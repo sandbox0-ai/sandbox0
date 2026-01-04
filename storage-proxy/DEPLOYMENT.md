@@ -161,7 +161,7 @@ volumeClaimTemplates:
   spec:
     resources:
       requests:
-        storage: 100Gi  # Adjust based on workload
+        storage: 10Gi  # Adjust based on workload
 ```
 
 ### Storage Class

@@ -100,7 +100,7 @@ func main() {
 	}()
 
 	// Create HTTP server
-	httpSrv := httpserver.NewServer(volMgr, logger)
+	httpSrv := httpserver.NewServer(logger)
 	httpAddr := fmt.Sprintf("%s:%d", cfg.HTTPAddr, cfg.HTTPPort)
 	httpServer := &http.Server{
 		Addr:         httpAddr,

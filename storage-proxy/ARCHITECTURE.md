@@ -187,11 +187,11 @@ JuiceFS chunk store provides multi-layer caching:
 │ Layer 1: Memory Cache                       │
 │  - Recently accessed blocks                 │
 │  - Fast access (nanoseconds)                │
-│  - Size: ~300MB per volume                  │
+│  - Size: ~32MB per volume                   │
 │                                              │
 │ Layer 2: Local Disk Cache                   │
 │  - Persistent cache on SSD                  │
-│  - Size: 100GB default (configurable)       │
+│  - Size: 1GB default (configurable)         │
 │  - Survives pod restarts (StatefulSet PVC)  │
 │                                              │
 │ Layer 3: S3 Object Storage                  │

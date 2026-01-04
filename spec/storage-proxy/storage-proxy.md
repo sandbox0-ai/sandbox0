@@ -4,6 +4,8 @@
 
 Storage Proxy 是一个独立的服务，负责管理所有持久化存储访问，将 JuiceFS 完全从 Procd 中移除。
 
+**VERY IMPORTANT**: storage-proxy作为sandbox0的底层存储依赖,**稳定性大于一切**,非必要不添加新功能,尽量使用juicefs sdk而不自己实现.
+
 ### 核心原则
 
 1. **凭证隔离**：所有 S3、PostgreSQL 凭证仅在 Proxy 中存储

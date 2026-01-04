@@ -55,7 +55,7 @@ func LoadFromEnv() *Config {
 		DefaultMetaURL:    getEnv("DEFAULT_META_URL", ""),
 		DefaultS3Region:   getEnv("DEFAULT_S3_REGION", "us-east-1"),
 		DefaultS3Endpoint: getEnv("DEFAULT_S3_ENDPOINT", ""),
-		DefaultCacheSize:  getEnv("DEFAULT_CACHE_SIZE", "10G"),
+		DefaultCacheSize:  getEnv("DEFAULT_CACHE_SIZE", "1G"),
 		DefaultCacheDir:   getEnv("DEFAULT_CACHE_DIR", "/var/lib/storage-proxy/cache"),
 
 		JWTSecret: getEnv("JWT_SECRET", ""),

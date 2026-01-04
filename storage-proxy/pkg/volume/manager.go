@@ -100,9 +100,9 @@ func (m *Manager) MountVolume(ctx context.Context, volumeID string, config *Volu
 		DownloadLimit: 0,
 		Writeback:     config.Writeback,
 		Prefetch:      config.Prefetch,
-		BufferSize:    uint64(parseSizeString(config.BufferSize, 300<<20)), // 300MB default
+		BufferSize:    uint64(parseSizeString(config.BufferSize, 32<<20)), // 32MB default
 		CacheDir:      cacheDir,
-		CacheSize:     uint64(parseSizeString(config.CacheSize, 10<<30)), // 10GB default
+		CacheSize:     uint64(parseSizeString(config.CacheSize, 1<<30)), // 1GB default
 		FreeSpace:     0.1,
 		CacheMode:     0600,
 		AutoCreate:    true,
@@ -157,16 +157,20 @@ func (m *Manager) UnmountVolume(ctx context.Context, volumeID string) error {
 
 	m.logger.WithField("volume_id", volumeID).Info("Unmounting volume")
 
-	// Note: VFS doesn't have FlushAll method, flush is handled by chunk store
-	// The chunk store will flush on shutdown
+	// Flush all buffered data in VFS
+	if err := volCtx.VFS.FlushAll(""); err != nil {
+		m.logger.WithError(err).Warn("Failed to flush VFS data")
+	}
 
 	// Close metadata session
 	if err := volCtx.Meta.CloseSession(); err != nil {
 		m.logger.WithError(err).Warn("Failed to close metadata session")
 	}
 
-	// Note: ChunkStore doesn't have Shutdown method
-	// Resources are cleaned up automatically
+	// Note: ChunkStore doesn't have Shutdown method.
+	// In writeback mode, background uploader goroutines in ChunkStore will continue
+	// until all staging chunks are uploaded, as long as the process is running.
+	// For absolute safety, one could wait for the staging directory to be empty.
 
 	delete(m.volumes, volumeID)
 

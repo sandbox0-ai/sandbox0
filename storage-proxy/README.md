@@ -169,7 +169,7 @@ curl http://localhost:8081/health
 | `METRICS_PORT` | Prometheus metrics port | `9090` |
 | `LOG_LEVEL` | Log level (debug, info, warn, error) | `info` |
 | `AUDIT_LOG` | Enable audit logging | `true` |
-| `DEFAULT_CACHE_SIZE` | Default cache size per volume | `10G` |
+| `DEFAULT_CACHE_SIZE` | Default cache size per volume | `1G` |
 | `DEFAULT_CACHE_DIR` | Cache directory | `/var/lib/storage-proxy/cache` |
 
 ## API Reference
@@ -228,7 +228,7 @@ Content-Type: application/json
     "s3_bucket": "sandbox0-volumes",
     "s3_prefix": "teams/team-123/volumes/vol-456",
     "s3_region": "us-east-1",
-    "cache_size": "10G",
+    "cache_size": "1G",
     "cache_dir": "/var/lib/storage-proxy/cache/vol-456"
   }
 }

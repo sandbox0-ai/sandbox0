@@ -1,0 +1,50 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.txt
+coverage.html
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Dependency directories
+vendor/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Generated protobuf files (should be regenerated)
+proto/fs/*.pb.go
+
+# Logs
+*.log
+logs/
+
+# Cache
+cache/
+tmp/
+
+# Secrets (never commit)
+*.pem
+*.key
+*.crt
+.env
+.env.local
+secrets/
+

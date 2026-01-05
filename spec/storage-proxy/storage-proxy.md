@@ -1,5 +1,8 @@
 # Storage Proxy - Design Specification
 
+TODO:
+1. sandboxvolume http api
+
 ## 一、设计目标
 
 Storage Proxy 是一个独立的服务，负责管理所有持久化存储访问，将 JuiceFS 完全从 Procd 中移除。

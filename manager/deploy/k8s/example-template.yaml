@@ -1,0 +1,91 @@
+apiVersion: sandbox0.ai/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: python-dev
+  namespace: default
+spec:
+  description: "Python development environment with procd"
+  displayName: "Python Dev"
+  tags:
+    - python
+    - development
+  
+  mainContainer:
+    image: sandbox0/procd:latest
+    imagePullPolicy: Always
+    securityContext:
+      capabilities:
+        add:
+          - NET_ADMIN  # For nftables only
+    resources:
+      limits:
+        cpu: "2"
+        memory: "4Gi"
+      requests:
+        cpu: "1"
+        memory: "2Gi"
+  
+  resources:
+    cpu: "2"
+    memory: "4Gi"
+  
+  pool:
+    minIdle: 3
+    maxIdle: 10
+  
+  envVars:
+    SANDBOX_TYPE: "python-dev"
+    PYTHON_VERSION: "3.11"
+  
+  envdVersion: "0.1.0"
+  runtimeClassName: kata  # Optional: Use Kata Containers for better isolation
+  
+  public: false
+  allowedTeams:
+    - team-123
+    - team-456
+
+---
+apiVersion: sandbox0.ai/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: node-dev
+  namespace: default
+spec:
+  description: "Node.js development environment"
+  displayName: "Node.js Dev"
+  tags:
+    - nodejs
+    - javascript
+    - development
+  
+  mainContainer:
+    image: sandbox0/procd:node-latest
+    imagePullPolicy: Always
+    securityContext:
+      capabilities:
+        add:
+          - NET_ADMIN
+    resources:
+      limits:
+        cpu: "2"
+        memory: "4Gi"
+      requests:
+        cpu: "1"
+        memory: "2Gi"
+  
+  resources:
+    cpu: "2"
+    memory: "4Gi"
+  
+  pool:
+    minIdle: 2
+    maxIdle: 8
+  
+  envVars:
+    SANDBOX_TYPE: "node-dev"
+    NODE_VERSION: "20"
+  
+  envdVersion: "0.1.0"
+  public: true
+

@@ -80,7 +80,7 @@ Manager 是 sandbox0 的核心管理服务，负责：
 │                                                                              │
 │  5. SandboxVolume (Managed by Storage Proxy)                                │
 │     ├── 元数据管理（PostgreSQL）                                              │
-│     ├── JuiceFS文件系统（S3-backed POSIX）                                    │
+│     ├── sandboxvolume文件系统（S3-backed POSIX, storage-proxy）                                    │
 │     └─→ 通过Storage Proxy API访问                                            │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -221,7 +221,7 @@ type NetworkPolicy struct {
 }
 ```
 
-### 3.3 Example: SandboxTemplate with JuiceFS Support
+### 3.3 Example: SandboxTemplate with sandboxvolume Support
 
 ```yaml
 apiVersion: sandbox0.ai/v1alpha1
@@ -230,7 +230,7 @@ metadata:
   name: python-dev
   namespace: default
 spec:
-  description: "Python development environment with JuiceFS volume support"
+  description: "Python development environment with sandboxvolume support"
   displayName: "Python Dev"
   
   mainContainer:
@@ -239,33 +239,13 @@ spec:
       capabilities:
         add:
           - NET_ADMIN  # For nftables only, no SYS_ADMIN needed
-    env:
-      - name: JUICEFS_META_URL
-        value: "postgres://sandbox0:password@postgres.sandbox0-system.svc.cluster.local:5432/sandbox0?sslmode=disable"
-      - name: JUICEFS_S3_BUCKET
-        value: "sandbox0-volumes"
-      - name: JUICEFS_S3_REGION
-        value: "us-east-1"
-      - name: JUICEFS_CACHE_SIZE
-        value: "10Gi"
-    volumeMounts:
-      - name: juicefs-cache
-        mountPath: /var/lib/juicefs/cache
     resources:
       limits:
         cpu: "2"
         memory: "4Gi"
-        sandbox0.ai/fuse: "1"  # Request /dev/fuse from k8s-plugin
       requests:
         cpu: "1"
         memory: "2Gi"
-  
-  pod:
-    volumes:
-      - name: juicefs-cache
-        emptyDir:
-          sizeLimit: 10Gi
-  
   resources:
     cpu: "2"
     memory: "4Gi"
@@ -486,8 +466,6 @@ func (s *SandboxService) applyNetworkPolicy(ctx context.Context, template *crd.S
 |------|-----|----------|------|
 | 模板定义 | JSON + Dockerfile | CRD | K8s 原生 |
 | 多容器 | 不支持 | ✅ Sidecar | 更灵活 |
-| 卷挂载 | 单一 S3 | **JuiceFS (S3-backed POSIX)** | 完整 POSIX 语义 |
-| Volume管理 | 内置 | **Storage Proxy (独立服务)** | 元数据与JuiceFS统一管理 |
 | 资源配额 | CPU/Memory/Disk | CPU/Memory/GPU | 支持 GPU |
 | 水池管理 | 内置 | **ReplicaSet + Cleanup Controller** | k8s 原生，高可靠 |
 | 状态存储 | 内置 | **Pod annotations (informer cache)** | 无额外依赖 |

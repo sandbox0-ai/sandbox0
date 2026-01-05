@@ -81,7 +81,13 @@ type SandboxVolumeManager struct {
     mounts map[string]*MountContext  // sandboxvolumeID -> MountContext
 
     // Configuration
-    proxyURL string  // Storage Proxy gRPC address
+    proxyBaseURL    string  // Storage Proxy base URL
+    proxyReplicas   int     // Number of Storage Proxy replicas
+    nodeName        string  // Current Pod's node name (for affinity routing)
+
+    // Cache configuration
+    cacheMaxBytes   int64   // Local cache size limit
+    cacheTTL        time.Duration // Cache TTL
 }
 
 // MountContext represents an active mount
@@ -138,6 +144,27 @@ type RemoteFS struct {
     sandboxvolumeID  string
     token            string
     rootInode        string
+
+    // Local read cache (see Section 10 for details)
+    cache            *CacheStore          // LRU cache for read operations
+    cacheMaxBytes    int64                // Cache size limit (default: 100MB)
+    cacheTTL         time.Duration        // Cache TTL (default: 30s)
+}
+
+// CacheStore local read cache for performance optimization
+type CacheStore struct {
+    mu    sync.RWMutex
+    entries map[string]*CacheEntry        // inode -> CacheEntry
+    maxBytes int64
+    currentBytes int64
+}
+
+// CacheEntry represents a cached file data or metadata
+type CacheEntry struct {
+    inode    string
+    data     []byte                      // Cached file data (nil for metadata-only entries)
+    attr     *fs.GetAttrResponse         // Cached attributes
+    expireAt time.Time                   // TTL-based expiration
 }
 
 // RemoteFSNode represents a file/directory node
@@ -493,8 +520,21 @@ func (vm *SandboxVolumeManager) Mount(ctx context.Context, req *MountRequest) (*
 ### 5.2 Create gRPC Connection with Packet Marking
 
 ```go
-// createGRPCConnection creates gRPC connection with packet marking
+// getStorageProxyAddress returns the preferred Storage Proxy address using node affinity
+func (vm *SandboxVolumeManager) getStorageProxyAddress() string {
+    // Hash-based routing: same node -> same replica
+    hash := fnv.New32()
+    hash.Write([]byte(vm.nodeName))
+    replicaIndex := hash.Sum32() % uint32(vm.proxyReplicas)
+
+    return fmt.Sprintf("storage-proxy-%d.%s:8080", replicaIndex, vm.proxyBaseURL)
+}
+
+// createGRPCConnection creates gRPC connection with packet marking and node affinity
 func (vm *SandboxVolumeManager) createGRPCConnection() (*grpc.ClientConn, error) {
+    // Get preferred Storage Proxy address (node affinity routing)
+    proxyAddr := vm.getStorageProxyAddress()
+
     // Custom dialer that sets SO_MARK socket option
     dialer := &net.Dialer{
         Control: func(network, address string, c syscall.RawConn) error {
@@ -511,7 +551,7 @@ func (vm *SandboxVolumeManager) createGRPCConnection() (*grpc.ClientConn, error)
     }
 
     // Create gRPC connection
-    return grpc.Dial(vm.proxyURL,
+    return grpc.Dial(proxyAddr,
         grpc.WithTransportCredentials(insecure.NewCredentials()),
         grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
             return dialer.DialContext(ctx, "tcp", addr)
@@ -715,9 +755,40 @@ table inet sb0-firewall {
 ```yaml
 # Procd container environment
 env:
-  - name: STORAGE_PROXY_URL
-    value: "storage-proxy.sandbox0-system.svc.cluster.local:8080"
+  # Node name for affinity routing (from downward API)
+  - name: NODE_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: spec.nodeName
+
+  # Storage Proxy base configuration
+  - name: STORAGE_PROXY_BASE_URL
+    value: "storage-proxy.storage-proxy.svc.cluster.local"
+
+  - name: STORAGE_PROXY_REPLICAS
+    value: "3"  # Number of StatefulSet replicas
+
+  # Local cache configuration
+  - name: CACHE_MAX_BYTES
+    value: "104857600"  # 100MB
+
+  - name: CACHE_TTL_SECONDS
+    value: "30"  # 30 seconds
 ```
+
+### 8.3 Node Affinity Routing
+
+Procd使用Node亲和性路由优先连接同节点的Storage Proxy实例：
+
+**原理：**
+- Storage Proxy作为StatefulSet部署，有稳定的网络标识：`storage-proxy-{0..n}`
+- Procd通过`NODE_NAME`环境变量获取所在节点
+- 使用hash函数将节点名映射到Storage Proxy副本索引
+
+**优势：**
+- 减少跨节点网络延迟
+- 简单但有效的负载均衡
+- 利用StatefulSet的稳定网络特性
 
 ---
 
@@ -736,15 +807,173 @@ var (
 
 ---
 
-## 十、性能特性
+## 十、性能优化
 
-| Operation | Latency | Notes |
-|-----------|---------|-------|
+### 10.1 性能目标
+
+| Operation | 目标延迟 | 说明 |
+|-----------|----------|------|
 | Mount | ~30-50ms | gRPC connect + FUSE mount |
 | Read (cached) | ~2-3ms | gRPC roundtrip |
 | Write | ~5-10ms | gRPC + async write |
 | Create | ~3-5ms | gRPC roundtrip |
 | Lookup | ~1-2ms | gRPC roundtrip |
+
+### 10.2 性能问题分析
+
+当前架构中每个文件操作都需要经过完整的调用链：
+
+```
+User → FUSE → gRPC → Storage Proxy → JuiceFS → S3/PostgreSQL
+```
+
+**性能影响：**
+- 每个读操作至少1次网络往返（即使命中Storage Proxy缓存）
+- 大量小文件读取场景延迟累积明显
+- Storage Proxy在高并发下可能成为瓶颈
+
+### 10.3 性能优化方案
+
+#### 10.3.1 Procd本地读缓存
+
+在RemoteFS中添加本地缓存层（见4.1节数据结构定义）：
+
+**缓存策略：**
+- **仅缓存读操作**，写操作直接透传（避免一致性问题）
+- 基于inode的LRU淘汰策略
+- TTL过期自动失效（默认30秒）
+- 可配置缓存大小上限（默认100MB）
+
+**缓存实现示例：**
+
+```go
+// GetAttr with local cache
+func (n *RemoteFSNode) Attr(ctx context.Context, a *fuse.Attr) error {
+    // Try cache first
+    if entry := n.fs.cache.Get(n.inode); entry != nil && !entry.Expired() {
+        *a = fuseAttrFrom(entry.attr)
+        return nil
+    }
+
+    // Cache miss - fetch from Storage Proxy
+    req := &fs.GetAttrRequest{Inode: n.inode}
+    resp, err := n.fs.client.GetAttr(withAuth(ctx, n.fs.token), req)
+    if err != nil {
+        return err
+    }
+
+    // Update cache
+    n.fs.cache.Put(&CacheEntry{
+        inode:    n.inode,
+        attr:     resp,
+        expireAt: time.Now().Add(n.fs.cacheTTL),
+    })
+
+    *a = fuseAttrFrom(resp)
+    return nil
+}
+
+// Read with local cache
+func (h *RemoteFileHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
+    cacheKey := fmt.Sprintf("%s:%d", h.inode, req.Offset)
+
+    // Try cache first
+    if entry := h.fs.cache.Get(cacheKey); entry != nil && !entry.Expired() {
+        n := copy(resp.Data, entry.data)
+        resp.Data = resp.Data[:n]
+        return nil
+    }
+
+    // Cache miss - fetch from Storage Proxy
+    rreq := &fs.ReadRequest{
+        Inode:    h.inode,
+        HandleId: h.id,
+        Offset:   req.Offset,
+        Size:     int64(len(resp.Data)),
+    }
+
+    rresp, err := h.fs.client.Read(withAuth(ctx, h.fs.token), rreq)
+    if err != nil {
+        return err
+    }
+
+    n := copy(resp.Data, rresp.Data)
+    resp.Data = resp.Data[:n]
+
+    // Update cache (for small files only, e.g., < 1MB)
+    if len(rresp.Data) < 1024*1024 {
+        h.fs.cache.Put(&CacheEntry{
+            inode:    cacheKey,
+            data:     resp.Data,
+            expireAt: time.Now().Add(h.fs.cacheTTL),
+        })
+    }
+
+    return nil
+}
+```
+
+**缓存失效：**
+- 写操作后立即失效相关inode的缓存
+- TTL自动过期
+- LRU淘汰达到内存上限时
+
+#### 10.3.2 Node亲和性路由
+
+由于Storage Proxy是StatefulSet部署，优先调用同Node的实例：
+
+```go
+// SandboxVolumeManager with node-aware routing
+type SandboxVolumeManager struct {
+    mu     sync.RWMutex
+    mounts map[string]*MountContext
+
+    // Configuration
+    proxyBaseURL    string  // Base URL: storage-proxy.storage-proxy.svc.cluster.local
+    proxyReplicas   int     // Number of Storage Proxy replicas
+    nodeName        string  // Current Pod's node name (from env)
+}
+
+// getStorageProxyAddress returns the preferred Storage Proxy address
+func (vm *SandboxVolumeManager) getStorageProxyAddress() string {
+    // Hash-based routing: same node -> same replica
+    hash := fnv.New32()
+    hash.Write([]byte(vm.nodeName))
+    replicaIndex := hash.Sum32() % uint32(vm.proxyReplicas)
+
+    return fmt.Sprintf("storage-proxy-%d.%s:8080", replicaIndex, vm.proxyBaseURL)
+}
+```
+
+**优势：**
+- 减少跨节点网络延迟
+- 利用StatefulSet的稳定网络标识
+- 简单的负载均衡策略
+
+#### 10.3.3 写操作策略
+
+**不实施写合并/写缓冲**，原因：
+- 引入一致性问题（Procd crash时数据丢失）
+- 与JuiceFS的写优化机制重复
+- 简化错误处理流程
+
+写操作直接透传到Storage Proxy，由JuiceFS SDK处理写入优化。
+
+### 10.4 实现优先级
+
+| 优先级 | 优化项 | 复杂度 | 收益 |
+|--------|--------|--------|------|
+| P0 | Node亲和性路由 | 低 | 高（减少网络延迟） |
+| P1 | Procd本地读缓存 | 中 | 高（减少gRPC调用） |
+| P2 | 监控指标 | 低 | 中（可观测性） |
+
+### 10.5 监控指标
+
+需要添加的Prometheus指标：
+- `procd_cache_hit_rate`: 缓存命中率
+- `procd_cache_size_bytes`: 缓存使用大小
+- `procd_grpc_latency_ms`: gRPC调用延迟（P50/P99）
+- `procd_fuse_ops_total`: FUSE操作计数（按类型）
 
 ---
 

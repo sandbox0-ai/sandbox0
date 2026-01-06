@@ -17,6 +17,7 @@ import (
 	httpserver "github.com/sandbox0-ai/infra/storage-proxy/pkg/http"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/infra/storage-proxy/proto/fs"
+	"github.com/sandbox0-ai/infra/pkg/env"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
@@ -25,6 +26,9 @@ import (
 )
 
 func main() {
+	// Load environment variables from .env file
+	env.Load()
+
 	// Setup logger
 	logger := logrus.New()
 	logger.SetFormatter(&logrus.JSONFormatter{})

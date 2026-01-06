@@ -16,11 +16,15 @@ import (
 	procdhttp "github.com/sandbox0-ai/infra/procd/pkg/http"
 	"github.com/sandbox0-ai/infra/procd/pkg/network"
 	"github.com/sandbox0-ai/infra/procd/pkg/volume"
+	"github.com/sandbox0-ai/infra/pkg/env"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
 func main() {
+	// Load environment variables from .env file
+	env.Load()
+
 	// Initialize logger
 	logger := initLogger()
 	defer logger.Sync()

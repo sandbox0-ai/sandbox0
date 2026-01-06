@@ -2,9 +2,9 @@
 package config
 
 import (
-	"os"
-	"strconv"
 	"time"
+
+	"github.com/sandbox0-ai/infra/pkg/env"
 )
 
 // Config holds all configuration for Procd.
@@ -52,21 +52,21 @@ type NetworkConfig struct {
 // DefaultConfig returns a Config with default values.
 func DefaultConfig() *Config {
 	return &Config{
-		SandboxID:  getEnv("SANDBOX_ID", ""),
-		TemplateID: getEnv("TEMPLATE_ID", ""),
-		NodeName:   getEnv("NODE_NAME", ""),
+		SandboxID:  env.GetEnv("SANDBOX_ID", ""),
+		TemplateID: env.GetEnv("TEMPLATE_ID", ""),
+		NodeName:   env.GetEnv("NODE_NAME", ""),
 
-		HTTPPort: getEnvInt("PROCD_HTTP_PORT", 8080),
-		LogLevel: getEnv("PROCD_LOG_LEVEL", "info"),
+		HTTPPort: env.GetEnvInt("PROCD_HTTP_PORT", 8080),
+		LogLevel: env.GetEnv("PROCD_LOG_LEVEL", "info"),
 
-		MaxContexts: getEnvInt("PROCD_MAX_CONTEXTS", 100),
+		MaxContexts: env.GetEnvInt("PROCD_MAX_CONTEXTS", 100),
 
-		StorageProxyBaseURL:  getEnv("STORAGE_PROXY_BASE_URL", "storage-proxy.sandbox0-system.svc.cluster.local"),
-		StorageProxyReplicas: getEnvInt("STORAGE_PROXY_REPLICAS", 3),
+		StorageProxyBaseURL:  env.GetEnv("STORAGE_PROXY_BASE_URL", "storage-proxy.sandbox0-system.svc.cluster.local"),
+		StorageProxyReplicas: env.GetEnvInt("STORAGE_PROXY_REPLICAS", 3),
 
 		Network: &NetworkConfig{
-			TCPProxyPort:   int32(getEnvInt("NETWORK_TCP_PROXY_PORT", 1080)),
-			EnableTCPProxy: getEnvBool("NETWORK_ENABLE_TCP_PROXY", false),
+			TCPProxyPort:   int32(env.GetEnvInt("NETWORK_TCP_PROXY_PORT", 1080)),
+			EnableTCPProxy: env.GetEnvBool("NETWORK_ENABLE_TCP_PROXY", false),
 			DNSServers:     []string{"8.8.8.8", "8.8.4.4"},
 			DefaultDenyCIDRs: []string{
 				"10.0.0.0/8",
@@ -77,10 +77,10 @@ func DefaultConfig() *Config {
 			},
 		},
 
-		RootPath: getEnv("PROCD_ROOT_PATH", "/workspace"),
+		RootPath: env.GetEnv("PROCD_ROOT_PATH", "/workspace"),
 
-		CacheMaxBytes: int64(getEnvInt("CACHE_MAX_BYTES", 100*1024*1024)),
-		CacheTTL:      time.Duration(getEnvInt("CACHE_TTL_SECONDS", 30)) * time.Second,
+		CacheMaxBytes: int64(env.GetEnvInt("CACHE_MAX_BYTES", 100*1024*1024)),
+		CacheTTL:      time.Duration(env.GetEnvInt("CACHE_TTL_SECONDS", 30)) * time.Second,
 	}
 }
 
@@ -88,29 +88,4 @@ func DefaultConfig() *Config {
 func (c *Config) Validate() error {
 	// SandboxID and TemplateID can be empty during development
 	return nil
-}
-
-func getEnv(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
-}
-
-func getEnvInt(key string, defaultValue int) int {
-	if value := os.Getenv(key); value != "" {
-		if intVal, err := strconv.Atoi(value); err == nil {
-			return intVal
-		}
-	}
-	return defaultValue
-}
-
-func getEnvBool(key string, defaultValue bool) bool {
-	if value := os.Getenv(key); value != "" {
-		if boolVal, err := strconv.ParseBool(value); err == nil {
-			return boolVal
-		}
-	}
-	return defaultValue
 }

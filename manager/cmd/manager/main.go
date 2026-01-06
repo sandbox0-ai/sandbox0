@@ -14,6 +14,7 @@ import (
 	"github.com/sandbox0-ai/infra/manager/pkg/controller"
 	httpserver "github.com/sandbox0-ai/infra/manager/pkg/http"
 	"github.com/sandbox0-ai/infra/manager/pkg/service"
+	"github.com/sandbox0-ai/infra/pkg/env"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	corev1 "k8s.io/api/core/v1"
@@ -31,6 +32,9 @@ import (
 )
 
 func main() {
+	// Load environment variables from .env file
+	env.Load()
+
 	// Load configuration
 	cfg := config.LoadConfig()
 

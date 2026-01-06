@@ -8,6 +8,7 @@ import (
 	"github.com/sandbox0-ai/infra/internal-gateway/pkg/db"
 	"github.com/sandbox0-ai/infra/internal-gateway/pkg/middleware"
 	"github.com/sandbox0-ai/infra/internal-gateway/pkg/proxy"
+	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	"go.uber.org/zap"
 )
 
@@ -184,7 +185,36 @@ func (s *Server) getProcdURL(c *gin.Context, sandboxID string) (*url.URL, error)
 // proxyToProcd proxies a request to a specific procd instance
 func (s *Server) proxyToProcd(c *gin.Context, procdURL *url.URL) {
 	authCtx := middleware.GetAuthContext(c)
+
+	// Generate internal token for procd
+	internalToken, err := s.internalAuthGen.Generate("procd", authCtx.TeamID, authCtx.UserID, internalauth.GenerateOptions{})
+	if err != nil {
+		s.logger.Error("Failed to generate internal token for procd",
+			zap.String("team_id", authCtx.TeamID),
+			zap.Error(err),
+		)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal authentication failed"})
+		return
+	}
+
+	// Generate a special token for procd to communicate with storage-proxy
+	// This token allows procd to access storage-proxy on behalf of this team
+	procdStorageToken, err := s.procdAuthGen.Generate("storage-proxy", authCtx.TeamID, authCtx.UserID, internalauth.GenerateOptions{
+		Permissions: []string{"sandboxvolume:read", "sandboxvolume:write"},
+	})
+	if err != nil {
+		s.logger.Error("Failed to generate procd-storage token",
+			zap.String("team_id", authCtx.TeamID),
+			zap.Error(err),
+		)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal authentication failed"})
+		return
+	}
+
+	// Set headers
 	c.Request.Header.Set("X-Team-ID", authCtx.TeamID)
+	c.Request.Header.Set("X-Internal-Token", internalToken)
+	c.Request.Header.Set("X-Token-For-Procd", procdStorageToken)
 
 	// Create and execute reverse proxy
 	director := func(req *http.Request) {

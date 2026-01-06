@@ -22,6 +22,9 @@ type Config struct {
 	// Authentication
 	JWTSecret string
 
+	// Internal authentication (for inter-service communication)
+	InternalJWTPrivateKeyPath string
+
 	// Rate limiting
 	RateLimitRPS   int
 	RateLimitBurst int
@@ -52,6 +55,9 @@ func Load() *Config {
 
 		// Authentication
 		JWTSecret: env.GetEnv("JWT_SECRET", ""),
+
+		// Internal authentication
+		InternalJWTPrivateKeyPath: env.GetEnv("INTERNAL_JWT_PRIVATE_KEY_PATH", "/secrets/internal_jwt_private.key"),
 
 		// Rate limiting (per team)
 		RateLimitRPS:   env.GetEnvInt("RATE_LIMIT_RPS", 100),

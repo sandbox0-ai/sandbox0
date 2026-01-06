@@ -2,7 +2,6 @@ package auth
 
 import (
 	"context"
-	"strings"
 
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	"go.uber.org/zap"
@@ -34,15 +33,6 @@ func (a *GRPCAuthenticator) UnaryInterceptor() grpc.UnaryServerInterceptor {
 		info *grpc.UnaryServerInfo,
 		handler grpc.UnaryHandler,
 	) (interface{}, error) {
-		// Skip authentication for volume management endpoints
-		// These are called by manager/internal-gateway which have their own auth
-		if strings.HasSuffix(info.FullMethod, "MountVolume") ||
-			strings.HasSuffix(info.FullMethod, "UnmountVolume") {
-			a.logger.Debug("Skipping auth for volume management endpoint",
-				zap.String("method", info.FullMethod),
-			)
-			return handler(ctx, req)
-		}
 
 		// Extract and validate token
 		claims, err := a.authenticate(ctx)
@@ -102,11 +92,6 @@ func (a *GRPCAuthenticator) StreamInterceptor() grpc.StreamServerInterceptor {
 		info *grpc.StreamServerInfo,
 		handler grpc.StreamHandler,
 	) error {
-		// Skip authentication for volume management endpoints
-		if strings.HasSuffix(info.FullMethod, "MountVolume") ||
-			strings.HasSuffix(info.FullMethod, "UnmountVolume") {
-			return handler(srv, ss)
-		}
 
 		// Extract and validate token
 		claims, err := a.authenticate(ss.Context())

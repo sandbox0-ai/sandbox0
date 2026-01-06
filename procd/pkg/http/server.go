@@ -185,8 +185,8 @@ func (s *Server) recoveryMiddleware(next http.Handler) http.Handler {
 // This token is used for authenticating requests to storage-proxy gRPC service.
 func (s *Server) internalTokenMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Extract token from x-internaltoken2storageproxy header
-		token := r.Header.Get("x-internaltoken2storageproxy")
+		// Extract token from X-Token-For-Procd header
+		token := r.Header.Get("X-Token-For-Procd")
 		if token == "" {
 			s.logger.Warn("Missing internal token",
 				zap.String("path", r.URL.Path),

@@ -13,19 +13,22 @@ import (
 	"github.com/sandbox0-ai/infra/internal-gateway/pkg/db"
 	"github.com/sandbox0-ai/infra/internal-gateway/pkg/middleware"
 	"github.com/sandbox0-ai/infra/internal-gateway/pkg/proxy"
+	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	"go.uber.org/zap"
 )
 
 // Server represents the HTTP server for internal-gateway
 type Server struct {
-	router         *gin.Engine
-	cfg            *config.Config
-	repo           *db.Repository
-	router_proxy   *proxy.Router
-	authMiddleware *middleware.AuthMiddleware
-	rateLimiter    *middleware.RateLimiter
-	requestLogger  *middleware.RequestLogger
-	logger         *zap.Logger
+	router          *gin.Engine
+	cfg             *config.Config
+	repo            *db.Repository
+	router_proxy    *proxy.Router
+	authMiddleware  *middleware.AuthMiddleware
+	rateLimiter     *middleware.RateLimiter
+	requestLogger   *middleware.RequestLogger
+	logger          *zap.Logger
+	internalAuthGen *internalauth.Generator
+	procdAuthGen    *internalauth.Generator
 }
 
 // NewServer creates a new HTTP server
@@ -57,15 +60,33 @@ func NewServer(
 	rateLimiter := middleware.NewRateLimiter(repo, cfg.RateLimitRPS, cfg.RateLimitBurst, logger)
 	requestLogger := middleware.NewRequestLogger(repo, logger, cfg.EnableAudit)
 
+	// Initialize internal auth generator
+	privateKey, err := internalauth.LoadEd25519PrivateKeyFromFile(cfg.InternalJWTPrivateKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("load internal JWT private key: %w", err)
+	}
+	internalAuthGen := internalauth.NewGenerator(internalauth.GeneratorConfig{
+		Caller:     "internal-gateway",
+		PrivateKey: privateKey,
+		TTL:        30 * time.Second,
+	})
+	procdAuthGen := internalauth.NewGenerator(internalauth.GeneratorConfig{
+		Caller:     "procd",
+		PrivateKey: privateKey,
+		TTL:        0,
+	})
+
 	server := &Server{
-		router:         router,
-		cfg:            cfg,
-		repo:           repo,
-		router_proxy:   proxyRouter,
-		authMiddleware: authMiddleware,
-		rateLimiter:    rateLimiter,
-		requestLogger:  requestLogger,
-		logger:         logger,
+		router:          router,
+		cfg:             cfg,
+		repo:            repo,
+		router_proxy:    proxyRouter,
+		authMiddleware:  authMiddleware,
+		rateLimiter:     rateLimiter,
+		requestLogger:   requestLogger,
+		logger:          logger,
+		internalAuthGen: internalAuthGen,
+		procdAuthGen:    procdAuthGen,
 	}
 
 	server.setupRoutes()

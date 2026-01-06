@@ -36,8 +36,9 @@ func NewContextHandler(manager *ctxpkg.Manager, logger *zap.Logger) *ContextHand
 
 // CreateContextRequest is the request body for creating a context.
 type CreateContextRequest struct {
-	Type     string            `json:"type"`
-	Language string            `json:"language"`
+	Type     string            `json:"type"`     // "repl" or "cmd"
+	Language string            `json:"language"` // For REPL: python, node, bash, zsh, etc.
+	Command  []string          `json:"command"`  // For CMD: command path and args, e.g., ["/bin/ls", "-la"]
 	CWD      string            `json:"cwd"`
 	EnvVars  map[string]string `json:"env_vars"`
 	PTYSize  *process.PTYSize  `json:"pty_size"`
@@ -84,14 +85,16 @@ func (h *ContextHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	processType := process.ProcessTypeShell
-	if req.Type == "repl" {
-		processType = process.ProcessTypeREPL
+	// Default to REPL type (includes shells like bash/zsh)
+	processType := process.ProcessTypeREPL
+	if req.Type == "cmd" {
+		processType = process.ProcessTypeCMD
 	}
 
 	config := process.ProcessConfig{
 		Type:     processType,
 		Language: req.Language,
+		Command:  req.Command,
 		CWD:      req.CWD,
 		EnvVars:  req.EnvVars,
 		PTYSize:  req.PTYSize,

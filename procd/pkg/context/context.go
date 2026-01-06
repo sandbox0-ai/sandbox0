@@ -32,8 +32,11 @@ func NewContext(config process.ProcessConfig) (*Context, error) {
 	switch config.Type {
 	case process.ProcessTypeREPL:
 		proc, err = createREPLProcess(id, config)
-	case process.ProcessTypeShell:
-		proc, err = createShellProcess(id, config)
+	case process.ProcessTypeCMD:
+		if len(config.Command) == 0 {
+			return nil, fmt.Errorf("CMD process type requires command to be specified in config.Command")
+		}
+		proc, err = createCMDProcess(id, config, config.Command)
 	default:
 		return nil, fmt.Errorf("%w: %s", process.ErrUnsupportedProcessType, config.Type)
 	}

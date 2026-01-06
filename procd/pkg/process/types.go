@@ -11,10 +11,10 @@ import (
 type ProcessType string
 
 const (
-	// ProcessTypeREPL represents a REPL process (Python, Node, etc.)
+	// ProcessTypeREPL represents a REPL process (Python, Node, Bash, Zsh, etc.)
 	ProcessTypeREPL ProcessType = "repl"
-	// ProcessTypeShell represents a shell process (bash, zsh, etc.)
-	ProcessTypeShell ProcessType = "shell"
+	// ProcessTypeCMD represents a one-time command execution (e.g., /bin/ls, /bin/cat)
+	ProcessTypeCMD ProcessType = "cmd"
 )
 
 // OutputSource defines the source of process output.
@@ -47,7 +47,8 @@ type PTYSize struct {
 // ProcessConfig holds configuration for creating a process.
 type ProcessConfig struct {
 	Type        ProcessType       `json:"type"`
-	Language    string            `json:"language"`
+	Language    string            `json:"language"` // For REPL: python, node, bash, zsh, etc.
+	Command     []string          `json:"command"`  // For CMD: command path and arguments, e.g., ["/bin/ls", "-la"]
 	CWD         string            `json:"cwd"`
 	EnvVars     map[string]string `json:"env_vars"`
 	AutoRestart bool              `json:"auto_restart"`

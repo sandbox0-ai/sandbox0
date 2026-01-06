@@ -151,4 +151,3 @@ func initDatabase(ctx context.Context, databaseURL string, logger *zap.Logger) (
 
 	return pool, nil
 }
-

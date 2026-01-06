@@ -87,4 +87,3 @@ func (s *Server) warmPool(c *gin.Context) {
 	c.Request.URL.Path = "/api/v1/templates/" + templateID + "/pool/warm"
 	s.router_proxy.ProxyToManager()(c)
 }
-

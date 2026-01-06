@@ -14,8 +14,8 @@ import (
 
 // ContextHandler handles context-related HTTP requests.
 type ContextHandler struct {
-	manager *ctxpkg.Manager
-	logger  *zap.Logger
+	manager  *ctxpkg.Manager
+	logger   *zap.Logger
 	upgrader websocket.Upgrader
 }
 
@@ -266,4 +266,3 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
-

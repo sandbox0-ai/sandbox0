@@ -245,4 +245,3 @@ func (m *Manager) createGRPCConnection(proxyAddr string) (*grpc.ClientConn, erro
 	)
 }
 */
-

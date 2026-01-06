@@ -203,4 +203,3 @@ func (s *Server) restoreSnapshot(c *gin.Context) {
 	c.Request.URL.Path = "/api/v1/sandboxvolumes/" + volumeID + "/restore"
 	s.router_proxy.ProxyToStorageProxy()(c)
 }
-

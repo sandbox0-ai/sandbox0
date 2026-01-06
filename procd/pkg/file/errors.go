@@ -24,4 +24,3 @@ var (
 	// ErrWatcherClosed is returned when the watcher manager is closed.
 	ErrWatcherClosed = errors.New("watcher manager closed")
 )
-

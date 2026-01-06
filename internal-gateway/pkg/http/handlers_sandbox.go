@@ -147,4 +147,3 @@ func (s *Server) refreshSandbox(c *gin.Context) {
 
 	s.router_proxy.ProxyToManager()(c)
 }
-

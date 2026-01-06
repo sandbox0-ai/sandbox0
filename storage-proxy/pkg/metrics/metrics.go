@@ -95,4 +95,3 @@ var (
 		Help: "Total number of authentication errors",
 	}, []string{"error_type"})
 )
-

@@ -122,4 +122,3 @@ func (h *NetworkHandler) AddDenyCIDR(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]bool{"added": true})
 }
-

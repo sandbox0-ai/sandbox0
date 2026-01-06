@@ -89,7 +89,7 @@ func (h *FileHandler) handleGet(w http.ResponseWriter, r *http.Request, path str
 	// Check if binary content
 	if query.Get("binary") == "true" {
 		writeJSON(w, http.StatusOK, map[string]string{
-			"content": base64.StdEncoding.EncodeToString(data),
+			"content":  base64.StdEncoding.EncodeToString(data),
 			"encoding": "base64",
 		})
 		return
@@ -261,4 +261,3 @@ func (h *FileHandler) handleFileError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusInternalServerError, "operation_failed", err.Error())
 	}
 }
-

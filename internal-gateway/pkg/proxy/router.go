@@ -202,4 +202,3 @@ func (r *Router) ForwardRequest(ctx context.Context, method, targetURL string, b
 
 	return client.Do(req)
 }
-

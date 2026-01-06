@@ -222,4 +222,3 @@ func (s *Server) readinessCheck(c *gin.Context) {
 		"timestamp": time.Now().Unix(),
 	})
 }
-

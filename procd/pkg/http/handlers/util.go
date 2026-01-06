@@ -27,4 +27,3 @@ func writeError(w http.ResponseWriter, status int, errCode string, message strin
 		Message: message,
 	})
 }
-

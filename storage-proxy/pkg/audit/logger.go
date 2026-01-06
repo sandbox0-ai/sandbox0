@@ -12,17 +12,17 @@ import (
 
 // Event represents an audit event
 type Event struct {
-	Timestamp time.Time `json:"timestamp"`
-	VolumeID  string    `json:"volume_id"`
-	SandboxID string    `json:"sandbox_id"`
-	TeamID    string    `json:"team_id,omitempty"`
-	Operation string    `json:"operation"`
-	Inode     uint64    `json:"inode,omitempty"`
-	Path      string    `json:"path,omitempty"`
-	Size      int64     `json:"size,omitempty"`
+	Timestamp time.Time     `json:"timestamp"`
+	VolumeID  string        `json:"volume_id"`
+	SandboxID string        `json:"sandbox_id"`
+	TeamID    string        `json:"team_id,omitempty"`
+	Operation string        `json:"operation"`
+	Inode     uint64        `json:"inode,omitempty"`
+	Path      string        `json:"path,omitempty"`
+	Size      int64         `json:"size,omitempty"`
 	Latency   time.Duration `json:"latency_ms,omitempty"`
-	Status    string    `json:"status"`
-	Error     string    `json:"error,omitempty"`
+	Status    string        `json:"status"`
+	Error     string        `json:"error,omitempty"`
 }
 
 // Logger handles audit logging
@@ -37,7 +37,7 @@ func NewLogger(filename string, logger *logrus.Logger) (*Logger, error) {
 	// Create audit log file if specified
 	var file *os.File
 	var err error
-	
+
 	if filename != "" {
 		file, err = os.OpenFile(filename, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 		if err != nil {
@@ -94,4 +94,3 @@ func (l *Logger) Close() error {
 	}
 	return nil
 }
-

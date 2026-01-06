@@ -43,4 +43,3 @@ func createShellProcess(ctxID string, config process.ProcessConfig) (process.Pro
 		return nil, fmt.Errorf("%w: %s", process.ErrUnsupportedLanguage, shellType)
 	}
 }
-

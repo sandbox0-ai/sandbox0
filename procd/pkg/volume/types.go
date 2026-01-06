@@ -74,10 +74,9 @@ type MountContext struct {
 
 // Config holds SandboxVolume manager configuration.
 type Config struct {
-	ProxyBaseURL    string
-	ProxyReplicas   int
-	NodeName        string
-	CacheMaxBytes   int64
-	CacheTTL        time.Duration
+	ProxyBaseURL  string
+	ProxyReplicas int
+	NodeName      string
+	CacheMaxBytes int64
+	CacheTTL      time.Duration
 }
-

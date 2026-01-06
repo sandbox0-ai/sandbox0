@@ -162,4 +162,3 @@ func (w *websocketConn) Write(p []byte) (n int, err error) {
 func (w *websocketConn) Close() error {
 	return w.body.Close()
 }
-

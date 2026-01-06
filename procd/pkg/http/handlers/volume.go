@@ -90,4 +90,3 @@ func (h *VolumeHandler) Status(w http.ResponseWriter, r *http.Request) {
 		"mounts": status,
 	})
 }
-

@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sandbox0-ai/infra/pkg/env"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/audit"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/auth"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/config"
@@ -17,7 +18,6 @@ import (
 	httpserver "github.com/sandbox0-ai/infra/storage-proxy/pkg/http"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/infra/storage-proxy/proto/fs"
-	"github.com/sandbox0-ai/infra/pkg/env"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"

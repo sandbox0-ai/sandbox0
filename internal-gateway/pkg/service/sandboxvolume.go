@@ -15,14 +15,14 @@ import (
 )
 
 var (
-	ErrSandboxNotFound      = errors.New("sandbox not found")
-	ErrVolumeNotFound       = errors.New("sandboxvolume not found")
-	ErrAttachFailed         = errors.New("failed to attach sandboxvolume")
-	ErrDetachFailed         = errors.New("failed to detach sandboxvolume")
-	ErrMountFailed          = errors.New("failed to mount sandboxvolume")
-	ErrUnmountFailed        = errors.New("failed to unmount sandboxvolume")
-	ErrStorageProxyError    = errors.New("storage proxy error")
-	ErrProcdError           = errors.New("procd error")
+	ErrSandboxNotFound   = errors.New("sandbox not found")
+	ErrVolumeNotFound    = errors.New("sandboxvolume not found")
+	ErrAttachFailed      = errors.New("failed to attach sandboxvolume")
+	ErrDetachFailed      = errors.New("failed to detach sandboxvolume")
+	ErrMountFailed       = errors.New("failed to mount sandboxvolume")
+	ErrUnmountFailed     = errors.New("failed to unmount sandboxvolume")
+	ErrStorageProxyError = errors.New("storage proxy error")
+	ErrProcdError        = errors.New("procd error")
 )
 
 // SandboxVolumeService handles SandboxVolume attach/detach coordination
@@ -47,18 +47,18 @@ func NewSandboxVolumeService(repo *db.Repository, storageProxyURL string, logger
 
 // AttachRequest represents a request to attach a SandboxVolume
 type AttachRequest struct {
-	SandboxID   string `json:"sandbox_id" binding:"required"`
-	MountPoint  string `json:"mount_point" binding:"required"`
-	ReadOnly    bool   `json:"read_only"`
-	SnapshotID  string `json:"snapshot_id,omitempty"`
+	SandboxID  string `json:"sandbox_id" binding:"required"`
+	MountPoint string `json:"mount_point" binding:"required"`
+	ReadOnly   bool   `json:"read_only"`
+	SnapshotID string `json:"snapshot_id,omitempty"`
 }
 
 // AttachResponse represents the response from attach operation
 type AttachResponse struct {
-	SandboxVolumeID     string `json:"sandboxvolume_id"`
-	SandboxID           string `json:"sandbox_id"`
-	MountPoint          string `json:"mount_point"`
-	MountedAt           string `json:"mounted_at"`
+	SandboxVolumeID string `json:"sandboxvolume_id"`
+	SandboxID       string `json:"sandbox_id"`
+	MountPoint      string `json:"mount_point"`
+	MountedAt       string `json:"mounted_at"`
 }
 
 // DetachRequest represents a request to detach a SandboxVolume
@@ -332,4 +332,3 @@ func (s *SandboxVolumeService) callProcdUnmount(ctx context.Context, procdAddres
 
 	return nil
 }
-

@@ -127,4 +127,3 @@ func (ac *AuthContext) HasRole(role string) bool {
 	}
 	return false
 }
-

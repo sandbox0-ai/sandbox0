@@ -87,4 +87,3 @@ func (s *Server) handleFileWatch(c *gin.Context) {
 	c.Request.URL.Path = "/api/v1/files/watch"
 	wsProxy.Proxy(procdURL)(c)
 }
-

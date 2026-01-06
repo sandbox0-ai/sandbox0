@@ -71,10 +71,10 @@ type ExecutionResult struct {
 
 // ResourceUsage represents resource consumption of a process.
 type ResourceUsage struct {
-	CPUPercent    float64 `json:"cpu_percent"`
-	MemoryBytes   int64   `json:"memory_bytes"`
-	OpenFiles     int     `json:"open_files"`
-	ThreadCount   int     `json:"thread_count"`
+	CPUPercent  float64 `json:"cpu_percent"`
+	MemoryBytes int64   `json:"memory_bytes"`
+	OpenFiles   int     `json:"open_files"`
+	ThreadCount int     `json:"thread_count"`
 }
 
 // Process interface defines the contract for all process types.
@@ -340,4 +340,3 @@ func (bp *BaseProcess) GetPTY() *os.File {
 func (bp *BaseProcess) GetConfig() ProcessConfig {
 	return bp.config
 }
-

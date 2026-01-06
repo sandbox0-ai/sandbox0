@@ -328,4 +328,3 @@ func (dm *DomainMatcher) Match(domain string) bool {
 
 	return false
 }
-

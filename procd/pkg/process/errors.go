@@ -33,4 +33,3 @@ var (
 	// ErrPermissionDenied is returned when permission is denied.
 	ErrPermissionDenied = errors.New("permission denied")
 )
-

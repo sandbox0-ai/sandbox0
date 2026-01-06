@@ -79,4 +79,3 @@ var (
 		[]string{"operation", "status"},
 	)
 )
-

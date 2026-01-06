@@ -241,11 +241,11 @@ func (p *PythonREPL) monitorProcess() {
 // detectPrompt checks if the output contains a Python prompt.
 func (p *PythonREPL) detectPrompt(data []byte) bool {
 	patterns := []string{
-		"In [",   // IPython input prompt
-		"Out[",   // IPython output prompt
-		"...:",   // Continuation prompt
-		">>> ",   // Standard Python prompt
-		"... ",   // Standard continuation
+		"In [", // IPython input prompt
+		"Out[", // IPython output prompt
+		"...:", // Continuation prompt
+		">>> ", // Standard Python prompt
+		"... ", // Standard continuation
 	}
 
 	str := string(data)
@@ -256,4 +256,3 @@ func (p *PythonREPL) detectPrompt(data []byte) bool {
 	}
 	return false
 }
-

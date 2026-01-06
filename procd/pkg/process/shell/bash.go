@@ -405,4 +405,3 @@ func (z *ZshShell) monitorProcess() {
 
 	z.CloseOutput()
 }
-

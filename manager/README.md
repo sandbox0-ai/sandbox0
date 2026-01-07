@@ -82,7 +82,7 @@ METRICS_PORT=9090
 ### 1. Install CRD
 
 ```bash
-kubectl apply -f deploy/k8s/crd.yaml
+kubectl apply -f deploy/k8s/_sandboxtemplates.yaml
 ```
 
 ### 2. Create RBAC

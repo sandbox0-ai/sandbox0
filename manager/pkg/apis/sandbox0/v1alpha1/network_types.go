@@ -128,8 +128,9 @@ type AuditSpec struct {
 	Level string `json:"level,omitempty"`
 
 	// SampleRate is the sampling rate for audit logs (0.0-1.0)
+	// +kubebuilder:validation:Pattern=`^(0(\.\d+)?|1(\.0+)?)$`
 	// +kubebuilder:default=1.0
-	SampleRate float64 `json:"sampleRate,omitempty"`
+	SampleRate string `json:"sampleRate,omitempty"`
 }
 
 // SandboxNetworkPolicyStatus defines the observed state of SandboxNetworkPolicy

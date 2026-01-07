@@ -1,0 +1,611 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: sandboxtemplates.
+spec:
+  group: ""
+  names:
+    kind: SandboxTemplate
+    listKind: SandboxTemplateList
+    plural: sandboxtemplates
+    singular: sandboxtemplate
+  scope: Namespaced
+  versions:
+  - name: ""
+    schema:
+      openAPIV3Schema:
+        description: SandboxTemplate defines a template for creating sandboxes
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: SandboxTemplateSpec defines the desired state of SandboxTemplate
+            properties:
+              aliases:
+                description: Aliases
+                items:
+                  type: string
+                type: array
+              allowedTeams:
+                items:
+                  type: string
+                type: array
+              description:
+                description: Description of the template
+                type: string
+              displayName:
+                type: string
+              envVars:
+                additionalProperties:
+                  type: string
+                description: Environment variables (global, shared by all containers)
+                type: object
+              envdVersion:
+                description: Environment configuration
+                type: string
+              inherits:
+                description: Template inheritance
+                type: string
+              lifecycle:
+                description: Lifecycle management
+                properties:
+                  defaultTTL:
+                    format: int32
+                    type: integer
+                  idleTimeout:
+                    format: int32
+                    type: integer
+                  maxTTL:
+                    format: int32
+                    type: integer
+                  preStop:
+                    description: PreStopHook defines pre-stop hook
+                    properties:
+                      command:
+                        items:
+                          type: string
+                        type: array
+                      timeoutSeconds:
+                        format: int32
+                        type: integer
+                    type: object
+                type: object
+              mainContainer:
+                description: MainContainer configuration (required)
+                properties:
+                  args:
+                    items:
+                      type: string
+                    type: array
+                  command:
+                    items:
+                      type: string
+                    type: array
+                  env:
+                    items:
+                      description: EnvVar represents an environment variable
+                      properties:
+                        name:
+                          type: string
+                        value:
+                          type: string
+                      required:
+                      - name
+                      - value
+                      type: object
+                    type: array
+                  image:
+                    type: string
+                  imagePullPolicy:
+                    type: string
+                  resources:
+                    description: ResourceRequirements defines resource requirements
+                      for containers
+                    properties:
+                      limits:
+                        additionalProperties:
+                          type: string
+                        type: object
+                      requests:
+                        additionalProperties:
+                          type: string
+                        type: object
+                    type: object
+                  securityContext:
+                    description: SecurityContext defines security context for containers
+                    properties:
+                      capabilities:
+                        description: Capabilities defines Linux capabilities
+                        properties:
+                          drop:
+                            description: Add field is removed to prevent privilege
+                              escalation
+                            items:
+                              type: string
+                            type: array
+                        type: object
+                      runAsGroup:
+                        format: int64
+                        type: integer
+                      runAsUser:
+                        format: int64
+                        type: integer
+                    type: object
+                  volumeMounts:
+                    items:
+                      description: VolumeMount represents a volume mount
+                      properties:
+                        mountPath:
+                          type: string
+                        name:
+                          type: string
+                        readOnly:
+                          type: boolean
+                      required:
+                      - mountPath
+                      - name
+                      type: object
+                    type: array
+                required:
+                - image
+                type: object
+              network:
+                description: Network policy (template-level default)
+                properties:
+                  egress:
+                    description: NetworkEgressPolicy defines egress policy
+                    properties:
+                      allowedDomains:
+                        items:
+                          type: string
+                        type: array
+                      allowedIPs:
+                        items:
+                          type: string
+                        type: array
+                      blockedDomains:
+                        items:
+                          type: string
+                        type: array
+                      blockedIPs:
+                        items:
+                          type: string
+                        type: array
+                    type: object
+                  ingress:
+                    description: NetworkIngressPolicy defines ingress policy
+                    properties:
+                      allowedIPs:
+                        items:
+                          type: string
+                        type: array
+                      blockedIPs:
+                        items:
+                          type: string
+                        type: array
+                    type: object
+                  mode:
+                    description: NetworkPolicyMode defines network policy mode
+                    type: string
+                required:
+                - mode
+                type: object
+              pod:
+                description: Pod-level configuration
+                properties:
+                  affinity:
+                    description: Affinity defines pod affinity rules
+                    properties:
+                      nodeAffinity:
+                        description: NodeAffinity defines node affinity rules
+                        properties:
+                          preferredDuringSchedulingIgnoredDuringExecution:
+                            items:
+                              description: PreferredSchedulingTerm defines preferred
+                                scheduling term
+                              properties:
+                                preference:
+                                  description: NodeSelectorTerm defines node selector
+                                    term
+                                  properties:
+                                    matchExpressions:
+                                      items:
+                                        description: NodeSelectorRequirement defines
+                                          node selector requirement
+                                        properties:
+                                          key:
+                                            type: string
+                                          operator:
+                                            type: string
+                                          values:
+                                            items:
+                                              type: string
+                                            type: array
+                                        required:
+                                        - key
+                                        - operator
+                                        type: object
+                                      type: array
+                                    matchFields:
+                                      items:
+                                        description: NodeSelectorRequirement defines
+                                          node selector requirement
+                                        properties:
+                                          key:
+                                            type: string
+                                          operator:
+                                            type: string
+                                          values:
+                                            items:
+                                              type: string
+                                            type: array
+                                        required:
+                                        - key
+                                        - operator
+                                        type: object
+                                      type: array
+                                  type: object
+                                weight:
+                                  format: int32
+                                  type: integer
+                              required:
+                              - preference
+                              - weight
+                              type: object
+                            type: array
+                          requiredDuringSchedulingIgnoredDuringExecution:
+                            description: NodeSelector defines node selector
+                            properties:
+                              nodeSelectorTerms:
+                                items:
+                                  description: NodeSelectorTerm defines node selector
+                                    term
+                                  properties:
+                                    matchExpressions:
+                                      items:
+                                        description: NodeSelectorRequirement defines
+                                          node selector requirement
+                                        properties:
+                                          key:
+                                            type: string
+                                          operator:
+                                            type: string
+                                          values:
+                                            items:
+                                              type: string
+                                            type: array
+                                        required:
+                                        - key
+                                        - operator
+                                        type: object
+                                      type: array
+                                    matchFields:
+                                      items:
+                                        description: NodeSelectorRequirement defines
+                                          node selector requirement
+                                        properties:
+                                          key:
+                                            type: string
+                                          operator:
+                                            type: string
+                                          values:
+                                            items:
+                                              type: string
+                                            type: array
+                                        required:
+                                        - key
+                                        - operator
+                                        type: object
+                                      type: array
+                                  type: object
+                                type: array
+                            required:
+                            - nodeSelectorTerms
+                            type: object
+                        type: object
+                      podAffinity:
+                        description: PodAffinity defines pod affinity rules
+                        properties:
+                          preferredDuringSchedulingIgnoredDuringExecution:
+                            items:
+                              description: WeightedPodAffinityTerm defines weighted
+                                pod affinity term
+                              properties:
+                                podAffinityTerm:
+                                  description: PodAffinityTerm defines pod affinity
+                                    term
+                                  properties:
+                                    labelSelector:
+                                      description: LabelSelector defines label selector
+                                      properties:
+                                        matchExpressions:
+                                          items:
+                                            description: LabelSelectorRequirement
+                                              defines label selector requirement
+                                            properties:
+                                              key:
+                                                type: string
+                                              operator:
+                                                type: string
+                                              values:
+                                                items:
+                                                  type: string
+                                                type: array
+                                            required:
+                                            - key
+                                            - operator
+                                            type: object
+                                          type: array
+                                        matchLabels:
+                                          additionalProperties:
+                                            type: string
+                                          type: object
+                                      type: object
+                                    namespaces:
+                                      items:
+                                        type: string
+                                      type: array
+                                    topologyKey:
+                                      type: string
+                                  required:
+                                  - topologyKey
+                                  type: object
+                                weight:
+                                  format: int32
+                                  type: integer
+                              required:
+                              - podAffinityTerm
+                              - weight
+                              type: object
+                            type: array
+                          requiredDuringSchedulingIgnoredDuringExecution:
+                            items:
+                              description: PodAffinityTerm defines pod affinity term
+                              properties:
+                                labelSelector:
+                                  description: LabelSelector defines label selector
+                                  properties:
+                                    matchExpressions:
+                                      items:
+                                        description: LabelSelectorRequirement defines
+                                          label selector requirement
+                                        properties:
+                                          key:
+                                            type: string
+                                          operator:
+                                            type: string
+                                          values:
+                                            items:
+                                              type: string
+                                            type: array
+                                        required:
+                                        - key
+                                        - operator
+                                        type: object
+                                      type: array
+                                    matchLabels:
+                                      additionalProperties:
+                                        type: string
+                                      type: object
+                                  type: object
+                                namespaces:
+                                  items:
+                                    type: string
+                                  type: array
+                                topologyKey:
+                                  type: string
+                              required:
+                              - topologyKey
+                              type: object
+                            type: array
+                        type: object
+                    type: object
+                  nodeSelector:
+                    additionalProperties:
+                      type: string
+                    type: object
+                  serviceAccountName:
+                    type: string
+                  tolerations:
+                    items:
+                      description: Toleration defines pod toleration
+                      properties:
+                        effect:
+                          type: string
+                        key:
+                          type: string
+                        operator:
+                          type: string
+                        value:
+                          type: string
+                      type: object
+                    type: array
+                type: object
+              pool:
+                description: Pool strategy
+                properties:
+                  maxIdle:
+                    format: int32
+                    type: integer
+                  minIdle:
+                    format: int32
+                    type: integer
+                required:
+                - maxIdle
+                - minIdle
+                type: object
+              public:
+                description: Access control
+                type: boolean
+              resources:
+                description: Resource quota
+                properties:
+                  cpu:
+                    type: string
+                  gpu:
+                    type: string
+                  memory:
+                    type: string
+                required:
+                - cpu
+                - memory
+                type: object
+              runtimeClassName:
+                type: string
+              sidecars:
+                description: Sidecar containers (optional)
+                items:
+                  description: ContainerSpec defines container configuration
+                  properties:
+                    args:
+                      items:
+                        type: string
+                      type: array
+                    command:
+                      items:
+                        type: string
+                      type: array
+                    env:
+                      items:
+                        description: EnvVar represents an environment variable
+                        properties:
+                          name:
+                            type: string
+                          value:
+                            type: string
+                        required:
+                        - name
+                        - value
+                        type: object
+                      type: array
+                    image:
+                      type: string
+                    imagePullPolicy:
+                      type: string
+                    resources:
+                      description: ResourceRequirements defines resource requirements
+                        for containers
+                      properties:
+                        limits:
+                          additionalProperties:
+                            type: string
+                          type: object
+                        requests:
+                          additionalProperties:
+                            type: string
+                          type: object
+                      type: object
+                    securityContext:
+                      description: SecurityContext defines security context for containers
+                      properties:
+                        capabilities:
+                          description: Capabilities defines Linux capabilities
+                          properties:
+                            drop:
+                              description: Add field is removed to prevent privilege
+                                escalation
+                              items:
+                                type: string
+                              type: array
+                          type: object
+                        runAsGroup:
+                          format: int64
+                          type: integer
+                        runAsUser:
+                          format: int64
+                          type: integer
+                      type: object
+                    volumeMounts:
+                      items:
+                        description: VolumeMount represents a volume mount
+                        properties:
+                          mountPath:
+                            type: string
+                          name:
+                            type: string
+                          readOnly:
+                            type: boolean
+                        required:
+                        - mountPath
+                        - name
+                        type: object
+                      type: array
+                  required:
+                  - image
+                  type: object
+                type: array
+              tags:
+                items:
+                  type: string
+                type: array
+            required:
+            - envdVersion
+            - mainContainer
+            - pool
+            - resources
+            type: object
+          status:
+            description: SandboxTemplateStatus defines the observed state of SandboxTemplate
+            properties:
+              activeCount:
+                format: int32
+                type: integer
+              conditions:
+                description: Conditions
+                items:
+                  description: SandboxTemplateCondition defines a condition of SandboxTemplate
+                  properties:
+                    lastTransitionTime:
+                      format: date-time
+                      type: string
+                    message:
+                      type: string
+                    reason:
+                      type: string
+                    status:
+                      description: ConditionStatus defines condition status
+                      type: string
+                    type:
+                      description: SandboxTemplateConditionType defines condition
+                        type
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              idleCount:
+                description: Pool statistics
+                format: int32
+                type: integer
+              lastUpdateTime:
+                description: Last updated time
+                format: date-time
+                type: string
+            required:
+            - activeCount
+            - idleCount
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true

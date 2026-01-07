@@ -19,10 +19,11 @@ import (
 
 // SandboxService handles sandbox operations
 type SandboxService struct {
-	k8sClient      kubernetes.Interface
-	podLister      corelisters.PodLister
-	templateLister controller.TemplateLister
-	logger         *zap.Logger
+	k8sClient            kubernetes.Interface
+	podLister            corelisters.PodLister
+	templateLister       controller.TemplateLister
+	networkPolicyService *NetworkPolicyService
+	logger               *zap.Logger
 }
 
 // NewSandboxService creates a new SandboxService
@@ -30,13 +31,15 @@ func NewSandboxService(
 	k8sClient kubernetes.Interface,
 	podLister corelisters.PodLister,
 	templateLister controller.TemplateLister,
+	networkPolicyService *NetworkPolicyService,
 	logger *zap.Logger,
 ) *SandboxService {
 	return &SandboxService{
-		k8sClient:      k8sClient,
-		podLister:      podLister,
-		templateLister: templateLister,
-		logger:         logger,
+		k8sClient:            k8sClient,
+		podLister:            podLister,
+		templateLister:       templateLister,
+		networkPolicyService: networkPolicyService,
+		logger:               logger,
 	}
 }
 
@@ -102,6 +105,45 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 
 	// Build procd address
 	procdAddress := fmt.Sprintf("%s.%s.svc.cluster.local:8080", pod.Name, pod.Namespace)
+
+	// Create network and bandwidth policies for the sandbox
+	if s.networkPolicyService != nil {
+		// Create network policy
+		var requestNetwork *v1alpha1.NetworkPolicy
+		if req.Config != nil {
+			requestNetwork = req.Config.Network
+		}
+
+		if err := s.networkPolicyService.CreateOrUpdateNetworkPolicy(ctx, &CreateNetworkPolicyRequest{
+			SandboxID:    req.SandboxID,
+			TeamID:       req.TeamID,
+			Namespace:    pod.Namespace,
+			TemplateSpec: template.Spec.Network,
+			RequestSpec:  requestNetwork,
+		}); err != nil {
+			s.logger.Error("Failed to create network policy",
+				zap.String("sandboxID", req.SandboxID),
+				zap.Error(err),
+			)
+			// Don't fail the claim, but log the error
+		}
+
+		// Create bandwidth policy with defaults
+		if err := s.networkPolicyService.CreateOrUpdateBandwidthPolicy(ctx, &CreateBandwidthPolicyRequest{
+			SandboxID:         req.SandboxID,
+			TeamID:            req.TeamID,
+			Namespace:         pod.Namespace,
+			EgressRateBps:     100 * 1000 * 1000, // 100 Mbps
+			IngressRateBps:    100 * 1000 * 1000, // 100 Mbps
+			AccountingEnabled: true,
+		}); err != nil {
+			s.logger.Error("Failed to create bandwidth policy",
+				zap.String("sandboxID", req.SandboxID),
+				zap.Error(err),
+			)
+			// Don't fail the claim, but log the error
+		}
+	}
 
 	return &ClaimResponse{
 		SandboxID:    req.SandboxID,
@@ -364,6 +406,23 @@ func (s *SandboxService) TerminateSandbox(ctx context.Context, sandboxID string)
 	}
 
 	pod := pods[0]
+
+	// Delete network and bandwidth policies
+	if s.networkPolicyService != nil {
+		if err := s.networkPolicyService.DeleteNetworkPolicy(ctx, pod.Namespace, sandboxID); err != nil {
+			s.logger.Warn("Failed to delete network policy",
+				zap.String("sandboxID", sandboxID),
+				zap.Error(err),
+			)
+		}
+
+		if err := s.networkPolicyService.DeleteBandwidthPolicy(ctx, pod.Namespace, sandboxID); err != nil {
+			s.logger.Warn("Failed to delete bandwidth policy",
+				zap.String("sandboxID", sandboxID),
+				zap.Error(err),
+			)
+		}
+	}
 
 	// Delete the pod
 	err = s.k8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{})

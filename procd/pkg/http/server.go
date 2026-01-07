@@ -15,7 +15,6 @@ import (
 	ctxpkg "github.com/sandbox0-ai/infra/procd/pkg/context"
 	"github.com/sandbox0-ai/infra/procd/pkg/file"
 	"github.com/sandbox0-ai/infra/procd/pkg/http/handlers"
-	"github.com/sandbox0-ai/infra/procd/pkg/network"
 	"github.com/sandbox0-ai/infra/procd/pkg/volume"
 	"go.uber.org/zap"
 )
@@ -55,7 +54,6 @@ type Server struct {
 
 	// Managers
 	contextManager *ctxpkg.Manager
-	networkManager *network.Manager
 	volumeManager  *volume.Manager
 	fileManager    *file.Manager
 
@@ -70,7 +68,6 @@ type Server struct {
 func NewServer(
 	cfg *config.Config,
 	contextManager *ctxpkg.Manager,
-	networkManager *network.Manager,
 	volumeManager *volume.Manager,
 	fileManager *file.Manager,
 	authValidator *internalauth.Validator,
@@ -81,7 +78,6 @@ func NewServer(
 		router:         mux.NewRouter(),
 		cfg:            cfg,
 		contextManager: contextManager,
-		networkManager: networkManager,
 		volumeManager:  volumeManager,
 		fileManager:    fileManager,
 		authValidator:  authValidator,
@@ -119,14 +115,8 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/contexts/{id}/input", contextHandler.WriteInput).Methods("POST")
 	api.HandleFunc("/contexts/{id}/ws", contextHandler.WebSocket).Methods("GET")
 
-	// Network handlers
-	networkHandler := handlers.NewNetworkHandler(s.networkManager, s.logger)
-	api.HandleFunc("/network/policy", networkHandler.GetPolicy).Methods("GET")
-	api.HandleFunc("/network/policy", networkHandler.UpdatePolicy).Methods("PUT")
-	api.HandleFunc("/network/policy/reset", networkHandler.ResetPolicy).Methods("POST")
-	api.HandleFunc("/network/policy/allow/cidr", networkHandler.AddAllowCIDR).Methods("POST")
-	api.HandleFunc("/network/policy/allow/domain", networkHandler.AddAllowDomain).Methods("POST")
-	api.HandleFunc("/network/policy/deny/cidr", networkHandler.AddDenyCIDR).Methods("POST")
+	// Note: Network policy APIs are no longer handled by procd.
+	// Network isolation is managed by the netd service via CRDs.
 
 	// SandboxVolume handlers
 	volumeHandler := handlers.NewVolumeHandler(s.volumeManager, s.logger)

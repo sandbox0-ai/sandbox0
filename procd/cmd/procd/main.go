@@ -16,7 +16,6 @@ import (
 	ctxpkg "github.com/sandbox0-ai/infra/procd/pkg/context"
 	"github.com/sandbox0-ai/infra/procd/pkg/file"
 	procdhttp "github.com/sandbox0-ai/infra/procd/pkg/http"
-	"github.com/sandbox0-ai/infra/procd/pkg/network"
 	"github.com/sandbox0-ai/infra/procd/pkg/volume"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -49,18 +48,6 @@ func main() {
 
 	// Initialize managers
 	contextManager := ctxpkg.NewManager(cfg.MaxContexts)
-
-	networkCfg := &network.Config{
-		SandboxID:        cfg.SandboxID,
-		TCPProxyPort:     cfg.Network.TCPProxyPort,
-		EnableTCPProxy:   cfg.Network.EnableTCPProxy,
-		DNSServers:       cfg.Network.DNSServers,
-		DefaultDenyCIDRs: cfg.Network.DefaultDenyCIDRs,
-	}
-	networkManager, err := network.NewManager(networkCfg, logger)
-	if err != nil {
-		logger.Fatal("Failed to create network manager", zap.Error(err))
-	}
 
 	// Create shared token provider for storage-proxy communication
 	tokenProvider := procdhttp.NewTokenProvider()
@@ -97,23 +84,13 @@ func main() {
 		zap.Strings("allowed_callers", validatorConfig.AllowedCallers),
 	)
 
-	// Setup network
-	if err := networkManager.Setup(); err != nil {
-		logger.Fatal("Failed to setup network", zap.Error(err))
-	}
-
-	// Start TCP proxy if enabled
-	if cfg.Network.EnableTCPProxy {
-		if err := networkManager.StartTCPProxy(); err != nil {
-			logger.Fatal("Failed to start TCP proxy", zap.Error(err))
-		}
-	}
+	// Note: Network isolation is now handled by the netd service (DaemonSet).
+	// procd no longer manages network policies.
 
 	// Create and start HTTP server
 	server := procdhttp.NewServer(
 		cfg,
 		contextManager,
-		networkManager,
 		volumeManager,
 		fileManager,
 		authValidator,
@@ -142,7 +119,6 @@ func main() {
 		// Cleanup managers
 		contextManager.Cleanup()
 		volumeManager.Cleanup()
-		networkManager.Shutdown()
 		fileManager.Close()
 
 		done <- true

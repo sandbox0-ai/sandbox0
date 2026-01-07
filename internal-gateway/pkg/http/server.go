@@ -129,6 +129,14 @@ func (s *Server) setupRoutes() {
 			sandboxes.POST("/:id/resume", s.authMiddleware.RequirePermission(auth.PermSandboxWrite), s.resumeSandbox)
 			sandboxes.POST("/:id/refresh", s.authMiddleware.RequirePermission(auth.PermSandboxWrite), s.refreshSandbox)
 
+			// === Network Policy (→ Manager) ===
+			sandboxes.GET("/:id/network", s.authMiddleware.RequirePermission(auth.PermSandboxRead), s.getNetworkPolicy)
+			sandboxes.PATCH("/:id/network", s.authMiddleware.RequirePermission(auth.PermSandboxWrite), s.updateNetworkPolicy)
+
+			// === Bandwidth Policy (→ Manager) ===
+			sandboxes.GET("/:id/bandwidth", s.authMiddleware.RequirePermission(auth.PermSandboxRead), s.getBandwidthPolicy)
+			sandboxes.PATCH("/:id/bandwidth", s.authMiddleware.RequirePermission(auth.PermSandboxWrite), s.updateBandwidthPolicy)
+
 			// === Process/Context Management (→ Procd) ===
 			contexts := sandboxes.Group("/:id/contexts")
 			{

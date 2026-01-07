@@ -25,9 +25,6 @@ type Config struct {
 	StorageProxyBaseURL  string
 	StorageProxyReplicas int
 
-	// Network configuration
-	Network *NetworkConfig
-
 	// File manager configuration
 	RootPath string
 
@@ -39,18 +36,8 @@ type Config struct {
 	InternalAuthPublicKeyPath string
 }
 
-// NetworkConfig holds network isolation configuration.
-type NetworkConfig struct {
-	// TCP Proxy settings
-	TCPProxyPort   int32
-	EnableTCPProxy bool
-
-	// DNS servers for independent resolution
-	DNSServers []string
-
-	// Default deny CIDRs (private networks)
-	DefaultDenyCIDRs []string
-}
+// Note: Network isolation is now handled by the netd service (DaemonSet).
+// NetworkConfig has been removed from procd.
 
 // DefaultConfig returns a Config with default values.
 func DefaultConfig() *Config {
@@ -66,19 +53,6 @@ func DefaultConfig() *Config {
 
 		StorageProxyBaseURL:  env.GetEnv("STORAGE_PROXY_BASE_URL", "storage-proxy.sandbox0-system.svc.cluster.local"),
 		StorageProxyReplicas: env.GetEnvInt("STORAGE_PROXY_REPLICAS", 3),
-
-		Network: &NetworkConfig{
-			TCPProxyPort:   int32(env.GetEnvInt("NETWORK_TCP_PROXY_PORT", 1080)),
-			EnableTCPProxy: env.GetEnvBool("NETWORK_ENABLE_TCP_PROXY", false),
-			DNSServers:     []string{"8.8.8.8", "8.8.4.4"},
-			DefaultDenyCIDRs: []string{
-				"10.0.0.0/8",
-				"127.0.0.0/8",
-				"169.254.0.0/16",
-				"172.16.0.0/12",
-				"192.168.0.0/16",
-			},
-		},
 
 		RootPath: env.GetEnv("PROCD_ROOT_PATH", "/workspace"),
 

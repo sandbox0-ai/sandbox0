@@ -92,11 +92,18 @@ func main() {
 	// Create pod lister
 	podLister := informerFactory.Core().V1().Pods().Lister()
 
+	// Create network policy service for CRD management
+	networkPolicyService, err := service.NewNetworkPolicyService(k8sConfig, logger)
+	if err != nil {
+		logger.Fatal("Failed to create network policy service", zap.Error(err))
+	}
+
 	// Create services
 	sandboxService := service.NewSandboxService(
 		k8sClient,
 		podLister,
 		operator.GetTemplateLister(),
+		networkPolicyService,
 		logger,
 	)
 

@@ -32,6 +32,10 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(SchemeGroupVersion,
 		&SandboxTemplate{},
 		&SandboxTemplateList{},
+		&SandboxNetworkPolicy{},
+		&SandboxNetworkPolicyList{},
+		&SandboxBandwidthPolicy{},
+		&SandboxBandwidthPolicyList{},
 	)
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
 	return nil

@@ -12,6 +12,8 @@ import (
 	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/infra/manager/pkg/config"
 	"github.com/sandbox0-ai/infra/manager/pkg/controller"
+	clientset "github.com/sandbox0-ai/infra/manager/pkg/generated/clientset/versioned"
+	"github.com/sandbox0-ai/infra/manager/pkg/generated/informers/externalversions"
 	httpserver "github.com/sandbox0-ai/infra/manager/pkg/http"
 	"github.com/sandbox0-ai/infra/manager/pkg/service"
 	"github.com/sandbox0-ai/infra/pkg/env"
@@ -19,9 +21,6 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -65,12 +64,25 @@ func main() {
 		logger.Fatal("Failed to add SandboxTemplate to scheme", zap.Error(err))
 	}
 
+	// Create generated CRD clientset
+	crdClient, err := clientset.NewForConfig(k8sConfig)
+	if err != nil {
+		logger.Fatal("Failed to create CRD clientset", zap.Error(err))
+	}
+
 	// Create informers
 	informerFactory := informers.NewSharedInformerFactory(k8sClient, cfg.ResyncPeriod)
 	podInformer := informerFactory.Core().V1().Pods().Informer()
 
-	// Create SandboxTemplate informer manually
-	templateInformer := createTemplateInformer(k8sConfig, cfg.Namespace, cfg.ResyncPeriod)
+	// Create CRD informer factory using generated clientset
+	crdInformerFactory := externalversions.NewSharedInformerFactoryWithOptions(
+		crdClient,
+		cfg.ResyncPeriod,
+		externalversions.WithNamespace(cfg.Namespace),
+	)
+
+	// Get SandboxTemplate informer from the factory
+	templateInformer := crdInformerFactory.Sandbox0().V1alpha1().SandboxTemplates().Informer()
 
 	// Create event recorder
 	eventBroadcaster := record.NewBroadcaster()
@@ -153,7 +165,23 @@ func main() {
 	// Start informers
 	logger.Info("Starting informers")
 	informerFactory.Start(ctx.Done())
-	go templateInformer.Run(ctx.Done())
+	crdInformerFactory.Start(ctx.Done())
+
+	// Wait for cache sync
+	logger.Info("Waiting for informer caches to sync")
+	if !cache.WaitForCacheSync(ctx.Done(), podInformer.HasSynced, templateInformer.HasSynced) {
+		logger.Fatal("Failed to sync informer caches")
+	}
+
+	// Wait for CRD cache sync
+	syncResult := crdInformerFactory.WaitForCacheSync(ctx.Done())
+	for typ, synced := range syncResult {
+		if !synced {
+			logger.Warn("CRD informer cache not synced", zap.String("type", typ.String()))
+		} else {
+			logger.Info("CRD informer cache synced", zap.String("type", typ.String()))
+		}
+	}
 
 	// Start operator
 	go func() {
@@ -219,35 +247,6 @@ func buildKubeConfig(kubeconfig string) (*rest.Config, error) {
 		return clientcmd.BuildConfigFromFlags("", kubeconfig)
 	}
 	return rest.InClusterConfig()
-}
-
-// createTemplateInformer creates an informer for SandboxTemplate
-func createTemplateInformer(cfg *rest.Config, namespace string, resyncPeriod time.Duration) cache.SharedIndexInformer {
-	// Create a simple informer that watches for SandboxTemplate
-	// In a real implementation, we should use generated clientset
-	// For now, we'll create a mock informer
-
-	listWatch := &cache.ListWatch{
-		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
-			// Mock list function
-			return &v1alpha1.SandboxTemplateList{
-				Items: []v1alpha1.SandboxTemplate{},
-			}, nil
-		},
-		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
-			// Mock watch function
-			return watch.NewFake(), nil
-		},
-	}
-
-	informer := cache.NewSharedIndexInformer(
-		listWatch,
-		&v1alpha1.SandboxTemplate{},
-		resyncPeriod,
-		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
-	)
-
-	return informer
 }
 
 // startMetricsServer starts the Prometheus metrics server

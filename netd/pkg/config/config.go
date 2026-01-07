@@ -59,6 +59,15 @@ type Config struct {
 
 	// ProcdPort is the port procd listens on
 	ProcdPort int
+
+	// UseEBPF enables eBPF-based bandwidth control (more efficient than tc htb)
+	UseEBPF bool
+
+	// BPFFSPath is the path to bpf filesystem (usually /sys/fs/bpf)
+	BPFFSPath string
+
+	// UseEDT enables Earliest Departure Time pacing for eBPF
+	UseEDT bool
 }
 
 // LoadConfig loads configuration from environment variables
@@ -81,6 +90,9 @@ func LoadConfig() *Config {
 		ClusterDNSCIDR:        getEnv("CLUSTER_DNS_CIDR", ""),
 		InternalGatewayCIDR:   getEnv("INTERNAL_GATEWAY_CIDR", ""),
 		ProcdPort:             getEnvInt("PROCD_PORT", 49983),
+		UseEBPF:               getEnvBool("USE_EBPF", true), // Enabled by default
+		BPFFSPath:             getEnv("BPF_FS_PATH", "/sys/fs/bpf"),
+		UseEDT:                getEnvBool("USE_EDT", true), // EDT pacing enabled by default
 	}
 
 	return cfg

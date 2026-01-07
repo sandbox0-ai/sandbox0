@@ -1,5 +1,6 @@
 // Package dataplane implements the network data plane for netd.
 // It uses iptables/nftables for packet filtering and tc for traffic shaping.
+// Optionally uses eBPF for more efficient bandwidth control.
 package dataplane
 
 import (
@@ -11,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/infra/netd/pkg/ebpf"
 	"github.com/sandbox0-ai/infra/netd/pkg/watcher"
 	"go.uber.org/zap"
 )
@@ -26,6 +28,11 @@ type DataPlane struct {
 	clusterDNSCIDR      string
 	internalGatewayCIDR string
 
+	// eBPF manager for bandwidth control
+	ebpfMgr   *ebpf.Manager
+	useEBPF   bool
+	bpfFSPath string
+
 	// Track applied rules per sandbox
 	mu           sync.RWMutex
 	sandboxRules map[string]*SandboxRules
@@ -40,6 +47,20 @@ type SandboxRules struct {
 	IngressRules []string
 	TCClass      string
 	Applied      bool
+}
+
+// Config contains configuration for the DataPlane
+type Config struct {
+	ProxyHTTPPort       int
+	ProxyHTTPSPort      int
+	ProcdPort           int
+	FailClosed          bool
+	StorageProxyCIDR    string
+	ClusterDNSCIDR      string
+	InternalGatewayCIDR string
+	UseEBPF             bool
+	BPFFSPath           string
+	UseEDT              bool // Use Earliest Departure Time for eBPF pacing
 }
 
 // NewDataPlane creates a new DataPlane
@@ -62,13 +83,61 @@ func NewDataPlane(
 		storageProxyCIDR:    storageProxyCIDR,
 		clusterDNSCIDR:      clusterDNSCIDR,
 		internalGatewayCIDR: internalGatewayCIDR,
+		useEBPF:             false,
 		sandboxRules:        make(map[string]*SandboxRules),
 	}
 }
 
+// NewDataPlaneWithEBPF creates a new DataPlane with eBPF support
+func NewDataPlaneWithEBPF(logger *zap.Logger, cfg *Config) (*DataPlane, error) {
+	dp := &DataPlane{
+		logger:              logger,
+		proxyHTTPPort:       cfg.ProxyHTTPPort,
+		proxyHTTPSPort:      cfg.ProxyHTTPSPort,
+		procdPort:           cfg.ProcdPort,
+		failClosed:          cfg.FailClosed,
+		storageProxyCIDR:    cfg.StorageProxyCIDR,
+		clusterDNSCIDR:      cfg.ClusterDNSCIDR,
+		internalGatewayCIDR: cfg.InternalGatewayCIDR,
+		useEBPF:             cfg.UseEBPF,
+		bpfFSPath:           cfg.BPFFSPath,
+		sandboxRules:        make(map[string]*SandboxRules),
+	}
+
+	if cfg.UseEBPF {
+		ebpfMgr, err := ebpf.NewManager(logger, cfg.BPFFSPath, cfg.UseEDT)
+		if err != nil {
+			logger.Warn("Failed to create eBPF manager, falling back to iptables/tc",
+				zap.Error(err),
+			)
+			dp.useEBPF = false
+		} else {
+			dp.ebpfMgr = ebpfMgr
+			dp.useEBPF = ebpfMgr.IsAvailable()
+			if dp.useEBPF {
+				logger.Info("eBPF support enabled for bandwidth control")
+			} else {
+				logger.Info("eBPF not available, using traditional tc for bandwidth control")
+			}
+		}
+	}
+
+	return dp, nil
+}
+
 // Initialize sets up base iptables chains for netd
 func (dp *DataPlane) Initialize(ctx context.Context) error {
-	dp.logger.Info("Initializing dataplane")
+	dp.logger.Info("Initializing dataplane",
+		zap.Bool("useEBPF", dp.useEBPF),
+	)
+
+	// Initialize eBPF manager if enabled
+	if dp.ebpfMgr != nil {
+		if err := dp.ebpfMgr.Initialize(ctx); err != nil {
+			dp.logger.Warn("Failed to initialize eBPF manager", zap.Error(err))
+			dp.useEBPF = false
+		}
+	}
 
 	// Create custom chains for netd
 	chains := []struct {
@@ -408,43 +477,88 @@ func (dp *DataPlane) applyBandwidthRules(
 	vethName := fmt.Sprintf("veth%s", info.SandboxID[:8])
 	rules.VethName = vethName
 
-	// Apply egress rate limit using tc htb
+	// Get rate limits
+	var egressRateBps, ingressRateBps, burstBytes int64
 	if policy.Spec.EgressRateLimit != nil {
-		rateLimit := policy.Spec.EgressRateLimit
-		rateBits := rateLimit.RateBps
-		burstBytes := rateLimit.BurstBytes
+		egressRateBps = policy.Spec.EgressRateLimit.RateBps
+		burstBytes = policy.Spec.EgressRateLimit.BurstBytes
+	}
+	if policy.Spec.IngressRateLimit != nil {
+		ingressRateBps = policy.Spec.IngressRateLimit.RateBps
 		if burstBytes == 0 {
-			burstBytes = rateBits / 8 // Default burst to 1 second of data
+			burstBytes = policy.Spec.IngressRateLimit.BurstBytes
 		}
-
-		// Create qdisc if not exists
-		dp.runTC("qdisc", "add", "dev", vethName, "root", "handle", "1:", "htb", "default", "10")
-
-		// Create class for this sandbox
-		classID := fmt.Sprintf("1:%s", info.SandboxID[:4])
-		if err := dp.runTC(
-			"class", "add", "dev", vethName,
-			"parent", "1:", "classid", classID,
-			"htb", "rate", fmt.Sprintf("%dbit", rateBits),
-			"burst", fmt.Sprintf("%d", burstBytes),
-		); err != nil {
-			dp.logger.Warn("Failed to add tc class", zap.Error(err))
-		}
-
-		// Add filter to match this pod's traffic
-		if err := dp.runTC(
-			"filter", "add", "dev", vethName,
-			"protocol", "ip", "parent", "1:0",
-			"prio", "1", "u32",
-			"match", "ip", "src", info.PodIP+"/32",
-			"flowid", classID,
-		); err != nil {
-			dp.logger.Warn("Failed to add tc filter", zap.Error(err))
-		}
-
-		rules.TCClass = classID
+	}
+	if burstBytes == 0 && egressRateBps > 0 {
+		burstBytes = egressRateBps / 8 // Default burst to 1 second of data
 	}
 
+	// Use eBPF manager if available for more efficient rate limiting
+	if dp.ebpfMgr != nil && dp.useEBPF {
+		cfg := &ebpf.RateLimitConfig{
+			SandboxID:      info.SandboxID,
+			Iface:          vethName,
+			EgressRateBps:  egressRateBps,
+			IngressRateBps: ingressRateBps,
+			BurstBytes:     burstBytes,
+			UseBPF:         true,
+		}
+
+		if err := dp.ebpfMgr.ApplyRateLimit(ctx, cfg); err != nil {
+			dp.logger.Warn("eBPF rate limit failed, falling back to tc",
+				zap.String("sandboxID", info.SandboxID),
+				zap.Error(err),
+			)
+			return dp.applyTCBandwidthRules(ctx, info, vethName, egressRateBps, burstBytes, rules)
+		}
+
+		rules.TCClass = "ebpf:fq"
+		return nil
+	}
+
+	// Fall back to traditional tc htb
+	return dp.applyTCBandwidthRules(ctx, info, vethName, egressRateBps, burstBytes, rules)
+}
+
+// applyTCBandwidthRules applies bandwidth rules using traditional tc htb
+func (dp *DataPlane) applyTCBandwidthRules(
+	ctx context.Context,
+	info *watcher.SandboxInfo,
+	vethName string,
+	rateBps int64,
+	burstBytes int64,
+	rules *SandboxRules,
+) error {
+	if rateBps == 0 {
+		return nil
+	}
+
+	// Create qdisc if not exists
+	dp.runTC("qdisc", "add", "dev", vethName, "root", "handle", "1:", "htb", "default", "10")
+
+	// Create class for this sandbox
+	classID := fmt.Sprintf("1:%s", info.SandboxID[:4])
+	if err := dp.runTC(
+		"class", "add", "dev", vethName,
+		"parent", "1:", "classid", classID,
+		"htb", "rate", fmt.Sprintf("%dbit", rateBps),
+		"burst", fmt.Sprintf("%d", burstBytes),
+	); err != nil {
+		dp.logger.Warn("Failed to add tc class", zap.Error(err))
+	}
+
+	// Add filter to match this pod's traffic
+	if err := dp.runTC(
+		"filter", "add", "dev", vethName,
+		"protocol", "ip", "parent", "1:0",
+		"prio", "1", "u32",
+		"match", "ip", "src", info.PodIP+"/32",
+		"flowid", classID,
+	); err != nil {
+		dp.logger.Warn("Failed to add tc filter", zap.Error(err))
+	}
+
+	rules.TCClass = classID
 	return nil
 }
 
@@ -491,10 +605,21 @@ func (dp *DataPlane) RemovePodRules(ctx context.Context, sandboxID string) error
 		}
 	}
 
-	// Remove tc rules
+	// Remove tc/eBPF rules
 	if rules.VethName != "" && rules.TCClass != "" {
-		dp.runTC("filter", "del", "dev", rules.VethName, "parent", "1:0")
-		dp.runTC("class", "del", "dev", rules.VethName, "classid", rules.TCClass)
+		if dp.ebpfMgr != nil && strings.HasPrefix(rules.TCClass, "ebpf:") {
+			// Remove eBPF-based rate limiting
+			if err := dp.ebpfMgr.RemoveRateLimit(ctx, rules.VethName); err != nil {
+				dp.logger.Warn("Failed to remove eBPF rate limit",
+					zap.String("vethName", rules.VethName),
+					zap.Error(err),
+				)
+			}
+		} else {
+			// Remove traditional tc rules
+			dp.runTC("filter", "del", "dev", rules.VethName, "parent", "1:0")
+			dp.runTC("class", "del", "dev", rules.VethName, "classid", rules.TCClass)
+		}
 	}
 
 	delete(dp.sandboxRules, sandboxID)
@@ -526,6 +651,13 @@ func (dp *DataPlane) Cleanup(ctx context.Context) error {
 		dp.runIPTables("-t", c.table, "-F", c.chain)
 	}
 
+	// Cleanup eBPF manager
+	if dp.ebpfMgr != nil {
+		if err := dp.ebpfMgr.Cleanup(ctx); err != nil {
+			dp.logger.Warn("Failed to cleanup eBPF manager", zap.Error(err))
+		}
+	}
+
 	// Clear sandbox rules map
 	dp.mu.Lock()
 	dp.sandboxRules = make(map[string]*SandboxRules)
@@ -533,6 +665,11 @@ func (dp *DataPlane) Cleanup(ctx context.Context) error {
 
 	dp.logger.Info("Dataplane cleaned up")
 	return nil
+}
+
+// UseEBPF returns whether eBPF is enabled and available
+func (dp *DataPlane) UseEBPF() bool {
+	return dp.useEBPF && dp.ebpfMgr != nil
 }
 
 // runIPTables executes an iptables command

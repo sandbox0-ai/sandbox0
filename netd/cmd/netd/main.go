@@ -69,25 +69,40 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Create watcher
-	w := watcher.NewWatcher(
+	// Create watcher with REST config for CRD access
+	w, err := watcher.NewWatcherWithConfig(
+		k8sConfig,
 		k8sClient,
 		cfg.NodeName,
 		cfg.Namespace,
 		cfg.ResyncPeriod,
 		logger,
 	)
+	if err != nil {
+		logger.Fatal("Failed to create watcher", zap.Error(err))
+	}
 
-	// Create dataplane
-	dp := dataplane.NewDataPlane(
-		logger,
-		cfg.ProxyHTTPPort,
-		cfg.ProxyHTTPSPort,
-		cfg.ProcdPort,
-		cfg.FailClosed,
-		cfg.StorageProxyCIDR,
-		cfg.ClusterDNSCIDR,
-		cfg.InternalGatewayCIDR,
+	// Create dataplane with eBPF support
+	dpConfig := &dataplane.Config{
+		ProxyHTTPPort:       cfg.ProxyHTTPPort,
+		ProxyHTTPSPort:      cfg.ProxyHTTPSPort,
+		ProcdPort:           cfg.ProcdPort,
+		FailClosed:          cfg.FailClosed,
+		StorageProxyCIDR:    cfg.StorageProxyCIDR,
+		ClusterDNSCIDR:      cfg.ClusterDNSCIDR,
+		InternalGatewayCIDR: cfg.InternalGatewayCIDR,
+		UseEBPF:             cfg.UseEBPF,
+		BPFFSPath:           cfg.BPFFSPath,
+		UseEDT:              cfg.UseEDT,
+	}
+
+	dp, err := dataplane.NewDataPlaneWithEBPF(logger, dpConfig)
+	if err != nil {
+		logger.Fatal("Failed to create dataplane", zap.Error(err))
+	}
+
+	logger.Info("Dataplane configured",
+		zap.Bool("useEBPF", dp.UseEBPF()),
 	)
 
 	// Create proxy

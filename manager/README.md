@@ -111,10 +111,11 @@ spec:
   
   mainContainer:
     image: sandbox0/procd:latest
+    # Note: Using default capabilities (no NET_ADMIN)
     securityContext:
       capabilities:
-        add:
-          - NET_ADMIN
+        drop:
+          - NET_RAW
     resources:
       limits:
         cpu: "2"

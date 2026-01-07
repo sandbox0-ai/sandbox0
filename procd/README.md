@@ -118,21 +118,27 @@ Environment variables:
 
 ### Network Isolation
 
-Procd implements network isolation at the pod level using nftables:
+**DEPRECATED**: Network isolation is no longer handled by procd. It has been migrated to the `netd` service, which runs as a DaemonSet on each node and enforces network policies via CRDs (`SandboxNetworkPolicy` and `SandboxBandwidthPolicy`).
 
+The `netd` service provides:
 - **IP/CIDR filtering**: Precise control over outbound traffic destinations
-- **Domain filtering**: Support for domain and wildcard domain filtering (via TCP proxy)
-- **DNS spoofing protection**: Independent DNS resolution
+- **Domain filtering**: Support for domain and wildcard domain filtering (via L7 proxy)
+- **DNS spoofing protection**: Independent DNS resolution with rebinding protection
 - **Private IP blacklist**: Default blocking of private network ranges
-- **Packet marking**: Storage Proxy traffic bypasses firewall rules (SO_MARK=0x2)
+- **Bandwidth control**: Per-sandbox rate limiting and metering
+- **Audit logging**: Connection auditing for security and billing
+
+See `infra/netd/README.md` for details.
 
 ### Required Capabilities
+
+procd no longer requires `NET_ADMIN` capability. The container runs with default unprivileged capabilities, but it is recommended to drop unnecessary ones like `NET_RAW`:
 
 ```yaml
 securityContext:
   capabilities:
-    add:
-    - NET_ADMIN  # Required for nftables configuration
+    drop:
+    - NET_RAW
 ```
 
 ### Recommended: Kata Containers

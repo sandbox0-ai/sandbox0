@@ -13,10 +13,11 @@ spec:
   mainContainer:
     image: sandbox0/procd:latest
     imagePullPolicy: Always
+    # Note: Using default capabilities (no NET_ADMIN, no privileges)
     securityContext:
       capabilities:
-        add:
-          - NET_ADMIN  # For nftables only
+        drop:
+          - NET_RAW
     resources:
       limits:
         cpu: "2"
@@ -62,10 +63,11 @@ spec:
   mainContainer:
     image: sandbox0/procd:node-latest
     imagePullPolicy: Always
+    # Note: Using default capabilities (no NET_ADMIN, no privileges)
     securityContext:
       capabilities:
-        add:
-          - NET_ADMIN
+        drop:
+          - NET_RAW
     resources:
       limits:
         cpu: "2"

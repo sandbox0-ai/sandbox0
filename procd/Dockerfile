@@ -23,6 +23,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o procd ./cmd/procd
 FROM alpine:3.19
 
 # Install runtime dependencies
+# Note: nftables and iptables removed - network isolation is handled by netd service
 RUN apk add --no-cache \
     ca-certificates \
     tzdata \
@@ -31,14 +32,12 @@ RUN apk add --no-cache \
     py3-pip \
     nodejs \
     npm \
-    fuse \
-    nftables \
-    iptables
+    fuse
 
 # Install IPython for Python REPL
 RUN pip3 install --break-system-packages ipython
 
-# Create non-root user (but procd needs CAP_NET_ADMIN)
+# Create non-root user
 RUN addgroup -g 1000 sandbox && \
     adduser -u 1000 -G sandbox -s /bin/bash -D sandbox
 
@@ -60,8 +59,7 @@ EXPOSE 8080
 # Volume for workspace
 VOLUME /workspace
 
-# Run as root initially (needed for network setup)
-# In production, use pod security contexts to drop privileges after setup
+# Run as root (needed for FUSE mounts and process management)
 USER root
 
 # Health check

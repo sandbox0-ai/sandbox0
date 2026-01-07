@@ -16,7 +16,7 @@ spec:
 
   # Security context for the pod
   securityContext:
-    runAsNonRoot: false  # Root needed for nftables setup
+    runAsNonRoot: false
     fsGroup: 1000
 
   containers:
@@ -61,12 +61,12 @@ spec:
         memory: "4Gi"
 
     # Security context for container
+    # Note: Using default capabilities (no NET_ADMIN, no privileges)
+    # Network isolation is handled by netd service.
     securityContext:
       capabilities:
-        add:
-        - NET_ADMIN  # Required for nftables configuration
         drop:
-        - ALL
+        - NET_RAW
 
     # Health checks
     livenessProbe:

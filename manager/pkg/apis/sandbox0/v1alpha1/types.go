@@ -111,8 +111,8 @@ type SecurityContext struct {
 
 // Capabilities defines Linux capabilities
 type Capabilities struct {
-	Add  []string `json:"add,omitempty"` // e.g. ["NET_ADMIN"]
-	Drop []string `json:"drop,omitempty"`
+	// Add field is removed to prevent privilege escalation
+	Drop []string `json:"drop,omitempty"` // e.g. ["NET_RAW"]
 }
 
 // PodSpecOverride allows overriding pod-level settings

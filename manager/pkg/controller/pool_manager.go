@@ -251,7 +251,6 @@ func (pm *PoolManager) buildContainer(spec *v1alpha1.ContainerSpec, template *v1
 		}
 		if spec.SecurityContext.Capabilities != nil {
 			container.SecurityContext.Capabilities = &corev1.Capabilities{
-				Add:  convertCapabilities(spec.SecurityContext.Capabilities.Add),
 				Drop: convertCapabilities(spec.SecurityContext.Capabilities.Drop),
 			}
 		}

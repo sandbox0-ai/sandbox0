@@ -2,9 +2,10 @@
 
 SERVICES := internal-gateway manager storage-proxy k8s-plugin
 
-all: build
+all: build-all
 
-build:
+# Build all services
+build-all:
 	@for service in $(SERVICES); do \
 		echo "Building $$service..."; \
 		if [ -f "$$service/Makefile" ]; then \

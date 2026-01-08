@@ -4,9 +4,9 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.20.0
-  name: sandboxtemplates.
+  name: sandboxtemplates.sandbox0.ai
 spec:
-  group: ""
+  group: sandbox0.ai
   names:
     kind: SandboxTemplate
     listKind: SandboxTemplateList
@@ -14,7 +14,7 @@ spec:
     singular: sandboxtemplate
   scope: Namespaced
   versions:
-  - name: ""
+  - name: v1alpha1
     schema:
       openAPIV3Schema:
         description: SandboxTemplate defines a template for creating sandboxes

@@ -46,7 +46,7 @@ func DefaultConfig() *Config {
 		TemplateID: env.GetEnv("TEMPLATE_ID", ""),
 		NodeName:   env.GetEnv("NODE_NAME", ""),
 
-		HTTPPort: env.GetEnvInt("PROCD_HTTP_PORT", 8080),
+		HTTPPort: env.GetEnvInt("PROCD_HTTP_PORT", 49983),
 		LogLevel: env.GetEnv("PROCD_LOG_LEVEL", "info"),
 
 		MaxContexts: env.GetEnvInt("PROCD_MAX_CONTEXTS", 100),

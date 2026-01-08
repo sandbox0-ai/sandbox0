@@ -54,7 +54,7 @@ manifests: ## Generate CRD manifests
 	@controller-gen crd:crdVersions=v1 paths="./pkg/apis/sandbox0/v1alpha1/..." output:crd:dir=./deploy/k8s
 
 .PHONY: build
-build: manifest generate ## Build the manager binary
+build: manifests generate ## Build the manager binary
 	@go build -o bin/manager ./cmd/manager
 	@echo "Build the procd binary..."
 	@go build -o bin/procd ./cmd/procd

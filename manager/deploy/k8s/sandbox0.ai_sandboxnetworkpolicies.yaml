@@ -4,9 +4,9 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.20.0
-  name: sandboxnetworkpolicies.
+  name: sandboxnetworkpolicies.sandbox0.ai
 spec:
-  group: ""
+  group: sandbox0.ai
   names:
     kind: SandboxNetworkPolicy
     listKind: SandboxNetworkPolicyList
@@ -14,7 +14,7 @@ spec:
     singular: sandboxnetworkpolicy
   scope: Namespaced
   versions:
-  - name: ""
+  - name: v1alpha1
     schema:
       openAPIV3Schema:
         description: SandboxNetworkPolicy defines network policy for a sandbox (instance-level)

@@ -1,4 +1,4 @@
-.PHONY: all build test lint tidy vendor clean
+.PHONY: all build build-all build-% test lint tidy vendor clean
 
 SERVICES := internal-gateway manager storage-proxy k8s-plugin
 
@@ -16,6 +16,33 @@ build-all:
 			go build -v -o $$service/bin/$$service ./$$service/; \
 		fi; \
 	done
+
+# Build specific service: make build <service> 
+build:
+	@service="$(filter-out build build-all test lint tidy vendor clean,$(MAKECMDGOALS))"; \
+	if [ -z "$$service" ]; then \
+		echo "Error: Please specify a service or use 'make build-all'"; \
+		echo "Available services: $(SERVICES)"; \
+		echo "Usage: make build <service> or make build-<service>"; \
+		exit 1; \
+	elif echo "$(SERVICES)" | grep -qw "$$service"; then \
+		echo "Building $$service..."; \
+		if [ -f "$$service/Makefile" ]; then \
+			$(MAKE) -C $$service build; \
+		elif [ -d "$$service/cmd" ]; then \
+			go build -v -o $$service/bin/$$service ./$$service/cmd/...; \
+		elif [ -f "$$service/main.go" ]; then \
+			go build -v -o $$service/bin/$$service ./$$service/; \
+		fi; \
+	else \
+		echo "Error: Unknown service '$$service'"; \
+		echo "Available services: $(SERVICES)"; \
+		exit 1; \
+	fi
+
+# Prevent make from treating service names as targets
+internal-gateway manager storage-proxy k8s-plugin:
+	@:
 
 test:
 	go test -v ./...

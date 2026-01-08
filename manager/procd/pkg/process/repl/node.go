@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
-	"github.com/sandbox0-ai/infra/procd/pkg/process"
+	"github.com/sandbox0-ai/infra/manager/procd/pkg/process"
 )
 
 // NodeREPL implements a Node.js REPL.

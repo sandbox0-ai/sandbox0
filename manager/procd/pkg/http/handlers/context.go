@@ -7,8 +7,8 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
-	ctxpkg "github.com/sandbox0-ai/infra/procd/pkg/context"
-	"github.com/sandbox0-ai/infra/procd/pkg/process"
+	ctxpkg "github.com/sandbox0-ai/infra/manager/procd/pkg/context"
+	"github.com/sandbox0-ai/infra/manager/procd/pkg/process"
 	"go.uber.org/zap"
 )
 

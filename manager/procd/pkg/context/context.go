@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/sandbox0-ai/infra/procd/pkg/process"
+	"github.com/sandbox0-ai/infra/manager/procd/pkg/process"
 )
 
 // Context represents a logical container for a process with its environment.

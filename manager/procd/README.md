@@ -1,6 +1,6 @@
 # Procd
 
-Procd is the core container component (PID=1) of Sandbox0, responsible for process management, network isolation, file operations, and SandboxVolume mounting within the sandbox.
+Procd is the core container component (PID=1) of Sandbox0, responsible for process management, file operations, and SandboxVolume mounting within the sandbox.
 
 ## Overview
 
@@ -8,8 +8,7 @@ Procd runs as the init process inside each sandbox pod and provides:
 
 1. **Process Management**: Unified process abstraction supporting REPL and Shell process types
 2. **SandboxVolume Management**: Persistent storage mounting via FUSE and gRPC to Storage Proxy
-3. **Network Isolation**: Dynamic network policies with IP/CIDR filtering, domain filtering, and DNS spoofing protection
-4. **File Operations**: File read/write, directory operations, and file system watching
+3. **File Operations**: File read/write, directory operations, and file system watching
 
 ## Architecture
 
@@ -21,19 +20,19 @@ Procd runs as the init process inside each sandbox pod and provides:
 │   Procd (PID=1)                                                              │
 │   ┌───────────────────────────────────────────────────────────────────────┐  │
 │   │                        HTTP Server (Port: 8080)                       │  │
-│   │  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐      │  │
-│   │  │  Context    │ │SandboxVolume│ │   Network   │ │   File      │      │  │
-│   │  │   APIs      │ │    APIs     │ │    APIs     │ │   APIs      │      │  │
-│   │  └─────────────┘ └─────────────┘ └─────────────┘ └─────────────┘      │  │
+│   │  ┌─────────────┐ ┌─────────────┐                 ┌─────────────┐      │  │
+│   │  │  Context    │ │SandboxVolume│                 │   File      │      │  │
+│   │  │   APIs      │ │    APIs     │                 │   APIs      │      │  │
+│   │  └─────────────┘ └─────────────┘                 └─────────────┘      │  │
 │   └───────────────────────────────────────────────────────────────────────┘  │
 │                                    │                                         │
 │                                    ▼                                         │
 │   ┌───────────────────────────────────────────────────────────────────────┐  │
 │   │                        Core Managers                                  │  │
-│   │  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐      │  │
-│   │  │  Context    │ │SandboxVolume│ │  Network    │ │   File      │      │  │
-│   │  │  Manager    │ │  Manager    │ │  Manager    │ │  Manager    │      │  │
-│   │  └─────────────┘ └─────────────┘ └─────────────┘ └─────────────┘      │  │
+│   │  ┌─────────────┐ ┌─────────────┐                 ┌─────────────┐      │  │
+│   │  │  Context    │ │SandboxVolume│                 │   File      │      │  │
+│   │  │  Manager    │ │  Manager    │                 │  Manager    │      │  │
+│   │  └─────────────┘ └─────────────┘                 └─────────────┘      │  │
 │   └───────────────────────────────────────────────────────────────────────┘  │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
@@ -73,8 +72,6 @@ Environment variables:
 | `PROCD_MAX_CONTEXTS` | Maximum number of contexts | 100 |
 | `STORAGE_PROXY_BASE_URL` | Storage Proxy base URL | storage-proxy.sandbox0-system.svc.cluster.local |
 | `STORAGE_PROXY_REPLICAS` | Number of Storage Proxy replicas | 3 |
-| `NETWORK_ENABLE_TCP_PROXY` | Enable TCP proxy for domain filtering | false |
-| `NETWORK_TCP_PROXY_PORT` | TCP proxy port | 1080 |
 
 ## API Endpoints
 
@@ -90,14 +87,6 @@ Environment variables:
 - `POST /api/v1/contexts/{id}/restart` - Restart context
 - `POST /api/v1/contexts/{id}/input` - Write input
 - `GET /api/v1/contexts/{id}/ws` - WebSocket for I/O
-
-### Network
-- `GET /api/v1/network/policy` - Get current policy
-- `PUT /api/v1/network/policy` - Update policy
-- `POST /api/v1/network/policy/reset` - Reset to default
-- `POST /api/v1/network/policy/allow/cidr` - Add allow CIDR
-- `POST /api/v1/network/policy/allow/domain` - Add allow domain
-- `POST /api/v1/network/policy/deny/cidr` - Add deny CIDR
 
 ### SandboxVolume
 - `POST /api/v1/sandboxvolumes/mount` - Mount volume
@@ -118,7 +107,7 @@ Environment variables:
 
 ### Network Isolation
 
-**DEPRECATED**: Network isolation is no longer handled by procd. It has been migrated to the `netd` service, which runs as a DaemonSet on each node and enforces network policies via CRDs (`SandboxNetworkPolicy` and `SandboxBandwidthPolicy`).
+Network isolation is NOT handled by procd. It is managed by the `netd` service, which runs as a DaemonSet on each node and enforces network policies via CRDs (`SandboxNetworkPolicy` and `SandboxBandwidthPolicy`).
 
 The `netd` service provides:
 - **IP/CIDR filtering**: Precise control over outbound traffic destinations
@@ -162,10 +151,6 @@ procd_contexts_by_type            # Count by type
 # SandboxVolume metrics
 procd_sandboxvolumes_mounted      # Mounted volume count
 procd_sandboxvolume_mount_duration_ms
-
-# Network metrics
-procd_network_rules_total         # Firewall rule count
-procd_network_policy_updates
 
 # File metrics
 procd_file_operations_total       # File operation count

@@ -9,135 +9,130 @@ import (
 	"time"
 
 	"github.com/creack/pty"
-	"github.com/sandbox0-ai/infra/procd/pkg/process"
+	"github.com/sandbox0-ai/infra/manager/procd/pkg/process"
 )
 
-// BashREPL implements a Bash shell REPL.
-type BashREPL struct {
+// ZshREPL implements a Zsh shell REPL.
+type ZshREPL struct {
 	*process.BaseProcess
 	cmd    *exec.Cmd
 	prompt string
 }
 
-// NewBashREPL creates a new Bash REPL process.
-func NewBashREPL(id string, config process.ProcessConfig) (*BashREPL, error) {
+// NewZshREPL creates a new Zsh REPL process.
+func NewZshREPL(id string, config process.ProcessConfig) (*ZshREPL, error) {
 	bp := process.NewBaseProcess(id, process.ProcessTypeREPL, config)
 
-	return &BashREPL{
+	return &ZshREPL{
 		BaseProcess: bp,
 		prompt:      "SANDBOX0>>> ",
 	}, nil
 }
 
-// Start starts the Bash REPL process.
-func (b *BashREPL) Start() error {
-	if b.IsRunning() {
+// Start starts the Zsh REPL process.
+func (z *ZshREPL) Start() error {
+	if z.IsRunning() {
 		return process.ErrProcessAlreadyRunning
 	}
 
-	b.SetState(process.ProcessStateStarting)
+	z.SetState(process.ProcessStateStarting)
 
-	config := b.GetConfig()
+	config := z.GetConfig()
 
-	// Start interactive bash
-	cmd := exec.Command("bash", "--norc", "--noprofile", "-i")
+	// Check if zsh is available
+	zshPath, err := exec.LookPath("zsh")
+	if err != nil {
+		// Fall back to bash
+		zshPath = "bash"
+	}
 
-	// Set working directory
+	cmd := exec.Command(zshPath, "--no-rcs", "-i")
+
 	if config.CWD != "" {
 		cmd.Dir = config.CWD
 	}
 
-	// Set environment variables
 	env := os.Environ()
 	for k, v := range config.EnvVars {
 		env = append(env, fmt.Sprintf("%s=%s", k, v))
 	}
 
-	// Set TERM
 	term := config.Term
 	if term == "" {
 		term = "xterm-256color"
 	}
 	env = append(env, fmt.Sprintf("TERM=%s", term))
-
-	// Set custom prompt
-	env = append(env, fmt.Sprintf("PS1=%s", b.prompt))
+	env = append(env, fmt.Sprintf("PS1=%s", z.prompt))
 
 	cmd.Env = env
 
-	// Get PTY size
 	ptySize := config.PTYSize
 	if ptySize == nil {
 		ptySize = &process.PTYSize{Rows: 24, Cols: 80}
 	}
 
-	// Start with PTY
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
 		Rows: ptySize.Rows,
 		Cols: ptySize.Cols,
 	})
 	if err != nil {
-		b.SetState(process.ProcessStateCrashed)
+		z.SetState(process.ProcessStateCrashed)
 		return fmt.Errorf("%w: %v", process.ErrProcessStartFailed, err)
 	}
 
-	b.cmd = cmd
-	b.SetPTY(ptmx)
-	b.SetPID(cmd.Process.Pid)
-	b.SetState(process.ProcessStateRunning)
+	z.cmd = cmd
+	z.SetPTY(ptmx)
+	z.SetPID(cmd.Process.Pid)
+	z.SetState(process.ProcessStateRunning)
 
-	// Start output reader
-	go b.readOutput(ptmx)
-
-	// Start process monitor
-	go b.monitorProcess()
+	go z.readOutput(ptmx)
+	go z.monitorProcess()
 
 	return nil
 }
 
-// Stop stops the Bash REPL process.
-func (b *BashREPL) Stop() error {
-	if !b.IsRunning() {
+// Stop stops the Zsh REPL process.
+func (z *ZshREPL) Stop() error {
+	if !z.IsRunning() {
 		return nil
 	}
 
-	if b.cmd != nil && b.cmd.Process != nil {
-		if err := b.cmd.Process.Signal(syscall.SIGTERM); err != nil {
-			b.cmd.Process.Kill()
+	if z.cmd != nil && z.cmd.Process != nil {
+		if err := z.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+			z.cmd.Process.Kill()
 		}
 	}
 
-	if ptyFile := b.GetPTY(); ptyFile != nil {
+	if ptyFile := z.GetPTY(); ptyFile != nil {
 		ptyFile.Close()
 	}
 
-	b.SetState(process.ProcessStateStopped)
-	b.CloseOutput()
+	z.SetState(process.ProcessStateStopped)
+	z.CloseOutput()
 
 	return nil
 }
 
 // Restart restarts the process.
-func (b *BashREPL) Restart() error {
-	if err := b.Stop(); err != nil {
+func (z *ZshREPL) Restart() error {
+	if err := z.Stop(); err != nil {
 		return err
 	}
 	time.Sleep(100 * time.Millisecond)
-	return b.Start()
+	return z.Start()
 }
 
-// ExecuteCode executes a command in the Bash REPL.
-func (b *BashREPL) ExecuteCode(cmd string) (*process.ExecutionResult, error) {
-	if !b.IsRunning() {
+// ExecuteCode executes a command in the Zsh REPL.
+func (z *ZshREPL) ExecuteCode(cmd string) (*process.ExecutionResult, error) {
+	if !z.IsRunning() {
 		return nil, process.ErrProcessNotRunning
 	}
 
-	ptyFile := b.GetPTY()
+	ptyFile := z.GetPTY()
 	if ptyFile == nil {
 		return nil, process.ErrProcessNotRunning
 	}
 
-	// Write command to PTY
 	_, err := fmt.Fprintln(ptyFile, cmd)
 	if err != nil {
 		return nil, err
@@ -149,8 +144,8 @@ func (b *BashREPL) ExecuteCode(cmd string) (*process.ExecutionResult, error) {
 }
 
 // ResizeTerminal resizes the PTY.
-func (b *BashREPL) ResizeTerminal(size process.PTYSize) error {
-	ptyFile := b.GetPTY()
+func (z *ZshREPL) ResizeTerminal(size process.PTYSize) error {
+	ptyFile := z.GetPTY()
 	if ptyFile == nil {
 		return process.ErrProcessNotRunning
 	}
@@ -161,7 +156,7 @@ func (b *BashREPL) ResizeTerminal(size process.PTYSize) error {
 	})
 }
 
-func (b *BashREPL) readOutput(ptmx *os.File) {
+func (z *ZshREPL) readOutput(ptmx *os.File) {
 	buf := make([]byte, 4096)
 	for {
 		n, err := ptmx.Read(buf)
@@ -169,7 +164,7 @@ func (b *BashREPL) readOutput(ptmx *os.File) {
 			data := make([]byte, n)
 			copy(data, buf[:n])
 
-			b.PublishOutput(process.ProcessOutput{
+			z.PublishOutput(process.ProcessOutput{
 				Timestamp: time.Now(),
 				Source:    process.OutputSourcePTY,
 				Data:      data,
@@ -184,12 +179,12 @@ func (b *BashREPL) readOutput(ptmx *os.File) {
 	}
 }
 
-func (b *BashREPL) monitorProcess() {
-	if b.cmd == nil {
+func (z *ZshREPL) monitorProcess() {
+	if z.cmd == nil {
 		return
 	}
 
-	err := b.cmd.Wait()
+	err := z.cmd.Wait()
 
 	exitCode := 0
 	if err != nil {
@@ -198,15 +193,15 @@ func (b *BashREPL) monitorProcess() {
 		}
 	}
 
-	b.SetExitCode(exitCode)
+	z.SetExitCode(exitCode)
 
 	if exitCode == 0 {
-		b.SetState(process.ProcessStateStopped)
+		z.SetState(process.ProcessStateStopped)
 	} else if exitCode == -1 || exitCode == 137 {
-		b.SetState(process.ProcessStateKilled)
+		z.SetState(process.ProcessStateKilled)
 	} else {
-		b.SetState(process.ProcessStateCrashed)
+		z.SetState(process.ProcessStateCrashed)
 	}
 
-	b.CloseOutput()
+	z.CloseOutput()
 }

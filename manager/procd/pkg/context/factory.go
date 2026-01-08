@@ -3,9 +3,9 @@ package context
 import (
 	"fmt"
 
-	"github.com/sandbox0-ai/infra/procd/pkg/process"
-	"github.com/sandbox0-ai/infra/procd/pkg/process/cmd"
-	"github.com/sandbox0-ai/infra/procd/pkg/process/repl"
+	"github.com/sandbox0-ai/infra/manager/procd/pkg/process"
+	"github.com/sandbox0-ai/infra/manager/procd/pkg/process/cmd"
+	"github.com/sandbox0-ai/infra/manager/procd/pkg/process/repl"
 )
 
 // createREPLProcess creates a REPL process based on language.

@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/gorilla/websocket"
-	"github.com/sandbox0-ai/infra/procd/pkg/file"
+	"github.com/sandbox0-ai/infra/manager/procd/pkg/file"
 	"go.uber.org/zap"
 )
 

@@ -12,11 +12,11 @@ import (
 
 	"github.com/sandbox0-ai/infra/pkg/env"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
-	"github.com/sandbox0-ai/infra/procd/pkg/config"
-	ctxpkg "github.com/sandbox0-ai/infra/procd/pkg/context"
-	"github.com/sandbox0-ai/infra/procd/pkg/file"
-	procdhttp "github.com/sandbox0-ai/infra/procd/pkg/http"
-	"github.com/sandbox0-ai/infra/procd/pkg/volume"
+	"github.com/sandbox0-ai/infra/manager/procd/pkg/config"
+	ctxpkg "github.com/sandbox0-ai/infra/manager/procd/pkg/context"
+	"github.com/sandbox0-ai/infra/manager/procd/pkg/file"
+	procdhttp "github.com/sandbox0-ai/infra/manager/procd/pkg/http"
+	"github.com/sandbox0-ai/infra/manager/procd/pkg/volume"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )

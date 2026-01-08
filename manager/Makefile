@@ -39,11 +39,6 @@ generate: ## Generate clientset, informers, and listers
 	cp -R "$${OUTPUT_BASE}/$${MODULE_NAME}/manager/pkg/"* "$${SCRIPT_ROOT}/pkg/" && \
 	echo "Done!"
 
-.PHONY: verify-codegen
-verify-codegen: ## Verify generated code is up to date
-	@echo "Verifying generated code..."
-	@bash hack/verify-codegen.sh
-
 .PHONY: install-tools
 install-tools: ## Install code generation tools
 	@echo "Installing code generation tools..."
@@ -62,6 +57,8 @@ manifests: ## Generate CRD manifests
 build: ## Build the manager binary
 	@echo "Building manager..."
 	@go build -o bin/manager ./cmd/manager
+	@echo "Build the procd binary..."
+	@go build -o bin/procd ./cmd/procd
 
 .PHONY: test
 test: ## Run tests

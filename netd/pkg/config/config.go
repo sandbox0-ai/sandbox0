@@ -2,9 +2,9 @@
 package config
 
 import (
-	"os"
-	"strconv"
 	"time"
+
+	"github.com/sandbox0-ai/infra/pkg/env"
 )
 
 // Config holds netd configuration
@@ -73,61 +73,27 @@ type Config struct {
 // LoadConfig loads configuration from environment variables
 func LoadConfig() *Config {
 	cfg := &Config{
-		LogLevel:              getEnv("LOG_LEVEL", "info"),
-		MetricsPort:           getEnvInt("METRICS_PORT", 9090),
-		HealthPort:            getEnvInt("HEALTH_PORT", 8080),
-		NodeName:              getEnv("NODE_NAME", ""),
-		Namespace:             getEnv("NAMESPACE", ""),
-		KubeConfig:            getEnv("KUBECONFIG", ""),
-		ResyncPeriod:          getEnvDuration("RESYNC_PERIOD", 30*time.Second),
-		ProxyListenAddr:       getEnv("PROXY_LISTEN_ADDR", "0.0.0.0"),
-		ProxyHTTPPort:         getEnvInt("PROXY_HTTP_PORT", 18080),
-		ProxyHTTPSPort:        getEnvInt("PROXY_HTTPS_PORT", 18443),
-		DNSResolvers:          []string{getEnv("DNS_RESOLVER", "8.8.8.8:53")},
-		MetricsReportInterval: getEnvDuration("METRICS_REPORT_INTERVAL", 10*time.Second),
-		FailClosed:            getEnvBool("FAIL_CLOSED", true),
-		StorageProxyCIDR:      getEnv("STORAGE_PROXY_CIDR", ""),
-		ClusterDNSCIDR:        getEnv("CLUSTER_DNS_CIDR", ""),
-		InternalGatewayCIDR:   getEnv("INTERNAL_GATEWAY_CIDR", ""),
-		ProcdPort:             getEnvInt("PROCD_PORT", 49983),
-		UseEBPF:               getEnvBool("USE_EBPF", true), // Enabled by default
-		BPFFSPath:             getEnv("BPF_FS_PATH", "/sys/fs/bpf"),
-		UseEDT:                getEnvBool("USE_EDT", true), // EDT pacing enabled by default
+		LogLevel:              env.GetEnv("LOG_LEVEL", "info"),
+		MetricsPort:           env.GetEnvInt("METRICS_PORT", 9090),
+		HealthPort:            env.GetEnvInt("HEALTH_PORT", 8080),
+		NodeName:              env.GetEnv("NODE_NAME", ""),
+		Namespace:             env.GetEnv("NAMESPACE", ""),
+		KubeConfig:            env.GetEnv("KUBECONFIG", ""),
+		ResyncPeriod:          env.GetEnvDuration("RESYNC_PERIOD", 30*time.Second),
+		ProxyListenAddr:       env.GetEnv("PROXY_LISTEN_ADDR", "0.0.0.0"),
+		ProxyHTTPPort:         env.GetEnvInt("PROXY_HTTP_PORT", 18080),
+		ProxyHTTPSPort:        env.GetEnvInt("PROXY_HTTPS_PORT", 18443),
+		DNSResolvers:          []string{env.GetEnv("DNS_RESOLVER", "8.8.8.8:53")},
+		MetricsReportInterval: env.GetEnvDuration("METRICS_REPORT_INTERVAL", 10*time.Second),
+		FailClosed:            env.GetEnvBool("FAIL_CLOSED", true),
+		StorageProxyCIDR:      env.GetEnv("STORAGE_PROXY_CIDR", ""),
+		ClusterDNSCIDR:        env.GetEnv("CLUSTER_DNS_CIDR", ""),
+		InternalGatewayCIDR:   env.GetEnv("INTERNAL_GATEWAY_CIDR", ""),
+		ProcdPort:             env.GetEnvInt("PROCD_PORT", 49983),
+		UseEBPF:               env.GetEnvBool("USE_EBPF", true), // Enabled by default
+		BPFFSPath:             env.GetEnv("BPF_FS_PATH", "/sys/fs/bpf"),
+		UseEDT:                env.GetEnvBool("USE_EDT", true), // EDT pacing enabled by default
 	}
 
 	return cfg
-}
-
-func getEnv(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
-}
-
-func getEnvInt(key string, defaultValue int) int {
-	if value := os.Getenv(key); value != "" {
-		if i, err := strconv.Atoi(value); err == nil {
-			return i
-		}
-	}
-	return defaultValue
-}
-
-func getEnvBool(key string, defaultValue bool) bool {
-	if value := os.Getenv(key); value != "" {
-		if b, err := strconv.ParseBool(value); err == nil {
-			return b
-		}
-	}
-	return defaultValue
-}
-
-func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
-	if value := os.Getenv(key); value != "" {
-		if d, err := time.ParseDuration(value); err == nil {
-			return d
-		}
-	}
-	return defaultValue
 }

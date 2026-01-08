@@ -17,12 +17,11 @@ import (
 	"github.com/sandbox0-ai/infra/netd/pkg/proxy"
 	"github.com/sandbox0-ai/infra/netd/pkg/watcher"
 	"github.com/sandbox0-ai/infra/pkg/env"
+	"github.com/sandbox0-ai/infra/pkg/k8s"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 )
 
 func main() {
@@ -50,7 +49,7 @@ func main() {
 	}
 
 	// Create Kubernetes client
-	k8sConfig, err := buildKubeConfig(cfg.KubeConfig)
+	k8sConfig, err := k8s.BuildRestConfig(cfg.KubeConfig)
 	if err != nil {
 		logger.Fatal("Failed to build Kubernetes config", zap.Error(err))
 	}
@@ -320,14 +319,6 @@ func initLogger(logLevel string) *zap.Logger {
 	}
 
 	return logger
-}
-
-// buildKubeConfig builds Kubernetes config
-func buildKubeConfig(kubeconfig string) (*rest.Config, error) {
-	if kubeconfig != "" {
-		return clientcmd.BuildConfigFromFlags("", kubeconfig)
-	}
-	return rest.InClusterConfig()
 }
 
 // startHealthServer starts the health check server

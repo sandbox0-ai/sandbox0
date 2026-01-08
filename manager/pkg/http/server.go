@@ -62,6 +62,8 @@ func (s *Server) setupRoutes() {
 		sandboxes := v1.Group("/sandboxes")
 		{
 			sandboxes.POST("/claim", s.claimSandbox)
+			sandboxes.GET("", s.listSandboxes)
+			sandboxes.GET("/:id", s.getSandbox)
 			sandboxes.GET("/:id/status", s.getSandboxStatus)
 			sandboxes.DELETE("/:id", s.terminateSandbox)
 		}
@@ -157,11 +159,109 @@ func (s *Server) claimSandbox(c *gin.Context) {
 	c.JSON(http.StatusCreated, resp)
 }
 
+func (s *Server) listSandboxes(c *gin.Context) {
+	// Get team ID from claims
+	claims := internalauth.ClaimsFromContext(c.Request.Context())
+	if claims == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "missing authentication",
+		})
+		return
+	}
+
+	sandboxes, err := s.sandboxService.ListSandboxes(c.Request.Context(), claims.TeamID)
+	if err != nil {
+		s.logger.Error("Failed to list sandboxes",
+			zap.String("teamID", claims.TeamID),
+			zap.Error(err),
+		)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": fmt.Sprintf("failed to list sandboxes: %v", err),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"sandboxes": sandboxes,
+		"count":     len(sandboxes),
+	})
+}
+
+func (s *Server) getSandbox(c *gin.Context) {
+	sandboxID := c.Param("id")
+	if sandboxID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "sandbox_id is required",
+		})
+		return
+	}
+
+	// Get team ID from claims for ownership verification
+	claims := internalauth.ClaimsFromContext(c.Request.Context())
+	if claims == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "missing authentication",
+		})
+		return
+	}
+
+	sandbox, err := s.sandboxService.GetSandbox(c.Request.Context(), sandboxID)
+	if err != nil {
+		s.logger.Error("Failed to get sandbox",
+			zap.String("sandboxID", sandboxID),
+			zap.Error(err),
+		)
+		c.JSON(http.StatusNotFound, gin.H{
+			"error": fmt.Sprintf("sandbox not found: %v", err),
+		})
+		return
+	}
+
+	// Verify team ownership
+	if sandbox.TeamID != claims.TeamID {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error": "sandbox belongs to a different team",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, sandbox)
+}
+
 func (s *Server) getSandboxStatus(c *gin.Context) {
 	sandboxID := c.Param("id")
 	if sandboxID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": "sandbox_id is required",
+		})
+		return
+	}
+
+	// Get team ID from claims for ownership verification
+	claims := internalauth.ClaimsFromContext(c.Request.Context())
+	if claims == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "missing authentication",
+		})
+		return
+	}
+
+	sandbox, err := s.sandboxService.GetSandbox(c.Request.Context(), sandboxID)
+	if err != nil {
+		s.logger.Error("Failed to get sandbox",
+			zap.String("sandboxID", sandboxID),
+			zap.Error(err),
+		)
+		c.JSON(http.StatusNotFound, gin.H{
+			"error": fmt.Sprintf("sandbox not found: %v", err),
+		})
+		return
+	}
+
+	// Verify team ownership
+	if sandbox.TeamID != claims.TeamID {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error": "sandbox belongs to a different team",
 		})
 		return
 	}

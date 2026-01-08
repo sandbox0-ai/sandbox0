@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sandbox0-ai/infra/internal-gateway/pkg/auth"
+	"github.com/sandbox0-ai/infra/internal-gateway/pkg/client"
 	"github.com/sandbox0-ai/infra/internal-gateway/pkg/config"
 	"github.com/sandbox0-ai/infra/internal-gateway/pkg/db"
 	"github.com/sandbox0-ai/infra/internal-gateway/pkg/middleware"
@@ -23,6 +24,7 @@ type Server struct {
 	cfg             *config.Config
 	repo            *db.Repository
 	router_proxy    *proxy.Router
+	managerClient   *client.ManagerClient
 	authMiddleware  *middleware.AuthMiddleware
 	rateLimiter     *middleware.RateLimiter
 	requestLogger   *middleware.RequestLogger
@@ -47,7 +49,6 @@ func NewServer(
 	proxyRouter, err := proxy.NewRouter(
 		cfg.ManagerURL,
 		cfg.StorageProxyURL,
-		repo,
 		logger,
 		cfg.ProxyTimeout,
 	)
@@ -76,11 +77,15 @@ func NewServer(
 		TTL:        0,
 	})
 
+	// Create manager client
+	managerClient := client.NewManagerClient(cfg.ManagerURL, internalAuthGen, logger)
+
 	server := &Server{
 		router:          router,
 		cfg:             cfg,
 		repo:            repo,
 		router_proxy:    proxyRouter,
+		managerClient:   managerClient,
 		authMiddleware:  authMiddleware,
 		rateLimiter:     rateLimiter,
 		requestLogger:   requestLogger,

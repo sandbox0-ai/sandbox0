@@ -50,8 +50,8 @@ func Load() *Config {
 		DatabaseURL: env.GetEnv("DATABASE_URL", "postgres://localhost:5432/sandbox0?sslmode=disable"),
 
 		// Upstream services
-		ManagerURL:      env.GetEnv("MANAGER_URL", "http://manager:8080"),
-		StorageProxyURL: env.GetEnv("STORAGE_PROXY_URL", "http://storage-proxy:8081"),
+		ManagerURL:      env.GetEnv("MANAGER_URL", "http://manager.sandbox0-system:8080"),
+		StorageProxyURL: env.GetEnv("STORAGE_PROXY_URL", "http://storage-proxy.sandbox0-system:8081"),
 
 		// Authentication
 		JWTSecret: env.GetEnv("JWT_SECRET", ""),

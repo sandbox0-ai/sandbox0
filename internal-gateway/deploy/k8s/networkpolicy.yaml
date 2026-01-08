@@ -63,5 +63,5 @@ spec:
           sandbox0.ai/component: procd
     ports:
     - protocol: TCP
-      port: 8080
+      port: 49983
 

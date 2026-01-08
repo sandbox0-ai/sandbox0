@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/infra/internal-gateway/pkg/db"
 	"go.uber.org/zap"
 )
 
@@ -28,13 +27,12 @@ const (
 type Router struct {
 	managerURL      *url.URL
 	storageProxyURL *url.URL
-	repo            *db.Repository
 	logger          *zap.Logger
 	timeout         time.Duration
 }
 
 // NewRouter creates a new router
-func NewRouter(managerURL, storageProxyURL string, repo *db.Repository, logger *zap.Logger, timeout time.Duration) (*Router, error) {
+func NewRouter(managerURL, storageProxyURL string, logger *zap.Logger, timeout time.Duration) (*Router, error) {
 	mgrURL, err := url.Parse(managerURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse manager URL: %w", err)
@@ -48,7 +46,6 @@ func NewRouter(managerURL, storageProxyURL string, repo *db.Repository, logger *
 	return &Router{
 		managerURL:      mgrURL,
 		storageProxyURL: spURL,
-		repo:            repo,
 		logger:          logger,
 		timeout:         timeout,
 	}, nil
@@ -64,55 +61,9 @@ func (r *Router) ProxyToStorageProxy() gin.HandlerFunc {
 	return r.createReverseProxy(r.storageProxyURL)
 }
 
-// ProxyToProcd creates a reverse proxy handler that resolves Procd address dynamically
-func (r *Router) ProxyToProcd() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		sandboxID := c.Param("id")
-		if sandboxID == "" {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "sandbox_id is required",
-			})
-			return
-		}
-
-		// Look up sandbox to get procd address
-		sandbox, err := r.repo.GetSandbox(c.Request.Context(), sandboxID)
-		if err != nil {
-			if err == db.ErrNotFound {
-				c.JSON(http.StatusNotFound, gin.H{
-					"error": "sandbox not found",
-				})
-				return
-			}
-			r.logger.Error("Failed to get sandbox",
-				zap.String("sandbox_id", sandboxID),
-				zap.Error(err),
-			)
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "failed to resolve sandbox",
-			})
-			return
-		}
-
-		// Parse procd address
-		procdURL, err := url.Parse(sandbox.ProcdAddress)
-		if err != nil {
-			r.logger.Error("Invalid procd address",
-				zap.String("sandbox_id", sandboxID),
-				zap.String("procd_address", sandbox.ProcdAddress),
-				zap.Error(err),
-			)
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "invalid procd address",
-			})
-			return
-		}
-
-		// Create reverse proxy
-		proxy := r.createReverseProxyDirector(procdURL)
-		proxy.ServeHTTP(c.Writer, c.Request)
-	}
-}
+// ProxyToProcd is deprecated - use handlers with manager client instead
+// This method is no longer used as procd routing is handled by handlers
+// that call the manager service to resolve sandbox addresses
 
 // createReverseProxy creates a gin handler that proxies to the given URL
 func (r *Router) createReverseProxy(target *url.URL) gin.HandlerFunc {

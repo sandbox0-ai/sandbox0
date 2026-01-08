@@ -48,6 +48,10 @@ func main() {
 		zap.Int("metricsPort", cfg.MetricsPort),
 	)
 
+	// Create context that cancels on signal
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
 	// Create Kubernetes client
 	k8sConfig, err := buildKubeConfig(cfg.KubeConfig)
 	if err != nil {
@@ -157,10 +161,6 @@ func main() {
 
 	// Start metrics server
 	go startMetricsServer(cfg.MetricsPort, logger)
-
-	// Create context that cancels on signal
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
 
 	// Start informers
 	logger.Info("Starting informers")

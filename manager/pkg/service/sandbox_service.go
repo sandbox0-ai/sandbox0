@@ -8,6 +8,7 @@ import (
 
 	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/infra/manager/pkg/controller"
+	"github.com/sandbox0-ai/infra/manager/pkg/db"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -103,9 +104,6 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		}
 	}
 
-	// Build procd address
-	procdAddress := fmt.Sprintf("%s.%s.svc.cluster.local:8080", pod.Name, pod.Namespace)
-
 	// Create network and bandwidth policies for the sandbox
 	if s.SandboxNetworkPolicyService != nil {
 		// Create network policy
@@ -149,7 +147,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		SandboxID:    req.SandboxID,
 		TemplateID:   req.TemplateID,
 		Status:       "starting",
-		ProcdAddress: procdAddress,
+		ProcdAddress: s.prodAddress(pod.Name, pod.Namespace),
 		PodName:      pod.Name,
 		Namespace:    pod.Namespace,
 	}, nil
@@ -434,8 +432,8 @@ func (s *SandboxService) TerminateSandbox(ctx context.Context, sandboxID string)
 	return nil
 }
 
-// GetSandboxStatus gets the status of a sandbox
-func (s *SandboxService) GetSandboxStatus(ctx context.Context, sandboxID string) (map[string]interface{}, error) {
+// GetSandbox gets a sandbox by ID
+func (s *SandboxService) GetSandbox(ctx context.Context, sandboxID string) (*db.Sandbox, error) {
 	// Find the pod by sandbox ID
 	pods, err := s.podLister.Pods("").List(labels.SelectorFromSet(map[string]string{
 		controller.LabelSandboxID: sandboxID,
@@ -449,18 +447,103 @@ func (s *SandboxService) GetSandboxStatus(ctx context.Context, sandboxID string)
 	}
 
 	pod := pods[0]
+	return s.podToSandbox(pod, sandboxID), nil
+}
+
+// ListSandboxes lists all sandboxes for a team
+func (s *SandboxService) ListSandboxes(ctx context.Context, teamID string) ([]*db.Sandbox, error) {
+	// List all pods with active pool type (claimed sandboxes)
+	pods, err := s.podLister.Pods("").List(labels.SelectorFromSet(map[string]string{
+		controller.LabelPoolType: controller.PoolTypeActive,
+	}))
+	if err != nil {
+		return nil, fmt.Errorf("list pods: %w", err)
+	}
+
+	var sandboxes []*db.Sandbox
+	for _, pod := range pods {
+		// Filter by team ID if specified
+		if teamID != "" && pod.Annotations[controller.AnnotationTeamID] != teamID {
+			continue
+		}
+
+		sandboxID := pod.Labels[controller.LabelSandboxID]
+		if sandboxID != "" {
+			sandboxes = append(sandboxes, s.podToSandbox(pod, sandboxID))
+		}
+	}
+
+	return sandboxes, nil
+}
+
+// podToSandbox converts a pod to a sandbox object
+func (s *SandboxService) podToSandbox(pod *corev1.Pod, sandboxID string) *db.Sandbox {
+	status := s.podPhaseToSandboxStatus(pod.Status.Phase)
+
+	// Parse timestamps
+	var claimedAt, expiresAt, createdAt time.Time
+	if claimedAtStr := pod.Annotations[controller.AnnotationClaimedAt]; claimedAtStr != "" {
+		claimedAt, _ = time.Parse(time.RFC3339, claimedAtStr)
+	}
+	if expiresAtStr := pod.Annotations[controller.AnnotationExpiresAt]; expiresAtStr != "" {
+		expiresAt, _ = time.Parse(time.RFC3339, expiresAtStr)
+	}
+	createdAt = pod.CreationTimestamp.Time
+
+	return &db.Sandbox{
+		ID:           sandboxID,
+		TemplateID:   pod.Labels[controller.LabelTemplateID],
+		TeamID:       pod.Annotations[controller.AnnotationTeamID],
+		UserID:       pod.Annotations[controller.AnnotationUserID],
+		ProcdAddress: s.prodAddress(pod.Name, pod.Namespace),
+		Status:       status,
+		PodName:      pod.Name,
+		Namespace:    pod.Namespace,
+		ExpiresAt:    expiresAt,
+		ClaimedAt:    claimedAt,
+		CreatedAt:    createdAt,
+	}
+}
+
+func (s *SandboxService) prodAddress(name, namespace string) string {
+	return fmt.Sprintf("http://%s.%s.svc.cluster.local:49983", name, namespace)
+}
+
+// podPhaseToSandboxStatus converts pod phase to sandbox status
+func (s *SandboxService) podPhaseToSandboxStatus(phase corev1.PodPhase) string {
+	switch phase {
+	case corev1.PodPending:
+		return db.SandboxStatusStarting
+	case corev1.PodRunning:
+		return db.SandboxStatusRunning
+	case corev1.PodSucceeded:
+		return db.SandboxStatusCompleted
+	case corev1.PodFailed:
+		return db.SandboxStatusFailed
+	default:
+		return db.SandboxStatusPending
+	}
+}
+
+// GetSandboxStatus gets the status of a sandbox
+func (s *SandboxService) GetSandboxStatus(ctx context.Context, sandboxID string) (map[string]interface{}, error) {
+	sandbox, err := s.GetSandbox(ctx, sandboxID)
+	if err != nil {
+		return nil, err
+	}
 
 	status := map[string]interface{}{
-		"sandbox_id":    sandboxID,
-		"template_id":   pod.Labels[controller.LabelTemplateID],
-		"pod_name":      pod.Name,
-		"namespace":     pod.Namespace,
-		"phase":         string(pod.Status.Phase),
-		"procd_address": fmt.Sprintf("%s.%s.svc.cluster.local:8080", pod.Name, pod.Namespace),
-		"team_id":       pod.Annotations[controller.AnnotationTeamID],
-		"user_id":       pod.Annotations[controller.AnnotationUserID],
-		"claimed_at":    pod.Annotations[controller.AnnotationClaimedAt],
-		"expires_at":    pod.Annotations[controller.AnnotationExpiresAt],
+		"sandbox_id":    sandbox.ID,
+		"template_id":   sandbox.TemplateID,
+		"team_id":       sandbox.TeamID,
+		"user_id":       sandbox.UserID,
+		"pod_name":      sandbox.PodName,
+		"namespace":     sandbox.Namespace,
+		"status":        sandbox.Status,
+		"procd_address": sandbox.ProcdAddress,
+		"claimed_at":    sandbox.ClaimedAt.Format(time.RFC3339),
+		"expires_at":    sandbox.ExpiresAt.Format(time.RFC3339),
+		"created_at":    sandbox.CreatedAt.Format(time.RFC3339),
 	}
 
 	return status, nil

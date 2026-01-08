@@ -55,14 +55,3 @@ type User struct {
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
 }
-
-// Sandbox represents a sandbox instance (for routing purposes)
-type Sandbox struct {
-	ID           string    `json:"id"`
-	TemplateID   string    `json:"template_id"`
-	TeamID       string    `json:"team_id"`
-	ProcdAddress string    `json:"procd_address"`
-	Status       string    `json:"status"`
-	ExpiresAt    time.Time `json:"expires_at"`
-	CreatedAt    time.Time `json:"created_at"`
-}

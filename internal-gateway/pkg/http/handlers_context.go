@@ -5,7 +5,6 @@ import (
 	"net/url"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/infra/internal-gateway/pkg/db"
 	"github.com/sandbox0-ai/infra/internal-gateway/pkg/middleware"
 	"github.com/sandbox0-ai/infra/internal-gateway/pkg/proxy"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
@@ -146,26 +145,18 @@ func (s *Server) contextWebSocket(c *gin.Context) {
 func (s *Server) getProcdURL(c *gin.Context, sandboxID string) (*url.URL, error) {
 	authCtx := middleware.GetAuthContext(c)
 
-	// Look up sandbox
-	sandbox, err := s.repo.GetSandbox(c.Request.Context(), sandboxID)
+	// Look up sandbox from manager
+	sandbox, err := s.managerClient.GetSandbox(c.Request.Context(), sandboxID, authCtx.TeamID)
 	if err != nil {
-		if err == db.ErrNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"error": "sandbox not found"})
-		} else {
-			s.logger.Error("Failed to get sandbox",
+		s.logger.Error("Failed to get sandbox from manager",
 				zap.String("sandbox_id", sandboxID),
 				zap.Error(err),
 			)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to resolve sandbox"})
-		}
+		c.JSON(http.StatusNotFound, gin.H{"error": "sandbox not found"})
 		return nil, err
 	}
 
-	// Check team ownership
-	if sandbox.TeamID != authCtx.TeamID {
-		c.JSON(http.StatusForbidden, gin.H{"error": "sandbox belongs to a different team"})
-		return nil, db.ErrNotFound
-	}
+	// Team ownership is already verified by manager
 
 	// Parse procd address
 	procdURL, err := url.Parse(sandbox.ProcdAddress)

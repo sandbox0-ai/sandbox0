@@ -50,20 +50,6 @@ CREATE TABLE IF NOT EXISTS api_keys (
 CREATE INDEX IF NOT EXISTS idx_api_keys_team_id ON api_keys(team_id);
 CREATE INDEX IF NOT EXISTS idx_api_keys_key_value ON api_keys(key_value);
 
--- Sandboxes table (minimal, for routing purposes)
-CREATE TABLE IF NOT EXISTS sandboxes (
-    id TEXT PRIMARY KEY,
-    template_id TEXT NOT NULL,
-    team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-    procd_address TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    expires_at TIMESTAMPTZ NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_sandboxes_team_id ON sandboxes(team_id);
-CREATE INDEX IF NOT EXISTS idx_sandboxes_status ON sandboxes(status);
-
 -- Rate Limits table (for distributed rate limiting)
 CREATE TABLE IF NOT EXISTS rate_limits (
     team_id TEXT NOT NULL,

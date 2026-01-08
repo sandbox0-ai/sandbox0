@@ -55,24 +55,7 @@ func (s *Server) getSandbox(c *gin.Context) {
 		return
 	}
 
-	// Verify the sandbox belongs to the team
-	authCtx := middleware.GetAuthContext(c)
-	sandbox, err := s.repo.GetSandbox(c.Request.Context(), sandboxID)
-	if err != nil {
-		s.logger.Warn("Sandbox not found",
-			zap.String("sandbox_id", sandboxID),
-			zap.Error(err),
-		)
-		c.JSON(http.StatusNotFound, gin.H{"error": "sandbox not found"})
-		return
-	}
-
-	// Check team ownership
-	if sandbox.TeamID != authCtx.TeamID {
-		c.JSON(http.StatusForbidden, gin.H{"error": "sandbox belongs to a different team"})
-		return
-	}
-
+	// Proxy to manager - manager will handle team ownership verification
 	s.proxyToManager(c)
 }
 

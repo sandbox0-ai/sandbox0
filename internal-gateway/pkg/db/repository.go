@@ -116,29 +116,6 @@ func (r *Repository) GetTeam(ctx context.Context, teamID string) (*Team, error) 
 	return &team, nil
 }
 
-// GetSandbox retrieves sandbox information for routing
-func (r *Repository) GetSandbox(ctx context.Context, sandboxID string) (*Sandbox, error) {
-	var sandbox Sandbox
-
-	err := r.pool.QueryRow(ctx, `
-		SELECT id, template_id, team_id, procd_address, status, expires_at, created_at
-		FROM sandboxes
-		WHERE id = $1
-	`, sandboxID).Scan(
-		&sandbox.ID, &sandbox.TemplateID, &sandbox.TeamID,
-		&sandbox.ProcdAddress, &sandbox.Status, &sandbox.ExpiresAt, &sandbox.CreatedAt,
-	)
-
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrNotFound
-		}
-		return nil, fmt.Errorf("query sandbox: %w", err)
-	}
-
-	return &sandbox, nil
-}
-
 func nullString(s string) interface{} {
 	if s == "" {
 		return nil

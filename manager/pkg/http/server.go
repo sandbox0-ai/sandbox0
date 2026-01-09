@@ -65,6 +65,9 @@ func (s *Server) setupRoutes() {
 			sandboxes.GET("", s.listSandboxes)
 			sandboxes.GET("/:id", s.getSandbox)
 			sandboxes.GET("/:id/status", s.getSandboxStatus)
+			sandboxes.GET("/:id/stats", s.getSandboxStats)
+			sandboxes.POST("/:id/pause", s.pauseSandbox)
+			sandboxes.POST("/:id/resume", s.resumeSandbox)
 			sandboxes.DELETE("/:id", s.terminateSandbox)
 		}
 	}
@@ -308,6 +311,153 @@ func (s *Server) terminateSandbox(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"message": "sandbox terminated successfully",
 	})
+}
+
+func (s *Server) pauseSandbox(c *gin.Context) {
+	sandboxID := c.Param("id")
+	if sandboxID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "sandbox_id is required",
+		})
+		return
+	}
+
+	// Get team ID from claims for ownership verification
+	claims := internalauth.ClaimsFromContext(c.Request.Context())
+	if claims == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "missing authentication",
+		})
+		return
+	}
+
+	// Verify ownership
+	sandbox, err := s.sandboxService.GetSandbox(c.Request.Context(), sandboxID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error": fmt.Sprintf("sandbox not found: %v", err),
+		})
+		return
+	}
+
+	if sandbox.TeamID != claims.TeamID {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error": "sandbox belongs to a different team",
+		})
+		return
+	}
+
+	resp, err := s.sandboxService.PauseSandbox(c.Request.Context(), sandboxID)
+	if err != nil {
+		s.logger.Error("Failed to pause sandbox",
+			zap.String("sandboxID", sandboxID),
+			zap.Error(err),
+		)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": fmt.Sprintf("failed to pause sandbox: %v", err),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+func (s *Server) resumeSandbox(c *gin.Context) {
+	sandboxID := c.Param("id")
+	if sandboxID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "sandbox_id is required",
+		})
+		return
+	}
+
+	// Get team ID from claims for ownership verification
+	claims := internalauth.ClaimsFromContext(c.Request.Context())
+	if claims == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "missing authentication",
+		})
+		return
+	}
+
+	// Verify ownership
+	sandbox, err := s.sandboxService.GetSandbox(c.Request.Context(), sandboxID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error": fmt.Sprintf("sandbox not found: %v", err),
+		})
+		return
+	}
+
+	if sandbox.TeamID != claims.TeamID {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error": "sandbox belongs to a different team",
+		})
+		return
+	}
+
+	resp, err := s.sandboxService.ResumeSandbox(c.Request.Context(), sandboxID)
+	if err != nil {
+		s.logger.Error("Failed to resume sandbox",
+			zap.String("sandboxID", sandboxID),
+			zap.Error(err),
+		)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": fmt.Sprintf("failed to resume sandbox: %v", err),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+func (s *Server) getSandboxStats(c *gin.Context) {
+	sandboxID := c.Param("id")
+	if sandboxID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "sandbox_id is required",
+		})
+		return
+	}
+
+	// Get team ID from claims for ownership verification
+	claims := internalauth.ClaimsFromContext(c.Request.Context())
+	if claims == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "missing authentication",
+		})
+		return
+	}
+
+	// Verify ownership
+	sandbox, err := s.sandboxService.GetSandbox(c.Request.Context(), sandboxID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error": fmt.Sprintf("sandbox not found: %v", err),
+		})
+		return
+	}
+
+	if sandbox.TeamID != claims.TeamID {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error": "sandbox belongs to a different team",
+		})
+		return
+	}
+
+	stats, err := s.sandboxService.GetSandboxResourceUsage(c.Request.Context(), sandboxID)
+	if err != nil {
+		s.logger.Error("Failed to get sandbox stats",
+			zap.String("sandboxID", sandboxID),
+			zap.Error(err),
+		)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": fmt.Sprintf("failed to get sandbox stats: %v", err),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, stats)
 }
 
 // Middleware

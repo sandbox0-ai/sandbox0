@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
@@ -24,7 +25,14 @@ type SandboxService struct {
 	podLister                   corelisters.PodLister
 	templateLister              controller.TemplateLister
 	SandboxNetworkPolicyService *SandboxNetworkPolicyService
+	procdClient                 *ProcdClient
+	tokenGenerator              TokenGenerator
 	logger                      *zap.Logger
+}
+
+// TokenGenerator generates internal tokens for procd authentication.
+type TokenGenerator interface {
+	GenerateToken(teamID, sandboxID string) (string, error)
 }
 
 // NewSandboxService creates a new SandboxService
@@ -33,6 +41,7 @@ func NewSandboxService(
 	podLister corelisters.PodLister,
 	templateLister controller.TemplateLister,
 	SandboxNetworkPolicyService *SandboxNetworkPolicyService,
+	tokenGenerator TokenGenerator,
 	logger *zap.Logger,
 ) *SandboxService {
 	return &SandboxService{
@@ -40,6 +49,8 @@ func NewSandboxService(
 		podLister:                   podLister,
 		templateLister:              templateLister,
 		SandboxNetworkPolicyService: SandboxNetworkPolicyService,
+		procdClient:                 NewProcdClient(),
+		tokenGenerator:              tokenGenerator,
 		logger:                      logger,
 	}
 }
@@ -552,4 +563,292 @@ func (s *SandboxService) GetSandboxStatus(ctx context.Context, sandboxID string)
 	}
 
 	return status, nil
+}
+
+// PauseSandboxResponse represents the response from pausing a sandbox.
+type PauseSandboxResponse struct {
+	SandboxID     string                `json:"sandbox_id"`
+	Paused        bool                  `json:"paused"`
+	ResourceUsage *SandboxResourceUsage `json:"resource_usage,omitempty"`
+	UpdatedMemory string                `json:"updated_memory,omitempty"`
+}
+
+// ResumeSandboxResponse represents the response from resuming a sandbox.
+type ResumeSandboxResponse struct {
+	SandboxID      string `json:"sandbox_id"`
+	Resumed        bool   `json:"resumed"`
+	RestoredMemory string `json:"restored_memory,omitempty"`
+}
+
+// OriginalResources stores original pod resources before pause.
+type OriginalResources struct {
+	Containers map[string]ContainerResources `json:"containers"`
+}
+
+// ContainerResources stores resource requests/limits for a container.
+type ContainerResources struct {
+	Requests corev1.ResourceList `json:"requests,omitempty"`
+	Limits   corev1.ResourceList `json:"limits,omitempty"`
+}
+
+// PauseSandbox pauses a sandbox and reduces pod resources based on actual usage.
+// This uses Kubernetes 1.35+ in-place pod update feature.
+func (s *SandboxService) PauseSandbox(ctx context.Context, sandboxID string) (*PauseSandboxResponse, error) {
+	s.logger.Info("Pausing sandbox", zap.String("sandboxID", sandboxID))
+
+	// Find the pod by sandbox ID
+	pods, err := s.podLister.Pods("").List(labels.SelectorFromSet(map[string]string{
+		controller.LabelSandboxID: sandboxID,
+	}))
+	if err != nil {
+		return nil, fmt.Errorf("list pods: %w", err)
+	}
+
+	if len(pods) == 0 {
+		return nil, fmt.Errorf("sandbox not found: %s", sandboxID)
+	}
+
+	pod := pods[0]
+
+	// Check if already paused
+	if pod.Annotations[controller.AnnotationPaused] == "true" {
+		return nil, fmt.Errorf("sandbox is already paused")
+	}
+
+	// Generate internal token for procd authentication
+	if s.tokenGenerator == nil {
+		return nil, fmt.Errorf("token generator not configured, cannot authenticate with procd")
+	}
+	teamID := pod.Annotations[controller.AnnotationTeamID]
+	token, err := s.tokenGenerator.GenerateToken(teamID, sandboxID)
+	if err != nil {
+		return nil, fmt.Errorf("generate token: %w", err)
+	}
+
+	// Call procd pause API
+	procdAddress := s.prodAddress(pod.Name, pod.Namespace)
+	pauseResp, err := s.procdClient.Pause(ctx, procdAddress, token)
+	if err != nil {
+		return nil, fmt.Errorf("call procd pause: %w", err)
+	}
+
+	if !pauseResp.Paused {
+		return nil, fmt.Errorf("procd pause failed: %s", pauseResp.Error)
+	}
+
+	// Save original resources before updating
+	originalResources := s.extractOriginalResources(pod)
+	originalResourcesJSON, err := json.Marshal(originalResources)
+	if err != nil {
+		return nil, fmt.Errorf("marshal original resources: %w", err)
+	}
+
+	// Calculate new memory request based on working set + buffer
+	var newMemory resource.Quantity
+	if pauseResp.ResourceUsage != nil && pauseResp.ResourceUsage.ContainerMemoryWorkingSet > 0 {
+		// Add 20% buffer to working set for safety
+		workingSet := pauseResp.ResourceUsage.ContainerMemoryWorkingSet
+		newMemoryBytes := int64(float64(workingSet) * 1.2)
+		// Minimum 64Mi to avoid too aggressive scaling
+		if newMemoryBytes < 64*1024*1024 {
+			newMemoryBytes = 64 * 1024 * 1024
+		}
+		newMemory = *resource.NewQuantity(newMemoryBytes, resource.BinarySI)
+	}
+
+	// Update pod with reduced resources (in-place update)
+	podCopy := pod.DeepCopy()
+
+	// Update annotations
+	if podCopy.Annotations == nil {
+		podCopy.Annotations = make(map[string]string)
+	}
+	podCopy.Annotations[controller.AnnotationPaused] = "true"
+	podCopy.Annotations[controller.AnnotationPausedAt] = time.Now().Format(time.RFC3339)
+	podCopy.Annotations[controller.AnnotationOriginalResources] = string(originalResourcesJSON)
+
+	// Update container resources if we have a valid new memory size
+	if !newMemory.IsZero() {
+		for i := range podCopy.Spec.Containers {
+			container := &podCopy.Spec.Containers[i]
+			if container.Resources.Requests == nil {
+				container.Resources.Requests = make(corev1.ResourceList)
+			}
+			container.Resources.Requests[corev1.ResourceMemory] = newMemory
+			// Also update limits if set
+			if container.Resources.Limits != nil {
+				if _, hasMemLimit := container.Resources.Limits[corev1.ResourceMemory]; hasMemLimit {
+					container.Resources.Limits[corev1.ResourceMemory] = newMemory
+				}
+			}
+		}
+	}
+
+	// Apply the update
+	_, err = s.k8sClient.CoreV1().Pods(pod.Namespace).Update(ctx, podCopy, metav1.UpdateOptions{})
+	if err != nil {
+		s.logger.Error("Failed to update pod resources after pause",
+			zap.String("sandboxID", sandboxID),
+			zap.Error(err),
+		)
+		// Don't fail the pause operation, just log the error
+		// The sandbox is still paused in procd
+	}
+
+	s.logger.Info("Sandbox paused successfully",
+		zap.String("sandboxID", sandboxID),
+		zap.String("newMemory", newMemory.String()),
+		zap.Int64("workingSet", pauseResp.ResourceUsage.ContainerMemoryWorkingSet),
+	)
+
+	return &PauseSandboxResponse{
+		SandboxID:     sandboxID,
+		Paused:        true,
+		ResourceUsage: pauseResp.ResourceUsage,
+		UpdatedMemory: newMemory.String(),
+	}, nil
+}
+
+// ResumeSandbox resumes a paused sandbox and restores original pod resources.
+func (s *SandboxService) ResumeSandbox(ctx context.Context, sandboxID string) (*ResumeSandboxResponse, error) {
+	s.logger.Info("Resuming sandbox", zap.String("sandboxID", sandboxID))
+
+	// Find the pod by sandbox ID
+	pods, err := s.podLister.Pods("").List(labels.SelectorFromSet(map[string]string{
+		controller.LabelSandboxID: sandboxID,
+	}))
+	if err != nil {
+		return nil, fmt.Errorf("list pods: %w", err)
+	}
+
+	if len(pods) == 0 {
+		return nil, fmt.Errorf("sandbox not found: %s", sandboxID)
+	}
+
+	pod := pods[0]
+
+	// Check if paused
+	if pod.Annotations[controller.AnnotationPaused] != "true" {
+		return nil, fmt.Errorf("sandbox is not paused")
+	}
+
+	// Restore original resources first (before resuming processes)
+	var restoredMemory string
+	originalResourcesJSON := pod.Annotations[controller.AnnotationOriginalResources]
+	if originalResourcesJSON != "" {
+		var originalResources OriginalResources
+		if err := json.Unmarshal([]byte(originalResourcesJSON), &originalResources); err == nil {
+			podCopy := pod.DeepCopy()
+
+			for i := range podCopy.Spec.Containers {
+				container := &podCopy.Spec.Containers[i]
+				if orig, ok := originalResources.Containers[container.Name]; ok {
+					container.Resources.Requests = orig.Requests
+					container.Resources.Limits = orig.Limits
+					if memReq, ok := orig.Requests[corev1.ResourceMemory]; ok {
+						restoredMemory = memReq.String()
+					}
+				}
+			}
+
+			// Remove pause annotations
+			delete(podCopy.Annotations, controller.AnnotationPaused)
+			delete(podCopy.Annotations, controller.AnnotationPausedAt)
+			delete(podCopy.Annotations, controller.AnnotationOriginalResources)
+
+			// Apply the update
+			_, err = s.k8sClient.CoreV1().Pods(pod.Namespace).Update(ctx, podCopy, metav1.UpdateOptions{})
+			if err != nil {
+				s.logger.Error("Failed to restore pod resources before resume",
+					zap.String("sandboxID", sandboxID),
+					zap.Error(err),
+				)
+				// Continue with resume anyway
+			}
+		}
+	}
+
+	// Generate internal token for procd authentication
+	if s.tokenGenerator == nil {
+		return nil, fmt.Errorf("token generator not configured, cannot authenticate with procd")
+	}
+	teamID := pod.Annotations[controller.AnnotationTeamID]
+	token, err := s.tokenGenerator.GenerateToken(teamID, sandboxID)
+	if err != nil {
+		return nil, fmt.Errorf("generate token: %w", err)
+	}
+
+	// Call procd resume API
+	procdAddress := s.prodAddress(pod.Name, pod.Namespace)
+	resumeResp, err := s.procdClient.Resume(ctx, procdAddress, token)
+	if err != nil {
+		return nil, fmt.Errorf("call procd resume: %w", err)
+	}
+
+	if !resumeResp.Resumed {
+		return nil, fmt.Errorf("procd resume failed: %s", resumeResp.Error)
+	}
+
+	s.logger.Info("Sandbox resumed successfully",
+		zap.String("sandboxID", sandboxID),
+		zap.String("restoredMemory", restoredMemory),
+	)
+
+	return &ResumeSandboxResponse{
+		SandboxID:      sandboxID,
+		Resumed:        true,
+		RestoredMemory: restoredMemory,
+	}, nil
+}
+
+// GetSandboxResourceUsage gets the resource usage of a sandbox.
+func (s *SandboxService) GetSandboxResourceUsage(ctx context.Context, sandboxID string) (*SandboxResourceUsage, error) {
+	// Find the pod by sandbox ID
+	pods, err := s.podLister.Pods("").List(labels.SelectorFromSet(map[string]string{
+		controller.LabelSandboxID: sandboxID,
+	}))
+	if err != nil {
+		return nil, fmt.Errorf("list pods: %w", err)
+	}
+
+	if len(pods) == 0 {
+		return nil, fmt.Errorf("sandbox not found: %s", sandboxID)
+	}
+
+	pod := pods[0]
+
+	// Generate internal token for procd authentication
+	if s.tokenGenerator == nil {
+		return nil, fmt.Errorf("token generator not configured, cannot authenticate with procd")
+	}
+	teamID := pod.Annotations[controller.AnnotationTeamID]
+	token, err := s.tokenGenerator.GenerateToken(teamID, sandboxID)
+	if err != nil {
+		return nil, fmt.Errorf("generate token: %w", err)
+	}
+
+	// Call procd stats API
+	procdAddress := s.prodAddress(pod.Name, pod.Namespace)
+	statsResp, err := s.procdClient.Stats(ctx, procdAddress, token)
+	if err != nil {
+		return nil, fmt.Errorf("call procd stats: %w", err)
+	}
+
+	return &statsResp.SandboxResourceUsage, nil
+}
+
+// extractOriginalResources extracts current resources from pod containers.
+func (s *SandboxService) extractOriginalResources(pod *corev1.Pod) OriginalResources {
+	original := OriginalResources{
+		Containers: make(map[string]ContainerResources),
+	}
+
+	for _, container := range pod.Spec.Containers {
+		original.Containers[container.Name] = ContainerResources{
+			Requests: container.Resources.Requests.DeepCopy(),
+			Limits:   container.Resources.Limits.DeepCopy(),
+		}
+	}
+
+	return original
 }

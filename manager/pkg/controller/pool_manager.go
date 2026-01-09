@@ -27,11 +27,14 @@ const (
 	PoolTypeActive = "active"
 
 	// Annotations
-	AnnotationTeamID    = "sandbox0.ai/team-id"
-	AnnotationUserID    = "sandbox0.ai/user-id"
-	AnnotationClaimedAt = "sandbox0.ai/claimed-at"
-	AnnotationExpiresAt = "sandbox0.ai/expires-at"
-	AnnotationConfig    = "sandbox0.ai/config"
+	AnnotationTeamID            = "sandbox0.ai/team-id"
+	AnnotationUserID            = "sandbox0.ai/user-id"
+	AnnotationClaimedAt         = "sandbox0.ai/claimed-at"
+	AnnotationExpiresAt         = "sandbox0.ai/expires-at"
+	AnnotationConfig            = "sandbox0.ai/config"
+	AnnotationPaused            = "sandbox0.ai/paused"
+	AnnotationPausedAt          = "sandbox0.ai/paused-at"
+	AnnotationOriginalResources = "sandbox0.ai/original-resources"
 )
 
 // PoolManager manages the idle pool (ReplicaSet)

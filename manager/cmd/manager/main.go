@@ -114,12 +114,33 @@ func main() {
 		logger.Fatal("Failed to create network policy service", zap.Error(err))
 	}
 
+	// Initialize internal auth generator for procd communication
+	var tokenGenerator service.TokenGenerator
+	if cfg.InternalAuthPrivateKeyPath != "" {
+		privateKey, err := internalauth.LoadEd25519PrivateKeyFromFile(cfg.InternalAuthPrivateKeyPath)
+		if err != nil {
+			logger.Warn("Failed to load internal auth private key, pause/resume will not work",
+				zap.String("path", cfg.InternalAuthPrivateKeyPath),
+				zap.Error(err),
+			)
+		} else {
+			internalAuthGen := internalauth.NewGenerator(internalauth.GeneratorConfig{
+				Caller:     "manager",
+				PrivateKey: privateKey,
+				TTL:        30 * time.Second,
+			})
+			tokenGenerator = service.NewInternalTokenGenerator(internalAuthGen)
+			logger.Info("Internal auth generator initialized for procd communication")
+		}
+	}
+
 	// Create services
 	sandboxService := service.NewSandboxService(
 		k8sClient,
 		podLister,
 		operator.GetTemplateLister(),
 		networkPolicyService,
+		tokenGenerator,
 		logger,
 	)
 

@@ -1,4 +1,4 @@
-.PHONY: all build build-all build-% test lint tidy vendor clean
+.PHONY: all build build-all obuild obuild-all test lint tidy vendor clean
 
 SERVICES := internal-gateway manager storage-proxy netd k8s-plugin
 
@@ -17,9 +17,9 @@ build-all:
 		fi; \
 	done
 
-# Build specific service: make build <service> 
+# Build specific service: make build <service>
 build:
-	@service="$(filter-out build build-all test lint tidy vendor clean,$(MAKECMDGOALS))"; \
+	@service="$(filter-out build build-all obuild obuild-all test lint tidy vendor clean,$(MAKECMDGOALS))"; \
 	if [ -z "$$service" ]; then \
 		echo "Error: Please specify a service or use 'make build-all'"; \
 		echo "Available services: $(SERVICES)"; \
@@ -33,6 +33,29 @@ build:
 			go build -v -o $$service/bin/$$service ./$$service/cmd/...; \
 		elif [ -f "$$service/main.go" ]; then \
 			go build -v -o $$service/bin/$$service ./$$service/; \
+		fi; \
+	else \
+		echo "Error: Unknown service '$$service'"; \
+		echo "Available services: $(SERVICES)"; \
+		exit 1; \
+	fi
+
+# Direct go build specific service: make obuild <service> (no Makefile delegation)
+obuild:
+	@service="$(filter-out build build-all obuild test lint tidy vendor clean,$(MAKECMDGOALS))"; \
+	if [ -z "$$service" ]; then \
+		echo "Error: Please specify a service or use 'make obuild-all'"; \
+		echo "Available services: $(SERVICES)"; \
+		echo "Usage: make obuild <service>"; \
+		exit 1; \
+	elif echo "$(SERVICES)" | grep -qw "$$service"; then \
+		echo "Direct go build $$service..."; \
+		if [ -d "$$service/cmd" ]; then \
+			go build -v -o $$service/bin ./$$service/cmd/...; \
+		elif [ -f "$$service/main.go" ]; then \
+			go build -v -o $$service/bin ./$$service/; \
+		else \
+			echo "Warning: No cmd directory or main.go found for $$service"; \
 		fi; \
 	else \
 		echo "Error: Unknown service '$$service'"; \

@@ -9,7 +9,6 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
@@ -152,147 +151,23 @@ func (pm *PoolManager) getOrCreateReplicaSet(ctx context.Context, template *v1al
 
 // buildPodTemplate builds the pod template for a template
 func (pm *PoolManager) buildPodTemplate(template *v1alpha1.SandboxTemplate) corev1.PodTemplateSpec {
-	podTemplate := corev1.PodTemplateSpec{
+	return corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels: map[string]string{
 				LabelTemplateID: template.ObjectMeta.Name,
 				LabelPoolType:   PoolTypeIdle,
 			},
 		},
-		Spec: corev1.PodSpec{
-			RestartPolicy: corev1.RestartPolicyNever,
-			Containers:    pm.buildContainers(template),
-		},
+		Spec: v1alpha1.BuildPodSpec(template),
 	}
-
-	// Apply runtime class if specified
-	if template.Spec.RuntimeClassName != nil {
-		podTemplate.Spec.RuntimeClassName = template.Spec.RuntimeClassName
-	}
-
-	// Apply pod-level overrides
-	if template.Spec.Pod != nil {
-		if template.Spec.Pod.NodeSelector != nil {
-			podTemplate.Spec.NodeSelector = template.Spec.Pod.NodeSelector
-		}
-		if template.Spec.Pod.ServiceAccountName != "" {
-			podTemplate.Spec.ServiceAccountName = template.Spec.Pod.ServiceAccountName
-		}
-		if template.Spec.Pod.Tolerations != nil {
-			podTemplate.Spec.Tolerations = convertTolerations(template.Spec.Pod.Tolerations)
-		}
-		// Note: Affinity conversion is complex, skip for now or implement separately
-	}
-
-	return podTemplate
-}
-
-// buildContainers builds the containers for a pod
-func (pm *PoolManager) buildContainers(template *v1alpha1.SandboxTemplate) []corev1.Container {
-	containers := []corev1.Container{
-		pm.buildContainer(&template.Spec.MainContainer, template, true),
-	}
-
-	for i := range template.Spec.Sidecars {
-		containers = append(containers, pm.buildContainer(&template.Spec.Sidecars[i], template, false))
-	}
-
-	return containers
-}
-
-// buildContainer builds a single container
-func (pm *PoolManager) buildContainer(spec *v1alpha1.ContainerSpec, template *v1alpha1.SandboxTemplate, isMain bool) corev1.Container {
-	name := "procd"
-	if !isMain {
-		// For sidecars, generate unique name
-		name = fmt.Sprintf("sidecar-%s", spec.Image)
-	}
-
-	container := corev1.Container{
-		Name:            name,
-		Image:           spec.Image,
-		ImagePullPolicy: corev1.PullIfNotPresent,
-		Command:         spec.Command,
-		Args:            spec.Args,
-	}
-
-	if spec.ImagePullPolicy != "" {
-		container.ImagePullPolicy = corev1.PullPolicy(spec.ImagePullPolicy)
-	}
-
-	// Environment variables
-	var envVars []corev1.EnvVar
-
-	// Add global env vars
-	for k, v := range template.Spec.EnvVars {
-		envVars = append(envVars, corev1.EnvVar{Name: k, Value: v})
-	}
-
-	// Add container-specific env vars
-	for _, ev := range spec.Env {
-		envVars = append(envVars, corev1.EnvVar{Name: ev.Name, Value: ev.Value})
-	}
-
-	container.Env = envVars
-
-	// Resources
-	if len(spec.Resources.Limits) > 0 || len(spec.Resources.Requests) > 0 {
-		container.Resources = corev1.ResourceRequirements{
-			Limits:   convertResourceList(spec.Resources.Limits),
-			Requests: convertResourceList(spec.Resources.Requests),
-		}
-	}
-
-	// Security context
-	if spec.SecurityContext != nil {
-		container.SecurityContext = &corev1.SecurityContext{}
-		if spec.SecurityContext.RunAsUser != nil {
-			container.SecurityContext.RunAsUser = spec.SecurityContext.RunAsUser
-		}
-		if spec.SecurityContext.RunAsGroup != nil {
-			container.SecurityContext.RunAsGroup = spec.SecurityContext.RunAsGroup
-		}
-		if spec.SecurityContext.Capabilities != nil {
-			container.SecurityContext.Capabilities = &corev1.Capabilities{
-				Drop: convertCapabilities(spec.SecurityContext.Capabilities.Drop),
-			}
-		}
-	}
-
-	return container
 }
 
 // Helper functions
-
 func getInt32Value(val *int32) int32 {
 	if val == nil {
 		return 0
 	}
 	return *val
-}
-
-func convertResourceList(resources map[string]string) corev1.ResourceList {
-	if resources == nil {
-		return nil
-	}
-
-	result := make(corev1.ResourceList)
-	for k, v := range resources {
-		result[corev1.ResourceName(k)] = resource.MustParse(v)
-	}
-	return result
-}
-
-func convertCapabilities(caps []string) []corev1.Capability {
-	if caps == nil {
-		return nil
-	}
-
-	result := make([]corev1.Capability, len(caps))
-	for i, cap := range caps {
-		result[i] = corev1.Capability(cap)
-	}
-	return result
 }
 
 func convertTolerations(tolerations []v1alpha1.Toleration) []corev1.Toleration {

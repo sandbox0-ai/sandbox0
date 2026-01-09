@@ -1,6 +1,8 @@
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -36,13 +38,10 @@ type SandboxTemplateSpec struct {
 	MainContainer ContainerSpec `json:"mainContainer"`
 
 	// Sidecar containers (optional)
-	Sidecars []ContainerSpec `json:"sidecars,omitempty"`
+	Sidecars []corev1.Container `json:"sidecars,omitempty"`
 
 	// Pod-level configuration
 	Pod *PodSpecOverride `json:"pod,omitempty"`
-
-	// Resource quota
-	Resources ResourceQuota `json:"resources"`
 
 	// Template Sandbox Network policy (template-level default)
 	Network *TplSandboxNetworkPolicy `json:"network,omitempty"`
@@ -53,9 +52,6 @@ type SandboxTemplateSpec struct {
 	// Lifecycle management
 	Lifecycle *LifecyclePolicy `json:"lifecycle,omitempty"`
 
-	// Template inheritance
-	Inherits *string `json:"inherits,omitempty"`
-
 	// Environment variables (global, shared by all containers)
 	EnvVars map[string]string `json:"envVars,omitempty"`
 
@@ -63,24 +59,17 @@ type SandboxTemplateSpec struct {
 	Public       bool     `json:"public,omitempty"`
 	AllowedTeams []string `json:"allowedTeams,omitempty"`
 
-	// Aliases
-	Aliases []string `json:"aliases,omitempty"`
-
 	// Environment configuration
-	EnvdVersion      string  `json:"envdVersion"`
 	RuntimeClassName *string `json:"runtimeClassName,omitempty"`
 }
 
-// ContainerSpec defines container configuration
 type ContainerSpec struct {
-	Image           string               `json:"image"`
-	ImagePullPolicy string               `json:"imagePullPolicy,omitempty"`
-	Command         []string             `json:"command,omitempty"`
-	Args            []string             `json:"args,omitempty"`
-	Env             []EnvVar             `json:"env,omitempty"`
-	VolumeMounts    []VolumeMount        `json:"volumeMounts,omitempty"`
-	Resources       ResourceRequirements `json:"resources,omitempty"`
-	SecurityContext *SecurityContext     `json:"securityContext,omitempty"`
+	Image           string           `json:"image"`
+	ImagePullPolicy string           `json:"imagePullPolicy,omitempty"`
+	Env             []EnvVar         `json:"env,omitempty"`
+	Resources       ResourceQuota    `json:"resources"`
+	VolumeMounts    []VolumeMount    `json:"volumeMounts,omitempty"`
+	SecurityContext *SecurityContext `json:"securityContext,omitempty"`
 }
 
 // EnvVar represents an environment variable
@@ -201,9 +190,8 @@ type Toleration struct {
 
 // ResourceQuota defines resource quota (per template)
 type ResourceQuota struct {
-	CPU    string `json:"cpu"`           // e.g. "2"
-	Memory string `json:"memory"`        // e.g. "4Gi"
-	GPU    string `json:"gpu,omitempty"` // e.g. "1"
+	CPU    resource.Quantity `json:"cpu,omitempty"`    // e.g. "2"
+	Memory resource.Quantity `json:"memory,omitempty"` // e.g. "4Gi"
 }
 
 // PoolStrategy defines pool strategy
@@ -244,10 +232,11 @@ type NetworkIngressPolicy struct {
 
 // LifecyclePolicy defines lifecycle policy
 type LifecyclePolicy struct {
-	DefaultTTL  int32        `json:"defaultTTL,omitempty"`  // Default TTL in seconds
-	MaxTTL      int32        `json:"maxTTL,omitempty"`      // Maximum TTL in seconds
-	IdleTimeout int32        `json:"idleTimeout,omitempty"` // Idle timeout in seconds
-	PreStop     *PreStopHook `json:"preStop,omitempty"`     // PreStop hook
+	DefaultTTL  int32 `json:"defaultTTL,omitempty"`  // Default TTL in seconds
+	MaxTTL      int32 `json:"maxTTL,omitempty"`      // Maximum TTL in seconds
+	IdleTimeout int32 `json:"idleTimeout,omitempty"` // Idle timeout in seconds
+	// use pure k8s hooks
+	PreStop *PreStopHook `json:"preStop,omitempty"` // PreStop hook
 }
 
 // PreStopHook defines pre-stop hook

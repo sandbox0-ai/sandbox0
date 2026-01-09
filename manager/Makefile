@@ -56,7 +56,7 @@ manifests: ## Generate CRD manifests
 .PHONY: build
 build: manifests generate ## Build the manager binary
 	@go build -o bin/manager ./cmd/manager
-	@echo "Build the procd binary..."
+	@echo "Building the procd binary..."
 	@go build -o bin/procd ./cmd/procd
 
 .PHONY: test

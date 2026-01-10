@@ -167,7 +167,7 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) 
 
 	if err := migrate.Up(ctx, pool, "migrations", migrate.Options{
 		Logger: migrateLogger,
-		Schema: "sandbox0_ig",
+		Schema: "ig",
 	}); err != nil {
 		return fmt.Errorf("migrate up: %w", err)
 	}

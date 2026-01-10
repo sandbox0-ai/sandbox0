@@ -12,11 +12,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sandbox0-ai/infra/pkg/env"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	"github.com/sandbox0-ai/infra/pkg/k8s"
+	"github.com/sandbox0-ai/infra/pkg/migrate"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/auth"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/config"
+	"github.com/sandbox0-ai/infra/storage-proxy/pkg/db"
 	grpcserver "github.com/sandbox0-ai/infra/storage-proxy/pkg/grpc"
 	httpserver "github.com/sandbox0-ai/infra/storage-proxy/pkg/http"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/volume"
@@ -73,8 +76,27 @@ func main() {
 		zap.String("cache_dir", cfg.DefaultCacheDir),
 	)
 
+	// Initialize database connection pool
+	var repo *db.Repository
+	if cfg.DatabaseURL != "" {
+		pool, err := initDatabase(context.Background(), cfg.DatabaseURL, zapLogger)
+		if err != nil {
+			zapLogger.Fatal("Failed to connect to database", zap.Error(err))
+		}
+		defer pool.Close()
+
+		// Run database migrations
+		if err := runMigrations(context.Background(), pool, zapLogger); err != nil {
+			zapLogger.Fatal("Failed to run database migrations", zap.Error(err))
+		}
+
+		repo = db.NewRepository(pool)
+	} else {
+		zapLogger.Warn("DATABASE_URL not set, running without database persistence")
+	}
+
 	// Create volume manager
-	volMgr := volume.NewManager(logrusLogger, cfg)
+	volMgr := volume.NewManager(logrusLogger, cfg, repo)
 
 	// Create Kubernetes client for pod watching
 	k8sClient, err := k8s.NewClient(cfg.KubeconfigPath)
@@ -229,4 +251,69 @@ func main() {
 	}
 
 	zapLogger.Info("Shutdown complete")
+}
+
+// initDatabase initializes the database connection pool
+func initDatabase(ctx context.Context, databaseURL string, logger *zap.Logger) (*pgxpool.Pool, error) {
+	if databaseURL == "" {
+		return nil, fmt.Errorf("database URL is empty")
+	}
+
+	poolConfig, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse database URL: %w", err)
+	}
+
+	// Configure pool
+	poolConfig.MaxConns = 50
+	poolConfig.MinConns = 10
+
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
+	if err != nil {
+		return nil, fmt.Errorf("create connection pool: %w", err)
+	}
+
+	// Test connection
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("ping database: %w", err)
+	}
+
+	logger.Info("Database connection established",
+		zap.Int32("max_conns", poolConfig.MaxConns),
+		zap.Int32("min_conns", poolConfig.MinConns),
+	)
+
+	return pool, nil
+}
+
+// runMigrations runs database migrations on startup
+func runMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) error {
+	logger.Info("Running database migrations")
+
+	// Create a migration logger that writes to zap
+	migrateLogger := &zapLogger{logger: logger}
+
+	if err := migrate.Up(ctx, pool, "migrations", migrate.Options{
+		Logger: migrateLogger,
+		Schema: "sp",
+	}); err != nil {
+		return fmt.Errorf("migrate up: %w", err)
+	}
+
+	logger.Info("Database migrations completed successfully")
+	return nil
+}
+
+// zapLogger adapts zap.Logger to migrate.Logger interface
+type zapLogger struct {
+	logger *zap.Logger
+}
+
+func (z *zapLogger) Printf(format string, args ...interface{}) {
+	z.logger.Info(fmt.Sprintf(format, args...))
+}
+
+func (z *zapLogger) Fatalf(format string, args ...interface{}) {
+	z.logger.Fatal(fmt.Sprintf(format, args...))
 }

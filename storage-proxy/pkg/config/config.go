@@ -14,6 +14,9 @@ type Config struct {
 	HTTPAddr string
 	HTTPPort int
 
+	// Database
+	DatabaseURL string
+
 	// JuiceFS defaults
 	MetaURL        string
 	S3Bucket       string
@@ -25,6 +28,7 @@ type Config struct {
 
 	DefaultCacheSize string
 	DefaultCacheDir  string
+	DefaultClusterId string
 
 	// Security
 	InternalAuthPublicKey string // Ed25519 public key for internal auth (base64 encoded)
@@ -58,6 +62,8 @@ func LoadFromEnv() *Config {
 		HTTPAddr: env.GetEnv("HTTP_ADDR", "0.0.0.0"),
 		HTTPPort: env.GetEnvInt("HTTP_PORT", 8081),
 
+		DatabaseURL: env.GetEnv("DATABASE_URL", ""),
+
 		MetaURL:        env.GetEnv("META_URL", ""),
 		S3Bucket:       env.GetEnv("S3_BUCKET", ""),
 		S3Region:       env.GetEnv("S3_REGION", "us-east-1"),
@@ -68,6 +74,7 @@ func LoadFromEnv() *Config {
 
 		DefaultCacheSize: env.GetEnv("DEFAULT_CACHE_SIZE", "1G"),
 		DefaultCacheDir:  env.GetEnv("DEFAULT_CACHE_DIR", "/var/lib/storage-proxy/cache"),
+		DefaultClusterId: env.GetEnv("DEFAULT_CLUSTER_ID", "default"),
 
 		InternalAuthPublicKey: env.GetEnv("INTERNAL_AUTH_PUBLIC_KEY", ""),
 

@@ -14,6 +14,7 @@ import (
 	"github.com/juicedata/juicefs/pkg/vfs"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/config"
+	"github.com/sandbox0-ai/infra/storage-proxy/pkg/db"
 	"github.com/sirupsen/logrus"
 )
 
@@ -43,15 +44,17 @@ type Manager struct {
 	sandboxToVolumes map[string]map[string]struct{} // sandboxID -> set of volumeIDs
 	logger           *logrus.Logger
 	config           *config.Config
+	repo             *db.Repository
 }
 
 // NewManager creates a new volume manager
-func NewManager(logger *logrus.Logger, cfg *config.Config) *Manager {
+func NewManager(logger *logrus.Logger, cfg *config.Config, repo *db.Repository) *Manager {
 	return &Manager{
 		volumes:          make(map[string]*VolumeContext),
 		sandboxToVolumes: make(map[string]map[string]struct{}),
 		logger:           logger,
 		config:           cfg,
+		repo:             repo,
 	}
 }
 

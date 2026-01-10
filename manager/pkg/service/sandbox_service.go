@@ -9,7 +9,6 @@ import (
 
 	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/infra/manager/pkg/controller"
-	"github.com/sandbox0-ai/infra/manager/pkg/db"
 	"github.com/sandbox0-ai/infra/manager/pkg/metrics"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -20,6 +19,30 @@ import (
 	utilrand "k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
+)
+
+// Sandbox represents a sandbox instance
+type Sandbox struct {
+	ID           string    `json:"id"`
+	TemplateID   string    `json:"template_id"`
+	TeamID       string    `json:"team_id"`
+	UserID       string    `json:"user_id"`
+	ProcdAddress string    `json:"procd_address"`
+	Status       string    `json:"status"`
+	PodName      string    `json:"pod_name"`
+	Namespace    string    `json:"namespace"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	ClaimedAt    time.Time `json:"claimed_at"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+// SandboxStatus represents possible sandbox statuses
+const (
+	SandboxStatusPending   = "pending"
+	SandboxStatusStarting  = "starting"
+	SandboxStatusRunning   = "running"
+	SandboxStatusFailed    = "failed"
+	SandboxStatusCompleted = "completed"
 )
 
 // SandboxService handles sandbox operations
@@ -389,7 +412,7 @@ func (s *SandboxService) TerminateSandbox(ctx context.Context, sandboxID string)
 }
 
 // GetSandbox gets a sandbox by ID
-func (s *SandboxService) GetSandbox(ctx context.Context, sandboxID string) (*db.Sandbox, error) {
+func (s *SandboxService) GetSandbox(ctx context.Context, sandboxID string) (*Sandbox, error) {
 	// Find the pod by sandbox ID
 	pods, err := s.podLister.Pods("").List(labels.SelectorFromSet(map[string]string{
 		controller.LabelSandboxID: sandboxID,
@@ -407,7 +430,7 @@ func (s *SandboxService) GetSandbox(ctx context.Context, sandboxID string) (*db.
 }
 
 // ListSandboxes lists all sandboxes for a team
-func (s *SandboxService) ListSandboxes(ctx context.Context, teamID string) ([]*db.Sandbox, error) {
+func (s *SandboxService) ListSandboxes(ctx context.Context, teamID string) ([]*Sandbox, error) {
 	// List all pods with active pool type (claimed sandboxes)
 	pods, err := s.podLister.Pods("").List(labels.SelectorFromSet(map[string]string{
 		controller.LabelPoolType: controller.PoolTypeActive,
@@ -416,7 +439,7 @@ func (s *SandboxService) ListSandboxes(ctx context.Context, teamID string) ([]*d
 		return nil, fmt.Errorf("list pods: %w", err)
 	}
 
-	var sandboxes []*db.Sandbox
+	var sandboxes []*Sandbox
 	for _, pod := range pods {
 		// Filter by team ID if specified
 		if teamID != "" && pod.Annotations[controller.AnnotationTeamID] != teamID {
@@ -433,7 +456,7 @@ func (s *SandboxService) ListSandboxes(ctx context.Context, teamID string) ([]*d
 }
 
 // podToSandbox converts a pod to a sandbox object
-func (s *SandboxService) podToSandbox(pod *corev1.Pod, sandboxID string) *db.Sandbox {
+func (s *SandboxService) podToSandbox(pod *corev1.Pod, sandboxID string) *Sandbox {
 	status := s.podPhaseToSandboxStatus(pod.Status.Phase)
 
 	// Parse timestamps
@@ -446,7 +469,7 @@ func (s *SandboxService) podToSandbox(pod *corev1.Pod, sandboxID string) *db.San
 	}
 	createdAt = pod.CreationTimestamp.Time
 
-	return &db.Sandbox{
+	return &Sandbox{
 		ID:           sandboxID,
 		TemplateID:   pod.Labels[controller.LabelTemplateID],
 		TeamID:       pod.Annotations[controller.AnnotationTeamID],
@@ -469,15 +492,15 @@ func (s *SandboxService) prodAddress(name, namespace string) string {
 func (s *SandboxService) podPhaseToSandboxStatus(phase corev1.PodPhase) string {
 	switch phase {
 	case corev1.PodPending:
-		return db.SandboxStatusStarting
+		return SandboxStatusStarting
 	case corev1.PodRunning:
-		return db.SandboxStatusRunning
+		return SandboxStatusRunning
 	case corev1.PodSucceeded:
-		return db.SandboxStatusCompleted
+		return SandboxStatusCompleted
 	case corev1.PodFailed:
-		return db.SandboxStatusFailed
+		return SandboxStatusFailed
 	default:
-		return db.SandboxStatusPending
+		return SandboxStatusPending
 	}
 }
 

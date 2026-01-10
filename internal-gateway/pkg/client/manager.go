@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/sandbox0-ai/infra/manager/pkg/db"
+	mgr "github.com/sandbox0-ai/infra/manager/pkg/service"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	"go.uber.org/zap"
 )
@@ -34,7 +34,7 @@ func NewManagerClient(baseURL string, internalAuthGen *internalauth.Generator, l
 }
 
 // GetSandbox retrieves sandbox information from manager
-func (c *ManagerClient) GetSandbox(ctx context.Context, sandboxID, userID, teamID string) (*db.Sandbox, error) {
+func (c *ManagerClient) GetSandbox(ctx context.Context, sandboxID, userID, teamID string) (*mgr.Sandbox, error) {
 	// Generate internal token for manager
 	token, err := c.internalAuthGen.Generate("manager", teamID, userID, internalauth.GenerateOptions{})
 	if err != nil {
@@ -71,7 +71,7 @@ func (c *ManagerClient) GetSandbox(ctx context.Context, sandboxID, userID, teamI
 	}
 
 	// Parse response
-	var sandbox db.Sandbox
+	var sandbox mgr.Sandbox
 	if err := json.NewDecoder(resp.Body).Decode(&sandbox); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}

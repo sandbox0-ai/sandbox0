@@ -6,11 +6,11 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
-	clientset "github.com/sandbox0-ai/infra/manager/pkg/generated/clientset/versioned"
 	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/util/retry"
 )
@@ -18,18 +18,19 @@ import (
 const (
 	annotationAutoscaleLastScaleTime = "sandbox0.ai/autoscale-last-scale-time"
 	annotationAutoscaleLastColdTime  = "sandbox0.ai/autoscale-last-cold-time"
+	annotationAutoscaleLastClaimTime = "sandbox0.ai/autoscale-last-claim-time"
 )
 
 type AutoScaler struct {
-	crdClient clientset.Interface
+	k8sClient kubernetes.Interface
 	podLister corelisters.PodLister
 	logger    *zap.Logger
 }
 
 // NewAutoScaler creates a new AutoScaler.
-func NewAutoScaler(crdClient clientset.Interface, podLister corelisters.PodLister, logger *zap.Logger) *AutoScaler {
+func NewAutoScaler(k8sClient kubernetes.Interface, podLister corelisters.PodLister, logger *zap.Logger) *AutoScaler {
 	return &AutoScaler{
-		crdClient: crdClient,
+		k8sClient: k8sClient,
 		podLister: podLister,
 		logger:    logger,
 	}
@@ -82,15 +83,15 @@ func defaultAutoScaleConfig() AutoScaleConfig {
 	}
 }
 
-// ReconcileAutoScale computes a desired MinIdle for the template and updates the CRD if needed.
+// ReconcileAutoScale computes desired ReplicaSet replicas for the template.
 // Algorithm (pragmatic + safe):
 // - Use recent claim events as demand signal, derived from active pods' annotations:
 //   - AnnotationClaimedAt: RFC3339 timestamp
 //   - AnnotationClaimType: "hot" or "cold"
 //
-// - If we see any cold claims in the recent window, scale up MinIdle quickly.
-// - If there is sustained no traffic AND we have excess idle, scale down slowly.
-// - Always clamp MinIdle within [0, MaxIdle].
+// - If we see cold claims in the recent window, scale up quickly (TCP-inspired).
+// - If there is sustained no traffic, scale down slowly.
+// - Always clamp replicas within [MinIdle, MaxIdle] (user-provided bounds).
 func (as *AutoScaler) ReconcileAutoScale(ctx context.Context, template *v1alpha1.SandboxTemplate, now time.Time) error {
 	if template == nil {
 		return fmt.Errorf("nil template")
@@ -99,6 +100,22 @@ func (as *AutoScaler) ReconcileAutoScale(ctx context.Context, template *v1alpha1
 		return nil
 	}
 	cfg := defaultAutoScaleConfig()
+
+	// Load ReplicaSet and use it as the actuator + cooldown state holder.
+	rsName := v1alpha1.GenReplicasetName(template)
+	rs, err := as.k8sClient.AppsV1().ReplicaSets(template.Namespace).Get(ctx, rsName, metav1.GetOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			// PoolManager will create it; we'll reconcile next cycle.
+			return nil
+		}
+		return fmt.Errorf("get replicaset %s: %w", rsName, err)
+	}
+
+	currentReplicas := int32(0)
+	if rs.Spec.Replicas != nil {
+		currentReplicas = *rs.Spec.Replicas
+	}
 
 	// Gather recent claim stats from active pods.
 	activePods, err := as.podLister.Pods(template.Namespace).List(labels.SelectorFromSet(map[string]string{
@@ -113,6 +130,7 @@ func (as *AutoScaler) ReconcileAutoScale(ctx context.Context, template *v1alpha1
 	var claimsTotal int32
 	var coldClaims int32
 	var lastClaimTime time.Time
+	var lastClaimTimeAny time.Time
 	var lastColdTime time.Time
 
 	for _, p := range activePods {
@@ -127,6 +145,12 @@ func (as *AutoScaler) ReconcileAutoScale(ctx context.Context, template *v1alpha1
 		if err != nil {
 			continue
 		}
+
+		// Track latest claim time regardless of window for long no-traffic detection.
+		if claimedAt.After(lastClaimTimeAny) {
+			lastClaimTimeAny = claimedAt
+		}
+
 		if claimedAt.Before(windowStart) {
 			continue
 		}
@@ -144,18 +168,30 @@ func (as *AutoScaler) ReconcileAutoScale(ctx context.Context, template *v1alpha1
 		}
 	}
 
-	// Cooldowns stored on template annotations (survive restarts, multi-reconcile safe).
-	lastScaleAt := parseRFC3339(template.Annotations, annotationAutoscaleLastScaleTime)
-	lastColdAtAnn := parseRFC3339(template.Annotations, annotationAutoscaleLastColdTime)
+	// Cooldowns stored on ReplicaSet annotations (survive restarts; avoids mutating user template).
+	lastScaleAt := parseRFC3339(rs.Annotations, annotationAutoscaleLastScaleTime)
+	lastColdAtAnn := parseRFC3339(rs.Annotations, annotationAutoscaleLastColdTime)
+	lastClaimAtAnn := parseRFC3339(rs.Annotations, annotationAutoscaleLastClaimTime)
 	if lastColdTime.After(lastColdAtAnn) {
 		lastColdAtAnn = lastColdTime
 	}
+	if lastClaimTimeAny.After(lastClaimAtAnn) {
+		lastClaimAtAnn = lastClaimTimeAny
+	}
 
-	desired := template.Spec.Pool.MinIdle
+	minIdle := template.Spec.Pool.MinIdle
 	maxIdle := template.Spec.Pool.MaxIdle
 	if maxIdle < 0 {
 		maxIdle = 0
 	}
+	if minIdle < 0 {
+		minIdle = 0
+	}
+	if maxIdle < minIdle {
+		maxIdle = minIdle
+	}
+
+	desired := clamp32(currentReplicas, minIdle, maxIdle)
 
 	// Scale up decision (TCP-inspired):
 	// Treat cold claims as "loss" / insufficient warm capacity.
@@ -200,11 +236,14 @@ func (as *AutoScaler) ReconcileAutoScale(ctx context.Context, template *v1alpha1
 	}
 
 	// Scale down decision: no recent traffic for a while -> slowly decrease.
-	// We use "lastClaimTime" derived from pods; if we have no claims at all in window,
-	// also check last claim time annotation if present (future enhancement). For now, we rely on pods.
-	noTrafficDuration := now.Sub(lastClaimTime)
-	if claimsTotal == 0 {
-		// If we didn't observe a claim in the window, treat as no traffic at least window size.
+	// We use persisted last-claim-time for long no-traffic windows.
+	noTrafficDuration := time.Duration(1<<63 - 1) // effectively infinity
+	if !lastClaimAtAnn.IsZero() {
+		noTrafficDuration = now.Sub(lastClaimAtAnn)
+	} else if !lastClaimTime.IsZero() {
+		noTrafficDuration = now.Sub(lastClaimTime)
+	} else if claimsTotal == 0 {
+		// If we didn't observe a claim at all, treat as no traffic at least window size.
 		noTrafficDuration = cfg.Window
 	}
 	if noTrafficDuration >= cfg.NoTrafficScaleDown && now.Sub(lastScaleAt) >= cfg.ScaleDownCooldown {
@@ -215,25 +254,18 @@ func (as *AutoScaler) ReconcileAutoScale(ctx context.Context, template *v1alpha1
 		}
 	}
 
-	// Update the template if needed (MinIdle or autoscale annotations).
-	needUpdate := desired != template.Spec.Pool.MinIdle
-	if template.Annotations == nil {
-		template.Annotations = map[string]string{}
-	}
-	// Persist last cold time if we observed it.
-	if !lastColdAtAnn.IsZero() {
-		template.Annotations[annotationAutoscaleLastColdTime] = lastColdAtAnn.UTC().Format(time.RFC3339)
-	}
-	if needUpdate {
-		template.Annotations[annotationAutoscaleLastScaleTime] = now.UTC().Format(time.RFC3339)
-	}
-	if !needUpdate && template.Annotations[annotationAutoscaleLastColdTime] == "" && template.Annotations[annotationAutoscaleLastScaleTime] == "" {
+	desired = clamp32(desired, minIdle, maxIdle)
+	needUpdate := desired != currentReplicas
+
+	needPersist := !lastClaimAtAnn.IsZero() || !lastColdAtAnn.IsZero()
+	// If no replica change and no timestamps to persist, do nothing.
+	if !needUpdate && !needPersist {
 		return nil
 	}
 
-	// Only write if MinIdle changed or we have annotation changes to persist.
+	// Only write if replicas changed or we have annotation changes to persist.
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		current, err := as.crdClient.Sandbox0V1alpha1().SandboxTemplates(template.Namespace).Get(ctx, template.Name, metav1.GetOptions{})
+		current, err := as.k8sClient.AppsV1().ReplicaSets(template.Namespace).Get(ctx, rsName, metav1.GetOptions{})
 		if err != nil {
 			if errors.IsNotFound(err) {
 				return nil
@@ -241,26 +273,32 @@ func (as *AutoScaler) ReconcileAutoScale(ctx context.Context, template *v1alpha1
 			return err
 		}
 
+		current = current.DeepCopy()
 		if current.Annotations == nil {
 			current.Annotations = map[string]string{}
+		}
+		if !lastClaimAtAnn.IsZero() {
+			current.Annotations[annotationAutoscaleLastClaimTime] = lastClaimAtAnn.UTC().Format(time.RFC3339)
 		}
 		if !lastColdAtAnn.IsZero() {
 			current.Annotations[annotationAutoscaleLastColdTime] = lastColdAtAnn.UTC().Format(time.RFC3339)
 		}
 		if needUpdate {
-			current.Spec.Pool.MinIdle = desired
 			current.Annotations[annotationAutoscaleLastScaleTime] = now.UTC().Format(time.RFC3339)
-			as.logger.Info("Autoscale updated MinIdle",
+			current.Spec.Replicas = ptr32(desired)
+			as.logger.Info("Autoscale updated ReplicaSet replicas",
 				zap.String("template", template.Name),
 				zap.String("namespace", template.Namespace),
-				zap.Int32("minIdle", current.Spec.Pool.MinIdle),
-				zap.Int32("maxIdle", current.Spec.Pool.MaxIdle),
+				zap.String("replicaset", rsName),
+				zap.Int32("replicas", desired),
+				zap.Int32("minIdle", minIdle),
+				zap.Int32("maxIdle", maxIdle),
 				zap.Int32("coldClaimsWindow", coldClaims),
 				zap.Int32("claimsWindow", claimsTotal),
 			)
 		}
 
-		_, err = as.crdClient.Sandbox0V1alpha1().SandboxTemplates(current.Namespace).Update(ctx, current, metav1.UpdateOptions{})
+		_, err = as.k8sClient.AppsV1().ReplicaSets(current.Namespace).Update(ctx, current, metav1.UpdateOptions{})
 		return err
 	})
 }
@@ -303,3 +341,5 @@ func min32(a, b int32) int32 {
 	}
 	return b
 }
+
+func ptr32(v int32) *int32 { return &v }

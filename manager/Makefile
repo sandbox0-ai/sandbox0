@@ -60,9 +60,15 @@ build: manifests generate ## Build the manager binary
 	@go build -o bin/procd ./cmd/procd
 
 .PHONY: test
-test: ## Run tests
+test: ## Run all tests and show coverage summary
 	@echo "Running tests..."
-	@go test -v ./...
+	@GOTOOLCHAIN=go1.25.0+auto go test -v -coverprofile=coverage.out ./...
+	@if [ -f coverage.out ]; then \
+		echo "\nTest Coverage Summary:"; \
+		go tool cover -func=coverage.out; \
+		rm coverage.out; \
+	fi
+
 
 .PHONY: lint
 lint: ## Run linter

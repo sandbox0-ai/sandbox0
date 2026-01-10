@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
-	clientset "github.com/sandbox0-ai/infra/manager/pkg/generated/clientset/versioned"
 	"github.com/sandbox0-ai/infra/manager/pkg/metrics"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -29,7 +28,6 @@ const (
 // Operator is the main controller for SandboxTemplate CRD
 type Operator struct {
 	k8sClient   kubernetes.Interface
-	crdClient   clientset.Interface
 	podLister   corelisters.PodLister
 	podsSynced  cache.InformerSynced
 	poolManager *PoolManager
@@ -75,7 +73,6 @@ func (t *TemplateListerImpl) Get(namespace, name string) (*v1alpha1.SandboxTempl
 // NewOperator creates a new Operator
 func NewOperator(
 	k8sClient kubernetes.Interface,
-	crdClient clientset.Interface,
 	podInformer cache.SharedIndexInformer,
 	templateInformer cache.SharedIndexInformer,
 	recorder record.EventRecorder,
@@ -83,11 +80,10 @@ func NewOperator(
 ) *Operator {
 	podLister := corelisters.NewPodLister(podInformer.GetIndexer())
 	poolManager := NewPoolManager(k8sClient, podLister, recorder, logger)
-	autoScaler := NewAutoScaler(crdClient, podLister, logger)
+	autoScaler := NewAutoScaler(k8sClient, podLister, logger)
 
 	op := &Operator{
 		k8sClient:        k8sClient,
-		crdClient:        crdClient,
 		podLister:        podLister,
 		podsSynced:       podInformer.HasSynced,
 		poolManager:      poolManager,

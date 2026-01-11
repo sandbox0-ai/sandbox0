@@ -138,6 +138,7 @@ func main() {
 
 	// Create authenticator based on config
 	var grpcInterceptor grpc.UnaryServerInterceptor
+	var httpAuthenticator *auth.HTTPAuthenticator
 
 	if cfg.InternalAuthPublicKey != "" {
 		// Use new internalauth validator
@@ -167,7 +168,9 @@ func main() {
 		authenticator := auth.NewGRPCAuthenticator(validator, zapLogger)
 		grpcInterceptor = authenticator.UnaryInterceptor()
 
-		zapLogger.Info("Using internalauth validator for gRPC authentication")
+		httpAuthenticator = auth.NewHTTPAuthenticator(validator, zapLogger)
+
+		zapLogger.Info("Using internalauth validator for gRPC and HTTP authentication")
 	} else {
 		zapLogger.Fatal("No authentication method configured")
 	}
@@ -204,7 +207,7 @@ func main() {
 	}()
 
 	// Create HTTP server
-	httpSrv := httpserver.NewServer(logrusLogger, repo)
+	httpSrv := httpserver.NewServer(logrusLogger, repo, httpAuthenticator)
 	httpAddr := fmt.Sprintf("%s:%d", cfg.HTTPAddr, cfg.HTTPPort)
 	httpServer := &http.Server{
 		Addr:         httpAddr,

@@ -7,12 +7,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/db"
 )
 
 type createSandboxVolumeRequest struct {
-	TeamID     string `json:"team_id"`
-	UserID     string `json:"user_id"`
 	CacheSize  string `json:"cache_size"`
 	Prefetch   int    `json:"prefetch"`
 	BufferSize string `json:"buffer_size"`
@@ -21,13 +20,22 @@ type createSandboxVolumeRequest struct {
 }
 
 func (s *Server) createSandboxVolume(w http.ResponseWriter, r *http.Request) {
+	// Get claims from context (populated by middleware)
+	claims := internalauth.ClaimsFromContext(r.Context())
+	if claims == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	var req createSandboxVolumeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	if req.TeamID == "" || req.UserID == "" {
+
+	teamId, userId := claims.TeamID, claims.UserID
+	if teamId == "" || userId == "" {
 		http.Error(w, "team_id and user_id are required", http.StatusBadRequest)
 		return
 	}
@@ -42,8 +50,8 @@ func (s *Server) createSandboxVolume(w http.ResponseWriter, r *http.Request) {
 
 	vol := &db.SandboxVolume{
 		ID:         uuid.New().String(),
-		TeamID:     req.TeamID,
-		UserID:     req.UserID,
+		TeamID:     teamId,
+		UserID:     userId,
 		CacheSize:  req.CacheSize,
 		Prefetch:   req.Prefetch,
 		BufferSize: req.BufferSize,
@@ -65,9 +73,17 @@ func (s *Server) createSandboxVolume(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listSandboxVolumes(w http.ResponseWriter, r *http.Request) {
-	teamID := r.URL.Query().Get("team_id")
+	// Get claims from context
+	claims := internalauth.ClaimsFromContext(r.Context())
+	if claims == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	// Use team_id from trusted token
+	teamID := claims.TeamID
 	if teamID == "" {
-		http.Error(w, "team_id is required", http.StatusBadRequest)
+		http.Error(w, "team_id is required in token", http.StatusBadRequest)
 		return
 	}
 
@@ -83,6 +99,13 @@ func (s *Server) listSandboxVolumes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getSandboxVolume(w http.ResponseWriter, r *http.Request) {
+	// Get claims from context
+	claims := internalauth.ClaimsFromContext(r.Context())
+	if claims == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	id := r.PathValue("id")
 	if id == "" {
 		http.Error(w, "id is required", http.StatusBadRequest)
@@ -97,6 +120,13 @@ func (s *Server) getSandboxVolume(w http.ResponseWriter, r *http.Request) {
 		}
 		s.logger.WithError(err).Error("Failed to get sandbox volume")
 		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// Check if the volume belongs to the requesting team
+	if vol.TeamID != claims.TeamID {
+		s.logger.WithField("vol_team", vol.TeamID).WithField("req_team", claims.TeamID).Warn("Unauthorized access attempt to sandbox volume")
+		http.Error(w, "not found", http.StatusNotFound) // Don't reveal existence
 		return
 	}
 

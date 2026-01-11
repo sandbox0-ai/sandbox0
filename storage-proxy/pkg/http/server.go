@@ -6,23 +6,26 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/sandbox0-ai/infra/storage-proxy/pkg/auth"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/db"
 	"github.com/sirupsen/logrus"
 )
 
 // Server provides HTTP management API for health checks and metrics
 type Server struct {
-	logger *logrus.Logger
-	mux    *http.ServeMux
-	repo   *db.Repository
+	logger        *logrus.Logger
+	mux           *http.ServeMux
+	repo          *db.Repository
+	authenticator *auth.HTTPAuthenticator
 }
 
 // NewServer creates a new HTTP server
-func NewServer(logger *logrus.Logger, repo *db.Repository) *Server {
+func NewServer(logger *logrus.Logger, repo *db.Repository, authenticator *auth.HTTPAuthenticator) *Server {
 	s := &Server{
-		logger: logger,
-		mux:    http.NewServeMux(),
-		repo:   repo,
+		logger:        logger,
+		mux:           http.NewServeMux(),
+		repo:          repo,
+		authenticator: authenticator,
 	}
 
 	// Register handlers
@@ -40,7 +43,11 @@ func NewServer(logger *logrus.Logger, repo *db.Repository) *Server {
 
 // ServeHTTP implements http.Handler
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.mux.ServeHTTP(w, r)
+	if s.authenticator != nil {
+		s.authenticator.HealthCheckMiddleware(s.mux).ServeHTTP(w, r)
+	} else {
+		s.mux.ServeHTTP(w, r)
+	}
 }
 
 // handleHealth handles health check requests

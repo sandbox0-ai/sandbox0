@@ -204,7 +204,7 @@ func main() {
 	}()
 
 	// Create HTTP server
-	httpSrv := httpserver.NewServer(logrusLogger)
+	httpSrv := httpserver.NewServer(logrusLogger, repo)
 	httpAddr := fmt.Sprintf("%s:%d", cfg.HTTPAddr, cfg.HTTPPort)
 	httpServer := &http.Server{
 		Addr:         httpAddr,

@@ -288,7 +288,7 @@ Cluster 通过 **Private Link** 直接访问存储服务（S3、PostgreSQL），
    POST /api/v1/regions
    {
      "region_id": "aws/us-east-1",
-     "edge_gateway_url": "https://edge.us-east-1.sandbox0.io",
+     "edge_gateway_url": "https://edge.us-east-1.sandbox0.ai",
      "storage_config": { ... }
    }
    ```
@@ -321,7 +321,7 @@ Cluster 通过 **Private Link** 直接访问存储服务（S3、PostgreSQL），
    helm install sandbox0-cluster ./chart/ \
      --set region=aws/us-east-1 \
      --set cluster-id=cluster-3 \
-     --set edge-gateway.url=https://edge.us-east-1.sandbox0.io \
+     --set edge-gateway.url=https://edge.us-east-1.sandbox0.ai \
      --set storage.s3.bucket=juicefs-us-east-1 \
      --set storage.s3.endpoint=$S3_PRIVATELINK_ENDPOINT \
      --set storage.pg.host=$RDS_PROXY_ENDPOINT
@@ -334,7 +334,7 @@ Cluster 通过 **Private Link** 直接访问存储服务（S3、PostgreSQL），
      "cluster_id": "cluster-3",
      "region_id": "aws/us-east-1",
      "vpc_id": "vpc-xxxxx",
-     "api_endpoint": "https://cluster-3.internal.sandbox0.io"
+     "api_endpoint": "https://cluster-3.internal.sandbox0.ai"
    }
    ```
 
@@ -354,7 +354,7 @@ vpc:
 
 # Edge Gateway 配置
 edgeGateway:
-  url: https://edge.us-east-1.sandbox0.io
+  url: https://edge.us-east-1.sandbox0.ai
   authToken: ${EDGE_TOKEN}
 
 # Storage 配置（通过 Private Link）

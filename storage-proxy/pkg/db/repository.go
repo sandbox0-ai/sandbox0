@@ -115,7 +115,7 @@ func (r *Repository) ListSandboxVolumesByTeam(ctx context.Context, teamID string
 			cache_size, prefetch, buffer_size, writeback, read_only,
 			created_at, updated_at
 		FROM sandbox_volumes
-		WHERE team_id = $1 AND is_active = true
+		WHERE team_id = $1
 		ORDER BY created_at DESC
 	`, teamID)
 	if err != nil {
@@ -138,23 +138,4 @@ func (r *Repository) ListSandboxVolumesByTeam(ctx context.Context, teamID string
 	}
 
 	return volumes, nil
-}
-
-// DeleteSandboxVolume soft deletes a sandbox volume
-func (r *Repository) DeleteSandboxVolume(ctx context.Context, id string) error {
-	cmdTag, err := r.pool.Exec(ctx, `
-		UPDATE sandbox_volumes 
-		SET is_active = false, updated_at = NOW()
-		WHERE id = $1
-	`, id)
-
-	if err != nil {
-		return fmt.Errorf("delete sandbox volume: %w", err)
-	}
-
-	if cmdTag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-
-	return nil
 }

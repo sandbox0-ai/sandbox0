@@ -18,9 +18,6 @@ type Config struct {
 	HTTPPort int
 	LogLevel string
 
-	// Context/Process limits
-	MaxContexts int
-
 	// Storage Proxy configuration
 	StorageProxyBaseURL  string
 	StorageProxyReplicas int
@@ -45,8 +42,6 @@ func DefaultConfig() *Config {
 
 		HTTPPort: env.GetEnvInt("PROCD_HTTP_PORT", 49983),
 		LogLevel: env.GetEnv("PROCD_LOG_LEVEL", "info"),
-
-		MaxContexts: env.GetEnvInt("PROCD_MAX_CONTEXTS", 100),
 
 		StorageProxyBaseURL:  env.GetEnv("STORAGE_PROXY_BASE_URL", "storage-proxy.sandbox0-system.svc.cluster.local"),
 		StorageProxyReplicas: env.GetEnvInt("STORAGE_PROXY_REPLICAS", 3),

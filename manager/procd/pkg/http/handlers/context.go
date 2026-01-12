@@ -130,10 +130,6 @@ func (h *ContextHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	ctx, err := h.manager.CreateContext(config)
 	if err != nil {
-		if err == ctxpkg.ErrMaxContextsReached {
-			writeError(w, http.StatusTooManyRequests, "max_contexts_reached", err.Error())
-			return
-		}
 		writeError(w, http.StatusInternalServerError, "create_failed", err.Error())
 		return
 	}

@@ -12,14 +12,12 @@ import (
 type Manager struct {
 	mu       sync.RWMutex
 	contexts map[string]*Context
-	maxCtxs  int
 }
 
 // NewManager creates a new context manager.
-func NewManager(maxContexts int) *Manager {
+func NewManager() *Manager {
 	return &Manager{
 		contexts: make(map[string]*Context),
-		maxCtxs:  maxContexts,
 	}
 }
 
@@ -27,10 +25,6 @@ func NewManager(maxContexts int) *Manager {
 func (m *Manager) CreateContext(config process.ProcessConfig) (*Context, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	if len(m.contexts) >= m.maxCtxs {
-		return nil, ErrMaxContextsReached
-	}
 
 	// Define exit handler for the new context
 	exitHandler := func(cfg *process.ProcessConfig) {

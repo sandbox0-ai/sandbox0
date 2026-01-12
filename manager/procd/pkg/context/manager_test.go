@@ -11,7 +11,7 @@ import (
 
 // TestNewManager tests manager creation.
 func TestNewManager(t *testing.T) {
-	m := NewManager(10)
+	m := NewManager()
 	if m == nil {
 		t.Fatal("NewManager() returned nil")
 	}
@@ -28,12 +28,12 @@ func TestNewManager(t *testing.T) {
 
 // TestManager_CreateContext tests context creation with max limit.
 func TestManager_CreateContext(t *testing.T) {
-	m := NewManager(2) // Max 2 contexts
+	m := NewManager()
 
 	// Create first context
 	config := process.ProcessConfig{
-		Type:     process.ProcessTypeCMD,
-		Command:  []string{"/bin/echo", "test"},
+		Type:        process.ProcessTypeCMD,
+		Command:     []string{"/bin/echo", "test"},
 		AutoRestart: false,
 	}
 
@@ -63,19 +63,13 @@ func TestManager_CreateContext(t *testing.T) {
 		t.Error("Context IDs should be unique")
 	}
 
-	// Try to create third context - should fail due to limit
-	_, err = m.CreateContext(config)
-	if err != ErrMaxContextsReached {
-		t.Errorf("CreateContext() error = %v, want %v", err, ErrMaxContextsReached)
-	}
-
 	// Clean up
 	m.Cleanup()
 }
 
 // TestManager_CreateContextErrors tests error cases for context creation.
 func TestManager_CreateContextErrors(t *testing.T) {
-	m := NewManager(10)
+	m := NewManager()
 
 	tests := []struct {
 		name    string
@@ -110,7 +104,7 @@ func TestManager_CreateContextErrors(t *testing.T) {
 
 // TestManager_GetContext tests getting a context by ID.
 func TestManager_GetContext(t *testing.T) {
-	m := NewManager(10)
+	m := NewManager()
 
 	config := process.ProcessConfig{
 		Type:    process.ProcessTypeCMD,
@@ -143,7 +137,7 @@ func TestManager_GetContext(t *testing.T) {
 
 // TestManager_DeleteContext tests context deletion.
 func TestManager_DeleteContext(t *testing.T) {
-	m := NewManager(10)
+	m := NewManager()
 
 	config := process.ProcessConfig{
 		Type:    process.ProcessTypeCMD,
@@ -181,7 +175,7 @@ func TestManager_DeleteContext(t *testing.T) {
 
 // TestManager_ListContexts tests listing all contexts.
 func TestManager_ListContexts(t *testing.T) {
-	m := NewManager(10)
+	m := NewManager()
 
 	config := process.ProcessConfig{
 		Type:    process.ProcessTypeCMD,
@@ -226,7 +220,7 @@ func TestManager_ListContexts(t *testing.T) {
 
 // TestManager_RestartContext tests context restart.
 func TestManager_RestartContext(t *testing.T) {
-	m := NewManager(10)
+	m := NewManager()
 
 	config := process.ProcessConfig{
 		Type:    process.ProcessTypeCMD,
@@ -260,7 +254,7 @@ func TestManager_RestartContext(t *testing.T) {
 
 // TestManager_PauseAllResumeAll tests pause/resume all contexts.
 func TestManager_PauseAllResumeAll(t *testing.T) {
-	m := NewManager(10)
+	m := NewManager()
 
 	config := process.ProcessConfig{
 		Type:    process.ProcessTypeCMD,
@@ -290,7 +284,7 @@ func TestManager_PauseAllResumeAll(t *testing.T) {
 
 // TestManager_GetResourceUsage tests getting resource usage for a context.
 func TestManager_GetResourceUsage(t *testing.T) {
-	m := NewManager(10)
+	m := NewManager()
 
 	config := process.ProcessConfig{
 		Type:    process.ProcessTypeCMD,
@@ -331,7 +325,7 @@ func TestManager_GetResourceUsage(t *testing.T) {
 
 // TestManager_GetAllResourceUsage tests getting aggregated resource usage.
 func TestManager_GetAllResourceUsage(t *testing.T) {
-	m := NewManager(10)
+	m := NewManager()
 
 	config := process.ProcessConfig{
 		Type:    process.ProcessTypeCMD,
@@ -370,7 +364,7 @@ func TestManager_GetAllResourceUsage(t *testing.T) {
 
 // TestManager_ConcurrentAccess tests concurrent access to the manager.
 func TestManager_ConcurrentAccess(t *testing.T) {
-	m := NewManager(100)
+	m := NewManager()
 
 	config := process.ProcessConfig{
 		Type:    process.ProcessTypeCMD,
@@ -448,7 +442,7 @@ func TestManager_ConcurrentAccess(t *testing.T) {
 
 // TestManager_WriteInputReadOutput tests input/output operations.
 func TestManager_WriteInputReadOutput(t *testing.T) {
-	m := NewManager(10)
+	m := NewManager()
 
 	config := process.ProcessConfig{
 		Type:    process.ProcessTypeCMD,
@@ -493,7 +487,7 @@ func TestManager_WriteInputReadOutput(t *testing.T) {
 
 // TestContext_StateMethods tests context state methods.
 func TestContext_StateMethods(t *testing.T) {
-	m := NewManager(10)
+	m := NewManager()
 
 	config := process.ProcessConfig{
 		Type:    process.ProcessTypeCMD,
@@ -522,7 +516,7 @@ func TestContext_StateMethods(t *testing.T) {
 
 // TestContext_ResourceUsage tests context resource usage.
 func TestContext_ResourceUsage(t *testing.T) {
-	m := NewManager(10)
+	m := NewManager()
 
 	config := process.ProcessConfig{
 		Type:    process.ProcessTypeCMD,
@@ -547,7 +541,7 @@ func TestContext_ResourceUsage(t *testing.T) {
 
 // TestManager_Cleanup tests cleanup functionality.
 func TestManager_Cleanup(t *testing.T) {
-	m := NewManager(10)
+	m := NewManager()
 
 	config := process.ProcessConfig{
 		Type:    process.ProcessTypeCMD,
@@ -586,51 +580,9 @@ func TestManager_Cleanup(t *testing.T) {
 	m.Cleanup()
 }
 
-// TestManager_MaxContextsLimit tests that the max contexts limit is enforced.
-func TestManager_MaxContextsLimit(t *testing.T) {
-	const maxContexts = 5
-	m := NewManager(maxContexts)
-
-	config := process.ProcessConfig{
-		Type:    process.ProcessTypeCMD,
-		Command: []string{"/bin/echo", "test"},
-	}
-
-	// Create up to the limit
-	for i := 0; i < maxContexts; i++ {
-		_, err := m.CreateContext(config)
-		if err != nil {
-			t.Fatalf("CreateContext() failed at iteration %d: %v", i, err)
-		}
-	}
-
-	// Try to create one more - should fail
-	_, err := m.CreateContext(config)
-	if err != ErrMaxContextsReached {
-		t.Errorf("CreateContext() beyond limit error = %v, want %v", err, ErrMaxContextsReached)
-	}
-
-	// Delete one context
-	ctxs := m.ListContexts()
-	if len(ctxs) > 0 {
-		err = m.DeleteContext(ctxs[0].ID)
-		if err != nil {
-			t.Fatalf("DeleteContext() failed = %v", err)
-		}
-
-		// Should be able to create again
-		_, err = m.CreateContext(config)
-		if err != nil {
-			t.Errorf("CreateContext() after delete failed = %v", err)
-		}
-	}
-
-	m.Cleanup()
-}
-
 // TestSandboxResourceUsage_Fields tests SandboxResourceUsage struct fields.
 func TestSandboxResourceUsage_Fields(t *testing.T) {
-	m := NewManager(10)
+	m := NewManager()
 
 	config := process.ProcessConfig{
 		Type:    process.ProcessTypeCMD,
@@ -665,7 +617,7 @@ func TestSandboxResourceUsage_Fields(t *testing.T) {
 
 // TestContext_TypesAndLanguage tests context type and language fields.
 func TestContext_TypesAndLanguage(t *testing.T) {
-	m := NewManager(10)
+	m := NewManager()
 
 	tests := []struct {
 		name     string

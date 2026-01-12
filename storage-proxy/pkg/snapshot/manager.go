@@ -16,6 +16,7 @@ import (
 	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/config"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/db"
+	"github.com/sandbox0-ai/infra/storage-proxy/pkg/metrics"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/volume"
 	"github.com/sirupsen/logrus"
 )
@@ -40,6 +41,13 @@ type repository interface {
 	DeleteSnapshotTx(context.Context, pgx.Tx, string) error
 }
 
+// FlushCoordinator handles distributed flush coordination across storage-proxy instances
+type FlushCoordinator interface {
+	// CoordinateFlush coordinates a flush across all instances that have the volume mounted.
+	// Returns when all instances have flushed or timeout occurs.
+	CoordinateFlush(ctx context.Context, volumeID string) error
+}
+
 // Errors
 var (
 	ErrVolumeNotFound            = errors.New("volume not found")
@@ -53,14 +61,15 @@ var (
 
 // Manager handles snapshot operations for SandboxVolumes
 type Manager struct {
-	mu        sync.RWMutex
-	locks     map[string]time.Time // volumeID -> lock acquired time
-	repo      repository
-	volMgr    volumeProvider
-	config    *config.Config
-	logger    *logrus.Logger
-	clusterID string
-	podID     string
+	mu          sync.RWMutex
+	locks       map[string]time.Time // volumeID -> lock acquired time
+	repo        repository
+	volMgr      volumeProvider
+	coordinator FlushCoordinator // Optional: for distributed coordination
+	config      *config.Config
+	logger      *logrus.Logger
+	clusterID   string
+	podID       string
 }
 
 // NewManager creates a new snapshot manager
@@ -81,6 +90,14 @@ func NewManager(
 	}
 }
 
+// SetFlushCoordinator sets the flush coordinator for distributed coordination.
+// This should be called after coordinator is initialized.
+func (m *Manager) SetFlushCoordinator(coordinator FlushCoordinator) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.coordinator = coordinator
+}
+
 // CreateSnapshotRequest contains parameters for creating a snapshot
 type CreateSnapshotRequest struct {
 	VolumeID    string
@@ -93,10 +110,27 @@ type CreateSnapshotRequest struct {
 // CreateSnapshot creates a new snapshot of a volume using JuiceFS COW clone
 // Uses a transaction to ensure data consistency and row-level locking to avoid deadlocks
 func (m *Manager) CreateSnapshot(ctx context.Context, req *CreateSnapshotRequest) (*db.Snapshot, error) {
+	startTime := time.Now()
 	m.logger.WithFields(logrus.Fields{
 		"volume_id": req.VolumeID,
 		"name":      req.Name,
 	}).Info("Creating snapshot")
+
+	// 0. Distributed flush coordination (if coordinator is set)
+	// This ensures all storage-proxy instances that have this volume mounted
+	// flush their local caches to S3 before we create the snapshot.
+	m.mu.RLock()
+	coordinator := m.coordinator
+	m.mu.RUnlock()
+
+	if coordinator != nil {
+		m.logger.WithField("volume_id", req.VolumeID).Info("Coordinating flush across all instances")
+		if err := coordinator.CoordinateFlush(ctx, req.VolumeID); err != nil {
+			m.logger.WithError(err).Error("Distributed flush coordination failed")
+			return nil, fmt.Errorf("distributed flush coordination: %w", err)
+		}
+		m.logger.WithField("volume_id", req.VolumeID).Info("Distributed flush coordination completed")
+	}
 
 	var snapshot *db.Snapshot
 	var snapshotPath string
@@ -129,7 +163,10 @@ func (m *Manager) CreateSnapshot(ctx context.Context, req *CreateSnapshotRequest
 			return fmt.Errorf("get volume context: %w", err)
 		}
 
-		// 3. Flush all cached data to ensure consistency
+		// 3. Flush local cached data to ensure consistency
+		// Note: If coordinator is set, distributed flush was already done above.
+		// This local flush is a safety measure for the case where coordinator is not set,
+		// or if new data was written after the coordinated flush.
 		if err := volCtx.VFS.FlushAll(""); err != nil {
 			m.logger.WithError(err).Warn("Failed to flush VFS data before snapshot")
 			// Continue anyway - data should still be consistent
@@ -201,7 +238,31 @@ func (m *Manager) CreateSnapshot(ctx context.Context, req *CreateSnapshotRequest
 	})
 
 	if err != nil {
+		metrics.SnapshotOperationsTotal.WithLabelValues("create", "failure").Inc()
+		metrics.SnapshotOperationDuration.WithLabelValues("create").Observe(time.Since(startTime).Seconds())
+
+		// Record error type
+		var errorType string
+		if errors.Is(err, ErrVolumeNotFound) {
+			errorType = "volume_not_found"
+		} else if errors.Is(err, ErrVolumeBusy) {
+			errorType = "volume_busy"
+		} else {
+			errorType = "internal_error"
+		}
+		metrics.SnapshotErrors.WithLabelValues("create", errorType).Inc()
+
 		return nil, err
+	}
+
+	// Record success metrics
+	metrics.SnapshotOperationsTotal.WithLabelValues("create", "success").Inc()
+	metrics.SnapshotOperationDuration.WithLabelValues("create").Observe(time.Since(startTime).Seconds())
+	metrics.SnapshotsTotal.Inc()
+
+	// Record snapshot size if available
+	if snapshot.SizeBytes > 0 {
+		metrics.SnapshotSizeBytes.WithLabelValues(req.VolumeID).Observe(float64(snapshot.SizeBytes))
 	}
 
 	m.logger.WithFields(logrus.Fields{
@@ -360,6 +421,7 @@ func (m *Manager) RestoreSnapshot(ctx context.Context, req *RestoreSnapshotReque
 // DeleteSnapshot removes a snapshot
 // Uses a transaction to ensure data consistency and avoid race conditions
 func (m *Manager) DeleteSnapshot(ctx context.Context, volumeID, snapshotID, teamID string) error {
+	startTime := time.Now()
 	m.logger.WithFields(logrus.Fields{
 		"volume_id":   volumeID,
 		"snapshot_id": snapshotID,
@@ -397,6 +459,20 @@ func (m *Manager) DeleteSnapshot(ctx context.Context, volumeID, snapshotID, team
 	})
 
 	if err != nil {
+		metrics.SnapshotOperationsTotal.WithLabelValues("delete", "failure").Inc()
+		metrics.SnapshotOperationDuration.WithLabelValues("delete").Observe(time.Since(startTime).Seconds())
+
+		// Record error type
+		var errorType string
+		if errors.Is(err, ErrSnapshotNotFound) {
+			errorType = "snapshot_not_found"
+		} else if errors.Is(err, ErrVolumeBusy) {
+			errorType = "volume_busy"
+		} else {
+			errorType = "internal_error"
+		}
+		metrics.SnapshotErrors.WithLabelValues("delete", errorType).Inc()
+
 		return err
 	}
 
@@ -410,6 +486,11 @@ func (m *Manager) DeleteSnapshot(ctx context.Context, volumeID, snapshotID, team
 		snapshotPath := fmt.Sprintf("/snapshots/%s/%s", volumeID, snapshotID)
 		m.deleteSnapshotDir(ctx, volCtx.Meta, snapshotPath)
 	}
+
+	// Record success metrics
+	metrics.SnapshotOperationsTotal.WithLabelValues("delete", "success").Inc()
+	metrics.SnapshotOperationDuration.WithLabelValues("delete").Observe(time.Since(startTime).Seconds())
+	metrics.SnapshotsTotal.Dec()
 
 	m.logger.WithFields(logrus.Fields{
 		"volume_id":   volumeID,

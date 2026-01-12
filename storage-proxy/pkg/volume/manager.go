@@ -17,6 +17,12 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// MountRegistrar handles registration of volume mounts for distributed coordination
+type MountRegistrar interface {
+	RegisterMount(ctx context.Context, volumeID string) error
+	UnregisterMount(ctx context.Context, volumeID string) error
+}
+
 // VolumeConfig holds the configuration for a volume
 type VolumeConfig struct {
 	CacheSize  string
@@ -43,6 +49,7 @@ type Manager struct {
 	sandboxToVolumes map[string]map[string]struct{} // sandboxID -> set of volumeIDs
 	logger           *logrus.Logger
 	config           *config.Config
+	registrar        MountRegistrar // Optional: for distributed coordination
 }
 
 // NewManager creates a new volume manager
@@ -53,6 +60,14 @@ func NewManager(logger *logrus.Logger, cfg *config.Config) *Manager {
 		logger:           logger,
 		config:           cfg,
 	}
+}
+
+// SetMountRegistrar sets the mount registrar for distributed coordination.
+// This should be called after coordinator is initialized.
+func (m *Manager) SetMountRegistrar(registrar MountRegistrar) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.registrar = registrar
 }
 
 // MountVolume mounts a JuiceFS volume using SDK mode (in-memory, no FUSE)
@@ -135,6 +150,14 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID string, co
 		MountedAt: time.Now(),
 	}
 
+	// 6. Register mount for distributed coordination (if registrar is set)
+	if m.registrar != nil {
+		if err := m.registrar.RegisterMount(ctx, volumeID); err != nil {
+			m.logger.WithError(err).Warn("Failed to register mount for coordination")
+			// Don't fail the mount operation, coordination is optional
+		}
+	}
+
 	m.logger.WithFields(logrus.Fields{
 		"volume_id": volumeID,
 		"cache_dir": cacheDir,
@@ -155,6 +178,14 @@ func (m *Manager) UnmountVolume(ctx context.Context, volumeID string) error {
 	}
 
 	m.logger.WithField("volume_id", volumeID).Info("Unmounting volume")
+
+	// Unregister mount from distributed coordination (if registrar is set)
+	if m.registrar != nil {
+		if err := m.registrar.UnregisterMount(ctx, volumeID); err != nil {
+			m.logger.WithError(err).Warn("Failed to unregister mount from coordination")
+			// Don't fail the unmount operation
+		}
+	}
 
 	// Flush all buffered data in VFS
 	if err := volCtx.VFS.FlushAll(""); err != nil {

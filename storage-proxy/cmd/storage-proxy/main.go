@@ -19,6 +19,7 @@ import (
 	"github.com/sandbox0-ai/infra/pkg/migrate"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/auth"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/config"
+	"github.com/sandbox0-ai/infra/storage-proxy/pkg/coordinator"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/db"
 	grpcserver "github.com/sandbox0-ai/infra/storage-proxy/pkg/grpc"
 	httpserver "github.com/sandbox0-ai/infra/storage-proxy/pkg/http"
@@ -79,8 +80,10 @@ func main() {
 
 	// Initialize database connection pool
 	var repo *db.Repository
+	var pool *pgxpool.Pool
 	if cfg.DatabaseURL != "" {
-		pool, err := initDatabase(context.Background(), cfg.DatabaseURL, zapLogger)
+		var err error
+		pool, err = initDatabase(context.Background(), cfg.DatabaseURL, zapLogger)
 		if err != nil {
 			zapLogger.Fatal("Failed to connect to database", zap.Error(err))
 		}
@@ -98,6 +101,27 @@ func main() {
 
 	// Create volume manager
 	volMgr := volume.NewManager(logrusLogger, cfg)
+
+	// Create and start coordinator for distributed flush coordination
+	var coord *coordinator.Coordinator
+	if pool != nil && repo != nil {
+		// Create volume provider adapter for coordinator
+		volProvider := &volumeProviderAdapter{volMgr: volMgr}
+		coord = coordinator.NewCoordinator(pool, repo, volProvider, cfg, logrusLogger)
+
+		// Set coordinator as mount registrar for volume manager
+		volMgr.SetMountRegistrar(coord)
+
+		// Start coordinator
+		if err := coord.Start(context.Background()); err != nil {
+			zapLogger.Fatal("Failed to start coordinator", zap.Error(err))
+		}
+		defer coord.Stop(context.Background())
+
+		zapLogger.Info("Distributed flush coordinator started",
+			zap.String("instance_id", coord.GetInstanceID()),
+		)
+	}
 
 	// Create Kubernetes client for pod watching
 	k8sClient, err := k8s.NewClient(cfg.KubeconfigPath)
@@ -209,6 +233,11 @@ func main() {
 
 	// Create snapshot manager
 	snapshotMgr := snapshot.NewManager(repo, volMgr, cfg, logrusLogger)
+
+	// Set coordinator for snapshot manager (for distributed flush)
+	if coord != nil {
+		snapshotMgr.SetFlushCoordinator(coord)
+	}
 
 	// Create HTTP server
 	httpSrv := httpserver.NewServer(logrusLogger, repo, httpAuthenticator, snapshotMgr)
@@ -323,4 +352,30 @@ func (z *zapLogger) Printf(format string, args ...interface{}) {
 
 func (z *zapLogger) Fatalf(format string, args ...interface{}) {
 	z.logger.Fatal(fmt.Sprintf(format, args...))
+}
+
+// volumeProviderAdapter adapts volume.Manager to coordinator.VolumeProvider interface
+type volumeProviderAdapter struct {
+	volMgr *volume.Manager
+}
+
+func (a *volumeProviderAdapter) GetVolume(volumeID string) (coordinator.VolumeContext, error) {
+	volCtx, err := a.volMgr.GetVolume(volumeID)
+	if err != nil {
+		return nil, err
+	}
+	return &volumeContextAdapter{vfs: volCtx.VFS}, nil
+}
+
+func (a *volumeProviderAdapter) ListVolumes() []string {
+	return a.volMgr.ListVolumes()
+}
+
+// volumeContextAdapter adapts VFS to coordinator.VolumeContext interface
+type volumeContextAdapter struct {
+	vfs interface{ FlushAll(string) error }
+}
+
+func (a *volumeContextAdapter) FlushAll(path string) error {
+	return a.vfs.FlushAll(path)
 }

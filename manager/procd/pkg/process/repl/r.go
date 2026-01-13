@@ -181,9 +181,8 @@ func (r *RREPL) readOutput(ptmx *os.File) {
 			copy(data, buf[:nr])
 
 			r.PublishOutput(process.ProcessOutput{
-				Timestamp: time.Now(),
-				Source:    process.OutputSourcePTY,
-				Data:      data,
+				Source: process.OutputSourcePTY,
+				Data:   data,
 			})
 		}
 		if err != nil {

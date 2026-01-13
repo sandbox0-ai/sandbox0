@@ -181,9 +181,8 @@ func (p *PerlREPL) readOutput(ptmx *os.File) {
 			copy(data, buf[:nr])
 
 			p.PublishOutput(process.ProcessOutput{
-				Timestamp: time.Now(),
-				Source:    process.OutputSourcePTY,
-				Data:      data,
+				Source: process.OutputSourcePTY,
+				Data:   data,
 			})
 		}
 		if err != nil {

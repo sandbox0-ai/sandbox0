@@ -175,9 +175,8 @@ func (l *LuaREPL) readOutput(ptmx *os.File) {
 			copy(data, buf[:nr])
 
 			l.PublishOutput(process.ProcessOutput{
-				Timestamp: time.Now(),
-				Source:    process.OutputSourcePTY,
-				Data:      data,
+				Source: process.OutputSourcePTY,
+				Data:   data,
 			})
 		}
 		if err != nil {

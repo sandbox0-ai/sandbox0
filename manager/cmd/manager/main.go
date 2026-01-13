@@ -132,6 +132,7 @@ func main() {
 		podInformer,
 		templateInformer,
 		recorder,
+		clk,
 		logger,
 	)
 

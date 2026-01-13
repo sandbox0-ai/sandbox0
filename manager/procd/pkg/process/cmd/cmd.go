@@ -187,9 +187,8 @@ func (c *CMD) readPTYOutput(ptmx *os.File) {
 			copy(data, buf[:n])
 
 			c.PublishOutput(process.ProcessOutput{
-				Timestamp: time.Now(),
-				Source:    process.OutputSourcePTY,
-				Data:      data,
+				Source: process.OutputSourcePTY,
+				Data:   data,
 			})
 		}
 		if err != nil {
@@ -221,16 +220,14 @@ func (c *CMD) monitorProcess() {
 	if c.GetPTY() == nil {
 		if c.stdout.Len() > 0 {
 			c.PublishOutput(process.ProcessOutput{
-				Timestamp: time.Now(),
-				Source:    process.OutputSourceStdout,
-				Data:      c.stdout.Bytes(),
+				Source: process.OutputSourceStdout,
+				Data:   c.stdout.Bytes(),
 			})
 		}
 		if c.stderr.Len() > 0 {
 			c.PublishOutput(process.ProcessOutput{
-				Timestamp: time.Now(),
-				Source:    process.OutputSourceStderr,
-				Data:      c.stderr.Bytes(),
+				Source: process.OutputSourceStderr,
+				Data:   c.stderr.Bytes(),
 			})
 		}
 	}

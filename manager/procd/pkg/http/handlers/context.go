@@ -300,7 +300,6 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 				"type":      "output",
 				"source":    string(output.Source),
 				"data":      string(output.Data),
-				"timestamp": output.Timestamp.Format("2006-01-02T15:04:05Z07:00"),
 			}
 
 			if err := conn.WriteJSON(msg); err != nil {

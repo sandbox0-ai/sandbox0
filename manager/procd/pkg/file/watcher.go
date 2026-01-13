@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/google/uuid"
@@ -25,11 +24,10 @@ const (
 
 // WatchEvent represents a file system event.
 type WatchEvent struct {
-	WatchID   string    `json:"watch_id"`
-	Type      EventType `json:"type"`
-	Path      string    `json:"path"`
-	OldPath   string    `json:"old_path,omitempty"`
-	Timestamp time.Time `json:"timestamp"`
+	WatchID string    `json:"watch_id"`
+	Type    EventType `json:"type"`
+	Path    string    `json:"path"`
+	OldPath string    `json:"old_path,omitempty"`
 }
 
 // Watcher represents a directory watcher.
@@ -110,10 +108,9 @@ func (wm *WatcherManager) handleFsEvent(event fsnotify.Event) {
 	for _, watcher := range wm.watchers {
 		if wm.matchWatcher(watcher, event.Name) {
 			watchEvent := WatchEvent{
-				WatchID:   watcher.ID,
-				Type:      eventType,
-				Path:      event.Name,
-				Timestamp: time.Now(),
+				WatchID: watcher.ID,
+				Type:    eventType,
+				Path:    event.Name,
 			}
 
 			select {

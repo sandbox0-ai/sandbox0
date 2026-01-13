@@ -33,9 +33,10 @@ type Operator struct {
 	poolManager *PoolManager
 	autoScaler  *AutoScaler
 	recorder    record.EventRecorder
+	clock       TimeProvider
 	logger      *zap.Logger
 
-	workqueue workqueue.RateLimitingInterface
+	workqueue workqueue.TypedRateLimitingInterface[string]
 
 	// Template informer and lister (to be injected)
 	templateInformer cache.SharedIndexInformer
@@ -76,8 +77,14 @@ func NewOperator(
 	podInformer cache.SharedIndexInformer,
 	templateInformer cache.SharedIndexInformer,
 	recorder record.EventRecorder,
+	clock TimeProvider,
 	logger *zap.Logger,
 ) *Operator {
+	// Use system time as fallback if clock is nil
+	if clock == nil {
+		clock = systemTime{}
+	}
+
 	podLister := corelisters.NewPodLister(podInformer.GetIndexer())
 	poolManager := NewPoolManager(k8sClient, podLister, recorder, logger)
 	autoScaler := NewAutoScaler(k8sClient, podLister, logger)
@@ -89,8 +96,9 @@ func NewOperator(
 		poolManager:      poolManager,
 		autoScaler:       autoScaler,
 		recorder:         recorder,
+		clock:            clock,
 		logger:           logger,
-		workqueue:        workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()),
+		workqueue:        workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[string]()),
 		templateInformer: templateInformer,
 		templateLister: TemplateListerImpl{
 			indexer: templateInformer.GetIndexer(),
@@ -142,20 +150,13 @@ func (op *Operator) runWorker(ctx context.Context) {
 // processNextWorkItem will read a single work item off the workqueue and
 // attempt to process it, by calling the syncHandler
 func (op *Operator) processNextWorkItem(ctx context.Context) bool {
-	obj, shutdown := op.workqueue.Get()
+	key, shutdown := op.workqueue.Get()
 	if shutdown {
 		return false
 	}
 
-	err := func(obj any) error {
-		defer op.workqueue.Done(obj)
-
-		key, ok := obj.(string)
-		if !ok {
-			op.workqueue.Forget(obj)
-			runtime.HandleError(fmt.Errorf("expected string in workqueue but got %#v", obj))
-			return nil
-		}
+	err := func(key string) error {
+		defer op.workqueue.Done(key)
 
 		if err := op.syncHandler(ctx, key); err != nil {
 			// Requeue the item if there's an error
@@ -169,14 +170,14 @@ func (op *Operator) processNextWorkItem(ctx context.Context) bool {
 			}
 
 			// Drop the item after max retries
-			op.workqueue.Forget(obj)
+			op.workqueue.Forget(key)
 			runtime.HandleError(fmt.Errorf("dropping template %q out of the queue: %v", key, err))
 			return nil
 		}
 
-		op.workqueue.Forget(obj)
+		op.workqueue.Forget(key)
 		return nil
-	}(obj)
+	}(key)
 
 	if err != nil {
 		runtime.HandleError(err)
@@ -218,7 +219,7 @@ func (op *Operator) syncHandler(ctx context.Context, key string) error {
 
 	// Autoscale (may update template.spec.pool.minIdle, which will trigger another reconcile)
 	if template.Spec.Pool.AutoScale && op.autoScaler != nil {
-		if err := op.autoScaler.ReconcileAutoScale(ctx, template, time.Now()); err != nil {
+		if err := op.autoScaler.ReconcileAutoScale(ctx, template, op.clock.Now()); err != nil {
 			op.logger.Warn("Autoscale reconcile failed",
 				zap.String("template", template.Name),
 				zap.String("namespace", template.Namespace),

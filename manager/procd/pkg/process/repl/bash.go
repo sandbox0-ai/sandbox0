@@ -175,9 +175,8 @@ func (b *BashREPL) readOutput(ptmx *os.File) {
 			copy(data, buf[:n])
 
 			b.PublishOutput(process.ProcessOutput{
-				Timestamp: time.Now(),
-				Source:    process.OutputSourcePTY,
-				Data:      data,
+				Source: process.OutputSourcePTY,
+				Data:   data,
 			})
 		}
 		if err != nil {

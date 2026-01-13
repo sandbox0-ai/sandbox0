@@ -6,7 +6,6 @@ import (
 	"os"
 	"sync"
 	"syscall"
-	"time"
 )
 
 // ProcessType defines the type of process.
@@ -62,9 +61,8 @@ type ProcessConfig struct {
 
 // ProcessOutput represents output from a process.
 type ProcessOutput struct {
-	Timestamp time.Time    `json:"timestamp"`
-	Source    OutputSource `json:"source"`
-	Data      []byte       `json:"data"`
+	Source OutputSource `json:"source"`
+	Data   []byte       `json:"data"`
 }
 
 // ExecutionResult represents the result of code/command execution.

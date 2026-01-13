@@ -207,9 +207,8 @@ func (p *PythonREPL) readOutput(ptmx *os.File) {
 
 			if len(data) > 0 {
 				p.PublishOutput(process.ProcessOutput{
-					Timestamp: time.Now(),
-					Source:    process.OutputSourcePTY,
-					Data:      data,
+					Source: process.OutputSourcePTY,
+					Data:   data,
 				})
 			}
 		}

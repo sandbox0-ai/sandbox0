@@ -222,11 +222,10 @@ func (h *FileHandler) Watch(w http.ResponseWriter, r *http.Request) {
 			go func(w *file.Watcher) {
 				for event := range w.EventChan {
 					conn.WriteJSON(map[string]any{
-						"type":      "event",
-						"watch_id":  event.WatchID,
-						"event":     string(event.Type),
-						"path":      event.Path,
-						"timestamp": event.Timestamp.Format("2006-01-02T15:04:05Z07:00"),
+						"type":     "event",
+						"watch_id": event.WatchID,
+						"event":    string(event.Type),
+						"path":     event.Path,
 					})
 				}
 			}(watcher)

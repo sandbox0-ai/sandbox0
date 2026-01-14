@@ -7,12 +7,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sandbox0-ai/infra/internal-gateway/pkg/config"
-	"github.com/sandbox0-ai/infra/internal-gateway/pkg/db"
 	"github.com/sandbox0-ai/infra/internal-gateway/pkg/http"
 	"github.com/sandbox0-ai/infra/pkg/env"
-	"github.com/sandbox0-ai/infra/pkg/migrate"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -42,23 +39,8 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Initialize database connection pool
-	pool, err := initDatabase(ctx, cfg.DatabaseURL, logger)
-	if err != nil {
-		logger.Fatal("Failed to connect to database", zap.Error(err))
-	}
-	defer pool.Close()
-
-	// Run database migrations
-	if err := runMigrations(ctx, pool, logger); err != nil {
-		logger.Fatal("Failed to run database migrations", zap.Error(err))
-	}
-
-	// Create repository
-	repo := db.NewRepository(pool)
-
 	// Create HTTP server
-	server, err := http.NewServer(cfg, repo, logger)
+	server, err := http.NewServer(cfg, logger)
 	if err != nil {
 		logger.Fatal("Failed to create HTTP server", zap.Error(err))
 	}
@@ -126,65 +108,4 @@ func initLogger(level string) (*zap.Logger, error) {
 	}
 
 	return config.Build()
-}
-
-// initDatabase initializes the database connection pool
-func initDatabase(ctx context.Context, databaseURL string, logger *zap.Logger) (*pgxpool.Pool, error) {
-	poolConfig, err := pgxpool.ParseConfig(databaseURL)
-	if err != nil {
-		return nil, fmt.Errorf("parse database URL: %w", err)
-	}
-
-	// Configure pool
-	poolConfig.MaxConns = 30
-	poolConfig.MinConns = 8
-
-	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
-	if err != nil {
-		return nil, fmt.Errorf("create connection pool: %w", err)
-	}
-
-	// Test connection
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("ping database: %w", err)
-	}
-
-	logger.Info("Database connection established",
-		zap.Int32("max_conns", poolConfig.MaxConns),
-		zap.Int32("min_conns", poolConfig.MinConns),
-	)
-
-	return pool, nil
-}
-
-// runMigrations runs database migrations on startup
-func runMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) error {
-	logger.Info("Running database migrations")
-
-	// Create a migration logger that writes to zap
-	migrateLogger := &zapLogger{logger: logger}
-
-	if err := migrate.Up(ctx, pool, "migrations",
-		migrate.WithLogger(migrateLogger),
-		migrate.WithSchema("ig"),
-	); err != nil {
-		return fmt.Errorf("migrate up: %w", err)
-	}
-
-	logger.Info("Database migrations completed successfully")
-	return nil
-}
-
-// zapLogger adapts zap.Logger to migrate.Logger interface
-type zapLogger struct {
-	logger *zap.Logger
-}
-
-func (z *zapLogger) Printf(format string, args ...any) {
-	z.logger.Info(fmt.Sprintf(format, args...))
-}
-
-func (z *zapLogger) Fatalf(format string, args ...any) {
-	z.logger.Fatal(fmt.Sprintf(format, args...))
 }

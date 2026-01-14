@@ -10,6 +10,12 @@ import (
 	"os"
 )
 
+// PublicKeyType is the type alias for Ed25519 public key.
+type PublicKeyType = ed25519.PublicKey
+
+// PrivateKeyType is the type alias for Ed25519 private key.
+type PrivateKeyType = ed25519.PrivateKey
+
 var (
 	// ErrInvalidKeyType is returned when the key type is not supported.
 	ErrInvalidKeyType = errors.New("internalauth: invalid key type")

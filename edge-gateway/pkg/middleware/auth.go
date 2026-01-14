@@ -6,8 +6,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/sandbox0-ai/infra/internal-gateway/pkg/auth"
-	"github.com/sandbox0-ai/infra/internal-gateway/pkg/db"
+	"github.com/sandbox0-ai/infra/edge-gateway/pkg/db"
+	"github.com/sandbox0-ai/infra/pkg/auth"
 	"go.uber.org/zap"
 )
 
@@ -94,7 +94,7 @@ func (m *AuthMiddleware) authenticateAPIKey(c *gin.Context, keyValue string) (*a
 		TeamID:      apiKey.TeamID,
 		APIKeyID:    apiKey.ID,
 		Roles:       apiKey.Roles,
-		Permissions: expandRolePermissions(apiKey.Roles),
+		Permissions: auth.ExpandRolePermissions(apiKey.Roles),
 	}, nil
 }
 
@@ -143,7 +143,7 @@ func (m *AuthMiddleware) authenticateJWT(c *gin.Context, tokenString string) (*a
 		TeamID:      teamID,
 		UserID:      userID,
 		Roles:       roles,
-		Permissions: expandRolePermissions(roles),
+		Permissions: auth.ExpandRolePermissions(roles),
 	}, nil
 }
 
@@ -169,50 +169,10 @@ func (m *AuthMiddleware) RequirePermission(permission string) gin.HandlerFunc {
 	}
 }
 
-// RequireRole returns middleware that checks for a specific role
-func (m *AuthMiddleware) RequireRole(role string) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		authCtx := GetAuthContext(c)
-		if authCtx == nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error": "not authenticated",
-			})
-			return
-		}
-
-		if !authCtx.HasRole(role) {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-				"error": "insufficient role",
-			})
-			return
-		}
-
-		c.Next()
-	}
-}
-
 // GetAuthContext extracts auth context from gin context
 func GetAuthContext(c *gin.Context) *auth.AuthContext {
 	if v, exists := c.Get("auth_context"); exists {
 		return v.(*auth.AuthContext)
 	}
 	return nil
-}
-
-// expandRolePermissions expands roles to permissions
-func expandRolePermissions(roles []string) []string {
-	permSet := make(map[string]struct{})
-	for _, role := range roles {
-		if perms, ok := auth.RolePermissions[role]; ok {
-			for _, p := range perms {
-				permSet[p] = struct{}{}
-			}
-		}
-	}
-
-	permissions := make([]string, 0, len(permSet))
-	for p := range permSet {
-		permissions = append(permissions, p)
-	}
-	return permissions
 }

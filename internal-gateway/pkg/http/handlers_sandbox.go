@@ -31,7 +31,7 @@ func (s *Server) proxyToManager(c *gin.Context) {
 	c.Request.Header.Set("X-Internal-Token", internalToken)
 
 	// Forward to manager
-	s.router_proxy.ProxyToManager()(c)
+	s.proxy2Mgr.ProxyToTarget()(c)
 }
 
 // createSandbox creates a new sandbox

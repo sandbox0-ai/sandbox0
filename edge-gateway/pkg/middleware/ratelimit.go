@@ -6,29 +6,24 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/infra/internal-gateway/pkg/db"
 	"go.uber.org/zap"
 	"golang.org/x/time/rate"
 )
 
 // RateLimiter provides rate limiting functionality
 type RateLimiter struct {
-	repo          *db.Repository
 	logger        *zap.Logger
 	rps           int
 	burst         int
 	localLimiters sync.Map // map[teamID]*rate.Limiter
-	useDatabase   bool
 }
 
 // NewRateLimiter creates a new rate limiter
-func NewRateLimiter(repo *db.Repository, rps, burst int, logger *zap.Logger) *RateLimiter {
+func NewRateLimiter(rps, burst int, logger *zap.Logger) *RateLimiter {
 	rl := &RateLimiter{
-		repo:        repo,
-		logger:      logger,
-		rps:         rps,
-		burst:       burst,
-		useDatabase: repo != nil,
+		logger: logger,
+		rps:    rps,
+		burst:  burst,
 	}
 
 	// Start cleanup goroutine for local limiters
@@ -95,25 +90,8 @@ func (rl *RateLimiter) cleanupLoop() {
 
 	for range ticker.C {
 		// Reset all limiters periodically to prevent memory leaks
-		// In production, you might want a more sophisticated cleanup strategy
 		rl.localLimiters.Range(func(key, value any) bool {
-			// Keep limiters, just let them naturally reset
 			return true
 		})
-	}
-}
-
-// GlobalRateLimit returns a middleware that applies a global rate limit
-func GlobalRateLimit(rps int) gin.HandlerFunc {
-	limiter := rate.NewLimiter(rate.Limit(rps), rps*2)
-
-	return func(c *gin.Context) {
-		if !limiter.Allow() {
-			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
-				"error": "server rate limit exceeded",
-			})
-			return
-		}
-		c.Next()
 	}
 }

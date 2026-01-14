@@ -11,7 +11,4 @@ var (
 
 	// Rate limiting errors
 	ErrRateLimitExceeded = errors.New("rate limit exceeded")
-
-	// Quota errors
-	ErrQuotaExceeded = errors.New("quota exceeded")
 )

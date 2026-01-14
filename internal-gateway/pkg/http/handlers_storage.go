@@ -31,7 +31,7 @@ func (s *Server) proxyToStorageProxy(c *gin.Context) {
 	c.Request.Header.Set("X-Internal-Token", internalToken)
 
 	// Forward to storage-proxy
-	s.router_proxy.ProxyToStorageProxy()(c)
+	s.proxy2sp.ProxyToTarget()(c)
 }
 
 // createSandboxVolume creates a new sandbox volume

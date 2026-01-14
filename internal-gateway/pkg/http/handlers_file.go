@@ -4,7 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/infra/internal-gateway/pkg/proxy"
+	"github.com/sandbox0-ai/infra/pkg/proxy"
 )
 
 // === File System Handlers (→ Procd) ===

@@ -1,3 +1,4 @@
+// Package auth provides authentication context and utilities for the sandbox0 gateway.
 package auth
 
 import (
@@ -126,4 +127,22 @@ func (ac *AuthContext) HasRole(role string) bool {
 		}
 	}
 	return false
+}
+
+// ExpandRolePermissions expands roles to permissions
+func ExpandRolePermissions(roles []string) []string {
+	permSet := make(map[string]struct{})
+	for _, role := range roles {
+		if perms, ok := RolePermissions[role]; ok {
+			for _, p := range perms {
+				permSet[p] = struct{}{}
+			}
+		}
+	}
+
+	permissions := make([]string, 0, len(permSet))
+	for p := range permSet {
+		permissions = append(permissions, p)
+	}
+	return permissions
 }

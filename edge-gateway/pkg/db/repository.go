@@ -13,14 +13,30 @@ import (
 )
 
 var (
-	ErrNotFound      = errors.New("not found")
-	ErrInvalidKey    = errors.New("invalid api key")
-	ErrExpiredKey    = errors.New("api key expired")
-	ErrInactiveKey   = errors.New("api key inactive")
-	ErrQuotaExceeded = errors.New("quota exceeded")
+	ErrNotFound    = errors.New("not found")
+	ErrInvalidKey  = errors.New("invalid api key")
+	ErrExpiredKey  = errors.New("api key expired")
+	ErrInactiveKey = errors.New("api key inactive")
 )
 
-// Repository provides database access for internal-gateway
+// APIKey represents an API key stored in the database
+type APIKey struct {
+	ID         string    `json:"id"`
+	KeyValue   string    `json:"key_value"`
+	TeamID     string    `json:"team_id"`
+	CreatedBy  string    `json:"created_by"`
+	Name       string    `json:"name"`
+	Type       string    `json:"type"` // 'user', 'service', 'internal'
+	Roles      []string  `json:"roles"`
+	IsActive   bool      `json:"is_active"`
+	ExpiresAt  time.Time `json:"expires_at"`
+	LastUsed   time.Time `json:"last_used_at"`
+	UsageCount int64     `json:"usage_count"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+// Repository provides database access for edge-gateway
 type Repository struct {
 	pool *pgxpool.Pool
 }
@@ -56,7 +72,6 @@ func (r *Repository) ValidateAPIKey(ctx context.Context, keyValue string) (*APIK
 		&key.ExpiresAt, &key.LastUsed, &key.UsageCount,
 		&key.CreatedAt, &key.UpdatedAt,
 	)
-
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrInvalidKey
@@ -91,34 +106,4 @@ func (r *Repository) ValidateAPIKey(ctx context.Context, keyValue string) (*APIK
 	}()
 
 	return &key, nil
-}
-
-// GetTeam retrieves a team by ID
-func (r *Repository) GetTeam(ctx context.Context, teamID string) (*Team, error) {
-	var team Team
-
-	err := r.pool.QueryRow(ctx, `
-		SELECT id, name, quota, is_active, created_at, updated_at
-		FROM teams
-		WHERE id = $1
-	`, teamID).Scan(
-		&team.ID, &team.Name, &team.Quota, &team.IsActive,
-		&team.CreatedAt, &team.UpdatedAt,
-	)
-
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrNotFound
-		}
-		return nil, fmt.Errorf("query team: %w", err)
-	}
-
-	return &team, nil
-}
-
-func nullString(s string) any {
-	if s == "" {
-		return nil
-	}
-	return s
 }

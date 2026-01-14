@@ -1,6 +1,6 @@
 .PHONY: all build build-all obuild obuild-all test lint tidy vendor clean
 
-SERVICES := internal-gateway manager storage-proxy netd k8s-plugin
+SERVICES := edge-gateway internal-gateway manager storage-proxy netd k8s-plugin
 
 all: build-all
 
@@ -87,7 +87,7 @@ obuild:
 	fi
 
 # Prevent make from treating service names as targets
-internal-gateway manager storage-proxy k8s-plugin:
+edge-gateway internal-gateway manager storage-proxy k8s-plugin:
 	@:
 
 lint:

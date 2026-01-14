@@ -1,11 +1,11 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: internal-gateway
+  name: edge-gateway
   namespace: sandbox0-system
   labels:
-    app: internal-gateway
-    app.kubernetes.io/name: internal-gateway
+    app: edge-gateway
+    app.kubernetes.io/name: edge-gateway
     app.kubernetes.io/component: gateway
 spec:
   replicas: 3
@@ -16,41 +16,53 @@ spec:
       maxUnavailable: 0
   selector:
     matchLabels:
-      app: internal-gateway
+      app: edge-gateway
   template:
     metadata:
       labels:
-        app: internal-gateway
-        app.kubernetes.io/name: internal-gateway
+        app: edge-gateway
+        app.kubernetes.io/name: edge-gateway
       annotations:
         prometheus.io/scrape: "true"
-        prometheus.io/port: "8443"
+        prometheus.io/port: "8080"
         prometheus.io/path: "/metrics"
     spec:
-      serviceAccountName: internal-gateway
+      serviceAccountName: edge-gateway
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534
         fsGroup: 65534
       containers:
-      - name: internal-gateway
-        image: sandbox0/internal-gateway:latest
+      - name: edge-gateway
+        image: sandbox0/edge-gateway:latest
         imagePullPolicy: IfNotPresent
         ports:
         - name: http
-          containerPort: 8443
+          containerPort: 8080
           protocol: TCP
         env:
-        - name: INTERNAL_GATEWAY_HTTP_PORT
-          value: "8443"
-        - name: INTERNAL_GATEWAY_LOG_LEVEL
+        - name: EDGE_GATEWAY_HTTP_PORT
+          value: "8080"
+        - name: EDGE_GATEWAY_LOG_LEVEL
           value: "info"
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: edge-gateway-secrets
+              key: database-url
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: edge-gateway-secrets
+              key: jwt-secret
+        - name: INTERNAL_GATEWAY_URL
+          value: "http://internal-gateway.sandbox0-system.svc.cluster.local:8443"
         - name: INTERNAL_JWT_PRIVATE_KEY_PATH
           value: "/secrets/internal_jwt_private.key"
-        - name: MANAGER_URL
-          value: "http://manager.sandbox0-system.svc.cluster.local:8080"
-        - name: STORAGE_PROXY_URL
-          value: "http://storage-proxy.sandbox0-system.svc.cluster.local:8081"
+        - name: RATE_LIMIT_RPS
+          value: "100"
+        - name: RATE_LIMIT_BURST
+          value: "200"
         volumeMounts:
         - name: internal-jwt-key
           mountPath: /secrets
@@ -98,7 +110,7 @@ spec:
                 - key: app
                   operator: In
                   values:
-                  - internal-gateway
+                  - edge-gateway
               topologyKey: kubernetes.io/hostname
       topologySpreadConstraints:
       - maxSkew: 1
@@ -106,52 +118,52 @@ spec:
         whenUnsatisfiable: ScheduleAnyway
         labelSelector:
           matchLabels:
-            app: internal-gateway
+            app: edge-gateway
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: internal-gateway
+  name: edge-gateway
   namespace: sandbox0-system
   labels:
-    app: internal-gateway
+    app: edge-gateway
 spec:
   type: ClusterIP
   ports:
   - name: http
-    port: 8443
+    port: 8080
     targetPort: http
     protocol: TCP
   selector:
-    app: internal-gateway
+    app: edge-gateway
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: internal-gateway
+  name: edge-gateway
   namespace: sandbox0-system
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: internal-gateway
+  name: edge-gateway
   namespace: sandbox0-system
 spec:
   minAvailable: 2
   selector:
     matchLabels:
-      app: internal-gateway
+      app: edge-gateway
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: internal-gateway
+  name: edge-gateway
   namespace: sandbox0-system
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: internal-gateway
+    name: edge-gateway
   minReplicas: 3
   maxReplicas: 10
   metrics:

@@ -8,13 +8,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/sandbox0-ai/infra/internal-gateway/pkg/auth"
 	"github.com/sandbox0-ai/infra/internal-gateway/pkg/client"
 	"github.com/sandbox0-ai/infra/internal-gateway/pkg/config"
-	"github.com/sandbox0-ai/infra/internal-gateway/pkg/db"
 	"github.com/sandbox0-ai/infra/internal-gateway/pkg/middleware"
-	"github.com/sandbox0-ai/infra/internal-gateway/pkg/proxy"
+	"github.com/sandbox0-ai/infra/pkg/auth"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
+	"github.com/sandbox0-ai/infra/pkg/proxy"
 	"go.uber.org/zap"
 )
 
@@ -22,11 +21,10 @@ import (
 type Server struct {
 	router          *gin.Engine
 	cfg             *config.Config
-	repo            *db.Repository
-	router_proxy    *proxy.Router
+	proxy2Mgr       *proxy.Router
+	proxy2sp        *proxy.Router
 	managerClient   *client.ManagerClient
-	authMiddleware  *middleware.AuthMiddleware
-	rateLimiter     *middleware.RateLimiter
+	authMiddleware  *middleware.InternalAuthMiddleware
 	requestLogger   *middleware.RequestLogger
 	logger          *zap.Logger
 	internalAuthGen *internalauth.Generator
@@ -36,7 +34,6 @@ type Server struct {
 // NewServer creates a new HTTP server
 func NewServer(
 	cfg *config.Config,
-	repo *db.Repository,
 	logger *zap.Logger,
 ) (*Server, error) {
 	// Set gin mode
@@ -46,26 +43,44 @@ func NewServer(
 	router := gin.New()
 
 	// Create proxy router
-	proxyRouter, err := proxy.NewRouter(
+	proxy2Mgr, err := proxy.NewRouter(
 		cfg.ManagerURL,
+		logger,
+		cfg.ProxyTimeout,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create manager proxy router: %w", err)
+	}
+
+	proxy2sp, err := proxy.NewRouter(
 		cfg.StorageProxyURL,
 		logger,
 		cfg.ProxyTimeout,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("create proxy router: %w", err)
+		return nil, fmt.Errorf("create storage-proxy proxy router: %w", err)
 	}
 
-	// Create middleware
-	authMiddleware := middleware.NewAuthMiddleware(repo, cfg.JWTSecret, logger)
-	rateLimiter := middleware.NewRateLimiter(repo, cfg.RateLimitRPS, cfg.RateLimitBurst, logger)
-	requestLogger := middleware.NewRequestLogger(repo, logger, cfg.EnableAudit)
-
-	// Initialize internal auth generator
+	// Initialize internal auth keys
 	privateKey, err := internalauth.LoadEd25519PrivateKeyFromFile(cfg.InternalJWTPrivateKeyPath)
 	if err != nil {
 		return nil, fmt.Errorf("load internal JWT private key: %w", err)
 	}
+	publicKey := privateKey.Public().(internalauth.PublicKeyType)
+
+	// Create internal auth validator (for validating tokens from edge-gateway)
+	validator := internalauth.NewValidator(internalauth.ValidatorConfig{
+		Target:             "internal-gateway",
+		PublicKey:          publicKey,
+		AllowedCallers:     []string{"edge-gateway"},
+		ClockSkewTolerance: 10 * time.Second,
+	})
+
+	// Create middleware
+	authMiddleware := middleware.NewInternalAuthMiddleware(validator, logger)
+	requestLogger := middleware.NewRequestLogger(logger)
+
+	// Initialize internal auth generator (for downstream services)
 	internalAuthGen := internalauth.NewGenerator(internalauth.GeneratorConfig{
 		Caller:     "internal-gateway",
 		PrivateKey: privateKey,
@@ -83,11 +98,10 @@ func NewServer(
 	server := &Server{
 		router:          router,
 		cfg:             cfg,
-		repo:            repo,
-		router_proxy:    proxyRouter,
+		proxy2Mgr:       proxy2Mgr,
+		proxy2sp:        proxy2sp,
 		managerClient:   managerClient,
 		authMiddleware:  authMiddleware,
-		rateLimiter:     rateLimiter,
 		requestLogger:   requestLogger,
 		logger:          logger,
 		internalAuthGen: internalAuthGen,
@@ -109,17 +123,14 @@ func (s *Server) setupRoutes() {
 	s.router.GET("/healthz", s.healthCheck)
 	s.router.GET("/readyz", s.readinessCheck)
 
-	// Metrics endpoint (optional auth)
-	if s.cfg.EnableMetrics {
-		s.router.GET("/metrics", gin.WrapH(promhttp.Handler()))
-	}
+	// Metrics endpoint
+	s.router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	// API v1 routes
 	v1 := s.router.Group("/api/v1")
 	{
-		// Apply auth and rate limiting to all v1 routes
+		// Apply internal auth to all v1 routes (requests come from edge-gateway)
 		v1.Use(s.authMiddleware.Authenticate())
-		v1.Use(s.rateLimiter.RateLimit())
 
 		// === Sandbox Management (→ Manager) ===
 		sandboxes := v1.Group("/sandboxes")
@@ -249,15 +260,8 @@ func (s *Server) healthCheck(c *gin.Context) {
 }
 
 func (s *Server) readinessCheck(c *gin.Context) {
-	// Check database connectivity
-	if err := s.repo.Pool().Ping(c.Request.Context()); err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{
-			"status": "not ready",
-			"error":  "database unavailable",
-		})
-		return
-	}
-
+	// Internal-gateway is ready if it can process requests
+	// No database dependency anymore
 	c.JSON(http.StatusOK, gin.H{
 		"status":    "ready",
 		"timestamp": time.Now().Unix(),

@@ -1,0 +1,104 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "netd.fullname" . }}
+  labels:
+    {{- include "netd.labels" . | nindent 4 }}
+    app.kubernetes.io/component: network-dataplane
+spec:
+  selector:
+    matchLabels:
+      {{- include "netd.selectorLabels" . | nindent 6 }}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        {{- include "netd.selectorLabels" . | nindent 8 }}
+      annotations:
+        {{- toYaml .Values.podAnnotations | nindent 8 }}
+    spec:
+      hostNetwork: true
+      hostPID: true
+      dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: {{ include "netd.serviceAccountName" . }}
+      tolerations:
+        {{- toYaml .Values.tolerations | nindent 8 }}
+      priorityClassName: system-node-critical
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --log-level=$(LOG_LEVEL)
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            {{- range $key, $value := .Values.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            # Platform infrastructure CIDRs (configure per cluster)
+            - name: STORAGE_PROXY_CIDR
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "netd.fullname" . }}-config
+                  key: storage-proxy-cidr
+                  optional: true
+            - name: CLUSTER_DNS_CIDR
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "netd.fullname" . }}-config
+                  key: cluster-dns-cidr
+                  optional: true
+            - name: INTERNAL_GATEWAY_CIDR
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "netd.fullname" . }}-config
+                  key: internal-gateway-cidr
+                  optional: true
+          ports:
+            - name: metrics
+              containerPort: 9090
+              hostPort: 9090
+              protocol: TCP
+            - name: health
+              containerPort: 8080
+              hostPort: 8080
+              protocol: TCP
+            - name: proxy-http
+              containerPort: 18080
+              hostPort: 18080
+              protocol: TCP
+            - name: proxy-https
+              containerPort: 18443
+              hostPort: 18443
+              protocol: TCP
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            {{- toYaml .Values.volumeMounts | nindent 12 }}
+      volumes:
+        {{- toYaml .Values.volumes | nindent 8 }}

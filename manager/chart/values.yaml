@@ -1,0 +1,50 @@
+replicaCount: 1
+
+image:
+  repository: sandbox0/manager
+  pullPolicy: Always
+  tag: "latest"
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: "manager"
+
+podAnnotations: {}
+podSecurityContext: {}
+
+securityContext: {}
+
+service:
+  type: ClusterIP
+  port: 8080
+  metricsPort: 9090
+  webhookPort: 443
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+env:
+  HTTP_PORT: "8080"
+  METRICS_PORT: "9090"
+  LOG_LEVEL: "info"
+  CLEANUP_INTERVAL: "60s"
+  RESYNC_PERIOD: "30s"
+
+webhook:
+  enabled: true
+  secretName: webhook-server-cert

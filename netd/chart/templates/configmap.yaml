@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "netd.fullname" . }}-config
+  labels:
+    {{- include "netd.labels" . | nindent 4 }}
+data:
+  # Configure these based on your cluster setup
+  storage-proxy-cidr: {{ .Values.config.storageProxyCidr | quote }}
+  cluster-dns-cidr: {{ .Values.config.clusterDnsCidr | quote }}
+  internal-gateway-cidr: {{ .Values.config.internalGatewayCidr | quote }}

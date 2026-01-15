@@ -1,0 +1,114 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "storage-proxy.fullname" . }}
+  labels:
+    {{- include "storage-proxy.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "storage-proxy.fullname" . }}
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "storage-proxy.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "storage-proxy.selectorLabels" . | nindent 8 }}
+      annotations:
+        {{- toYaml .Values.podAnnotations | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "storage-proxy.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.service.grpcPort }}
+              name: grpc
+              protocol: TCP
+            - containerPort: {{ .Values.service.httpPort }}
+              name: http
+              protocol: TCP
+            - containerPort: {{ .Values.service.metricsPort }}
+              name: metrics
+              protocol: TCP
+          env:
+            {{- range $key, $value := .Values.env }}
+            - name: {{ $key }}
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "storage-proxy.fullname" $ }}-config
+                  key: {{ $key }}
+            {{- end }}
+            # Secrets
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "storage-proxy.fullname" . }}-secrets
+                  key: jwt-secret
+            - name: DEFAULT_META_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "storage-proxy.fullname" . }}-secrets
+                  key: postgres-url
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "storage-proxy.fullname" . }}-secrets
+                  key: aws-access-key-id
+                  optional: true
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "storage-proxy.fullname" . }}-secrets
+                  key: aws-secret-access-key
+                  optional: true
+            - name: AWS_REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "storage-proxy.fullname" . }}-config
+                  key: DEFAULT_S3_REGION
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            {{- toYaml .Values.volumeMounts | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.service.httpPort }}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: {{ .Values.service.httpPort }}
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.service.httpPort }}
+            initialDelaySeconds: 0
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30
+      volumes:
+        {{- toYaml .Values.volumes | nindent 8 }}
+  {{- if .Values.persistence.cache.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: cache
+      spec:
+        accessModes:
+          {{- toYaml .Values.persistence.cache.accessModes | nindent 10 }}
+        storageClassName: {{ .Values.persistence.cache.storageClassName }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.cache.size }}
+  {{- end }}

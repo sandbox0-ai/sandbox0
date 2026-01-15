@@ -1,0 +1,77 @@
+image:
+  repository: sandbox0/netd
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: "netd"
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "9090"
+  prometheus.io/path: "/metrics"
+
+podSecurityContext: {}
+
+securityContext:
+  privileged: true
+  capabilities:
+    add:
+      - NET_ADMIN
+      - NET_RAW
+      - SYS_ADMIN
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+nodeSelector: {}
+
+tolerations:
+  - operator: Exists
+    effect: NoSchedule
+  - operator: Exists
+    effect: NoExecute
+
+affinity: {}
+
+config:
+  storageProxyCidr: ""
+  clusterDnsCidr: "10.96.0.10/32"
+  internalGatewayCidr: ""
+
+env:
+  LOG_LEVEL: "info"
+  METRICS_PORT: "9090"
+  HEALTH_PORT: "8080"
+  PROXY_HTTP_PORT: "18080"
+  PROXY_HTTPS_PORT: "18443"
+  FAIL_CLOSED: "true"
+  METRICS_REPORT_INTERVAL: "10s"
+
+volumes:
+  - name: xtables-lock
+    hostPath:
+      path: /run/xtables.lock
+      type: FileOrCreate
+  - name: lib-modules
+    hostPath:
+      path: /lib/modules
+      type: Directory
+
+volumeMounts:
+  - name: xtables-lock
+    mountPath: /run/xtables.lock
+    readOnly: false
+  - name: lib-modules
+    mountPath: /lib/modules
+    readOnly: true

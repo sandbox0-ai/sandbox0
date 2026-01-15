@@ -1,0 +1,17 @@
+apiVersion: v2
+name: infra
+description: A Helm chart for sandbox0 infra
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+dependencies:
+  - name: edge-gateway
+    version: 0.1.0
+  - name: internal-gateway
+    version: 0.1.0
+  - name: manager
+    version: 0.1.0
+  - name: netd
+    version: 0.1.0
+  - name: storage-proxy
+    version: 0.1.0

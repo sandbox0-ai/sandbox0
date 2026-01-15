@@ -49,3 +49,4 @@ tmp/
 .env.local
 secrets/
 
+helm/charts

@@ -1,0 +1,61 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "netd.serviceAccountName" . }}
+  labels:
+    {{- include "netd.labels" . | nindent 4 }}
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "netd.fullname" . }}
+  labels:
+    {{- include "netd.labels" . | nindent 4 }}
+rules:
+  # Watch pods on this node
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # Watch nodes for node info
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  # Watch and update SandboxNetworkPolicy CRD
+  - apiGroups: ["sandbox0.ai"]
+    resources: ["sandboxnetworkpolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["sandbox0.ai"]
+    resources: ["sandboxnetworkpolicies/status"]
+    verbs: ["update", "patch"]
+  # Watch and update SandboxBandwidthPolicy CRD
+  - apiGroups: ["sandbox0.ai"]
+    resources: ["sandboxbandwidthpolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["sandbox0.ai"]
+    resources: ["sandboxbandwidthpolicies/status"]
+    verbs: ["update", "patch"]
+  # Watch SandboxTemplate for reference
+  - apiGroups: ["sandbox0.ai"]
+    resources: ["sandboxtemplates"]
+    verbs: ["get", "list", "watch"]
+  # Events for diagnostics
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "netd.fullname" . }}
+  labels:
+    {{- include "netd.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "netd.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "netd.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}

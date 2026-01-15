@@ -51,7 +51,7 @@ install-tools: ## Install code generation tools
 .PHONY: manifests
 manifests: ## Generate CRD manifests
 	@echo "Generating CRD manifests..."
-	@controller-gen crd:crdVersions=v1 paths="./pkg/apis/sandbox0/v1alpha1/..." output:crd:dir=./deploy/k8s
+	@controller-gen crd:crdVersions=v1 paths="./pkg/apis/sandbox0/v1alpha1/..." output:crd:dir=./chart/crds/
 
 .PHONY: build
 build: manifests generate ## Build the manager binary

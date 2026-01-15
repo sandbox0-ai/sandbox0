@@ -1,0 +1,6 @@
+apiVersion: v2
+name: manager
+description: A Helm chart for sandbox0 manager
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

@@ -1,4 +1,4 @@
-.PHONY: all build build-all obuild obuild-all test lint tidy vendor clean
+.PHONY: all build build-all obuild obuild-all test lint tidy vendor clean helm-update
 
 SERVICES := edge-gateway internal-gateway manager storage-proxy netd k8s-plugin
 
@@ -19,7 +19,7 @@ build-all:
 
 # Build specific service: make build <service>
 build:
-	@service="$(filter-out build build-all obuild obuild-all test lint tidy vendor clean,$(MAKECMDGOALS))"; \
+	@service="$(filter-out build build-all obuild obuild-all test lint tidy vendor clean helm-update,$(MAKECMDGOALS))"; \
 	if [ -z "$$service" ]; then \
 		echo "Error: Please specify a service or use 'make build-all'"; \
 		echo "Available services: $(SERVICES)"; \
@@ -41,7 +41,7 @@ build:
 	fi
 
 test:
-	@service="$(filter-out build build-all obuild obuild-all test lint tidy vendor clean,$(MAKECMDGOALS))"; \
+	@service="$(filter-out build build-all obuild obuild-all test lint tidy vendor clean helm-update,$(MAKECMDGOALS))"; \
 	if [ -z "$$service" ]; then \
 		echo "Available services: $(SERVICES)"; \
 		echo "Usage: make test <service>"; \
@@ -63,7 +63,7 @@ test:
 
 # Direct go build specific service: make obuild <service> (no Makefile delegation)
 obuild:
-	@service="$(filter-out build build-all obuild test lint tidy vendor clean,$(MAKECMDGOALS))"; \
+	@service="$(filter-out build build-all obuild test lint tidy vendor clean helm-update,$(MAKECMDGOALS))"; \
 	if [ -z "$$service" ]; then \
 		echo "Error: Please specify a service or use 'make obuild-all'"; \
 		echo "Available services: $(SERVICES)"; \
@@ -106,3 +106,12 @@ clean:
 	done
 	rm -rf vendor
 
+helm-update:
+	@mkdir -p helm/charts
+	@for service in $(SERVICES); do \
+		if [ -d "$$service/chart" ]; then \
+			echo "Copying chart for $$service..."; \
+			rm -rf helm/charts/$$service; \
+			cp -r $$service/chart helm/charts/$$service; \
+		fi; \
+	done

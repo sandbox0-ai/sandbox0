@@ -1,0 +1,123 @@
+replicaCount: 3
+
+image:
+  repository: sandbox0/edge-gateway
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: "edge-gateway"
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8080"
+  prometheus.io/path: "/metrics"
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+  fsGroup: 65534
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: true
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/websocket-services: "edge-gateway"
+    nginx.ingress.kubernetes.io/limit-rps: "100"
+    nginx.ingress.kubernetes.io/limit-connections: "50"
+  hosts:
+    - host: api.sandbox0.ai
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: edge-gateway-tls
+      hosts:
+        - api.sandbox0.ai
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+pdb:
+  enabled: true
+  minAvailable: 2
+
+env:
+  EDGE_GATEWAY_HTTP_PORT: "8080"
+  EDGE_GATEWAY_LOG_LEVEL: "info"
+  INTERNAL_GATEWAY_URL: "http://internal-gateway.sandbox0-system.svc.cluster.local:8443"
+  INTERNAL_JWT_PRIVATE_KEY_PATH: "/secrets/internal_jwt_private.key"
+  RATE_LIMIT_RPS: "100"
+  RATE_LIMIT_BURST: "200"
+
+secrets:
+  databaseUrl: "postgres://sandbox0:sandbox0@postgres.sandbox0-system:5432/sandbox0?sslmode=disable"
+  jwtSecret: "change-me-in-production"
+  internalJwtKeySecretName: "internal-jwt-key"
+
+volumeMounts:
+- name: internal-jwt-key
+  mountPath: /secrets
+  readOnly: true
+
+volumes:
+- name: internal-jwt-key
+  secret:
+    secretName: internal-jwt-key
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 100
+      podAffinityTerm:
+        labelSelector:
+          matchExpressions:
+          - key: app
+            operator: In
+            values:
+            - edge-gateway
+        topologyKey: kubernetes.io/hostname
+
+topologySpreadConstraints:
+- maxSkew: 1
+  topologyKey: topology.kubernetes.io/zone
+  whenUnsatisfiable: ScheduleAnyway
+  labelSelector:
+    matchLabels:
+      app: edge-gateway

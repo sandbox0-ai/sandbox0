@@ -123,4 +123,4 @@ release:
 		echo "Error: VERSION is required. Usage: make release VERSION=v0.1.0"; \
 		exit 2; \
 	fi
-	@bash helm/release.sh "$(VERSION)"
+	@bash release.sh "$(VERSION)"

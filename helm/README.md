@@ -51,7 +51,7 @@ global:
     meta_url: "postgres://juicefs:PASSWORD@postgres-host:5432/juicefs?sslmode=require"
     s3_bucket: "your-bucket-name"
     s3_region: "us-east-1"
-    s3_endpoint: "https://s3.amazonaws.com"
+    s3_endpoint: "http://rustfs:9000" # in-cluster RustFS service (if enabled)
     s3_access_key: "YOUR_ACCESS_KEY"
     s3_secret_key: "YOUR_SECRET_KEY"
     s3_session_token: ""
@@ -92,6 +92,14 @@ make helm-update
 cd helm
 helm dependency update
 ```
+
+### 3.1 Optional: Use Built-in RustFS as S3
+
+This umbrella chart can deploy [RustFS](https://charts.rustfs.com/) as an in-cluster S3-compatible backend for JuiceFS.
+
+- Enable/disable: set `rustfs.enabled`
+- Endpoint for JuiceFS: set `global.juicefs.s3_endpoint` to `http://rustfs:9000`
+- Credentials: keep `rustfs.secret.rustfs.*` aligned with `global.juicefs.s3_access_key` / `s3_secret_key`
 
 ### 4. Install the Chart
 

@@ -15,7 +15,7 @@ if ! [[ "${CHART_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([\-+].*)?$ ]]; then
   exit 2
 fi
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHART_YAML="${ROOT_DIR}/infra/helm/Chart.yaml"
 VALUES_YAML="${ROOT_DIR}/infra/helm/values.yaml"
 

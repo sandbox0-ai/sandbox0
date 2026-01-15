@@ -11,9 +11,11 @@ global:
     meta_url: "postgres://juicefs:juicefs@postgres:5432/juicefs?sslmode=disable"
     s3_bucket: "sandbox0-data"
     s3_region: "us-east-1"
-    s3_endpoint: "https://s3.amazonaws.com"
-    s3_access_key: "your-access-key-here"
-    s3_secret_key: "your-secret-key-here"
+    # S3-compatible endpoint used by JuiceFS data blocks.
+    # When using the built-in RustFS subchart, this should point to the in-cluster service.
+    s3_endpoint: "http://rustfs:9000"
+    s3_access_key: "rustfsadmin"
+    s3_secret_key: "rustfsadmin"
     s3_session_token: ""
   
   # JWT configuration
@@ -37,75 +39,6 @@ global:
 # Service-specific overrides (optional)
 # Each service can override global values if needed
 #
-manager:
-  replicaCount: 1
-  
-  image:
-    repository: sandbox0ai/manager
-    tag: *globalTag
-  
-  resources:
-    limits:
-      cpu: 500m
-      memory: 512Mi
-    requests:
-      cpu: 100m
-      memory: 256Mi
-  
-  # Optional: override global database URL
-  # config:
-  #   database_url: "postgres://custom-url"
-
-# ------------------------------------------------------------------------------
-# Storage-proxy - JuiceFS storage proxy for persistent volumes
-# ------------------------------------------------------------------------------
-storage-proxy:
-  replicaCount: 1
-  
-  image:
-    repository: sandbox0ai/storage-proxy
-    tag: *globalTag
-  
-  resources:
-    limits:
-      cpu: 1000m
-      memory: 2Gi
-    requests:
-      cpu: 200m
-      memory: 512Mi
-  
-  # Cache configuration
-  config:
-    cache_root: "/var/cache/storage-proxy"
-    cache_size: "10737418240"  # 10GB
-  
-  persistence:
-    enabled: true
-    size: 40Gi
-    storageClass: "default"
-
-# ------------------------------------------------------------------------------
-# Internal-gateway - Internal service gateway
-# ------------------------------------------------------------------------------
-internal-gateway:
-  replicaCount: 1
-  
-  image:
-    repository: sandbox0ai/internal-gateway
-    tag: *globalTag
-  
-  resources:
-    #limits:
-    #  cpu: 500m
-    #  memory: 256Mi
-    requests:
-      cpu: 100m
-      memory: 128Mi
-  
-  config:
-    manager_url: "http://manager:8080"
-    storage_proxy_url: "http://storage-proxy:8081"
-
 # ------------------------------------------------------------------------------
 # Edge-gateway - Public API gateway
 # ------------------------------------------------------------------------------
@@ -155,6 +88,78 @@ edge-gateway:
       admin_only: false
 
 # ------------------------------------------------------------------------------
+# Internal-gateway - Internal service gateway
+# ------------------------------------------------------------------------------
+internal-gateway:
+  replicaCount: 1
+  
+  image:
+    repository: sandbox0ai/internal-gateway
+    tag: *globalTag
+  
+  resources:
+    #limits:
+    #  cpu: 500m
+    #  memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  
+  config:
+    manager_url: "http://manager:8080"
+    storage_proxy_url: "http://storage-proxy:8081"
+
+# ------------------------------------------------------------------------------
+# Manager - Kubernetes operator for sandbox lifecycle management
+# ------------------------------------------------------------------------------
+manager:
+  replicaCount: 1
+  
+  image:
+    repository: sandbox0ai/manager
+    tag: *globalTag
+  
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+  
+  # Optional: override global database URL
+  # config:
+  #   database_url: "postgres://custom-url"
+
+# ------------------------------------------------------------------------------
+# Storage-proxy - JuiceFS storage proxy for persistent volumes
+# ------------------------------------------------------------------------------
+storage-proxy:
+  replicaCount: 1
+  
+  image:
+    repository: sandbox0ai/storage-proxy
+    tag: *globalTag
+  
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+    requests:
+      cpu: 200m
+      memory: 512Mi
+  
+  # Cache configuration
+  config:
+    cache_root: "/var/cache/storage-proxy"
+    cache_size: "10737418240"  # 10GB
+  
+  persistence:
+    enabled: true
+    size: 40Gi
+    storageClass: "default"
+
+# ------------------------------------------------------------------------------
 # Netd - Network daemon for L7 proxy and eBPF policies
 # ------------------------------------------------------------------------------
 netd:
@@ -175,3 +180,36 @@ netd:
     fail_closed: true
     # use_ebpf enables eBPF-based bandwidth control (more efficient than tc htb)
     use_ebpf: true
+
+# ------------------------------------------------------------------------------
+# RustFS - Built-in S3-compatible object storage (optional)
+# ------------------------------------------------------------------------------
+rustfs:
+  enabled: true
+
+  # For local/dev: keep it simple (1 pod + 1 PVC).
+  replicaCount: 1
+  mode:
+    standalone:
+      enabled: true
+    distributed:
+      enabled: false
+
+  # Disable ingress by default; access RustFS via in-cluster service.
+  ingress:
+    enabled: false
+
+  # The credentials should match global.juicefs.s3_access_key / s3_secret_key.
+  secret:
+    rustfs:
+      access_key: "rustfsadmin"
+      secret_key: "rustfsadmin"
+
+  # Align region with global.juicefs.s3_region.
+  config:
+    rustfs:
+      region: "us-east-1"
+
+  # StorageClass used for RustFS PVCs.
+  storageclass:
+    name: "default"

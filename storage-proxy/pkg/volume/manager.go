@@ -309,19 +309,28 @@ func (m *Manager) createS3Storage(config *VolumeConfig, prefix string, format *m
 	if endpoint == "" {
 		endpoint = fmt.Sprintf("https://s3.%s.amazonaws.com", m.config.S3Region)
 	}
+	endpoint = strings.TrimRight(endpoint, "/")
 
-	// Build S3 URL for JuiceFS object store
-	// Format: s3://bucket/prefix?region=us-east-1&access-key=xxx&secret-key=xxx
+	// Build S3 endpoint for JuiceFS object store.
+	// JuiceFS expects either:
+	// - [ENDPOINT]/[BUCKET] (recommended for S3-compatible backends), or
+	// - [BUCKET].[ENDPOINT]
 	bucket := m.config.S3Bucket
-	if prefix != "" {
-		prefix = strings.TrimLeft(prefix, "/")
-		bucket = fmt.Sprintf("%s/%s", bucket, prefix)
-	}
+	s3Endpoint := fmt.Sprintf("%s/%s", endpoint, bucket)
 
 	// Create object storage using JuiceFS object package
-	obj, err := object.CreateStorage("s3", bucket, m.config.S3AccessKey, m.config.S3SecretKey, m.config.S3SessionToken)
+	obj, err := object.CreateStorage("s3", s3Endpoint, m.config.S3AccessKey, m.config.S3SecretKey, m.config.S3SessionToken)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create S3 storage: %w", err)
+	}
+
+	// Apply an object key prefix for namespace isolation (e.g. per-team).
+	if prefix != "" {
+		p := strings.Trim(prefix, "/")
+		if p != "" {
+			p += "/"
+		}
+		obj = object.WithPrefix(obj, p)
 	}
 
 	return obj, nil

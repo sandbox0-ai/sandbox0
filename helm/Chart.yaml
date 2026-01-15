@@ -15,3 +15,7 @@ dependencies:
     version: 0.1.0
   - name: storage-proxy
     version: 0.1.0
+  - name: rustfs
+    version: 0.0.79
+    repository: https://charts.rustfs.com
+    condition: rustfs.enabled

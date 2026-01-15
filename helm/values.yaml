@@ -4,11 +4,11 @@ global:
   tag: &globalTag "latest"
   # Database configuration (shared by all services)
   database:
-    url: "postgres://sandbox0:sandbox0@postgres:5432/sandbox0?sslmode=disable"
+    url: "postgres://sandbox0:sandbox0@postgresql:5432/sandbox0?sslmode=disable"
   
   # JuiceFS metadata database (for storage-proxy)
   juicefs:
-    meta_url: "postgres://juicefs:juicefs@postgres:5432/juicefs?sslmode=disable"
+    meta_url: "postgres://juicefs:juicefs@postgresql:5432/juicefs?sslmode=disable"
     s3_bucket: "sandbox0-data"
     s3_region: "us-east-1"
     # S3-compatible endpoint used by JuiceFS data blocks.
@@ -213,3 +213,40 @@ rustfs:
   # StorageClass used for RustFS PVCs.
   storageclass:
     name: "default"
+
+# ------------------------------------------------------------------------------
+# PostgreSQL - Built-in database (optional)
+# ------------------------------------------------------------------------------
+postgresql:
+  enabled: true
+
+  # Create the primary app database/user.
+  auth:
+    enablePostgresUser: true
+    postgresPassword: "postgres"
+    username: "sandbox0"
+    password: "sandbox0"
+    database: "sandbox0"
+
+  # Also initialize JuiceFS metadata DB/user.
+  primary:
+    initdb:
+      user: "postgres"
+      password: "postgres"
+      scripts:
+        01-init-juicefs.sql: |
+          DO $$
+          BEGIN
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'juicefs') THEN
+              CREATE ROLE juicefs LOGIN PASSWORD 'juicefs';
+            END IF;
+            IF NOT EXISTS (SELECT FROM pg_database WHERE datname = 'juicefs') THEN
+              CREATE DATABASE juicefs OWNER juicefs;
+            END IF;
+          END
+          $$;
+
+    persistence:
+      enabled: true
+      size: 20Gi
+      storageClass: "default"

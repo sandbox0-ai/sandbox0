@@ -101,6 +101,15 @@ This umbrella chart can deploy [RustFS](https://charts.rustfs.com/) as an in-clu
 - Endpoint for JuiceFS: set `global.juicefs.s3_endpoint` to `http://rustfs:9000`
 - Credentials: keep `rustfs.secret.rustfs.*` aligned with `global.juicefs.s3_access_key` / `s3_secret_key`
 
+### 3.2 Optional: Use Built-in PostgreSQL
+
+This umbrella chart can deploy PostgreSQL as an in-cluster database for:
+
+- `global.database.url` (sandbox0 metadata)
+- `global.juicefs.meta_url` (JuiceFS metadata)
+
+Enable/disable: set `postgresql.enabled`. Default service hostname is `postgresql` within the release namespace.
+
 ### 4. Install the Chart
 
 ```bash

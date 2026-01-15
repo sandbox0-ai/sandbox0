@@ -19,3 +19,7 @@ dependencies:
     version: 0.0.79
     repository: https://charts.rustfs.com
     condition: rustfs.enabled
+  - name: postgresql
+    version: 18.2.0
+    repository: https://charts.bitnami.com/bitnami
+    condition: postgresql.enabled

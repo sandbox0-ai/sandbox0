@@ -49,8 +49,12 @@ RUN apt-get update \
     libsm6 \
     libxext6 \
     libxrender1 \
+    pkg-config \
+    libssl-dev \
+    libffi-dev \
     python3 \
     python3-pip \
+    python3-dev \
     python3-venv \
     python-is-python3 \
     ipython3 \
@@ -67,7 +71,6 @@ RUN apt-get update \
 # Agent-friendly CLI utilities + DB/cloud tooling (expected to evolve; keep in its own layer for cache).
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
-    jq \
     # Search / navigation / inspection
     ripgrep \
     fd-find \
@@ -106,20 +109,21 @@ RUN apt-get update \
     # JSON/YAML + better file viewers
     yq \
     bat \
+    jq \
     # HTTP + disk tools
     httpie \
     ncdu \
     duf \
     # DB client CLIs
     postgresql-client \
+    libpq-dev \
     default-mysql-client \
     sqlite3 \
     redis-tools \
-    # Cloud / repo tooling
+    # Repo tooling
     git-lfs \
     gh \
     rclone \
-    awscli \
   # Ubuntu uses 'fdfind' and 'batcat' binary names; create common aliases for tooling compatibility.
   && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
   && (command -v batcat >/dev/null 2>&1 && ln -sf /usr/bin/batcat /usr/local/bin/bat || true) \
@@ -128,8 +132,7 @@ RUN apt-get update \
 # Preinstall a "common E2B-like" Python stack (WITHOUT Jupyter server).
 # Notes:
 # - We intentionally do NOT install: jupyter-server, ipykernel (sandbox0 doesn't use Jupyter for code execution).
-RUN python3 -m pip install --no-cache-dir -U pip setuptools wheel \
-  && python3 -m pip install --no-cache-dir \
+RUN python3 -m pip install --no-cache-dir --break-system-packages \
     aiohttp==3.12.14 \
     beautifulsoup4==4.13.4 \
     bokeh==3.7.3 \
@@ -160,7 +163,6 @@ RUN python3 -m pip install --no-cache-dir -U pip setuptools wheel \
     sympy==1.14.0 \
     textblob==0.19.0 \
     tornado==6.5.1 \
-    urllib3==2.6.0 \
     xarray==2025.4.0 \
     xlrd==2.0.1
 

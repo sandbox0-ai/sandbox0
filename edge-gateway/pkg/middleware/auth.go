@@ -53,7 +53,7 @@ func (m *AuthMiddleware) Authenticate() gin.HandlerFunc {
 		var authCtx *auth.AuthContext
 		var err error
 
-		if strings.HasPrefix(token, "sb0_") {
+		if strings.HasPrefix(token, "s0_") {
 			// API Key authentication
 			authCtx, err = m.authenticateAPIKey(c, token)
 		} else {
@@ -111,7 +111,6 @@ func (m *AuthMiddleware) authenticateJWT(c *gin.Context, tokenString string) (*a
 		}
 		return m.jwtSecret, nil
 	})
-
 	if err != nil {
 		return nil, ErrInvalidToken
 	}

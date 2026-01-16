@@ -16,7 +16,7 @@ import (
 
 // CreateAPIKey creates a new API key
 func (r *Repository) CreateAPIKey(ctx context.Context, teamID, userID, name, keyType string, roles []string, expiresAt time.Time) (*APIKey, string, error) {
-	// Generate API key: sb0_<team_id_prefix>_<random>
+	// Generate API key: s0_<team_id_prefix>_<random>
 	teamPrefix := teamID
 	if len(teamPrefix) > 8 {
 		teamPrefix = teamPrefix[:8]
@@ -26,7 +26,7 @@ func (r *Repository) CreateAPIKey(ctx context.Context, teamID, userID, name, key
 	if _, err := rand.Read(randomBytes); err != nil {
 		return nil, "", fmt.Errorf("generate random: %w", err)
 	}
-	keyValue := fmt.Sprintf("sb0_%s_%s", teamPrefix, hex.EncodeToString(randomBytes))
+	keyValue := fmt.Sprintf("s0_%s_%s", teamPrefix, hex.EncodeToString(randomBytes))
 
 	id := uuid.New().String()
 	rolesJSON, err := json.Marshal(roles)
@@ -45,7 +45,6 @@ func (r *Repository) CreateAPIKey(ctx context.Context, teamID, userID, name, key
 		&key.Type, &rolesJSON, &key.IsActive, &key.ExpiresAt,
 		&key.LastUsed, &key.UsageCount, &key.CreatedAt, &key.UpdatedAt,
 	)
-
 	if err != nil {
 		return nil, "", fmt.Errorf("insert api key: %w", err)
 	}
@@ -148,7 +147,6 @@ func (r *Repository) DeactivateAPIKey(ctx context.Context, id string) error {
 	result, err := r.pool.Exec(ctx, `
 		UPDATE api_keys SET is_active = false WHERE id = $1
 	`, id)
-
 	if err != nil {
 		return fmt.Errorf("deactivate api key: %w", err)
 	}
@@ -188,8 +186,8 @@ func (r *Repository) GetAPIKeyByID(ctx context.Context, id string) (*APIKey, err
 
 // ValidateAPIKey validates an API key and returns the associated auth context
 func (r *Repository) ValidateAPIKey(ctx context.Context, keyValue string) (*APIKey, error) {
-	// API key format: sb0_<team_id>_<random_secret>
-	if !strings.HasPrefix(keyValue, "sb0_") {
+	// API key format: s0_<team_id>_<random_secret>
+	if !strings.HasPrefix(keyValue, "s0_") {
 		return nil, ErrInvalidKey
 	}
 

@@ -11,10 +11,12 @@ INSTALLATION SEQUENCE:
   1. PostgreSQL and RustFS (infrastructure)
   2. Manager chart installs:
      - Namespace '{{ .Values.manager.config.default_template_namespace }}' (pre-install hook, weight -10)
-     - CRDs (sandboxtemplates, sandboxnetworkpolicies, sandboxbandwidthpolicies)
+     - CRDs (sandboxtemplates)
      - Manager deployment
   3. Default SandboxTemplate CR '{{ .Values.defaultTemplate.name }}' (post-install hook, weight 10)
   4. Other services (storage-proxy, netd, internal-gateway, edge-gateway)
+
+NOTE: Network and bandwidth policies are stored as Pod annotations instead of CRDs.
 
 VERIFY INSTALLATION:
   # Check if namespace was created

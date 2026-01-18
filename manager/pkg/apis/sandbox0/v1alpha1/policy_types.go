@@ -1,32 +1,7 @@
 package v1alpha1
 
-import (
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-)
-
-// +genclient
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-
-// SandboxNetworkPolicy defines network policy for a sandbox (instance-level)
-type SandboxNetworkPolicy struct {
-	metav1.TypeMeta   `json:",inline"`
-	metav1.ObjectMeta `json:"metadata,omitempty"`
-
-	Spec   SandboxNetworkPolicySpec   `json:"spec"`
-	Status SandboxNetworkPolicyStatus `json:"status,omitempty"`
-}
-
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-
-// SandboxNetworkPolicyList contains a list of SandboxNetworkPolicy
-type SandboxNetworkPolicyList struct {
-	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []SandboxNetworkPolicy `json:"items"`
-}
-
-// SandboxNetworkPolicySpec defines the desired state of SandboxNetworkPolicy
-type SandboxNetworkPolicySpec struct {
+// NetworkPolicySpec defines network policy for a sandbox (stored in pod annotation)
+type NetworkPolicySpec struct {
 	// SandboxID is the unique identifier of the sandbox this policy applies to
 	SandboxID string `json:"sandboxId"`
 
@@ -46,8 +21,6 @@ type SandboxNetworkPolicySpec struct {
 // EgressPolicySpec defines egress policy specification
 type EgressPolicySpec struct {
 	// DefaultAction is the default action for egress traffic (deny or allow)
-	// +kubebuilder:validation:Enum=deny;allow
-	// +kubebuilder:default=deny
 	DefaultAction string `json:"defaultAction,omitempty"`
 
 	// AllowedCIDRs is a list of allowed destination CIDRs
@@ -76,8 +49,6 @@ type EgressPolicySpec struct {
 // IngressPolicySpec defines ingress policy specification
 type IngressPolicySpec struct {
 	// DefaultAction is the default action for ingress traffic (deny or allow)
-	// +kubebuilder:validation:Enum=deny;allow
-	// +kubebuilder:default=deny
 	DefaultAction string `json:"defaultAction,omitempty"`
 
 	// AllowedSourceCIDRs is a list of allowed source CIDRs
@@ -96,8 +67,6 @@ type PortSpec struct {
 	Port int32 `json:"port"`
 
 	// Protocol (tcp or udp)
-	// +kubebuilder:validation:Enum=tcp;udp
-	// +kubebuilder:default=tcp
 	Protocol string `json:"protocol,omitempty"`
 
 	// EndPort for port ranges (optional)
@@ -123,42 +92,50 @@ type DNSPolicySpec struct {
 // AuditSpec defines audit configuration
 type AuditSpec struct {
 	// Level is the audit level (off, basic, full)
-	// +kubebuilder:validation:Enum=off;basic;full
-	// +kubebuilder:default=basic
 	Level string `json:"level,omitempty"`
 
 	// SampleRate is the sampling rate for audit logs (0.0-1.0)
-	// +kubebuilder:validation:Pattern=`^(0(\.\d+)?|1(\.0+)?)$`
-	// +kubebuilder:default=1.0
 	SampleRate string `json:"sampleRate,omitempty"`
 }
 
-// SandboxNetworkPolicyStatus defines the observed state of SandboxNetworkPolicy
-type SandboxNetworkPolicyStatus struct {
-	// ObservedGeneration is the generation observed by netd
-	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+// BandwidthPolicySpec defines bandwidth policy for a sandbox (stored in pod annotation)
+type BandwidthPolicySpec struct {
+	// SandboxID is the unique identifier of the sandbox this policy applies to
+	SandboxID string `json:"sandboxId"`
 
-	// LastAppliedTime is the last time the policy was applied
-	LastAppliedTime metav1.Time `json:"lastAppliedTime,omitempty"`
+	// TeamID is the team that owns this sandbox
+	TeamID string `json:"teamId"`
 
-	// Phase is the current phase of the policy
-	// +kubebuilder:validation:Enum=Pending;Applied;Failed
-	Phase string `json:"phase,omitempty"`
+	// EgressRateLimit defines egress rate limiting
+	EgressRateLimit *RateLimitSpec `json:"egressRateLimit,omitempty"`
 
-	// Message provides additional information about the status
-	Message string `json:"message,omitempty"`
+	// IngressRateLimit defines ingress rate limiting
+	IngressRateLimit *RateLimitSpec `json:"ingressRateLimit,omitempty"`
 
-	// Conditions represent the latest available observations
-	Conditions []NetworkPolicyCondition `json:"conditions,omitempty"`
+	// Accounting defines traffic accounting configuration
+	Accounting *AccountingSpec `json:"accounting,omitempty"`
 }
 
-// NetworkPolicyCondition defines a condition of the network policy
-type NetworkPolicyCondition struct {
-	Type               string      `json:"type"`
-	Status             string      `json:"status"`
-	LastTransitionTime metav1.Time `json:"lastTransitionTime,omitempty"`
-	Reason             string      `json:"reason,omitempty"`
-	Message            string      `json:"message,omitempty"`
+// RateLimitSpec defines rate limiting specification
+type RateLimitSpec struct {
+	// RateBps is the rate limit in bits per second
+	RateBps int64 `json:"rateBps"`
+
+	// BurstBytes is the burst size in bytes
+	BurstBytes int64 `json:"burstBytes,omitempty"`
+
+	// CeilBps is the ceiling rate in bits per second (for HTB)
+	CeilBps int64 `json:"ceilBps,omitempty"`
+}
+
+// AccountingSpec defines traffic accounting configuration
+type AccountingSpec struct {
+	// Enabled enables traffic accounting
+	Enabled bool `json:"enabled"`
+
+	// ReportIntervalSeconds is the interval for reporting traffic statistics
+	// Fixed at 10 seconds per platform policy
+	ReportIntervalSeconds int32 `json:"reportIntervalSeconds,omitempty"`
 }
 
 // Default platform-enforced deny CIDRs

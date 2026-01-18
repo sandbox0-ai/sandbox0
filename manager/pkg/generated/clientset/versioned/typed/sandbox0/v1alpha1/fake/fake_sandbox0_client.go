@@ -17,14 +17,6 @@ type FakeSandbox0V1alpha1 struct {
 	*testing.Fake
 }
 
-func (c *FakeSandbox0V1alpha1) SandboxBandwidthPolicies(namespace string) v1alpha1.SandboxBandwidthPolicyInterface {
-	return &FakeSandboxBandwidthPolicies{c, namespace}
-}
-
-func (c *FakeSandbox0V1alpha1) SandboxNetworkPolicies(namespace string) v1alpha1.SandboxNetworkPolicyInterface {
-	return &FakeSandboxNetworkPolicies{c, namespace}
-}
-
 func (c *FakeSandbox0V1alpha1) SandboxTemplates(namespace string) v1alpha1.SandboxTemplateInterface {
 	return &FakeSandboxTemplates{c, namespace}
 }

@@ -7,22 +7,6 @@ All rights reserved.
 
 package v1alpha1
 
-// SandboxBandwidthPolicyListerExpansion allows custom methods to be added to
-// SandboxBandwidthPolicyLister.
-type SandboxBandwidthPolicyListerExpansion interface{}
-
-// SandboxBandwidthPolicyNamespaceListerExpansion allows custom methods to be added to
-// SandboxBandwidthPolicyNamespaceLister.
-type SandboxBandwidthPolicyNamespaceListerExpansion interface{}
-
-// SandboxNetworkPolicyListerExpansion allows custom methods to be added to
-// SandboxNetworkPolicyLister.
-type SandboxNetworkPolicyListerExpansion interface{}
-
-// SandboxNetworkPolicyNamespaceListerExpansion allows custom methods to be added to
-// SandboxNetworkPolicyNamespaceLister.
-type SandboxNetworkPolicyNamespaceListerExpansion interface{}
-
 // SandboxTemplateListerExpansion allows custom methods to be added to
 // SandboxTemplateLister.
 type SandboxTemplateListerExpansion interface{}

@@ -3,21 +3,16 @@ package watcher
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"time"
 
 	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/infra/manager/pkg/controller"
-	clientset "github.com/sandbox0-ai/infra/manager/pkg/generated/clientset/versioned"
-	crdinformers "github.com/sandbox0-ai/infra/manager/pkg/generated/informers/externalversions"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 )
 
@@ -35,19 +30,17 @@ type SandboxInfo struct {
 	IsActive  bool
 }
 
-// PolicyCache holds cached network and bandwidth policies
+// PolicyCache holds cached network and bandwidth policies parsed from pod annotations
 type PolicyCache struct {
 	mu                sync.RWMutex
-	networkPolicies   map[string]*v1alpha1.SandboxNetworkPolicy   // sandboxID -> policy
-	bandwidthPolicies map[string]*v1alpha1.SandboxBandwidthPolicy // sandboxID -> policy
+	networkPolicies   map[string]*v1alpha1.NetworkPolicySpec   // sandboxID -> policy spec
+	bandwidthPolicies map[string]*v1alpha1.BandwidthPolicySpec // sandboxID -> policy spec
 }
 
 // Watcher watches Kubernetes resources for netd
 type Watcher struct {
 	k8sClient       kubernetes.Interface
-	crdClient       clientset.Interface
 	informerFactory informers.SharedInformerFactory
-	crdFactory      crdinformers.SharedInformerFactory
 	nodeName        string
 	namespace       string
 	logger          *zap.Logger
@@ -56,15 +49,15 @@ type Watcher struct {
 	podMappingMu sync.RWMutex
 	podMapping   map[string]*SandboxInfo
 
-	// Policy cache
+	// Policy cache (parsed from pod annotations)
 	policyCache *PolicyCache
 
 	// Event handlers
 	onPodAdd                func(*SandboxInfo)
 	onPodUpdate             func(*SandboxInfo, *SandboxInfo)
 	onPodDelete             func(*SandboxInfo)
-	onNetworkPolicyChange   func(sandboxID string, policy *v1alpha1.SandboxNetworkPolicy)
-	onBandwidthPolicyChange func(sandboxID string, policy *v1alpha1.SandboxBandwidthPolicy)
+	onNetworkPolicyChange   func(sandboxID string, policy *v1alpha1.NetworkPolicySpec)
+	onBandwidthPolicyChange func(sandboxID string, policy *v1alpha1.BandwidthPolicySpec)
 }
 
 // NewWatcher creates a new Watcher
@@ -95,42 +88,10 @@ func NewWatcher(
 		logger:          logger,
 		podMapping:      make(map[string]*SandboxInfo),
 		policyCache: &PolicyCache{
-			networkPolicies:   make(map[string]*v1alpha1.SandboxNetworkPolicy),
-			bandwidthPolicies: make(map[string]*v1alpha1.SandboxBandwidthPolicy),
+			networkPolicies:   make(map[string]*v1alpha1.NetworkPolicySpec),
+			bandwidthPolicies: make(map[string]*v1alpha1.BandwidthPolicySpec),
 		},
 	}
-}
-
-// NewWatcherWithConfig creates a new Watcher with REST config for CRD access
-func NewWatcherWithConfig(
-	restConfig *rest.Config,
-	k8sClient kubernetes.Interface,
-	nodeName string,
-	namespace string,
-	resyncPeriod time.Duration,
-	logger *zap.Logger,
-) (*Watcher, error) {
-	watcher := NewWatcher(k8sClient, nodeName, namespace, resyncPeriod, logger)
-
-	// Create generated CRD clientset
-	crdClient, err := clientset.NewForConfig(restConfig)
-	if err != nil {
-		return nil, fmt.Errorf("create CRD clientset: %w", err)
-	}
-	watcher.crdClient = crdClient
-
-	// Create CRD informer factory using generated clientset
-	if namespace != "" {
-		watcher.crdFactory = crdinformers.NewSharedInformerFactoryWithOptions(
-			crdClient,
-			resyncPeriod,
-			crdinformers.WithNamespace(namespace),
-		)
-	} else {
-		watcher.crdFactory = crdinformers.NewSharedInformerFactory(crdClient, resyncPeriod)
-	}
-
-	return watcher, nil
 }
 
 // SetPodEventHandlers sets the event handlers for pod events
@@ -145,12 +106,12 @@ func (w *Watcher) SetPodEventHandlers(
 }
 
 // SetNetworkPolicyHandler sets the handler for network policy changes
-func (w *Watcher) SetNetworkPolicyHandler(handler func(sandboxID string, policy *v1alpha1.SandboxNetworkPolicy)) {
+func (w *Watcher) SetNetworkPolicyHandler(handler func(sandboxID string, policy *v1alpha1.NetworkPolicySpec)) {
 	w.onNetworkPolicyChange = handler
 }
 
 // SetBandwidthPolicyHandler sets the handler for bandwidth policy changes
-func (w *Watcher) SetBandwidthPolicyHandler(handler func(sandboxID string, policy *v1alpha1.SandboxBandwidthPolicy)) {
+func (w *Watcher) SetBandwidthPolicyHandler(handler func(sandboxID string, policy *v1alpha1.BandwidthPolicySpec)) {
 	w.onBandwidthPolicyChange = handler
 }
 
@@ -164,82 +125,17 @@ func (w *Watcher) Start(ctx context.Context) error {
 		DeleteFunc: w.handlePodDelete,
 	})
 
-	// Setup CRD informers using dynamic client if available
-	if w.crdFactory != nil {
-		w.setupNetworkPolicyInformer(ctx)
-		w.setupBandwidthPolicyInformer(ctx)
-	} else {
-		w.logger.Warn("CRD informer factory not initialized, CRD watching disabled")
-	}
-
 	// Start informers
 	w.informerFactory.Start(ctx.Done())
-	if w.crdFactory != nil {
-		w.crdFactory.Start(ctx.Done())
-	}
 
 	// Wait for cache sync
 	w.logger.Info("Waiting for informer caches to sync")
 	if !cache.WaitForCacheSync(ctx.Done(), podInformer.HasSynced) {
-		return fmt.Errorf("failed to sync pod informer cache")
-	}
-
-	// Wait for CRD cache sync if available
-	if w.crdFactory != nil {
-		syncResult := w.crdFactory.WaitForCacheSync(ctx.Done())
-		for typ, synced := range syncResult {
-			if !synced {
-				w.logger.Warn("CRD informer cache not synced", zap.String("type", typ.String()))
-			} else {
-				w.logger.Info("CRD informer cache synced", zap.String("type", typ.String()))
-			}
-		}
+		return nil
 	}
 
 	w.logger.Info("Watcher started and caches synced")
 	return nil
-}
-
-// setupNetworkPolicyInformer creates informer for SandboxNetworkPolicy using generated clientset
-func (w *Watcher) setupNetworkPolicyInformer(ctx context.Context) {
-	informer := w.crdFactory.Sandbox0().V1alpha1().SandboxNetworkPolicies().Informer()
-
-	informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj any) {
-			policy := obj.(*v1alpha1.SandboxNetworkPolicy)
-			w.handleNetworkPolicyAdd(policy)
-		},
-		UpdateFunc: func(oldObj, newObj any) {
-			oldPolicy := oldObj.(*v1alpha1.SandboxNetworkPolicy)
-			newPolicy := newObj.(*v1alpha1.SandboxNetworkPolicy)
-			w.handleNetworkPolicyUpdate(oldPolicy, newPolicy)
-		},
-		DeleteFunc: func(obj any) {
-			policy := obj.(*v1alpha1.SandboxNetworkPolicy)
-			w.handleNetworkPolicyDelete(policy)
-		},
-	})
-}
-
-// setupBandwidthPolicyInformer creates informer for SandboxBandwidthPolicy using generated clientset
-func (w *Watcher) setupBandwidthPolicyInformer(ctx context.Context) {
-	informer := w.crdFactory.Sandbox0().V1alpha1().SandboxBandwidthPolicies().Informer()
-
-	informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj any) {
-			policy := obj.(*v1alpha1.SandboxBandwidthPolicy)
-			w.handleBandwidthPolicyAdd(policy)
-		},
-		UpdateFunc: func(oldObj, newObj any) {
-			oldPolicy := oldObj.(*v1alpha1.SandboxBandwidthPolicy)
-			newPolicy := newObj.(*v1alpha1.SandboxBandwidthPolicy)
-			w.handleBandwidthPolicyUpdate(oldPolicy, newPolicy)
-		},
-		DeleteFunc: func(obj any) {
-			policy := obj.(*v1alpha1.SandboxBandwidthPolicy)
-			w.handleBandwidthPolicyDelete(policy)
-		},
-	})
 }
 
 // handlePodAdd handles pod add events
@@ -258,6 +154,9 @@ func (w *Watcher) handlePodAdd(obj any) {
 	w.podMappingMu.Lock()
 	w.podMapping[info.PodIP] = info
 	w.podMappingMu.Unlock()
+
+	// Parse and cache policies from pod annotations
+	w.updatePoliciesFromPod(pod, info.SandboxID)
 
 	w.logger.Info("Sandbox pod added",
 		zap.String("sandboxID", info.SandboxID),
@@ -299,6 +198,27 @@ func (w *Watcher) handlePodUpdate(oldObj, newObj any) {
 	}
 	w.podMappingMu.Unlock()
 
+	// Check if policies changed (by comparing annotation values)
+	if isActive {
+		oldNetworkPolicy := ""
+		oldBandwidthPolicy := ""
+		if oldPod.Annotations != nil {
+			oldNetworkPolicy = oldPod.Annotations[controller.AnnotationNetworkPolicy]
+			oldBandwidthPolicy = oldPod.Annotations[controller.AnnotationBandwidthPolicy]
+		}
+		newNetworkPolicy := ""
+		newBandwidthPolicy := ""
+		if newPod.Annotations != nil {
+			newNetworkPolicy = newPod.Annotations[controller.AnnotationNetworkPolicy]
+			newBandwidthPolicy = newPod.Annotations[controller.AnnotationBandwidthPolicy]
+		}
+
+		// Update policies if they changed
+		if oldNetworkPolicy != newNetworkPolicy || oldBandwidthPolicy != newBandwidthPolicy {
+			w.updatePoliciesFromPod(newPod, newInfo.SandboxID)
+		}
+	}
+
 	if w.onPodUpdate != nil && (wasActive || isActive) {
 		w.onPodUpdate(oldInfo, newInfo)
 	}
@@ -330,6 +250,9 @@ func (w *Watcher) handlePodDelete(obj any) {
 	w.podMappingMu.Lock()
 	delete(w.podMapping, info.PodIP)
 	w.podMappingMu.Unlock()
+
+	// Remove policies from cache
+	w.removePolicies(info.SandboxID)
 
 	w.logger.Info("Sandbox pod deleted",
 		zap.String("sandboxID", info.SandboxID),
@@ -368,92 +291,71 @@ func (w *Watcher) podToSandboxInfo(pod *corev1.Pod) *SandboxInfo {
 	}
 }
 
-// Network policy handlers
-func (w *Watcher) handleNetworkPolicyAdd(policy *v1alpha1.SandboxNetworkPolicy) {
-	sandboxID := policy.Spec.SandboxID
+// updatePoliciesFromPod parses and caches policies from pod annotations
+func (w *Watcher) updatePoliciesFromPod(pod *corev1.Pod, sandboxID string) {
+	if pod.Annotations == nil {
+		return
+	}
 
+	// Parse network policy from annotation
+	networkPolicyAnnotation := pod.Annotations[controller.AnnotationNetworkPolicy]
+	networkPolicy, err := v1alpha1.ParseNetworkPolicyFromAnnotation(networkPolicyAnnotation)
+	if err != nil {
+		w.logger.Error("Failed to parse network policy from annotation",
+			zap.String("sandboxID", sandboxID),
+			zap.Error(err),
+		)
+	}
+
+	// Parse bandwidth policy from annotation
+	bandwidthPolicyAnnotation := pod.Annotations[controller.AnnotationBandwidthPolicy]
+	bandwidthPolicy, err := v1alpha1.ParseBandwidthPolicyFromAnnotation(bandwidthPolicyAnnotation)
+	if err != nil {
+		w.logger.Error("Failed to parse bandwidth policy from annotation",
+			zap.String("sandboxID", sandboxID),
+			zap.Error(err),
+		)
+	}
+
+	// Update cache and notify handlers
 	w.policyCache.mu.Lock()
-	w.policyCache.networkPolicies[sandboxID] = policy
+	oldNetworkPolicy := w.policyCache.networkPolicies[sandboxID]
+	oldBandwidthPolicy := w.policyCache.bandwidthPolicies[sandboxID]
+	w.policyCache.networkPolicies[sandboxID] = networkPolicy
+	w.policyCache.bandwidthPolicies[sandboxID] = bandwidthPolicy
 	w.policyCache.mu.Unlock()
 
-	w.logger.Info("Network policy added",
-		zap.String("sandboxID", sandboxID),
-		zap.String("name", policy.Name),
-	)
+	// Notify handlers if policies changed
+	if networkPolicy != nil && (oldNetworkPolicy == nil || networkPolicyAnnotation != "") {
+		w.logger.Info("Network policy updated from annotation",
+			zap.String("sandboxID", sandboxID),
+		)
+		if w.onNetworkPolicyChange != nil {
+			w.onNetworkPolicyChange(sandboxID, networkPolicy)
+		}
+	}
 
-	if w.onNetworkPolicyChange != nil {
-		w.onNetworkPolicyChange(sandboxID, policy)
+	if bandwidthPolicy != nil && (oldBandwidthPolicy == nil || bandwidthPolicyAnnotation != "") {
+		w.logger.Info("Bandwidth policy updated from annotation",
+			zap.String("sandboxID", sandboxID),
+		)
+		if w.onBandwidthPolicyChange != nil {
+			w.onBandwidthPolicyChange(sandboxID, bandwidthPolicy)
+		}
 	}
 }
 
-func (w *Watcher) handleNetworkPolicyUpdate(oldPolicy, newPolicy *v1alpha1.SandboxNetworkPolicy) {
-	sandboxID := newPolicy.Spec.SandboxID
-
-	w.policyCache.mu.Lock()
-	w.policyCache.networkPolicies[sandboxID] = newPolicy
-	w.policyCache.mu.Unlock()
-
-	w.logger.Info("Network policy updated",
-		zap.String("sandboxID", sandboxID),
-	)
-
-	if w.onNetworkPolicyChange != nil {
-		w.onNetworkPolicyChange(sandboxID, newPolicy)
-	}
-}
-
-func (w *Watcher) handleNetworkPolicyDelete(policy *v1alpha1.SandboxNetworkPolicy) {
-	sandboxID := policy.Spec.SandboxID
-
+// removePolicies removes policies from cache and notifies handlers
+func (w *Watcher) removePolicies(sandboxID string) {
 	w.policyCache.mu.Lock()
 	delete(w.policyCache.networkPolicies, sandboxID)
-	w.policyCache.mu.Unlock()
-
-	w.logger.Info("Network policy deleted",
-		zap.String("sandboxID", sandboxID),
-	)
-
-	if w.onNetworkPolicyChange != nil {
-		w.onNetworkPolicyChange(sandboxID, nil)
-	}
-}
-
-// Bandwidth policy handlers
-func (w *Watcher) handleBandwidthPolicyAdd(policy *v1alpha1.SandboxBandwidthPolicy) {
-	sandboxID := policy.Spec.SandboxID
-
-	w.policyCache.mu.Lock()
-	w.policyCache.bandwidthPolicies[sandboxID] = policy
-	w.policyCache.mu.Unlock()
-
-	w.logger.Info("Bandwidth policy added",
-		zap.String("sandboxID", sandboxID),
-	)
-
-	if w.onBandwidthPolicyChange != nil {
-		w.onBandwidthPolicyChange(sandboxID, policy)
-	}
-}
-
-func (w *Watcher) handleBandwidthPolicyUpdate(oldPolicy, newPolicy *v1alpha1.SandboxBandwidthPolicy) {
-	sandboxID := newPolicy.Spec.SandboxID
-
-	w.policyCache.mu.Lock()
-	w.policyCache.bandwidthPolicies[sandboxID] = newPolicy
-	w.policyCache.mu.Unlock()
-
-	if w.onBandwidthPolicyChange != nil {
-		w.onBandwidthPolicyChange(sandboxID, newPolicy)
-	}
-}
-
-func (w *Watcher) handleBandwidthPolicyDelete(policy *v1alpha1.SandboxBandwidthPolicy) {
-	sandboxID := policy.Spec.SandboxID
-
-	w.policyCache.mu.Lock()
 	delete(w.policyCache.bandwidthPolicies, sandboxID)
 	w.policyCache.mu.Unlock()
 
+	// Notify handlers that policies are removed
+	if w.onNetworkPolicyChange != nil {
+		w.onNetworkPolicyChange(sandboxID, nil)
+	}
 	if w.onBandwidthPolicyChange != nil {
 		w.onBandwidthPolicyChange(sandboxID, nil)
 	}
@@ -467,14 +369,14 @@ func (w *Watcher) GetSandboxByIP(podIP string) *SandboxInfo {
 }
 
 // GetNetworkPolicy returns network policy for a sandbox
-func (w *Watcher) GetNetworkPolicy(sandboxID string) *v1alpha1.SandboxNetworkPolicy {
+func (w *Watcher) GetNetworkPolicy(sandboxID string) *v1alpha1.NetworkPolicySpec {
 	w.policyCache.mu.RLock()
 	defer w.policyCache.mu.RUnlock()
 	return w.policyCache.networkPolicies[sandboxID]
 }
 
 // GetBandwidthPolicy returns bandwidth policy for a sandbox
-func (w *Watcher) GetBandwidthPolicy(sandboxID string) *v1alpha1.SandboxBandwidthPolicy {
+func (w *Watcher) GetBandwidthPolicy(sandboxID string) *v1alpha1.BandwidthPolicySpec {
 	w.policyCache.mu.RLock()
 	defer w.policyCache.mu.RUnlock()
 	return w.policyCache.bandwidthPolicies[sandboxID]
@@ -499,11 +401,11 @@ func (w *Watcher) ListSandboxPods(selector labels.Selector) ([]*corev1.Pod, erro
 }
 
 // ListNetworkPolicies returns all cached network policies
-func (w *Watcher) ListNetworkPolicies() []*v1alpha1.SandboxNetworkPolicy {
+func (w *Watcher) ListNetworkPolicies() []*v1alpha1.NetworkPolicySpec {
 	w.policyCache.mu.RLock()
 	defer w.policyCache.mu.RUnlock()
 
-	result := make([]*v1alpha1.SandboxNetworkPolicy, 0, len(w.policyCache.networkPolicies))
+	result := make([]*v1alpha1.NetworkPolicySpec, 0, len(w.policyCache.networkPolicies))
 	for _, policy := range w.policyCache.networkPolicies {
 		result = append(result, policy)
 	}
@@ -511,43 +413,13 @@ func (w *Watcher) ListNetworkPolicies() []*v1alpha1.SandboxNetworkPolicy {
 }
 
 // ListBandwidthPolicies returns all cached bandwidth policies
-func (w *Watcher) ListBandwidthPolicies() []*v1alpha1.SandboxBandwidthPolicy {
+func (w *Watcher) ListBandwidthPolicies() []*v1alpha1.BandwidthPolicySpec {
 	w.policyCache.mu.RLock()
 	defer w.policyCache.mu.RUnlock()
 
-	result := make([]*v1alpha1.SandboxBandwidthPolicy, 0, len(w.policyCache.bandwidthPolicies))
+	result := make([]*v1alpha1.BandwidthPolicySpec, 0, len(w.policyCache.bandwidthPolicies))
 	for _, policy := range w.policyCache.bandwidthPolicies {
 		result = append(result, policy)
 	}
 	return result
-}
-
-// FetchNetworkPolicy fetches a network policy directly from API server
-func (w *Watcher) FetchNetworkPolicy(ctx context.Context, namespace, sandboxID string) (*v1alpha1.SandboxNetworkPolicy, error) {
-	if w.crdClient == nil {
-		return nil, fmt.Errorf("CRD client not initialized")
-	}
-
-	policyName := fmt.Sprintf("sandbox-%s-network", sandboxID)
-	policy, err := w.crdClient.Sandbox0V1alpha1().SandboxNetworkPolicies(namespace).Get(ctx, policyName, metav1.GetOptions{})
-	if err != nil {
-		return nil, err
-	}
-
-	return policy, nil
-}
-
-// FetchBandwidthPolicy fetches a bandwidth policy directly from API server
-func (w *Watcher) FetchBandwidthPolicy(ctx context.Context, namespace, sandboxID string) (*v1alpha1.SandboxBandwidthPolicy, error) {
-	if w.crdClient == nil {
-		return nil, fmt.Errorf("CRD client not initialized")
-	}
-
-	policyName := fmt.Sprintf("sandbox-%s-bandwidth", sandboxID)
-	policy, err := w.crdClient.Sandbox0V1alpha1().SandboxBandwidthPolicies(namespace).Get(ctx, policyName, metav1.GetOptions{})
-	if err != nil {
-		return nil, err
-	}
-
-	return policy, nil
 }

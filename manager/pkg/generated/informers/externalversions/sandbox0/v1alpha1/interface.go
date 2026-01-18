@@ -13,10 +13,6 @@ import (
 
 // Interface provides access to all the informers in this group version.
 type Interface interface {
-	// SandboxBandwidthPolicies returns a SandboxBandwidthPolicyInformer.
-	SandboxBandwidthPolicies() SandboxBandwidthPolicyInformer
-	// SandboxNetworkPolicies returns a SandboxNetworkPolicyInformer.
-	SandboxNetworkPolicies() SandboxNetworkPolicyInformer
 	// SandboxTemplates returns a SandboxTemplateInformer.
 	SandboxTemplates() SandboxTemplateInformer
 }
@@ -30,16 +26,6 @@ type version struct {
 // New returns a new Interface.
 func New(f internalinterfaces.SharedInformerFactory, namespace string, tweakListOptions internalinterfaces.TweakListOptionsFunc) Interface {
 	return &version{factory: f, namespace: namespace, tweakListOptions: tweakListOptions}
-}
-
-// SandboxBandwidthPolicies returns a SandboxBandwidthPolicyInformer.
-func (v *version) SandboxBandwidthPolicies() SandboxBandwidthPolicyInformer {
-	return &sandboxBandwidthPolicyInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
-}
-
-// SandboxNetworkPolicies returns a SandboxNetworkPolicyInformer.
-func (v *version) SandboxNetworkPolicies() SandboxNetworkPolicyInformer {
-	return &sandboxNetworkPolicyInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }
 
 // SandboxTemplates returns a SandboxTemplateInformer.

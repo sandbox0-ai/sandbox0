@@ -1,69 +1,38 @@
 package service
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
-	"fmt"
-
 	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
 	"go.uber.org/zap"
-	"k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/rest"
 )
 
-// SandboxNetworkPolicyService manages SandboxNetworkPolicy and SandboxBandwidthPolicy CRDs
-type SandboxNetworkPolicyService struct {
-	restClient *rest.RESTClient
-	logger     *zap.Logger
+// NetworkPolicyService builds network and bandwidth policy specs for pod annotations
+type NetworkPolicyService struct {
+	logger *zap.Logger
 }
 
-// NewSandboxNetworkPolicyService creates a new SandboxNetworkPolicyService
-func NewSandboxNetworkPolicyService(
-	restConfig *rest.Config,
-	logger *zap.Logger,
-) (*SandboxNetworkPolicyService, error) {
-	// Configure REST client for our CRD group
-	config := *restConfig
-	config.ContentConfig.GroupVersion = &v1alpha1.SchemeGroupVersion
-	config.APIPath = "/apis"
-	config.NegotiatedSerializer = nil
-	config.ContentType = "application/json"
-
-	restClient, err := rest.RESTClientFor(&config)
-	if err != nil {
-		return nil, fmt.Errorf("create REST client: %w", err)
+// NewNetworkPolicyService creates a new NetworkPolicyService
+func NewNetworkPolicyService(logger *zap.Logger) *NetworkPolicyService {
+	return &NetworkPolicyService{
+		logger: logger,
 	}
-
-	return &SandboxNetworkPolicyService{
-		restClient: restClient,
-		logger:     logger,
-	}, nil
 }
 
-// CreateSandboxNetworkPolicyRequest contains the request to create a network policy
-type CreateSandboxNetworkPolicyRequest struct {
-	SandboxID       string
-	TeamID          string
-	Namespace       string
-	TemplateSpec    *v1alpha1.TplSandboxNetworkPolicy // From template
-	RequestSpec     *v1alpha1.TplSandboxNetworkPolicy // From claim request (overrides template)
-	OwnerReferences []metav1.OwnerReference
+
+// BuildNetworkPolicyRequest contains the request to build a network policy
+type BuildNetworkPolicyRequest struct {
+	SandboxID    string
+	TeamID       string
+	TemplateSpec *v1alpha1.TplSandboxNetworkPolicy // From template
+	RequestSpec  *v1alpha1.TplSandboxNetworkPolicy // From claim request (overrides template)
 }
 
-// CreateOrUpdateSandboxNetworkPolicy creates or updates a SandboxNetworkPolicy for a sandbox
-func (s *SandboxNetworkPolicyService) CreateOrUpdateSandboxNetworkPolicy(
-	ctx context.Context,
-	req *CreateSandboxNetworkPolicyRequest,
-) error {
-	policyName := fmt.Sprintf("sandbox-%s-network", req.SandboxID)
-
+// BuildNetworkPolicyAnnotation builds the network policy annotation JSON
+func (s *NetworkPolicyService) BuildNetworkPolicyAnnotation(req *BuildNetworkPolicyRequest) (string, error) {
 	// Merge template and request specs
 	mergedSpec := s.mergeNetworkPolicies(req.TemplateSpec, req.RequestSpec)
 
 	// Build the policy spec
-	policySpec := &v1alpha1.SandboxNetworkPolicySpec{
+	spec := &v1alpha1.NetworkPolicySpec{
 		SandboxID: req.SandboxID,
 		TeamID:    req.TeamID,
 		Egress:    v1alpha1.BuildEgressSpec(mergedSpec),
@@ -74,126 +43,45 @@ func (s *SandboxNetworkPolicyService) CreateOrUpdateSandboxNetworkPolicy(
 		},
 	}
 
-	policy := &v1alpha1.SandboxNetworkPolicy{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: v1alpha1.SchemeGroupVersion.String(),
-			Kind:       "SandboxNetworkPolicy",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      policyName,
-			Namespace: req.Namespace,
-			Labels: map[string]string{
-				"sandbox0.ai/sandbox-id": req.SandboxID,
-				"sandbox0.ai/team-id":    req.TeamID,
-			},
-			OwnerReferences: req.OwnerReferences,
-		},
-		Spec: *policySpec,
-	}
-
-	// Try to get existing policy
-	existingPolicy, err := s.GetSandboxNetworkPolicy(ctx, req.Namespace, req.SandboxID)
-	if err == nil {
-		// Update existing policy
-		policy.ResourceVersion = existingPolicy.ResourceVersion
-		return s.updateSandboxNetworkPolicyCRD(ctx, req.Namespace, policy)
-	}
-
-	// Create new policy
-	return s.createSandboxNetworkPolicyCRD(ctx, req.Namespace, policy)
+	return v1alpha1.NetworkPolicyToAnnotation(spec)
 }
 
-// createSandboxNetworkPolicyCRD creates a new SandboxNetworkPolicy CRD
-func (s *SandboxNetworkPolicyService) createSandboxNetworkPolicyCRD(ctx context.Context, namespace string, policy *v1alpha1.SandboxNetworkPolicy) error {
-	data, err := json.Marshal(policy)
-	if err != nil {
-		return fmt.Errorf("marshal policy: %w", err)
-	}
-
-	result := s.restClient.Post().
-		Namespace(namespace).
-		Resource("sandboxnetworkpolicies").
-		Body(bytes.NewReader(data)).
-		Do(ctx)
-
-	if err := result.Error(); err != nil {
-		return fmt.Errorf("create network policy: %w", err)
-	}
-
-	s.logger.Info("Created SandboxNetworkPolicy",
-		zap.String("name", policy.Name),
-		zap.String("sandboxID", policy.Spec.SandboxID),
-	)
-
-	return nil
-}
-
-// updateSandboxNetworkPolicyCRD updates an existing SandboxNetworkPolicy CRD
-func (s *SandboxNetworkPolicyService) updateSandboxNetworkPolicyCRD(ctx context.Context, namespace string, policy *v1alpha1.SandboxNetworkPolicy) error {
-	data, err := json.Marshal(policy)
-	if err != nil {
-		return fmt.Errorf("marshal policy: %w", err)
-	}
-
-	result := s.restClient.Put().
-		Namespace(namespace).
-		Resource("sandboxnetworkpolicies").
-		Name(policy.Name).
-		Body(bytes.NewReader(data)).
-		Do(ctx)
-
-	if err := result.Error(); err != nil {
-		return fmt.Errorf("update network policy: %w", err)
-	}
-
-	s.logger.Info("Updated SandboxNetworkPolicy",
-		zap.String("name", policy.Name),
-		zap.String("sandboxID", policy.Spec.SandboxID),
-	)
-
-	return nil
-}
-
-// CreateBandwidthPolicyRequest contains the request to create a bandwidth policy
-type CreateBandwidthPolicyRequest struct {
+// BuildBandwidthPolicyRequest contains the request to build a bandwidth policy
+type BuildBandwidthPolicyRequest struct {
 	SandboxID         string
 	TeamID            string
-	Namespace         string
 	EgressRateBps     int64
 	IngressRateBps    int64
 	BurstBytes        int64
 	AccountingEnabled bool
-	OwnerReferences   []metav1.OwnerReference
 }
 
-// CreateOrUpdateBandwidthPolicy creates or updates a SandboxBandwidthPolicy for a sandbox
-func (s *SandboxNetworkPolicyService) CreateOrUpdateBandwidthPolicy(
-	ctx context.Context,
-	req *CreateBandwidthPolicyRequest,
-) error {
-	policyName := fmt.Sprintf("sandbox-%s-bandwidth", req.SandboxID)
-
+// BuildBandwidthPolicyAnnotation builds the bandwidth policy annotation JSON
+func (s *NetworkPolicyService) BuildBandwidthPolicyAnnotation(req *BuildBandwidthPolicyRequest) (string, error) {
 	// Default values
-	if req.EgressRateBps == 0 {
-		req.EgressRateBps = 100 * 1000 * 1000 // 100 Mbps default
+	egressRateBps := req.EgressRateBps
+	if egressRateBps == 0 {
+		egressRateBps = 100 * 1000 * 1000 // 100 Mbps default
 	}
-	if req.IngressRateBps == 0 {
-		req.IngressRateBps = 100 * 1000 * 1000 // 100 Mbps default
+	ingressRateBps := req.IngressRateBps
+	if ingressRateBps == 0 {
+		ingressRateBps = 100 * 1000 * 1000 // 100 Mbps default
 	}
-	if req.BurstBytes == 0 {
-		req.BurstBytes = req.EgressRateBps / 8 // 1 second burst
+	burstBytes := req.BurstBytes
+	if burstBytes == 0 {
+		burstBytes = egressRateBps / 8 // 1 second burst
 	}
 
-	policySpec := &v1alpha1.SandboxBandwidthPolicySpec{
+	spec := &v1alpha1.BandwidthPolicySpec{
 		SandboxID: req.SandboxID,
 		TeamID:    req.TeamID,
 		EgressRateLimit: &v1alpha1.RateLimitSpec{
-			RateBps:    req.EgressRateBps,
-			BurstBytes: req.BurstBytes,
+			RateBps:    egressRateBps,
+			BurstBytes: burstBytes,
 		},
 		IngressRateLimit: &v1alpha1.RateLimitSpec{
-			RateBps:    req.IngressRateBps,
-			BurstBytes: req.BurstBytes,
+			RateBps:    ingressRateBps,
+			BurstBytes: burstBytes,
 		},
 		Accounting: &v1alpha1.AccountingSpec{
 			Enabled:               true,
@@ -201,185 +89,12 @@ func (s *SandboxNetworkPolicyService) CreateOrUpdateBandwidthPolicy(
 		},
 	}
 
-	policy := &v1alpha1.SandboxBandwidthPolicy{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: v1alpha1.SchemeGroupVersion.String(),
-			Kind:       "SandboxBandwidthPolicy",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      policyName,
-			Namespace: req.Namespace,
-			Labels: map[string]string{
-				"sandbox0.ai/sandbox-id": req.SandboxID,
-				"sandbox0.ai/team-id":    req.TeamID,
-			},
-			OwnerReferences: req.OwnerReferences,
-		},
-		Spec: *policySpec,
-	}
-
-	// Try to get existing policy
-	existingPolicy, err := s.GetBandwidthPolicy(ctx, req.Namespace, req.SandboxID)
-	if err == nil {
-		// Update existing policy
-		policy.ResourceVersion = existingPolicy.ResourceVersion
-		return s.updateBandwidthPolicyCRD(ctx, req.Namespace, policy)
-	}
-
-	// Create new policy
-	return s.createBandwidthPolicyCRD(ctx, req.Namespace, policy)
-}
-
-// createBandwidthPolicyCRD creates a new SandboxBandwidthPolicy CRD
-func (s *SandboxNetworkPolicyService) createBandwidthPolicyCRD(ctx context.Context, namespace string, policy *v1alpha1.SandboxBandwidthPolicy) error {
-	data, err := json.Marshal(policy)
-	if err != nil {
-		return fmt.Errorf("marshal policy: %w", err)
-	}
-
-	result := s.restClient.Post().
-		Namespace(namespace).
-		Resource("sandboxbandwidthpolicies").
-		Body(bytes.NewReader(data)).
-		Do(ctx)
-
-	if err := result.Error(); err != nil {
-		return fmt.Errorf("create bandwidth policy: %w", err)
-	}
-
-	s.logger.Info("Created SandboxBandwidthPolicy",
-		zap.String("name", policy.Name),
-		zap.String("sandboxID", policy.Spec.SandboxID),
-	)
-
-	return nil
-}
-
-// updateBandwidthPolicyCRD updates an existing SandboxBandwidthPolicy CRD
-func (s *SandboxNetworkPolicyService) updateBandwidthPolicyCRD(ctx context.Context, namespace string, policy *v1alpha1.SandboxBandwidthPolicy) error {
-	data, err := json.Marshal(policy)
-	if err != nil {
-		return fmt.Errorf("marshal policy: %w", err)
-	}
-
-	result := s.restClient.Put().
-		Namespace(namespace).
-		Resource("sandboxbandwidthpolicies").
-		Name(policy.Name).
-		Body(bytes.NewReader(data)).
-		Do(ctx)
-
-	if err := result.Error(); err != nil {
-		return fmt.Errorf("update bandwidth policy: %w", err)
-	}
-
-	s.logger.Info("Updated SandboxBandwidthPolicy",
-		zap.String("name", policy.Name),
-		zap.String("sandboxID", policy.Spec.SandboxID),
-	)
-
-	return nil
-}
-
-// DeleteSandboxNetworkPolicy deletes the network policy for a sandbox
-func (s *SandboxNetworkPolicyService) DeleteSandboxNetworkPolicy(ctx context.Context, namespace, sandboxID string) error {
-	policyName := fmt.Sprintf("sandbox-%s-network", sandboxID)
-
-	result := s.restClient.Delete().
-		Namespace(namespace).
-		Resource("sandboxnetworkpolicies").
-		Name(policyName).
-		Do(ctx)
-
-	if err := result.Error(); err != nil {
-		// Check if it's a 404 - that's OK
-		if errors.IsNotFound(err) {
-			return nil
-		}
-		return fmt.Errorf("delete network policy: %w", err)
-	}
-
-	return nil
-}
-
-// DeleteBandwidthPolicy deletes the bandwidth policy for a sandbox
-func (s *SandboxNetworkPolicyService) DeleteBandwidthPolicy(ctx context.Context, namespace, sandboxID string) error {
-	policyName := fmt.Sprintf("sandbox-%s-bandwidth", sandboxID)
-
-	result := s.restClient.Delete().
-		Namespace(namespace).
-		Resource("sandboxbandwidthpolicies").
-		Name(policyName).
-		Do(ctx)
-
-	if err := result.Error(); err != nil {
-		// Check if it's a 404 - that's OK
-		if errors.IsNotFound(err) {
-			return nil
-		}
-		return fmt.Errorf("delete bandwidth policy: %w", err)
-	}
-
-	return nil
-}
-
-// GetSandboxNetworkPolicy gets the network policy for a sandbox
-func (s *SandboxNetworkPolicyService) GetSandboxNetworkPolicy(ctx context.Context, namespace, sandboxID string) (*v1alpha1.SandboxNetworkPolicy, error) {
-	policyName := fmt.Sprintf("sandbox-%s-network", sandboxID)
-
-	result := s.restClient.Get().
-		Namespace(namespace).
-		Resource("sandboxnetworkpolicies").
-		Name(policyName).
-		Do(ctx)
-
-	if err := result.Error(); err != nil {
-		return nil, err
-	}
-
-	data, err := result.Raw()
-	if err != nil {
-		return nil, err
-	}
-
-	policy := &v1alpha1.SandboxNetworkPolicy{}
-	if err := json.Unmarshal(data, policy); err != nil {
-		return nil, fmt.Errorf("unmarshal policy: %w", err)
-	}
-
-	return policy, nil
-}
-
-// GetBandwidthPolicy gets the bandwidth policy for a sandbox
-func (s *SandboxNetworkPolicyService) GetBandwidthPolicy(ctx context.Context, namespace, sandboxID string) (*v1alpha1.SandboxBandwidthPolicy, error) {
-	policyName := fmt.Sprintf("sandbox-%s-bandwidth", sandboxID)
-
-	result := s.restClient.Get().
-		Namespace(namespace).
-		Resource("sandboxbandwidthpolicies").
-		Name(policyName).
-		Do(ctx)
-
-	if err := result.Error(); err != nil {
-		return nil, err
-	}
-
-	data, err := result.Raw()
-	if err != nil {
-		return nil, err
-	}
-
-	policy := &v1alpha1.SandboxBandwidthPolicy{}
-	if err := json.Unmarshal(data, policy); err != nil {
-		return nil, fmt.Errorf("unmarshal policy: %w", err)
-	}
-
-	return policy, nil
+	return v1alpha1.BandwidthPolicyToAnnotation(spec)
 }
 
 // mergeNetworkPolicies merges template and request network policies
 // Request values override template values
-func (s *SandboxNetworkPolicyService) mergeNetworkPolicies(
+func (s *NetworkPolicyService) mergeNetworkPolicies(
 	template *v1alpha1.TplSandboxNetworkPolicy,
 	request *v1alpha1.TplSandboxNetworkPolicy,
 ) *v1alpha1.TplSandboxNetworkPolicy {
@@ -429,91 +144,4 @@ func (s *SandboxNetworkPolicyService) mergeNetworkPolicies(
 	}
 
 	return merged
-}
-
-// UpdateSandboxNetworkPolicyRequest is the request to update a network policy
-type UpdateSandboxNetworkPolicyRequest struct {
-	SandboxID      string
-	Namespace      string
-	AllowedDomains []string
-	DeniedDomains  []string
-	AllowedCIDRs   []string
-	DeniedCIDRs    []string
-}
-
-// UpdateSandboxNetworkPolicy updates an existing network policy
-func (s *SandboxNetworkPolicyService) UpdateSandboxNetworkPolicy(
-	ctx context.Context,
-	req *UpdateSandboxNetworkPolicyRequest,
-) error {
-	// Get existing policy
-	policy, err := s.GetSandboxNetworkPolicy(ctx, req.Namespace, req.SandboxID)
-	if err != nil {
-		return fmt.Errorf("get existing policy: %w", err)
-	}
-
-	// Update spec
-	if policy.Spec.Egress == nil {
-		policy.Spec.Egress = &v1alpha1.EgressPolicySpec{}
-	}
-
-	if req.AllowedDomains != nil {
-		policy.Spec.Egress.AllowedDomains = req.AllowedDomains
-	}
-	if req.DeniedDomains != nil {
-		policy.Spec.Egress.DeniedDomains = req.DeniedDomains
-	}
-	if req.AllowedCIDRs != nil {
-		policy.Spec.Egress.AllowedCIDRs = req.AllowedCIDRs
-	}
-	if req.DeniedCIDRs != nil {
-		policy.Spec.Egress.DeniedCIDRs = req.DeniedCIDRs
-	}
-
-	return s.updateSandboxNetworkPolicyCRD(ctx, req.Namespace, policy)
-}
-
-// UpdateBandwidthPolicyRequest is the request to update a bandwidth policy
-type UpdateBandwidthPolicyRequest struct {
-	SandboxID      string
-	Namespace      string
-	EgressRateBps  *int64
-	IngressRateBps *int64
-	BurstBytes     *int64
-}
-
-// UpdateBandwidthPolicy updates an existing bandwidth policy
-func (s *SandboxNetworkPolicyService) UpdateBandwidthPolicy(
-	ctx context.Context,
-	req *UpdateBandwidthPolicyRequest,
-) error {
-	// Get existing policy
-	policy, err := s.GetBandwidthPolicy(ctx, req.Namespace, req.SandboxID)
-	if err != nil {
-		return fmt.Errorf("get existing policy: %w", err)
-	}
-
-	// Update spec
-	if req.EgressRateBps != nil {
-		if policy.Spec.EgressRateLimit == nil {
-			policy.Spec.EgressRateLimit = &v1alpha1.RateLimitSpec{}
-		}
-		policy.Spec.EgressRateLimit.RateBps = *req.EgressRateBps
-	}
-	if req.IngressRateBps != nil {
-		if policy.Spec.IngressRateLimit == nil {
-			policy.Spec.IngressRateLimit = &v1alpha1.RateLimitSpec{}
-		}
-		policy.Spec.IngressRateLimit.RateBps = *req.IngressRateBps
-	}
-	if req.BurstBytes != nil {
-		if policy.Spec.EgressRateLimit != nil {
-			policy.Spec.EgressRateLimit.BurstBytes = *req.BurstBytes
-		}
-		if policy.Spec.IngressRateLimit != nil {
-			policy.Spec.IngressRateLimit.BurstBytes = *req.BurstBytes
-		}
-	}
-
-	return s.updateBandwidthPolicyCRD(ctx, req.Namespace, policy)
 }

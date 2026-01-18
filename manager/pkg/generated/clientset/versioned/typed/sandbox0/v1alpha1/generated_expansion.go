@@ -7,8 +7,4 @@ All rights reserved.
 
 package v1alpha1
 
-type SandboxBandwidthPolicyExpansion interface{}
-
-type SandboxNetworkPolicyExpansion interface{}
-
 type SandboxTemplateExpansion interface{}

@@ -135,11 +135,8 @@ func main() {
 	// Create pod lister
 	podLister := informerFactory.Core().V1().Pods().Lister()
 
-	// Create network policy service for CRD management
-	networkPolicyService, err := service.NewSandboxNetworkPolicyService(k8sConfig, logger)
-	if err != nil {
-		logger.Fatal("Failed to create network policy service", zap.Error(err))
-	}
+	// Create network policy service for building policy annotations
+	networkPolicyService := service.NewNetworkPolicyService(logger)
 
 	// Initialize internal auth generator for procd communication
 	var internalTokenGenerator service.TokenGenerator

@@ -20,7 +20,6 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/scheme"
 )
 
 func main() {
@@ -55,27 +54,18 @@ func main() {
 		logger.Fatal("Failed to create Kubernetes client", zap.Error(err))
 	}
 
-	// Add CRD types to scheme
-	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
-		logger.Fatal("Failed to add CRD types to scheme", zap.Error(err))
-	}
-
 	// Create context with cancellation
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Create watcher with REST config for CRD access
-	w, err := watcher.NewWatcherWithConfig(
-		k8sConfig,
+	// Create watcher (policies are now read from pod annotations)
+	w := watcher.NewWatcher(
 		k8sClient,
 		cfg.NodeName,
 		cfg.Namespace,
 		cfg.ResyncPeriod,
 		logger,
 	)
-	if err != nil {
-		logger.Fatal("Failed to create watcher", zap.Error(err))
-	}
 
 	// Create dataplane with eBPF support
 	dpConfig := &dataplane.Config{
@@ -188,7 +178,7 @@ func main() {
 	)
 
 	// Set up policy change handlers
-	w.SetNetworkPolicyHandler(func(sandboxID string, policy *v1alpha1.SandboxNetworkPolicy) {
+	w.SetNetworkPolicyHandler(func(sandboxID string, policy *v1alpha1.NetworkPolicySpec) {
 		logger.Info("Network policy changed",
 			zap.String("sandboxID", sandboxID),
 			zap.Bool("hasPolicy", policy != nil),
@@ -215,7 +205,7 @@ func main() {
 		}
 	})
 
-	w.SetBandwidthPolicyHandler(func(sandboxID string, policy *v1alpha1.SandboxBandwidthPolicy) {
+	w.SetBandwidthPolicyHandler(func(sandboxID string, policy *v1alpha1.BandwidthPolicySpec) {
 		logger.Info("Bandwidth policy changed",
 			zap.String("sandboxID", sandboxID),
 			zap.Bool("hasPolicy", policy != nil),

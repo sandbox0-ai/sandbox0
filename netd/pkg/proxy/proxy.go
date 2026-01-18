@@ -312,15 +312,12 @@ func (p *Proxy) checkPolicy(sandboxID, destHost string, destPort int) (decision,
 		return "deny", "no network policy found"
 	}
 
-	if policy.Spec.Egress == nil {
-		// No egress rules = use default action
-		if policy.Spec.Egress.DefaultAction == "allow" {
-			return "allow", "default allow"
-		}
-		return "deny", "default deny"
+	if policy.Egress == nil {
+		// No egress rules = default deny
+		return "deny", "no egress policy, default deny"
 	}
 
-	egress := policy.Spec.Egress
+	egress := policy.Egress
 
 	// Check denied domains first
 	for _, domain := range egress.DeniedDomains {

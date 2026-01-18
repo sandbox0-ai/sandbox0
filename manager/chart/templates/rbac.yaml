@@ -6,18 +6,14 @@ metadata:
   labels:
     {{- include "manager.labels" . | nindent 4 }}
 rules:
-  # Sandbox CRDs
+  # Sandbox CRDs (network/bandwidth policies are now stored in pod annotations)
   - apiGroups: ["sandbox0.ai"]
     resources:
       - sandboxtemplates
-      - sandboxnetworkpolicies
-      - sandboxbandwidthpolicies
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["sandbox0.ai"]
     resources:
       - sandboxtemplates/status
-      - sandboxnetworkpolicies/status
-      - sandboxbandwidthpolicies/status
     verbs: ["get", "update", "patch"]
   # Core resources
   - apiGroups: [""]

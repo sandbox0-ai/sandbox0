@@ -17,22 +17,12 @@ import (
 
 type Sandbox0V1alpha1Interface interface {
 	RESTClient() rest.Interface
-	SandboxBandwidthPoliciesGetter
-	SandboxNetworkPoliciesGetter
 	SandboxTemplatesGetter
 }
 
 // Sandbox0V1alpha1Client is used to interact with features provided by the sandbox0.ai group.
 type Sandbox0V1alpha1Client struct {
 	restClient rest.Interface
-}
-
-func (c *Sandbox0V1alpha1Client) SandboxBandwidthPolicies(namespace string) SandboxBandwidthPolicyInterface {
-	return newSandboxBandwidthPolicies(c, namespace)
-}
-
-func (c *Sandbox0V1alpha1Client) SandboxNetworkPolicies(namespace string) SandboxNetworkPolicyInterface {
-	return newSandboxNetworkPolicies(c, namespace)
 }
 
 func (c *Sandbox0V1alpha1Client) SandboxTemplates(namespace string) SandboxTemplateInterface {

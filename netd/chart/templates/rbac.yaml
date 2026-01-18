@@ -6,13 +6,7 @@ metadata:
   labels:
     {{- include "netd.labels" . | nindent 4 }}
 rules:
-  # Watch sandbox CRDs for network policies
-  - apiGroups: ["sandbox0.ai"]
-    resources:
-      - sandboxnetworkpolicies
-      - sandboxbandwidthpolicies
-    verbs: ["get", "list", "watch"]
-  # Watch pods to apply network policies
+  # Watch pods to apply network policies (policies are stored in pod annotations)
   - apiGroups: [""]
     resources:
       - pods

@@ -47,16 +47,16 @@ const (
 
 // SandboxService handles sandbox operations
 type SandboxService struct {
-	k8sClient                   kubernetes.Interface
-	podLister                   corelisters.PodLister
-	templateLister              controller.TemplateLister
-	SandboxNetworkPolicyService *SandboxNetworkPolicyService
-	procdClient                 *ProcdClient
-	internalTokenGenerator      TokenGenerator
-	procdTokenGenerator         TokenGenerator
-	clock                       TimeProvider
-	defaultTTL                  time.Duration
-	logger                      *zap.Logger
+	k8sClient              kubernetes.Interface
+	podLister              corelisters.PodLister
+	templateLister         controller.TemplateLister
+	NetworkPolicyService   *NetworkPolicyService
+	procdClient            *ProcdClient
+	internalTokenGenerator TokenGenerator
+	procdTokenGenerator    TokenGenerator
+	clock                  TimeProvider
+	defaultTTL             time.Duration
+	logger                 *zap.Logger
 }
 
 // TimeProvider provides time functions, allowing for synchronized time across clusters
@@ -83,7 +83,7 @@ func NewSandboxService(
 	k8sClient kubernetes.Interface,
 	podLister corelisters.PodLister,
 	templateLister controller.TemplateLister,
-	SandboxNetworkPolicyService *SandboxNetworkPolicyService,
+	networkPolicyService *NetworkPolicyService,
 	internalTokenGenerator TokenGenerator,
 	procdTokenGenerator TokenGenerator,
 	clock TimeProvider,
@@ -96,16 +96,16 @@ func NewSandboxService(
 	}
 
 	return &SandboxService{
-		k8sClient:                   k8sClient,
-		podLister:                   podLister,
-		templateLister:              templateLister,
-		SandboxNetworkPolicyService: SandboxNetworkPolicyService,
-		procdClient:                 NewProcdClient(),
-		internalTokenGenerator:      internalTokenGenerator,
-		procdTokenGenerator:         procdTokenGenerator,
-		clock:                       clock,
-		defaultTTL:                  defaultTTL,
-		logger:                      logger,
+		k8sClient:              k8sClient,
+		podLister:              podLister,
+		templateLister:         templateLister,
+		NetworkPolicyService:   networkPolicyService,
+		procdClient:            NewProcdClient(),
+		internalTokenGenerator: internalTokenGenerator,
+		procdTokenGenerator:    procdTokenGenerator,
+		clock:                  clock,
+		defaultTTL:             defaultTTL,
+		logger:                 logger,
 	}
 }
 
@@ -193,51 +193,8 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "success").Inc()
 	metrics.SandboxClaimDuration.WithLabelValues(req.Template, claimType).Observe(time.Since(start).Seconds())
 
-	// Create network and bandwidth policies for the sandbox
-	if s.SandboxNetworkPolicyService != nil {
-		// Create owner reference to the pod
-		ownerRefs := []metav1.OwnerReference{
-			*metav1.NewControllerRef(pod, corev1.SchemeGroupVersion.WithKind("Pod")),
-		}
-
-		// Create network policy
-		var requestNetwork *v1alpha1.TplSandboxNetworkPolicy
-		if req.Config != nil {
-			requestNetwork = req.Config.Network
-		}
-
-		if err := s.SandboxNetworkPolicyService.CreateOrUpdateSandboxNetworkPolicy(ctx, &CreateSandboxNetworkPolicyRequest{
-			SandboxID:       pod.Name,
-			TeamID:          req.TeamID,
-			Namespace:       pod.Namespace,
-			TemplateSpec:    template.Spec.Network,
-			RequestSpec:     requestNetwork,
-			OwnerReferences: ownerRefs,
-		}); err != nil {
-			s.logger.Error("Failed to create network policy",
-				zap.String("sandboxID", pod.Name),
-				zap.Error(err),
-			)
-			// Don't fail the claim, but log the error
-		}
-
-		// Create bandwidth policy with defaults
-		if err := s.SandboxNetworkPolicyService.CreateOrUpdateBandwidthPolicy(ctx, &CreateBandwidthPolicyRequest{
-			SandboxID:         pod.Name,
-			TeamID:            req.TeamID,
-			Namespace:         pod.Namespace,
-			EgressRateBps:     100 * 1000 * 1000, // 100 Mbps
-			IngressRateBps:    100 * 1000 * 1000, // 100 Mbps
-			AccountingEnabled: true,
-			OwnerReferences:   ownerRefs,
-		}); err != nil {
-			s.logger.Error("Failed to create bandwidth policy",
-				zap.String("sandboxID", pod.Name),
-				zap.Error(err),
-			)
-			// Don't fail the claim, but log the error
-		}
-	}
+	// Note: Network and bandwidth policies are now stored in pod annotations
+	// They are set in claimIdlePod() and createNewPod() methods
 
 	return &ClaimResponse{
 		SandboxID:    pod.Name,
@@ -317,6 +274,46 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		pod.Annotations[controller.AnnotationConfig] = string(configJSON)
 	}
 
+	// Build and add network policy annotation
+	if s.NetworkPolicyService != nil {
+		var requestNetwork *v1alpha1.TplSandboxNetworkPolicy
+		if req.Config != nil {
+			requestNetwork = req.Config.Network
+		}
+
+		networkPolicyJSON, err := s.NetworkPolicyService.BuildNetworkPolicyAnnotation(&BuildNetworkPolicyRequest{
+			SandboxID:    pod.Name,
+			TeamID:       req.TeamID,
+			TemplateSpec: template.Spec.Network,
+			RequestSpec:  requestNetwork,
+		})
+		if err != nil {
+			s.logger.Error("Failed to build network policy annotation",
+				zap.String("sandboxID", pod.Name),
+				zap.Error(err),
+			)
+		} else {
+			pod.Annotations[controller.AnnotationNetworkPolicy] = networkPolicyJSON
+		}
+
+		// Build and add bandwidth policy annotation
+		bandwidthPolicyJSON, err := s.NetworkPolicyService.BuildBandwidthPolicyAnnotation(&BuildBandwidthPolicyRequest{
+			SandboxID:         pod.Name,
+			TeamID:            req.TeamID,
+			EgressRateBps:     100 * 1000 * 1000, // 100 Mbps
+			IngressRateBps:    100 * 1000 * 1000, // 100 Mbps
+			AccountingEnabled: true,
+		})
+		if err != nil {
+			s.logger.Error("Failed to build bandwidth policy annotation",
+				zap.String("sandboxID", pod.Name),
+				zap.Error(err),
+			)
+		} else {
+			pod.Annotations[controller.AnnotationBandwidthPolicy] = bandwidthPolicyJSON
+		}
+	}
+
 	// Update the pod
 	updatedPod, err := s.k8sClient.CoreV1().Pods(pod.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
 	if err != nil {
@@ -375,6 +372,46 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 		pod.Annotations[controller.AnnotationConfig] = string(configJSON)
 	}
 
+	// Build and add network policy annotation
+	if s.NetworkPolicyService != nil {
+		var requestNetwork *v1alpha1.TplSandboxNetworkPolicy
+		if req.Config != nil {
+			requestNetwork = req.Config.Network
+		}
+
+		networkPolicyJSON, err := s.NetworkPolicyService.BuildNetworkPolicyAnnotation(&BuildNetworkPolicyRequest{
+			SandboxID:    podName,
+			TeamID:       req.TeamID,
+			TemplateSpec: template.Spec.Network,
+			RequestSpec:  requestNetwork,
+		})
+		if err != nil {
+			s.logger.Error("Failed to build network policy annotation",
+				zap.String("sandboxID", podName),
+				zap.Error(err),
+			)
+		} else {
+			pod.Annotations[controller.AnnotationNetworkPolicy] = networkPolicyJSON
+		}
+
+		// Build and add bandwidth policy annotation
+		bandwidthPolicyJSON, err := s.NetworkPolicyService.BuildBandwidthPolicyAnnotation(&BuildBandwidthPolicyRequest{
+			SandboxID:         podName,
+			TeamID:            req.TeamID,
+			EgressRateBps:     100 * 1000 * 1000, // 100 Mbps
+			IngressRateBps:    100 * 1000 * 1000, // 100 Mbps
+			AccountingEnabled: true,
+		})
+		if err != nil {
+			s.logger.Error("Failed to build bandwidth policy annotation",
+				zap.String("sandboxID", podName),
+				zap.Error(err),
+			)
+		} else {
+			pod.Annotations[controller.AnnotationBandwidthPolicy] = bandwidthPolicyJSON
+		}
+	}
+
 	// Create the pod
 	createdPod, err := s.k8sClient.CoreV1().Pods(template.ObjectMeta.Namespace).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
@@ -400,22 +437,8 @@ func (s *SandboxService) TerminateSandbox(ctx context.Context, sandboxID string)
 		return fmt.Errorf("get pod: %w", err)
 	}
 
-	// Delete network and bandwidth policies
-	if s.SandboxNetworkPolicyService != nil {
-		if err := s.SandboxNetworkPolicyService.DeleteSandboxNetworkPolicy(ctx, pod.Namespace, sandboxID); err != nil {
-			s.logger.Warn("Failed to delete network policy",
-				zap.String("sandboxID", sandboxID),
-				zap.Error(err),
-			)
-		}
-
-		if err := s.SandboxNetworkPolicyService.DeleteBandwidthPolicy(ctx, pod.Namespace, sandboxID); err != nil {
-			s.logger.Warn("Failed to delete bandwidth policy",
-				zap.String("sandboxID", sandboxID),
-				zap.Error(err),
-			)
-		}
-	}
+	// Note: Network and bandwidth policies are now stored in pod annotations
+	// They are automatically deleted when the pod is deleted
 
 	// Delete the pod
 	err = s.k8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{})

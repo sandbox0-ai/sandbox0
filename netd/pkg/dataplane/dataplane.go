@@ -207,8 +207,8 @@ func (dp *DataPlane) Initialize(ctx context.Context) error {
 func (dp *DataPlane) ApplyPodRules(
 	ctx context.Context,
 	info *watcher.SandboxInfo,
-	networkPolicy *v1alpha1.SandboxNetworkPolicy,
-	bandwidthPolicy *v1alpha1.SandboxBandwidthPolicy,
+	networkPolicy *v1alpha1.NetworkPolicySpec,
+	bandwidthPolicy *v1alpha1.BandwidthPolicySpec,
 ) error {
 	dp.mu.Lock()
 	defer dp.mu.Unlock()
@@ -258,7 +258,7 @@ func (dp *DataPlane) ApplyPodRules(
 func (dp *DataPlane) applyEgressRules(
 	ctx context.Context,
 	info *watcher.SandboxInfo,
-	policy *v1alpha1.SandboxNetworkPolicy,
+	policy *v1alpha1.NetworkPolicySpec,
 	rules *SandboxRules,
 ) error {
 	podIP := info.PodIP
@@ -303,9 +303,9 @@ func (dp *DataPlane) applyEgressRules(
 
 	// 4. Redirect HTTP/HTTPS to proxy (for domain-based filtering)
 	enforceProxyPorts := []int{80, 443}
-	if policy != nil && policy.Spec.Egress != nil && len(policy.Spec.Egress.EnforceProxyPorts) > 0 {
-		enforceProxyPorts = make([]int, len(policy.Spec.Egress.EnforceProxyPorts))
-		for i, p := range policy.Spec.Egress.EnforceProxyPorts {
+	if policy != nil && policy.Egress != nil && len(policy.Egress.EnforceProxyPorts) > 0 {
+		enforceProxyPorts = make([]int, len(policy.Egress.EnforceProxyPorts))
+		for i, p := range policy.Egress.EnforceProxyPorts {
 			enforceProxyPorts[i] = int(p)
 		}
 	}
@@ -332,8 +332,8 @@ func (dp *DataPlane) applyEgressRules(
 	}
 
 	// 5. Apply allowed CIDRs
-	if policy != nil && policy.Spec.Egress != nil {
-		for _, cidr := range policy.Spec.Egress.AllowedCIDRs {
+	if policy != nil && policy.Egress != nil {
+		for _, cidr := range policy.Egress.AllowedCIDRs {
 			if err := dp.runIPTables(
 				"-t", "filter", "-A", "NETD-EGRESS",
 				"-s", podIP, "-d", cidr,
@@ -347,8 +347,8 @@ func (dp *DataPlane) applyEgressRules(
 
 	// 6. Block platform-denied CIDRs (RFC1918, metadata, etc.)
 	deniedCIDRs := v1alpha1.PlatformDeniedCIDRs
-	if policy != nil && policy.Spec.Egress != nil && len(policy.Spec.Egress.AlwaysDeniedCIDRs) > 0 {
-		deniedCIDRs = policy.Spec.Egress.AlwaysDeniedCIDRs
+	if policy != nil && policy.Egress != nil && len(policy.Egress.AlwaysDeniedCIDRs) > 0 {
+		deniedCIDRs = policy.Egress.AlwaysDeniedCIDRs
 	}
 
 	for _, cidr := range deniedCIDRs {
@@ -364,7 +364,7 @@ func (dp *DataPlane) applyEgressRules(
 
 	// 7. Default action (deny by default for enterprise security)
 	defaultAction := "DROP"
-	if policy != nil && policy.Spec.Egress != nil && policy.Spec.Egress.DefaultAction == "allow" {
+	if policy != nil && policy.Egress != nil && policy.Egress.DefaultAction == "allow" {
 		defaultAction = "ACCEPT"
 	}
 
@@ -384,7 +384,7 @@ func (dp *DataPlane) applyEgressRules(
 func (dp *DataPlane) applyIngressRules(
 	ctx context.Context,
 	info *watcher.SandboxInfo,
-	policy *v1alpha1.SandboxNetworkPolicy,
+	policy *v1alpha1.NetworkPolicySpec,
 	rules *SandboxRules,
 ) error {
 	podIP := info.PodIP
@@ -416,8 +416,8 @@ func (dp *DataPlane) applyIngressRules(
 	}
 
 	// 3. Apply allowed source CIDRs from policy
-	if policy != nil && policy.Spec.Ingress != nil {
-		for _, cidr := range policy.Spec.Ingress.AllowedSourceCIDRs {
+	if policy != nil && policy.Ingress != nil {
+		for _, cidr := range policy.Ingress.AllowedSourceCIDRs {
 			if err := dp.runIPTables(
 				"-t", "filter", "-A", "NETD-INGRESS",
 				"-s", cidr, "-d", podIP,
@@ -429,7 +429,7 @@ func (dp *DataPlane) applyIngressRules(
 		}
 
 		// Apply allowed ports
-		for _, portSpec := range policy.Spec.Ingress.AllowedPorts {
+		for _, portSpec := range policy.Ingress.AllowedPorts {
 			protocol := portSpec.Protocol
 			if protocol == "" {
 				protocol = "tcp"
@@ -448,7 +448,7 @@ func (dp *DataPlane) applyIngressRules(
 
 	// 4. Default deny for ingress
 	defaultAction := "DROP"
-	if policy != nil && policy.Spec.Ingress != nil && policy.Spec.Ingress.DefaultAction == "allow" {
+	if policy != nil && policy.Ingress != nil && policy.Ingress.DefaultAction == "allow" {
 		defaultAction = "ACCEPT"
 	}
 
@@ -468,7 +468,7 @@ func (dp *DataPlane) applyIngressRules(
 func (dp *DataPlane) applyBandwidthRules(
 	ctx context.Context,
 	info *watcher.SandboxInfo,
-	policy *v1alpha1.SandboxBandwidthPolicy,
+	policy *v1alpha1.BandwidthPolicySpec,
 	rules *SandboxRules,
 ) error {
 	// Find the veth interface for this pod
@@ -479,14 +479,14 @@ func (dp *DataPlane) applyBandwidthRules(
 
 	// Get rate limits
 	var egressRateBps, ingressRateBps, burstBytes int64
-	if policy.Spec.EgressRateLimit != nil {
-		egressRateBps = policy.Spec.EgressRateLimit.RateBps
-		burstBytes = policy.Spec.EgressRateLimit.BurstBytes
+	if policy.EgressRateLimit != nil {
+		egressRateBps = policy.EgressRateLimit.RateBps
+		burstBytes = policy.EgressRateLimit.BurstBytes
 	}
-	if policy.Spec.IngressRateLimit != nil {
-		ingressRateBps = policy.Spec.IngressRateLimit.RateBps
+	if policy.IngressRateLimit != nil {
+		ingressRateBps = policy.IngressRateLimit.RateBps
 		if burstBytes == 0 {
-			burstBytes = policy.Spec.IngressRateLimit.BurstBytes
+			burstBytes = policy.IngressRateLimit.BurstBytes
 		}
 	}
 	if burstBytes == 0 && egressRateBps > 0 {

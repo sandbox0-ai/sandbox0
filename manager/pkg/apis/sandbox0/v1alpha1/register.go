@@ -28,14 +28,13 @@ func Resource(resource string) schema.GroupResource {
 }
 
 // addKnownTypes adds the set of types defined in this package to the supplied scheme
+// Note: SandboxNetworkPolicy and SandboxBandwidthPolicy are no longer CRDs.
+// They are now stored as JSON in Pod annotations. The types are kept for
+// serialization/deserialization but not registered as CRD types.
 func addKnownTypes(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(SchemeGroupVersion,
 		&SandboxTemplate{},
 		&SandboxTemplateList{},
-		&SandboxNetworkPolicy{},
-		&SandboxNetworkPolicyList{},
-		&SandboxBandwidthPolicy{},
-		&SandboxBandwidthPolicyList{},
 	)
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
 	return nil

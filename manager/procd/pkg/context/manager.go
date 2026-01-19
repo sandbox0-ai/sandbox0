@@ -1,0 +1,299 @@
+package context
+
+import (
+	"errors"
+	"fmt"
+	"sync"
+
+	"github.com/sandbox0-ai/infra/manager/procd/pkg/process"
+)
+
+// Manager manages contexts in the sandbox.
+type Manager struct {
+	mu       sync.RWMutex
+	contexts map[string]*Context
+}
+
+// NewManager creates a new context manager.
+func NewManager() *Manager {
+	return &Manager{
+		contexts: make(map[string]*Context),
+	}
+}
+
+// CreateContext creates a new context.
+func (m *Manager) CreateContext(config process.ProcessConfig) (*Context, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Define exit handler for the new context
+	exitHandler := func(cfg *process.ProcessConfig) {
+		// Create the callback context asynchronously to avoid holding locks or blocking
+		go func() {
+			if _, err := m.CreateContext(*cfg); err != nil {
+				// Log error? Accessing logger here is hard as Manager doesn't have it.
+				// Maybe we should inject logger into Manager?
+				fmt.Printf("Failed to create on_exit context: %v\n", err)
+			}
+		}()
+	}
+
+	ctx, err := NewContext(config, exitHandler)
+	if err != nil {
+		return nil, err
+	}
+
+	m.contexts[ctx.ID] = ctx
+	return ctx, nil
+}
+
+// GetContext returns a context by ID.
+func (m *Manager) GetContext(id string) (*Context, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	ctx, exists := m.contexts[id]
+	if !exists {
+		return nil, ErrContextNotFound
+	}
+
+	return ctx, nil
+}
+
+// ListContexts returns all contexts.
+func (m *Manager) ListContexts() []*Context {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make([]*Context, 0, len(m.contexts))
+	for _, ctx := range m.contexts {
+		result = append(result, ctx)
+	}
+
+	return result
+}
+
+// DeleteContext deletes a context.
+func (m *Manager) DeleteContext(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	ctx, exists := m.contexts[id]
+	if !exists {
+		return ErrContextNotFound
+	}
+
+	if err := ctx.Stop(); err != nil {
+		// Log but continue with deletion
+	}
+
+	delete(m.contexts, id)
+	return nil
+}
+
+// RestartContext restarts a context.
+func (m *Manager) RestartContext(id string) (*Context, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	ctx, exists := m.contexts[id]
+	if !exists {
+		return nil, ErrContextNotFound
+	}
+
+	if err := ctx.Restart(); err != nil {
+		return nil, err
+	}
+
+	return ctx, nil
+}
+
+// PauseAll pauses all running contexts and their child processes.
+// Returns an error if any context fails to pause.
+func (m *Manager) PauseAll() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var errs []error
+	for _, ctx := range m.contexts {
+		if ctx.IsRunning() {
+			if err := ctx.Pause(); err != nil {
+				errs = append(errs, fmt.Errorf("context %s: %w", ctx.ID, err))
+			}
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+// ResumeAll resumes all paused contexts and their child processes.
+// Returns an error if any context fails to resume.
+func (m *Manager) ResumeAll() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var errs []error
+	for _, ctx := range m.contexts {
+		if ctx.IsPaused() {
+			if err := ctx.Resume(); err != nil {
+				errs = append(errs, fmt.Errorf("context %s: %w", ctx.ID, err))
+			}
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+// WriteInput writes input to a context's main process.
+func (m *Manager) WriteInput(contextID string, data []byte) error {
+	ctx, err := m.GetContext(contextID)
+	if err != nil {
+		return err
+	}
+
+	if ctx.MainProcess == nil {
+		return process.ErrProcessNotRunning
+	}
+
+	return ctx.MainProcess.WriteInput(data)
+}
+
+// ReadOutput returns the output channel for a context.
+func (m *Manager) ReadOutput(contextID string) (<-chan process.ProcessOutput, error) {
+	ctx, err := m.GetContext(contextID)
+	if err != nil {
+		return nil, err
+	}
+
+	if ctx.MainProcess == nil {
+		return nil, process.ErrProcessNotRunning
+	}
+
+	return ctx.MainProcess.ReadOutput(), nil
+}
+
+// Cleanup cleans up all contexts.
+func (m *Manager) Cleanup() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, ctx := range m.contexts {
+		ctx.Stop()
+	}
+
+	m.contexts = make(map[string]*Context)
+}
+
+// ContextResourceUsage represents resource usage for a single context.
+type ContextResourceUsage struct {
+	ContextID string                `json:"context_id"`
+	Type      process.ProcessType   `json:"type"`
+	Language  string                `json:"language"`
+	Running   bool                  `json:"running"`
+	Paused    bool                  `json:"paused"`
+	Usage     process.ResourceUsage `json:"usage"`
+}
+
+// SandboxResourceUsage represents aggregated resource usage for the entire sandbox.
+type SandboxResourceUsage struct {
+	// Container-level stats (from cgroup)
+	ContainerMemoryUsage      int64 `json:"container_memory_usage"`
+	ContainerMemoryLimit      int64 `json:"container_memory_limit"`
+	ContainerMemoryWorkingSet int64 `json:"container_memory_working_set"`
+
+	// Aggregated process stats across all contexts
+	TotalMemoryRSS    int64 `json:"total_memory_rss"`
+	TotalMemoryVMS    int64 `json:"total_memory_vms"`
+	TotalOpenFiles    int   `json:"total_open_files"`
+	TotalThreadCount  int   `json:"total_thread_count"`
+	TotalIOReadBytes  int64 `json:"total_io_read_bytes"`
+	TotalIOWriteBytes int64 `json:"total_io_write_bytes"`
+
+	// Context count
+	ContextCount        int `json:"context_count"`
+	RunningContextCount int `json:"running_context_count"`
+	PausedContextCount  int `json:"paused_context_count"`
+
+	// Per-context breakdown
+	Contexts []ContextResourceUsage `json:"contexts"`
+}
+
+// GetResourceUsage returns resource usage for a specific context.
+func (m *Manager) GetResourceUsage(contextID string) (*ContextResourceUsage, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	ctx, exists := m.contexts[contextID]
+	if !exists {
+		return nil, ErrContextNotFound
+	}
+
+	return &ContextResourceUsage{
+		ContextID: ctx.ID,
+		Type:      ctx.Type,
+		Language:  ctx.Language,
+		Running:   ctx.IsRunning(),
+		Paused:    ctx.IsPaused(),
+		Usage:     ctx.ResourceUsage(),
+	}, nil
+}
+
+// GetAllResourceUsage returns aggregated resource usage for the entire sandbox.
+func (m *Manager) GetAllResourceUsage() *SandboxResourceUsage {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := &SandboxResourceUsage{
+		Contexts: make([]ContextResourceUsage, 0, len(m.contexts)),
+	}
+
+	for _, ctx := range m.contexts {
+		usage := ctx.ResourceUsage()
+
+		ctxUsage := ContextResourceUsage{
+			ContextID: ctx.ID,
+			Type:      ctx.Type,
+			Language:  ctx.Language,
+			Running:   ctx.IsRunning(),
+			Paused:    ctx.IsPaused(),
+			Usage:     usage,
+		}
+		result.Contexts = append(result.Contexts, ctxUsage)
+
+		// Aggregate stats
+		result.TotalMemoryRSS += usage.MemoryRSS
+		result.TotalMemoryVMS += usage.MemoryVMS
+		result.TotalOpenFiles += usage.OpenFiles
+		result.TotalThreadCount += usage.ThreadCount
+		result.TotalIOReadBytes += usage.IOReadBytes
+		result.TotalIOWriteBytes += usage.IOWriteBytes
+
+		// Use container-level stats from the first context (they're the same for all)
+		if result.ContainerMemoryUsage == 0 {
+			result.ContainerMemoryUsage = usage.ContainerMemoryUsage
+			result.ContainerMemoryLimit = usage.ContainerMemoryLimit
+			result.ContainerMemoryWorkingSet = usage.ContainerMemoryWorkingSet
+		}
+
+		// Count states
+		result.ContextCount++
+		if ctx.IsRunning() {
+			result.RunningContextCount++
+		}
+		if ctx.IsPaused() {
+			result.PausedContextCount++
+		}
+	}
+
+	// If no contexts, still try to get container-level stats
+	if result.ContextCount == 0 {
+		containerStats, err := process.GetContainerResourceUsage()
+		if err == nil {
+			result.ContainerMemoryUsage = containerStats.Usage
+			result.ContainerMemoryLimit = containerStats.Limit
+			result.ContainerMemoryWorkingSet = containerStats.WorkingSet
+		}
+	}
+
+	return result
+}

@@ -12,4 +12,8 @@ data:
     {{- $_ := set $config "database_url" .Values.global.database.url }}
     {{- end }}
     {{- end }}
+    {{- if not $config.manager_image }}
+    {{- $managerTag := .Values.image.tag | default .Chart.AppVersion }}
+    {{- $_ := set $config "manager_image" (printf "%s:%s" .Values.image.repository $managerTag) }}
+    {{- end }}
     {{- $config | toYaml | nindent 4 }}

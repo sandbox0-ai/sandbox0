@@ -13,6 +13,9 @@ type Config struct {
 	// HTTP Server
 	HTTPPort int `yaml:"http_port"`
 
+	// manager docker image, used to copy the procd binary to sandbox pod
+	ManagerImage string `yaml:"manager_image"`
+
 	// template
 	DefaultTemplateName      string `yaml:"default_template_name"`
 	DefaultTemplateNamespace string `yaml:"default_template_namespace"`
@@ -49,6 +52,7 @@ type Config struct {
 func defaultConfig() *Config {
 	return &Config{
 		HTTPPort:                 8080,
+		ManagerImage:             "sandbox0ai/manager:latest",
 		DefaultTemplateName:      "default",
 		DefaultTemplateNamespace: "sandbox0",
 		DefaultTemplateImage:     "sandbox0ai/otemplates:default-v0.1.0",

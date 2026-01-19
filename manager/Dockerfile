@@ -11,7 +11,8 @@ RUN go mod download
 COPY . .
 
 # Build
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o manager cmd/manager/main.go
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o manager cmd/manager/main.go \
+  && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o procd cmd/procd/main.go
 
 # Runtime stage
 FROM alpine:3.19
@@ -21,6 +22,7 @@ RUN apk --no-cache add ca-certificates
 WORKDIR /app
 
 COPY --from=builder /workspace/manager .
+COPY --from=builder /workspace/procd .
 
 USER 65532:65532
 

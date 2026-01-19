@@ -96,6 +96,7 @@ sandboxNamespace:
 config:
   http_port: 8080
   log_level: "info"
+  manager_image: ""
 
   # Template defaults
   default_template_name: "default"

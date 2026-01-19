@@ -1,8 +1,7 @@
 package v1alpha1
 
 import (
-	"fmt"
-
+	"github.com/sandbox0-ai/infra/manager/pkg/config"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -12,6 +11,8 @@ func BuildPodSpec(template *SandboxTemplate) corev1.PodSpec {
 		RestartPolicy: corev1.RestartPolicyNever,
 		Containers:    buildContainers(template),
 	}
+
+	applyProcdInit(&spec)
 
 	// Apply runtime class if specified
 	if template.Spec.RuntimeClassName != nil {
@@ -33,7 +34,7 @@ func BuildPodSpec(template *SandboxTemplate) corev1.PodSpec {
 // buildContainers builds containers from template
 func buildContainers(template *SandboxTemplate) []corev1.Container {
 	containers := []corev1.Container{
-		buildContainer(&template.Spec.MainContainer, template, true),
+		buildContainer(&template.Spec.MainContainer, template),
 	}
 
 	for i := range template.Spec.Sidecars {
@@ -43,11 +44,8 @@ func buildContainers(template *SandboxTemplate) []corev1.Container {
 }
 
 // buildContainer builds a single container
-func buildContainer(spec *ContainerSpec, template *SandboxTemplate, isMain bool) corev1.Container {
+func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Container {
 	name := "procd"
-	if !isMain {
-		name = fmt.Sprintf("sidecar-%s", spec.Image)
-	}
 
 	container := corev1.Container{
 		Name:            name,
@@ -68,6 +66,11 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate, isMain bool)
 		envVars = append(envVars, corev1.EnvVar{Name: ev.Name, Value: ev.Value})
 	}
 	container.Env = envVars
+	container.Command = []string{"/procd/bin/procd"}
+	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+		Name:      "procd-bin",
+		MountPath: "/procd/bin",
+	})
 
 	// Security context
 	if spec.SecurityContext != nil {
@@ -86,6 +89,35 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate, isMain bool)
 	}
 
 	return container
+}
+
+func applyProcdInit(spec *corev1.PodSpec) {
+	cfg := config.LoadConfig()
+	managerImage := cfg.ManagerImage
+
+	spec.Volumes = append(spec.Volumes, corev1.Volume{
+		Name: "procd-bin",
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
+		},
+	})
+
+	spec.InitContainers = append(spec.InitContainers, corev1.Container{
+		Name:            "procd-init",
+		Image:           managerImage,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		Command: []string{
+			"/bin/sh",
+			"-c",
+			"cp /app/procd /procd/bin/procd && chmod 0755 /procd/bin/procd",
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{
+				Name:      "procd-bin",
+				MountPath: "/procd/bin",
+			},
+		},
+	})
 }
 
 func convertCapabilities(caps []string) []corev1.Capability {

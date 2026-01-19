@@ -60,6 +60,7 @@ manifests: ## Generate CRD manifests
 .PHONY: build
 build: manifests generate ## Build the manager binary
 	@go build -o bin/manager ./cmd/manager
+	@go build -o bin/procd ./cmd/procd
 
 # Build Docker image
 docker-build:

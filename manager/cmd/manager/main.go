@@ -103,6 +103,7 @@ func main() {
 	// Create informers
 	informerFactory := informers.NewSharedInformerFactory(k8sClient, cfg.ResyncPeriod)
 	podInformer := informerFactory.Core().V1().Pods().Informer()
+	nodeInformer := informerFactory.Core().V1().Nodes().Informer()
 
 	// Create CRD informer factory using generated clientset
 	crdInformerFactory := externalversions.NewSharedInformerFactoryWithOptions(
@@ -132,8 +133,9 @@ func main() {
 		logger,
 	)
 
-	// Create pod lister
+	// Create listers
 	podLister := informerFactory.Core().V1().Pods().Lister()
+	nodeLister := informerFactory.Core().V1().Nodes().Lister()
 
 	// Create network policy service for building policy annotations
 	networkPolicyService := service.NewNetworkPolicyService(logger)
@@ -177,6 +179,15 @@ func main() {
 		logger,
 	)
 
+	// Create cluster service (for scheduler)
+	clusterService := service.NewClusterService(
+		k8sClient,
+		podLister,
+		nodeLister,
+		operator.GetTemplateLister(),
+		logger,
+	)
+
 	// Create cleanup controller
 	cleanupController := controller.NewCleanupController(
 		k8sClient,
@@ -211,6 +222,7 @@ func main() {
 	httpServer := httpserver.NewServer(
 		sandboxService,
 		templateService,
+		clusterService,
 		authValidator,
 		logger,
 		cfg.HTTPPort,
@@ -241,7 +253,7 @@ func main() {
 
 	// Wait for cache sync
 	logger.Info("Waiting for informer caches to sync")
-	if !cache.WaitForCacheSync(ctx.Done(), podInformer.HasSynced, templateInformer.HasSynced) {
+	if !cache.WaitForCacheSync(ctx.Done(), podInformer.HasSynced, nodeInformer.HasSynced, templateInformer.HasSynced) {
 		logger.Fatal("Failed to sync informer caches")
 	}
 

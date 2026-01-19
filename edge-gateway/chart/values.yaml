@@ -80,6 +80,11 @@ config:
   http_port: 8080
   log_level: "info"
   internal_gateway_url: "http://internal-gateway:8443"
+  
+  # Scheduler configuration (for multi-cluster mode)
+  # When enabled, template requests are routed to scheduler instead of internal-gateway
+  scheduler_enabled: false
+  scheduler_url: "http://scheduler:8080"
 
   # Database and JWT - uses global values by default
   # Override: set these to specific values to override global.*

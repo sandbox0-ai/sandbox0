@@ -8,39 +8,32 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config holds all configuration for internal-gateway
+// Config holds all configuration for scheduler
 type Config struct {
 	// Server configuration
 	HTTPPort int    `yaml:"http_port"`
 	LogLevel string `yaml:"log_level"`
 
-	// Upstream services
-	ManagerURL      string `yaml:"manager_url"`
-	StorageProxyURL string `yaml:"storage_proxy_url"`
+	// Database configuration
+	DatabaseURL string `yaml:"database_url"`
 
-	// Internal authentication (for validating requests from edge-gateway and
-	// generating tokens for downstream services)
-	// AllowedCallers is the list of services allowed to call internal-gateway
-	// Default: ["edge-gateway"], can include "scheduler" for multi-cluster mode
-	AllowedCallers []string `yaml:"allowed_callers"`
+	// Reconciler configuration
+	ReconcileInterval time.Duration `yaml:"reconcile_interval"`
 
 	// Timeouts
-	ProxyTimeout      time.Duration `yaml:"proxy_timeout"`
-	ShutdownTimeout   time.Duration `yaml:"shutdown_timeout"`
-	HealthCheckPeriod time.Duration `yaml:"health_check_period"`
+	ClusterTimeout  time.Duration `yaml:"cluster_timeout"`
+	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"`
 }
 
 // defaultConfig returns the default configuration
 func defaultConfig() *Config {
 	return &Config{
-		HTTPPort:          8443,
+		HTTPPort:          8080,
 		LogLevel:          "info",
-		ManagerURL:        "http://manager.sandbox0-system:8080",
-		StorageProxyURL:   "http://storage-proxy.sandbox0-system:8081",
-		AllowedCallers:    []string{"edge-gateway"},
-		ProxyTimeout:      30 * time.Second,
+		DatabaseURL:       "postgres://sandbox0:sandbox0@postgresql:5432/sandbox0?sslmode=disable",
+		ReconcileInterval: 30 * time.Second,
+		ClusterTimeout:    10 * time.Second,
 		ShutdownTimeout:   30 * time.Second,
-		HealthCheckPeriod: 10 * time.Second,
 	}
 }
 

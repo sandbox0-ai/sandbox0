@@ -17,6 +17,7 @@ type Server struct {
 	router          *gin.Engine
 	sandboxService  *service.SandboxService
 	templateService *service.TemplateService
+	clusterService  *service.ClusterService
 	authValidator   *internalauth.Validator
 	logger          *zap.Logger
 	port            int
@@ -26,6 +27,7 @@ type Server struct {
 func NewServer(
 	sandboxService *service.SandboxService,
 	templateService *service.TemplateService,
+	clusterService *service.ClusterService,
 	authValidator *internalauth.Validator,
 	logger *zap.Logger,
 	port int,
@@ -41,6 +43,7 @@ func NewServer(
 		router:          router,
 		sandboxService:  sandboxService,
 		templateService: templateService,
+		clusterService:  clusterService,
 		authValidator:   authValidator,
 		logger:          logger,
 		port:            port,
@@ -83,6 +86,13 @@ func (s *Server) setupRoutes() {
 			templates.PUT("/:id", s.updateTemplate)
 			templates.DELETE("/:id", s.deleteTemplate)
 			templates.POST("/:id/pool/warm", s.warmPool)
+			templates.GET("/stats", s.getTemplateStats) // Template stats for scheduler
+		}
+
+		// Cluster management (for scheduler)
+		cluster := v1.Group("/cluster")
+		{
+			cluster.GET("/summary", s.getClusterSummary)
 		}
 	}
 }

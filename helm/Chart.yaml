@@ -29,4 +29,10 @@ dependencies:
     version: 0.1.0
   - name: edge-gateway
     version: 0.1.0
+  
+  # Phase 4: Optional control plane components
+  # Scheduler is optional and only needed for multi-cluster deployments
+  - name: scheduler
+    version: 0.1.0
+    condition: scheduler.enabled
 

@@ -1,9 +1,9 @@
-# Default values for internal-gateway
+# Default values for scheduler
 
 replicaCount: 1
 
 image:
-  repository: sandbox0ai/internal-gateway
+  repository: sandbox0ai/scheduler
   pullPolicy: IfNotPresent
   tag: ""
 
@@ -29,7 +29,7 @@ securityContext:
 
 service:
   type: ClusterIP
-  port: 8443
+  port: 8080
 
 resources:
   limits:
@@ -41,14 +41,14 @@ resources:
 
 livenessProbe:
   httpGet:
-    path: /health
+    path: /healthz
     port: http
   initialDelaySeconds: 10
   periodSeconds: 10
 
 readinessProbe:
   httpGet:
-    path: /health
+    path: /readyz
     port: http
   initialDelaySeconds: 5
   periodSeconds: 5
@@ -62,17 +62,20 @@ affinity: {}
 secrets:
   internalJwtSecretName: ""  # defaults to {{ .Values.global.jwt.internalJwtSecretName }}
   internalJwtPrivateKeyKey: ""  # defaults to {{ .Values.global.jwt.privateKeyKey }}
+  internalJwtPublicKeyKey: ""  # defaults to {{ .Values.global.jwt.publicKeyKey }}
 
 # Application config - directly maps to config.yaml (snake_case)
 config:
-  http_port: 8443
+  http_port: 8080
   log_level: "info"
-  manager_url: "http://manager:8080"
-  storage_proxy_url: "http://storage-proxy:8081"
-  proxy_timeout: "30s"
+  
+  # Database - uses global values by default
+  # Override: set this to a specific value to override global.database.url
+  database_url: ""  # defaults to {{ .Values.global.database.url }}
+  
+  # Reconciler
+  reconcile_interval: "30s"
+  
+  # Timeouts
+  cluster_timeout: "10s"
   shutdown_timeout: "30s"
-  health_check_period: "10s"
-  # Allowed callers for internal auth validation
-  # Add "scheduler" when using multi-cluster mode
-  allowed_callers:
-    - "edge-gateway"

@@ -23,6 +23,10 @@ type Config struct {
 	// Upstream service
 	InternalGatewayURL string `yaml:"internal_gateway_url"`
 
+	// Scheduler configuration (optional, for multi-cluster mode)
+	SchedulerEnabled bool   `yaml:"scheduler_enabled"`
+	SchedulerURL     string `yaml:"scheduler_url"`
+
 	// JWT Configuration
 	JWTSecret          string        `yaml:"jwt_secret"`
 	JWTAccessTokenTTL  time.Duration `yaml:"jwt_access_token_ttl"`

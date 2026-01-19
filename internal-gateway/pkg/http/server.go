@@ -68,11 +68,15 @@ func NewServer(
 	}
 	publicKey := privateKey.Public().(internalauth.PublicKeyType)
 
-	// Create internal auth validator (for validating tokens from edge-gateway)
+	// Create internal auth validator (for validating tokens from edge-gateway and optionally scheduler)
+	allowedCallers := cfg.AllowedCallers
+	if len(allowedCallers) == 0 {
+		allowedCallers = []string{"edge-gateway"}
+	}
 	validator := internalauth.NewValidator(internalauth.ValidatorConfig{
 		Target:             "internal-gateway",
 		PublicKey:          publicKey,
-		AllowedCallers:     []string{"edge-gateway"},
+		AllowedCallers:     allowedCallers,
 		ClockSkewTolerance: 10 * time.Second,
 	})
 
@@ -211,6 +215,20 @@ func (s *Server) setupRoutes() {
 				snapshots.DELETE("/:snapshot_id", s.authMiddleware.RequirePermission(auth.PermSandboxVolumeDelete), s.deleteSandboxVolumeSnapshot)
 			}
 		}
+	}
+
+	// Internal API routes (for scheduler to call)
+	// These routes are authenticated but don't require specific permissions
+	// (scheduler uses *:* permissions)
+	internal := s.router.Group("/internal/v1")
+	{
+		internal.Use(s.authMiddleware.Authenticate())
+
+		// Cluster information (→ Manager)
+		internal.GET("/cluster/summary", s.getClusterSummary)
+
+		// Template statistics (→ Manager)
+		internal.GET("/templates/stats", s.getTemplateStats)
 	}
 }
 

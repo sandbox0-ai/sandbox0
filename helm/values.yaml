@@ -80,6 +80,11 @@ edge-gateway:
   config:
     internal_gateway_url: "http://internal-gateway:8443"
     
+    # Scheduler configuration (for multi-cluster mode)
+    # When enabled, template requests are routed to scheduler instead of internal-gateway
+    scheduler_enabled: false
+    scheduler_url: "http://scheduler:8080"
+    
     # Authentication providers
     built_in_auth:
       enabled: true
@@ -108,6 +113,11 @@ internal-gateway:
   config:
     manager_url: "http://manager:8080"
     storage_proxy_url: "http://storage-proxy:8081"
+    # Allowed callers for internal auth validation
+    # Add "scheduler" when using multi-cluster mode
+    allowed_callers:
+      - "edge-gateway"
+      # - "scheduler"  # Uncomment for multi-cluster mode
 
 # ------------------------------------------------------------------------------
 # Manager - Kubernetes operator for sandbox lifecycle management
@@ -179,6 +189,35 @@ netd:
     fail_closed: true
     # use_ebpf enables eBPF-based bandwidth control (more efficient than tc htb)
     use_ebpf: true
+
+# ------------------------------------------------------------------------------
+# Scheduler - Multi-cluster template management (optional)
+# ------------------------------------------------------------------------------
+# Enable this for multi-cluster deployments to distribute templates across clusters.
+# When enabled:
+#   1. edge-gateway routes /api/v1/templates to scheduler
+#   2. scheduler stores templates in PostgreSQL
+#   3. scheduler distributes templates to clusters via internal-gateway
+scheduler:
+  enabled: false  # Set to true for multi-cluster mode
+  
+  replicaCount: 1
+  
+  image:
+    repository: sandbox0ai/scheduler
+    tag: *globalTag
+  
+  resources:
+    #limits:
+    #  cpu: 500m
+    #  memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  
+  config:
+    reconcile_interval: "30s"
+    cluster_timeout: "10s"
 
 # ------------------------------------------------------------------------------
 # RustFS - Built-in S3-compatible object storage (optional)

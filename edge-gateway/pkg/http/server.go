@@ -28,6 +28,7 @@ type Server struct {
 	pool            *pgxpool.Pool
 	repo            *db.Repository
 	proxyRouter     *proxy.Router
+	schedulerRouter *proxy.Router // Optional: proxy to scheduler for templates
 	authMiddleware  *middleware.AuthMiddleware
 	rateLimiter     *middleware.RateLimiter
 	requestLogger   *middleware.RequestLogger
@@ -71,6 +72,22 @@ func NewServer(
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create proxy router: %w", err)
+	}
+
+	// Create scheduler proxy router (optional, for multi-cluster mode)
+	var schedulerRouter *proxy.Router
+	if cfg.SchedulerEnabled && cfg.SchedulerURL != "" {
+		schedulerRouter, err = proxy.NewRouter(
+			cfg.SchedulerURL,
+			logger,
+			cfg.ProxyTimeout,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("create scheduler proxy router: %w", err)
+		}
+		logger.Info("Scheduler mode enabled",
+			zap.String("scheduler_url", cfg.SchedulerURL),
+		)
 	}
 
 	// Create middleware
@@ -121,6 +138,7 @@ func NewServer(
 		pool:            pool,
 		repo:            repo,
 		proxyRouter:     proxyRouter,
+		schedulerRouter: schedulerRouter,
 		authMiddleware:  authMiddleware,
 		rateLimiter:     rateLimiter,
 		requestLogger:   requestLogger,
@@ -217,21 +235,41 @@ func (s *Server) setupRoutes() {
 	}
 
 	// ===== API Proxy Routes =====
-	// These routes proxy to internal-gateway after authentication
+	// These routes proxy to internal-gateway (or scheduler for templates) after authentication
 	api := s.router.Group("/api")
 	{
 		// Apply auth and rate limiting to all API routes
 		api.Use(s.authMiddleware.Authenticate())
 		api.Use(s.rateLimiter.RateLimit())
-		api.Use(s.injectInternalToken())
 
-		// Wildcard proxy - forward all requests to internal-gateway
+		// If scheduler is enabled, route /api/v1/templates* to scheduler
+		if s.schedulerRouter != nil {
+			// Template routes go to scheduler
+			templates := api.Group("/v1/templates")
+			templates.Use(s.injectInternalTokenForTarget("scheduler"))
+			templates.Any("", s.schedulerRouter.ProxyToTarget())
+			templates.Any("/*path", s.schedulerRouter.ProxyToTarget())
+
+			// Cluster management routes also go to scheduler
+			clusters := api.Group("/v1/clusters")
+			clusters.Use(s.injectInternalTokenForTarget("scheduler"))
+			clusters.Any("", s.schedulerRouter.ProxyToTarget())
+			clusters.Any("/*path", s.schedulerRouter.ProxyToTarget())
+		}
+
+		// All other API routes go to internal-gateway
+		api.Use(s.injectInternalToken())
 		api.Any("/*path", s.proxyRouter.ProxyToTarget())
 	}
 }
 
-// injectInternalToken adds internal auth token to forwarded requests
+// injectInternalToken adds internal auth token to forwarded requests (default: internal-gateway)
 func (s *Server) injectInternalToken() gin.HandlerFunc {
+	return s.injectInternalTokenForTarget("internal-gateway")
+}
+
+// injectInternalTokenForTarget adds internal auth token for a specific target service
+func (s *Server) injectInternalTokenForTarget(target string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authCtx := middleware.GetAuthContext(c)
 		if authCtx == nil {
@@ -239,9 +277,9 @@ func (s *Server) injectInternalToken() gin.HandlerFunc {
 			return
 		}
 
-		// Generate internal token for internal-gateway
+		// Generate internal token for the target service
 		token, err := s.internalAuthGen.Generate(
-			"internal-gateway",
+			target,
 			authCtx.TeamID,
 			authCtx.UserID,
 			internalauth.GenerateOptions{
@@ -250,7 +288,10 @@ func (s *Server) injectInternalToken() gin.HandlerFunc {
 			},
 		)
 		if err != nil {
-			s.logger.Error("Failed to generate internal token", zap.Error(err))
+			s.logger.Error("Failed to generate internal token",
+				zap.String("target", target),
+				zap.Error(err),
+			)
 			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
 				"error": "internal server error",
 			})

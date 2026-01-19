@@ -32,6 +32,15 @@ func NewInternalGatewayClient(internalAuthGen *internalauth.Generator, timeout t
 	}
 }
 
+// ClusterSummary represents the cluster capacity and status
+type ClusterSummary struct {
+	ClusterID      string `json:"cluster_id"`
+	NodeCount      int    `json:"node_count"`
+	IdlePodCount   int32  `json:"idle_pod_count"`
+	ActivePodCount int32  `json:"active_pod_count"`
+	TotalPodCount  int32  `json:"total_pod_count"`
+}
+
 // TemplateStat represents statistics for a single template
 type TemplateStat struct {
 	TemplateID  string `json:"template_id"`
@@ -47,6 +56,50 @@ type TemplateStats struct {
 	Templates []TemplateStat `json:"templates"`
 }
 
+// GetClusterSummary gets cluster summary from internal-gateway
+func (c *InternalGatewayClient) GetClusterSummary(ctx context.Context, baseURL string) (*ClusterSummary, error) {
+	// Generate internal token for internal-gateway
+	token, err := c.internalAuthGen.Generate("internal-gateway", "scheduler", "scheduler", internalauth.GenerateOptions{
+		Permissions: []string{"*:*"},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("generate internal token: %w", err)
+	}
+
+	// Build request URL
+	url := fmt.Sprintf("%s/internal/v1/cluster/summary", baseURL)
+
+	// Create request
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	// Set headers
+	req.Header.Set(internalauth.DefaultTokenHeader, token)
+	req.Header.Set("Content-Type", "application/json")
+
+	// Execute request
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("execute request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Check status code
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("unexpected status code %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Parse response
+	var summary ClusterSummary
+	if err := json.NewDecoder(resp.Body).Decode(&summary); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+
+	return &summary, nil
+}
 
 // GetTemplateStats gets template statistics from internal-gateway
 func (c *InternalGatewayClient) GetTemplateStats(ctx context.Context, baseURL string) (*TemplateStats, error) {

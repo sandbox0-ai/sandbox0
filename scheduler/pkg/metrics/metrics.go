@@ -33,6 +33,15 @@ var (
 		[]string{"cluster_id", "template_id", "tenant", "type"}, // type: min_idle, max_idle
 	)
 
+	// ClusterCapacity tracks cluster capacity metrics
+	ClusterCapacity = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "scheduler_cluster_capacity",
+			Help: "Cluster capacity metrics",
+		},
+		[]string{"cluster_id", "metric"}, // metric: nodes, idle_pods, active_pods, total_pods
+	)
+
 	// TemplateSyncStatus tracks template sync status per cluster
 	TemplateSyncStatus = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -57,5 +66,14 @@ var (
 			Name: "scheduler_last_reconcile_timestamp_seconds",
 			Help: "Timestamp of the last successful reconciliation",
 		},
+	)
+
+	// CapacityClamps tracks when allocations were clamped by capacity
+	CapacityClamps = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "scheduler_capacity_clamps_total",
+			Help: "Total number of times allocations were clamped by cluster capacity",
+		},
+		[]string{"cluster_id", "template_id"},
 	)
 )

@@ -178,6 +178,19 @@ func (r *Repository) UpdateCluster(ctx context.Context, cluster *Cluster) error 
 	return nil
 }
 
+// UpdateClusterLastSeen updates the last_seen_at timestamp
+func (r *Repository) UpdateClusterLastSeen(ctx context.Context, clusterID string) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE scheduler_clusters
+		SET last_seen_at = NOW()
+		WHERE cluster_id = $1
+	`, clusterID)
+	if err != nil {
+		return fmt.Errorf("update cluster last seen: %w", err)
+	}
+	return nil
+}
+
 // DeleteCluster deletes a cluster
 func (r *Repository) DeleteCluster(ctx context.Context, clusterID string) error {
 	_, err := r.pool.Exec(ctx, `

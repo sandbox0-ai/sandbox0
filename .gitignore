@@ -52,4 +52,3 @@ helm/charts/manager
 helm/charts/netd
 helm/charts/storage-proxy
 helm/charts/scheduler
-helm/configs/

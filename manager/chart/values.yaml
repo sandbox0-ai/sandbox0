@@ -1,144 +1,96 @@
-# Default values for manager
-
-replicaCount: 1
-
-image:
-  repository: sandbox0ai/infra
-  pullPolicy: IfNotPresent
-  tag: ""
-
-imagePullSecrets: []
-nameOverride: ""
+affinity: {}
+config:
+    cleanup_interval: 1m0s
+    database_url: ""
+    default_cluster_id: default
+    default_sandbox_ttl: 5m0s
+    default_template_image: sandbox0ai/otemplates:default-v0.1.0
+    default_template_name: default
+    default_template_namespace: sandbox0
+    http_port: 8080
+    kube_config: ""
+    leader_election: true
+    log_level: info
+    manager_image: sandbox0ai/infra:latest
+    metrics_port: 9090
+    procd_config:
+        cache_max_bytes: 104857600
+        cache_ttl: 30s
+        http_port: 49983
+        log_level: info
+        node_name: ""
+        root_path: /workspace
+        sandbox_id: ""
+        storage_proxy_base_url: storage-proxy.sandbox0-system.svc.cluster.local
+        storage_proxy_replicas: 3
+        template_id: ""
+    resync_period: 30s
+    webhook_cert_path: /tmp/k8s-webhook-server/serving-certs/tls.crt
+    webhook_key_path: /tmp/k8s-webhook-server/serving-certs/tls.key
+    webhook_port: 9443
+crds:
+    install: true
 fullnameOverride: ""
-
-serviceAccount:
-  create: true
-  automount: true
-  annotations: {}
-  name: ""
-
+image:
+    pullPolicy: IfNotPresent
+    repository: sandbox0ai/infra
+    tag: ""
+imagePullSecrets: []
+livenessProbe:
+    httpGet:
+        path: /health
+        port: http
+    initialDelaySeconds: 10
+    periodSeconds: 10
+metricsService:
+    port: 9090
+    type: ClusterIP
+nameOverride: ""
+nodeSelector: {}
 podAnnotations: {}
 podLabels: {}
-
 podSecurityContext: {}
-
-securityContext:
-  readOnlyRootFilesystem: true
-  runAsNonRoot: true
-  runAsUser: 1000
-
-service:
-  type: ClusterIP
-  port: 8080
-
-metricsService:
-  type: ClusterIP
-  port: 9090
-
-webhookService:
-  type: ClusterIP
-  port: 9443
-
-resources:
-  limits:
-    cpu: 500m
-    memory: 512Mi
-  requests:
-    cpu: 100m
-    memory: 256Mi
-
-livenessProbe:
-  httpGet:
-    path: /health
-    port: http
-  initialDelaySeconds: 10
-  periodSeconds: 10
-
-readinessProbe:
-  httpGet:
-    path: /health
-    port: http
-  initialDelaySeconds: 5
-  periodSeconds: 5
-
-nodeSelector: {}
-tolerations: []
-affinity: {}
-
-# Secrets - only for file-based secrets (keys, certs)
-# Uses global.jwt.internalJwtSecretName by default
-secrets:
-  internalJwtSecretName: ""  # defaults to {{ .Values.global.jwt.internalJwtSecretName }}
-  internalJwtPrivateKeyKey: ""  # defaults to {{ .Values.global.jwt.privateKeyKey }}
-  internalJwtPublicKeyKey: ""  # defaults to {{ .Values.global.jwt.publicKeyKey }}
-
-# Webhook TLS
-webhook:
-  enabled: true
-  certManager:
-    enabled: false
-  tls:
-    certSecretName: ""
-
-# CRD installation
-crds:
-  install: true
-
-# RBAC
 rbac:
-  create: true
-
-# Sandbox Namespace (config.default_template_namespace) - Namespace for SandboxTemplates
+    create: true
+readinessProbe:
+    httpGet:
+        path: /health
+        port: http
+    initialDelaySeconds: 5
+    periodSeconds: 5
+replicaCount: 1
+resources:
+    limits:
+        cpu: 500m
+        memory: 512Mi
+    requests:
+        cpu: 100m
+        memory: 256Mi
 sandboxNamespace:
-  create: true  # Set to false if namespace is managed externally
-
-# Application config - directly maps to config.yaml (snake_case)
-config:
-  http_port: 8080
-  log_level: "info"
-  manager_image: ""
-
-  # Template defaults
-  default_template_name: "default"
-  default_template_namespace: "sandbox0"
-  default_template_image: "sandbox0ai/otemplates:default-v0.1.0"
-  default_cluster_id: "default"
-
-  # Kubernetes
-  kube_config: ""
-  namespace: "default"
-  leader_election: true
-  resync_period: "30s"
-
-  # Database - configure directly (no env var needed)
-  database_url: "postgres://user:pass@postgres:5432/sandbox0"
-
-  # Cleanup
-  cleanup_interval: "60s"
-
-  # Metrics
-  metrics_port: 9090
-
-  # Webhook
-  webhook_port: 9443
-  webhook_cert_path: "/tmp/k8s-webhook-server/serving-certs/tls.crt"
-  webhook_key_path: "/tmp/k8s-webhook-server/serving-certs/tls.key"
-
-  # Internal Auth
-  # Paths are fixed in code and Helm manifests.
-
-  # Sandbox
-  default_sandbox_ttl: "5m"
-
-  # Procd config injected into sandbox pods
-  procd_config:
-      sandbox_id: ""
-      template_id: ""
-      node_name: ""
-      http_port: 49983
-      log_level: info
-      storage_proxy_base_url: storage-proxy.sandbox0-system.svc.cluster.local
-      storage_proxy_replicas: 3
-      root_path: /workspace
-      cache_max_bytes: 104857600
-      cache_ttl: 30s
+    create: true
+secrets:
+    internalJwtPrivateKeyKey: ""
+    internalJwtPublicKeyKey: ""
+    internalJwtSecretName: ""
+securityContext:
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 1000
+service:
+    port: 8080
+    type: ClusterIP
+serviceAccount:
+    annotations: {}
+    automount: true
+    create: true
+    name: ""
+tolerations: []
+webhook:
+    certManager:
+        enabled: false
+    enabled: true
+    tls:
+        certSecretName: ""
+webhookService:
+    port: 9443
+    type: ClusterIP

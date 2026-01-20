@@ -149,7 +149,6 @@ clean:
 		if [ "$$service" = "procd" ]; then \
 			rm -rf manager/bin/procd; \
 		else \
-			rm -rf helm/configs/$$service.yaml; \
 			rm -rf $$service/bin; \
 			rm -rf helm/charts/$$service; \
 		fi; \

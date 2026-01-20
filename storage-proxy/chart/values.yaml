@@ -1,125 +1,80 @@
-# Default values for storage-proxy
-
-replicaCount: 1
-
-image:
-  repository: sandbox0ai/infra
-  pullPolicy: IfNotPresent
-  tag: ""
-
-imagePullSecrets: []
-nameOverride: ""
+affinity: {}
+config:
+    audit_file: /var/log/storage-proxy/audit.log
+    audit_log: true
+    cache_dir: /var/lib/storage-proxy/cache
+    database_url: ""
+    default_cache_size: 1G
+    default_cluster_id: default
+    grpc_addr: 0.0.0.0
+    grpc_port: 8080
+    http_addr: 0.0.0.0
+    http_port: 8081
+    kubeconfig_path: ""
+    log_level: info
+    max_bytes_per_second: 1073741824
+    max_ops_per_second: 10000
+    meta_url: ""
+    metrics_enabled: true
+    metrics_port: 9090
+    s3_access_key: ""
+    s3_bucket: ""
+    s3_endpoint: ""
+    s3_region: us-east-1
+    s3_secret_key: ""
+    s3_session_token: ""
 fullnameOverride: ""
-
-serviceAccount:
-  create: true
-  automount: true
-  annotations: {}
-  name: ""
-
+grpcService:
+    port: 8080
+    type: ClusterIP
+httpService:
+    port: 8081
+    type: ClusterIP
+image:
+    pullPolicy: IfNotPresent
+    repository: sandbox0ai/infra
+    tag: ""
+imagePullSecrets: []
+livenessProbe:
+    httpGet:
+        path: /health
+        port: http
+    initialDelaySeconds: 10
+    periodSeconds: 10
+metricsService:
+    port: 9090
+    type: ClusterIP
+nameOverride: ""
+nodeSelector: {}
 podAnnotations: {}
 podLabels: {}
-
 podSecurityContext: {}
-
-securityContext:
-  readOnlyRootFilesystem: false  # Needs to write cache files
-  runAsNonRoot: true
-  runAsUser: 1000
-
-grpcService:
-  type: ClusterIP
-  port: 8080
-
-httpService:
-  type: ClusterIP
-  port: 8081
-
-metricsService:
-  type: ClusterIP
-  port: 9090
-
-resources:
-  limits:
-    cpu: "2"
-    memory: 4Gi
-  requests:
-    cpu: 500m
-    memory: 1Gi
-
-livenessProbe:
-  httpGet:
-    path: /health
-    port: http
-  initialDelaySeconds: 10
-  periodSeconds: 10
-
-readinessProbe:
-  httpGet:
-    path: /health
-    port: http
-  initialDelaySeconds: 5
-  periodSeconds: 5
-
-nodeSelector: {}
-tolerations: []
-affinity: {}
-
-# Secrets - only for file-based secrets (keys, certs)
-# Uses global.jwt.internalJwtSecretName by default
-secrets:
-  internalJwtSecretName: ""  # defaults to {{ .Values.global.jwt.internalJwtSecretName }}
-  internalJwtPublicKeyKey: ""  # defaults to {{ .Values.global.jwt.publicKeyKey }}
-
-# RBAC for watching pods
 rbac:
-  create: true
-
-# Application config - directly maps to config.yaml (snake_case)
-config:
-  # gRPC Server
-  grpc_addr: "0.0.0.0"
-  grpc_port: 8080
-
-  # HTTP Management API
-  http_addr: "0.0.0.0"
-  http_port: 8081
-
-  # Database - uses global value by default
-  # Override: set this to a specific value to override global.database.url
-  database_url: ""  # defaults to {{ .Values.global.database.url }}
-
-  # JuiceFS - uses global values by default
-  # Override: set these to specific values to override global.juicefs.*
-  meta_url: ""  # defaults to {{ .Values.global.juicefs.meta_url }}
-  s3_bucket: ""  # defaults to {{ .Values.global.juicefs.s3_bucket }}
-  s3_region: ""  # defaults to {{ .Values.global.juicefs.s3_region }}
-  s3_endpoint: ""  # defaults to {{ .Values.global.juicefs.s3_endpoint }}
-  s3_access_key: ""  # defaults to {{ .Values.global.juicefs.s3_access_key }}
-  s3_secret_key: ""  # defaults to {{ .Values.global.juicefs.s3_secret_key }}
-  s3_session_token: ""  # defaults to {{ .Values.global.juicefs.s3_session_token }}
-
-  # Cache
-  default_cache_size: "1G" # per sandboxvolume
-  cache_dir: "/var/lib/storage-proxy/cache"
-
-  default_cluster_id: "default"
-
-  # Security - file path for public key
-  # Internal auth keys are mounted at fixed paths (/config, /secrets).
-
-  # Monitoring
-  metrics_enabled: true
-  metrics_port: 9090
-
-  # Logging
-  log_level: "info"
-  audit_log: true
-  audit_file: "/var/log/storage-proxy/audit.log"
-
-  # Rate limiting
-  max_ops_per_second: 10000
-  max_bytes_per_second: 1073741824  # 1GB/s
-
-  # Kubernetes
-  kubeconfig_path: ""
+    create: true
+readinessProbe:
+    httpGet:
+        path: /health
+        port: http
+    initialDelaySeconds: 5
+    periodSeconds: 5
+replicaCount: 1
+resources:
+    limits:
+        cpu: "2"
+        memory: 4Gi
+    requests:
+        cpu: 500m
+        memory: 1Gi
+secrets:
+    internalJwtPublicKeyKey: ""
+    internalJwtSecretName: ""
+securityContext:
+    readOnlyRootFilesystem: false
+    runAsNonRoot: true
+    runAsUser: 1000
+serviceAccount:
+    annotations: {}
+    automount: true
+    create: true
+    name: ""
+tolerations: []

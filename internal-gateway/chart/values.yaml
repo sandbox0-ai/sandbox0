@@ -1,78 +1,58 @@
-# Default values for internal-gateway
-
-replicaCount: 1
-
-image:
-  repository: sandbox0ai/infra
-  pullPolicy: IfNotPresent
-  tag: ""
-
-imagePullSecrets: []
-nameOverride: ""
+affinity: {}
+config:
+    allowed_callers:
+        - edge-gateway
+        - scheduler
+    health_check_period: 10s
+    http_port: 8443
+    log_level: info
+    manager_url: http://manager.sandbox0-system:8080
+    shutdown_timeout: 30s
+    storage_proxy_url: http://storage-proxy.sandbox0-system:8081
 fullnameOverride: ""
-
-serviceAccount:
-  create: true
-  automount: true
-  annotations: {}
-  name: ""
-
+image:
+    pullPolicy: IfNotPresent
+    repository: sandbox0ai/infra
+    tag: ""
+imagePullSecrets: []
+livenessProbe:
+    httpGet:
+        path: /health
+        port: http
+    initialDelaySeconds: 10
+    periodSeconds: 10
+nameOverride: ""
+nodeSelector: {}
 podAnnotations: {}
 podLabels: {}
-
 podSecurityContext: {}
-
-securityContext:
-  readOnlyRootFilesystem: true
-  runAsNonRoot: true
-  runAsUser: 1000
-
-service:
-  type: ClusterIP
-  port: 8443
-
-resources:
-  limits:
-    cpu: 500m
-    memory: 256Mi
-  requests:
-    cpu: 100m
-    memory: 128Mi
-
-livenessProbe:
-  httpGet:
-    path: /health
-    port: http
-  initialDelaySeconds: 10
-  periodSeconds: 10
-
 readinessProbe:
-  httpGet:
-    path: /health
-    port: http
-  initialDelaySeconds: 5
-  periodSeconds: 5
-
-nodeSelector: {}
-tolerations: []
-affinity: {}
-
-# Secrets - only for file-based secrets (keys, certs)
-# Uses global.jwt.internalJwtSecretName by default
+    httpGet:
+        path: /health
+        port: http
+    initialDelaySeconds: 5
+    periodSeconds: 5
+replicaCount: 1
+resources:
+    limits:
+        cpu: 500m
+        memory: 256Mi
+    requests:
+        cpu: 100m
+        memory: 128Mi
 secrets:
-  internalJwtSecretName: ""  # defaults to {{ .Values.global.jwt.internalJwtSecretName }}
-  internalJwtPrivateKeyKey: ""  # defaults to {{ .Values.global.jwt.privateKeyKey }}
-
-# Application config - directly maps to config.yaml (snake_case)
-config:
-  http_port: 8443
-  log_level: "info"
-  manager_url: "http://manager:8080"
-  storage_proxy_url: "http://storage-proxy:8081"
-  proxy_timeout: "30s"
-  shutdown_timeout: "30s"
-  health_check_period: "10s"
-  # Allowed callers for internal auth validation
-  # Add "scheduler" when using multi-cluster mode
-  allowed_callers:
-    - "edge-gateway"
+    internalJwtPrivateKeyKey: ""
+    internalJwtSecretName: ""
+securityContext:
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 1000
+service:
+    port: 8443
+    type: ClusterIP
+serviceAccount:
+    annotations: {}
+    automount: true
+    create: true
+    name: ""
+tolerations: []

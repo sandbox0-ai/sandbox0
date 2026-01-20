@@ -1,114 +1,79 @@
-# Default values for netd
-
-image:
-  repository: sandbox0ai/infra
-  pullPolicy: IfNotPresent
-  tag: ""
-
-imagePullSecrets: []
-nameOverride: ""
+affinity: {}
+config:
+    bpf_fs_path: /sys/fs/bpf
+    cluster_dns_cidr: ""
+    dns_resolvers:
+        - 8.8.8.8:53
+    fail_closed: true
+    health_port: 8080
+    internal_gateway_cidr: ""
+    kube_config: ""
+    log_level: info
+    metrics_port: 9090
+    metrics_report_interval: 10s
+    namespace: ""
+    node_name: ""
+    procd_port: 49983
+    proxy_http_port: 18080
+    proxy_https_port: 18443
+    proxy_listen_addr: 0.0.0.0
+    resync_period: 30s
+    storage_proxy_cidr: ""
+    use_ebpf: true
+    use_edt: true
 fullnameOverride: ""
-
-serviceAccount:
-  create: true
-  automount: true
-  annotations: {}
-  name: ""
-
+healthService:
+    port: 8080
+    type: ClusterIP
+image:
+    pullPolicy: IfNotPresent
+    repository: sandbox0ai/infra
+    tag: ""
+imagePullSecrets: []
+livenessProbe:
+    httpGet:
+        path: /health
+        port: health
+    initialDelaySeconds: 10
+    periodSeconds: 10
+metricsService:
+    port: 9090
+    type: ClusterIP
+nameOverride: ""
+nodeSelector: {}
 podAnnotations: {}
 podLabels: {}
-
-# netd requires privileged access for eBPF and network control
 podSecurityContext: {}
-
-securityContext:
-  privileged: true
-  capabilities:
-    add:
-      - NET_ADMIN
-      - SYS_ADMIN
-      - BPF
-
-metricsService:
-  type: ClusterIP
-  port: 9090
-
-healthService:
-  type: ClusterIP
-  port: 8080
-
-resources:
-  limits:
-    cpu: 200m
-    memory: 256Mi
-  requests:
-    cpu: 50m
-    memory: 64Mi
-
-livenessProbe:
-  httpGet:
-    path: /health
-    port: health
-  initialDelaySeconds: 10
-  periodSeconds: 10
-
-readinessProbe:
-  httpGet:
-    path: /health
-    port: health
-  initialDelaySeconds: 5
-  periodSeconds: 5
-
-nodeSelector: {}
-
-tolerations:
-  # Run on all nodes including masters
-  - operator: Exists
-
-affinity: {}
-
-# Update strategy for DaemonSet
-updateStrategy:
-  type: RollingUpdate
-  rollingUpdate:
-    maxUnavailable: 1
-
-# RBAC
 rbac:
-  create: true
-
-# Application config - directly maps to config.yaml (snake_case)
-config:
-  log_level: "info"
-  metrics_port: 9090
-  health_port: 8080
-
-  # Node name - use env var placeholder (injected from downward API)
-  node_name: "${NODE_NAME}"
-
-  # Kubernetes
-  namespace: ""  # Empty means all namespaces
-  kube_config: ""
-  resync_period: "30s"
-
-  # L7 Proxy
-  proxy_listen_addr: "0.0.0.0"
-  proxy_http_port: 18080
-  proxy_https_port: 18443
-  dns_resolvers:
-    - "8.8.8.8:53"
-
-  # Metrics
-  metrics_report_interval: "10s"
-
-  # Network policy
-  fail_closed: true
-  storage_proxy_cidr: ""
-  cluster_dns_cidr: ""
-  internal_gateway_cidr: ""
-  procd_port: 49983
-
-  # eBPF
-  use_ebpf: true
-  bpf_fs_path: "/sys/fs/bpf"
-  use_edt: true
+    create: true
+readinessProbe:
+    httpGet:
+        path: /health
+        port: health
+    initialDelaySeconds: 5
+    periodSeconds: 5
+resources:
+    limits:
+        cpu: 200m
+        memory: 256Mi
+    requests:
+        cpu: 50m
+        memory: 64Mi
+securityContext:
+    capabilities:
+        add:
+            - NET_ADMIN
+            - SYS_ADMIN
+            - BPF
+    privileged: true
+serviceAccount:
+    annotations: {}
+    automount: true
+    create: true
+    name: ""
+tolerations:
+    - operator: Exists
+updateStrategy:
+    rollingUpdate:
+        maxUnavailable: 1
+    type: RollingUpdate

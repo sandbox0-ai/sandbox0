@@ -20,12 +20,6 @@ type configEntry struct {
 }
 
 func main() {
-	outDir := filepath.Join("helm", "configs")
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create output directory: %v\n", err)
-		os.Exit(1)
-	}
-
 	entries := []configEntry{
 		{name: "edge-gateway", cfg: edgeconfig.LoadConfig()},
 		{name: "internal-gateway", cfg: internalconfig.LoadConfig()},
@@ -36,20 +30,50 @@ func main() {
 	}
 
 	for _, entry := range entries {
-		if err := writeConfig(outDir, entry.name, entry.cfg); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to write %s config: %v\n", entry.name, err)
+		if err := updateValuesConfig(entry.name, entry.cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to update %s values.yaml: %v\n", entry.name, err)
 			os.Exit(1)
 		}
-		fmt.Printf("Wrote %s/%s.yaml\n", outDir, entry.name)
+		fmt.Printf("Updated %s/chart/values.yaml\n", entry.name)
 	}
 }
 
-func writeConfig(outDir, name string, cfg any) error {
-	data, err := yaml.Marshal(cfg)
+func updateValuesConfig(service string, cfg any) error {
+	valuesPath := filepath.Join(service, "chart", "values.yaml")
+	valuesData, err := os.ReadFile(valuesPath)
 	if err != nil {
 		return err
 	}
 
-	outPath := filepath.Join(outDir, fmt.Sprintf("%s.yaml", name))
-	return os.WriteFile(outPath, data, 0o644)
+	var values map[string]any
+	if err := yaml.Unmarshal(valuesData, &values); err != nil {
+		return err
+	}
+
+	cfgMap, err := toMap(cfg)
+	if err != nil {
+		return err
+	}
+
+	values["config"] = cfgMap
+	updated, err := yaml.Marshal(values)
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(valuesPath, updated, 0o644)
+}
+
+func toMap(cfg any) (map[string]any, error) {
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	var cfgMap map[string]any
+	if err := yaml.Unmarshal(data, &cfgMap); err != nil {
+		return nil, err
+	}
+
+	return cfgMap, nil
 }

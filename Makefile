@@ -1,4 +1,4 @@
-.PHONY: all build build-all test test-all lint tidy vendor clean helm-update release docker-build docker-push proto
+.PHONY: all build build-all test test-all lint tidy vendor clean helm-update helm-configs release docker-build docker-push proto
 
 SERVICES := edge-gateway internal-gateway manager scheduler storage-proxy netd k8s-plugin procd
 
@@ -149,8 +149,9 @@ clean:
 		if [ "$$service" = "procd" ]; then \
 			rm -rf manager/bin/procd; \
 		else \
+			rm -rf helm/configs/$$service.yaml; \
 			rm -rf $$service/bin; \
-			rm -rf helm/charts/$$service;\
+			rm -rf helm/charts/$$service; \
 		fi; \
 	done
 	rm -rf storage-proxy/proto/fs/*.pb.go
@@ -165,6 +166,10 @@ helm-update:
 			cp -r $$service/chart helm/charts/$$service; \
 		fi; \
 	done
+
+helm-configs:
+	@printf "$(CYAN)Generating default Helm configs...$(RESET)\n"
+	@CONFIG_PATH=/dev/null go run ./tools/configdump
 
 helm-clean:
 	@mkdir -p helm/charts

@@ -37,7 +37,7 @@ image:
 imagePullSecrets: []
 livenessProbe:
     httpGet:
-        path: /health
+        path: /healthz
         port: http
     initialDelaySeconds: 10
     periodSeconds: 10
@@ -53,7 +53,7 @@ rbac:
     create: true
 readinessProbe:
     httpGet:
-        path: /health
+        path: /readyz
         port: http
     initialDelaySeconds: 5
     periodSeconds: 5

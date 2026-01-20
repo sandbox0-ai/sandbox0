@@ -32,8 +32,8 @@ func NewServer(logger *logrus.Logger, repo *db.Repository, authenticator *auth.H
 	}
 
 	// Register handlers
-	s.mux.HandleFunc("/health", s.handleHealth)
-	s.mux.HandleFunc("/ready", s.handleReady)
+	s.mux.HandleFunc("/healthz", s.handleHealth)
+	s.mux.HandleFunc("/readyz", s.handleReady)
 	s.mux.Handle("/metrics", promhttp.Handler())
 
 	// Sandbox Volume handlers

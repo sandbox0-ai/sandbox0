@@ -1,8 +1,6 @@
+-- +goose Up
 -- Scheduler database schema
 -- This migration creates the tables needed for the scheduler service
-
-CREATE SCHEMA IF NOT EXISTS scheduler;
-SET search_path TO scheduler;
 
 -- Clusters table: stores registered data-plane clusters
 CREATE TABLE IF NOT EXISTS scheduler_clusters (
@@ -58,6 +56,7 @@ CREATE INDEX IF NOT EXISTS idx_scheduler_allocations_cluster ON scheduler_templa
 CREATE INDEX IF NOT EXISTS idx_scheduler_allocations_sync_status ON scheduler_template_allocations(sync_status);
 
 -- Function to update updated_at timestamp
+-- +goose StatementBegin
 CREATE OR REPLACE FUNCTION update_updated_at_column()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -65,6 +64,7 @@ BEGIN
     RETURN NEW;
 END;
 $$ language 'plpgsql';
+-- +goose StatementEnd
 
 -- Triggers for updated_at
 DROP TRIGGER IF EXISTS update_scheduler_clusters_updated_at ON scheduler_clusters;
@@ -84,3 +84,12 @@ CREATE TRIGGER update_scheduler_allocations_updated_at
     BEFORE UPDATE ON scheduler_template_allocations
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_column();
+
+-- +goose Down
+DROP TRIGGER IF EXISTS update_scheduler_allocations_updated_at ON scheduler_template_allocations;
+DROP TRIGGER IF EXISTS update_scheduler_templates_updated_at ON scheduler_templates;
+DROP TRIGGER IF EXISTS update_scheduler_clusters_updated_at ON scheduler_clusters;
+DROP FUNCTION IF EXISTS update_updated_at_column();
+DROP TABLE IF EXISTS scheduler_template_allocations;
+DROP TABLE IF EXISTS scheduler_templates;
+DROP TABLE IF EXISTS scheduler_clusters;

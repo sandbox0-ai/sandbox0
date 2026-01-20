@@ -2,9 +2,6 @@
 -- Edge Gateway Database Schema
 -- Authentication, teams, and API keys
 
-CREATE SCHEMA IF NOT EXISTS eg;
-SET search_path TO eg;
-
 -- Users table
 CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -102,6 +99,7 @@ CREATE INDEX IF NOT EXISTS idx_api_keys_team_id ON api_keys(team_id);
 CREATE INDEX IF NOT EXISTS idx_api_keys_key_value ON api_keys(key_value);
 
 -- Updated_at trigger
+-- +goose StatementBegin
 CREATE OR REPLACE FUNCTION update_updated_at_column()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -109,6 +107,7 @@ BEGIN
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
+-- +goose StatementEnd
 
 DROP TRIGGER IF EXISTS update_users_updated_at ON users;
 CREATE TRIGGER update_users_updated_at
@@ -135,7 +134,6 @@ CREATE TRIGGER update_api_keys_updated_at
     EXECUTE FUNCTION update_updated_at_column();
 
 -- +goose Down
-SET search_path TO eg;
 DROP TRIGGER IF EXISTS update_api_keys_updated_at ON api_keys;
 DROP TRIGGER IF EXISTS update_user_identities_updated_at ON user_identities;
 DROP TRIGGER IF EXISTS update_teams_updated_at ON teams;
@@ -161,4 +159,3 @@ ALTER TABLE users DROP CONSTRAINT IF EXISTS fk_users_default_team;
 DROP TABLE IF EXISTS teams;
 DROP TABLE IF EXISTS users;
 DROP FUNCTION IF EXISTS update_updated_at_column();
-DROP SCHEMA IF EXISTS eg;

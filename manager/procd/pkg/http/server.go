@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/sandbox0-ai/infra/manager/procd/pkg/config"
+	"github.com/sandbox0-ai/infra/manager/pkg/config"
 	ctxpkg "github.com/sandbox0-ai/infra/manager/procd/pkg/context"
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/file"
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/http/handlers"
@@ -50,7 +50,7 @@ type Server struct {
 	router     *mux.Router
 	httpServer *http.Server
 	logger     *zap.Logger
-	cfg        *config.Config
+	cfg        *config.ProcdConfig
 
 	// Managers
 	contextManager *ctxpkg.Manager
@@ -66,7 +66,7 @@ type Server struct {
 
 // NewServer creates a new HTTP server.
 func NewServer(
-	cfg *config.Config,
+	cfg *config.ProcdConfig,
 	contextManager *ctxpkg.Manager,
 	volumeManager *volume.Manager,
 	fileManager *file.Manager,

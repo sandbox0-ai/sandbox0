@@ -129,3 +129,16 @@ config:
 
   # Sandbox
   default_sandbox_ttl: "5m"
+
+  # Procd config injected into sandbox pods
+  procd_config:
+      sandbox_id: ""
+      template_id: ""
+      node_name: ""
+      http_port: 49983
+      log_level: info
+      storage_proxy_base_url: storage-proxy.sandbox0-system.svc.cluster.local
+      storage_proxy_replicas: 3
+      root_path: /workspace
+      cache_max_bytes: 104857600
+      cache_ttl: 30s

@@ -1,6 +1,8 @@
 package v1alpha1
 
 import (
+	"sort"
+
 	"github.com/sandbox0-ai/infra/manager/pkg/config"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -65,6 +67,7 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Conta
 	for _, ev := range spec.Env {
 		envVars = append(envVars, corev1.EnvVar{Name: ev.Name, Value: ev.Value})
 	}
+	envVars = appendProcdConfigEnvVars(envVars)
 	container.Env = envVars
 	container.Command = []string{"/procd/bin/procd"}
 	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
@@ -89,6 +92,36 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Conta
 	}
 
 	return container
+}
+
+func appendProcdConfigEnvVars(envVars []corev1.EnvVar) []corev1.EnvVar {
+	cfg := config.LoadConfig()
+	if cfg == nil {
+		return envVars
+	}
+
+	envMap := cfg.ProcdConfig.EnvMap()
+	if len(envMap) == 0 {
+		return envVars
+	}
+
+	keys := make([]string, 0, len(envMap))
+	for key := range envMap {
+		if key == "" {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	for _, key := range keys {
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  key,
+			Value: envMap[key],
+		})
+	}
+
+	return envVars
 }
 
 func applyProcdInit(spec *corev1.PodSpec) {

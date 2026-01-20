@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
-	"github.com/sandbox0-ai/infra/manager/procd/pkg/config"
+	"github.com/sandbox0-ai/infra/manager/pkg/config"
 	ctxpkg "github.com/sandbox0-ai/infra/manager/procd/pkg/context"
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/file"
 	procdhttp "github.com/sandbox0-ai/infra/manager/procd/pkg/http"
@@ -23,7 +23,7 @@ import (
 
 func main() {
 	// Load configuration
-	cfg := config.LoadConfig()
+	cfg := config.LoadProcdConfig()
 
 	if err := cfg.Validate(); err != nil {
 		fmt.Fprintf(os.Stderr, "Invalid configuration: %v\n", err)

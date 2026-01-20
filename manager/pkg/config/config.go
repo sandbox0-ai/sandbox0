@@ -46,6 +46,9 @@ type Config struct {
 
 	// Sandbox
 	DefaultSandboxTTL time.Duration `yaml:"default_sandbox_ttl"`
+
+	// Procd config injected into sandbox pods
+	ProcdConfig ProcdConfig `yaml:"procd_config"`
 }
 
 // defaultConfig returns the default configuration
@@ -68,6 +71,7 @@ func defaultConfig() *Config {
 		WebhookCertPath:          "/tmp/k8s-webhook-server/serving-certs/tls.crt",
 		WebhookKeyPath:           "/tmp/k8s-webhook-server/serving-certs/tls.key",
 		DefaultSandboxTTL:        5 * time.Minute,
+		ProcdConfig:              defaultProcdConfig(),
 	}
 }
 

@@ -70,24 +70,35 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		return err
 	}
 
+	grpcPort := int32(config.GRPCPort)
+	httpPort := int32(config.HTTPPort)
+	metricsPort := int32(config.MetricsPort)
+
+	var resources *corev1.ResourceRequirements
+	serviceConfig := (*infrav1alpha1.ServiceNetworkConfig)(nil)
+	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil {
+		resources = infra.Spec.Services.StorageProxy.Resources
+		serviceConfig = infra.Spec.Services.StorageProxy.Service
+	}
+
 	// Create deployment
 	if err := r.Resources.ReconcileDeployment(ctx, infra, deploymentName, labels, replicas, common.ServiceDefinition{
 		Name:               "storage-proxy",
-		Port:               8080,
-		TargetPort:         8080,
+		Port:               grpcPort,
+		TargetPort:         grpcPort,
 		ServiceAccountName: fmt.Sprintf("%s-storage-proxy", infra.Name),
 		Ports: []corev1.ContainerPort{
 			{
 				Name:          "grpc",
-				ContainerPort: 8080,
+				ContainerPort: grpcPort,
 			},
 			{
 				Name:          "http",
-				ContainerPort: 8081,
+				ContainerPort: httpPort,
 			},
 			{
 				Name:          "metrics",
-				ContainerPort: 9090,
+				ContainerPort: metricsPort,
 			},
 		},
 		Image: fmt.Sprintf("%s:%s", imageRepo, infra.Spec.Version),
@@ -179,18 +190,21 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			InitialDelaySeconds: 5,
 			PeriodSeconds:       5,
 		},
+		Resources: resources,
 	}); err != nil {
 		return err
 	}
 
 	// Create service (gRPC)
-	if err := r.Resources.ReconcileService(ctx, infra, serviceName, labels, corev1.ServiceTypeClusterIP, 8080, 8080); err != nil {
+	serviceType := common.ResolveServiceType(serviceConfig)
+	servicePort := common.ResolveServicePort(serviceConfig, grpcPort)
+	if err := r.Resources.ReconcileService(ctx, infra, serviceName, labels, serviceType, servicePort, grpcPort); err != nil {
 		return err
 	}
-	if err := r.Resources.ReconcileService(ctx, infra, fmt.Sprintf("%s-http", serviceName), labels, corev1.ServiceTypeClusterIP, 8081, 8081); err != nil {
+	if err := r.Resources.ReconcileService(ctx, infra, fmt.Sprintf("%s-http", serviceName), labels, corev1.ServiceTypeClusterIP, httpPort, httpPort); err != nil {
 		return err
 	}
-	if err := r.Resources.ReconcileService(ctx, infra, fmt.Sprintf("%s-metrics", serviceName), labels, corev1.ServiceTypeClusterIP, 9090, 9090); err != nil {
+	if err := r.Resources.ReconcileService(ctx, infra, fmt.Sprintf("%s-metrics", serviceName), labels, corev1.ServiceTypeClusterIP, metricsPort, metricsPort); err != nil {
 		return err
 	}
 

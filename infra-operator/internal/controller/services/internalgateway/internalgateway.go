@@ -75,15 +75,24 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		controlPlanePublicKeyKey = controlPlanePublicKey
 	}
 
+	var resources *corev1.ResourceRequirements
+	serviceConfig := (*infrav1alpha1.ServiceNetworkConfig)(nil)
+	if infra.Spec.Services != nil && infra.Spec.Services.InternalGateway != nil {
+		resources = infra.Spec.Services.InternalGateway.Resources
+		serviceConfig = infra.Spec.Services.InternalGateway.Service
+	}
+
+	httpPort := int32(config.HTTPPort)
+
 	// Create deployment
 	if err := r.Resources.ReconcileDeployment(ctx, infra, deploymentName, labels, replicas, common.ServiceDefinition{
 		Name:       "internal-gateway",
-		Port:       8443,
-		TargetPort: 8443,
+		Port:       httpPort,
+		TargetPort: httpPort,
 		Ports: []corev1.ContainerPort{
 			{
 				Name:          "http",
-				ContainerPort: 8443,
+				ContainerPort: httpPort,
 			},
 		},
 		Image: fmt.Sprintf("%s:%s", imageRepo, infra.Spec.Version),
@@ -175,12 +184,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			InitialDelaySeconds: 5,
 			PeriodSeconds:       5,
 		},
+		Resources: resources,
 	}); err != nil {
 		return err
 	}
 
 	// Create service
-	if err := r.Resources.ReconcileService(ctx, infra, serviceName, labels, corev1.ServiceTypeClusterIP, 8443, 8443); err != nil {
+	serviceType := common.ResolveServiceType(serviceConfig)
+	servicePort := common.ResolveServicePort(serviceConfig, httpPort)
+	if err := r.Resources.ReconcileService(ctx, infra, serviceName, labels, serviceType, servicePort, httpPort); err != nil {
 		return err
 	}
 
@@ -188,7 +200,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	if infra.Status.Endpoints == nil {
 		infra.Status.Endpoints = &infrav1alpha1.EndpointsStatus{}
 	}
-	infra.Status.Endpoints.InternalGateway = fmt.Sprintf("http://%s:8443", serviceName)
+	infra.Status.Endpoints.InternalGateway = fmt.Sprintf("http://%s:%d", serviceName, servicePort)
 
 	logger.Info("Internal gateway reconciled successfully")
 	return nil
@@ -200,12 +212,27 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		cfg = infra.Spec.Services.InternalGateway.Config
 	}
 
-	managerURL := fmt.Sprintf("http://%s-manager:8080", infra.Name)
+	managerConfig := &apiconfig.ManagerConfig{}
+	if infra.Spec.Services != nil && infra.Spec.Services.Manager != nil && infra.Spec.Services.Manager.Config != nil {
+		managerConfig = infra.Spec.Services.Manager.Config
+	}
+	managerServiceConfig := (*infrav1alpha1.ServiceNetworkConfig)(nil)
+	if infra.Spec.Services != nil && infra.Spec.Services.Manager != nil {
+		managerServiceConfig = infra.Spec.Services.Manager.Service
+	}
+	managerServicePort := common.ResolveServicePort(managerServiceConfig, int32(managerConfig.HTTPPort))
+
+	managerURL := fmt.Sprintf("http://%s-manager:%d", infra.Name, managerServicePort)
 	if cfg.ManagerURL == "" {
 		cfg.ManagerURL = managerURL
 	}
 
-	storageProxyURL := fmt.Sprintf("http://%s-storage-proxy-http:8081", infra.Name)
+	storageProxyConfig := &apiconfig.StorageProxyConfig{}
+	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil && infra.Spec.Services.StorageProxy.Config != nil {
+		storageProxyConfig = infra.Spec.Services.StorageProxy.Config
+	}
+	storageProxyHTTPPort := int32(storageProxyConfig.HTTPPort)
+	storageProxyURL := fmt.Sprintf("http://%s-storage-proxy-http:%d", infra.Name, storageProxyHTTPPort)
 	if cfg.StorageProxyURL == "" {
 		cfg.StorageProxyURL = storageProxyURL
 	}

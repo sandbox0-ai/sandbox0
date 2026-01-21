@@ -91,7 +91,7 @@ build: manifests
 		elif [ "$$service" = "infra-operator" ]; then \
 			$(MAKE) operator-manifests; \
 			mkdir -p infra-operator/bin; \
-			go build -v -o infra-operator/bin/manager ./infra-operator/cmd/infra-operator; \
+			go build -v -o infra-operator/bin/infra-operator ./infra-operator/cmd/infra-operator; \
 		fi; \
 	else \
 		echo "Error: Unknown service '$$service'"; \

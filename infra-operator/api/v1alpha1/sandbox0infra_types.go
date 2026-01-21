@@ -123,6 +123,7 @@ type DatabaseConfig struct {
 
 	// Builtin configures the built-in single-node PostgreSQL
 	// +optional
+	// +kubebuilder:default={}
 	Builtin *BuiltinDatabaseConfig `json:"builtin,omitempty"`
 
 	// External configures connection to external database
@@ -135,6 +136,31 @@ type BuiltinDatabaseConfig struct {
 	// Enabled enables the built-in database
 	// +kubebuilder:default=true
 	Enabled bool `json:"enabled,omitempty"`
+
+	// Image specifies the postgres image for the builtin database
+	// +kubebuilder:default="postgres:16-alpine"
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// Port specifies the database port
+	// +kubebuilder:default=5432
+	// +optional
+	Port int32 `json:"port,omitempty"`
+
+	// Username specifies the database username
+	// +kubebuilder:default="sandbox0"
+	// +optional
+	Username string `json:"username,omitempty"`
+
+	// Database specifies the database name
+	// +kubebuilder:default="sandbox0"
+	// +optional
+	Database string `json:"database,omitempty"`
+
+	// SSLMode specifies the SSL mode for builtin DSN
+	// +kubebuilder:default="disable"
+	// +optional
+	SSLMode string `json:"sslMode,omitempty"`
 
 	// Persistence configures database storage
 	// +optional
@@ -209,6 +235,7 @@ type StorageConfig struct {
 
 	// Builtin configures the built-in RustFS storage
 	// +optional
+	// +kubebuilder:default={}
 	Builtin *BuiltinStorageConfig `json:"builtin,omitempty"`
 
 	// S3 configures S3 or S3-compatible storage
@@ -225,6 +252,56 @@ type BuiltinStorageConfig struct {
 	// Enabled enables the built-in storage
 	// +kubebuilder:default=true
 	Enabled bool `json:"enabled,omitempty"`
+
+	// Image specifies the RustFS image for builtin storage
+	// +kubebuilder:default="rustfs/rustfs:1.0.0-alpha.79"
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// Port specifies the RustFS API port
+	// +kubebuilder:default=9000
+	// +optional
+	Port int32 `json:"port,omitempty"`
+
+	// ConsolePort specifies the RustFS console port
+	// +kubebuilder:default=9001
+	// +optional
+	ConsolePort int32 `json:"consolePort,omitempty"`
+
+	// Bucket specifies the default bucket name for builtin storage
+	// +kubebuilder:default="sandbox0"
+	// +optional
+	Bucket string `json:"bucket,omitempty"`
+
+	// Region specifies the default region for builtin storage
+	// +kubebuilder:default="us-east-1"
+	// +optional
+	Region string `json:"region,omitempty"`
+
+	// ConsoleEnabled enables the RustFS console
+	// +kubebuilder:default=true
+	// +optional
+	ConsoleEnabled bool `json:"consoleEnabled,omitempty"`
+
+	// Volumes specifies the RustFS data path
+	// +kubebuilder:default="/data"
+	// +optional
+	Volumes string `json:"volumes,omitempty"`
+
+	// ObsLogDirectory specifies the RustFS log directory
+	// +kubebuilder:default="/data/logs"
+	// +optional
+	ObsLogDirectory string `json:"obsLogDirectory,omitempty"`
+
+	// ObsLoggerLevel specifies the RustFS log level
+	// +kubebuilder:default="debug"
+	// +optional
+	ObsLoggerLevel string `json:"obsLoggerLevel,omitempty"`
+
+	// ObsEnvironment specifies the RustFS environment label
+	// +kubebuilder:default="develop"
+	// +optional
+	ObsEnvironment string `json:"obsEnvironment,omitempty"`
 
 	// Persistence configures storage persistence
 	// +optional

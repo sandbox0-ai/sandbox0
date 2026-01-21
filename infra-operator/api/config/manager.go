@@ -96,8 +96,8 @@ type ManagerConfig struct {
 	// +kubebuilder:default="32Mi"
 	PauseMinMemoryLimit string `yaml:"pause_min_memory_limit" json:"pauseMinMemoryLimit"`
 	// +optional
-	// +kubebuilder:default=1.1
-	PauseMemoryBufferRatio float64 `yaml:"pause_memory_buffer_ratio" json:"pauseMemoryBufferRatio"`
+	// +kubebuilder:default="1.1"
+	PauseMemoryBufferRatio string `yaml:"pause_memory_buffer_ratio" json:"pauseMemoryBufferRatio"`
 	// +optional
 	// +kubebuilder:default="10m"
 	PauseMinCPU string `yaml:"pause_min_cpu" json:"pauseMinCPU"`

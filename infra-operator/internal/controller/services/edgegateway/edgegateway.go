@@ -69,15 +69,23 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		return err
 	}
 
+	var resources *corev1.ResourceRequirements
+	serviceConfig := (*infrav1alpha1.ServiceNetworkConfig)(nil)
+	if infra.Spec.Services != nil && infra.Spec.Services.EdgeGateway != nil {
+		resources = infra.Spec.Services.EdgeGateway.Resources
+		serviceConfig = infra.Spec.Services.EdgeGateway.Service
+	}
+
 	// Create deployment
+	httpPort := int32(config.HTTPPort)
 	if err := r.Resources.ReconcileDeployment(ctx, infra, deploymentName, labels, replicas, common.ServiceDefinition{
 		Name:       "edge-gateway",
-		Port:       8080,
-		TargetPort: 8080,
+		Port:       httpPort,
+		TargetPort: httpPort,
 		Ports: []corev1.ContainerPort{
 			{
 				Name:          "http",
-				ContainerPort: 8080,
+				ContainerPort: httpPort,
 			},
 		},
 		Image: fmt.Sprintf("%s:%s", imageRepo, infra.Spec.Version),
@@ -149,25 +157,22 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			InitialDelaySeconds: 5,
 			PeriodSeconds:       5,
 		},
+		Resources: resources,
 	}); err != nil {
 		return err
 	}
 
 	// Create service
-	serviceType := corev1.ServiceTypeClusterIP
-	servicePort := int32(80)
-	if infra.Spec.Services != nil && infra.Spec.Services.EdgeGateway != nil && infra.Spec.Services.EdgeGateway.Service != nil {
-		serviceType = infra.Spec.Services.EdgeGateway.Service.Type
-		servicePort = infra.Spec.Services.EdgeGateway.Service.Port
-	}
-	if err := r.Resources.ReconcileService(ctx, infra, serviceName, labels, serviceType, servicePort, 8080); err != nil {
+	serviceType := common.ResolveServiceType(serviceConfig)
+	servicePort := common.ResolveServicePort(serviceConfig, httpPort)
+	if err := r.Resources.ReconcileService(ctx, infra, serviceName, labels, serviceType, servicePort, httpPort); err != nil {
 		return err
 	}
 
 	// Create ingress if enabled
 	if infra.Spec.Services != nil && infra.Spec.Services.EdgeGateway != nil &&
 		infra.Spec.Services.EdgeGateway.Ingress != nil && infra.Spec.Services.EdgeGateway.Ingress.Enabled {
-		if err := r.Resources.ReconcileIngress(ctx, infra, serviceName, infra.Spec.Services.EdgeGateway.Ingress); err != nil {
+		if err := r.Resources.ReconcileIngress(ctx, infra, serviceName, servicePort, infra.Spec.Services.EdgeGateway.Ingress); err != nil {
 			return err
 		}
 	}
@@ -191,7 +196,16 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		}
 	}
 
-	internalGatewayURL := fmt.Sprintf("http://%s-internal-gateway:8443", infra.Name)
+	internalGatewayConfig := &apiconfig.InternalGatewayConfig{}
+	if infra.Spec.Services != nil && infra.Spec.Services.InternalGateway != nil && infra.Spec.Services.InternalGateway.Config != nil {
+		internalGatewayConfig = infra.Spec.Services.InternalGateway.Config
+	}
+	internalGatewayServiceConfig := (*infrav1alpha1.ServiceNetworkConfig)(nil)
+	if infra.Spec.Services != nil && infra.Spec.Services.InternalGateway != nil {
+		internalGatewayServiceConfig = infra.Spec.Services.InternalGateway.Service
+	}
+	internalGatewayPort := common.ResolveServicePort(internalGatewayServiceConfig, int32(internalGatewayConfig.HTTPPort))
+	internalGatewayURL := fmt.Sprintf("http://%s-internal-gateway:%d", infra.Name, internalGatewayPort)
 	if cfg.DefaultInternalGatewayURL == "" {
 		cfg.DefaultInternalGatewayURL = internalGatewayURL
 	}

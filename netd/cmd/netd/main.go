@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -66,6 +67,13 @@ func main() {
 		logger,
 	)
 
+	// Parse ratios
+	burstRatio, err := strconv.ParseFloat(cfg.BurstRatio, 64)
+	if err != nil {
+		logger.Warn("Failed to parse BurstRatio, using default 0.125", zap.String("value", cfg.BurstRatio), zap.Error(err))
+		burstRatio = 0.125
+	}
+
 	// Create dataplane with eBPF support
 	dpConfig := &dataplane.Config{
 		ProxyHTTPPort:       cfg.ProxyHTTPPort,
@@ -82,7 +90,7 @@ func main() {
 		UseEDT:              cfg.UseEDT,
 		EDTHorizon:          cfg.EDTHorizon.Duration,
 		VethPrefix:          cfg.VethPrefix,
-		BurstRatio:          cfg.BurstRatio,
+		BurstRatio:          burstRatio,
 	}
 
 	dp, err := dataplane.NewDataPlaneWithEBPF(logger, dpConfig)

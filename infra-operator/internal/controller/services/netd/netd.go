@@ -57,28 +57,37 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		return err
 	}
 
+	var resources *corev1.ResourceRequirements
+	if infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
+		resources = infra.Spec.Services.Netd.Resources
+	}
+
 	// Create DaemonSet
+	metricsPort := int32(config.MetricsPort)
+	healthPort := int32(config.HealthPort)
+	proxyHTTPPort := int32(config.ProxyHTTPPort)
+	proxyHTTPSPort := int32(config.ProxyHTTPSPort)
 	if err := r.Resources.ReconcileDaemonSet(ctx, infra, dsName, labels, common.ServiceDefinition{
 		Name:               "netd",
-		Port:               8080,
-		TargetPort:         8080,
+		Port:               healthPort,
+		TargetPort:         healthPort,
 		ServiceAccountName: fmt.Sprintf("%s-netd", infra.Name),
 		Ports: []corev1.ContainerPort{
 			{
 				Name:          "metrics",
-				ContainerPort: 9090,
+				ContainerPort: metricsPort,
 			},
 			{
 				Name:          "health",
-				ContainerPort: 8080,
+				ContainerPort: healthPort,
 			},
 			{
 				Name:          "proxy-http",
-				ContainerPort: 18080,
+				ContainerPort: proxyHTTPPort,
 			},
 			{
 				Name:          "proxy-https",
-				ContainerPort: 18443,
+				ContainerPort: proxyHTTPSPort,
 			},
 		},
 		Image: fmt.Sprintf("%s:%s", imageRepo, infra.Spec.Version),
@@ -165,11 +174,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			InitialDelaySeconds: 5,
 			PeriodSeconds:       5,
 		},
+		Resources: resources,
 	}); err != nil {
 		return err
 	}
 
-	if err := r.Resources.ReconcileService(ctx, infra, fmt.Sprintf("%s-metrics", dsName), labels, corev1.ServiceTypeClusterIP, 9090, 9090); err != nil {
+	if err := r.Resources.ReconcileService(ctx, infra, fmt.Sprintf("%s-metrics", dsName), labels, corev1.ServiceTypeClusterIP, metricsPort, metricsPort); err != nil {
 		return err
 	}
 

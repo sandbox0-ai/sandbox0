@@ -122,6 +122,7 @@ func (r *Reconciler) reconcileBuiltinDatabase(ctx context.Context, infra *infrav
 // reconcileDatabaseSecret creates or updates the database credentials secret.
 func (r *Reconciler) reconcileDatabaseSecret(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
 	secretName := fmt.Sprintf("%s-%s", infra.Name, databaseSecretName)
+	builtin := resolveBuiltinDatabaseConfig(infra)
 
 	secret := &corev1.Secret{}
 	err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: secretName, Namespace: infra.Namespace}, secret)
@@ -139,12 +140,12 @@ func (r *Reconciler) reconcileDatabaseSecret(ctx context.Context, infra *infrav1
 			},
 			Type: corev1.SecretTypeOpaque,
 			StringData: map[string]string{
-				"username": "sandbox0",
+				"username": builtin.Username,
 				"password": password,
-				"database": "sandbox0",
+				"database": builtin.Database,
 				"host":     fmt.Sprintf("%s-postgres", infra.Name),
-				"port":     fmt.Sprintf("%d", databasePort),
-				"dsn":      fmt.Sprintf("postgres://sandbox0:%s@%s-postgres:%d/sandbox0?sslmode=disable", password, infra.Name, databasePort),
+				"port":     fmt.Sprintf("%d", builtin.Port),
+				"dsn":      fmt.Sprintf("postgres://%s:%s@%s-postgres:%d/%s?sslmode=%s", builtin.Username, password, infra.Name, builtin.Port, builtin.Database, builtin.SSLMode),
 			},
 		}
 
@@ -213,6 +214,7 @@ func (r *Reconciler) reconcileDatabaseStatefulSet(ctx context.Context, infra *in
 	stsName := fmt.Sprintf("%s-postgres", infra.Name)
 	secretName := fmt.Sprintf("%s-%s", infra.Name, databaseSecretName)
 	pvcName := fmt.Sprintf("%s-postgres-data", infra.Name)
+	builtin := resolveBuiltinDatabaseConfig(infra)
 
 	sts := &appsv1.StatefulSet{}
 	err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: stsName, Namespace: infra.Namespace}, sts)
@@ -247,11 +249,11 @@ func (r *Reconciler) reconcileDatabaseStatefulSet(ctx context.Context, infra *in
 					Containers: []corev1.Container{
 						{
 							Name:  databaseName,
-							Image: "postgres:16-alpine",
+							Image: builtin.Image,
 							Ports: []corev1.ContainerPort{
 								{
 									Name:          "postgres",
-									ContainerPort: databasePort,
+									ContainerPort: builtin.Port,
 								},
 							},
 							Env: []corev1.EnvVar{
@@ -312,7 +314,7 @@ func (r *Reconciler) reconcileDatabaseStatefulSet(ctx context.Context, infra *in
 							LivenessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
 									Exec: &corev1.ExecAction{
-										Command: []string{"pg_isready", "-U", "sandbox0"},
+										Command: []string{"pg_isready", "-U", builtin.Username},
 									},
 								},
 								InitialDelaySeconds: 30,
@@ -321,7 +323,7 @@ func (r *Reconciler) reconcileDatabaseStatefulSet(ctx context.Context, infra *in
 							ReadinessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
 									Exec: &corev1.ExecAction{
-										Command: []string{"pg_isready", "-U", "sandbox0"},
+										Command: []string{"pg_isready", "-U", builtin.Username},
 									},
 								},
 								InitialDelaySeconds: 5,
@@ -360,6 +362,7 @@ func (r *Reconciler) reconcileDatabaseStatefulSet(ctx context.Context, infra *in
 // reconcileDatabaseService creates or updates the PostgreSQL Service.
 func (r *Reconciler) reconcileDatabaseService(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
 	svcName := fmt.Sprintf("%s-postgres", infra.Name)
+	builtin := resolveBuiltinDatabaseConfig(infra)
 
 	svc := &corev1.Service{}
 	err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: svcName, Namespace: infra.Namespace}, svc)
@@ -385,8 +388,8 @@ func (r *Reconciler) reconcileDatabaseService(ctx context.Context, infra *infrav
 			Ports: []corev1.ServicePort{
 				{
 					Name:       "postgres",
-					Port:       databasePort,
-					TargetPort: intstr.FromInt(databasePort),
+					Port:       builtin.Port,
+					TargetPort: intstr.FromInt(int(builtin.Port)),
 				},
 			},
 		},
@@ -481,4 +484,38 @@ func GetJuicefsMetaURL(ctx context.Context, client client.Client, infra *infrav1
 
 	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
 		ext.Username, password, ext.Host, port, ext.Database, sslMode), nil
+}
+
+func resolveBuiltinDatabaseConfig(infra *infrav1alpha1.Sandbox0Infra) infrav1alpha1.BuiltinDatabaseConfig {
+	cfg := infrav1alpha1.BuiltinDatabaseConfig{
+		Image:    "postgres:16-alpine",
+		Port:     databasePort,
+		Username: "sandbox0",
+		Database: "sandbox0",
+		SSLMode:  "disable",
+	}
+	if infra.Spec.Database.Builtin == nil {
+		return cfg
+	}
+
+	builtin := infra.Spec.Database.Builtin
+	cfg.Enabled = builtin.Enabled
+	cfg.Persistence = builtin.Persistence
+	if builtin.Image != "" {
+		cfg.Image = builtin.Image
+	}
+	if builtin.Port != 0 {
+		cfg.Port = builtin.Port
+	}
+	if builtin.Username != "" {
+		cfg.Username = builtin.Username
+	}
+	if builtin.Database != "" {
+		cfg.Database = builtin.Database
+	}
+	if builtin.SSLMode != "" {
+		cfg.SSLMode = builtin.SSLMode
+	}
+
+	return cfg
 }

@@ -139,7 +139,7 @@ type NetdConfig struct {
 	// BurstRatio is the default ratio of rate to burst (e.g. 0.125 for 1/8)
 	// +optional
 	// +kubebuilder:default="0.125"
-	BurstRatio float64 `yaml:"burst_ratio" json:"burstRatio"`
+	BurstRatio string `yaml:"burst_ratio" json:"burstRatio"`
 
 	// EDTHorizon is the horizon for EDT-based pacing
 	// +optional

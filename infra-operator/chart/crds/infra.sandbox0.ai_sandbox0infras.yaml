@@ -126,12 +126,22 @@ spec:
                 description: Database configures the main database for sandbox0
                 properties:
                   builtin:
+                    default: {}
                     description: Builtin configures the built-in single-node PostgreSQL
                     properties:
+                      database:
+                        default: sandbox0
+                        description: Database specifies the database name
+                        type: string
                       enabled:
                         default: true
                         description: Enabled enables the built-in database
                         type: boolean
+                      image:
+                        default: postgres:16-alpine
+                        description: Image specifies the postgres image for the builtin
+                          database
+                        type: string
                       persistence:
                         description: Persistence configures database storage
                         properties:
@@ -152,6 +162,19 @@ spec:
                               (empty for default)
                             type: string
                         type: object
+                      port:
+                        default: 5432
+                        description: Port specifies the database port
+                        format: int32
+                        type: integer
+                      sslMode:
+                        default: disable
+                        description: SSLMode specifies the SSL mode for builtin DSN
+                        type: string
+                      username:
+                        default: sandbox0
+                        description: Username specifies the database username
+                        type: string
                     type: object
                   external:
                     description: External configures connection to external database
@@ -403,11 +426,25 @@ spec:
                                     type: string
                                 type: object
                             type: object
+                          clusterCacheTTL:
+                            default: 30s
+                            description: Cache configuration
+                            type: string
+                          databaseMaxConns:
+                            default: 30
+                            type: integer
+                          databaseMinConns:
+                            default: 8
+                            type: integer
                           databaseUrl:
                             description: Database configuration (for API key validation)
                             type: string
                           defaultInternalGatewayUrl:
                             description: Upstream service
+                            type: string
+                          defaultTeamName:
+                            default: Personal Team
+                            description: Identity and Teams
                             type: string
                           edition:
                             default: self-hosted
@@ -417,8 +454,18 @@ spec:
                             default: 8080
                             description: Server configuration
                             type: integer
+                          internalAuthCaller:
+                            default: edge-gateway
+                            type: string
+                          internalAuthTTL:
+                            default: 30s
+                            description: Internal Authentication
+                            type: string
                           jwtAccessTokenTTL:
                             default: 15m
+                            type: string
+                          jwtIssuer:
+                            default: edge-gateway
                             type: string
                           jwtRefreshTokenTTL:
                             default: 168h
@@ -485,6 +532,12 @@ spec:
                                   type: object
                               type: object
                             type: array
+                          oidcStateCleanupInterval:
+                            default: 5m
+                            type: string
+                          oidcStateTTL:
+                            default: 10m
+                            type: string
                           proxyTimeout:
                             default: 30s
                             description: Timeouts
@@ -492,6 +545,9 @@ spec:
                           rateLimitBurst:
                             default: 200
                             type: integer
+                          rateLimitCleanupInterval:
+                            default: 10m
+                            type: string
                           rateLimitRPS:
                             default: 100
                             description: Rate limiting
@@ -501,6 +557,15 @@ spec:
                               mode)
                             type: boolean
                           schedulerUrl:
+                            type: string
+                          serverIdleTimeout:
+                            default: 120s
+                            type: string
+                          serverReadTimeout:
+                            default: 30s
+                            type: string
+                          serverWriteTimeout:
+                            default: 60s
                             type: string
                           shutdownTimeout:
                             default: 30s
@@ -639,6 +704,24 @@ spec:
                           managerUrl:
                             description: Upstream services
                             type: string
+                          procdStoragePermissions:
+                            default:
+                            - sandboxvolume:read
+                            - sandboxvolume:write
+                            items:
+                              type: string
+                            type: array
+                          proxyTimeout:
+                            default: 10s
+                            description: Proxy configuration
+                            type: string
+                          schedulerPermissions:
+                            default:
+                            - '*:*'
+                            description: Permissions
+                            items:
+                              type: string
+                            type: array
                           shutdownTimeout:
                             default: 30s
                             description: Timeouts
@@ -753,13 +836,34 @@ spec:
                         default: {}
                         description: Config contains manager specific configuration
                         properties:
+                          bandwidthAccountingInterval:
+                            default: 10
+                            type: integer
                           cleanupInterval:
                             default: 60s
                             description: Cleanup Controller
                             type: string
+                          databaseMaxConns:
+                            default: 10
+                            description: Database
+                            format: int32
+                            type: integer
+                          databaseMinConns:
+                            default: 2
+                            format: int32
+                            type: integer
                           databaseUrl:
                             description: Database
                             type: string
+                          defaultBandwidthBurstBytes:
+                            default: 12500000
+                            format: int64
+                            type: integer
+                          defaultBandwidthRateBps:
+                            default: 100000000
+                            description: Network
+                            format: int64
+                            type: integer
                           defaultClusterId:
                             type: string
                           defaultSandboxTTL:
@@ -797,6 +901,23 @@ spec:
                             default: 9090
                             description: Metrics
                             type: integer
+                          pauseMemoryBufferRatio:
+                            default: "1.1"
+                            type: string
+                          pauseMinCPU:
+                            default: 10m
+                            type: string
+                          pauseMinMemoryLimit:
+                            default: 32Mi
+                            type: string
+                          pauseMinMemoryRequest:
+                            default: 10Mi
+                            description: Pause/Resume
+                            type: string
+                          procdClientTimeout:
+                            default: 30s
+                            description: Timeouts
+                            type: string
                           procdConfig:
                             default: {}
                             description: Procd config injected into sandbox pods
@@ -813,6 +934,19 @@ spec:
                                 default: 49983
                                 description: Server configuration
                                 type: integer
+                              juicefsBufferSize:
+                                default: "300"
+                                type: string
+                              juicefsCacheSize:
+                                default: "100"
+                                description: JuiceFS Mount Defaults
+                                type: string
+                              juicefsPrefetch:
+                                default: 3
+                                type: integer
+                              juicefsWriteback:
+                                default: true
+                                type: boolean
                               logLevel:
                                 default: info
                                 type: string
@@ -826,8 +960,12 @@ spec:
                                 description: Sandbox identity
                                 type: string
                               storageProxyBaseURL:
+                                default: storage-proxy
                                 description: Storage Proxy configuration
                                 type: string
+                              storageProxyPort:
+                                default: 8080
+                                type: integer
                               storageProxyReplicas:
                                 default: 3
                                 type: integer
@@ -835,6 +973,9 @@ spec:
                                 type: string
                             type: object
                           resyncPeriod:
+                            default: 30s
+                            type: string
+                          shutdownTimeout:
                             default: 30s
                             type: string
                           webhookCertPath:
@@ -960,10 +1101,24 @@ spec:
                             description: BPFFSPath is the path to bpf filesystem (usually
                               /sys/fs/bpf)
                             type: string
+                          bpfPinPath:
+                            default: netd
+                            description: BPFPinPath is the sub-path within BPFFS to
+                              pin BPF maps/programs
+                            type: string
+                          burstRatio:
+                            default: "0.125"
+                            description: BurstRatio is the default ratio of rate to
+                              burst (e.g. 0.125 for 1/8)
+                            type: string
                           clusterDNSCIDR:
                             description: ClusterDNSCIDR is the CIDR for cluster DNS
                               (always allowed for DNS)
                             type: string
+                          dnsPort:
+                            default: 53
+                            description: DNSPort is the port used for DNS lookups
+                            type: integer
                           dnsResolvers:
                             default:
                             - 8.8.8.8:53
@@ -972,6 +1127,10 @@ spec:
                             items:
                               type: string
                             type: array
+                          edtHorizon:
+                            default: 10ms
+                            description: EDTHorizon is the horizon for EDT-based pacing
+                            type: string
                           failClosed:
                             default: true
                             description: FailClosed if true, blocks all traffic when
@@ -1016,6 +1175,11 @@ spec:
                             default: 49983
                             description: ProcdPort is the port procd listens on
                             type: integer
+                          proxyDNSTimeout:
+                            default: 10s
+                            description: ProxyDNSTimeout is the timeout for DNS resolution
+                              in the proxy
+                            type: string
                           proxyHTTPPort:
                             default: 18080
                             description: ProxyHTTPPort is the port for HTTP proxy
@@ -1026,14 +1190,29 @@ spec:
                             description: ProxyHTTPSPort is the port for HTTPS/TLS
                               proxy (redirect from port 443)
                             type: integer
+                          proxyHeaderLimit:
+                            default: 65536
+                            description: ProxyHeaderLimit is the maximum size for
+                              HTTP headers
+                            format: int64
+                            type: integer
                           proxyListenAddr:
                             default: 0.0.0.0
                             description: ProxyListenAddr is the address for the L7
                               proxy to listen on
                             type: string
+                          proxyUpstreamTimeout:
+                            default: 10s
+                            description: ProxyUpstreamTimeout is the timeout for connecting
+                              to upstream servers
+                            type: string
                           resyncPeriod:
                             default: 30s
                             description: ResyncPeriod is the period for informer resync
+                            type: string
+                          shutdownDelay:
+                            default: 2s
+                            description: ShutdownDelay is the delay before final shutdown
                             type: string
                           storageProxyCIDR:
                             description: StorageProxyCIDR is the CIDR for storage-proxy
@@ -1049,6 +1228,10 @@ spec:
                             description: UseEDT enables Earliest Departure Time pacing
                               for eBPF
                             type: boolean
+                          vethPrefix:
+                            default: veth
+                            description: VethPrefix is the prefix for veth interfaces
+                            type: string
                         type: object
                       enabled:
                         default: true
@@ -1157,6 +1340,24 @@ spec:
                         default: {}
                         description: Config contains scheduler specific configuration
                         properties:
+                          databasePool:
+                            description: Database Pool configuration
+                            properties:
+                              maxConnIdleTime:
+                                default: 5m
+                                type: string
+                              maxConnLifetime:
+                                default: 30m
+                                type: string
+                              maxConns:
+                                default: 10
+                                format: int32
+                                type: integer
+                              minConns:
+                                default: 2
+                                format: int32
+                                type: integer
+                            type: object
                           databaseUrl:
                             description: Database configuration
                             type: string
@@ -1164,8 +1365,20 @@ spec:
                             default: 8080
                             description: Server configuration
                             type: integer
+                          idleTimeout:
+                            default: 120s
+                            type: string
                           logLevel:
                             default: info
+                            type: string
+                          podsPerNode:
+                            default: 50
+                            type: integer
+                          proxyTimeout:
+                            default: 10s
+                            type: string
+                          readTimeout:
+                            default: 30s
                             type: string
                           reconcileInterval:
                             default: 30s
@@ -1174,6 +1387,9 @@ spec:
                           shutdownTimeout:
                             default: 30s
                             description: Timeouts
+                            type: string
+                          writeTimeout:
+                            default: 60s
                             type: string
                         type: object
                       enabled:
@@ -1293,6 +1509,18 @@ spec:
                           cacheDir:
                             default: /var/lib/storage-proxy/cache
                             type: string
+                          cleanupInterval:
+                            default: 60s
+                            type: string
+                          databaseMaxConns:
+                            default: 30
+                            type: integer
+                          databaseMinConns:
+                            default: 5
+                            type: integer
+                          databaseSchema:
+                            default: sp
+                            type: string
                           databaseUrl:
                             description: Database
                             type: string
@@ -1301,6 +1529,9 @@ spec:
                             type: string
                           defaultClusterId:
                             type: string
+                          flushTimeout:
+                            default: 30s
+                            type: string
                           grpcAddr:
                             default: 0.0.0.0
                             description: gRPC Server
@@ -1308,12 +1539,56 @@ spec:
                           grpcPort:
                             default: 8080
                             type: integer
+                          heartbeatInterval:
+                            default: 5s
+                            description: Coordination
+                            type: string
+                          heartbeatTimeout:
+                            default: 15
+                            type: integer
                           httpAddr:
                             default: 0.0.0.0
                             description: HTTP Management API
                             type: string
+                          httpIdleTimeout:
+                            default: 60s
+                            type: string
                           httpPort:
                             default: 8081
+                            type: integer
+                          httpReadTimeout:
+                            default: 15s
+                            description: Timeouts
+                            type: string
+                          httpWriteTimeout:
+                            default: 15s
+                            type: string
+                          juicefsAttrTimeout:
+                            default: 1s
+                            type: string
+                          juicefsBlockSize:
+                            default: 4096
+                            type: integer
+                          juicefsCompression:
+                            default: lz4
+                            type: string
+                          juicefsDirEntryTimeout:
+                            default: 1s
+                            type: string
+                          juicefsEntryTimeout:
+                            default: 1s
+                            type: string
+                          juicefsMaxUpload:
+                            default: 20
+                            type: integer
+                          juicefsMetaRetries:
+                            default: 10
+                            type: integer
+                          juicefsName:
+                            default: sandbox0
+                            type: string
+                          juicefsTrashDays:
+                            default: 1
                             type: integer
                           kubeconfigPath:
                             description: Kubernetes
@@ -1457,8 +1732,23 @@ spec:
                 description: Storage configures the storage backend (JuiceFS S3 backend)
                 properties:
                   builtin:
+                    default: {}
                     description: Builtin configures the built-in RustFS storage
                     properties:
+                      bucket:
+                        default: sandbox0
+                        description: Bucket specifies the default bucket name for
+                          builtin storage
+                        type: string
+                      consoleEnabled:
+                        default: true
+                        description: ConsoleEnabled enables the RustFS console
+                        type: boolean
+                      consolePort:
+                        default: 9001
+                        description: ConsolePort specifies the RustFS console port
+                        format: int32
+                        type: integer
                       credentials:
                         description: Credentials configures access credentials (auto-generated
                           if not specified)
@@ -1474,6 +1764,24 @@ spec:
                         default: true
                         description: Enabled enables the built-in storage
                         type: boolean
+                      image:
+                        default: rustfs/rustfs:1.0.0-alpha.79
+                        description: Image specifies the RustFS image for builtin
+                          storage
+                        type: string
+                      obsEnvironment:
+                        default: develop
+                        description: ObsEnvironment specifies the RustFS environment
+                          label
+                        type: string
+                      obsLogDirectory:
+                        default: /data/logs
+                        description: ObsLogDirectory specifies the RustFS log directory
+                        type: string
+                      obsLoggerLevel:
+                        default: debug
+                        description: ObsLoggerLevel specifies the RustFS log level
+                        type: string
                       persistence:
                         description: Persistence configures storage persistence
                         properties:
@@ -1494,6 +1802,20 @@ spec:
                               (empty for default)
                             type: string
                         type: object
+                      port:
+                        default: 9000
+                        description: Port specifies the RustFS API port
+                        format: int32
+                        type: integer
+                      region:
+                        default: us-east-1
+                        description: Region specifies the default region for builtin
+                          storage
+                        type: string
+                      volumes:
+                        default: /data
+                        description: Volumes specifies the RustFS data path
+                        type: string
                     type: object
                   oss:
                     description: OSS configures Aliyun OSS storage

@@ -65,6 +65,7 @@ type ServiceDefinition struct {
 	LivenessProbe      *corev1.Probe
 	ReadinessProbe     *corev1.Probe
 	ServiceAccountName string
+	Resources          *corev1.ResourceRequirements
 }
 
 // ReconcileDeployment creates or updates a deployment.
@@ -73,6 +74,20 @@ func (r *ResourceManager) ReconcileDeployment(ctx context.Context, infra *infrav
 	err := r.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, deploy)
 	if err != nil && !errors.IsNotFound(err) {
 		return err
+	}
+
+	defaultResources := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("100m"),
+			corev1.ResourceMemory: resource.MustParse("256Mi"),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("500m"),
+			corev1.ResourceMemory: resource.MustParse("512Mi"),
+		},
+	}
+	if def.Resources != nil {
+		defaultResources = *def.Resources
 	}
 
 	desiredDeploy := &appsv1.Deployment{
@@ -93,23 +108,14 @@ func (r *ResourceManager) ReconcileDeployment(ctx context.Context, infra *infrav
 					ServiceAccountName: def.ServiceAccountName,
 					Containers: []corev1.Container{
 						{
-							Name:         def.Name,
-							Image:        def.Image,
-							Command:      def.Command,
-							Args:         def.Args,
-							Env:          def.EnvVars,
-							VolumeMounts: def.VolumeMounts,
-							Ports:        ResolveContainerPorts(def),
-							Resources: corev1.ResourceRequirements{
-								Requests: corev1.ResourceList{
-									corev1.ResourceCPU:    resource.MustParse("100m"),
-									corev1.ResourceMemory: resource.MustParse("256Mi"),
-								},
-								Limits: corev1.ResourceList{
-									corev1.ResourceCPU:    resource.MustParse("500m"),
-									corev1.ResourceMemory: resource.MustParse("512Mi"),
-								},
-							},
+							Name:           def.Name,
+							Image:          def.Image,
+							Command:        def.Command,
+							Args:           def.Args,
+							Env:            def.EnvVars,
+							VolumeMounts:   def.VolumeMounts,
+							Ports:          ResolveContainerPorts(def),
+							Resources:      defaultResources,
 							LivenessProbe:  def.LivenessProbe,
 							ReadinessProbe: def.ReadinessProbe,
 						},
@@ -138,6 +144,20 @@ func (r *ResourceManager) ReconcileDaemonSet(ctx context.Context, infra *infrav1
 	err := r.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, ds)
 	if err != nil && !errors.IsNotFound(err) {
 		return err
+	}
+
+	defaultResources := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("100m"),
+			corev1.ResourceMemory: resource.MustParse("128Mi"),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("500m"),
+			corev1.ResourceMemory: resource.MustParse("256Mi"),
+		},
+	}
+	if def.Resources != nil {
+		defaultResources = *def.Resources
 	}
 
 	desiredDs := &appsv1.DaemonSet{
@@ -171,16 +191,7 @@ func (r *ResourceManager) ReconcileDaemonSet(ctx context.Context, infra *infrav1
 									Add: []corev1.Capability{"NET_ADMIN", "SYS_ADMIN"},
 								},
 							},
-							Resources: corev1.ResourceRequirements{
-								Requests: corev1.ResourceList{
-									corev1.ResourceCPU:    resource.MustParse("100m"),
-									corev1.ResourceMemory: resource.MustParse("128Mi"),
-								},
-								Limits: corev1.ResourceList{
-									corev1.ResourceCPU:    resource.MustParse("500m"),
-									corev1.ResourceMemory: resource.MustParse("256Mi"),
-								},
-							},
+							Resources:      defaultResources,
 							LivenessProbe:  def.LivenessProbe,
 							ReadinessProbe: def.ReadinessProbe,
 						},
@@ -216,6 +227,20 @@ func ResolveContainerPorts(def ServiceDefinition) []corev1.ContainerPort {
 			ContainerPort: def.TargetPort,
 		},
 	}
+}
+
+func ResolveServiceType(config *infrav1alpha1.ServiceNetworkConfig) corev1.ServiceType {
+	if config != nil && config.Type != "" {
+		return config.Type
+	}
+	return corev1.ServiceTypeClusterIP
+}
+
+func ResolveServicePort(config *infrav1alpha1.ServiceNetworkConfig, fallback int32) int32 {
+	if config != nil && config.Port != 0 {
+		return config.Port
+	}
+	return fallback
 }
 
 // ReconcileService creates or updates a service.
@@ -257,7 +282,7 @@ func (r *ResourceManager) ReconcileService(ctx context.Context, infra *infrav1al
 }
 
 // ReconcileIngress creates or updates an ingress.
-func (r *ResourceManager) ReconcileIngress(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, serviceName string, config *infrav1alpha1.IngressConfig) error {
+func (r *ResourceManager) ReconcileIngress(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, serviceName string, servicePort int32, config *infrav1alpha1.IngressConfig) error {
 	ingressName := serviceName
 
 	ingress := &networkingv1.Ingress{}
@@ -287,7 +312,7 @@ func (r *ResourceManager) ReconcileIngress(ctx context.Context, infra *infrav1al
 										Service: &networkingv1.IngressServiceBackend{
 											Name: serviceName,
 											Port: networkingv1.ServiceBackendPort{
-												Number: 80,
+												Number: servicePort,
 											},
 										},
 									},

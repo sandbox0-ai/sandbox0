@@ -127,6 +127,7 @@ func (r *Reconciler) reconcileBuiltinStorage(ctx context.Context, infra *infrav1
 // reconcileStorageSecret creates or updates the storage credentials secret.
 func (r *Reconciler) reconcileStorageSecret(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
 	secretName := fmt.Sprintf("%s-%s", infra.Name, rustfsSecretName)
+	builtin := resolveBuiltinStorageConfig(infra)
 
 	secret := &corev1.Secret{}
 	err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: secretName, Namespace: infra.Namespace}, secret)
@@ -135,19 +136,20 @@ func (r *Reconciler) reconcileStorageSecret(ctx context.Context, infra *infrav1a
 	}
 
 	if errors.IsNotFound(err) {
-		accessKey := "sandbox0admin"
-		secretKey := common.GenerateRandomString(32)
-
-		// Use configured credentials if provided
-		if infra.Spec.Storage.Builtin != nil && infra.Spec.Storage.Builtin.Credentials != nil {
-			if infra.Spec.Storage.Builtin.Credentials.AccessKey != "" {
-				accessKey = infra.Spec.Storage.Builtin.Credentials.AccessKey
-			}
-			if infra.Spec.Storage.Builtin.Credentials.SecretKey != "" {
-				secretKey = infra.Spec.Storage.Builtin.Credentials.SecretKey
-			}
+		accessKey := ""
+		secretKey := ""
+		if builtin.Credentials != nil {
+			accessKey = builtin.Credentials.AccessKey
+			secretKey = builtin.Credentials.SecretKey
+		}
+		if accessKey == "" {
+			accessKey = common.GenerateRandomString(16)
+		}
+		if secretKey == "" {
+			secretKey = common.GenerateRandomString(32)
 		}
 
+		// Use configured credentials if provided
 		secret = &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      secretName,
@@ -157,7 +159,7 @@ func (r *Reconciler) reconcileStorageSecret(ctx context.Context, infra *infrav1a
 			StringData: map[string]string{
 				"RUSTFS_ACCESS_KEY": accessKey,
 				"RUSTFS_SECRET_KEY": secretKey,
-				"endpoint":          fmt.Sprintf("http://%s-rustfs:%d", infra.Name, rustfsPort),
+				"endpoint":          fmt.Sprintf("http://%s-rustfs:%d", infra.Name, builtin.Port),
 			},
 		}
 
@@ -226,6 +228,7 @@ func (r *Reconciler) reconcileStorageStatefulSet(ctx context.Context, infra *inf
 	stsName := fmt.Sprintf("%s-rustfs", infra.Name)
 	secretName := fmt.Sprintf("%s-%s", infra.Name, rustfsSecretName)
 	pvcName := fmt.Sprintf("%s-rustfs-data", infra.Name)
+	builtin := resolveBuiltinStorageConfig(infra)
 
 	sts := &appsv1.StatefulSet{}
 	err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: stsName, Namespace: infra.Namespace}, sts)
@@ -261,16 +264,16 @@ func (r *Reconciler) reconcileStorageStatefulSet(ctx context.Context, infra *inf
 					Containers: []corev1.Container{
 						{
 							Name:    "rustfs",
-							Image:   "rustfs/rustfs:1.0.0-alpha.79",
+							Image:   builtin.Image,
 							Command: []string{"/usr/bin/rustfs"},
 							Ports: []corev1.ContainerPort{
 								{
 									Name:          "endpoint",
-									ContainerPort: rustfsPort,
+									ContainerPort: builtin.Port,
 								},
 								{
 									Name:          "console",
-									ContainerPort: rustfsConsole,
+									ContainerPort: builtin.ConsolePort,
 								},
 							},
 							Env: []corev1.EnvVar{
@@ -298,35 +301,35 @@ func (r *Reconciler) reconcileStorageStatefulSet(ctx context.Context, infra *inf
 								},
 								{
 									Name:  "RUSTFS_ADDRESS",
-									Value: fmt.Sprintf(":%d", rustfsPort),
+									Value: fmt.Sprintf(":%d", builtin.Port),
 								},
 								{
 									Name:  "RUSTFS_CONSOLE_ADDRESS",
-									Value: fmt.Sprintf(":%d", rustfsConsole),
+									Value: fmt.Sprintf(":%d", builtin.ConsolePort),
 								},
 								{
 									Name:  "RUSTFS_CONSOLE_ENABLE",
-									Value: "true",
+									Value: fmt.Sprintf("%t", builtin.ConsoleEnabled),
 								},
 								{
 									Name:  "RUSTFS_VOLUMES",
-									Value: "/data",
+									Value: builtin.Volumes,
 								},
 								{
 									Name:  "RUSTFS_REGION",
-									Value: "us-east-1",
+									Value: builtin.Region,
 								},
 								{
 									Name:  "RUSTFS_OBS_LOG_DIRECTORY",
-									Value: "/data/logs",
+									Value: builtin.ObsLogDirectory,
 								},
 								{
 									Name:  "RUSTFS_OBS_LOGGER_LEVEL",
-									Value: "debug",
+									Value: builtin.ObsLoggerLevel,
 								},
 								{
 									Name:  "RUSTFS_OBS_ENVIRONMENT",
-									Value: "develop",
+									Value: builtin.ObsEnvironment,
 								},
 							},
 							VolumeMounts: []corev1.VolumeMount{
@@ -349,7 +352,7 @@ func (r *Reconciler) reconcileStorageStatefulSet(ctx context.Context, infra *inf
 								ProbeHandler: corev1.ProbeHandler{
 									HTTPGet: &corev1.HTTPGetAction{
 										Path: "/health",
-										Port: intstr.FromInt(rustfsPort),
+										Port: intstr.FromInt(int(builtin.Port)),
 									},
 								},
 								InitialDelaySeconds: 10,
@@ -359,7 +362,7 @@ func (r *Reconciler) reconcileStorageStatefulSet(ctx context.Context, infra *inf
 								ProbeHandler: corev1.ProbeHandler{
 									HTTPGet: &corev1.HTTPGetAction{
 										Path: "/health",
-										Port: intstr.FromInt(rustfsPort),
+										Port: intstr.FromInt(int(builtin.Port)),
 									},
 								},
 								InitialDelaySeconds: 30,
@@ -398,6 +401,7 @@ func (r *Reconciler) reconcileStorageStatefulSet(ctx context.Context, infra *inf
 // reconcileStorageService creates or updates the RustFS/MinIO Service.
 func (r *Reconciler) reconcileStorageService(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
 	svcName := fmt.Sprintf("%s-rustfs", infra.Name)
+	builtin := resolveBuiltinStorageConfig(infra)
 
 	svc := &corev1.Service{}
 	err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: svcName, Namespace: infra.Namespace}, svc)
@@ -423,13 +427,13 @@ func (r *Reconciler) reconcileStorageService(ctx context.Context, infra *infrav1
 			Ports: []corev1.ServicePort{
 				{
 					Name:       "api",
-					Port:       rustfsPort,
-					TargetPort: intstr.FromInt(rustfsPort),
+					Port:       builtin.Port,
+					TargetPort: intstr.FromInt(int(builtin.Port)),
 				},
 				{
 					Name:       "console",
-					Port:       rustfsConsole,
-					TargetPort: intstr.FromInt(rustfsConsole),
+					Port:       builtin.ConsolePort,
+					TargetPort: intstr.FromInt(int(builtin.ConsolePort)),
 				},
 			},
 		},
@@ -468,6 +472,7 @@ func GetStorageConfig(ctx context.Context, client client.Client, infra *infrav1a
 
 	switch infra.Spec.Storage.Type {
 	case infrav1alpha1.StorageTypeBuiltin:
+		builtin := resolveBuiltinStorageConfig(infra)
 		secretName := fmt.Sprintf("%s-%s", infra.Name, rustfsSecretName)
 		secret := &corev1.Secret{}
 		if err := client.Get(ctx, types.NamespacedName{Name: secretName, Namespace: infra.Namespace}, secret); err != nil {
@@ -477,8 +482,8 @@ func GetStorageConfig(ctx context.Context, client client.Client, infra *infrav1a
 		config.AccessKey = string(secret.Data["RUSTFS_ACCESS_KEY"])
 		config.SecretKey = string(secret.Data["RUSTFS_SECRET_KEY"])
 		config.SecretName = secretName
-		config.Bucket = "sandbox0"
-		config.Region = "us-east-1"
+		config.Bucket = builtin.Bucket
+		config.Region = builtin.Region
 
 	case infrav1alpha1.StorageTypeS3:
 		if infra.Spec.Storage.S3 == nil {
@@ -541,4 +546,58 @@ func GetStorageConfig(ctx context.Context, client client.Client, infra *infrav1a
 	}
 
 	return config, nil
+}
+
+func resolveBuiltinStorageConfig(infra *infrav1alpha1.Sandbox0Infra) infrav1alpha1.BuiltinStorageConfig {
+	cfg := infrav1alpha1.BuiltinStorageConfig{
+		Image:           "rustfs/rustfs:1.0.0-alpha.79",
+		Port:            rustfsPort,
+		ConsolePort:     rustfsConsole,
+		Bucket:          "sandbox0",
+		Region:          "us-east-1",
+		ConsoleEnabled:  true,
+		Volumes:         "/data",
+		ObsLogDirectory: "/data/logs",
+		ObsLoggerLevel:  "debug",
+		ObsEnvironment:  "develop",
+	}
+
+	if infra.Spec.Storage.Builtin == nil {
+		return cfg
+	}
+
+	builtin := infra.Spec.Storage.Builtin
+	cfg.Enabled = builtin.Enabled
+	cfg.Persistence = builtin.Persistence
+	cfg.Credentials = builtin.Credentials
+	if builtin.Image != "" {
+		cfg.Image = builtin.Image
+	}
+	if builtin.Port != 0 {
+		cfg.Port = builtin.Port
+	}
+	if builtin.ConsolePort != 0 {
+		cfg.ConsolePort = builtin.ConsolePort
+	}
+	if builtin.Bucket != "" {
+		cfg.Bucket = builtin.Bucket
+	}
+	if builtin.Region != "" {
+		cfg.Region = builtin.Region
+	}
+	if builtin.Volumes != "" {
+		cfg.Volumes = builtin.Volumes
+	}
+	if builtin.ObsLogDirectory != "" {
+		cfg.ObsLogDirectory = builtin.ObsLogDirectory
+	}
+	if builtin.ObsLoggerLevel != "" {
+		cfg.ObsLoggerLevel = builtin.ObsLoggerLevel
+	}
+	if builtin.ObsEnvironment != "" {
+		cfg.ObsEnvironment = builtin.ObsEnvironment
+	}
+	cfg.ConsoleEnabled = builtin.ConsoleEnabled
+
+	return cfg
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -168,6 +169,13 @@ func main() {
 		logger.Info("Internal auth generators initialized for procd communication")
 	}
 
+	// Parse ratios
+	pauseMemoryBufferRatio, err := strconv.ParseFloat(cfg.PauseMemoryBufferRatio, 64)
+	if err != nil {
+		logger.Warn("Failed to parse PauseMemoryBufferRatio, using default 1.1", zap.String("value", cfg.PauseMemoryBufferRatio), zap.Error(err))
+		pauseMemoryBufferRatio = 1.1
+	}
+
 	// Create services
 	cfgForSandbox := service.SandboxServiceConfig{
 		DefaultTTL:                  cfg.DefaultSandboxTTL.Duration,
@@ -176,7 +184,7 @@ func main() {
 		BandwidthAccountingInterval: cfg.BandwidthAccountingInterval,
 		PauseMinMemoryRequest:       cfg.PauseMinMemoryRequest,
 		PauseMinMemoryLimit:         cfg.PauseMinMemoryLimit,
-		PauseMemoryBufferRatio:      cfg.PauseMemoryBufferRatio,
+		PauseMemoryBufferRatio:      pauseMemoryBufferRatio,
 		PauseMinCPU:                 cfg.PauseMinCPU,
 		ProcdPort:                   cfg.ProcdConfig.HTTPPort,
 		ProcdClientTimeout:          cfg.ProcdClientTimeout.Duration,

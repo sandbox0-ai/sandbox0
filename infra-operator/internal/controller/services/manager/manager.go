@@ -68,24 +68,35 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		return err
 	}
 
+	httpPort := int32(config.HTTPPort)
+	metricsPort := int32(config.MetricsPort)
+	webhookPort := int32(config.WebhookPort)
+
+	var resources *corev1.ResourceRequirements
+	serviceConfig := (*infrav1alpha1.ServiceNetworkConfig)(nil)
+	if infra.Spec.Services != nil && infra.Spec.Services.Manager != nil {
+		resources = infra.Spec.Services.Manager.Resources
+		serviceConfig = infra.Spec.Services.Manager.Service
+	}
+
 	// Create deployment
 	if err := r.Resources.ReconcileDeployment(ctx, infra, deploymentName, labels, replicas, common.ServiceDefinition{
 		Name:               "manager",
-		Port:               8080,
-		TargetPort:         8080,
+		Port:               httpPort,
+		TargetPort:         httpPort,
 		ServiceAccountName: fmt.Sprintf("%s-manager", infra.Name),
 		Ports: []corev1.ContainerPort{
 			{
 				Name:          "http",
-				ContainerPort: 8080,
+				ContainerPort: httpPort,
 			},
 			{
 				Name:          "metrics",
-				ContainerPort: 9090,
+				ContainerPort: metricsPort,
 			},
 			{
 				Name:          "webhook",
-				ContainerPort: 9443,
+				ContainerPort: webhookPort,
 			},
 		},
 		Image: fmt.Sprintf("%s:%s", imageRepo, infra.Spec.Version),
@@ -177,24 +188,21 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			InitialDelaySeconds: 5,
 			PeriodSeconds:       5,
 		},
+		Resources: resources,
 	}); err != nil {
 		return err
 	}
 
 	// Create service
-	serviceType := corev1.ServiceTypeClusterIP
-	servicePort := int32(8080)
-	if infra.Spec.Services != nil && infra.Spec.Services.Manager != nil && infra.Spec.Services.Manager.Service != nil {
-		serviceType = infra.Spec.Services.Manager.Service.Type
-		servicePort = infra.Spec.Services.Manager.Service.Port
-	}
-	if err := r.Resources.ReconcileService(ctx, infra, deploymentName, labels, serviceType, servicePort, 8080); err != nil {
+	serviceType := common.ResolveServiceType(serviceConfig)
+	servicePort := common.ResolveServicePort(serviceConfig, httpPort)
+	if err := r.Resources.ReconcileService(ctx, infra, deploymentName, labels, serviceType, servicePort, httpPort); err != nil {
 		return err
 	}
-	if err := r.Resources.ReconcileService(ctx, infra, fmt.Sprintf("%s-metrics", deploymentName), labels, corev1.ServiceTypeClusterIP, 9090, 9090); err != nil {
+	if err := r.Resources.ReconcileService(ctx, infra, fmt.Sprintf("%s-metrics", deploymentName), labels, corev1.ServiceTypeClusterIP, metricsPort, metricsPort); err != nil {
 		return err
 	}
-	if err := r.Resources.ReconcileService(ctx, infra, fmt.Sprintf("%s-webhook", deploymentName), labels, corev1.ServiceTypeClusterIP, 9443, 9443); err != nil {
+	if err := r.Resources.ReconcileService(ctx, infra, fmt.Sprintf("%s-webhook", deploymentName), labels, corev1.ServiceTypeClusterIP, webhookPort, webhookPort); err != nil {
 		return err
 	}
 
@@ -229,8 +237,20 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		cfg.ManagerImage = managerImage
 	}
 
+	storageProxyConfig := &apiconfig.StorageProxyConfig{}
+	storageProxyServiceConfig := (*infrav1alpha1.ServiceNetworkConfig)(nil)
+	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil && infra.Spec.Services.StorageProxy.Config != nil {
+		storageProxyConfig = infra.Spec.Services.StorageProxy.Config
+	}
+	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil {
+		storageProxyServiceConfig = infra.Spec.Services.StorageProxy.Service
+	}
+
 	if cfg.ProcdConfig.StorageProxyBaseURL == "" {
 		cfg.ProcdConfig.StorageProxyBaseURL = fmt.Sprintf("%s-storage-proxy.%s.svc.cluster.local", infra.Name, infra.Namespace)
+	}
+	if cfg.ProcdConfig.StorageProxyPort == 0 {
+		cfg.ProcdConfig.StorageProxyPort = int(common.ResolveServicePort(storageProxyServiceConfig, int32(storageProxyConfig.GRPCPort)))
 	}
 
 	return cfg, nil

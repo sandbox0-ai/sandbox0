@@ -63,16 +63,24 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		return err
 	}
 
+	var resources *corev1.ResourceRequirements
+	serviceConfig := (*infrav1alpha1.ServiceNetworkConfig)(nil)
+	if infra.Spec.Services != nil && infra.Spec.Services.Scheduler != nil {
+		resources = infra.Spec.Services.Scheduler.Resources
+		serviceConfig = infra.Spec.Services.Scheduler.Service
+	}
+
 	// Create deployment
+	httpPort := int32(config.HTTPPort)
 	if err := r.Resources.ReconcileDeployment(ctx, infra, deploymentName, labels, replicas, common.ServiceDefinition{
 		Name:               "scheduler",
-		Port:               8080,
-		TargetPort:         8080,
+		Port:               httpPort,
+		TargetPort:         httpPort,
 		ServiceAccountName: fmt.Sprintf("%s-scheduler", infra.Name),
 		Ports: []corev1.ContainerPort{
 			{
 				Name:          "http",
-				ContainerPort: 8080,
+				ContainerPort: httpPort,
 			},
 		},
 		Image: fmt.Sprintf("%s:%s", imageRepo, infra.Spec.Version),
@@ -164,18 +172,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			InitialDelaySeconds: 5,
 			PeriodSeconds:       5,
 		},
+		Resources: resources,
 	}); err != nil {
 		return err
 	}
 
 	// Create service
-	serviceType := corev1.ServiceTypeClusterIP
-	servicePort := int32(8080)
-	if infra.Spec.Services != nil && infra.Spec.Services.Scheduler != nil && infra.Spec.Services.Scheduler.Service != nil {
-		serviceType = infra.Spec.Services.Scheduler.Service.Type
-		servicePort = infra.Spec.Services.Scheduler.Service.Port
-	}
-	if err := r.Resources.ReconcileService(ctx, infra, deploymentName, labels, serviceType, servicePort, 8080); err != nil {
+	serviceType := common.ResolveServiceType(serviceConfig)
+	servicePort := common.ResolveServicePort(serviceConfig, httpPort)
+	if err := r.Resources.ReconcileService(ctx, infra, deploymentName, labels, serviceType, servicePort, httpPort); err != nil {
 		return err
 	}
 

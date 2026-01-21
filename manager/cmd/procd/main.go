@@ -12,11 +12,11 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/infra/infra-operator/api/config"
-	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	ctxpkg "github.com/sandbox0-ai/infra/manager/procd/pkg/context"
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/file"
 	procdhttp "github.com/sandbox0-ai/infra/manager/procd/pkg/http"
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/volume"
+	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -56,7 +56,7 @@ func main() {
 		ProxyReplicas: cfg.StorageProxyReplicas,
 		NodeName:      cfg.NodeName,
 		CacheMaxBytes: cfg.CacheMaxBytes,
-		CacheTTL:      cfg.CacheTTL,
+		CacheTTL:      cfg.CacheTTL.Duration,
 	}
 	volumeManager := volume.NewManager(volumeCfg, tokenProvider, logger)
 

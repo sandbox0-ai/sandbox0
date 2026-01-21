@@ -200,7 +200,7 @@ func (s *Server) selectClusterForTemplate(c *gin.Context, templateID, teamID str
 	}
 
 	clusterTemplateID := naming.TemplateNameForCluster(template.Scope, template.TeamID, template.TemplateID)
-	maxAge := s.cfg.ReconcileInterval * 2
+	maxAge := s.cfg.ReconcileInterval.Duration * 2
 
 	var selected *db.Cluster
 	selectedBy := "weight"

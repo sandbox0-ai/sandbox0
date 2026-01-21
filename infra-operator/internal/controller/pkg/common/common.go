@@ -362,25 +362,6 @@ func (r *ResourceManager) ReconcileServiceConfigMap(ctx context.Context, infra *
 	return r.Client.Update(ctx, existing)
 }
 
-func DecodeServiceConfig(raw *runtime.RawExtension, config any) error {
-	if raw == nil || len(raw.Raw) == 0 {
-		return nil
-	}
-
-	if err := yaml.Unmarshal(raw.Raw, config); err != nil {
-		return fmt.Errorf("parse service config: %w", err)
-	}
-
-	return nil
-}
-
-func SetIfMissing(config map[string]any, key string, value any) {
-	if _, ok := config[key]; ok {
-		return
-	}
-	config[key] = value
-}
-
 func GetOrInitMap(config map[string]any, key string) map[string]any {
 	if val, ok := config[key]; ok {
 		if typed, ok := val.(map[string]any); ok {

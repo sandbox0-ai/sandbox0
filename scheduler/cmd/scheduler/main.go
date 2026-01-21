@@ -8,13 +8,13 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/pkg/clock"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	"github.com/sandbox0-ai/infra/pkg/migrate"
 	"github.com/sandbox0-ai/infra/pkg/pubsub"
 	schedmigrations "github.com/sandbox0-ai/infra/scheduler/migrations"
 	"github.com/sandbox0-ai/infra/scheduler/pkg/client"
-	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/scheduler/pkg/db"
 	httpserver "github.com/sandbox0-ai/infra/scheduler/pkg/http"
 	schedpubsub "github.com/sandbox0-ai/infra/scheduler/pkg/pubsub"
@@ -108,7 +108,7 @@ func main() {
 	igClient := client.NewInternalGatewayClient(internalAuthGen, logger)
 
 	// Create reconciler
-	rec := reconciler.NewReconciler(repo, igClient, cfg.ReconcileInterval, clk, logger)
+	rec := reconciler.NewReconciler(repo, igClient, cfg.ReconcileInterval.Duration, clk, logger)
 
 	// Create HTTP server
 	httpServer := httpserver.NewServer(cfg, repo, authValidator, internalAuthGen, rec, logger)

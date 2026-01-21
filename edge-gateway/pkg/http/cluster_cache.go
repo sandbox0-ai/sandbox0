@@ -44,7 +44,7 @@ func (s *Server) getInternalGatewayProxy(targetURL string) (*proxy.Router, error
 		return p, nil
 	}
 
-	p, err := proxy.NewRouter(targetURL, s.logger, s.cfg.ProxyTimeout)
+	p, err := proxy.NewRouter(targetURL, s.logger, s.cfg.ProxyTimeout.Duration)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +116,7 @@ func (s *Server) refreshClusterCache(ctx context.Context, authCtx *auth.AuthCont
 	}
 	req.Header.Set("X-Auth-Method", string(authCtx.AuthMethod))
 
-	client := &http.Client{Timeout: s.cfg.ProxyTimeout}
+	client := &http.Client{Timeout: s.cfg.ProxyTimeout.Duration}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("list clusters: %w", err)

@@ -8,8 +8,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/sandbox0-ai/infra/internal-gateway/pkg/client"
 	"github.com/sandbox0-ai/infra/infra-operator/api/config"
+	"github.com/sandbox0-ai/infra/internal-gateway/pkg/client"
 	"github.com/sandbox0-ai/infra/internal-gateway/pkg/middleware"
 	"github.com/sandbox0-ai/infra/pkg/auth"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
@@ -264,7 +264,7 @@ func (s *Server) Start(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		s.logger.Info("Shutting down HTTP server")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout.Duration)
 		defer cancel()
 		return server.Shutdown(shutdownCtx)
 	case err := <-errChan:

@@ -1,3 +1,4 @@
+// +kubebuilder:object:generate=true
 package config
 
 import (
@@ -5,50 +6,51 @@ import (
 	"os"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"gopkg.in/yaml.v3"
 )
 
 // ManagerConfig holds the configuration for the manager.
 type ManagerConfig struct {
 	// HTTP Server
-	HTTPPort int `yaml:"http_port"`
+	HTTPPort int `yaml:"http_port" json:"httpPort"`
 
 	// manager docker image, used to copy the procd binary to sandbox pod
-	ManagerImage string `yaml:"manager_image"`
+	ManagerImage string `yaml:"manager_image" json:"managerImage"`
 
 	// template
-	DefaultTemplateName      string `yaml:"default_template_name"`
-	DefaultTemplateNamespace string `yaml:"default_template_namespace"`
-	DefaultTemplateImage     string `yaml:"default_template_image"`
-	DefaultClusterId         string `yaml:"default_cluster_id"`
+	DefaultTemplateName      string `yaml:"default_template_name" json:"defaultTemplateName"`
+	DefaultTemplateNamespace string `yaml:"default_template_namespace" json:"defaultTemplateNamespace"`
+	DefaultTemplateImage     string `yaml:"default_template_image" json:"defaultTemplateImage"`
+	DefaultClusterId         string `yaml:"default_cluster_id" json:"defaultClusterId"`
 
 	// Kubernetes
-	KubeConfig     string        `yaml:"kube_config"`
-	LeaderElection bool          `yaml:"leader_election"`
-	ResyncPeriod   time.Duration `yaml:"resync_period"`
+	KubeConfig     string          `yaml:"kube_config" json:"kubeConfig"`
+	LeaderElection bool            `yaml:"leader_election" json:"leaderElection"`
+	ResyncPeriod   metav1.Duration `yaml:"resync_period" json:"resyncPeriod"`
 
 	// Database
-	DatabaseURL string `yaml:"database_url"`
+	DatabaseURL string `yaml:"database_url" json:"databaseUrl"`
 
 	// Cleanup Controller
-	CleanupInterval time.Duration `yaml:"cleanup_interval"`
+	CleanupInterval metav1.Duration `yaml:"cleanup_interval" json:"cleanupInterval"`
 
 	// Logging
-	LogLevel string `yaml:"log_level"`
+	LogLevel string `yaml:"log_level" json:"logLevel"`
 
 	// Metrics
-	MetricsPort int `yaml:"metrics_port"`
+	MetricsPort int `yaml:"metrics_port" json:"metricsPort"`
 
 	// Webhook
-	WebhookPort     int    `yaml:"webhook_port"`
-	WebhookCertPath string `yaml:"webhook_cert_path"`
-	WebhookKeyPath  string `yaml:"webhook_key_path"`
+	WebhookPort     int    `yaml:"webhook_port" json:"webhookPort"`
+	WebhookCertPath string `yaml:"webhook_cert_path" json:"webhookCertPath"`
+	WebhookKeyPath  string `yaml:"webhook_key_path" json:"webhookKeyPath"`
 
 	// Sandbox
-	DefaultSandboxTTL time.Duration `yaml:"default_sandbox_ttl"`
+	DefaultSandboxTTL metav1.Duration `yaml:"default_sandbox_ttl" json:"defaultSandboxTTL"`
 
 	// Procd config injected into sandbox pods
-	ProcdConfig ProcdConfig `yaml:"procd_config"`
+	ProcdConfig ProcdConfig `yaml:"procd_config" json:"procdConfig"`
 }
 
 // DefaultManagerConfig returns the default configuration.
@@ -62,15 +64,15 @@ func DefaultManagerConfig() *ManagerConfig {
 		DefaultClusterId:         "default",
 		KubeConfig:               "",
 		LeaderElection:           true,
-		ResyncPeriod:             30 * time.Second,
+		ResyncPeriod:             metav1.Duration{Duration: 30 * time.Second},
 		DatabaseURL:              "",
-		CleanupInterval:          60 * time.Second,
+		CleanupInterval:          metav1.Duration{Duration: 60 * time.Second},
 		LogLevel:                 "info",
 		MetricsPort:              9090,
 		WebhookPort:              9443,
 		WebhookCertPath:          "/tmp/k8s-webhook-server/serving-certs/tls.crt",
 		WebhookKeyPath:           "/tmp/k8s-webhook-server/serving-certs/tls.key",
-		DefaultSandboxTTL:        5 * time.Minute,
+		DefaultSandboxTTL:        metav1.Duration{Duration: 5 * time.Minute},
 		ProcdConfig:              DefaultProcdConfig(),
 	}
 }

@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/infra/infra-operator/api/config"
+	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/infra/netd/pkg/dataplane"
 	"github.com/sandbox0-ai/infra/netd/pkg/metrics"
 	"github.com/sandbox0-ai/infra/netd/pkg/proxy"
@@ -63,7 +63,7 @@ func main() {
 		k8sClient,
 		cfg.NodeName,
 		cfg.Namespace,
-		cfg.ResyncPeriod,
+		cfg.ResyncPeriod.Duration,
 		logger,
 	)
 
@@ -254,7 +254,7 @@ func main() {
 	go startMetricsServer(cfg.MetricsPort, logger)
 
 	// Start metrics reporter
-	go startMetricsReporter(ctx, w, cfg.MetricsReportInterval, logger)
+	go startMetricsReporter(ctx, w, cfg.MetricsReportInterval.Duration, logger)
 
 	logger.Info("netd is running")
 

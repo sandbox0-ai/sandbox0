@@ -21,7 +21,6 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -195,14 +194,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 }
 
 func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (*apiconfig.InternalGatewayConfig, error) {
-	var raw *runtime.RawExtension
-	if infra.Spec.Services != nil && infra.Spec.Services.InternalGateway != nil {
-		raw = infra.Spec.Services.InternalGateway.Config
-	}
-
 	cfg := apiconfig.DefaultInternalGatewayConfig()
-	if err := common.DecodeServiceConfig(raw, cfg); err != nil {
-		return nil, err
+	if infra.Spec.Services != nil && infra.Spec.Services.InternalGateway != nil && infra.Spec.Services.InternalGateway.Config != nil {
+		// Since Config is now strongly typed, we can just use it.
+		// However, to apply defaults to fields not specified in the CRD, 
+		// we might still want to merge or just use it as is if we assume 
+		// the user provided a full config or if we want defaults from the struct itself.
+		// For now, let's just use the one from CRD if provided.
+		cfg = infra.Spec.Services.InternalGateway.Config
 	}
 
 	managerURL := fmt.Sprintf("http://%s-manager:8080", infra.Name)

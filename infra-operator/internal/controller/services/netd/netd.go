@@ -21,7 +21,6 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -179,14 +178,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 }
 
 func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (*apiconfig.NetdConfig, error) {
-	var raw *runtime.RawExtension
-	if infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
-		raw = infra.Spec.Services.Netd.Config
-	}
-
 	cfg := apiconfig.DefaultNetdConfig()
-	if err := common.DecodeServiceConfig(raw, cfg); err != nil {
-		return nil, err
+	if infra.Spec.Services != nil && infra.Spec.Services.Netd != nil && infra.Spec.Services.Netd.Config != nil {
+		cfg = infra.Spec.Services.Netd.Config
 	}
 
 	if cfg.NodeName == "" {

@@ -1,3 +1,4 @@
+// +kubebuilder:object:generate=true
 package config
 
 import (
@@ -10,44 +11,44 @@ import (
 // StorageProxyConfig holds the server configuration.
 type StorageProxyConfig struct {
 	// gRPC Server
-	GRPCAddr string `yaml:"grpc_addr"`
-	GRPCPort int    `yaml:"grpc_port"`
+	GRPCAddr string `yaml:"grpc_addr" json:"grpcAddr"`
+	GRPCPort int    `yaml:"grpc_port" json:"grpcPort"`
 
 	// HTTP Management API
-	HTTPAddr string `yaml:"http_addr"`
-	HTTPPort int    `yaml:"http_port"`
+	HTTPAddr string `yaml:"http_addr" json:"httpAddr"`
+	HTTPPort int    `yaml:"http_port" json:"httpPort"`
 
 	// Database
-	DatabaseURL string `yaml:"database_url"`
+	DatabaseURL string `yaml:"database_url" json:"databaseUrl"`
 
 	// JuiceFS defaults
-	MetaURL        string `yaml:"meta_url"`
-	S3Bucket       string `yaml:"s3_bucket"`
-	S3Region       string `yaml:"s3_region"`
-	S3Endpoint     string `yaml:"s3_endpoint"`
-	S3AccessKey    string `yaml:"s3_access_key"`
-	S3SecretKey    string `yaml:"s3_secret_key"`
-	S3SessionToken string `yaml:"s3_session_token"`
+	MetaURL        string `yaml:"meta_url" json:"metaUrl"`
+	S3Bucket       string `yaml:"s3_bucket" json:"s3Bucket"`
+	S3Region       string `yaml:"s3_region" json:"s3Region"`
+	S3Endpoint     string `yaml:"s3_endpoint" json:"s3Endpoint"`
+	S3AccessKey    string `yaml:"s3_access_key" json:"s3AccessKey"`
+	S3SecretKey    string `yaml:"s3_secret_key" json:"s3SecretKey"`
+	S3SessionToken string `yaml:"s3_session_token" json:"s3SessionToken"`
 
-	DefaultCacheSize string `yaml:"default_cache_size"`
-	CacheDir         string `yaml:"cache_dir"`
-	DefaultClusterId string `yaml:"default_cluster_id"`
+	DefaultCacheSize string `yaml:"default_cache_size" json:"defaultCacheSize"`
+	CacheDir         string `yaml:"cache_dir" json:"cacheDir"`
+	DefaultClusterId string `yaml:"default_cluster_id" json:"defaultClusterId"`
 
 	// Monitoring
-	MetricsEnabled bool `yaml:"metrics_enabled"`
-	MetricsPort    int  `yaml:"metrics_port"`
+	MetricsEnabled bool `yaml:"metrics_enabled" json:"metricsEnabled"`
+	MetricsPort    int  `yaml:"metrics_port" json:"metricsPort"`
 
 	// Logging
-	LogLevel  string `yaml:"log_level"`
-	AuditLog  bool   `yaml:"audit_log"`
-	AuditFile string `yaml:"audit_file"`
+	LogLevel  string `yaml:"log_level" json:"logLevel"`
+	AuditLog  bool   `yaml:"audit_log" json:"auditLog"`
+	AuditFile string `yaml:"audit_file" json:"auditFile"`
 
 	// Rate limiting
-	MaxOpsPerSecond   int   `yaml:"max_ops_per_second"`
-	MaxBytesPerSecond int64 `yaml:"max_bytes_per_second"`
+	MaxOpsPerSecond   int   `yaml:"max_ops_per_second" json:"maxOpsPerSecond"`
+	MaxBytesPerSecond int64 `yaml:"max_bytes_per_second" json:"maxBytesPerSecond"`
 
 	// Kubernetes
-	KubeconfigPath string `yaml:"kubeconfig_path"` // Path to kubeconfig file (empty for in-cluster config)
+	KubeconfigPath string `yaml:"kubeconfig_path" json:"kubeconfigPath"` // Path to kubeconfig file (empty for in-cluster config)
 }
 
 // DefaultStorageProxyConfig returns the default configuration.

@@ -1,3 +1,4 @@
+// +kubebuilder:object:generate=true
 package config
 
 import (
@@ -5,23 +6,24 @@ import (
 	"os"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"gopkg.in/yaml.v3"
 )
 
 // SchedulerConfig holds all configuration for scheduler.
 type SchedulerConfig struct {
 	// Server configuration
-	HTTPPort int    `yaml:"http_port"`
-	LogLevel string `yaml:"log_level"`
+	HTTPPort int    `yaml:"http_port" json:"httpPort"`
+	LogLevel string `yaml:"log_level" json:"logLevel"`
 
 	// Database configuration
-	DatabaseURL string `yaml:"database_url"`
+	DatabaseURL string `yaml:"database_url" json:"databaseUrl"`
 
 	// Reconciler configuration
-	ReconcileInterval time.Duration `yaml:"reconcile_interval"`
+	ReconcileInterval metav1.Duration `yaml:"reconcile_interval" json:"reconcileInterval"`
 
 	// Timeouts
-	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"`
+	ShutdownTimeout metav1.Duration `yaml:"shutdown_timeout" json:"shutdownTimeout"`
 }
 
 // DefaultSchedulerConfig returns the default configuration.
@@ -30,8 +32,8 @@ func DefaultSchedulerConfig() *SchedulerConfig {
 		HTTPPort:          8080,
 		LogLevel:          "info",
 		DatabaseURL:       "",
-		ReconcileInterval: 30 * time.Second,
-		ShutdownTimeout:   30 * time.Second,
+		ReconcileInterval: metav1.Duration{Duration: 30 * time.Second},
+		ShutdownTimeout:   metav1.Duration{Duration: 30 * time.Second},
 	}
 }
 

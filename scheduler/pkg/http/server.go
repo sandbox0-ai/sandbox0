@@ -9,9 +9,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	"github.com/sandbox0-ai/infra/pkg/proxy"
-	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/scheduler/pkg/db"
 	"go.uber.org/zap"
 )
@@ -149,7 +149,7 @@ func (s *Server) Start(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		s.logger.Info("Shutting down HTTP server")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout.Duration)
 		defer cancel()
 		return server.Shutdown(shutdownCtx)
 	case err := <-errChan:
@@ -305,7 +305,7 @@ func (s *Server) getClusterFromCache(clusterID string) *db.Cluster {
 }
 
 func (s *Server) refreshClusterCache(ctx context.Context) error {
-	cacheTTL := s.cfg.ReconcileInterval
+	cacheTTL := s.cfg.ReconcileInterval.Duration
 	if cacheTTL <= 0 {
 		cacheTTL = 30 * time.Second
 	}

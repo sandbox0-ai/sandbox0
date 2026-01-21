@@ -1,3 +1,4 @@
+// +kubebuilder:object:generate=true
 package config
 
 import (
@@ -5,28 +6,29 @@ import (
 	"os"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"gopkg.in/yaml.v3"
 )
 
 // InternalGatewayConfig holds all configuration for internal-gateway.
 type InternalGatewayConfig struct {
 	// Server configuration
-	HTTPPort int    `yaml:"http_port"`
-	LogLevel string `yaml:"log_level"`
+	HTTPPort int    `yaml:"http_port" json:"httpPort"`
+	LogLevel string `yaml:"log_level" json:"logLevel"`
 
 	// Upstream services
-	ManagerURL      string `yaml:"manager_url"`
-	StorageProxyURL string `yaml:"storage_proxy_url"`
+	ManagerURL      string `yaml:"manager_url" json:"managerUrl"`
+	StorageProxyURL string `yaml:"storage_proxy_url" json:"storageProxyUrl"`
 
 	// Internal authentication (for validating requests from edge-gateway and
 	// generating tokens for downstream services)
 	// AllowedCallers is the list of services allowed to call internal-gateway
 	// Default: ["edge-gateway"], can include "scheduler" for multi-cluster mode
-	AllowedCallers []string `yaml:"allowed_callers"`
+	AllowedCallers []string `yaml:"allowed_callers" json:"allowedCallers"`
 
 	// Timeouts
-	ShutdownTimeout   time.Duration `yaml:"shutdown_timeout"`
-	HealthCheckPeriod time.Duration `yaml:"health_check_period"`
+	ShutdownTimeout   metav1.Duration `yaml:"shutdown_timeout" json:"shutdownTimeout"`
+	HealthCheckPeriod metav1.Duration `yaml:"health_check_period" json:"healthCheckPeriod"`
 }
 
 // DefaultInternalGatewayConfig returns the default configuration.
@@ -37,8 +39,8 @@ func DefaultInternalGatewayConfig() *InternalGatewayConfig {
 		ManagerURL:        "http://manager.sandbox0-system:8080",
 		StorageProxyURL:   "http://storage-proxy.sandbox0-system:8081",
 		AllowedCallers:    []string{"edge-gateway", "scheduler"},
-		ShutdownTimeout:   30 * time.Second,
-		HealthCheckPeriod: 10 * time.Second,
+		ShutdownTimeout:   metav1.Duration{Duration: 30 * time.Second},
+		HealthCheckPeriod: metav1.Duration{Duration: 10 * time.Second},
 	}
 }
 

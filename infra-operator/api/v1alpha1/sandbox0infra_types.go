@@ -20,7 +20,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
+
+	config "github.com/sandbox0-ai/infra/infra-operator/api/config"
 )
 
 // DeploymentMode defines the deployment mode of sandbox0 infrastructure
@@ -356,31 +357,31 @@ type KeyPairSecretRef struct {
 type ServicesConfig struct {
 	// EdgeGateway configures the edge-gateway service (control plane)
 	// +optional
-	EdgeGateway *ServiceConfig `json:"edgeGateway,omitempty"`
+	EdgeGateway *EdgeGatewayServiceConfig `json:"edgeGateway,omitempty"`
 
 	// Scheduler configures the scheduler service (control plane)
 	// +optional
-	Scheduler *ServiceConfig `json:"scheduler,omitempty"`
+	Scheduler *SchedulerServiceConfig `json:"scheduler,omitempty"`
 
 	// InternalGateway configures the internal-gateway service (data plane)
 	// +optional
-	InternalGateway *ServiceConfig `json:"internalGateway,omitempty"`
+	InternalGateway *InternalGatewayServiceConfig `json:"internalGateway,omitempty"`
 
 	// Manager configures the manager service (data plane)
 	// +optional
-	Manager *ServiceConfig `json:"manager,omitempty"`
+	Manager *ManagerServiceConfig `json:"manager,omitempty"`
 
 	// StorageProxy configures the storage-proxy service (data plane)
 	// +optional
-	StorageProxy *ServiceConfig `json:"storageProxy,omitempty"`
+	StorageProxy *StorageProxyServiceConfig `json:"storageProxy,omitempty"`
 
 	// Netd configures the netd service (data plane)
 	// +optional
-	Netd *ServiceConfig `json:"netd,omitempty"`
+	Netd *NetdServiceConfig `json:"netd,omitempty"`
 }
 
-// ServiceConfig defines common service configuration
-type ServiceConfig struct {
+// BaseServiceConfig defines common service configuration
+type BaseServiceConfig struct {
 	// Enabled enables or disables the service
 	// +kubebuilder:default=true
 	Enabled bool `json:"enabled,omitempty"`
@@ -400,11 +401,54 @@ type ServiceConfig struct {
 	// Ingress configures ingress settings
 	// +optional
 	Ingress *IngressConfig `json:"ingress,omitempty"`
+}
 
-	// Config contains service-specific configuration
-	// +kubebuilder:pruning:PreserveUnknownFields
+// EdgeGatewayServiceConfig defines configuration for edge-gateway service
+type EdgeGatewayServiceConfig struct {
+	BaseServiceConfig `json:",inline"`
+	// Config contains edge-gateway specific configuration
 	// +optional
-	Config *runtime.RawExtension `json:"config,omitempty"`
+	Config *config.EdgeGatewayConfig `json:"config,omitempty"`
+}
+
+// SchedulerServiceConfig defines configuration for scheduler service
+type SchedulerServiceConfig struct {
+	BaseServiceConfig `json:",inline"`
+	// Config contains scheduler specific configuration
+	// +optional
+	Config *config.SchedulerConfig `json:"config,omitempty"`
+}
+
+// InternalGatewayServiceConfig defines configuration for internal-gateway service
+type InternalGatewayServiceConfig struct {
+	BaseServiceConfig `json:",inline"`
+	// Config contains internal-gateway specific configuration
+	// +optional
+	Config *config.InternalGatewayConfig `json:"config,omitempty"`
+}
+
+// ManagerServiceConfig defines configuration for manager service
+type ManagerServiceConfig struct {
+	BaseServiceConfig `json:",inline"`
+	// Config contains manager specific configuration
+	// +optional
+	Config *config.ManagerConfig `json:"config,omitempty"`
+}
+
+// StorageProxyServiceConfig defines configuration for storage-proxy service
+type StorageProxyServiceConfig struct {
+	BaseServiceConfig `json:",inline"`
+	// Config contains storage-proxy specific configuration
+	// +optional
+	Config *config.StorageProxyConfig `json:"config,omitempty"`
+}
+
+// NetdServiceConfig defines configuration for netd service
+type NetdServiceConfig struct {
+	BaseServiceConfig `json:",inline"`
+	// Config contains netd specific configuration
+	// +optional
+	Config *config.NetdConfig `json:"config,omitempty"`
 }
 
 // ServiceNetworkConfig defines service network configuration

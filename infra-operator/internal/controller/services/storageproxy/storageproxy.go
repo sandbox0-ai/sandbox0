@@ -21,7 +21,6 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -199,14 +198,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 }
 
 func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (*apiconfig.StorageProxyConfig, error) {
-	var raw *runtime.RawExtension
-	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil {
-		raw = infra.Spec.Services.StorageProxy.Config
-	}
-
 	cfg := apiconfig.DefaultStorageProxyConfig()
-	if err := common.DecodeServiceConfig(raw, cfg); err != nil {
-		return nil, err
+	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil && infra.Spec.Services.StorageProxy.Config != nil {
+		cfg = infra.Spec.Services.StorageProxy.Config
 	}
 
 	if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {

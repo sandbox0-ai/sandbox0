@@ -10,8 +10,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/infra/infra-operator/api/config"
+	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/infra/manager/pkg/controller"
 	clientset "github.com/sandbox0-ai/infra/manager/pkg/generated/clientset/versioned"
 	"github.com/sandbox0-ai/infra/manager/pkg/generated/informers/externalversions"
@@ -102,14 +102,14 @@ func main() {
 	}
 
 	// Create informers
-	informerFactory := informers.NewSharedInformerFactory(k8sClient, cfg.ResyncPeriod)
+	informerFactory := informers.NewSharedInformerFactory(k8sClient, cfg.ResyncPeriod.Duration)
 	podInformer := informerFactory.Core().V1().Pods().Informer()
 	nodeInformer := informerFactory.Core().V1().Nodes().Informer()
 
 	// Create CRD informer factory using generated clientset
 	crdInformerFactory := externalversions.NewSharedInformerFactoryWithOptions(
 		crdClient,
-		cfg.ResyncPeriod,
+		cfg.ResyncPeriod.Duration,
 		externalversions.WithNamespace(cfg.DefaultTemplateNamespace),
 	)
 
@@ -173,7 +173,7 @@ func main() {
 		internalTokenGenerator,
 		procdTokenGenerator,
 		clk,
-		cfg.DefaultSandboxTTL,
+		cfg.DefaultSandboxTTL.Duration,
 		logger,
 	)
 
@@ -201,7 +201,7 @@ func main() {
 		clk,
 		sandboxService,
 		logger,
-		cfg.CleanupInterval,
+		cfg.CleanupInterval.Duration,
 	)
 
 	// Initialize internal auth validator

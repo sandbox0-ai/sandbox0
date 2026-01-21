@@ -361,9 +361,174 @@ spec:
                       plane)
                     properties:
                       config:
-                        description: Config contains service-specific configuration
+                        description: Config contains edge-gateway specific configuration
+                        properties:
+                          baseUrl:
+                            description: Base URL for OIDC callbacks
+                            type: string
+                          builtInAuth:
+                            description: Built-in Authentication
+                            properties:
+                              adminOnly:
+                                description: AdminOnly restricts built-in auth to
+                                  admin accounts only
+                                type: boolean
+                              allowRegistration:
+                                description: AllowRegistration allows new users to
+                                  register
+                                type: boolean
+                              emailVerificationRequired:
+                                description: EmailVerificationRequired requires email
+                                  verification
+                                type: boolean
+                              enabled:
+                                description: Enabled enables built-in email/password
+                                  authentication
+                                type: boolean
+                              initUser:
+                                description: InitUser is the initial admin user (for
+                                  self-hosted)
+                                properties:
+                                  email:
+                                    type: string
+                                  name:
+                                    type: string
+                                  password:
+                                    type: string
+                                required:
+                                - email
+                                - name
+                                - password
+                                type: object
+                            required:
+                            - adminOnly
+                            - allowRegistration
+                            - emailVerificationRequired
+                            - enabled
+                            - initUser
+                            type: object
+                          databaseUrl:
+                            description: Database configuration (for API key validation)
+                            type: string
+                          defaultInternalGatewayUrl:
+                            description: Upstream service
+                            type: string
+                          edition:
+                            description: 'Edition: "saas" or "self-hosted"'
+                            type: string
+                          httpPort:
+                            description: Server configuration
+                            type: integer
+                          jwtAccessTokenTTL:
+                            type: string
+                          jwtRefreshTokenTTL:
+                            type: string
+                          jwtSecret:
+                            description: JWT Configuration
+                            type: string
+                          logLevel:
+                            type: string
+                          oidcProviders:
+                            description: OIDC Providers
+                            items:
+                              description: OIDCProviderConfig configures an OIDC provider.
+                              properties:
+                                autoProvision:
+                                  description: AutoProvision automatically creates
+                                    users on first login
+                                  type: boolean
+                                clientId:
+                                  description: ClientID is the OAuth client ID
+                                  type: string
+                                clientSecret:
+                                  description: ClientSecret is the OAuth client secret
+                                  type: string
+                                discoveryUrl:
+                                  description: DiscoveryURL is the OIDC discovery
+                                    URL (.well-known/openid-configuration)
+                                  type: string
+                                enabled:
+                                  description: Enabled toggles the provider
+                                  type: boolean
+                                id:
+                                  description: ID is the unique identifier for the
+                                    provider (e.g., "github", "google")
+                                  type: string
+                                name:
+                                  description: Name is the display name
+                                  type: string
+                                scopes:
+                                  description: Scopes are the OAuth scopes to request
+                                  items:
+                                    type: string
+                                  type: array
+                                teamMapping:
+                                  description: TeamMapping configures automatic team
+                                    assignment
+                                  properties:
+                                    defaultRole:
+                                      description: DefaultRole is the role assigned
+                                        to new users
+                                      type: string
+                                    defaultTeamId:
+                                      description: DefaultTeamID is the team to add
+                                        users to
+                                      type: string
+                                    domain:
+                                      description: Domain filters users by email domain
+                                      type: string
+                                  required:
+                                  - defaultRole
+                                  - defaultTeamId
+                                  - domain
+                                  type: object
+                              required:
+                              - autoProvision
+                              - clientId
+                              - clientSecret
+                              - discoveryUrl
+                              - enabled
+                              - id
+                              - name
+                              - scopes
+                              - teamMapping
+                              type: object
+                            type: array
+                          proxyTimeout:
+                            description: Timeouts
+                            type: string
+                          rateLimitBurst:
+                            type: integer
+                          rateLimitRPS:
+                            description: Rate limiting
+                            type: integer
+                          schedulerEnabled:
+                            description: Scheduler configuration (optional, for multi-cluster
+                              mode)
+                            type: boolean
+                          schedulerUrl:
+                            type: string
+                          shutdownTimeout:
+                            type: string
+                        required:
+                        - baseUrl
+                        - builtInAuth
+                        - databaseUrl
+                        - defaultInternalGatewayUrl
+                        - edition
+                        - httpPort
+                        - jwtAccessTokenTTL
+                        - jwtRefreshTokenTTL
+                        - jwtSecret
+                        - logLevel
+                        - oidcProviders
+                        - proxyTimeout
+                        - rateLimitBurst
+                        - rateLimitRPS
+                        - schedulerEnabled
+                        - schedulerUrl
+                        - shutdownTimeout
                         type: object
-                        x-kubernetes-preserve-unknown-fields: true
                       enabled:
                         default: true
                         description: Enabled enables or disables the service
@@ -468,9 +633,41 @@ spec:
                       (data plane)
                     properties:
                       config:
-                        description: Config contains service-specific configuration
+                        description: Config contains internal-gateway specific configuration
+                        properties:
+                          allowedCallers:
+                            description: |-
+                              Internal authentication (for validating requests from edge-gateway and
+                              generating tokens for downstream services)
+                              AllowedCallers is the list of services allowed to call internal-gateway
+                              Default: ["edge-gateway"], can include "scheduler" for multi-cluster mode
+                            items:
+                              type: string
+                            type: array
+                          healthCheckPeriod:
+                            type: string
+                          httpPort:
+                            description: Server configuration
+                            type: integer
+                          logLevel:
+                            type: string
+                          managerUrl:
+                            description: Upstream services
+                            type: string
+                          shutdownTimeout:
+                            description: Timeouts
+                            type: string
+                          storageProxyUrl:
+                            type: string
+                        required:
+                        - allowedCallers
+                        - healthCheckPeriod
+                        - httpPort
+                        - logLevel
+                        - managerUrl
+                        - shutdownTimeout
+                        - storageProxyUrl
                         type: object
-                        x-kubernetes-preserve-unknown-fields: true
                       enabled:
                         default: true
                         description: Enabled enables or disables the service
@@ -574,9 +771,114 @@ spec:
                     description: Manager configures the manager service (data plane)
                     properties:
                       config:
-                        description: Config contains service-specific configuration
+                        description: Config contains manager specific configuration
+                        properties:
+                          cleanupInterval:
+                            description: Cleanup Controller
+                            type: string
+                          databaseUrl:
+                            description: Database
+                            type: string
+                          defaultClusterId:
+                            type: string
+                          defaultSandboxTTL:
+                            description: Sandbox
+                            type: string
+                          defaultTemplateImage:
+                            type: string
+                          defaultTemplateName:
+                            description: template
+                            type: string
+                          defaultTemplateNamespace:
+                            type: string
+                          httpPort:
+                            description: HTTP Server
+                            type: integer
+                          kubeConfig:
+                            description: Kubernetes
+                            type: string
+                          leaderElection:
+                            type: boolean
+                          logLevel:
+                            description: Logging
+                            type: string
+                          managerImage:
+                            description: manager docker image, used to copy the procd
+                              binary to sandbox pod
+                            type: string
+                          metricsPort:
+                            description: Metrics
+                            type: integer
+                          procdConfig:
+                            description: Procd config injected into sandbox pods
+                            properties:
+                              cacheMaxBytes:
+                                description: Cache configuration
+                                format: int64
+                                type: integer
+                              cacheTTL:
+                                type: string
+                              httpPort:
+                                description: Server configuration
+                                type: integer
+                              logLevel:
+                                type: string
+                              nodeName:
+                                type: string
+                              rootPath:
+                                description: File manager configuration
+                                type: string
+                              sandboxID:
+                                description: Sandbox identity
+                                type: string
+                              storageProxyBaseURL:
+                                description: Storage Proxy configuration
+                                type: string
+                              storageProxyReplicas:
+                                type: integer
+                              templateID:
+                                type: string
+                            required:
+                            - cacheMaxBytes
+                            - cacheTTL
+                            - httpPort
+                            - logLevel
+                            - nodeName
+                            - rootPath
+                            - sandboxID
+                            - storageProxyBaseURL
+                            - storageProxyReplicas
+                            - templateID
+                            type: object
+                          resyncPeriod:
+                            type: string
+                          webhookCertPath:
+                            type: string
+                          webhookKeyPath:
+                            type: string
+                          webhookPort:
+                            description: Webhook
+                            type: integer
+                        required:
+                        - cleanupInterval
+                        - databaseUrl
+                        - defaultClusterId
+                        - defaultSandboxTTL
+                        - defaultTemplateImage
+                        - defaultTemplateName
+                        - defaultTemplateNamespace
+                        - httpPort
+                        - kubeConfig
+                        - leaderElection
+                        - logLevel
+                        - managerImage
+                        - metricsPort
+                        - procdConfig
+                        - resyncPeriod
+                        - webhookCertPath
+                        - webhookKeyPath
+                        - webhookPort
                         type: object
-                        x-kubernetes-preserve-unknown-fields: true
                       enabled:
                         default: true
                         description: Enabled enables or disables the service
@@ -680,9 +982,108 @@ spec:
                     description: Netd configures the netd service (data plane)
                     properties:
                       config:
-                        description: Config contains service-specific configuration
+                        description: Config contains netd specific configuration
+                        properties:
+                          bpfFSPath:
+                            description: BPFFSPath is the path to bpf filesystem (usually
+                              /sys/fs/bpf)
+                            type: string
+                          clusterDNSCIDR:
+                            description: ClusterDNSCIDR is the CIDR for cluster DNS
+                              (always allowed for DNS)
+                            type: string
+                          dnsResolvers:
+                            description: DNSResolvers are the upstream DNS resolvers
+                              for the proxy
+                            items:
+                              type: string
+                            type: array
+                          failClosed:
+                            description: FailClosed if true, blocks all traffic when
+                              netd is not ready
+                            type: boolean
+                          healthPort:
+                            description: HealthPort is the port for health checks
+                            type: integer
+                          internalGatewayCIDR:
+                            description: InternalGatewayCIDR is the CIDR for internal-gateway
+                              (allowed for ingress to procd)
+                            type: string
+                          kubeConfig:
+                            description: KubeConfig is the path to kubeconfig file
+                              (optional, uses in-cluster config if empty)
+                            type: string
+                          logLevel:
+                            description: LogLevel is the logging level (debug, info,
+                              warn, error)
+                            type: string
+                          metricsPort:
+                            description: MetricsPort is the port for Prometheus metrics
+                            type: integer
+                          metricsReportInterval:
+                            description: MetricsReportInterval is the interval for
+                              reporting metrics
+                            type: string
+                          namespace:
+                            description: Namespace is the namespace to watch for sandbox
+                              pods
+                            type: string
+                          nodeName:
+                            description: NodeName is the name of the node this netd
+                              is running on
+                            type: string
+                          procdPort:
+                            description: ProcdPort is the port procd listens on
+                            type: integer
+                          proxyHTTPPort:
+                            description: ProxyHTTPPort is the port for HTTP proxy
+                              (redirect from port 80)
+                            type: integer
+                          proxyHTTPSPort:
+                            description: ProxyHTTPSPort is the port for HTTPS/TLS
+                              proxy (redirect from port 443)
+                            type: integer
+                          proxyListenAddr:
+                            description: ProxyListenAddr is the address for the L7
+                              proxy to listen on
+                            type: string
+                          resyncPeriod:
+                            description: ResyncPeriod is the period for informer resync
+                            type: string
+                          storageProxyCIDR:
+                            description: StorageProxyCIDR is the CIDR for storage-proxy
+                              (always allowed)
+                            type: string
+                          useEBPF:
+                            description: UseEBPF enables eBPF-based bandwidth control
+                              (more efficient than tc htb)
+                            type: boolean
+                          useEDT:
+                            description: UseEDT enables Earliest Departure Time pacing
+                              for eBPF
+                            type: boolean
+                        required:
+                        - bpfFSPath
+                        - clusterDNSCIDR
+                        - dnsResolvers
+                        - failClosed
+                        - healthPort
+                        - internalGatewayCIDR
+                        - kubeConfig
+                        - logLevel
+                        - metricsPort
+                        - metricsReportInterval
+                        - namespace
+                        - nodeName
+                        - procdPort
+                        - proxyHTTPPort
+                        - proxyHTTPSPort
+                        - proxyListenAddr
+                        - resyncPeriod
+                        - storageProxyCIDR
+                        - useEBPF
+                        - useEDT
                         type: object
-                        x-kubernetes-preserve-unknown-fields: true
                       enabled:
                         default: true
                         description: Enabled enables or disables the service
@@ -787,9 +1188,29 @@ spec:
                       plane)
                     properties:
                       config:
-                        description: Config contains service-specific configuration
+                        description: Config contains scheduler specific configuration
+                        properties:
+                          databaseUrl:
+                            description: Database configuration
+                            type: string
+                          httpPort:
+                            description: Server configuration
+                            type: integer
+                          logLevel:
+                            type: string
+                          reconcileInterval:
+                            description: Reconciler configuration
+                            type: string
+                          shutdownTimeout:
+                            description: Timeouts
+                            type: string
+                        required:
+                        - databaseUrl
+                        - httpPort
+                        - logLevel
+                        - reconcileInterval
+                        - shutdownTimeout
                         type: object
-                        x-kubernetes-preserve-unknown-fields: true
                       enabled:
                         default: true
                         description: Enabled enables or disables the service
@@ -894,9 +1315,88 @@ spec:
                       (data plane)
                     properties:
                       config:
-                        description: Config contains service-specific configuration
+                        description: Config contains storage-proxy specific configuration
+                        properties:
+                          auditFile:
+                            type: string
+                          auditLog:
+                            type: boolean
+                          cacheDir:
+                            type: string
+                          databaseUrl:
+                            description: Database
+                            type: string
+                          defaultCacheSize:
+                            type: string
+                          defaultClusterId:
+                            type: string
+                          grpcAddr:
+                            description: gRPC Server
+                            type: string
+                          grpcPort:
+                            type: integer
+                          httpAddr:
+                            description: HTTP Management API
+                            type: string
+                          httpPort:
+                            type: integer
+                          kubeconfigPath:
+                            description: Kubernetes
+                            type: string
+                          logLevel:
+                            description: Logging
+                            type: string
+                          maxBytesPerSecond:
+                            format: int64
+                            type: integer
+                          maxOpsPerSecond:
+                            description: Rate limiting
+                            type: integer
+                          metaUrl:
+                            description: JuiceFS defaults
+                            type: string
+                          metricsEnabled:
+                            description: Monitoring
+                            type: boolean
+                          metricsPort:
+                            type: integer
+                          s3AccessKey:
+                            type: string
+                          s3Bucket:
+                            type: string
+                          s3Endpoint:
+                            type: string
+                          s3Region:
+                            type: string
+                          s3SecretKey:
+                            type: string
+                          s3SessionToken:
+                            type: string
+                        required:
+                        - auditFile
+                        - auditLog
+                        - cacheDir
+                        - databaseUrl
+                        - defaultCacheSize
+                        - defaultClusterId
+                        - grpcAddr
+                        - grpcPort
+                        - httpAddr
+                        - httpPort
+                        - kubeconfigPath
+                        - logLevel
+                        - maxBytesPerSecond
+                        - maxOpsPerSecond
+                        - metaUrl
+                        - metricsEnabled
+                        - metricsPort
+                        - s3AccessKey
+                        - s3Bucket
+                        - s3Endpoint
+                        - s3Region
+                        - s3SecretKey
+                        - s3SessionToken
                         type: object
-                        x-kubernetes-preserve-unknown-fields: true
                       enabled:
                         default: true
                         description: Enabled enables or disables the service

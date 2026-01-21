@@ -13,10 +13,10 @@ import (
 	"github.com/sandbox0-ai/infra/edge-gateway/pkg/auth/builtin"
 	"github.com/sandbox0-ai/infra/edge-gateway/pkg/auth/jwt"
 	"github.com/sandbox0-ai/infra/edge-gateway/pkg/auth/oidc"
-	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/edge-gateway/pkg/db"
 	"github.com/sandbox0-ai/infra/edge-gateway/pkg/http/handlers"
 	"github.com/sandbox0-ai/infra/edge-gateway/pkg/middleware"
+	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	"github.com/sandbox0-ai/infra/pkg/proxy"
 	"go.uber.org/zap"
@@ -76,7 +76,7 @@ func NewServer(
 	igRouter, err := proxy.NewRouter(
 		cfg.DefaultInternalGatewayURL,
 		logger,
-		cfg.ProxyTimeout,
+		cfg.ProxyTimeout.Duration,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create proxy router: %w", err)
@@ -88,7 +88,7 @@ func NewServer(
 		schedulerRouter, err = proxy.NewRouter(
 			cfg.SchedulerURL,
 			logger,
-			cfg.ProxyTimeout,
+			cfg.ProxyTimeout.Duration,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("create scheduler proxy router: %w", err)
@@ -115,7 +115,7 @@ func NewServer(
 	})
 
 	// Initialize JWT issuer
-	jwtIssuer := jwt.NewIssuer(cfg.JWTSecret, cfg.JWTAccessTokenTTL, cfg.JWTRefreshTokenTTL)
+	jwtIssuer := jwt.NewIssuer(cfg.JWTSecret, cfg.JWTAccessTokenTTL.Duration, cfg.JWTRefreshTokenTTL.Duration)
 
 	// Initialize built-in auth provider
 	builtinProvider := builtin.NewProvider(repo, &cfg.BuiltInAuth)
@@ -354,7 +354,7 @@ func (s *Server) Start(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		s.logger.Info("Shutting down HTTP server")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout.Duration)
 		defer cancel()
 		return server.Shutdown(shutdownCtx)
 	case err := <-errChan:

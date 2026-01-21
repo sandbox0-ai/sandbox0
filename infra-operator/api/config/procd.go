@@ -1,3 +1,4 @@
+// +kubebuilder:object:generate=true
 package config
 
 import (
@@ -9,32 +10,33 @@ import (
 	"sync"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"gopkg.in/yaml.v3"
 )
 
 // ProcdConfig holds all configuration for procd.
 type ProcdConfig struct {
 	// Sandbox identity
-	SandboxID  string `yaml:"sandbox_id"`
-	TemplateID string `yaml:"template_id"`
-	NodeName   string `yaml:"node_name"`
+	SandboxID  string `yaml:"sandbox_id" json:"sandboxID"`
+	TemplateID string `yaml:"template_id" json:"templateID"`
+	NodeName   string `yaml:"node_name" json:"nodeName"`
 
 	// Server configuration
-	HTTPPort int    `yaml:"http_port"`
-	LogLevel string `yaml:"log_level"`
+	HTTPPort int    `yaml:"http_port" json:"httpPort"`
+	LogLevel string `yaml:"log_level" json:"logLevel"`
 
 	// Storage Proxy configuration
-	StorageProxyBaseURL  string `yaml:"storage_proxy_base_url"`
-	StorageProxyReplicas int    `yaml:"storage_proxy_replicas"`
+	StorageProxyBaseURL  string `yaml:"storage_proxy_base_url" json:"storageProxyBaseURL"`
+	StorageProxyReplicas int    `yaml:"storage_proxy_replicas" json:"storageProxyReplicas"`
 
 	// File manager configuration
-	RootPath string `yaml:"root_path"`
+	RootPath string `yaml:"root_path" json:"rootPath"`
 
 	// Cache configuration
-	CacheMaxBytes int64         `yaml:"cache_max_bytes"`
-	CacheTTL      time.Duration `yaml:"cache_ttl"`
+	CacheMaxBytes int64           `yaml:"cache_max_bytes" json:"cacheMaxBytes"`
+	CacheTTL      metav1.Duration `yaml:"cache_ttl" json:"cacheTTL"`
 
-	setKeys map[string]any `yaml:"-"`
+	setKeys map[string]string `yaml:"-" json:"-"`
 }
 
 // DefaultProcdConfig returns the default configuration.
@@ -46,7 +48,7 @@ func DefaultProcdConfig() ProcdConfig {
 		StorageProxyReplicas: 3,
 		RootPath:             "/workspace",
 		CacheMaxBytes:        100 * 1024 * 1024,
-		CacheTTL:             30 * time.Second,
+		CacheTTL:             metav1.Duration{Duration: 30 * time.Second},
 	}
 }
 
@@ -61,6 +63,11 @@ func (c *ProcdConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 
+	setKeys := make(map[string]string)
+	for k, v := range raw {
+		setKeys[k] = fmt.Sprint(v)
+	}
+
 	type alias ProcdConfig
 	decoded := alias(*c)
 	if err := value.Decode(&decoded); err != nil {
@@ -68,27 +75,13 @@ func (c *ProcdConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 
 	*c = ProcdConfig(decoded)
-	c.setKeys = raw
+	c.setKeys = setKeys
 	return nil
 }
 
 // EnvMap returns configured keys as environment variables.
 func (c ProcdConfig) EnvMap() map[string]string {
-	if len(c.setKeys) == 0 {
-		return nil
-	}
-
-	env := make(map[string]string, len(c.setKeys))
-	for key, value := range c.setKeys {
-		if key == "" || value == nil {
-			continue
-		}
-		env[key] = fmt.Sprint(value)
-	}
-	if len(env) == 0 {
-		return nil
-	}
-	return env
+	return c.setKeys
 }
 
 var (

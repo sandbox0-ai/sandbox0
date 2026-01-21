@@ -1,6 +1,0 @@
-apiVersion: v2
-name: scheduler
-description: A Helm chart for sandbox0 scheduler - multi-cluster template management
-type: application
-version: 0.1.0
-appVersion: "v0.1.0"

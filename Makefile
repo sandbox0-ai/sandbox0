@@ -158,43 +158,14 @@ clean:
 			rm -rf manager/bin/procd; \
 		else \
 			rm -rf $$service/bin; \
-			rm -rf helm/charts/$$service; \
 		fi; \
 	done
 	rm -rf storage-proxy/proto/fs/*.pb.go
 	rm -rf vendor
 
-helm-update: helm-configs
-	@mkdir -p helm/charts
-	@for service in $(SERVICES); do \
-		if [ -d "$$service/chart" ]; then \
-			echo "Copying chart for $$service..."; \
-			rm -rf helm/charts/$$service; \
-			cp -r $$service/chart helm/charts/$$service; \
-		fi; \
-	done
-
-helm-configs:
+app-configs:
 	@printf "$(CYAN)Generating default Helm configs...$(RESET)\n"
 	@CONFIG_PATH=/dev/null go run ./tools/configdump
-
-helm-clean:
-	@mkdir -p helm/charts
-	@for service in $(SERVICES); do \
-		if [ -d "$$service/chart" ]; then \
-			echo "Deleting chart for $$service..."; \
-			rm -rf helm/charts/$$service; \
-		fi; \
-	done
-
-# Release helm chart and git tag in one shot:
-#   make release VERSION=v0.1.0
-release:
-	@if [ -z "$(VERSION)" ]; then \
-		echo "Error: VERSION is required. Usage: make release VERSION=v0.1.0"; \
-		exit 2; \
-	fi
-	@bash release.sh "$(VERSION)"
 
 proto:
 	@printf "$(CYAN)Generating storage-proxy protobufs...$(RESET)\n"

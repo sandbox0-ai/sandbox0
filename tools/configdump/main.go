@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 
 	edgeconfig "github.com/sandbox0-ai/infra/edge-gateway/pkg/config"
 	internalconfig "github.com/sandbox0-ai/infra/internal-gateway/pkg/config"
@@ -39,29 +38,17 @@ func main() {
 }
 
 func updateValuesConfig(service string, cfg any) error {
-	valuesPath := filepath.Join(service, "chart", "values.yaml")
-	valuesData, err := os.ReadFile(valuesPath)
-	if err != nil {
-		return err
-	}
-
-	var values map[string]any
-	if err := yaml.Unmarshal(valuesData, &values); err != nil {
-		return err
-	}
-
 	cfgMap, err := toMap(cfg)
 	if err != nil {
 		return err
 	}
 
-	values["config"] = cfgMap
-	updated, err := yaml.Marshal(values)
+	cfgYaml, err := yaml.Marshal(cfgMap)
 	if err != nil {
 		return err
 	}
 
-	return os.WriteFile(valuesPath, updated, 0o644)
+	return os.WriteFile("./"+service+".yaml", cfgYaml, 0o644)
 }
 
 func toMap(cfg any) (map[string]any, error) {

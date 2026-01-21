@@ -1,8 +1,0 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {{ include "edge-gateway.fullname" . }}-migrations
-  labels:
-    {{- include "edge-gateway.labels" . | nindent 4 }}
-data:
-{{- (.Files.Glob "migrations/*.sql").AsConfig | nindent 2 }}

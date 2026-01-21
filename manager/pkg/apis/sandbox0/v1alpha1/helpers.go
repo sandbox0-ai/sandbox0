@@ -95,6 +95,22 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Conta
 }
 
 func appendProcdConfigEnvVars(envVars []corev1.EnvVar) []corev1.EnvVar {
+	hasNodeName := false
+	for _, ev := range envVars {
+		if ev.Name == "node_name" {
+			hasNodeName = true
+			break
+		}
+	}
+	if !hasNodeName {
+		envVars = append(envVars, corev1.EnvVar{
+			Name: "node_name",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.nodeName"},
+			},
+		})
+	}
+
 	cfg := config.LoadManagerConfig()
 	if cfg == nil {
 		return envVars
@@ -115,6 +131,9 @@ func appendProcdConfigEnvVars(envVars []corev1.EnvVar) []corev1.EnvVar {
 	sort.Strings(keys)
 
 	for _, key := range keys {
+		if key == "node_name" {
+			continue
+		}
 		envVars = append(envVars, corev1.EnvVar{
 			Name:  key,
 			Value: envMap[key],

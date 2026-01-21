@@ -18,7 +18,7 @@ type ManagerConfig struct {
 
 	// manager docker image, used to copy the procd binary to sandbox pod
 	// +optional
-	ManagerImage string `yaml:"manager_image" json:"managerImage"`
+	ManagerImage string `yaml:"manager_image" json:"-"`
 
 	// template
 	// +optional
@@ -30,7 +30,7 @@ type ManagerConfig struct {
 	// +kubebuilder:default="sandbox0ai/otemplates:default-v0.1.0"
 	DefaultTemplateImage string `yaml:"default_template_image" json:"defaultTemplateImage"`
 	// +optional
-	DefaultClusterId string `yaml:"default_cluster_id" json:"defaultClusterId"`
+	DefaultClusterId string `yaml:"default_cluster_id" json:"-"`
 
 	// Kubernetes
 	// +optional
@@ -44,7 +44,7 @@ type ManagerConfig struct {
 
 	// Database
 	// +optional
-	DatabaseURL string `yaml:"database_url" json:"databaseUrl"`
+	DatabaseURL string `yaml:"database_url" json:"-"`
 
 	// Cleanup Controller
 	// +optional

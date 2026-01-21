@@ -16,13 +16,8 @@ import (
 
 // ProcdConfig holds all configuration for procd.
 type ProcdConfig struct {
-	// Sandbox identity
 	// +optional
-	SandboxID string `yaml:"sandbox_id" json:"sandboxID"`
-	// +optional
-	TemplateID string `yaml:"template_id" json:"templateID"`
-	// +optional
-	NodeName string `yaml:"node_name" json:"nodeName"`
+	NodeName string `yaml:"node_name" json:"-"`
 
 	// Server configuration
 	// +optional
@@ -35,10 +30,10 @@ type ProcdConfig struct {
 	// Storage Proxy configuration
 	// +optional
 	// +kubebuilder:default="storage-proxy"
-	StorageProxyBaseURL string `yaml:"storage_proxy_base_url" json:"storageProxyBaseURL"`
+	StorageProxyBaseURL string `yaml:"storage_proxy_base_url" json:"-"`
 	// +optional
 	// +kubebuilder:default=8080
-	StorageProxyPort int `yaml:"storage_proxy_port" json:"storageProxyPort"`
+	StorageProxyPort int `yaml:"storage_proxy_port" json:"-"`
 	// +optional
 	// +kubebuilder:default=3
 	StorageProxyReplicas int `yaml:"storage_proxy_replicas" json:"storageProxyReplicas"`

@@ -219,49 +219,29 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	}
 
 	if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {
-		if cfg.DatabaseURL == "" {
-			cfg.DatabaseURL = dsn
-		}
+		cfg.DatabaseURL = dsn
 	}
 
 	metaURL, err := database.GetJuicefsMetaURL(ctx, r.Resources.Client, infra)
 	if err != nil {
 		return nil, err
 	}
-	if cfg.MetaURL == "" {
-		cfg.MetaURL = metaURL
-	}
+	cfg.MetaURL = metaURL
 
 	storageConfig, err := storage.GetStorageConfig(ctx, r.Resources.Client, infra)
 	if err != nil {
 		return nil, err
 	}
 
-	if cfg.S3Bucket == "" {
-		cfg.S3Bucket = storageConfig.Bucket
-	}
-	if cfg.S3Region == "" {
-		cfg.S3Region = storageConfig.Region
-	}
-	if cfg.S3Endpoint == "" {
-		cfg.S3Endpoint = storageConfig.Endpoint
-	}
-	if cfg.S3AccessKey == "" {
-		cfg.S3AccessKey = storageConfig.AccessKey
-	}
-	if cfg.S3SecretKey == "" {
-		cfg.S3SecretKey = storageConfig.SecretKey
-	}
-	if storageConfig.SessionToken != "" {
-		if cfg.S3SessionToken == "" {
-			cfg.S3SessionToken = storageConfig.SessionToken
-		}
-	}
+	cfg.S3Bucket = storageConfig.Bucket
+	cfg.S3Region = storageConfig.Region
+	cfg.S3Endpoint = storageConfig.Endpoint
+	cfg.S3AccessKey = storageConfig.AccessKey
+	cfg.S3SecretKey = storageConfig.SecretKey
+	cfg.S3SessionToken = storageConfig.SessionToken
 
 	if infra.Spec.Cluster != nil && infra.Spec.Cluster.ID != "" {
-		if cfg.DefaultClusterId == "" {
-			cfg.DefaultClusterId = infra.Spec.Cluster.ID
-		}
+		cfg.DefaultClusterId = infra.Spec.Cluster.ID
 	}
 
 	return cfg, nil

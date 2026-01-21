@@ -414,17 +414,6 @@ spec:
                                 description: Enabled enables built-in email/password
                                   authentication
                                 type: boolean
-                              initUser:
-                                description: InitUser is the initial admin user (for
-                                  self-hosted)
-                                properties:
-                                  email:
-                                    type: string
-                                  name:
-                                    type: string
-                                  password:
-                                    type: string
-                                type: object
                             type: object
                           clusterCacheTTL:
                             default: 30s
@@ -436,12 +425,6 @@ spec:
                           databaseMinConns:
                             default: 8
                             type: integer
-                          databaseUrl:
-                            description: Database configuration (for API key validation)
-                            type: string
-                          defaultInternalGatewayUrl:
-                            description: Upstream service
-                            type: string
                           defaultTeamName:
                             default: Personal Team
                             description: Identity and Teams
@@ -701,9 +684,6 @@ spec:
                           logLevel:
                             default: info
                             type: string
-                          managerUrl:
-                            description: Upstream services
-                            type: string
                           procdStoragePermissions:
                             default:
                             - sandboxvolume:read
@@ -725,8 +705,6 @@ spec:
                           shutdownTimeout:
                             default: 30s
                             description: Timeouts
-                            type: string
-                          storageProxyUrl:
                             type: string
                         type: object
                       enabled:
@@ -852,9 +830,6 @@ spec:
                             default: 2
                             format: int32
                             type: integer
-                          databaseUrl:
-                            description: Database
-                            type: string
                           defaultBandwidthBurstBytes:
                             default: 12500000
                             format: int64
@@ -864,8 +839,6 @@ spec:
                             description: Network
                             format: int64
                             type: integer
-                          defaultClusterId:
-                            type: string
                           defaultSandboxTTL:
                             default: 5m
                             description: Sandbox
@@ -892,10 +865,6 @@ spec:
                           logLevel:
                             default: info
                             description: Logging
-                            type: string
-                          managerImage:
-                            description: manager docker image, used to copy the procd
-                              binary to sandbox pod
                             type: string
                           metricsPort:
                             default: 9090
@@ -950,27 +919,13 @@ spec:
                               logLevel:
                                 default: info
                                 type: string
-                              nodeName:
-                                type: string
                               rootPath:
                                 default: /workspace
                                 description: File manager configuration
                                 type: string
-                              sandboxID:
-                                description: Sandbox identity
-                                type: string
-                              storageProxyBaseURL:
-                                default: storage-proxy
-                                description: Storage Proxy configuration
-                                type: string
-                              storageProxyPort:
-                                default: 8080
-                                type: integer
                               storageProxyReplicas:
                                 default: 3
                                 type: integer
-                              templateID:
-                                type: string
                             type: object
                           resyncPeriod:
                             default: 30s
@@ -1161,10 +1116,6 @@ spec:
                             default: 10s
                             description: MetricsReportInterval is the interval for
                               reporting metrics
-                            type: string
-                          namespace:
-                            description: Namespace is the namespace to watch for sandbox
-                              pods
                             type: string
                           nodeName:
                             default: ${NODE_NAME}
@@ -1358,9 +1309,6 @@ spec:
                                 format: int32
                                 type: integer
                             type: object
-                          databaseUrl:
-                            description: Database configuration
-                            type: string
                           httpPort:
                             default: 8080
                             description: Server configuration
@@ -1521,13 +1469,8 @@ spec:
                           databaseSchema:
                             default: sp
                             type: string
-                          databaseUrl:
-                            description: Database
-                            type: string
                           defaultCacheSize:
                             default: 1G
-                            type: string
-                          defaultClusterId:
                             type: string
                           flushTimeout:
                             default: 30s
@@ -1605,9 +1548,6 @@ spec:
                             default: 10000
                             description: Rate limiting
                             type: integer
-                          metaUrl:
-                            description: JuiceFS defaults
-                            type: string
                           metricsEnabled:
                             default: true
                             description: Monitoring
@@ -1615,18 +1555,6 @@ spec:
                           metricsPort:
                             default: 9090
                             type: integer
-                          s3AccessKey:
-                            type: string
-                          s3Bucket:
-                            type: string
-                          s3Endpoint:
-                            type: string
-                          s3Region:
-                            type: string
-                          s3SecretKey:
-                            type: string
-                          s3SessionToken:
-                            type: string
                         type: object
                       enabled:
                         default: true

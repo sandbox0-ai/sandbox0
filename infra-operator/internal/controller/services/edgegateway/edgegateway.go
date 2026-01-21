@@ -191,9 +191,7 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	}
 
 	if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {
-		if cfg.DatabaseURL == "" {
-			cfg.DatabaseURL = dsn
-		}
+		cfg.DatabaseURL = dsn
 	}
 
 	internalGatewayConfig := &apiconfig.InternalGatewayConfig{}
@@ -206,9 +204,7 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	}
 	internalGatewayPort := common.ResolveServicePort(internalGatewayServiceConfig, int32(internalGatewayConfig.HTTPPort))
 	internalGatewayURL := fmt.Sprintf("http://%s-internal-gateway:%d", infra.Name, internalGatewayPort)
-	if cfg.DefaultInternalGatewayURL == "" {
-		cfg.DefaultInternalGatewayURL = internalGatewayURL
-	}
+	cfg.DefaultInternalGatewayURL = internalGatewayURL
 
 	if infra.Spec.InitUser != nil && infra.Spec.InitUser.Enabled {
 		password, err := common.GetSecretValue(ctx, r.Resources.Client, infra.Namespace, infra.Spec.InitUser.PasswordSecret)
@@ -216,12 +212,10 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 			return nil, err
 		}
 
-		if cfg.BuiltInAuth.InitUser == nil {
-			cfg.BuiltInAuth.InitUser = &apiconfig.InitUserConfig{
-				Email:    infra.Spec.InitUser.Email,
-				Password: password,
-				Name:     infra.Spec.InitUser.Name,
-			}
+		cfg.BuiltInAuth.InitUser = &apiconfig.InitUserConfig{
+			Email:    infra.Spec.InitUser.Email,
+			Password: password,
+			Name:     infra.Spec.InitUser.Name,
 		}
 	}
 

@@ -21,7 +21,7 @@ type SchedulerConfig struct {
 
 	// Database configuration
 	// +optional
-	DatabaseURL string `yaml:"database_url" json:"databaseUrl"`
+	DatabaseURL string `yaml:"database_url" json:"-"`
 
 	// Reconciler configuration
 	// +optional

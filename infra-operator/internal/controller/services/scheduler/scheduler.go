@@ -195,9 +195,7 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	}
 
 	if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {
-		if cfg.DatabaseURL == "" {
-			cfg.DatabaseURL = dsn
-		}
+		cfg.DatabaseURL = dsn
 	}
 
 	return cfg, nil

@@ -193,9 +193,7 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		cfg = infra.Spec.Services.Netd.Config
 	}
 
-	if cfg.Namespace == "" {
-		cfg.Namespace = infra.Namespace
-	}
+	cfg.Namespace = infra.Namespace
 
 	return cfg, nil
 }

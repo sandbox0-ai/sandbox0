@@ -217,9 +217,7 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	}
 
 	if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {
-		if cfg.DatabaseURL == "" {
-			cfg.DatabaseURL = dsn
-		}
+		cfg.DatabaseURL = dsn
 	}
 
 	if cfg.DefaultTemplateNamespace == "" {
@@ -227,15 +225,10 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	}
 
 	if infra.Spec.Cluster != nil && infra.Spec.Cluster.ID != "" {
-		if cfg.DefaultClusterId == "" {
-			cfg.DefaultClusterId = infra.Spec.Cluster.ID
-		}
+		cfg.DefaultClusterId = infra.Spec.Cluster.ID
 	}
 
-	managerImage := fmt.Sprintf("%s:%s", imageRepo, infra.Spec.Version)
-	if cfg.ManagerImage == "" {
-		cfg.ManagerImage = managerImage
-	}
+	cfg.ManagerImage = fmt.Sprintf("%s:%s", imageRepo, infra.Spec.Version)
 
 	storageProxyConfig := &apiconfig.StorageProxyConfig{}
 	storageProxyServiceConfig := (*infrav1alpha1.ServiceNetworkConfig)(nil)
@@ -246,12 +239,8 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		storageProxyServiceConfig = infra.Spec.Services.StorageProxy.Service
 	}
 
-	if cfg.ProcdConfig.StorageProxyBaseURL == "" {
-		cfg.ProcdConfig.StorageProxyBaseURL = fmt.Sprintf("%s-storage-proxy.%s.svc.cluster.local", infra.Name, infra.Namespace)
-	}
-	if cfg.ProcdConfig.StorageProxyPort == 0 {
-		cfg.ProcdConfig.StorageProxyPort = int(common.ResolveServicePort(storageProxyServiceConfig, int32(storageProxyConfig.GRPCPort)))
-	}
+	cfg.ProcdConfig.StorageProxyBaseURL = fmt.Sprintf("%s-storage-proxy.%s.svc.cluster.local", infra.Name, infra.Namespace)
+	cfg.ProcdConfig.StorageProxyPort = int(common.ResolveServicePort(storageProxyServiceConfig, int32(storageProxyConfig.GRPCPort)))
 
 	return cfg, nil
 }

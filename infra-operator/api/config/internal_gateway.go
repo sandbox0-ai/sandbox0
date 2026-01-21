@@ -21,9 +21,9 @@ type InternalGatewayConfig struct {
 
 	// Upstream services
 	// +optional
-	ManagerURL string `yaml:"manager_url" json:"managerUrl"`
+	ManagerURL string `yaml:"manager_url" json:"-"`
 	// +optional
-	StorageProxyURL string `yaml:"storage_proxy_url" json:"storageProxyUrl"`
+	StorageProxyURL string `yaml:"storage_proxy_url" json:"-"`
 
 	// Internal authentication (for validating requests from edge-gateway and
 	// generating tokens for downstream services)

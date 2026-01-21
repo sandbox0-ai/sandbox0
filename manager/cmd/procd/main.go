@@ -39,8 +39,6 @@ func main() {
 	)
 
 	logger.Info("Configuration loaded",
-		zap.String("sandbox_id", cfg.SandboxID),
-		zap.String("template_id", cfg.TemplateID),
 		zap.Int("http_port", cfg.HTTPPort),
 		zap.String("root_path", cfg.RootPath),
 	)

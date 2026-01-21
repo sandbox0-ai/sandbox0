@@ -223,9 +223,7 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	managerServicePort := common.ResolveServicePort(managerServiceConfig, int32(managerConfig.HTTPPort))
 
 	managerURL := fmt.Sprintf("http://%s-manager:%d", infra.Name, managerServicePort)
-	if cfg.ManagerURL == "" {
-		cfg.ManagerURL = managerURL
-	}
+	cfg.ManagerURL = managerURL
 
 	storageProxyConfig := &apiconfig.StorageProxyConfig{}
 	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil && infra.Spec.Services.StorageProxy.Config != nil {
@@ -233,9 +231,7 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	}
 	storageProxyHTTPPort := int32(storageProxyConfig.HTTPPort)
 	storageProxyURL := fmt.Sprintf("http://%s-storage-proxy-http:%d", infra.Name, storageProxyHTTPPort)
-	if cfg.StorageProxyURL == "" {
-		cfg.StorageProxyURL = storageProxyURL
-	}
+	cfg.StorageProxyURL = storageProxyURL
 
 	return cfg, nil
 }

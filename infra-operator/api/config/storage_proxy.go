@@ -28,7 +28,7 @@ type StorageProxyConfig struct {
 
 	// Database
 	// +optional
-	DatabaseURL string `yaml:"database_url" json:"databaseUrl"`
+	DatabaseURL string `yaml:"database_url" json:"-"`
 	// +optional
 	// +kubebuilder:default=30
 	DatabaseMaxConns int `yaml:"database_max_conns" json:"databaseMaxConns"`
@@ -41,19 +41,19 @@ type StorageProxyConfig struct {
 
 	// JuiceFS defaults
 	// +optional
-	MetaURL string `yaml:"meta_url" json:"metaUrl"`
+	MetaURL string `yaml:"meta_url" json:"-"`
 	// +optional
-	S3Bucket string `yaml:"s3_bucket" json:"s3Bucket"`
+	S3Bucket string `yaml:"s3_bucket" json:"-"`
 	// +optional
-	S3Region string `yaml:"s3_region" json:"s3Region"`
+	S3Region string `yaml:"s3_region" json:"-"`
 	// +optional
-	S3Endpoint string `yaml:"s3_endpoint" json:"s3Endpoint"`
+	S3Endpoint string `yaml:"s3_endpoint" json:"-"`
 	// +optional
-	S3AccessKey string `yaml:"s3_access_key" json:"s3AccessKey"`
+	S3AccessKey string `yaml:"s3_access_key" json:"-"`
 	// +optional
-	S3SecretKey string `yaml:"s3_secret_key" json:"s3SecretKey"`
+	S3SecretKey string `yaml:"s3_secret_key" json:"-"`
 	// +optional
-	S3SessionToken string `yaml:"s3_session_token" json:"s3SessionToken"`
+	S3SessionToken string `yaml:"s3_session_token" json:"-"`
 
 	// +optional
 	// +kubebuilder:default="sandbox0"
@@ -105,7 +105,7 @@ type StorageProxyConfig struct {
 	// +kubebuilder:default="/var/lib/storage-proxy/cache"
 	CacheDir string `yaml:"cache_dir" json:"cacheDir"`
 	// +optional
-	DefaultClusterId string `yaml:"default_cluster_id" json:"defaultClusterId"`
+	DefaultClusterId string `yaml:"default_cluster_id" json:"-"`
 
 	// Monitoring
 	// +optional

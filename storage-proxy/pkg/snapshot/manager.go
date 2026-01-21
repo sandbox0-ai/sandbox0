@@ -15,7 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/sandbox0-ai/infra/pkg/naming"
-	"github.com/sandbox0-ai/infra/storage-proxy/pkg/config"
+	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/metrics"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/volume"
@@ -67,7 +67,7 @@ type Manager struct {
 	repo        repository
 	volMgr      volumeProvider
 	coordinator FlushCoordinator // Optional: for distributed coordination
-	config      *config.Config
+	config      *config.StorageProxyConfig
 	logger      *logrus.Logger
 	clusterID   string
 	podID       string
@@ -78,7 +78,7 @@ type Manager struct {
 func NewManager(
 	repo repository,
 	volMgr volumeProvider,
-	cfg *config.Config,
+	cfg *config.StorageProxyConfig,
 	logger *logrus.Logger,
 ) *Manager {
 	// Initialize independent JuiceFS meta client for snapshot operations.

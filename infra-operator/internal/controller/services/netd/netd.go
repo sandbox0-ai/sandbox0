@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	apiconfig "github.com/sandbox0-ai/infra/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/infra/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/pkg/common"
 )
@@ -177,19 +178,23 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	return nil
 }
 
-func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (map[string]any, error) {
+func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (*apiconfig.NetdConfig, error) {
 	var raw *runtime.RawExtension
 	if infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
 		raw = infra.Spec.Services.Netd.Config
 	}
 
-	config, err := common.ParseServiceConfig(raw)
-	if err != nil {
+	cfg := apiconfig.DefaultNetdConfig()
+	if err := common.DecodeServiceConfig(raw, cfg); err != nil {
 		return nil, err
 	}
 
-	common.SetIfMissing(config, "node_name", "${NODE_NAME}")
-	common.SetIfMissing(config, "namespace", infra.Namespace)
+	if cfg.NodeName == "" {
+		cfg.NodeName = "${NODE_NAME}"
+	}
+	if cfg.Namespace == "" {
+		cfg.Namespace = infra.Namespace
+	}
 
-	return config, nil
+	return cfg, nil
 }

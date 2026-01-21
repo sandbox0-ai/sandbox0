@@ -11,7 +11,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	"github.com/sandbox0-ai/infra/pkg/proxy"
-	"github.com/sandbox0-ai/infra/scheduler/pkg/config"
+	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/scheduler/pkg/db"
 	"go.uber.org/zap"
 )
@@ -19,7 +19,7 @@ import (
 // Server represents the HTTP server for scheduler
 type Server struct {
 	router          *gin.Engine
-	cfg             *config.Config
+	cfg             *config.SchedulerConfig
 	repo            *db.Repository
 	authValidator   *internalauth.Validator
 	internalAuthGen *internalauth.Generator
@@ -43,7 +43,7 @@ type Reconciler interface {
 
 // NewServer creates a new HTTP server
 func NewServer(
-	cfg *config.Config,
+	cfg *config.SchedulerConfig,
 	repo *db.Repository,
 	authValidator *internalauth.Validator,
 	internalAuthGen *internalauth.Generator,

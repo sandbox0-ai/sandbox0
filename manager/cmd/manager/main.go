@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
-	"github.com/sandbox0-ai/infra/manager/pkg/config"
+	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/manager/pkg/controller"
 	clientset "github.com/sandbox0-ai/infra/manager/pkg/generated/clientset/versioned"
 	"github.com/sandbox0-ai/infra/manager/pkg/generated/informers/externalversions"
@@ -35,7 +35,7 @@ import (
 
 func main() {
 	// Load configuration
-	cfg := config.LoadConfig()
+	cfg := config.LoadManagerConfig()
 
 	// Initialize logger
 	logger := initLogger(cfg.LogLevel)

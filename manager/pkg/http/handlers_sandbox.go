@@ -5,7 +5,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/infra/manager/pkg/config"
+	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/manager/pkg/service"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	"go.uber.org/zap"
@@ -29,7 +29,7 @@ func (s *Server) claimSandbox(c *gin.Context) {
 		return
 	}
 	if req.Template == "" || req.Namespace == "" {
-		cfg := config.LoadConfig()
+		cfg := config.LoadManagerConfig()
 		if req.Template == "" {
 			req.Template = cfg.DefaultTemplateName
 		}

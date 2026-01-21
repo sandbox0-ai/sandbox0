@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/sandbox0-ai/infra/manager/pkg/config"
+	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	ctxpkg "github.com/sandbox0-ai/infra/manager/procd/pkg/context"
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/file"
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/http/handlers"

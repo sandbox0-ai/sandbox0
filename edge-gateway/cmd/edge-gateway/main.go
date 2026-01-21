@@ -9,7 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	egmigrations "github.com/sandbox0-ai/infra/edge-gateway/migrations"
-	"github.com/sandbox0-ai/infra/edge-gateway/pkg/config"
+	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/edge-gateway/pkg/http"
 	"github.com/sandbox0-ai/infra/pkg/migrate"
 	"go.uber.org/zap"
@@ -18,7 +18,7 @@ import (
 
 func main() {
 	// Load configuration
-	cfg := config.LoadConfig()
+	cfg := config.LoadEdgeGatewayConfig()
 
 	// Initialize logger
 	logger, err := initLogger(cfg.LogLevel)

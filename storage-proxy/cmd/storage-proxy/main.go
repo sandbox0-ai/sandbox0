@@ -11,12 +11,12 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	"github.com/sandbox0-ai/infra/pkg/k8s"
 	"github.com/sandbox0-ai/infra/pkg/migrate"
 	spmigrations "github.com/sandbox0-ai/infra/storage-proxy/migrations"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/auth"
-	"github.com/sandbox0-ai/infra/storage-proxy/pkg/config"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/coordinator"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/db"
 	grpcserver "github.com/sandbox0-ai/infra/storage-proxy/pkg/grpc"
@@ -42,7 +42,7 @@ func main() {
 	logrusLogger.SetOutput(os.Stdout)
 
 	// Load configuration
-	cfg := config.LoadConfig()
+	cfg := config.LoadStorageProxyConfig()
 
 	if err := cfg.Validate(); err != nil {
 		logrusLogger.WithError(err).Fatal("Invalid configuration")
@@ -371,7 +371,7 @@ func (a *volumeContextAdapter) FlushAll(path string) error {
 }
 
 // initializeJuiceFS initializes the JuiceFS filesystem if not already initialized
-func initializeJuiceFS(cfg *config.Config, logger *zap.Logger) error {
+func initializeJuiceFS(cfg *config.StorageProxyConfig, logger *zap.Logger) error {
 	logger.Info("Checking JuiceFS initialization status")
 
 	// Skip if essential config is missing

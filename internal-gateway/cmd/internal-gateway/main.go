@@ -7,7 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/sandbox0-ai/infra/internal-gateway/pkg/config"
+	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/internal-gateway/pkg/http"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -15,7 +15,7 @@ import (
 
 func main() {
 	// Load configuration
-	cfg := config.LoadConfig()
+	cfg := config.LoadInternalGatewayConfig()
 
 	// Initialize logger
 	logger, err := initLogger(cfg.LogLevel)

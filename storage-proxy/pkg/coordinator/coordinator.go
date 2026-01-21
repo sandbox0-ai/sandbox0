@@ -17,7 +17,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/sandbox0-ai/infra/storage-proxy/pkg/config"
+	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/metrics"
 	"github.com/sirupsen/logrus"
@@ -77,7 +77,7 @@ type Coordinator struct {
 	pool       *pgxpool.Pool
 	repo       db.CoordinatorRepository
 	volMgr     VolumeProvider
-	config     *config.Config
+	config     *config.StorageProxyConfig
 	logger     *logrus.Logger
 	clusterID  string
 	podID      string
@@ -99,7 +99,7 @@ func NewCoordinator(
 	pool *pgxpool.Pool,
 	repo db.CoordinatorRepository,
 	volMgr VolumeProvider,
-	cfg *config.Config,
+	cfg *config.StorageProxyConfig,
 	logger *logrus.Logger,
 ) *Coordinator {
 	return &Coordinator{

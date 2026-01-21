@@ -13,7 +13,7 @@ import (
 	"github.com/sandbox0-ai/infra/edge-gateway/pkg/auth/builtin"
 	"github.com/sandbox0-ai/infra/edge-gateway/pkg/auth/jwt"
 	"github.com/sandbox0-ai/infra/edge-gateway/pkg/auth/oidc"
-	"github.com/sandbox0-ai/infra/edge-gateway/pkg/config"
+	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/edge-gateway/pkg/db"
 	"github.com/sandbox0-ai/infra/edge-gateway/pkg/http/handlers"
 	"github.com/sandbox0-ai/infra/edge-gateway/pkg/middleware"
@@ -25,7 +25,7 @@ import (
 // Server represents the HTTP server for edge-gateway
 type Server struct {
 	router          *gin.Engine
-	cfg             *config.Config
+	cfg             *config.EdgeGatewayConfig
 	pool            *pgxpool.Pool
 	repo            *db.Repository
 	igRouter        *proxy.Router
@@ -57,7 +57,7 @@ type Server struct {
 
 // NewServer creates a new HTTP server
 func NewServer(
-	cfg *config.Config,
+	cfg *config.EdgeGatewayConfig,
 	pool *pgxpool.Pool,
 	logger *zap.Logger,
 ) (*Server, error) {

@@ -51,7 +51,7 @@ build-all: manifests
 	@go build -v -o k8s-plugin/bin/k8s-plugin ./k8s-plugin
 	@printf "$(GREEN)Building infra-operator...$(RESET)\n"
 	@mkdir -p infra-operator/bin
-	@go build -v -o infra-operator/bin/manager ./infra-operator/cmd/main.go
+	@go build -v -o infra-operator/bin/manager ./infra-operator/cmd/infra-operator
 
 # Build specific service: make build <service>
 build: manifests
@@ -91,7 +91,7 @@ build: manifests
 		elif [ "$$service" = "infra-operator" ]; then \
 			$(MAKE) operator-manifests; \
 			mkdir -p infra-operator/bin; \
-			go build -v -o infra-operator/bin/manager ./infra-operator/cmd/main.go; \
+			go build -v -o infra-operator/bin/manager ./infra-operator/cmd/infra-operator; \
 		fi; \
 	else \
 		echo "Error: Unknown service '$$service'"; \
@@ -206,4 +206,4 @@ operator-install: operator-manifests
 
 .PHONY: operator-run
 operator-run: operator-manifests
-	go run ./infra-operator/cmd/main.go
+	go run ./infra-operator/cmd/infra-operator

@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	apiconfig "github.com/sandbox0-ai/infra/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/infra/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/pkg/common"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/database"
@@ -182,20 +183,22 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	return nil
 }
 
-func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (map[string]any, error) {
-	var raw = (*runtime.RawExtension)(nil)
+func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (*apiconfig.SchedulerConfig, error) {
+	var raw *runtime.RawExtension
 	if infra.Spec.Services != nil && infra.Spec.Services.Scheduler != nil {
 		raw = infra.Spec.Services.Scheduler.Config
 	}
 
-	config, err := common.ParseServiceConfig(raw)
-	if err != nil {
+	cfg := apiconfig.DefaultSchedulerConfig()
+	if err := common.DecodeServiceConfig(raw, cfg); err != nil {
 		return nil, err
 	}
 
 	if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {
-		common.SetIfMissing(config, "database_url", dsn)
+		if cfg.DatabaseURL == "" {
+			cfg.DatabaseURL = dsn
+		}
 	}
 
-	return config, nil
+	return cfg, nil
 }

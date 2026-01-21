@@ -11,8 +11,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
-	"github.com/sandbox0-ai/infra/manager/pkg/config"
 	ctxpkg "github.com/sandbox0-ai/infra/manager/procd/pkg/context"
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/file"
 	procdhttp "github.com/sandbox0-ai/infra/manager/procd/pkg/http"

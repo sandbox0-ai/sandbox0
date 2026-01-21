@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sandbox0-ai/infra/edge-gateway/pkg/config"
+	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/edge-gateway/pkg/db"
 	"go.uber.org/zap"
 )
@@ -35,7 +35,7 @@ type Manager struct {
 }
 
 // NewManager creates a new OIDC manager
-func NewManager(ctx context.Context, cfg *config.Config, repo *db.Repository, logger *zap.Logger) (*Manager, error) {
+func NewManager(ctx context.Context, cfg *config.EdgeGatewayConfig, repo *db.Repository, logger *zap.Logger) (*Manager, error) {
 	m := &Manager{
 		providers: make(map[string]*Provider),
 		repo:      repo,

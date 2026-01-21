@@ -322,7 +322,7 @@ func (r *ResourceManager) ReconcileIngress(ctx context.Context, infra *infrav1al
 }
 
 // ReconcileServiceConfigMap creates or updates a configmap for a service.
-func (r *ResourceManager) ReconcileServiceConfigMap(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, labels map[string]string, config map[string]any) error {
+func (r *ResourceManager) ReconcileServiceConfigMap(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, labels map[string]string, config any) error {
 	if config == nil {
 		config = map[string]any{}
 	}
@@ -362,17 +362,16 @@ func (r *ResourceManager) ReconcileServiceConfigMap(ctx context.Context, infra *
 	return r.Client.Update(ctx, existing)
 }
 
-func ParseServiceConfig(raw *runtime.RawExtension) (map[string]any, error) {
-	config := map[string]any{}
+func DecodeServiceConfig(raw *runtime.RawExtension, config any) error {
 	if raw == nil || len(raw.Raw) == 0 {
-		return config, nil
+		return nil
 	}
 
-	if err := yaml.Unmarshal(raw.Raw, &config); err != nil {
-		return nil, fmt.Errorf("parse service config: %w", err)
+	if err := yaml.Unmarshal(raw.Raw, config); err != nil {
+		return fmt.Errorf("parse service config: %w", err)
 	}
 
-	return config, nil
+	return nil
 }
 
 func SetIfMissing(config map[string]any, key string, value any) {

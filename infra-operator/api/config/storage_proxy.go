@@ -7,8 +7,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config holds the server configuration
-type Config struct {
+// StorageProxyConfig holds the server configuration.
+type StorageProxyConfig struct {
 	// gRPC Server
 	GRPCAddr string `yaml:"grpc_addr"`
 	GRPCPort int    `yaml:"grpc_port"`
@@ -33,8 +33,6 @@ type Config struct {
 	CacheDir         string `yaml:"cache_dir"`
 	DefaultClusterId string `yaml:"default_cluster_id"`
 
-	// Security
-
 	// Monitoring
 	MetricsEnabled bool `yaml:"metrics_enabled"`
 	MetricsPort    int  `yaml:"metrics_port"`
@@ -52,9 +50,9 @@ type Config struct {
 	KubeconfigPath string `yaml:"kubeconfig_path"` // Path to kubeconfig file (empty for in-cluster config)
 }
 
-// defaultConfig returns the default configuration
-func defaultConfig() *Config {
-	return &Config{
+// DefaultStorageProxyConfig returns the default configuration.
+func DefaultStorageProxyConfig() *StorageProxyConfig {
+	return &StorageProxyConfig{
 		GRPCAddr:          "0.0.0.0",
 		GRPCPort:          8080,
 		HTTPAddr:          "0.0.0.0",
@@ -75,32 +73,23 @@ func defaultConfig() *Config {
 	}
 }
 
-var Cfg *Config
-
-func init() {
+// LoadStorageProxyConfig returns the storage-proxy configuration.
+func LoadStorageProxyConfig() *StorageProxyConfig {
 	path := os.Getenv("CONFIG_PATH")
 	if path == "" {
 		path = "/config/config.yaml"
 	}
 
-	var err error
-	Cfg, err = load(path)
+	cfg, err := loadStorageProxyConfig(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load config from %s: %v, using defaults\n", path, err)
-		Cfg = defaultConfig()
+		cfg = DefaultStorageProxyConfig()
 	}
+	return cfg
 }
 
-// LoadConfig returns the global configuration
-func LoadConfig() *Config {
-	return Cfg
-}
-
-// load loads configuration from a YAML file
-func load(path string) (*Config, error) {
-	// Default configuration
-	cfg := defaultConfig()
-
+func loadStorageProxyConfig(path string) (*StorageProxyConfig, error) {
+	cfg := DefaultStorageProxyConfig()
 	if path == "" {
 		return cfg, nil
 	}
@@ -120,12 +109,12 @@ func load(path string) (*Config, error) {
 	return cfg, nil
 }
 
-// Validate validates the configuration
-func (c *Config) Validate() error {
+// Validate validates the configuration.
+func (c *StorageProxyConfig) Validate() error {
 	return nil
 }
 
-// ConfigError represents a configuration error
+// ConfigError represents a configuration error.
 type ConfigError struct {
 	Message string
 }

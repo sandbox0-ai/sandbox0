@@ -1,4 +1,3 @@
-// Package config provides configuration for netd.
 package config
 
 import (
@@ -9,8 +8,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config holds netd configuration
-type Config struct {
+// NetdConfig holds netd configuration.
+type NetdConfig struct {
 	// LogLevel is the logging level (debug, info, warn, error)
 	LogLevel string `yaml:"log_level"`
 
@@ -72,9 +71,9 @@ type Config struct {
 	UseEDT bool `yaml:"use_edt"`
 }
 
-// defaultConfig returns the default configuration
-func defaultConfig() *Config {
-	return &Config{
+// DefaultNetdConfig returns the default configuration.
+func DefaultNetdConfig() *NetdConfig {
+	return &NetdConfig{
 		LogLevel:              "info",
 		MetricsPort:           9090,
 		HealthPort:            8080,
@@ -98,32 +97,23 @@ func defaultConfig() *Config {
 	}
 }
 
-var Cfg *Config
-
-func init() {
+// LoadNetdConfig returns the netd configuration.
+func LoadNetdConfig() *NetdConfig {
 	path := os.Getenv("CONFIG_PATH")
 	if path == "" {
 		path = "/config/config.yaml"
 	}
 
-	var err error
-	Cfg, err = load(path)
+	cfg, err := loadNetdConfig(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load config from %s: %v, using defaults\n", path, err)
-		Cfg = defaultConfig()
+		cfg = DefaultNetdConfig()
 	}
+	return cfg
 }
 
-// LoadConfig returns the global configuration
-func LoadConfig() *Config {
-	return Cfg
-}
-
-// load loads configuration from a YAML file
-func load(path string) (*Config, error) {
-	// Default config
-	cfg := defaultConfig()
-
+func loadNetdConfig(path string) (*NetdConfig, error) {
+	cfg := DefaultNetdConfig()
 	if path == "" {
 		return cfg, nil
 	}

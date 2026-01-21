@@ -3,7 +3,7 @@ package service
 import (
 	"context"
 
-	"github.com/sandbox0-ai/infra/manager/pkg/config"
+	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/manager/pkg/controller"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -64,7 +64,7 @@ func NewClusterService(
 
 // GetClusterSummary returns the cluster summary including capacity and pod counts
 func (s *ClusterService) GetClusterSummary(ctx context.Context) (*ClusterSummary, error) {
-	cfg := config.LoadConfig()
+	cfg := config.LoadManagerConfig()
 
 	// Get node count
 	nodes, err := s.nodeLister.List(labels.Everything())

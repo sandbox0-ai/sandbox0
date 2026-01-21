@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/sandbox0-ai/infra/storage-proxy/pkg/config"
+	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/db"
 	"github.com/sirupsen/logrus"
 )
@@ -161,7 +161,7 @@ func (m *MockVolumeProvider) RemoveVolume(volumeID string) {
 
 // Test helpers
 func newTestCoordinator(t *testing.T) (*Coordinator, *MockRepository, *MockVolumeProvider) {
-	cfg := &config.Config{
+	cfg := &config.StorageProxyConfig{
 		DefaultClusterId: "test-cluster",
 	}
 	logger := logrus.New()

@@ -4,12 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	edgeconfig "github.com/sandbox0-ai/infra/edge-gateway/pkg/config"
-	internalconfig "github.com/sandbox0-ai/infra/internal-gateway/pkg/config"
-	managerconfig "github.com/sandbox0-ai/infra/manager/pkg/config"
-	netdconfig "github.com/sandbox0-ai/infra/netd/pkg/config"
-	schedulerconfig "github.com/sandbox0-ai/infra/scheduler/pkg/config"
-	storageconfig "github.com/sandbox0-ai/infra/storage-proxy/pkg/config"
+	apiconfig "github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"gopkg.in/yaml.v3"
 )
 
@@ -20,12 +15,12 @@ type configEntry struct {
 
 func main() {
 	entries := []configEntry{
-		{name: "edge-gateway", cfg: edgeconfig.LoadConfig()},
-		{name: "internal-gateway", cfg: internalconfig.LoadConfig()},
-		{name: "manager", cfg: managerconfig.LoadConfig()},
-		{name: "scheduler", cfg: schedulerconfig.LoadConfig()},
-		{name: "storage-proxy", cfg: storageconfig.LoadConfig()},
-		{name: "netd", cfg: netdconfig.LoadConfig()},
+		{name: "edge-gateway", cfg: apiconfig.LoadEdgeGatewayConfig()},
+		{name: "internal-gateway", cfg: apiconfig.LoadInternalGatewayConfig()},
+		{name: "manager", cfg: apiconfig.LoadManagerConfig()},
+		{name: "scheduler", cfg: apiconfig.LoadSchedulerConfig()},
+		{name: "storage-proxy", cfg: apiconfig.LoadStorageProxyConfig()},
+		{name: "netd", cfg: apiconfig.LoadNetdConfig()},
 	}
 
 	for _, entry := range entries {

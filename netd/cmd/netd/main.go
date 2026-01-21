@@ -11,7 +11,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
-	"github.com/sandbox0-ai/infra/netd/pkg/config"
+	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/netd/pkg/dataplane"
 	"github.com/sandbox0-ai/infra/netd/pkg/metrics"
 	"github.com/sandbox0-ai/infra/netd/pkg/proxy"
@@ -24,7 +24,7 @@ import (
 
 func main() {
 	// Load configuration
-	cfg := config.LoadConfig()
+	cfg := config.LoadNetdConfig()
 
 	// Initialize logger
 	logger := initLogger(cfg.LogLevel)

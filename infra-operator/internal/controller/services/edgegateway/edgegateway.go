@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	apiconfig "github.com/sandbox0-ai/infra/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/infra/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/pkg/common"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/database"
@@ -178,23 +179,27 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	return nil
 }
 
-func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (map[string]any, error) {
+func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (*apiconfig.EdgeGatewayConfig, error) {
 	var raw *runtime.RawExtension
 	if infra.Spec.Services != nil && infra.Spec.Services.EdgeGateway != nil {
 		raw = infra.Spec.Services.EdgeGateway.Config
 	}
 
-	config, err := common.ParseServiceConfig(raw)
-	if err != nil {
+	cfg := apiconfig.DefaultEdgeGatewayConfig()
+	if err := common.DecodeServiceConfig(raw, cfg); err != nil {
 		return nil, err
 	}
 
 	if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {
-		common.SetIfMissing(config, "database_url", dsn)
+		if cfg.DatabaseURL == "" {
+			cfg.DatabaseURL = dsn
+		}
 	}
 
 	internalGatewayURL := fmt.Sprintf("http://%s-internal-gateway:8443", infra.Name)
-	common.SetIfMissing(config, "default_internal_gateway_url", internalGatewayURL)
+	if cfg.DefaultInternalGatewayURL == "" {
+		cfg.DefaultInternalGatewayURL = internalGatewayURL
+	}
 
 	if infra.Spec.InitUser != nil && infra.Spec.InitUser.Enabled {
 		password, err := common.GetSecretValue(ctx, r.Resources.Client, infra.Namespace, infra.Spec.InitUser.PasswordSecret)
@@ -202,17 +207,22 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 			return nil, err
 		}
 
-		builtInAuth := common.GetOrInitMap(config, "built_in_auth")
-		if _, ok := builtInAuth["init_user"]; !ok {
-			builtInAuth["init_user"] = map[string]any{
-				"email":    infra.Spec.InitUser.Email,
-				"password": password,
-				"name":     infra.Spec.InitUser.Name,
+		if cfg.BuiltInAuth.InitUser == nil {
+			cfg.BuiltInAuth.InitUser = &apiconfig.InitUserConfig{
+				Email:    infra.Spec.InitUser.Email,
+				Password: password,
+				Name:     infra.Spec.InitUser.Name,
 			}
 		}
 	}
 
-	return config, nil
+	for i := range cfg.OIDCProviders {
+		if len(cfg.OIDCProviders[i].Scopes) == 0 {
+			cfg.OIDCProviders[i].Scopes = []string{"openid", "email", "profile"}
+		}
+	}
+
+	return cfg, nil
 }
 
 func updateEndpoints(infra *infrav1alpha1.Sandbox0Infra, serviceName string, servicePort int32) {

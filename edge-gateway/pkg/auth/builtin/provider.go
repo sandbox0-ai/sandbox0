@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/sandbox0-ai/infra/edge-gateway/pkg/config"
+	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/edge-gateway/pkg/db"
 	"golang.org/x/crypto/bcrypt"
 )

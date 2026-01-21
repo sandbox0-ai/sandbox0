@@ -14,7 +14,7 @@ import (
 	"github.com/sandbox0-ai/infra/pkg/pubsub"
 	schedmigrations "github.com/sandbox0-ai/infra/scheduler/migrations"
 	"github.com/sandbox0-ai/infra/scheduler/pkg/client"
-	"github.com/sandbox0-ai/infra/scheduler/pkg/config"
+	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/scheduler/pkg/db"
 	httpserver "github.com/sandbox0-ai/infra/scheduler/pkg/http"
 	schedpubsub "github.com/sandbox0-ai/infra/scheduler/pkg/pubsub"
@@ -25,7 +25,7 @@ import (
 
 func main() {
 	// Load configuration
-	cfg := config.LoadConfig()
+	cfg := config.LoadSchedulerConfig()
 
 	// Initialize logger
 	logger := initLogger(cfg.LogLevel)

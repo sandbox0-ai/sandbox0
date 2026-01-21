@@ -12,7 +12,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// ProcdConfig holds all configuration for Procd.
+// ProcdConfig holds all configuration for procd.
 type ProcdConfig struct {
 	// Sandbox identity
 	SandboxID  string `yaml:"sandbox_id"`
@@ -37,8 +37,8 @@ type ProcdConfig struct {
 	setKeys map[string]any `yaml:"-"`
 }
 
-// defaultProcdConfig returns the default configuration.
-func defaultProcdConfig() ProcdConfig {
+// DefaultProcdConfig returns the default configuration.
+func DefaultProcdConfig() ProcdConfig {
 	return ProcdConfig{
 		HTTPPort:             49983,
 		LogLevel:             "info",
@@ -96,7 +96,7 @@ var (
 	procdCfgOnce sync.Once
 )
 
-// LoadProcdConfig returns the Procd configuration.
+// LoadProcdConfig returns the procd configuration.
 func LoadProcdConfig() *ProcdConfig {
 	procdCfgOnce.Do(func() {
 		procdCfg = loadProcdConfig()
@@ -111,7 +111,7 @@ func (c *ProcdConfig) Validate() error {
 }
 
 func loadProcdConfig() *ProcdConfig {
-	cfg := defaultProcdConfig()
+	cfg := DefaultProcdConfig()
 	path := os.Getenv("CONFIG_PATH")
 	if path == "" {
 		path = "/config/config.yaml"

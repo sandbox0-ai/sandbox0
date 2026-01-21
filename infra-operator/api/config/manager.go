@@ -8,8 +8,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config holds the configuration for the manager
-type Config struct {
+// ManagerConfig holds the configuration for the manager.
+type ManagerConfig struct {
 	// HTTP Server
 	HTTPPort int `yaml:"http_port"`
 
@@ -51,9 +51,9 @@ type Config struct {
 	ProcdConfig ProcdConfig `yaml:"procd_config"`
 }
 
-// defaultConfig returns the default configuration
-func defaultConfig() *Config {
-	return &Config{
+// DefaultManagerConfig returns the default configuration.
+func DefaultManagerConfig() *ManagerConfig {
+	return &ManagerConfig{
 		HTTPPort:                 8080,
 		ManagerImage:             "sandbox0ai/infra:latest",
 		DefaultTemplateName:      "default",
@@ -71,36 +71,27 @@ func defaultConfig() *Config {
 		WebhookCertPath:          "/tmp/k8s-webhook-server/serving-certs/tls.crt",
 		WebhookKeyPath:           "/tmp/k8s-webhook-server/serving-certs/tls.key",
 		DefaultSandboxTTL:        5 * time.Minute,
-		ProcdConfig:              defaultProcdConfig(),
+		ProcdConfig:              DefaultProcdConfig(),
 	}
 }
 
-var Cfg *Config
-
-func init() {
+// LoadManagerConfig returns the manager configuration.
+func LoadManagerConfig() *ManagerConfig {
 	path := os.Getenv("CONFIG_PATH")
 	if path == "" {
 		path = "/config/config.yaml"
 	}
 
-	var err error
-	Cfg, err = load(path)
+	cfg, err := loadManagerConfig(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load config from %s: %v, using defaults\n", path, err)
-		Cfg = defaultConfig()
+		cfg = DefaultManagerConfig()
 	}
+	return cfg
 }
 
-// LoadConfig returns the global configuration
-func LoadConfig() *Config {
-	return Cfg
-}
-
-// load loads configuration from a YAML file
-func load(path string) (*Config, error) {
-	// Default configuration
-	cfg := defaultConfig()
-
+func loadManagerConfig(path string) (*ManagerConfig, error) {
+	cfg := DefaultManagerConfig()
 	if path == "" {
 		return cfg, nil
 	}

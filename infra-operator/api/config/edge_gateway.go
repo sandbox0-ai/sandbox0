@@ -8,8 +8,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config holds all configuration for edge-gateway
-type Config struct {
+// EdgeGatewayConfig holds all configuration for edge-gateway.
+type EdgeGatewayConfig struct {
 	// Edition: "saas" or "self-hosted"
 	Edition string `yaml:"edition"`
 
@@ -32,8 +32,6 @@ type Config struct {
 	JWTAccessTokenTTL  time.Duration `yaml:"jwt_access_token_ttl"`
 	JWTRefreshTokenTTL time.Duration `yaml:"jwt_refresh_token_ttl"`
 
-	// Internal authentication (for generating tokens to internal-gateway)
-
 	// Rate limiting
 	RateLimitRPS   int `yaml:"rate_limit_rps"`
 	RateLimitBurst int `yaml:"rate_limit_burst"`
@@ -52,7 +50,7 @@ type Config struct {
 	BaseURL string `yaml:"base_url"`
 }
 
-// BuiltInAuthConfig configures the built-in authentication
+// BuiltInAuthConfig configures the built-in authentication.
 type BuiltInAuthConfig struct {
 	// Enabled enables built-in email/password authentication
 	Enabled bool `yaml:"enabled"`
@@ -70,14 +68,14 @@ type BuiltInAuthConfig struct {
 	InitUser *InitUserConfig `yaml:"init_user"`
 }
 
-// InitUserConfig configures the initial admin user
+// InitUserConfig configures the initial admin user.
 type InitUserConfig struct {
 	Email    string `yaml:"email"`
 	Password string `yaml:"password"`
 	Name     string `yaml:"name"`
 }
 
-// OIDCProviderConfig configures an OIDC provider
+// OIDCProviderConfig configures an OIDC provider.
 type OIDCProviderConfig struct {
 	// ID is the unique identifier for the provider (e.g., "github", "google")
 	ID string `yaml:"id"`
@@ -107,7 +105,7 @@ type OIDCProviderConfig struct {
 	TeamMapping *TeamMappingConfig `yaml:"team_mapping"`
 }
 
-// TeamMappingConfig configures automatic team mapping for OIDC
+// TeamMappingConfig configures automatic team mapping for OIDC.
 type TeamMappingConfig struct {
 	// Domain filters users by email domain
 	Domain string `yaml:"domain"`
@@ -119,9 +117,9 @@ type TeamMappingConfig struct {
 	DefaultTeamID string `yaml:"default_team_id"`
 }
 
-// defaultConfig returns the default configuration
-func defaultConfig() *Config {
-	return &Config{
+// DefaultEdgeGatewayConfig returns the default configuration.
+func DefaultEdgeGatewayConfig() *EdgeGatewayConfig {
+	return &EdgeGatewayConfig{
 		Edition:                   "self-hosted",
 		HTTPPort:                  8080,
 		LogLevel:                  "info",
@@ -148,32 +146,23 @@ func defaultConfig() *Config {
 	}
 }
 
-var Cfg *Config
-
-func init() {
+// LoadEdgeGatewayConfig returns the edge-gateway configuration.
+func LoadEdgeGatewayConfig() *EdgeGatewayConfig {
 	path := os.Getenv("CONFIG_PATH")
 	if path == "" {
 		path = "/config/config.yaml"
 	}
 
-	var err error
-	Cfg, err = load(path)
+	cfg, err := loadEdgeGatewayConfig(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load config from %s: %v, using defaults\n", path, err)
-		Cfg = defaultConfig()
+		cfg = DefaultEdgeGatewayConfig()
 	}
+	return cfg
 }
 
-// LoadConfig returns the global configuration
-func LoadConfig() *Config {
-	return Cfg
-}
-
-// load loads configuration from a YAML file
-func load(path string) (*Config, error) {
-	// Default configuration
-	cfg := defaultConfig()
-
+func loadEdgeGatewayConfig(path string) (*EdgeGatewayConfig, error) {
+	cfg := DefaultEdgeGatewayConfig()
 	if path == "" {
 		return cfg, nil
 	}
@@ -200,8 +189,8 @@ func load(path string) (*Config, error) {
 	return cfg, nil
 }
 
-// GetOIDCProvider returns an OIDC provider by ID
-func (c *Config) GetOIDCProvider(id string) *OIDCProviderConfig {
+// GetOIDCProvider returns an OIDC provider by ID.
+func (c *EdgeGatewayConfig) GetOIDCProvider(id string) *OIDCProviderConfig {
 	for i := range c.OIDCProviders {
 		if c.OIDCProviders[i].ID == id && c.OIDCProviders[i].Enabled {
 			return &c.OIDCProviders[i]
@@ -210,8 +199,8 @@ func (c *Config) GetOIDCProvider(id string) *OIDCProviderConfig {
 	return nil
 }
 
-// GetEnabledOIDCProviders returns all enabled OIDC providers
-func (c *Config) GetEnabledOIDCProviders() []OIDCProviderConfig {
+// GetEnabledOIDCProviders returns all enabled OIDC providers.
+func (c *EdgeGatewayConfig) GetEnabledOIDCProviders() []OIDCProviderConfig {
 	var providers []OIDCProviderConfig
 	for _, p := range c.OIDCProviders {
 		if p.Enabled {

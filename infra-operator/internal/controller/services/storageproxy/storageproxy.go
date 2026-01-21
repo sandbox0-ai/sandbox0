@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	apiconfig "github.com/sandbox0-ai/infra/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/infra/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/pkg/common"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/database"
@@ -197,44 +198,62 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	return nil
 }
 
-func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (map[string]any, error) {
+func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (*apiconfig.StorageProxyConfig, error) {
 	var raw *runtime.RawExtension
 	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil {
 		raw = infra.Spec.Services.StorageProxy.Config
 	}
 
-	config, err := common.ParseServiceConfig(raw)
-	if err != nil {
+	cfg := apiconfig.DefaultStorageProxyConfig()
+	if err := common.DecodeServiceConfig(raw, cfg); err != nil {
 		return nil, err
 	}
 
 	if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {
-		common.SetIfMissing(config, "database_url", dsn)
+		if cfg.DatabaseURL == "" {
+			cfg.DatabaseURL = dsn
+		}
 	}
 
 	metaURL, err := database.GetJuicefsMetaURL(ctx, r.Resources.Client, infra)
 	if err != nil {
 		return nil, err
 	}
-	common.SetIfMissing(config, "meta_url", metaURL)
+	if cfg.MetaURL == "" {
+		cfg.MetaURL = metaURL
+	}
 
 	storageConfig, err := storage.GetStorageConfig(ctx, r.Resources.Client, infra)
 	if err != nil {
 		return nil, err
 	}
 
-	common.SetIfMissing(config, "s3_bucket", storageConfig.Bucket)
-	common.SetIfMissing(config, "s3_region", storageConfig.Region)
-	common.SetIfMissing(config, "s3_endpoint", storageConfig.Endpoint)
-	common.SetIfMissing(config, "s3_access_key", storageConfig.AccessKey)
-	common.SetIfMissing(config, "s3_secret_key", storageConfig.SecretKey)
+	if cfg.S3Bucket == "" {
+		cfg.S3Bucket = storageConfig.Bucket
+	}
+	if cfg.S3Region == "" {
+		cfg.S3Region = storageConfig.Region
+	}
+	if cfg.S3Endpoint == "" {
+		cfg.S3Endpoint = storageConfig.Endpoint
+	}
+	if cfg.S3AccessKey == "" {
+		cfg.S3AccessKey = storageConfig.AccessKey
+	}
+	if cfg.S3SecretKey == "" {
+		cfg.S3SecretKey = storageConfig.SecretKey
+	}
 	if storageConfig.SessionToken != "" {
-		common.SetIfMissing(config, "s3_session_token", storageConfig.SessionToken)
+		if cfg.S3SessionToken == "" {
+			cfg.S3SessionToken = storageConfig.SessionToken
+		}
 	}
 
 	if infra.Spec.Cluster != nil && infra.Spec.Cluster.ID != "" {
-		common.SetIfMissing(config, "default_cluster_id", infra.Spec.Cluster.ID)
+		if cfg.DefaultClusterId == "" {
+			cfg.DefaultClusterId = infra.Spec.Cluster.ID
+		}
 	}
 
-	return config, nil
+	return cfg, nil
 }

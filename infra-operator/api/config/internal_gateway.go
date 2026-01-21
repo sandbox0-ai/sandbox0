@@ -8,8 +8,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config holds all configuration for internal-gateway
-type Config struct {
+// InternalGatewayConfig holds all configuration for internal-gateway.
+type InternalGatewayConfig struct {
 	// Server configuration
 	HTTPPort int    `yaml:"http_port"`
 	LogLevel string `yaml:"log_level"`
@@ -29,9 +29,9 @@ type Config struct {
 	HealthCheckPeriod time.Duration `yaml:"health_check_period"`
 }
 
-// defaultConfig returns the default configuration
-func defaultConfig() *Config {
-	return &Config{
+// DefaultInternalGatewayConfig returns the default configuration.
+func DefaultInternalGatewayConfig() *InternalGatewayConfig {
+	return &InternalGatewayConfig{
 		HTTPPort:          8443,
 		LogLevel:          "info",
 		ManagerURL:        "http://manager.sandbox0-system:8080",
@@ -42,32 +42,23 @@ func defaultConfig() *Config {
 	}
 }
 
-var Cfg *Config
-
-func init() {
+// LoadInternalGatewayConfig returns the internal-gateway configuration.
+func LoadInternalGatewayConfig() *InternalGatewayConfig {
 	path := os.Getenv("CONFIG_PATH")
 	if path == "" {
 		path = "/config/config.yaml"
 	}
 
-	var err error
-	Cfg, err = load(path)
+	cfg, err := loadInternalGatewayConfig(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load config from %s: %v, using defaults\n", path, err)
-		Cfg = defaultConfig()
+		cfg = DefaultInternalGatewayConfig()
 	}
+	return cfg
 }
 
-// LoadConfig returns the global configuration
-func LoadConfig() *Config {
-	return Cfg
-}
-
-// load loads configuration from a YAML file
-func load(path string) (*Config, error) {
-	// Default configuration
-	cfg := defaultConfig()
-
+func loadInternalGatewayConfig(path string) (*InternalGatewayConfig, error) {
+	cfg := DefaultInternalGatewayConfig()
 	if path == "" {
 		return cfg, nil
 	}

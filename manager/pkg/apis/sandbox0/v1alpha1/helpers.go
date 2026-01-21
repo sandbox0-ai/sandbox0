@@ -3,7 +3,7 @@ package v1alpha1
 import (
 	"sort"
 
-	"github.com/sandbox0-ai/infra/manager/pkg/config"
+	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -95,7 +95,7 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Conta
 }
 
 func appendProcdConfigEnvVars(envVars []corev1.EnvVar) []corev1.EnvVar {
-	cfg := config.LoadConfig()
+	cfg := config.LoadManagerConfig()
 	if cfg == nil {
 		return envVars
 	}
@@ -125,7 +125,7 @@ func appendProcdConfigEnvVars(envVars []corev1.EnvVar) []corev1.EnvVar {
 }
 
 func applyProcdInit(spec *corev1.PodSpec) {
-	cfg := config.LoadConfig()
+	cfg := config.LoadManagerConfig()
 	managerImage := cfg.ManagerImage
 
 	spec.Volumes = append(spec.Volumes, corev1.Volume{

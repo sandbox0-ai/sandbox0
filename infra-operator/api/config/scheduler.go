@@ -8,8 +8,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config holds all configuration for scheduler
-type Config struct {
+// SchedulerConfig holds all configuration for scheduler.
+type SchedulerConfig struct {
 	// Server configuration
 	HTTPPort int    `yaml:"http_port"`
 	LogLevel string `yaml:"log_level"`
@@ -24,9 +24,9 @@ type Config struct {
 	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"`
 }
 
-// defaultConfig returns the default configuration
-func defaultConfig() *Config {
-	return &Config{
+// DefaultSchedulerConfig returns the default configuration.
+func DefaultSchedulerConfig() *SchedulerConfig {
+	return &SchedulerConfig{
 		HTTPPort:          8080,
 		LogLevel:          "info",
 		DatabaseURL:       "",
@@ -35,32 +35,23 @@ func defaultConfig() *Config {
 	}
 }
 
-var Cfg *Config
-
-func init() {
+// LoadSchedulerConfig returns the scheduler configuration.
+func LoadSchedulerConfig() *SchedulerConfig {
 	path := os.Getenv("CONFIG_PATH")
 	if path == "" {
 		path = "/config/config.yaml"
 	}
 
-	var err error
-	Cfg, err = load(path)
+	cfg, err := loadSchedulerConfig(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load config from %s: %v, using defaults\n", path, err)
-		Cfg = defaultConfig()
+		cfg = DefaultSchedulerConfig()
 	}
+	return cfg
 }
 
-// LoadConfig returns the global configuration
-func LoadConfig() *Config {
-	return Cfg
-}
-
-// load loads configuration from a YAML file
-func load(path string) (*Config, error) {
-	// Default configuration
-	cfg := defaultConfig()
-
+func loadSchedulerConfig(path string) (*SchedulerConfig, error) {
+	cfg := DefaultSchedulerConfig()
 	if path == "" {
 		return cfg, nil
 	}

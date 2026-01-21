@@ -9,7 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sandbox0-ai/infra/internal-gateway/pkg/client"
-	"github.com/sandbox0-ai/infra/internal-gateway/pkg/config"
+	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/internal-gateway/pkg/middleware"
 	"github.com/sandbox0-ai/infra/pkg/auth"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
@@ -20,7 +20,7 @@ import (
 // Server represents the HTTP server for internal-gateway
 type Server struct {
 	router          *gin.Engine
-	cfg             *config.Config
+	cfg             *config.InternalGatewayConfig
 	proxy2Mgr       *proxy.Router
 	proxy2sp        *proxy.Router
 	managerClient   *client.ManagerClient
@@ -33,7 +33,7 @@ type Server struct {
 
 // NewServer creates a new HTTP server
 func NewServer(
-	cfg *config.Config,
+	cfg *config.InternalGatewayConfig,
 	logger *zap.Logger,
 ) (*Server, error) {
 	// Set gin mode

@@ -221,6 +221,13 @@ func (s *Server) readinessCheck(c *gin.Context) {
 
 func requestLogger(logger *zap.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Skip logging for health check and readiness check
+		path := c.Request.URL.Path
+		if path == "/healthz" || path == "/readyz" {
+			c.Next()
+			return
+		}
+
 		start := time.Now()
 
 		// Process request

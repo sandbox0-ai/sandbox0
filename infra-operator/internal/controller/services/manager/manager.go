@@ -21,7 +21,12 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	apiconfig "github.com/sandbox0-ai/infra/infra-operator/api/config"
@@ -29,7 +34,19 @@ import (
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/pkg/common"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/database"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/internalauth"
+	templatev1alpha1 "github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
 	pkginternalauth "github.com/sandbox0-ai/infra/pkg/internalauth"
+)
+
+const (
+	defaultTemplateName        = "default"
+	defaultTemplateImage       = "sandbox0ai/otemplates:default-v0.1.0"
+	defaultTemplateCPU         = "500m"
+	defaultTemplateMemory      = "512Mi"
+	defaultTemplateDisplayName = "Default"
+	defaultTemplateNamespace   = "sandbox0"
+	defaultTemplateMinIdle     = int32(1)
+	defaultTemplateMaxIdle     = int32(5)
 )
 
 type Reconciler struct {
@@ -64,6 +81,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	if err != nil {
 		return err
 	}
+
+	// Try to create the default template namespace
+	templateNamespace := config.TemplateNamespace
+	if templateNamespace != "" {
+		if err := r.Resources.ReconcileNamespace(ctx, templateNamespace); err != nil {
+			return fmt.Errorf("reconcile namespace %s: %w", templateNamespace, err)
+		}
+	}
+
+	if err := r.ensureDefaultTemplate(ctx, infra, config); err != nil {
+		return err
+	}
+
 	if err := r.Resources.ReconcileServiceConfigMap(ctx, infra, deploymentName, labels, config); err != nil {
 		return err
 	}
@@ -220,9 +250,19 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		cfg.DatabaseURL = dsn
 	}
 
-	if cfg.DefaultTemplateNamespace == "" {
-		cfg.DefaultTemplateNamespace = infra.Namespace
+	if cfg.DefaultTemplate == nil {
+		cfg.DefaultTemplate = &apiconfig.DefaultTemplateConfig{}
 	}
+	if cfg.DefaultTemplate.Name == "" {
+		cfg.DefaultTemplate.Name = defaultTemplateName
+	}
+	if cfg.DefaultTemplate.Image == "" {
+		cfg.DefaultTemplate.Image = defaultTemplateImage
+	}
+	if cfg.TemplateNamespace == "" {
+		cfg.TemplateNamespace = defaultTemplateNamespace
+	}
+	cfg.DefaultTemplate.Pool = applyDefaultTemplatePool(cfg.DefaultTemplate.Pool)
 
 	if infra.Spec.Cluster != nil && infra.Spec.Cluster.ID != "" {
 		cfg.DefaultClusterId = infra.Spec.Cluster.ID
@@ -243,4 +283,109 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	cfg.ProcdConfig.StorageProxyPort = int(common.ResolveServicePort(storageProxyServiceConfig, int32(storageProxyConfig.GRPCPort)))
 
 	return cfg, nil
+}
+
+func (r *Reconciler) ensureDefaultTemplate(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, config *apiconfig.ManagerConfig) error {
+	logger := log.FromContext(ctx)
+	name := ""
+	namespace := ""
+	image := ""
+	pool := apiconfig.DefaultTemplatePoolConfig{}
+	if config.DefaultTemplate != nil {
+		name = config.DefaultTemplate.Name
+		image = config.DefaultTemplate.Image
+		pool = config.DefaultTemplate.Pool
+	}
+	if name == "" {
+		name = defaultTemplateName
+	}
+	namespace = config.TemplateNamespace
+	if namespace == "" {
+		namespace = defaultTemplateNamespace
+	}
+	if image == "" {
+		image = defaultTemplateImage
+	}
+	pool = applyDefaultTemplatePool(pool)
+
+	existing := &templatev1alpha1.SandboxTemplate{}
+	err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, existing)
+	if err == nil {
+		return nil
+	}
+	if !errors.IsNotFound(err) {
+		return err
+	}
+
+	template := &templatev1alpha1.SandboxTemplate{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: templatev1alpha1.SchemeGroupVersion.String(),
+			Kind:       "SandboxTemplate",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/managed-by": "sandbox0infra-operator",
+				"sandbox0.ai/template-role":    "default",
+			},
+			Annotations: map[string]string{
+				"sandbox0.ai/infra-name":      infra.Name,
+				"sandbox0.ai/infra-namespace": infra.Namespace,
+			},
+		},
+		Spec: templatev1alpha1.SandboxTemplateSpec{
+			DisplayName: defaultTemplateDisplayName,
+			Description: "Default template installed by infra-operator.",
+			MainContainer: templatev1alpha1.ContainerSpec{
+				Image: image,
+				Resources: templatev1alpha1.ResourceQuota{
+					CPU:    resource.MustParse(defaultTemplateCPU),
+					Memory: resource.MustParse(defaultTemplateMemory),
+				},
+			},
+			Pool: templatev1alpha1.PoolStrategy{
+				MinIdle:   pool.MinIdle,
+				MaxIdle:   pool.MaxIdle,
+				AutoScale: pool.AutoScale,
+			},
+			Network: &templatev1alpha1.TplSandboxNetworkPolicy{
+				Mode: templatev1alpha1.NetworkModeAllowAll,
+			},
+			Public: true,
+		},
+	}
+
+	if config.DefaultClusterId != "" {
+		template.Spec.ClusterId = &config.DefaultClusterId
+	}
+
+	if namespace == infra.Namespace {
+		if err := controllerutil.SetControllerReference(infra, template, r.Resources.Scheme); err != nil {
+			return err
+		}
+	}
+
+	if err := r.Resources.Client.Create(ctx, template); err != nil {
+		return err
+	}
+
+	logger.Info("Default template created", "name", name, "namespace", namespace)
+	return nil
+}
+
+func applyDefaultTemplatePool(pool apiconfig.DefaultTemplatePoolConfig) apiconfig.DefaultTemplatePoolConfig {
+	if pool.MinIdle == 0 && pool.MaxIdle == 0 && !pool.AutoScale {
+		pool.MinIdle = defaultTemplateMinIdle
+		pool.MaxIdle = defaultTemplateMaxIdle
+		pool.AutoScale = true
+		return pool
+	}
+	if pool.MinIdle == 0 {
+		pool.MinIdle = defaultTemplateMinIdle
+	}
+	if pool.MaxIdle == 0 {
+		pool.MaxIdle = defaultTemplateMaxIdle
+	}
+	return pool
 }

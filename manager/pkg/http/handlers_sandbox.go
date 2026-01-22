@@ -28,15 +28,21 @@ func (s *Server) claimSandbox(c *gin.Context) {
 		})
 		return
 	}
-	if req.Template == "" || req.Namespace == "" {
-		cfg := config.LoadManagerConfig()
-		if req.Template == "" {
-			req.Template = cfg.DefaultTemplateName
-		}
-		if req.Namespace == "" {
-			req.Namespace = cfg.DefaultTemplateNamespace
-		}
+	cfg := config.LoadManagerConfig()
+	defaultTemplate := config.DefaultTemplateConfig{}
+	if cfg.DefaultTemplate != nil {
+		defaultTemplate = *cfg.DefaultTemplate
 	}
+	if defaultTemplate.Name == "" {
+		defaultTemplate.Name = "default"
+	}
+	if req.Template == "" {
+		req.Template = defaultTemplate.Name
+	}
+	if cfg.TemplateNamespace == "" {
+		cfg.TemplateNamespace = "sandbox0"
+	}
+	req.Namespace = cfg.TemplateNamespace
 
 	resp, err := s.sandboxService.ClaimSandbox(c.Request.Context(), &req)
 	if err != nil {

@@ -23,6 +23,13 @@ func NewRequestLogger(logger *zap.Logger) *RequestLogger {
 // Logger returns a gin middleware that logs requests
 func (rl *RequestLogger) Logger() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Skip logging for health check and readiness check
+		path := c.Request.URL.Path
+		if path == "/healthz" || path == "/readyz" {
+			c.Next()
+			return
+		}
+
 		// Generate request ID
 		requestID := uuid.New().String()
 		c.Set("request_id", requestID)

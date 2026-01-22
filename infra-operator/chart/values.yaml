@@ -39,6 +39,7 @@ rbac:
       resources:
       - configmaps
       - events
+      - namespaces
       - nodes
       - persistentvolumeclaims
       - pods

@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	infrav1alpha1 "github.com/sandbox0-ai/infra/infra-operator/api/v1alpha1"
 )
@@ -385,6 +386,37 @@ func (r *ResourceManager) ReconcileServiceConfigMap(ctx context.Context, infra *
 	existing.Data = desired.Data
 	existing.Labels = desired.Labels
 	return r.Client.Update(ctx, existing)
+}
+
+// ReconcileNamespace creates a namespace if it does not exist.
+// It ignores errors if the operator does not have permission to create the namespace.
+func (r *ResourceManager) ReconcileNamespace(ctx context.Context, name string) error {
+	ns := &corev1.Namespace{}
+	err := r.Client.Get(ctx, types.NamespacedName{Name: name}, ns)
+	if err == nil {
+		return nil
+	}
+
+	if !errors.IsNotFound(err) {
+		return err
+	}
+
+	desired := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+		},
+	}
+
+	err = r.Client.Create(ctx, desired)
+	if err != nil {
+		if errors.IsForbidden(err) {
+			log.FromContext(ctx).Info("Forbidden to create namespace, skipping", "namespace", name)
+			return nil
+		}
+		return err
+	}
+
+	return nil
 }
 
 func GetOrInitMap(config map[string]any, key string) map[string]any {

@@ -21,14 +21,12 @@ type ManagerConfig struct {
 
 	// template
 	// +optional
-	// +kubebuilder:default="default"
-	DefaultTemplateName string `yaml:"default_template_name" json:"defaultTemplateName"`
+	// +kubebuilder:default={}
+	DefaultTemplate *DefaultTemplateConfig `yaml:"default_template" json:"defaultTemplate"`
 	// +optional
-	DefaultTemplateNamespace string `yaml:"default_template_namespace" json:"defaultTemplateNamespace"`
-	// +optional
-	// +kubebuilder:default="sandbox0ai/otemplates:default-v0.1.0"
-	DefaultTemplateImage string `yaml:"default_template_image" json:"defaultTemplateImage"`
-	DefaultClusterId     string `yaml:"default_cluster_id" json:"-"`
+	// +kubebuilder:default="sandbox0"
+	TemplateNamespace string `yaml:"template_namespace" json:"templateNamespace"`
+	DefaultClusterId  string `yaml:"default_cluster_id" json:"-"`
 
 	// Kubernetes
 	// +optional
@@ -119,6 +117,32 @@ type ManagerConfig struct {
 	// +optional
 	// +kubebuilder:default={}
 	ProcdConfig ProcdConfig `yaml:"procd_config" json:"procdConfig"`
+}
+
+// DefaultTemplateConfig holds defaults for the installed template.
+type DefaultTemplateConfig struct {
+	// +optional
+	// +kubebuilder:default="default"
+	Name string `yaml:"name" json:"name"`
+	// +optional
+	// +kubebuilder:default="sandbox0ai/otemplates:default-v0.1.0"
+	Image string `yaml:"image" json:"image"`
+	// +optional
+	// +kubebuilder:default={}
+	Pool DefaultTemplatePoolConfig `yaml:"pool" json:"pool"`
+}
+
+// DefaultTemplatePoolConfig holds pool defaults for the installed template.
+type DefaultTemplatePoolConfig struct {
+	// +optional
+	// +kubebuilder:default=1
+	MinIdle int32 `yaml:"min_idle" json:"minIdle"`
+	// +optional
+	// +kubebuilder:default=5
+	MaxIdle int32 `yaml:"max_idle" json:"maxIdle"`
+	// +optional
+	// +kubebuilder:default=true
+	AutoScale bool `yaml:"auto_scale" json:"autoScale"`
 }
 
 // LoadManagerConfig returns the manager configuration.

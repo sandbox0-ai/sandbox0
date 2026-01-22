@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/infra/infra-operator/api/config"
+	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/infra/manager/pkg/controller"
 	clientset "github.com/sandbox0-ai/infra/manager/pkg/generated/clientset/versioned"
 	"go.uber.org/zap"
@@ -41,7 +41,11 @@ func (s *TemplateService) CreateTemplate(ctx context.Context, template *v1alpha1
 	// We should probably use the same namespace as the manager or let the user specify.
 	if template.Namespace == "" {
 		cfg := config.LoadManagerConfig()
-		template.Namespace = cfg.DefaultTemplateNamespace // Fallback
+		if cfg.TemplateNamespace != "" {
+			template.Namespace = cfg.TemplateNamespace
+		} else {
+			template.Namespace = "sandbox0"
+		}
 	}
 
 	// Set default values if needed

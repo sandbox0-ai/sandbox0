@@ -843,14 +843,34 @@ spec:
                             default: 5m
                             description: Sandbox
                             type: string
-                          defaultTemplateImage:
-                            default: sandbox0ai/otemplates:default-v0.1.0
-                            type: string
-                          defaultTemplateName:
-                            default: default
+                          defaultTemplate:
+                            default: {}
                             description: template
-                            type: string
-                          defaultTemplateNamespace:
+                            properties:
+                              image:
+                                default: sandbox0ai/otemplates:default-v0.1.0
+                                type: string
+                              name:
+                                default: default
+                                type: string
+                              pool:
+                                default: {}
+                                properties:
+                                  autoScale:
+                                    default: true
+                                    type: boolean
+                                  maxIdle:
+                                    default: 5
+                                    format: int32
+                                    type: integer
+                                  minIdle:
+                                    default: 1
+                                    format: int32
+                                    type: integer
+                                type: object
+                            type: object
+                          templateNamespace:
+                            default: sandbox0
                             type: string
                           httpPort:
                             default: 8080

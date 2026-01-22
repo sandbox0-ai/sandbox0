@@ -107,11 +107,16 @@ func main() {
 	podInformer := informerFactory.Core().V1().Pods().Informer()
 	nodeInformer := informerFactory.Core().V1().Nodes().Informer()
 
+	templateNamespace := cfg.TemplateNamespace
+	if templateNamespace == "" {
+		templateNamespace = "sandbox0"
+	}
+
 	// Create CRD informer factory using generated clientset
 	crdInformerFactory := externalversions.NewSharedInformerFactoryWithOptions(
 		crdClient,
 		cfg.ResyncPeriod.Duration,
-		externalversions.WithNamespace(cfg.DefaultTemplateNamespace),
+		externalversions.WithNamespace(templateNamespace),
 	)
 
 	// Get SandboxTemplate informer from the factory

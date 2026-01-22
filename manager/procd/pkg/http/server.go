@@ -176,6 +176,12 @@ func (s *Server) readyHandler(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Skip logging for health check and readiness check
+		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		start := time.Now()
 
 		// Wrap response writer to capture status code

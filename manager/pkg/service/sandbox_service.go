@@ -126,9 +126,9 @@ func NewSandboxService(
 
 // ClaimRequest represents a sandbox claim request
 type ClaimRequest struct {
+	Namespace string
 	TeamID    string         `json:"team_id"`
 	UserID    string         `json:"user_id"`
-	Namespace string         `json:"namespace"`
 	Template  string         `json:"template"`
 	Config    *SandboxConfig `json:"config,omitempty"`
 }

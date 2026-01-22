@@ -54,11 +54,42 @@ func NewServer(logger *logrus.Logger, repo *db.Repository, authenticator *auth.H
 
 // ServeHTTP implements http.Handler
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Skip logging for health check, readiness check and metrics
+	if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/metrics" {
+		s.serve(w, r)
+		return
+	}
+
+	start := time.Now()
+	wrapped := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+
+	s.serve(wrapped, r)
+
+	s.logger.WithFields(logrus.Fields{
+		"method":   r.Method,
+		"path":     r.URL.Path,
+		"status":   wrapped.statusCode,
+		"duration": time.Since(start),
+		"remote":   r.RemoteAddr,
+	}).Info("HTTP request")
+}
+
+func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	if s.authenticator != nil {
 		s.authenticator.HealthCheckMiddleware(s.mux).ServeHTTP(w, r)
 	} else {
 		s.mux.ServeHTTP(w, r)
 	}
+}
+
+type responseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (rw *responseWriter) WriteHeader(code int) {
+	rw.statusCode = code
+	rw.ResponseWriter.WriteHeader(code)
 }
 
 // handleHealth handles health check requests

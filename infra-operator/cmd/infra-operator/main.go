@@ -35,6 +35,7 @@ import (
 
 	infrav1alpha1 "github.com/sandbox0-ai/infra/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller"
+	managerv1alpha1 "github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -47,6 +48,7 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(infrav1alpha1.AddToScheme(scheme))
+	utilruntime.Must(managerv1alpha1.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 

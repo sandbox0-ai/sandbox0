@@ -33,6 +33,10 @@ func (a *GRPCAuthenticator) UnaryInterceptor() grpc.UnaryServerInterceptor {
 		info *grpc.UnaryServerInfo,
 		handler grpc.UnaryHandler,
 	) (any, error) {
+		// Skip logging and authentication for health check
+		if info.FullMethod == "/grpc.health.v1.Health/Check" || info.FullMethod == "/grpc.health.v1.Health/Watch" {
+			return handler(ctx, req)
+		}
 
 		// Extract and validate token
 		claims, err := a.authenticate(ctx)
@@ -47,7 +51,7 @@ func (a *GRPCAuthenticator) UnaryInterceptor() grpc.UnaryServerInterceptor {
 		// Add claims to context for downstream handlers
 		ctx = internalauth.WithClaims(ctx, claims)
 
-		a.logger.Debug("Request authenticated",
+		a.logger.Info("Request authenticated",
 			zap.String("method", info.FullMethod),
 			zap.String("team_id", claims.TeamID),
 			zap.String("caller", claims.Caller),
@@ -92,12 +96,22 @@ func (a *GRPCAuthenticator) StreamInterceptor() grpc.StreamServerInterceptor {
 		info *grpc.StreamServerInfo,
 		handler grpc.StreamHandler,
 	) error {
+		// Skip for health check
+		if info.FullMethod == "/grpc.health.v1.Health/Check" || info.FullMethod == "/grpc.health.v1.Health/Watch" {
+			return handler(srv, ss)
+		}
 
 		// Extract and validate token
 		claims, err := a.authenticate(ss.Context())
 		if err != nil {
 			return status.Error(codes.Unauthenticated, err.Error())
 		}
+
+		a.logger.Info("Stream request authenticated",
+			zap.String("method", info.FullMethod),
+			zap.String("team_id", claims.TeamID),
+			zap.String("caller", claims.Caller),
+		)
 
 		// Wrap the stream with authenticated context
 		wrappedStream := &authenticatedStream{

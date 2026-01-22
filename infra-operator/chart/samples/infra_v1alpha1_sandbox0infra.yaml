@@ -34,6 +34,15 @@ spec:
     manager:
       enabled: true
       replicas: 1
+      config:
+        templateNamespace: sandbox0
+        defaultTemplate:
+          name: default
+          image: sandbox0ai/otemplates:default-v0.1.0
+          pool:
+            minIdle: 1
+            maxIdle: 5
+            autoScale: true
     storageProxy:
       enabled: true
       replicas: 1

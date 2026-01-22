@@ -88,7 +88,7 @@ func (h *InitializeHandler) Initialize(w http.ResponseWriter, r *http.Request) {
 	if webhookURL != "" {
 		h.readyOnce.Do(func() {
 			h.dispatcher.Enqueue(webhook.Event{
-				EventType: "sandbox.ready",
+				EventType: webhook.EventTypeSandboxReady,
 				Payload: map[string]any{
 					"http_port":  h.httpPort,
 					"sandbox_id": req.SandboxID,

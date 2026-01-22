@@ -13,6 +13,7 @@ type Manager struct {
 	mu       sync.RWMutex
 	contexts map[string]*Context
 	onExit   process.ExitHandler
+	onStart  process.StartHandler
 }
 
 // NewManager creates a new context manager.
@@ -29,10 +30,17 @@ func (m *Manager) SetExitHandler(handler process.ExitHandler) {
 	m.onExit = handler
 }
 
+// SetStartHandler sets a global start handler for new contexts and restarts.
+func (m *Manager) SetStartHandler(handler process.StartHandler) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onStart = handler
+}
+
 // CreateContext creates a new context.
 func (m *Manager) CreateContext(config process.ProcessConfig) (*Context, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	startHandler := m.onStart
 
 	// Define exit handler for the new context
 	exitHandler := func(event process.ExitEvent) {
@@ -49,12 +57,14 @@ func (m *Manager) CreateContext(config process.ProcessConfig) (*Context, error) 
 		}
 	}
 
-	ctx, err := NewContext(config, exitHandler)
+	ctx, err := NewContext(config, exitHandler, startHandler)
 	if err != nil {
+		m.mu.Unlock()
 		return nil, err
 	}
 
 	m.contexts[ctx.ID] = ctx
+	m.mu.Unlock()
 	return ctx, nil
 }
 
@@ -105,17 +115,19 @@ func (m *Manager) DeleteContext(id string) error {
 // RestartContext restarts a context.
 func (m *Manager) RestartContext(id string) (*Context, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	ctx, exists := m.contexts[id]
 	if !exists {
+		m.mu.Unlock()
 		return nil, ErrContextNotFound
 	}
 
 	if err := ctx.Restart(); err != nil {
+		m.mu.Unlock()
 		return nil, err
 	}
 
+	m.mu.Unlock()
 	return ctx, nil
 }
 

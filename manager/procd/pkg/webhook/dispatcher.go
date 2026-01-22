@@ -16,10 +16,32 @@ import (
 	"go.uber.org/zap"
 )
 
+// EventType defines the webhook event type.
+type EventType string
+
+const (
+	// Sandbox events
+	EventTypeSandboxReady   EventType = "sandbox.ready"
+	EventTypeSandboxKilled  EventType = "sandbox.killed"
+	EventTypeSandboxPaused  EventType = "sandbox.paused"
+	EventTypeSandboxResumed EventType = "sandbox.resumed"
+
+	// Process events
+	EventTypeProcessStarted EventType = "process.started"
+	EventTypeProcessExited  EventType = "process.exited"
+	EventTypeProcessCrashed EventType = "process.crashed"
+
+	// File system events
+	EventTypeFileModified EventType = "file.modified"
+
+	// Agent events
+	EventTypeAgentEvent EventType = "agent.event"
+)
+
 // Event represents a webhook event payload.
 type Event struct {
 	EventID   string    `json:"event_id"`
-	EventType string    `json:"event_type"`
+	EventType EventType `json:"event_type"`
 	Timestamp time.Time `json:"timestamp"`
 	SandboxID string    `json:"sandbox_id"`
 	TeamID    string    `json:"team_id"`
@@ -71,10 +93,10 @@ func NewDispatcher(options Options, logger *zap.Logger) *Dispatcher {
 	}
 
 	d := &Dispatcher{
-		logger:  logger,
-		client:  &http.Client{Timeout: options.RequestTimeout},
-		queue:   make(chan Event, options.QueueSize),
-		options: options,
+		logger:   logger,
+		client:   &http.Client{Timeout: options.RequestTimeout},
+		queue:    make(chan Event, options.QueueSize),
+		options:  options,
 		randSeed: rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 
@@ -127,7 +149,7 @@ func (d *Dispatcher) Enqueue(event Event) {
 		if d.logger != nil {
 			d.logger.Warn("Webhook queue full, dropping event",
 				zap.String("event_id", event.EventID),
-				zap.String("event_type", event.EventType),
+				zap.String("event_type", string(event.EventType)),
 			)
 		}
 	}
@@ -162,7 +184,7 @@ func (d *Dispatcher) sendWithRetry(event Event) {
 	if d.logger != nil && lastErr != nil {
 		d.logger.Warn("Webhook delivery failed",
 			zap.String("event_id", event.EventID),
-			zap.String("event_type", event.EventType),
+			zap.String("event_type", string(event.EventType)),
 			zap.Error(lastErr),
 		)
 	}

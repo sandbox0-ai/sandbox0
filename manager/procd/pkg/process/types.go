@@ -117,8 +117,21 @@ type ExitEvent struct {
 	Config        ProcessConfig
 }
 
+// StartEvent captures details about a process start.
+type StartEvent struct {
+	ProcessID   string
+	ProcessType ProcessType
+	PID         int
+	StartTime   time.Time
+	State       ProcessState
+	Config      ProcessConfig
+}
+
 // ExitHandler is a function that handles process exit events.
 type ExitHandler func(ExitEvent)
+
+// StartHandler is a function that handles process start events.
+type StartHandler func(StartEvent)
 
 // Process interface defines the contract for all process types.
 type Process interface {
@@ -133,6 +146,7 @@ type Process interface {
 	Restart() error
 	IsRunning() bool
 	State() ProcessState
+	SetStartHandler(StartHandler)
 	SetExitHandler(ExitHandler)
 
 	// Pause/Resume - sends SIGSTOP/SIGCONT to process group
@@ -289,7 +303,8 @@ type BaseProcess struct {
 	// cpuTracker tracks CPU time between samples for percentage calculation
 	cpuTracker *cpuTracker
 
-	exitHandler ExitHandler
+	exitHandler  ExitHandler
+	startHandler StartHandler
 
 	mu sync.RWMutex
 }
@@ -311,6 +326,13 @@ func (bp *BaseProcess) SetExitHandler(handler ExitHandler) {
 	bp.mu.Lock()
 	defer bp.mu.Unlock()
 	bp.exitHandler = handler
+}
+
+// SetStartHandler sets the start handler.
+func (bp *BaseProcess) SetStartHandler(handler StartHandler) {
+	bp.mu.Lock()
+	defer bp.mu.Unlock()
+	bp.startHandler = handler
 }
 
 // ID returns the process ID.
@@ -525,6 +547,16 @@ func (bp *BaseProcess) StartTime() time.Time {
 func (bp *BaseProcess) NotifyExit(event ExitEvent) {
 	bp.mu.RLock()
 	handler := bp.exitHandler
+	bp.mu.RUnlock()
+	if handler != nil {
+		handler(event)
+	}
+}
+
+// NotifyStart invokes the start handler, if configured.
+func (bp *BaseProcess) NotifyStart(event StartEvent) {
+	bp.mu.RLock()
+	handler := bp.startHandler
 	bp.mu.RUnlock()
 	if handler != nil {
 		handler(event)

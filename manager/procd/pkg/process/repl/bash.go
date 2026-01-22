@@ -91,6 +91,14 @@ func (b *BashREPL) Start() error {
 	b.SetPID(cmd.Process.Pid)
 	b.SetStartTime(time.Now())
 	b.SetState(process.ProcessStateRunning)
+	b.NotifyStart(process.StartEvent{
+		ProcessID:   b.ID(),
+		ProcessType: b.Type(),
+		PID:         b.PID(),
+		StartTime:   b.StartTime(),
+		State:       b.State(),
+		Config:      config,
+	})
 
 	// Start output reader
 	go b.readOutput(ptmx)

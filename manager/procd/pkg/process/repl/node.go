@@ -78,6 +78,14 @@ func (n *NodeREPL) Start() error {
 	n.SetPID(cmd.Process.Pid)
 	n.SetStartTime(time.Now())
 	n.SetState(process.ProcessStateRunning)
+	n.NotifyStart(process.StartEvent{
+		ProcessID:   n.ID(),
+		ProcessType: n.Type(),
+		PID:         n.PID(),
+		StartTime:   n.StartTime(),
+		State:       n.State(),
+		Config:      config,
+	})
 
 	// Start output reader
 	go n.readOutput(ptmx)

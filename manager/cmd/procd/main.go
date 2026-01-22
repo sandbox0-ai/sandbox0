@@ -56,9 +56,9 @@ func main() {
 	}, logger)
 
 	contextManager.SetExitHandler(func(event process.ExitEvent) {
-		eventType := "process.exited"
+		eventType := webhook.EventTypeProcessExited
 		if event.State == process.ProcessStateCrashed || event.State == process.ProcessStateKilled {
-			eventType = "process.crashed"
+			eventType = webhook.EventTypeProcessCrashed
 		}
 		payload := map[string]any{
 			"process_id":     event.ProcessID,
@@ -72,6 +72,28 @@ func main() {
 		}
 		webhookDispatcher.Enqueue(webhook.Event{
 			EventType: eventType,
+			Payload:   payload,
+		})
+	})
+
+	contextManager.SetStartHandler(func(event process.StartEvent) {
+		payload := map[string]any{
+			"process_id":   event.ProcessID,
+			"process_type": event.ProcessType,
+			"pid":          event.PID,
+			"command":      event.Config.Command,
+			"env_vars":     event.Config.EnvVars,
+			"cwd":          event.Config.CWD,
+			"language":     event.Config.Language,
+		}
+		if event.Config.PTYSize != nil {
+			payload["pty_size"] = event.Config.PTYSize
+		}
+		if event.Config.Term != "" {
+			payload["term"] = event.Config.Term
+		}
+		webhookDispatcher.Enqueue(webhook.Event{
+			EventType: webhook.EventTypeProcessStarted,
 			Payload:   payload,
 		})
 	})
@@ -139,8 +161,16 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
-		<-quit
-		logger.Info("Received shutdown signal")
+		sig := <-quit
+		logger.Info("Received shutdown signal", zap.String("signal", sig.String()))
+
+		webhookDispatcher.Enqueue(webhook.Event{
+			EventType: webhook.EventTypeSandboxKilled,
+			Payload: map[string]any{
+				"signal": sig.String(),
+				"reason": "shutdown",
+			},
+		})
 
 		// Graceful shutdown
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

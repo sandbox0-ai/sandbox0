@@ -100,6 +100,14 @@ func (c *CMD) Start() error {
 		c.SetPID(cmd.Process.Pid)
 		c.SetStartTime(time.Now())
 		c.SetState(process.ProcessStateRunning)
+		c.NotifyStart(process.StartEvent{
+			ProcessID:   c.ID(),
+			ProcessType: c.Type(),
+			PID:         c.PID(),
+			StartTime:   c.StartTime(),
+			State:       c.State(),
+			Config:      config,
+		})
 
 		// Start output reader
 		go c.readPTYOutput(ptmx)
@@ -120,6 +128,14 @@ func (c *CMD) Start() error {
 		c.SetPID(cmd.Process.Pid)
 		c.SetStartTime(time.Now())
 		c.SetState(process.ProcessStateRunning)
+		c.NotifyStart(process.StartEvent{
+			ProcessID:   c.ID(),
+			ProcessType: c.Type(),
+			PID:         c.PID(),
+			StartTime:   c.StartTime(),
+			State:       c.State(),
+			Config:      config,
+		})
 
 		// Start process monitor
 		go c.monitorProcess()

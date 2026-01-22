@@ -5,7 +5,6 @@ import (
 	"net/http"
 
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/webhook"
-	"github.com/sandbox0-ai/infra/pkg/internalauth"
 )
 
 // WebhookHandler handles webhook publish requests.
@@ -22,9 +21,8 @@ func NewWebhookHandler(dispatcher *webhook.Dispatcher) *WebhookHandler {
 
 // PublishRequest is the request body for publishing a webhook event.
 type PublishRequest struct {
-	EventID   string          `json:"event_id,omitempty"`
-	EventType string          `json:"event_type"`
-	Payload   json.RawMessage `json:"payload,omitempty"`
+	EventID string          `json:"event_id,omitempty"`
+	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
 // PublishResponse is the response for a publish request.
@@ -45,18 +43,6 @@ func (h *WebhookHandler) Publish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.EventType == "" {
-		writeError(w, http.StatusBadRequest, "invalid_request", "event_type is required")
-		return
-	}
-
-	claims := internalauth.ClaimsFromContext(r.Context())
-	teamID := ""
-	if claims != nil {
-		teamID = claims.TeamID
-	}
-
-	sandboxID, _ := h.dispatcher.Identity()
 	payload := any(map[string]any{})
 	if len(req.Payload) > 0 {
 		payload = req.Payload
@@ -64,12 +50,9 @@ func (h *WebhookHandler) Publish(w http.ResponseWriter, r *http.Request) {
 
 	event := webhook.Event{
 		EventID:   req.EventID,
-		EventType: req.EventType,
-		SandboxID: sandboxID,
-		TeamID:    teamID,
+		EventType: webhook.EventTypeAgentEvent,
 		Payload:   payload,
 	}
-
 	h.dispatcher.Enqueue(event)
 
 	writeJSON(w, http.StatusAccepted, PublishResponse{EventID: event.EventID})

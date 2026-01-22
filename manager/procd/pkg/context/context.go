@@ -22,7 +22,7 @@ type Context struct {
 }
 
 // NewContext creates a new context with the given configuration.
-func NewContext(config process.ProcessConfig, exitHandler process.ExitHandler) (*Context, error) {
+func NewContext(config process.ProcessConfig, exitHandler process.ExitHandler, startHandler process.StartHandler) (*Context, error) {
 	id := "ctx-" + uuid.New().String()[:8]
 
 	var proc process.Process
@@ -46,6 +46,9 @@ func NewContext(config process.ProcessConfig, exitHandler process.ExitHandler) (
 
 	if exitHandler != nil {
 		proc.SetExitHandler(exitHandler)
+	}
+	if startHandler != nil {
+		proc.SetStartHandler(startHandler)
 	}
 
 	if err := proc.Start(); err != nil {

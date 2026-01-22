@@ -5,20 +5,23 @@ import (
 	"net/http"
 
 	ctxpkg "github.com/sandbox0-ai/infra/manager/procd/pkg/context"
+	"github.com/sandbox0-ai/infra/manager/procd/pkg/webhook"
 	"go.uber.org/zap"
 )
 
 // SandboxHandler handles sandbox-level HTTP requests.
 type SandboxHandler struct {
-	manager *ctxpkg.Manager
-	logger  *zap.Logger
+	manager    *ctxpkg.Manager
+	dispatcher *webhook.Dispatcher
+	logger     *zap.Logger
 }
 
 // NewSandboxHandler creates a new sandbox handler.
-func NewSandboxHandler(manager *ctxpkg.Manager, logger *zap.Logger) *SandboxHandler {
+func NewSandboxHandler(manager *ctxpkg.Manager, dispatcher *webhook.Dispatcher, logger *zap.Logger) *SandboxHandler {
 	return &SandboxHandler{
-		manager: manager,
-		logger:  logger,
+		manager:    manager,
+		dispatcher: dispatcher,
+		logger:     logger,
 	}
 }
 
@@ -64,6 +67,14 @@ func (h *SandboxHandler) Pause(w http.ResponseWriter, r *http.Request) {
 		zap.Int64("memory_usage", resourceUsage.ContainerMemoryUsage),
 		zap.Int64("memory_working_set", resourceUsage.ContainerMemoryWorkingSet),
 	)
+	if h.dispatcher != nil {
+		h.dispatcher.Enqueue(webhook.Event{
+			EventType: webhook.EventTypeSandboxPaused,
+			Payload: map[string]any{
+				"resource_usage": resourceUsage,
+			},
+		})
+	}
 	writeJSON(w, http.StatusOK, PauseAllResponse{
 		Paused:        true,
 		ResourceUsage: resourceUsage,
@@ -97,6 +108,14 @@ func (h *SandboxHandler) Resume(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.logger.Info("All contexts resumed successfully")
+	if h.dispatcher != nil {
+		h.dispatcher.Enqueue(webhook.Event{
+			EventType: webhook.EventTypeSandboxResumed,
+			Payload: map[string]any{
+				"resumed": true,
+			},
+		})
+	}
 	writeJSON(w, http.StatusOK, ResumeAllResponse{
 		Resumed: true,
 	})

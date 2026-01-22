@@ -121,7 +121,7 @@ func (s *Server) setupRoutes() {
 	api.Use(s.internalTokenMiddleware)
 
 	// Sandbox-level handlers (pause/resume all processes)
-	sandboxHandler := handlers.NewSandboxHandler(s.contextManager, s.logger)
+	sandboxHandler := handlers.NewSandboxHandler(s.contextManager, s.webhookDispatcher, s.logger)
 	api.HandleFunc("/sandbox/pause", sandboxHandler.Pause).Methods("POST")
 	api.HandleFunc("/sandbox/resume", sandboxHandler.Resume).Methods("POST")
 	api.HandleFunc("/sandbox/stats", sandboxHandler.Stats).Methods("GET")
@@ -136,11 +136,6 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/contexts/{id}/input", contextHandler.WriteInput).Methods("POST")
 	api.HandleFunc("/contexts/{id}/stats", contextHandler.Stats).Methods("GET")
 	api.HandleFunc("/contexts/{id}/ws", contextHandler.WebSocket).Methods("GET")
-
-	// Exec handlers (synchronous execution)
-	execHandler := handlers.NewExecHandler(s.logger)
-	api.HandleFunc("/exec", execHandler.Exec).Methods("POST")
-	api.HandleFunc("/exec/stream", execHandler.ExecStream).Methods("POST")
 
 	// Initialize handler
 	initializeHandler := handlers.NewInitializeHandler(s.webhookDispatcher, s.cfg.HTTPPort, s.logger)

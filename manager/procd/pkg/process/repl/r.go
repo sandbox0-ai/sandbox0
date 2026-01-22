@@ -97,6 +97,14 @@ func (r *RREPL) Start() error {
 	r.SetPID(cmd.Process.Pid)
 	r.SetStartTime(time.Now())
 	r.SetState(process.ProcessStateRunning)
+	r.NotifyStart(process.StartEvent{
+		ProcessID:   r.ID(),
+		ProcessType: r.Type(),
+		PID:         r.PID(),
+		StartTime:   r.StartTime(),
+		State:       r.State(),
+		Config:      config,
+	})
 
 	// Start output reader
 	go r.readOutput(ptmx)

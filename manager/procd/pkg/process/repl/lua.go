@@ -91,6 +91,14 @@ func (l *LuaREPL) Start() error {
 	l.SetPID(cmd.Process.Pid)
 	l.SetStartTime(time.Now())
 	l.SetState(process.ProcessStateRunning)
+	l.NotifyStart(process.StartEvent{
+		ProcessID:   l.ID(),
+		ProcessType: l.Type(),
+		PID:         l.PID(),
+		StartTime:   l.StartTime(),
+		State:       l.State(),
+		Config:      config,
+	})
 
 	// Start output reader
 	go l.readOutput(ptmx)

@@ -90,6 +90,14 @@ func (z *ZshREPL) Start() error {
 	z.SetPID(cmd.Process.Pid)
 	z.SetStartTime(time.Now())
 	z.SetState(process.ProcessStateRunning)
+	z.NotifyStart(process.StartEvent{
+		ProcessID:   z.ID(),
+		ProcessType: z.Type(),
+		PID:         z.PID(),
+		StartTime:   z.StartTime(),
+		State:       z.State(),
+		Config:      config,
+	})
 
 	go z.readOutput(ptmx)
 	go z.monitorProcess()

@@ -250,10 +250,15 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	// Note: Network and bandwidth policies are now stored in pod annotations
 	// They are set in claimIdlePod() and createNewPod() methods
 
+	procdAddress := s.prodAddress(pod.Name, pod.Namespace)
+	if err := s.initializeProcd(ctx, pod, req, procdAddress); err != nil {
+		return nil, fmt.Errorf("initialize procd: %w", err)
+	}
+
 	return &ClaimResponse{
 		SandboxID:    pod.Name,
 		Status:       "starting",
-		ProcdAddress: s.prodAddress(pod.Name, pod.Namespace),
+		ProcdAddress: procdAddress,
 		PodName:      pod.Name,
 		Template:     req.Template,
 		Namespace:    pod.Namespace,
@@ -328,10 +333,6 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		}
 		pod.Annotations[controller.AnnotationConfig] = string(configJSON)
 	}
-	webhookInfo := s.getWebhookInfo(req)
-	if webhookInfo != nil {
-		s.applyWebhookAnnotations(pod, webhookInfo)
-	}
 
 	// Build and add network policy annotation
 	if s.NetworkPolicyService != nil {
@@ -339,6 +340,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		if req.Config != nil {
 			requestNetwork = req.Config.Network
 		}
+		webhookInfo := s.getWebhookInfo(req)
 		if webhookInfo != nil {
 			requestNetwork = s.appendWebhookNetworkPolicy(requestNetwork, webhookInfo.URL)
 		}
@@ -437,10 +439,6 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 		}
 		pod.Annotations[controller.AnnotationConfig] = string(configJSON)
 	}
-	webhookInfo := s.getWebhookInfo(req)
-	if webhookInfo != nil {
-		s.applyWebhookAnnotations(pod, webhookInfo)
-	}
 
 	// Build and add network policy annotation
 	if s.NetworkPolicyService != nil {
@@ -448,6 +446,7 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 		if req.Config != nil {
 			requestNetwork = req.Config.Network
 		}
+		webhookInfo := s.getWebhookInfo(req)
 		if webhookInfo != nil {
 			requestNetwork = s.appendWebhookNetworkPolicy(requestNetwork, webhookInfo.URL)
 		}
@@ -520,21 +519,6 @@ func (s *SandboxService) getWebhookInfo(req *ClaimRequest) *webhookInfo {
 	}
 }
 
-func (s *SandboxService) applyWebhookAnnotations(pod *corev1.Pod, info *webhookInfo) {
-	if pod == nil || info == nil {
-		return
-	}
-	if pod.Annotations == nil {
-		pod.Annotations = make(map[string]string)
-	}
-	pod.Annotations[controller.AnnotationWebhookURL] = info.URL
-	if info.Secret != "" {
-		pod.Annotations[controller.AnnotationWebhookSecret] = info.Secret
-	} else {
-		delete(pod.Annotations, controller.AnnotationWebhookSecret)
-	}
-}
-
 func (s *SandboxService) appendWebhookNetworkPolicy(
 	requestNetwork *v1alpha1.TplSandboxNetworkPolicy,
 	webhookURL string,
@@ -576,6 +560,60 @@ func formatCIDRForIP(ip net.IP) string {
 		return ip.String() + "/32"
 	}
 	return ip.String() + "/128"
+}
+
+func (s *SandboxService) initializeProcd(
+	ctx context.Context,
+	pod *corev1.Pod,
+	req *ClaimRequest,
+	procdAddress string,
+) error {
+	if s.internalTokenGenerator == nil || s.procdTokenGenerator == nil {
+		return fmt.Errorf("token generators not configured, cannot authenticate with procd")
+	}
+	if pod == nil || req == nil {
+		return fmt.Errorf("missing sandbox context")
+	}
+
+	teamID := req.TeamID
+	userID := req.UserID
+	sandboxID := pod.Name
+
+	internalToken, err := s.internalTokenGenerator.GenerateToken(teamID, userID, sandboxID)
+	if err != nil {
+		return fmt.Errorf("generate internal token: %w", err)
+	}
+
+	procdToken, err := s.procdTokenGenerator.GenerateToken(teamID, userID, sandboxID)
+	if err != nil {
+		return fmt.Errorf("generate procd token: %w", err)
+	}
+
+	webhookInfo := s.getWebhookInfo(req)
+	var webhookConfig *InitializeWebhook
+	if webhookInfo != nil {
+		webhookConfig = &InitializeWebhook{
+			URL:    webhookInfo.URL,
+			Secret: webhookInfo.Secret,
+		}
+	}
+
+	initReq := InitializeRequest{
+		SandboxID: sandboxID,
+		TeamID:    teamID,
+		Webhook:   webhookConfig,
+	}
+
+	var initErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		_, initErr = s.procdClient.Initialize(ctx, procdAddress, initReq, internalToken, procdToken)
+		if initErr == nil {
+			return nil
+		}
+		time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
+	}
+
+	return initErr
 }
 
 // TerminateSandbox terminates a sandbox

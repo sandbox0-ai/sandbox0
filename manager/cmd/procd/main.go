@@ -8,12 +8,10 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
 	"github.com/sandbox0-ai/infra/infra-operator/api/config"
-	"github.com/sandbox0-ai/infra/manager/pkg/controller"
 	ctxpkg "github.com/sandbox0-ai/infra/manager/procd/pkg/context"
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/file"
 	procdhttp "github.com/sandbox0-ai/infra/manager/procd/pkg/http"
@@ -56,11 +54,6 @@ func main() {
 		BaseBackoff:    cfg.WebhookBaseBackoff.Duration,
 		RequestTimeout: cfg.WebhookRequestTimeout.Duration,
 	}, logger)
-
-	annotationsPath := cfg.WebhookAnnotationsPath
-	if annotationsPath == "" {
-		annotationsPath = "/etc/sandbox0/annotations"
-	}
 
 	contextManager.SetExitHandler(func(event process.ExitEvent) {
 		eventType := "process.exited"
@@ -125,34 +118,6 @@ func main() {
 		zap.Strings("allowed_callers", validatorConfig.AllowedCallers),
 	)
 
-	annotationCtx, cancelAnnotations := context.WithCancel(context.Background())
-	var readyOnce sync.Once
-	if err := webhook.WatchAnnotations(annotationCtx, annotationsPath, logger, func(annotations map[string]string) {
-		webhookURL := annotations[controller.AnnotationWebhookURL]
-		webhookSecret := annotations[controller.AnnotationWebhookSecret]
-		teamID := annotations[controller.AnnotationTeamID]
-		sandboxID := annotations[controller.AnnotationSandboxID]
-
-		webhookDispatcher.SetConfig(webhookURL, webhookSecret)
-		webhookDispatcher.SetIdentity(sandboxID, teamID)
-
-		if webhookURL != "" {
-			readyOnce.Do(func() {
-				webhookDispatcher.Enqueue(webhook.Event{
-					EventType: "sandbox.ready",
-					Payload: map[string]any{
-						"http_port":  cfg.HTTPPort,
-						"sandbox_id": sandboxID,
-					},
-				})
-			})
-		}
-	}); err != nil {
-		logger.Warn("Failed to start webhook annotation watcher",
-			zap.Error(err),
-		)
-	}
-
 	// Note: Network isolation is now handled by the netd service (DaemonSet).
 	// procd no longer manages network policies.
 
@@ -190,8 +155,6 @@ func main() {
 		contextManager.Cleanup()
 		volumeManager.Cleanup()
 		fileManager.Close()
-		cancelAnnotations()
-
 		done <- true
 	}()
 

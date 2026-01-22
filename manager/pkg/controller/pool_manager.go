@@ -38,8 +38,6 @@ const (
 	AnnotationPausedState     = "sandbox0.ai/paused-state"
 	AnnotationNetworkPolicy   = "sandbox0.ai/network-policy"   // JSON serialized network policy spec
 	AnnotationBandwidthPolicy = "sandbox0.ai/bandwidth-policy" // JSON serialized bandwidth policy spec
-	AnnotationWebhookURL      = "sandbox0.ai/webhook-url"
-	AnnotationWebhookSecret   = "sandbox0.ai/webhook-secret"
 	AnnotationSandboxID       = "sandbox0.ai/sandbox-id"
 )
 

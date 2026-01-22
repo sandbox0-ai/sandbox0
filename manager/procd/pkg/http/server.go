@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,8 +16,8 @@ import (
 	ctxpkg "github.com/sandbox0-ai/infra/manager/procd/pkg/context"
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/file"
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/http/handlers"
-	"github.com/sandbox0-ai/infra/manager/procd/pkg/webhook"
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/volume"
+	"github.com/sandbox0-ai/infra/manager/procd/pkg/webhook"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	"go.uber.org/zap"
 )
@@ -80,15 +82,15 @@ func NewServer(
 	logger *zap.Logger,
 ) *Server {
 	s := &Server{
-		router:         mux.NewRouter(),
-		cfg:            cfg,
-		contextManager: contextManager,
-		volumeManager:  volumeManager,
-		fileManager:    fileManager,
-		authValidator:  authValidator,
-		tokenProvider:  tokenProvider,
+		router:            mux.NewRouter(),
+		cfg:               cfg,
+		contextManager:    contextManager,
+		volumeManager:     volumeManager,
+		fileManager:       fileManager,
+		authValidator:     authValidator,
+		tokenProvider:     tokenProvider,
 		webhookDispatcher: webhookDispatcher,
-		logger:         logger,
+		logger:            logger,
 	}
 
 	s.setupRoutes()
@@ -103,6 +105,13 @@ func (s *Server) setupRoutes() {
 	// Health check endpoints (no auth required)
 	s.router.HandleFunc("/healthz", s.healthHandler).Methods("GET")
 	s.router.HandleFunc("/readyz", s.readyHandler).Methods("GET")
+
+	// Local-only API (localhost access only, no auth)
+	local := s.router.PathPrefix("/api/v1").Subrouter()
+	local.Use(s.localhostOnlyMiddleware)
+
+	webhookHandler := handlers.NewWebhookHandler(s.webhookDispatcher)
+	local.HandleFunc("/webhook/publish", webhookHandler.Publish).Methods("POST")
 
 	// API v1 (auth required if enabled)
 	api := s.router.PathPrefix("/api/v1").Subrouter()
@@ -133,6 +142,10 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/exec", execHandler.Exec).Methods("POST")
 	api.HandleFunc("/exec/stream", execHandler.ExecStream).Methods("POST")
 
+	// Initialize handler
+	initializeHandler := handlers.NewInitializeHandler(s.webhookDispatcher, s.cfg.HTTPPort, s.logger)
+	api.HandleFunc("/initialize", initializeHandler.Initialize).Methods("POST")
+
 	// SandboxVolume handlers
 	volumeHandler := handlers.NewVolumeHandler(s.volumeManager, s.logger)
 	api.HandleFunc("/sandboxvolumes/mount", volumeHandler.Mount).Methods("POST")
@@ -145,9 +158,6 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/files/move", fileHandler.Move).Methods("POST")
 	api.PathPrefix("/files/").HandlerFunc(fileHandler.Handle)
 
-	// Webhook handlers
-	webhookHandler := handlers.NewWebhookHandler(s.webhookDispatcher)
-	api.HandleFunc("/webhook/publish", webhookHandler.Publish).Methods("POST")
 }
 
 // Start starts the HTTP server.
@@ -221,6 +231,40 @@ func (s *Server) recoveryMiddleware(next http.Handler) http.Handler {
 		}()
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (s *Server) localhostOnlyMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isLoopbackAddress(r.RemoteAddr) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func isLoopbackAddress(addr string) bool {
+	if addr == "" {
+		return false
+	}
+	host := addr
+	if strings.HasPrefix(host, "[") {
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+	} else if strings.Count(host, ":") > 0 {
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback()
 }
 
 // internalTokenMiddleware extracts and stores the internal token from request headers.

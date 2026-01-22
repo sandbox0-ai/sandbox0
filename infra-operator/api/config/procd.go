@@ -59,11 +59,6 @@ type ProcdConfig struct {
 	// +optional
 	// +kubebuilder:default="30s"
 	CacheTTL metav1.Duration `yaml:"cache_ttl" json:"cacheTTL"`
-
-	// Webhook configuration
-	// +optional
-	// +kubebuilder:default="/etc/sandbox0/annotations"
-	WebhookAnnotationsPath string `yaml:"webhook_annotations_path" json:"webhookAnnotationsPath"`
 	// +optional
 	// +kubebuilder:default=256
 	WebhookQueueSize int `yaml:"webhook_queue_size" json:"webhookQueueSize"`

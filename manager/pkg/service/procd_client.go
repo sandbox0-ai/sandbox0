@@ -94,6 +94,25 @@ type StatsResponse struct {
 	SandboxResourceUsage
 }
 
+// InitializeRequest represents the procd initialize request.
+type InitializeRequest struct {
+	SandboxID string             `json:"sandbox_id"`
+	TeamID    string             `json:"team_id,omitempty"`
+	Webhook   *InitializeWebhook `json:"webhook,omitempty"`
+}
+
+// InitializeWebhook represents webhook configuration for initialization.
+type InitializeWebhook struct {
+	URL    string `json:"url"`
+	Secret string `json:"secret,omitempty"`
+}
+
+// InitializeResponse represents the response from procd initialize API.
+type InitializeResponse struct {
+	SandboxID string `json:"sandbox_id"`
+	TeamID    string `json:"team_id,omitempty"`
+}
+
 // Pause calls the procd pause API and returns resource usage.
 func (c *ProcdClient) Pause(ctx context.Context, procdAddress, internalToken, procdStorageToken string) (*PauseResponse, error) {
 	url := procdAddress + "/api/v1/sandbox/pause"
@@ -196,6 +215,23 @@ func (c *ProcdClient) Stats(ctx context.Context, procdAddress, internalToken, pr
 
 	var result StatsResponse
 	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("unmarshal response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// Initialize calls the procd initialize API.
+func (c *ProcdClient) Initialize(ctx context.Context, procdAddress string, req InitializeRequest, internalToken, procdStorageToken string) (*InitializeResponse, error) {
+	url := procdAddress + "/api/v1/initialize"
+
+	respBody, err := c.doRequest(ctx, http.MethodPost, url, req, internalToken, procdStorageToken)
+	if err != nil {
+		return nil, err
+	}
+
+	var result InitializeResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("unmarshal response: %w", err)
 	}
 

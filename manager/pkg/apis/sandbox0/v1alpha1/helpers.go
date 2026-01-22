@@ -7,12 +7,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-const (
-	annotationsVolumeName = "pod-annotations"
-	annotationsMountPath  = "/etc/sandbox0"
-	annotationsFileName   = "annotations"
-)
-
 // buildPodSpec builds a pod spec from a template
 func BuildPodSpec(template *SandboxTemplate) corev1.PodSpec {
 	spec := corev1.PodSpec{
@@ -20,7 +14,6 @@ func BuildPodSpec(template *SandboxTemplate) corev1.PodSpec {
 		Containers:    buildContainers(template),
 	}
 
-	applyPodAnnotationsVolume(&spec)
 	applyProcdInit(&spec)
 
 	// Apply runtime class if specified
@@ -80,11 +73,6 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Conta
 	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
 		Name:      "procd-bin",
 		MountPath: "/procd/bin",
-	})
-	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-		Name:      annotationsVolumeName,
-		MountPath: annotationsMountPath,
-		ReadOnly:  true,
 	})
 
 	// Security context
@@ -153,27 +141,6 @@ func appendProcdConfigEnvVars(envVars []corev1.EnvVar) []corev1.EnvVar {
 	}
 
 	return envVars
-}
-
-func applyPodAnnotationsVolume(spec *corev1.PodSpec) {
-	if spec == nil {
-		return
-	}
-	spec.Volumes = append(spec.Volumes, corev1.Volume{
-		Name: annotationsVolumeName,
-		VolumeSource: corev1.VolumeSource{
-			DownwardAPI: &corev1.DownwardAPIVolumeSource{
-				Items: []corev1.DownwardAPIVolumeFile{
-					{
-						Path: annotationsFileName,
-						FieldRef: &corev1.ObjectFieldSelector{
-							FieldPath: "metadata.annotations",
-						},
-					},
-				},
-			},
-		},
-	})
 }
 
 func applyProcdInit(spec *corev1.PodSpec) {

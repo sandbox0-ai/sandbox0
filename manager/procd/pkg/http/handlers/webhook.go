@@ -3,7 +3,6 @@ package handlers
 import (
 	"encoding/json"
 	"net/http"
-	"time"
 
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/webhook"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
@@ -25,7 +24,6 @@ func NewWebhookHandler(dispatcher *webhook.Dispatcher) *WebhookHandler {
 type PublishRequest struct {
 	EventID   string          `json:"event_id,omitempty"`
 	EventType string          `json:"event_type"`
-	Timestamp string          `json:"timestamp,omitempty"`
 	Payload   json.RawMessage `json:"payload,omitempty"`
 }
 
@@ -52,16 +50,6 @@ func (h *WebhookHandler) Publish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var timestamp time.Time
-	if req.Timestamp != "" {
-		parsed, err := time.Parse(time.RFC3339, req.Timestamp)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid_request", "timestamp must be RFC3339")
-			return
-		}
-		timestamp = parsed
-	}
-
 	claims := internalauth.ClaimsFromContext(r.Context())
 	teamID := ""
 	if claims != nil {
@@ -77,7 +65,6 @@ func (h *WebhookHandler) Publish(w http.ResponseWriter, r *http.Request) {
 	event := webhook.Event{
 		EventID:   req.EventID,
 		EventType: req.EventType,
-		Timestamp: timestamp,
 		SandboxID: sandboxID,
 		TeamID:    teamID,
 		Payload:   payload,

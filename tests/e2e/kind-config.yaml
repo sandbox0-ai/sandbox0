@@ -10,9 +10,16 @@ nodes:
     apiServer:
       extraArgs:
         enable-aggregator-routing: "true"
+  extraPortMappings:
+  - containerPort: 30080
+    hostPort: 30080
 - role: worker
   image: kindest/node:v1.35.0
-  replicas: 2
+  extraMounts:
+  - containerPath: /var/run/docker.sock
+    hostPath: /var/run/docker.sock
+- role: worker
+  image: kindest/node:v1.35.0
   extraMounts:
   - containerPath: /var/run/docker.sock
     hostPath: /var/run/docker.sock

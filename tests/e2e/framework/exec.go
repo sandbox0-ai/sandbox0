@@ -9,6 +9,7 @@ import (
 
 // RunCommand executes a command and returns a detailed error on failure.
 func RunCommand(ctx context.Context, name string, args ...string) error {
+	fmt.Printf("Executing: %s %v\n", name, args)
 	cmd := exec.CommandContext(ctx, name, args...)
 
 	var output bytes.Buffer
@@ -16,6 +17,7 @@ func RunCommand(ctx context.Context, name string, args ...string) error {
 	cmd.Stderr = &output
 
 	if err := cmd.Run(); err != nil {
+		fmt.Printf("Command failed: %v\nOutput: %s\n", err, output.String())
 		return fmt.Errorf("command failed: %s %v: %w\n%s", name, args, err, output.String())
 	}
 
@@ -24,6 +26,7 @@ func RunCommand(ctx context.Context, name string, args ...string) error {
 
 // RunCommandOutput executes a command and returns stdout/stderr on success.
 func RunCommandOutput(ctx context.Context, name string, args ...string) (string, error) {
+	fmt.Printf("Executing: %s %v\n", name, args)
 	cmd := exec.CommandContext(ctx, name, args...)
 
 	var output bytes.Buffer

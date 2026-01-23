@@ -156,17 +156,12 @@ test-integration-verbose:
 	@printf "$(CYAN)Running integration tests (verbose)...$(RESET)\n"
 	GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./tests/integration/... -timeout=10m -v
 
+# E2E test mode: all, control-plane, data-plane, combined
+E2E_TEST_MODE ?= combined
+
 # E2E tests
-test-e2e: test-integration
-	@printf "$(CYAN)Running E2E tests...$(RESET)\n"
-	@$(MAKE) docker-build
-	@if [ "$(E2E_USE_EXISTING_CLUSTER)" != "true" ]; then \
-		kind create cluster --config tests/e2e/kind-config.yaml || true; \
-	fi
-	@if [ "$(E2E_USE_EXISTING_CLUSTER)" != "true" ]; then \
-		kind load docker-image sandbox0ai/infra:latest || true; \
-	fi
-	E2E_TEST_MODE?=combined
+test-e2e:
+	@printf "$(CYAN)Running E2E tests (mode: $(E2E_TEST_MODE))...$(RESET)\n"
 	E2E_TEST_MODE=$(E2E_TEST_MODE) go test -v ./tests/e2e/... -timeout=30m
 
 test-e2e-kind:

@@ -1,4 +1,9 @@
 # Example: Cloud control plane mode
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sandbox0-system
+---
 apiVersion: infra.sandbox0.ai/v1alpha1
 kind: Sandbox0Infra
 metadata:
@@ -7,7 +12,7 @@ metadata:
 spec:
   mode: control-plane
   region: aws/us-east-1
-  version: "v0.0.0"
+  version: "latest"
   database:
     type: postgres
     external:

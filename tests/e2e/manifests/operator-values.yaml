@@ -1,4 +1,0 @@
-# Default values for infra-operator in E2E tests.
-image:
-  repository: sandbox0ai/infra
-  tag: "latest"

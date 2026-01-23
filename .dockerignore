@@ -5,3 +5,4 @@
 tests/
 Makefile
 Dockerfile
+infra-operator/chart

@@ -1,4 +1,4 @@
-package e2e
+package suites
 
 import (
 	"fmt"
@@ -43,6 +43,7 @@ var _ = Describe("Operator entrypoint", Ordered, func() {
 	Context("installation", func() {
 		It("installs CRDs and reconciles control-plane components", func() {
 			if !shouldRun("control-plane") {
+				fmt.Printf("E2E_TEST_MODE does not include control-plane, skipping...\n")
 				Skip("E2E_TEST_MODE does not include control-plane")
 			}
 
@@ -50,6 +51,12 @@ var _ = Describe("Operator entrypoint", Ordered, func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			err = framework.WaitForDeployment(testCtx.Context, cfg.Kubeconfig, cfg.OperatorNamespace, cfg.OperatorDeploymentName, "3m")
+			Expect(err).NotTo(HaveOccurred())
+
+			err = framework.EnsureNamespace(testCtx.Context, cfg.Kubeconfig, cfg.InfraNamespace)
+			Expect(err).NotTo(HaveOccurred())
+
+			err = framework.ApplyInfraControlPlaneSecrets(testCtx.Context, cfg.Kubeconfig, cfg.InfraNamespace)
 			Expect(err).NotTo(HaveOccurred())
 
 			err = framework.ApplyManifest(testCtx.Context, cfg.Kubeconfig, cfg.InfraControlPlaneManifestPath)
@@ -69,6 +76,7 @@ var _ = Describe("Operator entrypoint", Ordered, func() {
 	Context("upgrade and rollback", func() {
 		It("applies configuration changes with rolling updates", func() {
 			if !shouldRun("control-plane") {
+				fmt.Printf("E2E_TEST_MODE does not include control-plane, skipping...\n")
 				Skip("E2E_TEST_MODE does not include control-plane")
 			}
 
@@ -86,6 +94,7 @@ var _ = Describe("Operator entrypoint", Ordered, func() {
 
 		It("rolls back to last stable configuration", func() {
 			if !shouldRun("control-plane") {
+				fmt.Printf("E2E_TEST_MODE does not include control-plane, skipping...\n")
 				Skip("E2E_TEST_MODE does not include control-plane")
 			}
 
@@ -105,10 +114,17 @@ var _ = Describe("Operator entrypoint", Ordered, func() {
 	Context("data-plane mode", func() {
 		It("reconciles data-plane components with external dependencies", func() {
 			if !shouldRun("data-plane") {
+				fmt.Printf("E2E_TEST_MODE does not include data-plane, skipping...\n")
 				Skip("E2E_TEST_MODE does not include data-plane")
 			}
 
-			err := framework.ApplyManifest(testCtx.Context, cfg.Kubeconfig, cfg.InfraDataPlaneManifestPath)
+			err := framework.EnsureNamespace(testCtx.Context, cfg.Kubeconfig, cfg.InfraNamespace)
+			Expect(err).NotTo(HaveOccurred())
+
+			err = framework.ApplyInfraDataPlaneSecrets(testCtx.Context, cfg.Kubeconfig, cfg.InfraNamespace)
+			Expect(err).NotTo(HaveOccurred())
+
+			err = framework.ApplyManifest(testCtx.Context, cfg.Kubeconfig, cfg.InfraDataPlaneManifestPath)
 			Expect(err).NotTo(HaveOccurred())
 			DeferCleanup(func() {
 				_ = framework.KubectlDeleteManifest(testCtx.Context, cfg.Kubeconfig, cfg.InfraDataPlaneManifestPath)
@@ -134,6 +150,7 @@ var _ = Describe("Operator entrypoint", Ordered, func() {
 	Context("lifecycle and recovery", func() {
 		It("recovers after operator restart without duplication", func() {
 			if !shouldRun("control-plane") {
+				fmt.Printf("E2E_TEST_MODE does not include control-plane, skipping...\n")
 				Skip("E2E_TEST_MODE does not include control-plane")
 			}
 
@@ -149,6 +166,7 @@ var _ = Describe("Operator entrypoint", Ordered, func() {
 
 		It("cleans up resources on uninstall", func() {
 			if !shouldRun("control-plane") {
+				fmt.Printf("E2E_TEST_MODE does not include control-plane, skipping...\n")
 				Skip("E2E_TEST_MODE does not include control-plane")
 			}
 
@@ -169,10 +187,17 @@ var _ = Describe("Operator entrypoint", Ordered, func() {
 	Context("combined install", func() {
 		It("installs control-plane and data-plane in a single CR", func() {
 			if !shouldRun("combined") {
+				fmt.Printf("E2E_TEST_MODE does not include combined, skipping...\n")
 				Skip("E2E_TEST_MODE does not include combined")
 			}
 
-			err := framework.ApplyManifest(testCtx.Context, cfg.Kubeconfig, cfg.InfraAllManifestPath)
+			err := framework.EnsureNamespace(testCtx.Context, cfg.Kubeconfig, cfg.InfraNamespace)
+			Expect(err).NotTo(HaveOccurred())
+
+			err = framework.ApplyInfraAllSecrets(testCtx.Context, cfg.Kubeconfig, cfg.InfraNamespace)
+			Expect(err).NotTo(HaveOccurred())
+
+			err = framework.ApplyManifest(testCtx.Context, cfg.Kubeconfig, cfg.InfraAllManifestPath)
 			Expect(err).NotTo(HaveOccurred())
 			DeferCleanup(func() {
 				_ = framework.KubectlDeleteManifest(testCtx.Context, cfg.Kubeconfig, cfg.InfraAllManifestPath)

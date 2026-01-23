@@ -26,13 +26,13 @@ type Config struct {
 	OperatorImageRepo      string
 	OperatorImageTag       string
 
-	InfraNamespace                 string
-	InfraControlPlaneManifestPath  string
-	InfraControlPlaneName          string
-	InfraDataPlaneManifestPath     string
-	InfraDataPlaneName             string
-	InfraAllManifestPath           string
-	InfraAllName                   string
+	InfraNamespace                string
+	InfraControlPlaneManifestPath string
+	InfraControlPlaneName         string
+	InfraDataPlaneManifestPath    string
+	InfraDataPlaneName            string
+	InfraAllManifestPath          string
+	InfraAllName                  string
 }
 
 // LoadConfig reads E2E configuration from environment variables.
@@ -43,11 +43,11 @@ func LoadConfig() (Config, error) {
 	}
 
 	defaultKindConfig := filepath.Join(infraRoot, "tests", "e2e", "kind-config.yaml")
-	defaultOperatorValues := filepath.Join(infraRoot, "tests", "e2e", "manifests", "operator-values.yaml")
 	defaultOperatorChart := filepath.Join(infraRoot, "infra-operator", "chart")
-	defaultInfraControlPlane := filepath.Join(infraRoot, "tests", "e2e", "manifests", "infra-control-plane.yaml")
-	defaultInfraDataPlane := filepath.Join(infraRoot, "tests", "e2e", "manifests", "infra-data-plane.yaml")
-	defaultInfraAll := filepath.Join(infraRoot, "tests", "e2e", "manifests", "infra-all.yaml")
+	defaultOperatorValues := filepath.Join(defaultOperatorChart, "values.yaml")
+	defaultInfraControlPlane := filepath.Join(defaultOperatorChart, "samples", "infra_v1alpha1_sandbox0infra_controlplane.yaml")
+	defaultInfraDataPlane := filepath.Join(defaultOperatorChart, "samples", "infra_v1alpha1_sandbox0infra_dataplane.yaml")
+	defaultInfraAll := filepath.Join(defaultOperatorChart, "samples", "infra_v1alpha1_sandbox0infra.yaml")
 
 	cfg := Config{
 		ClusterName:           envString("E2E_CLUSTER_NAME", "sandbox0-e2e"),
@@ -73,7 +73,7 @@ func LoadConfig() (Config, error) {
 		InfraDataPlaneManifestPath:    envString("E2E_INFRA_DATA_PLANE_MANIFEST", defaultInfraDataPlane),
 		InfraDataPlaneName:            envString("E2E_INFRA_DATA_PLANE_NAME", "sandbox0-data-plane"),
 		InfraAllManifestPath:          envString("E2E_INFRA_ALL_MANIFEST", defaultInfraAll),
-		InfraAllName:                  envString("E2E_INFRA_ALL_NAME", "sandbox0-all"),
+		InfraAllName:                  envString("E2E_INFRA_ALL_NAME", "sandbox0-dev"),
 	}
 
 	if cfg.UseExistingCluster {

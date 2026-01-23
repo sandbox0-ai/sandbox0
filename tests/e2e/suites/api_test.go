@@ -1,4 +1,4 @@
-package e2e
+package suites
 
 import (
 	. "github.com/onsi/ginkgo/v2"

@@ -1,12 +1,17 @@
 # Example: Local development mode (all components with builtin database/storage)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sandbox0-system
+---
 apiVersion: infra.sandbox0.ai/v1alpha1
 kind: Sandbox0Infra
 metadata:
   name: sandbox0-dev
-  namespace: default
+  namespace: sandbox0-system
 spec:
   mode: all
-  version: "v0.0.0"
+  version: "latest"
   database:
     type: builtin
     builtin:

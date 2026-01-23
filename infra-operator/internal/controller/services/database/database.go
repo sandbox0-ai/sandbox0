@@ -19,6 +19,8 @@ package database
 import (
 	"context"
 	"fmt"
+	"net"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -112,6 +114,10 @@ func (r *Reconciler) reconcileBuiltinDatabase(ctx context.Context, infra *infrav
 
 	// Create Service for PostgreSQL
 	if err := r.reconcileDatabaseService(ctx, infra); err != nil {
+		return err
+	}
+
+	if err := r.ensureDatabaseReady(ctx, infra); err != nil {
 		return err
 	}
 
@@ -406,6 +412,46 @@ func (r *Reconciler) reconcileDatabaseService(ctx context.Context, infra *infrav
 	// Update existing Service
 	svc.Spec = desiredSvc.Spec
 	return r.Resources.Client.Update(ctx, svc)
+}
+
+func (r *Reconciler) ensureDatabaseReady(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
+	stsName := fmt.Sprintf("%s-postgres", infra.Name)
+	sts := &appsv1.StatefulSet{}
+	if err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: stsName, Namespace: infra.Namespace}, sts); err != nil {
+		return err
+	}
+
+	replicas := int32(1)
+	if sts.Spec.Replicas != nil {
+		replicas = *sts.Spec.Replicas
+	}
+	if sts.Status.ReadyReplicas < replicas {
+		return fmt.Errorf("database statefulset %q not ready: %d/%d ready", stsName, sts.Status.ReadyReplicas, replicas)
+	}
+
+	serviceHost := fmt.Sprintf("%s-postgres.%s.svc", infra.Name, infra.Namespace)
+	if err := waitForTCP(ctx, serviceHost, databasePort, 3*time.Second); err != nil {
+		return fmt.Errorf("database service %q not reachable: %w", serviceHost, err)
+	}
+
+	return nil
+}
+
+func waitForTCP(ctx context.Context, host string, port int32, timeout time.Duration) error {
+	dialer := net.Dialer{}
+	dialCtx := ctx
+	cancel := func() {}
+	if timeout > 0 {
+		dialCtx, cancel = context.WithTimeout(ctx, timeout)
+	}
+	defer cancel()
+
+	conn, err := dialer.DialContext(dialCtx, "tcp", net.JoinHostPort(host, fmt.Sprintf("%d", port)))
+	if err != nil {
+		return err
+	}
+	_ = conn.Close()
+	return nil
 }
 
 // GetDatabaseDSN returns the database DSN for services to use.

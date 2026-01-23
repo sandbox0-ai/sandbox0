@@ -1,3 +1,4 @@
+{{- $role := .Files.Get "files/clusterrole.yaml" | fromYaml }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -5,7 +6,7 @@ metadata:
   labels:
     {{- include "infra-operator.labels" . | nindent 4 }}
 rules:
-{{- toYaml .Values.rbac.rules | nindent 2 }}
+{{- $role.rules | toYaml | nindent 2 }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

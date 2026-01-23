@@ -268,6 +268,8 @@ func (in *OperatorConfig) DeepCopy() *OperatorConfig {
 func (in *ProcdConfig) DeepCopyInto(out *ProcdConfig) {
 	*out = *in
 	out.CacheTTL = in.CacheTTL
+	out.WebhookRequestTimeout = in.WebhookRequestTimeout
+	out.WebhookBaseBackoff = in.WebhookBaseBackoff
 	if in.setKeys != nil {
 		in, out := &in.setKeys, &out.setKeys
 		*out = make(map[string]string, len(*in))

@@ -232,7 +232,7 @@ manifests: controller-gen
 operator-manifests: controller-gen
 	@printf "$(CYAN)Generating infra-operator manifests...$(RESET)\n"
 	@$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook object paths="./infra-operator/..." output:crd:artifacts:config=infra-operator/chart/crds output:rbac:artifacts:config=infra-operator/chart/crds output:webhook:artifacts:config=infra-operator/chart/crds
-	@rm -f infra-operator/chart/crds/role.yaml
+	@mv infra-operator/chart/crds/role.yaml infra-operator/chart/files/clusterrole.yaml
 
 .PHONY: operator-install
 operator-install: operator-manifests

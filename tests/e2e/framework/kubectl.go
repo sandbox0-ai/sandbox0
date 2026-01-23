@@ -245,6 +245,24 @@ type containerStateTerminated struct {
 	ExitCode int32  `json:"exitCode"`
 }
 
+type podFailure struct {
+	PodName       string
+	ContainerName string
+	State         string
+	Reason        string
+	Message       string
+}
+
+func (p *podFailure) Error() string {
+	if p == nil {
+		return ""
+	}
+	if p.ContainerName == "" {
+		return fmt.Sprintf("pod %q failed: %s %s", p.PodName, p.Reason, p.Message)
+	}
+	return fmt.Sprintf("pod %q container %q %s: %s %s", p.PodName, p.ContainerName, p.State, p.Reason, p.Message)
+}
+
 var podFailureReasons = map[string]struct{}{
 	"CrashLoopBackOff":           {},
 	"ImagePullBackOff":           {},
@@ -271,43 +289,100 @@ func checkForPodFailures(ctx context.Context, kubeconfig, namespace string) erro
 		return nil
 	}
 	for _, item := range list.Items {
-		if err := detectPodFailure(item); err != nil {
-			return err
+		if failure := detectPodFailure(item); failure != nil {
+			logPodFailure(ctx, kubeconfig, namespace, failure)
+			return failure
 		}
 	}
 	return nil
 }
 
-func detectPodFailure(item pod) error {
+func detectPodFailure(item pod) *podFailure {
 	if item.Status.Phase == "Failed" {
-		return fmt.Errorf("pod %q failed: %s %s", item.Metadata.Name, item.Status.Reason, item.Status.Message)
+		return &podFailure{
+			PodName: item.Metadata.Name,
+			Reason:  item.Status.Reason,
+			Message: item.Status.Message,
+		}
 	}
-	if err := detectContainerFailures(item.Metadata.Name, item.Status.InitContainerStatuses); err != nil {
-		return err
+	if failure := detectContainerFailures(item.Metadata.Name, item.Status.InitContainerStatuses); failure != nil {
+		return failure
 	}
-	if err := detectContainerFailures(item.Metadata.Name, item.Status.ContainerStatuses); err != nil {
-		return err
+	if failure := detectContainerFailures(item.Metadata.Name, item.Status.ContainerStatuses); failure != nil {
+		return failure
 	}
 	return nil
 }
 
-func detectContainerFailures(podName string, statuses []containerStatus) error {
+func detectContainerFailures(podName string, statuses []containerStatus) *podFailure {
 	for _, status := range statuses {
 		if status.State.Waiting != nil {
 			if _, ok := podFailureReasons[status.State.Waiting.Reason]; ok {
-				return fmt.Errorf("pod %q container %q waiting: %s %s", podName, status.Name, status.State.Waiting.Reason, status.State.Waiting.Message)
+				return &podFailure{
+					PodName:       podName,
+					ContainerName: status.Name,
+					State:         "waiting",
+					Reason:        status.State.Waiting.Reason,
+					Message:       status.State.Waiting.Message,
+				}
 			}
 		}
 		if status.State.Terminated != nil {
 			if status.State.Terminated.ExitCode != 0 && status.State.Terminated.Reason != "Completed" {
-				return fmt.Errorf("pod %q container %q terminated: %s %s (exit %d)", podName, status.Name, status.State.Terminated.Reason, status.State.Terminated.Message, status.State.Terminated.ExitCode)
+				return &podFailure{
+					PodName:       podName,
+					ContainerName: status.Name,
+					State:         "terminated",
+					Reason:        status.State.Terminated.Reason,
+					Message: fmt.Sprintf(
+						"%s (exit %d)",
+						status.State.Terminated.Message,
+						status.State.Terminated.ExitCode,
+					),
+				}
 			}
 		}
 		if status.LastState.Terminated != nil {
 			if status.LastState.Terminated.ExitCode != 0 && status.LastState.Terminated.Reason != "Completed" {
-				return fmt.Errorf("pod %q container %q last terminated: %s %s (exit %d)", podName, status.Name, status.LastState.Terminated.Reason, status.LastState.Terminated.Message, status.LastState.Terminated.ExitCode)
+				return &podFailure{
+					PodName:       podName,
+					ContainerName: status.Name,
+					State:         "last terminated",
+					Reason:        status.LastState.Terminated.Reason,
+					Message: fmt.Sprintf(
+						"%s (exit %d)",
+						status.LastState.Terminated.Message,
+						status.LastState.Terminated.ExitCode,
+					),
+				}
 			}
 		}
 	}
 	return nil
+}
+
+func logPodFailure(ctx context.Context, kubeconfig, namespace string, failure *podFailure) {
+	if failure == nil || namespace == "" || failure.ContainerName == "" {
+		return
+	}
+	logContainerLogs(ctx, kubeconfig, namespace, failure.PodName, failure.ContainerName, false)
+	logContainerLogs(ctx, kubeconfig, namespace, failure.PodName, failure.ContainerName, true)
+}
+
+func logContainerLogs(ctx context.Context, kubeconfig, namespace, podName, containerName string, previous bool) {
+	args := []string{"logs", podName, "--namespace", namespace, "-c", containerName}
+	if previous {
+		args = append(args, "--previous")
+	}
+	fmt.Printf("Fetching logs for pod %q container %q (previous=%t)...\n", podName, containerName, previous)
+	output, err := KubectlOutput(ctx, kubeconfig, args...)
+	if err != nil {
+		fmt.Printf("Failed to fetch logs for pod %q container %q (previous=%t): %v\n", podName, containerName, previous, err)
+		return
+	}
+	if strings.TrimSpace(output) == "" {
+		fmt.Printf("No logs for pod %q container %q (previous=%t).\n", podName, containerName, previous)
+		return
+	}
+	fmt.Printf("Logs for pod %q container %q (previous=%t):\n%s\n", podName, containerName, previous, output)
 }

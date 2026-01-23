@@ -945,6 +945,18 @@ spec:
                               storageProxyReplicas:
                                 default: 3
                                 type: integer
+                              webhookBaseBackoff:
+                                default: 500ms
+                                type: string
+                              webhookMaxRetries:
+                                default: 3
+                                type: integer
+                              webhookQueueSize:
+                                default: 256
+                                type: integer
+                              webhookRequestTimeout:
+                                default: 5s
+                                type: string
                             type: object
                           resyncPeriod:
                             default: 30s

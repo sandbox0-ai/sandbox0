@@ -17,7 +17,6 @@ limitations under the License.
 package storage
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -142,6 +141,7 @@ func (r *Reconciler) reconcileBuiltinStorage(ctx context.Context, infra *infrav1
 func (r *Reconciler) reconcileStorageSecret(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
 	secretName := fmt.Sprintf("%s-%s", infra.Name, rustfsSecretName)
 	builtin := resolveBuiltinStorageConfig(infra)
+	endpoint := builtinEndpoint(infra, builtin)
 
 	secret := &corev1.Secret{}
 	err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: secretName, Namespace: infra.Namespace}, secret)
@@ -173,7 +173,7 @@ func (r *Reconciler) reconcileStorageSecret(ctx context.Context, infra *infrav1a
 			StringData: map[string]string{
 				"RUSTFS_ACCESS_KEY": accessKey,
 				"RUSTFS_SECRET_KEY": secretKey,
-				"endpoint":          fmt.Sprintf("http://%s-rustfs:%d", infra.Name, builtin.Port),
+				"endpoint":          endpoint,
 			},
 		}
 
@@ -182,6 +182,14 @@ func (r *Reconciler) reconcileStorageSecret(ctx context.Context, infra *infrav1a
 		}
 
 		return r.Resources.Client.Create(ctx, secret)
+	}
+
+	if secret.Data == nil {
+		return nil
+	}
+	if current := string(secret.Data["endpoint"]); current != endpoint {
+		secret.Data["endpoint"] = []byte(endpoint)
+		return r.Resources.Client.Update(ctx, secret)
 	}
 
 	return nil
@@ -473,9 +481,11 @@ func (r *Reconciler) ensureStorageBucket(ctx context.Context, infra *infrav1alph
 	}
 
 	if config.Type == infrav1alpha1.StorageTypeBuiltin {
-		if err := r.ensureBuiltinStorageReady(ctx, infra, config); err != nil {
+		if err := r.ensureBuiltinStorageReady(ctx, infra); err != nil {
 			return err
 		}
+		builtin := resolveBuiltinStorageConfig(infra)
+		config.Endpoint = builtinEndpoint(infra, builtin)
 	}
 
 	store, err := r.createObjectStorage(config)
@@ -487,15 +497,14 @@ func (r *Reconciler) ensureStorageBucket(ctx context.Context, infra *infrav1alph
 		return nil
 	}
 
-	markerData := bytes.NewReader([]byte("initialized"))
-	if err := store.Put(".sandbox0-bucket-marker", markerData); err != nil {
-		return fmt.Errorf("failed to create bucket marker in %q: %w", config.Bucket, err)
+	if err := store.Create(); err != nil {
+		return fmt.Errorf("%s: %w", bucketCreateHint(config, err), err)
 	}
 
 	return nil
 }
 
-func (r *Reconciler) ensureBuiltinStorageReady(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, config *StorageConfig) error {
+func (r *Reconciler) ensureBuiltinStorageReady(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
 	stsName := fmt.Sprintf("%s-rustfs", infra.Name)
 	sts := &appsv1.StatefulSet{}
 	if err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: stsName, Namespace: infra.Namespace}, sts); err != nil {
@@ -510,10 +519,7 @@ func (r *Reconciler) ensureBuiltinStorageReady(ctx context.Context, infra *infra
 		return fmt.Errorf("rustfs statefulset %q not ready: %d/%d ready", stsName, sts.Status.ReadyReplicas, replicas)
 	}
 
-	endpoint := strings.TrimSpace(config.Endpoint)
-	if endpoint == "" {
-		endpoint = fmt.Sprintf("http://%s-rustfs:%d", infra.Name, rustfsPort)
-	}
+	endpoint := builtinEndpoint(infra, resolveBuiltinStorageConfig(infra))
 	host, port, err := parseEndpointHostPort(endpoint, rustfsPort)
 	if err != nil {
 		return err
@@ -523,6 +529,53 @@ func (r *Reconciler) ensureBuiltinStorageReady(ctx context.Context, infra *infra
 	}
 
 	return nil
+}
+
+func builtinEndpoint(infra *infrav1alpha1.Sandbox0Infra, builtin infrav1alpha1.BuiltinStorageConfig) string {
+	return fmt.Sprintf("http://%s-rustfs.%s.svc:%d", infra.Name, infra.Namespace, builtin.Port)
+}
+
+func bucketCreateHint(config *StorageConfig, err error) string {
+	if config == nil {
+		return "failed to ensure bucket"
+	}
+	if config.Type == infrav1alpha1.StorageTypeBuiltin {
+		return fmt.Sprintf("failed to auto-create builtin bucket %q", config.Bucket)
+	}
+	if isAccessDeniedError(err) {
+		return fmt.Sprintf(
+			"bucket %q not accessible; pre-create it or grant CreateBucket/ListBucket permissions",
+			config.Bucket,
+		)
+	}
+	if isNoSuchBucketError(err) {
+		return fmt.Sprintf("bucket %q does not exist; pre-create it or grant CreateBucket permission", config.Bucket)
+	}
+	return fmt.Sprintf("failed to ensure bucket %q", config.Bucket)
+}
+
+func isAccessDeniedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "accessdenied") ||
+		strings.Contains(msg, "access denied") ||
+		strings.Contains(msg, "forbidden") ||
+		strings.Contains(msg, "authorization") ||
+		strings.Contains(msg, "not authorized") ||
+		strings.Contains(msg, "signaturedoesnotmatch") ||
+		strings.Contains(msg, "invalidaccesskeyid")
+}
+
+func isNoSuchBucketError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "nosuchbucket") ||
+		strings.Contains(msg, "bucket does not exist") ||
+		strings.Contains(msg, "404")
 }
 
 func (r *Reconciler) createObjectStorage(config *StorageConfig) (object.ObjectStorage, error) {

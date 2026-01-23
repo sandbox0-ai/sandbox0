@@ -26,6 +26,9 @@ spec:
     - jsonPath: .status.progress
       name: Progress
       type: string
+    - jsonPath: .status.lastMessage
+      name: Message
+      type: string
     - jsonPath: .spec.version
       name: Version
       type: string

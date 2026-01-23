@@ -33,6 +33,16 @@ func NewProcdClient(config ProcdClientConfig) *ProcdClient {
 	}
 }
 
+// NewProcdClientWithHTTPClient creates a procd client with a custom HTTP client.
+func NewProcdClientWithHTTPClient(httpClient *http.Client) *ProcdClient {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 30 * time.Second}
+	}
+	return &ProcdClient{
+		httpClient: httpClient,
+	}
+}
+
 // ResourceUsage represents resource consumption from procd.
 type ResourceUsage struct {
 	CPUPercent                float64 `json:"cpu_percent"`

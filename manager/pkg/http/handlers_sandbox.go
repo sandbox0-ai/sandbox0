@@ -167,7 +167,31 @@ func (s *Server) terminateSandbox(c *gin.Context) {
 		return
 	}
 
-	err := s.sandboxService.TerminateSandbox(c.Request.Context(), sandboxID)
+	// Get team ID from claims for ownership verification
+	claims := internalauth.ClaimsFromContext(c.Request.Context())
+	if claims == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "missing authentication",
+		})
+		return
+	}
+
+	sandbox, err := s.sandboxService.GetSandbox(c.Request.Context(), sandboxID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error": fmt.Sprintf("sandbox not found: %v", err),
+		})
+		return
+	}
+
+	if sandbox.TeamID != claims.TeamID {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error": "sandbox belongs to a different team",
+		})
+		return
+	}
+
+	err = s.sandboxService.TerminateSandbox(c.Request.Context(), sandboxID)
 	if err != nil {
 		s.logger.Error("Failed to terminate sandbox",
 			zap.String("sandboxID", sandboxID),

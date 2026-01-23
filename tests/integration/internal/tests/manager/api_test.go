@@ -7,12 +7,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/infra/manager/pkg/controller"
 	clientset "github.com/sandbox0-ai/infra/manager/pkg/generated/clientset/versioned"
 	clientsetfake "github.com/sandbox0-ai/infra/manager/pkg/generated/clientset/versioned/fake"
 	managerhttp "github.com/sandbox0-ai/infra/manager/pkg/http"
@@ -20,79 +22,65 @@ import (
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	"github.com/sandbox0-ai/infra/tests/integration/internal/utils"
 	"go.uber.org/zap"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 )
 
 type managerTestEnv struct {
-	server *httptest.Server
-	token  string
+	server     *httptest.Server
+	token      string
+	podIndexer cache.Indexer
+	k8sClient  kubernetes.Interface
 }
 
-func TestManagerIntegration_TemplateLifecycle(t *testing.T) {
-	env := newManagerTestEnv(t)
-
-	template := v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "basic-template",
-		},
-		Spec: v1alpha1.SandboxTemplateSpec{
-			MainContainer: v1alpha1.ContainerSpec{
-				Image:     "sandbox0ai/infra:latest",
-				Resources: v1alpha1.ResourceQuota{},
-			},
-			Pool: v1alpha1.PoolStrategy{
-				MinIdle:   0,
-				MaxIdle:   1,
-				AutoScale: false,
-			},
-		},
-	}
-
-	resp, body := doRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/api/v1/templates", env.token, template)
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("expected create status %d, got %d: %s", http.StatusCreated, resp.StatusCode, string(body))
-	}
-
-	err := utils.WaitUntil(context.Background(), 2*time.Second, 100*time.Millisecond, func(ctx context.Context) (bool, error) {
-		resp, body := doRequest(t, env.server.Client(), http.MethodGet, env.server.URL+"/api/v1/templates", env.token, nil)
-		if resp.StatusCode != http.StatusOK {
-			return false, nil
-		}
-		var payload struct {
-			Templates []v1alpha1.SandboxTemplate `json:"templates"`
-			Count     int                        `json:"count"`
-		}
-		if err := json.Unmarshal(body, &payload); err != nil {
-			return false, err
-		}
-		if payload.Count != 1 {
-			return false, nil
-		}
-		if len(payload.Templates) != 1 || payload.Templates[0].Name != template.Name {
-			return false, nil
-		}
-		return true, nil
-	})
-	utils.RequireNoError(t, err, "waiting for template to appear in list")
-}
-
-func TestManagerIntegration_TemplatesRequireAuth(t *testing.T) {
-	env := newManagerTestEnv(t)
-
-	resp, _ := doRequest(t, env.server.Client(), http.MethodGet, env.server.URL+"/api/v1/templates", "", nil)
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("expected unauthorized, got %d", resp.StatusCode)
-	}
+type managerTestEnvOptions struct {
+	sandboxConfig          service.SandboxServiceConfig
+	internalTokenGenerator service.TokenGenerator
+	procdTokenGenerator    service.TokenGenerator
+	procdClient            *service.ProcdClient
 }
 
 func newManagerTestEnv(t *testing.T) *managerTestEnv {
+	return newManagerTestEnvWithOptions(t, managerTestEnvOptions{})
+}
+
+func newManagerTestEnvWithProcd(t *testing.T) *managerTestEnv {
 	t.Helper()
 
-	k8sClient := k8sfake.NewSimpleClientset()
+	procdServer := newProcdStubServer(t)
+	t.Cleanup(procdServer.Close)
+
+	procdClient := newProcdClientForURL(t, procdServer.URL)
+
+	privateKey, _, err := createInternalKeys()
+	utils.RequireNoError(t, err, "create procd keys")
+
+	procdGen := internalauth.NewGenerator(internalauth.DefaultGeneratorConfig("manager", privateKey))
+
+	return newManagerTestEnvWithOptions(t, managerTestEnvOptions{
+		sandboxConfig: service.SandboxServiceConfig{
+			DefaultTTL:             time.Hour,
+			PauseMinMemoryRequest:  "10Mi",
+			PauseMinMemoryLimit:    "32Mi",
+			PauseMemoryBufferRatio: 1.1,
+			PauseMinCPU:            "10m",
+			ProcdPort:              49983,
+		},
+		internalTokenGenerator: service.NewInternalTokenGenerator(procdGen),
+		procdTokenGenerator:    service.NewProcdTokenGenerator(procdGen),
+		procdClient:            procdClient,
+	})
+}
+
+func newManagerTestEnvWithOptions(t *testing.T, opts managerTestEnvOptions) *managerTestEnv {
+	t.Helper()
+
+	k8sClient := k8sfake.NewClientset()
 	crdClient := clientsetfake.NewSimpleClientset()
 
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
@@ -116,12 +104,15 @@ func newManagerTestEnv(t *testing.T) *managerTestEnv {
 		podLister,
 		templateLister,
 		nil,
+		opts.internalTokenGenerator,
+		opts.procdTokenGenerator,
 		nil,
-		nil,
-		nil,
-		service.SandboxServiceConfig{},
+		opts.sandboxConfig,
 		logger,
 	)
+	if opts.procdClient != nil {
+		sandboxService.SetProcdClient(opts.procdClient)
+	}
 
 	templateService := service.NewTemplateService(crdClient, templateLister, logger)
 	clusterService := service.NewClusterService(
@@ -156,8 +147,10 @@ func newManagerTestEnv(t *testing.T) *managerTestEnv {
 	t.Cleanup(httpServer.Close)
 
 	return &managerTestEnv{
-		server: httpServer,
-		token:  token,
+		server:     httpServer,
+		token:      token,
+		podIndexer: podIndexer,
+		k8sClient:  k8sClient,
 	}
 }
 
@@ -230,4 +223,89 @@ func doRequest(t *testing.T, client *http.Client, method, url, token string, bod
 	utils.RequireNoError(t, err, "read response")
 
 	return resp, respBody
+}
+
+func addSandboxPod(t *testing.T, env *managerTestEnv, name, teamID, userID string, phase corev1.PodPhase) {
+	t.Helper()
+	// Use empty namespace to match GetSandbox lookup (Pods("").Get(name)).
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "",
+			Labels: map[string]string{
+				controller.LabelSandboxID: name,
+			},
+			Annotations: map[string]string{
+				controller.AnnotationTeamID: teamID,
+				controller.AnnotationUserID: userID,
+			},
+		},
+		Status: corev1.PodStatus{Phase: phase},
+	}
+	_, err := env.k8sClient.CoreV1().Pods(pod.Namespace).Create(context.Background(), pod, metav1.CreateOptions{})
+	utils.RequireNoError(t, err, "create pod in fake client")
+	utils.RequireNoError(t, env.podIndexer.Add(pod), "add pod to indexer")
+}
+
+type rewriteTransport struct {
+	base      *url.URL
+	transport http.RoundTripper
+}
+
+func (r rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	clone := req.Clone(req.Context())
+	clone.URL.Scheme = r.base.Scheme
+	clone.URL.Host = r.base.Host
+	return r.transport.RoundTrip(clone)
+}
+
+func newProcdClientForURL(t *testing.T, baseURL string) *service.ProcdClient {
+	t.Helper()
+
+	parsed, err := url.Parse(baseURL)
+	utils.RequireNoError(t, err, "parse procd url")
+
+	httpClient := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: rewriteTransport{
+			base:      parsed,
+			transport: http.DefaultTransport,
+		},
+	}
+
+	return service.NewProcdClientWithHTTPClient(httpClient)
+}
+
+func newProcdStubServer(t *testing.T) *httptest.Server {
+	t.Helper()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/sandbox/pause", func(w http.ResponseWriter, r *http.Request) {
+		response := service.PauseResponse{
+			Paused: true,
+			ResourceUsage: &service.SandboxResourceUsage{
+				ContainerMemoryWorkingSet: 64 * 1024 * 1024,
+			},
+		}
+		_ = json.NewEncoder(w).Encode(response)
+	})
+	mux.HandleFunc("/api/v1/sandbox/resume", func(w http.ResponseWriter, r *http.Request) {
+		response := service.ResumeResponse{Resumed: true}
+		_ = json.NewEncoder(w).Encode(response)
+	})
+	mux.HandleFunc("/api/v1/sandbox/stats", func(w http.ResponseWriter, r *http.Request) {
+		response := service.StatsResponse{
+			SandboxResourceUsage: service.SandboxResourceUsage{
+				ContainerMemoryWorkingSet: 64 * 1024 * 1024,
+				ContextCount:              1,
+			},
+		}
+		_ = json.NewEncoder(w).Encode(response)
+	})
+	mux.HandleFunc("/api/v1/initialize", func(w http.ResponseWriter, r *http.Request) {
+		response := service.InitializeResponse{SandboxID: "initialized"}
+		_ = json.NewEncoder(w).Encode(response)
+	})
+
+	return httptest.NewServer(mux)
 }

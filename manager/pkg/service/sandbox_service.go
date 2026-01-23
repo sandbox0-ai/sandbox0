@@ -127,6 +127,14 @@ func NewSandboxService(
 	}
 }
 
+// SetProcdClient overrides the procd client (used by tests).
+func (s *SandboxService) SetProcdClient(client *ProcdClient) {
+	if client == nil {
+		return
+	}
+	s.procdClient = client
+}
+
 // ClaimRequest represents a sandbox claim request
 type ClaimRequest struct {
 	Namespace string

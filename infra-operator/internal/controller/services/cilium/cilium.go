@@ -37,7 +37,7 @@ import (
 )
 
 const (
-	defaultInstallVersion   = "1.18.0"
+	defaultInstallVersion   = "1.18.6"
 	minSupportedVersion     = "1.14.0"
 	defaultInstallNamespace = "kube-system"
 )
@@ -222,9 +222,13 @@ func (r *Reconciler) reconcileInstallJob(
 	labels := common.GetServiceLabels(infra.Name, "cilium-installer")
 
 	command := []string{
-		"/bin/sh",
-		"-c",
-		fmt.Sprintf("cilium %s --version %s --namespace %s --wait", action, version, cfg.InstallNamespace),
+		"cilium",
+		action,
+		"--version",
+		version,
+		"--namespace",
+		cfg.InstallNamespace,
+		"--wait",
 	}
 	desired := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -376,8 +380,7 @@ func compareInt(left, right int) int {
 }
 
 func buildCLIImage(version string) string {
-	if version == "" {
-		version = defaultInstallVersion
-	}
-	return fmt.Sprintf("cilium/cilium:v%s", strings.TrimPrefix(version, "v"))
+	// Use the dedicated cilium-cli image which contains the 'install' command.
+	// The cilium/cilium image only contains the agent and cilium-dbg tool.
+	return "quay.io/cilium/cilium-cli:v0.19.0"
 }

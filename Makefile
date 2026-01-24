@@ -51,7 +51,7 @@ build: manifests proto
 			mkdir -p $$dir/bin; \
 			out="$$dir/bin/$$bin"; \
 		fi; \
-		if [ "$$s" = "storage-proxy" ]; then \
+		if [ "$$s" = "storage-proxy" ] || [ "$$s" = "infra-operator" ]; then \
 			CGO_ENABLED=1 go build -v -o $$out $$src; \
 		else \
 			CGO_ENABLED=0 go build -v -o $$out $$src; \
@@ -72,6 +72,7 @@ build-local-all: manifests proto
 		$(MAKE) build SERVICE=$$service BIN_DIR=$(shell pwd)/bin; \
 	done
 
+# NOTE: This only works on Linux because storage-proxy and infra-operator cannot be cross-compiled.
 docker-build-local: build-local-all
 	@printf "$(GREEN)Docker building with local binaries...$(RESET)\n"
 	docker build -t sandbox0ai/infra:$(TAG) -f Dockerfile.local .

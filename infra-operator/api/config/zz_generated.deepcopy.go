@@ -165,6 +165,19 @@ func (in *InternalGatewayConfig) DeepCopyInto(out *InternalGatewayConfig) {
 	out.ShutdownTimeout = in.ShutdownTimeout
 	out.HealthCheckPeriod = in.HealthCheckPeriod
 	out.ProxyTimeout = in.ProxyTimeout
+	in.BuiltInAuth.DeepCopyInto(&out.BuiltInAuth)
+	if in.OIDCProviders != nil {
+		in, out := &in.OIDCProviders, &out.OIDCProviders
+		*out = make([]OIDCProviderConfig, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+	out.OIDCStateTTL = in.OIDCStateTTL
+	out.OIDCStateCleanupInterval = in.OIDCStateCleanupInterval
+	out.JWTAccessTokenTTL = in.JWTAccessTokenTTL
+	out.JWTRefreshTokenTTL = in.JWTRefreshTokenTTL
+	out.RateLimitCleanupInterval = in.RateLimitCleanupInterval
 	if in.SchedulerPermissions != nil {
 		in, out := &in.SchedulerPermissions, &out.SchedulerPermissions
 		*out = make([]string, len(*in))

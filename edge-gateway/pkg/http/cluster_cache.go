@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/infra/edge-gateway/pkg/middleware"
 	"github.com/sandbox0-ai/infra/pkg/auth"
+	"github.com/sandbox0-ai/infra/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	"github.com/sandbox0-ai/infra/pkg/proxy"
 )

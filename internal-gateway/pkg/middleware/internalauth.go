@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -15,6 +16,11 @@ type InternalAuthMiddleware struct {
 	logger    *zap.Logger
 }
 
+var (
+	ErrMissingInternalToken = errors.New("missing internal authentication token")
+	ErrInvalidInternalToken = errors.New("invalid internal authentication token")
+)
+
 // NewInternalAuthMiddleware creates a new internal auth middleware
 func NewInternalAuthMiddleware(validator *internalauth.Validator, logger *zap.Logger) *InternalAuthMiddleware {
 	return &InternalAuthMiddleware{
@@ -26,56 +32,71 @@ func NewInternalAuthMiddleware(validator *internalauth.Validator, logger *zap.Lo
 // Authenticate returns a gin middleware that validates internal tokens from edge-gateway
 func (m *InternalAuthMiddleware) Authenticate() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Extract internal token from header
-		token := c.GetHeader(internalauth.DefaultTokenHeader)
-		if token == "" {
-			// Try Authorization header as fallback
+		authCtx, claims, err := m.authenticateRequest(c, true)
+		if err != nil {
+			if errors.Is(err, ErrInvalidInternalToken) {
+				m.logger.Warn("Internal auth validation failed",
+					zap.String("error", err.Error()),
+					zap.String("client_ip", c.ClientIP()),
+				)
+			}
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"error": err.Error(),
+			})
+			return
+		}
+
+		m.setAuthContext(c, authCtx, claims)
+		c.Next()
+	}
+}
+
+// AuthenticateRequest validates internal credentials and returns auth context.
+func (m *InternalAuthMiddleware) AuthenticateRequest(c *gin.Context) (*auth.AuthContext, *internalauth.Claims, error) {
+	return m.authenticateRequest(c, false)
+}
+
+func (m *InternalAuthMiddleware) authenticateRequest(c *gin.Context, allowAuthHeader bool) (*auth.AuthContext, *internalauth.Claims, error) {
+	// Extract internal token from header
+	token := c.GetHeader(internalauth.DefaultTokenHeader)
+	if token == "" {
+		// Try Authorization header as fallback
+		if allowAuthHeader {
 			authHeader := c.GetHeader(internalauth.AuthorizationHeader)
 			if authHeader != "" && len(authHeader) > 7 && authHeader[:7] == "Bearer " {
 				token = authHeader[7:]
 			}
 		}
+	}
 
-		if token == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error": "missing internal authentication token",
-			})
-			return
-		}
+	if token == "" {
+		return nil, nil, ErrMissingInternalToken
+	}
 
-		// Validate token
-		claims, err := m.validator.Validate(token)
-		if err != nil {
-			m.logger.Warn("Internal auth validation failed",
-				zap.String("error", err.Error()),
-				zap.String("client_ip", c.ClientIP()),
-			)
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error": "unauthorized: " + err.Error(),
-			})
-			return
-		}
+	claims, err := m.validator.Validate(token)
+	if err != nil {
+		return nil, nil, ErrInvalidInternalToken
+	}
 
-		// Convert internalauth.Claims to auth.AuthContext
-		authCtx := &auth.AuthContext{
-			AuthMethod:  auth.AuthMethodInternal,
-			TeamID:      claims.TeamID,
-			UserID:      claims.UserID,
-			Permissions: claims.Permissions,
-		}
+	authCtx := &auth.AuthContext{
+		AuthMethod:  auth.AuthMethodInternal,
+		TeamID:      claims.TeamID,
+		UserID:      claims.UserID,
+		Permissions: claims.Permissions,
+	}
 
-		// Store auth context in gin context
-		c.Set("auth_context", authCtx)
+	return authCtx, claims, nil
+}
 
-		// Also store in request context for downstream use
-		ctx := auth.WithAuthContext(c.Request.Context(), authCtx)
-		c.Request = c.Request.WithContext(ctx)
+func (m *InternalAuthMiddleware) setAuthContext(c *gin.Context, authCtx *auth.AuthContext, claims *internalauth.Claims) {
+	c.Set("auth_context", authCtx)
 
-		// Store internalauth claims in context as well
+	ctx := auth.WithAuthContext(c.Request.Context(), authCtx)
+	c.Request = c.Request.WithContext(ctx)
+
+	if claims != nil {
 		ctx = internalauth.WithClaims(c.Request.Context(), claims)
 		c.Request = c.Request.WithContext(ctx)
-
-		c.Next()
 	}
 }
 

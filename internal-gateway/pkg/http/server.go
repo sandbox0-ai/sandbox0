@@ -4,14 +4,22 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/internal-gateway/pkg/client"
 	"github.com/sandbox0-ai/infra/internal-gateway/pkg/middleware"
 	"github.com/sandbox0-ai/infra/pkg/auth"
+	gatewaybuiltin "github.com/sandbox0-ai/infra/pkg/gateway/auth/builtin"
+	gatewayjwt "github.com/sandbox0-ai/infra/pkg/gateway/auth/jwt"
+	gatewayoidc "github.com/sandbox0-ai/infra/pkg/gateway/auth/oidc"
+	gatewaydb "github.com/sandbox0-ai/infra/pkg/gateway/db"
+	gatewaymiddleware "github.com/sandbox0-ai/infra/pkg/gateway/middleware"
+	"github.com/sandbox0-ai/infra/pkg/gateway/public"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	"github.com/sandbox0-ai/infra/pkg/proxy"
 	"go.uber.org/zap"
@@ -25,6 +33,14 @@ type Server struct {
 	proxy2sp        *proxy.Router
 	managerClient   *client.ManagerClient
 	authMiddleware  *middleware.InternalAuthMiddleware
+	publicAuth      *gatewaymiddleware.AuthMiddleware
+	compositeAuth   *middleware.CompositeAuthMiddleware
+	publicRepo      *gatewaydb.Repository
+	rateLimiter     *gatewaymiddleware.RateLimiter
+	externalLimiter *middleware.ExternalRateLimiter
+	publicBuiltin   *gatewaybuiltin.Provider
+	publicOIDC      *gatewayoidc.Manager
+	publicJWT       *gatewayjwt.Issuer
 	requestLogger   *middleware.RequestLogger
 	logger          *zap.Logger
 	internalAuthGen *internalauth.Generator
@@ -34,6 +50,7 @@ type Server struct {
 // NewServer creates a new HTTP server
 func NewServer(
 	cfg *config.InternalGatewayConfig,
+	pool *pgxpool.Pool,
 	logger *zap.Logger,
 ) (*Server, error) {
 	// Set gin mode
@@ -108,6 +125,52 @@ func NewServer(
 	// Create manager client
 	managerClient := client.NewManagerClient(cfg.ManagerURL, internalAuthGen, logger, proxyTimeout)
 
+	var publicRepo *gatewaydb.Repository
+	var publicAuth *gatewaymiddleware.AuthMiddleware
+	var compositeAuth *middleware.CompositeAuthMiddleware
+	var rateLimiter *gatewaymiddleware.RateLimiter
+	var externalLimiter *middleware.ExternalRateLimiter
+	var publicBuiltin *gatewaybuiltin.Provider
+	var publicOIDC *gatewayoidc.Manager
+	var publicJWT *gatewayjwt.Issuer
+
+	if authModeEnabled(cfg.AuthMode, authModePublic) || authModeEnabled(cfg.AuthMode, authModeBoth) {
+		if pool == nil {
+			return nil, fmt.Errorf("public auth requires database connection")
+		}
+
+		publicRepo = gatewaydb.NewRepository(pool)
+
+		edgeCfg := &config.EdgeGatewayConfig{
+			DefaultTeamName:          cfg.DefaultTeamName,
+			OIDCProviders:            cfg.OIDCProviders,
+			OIDCStateTTL:             cfg.OIDCStateTTL,
+			OIDCStateCleanupInterval: cfg.OIDCStateCleanupInterval,
+			BaseURL:                  cfg.BaseURL,
+		}
+
+		builtinProvider := gatewaybuiltin.NewProvider(publicRepo, &cfg.BuiltInAuth, cfg.DefaultTeamName)
+		oidcManager, err := gatewayoidc.NewManager(context.Background(), edgeCfg, publicRepo, logger)
+		if err != nil {
+			logger.Warn("Failed to initialize OIDC manager", zap.Error(err))
+		}
+		if cfg.BuiltInAuth.Enabled && cfg.BuiltInAuth.InitUser != nil {
+			if err := builtinProvider.EnsureInitUser(context.Background()); err != nil {
+				logger.Warn("Failed to ensure init user", zap.Error(err))
+			}
+		}
+
+		jwtIssuer := gatewayjwt.NewIssuer(cfg.JWTIssuer, cfg.JWTSecret, cfg.JWTAccessTokenTTL.Duration, cfg.JWTRefreshTokenTTL.Duration)
+
+		publicAuth = gatewaymiddleware.NewAuthMiddleware(publicRepo, cfg.JWTSecret, logger)
+		compositeAuth = middleware.NewCompositeAuthMiddleware(authMiddleware, publicAuth, logger)
+		rateLimiter = gatewaymiddleware.NewRateLimiter(cfg.RateLimitRPS, cfg.RateLimitBurst, cfg.RateLimitCleanupInterval.Duration, logger)
+		externalLimiter = middleware.NewExternalRateLimiter(rateLimiter)
+		publicBuiltin = builtinProvider
+		publicOIDC = oidcManager
+		publicJWT = jwtIssuer
+	}
+
 	server := &Server{
 		router:          router,
 		cfg:             cfg,
@@ -115,6 +178,14 @@ func NewServer(
 		proxy2sp:        proxy2sp,
 		managerClient:   managerClient,
 		authMiddleware:  authMiddleware,
+		publicAuth:      publicAuth,
+		compositeAuth:   compositeAuth,
+		publicRepo:      publicRepo,
+		rateLimiter:     rateLimiter,
+		externalLimiter: externalLimiter,
+		publicBuiltin:   publicBuiltin,
+		publicOIDC:      publicOIDC,
+		publicJWT:       publicJWT,
 		requestLogger:   requestLogger,
 		logger:          logger,
 		internalAuthGen: internalAuthGen,
@@ -144,11 +215,29 @@ func (s *Server) setupRoutes() {
 	// Metrics endpoint
 	s.router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
+	if authModeEnabled(s.cfg.AuthMode, authModePublic) {
+		public.RegisterRoutes(s.router, public.Deps{
+			Repo:            s.publicRepo,
+			AuthMiddleware:  s.publicAuth,
+			BuiltinProvider: s.publicBuiltin,
+			OIDCManager:     s.publicOIDC,
+			JWTIssuer:       s.publicJWT,
+			Logger:          s.logger,
+		})
+	}
+
 	// API v1 routes
 	v1 := s.router.Group("/api/v1")
 	{
-		// Apply internal auth to all v1 routes (requests come from edge-gateway)
-		v1.Use(s.authMiddleware.Authenticate())
+		if authModeEnabled(s.cfg.AuthMode, authModePublic) {
+			v1.Use(s.compositeAuth.Authenticate())
+			if s.externalLimiter != nil {
+				v1.Use(s.externalLimiter.RateLimit())
+			}
+		} else {
+			// Apply internal auth to all v1 routes (requests come from edge-gateway)
+			v1.Use(s.authMiddleware.Authenticate())
+		}
 
 		// === Sandbox Management (→ Manager) ===
 		sandboxes := v1.Group("/sandboxes")
@@ -291,10 +380,45 @@ func (s *Server) healthCheck(c *gin.Context) {
 }
 
 func (s *Server) readinessCheck(c *gin.Context) {
-	// Internal-gateway is ready if it can process requests
-	// No database dependency anymore
+	if authModeEnabled(s.cfg.AuthMode, authModePublic) && s.publicRepo != nil {
+		if err := s.publicRepo.Pool().Ping(c.Request.Context()); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"status": "not ready",
+				"error":  "database unavailable",
+			})
+			return
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"status":    "ready",
 		"timestamp": time.Now().Unix(),
 	})
+}
+
+const (
+	authModeInternal = "internal"
+	authModePublic   = "public"
+	authModeBoth     = "both"
+)
+
+func normalizeAuthMode(mode string) string {
+	mode = strings.TrimSpace(strings.ToLower(mode))
+	if mode == "" {
+		return authModeInternal
+	}
+	switch mode {
+	case authModeInternal, authModePublic, authModeBoth:
+		return mode
+	default:
+		return authModeInternal
+	}
+}
+
+func authModeEnabled(mode, target string) bool {
+	mode = normalizeAuthMode(mode)
+	if mode == authModeBoth {
+		return true
+	}
+	return mode == target
 }

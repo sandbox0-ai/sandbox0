@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/infra/infra-operator/api/config"
-	"github.com/sandbox0-ai/infra/edge-gateway/pkg/db"
+	"github.com/sandbox0-ai/infra/pkg/gateway/db"
 	"go.uber.org/zap"
 )
 

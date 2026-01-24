@@ -53,6 +53,8 @@ spec:
     internalGateway:
       enabled: true
       replicas: 1
+      config:
+        authMode: public
     manager:
       enabled: true
       replicas: 1

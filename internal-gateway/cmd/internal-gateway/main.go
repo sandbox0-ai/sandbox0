@@ -5,10 +5,15 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/internal-gateway/pkg/http"
+	"github.com/sandbox0-ai/infra/pkg/dbpool"
+	gatewaymigrations "github.com/sandbox0-ai/infra/pkg/gateway/migrations"
+	"github.com/sandbox0-ai/infra/pkg/migrate"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -35,8 +40,18 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	var pool *pgxpool.Pool
+	if isPublicAuthEnabled(cfg.AuthMode) {
+		pool = initDatabase(ctx, cfg, logger)
+		defer pool.Close()
+
+		if err := runMigrations(ctx, pool, logger); err != nil {
+			logger.Fatal("Failed to run database migrations", zap.Error(err))
+		}
+	}
+
 	// Create HTTP server
-	server, err := http.NewServer(cfg, logger)
+	server, err := http.NewServer(cfg, pool, logger)
 	if err != nil {
 		logger.Fatal("Failed to create HTTP server", zap.Error(err))
 	}
@@ -104,4 +119,60 @@ func initLogger(level string) (*zap.Logger, error) {
 	}
 
 	return config.Build()
+}
+
+func isPublicAuthEnabled(mode string) bool {
+	mode = strings.TrimSpace(strings.ToLower(mode))
+	if mode == "" {
+		return false
+	}
+	return mode == "public" || mode == "both"
+}
+
+func initDatabase(ctx context.Context, cfg *config.InternalGatewayConfig, logger *zap.Logger) *pgxpool.Pool {
+	pool, err := dbpool.New(ctx, dbpool.Options{
+		DatabaseURL: cfg.DatabaseURL,
+		MaxConns:    int32(cfg.DatabaseMaxConns),
+		MinConns:    int32(cfg.DatabaseMinConns),
+		Schema:      "eg",
+	})
+	if err != nil {
+		logger.Fatal("Failed to connect to database", zap.Error(err))
+	}
+
+	logger.Info("Database connection established",
+		zap.Int32("max_conns", pool.Config().MaxConns),
+		zap.Int32("min_conns", pool.Config().MinConns),
+	)
+
+	return pool
+}
+
+func runMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) error {
+	logger.Info("Running database migrations")
+
+	migrateLogger := &zapLogger{logger: logger}
+
+	if err := migrate.Up(ctx, pool, ".",
+		migrate.WithBaseFS(gatewaymigrations.FS),
+		migrate.WithLogger(migrateLogger),
+		migrate.WithSchema("eg"),
+	); err != nil {
+		return fmt.Errorf("migrate up: %w", err)
+	}
+
+	logger.Info("Database migrations completed successfully")
+	return nil
+}
+
+type zapLogger struct {
+	logger *zap.Logger
+}
+
+func (z *zapLogger) Printf(format string, args ...any) {
+	z.logger.Info(fmt.Sprintf(format, args...))
+}
+
+func (z *zapLogger) Fatalf(format string, args ...any) {
+	z.logger.Fatal(fmt.Sprintf(format, args...))
 }

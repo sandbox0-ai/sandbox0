@@ -1,13 +1,14 @@
 package middleware
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/sandbox0-ai/infra/edge-gateway/pkg/db"
 	"github.com/sandbox0-ai/infra/pkg/auth"
+	"github.com/sandbox0-ai/infra/pkg/gateway/db"
 	"go.uber.org/zap"
 )
 
@@ -30,37 +31,7 @@ func NewAuthMiddleware(repo *db.Repository, jwtSecret string, logger *zap.Logger
 // Authenticate returns a gin middleware that authenticates requests
 func (m *AuthMiddleware) Authenticate() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		authHeader := c.GetHeader("Authorization")
-		if authHeader == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error": "missing authorization header",
-			})
-			return
-		}
-
-		// Extract token from "Bearer <token>"
-		parts := strings.SplitN(authHeader, " ", 2)
-		if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error": "invalid authorization header format",
-			})
-			return
-		}
-
-		token := parts[1]
-
-		// Determine auth method based on token format
-		var authCtx *auth.AuthContext
-		var err error
-
-		if strings.HasPrefix(token, "s0_") {
-			// API Key authentication
-			authCtx, err = m.authenticateAPIKey(c, token)
-		} else {
-			// JWT authentication
-			authCtx, err = m.authenticateJWT(c, token)
-		}
-
+		authCtx, err := m.AuthenticateRequest(c)
 		if err != nil {
 			m.logger.Warn("Authentication failed",
 				zap.String("error", err.Error()),
@@ -72,14 +43,37 @@ func (m *AuthMiddleware) Authenticate() gin.HandlerFunc {
 			return
 		}
 
-		// Store auth context in gin context
 		c.Set("auth_context", authCtx)
-		// Also store in request context for downstream use
 		ctx := auth.WithAuthContext(c.Request.Context(), authCtx)
 		c.Request = c.Request.WithContext(ctx)
 
 		c.Next()
 	}
+}
+
+// AuthenticateRequest validates credentials and returns the auth context.
+func (m *AuthMiddleware) AuthenticateRequest(c *gin.Context) (*auth.AuthContext, error) {
+	authHeader := c.GetHeader("Authorization")
+	if authHeader == "" {
+		return nil, errors.New("missing authorization header")
+	}
+
+	// Extract token from "Bearer <token>"
+	parts := strings.SplitN(authHeader, " ", 2)
+	if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
+		return nil, errors.New("invalid authorization header format")
+	}
+
+	token := parts[1]
+
+	// Determine auth method based on token format
+	if strings.HasPrefix(token, "s0_") {
+		// API Key authentication
+		return m.authenticateAPIKey(c, token)
+	}
+
+	// JWT authentication
+	return m.authenticateJWT(c, token)
 }
 
 // authenticateAPIKey validates an API key

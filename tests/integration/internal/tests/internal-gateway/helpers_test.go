@@ -52,7 +52,7 @@ func newGatewayTestEnv(t *testing.T, managerURL, storageProxyURL string, schedul
 		ProcdStoragePermissions: []string{"sandboxvolume:read"},
 	}
 
-	server, err := gatewayhttp.NewServer(cfg, zap.NewNop())
+	server, err := gatewayhttp.NewServer(cfg, nil, zap.NewNop())
 	if err != nil {
 		t.Fatalf("create internal-gateway server: %v", err)
 	}

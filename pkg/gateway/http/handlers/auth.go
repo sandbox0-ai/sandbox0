@@ -6,11 +6,11 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/infra/edge-gateway/pkg/auth/builtin"
-	"github.com/sandbox0-ai/infra/edge-gateway/pkg/auth/jwt"
-	"github.com/sandbox0-ai/infra/edge-gateway/pkg/auth/oidc"
-	"github.com/sandbox0-ai/infra/edge-gateway/pkg/db"
-	"github.com/sandbox0-ai/infra/edge-gateway/pkg/middleware"
+	"github.com/sandbox0-ai/infra/pkg/gateway/auth/builtin"
+	"github.com/sandbox0-ai/infra/pkg/gateway/auth/jwt"
+	"github.com/sandbox0-ai/infra/pkg/gateway/auth/oidc"
+	"github.com/sandbox0-ai/infra/pkg/gateway/db"
+	"github.com/sandbox0-ai/infra/pkg/gateway/middleware"
 	"go.uber.org/zap"
 )
 

@@ -59,7 +59,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	case infrav1alpha1.DatabaseTypeBuiltin:
 		logger.Info("Reconciling builtin database")
 		return r.reconcileBuiltinDatabase(ctx, infra)
-	case infrav1alpha1.DatabaseTypePostgres, infrav1alpha1.DatabaseTypeMySQL:
+	case infrav1alpha1.DatabaseTypeExternal:
 		logger.Info("Using external database")
 		return ValidateExternalDatabase(ctx, r.Resources.Client, infra)
 	default:
@@ -465,7 +465,7 @@ func GetDatabaseDSN(ctx context.Context, client client.Client, infra *infrav1alp
 		}
 		return string(secret.Data["dsn"]), nil
 
-	case infrav1alpha1.DatabaseTypePostgres:
+	case infrav1alpha1.DatabaseTypeExternal:
 		if infra.Spec.Database.External == nil {
 			return "", fmt.Errorf("external database configuration is required")
 		}

@@ -8,10 +8,10 @@ import (
 	"syscall"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	egmigrations "github.com/sandbox0-ai/infra/edge-gateway/migrations"
 	"github.com/sandbox0-ai/infra/edge-gateway/pkg/http"
 	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/pkg/dbpool"
+	egmigrations "github.com/sandbox0-ai/infra/pkg/gateway/migrations"
 	"github.com/sandbox0-ai/infra/pkg/migrate"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"

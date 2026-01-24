@@ -326,12 +326,6 @@ func (dp *DataPlane) applyEgressRules(
 
 	// 4. Redirect HTTP/HTTPS to proxy (for domain-based filtering)
 	enforceProxyPorts := []int{80, 443}
-	if policy != nil && policy.Egress != nil && len(policy.Egress.EnforceProxyPorts) > 0 {
-		enforceProxyPorts = make([]int, len(policy.Egress.EnforceProxyPorts))
-		for i, p := range policy.Egress.EnforceProxyPorts {
-			enforceProxyPorts[i] = int(p)
-		}
-	}
 
 	for _, port := range enforceProxyPorts {
 		var proxyPort int

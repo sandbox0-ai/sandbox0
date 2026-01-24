@@ -189,13 +189,11 @@ func BuildEgressSpec(policy *TplSandboxNetworkPolicy) *EgressPolicySpec {
 		return &EgressPolicySpec{
 			DefaultAction:     "deny",
 			AlwaysDeniedCIDRs: PlatformDeniedCIDRs,
-			EnforceProxyPorts: []int32{80, 443},
 		}
 	}
 
 	spec := &EgressPolicySpec{
 		AlwaysDeniedCIDRs: PlatformDeniedCIDRs,
-		EnforceProxyPorts: []int32{80, 443},
 	}
 
 	switch policy.Mode {

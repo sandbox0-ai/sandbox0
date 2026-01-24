@@ -8,6 +8,7 @@ import (
 	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/infra/manager/pkg/controller"
 	clientset "github.com/sandbox0-ai/infra/manager/pkg/generated/clientset/versioned"
+	"github.com/sandbox0-ai/infra/manager/pkg/network"
 	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -18,18 +19,21 @@ type TemplateService struct {
 	crdClient      clientset.Interface
 	templateLister controller.TemplateLister
 	logger         *zap.Logger
+	network        network.Provider
 }
 
 // NewTemplateService creates a new TemplateService
 func NewTemplateService(
 	crdClient clientset.Interface,
 	templateLister controller.TemplateLister,
+	networkProvider network.Provider,
 	logger *zap.Logger,
 ) *TemplateService {
 	return &TemplateService{
 		crdClient:      crdClient,
 		templateLister: templateLister,
 		logger:         logger,
+		network:        networkProvider,
 	}
 }
 
@@ -45,6 +49,16 @@ func (s *TemplateService) CreateTemplate(ctx context.Context, template *v1alpha1
 			template.Namespace = cfg.TemplateNamespace
 		} else {
 			template.Namespace = "sandbox0"
+		}
+	}
+
+	if s.network != nil {
+		if err := s.network.EnsureBaseline(ctx, template.Namespace); err != nil {
+			s.logger.Warn("Network provider baseline failed",
+				zap.String("provider", s.network.Name()),
+				zap.String("namespace", template.Namespace),
+				zap.Error(err),
+			)
 		}
 	}
 

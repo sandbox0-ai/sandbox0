@@ -36,22 +36,22 @@ type BuildNetworkPolicyRequest struct {
 
 // BuildNetworkPolicyAnnotation builds the network policy annotation JSON
 func (s *NetworkPolicyService) BuildNetworkPolicyAnnotation(req *BuildNetworkPolicyRequest) (string, error) {
+	spec := s.BuildNetworkPolicySpec(req)
+	return v1alpha1.NetworkPolicyToAnnotation(spec)
+}
+
+// BuildNetworkPolicySpec builds the network policy spec without serialization.
+func (s *NetworkPolicyService) BuildNetworkPolicySpec(req *BuildNetworkPolicyRequest) *v1alpha1.NetworkPolicySpec {
 	// Merge template and request specs
 	mergedSpec := s.mergeNetworkPolicies(req.TemplateSpec, req.RequestSpec)
 
 	// Build the policy spec
-	spec := &v1alpha1.NetworkPolicySpec{
+	return &v1alpha1.NetworkPolicySpec{
 		SandboxID: req.SandboxID,
 		TeamID:    req.TeamID,
 		Egress:    v1alpha1.BuildEgressSpec(mergedSpec),
 		Ingress:   v1alpha1.BuildIngressSpec(mergedSpec),
-		Audit: &v1alpha1.AuditSpec{
-			Level:      "basic", // default, can be overridden by template
-			SampleRate: "1.0",
-		},
 	}
-
-	return v1alpha1.NetworkPolicyToAnnotation(spec)
 }
 
 // BuildBandwidthPolicyRequest contains the request to build a bandwidth policy
@@ -66,6 +66,12 @@ type BuildBandwidthPolicyRequest struct {
 
 // BuildBandwidthPolicyAnnotation builds the bandwidth policy annotation JSON
 func (s *NetworkPolicyService) BuildBandwidthPolicyAnnotation(req *BuildBandwidthPolicyRequest) (string, error) {
+	spec := s.BuildBandwidthPolicySpec(req)
+	return v1alpha1.BandwidthPolicyToAnnotation(spec)
+}
+
+// BuildBandwidthPolicySpec builds the bandwidth policy spec without serialization.
+func (s *NetworkPolicyService) BuildBandwidthPolicySpec(req *BuildBandwidthPolicyRequest) *v1alpha1.BandwidthPolicySpec {
 	// Default values
 	egressRateBps := req.EgressRateBps
 	if egressRateBps == 0 {
@@ -83,7 +89,7 @@ func (s *NetworkPolicyService) BuildBandwidthPolicyAnnotation(req *BuildBandwidt
 		burstBytes = egressRateBps / 8 // fallback if still 0
 	}
 
-	spec := &v1alpha1.BandwidthPolicySpec{
+	return &v1alpha1.BandwidthPolicySpec{
 		SandboxID: req.SandboxID,
 		TeamID:    req.TeamID,
 		EgressRateLimit: &v1alpha1.RateLimitSpec{
@@ -99,8 +105,6 @@ func (s *NetworkPolicyService) BuildBandwidthPolicyAnnotation(req *BuildBandwidt
 			ReportIntervalSeconds: int32(s.config.BandwidthAccountingInterval),
 		},
 	}
-
-	return v1alpha1.BandwidthPolicyToAnnotation(spec)
 }
 
 // mergeNetworkPolicies merges template and request network policies

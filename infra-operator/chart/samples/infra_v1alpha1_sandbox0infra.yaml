@@ -33,6 +33,9 @@ spec:
       service:
         type: NodePort
         port: 80
+    scheduler:
+      enabled: true
+      replicas: 1
     internalGateway:
       enabled: true
       replicas: 1

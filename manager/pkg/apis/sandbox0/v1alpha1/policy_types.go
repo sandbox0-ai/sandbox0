@@ -13,9 +13,6 @@ type NetworkPolicySpec struct {
 
 	// Ingress defines inbound traffic rules (default deny)
 	Ingress *IngressPolicySpec `json:"ingress,omitempty"`
-
-	// Audit defines audit configuration
-	Audit *AuditSpec `json:"audit,omitempty"`
 }
 
 // EgressPolicySpec defines egress policy specification
@@ -34,12 +31,6 @@ type EgressPolicySpec struct {
 
 	// DeniedDomains is a list of denied destination domains
 	DeniedDomains []string `json:"deniedDomains,omitempty"`
-
-	// EnforceProxyPorts are ports that must go through the L7 proxy (e.g., 80, 443)
-	EnforceProxyPorts []int32 `json:"enforceProxyPorts,omitempty"`
-
-	// DNSPolicy defines DNS access policy
-	DNSPolicy *DNSPolicySpec `json:"dnsPolicy,omitempty"`
 
 	// AlwaysDeniedCIDRs are platform-enforced deny CIDRs (user cannot override)
 	// This includes RFC1918, metadata services, cluster services, etc.
@@ -71,31 +62,6 @@ type PortSpec struct {
 
 	// EndPort for port ranges (optional)
 	EndPort *int32 `json:"endPort,omitempty"`
-}
-
-// DNSPolicySpec defines DNS access policy
-type DNSPolicySpec struct {
-	// AllowedServers is a list of allowed DNS servers
-	// If empty, defaults to cluster DNS
-	AllowedServers []string `json:"allowedServers,omitempty"`
-
-	// AllowDoH allows DNS over HTTPS
-	AllowDoH bool `json:"allowDoH,omitempty"`
-
-	// AllowDoT allows DNS over TLS
-	AllowDoT bool `json:"allowDoT,omitempty"`
-
-	// AllowQUIC allows DNS over QUIC
-	AllowQUIC bool `json:"allowQuic,omitempty"`
-}
-
-// AuditSpec defines audit configuration
-type AuditSpec struct {
-	// Level is the audit level (off, basic, full)
-	Level string `json:"level,omitempty"`
-
-	// SampleRate is the sampling rate for audit logs (0.0-1.0)
-	SampleRate string `json:"sampleRate,omitempty"`
 }
 
 // BandwidthPolicySpec defines bandwidth policy for a sandbox (stored in pod annotation)

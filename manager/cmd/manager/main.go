@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	clientset "github.com/sandbox0-ai/infra/manager/pkg/generated/clientset/versioned"
 	"github.com/sandbox0-ai/infra/manager/pkg/generated/informers/externalversions"
 	httpserver "github.com/sandbox0-ai/infra/manager/pkg/http"
+	"github.com/sandbox0-ai/infra/manager/pkg/network"
 	"github.com/sandbox0-ai/infra/manager/pkg/service"
 	"github.com/sandbox0-ai/infra/manager/pkg/webhook"
 	"github.com/sandbox0-ai/infra/pkg/clock"
@@ -25,6 +27,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -155,6 +158,34 @@ func main() {
 		BandwidthAccountingInterval: cfg.BandwidthAccountingInterval,
 	}, logger)
 
+	if !strings.EqualFold(cfg.Network.Provider, "cilium") {
+		logger.Fatal("Unsupported network provider; only cilium is supported",
+			zap.String("provider", cfg.Network.Provider),
+		)
+	}
+	dynamicClient, err := dynamic.NewForConfig(k8sConfig)
+	if err != nil {
+		logger.Fatal("Failed to create dynamic client for Cilium provider", zap.Error(err))
+	}
+	networkProvider := network.NewCiliumProvider(
+		k8sClient,
+		dynamicClient,
+		network.CiliumConfig{
+			PolicyNamePrefix:           cfg.Network.Cilium.PolicyNamePrefix,
+			BaselinePolicyName:         cfg.Network.Cilium.BaselinePolicyName,
+			SandboxSelectorLabelKey:    cfg.Network.Cilium.SandboxSelectorLabelKey,
+			CNPGroup:                   cfg.Network.Cilium.CNPGroup,
+			CNPVersion:                 cfg.Network.Cilium.CNPVersion,
+			CNPKind:                    cfg.Network.Cilium.CNPKind,
+			FieldManager:               cfg.Network.Cilium.FieldManager,
+			EnableBandwidthAnnotations: cfg.Network.Cilium.EnableBandwidthAnnotations,
+			EgressBandwidthAnnotation:  cfg.Network.Cilium.EgressBandwidthAnnotation,
+			IngressBandwidthAnnotation: cfg.Network.Cilium.IngressBandwidthAnnotation,
+		},
+		logger,
+	)
+	logger.Info("Network provider enabled", zap.String("provider", networkProvider.Name()))
+
 	// Initialize internal auth generator for procd communication
 	var internalTokenGenerator service.TokenGenerator
 	var procdTokenGenerator service.TokenGenerator
@@ -201,6 +232,7 @@ func main() {
 		podLister,
 		operator.GetTemplateLister(),
 		networkPolicyService,
+		networkProvider,
 		internalTokenGenerator,
 		procdTokenGenerator,
 		clk,
@@ -211,6 +243,7 @@ func main() {
 	templateService := service.NewTemplateService(
 		crdClient,
 		operator.GetTemplateLister(),
+		networkProvider,
 		logger,
 	)
 

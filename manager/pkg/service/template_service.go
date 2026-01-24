@@ -29,6 +29,9 @@ func NewTemplateService(
 	networkProvider network.Provider,
 	logger *zap.Logger,
 ) *TemplateService {
+	if networkProvider == nil {
+		networkProvider = network.NewNoopProvider()
+	}
 	return &TemplateService{
 		crdClient:      crdClient,
 		templateLister: templateLister,

@@ -24,3 +24,25 @@ type Provider interface {
 	ApplySandboxPolicy(ctx context.Context, input SandboxPolicyInput) error
 	RemoveSandboxPolicy(ctx context.Context, namespace, sandboxID string) error
 }
+
+// NoopProvider is a default provider that performs no actions.
+type NoopProvider struct{}
+
+func (NoopProvider) Name() string { return "noop" }
+
+func (NoopProvider) EnsureBaseline(ctx context.Context, namespace string) error {
+	return nil
+}
+
+func (NoopProvider) ApplySandboxPolicy(ctx context.Context, input SandboxPolicyInput) error {
+	return nil
+}
+
+func (NoopProvider) RemoveSandboxPolicy(ctx context.Context, namespace, sandboxID string) error {
+	return nil
+}
+
+// NewNoopProvider returns a Provider that is safe for production defaults.
+func NewNoopProvider() Provider {
+	return NoopProvider{}
+}

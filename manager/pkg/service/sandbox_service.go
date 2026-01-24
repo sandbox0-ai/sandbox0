@@ -115,6 +115,9 @@ func NewSandboxService(
 	if clock == nil {
 		clock = systemTime{}
 	}
+	if networkProvider == nil {
+		networkProvider = network.NewNoopProvider()
+	}
 
 	return &SandboxService{
 		k8sClient:              k8sClient,

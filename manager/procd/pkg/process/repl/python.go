@@ -4,7 +4,6 @@ package repl
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -12,14 +11,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/creack/pty"
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/process"
 )
 
 // PythonREPL implements a Python REPL using IPython.
 type PythonREPL struct {
 	*process.BaseProcess
-	cmd       *exec.Cmd
+	runner    *process.PTYRunner
 	promptMu  sync.Mutex
 	lastInput string
 }
@@ -28,9 +26,11 @@ type PythonREPL struct {
 func NewPythonREPL(id string, config process.ProcessConfig) (*PythonREPL, error) {
 	bp := process.NewBaseProcess(id, process.ProcessTypeREPL, config)
 
-	return &PythonREPL{
+	repl := &PythonREPL{
 		BaseProcess: bp,
-	}, nil
+	}
+	repl.runner = process.NewPTYRunner(bp, repl.filterOutput, nil)
+	return repl, nil
 }
 
 // Start starts the Python REPL process.
@@ -38,8 +38,6 @@ func (p *PythonREPL) Start() error {
 	if p.IsRunning() {
 		return process.ErrProcessAlreadyRunning
 	}
-
-	p.SetState(process.ProcessStateStarting)
 
 	config := p.GetConfig()
 
@@ -90,68 +88,12 @@ func (p *PythonREPL) Start() error {
 		Setpgid: true,
 	}
 
-	// Get PTY size
-	ptySize := config.PTYSize
-	if ptySize == nil {
-		ptySize = &process.PTYSize{Rows: 24, Cols: 80}
-	}
-
-	// Start with PTY
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
-		Rows: ptySize.Rows,
-		Cols: ptySize.Cols,
-	})
-	if err != nil {
-		p.SetState(process.ProcessStateCrashed)
-		return fmt.Errorf("%w: %v", process.ErrProcessStartFailed, err)
-	}
-
-	p.cmd = cmd
-	p.SetPTY(ptmx)
-	p.SetPID(cmd.Process.Pid)
-	p.SetStartTime(time.Now())
-	p.SetState(process.ProcessStateRunning)
-	p.NotifyStart(process.StartEvent{
-		ProcessID:   p.ID(),
-		ProcessType: p.Type(),
-		PID:         p.PID(),
-		StartTime:   p.StartTime(),
-		State:       p.State(),
-		Config:      config,
-	})
-
-	// Start output reader
-	go p.readOutput(ptmx)
-
-	// Start process monitor
-	go p.monitorProcess()
-
-	return nil
+	return p.runner.Start(cmd, config.PTYSize)
 }
 
 // Stop stops the Python REPL process.
 func (p *PythonREPL) Stop() error {
-	if !p.IsRunning() {
-		return nil
-	}
-
-	if p.cmd != nil && p.cmd.Process != nil {
-		// Send SIGTERM first
-		if err := p.cmd.Process.Signal(syscall.SIGTERM); err != nil {
-			// If SIGTERM fails, use SIGKILL
-			p.cmd.Process.Kill()
-		}
-	}
-
-	// Close PTY
-	if ptyFile := p.GetPTY(); ptyFile != nil {
-		ptyFile.Close()
-	}
-
-	p.SetState(process.ProcessStateStopped)
-	p.CloseOutput()
-
-	return nil
+	return p.runner.Stop()
 }
 
 // Restart restarts the process.
@@ -192,42 +134,11 @@ func (p *PythonREPL) ExecuteCode(code string) (*process.ExecutionResult, error) 
 
 // ResizeTerminal resizes the PTY.
 func (p *PythonREPL) ResizeTerminal(size process.PTYSize) error {
-	ptyFile := p.GetPTY()
-	if ptyFile == nil {
+	if !p.IsRunning() {
 		return process.ErrProcessNotRunning
 	}
 
-	return pty.Setsize(ptyFile, &pty.Winsize{
-		Rows: size.Rows,
-		Cols: size.Cols,
-	})
-}
-
-func (p *PythonREPL) readOutput(ptmx *os.File) {
-	buf := make([]byte, 4096)
-	for {
-		n, err := ptmx.Read(buf)
-		if n > 0 {
-			data := make([]byte, n)
-			copy(data, buf[:n])
-
-			// Filter out echo of input if needed
-			data = p.filterOutput(data)
-
-			if len(data) > 0 {
-				p.PublishOutput(process.ProcessOutput{
-					Source: process.OutputSourcePTY,
-					Data:   data,
-				})
-			}
-		}
-		if err != nil {
-			if err != io.EOF {
-				// Log error if needed
-			}
-			break
-		}
-	}
+	return p.BaseProcess.ResizePTY(size)
 }
 
 func (p *PythonREPL) filterOutput(data []byte) []byte {
@@ -242,45 +153,6 @@ func (p *PythonREPL) filterOutput(data []byte) []byte {
 	}
 
 	return data
-}
-
-func (p *PythonREPL) monitorProcess() {
-	if p.cmd == nil {
-		return
-	}
-
-	err := p.cmd.Wait()
-
-	exitCode := 0
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		}
-	}
-
-	p.SetExitCode(exitCode)
-
-	duration := time.Since(p.StartTime())
-
-	if exitCode == 0 {
-		p.SetState(process.ProcessStateStopped)
-	} else if exitCode == -1 || exitCode == 137 {
-		p.SetState(process.ProcessStateKilled)
-	} else {
-		p.SetState(process.ProcessStateCrashed)
-	}
-
-	p.NotifyExit(process.ExitEvent{
-		ProcessID:   p.ID(),
-		ProcessType: p.Type(),
-		PID:         p.PID(),
-		ExitCode:    exitCode,
-		Duration:    duration,
-		State:       p.State(),
-		Config:      p.GetConfig(),
-	})
-
-	p.CloseOutput()
 }
 
 // detectPrompt checks if the output contains a Python prompt.

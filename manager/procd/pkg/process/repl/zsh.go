@@ -2,20 +2,18 @@ package repl
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"syscall"
 	"time"
 
-	"github.com/creack/pty"
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/process"
 )
 
 // ZshREPL implements a Zsh shell REPL.
 type ZshREPL struct {
 	*process.BaseProcess
-	cmd    *exec.Cmd
+	runner *process.PTYRunner
 	prompt string
 }
 
@@ -25,6 +23,7 @@ func NewZshREPL(id string, config process.ProcessConfig) (*ZshREPL, error) {
 
 	return &ZshREPL{
 		BaseProcess: bp,
+		runner:      process.NewPTYRunner(bp, nil, nil),
 		prompt:      "SANDBOX0>>> ",
 	}, nil
 }
@@ -34,8 +33,6 @@ func (z *ZshREPL) Start() error {
 	if z.IsRunning() {
 		return process.ErrProcessAlreadyRunning
 	}
-
-	z.SetState(process.ProcessStateStarting)
 
 	config := z.GetConfig()
 
@@ -71,60 +68,12 @@ func (z *ZshREPL) Start() error {
 		Setpgid: true,
 	}
 
-	ptySize := config.PTYSize
-	if ptySize == nil {
-		ptySize = &process.PTYSize{Rows: 24, Cols: 80}
-	}
-
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
-		Rows: ptySize.Rows,
-		Cols: ptySize.Cols,
-	})
-	if err != nil {
-		z.SetState(process.ProcessStateCrashed)
-		return fmt.Errorf("%w: %v", process.ErrProcessStartFailed, err)
-	}
-
-	z.cmd = cmd
-	z.SetPTY(ptmx)
-	z.SetPID(cmd.Process.Pid)
-	z.SetStartTime(time.Now())
-	z.SetState(process.ProcessStateRunning)
-	z.NotifyStart(process.StartEvent{
-		ProcessID:   z.ID(),
-		ProcessType: z.Type(),
-		PID:         z.PID(),
-		StartTime:   z.StartTime(),
-		State:       z.State(),
-		Config:      config,
-	})
-
-	go z.readOutput(ptmx)
-	go z.monitorProcess()
-
-	return nil
+	return z.runner.Start(cmd, config.PTYSize)
 }
 
 // Stop stops the Zsh REPL process.
 func (z *ZshREPL) Stop() error {
-	if !z.IsRunning() {
-		return nil
-	}
-
-	if z.cmd != nil && z.cmd.Process != nil {
-		if err := z.cmd.Process.Signal(syscall.SIGTERM); err != nil {
-			z.cmd.Process.Kill()
-		}
-	}
-
-	if ptyFile := z.GetPTY(); ptyFile != nil {
-		ptyFile.Close()
-	}
-
-	z.SetState(process.ProcessStateStopped)
-	z.CloseOutput()
-
-	return nil
+	return z.runner.Stop()
 }
 
 // Restart restarts the process.
@@ -159,74 +108,9 @@ func (z *ZshREPL) ExecuteCode(cmd string) (*process.ExecutionResult, error) {
 
 // ResizeTerminal resizes the PTY.
 func (z *ZshREPL) ResizeTerminal(size process.PTYSize) error {
-	ptyFile := z.GetPTY()
-	if ptyFile == nil {
+	if !z.IsRunning() {
 		return process.ErrProcessNotRunning
 	}
 
-	return pty.Setsize(ptyFile, &pty.Winsize{
-		Rows: size.Rows,
-		Cols: size.Cols,
-	})
-}
-
-func (z *ZshREPL) readOutput(ptmx *os.File) {
-	buf := make([]byte, 4096)
-	for {
-		n, err := ptmx.Read(buf)
-		if n > 0 {
-			data := make([]byte, n)
-			copy(data, buf[:n])
-
-			z.PublishOutput(process.ProcessOutput{
-				Source: process.OutputSourcePTY,
-				Data:   data,
-			})
-		}
-		if err != nil {
-			if err != io.EOF {
-				// Log error if needed
-			}
-			break
-		}
-	}
-}
-
-func (z *ZshREPL) monitorProcess() {
-	if z.cmd == nil {
-		return
-	}
-
-	err := z.cmd.Wait()
-
-	exitCode := 0
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		}
-	}
-
-	z.SetExitCode(exitCode)
-
-	duration := time.Since(z.StartTime())
-
-	if exitCode == 0 {
-		z.SetState(process.ProcessStateStopped)
-	} else if exitCode == -1 || exitCode == 137 {
-		z.SetState(process.ProcessStateKilled)
-	} else {
-		z.SetState(process.ProcessStateCrashed)
-	}
-
-	z.NotifyExit(process.ExitEvent{
-		ProcessID:   z.ID(),
-		ProcessType: z.Type(),
-		PID:         z.PID(),
-		ExitCode:    exitCode,
-		Duration:    duration,
-		State:       z.State(),
-		Config:      z.GetConfig(),
-	})
-
-	z.CloseOutput()
+	return z.BaseProcess.ResizePTY(size)
 }

@@ -1,0 +1,173 @@
+package process
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"syscall"
+	"time"
+
+	"github.com/creack/pty"
+)
+
+// PTYRunner manages PTY lifecycle for exec-based processes.
+type PTYRunner struct {
+	base         *BaseProcess
+	cmd          *exec.Cmd
+	outputFilter func([]byte) []byte
+	onStop       func()
+	exitResolver func(error) (int, bool)
+}
+
+// NewPTYRunner creates a PTY runner for a process.
+func NewPTYRunner(base *BaseProcess, outputFilter func([]byte) []byte, onStop func()) *PTYRunner {
+	return &PTYRunner{
+		base:         base,
+		outputFilter: outputFilter,
+		onStop:       onStop,
+	}
+}
+
+// SetExitResolver sets a custom exit code resolver for this runner.
+func (r *PTYRunner) SetExitResolver(resolver func(error) (int, bool)) {
+	r.exitResolver = resolver
+}
+
+// Start launches the command with a PTY attached.
+func (r *PTYRunner) Start(cmd *exec.Cmd, size *PTYSize) error {
+	if r.base.IsRunning() {
+		return ErrProcessAlreadyRunning
+	}
+
+	r.base.SetState(ProcessStateStarting)
+
+	ptySize := size
+	if ptySize == nil {
+		ptySize = &PTYSize{Rows: 24, Cols: 80}
+	}
+
+	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
+		Rows: ptySize.Rows,
+		Cols: ptySize.Cols,
+	})
+	if err != nil {
+		r.base.SetState(ProcessStateCrashed)
+		return fmt.Errorf("%w: %v", ErrProcessStartFailed, err)
+	}
+
+	r.cmd = cmd
+	r.base.SetPTY(ptmx)
+	r.base.SetPID(cmd.Process.Pid)
+	r.base.SetStartTime(time.Now())
+	r.base.SetState(ProcessStateRunning)
+	r.base.NotifyStart(StartEvent{
+		ProcessID:   r.base.ID(),
+		ProcessType: r.base.Type(),
+		PID:         r.base.PID(),
+		StartTime:   r.base.StartTime(),
+		State:       r.base.State(),
+		Config:      r.base.GetConfig(),
+	})
+
+	go r.readOutput(ptmx)
+	go r.monitorProcess()
+
+	return nil
+}
+
+// Stop terminates the PTY-backed process.
+func (r *PTYRunner) Stop() error {
+	if !r.base.IsRunning() {
+		return nil
+	}
+
+	if r.onStop != nil {
+		r.onStop()
+	}
+
+	if r.cmd != nil && r.cmd.Process != nil {
+		if err := r.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+			_ = r.cmd.Process.Kill()
+		}
+	}
+
+	if ptyFile := r.base.GetPTY(); ptyFile != nil {
+		ptyFile.Close()
+	}
+
+	r.base.SetState(ProcessStateStopped)
+	r.base.CloseOutput()
+
+	return nil
+}
+
+func (r *PTYRunner) readOutput(ptmx *os.File) {
+	buf := make([]byte, 4096)
+	for {
+		n, err := ptmx.Read(buf)
+		if n > 0 {
+			data := make([]byte, n)
+			copy(data, buf[:n])
+			if r.outputFilter != nil {
+				data = r.outputFilter(data)
+			}
+			if len(data) > 0 {
+				r.base.PublishOutput(ProcessOutput{
+					Source: OutputSourcePTY,
+					Data:   data,
+				})
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+}
+
+func (r *PTYRunner) monitorProcess() {
+	if r.cmd == nil {
+		return
+	}
+
+	err := r.cmd.Wait()
+
+	exitCode := 0
+	if err != nil {
+		if r.exitResolver != nil {
+			if code, ok := r.exitResolver(err); ok {
+				exitCode = code
+			}
+		}
+		if exitCode == 0 {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				exitCode = exitErr.ExitCode()
+			} else if r.base.State() == ProcessStateStarting {
+				exitCode = 1
+			}
+		}
+	}
+
+	r.base.SetExitCode(exitCode)
+
+	duration := time.Since(r.base.StartTime())
+
+	if exitCode == 0 {
+		r.base.SetState(ProcessStateStopped)
+	} else if exitCode == -1 || exitCode == 137 {
+		r.base.SetState(ProcessStateKilled)
+	} else {
+		r.base.SetState(ProcessStateCrashed)
+	}
+
+	r.base.NotifyExit(ExitEvent{
+		ProcessID:   r.base.ID(),
+		ProcessType: r.base.Type(),
+		PID:         r.base.PID(),
+		ExitCode:    exitCode,
+		Duration:    duration,
+		State:       r.base.State(),
+		Config:      r.base.GetConfig(),
+	})
+
+	r.base.CloseOutput()
+}

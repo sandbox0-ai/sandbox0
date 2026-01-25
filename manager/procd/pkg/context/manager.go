@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"syscall"
 
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/process"
 )
@@ -193,6 +194,26 @@ func (m *Manager) ReadOutput(contextID string) (<-chan process.ProcessOutput, er
 	}
 
 	return ctx.MainProcess.ReadOutput(), nil
+}
+
+// ResizePTY resizes the PTY for a context.
+func (m *Manager) ResizePTY(contextID string, size process.PTYSize) error {
+	ctx, err := m.GetContext(contextID)
+	if err != nil {
+		return err
+	}
+
+	return ctx.ResizePTY(size)
+}
+
+// SendSignal sends a signal to a context's process.
+func (m *Manager) SendSignal(contextID string, sig syscall.Signal) error {
+	ctx, err := m.GetContext(contextID)
+	if err != nil {
+		return err
+	}
+
+	return ctx.SendSignal(sig)
 }
 
 // Cleanup cleans up all contexts.

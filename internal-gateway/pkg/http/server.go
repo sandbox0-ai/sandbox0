@@ -270,10 +270,6 @@ func (s *Server) setupRoutes() {
 			sandboxes.GET("/:id/bandwidth", s.authMiddleware.RequirePermission(auth.PermSandboxRead), s.getBandwidthPolicy)
 			sandboxes.PATCH("/:id/bandwidth", s.authMiddleware.RequirePermission(auth.PermSandboxWrite), s.updateBandwidthPolicy)
 
-			// === Process Execution (→ Procd) ===
-			sandboxes.POST("/:id/exec", s.authMiddleware.RequirePermission(auth.PermSandboxWrite), s.exec) // sync mode
-			sandboxes.POST("/:id/exec/stream", s.authMiddleware.RequirePermission(auth.PermSandboxWrite), s.execStream)
-
 			// === Process/Context Management (→ Procd) ===
 			contexts := sandboxes.Group("/:id/contexts")
 			{

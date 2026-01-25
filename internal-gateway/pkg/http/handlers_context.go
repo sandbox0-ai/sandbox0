@@ -124,40 +124,6 @@ func (s *Server) executeInContext(c *gin.Context) {
 	s.proxyToProcd(c, procdURL)
 }
 
-// exec executes a command directly in the sandbox (without context management)
-func (s *Server) exec(c *gin.Context) {
-	sandboxID := c.Param("id")
-	if sandboxID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
-		return
-	}
-
-	procdURL, err := s.getProcdURL(c, sandboxID)
-	if err != nil {
-		return
-	}
-
-	c.Request.URL.Path = "/api/v1/exec"
-	s.proxyToProcd(c, procdURL)
-}
-
-// execStream executes a command directly in the sandbox with streaming output
-func (s *Server) execStream(c *gin.Context) {
-	sandboxID := c.Param("id")
-	if sandboxID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
-		return
-	}
-
-	procdURL, err := s.getProcdURL(c, sandboxID)
-	if err != nil {
-		return
-	}
-
-	c.Request.URL.Path = "/api/v1/exec/stream"
-	s.proxyToProcd(c, procdURL)
-}
-
 // contextWebSocket handles WebSocket connections for context
 func (s *Server) contextWebSocket(c *gin.Context) {
 	sandboxID := c.Param("id")

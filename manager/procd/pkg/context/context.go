@@ -3,6 +3,7 @@ package context
 
 import (
 	"fmt"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -124,4 +125,22 @@ func (ctx *Context) ResourceUsage() process.ResourceUsage {
 		return ctx.MainProcess.ResourceUsage()
 	}
 	return process.ResourceUsage{}
+}
+
+// ResizePTY resizes the context's PTY, if available.
+func (ctx *Context) ResizePTY(size process.PTYSize) error {
+	if ctx.MainProcess != nil {
+		ctx.UpdatedAt = time.Now()
+		return ctx.MainProcess.ResizePTY(size)
+	}
+	return process.ErrProcessNotRunning
+}
+
+// SendSignal sends a signal to the context's process.
+func (ctx *Context) SendSignal(sig syscall.Signal) error {
+	if ctx.MainProcess != nil {
+		ctx.UpdatedAt = time.Now()
+		return ctx.MainProcess.SendSignal(sig)
+	}
+	return process.ErrProcessNotRunning
 }

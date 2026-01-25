@@ -2,20 +2,18 @@ package repl
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"syscall"
 	"time"
 
-	"github.com/creack/pty"
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/process"
 )
 
 // BashREPL implements a Bash shell REPL.
 type BashREPL struct {
 	*process.BaseProcess
-	cmd    *exec.Cmd
+	runner *process.PTYRunner
 	prompt string
 }
 
@@ -25,6 +23,7 @@ func NewBashREPL(id string, config process.ProcessConfig) (*BashREPL, error) {
 
 	return &BashREPL{
 		BaseProcess: bp,
+		runner:      process.NewPTYRunner(bp, nil, nil),
 		prompt:      "SANDBOX0>>> ",
 	}, nil
 }
@@ -34,8 +33,6 @@ func (b *BashREPL) Start() error {
 	if b.IsRunning() {
 		return process.ErrProcessAlreadyRunning
 	}
-
-	b.SetState(process.ProcessStateStarting)
 
 	config := b.GetConfig()
 
@@ -70,65 +67,12 @@ func (b *BashREPL) Start() error {
 
 	cmd.Env = env
 
-	// Get PTY size
-	ptySize := config.PTYSize
-	if ptySize == nil {
-		ptySize = &process.PTYSize{Rows: 24, Cols: 80}
-	}
-
-	// Start with PTY
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
-		Rows: ptySize.Rows,
-		Cols: ptySize.Cols,
-	})
-	if err != nil {
-		b.SetState(process.ProcessStateCrashed)
-		return fmt.Errorf("%w: %v", process.ErrProcessStartFailed, err)
-	}
-
-	b.cmd = cmd
-	b.SetPTY(ptmx)
-	b.SetPID(cmd.Process.Pid)
-	b.SetStartTime(time.Now())
-	b.SetState(process.ProcessStateRunning)
-	b.NotifyStart(process.StartEvent{
-		ProcessID:   b.ID(),
-		ProcessType: b.Type(),
-		PID:         b.PID(),
-		StartTime:   b.StartTime(),
-		State:       b.State(),
-		Config:      config,
-	})
-
-	// Start output reader
-	go b.readOutput(ptmx)
-
-	// Start process monitor
-	go b.monitorProcess()
-
-	return nil
+	return b.runner.Start(cmd, config.PTYSize)
 }
 
 // Stop stops the Bash REPL process.
 func (b *BashREPL) Stop() error {
-	if !b.IsRunning() {
-		return nil
-	}
-
-	if b.cmd != nil && b.cmd.Process != nil {
-		if err := b.cmd.Process.Signal(syscall.SIGTERM); err != nil {
-			b.cmd.Process.Kill()
-		}
-	}
-
-	if ptyFile := b.GetPTY(); ptyFile != nil {
-		ptyFile.Close()
-	}
-
-	b.SetState(process.ProcessStateStopped)
-	b.CloseOutput()
-
-	return nil
+	return b.runner.Stop()
 }
 
 // Restart restarts the process.
@@ -164,74 +108,9 @@ func (b *BashREPL) ExecuteCode(cmd string) (*process.ExecutionResult, error) {
 
 // ResizeTerminal resizes the PTY.
 func (b *BashREPL) ResizeTerminal(size process.PTYSize) error {
-	ptyFile := b.GetPTY()
-	if ptyFile == nil {
+	if !b.IsRunning() {
 		return process.ErrProcessNotRunning
 	}
 
-	return pty.Setsize(ptyFile, &pty.Winsize{
-		Rows: size.Rows,
-		Cols: size.Cols,
-	})
-}
-
-func (b *BashREPL) readOutput(ptmx *os.File) {
-	buf := make([]byte, 4096)
-	for {
-		n, err := ptmx.Read(buf)
-		if n > 0 {
-			data := make([]byte, n)
-			copy(data, buf[:n])
-
-			b.PublishOutput(process.ProcessOutput{
-				Source: process.OutputSourcePTY,
-				Data:   data,
-			})
-		}
-		if err != nil {
-			if err != io.EOF {
-				// Log error if needed
-			}
-			break
-		}
-	}
-}
-
-func (b *BashREPL) monitorProcess() {
-	if b.cmd == nil {
-		return
-	}
-
-	err := b.cmd.Wait()
-
-	exitCode := 0
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		}
-	}
-
-	b.SetExitCode(exitCode)
-
-	duration := time.Since(b.StartTime())
-
-	if exitCode == 0 {
-		b.SetState(process.ProcessStateStopped)
-	} else if exitCode == -1 || exitCode == 137 {
-		b.SetState(process.ProcessStateKilled)
-	} else {
-		b.SetState(process.ProcessStateCrashed)
-	}
-
-	b.NotifyExit(process.ExitEvent{
-		ProcessID:   b.ID(),
-		ProcessType: b.Type(),
-		PID:         b.PID(),
-		ExitCode:    exitCode,
-		Duration:    duration,
-		State:       b.State(),
-		Config:      b.GetConfig(),
-	})
-
-	b.CloseOutput()
+	return b.BaseProcess.ResizePTY(size)
 }

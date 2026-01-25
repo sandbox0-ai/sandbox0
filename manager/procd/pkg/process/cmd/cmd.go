@@ -11,7 +11,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/creack/pty"
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/process"
 )
 
@@ -25,6 +24,7 @@ type CMD struct {
 	stdout  bytes.Buffer
 	stderr  bytes.Buffer
 	command []string
+	runner  *process.PTYRunner
 }
 
 // NewCMD creates a new CMD process.
@@ -75,6 +75,9 @@ func (c *CMD) Start() error {
 	for k, v := range config.EnvVars {
 		env = append(env, fmt.Sprintf("%s=%s", k, v))
 	}
+	if config.PTYSize != nil {
+		env = append(env, fmt.Sprintf("TERM=%s", resolveTerm(config)))
+	}
 	cmd.Env = env
 
 	// Create a new process group so we can send signals to all child processes
@@ -84,36 +87,16 @@ func (c *CMD) Start() error {
 
 	// Check if PTY is requested
 	if config.PTYSize != nil {
-		// Start with PTY for interactive commands
-		ptySize := config.PTYSize
-		ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
-			Rows: ptySize.Rows,
-			Cols: ptySize.Cols,
-		})
-		if err != nil {
-			c.SetState(process.ProcessStateCrashed)
-			return fmt.Errorf("%w: %v", process.ErrProcessStartFailed, err)
+		if c.runner == nil {
+			c.runner = process.NewPTYRunner(c.BaseProcess, nil, c.cancel)
 		}
-
-		c.SetPTY(ptmx)
-		c.cmd = cmd
-		c.SetPID(cmd.Process.Pid)
-		c.SetStartTime(time.Now())
-		c.SetState(process.ProcessStateRunning)
-		c.NotifyStart(process.StartEvent{
-			ProcessID:   c.ID(),
-			ProcessType: c.Type(),
-			PID:         c.PID(),
-			StartTime:   c.StartTime(),
-			State:       c.State(),
-			Config:      config,
+		c.runner.SetExitResolver(func(err error) (int, bool) {
+			if c.ctx.Err() == context.Canceled {
+				return 137, true
+			}
+			return 0, false
 		})
-
-		// Start output reader
-		go c.readPTYOutput(ptmx)
-
-		// Start process monitor
-		go c.monitorProcess()
+		return c.runner.Start(cmd, config.PTYSize)
 	} else {
 		// Start with pipes for non-interactive commands
 		cmd.Stdout = &c.stdout
@@ -150,6 +133,10 @@ func (c *CMD) Stop() error {
 		return nil
 	}
 
+	if c.GetPTY() != nil && c.runner != nil {
+		return c.runner.Stop()
+	}
+
 	// Cancel the context to signal the command to stop
 	c.cancel()
 
@@ -159,11 +146,6 @@ func (c *CMD) Stop() error {
 			// If SIGTERM fails, use SIGKILL
 			c.cmd.Process.Kill()
 		}
-	}
-
-	// Close PTY if it exists
-	if ptyFile := c.GetPTY(); ptyFile != nil {
-		ptyFile.Close()
 	}
 
 	c.SetState(process.ProcessStateStopped)
@@ -194,25 +176,6 @@ func (c *CMD) GetOutput() (stdout, stderr string) {
 // GetCommand returns the command being executed.
 func (c *CMD) GetCommand() string {
 	return strings.Join(c.command, " ")
-}
-
-func (c *CMD) readPTYOutput(ptmx *os.File) {
-	buf := make([]byte, 4096)
-	for {
-		n, err := ptmx.Read(buf)
-		if n > 0 {
-			data := make([]byte, n)
-			copy(data, buf[:n])
-
-			c.PublishOutput(process.ProcessOutput{
-				Source: process.OutputSourcePTY,
-				Data:   data,
-			})
-		}
-		if err != nil {
-			break
-		}
-	}
 }
 
 func (c *CMD) monitorProcess() {
@@ -287,4 +250,14 @@ func truncatePreview(data []byte, limit int) string {
 		return string(data)
 	}
 	return string(data[:limit])
+}
+
+func resolveTerm(config process.ProcessConfig) string {
+	if config.Term != "" {
+		return config.Term
+	}
+	if val, ok := config.EnvVars["TERM"]; ok && strings.TrimSpace(val) != "" {
+		return val
+	}
+	return "xterm-256color"
 }

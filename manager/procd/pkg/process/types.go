@@ -7,6 +7,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/creack/pty"
 )
 
 // ProcessType defines the type of process.
@@ -157,6 +159,8 @@ type Process interface {
 	// I/O
 	WriteInput(data []byte) error
 	ReadOutput() <-chan ProcessOutput
+	ResizePTY(size PTYSize) error
+	SendSignal(sig syscall.Signal) error
 
 	// Status
 	ExitCode() (int, error)
@@ -499,6 +503,43 @@ func (bp *BaseProcess) WriteInput(data []byte) error {
 
 	_, err := pty.Write(data)
 	return err
+}
+
+// ResizePTY resizes the attached PTY, if present.
+func (bp *BaseProcess) ResizePTY(size PTYSize) error {
+	ptyFile := bp.GetPTY()
+	if ptyFile == nil {
+		return ErrPTYNotAvailable
+	}
+
+	if size.Rows == 0 || size.Cols == 0 {
+		return fmt.Errorf("%w: rows and cols must be > 0", ErrInvalidPTYSize)
+	}
+
+	return pty.Setsize(ptyFile, &pty.Winsize{
+		Rows: size.Rows,
+		Cols: size.Cols,
+	})
+}
+
+// SendSignal sends a signal to the process group, falling back to the PID.
+func (bp *BaseProcess) SendSignal(sig syscall.Signal) error {
+	bp.mu.RLock()
+	pid := bp.pid
+	state := bp.state
+	bp.mu.RUnlock()
+
+	if pid <= 0 || (state != ProcessStateRunning && state != ProcessStatePaused) {
+		return ErrProcessNotRunning
+	}
+
+	if err := syscall.Kill(-pid, sig); err != nil {
+		if err := syscall.Kill(pid, sig); err != nil {
+			return fmt.Errorf("%w: %v", ErrSignalFailed, err)
+		}
+	}
+
+	return nil
 }
 
 // SetState updates the process state.

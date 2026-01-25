@@ -44,4 +44,13 @@ var (
 
 	// ErrPermissionDenied is returned when permission is denied.
 	ErrPermissionDenied = errors.New("permission denied")
+
+	// ErrPTYNotAvailable is returned when a process has no PTY attached.
+	ErrPTYNotAvailable = errors.New("pty not available")
+
+	// ErrSignalFailed is returned when sending a signal fails.
+	ErrSignalFailed = errors.New("signal failed")
+
+	// ErrInvalidPTYSize is returned when PTY size is invalid.
+	ErrInvalidPTYSize = errors.New("invalid pty size")
 )

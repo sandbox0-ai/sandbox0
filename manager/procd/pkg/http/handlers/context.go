@@ -3,7 +3,11 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strconv"
+	"strings"
+	"syscall"
 
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
@@ -64,6 +68,25 @@ type ContextStatsResponse struct {
 	Running   bool                  `json:"running"`
 	Paused    bool                  `json:"paused"`
 	Usage     process.ResourceUsage `json:"usage"`
+}
+
+// ResizeContextRequest is the request body for resizing a PTY.
+type ResizeContextRequest struct {
+	Rows uint16 `json:"rows"`
+	Cols uint16 `json:"cols"`
+}
+
+// SignalContextRequest is the request body for sending a signal.
+type SignalContextRequest struct {
+	Signal string `json:"signal"`
+}
+
+type wsControlMessage struct {
+	Type   string `json:"type"`
+	Data   string `json:"data"`
+	Rows   uint16 `json:"rows"`
+	Cols   uint16 `json:"cols"`
+	Signal string `json:"signal"`
 }
 
 // List lists all contexts.
@@ -253,6 +276,124 @@ func (h *ContextHandler) Stats(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ResizePTY resizes a context's PTY.
+func (h *ContextHandler) ResizePTY(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	id := vars["id"]
+
+	var req ResizeContextRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if req.Rows == 0 || req.Cols == 0 {
+		writeError(w, http.StatusBadRequest, "invalid_request", "rows and cols must be > 0")
+		return
+	}
+
+	err := h.manager.ResizePTY(id, process.PTYSize{Rows: req.Rows, Cols: req.Cols})
+	if err != nil {
+		if err == ctxpkg.ErrContextNotFound {
+			writeError(w, http.StatusNotFound, "context_not_found", err.Error())
+			return
+		}
+		if errors.Is(err, process.ErrPTYNotAvailable) {
+			writeError(w, http.StatusConflict, "pty_unavailable", err.Error())
+			return
+		}
+		if errors.Is(err, process.ErrProcessNotRunning) {
+			writeError(w, http.StatusConflict, "process_not_running", err.Error())
+			return
+		}
+		if errors.Is(err, process.ErrInvalidPTYSize) {
+			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "resize_failed", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]bool{"resized": true})
+}
+
+// SendSignal sends a signal to a context's process.
+func (h *ContextHandler) SendSignal(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	id := vars["id"]
+
+	var req SignalContextRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+
+	sig, err := parseSignal(req.Signal)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+
+	if err := h.manager.SendSignal(id, sig); err != nil {
+		if err == ctxpkg.ErrContextNotFound {
+			writeError(w, http.StatusNotFound, "context_not_found", err.Error())
+			return
+		}
+		if errors.Is(err, process.ErrProcessNotRunning) {
+			writeError(w, http.StatusConflict, "process_not_running", err.Error())
+			return
+		}
+		if errors.Is(err, process.ErrSignalFailed) {
+			writeError(w, http.StatusInternalServerError, "signal_failed", err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "signal_failed", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]bool{"signaled": true})
+}
+
+func parseSignal(value string) (syscall.Signal, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return 0, errors.New("signal is required")
+	}
+
+	upper := strings.ToUpper(trimmed)
+	if strings.HasPrefix(upper, "SIG") {
+		upper = strings.TrimPrefix(upper, "SIG")
+	}
+
+	switch upper {
+	case "INT":
+		return syscall.SIGINT, nil
+	case "TERM":
+		return syscall.SIGTERM, nil
+	case "KILL":
+		return syscall.SIGKILL, nil
+	case "HUP":
+		return syscall.SIGHUP, nil
+	case "QUIT":
+		return syscall.SIGQUIT, nil
+	case "USR1":
+		return syscall.SIGUSR1, nil
+	case "USR2":
+		return syscall.SIGUSR2, nil
+	case "WINCH":
+		return syscall.SIGWINCH, nil
+	case "STOP":
+		return syscall.SIGSTOP, nil
+	case "CONT":
+		return syscall.SIGCONT, nil
+	}
+
+	if num, err := strconv.Atoi(upper); err == nil && num > 0 {
+		return syscall.Signal(num), nil
+	}
+
+	return 0, errors.New("unsupported signal")
+}
+
 // WebSocket handles WebSocket connections for context I/O.
 func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
@@ -298,9 +439,44 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			break
 		}
+		if len(data) == 0 {
+			continue
+		}
+
+		var msg wsControlMessage
+		if err := json.Unmarshal(data, &msg); err == nil && msg.Type != "" {
+			switch msg.Type {
+			case "input":
+				if ctx.MainProcess != nil && msg.Data != "" {
+					_ = ctx.MainProcess.WriteInput([]byte(msg.Data))
+				}
+			case "resize":
+				if msg.Rows == 0 || msg.Cols == 0 {
+					h.logger.Warn("Invalid resize request", zap.String("context_id", id))
+					continue
+				}
+				if err := h.manager.ResizePTY(id, process.PTYSize{Rows: msg.Rows, Cols: msg.Cols}); err != nil {
+					h.logger.Warn("Resize failed", zap.String("context_id", id), zap.Error(err))
+				}
+			case "signal":
+				sig, err := parseSignal(msg.Signal)
+				if err != nil {
+					h.logger.Warn("Invalid signal request", zap.String("context_id", id), zap.Error(err))
+					continue
+				}
+				if err := h.manager.SendSignal(id, sig); err != nil {
+					h.logger.Warn("Signal failed", zap.String("context_id", id), zap.Error(err))
+				}
+			default:
+				if ctx.MainProcess != nil {
+					_ = ctx.MainProcess.WriteInput(data)
+				}
+			}
+			continue
+		}
 
 		if ctx.MainProcess != nil {
-			ctx.MainProcess.WriteInput(data)
+			_ = ctx.MainProcess.WriteInput(data)
 		}
 	}
 }

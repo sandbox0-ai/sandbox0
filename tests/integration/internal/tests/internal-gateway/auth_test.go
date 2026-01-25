@@ -53,7 +53,7 @@ func TestInternalGatewayIntegration_PermissionDenied(t *testing.T) {
 	}
 }
 
-func TestInternalGatewayIntegration_ProcdEndpointsRequireSandboxWrite(t *testing.T) {
+func TestInternalGatewayIntegration_SandboxWriteRequired(t *testing.T) {
 	keys := gatewayKeyPair{}
 	keys.privateKey, keys.publicKey = writeInternalGatewayKeys(t)
 
@@ -70,18 +70,12 @@ func TestInternalGatewayIntegration_ProcdEndpointsRequireSandboxWrite(t *testing
 	env := newGatewayTestEnv(t, managerServer.URL, storageServer.URL, nil, keys)
 	token := newInternalToken(t, env.edgeGen, []string{auth.PermSandboxRead})
 
-	resp, _ := doGatewayRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/api/v1/sandboxes/sbx-1/exec", token, map[string]any{
-		"cmd": "echo ok",
+	resp, _ := doGatewayRequest(t, env.server.Client(), http.MethodPatch, env.server.URL+"/api/v1/sandboxes/sbx-1/bandwidth", token, map[string]any{
+		"upload_bps":   1024,
+		"download_bps": 1024,
 	})
 	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("expected forbidden for exec, got %d", resp.StatusCode)
-	}
-
-	resp, _ = doGatewayRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/api/v1/sandboxes/sbx-1/exec/stream", token, map[string]any{
-		"cmd": "echo ok",
-	})
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("expected forbidden for exec stream, got %d", resp.StatusCode)
+		t.Fatalf("expected forbidden for sandbox bandwidth update, got %d", resp.StatusCode)
 	}
 }
 

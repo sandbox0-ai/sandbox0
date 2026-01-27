@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/sandbox0-ai/infra/pkg/auth"
+	gatewayjwt "github.com/sandbox0-ai/infra/pkg/gateway/auth/jwt"
 	"github.com/sandbox0-ai/infra/pkg/gateway/db"
 	"go.uber.org/zap"
 )
@@ -15,14 +16,16 @@ import (
 // AuthMiddleware provides authentication middleware
 type AuthMiddleware struct {
 	repo      *db.Repository
+	jwtIssuer *gatewayjwt.Issuer
 	jwtSecret []byte
 	logger    *zap.Logger
 }
 
 // NewAuthMiddleware creates a new auth middleware
-func NewAuthMiddleware(repo *db.Repository, jwtSecret string, logger *zap.Logger) *AuthMiddleware {
+func NewAuthMiddleware(repo *db.Repository, jwtSecret string, jwtIssuer *gatewayjwt.Issuer, logger *zap.Logger) *AuthMiddleware {
 	return &AuthMiddleware{
 		repo:      repo,
+		jwtIssuer: jwtIssuer,
 		jwtSecret: []byte(jwtSecret),
 		logger:    logger,
 	}
@@ -95,6 +98,36 @@ func (m *AuthMiddleware) authenticateAPIKey(c *gin.Context, keyValue string) (*a
 func (m *AuthMiddleware) authenticateJWT(c *gin.Context, tokenString string) (*auth.AuthContext, error) {
 	if len(m.jwtSecret) == 0 {
 		return nil, ErrJWTNotConfigured
+	}
+
+	if m.jwtIssuer != nil {
+		claims, err := m.jwtIssuer.ValidateAccessToken(tokenString)
+		if err != nil {
+			switch {
+			case errors.Is(err, gatewayjwt.ErrJWTNotConfigured):
+				return nil, ErrJWTNotConfigured
+			case errors.Is(err, gatewayjwt.ErrTokenExpired):
+				return nil, ErrExpiredToken
+			case errors.Is(err, gatewayjwt.ErrInvalidSigningMethod):
+				return nil, ErrInvalidSigningMethod
+			default:
+				return nil, ErrInvalidToken
+			}
+		}
+
+		permissions := auth.ExpandRolePermissions(claims.TeamRole)
+		if claims.IsAdmin {
+			permissions = append(permissions, "*")
+		}
+
+		return &auth.AuthContext{
+			AuthMethod:    auth.AuthMethodJWT,
+			TeamID:        claims.TeamID,
+			UserID:        claims.UserID,
+			TeamRole:      claims.TeamRole,
+			IsSystemAdmin: claims.IsAdmin,
+			Permissions:   permissions,
+		}, nil
 	}
 
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (any, error) {

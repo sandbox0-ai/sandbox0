@@ -59,54 +59,9 @@ type InternalGatewayConfig struct {
 	// +kubebuilder:default=8
 	DatabaseMinConns int `yaml:"database_min_conns" json:"databaseMinConns"`
 
-	// Identity and Teams
+	// Shared gateway configuration
 	// +optional
-	// +kubebuilder:default="Personal Team"
-	DefaultTeamName string `yaml:"default_team_name" json:"defaultTeamName"`
-
-	// Built-in Authentication
-	// +optional
-	// +kubebuilder:default={}
-	BuiltInAuth BuiltInAuthConfig `yaml:"built_in_auth" json:"builtInAuth"`
-
-	// OIDC Providers
-	// +optional
-	OIDCProviders []OIDCProviderConfig `yaml:"oidc_providers" json:"oidcProviders"`
-	// +optional
-	// +kubebuilder:default="10m"
-	OIDCStateTTL metav1.Duration `yaml:"oidc_state_ttl" json:"oidcStateTTL"`
-	// +optional
-	// +kubebuilder:default="5m"
-	OIDCStateCleanupInterval metav1.Duration `yaml:"oidc_state_cleanup_interval" json:"oidcStateCleanupInterval"`
-
-	// Base URL for OIDC callbacks
-	// +optional
-	// +kubebuilder:default="http://localhost:8080"
-	BaseURL string `yaml:"base_url" json:"baseUrl"`
-
-	// JWT Configuration
-	// +optional
-	JWTSecret string `yaml:"jwt_secret" json:"jwtSecret"`
-	// +optional
-	// +kubebuilder:default="internal-gateway"
-	JWTIssuer string `yaml:"jwt_issuer" json:"jwtIssuer"`
-	// +optional
-	// +kubebuilder:default="15m"
-	JWTAccessTokenTTL metav1.Duration `yaml:"jwt_access_token_ttl" json:"jwtAccessTokenTTL"`
-	// +optional
-	// +kubebuilder:default="168h"
-	JWTRefreshTokenTTL metav1.Duration `yaml:"jwt_refresh_token_ttl" json:"jwtRefreshTokenTTL"`
-
-	// Rate limiting
-	// +optional
-	// +kubebuilder:default=100
-	RateLimitRPS int `yaml:"rate_limit_rps" json:"rateLimitRPS"`
-	// +optional
-	// +kubebuilder:default=200
-	RateLimitBurst int `yaml:"rate_limit_burst" json:"rateLimitBurst"`
-	// +optional
-	// +kubebuilder:default="10m"
-	RateLimitCleanupInterval metav1.Duration `yaml:"rate_limit_cleanup_interval" json:"rateLimitCleanupInterval"`
+	GatewayConfig `yaml:",inline" json:",inline"`
 
 	// Permissions
 	// +optional

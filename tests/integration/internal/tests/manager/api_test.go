@@ -90,11 +90,11 @@ func newManagerTestEnvWithOptions(t *testing.T, opts managerTestEnvOptions) *man
 
 	podIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
 	nodeIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
-	configMapIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	secretIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
 	namespaceIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
 	podLister := corelisters.NewPodLister(podIndexer)
 	nodeLister := corelisters.NewNodeLister(nodeIndexer)
-	configMapLister := corelisters.NewConfigMapLister(configMapIndexer)
+	secretLister := corelisters.NewSecretLister(secretIndexer)
 	namespaceLister := corelisters.NewNamespaceLister(namespaceIndexer)
 
 	templateLister := &testTemplateLister{
@@ -105,7 +105,7 @@ func newManagerTestEnvWithOptions(t *testing.T, opts managerTestEnvOptions) *man
 	sandboxService := service.NewSandboxService(
 		k8sClient,
 		podLister,
-		configMapLister,
+		secretLister,
 		templateLister,
 		nil,
 		nil,

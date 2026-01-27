@@ -272,7 +272,21 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 			Name:     infra.Spec.InitUser.Name,
 		}
 	}
+
+	if strings.TrimSpace(cfg.JWTIssuer) == "" {
+		cfg.JWTIssuer = "internal-gateway"
+	}
+
+	if internalGatewayPublicAuthEnabled(cfg.AuthMode) && strings.TrimSpace(cfg.JWTSecret) == "" {
+		cfg.JWTSecret = common.GenerateRandomString(32)
+	}
+
 	return cfg, nil
+}
+
+func internalGatewayPublicAuthEnabled(mode string) bool {
+	mode = strings.TrimSpace(strings.ToLower(mode))
+	return mode == "public" || mode == "both"
 }
 
 func internalAuthRequiresControlPlaneKey(cfg *apiconfig.InternalGatewayConfig) bool {

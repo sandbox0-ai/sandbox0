@@ -93,11 +93,6 @@ func NewServer(
 		)
 	}
 
-	// Create middleware
-	authMiddleware := middleware.NewAuthMiddleware(repo, cfg.JWTSecret, logger)
-	rateLimiter := middleware.NewRateLimiter(cfg.RateLimitRPS, cfg.RateLimitBurst, cfg.RateLimitCleanupInterval.Duration, logger)
-	requestLogger := middleware.NewRequestLogger(logger)
-
 	// Initialize internal auth generator
 	privateKey, err := internalauth.LoadEd25519PrivateKeyFromFile(internalauth.DefaultInternalJWTPrivateKeyPath)
 	if err != nil {
@@ -111,6 +106,11 @@ func NewServer(
 
 	// Initialize JWT issuer
 	jwtIssuer := jwt.NewIssuer(cfg.JWTIssuer, cfg.JWTSecret, cfg.JWTAccessTokenTTL.Duration, cfg.JWTRefreshTokenTTL.Duration)
+
+	// Create middleware
+	authMiddleware := middleware.NewAuthMiddleware(repo, cfg.JWTSecret, jwtIssuer, logger)
+	rateLimiter := middleware.NewRateLimiter(cfg.RateLimitRPS, cfg.RateLimitBurst, cfg.RateLimitCleanupInterval.Duration, logger)
+	requestLogger := middleware.NewRequestLogger(logger)
 
 	// Initialize built-in auth provider
 	builtinProvider := builtin.NewProvider(repo, &cfg.BuiltInAuth, cfg.DefaultTeamName)

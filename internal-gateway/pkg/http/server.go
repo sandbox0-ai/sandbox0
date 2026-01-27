@@ -186,7 +186,7 @@ func NewServer(
 
 		jwtIssuer := gatewayjwt.NewIssuer(cfg.JWTIssuer, cfg.JWTSecret, cfg.JWTAccessTokenTTL.Duration, cfg.JWTRefreshTokenTTL.Duration)
 
-		publicAuth = gatewaymiddleware.NewAuthMiddleware(publicRepo, cfg.JWTSecret, logger)
+		publicAuth = gatewaymiddleware.NewAuthMiddleware(publicRepo, cfg.JWTSecret, jwtIssuer, logger)
 		compositeAuth = middleware.NewCompositeAuthMiddleware(authMiddleware, publicAuth, logger)
 		rateLimiter = gatewaymiddleware.NewRateLimiter(cfg.RateLimitRPS, cfg.RateLimitBurst, cfg.RateLimitCleanupInterval.Duration, logger)
 		externalLimiter = middleware.NewExternalRateLimiter(rateLimiter)

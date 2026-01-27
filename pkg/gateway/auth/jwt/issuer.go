@@ -13,6 +13,7 @@ var (
 	ErrInvalidToken         = errors.New("invalid token")
 	ErrTokenExpired         = errors.New("token expired")
 	ErrInvalidSigningMethod = errors.New("invalid signing method")
+	ErrJWTNotConfigured     = errors.New("JWT authentication not configured")
 )
 
 // Claims represents JWT claims
@@ -55,6 +56,10 @@ type TokenPair struct {
 
 // IssueTokenPair issues both access and refresh tokens
 func (i *Issuer) IssueTokenPair(userID, teamID, teamRole, email, name string, isAdmin bool) (*TokenPair, error) {
+	if len(i.secret) == 0 {
+		return nil, ErrJWTNotConfigured
+	}
+
 	now := time.Now()
 	accessExpiry := now.Add(i.accessTokenTTL)
 	refreshExpiry := now.Add(i.refreshTokenTTL)
@@ -140,6 +145,10 @@ func (i *Issuer) ValidateRefreshToken(tokenString string) (*Claims, error) {
 
 // validateToken validates a JWT token
 func (i *Issuer) validateToken(tokenString string) (*Claims, error) {
+	if len(i.secret) == 0 {
+		return nil, ErrJWTNotConfigured
+	}
+
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (any, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, ErrInvalidSigningMethod

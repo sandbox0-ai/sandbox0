@@ -19,6 +19,7 @@ package edgegateway
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -221,6 +222,14 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 			Password: password,
 			Name:     infra.Spec.InitUser.Name,
 		}
+	}
+
+	if strings.TrimSpace(cfg.JWTIssuer) == "" {
+		cfg.JWTIssuer = "edge-gateway"
+	}
+
+	if strings.TrimSpace(cfg.JWTSecret) == "" {
+		cfg.JWTSecret = common.GenerateRandomString(32)
 	}
 
 	return cfg, nil

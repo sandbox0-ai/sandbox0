@@ -514,13 +514,9 @@ spec:
                             default: 15m
                             type: string
                           jwtIssuer:
-                            default: edge-gateway
                             type: string
                           jwtRefreshTokenTTL:
                             default: 168h
-                            type: string
-                          jwtSecret:
-                            description: JWT Configuration
                             type: string
                           logLevel:
                             default: info
@@ -797,13 +793,9 @@ spec:
                             default: 15m
                             type: string
                           jwtIssuer:
-                            default: internal-gateway
                             type: string
                           jwtRefreshTokenTTL:
                             default: 168h
-                            type: string
-                          jwtSecret:
-                            description: JWT Configuration
                             type: string
                           logLevel:
                             default: info

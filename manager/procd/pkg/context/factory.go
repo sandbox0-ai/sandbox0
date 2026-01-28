@@ -1,15 +1,25 @@
 package context
 
 import (
-	"fmt"
-
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/process"
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/process/cmd"
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/process/repl"
 )
 
+// Language aliases map alternative names to canonical REPL names.
+var languageAliases = map[string]string{
+	"python3":    "python",
+	"javascript": "node",
+	"nodejs":     "node",
+	"rb":         "ruby",
+	"R":          "r",
+	"pl":         "perl",
+}
+
 // createREPLProcess creates a REPL process based on language.
-// Now supports Python, Node.js, Bash, Zsh, Ruby, Lua, PHP, R, and Perl.
+// Supports all languages registered in the REPL registry, including:
+// Python, Node.js, Bash, Zsh, Ruby, Lua, PHP, R, Perl, Redis, SQLite, MySQL, PostgreSQL,
+// Elixir, Erlang, Scala, Clojure, Haskell, OCaml, Julia, Swift, Kotlin, Groovy, and more.
 func createREPLProcess(ctxID string, config process.ProcessConfig) (process.Process, error) {
 	procID := ctxID + "-proc"
 	lang := config.Language
@@ -17,28 +27,16 @@ func createREPLProcess(ctxID string, config process.ProcessConfig) (process.Proc
 		lang = "python"
 	}
 
-	switch lang {
-	case "python", "python3":
-		return repl.NewPythonREPL(procID, config)
-	case "javascript", "node", "nodejs":
-		return repl.NewNodeREPL(procID, config)
-	case "bash":
-		return repl.NewBashREPL(procID, config)
-	case "zsh":
-		return repl.NewZshREPL(procID, config)
-	case "ruby", "rb":
-		return repl.NewRubyREPL(procID, config)
-	case "lua":
-		return repl.NewLuaREPL(procID, config)
-	case "php":
-		return repl.NewPHPREPL(procID, config)
-	case "r", "R":
-		return repl.NewRREPL(procID, config)
-	case "perl", "pl":
-		return repl.NewPerlREPL(procID, config)
-	default:
-		return nil, fmt.Errorf("%w: %s", process.ErrUnsupportedLanguage, lang)
+	// Resolve language aliases
+	if canonical, ok := languageAliases[lang]; ok {
+		lang = canonical
 	}
+
+	// Update config with resolved language
+	config.Language = lang
+
+	// Use the unified REPL factory
+	return repl.NewREPL(procID, config)
 }
 
 // createCMDProcess creates a CMD process for one-time command execution.

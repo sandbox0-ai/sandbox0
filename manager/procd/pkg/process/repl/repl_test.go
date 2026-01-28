@@ -9,8 +9,234 @@ import (
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/process"
 )
 
-// TestNewPythonREPL tests Python REPL creation.
-func TestNewPythonREPL(t *testing.T) {
+// TestREPLConfig_Validate tests config validation.
+func TestREPLConfig_Validate(t *testing.T) {
+	tests := []struct {
+		name      string
+		config    REPLConfig
+		wantError bool
+	}{
+		{
+			name: "valid config",
+			config: REPLConfig{
+				Name: "test",
+				Candidates: []ExecCandidate{
+					{Name: "test-cmd", Args: []string{}},
+				},
+			},
+			wantError: false,
+		},
+		{
+			name: "missing name",
+			config: REPLConfig{
+				Candidates: []ExecCandidate{
+					{Name: "test-cmd", Args: []string{}},
+				},
+			},
+			wantError: true,
+		},
+		{
+			name: "no candidates",
+			config: REPLConfig{
+				Name:       "test",
+				Candidates: []ExecCandidate{},
+			},
+			wantError: true,
+		},
+		{
+			name: "candidate missing name",
+			config: REPLConfig{
+				Name: "test",
+				Candidates: []ExecCandidate{
+					{Name: "", Args: []string{}},
+				},
+			},
+			wantError: true,
+		},
+		{
+			name: "invalid regex pattern",
+			config: REPLConfig{
+				Name: "test",
+				Candidates: []ExecCandidate{
+					{Name: "test-cmd", Args: []string{}},
+				},
+				Prompt: PromptConfig{
+					Patterns: []string{"[invalid"},
+				},
+			},
+			wantError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.config.Validate()
+			if (err != nil) != tt.wantError {
+				t.Errorf("Validate() error = %v, wantError %v", err, tt.wantError)
+			}
+		})
+	}
+}
+
+// TestREPLConfig_Clone tests config cloning.
+func TestREPLConfig_Clone(t *testing.T) {
+	original := &REPLConfig{
+		Name: "test",
+		Candidates: []ExecCandidate{
+			{Name: "cmd1", Args: []string{"-a", "-b"}},
+			{Name: "cmd2", Args: []string{"-c"}},
+		},
+		Env: []EnvVar{
+			{Name: "VAR1", Value: "value1"},
+		},
+		Prompt: PromptConfig{
+			Patterns: []string{`> `, `>>> `},
+		},
+		InitCommands: []string{"cmd1", "cmd2"},
+	}
+
+	clone := original.Clone()
+
+	// Modify clone
+	clone.Name = "modified"
+	clone.Candidates[0].Name = "modified-cmd"
+	clone.Candidates[0].Args[0] = "-modified"
+	clone.Env[0].Value = "modified"
+	clone.Prompt.Patterns[0] = "modified"
+	clone.InitCommands[0] = "modified"
+
+	// Original should be unchanged
+	if original.Name != "test" {
+		t.Error("Clone modified original Name")
+	}
+	if original.Candidates[0].Name != "cmd1" {
+		t.Error("Clone modified original Candidates")
+	}
+	if original.Candidates[0].Args[0] != "-a" {
+		t.Error("Clone modified original Candidates Args")
+	}
+	if original.Env[0].Value != "value1" {
+		t.Error("Clone modified original Env")
+	}
+	if original.Prompt.Patterns[0] != `> ` {
+		t.Error("Clone modified original Prompt.Patterns")
+	}
+	if original.InitCommands[0] != "cmd1" {
+		t.Error("Clone modified original InitCommands")
+	}
+}
+
+// TestBuiltinConfigs tests that all built-in configs are valid.
+func TestBuiltinConfigs(t *testing.T) {
+	for name, config := range BuiltinConfigs {
+		t.Run(name, func(t *testing.T) {
+			if err := config.Validate(); err != nil {
+				t.Errorf("Built-in config %s is invalid: %v", name, err)
+			}
+			if config.Name != name {
+				t.Errorf("Config name mismatch: got %s, want %s", config.Name, name)
+			}
+		})
+	}
+}
+
+// TestGetBuiltinConfig tests retrieving built-in configs.
+func TestGetBuiltinConfig(t *testing.T) {
+	config, ok := GetBuiltinConfig("python")
+	if !ok {
+		t.Fatal("GetBuiltinConfig() should find python")
+	}
+	if config.Name != "python" {
+		t.Errorf("Config name = %s, want python", config.Name)
+	}
+
+	_, ok = GetBuiltinConfig("nonexistent")
+	if ok {
+		t.Error("GetBuiltinConfig() should not find nonexistent")
+	}
+}
+
+// TestREPLRegistry tests the registry.
+func TestREPLRegistry(t *testing.T) {
+	registry := NewREPLRegistry()
+
+	if _, ok := registry.Get("python"); !ok {
+		t.Error("Registry should have python config")
+	}
+
+	customConfig := &REPLConfig{
+		Name: "custom",
+		Candidates: []ExecCandidate{
+			{Name: "custom-cmd", Args: []string{}},
+		},
+	}
+	if err := registry.Register(customConfig); err != nil {
+		t.Fatalf("Register() failed: %v", err)
+	}
+
+	config, ok := registry.Get("custom")
+	if !ok {
+		t.Error("Registry should have custom config after registration")
+	}
+	if config.Name != "custom" {
+		t.Errorf("Config name = %s, want custom", config.Name)
+	}
+
+	names := registry.List()
+	if len(names) == 0 {
+		t.Error("Registry.List() should return configs")
+	}
+}
+
+// TestNewREPL tests REPL creation with various languages.
+func TestNewREPL(t *testing.T) {
+	tests := []struct {
+		name     string
+		language string
+		wantErr  bool
+	}{
+		{"python", "python", false},
+		{"node", "node", false},
+		{"bash", "bash", false},
+		{"zsh", "zsh", false},
+		{"ruby", "ruby", false},
+		{"lua", "lua", false},
+		{"php", "php", false},
+		{"r", "r", false},
+		{"perl", "perl", false},
+		{"redis-cli", "redis-cli", false},
+		{"sqlite", "sqlite", false},
+		{"unknown", "unknown", true},
+		{"empty", "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := process.ProcessConfig{
+				Type:     process.ProcessTypeREPL,
+				Language: tt.language,
+			}
+
+			repl, err := NewREPL("test-"+tt.name, config)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("NewREPL() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+
+			if !tt.wantErr {
+				if repl == nil {
+					t.Error("NewREPL() returned nil without error")
+				}
+				if repl.Language() != tt.language {
+					t.Errorf("Language() = %s, want %s", repl.Language(), tt.language)
+				}
+			}
+		})
+	}
+}
+
+// TestREPL_Lifecycle tests basic REPL lifecycle operations.
+func TestREPL_Lifecycle(t *testing.T) {
 	config := process.ProcessConfig{
 		Type:     process.ProcessTypeREPL,
 		Language: "python",
@@ -18,54 +244,56 @@ func TestNewPythonREPL(t *testing.T) {
 		EnvVars:  map[string]string{"TEST": "value"},
 	}
 
-	repl, err := NewPythonREPL("test-python", config)
+	repl, err := NewREPL("test-lifecycle", config)
 	if err != nil {
-		t.Fatalf("NewPythonREPL() failed = %v", err)
+		t.Fatalf("NewREPL() failed = %v", err)
 	}
 
-	if repl == nil {
-		t.Fatal("NewPythonREPL() returned nil")
+	// Test initial state
+	if repl.ID() != "test-lifecycle" {
+		t.Errorf("ID() = %s, want test-lifecycle", repl.ID())
 	}
-
-	if repl.ID() != "test-python" {
-		t.Errorf("ID() = %s, want test-python", repl.ID())
-	}
-
 	if repl.Type() != process.ProcessTypeREPL {
 		t.Errorf("Type() = %s, want %s", repl.Type(), process.ProcessTypeREPL)
 	}
-
 	if repl.State() != process.ProcessStateCreated {
 		t.Errorf("State() = %s, want %s", repl.State(), process.ProcessStateCreated)
 	}
+	if repl.Language() != "python" {
+		t.Errorf("Language() = %s, want python", repl.Language())
+	}
+
+	// Test ResizeTerminal when not running
+	size := process.PTYSize{Rows: 40, Cols: 120}
+	err = repl.ResizeTerminal(size)
+	if err != process.ErrProcessNotRunning {
+		t.Errorf("ResizeTerminal() error = %v, want %v", err, process.ErrProcessNotRunning)
+	}
+
+	// Test Stop when not running (should not error)
+	if err := repl.Stop(); err != nil {
+		t.Errorf("Stop() error = %v", err)
+	}
 }
 
-// TestPythonREPL_StartWithoutPython tests starting when Python is not available.
-func TestPythonREPL_StartWithoutPython(t *testing.T) {
+// TestREPL_StartWithoutInterpreter tests starting when interpreter is not available.
+func TestREPL_StartWithoutInterpreter(t *testing.T) {
 	config := process.ProcessConfig{
 		Type:     process.ProcessTypeREPL,
 		Language: "python",
-		// Use a PATH that won't have Python
 	}
 
-	repl, err := NewPythonREPL("test-no-python", config)
+	repl, err := NewREPL("test-no-interpreter", config)
 	if err != nil {
-		t.Fatalf("NewPythonREPL() failed = %v", err)
+		t.Fatalf("NewREPL() failed = %v", err)
 	}
 
-	// Mock the situation by removing Python from PATH
-	// Since we can't reliably mock this, we'll test that Start returns an error
-	// when Python is not found. This test may pass if Python IS available.
-
-	// Try to start - it may succeed if Python is available, or fail if not
 	err = repl.Start()
 	if err != nil {
-		// Expected when Python is not available
-		if strings.Contains(err.Error(), "no Python interpreter found") {
-			return // Expected error
+		if strings.Contains(err.Error(), "no interpreter found") {
+			return // Expected error when Python not available
 		}
-		// Other errors are also acceptable (e.g., permission issues)
-		return
+		return // Other errors acceptable
 	}
 
 	// If Python IS available, clean up
@@ -73,98 +301,52 @@ func TestPythonREPL_StartWithoutPython(t *testing.T) {
 	t.Skip("Python is available, skipping 'not found' test")
 }
 
-// TestPythonREPL_ResizeTerminalNotRunning tests ResizeTerminal when not running.
-func TestPythonREPL_ResizeTerminalNotRunning(t *testing.T) {
+// TestREPL_DoubleStart tests starting an already running REPL.
+func TestREPL_DoubleStart(t *testing.T) {
 	config := process.ProcessConfig{
 		Type:     process.ProcessTypeREPL,
 		Language: "python",
 	}
 
-	repl, err := NewPythonREPL("test-resize", config)
+	repl, err := NewREPL("test-double", config)
 	if err != nil {
-		t.Fatalf("NewPythonREPL() failed = %v", err)
+		t.Fatalf("NewREPL() failed = %v", err)
 	}
 
-	size := process.PTYSize{Rows: 40, Cols: 120}
-	err = repl.ResizeTerminal(size)
-	if err != process.ErrProcessNotRunning {
-		t.Errorf("ResizeTerminal() error = %v, want %v", err, process.ErrProcessNotRunning)
-	}
-}
-
-// TestPythonREPL_StopNotRunning tests Stop when not running.
-func TestPythonREPL_StopNotRunning(t *testing.T) {
-	config := process.ProcessConfig{
-		Type:     process.ProcessTypeREPL,
-		Language: "python",
-	}
-
-	repl, err := NewPythonREPL("test-stop", config)
-	if err != nil {
-		t.Fatalf("NewPythonREPL() failed = %v", err)
-	}
-
-	// Stop without starting - should not error
-	err = repl.Stop()
-	if err != nil {
-		t.Errorf("Stop() error = %v", err)
-	}
-}
-
-// TestPythonREPL_DoubleStart tests starting an already running REPL.
-func TestPythonREPL_DoubleStart(t *testing.T) {
-	config := process.ProcessConfig{
-		Type:     process.ProcessTypeREPL,
-		Language: "python",
-	}
-
-	repl, err := NewPythonREPL("test-double", config)
-	if err != nil {
-		t.Fatalf("NewPythonREPL() failed = %v", err)
-	}
-
-	// First start attempt - may fail if Python not available
 	err = repl.Start()
 	if err != nil {
-		if strings.Contains(err.Error(), "no Python interpreter found") {
+		if strings.Contains(err.Error(), "no interpreter found") {
 			t.Skip("Python not available")
 		}
-		// Other errors also mean we can't test double start
 		t.Skipf("Python start failed: %v", err)
 	}
 
-	// Give it a moment to start
 	time.Sleep(100 * time.Millisecond)
 
-	// Try to start again - should fail
 	err = repl.Start()
 	if err != process.ErrProcessAlreadyRunning {
 		t.Errorf("Start() second attempt error = %v, want %v", err, process.ErrProcessAlreadyRunning)
 	}
 
-	// Clean up
 	repl.Stop()
 }
 
-// TestPythonREPL_StateTransitions tests state transitions.
-func TestPythonREPL_StateTransitions(t *testing.T) {
+// TestREPL_StateTransitions tests state transitions.
+func TestREPL_StateTransitions(t *testing.T) {
 	config := process.ProcessConfig{
 		Type:     process.ProcessTypeREPL,
-		Language: "python",
+		Language: "bash",
 	}
 
-	repl, err := NewPythonREPL("test-states", config)
+	repl, err := NewREPL("test-states", config)
 	if err != nil {
-		t.Fatalf("NewPythonREPL() failed = %v", err)
+		t.Fatalf("NewREPL() failed = %v", err)
 	}
 
-	// Initial state
 	if repl.State() != process.ProcessStateCreated {
 		t.Errorf("Initial state = %s, want %s", repl.State(), process.ProcessStateCreated)
 	}
 
-	// Note: We can't test actual state transitions without Python available
-	// so we test that state can be set
 	repl.SetState(process.ProcessStateRunning)
 	if repl.State() != process.ProcessStateRunning {
 		t.Errorf("State after SetState = %s, want %s", repl.State(), process.ProcessStateRunning)
@@ -176,54 +358,16 @@ func TestPythonREPL_StateTransitions(t *testing.T) {
 	}
 }
 
-// TestPythonREPL_FilterOutput tests output filtering logic.
-func TestPythonREPL_FilterOutput(t *testing.T) {
+// TestREPL_DetectPrompt tests prompt detection.
+func TestREPL_DetectPrompt(t *testing.T) {
 	config := process.ProcessConfig{
 		Type:     process.ProcessTypeREPL,
 		Language: "python",
 	}
 
-	repl, err := NewPythonREPL("test-filter", config)
+	repl, err := NewREPL("test-prompt", config)
 	if err != nil {
-		t.Fatalf("NewPythonREPL() failed = %v", err)
-	}
-
-	// Set last input to test echo filtering
-	repl.promptMu.Lock()
-	repl.lastInput = "print('hello')"
-	repl.promptMu.Unlock()
-
-	// Test filtering with input echo
-	input := []byte("print('hello')\nhello\n")
-	filtered := repl.filterOutput(input)
-
-	// The filter should remove the echoed input
-	if strings.Contains(string(filtered), "print('hello')") {
-		t.Error("filterOutput() should remove echoed input")
-	}
-
-	// Test without last input set
-	repl.promptMu.Lock()
-	repl.lastInput = ""
-	repl.promptMu.Unlock()
-
-	input = []byte("some output")
-	filtered = repl.filterOutput(input)
-	if string(filtered) != "some output" {
-		t.Errorf("filterOutput() = %s, want 'some output'", string(filtered))
-	}
-}
-
-// TestPythonREPL_DetectPrompt tests prompt detection.
-func TestPythonREPL_DetectPrompt(t *testing.T) {
-	config := process.ProcessConfig{
-		Type:     process.ProcessTypeREPL,
-		Language: "python",
-	}
-
-	repl, err := NewPythonREPL("test-prompt", config)
-	if err != nil {
-		t.Fatalf("NewPythonREPL() failed = %v", err)
+		t.Fatalf("NewREPL() failed = %v", err)
 	}
 
 	tests := []struct {
@@ -231,192 +375,21 @@ func TestPythonREPL_DetectPrompt(t *testing.T) {
 		data     []byte
 		expected bool
 	}{
-		{
-			name:     "IPython input prompt",
-			data:     []byte("In [1]:"),
-			expected: true,
-		},
-		{
-			name:     "IPython output prompt",
-			data:     []byte("Out[1]:"),
-			expected: true,
-		},
-		{
-			name:     "IPython continuation",
-			data:     []byte("...:"),
-			expected: true,
-		},
-		{
-			name:     "Standard Python prompt",
-			data:     []byte(">>> "),
-			expected: true,
-		},
-		{
-			name:     "Standard continuation",
-			data:     []byte("... "),
-			expected: true,
-		},
-		{
-			name:     "Regular output",
-			data:     []byte("hello world"),
-			expected: false,
-		},
-		{
-			name:     "Empty",
-			data:     []byte(""),
-			expected: false,
-		},
+		{"IPython input prompt", []byte("In [1]:"), true},
+		{"IPython output prompt", []byte("Out[1]:"), true},
+		{"Standard Python prompt", []byte(">>> "), true},
+		{"Standard continuation", []byte("... "), true},
+		{"Regular output", []byte("hello world"), false},
+		{"Empty", []byte(""), false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := repl.detectPrompt(tt.data)
+			got := repl.DetectPrompt(tt.data)
 			if got != tt.expected {
-				t.Errorf("detectPrompt() = %v, want %v", got, tt.expected)
+				t.Errorf("DetectPrompt() = %v, want %v", got, tt.expected)
 			}
 		})
-	}
-}
-
-// TestNewNodeREPL tests Node REPL creation.
-func TestNewNodeREPL(t *testing.T) {
-	config := process.ProcessConfig{
-		Type:     process.ProcessTypeREPL,
-		Language: "node",
-	}
-
-	repl, err := NewNodeREPL("test-node", config)
-	if err != nil {
-		t.Fatalf("NewNodeREPL() failed = %v", err)
-	}
-
-	if repl == nil {
-		t.Fatal("NewNodeREPL() returned nil")
-	}
-
-	if repl.ID() != "test-node" {
-		t.Errorf("ID() = %s, want test-node", repl.ID())
-	}
-
-	if repl.Type() != process.ProcessTypeREPL {
-		t.Errorf("Type() = %s, want %s", repl.Type(), process.ProcessTypeREPL)
-	}
-}
-
-// TestNodeREPL_ResizeTerminalNotRunning tests ResizeTerminal when not running.
-func TestNodeREPL_ResizeTerminalNotRunning(t *testing.T) {
-	config := process.ProcessConfig{
-		Type:     process.ProcessTypeREPL,
-		Language: "node",
-	}
-
-	repl, err := NewNodeREPL("test-node-resize", config)
-	if err != nil {
-		t.Fatalf("NewNodeREPL() failed = %v", err)
-	}
-
-	size := process.PTYSize{Rows: 40, Cols: 120}
-	err = repl.ResizeTerminal(size)
-	if err != process.ErrProcessNotRunning {
-		t.Errorf("ResizeTerminal() error = %v, want %v", err, process.ErrProcessNotRunning)
-	}
-}
-
-// TestNewBashREPL tests Bash REPL creation.
-func TestNewBashREPL(t *testing.T) {
-	config := process.ProcessConfig{
-		Type:     process.ProcessTypeREPL,
-		Language: "bash",
-	}
-
-	repl, err := NewBashREPL("test-bash", config)
-	if err != nil {
-		t.Fatalf("NewBashREPL() failed = %v", err)
-	}
-
-	if repl == nil {
-		t.Fatal("NewBashREPL() returned nil")
-	}
-
-	if repl.ID() != "test-bash" {
-		t.Errorf("ID() = %s, want test-bash", repl.ID())
-	}
-
-	if repl.Type() != process.ProcessTypeREPL {
-		t.Errorf("Type() = %s, want %s", repl.Type(), process.ProcessTypeREPL)
-	}
-
-	// Verify the prompt is set
-	if repl.prompt != "SANDBOX0>>> " {
-		t.Errorf("prompt = %s, want 'SANDBOX0>>> '", repl.prompt)
-	}
-}
-
-// TestBashREPL_ResizeTerminalNotRunning tests ResizeTerminal when not running.
-func TestBashREPL_ResizeTerminalNotRunning(t *testing.T) {
-	config := process.ProcessConfig{
-		Type:     process.ProcessTypeREPL,
-		Language: "bash",
-	}
-
-	repl, err := NewBashREPL("test-bash-resize", config)
-	if err != nil {
-		t.Fatalf("NewBashREPL() failed = %v", err)
-	}
-
-	size := process.PTYSize{Rows: 40, Cols: 120}
-	err = repl.ResizeTerminal(size)
-	if err != process.ErrProcessNotRunning {
-		t.Errorf("ResizeTerminal() error = %v, want %v", err, process.ErrProcessNotRunning)
-	}
-}
-
-// TestNewZshREPL tests Zsh REPL creation.
-func TestNewZshREPL(t *testing.T) {
-	config := process.ProcessConfig{
-		Type:     process.ProcessTypeREPL,
-		Language: "zsh",
-	}
-
-	repl, err := NewZshREPL("test-zsh", config)
-	if err != nil {
-		t.Fatalf("NewZshREPL() failed = %v", err)
-	}
-
-	if repl == nil {
-		t.Fatal("NewZshREPL() returned nil")
-	}
-
-	if repl.ID() != "test-zsh" {
-		t.Errorf("ID() = %s, want test-zsh", repl.ID())
-	}
-
-	if repl.Type() != process.ProcessTypeREPL {
-		t.Errorf("Type() = %s, want %s", repl.Type(), process.ProcessTypeREPL)
-	}
-
-	// Verify the prompt is set
-	if repl.prompt != "SANDBOX0>>> " {
-		t.Errorf("prompt = %s, want 'SANDBOX0>>> '", repl.prompt)
-	}
-}
-
-// TestZshREPL_ResizeTerminalNotRunning tests ResizeTerminal when not running.
-func TestZshREPL_ResizeTerminalNotRunning(t *testing.T) {
-	config := process.ProcessConfig{
-		Type:     process.ProcessTypeREPL,
-		Language: "zsh",
-	}
-
-	repl, err := NewZshREPL("test-zsh-resize", config)
-	if err != nil {
-		t.Fatalf("NewZshREPL() failed = %v", err)
-	}
-
-	size := process.PTYSize{Rows: 40, Cols: 120}
-	err = repl.ResizeTerminal(size)
-	if err != process.ErrProcessNotRunning {
-		t.Errorf("ResizeTerminal() error = %v, want %v", err, process.ErrProcessNotRunning)
 	}
 }
 
@@ -427,81 +400,19 @@ func TestREPL_PauseResume(t *testing.T) {
 		Language: "bash",
 	}
 
-	repl, err := NewBashREPL("test-pause", config)
+	repl, err := NewREPL("test-pause", config)
 	if err != nil {
-		t.Fatalf("NewBashREPL() failed = %v", err)
+		t.Fatalf("NewREPL() failed = %v", err)
 	}
 
-	// Pause when not running should fail
 	err = repl.Pause()
 	if err != process.ErrProcessNotRunning {
 		t.Errorf("Pause() error = %v, want %v", err, process.ErrProcessNotRunning)
 	}
 
-	// Resume when not paused should fail
 	err = repl.Resume()
 	if err != process.ErrProcessNotPaused {
 		t.Errorf("Resume() error = %v, want %v", err, process.ErrProcessNotPaused)
-	}
-}
-
-// TestREPL_IDAndType tests ID and Type getters.
-func TestREPL_IDAndType(t *testing.T) {
-	tests := []struct {
-		name     string
-		language string
-		newFunc  func(string, process.ProcessConfig) (process.Process, error)
-	}{
-		{
-			name:     "Python",
-			language: "python",
-			newFunc: func(id string, config process.ProcessConfig) (process.Process, error) {
-				return NewPythonREPL(id, config)
-			},
-		},
-		{
-			name:     "Node",
-			language: "node",
-			newFunc: func(id string, config process.ProcessConfig) (process.Process, error) {
-				return NewNodeREPL(id, config)
-			},
-		},
-		{
-			name:     "Bash",
-			language: "bash",
-			newFunc: func(id string, config process.ProcessConfig) (process.Process, error) {
-				return NewBashREPL(id, config)
-			},
-		},
-		{
-			name:     "Zsh",
-			language: "zsh",
-			newFunc: func(id string, config process.ProcessConfig) (process.Process, error) {
-				return NewZshREPL(id, config)
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			config := process.ProcessConfig{
-				Type:     process.ProcessTypeREPL,
-				Language: tt.language,
-			}
-
-			p, err := tt.newFunc("test-id-type", config)
-			if err != nil {
-				t.Fatalf("%s: newFunc() failed = %v", tt.name, err)
-			}
-
-			if p.ID() != "test-id-type" {
-				t.Errorf("ID() = %s, want test-id-type", p.ID())
-			}
-
-			if p.Type() != process.ProcessTypeREPL {
-				t.Errorf("Type() = %s, want %s", p.Type(), process.ProcessTypeREPL)
-			}
-		})
 	}
 }
 
@@ -512,14 +423,12 @@ func TestREPL_ResourceUsageWithNoPID(t *testing.T) {
 		Language: "bash",
 	}
 
-	repl, err := NewBashREPL("test-resource", config)
+	repl, err := NewREPL("test-resource", config)
 	if err != nil {
-		t.Fatalf("NewBashREPL() failed = %v", err)
+		t.Fatalf("NewREPL() failed = %v", err)
 	}
 
-	// Resource usage with no PID should return zeros
 	usage := repl.ResourceUsage()
-
 	if usage.CPUPercent != -1 {
 		t.Errorf("CPUPercent = %f, want -1", usage.CPUPercent)
 	}
@@ -535,229 +444,265 @@ func TestREPL_ReadOutput(t *testing.T) {
 		Language: "bash",
 	}
 
-	repl, err := NewBashREPL("test-output", config)
+	repl, err := NewREPL("test-output", config)
 	if err != nil {
-		t.Fatalf("NewBashREPL() failed = %v", err)
+		t.Fatalf("NewREPL() failed = %v", err)
 	}
 
-	// ReadOutput should return a channel
 	ch := repl.ReadOutput()
 	if ch == nil {
 		t.Error("ReadOutput() returned nil channel")
 	}
 }
 
-// TestREPL_ConfigTests tests configuration handling.
-func TestREPL_ConfigTests(t *testing.T) {
+// TestREPL_ProcessInterface verifies that REPL implements Process interface.
+func TestREPL_ProcessInterface(t *testing.T) {
+	var _ process.Process = &REPL{}
+}
+
+// TestNewCustomREPL tests creating a custom REPL.
+func TestNewCustomREPL(t *testing.T) {
+	replConfig := &REPLConfig{
+		Name: "custom-cli",
+		Candidates: []ExecCandidate{
+			{Name: "echo", Args: []string{}},
+		},
+		Prompt: PromptConfig{
+			Patterns: []string{`> `},
+		},
+	}
+
+	processConfig := process.ProcessConfig{
+		Type:     process.ProcessTypeREPL,
+		Language: "custom-cli",
+	}
+
+	repl, err := NewCustomREPL("test-custom", replConfig, processConfig)
+	if err != nil {
+		t.Fatalf("NewCustomREPL() failed: %v", err)
+	}
+
+	if repl.Language() != "custom-cli" {
+		t.Errorf("Language() = %s, want custom-cli", repl.Language())
+	}
+}
+
+// TestCreateREPLConfig tests the helper for creating minimal configs.
+func TestCreateREPLConfig(t *testing.T) {
+	config := CreateREPLConfig("myrepl", []ExecCandidate{
+		{Name: "myrepl", Args: []string{"--interactive"}},
+	})
+
+	if config.Name != "myrepl" {
+		t.Errorf("Name = %s, want myrepl", config.Name)
+	}
+	if len(config.Candidates) != 1 {
+		t.Errorf("len(Candidates) = %d, want 1", len(config.Candidates))
+	}
+	if err := config.Validate(); err != nil {
+		t.Errorf("Config is invalid: %v", err)
+	}
+}
+
+// TestStripANSI tests ANSI escape sequence stripping.
+func TestStripANSI(t *testing.T) {
 	tests := []struct {
-		name    string
-		config  process.ProcessConfig
-		newFunc func(string, process.ProcessConfig) (process.Process, error)
+		name     string
+		input    []byte
+		expected []byte
 	}{
-		{
-			name: "Python with CWD and env",
-			config: process.ProcessConfig{
-				Type:     process.ProcessTypeREPL,
-				Language: "python",
-				CWD:      "/tmp",
-				EnvVars:  map[string]string{"PYTHONPATH": "/test"},
-			},
-			newFunc: func(id string, config process.ProcessConfig) (process.Process, error) {
-				return NewPythonREPL(id, config)
-			},
-		},
-		{
-			name: "Node with custom PTY size",
-			config: process.ProcessConfig{
-				Type:     process.ProcessTypeREPL,
-				Language: "node",
-				PTYSize:  &process.PTYSize{Rows: 50, Cols: 160},
-			},
-			newFunc: func(id string, config process.ProcessConfig) (process.Process, error) {
-				return NewNodeREPL(id, config)
-			},
-		},
-		{
-			name: "Bash with custom TERM",
-			config: process.ProcessConfig{
-				Type:     process.ProcessTypeREPL,
-				Language: "bash",
-				Term:     "xterm",
-			},
-			newFunc: func(id string, config process.ProcessConfig) (process.Process, error) {
-				return NewBashREPL(id, config)
-			},
-		},
+		{"no ANSI", []byte("hello world"), []byte("hello world")},
+		{"color codes", []byte("\x1b[31mred\x1b[0m"), []byte("red")},
+		{"cursor movement", []byte("\x1b[2Jhello\x1b[H"), []byte("hello")},
+		{"empty", []byte(""), []byte("")},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p, err := tt.newFunc("test-config", tt.config)
-			if err != nil {
-				t.Fatalf("%s: newFunc() failed = %v", tt.name, err)
-			}
-
-			// Verify the process was created with correct type
-			if p.Type() != tt.config.Type {
-				t.Errorf("Type() = %s, want %s", p.Type(), tt.config.Type)
+			got := stripANSI(tt.input)
+			if string(got) != string(tt.expected) {
+				t.Errorf("stripANSI() = %q, want %q", got, tt.expected)
 			}
 		})
 	}
 }
 
-// TestREPL_ProcessInterface verifies that all REPL types implement Process interface.
-func TestREPL_ProcessInterface(t *testing.T) {
+// TestCheckExecutable tests executable checking.
+func TestCheckExecutable(t *testing.T) {
+	// sh should exist on any Unix system
+	path, ok := CheckExecutable("sh")
+	if !ok {
+		t.Skip("sh not found, skipping")
+	}
+	if path == "" {
+		t.Error("CheckExecutable() returned empty path")
+	}
+
+	// non-existent should not be found
+	_, ok = CheckExecutable("nonexistent-command-12345")
+	if ok {
+		t.Error("CheckExecutable() should not find nonexistent command")
+	}
+}
+
+// TestListBuiltinConfigs tests listing built-in configs.
+func TestListBuiltinConfigs(t *testing.T) {
+	names := ListBuiltinConfigs()
+	if len(names) == 0 {
+		t.Error("ListBuiltinConfigs() returned empty list")
+	}
+
+	expected := []string{"python", "node", "bash", "zsh", "ruby"}
+	for _, name := range expected {
+		found := false
+		for _, n := range names {
+			if n == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("ListBuiltinConfigs() missing %s", name)
+		}
+	}
+}
+
+// TestCheckREPLAvailable tests REPL availability checking.
+func TestCheckREPLAvailable(t *testing.T) {
+	// bash/sh should be available on Unix
+	path, ok := CheckREPLAvailable("bash")
+	if ok && path == "" {
+		t.Error("CheckREPLAvailable() returned empty path when available")
+	}
+
+	// unknown language should not be available
+	_, ok = CheckREPLAvailable("unknown-language-12345")
+	if ok {
+		t.Error("CheckREPLAvailable() should not find unknown language")
+	}
+}
+
+// TestListAvailableREPLs tests listing available REPLs.
+func TestListAvailableREPLs(t *testing.T) {
+	available := ListAvailableREPLs()
+	// At minimum bash/sh should be available
+	t.Logf("Available REPLs: %v", available)
+}
+
+// TestREPL_OutputFiltering tests output filtering for bash.
+func TestREPL_OutputFiltering(t *testing.T) {
 	config := process.ProcessConfig{
 		Type:     process.ProcessTypeREPL,
 		Language: "bash",
 	}
 
-	// This test verifies at compile time that our REPL types
-	// implement the Process interface. We don't need to do anything
-	// at runtime other than create the instances.
-
-	var _ process.Process = &BashREPL{}
-	var _ process.Process = &ZshREPL{}
-	var _ process.Process = &PythonREPL{}
-	var _ process.Process = &NodeREPL{}
-	var _ process.Process = &RubyREPL{}
-	var _ process.Process = &LuaREPL{}
-	var _ process.Process = &PHPREPL{}
-	var _ process.Process = &RREPL{}
-	var _ process.Process = &PerlREPL{}
-
-	_, _ = NewBashREPL("test-interface", config)
-	_, _ = NewZshREPL("test-interface", config)
-	_, _ = NewPythonREPL("test-interface", config)
-	_, _ = NewNodeREPL("test-interface", config)
-	_, _ = NewRubyREPL("test-interface", config)
-	_, _ = NewLuaREPL("test-interface", config)
-	_, _ = NewPHPREPL("test-interface", config)
-	_, _ = NewRREPL("test-interface", config)
-	_, _ = NewPerlREPL("test-interface", config)
-}
-
-// TestNewRubyREPL tests Ruby REPL creation.
-func TestNewRubyREPL(t *testing.T) {
-	config := process.ProcessConfig{
-		Type:     process.ProcessTypeREPL,
-		Language: "ruby",
-	}
-
-	repl, err := NewRubyREPL("test-ruby", config)
+	repl, err := NewREPL("test-filter", config)
 	if err != nil {
-		t.Fatalf("NewRubyREPL() failed = %v", err)
+		t.Fatalf("NewREPL() failed = %v", err)
 	}
 
-	if repl == nil {
-		t.Fatal("NewRubyREPL() returned nil")
+	// Verify bash config has filtering enabled
+	replConfig := repl.Config()
+	if !replConfig.Output.FilterEcho {
+		t.Error("bash config should have FilterEcho enabled")
+	}
+	if !replConfig.Output.TrimPrompt {
+		t.Error("bash config should have TrimPrompt enabled")
 	}
 
-	if repl.ID() != "test-ruby" {
-		t.Errorf("ID() = %s, want test-ruby", repl.ID())
+	// Test WriteInput sets lastInput
+	repl.WriteInput([]byte("echo 'hi'\n"))
+
+	repl.mu.Lock()
+	lastInput := repl.lastInput
+	repl.mu.Unlock()
+
+	if lastInput != "echo 'hi'" {
+		t.Errorf("lastInput = %q, want %q", lastInput, "echo 'hi'")
 	}
 
-	if repl.Type() != process.ProcessTypeREPL {
-		t.Errorf("Type() = %s, want %s", repl.Type(), process.ProcessTypeREPL)
-	}
-}
-
-// TestNewLuaREPL tests Lua REPL creation.
-func TestNewLuaREPL(t *testing.T) {
-	config := process.ProcessConfig{
-		Type:     process.ProcessTypeREPL,
-		Language: "lua",
-	}
-
-	repl, err := NewLuaREPL("test-lua", config)
-	if err != nil {
-		t.Fatalf("NewLuaREPL() failed = %v", err)
-	}
-
-	if repl == nil {
-		t.Fatal("NewLuaREPL() returned nil")
-	}
-
-	if repl.ID() != "test-lua" {
-		t.Errorf("ID() = %s, want test-lua", repl.ID())
-	}
-
-	if repl.Type() != process.ProcessTypeREPL {
-		t.Errorf("Type() = %s, want %s", repl.Type(), process.ProcessTypeREPL)
-	}
-}
-
-// TestNewPHPREPL tests PHP REPL creation.
-func TestNewPHPREPL(t *testing.T) {
-	config := process.ProcessConfig{
-		Type:     process.ProcessTypeREPL,
-		Language: "php",
-	}
-
-	repl, err := NewPHPREPL("test-php", config)
-	if err != nil {
-		t.Fatalf("NewPHPREPL() failed = %v", err)
+	// Test output filtering
+	tests := []struct {
+		name     string
+		input    []byte
+		expected string
+	}{
+		{
+			name:     "filter echo",
+			input:    []byte("echo 'hi'\nhi\n"),
+			expected: "hi",
+		},
+		{
+			name:     "filter prompt",
+			input:    []byte("SANDBOX0>>> "),
+			expected: "",
+		},
+		{
+			name:     "filter both",
+			input:    []byte("SANDBOX0>>> echo 'hi'\nhi\nSANDBOX0>>> "),
+			expected: "hi",
+		},
+		{
+			name:     "just output",
+			input:    []byte("hi\n"),
+			expected: "hi",
+		},
+		{
+			name:     "with CRLF",
+			input:    []byte("echo 'hi'\r\nhi\r\nSANDBOX0>>> "),
+			expected: "hi",
+		},
+		{
+			name:     "with standalone CR",
+			input:    []byte("SANDBOX0>>> echo 'hi'\r\nhi\rSANDBOX0>>> "),
+			expected: "hi",
+		},
 	}
 
-	if repl == nil {
-		t.Fatal("NewPHPREPL() returned nil")
-	}
-
-	if repl.ID() != "test-php" {
-		t.Errorf("ID() = %s, want test-php", repl.ID())
-	}
-
-	if repl.Type() != process.ProcessTypeREPL {
-		t.Errorf("Type() = %s, want %s", repl.Type(), process.ProcessTypeREPL)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Reset lastInput for echo filtering
+			repl.SetLastInput("echo 'hi'")
+			got := repl.filterOutput(tt.input)
+			if string(got) != tt.expected {
+				t.Errorf("filterOutput() = %q, want %q", got, tt.expected)
+			}
+		})
 	}
 }
 
-// TestNewRREPL tests R REPL creation.
-func TestNewRREPL(t *testing.T) {
+// TestREPL_WriteInputTracksEcho tests that WriteInput tracks input for echo filtering.
+func TestREPL_WriteInputTracksEcho(t *testing.T) {
 	config := process.ProcessConfig{
 		Type:     process.ProcessTypeREPL,
-		Language: "r",
+		Language: "bash",
 	}
 
-	repl, err := NewRREPL("test-r", config)
+	repl, err := NewREPL("test-write", config)
 	if err != nil {
-		t.Fatalf("NewRREPL() failed = %v", err)
+		t.Fatalf("NewREPL() failed = %v", err)
 	}
 
-	if repl == nil {
-		t.Fatal("NewRREPL() returned nil")
+	// Write input with various line endings
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"echo hello\n", "echo hello"},
+		{"ls -la\r\n", "ls -la"},
+		{"pwd", "pwd"},
 	}
 
-	if repl.ID() != "test-r" {
-		t.Errorf("ID() = %s, want test-r", repl.ID())
-	}
+	for _, tt := range tests {
+		// This will fail because process isn't running, but lastInput should still be set
+		_ = repl.WriteInput([]byte(tt.input))
 
-	if repl.Type() != process.ProcessTypeREPL {
-		t.Errorf("Type() = %s, want %s", repl.Type(), process.ProcessTypeREPL)
-	}
-}
+		repl.mu.Lock()
+		lastInput := repl.lastInput
+		repl.mu.Unlock()
 
-// TestNewPerlREPL tests Perl REPL creation.
-func TestNewPerlREPL(t *testing.T) {
-	config := process.ProcessConfig{
-		Type:     process.ProcessTypeREPL,
-		Language: "perl",
-	}
-
-	repl, err := NewPerlREPL("test-perl", config)
-	if err != nil {
-		t.Fatalf("NewPerlREPL() failed = %v", err)
-	}
-
-	if repl == nil {
-		t.Fatal("NewPerlREPL() returned nil")
-	}
-
-	if repl.ID() != "test-perl" {
-		t.Errorf("ID() = %s, want test-perl", repl.ID())
-	}
-
-	if repl.Type() != process.ProcessTypeREPL {
-		t.Errorf("Type() = %s, want %s", repl.Type(), process.ProcessTypeREPL)
+		if lastInput != tt.expected {
+			t.Errorf("WriteInput(%q): lastInput = %q, want %q", tt.input, lastInput, tt.expected)
+		}
 	}
 }

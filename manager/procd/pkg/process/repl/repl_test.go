@@ -23,6 +23,9 @@ func TestREPLConfig_Validate(t *testing.T) {
 				Candidates: []ExecCandidate{
 					{Name: "test-cmd", Args: []string{}},
 				},
+				Prompt: PromptConfig{
+					Patterns: []string{`> `},
+				},
 			},
 			wantError: false,
 		},
@@ -32,6 +35,9 @@ func TestREPLConfig_Validate(t *testing.T) {
 				Candidates: []ExecCandidate{
 					{Name: "test-cmd", Args: []string{}},
 				},
+				Prompt: PromptConfig{
+					Patterns: []string{`> `},
+				},
 			},
 			wantError: true,
 		},
@@ -40,6 +46,9 @@ func TestREPLConfig_Validate(t *testing.T) {
 			config: REPLConfig{
 				Name:       "test",
 				Candidates: []ExecCandidate{},
+				Prompt: PromptConfig{
+					Patterns: []string{`> `},
+				},
 			},
 			wantError: true,
 		},
@@ -49,6 +58,9 @@ func TestREPLConfig_Validate(t *testing.T) {
 				Name: "test",
 				Candidates: []ExecCandidate{
 					{Name: "", Args: []string{}},
+				},
+				Prompt: PromptConfig{
+					Patterns: []string{`> `},
 				},
 			},
 			wantError: true,
@@ -168,6 +180,9 @@ func TestREPLRegistry(t *testing.T) {
 		Name: "custom",
 		Candidates: []ExecCandidate{
 			{Name: "custom-cmd", Args: []string{}},
+		},
+		Prompt: PromptConfig{
+			Patterns: []string{`> `},
 		},
 	}
 	if err := registry.Register(customConfig); err != nil {
@@ -663,7 +678,7 @@ func TestREPL_OutputFiltering(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Reset lastInput for echo filtering
 			repl.SetLastInput("echo 'hi'")
-			got := repl.filterOutput(tt.input)
+			got, _ := repl.filterOutput(tt.input)
 			if string(got) != tt.expected {
 				t.Errorf("filterOutput() = %q, want %q", got, tt.expected)
 			}

@@ -28,6 +28,7 @@ const (
 	OutputSourceStdout OutputSource = "stdout"
 	OutputSourceStderr OutputSource = "stderr"
 	OutputSourcePTY    OutputSource = "pty"
+	OutputSourcePrompt OutputSource = "prompt"
 )
 
 // ProcessState represents the current state of a process.

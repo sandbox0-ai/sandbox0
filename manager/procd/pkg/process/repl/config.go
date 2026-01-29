@@ -89,6 +89,9 @@ func (c *REPLConfig) Validate() error {
 		}
 	}
 	// Validate prompt patterns are valid regex
+	if len(c.Prompt.Patterns) == 0 {
+		return fmt.Errorf("prompt patterns are required for REPL completion detection")
+	}
 	for i, pattern := range c.Prompt.Patterns {
 		if _, err := regexp.Compile(pattern); err != nil {
 			return fmt.Errorf("prompt pattern %d is invalid regex: %w", i, err)

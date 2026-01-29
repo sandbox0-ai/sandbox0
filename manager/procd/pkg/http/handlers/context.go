@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/gorilla/mux"
@@ -83,11 +84,12 @@ type SignalContextRequest struct {
 }
 
 type wsControlMessage struct {
-	Type   string `json:"type"`
-	Data   string `json:"data"`
-	Rows   uint16 `json:"rows"`
-	Cols   uint16 `json:"cols"`
-	Signal string `json:"signal"`
+	Type      string `json:"type"`
+	Data      string `json:"data"`
+	Rows      uint16 `json:"rows"`
+	Cols      uint16 `json:"cols"`
+	Signal    string `json:"signal"`
+	RequestID string `json:"request_id"`
 }
 
 // List lists all contexts.
@@ -416,6 +418,21 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
+	var pendingMu sync.Mutex
+	pendingRequestID := ""
+	setPendingRequestID := func(value string) {
+		pendingMu.Lock()
+		pendingRequestID = value
+		pendingMu.Unlock()
+	}
+	takePendingRequestID := func() string {
+		pendingMu.Lock()
+		value := pendingRequestID
+		pendingRequestID = ""
+		pendingMu.Unlock()
+		return value
+	}
+
 	// Get output channel
 	outputCh, err := h.manager.ReadOutput(id)
 	if err != nil {
@@ -425,6 +442,21 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 	// Write output to WebSocket
 	go func() {
 		for output := range outputCh {
+			if output.Source == process.OutputSourcePrompt {
+				requestID := takePendingRequestID()
+				if requestID == "" {
+					continue
+				}
+				msg := map[string]any{
+					"type":       "done",
+					"request_id": requestID,
+				}
+				if err := conn.WriteJSON(msg); err != nil {
+					return
+				}
+				continue
+			}
+
 			msg := map[string]any{
 				"type":   "output",
 				"source": string(output.Source),
@@ -451,6 +483,7 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 		if err := json.Unmarshal(data, &msg); err == nil && msg.Type != "" {
 			switch msg.Type {
 			case "input":
+				setPendingRequestID(msg.RequestID)
 				if ctx.MainProcess != nil && msg.Data != "" {
 					_ = ctx.MainProcess.WriteInput([]byte(msg.Data))
 				}
@@ -473,6 +506,7 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 				}
 			default:
 				if ctx.MainProcess != nil {
+					setPendingRequestID(msg.RequestID)
 					_ = ctx.MainProcess.WriteInput(data)
 				}
 			}
@@ -480,6 +514,7 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if ctx.MainProcess != nil {
+			setPendingRequestID("")
 			_ = ctx.MainProcess.WriteInput(data)
 		}
 	}

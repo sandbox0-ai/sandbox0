@@ -48,8 +48,8 @@ func New(id string, replConfig *REPLConfig, processConfig process.ProcessConfig)
 	}
 
 	// Set up output filter if needed
-	var outputFilter func([]byte) []byte
-	if replConfig.Output.FilterEcho || replConfig.Output.TrimPrompt || replConfig.Output.StripANSI {
+	var outputFilter func([]byte) ([]byte, bool)
+	if replConfig.Output.FilterEcho || replConfig.Output.TrimPrompt || replConfig.Output.StripANSI || len(repl.promptRegexps) > 0 {
 		outputFilter = repl.filterOutput
 	}
 
@@ -167,9 +167,18 @@ func (r *REPL) SetLastInput(input string) {
 }
 
 // filterOutput processes output according to config.
-func (r *REPL) filterOutput(data []byte) []byte {
+func (r *REPL) filterOutput(data []byte) ([]byte, bool) {
 	if len(data) == 0 {
-		return data
+		return data, false
+	}
+
+	detectionData := data
+	if r.config.Output.StripANSI {
+		detectionData = stripANSI(detectionData)
+	}
+	promptDetected := r.DetectPrompt(detectionData)
+	if !r.config.Output.FilterEcho && !r.config.Output.TrimPrompt && !r.config.Output.StripANSI {
+		return data, promptDetected
 	}
 
 	result := data
@@ -210,7 +219,7 @@ func (r *REPL) filterOutput(data []byte) []byte {
 	// Trim leading/trailing whitespace
 	result = bytes.TrimSpace(result)
 
-	return result
+	return result, promptDetected
 }
 
 // DetectPrompt checks if the output contains a prompt.

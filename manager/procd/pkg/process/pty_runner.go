@@ -14,13 +14,13 @@ import (
 type PTYRunner struct {
 	base         *BaseProcess
 	cmd          *exec.Cmd
-	outputFilter func([]byte) []byte
+	outputFilter func([]byte) ([]byte, bool)
 	onStop       func()
 	exitResolver func(error) (int, bool)
 }
 
 // NewPTYRunner creates a PTY runner for a process.
-func NewPTYRunner(base *BaseProcess, outputFilter func([]byte) []byte, onStop func()) *PTYRunner {
+func NewPTYRunner(base *BaseProcess, outputFilter func([]byte) ([]byte, bool), onStop func()) *PTYRunner {
 	return &PTYRunner{
 		base:         base,
 		outputFilter: outputFilter,
@@ -108,13 +108,19 @@ func (r *PTYRunner) readOutput(ptmx *os.File) {
 		if n > 0 {
 			data := make([]byte, n)
 			copy(data, buf[:n])
+			promptDetected := false
 			if r.outputFilter != nil {
-				data = r.outputFilter(data)
+				data, promptDetected = r.outputFilter(data)
 			}
 			if len(data) > 0 {
 				r.base.PublishOutput(ProcessOutput{
 					Source: OutputSourcePTY,
 					Data:   data,
+				})
+			}
+			if promptDetected {
+				r.base.PublishOutput(ProcessOutput{
+					Source: OutputSourcePrompt,
 				})
 			}
 		}

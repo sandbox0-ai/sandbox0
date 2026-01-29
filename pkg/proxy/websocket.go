@@ -1,12 +1,16 @@
 package proxy
 
 import (
+	"bufio"
+	"context"
+	"crypto/tls"
+	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 )
 
@@ -15,7 +19,6 @@ type WebSocketProxy struct {
 	logger *zap.Logger
 	// requestModifiers are applied before proxying.
 	requestModifiers []RequestModifier
-	upgrader         websocket.Upgrader
 }
 
 // NewWebSocketProxy creates a new WebSocket proxy
@@ -24,11 +27,6 @@ func NewWebSocketProxy(logger *zap.Logger, opts ...Option) *WebSocketProxy {
 	return &WebSocketProxy{
 		logger:           logger,
 		requestModifiers: parsedOpts.requestModifiers,
-		upgrader: websocket.Upgrader{
-			CheckOrigin: func(_ *http.Request) bool {
-				return true
-			},
-		},
 	}
 }
 
@@ -43,23 +41,27 @@ func (p *WebSocketProxy) Proxy(targetURL *url.URL) gin.HandlerFunc {
 			return
 		}
 
-		applyRequestModifiers(c.Request, p.requestModifiers)
-
-		// Create target URL
-		wsURL := *targetURL
-		if wsURL.Scheme == "http" {
-			wsURL.Scheme = "ws"
-		} else if wsURL.Scheme == "https" {
-			wsURL.Scheme = "wss"
+		hijacker, ok := c.Writer.(http.Hijacker)
+		if !ok {
+			p.logger.Error("ResponseWriter does not support hijacking")
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "websocket hijacking not supported",
+			})
+			return
 		}
-		wsURL.Path = c.Request.URL.Path
-		wsURL.RawQuery = c.Request.URL.RawQuery
 
-		upstreamHeaders := cloneWebSocketHeaders(c.Request.Header)
-		upstreamConn, _, err := websocket.DefaultDialer.Dial(wsURL.String(), upstreamHeaders)
+		outReq := c.Request.Clone(c.Request.Context())
+		outReq.URL.Path = c.Request.URL.Path
+		outReq.URL.RawQuery = c.Request.URL.RawQuery
+		outReq.Host = targetURL.Host
+		outReq.RequestURI = ""
+
+		applyRequestModifiers(outReq, p.requestModifiers)
+
+		upstreamConn, err := dialWebSocketUpstream(outReq.Context(), targetURL)
 		if err != nil {
 			p.logger.Error("Failed to connect to upstream WebSocket",
-				zap.String("target", wsURL.String()),
+				zap.String("target", targetURL.Host),
 				zap.Error(err),
 			)
 			c.JSON(http.StatusBadGateway, gin.H{
@@ -69,16 +71,47 @@ func (p *WebSocketProxy) Proxy(targetURL *url.URL) gin.HandlerFunc {
 		}
 		defer upstreamConn.Close()
 
-		downstreamConn, err := p.upgrader.Upgrade(c.Writer, c.Request, nil)
+		if err := writeUpstreamHandshake(upstreamConn, outReq); err != nil {
+			p.logger.Error("Failed to write upstream WebSocket handshake", zap.Error(err))
+			c.JSON(http.StatusBadGateway, gin.H{
+				"error": "upstream websocket unavailable",
+			})
+			return
+		}
+
+		upstreamReader := bufio.NewReader(upstreamConn)
+		resp, err := http.ReadResponse(upstreamReader, outReq)
 		if err != nil {
-			p.logger.Error("Failed to upgrade downstream WebSocket", zap.Error(err))
+			p.logger.Error("Failed to read upstream WebSocket handshake", zap.Error(err))
+			c.JSON(http.StatusBadGateway, gin.H{
+				"error": "upstream websocket unavailable",
+			})
+			return
+		}
+
+		if resp.StatusCode != http.StatusSwitchingProtocols {
+			defer resp.Body.Close()
+			copyHeaders(c.Writer.Header(), resp.Header)
+			c.Writer.WriteHeader(resp.StatusCode)
+			_, _ = io.Copy(c.Writer, resp.Body)
+			return
+		}
+
+		downstreamConn, _, err := hijacker.Hijack()
+		if err != nil {
+			p.logger.Error("Failed to hijack downstream connection", zap.Error(err))
 			return
 		}
 		defer downstreamConn.Close()
 
+		if err := resp.Write(downstreamConn); err != nil {
+			p.logger.Error("Failed to write downstream WebSocket handshake", zap.Error(err))
+			return
+		}
+
 		errChan := make(chan error, 2)
-		go func() { errChan <- proxyWebSocket(downstreamConn, upstreamConn) }()
-		go func() { errChan <- proxyWebSocket(upstreamConn, downstreamConn) }()
+		go func() { _, err := io.Copy(upstreamConn, downstreamConn); errChan <- err }()
+		go func() { _, err := io.Copy(downstreamConn, upstreamReader); errChan <- err }()
 		<-errChan
 	}
 }
@@ -89,24 +122,39 @@ func isWebSocketUpgrade(r *http.Request) bool {
 		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
 }
 
-func cloneWebSocketHeaders(headers http.Header) http.Header {
-	upstreamHeaders := headers.Clone()
-	upstreamHeaders.Del("Connection")
-	upstreamHeaders.Del("Upgrade")
-	upstreamHeaders.Del("Sec-WebSocket-Key")
-	upstreamHeaders.Del("Sec-WebSocket-Version")
-	upstreamHeaders.Del("Sec-WebSocket-Extensions")
-	return upstreamHeaders
+func dialWebSocketUpstream(ctx context.Context, targetURL *url.URL) (net.Conn, error) {
+	dialer := &net.Dialer{}
+	switch strings.ToLower(targetURL.Scheme) {
+	case "https", "wss":
+		rawConn, err := dialer.DialContext(ctx, "tcp", targetURL.Host)
+		if err != nil {
+			return nil, err
+		}
+		tlsConn := tls.Client(rawConn, &tls.Config{
+			ServerName: targetURL.Hostname(),
+		})
+		if err := tlsConn.Handshake(); err != nil {
+			rawConn.Close()
+			return nil, err
+		}
+		return tlsConn, nil
+	default:
+		return dialer.DialContext(ctx, "tcp", targetURL.Host)
+	}
 }
 
-func proxyWebSocket(dst *websocket.Conn, src *websocket.Conn) error {
-	for {
-		msgType, msg, err := src.ReadMessage()
-		if err != nil {
-			return err
-		}
-		if err := dst.WriteMessage(msgType, msg); err != nil {
-			return err
+func writeUpstreamHandshake(conn net.Conn, req *http.Request) error {
+	writer := bufio.NewWriter(conn)
+	if err := req.Write(writer); err != nil {
+		return err
+	}
+	return writer.Flush()
+}
+
+func copyHeaders(dst, src http.Header) {
+	for key, values := range src {
+		for _, value := range values {
+			dst.Add(key, value)
 		}
 	}
 }

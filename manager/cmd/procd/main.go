@@ -20,6 +20,7 @@ import (
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/volume"
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/webhook"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
+	"github.com/sandbox0-ai/infra/pkg/observability"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -48,6 +49,20 @@ func main() {
 		zap.Int("http_port", cfg.HTTPPort),
 		zap.String("root_path", cfg.RootPath),
 	)
+
+	// Initialize observability provider
+	obsProvider, err := observability.New(observability.Config{
+		ServiceName: "procd",
+		Logger:      logger,
+		TraceExporter: observability.TraceExporterConfig{
+			Type:     os.Getenv("OTEL_EXPORTER_TYPE"),
+			Endpoint: os.Getenv("OTEL_EXPORTER_ENDPOINT"),
+		},
+	})
+	if err != nil {
+		logger.Fatal("Failed to initialize observability", zap.Error(err))
+	}
+	defer obsProvider.Shutdown(context.Background())
 
 	// Initialize managers
 	contextManager := ctxpkg.NewManager()
@@ -157,6 +172,7 @@ func main() {
 		tokenProvider,
 		webhookDispatcher,
 		logger,
+		obsProvider,
 	)
 
 	// Handle shutdown signals

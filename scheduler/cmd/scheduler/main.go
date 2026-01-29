@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/sandbox0-ai/infra/pkg/dbpool"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	"github.com/sandbox0-ai/infra/pkg/migrate"
+	"github.com/sandbox0-ai/infra/pkg/observability"
 	"github.com/sandbox0-ai/infra/pkg/pubsub"
 	schedmigrations "github.com/sandbox0-ai/infra/scheduler/migrations"
 	"github.com/sandbox0-ai/infra/scheduler/pkg/client"
@@ -41,8 +43,22 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	// Initialize observability provider
+	obsProvider, err := observability.New(observability.Config{
+		ServiceName: "scheduler",
+		Logger:      logger,
+		TraceExporter: observability.TraceExporterConfig{
+			Type:     os.Getenv("OTEL_EXPORTER_TYPE"),
+			Endpoint: os.Getenv("OTEL_EXPORTER_ENDPOINT"),
+		},
+	})
+	if err != nil {
+		logger.Fatal("Failed to initialize observability", zap.Error(err))
+	}
+	defer obsProvider.Shutdown(ctx)
+
 	// Initialize database pool
-	pool, err := initDatabase(ctx, cfg, logger)
+	pool, err := initDatabase(ctx, cfg, logger, obsProvider)
 	if err != nil {
 		logger.Fatal("Failed to connect to database", zap.Error(err))
 	}
@@ -106,7 +122,7 @@ func main() {
 	)
 
 	// Create internal-gateway client
-	igClient := client.NewInternalGatewayClient(internalAuthGen, logger)
+	igClient := client.NewInternalGatewayClient(internalAuthGen, logger, obsProvider)
 
 	// Create reconciler
 	rec := reconciler.NewReconciler(repo, igClient, cfg.ReconcileInterval.Duration, clk, cfg.PodsPerNode, logger)
@@ -212,7 +228,7 @@ func (z *zapLogger) Fatalf(format string, args ...any) {
 	z.logger.Fatal(fmt.Sprintf(format, args...))
 }
 
-func initDatabase(ctx context.Context, cfg *config.SchedulerConfig, logger *zap.Logger) (*pgxpool.Pool, error) {
+func initDatabase(ctx context.Context, cfg *config.SchedulerConfig, logger *zap.Logger, obsProvider *observability.Provider) (*pgxpool.Pool, error) {
 	maxConnLifetime := cfg.DatabasePool.MaxConnLifetime.Duration
 	if maxConnLifetime == 0 {
 		maxConnLifetime = 30 * time.Minute
@@ -235,6 +251,9 @@ func initDatabase(ctx context.Context, cfg *config.SchedulerConfig, logger *zap.
 	if err != nil {
 		return nil, err
 	}
+
+	// Wrap pool with observability
+	obsProvider.Pgx.WrapPool(pool)
 
 	logger.Info("Connected to database",
 		zap.Int32("max_conns", pool.Config().MaxConns),

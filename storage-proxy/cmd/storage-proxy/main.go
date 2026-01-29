@@ -16,6 +16,7 @@ import (
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	"github.com/sandbox0-ai/infra/pkg/k8s"
 	"github.com/sandbox0-ai/infra/pkg/migrate"
+	"github.com/sandbox0-ai/infra/pkg/observability"
 	spmigrations "github.com/sandbox0-ai/infra/storage-proxy/migrations"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/auth"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/coordinator"
@@ -76,12 +77,25 @@ func main() {
 		zap.String("cache_dir", cfg.CacheDir),
 	)
 
+	// Initialize observability provider
+	obsProvider, err := observability.New(observability.Config{
+		ServiceName: "storage-proxy",
+		Logger:      zapLogger,
+		TraceExporter: observability.TraceExporterConfig{
+			Type:     os.Getenv("OTEL_EXPORTER_TYPE"),
+			Endpoint: os.Getenv("OTEL_EXPORTER_ENDPOINT"),
+		},
+	})
+	if err != nil {
+		zapLogger.Fatal("Failed to initialize observability", zap.Error(err))
+	}
+	defer obsProvider.Shutdown(context.Background())
+
 	// Initialize database connection pool
 	var repo *db.Repository
 	var pool *pgxpool.Pool
 	if cfg.DatabaseURL != "" {
-		var err error
-		pool, err = initDatabase(context.Background(), cfg.DatabaseURL, cfg, zapLogger)
+		pool, err = initDatabase(context.Background(), cfg.DatabaseURL, cfg, zapLogger, obsProvider)
 		if err != nil {
 			zapLogger.Fatal("Failed to connect to database", zap.Error(err))
 		}
@@ -127,7 +141,7 @@ func main() {
 	}
 
 	// Create Kubernetes client for pod watching
-	k8sClient, err := k8s.NewClient(cfg.KubeconfigPath)
+	k8sClient, err := k8s.NewClientWithObservability(cfg.KubeconfigPath, obsProvider)
 	if err != nil {
 		zapLogger.Warn("Failed to create Kubernetes client, pod watcher disabled",
 			zap.Error(err),
@@ -294,7 +308,7 @@ func main() {
 }
 
 // initDatabase initializes the database connection pool
-func initDatabase(ctx context.Context, databaseURL string, cfg *config.StorageProxyConfig, logger *zap.Logger) (*pgxpool.Pool, error) {
+func initDatabase(ctx context.Context, databaseURL string, cfg *config.StorageProxyConfig, logger *zap.Logger, obsProvider *observability.Provider) (*pgxpool.Pool, error) {
 	if databaseURL == "" {
 		return nil, fmt.Errorf("database URL is empty")
 	}
@@ -315,6 +329,9 @@ func initDatabase(ctx context.Context, databaseURL string, cfg *config.StoragePr
 	if err != nil {
 		return nil, err
 	}
+
+	// Wrap pool with observability
+	obsProvider.Pgx.WrapPool(pool)
 
 	logger.Info("Database connection established",
 		zap.Int32("max_conns", pool.Config().MaxConns),

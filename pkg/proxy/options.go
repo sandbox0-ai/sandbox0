@@ -9,6 +9,7 @@ type Option func(*options)
 
 type options struct {
 	requestModifiers []RequestModifier
+	httpClient       *http.Client
 }
 
 // WithRequestModifier registers a request modifier for proxy requests.
@@ -18,6 +19,14 @@ func WithRequestModifier(mod RequestModifier) Option {
 			return
 		}
 		o.requestModifiers = append(o.requestModifiers, mod)
+	}
+}
+
+// WithHTTPClient sets a custom HTTP client for the proxy.
+// This allows for custom transport configurations including observability.
+func WithHTTPClient(client *http.Client) Option {
+	return func(o *options) {
+		o.httpClient = client
 	}
 }
 

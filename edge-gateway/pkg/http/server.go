@@ -19,6 +19,8 @@ import (
 	"github.com/sandbox0-ai/infra/pkg/gateway/public"
 	"github.com/sandbox0-ai/infra/pkg/gateway/spec"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
+	"github.com/sandbox0-ai/infra/pkg/observability"
+	httpobs "github.com/sandbox0-ai/infra/pkg/observability/http"
 	"github.com/sandbox0-ai/infra/pkg/proxy"
 	"go.uber.org/zap"
 )
@@ -55,6 +57,7 @@ func NewServer(
 	cfg *config.EdgeGatewayConfig,
 	pool *pgxpool.Pool,
 	logger *zap.Logger,
+	obsProvider *observability.Provider,
 ) (*Server, error) {
 	ctx := context.Background()
 
@@ -67,11 +70,17 @@ func NewServer(
 	// Create repository
 	repo := db.NewRepository(pool)
 
+	// Create observable HTTP client for proxy
+	httpClient := obsProvider.HTTP.NewClient(httpobs.Config{
+		Timeout: cfg.ProxyTimeout.Duration,
+	})
+
 	// Create proxy router to internal-gateway
 	igRouter, err := proxy.NewRouter(
 		cfg.DefaultInternalGatewayURL,
 		logger,
 		cfg.ProxyTimeout.Duration,
+		proxy.WithHTTPClient(httpClient),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create proxy router: %w", err)
@@ -84,6 +93,7 @@ func NewServer(
 			cfg.SchedulerURL,
 			logger,
 			cfg.ProxyTimeout.Duration,
+			proxy.WithHTTPClient(httpClient),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("create scheduler proxy router: %w", err)

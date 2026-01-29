@@ -25,6 +25,8 @@ import (
 	"github.com/sandbox0-ai/infra/pkg/gateway/public"
 	"github.com/sandbox0-ai/infra/pkg/gateway/spec"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
+	"github.com/sandbox0-ai/infra/pkg/observability"
+	httpobs "github.com/sandbox0-ai/infra/pkg/observability/http"
 	"github.com/sandbox0-ai/infra/pkg/proxy"
 	"go.uber.org/zap"
 )
@@ -58,6 +60,7 @@ func NewServer(
 	cfg *config.InternalGatewayConfig,
 	pool *pgxpool.Pool,
 	logger *zap.Logger,
+	obsProvider *observability.Provider,
 ) (*Server, error) {
 	// Set gin mode
 	gin.SetMode(gin.ReleaseMode)
@@ -71,6 +74,11 @@ func NewServer(
 		proxyTimeout = 10 * time.Second
 	}
 
+	// Create observable HTTP client for proxy
+	httpClient := obsProvider.HTTP.NewClient(httpobs.Config{
+		Timeout: proxyTimeout,
+	})
+
 	var proxy2Mgr *proxy.Router
 	if strings.TrimSpace(cfg.ManagerURL) != "" {
 		var err error
@@ -78,6 +86,7 @@ func NewServer(
 			cfg.ManagerURL,
 			logger,
 			proxyTimeout,
+			proxy.WithHTTPClient(httpClient),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("create manager proxy router: %w", err)
@@ -91,6 +100,7 @@ func NewServer(
 			cfg.StorageProxyURL,
 			logger,
 			proxyTimeout,
+			proxy.WithHTTPClient(httpClient),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("create storage-proxy proxy router: %w", err)

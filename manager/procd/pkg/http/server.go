@@ -20,6 +20,7 @@ import (
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/webhook"
 	"github.com/sandbox0-ai/infra/pkg/gateway/spec"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
+	"github.com/sandbox0-ai/infra/pkg/observability"
 	"go.uber.org/zap"
 )
 
@@ -81,7 +82,11 @@ func NewServer(
 	tokenProvider *TokenProvider,
 	webhookDispatcher *webhook.Dispatcher,
 	logger *zap.Logger,
+	obsProvider *observability.Provider,
 ) *Server {
+	// obsProvider is passed for future use (e.g., instrumenting handlers)
+	_ = obsProvider
+
 	s := &Server{
 		router:            mux.NewRouter(),
 		cfg:               cfg,

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/sandbox0-ai/infra/pkg/observability"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -48,6 +49,19 @@ func NewClient(kubeconfigPath string) (kubernetes.Interface, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	return kubernetes.NewForConfig(config)
+}
+
+// NewClientWithObservability creates a new Kubernetes clientset with observability instrumentation
+func NewClientWithObservability(kubeconfigPath string, obsProvider *observability.Provider) (kubernetes.Interface, error) {
+	config, err := BuildRestConfig(kubeconfigPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Wrap config with observability
+	obsProvider.K8s.WrapConfig(config)
 
 	return kubernetes.NewForConfig(config)
 }

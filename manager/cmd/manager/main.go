@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"os/signal"
 	"strconv"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"github.com/sandbox0-ai/infra/pkg/clock"
 	"github.com/sandbox0-ai/infra/pkg/dbpool"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
+	"github.com/sandbox0-ai/infra/pkg/observability"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	corev1 "k8s.io/api/core/v1"
@@ -56,11 +58,28 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	// Initialize observability provider
+	obsProvider, err := observability.New(observability.Config{
+		ServiceName: "manager",
+		Logger:      logger,
+		TraceExporter: observability.TraceExporterConfig{
+			Type:     os.Getenv("OTEL_EXPORTER_TYPE"),
+			Endpoint: os.Getenv("OTEL_EXPORTER_ENDPOINT"),
+		},
+	})
+	if err != nil {
+		logger.Fatal("Failed to initialize observability", zap.Error(err))
+	}
+	defer obsProvider.Shutdown(ctx)
+
 	// Create Kubernetes client
 	k8sConfig, err := buildKubeConfig(cfg.KubeConfig)
 	if err != nil {
 		logger.Fatal("Failed to build Kubernetes config", zap.Error(err))
 	}
+
+	// Wrap K8s config with observability
+	obsProvider.K8s.WrapConfig(k8sConfig)
 
 	k8sClient, err := kubernetes.NewForConfig(k8sConfig)
 	if err != nil {
@@ -82,7 +101,7 @@ func main() {
 	var pool *pgxpool.Pool
 	var clk *clock.Clock
 	if cfg.DatabaseURL != "" {
-		pool, err = initDatabase(ctx, cfg.DatabaseURL, cfg.DatabaseMaxConns, cfg.DatabaseMinConns, logger)
+		pool, err = initDatabase(ctx, cfg.DatabaseURL, cfg.DatabaseMaxConns, cfg.DatabaseMinConns, logger, obsProvider)
 		if err != nil {
 			logger.Fatal("Failed to connect to database", zap.Error(err))
 		}
@@ -421,7 +440,7 @@ func startMetricsServer(port int, logger *zap.Logger) {
 }
 
 // initDatabase initializes the database connection pool
-func initDatabase(ctx context.Context, databaseURL string, maxConns, minConns int32, logger *zap.Logger) (*pgxpool.Pool, error) {
+func initDatabase(ctx context.Context, databaseURL string, maxConns, minConns int32, logger *zap.Logger, obsProvider *observability.Provider) (*pgxpool.Pool, error) {
 	pool, err := dbpool.New(ctx, dbpool.Options{
 		DatabaseURL: databaseURL,
 		MaxConns:    maxConns,
@@ -430,6 +449,9 @@ func initDatabase(ctx context.Context, databaseURL string, maxConns, minConns in
 	if err != nil {
 		return nil, err
 	}
+
+	// Wrap pool with observability
+	obsProvider.Pgx.WrapPool(pool)
 
 	logger.Info("Database connection established",
 		zap.Int32("max_conns", pool.Config().MaxConns),

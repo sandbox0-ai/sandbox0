@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/infra/pkg/gateway/spec"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
+	"github.com/sandbox0-ai/infra/pkg/observability"
+	httpobs "github.com/sandbox0-ai/infra/pkg/observability/http"
 	"go.uber.org/zap"
 )
 
@@ -22,11 +25,15 @@ type InternalGatewayClient struct {
 }
 
 // NewInternalGatewayClient creates a new internal-gateway client
-func NewInternalGatewayClient(internalAuthGen *internalauth.Generator, logger *zap.Logger) *InternalGatewayClient {
+func NewInternalGatewayClient(internalAuthGen *internalauth.Generator, logger *zap.Logger, obsProvider *observability.Provider) *InternalGatewayClient {
+	httpClient := obsProvider.HTTP.NewClient(httpobs.Config{
+		Timeout: 30 * time.Second,
+	})
+
 	return &InternalGatewayClient{
 		internalAuthGen: internalAuthGen,
 		logger:          logger,
-		httpClient:      &http.Client{},
+		httpClient:      httpClient,
 	}
 }
 

@@ -18,6 +18,8 @@ type Router struct {
 	timeout   time.Duration
 	// requestModifiers are applied before proxying.
 	requestModifiers []RequestModifier
+	// httpClient is the HTTP client used for proxy requests
+	httpClient *http.Client
 }
 
 // NewRouter creates a new router
@@ -33,6 +35,7 @@ func NewRouter(targetUrl string, logger *zap.Logger, timeout time.Duration, opts
 		logger:           logger,
 		timeout:          timeout,
 		requestModifiers: parsedOpts.requestModifiers,
+		httpClient:       parsedOpts.httpClient,
 	}, nil
 }
 
@@ -74,13 +77,21 @@ func (r *Router) createReverseProxyDirector(target *url.URL) *httputil.ReversePr
 		)
 	}
 
-	proxy := &httputil.ReverseProxy{
-		Director: director,
-		Transport: &http.Transport{
+	// Use custom HTTP client's transport if provided, otherwise use default transport
+	var transport http.RoundTripper
+	if r.httpClient != nil && r.httpClient.Transport != nil {
+		transport = r.httpClient.Transport
+	} else {
+		transport = &http.Transport{
 			MaxIdleConns:        50,
 			MaxIdleConnsPerHost: 20,
 			IdleConnTimeout:     90 * time.Second,
-		},
+		}
+	}
+
+	proxy := &httputil.ReverseProxy{
+		Director:  director,
+		Transport: transport,
 		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
 			r.logger.Error("Proxy error",
 				zap.String("target", req.URL.String()),

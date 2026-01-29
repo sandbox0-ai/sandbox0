@@ -14,6 +14,7 @@ import (
 	"github.com/sandbox0-ai/infra/pkg/dbpool"
 	gatewaymigrations "github.com/sandbox0-ai/infra/pkg/gateway/migrations"
 	"github.com/sandbox0-ai/infra/pkg/migrate"
+	"github.com/sandbox0-ai/infra/pkg/observability"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -40,9 +41,23 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Initialize observability provider
+	obsProvider, err := observability.New(observability.Config{
+		ServiceName: "internal-gateway",
+		Logger:      logger,
+		TraceExporter: observability.TraceExporterConfig{
+			Type:     os.Getenv("OTEL_EXPORTER_TYPE"),
+			Endpoint: os.Getenv("OTEL_EXPORTER_ENDPOINT"),
+		},
+	})
+	if err != nil {
+		logger.Fatal("Failed to initialize observability", zap.Error(err))
+	}
+	defer obsProvider.Shutdown(ctx)
+
 	var pool *pgxpool.Pool
 	if isPublicAuthEnabled(cfg.AuthMode) {
-		pool = initDatabase(ctx, cfg, logger)
+		pool = initDatabase(ctx, cfg, logger, obsProvider)
 		defer pool.Close()
 
 		if err := runMigrations(ctx, pool, logger); err != nil {
@@ -51,7 +66,7 @@ func main() {
 	}
 
 	// Create HTTP server
-	server, err := http.NewServer(cfg, pool, logger)
+	server, err := http.NewServer(cfg, pool, logger, obsProvider)
 	if err != nil {
 		logger.Fatal("Failed to create HTTP server", zap.Error(err))
 	}
@@ -129,7 +144,7 @@ func isPublicAuthEnabled(mode string) bool {
 	return mode == "public" || mode == "both"
 }
 
-func initDatabase(ctx context.Context, cfg *config.InternalGatewayConfig, logger *zap.Logger) *pgxpool.Pool {
+func initDatabase(ctx context.Context, cfg *config.InternalGatewayConfig, logger *zap.Logger, obsProvider *observability.Provider) *pgxpool.Pool {
 	pool, err := dbpool.New(ctx, dbpool.Options{
 		DatabaseURL: cfg.DatabaseURL,
 		MaxConns:    int32(cfg.DatabaseMaxConns),
@@ -139,6 +154,9 @@ func initDatabase(ctx context.Context, cfg *config.InternalGatewayConfig, logger
 	if err != nil {
 		logger.Fatal("Failed to connect to database", zap.Error(err))
 	}
+
+	// Wrap pool with observability
+	obsProvider.Pgx.WrapPool(pool)
 
 	logger.Info("Database connection established",
 		zap.Int32("max_conns", pool.Config().MaxConns),

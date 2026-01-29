@@ -45,6 +45,10 @@ func startWithCandidates(base *process.BaseProcess, runner *process.PTYRunner, c
 			cmd.Dir = config.CWD
 		}
 
+		// Note: Do NOT set Setpgid for PTY processes.
+		// PTY automatically creates a new session and handles terminal control.
+		// Setting Setpgid would conflict with PTY's session management.
+
 		env := os.Environ()
 		for k, v := range config.EnvVars {
 			env = append(env, fmt.Sprintf("%s=%s", k, v))

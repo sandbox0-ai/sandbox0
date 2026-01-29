@@ -80,13 +80,10 @@ func (c *CMD) Start() error {
 	}
 	cmd.Env = env
 
-	// Create a new process group so we can send signals to all child processes
-	// cmd.SysProcAttr = &syscall.SysProcAttr{
-	// 	Setpgid: true,
-	// }
-
 	// Check if PTY is requested
 	if config.PTYSize != nil {
+		// PTY mode: Do NOT set Setpgid.
+		// PTY automatically creates a new session and handles terminal control.
 		if c.runner == nil {
 			c.runner = process.NewPTYRunner(c.BaseProcess, nil, c.cancel)
 		}
@@ -98,6 +95,11 @@ func (c *CMD) Start() error {
 		})
 		return c.runner.Start(cmd, config.PTYSize)
 	} else {
+		// Non-PTY mode: Create a new process group for signal management
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			Setpgid: true,
+		}
+
 		// Start with pipes for non-interactive commands
 		cmd.Stdout = &c.stdout
 		cmd.Stderr = &c.stderr

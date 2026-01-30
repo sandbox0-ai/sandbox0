@@ -51,6 +51,8 @@ type CreateContextRequest struct {
 	EnvVars  map[string]string   `json:"env_vars"`
 	PTYSize  *process.PTYSize    `json:"pty_size"`
 	Input    string              `json:"input"`
+	IdleTimeoutSec int32         `json:"idle_timeout_sec,omitempty"`
+	TTLSec         int32         `json:"ttl_sec,omitempty"`
 }
 
 // ContextResponse is the response body for a context.
@@ -149,14 +151,27 @@ func (h *ContextHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, err := h.manager.CreateContext(process.ProcessConfig{
+	if req.IdleTimeoutSec < 0 || req.TTLSec < 0 {
+		writeError(w, http.StatusBadRequest, "invalid_request", "idle_timeout_sec and ttl_sec must be >= 0")
+		return
+	}
+
+	policy := ctxpkg.CleanupPolicy{}
+	if req.IdleTimeoutSec > 0 {
+		policy.IdleTimeout = time.Duration(req.IdleTimeoutSec) * time.Second
+	}
+	if req.TTLSec > 0 {
+		policy.MaxLifetime = time.Duration(req.TTLSec) * time.Second
+	}
+
+	ctx, err := h.manager.CreateContextWithPolicy(process.ProcessConfig{
 		Type:     req.Type,
 		Language: req.Language,
 		Command:  req.Command,
 		CWD:      req.CWD,
 		EnvVars:  req.EnvVars,
 		PTYSize:  req.PTYSize,
-	})
+	}, policy)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "create_failed", err.Error())
 		return
@@ -659,6 +674,7 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 						closeConn("websocket write failed")
 						return
 					}
+					ctx.Touch()
 					continue
 				}
 
@@ -672,6 +688,7 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 					closeConn("websocket write failed")
 					return
 				}
+				ctx.Touch()
 			}
 		}
 	}()
@@ -697,8 +714,8 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 			switch msg.Type {
 			case "input":
 				setPendingRequestID(msg.RequestID)
-				if ctx.MainProcess != nil && msg.Data != "" {
-					_ = ctx.MainProcess.WriteInput([]byte(msg.Data))
+				if msg.Data != "" {
+					_ = h.manager.WriteInput(id, []byte(msg.Data))
 				}
 			case "resize":
 				if msg.Rows == 0 || msg.Cols == 0 {

@@ -291,6 +291,10 @@ func (in *OperatorConfig) DeepCopy() *OperatorConfig {
 func (in *ProcdConfig) DeepCopyInto(out *ProcdConfig) {
 	*out = *in
 	out.CacheTTL = in.CacheTTL
+	out.ContextCleanupInterval = in.ContextCleanupInterval
+	out.ContextIdleTimeout = in.ContextIdleTimeout
+	out.ContextMaxLifetime = in.ContextMaxLifetime
+	out.ContextFinishedTTL = in.ContextFinishedTTL
 	out.WebhookRequestTimeout = in.WebhookRequestTimeout
 	out.WebhookBaseBackoff = in.WebhookBaseBackoff
 	if in.setKeys != nil {

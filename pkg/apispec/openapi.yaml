@@ -2614,6 +2614,12 @@ components:
           $ref: "#/components/schemas/PTYSize"
         input:
           type: string
+        idle_timeout_sec:
+          type: integer
+          format: int32
+        ttl_sec:
+          type: integer
+          format: int32
     ContextResponse:
       type: object
       properties:

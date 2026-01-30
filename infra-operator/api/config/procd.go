@@ -59,6 +59,19 @@ type ProcdConfig struct {
 	// +optional
 	// +kubebuilder:default="30s"
 	CacheTTL metav1.Duration `yaml:"cache_ttl" json:"cacheTTL"`
+	// Context cleanup configuration
+	// +optional
+	// +kubebuilder:default="30s"
+	ContextCleanupInterval metav1.Duration `yaml:"context_cleanup_interval" json:"contextCleanupInterval"`
+	// +optional
+	// +kubebuilder:default="0s"
+	ContextIdleTimeout metav1.Duration `yaml:"context_idle_timeout" json:"contextIdleTimeout"`
+	// +optional
+	// +kubebuilder:default="0s"
+	ContextMaxLifetime metav1.Duration `yaml:"context_max_lifetime" json:"contextMaxLifetime"`
+	// +optional
+	// +kubebuilder:default="0s"
+	ContextFinishedTTL metav1.Duration `yaml:"context_finished_ttl" json:"contextFinishedTTL"`
 	// +optional
 	// +kubebuilder:default=256
 	WebhookQueueSize int `yaml:"webhook_queue_size" json:"webhookQueueSize"`

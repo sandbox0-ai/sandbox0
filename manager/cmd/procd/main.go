@@ -65,6 +65,11 @@ func main() {
 
 	// Initialize managers
 	contextManager := ctxpkg.NewManager()
+	contextManager.SetDefaultCleanupPolicy(ctxpkg.CleanupPolicy{
+		IdleTimeout: cfg.ContextIdleTimeout.Duration,
+		MaxLifetime: cfg.ContextMaxLifetime.Duration,
+		FinishedTTL: cfg.ContextFinishedTTL.Duration,
+	})
 
 	webhookDispatcher := webhook.NewDispatcher(webhook.Options{
 		QueueSize:      cfg.WebhookQueueSize,
@@ -175,6 +180,9 @@ func main() {
 		obsProvider,
 	)
 
+	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
+	contextManager.StartCleanup(cleanupCtx, cfg.ContextCleanupInterval.Duration)
+
 	// Handle shutdown signals
 	done := make(chan bool, 1)
 	quit := make(chan os.Signal, 1)
@@ -183,6 +191,8 @@ func main() {
 	go func() {
 		sig := <-quit
 		logger.Info("Received shutdown signal", zap.String("signal", sig.String()))
+
+		cleanupCancel()
 
 		webhookDispatcher.Enqueue(webhook.Event{
 			EventType: webhook.EventTypeSandboxKilled,

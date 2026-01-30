@@ -3,6 +3,7 @@ package context
 
 import (
 	"fmt"
+	"sync"
 	"syscall"
 	"time"
 
@@ -20,6 +21,22 @@ type Context struct {
 	MainProcess process.Process     `json:"-"`
 	CreatedAt   time.Time           `json:"created_at"`
 	UpdatedAt   time.Time           `json:"updated_at"`
+	LastActivityAt time.Time     `json:"-"`
+	FinishedAt     *time.Time    `json:"-"`
+	CleanupPolicy  CleanupPolicy `json:"-"`
+
+	mu sync.RWMutex
+}
+
+// CleanupPolicy defines when a context should be cleaned up.
+type CleanupPolicy struct {
+	IdleTimeout time.Duration
+	MaxLifetime time.Duration
+	FinishedTTL time.Duration
+}
+
+func (p CleanupPolicy) isZero() bool {
+	return p.IdleTimeout == 0 && p.MaxLifetime == 0 && p.FinishedTTL == 0
 }
 
 // NewContext creates a new context with the given configuration.
@@ -45,6 +62,22 @@ func NewContext(config process.ProcessConfig, exitHandler process.ExitHandler, s
 		return nil, err
 	}
 
+	now := time.Now()
+	ctx := &Context{
+		ID:          id,
+		Type:        config.Type,
+		Language:    config.Language,
+		CWD:         config.CWD,
+		EnvVars:     config.EnvVars,
+		MainProcess: proc,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		LastActivityAt: now,
+	}
+
+	proc.AddExitHandler(func(event process.ExitEvent) {
+		ctx.markFinished()
+	})
 	if exitHandler != nil {
 		proc.AddExitHandler(exitHandler)
 	}
@@ -56,16 +89,7 @@ func NewContext(config process.ProcessConfig, exitHandler process.ExitHandler, s
 		return nil, err
 	}
 
-	return &Context{
-		ID:          id,
-		Type:        config.Type,
-		Language:    config.Language,
-		CWD:         config.CWD,
-		EnvVars:     config.EnvVars,
-		MainProcess: proc,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
-	}, nil
+	return ctx, nil
 }
 
 // Stop stops the context and its main process.
@@ -79,7 +103,7 @@ func (ctx *Context) Stop() error {
 // Restart restarts the context's main process.
 func (ctx *Context) Restart() error {
 	if ctx.MainProcess != nil {
-		ctx.UpdatedAt = time.Now()
+		ctx.touch()
 		return ctx.MainProcess.Restart()
 	}
 	return nil
@@ -104,7 +128,7 @@ func (ctx *Context) IsPaused() bool {
 // Pause pauses the context's main process and all its children.
 func (ctx *Context) Pause() error {
 	if ctx.MainProcess != nil {
-		ctx.UpdatedAt = time.Now()
+		ctx.touch()
 		return ctx.MainProcess.Pause()
 	}
 	return nil
@@ -113,7 +137,7 @@ func (ctx *Context) Pause() error {
 // Resume resumes the context's main process and all its children.
 func (ctx *Context) Resume() error {
 	if ctx.MainProcess != nil {
-		ctx.UpdatedAt = time.Now()
+		ctx.touch()
 		return ctx.MainProcess.Resume()
 	}
 	return nil
@@ -130,7 +154,7 @@ func (ctx *Context) ResourceUsage() process.ResourceUsage {
 // ResizePTY resizes the context's PTY, if available.
 func (ctx *Context) ResizePTY(size process.PTYSize) error {
 	if ctx.MainProcess != nil {
-		ctx.UpdatedAt = time.Now()
+		ctx.touch()
 		return ctx.MainProcess.ResizePTY(size)
 	}
 	return process.ErrProcessNotRunning
@@ -139,7 +163,7 @@ func (ctx *Context) ResizePTY(size process.PTYSize) error {
 // SendSignal sends a signal to the context's process.
 func (ctx *Context) SendSignal(sig syscall.Signal) error {
 	if ctx.MainProcess != nil {
-		ctx.UpdatedAt = time.Now()
+		ctx.touch()
 		return ctx.MainProcess.SendSignal(sig)
 	}
 	return process.ErrProcessNotRunning
@@ -150,7 +174,7 @@ func (ctx *Context) SendSignal(sig syscall.Signal) error {
 func (ctx *Context) AddExitHandler(handler process.ExitHandler) {
 	if ctx.MainProcess != nil {
 		ctx.MainProcess.AddExitHandler(handler)
-		ctx.UpdatedAt = time.Now()
+		ctx.touch()
 	}
 }
 
@@ -159,6 +183,53 @@ func (ctx *Context) AddExitHandler(handler process.ExitHandler) {
 func (ctx *Context) AddStartHandler(handler process.StartHandler) {
 	if ctx.MainProcess != nil {
 		ctx.MainProcess.AddStartHandler(handler)
-		ctx.UpdatedAt = time.Now()
+		ctx.touch()
 	}
+}
+
+// Touch marks the context as recently active.
+func (ctx *Context) Touch() {
+	ctx.touch()
+}
+
+// SetCleanupPolicy sets the cleanup policy for the context.
+func (ctx *Context) SetCleanupPolicy(policy CleanupPolicy) {
+	ctx.mu.Lock()
+	defer ctx.mu.Unlock()
+	ctx.CleanupPolicy = policy
+}
+
+func (ctx *Context) markFinished() {
+	now := time.Now()
+	ctx.mu.Lock()
+	defer ctx.mu.Unlock()
+	ctx.FinishedAt = &now
+	ctx.UpdatedAt = now
+}
+
+func (ctx *Context) touch() {
+	now := time.Now()
+	ctx.mu.Lock()
+	defer ctx.mu.Unlock()
+	ctx.LastActivityAt = now
+	ctx.UpdatedAt = now
+}
+
+func (ctx *Context) shouldCleanup(now time.Time) bool {
+	ctx.mu.RLock()
+	policy := ctx.CleanupPolicy
+	lastActivity := ctx.LastActivityAt
+	finishedAt := ctx.FinishedAt
+	ctx.mu.RUnlock()
+
+	if policy.MaxLifetime > 0 && now.Sub(ctx.CreatedAt) > policy.MaxLifetime {
+		return true
+	}
+	if policy.FinishedTTL > 0 && finishedAt != nil && now.Sub(*finishedAt) > policy.FinishedTTL {
+		return true
+	}
+	if policy.IdleTimeout > 0 && now.Sub(lastActivity) > policy.IdleTimeout {
+		return true
+	}
+	return false
 }

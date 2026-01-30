@@ -1,10 +1,12 @@
 package context
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/process"
 )
@@ -49,6 +51,8 @@ type Manager struct {
 	contexts map[string]*Context
 	onExit   process.ExitHandler
 	onStart  process.StartHandler
+	defaultCleanupPolicy CleanupPolicy
+	cleanupOnce          sync.Once
 }
 
 // NewManager creates a new context manager.
@@ -72,11 +76,44 @@ func (m *Manager) SetStartHandler(handler process.StartHandler) {
 	m.onStart = handler
 }
 
+// SetDefaultCleanupPolicy sets the default cleanup policy for new contexts.
+func (m *Manager) SetDefaultCleanupPolicy(policy CleanupPolicy) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.defaultCleanupPolicy = policy
+}
+
+// StartCleanup starts a background cleanup loop.
+func (m *Manager) StartCleanup(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	m.cleanupOnce.Do(func() {
+		ticker := time.NewTicker(interval)
+		go func() {
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					m.cleanupExpired()
+				}
+			}
+		}()
+	})
+}
+
 // CreateContext creates a new context.
 func (m *Manager) CreateContext(config process.ProcessConfig) (*Context, error) {
+	return m.CreateContextWithPolicy(config, CleanupPolicy{})
+}
+
+// CreateContextWithPolicy creates a new context with a cleanup policy.
+func (m *Manager) CreateContextWithPolicy(config process.ProcessConfig, policy CleanupPolicy) (*Context, error) {
 	m.mu.Lock()
 	startHandler := m.onStart
-
+	defaultPolicy := m.defaultCleanupPolicy
 	// Define exit handler for the new context
 	exitHandler := func(event process.ExitEvent) {
 		if m.onExit != nil {
@@ -89,6 +126,11 @@ func (m *Manager) CreateContext(config process.ProcessConfig) (*Context, error) 
 		m.mu.Unlock()
 		return nil, err
 	}
+
+	if policy.isZero() {
+		policy = defaultPolicy
+	}
+	ctx.SetCleanupPolicy(policy)
 
 	m.contexts[ctx.ID] = ctx
 	m.mu.Unlock()
@@ -203,7 +245,11 @@ func (m *Manager) WriteInput(contextID string, data []byte) error {
 	if ctx.MainProcess == nil {
 		return process.ErrProcessNotRunning
 	}
-	return ctx.MainProcess.WriteInput(data)
+	if err := ctx.MainProcess.WriteInput(data); err != nil {
+		return err
+	}
+	ctx.Touch()
+	return nil
 }
 
 // ReadOutput returns the output channel for a context.
@@ -250,6 +296,23 @@ func (m *Manager) Cleanup() {
 	}
 
 	m.contexts = make(map[string]*Context)
+}
+
+func (m *Manager) cleanupExpired() {
+	now := time.Now()
+	expiredIDs := make([]string, 0)
+
+	m.mu.RLock()
+	for id, ctx := range m.contexts {
+		if ctx.shouldCleanup(now) {
+			expiredIDs = append(expiredIDs, id)
+		}
+	}
+	m.mu.RUnlock()
+
+	for _, id := range expiredIDs {
+		_ = m.DeleteContext(id)
+	}
 }
 
 // GetResourceUsage returns resource usage for a specific context.

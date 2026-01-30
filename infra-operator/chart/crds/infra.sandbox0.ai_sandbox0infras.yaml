@@ -1105,6 +1105,19 @@ spec:
                               cacheTTL:
                                 default: 30s
                                 type: string
+                              contextCleanupInterval:
+                                default: 30s
+                                description: Context cleanup configuration
+                                type: string
+                              contextFinishedTTL:
+                                default: 0s
+                                type: string
+                              contextIdleTimeout:
+                                default: 0s
+                                type: string
+                              contextMaxLifetime:
+                                default: 0s
+                                type: string
                               httpPort:
                                 default: 49983
                                 description: Server configuration

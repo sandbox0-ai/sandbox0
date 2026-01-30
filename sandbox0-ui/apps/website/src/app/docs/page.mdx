@@ -1,0 +1,70 @@
+import { PixelButton } from "@sandbox0/ui";
+
+<DocsHero title="DOCUMENTATION">
+  Sandbox0 API documentation for AI agent developers
+</DocsHero>
+
+Sandbox0 provides persistent, fast-starting sandboxes for AI agents with full file system access, session management, and network isolation. Built on Kubernetes with JuiceFS for storage.
+
+<Callout type="info" title="For AI Agent Developers">
+  Sandbox0 is designed specifically for developers building AI agents that
+  need reliable, persistent execution environments. Our 100ms cold start
+  ensures your agents respond instantly to user requests.
+</Callout>
+
+## GET STARTED
+
+<CardGrid>
+  <LinkCard title="🚀 QUICK START" href="/docs/quickstart" cta="View Guide">
+    Get your first sandbox running in under 5 minutes.
+  </LinkCard>
+
+  <LinkCard title="📚 CORE CONCEPTS" href="/docs/concepts" cta="Learn More">
+    Understand sandboxes, processes, and volumes.
+  </LinkCard>
+
+  <LinkCard title="🔑 AUTHENTICATION" href="/docs/authentication" cta="Setup Auth">
+    Set up API keys and secure your sandboxes.
+  </LinkCard>
+
+  <LinkCard title="⚡ API REFERENCE" href="/docs/api" cta="Browse API">
+    Complete REST API documentation.
+  </LinkCard>
+</CardGrid>
+
+## SDKs
+
+Official SDKs for popular programming languages:
+
+<ResourceList>
+  <ResourceItem
+    badge="Python"
+    description="Full-featured Python SDK with async support"
+    href="/docs/sdks/python"
+  />
+  <ResourceItem
+    badge="JavaScript"
+    description="TypeScript-first SDK for Node.js and browsers"
+    href="/docs/sdks/javascript"
+  />
+  <ResourceItem
+    badge="Go"
+    description="High-performance Go SDK with full API coverage"
+    href="/docs/sdks/go"
+  />
+</ResourceList>
+
+## CLI
+
+The `s0` CLI provides a powerful command-line interface for managing sandboxes:
+
+<TerminalBlock lines={"$ s0 create --template python\n✓ Sandbox created in 98ms\nsandbox-id: sb_abc123"} />
+
+<PixelButton variant="secondary" scale="sm">
+  <a href="/docs/cli">View CLI Docs →</a>
+</PixelButton>
+
+<Callout type="info" title="Need Help?" className="mt-12">
+  Join our community and get support:
+  <LinkRow links="Discord=https://discord.gg/sandbox0|GitHub=https://github.com/sandbox0|Email=mailto:support@sandbox0.ai" />
+</Callout>

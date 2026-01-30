@@ -1,0 +1,228 @@
+# Sandboxes API
+
+The Sandboxes API allows you to create, manage, and interact with isolated execution environments.
+
+## Base URL
+
+```
+https://api.sandbox0.ai/v1
+```
+
+All API requests require authentication via API key in the `Authorization` header:
+
+<CodeBlock language="bash" scale="md">
+{`Authorization: Bearer YOUR_API_KEY`}
+</CodeBlock>
+
+---
+
+## Create Sandbox
+
+<Endpoint method="POST">/sandboxes</Endpoint>
+
+Creates a new sandbox from a template.
+
+### Request Body
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `template` | string | Yes | Template ID (e.g., `python:3.11`) |
+| `name` | string | No | Human-readable name |
+| `timeout` | integer | No | Idle timeout in seconds (default: 300) |
+| `volumes` | array | No | Volume mount configurations |
+| `network_policy` | object | No | Network isolation settings |
+
+### Example Request
+
+<CodeBlock language="bash" filename="create-sandbox.sh" scale="md">
+{`curl -X POST https://api.sandbox0.ai/v1/sandboxes \\
+  -H "Authorization: Bearer YOUR_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "template": "python:3.11",
+    "name": "my-agent-sandbox",
+    "timeout": 600,
+    "volumes": [
+      {
+        "volume_id": "vol_abc123",
+        "mount_path": "/data"
+      }
+    ],
+    "network_policy": {
+      "allow_internet": true,
+      "allowed_domains": ["*.openai.com"]
+    }
+  }'`}
+</CodeBlock>
+
+### Response
+
+<CodeBlock language="json" scale="md">
+{`{
+  "id": "sb_xyz789",
+  "template": "python:3.11",
+  "name": "my-agent-sandbox",
+  "status": "running",
+  "created_at": "2026-01-17T10:30:00Z",
+  "timeout": 600,
+  "endpoint": "https://sb-xyz789.sandbox0.ai",
+  "volumes": [
+    {
+      "volume_id": "vol_abc123",
+      "mount_path": "/data"
+    }
+  ]
+}`}
+</CodeBlock>
+
+<Callout type="success" title="Fast Cold Start">
+Sandboxes are typically ready in under 100ms thanks to our warm pool architecture.
+</Callout>
+
+---
+
+## Get Sandbox
+
+<Endpoint method="GET">/sandboxes/:id</Endpoint>
+
+Retrieves information about a specific sandbox.
+
+### Example Request
+
+<CodeBlock language="bash" scale="md">
+{`curl https://api.sandbox0.ai/v1/sandboxes/sb_xyz789 \\
+  -H "Authorization: Bearer YOUR_API_KEY"`}
+</CodeBlock>
+
+### Response
+
+<CodeBlock language="json" scale="md">
+{`{
+  "id": "sb_xyz789",
+  "template": "python:3.11",
+  "name": "my-agent-sandbox",
+  "status": "running",
+  "created_at": "2026-01-17T10:30:00Z",
+  "last_activity": "2026-01-17T10:45:23Z",
+  "timeout": 600,
+  "cpu_usage": 0.23,
+  "memory_usage": 256000000
+}`}
+</CodeBlock>
+
+---
+
+## List Sandboxes
+
+<Endpoint method="GET">/sandboxes</Endpoint>
+
+Lists all sandboxes in your account.
+
+### Query Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `status` | string | Filter by status: `running`, `stopped` |
+| `template` | string | Filter by template |
+| `limit` | integer | Results per page (default: 50, max: 100) |
+| `offset` | integer | Pagination offset |
+
+### Example Request
+
+<CodeBlock language="bash" scale="md">
+{`curl "https://api.sandbox0.ai/v1/sandboxes?status=running&limit=10" \\
+  -H "Authorization: Bearer YOUR_API_KEY"`}
+</CodeBlock>
+
+---
+
+## Execute Command
+
+<Endpoint method="POST">/sandboxes/:id/exec</Endpoint>
+
+Executes a command in the sandbox and returns the output.
+
+### Request Body
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `command` | string | Yes | Command to execute |
+| `timeout` | integer | No | Execution timeout in seconds (default: 30) |
+| `env` | object | No | Environment variables |
+
+### Example Request
+
+<CodeBlock language="bash" scale="md">
+{`curl -X POST https://api.sandbox0.ai/v1/sandboxes/sb_xyz789/exec \\
+  -H "Authorization: Bearer YOUR_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "command": "python -c \\"print('Hello World')\\"",
+    "timeout": 10,
+    "env": {
+      "DEBUG": "true"
+    }
+  }'`}
+</CodeBlock>
+
+### Response
+
+<CodeBlock language="json" scale="md">
+{`{
+  "stdout": "Hello World\\n",
+  "stderr": "",
+  "exit_code": 0,
+  "execution_time": 0.034
+}`}
+</CodeBlock>
+
+---
+
+## Delete Sandbox
+
+<Endpoint method="DELETE">/sandboxes/:id</Endpoint>
+
+Deletes a sandbox and releases its resources.
+
+<Callout type="warning" title="Data Loss">
+Deleting a sandbox removes all ephemeral data. Make sure to persist important data to volumes before deletion.
+</Callout>
+
+### Example Request
+
+<CodeBlock language="bash" scale="md">
+{`curl -X DELETE https://api.sandbox0.ai/v1/sandboxes/sb_xyz789 \\
+  -H "Authorization: Bearer YOUR_API_KEY"`}
+</CodeBlock>
+
+### Response
+
+<CodeBlock language="json" scale="md">
+{`{
+  "id": "sb_xyz789",
+  "status": "deleted",
+  "deleted_at": "2026-01-17T11:00:00Z"
+}`}
+</CodeBlock>
+
+---
+
+## Status Codes
+
+| Code | Description |
+|------|-------------|
+| `200` | Success |
+| `201` | Resource created |
+| `400` | Bad request (invalid parameters) |
+| `401` | Unauthorized (invalid API key) |
+| `404` | Resource not found |
+| `429` | Rate limit exceeded |
+| `500` | Internal server error |
+
+---
+
+## Next Steps
+
+- **[Processes API](/docs/api/processes)** - Execute and manage processes
+- **[Files API](/docs/api/files)** - File system operations
+- **[Volumes API](/docs/api/volumes)** - Persistent storage management

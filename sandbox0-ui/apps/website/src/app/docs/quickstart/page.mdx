@@ -1,0 +1,198 @@
+# Quick Start
+
+Get started with Sandbox0 in under 5 minutes. This guide will walk you through creating your first sandbox and running code.
+
+<Callout type="info" title="Prerequisites">
+You'll need an API key to use Sandbox0. Sign up at [sandbox0.ai](https://sandbox0.ai) to get your key.
+</Callout>
+
+## Installation
+
+Choose your preferred SDK:
+
+<Tabs
+  tabs={[
+    {
+      label: "Python",
+      content: (
+        <CodeBlock language="bash" scale="md">
+{`pip install sandbox0`}
+        </CodeBlock>
+      ),
+    },
+    {
+      label: "JavaScript",
+      content: (
+        <CodeBlock language="bash" scale="md">
+{`npm install @sandbox0/sdk`}
+        </CodeBlock>
+      ),
+    },
+    {
+      label: "Go",
+      content: (
+        <CodeBlock language="bash" scale="md">
+{`go get github.com/sandbox0/sdk-go`}
+        </CodeBlock>
+      ),
+    },
+  ]}
+/>
+
+## Create Your First Sandbox
+
+<Tabs
+  tabs={[
+    {
+      label: "Python",
+      content: (
+        <CodeBlock language="python" filename="quickstart.py" scale="md">
+{`from sandbox0 import Sandbox0
+
+# Initialize client with your API key
+client = Sandbox0(api_key="your_api_key_here")
+
+# Create a new sandbox
+sandbox = client.sandboxes.create(
+    template="python:3.11"
+)
+
+print(f"Sandbox created: {sandbox.id}")
+print(f"Status: {sandbox.status}")
+
+# Execute code in the sandbox
+result = sandbox.exec("print('Hello from Sandbox0!')")
+print(result.stdout)  # Output: Hello from Sandbox0!
+
+# Clean up
+sandbox.delete()`}
+        </CodeBlock>
+      ),
+    },
+    {
+      label: "JavaScript",
+      content: (
+        <CodeBlock language="javascript" filename="quickstart.js" scale="md">
+{`import { Sandbox0 } from '@sandbox0/sdk';
+
+// Initialize client with your API key
+const client = new Sandbox0({
+  apiKey: 'your_api_key_here'
+});
+
+// Create a new sandbox
+const sandbox = await client.sandboxes.create({
+  template: 'node:20'
+});
+
+console.log(\`Sandbox created: \${sandbox.id}\`);
+console.log(\`Status: \${sandbox.status}\`);
+
+// Execute code in the sandbox
+const result = await sandbox.exec(
+  "console.log('Hello from Sandbox0!')"
+);
+console.log(result.stdout);  // Output: Hello from Sandbox0!
+
+// Clean up
+await sandbox.delete();`}
+        </CodeBlock>
+      ),
+    },
+    {
+      label: "Go",
+      content: (
+        <CodeBlock language="go" filename="quickstart.go" scale="md">
+{`package main
+
+import (
+    "fmt"
+    "github.com/sandbox0/sdk-go"
+)
+
+func main() {
+    // Initialize client with your API key
+    client := sandbox0.NewClient("your_api_key_here")
+
+    // Create a new sandbox
+    sandbox, err := client.Sandboxes.Create(&sandbox0.CreateSandboxRequest{
+        Template: "go:1.21",
+    })
+    if err != nil {
+        panic(err)
+    }
+
+    fmt.Printf("Sandbox created: %s\\n", sandbox.ID)
+    fmt.Printf("Status: %s\\n", sandbox.Status)
+
+    // Execute code in the sandbox
+    result, err := sandbox.Exec(\`fmt.Println("Hello from Sandbox0!")\`)
+    if err != nil {
+        panic(err)
+    }
+    fmt.Println(result.Stdout)  // Output: Hello from Sandbox0!
+
+    // Clean up
+    sandbox.Delete()
+}`}
+        </CodeBlock>
+      ),
+    },
+  ]}
+/>
+
+## Working with Files
+
+Sandbox0 provides a full POSIX file system. Here's how to work with files:
+
+<CodeBlock language="python" filename="files_example.py" scale="md">
+{`# Write a file
+sandbox.files.write("/workspace/data.txt", "Hello, World!")
+
+# Read a file
+content = sandbox.files.read("/workspace/data.txt")
+print(content)  # Output: Hello, World!
+
+# List directory contents
+files = sandbox.files.list("/workspace")
+for file in files:
+    print(f"{file.name} ({file.size} bytes)")`}
+</CodeBlock>
+
+<Callout type="success" title="Persistent Storage">
+Files in `/workspace` persist across sandbox sessions when using volumes. Learn more in the [Volumes documentation](/docs/api/volumes).
+</Callout>
+
+## Running Long-lived Processes
+
+For interactive sessions or long-running processes, use the REPL mode:
+
+<CodeBlock language="python" filename="repl_example.py" scale="md">
+{`# Start a Python REPL
+repl = sandbox.processes.create_repl(
+    command="python3",
+    timeout=300  # 5 minutes
+)
+
+# Execute commands in the REPL
+result = repl.exec("x = 42")
+result = repl.exec("print(x * 2)")
+print(result.stdout)  # Output: 84
+
+# REPL state persists between executions
+result = repl.exec("print(x + 8)")
+print(result.stdout)  # Output: 50`}
+</CodeBlock>
+
+## Next Steps
+
+Now that you've created your first sandbox, explore these topics:
+
+- **[Core Concepts](/docs/concepts)** - Understand sandboxes, processes, and volumes
+- **[Authentication](/docs/authentication)** - Secure your API keys
+- **[SDK Documentation](/docs/sdks/python)** - Deep dive into SDK features
+- **[API Reference](/docs/api)** - Complete REST API documentation
+
+<Callout type="info" title="Need Help?">
+Join our [Discord community](https://discord.gg/sandbox0) or check out [GitHub examples](https://github.com/sandbox0/examples).
+</Callout>

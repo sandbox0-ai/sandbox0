@@ -1,0 +1,193 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Press+Start+2P&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* Force dark mode */
+  :root {
+    color-scheme: dark;
+    --color-background: #000000;
+    --color-foreground: #FFFFFF;
+    --color-accent: #2E51FF;
+    --color-surface: #1A1A1A;
+    --color-muted: #888888;
+  }
+
+  html {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: 'Inter', system-ui, sans-serif;
+  }
+
+  body {
+    background-color: var(--color-background);
+    min-height: 100vh;
+  }
+
+  /* Pixel Style Scrollbar */
+  ::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-surface);
+    border: none;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-muted);
+  }
+
+  /* Firefox */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-surface) transparent;
+  }
+
+  /* Remove all border-radius by default (pixel art style) */
+  *,
+  *::before,
+  *::after {
+    border-radius: 0 !important;
+  }
+
+  /* 
+   * Pixel-perfect image rendering 
+   * Adaptive Thresholds:
+   * - Min Pixel: 1px (High-res for small elements)
+   * - Max Pixel: 4px (Capped for large elements to prevent blockiness)
+   * - High-res Font Threshold: < 14px or > 24px (For readability)
+   */
+  img[data-pixel],
+  .pixel-art {
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+  }
+
+  /* Focus outline - pixel style */
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  /* Pixel border utilities */
+  .pixel-border-sm {
+    box-shadow: 
+      -1px 0 0 0 var(--color-foreground),
+      1px 0 0 0 var(--color-foreground),
+      0 -1px 0 0 var(--color-foreground),
+      0 1px 0 0 var(--color-foreground);
+  }
+
+  .pixel-border-md {
+    box-shadow: 
+      -2px 0 0 0 var(--color-foreground),
+      2px 0 0 0 var(--color-foreground),
+      0 -2px 0 0 var(--color-foreground),
+      0 2px 0 0 var(--color-foreground);
+  }
+
+  .pixel-border-lg {
+    box-shadow: 
+      -4px 0 0 0 var(--color-foreground),
+      4px 0 0 0 var(--color-foreground),
+      0 -4px 0 0 var(--color-foreground),
+      0 4px 0 0 var(--color-foreground);
+  }
+}
+
+@layer utilities {
+  /* Typography utilities */
+  .font-pixel {
+    font-family: 'Press Start 2P', monospace;
+    line-height: 1.5;
+  }
+
+  .font-mono {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  }
+
+  /* Animation utilities */
+  .animate-pixel-blink {
+    animation: pixel-blink 0.5s steps(1) infinite;
+  }
+
+  @keyframes pixel-blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
+  }
+
+  /* Prism token colors (subtle, pixel-friendly dark theme) */
+  .pixel-codeblock .token.comment,
+  .pixel-codeblock .token.prolog,
+  .pixel-codeblock .token.doctype,
+  .pixel-codeblock .token.cdata {
+    color: #6b7280; /* gray-500 */
+  }
+
+  .pixel-codeblock .token.punctuation {
+    color: #cbd5e1; /* slate-300 */
+  }
+
+  .pixel-codeblock .token.property,
+  .pixel-codeblock .token.tag,
+  .pixel-codeblock .token.constant,
+  .pixel-codeblock .token.symbol,
+  .pixel-codeblock .token.deleted {
+    color: #eab308; /* amber-500 */
+  }
+
+  .pixel-codeblock .token.boolean,
+  .pixel-codeblock .token.number {
+    color: #a78bfa; /* violet-400 */
+  }
+
+  .pixel-codeblock .token.selector,
+  .pixel-codeblock .token.attr-name,
+  .pixel-codeblock .token.string,
+  .pixel-codeblock .token.char,
+  .pixel-codeblock .token.builtin,
+  .pixel-codeblock .token.inserted {
+    color: #7ee787; /* green */
+  }
+
+  .pixel-codeblock .token.operator,
+  .pixel-codeblock .token.entity,
+  .pixel-codeblock .token.url {
+    color: #94a3b8; /* slate-400 */
+  }
+
+  .pixel-codeblock .token.atrule,
+  .pixel-codeblock .token.keyword,
+  .pixel-codeblock .token.attr-value {
+    color: var(--color-accent);
+  }
+
+  .pixel-codeblock .token.function,
+  .pixel-codeblock .token.class-name {
+    color: #f472b6; /* pink-400 */
+  }
+
+  .pixel-codeblock .token.regex,
+  .pixel-codeblock .token.important,
+  .pixel-codeblock .token.variable {
+    color: #60a5fa; /* blue-400 */
+  }
+
+  .pixel-codeblock .token.important,
+  .pixel-codeblock .token.bold {
+    font-weight: 700;
+  }
+  .pixel-codeblock .token.italic {
+    font-style: italic;
+  }
+}

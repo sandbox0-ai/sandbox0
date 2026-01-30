@@ -17,7 +17,6 @@ import (
 	"github.com/gorilla/websocket"
 	ctxpkg "github.com/sandbox0-ai/infra/manager/procd/pkg/context"
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/process"
-	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 )
 
@@ -99,11 +98,12 @@ type SignalContextRequest struct {
 }
 
 type wsControlMessage struct {
-	Type   string `json:"type"`
-	Data   string `json:"data"`
-	Rows   uint16 `json:"rows"`
-	Cols   uint16 `json:"cols"`
-	Signal string `json:"signal"`
+	Type      string `json:"type"`
+	Data      string `json:"data"`
+	Rows      uint16 `json:"rows"`
+	Cols      uint16 `json:"cols"`
+	Signal    string `json:"signal"`
+	RequestID string `json:"request_id"`
 }
 
 type execError struct {
@@ -677,12 +677,6 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	// Read input from WebSocket
-	traceRequestID := ""
-	spanCtx := trace.SpanFromContext(r.Context()).SpanContext()
-	if spanCtx.IsValid() {
-		traceRequestID = spanCtx.TraceID().String()
-	}
-
 	for {
 		select {
 		case <-closeDone:
@@ -702,7 +696,7 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 		if err := json.Unmarshal(data, &msg); err == nil && msg.Type != "" {
 			switch msg.Type {
 			case "input":
-				setPendingRequestID(traceRequestID)
+				setPendingRequestID(msg.RequestID)
 				if ctx.MainProcess != nil && msg.Data != "" {
 					_ = ctx.MainProcess.WriteInput([]byte(msg.Data))
 				}
@@ -725,7 +719,7 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 				}
 			default:
 				if ctx.MainProcess != nil {
-					setPendingRequestID(traceRequestID)
+					setPendingRequestID(msg.RequestID)
 					_ = ctx.MainProcess.WriteInput(data)
 				}
 			}
@@ -733,7 +727,7 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if ctx.MainProcess != nil {
-			setPendingRequestID(traceRequestID)
+			setPendingRequestID(msg.RequestID)
 			_ = ctx.MainProcess.WriteInput(data)
 		}
 	}

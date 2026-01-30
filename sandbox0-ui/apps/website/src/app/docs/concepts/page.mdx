@@ -1,0 +1,208 @@
+# Core Concepts
+
+Understanding the key concepts of Sandbox0 will help you build robust AI agents and applications.
+
+## Architecture Overview
+
+Sandbox0 is built on a cloud-native architecture with these key components:
+
+- **Sandboxes** - Isolated container environments for code execution
+- **Processes** - Code execution units (Cmd or REPL)
+- **Volumes** - Persistent storage with JuiceFS
+- **Network Policies** - Fine-grained network isolation
+
+<Callout type="info">
+Sandbox0 runs on Kubernetes with custom operators for fast cold starts and efficient resource management.
+</Callout>
+
+---
+
+## Sandboxes
+
+A **sandbox** is an isolated execution environment that provides:
+
+- Dedicated file system (ephemeral + persistent volumes)
+- Process isolation
+- Network isolation with configurable policies
+- Session state management
+
+### Sandbox Lifecycle
+
+```
+┌─────────┐   create   ┌─────────┐   start   ┌─────────┐
+│  Pool   │ ─────────> │  Ready  │ ────────> │ Running │
+└─────────┘            └─────────┘           └─────────┘
+                                                   │
+                                                   │ delete
+                                                   v
+                                              ┌─────────┐
+                                              │ Stopped │
+                                              └─────────┘
+```
+
+### Templates
+
+Sandboxes are created from **templates** that define the base image and configuration:
+
+- `python:3.11` - Python 3.11 with common packages
+- `node:20` - Node.js 20 with npm/yarn
+- `go:1.21` - Go 1.21 with build tools
+- `base:ubuntu` - Clean Ubuntu base image
+
+<Callout type="success" title="100ms Cold Start">
+Sandbox0 maintains a warm pool of pre-started containers, enabling 100ms cold starts for instant agent responses.
+</Callout>
+
+---
+
+## Processes
+
+Processes are how you execute code inside a sandbox. There are two types:
+
+### 1. Command (Cmd) Processes
+
+One-time command execution with output capture:
+
+```python
+result = sandbox.exec("ls -la /workspace")
+print(result.stdout)
+print(result.exit_code)
+```
+
+**Use cases:**
+- Running scripts
+- One-time computations
+- File operations
+
+### 2. REPL Processes
+
+Interactive sessions that maintain state across executions:
+
+```python
+repl = sandbox.processes.create_repl(command="python3")
+
+repl.exec("x = 42")
+repl.exec("y = x * 2")
+result = repl.exec("print(y)")  # Output: 84
+```
+
+**Use cases:**
+- Interactive coding sessions
+- Stateful computations
+- Debugging and exploration
+
+<Callout type="info" title="Session Persistence">
+REPL sessions persist across disconnections. If your connection drops, reconnect to the same process and continue where you left off.
+</Callout>
+
+---
+
+## Volumes
+
+**Volumes** provide persistent storage backed by JuiceFS, a distributed POSIX file system.
+
+### Volume Features
+
+- **Persistent** - Data survives sandbox restarts
+- **Snapshots** - Point-in-time backups
+- **Cloning** - Fast volume duplication
+- **Sharing** - Mount volumes across sandboxes
+
+### Working with Volumes
+
+```python
+# Create a volume
+volume = client.volumes.create(name="my-data", size_gb=10)
+
+# Attach to sandbox
+sandbox = client.sandboxes.create(
+    template="python:3.11",
+    volumes=[{"volume_id": volume.id, "mount_path": "/data"}]
+)
+
+# Files written to /data persist
+sandbox.files.write("/data/state.json", json.dumps(state))
+
+# Create a snapshot
+snapshot = volume.create_snapshot(name="backup-v1")
+
+# Restore from snapshot
+new_volume = client.volumes.create_from_snapshot(snapshot.id)
+```
+
+<Callout type="warning" title="Volume Limits">
+Free tier includes 10GB of volume storage. Upgrade to Pro for unlimited storage and faster I/O.
+</Callout>
+
+---
+
+## Network Isolation
+
+Sandbox0 provides granular network controls to prevent unauthorized access:
+
+### Network Policies
+
+- **IP/CIDR filtering** - Allow/deny specific IP ranges
+- **Domain filtering** - Control access by hostname
+- **DNS protection** - Prevent DNS spoofing attacks
+
+### Configuration Example
+
+```python
+sandbox = client.sandboxes.create(
+    template="python:3.11",
+    network_policy={
+        "allow_internet": True,
+        "allowed_domains": [
+            "api.openai.com",
+            "*.googleapis.com"
+        ],
+        "blocked_ips": ["10.0.0.0/8"]
+    }
+)
+```
+
+<Callout type="danger" title="Security Best Practice">
+Always use restrictive network policies for untrusted code execution. Start with deny-all and explicitly allow required services.
+</Callout>
+
+---
+
+## Authentication
+
+Sandbox0 uses **API keys** for authentication. Keys are scoped to your account and can be:
+
+- Created and revoked via dashboard
+- Scoped to specific sandboxes or templates
+- Rate-limited per tier
+
+See [Authentication](/docs/authentication) for detailed setup.
+
+---
+
+## Rate Limits
+
+<div className="space-y-3">
+  <div className="flex items-center gap-3">
+    <Badge variant="default">Free</Badge>
+    <span className="text-sm text-muted">100 sandboxes/day, 1,000 API calls/hour</span>
+  </div>
+  
+  <div className="flex items-center gap-3">
+    <Badge variant="accent">Pro</Badge>
+    <span className="text-sm text-muted">Unlimited sandboxes, 10,000 API calls/hour</span>
+  </div>
+  
+  <div className="flex items-center gap-3">
+    <Badge variant="success">Enterprise</Badge>
+    <span className="text-sm text-muted">Custom limits, private deployment available</span>
+  </div>
+</div>
+
+---
+
+## Next Steps
+
+- **[Quick Start](/docs/quickstart)** - Build your first sandbox
+- **[SDK Documentation](/docs/sdks/python)** - Explore SDK features
+- **[API Reference](/docs/api)** - Complete API documentation

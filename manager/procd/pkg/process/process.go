@@ -51,14 +51,15 @@ type PTYSize struct {
 
 // ProcessConfig holds configuration for creating a process.
 type ProcessConfig struct {
-	Type     ProcessType       `json:"type"`
-	Language string            `json:"language"` // For REPL: python, node, bash, zsh, ruby, lua, php, r, perl, etc.
-	Code     string            `json:"code"`     // For REPL: code to execute
-	Command  []string          `json:"command"`  // For CMD: command path and arguments, e.g., ["/bin/ls", "-la"]
-	CWD      string            `json:"cwd"`
-	EnvVars  map[string]string `json:"env_vars"`
-	PTYSize  *PTYSize          `json:"pty_size"`
-	Term     string            `json:"term"`
+	Type       ProcessType       `json:"type"`
+	Language   string            `json:"language"` // For REPL: python, node, bash, zsh, ruby, lua, php, r, perl, etc.
+	Code       string            `json:"code"`     // For REPL: code to execute
+	Command    []string          `json:"command"`  // For CMD: command path and arguments, e.g., ["/bin/ls", "-la"]
+	CWD        string            `json:"cwd"`
+	EnvVars    map[string]string `json:"env_vars"`
+	PTYSize    *PTYSize          `json:"pty_size"`
+	Term       string            `json:"term"`
+	BufferSize int               `json:"buffer_size"` // Number of messages to buffer for the output multiplexer, default is 64 if not set
 }
 
 // ProcessOutput represents output from a process.
@@ -186,18 +187,35 @@ type BaseProcess struct {
 	startHandlers []StartHandler
 
 	mu sync.RWMutex
+
+	inputQueue      chan []byte
+	inputReady      chan struct{}
+	inputStop       chan struct{}
+	inputReadyOnce  sync.Once
+	inputWriterOnce sync.Once
+	inputStopOnce   sync.Once
 }
 
 // NewBaseProcess creates a new base process.
 func NewBaseProcess(id string, processType ProcessType, config ProcessConfig) *BaseProcess {
-	return &BaseProcess{
+	if config.BufferSize == 0 {
+		config.BufferSize = 64
+	}
+	bp := &BaseProcess{
 		id:              id,
 		processType:     processType,
 		config:          config,
 		state:           ProcessStateCreated,
-		outputMultiplex: NewMultiplexedChannel[ProcessOutput](64),
+		outputMultiplex: NewMultiplexedChannel[ProcessOutput](config.BufferSize),
 		cpuTracker:      newCPUTracker(),
+		inputQueue:      make(chan []byte, config.BufferSize),
+		inputReady:      make(chan struct{}),
+		inputStop:       make(chan struct{}),
 	}
+	if processType != ProcessTypeREPL {
+		close(bp.inputReady)
+	}
+	return bp
 }
 
 // AddExitHandler appends an exit handler to the handler chain.
@@ -376,14 +394,28 @@ func (bp *BaseProcess) ReadOutput() <-chan ProcessOutput {
 func (bp *BaseProcess) WriteInput(data []byte) error {
 	bp.mu.RLock()
 	pty := bp.pty
+	state := bp.state
 	bp.mu.RUnlock()
 
 	if pty == nil {
 		return ErrProcessNotRunning
 	}
+	if state == ProcessStateStopped || state == ProcessStateKilled || state == ProcessStateCrashed {
+		return ErrProcessNotRunning
+	}
+	if len(data) == 0 {
+		return nil
+	}
 
-	_, err := pty.Write(data)
-	return err
+	payload := make([]byte, len(data))
+	copy(payload, data)
+
+	select {
+	case bp.inputQueue <- payload:
+		return nil
+	default:
+		return ErrInputBufferFull
+	}
 }
 
 // ResizePTY resizes the attached PTY, if present.
@@ -435,6 +467,42 @@ func (bp *BaseProcess) SetPTY(pty *os.File) {
 	bp.mu.Lock()
 	defer bp.mu.Unlock()
 	bp.pty = pty
+	bp.startInputWriter(pty)
+}
+
+func (bp *BaseProcess) signalInputReady() {
+	bp.inputReadyOnce.Do(func() {
+		close(bp.inputReady)
+	})
+}
+
+func (bp *BaseProcess) stopInputWriter() {
+	bp.inputStopOnce.Do(func() {
+		close(bp.inputStop)
+	})
+}
+
+func (bp *BaseProcess) startInputWriter(pty *os.File) {
+	bp.inputWriterOnce.Do(func() {
+		go func() {
+			select {
+			case <-bp.inputReady:
+			case <-bp.inputStop:
+				return
+			}
+			for {
+				select {
+				case <-bp.inputStop:
+					return
+				case data := <-bp.inputQueue:
+					if len(data) == 0 {
+						continue
+					}
+					_, _ = pty.Write(data)
+				}
+			}
+		}()
+	})
 }
 
 // SetPID sets the system process ID.

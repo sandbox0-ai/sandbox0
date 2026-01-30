@@ -85,6 +85,8 @@ func (r *PTYRunner) Stop() error {
 		r.onStop()
 	}
 
+	r.base.stopInputWriter()
+
 	if r.cmd != nil && r.cmd.Process != nil {
 		if err := r.cmd.Process.Signal(syscall.SIGTERM); err != nil {
 			_ = r.cmd.Process.Kill()
@@ -119,6 +121,7 @@ func (r *PTYRunner) readOutput(ptmx *os.File) {
 				})
 			}
 			if promptDetected {
+				r.base.signalInputReady()
 				r.base.PublishOutput(ProcessOutput{
 					Source: OutputSourcePrompt,
 				})
@@ -175,5 +178,6 @@ func (r *PTYRunner) monitorProcess() {
 		Config:      r.base.GetConfig(),
 	})
 
+	r.base.stopInputWriter()
 	r.base.CloseOutput()
 }

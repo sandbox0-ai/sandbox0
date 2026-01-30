@@ -53,4 +53,7 @@ var (
 
 	// ErrInvalidPTYSize is returned when PTY size is invalid.
 	ErrInvalidPTYSize = errors.New("invalid pty size")
+
+	// ErrInputBufferFull is returned when the input queue is full.
+	ErrInputBufferFull = errors.New("input buffer full")
 )

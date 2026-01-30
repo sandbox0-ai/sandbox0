@@ -16,6 +16,9 @@ type MultiplexedChannel[T any] struct {
 
 // NewMultiplexedChannel creates a new multiplexed channel.
 func NewMultiplexedChannel[T any](bufferSize int) *MultiplexedChannel[T] {
+	if bufferSize == 0 {
+		bufferSize = 64
+	}
 	mc := &MultiplexedChannel[T]{
 		Source:      make(chan T, bufferSize),
 		subscribers: make([]chan T, 0),

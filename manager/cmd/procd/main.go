@@ -139,6 +139,7 @@ func main() {
 	if err != nil {
 		logger.Fatal("Failed to create file manager", zap.Error(err))
 	}
+	volumeManager.SetEventSink(fileManager)
 
 	// Initialize internal auth validator
 	publicKey, err := internalauth.LoadEd25519PublicKeyFromFile(internalauth.DefaultInternalJWTPublicKeyPath)

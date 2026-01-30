@@ -136,6 +136,14 @@ type StorageProxyConfig struct {
 	// +kubebuilder:default=1073741824
 	MaxBytesPerSecond int64 `yaml:"max_bytes_per_second" json:"maxBytesPerSecond"`
 
+	// Watch events
+	// +optional
+	// +kubebuilder:default=true
+	WatchEventsEnabled bool `yaml:"watch_events_enabled" json:"watchEventsEnabled"`
+	// +optional
+	// +kubebuilder:default=256
+	WatchEventQueueSize int `yaml:"watch_event_queue_size" json:"watchEventQueueSize"`
+
 	// Kubernetes
 	// +optional
 	KubeconfigPath string `yaml:"kubeconfig_path" json:"kubeconfigPath"` // Path to kubeconfig file (empty for in-cluster config)

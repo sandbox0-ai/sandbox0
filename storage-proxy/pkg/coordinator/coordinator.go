@@ -21,12 +21,15 @@ import (
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/metrics"
 	"github.com/sirupsen/logrus"
+
+	pb "github.com/sandbox0-ai/infra/storage-proxy/proto/fs"
 )
 
 const (
 	// PostgreSQL NOTIFY channels
 	ChannelFlushRequest  = "snapshot_flush_request"
 	ChannelFlushResponse = "snapshot_flush_response"
+	ChannelWatchEvent    = "volume_watch_event"
 
 	// Heartbeat settings
 	HeartbeatInterval = 5 * time.Second
@@ -86,6 +89,9 @@ type Coordinator struct {
 	// Mounted volumes on this instance
 	mountedVolumes map[string]struct{}
 
+	// Event hub for watch events
+	eventHub EventHub
+
 	// Channels
 	stopCh   chan struct{}
 	doneCh   chan struct{}
@@ -94,11 +100,17 @@ type Coordinator struct {
 	stopping bool
 }
 
+// EventHub receives watch events for local subscribers.
+type EventHub interface {
+	Publish(event *pb.WatchEvent)
+}
+
 // NewCoordinator creates a new coordinator
 func NewCoordinator(
 	pool *pgxpool.Pool,
 	repo db.CoordinatorRepository,
 	volMgr VolumeProvider,
+	eventHub EventHub,
 	cfg *config.StorageProxyConfig,
 	logger *logrus.Logger,
 ) *Coordinator {
@@ -106,6 +118,7 @@ func NewCoordinator(
 		pool:           pool,
 		repo:           repo,
 		volMgr:         volMgr,
+		eventHub:       eventHub,
 		config:         cfg,
 		logger:         logger,
 		clusterID:      cfg.DefaultClusterId,
@@ -151,6 +164,13 @@ func (c *Coordinator) Start(ctx context.Context) error {
 	if err != nil {
 		c.listenConn.Release()
 		return fmt.Errorf("LISTEN %s: %w", ChannelFlushResponse, err)
+	}
+
+	// Subscribe to watch event channel
+	_, err = c.listenConn.Exec(ctx, fmt.Sprintf("LISTEN %s", ChannelWatchEvent))
+	if err != nil {
+		c.listenConn.Release()
+		return fmt.Errorf("LISTEN %s: %w", ChannelWatchEvent, err)
 	}
 
 	// Start background goroutines
@@ -486,6 +506,21 @@ func (c *Coordinator) runNotificationListener(ctx context.Context) {
 			// Response notifications are handled by polling in waitForFlushCompletion
 			// This is just for logging/debugging
 			c.logger.WithField("payload", notification.Payload).Debug("Received flush response notification")
+		case ChannelWatchEvent:
+			var event pb.WatchEvent
+			if err := json.Unmarshal([]byte(notification.Payload), &event); err != nil {
+				c.logger.WithError(err).Warn("Failed to parse watch event")
+				continue
+			}
+			if event.OriginInstance == c.GetInstanceID() {
+				continue
+			}
+			if !c.IsVolumeMounted(event.VolumeId) {
+				continue
+			}
+			if c.eventHub != nil {
+				c.eventHub.Publish(&event)
+			}
 		}
 	}
 }
@@ -670,4 +705,34 @@ func (c *Coordinator) runCleanup(ctx context.Context) {
 // GetInstanceID returns the unique identifier for this instance
 func (c *Coordinator) GetInstanceID() string {
 	return fmt.Sprintf("%s/%s", c.clusterID, c.podID)
+}
+
+// Publish broadcasts a watch event locally and across replicas.
+func (c *Coordinator) Publish(ctx context.Context, event *pb.WatchEvent) {
+	if c == nil || event == nil {
+		return
+	}
+	clone := &pb.WatchEvent{
+		VolumeId:        event.VolumeId,
+		EventType:       event.EventType,
+		Path:            event.Path,
+		OldPath:         event.OldPath,
+		Inode:           event.Inode,
+		TimestampUnix:   event.TimestampUnix,
+		OriginInstance:  event.OriginInstance,
+		OriginSandboxId: event.OriginSandboxId,
+	}
+	if clone.OriginInstance == "" {
+		clone.OriginInstance = c.GetInstanceID()
+	}
+	if clone.TimestampUnix == 0 {
+		clone.TimestampUnix = time.Now().Unix()
+	}
+	if c.eventHub != nil {
+		c.eventHub.Publish(clone)
+	}
+	payload, _ := json.Marshal(clone)
+	if _, err := c.pool.Exec(ctx, fmt.Sprintf("SELECT pg_notify('%s', $1)", ChannelWatchEvent), string(payload)); err != nil {
+		c.logger.WithError(err).Warn("Failed to send watch event notification")
+	}
 }

@@ -68,6 +68,7 @@ type MountStatus struct {
 type MountContext struct {
 	SandboxVolumeID string
 	MountPoint      string
+	SandboxID       string
 
 	// gRPC connection and client
 	GrpcConn   any // *grpc.ClientConn
@@ -75,6 +76,9 @@ type MountContext struct {
 
 	// FUSE server
 	FuseServer any // *fuse.Server
+
+	// Remote watch cancellation
+	WatchCancel func()
 
 	MountedAt time.Time
 

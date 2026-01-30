@@ -46,6 +46,9 @@ service FileSystem {
   // Volume management
   rpc MountVolume(MountVolumeRequest) returns (MountVolumeResponse);
   rpc UnmountVolume(UnmountVolumeRequest) returns (Empty);
+
+  // Volume event watch
+  rpc WatchVolumeEvents(WatchRequest) returns (stream WatchEvent);
 }
 
 // Read request
@@ -239,6 +242,38 @@ message MountVolumeResponse {
 
 message UnmountVolumeRequest {
   string volume_id = 1;
+}
+
+// Watch request for volume events.
+message WatchRequest {
+  string volume_id = 1;
+  string path_prefix = 2;   // Only events under this path (optional)
+  bool recursive = 3;       // Include subdirectories
+  bool include_self = 4;    // Include events originating from same sandbox
+  string sandbox_id = 5;    // Sandbox identifier for self-filtering
+}
+
+// Volume event type.
+enum WatchEventType {
+  WATCH_EVENT_TYPE_UNSPECIFIED = 0;
+  WATCH_EVENT_TYPE_CREATE = 1;
+  WATCH_EVENT_TYPE_WRITE = 2;
+  WATCH_EVENT_TYPE_REMOVE = 3;
+  WATCH_EVENT_TYPE_RENAME = 4;
+  WATCH_EVENT_TYPE_CHMOD = 5;
+  WATCH_EVENT_TYPE_INVALIDATE = 6; // Use when path cannot be resolved
+}
+
+// Watch event for volume changes.
+message WatchEvent {
+  string volume_id = 1;
+  WatchEventType event_type = 2;
+  string path = 3;
+  string old_path = 4;
+  uint64 inode = 5;
+  int64 timestamp_unix = 6;
+  string origin_instance = 7;
+  string origin_sandbox_id = 8;
 }
 
 // Filesystem statistics

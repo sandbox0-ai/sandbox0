@@ -240,6 +240,11 @@ func (m *Manager) UnwatchDir(watchID string) error {
 	return m.watcherMgr.UnwatchDir(watchID)
 }
 
+// Emit broadcasts an external event to watchers.
+func (m *Manager) Emit(event WatchEvent) {
+	m.watcherMgr.Emit(event)
+}
+
 // GetRootPath returns the root path.
 func (m *Manager) GetRootPath() string {
 	return m.rootPath

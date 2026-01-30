@@ -2,19 +2,26 @@ package volume
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"net"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/sandbox0-ai/infra/manager/procd/pkg/file"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	pb "github.com/sandbox0-ai/infra/storage-proxy/proto/fs"
 )
@@ -32,6 +39,7 @@ type Manager struct {
 	config        *Config
 	logger        *zap.Logger
 	tokenProvider TokenProvider
+	eventSink     EventSink
 }
 
 // NewManager creates a new SandboxVolume manager.
@@ -42,6 +50,18 @@ func NewManager(config *Config, tokenProvider TokenProvider, logger *zap.Logger)
 		tokenProvider: tokenProvider,
 		logger:        logger,
 	}
+}
+
+// EventSink receives translated watch events for mounted volumes.
+type EventSink interface {
+	Emit(event file.WatchEvent)
+}
+
+// SetEventSink sets the event sink for watch events.
+func (m *Manager) SetEventSink(sink EventSink) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.eventSink = sink
 }
 
 // Mount mounts a SandboxVolume.
@@ -144,6 +164,7 @@ func (m *Manager) Mount(ctx context.Context, req *MountRequest) (*MountResponse,
 	mountCtx := &MountContext{
 		SandboxVolumeID: req.SandboxVolumeID,
 		MountPoint:      req.MountPoint,
+		SandboxID:       req.SandboxID,
 		GrpcConn:        conn,
 		GrpcClient:      client,
 		FuseServer:      fuseServer,
@@ -156,6 +177,8 @@ func (m *Manager) Mount(ctx context.Context, req *MountRequest) (*MountResponse,
 		zap.String("sandboxvolume_id", req.SandboxVolumeID),
 		zap.String("mount_point", req.MountPoint),
 	)
+
+	m.startRemoteWatch(mountCtx)
 
 	return &MountResponse{
 		SandboxVolumeID: req.SandboxVolumeID,
@@ -203,6 +226,10 @@ func (m *Manager) Unmount(ctx context.Context, sandboxvolumeID string) error {
 				zap.String("sandboxvolume_id", sandboxvolumeID),
 			)
 		}
+	}
+
+	if mountCtx.WatchCancel != nil {
+		mountCtx.WatchCancel()
 	}
 
 	// Close gRPC connection
@@ -292,6 +319,10 @@ func (m *Manager) Cleanup() {
 			}
 		}
 
+		if mountCtx.WatchCancel != nil {
+			mountCtx.WatchCancel()
+		}
+
 		delete(m.mounts, id)
 	}
 
@@ -348,6 +379,94 @@ func (m *Manager) createGRPCConnection(ctx context.Context, proxyAddr string) (*
 	}
 
 	return conn, nil
+}
+
+func (m *Manager) startRemoteWatch(mountCtx *MountContext) {
+	m.mu.RLock()
+	sink := m.eventSink
+	m.mu.RUnlock()
+	if sink == nil || mountCtx == nil || mountCtx.GrpcClient == nil {
+		return
+	}
+	client, ok := mountCtx.GrpcClient.(pb.FileSystemClient)
+	if !ok {
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	mountCtx.WatchCancel = cancel
+
+	req := &pb.WatchRequest{
+		VolumeId:    mountCtx.SandboxVolumeID,
+		PathPrefix:  "/",
+		Recursive:   true,
+		IncludeSelf: true,
+		SandboxId:   mountCtx.SandboxID,
+	}
+
+	go func() {
+		stream, err := client.WatchVolumeEvents(ctx, req)
+		if err != nil {
+			m.logger.Warn("Failed to start watch stream",
+				zap.String("sandboxvolume_id", mountCtx.SandboxVolumeID),
+				zap.Error(err),
+			)
+			return
+		}
+
+		for {
+			event, err := stream.Recv()
+			if err != nil {
+				if err == io.EOF || status.Code(err) == codes.Canceled || errors.Is(err, context.Canceled) {
+					return
+				}
+				m.logger.Warn("Watch stream error",
+					zap.String("sandboxvolume_id", mountCtx.SandboxVolumeID),
+					zap.Error(err),
+				)
+				return
+			}
+			sink.Emit(translateWatchEvent(mountCtx, event))
+		}
+	}()
+}
+
+func translateWatchEvent(mountCtx *MountContext, event *pb.WatchEvent) file.WatchEvent {
+	return file.WatchEvent{
+		Type:    mapWatchEventType(event.GetEventType()),
+		Path:    mapWatchEventPath(mountCtx.MountPoint, event.GetPath()),
+		OldPath: mapWatchEventPath(mountCtx.MountPoint, event.GetOldPath()),
+	}
+}
+
+func mapWatchEventType(eventType pb.WatchEventType) file.EventType {
+	switch eventType {
+	case pb.WatchEventType_WATCH_EVENT_TYPE_CREATE:
+		return file.EventCreate
+	case pb.WatchEventType_WATCH_EVENT_TYPE_WRITE:
+		return file.EventWrite
+	case pb.WatchEventType_WATCH_EVENT_TYPE_REMOVE:
+		return file.EventRemove
+	case pb.WatchEventType_WATCH_EVENT_TYPE_RENAME:
+		return file.EventRename
+	case pb.WatchEventType_WATCH_EVENT_TYPE_CHMOD:
+		return file.EventChmod
+	case pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE:
+		return file.EventInvalidate
+	default:
+		return file.EventInvalidate
+	}
+}
+
+func mapWatchEventPath(mountPoint, eventPath string) string {
+	if mountPoint == "" {
+		return eventPath
+	}
+	if eventPath == "" || eventPath == "/" {
+		return mountPoint
+	}
+	trimmed := strings.TrimPrefix(eventPath, "/")
+	return filepath.Join(mountPoint, trimmed)
 }
 
 // authInterceptor returns a unary interceptor that adds auth token to requests.

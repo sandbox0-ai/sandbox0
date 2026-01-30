@@ -24,6 +24,7 @@ import (
 	grpcserver "github.com/sandbox0-ai/infra/storage-proxy/pkg/grpc"
 	httpserver "github.com/sandbox0-ai/infra/storage-proxy/pkg/http"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/juicefs"
+	"github.com/sandbox0-ai/infra/storage-proxy/pkg/notify"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/snapshot"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/volume"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/watcher"
@@ -119,12 +120,20 @@ func main() {
 	// Create volume manager
 	volMgr := volume.NewManager(logrusLogger, cfg)
 
+	// Create watch event hub
+	var eventHub *notify.Hub
+	var eventBroadcaster notify.Broadcaster
+	if cfg.WatchEventsEnabled {
+		eventHub = notify.NewHub(logrusLogger, cfg.WatchEventQueueSize)
+		eventBroadcaster = notify.NewLocalBroadcaster(eventHub)
+	}
+
 	// Create and start coordinator for distributed flush coordination
 	var coord *coordinator.Coordinator
 	if pool != nil && repo != nil {
 		// Create volume provider adapter for coordinator
 		volProvider := &volumeProviderAdapter{volMgr: volMgr}
-		coord = coordinator.NewCoordinator(pool, repo, volProvider, cfg, logrusLogger)
+		coord = coordinator.NewCoordinator(pool, repo, volProvider, eventHub, cfg, logrusLogger)
 
 		// Set coordinator as mount registrar for volume manager
 		volMgr.SetMountRegistrar(coord)
@@ -138,6 +147,10 @@ func main() {
 		zapLogger.Info("Distributed flush coordinator started",
 			zap.String("instance_id", coord.GetInstanceID()),
 		)
+
+		if eventHub != nil {
+			eventBroadcaster = coord
+		}
 	}
 
 	// Create Kubernetes client for pod watching
@@ -210,7 +223,7 @@ func main() {
 	)
 
 	// Register FileSystem service
-	fsServer := grpcserver.NewFileSystemServer(volMgr, logrusLogger)
+	fsServer := grpcserver.NewFileSystemServer(volMgr, eventHub, eventBroadcaster, logrusLogger)
 	pb.RegisterFileSystemServer(grpcServer, fsServer)
 
 	// Register health service

@@ -9,6 +9,7 @@ import (
 	"github.com/juicedata/juicefs/pkg/vfs"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	"github.com/sandbox0-ai/infra/pkg/naming"
+	"github.com/sandbox0-ai/infra/storage-proxy/pkg/notify"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/infra/storage-proxy/proto/fs"
 	"github.com/sirupsen/logrus"
@@ -20,15 +21,22 @@ import (
 type FileSystemServer struct {
 	pb.UnimplementedFileSystemServer
 
-	volMgr *volume.Manager
-	logger *logrus.Logger
+	volMgr           *volume.Manager
+	eventHub         *notify.Hub
+	eventBroadcaster notify.Broadcaster
+	logger           *logrus.Logger
 }
 
 // NewFileSystemServer creates a new file system server
-func NewFileSystemServer(volMgr *volume.Manager, logger *logrus.Logger) *FileSystemServer {
+func NewFileSystemServer(volMgr *volume.Manager, eventHub *notify.Hub, eventBroadcaster notify.Broadcaster, logger *logrus.Logger) *FileSystemServer {
+	if eventBroadcaster == nil && eventHub != nil {
+		eventBroadcaster = notify.NewLocalBroadcaster(eventHub)
+	}
 	return &FileSystemServer{
-		volMgr: volMgr,
-		logger: logger,
+		volMgr:           volMgr,
+		eventHub:         eventHub,
+		eventBroadcaster: eventBroadcaster,
+		logger:           logger,
 	}
 }
 
@@ -82,6 +90,40 @@ func (s *FileSystemServer) UnmountVolume(ctx context.Context, req *pb.UnmountVol
 	}
 
 	return &pb.Empty{}, nil
+}
+
+// WatchVolumeEvents streams volume change events to clients.
+func (s *FileSystemServer) WatchVolumeEvents(req *pb.WatchRequest, stream pb.FileSystem_WatchVolumeEventsServer) error {
+	if s.eventHub == nil {
+		return status.Error(codes.FailedPrecondition, "watch events disabled")
+	}
+	if req == nil || req.VolumeId == "" {
+		return status.Error(codes.InvalidArgument, "volume_id is required")
+	}
+
+	_, ch, cancel := s.eventHub.Subscribe(req)
+	defer cancel()
+
+	for {
+		select {
+		case <-stream.Context().Done():
+			return stream.Context().Err()
+		case event, ok := <-ch:
+			if !ok {
+				return nil
+			}
+			if err := stream.Send(event); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func (s *FileSystemServer) publishEvent(ctx context.Context, event *pb.WatchEvent) {
+	if s.eventBroadcaster == nil || event == nil {
+		return
+	}
+	s.eventBroadcaster.Publish(ctx, event)
 }
 
 // GetAttr implements FUSE getattr
@@ -236,6 +278,18 @@ func (s *FileSystemServer) Write(ctx context.Context, req *pb.WriteRequest) (*pb
 		return nil, status.Error(codes.Internal, syscall.Errno(errno).Error())
 	}
 
+	path := resolveInodePath(volCtx, req.Inode)
+	eventType := pb.WatchEventType_WATCH_EVENT_TYPE_WRITE
+	if path == "" {
+		eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
+	}
+	s.publishEvent(ctx, &pb.WatchEvent{
+		VolumeId:  req.VolumeId,
+		EventType: eventType,
+		Path:      path,
+		Inode:     req.Inode,
+	})
+
 	return &pb.WriteResponse{
 		BytesWritten: int64(len(req.Data)),
 	}, nil
@@ -266,6 +320,18 @@ func (s *FileSystemServer) Create(ctx context.Context, req *pb.CreateRequest) (*
 		return nil, status.Error(codes.Internal, syscall.Errno(errno).Error())
 	}
 
+	path := resolveChildPath(volCtx, req.Parent, req.Name)
+	eventType := pb.WatchEventType_WATCH_EVENT_TYPE_CREATE
+	if path == "" {
+		eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
+	}
+	s.publishEvent(ctx, &pb.WatchEvent{
+		VolumeId:  req.VolumeId,
+		EventType: eventType,
+		Path:      path,
+		Inode:     uint64(entry.Inode),
+	})
+
 	return &pb.NodeResponse{
 		Inode:      uint64(entry.Inode),
 		Generation: 0,
@@ -293,6 +359,18 @@ func (s *FileSystemServer) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb
 		return nil, status.Error(codes.Internal, syscall.Errno(st).Error())
 	}
 
+	path := resolveChildPath(volCtx, req.Parent, req.Name)
+	eventType := pb.WatchEventType_WATCH_EVENT_TYPE_CREATE
+	if path == "" {
+		eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
+	}
+	s.publishEvent(ctx, &pb.WatchEvent{
+		VolumeId:  req.VolumeId,
+		EventType: eventType,
+		Path:      path,
+		Inode:     uint64(inode),
+	})
+
 	return &pb.NodeResponse{
 		Inode:      uint64(inode),
 		Generation: 0,
@@ -315,6 +393,17 @@ func (s *FileSystemServer) Unlink(ctx context.Context, req *pb.UnlinkRequest) (*
 	if st != 0 {
 		return nil, status.Error(codes.Internal, syscall.Errno(st).Error())
 	}
+
+	path := resolveChildPath(volCtx, req.Parent, req.Name)
+	eventType := pb.WatchEventType_WATCH_EVENT_TYPE_REMOVE
+	if path == "" {
+		eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
+	}
+	s.publishEvent(ctx, &pb.WatchEvent{
+		VolumeId:  req.VolumeId,
+		EventType: eventType,
+		Path:      path,
+	})
 
 	return &pb.Empty{}, nil
 }
@@ -374,6 +463,20 @@ func (s *FileSystemServer) Rename(ctx context.Context, req *pb.RenameRequest) (*
 		return nil, status.Error(codes.Internal, syscall.Errno(st).Error())
 	}
 
+	oldPath := resolveChildPath(volCtx, req.OldParent, req.OldName)
+	newPath := resolveChildPath(volCtx, req.NewParent, req.NewName)
+	eventType := pb.WatchEventType_WATCH_EVENT_TYPE_RENAME
+	if oldPath == "" && newPath == "" {
+		eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
+	}
+	s.publishEvent(ctx, &pb.WatchEvent{
+		VolumeId:  req.VolumeId,
+		EventType: eventType,
+		Path:      newPath,
+		OldPath:   oldPath,
+		Inode:     uint64(inode),
+	})
+
 	return &pb.Empty{}, nil
 }
 
@@ -394,6 +497,23 @@ func (s *FileSystemServer) SetAttr(ctx context.Context, req *pb.SetAttrRequest) 
 	if st != 0 {
 		return nil, status.Error(codes.Internal, syscall.Errno(st).Error())
 	}
+
+	path := resolveInodePath(volCtx, req.Inode)
+	eventType := pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
+	if req.Valid&uint32(meta.SetAttrMode) != 0 {
+		eventType = pb.WatchEventType_WATCH_EVENT_TYPE_CHMOD
+	} else if path != "" {
+		eventType = pb.WatchEventType_WATCH_EVENT_TYPE_WRITE
+	}
+	if path == "" {
+		eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
+	}
+	s.publishEvent(ctx, &pb.WatchEvent{
+		VolumeId:  req.VolumeId,
+		EventType: eventType,
+		Path:      path,
+		Inode:     req.Inode,
+	})
 
 	return &pb.SetAttrResponse{
 		Attr: convertAttr(&attr),
@@ -449,6 +569,17 @@ func (s *FileSystemServer) Rmdir(ctx context.Context, req *pb.RmdirRequest) (*pb
 		}
 		return nil, status.Error(codes.Internal, syscall.Errno(st).Error())
 	}
+
+	path := resolveChildPath(volCtx, req.Parent, req.Name)
+	eventType := pb.WatchEventType_WATCH_EVENT_TYPE_REMOVE
+	if path == "" {
+		eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
+	}
+	s.publishEvent(ctx, &pb.WatchEvent{
+		VolumeId:  req.VolumeId,
+		EventType: eventType,
+		Path:      path,
+	})
 
 	return &pb.Empty{}, nil
 }
@@ -506,6 +637,18 @@ func (s *FileSystemServer) Symlink(ctx context.Context, req *pb.SymlinkRequest) 
 		return nil, status.Error(codes.Internal, syscall.Errno(st).Error())
 	}
 
+	path := resolveChildPath(volCtx, req.Parent, req.Name)
+	eventType := pb.WatchEventType_WATCH_EVENT_TYPE_CREATE
+	if path == "" {
+		eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
+	}
+	s.publishEvent(ctx, &pb.WatchEvent{
+		VolumeId:  req.VolumeId,
+		EventType: eventType,
+		Path:      path,
+		Inode:     uint64(inode),
+	})
+
 	return &pb.NodeResponse{
 		Inode:      uint64(inode),
 		Generation: 0,
@@ -552,6 +695,18 @@ func (s *FileSystemServer) Link(ctx context.Context, req *pb.LinkRequest) (*pb.N
 	if st != 0 {
 		return nil, status.Error(codes.Internal, syscall.Errno(st).Error())
 	}
+
+	path := resolveChildPath(volCtx, req.NewParent, req.NewName)
+	eventType := pb.WatchEventType_WATCH_EVENT_TYPE_CREATE
+	if path == "" {
+		eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
+	}
+	s.publishEvent(ctx, &pb.WatchEvent{
+		VolumeId:  req.VolumeId,
+		EventType: eventType,
+		Path:      path,
+		Inode:     req.Inode,
+	})
 
 	return &pb.NodeResponse{
 		Inode:      uint64(inode),
@@ -633,6 +788,18 @@ func (s *FileSystemServer) Fallocate(ctx context.Context, req *pb.FallocateReque
 		"length":    req.Length,
 	}).Debug("Fallocate succeeded")
 
+	path := resolveInodePath(volCtx, req.Inode)
+	eventType := pb.WatchEventType_WATCH_EVENT_TYPE_WRITE
+	if path == "" {
+		eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
+	}
+	s.publishEvent(ctx, &pb.WatchEvent{
+		VolumeId:  req.VolumeId,
+		EventType: eventType,
+		Path:      path,
+		Inode:     req.Inode,
+	})
+
 	return &pb.Empty{}, nil
 }
 
@@ -688,6 +855,18 @@ func (s *FileSystemServer) SetXattr(ctx context.Context, req *pb.SetXattrRequest
 		return nil, status.Error(codes.Internal, syscall.Errno(st).Error())
 	}
 
+	path := resolveInodePath(volCtx, req.Inode)
+	eventType := pb.WatchEventType_WATCH_EVENT_TYPE_CHMOD
+	if path == "" {
+		eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
+	}
+	s.publishEvent(ctx, &pb.WatchEvent{
+		VolumeId:  req.VolumeId,
+		EventType: eventType,
+		Path:      path,
+		Inode:     req.Inode,
+	})
+
 	return &pb.Empty{}, nil
 }
 
@@ -737,7 +916,45 @@ func (s *FileSystemServer) RemoveXattr(ctx context.Context, req *pb.RemoveXattrR
 		return nil, status.Error(codes.Internal, syscall.Errno(st).Error())
 	}
 
+	path := resolveInodePath(volCtx, req.Inode)
+	eventType := pb.WatchEventType_WATCH_EVENT_TYPE_CHMOD
+	if path == "" {
+		eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
+	}
+	s.publishEvent(ctx, &pb.WatchEvent{
+		VolumeId:  req.VolumeId,
+		EventType: eventType,
+		Path:      path,
+		Inode:     req.Inode,
+	})
+
 	return &pb.Empty{}, nil
+}
+
+func resolveInodePath(volCtx *volume.VolumeContext, inode uint64) string {
+	if volCtx == nil {
+		return ""
+	}
+	paths := volCtx.Meta.GetPaths(meta.Background(), meta.Ino(inode))
+	if len(paths) == 0 {
+		return ""
+	}
+	return paths[0]
+}
+
+func resolveChildPath(volCtx *volume.VolumeContext, parent uint64, name string) string {
+	if volCtx == nil {
+		return ""
+	}
+	parentPaths := volCtx.Meta.GetPaths(meta.Background(), meta.Ino(parent))
+	if len(parentPaths) == 0 {
+		return ""
+	}
+	parentPath := parentPaths[0]
+	if parentPath == "/" {
+		return "/" + name
+	}
+	return parentPath + "/" + name
 }
 
 // Helper: convert meta.Attr to protobuf GetAttrResponse

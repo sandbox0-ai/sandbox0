@@ -15,11 +15,12 @@ import (
 type EventType string
 
 const (
-	EventCreate EventType = "create"
-	EventWrite  EventType = "write"
-	EventRemove EventType = "remove"
-	EventRename EventType = "rename"
-	EventChmod  EventType = "chmod"
+	EventCreate     EventType = "create"
+	EventWrite      EventType = "write"
+	EventRemove     EventType = "remove"
+	EventRename     EventType = "rename"
+	EventChmod      EventType = "chmod"
+	EventInvalidate EventType = "invalidate"
 )
 
 // WatchEvent represents a file system event.
@@ -201,6 +202,24 @@ func (wm *WatcherManager) UnwatchDir(watchID string) error {
 	delete(wm.watchers, watchID)
 
 	return nil
+}
+
+// Emit broadcasts an external event to matching watchers.
+func (wm *WatcherManager) Emit(event WatchEvent) {
+	wm.mu.RLock()
+	defer wm.mu.RUnlock()
+
+	for _, watcher := range wm.watchers {
+		if wm.matchWatcher(watcher, event.Path) || (event.OldPath != "" && wm.matchWatcher(watcher, event.OldPath)) {
+			watchEvent := event
+			watchEvent.WatchID = watcher.ID
+			select {
+			case watcher.EventChan <- watchEvent:
+			default:
+				// Channel full, drop event
+			}
+		}
+	}
 }
 
 // Close closes the watcher manager.

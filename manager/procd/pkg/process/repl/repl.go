@@ -169,11 +169,6 @@ func (r *REPL) Language() string {
 	return r.config.Name
 }
 
-// ExitCommand returns the command to gracefully exit the REPL.
-func (r *REPL) ExitCommand() string {
-	return r.config.ExitCommand
-}
-
 func (r *REPL) detectReadyToken(data []byte) bool {
 	if len(r.readyToken) == 0 {
 		return false

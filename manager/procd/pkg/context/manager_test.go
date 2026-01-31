@@ -789,7 +789,7 @@ func TestContext_AddHandlers_AfterCreation(t *testing.T) {
 	}
 
 	// Create context without handlers
-	ctx, err := NewContext(config, nil, nil)
+	ctx, err := NewContext(config, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewContext() failed = %v", err)
 	}

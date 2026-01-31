@@ -1,6 +1,8 @@
 package context
 
 import (
+	"fmt"
+
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/process"
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/process/cmd"
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/process/repl"
@@ -16,15 +18,25 @@ var languageAliases = map[string]string{
 	"pl":         "perl",
 }
 
-// createREPLProcess creates a REPL process based on language.
-// Supports all languages registered in the REPL registry, including:
-// Python, Node.js, Bash, Zsh, Ruby, Lua, PHP, R, Perl, Redis, SQLite, MySQL, PostgreSQL,
-// Elixir, Erlang, Scala, Clojure, Haskell, OCaml, Julia, Swift, Kotlin, Groovy, and more.
-func createREPLProcess(ctxID string, config process.ProcessConfig) (process.Process, error) {
+// createREPLProcess creates a REPL process based on language or a custom config.
+// Supports built-in languages registered in the REPL registry and custom per-context configs.
+func createREPLProcess(ctxID string, config process.ProcessConfig, replConfig *repl.REPLConfig) (process.Process, error) {
 	procID := ctxID + "-proc"
 	lang := config.Language
 	if lang == "" {
 		lang = "python"
+	}
+
+	if replConfig != nil {
+		if replConfig.Name == "" {
+			return nil, fmt.Errorf("repl_config.name is required")
+		}
+		if config.Language == "" {
+			config.Language = replConfig.Name
+		} else if config.Language != replConfig.Name {
+			return nil, fmt.Errorf("language must match repl_config.name")
+		}
+		return repl.NewCustomREPL(procID, replConfig, config)
 	}
 
 	// Resolve language aliases

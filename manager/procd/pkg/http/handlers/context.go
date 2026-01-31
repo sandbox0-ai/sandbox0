@@ -17,6 +17,7 @@ import (
 	"github.com/gorilla/websocket"
 	ctxpkg "github.com/sandbox0-ai/infra/manager/procd/pkg/context"
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/process"
+	"github.com/sandbox0-ai/infra/manager/procd/pkg/process/repl"
 	"go.uber.org/zap"
 )
 
@@ -44,10 +45,10 @@ func NewContextHandler(manager *ctxpkg.Manager, logger *zap.Logger) *ContextHand
 
 // CreateContextRequest is the request body for creating a context.
 type CreateContextRequest struct {
-	Type     process.ProcessType `json:"type"`     // "repl" or "cmd"
-	Language string              `json:"language"` // For REPL: python, node, bash, zsh, etc.
-	Input    string              `json:"input"`    // For REPL: code to execute
-	Command  []string            `json:"command"`  // For CMD: command path and args, e.g., ["/bin/ls", "-la"]
+	Type process.ProcessType `json:"type"` // "repl" or "cmd"
+
+	Repl *CreateREPLContextRequest `json:"repl,omitempty"`
+	Cmd  *CreateCMDContextRequest  `json:"cmd,omitempty"`
 
 	WaitUntilDone bool `json:"wait_until_done"`
 
@@ -56,6 +57,18 @@ type CreateContextRequest struct {
 	PTYSize        *process.PTYSize  `json:"pty_size"`
 	IdleTimeoutSec int32             `json:"idle_timeout_sec,omitempty"`
 	TTLSec         int32             `json:"ttl_sec,omitempty"`
+}
+
+// CreateREPLContextRequest is the request body for creating a REPL context.
+type CreateREPLContextRequest struct {
+	Language   string          `json:"language"`              // python, node, bash, zsh, etc.
+	Input      string          `json:"input"`                 // code to execute
+	ReplConfig *repl.REPLConfig `json:"repl_config,omitempty"` // custom config
+}
+
+// CreateCMDContextRequest is the request body for creating a CMD context.
+type CreateCMDContextRequest struct {
+	Command []string `json:"command"` // command path and args, e.g., ["/bin/ls", "-la"]
 }
 
 // ContextResponse is the response body for a context.
@@ -158,6 +171,47 @@ func (h *ContextHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "idle_timeout_sec and ttl_sec must be >= 0")
 		return
 	}
+	var (
+		language   string
+		command    []string
+		replConfig *repl.REPLConfig
+		input      string
+	)
+	if req.Repl != nil && req.Type != process.ProcessTypeREPL {
+		writeError(w, http.StatusBadRequest, "invalid_request", "repl is only valid for repl contexts")
+		return
+	}
+	if req.Cmd != nil && req.Type != process.ProcessTypeCMD {
+		writeError(w, http.StatusBadRequest, "invalid_request", "cmd is only valid for cmd contexts")
+		return
+	}
+	if req.Repl != nil {
+		language = req.Repl.Language
+		replConfig = req.Repl.ReplConfig
+		input = req.Repl.Input
+	}
+	if req.Cmd != nil {
+		command = req.Cmd.Command
+	}
+	if replConfig != nil {
+		if replConfig.Name == "" {
+			replConfig.Name = language
+		}
+		if replConfig.Name == "" {
+			writeError(w, http.StatusBadRequest, "invalid_request", "repl.repl_config.name is required")
+			return
+		}
+		if language == "" {
+			language = replConfig.Name
+		} else if language != replConfig.Name {
+			writeError(w, http.StatusBadRequest, "invalid_request", "repl.language must match repl.repl_config.name")
+			return
+		}
+		if err := replConfig.Validate(); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+	}
 
 	policy := ctxpkg.CleanupPolicy{}
 	if req.IdleTimeoutSec > 0 {
@@ -167,21 +221,21 @@ func (h *ContextHandler) Create(w http.ResponseWriter, r *http.Request) {
 		policy.MaxLifetime = time.Duration(req.TTLSec) * time.Second
 	}
 
-	ctx, err := h.manager.CreateContextWithPolicy(process.ProcessConfig{
+	ctx, err := h.manager.CreateContextWithPolicyAndREPLConfig(process.ProcessConfig{
 		Type:     req.Type,
-		Language: req.Language,
-		Command:  req.Command,
+		Language: language,
+		Command:  command,
 		CWD:      req.CWD,
 		EnvVars:  req.EnvVars,
 		PTYSize:  req.PTYSize,
-	}, policy)
+	}, replConfig, policy)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "create_failed", err.Error())
 		return
 	}
 
 	if req.WaitUntilDone {
-		output, execErr, aborted := h.execInputSync(ctx, req.Input, r.Context())
+		output, execErr, aborted := h.execInputSync(ctx, input, r.Context())
 		if aborted {
 			return
 		}

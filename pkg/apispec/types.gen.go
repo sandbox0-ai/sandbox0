@@ -51,6 +51,12 @@ const (
 	Repl ProcessType = "repl"
 )
 
+// Defines values for REPLReadyMode.
+const (
+	PromptToken  REPLReadyMode = "prompt_token"
+	StartupDelay REPLReadyMode = "startup_delay"
+)
+
 // Defines values for SuccessAPIKeyListResponseSuccess.
 const (
 	SuccessAPIKeyListResponseSuccessTrue SuccessAPIKeyListResponseSuccess = true
@@ -431,18 +437,29 @@ type CreateAPIKeyResponse struct {
 	Type      string    `json:"type"`
 }
 
+// CreateCMDContextRequest defines model for CreateCMDContextRequest.
+type CreateCMDContextRequest struct {
+	Command *[]string `json:"command,omitempty"`
+}
+
 // CreateContextRequest defines model for CreateContextRequest.
 type CreateContextRequest struct {
-	Command        *[]string          `json:"command,omitempty"`
-	Cwd            *string            `json:"cwd,omitempty"`
-	EnvVars        *map[string]string `json:"env_vars,omitempty"`
-	IdleTimeoutSec *int32             `json:"idle_timeout_sec,omitempty"`
-	Input          *string            `json:"input,omitempty"`
-	Language       *string            `json:"language,omitempty"`
-	PtySize        *PTYSize           `json:"pty_size,omitempty"`
-	TtlSec         *int32             `json:"ttl_sec,omitempty"`
-	Type           *ProcessType       `json:"type,omitempty"`
-	WaitUntilDone  *bool              `json:"wait_until_done,omitempty"`
+	Cmd            *CreateCMDContextRequest  `json:"cmd,omitempty"`
+	Cwd            *string                   `json:"cwd,omitempty"`
+	EnvVars        *map[string]string        `json:"env_vars,omitempty"`
+	IdleTimeoutSec *int32                    `json:"idle_timeout_sec,omitempty"`
+	PtySize        *PTYSize                  `json:"pty_size,omitempty"`
+	Repl           *CreateREPLContextRequest `json:"repl,omitempty"`
+	TtlSec         *int32                    `json:"ttl_sec,omitempty"`
+	Type           *ProcessType              `json:"type,omitempty"`
+	WaitUntilDone  *bool                     `json:"wait_until_done,omitempty"`
+}
+
+// CreateREPLContextRequest defines model for CreateREPLContextRequest.
+type CreateREPLContextRequest struct {
+	Input      *string     `json:"input,omitempty"`
+	Language   *string     `json:"language,omitempty"`
+	ReplConfig *REPLConfig `json:"repl_config,omitempty"`
 }
 
 // CreateSandboxVolumeRequest defines model for CreateSandboxVolumeRequest.
@@ -487,6 +504,12 @@ type ErrorEnvelope struct {
 
 // ErrorEnvelopeSuccess defines model for ErrorEnvelope.Success.
 type ErrorEnvelopeSuccess bool
+
+// ExecCandidate defines model for ExecCandidate.
+type ExecCandidate struct {
+	Args *[]string `json:"args,omitempty"`
+	Name string    `json:"name"`
+}
 
 // FileContentResponse defines model for FileContentResponse.
 type FileContentResponse struct {
@@ -686,6 +709,40 @@ type PreferredSchedulingTerm struct {
 
 // ProcessType defines model for ProcessType.
 type ProcessType string
+
+// REPLConfig defines model for REPLConfig.
+type REPLConfig struct {
+	Candidates  []ExecCandidate   `json:"candidates"`
+	DefaultTerm *string           `json:"default_term,omitempty"`
+	Description *string           `json:"description,omitempty"`
+	DisplayName *string           `json:"display_name,omitempty"`
+	Env         *[]REPLEnvVar     `json:"env,omitempty"`
+	Name        string            `json:"name"`
+	Prompt      *REPLPromptConfig `json:"prompt,omitempty"`
+	Ready       *REPLReadyConfig  `json:"ready,omitempty"`
+}
+
+// REPLEnvVar defines model for REPLEnvVar.
+type REPLEnvVar struct {
+	Name      string  `json:"name"`
+	Value     *string `json:"value,omitempty"`
+	ValueFrom *string `json:"value_from,omitempty"`
+}
+
+// REPLPromptConfig defines model for REPLPromptConfig.
+type REPLPromptConfig struct {
+	CustomPrompt *string `json:"custom_prompt,omitempty"`
+}
+
+// REPLReadyConfig defines model for REPLReadyConfig.
+type REPLReadyConfig struct {
+	Mode           *REPLReadyMode `json:"mode,omitempty"`
+	StartupDelayMs *int32         `json:"startup_delay_ms,omitempty"`
+	Token          *string        `json:"token,omitempty"`
+}
+
+// REPLReadyMode defines model for REPLReadyMode.
+type REPLReadyMode string
 
 // RateLimitSpec defines model for RateLimitSpec.
 type RateLimitSpec struct {

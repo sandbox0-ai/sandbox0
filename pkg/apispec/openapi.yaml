@@ -2634,17 +2634,93 @@ components:
         cols:
           type: integer
           format: int32
+    ExecCandidate:
+      type: object
+      properties:
+        name:
+          type: string
+        args:
+          type: array
+          items:
+            type: string
+      required: [name]
+    REPLEnvVar:
+      type: object
+      properties:
+        name:
+          type: string
+        value:
+          type: string
+        value_from:
+          type: string
+      required: [name]
+    REPLPromptConfig:
+      type: object
+      properties:
+        custom_prompt:
+          type: string
+    REPLReadyMode:
+      type: string
+      enum: [prompt_token, startup_delay]
+    REPLReadyConfig:
+      type: object
+      properties:
+        mode:
+          $ref: "#/components/schemas/REPLReadyMode"
+        token:
+          type: string
+        startup_delay_ms:
+          type: integer
+          format: int32
+    REPLConfig:
+      type: object
+      properties:
+        name:
+          type: string
+        display_name:
+          type: string
+        description:
+          type: string
+        candidates:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExecCandidate"
+        env:
+          type: array
+          items:
+            $ref: "#/components/schemas/REPLEnvVar"
+        default_term:
+          type: string
+        prompt:
+          $ref: "#/components/schemas/REPLPromptConfig"
+        ready:
+          $ref: "#/components/schemas/REPLReadyConfig"
+      required: [name, candidates]
+    CreateREPLContextRequest:
+      type: object
+      properties:
+        language:
+          type: string
+        input:
+          type: string
+        repl_config:
+          $ref: "#/components/schemas/REPLConfig"
+    CreateCMDContextRequest:
+      type: object
+      properties:
+        command:
+          type: array
+          items:
+            type: string
     CreateContextRequest:
       type: object
       properties:
         type:
           $ref: "#/components/schemas/ProcessType"
-        language:
-          type: string
-        command:
-          type: array
-          items:
-            type: string
+        repl:
+          $ref: "#/components/schemas/CreateREPLContextRequest"
+        cmd:
+          $ref: "#/components/schemas/CreateCMDContextRequest"
         wait_until_done:
           type: boolean
         cwd:
@@ -2655,8 +2731,6 @@ components:
             type: string
         pty_size:
           $ref: "#/components/schemas/PTYSize"
-        input:
-          type: string
         idle_timeout_sec:
           type: integer
           format: int32

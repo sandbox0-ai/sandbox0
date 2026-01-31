@@ -9,21 +9,22 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/process"
+	"github.com/sandbox0-ai/infra/manager/procd/pkg/process/repl"
 )
 
 // Context represents a logical container for a process with its environment.
 type Context struct {
-	ID          string              `json:"id"`
-	Type        process.ProcessType `json:"type"`
-	Language    string              `json:"language"`
-	CWD         string              `json:"cwd"`
-	EnvVars     map[string]string   `json:"env_vars"`
-	MainProcess process.Process     `json:"-"`
-	CreatedAt   time.Time           `json:"created_at"`
-	UpdatedAt   time.Time           `json:"updated_at"`
-	LastActivityAt time.Time     `json:"-"`
-	FinishedAt     *time.Time    `json:"-"`
-	CleanupPolicy  CleanupPolicy `json:"-"`
+	ID             string              `json:"id"`
+	Type           process.ProcessType `json:"type"`
+	Language       string              `json:"language"`
+	CWD            string              `json:"cwd"`
+	EnvVars        map[string]string   `json:"env_vars"`
+	MainProcess    process.Process     `json:"-"`
+	CreatedAt      time.Time           `json:"created_at"`
+	UpdatedAt      time.Time           `json:"updated_at"`
+	LastActivityAt time.Time           `json:"-"`
+	FinishedAt     *time.Time          `json:"-"`
+	CleanupPolicy  CleanupPolicy       `json:"-"`
 
 	mu sync.RWMutex
 }
@@ -40,15 +41,19 @@ func (p CleanupPolicy) isZero() bool {
 }
 
 // NewContext creates a new context with the given configuration.
-func NewContext(config process.ProcessConfig, exitHandler process.ExitHandler, startHandler process.StartHandler) (*Context, error) {
+func NewContext(config process.ProcessConfig, replConfig *repl.REPLConfig, exitHandler process.ExitHandler, startHandler process.StartHandler) (*Context, error) {
 	id := "ctx-" + uuid.New().String()[:8]
 
 	var proc process.Process
 	var err error
 
+	if config.Type == process.ProcessTypeREPL && replConfig != nil && config.Language == "" {
+		config.Language = replConfig.Name
+	}
+
 	switch config.Type {
 	case process.ProcessTypeREPL:
-		proc, err = createREPLProcess(id, config)
+		proc, err = createREPLProcess(id, config, replConfig)
 	case process.ProcessTypeCMD:
 		if len(config.Command) == 0 {
 			return nil, fmt.Errorf("CMD process type requires command to be specified in config.Command")
@@ -64,14 +69,14 @@ func NewContext(config process.ProcessConfig, exitHandler process.ExitHandler, s
 
 	now := time.Now()
 	ctx := &Context{
-		ID:          id,
-		Type:        config.Type,
-		Language:    config.Language,
-		CWD:         config.CWD,
-		EnvVars:     config.EnvVars,
-		MainProcess: proc,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:             id,
+		Type:           config.Type,
+		Language:       config.Language,
+		CWD:            config.CWD,
+		EnvVars:        config.EnvVars,
+		MainProcess:    proc,
+		CreatedAt:      now,
+		UpdatedAt:      now,
 		LastActivityAt: now,
 	}
 

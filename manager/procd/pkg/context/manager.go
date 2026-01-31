@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/process"
+	"github.com/sandbox0-ai/infra/manager/procd/pkg/process/repl"
 )
 
 // ContextResourceUsage represents resource usage for a single context.
@@ -111,6 +112,11 @@ func (m *Manager) CreateContext(config process.ProcessConfig) (*Context, error) 
 
 // CreateContextWithPolicy creates a new context with a cleanup policy.
 func (m *Manager) CreateContextWithPolicy(config process.ProcessConfig, policy CleanupPolicy) (*Context, error) {
+	return m.CreateContextWithPolicyAndREPLConfig(config, nil, policy)
+}
+
+// CreateContextWithPolicyAndREPLConfig creates a new context with a cleanup policy and optional REPL config.
+func (m *Manager) CreateContextWithPolicyAndREPLConfig(config process.ProcessConfig, replConfig *repl.REPLConfig, policy CleanupPolicy) (*Context, error) {
 	m.mu.Lock()
 	startHandler := m.onStart
 	defaultPolicy := m.defaultCleanupPolicy
@@ -121,7 +127,7 @@ func (m *Manager) CreateContextWithPolicy(config process.ProcessConfig, policy C
 		}
 	}
 
-	ctx, err := NewContext(config, exitHandler, startHandler)
+	ctx, err := NewContext(config, replConfig, exitHandler, startHandler)
 	if err != nil {
 		m.mu.Unlock()
 		return nil, err

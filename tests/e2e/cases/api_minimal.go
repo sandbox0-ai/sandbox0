@@ -152,8 +152,10 @@ func registerApiMinimalSuite(envProvider func() *framework.ScenarioEnv) {
 				processType := apispec.Cmd
 				command := []string{"/bin/sh", "-c", "sleep 30"}
 				ctxReq := apispec.CreateContextRequest{
-					Type:    &processType,
-					Command: &command,
+					Type: &processType,
+					Cmd: &apispec.CreateCMDContextRequest{
+						Command: &command,
+					},
 				}
 				ctxResp, status, err := session.CreateContext(env.TestCtx.Context, GinkgoT(), sandboxID, ctxReq)
 				Expect(err).NotTo(HaveOccurred())

@@ -91,13 +91,11 @@ func TestREPLConfig_Clone(t *testing.T) {
 		},
 		Prompt: PromptConfig{
 			CustomPrompt: "PROMPT> ",
-			PromptEnvVar: "PS1",
 		},
 		Ready: ReadyConfig{
 			Mode:  ReadyModePromptToken,
 			Token: "PROMPT> ",
 		},
-		InitCommands: []string{"cmd1", "cmd2"},
 	}
 
 	clone := original.Clone()
@@ -109,7 +107,6 @@ func TestREPLConfig_Clone(t *testing.T) {
 	clone.Env[0].Value = "modified"
 	clone.Prompt.CustomPrompt = "modified"
 	clone.Ready.Token = "modified"
-	clone.InitCommands[0] = "modified"
 
 	// Original should be unchanged
 	if original.Name != "test" {
@@ -129,9 +126,6 @@ func TestREPLConfig_Clone(t *testing.T) {
 	}
 	if original.Ready.Token != "PROMPT> " {
 		t.Error("Clone modified original Ready.Token")
-	}
-	if original.InitCommands[0] != "cmd1" {
-		t.Error("Clone modified original InitCommands")
 	}
 }
 

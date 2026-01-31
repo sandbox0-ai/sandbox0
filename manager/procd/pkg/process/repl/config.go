@@ -27,8 +27,6 @@ type EnvVar struct {
 type PromptConfig struct {
 	// CustomPrompt is the custom prompt to set (if supported by the REPL).
 	CustomPrompt string `json:"custom_prompt,omitempty" yaml:"custom_prompt,omitempty"`
-	// PromptEnvVar is the env var name to set prompt (e.g., "PS1" for shells).
-	PromptEnvVar string `json:"prompt_env_var,omitempty" yaml:"prompt_env_var,omitempty"`
 }
 
 // ReadyMode defines how initial input readiness is detected.
@@ -72,12 +70,6 @@ type REPLConfig struct {
 
 	// Ready configuration.
 	Ready ReadyConfig `json:"ready,omitempty" yaml:"ready,omitempty"`
-
-	// InitCommands are commands to run after REPL starts (e.g., disable history).
-	InitCommands []string `json:"init_commands,omitempty" yaml:"init_commands,omitempty"`
-
-	// ExitCommand is the command to gracefully exit the REPL.
-	ExitCommand string `json:"exit_command,omitempty" yaml:"exit_command,omitempty"`
 }
 
 // Validate validates the REPL configuration.
@@ -133,12 +125,11 @@ func (c *REPLConfig) Clone() *REPLConfig {
 	}
 	clone.Env = make([]EnvVar, len(c.Env))
 	copy(clone.Env, c.Env)
-	clone.InitCommands = append([]string(nil), c.InitCommands...)
 	return &clone
 }
 
 // DefaultReadyToken is the default prompt token for REPLs.
-const DefaultReadyToken = "__S0_READY__ "
+const DefaultReadyToken = "_S0_> "
 
 // DefaultContinuationToken is the default continuation prompt for REPLs.
 const DefaultContinuationToken = "__S0_CONT__ "
@@ -164,7 +155,6 @@ var BuiltinConfigs = map[string]*REPLConfig{
 			Mode:  ReadyModePromptToken,
 			Token: DefaultReadyToken,
 		},
-		ExitCommand: "exit()",
 	},
 
 	"node": {
@@ -179,7 +169,6 @@ var BuiltinConfigs = map[string]*REPLConfig{
 			Mode:  ReadyModePromptToken,
 			Token: DefaultReadyToken,
 		},
-		ExitCommand: ".exit",
 	},
 
 	"bash": {
@@ -197,13 +186,11 @@ var BuiltinConfigs = map[string]*REPLConfig{
 		},
 		Prompt: PromptConfig{
 			CustomPrompt: DefaultReadyToken,
-			PromptEnvVar: "PS1",
 		},
 		Ready: ReadyConfig{
 			Mode:  ReadyModePromptToken,
 			Token: DefaultReadyToken,
 		},
-		ExitCommand: "exit",
 	},
 
 	"zsh": {
@@ -222,13 +209,11 @@ var BuiltinConfigs = map[string]*REPLConfig{
 		},
 		Prompt: PromptConfig{
 			CustomPrompt: DefaultReadyToken,
-			PromptEnvVar: "PS1",
 		},
 		Ready: ReadyConfig{
 			Mode:  ReadyModePromptToken,
 			Token: DefaultReadyToken,
 		},
-		ExitCommand: "exit",
 	},
 
 	"ruby": {
@@ -242,7 +227,6 @@ var BuiltinConfigs = map[string]*REPLConfig{
 			Mode:  ReadyModePromptToken,
 			Token: DefaultReadyToken,
 		},
-		ExitCommand: "exit",
 	},
 
 	"lua": {
@@ -261,7 +245,6 @@ var BuiltinConfigs = map[string]*REPLConfig{
 			Mode:  ReadyModePromptToken,
 			Token: DefaultReadyToken,
 		},
-		ExitCommand: "os.exit()",
 	},
 
 	"php": {
@@ -275,7 +258,6 @@ var BuiltinConfigs = map[string]*REPLConfig{
 		Ready: ReadyConfig{
 			Mode: ReadyModeStartupDelay,
 		},
-		ExitCommand: "exit",
 	},
 
 	"r": {
@@ -290,7 +272,6 @@ var BuiltinConfigs = map[string]*REPLConfig{
 			Mode:  ReadyModePromptToken,
 			Token: DefaultReadyToken,
 		},
-		ExitCommand: "q()",
 	},
 
 	"perl": {
@@ -304,7 +285,6 @@ var BuiltinConfigs = map[string]*REPLConfig{
 		Ready: ReadyConfig{
 			Mode: ReadyModeStartupDelay,
 		},
-		ExitCommand: "q",
 	},
 
 	// Database REPLs
@@ -318,7 +298,6 @@ var BuiltinConfigs = map[string]*REPLConfig{
 		Ready: ReadyConfig{
 			Mode: ReadyModeStartupDelay,
 		},
-		ExitCommand: "QUIT",
 	},
 
 	"sqlite": {
@@ -333,36 +312,6 @@ var BuiltinConfigs = map[string]*REPLConfig{
 			Mode:  ReadyModePromptToken,
 			Token: DefaultReadyToken,
 		},
-		ExitCommand: ".quit",
-	},
-
-	"mysql": {
-		Name:        "mysql",
-		DisplayName: "MySQL",
-		Description: "MySQL command-line client",
-		Candidates: []ExecCandidate{
-			{Name: "mysql", Args: []string{"--prompt", DefaultReadyToken}},
-			{Name: "mariadb", Args: []string{"--prompt", DefaultReadyToken}},
-		},
-		Ready: ReadyConfig{
-			Mode:  ReadyModePromptToken,
-			Token: DefaultReadyToken,
-		},
-		ExitCommand: "exit",
-	},
-
-	"psql": {
-		Name:        "psql",
-		DisplayName: "PostgreSQL",
-		Description: "PostgreSQL interactive terminal",
-		Candidates: []ExecCandidate{
-			{Name: "psql", Args: []string{"-v", "PROMPT1=" + DefaultReadyToken, "-v", "PROMPT2=" + DefaultContinuationToken}},
-		},
-		Ready: ReadyConfig{
-			Mode:  ReadyModePromptToken,
-			Token: DefaultReadyToken,
-		},
-		ExitCommand: `\q`,
 	},
 
 	"swift": {
@@ -376,7 +325,6 @@ var BuiltinConfigs = map[string]*REPLConfig{
 		Ready: ReadyConfig{
 			Mode: ReadyModeStartupDelay,
 		},
-		ExitCommand: ":quit",
 	},
 
 	"kotlin": {
@@ -390,7 +338,6 @@ var BuiltinConfigs = map[string]*REPLConfig{
 		Ready: ReadyConfig{
 			Mode: ReadyModeStartupDelay,
 		},
-		ExitCommand: ":quit",
 	},
 }
 

@@ -23,9 +23,6 @@ func TestREPLConfig_Validate(t *testing.T) {
 				Candidates: []ExecCandidate{
 					{Name: "test-cmd", Args: []string{}},
 				},
-				Prompt: PromptConfig{
-					Patterns: []string{`> `},
-				},
 			},
 			wantError: false,
 		},
@@ -35,9 +32,6 @@ func TestREPLConfig_Validate(t *testing.T) {
 				Candidates: []ExecCandidate{
 					{Name: "test-cmd", Args: []string{}},
 				},
-				Prompt: PromptConfig{
-					Patterns: []string{`> `},
-				},
 			},
 			wantError: true,
 		},
@@ -46,9 +40,6 @@ func TestREPLConfig_Validate(t *testing.T) {
 			config: REPLConfig{
 				Name:       "test",
 				Candidates: []ExecCandidate{},
-				Prompt: PromptConfig{
-					Patterns: []string{`> `},
-				},
 			},
 			wantError: true,
 		},
@@ -59,21 +50,18 @@ func TestREPLConfig_Validate(t *testing.T) {
 				Candidates: []ExecCandidate{
 					{Name: "", Args: []string{}},
 				},
-				Prompt: PromptConfig{
-					Patterns: []string{`> `},
-				},
 			},
 			wantError: true,
 		},
 		{
-			name: "invalid regex pattern",
+			name: "prompt token missing",
 			config: REPLConfig{
 				Name: "test",
 				Candidates: []ExecCandidate{
 					{Name: "test-cmd", Args: []string{}},
 				},
-				Prompt: PromptConfig{
-					Patterns: []string{"[invalid"},
+				Ready: ReadyConfig{
+					Mode: ReadyModePromptToken,
 				},
 			},
 			wantError: true,
@@ -102,7 +90,12 @@ func TestREPLConfig_Clone(t *testing.T) {
 			{Name: "VAR1", Value: "value1"},
 		},
 		Prompt: PromptConfig{
-			Patterns: []string{`> `, `>>> `},
+			CustomPrompt: "PROMPT> ",
+			PromptEnvVar: "PS1",
+		},
+		Ready: ReadyConfig{
+			Mode:  ReadyModePromptToken,
+			Token: "PROMPT> ",
 		},
 		InitCommands: []string{"cmd1", "cmd2"},
 	}
@@ -114,7 +107,8 @@ func TestREPLConfig_Clone(t *testing.T) {
 	clone.Candidates[0].Name = "modified-cmd"
 	clone.Candidates[0].Args[0] = "-modified"
 	clone.Env[0].Value = "modified"
-	clone.Prompt.Patterns[0] = "modified"
+	clone.Prompt.CustomPrompt = "modified"
+	clone.Ready.Token = "modified"
 	clone.InitCommands[0] = "modified"
 
 	// Original should be unchanged
@@ -130,8 +124,11 @@ func TestREPLConfig_Clone(t *testing.T) {
 	if original.Env[0].Value != "value1" {
 		t.Error("Clone modified original Env")
 	}
-	if original.Prompt.Patterns[0] != `> ` {
-		t.Error("Clone modified original Prompt.Patterns")
+	if original.Prompt.CustomPrompt != "PROMPT> " {
+		t.Error("Clone modified original Prompt.CustomPrompt")
+	}
+	if original.Ready.Token != "PROMPT> " {
+		t.Error("Clone modified original Ready.Token")
 	}
 	if original.InitCommands[0] != "cmd1" {
 		t.Error("Clone modified original InitCommands")
@@ -180,9 +177,6 @@ func TestREPLRegistry(t *testing.T) {
 		Name: "custom",
 		Candidates: []ExecCandidate{
 			{Name: "custom-cmd", Args: []string{}},
-		},
-		Prompt: PromptConfig{
-			Patterns: []string{`> `},
 		},
 	}
 	if err := registry.Register(customConfig); err != nil {
@@ -373,38 +367,44 @@ func TestREPL_StateTransitions(t *testing.T) {
 	}
 }
 
-// TestREPL_DetectPrompt tests prompt detection.
-func TestREPL_DetectPrompt(t *testing.T) {
-	config := process.ProcessConfig{
+// TestREPL_DetectReadyToken tests prompt token detection across chunks.
+func TestREPL_DetectReadyToken(t *testing.T) {
+	replConfig := &REPLConfig{
+		Name: "test-ready",
+		Candidates: []ExecCandidate{
+			{Name: "test-cmd", Args: []string{}},
+		},
+		Ready: ReadyConfig{
+			Mode:  ReadyModePromptToken,
+			Token: "__READY__ ",
+		},
+	}
+	processConfig := process.ProcessConfig{
 		Type:     process.ProcessTypeREPL,
-		Language: "python",
+		Language: "test-ready",
 	}
 
-	repl, err := NewREPL("test-prompt", config)
+	repl, err := NewCustomREPL("test-prompt", replConfig, processConfig)
 	if err != nil {
-		t.Fatalf("NewREPL() failed = %v", err)
+		t.Fatalf("NewCustomREPL() failed = %v", err)
 	}
 
-	tests := []struct {
-		name     string
-		data     []byte
-		expected bool
-	}{
-		{"IPython input prompt", []byte("In [1]:"), true},
-		{"IPython output prompt", []byte("Out[1]:"), true},
-		{"Standard Python prompt", []byte(">>> "), true},
-		{"Standard continuation", []byte("... "), true},
-		{"Regular output", []byte("hello world"), false},
-		{"Empty", []byte(""), false},
+	first, detected := repl.filterOutput([]byte("hello __REA"))
+	if detected {
+		t.Fatal("expected no detection in first chunk")
+	}
+	if string(first) != "hello __REA" {
+		t.Fatalf("filterOutput() altered output: %q", first)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := repl.DetectPrompt(tt.data)
-			if got != tt.expected {
-				t.Errorf("DetectPrompt() = %v, want %v", got, tt.expected)
-			}
-		})
+	_, detected = repl.filterOutput([]byte("DY__ world __READY__ "))
+	if !detected {
+		t.Fatal("expected detection after token")
+	}
+
+	_, detected = repl.filterOutput([]byte("__READY__ "))
+	if detected {
+		t.Fatal("expected detection to fire only once")
 	}
 }
 
@@ -482,9 +482,6 @@ func TestNewCustomREPL(t *testing.T) {
 		Candidates: []ExecCandidate{
 			{Name: "echo", Args: []string{}},
 		},
-		Prompt: PromptConfig{
-			Patterns: []string{`> `},
-		},
 	}
 
 	processConfig := process.ProcessConfig{
@@ -516,29 +513,6 @@ func TestCreateREPLConfig(t *testing.T) {
 	}
 	if err := config.Validate(); err != nil {
 		t.Errorf("Config is invalid: %v", err)
-	}
-}
-
-// TestStripANSI tests ANSI escape sequence stripping.
-func TestStripANSI(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    []byte
-		expected []byte
-	}{
-		{"no ANSI", []byte("hello world"), []byte("hello world")},
-		{"color codes", []byte("\x1b[31mred\x1b[0m"), []byte("red")},
-		{"cursor movement", []byte("\x1b[2Jhello\x1b[H"), []byte("hello")},
-		{"empty", []byte(""), []byte("")},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := stripANSI(tt.input)
-			if string(got) != string(tt.expected) {
-				t.Errorf("stripANSI() = %q, want %q", got, tt.expected)
-			}
-		})
 	}
 }
 
@@ -602,168 +576,4 @@ func TestListAvailableREPLs(t *testing.T) {
 	available := ListAvailableREPLs()
 	// At minimum bash/sh should be available
 	t.Logf("Available REPLs: %v", available)
-}
-
-// TestREPL_OutputFiltering tests output filtering for bash.
-func TestREPL_OutputFiltering(t *testing.T) {
-	config := process.ProcessConfig{
-		Type:     process.ProcessTypeREPL,
-		Language: "bash",
-	}
-
-	repl, err := NewREPL("test-filter", config)
-	if err != nil {
-		t.Fatalf("NewREPL() failed = %v", err)
-	}
-
-	// Verify bash config has filtering enabled
-	replConfig := repl.Config()
-	if !replConfig.Output.FilterEcho {
-		t.Error("bash config should have FilterEcho enabled")
-	}
-	if !replConfig.Output.TrimPrompt {
-		t.Error("bash config should have TrimPrompt enabled")
-	}
-
-	// Test WriteInput sets lastInput
-	repl.WriteInput([]byte("echo 'hi'\n"))
-
-	repl.mu.Lock()
-	lastInput := repl.lastInput
-	repl.mu.Unlock()
-
-	if lastInput != "echo 'hi'" {
-		t.Errorf("lastInput = %q, want %q", lastInput, "echo 'hi'")
-	}
-
-	// Test output filtering
-	tests := []struct {
-		name     string
-		input    []byte
-		expected string
-	}{
-		{
-			name:     "filter echo",
-			input:    []byte("echo 'hi'\nhi\n"),
-			expected: "hi",
-		},
-		{
-			name:     "filter prompt",
-			input:    []byte("SANDBOX0>>> "),
-			expected: "",
-		},
-		{
-			name:     "filter both",
-			input:    []byte("SANDBOX0>>> echo 'hi'\nhi\nSANDBOX0>>> "),
-			expected: "hi",
-		},
-		{
-			name:     "just output",
-			input:    []byte("hi\n"),
-			expected: "hi",
-		},
-		{
-			name:     "with CRLF",
-			input:    []byte("echo 'hi'\r\nhi\r\nSANDBOX0>>> "),
-			expected: "hi",
-		},
-		{
-			name:     "with standalone CR",
-			input:    []byte("SANDBOX0>>> echo 'hi'\r\nhi\rSANDBOX0>>> "),
-			expected: "hi",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Reset lastInput for echo filtering
-			repl.SetLastInput("echo 'hi'")
-			got, _ := repl.filterOutput(tt.input)
-			if string(got) != tt.expected {
-				t.Errorf("filterOutput() = %q, want %q", got, tt.expected)
-			}
-		})
-	}
-}
-
-// TestREPL_OutputFiltering_PythonPrint ensures Python output isn't swallowed by prompt trimming.
-func TestREPL_OutputFiltering_PythonPrint(t *testing.T) {
-	config := process.ProcessConfig{
-		Type:     process.ProcessTypeREPL,
-		Language: "python",
-	}
-
-	repl, err := NewREPL("test-python-filter", config)
-	if err != nil {
-		t.Fatalf("NewREPL() failed = %v", err)
-	}
-
-	repl.SetLastInput(`print("hello world")`)
-
-	tests := []struct {
-		name     string
-		input    []byte
-		expected string
-	}{
-		{
-			name:     "ipython prompt and output in same chunk",
-			input:    []byte("In [1]: print(\"hello world\")\r\nhello world\r\nIn [2]: "),
-			expected: "hello world",
-		},
-		{
-			name:     "standard python prompt and output in same chunk",
-			input:    []byte(">>> print(\"hello world\")\r\nhello world\r\n>>> "),
-			expected: "hello world",
-		},
-		{
-			name:     "output with trailing prompt chunk",
-			input:    []byte("hello world\r\nIn [2]: "),
-			expected: "hello world",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, _ := repl.filterOutput(tt.input)
-			if string(got) != tt.expected {
-				t.Errorf("filterOutput() = %q, want %q", got, tt.expected)
-			}
-		})
-	}
-}
-
-// TestREPL_WriteInputTracksEcho tests that WriteInput tracks input for echo filtering.
-func TestREPL_WriteInputTracksEcho(t *testing.T) {
-	config := process.ProcessConfig{
-		Type:     process.ProcessTypeREPL,
-		Language: "bash",
-	}
-
-	repl, err := NewREPL("test-write", config)
-	if err != nil {
-		t.Fatalf("NewREPL() failed = %v", err)
-	}
-
-	// Write input with various line endings
-	tests := []struct {
-		input    string
-		expected string
-	}{
-		{"echo hello\n", "echo hello"},
-		{"ls -la\r\n", "ls -la"},
-		{"pwd", "pwd"},
-	}
-
-	for _, tt := range tests {
-		// This will fail because process isn't running, but lastInput should still be set
-		_ = repl.WriteInput([]byte(tt.input))
-
-		repl.mu.Lock()
-		lastInput := repl.lastInput
-		repl.mu.Unlock()
-
-		if lastInput != tt.expected {
-			t.Errorf("WriteInput(%q): lastInput = %q, want %q", tt.input, lastInput, tt.expected)
-		}
-	}
 }

@@ -3,8 +3,6 @@ package repl
 import (
 	"bytes"
 	"fmt"
-	"regexp"
-	"strings"
 	"sync"
 	"time"
 
@@ -17,10 +15,11 @@ type REPL struct {
 	runner *process.PTYRunner
 	config *REPLConfig
 
-	// Output processing state
-	mu            sync.Mutex
-	lastInput     string
-	promptRegexps []*regexp.Regexp
+	// Ready detection state
+	mu          sync.Mutex
+	readyOnce   sync.Once
+	readyToken  []byte
+	readyBuffer []byte
 }
 
 var _ process.Process = (*REPL)(nil)
@@ -30,7 +29,9 @@ func New(id string, replConfig *REPLConfig, processConfig process.ProcessConfig)
 	if replConfig == nil {
 		return nil, fmt.Errorf("REPL config is required")
 	}
-	if err := replConfig.Validate(); err != nil {
+	config := replConfig.Clone()
+	config.applyDefaults()
+	if err := config.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid REPL config: %w", err)
 	}
 
@@ -38,20 +39,17 @@ func New(id string, replConfig *REPLConfig, processConfig process.ProcessConfig)
 
 	repl := &REPL{
 		BaseProcess: bp,
-		config:      replConfig.Clone(),
+		config:      config,
 	}
 
-	// Compile prompt patterns
-	repl.promptRegexps = make([]*regexp.Regexp, 0, len(replConfig.Prompt.Patterns))
-	for _, pattern := range replConfig.Prompt.Patterns {
-		if re, err := regexp.Compile(pattern); err == nil {
-			repl.promptRegexps = append(repl.promptRegexps, re)
-		}
+	if config.Ready.Mode == ReadyModePromptToken && config.Ready.Token != "" {
+		repl.readyToken = []byte(config.Ready.Token)
+		repl.readyBuffer = make([]byte, 0, len(repl.readyToken))
 	}
 
-	// Set up output filter if needed
+	// Set up output filter if needed for readiness detection
 	var outputFilter func([]byte) ([]byte, bool)
-	if replConfig.Output.FilterEcho || replConfig.Output.TrimPrompt || replConfig.Output.StripANSI || len(repl.promptRegexps) > 0 {
+	if config.Ready.Mode == ReadyModePromptToken && len(repl.readyToken) > 0 {
 		outputFilter = repl.filterOutput
 	}
 
@@ -87,7 +85,11 @@ func (r *REPL) Start() error {
 
 	// Build environment variables
 	extraEnv := r.buildEnvVars(processConfig)
-	return startWithCandidates(r.BaseProcess, r.runner, processConfig, candidates, extraEnv)
+	if err := startWithCandidates(r.BaseProcess, r.runner, processConfig, candidates, extraEnv); err != nil {
+		return err
+	}
+	r.scheduleStartupReady()
+	return nil
 }
 
 // buildEnvVars builds the environment variables for the REPL.
@@ -125,17 +127,7 @@ func (r *REPL) buildEnvVars(processConfig process.ProcessConfig) []string {
 func (r *REPL) Stop() error {
 	return r.runner.Stop()
 }
-
-// WriteInput writes data to the REPL and tracks it for echo filtering.
 func (r *REPL) WriteInput(data []byte) error {
-	// Track input for echo filtering
-	if r.config.Output.FilterEcho {
-		input := string(data)
-		// Remove trailing newline for matching
-		input = strings.TrimSuffix(input, "\n")
-		input = strings.TrimSuffix(input, "\r")
-		r.SetLastInput(input)
-	}
 	return r.BaseProcess.WriteInput(data)
 }
 
@@ -161,86 +153,15 @@ func (r *REPL) Config() *REPLConfig {
 	return r.config.Clone()
 }
 
-// SetLastInput sets the last input for echo filtering.
-func (r *REPL) SetLastInput(input string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.lastInput = input
-}
-
-// filterOutput processes output according to config.
+// filterOutput detects readiness without altering output.
 func (r *REPL) filterOutput(data []byte) ([]byte, bool) {
 	if len(data) == 0 {
 		return data, false
 	}
-
-	detectionData := data
-	if r.config.Output.StripANSI {
-		detectionData = stripANSI(detectionData)
+	if r.detectReadyToken(data) && r.markReady() {
+		return data, true
 	}
-	promptDetected := r.DetectPrompt(detectionData)
-	if !r.config.Output.FilterEcho && !r.config.Output.TrimPrompt && !r.config.Output.StripANSI {
-		return data, promptDetected
-	}
-
-	result := data
-
-	// Strip ANSI escape sequences
-	if r.config.Output.StripANSI {
-		result = stripANSI(result)
-	}
-
-	// Normalize line endings: convert \r\n to \n, and standalone \r to \n
-	result = bytes.ReplaceAll(result, []byte("\r\n"), []byte("\n"))
-	result = bytes.ReplaceAll(result, []byte("\r"), []byte("\n"))
-
-	// Filter echoed input
-	if r.config.Output.FilterEcho {
-		r.mu.Lock()
-		lastInput := r.lastInput
-		r.mu.Unlock()
-
-		if lastInput != "" && bytes.Contains(result, []byte(lastInput)) {
-			// Remove the echoed command line (command + newline)
-			result = bytes.Replace(result, []byte(lastInput+"\n"), []byte{}, 1)
-		}
-	}
-
-	// Trim prompt patterns
-	if r.config.Output.TrimPrompt {
-		for _, re := range r.promptRegexps {
-			result = re.ReplaceAll(result, []byte{})
-		}
-	}
-
-	// Clean up multiple consecutive newlines
-	for bytes.Contains(result, []byte("\n\n\n")) {
-		result = bytes.ReplaceAll(result, []byte("\n\n\n"), []byte("\n\n"))
-	}
-
-	// Trim leading/trailing whitespace
-	result = bytes.TrimSpace(result)
-
-	return result, promptDetected
-}
-
-// DetectPrompt checks if the output contains a prompt.
-func (r *REPL) DetectPrompt(data []byte) bool {
-	str := string(data)
-	for _, re := range r.promptRegexps {
-		if re.MatchString(str) {
-			return true
-		}
-	}
-	return false
-}
-
-// ansiRegex matches ANSI escape sequences.
-var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
-
-// stripANSI removes ANSI escape sequences from data.
-func stripANSI(data []byte) []byte {
-	return ansiRegex.ReplaceAll(data, []byte{})
+	return data, false
 }
 
 // Language returns the REPL language/name.
@@ -251,4 +172,67 @@ func (r *REPL) Language() string {
 // ExitCommand returns the command to gracefully exit the REPL.
 func (r *REPL) ExitCommand() string {
 	return r.config.ExitCommand
+}
+
+func (r *REPL) detectReadyToken(data []byte) bool {
+	if len(r.readyToken) == 0 {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if len(r.readyBuffer) == 0 {
+		if bytes.Contains(data, r.readyToken) {
+			return true
+		}
+		r.readyBuffer = append(r.readyBuffer[:0], tailForToken(data, len(r.readyToken))...)
+		return false
+	}
+
+	combined := make([]byte, 0, len(r.readyBuffer)+len(data))
+	combined = append(combined, r.readyBuffer...)
+	combined = append(combined, data...)
+	if bytes.Contains(combined, r.readyToken) {
+		r.readyBuffer = r.readyBuffer[:0]
+		return true
+	}
+	r.readyBuffer = append(r.readyBuffer[:0], tailForToken(combined, len(r.readyToken))...)
+	return false
+}
+
+func tailForToken(data []byte, tokenLen int) []byte {
+	if tokenLen <= 1 || len(data) < tokenLen-1 {
+		return data
+	}
+	return data[len(data)-(tokenLen-1):]
+}
+
+func (r *REPL) markReady() bool {
+	fired := false
+	r.readyOnce.Do(func() {
+		fired = true
+	})
+	return fired
+}
+
+func (r *REPL) scheduleStartupReady() {
+	if r.config.Ready.Mode != ReadyModeStartupDelay {
+		return
+	}
+	delay := time.Duration(r.config.Ready.StartupDelayMs) * time.Millisecond
+	if delay <= 0 {
+		delay = time.Duration(DefaultReadyStartupDelayMs) * time.Millisecond
+	}
+	go func() {
+		time.Sleep(delay)
+		if !r.IsRunning() {
+			return
+		}
+		if r.markReady() {
+			r.BaseProcess.SignalInputReady()
+			r.BaseProcess.PublishOutput(process.ProcessOutput{
+				Source: process.OutputSourcePrompt,
+			})
+		}
+	}()
 }

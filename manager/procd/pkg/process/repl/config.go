@@ -3,7 +3,6 @@ package repl
 
 import (
 	"fmt"
-	"regexp"
 )
 
 // ExecCandidate represents a candidate executable with its arguments.
@@ -24,24 +23,30 @@ type EnvVar struct {
 	ValueFrom string `json:"value_from,omitempty" yaml:"value_from,omitempty"`
 }
 
-// PromptConfig defines how to detect and customize prompts.
+// PromptConfig defines how to customize prompts.
 type PromptConfig struct {
-	// Patterns are regex patterns to detect prompt.
-	Patterns []string `json:"patterns,omitempty" yaml:"patterns,omitempty"`
 	// CustomPrompt is the custom prompt to set (if supported by the REPL).
 	CustomPrompt string `json:"custom_prompt,omitempty" yaml:"custom_prompt,omitempty"`
 	// PromptEnvVar is the env var name to set prompt (e.g., "PS1" for shells).
 	PromptEnvVar string `json:"prompt_env_var,omitempty" yaml:"prompt_env_var,omitempty"`
 }
 
-// OutputConfig defines output processing configuration.
-type OutputConfig struct {
-	// StripANSI removes ANSI escape sequences from output.
-	StripANSI bool `json:"strip_ansi,omitempty" yaml:"strip_ansi,omitempty"`
-	// FilterEcho removes echoed input from output.
-	FilterEcho bool `json:"filter_echo,omitempty" yaml:"filter_echo,omitempty"`
-	// TrimPrompt removes prompt patterns from output.
-	TrimPrompt bool `json:"trim_prompt,omitempty" yaml:"trim_prompt,omitempty"`
+// ReadyMode defines how initial input readiness is detected.
+type ReadyMode string
+
+const (
+	ReadyModePromptToken  ReadyMode = "prompt_token"
+	ReadyModeStartupDelay ReadyMode = "startup_delay"
+)
+
+// ReadyConfig defines how the REPL becomes input-ready.
+type ReadyConfig struct {
+	// Mode controls the readiness detection strategy.
+	Mode ReadyMode `json:"mode,omitempty" yaml:"mode,omitempty"`
+	// Token is the prompt token used for ReadyModePromptToken.
+	Token string `json:"token,omitempty" yaml:"token,omitempty"`
+	// StartupDelayMs is the delay before ready in startup_delay mode.
+	StartupDelayMs int `json:"startup_delay_ms,omitempty" yaml:"startup_delay_ms,omitempty"`
 }
 
 // REPLConfig defines the configuration for a REPL type.
@@ -65,8 +70,8 @@ type REPLConfig struct {
 	// Prompt configuration.
 	Prompt PromptConfig `json:"prompt,omitempty" yaml:"prompt,omitempty"`
 
-	// Output processing configuration.
-	Output OutputConfig `json:"output,omitempty" yaml:"output,omitempty"`
+	// Ready configuration.
+	Ready ReadyConfig `json:"ready,omitempty" yaml:"ready,omitempty"`
 
 	// InitCommands are commands to run after REPL starts (e.g., disable history).
 	InitCommands []string `json:"init_commands,omitempty" yaml:"init_commands,omitempty"`
@@ -88,16 +93,32 @@ func (c *REPLConfig) Validate() error {
 			return fmt.Errorf("candidate %d: name is required", i)
 		}
 	}
-	// Validate prompt patterns are valid regex
-	if len(c.Prompt.Patterns) == 0 {
-		return fmt.Errorf("prompt patterns are required for REPL completion detection")
+	switch c.Ready.Mode {
+	case "", ReadyModePromptToken, ReadyModeStartupDelay:
+		// ok
+	default:
+		return fmt.Errorf("ready mode %q is invalid", c.Ready.Mode)
 	}
-	for i, pattern := range c.Prompt.Patterns {
-		if _, err := regexp.Compile(pattern); err != nil {
-			return fmt.Errorf("prompt pattern %d is invalid regex: %w", i, err)
-		}
+	if c.Ready.Mode == ReadyModePromptToken && c.Ready.Token == "" {
+		return fmt.Errorf("ready token is required for prompt_token mode")
+	}
+	if c.Ready.Mode == ReadyModeStartupDelay && c.Ready.StartupDelayMs < 0 {
+		return fmt.Errorf("startup_delay_ms must be >= 0")
 	}
 	return nil
+}
+
+func (c *REPLConfig) applyDefaults() {
+	if c.Ready.Mode == "" {
+		if c.Ready.Token != "" {
+			c.Ready.Mode = ReadyModePromptToken
+		} else {
+			c.Ready.Mode = ReadyModeStartupDelay
+		}
+	}
+	if c.Ready.Mode == ReadyModeStartupDelay && c.Ready.StartupDelayMs == 0 {
+		c.Ready.StartupDelayMs = DefaultReadyStartupDelayMs
+	}
 }
 
 // Clone returns a deep copy of the config.
@@ -112,13 +133,18 @@ func (c *REPLConfig) Clone() *REPLConfig {
 	}
 	clone.Env = make([]EnvVar, len(c.Env))
 	copy(clone.Env, c.Env)
-	clone.Prompt.Patterns = append([]string(nil), c.Prompt.Patterns...)
 	clone.InitCommands = append([]string(nil), c.InitCommands...)
 	return &clone
 }
 
-// DefaultPrompt is the default custom prompt for shell-like REPLs.
-const DefaultPrompt = "SANDBOX0>>> "
+// DefaultReadyToken is the default prompt token for REPLs.
+const DefaultReadyToken = "__S0_READY__ "
+
+// DefaultContinuationToken is the default continuation prompt for REPLs.
+const DefaultContinuationToken = "__S0_CONT__ "
+
+// DefaultReadyStartupDelayMs is the default startup delay for readiness.
+const DefaultReadyStartupDelayMs = 200
 
 // BuiltinConfigs contains built-in REPL configurations.
 var BuiltinConfigs = map[string]*REPLConfig{
@@ -127,29 +153,16 @@ var BuiltinConfigs = map[string]*REPLConfig{
 		DisplayName: "Python",
 		Description: "Python interactive interpreter",
 		Candidates: []ExecCandidate{
-			{Name: "ipython3", Args: []string{"--simple-prompt", "-i", "--no-banner", "--colors=NoColor"}},
-			{Name: "ipython", Args: []string{"--simple-prompt", "-i", "--no-banner", "--colors=NoColor"}},
-			{Name: "python3", Args: []string{"-i", "-u"}},
-			{Name: "python", Args: []string{"-i", "-u"}},
-			{Name: "python2", Args: []string{"-i", "-u"}},
+			{Name: "python3", Args: []string{"-q", "-i", "-u", "-c", "import sys; sys.ps1='" + DefaultReadyToken + "'; sys.ps2='" + DefaultContinuationToken + "'"}},
+			{Name: "python", Args: []string{"-q", "-i", "-u", "-c", "import sys; sys.ps1='" + DefaultReadyToken + "'; sys.ps2='" + DefaultContinuationToken + "'"}},
 		},
 		Env: []EnvVar{
 			{Name: "PYTHONUNBUFFERED", Value: "1"},
 			{Name: "PYTHONDONTWRITEBYTECODE", Value: "1"},
 		},
-		Prompt: PromptConfig{
-			Patterns: []string{
-				`In \[\d+\]:`, // IPython input prompt
-				`Out\[\d+\]:`, // IPython output prompt
-				`\.{3}:`,      // IPython continuation
-				`>>> `,        // Standard Python prompt
-				`\.\.\. `,     // Standard continuation
-			},
-		},
-		Output: OutputConfig{
-			StripANSI:  true,
-			FilterEcho: true,
-			TrimPrompt: true,
+		Ready: ReadyConfig{
+			Mode:  ReadyModePromptToken,
+			Token: DefaultReadyToken,
 		},
 		ExitCommand: "exit()",
 	},
@@ -159,19 +172,12 @@ var BuiltinConfigs = map[string]*REPLConfig{
 		DisplayName: "Node.js",
 		Description: "Node.js JavaScript runtime REPL",
 		Candidates: []ExecCandidate{
-			{Name: "node", Args: []string{"--interactive"}},
-			{Name: "nodejs", Args: []string{"--interactive"}},
+			{Name: "node", Args: []string{"-e", "require('repl').start({prompt: '" + DefaultReadyToken + "'})"}},
+			{Name: "nodejs", Args: []string{"-e", "require('repl').start({prompt: '" + DefaultReadyToken + "'})"}},
 		},
-		Prompt: PromptConfig{
-			Patterns: []string{
-				`> `,      // Standard Node prompt
-				`\.\.\. `, // Continuation
-			},
-		},
-		Output: OutputConfig{
-			StripANSI:  true,
-			FilterEcho: true,
-			TrimPrompt: true,
+		Ready: ReadyConfig{
+			Mode:  ReadyModePromptToken,
+			Token: DefaultReadyToken,
 		},
 		ExitCommand: ".exit",
 	},
@@ -190,16 +196,12 @@ var BuiltinConfigs = map[string]*REPLConfig{
 			{Name: "PS1", ValueFrom: "prompt"},
 		},
 		Prompt: PromptConfig{
-			CustomPrompt: DefaultPrompt,
+			CustomPrompt: DefaultReadyToken,
 			PromptEnvVar: "PS1",
-			Patterns: []string{
-				regexp.QuoteMeta(DefaultPrompt),
-			},
 		},
-		Output: OutputConfig{
-			StripANSI:  true,
-			FilterEcho: true,
-			TrimPrompt: true,
+		Ready: ReadyConfig{
+			Mode:  ReadyModePromptToken,
+			Token: DefaultReadyToken,
 		},
 		ExitCommand: "exit",
 	},
@@ -219,16 +221,12 @@ var BuiltinConfigs = map[string]*REPLConfig{
 			{Name: "PS1", ValueFrom: "prompt"},
 		},
 		Prompt: PromptConfig{
-			CustomPrompt: DefaultPrompt,
+			CustomPrompt: DefaultReadyToken,
 			PromptEnvVar: "PS1",
-			Patterns: []string{
-				regexp.QuoteMeta(DefaultPrompt),
-			},
 		},
-		Output: OutputConfig{
-			StripANSI:  true,
-			FilterEcho: true,
-			TrimPrompt: true,
+		Ready: ReadyConfig{
+			Mode:  ReadyModePromptToken,
+			Token: DefaultReadyToken,
 		},
 		ExitCommand: "exit",
 	},
@@ -238,20 +236,11 @@ var BuiltinConfigs = map[string]*REPLConfig{
 		DisplayName: "Ruby",
 		Description: "Ruby IRB (Interactive Ruby)",
 		Candidates: []ExecCandidate{
-			{Name: "irb", Args: []string{"--simple-prompt", "--noreadline"}},
-			{Name: "ruby", Args: []string{"-e", "require 'irb'; IRB.start"}},
+			{Name: "ruby", Args: []string{"-e", "require 'irb'; IRB.conf[:PROMPT][:S0]={PROMPT_I:'" + DefaultReadyToken + "', PROMPT_S:'" + DefaultContinuationToken + "', PROMPT_C:'" + DefaultContinuationToken + "', RETURN:\"%s\\n\"}; IRB.conf[:PROMPT_MODE]=:S0; IRB.start"}},
 		},
-		Prompt: PromptConfig{
-			Patterns: []string{
-				`>> `,     // IRB simple prompt
-				`\?> `,    // IRB continuation
-				`irb.*> `, // IRB standard prompt
-			},
-		},
-		Output: OutputConfig{
-			StripANSI:  true,
-			FilterEcho: true,
-			TrimPrompt: true,
+		Ready: ReadyConfig{
+			Mode:  ReadyModePromptToken,
+			Token: DefaultReadyToken,
 		},
 		ExitCommand: "exit",
 	},
@@ -261,23 +250,16 @@ var BuiltinConfigs = map[string]*REPLConfig{
 		DisplayName: "Lua",
 		Description: "Lua interpreter",
 		Candidates: []ExecCandidate{
-			{Name: "lua", Args: []string{"-i"}},
-			{Name: "lua5.4", Args: []string{"-i"}},
-			{Name: "lua5.3", Args: []string{"-i"}},
-			{Name: "lua5.2", Args: []string{"-i"}},
-			{Name: "lua5.1", Args: []string{"-i"}},
-			{Name: "luajit", Args: []string{"-i"}},
+			{Name: "lua", Args: []string{"-i", "-e", "_PROMPT='" + DefaultReadyToken + "'; _PROMPT2='" + DefaultContinuationToken + "'"}},
+			{Name: "lua5.4", Args: []string{"-i", "-e", "_PROMPT='" + DefaultReadyToken + "'; _PROMPT2='" + DefaultContinuationToken + "'"}},
+			{Name: "lua5.3", Args: []string{"-i", "-e", "_PROMPT='" + DefaultReadyToken + "'; _PROMPT2='" + DefaultContinuationToken + "'"}},
+			{Name: "lua5.2", Args: []string{"-i", "-e", "_PROMPT='" + DefaultReadyToken + "'; _PROMPT2='" + DefaultContinuationToken + "'"}},
+			{Name: "lua5.1", Args: []string{"-i", "-e", "_PROMPT='" + DefaultReadyToken + "'; _PROMPT2='" + DefaultContinuationToken + "'"}},
+			{Name: "luajit", Args: []string{"-i", "-e", "_PROMPT='" + DefaultReadyToken + "'; _PROMPT2='" + DefaultContinuationToken + "'"}},
 		},
-		Prompt: PromptConfig{
-			Patterns: []string{
-				`> `,  // Lua prompt
-				`>> `, // Continuation
-			},
-		},
-		Output: OutputConfig{
-			StripANSI:  true,
-			FilterEcho: true,
-			TrimPrompt: true,
+		Ready: ReadyConfig{
+			Mode:  ReadyModePromptToken,
+			Token: DefaultReadyToken,
 		},
 		ExitCommand: "os.exit()",
 	},
@@ -290,17 +272,8 @@ var BuiltinConfigs = map[string]*REPLConfig{
 			{Name: "psysh", Args: []string{}}, // PsySH is better for REPL
 			{Name: "php", Args: []string{"-a"}},
 		},
-		Prompt: PromptConfig{
-			Patterns: []string{
-				`php > `,    // PHP prompt
-				`>>> `,      // PsySH prompt
-				`\.\.\. > `, // Continuation
-			},
-		},
-		Output: OutputConfig{
-			StripANSI:  true,
-			FilterEcho: true,
-			TrimPrompt: true,
+		Ready: ReadyConfig{
+			Mode: ReadyModeStartupDelay,
 		},
 		ExitCommand: "exit",
 	},
@@ -310,19 +283,12 @@ var BuiltinConfigs = map[string]*REPLConfig{
 		DisplayName: "R",
 		Description: "R statistical computing",
 		Candidates: []ExecCandidate{
-			{Name: "R", Args: []string{"--no-save", "--no-restore", "--interactive"}},
-			{Name: "Rscript", Args: []string{"-e", "options(prompt='> '); while(TRUE) { cat('> '); eval(parse(text=readline())) }"}},
+			{Name: "R", Args: []string{"--no-save", "--no-restore", "--interactive", "-e", "options(prompt='" + DefaultReadyToken + "', continue='" + DefaultContinuationToken + "')"}},
+			{Name: "Rscript", Args: []string{"-e", "options(prompt='" + DefaultReadyToken + "', continue='" + DefaultContinuationToken + "'); while(TRUE) { cat(getOption('prompt')); eval(parse(text=readline())) }"}},
 		},
-		Prompt: PromptConfig{
-			Patterns: []string{
-				`> `,  // R prompt
-				`\+ `, // Continuation
-			},
-		},
-		Output: OutputConfig{
-			StripANSI:  true,
-			FilterEcho: true,
-			TrimPrompt: true,
+		Ready: ReadyConfig{
+			Mode:  ReadyModePromptToken,
+			Token: DefaultReadyToken,
 		},
 		ExitCommand: "q()",
 	},
@@ -335,16 +301,8 @@ var BuiltinConfigs = map[string]*REPLConfig{
 			{Name: "reply", Args: []string{}}, // Reply is a better Perl REPL
 			{Name: "perl", Args: []string{"-de0"}},
 		},
-		Prompt: PromptConfig{
-			Patterns: []string{
-				`DB<\d+> `, // Perl debugger prompt
-				`\d+> `,    // Reply prompt
-			},
-		},
-		Output: OutputConfig{
-			StripANSI:  true,
-			FilterEcho: true,
-			TrimPrompt: true,
+		Ready: ReadyConfig{
+			Mode: ReadyModeStartupDelay,
 		},
 		ExitCommand: "q",
 	},
@@ -357,17 +315,8 @@ var BuiltinConfigs = map[string]*REPLConfig{
 		Candidates: []ExecCandidate{
 			{Name: "redis-cli", Args: []string{}},
 		},
-		Prompt: PromptConfig{
-			Patterns: []string{
-				`\d+\.\d+\.\d+\.\d+:\d+> `, // Connected prompt (127.0.0.1:6379>)
-				`redis.*> `,                // Named connection
-				`> `,                       // Generic
-			},
-		},
-		Output: OutputConfig{
-			StripANSI:  true,
-			FilterEcho: true,
-			TrimPrompt: true,
+		Ready: ReadyConfig{
+			Mode: ReadyModeStartupDelay,
 		},
 		ExitCommand: "QUIT",
 	},
@@ -377,19 +326,12 @@ var BuiltinConfigs = map[string]*REPLConfig{
 		DisplayName: "SQLite",
 		Description: "SQLite command-line shell",
 		Candidates: []ExecCandidate{
-			{Name: "sqlite3", Args: []string{"-interactive"}},
-			{Name: "sqlite", Args: []string{"-interactive"}},
+			{Name: "sqlite3", Args: []string{"-interactive", "-cmd", ".prompt '" + DefaultReadyToken + "' '" + DefaultContinuationToken + "'"}},
+			{Name: "sqlite", Args: []string{"-interactive", "-cmd", ".prompt '" + DefaultReadyToken + "' '" + DefaultContinuationToken + "'"}},
 		},
-		Prompt: PromptConfig{
-			Patterns: []string{
-				`sqlite> `,
-				`   \.\.\.> `, // Continuation
-			},
-		},
-		Output: OutputConfig{
-			StripANSI:  true,
-			FilterEcho: true,
-			TrimPrompt: true,
+		Ready: ReadyConfig{
+			Mode:  ReadyModePromptToken,
+			Token: DefaultReadyToken,
 		},
 		ExitCommand: ".quit",
 	},
@@ -399,20 +341,12 @@ var BuiltinConfigs = map[string]*REPLConfig{
 		DisplayName: "MySQL",
 		Description: "MySQL command-line client",
 		Candidates: []ExecCandidate{
-			{Name: "mysql", Args: []string{}},
-			{Name: "mariadb", Args: []string{}},
+			{Name: "mysql", Args: []string{"--prompt", DefaultReadyToken}},
+			{Name: "mariadb", Args: []string{"--prompt", DefaultReadyToken}},
 		},
-		Prompt: PromptConfig{
-			Patterns: []string{
-				`mysql> `,
-				`    -> `, // Continuation
-				`MariaDB.*> `,
-			},
-		},
-		Output: OutputConfig{
-			StripANSI:  true,
-			FilterEcho: true,
-			TrimPrompt: true,
+		Ready: ReadyConfig{
+			Mode:  ReadyModePromptToken,
+			Token: DefaultReadyToken,
 		},
 		ExitCommand: "exit",
 	},
@@ -422,178 +356,13 @@ var BuiltinConfigs = map[string]*REPLConfig{
 		DisplayName: "PostgreSQL",
 		Description: "PostgreSQL interactive terminal",
 		Candidates: []ExecCandidate{
-			{Name: "psql", Args: []string{}},
+			{Name: "psql", Args: []string{"-v", "PROMPT1=" + DefaultReadyToken, "-v", "PROMPT2=" + DefaultContinuationToken}},
 		},
-		Prompt: PromptConfig{
-			Patterns: []string{
-				`\w+=# `, // Superuser prompt
-				`\w+=> `, // Normal user prompt
-				`\w+-# `, // Continuation (superuser)
-				`\w+-> `, // Continuation (normal)
-			},
-		},
-		Output: OutputConfig{
-			StripANSI:  true,
-			FilterEcho: true,
-			TrimPrompt: true,
+		Ready: ReadyConfig{
+			Mode:  ReadyModePromptToken,
+			Token: DefaultReadyToken,
 		},
 		ExitCommand: `\q`,
-	},
-
-	// Additional language REPLs
-	"elixir": {
-		Name:        "elixir",
-		DisplayName: "Elixir",
-		Description: "Elixir IEx shell",
-		Candidates: []ExecCandidate{
-			{Name: "iex", Args: []string{}},
-		},
-		Prompt: PromptConfig{
-			Patterns: []string{
-				`iex\(\d+\)> `,   // IEx prompt
-				`\.{3}\(\d+\)> `, // Continuation
-			},
-		},
-		Output: OutputConfig{
-			StripANSI:  true,
-			FilterEcho: true,
-			TrimPrompt: true,
-		},
-		ExitCommand: "System.halt",
-	},
-
-	"erlang": {
-		Name:        "erlang",
-		DisplayName: "Erlang",
-		Description: "Erlang shell",
-		Candidates: []ExecCandidate{
-			{Name: "erl", Args: []string{}},
-		},
-		Prompt: PromptConfig{
-			Patterns: []string{
-				`\d+> `, // Erlang prompt
-			},
-		},
-		Output: OutputConfig{
-			StripANSI:  true,
-			FilterEcho: true,
-			TrimPrompt: true,
-		},
-		ExitCommand: "q().",
-	},
-
-	"scala": {
-		Name:        "scala",
-		DisplayName: "Scala",
-		Description: "Scala REPL",
-		Candidates: []ExecCandidate{
-			{Name: "scala", Args: []string{}},
-			{Name: "amm", Args: []string{}}, // Ammonite REPL
-		},
-		Prompt: PromptConfig{
-			Patterns: []string{
-				`scala> `,
-				`     \| `, // Continuation
-				`@ `,       // Ammonite
-			},
-		},
-		Output: OutputConfig{
-			StripANSI:  true,
-			FilterEcho: true,
-			TrimPrompt: true,
-		},
-		ExitCommand: ":quit",
-	},
-
-	"clojure": {
-		Name:        "clojure",
-		DisplayName: "Clojure",
-		Description: "Clojure REPL",
-		Candidates: []ExecCandidate{
-			{Name: "clj", Args: []string{}},
-			{Name: "clojure", Args: []string{}},
-			{Name: "lein", Args: []string{"repl"}},
-		},
-		Prompt: PromptConfig{
-			Patterns: []string{
-				`user=> `, // Default Clojure prompt
-				`\w+=> `,  // Namespace prompt
-				`#_=> `,   // Continuation
-			},
-		},
-		Output: OutputConfig{
-			StripANSI:  true,
-			FilterEcho: true,
-			TrimPrompt: true,
-		},
-		ExitCommand: "(System/exit 0)",
-	},
-
-	"haskell": {
-		Name:        "haskell",
-		DisplayName: "Haskell",
-		Description: "GHCi - Glasgow Haskell Compiler interactive",
-		Candidates: []ExecCandidate{
-			{Name: "ghci", Args: []string{}},
-		},
-		Prompt: PromptConfig{
-			Patterns: []string{
-				`Prelude> `,
-				`\*?\w+> `, // Module prompt
-				`ghci> `,
-			},
-		},
-		Output: OutputConfig{
-			StripANSI:  true,
-			FilterEcho: true,
-			TrimPrompt: true,
-		},
-		ExitCommand: ":quit",
-	},
-
-	"ocaml": {
-		Name:        "ocaml",
-		DisplayName: "OCaml",
-		Description: "OCaml toplevel",
-		Candidates: []ExecCandidate{
-			{Name: "utop", Args: []string{}}, // Better UX
-			{Name: "ocaml", Args: []string{}},
-		},
-		Prompt: PromptConfig{
-			Patterns: []string{
-				`# `,            // Standard OCaml
-				`utop\[\d+\]> `, // UTop
-			},
-		},
-		Output: OutputConfig{
-			StripANSI:  true,
-			FilterEcho: true,
-			TrimPrompt: true,
-		},
-		ExitCommand: "#quit;;",
-	},
-
-	"julia": {
-		Name:        "julia",
-		DisplayName: "Julia",
-		Description: "Julia REPL",
-		Candidates: []ExecCandidate{
-			{Name: "julia", Args: []string{}},
-		},
-		Prompt: PromptConfig{
-			Patterns: []string{
-				`julia> `,
-				`help\?> `, // Help mode
-				`shell> `,  // Shell mode
-				`pkg> `,    // Package mode
-			},
-		},
-		Output: OutputConfig{
-			StripANSI:  true,
-			FilterEcho: true,
-			TrimPrompt: true,
-		},
-		ExitCommand: "exit()",
 	},
 
 	"swift": {
@@ -604,16 +373,8 @@ var BuiltinConfigs = map[string]*REPLConfig{
 			{Name: "swift", Args: []string{"-repl"}},
 			{Name: "swift", Args: []string{}},
 		},
-		Prompt: PromptConfig{
-			Patterns: []string{
-				`\d+> `,  // Swift REPL prompt
-				`\d+\. `, // Continuation
-			},
-		},
-		Output: OutputConfig{
-			StripANSI:  true,
-			FilterEcho: true,
-			TrimPrompt: true,
+		Ready: ReadyConfig{
+			Mode: ReadyModeStartupDelay,
 		},
 		ExitCommand: ":quit",
 	},
@@ -626,38 +387,10 @@ var BuiltinConfigs = map[string]*REPLConfig{
 			{Name: "kotlinc", Args: []string{}},
 			{Name: "kotlin", Args: []string{}},
 		},
-		Prompt: PromptConfig{
-			Patterns: []string{
-				`>>> `,    // Kotlin prompt
-				`\.\.\. `, // Continuation
-			},
-		},
-		Output: OutputConfig{
-			StripANSI:  true,
-			FilterEcho: true,
-			TrimPrompt: true,
+		Ready: ReadyConfig{
+			Mode: ReadyModeStartupDelay,
 		},
 		ExitCommand: ":quit",
-	},
-
-	"groovy": {
-		Name:        "groovy",
-		DisplayName: "Groovy",
-		Description: "Groovy shell",
-		Candidates: []ExecCandidate{
-			{Name: "groovysh", Args: []string{}},
-		},
-		Prompt: PromptConfig{
-			Patterns: []string{
-				`groovy:\d+> `,
-			},
-		},
-		Output: OutputConfig{
-			StripANSI:  true,
-			FilterEcho: true,
-			TrimPrompt: true,
-		},
-		ExitCommand: ":exit",
 	},
 }
 

@@ -482,6 +482,11 @@ func (bp *BaseProcess) signalInputReady() {
 	})
 }
 
+// SignalInputReady marks the process as ready for input.
+func (bp *BaseProcess) SignalInputReady() {
+	bp.signalInputReady()
+}
+
 func (bp *BaseProcess) stopInputWriter() {
 	bp.inputStopOnce.Do(func() {
 		close(bp.inputStop)

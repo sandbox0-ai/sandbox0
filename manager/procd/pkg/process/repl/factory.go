@@ -39,8 +39,8 @@ func CreateREPLConfig(name string, candidates []ExecCandidate) *REPLConfig {
 		Name:        name,
 		DisplayName: name,
 		Candidates:  candidates,
-		Prompt: PromptConfig{
-			Patterns: []string{`> `, `>>> `},
+		Ready: ReadyConfig{
+			Mode: ReadyModeStartupDelay,
 		},
 	}
 }

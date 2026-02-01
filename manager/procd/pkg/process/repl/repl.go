@@ -10,12 +10,16 @@ import (
 )
 
 // REPL implements a configurable REPL process.
+// Design note: REPL output is intentionally passed through unchanged.
+// Parsing interactive CLI output is brittle and lossy; the only reliable
+// contract is readiness via a prompt token, so we never trim or reinterpret output.
+// This also keeps REPL compatible with arbitrary interactive CLIs.
 type REPL struct {
 	*process.BaseProcess
 	runner *process.PTYRunner
 	config *REPLConfig
 
-	// Ready detection state
+	// Ready detection state.
 	mu          sync.Mutex
 	readyToken  []byte
 	readyBuffer []byte
@@ -153,6 +157,7 @@ func (r *REPL) Config() *REPLConfig {
 }
 
 // filterOutput detects readiness without altering output.
+// This is deliberately minimal: output must remain raw for AI agents.
 func (r *REPL) filterOutput(data []byte) ([]byte, bool) {
 	if len(data) == 0 {
 		return data, false

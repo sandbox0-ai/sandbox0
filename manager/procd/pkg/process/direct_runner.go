@@ -1,10 +1,11 @@
 package process
 
 import (
-	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os/exec"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -14,11 +15,16 @@ type DirectRunner struct {
 	base         *BaseProcess
 	cmd          *exec.Cmd
 	ctx          context.Context
-	stdout       bytes.Buffer
-	stderr       bytes.Buffer
+	stdout       *limitedBuffer
+	stderr       *limitedBuffer
+	stdoutPipe   io.ReadCloser
+	stderrPipe   io.ReadCloser
+	outputWG     sync.WaitGroup
 	onStop       func()
 	exitResolver func(error) (int, bool)
 }
+
+var _ OutputProvider = (*DirectRunner)(nil)
 
 // NewDirectRunner creates a direct runner for a process.
 func NewDirectRunner(base *BaseProcess, ctx context.Context, onStop func()) *DirectRunner {
@@ -26,6 +32,8 @@ func NewDirectRunner(base *BaseProcess, ctx context.Context, onStop func()) *Dir
 		base:   base,
 		ctx:    ctx,
 		onStop: onStop,
+		stdout: newLimitedBuffer(maxDirectRunnerOutputBytes),
+		stderr: newLimitedBuffer(maxDirectRunnerOutputBytes),
 	}
 }
 
@@ -47,9 +55,16 @@ func (r *DirectRunner) Start(cmd *exec.Cmd) error {
 		Setpgid: true,
 	}
 
-	// Set up pipes for output capture
-	cmd.Stdout = &r.stdout
-	cmd.Stderr = &r.stderr
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		r.base.SetState(ProcessStateCrashed)
+		return fmt.Errorf("%w: %v", ErrProcessStartFailed, err)
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		r.base.SetState(ProcessStateCrashed)
+		return fmt.Errorf("%w: %v", ErrProcessStartFailed, err)
+	}
 
 	if err := cmd.Start(); err != nil {
 		r.base.SetState(ProcessStateCrashed)
@@ -57,6 +72,8 @@ func (r *DirectRunner) Start(cmd *exec.Cmd) error {
 	}
 
 	r.cmd = cmd
+	r.stdoutPipe = stdoutPipe
+	r.stderrPipe = stderrPipe
 	r.base.SetPID(cmd.Process.Pid)
 	r.base.SetStartTime(time.Now())
 	r.base.SetState(ProcessStateRunning)
@@ -69,6 +86,9 @@ func (r *DirectRunner) Start(cmd *exec.Cmd) error {
 		Config:      r.base.GetConfig(),
 	})
 
+	r.outputWG.Add(2)
+	go r.readPipe(OutputSourceStdout, stdoutPipe, r.stdout)
+	go r.readPipe(OutputSourceStderr, stderrPipe, r.stderr)
 	go r.monitorProcess()
 
 	return nil
@@ -88,6 +108,12 @@ func (r *DirectRunner) Stop() error {
 		if err := r.cmd.Process.Signal(syscall.SIGTERM); err != nil {
 			_ = r.cmd.Process.Kill()
 		}
+	}
+	if r.stdoutPipe != nil {
+		_ = r.stdoutPipe.Close()
+	}
+	if r.stderrPipe != nil {
+		_ = r.stderrPipe.Close()
 	}
 
 	r.base.SetState(ProcessStateStopped)
@@ -126,21 +152,8 @@ func (r *DirectRunner) monitorProcess() {
 
 	r.base.SetExitCode(exitCode)
 
+	r.outputWG.Wait()
 	duration := time.Since(r.base.StartTime())
-
-	// Publish captured output
-	if r.stdout.Len() > 0 {
-		r.base.PublishOutput(ProcessOutput{
-			Source: OutputSourceStdout,
-			Data:   r.stdout.Bytes(),
-		})
-	}
-	if r.stderr.Len() > 0 {
-		r.base.PublishOutput(ProcessOutput{
-			Source: OutputSourceStderr,
-			Data:   r.stderr.Bytes(),
-		})
-	}
 
 	stdoutPreview := truncatePreview(r.stdout.Bytes(), 2048)
 	stderrPreview := truncatePreview(r.stderr.Bytes(), 2048)
@@ -168,6 +181,82 @@ func (r *DirectRunner) monitorProcess() {
 	r.base.CloseOutput()
 }
 
+func (r *DirectRunner) readPipe(source OutputSource, reader io.Reader, buffer *limitedBuffer) {
+	defer r.outputWG.Done()
+	buf := make([]byte, 4096)
+	for {
+		n, err := reader.Read(buf)
+		if n > 0 {
+			payload := make([]byte, n)
+			copy(payload, buf[:n])
+			buffer.Write(payload)
+			r.base.PublishOutput(ProcessOutput{
+				Source: source,
+				Data:   payload,
+			})
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+const maxDirectRunnerOutputBytes = 1 << 20
+
+type limitedBuffer struct {
+	mu   sync.Mutex
+	max  int
+	data []byte
+}
+
+func newLimitedBuffer(max int) *limitedBuffer {
+	if max <= 0 {
+		max = 1 << 20
+	}
+	return &limitedBuffer{max: max}
+}
+
+func (b *limitedBuffer) Write(p []byte) {
+	if len(p) == 0 {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(p) >= b.max {
+		b.data = append(b.data[:0], p[len(p)-b.max:]...)
+		return
+	}
+	if len(b.data)+len(p) > b.max {
+		excess := len(b.data) + len(p) - b.max
+		if excess >= len(b.data) {
+			b.data = b.data[:0]
+		} else {
+			b.data = b.data[excess:]
+		}
+	}
+	b.data = append(b.data, p...)
+}
+
+func (b *limitedBuffer) Bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.data) == 0 {
+		return nil
+	}
+	out := make([]byte, len(b.data))
+	copy(out, b.data)
+	return out
+}
+
+func (b *limitedBuffer) String() string {
+	return string(b.Bytes())
+}
+
+func (b *limitedBuffer) Len() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.data)
+}
 func truncatePreview(data []byte, limit int) string {
 	if limit <= 0 || len(data) == 0 {
 		return ""

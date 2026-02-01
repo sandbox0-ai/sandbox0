@@ -712,6 +712,21 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if ctx.MainProcess.IsFinished() {
+		if outputProvider, ok := ctx.MainProcess.(process.OutputProvider); ok {
+			stdout, stderr := outputProvider.GetOutput()
+			if stdout != "" {
+				_ = conn.WriteJSON(map[string]any{
+					"source": string(process.OutputSourceStdout),
+					"data":   stdout,
+				})
+			}
+			if stderr != "" {
+				_ = conn.WriteJSON(map[string]any{
+					"source": string(process.OutputSourceStderr),
+					"data":   stderr,
+				})
+			}
+		}
 		closeConn("context finished")
 		return
 	}
@@ -757,20 +772,11 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 					if requestID == "" {
 						continue
 					}
-					msg := map[string]any{
-						"type":       "ready",
-						"request_id": requestID,
-					}
-					if err := conn.WriteJSON(msg); err != nil {
-						closeConn("websocket write failed")
-						return
-					}
 					ctx.Touch()
 					continue
 				}
 
 				msg := map[string]any{
-					"type":   "output",
 					"source": string(output.Source),
 					"data":   string(output.Data),
 				}

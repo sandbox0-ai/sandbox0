@@ -136,6 +136,12 @@ type ExitHandler func(ExitEvent)
 // StartHandler is a function that handles process start events.
 type StartHandler func(StartEvent)
 
+// OutputProvider exposes buffered stdout/stderr output when available.
+// Not all process types provide this (PTY-backed processes usually don't).
+type OutputProvider interface {
+	GetOutput() (stdout, stderr string)
+}
+
 // Process interface defines the contract for all process types.
 type Process interface {
 	// Identity

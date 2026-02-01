@@ -25,6 +25,7 @@ type CMD struct {
 }
 
 var _ process.Process = (*CMD)(nil)
+var _ process.OutputProvider = (*CMD)(nil)
 
 // NewCMD creates a new CMD process.
 // The command parameter should be the full command path and arguments, e.g., []string{"/bin/ls", "-la"}

@@ -1392,44 +1392,36 @@ paths:
       responses:
         "101":
           description: Switching Protocols
-  /api/v1/sandboxes/{id}/files/{path}:
+  /api/v1/sandboxes/{id}/files:
     get:
       tags: [files]
-      summary: Read file or query file info
+      summary: Read file content
       description: |
         Use query params:
-        - stat=true: returns file metadata
-        - list=true: returns directory entries
-        - binary=true: returns base64 content
+        - path=/tmp/a.txt: target file path
       security:
         - bearerAuth: []
       x-upstream-service: procd
-      x-upstream-path: /api/v1/files/{path}
+      x-upstream-path: /api/v1/files
       parameters:
         - $ref: "#/components/parameters/SandboxID"
         - $ref: "#/components/parameters/FilePath"
-        - $ref: "#/components/parameters/QueryStat"
-        - $ref: "#/components/parameters/QueryList"
-        - $ref: "#/components/parameters/QueryBinary"
       responses:
         "200":
-          description: File content or metadata
+          description: File content
           content:
             application/octet-stream:
               schema:
                 type: string
                 format: binary
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SuccessFileReadResponse"
     post:
       tags: [files]
       summary: Write file or create directory
-      description: Use `mkdir=true` to create directories, otherwise writes file content.
+      description: Use `path` query param and `mkdir=true` to create directories, otherwise writes file content.
       security:
         - bearerAuth: []
       x-upstream-service: procd
-      x-upstream-path: /api/v1/files/{path}
+      x-upstream-path: /api/v1/files
       parameters:
         - $ref: "#/components/parameters/SandboxID"
         - $ref: "#/components/parameters/FilePath"
@@ -1461,7 +1453,7 @@ paths:
       security:
         - bearerAuth: []
       x-upstream-service: procd
-      x-upstream-path: /api/v1/files/{path}
+      x-upstream-path: /api/v1/files
       parameters:
         - $ref: "#/components/parameters/SandboxID"
         - $ref: "#/components/parameters/FilePath"
@@ -1472,6 +1464,69 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessDeletedResponse"
+  /api/v1/sandboxes/{id}/files/stat:
+    get:
+      tags: [files]
+      summary: Stat a file
+      description: |
+        Use query params:
+        - path=/tmp/a.txt: target file path
+      security:
+        - bearerAuth: []
+      x-upstream-service: procd
+      x-upstream-path: /api/v1/files/stat
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+        - $ref: "#/components/parameters/FilePath"
+      responses:
+        "200":
+          description: File metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessFileStatResponse"
+  /api/v1/sandboxes/{id}/files/list:
+    get:
+      tags: [files]
+      summary: List directory entries
+      description: |
+        Use query params:
+        - path=/tmp: target directory path
+      security:
+        - bearerAuth: []
+      x-upstream-service: procd
+      x-upstream-path: /api/v1/files/list
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+        - $ref: "#/components/parameters/FilePath"
+      responses:
+        "200":
+          description: Directory entries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessFileListResponse"
+  /api/v1/sandboxes/{id}/files/binary:
+    get:
+      tags: [files]
+      summary: Read file content as base64
+      description: |
+        Use query params:
+        - path=/tmp/a.txt: target file path
+      security:
+        - bearerAuth: []
+      x-upstream-service: procd
+      x-upstream-path: /api/v1/files/binary
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+        - $ref: "#/components/parameters/FilePath"
+      responses:
+        "200":
+          description: Base64 file content
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessFileBinaryResponse"
   /api/v1/templates:
     get:
       tags: [templates]
@@ -1838,28 +1893,10 @@ components:
         type: string
     FilePath:
       name: path
-      in: path
+      in: query
       required: true
       schema:
         type: string
-    QueryStat:
-      name: stat
-      in: query
-      required: false
-      schema:
-        type: boolean
-    QueryList:
-      name: list
-      in: query
-      required: false
-      schema:
-        type: boolean
-    QueryBinary:
-      name: binary
-      in: query
-      required: false
-      schema:
-        type: boolean
     QueryMkdir:
       name: mkdir
       in: query
@@ -2882,6 +2919,32 @@ components:
                       items:
                         $ref: "#/components/schemas/FileInfo"
                 - $ref: "#/components/schemas/FileContentResponse"
+    SuccessFileStatResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/FileInfo"
+    SuccessFileListResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                entries:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/FileInfo"
+    SuccessFileBinaryResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/FileContentResponse"
     MoveFileRequest:
       type: object
       properties:

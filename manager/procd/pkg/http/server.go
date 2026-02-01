@@ -166,7 +166,10 @@ func (s *Server) setupRoutes() {
 	fileHandler := handlers.NewFileHandler(s.fileManager, s.logger)
 	api.HandleFunc("/files/watch", fileHandler.Watch).Methods("GET")
 	api.HandleFunc("/files/move", fileHandler.Move).Methods("POST")
-	api.PathPrefix("/files/").HandlerFunc(fileHandler.Handle)
+	api.HandleFunc("/files", fileHandler.Handle).Methods("GET", "POST", "DELETE")
+	api.HandleFunc("/files/stat", fileHandler.Stat).Methods("GET")
+	api.HandleFunc("/files/list", fileHandler.List).Methods("GET")
+	api.HandleFunc("/files/binary", fileHandler.Binary).Methods("GET")
 
 }
 

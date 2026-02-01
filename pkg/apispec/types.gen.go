@@ -4,10 +4,8 @@
 package apispec
 
 import (
-	"encoding/json"
 	"time"
 
-	"github.com/oapi-codegen/runtime"
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
@@ -117,9 +115,19 @@ const (
 	SuccessEnvelopeSuccessTrue SuccessEnvelopeSuccess = true
 )
 
-// Defines values for SuccessFileReadResponseSuccess.
+// Defines values for SuccessFileBinaryResponseSuccess.
 const (
-	SuccessFileReadResponseSuccessTrue SuccessFileReadResponseSuccess = true
+	SuccessFileBinaryResponseSuccessTrue SuccessFileBinaryResponseSuccess = true
+)
+
+// Defines values for SuccessFileListResponseSuccess.
+const (
+	SuccessFileListResponseSuccessTrue SuccessFileListResponseSuccess = true
+)
+
+// Defines values for SuccessFileStatResponseSuccess.
+const (
+	SuccessFileStatResponseSuccessTrue SuccessFileStatResponseSuccess = true
 )
 
 // Defines values for SuccessHealthResponseSuccess.
@@ -1058,24 +1066,34 @@ type SuccessEnvelope struct {
 // SuccessEnvelopeSuccess defines model for SuccessEnvelope.Success.
 type SuccessEnvelopeSuccess bool
 
-// SuccessFileReadResponse defines model for SuccessFileReadResponse.
-type SuccessFileReadResponse struct {
-	Data    *SuccessFileReadResponse_Data  `json:"data,omitempty"`
-	Success SuccessFileReadResponseSuccess `json:"success"`
+// SuccessFileBinaryResponse defines model for SuccessFileBinaryResponse.
+type SuccessFileBinaryResponse struct {
+	Data    *FileContentResponse             `json:"data,omitempty"`
+	Success SuccessFileBinaryResponseSuccess `json:"success"`
 }
 
-// SuccessFileReadResponseData1 defines model for .
-type SuccessFileReadResponseData1 struct {
-	Entries *[]FileInfo `json:"entries,omitempty"`
+// SuccessFileBinaryResponseSuccess defines model for SuccessFileBinaryResponse.Success.
+type SuccessFileBinaryResponseSuccess bool
+
+// SuccessFileListResponse defines model for SuccessFileListResponse.
+type SuccessFileListResponse struct {
+	Data *struct {
+		Entries *[]FileInfo `json:"entries,omitempty"`
+	} `json:"data,omitempty"`
+	Success SuccessFileListResponseSuccess `json:"success"`
 }
 
-// SuccessFileReadResponse_Data defines model for SuccessFileReadResponse.Data.
-type SuccessFileReadResponse_Data struct {
-	union json.RawMessage
+// SuccessFileListResponseSuccess defines model for SuccessFileListResponse.Success.
+type SuccessFileListResponseSuccess bool
+
+// SuccessFileStatResponse defines model for SuccessFileStatResponse.
+type SuccessFileStatResponse struct {
+	Data    *FileInfo                      `json:"data,omitempty"`
+	Success SuccessFileStatResponseSuccess `json:"success"`
 }
 
-// SuccessFileReadResponseSuccess defines model for SuccessFileReadResponse.Success.
-type SuccessFileReadResponseSuccess bool
+// SuccessFileStatResponseSuccess defines model for SuccessFileStatResponse.Success.
+type SuccessFileStatResponseSuccess bool
 
 // SuccessHealthResponse defines model for SuccessHealthResponse.
 type SuccessHealthResponse struct {
@@ -1483,20 +1501,11 @@ type IdentityID = string
 // OIDCProvider defines model for OIDCProvider.
 type OIDCProvider = string
 
-// QueryBinary defines model for QueryBinary.
-type QueryBinary = bool
-
-// QueryList defines model for QueryList.
-type QueryList = bool
-
 // QueryMkdir defines model for QueryMkdir.
 type QueryMkdir = bool
 
 // QueryRecursive defines model for QueryRecursive.
 type QueryRecursive = bool
-
-// QueryStat defines model for QueryStat.
-type QueryStat = bool
 
 // SandboxID defines model for SandboxID.
 type SandboxID = string
@@ -1516,17 +1525,36 @@ type TemplateID = string
 // UserID defines model for UserID.
 type UserID = string
 
-// GetApiV1SandboxesIdFilesPathParams defines parameters for GetApiV1SandboxesIdFilesPath.
-type GetApiV1SandboxesIdFilesPathParams struct {
-	Stat   *QueryStat   `form:"stat,omitempty" json:"stat,omitempty"`
-	List   *QueryList   `form:"list,omitempty" json:"list,omitempty"`
-	Binary *QueryBinary `form:"binary,omitempty" json:"binary,omitempty"`
+// DeleteApiV1SandboxesIdFilesParams defines parameters for DeleteApiV1SandboxesIdFiles.
+type DeleteApiV1SandboxesIdFilesParams struct {
+	Path FilePath `form:"path" json:"path"`
 }
 
-// PostApiV1SandboxesIdFilesPathParams defines parameters for PostApiV1SandboxesIdFilesPath.
-type PostApiV1SandboxesIdFilesPathParams struct {
+// GetApiV1SandboxesIdFilesParams defines parameters for GetApiV1SandboxesIdFiles.
+type GetApiV1SandboxesIdFilesParams struct {
+	Path FilePath `form:"path" json:"path"`
+}
+
+// PostApiV1SandboxesIdFilesParams defines parameters for PostApiV1SandboxesIdFiles.
+type PostApiV1SandboxesIdFilesParams struct {
+	Path      FilePath        `form:"path" json:"path"`
 	Mkdir     *QueryMkdir     `form:"mkdir,omitempty" json:"mkdir,omitempty"`
 	Recursive *QueryRecursive `form:"recursive,omitempty" json:"recursive,omitempty"`
+}
+
+// GetApiV1SandboxesIdFilesBinaryParams defines parameters for GetApiV1SandboxesIdFilesBinary.
+type GetApiV1SandboxesIdFilesBinaryParams struct {
+	Path FilePath `form:"path" json:"path"`
+}
+
+// GetApiV1SandboxesIdFilesListParams defines parameters for GetApiV1SandboxesIdFilesList.
+type GetApiV1SandboxesIdFilesListParams struct {
+	Path FilePath `form:"path" json:"path"`
+}
+
+// GetApiV1SandboxesIdFilesStatParams defines parameters for GetApiV1SandboxesIdFilesStat.
+type GetApiV1SandboxesIdFilesStatParams struct {
+	Path FilePath `form:"path" json:"path"`
 }
 
 // GetAuthOidcProviderCallbackParams defines parameters for GetAuthOidcProviderCallback.
@@ -1623,91 +1651,3 @@ type PutTeamsIdMembersUserIdJSONRequestBody = UpdateTeamMemberRequest
 
 // PutUsersMeJSONRequestBody defines body for PutUsersMe for application/json ContentType.
 type PutUsersMeJSONRequestBody = UpdateUserRequest
-
-// AsFileInfo returns the union data inside the SuccessFileReadResponse_Data as a FileInfo
-func (t SuccessFileReadResponse_Data) AsFileInfo() (FileInfo, error) {
-	var body FileInfo
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromFileInfo overwrites any union data inside the SuccessFileReadResponse_Data as the provided FileInfo
-func (t *SuccessFileReadResponse_Data) FromFileInfo(v FileInfo) error {
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeFileInfo performs a merge with any union data inside the SuccessFileReadResponse_Data, using the provided FileInfo
-func (t *SuccessFileReadResponse_Data) MergeFileInfo(v FileInfo) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsSuccessFileReadResponseData1 returns the union data inside the SuccessFileReadResponse_Data as a SuccessFileReadResponseData1
-func (t SuccessFileReadResponse_Data) AsSuccessFileReadResponseData1() (SuccessFileReadResponseData1, error) {
-	var body SuccessFileReadResponseData1
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromSuccessFileReadResponseData1 overwrites any union data inside the SuccessFileReadResponse_Data as the provided SuccessFileReadResponseData1
-func (t *SuccessFileReadResponse_Data) FromSuccessFileReadResponseData1(v SuccessFileReadResponseData1) error {
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeSuccessFileReadResponseData1 performs a merge with any union data inside the SuccessFileReadResponse_Data, using the provided SuccessFileReadResponseData1
-func (t *SuccessFileReadResponse_Data) MergeSuccessFileReadResponseData1(v SuccessFileReadResponseData1) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsFileContentResponse returns the union data inside the SuccessFileReadResponse_Data as a FileContentResponse
-func (t SuccessFileReadResponse_Data) AsFileContentResponse() (FileContentResponse, error) {
-	var body FileContentResponse
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromFileContentResponse overwrites any union data inside the SuccessFileReadResponse_Data as the provided FileContentResponse
-func (t *SuccessFileReadResponse_Data) FromFileContentResponse(v FileContentResponse) error {
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeFileContentResponse performs a merge with any union data inside the SuccessFileReadResponse_Data, using the provided FileContentResponse
-func (t *SuccessFileReadResponse_Data) MergeFileContentResponse(v FileContentResponse) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-func (t SuccessFileReadResponse_Data) MarshalJSON() ([]byte, error) {
-	b, err := t.union.MarshalJSON()
-	return b, err
-}
-
-func (t *SuccessFileReadResponse_Data) UnmarshalJSON(b []byte) error {
-	err := t.union.UnmarshalJSON(b)
-	return err
-}

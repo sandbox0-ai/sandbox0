@@ -11,17 +11,16 @@ import (
 // === File System Handlers (→ Procd) ===
 
 // handleFileOperation handles file operations (GET, POST, DELETE).
-// Route: /api/v1/sandboxes/:id/files/*path
+// Route: /api/v1/sandboxes/:id/files
 func (s *Server) handleFileOperation(c *gin.Context) {
 	sandboxID := c.Param("id")
-	filePath := c.Param("path")
+	filePath := c.Query("path")
 	if sandboxID == "" {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
 		return
 	}
-
-	if c.Request.Method == http.MethodGet && filePath == "/watch" {
-		s.handleFileWatch(c)
+	if filePath == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "path is required")
 		return
 	}
 
@@ -30,11 +29,7 @@ func (s *Server) handleFileOperation(c *gin.Context) {
 		return // Error response already sent
 	}
 
-	if c.Request.Method == http.MethodPost && filePath == "/move" {
-		c.Request.URL.Path = "/api/v1/files/move"
-	} else {
-		c.Request.URL.Path = "/api/v1/files" + filePath
-	}
+	c.Request.URL.Path = "/api/v1/files"
 
 	s.proxyToProcd(c, procdURL)
 }
@@ -62,4 +57,88 @@ func (s *Server) handleFileWatch(c *gin.Context) {
 	wsProxy := proxy.NewWebSocketProxy(s.logger, proxy.WithRequestModifier(requestModifier))
 	c.Request.URL.Path = "/api/v1/files/watch"
 	wsProxy.Proxy(procdURL)(c)
+}
+
+// handleFileMove handles file/directory move operations.
+// Route: /api/v1/sandboxes/:id/files/move
+func (s *Server) handleFileMove(c *gin.Context) {
+	sandboxID := c.Param("id")
+	if sandboxID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
+		return
+	}
+
+	procdURL, err := s.getProcdURL(c, sandboxID)
+	if err != nil {
+		return
+	}
+
+	c.Request.URL.Path = "/api/v1/files/move"
+	s.proxyToProcd(c, procdURL)
+}
+
+// handleFileStat handles file stat operations.
+// Route: /api/v1/sandboxes/:id/files/stat
+func (s *Server) handleFileStat(c *gin.Context) {
+	sandboxID := c.Param("id")
+	if sandboxID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
+		return
+	}
+	if c.Query("path") == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "path is required")
+		return
+	}
+
+	procdURL, err := s.getProcdURL(c, sandboxID)
+	if err != nil {
+		return
+	}
+
+	c.Request.URL.Path = "/api/v1/files/stat"
+	s.proxyToProcd(c, procdURL)
+}
+
+// handleFileList handles directory listing operations.
+// Route: /api/v1/sandboxes/:id/files/list
+func (s *Server) handleFileList(c *gin.Context) {
+	sandboxID := c.Param("id")
+	if sandboxID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
+		return
+	}
+	if c.Query("path") == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "path is required")
+		return
+	}
+
+	procdURL, err := s.getProcdURL(c, sandboxID)
+	if err != nil {
+		return
+	}
+
+	c.Request.URL.Path = "/api/v1/files/list"
+	s.proxyToProcd(c, procdURL)
+}
+
+// handleFileBinary handles base64 file reads.
+// Route: /api/v1/sandboxes/:id/files/binary
+func (s *Server) handleFileBinary(c *gin.Context) {
+	sandboxID := c.Param("id")
+	if sandboxID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
+		return
+	}
+	if c.Query("path") == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "path is required")
+		return
+	}
+
+	procdURL, err := s.getProcdURL(c, sandboxID)
+	if err != nil {
+		return
+	}
+
+	c.Request.URL.Path = "/api/v1/files/binary"
+	s.proxyToProcd(c, procdURL)
 }

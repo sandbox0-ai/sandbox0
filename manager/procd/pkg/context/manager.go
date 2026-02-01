@@ -107,12 +107,7 @@ func (m *Manager) StartCleanup(ctx context.Context, interval time.Duration) {
 
 // CreateContext creates a new context.
 func (m *Manager) CreateContext(config process.ProcessConfig) (*Context, error) {
-	return m.CreateContextWithPolicy(config, CleanupPolicy{})
-}
-
-// CreateContextWithPolicy creates a new context with a cleanup policy.
-func (m *Manager) CreateContextWithPolicy(config process.ProcessConfig, policy CleanupPolicy) (*Context, error) {
-	return m.CreateContextWithPolicyAndREPLConfig(config, nil, policy)
+	return m.CreateContextWithPolicyAndREPLConfig(config, nil, CleanupPolicy{})
 }
 
 // CreateContextWithPolicyAndREPLConfig creates a new context with a cleanup policy and optional REPL config.

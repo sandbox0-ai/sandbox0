@@ -130,7 +130,8 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID string, co
 		AutoCreate:    true,
 	}
 
-	store := chunk.NewCachedStore(blob, chunkConf, prometheus.DefaultRegisterer)
+	registry := prometheus.NewRegistry()
+	store := chunk.NewCachedStore(blob, chunkConf, registry)
 
 	// 4. Create JuiceFS VFS (in-memory, NO FUSE)
 	attrTimeout, _ := time.ParseDuration(m.config.JuiceFSAttrTimeout)
@@ -155,11 +156,7 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID string, co
 		EntryTimeout:    entryTimeout,
 		DirEntryTimeout: dirEntryTimeout,
 	}
-	registry, ok := prometheus.DefaultGatherer.(*prometheus.Registry)
-	if !ok {
-		registry = prometheus.NewRegistry()
-	}
-	vfsInst := vfs.NewVFS(vfsConf, metaClient, store, prometheus.DefaultRegisterer, registry)
+	vfsInst := vfs.NewVFS(vfsConf, metaClient, store, registry, registry)
 
 	// 5. Store volume context
 	m.volumes[volumeID] = &VolumeContext{
@@ -209,13 +206,24 @@ func (m *Manager) UnmountVolume(ctx context.Context, volumeID string) error {
 	}
 
 	// Flush all buffered data in VFS
-	if err := volCtx.VFS.FlushAll(""); err != nil {
-		m.logger.WithError(err).Warn("Failed to flush VFS data")
+	if volCtx.VFS != nil {
+		if err := volCtx.VFS.FlushAll(""); err != nil {
+			m.logger.WithError(err).Warn("Failed to flush VFS data")
+		}
 	}
 
 	// Close metadata session
-	if err := volCtx.Meta.CloseSession(); err != nil {
-		m.logger.WithError(err).Warn("Failed to close metadata session")
+	if volCtx.Meta != nil {
+		func() {
+			defer func() {
+				if recoverErr := recover(); recoverErr != nil {
+					m.logger.WithField("panic", recoverErr).Warn("Metadata session close panicked")
+				}
+			}()
+			if err := volCtx.Meta.CloseSession(); err != nil {
+				m.logger.WithError(err).Warn("Failed to close metadata session")
+			}
+		}()
 	}
 
 	// Remove from sandbox tracking

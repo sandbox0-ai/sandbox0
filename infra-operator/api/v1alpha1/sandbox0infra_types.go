@@ -817,6 +817,7 @@ const (
 	ConditionTypeInternalGatewayReady = "InternalGatewayReady"
 	ConditionTypeManagerReady         = "ManagerReady"
 	ConditionTypeStorageProxyReady    = "StorageProxyReady"
+	ConditionTypeFusePluginReady      = "FusePluginReady"
 	ConditionTypeCiliumReady          = "CiliumReady"
 	ConditionTypeSchedulerReady       = "SchedulerReady"
 	ConditionTypeInternalAuthReady    = "InternalAuthReady"

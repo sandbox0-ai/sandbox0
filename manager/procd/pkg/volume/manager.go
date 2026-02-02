@@ -4,26 +4,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"io"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
-	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/file"
+	pb "github.com/sandbox0-ai/infra/storage-proxy/proto/fs"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
-
-	pb "github.com/sandbox0-ai/infra/storage-proxy/proto/fs"
 )
 
 // TokenProvider provides internal token for gRPC authentication.
@@ -33,8 +28,9 @@ type TokenProvider interface {
 
 // Manager manages SandboxVolume mounts.
 type Manager struct {
-	mu     sync.RWMutex
-	mounts map[string]*MountContext
+	mu             sync.RWMutex
+	mounts         map[string]*MountContext
+	mountsInFlight map[string]struct{}
 
 	config        *Config
 	logger        *zap.Logger
@@ -45,10 +41,11 @@ type Manager struct {
 // NewManager creates a new SandboxVolume manager.
 func NewManager(config *Config, tokenProvider TokenProvider, logger *zap.Logger) *Manager {
 	return &Manager{
-		mounts:        make(map[string]*MountContext),
-		config:        config,
-		tokenProvider: tokenProvider,
-		logger:        logger,
+		mounts:         make(map[string]*MountContext),
+		mountsInFlight: make(map[string]struct{}),
+		config:         config,
+		tokenProvider:  tokenProvider,
+		logger:         logger,
 	}
 }
 
@@ -64,24 +61,66 @@ func (m *Manager) SetEventSink(sink EventSink) {
 	m.eventSink = sink
 }
 
+func validateMountPoint(mountPoint string) (string, error) {
+	if mountPoint == "" {
+		return "", ErrInvalidMountPoint
+	}
+
+	clean := filepath.Clean(mountPoint)
+	if !filepath.IsAbs(clean) {
+		return "", ErrInvalidMountPoint
+	}
+	if clean == "/" {
+		return "", ErrInvalidMountPoint
+	}
+
+	return clean, nil
+}
+
 // Mount mounts a SandboxVolume.
 func (m *Manager) Mount(ctx context.Context, req *MountRequest) (*MountResponse, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	mountPoint, err := validateMountPoint(req.MountPoint)
+	if err != nil {
+		return nil, err
+	}
 
-	// Check if already mounted
+	m.mu.Lock()
+	// Check if already mounted or mounting
 	if _, exists := m.mounts[req.SandboxVolumeID]; exists {
+		m.mu.Unlock()
 		return nil, ErrVolumeAlreadyMounted
 	}
-
-	// Validate mount point
-	if req.MountPoint == "" {
-		return nil, ErrInvalidMountPoint
+	if _, inFlight := m.mountsInFlight[req.SandboxVolumeID]; inFlight {
+		m.mu.Unlock()
+		return nil, ErrVolumeMountInProgress
 	}
+	for _, mountCtx := range m.mounts {
+		if mountCtx.MountPoint == mountPoint {
+			m.mu.Unlock()
+			return nil, ErrMountPointInUse
+		}
+	}
+	m.mountsInFlight[req.SandboxVolumeID] = struct{}{}
+	m.mu.Unlock()
 
-	// Ensure mount point directory exists
-	if err := os.MkdirAll(req.MountPoint, 0755); err != nil {
+	inFlight := true
+	defer func() {
+		if inFlight {
+			m.mu.Lock()
+			delete(m.mountsInFlight, req.SandboxVolumeID)
+			m.mu.Unlock()
+		}
+	}()
+
+	// Ensure mount point directory exists and is a directory
+	if err := os.MkdirAll(mountPoint, 0755); err != nil {
 		return nil, fmt.Errorf("create mount point: %w", err)
+	}
+	if info, err := os.Stat(mountPoint); err != nil || !info.IsDir() {
+		if err != nil {
+			return nil, fmt.Errorf("stat mount point: %w", err)
+		}
+		return nil, ErrInvalidMountPoint
 	}
 
 	// Get preferred Storage Proxy address using node affinity
@@ -92,8 +131,7 @@ func (m *Manager) Mount(ctx context.Context, req *MountRequest) (*MountResponse,
 		zap.String("proxy_address", proxyAddr),
 	)
 
-	// Create gRPC connection with packet marking (SO_MARK=0x2)
-	// This allows storage traffic to bypass nftables network policy rules
+	// Create gRPC connection to storage-proxy
 	conn, err := m.createGRPCConnection(ctx, proxyAddr)
 	if err != nil {
 		return nil, fmt.Errorf("create grpc connection: %w", err)
@@ -139,11 +177,14 @@ func (m *Manager) Mount(ctx context.Context, req *MountRequest) (*MountResponse,
 	)
 
 	// Cleanup any stale FUSE mounts
-	CleanupStaleMounts(req.MountPoint, m.logger)
+	if err := CleanupStaleMounts(mountPoint, m.logger); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("cleanup stale mounts: %w", err)
+	}
 
 	// Create RemoteFS and mount FUSE
 	remoteFS := NewRemoteFS(client, req.SandboxVolumeID, m.logger)
-	fuseServer, err := MountFUSE(req.MountPoint, remoteFS, m.logger)
+	fuseServer, err := MountFUSE(mountPoint, remoteFS, m.logger)
 	if err != nil {
 		// Cleanup: unmount from storage-proxy and close connection
 		unmountReq := &pb.UnmountVolumeRequest{VolumeId: req.SandboxVolumeID}
@@ -163,26 +204,36 @@ func (m *Manager) Mount(ctx context.Context, req *MountRequest) (*MountResponse,
 	// Store mount context
 	mountCtx := &MountContext{
 		SandboxVolumeID: req.SandboxVolumeID,
-		MountPoint:      req.MountPoint,
+		MountPoint:      mountPoint,
 		SandboxID:       req.SandboxID,
 		GrpcConn:        conn,
 		GrpcClient:      client,
 		FuseServer:      fuseServer,
 		MountedAt:       time.Now(),
 	}
-
+	m.mu.Lock()
+	if _, exists := m.mounts[req.SandboxVolumeID]; exists {
+		m.mu.Unlock()
+		_ = UnmountFUSE(fuseServer, mountPoint)
+		_, _ = client.UnmountVolume(ctx, &pb.UnmountVolumeRequest{VolumeId: req.SandboxVolumeID})
+		_ = conn.Close()
+		return nil, ErrVolumeAlreadyMounted
+	}
 	m.mounts[req.SandboxVolumeID] = mountCtx
+	delete(m.mountsInFlight, req.SandboxVolumeID)
+	inFlight = false
+	m.mu.Unlock()
 
 	m.logger.Info("Mounted SandboxVolume with FUSE",
 		zap.String("sandboxvolume_id", req.SandboxVolumeID),
-		zap.String("mount_point", req.MountPoint),
+		zap.String("mount_point", mountPoint),
 	)
 
 	m.startRemoteWatch(mountCtx)
 
 	return &MountResponse{
 		SandboxVolumeID: req.SandboxVolumeID,
-		MountPoint:      req.MountPoint,
+		MountPoint:      mountPoint,
 		MountedAt:       time.Now().Format(time.RFC3339),
 	}, nil
 }
@@ -199,7 +250,7 @@ func (m *Manager) Unmount(ctx context.Context, sandboxvolumeID string) error {
 
 	// Unmount FUSE first
 	if mountCtx.FuseServer != nil {
-		if err := UnmountFUSE(mountCtx.FuseServer.(*fuse.Server), mountCtx.MountPoint); err != nil {
+		if err := UnmountFUSE(mountCtx.FuseServer, mountCtx.MountPoint); err != nil {
 			m.logger.Warn("Failed to unmount FUSE",
 				zap.String("sandboxvolume_id", sandboxvolumeID),
 				zap.Error(err),
@@ -209,12 +260,11 @@ func (m *Manager) Unmount(ctx context.Context, sandboxvolumeID string) error {
 
 	// Call storage-proxy to unmount the volume
 	if mountCtx.GrpcClient != nil {
-		client := mountCtx.GrpcClient.(pb.FileSystemClient)
 		unmountReq := &pb.UnmountVolumeRequest{
 			VolumeId: sandboxvolumeID,
 		}
 
-		_, err := client.UnmountVolume(ctx, unmountReq)
+		_, err := mountCtx.GrpcClient.UnmountVolume(ctx, unmountReq)
 		if err != nil {
 			m.logger.Warn("Failed to unmount volume on storage-proxy",
 				zap.String("sandboxvolume_id", sandboxvolumeID),
@@ -234,13 +284,11 @@ func (m *Manager) Unmount(ctx context.Context, sandboxvolumeID string) error {
 
 	// Close gRPC connection
 	if mountCtx.GrpcConn != nil {
-		if conn, ok := mountCtx.GrpcConn.(*grpc.ClientConn); ok {
-			if err := conn.Close(); err != nil {
-				m.logger.Warn("Failed to close gRPC connection",
-					zap.String("sandboxvolume_id", sandboxvolumeID),
-					zap.Error(err),
-				)
-			}
+		if err := mountCtx.GrpcConn.Close(); err != nil {
+			m.logger.Warn("Failed to close gRPC connection",
+				zap.String("sandboxvolume_id", sandboxvolumeID),
+				zap.Error(err),
+			)
 		}
 	}
 
@@ -280,14 +328,11 @@ func (m *Manager) IsMounted(sandboxvolumeID string) bool {
 	return exists
 }
 
-// getStorageProxyAddress returns the preferred Storage Proxy address using node affinity.
 func (m *Manager) getStorageProxyAddress() string {
-	// Hash-based routing: same node -> same replica
-	hash := fnv.New32()
-	hash.Write([]byte(m.config.NodeName))
-	replicaIndex := hash.Sum32() % uint32(m.config.ProxyReplicas)
-
-	return fmt.Sprintf("storage-proxy-%d.%s:%d", replicaIndex, m.config.ProxyBaseURL, m.config.ProxyPort)
+	if m.config.ProxyPort == 0 {
+		return m.config.ProxyBaseURL
+	}
+	return fmt.Sprintf("%s:%d", m.config.ProxyBaseURL, m.config.ProxyPort)
 }
 
 // Cleanup unmounts all volumes.
@@ -300,23 +345,20 @@ func (m *Manager) Cleanup() {
 	for id, mountCtx := range m.mounts {
 		// Unmount FUSE first
 		if mountCtx.FuseServer != nil {
-			_ = UnmountFUSE(mountCtx.FuseServer.(*fuse.Server), mountCtx.MountPoint)
+			_ = UnmountFUSE(mountCtx.FuseServer, mountCtx.MountPoint)
 		}
 
 		// Call storage-proxy to unmount
 		if mountCtx.GrpcClient != nil {
-			client := mountCtx.GrpcClient.(pb.FileSystemClient)
 			unmountReq := &pb.UnmountVolumeRequest{
 				VolumeId: id,
 			}
-			_, _ = client.UnmountVolume(ctx, unmountReq)
+			_, _ = mountCtx.GrpcClient.UnmountVolume(ctx, unmountReq)
 		}
 
 		// Close gRPC connection
 		if mountCtx.GrpcConn != nil {
-			if conn, ok := mountCtx.GrpcConn.(*grpc.ClientConn); ok {
-				_ = conn.Close()
-			}
+			_ = mountCtx.GrpcConn.Close()
 		}
 
 		if mountCtx.WatchCancel != nil {
@@ -325,48 +367,22 @@ func (m *Manager) Cleanup() {
 
 		delete(m.mounts, id)
 	}
+	for id := range m.mountsInFlight {
+		delete(m.mountsInFlight, id)
+	}
 
 	m.logger.Info("All volumes unmounted")
 }
 
-// createGRPCConnection creates a gRPC connection with packet marking and auth.
-// This allows the connection to bypass nftables rules for storage traffic.
-// SO_MARK is used to mark packets for special routing that bypasses
-// the sandbox's network policy restrictions.
+// createGRPCConnection creates a gRPC connection with auth.
 func (m *Manager) createGRPCConnection(ctx context.Context, proxyAddr string) (*grpc.ClientConn, error) {
-	soMark := m.config.SOMark
-	if soMark == 0 {
-		soMark = 0x2 // fallback to default if 0
-	}
-
-	// Custom dialer that sets SO_MARK socket option
-	dialer := &net.Dialer{
-		Control: func(network, address string, c syscall.RawConn) error {
-			var opErr error
-			err := c.Control(func(fd uintptr) {
-				// Set SO_MARK to bypass nftables rules
-				// 0x24 is SO_MARK on Linux (syscall.SO_MARK)
-				// This packet mark allows storage traffic to bypass
-				// the sandbox's network isolation rules
-				opErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, 0x24, soMark)
-			})
-			if err != nil {
-				return err
-			}
-			return opErr
-		},
-	}
-
 	maxMsgSize := m.config.GRPCMaxMsgSize
 	if maxMsgSize == 0 {
 		maxMsgSize = 100 * 1024 * 1024 // 100MB default
 	}
 
-	conn, err := grpc.DialContext(ctx, proxyAddr,
+	conn, err := grpc.NewClient(proxyAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
-			return dialer.DialContext(ctx, "tcp", addr)
-		}),
 		grpc.WithDefaultCallOptions(
 			grpc.MaxCallRecvMsgSize(maxMsgSize),
 			grpc.MaxCallSendMsgSize(maxMsgSize),
@@ -388,10 +404,6 @@ func (m *Manager) startRemoteWatch(mountCtx *MountContext) {
 	if sink == nil || mountCtx == nil || mountCtx.GrpcClient == nil {
 		return
 	}
-	client, ok := mountCtx.GrpcClient.(pb.FileSystemClient)
-	if !ok {
-		return
-	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	mountCtx.WatchCancel = cancel
@@ -405,7 +417,7 @@ func (m *Manager) startRemoteWatch(mountCtx *MountContext) {
 	}
 
 	go func() {
-		stream, err := client.WatchVolumeEvents(ctx, req)
+		stream, err := mountCtx.GrpcClient.WatchVolumeEvents(ctx, req)
 		if err != nil {
 			m.logger.Warn("Failed to start watch stream",
 				zap.String("sandboxvolume_id", mountCtx.SandboxVolumeID),
@@ -498,6 +510,6 @@ func (m *Manager) addAuthMetadata(ctx context.Context) context.Context {
 		return ctx
 	}
 
-	md := metadata.Pairs("authorization", "Bearer "+token)
+	md := metadata.Pairs("x-internal-token", token)
 	return metadata.NewOutgoingContext(ctx, md)
 }

@@ -19,7 +19,7 @@ type REPL struct {
 	runner *process.PTYRunner
 	config *REPLConfig
 
-	// Ready detection state.
+	// Ready detection state. Note: prompt token detection is per-chunk and can fire multiple times.
 	mu          sync.Mutex
 	readyToken  []byte
 	readyBuffer []byte

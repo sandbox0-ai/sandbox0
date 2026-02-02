@@ -46,6 +46,14 @@ func (h *VolumeHandler) Mount(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "already_mounted", err.Error())
 			return
 		}
+		if err == volume.ErrVolumeMountInProgress {
+			writeError(w, http.StatusConflict, "mount_in_progress", err.Error())
+			return
+		}
+		if err == volume.ErrMountPointInUse {
+			writeError(w, http.StatusConflict, "mount_point_in_use", err.Error())
+			return
+		}
 		if err == volume.ErrInvalidMountPoint {
 			writeError(w, http.StatusBadRequest, "invalid_mount_point", err.Error())
 			return

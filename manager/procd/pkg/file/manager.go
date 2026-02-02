@@ -2,10 +2,12 @@
 package file
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -76,6 +78,31 @@ func (m *Manager) sanitizePath(path string) string {
 	return filepath.Clean(filepath.Join(m.rootPath, cleanPath))
 }
 
+func pathIsDir(path string) (bool, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+	return info.IsDir(), nil
+}
+
+func isPathNotDir(err error, path string) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.ENOTDIR) {
+		return true
+	}
+	if os.IsExist(err) {
+		isDir, statErr := pathIsDir(path)
+		if statErr == nil {
+			return !isDir
+		}
+		return true
+	}
+	return false
+}
+
 // ReadFile reads a file.
 func (m *Manager) ReadFile(path string) ([]byte, error) {
 	cleanPath := m.sanitizePath(path)
@@ -84,6 +111,9 @@ func (m *Manager) ReadFile(path string) ([]byte, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, ErrFileNotFound
+		}
+		if os.IsPermission(err) {
+			return nil, ErrPermissionDenied
 		}
 		return nil, err
 	}
@@ -105,17 +135,47 @@ func (m *Manager) WriteFile(path string, data []byte, perm os.FileMode) error {
 
 	// Ensure parent directory exists
 	dir := filepath.Dir(cleanPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if info, err := os.Stat(dir); err == nil {
+		// Path exists, verify it's a directory
+		if !info.IsDir() {
+			return ErrPathNotDir
+		}
+		// Already exists as directory, continue
+	} else if os.IsNotExist(err) {
+		// Path doesn't exist, create it
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			if os.IsPermission(err) {
+				return ErrPermissionDenied
+			}
+			if isPathNotDir(err, dir) {
+				return ErrPathNotDir
+			}
+			return err
+		}
+	} else {
+		// Other stat error (permission, etc)
+		if os.IsPermission(err) {
+			return ErrPermissionDenied
+		}
 		return err
 	}
 
 	// Atomic write using temp file
 	tmpPath := cleanPath + ".tmp"
 	if err := os.WriteFile(tmpPath, data, perm); err != nil {
+		if os.IsPermission(err) {
+			return ErrPermissionDenied
+		}
 		return err
 	}
 
-	return os.Rename(tmpPath, cleanPath)
+	if err := os.Rename(tmpPath, cleanPath); err != nil {
+		if os.IsPermission(err) {
+			return ErrPermissionDenied
+		}
+		return err
+	}
+	return nil
 }
 
 // Stat returns file information.
@@ -126,6 +186,9 @@ func (m *Manager) Stat(path string) (*FileInfo, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, ErrFileNotFound
+		}
+		if os.IsPermission(err) {
+			return nil, ErrPermissionDenied
 		}
 		return nil, err
 	}
@@ -162,6 +225,9 @@ func (m *Manager) ListDir(path string) ([]*FileInfo, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, ErrDirNotFound
+		}
+		if os.IsPermission(err) {
+			return nil, ErrPermissionDenied
 		}
 		return nil, err
 	}
@@ -201,10 +267,35 @@ func (m *Manager) MakeDir(path string, perm os.FileMode, recursive bool) error {
 	cleanPath := m.sanitizePath(path)
 
 	if recursive {
-		return os.MkdirAll(cleanPath, perm)
+		if err := os.MkdirAll(cleanPath, perm); err != nil {
+			if os.IsPermission(err) {
+				return ErrPermissionDenied
+			}
+			if isPathNotDir(err, cleanPath) {
+				return ErrPathNotDir
+			}
+			return err
+		}
+		return nil
 	}
 
-	return os.Mkdir(cleanPath, perm)
+	if err := os.Mkdir(cleanPath, perm); err != nil {
+		if os.IsPermission(err) {
+			return ErrPermissionDenied
+		}
+		if os.IsExist(err) {
+			isDir, statErr := pathIsDir(cleanPath)
+			if statErr == nil && isDir {
+				return ErrPathAlreadyExists
+			}
+			return ErrPathNotDir
+		}
+		if errors.Is(err, syscall.ENOTDIR) {
+			return ErrPathNotDir
+		}
+		return err
+	}
+	return nil
 }
 
 // Move moves/renames a file or directory.
@@ -215,17 +306,38 @@ func (m *Manager) Move(src, dst string) error {
 	// Ensure destination directory exists
 	dstDir := filepath.Dir(cleanDst)
 	if err := os.MkdirAll(dstDir, 0755); err != nil {
+		if os.IsPermission(err) {
+			return ErrPermissionDenied
+		}
+		if isPathNotDir(err, dstDir) {
+			return ErrPathNotDir
+		}
 		return err
 	}
 
-	return os.Rename(cleanSrc, cleanDst)
+	if err := os.Rename(cleanSrc, cleanDst); err != nil {
+		if os.IsNotExist(err) {
+			return ErrFileNotFound
+		}
+		if os.IsPermission(err) {
+			return ErrPermissionDenied
+		}
+		return err
+	}
+	return nil
 }
 
 // Remove removes a file or directory.
 func (m *Manager) Remove(path string) error {
 	cleanPath := m.sanitizePath(path)
 
-	return os.RemoveAll(cleanPath)
+	if err := os.RemoveAll(cleanPath); err != nil {
+		if os.IsPermission(err) {
+			return ErrPermissionDenied
+		}
+		return err
+	}
+	return nil
 }
 
 // WatchDir starts watching a directory for changes.

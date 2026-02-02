@@ -43,6 +43,7 @@ import (
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/cilium"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/database"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/edgegateway"
+	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/fuseplugin"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/internalauth"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/internalgateway"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/manager"
@@ -189,6 +190,7 @@ type componentPlan struct {
 	EnableInternalGateway     bool
 	EnableManager             bool
 	EnableStorageProxy        bool
+	EnableFusePlugin          bool
 	EnableInternalAuth        bool
 	EnableDatabase            bool
 	EnableStorage             bool
@@ -216,6 +218,7 @@ func (r *Sandbox0InfraReconciler) buildComponentPlan(infra *infrav1alpha1.Sandbo
 		EnableInternalGateway:     enableInternalGateway,
 		EnableManager:             enableManager,
 		EnableStorageProxy:        enableStorageProxy,
+		EnableFusePlugin:          enableStorageProxy,
 		EnableInternalAuth:        hasControlPlane || hasDataPlane,
 		EnableDatabase:            infrav1alpha1.IsDatabaseEnabled(infra),
 		EnableStorage:             infrav1alpha1.IsStorageEnabled(infra),
@@ -259,6 +262,7 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 	internalGatewayReconciler := internalgateway.NewReconciler(resources)
 	managerReconciler := manager.NewReconciler(resources)
 	storageProxyReconciler := storageproxy.NewReconciler(resources)
+	fusePluginReconciler := fuseplugin.NewReconciler(resources)
 	ciliumReconciler := cilium.NewReconciler(resources)
 	rbacReconciler := rbac.NewReconciler(resources)
 
@@ -375,6 +379,16 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 			SuccessReason:  "CiliumReady",
 			SuccessMessage: "Cilium is ready",
 			ErrorReason:    "CiliumFailed",
+		})
+	}
+	if plan.EnableFusePlugin {
+		steps = append(steps, reconcileStep{
+			Name:           "fuse-device-plugin",
+			Run:            func(ctx context.Context) error { return fusePluginReconciler.Reconcile(ctx, infra, imageRepo) },
+			ConditionType:  infrav1alpha1.ConditionTypeFusePluginReady,
+			SuccessReason:  "FusePluginReady",
+			SuccessMessage: "FUSE device plugin is ready",
+			ErrorReason:    "FusePluginFailed",
 		})
 	}
 	if plan.EnableManager {
@@ -567,6 +581,9 @@ func (r *Sandbox0InfraReconciler) expectedConditionTypes(infra *infrav1alpha1.Sa
 	}
 	if plan.EnableStorageProxy {
 		conditions = append(conditions, infrav1alpha1.ConditionTypeStorageProxyReady)
+	}
+	if plan.EnableFusePlugin {
+		conditions = append(conditions, infrav1alpha1.ConditionTypeFusePluginReady)
 	}
 	if plan.EnableCilium {
 		conditions = append(conditions, infrav1alpha1.ConditionTypeCiliumReady)

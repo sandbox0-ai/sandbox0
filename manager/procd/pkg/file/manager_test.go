@@ -339,6 +339,75 @@ func TestMakeDirValidPaths(t *testing.T) {
 	}
 }
 
+func TestMakeDirAlreadyExists(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "test-file-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	m, err := NewManager(tempDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+
+	if err := m.MakeDir("existing", 0755, false); err != nil {
+		t.Fatalf("MakeDir() initial failed = %v", err)
+	}
+
+	err = m.MakeDir("existing", 0755, false)
+	if err != ErrPathAlreadyExists {
+		t.Errorf("MakeDir() error = %v, want %v", err, ErrPathAlreadyExists)
+	}
+}
+
+func TestMakeDirPathNotDir(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "test-file-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	m, err := NewManager(tempDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+
+	if err := m.WriteFile("existing-file", []byte("data"), 0644); err != nil {
+		t.Fatalf("WriteFile() failed = %v", err)
+	}
+
+	err = m.MakeDir("existing-file/child", 0755, true)
+	if err != ErrPathNotDir {
+		t.Errorf("MakeDir() error = %v, want %v", err, ErrPathNotDir)
+	}
+}
+
+func TestWriteFileParentIsFile(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "test-file-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	m, err := NewManager(tempDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+
+	if err := m.WriteFile("parent", []byte("data"), 0644); err != nil {
+		t.Fatalf("WriteFile() failed = %v", err)
+	}
+
+	err = m.WriteFile("parent/child.txt", []byte("data"), 0644)
+	if err != ErrPathNotDir {
+		t.Errorf("WriteFile() error = %v, want %v", err, ErrPathNotDir)
+	}
+}
+
 // TestStatSymlink tests that Stat properly handles symlinks.
 func TestStatSymlink(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "test-file-")
@@ -980,6 +1049,16 @@ func TestErrorDefinitions(t *testing.T) {
 			name: "ErrWatcherClosed",
 			err:  ErrWatcherClosed,
 			want: "watcher manager closed",
+		},
+		{
+			name: "ErrPathAlreadyExists",
+			err:  ErrPathAlreadyExists,
+			want: "path already exists",
+		},
+		{
+			name: "ErrPathNotDir",
+			err:  ErrPathNotDir,
+			want: "path is not a directory",
 		},
 	}
 

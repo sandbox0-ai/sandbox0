@@ -6,6 +6,7 @@ import (
 	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/pkg/naming"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 const (
@@ -25,6 +26,7 @@ func BuildPodSpec(template *SandboxTemplate, restart bool) corev1.PodSpec {
 
 	applyProcdSecretVolume(&spec, template)
 	applyProcdInit(&spec)
+	applyFuseResource(&spec)
 
 	// Apply runtime class if specified
 	if template.Spec.RuntimeClassName != nil {
@@ -41,6 +43,34 @@ func BuildPodSpec(template *SandboxTemplate, restart bool) corev1.PodSpec {
 		}
 	}
 	return spec
+}
+
+func applyFuseResource(spec *corev1.PodSpec) {
+	if spec == nil {
+		return
+	}
+
+	for i := range spec.Containers {
+		if spec.Containers[i].Name != "procd" {
+			continue
+		}
+
+		if spec.Containers[i].Resources.Requests == nil {
+			spec.Containers[i].Resources.Requests = make(corev1.ResourceList)
+		}
+		if spec.Containers[i].Resources.Limits == nil {
+			spec.Containers[i].Resources.Limits = make(corev1.ResourceList)
+		}
+
+		fuseResource := corev1.ResourceName("sandbox0.ai/fuse")
+		fuseQuantity := resource.MustParse("1")
+		if _, exists := spec.Containers[i].Resources.Requests[fuseResource]; !exists {
+			spec.Containers[i].Resources.Requests[fuseResource] = fuseQuantity
+		}
+		if _, exists := spec.Containers[i].Resources.Limits[fuseResource]; !exists {
+			spec.Containers[i].Resources.Limits[fuseResource] = fuseQuantity
+		}
+	}
 }
 
 // buildContainers builds containers from template
@@ -100,6 +130,13 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Conta
 			}
 		}
 	}
+	if container.SecurityContext == nil {
+		container.SecurityContext = &corev1.SecurityContext{}
+	}
+	if container.SecurityContext.Capabilities == nil {
+		container.SecurityContext.Capabilities = &corev1.Capabilities{}
+	}
+	container.SecurityContext.Capabilities.Add = append(container.SecurityContext.Capabilities.Add, corev1.Capability("SYS_ADMIN"))
 
 	return container
 }

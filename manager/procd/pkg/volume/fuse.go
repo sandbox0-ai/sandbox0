@@ -2,6 +2,7 @@ package volume
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"sync"
 	"syscall"
@@ -843,12 +844,17 @@ func IsFUSEMountPoint(path string) bool {
 }
 
 // CleanupStaleMounts attempts to cleanup stale FUSE mounts.
-func CleanupStaleMounts(mountPoint string, logger *zap.Logger) {
+func CleanupStaleMounts(mountPoint string, logger *zap.Logger) error {
 	if IsFUSEMountPoint(mountPoint) {
 		logger.Info("Cleaning up stale FUSE mount", zap.String("mount_point", mountPoint))
 		// Use 0 as flags; MNT_FORCE is not portable across platforms
-		_ = syscall.Unmount(mountPoint, 0)
+		if err := syscall.Unmount(mountPoint, 0); err != nil {
+			return fmt.Errorf("unmount stale fuse: %w", err)
+		}
 	}
 	// Ensure directory exists for new mount
-	_ = os.MkdirAll(mountPoint, 0755)
+	if err := os.MkdirAll(mountPoint, 0755); err != nil {
+		return fmt.Errorf("ensure mount point: %w", err)
+	}
+	return nil
 }

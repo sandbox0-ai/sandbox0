@@ -5,17 +5,28 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/hanwen/go-fuse/v2/fuse"
+	"google.golang.org/grpc"
+
+	pb "github.com/sandbox0-ai/infra/storage-proxy/proto/fs"
 )
 
 var (
 	// ErrVolumeAlreadyMounted is returned when a volume is already mounted.
 	ErrVolumeAlreadyMounted = errors.New("sandboxvolume already mounted")
 
+	// ErrVolumeMountInProgress is returned when a volume is already mounting.
+	ErrVolumeMountInProgress = errors.New("sandboxvolume mount in progress")
+
 	// ErrVolumeNotMounted is returned when a volume is not mounted.
 	ErrVolumeNotMounted = errors.New("sandboxvolume not mounted")
 
 	// ErrInvalidMountPoint is returned when the mount point is invalid.
 	ErrInvalidMountPoint = errors.New("invalid mount point")
+
+	// ErrMountPointInUse is returned when a mount point is already in use.
+	ErrMountPointInUse = errors.New("mount point already in use")
 
 	// ErrMountTimeout is returned when mount times out.
 	ErrMountTimeout = errors.New("mount timeout")
@@ -71,11 +82,11 @@ type MountContext struct {
 	SandboxID       string
 
 	// gRPC connection and client
-	GrpcConn   any // *grpc.ClientConn
-	GrpcClient any // pb.FileSystemClient
+	GrpcConn   *grpc.ClientConn
+	GrpcClient pb.FileSystemClient
 
 	// FUSE server
-	FuseServer any // *fuse.Server
+	FuseServer *fuse.Server
 
 	// Remote watch cancellation
 	WatchCancel func()
@@ -89,8 +100,6 @@ type MountContext struct {
 type Config struct {
 	ProxyBaseURL  string
 	ProxyPort     int
-	ProxyReplicas int
-	NodeName      string
 	CacheMaxBytes int64
 	CacheTTL      time.Duration
 
@@ -102,5 +111,4 @@ type Config struct {
 
 	// gRPC settings
 	GRPCMaxMsgSize int
-	SOMark         int
 }

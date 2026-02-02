@@ -1142,9 +1142,6 @@ spec:
                                 default: /workspace
                                 description: File manager configuration
                                 type: string
-                              storageProxyReplicas:
-                                default: 3
-                                type: integer
                               webhookBaseBackoff:
                                 default: 500ms
                                 type: string

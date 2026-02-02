@@ -16,8 +16,6 @@ import (
 
 // ProcdConfig holds all configuration for procd.
 type ProcdConfig struct {
-	NodeName string `yaml:"node_name" json:"-"`
-
 	// Server configuration
 	// +optional
 	// +kubebuilder:default=49983
@@ -29,9 +27,6 @@ type ProcdConfig struct {
 	// Storage Proxy configuration
 	StorageProxyBaseURL string `yaml:"storage_proxy_base_url" json:"-"`
 	StorageProxyPort    int    `yaml:"storage_proxy_port" json:"-"`
-	// +optional
-	// +kubebuilder:default=3
-	StorageProxyReplicas int `yaml:"storage_proxy_replicas" json:"storageProxyReplicas"`
 
 	// JuiceFS Mount Defaults
 	// +optional

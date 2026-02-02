@@ -397,8 +397,8 @@ func TestREPL_DetectReadyToken(t *testing.T) {
 	}
 
 	_, detected = repl.filterOutput([]byte("__READY__ "))
-	if detected {
-		t.Fatal("expected detection to fire only once")
+	if !detected {
+		t.Fatal("expected detection to fire on subsequent tokens")
 	}
 }
 

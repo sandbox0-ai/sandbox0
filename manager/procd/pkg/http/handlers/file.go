@@ -277,6 +277,10 @@ func (h *FileHandler) handleFileError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusRequestEntityTooLarge, "file_too_large", err.Error())
 	case file.ErrPermissionDenied:
 		writeError(w, http.StatusForbidden, "permission_denied", err.Error())
+	case file.ErrPathAlreadyExists:
+		writeError(w, http.StatusConflict, "path_exists", err.Error())
+	case file.ErrPathNotDir:
+		writeError(w, http.StatusConflict, "path_not_directory", err.Error())
 	default:
 		writeError(w, http.StatusInternalServerError, "operation_failed", err.Error())
 	}

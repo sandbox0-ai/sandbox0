@@ -325,8 +325,7 @@ func (s *Server) storageProxyUpstreamMiddleware(next http.Handler) http.Handler 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		baseURL := strings.TrimSpace(s.cfg.StorageProxyBaseURL)
 		port := s.cfg.StorageProxyPort
-		replicas := s.cfg.StorageProxyReplicas
-		if baseURL != "" && port > 0 && replicas > 0 {
+		if baseURL != "" && port > 0 {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -334,10 +333,9 @@ func (s *Server) storageProxyUpstreamMiddleware(next http.Handler) http.Handler 
 		s.logger.Error("Storage-proxy upstream not configured",
 			zap.String("proxy_base_url", baseURL),
 			zap.Int("proxy_port", port),
-			zap.Int("proxy_replicas", replicas),
 		)
 		_ = spec.WriteError(w, http.StatusServiceUnavailable, "storage_proxy_unavailable",
-			fmt.Sprintf("storage-proxy upstream not configured (base_url=%q port=%d replicas=%d)", baseURL, port, replicas),
+			fmt.Sprintf("storage-proxy upstream not configured (base_url=%q port=%d)", baseURL, port),
 		)
 	})
 }

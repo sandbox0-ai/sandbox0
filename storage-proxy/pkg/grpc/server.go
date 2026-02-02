@@ -317,7 +317,7 @@ func (s *FileSystemServer) Create(ctx context.Context, req *pb.CreateRequest) (*
 			"mode":      req.Mode,
 			"error":     errno,
 		}).Error("Create failed")
-		return nil, status.Error(codes.Internal, syscall.Errno(errno).Error())
+		return nil, status.Error(mapErrnoToCode(syscall.Errno(errno)), syscall.Errno(errno).Error())
 	}
 
 	path := resolveChildPath(volCtx, req.Parent, req.Name)
@@ -356,7 +356,7 @@ func (s *FileSystemServer) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb
 	vfsCtx := vfs.NewLogContext(meta.Background())
 	st := volCtx.Meta.Mkdir(vfsCtx, parent, req.Name, uint16(req.Mode), 0, 0, &inode, &attr)
 	if st != 0 {
-		return nil, status.Error(codes.Internal, syscall.Errno(st).Error())
+		return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
 	}
 
 	path := resolveChildPath(volCtx, req.Parent, req.Name)
@@ -376,6 +376,23 @@ func (s *FileSystemServer) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb
 		Generation: 0,
 		Attr:       convertAttr(&attr),
 	}, nil
+}
+
+func mapErrnoToCode(errno syscall.Errno) codes.Code {
+	switch errno {
+	case syscall.EEXIST:
+		return codes.AlreadyExists
+	case syscall.ENOENT:
+		return codes.NotFound
+	case syscall.EACCES, syscall.EPERM:
+		return codes.PermissionDenied
+	case syscall.ENOSPC:
+		return codes.ResourceExhausted
+	case syscall.EINVAL, syscall.ENOTDIR:
+		return codes.InvalidArgument
+	default:
+		return codes.Internal
+	}
 }
 
 // Unlink implements FUSE unlink

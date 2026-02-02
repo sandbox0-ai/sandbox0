@@ -106,15 +106,13 @@ func (mc *MultiplexedChannel[T]) Unsubscribe(sub chan T) {
 // Publish sends an event to all subscribers.
 // It's safe to call after Close - events will be silently dropped.
 func (mc *MultiplexedChannel[T]) Publish(event T) {
-	mc.mu.RLock()
-	closed := mc.closed
-	mc.mu.RUnlock()
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
 
-	if closed {
+	if mc.closed {
 		return // Channel is closed, drop the event
 	}
 
-	mc.mu.Lock()
 	if mc.historySize > 0 {
 		if len(mc.history) >= mc.historySize {
 			copy(mc.history, mc.history[1:])
@@ -123,7 +121,6 @@ func (mc *MultiplexedChannel[T]) Publish(event T) {
 			mc.history = append(mc.history, event)
 		}
 	}
-	mc.mu.Unlock()
 
 	select {
 	case mc.Source <- event:

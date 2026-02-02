@@ -3,6 +3,7 @@ package volume
 
 import (
 	"errors"
+	"os"
 	"syscall"
 	"testing"
 
@@ -273,10 +274,15 @@ func TestCleanupStaleMounts(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// This should not panic
-			CleanupStaleMounts(tt.path, logger)
+			if err := CleanupStaleMounts(tt.path, logger); err != nil {
+				t.Fatalf("CleanupStaleMounts() failed: %v", err)
+			}
 
 			// Verify directory exists after cleanup
 			// (CleanupStaleMounts ensures the directory exists)
+			if _, err := os.Stat(tt.path); err != nil {
+				t.Fatalf("expected mount point to exist: %v", err)
+			}
 		})
 	}
 }

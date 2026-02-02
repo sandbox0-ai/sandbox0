@@ -4,8 +4,12 @@ package volume
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"strings"
 
 	"go.uber.org/zap/zaptest"
 )
@@ -23,9 +27,7 @@ func (m *mockTokenProvider) GetInternalToken() string {
 func TestNewManager(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	config := &Config{
-		ProxyBaseURL:  "storage-proxy.default.svc.cluster.local",
-		ProxyReplicas: 3,
-		NodeName:      "node-1",
+		ProxyBaseURL: "storage-proxy.default.svc.cluster.local",
 	}
 
 	m := NewManager(config, &mockTokenProvider{token: "test-token"}, logger)
@@ -63,9 +65,7 @@ func TestNewManager(t *testing.T) {
 func TestManager_IsMounted(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	config := &Config{
-		ProxyBaseURL:  "storage-proxy.default.svc.cluster.local",
-		ProxyReplicas: 3,
-		NodeName:      "node-1",
+		ProxyBaseURL: "storage-proxy.default.svc.cluster.local",
 	}
 
 	m := NewManager(config, &mockTokenProvider{token: "test-token"}, logger)
@@ -101,13 +101,17 @@ func TestManager_IsMounted(t *testing.T) {
 func TestManager_MountValidation(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	config := &Config{
-		ProxyBaseURL:  "storage-proxy.default.svc.cluster.local",
-		ProxyReplicas: 3,
-		NodeName:      "node-1",
+		ProxyBaseURL: "storage-proxy.default.svc.cluster.local",
 	}
 
 	m := NewManager(config, &mockTokenProvider{token: "test-token"}, logger)
 	ctx := context.Background()
+	tempDir, err := os.MkdirTemp("", "procd-mount-validate-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+	validMount := filepath.Join(tempDir, "vol-1")
 
 	tests := []struct {
 		name    string
@@ -123,10 +127,26 @@ func TestManager_MountValidation(t *testing.T) {
 			wantErr: ErrInvalidMountPoint,
 		},
 		{
+			name: "relative mount point",
+			req: &MountRequest{
+				SandboxVolumeID: "vol-1",
+				MountPoint:      "mnt/vol-1",
+			},
+			wantErr: ErrInvalidMountPoint,
+		},
+		{
+			name: "root mount point",
+			req: &MountRequest{
+				SandboxVolumeID: "vol-1",
+				MountPoint:      "/",
+			},
+			wantErr: ErrInvalidMountPoint,
+		},
+		{
 			name: "valid request but will fail on gRPC",
 			req: &MountRequest{
 				SandboxVolumeID: "vol-1",
-				MountPoint:      "/mnt/vol-1",
+				MountPoint:      validMount,
 				VolumeConfig: &VolumeConfig{
 					CacheSize:  "100",
 					Prefetch:   3,
@@ -153,13 +173,53 @@ func TestManager_MountValidation(t *testing.T) {
 	}
 }
 
+func TestValidateMountPoint(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "procd-mount-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	tests := []struct {
+		name      string
+		mountPath string
+		wantErr   bool
+	}{
+		{
+			name:      "absolute path",
+			mountPath: tempDir,
+			wantErr:   false,
+		},
+		{
+			name:      "relative path",
+			mountPath: "mnt/data",
+			wantErr:   true,
+		},
+		{
+			name:      "root path",
+			mountPath: "/",
+			wantErr:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := validateMountPoint(tt.mountPath)
+			if tt.wantErr && err == nil {
+				t.Fatalf("validateMountPoint() expected error")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("validateMountPoint() unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 // TestManager_UnmountNotMounted tests unmounting a volume that isn't mounted.
 func TestManager_UnmountNotMounted(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	config := &Config{
-		ProxyBaseURL:  "storage-proxy.default.svc.cluster.local",
-		ProxyReplicas: 3,
-		NodeName:      "node-1",
+		ProxyBaseURL: "storage-proxy.default.svc.cluster.local",
 	}
 
 	m := NewManager(config, &mockTokenProvider{token: "test-token"}, logger)
@@ -171,13 +231,41 @@ func TestManager_UnmountNotMounted(t *testing.T) {
 	}
 }
 
+func TestManager_MountPointInUse(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+	config := &Config{
+		ProxyBaseURL: "storage-proxy.default.svc.cluster.local",
+	}
+
+	m := NewManager(config, &mockTokenProvider{token: "test-token"}, logger)
+	ctx := context.Background()
+
+	tempDir, err := os.MkdirTemp("", "procd-mount-inuse-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	m.mounts["existing-vol"] = &MountContext{
+		SandboxVolumeID: "existing-vol",
+		MountPoint:      tempDir,
+		MountedAt:       time.Now(),
+	}
+
+	_, err = m.Mount(ctx, &MountRequest{
+		SandboxVolumeID: "new-vol",
+		MountPoint:      tempDir,
+	})
+	if err != ErrMountPointInUse {
+		t.Errorf("Mount() error = %v, want %v", err, ErrMountPointInUse)
+	}
+}
+
 // TestManager_GetStatus tests GetStatus method.
 func TestManager_GetStatus(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	config := &Config{
-		ProxyBaseURL:  "storage-proxy.default.svc.cluster.local",
-		ProxyReplicas: 3,
-		NodeName:      "node-1",
+		ProxyBaseURL: "storage-proxy.default.svc.cluster.local",
 	}
 
 	m := NewManager(config, &mockTokenProvider{token: "test-token"}, logger)
@@ -193,9 +281,7 @@ func TestManager_GetStatus(t *testing.T) {
 func TestManager_Cleanup(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	config := &Config{
-		ProxyBaseURL:  "storage-proxy.default.svc.cluster.local",
-		ProxyReplicas: 3,
-		NodeName:      "node-1",
+		ProxyBaseURL: "storage-proxy.default.svc.cluster.local",
 	}
 
 	m := NewManager(config, &mockTokenProvider{token: "test-token"}, logger)
@@ -214,9 +300,7 @@ func TestManager_Cleanup(t *testing.T) {
 func TestManager_ConcurrentAccess(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	config := &Config{
-		ProxyBaseURL:  "storage-proxy.default.svc.cluster.local",
-		ProxyReplicas: 3,
-		NodeName:      "node-1",
+		ProxyBaseURL: "storage-proxy.default.svc.cluster.local",
 	}
 
 	m := NewManager(config, &mockTokenProvider{token: "test-token"}, logger)
@@ -299,9 +383,7 @@ func TestManager_getStorageProxyAddress(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			logger := zaptest.NewLogger(t)
 			config := &Config{
-				ProxyBaseURL:  tt.baseURL,
-				ProxyReplicas: tt.replicas,
-				NodeName:      tt.nodeName,
+				ProxyBaseURL: tt.baseURL,
 			}
 
 			m := NewManager(config, &mockTokenProvider{}, logger)
@@ -317,7 +399,7 @@ func TestManager_getStorageProxyAddress(t *testing.T) {
 			found := false
 			for i := 0; i < tt.replicas; i++ {
 				expected := "storage-proxy-0."
-				if addr == expected || addr[:len(expected)] == expected {
+				if addr == expected || strings.HasPrefix(addr, expected) {
 					found = true
 					break
 				}
@@ -394,6 +476,11 @@ func TestErrorDefinitions(t *testing.T) {
 			want: "sandboxvolume already mounted",
 		},
 		{
+			name: "ErrVolumeMountInProgress",
+			err:  ErrVolumeMountInProgress,
+			want: "sandboxvolume mount in progress",
+		},
+		{
 			name: "ErrVolumeNotMounted",
 			err:  ErrVolumeNotMounted,
 			want: "sandboxvolume not mounted",
@@ -402,6 +489,11 @@ func TestErrorDefinitions(t *testing.T) {
 			name: "ErrInvalidMountPoint",
 			err:  ErrInvalidMountPoint,
 			want: "invalid mount point",
+		},
+		{
+			name: "ErrMountPointInUse",
+			err:  ErrMountPointInUse,
+			want: "mount point already in use",
 		},
 		{
 			name: "ErrMountTimeout",
@@ -436,9 +528,7 @@ func TestErrorDefinitions(t *testing.T) {
 func TestManager_ConcurrentMountUnmount(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	config := &Config{
-		ProxyBaseURL:  "storage-proxy.default.svc.cluster.local",
-		ProxyReplicas: 3,
-		NodeName:      "node-1",
+		ProxyBaseURL: "storage-proxy.default.svc.cluster.local",
 	}
 
 	m := NewManager(config, &mockTokenProvider{token: "test-token"}, logger)
@@ -502,22 +592,12 @@ func TestMountStatus(t *testing.T) {
 func TestConfigValidation(t *testing.T) {
 	config := &Config{
 		ProxyBaseURL:  "storage-proxy",
-		ProxyReplicas: 1,
-		NodeName:      "test-node",
 		CacheMaxBytes: 1024 * 1024 * 100,
 		CacheTTL:      5 * time.Minute,
 	}
 
 	if config.ProxyBaseURL != "storage-proxy" {
 		t.Errorf("ProxyBaseURL = %s", config.ProxyBaseURL)
-	}
-
-	if config.ProxyReplicas != 1 {
-		t.Errorf("ProxyReplicas = %d", config.ProxyReplicas)
-	}
-
-	if config.NodeName != "test-node" {
-		t.Errorf("NodeName = %s", config.NodeName)
 	}
 
 	if config.CacheMaxBytes != 1024*1024*100 {

@@ -20,4 +20,10 @@ var (
 
 	// ErrWatcherClosed is returned when the watcher manager is closed.
 	ErrWatcherClosed = errors.New("watcher manager closed")
+
+	// ErrPathAlreadyExists is returned when a path already exists.
+	ErrPathAlreadyExists = errors.New("path already exists")
+
+	// ErrPathNotDir is returned when a path exists but is not a directory.
+	ErrPathNotDir = errors.New("path is not a directory")
 )

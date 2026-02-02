@@ -28,6 +28,7 @@ RUN apt-get update \
     ca-certificates \
     curl \
     gnupg \
+    fuse3 \
   && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
   && rm -rf /var/lib/apt/lists/*
 

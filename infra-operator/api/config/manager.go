@@ -86,6 +86,14 @@ type ManagerConfig struct {
 	// +kubebuilder:default=10
 	BandwidthAccountingInterval int `yaml:"bandwidth_accounting_interval" json:"bandwidthAccountingInterval"`
 
+	// Netd apply wait
+	// +optional
+	// +kubebuilder:default="30s"
+	NetdPolicyApplyTimeout metav1.Duration `yaml:"netd_policy_apply_timeout" json:"netdPolicyApplyTimeout"`
+	// +optional
+	// +kubebuilder:default="500ms"
+	NetdPolicyApplyPollInterval metav1.Duration `yaml:"netd_policy_apply_poll_interval" json:"netdPolicyApplyPollInterval"`
+
 	// Pause/Resume
 	// +optional
 	// +kubebuilder:default="10Mi"

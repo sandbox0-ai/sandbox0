@@ -125,7 +125,7 @@ func main() {
 
 	// Create informers
 	informerFactory := informers.NewSharedInformerFactory(k8sClient, cfg.ResyncPeriod.Duration)
-	podInformer := informerFactory.Core().V1().Pods().Informer()
+	podInformer := informerFactory.Core().V1().Pods()
 	nodeInformer := informerFactory.Core().V1().Nodes().Informer()
 	secretInformer := informerFactory.Core().V1().Secrets().Informer()
 	_ = informerFactory.Core().V1().Namespaces().Informer()
@@ -151,7 +151,7 @@ func main() {
 	// Create operator
 	operator := controller.NewOperator(
 		k8sClient,
-		podInformer,
+		podInformer.Informer(),
 		replicaSetInformer,
 		secretInformer,
 		templateInformer,
@@ -170,7 +170,7 @@ func main() {
 	namespaceLister := informerFactory.Core().V1().Namespaces().Lister()
 
 	sandboxIndex := service.NewSandboxIndex()
-	podInformer.AddEventHandler(sandboxIndex.ResourceEventHandler())
+	podInformer.Informer().AddEventHandler(sandboxIndex.ResourceEventHandler())
 
 	// Create network policy service for building policy annotations
 	networkPolicyService := service.NewNetworkPolicyService(service.NetworkPolicyServiceConfig{
@@ -179,8 +179,14 @@ func main() {
 		BandwidthAccountingInterval: cfg.BandwidthAccountingInterval,
 	}, logger)
 
-	networkProvider := network.NewNoopProvider()
-	logger.Info("Network provider disabled; netd enforces policies via pod annotations")
+	networkProvider := network.NewNetdProvider(podInformer, podLister, network.NetdProviderConfig{
+		ApplyTimeout: cfg.NetdPolicyApplyTimeout.Duration,
+		PollInterval: cfg.NetdPolicyApplyPollInterval.Duration,
+	}, logger)
+	logger.Info("Network provider set to netd",
+		zap.Duration("applyTimeout", cfg.NetdPolicyApplyTimeout.Duration),
+		zap.Duration("pollInterval", cfg.NetdPolicyApplyPollInterval.Duration),
+	)
 
 	// Initialize internal auth generator for procd communication
 	var internalTokenGenerator service.TokenGenerator
@@ -323,7 +329,7 @@ func main() {
 
 	// Wait for cache sync
 	logger.Info("Waiting for informer caches to sync")
-	if !cache.WaitForCacheSync(ctx.Done(), podInformer.HasSynced, nodeInformer.HasSynced, secretInformer.HasSynced, replicaSetInformer.HasSynced, templateInformer.HasSynced) {
+	if !cache.WaitForCacheSync(ctx.Done(), podInformer.Informer().HasSynced, nodeInformer.HasSynced, secretInformer.HasSynced, replicaSetInformer.HasSynced, templateInformer.HasSynced) {
 		logger.Fatal("Failed to sync informer caches")
 	}
 

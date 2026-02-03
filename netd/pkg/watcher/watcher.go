@@ -3,6 +3,8 @@ package watcher
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
@@ -10,7 +12,9 @@ import (
 	"github.com/sandbox0-ai/infra/manager/pkg/controller"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
@@ -422,6 +426,70 @@ func (w *Watcher) ListActiveSandboxes() []*SandboxInfo {
 func (w *Watcher) ListSandboxPods(selector labels.Selector) ([]*corev1.Pod, error) {
 	podLister := w.informerFactory.Core().V1().Pods().Lister()
 	return podLister.List(selector)
+}
+
+// MarkPolicyApplied updates the applied policy hash annotations after rules are applied.
+func (w *Watcher) MarkPolicyApplied(ctx context.Context, sandboxID string) error {
+	pod, err := w.getSandboxPodByID(sandboxID)
+	if err != nil {
+		return err
+	}
+	if pod == nil || pod.Annotations == nil {
+		return nil
+	}
+
+	networkHash := pod.Annotations[controller.AnnotationNetworkPolicyHash]
+	bandwidthHash := pod.Annotations[controller.AnnotationBandwidthPolicyHash]
+	if networkHash == "" && bandwidthHash == "" {
+		return nil
+	}
+
+	annotations := map[string]any{}
+	if networkHash != "" && pod.Annotations[controller.AnnotationNetworkPolicyAppliedHash] != networkHash {
+		annotations[controller.AnnotationNetworkPolicyAppliedHash] = networkHash
+	}
+	if bandwidthHash != "" && pod.Annotations[controller.AnnotationBandwidthPolicyAppliedHash] != bandwidthHash {
+		annotations[controller.AnnotationBandwidthPolicyAppliedHash] = bandwidthHash
+	}
+	if len(annotations) == 0 {
+		return nil
+	}
+
+	patch := map[string]any{
+		"metadata": map[string]any{
+			"annotations": annotations,
+		},
+	}
+	data, err := json.Marshal(patch)
+	if err != nil {
+		return fmt.Errorf("marshal policy applied patch: %w", err)
+	}
+
+	_, err = w.k8sClient.CoreV1().Pods(pod.Namespace).Patch(
+		ctx,
+		pod.Name,
+		types.MergePatchType,
+		data,
+		metav1.PatchOptions{},
+	)
+	if err != nil {
+		return fmt.Errorf("patch policy applied annotations: %w", err)
+	}
+	return nil
+}
+
+func (w *Watcher) getSandboxPodByID(sandboxID string) (*corev1.Pod, error) {
+	podLister := w.informerFactory.Core().V1().Pods().Lister()
+	pods, err := podLister.List(labels.SelectorFromSet(map[string]string{
+		controller.LabelSandboxID: sandboxID,
+	}))
+	if err != nil {
+		return nil, err
+	}
+	if len(pods) == 0 {
+		return nil, fmt.Errorf("sandbox pod not found: %s", sandboxID)
+	}
+	return pods[0], nil
 }
 
 // ListNetworkPolicies returns all cached network policies

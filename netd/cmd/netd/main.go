@@ -146,6 +146,11 @@ func main() {
 					zap.Error(err),
 				)
 				metrics.RecordRuleError(info.SandboxID, "apply")
+			} else if err := w.MarkPolicyApplied(ctx, info.SandboxID); err != nil {
+				logger.Warn("Failed to mark policy applied",
+					zap.String("sandboxID", info.SandboxID),
+					zap.Error(err),
+				)
 			}
 
 			metrics.SetActiveSandboxes(len(w.ListActiveSandboxes()))
@@ -167,6 +172,11 @@ func main() {
 						zap.Error(err),
 					)
 					metrics.RecordRuleError(newInfo.SandboxID, "apply")
+				} else if err := w.MarkPolicyApplied(ctx, newInfo.SandboxID); err != nil {
+					logger.Warn("Failed to mark policy applied",
+						zap.String("sandboxID", newInfo.SandboxID),
+						zap.Error(err),
+					)
 				}
 			}
 
@@ -227,6 +237,11 @@ func main() {
 						zap.Error(err),
 					)
 					metrics.RecordRuleError(sandboxID, "policy_update")
+				} else if err := w.MarkPolicyApplied(ctx, sandboxID); err != nil {
+					logger.Warn("Failed to mark policy applied",
+						zap.String("sandboxID", sandboxID),
+						zap.Error(err),
+					)
 				}
 				break
 			}
@@ -254,6 +269,11 @@ func main() {
 						zap.Error(err),
 					)
 					metrics.RecordRuleError(sandboxID, "policy_update")
+				} else if err := w.MarkPolicyApplied(ctx, sandboxID); err != nil {
+					logger.Warn("Failed to mark policy applied",
+						zap.String("sandboxID", sandboxID),
+						zap.Error(err),
+					)
 				}
 				break
 			}

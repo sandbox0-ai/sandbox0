@@ -28,19 +28,23 @@ const (
 	PoolTypeActive = "active"
 
 	// Annotations
-	AnnotationTeamID          = "sandbox0.ai/team-id"
-	AnnotationUserID          = "sandbox0.ai/user-id"
-	AnnotationClaimedAt       = "sandbox0.ai/claimed-at"
-	AnnotationClaimType       = "sandbox0.ai/claim-type" // "hot" or "cold"
-	AnnotationExpiresAt       = "sandbox0.ai/expires-at"
-	AnnotationHardExpiresAt   = "sandbox0.ai/hard-expires-at"
-	AnnotationConfig          = "sandbox0.ai/config"
-	AnnotationPaused          = "sandbox0.ai/paused"
-	AnnotationPausedAt        = "sandbox0.ai/paused-at"
-	AnnotationPausedState     = "sandbox0.ai/paused-state"
-	AnnotationNetworkPolicy   = "sandbox0.ai/network-policy"   // JSON serialized network policy spec
-	AnnotationBandwidthPolicy = "sandbox0.ai/bandwidth-policy" // JSON serialized bandwidth policy spec
-	AnnotationSandboxID       = "sandbox0.ai/sandbox-id"
+	AnnotationTeamID                     = "sandbox0.ai/team-id"
+	AnnotationUserID                     = "sandbox0.ai/user-id"
+	AnnotationClaimedAt                  = "sandbox0.ai/claimed-at"
+	AnnotationClaimType                  = "sandbox0.ai/claim-type" // "hot" or "cold"
+	AnnotationExpiresAt                  = "sandbox0.ai/expires-at"
+	AnnotationHardExpiresAt              = "sandbox0.ai/hard-expires-at"
+	AnnotationConfig                     = "sandbox0.ai/config"
+	AnnotationPaused                     = "sandbox0.ai/paused"
+	AnnotationPausedAt                   = "sandbox0.ai/paused-at"
+	AnnotationPausedState                = "sandbox0.ai/paused-state"
+	AnnotationNetworkPolicy              = "sandbox0.ai/network-policy"   // JSON serialized network policy spec
+	AnnotationBandwidthPolicy            = "sandbox0.ai/bandwidth-policy" // JSON serialized bandwidth policy spec
+	AnnotationNetworkPolicyHash          = "sandbox0.ai/network-policy-hash"
+	AnnotationBandwidthPolicyHash        = "sandbox0.ai/bandwidth-policy-hash"
+	AnnotationNetworkPolicyAppliedHash   = "sandbox0.ai/network-policy-applied-hash"
+	AnnotationBandwidthPolicyAppliedHash = "sandbox0.ai/bandwidth-policy-applied-hash"
+	AnnotationSandboxID                  = "sandbox0.ai/sandbox-id"
 )
 
 // PoolManager manages the idle pool (ReplicaSet)

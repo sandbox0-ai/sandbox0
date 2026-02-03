@@ -368,12 +368,19 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 	}
 
 	// Build and add network policy annotation
-	s.applyPoliciesForPod(ctx, pod, template, req)
+	networkSpec, bandwidthSpec, err := s.applyPoliciesForPod(ctx, pod, template, req)
+	if err != nil {
+		return nil, err
+	}
 
 	// Update the pod
 	updatedPod, err := s.k8sClient.CoreV1().Pods(pod.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("update pod: %w", err)
+	}
+
+	if err := s.applyNetworkProvider(ctx, updatedPod, req.TeamID, networkSpec, bandwidthSpec); err != nil {
+		return nil, fmt.Errorf("apply network policy: %w", err)
 	}
 
 	s.logger.Info("Successfully claimed idle pod",
@@ -441,12 +448,19 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 	}
 
 	// Build and add network policy annotation
-	s.applyPoliciesForPod(ctx, pod, template, req)
+	networkSpec, bandwidthSpec, err := s.applyPoliciesForPod(ctx, pod, template, req)
+	if err != nil {
+		return nil, err
+	}
 
 	// Create the pod
 	createdPod, err := s.k8sClient.CoreV1().Pods(template.ObjectMeta.Namespace).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("create pod: %w", err)
+	}
+
+	if err := s.applyNetworkProvider(ctx, createdPod, req.TeamID, networkSpec, bandwidthSpec); err != nil {
+		return nil, fmt.Errorf("apply network policy: %w", err)
 	}
 
 	s.logger.Info("Created new pod for cold start",
@@ -522,9 +536,14 @@ func formatCIDRForIP(ip net.IP) string {
 	return ip.String() + "/128"
 }
 
-func (s *SandboxService) applyPoliciesForPod(ctx context.Context, pod *corev1.Pod, template *v1alpha1.SandboxTemplate, req *ClaimRequest) {
+func (s *SandboxService) applyPoliciesForPod(
+	ctx context.Context,
+	pod *corev1.Pod,
+	template *v1alpha1.SandboxTemplate,
+	req *ClaimRequest,
+) (*v1alpha1.NetworkPolicySpec, *v1alpha1.BandwidthPolicySpec, error) {
 	if s.NetworkPolicyService == nil || pod == nil || template == nil || req == nil {
-		return
+		return nil, nil, nil
 	}
 
 	var requestNetwork *v1alpha1.TplSandboxNetworkPolicy
@@ -543,14 +562,8 @@ func (s *SandboxService) applyPoliciesForPod(ctx context.Context, pod *corev1.Po
 		RequestSpec:  requestNetwork,
 	})
 	if networkSpec != nil {
-		networkPolicyJSON, err := v1alpha1.NetworkPolicyToAnnotation(networkSpec)
-		if err != nil {
-			s.logger.Error("Failed to build network policy annotation",
-				zap.String("sandboxID", pod.Name),
-				zap.Error(err),
-			)
-		} else {
-			pod.Annotations[controller.AnnotationNetworkPolicy] = networkPolicyJSON
+		if _, err := s.setNetworkPolicyAnnotations(pod, networkSpec); err != nil {
+			return nil, nil, err
 		}
 	}
 
@@ -563,24 +576,56 @@ func (s *SandboxService) applyPoliciesForPod(ctx context.Context, pod *corev1.Po
 		AccountingEnabled: true,
 	})
 	if bandwidthSpec != nil {
-		bandwidthPolicyJSON, err := v1alpha1.BandwidthPolicyToAnnotation(bandwidthSpec)
-		if err != nil {
-			s.logger.Error("Failed to build bandwidth policy annotation",
-				zap.String("sandboxID", pod.Name),
-				zap.Error(err),
-			)
-		} else {
-			pod.Annotations[controller.AnnotationBandwidthPolicy] = bandwidthPolicyJSON
+		if _, err := s.setBandwidthPolicyAnnotations(pod, bandwidthSpec); err != nil {
+			return nil, nil, err
 		}
 	}
 
-	if err := s.applyNetworkProvider(ctx, pod, req.TeamID, networkSpec, bandwidthSpec); err != nil {
-		s.logger.Warn("Network provider apply failed",
-			zap.String("provider", s.networkProvider.Name()),
-			zap.String("sandboxID", pod.Name),
-			zap.Error(err),
-		)
+	return networkSpec, bandwidthSpec, nil
+}
+
+func (s *SandboxService) setNetworkPolicyAnnotations(pod *corev1.Pod, spec *v1alpha1.NetworkPolicySpec) (string, error) {
+	if pod.Annotations == nil {
+		pod.Annotations = make(map[string]string)
 	}
+	annotation, err := v1alpha1.NetworkPolicyToAnnotation(spec)
+	if err != nil {
+		return "", fmt.Errorf("serialize network policy: %w", err)
+	}
+	pod.Annotations[controller.AnnotationNetworkPolicy] = annotation
+	newHash := policyAnnotationHash(annotation)
+	oldHash := pod.Annotations[controller.AnnotationNetworkPolicyHash]
+	if newHash != "" {
+		pod.Annotations[controller.AnnotationNetworkPolicyHash] = newHash
+	} else {
+		delete(pod.Annotations, controller.AnnotationNetworkPolicyHash)
+	}
+	if oldHash != newHash {
+		delete(pod.Annotations, controller.AnnotationNetworkPolicyAppliedHash)
+	}
+	return newHash, nil
+}
+
+func (s *SandboxService) setBandwidthPolicyAnnotations(pod *corev1.Pod, spec *v1alpha1.BandwidthPolicySpec) (string, error) {
+	if pod.Annotations == nil {
+		pod.Annotations = make(map[string]string)
+	}
+	annotation, err := v1alpha1.BandwidthPolicyToAnnotation(spec)
+	if err != nil {
+		return "", fmt.Errorf("serialize bandwidth policy: %w", err)
+	}
+	pod.Annotations[controller.AnnotationBandwidthPolicy] = annotation
+	newHash := policyAnnotationHash(annotation)
+	oldHash := pod.Annotations[controller.AnnotationBandwidthPolicyHash]
+	if newHash != "" {
+		pod.Annotations[controller.AnnotationBandwidthPolicyHash] = newHash
+	} else {
+		delete(pod.Annotations, controller.AnnotationBandwidthPolicyHash)
+	}
+	if oldHash != newHash {
+		delete(pod.Annotations, controller.AnnotationBandwidthPolicyAppliedHash)
+	}
+	return newHash, nil
 }
 
 func (s *SandboxService) applyNetworkProvider(
@@ -765,20 +810,14 @@ func (s *SandboxService) UpdateNetworkPolicy(
 		TemplateSpec: templateSpec,
 		RequestSpec:  policy,
 	})
-	policyJSON, err := v1alpha1.NetworkPolicyToAnnotation(networkSpec)
-	if err != nil {
-		return nil, fmt.Errorf("serialize network policy: %w", err)
-	}
-
-	if err := s.applyNetworkProvider(ctx, pod, teamID, networkSpec, nil); err != nil {
-		return nil, fmt.Errorf("apply network policy: %w", err)
-	}
 
 	updatedPod := pod.DeepCopy()
 	if updatedPod.Annotations == nil {
 		updatedPod.Annotations = make(map[string]string)
 	}
-	updatedPod.Annotations[controller.AnnotationNetworkPolicy] = policyJSON
+	if _, err := s.setNetworkPolicyAnnotations(updatedPod, networkSpec); err != nil {
+		return nil, err
+	}
 
 	if configJSON := updatedPod.Annotations[controller.AnnotationConfig]; configJSON != "" {
 		var config SandboxConfig
@@ -804,8 +843,13 @@ func (s *SandboxService) UpdateNetworkPolicy(
 		updatedPod.Annotations[controller.AnnotationConfig] = string(updatedConfigJSON)
 	}
 
-	if _, err := s.k8sClient.CoreV1().Pods(pod.Namespace).Update(ctx, updatedPod, metav1.UpdateOptions{}); err != nil {
+	updatedPod, err = s.k8sClient.CoreV1().Pods(pod.Namespace).Update(ctx, updatedPod, metav1.UpdateOptions{})
+	if err != nil {
 		return nil, fmt.Errorf("update pod annotations: %w", err)
+	}
+
+	if err := s.applyNetworkProvider(ctx, updatedPod, teamID, networkSpec, nil); err != nil {
+		return nil, fmt.Errorf("apply network policy: %w", err)
 	}
 
 	return networkPolicyFromSpec(networkSpec), nil
@@ -878,23 +922,21 @@ func (s *SandboxService) UpdateBandwidthPolicy(
 	policy.TeamID = teamID
 	s.normalizeBandwidthPolicy(policy)
 
-	if err := s.applyNetworkProvider(ctx, pod, teamID, nil, policy); err != nil {
-		return nil, fmt.Errorf("apply bandwidth policy: %w", err)
-	}
-
-	policyJSON, err := v1alpha1.BandwidthPolicyToAnnotation(policy)
-	if err != nil {
-		return nil, fmt.Errorf("serialize bandwidth policy: %w", err)
-	}
-
 	updatedPod := pod.DeepCopy()
 	if updatedPod.Annotations == nil {
 		updatedPod.Annotations = make(map[string]string)
 	}
-	updatedPod.Annotations[controller.AnnotationBandwidthPolicy] = policyJSON
+	if _, err := s.setBandwidthPolicyAnnotations(updatedPod, policy); err != nil {
+		return nil, err
+	}
 
-	if _, err := s.k8sClient.CoreV1().Pods(pod.Namespace).Update(ctx, updatedPod, metav1.UpdateOptions{}); err != nil {
+	updatedPod, err = s.k8sClient.CoreV1().Pods(pod.Namespace).Update(ctx, updatedPod, metav1.UpdateOptions{})
+	if err != nil {
 		return nil, fmt.Errorf("update pod annotations: %w", err)
+	}
+
+	if err := s.applyNetworkProvider(ctx, updatedPod, teamID, nil, policy); err != nil {
+		return nil, fmt.Errorf("apply bandwidth policy: %w", err)
 	}
 
 	return policy, nil

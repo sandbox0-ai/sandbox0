@@ -626,7 +626,6 @@ type MoveFileRequest struct {
 type NetworkEgressPolicy struct {
 	AllowedDomains *[]string `json:"allowedDomains,omitempty"`
 	AllowedIPs     *[]string `json:"allowedIPs,omitempty"`
-	BlockedDomains *[]string `json:"blockedDomains,omitempty"`
 	BlockedIPs     *[]string `json:"blockedIPs,omitempty"`
 }
 

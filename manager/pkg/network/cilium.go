@@ -231,11 +231,6 @@ func (p *CiliumProvider) buildEgress(policy *v1alpha1.NetworkPolicySpec) ([]any,
 			"toCIDR": deniedCIDRs,
 		})
 	}
-	if len(eg.DeniedDomains) > 0 {
-		deniedRules = append(deniedRules, map[string]any{
-			"toFQDNs": buildFQDNRules(eg.DeniedDomains),
-		})
-	}
 
 	defaultAllow := strings.EqualFold(eg.DefaultAction, "allow")
 	if defaultAllow {

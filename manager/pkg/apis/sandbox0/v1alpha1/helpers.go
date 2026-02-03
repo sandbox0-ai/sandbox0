@@ -343,7 +343,6 @@ func BuildEgressSpec(policy *TplSandboxNetworkPolicy) *EgressPolicySpec {
 		spec.AllowedCIDRs = policy.Egress.AllowedIPs
 		spec.DeniedCIDRs = policy.Egress.BlockedIPs
 		spec.AllowedDomains = policy.Egress.AllowedDomains
-		spec.DeniedDomains = policy.Egress.BlockedDomains
 	}
 
 	return spec

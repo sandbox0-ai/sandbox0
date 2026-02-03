@@ -153,10 +153,6 @@ spec:
                         items:
                           type: string
                         type: array
-                      blockedDomains:
-                        items:
-                          type: string
-                        type: array
                       blockedIPs:
                         items:
                           type: string

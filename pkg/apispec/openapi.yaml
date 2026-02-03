@@ -3603,10 +3603,6 @@ components:
           type: array
           items:
             type: string
-        blockedDomains:
-          type: array
-          items:
-            type: string
     NetworkIngressPolicy:
       type: object
       properties:

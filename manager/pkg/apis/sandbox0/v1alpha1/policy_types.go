@@ -29,9 +29,6 @@ type EgressPolicySpec struct {
 	// AllowedDomains is a list of allowed destination domains (supports wildcards like *.example.com)
 	AllowedDomains []string `json:"allowedDomains,omitempty"`
 
-	// DeniedDomains is a list of denied destination domains
-	DeniedDomains []string `json:"deniedDomains,omitempty"`
-
 	// AlwaysDeniedCIDRs are platform-enforced deny CIDRs (user cannot override)
 	// This includes RFC1918, metadata services, cluster services, etc.
 	AlwaysDeniedCIDRs []string `json:"alwaysDeniedCidrs,omitempty"`

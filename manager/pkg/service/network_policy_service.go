@@ -144,7 +144,6 @@ func (s *NetworkPolicyService) mergeNetworkPolicies(
 			merged.Egress.AllowedIPs = append(merged.Egress.AllowedIPs, request.Egress.AllowedIPs...)
 			merged.Egress.AllowedDomains = append(merged.Egress.AllowedDomains, request.Egress.AllowedDomains...)
 			merged.Egress.BlockedIPs = append(merged.Egress.BlockedIPs, request.Egress.BlockedIPs...)
-			merged.Egress.BlockedDomains = append(merged.Egress.BlockedDomains, request.Egress.BlockedDomains...)
 		}
 	}
 

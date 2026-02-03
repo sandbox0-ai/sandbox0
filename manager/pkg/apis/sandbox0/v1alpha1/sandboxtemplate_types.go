@@ -215,7 +215,6 @@ type NetworkEgressPolicy struct {
 	AllowedIPs     []string `json:"allowedIPs,omitempty"`
 	AllowedDomains []string `json:"allowedDomains,omitempty"`
 	BlockedIPs     []string `json:"blockedIPs,omitempty"`
-	BlockedDomains []string `json:"blockedDomains,omitempty"`
 }
 
 // NetworkIngressPolicy defines ingress policy

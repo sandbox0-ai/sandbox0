@@ -154,11 +154,6 @@ func (in *EgressPolicySpec) DeepCopyInto(out *EgressPolicySpec) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
-	if in.DeniedDomains != nil {
-		in, out := &in.DeniedDomains, &out.DeniedDomains
-		*out = make([]string, len(*in))
-		copy(*out, *in)
-	}
 	if in.AlwaysDeniedCIDRs != nil {
 		in, out := &in.AlwaysDeniedCIDRs, &out.AlwaysDeniedCIDRs
 		*out = make([]string, len(*in))
@@ -313,11 +308,6 @@ func (in *NetworkEgressPolicy) DeepCopyInto(out *NetworkEgressPolicy) {
 	}
 	if in.BlockedIPs != nil {
 		in, out := &in.BlockedIPs, &out.BlockedIPs
-		*out = make([]string, len(*in))
-		copy(*out, *in)
-	}
-	if in.BlockedDomains != nil {
-		in, out := &in.BlockedDomains, &out.BlockedDomains
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}

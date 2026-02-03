@@ -40,13 +40,13 @@ import (
 	infrav1alpha1 "github.com/sandbox0-ai/infra/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/pkg/common"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/pkg/rbac"
-	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/cilium"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/database"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/edgegateway"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/fuseplugin"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/internalauth"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/internalgateway"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/manager"
+	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/netd"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/scheduler"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/storage"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/storageproxy"
@@ -72,7 +72,6 @@ type Sandbox0InfraReconciler struct {
 //+kubebuilder:rbac:groups=core,resources=services;secrets;configmaps;persistentvolumeclaims;serviceaccounts;pods;pods/exec;pods/resize;pods/status;nodes;events;namespaces,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=cilium.io,resources=ciliumnetworkpolicies,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings;clusterroles;clusterrolebindings,verbs=get;list;watch;create;update;patch;delete;bind
 //+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=validatingwebhookconfigurations;mutatingwebhookconfigurations,verbs=get;list;watch;create;update;patch;delete
@@ -192,10 +191,10 @@ type componentPlan struct {
 	EnableManager             bool
 	EnableStorageProxy        bool
 	EnableFusePlugin          bool
+	EnableNetd                bool
 	EnableInternalAuth        bool
 	EnableDatabase            bool
 	EnableStorage             bool
-	EnableCilium              bool
 	EnableInitUser            bool
 	EnableClusterRegistration bool
 	RequireControlPlaneConfig bool
@@ -220,10 +219,10 @@ func (r *Sandbox0InfraReconciler) buildComponentPlan(infra *infrav1alpha1.Sandbo
 		EnableManager:             enableManager,
 		EnableStorageProxy:        enableStorageProxy,
 		EnableFusePlugin:          enableStorageProxy,
+		EnableNetd:                infrav1alpha1.IsNetdEnabled(infra),
 		EnableInternalAuth:        hasControlPlane || hasDataPlane,
 		EnableDatabase:            infrav1alpha1.IsDatabaseEnabled(infra),
 		EnableStorage:             infrav1alpha1.IsStorageEnabled(infra),
-		EnableCilium:              cilium.IsEnabled(infra),
 		EnableInitUser:            hasControlPlane && infra.Spec.InitUser != nil && infra.Spec.InitUser.Enabled,
 		EnableClusterRegistration: hasDataPlane && infra.Spec.Cluster != nil,
 		RequireControlPlaneConfig: hasDataPlane && infra.Spec.ControlPlane != nil,
@@ -264,7 +263,7 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 	managerReconciler := manager.NewReconciler(resources)
 	storageProxyReconciler := storageproxy.NewReconciler(resources)
 	fusePluginReconciler := fuseplugin.NewReconciler(resources)
-	ciliumReconciler := cilium.NewReconciler(resources)
+	netdReconciler := netd.NewReconciler(resources)
 	rbacReconciler := rbac.NewReconciler(resources)
 
 	steps := []reconcileStep{}
@@ -365,21 +364,21 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 			ErrorReason:    "InternalGatewayFailed",
 		})
 	}
-	if plan.EnableCilium {
+	if plan.EnableNetd {
 		steps = append(steps, reconcileStep{
-			Name:                 "cilium-rbac",
-			Run:                  func(ctx context.Context) error { return rbacReconciler.ReconcileCiliumInstallerRBAC(ctx, infra) },
-			ConditionType:        infrav1alpha1.ConditionTypeCiliumReady,
-			ErrorReason:          "CiliumRBACFailed",
+			Name:                 "netd-rbac",
+			Run:                  func(ctx context.Context) error { return rbacReconciler.ReconcileNetdRBAC(ctx, infra) },
+			ConditionType:        infrav1alpha1.ConditionTypeNetdReady,
+			ErrorReason:          "NetdRBACFailed",
 			SkipSuccessCondition: true,
 		})
 		steps = append(steps, reconcileStep{
-			Name:           "cilium",
-			Run:            func(ctx context.Context) error { return ciliumReconciler.Reconcile(ctx, infra) },
-			ConditionType:  infrav1alpha1.ConditionTypeCiliumReady,
-			SuccessReason:  "CiliumReady",
-			SuccessMessage: "Cilium is ready",
-			ErrorReason:    "CiliumFailed",
+			Name:           "netd",
+			Run:            func(ctx context.Context) error { return netdReconciler.Reconcile(ctx, infra, imageRepo) },
+			ConditionType:  infrav1alpha1.ConditionTypeNetdReady,
+			SuccessReason:  "NetdReady",
+			SuccessMessage: "netd is ready",
+			ErrorReason:    "NetdFailed",
 		})
 	}
 	if plan.EnableFusePlugin {
@@ -583,11 +582,11 @@ func (r *Sandbox0InfraReconciler) expectedConditionTypes(infra *infrav1alpha1.Sa
 	if plan.EnableStorageProxy {
 		conditions = append(conditions, infrav1alpha1.ConditionTypeStorageProxyReady)
 	}
+	if plan.EnableNetd {
+		conditions = append(conditions, infrav1alpha1.ConditionTypeNetdReady)
+	}
 	if plan.EnableFusePlugin {
 		conditions = append(conditions, infrav1alpha1.ConditionTypeFusePluginReady)
-	}
-	if plan.EnableCilium {
-		conditions = append(conditions, infrav1alpha1.ConditionTypeCiliumReady)
 	}
 	if plan.EnableInitUser {
 		conditions = append(conditions, infrav1alpha1.ConditionTypeInitUserReady)

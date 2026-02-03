@@ -11,7 +11,7 @@ CONTROLLER_TOOLS_VERSION ?= v0.20.0
 OAPI_CODEGEN ?= $(LOCALBIN)/oapi-codegen
 OAPI_CODEGEN_VERSION ?= v2.4.1
 
-SERVICES := edge-gateway internal-gateway manager scheduler storage-proxy k8s-plugin procd infra-operator
+SERVICES := edge-gateway internal-gateway manager scheduler storage-proxy k8s-plugin procd netd infra-operator
 
 # Default version
 VERSION ?= latest
@@ -96,6 +96,8 @@ test:
 			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./manager/...; \
 		elif [ "$$service" = "procd" ]; then \
 			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./manager/procd/...; \
+		elif [ "$$service" = "netd" ]; then \
+			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./netd/...; \
 		elif [ "$$service" = "scheduler" ]; then \
 			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./scheduler/...; \
 		elif [ "$$service" = "storage-proxy" ]; then \
@@ -156,7 +158,7 @@ test-e2e-specific:
 	unset http_proxy && unset https_proxy && unset all_proxy && go test -v ./tests/e2e/... -focus="$(SPEC)" -timeout=30m
 
 # Prevent make from treating service names as targets
-edge-gateway internal-gateway manager scheduler storage-proxy k8s-plugin procd infra-operator:
+edge-gateway internal-gateway manager scheduler storage-proxy k8s-plugin procd netd infra-operator:
 	@:
 
 lint:

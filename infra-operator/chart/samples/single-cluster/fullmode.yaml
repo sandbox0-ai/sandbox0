@@ -12,8 +12,8 @@ metadata:
 spec:
   version: "latest"
   network:
-    # Enable network policy with Cilium.
-    provider: cilium
+    # Enable network policy with netd.
+    provider: netd
   database:
     # Use builtin for quick start; switch to external for managed PG.
     type: builtin
@@ -58,6 +58,8 @@ spec:
       replicas: 1
       config:
         authMode: public
+    netd:
+      enabled: true
     manager:
       enabled: true
       replicas: 1

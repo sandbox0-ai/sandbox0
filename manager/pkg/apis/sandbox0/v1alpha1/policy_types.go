@@ -2,6 +2,9 @@ package v1alpha1
 
 // NetworkPolicySpec defines network policy for a sandbox (stored in pod annotation)
 type NetworkPolicySpec struct {
+	// Version identifies the policy schema version
+	Version string `json:"version,omitempty"`
+
 	// SandboxID is the unique identifier of the sandbox this policy applies to
 	SandboxID string `json:"sandboxId"`
 
@@ -26,8 +29,17 @@ type EgressPolicySpec struct {
 	// DeniedCIDRs is a list of denied destination CIDRs
 	DeniedCIDRs []string `json:"deniedCidrs,omitempty"`
 
+	// AllowedPorts is a list of allowed destination ports (egress)
+	AllowedPorts []PortSpec `json:"allowedPorts,omitempty"`
+
+	// DeniedPorts is a list of denied destination ports (egress)
+	DeniedPorts []PortSpec `json:"deniedPorts,omitempty"`
+
 	// AllowedDomains is a list of allowed destination domains (supports wildcards like *.example.com)
 	AllowedDomains []string `json:"allowedDomains,omitempty"`
+
+	// DeniedDomains is a list of denied destination domains (supports wildcards like *.example.com)
+	DeniedDomains []string `json:"deniedDomains,omitempty"`
 
 	// AlwaysDeniedCIDRs are platform-enforced deny CIDRs (user cannot override)
 	// This includes RFC1918, metadata services, cluster services, etc.
@@ -63,6 +75,9 @@ type PortSpec struct {
 
 // BandwidthPolicySpec defines bandwidth policy for a sandbox (stored in pod annotation)
 type BandwidthPolicySpec struct {
+	// Version identifies the policy schema version
+	Version string `json:"version,omitempty"`
+
 	// SandboxID is the unique identifier of the sandbox this policy applies to
 	SandboxID string `json:"sandboxId"`
 

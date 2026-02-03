@@ -212,9 +212,12 @@ const (
 
 // NetworkEgressPolicy defines egress policy
 type NetworkEgressPolicy struct {
-	AllowedIPs     []string `json:"allowedIPs,omitempty"`
-	AllowedDomains []string `json:"allowedDomains,omitempty"`
-	BlockedIPs     []string `json:"blockedIPs,omitempty"`
+	AllowedIPs     []string   `json:"allowedIPs,omitempty"`
+	AllowedDomains []string   `json:"allowedDomains,omitempty"`
+	BlockedIPs     []string   `json:"blockedIPs,omitempty"`
+	BlockedDomains []string   `json:"blockedDomains,omitempty"`
+	AllowedPorts   []PortSpec `json:"allowedPorts,omitempty"`
+	BlockedPorts   []PortSpec `json:"blockedPorts,omitempty"`
 }
 
 // NetworkIngressPolicy defines ingress policy

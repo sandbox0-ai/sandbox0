@@ -3599,10 +3599,22 @@ components:
           type: array
           items:
             type: string
+        allowedPorts:
+          type: array
+          items:
+            $ref: "#/components/schemas/PortSpec"
+        blockedDomains:
+          type: array
+          items:
+            type: string
         blockedIPs:
           type: array
           items:
             type: string
+        blockedPorts:
+          type: array
+          items:
+            $ref: "#/components/schemas/PortSpec"
     NetworkIngressPolicy:
       type: object
       properties:
@@ -3614,9 +3626,23 @@ components:
           type: array
           items:
             type: string
+    PortSpec:
+      type: object
+      properties:
+        port:
+          type: integer
+          format: int32
+        protocol:
+          type: string
+        endPort:
+          type: integer
+          format: int32
+      required: [port]
     BandwidthPolicySpec:
       type: object
       properties:
+        version:
+          type: string
         sandboxId:
           type: string
         egressRateLimit:

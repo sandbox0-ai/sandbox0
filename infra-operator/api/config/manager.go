@@ -85,9 +85,6 @@ type ManagerConfig struct {
 	// +optional
 	// +kubebuilder:default=10
 	BandwidthAccountingInterval int `yaml:"bandwidth_accounting_interval" json:"bandwidthAccountingInterval"`
-	// +optional
-	// +kubebuilder:default={}
-	Network NetworkProviderConfig `yaml:"network" json:"-"`
 
 	// Pause/Resume
 	// +optional
@@ -141,88 +138,6 @@ type DefaultTemplatePoolConfig struct {
 	// +optional
 	// +kubebuilder:default=true
 	AutoScale bool `yaml:"auto_scale" json:"autoScale"`
-}
-
-// NetworkProviderConfig holds network provider settings.
-type NetworkProviderConfig struct {
-	// Provider is the network provider name (noop, cilium).
-	// +optional
-	// +kubebuilder:default="noop"
-	// +kubebuilder:validation:Enum=noop;cilium
-	Provider string `yaml:"provider" json:"provider"`
-
-	// Cilium config is used when provider is set to cilium.
-	// +optional
-	// +kubebuilder:default={}
-	Cilium CiliumConfig `yaml:"cilium" json:"cilium"`
-}
-
-// CiliumConfig holds Cilium-specific settings.
-type CiliumConfig struct {
-	// PolicyNamePrefix is the prefix for generated Cilium policies.
-	// +optional
-	// +kubebuilder:default="sandbox0"
-	PolicyNamePrefix string `yaml:"policy_name_prefix" json:"policyNamePrefix"`
-
-	// BaselinePolicyName is the name for the namespace baseline policy.
-	// +optional
-	// +kubebuilder:default="sandbox0-baseline"
-	BaselinePolicyName string `yaml:"baseline_policy_name" json:"baselinePolicyName"`
-
-	// SandboxSelectorLabelKey selects sandbox pods for baseline policy.
-	// +optional
-	// +kubebuilder:default="sandbox0.ai/sandbox-id"
-	SandboxSelectorLabelKey string `yaml:"sandbox_selector_label_key" json:"sandboxSelectorLabelKey"`
-
-	// CNPGroup is the API group for CiliumNetworkPolicy.
-	// +optional
-	// +kubebuilder:default="cilium.io"
-	CNPGroup string `yaml:"cnp_group" json:"cnpGroup"`
-
-	// CNPVersion is the API version for CiliumNetworkPolicy.
-	// +optional
-	// +kubebuilder:default="v2"
-	CNPVersion string `yaml:"cnp_version" json:"cnpVersion"`
-
-	// CNPKind is the Kind for CiliumNetworkPolicy.
-	// +optional
-	// +kubebuilder:default="CiliumNetworkPolicy"
-	CNPKind string `yaml:"cnp_kind" json:"cnpKind"`
-
-	// InstallVersion is the Cilium version to install when auto-install is enabled.
-	// +optional
-	// +kubebuilder:default="1.18.0"
-	InstallVersion string `yaml:"install_version" json:"installVersion"`
-
-	// InstallNamespace is the namespace where Cilium is installed.
-	// +optional
-	// +kubebuilder:default="kube-system"
-	InstallNamespace string `yaml:"install_namespace" json:"installNamespace"`
-
-	// AllowUpgrade controls whether infra-operator can upgrade an existing Cilium install.
-	// +optional
-	// +kubebuilder:default=false
-	AllowUpgrade bool `yaml:"allow_upgrade" json:"allowUpgrade"`
-
-	// FieldManager is the SSA field manager name.
-	// +optional
-	// +kubebuilder:default="sandbox0-manager"
-	FieldManager string `yaml:"field_manager" json:"fieldManager"`
-
-	// EnableBandwidthAnnotations enables pod bandwidth annotations.
-	// +optional
-	// +kubebuilder:default=true
-	EnableBandwidthAnnotations bool `yaml:"enable_bandwidth_annotations" json:"enableBandwidthAnnotations"`
-
-	// EgressBandwidthAnnotation is the egress bandwidth annotation key.
-	// +optional
-	// +kubebuilder:default="kubernetes.io/egress-bandwidth"
-	EgressBandwidthAnnotation string `yaml:"egress_bandwidth_annotation" json:"egressBandwidthAnnotation"`
-
-	// IngressBandwidthAnnotation is the ingress bandwidth annotation key.
-	// +optional
-	// +kubebuilder:default="kubernetes.io/ingress-bandwidth"
-	IngressBandwidthAnnotation string `yaml:"ingress_bandwidth_annotation" json:"ingressBandwidthAnnotation"`
 }
 
 // LoadManagerConfig returns the manager configuration.

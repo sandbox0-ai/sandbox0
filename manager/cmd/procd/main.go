@@ -161,7 +161,7 @@ func main() {
 		zap.Strings("allowed_callers", validatorConfig.AllowedCallers),
 	)
 
-	// Note: Network isolation is now handled by the Cilium provider.
+	// Note: Network isolation is handled by netd via pod annotations.
 	// Procd no longer manages network policies.
 
 	// Create and start HTTP server

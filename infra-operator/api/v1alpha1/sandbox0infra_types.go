@@ -81,10 +81,6 @@ type Sandbox0InfraSpec struct {
 	// +optional
 	InternalAuth *InternalAuthConfig `json:"internalAuth,omitempty"`
 
-	// Network configures cluster-wide network provider settings.
-	// +optional
-	Network *config.NetworkProviderConfig `json:"network,omitempty"`
-
 	// Services configures individual services
 	// +optional
 	// +kubebuilder:default={}
@@ -444,6 +440,11 @@ type ServicesConfig struct {
 	// +optional
 	// +kubebuilder:default={}
 	StorageProxy *StorageProxyServiceConfig `json:"storageProxy,omitempty"`
+
+	// Netd configures the netd service (data plane)
+	// +optional
+	// +kubebuilder:default={}
+	Netd *NetdServiceConfig `json:"netd,omitempty"`
 }
 
 // BaseServiceConfig defines common service configuration
@@ -514,6 +515,15 @@ type StorageProxyServiceConfig struct {
 	Config *config.StorageProxyConfig `json:"config,omitempty"`
 }
 
+// NetdServiceConfig defines configuration for netd service
+type NetdServiceConfig struct {
+	BaseServiceConfig `json:",inline"`
+	// Config contains netd specific configuration
+	// +optional
+	// +kubebuilder:default={}
+	Config *config.NetdConfig `json:"config,omitempty"`
+}
+
 // IsEdgeGatewayEnabled returns true when edge-gateway is enabled.
 func IsEdgeGatewayEnabled(infra *Sandbox0Infra) bool {
 	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.EdgeGateway == nil {
@@ -552,6 +562,14 @@ func IsStorageProxyEnabled(infra *Sandbox0Infra) bool {
 		return false
 	}
 	return infra.Spec.Services.StorageProxy.Enabled
+}
+
+// IsNetdEnabled returns true when netd is enabled.
+func IsNetdEnabled(infra *Sandbox0Infra) bool {
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.Netd == nil {
+		return false
+	}
+	return infra.Spec.Services.Netd.Enabled
 }
 
 // IsDatabaseEnabled returns true when database should be reconciled.
@@ -603,7 +621,7 @@ func HasControlPlaneServices(infra *Sandbox0Infra) bool {
 
 // HasDataPlaneServices returns true when any data-plane service is enabled.
 func HasDataPlaneServices(infra *Sandbox0Infra) bool {
-	return IsInternalGatewayEnabled(infra) || IsManagerEnabled(infra) || IsStorageProxyEnabled(infra)
+	return IsInternalGatewayEnabled(infra) || IsManagerEnabled(infra) || IsStorageProxyEnabled(infra) || IsNetdEnabled(infra)
 }
 
 // HasAnyServiceEnabled returns true when at least one service is enabled.
@@ -818,7 +836,7 @@ const (
 	ConditionTypeManagerReady         = "ManagerReady"
 	ConditionTypeStorageProxyReady    = "StorageProxyReady"
 	ConditionTypeFusePluginReady      = "FusePluginReady"
-	ConditionTypeCiliumReady          = "CiliumReady"
+	ConditionTypeNetdReady            = "NetdReady"
 	ConditionTypeSchedulerReady       = "SchedulerReady"
 	ConditionTypeInternalAuthReady    = "InternalAuthReady"
 	ConditionTypeCRDsInstalled        = "CRDsInstalled"

@@ -13,7 +13,7 @@ spec:
   version: "latest"
   network:
     # Optional network policy; remove if not needed.
-    provider: cilium
+    provider: netd
   database:
     # Must match the control plane database.
     type: external
@@ -66,3 +66,5 @@ spec:
     storageProxy:
       enabled: true
       replicas: 1
+    netd:
+      enabled: true

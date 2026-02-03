@@ -1,7 +1,7 @@
 FROM alpine:3.19
 
 # Install runtime dependencies
-RUN apk add --no-cache ca-certificates tzdata zstd-libs lz4-libs
+RUN apk add --no-cache ca-certificates tzdata zstd-libs lz4-libs iptables ipset nftables iproute2
 
 # Copy all binaries from the local bin directory to /usr/local/bin/
 # We expect the binaries to be pre-built for Linux/AMD64 or Linux/ARM64

@@ -39,18 +39,6 @@ func NewReconciler(resources *common.ResourceManager) *Reconciler {
 	return &Reconciler{Resources: resources}
 }
 
-// ReconcileCiliumInstallerRBAC reconciles RBAC for the Cilium installer job.
-func (r *Reconciler) ReconcileCiliumInstallerRBAC(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
-	name := fmt.Sprintf("%s-cilium-installer", infra.Name)
-	labels := common.GetServiceLabels(infra.Name, "cilium-installer")
-
-	if err := r.reconcileServiceAccount(ctx, infra, name, labels); err != nil {
-		return err
-	}
-
-	return r.reconcileClusterRoleBinding(ctx, infra, name, labels, "cluster-admin", name)
-}
-
 // ReconcileManagerRBAC reconciles RBAC for the manager service.
 func (r *Reconciler) ReconcileManagerRBAC(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
 	name := fmt.Sprintf("%s-manager", infra.Name)
@@ -68,11 +56,6 @@ func (r *Reconciler) ReconcileManagerRBAC(ctx context.Context, infra *infrav1alp
 		{
 			APIGroups: []string{"sandbox0.ai"},
 			Resources: []string{"sandboxtemplates", "sandboxtemplates/status"},
-			Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
-		},
-		{
-			APIGroups: []string{"cilium.io"},
-			Resources: []string{"ciliumnetworkpolicies"},
 			Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 		},
 		{
@@ -94,6 +77,34 @@ func (r *Reconciler) ReconcileManagerRBAC(ctx context.Context, infra *infrav1alp
 			APIGroups: []string{"admissionregistration.k8s.io"},
 			Resources: []string{"validatingwebhookconfigurations", "mutatingwebhookconfigurations"},
 			Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+		},
+	}
+
+	if err := r.reconcileClusterRole(ctx, name, labels, rules); err != nil {
+		return err
+	}
+
+	return r.reconcileClusterRoleBinding(ctx, infra, name, labels, name, name)
+}
+
+// ReconcileNetdRBAC reconciles RBAC for the netd service.
+func (r *Reconciler) ReconcileNetdRBAC(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
+	name := fmt.Sprintf("%s-netd", infra.Name)
+	labels := map[string]string{
+		"app.kubernetes.io/name":       "netd",
+		"app.kubernetes.io/instance":   infra.Name,
+		"app.kubernetes.io/managed-by": "sandbox0infra-operator",
+	}
+
+	if err := r.reconcileServiceAccount(ctx, infra, name, labels); err != nil {
+		return err
+	}
+
+	rules := []rbacv1.PolicyRule{
+		{
+			APIGroups: []string{""},
+			Resources: []string{"pods", "pods/status", "nodes"},
+			Verbs:     []string{"get", "list", "watch"},
 		},
 	}
 

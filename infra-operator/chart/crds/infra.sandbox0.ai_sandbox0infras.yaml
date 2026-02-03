@@ -362,83 +362,6 @@ spec:
                       metadata
                     type: boolean
                 type: object
-              network:
-                description: Network configures cluster-wide network provider settings.
-                properties:
-                  cilium:
-                    default: {}
-                    description: Cilium config is used when provider is set to cilium.
-                    properties:
-                      allowUpgrade:
-                        default: false
-                        description: AllowUpgrade controls whether infra-operator
-                          can upgrade an existing Cilium install.
-                        type: boolean
-                      baselinePolicyName:
-                        default: sandbox0-baseline
-                        description: BaselinePolicyName is the name for the namespace
-                          baseline policy.
-                        type: string
-                      cnpGroup:
-                        default: cilium.io
-                        description: CNPGroup is the API group for CiliumNetworkPolicy.
-                        type: string
-                      cnpKind:
-                        default: CiliumNetworkPolicy
-                        description: CNPKind is the Kind for CiliumNetworkPolicy.
-                        type: string
-                      cnpVersion:
-                        default: v2
-                        description: CNPVersion is the API version for CiliumNetworkPolicy.
-                        type: string
-                      egressBandwidthAnnotation:
-                        default: kubernetes.io/egress-bandwidth
-                        description: EgressBandwidthAnnotation is the egress bandwidth
-                          annotation key.
-                        type: string
-                      enableBandwidthAnnotations:
-                        default: true
-                        description: EnableBandwidthAnnotations enables pod bandwidth
-                          annotations.
-                        type: boolean
-                      fieldManager:
-                        default: sandbox0-manager
-                        description: FieldManager is the SSA field manager name.
-                        type: string
-                      ingressBandwidthAnnotation:
-                        default: kubernetes.io/ingress-bandwidth
-                        description: IngressBandwidthAnnotation is the ingress bandwidth
-                          annotation key.
-                        type: string
-                      installNamespace:
-                        default: kube-system
-                        description: InstallNamespace is the namespace where Cilium
-                          is installed.
-                        type: string
-                      installVersion:
-                        default: 1.18.0
-                        description: InstallVersion is the Cilium version to install
-                          when auto-install is enabled.
-                        type: string
-                      policyNamePrefix:
-                        default: sandbox0
-                        description: PolicyNamePrefix is the prefix for generated
-                          Cilium policies.
-                        type: string
-                      sandboxSelectorLabelKey:
-                        default: sandbox0.ai/sandbox-id
-                        description: SandboxSelectorLabelKey selects sandbox pods
-                          for baseline policy.
-                        type: string
-                    type: object
-                  provider:
-                    default: noop
-                    description: Provider is the network provider name (noop, cilium).
-                    enum:
-                    - noop
-                    - cilium
-                    type: string
-                type: object
               region:
                 description: Region identifies the region for multi-cluster deployments
                 type: string
@@ -1171,6 +1094,218 @@ spec:
                             default: 9443
                             description: Webhook
                             type: integer
+                        type: object
+                      enabled:
+                        default: false
+                        description: Enabled enables or disables the service
+                        type: boolean
+                      ingress:
+                        description: Ingress configures ingress settings
+                        properties:
+                          className:
+                            description: ClassName specifies the ingress class name
+                            type: string
+                          enabled:
+                            default: false
+                            description: Enabled enables ingress
+                            type: boolean
+                          host:
+                            description: Host specifies the ingress host
+                            type: string
+                          tlsSecret:
+                            description: TLSSecret specifies the TLS secret name
+                            type: string
+                        type: object
+                      replicas:
+                        default: 1
+                        description: Replicas specifies the number of replicas
+                        format: int32
+                        type: integer
+                      resources:
+                        description: Resources specifies resource requirements
+                        properties:
+                          claims:
+                            description: |-
+                              Claims lists the names of resources, defined in spec.resourceClaims,
+                              that are used by this container.
+
+                              This field depends on the
+                              DynamicResourceAllocation feature gate.
+
+                              This field is immutable. It can only be set for containers.
+                            items:
+                              description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                              properties:
+                                name:
+                                  description: |-
+                                    Name must match the name of one entry in pod.spec.resourceClaims of
+                                    the Pod where this field is used. It makes that resource available
+                                    inside a container.
+                                  type: string
+                                request:
+                                  description: |-
+                                    Request is the name chosen for a request in the referenced claim.
+                                    If empty, everything from the claim is made available, otherwise
+                                    only the result of this request.
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                            type: array
+                            x-kubernetes-list-map-keys:
+                            - name
+                            x-kubernetes-list-type: map
+                          limits:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: |-
+                              Limits describes the maximum amount of compute resources allowed.
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                            type: object
+                          requests:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: |-
+                              Requests describes the minimum amount of compute resources required.
+                              If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                              otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                            type: object
+                        type: object
+                      service:
+                        description: Service configures the Kubernetes service
+                        properties:
+                          port:
+                            default: 80
+                            description: Port specifies the service port
+                            format: int32
+                            type: integer
+                          type:
+                            default: ClusterIP
+                            description: Type specifies the service type
+                            type: string
+                        type: object
+                    type: object
+                  netd:
+                    default: {}
+                    description: Netd configures the netd service (data plane)
+                    properties:
+                      config:
+                        default: {}
+                        description: Config contains netd specific configuration
+                        properties:
+                          auditLogMaxBackups:
+                            default: 5
+                            type: integer
+                          auditLogMaxBytes:
+                            default: 104857600
+                            format: int64
+                            type: integer
+                          auditLogPath:
+                            type: string
+                          bpfFsPath:
+                            type: string
+                          bpfPinPath:
+                            type: string
+                          burstRatio:
+                            default: "0.125"
+                            type: string
+                          clusterDnsCidr:
+                            type: string
+                          dnsPort:
+                            default: 53
+                            type: integer
+                          dnsResolvers:
+                            items:
+                              type: string
+                            type: array
+                          edtHorizon:
+                            default: 200ms
+                            type: string
+                          failClosed:
+                            default: true
+                            type: boolean
+                          healthPort:
+                            default: 8081
+                            type: integer
+                          internalGatewayCidr:
+                            type: string
+                          kubeConfig:
+                            type: string
+                          logLevel:
+                            default: info
+                            type: string
+                          metricsPort:
+                            default: 9091
+                            type: integer
+                          metricsReportInterval:
+                            default: 10s
+                            type: string
+                          namespace:
+                            type: string
+                          nodeName:
+                            type: string
+                          preferNft:
+                            default: true
+                            type: boolean
+                          procdPort:
+                            default: 49983
+                            description: Ports and CIDRs
+                            type: integer
+                          proxyDnsTimeout:
+                            default: 5s
+                            type: string
+                          proxyHeaderLimit:
+                            format: int64
+                            type: integer
+                          proxyHttpPort:
+                            default: 18080
+                            type: integer
+                          proxyHttpsPort:
+                            default: 18443
+                            type: integer
+                          proxyIdleConnTimeout:
+                            default: 90s
+                            type: string
+                          proxyListenAddr:
+                            default: 0.0.0.0
+                            description: Proxy settings
+                            type: string
+                          proxyMaxIdleConns:
+                            default: 1000
+                            type: integer
+                          proxyMaxIdleConnsPerHost:
+                            default: 100
+                            type: integer
+                          proxyResponseHeaderTimeout:
+                            default: 10s
+                            type: string
+                          proxyUpstreamTimeout:
+                            default: 30s
+                            type: string
+                          resyncPeriod:
+                            default: 30s
+                            type: string
+                          shutdownDelay:
+                            default: 2s
+                            type: string
+                          storageProxyCidr:
+                            type: string
+                          useEbpf:
+                            description: eBPF and tc
+                            type: boolean
+                          useEdt:
+                            type: boolean
+                          vethPrefix:
+                            type: string
                         type: object
                       enabled:
                         default: false

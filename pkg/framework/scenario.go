@@ -175,9 +175,6 @@ func buildScenarioRollouts(infra *infrav1alpha1.Sandbox0Infra, infraName, namesp
 	if infrav1alpha1.IsStorageProxyEnabled(infra) {
 		rollouts = append(rollouts, RolloutTarget{Kind: "deployment", Name: infraName + "-storage-proxy", Namespace: namespace, Timeout: "5m"})
 	}
-	if infra != nil && infra.Spec.Network != nil && strings.EqualFold(strings.TrimSpace(infra.Spec.Network.Provider), "cilium") {
-		rollouts = append(rollouts, RolloutTarget{Kind: "daemonset", Name: "cilium", Namespace: "kube-system", Timeout: "10m"})
-	}
 	return rollouts
 }
 

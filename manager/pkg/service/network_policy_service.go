@@ -47,6 +47,7 @@ func (s *NetworkPolicyService) BuildNetworkPolicySpec(req *BuildNetworkPolicyReq
 
 	// Build the policy spec
 	return &v1alpha1.NetworkPolicySpec{
+		Version:   "v1",
 		SandboxID: req.SandboxID,
 		TeamID:    req.TeamID,
 		Egress:    v1alpha1.BuildEgressSpec(mergedSpec),
@@ -90,6 +91,7 @@ func (s *NetworkPolicyService) BuildBandwidthPolicySpec(req *BuildBandwidthPolic
 	}
 
 	return &v1alpha1.BandwidthPolicySpec{
+		Version:   "v1",
 		SandboxID: req.SandboxID,
 		TeamID:    req.TeamID,
 		EgressRateLimit: &v1alpha1.RateLimitSpec{

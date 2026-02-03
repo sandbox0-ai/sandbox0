@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -29,7 +28,6 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -182,31 +180,7 @@ func main() {
 	}, logger)
 
 	networkProvider := network.NewNoopProvider()
-	if strings.EqualFold(cfg.Network.Provider, "cilium") {
-		dynamicClient, err := dynamic.NewForConfig(k8sConfig)
-		if err != nil {
-			logger.Fatal("Failed to create dynamic client for Cilium provider", zap.Error(err))
-		}
-		ciliumProvider := network.NewCiliumProvider(
-			k8sClient,
-			dynamicClient,
-			network.CiliumConfig{
-				PolicyNamePrefix:           cfg.Network.Cilium.PolicyNamePrefix,
-				BaselinePolicyName:         cfg.Network.Cilium.BaselinePolicyName,
-				SandboxSelectorLabelKey:    cfg.Network.Cilium.SandboxSelectorLabelKey,
-				CNPGroup:                   cfg.Network.Cilium.CNPGroup,
-				CNPVersion:                 cfg.Network.Cilium.CNPVersion,
-				CNPKind:                    cfg.Network.Cilium.CNPKind,
-				FieldManager:               cfg.Network.Cilium.FieldManager,
-				EnableBandwidthAnnotations: cfg.Network.Cilium.EnableBandwidthAnnotations,
-				EgressBandwidthAnnotation:  cfg.Network.Cilium.EgressBandwidthAnnotation,
-				IngressBandwidthAnnotation: cfg.Network.Cilium.IngressBandwidthAnnotation,
-			},
-			logger,
-		)
-		networkProvider = ciliumProvider
-		logger.Info("Network provider enabled", zap.String("provider", networkProvider.Name()))
-	}
+	logger.Info("Network provider disabled; netd enforces policies via pod annotations")
 
 	// Initialize internal auth generator for procd communication
 	var internalTokenGenerator service.TokenGenerator

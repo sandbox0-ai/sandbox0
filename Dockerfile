@@ -28,11 +28,12 @@ RUN BUILD_GOOS="${TARGETOS:-$(go env GOOS)}" && \
     CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/scheduler ./scheduler/cmd/scheduler && \
     CGO_ENABLED=1 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/storage-proxy ./storage-proxy/cmd/storage-proxy && \
     CGO_ENABLED=1 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/infra-operator ./infra-operator/cmd/infra-operator && \
-    CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/k8s-plugin ./k8s-plugin
+    CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/k8s-plugin ./k8s-plugin && \
+    CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/netd ./netd/cmd/netd
 
 FROM alpine:3.19
 
-RUN apk add --no-cache ca-certificates tzdata zstd-libs lz4-libs
+RUN apk add --no-cache ca-certificates tzdata zstd-libs lz4-libs iptables ipset nftables iproute2
 
 COPY --from=builder /out/ /usr/local/bin/
 COPY scripts/entrypoint.sh /usr/local/bin/entrypoint

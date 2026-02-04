@@ -3,9 +3,11 @@
 package redirect
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
+	"os/exec"
 	"strconv"
 	"strings"
 
@@ -17,9 +19,11 @@ import (
 
 const (
 	chainName       = "NETD_PREROUTING"
+	ipsetName       = "netd-sandbox-ips"
 	tproxyMark      = "0x1/0x1"
 	ruleTableID     = 100
 	defaultLoopback = "127.0.0.0/8"
+	mangleTable     = "mangle"
 )
 
 type iptablesManager struct {
@@ -77,69 +81,90 @@ func (m *iptablesManager) Sync(ctx context.Context, sandboxIPs []string, bypassC
 		}
 	}
 
-	for _, ip := range normalizeIPs(sandboxIPs) {
-		// TCP 443
-		if err := m.appendRule(ctx, "-s", ip+"/32", "-p", "tcp", "--dport", "443", "-m", "conntrack", "--ctstate", "NEW", "-j", "TPROXY",
-			"--on-port", strconv.Itoa(m.cfg.ProxyHTTPSPort), "--tproxy-mark", tproxyMark); err != nil {
-			return err
-		}
-		if err := m.appendRule(ctx, "-s", ip+"/32", "-p", "tcp", "--dport", "443", "-m", "socket", "--transparent", "-j", "TPROXY",
-			"--on-port", strconv.Itoa(m.cfg.ProxyHTTPSPort), "--tproxy-mark", tproxyMark); err != nil {
-			return err
-		}
+	if err := m.syncIPSet(ctx, normalizeIPs(sandboxIPs)); err != nil {
+		return err
+	}
 
-		// TCP 853
-		if err := m.appendRule(ctx, "-s", ip+"/32", "-p", "tcp", "--dport", "853", "-m", "conntrack", "--ctstate", "NEW", "-j", "TPROXY",
-			"--on-port", strconv.Itoa(m.cfg.ProxyHTTPSPort), "--tproxy-mark", tproxyMark); err != nil {
-			return err
-		}
-		if err := m.appendRule(ctx, "-s", ip+"/32", "-p", "tcp", "--dport", "853", "-m", "socket", "--transparent", "-j", "TPROXY",
-			"--on-port", strconv.Itoa(m.cfg.ProxyHTTPSPort), "--tproxy-mark", tproxyMark); err != nil {
-			return err
-		}
+	// TCP 443
+	if err := m.appendRule(ctx, "-m", "set", "--match-set", ipsetName, "src", "-p", "tcp", "--dport", "443", "-m", "conntrack", "--ctstate", "NEW", "-j", "TPROXY",
+		"--on-port", strconv.Itoa(m.cfg.ProxyHTTPSPort), "--tproxy-mark", tproxyMark); err != nil {
+		return err
+	}
+	if err := m.appendRule(ctx, "-m", "set", "--match-set", ipsetName, "src", "-p", "tcp", "--dport", "443", "-m", "socket", "--transparent", "-j", "TPROXY",
+		"--on-port", strconv.Itoa(m.cfg.ProxyHTTPSPort), "--tproxy-mark", tproxyMark); err != nil {
+		return err
+	}
 
-		// UDP 443
-		if err := m.appendRule(ctx, "-s", ip+"/32", "-p", "udp", "--dport", "443", "-m", "conntrack", "--ctstate", "NEW", "-j", "TPROXY",
-			"--on-port", strconv.Itoa(m.cfg.ProxyHTTPSPort), "--tproxy-mark", tproxyMark); err != nil {
-			return err
-		}
-		if err := m.appendRule(ctx, "-s", ip+"/32", "-p", "udp", "--dport", "443", "-m", "socket", "--transparent", "-j", "TPROXY",
-			"--on-port", strconv.Itoa(m.cfg.ProxyHTTPSPort), "--tproxy-mark", tproxyMark); err != nil {
-			return err
-		}
+	// TCP 853
+	if err := m.appendRule(ctx, "-m", "set", "--match-set", ipsetName, "src", "-p", "tcp", "--dport", "853", "-m", "conntrack", "--ctstate", "NEW", "-j", "TPROXY",
+		"--on-port", strconv.Itoa(m.cfg.ProxyHTTPSPort), "--tproxy-mark", tproxyMark); err != nil {
+		return err
+	}
+	if err := m.appendRule(ctx, "-m", "set", "--match-set", ipsetName, "src", "-p", "tcp", "--dport", "853", "-m", "socket", "--transparent", "-j", "TPROXY",
+		"--on-port", strconv.Itoa(m.cfg.ProxyHTTPSPort), "--tproxy-mark", tproxyMark); err != nil {
+		return err
+	}
 
-		// UDP 853
-		if err := m.appendRule(ctx, "-s", ip+"/32", "-p", "udp", "--dport", "853", "-m", "conntrack", "--ctstate", "NEW", "-j", "TPROXY",
-			"--on-port", strconv.Itoa(m.cfg.ProxyHTTPSPort), "--tproxy-mark", tproxyMark); err != nil {
-			return err
-		}
-		if err := m.appendRule(ctx, "-s", ip+"/32", "-p", "udp", "--dport", "853", "-m", "socket", "--transparent", "-j", "TPROXY",
-			"--on-port", strconv.Itoa(m.cfg.ProxyHTTPSPort), "--tproxy-mark", tproxyMark); err != nil {
-			return err
-		}
+	// UDP 443
+	if err := m.appendRule(ctx, "-m", "set", "--match-set", ipsetName, "src", "-p", "udp", "--dport", "443", "-m", "conntrack", "--ctstate", "NEW", "-j", "TPROXY",
+		"--on-port", strconv.Itoa(m.cfg.ProxyHTTPSPort), "--tproxy-mark", tproxyMark); err != nil {
+		return err
+	}
+	if err := m.appendRule(ctx, "-m", "set", "--match-set", ipsetName, "src", "-p", "udp", "--dport", "443", "-m", "socket", "--transparent", "-j", "TPROXY",
+		"--on-port", strconv.Itoa(m.cfg.ProxyHTTPSPort), "--tproxy-mark", tproxyMark); err != nil {
+		return err
+	}
 
-		// TCP All
-		if err := m.appendRule(ctx, "-s", ip+"/32", "-p", "tcp", "-m", "conntrack", "--ctstate", "NEW", "-j", "TPROXY",
-			"--on-port", strconv.Itoa(m.cfg.ProxyHTTPPort), "--tproxy-mark", tproxyMark); err != nil {
-			return err
-		}
-		if err := m.appendRule(ctx, "-s", ip+"/32", "-p", "tcp", "-m", "socket", "--transparent", "-j", "TPROXY",
-			"--on-port", strconv.Itoa(m.cfg.ProxyHTTPPort), "--tproxy-mark", tproxyMark); err != nil {
-			return err
-		}
+	// UDP 853
+	if err := m.appendRule(ctx, "-m", "set", "--match-set", ipsetName, "src", "-p", "udp", "--dport", "853", "-m", "conntrack", "--ctstate", "NEW", "-j", "TPROXY",
+		"--on-port", strconv.Itoa(m.cfg.ProxyHTTPSPort), "--tproxy-mark", tproxyMark); err != nil {
+		return err
+	}
+	if err := m.appendRule(ctx, "-m", "set", "--match-set", ipsetName, "src", "-p", "udp", "--dport", "853", "-m", "socket", "--transparent", "-j", "TPROXY",
+		"--on-port", strconv.Itoa(m.cfg.ProxyHTTPSPort), "--tproxy-mark", tproxyMark); err != nil {
+		return err
+	}
 
-		// UDP All
-		if err := m.appendRule(ctx, "-s", ip+"/32", "-p", "udp", "-m", "conntrack", "--ctstate", "NEW", "-j", "TPROXY",
-			"--on-port", strconv.Itoa(m.cfg.ProxyHTTPPort), "--tproxy-mark", tproxyMark); err != nil {
-			return err
-		}
-		if err := m.appendRule(ctx, "-s", ip+"/32", "-p", "udp", "-m", "socket", "--transparent", "-j", "TPROXY",
-			"--on-port", strconv.Itoa(m.cfg.ProxyHTTPPort), "--tproxy-mark", tproxyMark); err != nil {
-			return err
-		}
+	// TCP All
+	if err := m.appendRule(ctx, "-m", "set", "--match-set", ipsetName, "src", "-p", "tcp", "-m", "conntrack", "--ctstate", "NEW", "-j", "TPROXY",
+		"--on-port", strconv.Itoa(m.cfg.ProxyHTTPPort), "--tproxy-mark", tproxyMark); err != nil {
+		return err
+	}
+	if err := m.appendRule(ctx, "-m", "set", "--match-set", ipsetName, "src", "-p", "tcp", "-m", "socket", "--transparent", "-j", "TPROXY",
+		"--on-port", strconv.Itoa(m.cfg.ProxyHTTPPort), "--tproxy-mark", tproxyMark); err != nil {
+		return err
+	}
+
+	// UDP All
+	if err := m.appendRule(ctx, "-m", "set", "--match-set", ipsetName, "src", "-p", "udp", "-m", "conntrack", "--ctstate", "NEW", "-j", "TPROXY",
+		"--on-port", strconv.Itoa(m.cfg.ProxyHTTPPort), "--tproxy-mark", tproxyMark); err != nil {
+		return err
+	}
+	if err := m.appendRule(ctx, "-m", "set", "--match-set", ipsetName, "src", "-p", "udp", "-m", "socket", "--transparent", "-j", "TPROXY",
+		"--on-port", strconv.Itoa(m.cfg.ProxyHTTPPort), "--tproxy-mark", tproxyMark); err != nil {
+		return err
 	}
 
 	m.logger.Info("Iptables sync complete")
+	return nil
+}
+
+func (m *iptablesManager) syncIPSet(ctx context.Context, ips []string) error {
+	var buf bytes.Buffer
+	// Create set if not exists
+	buf.WriteString(fmt.Sprintf("create %s hash:ip family inet -exist\n", ipsetName))
+	// Flush set
+	buf.WriteString(fmt.Sprintf("flush %s\n", ipsetName))
+	// Add IPs
+	for _, ip := range ips {
+		buf.WriteString(fmt.Sprintf("add %s %s -exist\n", ipsetName, ip))
+	}
+
+	cmd := exec.CommandContext(ctx, "ipset", "restore")
+	cmd.Stdin = &buf
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("ipset restore failed: %s: %w", string(out), err)
+	}
 	return nil
 }
 
@@ -147,9 +172,82 @@ func (m *iptablesManager) Cleanup(ctx context.Context) error {
 	if err := m.flushChain(ctx); err != nil {
 		return err
 	}
-	_ = m.ipt.DeleteIfExists("mangle", "PREROUTING", "-j", chainName)
-	_ = m.ipt.DeleteChain("mangle", chainName)
+	_ = m.ipt.DeleteIfExists(mangleTable, "PREROUTING", "-j", chainName)
+	_ = m.ipt.DeleteChain(mangleTable, chainName)
+
+	// Cleanup ipset
+	cmd := exec.CommandContext(ctx, "ipset", "destroy", ipsetName)
+	_ = cmd.Run()
+
 	return nil
+}
+
+func (m *iptablesManager) ensureChain(ctx context.Context) error {
+	_ = ctx
+	exists, err := m.ipt.ChainExists(mangleTable, chainName)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	return m.ipt.NewChain(mangleTable, chainName)
+}
+
+func (m *iptablesManager) ensureJump(ctx context.Context) error {
+	_ = ctx
+	exists, err := m.ipt.Exists(mangleTable, "PREROUTING", "-j", chainName)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	return m.ipt.Append(mangleTable, "PREROUTING", "-j", chainName)
+}
+
+func (m *iptablesManager) flushChain(ctx context.Context) error {
+	_ = ctx
+	return m.ipt.ClearChain(mangleTable, chainName)
+}
+
+func (m *iptablesManager) appendRule(ctx context.Context, args ...string) error {
+	_ = ctx
+	return m.ipt.Append(mangleTable, chainName, args...)
+}
+
+func normalizeIPs(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+func normalizeCIDRs(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func (m *iptablesManager) ensurePolicyRouting(ctx context.Context) error {
@@ -195,74 +293,6 @@ func (m *iptablesManager) ensurePolicyRouting(ctx context.Context) error {
 		}
 	}
 	return nil
-}
-
-func (m *iptablesManager) ensureChain(ctx context.Context) error {
-	_ = ctx
-	exists, err := m.ipt.ChainExists("mangle", chainName)
-	if err != nil {
-		return err
-	}
-	if exists {
-		return nil
-	}
-	return m.ipt.NewChain("mangle", chainName)
-}
-
-func (m *iptablesManager) ensureJump(ctx context.Context) error {
-	_ = ctx
-	exists, err := m.ipt.Exists("mangle", "PREROUTING", "-j", chainName)
-	if err != nil {
-		return err
-	}
-	if exists {
-		return nil
-	}
-	return m.ipt.Append("mangle", "PREROUTING", "-j", chainName)
-}
-
-func (m *iptablesManager) flushChain(ctx context.Context) error {
-	_ = ctx
-	return m.ipt.ClearChain("mangle", chainName)
-}
-
-func (m *iptablesManager) appendRule(ctx context.Context, args ...string) error {
-	_ = ctx
-	return m.ipt.Append("mangle", chainName, args...)
-}
-
-func normalizeIPs(values []string) []string {
-	out := make([]string, 0, len(values))
-	seen := map[string]struct{}{}
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		out = append(out, value)
-	}
-	return out
-}
-
-func normalizeCIDRs(values []string) []string {
-	out := make([]string, 0, len(values))
-	seen := map[string]struct{}{}
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		out = append(out, value)
-	}
-	return out
 }
 
 func ruleExists(rules []netlink.Rule, mark, mask uint32, table int) bool {

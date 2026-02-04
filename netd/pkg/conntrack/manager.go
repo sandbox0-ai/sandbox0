@@ -13,9 +13,9 @@ import (
 )
 
 type Manager struct {
-	logger *zap.Logger
-	mu     sync.Mutex
-	conn   *ct.Conn
+	logger  *zap.Logger
+	mu      sync.Mutex
+	conn    *ct.Conn
 	enabled bool
 }
 
@@ -40,8 +40,8 @@ func NewManager(logger *zap.Logger) (*Manager, error) {
 		}, fmt.Errorf("conntrack dial: %w", err)
 	}
 	return &Manager{
-		logger: logger,
-		conn:   conn,
+		logger:  logger,
+		conn:    conn,
 		enabled: true,
 	}, nil
 }

@@ -44,20 +44,16 @@ func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.T
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	httpLn, err := net.Listen("tcp", net.JoinHostPort(cfg.ProxyListenAddr, fmt.Sprintf("%d", cfg.ProxyHTTPPort)))
+	httpLn, err := listenTCPTransparent(net.JoinHostPort(cfg.ProxyListenAddr, fmt.Sprintf("%d", cfg.ProxyHTTPPort)))
 	if err != nil {
 		return nil, err
 	}
-	httpsLn, err := net.Listen("tcp", net.JoinHostPort(cfg.ProxyListenAddr, fmt.Sprintf("%d", cfg.ProxyHTTPSPort)))
+	httpsLn, err := listenTCPTransparent(net.JoinHostPort(cfg.ProxyListenAddr, fmt.Sprintf("%d", cfg.ProxyHTTPSPort)))
 	if err != nil {
 		_ = httpLn.Close()
 		return nil, err
 	}
-	listenIP := net.ParseIP(cfg.ProxyListenAddr)
-	if listenIP == nil {
-		listenIP = net.IPv4zero
-	}
-	udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: listenIP, Port: cfg.ProxyHTTPSPort})
+	udpConn, err := listenUDPTransparent(net.JoinHostPort(cfg.ProxyListenAddr, fmt.Sprintf("%d", cfg.ProxyHTTPSPort)))
 	if err != nil {
 		_ = httpLn.Close()
 		_ = httpsLn.Close()
@@ -232,7 +228,7 @@ func (s *Server) handleUDP(ctx context.Context) {
 			return
 		default:
 		}
-		n, addr, err := s.udpConn.ReadFromUDP(buffer)
+		n, addr, destIP, destPort, err := readUDPDatagram(s.udpConn, buffer)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -242,10 +238,6 @@ func (s *Server) handleUDP(ctx context.Context) {
 			}
 			s.logger.Error("UDP read failed", zap.Error(err))
 			continue
-		}
-		destIP, destPort, dstErr := originalDstUDP(s.udpConn)
-		if dstErr != nil {
-			s.logger.Debug("UDP original dst failed", zap.Error(dstErr))
 		}
 		payload := make([]byte, n)
 		copy(payload, buffer[:n])

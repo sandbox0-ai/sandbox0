@@ -212,6 +212,12 @@ func (d *Daemon) syncRedirect(
 	if err := redirectManager.Sync(ctx, sandboxIPs, bypassCIDRs); err != nil {
 		return err
 	}
+	for _, sandbox := range sandboxes {
+		if sandbox == nil || sandbox.NetworkPolicyHash == "" {
+			continue
+		}
+		policyStore.MarkApplied(sandbox.Namespace, sandbox.Name, sandbox.NetworkPolicyHash)
+	}
 	patchedCount := 0
 	if err := patcher.SyncAppliedHashes(ctx, sandboxes, policyStore); err != nil {
 		d.logger.Warn("Failed to sync applied hashes", zap.Error(err))

@@ -39,7 +39,7 @@ func (p *Patcher) SyncAppliedHashes(ctx context.Context, sandboxes []*watcher.Sa
 		}
 		annotations := map[string]string{}
 		if sandbox.NetworkPolicyHash != "" && sandbox.NetworkPolicyHash != sandbox.NetworkAppliedHash {
-			if store == nil || !store.HasPolicyHash(sandbox.Namespace, sandbox.Name, sandbox.NetworkPolicyHash) {
+			if store == nil || !store.HasPolicyApplied(sandbox.Namespace, sandbox.Name, sandbox.NetworkPolicyHash) {
 				continue
 			}
 			annotations[controller.AnnotationNetworkPolicyAppliedHash] = sandbox.NetworkPolicyHash

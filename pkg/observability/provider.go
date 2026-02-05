@@ -131,6 +131,15 @@ func (p *Provider) Tracer() trace.Tracer {
 	return p.tracer
 }
 
+// MetricsRegistryOrNil returns the metrics registry when metrics are enabled.
+// When metrics are disabled, it returns nil so callers can skip registration.
+func (p *Provider) MetricsRegistryOrNil() prometheus.Registerer {
+	if p == nil || p.config.DisableMetrics {
+		return nil
+	}
+	return p.MetricsRegistry
+}
+
 // initTracing initializes OpenTelemetry tracing with the configured exporter
 func initTracing(cfg Config) (*sdktrace.TracerProvider, error) {
 	var exporter sdktrace.SpanExporter

@@ -21,6 +21,7 @@ import (
 	"github.com/sandbox0-ai/infra/manager/pkg/service"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	"github.com/sandbox0-ai/infra/pkg/observability"
+	obsmetrics "github.com/sandbox0-ai/infra/pkg/observability/metrics"
 	"github.com/sandbox0-ai/infra/tests/integration/internal/utils"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -104,6 +105,20 @@ func newManagerTestEnvWithOptions(t *testing.T, opts managerTestEnvOptions) *man
 	}
 	logger := zap.NewNop()
 
+	obsProvider, err := observability.New(observability.Config{
+		ServiceName:    "manager-test",
+		Logger:         logger,
+		DisableTracing: true,
+		DisableMetrics: true,
+		DisableLogging: true,
+	})
+	utils.RequireNoError(t, err, "create observability provider")
+	t.Cleanup(func() {
+		_ = obsProvider.Shutdown(context.Background())
+	})
+
+	managerMetrics := obsmetrics.NewManager(obsProvider.MetricsRegistryOrNil())
+
 	sandboxService := service.NewSandboxService(
 		k8sClient,
 		podLister,
@@ -117,6 +132,7 @@ func newManagerTestEnvWithOptions(t *testing.T, opts managerTestEnvOptions) *man
 		nil,
 		opts.sandboxConfig,
 		logger,
+		managerMetrics,
 	)
 	if opts.procdClient != nil {
 		sandboxService.SetProcdClient(opts.procdClient)
@@ -141,18 +157,6 @@ func newManagerTestEnvWithOptions(t *testing.T, opts managerTestEnvOptions) *man
 	cfg := internalauth.DefaultValidatorConfig("manager", publicKey)
 	cfg.AllowedCallers = []string{"internal-gateway"}
 	validator := internalauth.NewValidator(cfg)
-
-	obsProvider, err := observability.New(observability.Config{
-		ServiceName:    "manager-test",
-		Logger:         logger,
-		DisableTracing: true,
-		DisableMetrics: true,
-		DisableLogging: true,
-	})
-	utils.RequireNoError(t, err, "create observability provider")
-	t.Cleanup(func() {
-		_ = obsProvider.Shutdown(context.Background())
-	})
 
 	server := managerhttp.NewServer(
 		sandboxService,

@@ -25,6 +25,7 @@ import (
 	"github.com/sandbox0-ai/infra/pkg/dbpool"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	"github.com/sandbox0-ai/infra/pkg/observability"
+	obsmetrics "github.com/sandbox0-ai/infra/pkg/observability/metrics"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	corev1 "k8s.io/api/core/v1"
@@ -69,6 +70,8 @@ func main() {
 		logger.Fatal("Failed to initialize observability", zap.Error(err))
 	}
 	defer obsProvider.Shutdown(ctx)
+
+	managerMetrics := obsmetrics.NewManager(obsProvider.MetricsRegistryOrNil())
 
 	// Create Kubernetes client
 	k8sConfig, err := buildKubeConfig(cfg.KubeConfig)
@@ -158,6 +161,7 @@ func main() {
 		recorder,
 		clk,
 		logger,
+		managerMetrics,
 	)
 	if pool != nil {
 		operator.SetTemplateStatsPublisher(controller.NewPGTemplateStatsPublisher(pool, cfg.DefaultClusterId, clk, logger))
@@ -243,6 +247,7 @@ func main() {
 		clk,
 		cfgForSandbox,
 		logger,
+		managerMetrics,
 	)
 
 	templateService := service.NewTemplateService(

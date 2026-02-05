@@ -16,8 +16,8 @@ import (
 	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/pkg/naming"
+	obsmetrics "github.com/sandbox0-ai/infra/pkg/observability/metrics"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/db"
-	"github.com/sandbox0-ai/infra/storage-proxy/pkg/metrics"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/infra/storage-proxy/proto/fs"
 	"github.com/sirupsen/logrus"
@@ -75,6 +75,7 @@ type Manager struct {
 	podID          string
 	metaClient     metaClient // Independent meta client for snapshot operations (no mount required)
 	eventPublisher eventPublisher
+	metrics        *obsmetrics.StorageProxyMetrics
 }
 
 // NewManager creates a new snapshot manager
@@ -83,6 +84,7 @@ func NewManager(
 	volMgr volumeProvider,
 	cfg *config.StorageProxyConfig,
 	logger *logrus.Logger,
+	metrics *obsmetrics.StorageProxyMetrics,
 ) (*Manager, error) {
 	// Initialize independent JuiceFS meta client for snapshot operations.
 	// This allows snapshots to be created/restored/deleted without requiring the volume to be mounted.
@@ -110,6 +112,7 @@ func NewManager(
 		clusterID:  cfg.DefaultClusterId,
 		podID:      uuid.New().String(), // Unique pod identifier
 		metaClient: metaClient,          // Independent meta client
+		metrics:    metrics,
 	}, nil
 }
 
@@ -142,6 +145,7 @@ type CreateSnapshotRequest struct {
 // Uses a transaction to ensure data consistency and row-level locking to avoid deadlocks.
 func (m *Manager) CreateSnapshot(ctx context.Context, req *CreateSnapshotRequest) (*db.Snapshot, error) {
 	startTime := time.Now()
+	metrics := m.metrics
 	m.logger.WithFields(logrus.Fields{
 		"volume_id": req.VolumeID,
 		"name":      req.Name,
@@ -272,8 +276,10 @@ func (m *Manager) CreateSnapshot(ctx context.Context, req *CreateSnapshotRequest
 		return nil
 	})
 	if err != nil {
-		metrics.SnapshotOperationsTotal.WithLabelValues("create", "failure").Inc()
-		metrics.SnapshotOperationDuration.WithLabelValues("create").Observe(time.Since(startTime).Seconds())
+		if metrics != nil {
+			metrics.SnapshotOperationsTotal.WithLabelValues("create", "failure").Inc()
+			metrics.SnapshotOperationDuration.WithLabelValues("create").Observe(time.Since(startTime).Seconds())
+		}
 
 		// Record error type
 		var errorType string
@@ -284,18 +290,22 @@ func (m *Manager) CreateSnapshot(ctx context.Context, req *CreateSnapshotRequest
 		} else {
 			errorType = "internal_error"
 		}
-		metrics.SnapshotErrors.WithLabelValues("create", errorType).Inc()
+		if metrics != nil {
+			metrics.SnapshotErrors.WithLabelValues("create", errorType).Inc()
+		}
 
 		return nil, err
 	}
 
 	// Record success metrics
-	metrics.SnapshotOperationsTotal.WithLabelValues("create", "success").Inc()
-	metrics.SnapshotOperationDuration.WithLabelValues("create").Observe(time.Since(startTime).Seconds())
-	metrics.SnapshotsTotal.Inc()
+	if metrics != nil {
+		metrics.SnapshotOperationsTotal.WithLabelValues("create", "success").Inc()
+		metrics.SnapshotOperationDuration.WithLabelValues("create").Observe(time.Since(startTime).Seconds())
+		metrics.SnapshotsTotal.Inc()
+	}
 
 	// Record snapshot size if available
-	if snapshot.SizeBytes > 0 {
+	if metrics != nil && snapshot.SizeBytes > 0 {
 		metrics.SnapshotSizeBytes.WithLabelValues(req.VolumeID).Observe(float64(snapshot.SizeBytes))
 	}
 
@@ -476,6 +486,7 @@ func (m *Manager) RestoreSnapshot(ctx context.Context, req *RestoreSnapshotReque
 // Uses a transaction to ensure data consistency and avoid race conditions.
 func (m *Manager) DeleteSnapshot(ctx context.Context, volumeID, snapshotID, teamID string) error {
 	startTime := time.Now()
+	metrics := m.metrics
 	m.logger.WithFields(logrus.Fields{
 		"volume_id":   volumeID,
 		"snapshot_id": snapshotID,
@@ -512,8 +523,10 @@ func (m *Manager) DeleteSnapshot(ctx context.Context, volumeID, snapshotID, team
 		return nil
 	})
 	if err != nil {
-		metrics.SnapshotOperationsTotal.WithLabelValues("delete", "failure").Inc()
-		metrics.SnapshotOperationDuration.WithLabelValues("delete").Observe(time.Since(startTime).Seconds())
+		if metrics != nil {
+			metrics.SnapshotOperationsTotal.WithLabelValues("delete", "failure").Inc()
+			metrics.SnapshotOperationDuration.WithLabelValues("delete").Observe(time.Since(startTime).Seconds())
+		}
 
 		// Record error type
 		var errorType string
@@ -524,7 +537,9 @@ func (m *Manager) DeleteSnapshot(ctx context.Context, volumeID, snapshotID, team
 		} else {
 			errorType = "internal_error"
 		}
-		metrics.SnapshotErrors.WithLabelValues("delete", errorType).Inc()
+		if metrics != nil {
+			metrics.SnapshotErrors.WithLabelValues("delete", errorType).Inc()
+		}
 
 		return err
 	}
@@ -540,9 +555,11 @@ func (m *Manager) DeleteSnapshot(ctx context.Context, volumeID, snapshotID, team
 	}
 
 	// Record success metrics
-	metrics.SnapshotOperationsTotal.WithLabelValues("delete", "success").Inc()
-	metrics.SnapshotOperationDuration.WithLabelValues("delete").Observe(time.Since(startTime).Seconds())
-	metrics.SnapshotsTotal.Dec()
+	if metrics != nil {
+		metrics.SnapshotOperationsTotal.WithLabelValues("delete", "success").Inc()
+		metrics.SnapshotOperationDuration.WithLabelValues("delete").Observe(time.Since(startTime).Seconds())
+		metrics.SnapshotsTotal.Dec()
+	}
 
 	m.logger.WithFields(logrus.Fields{
 		"volume_id":   volumeID,

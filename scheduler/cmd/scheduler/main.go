@@ -15,6 +15,7 @@ import (
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	"github.com/sandbox0-ai/infra/pkg/migrate"
 	"github.com/sandbox0-ai/infra/pkg/observability"
+	obsmetrics "github.com/sandbox0-ai/infra/pkg/observability/metrics"
 	"github.com/sandbox0-ai/infra/pkg/pubsub"
 	schedmigrations "github.com/sandbox0-ai/infra/scheduler/migrations"
 	"github.com/sandbox0-ai/infra/scheduler/pkg/client"
@@ -56,6 +57,8 @@ func main() {
 		logger.Fatal("Failed to initialize observability", zap.Error(err))
 	}
 	defer obsProvider.Shutdown(ctx)
+
+	schedulerMetrics := obsmetrics.NewScheduler(obsProvider.MetricsRegistryOrNil())
 
 	// Initialize database pool
 	pool, err := initDatabase(ctx, cfg, logger, obsProvider)
@@ -125,7 +128,7 @@ func main() {
 	igClient := client.NewInternalGatewayClient(internalAuthGen, logger, obsProvider)
 
 	// Create reconciler
-	rec := reconciler.NewReconciler(repo, igClient, cfg.ReconcileInterval.Duration, clk, cfg.PodsPerNode, logger)
+	rec := reconciler.NewReconciler(repo, igClient, cfg.ReconcileInterval.Duration, clk, cfg.PodsPerNode, logger, schedulerMetrics)
 
 	// Create HTTP server
 	httpServer := httpserver.NewServer(cfg, repo, authValidator, internalAuthGen, rec, logger, obsProvider)

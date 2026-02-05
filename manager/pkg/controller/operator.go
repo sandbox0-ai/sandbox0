@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
-	"github.com/sandbox0-ai/infra/manager/pkg/metrics"
+	obsmetrics "github.com/sandbox0-ai/infra/pkg/observability/metrics"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -40,6 +40,8 @@ type Operator struct {
 	statsPublisher TemplateStatsPublisher
 
 	workqueue workqueue.TypedRateLimitingInterface[string]
+
+	metrics *obsmetrics.ManagerMetrics
 
 	// Template informer and lister (to be injected)
 	templateInformer cache.SharedIndexInformer
@@ -87,6 +89,7 @@ func NewOperator(
 	recorder record.EventRecorder,
 	clock TimeProvider,
 	logger *zap.Logger,
+	metrics *obsmetrics.ManagerMetrics,
 ) *Operator {
 	// Use system time as fallback if clock is nil
 	if clock == nil {
@@ -109,6 +112,7 @@ func NewOperator(
 		clock:            clock,
 		logger:           logger,
 		workqueue:        workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[string]()),
+		metrics:          metrics,
 		templateInformer: templateInformer,
 		templateLister: TemplateListerImpl{
 			indexer: templateInformer.GetIndexer(),
@@ -285,8 +289,10 @@ func (op *Operator) updateTemplateStatus(ctx context.Context, template *v1alpha1
 		}
 	}
 
-	metrics.IdlePodsTotal.WithLabelValues(template.Name).Set(float64(idleCount))
-	metrics.ActivePodsTotal.WithLabelValues(template.Name).Set(float64(activeCount))
+	if op.metrics != nil {
+		op.metrics.IdlePodsTotal.WithLabelValues(template.Name).Set(float64(idleCount))
+		op.metrics.ActivePodsTotal.WithLabelValues(template.Name).Set(float64(activeCount))
+	}
 
 	// Publish stats if changed.
 	statsKey := template.Namespace + "/" + template.Name

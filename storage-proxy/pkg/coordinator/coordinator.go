@@ -19,9 +19,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/db"
-	"github.com/sandbox0-ai/infra/storage-proxy/pkg/metrics"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/volume"
 	"github.com/sirupsen/logrus"
+
+	obsmetrics "github.com/sandbox0-ai/infra/pkg/observability/metrics"
 
 	pb "github.com/sandbox0-ai/infra/storage-proxy/proto/fs"
 )
@@ -86,6 +87,7 @@ type Coordinator struct {
 	clusterID  string
 	podID      string
 	listenConn *pgxpool.Conn // Dedicated connection for LISTEN
+	metrics    *obsmetrics.StorageProxyMetrics
 
 	// Mounted volumes on this instance
 	mountedVolumes map[string]struct{}
@@ -114,6 +116,7 @@ func NewCoordinator(
 	eventHub EventHub,
 	cfg *config.StorageProxyConfig,
 	logger *logrus.Logger,
+	metrics *obsmetrics.StorageProxyMetrics,
 ) *Coordinator {
 	return &Coordinator{
 		pool:           pool,
@@ -124,6 +127,7 @@ func NewCoordinator(
 		logger:         logger,
 		clusterID:      cfg.DefaultClusterId,
 		podID:          uuid.New().String(),
+		metrics:        metrics,
 		mountedVolumes: make(map[string]struct{}),
 		stopCh:         make(chan struct{}),
 		doneCh:         make(chan struct{}),
@@ -233,6 +237,7 @@ func (c *Coordinator) Stop(ctx context.Context) error {
 func (c *Coordinator) RegisterMount(ctx context.Context, volumeID string, options volume.MountOptions) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	metrics := c.metrics
 
 	// Already registered locally
 	if _, exists := c.mountedVolumes[volumeID]; exists {
@@ -244,7 +249,9 @@ func (c *Coordinator) RegisterMount(ctx context.Context, volumeID string, option
 	// locally regardless of DB state, and we need to track it for heartbeats
 	// and flush coordination.
 	c.mountedVolumes[volumeID] = struct{}{}
-	metrics.CoordinatorMountsActive.Inc()
+	if metrics != nil {
+		metrics.CoordinatorMountsActive.Inc()
+	}
 
 	normalizedOptions := options
 	normalizedOptions.AccessMode = volume.NormalizeAccessMode(string(options.AccessMode))
@@ -265,7 +272,9 @@ func (c *Coordinator) RegisterMount(ctx context.Context, volumeID string, option
 	}
 
 	if err := c.repo.CreateMount(ctx, mount); err != nil {
-		metrics.CoordinatorMountRegistrations.WithLabelValues("failure").Inc()
+		if metrics != nil {
+			metrics.CoordinatorMountRegistrations.WithLabelValues("failure").Inc()
+		}
 		// Note: We still track locally even if DB registration fails
 		// This ensures heartbeat updates and flush coordination work
 		c.logger.WithFields(logrus.Fields{
@@ -276,7 +285,9 @@ func (c *Coordinator) RegisterMount(ctx context.Context, volumeID string, option
 		return fmt.Errorf("create mount: %w", err)
 	}
 
-	metrics.CoordinatorMountRegistrations.WithLabelValues("success").Inc()
+	if metrics != nil {
+		metrics.CoordinatorMountRegistrations.WithLabelValues("success").Inc()
+	}
 
 	c.logger.WithFields(logrus.Fields{
 		"volume_id":  volumeID,
@@ -339,6 +350,7 @@ func isMountROX(mount *db.VolumeMount) bool {
 func (c *Coordinator) UnregisterMount(ctx context.Context, volumeID string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	metrics := c.metrics
 
 	// Not registered locally
 	if _, exists := c.mountedVolumes[volumeID]; !exists {
@@ -346,13 +358,17 @@ func (c *Coordinator) UnregisterMount(ctx context.Context, volumeID string) erro
 	}
 
 	if err := c.repo.DeleteMount(ctx, volumeID, c.clusterID, c.podID); err != nil {
-		metrics.CoordinatorMountUnregistrations.WithLabelValues("failure").Inc()
+		if metrics != nil {
+			metrics.CoordinatorMountUnregistrations.WithLabelValues("failure").Inc()
+		}
 		return fmt.Errorf("delete mount: %w", err)
 	}
 
 	delete(c.mountedVolumes, volumeID)
-	metrics.CoordinatorMountsActive.Dec()
-	metrics.CoordinatorMountUnregistrations.WithLabelValues("success").Inc()
+	if metrics != nil {
+		metrics.CoordinatorMountsActive.Dec()
+		metrics.CoordinatorMountUnregistrations.WithLabelValues("success").Inc()
+	}
 
 	c.logger.WithFields(logrus.Fields{
 		"volume_id":  volumeID,
@@ -375,8 +391,11 @@ func (c *Coordinator) IsVolumeMounted(volumeID string) bool {
 // Returns when all instances have flushed or timeout occurs.
 func (c *Coordinator) CoordinateFlush(ctx context.Context, volumeID string) error {
 	startTime := time.Now()
-	metrics.CoordinatorActiveCoordinations.Inc()
-	defer metrics.CoordinatorActiveCoordinations.Dec()
+	metrics := c.metrics
+	if metrics != nil {
+		metrics.CoordinatorActiveCoordinations.Inc()
+		defer metrics.CoordinatorActiveCoordinations.Dec()
+	}
 
 	heartbeatTimeout := c.config.HeartbeatTimeout
 	if heartbeatTimeout == 0 {
@@ -397,8 +416,10 @@ func (c *Coordinator) CoordinateFlush(ctx context.Context, volumeID string) erro
 	// 2. If no active mounts, nothing to coordinate
 	if len(mounts) == 0 {
 		c.logger.WithField("volume_id", volumeID).Debug("No active mounts, skipping coordination")
-		metrics.CoordinatorFlushCoordinationsTotal.WithLabelValues("success").Inc()
-		metrics.CoordinatorFlushCoordinationDuration.Observe(time.Since(startTime).Seconds())
+		if metrics != nil {
+			metrics.CoordinatorFlushCoordinationsTotal.WithLabelValues("success").Inc()
+			metrics.CoordinatorFlushCoordinationDuration.Observe(time.Since(startTime).Seconds())
+		}
 		return nil
 	}
 
@@ -432,30 +453,40 @@ func (c *Coordinator) CoordinateFlush(ctx context.Context, volumeID string) erro
 	_, err = c.pool.Exec(ctx, fmt.Sprintf("SELECT pg_notify('%s', $1)", ChannelFlushRequest), string(payload))
 	if err != nil {
 		c.repo.UpdateCoordinationStatus(ctx, coord.ID, db.CoordStatusFailed)
-		metrics.CoordinatorFlushCoordinationsTotal.WithLabelValues("failure").Inc()
-		metrics.CoordinatorFlushCoordinationDuration.Observe(time.Since(startTime).Seconds())
+		if metrics != nil {
+			metrics.CoordinatorFlushCoordinationsTotal.WithLabelValues("failure").Inc()
+			metrics.CoordinatorFlushCoordinationDuration.Observe(time.Since(startTime).Seconds())
+		}
 		return fmt.Errorf("send flush request: %w", err)
 	}
 
-	metrics.CoordinatorFlushRequestsSent.Inc()
+	if metrics != nil {
+		metrics.CoordinatorFlushRequestsSent.Inc()
+	}
 
 	// 5. Wait for all responses
 	err = c.waitForFlushCompletion(ctx, coord)
 
 	// Record metrics based on result
 	duration := time.Since(startTime).Seconds()
-	metrics.CoordinatorFlushCoordinationDuration.Observe(duration)
+	if metrics != nil {
+		metrics.CoordinatorFlushCoordinationDuration.Observe(duration)
+	}
 
 	if err != nil {
-		if errors.Is(err, ErrFlushTimeout) {
-			metrics.CoordinatorFlushCoordinationsTotal.WithLabelValues("timeout").Inc()
-		} else {
-			metrics.CoordinatorFlushCoordinationsTotal.WithLabelValues("failure").Inc()
+		if metrics != nil {
+			if errors.Is(err, ErrFlushTimeout) {
+				metrics.CoordinatorFlushCoordinationsTotal.WithLabelValues("timeout").Inc()
+			} else {
+				metrics.CoordinatorFlushCoordinationsTotal.WithLabelValues("failure").Inc()
+			}
 		}
 		return err
 	}
 
-	metrics.CoordinatorFlushCoordinationsTotal.WithLabelValues("success").Inc()
+	if metrics != nil {
+		metrics.CoordinatorFlushCoordinationsTotal.WithLabelValues("success").Inc()
+	}
 	return nil
 }
 
@@ -524,6 +555,7 @@ func (c *Coordinator) waitForFlushCompletion(ctx context.Context, coord *db.Snap
 
 // runNotificationListener listens for PostgreSQL notifications
 func (c *Coordinator) runNotificationListener(ctx context.Context) {
+	metrics := c.metrics
 	for {
 		select {
 		case <-c.stopCh:
@@ -544,10 +576,14 @@ func (c *Coordinator) runNotificationListener(ctx context.Context) {
 
 		switch notification.Channel {
 		case ChannelFlushRequest:
-			metrics.CoordinatorNotificationsReceived.WithLabelValues(ChannelFlushRequest).Inc()
+			if metrics != nil {
+				metrics.CoordinatorNotificationsReceived.WithLabelValues(ChannelFlushRequest).Inc()
+			}
 			var req FlushRequest
 			if err := json.Unmarshal([]byte(notification.Payload), &req); err != nil {
-				metrics.CoordinatorNotificationErrors.Inc()
+				if metrics != nil {
+					metrics.CoordinatorNotificationErrors.Inc()
+				}
 				c.logger.WithError(err).Warn("Failed to parse flush request")
 				continue
 			}
@@ -560,7 +596,9 @@ func (c *Coordinator) runNotificationListener(ctx context.Context) {
 			}
 
 		case ChannelFlushResponse:
-			metrics.CoordinatorNotificationsReceived.WithLabelValues(ChannelFlushResponse).Inc()
+			if metrics != nil {
+				metrics.CoordinatorNotificationsReceived.WithLabelValues(ChannelFlushResponse).Inc()
+			}
 			// Response notifications are handled by polling in waitForFlushCompletion
 			// This is just for logging/debugging
 			c.logger.WithField("payload", notification.Payload).Debug("Received flush response notification")
@@ -597,7 +635,10 @@ func (c *Coordinator) runFlushHandler(ctx context.Context) {
 
 // handleFlushRequest handles a single flush request
 func (c *Coordinator) handleFlushRequest(ctx context.Context, req *FlushRequest) {
-	metrics.CoordinatorFlushRequestsReceived.Inc()
+	metrics := c.metrics
+	if metrics != nil {
+		metrics.CoordinatorFlushRequestsReceived.Inc()
+	}
 	startTime := time.Now()
 
 	logger := c.logger.WithFields(logrus.Fields{
@@ -637,12 +678,18 @@ func (c *Coordinator) handleFlushRequest(ctx context.Context, req *FlushRequest)
 	}
 
 	// Record flush latency
-	metrics.CoordinatorFlushLatency.Observe(time.Since(startTime).Seconds())
+	if metrics != nil {
+		metrics.CoordinatorFlushLatency.Observe(time.Since(startTime).Seconds())
+	}
 
 	if success {
-		metrics.CoordinatorFlushResponsesTotal.WithLabelValues("true").Inc()
+		if metrics != nil {
+			metrics.CoordinatorFlushResponsesTotal.WithLabelValues("true").Inc()
+		}
 	} else {
-		metrics.CoordinatorFlushResponsesTotal.WithLabelValues("false").Inc()
+		if metrics != nil {
+			metrics.CoordinatorFlushResponsesTotal.WithLabelValues("false").Inc()
+		}
 	}
 
 	// Record response in database
@@ -699,6 +746,7 @@ func (c *Coordinator) runHeartbeat(ctx context.Context) {
 
 // updateHeartbeats updates heartbeat for all mounted volumes
 func (c *Coordinator) updateHeartbeats(ctx context.Context) {
+	metrics := c.metrics
 	c.mu.RLock()
 	volumes := make([]string, 0, len(c.mountedVolumes))
 	for volumeID := range c.mountedVolumes {
@@ -708,7 +756,9 @@ func (c *Coordinator) updateHeartbeats(ctx context.Context) {
 
 	for _, volumeID := range volumes {
 		if err := c.repo.UpdateMountHeartbeat(ctx, volumeID, c.clusterID, c.podID); err != nil {
-			metrics.CoordinatorHeartbeatErrors.Inc()
+			if metrics != nil {
+				metrics.CoordinatorHeartbeatErrors.Inc()
+			}
 			// If update fails (e.g., mount record deleted), re-register
 			if strings.Contains(err.Error(), "not found") {
 				c.logger.WithField("volume_id", volumeID).Debug("Mount record not found, re-registering")
@@ -724,13 +774,16 @@ func (c *Coordinator) updateHeartbeats(ctx context.Context) {
 				c.logger.WithError(err).WithField("volume_id", volumeID).Warn("Failed to update heartbeat")
 			}
 		} else {
-			metrics.CoordinatorHeartbeatsTotal.Inc()
+			if metrics != nil {
+				metrics.CoordinatorHeartbeatsTotal.Inc()
+			}
 		}
 	}
 }
 
 // runCleanup periodically cleans up stale mounts
 func (c *Coordinator) runCleanup(ctx context.Context) {
+	metrics := c.metrics
 	cleanupInterval, _ := time.ParseDuration(c.config.CleanupInterval)
 	if cleanupInterval == 0 {
 		cleanupInterval = CleanupInterval
@@ -753,7 +806,9 @@ func (c *Coordinator) runCleanup(ctx context.Context) {
 			if err != nil {
 				c.logger.WithError(err).Warn("Failed to cleanup stale mounts")
 			} else if deleted > 0 {
-				metrics.CoordinatorStaleMountsCleaned.Add(float64(deleted))
+				if metrics != nil {
+					metrics.CoordinatorStaleMountsCleaned.Add(float64(deleted))
+				}
 				c.logger.WithField("deleted_count", deleted).Info("Cleaned up stale mounts")
 			}
 		}

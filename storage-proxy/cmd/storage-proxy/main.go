@@ -18,6 +18,7 @@ import (
 	"github.com/sandbox0-ai/infra/pkg/migrate"
 	"github.com/sandbox0-ai/infra/pkg/observability"
 	httpobs "github.com/sandbox0-ai/infra/pkg/observability/http"
+	obsmetrics "github.com/sandbox0-ai/infra/pkg/observability/metrics"
 	spmigrations "github.com/sandbox0-ai/infra/storage-proxy/migrations"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/auth"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/coordinator"
@@ -93,6 +94,8 @@ func main() {
 	}
 	defer obsProvider.Shutdown(context.Background())
 
+	storageProxyMetrics := obsmetrics.NewStorageProxy(obsProvider.MetricsRegistryOrNil())
+
 	// Initialize database connection pool
 	var repo *db.Repository
 	var pool *pgxpool.Pool
@@ -134,7 +137,7 @@ func main() {
 	if pool != nil && repo != nil {
 		// Create volume provider adapter for coordinator
 		volProvider := &volumeProviderAdapter{volMgr: volMgr}
-		coord = coordinator.NewCoordinator(pool, repo, volProvider, eventHub, cfg, logrusLogger)
+		coord = coordinator.NewCoordinator(pool, repo, volProvider, eventHub, cfg, logrusLogger, storageProxyMetrics)
 
 		// Set coordinator as mount registrar for volume manager
 		volMgr.SetMountRegistrar(coord)
@@ -250,7 +253,7 @@ func main() {
 	}()
 
 	// Create snapshot manager
-	snapshotMgr, err := snapshot.NewManager(repo, volMgr, cfg, logrusLogger)
+	snapshotMgr, err := snapshot.NewManager(repo, volMgr, cfg, logrusLogger, storageProxyMetrics)
 	if err != nil {
 		zapLogger.Fatal("Failed to initialize snapshot manager", zap.Error(err))
 	}

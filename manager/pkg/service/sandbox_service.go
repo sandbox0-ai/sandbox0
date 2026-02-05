@@ -12,9 +12,9 @@ import (
 
 	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/infra/manager/pkg/controller"
-	"github.com/sandbox0-ai/infra/manager/pkg/metrics"
 	"github.com/sandbox0-ai/infra/manager/pkg/network"
 	"github.com/sandbox0-ai/infra/pkg/naming"
+	obsmetrics "github.com/sandbox0-ai/infra/pkg/observability/metrics"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -80,6 +80,7 @@ type SandboxService struct {
 	clock                  TimeProvider
 	config                 SandboxServiceConfig
 	logger                 *zap.Logger
+	metrics                *obsmetrics.ManagerMetrics
 }
 
 // TimeProvider provides time functions, allowing for synchronized time across clusters
@@ -115,6 +116,7 @@ func NewSandboxService(
 	clock TimeProvider,
 	config SandboxServiceConfig,
 	logger *zap.Logger,
+	metrics *obsmetrics.ManagerMetrics,
 ) *SandboxService {
 	// Use system time as fallback if clock is nil
 	if clock == nil {
@@ -137,6 +139,7 @@ func NewSandboxService(
 		clock:                  clock,
 		config:                 config,
 		logger:                 logger,
+		metrics:                metrics,
 	}
 }
 
@@ -185,6 +188,7 @@ type ClaimResponse struct {
 // ClaimSandbox claims a sandbox from the idle pool or creates a new one
 func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*ClaimResponse, error) {
 	start := time.Now()
+	metrics := s.metrics
 	s.logger.Info("Claiming sandbox",
 		zap.String("template", req.Template),
 		zap.String("teamID", req.TeamID),
@@ -242,7 +246,9 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	for i := 0; i < 2; i++ {
 		pod, err = s.claimIdlePod(ctx, template, req)
 		if err != nil && !errors.IsConflict(err) {
-			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+			if metrics != nil {
+				metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+			}
 			return nil, fmt.Errorf("claim idle pod: %w", err)
 		}
 		if errors.IsConflict(err) {
@@ -267,13 +273,17 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		)
 		pod, err = s.createNewPod(ctx, template, req)
 		if err != nil {
-			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+			if metrics != nil {
+				metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+			}
 			return nil, fmt.Errorf("create new pod: %w", err)
 		}
 	}
 
-	metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "success").Inc()
-	metrics.SandboxClaimDuration.WithLabelValues(req.Template, claimType).Observe(time.Since(start).Seconds())
+	if metrics != nil {
+		metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "success").Inc()
+		metrics.SandboxClaimDuration.WithLabelValues(req.Template, claimType).Observe(time.Since(start).Seconds())
+	}
 
 	// Note: Network and bandwidth policies are now stored in pod annotations
 	// They are set in claimIdlePod() and createNewPod() methods

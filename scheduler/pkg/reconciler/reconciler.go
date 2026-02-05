@@ -9,9 +9,9 @@ import (
 	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/infra/pkg/clock"
 	"github.com/sandbox0-ai/infra/pkg/naming"
+	obsmetrics "github.com/sandbox0-ai/infra/pkg/observability/metrics"
 	"github.com/sandbox0-ai/infra/scheduler/pkg/client"
 	"github.com/sandbox0-ai/infra/scheduler/pkg/db"
-	"github.com/sandbox0-ai/infra/scheduler/pkg/metrics"
 	"go.uber.org/zap"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -32,6 +32,7 @@ type Reconciler struct {
 	lastReconcileTime time.Time
 	lastReconcileErr  error
 	statusMu          sync.RWMutex
+	metrics           *obsmetrics.SchedulerMetrics
 }
 
 func (r *Reconciler) now() time.Time {
@@ -56,6 +57,7 @@ func NewReconciler(
 	clk *clock.Clock,
 	podsPerNode int,
 	logger *zap.Logger,
+	metrics *obsmetrics.SchedulerMetrics,
 ) *Reconciler {
 	if podsPerNode <= 0 {
 		podsPerNode = 10 // default
@@ -70,6 +72,7 @@ func NewReconciler(
 		clusterCache:    make(map[string]*client.ClusterSummary),
 		templateStats:   make(map[string]map[string]client.TemplateStat),
 		templateStatsAt: make(map[string]time.Time),
+		metrics:         metrics,
 	}
 }
 
@@ -96,9 +99,12 @@ func (r *Reconciler) Start(ctx context.Context) {
 func (r *Reconciler) reconcile(ctx context.Context) {
 	r.logger.Debug("Starting reconciliation cycle")
 	start := r.now()
+	metrics := r.metrics
 	defer func() {
 		duration := r.since(start)
-		metrics.ReconcileDuration.Observe(duration.Seconds())
+		if metrics != nil {
+			metrics.ReconcileDuration.Observe(duration.Seconds())
+		}
 
 		r.statusMu.Lock()
 		r.lastReconcileTime = r.now()
@@ -109,7 +115,9 @@ func (r *Reconciler) reconcile(ctx context.Context) {
 	clusters, err := r.repo.ListEnabledClusters(ctx)
 	if err != nil {
 		r.logger.Error("Failed to list enabled clusters", zap.Error(err))
-		metrics.ReconcileTotal.WithLabelValues("error").Inc()
+		if metrics != nil {
+			metrics.ReconcileTotal.WithLabelValues("error").Inc()
+		}
 		r.statusMu.Lock()
 		r.lastReconcileErr = err
 		r.statusMu.Unlock()
@@ -118,7 +126,9 @@ func (r *Reconciler) reconcile(ctx context.Context) {
 
 	if len(clusters) == 0 {
 		r.logger.Debug("No enabled clusters found")
-		metrics.ReconcileTotal.WithLabelValues("success").Inc()
+		if metrics != nil {
+			metrics.ReconcileTotal.WithLabelValues("success").Inc()
+		}
 		return
 	}
 
@@ -165,8 +175,10 @@ func (r *Reconciler) reconcile(ctx context.Context) {
 	}
 
 	// Mark reconcile as successful
-	metrics.ReconcileTotal.WithLabelValues("success").Inc()
-	metrics.LastReconcileTimestamp.SetToCurrentTime()
+	if metrics != nil {
+		metrics.ReconcileTotal.WithLabelValues("success").Inc()
+		metrics.LastReconcileTimestamp.SetToCurrentTime()
+	}
 
 	r.statusMu.Lock()
 	r.lastReconcileErr = nil
@@ -182,6 +194,7 @@ func (r *Reconciler) reconcile(ctx context.Context) {
 
 // fetchClusterSummaries fetches summaries for all clusters in parallel
 func (r *Reconciler) fetchClusterSummaries(ctx context.Context, clusters []*db.Cluster) {
+	metrics := r.metrics
 	var wg sync.WaitGroup
 	summaries := make(map[string]*client.ClusterSummary)
 	var mu sync.Mutex
@@ -222,10 +235,12 @@ func (r *Reconciler) fetchClusterSummaries(ctx context.Context, clusters []*db.C
 			}
 
 			// Update metrics
-			metrics.ClusterCapacity.WithLabelValues(c.ClusterID, "nodes").Set(float64(summary.NodeCount))
-			metrics.ClusterCapacity.WithLabelValues(c.ClusterID, "idle_pods").Set(float64(summary.IdlePodCount))
-			metrics.ClusterCapacity.WithLabelValues(c.ClusterID, "active_pods").Set(float64(summary.ActivePodCount))
-			metrics.ClusterCapacity.WithLabelValues(c.ClusterID, "total_pods").Set(float64(summary.TotalPodCount))
+			if metrics != nil {
+				metrics.ClusterCapacity.WithLabelValues(c.ClusterID, "nodes").Set(float64(summary.NodeCount))
+				metrics.ClusterCapacity.WithLabelValues(c.ClusterID, "idle_pods").Set(float64(summary.IdlePodCount))
+				metrics.ClusterCapacity.WithLabelValues(c.ClusterID, "active_pods").Set(float64(summary.ActivePodCount))
+				metrics.ClusterCapacity.WithLabelValues(c.ClusterID, "total_pods").Set(float64(summary.TotalPodCount))
+			}
 
 			// Update last seen timestamp
 			if err := r.repo.UpdateClusterLastSeen(ctx, c.ClusterID); err != nil {
@@ -305,6 +320,7 @@ func (r *Reconciler) UpdateTemplateStats(clusterID, templateID string, idleCount
 func (r *Reconciler) reconcileTemplate(ctx context.Context, template *db.Template, clusters []*db.Cluster) error {
 	// Compute allocations based on weights
 	allocations := r.computeAllocations(template, clusters)
+	metrics := r.metrics
 
 	tenantLabel := "public"
 	if template.Scope == naming.ScopeTeam {
@@ -370,7 +386,9 @@ func (r *Reconciler) reconcileTemplate(ctx context.Context, template *db.Templat
 		}
 
 		// Update sync status metric
-		metrics.TemplateSyncStatus.WithLabelValues(alloc.ClusterID, template.TemplateID, tenantLabel).Set(1.0)
+		if metrics != nil {
+			metrics.TemplateSyncStatus.WithLabelValues(alloc.ClusterID, template.TemplateID, tenantLabel).Set(1.0)
+		}
 	}
 
 	return nil
@@ -384,6 +402,7 @@ func (r *Reconciler) computeAllocations(template *db.Template, clusters []*db.Cl
 	if len(clusters) == 0 {
 		return nil
 	}
+	metrics := r.metrics
 
 	// Calculate total weight for enabled clusters
 	totalWeight := 0
@@ -472,7 +491,9 @@ func (r *Reconciler) computeAllocations(template *db.Template, clusters []*db.Cl
 
 			// Log capacity-based adjustments
 			if clampReason != "" {
-				metrics.CapacityClamps.WithLabelValues(cluster.ClusterID, template.TemplateID).Inc()
+				if metrics != nil {
+					metrics.CapacityClamps.WithLabelValues(cluster.ClusterID, template.TemplateID).Inc()
+				}
 				r.logger.Warn("Allocation clamped by cluster capacity",
 					zap.String("cluster_id", cluster.ClusterID),
 					zap.String("template_id", template.TemplateID),
@@ -508,8 +529,10 @@ func (r *Reconciler) computeAllocations(template *db.Template, clusters []*db.Cl
 		allocatedMaxIdle += maxIdle
 
 		// Update metrics
-		metrics.TemplateAllocations.WithLabelValues(cluster.ClusterID, template.TemplateID, tenantLabel, "min_idle").Set(float64(minIdle))
-		metrics.TemplateAllocations.WithLabelValues(cluster.ClusterID, template.TemplateID, tenantLabel, "max_idle").Set(float64(maxIdle))
+		if metrics != nil {
+			metrics.TemplateAllocations.WithLabelValues(cluster.ClusterID, template.TemplateID, tenantLabel, "min_idle").Set(float64(minIdle))
+			metrics.TemplateAllocations.WithLabelValues(cluster.ClusterID, template.TemplateID, tenantLabel, "max_idle").Set(float64(maxIdle))
+		}
 
 		allocations = append(allocations, &db.TemplateAllocation{
 			TemplateID: template.TemplateID,
@@ -568,6 +591,7 @@ func (r *Reconciler) cleanupOrphanTemplates(ctx context.Context, cluster *db.Clu
 	if err != nil {
 		return 0, fmt.Errorf("failed to get template stats: %w", err)
 	}
+	metrics := r.metrics
 
 	orphansRemoved := 0
 	for _, stat := range stats.Templates {
@@ -588,7 +612,9 @@ func (r *Reconciler) cleanupOrphanTemplates(ctx context.Context, cluster *db.Clu
 				continue
 			}
 			orphansRemoved++
-			metrics.OrphansRemoved.WithLabelValues(cluster.ClusterID).Inc()
+			if metrics != nil {
+				metrics.OrphansRemoved.WithLabelValues(cluster.ClusterID).Inc()
+			}
 		}
 	}
 

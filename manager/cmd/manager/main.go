@@ -24,11 +24,18 @@ import (
 	"github.com/sandbox0-ai/infra/pkg/clock"
 	"github.com/sandbox0-ai/infra/pkg/dbpool"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
+	"github.com/sandbox0-ai/infra/pkg/migrate"
+	"github.com/sandbox0-ai/infra/pkg/naming"
 	"github.com/sandbox0-ai/infra/pkg/observability"
 	obsmetrics "github.com/sandbox0-ai/infra/pkg/observability/metrics"
+	"github.com/sandbox0-ai/infra/pkg/template"
+	templreconciler "github.com/sandbox0-ai/infra/pkg/template/reconciler"
+	templstorepg "github.com/sandbox0-ai/infra/pkg/template/store/pg"
+	schedmigrations "github.com/sandbox0-ai/infra/scheduler/migrations"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -98,33 +105,36 @@ func main() {
 		logger.Fatal("Failed to create CRD clientset", zap.Error(err))
 	}
 
-	// Initialize database and clock if DATABASE_URL is provided
-	var pool *pgxpool.Pool
-	var clk *clock.Clock
-	if cfg.DatabaseURL != "" {
-		pool, err = initDatabase(ctx, cfg.DatabaseURL, cfg.DatabaseMaxConns, cfg.DatabaseMinConns, logger, obsProvider)
-		if err != nil {
-			logger.Fatal("Failed to connect to database", zap.Error(err))
-		}
-		defer pool.Close()
-
-		// Initialize clock for cross-cluster time synchronization
-		clk, err = clock.New(ctx, &pgxPoolAdapter{pool: pool},
-			clock.WithSyncInterval(30*time.Second),
-			clock.WithLogger(&zapClockLogger{logger: logger}),
-		)
-		if err != nil {
-			logger.Fatal("Failed to initialize clock", zap.Error(err))
-		}
-		defer clk.Close()
-
-		logger.Info("Clock initialized for cross-cluster time synchronization",
-			zap.Int64("offset_ms", clk.Offset().Milliseconds()),
-			zap.Int64("rtt_ms", clk.LastRTT().Milliseconds()),
-		)
-	} else {
-		logger.Warn("DATABASE_URL not set, using local time (may cause cross-cluster inconsistencies)")
+	// Initialize database (required for template store)
+	if cfg.DatabaseURL == "" {
+		logger.Fatal("DATABASE_URL is required for template store")
 	}
+
+	pool, err := initDatabase(ctx, cfg.DatabaseURL, cfg.DatabaseMaxConns, cfg.DatabaseMinConns, logger, obsProvider)
+	if err != nil {
+		logger.Fatal("Failed to connect to database", zap.Error(err))
+	}
+	defer pool.Close()
+
+	if err := runTemplateMigrations(ctx, pool, logger); err != nil {
+		logger.Fatal("Failed to run template migrations", zap.Error(err))
+	}
+
+	// Initialize clock for cross-cluster time synchronization
+	var clk *clock.Clock
+	clk, err = clock.New(ctx, &pgxPoolAdapter{pool: pool},
+		clock.WithSyncInterval(30*time.Second),
+		clock.WithLogger(&zapClockLogger{logger: logger}),
+	)
+	if err != nil {
+		logger.Fatal("Failed to initialize clock", zap.Error(err))
+	}
+	defer clk.Close()
+
+	logger.Info("Clock initialized for cross-cluster time synchronization",
+		zap.Int64("offset_ms", clk.Offset().Milliseconds()),
+		zap.Int64("rtt_ms", clk.LastRTT().Milliseconds()),
+	)
 
 	// Create informers
 	informerFactory := informers.NewSharedInformerFactory(k8sClient, cfg.ResyncPeriod.Duration)
@@ -251,6 +261,30 @@ func main() {
 		networkProvider,
 		logger,
 	)
+	var templateStore *templstorepg.Store
+	var templateReconciler *templreconciler.SingleClusterReconciler
+	if cfg.TemplateStoreEnabled {
+		templateStore = templstorepg.NewStore(pool)
+		templateApplier := service.NewTemplateApplier(templateService)
+		if err := ensureDefaultTemplateInStore(ctx, templateStore, cfg, logger); err != nil {
+			logger.Fatal("Failed to ensure default template in store", zap.Error(err))
+		}
+		reconcileInterval := cfg.ResyncPeriod.Duration
+		if reconcileInterval == 0 {
+			reconcileInterval = 30 * time.Second
+		}
+		templateReconciler = templreconciler.NewSingleClusterReconciler(
+			templateStore,
+			templateApplier,
+			cfg.DefaultClusterId,
+			reconcileInterval,
+			clk,
+			logger,
+		)
+		go templateReconciler.Start(ctx)
+	} else {
+		logger.Info("Template store disabled; manager will apply templates directly")
+	}
 
 	// Create cluster service (for scheduler)
 	clusterService := service.NewClusterService(
@@ -296,6 +330,9 @@ func main() {
 	httpServer := httpserver.NewServer(
 		sandboxService,
 		templateService,
+		templateStore,
+		templateReconciler,
+		cfg.TemplateStoreEnabled,
 		clusterService,
 		authValidator,
 		logger,
@@ -420,12 +457,102 @@ func startMetricsServer(port int, logger *zap.Logger) {
 	}
 }
 
+func ensureDefaultTemplateInStore(ctx context.Context, store *templstorepg.Store, cfg *config.ManagerConfig, logger *zap.Logger) error {
+	if cfg == nil {
+		return nil
+	}
+
+	name := template.DefaultTemplateName
+	image := template.DefaultTemplateImage
+	pool := config.DefaultTemplatePoolConfig{}
+	if cfg.DefaultTemplate != nil {
+		if cfg.DefaultTemplate.Name != "" {
+			name = cfg.DefaultTemplate.Name
+		}
+		if cfg.DefaultTemplate.Image != "" {
+			image = cfg.DefaultTemplate.Image
+		}
+		pool = cfg.DefaultTemplate.Pool
+	}
+
+	templateID, err := naming.TemplateIDFromName(name)
+	if err != nil {
+		return fmt.Errorf("resolve default template id: %w", err)
+	}
+
+	existing, err := store.GetTemplate(ctx, naming.ScopePublic, "", templateID)
+	if err != nil {
+		return fmt.Errorf("get default template: %w", err)
+	}
+	if existing != nil {
+		return nil
+	}
+
+	minIdle, maxIdle, autoScale := template.ApplyDefaultPool(pool.MinIdle, pool.MaxIdle, pool.AutoScale)
+	spec := v1alpha1.SandboxTemplateSpec{
+		DisplayName: template.DefaultTemplateDisplayName,
+		Description: "Default template installed by manager.",
+		MainContainer: v1alpha1.ContainerSpec{
+			Image: image,
+			Resources: v1alpha1.ResourceQuota{
+				CPU:    resource.MustParse(template.DefaultTemplateCPU),
+				Memory: resource.MustParse(template.DefaultTemplateMemory),
+			},
+		},
+		Pool: v1alpha1.PoolStrategy{
+			MinIdle:   minIdle,
+			MaxIdle:   maxIdle,
+			AutoScale: autoScale,
+		},
+		Network: &v1alpha1.TplSandboxNetworkPolicy{
+			Mode: v1alpha1.NetworkModeAllowAll,
+		},
+		Public: true,
+	}
+
+	tpl := &template.Template{
+		TemplateID:   templateID,
+		TemplateName: name,
+		Scope:        naming.ScopePublic,
+		TeamID:       "",
+		UserID:       "system",
+		Spec:         spec,
+	}
+
+	if err := store.CreateTemplate(ctx, tpl); err != nil {
+		return fmt.Errorf("create default template: %w", err)
+	}
+
+	logger.Info("Default template created in store",
+		zap.String("template_id", templateID),
+		zap.String("template_name", name),
+	)
+	return nil
+}
+
+func runTemplateMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) error {
+	logger.Info("Running template migrations")
+
+	migrateLogger := &zapMigrateLogger{logger: logger}
+	if err := migrate.Up(ctx, pool, ".",
+		migrate.WithBaseFS(schedmigrations.FS),
+		migrate.WithLogger(migrateLogger),
+		migrate.WithSchema("sched"),
+	); err != nil {
+		return fmt.Errorf("migrate up: %w", err)
+	}
+
+	logger.Info("Template migrations completed successfully")
+	return nil
+}
+
 // initDatabase initializes the database connection pool
 func initDatabase(ctx context.Context, databaseURL string, maxConns, minConns int32, logger *zap.Logger, obsProvider *observability.Provider) (*pgxpool.Pool, error) {
 	pool, err := dbpool.New(ctx, dbpool.Options{
 		DatabaseURL: databaseURL,
 		MaxConns:    maxConns,
 		MinConns:    minConns,
+		Schema:      "sched",
 	})
 	if err != nil {
 		return nil, err
@@ -440,6 +567,19 @@ func initDatabase(ctx context.Context, databaseURL string, maxConns, minConns in
 	)
 
 	return pool, nil
+}
+
+// zapMigrateLogger adapts zap.Logger to migrate.Logger interface.
+type zapMigrateLogger struct {
+	logger *zap.Logger
+}
+
+func (z *zapMigrateLogger) Printf(format string, args ...any) {
+	z.logger.Info(fmt.Sprintf(format, args...))
+}
+
+func (z *zapMigrateLogger) Fatalf(format string, args ...any) {
+	z.logger.Fatal(fmt.Sprintf(format, args...))
 }
 
 // pgxPoolAdapter adapts pgxpool.Pool to clock.DB interface

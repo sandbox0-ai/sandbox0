@@ -10,7 +10,7 @@ import (
 	"github.com/sandbox0-ai/infra/pkg/gateway/spec"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	"github.com/sandbox0-ai/infra/pkg/naming"
-	"github.com/sandbox0-ai/infra/scheduler/pkg/db"
+	"github.com/sandbox0-ai/infra/pkg/template"
 	"go.uber.org/zap"
 )
 
@@ -29,10 +29,10 @@ func (s *Server) listTemplates(c *gin.Context) {
 		return
 	}
 
-	var templates []*db.Template
+	var templates []*template.Template
 	var err error
 
-	templates, err = s.repo.ListVisibleTemplates(c.Request.Context(), claims.TeamID)
+	templates, err = s.templateStore.ListVisibleTemplates(c.Request.Context(), claims.TeamID)
 
 	if err != nil {
 		s.logger.Error("Failed to list templates", zap.Error(err))
@@ -68,7 +68,7 @@ func (s *Server) getTemplate(c *gin.Context) {
 			return
 		}
 		if public {
-			template, err := s.repo.GetTemplate(c.Request.Context(), "public", "", templateID)
+			template, err := s.templateStore.GetTemplate(c.Request.Context(), "public", "", templateID)
 			if err != nil {
 				s.logger.Error("Failed to get template", zap.Error(err))
 				spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to get template")
@@ -83,7 +83,7 @@ func (s *Server) getTemplate(c *gin.Context) {
 		}
 	}
 
-	template, err := s.repo.GetTemplateForTeam(c.Request.Context(), claims.TeamID, templateID)
+	template, err := s.templateStore.GetTemplateForTeam(c.Request.Context(), claims.TeamID, templateID)
 	if err != nil {
 		s.logger.Error("Failed to get template", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to get template")
@@ -143,7 +143,7 @@ func (s *Server) createTemplate(c *gin.Context) {
 	}
 
 	// Check if template already exists
-	existing, err := s.repo.GetTemplate(c.Request.Context(), scope, teamID, templateID)
+	existing, err := s.templateStore.GetTemplate(c.Request.Context(), scope, teamID, templateID)
 	if err != nil {
 		s.logger.Error("Failed to check existing template", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to create template")
@@ -154,7 +154,7 @@ func (s *Server) createTemplate(c *gin.Context) {
 		return
 	}
 
-	template := &db.Template{
+	template := &template.Template{
 		TemplateID:   templateID,
 		TemplateName: req.TemplateName,
 		Scope:        scope,
@@ -163,7 +163,7 @@ func (s *Server) createTemplate(c *gin.Context) {
 		Spec:         req.Spec,
 	}
 
-	if err := s.repo.CreateTemplate(c.Request.Context(), template); err != nil {
+	if err := s.templateStore.CreateTemplate(c.Request.Context(), template); err != nil {
 		s.logger.Error("Failed to create template", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to create template")
 		return
@@ -182,7 +182,7 @@ func (s *Server) createTemplate(c *gin.Context) {
 	}
 
 	// Get the created template to return with timestamps
-	created, _ := s.repo.GetTemplate(c.Request.Context(), scope, teamID, templateID)
+	created, _ := s.templateStore.GetTemplate(c.Request.Context(), scope, teamID, templateID)
 	if created != nil {
 		spec.JSONSuccess(c, http.StatusCreated, created)
 	} else {
@@ -225,7 +225,7 @@ func (s *Server) updateTemplate(c *gin.Context) {
 	}
 
 	// Check if template exists
-	existing, err := s.repo.GetTemplate(c.Request.Context(), scope, teamID, templateID)
+	existing, err := s.templateStore.GetTemplate(c.Request.Context(), scope, teamID, templateID)
 	if err != nil {
 		s.logger.Error("Failed to get template", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to update template")
@@ -244,7 +244,7 @@ func (s *Server) updateTemplate(c *gin.Context) {
 		return
 	}
 
-	template := &db.Template{
+	template := &template.Template{
 		TemplateID:   templateID,
 		TemplateName: *req.TemplateName,
 		Scope:        scope,
@@ -253,7 +253,7 @@ func (s *Server) updateTemplate(c *gin.Context) {
 		Spec:         req.Spec,
 	}
 
-	if err := s.repo.UpdateTemplate(c.Request.Context(), template); err != nil {
+	if err := s.templateStore.UpdateTemplate(c.Request.Context(), template); err != nil {
 		s.logger.Error("Failed to update template", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to update template")
 		return
@@ -272,7 +272,7 @@ func (s *Server) updateTemplate(c *gin.Context) {
 	}
 
 	// Get the updated template to return with timestamps
-	updated, _ := s.repo.GetTemplate(c.Request.Context(), scope, teamID, templateID)
+	updated, _ := s.templateStore.GetTemplate(c.Request.Context(), scope, teamID, templateID)
 	if updated != nil {
 		spec.JSONSuccess(c, http.StatusOK, updated)
 	} else {
@@ -319,7 +319,7 @@ func (s *Server) deleteTemplate(c *gin.Context) {
 	}
 
 	// Check if template exists
-	existing, err := s.repo.GetTemplate(c.Request.Context(), scope, teamID, templateID)
+	existing, err := s.templateStore.GetTemplate(c.Request.Context(), scope, teamID, templateID)
 	if err != nil {
 		s.logger.Error("Failed to get template", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to delete template")
@@ -331,7 +331,7 @@ func (s *Server) deleteTemplate(c *gin.Context) {
 	}
 
 	// Get all allocations to clean up from clusters
-	allocations, err := s.repo.ListAllocationsByTemplate(c.Request.Context(), scope, teamID, templateID)
+	allocations, err := s.allocationStore.ListAllocationsByTemplate(c.Request.Context(), scope, teamID, templateID)
 	if err != nil {
 		s.logger.Error("Failed to get template allocations", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to delete template")
@@ -367,14 +367,14 @@ func (s *Server) deleteTemplate(c *gin.Context) {
 	}
 
 	// Delete allocations from database
-	if err := s.repo.DeleteAllocationsByTemplate(c.Request.Context(), scope, teamID, templateID); err != nil {
+	if err := s.allocationStore.DeleteAllocationsByTemplate(c.Request.Context(), scope, teamID, templateID); err != nil {
 		s.logger.Error("Failed to delete template allocations", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to delete template")
 		return
 	}
 
 	// Delete template from database
-	if err := s.repo.DeleteTemplate(c.Request.Context(), scope, teamID, templateID); err != nil {
+	if err := s.templateStore.DeleteTemplate(c.Request.Context(), scope, teamID, templateID); err != nil {
 		s.logger.Error("Failed to delete template", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to delete template")
 		return
@@ -434,7 +434,7 @@ func (s *Server) getTemplateAllocations(c *gin.Context) {
 		return
 	}
 
-	allocations, err := s.repo.ListAllocationsByTemplate(c.Request.Context(), scope, teamID, templateID)
+	allocations, err := s.allocationStore.ListAllocationsByTemplate(c.Request.Context(), scope, teamID, templateID)
 	if err != nil {
 		s.logger.Error("Failed to get template allocations", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to get template allocations")

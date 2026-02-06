@@ -17,6 +17,7 @@ import (
 	"github.com/sandbox0-ai/infra/pkg/observability"
 	obsmetrics "github.com/sandbox0-ai/infra/pkg/observability/metrics"
 	"github.com/sandbox0-ai/infra/pkg/pubsub"
+	templstorepg "github.com/sandbox0-ai/infra/pkg/template/store/pg"
 	schedmigrations "github.com/sandbox0-ai/infra/scheduler/migrations"
 	"github.com/sandbox0-ai/infra/scheduler/pkg/client"
 	"github.com/sandbox0-ai/infra/scheduler/pkg/db"
@@ -89,6 +90,7 @@ func main() {
 
 	// Create repository
 	repo := db.NewRepository(pool)
+	templateStore := templstorepg.NewStore(pool)
 
 	// Initialize internal auth
 	privateKey, err := internalauth.LoadEd25519PrivateKeyFromFile(internalauth.DefaultInternalJWTPrivateKeyPath)
@@ -128,10 +130,10 @@ func main() {
 	igClient := client.NewInternalGatewayClient(internalAuthGen, logger, obsProvider)
 
 	// Create reconciler
-	rec := reconciler.NewReconciler(repo, igClient, cfg.ReconcileInterval.Duration, clk, cfg.PodsPerNode, logger, schedulerMetrics)
+	rec := reconciler.NewReconciler(templateStore, templateStore, repo, igClient, cfg.ReconcileInterval.Duration, clk, cfg.PodsPerNode, logger, schedulerMetrics)
 
 	// Create HTTP server
-	httpServer := httpserver.NewServer(cfg, repo, authValidator, internalAuthGen, rec, logger, obsProvider)
+	httpServer := httpserver.NewServer(cfg, repo, templateStore, templateStore, authValidator, internalAuthGen, rec, logger, obsProvider)
 
 	// Start template idle listener
 	if cfg.DatabaseURL != "" {

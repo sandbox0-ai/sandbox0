@@ -13,6 +13,7 @@ import (
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	"github.com/sandbox0-ai/infra/pkg/observability"
 	httpobs "github.com/sandbox0-ai/infra/pkg/observability/http"
+	"github.com/sandbox0-ai/infra/pkg/template/store"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 )
@@ -22,6 +23,9 @@ type Server struct {
 	router          *gin.Engine
 	sandboxService  *service.SandboxService
 	templateService *service.TemplateService
+	templateStore   store.TemplateStore
+	templateReconciler TemplateReconciler
+	templateStoreEnabled bool
 	clusterService  *service.ClusterService
 	authValidator   *internalauth.Validator
 	logger          *zap.Logger
@@ -29,10 +33,18 @@ type Server struct {
 	obsProvider     *observability.Provider
 }
 
+// TemplateReconciler exposes minimal reconcile controls for template syncing.
+type TemplateReconciler interface {
+	TriggerReconcile(ctx context.Context)
+}
+
 // NewServer creates a new HTTP server
 func NewServer(
 	sandboxService *service.SandboxService,
 	templateService *service.TemplateService,
+	templateStore store.TemplateStore,
+	templateReconciler TemplateReconciler,
+	templateStoreEnabled bool,
 	clusterService *service.ClusterService,
 	authValidator *internalauth.Validator,
 	logger *zap.Logger,
@@ -53,6 +65,9 @@ func NewServer(
 		router:          router,
 		sandboxService:  sandboxService,
 		templateService: templateService,
+		templateStore:   templateStore,
+		templateReconciler: templateReconciler,
+		templateStoreEnabled: templateStoreEnabled,
 		clusterService:  clusterService,
 		authValidator:   authValidator,
 		logger:          logger,

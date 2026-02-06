@@ -12,12 +12,12 @@ import (
 	"github.com/sandbox0-ai/infra/pkg/gateway/spec"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	"github.com/sandbox0-ai/infra/pkg/naming"
-	"github.com/sandbox0-ai/infra/scheduler/pkg/db"
+	"github.com/sandbox0-ai/infra/pkg/template"
 	"go.uber.org/zap"
 )
 
 type SandboxClaimRequest struct {
-	Template string `json:"template"`
+	Template string `json:"template"` // template id
 }
 
 // createSandbox routes and proxies sandbox claim to the selected internal-gateway.
@@ -170,42 +170,42 @@ func (s *Server) proxySandbox(c *gin.Context) {
 	router.ProxyToTarget(c)
 }
 
-func (s *Server) selectClusterForTemplate(c *gin.Context, templateID, teamID string) (*db.Cluster, *db.Template, string, error) {
-	template, err := s.repo.GetTemplateForTeam(c.Request.Context(), teamID, templateID)
+func (s *Server) selectClusterForTemplate(c *gin.Context, templateID, teamID string) (*template.Cluster, *template.Template, string, error) {
+	tpl, err := s.templateStore.GetTemplateForTeam(c.Request.Context(), teamID, templateID)
 	if err != nil {
 		s.logger.Error("Failed to get template for routing", zap.Error(err))
 		return nil, nil, "", err
 	}
-	if template == nil {
+	if tpl == nil {
 		return nil, nil, "", nil
 	}
 
-	allocations, err := s.repo.ListAllocationsByTemplate(c.Request.Context(), template.Scope, template.TeamID, template.TemplateID)
+	allocations, err := s.allocationStore.ListAllocationsByTemplate(c.Request.Context(), tpl.Scope, tpl.TeamID, tpl.TemplateID)
 	if err != nil {
 		s.logger.Error("Failed to list template allocations", zap.Error(err))
-		return nil, template, "", err
+		return nil, tpl, "", err
 	}
 	if len(allocations) == 0 {
-		return nil, template, "", nil
+		return nil, tpl, "", nil
 	}
 
 	clusters, err := s.repo.ListEnabledClusters(c.Request.Context())
 	if err != nil {
 		s.logger.Error("Failed to list enabled clusters", zap.Error(err))
-		return nil, template, "", err
+		return nil, tpl, "", err
 	}
 
-	clusterMap := make(map[string]*db.Cluster, len(clusters))
+	clusterMap := make(map[string]*template.Cluster, len(clusters))
 	for _, cluster := range clusters {
 		clusterMap[cluster.ClusterID] = cluster
 	}
 
-	clusterTemplateID := naming.TemplateNameForCluster(template.Scope, template.TeamID, template.TemplateID)
+	clusterTemplateID := naming.TemplateNameForCluster(tpl.Scope, tpl.TeamID, tpl.TemplateID)
 	maxAge := s.cfg.ReconcileInterval.Duration * 2
 
-	var selected *db.Cluster
+	var selected *template.Cluster
 	selectedBy := "weight"
-	var selectedAlloc *db.TemplateAllocation
+	var selectedAlloc *template.TemplateAllocation
 	var bestIdle int32 = -1
 
 	for _, alloc := range allocations {
@@ -238,27 +238,27 @@ func (s *Server) selectClusterForTemplate(c *gin.Context, templateID, teamID str
 	if selected == nil {
 		selected, err = s.selectClusterByWeightWithAllocations(allocations, clusterMap)
 		if err != nil {
-			return nil, template, "", err
+			return nil, tpl, "", err
 		}
 		selectedBy = "weight"
 	}
 
 	if selected == nil {
-		return nil, template, "", nil
+		return nil, tpl, "", nil
 	}
 
 	s.logger.Info("Sandbox route selected",
-		zap.String("template_id", template.TemplateID),
-		zap.String("scope", template.Scope),
-		zap.String("team_id", template.TeamID),
+		zap.String("template_id", tpl.TemplateID),
+		zap.String("scope", tpl.Scope),
+		zap.String("team_id", tpl.TeamID),
 		zap.String("cluster_id", selected.ClusterID),
 		zap.String("selected_by", selectedBy),
 	)
 
-	return selected, template, selectedBy, nil
+	return selected, tpl, selectedBy, nil
 }
 
-func (s *Server) selectClusterByWeightWithAllocations(allocations []*db.TemplateAllocation, clusterMap map[string]*db.Cluster) (*db.Cluster, error) {
+func (s *Server) selectClusterByWeightWithAllocations(allocations []*template.TemplateAllocation, clusterMap map[string]*template.Cluster) (*template.Cluster, error) {
 	totalWeight := 0
 	for _, alloc := range allocations {
 		cluster := clusterMap[alloc.ClusterID]

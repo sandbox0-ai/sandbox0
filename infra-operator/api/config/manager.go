@@ -24,6 +24,9 @@ type ManagerConfig struct {
 	// +kubebuilder:default={}
 	DefaultTemplate  *DefaultTemplateConfig `yaml:"default_template" json:"defaultTemplate"`
 	DefaultClusterId string                 `yaml:"default_cluster_id" json:"-"`
+	// +optional
+	// +kubebuilder:default=true
+	TemplateStoreEnabled bool `yaml:"template_store_enabled" json:"-"`
 
 	// Kubernetes
 	// +optional

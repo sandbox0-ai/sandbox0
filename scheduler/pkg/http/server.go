@@ -15,6 +15,7 @@ import (
 	"github.com/sandbox0-ai/infra/pkg/observability"
 	httpobs "github.com/sandbox0-ai/infra/pkg/observability/http"
 	"github.com/sandbox0-ai/infra/pkg/proxy"
+	"github.com/sandbox0-ai/infra/pkg/template/store"
 	"github.com/sandbox0-ai/infra/scheduler/pkg/db"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
@@ -25,6 +26,8 @@ type Server struct {
 	router          *gin.Engine
 	cfg             *config.SchedulerConfig
 	repo            *db.Repository
+	templateStore   store.TemplateStore
+	allocationStore store.AllocationStore
 	authValidator   *internalauth.Validator
 	internalAuthGen *internalauth.Generator
 	reconciler      Reconciler
@@ -50,6 +53,8 @@ type Reconciler interface {
 func NewServer(
 	cfg *config.SchedulerConfig,
 	repo *db.Repository,
+	templateStore store.TemplateStore,
+	allocationStore store.AllocationStore,
 	authValidator *internalauth.Validator,
 	internalAuthGen *internalauth.Generator,
 	reconciler Reconciler,
@@ -71,6 +76,8 @@ func NewServer(
 		router:                 router,
 		cfg:                    cfg,
 		repo:                   repo,
+		templateStore:          templateStore,
+		allocationStore:        allocationStore,
 		authValidator:          authValidator,
 		internalAuthGen:        internalAuthGen,
 		reconciler:             reconciler,

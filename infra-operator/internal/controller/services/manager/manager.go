@@ -37,16 +37,7 @@ import (
 	templatev1alpha1 "github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
 	pkginternalauth "github.com/sandbox0-ai/infra/pkg/internalauth"
 	"github.com/sandbox0-ai/infra/pkg/naming"
-)
-
-const (
-	defaultTemplateName        = "default"
-	defaultTemplateImage       = "sandbox0ai/otemplates:default-v0.1.0"
-	defaultTemplateCPU         = "500m"
-	defaultTemplateMemory      = "512Mi"
-	defaultTemplateDisplayName = "Default"
-	defaultTemplateMinIdle     = int32(1)
-	defaultTemplateMaxIdle     = int32(5)
+	"github.com/sandbox0-ai/infra/pkg/template"
 )
 
 type Reconciler struct {
@@ -253,14 +244,16 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		cfg.DatabaseURL = dsn
 	}
 
+	cfg.TemplateStoreEnabled = !infrav1alpha1.IsSchedulerEnabled(infra)
+
 	if cfg.DefaultTemplate == nil {
 		cfg.DefaultTemplate = &apiconfig.DefaultTemplateConfig{}
 	}
 	if cfg.DefaultTemplate.Name == "" {
-		cfg.DefaultTemplate.Name = defaultTemplateName
+		cfg.DefaultTemplate.Name = template.DefaultTemplateName
 	}
 	if cfg.DefaultTemplate.Image == "" {
-		cfg.DefaultTemplate.Image = defaultTemplateImage
+		cfg.DefaultTemplate.Image = template.DefaultTemplateImage
 	}
 	cfg.DefaultTemplate.Pool = applyDefaultTemplatePool(cfg.DefaultTemplate.Pool)
 
@@ -302,14 +295,14 @@ func (r *Reconciler) ensureDefaultTemplate(ctx context.Context, infra *infrav1al
 		pool = config.DefaultTemplate.Pool
 	}
 	if name == "" {
-		name = defaultTemplateName
+		name = template.DefaultTemplateName
 	}
 	namespace, err := naming.TemplateNamespaceFromName(name)
 	if err != nil {
 		return fmt.Errorf("resolve template namespace: %w", err)
 	}
 	if image == "" {
-		image = defaultTemplateImage
+		image = template.DefaultTemplateImage
 	}
 	pool = applyDefaultTemplatePool(pool)
 
@@ -340,13 +333,13 @@ func (r *Reconciler) ensureDefaultTemplate(ctx context.Context, infra *infrav1al
 			},
 		},
 		Spec: templatev1alpha1.SandboxTemplateSpec{
-			DisplayName: defaultTemplateDisplayName,
+			DisplayName: template.DefaultTemplateDisplayName,
 			Description: "Default template installed by infra-operator.",
 			MainContainer: templatev1alpha1.ContainerSpec{
 				Image: image,
 				Resources: templatev1alpha1.ResourceQuota{
-					CPU:    resource.MustParse(defaultTemplateCPU),
-					Memory: resource.MustParse(defaultTemplateMemory),
+					CPU:    resource.MustParse(template.DefaultTemplateCPU),
+					Memory: resource.MustParse(template.DefaultTemplateMemory),
 				},
 			},
 			Pool: templatev1alpha1.PoolStrategy{
@@ -380,17 +373,9 @@ func (r *Reconciler) ensureDefaultTemplate(ctx context.Context, infra *infrav1al
 }
 
 func applyDefaultTemplatePool(pool apiconfig.DefaultTemplatePoolConfig) apiconfig.DefaultTemplatePoolConfig {
-	if pool.MinIdle == 0 && pool.MaxIdle == 0 && !pool.AutoScale {
-		pool.MinIdle = defaultTemplateMinIdle
-		pool.MaxIdle = defaultTemplateMaxIdle
-		pool.AutoScale = true
-		return pool
-	}
-	if pool.MinIdle == 0 {
-		pool.MinIdle = defaultTemplateMinIdle
-	}
-	if pool.MaxIdle == 0 {
-		pool.MaxIdle = defaultTemplateMaxIdle
-	}
+	minIdle, maxIdle, autoScale := template.ApplyDefaultPool(pool.MinIdle, pool.MaxIdle, pool.AutoScale)
+	pool.MinIdle = minIdle
+	pool.MaxIdle = maxIdle
+	pool.AutoScale = autoScale
 	return pool
 }

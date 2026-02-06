@@ -174,14 +174,10 @@ func registerApiNetworkPolicySuite(envProvider func() *framework.ScenarioEnv) {
 		})
 
 		Context("network policies", func() {
-			It("retrieves network and bandwidth policies", func() {
+			It("retrieves network policy", func() {
 				Expect(sandboxID).NotTo(BeEmpty())
 
 				_, status, _, err := session.GetNetworkPolicy(env.TestCtx.Context, GinkgoT(), sandboxID)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(status).To(Equal(http.StatusOK))
-
-				_, status, _, err = session.GetBandwidthPolicy(env.TestCtx.Context, GinkgoT(), sandboxID)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(status).To(Equal(http.StatusOK))
 			})

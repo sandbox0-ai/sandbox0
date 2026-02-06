@@ -29,9 +29,6 @@ type SandboxInfo struct {
 	NetworkPolicy        string
 	NetworkPolicyHash    string
 	NetworkAppliedHash   string
-	BandwidthPolicy      string
-	BandwidthHash        string
-	BandwidthAppliedHash string
 }
 
 type ServiceInfo struct {
@@ -246,7 +243,6 @@ func (w *Watcher) handlePodUpsert(obj any) {
 		zap.String("pod_ip", info.PodIP),
 		zap.String("node_name", info.NodeName),
 		zap.String("network_policy_hash", info.NetworkPolicyHash),
-		zap.String("bandwidth_hash", info.BandwidthHash),
 	)
 
 	if w.onSandboxUpsert != nil {
@@ -517,9 +513,6 @@ func sandboxInfoFromPod(pod *corev1.Pod) *SandboxInfo {
 		NetworkPolicy:        pod.Annotations[controller.AnnotationNetworkPolicy],
 		NetworkPolicyHash:    pod.Annotations[controller.AnnotationNetworkPolicyHash],
 		NetworkAppliedHash:   pod.Annotations[controller.AnnotationNetworkPolicyAppliedHash],
-		BandwidthPolicy:      pod.Annotations[controller.AnnotationBandwidthPolicy],
-		BandwidthHash:        pod.Annotations[controller.AnnotationBandwidthPolicyHash],
-		BandwidthAppliedHash: pod.Annotations[controller.AnnotationBandwidthPolicyAppliedHash],
 	}
 }
 

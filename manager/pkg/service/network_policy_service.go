@@ -5,23 +5,14 @@ import (
 	"go.uber.org/zap"
 )
 
-// NetworkPolicyServiceConfig holds configuration for NetworkPolicyService
-type NetworkPolicyServiceConfig struct {
-	DefaultBandwidthRateBps     int64
-	DefaultBandwidthBurstBytes  int64
-	BandwidthAccountingInterval int
-}
-
-// NetworkPolicyService builds network and bandwidth policy specs for pod annotations
+// NetworkPolicyService builds network policy specs for pod annotations
 type NetworkPolicyService struct {
-	config NetworkPolicyServiceConfig
 	logger *zap.Logger
 }
 
 // NewNetworkPolicyService creates a new NetworkPolicyService
-func NewNetworkPolicyService(config NetworkPolicyServiceConfig, logger *zap.Logger) *NetworkPolicyService {
+func NewNetworkPolicyService(logger *zap.Logger) *NetworkPolicyService {
 	return &NetworkPolicyService{
-		config: config,
 		logger: logger,
 	}
 }
@@ -52,60 +43,6 @@ func (s *NetworkPolicyService) BuildNetworkPolicySpec(req *BuildNetworkPolicyReq
 		TeamID:    req.TeamID,
 		Mode:      mergedSpec.Mode,
 		Egress:    v1alpha1.BuildEgressSpec(mergedSpec),
-	}
-}
-
-// BuildBandwidthPolicyRequest contains the request to build a bandwidth policy
-type BuildBandwidthPolicyRequest struct {
-	SandboxID         string
-	TeamID            string
-	EgressRateBps     int64
-	IngressRateBps    int64
-	BurstBytes        int64
-	AccountingEnabled bool
-}
-
-// BuildBandwidthPolicyAnnotation builds the bandwidth policy annotation JSON
-func (s *NetworkPolicyService) BuildBandwidthPolicyAnnotation(req *BuildBandwidthPolicyRequest) (string, error) {
-	spec := s.BuildBandwidthPolicySpec(req)
-	return v1alpha1.BandwidthPolicyToAnnotation(spec)
-}
-
-// BuildBandwidthPolicySpec builds the bandwidth policy spec without serialization.
-func (s *NetworkPolicyService) BuildBandwidthPolicySpec(req *BuildBandwidthPolicyRequest) *v1alpha1.BandwidthPolicySpec {
-	// Default values
-	egressRateBps := req.EgressRateBps
-	if egressRateBps == 0 {
-		egressRateBps = s.config.DefaultBandwidthRateBps
-	}
-	ingressRateBps := req.IngressRateBps
-	if ingressRateBps == 0 {
-		ingressRateBps = s.config.DefaultBandwidthRateBps
-	}
-	burstBytes := req.BurstBytes
-	if burstBytes == 0 {
-		burstBytes = s.config.DefaultBandwidthBurstBytes
-	}
-	if burstBytes == 0 {
-		burstBytes = egressRateBps / 8 // fallback if still 0
-	}
-
-	return &v1alpha1.BandwidthPolicySpec{
-		Version:   "v1",
-		SandboxID: req.SandboxID,
-		TeamID:    req.TeamID,
-		EgressRateLimit: &v1alpha1.RateLimitSpec{
-			RateBps:    egressRateBps,
-			BurstBytes: burstBytes,
-		},
-		IngressRateLimit: &v1alpha1.RateLimitSpec{
-			RateBps:    ingressRateBps,
-			BurstBytes: burstBytes,
-		},
-		Accounting: &v1alpha1.AccountingSpec{
-			Enabled:               true,
-			ReportIntervalSeconds: int32(s.config.BandwidthAccountingInterval),
-		},
 	}
 }
 

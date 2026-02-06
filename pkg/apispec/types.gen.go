@@ -65,11 +65,6 @@ const (
 	SuccessAuthProvidersResponseSuccessTrue SuccessAuthProvidersResponseSuccess = true
 )
 
-// Defines values for SuccessBandwidthPolicyResponseSuccess.
-const (
-	SuccessBandwidthPolicyResponseSuccessTrue SuccessBandwidthPolicyResponseSuccess = true
-)
-
 // Defines values for SuccessClaimResponseSuccess.
 const (
 	SuccessClaimResponseSuccessTrue SuccessClaimResponseSuccess = true
@@ -272,7 +267,7 @@ const (
 
 // Defines values for SuccessWrittenResponseSuccess.
 const (
-	SuccessWrittenResponseSuccessTrue SuccessWrittenResponseSuccess = true
+	True SuccessWrittenResponseSuccess = true
 )
 
 // Defines values for TplSandboxNetworkPolicyMode.
@@ -313,12 +308,6 @@ type APIKey struct {
 	UserId     *string    `json:"user_id"`
 }
 
-// AccountingSpec defines model for AccountingSpec.
-type AccountingSpec struct {
-	Enabled               bool   `json:"enabled"`
-	ReportIntervalSeconds *int32 `json:"reportIntervalSeconds,omitempty"`
-}
-
 // AddTeamMemberRequest defines model for AddTeamMemberRequest.
 type AddTeamMemberRequest struct {
 	Email openapi_types.Email      `json:"email"`
@@ -339,15 +328,6 @@ type AuthProvider struct {
 	Id   string `json:"id"`
 	Name string `json:"name"`
 	Type string `json:"type"`
-}
-
-// BandwidthPolicySpec defines model for BandwidthPolicySpec.
-type BandwidthPolicySpec struct {
-	Accounting       *AccountingSpec `json:"accounting,omitempty"`
-	EgressRateLimit  *RateLimitSpec  `json:"egressRateLimit,omitempty"`
-	IngressRateLimit *RateLimitSpec  `json:"ingressRateLimit,omitempty"`
-	SandboxId        *string         `json:"sandboxId,omitempty"`
-	Version          *string         `json:"version,omitempty"`
 }
 
 // Capabilities defines model for Capabilities.
@@ -763,13 +743,6 @@ type REPLReadyConfig struct {
 // REPLReadyMode defines model for REPLReadyMode.
 type REPLReadyMode string
 
-// RateLimitSpec defines model for RateLimitSpec.
-type RateLimitSpec struct {
-	BurstBytes *int64 `json:"burstBytes,omitempty"`
-	CeilBps    *int64 `json:"ceilBps,omitempty"`
-	RateBps    int64  `json:"rateBps"`
-}
-
 // RefreshRequest defines model for RefreshRequest.
 type RefreshRequest struct {
 	RefreshToken string `json:"refresh_token"`
@@ -982,15 +955,6 @@ type SuccessAuthProvidersResponse struct {
 
 // SuccessAuthProvidersResponseSuccess defines model for SuccessAuthProvidersResponse.Success.
 type SuccessAuthProvidersResponseSuccess bool
-
-// SuccessBandwidthPolicyResponse defines model for SuccessBandwidthPolicyResponse.
-type SuccessBandwidthPolicyResponse struct {
-	Data    *BandwidthPolicySpec                  `json:"data,omitempty"`
-	Success SuccessBandwidthPolicyResponseSuccess `json:"success"`
-}
-
-// SuccessBandwidthPolicyResponseSuccess defines model for SuccessBandwidthPolicyResponse.Success.
-type SuccessBandwidthPolicyResponseSuccess bool
 
 // SuccessClaimResponse defines model for SuccessClaimResponse.
 type SuccessClaimResponse struct {
@@ -1596,9 +1560,6 @@ type PostApiV1SandboxesJSONRequestBody = ClaimRequest
 
 // PatchApiV1SandboxesIdJSONRequestBody defines body for PatchApiV1SandboxesId for application/json ContentType.
 type PatchApiV1SandboxesIdJSONRequestBody = SandboxUpdateRequest
-
-// PatchApiV1SandboxesIdBandwidthJSONRequestBody defines body for PatchApiV1SandboxesIdBandwidth for application/json ContentType.
-type PatchApiV1SandboxesIdBandwidthJSONRequestBody = BandwidthPolicySpec
 
 // PostApiV1SandboxesIdContextsJSONRequestBody defines body for PostApiV1SandboxesIdContexts for application/json ContentType.
 type PostApiV1SandboxesIdContextsJSONRequestBody = CreateContextRequest

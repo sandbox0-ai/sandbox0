@@ -28,10 +28,9 @@ type NetdProviderConfig struct {
 }
 
 type policyWaiter struct {
-	expectedNetworkHash   string
-	expectedBandwidthHash string
-	done                  chan struct{}
-	once                  sync.Once
+	expectedNetworkHash string
+	done                chan struct{}
+	once                sync.Once
 }
 
 // NetdProvider waits for netd to apply policies.
@@ -93,11 +92,7 @@ func (p *NetdProvider) ApplySandboxPolicy(ctx context.Context, input SandboxPoli
 	if err != nil {
 		return fmt.Errorf("hash network policy: %w", err)
 	}
-	bandwidthHash, err := p.bandwidthPolicyHash(input.BandwidthPolicy)
-	if err != nil {
-		return fmt.Errorf("hash bandwidth policy: %w", err)
-	}
-	if networkHash == "" && bandwidthHash == "" {
+	if networkHash == "" {
 		return nil
 	}
 
@@ -108,7 +103,7 @@ func (p *NetdProvider) ApplySandboxPolicy(ctx context.Context, input SandboxPoli
 		defer cancel()
 	}
 
-	return p.waitForAppliedHashes(waitCtx, input.Namespace, input.PodName, networkHash, bandwidthHash)
+	return p.waitForAppliedHashes(waitCtx, input.Namespace, input.PodName, networkHash)
 }
 
 func (p *NetdProvider) RemoveSandboxPolicy(ctx context.Context, namespace, sandboxID string) error {
@@ -120,18 +115,16 @@ func (p *NetdProvider) waitForAppliedHashes(
 	namespace string,
 	podName string,
 	expectedNetworkHash string,
-	expectedBandwidthHash string,
 ) error {
 	key := namespace + "/" + podName
 	waiter := &policyWaiter{
-		expectedNetworkHash:   expectedNetworkHash,
-		expectedBandwidthHash: expectedBandwidthHash,
-		done:                  make(chan struct{}),
+		expectedNetworkHash: expectedNetworkHash,
+		done:                make(chan struct{}),
 	}
 	p.addWaiter(key, waiter)
 	defer p.removeWaiter(key, waiter)
 
-	if p.isApplied(namespace, podName, expectedNetworkHash, expectedBandwidthHash) {
+	if p.isApplied(namespace, podName, expectedNetworkHash) {
 		p.completeWaiter(key, waiter)
 		return nil
 	}
@@ -149,7 +142,7 @@ func (p *NetdProvider) waitForAppliedHashes(
 		case <-ctx.Done():
 			return fmt.Errorf("timeout waiting for netd policy apply for pod %s/%s", namespace, podName)
 		case <-p.tick(ticker):
-			if p.isApplied(namespace, podName, expectedNetworkHash, expectedBandwidthHash) {
+			if p.isApplied(namespace, podName, expectedNetworkHash) {
 				p.completeWaiter(key, waiter)
 				return nil
 			}
@@ -160,18 +153,12 @@ func (p *NetdProvider) waitForAppliedHashes(
 func (p *NetdProvider) appliedHashesMatch(
 	pod *corev1.Pod,
 	expectedNetworkHash string,
-	expectedBandwidthHash string,
 ) bool {
 	if pod == nil || pod.Annotations == nil {
 		return false
 	}
 	if expectedNetworkHash != "" {
 		if pod.Annotations[controller.AnnotationNetworkPolicyAppliedHash] != expectedNetworkHash {
-			return false
-		}
-	}
-	if expectedBandwidthHash != "" {
-		if pod.Annotations[controller.AnnotationBandwidthPolicyAppliedHash] != expectedBandwidthHash {
 			return false
 		}
 	}
@@ -199,7 +186,7 @@ func (p *NetdProvider) handlePodEvent(obj any) {
 	p.waitersMu.Lock()
 	waiters := p.waiters[key]
 	for waiter := range waiters {
-		if p.appliedHashesMatch(pod, waiter.expectedNetworkHash, waiter.expectedBandwidthHash) {
+		if p.appliedHashesMatch(pod, waiter.expectedNetworkHash) {
 			p.completeWaiterLocked(key, waiter)
 		}
 	}
@@ -210,13 +197,12 @@ func (p *NetdProvider) isApplied(
 	namespace string,
 	podName string,
 	expectedNetworkHash string,
-	expectedBandwidthHash string,
 ) bool {
 	pod, err := p.podLister.Pods(namespace).Get(podName)
 	if err != nil {
 		return false
 	}
-	return p.appliedHashesMatch(pod, expectedNetworkHash, expectedBandwidthHash)
+	return p.appliedHashesMatch(pod, expectedNetworkHash)
 }
 
 func (p *NetdProvider) addWaiter(key string, waiter *policyWaiter) {
@@ -275,17 +261,6 @@ func (p *NetdProvider) networkPolicyHash(spec *v1alpha1.NetworkPolicySpec) (stri
 		return "", nil
 	}
 	annotation, err := v1alpha1.NetworkPolicyToAnnotation(spec)
-	if err != nil {
-		return "", err
-	}
-	return hashAnnotation(annotation), nil
-}
-
-func (p *NetdProvider) bandwidthPolicyHash(spec *v1alpha1.BandwidthPolicySpec) (string, error) {
-	if spec == nil {
-		return "", nil
-	}
-	annotation, err := v1alpha1.BandwidthPolicyToAnnotation(spec)
 	if err != nil {
 		return "", err
 	}

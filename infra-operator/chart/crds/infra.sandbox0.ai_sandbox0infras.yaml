@@ -925,9 +925,6 @@ spec:
                         default: {}
                         description: Config contains manager specific configuration
                         properties:
-                          bandwidthAccountingInterval:
-                            default: 10
-                            type: integer
                           cleanupInterval:
                             default: 60s
                             description: Cleanup Controller
@@ -939,15 +936,6 @@ spec:
                           databaseMinConns:
                             default: 2
                             format: int32
-                            type: integer
-                          defaultBandwidthBurstBytes:
-                            default: 12500000
-                            format: int64
-                            type: integer
-                          defaultBandwidthRateBps:
-                            default: 100000000
-                            description: Network
-                            format: int64
                             type: integer
                           defaultSandboxTTL:
                             default: 5m

@@ -30,15 +30,12 @@ func (p *Patcher) SyncAppliedHashes(ctx context.Context, sandboxes []*watcher.Sa
 		return fmt.Errorf("k8s client is nil")
 	}
 	for _, sandbox := range sandboxes {
-		if sandbox == nil || (sandbox.NetworkPolicyHash == "" && sandbox.BandwidthHash == "") {
+		if sandbox == nil || sandbox.NetworkPolicyHash == "" {
 			continue
 		}
 		annotations := map[string]string{}
 		if sandbox.NetworkPolicyHash != "" && sandbox.NetworkPolicyHash != sandbox.NetworkAppliedHash {
 			annotations[controller.AnnotationNetworkPolicyAppliedHash] = sandbox.NetworkPolicyHash
-		}
-		if sandbox.BandwidthHash != "" && sandbox.BandwidthHash != sandbox.BandwidthAppliedHash {
-			annotations[controller.AnnotationBandwidthPolicyAppliedHash] = sandbox.BandwidthHash
 		}
 		if len(annotations) == 0 {
 			continue
@@ -68,7 +65,6 @@ func (p *Patcher) SyncAppliedHashes(ctx context.Context, sandboxes []*watcher.Sa
 			zap.String("pod", sandbox.Name),
 			zap.String("pod_ip", sandbox.PodIP),
 			zap.String("network_policy_applied_hash", annotations[controller.AnnotationNetworkPolicyAppliedHash]),
-			zap.String("bandwidth_applied_hash", annotations[controller.AnnotationBandwidthPolicyAppliedHash]),
 		)
 	}
 	return nil

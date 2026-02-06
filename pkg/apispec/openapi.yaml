@@ -1004,45 +1004,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessSandboxNetworkPolicyResponse"
-  /api/v1/sandboxes/{id}/bandwidth:
-    get:
-      tags: [sandboxes]
-      summary: Get sandbox bandwidth policy
-      security:
-        - bearerAuth: []
-      x-upstream-service: manager
-      x-upstream-path: /api/v1/sandboxes/{id}/bandwidth
-      parameters:
-        - $ref: "#/components/parameters/SandboxID"
-      responses:
-        "200":
-          description: Bandwidth policy
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SuccessBandwidthPolicyResponse"
-    patch:
-      tags: [sandboxes]
-      summary: Update sandbox bandwidth policy
-      security:
-        - bearerAuth: []
-      x-upstream-service: manager
-      x-upstream-path: /api/v1/sandboxes/{id}/bandwidth
-      parameters:
-        - $ref: "#/components/parameters/SandboxID"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/BandwidthPolicySpec"
-      responses:
-        "200":
-          description: Bandwidth policy updated
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SuccessBandwidthPolicyResponse"
   /api/v1/sandboxes/{id}/contexts:
     post:
       tags: [contexts]
@@ -3625,41 +3586,6 @@ components:
           type: integer
           format: int32
       required: [port]
-    BandwidthPolicySpec:
-      type: object
-      properties:
-        version:
-          type: string
-        sandboxId:
-          type: string
-        egressRateLimit:
-          $ref: "#/components/schemas/RateLimitSpec"
-        ingressRateLimit:
-          $ref: "#/components/schemas/RateLimitSpec"
-        accounting:
-          $ref: "#/components/schemas/AccountingSpec"
-    RateLimitSpec:
-      type: object
-      properties:
-        rateBps:
-          type: integer
-          format: int64
-        burstBytes:
-          type: integer
-          format: int64
-        ceilBps:
-          type: integer
-          format: int64
-      required: [rateBps]
-    AccountingSpec:
-      type: object
-      properties:
-        enabled:
-          type: boolean
-        reportIntervalSeconds:
-          type: integer
-          format: int32
-      required: [enabled]
     LifecyclePolicy:
       type: object
       properties:
@@ -3721,10 +3647,3 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/TplSandboxNetworkPolicy"
-    SuccessBandwidthPolicyResponse:
-      allOf:
-        - $ref: "#/components/schemas/SuccessEnvelope"
-        - type: object
-          properties:
-            data:
-              $ref: "#/components/schemas/BandwidthPolicySpec"

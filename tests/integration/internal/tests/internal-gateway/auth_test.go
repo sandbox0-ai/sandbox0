@@ -57,32 +57,6 @@ func TestInternalGatewayIntegration_PermissionDenied(t *testing.T) {
 	}
 }
 
-func TestInternalGatewayIntegration_SandboxWriteRequired(t *testing.T) {
-	keys := gatewayKeyPair{}
-	keys.privateKey, keys.publicKey = writeInternalGatewayKeys(t)
-
-	managerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatalf("unexpected manager request: %s", r.URL.Path)
-	}))
-	t.Cleanup(managerServer.Close)
-
-	storageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatalf("unexpected storage-proxy request: %s", r.URL.Path)
-	}))
-	t.Cleanup(storageServer.Close)
-
-	env := newGatewayTestEnv(t, managerServer.URL, storageServer.URL, nil, keys)
-	token := newInternalToken(t, env.edgeGen, []string{auth.PermSandboxRead})
-
-	resp, _ := doGatewayRequest(t, env.server.Client(), http.MethodPatch, env.server.URL+"/api/v1/sandboxes/sbx-1/bandwidth", token, map[string]any{
-		"upload_bps":   1024,
-		"download_bps": 1024,
-	})
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("expected forbidden for sandbox bandwidth update, got %d", resp.StatusCode)
-	}
-}
-
 func TestInternalGatewayIntegration_VolumeEndpointsRequirePermissions(t *testing.T) {
 	keys := gatewayKeyPair{}
 	keys.privateKey, keys.publicKey = writeInternalGatewayKeys(t)

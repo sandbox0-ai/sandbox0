@@ -177,11 +177,7 @@ func main() {
 	podInformer.Informer().AddEventHandler(sandboxIndex.ResourceEventHandler())
 
 	// Create network policy service for building policy annotations
-	networkPolicyService := service.NewNetworkPolicyService(service.NetworkPolicyServiceConfig{
-		DefaultBandwidthRateBps:     cfg.DefaultBandwidthRateBps,
-		DefaultBandwidthBurstBytes:  cfg.DefaultBandwidthBurstBytes,
-		BandwidthAccountingInterval: cfg.BandwidthAccountingInterval,
-	}, logger)
+	networkPolicyService := service.NewNetworkPolicyService(logger)
 
 	networkProvider := network.NewNetdProvider(podInformer, podLister, network.NetdProviderConfig{
 		ApplyTimeout: cfg.NetdPolicyApplyTimeout.Duration,
@@ -222,9 +218,6 @@ func main() {
 	// Create services
 	cfgForSandbox := service.SandboxServiceConfig{
 		DefaultTTL:                  cfg.DefaultSandboxTTL.Duration,
-		DefaultBandwidthRateBps:     cfg.DefaultBandwidthRateBps,
-		DefaultBandwidthBurstBytes:  cfg.DefaultBandwidthBurstBytes,
-		BandwidthAccountingInterval: cfg.BandwidthAccountingInterval,
 		PauseMinMemoryRequest:       cfg.PauseMinMemoryRequest,
 		PauseMinMemoryLimit:         cfg.PauseMinMemoryLimit,
 		PauseMemoryBufferRatio:      pauseMemoryBufferRatio,

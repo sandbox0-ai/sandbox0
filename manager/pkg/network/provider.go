@@ -14,7 +14,6 @@ type SandboxPolicyInput struct {
 	TeamID          string
 	PodLabels       map[string]string
 	NetworkPolicy   *v1alpha1.NetworkPolicySpec
-	BandwidthPolicy *v1alpha1.BandwidthPolicySpec
 }
 
 // Provider applies sandbox network policies using an external dataplane.

@@ -52,17 +52,14 @@ const (
 
 // SandboxServiceConfig handles configuration for SandboxService
 type SandboxServiceConfig struct {
-	DefaultTTL                  time.Duration
-	DefaultBandwidthRateBps     int64
-	DefaultBandwidthBurstBytes  int64
-	BandwidthAccountingInterval int
-	PauseMinMemoryRequest       string
-	PauseMinMemoryLimit         string
-	PauseMemoryBufferRatio      float64
-	PauseMinCPU                 string
-	ProcdPort                   int
-	ProcdClientTimeout          time.Duration
-	ProcdInitTimeout            time.Duration
+	DefaultTTL             time.Duration
+	PauseMinMemoryRequest  string
+	PauseMinMemoryLimit    string
+	PauseMemoryBufferRatio float64
+	PauseMinCPU            string
+	ProcdPort              int
+	ProcdClientTimeout     time.Duration
+	ProcdInitTimeout       time.Duration
 }
 
 // SandboxService handles sandbox operations
@@ -285,7 +282,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		metrics.SandboxClaimDuration.WithLabelValues(req.Template, claimType).Observe(time.Since(start).Seconds())
 	}
 
-	// Note: Network and bandwidth policies are now stored in pod annotations
+	// Note: Network policies are stored in pod annotations
 	// They are set in claimIdlePod() and createNewPod() methods
 
 	procdAddress, err := s.prodAddress(ctx, pod)
@@ -379,7 +376,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 	}
 
 	// Build and add network policy annotation
-	networkSpec, bandwidthSpec, err := s.applyPoliciesForPod(ctx, pod, template, req)
+	networkSpec, err := s.applyPoliciesForPod(ctx, pod, template, req)
 	if err != nil {
 		return nil, err
 	}
@@ -390,7 +387,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		return nil, fmt.Errorf("update pod: %w", err)
 	}
 
-	if err := s.applyNetworkProvider(ctx, updatedPod, req.TeamID, networkSpec, bandwidthSpec); err != nil {
+	if err := s.applyNetworkProvider(ctx, updatedPod, req.TeamID, networkSpec); err != nil {
 		return nil, fmt.Errorf("apply network policy: %w", err)
 	}
 
@@ -459,7 +456,7 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 	}
 
 	// Build and add network policy annotation
-	networkSpec, bandwidthSpec, err := s.applyPoliciesForPod(ctx, pod, template, req)
+	networkSpec, err := s.applyPoliciesForPod(ctx, pod, template, req)
 	if err != nil {
 		return nil, err
 	}
@@ -470,7 +467,7 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 		return nil, fmt.Errorf("create pod: %w", err)
 	}
 
-	if err := s.applyNetworkProvider(ctx, createdPod, req.TeamID, networkSpec, bandwidthSpec); err != nil {
+	if err := s.applyNetworkProvider(ctx, createdPod, req.TeamID, networkSpec); err != nil {
 		return nil, fmt.Errorf("apply network policy: %w", err)
 	}
 
@@ -552,9 +549,9 @@ func (s *SandboxService) applyPoliciesForPod(
 	pod *corev1.Pod,
 	template *v1alpha1.SandboxTemplate,
 	req *ClaimRequest,
-) (*v1alpha1.NetworkPolicySpec, *v1alpha1.BandwidthPolicySpec, error) {
+) (*v1alpha1.NetworkPolicySpec, error) {
 	if s.NetworkPolicyService == nil || pod == nil || template == nil || req == nil {
-		return nil, nil, nil
+		return nil, nil
 	}
 
 	var requestNetwork *v1alpha1.TplSandboxNetworkPolicy
@@ -574,25 +571,11 @@ func (s *SandboxService) applyPoliciesForPod(
 	})
 	if networkSpec != nil {
 		if _, err := s.setNetworkPolicyAnnotations(pod, networkSpec); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 
-	bandwidthSpec := s.NetworkPolicyService.BuildBandwidthPolicySpec(&BuildBandwidthPolicyRequest{
-		SandboxID:         pod.Name,
-		TeamID:            req.TeamID,
-		EgressRateBps:     s.config.DefaultBandwidthRateBps,
-		IngressRateBps:    s.config.DefaultBandwidthRateBps,
-		BurstBytes:        s.config.DefaultBandwidthBurstBytes,
-		AccountingEnabled: true,
-	})
-	if bandwidthSpec != nil {
-		if _, err := s.setBandwidthPolicyAnnotations(pod, bandwidthSpec); err != nil {
-			return nil, nil, err
-		}
-	}
-
-	return networkSpec, bandwidthSpec, nil
+	return networkSpec, nil
 }
 
 func (s *SandboxService) setNetworkPolicyAnnotations(pod *corev1.Pod, spec *v1alpha1.NetworkPolicySpec) (string, error) {
@@ -617,47 +600,23 @@ func (s *SandboxService) setNetworkPolicyAnnotations(pod *corev1.Pod, spec *v1al
 	return newHash, nil
 }
 
-func (s *SandboxService) setBandwidthPolicyAnnotations(pod *corev1.Pod, spec *v1alpha1.BandwidthPolicySpec) (string, error) {
-	if pod.Annotations == nil {
-		pod.Annotations = make(map[string]string)
-	}
-	annotation, err := v1alpha1.BandwidthPolicyToAnnotation(spec)
-	if err != nil {
-		return "", fmt.Errorf("serialize bandwidth policy: %w", err)
-	}
-	pod.Annotations[controller.AnnotationBandwidthPolicy] = annotation
-	newHash := policyAnnotationHash(annotation)
-	oldHash := pod.Annotations[controller.AnnotationBandwidthPolicyHash]
-	if newHash != "" {
-		pod.Annotations[controller.AnnotationBandwidthPolicyHash] = newHash
-	} else {
-		delete(pod.Annotations, controller.AnnotationBandwidthPolicyHash)
-	}
-	if oldHash != newHash {
-		delete(pod.Annotations, controller.AnnotationBandwidthPolicyAppliedHash)
-	}
-	return newHash, nil
-}
-
 func (s *SandboxService) applyNetworkProvider(
 	ctx context.Context,
 	pod *corev1.Pod,
 	teamID string,
 	networkSpec *v1alpha1.NetworkPolicySpec,
-	bandwidthSpec *v1alpha1.BandwidthPolicySpec,
 ) error {
-	if s.networkProvider == nil || pod == nil || (networkSpec == nil && bandwidthSpec == nil) {
+	if s.networkProvider == nil || pod == nil || networkSpec == nil {
 		return nil
 	}
 
 	input := network.SandboxPolicyInput{
-		SandboxID:       pod.Name,
-		Namespace:       pod.Namespace,
-		PodName:         pod.Name,
-		TeamID:          teamID,
-		PodLabels:       pod.Labels,
-		NetworkPolicy:   networkSpec,
-		BandwidthPolicy: bandwidthSpec,
+		SandboxID:     pod.Name,
+		Namespace:     pod.Namespace,
+		PodName:       pod.Name,
+		TeamID:        teamID,
+		PodLabels:     pod.Labels,
+		NetworkPolicy: networkSpec,
 	}
 	if err := s.networkProvider.ApplySandboxPolicy(ctx, input); err != nil {
 		return err
@@ -745,7 +704,7 @@ func (s *SandboxService) TerminateSandbox(ctx context.Context, sandboxID string)
 		return fmt.Errorf("get pod: %w", err)
 	}
 
-	// Note: Network and bandwidth policies are now stored in pod annotations
+	// Note: Network policies are stored in pod annotations
 	// They are automatically deleted when the pod is deleted
 	if s.networkProvider != nil {
 		if err := s.networkProvider.RemoveSandboxPolicy(ctx, pod.Namespace, pod.Name); err != nil {
@@ -874,98 +833,11 @@ func (s *SandboxService) UpdateNetworkPolicy(
 		return nil, fmt.Errorf("update pod annotations: %w", err)
 	}
 
-	if err := s.applyNetworkProvider(ctx, updatedPod, teamID, networkSpec, nil); err != nil {
+	if err := s.applyNetworkProvider(ctx, updatedPod, teamID, networkSpec); err != nil {
 		return nil, fmt.Errorf("apply network policy: %w", err)
 	}
 
 	return networkPolicyFromSpec(networkSpec), nil
-}
-
-// GetBandwidthPolicy gets the effective bandwidth policy for a sandbox.
-func (s *SandboxService) GetBandwidthPolicy(ctx context.Context, sandboxID string) (*v1alpha1.BandwidthPolicySpec, error) {
-	pod, err := s.getSandboxPod(ctx, sandboxID)
-	if err != nil {
-		return nil, fmt.Errorf("get pod: %w", err)
-	}
-
-	annotation := ""
-	if pod.Annotations != nil {
-		annotation = pod.Annotations[controller.AnnotationBandwidthPolicy]
-	}
-	spec, err := v1alpha1.ParseBandwidthPolicyFromAnnotation(annotation)
-	if err != nil {
-		return nil, fmt.Errorf("parse bandwidth policy annotation: %w", err)
-	}
-	if spec != nil {
-		return spec, nil
-	}
-
-	teamID := ""
-	if pod.Annotations != nil {
-		teamID = pod.Annotations[controller.AnnotationTeamID]
-	}
-	if s.NetworkPolicyService == nil {
-		return &v1alpha1.BandwidthPolicySpec{
-			SandboxID: pod.Name,
-			TeamID:    teamID,
-		}, nil
-	}
-
-	return s.NetworkPolicyService.BuildBandwidthPolicySpec(&BuildBandwidthPolicyRequest{
-		SandboxID:         pod.Name,
-		TeamID:            teamID,
-		EgressRateBps:     s.config.DefaultBandwidthRateBps,
-		IngressRateBps:    s.config.DefaultBandwidthRateBps,
-		BurstBytes:        s.config.DefaultBandwidthBurstBytes,
-		AccountingEnabled: true,
-	}), nil
-}
-
-// UpdateBandwidthPolicy updates the bandwidth policy for a sandbox.
-func (s *SandboxService) UpdateBandwidthPolicy(
-	ctx context.Context,
-	sandboxID string,
-	policy *v1alpha1.BandwidthPolicySpec,
-) (*v1alpha1.BandwidthPolicySpec, error) {
-	if policy == nil {
-		return nil, fmt.Errorf("bandwidth policy is required")
-	}
-	if s.NetworkPolicyService == nil {
-		return nil, fmt.Errorf("network policy service not configured")
-	}
-
-	pod, err := s.getSandboxPod(ctx, sandboxID)
-	if err != nil {
-		return nil, fmt.Errorf("get pod: %w", err)
-	}
-
-	teamID := ""
-	if pod.Annotations != nil {
-		teamID = pod.Annotations[controller.AnnotationTeamID]
-	}
-
-	policy.SandboxID = pod.Name
-	policy.TeamID = teamID
-	s.normalizeBandwidthPolicy(policy)
-
-	updatedPod := pod.DeepCopy()
-	if updatedPod.Annotations == nil {
-		updatedPod.Annotations = make(map[string]string)
-	}
-	if _, err := s.setBandwidthPolicyAnnotations(updatedPod, policy); err != nil {
-		return nil, err
-	}
-
-	updatedPod, err = s.k8sClient.CoreV1().Pods(pod.Namespace).Update(ctx, updatedPod, metav1.UpdateOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("update pod annotations: %w", err)
-	}
-
-	if err := s.applyNetworkProvider(ctx, updatedPod, teamID, nil, policy); err != nil {
-		return nil, fmt.Errorf("apply bandwidth policy: %w", err)
-	}
-
-	return policy, nil
 }
 
 func (s *SandboxService) getSandboxPod(ctx context.Context, sandboxID string) (*corev1.Pod, error) {
@@ -1013,39 +885,6 @@ func (s *SandboxService) templateNetworkSpec(pod *corev1.Pod) *v1alpha1.TplSandb
 		return nil
 	}
 	return template.Spec.Network
-}
-
-func (s *SandboxService) normalizeBandwidthPolicy(policy *v1alpha1.BandwidthPolicySpec) {
-	if policy.EgressRateLimit == nil {
-		policy.EgressRateLimit = &v1alpha1.RateLimitSpec{}
-	}
-	if policy.IngressRateLimit == nil {
-		policy.IngressRateLimit = &v1alpha1.RateLimitSpec{}
-	}
-	if policy.EgressRateLimit.RateBps == 0 {
-		policy.EgressRateLimit.RateBps = s.config.DefaultBandwidthRateBps
-	}
-	if policy.IngressRateLimit.RateBps == 0 {
-		policy.IngressRateLimit.RateBps = s.config.DefaultBandwidthRateBps
-	}
-	if policy.EgressRateLimit.BurstBytes == 0 {
-		policy.EgressRateLimit.BurstBytes = s.config.DefaultBandwidthBurstBytes
-		if policy.EgressRateLimit.BurstBytes == 0 {
-			policy.EgressRateLimit.BurstBytes = policy.EgressRateLimit.RateBps / 8
-		}
-	}
-	if policy.IngressRateLimit.BurstBytes == 0 {
-		policy.IngressRateLimit.BurstBytes = s.config.DefaultBandwidthBurstBytes
-		if policy.IngressRateLimit.BurstBytes == 0 {
-			policy.IngressRateLimit.BurstBytes = policy.IngressRateLimit.RateBps / 8
-		}
-	}
-	if policy.Accounting == nil {
-		policy.Accounting = &v1alpha1.AccountingSpec{Enabled: true}
-	}
-	if policy.Accounting.ReportIntervalSeconds == 0 {
-		policy.Accounting.ReportIntervalSeconds = int32(s.config.BandwidthAccountingInterval)
-	}
 }
 
 func networkPolicyFromSpec(spec *v1alpha1.NetworkPolicySpec) *v1alpha1.TplSandboxNetworkPolicy {

@@ -75,17 +75,6 @@ type ManagerConfig struct {
 	// +kubebuilder:default="5m"
 	DefaultSandboxTTL metav1.Duration `yaml:"default_sandbox_ttl" json:"defaultSandboxTTL"`
 
-	// Network
-	// +optional
-	// +kubebuilder:default=100000000
-	DefaultBandwidthRateBps int64 `yaml:"default_bandwidth_rate_bps" json:"defaultBandwidthRateBps"`
-	// +optional
-	// +kubebuilder:default=12500000
-	DefaultBandwidthBurstBytes int64 `yaml:"default_bandwidth_burst_bytes" json:"defaultBandwidthBurstBytes"`
-	// +optional
-	// +kubebuilder:default=10
-	BandwidthAccountingInterval int `yaml:"bandwidth_accounting_interval" json:"bandwidthAccountingInterval"`
-
 	// Netd apply wait
 	// +optional
 	// +kubebuilder:default="30s"

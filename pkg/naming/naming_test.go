@@ -68,15 +68,38 @@ func TestClusterIDFromName(t *testing.T) {
 	}
 }
 
-func TestTemplateIDFromName(t *testing.T) {
-	templateID, err := TemplateIDFromName("My Template Name")
+func TestTemplateNamespaceForBuiltin(t *testing.T) {
+	namespace, err := TemplateNamespaceForBuiltin("My Template ID")
 	if err != nil {
-		t.Fatalf("TemplateIDFromName: %v", err)
+		t.Fatalf("TemplateNamespaceForBuiltin: %v", err)
 	}
-	if len(templateID) > dnsLabelMaxLen {
-		t.Fatalf("template_id too long: %d", len(templateID))
+	if len(namespace) > dnsLabelMaxLen {
+		t.Fatalf("namespace too long: %d", len(namespace))
 	}
-	if err := validateDNSLabel(templateID); err != nil {
-		t.Fatalf("template_id invalid: %v", err)
+	if err := validateDNSLabel(namespace); err != nil {
+		t.Fatalf("namespace invalid: %v", err)
+	}
+}
+
+func TestTemplateNamespaceForTeam(t *testing.T) {
+	namespace, err := TemplateNamespaceForTeam("team-123")
+	if err != nil {
+		t.Fatalf("TemplateNamespaceForTeam: %v", err)
+	}
+	if len(namespace) > dnsLabelMaxLen {
+		t.Fatalf("namespace too long: %d", len(namespace))
+	}
+	if err := validateDNSLabel(namespace); err != nil {
+		t.Fatalf("namespace invalid: %v", err)
+	}
+}
+
+func TestCanonicalTemplateID(t *testing.T) {
+	templateID, err := CanonicalTemplateID("My-Template-ID")
+	if err != nil {
+		t.Fatalf("CanonicalTemplateID: %v", err)
+	}
+	if templateID != "my-template-id" {
+		t.Fatalf("expected lowercase template_id, got %s", templateID)
 	}
 }

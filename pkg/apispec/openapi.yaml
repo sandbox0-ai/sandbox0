@@ -1514,7 +1514,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/SandboxTemplate"
+              $ref: "#/components/schemas/TemplateCreateRequest"
       responses:
         "201":
           description: Template created
@@ -1559,7 +1559,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/SandboxTemplate"
+              $ref: "#/components/schemas/TemplateUpdateRequest"
       responses:
         "200":
           description: Template updated
@@ -3253,13 +3253,47 @@ components:
           type: integer
           format: int32
       required: [count]
+    TemplateCreateRequest:
+      type: object
+      properties:
+        template_id:
+          type: string
+        spec:
+          $ref: "#/components/schemas/SandboxTemplateSpec"
+      required: [template_id, spec]
+    TemplateUpdateRequest:
+      type: object
+      properties:
+        spec:
+          $ref: "#/components/schemas/SandboxTemplateSpec"
+      required: [spec]
+    Template:
+      type: object
+      properties:
+        template_id:
+          type: string
+        scope:
+          type: string
+        team_id:
+          type: string
+        user_id:
+          type: string
+        spec:
+          $ref: "#/components/schemas/SandboxTemplateSpec"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required: [template_id, scope, spec, created_at, updated_at]
     SuccessTemplateResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
           properties:
             data:
-              $ref: "#/components/schemas/SandboxTemplate"
+              $ref: "#/components/schemas/Template"
     SuccessTemplateListResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
@@ -3271,7 +3305,7 @@ components:
                 templates:
                   type: array
                   items:
-                    $ref: "#/components/schemas/SandboxTemplate"
+                    $ref: "#/components/schemas/Template"
                 count:
                   type: integer
     SandboxTemplate:

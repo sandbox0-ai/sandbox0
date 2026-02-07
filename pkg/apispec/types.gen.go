@@ -636,14 +636,6 @@ type NodeSelectorTerm struct {
 	MatchFields      *[]NodeSelectorRequirement `json:"matchFields,omitempty"`
 }
 
-// ObjectMeta defines model for ObjectMeta.
-type ObjectMeta struct {
-	Annotations *map[string]string `json:"annotations,omitempty"`
-	Labels      *map[string]string `json:"labels,omitempty"`
-	Name        *string            `json:"name,omitempty"`
-	Namespace   *string            `json:"namespace,omitempty"`
-}
-
 // PTYSize defines model for PTYSize.
 type PTYSize struct {
 	Cols *int32 `json:"cols,omitempty"`
@@ -847,24 +839,6 @@ type SandboxStatus struct {
 	UserId     *string `json:"user_id,omitempty"`
 }
 
-// SandboxTemplate defines model for SandboxTemplate.
-type SandboxTemplate struct {
-	ApiVersion *string                `json:"apiVersion,omitempty"`
-	Kind       *string                `json:"kind,omitempty"`
-	Metadata   *ObjectMeta            `json:"metadata,omitempty"`
-	Spec       *SandboxTemplateSpec   `json:"spec,omitempty"`
-	Status     *SandboxTemplateStatus `json:"status,omitempty"`
-}
-
-// SandboxTemplateCondition defines model for SandboxTemplateCondition.
-type SandboxTemplateCondition struct {
-	LastTransitionTime *time.Time `json:"lastTransitionTime,omitempty"`
-	Message            *string    `json:"message,omitempty"`
-	Reason             *string    `json:"reason,omitempty"`
-	Status             *string    `json:"status,omitempty"`
-	Type               *string    `json:"type,omitempty"`
-}
-
 // SandboxTemplateSpec defines model for SandboxTemplateSpec.
 type SandboxTemplateSpec struct {
 	AllowedTeams     *[]string                `json:"allowedTeams,omitempty"`
@@ -881,14 +855,6 @@ type SandboxTemplateSpec struct {
 	RuntimeClassName *string                  `json:"runtimeClassName,omitempty"`
 	Sidecars         *[]ContainerSpec         `json:"sidecars,omitempty"`
 	Tags             *[]string                `json:"tags,omitempty"`
-}
-
-// SandboxTemplateStatus defines model for SandboxTemplateStatus.
-type SandboxTemplateStatus struct {
-	ActiveCount    *int32                      `json:"activeCount,omitempty"`
-	Conditions     *[]SandboxTemplateCondition `json:"conditions,omitempty"`
-	IdleCount      *int32                      `json:"idleCount,omitempty"`
-	LastUpdateTime *time.Time                  `json:"lastUpdateTime,omitempty"`
 }
 
 // SandboxUpdateRequest defines model for SandboxUpdateRequest.
@@ -1312,8 +1278,8 @@ type SuccessTeamResponseSuccess bool
 // SuccessTemplateListResponse defines model for SuccessTemplateListResponse.
 type SuccessTemplateListResponse struct {
 	Data *struct {
-		Count     *int               `json:"count,omitempty"`
-		Templates *[]SandboxTemplate `json:"templates,omitempty"`
+		Count     *int        `json:"count,omitempty"`
+		Templates *[]Template `json:"templates,omitempty"`
 	} `json:"data,omitempty"`
 	Success SuccessTemplateListResponseSuccess `json:"success"`
 }
@@ -1323,7 +1289,7 @@ type SuccessTemplateListResponseSuccess bool
 
 // SuccessTemplateResponse defines model for SuccessTemplateResponse.
 type SuccessTemplateResponse struct {
-	Data    *SandboxTemplate               `json:"data,omitempty"`
+	Data    *Template                      `json:"data,omitempty"`
 	Success SuccessTemplateResponseSuccess `json:"success"`
 }
 
@@ -1378,6 +1344,28 @@ type TeamMember struct {
 	Role     string    `json:"role"`
 	TeamId   string    `json:"team_id"`
 	UserId   string    `json:"user_id"`
+}
+
+// Template defines model for Template.
+type Template struct {
+	CreatedAt  time.Time           `json:"created_at"`
+	Scope      string              `json:"scope"`
+	Spec       SandboxTemplateSpec `json:"spec"`
+	TeamId     *string             `json:"team_id,omitempty"`
+	TemplateId string              `json:"template_id"`
+	UpdatedAt  time.Time           `json:"updated_at"`
+	UserId     *string             `json:"user_id,omitempty"`
+}
+
+// TemplateCreateRequest defines model for TemplateCreateRequest.
+type TemplateCreateRequest struct {
+	Spec       SandboxTemplateSpec `json:"spec"`
+	TemplateId string              `json:"template_id"`
+}
+
+// TemplateUpdateRequest defines model for TemplateUpdateRequest.
+type TemplateUpdateRequest struct {
+	Spec SandboxTemplateSpec `json:"spec"`
 }
 
 // Toleration defines model for Toleration.
@@ -1598,10 +1586,10 @@ type PostApiV1SandboxvolumesJSONRequestBody = CreateSandboxVolumeRequest
 type PostApiV1SandboxvolumesIdSnapshotsJSONRequestBody = CreateSnapshotRequest
 
 // PostApiV1TemplatesJSONRequestBody defines body for PostApiV1Templates for application/json ContentType.
-type PostApiV1TemplatesJSONRequestBody = SandboxTemplate
+type PostApiV1TemplatesJSONRequestBody = TemplateCreateRequest
 
 // PutApiV1TemplatesIdJSONRequestBody defines body for PutApiV1TemplatesId for application/json ContentType.
-type PutApiV1TemplatesIdJSONRequestBody = SandboxTemplate
+type PutApiV1TemplatesIdJSONRequestBody = TemplateUpdateRequest
 
 // PostApiV1TemplatesIdPoolWarmJSONRequestBody defines body for PostApiV1TemplatesIdPoolWarm for application/json ContentType.
 type PostApiV1TemplatesIdPoolWarmJSONRequestBody = WarmPoolRequest

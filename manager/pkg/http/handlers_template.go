@@ -3,12 +3,12 @@ package http
 import (
 	"context"
 	"net/http"
-	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/infra/pkg/gateway/spec"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
+	"github.com/sandbox0-ai/infra/pkg/naming"
 	"go.uber.org/zap"
 )
 
@@ -78,10 +78,20 @@ func (s *Server) warmPool(c *gin.Context) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "template_id is required")
 		return
 	}
+	canonicalTemplateID, err := naming.CanonicalTemplateID(templateID)
+	if err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
+	templateID = canonicalTemplateID
 
 	claims := internalauth.ClaimsFromContext(c.Request.Context())
 	if claims == nil {
 		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
+		return
+	}
+	if claims.TeamID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "team_id is required for custom templates")
 		return
 	}
 
@@ -93,22 +103,6 @@ func (s *Server) warmPool(c *gin.Context) {
 
 	scope := "team"
 	teamID := claims.TeamID
-	if v := c.Query("public"); v != "" {
-		public, err := strconv.ParseBool(v)
-		if err != nil {
-			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid public query param")
-			return
-		}
-		if public {
-			scope = "public"
-			teamID = ""
-		}
-	}
-
-	if scope == "team" && teamID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "team_id is required for private templates")
-		return
-	}
 
 	tpl, err := s.templateStore.GetTemplate(c.Request.Context(), scope, teamID, templateID)
 	if err != nil {

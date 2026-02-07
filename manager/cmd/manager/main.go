@@ -25,17 +25,14 @@ import (
 	"github.com/sandbox0-ai/infra/pkg/dbpool"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	"github.com/sandbox0-ai/infra/pkg/migrate"
-	"github.com/sandbox0-ai/infra/pkg/naming"
 	"github.com/sandbox0-ai/infra/pkg/observability"
 	obsmetrics "github.com/sandbox0-ai/infra/pkg/observability/metrics"
-	"github.com/sandbox0-ai/infra/pkg/template"
 	templmigrations "github.com/sandbox0-ai/infra/pkg/template/migrations"
 	templreconciler "github.com/sandbox0-ai/infra/pkg/template/reconciler"
 	templstorepg "github.com/sandbox0-ai/infra/pkg/template/store/pg"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -266,9 +263,6 @@ func main() {
 	if cfg.TemplateStoreEnabled {
 		templateStore = templstorepg.NewStore(pool)
 		templateApplier := service.NewTemplateApplier(templateService)
-		if err := ensureDefaultTemplateInStore(ctx, templateStore, cfg, logger); err != nil {
-			logger.Fatal("Failed to ensure default template in store", zap.Error(err))
-		}
 		reconcileInterval := cfg.ResyncPeriod.Duration
 		if reconcileInterval == 0 {
 			reconcileInterval = 30 * time.Second
@@ -455,79 +449,6 @@ func startMetricsServer(port int, logger *zap.Logger) {
 	if err := http.ListenAndServe(addr, nil); err != nil {
 		logger.Error("Metrics server failed", zap.Error(err))
 	}
-}
-
-func ensureDefaultTemplateInStore(ctx context.Context, store *templstorepg.Store, cfg *config.ManagerConfig, logger *zap.Logger) error {
-	if cfg == nil {
-		return nil
-	}
-
-	name := template.DefaultTemplateName
-	image := template.DefaultTemplateImage
-	pool := config.DefaultTemplatePoolConfig{}
-	if cfg.DefaultTemplate != nil {
-		if cfg.DefaultTemplate.Name != "" {
-			name = cfg.DefaultTemplate.Name
-		}
-		if cfg.DefaultTemplate.Image != "" {
-			image = cfg.DefaultTemplate.Image
-		}
-		pool = cfg.DefaultTemplate.Pool
-	}
-
-	templateID, err := naming.TemplateIDFromName(name)
-	if err != nil {
-		return fmt.Errorf("resolve default template id: %w", err)
-	}
-
-	existing, err := store.GetTemplate(ctx, naming.ScopePublic, "", templateID)
-	if err != nil {
-		return fmt.Errorf("get default template: %w", err)
-	}
-	if existing != nil {
-		return nil
-	}
-
-	minIdle, maxIdle, autoScale := template.ApplyDefaultPool(pool.MinIdle, pool.MaxIdle, pool.AutoScale)
-	spec := v1alpha1.SandboxTemplateSpec{
-		DisplayName: template.DefaultTemplateDisplayName,
-		Description: "Default template installed by manager.",
-		MainContainer: v1alpha1.ContainerSpec{
-			Image: image,
-			Resources: v1alpha1.ResourceQuota{
-				CPU:    resource.MustParse(template.DefaultTemplateCPU),
-				Memory: resource.MustParse(template.DefaultTemplateMemory),
-			},
-		},
-		Pool: v1alpha1.PoolStrategy{
-			MinIdle:   minIdle,
-			MaxIdle:   maxIdle,
-			AutoScale: autoScale,
-		},
-		Network: &v1alpha1.TplSandboxNetworkPolicy{
-			Mode: v1alpha1.NetworkModeAllowAll,
-		},
-		Public: true,
-	}
-
-	tpl := &template.Template{
-		TemplateID:   templateID,
-		TemplateName: name,
-		Scope:        naming.ScopePublic,
-		TeamID:       "",
-		UserID:       "system",
-		Spec:         spec,
-	}
-
-	if err := store.CreateTemplate(ctx, tpl); err != nil {
-		return fmt.Errorf("create default template: %w", err)
-	}
-
-	logger.Info("Default template created in store",
-		zap.String("template_id", templateID),
-		zap.String("template_name", name),
-	)
-	return nil
 }
 
 func runTemplateMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) error {

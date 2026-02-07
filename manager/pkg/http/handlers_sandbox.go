@@ -5,7 +5,6 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/manager/pkg/service"
 	"github.com/sandbox0-ai/infra/pkg/gateway/spec"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
@@ -29,10 +28,8 @@ func (s *Server) claimSandbox(c *gin.Context) {
 	req.UserID = claims.UserID
 
 	if req.Template == "" {
-		cfg := config.LoadManagerConfig()
-		if cfg.DefaultTemplate != nil && cfg.DefaultTemplate.Name != "" {
-			req.Template = cfg.DefaultTemplate.Name
-		}
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "template is required")
+		return
 	}
 
 	resp, err := s.sandboxService.ClaimSandbox(c.Request.Context(), &req)

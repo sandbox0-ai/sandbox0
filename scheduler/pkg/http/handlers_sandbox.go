@@ -39,6 +39,12 @@ func (s *Server) createSandbox(c *gin.Context) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "template is required")
 		return
 	}
+	canonicalTemplateID, err := naming.CanonicalTemplateID(req.Template)
+	if err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
+	req.Template = canonicalTemplateID
 
 	claims := internalauth.ClaimsFromContext(c.Request.Context())
 	if claims == nil {

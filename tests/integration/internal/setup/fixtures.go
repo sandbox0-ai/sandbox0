@@ -3,7 +3,6 @@ package setup
 // TemplateFixture represents a reusable template for integration tests.
 type TemplateFixture struct {
 	ID       string
-	Name     string
 	Image    string
 	Command  string
 	Metadata map[string]string
@@ -13,7 +12,6 @@ type TemplateFixture struct {
 func DefaultTemplateFixture() TemplateFixture {
 	return TemplateFixture{
 		ID:      "tpl-basic",
-		Name:    "basic",
 		Image:   "sandbox0ai/infra:latest",
 		Command: "sleep 300",
 		Metadata: map[string]string{

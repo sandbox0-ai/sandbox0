@@ -1,7 +1,6 @@
 package template
 
 const (
-	DefaultTemplateName        = "default"
 	DefaultTemplateImage       = "sandbox0ai/otemplates:default-v0.1.0"
 	DefaultTemplateCPU         = "500m"
 	DefaultTemplateMemory      = "512Mi"

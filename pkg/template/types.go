@@ -9,7 +9,6 @@ import (
 // Template represents a SandboxTemplate stored in PostgreSQL.
 type Template struct {
 	TemplateID   string                       `json:"template_id"`
-	TemplateName string                       `json:"template_name"`
 	Scope        string                       `json:"scope"`             // public, team
 	TeamID       string                       `json:"team_id,omitempty"` // only for scope=team
 	UserID       string                       `json:"user_id,omitempty"` // creator/updater user id (best-effort)

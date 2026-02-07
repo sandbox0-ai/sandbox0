@@ -19,11 +19,11 @@ type ManagerConfig struct {
 	// manager docker image, used to copy the procd binary to sandbox pod
 	ManagerImage string `yaml:"manager_image" json:"-"`
 
-	// template
+	// builtin templates
 	// +optional
 	// +kubebuilder:default={}
-	DefaultTemplate  *DefaultTemplateConfig `yaml:"default_template" json:"defaultTemplate"`
-	DefaultClusterId string                 `yaml:"default_cluster_id" json:"-"`
+	BuiltinTemplates []BuiltinTemplateConfig `yaml:"builtin_templates" json:"builtinTemplates"`
+	DefaultClusterId string                  `yaml:"default_cluster_id" json:"-"`
 	// +optional
 	// +kubebuilder:default=true
 	TemplateStoreEnabled bool `yaml:"template_store_enabled" json:"-"`
@@ -117,21 +117,17 @@ type ManagerConfig struct {
 	ProcdConfig ProcdConfig `yaml:"procd_config" json:"procdConfig"`
 }
 
-// DefaultTemplateConfig holds defaults for the installed template.
-type DefaultTemplateConfig struct {
-	// +optional
-	// +kubebuilder:default="default"
-	Name string `yaml:"name" json:"name"`
-	// +optional
-	// +kubebuilder:default="sandbox0ai/otemplates:default-v0.1.0"
-	Image string `yaml:"image" json:"image"`
-	// +optional
-	// +kubebuilder:default={}
-	Pool DefaultTemplatePoolConfig `yaml:"pool" json:"pool"`
+// BuiltinTemplateConfig defines a system builtin template.
+type BuiltinTemplateConfig struct {
+	TemplateID  string                   `yaml:"template_id" json:"templateId"`
+	Image       string                   `yaml:"image" json:"image"`
+	DisplayName string                   `yaml:"display_name" json:"displayName"`
+	Description string                   `yaml:"description" json:"description"`
+	Pool        BuiltinTemplatePoolConfig `yaml:"pool" json:"pool"`
 }
 
-// DefaultTemplatePoolConfig holds pool defaults for the installed template.
-type DefaultTemplatePoolConfig struct {
+// BuiltinTemplatePoolConfig holds pool defaults for builtin templates.
+type BuiltinTemplatePoolConfig struct {
 	// +optional
 	// +kubebuilder:default=1
 	MinIdle int32 `yaml:"min_idle" json:"minIdle"`

@@ -925,6 +925,45 @@ spec:
                         default: {}
                         description: Config contains manager specific configuration
                         properties:
+                          builtinTemplates:
+                            default: []
+                            description: builtin templates
+                            items:
+                              description: BuiltinTemplateConfig defines a system
+                                builtin template.
+                              properties:
+                                description:
+                                  type: string
+                                displayName:
+                                  type: string
+                                image:
+                                  type: string
+                                pool:
+                                  description: BuiltinTemplatePoolConfig holds pool
+                                    defaults for builtin templates.
+                                  properties:
+                                    autoScale:
+                                      default: true
+                                      type: boolean
+                                    maxIdle:
+                                      default: 5
+                                      format: int32
+                                      type: integer
+                                    minIdle:
+                                      default: 1
+                                      format: int32
+                                      type: integer
+                                  type: object
+                                templateId:
+                                  type: string
+                              required:
+                              - description
+                              - displayName
+                              - image
+                              - pool
+                              - templateId
+                              type: object
+                            type: array
                           cleanupInterval:
                             default: 60s
                             description: Cleanup Controller
@@ -941,34 +980,6 @@ spec:
                             default: 5m
                             description: Sandbox
                             type: string
-                          defaultTemplate:
-                            default: {}
-                            description: template
-                            properties:
-                              image:
-                                default: sandbox0ai/otemplates:default-v0.1.0
-                                type: string
-                              name:
-                                default: default
-                                type: string
-                              pool:
-                                default: {}
-                                description: DefaultTemplatePoolConfig holds pool
-                                  defaults for the installed template.
-                                properties:
-                                  autoScale:
-                                    default: true
-                                    type: boolean
-                                  maxIdle:
-                                    default: 5
-                                    format: int32
-                                    type: integer
-                                  minIdle:
-                                    default: 1
-                                    format: int32
-                                    type: integer
-                                type: object
-                            type: object
                           httpPort:
                             default: 8080
                             description: HTTP Server

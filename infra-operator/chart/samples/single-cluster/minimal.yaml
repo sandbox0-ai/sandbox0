@@ -40,13 +40,14 @@ spec:
       enabled: true
       replicas: 1
       config:
-        defaultTemplate:
-          name: default
-          image: sandbox0ai/otemplates:default-v0.1.0
-          pool:
-            minIdle: 1
-            maxIdle: 5
-            autoScale: true
+        builtin_templates:
+          - template_id: default
+            image: sandbox0ai/otemplates:default-v0.1.0
+            display_name: Default
+            pool:
+              minIdle: 1
+              maxIdle: 5
+              autoScale: true
   initUser:
     enabled: true
     email: "admin@example.com"

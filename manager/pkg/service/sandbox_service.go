@@ -186,6 +186,11 @@ type ClaimResponse struct {
 func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*ClaimResponse, error) {
 	start := time.Now()
 	metrics := s.metrics
+	canonicalTemplateID, err := naming.CanonicalTemplateID(req.Template)
+	if err != nil {
+		return nil, err
+	}
+	req.Template = canonicalTemplateID
 	s.logger.Info("Claiming sandbox",
 		zap.String("template", req.Template),
 		zap.String("teamID", req.TeamID),
@@ -195,11 +200,10 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	// prefer team-scoped template, fall back to public, and always enforce ownership checks.
 	resolvedName := req.Template
 	var template *v1alpha1.SandboxTemplate
-	var err error
 
 	if req.TeamID != "" {
 		privateName := naming.TemplateNameForCluster(naming.ScopeTeam, req.TeamID, req.Template)
-		privateNamespace, nsErr := naming.TemplateNamespaceFromName(privateName)
+		privateNamespace, nsErr := naming.TemplateNamespaceForTeam(req.TeamID)
 		if nsErr != nil {
 			return nil, fmt.Errorf("resolve template namespace for %s: %w", privateName, nsErr)
 		}
@@ -211,7 +215,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	}
 
 	if template == nil {
-		publicNamespace, nsErr := naming.TemplateNamespaceFromName(req.Template)
+		publicNamespace, nsErr := naming.TemplateNamespaceForBuiltin(req.Template)
 		if nsErr != nil {
 			return nil, fmt.Errorf("resolve template namespace for %s: %w", req.Template, nsErr)
 		}
@@ -867,7 +871,18 @@ func (s *SandboxService) templateNetworkSpec(pod *corev1.Pod) *v1alpha1.TplSandb
 	if templateID == "" {
 		return nil
 	}
-	namespace, err := naming.TemplateNamespaceFromName(templateID)
+	teamID := pod.Annotations[controller.AnnotationTeamID]
+	if teamID != "" {
+		namespace, err := naming.TemplateNamespaceForTeam(teamID)
+		if err == nil {
+			template, getErr := s.templateLister.Get(namespace, templateID)
+			if getErr == nil {
+				return template.Spec.Network
+			}
+		}
+	}
+
+	namespace, err := naming.TemplateNamespaceForBuiltin(templateID)
 	if err != nil {
 		s.logger.Warn("Failed to resolve template namespace",
 			zap.String("templateID", templateID),

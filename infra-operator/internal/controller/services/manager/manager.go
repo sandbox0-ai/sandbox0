@@ -74,16 +74,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		return err
 	}
 
-	// Ensure namespace for the default template name.
-	defaultTemplateNamespace, err := naming.TemplateNamespaceFromName(config.DefaultTemplate.Name)
-	if err != nil {
-		return fmt.Errorf("resolve default template namespace: %w", err)
-	}
-	if err := r.Resources.ReconcileNamespace(ctx, defaultTemplateNamespace); err != nil {
-		return fmt.Errorf("reconcile namespace %s: %w", defaultTemplateNamespace, err)
-	}
-
-	if err := r.ensureDefaultTemplate(ctx, infra, config); err != nil {
+	if err := r.ensureBuiltinTemplates(ctx, infra, config); err != nil {
 		return err
 	}
 
@@ -247,17 +238,6 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 
 	cfg.TemplateStoreEnabled = templateStoreEnabledByInternalGateway(infra)
 
-	if cfg.DefaultTemplate == nil {
-		cfg.DefaultTemplate = &apiconfig.DefaultTemplateConfig{}
-	}
-	if cfg.DefaultTemplate.Name == "" {
-		cfg.DefaultTemplate.Name = template.DefaultTemplateName
-	}
-	if cfg.DefaultTemplate.Image == "" {
-		cfg.DefaultTemplate.Image = template.DefaultTemplateImage
-	}
-	cfg.DefaultTemplate.Pool = applyDefaultTemplatePool(cfg.DefaultTemplate.Pool)
-
 	if infra.Spec.Cluster != nil && infra.Spec.Cluster.ID != "" {
 		cfg.DefaultClusterId = infra.Spec.Cluster.ID
 	}
@@ -284,96 +264,109 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	return cfg, nil
 }
 
-func (r *Reconciler) ensureDefaultTemplate(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, config *apiconfig.ManagerConfig) error {
+func (r *Reconciler) ensureBuiltinTemplates(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, config *apiconfig.ManagerConfig) error {
 	logger := log.FromContext(ctx)
-	name := ""
-	namespace := ""
-	image := ""
-	pool := apiconfig.DefaultTemplatePoolConfig{}
-	if config.DefaultTemplate != nil {
-		name = config.DefaultTemplate.Name
-		image = config.DefaultTemplate.Image
-		pool = config.DefaultTemplate.Pool
-	}
-	if name == "" {
-		name = template.DefaultTemplateName
-	}
-	namespace, err := naming.TemplateNamespaceFromName(name)
-	if err != nil {
-		return fmt.Errorf("resolve template namespace: %w", err)
-	}
-	if image == "" {
-		image = template.DefaultTemplateImage
-	}
-	pool = applyDefaultTemplatePool(pool)
-
-	existing := &templatev1alpha1.SandboxTemplate{}
-	err = r.Resources.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, existing)
-	if err == nil {
+	if config == nil || len(config.BuiltinTemplates) == 0 {
 		return nil
 	}
-	if !errors.IsNotFound(err) {
-		return err
-	}
 
-	template := &templatev1alpha1.SandboxTemplate{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: templatev1alpha1.SchemeGroupVersion.String(),
-			Kind:       "SandboxTemplate",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/managed-by": "sandbox0infra-operator",
-				"sandbox0.ai/template-role":    "default",
-			},
-			Annotations: map[string]string{
-				"sandbox0.ai/infra-name":      infra.Name,
-				"sandbox0.ai/infra-namespace": infra.Namespace,
-			},
-		},
-		Spec: templatev1alpha1.SandboxTemplateSpec{
-			DisplayName: template.DefaultTemplateDisplayName,
-			Description: "Default template installed by infra-operator.",
-			MainContainer: templatev1alpha1.ContainerSpec{
-				Image: image,
-				Resources: templatev1alpha1.ResourceQuota{
-					CPU:    resource.MustParse(template.DefaultTemplateCPU),
-					Memory: resource.MustParse(template.DefaultTemplateMemory),
-				},
-			},
-			Pool: templatev1alpha1.PoolStrategy{
-				MinIdle:   pool.MinIdle,
-				MaxIdle:   pool.MaxIdle,
-				AutoScale: pool.AutoScale,
-			},
-			Network: &templatev1alpha1.TplSandboxNetworkPolicy{
-				Mode: templatev1alpha1.NetworkModeAllowAll,
-			},
-			Public: true,
-		},
-	}
+	for _, builtin := range config.BuiltinTemplates {
+		templateID, err := naming.CanonicalTemplateID(builtin.TemplateID)
+		if err != nil {
+			return fmt.Errorf("builtin template_id is invalid: %w", err)
+		}
 
-	if config.DefaultClusterId != "" {
-		template.Spec.ClusterId = &config.DefaultClusterId
-	}
+		namespace, err := naming.TemplateNamespaceForBuiltin(templateID)
+		if err != nil {
+			return fmt.Errorf("resolve builtin template namespace for %s: %w", templateID, err)
+		}
+		if err := r.Resources.ReconcileNamespace(ctx, namespace); err != nil {
+			return fmt.Errorf("reconcile namespace %s: %w", namespace, err)
+		}
 
-	if namespace == infra.Namespace {
-		if err := controllerutil.SetControllerReference(infra, template, r.Resources.Scheme); err != nil {
+		existing := &templatev1alpha1.SandboxTemplate{}
+		err = r.Resources.Client.Get(ctx, types.NamespacedName{Name: templateID, Namespace: namespace}, existing)
+		if err == nil {
+			continue
+		}
+		if !errors.IsNotFound(err) {
 			return err
 		}
-	}
 
-	if err := r.Resources.Client.Create(ctx, template); err != nil {
-		return err
-	}
+		image := strings.TrimSpace(builtin.Image)
+		if image == "" {
+			image = template.DefaultTemplateImage
+		}
+		pool := applyBuiltinTemplatePool(builtin.Pool)
+		displayName := strings.TrimSpace(builtin.DisplayName)
+		if displayName == "" {
+			displayName = templateID
+		}
+		description := strings.TrimSpace(builtin.Description)
+		if description == "" {
+			description = fmt.Sprintf("Builtin template %s installed by infra-operator.", templateID)
+		}
 
-	logger.Info("Default template created", "name", name, "namespace", namespace)
+		tpl := &templatev1alpha1.SandboxTemplate{
+			TypeMeta: metav1.TypeMeta{
+				APIVersion: templatev1alpha1.SchemeGroupVersion.String(),
+				Kind:       "SandboxTemplate",
+			},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      templateID,
+				Namespace: namespace,
+				Labels: map[string]string{
+					"app.kubernetes.io/managed-by": "sandbox0infra-operator",
+					"sandbox0.ai/template-role":    "builtin",
+					"sandbox0.ai/template-scope":   naming.ScopePublic,
+				},
+				Annotations: map[string]string{
+					"sandbox0.ai/infra-name":      infra.Name,
+					"sandbox0.ai/infra-namespace": infra.Namespace,
+				},
+			},
+			Spec: templatev1alpha1.SandboxTemplateSpec{
+				DisplayName: displayName,
+				Description: description,
+				MainContainer: templatev1alpha1.ContainerSpec{
+					Image: image,
+					Resources: templatev1alpha1.ResourceQuota{
+						CPU:    resource.MustParse(template.DefaultTemplateCPU),
+						Memory: resource.MustParse(template.DefaultTemplateMemory),
+					},
+				},
+				Pool: templatev1alpha1.PoolStrategy{
+					MinIdle:   pool.MinIdle,
+					MaxIdle:   pool.MaxIdle,
+					AutoScale: pool.AutoScale,
+				},
+				Network: &templatev1alpha1.TplSandboxNetworkPolicy{
+					Mode: templatev1alpha1.NetworkModeAllowAll,
+				},
+				Public: true,
+			},
+		}
+
+		if config.DefaultClusterId != "" {
+			tpl.Spec.ClusterId = &config.DefaultClusterId
+		}
+
+		if namespace == infra.Namespace {
+			if err := controllerutil.SetControllerReference(infra, tpl, r.Resources.Scheme); err != nil {
+				return err
+			}
+		}
+
+		if err := r.Resources.Client.Create(ctx, tpl); err != nil {
+			return err
+		}
+
+		logger.Info("Builtin template created", "template_id", templateID, "namespace", namespace)
+	}
 	return nil
 }
 
-func applyDefaultTemplatePool(pool apiconfig.DefaultTemplatePoolConfig) apiconfig.DefaultTemplatePoolConfig {
+func applyBuiltinTemplatePool(pool apiconfig.BuiltinTemplatePoolConfig) apiconfig.BuiltinTemplatePoolConfig {
 	minIdle, maxIdle, autoScale := template.ApplyDefaultPool(pool.MinIdle, pool.MaxIdle, pool.AutoScale)
 	pool.MinIdle = minIdle
 	pool.MaxIdle = maxIdle

@@ -33,9 +33,9 @@ func (s *Store) CreateTemplate(ctx context.Context, tpl *template.Template) erro
 	}
 
 	_, err = s.pool.Exec(ctx, `
-		INSERT INTO scheduler_templates (template_id, template_name, scope, team_id, user_id, spec)
-		VALUES ($1, $2, $3, $4, $5, $6)
-	`, tpl.TemplateID, tpl.TemplateName, tpl.Scope, tpl.TeamID, tpl.UserID, specJSON)
+		INSERT INTO scheduler_templates (template_id, scope, team_id, user_id, spec)
+		VALUES ($1, $2, $3, $4, $5)
+	`, tpl.TemplateID, tpl.Scope, tpl.TeamID, tpl.UserID, specJSON)
 	if err != nil {
 		return fmt.Errorf("create template: %w", err)
 	}
@@ -47,12 +47,11 @@ func (s *Store) GetTemplate(ctx context.Context, scope, teamID, templateID strin
 	var tpl template.Template
 	var specJSON []byte
 	err := s.pool.QueryRow(ctx, `
-		SELECT template_id, template_name, scope, team_id, user_id, spec, created_at, updated_at
+		SELECT template_id, scope, team_id, user_id, spec, created_at, updated_at
 		FROM scheduler_templates
 		WHERE scope = $1 AND team_id = $2 AND template_id = $3
 	`, scope, teamID, templateID).Scan(
 		&tpl.TemplateID,
-		&tpl.TemplateName,
 		&tpl.Scope,
 		&tpl.TeamID,
 		&tpl.UserID,
@@ -91,7 +90,7 @@ func (s *Store) GetTemplateForTeam(ctx context.Context, teamID, templateID strin
 // ListTemplates lists all templates.
 func (s *Store) ListTemplates(ctx context.Context) ([]*template.Template, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT template_id, template_name, scope, team_id, user_id, spec, created_at, updated_at
+		SELECT template_id, scope, team_id, user_id, spec, created_at, updated_at
 		FROM scheduler_templates
 		ORDER BY scope, team_id, template_id
 	`)
@@ -106,7 +105,6 @@ func (s *Store) ListTemplates(ctx context.Context) ([]*template.Template, error)
 		var specJSON []byte
 		if err := rows.Scan(
 			&tpl.TemplateID,
-			&tpl.TemplateName,
 			&tpl.Scope,
 			&tpl.TeamID,
 			&tpl.UserID,
@@ -127,7 +125,7 @@ func (s *Store) ListTemplates(ctx context.Context) ([]*template.Template, error)
 // ListVisibleTemplates lists templates visible to a team (public + that team's private).
 func (s *Store) ListVisibleTemplates(ctx context.Context, teamID string) ([]*template.Template, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT template_id, template_name, scope, team_id, user_id, spec, created_at, updated_at
+		SELECT template_id, scope, team_id, user_id, spec, created_at, updated_at
 		FROM scheduler_templates
 		WHERE scope = 'public' OR (scope = 'team' AND team_id = $1)
 		ORDER BY scope, template_id
@@ -143,7 +141,6 @@ func (s *Store) ListVisibleTemplates(ctx context.Context, teamID string) ([]*tem
 		var specJSON []byte
 		if err := rows.Scan(
 			&tpl.TemplateID,
-			&tpl.TemplateName,
 			&tpl.Scope,
 			&tpl.TeamID,
 			&tpl.UserID,
@@ -170,9 +167,9 @@ func (s *Store) UpdateTemplate(ctx context.Context, tpl *template.Template) erro
 
 	_, err = s.pool.Exec(ctx, `
 		UPDATE scheduler_templates
-		SET spec = $6, user_id = $5, template_name = $4
+		SET spec = $5, user_id = $4
 		WHERE scope = $1 AND team_id = $2 AND template_id = $3
-	`, tpl.Scope, tpl.TeamID, tpl.TemplateID, tpl.TemplateName, tpl.UserID, specJSON)
+	`, tpl.Scope, tpl.TeamID, tpl.TemplateID, tpl.UserID, specJSON)
 	if err != nil {
 		return fmt.Errorf("update template: %w", err)
 	}

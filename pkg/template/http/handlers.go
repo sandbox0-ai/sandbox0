@@ -3,7 +3,6 @@ package http
 import (
 	"context"
 	"net/http"
-	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
@@ -36,8 +35,6 @@ type Handler struct {
 
 // TemplateRequest represents the request body for updating a template.
 type TemplateRequest struct {
-	TemplateName *string                      `json:"template_name,omitempty"`
-	Public       *bool                        `json:"public,omitempty"`
 	Spec         v1alpha1.SandboxTemplateSpec `json:"spec"`
 }
 
@@ -46,6 +43,10 @@ func (h *Handler) ListTemplates(c *gin.Context) {
 	claims := internalauth.ClaimsFromContext(c.Request.Context())
 	if claims == nil {
 		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
+		return
+	}
+	if claims.TeamID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "team_id is required for custom templates")
 		return
 	}
 
@@ -69,33 +70,21 @@ func (h *Handler) GetTemplate(c *gin.Context) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "template_id is required")
 		return
 	}
+	canonicalTemplateID, err := naming.CanonicalTemplateID(templateID)
+	if err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
+	templateID = canonicalTemplateID
 
 	claims := internalauth.ClaimsFromContext(c.Request.Context())
 	if claims == nil {
 		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
 		return
 	}
-
-	if v := c.Query("public"); v != "" {
-		public, err := strconv.ParseBool(v)
-		if err != nil {
-			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid public query param")
-			return
-		}
-		if public {
-			tpl, err := h.Store.GetTemplate(c.Request.Context(), "public", "", templateID)
-			if err != nil {
-				h.Logger.Error("Failed to get template", zap.Error(err))
-				spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to get template")
-				return
-			}
-			if tpl == nil {
-				spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "template not found")
-				return
-			}
-			spec.JSONSuccess(c, http.StatusOK, tpl)
-			return
-		}
+	if claims.TeamID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "team_id is required for custom templates")
+		return
 	}
 
 	tpl, err := h.Store.GetTemplateForTeam(c.Request.Context(), claims.TeamID, templateID)
@@ -116,8 +105,7 @@ func (h *Handler) GetTemplate(c *gin.Context) {
 // CreateTemplate creates a new template.
 func (h *Handler) CreateTemplate(c *gin.Context) {
 	var req struct {
-		TemplateName string                       `json:"template_name"`
-		Public       bool                         `json:"public,omitempty"`
+		TemplateID string                       `json:"template_id"`
 		Spec         v1alpha1.SandboxTemplateSpec `json:"spec"`
 	}
 
@@ -126,36 +114,26 @@ func (h *Handler) CreateTemplate(c *gin.Context) {
 		return
 	}
 
-	if err := naming.ValidateTemplateName(req.TemplateName); err != nil {
+	canonicalTemplateID, err := naming.CanonicalTemplateID(req.TemplateID)
+	if err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
+	req.TemplateID = canonicalTemplateID
 
 	claims := internalauth.ClaimsFromContext(c.Request.Context())
 	if claims == nil {
 		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
 		return
 	}
+	if claims.TeamID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "team_id is required for custom templates")
+		return
+	}
 
 	scope := "team"
 	teamID := claims.TeamID
-	if req.Public {
-		if !internalauth.HasPermission(c.Request.Context(), "*") {
-			spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "system-admin required for public templates")
-			return
-		}
-		scope = "public"
-		teamID = ""
-	} else if teamID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "team_id is required for private templates")
-		return
-	}
-
-	templateID, err := naming.TemplateIDFromName(req.TemplateName)
-	if err != nil {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
-		return
-	}
+	templateID := req.TemplateID
 
 	existing, err := h.Store.GetTemplate(c.Request.Context(), scope, teamID, templateID)
 	if err != nil {
@@ -169,12 +147,11 @@ func (h *Handler) CreateTemplate(c *gin.Context) {
 	}
 
 	tpl := &template.Template{
-		TemplateID:   templateID,
-		TemplateName: req.TemplateName,
-		Scope:        scope,
-		TeamID:       teamID,
-		UserID:       claims.UserID,
-		Spec:         req.Spec,
+		TemplateID: templateID,
+		Scope:      scope,
+		TeamID:     teamID,
+		UserID:     claims.UserID,
+		Spec:       req.Spec,
 	}
 
 	if err := h.Store.CreateTemplate(c.Request.Context(), tpl); err != nil {
@@ -185,7 +162,6 @@ func (h *Handler) CreateTemplate(c *gin.Context) {
 
 	h.Logger.Info("Template created",
 		zap.String("template_id", templateID),
-		zap.String("template_name", req.TemplateName),
 		zap.String("scope", scope),
 		zap.String("team_id", teamID),
 	)
@@ -207,10 +183,20 @@ func (h *Handler) UpdateTemplate(c *gin.Context) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "template_id is required")
 		return
 	}
+	canonicalTemplateID, err := naming.CanonicalTemplateID(templateID)
+	if err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
+	templateID = canonicalTemplateID
 
 	claims := internalauth.ClaimsFromContext(c.Request.Context())
 	if claims == nil {
 		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
+		return
+	}
+	if claims.TeamID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "team_id is required for custom templates")
 		return
 	}
 
@@ -222,17 +208,6 @@ func (h *Handler) UpdateTemplate(c *gin.Context) {
 
 	scope := "team"
 	teamID := claims.TeamID
-	if req.Public != nil && *req.Public {
-		if !internalauth.HasPermission(c.Request.Context(), "*") {
-			spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "system-admin required for public templates")
-			return
-		}
-		scope = "public"
-		teamID = ""
-	} else if teamID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "team_id is required for private templates")
-		return
-	}
 
 	existing, err := h.Store.GetTemplate(c.Request.Context(), scope, teamID, templateID)
 	if err != nil {
@@ -245,21 +220,12 @@ func (h *Handler) UpdateTemplate(c *gin.Context) {
 		return
 	}
 
-	if req.TemplateName == nil || *req.TemplateName == "" {
-		req.TemplateName = &existing.TemplateName
-	}
-	if err := naming.ValidateTemplateName(*req.TemplateName); err != nil {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
-		return
-	}
-
 	tpl := &template.Template{
-		TemplateID:   templateID,
-		TemplateName: *req.TemplateName,
-		Scope:        scope,
-		TeamID:       teamID,
-		UserID:       claims.UserID,
-		Spec:         req.Spec,
+		TemplateID: templateID,
+		Scope:      scope,
+		TeamID:     teamID,
+		UserID:     claims.UserID,
+		Spec:       req.Spec,
 	}
 
 	if err := h.Store.UpdateTemplate(c.Request.Context(), tpl); err != nil {
@@ -270,7 +236,6 @@ func (h *Handler) UpdateTemplate(c *gin.Context) {
 
 	h.Logger.Info("Template updated",
 		zap.String("template_id", templateID),
-		zap.String("template_name", *req.TemplateName),
 		zap.String("scope", scope),
 		zap.String("team_id", teamID),
 	)
@@ -292,36 +257,25 @@ func (h *Handler) DeleteTemplate(c *gin.Context) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "template_id is required")
 		return
 	}
+	canonicalTemplateID, err := naming.CanonicalTemplateID(templateID)
+	if err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
+	templateID = canonicalTemplateID
 
 	claims := internalauth.ClaimsFromContext(c.Request.Context())
 	if claims == nil {
 		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
 		return
 	}
-
-	public := false
-	if v := c.Query("public"); v != "" {
-		b, err := strconv.ParseBool(v)
-		if err != nil {
-			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid public query param")
-			return
-		}
-		public = b
+	if claims.TeamID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "team_id is required for custom templates")
+		return
 	}
 
 	scope := "team"
 	teamID := claims.TeamID
-	if public {
-		if !internalauth.HasPermission(c.Request.Context(), "*") {
-			spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "system-admin required for public templates")
-			return
-		}
-		scope = "public"
-		teamID = ""
-	} else if teamID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "team_id is required for private templates")
-		return
-	}
 
 	existing, err := h.Store.GetTemplate(c.Request.Context(), scope, teamID, templateID)
 	if err != nil {
@@ -408,31 +362,25 @@ func (h *Handler) GetTemplateAllocations(c *gin.Context) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "template_id is required")
 		return
 	}
+	canonicalTemplateID, err := naming.CanonicalTemplateID(templateID)
+	if err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
+	templateID = canonicalTemplateID
 
 	claims := internalauth.ClaimsFromContext(c.Request.Context())
 	if claims == nil {
 		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
 		return
 	}
+	if claims.TeamID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "team_id is required for custom templates")
+		return
+	}
 
 	scope := "team"
 	teamID := claims.TeamID
-	if v := c.Query("public"); v != "" {
-		public, err := strconv.ParseBool(v)
-		if err != nil {
-			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid public query param")
-			return
-		}
-		if public {
-			scope = "public"
-			teamID = ""
-		}
-	}
-
-	if scope == "team" && teamID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "team_id is required for private templates")
-		return
-	}
 
 	allocations, err := h.AllocationStore.ListAllocationsByTemplate(c.Request.Context(), scope, teamID, templateID)
 	if err != nil {

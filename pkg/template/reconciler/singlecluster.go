@@ -135,7 +135,6 @@ func (r *SingleClusterReconciler) reconcile(ctx context.Context) {
 		if err := r.createOrUpdateTemplate(ctx, crd); err != nil {
 			r.logger.Error("Failed to sync template to cluster",
 				zap.String("template_id", tpl.TemplateID),
-				zap.String("template_name", tpl.TemplateName),
 				zap.Error(err),
 			)
 			r.statusMu.Lock()
@@ -152,6 +151,9 @@ func (r *SingleClusterReconciler) reconcile(ctx context.Context) {
 	}
 	orphansRemoved := 0
 	for _, tpl := range existing {
+		if tpl.Labels == nil || tpl.Labels["sandbox0.ai/template-logical-id"] == "" {
+			continue
+		}
 		if !expected[tpl.Name] {
 			if err := r.applier.DeleteTemplate(ctx, tpl.Name); err != nil {
 				r.logger.Error("Failed to delete orphan template",

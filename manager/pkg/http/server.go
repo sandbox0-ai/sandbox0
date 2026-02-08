@@ -24,6 +24,7 @@ type Server struct {
 	router               *gin.Engine
 	sandboxService       *service.SandboxService
 	templateService      *service.TemplateService
+	registryService      *service.RegistryService
 	templateStore        store.TemplateStore
 	templateReconciler   TemplateReconciler
 	templateStoreEnabled bool
@@ -44,6 +45,7 @@ type TemplateReconciler interface {
 func NewServer(
 	sandboxService *service.SandboxService,
 	templateService *service.TemplateService,
+	registryService *service.RegistryService,
 	templateStore store.TemplateStore,
 	templateReconciler TemplateReconciler,
 	templateStoreEnabled bool,
@@ -67,6 +69,7 @@ func NewServer(
 		router:               router,
 		sandboxService:       sandboxService,
 		templateService:      templateService,
+		registryService:      registryService,
 		templateStore:        templateStore,
 		templateReconciler:   templateReconciler,
 		templateStoreEnabled: templateStoreEnabled,
@@ -127,6 +130,11 @@ func (s *Server) setupRoutes() {
 			templates.POST("", s.createTemplate)
 			templates.PUT("/:id", s.updateTemplate)
 			templates.DELETE("/:id", s.deleteTemplate)
+		}
+
+		registry := v1.Group("/registry")
+		{
+			registry.POST("/credentials", s.getRegistryCredentials)
 		}
 	}
 

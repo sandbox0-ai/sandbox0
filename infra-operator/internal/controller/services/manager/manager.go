@@ -30,12 +30,15 @@ import (
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/pkg/common"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/database"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/internalauth"
+	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/registry"
 	pkginternalauth "github.com/sandbox0-ai/infra/pkg/internalauth"
 )
 
 type Reconciler struct {
 	Resources *common.ResourceManager
 }
+
+const registryCredentialsPath = "/etc/sandbox0/registry/.dockerconfigjson"
 
 func NewReconciler(resources *common.ResourceManager) *Reconciler {
 	return &Reconciler{Resources: resources}
@@ -91,6 +94,90 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		serviceConfig = infra.Spec.Services.Manager.Service
 	}
 
+	volumeMounts := []corev1.VolumeMount{
+		{
+			Name:      "config",
+			MountPath: "/config/config.yaml",
+			SubPath:   "config.yaml",
+			ReadOnly:  true,
+		},
+		{
+			Name:      "internal-jwt-private-key",
+			MountPath: pkginternalauth.DefaultInternalJWTPrivateKeyPath,
+			SubPath:   "internal_jwt_private.key",
+			ReadOnly:  true,
+		},
+		{
+			Name:      "internal-jwt-public-key",
+			MountPath: pkginternalauth.DefaultInternalJWTPublicKeyPath,
+			SubPath:   "internal_jwt_public.key",
+			ReadOnly:  true,
+		},
+	}
+
+	volumes := []corev1.Volume{
+		{
+			Name: "config",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: deploymentName},
+				},
+			},
+		},
+		{
+			Name: "internal-jwt-private-key",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: keySecretName,
+					Items: []corev1.KeyToPath{
+						{
+							Key:  privateKeyKey,
+							Path: "internal_jwt_private.key",
+						},
+					},
+				},
+			},
+		},
+		{
+			Name: "internal-jwt-public-key",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: keySecretName,
+					Items: []corev1.KeyToPath{
+						{
+							Key:  publicKeyKey,
+							Path: "internal_jwt_public.key",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	registryConfig := registry.ResolveRegistryConfig(infra)
+	if registryConfig != nil && registryConfig.SourceSecretName != "" && registryConfig.SourceSecretKey != "" {
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "registry-credentials",
+			MountPath: registryCredentialsPath,
+			SubPath:   registryConfig.SourceSecretKey,
+			ReadOnly:  true,
+		})
+		volumes = append(volumes, corev1.Volume{
+			Name: "registry-credentials",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: registryConfig.SourceSecretName,
+					Items: []corev1.KeyToPath{
+						{
+							Key:  registryConfig.SourceSecretKey,
+							Path: registryConfig.SourceSecretKey,
+						},
+					},
+				},
+			},
+		})
+	}
+
 	// Create deployment
 	if err := r.Resources.ReconcileDeployment(ctx, infra, deploymentName, labels, replicas, common.ServiceDefinition{
 		Name:               "manager",
@@ -122,64 +209,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 				Value: "/config/config.yaml",
 			},
 		},
-		VolumeMounts: []corev1.VolumeMount{
-			{
-				Name:      "config",
-				MountPath: "/config/config.yaml",
-				SubPath:   "config.yaml",
-				ReadOnly:  true,
-			},
-			{
-				Name:      "internal-jwt-private-key",
-				MountPath: pkginternalauth.DefaultInternalJWTPrivateKeyPath,
-				SubPath:   "internal_jwt_private.key",
-				ReadOnly:  true,
-			},
-			{
-				Name:      "internal-jwt-public-key",
-				MountPath: pkginternalauth.DefaultInternalJWTPublicKeyPath,
-				SubPath:   "internal_jwt_public.key",
-				ReadOnly:  true,
-			},
-		},
-		Volumes: []corev1.Volume{
-			{
-				Name: "config",
-				VolumeSource: corev1.VolumeSource{
-					ConfigMap: &corev1.ConfigMapVolumeSource{
-						LocalObjectReference: corev1.LocalObjectReference{Name: deploymentName},
-					},
-				},
-			},
-			{
-				Name: "internal-jwt-private-key",
-				VolumeSource: corev1.VolumeSource{
-					Secret: &corev1.SecretVolumeSource{
-						SecretName: keySecretName,
-						Items: []corev1.KeyToPath{
-							{
-								Key:  privateKeyKey,
-								Path: "internal_jwt_private.key",
-							},
-						},
-					},
-				},
-			},
-			{
-				Name: "internal-jwt-public-key",
-				VolumeSource: corev1.VolumeSource{
-					Secret: &corev1.SecretVolumeSource{
-						SecretName: keySecretName,
-						Items: []corev1.KeyToPath{
-							{
-								Key:  publicKeyKey,
-								Path: "internal_jwt_public.key",
-							},
-						},
-					},
-				},
-			},
-		},
+		VolumeMounts: volumeMounts,
+		Volumes:      volumes,
 		LivenessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{
@@ -241,6 +272,62 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	}
 
 	cfg.ManagerImage = fmt.Sprintf("%s:%s", imageRepo, infra.Spec.Version)
+
+	registryConfig := registry.ResolveRegistryConfig(infra)
+	if registryConfig != nil {
+		cfg.Registry.Provider = string(registryConfig.Provider)
+		cfg.Registry.Registry = registryConfig.Registry
+		cfg.Registry.PullSecretName = registryConfig.TargetSecretName
+		cfg.Registry.Namespace = infra.Namespace
+		if registryConfig.SourceSecretName != "" {
+			cfg.Registry.CredentialsFile = registryCredentialsPath
+		}
+	}
+	if infra.Spec.Registry != nil {
+		switch infra.Spec.Registry.Provider {
+		case infrav1alpha1.RegistryProviderAWS:
+			if infra.Spec.Registry.AWS != nil {
+				cfg.Registry.AWS = &apiconfig.RegistryAWSConfig{
+					Region:           infra.Spec.Registry.AWS.Region,
+					RegistryID:       infra.Spec.Registry.AWS.RegistryID,
+					AccessKeySecret:  infra.Spec.Registry.AWS.CredentialsSecret.Name,
+					AccessKeyKey:     infra.Spec.Registry.AWS.CredentialsSecret.AccessKeyKey,
+					SecretKeyKey:     infra.Spec.Registry.AWS.CredentialsSecret.SecretKeyKey,
+					SessionTokenKey:  infra.Spec.Registry.AWS.CredentialsSecret.SessionTokenKey,
+					RegistryOverride: infra.Spec.Registry.AWS.Registry,
+				}
+			}
+		case infrav1alpha1.RegistryProviderGCP:
+			if infra.Spec.Registry.GCP != nil {
+				cfg.Registry.GCP = &apiconfig.RegistryGCPConfig{
+					Registry:             infra.Spec.Registry.GCP.Registry,
+					ServiceAccountSecret: infra.Spec.Registry.GCP.ServiceAccountSecret.Name,
+					ServiceAccountKey:    infra.Spec.Registry.GCP.ServiceAccountSecret.Key,
+				}
+			}
+		case infrav1alpha1.RegistryProviderAzure:
+			if infra.Spec.Registry.Azure != nil {
+				cfg.Registry.Azure = &apiconfig.RegistryAzureConfig{
+					Registry:          infra.Spec.Registry.Azure.Registry,
+					CredentialsSecret: infra.Spec.Registry.Azure.CredentialsSecret.Name,
+					TenantIDKey:       infra.Spec.Registry.Azure.CredentialsSecret.TenantIDKey,
+					ClientIDKey:       infra.Spec.Registry.Azure.CredentialsSecret.ClientIDKey,
+					ClientSecretKey:   infra.Spec.Registry.Azure.CredentialsSecret.ClientSecretKey,
+				}
+			}
+		case infrav1alpha1.RegistryProviderAliyun:
+			if infra.Spec.Registry.Aliyun != nil {
+				cfg.Registry.Aliyun = &apiconfig.RegistryAliyunConfig{
+					Registry:          infra.Spec.Registry.Aliyun.Registry,
+					Region:            infra.Spec.Registry.Aliyun.Region,
+					InstanceID:        infra.Spec.Registry.Aliyun.InstanceID,
+					CredentialsSecret: infra.Spec.Registry.Aliyun.CredentialsSecret.Name,
+					AccessKeyKey:      infra.Spec.Registry.Aliyun.CredentialsSecret.AccessKeyKey,
+					SecretKeyKey:      infra.Spec.Registry.Aliyun.CredentialsSecret.SecretKeyKey,
+				}
+			}
+		}
+	}
 
 	storageProxyConfig := &apiconfig.StorageProxyConfig{}
 	storageProxyServiceConfig := (*infrav1alpha1.ServiceNetworkConfig)(nil)

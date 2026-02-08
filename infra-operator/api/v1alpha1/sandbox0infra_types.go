@@ -43,6 +43,18 @@ const (
 	StorageTypeOSS     StorageType = "oss"
 )
 
+// RegistryProvider defines the registry provider type.
+// +kubebuilder:validation:Enum=builtin;aws;gcp;azure;aliyun
+type RegistryProvider string
+
+const (
+	RegistryProviderBuiltin RegistryProvider = "builtin"
+	RegistryProviderAWS     RegistryProvider = "aws"
+	RegistryProviderGCP     RegistryProvider = "gcp"
+	RegistryProviderAzure   RegistryProvider = "azure"
+	RegistryProviderAliyun  RegistryProvider = "aliyun"
+)
+
 // Phase represents the current phase of the Sandbox0Infra
 // +kubebuilder:validation:Enum=Installing;Ready;Degraded;Failed;Upgrading
 type Phase string
@@ -72,6 +84,10 @@ type Sandbox0InfraSpec struct {
 	// Storage configures the storage backend (JuiceFS S3 backend)
 	// +optional
 	Storage *StorageConfig `json:"storage,omitempty"`
+
+	// Registry configures the container registry
+	// +optional
+	Registry *RegistryConfig `json:"registry,omitempty"`
 
 	// ControlPlane configures external control plane connection.
 	// +optional
@@ -375,6 +391,211 @@ type OSSCredentialsSecret struct {
 	SecretKeyKey string `json:"secretKeyKey,omitempty"`
 }
 
+// RegistryConfig defines container registry configuration.
+type RegistryConfig struct {
+	// Provider specifies the registry provider: builtin, aws, gcp, azure, or aliyun.
+	// +kubebuilder:default=builtin
+	// +kubebuilder:validation:Enum=builtin;aws;gcp;azure;aliyun
+	Provider RegistryProvider `json:"provider,omitempty"`
+
+	// ImagePullSecretName is the secret name to create in template namespaces.
+	// +kubebuilder:default="sandbox0-registry-pull"
+	// +optional
+	ImagePullSecretName string `json:"imagePullSecretName,omitempty"`
+
+	// Builtin configures the built-in registry.
+	// +optional
+	Builtin *BuiltinRegistryConfig `json:"builtin,omitempty"`
+
+	// AWS configures AWS registry integration.
+	// +optional
+	AWS *AWSRegistryConfig `json:"aws,omitempty"`
+
+	// GCP configures GCP registry integration.
+	// +optional
+	GCP *GCPRegistryConfig `json:"gcp,omitempty"`
+
+	// Azure configures Azure registry integration.
+	// +optional
+	Azure *AzureRegistryConfig `json:"azure,omitempty"`
+
+	// Aliyun configures Aliyun registry integration.
+	// +optional
+	Aliyun *AliyunRegistryConfig `json:"aliyun,omitempty"`
+}
+
+// BuiltinRegistryConfig defines built-in registry configuration.
+type BuiltinRegistryConfig struct {
+	// Enabled enables the built-in registry.
+	// +kubebuilder:default=true
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Image specifies the registry image.
+	// +kubebuilder:default="registry:2.8.3"
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// Port specifies the registry port.
+	// +kubebuilder:default=5000
+	// +optional
+	Port int32 `json:"port,omitempty"`
+
+	// Persistence configures registry persistence.
+	// +optional
+	Persistence *PersistenceConfig `json:"persistence,omitempty"`
+
+	// Service configures the registry service exposure.
+	// +optional
+	Service *ServiceNetworkConfig `json:"service,omitempty"`
+
+	// Credentials configures the registry username/password.
+	// +optional
+	Credentials *RegistryCredentials `json:"credentials,omitempty"`
+}
+
+// RegistryCredentials defines registry username/password.
+type RegistryCredentials struct {
+	// Username is the registry username.
+	// +optional
+	Username string `json:"username,omitempty"`
+
+	// Password is the registry password.
+	// +optional
+	Password string `json:"password,omitempty"`
+}
+
+// DockerConfigSecretRef references a dockerconfigjson secret.
+type DockerConfigSecretRef struct {
+	// Name is the name of the secret.
+	Name string `json:"name"`
+
+	// Key is the key in the secret.
+	// +kubebuilder:default=".dockerconfigjson"
+	Key string `json:"key,omitempty"`
+}
+
+// AWSRegistryConfig defines AWS registry configuration.
+type AWSRegistryConfig struct {
+	// Registry specifies the registry hostname.
+	// +optional
+	Registry string `json:"registry,omitempty"`
+
+	// Region specifies the AWS region.
+	Region string `json:"region"`
+
+	// RegistryID specifies the AWS account ID (optional).
+	// +optional
+	RegistryID string `json:"registryId,omitempty"`
+
+	// PullSecret references the dockerconfigjson secret to use for image pulls.
+	PullSecret DockerConfigSecretRef `json:"pullSecret"`
+
+	// CredentialsSecret references AWS credentials for short-lived tokens.
+	CredentialsSecret AWSRegistryCredentialsSecret `json:"credentialsSecret"`
+}
+
+// AWSRegistryCredentialsSecret references AWS credentials in a secret.
+type AWSRegistryCredentialsSecret struct {
+	// Name is the name of the secret.
+	Name string `json:"name"`
+
+	// AccessKeyKey is the key for access key ID.
+	// +kubebuilder:default="accessKeyId"
+	AccessKeyKey string `json:"accessKeyKey,omitempty"`
+
+	// SecretKeyKey is the key for secret access key.
+	// +kubebuilder:default="secretAccessKey"
+	SecretKeyKey string `json:"secretKeyKey,omitempty"`
+
+	// SessionTokenKey is the key for session token (optional).
+	// +optional
+	SessionTokenKey string `json:"sessionTokenKey,omitempty"`
+}
+
+// GCPRegistryConfig defines GCP registry configuration.
+type GCPRegistryConfig struct {
+	// Registry specifies the registry hostname.
+	Registry string `json:"registry"`
+
+	// PullSecret references the dockerconfigjson secret to use for image pulls.
+	PullSecret DockerConfigSecretRef `json:"pullSecret"`
+
+	// ServiceAccountSecret references the service account JSON key.
+	ServiceAccountSecret GCPRegistryServiceAccountSecret `json:"serviceAccountSecret"`
+}
+
+// GCPRegistryServiceAccountSecret references a service account key in a secret.
+type GCPRegistryServiceAccountSecret struct {
+	// Name is the name of the secret.
+	Name string `json:"name"`
+
+	// Key is the key in the secret.
+	// +kubebuilder:default="serviceAccount.json"
+	Key string `json:"key,omitempty"`
+}
+
+// AzureRegistryConfig defines Azure registry configuration.
+type AzureRegistryConfig struct {
+	// Registry specifies the registry hostname.
+	Registry string `json:"registry"`
+
+	// PullSecret references the dockerconfigjson secret to use for image pulls.
+	PullSecret DockerConfigSecretRef `json:"pullSecret"`
+
+	// CredentialsSecret references the client credentials for ACR.
+	CredentialsSecret AzureRegistryCredentialsSecret `json:"credentialsSecret"`
+}
+
+// AzureRegistryCredentialsSecret references Azure credentials in a secret.
+type AzureRegistryCredentialsSecret struct {
+	// Name is the name of the secret.
+	Name string `json:"name"`
+
+	// TenantIDKey is the key for tenant ID.
+	// +kubebuilder:default="tenantId"
+	TenantIDKey string `json:"tenantIdKey,omitempty"`
+
+	// ClientIDKey is the key for client ID.
+	// +kubebuilder:default="clientId"
+	ClientIDKey string `json:"clientIdKey,omitempty"`
+
+	// ClientSecretKey is the key for client secret.
+	// +kubebuilder:default="clientSecret"
+	ClientSecretKey string `json:"clientSecretKey,omitempty"`
+}
+
+// AliyunRegistryConfig defines Aliyun registry configuration.
+type AliyunRegistryConfig struct {
+	// Registry specifies the registry hostname.
+	Registry string `json:"registry"`
+
+	// Region specifies the Aliyun region.
+	Region string `json:"region"`
+
+	// InstanceID specifies the ACR instance ID.
+	InstanceID string `json:"instanceId"`
+
+	// PullSecret references the dockerconfigjson secret to use for image pulls.
+	PullSecret DockerConfigSecretRef `json:"pullSecret"`
+
+	// CredentialsSecret references Aliyun credentials for short-lived tokens.
+	CredentialsSecret AliyunRegistryCredentialsSecret `json:"credentialsSecret"`
+}
+
+// AliyunRegistryCredentialsSecret references Aliyun credentials in a secret.
+type AliyunRegistryCredentialsSecret struct {
+	// Name is the name of the secret.
+	Name string `json:"name"`
+
+	// AccessKeyKey is the key for access key ID.
+	// +kubebuilder:default="accessKeyId"
+	AccessKeyKey string `json:"accessKeyKey,omitempty"`
+
+	// SecretKeyKey is the key for secret access key.
+	// +kubebuilder:default="accessKeySecret"
+	SecretKeyKey string `json:"secretKeyKey,omitempty"`
+}
+
 // ControlPlaneConfig defines external control plane configuration
 type ControlPlaneConfig struct {
 	// URL is the control plane edge-gateway URL
@@ -613,6 +834,24 @@ func IsStorageEnabled(infra *Sandbox0Infra) bool {
 		}
 		return true
 	case StorageTypeS3, StorageTypeOSS:
+		return true
+	default:
+		return true
+	}
+}
+
+// IsRegistryEnabled returns true when registry should be reconciled.
+func IsRegistryEnabled(infra *Sandbox0Infra) bool {
+	if infra == nil || infra.Spec.Registry == nil {
+		return false
+	}
+	switch infra.Spec.Registry.Provider {
+	case RegistryProviderBuiltin:
+		if infra.Spec.Registry.Builtin != nil {
+			return infra.Spec.Registry.Builtin.Enabled
+		}
+		return true
+	case RegistryProviderAWS, RegistryProviderGCP, RegistryProviderAzure, RegistryProviderAliyun:
 		return true
 	default:
 		return true
@@ -858,6 +1097,7 @@ const (
 	ConditionTypeReady                = "Ready"
 	ConditionTypeDatabaseReady        = "DatabaseReady"
 	ConditionTypeStorageReady         = "StorageReady"
+	ConditionTypeRegistryReady        = "RegistryReady"
 	ConditionTypeEdgeGatewayReady     = "EdgeGatewayReady"
 	ConditionTypeInternalGatewayReady = "InternalGatewayReady"
 	ConditionTypeManagerReady         = "ManagerReady"

@@ -16,6 +16,7 @@ tags:
   - name: contexts
   - name: files
   - name: templates
+  - name: registry
   - name: sandbox-volumes
   - name: snapshots
 paths:
@@ -1583,6 +1584,33 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessMessageResponse"
+  /api/v1/registry/credentials:
+    post:
+      tags: [registry]
+      summary: Get registry credentials for uploads
+      security:
+        - bearerAuth: []
+      x-upstream-service: manager
+      x-upstream-path: /api/v1/registry/credentials
+      responses:
+        "200":
+          description: Registry credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessRegistryCredentialsResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
   /api/v1/sandboxvolumes:
     post:
       tags: [sandbox-volumes]
@@ -1896,6 +1924,28 @@ components:
               properties:
                 message:
                   type: string
+    SuccessRegistryCredentialsResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/RegistryCredentials"
+    RegistryCredentials:
+      type: object
+      properties:
+        provider:
+          type: string
+        registry:
+          type: string
+        username:
+          type: string
+        password:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+      required: [provider, registry, username, password]
     SuccessDeletedResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"

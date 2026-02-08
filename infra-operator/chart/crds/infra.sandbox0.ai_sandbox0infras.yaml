@@ -400,6 +400,285 @@ spec:
               region:
                 description: Region identifies the region for multi-cluster deployments
                 type: string
+              registry:
+                description: Registry configures the container registry
+                properties:
+                  aliyun:
+                    description: Aliyun configures Aliyun registry integration.
+                    properties:
+                      credentialsSecret:
+                        description: CredentialsSecret references Aliyun credentials
+                          for short-lived tokens.
+                        properties:
+                          accessKeyKey:
+                            default: accessKeyId
+                            description: AccessKeyKey is the key for access key ID.
+                            type: string
+                          name:
+                            description: Name is the name of the secret.
+                            type: string
+                          secretKeyKey:
+                            default: accessKeySecret
+                            description: SecretKeyKey is the key for secret access
+                              key.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      instanceId:
+                        description: InstanceID specifies the ACR instance ID.
+                        type: string
+                      pullSecret:
+                        description: PullSecret references the dockerconfigjson secret
+                          to use for image pulls.
+                        properties:
+                          key:
+                            default: .dockerconfigjson
+                            description: Key is the key in the secret.
+                            type: string
+                          name:
+                            description: Name is the name of the secret.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      region:
+                        description: Region specifies the Aliyun region.
+                        type: string
+                      registry:
+                        description: Registry specifies the registry hostname.
+                        type: string
+                    required:
+                    - credentialsSecret
+                    - instanceId
+                    - pullSecret
+                    - region
+                    - registry
+                    type: object
+                  aws:
+                    description: AWS configures AWS registry integration.
+                    properties:
+                      credentialsSecret:
+                        description: CredentialsSecret references AWS credentials
+                          for short-lived tokens.
+                        properties:
+                          accessKeyKey:
+                            default: accessKeyId
+                            description: AccessKeyKey is the key for access key ID.
+                            type: string
+                          name:
+                            description: Name is the name of the secret.
+                            type: string
+                          secretKeyKey:
+                            default: secretAccessKey
+                            description: SecretKeyKey is the key for secret access
+                              key.
+                            type: string
+                          sessionTokenKey:
+                            description: SessionTokenKey is the key for session token
+                              (optional).
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      pullSecret:
+                        description: PullSecret references the dockerconfigjson secret
+                          to use for image pulls.
+                        properties:
+                          key:
+                            default: .dockerconfigjson
+                            description: Key is the key in the secret.
+                            type: string
+                          name:
+                            description: Name is the name of the secret.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      region:
+                        description: Region specifies the AWS region.
+                        type: string
+                      registry:
+                        description: Registry specifies the registry hostname.
+                        type: string
+                      registryId:
+                        description: RegistryID specifies the AWS account ID (optional).
+                        type: string
+                    required:
+                    - credentialsSecret
+                    - pullSecret
+                    - region
+                    type: object
+                  azure:
+                    description: Azure configures Azure registry integration.
+                    properties:
+                      credentialsSecret:
+                        description: CredentialsSecret references the client credentials
+                          for ACR.
+                        properties:
+                          clientIdKey:
+                            default: clientId
+                            description: ClientIDKey is the key for client ID.
+                            type: string
+                          clientSecretKey:
+                            default: clientSecret
+                            description: ClientSecretKey is the key for client secret.
+                            type: string
+                          name:
+                            description: Name is the name of the secret.
+                            type: string
+                          tenantIdKey:
+                            default: tenantId
+                            description: TenantIDKey is the key for tenant ID.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      pullSecret:
+                        description: PullSecret references the dockerconfigjson secret
+                          to use for image pulls.
+                        properties:
+                          key:
+                            default: .dockerconfigjson
+                            description: Key is the key in the secret.
+                            type: string
+                          name:
+                            description: Name is the name of the secret.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      registry:
+                        description: Registry specifies the registry hostname.
+                        type: string
+                    required:
+                    - credentialsSecret
+                    - pullSecret
+                    - registry
+                    type: object
+                  builtin:
+                    description: Builtin configures the built-in registry.
+                    properties:
+                      credentials:
+                        description: Credentials configures the registry username/password.
+                        properties:
+                          password:
+                            description: Password is the registry password.
+                            type: string
+                          username:
+                            description: Username is the registry username.
+                            type: string
+                        type: object
+                      enabled:
+                        default: true
+                        description: Enabled enables the built-in registry.
+                        type: boolean
+                      image:
+                        default: registry:2.8.3
+                        description: Image specifies the registry image.
+                        type: string
+                      persistence:
+                        description: Persistence configures registry persistence.
+                        properties:
+                          enabled:
+                            default: true
+                            description: Enabled enables persistence
+                            type: boolean
+                          size:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            default: 20Gi
+                            description: Size specifies the storage size
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          storageClass:
+                            description: StorageClass specifies the storage class
+                              (empty for default)
+                            type: string
+                        type: object
+                      port:
+                        default: 5000
+                        description: Port specifies the registry port.
+                        format: int32
+                        type: integer
+                      service:
+                        description: Service configures the registry service exposure.
+                        properties:
+                          port:
+                            default: 80
+                            description: Port specifies the service port
+                            format: int32
+                            type: integer
+                          type:
+                            default: ClusterIP
+                            description: Type specifies the service type
+                            type: string
+                        type: object
+                    type: object
+                  gcp:
+                    description: GCP configures GCP registry integration.
+                    properties:
+                      pullSecret:
+                        description: PullSecret references the dockerconfigjson secret
+                          to use for image pulls.
+                        properties:
+                          key:
+                            default: .dockerconfigjson
+                            description: Key is the key in the secret.
+                            type: string
+                          name:
+                            description: Name is the name of the secret.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      registry:
+                        description: Registry specifies the registry hostname.
+                        type: string
+                      serviceAccountSecret:
+                        description: ServiceAccountSecret references the service account
+                          JSON key.
+                        properties:
+                          key:
+                            default: serviceAccount.json
+                            description: Key is the key in the secret.
+                            type: string
+                          name:
+                            description: Name is the name of the secret.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                    required:
+                    - pullSecret
+                    - registry
+                    - serviceAccountSecret
+                    type: object
+                  imagePullSecretName:
+                    default: sandbox0-registry-pull
+                    description: ImagePullSecretName is the secret name to create
+                      in template namespaces.
+                    type: string
+                  provider:
+                    allOf:
+                    - enum:
+                      - builtin
+                      - aws
+                      - gcp
+                      - azure
+                      - aliyun
+                    - enum:
+                      - builtin
+                      - aws
+                      - gcp
+                      - azure
+                      - aliyun
+                    default: builtin
+                    description: 'Provider specifies the registry provider: builtin,
+                      aws, gcp, azure, or aliyun.'
+                    type: string
+                type: object
               services:
                 default: {}
                 description: Services configures individual services

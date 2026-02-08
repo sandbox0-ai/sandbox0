@@ -51,7 +51,7 @@ func LoadConfig() (Config, error) {
 		OperatorChartPath:       envString("E2E_OPERATOR_CHART", defaultOperatorChart),
 		OperatorNamespace:       envString("E2E_OPERATOR_NAMESPACE", "infra-operator"),
 		OperatorReleaseName:     envString("E2E_OPERATOR_RELEASE", "infra-operator"),
-		OperatorDeploymentName:  envString("E2E_OPERATOR_DEPLOYMENT", "infra-operator-manager"),
+		OperatorDeploymentName:  envString("E2E_OPERATOR_DEPLOYMENT", "infra-operator"),
 		OperatorValuesPath:      envString("E2E_OPERATOR_VALUES", defaultOperatorValues),
 		OperatorImageRepo:       envString("E2E_OPERATOR_IMAGE_REPO", ""),
 		OperatorImageTag:        envString("E2E_OPERATOR_IMAGE_TAG", ""),

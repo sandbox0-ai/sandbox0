@@ -111,6 +111,87 @@ type ManagerConfig struct {
 	// +optional
 	// +kubebuilder:default={}
 	ProcdConfig ProcdConfig `yaml:"procd_config" json:"procdConfig"`
+
+	// Registry config for image pull secret provisioning
+	// +optional
+	// +kubebuilder:default={}
+	Registry RegistryConfig `yaml:"registry" json:"-"`
+}
+
+// RegistryConfig holds registry settings for manager.
+type RegistryConfig struct {
+	// Provider is the registry provider identifier.
+	// +optional
+	Provider string `yaml:"provider" json:"-"`
+
+	// Registry is the registry hostname (host:port).
+	// +optional
+	Registry string `yaml:"registry" json:"-"`
+
+	// PullSecretName is the secret name to create in template namespaces.
+	// +optional
+	PullSecretName string `yaml:"pull_secret_name" json:"-"`
+
+	// CredentialsFile is the path to dockerconfigjson file.
+	// +optional
+	CredentialsFile string `yaml:"credentials_file" json:"-"`
+
+	// Namespace is the namespace for registry secrets.
+	// +optional
+	Namespace string `yaml:"namespace" json:"-"`
+
+	// AWS configures AWS registry integration.
+	// +optional
+	AWS *RegistryAWSConfig `yaml:"aws" json:"-"`
+
+	// GCP configures GCP registry integration.
+	// +optional
+	GCP *RegistryGCPConfig `yaml:"gcp" json:"-"`
+
+	// Azure configures Azure registry integration.
+	// +optional
+	Azure *RegistryAzureConfig `yaml:"azure" json:"-"`
+
+	// Aliyun configures Aliyun registry integration.
+	// +optional
+	Aliyun *RegistryAliyunConfig `yaml:"aliyun" json:"-"`
+}
+
+// RegistryAWSConfig defines AWS registry config.
+type RegistryAWSConfig struct {
+	Region           string `yaml:"region" json:"-"`
+	RegistryID       string `yaml:"registry_id" json:"-"`
+	AccessKeySecret  string `yaml:"access_key_secret" json:"-"`
+	AccessKeyKey     string `yaml:"access_key_key" json:"-"`
+	SecretKeyKey     string `yaml:"secret_key_key" json:"-"`
+	SessionTokenKey  string `yaml:"session_token_key" json:"-"`
+	RegistryOverride string `yaml:"registry_override" json:"-"`
+}
+
+// RegistryGCPConfig defines GCP registry config.
+type RegistryGCPConfig struct {
+	Registry             string `yaml:"registry" json:"-"`
+	ServiceAccountSecret string `yaml:"service_account_secret" json:"-"`
+	ServiceAccountKey    string `yaml:"service_account_key" json:"-"`
+}
+
+// RegistryAzureConfig defines Azure registry config.
+type RegistryAzureConfig struct {
+	Registry          string `yaml:"registry" json:"-"`
+	CredentialsSecret string `yaml:"credentials_secret" json:"-"`
+	TenantIDKey       string `yaml:"tenant_id_key" json:"-"`
+	ClientIDKey       string `yaml:"client_id_key" json:"-"`
+	ClientSecretKey   string `yaml:"client_secret_key" json:"-"`
+}
+
+// RegistryAliyunConfig defines Aliyun registry config.
+type RegistryAliyunConfig struct {
+	Registry          string `yaml:"registry" json:"-"`
+	Region            string `yaml:"region" json:"-"`
+	InstanceID        string `yaml:"instance_id" json:"-"`
+	CredentialsSecret string `yaml:"credentials_secret" json:"-"`
+	AccessKeyKey      string `yaml:"access_key_key" json:"-"`
+	SecretKeyKey      string `yaml:"secret_key_key" json:"-"`
 }
 
 // LoadManagerConfig returns the manager configuration.

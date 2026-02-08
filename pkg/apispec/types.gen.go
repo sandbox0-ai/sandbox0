@@ -170,6 +170,11 @@ const (
 	SuccessRefreshResponseSuccessTrue SuccessRefreshResponseSuccess = true
 )
 
+// Defines values for SuccessRegistryCredentialsResponseSuccess.
+const (
+	SuccessRegistryCredentialsResponseSuccessTrue SuccessRegistryCredentialsResponseSuccess = true
+)
+
 // Defines values for SuccessResizedResponseSuccess.
 const (
 	SuccessResizedResponseSuccessTrue SuccessResizedResponseSuccess = true
@@ -267,7 +272,7 @@ const (
 
 // Defines values for SuccessWrittenResponseSuccess.
 const (
-	True SuccessWrittenResponseSuccess = true
+	SuccessWrittenResponseSuccessTrue SuccessWrittenResponseSuccess = true
 )
 
 // Defines values for TplSandboxNetworkPolicyMode.
@@ -753,6 +758,15 @@ type RegisterRequest struct {
 	Password string              `json:"password"`
 }
 
+// RegistryCredentials defines model for RegistryCredentials.
+type RegistryCredentials struct {
+	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
+	Password  string     `json:"password"`
+	Provider  string     `json:"provider"`
+	Registry  string     `json:"registry"`
+	Username  string     `json:"username"`
+}
+
 // ResizeContextRequest defines model for ResizeContextRequest.
 type ResizeContextRequest struct {
 	Cols int32 `json:"cols"`
@@ -1129,6 +1143,15 @@ type SuccessRefreshResponse struct {
 
 // SuccessRefreshResponseSuccess defines model for SuccessRefreshResponse.Success.
 type SuccessRefreshResponseSuccess bool
+
+// SuccessRegistryCredentialsResponse defines model for SuccessRegistryCredentialsResponse.
+type SuccessRegistryCredentialsResponse struct {
+	Data    *RegistryCredentials                      `json:"data,omitempty"`
+	Success SuccessRegistryCredentialsResponseSuccess `json:"success"`
+}
+
+// SuccessRegistryCredentialsResponseSuccess defines model for SuccessRegistryCredentialsResponse.Success.
+type SuccessRegistryCredentialsResponseSuccess bool
 
 // SuccessResizedResponse defines model for SuccessResizedResponse.
 type SuccessResizedResponse struct {

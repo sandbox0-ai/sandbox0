@@ -19,6 +19,7 @@ import (
 	"github.com/sandbox0-ai/infra/manager/pkg/generated/informers/externalversions"
 	httpserver "github.com/sandbox0-ai/infra/manager/pkg/http"
 	"github.com/sandbox0-ai/infra/manager/pkg/network"
+	registryprovider "github.com/sandbox0-ai/infra/manager/pkg/registry"
 	"github.com/sandbox0-ai/infra/manager/pkg/service"
 	"github.com/sandbox0-ai/infra/manager/pkg/webhook"
 	"github.com/sandbox0-ai/infra/pkg/clock"
@@ -256,8 +257,15 @@ func main() {
 		operator.GetTemplateLister(),
 		namespaceLister,
 		networkProvider,
+		cfg.Registry,
 		logger,
 	)
+
+	registryProvider, err := registryprovider.NewProvider(cfg.Registry, k8sClient, logger)
+	if err != nil {
+		logger.Warn("Registry provider disabled", zap.Error(err))
+	}
+	registryService := service.NewRegistryService(registryProvider, logger)
 	var templateStore *templstorepg.Store
 	var templateReconciler *templreconciler.SingleClusterReconciler
 	if cfg.TemplateStoreEnabled {
@@ -324,6 +332,7 @@ func main() {
 	httpServer := httpserver.NewServer(
 		sandboxService,
 		templateService,
+		registryService,
 		templateStore,
 		templateReconciler,
 		cfg.TemplateStoreEnabled,

@@ -10,6 +10,7 @@ import (
 	"github.com/sandbox0-ai/infra/pkg/clock"
 	"github.com/sandbox0-ai/infra/pkg/naming"
 	"go.uber.org/zap"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -189,7 +190,7 @@ func (r *SingleClusterReconciler) createOrUpdateTemplate(ctx context.Context, tp
 		return nil
 	}
 
-	if err != nil {
+	if err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("get template: %w", err)
 	}
 

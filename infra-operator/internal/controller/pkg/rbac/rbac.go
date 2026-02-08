@@ -60,7 +60,7 @@ func (r *Reconciler) ReconcileManagerRBAC(ctx context.Context, infra *infrav1alp
 		},
 		{
 			APIGroups: []string{""},
-			Resources: []string{"pods", "pods/exec", "pods/status", "services", "configmaps", "secrets", "persistentvolumeclaims", "events", "nodes", "namespaces"},
+			Resources: []string{"pods", "pods/exec", "pods/status", "services", "serviceaccounts", "configmaps", "secrets", "persistentvolumeclaims", "events", "nodes", "namespaces"},
 			Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 		},
 		{

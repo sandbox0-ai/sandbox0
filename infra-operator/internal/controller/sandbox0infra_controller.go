@@ -47,6 +47,7 @@ import (
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/internalgateway"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/manager"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/netd"
+	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/registry"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/scheduler"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/storage"
 	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/storageproxy"
@@ -141,6 +142,9 @@ func (r *Sandbox0InfraReconciler) setDefaults(infra *infrav1alpha1.Sandbox0Infra
 	if infra.Spec.Storage != nil && infra.Spec.Storage.Type == "" {
 		infra.Spec.Storage.Type = infrav1alpha1.StorageTypeBuiltin
 	}
+	if infra.Spec.Registry != nil && infra.Spec.Registry.Provider == "" {
+		infra.Spec.Registry.Provider = infrav1alpha1.RegistryProviderBuiltin
+	}
 }
 
 // initializeStatus initializes the status for a new resource
@@ -195,6 +199,7 @@ type componentPlan struct {
 	EnableInternalAuth        bool
 	EnableDatabase            bool
 	EnableStorage             bool
+	EnableRegistry            bool
 	EnableInitUser            bool
 	EnableClusterRegistration bool
 	RequireControlPlaneConfig bool
@@ -223,6 +228,7 @@ func (r *Sandbox0InfraReconciler) buildComponentPlan(infra *infrav1alpha1.Sandbo
 		EnableInternalAuth:        hasControlPlane || hasDataPlane,
 		EnableDatabase:            infrav1alpha1.IsDatabaseEnabled(infra),
 		EnableStorage:             infrav1alpha1.IsStorageEnabled(infra),
+		EnableRegistry:            infrav1alpha1.IsRegistryEnabled(infra),
 		EnableInitUser:            hasControlPlane && infra.Spec.InitUser != nil && infra.Spec.InitUser.Enabled,
 		EnableClusterRegistration: hasDataPlane && infra.Spec.Cluster != nil,
 		RequireControlPlaneConfig: hasDataPlane && infra.Spec.ControlPlane != nil,
@@ -257,6 +263,7 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 	authReconciler := internalauth.NewReconciler(resources)
 	dbReconciler := database.NewReconciler(resources)
 	storageReconciler := storage.NewReconciler(resources)
+	registryReconciler := registry.NewReconciler(resources)
 	edgeGatewayReconciler := edgegateway.NewReconciler(resources)
 	schedulerReconciler := scheduler.NewReconciler(resources)
 	internalGatewayReconciler := internalgateway.NewReconciler(resources)
@@ -323,6 +330,16 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 			SuccessReason:  "StorageReady",
 			SuccessMessage: "Storage is ready",
 			ErrorReason:    "StorageFailed",
+		})
+	}
+	if plan.EnableRegistry {
+		steps = append(steps, reconcileStep{
+			Name:           "registry",
+			Run:            func(ctx context.Context) error { return registryReconciler.Reconcile(ctx, infra) },
+			ConditionType:  infrav1alpha1.ConditionTypeRegistryReady,
+			SuccessReason:  "RegistryReady",
+			SuccessMessage: "Registry is ready",
+			ErrorReason:    "RegistryFailed",
 		})
 	}
 	if plan.EnableEdgeGateway {
@@ -566,6 +583,9 @@ func (r *Sandbox0InfraReconciler) expectedConditionTypes(infra *infrav1alpha1.Sa
 	}
 	if plan.EnableStorage {
 		conditions = append(conditions, infrav1alpha1.ConditionTypeStorageReady)
+	}
+	if plan.EnableRegistry {
+		conditions = append(conditions, infrav1alpha1.ConditionTypeRegistryReady)
 	}
 	if plan.EnableEdgeGateway {
 		conditions = append(conditions, infrav1alpha1.ConditionTypeEdgeGatewayReady)

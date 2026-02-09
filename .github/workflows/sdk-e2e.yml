@@ -64,80 +64,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
+      - name: Prepare infra environment
+        uses: ./.github/actions/prepare-infra
         with:
-          go-version: "1.25"
-          cache: true
-
-      - name: Cache local build outputs
-        uses: actions/cache@v4
-        with:
-          path: |
-            bin
-          key: infra-bin-${{ runner.os }}-${{ hashFiles('go.sum', '**/*.go', 'Makefile') }}
-          restore-keys: |
-            infra-bin-${{ runner.os }}-
-
-      - uses: helm/kind-action@v1
-        with:
-          version: v0.30.0
-          config: tests/e2e/kind-config.yaml
-          cluster_name: ${{ env.KIND_CLUSTER_NAME }}
-
-      - name: Install Helm
-        uses: azure/setup-helm@v4
-
-      - name: Setup protoc
-        uses: arduino/setup-protoc@v3
-
-      - name: Cache infra image tar
-        uses: actions/cache@v4
-        with:
-          path: /tmp/infra-image.tar
-          key: infra-image-${{ runner.os }}-${{ hashFiles('go.sum', '**/*.go', 'Dockerfile.local', 'Makefile') }}
-          restore-keys: |
-            infra-image-${{ runner.os }}-
-
-      - name: Build or load Docker image (local binaries)
-        env:
-          DOCKER_BUILDKIT: "1"
-        run: |
-          if [ -f /tmp/infra-image.tar ]; then
-            echo "Loading cached infra image..."
-            docker load -i /tmp/infra-image.tar
-          else
-            echo "Building infra image..."
-            make docker-build-local
-            docker save -o /tmp/infra-image.tar sandbox0ai/infra:latest
-          fi
-
-      - name: Cache dependency images
-        uses: actions/cache@v4
-        with:
-          path: /tmp/infra-deps.tar
-          key: infra-deps-${{ runner.os }}-postgres16-rustfs-1.0.0-alpha.79-registry-2.8.3
-
-      - name: Pull or load dependency images
-        run: |
-          if [ -f /tmp/infra-deps.tar ]; then
-            echo "Loading cached dependency images..."
-            docker load -i /tmp/infra-deps.tar
-          else
-            echo "Pulling dependency images..."
-            docker pull postgres:16-alpine
-            docker pull rustfs/rustfs:1.0.0-alpha.79
-            docker pull registry:2.8.3
-            docker save -o /tmp/infra-deps.tar postgres:16-alpine rustfs/rustfs:1.0.0-alpha.79 registry:2.8.3
-          fi
-
-      - name: Load Image to Kind
-        run: kind load docker-image sandbox0ai/infra:latest --name ${{ env.KIND_CLUSTER_NAME }}
-
-      - name: Load dependency images to Kind
-        run: |
-          kind load docker-image postgres:16-alpine --name ${{ env.KIND_CLUSTER_NAME }}
-          kind load docker-image rustfs/rustfs:1.0.0-alpha.79 --name ${{ env.KIND_CLUSTER_NAME }}
-          kind load docker-image registry:2.8.3 --name ${{ env.KIND_CLUSTER_NAME }}
+          kind-config: tests/e2e/kind-config.yaml
+          kind-cluster-name: ${{ env.KIND_CLUSTER_NAME }}
+          cache-key-suffix: amd64
 
       - name: Install infra-operator
         run: |

@@ -1,0 +1,105 @@
+name: Prepare infra environment
+description: Setup caches, Kind cluster, and local infra image.
+inputs:
+  go-version:
+    description: Go version to install.
+    required: false
+    default: "1.25"
+  infra-dir:
+    description: Infra directory relative to repo root.
+    required: false
+    default: "."
+  kind-config:
+    description: Kind config path relative to repo root.
+    required: true
+  kind-cluster-name:
+    description: Kind cluster name.
+    required: true
+  cache-key-suffix:
+    description: Suffix for cache keys (e.g. arch).
+    required: false
+    default: "default"
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/setup-go@v5
+      with:
+        go-version: ${{ inputs.go-version }}
+        cache: true
+
+    - name: Cache Go build, module, and local outputs
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+          ${{ inputs.infra-dir }}/bin
+        key: infra-build-${{ runner.os }}-${{ inputs.cache-key-suffix }}-${{ hashFiles(format('{0}/go.sum', inputs.infra-dir), format('{0}/**/*.go', inputs.infra-dir), format('{0}/Makefile', inputs.infra-dir)) }}
+        restore-keys: |
+          infra-build-${{ runner.os }}-${{ inputs.cache-key-suffix }}-
+
+    - uses: helm/kind-action@v1
+      with:
+        version: v0.30.0
+        config: ${{ inputs.kind-config }}
+        cluster_name: ${{ inputs.kind-cluster-name }}
+
+    - name: Install Helm
+      uses: azure/setup-helm@v4
+
+    - name: Setup protoc
+      uses: arduino/setup-protoc@v3
+
+    - name: Cache infra image tar
+      uses: actions/cache@v4
+      with:
+        path: /tmp/infra-image.tar
+        key: infra-image-${{ runner.os }}-${{ inputs.cache-key-suffix }}-${{ hashFiles(format('{0}/go.sum', inputs.infra-dir), format('{0}/**/*.go', inputs.infra-dir), format('{0}/Dockerfile.local', inputs.infra-dir), format('{0}/Makefile', inputs.infra-dir)) }}
+        restore-keys: |
+          infra-image-${{ runner.os }}-${{ inputs.cache-key-suffix }}-
+
+    - name: Build or load Docker image (local binaries)
+      working-directory: ${{ inputs.infra-dir }}
+      env:
+        DOCKER_BUILDKIT: "1"
+      shell: bash
+      run: |
+        if [ -f /tmp/infra-image.tar ]; then
+          echo "Loading cached infra image..."
+          docker load -i /tmp/infra-image.tar
+        else
+          echo "Building infra image..."
+          make docker-build-local
+          docker save -o /tmp/infra-image.tar sandbox0ai/infra:latest
+        fi
+
+    - name: Cache dependency images
+      uses: actions/cache@v4
+      with:
+        path: /tmp/infra-deps.tar
+        key: infra-deps-${{ runner.os }}-${{ inputs.cache-key-suffix }}-postgres16-rustfs-1.0.0-alpha.79-registry-2.8.3
+
+    - name: Pull or load dependency images
+      shell: bash
+      run: |
+        if [ -f /tmp/infra-deps.tar ]; then
+          echo "Loading cached dependency images..."
+          docker load -i /tmp/infra-deps.tar
+        else
+          echo "Pulling dependency images..."
+          docker pull postgres:16-alpine
+          docker pull rustfs/rustfs:1.0.0-alpha.79
+          docker pull registry:2.8.3
+          docker save -o /tmp/infra-deps.tar postgres:16-alpine rustfs/rustfs:1.0.0-alpha.79 registry:2.8.3
+        fi
+
+    - name: Load Image to Kind
+      shell: bash
+      run: kind load docker-image sandbox0ai/infra:latest --name ${{ inputs.kind-cluster-name }}
+
+    - name: Load dependency images to Kind
+      shell: bash
+      run: |
+        kind load docker-image postgres:16-alpine --name ${{ inputs.kind-cluster-name }}
+        kind load docker-image rustfs/rustfs:1.0.0-alpha.79 --name ${{ inputs.kind-cluster-name }}
+        kind load docker-image registry:2.8.3 --name ${{ inputs.kind-cluster-name }}

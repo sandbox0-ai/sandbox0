@@ -54,10 +54,11 @@ import (
 )
 
 const (
-	finalizerName   = "sandbox0infra.infra.sandbox0.ai/finalizer"
-	requeueInterval = 30 * time.Second
-	retryBaseDelay  = 2 * time.Second
-	retryMaxDelay   = 2 * time.Minute
+	finalizerName          = "sandbox0infra.infra.sandbox0.ai/finalizer"
+	requeueInterval        = 30 * time.Second
+	retryBaseDelay         = 2 * time.Second
+	retryMaxDelay          = 2 * time.Minute
+	initUserPasswordLength = 24
 )
 
 // Sandbox0InfraReconciler reconciles a Sandbox0Infra object
@@ -340,6 +341,16 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 			SuccessReason:  "RegistryReady",
 			SuccessMessage: "Registry is ready",
 			ErrorReason:    "RegistryFailed",
+		})
+	}
+	if plan.EnableInitUser {
+		steps = append(steps, reconcileStep{
+			Name:           "init-user-secret",
+			Run:            func(ctx context.Context) error { return r.ensureInitUserPasswordSecret(ctx, infra) },
+			ConditionType:  infrav1alpha1.ConditionTypeSecretsGenerated,
+			SuccessReason:  "InitUserSecretReady",
+			SuccessMessage: "Init user password secret is ready",
+			ErrorReason:    "InitUserSecretFailed",
 		})
 	}
 	if plan.EnableEdgeGateway {
@@ -638,6 +649,25 @@ func (r *Sandbox0InfraReconciler) reconcileInitUser(ctx context.Context, infra *
 	logger := log.FromContext(ctx)
 	logger.Info("Would create init user", "email", infra.Spec.InitUser.Email)
 	return nil
+}
+
+func (r *Sandbox0InfraReconciler) ensureInitUserPasswordSecret(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
+	if infra == nil || infra.Spec.InitUser == nil {
+		return nil
+	}
+
+	secretRef := infra.Spec.InitUser.PasswordSecret
+	if secretRef.Name == "" {
+		return fmt.Errorf("initUser.passwordSecret.name is required")
+	}
+
+	key := secretRef.Key
+	if key == "" {
+		key = "password"
+	}
+
+	_, err := common.EnsureSecretValue(ctx, r.Client, r.Scheme, infra, secretRef.Name, key, initUserPasswordLength)
+	return err
 }
 
 // registerCluster registers the cluster with the control plane

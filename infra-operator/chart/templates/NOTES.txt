@@ -1,0 +1,38 @@
+{{- $infras := lookup "infra.sandbox0.ai/v1alpha1" "Sandbox0Infra" .Release.Namespace "" -}}
+{{- $items := list -}}
+{{- if $infras -}}
+{{- $items = (get $infras "items" | default (list)) -}}
+{{- end -}}
+{{- if eq (len $items) 1 -}}
+{{- $infra := index $items 0 -}}
+{{- $spec := get $infra "spec" -}}
+{{- $initUser := get $spec "initUser" -}}
+{{- if and $initUser (get $initUser "enabled") -}}
+{{- $passwordSecret := get $initUser "passwordSecret" -}}
+{{- $secretName := get $passwordSecret "name" -}}
+{{- if $secretName -}}
+{{- $secretKey := default "password" (get $passwordSecret "key") -}}
+{{- $secret := lookup "v1" "Secret" .Release.Namespace $secretName -}}
+{{- if $secret -}}
+{{- $data := get $secret "data" -}}
+{{- $value := get $data $secretKey -}}
+{{- if $value }}
+Initial admin login:
+  Email: {{ get $initUser "email" }}
+  Password: {{ $value | b64dec }}
+{{- else }}
+Initial admin password is not ready yet. The secret {{ $secretName }} is missing key {{ $secretKey }}.
+{{- end -}}
+{{- else }}
+Initial admin password is not ready yet. Secret {{ $secretName }} was not found.
+{{- end -}}
+{{- else }}
+Initial admin password is not configured because initUser.passwordSecret.name is empty.
+{{- end -}}
+{{- end -}}
+{{- else }}
+Initial admin login is not configured. Enable spec.initUser to generate a password.
+{{- end -}}
+{{- else }}
+Initial admin login could not be resolved because there are zero or multiple Sandbox0Infra resources in namespace {{ .Release.Namespace }}.
+{{- end }}

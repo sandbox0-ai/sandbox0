@@ -90,13 +90,54 @@ jobs:
       - name: Setup protoc
         uses: arduino/setup-protoc@v3
 
-      - name: Build Docker Image (local binaries)
+      - name: Cache infra image tar
+        uses: actions/cache@v4
+        with:
+          path: /tmp/infra-image.tar
+          key: infra-image-${{ runner.os }}-${{ hashFiles('go.sum', '**/*.go', 'Dockerfile.local', 'Makefile') }}
+          restore-keys: |
+            infra-image-${{ runner.os }}-
+
+      - name: Build or load Docker image (local binaries)
         env:
           DOCKER_BUILDKIT: "1"
-        run: make docker-build-local
+        run: |
+          if [ -f /tmp/infra-image.tar ]; then
+            echo "Loading cached infra image..."
+            docker load -i /tmp/infra-image.tar
+          else
+            echo "Building infra image..."
+            make docker-build-local
+            docker save -o /tmp/infra-image.tar sandbox0ai/infra:latest
+          fi
+
+      - name: Cache dependency images
+        uses: actions/cache@v4
+        with:
+          path: /tmp/infra-deps.tar
+          key: infra-deps-${{ runner.os }}-postgres16-rustfs-1.0.0-alpha.79-registry-2.8.3
+
+      - name: Pull or load dependency images
+        run: |
+          if [ -f /tmp/infra-deps.tar ]; then
+            echo "Loading cached dependency images..."
+            docker load -i /tmp/infra-deps.tar
+          else
+            echo "Pulling dependency images..."
+            docker pull postgres:16-alpine
+            docker pull rustfs/rustfs:1.0.0-alpha.79
+            docker pull registry:2.8.3
+            docker save -o /tmp/infra-deps.tar postgres:16-alpine rustfs/rustfs:1.0.0-alpha.79 registry:2.8.3
+          fi
 
       - name: Load Image to Kind
         run: kind load docker-image sandbox0ai/infra:latest --name ${{ env.KIND_CLUSTER_NAME }}
+
+      - name: Load dependency images to Kind
+        run: |
+          kind load docker-image postgres:16-alpine --name ${{ env.KIND_CLUSTER_NAME }}
+          kind load docker-image rustfs/rustfs:1.0.0-alpha.79 --name ${{ env.KIND_CLUSTER_NAME }}
+          kind load docker-image registry:2.8.3 --name ${{ env.KIND_CLUSTER_NAME }}
 
       - name: Install infra-operator
         run: |
@@ -107,16 +148,14 @@ jobs:
       - name: Apply infra manifest
         run: kubectl apply -f "${INFRA_MANIFEST}"
 
-      - name: Wait for internal-gateway service
+      - name: Wait for Sandbox0Infra ready
         run: |
-          service_name="${INFRA_NAME}-internal-gateway"
-          for i in $(seq 1 60); do
-            if kubectl -n "${INFRA_NAMESPACE}" get svc "${service_name}" >/dev/null 2>&1; then
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "internal-gateway service not ready"
+          if kubectl -n "${INFRA_NAMESPACE}" wait --for=condition=Ready "sandbox0infra/${INFRA_NAME}" --timeout=12m; then
+            exit 0
+          fi
+          echo "Sandbox0Infra not ready"
+          echo "=== sandbox0infra ==="
+          kubectl -n "${INFRA_NAMESPACE}" get sandbox0infra "${INFRA_NAME}" -o yaml || true
           echo "=== infra-operator pods ==="
           kubectl -n infra-operator get pods -o wide || true
           echo "=== infra namespace pods ==="

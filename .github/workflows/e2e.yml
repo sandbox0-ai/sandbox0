@@ -45,14 +45,55 @@ jobs:
       - name: Setup protoc
         uses: arduino/setup-protoc@v3
 
-      - name: Build Docker Image (local binaries)
+      - name: Cache infra image tar
+        uses: actions/cache@v4
+        with:
+          path: /tmp/infra-image.tar
+          key: infra-image-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('infra/go.sum', 'infra/**/*.go', 'infra/Dockerfile.local', 'infra/Makefile') }}
+          restore-keys: |
+            infra-image-${{ runner.os }}-${{ matrix.arch }}-
+
+      - name: Build or load Docker image (local binaries)
         working-directory: infra
         env:
           DOCKER_BUILDKIT: "1"
-        run: make docker-build-local
+        run: |
+          if [ -f /tmp/infra-image.tar ]; then
+            echo "Loading cached infra image..."
+            docker load -i /tmp/infra-image.tar
+          else
+            echo "Building infra image..."
+            make docker-build-local
+            docker save -o /tmp/infra-image.tar sandbox0ai/infra:latest
+          fi
+
+      - name: Cache dependency images
+        uses: actions/cache@v4
+        with:
+          path: /tmp/infra-deps.tar
+          key: infra-deps-${{ runner.os }}-${{ matrix.arch }}-postgres16-rustfs-1.0.0-alpha.79-registry-2.8.3
+
+      - name: Pull or load dependency images
+        run: |
+          if [ -f /tmp/infra-deps.tar ]; then
+            echo "Loading cached dependency images..."
+            docker load -i /tmp/infra-deps.tar
+          else
+            echo "Pulling dependency images..."
+            docker pull postgres:16-alpine
+            docker pull rustfs/rustfs:1.0.0-alpha.79
+            docker pull registry:2.8.3
+            docker save -o /tmp/infra-deps.tar postgres:16-alpine rustfs/rustfs:1.0.0-alpha.79 registry:2.8.3
+          fi
 
       - name: Load Image to Kind
         run: kind load docker-image sandbox0ai/infra:latest --name sandbox0-e2e-${{ matrix.arch }}
+
+      - name: Load dependency images to Kind
+        run: |
+          kind load docker-image postgres:16-alpine --name sandbox0-e2e-${{ matrix.arch }}
+          kind load docker-image rustfs/rustfs:1.0.0-alpha.79 --name sandbox0-e2e-${{ matrix.arch }}
+          kind load docker-image registry:2.8.3 --name sandbox0-e2e-${{ matrix.arch }}
 
       - name: Run E2E
         working-directory: infra

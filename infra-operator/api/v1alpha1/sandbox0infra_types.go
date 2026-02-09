@@ -947,10 +947,6 @@ type ResourceCapacity struct {
 
 // InitUserConfig defines initial admin user configuration
 type InitUserConfig struct {
-	// Enabled enables initial user creation
-	// +kubebuilder:default=false
-	Enabled bool `json:"enabled,omitempty"`
-
 	// Email is the admin user's email
 	Email string `json:"email"`
 

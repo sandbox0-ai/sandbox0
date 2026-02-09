@@ -9,9 +9,8 @@
 {{- $spec := get $infra "spec" -}}
 {{- $initUser := get $spec "initUser" -}}
 {{- if and $initUser (get $initUser "enabled") -}}
-{{- $passwordSecret := get $initUser "passwordSecret" -}}
-{{- $secretName := get $passwordSecret "name" -}}
-{{- if $secretName -}}
+{{- $passwordSecret := (get $initUser "passwordSecret") | default (dict) -}}
+{{- $secretName := default "admin-password" (get $passwordSecret "name") -}}
 {{- $secretKey := default "password" (get $passwordSecret "key") -}}
 {{- $secret := lookup "v1" "Secret" .Release.Namespace $secretName -}}
 {{- if $secret -}}
@@ -26,9 +25,6 @@ Initial admin password is not ready yet. The secret {{ $secretName }} is missing
 {{- end -}}
 {{- else }}
 Initial admin password is not ready yet. Secret {{ $secretName }} was not found.
-{{- end -}}
-{{- else }}
-Initial admin password is not configured because initUser.passwordSecret.name is empty.
 {{- end -}}
 {{- else }}
 Initial admin login is not configured. Enable spec.initUser to generate a password.

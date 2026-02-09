@@ -260,8 +260,9 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		cfg.StorageProxyURL = ""
 	}
 
-	if infra.Spec.InitUser != nil && infra.Spec.InitUser.Enabled {
-		password, err := common.GetSecretValue(ctx, r.Resources.Client, infra.Namespace, infra.Spec.InitUser.PasswordSecret)
+	if infra.Spec.InitUser != nil {
+		secretRef := common.ResolveSecretKeyRef(infra.Spec.InitUser.PasswordSecret, "admin-password", "password")
+		password, err := common.GetSecretValue(ctx, r.Resources.Client, infra.Namespace, secretRef)
 		if err != nil {
 			return nil, err
 		}

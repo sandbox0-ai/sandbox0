@@ -73,8 +73,7 @@ spec:
       config:
         juicefsEncryptionEnabled: false
   initUser:
-    enabled: true
     email: "admin@example.com"
-    passwordSecret:
-      name: admin-password
-      key: password
+    # passwordSecret:
+    #   name: admin-password
+    #   key: password

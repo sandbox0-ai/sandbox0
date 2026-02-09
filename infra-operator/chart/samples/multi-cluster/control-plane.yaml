@@ -35,8 +35,7 @@ spec:
       enabled: true
       replicas: 1
   initUser:
-    enabled: true
     email: "admin@localhost"
-    passwordSecret:
-      name: admin-password
-      key: password
+    # passwordSecret:
+    #   name: admin-password
+    #   key: password

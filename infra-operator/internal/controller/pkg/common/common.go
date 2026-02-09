@@ -611,6 +611,17 @@ func GetSecretValue(ctx context.Context, client client.Client, namespace string,
 	return string(value), nil
 }
 
+// ResolveSecretKeyRef returns a ref with defaults applied when fields are empty.
+func ResolveSecretKeyRef(ref infrav1alpha1.SecretKeyRef, defaultName, defaultKey string) infrav1alpha1.SecretKeyRef {
+	if ref.Name == "" {
+		ref.Name = defaultName
+	}
+	if ref.Key == "" {
+		ref.Key = defaultKey
+	}
+	return ref
+}
+
 // GetServiceLabels returns standard labels for a service.
 func GetServiceLabels(instanceName, componentName string) map[string]string {
 	return map[string]string{

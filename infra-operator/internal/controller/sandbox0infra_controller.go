@@ -230,7 +230,7 @@ func (r *Sandbox0InfraReconciler) buildComponentPlan(infra *infrav1alpha1.Sandbo
 		EnableDatabase:            infrav1alpha1.IsDatabaseEnabled(infra),
 		EnableStorage:             infrav1alpha1.IsStorageEnabled(infra),
 		EnableRegistry:            infrav1alpha1.IsRegistryEnabled(infra),
-		EnableInitUser:            hasControlPlane && infra.Spec.InitUser != nil && infra.Spec.InitUser.Enabled,
+		EnableInitUser:            infra.Spec.InitUser != nil,
 		EnableClusterRegistration: hasDataPlane && infra.Spec.Cluster != nil,
 		RequireControlPlaneConfig: hasDataPlane && infra.Spec.ControlPlane != nil,
 	}
@@ -241,7 +241,7 @@ func (r *Sandbox0InfraReconciler) validateComponentPlan(infra *infrav1alpha1.San
 		infra.Spec.ControlPlane.InternalAuthPublicKeySecret.Name == "" {
 		return fmt.Errorf("controlPlane.internalAuthPublicKeySecret.name is required when controlPlane are enabled")
 	}
-	if infra.Spec.InitUser != nil && infra.Spec.InitUser.Enabled && !plan.EnableDatabase {
+	if infra.Spec.InitUser != nil && !plan.EnableDatabase {
 		return fmt.Errorf("initUser can only be enabled when database is enabled")
 	}
 	if infra.Spec.Cluster != nil && !plan.HasDataPlane {
@@ -656,17 +656,8 @@ func (r *Sandbox0InfraReconciler) ensureInitUserPasswordSecret(ctx context.Conte
 		return nil
 	}
 
-	secretRef := infra.Spec.InitUser.PasswordSecret
-	if secretRef.Name == "" {
-		return fmt.Errorf("initUser.passwordSecret.name is required")
-	}
-
-	key := secretRef.Key
-	if key == "" {
-		key = "password"
-	}
-
-	_, err := common.EnsureSecretValue(ctx, r.Client, r.Scheme, infra, secretRef.Name, key, initUserPasswordLength)
+	secretRef := common.ResolveSecretKeyRef(infra.Spec.InitUser.PasswordSecret, "admin-password", "password")
+	_, err := common.EnsureSecretValue(ctx, r.Client, r.Scheme, infra, secretRef.Name, secretRef.Key, initUserPasswordLength)
 	return err
 }
 

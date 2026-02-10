@@ -60,6 +60,7 @@ var (
 	ErrFlushFailed               = errors.New("flush failed on one or more nodes")
 	ErrCloneFailed               = errors.New("clone operation failed")
 	ErrVolumeBusy                = errors.New("volume is busy, try again later")
+	errPathNotFound              = errors.New("path not found")
 )
 
 // Manager handles snapshot operations for SandboxVolumes
@@ -209,7 +210,18 @@ func (m *Manager) CreateSnapshot(ctx context.Context, req *CreateSnapshotRequest
 		}
 		parentIno, rootIno, err := m.lookupPath(volumePath)
 		if err != nil {
-			return fmt.Errorf("lookup volume path: %w", err)
+			// A newly created volume can exist in DB before its JuiceFS namespace
+			// path is materialized. Create it lazily so snapshot APIs work without
+			// requiring a prior mount operation.
+			if errors.Is(err, errPathNotFound) {
+				if _, ensureErr := m.ensurePathExists(ctx, volumePath); ensureErr != nil {
+					return fmt.Errorf("ensure volume path: %w", ensureErr)
+				}
+				parentIno, rootIno, err = m.lookupPath(volumePath)
+			}
+			if err != nil {
+				return fmt.Errorf("lookup volume path: %w", err)
+			}
 		}
 
 		// 4. Ensure snapshot parent directory exists
@@ -601,7 +613,7 @@ func (m *Manager) lookupPath(path string) (parentIno, targetIno meta.Ino, err er
 		errno := m.metaClient.Lookup(jfsCtx, currentIno, part, &nextIno, &attr, true)
 		if errno != 0 {
 			if errno == syscall.ENOENT {
-				return currentIno, 0, fmt.Errorf("path not found: %s", path)
+				return currentIno, 0, &pathNotFoundError{path: path}
 			}
 			return 0, 0, fmt.Errorf("lookup %s: %s", part, errno.Error())
 		}
@@ -613,6 +625,18 @@ func (m *Manager) lookupPath(path string) (parentIno, targetIno meta.Ino, err er
 	}
 
 	return currentIno, currentIno, nil
+}
+
+type pathNotFoundError struct {
+	path string
+}
+
+func (e *pathNotFoundError) Error() string {
+	return fmt.Sprintf("path not found: %s", e.path)
+}
+
+func (e *pathNotFoundError) Is(target error) bool {
+	return target == errPathNotFound
 }
 
 // ensurePathExists creates directories along a path if they don't exist

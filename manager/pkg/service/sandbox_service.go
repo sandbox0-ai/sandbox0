@@ -742,6 +742,90 @@ func (s *SandboxService) GetSandbox(ctx context.Context, sandboxID string) (*San
 	return s.podToSandbox(ctx, pod, sandboxID), nil
 }
 
+// UpdateSandbox updates mutable sandbox configuration fields.
+func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cfg *SandboxConfig) (*Sandbox, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("sandbox config is required")
+	}
+
+	pod, err := s.getSandboxPod(ctx, sandboxID)
+	if err != nil {
+		return nil, fmt.Errorf("get pod: %w", err)
+	}
+
+	updatedPod := pod.DeepCopy()
+	if updatedPod.Annotations == nil {
+		updatedPod.Annotations = make(map[string]string)
+	}
+
+	merged := SandboxConfig{}
+	if configJSON := updatedPod.Annotations[controller.AnnotationConfig]; configJSON != "" {
+		if err := json.Unmarshal([]byte(configJSON), &merged); err != nil {
+			s.logger.Warn("Failed to parse existing sandbox config annotation",
+				zap.String("sandboxID", sandboxID),
+				zap.Error(err),
+			)
+		}
+	}
+
+	if cfg.EnvVars != nil {
+		merged.EnvVars = cfg.EnvVars
+	}
+	if cfg.TTL > 0 {
+		merged.TTL = cfg.TTL
+		expiresAt := s.clock.Now().Add(time.Duration(cfg.TTL) * time.Second)
+		updatedPod.Annotations[controller.AnnotationExpiresAt] = expiresAt.Format(time.RFC3339)
+	}
+	if cfg.HardTTL > 0 {
+		merged.HardTTL = cfg.HardTTL
+		hardExpiresAt := s.clock.Now().Add(time.Duration(cfg.HardTTL) * time.Second)
+		updatedPod.Annotations[controller.AnnotationHardExpiresAt] = hardExpiresAt.Format(time.RFC3339)
+	}
+	if cfg.Webhook != nil {
+		merged.Webhook = cfg.Webhook
+	}
+
+	var networkSpec *v1alpha1.NetworkPolicySpec
+	if cfg.Network != nil {
+		merged.Network = cfg.Network
+		if s.NetworkPolicyService == nil {
+			return nil, fmt.Errorf("network policy service not configured")
+		}
+
+		teamID := updatedPod.Annotations[controller.AnnotationTeamID]
+		templateSpec := s.templateNetworkSpec(updatedPod)
+		networkSpec = s.NetworkPolicyService.BuildNetworkPolicySpec(&BuildNetworkPolicyRequest{
+			SandboxID:    updatedPod.Name,
+			TeamID:       teamID,
+			TemplateSpec: templateSpec,
+			RequestSpec:  cfg.Network,
+		})
+		if _, err := s.setNetworkPolicyAnnotations(updatedPod, networkSpec); err != nil {
+			return nil, err
+		}
+	}
+
+	updatedConfigJSON, err := json.Marshal(merged)
+	if err != nil {
+		return nil, fmt.Errorf("marshal sandbox config: %w", err)
+	}
+	updatedPod.Annotations[controller.AnnotationConfig] = string(updatedConfigJSON)
+
+	updatedPod, err = s.k8sClient.CoreV1().Pods(pod.Namespace).Update(ctx, updatedPod, metav1.UpdateOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("update pod: %w", err)
+	}
+
+	if networkSpec != nil {
+		teamID := updatedPod.Annotations[controller.AnnotationTeamID]
+		if err := s.applyNetworkProvider(ctx, updatedPod, teamID, networkSpec); err != nil {
+			return nil, fmt.Errorf("apply network policy: %w", err)
+		}
+	}
+
+	return s.podToSandbox(ctx, updatedPod, sandboxID), nil
+}
+
 // GetNetworkPolicy gets the effective network policy for a sandbox.
 func (s *SandboxService) GetNetworkPolicy(ctx context.Context, sandboxID string) (*v1alpha1.TplSandboxNetworkPolicy, error) {
 	pod, err := s.getSandboxPod(ctx, sandboxID)
@@ -996,12 +1080,10 @@ func (s *SandboxService) prodAddress(ctx context.Context, pod *corev1.Pod) (stri
 }
 
 func (s *SandboxService) waitForPodIP(ctx context.Context, namespace, name string) (string, error) {
-	const (
-		maxAttempts = 15
-		waitDelay   = 200 * time.Millisecond
-	)
+	ticker := time.NewTicker(time.Millisecond * 50)
+	defer ticker.Stop()
 
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	for {
 		pod, err := s.podLister.Pods(namespace).Get(name)
 		if err != nil {
 			return "", fmt.Errorf("get pod for ip: %w", err)
@@ -1010,18 +1092,12 @@ func (s *SandboxService) waitForPodIP(ctx context.Context, namespace, name strin
 			return podIP, nil
 		}
 
-		if attempt == maxAttempts-1 {
-			break
-		}
-
 		select {
 		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-time.After(waitDelay):
+			return "", fmt.Errorf("pod ip not assigned")
+		case <-ticker.C:
 		}
 	}
-
-	return "", fmt.Errorf("pod ip not assigned")
 }
 
 // podPhaseToSandboxStatus converts pod phase to sandbox status

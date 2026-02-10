@@ -11,6 +11,10 @@ import (
 	"go.uber.org/zap"
 )
 
+type updateSandboxRequest struct {
+	Config *service.SandboxConfig `json:"config"`
+}
+
 // claimSandbox claims a sandbox
 func (s *Server) claimSandbox(c *gin.Context) {
 	var req service.ClaimRequest
@@ -78,6 +82,53 @@ func (s *Server) getSandbox(c *gin.Context) {
 	}
 
 	spec.JSONSuccess(c, http.StatusOK, sandbox)
+}
+
+// updateSandbox updates sandbox configuration
+func (s *Server) updateSandbox(c *gin.Context) {
+	sandboxID := c.Param("id")
+	if sandboxID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
+		return
+	}
+
+	claims := internalauth.ClaimsFromContext(c.Request.Context())
+	if claims == nil {
+		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
+		return
+	}
+
+	var req updateSandboxRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("invalid request: %v", err))
+		return
+	}
+	if req.Config == nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "config is required")
+		return
+	}
+
+	sandbox, err := s.sandboxService.GetSandbox(c.Request.Context(), sandboxID)
+	if err != nil {
+		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, fmt.Sprintf("sandbox not found: %v", err))
+		return
+	}
+	if sandbox.TeamID != claims.TeamID {
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "sandbox belongs to a different team")
+		return
+	}
+
+	updated, err := s.sandboxService.UpdateSandbox(c.Request.Context(), sandboxID, req.Config)
+	if err != nil {
+		s.logger.Error("Failed to update sandbox",
+			zap.String("sandboxID", sandboxID),
+			zap.Error(err),
+		)
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, fmt.Sprintf("failed to update sandbox: %v", err))
+		return
+	}
+
+	spec.JSONSuccess(c, http.StatusOK, updated)
 }
 
 // getSandboxStatus gets a sandbox status

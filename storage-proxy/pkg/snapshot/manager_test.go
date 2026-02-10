@@ -201,6 +201,37 @@ func (f *fakeMeta) Mkdir(ctx meta.Context, parent meta.Ino, name string, mode ui
 }
 
 func (f *fakeMeta) Clone(ctx meta.Context, srcParentIno, srcIno, parentIno meta.Ino, name string, cmode uint8, cumask uint16, count *uint64, total *uint64) syscall.Errno {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if _, ok := f.inoToPath[srcIno]; !ok {
+		return syscall.ENOENT
+	}
+	parentPath, ok := f.inoToPath[parentIno]
+	if !ok {
+		return syscall.ENOENT
+	}
+
+	var path string
+	if parentPath == "/" {
+		path = "/" + name
+	} else {
+		path = filepath.Join(parentPath, name)
+	}
+
+	if _, exists := f.pathToIno[path]; !exists {
+		ino := f.nextIno
+		f.nextIno++
+		f.pathToIno[path] = ino
+		f.inoToPath[ino] = path
+	}
+
+	if count != nil {
+		*count = 1
+	}
+	if total != nil {
+		*total = 1
+	}
 	return 0
 }
 
@@ -349,6 +380,38 @@ func TestEnsurePathExists_CreatesDirectories(t *testing.T) {
 	}
 	if _, _, err := mgr.lookupPath(parent); err != nil {
 		t.Fatalf("lookup failed: %v", err)
+	}
+}
+
+func TestCreateSnapshot_CreatesVolumePathWhenMissing(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol1"] = &db.SandboxVolume{ID: "vol1", TeamID: "team1", UserID: "user1"}
+
+	mgr := newTestManager(repo, &fakeVolumeProvider{err: errors.New("not mounted")})
+	snapshot, err := mgr.CreateSnapshot(context.Background(), &CreateSnapshotRequest{
+		VolumeID:    "vol1",
+		Name:        "snap-1",
+		Description: "test snapshot",
+		TeamID:      "team1",
+		UserID:      "user1",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if snapshot == nil || snapshot.ID == "" {
+		t.Fatalf("expected snapshot to be created, got: %+v", snapshot)
+	}
+
+	volumePath, err := naming.JuiceFSVolumePath("vol1")
+	if err != nil {
+		t.Fatalf("volume path generation failed: %v", err)
+	}
+	if _, _, err := mgr.lookupPath(volumePath); err != nil {
+		t.Fatalf("volume path should exist after snapshot create, got: %v", err)
+	}
+
+	if _, ok := repo.snapshots[snapshot.ID]; !ok {
+		t.Fatalf("snapshot metadata not persisted in repository")
 	}
 }
 

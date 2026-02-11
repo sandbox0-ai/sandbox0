@@ -111,15 +111,18 @@ func (s *Server) createContext(c *gin.Context) {
 	respBody, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode < 300 && exposurePort != nil {
-		autoWakeup := true
-		if req.Cmd != nil && req.Cmd.ExposeAutoWakeup != nil {
-			autoWakeup = *req.Cmd.ExposeAutoWakeup
+		resume := true
+		if req.Cmd != nil && req.Cmd.ExposeResume != nil {
+			resume = *req.Cmd.ExposeResume
 		}
-		if err := s.upsertExposePortPolicy(c, sandboxID, *exposurePort, autoWakeup); err != nil {
+		// Runtime precedence:
+		// 1) sandbox.auto_resume (global gate, default false)
+		// 2) cmd.expose_resume / exposed_ports[].resume (per-port gate)
+		if err := s.upsertExposePortPolicy(c, sandboxID, *exposurePort, resume); err != nil {
 			s.logger.Warn("Failed to update exposed port policy",
 				zap.String("sandbox_id", sandboxID),
 				zap.Int("port", *exposurePort),
-				zap.Bool("auto_wakeup", autoWakeup),
+				zap.Bool("resume", resume),
 				zap.Error(err),
 			)
 		}
@@ -151,9 +154,9 @@ func (s *Server) createContext(c *gin.Context) {
 type createContextRequestPayload struct {
 	Type string `json:"type"`
 	Cmd  *struct {
-		Command          []string `json:"command,omitempty"`
-		ExposePort       *int     `json:"expose_port,omitempty"`
-		ExposeAutoWakeup *bool    `json:"expose_auto_wakeup,omitempty"`
+		Command      []string `json:"command,omitempty"`
+		ExposePort   *int     `json:"expose_port,omitempty"`
+		ExposeResume *bool    `json:"expose_resume,omitempty"`
 	} `json:"cmd,omitempty"`
 }
 
@@ -169,7 +172,7 @@ func (s *Server) buildPublicExposureURL(label string) string {
 	return "https://" + label + "." + regionID + "." + rootDomain
 }
 
-func (s *Server) upsertExposePortPolicy(c *gin.Context, sandboxID string, port int, autoWakeup bool) error {
+func (s *Server) upsertExposePortPolicy(c *gin.Context, sandboxID string, port int, resume bool) error {
 	authCtx := middleware.GetAuthContext(c)
 	if authCtx == nil {
 		return errors.New("missing auth context")
@@ -182,15 +185,15 @@ func (s *Server) upsertExposePortPolicy(c *gin.Context, sandboxID string, port i
 	updated := false
 	for _, item := range sandbox.ExposedPorts {
 		if item.Port == port {
-			item.AutoWakeup = autoWakeup
+			item.Resume = resume
 			updated = true
 		}
 		ports = append(ports, item)
 	}
 	if !updated {
 		ports = append(ports, service.ExposedPortConfig{
-			Port:       port,
-			AutoWakeup: autoWakeup,
+			Port:   port,
+			Resume: resume,
 		})
 	}
 	return s.managerClient.UpdateSandboxExposedPorts(c.Request.Context(), sandboxID, authCtx.UserID, authCtx.TeamID, ports)

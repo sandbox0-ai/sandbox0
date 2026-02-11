@@ -436,9 +436,13 @@ type CreateAPIKeyResponse struct {
 
 // CreateCMDContextRequest defines model for CreateCMDContextRequest.
 type CreateCMDContextRequest struct {
-	Command          *[]string `json:"command,omitempty"`
-	ExposeAutoWakeup *bool     `json:"expose_auto_wakeup,omitempty"`
-	ExposePort       *int32    `json:"expose_port,omitempty"`
+	Command    *[]string `json:"command,omitempty"`
+	ExposePort *int32    `json:"expose_port,omitempty"`
+
+	// ExposeResume Port-level resume policy used when expose_port is set. Stored as
+	// exposed_ports[].resume for this sandbox. Priority at runtime:
+	// sandbox.auto_resume (global gate) > cmd.expose_resume (per-port gate).
+	ExposeResume *bool `json:"expose_resume,omitempty"`
 }
 
 // CreateContextRequest defines model for CreateContextRequest.
@@ -513,8 +517,12 @@ type ExecCandidate struct {
 
 // ExposedPortConfig defines model for ExposedPortConfig.
 type ExposedPortConfig struct {
-	AutoWakeup bool  `json:"auto_wakeup"`
-	Port       int32 `json:"port"`
+	Port int32 `json:"port"`
+
+	// Resume Port-level resume gate for public exposure traffic. Evaluated only when
+	// sandbox auto_resume is true. Priority: sandbox auto_resume (global gate)
+	// > exposed_ports[].resume (per-port gate).
+	Resume bool `json:"resume"`
 }
 
 // FileContentResponse defines model for FileContentResponse.
@@ -824,6 +832,8 @@ type Sandbox struct {
 
 // SandboxConfig defines model for SandboxConfig.
 type SandboxConfig struct {
+	// AutoResume Sandbox-level resume gate for paused sandboxes. When false, any inbound request
+	// (API or public exposure) must not auto resume the sandbox.
 	AutoResume   *bool                    `json:"auto_resume,omitempty"`
 	EnvVars      *map[string]string       `json:"env_vars,omitempty"`
 	ExposedPorts *[]ExposedPortConfig     `json:"exposed_ports,omitempty"`

@@ -68,9 +68,9 @@ type CreateREPLContextRequest struct {
 
 // CreateCMDContextRequest is the request body for creating a CMD context.
 type CreateCMDContextRequest struct {
-	Command          []string `json:"command"`                      // command path and args, e.g., ["/bin/ls", "-la"]
-	ExposePort       *int     `json:"expose_port,omitempty"`        // optional public exposure port, handled by gateway layer
-	ExposeAutoWakeup *bool    `json:"expose_auto_wakeup,omitempty"` // optional wake policy, handled by gateway layer
+	Command      []string `json:"command"`                 // command path and args, e.g., ["/bin/ls", "-la"]
+	ExposePort   *int     `json:"expose_port,omitempty"`   // optional public exposure port, handled by gateway layer
+	ExposeResume *bool    `json:"expose_resume,omitempty"` // optional resume policy, handled by gateway layer
 }
 
 // ContextResponse is the response body for a context.

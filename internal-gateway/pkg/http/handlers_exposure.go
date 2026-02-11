@@ -49,12 +49,14 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 		return
 	}
 	if sandbox.Paused {
+		// Resume precedence:
+		// sandbox.auto_resume must be true, then per-port exposed_ports[].resume must be true.
 		if !sandbox.AutoResume {
 			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is paused and auto_resume is disabled")
 			return
 		}
-		if !policy.AutoWakeup {
-			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is paused and auto_wakeup is disabled")
+		if !policy.Resume {
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is paused and resume is disabled")
 			return
 		}
 		resumeCtx, cancel := context.WithTimeout(c.Request.Context(), 45*time.Second)

@@ -171,8 +171,8 @@ type SandboxConfig struct {
 }
 
 type ExposedPortConfig struct {
-	Port       int  `json:"port"`
-	AutoWakeup bool `json:"auto_wakeup"`
+	Port   int  `json:"port"`
+	Resume bool `json:"resume"`
 }
 
 // WebhookConfig represents outbound webhook configuration.

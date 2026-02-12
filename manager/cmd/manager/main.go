@@ -341,6 +341,8 @@ func main() {
 		logger,
 		cfg.HTTPPort,
 		obsProvider,
+		cfg.PublicRootDomain,
+		cfg.PublicRegionID,
 	)
 
 	// Start metrics server

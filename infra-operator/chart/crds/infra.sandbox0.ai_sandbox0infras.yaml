@@ -382,6 +382,24 @@ spec:
                       metadata
                     type: boolean
                 type: object
+              publicExposure:
+                description: PublicExposure configures public URL exposure for sandboxes
+                properties:
+                  enabled:
+                    default: true
+                    description: Enabled enables public exposure routing
+                    type: boolean
+                  regionId:
+                    default: aws-us-east-1
+                    description: RegionID is the region identifier used in public
+                      URLs
+                    type: string
+                  rootDomain:
+                    default: sandbox0.app
+                    description: RootDomain is the root domain for public exposure
+                      URLs
+                    type: string
+                type: object
               region:
                 description: Region identifies the region for multi-cluster deployments
                 type: string
@@ -818,20 +836,6 @@ spec:
                             default: 30s
                             description: Timeouts
                             type: string
-                          publicExposureEnabled:
-                            default: false
-                            description: |-
-                              Public exposure host routing configuration.
-                              Host format is fixed as: <exposureLabel>.<region>.<rootDomain>
-                            type: boolean
-                          publicRegionId:
-                            type: string
-                          publicRootDomain:
-                            default: sandbox0.app
-                            type: string
-                          publicStrictHostValidation:
-                            default: true
-                            type: boolean
                           rateLimitBurst:
                             default: 200
                             type: integer
@@ -1118,20 +1122,6 @@ spec:
                             default: 10s
                             description: Proxy configuration
                             type: string
-                          publicExposureEnabled:
-                            default: false
-                            description: |-
-                              Public exposure host routing configuration.
-                              Host format is fixed as: <exposureLabel>.<region>.<rootDomain>
-                            type: boolean
-                          publicRegionId:
-                            type: string
-                          publicRootDomain:
-                            default: sandbox0.app
-                            type: string
-                          publicStrictHostValidation:
-                            default: true
-                            type: boolean
                           rateLimitBurst:
                             default: 200
                             type: integer

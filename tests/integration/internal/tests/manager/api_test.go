@@ -183,6 +183,8 @@ func newManagerTestEnvWithOptions(t *testing.T, opts managerTestEnvOptions) *man
 		logger,
 		0,
 		obsProvider,
+		"sandbox0.app",
+		"test-region",
 	)
 
 	httpServer := httptest.NewServer(server.Handler())

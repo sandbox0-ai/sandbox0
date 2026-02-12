@@ -346,6 +346,12 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		cfg.ProcdConfig.StorageProxyPort = 0
 	}
 
+	// Copy public exposure config from CRD top-level spec for generating public URLs
+	if infra.Spec.PublicExposure != nil {
+		cfg.PublicRootDomain = infra.Spec.PublicExposure.RootDomain
+		cfg.PublicRegionID = infra.Spec.PublicExposure.RegionID
+	}
+
 	return cfg, nil
 }
 

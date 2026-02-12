@@ -2521,6 +2521,12 @@ components:
             Port-level resume gate for public exposure traffic. Evaluated only when
             sandbox auto_resume is true. Priority: sandbox auto_resume (global gate)
             > exposed_ports[].resume (per-port gate).
+        public_url:
+          type: string
+          readOnly: true
+          description: |
+            The full public URL to access this exposed port.
+            Format: https://<sandboxName>--p<port>.<regionID>.<rootDomain>
       required: [port, resume]
     UpdateExposedPortsRequest:
       type: object
@@ -2544,6 +2550,12 @@ components:
                   type: array
                   items:
                     $ref: "#/components/schemas/ExposedPortConfig"
+                exposure_domain:
+                  type: string
+                  readOnly: true
+                  description: |
+                    The base exposure domain (e.g., "aws-us-east-1.sandbox0.app").
+                    Useful for clients that need to construct URLs manually.
               required: [sandbox_id, exposed_ports]
     WebhookConfig:
       type: object
@@ -2942,11 +2954,6 @@ components:
           type: string
         output:
           type: string
-        public_url:
-          type: string
-        exposed_port:
-          type: integer
-          format: int32
       required: [id, type, running, paused, created_at]
     ContextStatsResponse:
       type: object

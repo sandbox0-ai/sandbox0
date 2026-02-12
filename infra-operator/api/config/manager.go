@@ -116,6 +116,12 @@ type ManagerConfig struct {
 	// +optional
 	// +kubebuilder:default={}
 	Registry RegistryConfig `yaml:"registry" json:"-"`
+
+	// Public Exposure config for generating public URLs (injected by infra-operator)
+	// +optional
+	PublicRootDomain string `yaml:"public_root_domain" json:"-"`
+	// +optional
+	PublicRegionID string `yaml:"public_region_id" json:"-"`
 }
 
 // RegistryConfig holds registry settings for manager.

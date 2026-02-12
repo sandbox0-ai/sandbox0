@@ -4,16 +4,67 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/infra/manager/pkg/service"
 	"github.com/sandbox0-ai/infra/pkg/gateway/spec"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
+	"github.com/sandbox0-ai/infra/pkg/naming"
 	"go.uber.org/zap"
 )
 
 type updateExposedPortsRequest struct {
 	Ports []service.ExposedPortConfig `json:"ports"`
+}
+
+// exposedPortResponse represents an exposed port with public URL
+type exposedPortResponse struct {
+	Port      int    `json:"port"`
+	Resume    bool   `json:"resume"`
+	PublicURL string `json:"public_url,omitempty"`
+}
+
+// buildExposedPortResponses builds response with public URLs
+func (s *Server) buildExposedPortResponses(sandboxID string, ports []service.ExposedPortConfig) []exposedPortResponse {
+	responses := make([]exposedPortResponse, len(ports))
+	for i, p := range ports {
+		responses[i] = exposedPortResponse{
+			Port:   p.Port,
+			Resume: p.Resume,
+		}
+		if s.publicRootDomain != "" && s.publicRegionID != "" {
+			if publicURL, err := s.buildPublicURL(sandboxID, p.Port); err == nil {
+				responses[i].PublicURL = publicURL
+			}
+		}
+	}
+	return responses
+}
+
+// buildPublicURL constructs the public URL for an exposed port
+func (s *Server) buildPublicURL(sandboxID string, port int) (string, error) {
+	label, err := naming.BuildExposureHostLabel(sandboxID, port)
+	if err != nil {
+		return "", err
+	}
+	rootDomain := strings.TrimSpace(s.publicRootDomain)
+	if rootDomain == "" {
+		rootDomain = "sandbox0.app"
+	}
+	return fmt.Sprintf("https://%s.%s.%s", label, s.publicRegionID, rootDomain), nil
+}
+
+// getExposureDomain returns the exposure domain (regionID.rootDomain)
+func (s *Server) getExposureDomain() string {
+	rootDomain := strings.TrimSpace(s.publicRootDomain)
+	if rootDomain == "" {
+		rootDomain = "sandbox0.app"
+	}
+	if s.publicRegionID == "" {
+		return ""
+	}
+	return s.publicRegionID + "." + rootDomain
 }
 
 // getExposedPorts gets the exposed ports for a sandbox
@@ -45,10 +96,14 @@ func (s *Server) getExposedPorts(c *gin.Context) {
 		return
 	}
 
-	spec.JSONSuccess(c, http.StatusOK, gin.H{
+	response := gin.H{
 		"sandbox_id":     sandboxID,
-		"exposed_ports":  sandbox.ExposedPorts,
-	})
+		"exposed_ports":  s.buildExposedPortResponses(sandboxID, sandbox.ExposedPorts),
+	}
+	if domain := s.getExposureDomain(); domain != "" {
+		response["exposure_domain"] = domain
+	}
+	spec.JSONSuccess(c, http.StatusOK, response)
 }
 
 // updateExposedPorts updates the exposed ports for a sandbox
@@ -81,6 +136,17 @@ func (s *Server) updateExposedPorts(c *gin.Context) {
 		return
 	}
 
+	// Validate: if any port has resume=true, sandbox auto_resume must be enabled
+	if !sandbox.AutoResume {
+		for _, p := range req.Ports {
+			if p.Resume {
+				spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest,
+					"cannot set resume=true on exposed port when sandbox auto_resume is disabled")
+				return
+			}
+		}
+	}
+
 	cfg := &service.SandboxConfig{
 		ExposedPorts: req.Ports,
 	}
@@ -94,10 +160,14 @@ func (s *Server) updateExposedPorts(c *gin.Context) {
 		return
 	}
 
-	spec.JSONSuccess(c, http.StatusOK, gin.H{
+	response := gin.H{
 		"sandbox_id":     sandboxID,
-		"exposed_ports":  updated.ExposedPorts,
-	})
+		"exposed_ports":  s.buildExposedPortResponses(sandboxID, updated.ExposedPorts),
+	}
+	if domain := s.getExposureDomain(); domain != "" {
+		response["exposure_domain"] = domain
+	}
+	spec.JSONSuccess(c, http.StatusOK, response)
 }
 
 // clearExposedPorts clears all exposed ports for a sandbox
@@ -137,10 +207,14 @@ func (s *Server) clearExposedPorts(c *gin.Context) {
 		return
 	}
 
-	spec.JSONSuccess(c, http.StatusOK, gin.H{
+	response := gin.H{
 		"sandbox_id":     sandboxID,
-		"exposed_ports":  updated.ExposedPorts,
-	})
+		"exposed_ports":  s.buildExposedPortResponses(sandboxID, updated.ExposedPorts),
+	}
+	if domain := s.getExposureDomain(); domain != "" {
+		response["exposure_domain"] = domain
+	}
+	spec.JSONSuccess(c, http.StatusOK, response)
 }
 
 // deleteExposedPort deletes a specific exposed port for a sandbox
@@ -203,8 +277,12 @@ func (s *Server) deleteExposedPort(c *gin.Context) {
 		return
 	}
 
-	spec.JSONSuccess(c, http.StatusOK, gin.H{
+	response := gin.H{
 		"sandbox_id":     sandboxID,
-		"exposed_ports":  updated.ExposedPorts,
-	})
+		"exposed_ports":  s.buildExposedPortResponses(sandboxID, updated.ExposedPorts),
+	}
+	if domain := s.getExposureDomain(); domain != "" {
+		response["exposure_domain"] = domain
+	}
+	spec.JSONSuccess(c, http.StatusOK, response)
 }

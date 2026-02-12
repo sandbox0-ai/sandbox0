@@ -22,6 +22,10 @@ spec:
       passwordSecret:
         name: db-credentials
         key: password
+  publicExposure:
+    enabled: false
+    rootDomain: sandbox0.app
+    regionId: aws-us-east-1
   storage:
     # Data plane storage (choose s3 or oss for production).
     type: s3
@@ -65,7 +69,8 @@ spec:
     internalGateway:
       enabled: true
       replicas: 1
-      authMode: internal
+      config:
+        authMode: internal
     manager:
       enabled: true
       replicas: 1

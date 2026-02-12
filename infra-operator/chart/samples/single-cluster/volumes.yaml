@@ -30,6 +30,10 @@ spec:
   #     passwordSecret:
   #       name: db-credentials
   #       key: password
+  publicExposure:
+    enabled: true
+    rootDomain: sandbox0.app
+    regionId: aws-us-east-1
   storage:
     # Builtin storage is for quick start; use s3/oss for production scale.
     type: builtin

@@ -138,6 +138,17 @@ func (s *Server) updateSandbox(c *gin.Context) {
 		return
 	}
 
+	// Validate: if disabling auto_resume, check no exposed ports have resume=true
+	if req.Config.AutoResume != nil && !*req.Config.AutoResume {
+		for _, p := range sandbox.ExposedPorts {
+			if p.Resume {
+				spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest,
+					"cannot disable auto_resume while exposed ports have resume=true; remove or update those ports first")
+				return
+			}
+		}
+	}
+
 	updated, err := s.sandboxService.UpdateSandbox(c.Request.Context(), sandboxID, req.Config)
 	if err != nil {
 		s.logger.Error("Failed to update sandbox",

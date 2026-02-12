@@ -392,17 +392,15 @@ type ContextResourceUsage struct {
 
 // ContextResponse defines model for ContextResponse.
 type ContextResponse struct {
-	CreatedAt   string             `json:"created_at"`
-	Cwd         *string            `json:"cwd,omitempty"`
-	EnvVars     *map[string]string `json:"env_vars,omitempty"`
-	ExposedPort *int32             `json:"exposed_port,omitempty"`
-	Id          string             `json:"id"`
-	Language    *string            `json:"language,omitempty"`
-	Output      *string            `json:"output,omitempty"`
-	Paused      bool               `json:"paused"`
-	PublicUrl   *string            `json:"public_url,omitempty"`
-	Running     bool               `json:"running"`
-	Type        ProcessType        `json:"type"`
+	CreatedAt string             `json:"created_at"`
+	Cwd       *string            `json:"cwd,omitempty"`
+	EnvVars   *map[string]string `json:"env_vars,omitempty"`
+	Id        string             `json:"id"`
+	Language  *string            `json:"language,omitempty"`
+	Output    *string            `json:"output,omitempty"`
+	Paused    bool               `json:"paused"`
+	Running   bool               `json:"running"`
+	Type      ProcessType        `json:"type"`
 }
 
 // ContextStatsResponse defines model for ContextStatsResponse.
@@ -517,6 +515,10 @@ type ExecCandidate struct {
 // ExposedPortConfig defines model for ExposedPortConfig.
 type ExposedPortConfig struct {
 	Port int32 `json:"port"`
+
+	// PublicUrl The full public URL to access this exposed port.
+	// Format: https://<sandboxName>--p<port>.<regionID>.<rootDomain>
+	PublicUrl *string `json:"public_url,omitempty"`
 
 	// Resume Port-level resume gate for public exposure traffic. Evaluated only when
 	// sandbox auto_resume is true. Priority: sandbox auto_resume (global gate)
@@ -1046,7 +1048,11 @@ type SuccessEnvelopeSuccess bool
 type SuccessExposedPortsResponse struct {
 	Data *struct {
 		ExposedPorts []ExposedPortConfig `json:"exposed_ports"`
-		SandboxId    string              `json:"sandbox_id"`
+
+		// ExposureDomain The base exposure domain (e.g., "aws-us-east-1.sandbox0.app").
+		// Useful for clients that need to construct URLs manually.
+		ExposureDomain *string `json:"exposure_domain,omitempty"`
+		SandboxId      string  `json:"sandbox_id"`
 	} `json:"data,omitempty"`
 	Success SuccessExposedPortsResponseSuccess `json:"success"`
 }

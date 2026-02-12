@@ -294,6 +294,13 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		cfg.JWTSecret = jwtSecret
 	}
 
+	// Copy public exposure config from CRD top-level spec
+	if infra.Spec.PublicExposure != nil {
+		cfg.PublicExposureEnabled = infra.Spec.PublicExposure.Enabled
+		cfg.PublicRootDomain = infra.Spec.PublicExposure.RootDomain
+		cfg.PublicRegionID = infra.Spec.PublicExposure.RegionID
+	}
+
 	return cfg, nil
 }
 

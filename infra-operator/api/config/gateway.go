@@ -57,17 +57,16 @@ type GatewayConfig struct {
 
 	// Public exposure host routing configuration.
 	// Host format is fixed as: <exposureLabel>.<region>.<rootDomain>
-	// +optional
-	// +kubebuilder:default=false
-	PublicExposureEnabled bool `yaml:"public_exposure_enabled" json:"publicExposureEnabled"`
-	// +optional
-	// +kubebuilder:default="sandbox0.app"
-	PublicRootDomain string `yaml:"public_root_domain" json:"publicRootDomain"`
-	// +optional
-	PublicRegionID string `yaml:"public_region_id" json:"publicRegionId"`
+	// These fields are injected by infra-operator from Sandbox0Infra.Spec.PublicExposure
 	// +optional
 	// +kubebuilder:default=true
-	PublicStrictHostValidation bool `yaml:"public_strict_host_validation" json:"publicStrictHostValidation"`
+	PublicExposureEnabled bool `yaml:"public_exposure_enabled" json:"-"`
+	// +optional
+	// +kubebuilder:default="sandbox0.app"
+	PublicRootDomain string `yaml:"public_root_domain" json:"-"`
+	// +optional
+	// +kubebuilder:default="aws-us-east-1"
+	PublicRegionID string `yaml:"public_region_id" json:"-"`
 }
 
 // BuiltInAuthConfig configures the built-in authentication.

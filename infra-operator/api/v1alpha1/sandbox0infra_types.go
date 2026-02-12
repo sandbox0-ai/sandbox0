@@ -106,6 +106,10 @@ type Sandbox0InfraSpec struct {
 	// +optional
 	Region string `json:"region,omitempty"`
 
+	// PublicExposure configures public URL exposure for sandboxes
+	// +optional
+	PublicExposure *PublicExposureConfig `json:"publicExposure,omitempty"`
+
 	// Cluster configures cluster identification and capacity
 	// +optional
 	Cluster *ClusterConfig `json:"cluster,omitempty"`
@@ -906,6 +910,25 @@ type IngressConfig struct {
 	// TLSSecret specifies the TLS secret name
 	// +optional
 	TLSSecret string `json:"tlsSecret,omitempty"`
+}
+
+// PublicExposureConfig defines public URL exposure configuration for sandboxes.
+// Host format: <exposureLabel>.<regionID>.<rootDomain>
+type PublicExposureConfig struct {
+	// Enabled enables public exposure routing
+	// +optional
+	// +kubebuilder:default=true
+	Enabled bool `json:"enabled,omitempty"`
+
+	// RootDomain is the root domain for public exposure URLs
+	// +optional
+	// +kubebuilder:default="sandbox0.app"
+	RootDomain string `json:"rootDomain,omitempty"`
+
+	// RegionID is the region identifier used in public URLs
+	// +optional
+	// +kubebuilder:default="aws-us-east-1"
+	RegionID string `json:"regionId,omitempty"`
 }
 
 // ClusterConfig defines cluster identification and capacity

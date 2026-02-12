@@ -34,6 +34,9 @@ type Server struct {
 	logger               *zap.Logger
 	port                 int
 	obsProvider          *observability.Provider
+	// Public exposure config
+	publicRootDomain string
+	publicRegionID   string
 }
 
 // TemplateReconciler exposes minimal reconcile controls for template syncing.
@@ -54,6 +57,8 @@ func NewServer(
 	logger *zap.Logger,
 	port int,
 	obsProvider *observability.Provider,
+	publicRootDomain string,
+	publicRegionID string,
 ) *Server {
 	// Set gin mode based on log level
 	gin.SetMode(gin.ReleaseMode)
@@ -78,6 +83,8 @@ func NewServer(
 		logger:               logger,
 		port:                 port,
 		obsProvider:          obsProvider,
+		publicRootDomain:     publicRootDomain,
+		publicRegionID:       publicRegionID,
 	}
 	if templateStoreEnabled {
 		server.templateHandler = &templatehttp.Handler{

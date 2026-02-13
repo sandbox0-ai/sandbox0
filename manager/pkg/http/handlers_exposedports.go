@@ -52,7 +52,7 @@ func (s *Server) buildPublicURL(sandboxID string, port int) (string, error) {
 	if rootDomain == "" {
 		rootDomain = "sandbox0.app"
 	}
-	return fmt.Sprintf("https://%s.%s.%s", label, s.publicRegionID, rootDomain), nil
+	return fmt.Sprintf("%s.%s.%s", label, s.publicRegionID, rootDomain), nil
 }
 
 // getExposureDomain returns the exposure domain (regionID.rootDomain)
@@ -97,8 +97,8 @@ func (s *Server) getExposedPorts(c *gin.Context) {
 	}
 
 	response := gin.H{
-		"sandbox_id":     sandboxID,
-		"exposed_ports":  s.buildExposedPortResponses(sandboxID, sandbox.ExposedPorts),
+		"sandbox_id":    sandboxID,
+		"exposed_ports": s.buildExposedPortResponses(sandboxID, sandbox.ExposedPorts),
 	}
 	if domain := s.getExposureDomain(); domain != "" {
 		response["exposure_domain"] = domain
@@ -161,8 +161,8 @@ func (s *Server) updateExposedPorts(c *gin.Context) {
 	}
 
 	response := gin.H{
-		"sandbox_id":     sandboxID,
-		"exposed_ports":  s.buildExposedPortResponses(sandboxID, updated.ExposedPorts),
+		"sandbox_id":    sandboxID,
+		"exposed_ports": s.buildExposedPortResponses(sandboxID, updated.ExposedPorts),
 	}
 	if domain := s.getExposureDomain(); domain != "" {
 		response["exposure_domain"] = domain
@@ -208,8 +208,8 @@ func (s *Server) clearExposedPorts(c *gin.Context) {
 	}
 
 	response := gin.H{
-		"sandbox_id":     sandboxID,
-		"exposed_ports":  s.buildExposedPortResponses(sandboxID, updated.ExposedPorts),
+		"sandbox_id":    sandboxID,
+		"exposed_ports": s.buildExposedPortResponses(sandboxID, updated.ExposedPorts),
 	}
 	if domain := s.getExposureDomain(); domain != "" {
 		response["exposure_domain"] = domain
@@ -278,8 +278,8 @@ func (s *Server) deleteExposedPort(c *gin.Context) {
 	}
 
 	response := gin.H{
-		"sandbox_id":     sandboxID,
-		"exposed_ports":  s.buildExposedPortResponses(sandboxID, updated.ExposedPorts),
+		"sandbox_id":    sandboxID,
+		"exposed_ports": s.buildExposedPortResponses(sandboxID, updated.ExposedPorts),
 	}
 	if domain := s.getExposureDomain(); domain != "" {
 		response["exposure_domain"] = domain

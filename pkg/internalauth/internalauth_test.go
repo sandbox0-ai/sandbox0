@@ -303,3 +303,85 @@ func TestNewValidatorPanic(t *testing.T) {
 		PublicKey: nil,
 	})
 }
+
+func TestGenerateSystem(t *testing.T) {
+	generator := NewGenerator(GeneratorConfig{
+		Caller:     "internal-gateway",
+		PrivateKey: testPrivateKey,
+		TTL:        30 * time.Second,
+	})
+
+	validator := NewValidator(ValidatorConfig{
+		Target:    "manager",
+		PublicKey: testPublicKey,
+	})
+
+	token, err := generator.GenerateSystem("manager", GenerateOptions{
+		Permissions: []string{"*:*"},
+	})
+	if err != nil {
+		t.Fatalf("GenerateSystem failed: %v", err)
+	}
+
+	claims, err := validator.Validate(token)
+	if err != nil {
+		t.Fatalf("Validate failed: %v", err)
+	}
+
+	if !claims.IsSystem {
+		t.Error("Expected IsSystem to be true")
+	}
+
+	if !claims.IsSystemToken() {
+		t.Error("Expected IsSystemToken() to return true")
+	}
+
+	if claims.TeamID != "" {
+		t.Errorf("Expected empty TeamID for system token, got '%s'", claims.TeamID)
+	}
+
+	if claims.Subject != "system" {
+		t.Errorf("Expected subject 'system', got '%s'", claims.Subject)
+	}
+
+	if claims.Caller != "internal-gateway" {
+		t.Errorf("Expected caller 'internal-gateway', got '%s'", claims.Caller)
+	}
+}
+
+func TestSystemTokenBypassTeamIDRequirement(t *testing.T) {
+	generator := NewGenerator(GeneratorConfig{
+		Caller:     "internal-gateway",
+		PrivateKey: testPrivateKey,
+	})
+
+	validator := NewValidator(ValidatorConfig{
+		Target:    "manager",
+		PublicKey: testPublicKey,
+	})
+
+	// System token should pass even with RequireTeamID
+	token, _ := generator.GenerateSystem("manager", GenerateOptions{})
+
+	_, err := validator.ValidateWithOptions(token, ValidateOptions{
+		RequireTeamID: true,
+	})
+	if err != nil {
+		t.Errorf("System token should bypass RequireTeamID: %v", err)
+	}
+
+	// Regular token without teamID should fail (but Generate doesn't allow empty teamID)
+	// This test verifies the validation logic works correctly
+}
+
+func TestGenerateSystemEmptyTarget(t *testing.T) {
+	generator := NewGenerator(GeneratorConfig{
+		Caller:     "internal-gateway",
+		PrivateKey: testPrivateKey,
+	})
+
+	_, err := generator.GenerateSystem("", GenerateOptions{})
+	if err == nil {
+		t.Error("Expected error for empty target")
+	}
+}

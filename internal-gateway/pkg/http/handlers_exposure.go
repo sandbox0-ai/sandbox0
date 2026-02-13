@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/sandbox0-ai/infra/internal-gateway/pkg/client"
 	mgr "github.com/sandbox0-ai/infra/manager/pkg/service"
 	"github.com/sandbox0-ai/infra/pkg/gateway/spec"
 	"github.com/sandbox0-ai/infra/pkg/naming"
@@ -40,7 +42,16 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 
 	sandbox, err := s.managerClient.GetSandboxInternal(c.Request.Context(), sandboxID)
 	if err != nil {
-		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "sandbox not found")
+		s.logger.Warn("Failed to get sandbox for public exposure",
+			zap.String("sandbox_id", sandboxID),
+			zap.Error(err),
+		)
+		if errors.Is(err, client.ErrSandboxNotFound) {
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound,
+				fmt.Sprintf("sandbox %s not found", sandboxID))
+		} else {
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "manager service unavailable")
+		}
 		return
 	}
 	policy, ok := findExposedPortPolicy(sandbox, port)
@@ -69,7 +80,15 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 		s.sandboxAddrCache.Delete(sandboxID)
 		sandbox, err = s.managerClient.GetSandboxInternal(c.Request.Context(), sandboxID)
 		if err != nil {
-			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "sandbox not found")
+			s.logger.Warn("Failed to get sandbox after resume for public exposure",
+				zap.String("sandbox_id", sandboxID),
+				zap.Error(err),
+			)
+			if errors.Is(err, client.ErrSandboxNotFound) {
+				spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "sandbox not found")
+			} else {
+				spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "manager service unavailable")
+			}
 			return
 		}
 	}

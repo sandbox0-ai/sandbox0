@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/sandbox0-ai/infra/internal-gateway/pkg/client"
 	"github.com/sandbox0-ai/infra/internal-gateway/pkg/middleware"
 	"github.com/sandbox0-ai/infra/pkg/gateway/spec"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
@@ -282,7 +283,11 @@ func (s *Server) getProcdURL(c *gin.Context, sandboxID string) (*url.URL, error)
 				zap.String("sandbox_id", sandboxID),
 				zap.Error(err),
 			)
-			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "sandbox not found")
+			if errors.Is(err, client.ErrSandboxNotFound) {
+				spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "sandbox not found")
+			} else {
+				spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "manager service unavailable")
+			}
 			return nil, err
 		}
 
@@ -295,12 +300,24 @@ func (s *Server) getProcdURL(c *gin.Context, sandboxID string) (*url.URL, error)
 			resumeCtx, cancel := context.WithTimeout(c.Request.Context(), 45*time.Second)
 			defer cancel()
 			if err := s.managerClient.ResumeSandbox(resumeCtx, sandboxID, authCtx.UserID, authCtx.TeamID); err != nil {
+				s.logger.Warn("Resume sandbox failed",
+					zap.String("sandbox_id", sandboxID),
+					zap.Error(err),
+				)
 				spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
 				return nil, err
 			}
 			sandbox, err = s.managerClient.GetSandbox(c.Request.Context(), sandboxID, authCtx.UserID, authCtx.TeamID)
 			if err != nil {
-				spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "sandbox not found")
+				s.logger.Error("Failed to get sandbox after resume",
+					zap.String("sandbox_id", sandboxID),
+					zap.Error(err),
+				)
+				if errors.Is(err, client.ErrSandboxNotFound) {
+					spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "sandbox not found")
+				} else {
+					spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "manager service unavailable")
+				}
 				return nil, err
 			}
 		}

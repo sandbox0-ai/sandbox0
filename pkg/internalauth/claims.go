@@ -68,6 +68,7 @@ type Claims struct {
 	Issuer string `json:"iss"`
 
 	// Subject is the team ID that this token represents.
+	// For system tokens, this is "system".
 	Subject string `json:"sub"`
 
 	// Audience is the target service that should accept this token.
@@ -89,13 +90,18 @@ type Claims struct {
 	Target string `json:"target"`
 
 	// TeamID is the team ID for authorization context.
-	TeamID string `json:"team_id"`
+	// Empty for system tokens.
+	TeamID string `json:"team_id,omitempty"`
 
 	// UserID is the optional user ID for audit logging.
 	UserID string `json:"user_id,omitempty"`
 
 	// Permissions is the list of granted permissions.
 	Permissions []string `json:"permissions,omitempty"`
+
+	// IsSystem indicates this is a system-level token for internal service communication.
+	// System tokens have full access and are not bound to a specific team.
+	IsSystem bool `json:"is_system,omitempty"`
 }
 
 // GetExpirationTime implements jwt.Claims interface.
@@ -126,6 +132,12 @@ func (c *Claims) GetSubject() (string, error) {
 // GetAudience implements jwt.Claims interface.
 func (c *Claims) GetAudience() (jwt.ClaimStrings, error) {
 	return jwt.ClaimStrings{c.Audience}, nil
+}
+
+// IsSystemToken returns true if this is a system-level token.
+// System tokens are used for internal service communication and have full access.
+func (c *Claims) IsSystemToken() bool {
+	return c.IsSystem
 }
 
 // generateJTI generates a unique JWT ID using crypto/rand.

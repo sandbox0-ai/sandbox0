@@ -94,6 +94,63 @@ func (g *Generator) MustGenerate(target, teamID, userID string, opts GenerateOpt
 	return token
 }
 
+// GenerateSystem creates a system-level JWT token for internal service communication.
+// System tokens are not bound to a specific team and have full access.
+//
+// Parameters:
+//   - target: The service being called (e.g., "manager", "storage-proxy")
+//   - opts: Optional parameters (permissions, custom TTL, etc.)
+//
+// Returns a signed JWT token string.
+func (g *Generator) GenerateSystem(target string, opts GenerateOptions) (string, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	if target == "" {
+		return "", errors.New("internalauth: target cannot be empty")
+	}
+
+	ttl := g.config.TTL
+	if opts.TTL > 0 {
+		ttl = opts.TTL
+	}
+
+	now := time.Now()
+	if g.config.NowFunc != nil {
+		now = g.config.NowFunc()
+	}
+
+	claims := &Claims{
+		Issuer:      g.config.Caller,
+		Subject:     "system",
+		Audience:    target,
+		IssuedAt:    jwt.NewNumericDate(now),
+		ExpiresAt:   jwt.NewNumericDate(now.Add(ttl)),
+		ID:          generateJTI(),
+		Caller:      g.config.Caller,
+		Target:      target,
+		IsSystem:    true,
+		Permissions: opts.Permissions,
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims)
+	signed, err := token.SignedString(g.config.PrivateKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to sign token: %w", err)
+	}
+
+	return signed, nil
+}
+
+// MustGenerateSystem is like GenerateSystem but panics on error.
+func (g *Generator) MustGenerateSystem(target string, opts GenerateOptions) string {
+	token, err := g.GenerateSystem(target, opts)
+	if err != nil {
+		panic(err)
+	}
+	return token
+}
+
 // Validator is responsible for validating internal authentication tokens.
 type Validator struct {
 	mu     sync.RWMutex
@@ -196,7 +253,8 @@ func (v *Validator) ValidateWithOptions(tokenString string, opts ValidateOptions
 	}
 
 	// Validate required fields
-	if opts.RequireTeamID && claims.TeamID == "" {
+	// System tokens bypass team ID requirement
+	if opts.RequireTeamID && claims.TeamID == "" && !claims.IsSystem {
 		return nil, errors.New("internalauth: team_id is required")
 	}
 

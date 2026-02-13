@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,16 @@ import (
 	"github.com/sandbox0-ai/infra/pkg/gateway/spec"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	"go.uber.org/zap"
+)
+
+// Sentinel errors for ManagerClient operations.
+// Callers should use errors.Is() to check for specific error types.
+var (
+	// ErrSandboxNotFound indicates the requested sandbox does not exist.
+	ErrSandboxNotFound = errors.New("sandbox not found")
+
+	// ErrManagerUnavailable indicates the manager service is unreachable or returned an unexpected error.
+	ErrManagerUnavailable = errors.New("manager service unavailable")
 )
 
 // ManagerClient provides methods to call manager APIs
@@ -68,24 +79,24 @@ func (c *ManagerClient) GetSandbox(ctx context.Context, sandboxID, userID, teamI
 
 	// Check status code
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("sandbox not found: %s", sandboxID)
+		return nil, fmt.Errorf("%w: %s", ErrSandboxNotFound, sandboxID)
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		_, apiErr, err := spec.DecodeResponse[map[string]any](bytes.NewReader(body))
 		if err == nil && apiErr != nil {
-			return nil, fmt.Errorf("manager error: %s", apiErr.Message)
+			return nil, fmt.Errorf("%w: %s", ErrManagerUnavailable, apiErr.Message)
 		}
-		return nil, fmt.Errorf("unexpected status code %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("%w: unexpected status code %d: %s", ErrManagerUnavailable, resp.StatusCode, string(body))
 	}
 
 	// Parse response
 	sandbox, apiErr, err := spec.DecodeResponse[mgr.Sandbox](resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
+		return nil, fmt.Errorf("%w: decode response: %w", ErrManagerUnavailable, err)
 	}
 	if apiErr != nil {
-		return nil, fmt.Errorf("manager error: %s", apiErr.Message)
+		return nil, fmt.Errorf("%w: %s", ErrManagerUnavailable, apiErr.Message)
 	}
 
 	c.logger.Debug("Retrieved sandbox from manager",
@@ -98,9 +109,9 @@ func (c *ManagerClient) GetSandbox(ctx context.Context, sandboxID, userID, teamI
 
 // GetSandboxInternal retrieves sandbox information for trusted internal routing.
 func (c *ManagerClient) GetSandboxInternal(ctx context.Context, sandboxID string) (*mgr.Sandbox, error) {
-	token, err := c.internalAuthGen.Generate("manager", "", "", internalauth.GenerateOptions{})
+	token, err := c.internalAuthGen.GenerateSystem("manager", internalauth.GenerateOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("generate internal token: %w", err)
+		return nil, fmt.Errorf("generate system token: %w", err)
 	}
 
 	url := fmt.Sprintf("%s/internal/v1/sandboxes/%s", c.baseURL, sandboxID)
@@ -118,19 +129,19 @@ func (c *ManagerClient) GetSandboxInternal(ctx context.Context, sandboxID string
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("sandbox not found: %s", sandboxID)
+		return nil, fmt.Errorf("%w: %s", ErrSandboxNotFound, sandboxID)
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("unexpected status code %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("%w: unexpected status code %d: %s", ErrManagerUnavailable, resp.StatusCode, string(body))
 	}
 
 	sandbox, apiErr, err := spec.DecodeResponse[mgr.Sandbox](resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
+		return nil, fmt.Errorf("%w: decode response: %w", ErrManagerUnavailable, err)
 	}
 	if apiErr != nil {
-		return nil, fmt.Errorf("manager error: %s", apiErr.Message)
+		return nil, fmt.Errorf("%w: %s", ErrManagerUnavailable, apiErr.Message)
 	}
 	return sandbox, nil
 }
@@ -157,16 +168,16 @@ func (c *ManagerClient) ResumeSandbox(ctx context.Context, sandboxID, userID, te
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("sandbox not found: %s", sandboxID)
+		return fmt.Errorf("%w: %s", ErrSandboxNotFound, sandboxID)
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		var payload map[string]any
 		_ = json.Unmarshal(body, &payload)
 		if msg, ok := payload["message"].(string); ok && msg != "" {
-			return fmt.Errorf("manager error: %s", msg)
+			return fmt.Errorf("%w: %s", ErrManagerUnavailable, msg)
 		}
-		return fmt.Errorf("unexpected status code %d", resp.StatusCode)
+		return fmt.Errorf("%w: unexpected status code %d", ErrManagerUnavailable, resp.StatusCode)
 	}
 	return nil
 }

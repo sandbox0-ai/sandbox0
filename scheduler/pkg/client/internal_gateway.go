@@ -62,12 +62,12 @@ type TemplateStats struct {
 
 // GetClusterSummary gets cluster summary from internal-gateway
 func (c *InternalGatewayClient) GetClusterSummary(ctx context.Context, baseURL string) (*ClusterSummary, error) {
-	// Generate internal token for internal-gateway
-	token, err := c.internalAuthGen.Generate("internal-gateway", "scheduler", "scheduler", internalauth.GenerateOptions{
+	// Generate system token for internal-gateway
+	token, err := c.internalAuthGen.GenerateSystem("internal-gateway", internalauth.GenerateOptions{
 		Permissions: []string{"*:*"},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("generate internal token: %w", err)
+		return nil, fmt.Errorf("generate system token: %w", err)
 	}
 
 	// Build request URL
@@ -114,12 +114,12 @@ func (c *InternalGatewayClient) GetClusterSummary(ctx context.Context, baseURL s
 
 // GetTemplateStats gets template statistics from internal-gateway
 func (c *InternalGatewayClient) GetTemplateStats(ctx context.Context, baseURL string) (*TemplateStats, error) {
-	// Generate internal token for internal-gateway
-	token, err := c.internalAuthGen.Generate("internal-gateway", "scheduler", "scheduler", internalauth.GenerateOptions{
+	// Generate system token for internal-gateway
+	token, err := c.internalAuthGen.GenerateSystem("internal-gateway", internalauth.GenerateOptions{
 		Permissions: []string{"*:*"},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("generate internal token: %w", err)
+		return nil, fmt.Errorf("generate system token: %w", err)
 	}
 
 	// Build request URL
@@ -167,12 +167,12 @@ func (c *InternalGatewayClient) GetTemplateStats(ctx context.Context, baseURL st
 // CreateOrUpdateTemplate creates or updates a template in a cluster via internal-gateway.
 // The template name must be a Kubernetes DNS-1123 label.
 func (c *InternalGatewayClient) CreateOrUpdateTemplate(ctx context.Context, baseURL string, template *v1alpha1.SandboxTemplate) error {
-	// Generate internal token for internal-gateway
-	token, err := c.internalAuthGen.Generate("internal-gateway", "scheduler", "scheduler", internalauth.GenerateOptions{
+	// Generate system token for internal-gateway
+	token, err := c.internalAuthGen.GenerateSystem("internal-gateway", internalauth.GenerateOptions{
 		Permissions: []string{"*:*"},
 	})
 	if err != nil {
-		return fmt.Errorf("generate internal token: %w", err)
+		return fmt.Errorf("generate system token: %w", err)
 	}
 
 	// First, try to get the template to determine if it exists
@@ -248,12 +248,12 @@ func (c *InternalGatewayClient) CreateOrUpdateTemplate(ctx context.Context, base
 
 // DeleteTemplate deletes a template from a cluster via internal-gateway
 func (c *InternalGatewayClient) DeleteTemplate(ctx context.Context, baseURL string, templateID string) error {
-	// Generate internal token for internal-gateway
-	token, err := c.internalAuthGen.Generate("internal-gateway", "scheduler", "scheduler", internalauth.GenerateOptions{
+	// Generate system token for internal-gateway
+	token, err := c.internalAuthGen.GenerateSystem("internal-gateway", internalauth.GenerateOptions{
 		Permissions: []string{"*:*"},
 	})
 	if err != nil {
-		return fmt.Errorf("generate internal token: %w", err)
+		return fmt.Errorf("generate system token: %w", err)
 	}
 
 	// Build request URL

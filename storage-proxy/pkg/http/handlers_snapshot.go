@@ -228,6 +228,8 @@ func (s *Server) handleSnapshotError(w http.ResponseWriter, err error) {
 		_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "failed to flush data")
 	case errors.Is(err, snapshot.ErrCloneFailed):
 		_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "clone operation failed")
+	case errors.Is(err, snapshot.ErrRemountTimeout):
+		_ = spec.WriteError(w, http.StatusGatewayTimeout, spec.CodeInternal, "remount timeout")
 	default:
 		s.logger.WithError(err).Error("Snapshot operation failed")
 		_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "internal server error")

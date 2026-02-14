@@ -834,6 +834,7 @@ func (c *Coordinator) Publish(ctx context.Context, event *pb.WatchEvent) {
 		TimestampUnix:   event.TimestampUnix,
 		OriginInstance:  event.OriginInstance,
 		OriginSandboxId: event.OriginSandboxId,
+		InvalidateId:    event.InvalidateId,
 	}
 	if clone.OriginInstance == "" {
 		clone.OriginInstance = c.GetInstanceID()

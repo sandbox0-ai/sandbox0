@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/juicedata/juicefs/pkg/chunk"
 	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/juicedata/juicefs/pkg/object"
@@ -48,11 +49,26 @@ type VolumeContext struct {
 	RootPath  string
 }
 
+// MountSession tracks a single mount session on this instance.
+type MountSession struct {
+	ID        string
+	SandboxID string
+	CreatedAt time.Time
+}
+
+type invalidateTracker struct {
+	pending map[string]struct{}
+	done    chan struct{}
+	err     error
+}
+
 // Manager manages JuiceFS volumes
 type Manager struct {
 	mu               sync.RWMutex
 	volumes          map[string]*VolumeContext
 	sandboxToVolumes map[string]map[string]struct{} // sandboxID -> set of volumeIDs
+	mountSessions    map[string]map[string]*MountSession
+	invalidates      map[string]map[string]*invalidateTracker
 	logger           *logrus.Logger
 	config           *config.StorageProxyConfig
 	registrar        MountRegistrar // Optional: for distributed coordination
@@ -63,6 +79,8 @@ func NewManager(logger *logrus.Logger, cfg *config.StorageProxyConfig) *Manager 
 	return &Manager{
 		volumes:          make(map[string]*VolumeContext),
 		sandboxToVolumes: make(map[string]map[string]struct{}),
+		mountSessions:    make(map[string]map[string]*MountSession),
+		invalidates:      make(map[string]map[string]*invalidateTracker),
 		logger:           logger,
 		config:           cfg,
 	}
@@ -78,26 +96,35 @@ func (m *Manager) SetMountRegistrar(registrar MountRegistrar) {
 
 // MountVolume mounts a JuiceFS volume using SDK mode (in-memory, no FUSE).
 // AccessMode is enforced per storage-proxy instance (not per sandbox).
-func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID string, config *VolumeConfig, accessMode AccessMode) error {
+func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID string, config *VolumeConfig, accessMode AccessMode) (string, time.Time, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	accessMode = NormalizeAccessMode(string(accessMode))
 	readOnly := accessMode == AccessModeROX
+	sessionID := uuid.New().String()
+	sessionTime := time.Now()
 
 	// Validate mount with coordinator if available.
 	if m.registrar != nil {
 		if err := m.registrar.ValidateMount(ctx, volumeID, accessMode); err != nil {
-			return err
+			return "", time.Time{}, err
 		}
 	}
 
 	// Check if already mounted
 	if existing, exists := m.volumes[volumeID]; exists {
 		if existing.Access != accessMode {
-			return fmt.Errorf("volume %s already mounted with access_mode=%s", volumeID, existing.Access)
+			return "", time.Time{}, fmt.Errorf("volume %s already mounted with access_mode=%s", volumeID, existing.Access)
 		}
-		return nil
+		if m.mountSessions[volumeID] == nil {
+			m.mountSessions[volumeID] = make(map[string]*MountSession)
+		}
+		m.mountSessions[volumeID][sessionID] = &MountSession{
+			ID:        sessionID,
+			CreatedAt: sessionTime,
+		}
+		return sessionID, sessionTime, nil
 	}
 
 	m.logger.WithField("volume_id", volumeID).Info("Mounting volume")
@@ -115,13 +142,13 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID string, co
 	// Load or create format
 	format, err := metaClient.Load(true)
 	if err != nil {
-		return fmt.Errorf("failed to load juicefs format: %w", err)
+		return "", time.Time{}, fmt.Errorf("failed to load juicefs format: %w", err)
 	}
 
 	// 2. Initialize S3 object storage
 	blob, err := m.createS3Storage(config, s3Prefix, format)
 	if err != nil {
-		return fmt.Errorf("failed to create S3 storage: %w", err)
+		return "", time.Time{}, fmt.Errorf("failed to create S3 storage: %w", err)
 	}
 
 	// 3. Initialize chunk store with local cache
@@ -181,11 +208,11 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID string, co
 	// 5. Ensure per-volume root directory exists in JuiceFS namespace
 	rootPath, err := naming.JuiceFSVolumePath(volumeID)
 	if err != nil {
-		return fmt.Errorf("volume path: %w", err)
+		return "", time.Time{}, fmt.Errorf("volume path: %w", err)
 	}
 	rootInode, err := ensureVolumeRoot(metaClient, rootPath)
 	if err != nil {
-		return fmt.Errorf("ensure volume root: %w", err)
+		return "", time.Time{}, fmt.Errorf("ensure volume root: %w", err)
 	}
 
 	// 6. Store volume context
@@ -199,6 +226,13 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID string, co
 		MountedAt: time.Now(),
 		RootInode: rootInode,
 		RootPath:  rootPath,
+	}
+	if m.mountSessions[volumeID] == nil {
+		m.mountSessions[volumeID] = make(map[string]*MountSession)
+	}
+	m.mountSessions[volumeID][sessionID] = &MountSession{
+		ID:        sessionID,
+		CreatedAt: sessionTime,
 	}
 
 	// 7. Register mount for distributed coordination (if registrar is set)
@@ -217,7 +251,7 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID string, co
 		"access_mode": accessMode,
 	}).Info("Volume mounted successfully")
 
-	return nil
+	return sessionID, sessionTime, nil
 }
 
 // Use meta client directly to create the internal root path.
@@ -261,8 +295,8 @@ func ensureVolumeRoot(metaClient meta.Meta, path string) (meta.Ino, error) {
 	return current, nil
 }
 
-// UnmountVolume unmounts a volume
-func (m *Manager) UnmountVolume(ctx context.Context, volumeID string) error {
+// UnmountVolume unmounts a volume session and unmounts the volume if it is the last session.
+func (m *Manager) UnmountVolume(ctx context.Context, volumeID, sessionID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -270,6 +304,22 @@ func (m *Manager) UnmountVolume(ctx context.Context, volumeID string) error {
 	if !ok {
 		return fmt.Errorf("volume %s not mounted", volumeID)
 	}
+	if sessionID == "" {
+		return fmt.Errorf("missing mount session id")
+	}
+	sessions, ok := m.mountSessions[volumeID]
+	if !ok {
+		return fmt.Errorf("mount session %s not found for volume %s", sessionID, volumeID)
+	}
+	if _, ok := sessions[sessionID]; !ok {
+		return fmt.Errorf("mount session %s not found for volume %s", sessionID, volumeID)
+	}
+	delete(sessions, sessionID)
+	m.clearSessionFromInvalidatesLocked(volumeID, sessionID)
+	if len(sessions) > 0 {
+		return nil
+	}
+	delete(m.mountSessions, volumeID)
 
 	m.logger.WithField("volume_id", volumeID).Info("Unmounting volume")
 
@@ -335,6 +385,113 @@ func (m *Manager) GetVolume(volumeID string) (*VolumeContext, error) {
 	return volCtx, nil
 }
 
+// BeginInvalidate registers an invalidate event that requires remount acks.
+func (m *Manager) BeginInvalidate(volumeID, invalidateID string) (int, error) {
+	if invalidateID == "" {
+		return 0, fmt.Errorf("missing invalidate id")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	sessions := m.mountSessions[volumeID]
+	if len(sessions) == 0 {
+		return 0, nil
+	}
+	if m.invalidates[volumeID] == nil {
+		m.invalidates[volumeID] = make(map[string]*invalidateTracker)
+	}
+	if _, exists := m.invalidates[volumeID][invalidateID]; exists {
+		return 0, fmt.Errorf("invalidate %s already registered", invalidateID)
+	}
+	pending := make(map[string]struct{}, len(sessions))
+	for sessionID := range sessions {
+		pending[sessionID] = struct{}{}
+	}
+	m.invalidates[volumeID][invalidateID] = &invalidateTracker{
+		pending: pending,
+		done:    make(chan struct{}),
+	}
+	return len(pending), nil
+}
+
+// WaitForInvalidate waits until all sessions acknowledge the invalidate event.
+func (m *Manager) WaitForInvalidate(ctx context.Context, volumeID, invalidateID string) error {
+	m.mu.RLock()
+	tracker := m.invalidates[volumeID][invalidateID]
+	m.mu.RUnlock()
+	if tracker == nil {
+		return nil
+	}
+
+	select {
+	case <-tracker.done:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	tracker = m.invalidates[volumeID][invalidateID]
+	if tracker == nil {
+		return nil
+	}
+	err := tracker.err
+	delete(m.invalidates[volumeID], invalidateID)
+	if len(m.invalidates[volumeID]) == 0 {
+		delete(m.invalidates, volumeID)
+	}
+	return err
+}
+
+// AckInvalidate acknowledges an invalidate event for a mount session.
+func (m *Manager) AckInvalidate(volumeID, sessionID, invalidateID string, success bool, errorMessage string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	tracker := m.invalidates[volumeID][invalidateID]
+	if tracker == nil {
+		return nil
+	}
+	if _, ok := tracker.pending[sessionID]; !ok {
+		return nil
+	}
+	delete(tracker.pending, sessionID)
+	if !success && tracker.err == nil {
+		if errorMessage == "" {
+			errorMessage = "remount failed"
+		}
+		tracker.err = fmt.Errorf("%s", errorMessage)
+	}
+	if tracker.err != nil || len(tracker.pending) == 0 {
+		select {
+		case <-tracker.done:
+		default:
+			close(tracker.done)
+		}
+	}
+	return nil
+}
+
+func (m *Manager) clearSessionFromInvalidatesLocked(volumeID, sessionID string) {
+	trackerMap := m.invalidates[volumeID]
+	if len(trackerMap) == 0 {
+		return
+	}
+	for _, tracker := range trackerMap {
+		if _, ok := tracker.pending[sessionID]; !ok {
+			continue
+		}
+		delete(tracker.pending, sessionID)
+		if tracker.err != nil || len(tracker.pending) == 0 {
+			select {
+			case <-tracker.done:
+			default:
+				close(tracker.done)
+			}
+		}
+	}
+}
+
 // UpdateVolumeRoot updates the root inode for a mounted volume.
 func (m *Manager) UpdateVolumeRoot(volumeID string, rootInode meta.Ino) error {
 	m.mu.Lock()
@@ -359,6 +516,22 @@ func (m *Manager) ListVolumes() []string {
 	}
 
 	return volumes
+}
+
+// ListMountSessions returns all mount session IDs for a volume.
+func (m *Manager) ListMountSessions(volumeID string) []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	sessions := m.mountSessions[volumeID]
+	if len(sessions) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(sessions))
+	for sessionID := range sessions {
+		ids = append(ids, sessionID)
+	}
+	return ids
 }
 
 // TrackVolume associates a volume with a sandbox for automatic cleanup
@@ -407,6 +580,8 @@ func (m *Manager) UnmountSandboxVolumes(ctx context.Context, sandboxID string) [
 			}
 
 			delete(m.volumes, volumeID)
+			delete(m.mountSessions, volumeID)
+			delete(m.invalidates, volumeID)
 		}
 
 		delete(m.sandboxToVolumes[sandboxID], volumeID)

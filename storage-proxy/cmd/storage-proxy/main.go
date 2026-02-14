@@ -323,11 +323,13 @@ func main() {
 	// Unmount all volumes
 	for _, volumeID := range volMgr.ListVolumes() {
 		zapLogger.Info("Unmounting volume", zap.String("volume_id", volumeID))
-		if err := volMgr.UnmountVolume(context.Background(), volumeID); err != nil {
-			zapLogger.Error("Failed to unmount volume",
-				zap.String("volume_id", volumeID),
-				zap.Error(err),
-			)
+		for _, sessionID := range volMgr.ListMountSessions(volumeID) {
+			if err := volMgr.UnmountVolume(context.Background(), volumeID, sessionID); err != nil {
+				zapLogger.Error("Failed to unmount volume",
+					zap.String("volume_id", volumeID),
+					zap.Error(err),
+				)
+			}
 		}
 	}
 

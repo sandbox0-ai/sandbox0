@@ -4,7 +4,6 @@ import (
 	"context"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/juicedata/juicefs/pkg/vfs"
@@ -88,7 +87,7 @@ func (s *FileSystemServer) MountVolume(ctx context.Context, req *pb.MountVolumeR
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
-	err = s.volMgr.MountVolume(ctx, prefix, req.VolumeId, config, accessMode)
+	sessionID, mountedAt, err := s.volMgr.MountVolume(ctx, prefix, req.VolumeId, config, accessMode)
 	if err != nil {
 		s.logger.WithError(err).WithField("volume_id", req.VolumeId).Error("Failed to mount volume")
 		return nil, status.Error(codes.Internal, err.Error())
@@ -101,19 +100,38 @@ func (s *FileSystemServer) MountVolume(ctx context.Context, req *pb.MountVolumeR
 	}).Info("Volume mounted with team prefix")
 
 	return &pb.MountVolumeResponse{
-		VolumeId:  req.VolumeId,
-		MountedAt: time.Now().Unix(),
+		VolumeId:       req.VolumeId,
+		MountedAt:      mountedAt.Unix(),
+		MountSessionId: sessionID,
 	}, nil
 }
 
 // UnmountVolume unmounts a volume
 func (s *FileSystemServer) UnmountVolume(ctx context.Context, req *pb.UnmountVolumeRequest) (*pb.Empty, error) {
-	err := s.volMgr.UnmountVolume(ctx, req.VolumeId)
+	if req.MountSessionId == "" {
+		return nil, status.Error(codes.InvalidArgument, "mount_session_id is required")
+	}
+	err := s.volMgr.UnmountVolume(ctx, req.VolumeId, req.MountSessionId)
 	if err != nil {
 		s.logger.WithError(err).WithField("volume_id", req.VolumeId).Error("Failed to unmount volume")
+		if strings.Contains(err.Error(), "not mounted") || strings.Contains(err.Error(), "not found") {
+			return nil, status.Error(codes.NotFound, err.Error())
+		}
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
+	return &pb.Empty{}, nil
+}
+
+// AckInvalidate acknowledges a volume invalidate event after remount.
+func (s *FileSystemServer) AckInvalidate(ctx context.Context, req *pb.AckInvalidateRequest) (*pb.Empty, error) {
+	if req == nil || req.VolumeId == "" || req.MountSessionId == "" || req.InvalidateId == "" {
+		return nil, status.Error(codes.InvalidArgument, "volume_id, mount_session_id and invalidate_id are required")
+	}
+	if err := s.volMgr.AckInvalidate(req.VolumeId, req.MountSessionId, req.InvalidateId, req.Success, req.ErrorMessage); err != nil {
+		s.logger.WithError(err).WithField("volume_id", req.VolumeId).Error("Failed to ack invalidate")
+		return nil, status.Error(codes.Internal, err.Error())
+	}
 	return &pb.Empty{}, nil
 }
 

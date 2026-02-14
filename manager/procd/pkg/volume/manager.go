@@ -18,14 +18,15 @@ import (
 )
 
 type mountInfo struct {
-	volumeID    string
-	mountPoint  string
-	mountedAt   time.Time
-	fuseServer  *fuse.Server
-	fs          *grpcFS
-	cancelWatch context.CancelFunc
-	watchDone   chan struct{}
-	remounting  bool
+	volumeID       string
+	mountPoint     string
+	mountedAt      time.Time
+	mountSessionID string
+	fuseServer     *fuse.Server
+	fs             *grpcFS
+	cancelWatch    context.CancelFunc
+	watchDone      chan struct{}
+	remounting     bool
 }
 
 // Manager manages sandbox volume mounts in a sandbox.
@@ -106,24 +107,26 @@ func (m *Manager) Mount(ctx context.Context, req *MountRequest) (*MountResponse,
 	}
 
 	volumeConfig := m.mergeVolumeConfig(req.VolumeConfig)
-	if err := m.mountVolumeRemote(ctx, client, req.SandboxVolumeID, volumeConfig); err != nil {
+	mountSessionID, err := m.mountVolumeRemote(ctx, client, req.SandboxVolumeID, volumeConfig)
+	if err != nil {
 		return nil, err
 	}
 
 	fs := newGrpcFS(req.SandboxVolumeID, client, m.tokenProvider, m.cfg.CacheTTL, m.logger)
 	server, err := m.mountFuse(fs, mountPoint)
 	if err != nil {
-		_ = m.unmountVolumeRemote(ctx, client, req.SandboxVolumeID)
+		_ = m.unmountVolumeRemote(ctx, client, req.SandboxVolumeID, mountSessionID)
 		return nil, err
 	}
 
 	info := &mountInfo{
-		volumeID:   req.SandboxVolumeID,
-		mountPoint: mountPoint,
-		mountedAt:  time.Now(),
-		fuseServer: server,
-		fs:         fs,
-		watchDone:  make(chan struct{}),
+		volumeID:       req.SandboxVolumeID,
+		mountPoint:     mountPoint,
+		mountedAt:      time.Now(),
+		mountSessionID: mountSessionID,
+		fuseServer:     server,
+		fs:             fs,
+		watchDone:      make(chan struct{}),
 	}
 	m.startWatch(info, req)
 
@@ -136,13 +139,17 @@ func (m *Manager) Mount(ctx context.Context, req *MountRequest) (*MountResponse,
 		SandboxVolumeID: req.SandboxVolumeID,
 		MountPoint:      mountPoint,
 		MountedAt:       info.mountedAt.Format(time.RFC3339),
+		MountSessionID:  mountSessionID,
 	}, nil
 }
 
 // Unmount unmounts a sandbox volume.
-func (m *Manager) Unmount(ctx context.Context, volumeID string) error {
+func (m *Manager) Unmount(ctx context.Context, volumeID, mountSessionID string) error {
 	if volumeID == "" {
 		return fmt.Errorf("missing volume id")
+	}
+	if mountSessionID == "" {
+		return fmt.Errorf("missing mount session id")
 	}
 
 	m.mu.RLock()
@@ -150,6 +157,9 @@ func (m *Manager) Unmount(ctx context.Context, volumeID string) error {
 	m.mu.RUnlock()
 	if !ok {
 		return ErrVolumeNotMounted
+	}
+	if info.mountSessionID != mountSessionID {
+		return ErrMountSessionNotFound
 	}
 
 	if info.cancelWatch != nil {
@@ -167,7 +177,7 @@ func (m *Manager) Unmount(ctx context.Context, volumeID string) error {
 	if err != nil {
 		return err
 	}
-	if err := m.unmountVolumeRemote(ctx, client, volumeID); err != nil {
+	if err := m.unmountVolumeRemote(ctx, client, volumeID, info.mountSessionID); err != nil {
 		return err
 	}
 
@@ -192,6 +202,7 @@ func (m *Manager) GetStatus() []MountStatus {
 			MountPoint:          info.mountPoint,
 			MountedAt:           info.mountedAt.Format(time.RFC3339),
 			MountedDurationSecs: int64(now.Sub(info.mountedAt).Seconds()),
+			MountSessionID:      info.mountSessionID,
 		})
 	}
 	return status
@@ -200,16 +211,16 @@ func (m *Manager) GetStatus() []MountStatus {
 // Cleanup unmounts all volumes.
 func (m *Manager) Cleanup() {
 	m.mu.RLock()
-	volumes := make([]string, 0, len(m.mounts))
-	for volumeID := range m.mounts {
-		volumes = append(volumes, volumeID)
+	volumes := make([]*mountInfo, 0, len(m.mounts))
+	for _, info := range m.mounts {
+		volumes = append(volumes, info)
 	}
 	m.mu.RUnlock()
 
-	for _, volumeID := range volumes {
-		if err := m.Unmount(context.Background(), volumeID); err != nil {
+	for _, info := range volumes {
+		if err := m.Unmount(context.Background(), info.volumeID, info.mountSessionID); err != nil {
 			m.logger.Warn("Failed to unmount volume during cleanup",
-				zap.String("volume_id", volumeID),
+				zap.String("volume_id", info.volumeID),
 				zap.Error(err),
 			)
 		}
@@ -335,33 +346,68 @@ func (m *Manager) mergeVolumeConfig(override *VolumeConfig) *pb.VolumeConfig {
 	}
 }
 
-func (m *Manager) mountVolumeRemote(ctx context.Context, client pb.FileSystemClient, volumeID string, cfg *pb.VolumeConfig) error {
+func (m *Manager) mountVolumeRemote(ctx context.Context, client pb.FileSystemClient, volumeID string, cfg *pb.VolumeConfig) (string, error) {
 	callCtx, err := m.withToken(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
-	_, err = client.MountVolume(callCtx, &pb.MountVolumeRequest{
+	resp, err := client.MountVolume(callCtx, &pb.MountVolumeRequest{
 		VolumeId: volumeID,
 		Config:   cfg,
 	})
 	if err != nil {
-		return fmt.Errorf("mount volume via storage-proxy: %w", err)
+		return "", fmt.Errorf("mount volume via storage-proxy: %w", err)
 	}
-	return nil
+	if resp == nil || resp.MountSessionId == "" {
+		return "", fmt.Errorf("mount volume via storage-proxy: missing mount session id")
+	}
+	return resp.MountSessionId, nil
 }
 
-func (m *Manager) unmountVolumeRemote(ctx context.Context, client pb.FileSystemClient, volumeID string) error {
+func (m *Manager) unmountVolumeRemote(ctx context.Context, client pb.FileSystemClient, volumeID, mountSessionID string) error {
 	callCtx, err := m.withToken(ctx)
 	if err != nil {
 		return err
 	}
 	_, err = client.UnmountVolume(callCtx, &pb.UnmountVolumeRequest{
-		VolumeId: volumeID,
+		VolumeId:       volumeID,
+		MountSessionId: mountSessionID,
 	})
 	if err != nil {
 		return fmt.Errorf("unmount volume via storage-proxy: %w", err)
 	}
 	return nil
+}
+
+func (m *Manager) ackInvalidate(ctx context.Context, volumeID, mountSessionID, invalidateID string, remountErr error) {
+	if volumeID == "" || mountSessionID == "" || invalidateID == "" {
+		return
+	}
+	client, err := m.getClient(ctx)
+	if err != nil {
+		m.logger.Warn("Failed to get storage-proxy client to ack invalidate", zap.Error(err))
+		return
+	}
+	callCtx, err := m.withToken(ctx)
+	if err != nil {
+		m.logger.Warn("Failed to get internal token to ack invalidate", zap.Error(err))
+		return
+	}
+	success := remountErr == nil
+	errorMessage := ""
+	if remountErr != nil {
+		errorMessage = remountErr.Error()
+	}
+	_, err = client.AckInvalidate(callCtx, &pb.AckInvalidateRequest{
+		VolumeId:       volumeID,
+		MountSessionId: mountSessionID,
+		InvalidateId:   invalidateID,
+		Success:        success,
+		ErrorMessage:   errorMessage,
+	})
+	if err != nil {
+		m.logger.Warn("Failed to ack invalidate", zap.Error(err))
+	}
 }
 
 func (m *Manager) mountFuse(fs *grpcFS, mountPoint string) (*fuse.Server, error) {
@@ -436,7 +482,7 @@ func (m *Manager) emitWatchEvent(info *mountInfo, event *pb.WatchEvent) {
 	}
 
 	if event.EventType == pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE && (event.Path == "" || event.Path == "/") {
-		go m.remountVolume(info.volumeID)
+		go m.remountVolume(info.volumeID, info.mountSessionID, event.InvalidateId)
 		return
 	}
 
@@ -465,7 +511,7 @@ func joinMountPath(mountPoint, path string) string {
 	return filepath.Join(mountPoint, trimmed)
 }
 
-func (m *Manager) remountVolume(volumeID string) {
+func (m *Manager) remountVolume(volumeID, mountSessionID, invalidateID string) {
 	m.mu.Lock()
 	info, ok := m.mounts[volumeID]
 	if !ok || info == nil || info.remounting {
@@ -475,6 +521,7 @@ func (m *Manager) remountVolume(volumeID string) {
 	info.remounting = true
 	mountPoint := info.mountPoint
 	m.mu.Unlock()
+	remountErr := error(nil)
 
 	defer func() {
 		m.mu.Lock()
@@ -482,6 +529,9 @@ func (m *Manager) remountVolume(volumeID string) {
 			info.remounting = false
 		}
 		m.mu.Unlock()
+		if invalidateID != "" {
+			m.ackInvalidate(context.Background(), volumeID, mountSessionID, invalidateID, remountErr)
+		}
 	}()
 
 	m.logger.Info("Remounting volume to invalidate cache",
@@ -497,6 +547,7 @@ func (m *Manager) remountVolume(volumeID string) {
 
 	client, err := m.getClient(context.Background())
 	if err != nil {
+		remountErr = err
 		m.logger.Warn("Failed to get storage-proxy client during remount", zap.Error(err))
 		return
 	}
@@ -504,6 +555,7 @@ func (m *Manager) remountVolume(volumeID string) {
 	fs := newGrpcFS(volumeID, client, m.tokenProvider, m.cfg.CacheTTL, m.logger)
 	server, err := m.mountFuse(fs, mountPoint)
 	if err != nil {
+		remountErr = err
 		m.logger.Warn("Failed to remount fuse server", zap.Error(err))
 		return
 	}

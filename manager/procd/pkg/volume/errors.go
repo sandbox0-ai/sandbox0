@@ -13,6 +13,8 @@ var (
 	ErrMountPointInUse = errors.New("mount point already in use")
 	// ErrInvalidMountPoint indicates the mount point is invalid.
 	ErrInvalidMountPoint = errors.New("invalid mount point")
+	// ErrMountSessionNotFound indicates the mount session is not found.
+	ErrMountSessionNotFound = errors.New("mount session not found")
 	// ErrMissingInternalToken indicates the storage-proxy token is missing.
 	ErrMissingInternalToken = errors.New("missing internal token")
 	// ErrStorageProxyUnavailable indicates storage-proxy config is missing.

@@ -3281,13 +3281,17 @@ components:
           type: string
         mounted_at:
           type: string
-      required: [sandboxvolume_id, mount_point, mounted_at]
+        mount_session_id:
+          type: string
+      required: [sandboxvolume_id, mount_point, mounted_at, mount_session_id]
     UnmountRequest:
       type: object
       properties:
         sandboxvolume_id:
           type: string
-      required: [sandboxvolume_id]
+        mount_session_id:
+          type: string
+      required: [sandboxvolume_id, mount_session_id]
     MountStatus:
       type: object
       properties:
@@ -3300,6 +3304,8 @@ components:
         mounted_duration_sec:
           type: integer
           format: int64
+        mount_session_id:
+          type: string
     SuccessMountResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"

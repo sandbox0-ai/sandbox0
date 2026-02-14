@@ -1969,6 +1969,10 @@ spec:
                           metricsPort:
                             default: 9090
                             type: integer
+                          restoreRemountTimeout:
+                            default: 30s
+                            description: Snapshot restore
+                            type: string
                           watchEventQueueSize:
                             default: 256
                             type: integer

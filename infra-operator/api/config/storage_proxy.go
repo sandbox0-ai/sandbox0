@@ -154,6 +154,11 @@ type StorageProxyConfig struct {
 	// +kubebuilder:default=256
 	WatchEventQueueSize int `yaml:"watch_event_queue_size" json:"watchEventQueueSize"`
 
+	// Snapshot restore
+	// +optional
+	// +kubebuilder:default="30s"
+	RestoreRemountTimeout string `yaml:"restore_remount_timeout" json:"restoreRemountTimeout"`
+
 	// Kubernetes
 	// +optional
 	KubeconfigPath string `yaml:"kubeconfig_path" json:"kubeconfigPath"` // Path to kubeconfig file (empty for in-cluster config)

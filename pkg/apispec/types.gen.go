@@ -606,6 +606,7 @@ type MountRequest struct {
 // MountResponse defines model for MountResponse.
 type MountResponse struct {
 	MountPoint      string `json:"mount_point"`
+	MountSessionId  string `json:"mount_session_id"`
 	MountedAt       string `json:"mounted_at"`
 	SandboxvolumeId string `json:"sandboxvolume_id"`
 }
@@ -613,6 +614,7 @@ type MountResponse struct {
 // MountStatus defines model for MountStatus.
 type MountStatus struct {
 	MountPoint         *string `json:"mount_point,omitempty"`
+	MountSessionId     *string `json:"mount_session_id,omitempty"`
 	MountedAt          *string `json:"mounted_at,omitempty"`
 	MountedDurationSec *int64  `json:"mounted_duration_sec,omitempty"`
 	SandboxvolumeId    *string `json:"sandboxvolume_id,omitempty"`
@@ -1441,6 +1443,7 @@ type TplSandboxNetworkPolicyMode string
 
 // UnmountRequest defines model for UnmountRequest.
 type UnmountRequest struct {
+	MountSessionId  string `json:"mount_session_id"`
 	SandboxvolumeId string `json:"sandboxvolume_id"`
 }
 

@@ -77,10 +77,18 @@ func (h *VolumeHandler) Unmount(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_sandboxvolume_id", "sandboxvolume_id is required")
 		return
 	}
+	if req.MountSessionID == "" {
+		writeError(w, http.StatusBadRequest, "invalid_mount_session_id", "mount_session_id is required")
+		return
+	}
 
-	err := h.manager.Unmount(r.Context(), req.SandboxVolumeID)
+	err := h.manager.Unmount(r.Context(), req.SandboxVolumeID, req.MountSessionID)
 	if err != nil {
 		if err == volume.ErrVolumeNotMounted {
+			writeError(w, http.StatusNotFound, "not_mounted", err.Error())
+			return
+		}
+		if err == volume.ErrMountSessionNotFound {
 			writeError(w, http.StatusNotFound, "not_mounted", err.Error())
 			return
 		}

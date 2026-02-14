@@ -27,6 +27,8 @@ import (
 type volumeProvider interface {
 	GetVolume(string) (*volume.VolumeContext, error)
 	UpdateVolumeRoot(volumeID string, rootInode meta.Ino) error
+	BeginInvalidate(volumeID, invalidateID string) (int, error)
+	WaitForInvalidate(ctx context.Context, volumeID, invalidateID string) error
 }
 
 type repository interface {
@@ -60,6 +62,7 @@ var (
 	ErrFlushFailed               = errors.New("flush failed on one or more nodes")
 	ErrCloneFailed               = errors.New("clone operation failed")
 	ErrVolumeBusy                = errors.New("volume is busy, try again later")
+	ErrRemountTimeout            = errors.New("remount timeout")
 	errPathNotFound              = errors.New("path not found")
 )
 
@@ -489,7 +492,32 @@ func (m *Manager) RestoreSnapshot(ctx context.Context, req *RestoreSnapshotReque
 		"clone_count": cloneCount,
 	}).Info("Snapshot restored successfully")
 
-	m.publishInvalidateEvent(req.VolumeID)
+	invalidateID := uuid.New().String()
+	pending := 0
+	if m.volMgr != nil {
+		var beginErr error
+		pending, beginErr = m.volMgr.BeginInvalidate(req.VolumeID, invalidateID)
+		if beginErr != nil {
+			return fmt.Errorf("begin invalidate: %w", beginErr)
+		}
+	}
+	m.publishInvalidateEvent(req.VolumeID, invalidateID)
+	if pending > 0 && m.volMgr != nil {
+		timeout := 30 * time.Second
+		if m.config != nil && strings.TrimSpace(m.config.RestoreRemountTimeout) != "" {
+			if parsed, err := time.ParseDuration(m.config.RestoreRemountTimeout); err == nil {
+				timeout = parsed
+			}
+		}
+		waitCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		if err := m.volMgr.WaitForInvalidate(waitCtx, req.VolumeID, invalidateID); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				return ErrRemountTimeout
+			}
+			return err
+		}
+	}
 	return nil
 }
 
@@ -700,7 +728,7 @@ func (m *Manager) deleteSnapshotDir(ctx context.Context, snapshotPath string) {
 	}
 }
 
-func (m *Manager) publishInvalidateEvent(volumeID string) {
+func (m *Manager) publishInvalidateEvent(volumeID, invalidateID string) {
 	m.mu.RLock()
 	publisher := m.eventPublisher
 	podID := m.podID
@@ -715,6 +743,7 @@ func (m *Manager) publishInvalidateEvent(volumeID string) {
 		Path:           "/",
 		TimestampUnix:  time.Now().Unix(),
 		OriginInstance: podID,
+		InvalidateId:   invalidateID,
 	})
 }
 

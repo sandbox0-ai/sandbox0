@@ -42,11 +42,13 @@ type MountResponse struct {
 	SandboxVolumeID string `json:"sandboxvolume_id"`
 	MountPoint      string `json:"mount_point"`
 	MountedAt       string `json:"mounted_at"`
+	MountSessionID  string `json:"mount_session_id"`
 }
 
 // UnmountRequest represents a request to unmount a sandbox volume.
 type UnmountRequest struct {
 	SandboxVolumeID string `json:"sandboxvolume_id"`
+	MountSessionID  string `json:"mount_session_id"`
 }
 
 // MountStatus represents the current status of a mount.
@@ -55,6 +57,7 @@ type MountStatus struct {
 	MountPoint          string `json:"mount_point"`
 	MountedAt           string `json:"mounted_at"`
 	MountedDurationSecs int64  `json:"mounted_duration_sec"`
+	MountSessionID      string `json:"mount_session_id"`
 }
 
 // TokenProvider supplies the internal token for storage-proxy gRPC calls.

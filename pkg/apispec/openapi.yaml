@@ -2501,7 +2501,7 @@ components:
           $ref: "#/components/schemas/WebhookConfig"
         auto_resume:
           type: boolean
-          default: false
+          default: true
           description: |
             Sandbox-level resume gate for paused sandboxes. When false, any inbound request
             (API or public exposure) must not auto resume the sandbox.

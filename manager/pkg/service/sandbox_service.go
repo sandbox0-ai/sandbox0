@@ -1070,7 +1070,7 @@ func (s *SandboxService) podToSandbox(ctx context.Context, pod *corev1.Pod, sand
 	}
 
 	cfg := parseSandboxConfig(pod.Annotations[controller.AnnotationConfig])
-	autoResume := false
+	autoResume := true
 	if cfg.AutoResume != nil {
 		autoResume = *cfg.AutoResume
 	}

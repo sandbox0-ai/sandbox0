@@ -37,11 +37,11 @@ func TestListSandboxes(t *testing.T) {
 	now := time.Now()
 
 	tests := []struct {
-		name           string
-		pods           []*corev1.Pod
-		req            *ListSandboxesRequest
-		expectedCount  int
-		expectedIDs    []string
+		name            string
+		pods            []*corev1.Pod
+		req             *ListSandboxesRequest
+		expectedCount   int
+		expectedIDs     []string
 		expectedHasMore bool
 	}{
 		{
@@ -56,8 +56,8 @@ func TestListSandboxes(t *testing.T) {
 				Limit:  50,
 				Offset: 0,
 			},
-			expectedCount:  2,
-			expectedIDs:    []string{"sandbox-2", "sandbox-1"}, // sorted by created_at desc
+			expectedCount:   2,
+			expectedIDs:     []string{"sandbox-2", "sandbox-1"}, // sorted by created_at desc
 			expectedHasMore: false,
 		},
 		{
@@ -73,8 +73,8 @@ func TestListSandboxes(t *testing.T) {
 				Limit:  50,
 				Offset: 0,
 			},
-			expectedCount:  1,
-			expectedIDs:    []string{"sandbox-1"},
+			expectedCount:   1,
+			expectedIDs:     []string{"sandbox-1"},
 			expectedHasMore: false,
 		},
 		{
@@ -90,7 +90,7 @@ func TestListSandboxes(t *testing.T) {
 				Limit:      50,
 				Offset:     0,
 			},
-			expectedCount:  2,
+			expectedCount:   2,
 			expectedHasMore: false,
 		},
 		{
@@ -106,8 +106,8 @@ func TestListSandboxes(t *testing.T) {
 				Limit:  50,
 				Offset: 0,
 			},
-			expectedCount:  1,
-			expectedIDs:    []string{"sandbox-2"},
+			expectedCount:   1,
+			expectedIDs:     []string{"sandbox-2"},
 			expectedHasMore: false,
 		},
 		{
@@ -122,8 +122,8 @@ func TestListSandboxes(t *testing.T) {
 				Limit:  2,
 				Offset: 0,
 			},
-			expectedCount:  3,
-			expectedIDs:    []string{"sandbox-3", "sandbox-2"},
+			expectedCount:   3,
+			expectedIDs:     []string{"sandbox-3", "sandbox-2"},
 			expectedHasMore: true,
 		},
 		{
@@ -138,8 +138,8 @@ func TestListSandboxes(t *testing.T) {
 				Limit:  2,
 				Offset: 1,
 			},
-			expectedCount:  3,
-			expectedIDs:    []string{"sandbox-2", "sandbox-1"},
+			expectedCount:   3,
+			expectedIDs:     []string{"sandbox-2", "sandbox-1"},
 			expectedHasMore: false,
 		},
 		{
@@ -153,8 +153,8 @@ func TestListSandboxes(t *testing.T) {
 				Limit:  50,
 				Offset: 0,
 			},
-			expectedCount:  1,
-			expectedIDs:    []string{"sandbox-1"},
+			expectedCount:   1,
+			expectedIDs:     []string{"sandbox-1"},
 			expectedHasMore: false,
 		},
 		{
@@ -167,8 +167,8 @@ func TestListSandboxes(t *testing.T) {
 				Limit:  50,
 				Offset: 0,
 			},
-			expectedCount:  0,
-			expectedIDs:    nil,
+			expectedCount:   0,
+			expectedIDs:     nil,
 			expectedHasMore: false,
 		},
 	}

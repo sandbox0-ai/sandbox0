@@ -243,7 +243,7 @@ const client = new Sandbox0({ apiKey: 'your-api-key' });
 ```
 
 ```go
-import "github.com/sandbox0/sdk-go"
+import "github.com/sandbox0-ai/sdk-go"
 
 client := sandbox0.NewClient(sandbox0.WithAPIKey("your-api-key"))
 ```

@@ -122,6 +122,54 @@ type ManagerConfig struct {
 	PublicRootDomain string `yaml:"public_root_domain" json:"-"`
 	// +optional
 	PublicRegionID string `yaml:"public_region_id" json:"-"`
+
+	// Autoscaler config for pool scaling behavior
+	// +optional
+	// +kubebuilder:default={}
+	Autoscaler AutoscalerConfig `yaml:"autoscaler" json:"autoscaler"`
+}
+
+// AutoscalerConfig holds autoscaler settings for pool scaling behavior.
+type AutoscalerConfig struct {
+	// MinScaleInterval is the minimum time between scale operations for a template.
+	// This prevents thundering herd when multiple cold claims arrive simultaneously.
+	// +optional
+	// +kubebuilder:default="100ms"
+	MinScaleInterval metav1.Duration `yaml:"min_scale_interval" json:"minScaleInterval"`
+
+	// ScaleUpFactor determines how aggressively to scale up.
+	// When cold claim occurs, newReplicas = current * ScaleUpFactor.
+	// +optional
+	// +kubebuilder:default=1.5
+	ScaleUpFactor float64 `yaml:"scale_up_factor" json:"scaleUpFactor"`
+
+	// MaxScaleStep caps the maximum pods to add in a single scale operation.
+	// +optional
+	// +kubebuilder:default=10
+	MaxScaleStep int32 `yaml:"max_scale_step" json:"maxScaleStep"`
+
+	// MinIdleBuffer is the minimum number of idle pods to maintain above minIdle.
+	// When idle count drops to minIdle + MinIdleBuffer, proactive scaling kicks in.
+	// +optional
+	// +kubebuilder:default=2
+	MinIdleBuffer int32 `yaml:"min_idle_buffer" json:"minIdleBuffer"`
+
+	// TargetIdleRatio is the target ratio of idle pods to active pods.
+	// Formula: desiredIdle = active * TargetIdleRatio
+	// +optional
+	// +kubebuilder:default=0.2
+	TargetIdleRatio float64 `yaml:"target_idle_ratio" json:"targetIdleRatio"`
+
+	// NoTrafficScaleDownAfter is the duration without any claims before scaling down.
+	// Scale down is still async and happens in the background reconcile loop.
+	// +optional
+	// +kubebuilder:default="10m"
+	NoTrafficScaleDownAfter metav1.Duration `yaml:"no_traffic_scale_down_after" json:"noTrafficScaleDownAfter"`
+
+	// ScaleDownPercent is the percentage to reduce replicas during scale down.
+	// +optional
+	// +kubebuilder:default=0.1
+	ScaleDownPercent float64 `yaml:"scale_down_percent" json:"scaleDownPercent"`
 }
 
 // RegistryConfig holds registry settings for manager.

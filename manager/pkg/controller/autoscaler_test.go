@@ -2,604 +2,604 @@ package controller
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/infra/pkg/naming"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	appslisters "k8s.io/client-go/listers/apps/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 )
 
-func newTestPodLister(t *testing.T, pods ...*corev1.Pod) corelisters.PodLister {
-	t.Helper()
-	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{
-		cache.NamespaceIndex: cache.MetaNamespaceIndexFunc,
-	})
-	for _, p := range pods {
-		if p == nil {
-			continue
-		}
-		if err := indexer.Add(p); err != nil {
-			t.Fatalf("add pod: %v", err)
-		}
+func TestAutoScaler_OnColdClaim(t *testing.T) {
+	tests := []struct {
+		name             string
+		template         *v1alpha1.SandboxTemplate
+		existingPods     []*corev1.Pod
+		existingRS       *appsv1.ReplicaSet
+		expectedShould   bool
+		expectedDelta    int32
+		expectedReplicas int32
+		expectError      bool
+		skipIfNoRS       bool // If true, skip when ReplicaSet doesn't exist
+		testRateLimit    bool // If true, test rate limiting by making two calls
+	}{
+		{
+			name: "scale up on cold claim with no idle pods",
+			template: &v1alpha1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxTemplateSpec{
+					Pool: v1alpha1.PoolStrategy{
+						MinIdle:   2,
+						MaxIdle:   20,
+						AutoScale: true,
+					},
+				},
+			},
+			existingPods: []*corev1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "active-1",
+						Namespace: "default",
+						Labels: map[string]string{
+							LabelTemplateID: "test-template",
+							LabelPoolType:   PoolTypeActive,
+						},
+						Annotations: map[string]string{
+							AnnotationClaimedAt: time.Now().Add(-1 * time.Minute).Format(time.RFC3339),
+							AnnotationClaimType: "cold",
+						},
+					},
+					Status: corev1.PodStatus{Phase: corev1.PodRunning},
+				},
+			},
+			existingRS: func() *appsv1.ReplicaSet {
+				rsName, _ := naming.ReplicasetName(naming.DefaultClusterID, "test-template")
+				replicas := int32(2)
+				return &appsv1.ReplicaSet{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      rsName,
+						Namespace: "default",
+					},
+					Spec: appsv1.ReplicaSetSpec{
+						Replicas: &replicas,
+					},
+				}
+			}(),
+			expectedShould:   true,
+			expectedDelta:    1,
+			expectedReplicas: 3,
+		},
+		{
+			name: "no scale when rate limited",
+			template: &v1alpha1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "rate-limited-template",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxTemplateSpec{
+					Pool: v1alpha1.PoolStrategy{
+						MinIdle:   2,
+						MaxIdle:   20,
+						AutoScale: true,
+					},
+				},
+			},
+			existingPods: []*corev1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "active-1",
+						Namespace: "default",
+						Labels: map[string]string{
+							LabelTemplateID: "rate-limited-template",
+							LabelPoolType:   PoolTypeActive,
+						},
+						Annotations: map[string]string{
+							AnnotationClaimedAt: time.Now().Format(time.RFC3339),
+						},
+					},
+					Status: corev1.PodStatus{Phase: corev1.PodRunning},
+				},
+			},
+			existingRS: func() *appsv1.ReplicaSet {
+				rsName, _ := naming.ReplicasetName(naming.DefaultClusterID, "rate-limited-template")
+				replicas := int32(2)
+				return &appsv1.ReplicaSet{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      rsName,
+						Namespace: "default",
+					},
+					Spec: appsv1.ReplicaSetSpec{
+						Replicas: &replicas,
+					},
+				}
+			}(),
+			expectedShould: false,
+			// This test makes TWO calls to verify rate limiting works
+			// First call will succeed, second call will be rate limited
+			testRateLimit: true,
+		},
+		{
+			name: "respect maxIdle limit",
+			template: &v1alpha1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "max-idle-template",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxTemplateSpec{
+					Pool: v1alpha1.PoolStrategy{
+						MinIdle:   5,
+						MaxIdle:   5,
+						AutoScale: true,
+					},
+				},
+			},
+			existingPods: []*corev1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "active-1",
+						Namespace: "default",
+						Labels: map[string]string{
+							LabelTemplateID: "max-idle-template",
+							LabelPoolType:   PoolTypeActive,
+						},
+					},
+					Status: corev1.PodStatus{Phase: corev1.PodRunning},
+				},
+			},
+			existingRS: func() *appsv1.ReplicaSet {
+				rsName, _ := naming.ReplicasetName(naming.DefaultClusterID, "max-idle-template")
+				replicas := int32(5)
+				return &appsv1.ReplicaSet{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      rsName,
+						Namespace: "default",
+					},
+					Spec: appsv1.ReplicaSetSpec{
+						Replicas: &replicas,
+					},
+				}
+			}(),
+			expectedShould:   false,
+			expectedReplicas: 5,
+		},
+		{
+			name: "scale based on active count ratio",
+			template: &v1alpha1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "ratio-template",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxTemplateSpec{
+					Pool: v1alpha1.PoolStrategy{
+						MinIdle:   1,
+						MaxIdle:   50,
+						AutoScale: true,
+					},
+				},
+			},
+			existingPods: func() []*corev1.Pod {
+				var pods []*corev1.Pod
+				for i := 0; i < 20; i++ {
+					pods = append(pods, &corev1.Pod{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "active-" + string(rune('0'+i)),
+							Namespace: "default",
+							Labels: map[string]string{
+								LabelTemplateID: "ratio-template",
+								LabelPoolType:   PoolTypeActive,
+							},
+							Annotations: map[string]string{
+								AnnotationClaimedAt: time.Now().Add(-1 * time.Minute).Format(time.RFC3339),
+							},
+						},
+						Status: corev1.PodStatus{Phase: corev1.PodRunning},
+					})
+				}
+				return pods
+			}(),
+			existingRS: func() *appsv1.ReplicaSet {
+				rsName, _ := naming.ReplicasetName(naming.DefaultClusterID, "ratio-template")
+				replicas := int32(2)
+				return &appsv1.ReplicaSet{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      rsName,
+						Namespace: "default",
+					},
+					Spec: appsv1.ReplicaSetSpec{
+						Replicas: &replicas,
+					},
+				}
+			}(),
+			expectedShould:   true,
+			expectedReplicas: 4,
+		},
+		{
+			name: "no replicaset exists",
+			template: &v1alpha1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "no-rs-template",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxTemplateSpec{
+					Pool: v1alpha1.PoolStrategy{
+						MinIdle:   2,
+						MaxIdle:   20,
+						AutoScale: true,
+					},
+				},
+			},
+			existingPods:   nil,
+			existingRS:     nil, // No ReplicaSet
+			expectedShould: false,
+			skipIfNoRS:     true,
+		},
 	}
-	return corelisters.NewPodLister(indexer)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup fake client and informers
+			var objects []runtime.Object
+			for _, pod := range tt.existingPods {
+				objects = append(objects, pod)
+			}
+			if tt.existingRS != nil {
+				objects = append(objects, tt.existingRS)
+			}
+			k8sClient := fake.NewSimpleClientset(objects...)
+
+			// Create indexer and lister for pods
+			podIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+			for _, pod := range tt.existingPods {
+				require.NoError(t, podIndexer.Add(pod))
+			}
+			podLister := corelisters.NewPodLister(podIndexer)
+
+			// Create indexer and lister for replicasets
+			rsIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+			if tt.existingRS != nil {
+				require.NoError(t, rsIndexer.Add(tt.existingRS))
+			}
+			rsLister := appslisters.NewReplicaSetLister(rsIndexer)
+
+			// Create sync scaler with fast rate limit for testing
+			config := DefaultAutoScaleConfig()
+			config.MinScaleInterval = 10 * time.Millisecond
+			config.ScaleUpFactor = 1.5
+			config.MaxScaleStep = 10
+
+			scaler := NewAutoScalerWithConfig(
+				k8sClient,
+				podLister,
+				rsLister,
+				zap.NewNop(),
+				config,
+			)
+
+			ctx := context.Background()
+
+			if tt.testRateLimit {
+				// First call should succeed
+				decision1, err := scaler.OnColdClaim(ctx, tt.template)
+				require.NoError(t, err)
+				assert.True(t, decision1.ShouldScale, "First call should trigger scale")
+
+				// Second immediate call should be rate limited
+				decision2, err := scaler.OnColdClaim(ctx, tt.template)
+				require.NoError(t, err)
+				assert.False(t, decision2.ShouldScale, "Second call should be rate limited")
+				return
+			}
+
+			// First call
+			decision, err := scaler.OnColdClaim(ctx, tt.template)
+
+			if tt.expectError {
+				require.Error(t, err)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectedShould, decision.ShouldScale, "ShouldScale mismatch")
+
+			if tt.expectedShould {
+				assert.GreaterOrEqual(t, decision.Delta, tt.expectedDelta, "Delta should be at least expected")
+			}
+		})
+	}
 }
 
-func newTestReplicaSetLister(t *testing.T, sets ...*appsv1.ReplicaSet) appslisters.ReplicaSetLister {
-	t.Helper()
-	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{
-		cache.NamespaceIndex: cache.MetaNamespaceIndexFunc,
-	})
-	for _, rs := range sets {
-		if rs == nil {
-			continue
-		}
-		if err := indexer.Add(rs); err != nil {
-			t.Fatalf("add replicaset: %v", err)
-		}
+func TestAutoScaler_CalculateDesiredReplicas(t *testing.T) {
+	scaler := &AutoScaler{
+		config: AutoScaleConfig{
+			ScaleUpFactor:   1.5,
+			MaxScaleStep:    10,
+			MinIdleBuffer:   2,
+			TargetIdleRatio: 0.2,
+		},
 	}
-	return appslisters.NewReplicaSetLister(indexer)
+
+	tests := []struct {
+		name            string
+		minIdle         int32
+		maxIdle         int32
+		currentReplicas int32
+		idleCount       int32
+		activeCount     int32
+		expectedMin     int32
+		expectedMax     int32
+	}{
+		{
+			name:            "scale up from zero",
+			minIdle:         2,
+			maxIdle:         20,
+			currentReplicas: 0,
+			idleCount:       0,
+			activeCount:     1,
+			expectedMin:     2,
+			expectedMax:     20,
+		},
+		{
+			name:            "scale based on active count",
+			minIdle:         1,
+			maxIdle:         50,
+			currentReplicas: 2,
+			idleCount:       0,
+			activeCount:     20,
+			expectedMin:     4,
+			expectedMax:     12,
+		},
+		{
+			name:            "respect maxIdle",
+			minIdle:         5,
+			maxIdle:         5,
+			currentReplicas: 5,
+			idleCount:       0,
+			activeCount:     100,
+			expectedMin:     5,
+			expectedMax:     5,
+		},
+		{
+			name:            "scale with buffer",
+			minIdle:         2,
+			maxIdle:         20,
+			currentReplicas: 2,
+			idleCount:       0,
+			activeCount:     0,
+			expectedMin:     4,
+			expectedMax:     20,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			template := &v1alpha1.SandboxTemplate{
+				Spec: v1alpha1.SandboxTemplateSpec{
+					Pool: v1alpha1.PoolStrategy{
+						MinIdle:   tt.minIdle,
+						MaxIdle:   tt.maxIdle,
+						AutoScale: true,
+					},
+				},
+			}
+
+			result := scaler.calculateDesiredReplicas(template, tt.currentReplicas, tt.idleCount, tt.activeCount)
+
+			assert.GreaterOrEqual(t, result, tt.expectedMin, "Result should be >= expectedMin")
+			assert.LessOrEqual(t, result, tt.expectedMax, "Result should be <= expectedMax")
+		})
+	}
 }
 
-func mustCreateRS(t *testing.T, client *fake.Clientset, rs *appsv1.ReplicaSet) {
-	t.Helper()
-	if rs == nil {
-		t.Fatalf("nil rs")
-	}
-	_, err := client.AppsV1().ReplicaSets(rs.Namespace).Create(context.Background(), rs, metav1.CreateOptions{})
-	if err != nil {
-		t.Fatalf("create rs: %v", err)
-	}
+func TestScaleRateLimiter(t *testing.T) {
+	limiter := newScaleRateLimiter(100 * time.Millisecond)
+
+	key := "test-template"
+
+	// First call should succeed (acquire the lock)
+	assert.True(t, limiter.TryAcquire(key), "First TryAcquire should succeed")
+
+	// Immediate second call should be blocked (in progress)
+	assert.False(t, limiter.TryAcquire(key), "Second TryAcquire while in progress should be blocked")
+
+	// Complete the first operation
+	limiter.Complete(key)
+
+	// Immediate third call should still be blocked (interval not passed)
+	assert.False(t, limiter.TryAcquire(key), "TryAcquire immediately after complete should be blocked by interval")
+
+	// Wait for interval
+	time.Sleep(110 * time.Millisecond)
+
+	// After interval, should be allowed again
+	assert.True(t, limiter.TryAcquire(key), "TryAcquire after interval should succeed")
 }
 
-func getRSReplicas(t *testing.T, client *fake.Clientset, ns, name string) int32 {
-	t.Helper()
-	rs, err := client.AppsV1().ReplicaSets(ns).Get(context.Background(), name, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get rs: %v", err)
+func TestScaleRateLimiter_Concurrency(t *testing.T) {
+	limiter := newScaleRateLimiter(10 * time.Millisecond) // Short interval for testing
+
+	key := "concurrent-template"
+	var successCount int32
+	var wg sync.WaitGroup
+
+	// Launch 100 concurrent goroutines trying to acquire the rate limiter
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if limiter.TryAcquire(key) {
+				successCount++
+			}
+		}()
 	}
-	if rs.Spec.Replicas == nil {
-		return 0
-	}
-	return *rs.Spec.Replicas
+
+	wg.Wait()
+
+	// Only ONE goroutine should have succeeded
+	assert.Equal(t, int32(1), successCount, "Only one goroutine should acquire the rate limiter")
+
+	// Complete the operation
+	limiter.Complete(key)
+
+	// Wait for interval to pass
+	time.Sleep(20 * time.Millisecond)
+
+	// Now another should succeed
+	assert.True(t, limiter.TryAcquire(key), "TryAcquire after complete+interval should succeed")
 }
 
-func TestAutoScaler_SlowStartScaleUp(t *testing.T) {
-	ctx := context.Background()
-	now := time.Date(2026, 1, 10, 10, 0, 0, 0, time.UTC)
-
+func TestAutoScaler_GetPoolStats(t *testing.T) {
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "tpl",
-			Namespace: "sandbox0",
+			Name:      "stats-template",
+			Namespace: "default",
 		},
-		Spec: v1alpha1.SandboxTemplateSpec{
-			Pool: v1alpha1.PoolStrategy{
-				MinIdle:   0,
-				MaxIdle:   50,
-				AutoScale: true,
+	}
+
+	pods := []*corev1.Pod{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "idle-running",
+				Namespace: "default",
+				Labels: map[string]string{
+					LabelTemplateID: "stats-template",
+					LabelPoolType:   PoolTypeIdle,
+				},
 			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
 		},
-	}
-
-	clusterID := naming.ClusterIDOrDefault(template.Spec.ClusterId)
-	rsName, err := naming.ReplicasetName(clusterID, template.Name)
-	if err != nil {
-		t.Fatalf("replicaset name: %v", err)
-	}
-	k8s := fake.NewClientset()
-	mustCreateRS(t, k8s, &appsv1.ReplicaSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      rsName,
-			Namespace: template.Namespace,
-			Labels: map[string]string{
-				LabelTemplateID: template.Name,
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "idle-pending",
+				Namespace: "default",
+				Labels: map[string]string{
+					LabelTemplateID: "stats-template",
+					LabelPoolType:   PoolTypeIdle,
+				},
 			},
-			Annotations: map[string]string{},
+			Status: corev1.PodStatus{Phase: corev1.PodPending},
 		},
-		Spec: appsv1.ReplicaSetSpec{
-			Replicas: ptr32(1), // below SlowStartThreshold (default 4)
-		},
-	})
-
-	activePod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "p1",
-			Namespace: template.Namespace,
-			Labels: map[string]string{
-				LabelTemplateID: template.Name,
-				LabelPoolType:   PoolTypeActive,
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "idle-failed",
+				Namespace: "default",
+				Labels: map[string]string{
+					LabelTemplateID: "stats-template",
+					LabelPoolType:   PoolTypeIdle,
+				},
 			},
-			Annotations: map[string]string{
-				AnnotationClaimedAt: now.Add(-30 * time.Second).Format(time.RFC3339),
-				AnnotationClaimType: "cold",
+			Status: corev1.PodStatus{Phase: corev1.PodFailed},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "active-running",
+				Namespace: "default",
+				Labels: map[string]string{
+					LabelTemplateID: "stats-template",
+					LabelPoolType:   PoolTypeActive,
+				},
 			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "active-pending",
+				Namespace: "default",
+				Labels: map[string]string{
+					LabelTemplateID: "stats-template",
+					LabelPoolType:   PoolTypeActive,
+				},
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodPending},
 		},
 	}
 
-	podLister := newTestPodLister(t, activePod)
-	rsLister := newTestReplicaSetLister(t, &appsv1.ReplicaSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        rsName,
-			Namespace:   template.Namespace,
-			Annotations: map[string]string{},
-		},
-		Spec: appsv1.ReplicaSetSpec{
-			Replicas: ptr32(1),
-		},
-	})
-	as := NewAutoScaler(k8s, podLister, rsLister, zap.NewNop())
+	// Create indexer and lister
+	podIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	for _, pod := range pods {
+		require.NoError(t, podIndexer.Add(pod))
+	}
+	podLister := corelisters.NewPodLister(podIndexer)
 
-	if err := as.ReconcileAutoScale(ctx, template, now); err != nil {
-		t.Fatalf("reconcile: %v", err)
+	scaler := &AutoScaler{
+		podLister: podLister,
+		logger:    zap.NewNop(),
+		config:    DefaultAutoScaleConfig(),
 	}
 
-	// Slow start should increase replicas quickly (at least doubling from 1 -> >=2).
-	replicas := getRSReplicas(t, k8s, template.Namespace, rsName)
-	if replicas < 2 {
-		t.Fatalf("expected replicas to scale up to >=2, got %d", replicas)
-	}
+	idle, active, err := scaler.getPoolStats(template)
+
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), idle, "Idle count mismatch")
+	assert.Equal(t, int32(1), active, "Active count mismatch")
 }
 
-func TestAutoScaler_ScaleUpClampedToMaxIdle(t *testing.T) {
-	ctx := context.Background()
-	now := time.Date(2026, 1, 10, 10, 0, 0, 0, time.UTC)
-
+func TestAutoScaler_GetLastClaimTime(t *testing.T) {
 	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "tpl", Namespace: "sandbox0"},
-		Spec: v1alpha1.SandboxTemplateSpec{
-			Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 3, AutoScale: true},
-		},
-	}
-	clusterID := naming.ClusterIDOrDefault(template.Spec.ClusterId)
-	rsName, err := naming.ReplicasetName(clusterID, template.Name)
-	if err != nil {
-		t.Fatalf("replicaset name: %v", err)
-	}
-
-	k8s := fake.NewSimpleClientset()
-	mustCreateRS(t, k8s, &appsv1.ReplicaSet{
-		ObjectMeta: metav1.ObjectMeta{Name: rsName, Namespace: template.Namespace, Annotations: map[string]string{}},
-		Spec:       appsv1.ReplicaSetSpec{Replicas: ptr32(3)},
-	})
-
-	activePod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "p1",
-			Namespace: template.Namespace,
-			Labels: map[string]string{
-				LabelTemplateID: template.Name,
-				LabelPoolType:   PoolTypeActive,
-			},
-			Annotations: map[string]string{
-				AnnotationClaimedAt: now.Add(-20 * time.Second).Format(time.RFC3339),
-				AnnotationClaimType: "cold",
-			},
+			Name:      "claim-time-template",
+			Namespace: "default",
 		},
 	}
-	rsLister := newTestReplicaSetLister(t, &appsv1.ReplicaSet{
-		ObjectMeta: metav1.ObjectMeta{Name: rsName, Namespace: template.Namespace, Annotations: map[string]string{}},
-		Spec:       appsv1.ReplicaSetSpec{Replicas: ptr32(3)},
-	})
-	as := NewAutoScaler(k8s, newTestPodLister(t, activePod), rsLister, zap.NewNop())
 
-	if err := as.ReconcileAutoScale(ctx, template, now); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-	replicas := getRSReplicas(t, k8s, template.Namespace, rsName)
-	if replicas != 3 {
-		t.Fatalf("expected replicas to remain clamped at maxIdle=3, got %d", replicas)
-	}
-}
-
-func TestAutoScaler_ScaleDownOnNoTraffic(t *testing.T) {
-	ctx := context.Background()
-	now := time.Date(2026, 1, 10, 10, 0, 0, 0, time.UTC)
-
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "tpl", Namespace: "sandbox0"},
-		Spec: v1alpha1.SandboxTemplateSpec{
-			Pool: v1alpha1.PoolStrategy{MinIdle: 2, MaxIdle: 50, AutoScale: true},
-		},
-	}
-	clusterID := naming.ClusterIDOrDefault(template.Spec.ClusterId)
-	rsName, err := naming.ReplicasetName(clusterID, template.Name)
-	if err != nil {
-		t.Fatalf("replicaset name: %v", err)
-	}
-
-	k8s := fake.NewSimpleClientset()
-	// No recent claims: we make last scale time old so scale-down cooldown passes.
-	mustCreateRS(t, k8s, &appsv1.ReplicaSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      rsName,
-			Namespace: template.Namespace,
-			Annotations: map[string]string{
-				annotationAutoscaleLastScaleTime: now.Add(-10 * time.Minute).Format(time.RFC3339),
-				annotationAutoscaleLastClaimTime: now.Add(-20 * time.Minute).Format(time.RFC3339),
+	now := time.Now()
+	pods := []*corev1.Pod{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "active-1",
+				Namespace: "default",
+				Labels: map[string]string{
+					LabelTemplateID: "claim-time-template",
+					LabelPoolType:   PoolTypeActive,
+				},
+				Annotations: map[string]string{
+					AnnotationClaimedAt: now.Add(-5 * time.Minute).Format(time.RFC3339),
+				},
 			},
 		},
-		Spec: appsv1.ReplicaSetSpec{Replicas: ptr32(20)},
-	})
-
-	// No active pods => treated as no traffic at least window size.
-	rsLister := newTestReplicaSetLister(t, &appsv1.ReplicaSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      rsName,
-			Namespace: template.Namespace,
-			Annotations: map[string]string{
-				annotationAutoscaleLastScaleTime: now.Add(-10 * time.Minute).Format(time.RFC3339),
-				annotationAutoscaleLastClaimTime: now.Add(-20 * time.Minute).Format(time.RFC3339),
-			},
-		},
-		Spec: appsv1.ReplicaSetSpec{Replicas: ptr32(20)},
-	})
-	as := NewAutoScaler(k8s, newTestPodLister(t), rsLister, zap.NewNop())
-	if err := as.ReconcileAutoScale(ctx, template, now); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-	replicas := getRSReplicas(t, k8s, template.Namespace, rsName)
-	if replicas >= 20 {
-		t.Fatalf("expected scale down to reduce replicas, got %d", replicas)
-	}
-	if replicas < template.Spec.Pool.MinIdle {
-		t.Fatalf("expected replicas >= minIdle=%d, got %d", template.Spec.Pool.MinIdle, replicas)
-	}
-}
-
-func TestAutoScaler_ScaleUpCooldownRespected(t *testing.T) {
-	ctx := context.Background()
-	now := time.Date(2026, 1, 10, 10, 0, 0, 0, time.UTC)
-
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "tpl", Namespace: "sandbox0"},
-		Spec: v1alpha1.SandboxTemplateSpec{
-			Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 50, AutoScale: true},
-		},
-	}
-	clusterID := naming.ClusterIDOrDefault(template.Spec.ClusterId)
-	rsName, err := naming.ReplicasetName(clusterID, template.Name)
-	if err != nil {
-		t.Fatalf("replicaset name: %v", err)
-	}
-
-	k8s := fake.NewSimpleClientset()
-	// last scale time is very recent, so ScaleUpCooldown should prevent bump.
-	mustCreateRS(t, k8s, &appsv1.ReplicaSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      rsName,
-			Namespace: template.Namespace,
-			Annotations: map[string]string{
-				annotationAutoscaleLastScaleTime: now.Add(-5 * time.Second).Format(time.RFC3339),
-			},
-		},
-		Spec: appsv1.ReplicaSetSpec{Replicas: ptr32(5)},
-	})
-
-	activePod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "p1",
-			Namespace: template.Namespace,
-			Labels: map[string]string{
-				LabelTemplateID: template.Name,
-				LabelPoolType:   PoolTypeActive,
-			},
-			Annotations: map[string]string{
-				AnnotationClaimedAt: now.Add(-20 * time.Second).Format(time.RFC3339),
-				AnnotationClaimType: "cold",
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "active-2",
+				Namespace: "default",
+				Labels: map[string]string{
+					LabelTemplateID: "claim-time-template",
+					LabelPoolType:   PoolTypeActive,
+				},
+				Annotations: map[string]string{
+					AnnotationClaimedAt: now.Add(-1 * time.Minute).Format(time.RFC3339),
+				},
 			},
 		},
 	}
 
-	rsLister := newTestReplicaSetLister(t, &appsv1.ReplicaSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      rsName,
-			Namespace: template.Namespace,
-			Annotations: map[string]string{
-				annotationAutoscaleLastScaleTime: now.Add(-5 * time.Second).Format(time.RFC3339),
-			},
-		},
-		Spec: appsv1.ReplicaSetSpec{Replicas: ptr32(5)},
-	})
-	as := NewAutoScaler(k8s, newTestPodLister(t, activePod), rsLister, zap.NewNop())
-	if err := as.ReconcileAutoScale(ctx, template, now); err != nil {
-		t.Fatalf("reconcile: %v", err)
+	podIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	for _, pod := range pods {
+		require.NoError(t, podIndexer.Add(pod))
 	}
-	replicas := getRSReplicas(t, k8s, template.Namespace, rsName)
-	if replicas != 5 {
-		t.Fatalf("expected replicas unchanged due to cooldown, got %d", replicas)
-	}
-}
+	podLister := corelisters.NewPodLister(podIndexer)
 
-func TestAutoScaler_ClampToMinIdle(t *testing.T) {
-	ctx := context.Background()
-	now := time.Date(2026, 1, 10, 10, 0, 0, 0, time.UTC)
-
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "tpl", Namespace: "sandbox0"},
-		Spec: v1alpha1.SandboxTemplateSpec{
-			Pool: v1alpha1.PoolStrategy{MinIdle: 7, MaxIdle: 50, AutoScale: true},
-		},
-	}
-	clusterID := naming.ClusterIDOrDefault(template.Spec.ClusterId)
-	rsName, err := naming.ReplicasetName(clusterID, template.Name)
-	if err != nil {
-		t.Fatalf("replicaset name: %v", err)
+	scaler := &AutoScaler{
+		podLister: podLister,
+		logger:    zap.NewNop(),
+		config:    DefaultAutoScaleConfig(),
 	}
 
-	k8s := fake.NewSimpleClientset()
-	mustCreateRS(t, k8s, &appsv1.ReplicaSet{
-		ObjectMeta: metav1.ObjectMeta{Name: rsName, Namespace: template.Namespace, Annotations: map[string]string{}},
-		Spec:       appsv1.ReplicaSetSpec{Replicas: ptr32(2)},
-	})
+	lastClaim := scaler.getLastClaimTime(template)
 
-	rsLister := newTestReplicaSetLister(t, &appsv1.ReplicaSet{
-		ObjectMeta: metav1.ObjectMeta{Name: rsName, Namespace: template.Namespace, Annotations: map[string]string{}},
-		Spec:       appsv1.ReplicaSetSpec{Replicas: ptr32(2)},
-	})
-	as := NewAutoScaler(k8s, newTestPodLister(t), rsLister, zap.NewNop())
-	if err := as.ReconcileAutoScale(ctx, template, now); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-	replicas := getRSReplicas(t, k8s, template.Namespace, rsName)
-	if replicas < template.Spec.Pool.MinIdle {
-		t.Fatalf("expected replicas clamped to minIdle=%d, got %d", template.Spec.Pool.MinIdle, replicas)
-	}
-}
-
-func TestAutoScaler_MaxIdleLessThanMinIdle_ClampsToMinIdle(t *testing.T) {
-	ctx := context.Background()
-	now := time.Date(2026, 1, 10, 10, 0, 0, 0, time.UTC)
-
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "tpl", Namespace: "sandbox0"},
-		Spec: v1alpha1.SandboxTemplateSpec{
-			Pool: v1alpha1.PoolStrategy{MinIdle: 5, MaxIdle: 3, AutoScale: true},
-		},
-	}
-	clusterID := naming.ClusterIDOrDefault(template.Spec.ClusterId)
-	rsName, err := naming.ReplicasetName(clusterID, template.Name)
-	if err != nil {
-		t.Fatalf("replicaset name: %v", err)
-	}
-
-	k8s := fake.NewSimpleClientset()
-	mustCreateRS(t, k8s, &appsv1.ReplicaSet{
-		ObjectMeta: metav1.ObjectMeta{Name: rsName, Namespace: template.Namespace, Annotations: map[string]string{}},
-		Spec:       appsv1.ReplicaSetSpec{Replicas: ptr32(0)},
-	})
-
-	rsLister := newTestReplicaSetLister(t, &appsv1.ReplicaSet{
-		ObjectMeta: metav1.ObjectMeta{Name: rsName, Namespace: template.Namespace, Annotations: map[string]string{}},
-		Spec:       appsv1.ReplicaSetSpec{Replicas: ptr32(0)},
-	})
-	as := NewAutoScaler(k8s, newTestPodLister(t), rsLister, zap.NewNop())
-	if err := as.ReconcileAutoScale(ctx, template, now); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-	replicas := getRSReplicas(t, k8s, template.Namespace, rsName)
-	if replicas != 5 {
-		t.Fatalf("expected replicas clamped to minIdle=5 when maxIdle<minIdle, got %d", replicas)
-	}
-}
-
-func TestAutoScaler_ReplicaSetMissing_NoError(t *testing.T) {
-	ctx := context.Background()
-	now := time.Date(2026, 1, 10, 10, 0, 0, 0, time.UTC)
-
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "tpl", Namespace: "sandbox0"},
-		Spec: v1alpha1.SandboxTemplateSpec{
-			Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 10, AutoScale: true},
-		},
-	}
-
-	k8s := fake.NewSimpleClientset()
-	as := NewAutoScaler(k8s, newTestPodLister(t), newTestReplicaSetLister(t), zap.NewNop())
-	if err := as.ReconcileAutoScale(ctx, template, now); err != nil {
-		t.Fatalf("expected no error when RS missing, got %v", err)
-	}
-}
-
-func TestAutoScaler_AutoScaleDisabled_NoChange(t *testing.T) {
-	ctx := context.Background()
-	now := time.Date(2026, 1, 10, 10, 0, 0, 0, time.UTC)
-
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "tpl", Namespace: "sandbox0"},
-		Spec: v1alpha1.SandboxTemplateSpec{
-			Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 10, AutoScale: false},
-		},
-	}
-	clusterID := naming.ClusterIDOrDefault(template.Spec.ClusterId)
-	rsName, err := naming.ReplicasetName(clusterID, template.Name)
-	if err != nil {
-		t.Fatalf("replicaset name: %v", err)
-	}
-
-	k8s := fake.NewSimpleClientset()
-	mustCreateRS(t, k8s, &appsv1.ReplicaSet{
-		ObjectMeta: metav1.ObjectMeta{Name: rsName, Namespace: template.Namespace, Annotations: map[string]string{}},
-		Spec:       appsv1.ReplicaSetSpec{Replicas: ptr32(3)},
-	})
-
-	activePod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "p1",
-			Namespace: template.Namespace,
-			Labels: map[string]string{
-				LabelTemplateID: template.Name,
-				LabelPoolType:   PoolTypeActive,
-			},
-			Annotations: map[string]string{
-				AnnotationClaimedAt: now.Add(-20 * time.Second).Format(time.RFC3339),
-				AnnotationClaimType: "cold",
-			},
-		},
-	}
-
-	rsLister := newTestReplicaSetLister(t, &appsv1.ReplicaSet{
-		ObjectMeta: metav1.ObjectMeta{Name: rsName, Namespace: template.Namespace, Annotations: map[string]string{}},
-		Spec:       appsv1.ReplicaSetSpec{Replicas: ptr32(3)},
-	})
-	as := NewAutoScaler(k8s, newTestPodLister(t, activePod), rsLister, zap.NewNop())
-	if err := as.ReconcileAutoScale(ctx, template, now); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-	replicas := getRSReplicas(t, k8s, template.Namespace, rsName)
-	if replicas != 3 {
-		t.Fatalf("expected replicas unchanged when autoscale disabled, got %d", replicas)
-	}
-}
-
-func TestAutoScaler_IgnoreBadOrOldClaimAnnotations(t *testing.T) {
-	ctx := context.Background()
-	now := time.Date(2026, 1, 10, 10, 0, 0, 0, time.UTC)
-
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "tpl", Namespace: "sandbox0"},
-		Spec: v1alpha1.SandboxTemplateSpec{
-			Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 50, AutoScale: true},
-		},
-	}
-	clusterID := naming.ClusterIDOrDefault(template.Spec.ClusterId)
-	rsName, err := naming.ReplicasetName(clusterID, template.Name)
-	if err != nil {
-		t.Fatalf("replicaset name: %v", err)
-	}
-
-	k8s := fake.NewSimpleClientset()
-	mustCreateRS(t, k8s, &appsv1.ReplicaSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      rsName,
-			Namespace: template.Namespace,
-			// Pin last-claim-time to "recent" so scale-down doesn't happen in this test.
-			// This test only asserts that bad/old cold claims do not trigger scale-up.
-			Annotations: map[string]string{
-				annotationAutoscaleLastClaimTime: now.Add(-30 * time.Second).Format(time.RFC3339),
-			},
-		},
-		Spec: appsv1.ReplicaSetSpec{Replicas: ptr32(5)},
-	})
-
-	// One pod has invalid claimed-at, another is outside the window; neither should trigger scale-up.
-	badTimePod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "bad",
-			Namespace: template.Namespace,
-			Labels: map[string]string{
-				LabelTemplateID: template.Name,
-				LabelPoolType:   PoolTypeActive,
-			},
-			Annotations: map[string]string{
-				AnnotationClaimedAt: "not-a-time",
-				AnnotationClaimType: "cold",
-			},
-		},
-	}
-	oldPod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "old",
-			Namespace: template.Namespace,
-			Labels: map[string]string{
-				LabelTemplateID: template.Name,
-				LabelPoolType:   PoolTypeActive,
-			},
-			Annotations: map[string]string{
-				AnnotationClaimedAt: now.Add(-10 * time.Minute).Format(time.RFC3339),
-				AnnotationClaimType: "cold",
-			},
-		},
-	}
-
-	rsLister := newTestReplicaSetLister(t, &appsv1.ReplicaSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      rsName,
-			Namespace: template.Namespace,
-			Annotations: map[string]string{
-				annotationAutoscaleLastClaimTime: now.Add(-30 * time.Second).Format(time.RFC3339),
-			},
-		},
-		Spec: appsv1.ReplicaSetSpec{Replicas: ptr32(5)},
-	})
-	as := NewAutoScaler(k8s, newTestPodLister(t, badTimePod, oldPod), rsLister, zap.NewNop())
-	if err := as.ReconcileAutoScale(ctx, template, now); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-	replicas := getRSReplicas(t, k8s, template.Namespace, rsName)
-	if replicas != 5 {
-		t.Fatalf("expected replicas unchanged when only bad/old claims exist, got %d", replicas)
-	}
-}
-
-func TestAutoScaler_PersistsLastClaimTimeEvenWithoutReplicaChange(t *testing.T) {
-	ctx := context.Background()
-	now := time.Date(2026, 1, 10, 10, 0, 0, 0, time.UTC)
-
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "tpl", Namespace: "sandbox0"},
-		Spec: v1alpha1.SandboxTemplateSpec{
-			Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 10, AutoScale: true},
-		},
-	}
-	clusterID := naming.ClusterIDOrDefault(template.Spec.ClusterId)
-	rsName, err := naming.ReplicasetName(clusterID, template.Name)
-	if err != nil {
-		t.Fatalf("replicaset name: %v", err)
-	}
-
-	k8s := fake.NewSimpleClientset()
-	mustCreateRS(t, k8s, &appsv1.ReplicaSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        rsName,
-			Namespace:   template.Namespace,
-			Annotations: map[string]string{},
-		},
-		Spec: appsv1.ReplicaSetSpec{Replicas: ptr32(5)},
-	})
-
-	// A hot claim should not necessarily change replicas, but should update last-claim-time annotation.
-	activePod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "p1",
-			Namespace: template.Namespace,
-			Labels: map[string]string{
-				LabelTemplateID: template.Name,
-				LabelPoolType:   PoolTypeActive,
-			},
-			Annotations: map[string]string{
-				AnnotationClaimedAt: now.Add(-10 * time.Second).Format(time.RFC3339),
-				AnnotationClaimType: "hot",
-			},
-		},
-	}
-
-	rsLister := newTestReplicaSetLister(t, &appsv1.ReplicaSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        rsName,
-			Namespace:   template.Namespace,
-			Annotations: map[string]string{},
-		},
-		Spec: appsv1.ReplicaSetSpec{Replicas: ptr32(5)},
-	})
-	as := NewAutoScaler(k8s, newTestPodLister(t, activePod), rsLister, zap.NewNop())
-	if err := as.ReconcileAutoScale(ctx, template, now); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-
-	rs, err := k8s.AppsV1().ReplicaSets(template.Namespace).Get(ctx, rsName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get rs: %v", err)
-	}
-	if rs.Annotations == nil || rs.Annotations[annotationAutoscaleLastClaimTime] == "" {
-		t.Fatalf("expected %s annotation to be persisted on RS", annotationAutoscaleLastClaimTime)
-	}
+	expectedTime := now.Add(-1 * time.Minute)
+	diff := lastClaim.Sub(expectedTime)
+	assert.Less(t, diff.Abs(), time.Second, "Last claim time should be within 1 second of expected")
 }

@@ -170,6 +170,7 @@ func main() {
 		clk,
 		logger,
 		managerMetrics,
+		cfg.Autoscaler,
 	)
 	if pool != nil {
 		operator.SetTemplateStatsPublisher(controller.NewPGTemplateStatsPublisher(pool, cfg.DefaultClusterId, clk, logger))

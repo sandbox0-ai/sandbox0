@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sandbox0-ai/infra/infra-operator/api/config"
 	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
 	obsmetrics "github.com/sandbox0-ai/infra/pkg/observability/metrics"
 	"go.uber.org/zap"
@@ -90,6 +91,7 @@ func NewOperator(
 	clock TimeProvider,
 	logger *zap.Logger,
 	metrics *obsmetrics.ManagerMetrics,
+	autoscalerConfig config.AutoscalerConfig,
 ) *Operator {
 	// Use system time as fallback if clock is nil
 	if clock == nil {
@@ -100,7 +102,7 @@ func NewOperator(
 	replicaSetLister := appslisters.NewReplicaSetLister(replicaSetInformer.GetIndexer())
 	secretLister := corelisters.NewSecretLister(secretInformer.GetIndexer())
 	poolManager := NewPoolManager(k8sClient, replicaSetLister, secretLister, recorder, logger)
-	autoScaler := NewAutoScaler(k8sClient, podLister, replicaSetLister, logger)
+	autoScaler := NewAutoScalerWithConfig(k8sClient, podLister, replicaSetLister, logger, toAutoScaleConfig(autoscalerConfig))
 
 	op := &Operator{
 		k8sClient:        k8sClient,
@@ -239,10 +241,11 @@ func (op *Operator) syncHandler(ctx context.Context, key string) error {
 		return fmt.Errorf("update status: %w", err)
 	}
 
-	// Autoscale (may update template.spec.pool.minIdle, which will trigger another reconcile)
+	// Scale down for idle templates (async, background operation)
+	// Scale up is handled synchronously in SandboxService.OnColdClaim
 	if template.Spec.Pool.AutoScale && op.autoScaler != nil {
-		if err := op.autoScaler.ReconcileAutoScale(ctx, template, op.clock.Now()); err != nil {
-			op.logger.Warn("Autoscale reconcile failed",
+		if err := op.autoScaler.ReconcileScaleDown(ctx, template, op.clock.Now()); err != nil {
+			op.logger.Warn("Scale down reconcile failed",
 				zap.String("template", template.Name),
 				zap.String("namespace", template.Namespace),
 				zap.Error(err),
@@ -481,7 +484,25 @@ func (op *Operator) GetTemplateLister() TemplateLister {
 	return &op.templateLister
 }
 
+// GetAutoScaler returns the sync scaler for use in sandbox service
+func (op *Operator) GetAutoScaler() *AutoScaler {
+	return op.autoScaler
+}
+
 // SetTemplateStatsPublisher injects a stats publisher (optional).
 func (op *Operator) SetTemplateStatsPublisher(publisher TemplateStatsPublisher) {
 	op.statsPublisher = publisher
+}
+
+// toAutoScaleConfig converts config.AutoscalerConfig to AutoScaleConfig.
+func toAutoScaleConfig(cfg config.AutoscalerConfig) AutoScaleConfig {
+	return AutoScaleConfig{
+		MinScaleInterval:        cfg.MinScaleInterval.Duration,
+		ScaleUpFactor:           cfg.ScaleUpFactor,
+		MaxScaleStep:            cfg.MaxScaleStep,
+		MinIdleBuffer:           cfg.MinIdleBuffer,
+		TargetIdleRatio:         cfg.TargetIdleRatio,
+		NoTrafficScaleDownAfter: cfg.NoTrafficScaleDownAfter.Duration,
+		ScaleDownPercent:        cfg.ScaleDownPercent,
+	}
 }

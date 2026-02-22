@@ -25,10 +25,10 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilrand "k8s.io/apimachinery/pkg/util/rand"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/util/retry"
-	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 // Sandbox represents a sandbox instance
@@ -66,10 +66,10 @@ var errNoIdlePod = errors.New("no idle pod available")
 // - Not waiting too long (cold start may be faster than long retries)
 // - Not overwhelming the API server with requests
 var claimIdlePodBackoff = wait.Backoff{
-	Steps:    3,              // Max 3 attempts
+	Steps:    3, // Max 3 attempts
 	Duration: 15 * time.Millisecond,
-	Factor:   1.5,            // Mild exponential backoff: 15ms, 22ms, 33ms
-	Jitter:   0.1,            // 10% jitter to spread out concurrent requests
+	Factor:   1.5, // Mild exponential backoff: 15ms, 22ms, 33ms
+	Jitter:   0.1, // 10% jitter to spread out concurrent requests
 }
 
 // SandboxServiceConfig handles configuration for SandboxService
@@ -100,7 +100,18 @@ type SandboxService struct {
 	config                 SandboxServiceConfig
 	logger                 *zap.Logger
 	metrics                *obsmetrics.ManagerMetrics
+	autoScaler             AutoScalerInterface
 }
+
+// AutoScalerInterface defines the interface for auto scaling.
+// This allows the sandbox service to trigger scale-up during cold claims.
+type AutoScalerInterface interface {
+	OnColdClaim(ctx context.Context, template *v1alpha1.SandboxTemplate) (*ScaleDecisionResult, error)
+}
+
+// ScaleDecisionResult represents the result of a scaling decision.
+// This is a local copy to avoid tight coupling with controller package.
+type ScaleDecisionResult = controller.ScaleDecision
 
 // TimeProvider provides time functions, allowing for synchronized time across clusters
 type TimeProvider interface {
@@ -168,6 +179,11 @@ func (s *SandboxService) SetProcdClient(client *ProcdClient) {
 		return
 	}
 	s.procdClient = client
+}
+
+// SetAutoScaler injects the auto scaler for automatic pool scaling.
+func (s *SandboxService) SetAutoScaler(scaler AutoScalerInterface) {
+	s.autoScaler = scaler
 }
 
 // ClaimRequest represents a sandbox claim request
@@ -286,6 +302,28 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		s.logger.Info("No idle pod available, creating new pod",
 			zap.String("template", req.Template),
 		)
+
+		// Trigger async scale-up to replenish the idle pool
+		// This runs in a goroutine to not block the cold claim response
+		if s.autoScaler != nil && template.Spec.Pool.AutoScale {
+			go func() {
+				scaleCtx := context.Background()
+				scaleDecision, scaleErr := s.autoScaler.OnColdClaim(scaleCtx, template)
+				if scaleErr != nil {
+					s.logger.Warn("Auto scale failed during cold claim",
+						zap.String("template", req.Template),
+						zap.Error(scaleErr),
+					)
+				} else if scaleDecision != nil && scaleDecision.ShouldScale {
+					s.logger.Info("Auto scale triggered",
+						zap.String("template", req.Template),
+						zap.Int32("delta", scaleDecision.Delta),
+						zap.String("reason", scaleDecision.Reason),
+					)
+				}
+			}()
+		}
+
 		pod, err = s.createNewPod(ctx, template, req)
 		if err != nil {
 			if metrics != nil {

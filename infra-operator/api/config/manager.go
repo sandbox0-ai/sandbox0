@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 
 	"gopkg.in/yaml.v3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -140,8 +141,8 @@ type AutoscalerConfig struct {
 	// ScaleUpFactor determines how aggressively to scale up.
 	// When cold claim occurs, newReplicas = current * ScaleUpFactor.
 	// +optional
-	// +kubebuilder:default=1.5
-	ScaleUpFactor float64 `yaml:"scale_up_factor" json:"scaleUpFactor"`
+	// +kubebuilder:default="1.5"
+	ScaleUpFactor string `yaml:"scale_up_factor" json:"scaleUpFactor"`
 
 	// MaxScaleStep caps the maximum pods to add in a single scale operation.
 	// +optional
@@ -157,8 +158,8 @@ type AutoscalerConfig struct {
 	// TargetIdleRatio is the target ratio of idle pods to active pods.
 	// Formula: desiredIdle = active * TargetIdleRatio
 	// +optional
-	// +kubebuilder:default=0.2
-	TargetIdleRatio float64 `yaml:"target_idle_ratio" json:"targetIdleRatio"`
+	// +kubebuilder:default="0.2"
+	TargetIdleRatio string `yaml:"target_idle_ratio" json:"targetIdleRatio"`
 
 	// NoTrafficScaleDownAfter is the duration without any claims before scaling down.
 	// Scale down is still async and happens in the background reconcile loop.
@@ -168,8 +169,31 @@ type AutoscalerConfig struct {
 
 	// ScaleDownPercent is the percentage to reduce replicas during scale down.
 	// +optional
-	// +kubebuilder:default=0.1
-	ScaleDownPercent float64 `yaml:"scale_down_percent" json:"scaleDownPercent"`
+	// +kubebuilder:default="0.1"
+	ScaleDownPercent string `yaml:"scale_down_percent" json:"scaleDownPercent"`
+}
+
+func (c AutoscalerConfig) ParsedScaleUpFactor(defaultValue float64) float64 {
+	return parseFloatOrDefault(c.ScaleUpFactor, defaultValue)
+}
+
+func (c AutoscalerConfig) ParsedTargetIdleRatio(defaultValue float64) float64 {
+	return parseFloatOrDefault(c.TargetIdleRatio, defaultValue)
+}
+
+func (c AutoscalerConfig) ParsedScaleDownPercent(defaultValue float64) float64 {
+	return parseFloatOrDefault(c.ScaleDownPercent, defaultValue)
+}
+
+func parseFloatOrDefault(value string, defaultValue float64) float64 {
+	if value == "" {
+		return defaultValue
+	}
+	v, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return defaultValue
+	}
+	return v
 }
 
 // RegistryConfig holds registry settings for manager.

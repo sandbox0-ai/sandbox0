@@ -496,13 +496,14 @@ func (op *Operator) SetTemplateStatsPublisher(publisher TemplateStatsPublisher) 
 
 // toAutoScaleConfig converts config.AutoscalerConfig to AutoScaleConfig.
 func toAutoScaleConfig(cfg config.AutoscalerConfig) AutoScaleConfig {
+	defaultCfg := DefaultAutoScaleConfig()
 	return AutoScaleConfig{
 		MinScaleInterval:        cfg.MinScaleInterval.Duration,
-		ScaleUpFactor:           cfg.ScaleUpFactor,
+		ScaleUpFactor:           cfg.ParsedScaleUpFactor(defaultCfg.ScaleUpFactor),
 		MaxScaleStep:            cfg.MaxScaleStep,
 		MinIdleBuffer:           cfg.MinIdleBuffer,
-		TargetIdleRatio:         cfg.TargetIdleRatio,
+		TargetIdleRatio:         cfg.ParsedTargetIdleRatio(defaultCfg.TargetIdleRatio),
 		NoTrafficScaleDownAfter: cfg.NoTrafficScaleDownAfter.Duration,
-		ScaleDownPercent:        cfg.ScaleDownPercent,
+		ScaleDownPercent:        cfg.ParsedScaleDownPercent(defaultCfg.ScaleDownPercent),
 	}
 }

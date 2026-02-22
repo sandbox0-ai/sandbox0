@@ -1251,6 +1251,53 @@ spec:
                         default: {}
                         description: Config contains manager specific configuration
                         properties:
+                          autoscaler:
+                            default: {}
+                            description: Autoscaler config for pool scaling behavior
+                            properties:
+                              maxScaleStep:
+                                default: 10
+                                description: MaxScaleStep caps the maximum pods to
+                                  add in a single scale operation.
+                                format: int32
+                                type: integer
+                              minIdleBuffer:
+                                default: 2
+                                description: |-
+                                  MinIdleBuffer is the minimum number of idle pods to maintain above minIdle.
+                                  When idle count drops to minIdle + MinIdleBuffer, proactive scaling kicks in.
+                                format: int32
+                                type: integer
+                              minScaleInterval:
+                                default: 100ms
+                                description: |-
+                                  MinScaleInterval is the minimum time between scale operations for a template.
+                                  This prevents thundering herd when multiple cold claims arrive simultaneously.
+                                type: string
+                              noTrafficScaleDownAfter:
+                                default: 10m
+                                description: |-
+                                  NoTrafficScaleDownAfter is the duration without any claims before scaling down.
+                                  Scale down is still async and happens in the background reconcile loop.
+                                type: string
+                              scaleDownPercent:
+                                default: "0.1"
+                                description: ScaleDownPercent is the percentage to
+                                  reduce replicas during scale down.
+                                type: string
+                              scaleUpFactor:
+                                default: "1.5"
+                                description: |-
+                                  ScaleUpFactor determines how aggressively to scale up.
+                                  When cold claim occurs, newReplicas = current * ScaleUpFactor.
+                                type: string
+                              targetIdleRatio:
+                                default: "0.2"
+                                description: |-
+                                  TargetIdleRatio is the target ratio of idle pods to active pods.
+                                  Formula: desiredIdle = active * TargetIdleRatio
+                                type: string
+                            type: object
                           cleanupInterval:
                             default: 60s
                             description: Cleanup Controller

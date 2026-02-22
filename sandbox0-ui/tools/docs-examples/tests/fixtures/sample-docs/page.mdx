@@ -1,0 +1,26 @@
+# Sample
+
+```bash mode=run needs=none session=cli id=fence-1 env=PATH|HOME
+echo "hello"
+```
+
+<Tabs
+  tabs={[
+    {
+      label: "Python",
+      language: "python",
+      code: `print("ok")`,
+      mode: "run",
+      session: "py",
+      runtime: "python3.11",
+      deps: ["pyyaml"],
+      setup: ["python3 --version"]
+    },
+    {
+      label: "Config",
+      language: "yaml",
+      code: `name: demo`
+    }
+  ]}
+/>
+

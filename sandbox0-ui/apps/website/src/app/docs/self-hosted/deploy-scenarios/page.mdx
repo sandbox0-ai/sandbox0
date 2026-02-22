@@ -17,8 +17,12 @@ The simplest deployment with basic sandbox functionality.
 - Development environments
 - Basic sandbox execution without persistence
 
-```yaml
-apiVersion: infra.sandbox0.ai/v1alpha1
+<Tabs
+  tabs={[
+    {
+      label: "YAML",
+      language: "yaml",
+      code: `apiVersion: infra.sandbox0.ai/v1alpha1
 kind: Sandbox0Infra
 metadata:
   name: minimal
@@ -45,8 +49,13 @@ spec:
       config:
         authMode: public
     manager:
-      enabled: true
-```
+      enabled: true`,
+      mode: "read",
+      needs: "none",
+      session: "selfhosted-scenarios-minimal-yaml"
+    }
+  ]}
+/>
 
 ### Volumes Mode
 
@@ -61,8 +70,12 @@ Adds persistent volume support via storage-proxy.
 - File system operations
 - Volume snapshots and restoration
 
-```yaml
-apiVersion: infra.sandbox0.ai/v1alpha1
+<Tabs
+  tabs={[
+    {
+      label: "YAML",
+      language: "yaml",
+      code: `apiVersion: infra.sandbox0.ai/v1alpha1
 kind: Sandbox0Infra
 metadata:
   name: volumes
@@ -99,8 +112,13 @@ spec:
     storageProxy:
       enabled: true
       config:
-        juicefsEncryptionEnabled: false
-```
+        juicefsEncryptionEnabled: false`,
+      mode: "read",
+      needs: "none",
+      session: "selfhosted-scenarios-volumes-yaml"
+    }
+  ]}
+/>
 
 ### Network Policy Mode
 
@@ -115,8 +133,12 @@ Adds network isolation and egress control via netd.
 - Egress traffic control
 - Network isolation between sandboxes
 
-```yaml
-apiVersion: infra.sandbox0.ai/v1alpha1
+<Tabs
+  tabs={[
+    {
+      label: "YAML",
+      language: "yaml",
+      code: `apiVersion: infra.sandbox0.ai/v1alpha1
 kind: Sandbox0Infra
 metadata:
   name: network-policy
@@ -142,8 +164,13 @@ spec:
     manager:
       enabled: true
     netd:
-      enabled: true
-```
+      enabled: true`,
+      mode: "read",
+      needs: "none",
+      session: "selfhosted-scenarios-network-yaml"
+    }
+  ]}
+/>
 
 ### Full Mode
 
@@ -158,8 +185,12 @@ All data plane services with full feature support.
 - Full feature set
 - High availability requirements
 
-```yaml
-apiVersion: infra.sandbox0.ai/v1alpha1
+<Tabs
+  tabs={[
+    {
+      label: "YAML",
+      language: "yaml",
+      code: `apiVersion: infra.sandbox0.ai/v1alpha1
 kind: Sandbox0Infra
 metadata:
   name: fullmode
@@ -201,8 +232,13 @@ spec:
       config:
         juicefsEncryptionEnabled: false
     netd:
-      enabled: true
-```
+      enabled: true`,
+      mode: "read",
+      needs: "none",
+      session: "selfhosted-scenarios-full-yaml"
+    }
+  ]}
+/>
 
 ## Multi-Cluster Scenarios
 
@@ -218,8 +254,12 @@ Deploy the control plane to manage multiple data plane clusters.
 - External PostgreSQL (shared with data planes)
 - Ingress for external access
 
-```yaml
-apiVersion: infra.sandbox0.ai/v1alpha1
+<Tabs
+  tabs={[
+    {
+      label: "YAML",
+      language: "yaml",
+      code: `apiVersion: infra.sandbox0.ai/v1alpha1
 kind: Sandbox0Infra
 metadata:
   name: s0cp
@@ -250,8 +290,13 @@ spec:
       config:
         schedulerEnabled: true
     scheduler:
-      enabled: true
-```
+      enabled: true`,
+      mode: "read",
+      needs: "none",
+      session: "selfhosted-scenarios-control-plane-yaml"
+    }
+  ]}
+/>
 
 ### Data Plane
 
@@ -264,8 +309,12 @@ Deploy data planes in different clusters/regions.
 - Connection to control plane
 - Unique cluster ID
 
-```yaml
-apiVersion: infra.sandbox0.ai/v1alpha1
+<Tabs
+  tabs={[
+    {
+      label: "YAML",
+      language: "yaml",
+      code: `apiVersion: infra.sandbox0.ai/v1alpha1
 kind: Sandbox0Infra
 metadata:
   name: s0dp
@@ -313,8 +362,13 @@ spec:
     storageProxy:
       enabled: true
     netd:
-      enabled: true
-```
+      enabled: true`,
+      mode: "read",
+      needs: "none",
+      session: "selfhosted-scenarios-data-plane-yaml"
+    }
+  ]}
+/>
 
 ## Choosing a Scenario
 
@@ -340,14 +394,23 @@ spec:
 
 ### Built-in (Development)
 
-```yaml
-storage:
+<Tabs
+  tabs={[
+    {
+      label: "YAML",
+      language: "yaml",
+      code: `storage:
   type: builtin
   builtin:
     enabled: true
     persistence:
-      size: "20Gi"
-```
+      size: "20Gi"`,
+      mode: "read",
+      needs: "none",
+      session: "selfhosted-scenarios-storage-builtin-yaml"
+    }
+  ]}
+/>
 
 <Callout variant="warning">
 Built-in storage (RustFS) is for development only. Use S3 or OSS for production.
@@ -355,8 +418,12 @@ Built-in storage (RustFS) is for development only. Use S3 or OSS for production.
 
 ### AWS S3 (Production)
 
-```yaml
-storage:
+<Tabs
+  tabs={[
+    {
+      label: "YAML",
+      language: "yaml",
+      code: `storage:
   type: s3
   s3:
     bucket: sandbox0-prod
@@ -365,48 +432,85 @@ storage:
     credentialsSecret:
       name: aws-credentials
       accessKeyKey: accessKeyId
-      secretKeyKey: secretAccessKey
-```
+      secretKeyKey: secretAccessKey`,
+      mode: "read",
+      needs: "none",
+      session: "selfhosted-scenarios-storage-s3-yaml"
+    }
+  ]}
+/>
 
 Create the credentials secret:
 
-```bash
-kubectl create secret generic aws-credentials \
+<Tabs
+  tabs={[
+    {
+      label: "CLI",
+      language: "bash",
+      code: `kubectl create secret generic aws-credentials \
   --from-literal=accessKeyId=AKIAIOSFODNN7EXAMPLE \
   --from-literal=secretAccessKey=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
-  -n sandbox0-system
-```
+  -n sandbox0-system`,
+      mode: "run",
+      needs: "k8s",
+      session: "selfhosted-scenarios-storage-s3-secret",
+      setup: ["command -v kubectl >/dev/null"]
+    }
+  ]}
+/>
 
 ### Aliyun OSS (Production)
 
-```yaml
-storage:
+<Tabs
+  tabs={[
+    {
+      label: "YAML",
+      language: "yaml",
+      code: `storage:
   type: oss
   oss:
     bucket: sandbox0-prod
     region: cn-hangzhou
     endpoint: https://oss-cn-hangzhou.aliyuncs.com
     credentialsSecret:
-      name: oss-credentials
-```
+      name: oss-credentials`,
+      mode: "read",
+      needs: "none",
+      session: "selfhosted-scenarios-storage-oss-yaml"
+    }
+  ]}
+/>
 
 ## Registry Options
 
 ### Built-in Registry
 
-```yaml
-registry:
+<Tabs
+  tabs={[
+    {
+      label: "YAML",
+      language: "yaml",
+      code: `registry:
   provider: builtin
   builtin:
     enabled: true
     persistence:
-      size: "20Gi"
-```
+      size: "20Gi"`,
+      mode: "read",
+      needs: "none",
+      session: "selfhosted-scenarios-registry-builtin-yaml"
+    }
+  ]}
+/>
 
 ### AWS ECR
 
-```yaml
-registry:
+<Tabs
+  tabs={[
+    {
+      label: "YAML",
+      language: "yaml",
+      code: `registry:
   provider: aws
   aws:
     region: us-east-1
@@ -414,8 +518,13 @@ registry:
     pullSecret:
       name: ecr-pull-secret
     credentialsSecret:
-      name: aws-credentials
-```
+      name: aws-credentials`,
+      mode: "read",
+      needs: "none",
+      session: "selfhosted-scenarios-registry-aws-yaml"
+    }
+  ]}
+/>
 
 ### Other Providers
 

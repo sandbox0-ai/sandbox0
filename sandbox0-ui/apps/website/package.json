@@ -6,7 +6,10 @@
     "dev": "next dev --port 4300",
     "build": "next build",
     "start": "next start --port 4300",
-    "lint": "next lint"
+    "lint": "next lint",
+    "docs:examples:extract": "node ../../tools/docs-examples/cli.mjs extract --docs-dir ./src/app/docs --out-file ./tmp/docs-examples/manifest.json",
+    "docs:examples:check": "npm run docs:examples:extract && node ../../tools/docs-examples/cli.mjs validate-fast --manifest ./tmp/docs-examples/manifest.json",
+    "docs:examples:run": "npm run docs:examples:extract && node ../../tools/docs-examples/cli.mjs validate-run --manifest ./tmp/docs-examples/manifest.json --needs all --strict-deps true"
   },
   "dependencies": {
     "@mdx-js/loader": "^3.1.0",

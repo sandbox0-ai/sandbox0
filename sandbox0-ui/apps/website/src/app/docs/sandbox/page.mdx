@@ -59,8 +59,16 @@ Claim a sandbox from a template. The sandbox is created from a pre-warmed pool f
     {
       label: "Go",
       language: "go",
-      code: `import "github.com/sandbox0-ai/sdk-go"
+      code: `import (
+    "context"
+    "fmt"
+    "log"
+    "os"
 
+    sandbox0 "github.com/sandbox0-ai/sdk-go"
+)
+
+ctx := context.Background()
 client, err := sandbox0.NewClient(
     sandbox0.WithToken(os.Getenv("SANDBOX0_TOKEN")),
 )
@@ -79,12 +87,20 @@ if err != nil {
     log.Fatal(err)
 }
 fmt.Printf("Sandbox ID: %s\\n", sandbox.ID)
-defer client.DeleteSandbox(ctx, sandbox.ID)`
+sandboxID := sandbox.ID`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-go",
+      deps: ["github.com/sandbox0-ai/sdk-go"],
+      env: ["SANDBOX0_TOKEN"],
+      setup: ["go version"]
     },
     {
       label: "Python",
       language: "python",
-      code: `from sandbox0 import Client
+      code: `import os
+
+from sandbox0 import Client
 
 client = Client(token=os.environ["SANDBOX0_TOKEN"])
 
@@ -97,14 +113,22 @@ sandbox = client.claim_sandbox(
     },
 )
 print(f"Sandbox ID: {sandbox.id}")
-
-# Cleanup
-client.delete_sandbox(sandbox.id)`
+sandbox_id = sandbox.id`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-python",
+      deps: ["sandbox0"],
+      env: ["SANDBOX0_TOKEN"],
+      setup: ["python3 --version"]
     },
     {
       label: "JavaScript",
       language: "typescript",
       code: `import { Sandbox0 } from '@sandbox0/sdk';
+
+if (!process.env.SANDBOX0_TOKEN) {
+    throw new Error('Missing SANDBOX0_TOKEN');
+}
 
 const client = new Sandbox0({ token: process.env.SANDBOX0_TOKEN });
 
@@ -117,19 +141,24 @@ const sandbox = await client.claimSandbox({
     },
 });
 console.log('Sandbox ID:', sandbox.id);
-
-// Cleanup
-await client.deleteSandbox(sandbox.id);`
+let sandboxId = sandbox.id;`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-typescript",
+      deps: ["@sandbox0/sdk"],
+      env: ["SANDBOX0_TOKEN"],
+      setup: ["node --version"]
     },
     {
       label: "CLI",
       language: "bash",
       code: `# Claim a sandbox from the "default" template
-s0 sandbox create --template default --hard-ttl 300
-
-# Output:
-# Sandbox ID: sb_abc123
-# Status: running`
+SANDBOX_ID="$(s0 sandbox create --template default --hard-ttl 300 | awk '/Sandbox ID:/ {print $3}')"
+echo "Sandbox ID: $SANDBOX_ID"`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-cli",
+      setup: ["command -v s0 >/dev/null"]
     }
   ]}
 />
@@ -149,40 +178,49 @@ Retrieve full details about a sandbox.
     {
       label: "Go",
       language: "go",
-      code: `sandbox, err := client.GetSandbox(ctx, "sb_abc123")
+      code: `sandbox, err := client.GetSandbox(ctx, sandboxID)
 if err != nil {
     log.Fatal(err)
 }
 fmt.Printf("Status: %s\\n", sandbox.Status)
 fmt.Printf("Template: %s\\n", sandbox.TemplateID)
-fmt.Printf("Expires at: %s\\n", sandbox.ExpiresAt)`
+fmt.Printf("Expires at: %s\\n", sandbox.ExpiresAt)`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
       language: "python",
-      code: `sandbox = client.get_sandbox("sb_abc123")
+      code: `sandbox = client.get_sandbox(sandbox_id)
 print(f"Status: {sandbox.status}")
 print(f"Template: {sandbox.template_id}")
-print(f"Expires at: {sandbox.expires_at}")`
+print(f"Expires at: {sandbox.expires_at}")`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
       language: "typescript",
-      code: `const sandbox = await client.getSandbox('sb_abc123');
+      code: `const sandbox = await client.getSandbox(sandboxId);
 console.log('Status:', sandbox.status);
 console.log('Template:', sandbox.templateId);
-console.log('Expires at:', sandbox.expiresAt);`
+console.log('Expires at:', sandbox.expiresAt);`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 sandbox get sb_abc123
-
-# Output:
-# ID: sb_abc123
-# Status: running
-# Template: default
-# Expires at: 2024-01-15T10:30:00Z`
+      code: `s0 sandbox get "$SANDBOX_ID"`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-cli"
     }
   ]}
 />
@@ -202,28 +240,43 @@ Get the current status of a sandbox (lighter weight than full details).
     {
       label: "Go",
       language: "go",
-      code: `status, err := client.GetSandboxStatus(ctx, "sb_abc123")
+      code: `status, err := client.GetSandboxStatus(ctx, sandboxID)
 if err != nil {
     log.Fatal(err)
 }
-fmt.Printf("Status: %s\\n", status.Status)`
+fmt.Printf("Status: %s\\n", status.Status)`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
       language: "python",
-      code: `status = client.get_sandbox_status("sb_abc123")
-print(f"Status: {status.status}")`
+      code: `status = client.get_sandbox_status(sandbox_id)
+print(f"Status: {status.status}")`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
       language: "typescript",
-      code: `const status = await client.getSandboxStatus('sb_abc123');
-console.log('Status:', status.status);`
+      code: `const status = await client.getSandboxStatus(sandboxId);
+console.log('Status:', status.status);`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 sandbox status sb_abc123`
+      code: `s0 sandbox status "$SANDBOX_ID"`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-cli"
     }
   ]}
 />
@@ -263,7 +316,11 @@ if err != nil {
 }
 for _, sb := range sandboxes {
     fmt.Printf("- %s (status: %s)\\n", sb.ID, sb.Status)
-}`
+}`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
@@ -274,7 +331,11 @@ for _, sb := range sandboxes {
     limit=10,
 )
 for sb in sandboxes:
-    print(f"- {sb.id} (status: {sb.status})")`
+    print(f"- {sb.id} (status: {sb.status})")`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
@@ -286,16 +347,19 @@ for sb in sandboxes:
 });
 for (const sb of sandboxes) {
     console.log(\`- \${sb.id} (status: \${sb.status})\`);
-}`
+}`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 sandbox list --status running --template default
-
-# Output:
-# sb_abc123  running   default   2024-01-15T10:00:00Z
-# sb_def456  running   default   2024-01-15T10:05:00Z`
+      code: `s0 sandbox list --status running --template default`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-cli"
     }
   ]}
 />
@@ -315,33 +379,48 @@ Update sandbox configuration.
     {
       label: "Go",
       language: "go",
-      code: `_, err := client.UpdateSandbox(ctx, "sb_abc123", &sandbox0.UpdateSandboxRequest{
+      code: `_, err := client.UpdateSandbox(ctx, sandboxID, &sandbox0.UpdateSandboxRequest{
     Config: &sandbox0.SandboxConfig{
         EnvVars: map[string]string{
             "DEBUG": "true",
         },
     },
-})`
+})`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
       language: "python",
       code: `client.update_sandbox(
-    "sb_abc123",
+    sandbox_id,
     config={"env_vars": {"DEBUG": "true"}},
-)`
+)`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
       language: "typescript",
-      code: `await client.updateSandbox('sb_abc123', {
+      code: `await client.updateSandbox(sandboxId, {
     config: { envVars: { DEBUG: 'true' } },
-});`
+});`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 sandbox update sb_abc123 --env DEBUG=true`
+      code: `s0 sandbox update "$SANDBOX_ID" --env DEBUG=true`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-cli"
     }
   ]}
 />
@@ -366,28 +445,43 @@ Use `auto_resume` to automatically resume when accessed.
     {
       label: "Go",
       language: "go",
-      code: `_, err := client.PauseSandbox(ctx, "sb_abc123")
+      code: `_, err := client.PauseSandbox(ctx, sandboxID)
 if err != nil {
     log.Fatal(err)
 }
-fmt.Println("Sandbox paused")`
+fmt.Println("Sandbox paused")`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
       language: "python",
-      code: `client.pause_sandbox("sb_abc123")
-print("Sandbox paused")`
+      code: `client.pause_sandbox(sandbox_id)
+print("Sandbox paused")`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
       language: "typescript",
-      code: `await client.pauseSandbox('sb_abc123');
-console.log('Sandbox paused');`
+      code: `await client.pauseSandbox(sandboxId);
+console.log('Sandbox paused');`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 sandbox pause sb_abc123`
+      code: `s0 sandbox pause "$SANDBOX_ID"`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-cli"
     }
   ]}
 />
@@ -407,28 +501,43 @@ Resume a paused sandbox.
     {
       label: "Go",
       language: "go",
-      code: `_, err := client.ResumeSandbox(ctx, "sb_abc123")
+      code: `_, err := client.ResumeSandbox(ctx, sandboxID)
 if err != nil {
     log.Fatal(err)
 }
-fmt.Println("Sandbox resumed")`
+fmt.Println("Sandbox resumed")`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
       language: "python",
-      code: `client.resume_sandbox("sb_abc123")
-print("Sandbox resumed")`
+      code: `client.resume_sandbox(sandbox_id)
+print("Sandbox resumed")`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
       language: "typescript",
-      code: `await client.resumeSandbox('sb_abc123');
-console.log('Sandbox resumed');`
+      code: `await client.resumeSandbox(sandboxId);
+console.log('Sandbox resumed');`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 sandbox resume sb_abc123`
+      code: `s0 sandbox resume "$SANDBOX_ID"`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-cli"
     }
   ]}
 />
@@ -452,31 +561,43 @@ TTL cannot be extended beyond the <code>hard_ttl</code> limit set during creatio
     {
       label: "Go",
       language: "go",
-      code: `resp, err := client.RefreshSandbox(ctx, "sb_abc123")
+      code: `resp, err := client.RefreshSandbox(ctx, sandboxID)
 if err != nil {
     log.Fatal(err)
 }
-fmt.Printf("New expires at: %s\\n", resp.ExpiresAt)`
+fmt.Printf("New expires at: %s\\n", resp.ExpiresAt)`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
       language: "python",
-      code: `resp = client.refresh_sandbox("sb_abc123")
-print(f"New expires at: {resp.expires_at}")`
+      code: `resp = client.refresh_sandbox(sandbox_id)
+print(f"New expires at: {resp.expires_at}")`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
       language: "typescript",
-      code: `const resp = await client.refreshSandbox('sb_abc123');
-console.log('New expires at:', resp.expiresAt);`
+      code: `const resp = await client.refreshSandbox(sandboxId);
+console.log('New expires at:', resp.expiresAt);`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 sandbox refresh sb_abc123
-
-# Output:
-# New expires at: 2024-01-15T11:00:00Z`
+      code: `s0 sandbox refresh "$SANDBOX_ID"`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-cli"
     }
   ]}
 />
@@ -496,28 +617,43 @@ Terminate and delete a sandbox. This action is irreversible.
     {
       label: "Go",
       language: "go",
-      code: `_, err := client.DeleteSandbox(ctx, "sb_abc123")
+      code: `_, err := client.DeleteSandbox(ctx, sandboxID)
 if err != nil {
     log.Fatal(err)
 }
-fmt.Println("Sandbox deleted")`
+fmt.Println("Sandbox deleted")`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
       language: "python",
-      code: `client.delete_sandbox("sb_abc123")
-print("Sandbox deleted")`
+      code: `client.delete_sandbox(sandbox_id)
+print("Sandbox deleted")`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
       language: "typescript",
-      code: `await client.deleteSandbox('sb_abc123');
-console.log('Sandbox deleted');`
+      code: `await client.deleteSandbox(sandboxId);
+console.log('Sandbox deleted');`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 sandbox delete sb_abc123`
+      code: `s0 sandbox delete "$SANDBOX_ID"`,
+      mode: "run",
+      needs: "infra",
+      session: "sandbox-cli"
     }
   ]}
 />

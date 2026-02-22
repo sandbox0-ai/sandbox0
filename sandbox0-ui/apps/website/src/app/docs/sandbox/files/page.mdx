@@ -43,29 +43,44 @@ content, err := sandbox.ReadFile(ctx, "/workspace/hello.txt")
 if err != nil {
     log.Fatal(err)
 }
-fmt.Printf("Content: %s\\n", string(content))`
+fmt.Printf("Content: %s\\n", string(content))`,
+      mode: "run",
+      needs: "infra",
+      session: "files-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
       language: "python",
       code: `# Read file content
 content = sandbox.read_file("/workspace/hello.txt")
-print(f"Content: {content.decode()}")`
+print(f"Content: {content.decode()}")`,
+      mode: "run",
+      needs: "infra",
+      session: "files-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
       language: "typescript",
       code: `// Read file content
 const content = await sandbox.readFile('/workspace/hello.txt');
-console.log('Content:', content.toString());`
+console.log('Content:', content.toString());`,
+      mode: "run",
+      needs: "infra",
+      session: "files-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 file read sb_abc123 /workspace/hello.txt
-
-# Output:
-# Hello, World!`
+      code: `SANDBOX_ID="$(s0 sandbox create --template default --hard-ttl 300 | awk '/Sandbox ID:/ {print $3}')"
+s0 file write "$SANDBOX_ID" /workspace/hello.txt --content "Hello, World!"
+s0 file read "$SANDBOX_ID" /workspace/hello.txt`,
+      mode: "run",
+      needs: "infra",
+      session: "files-cli",
+      setup: ["command -v s0 >/dev/null"]
     }
   ]}
 />
@@ -101,26 +116,41 @@ _, err := sandbox.WriteFile(ctx, "/workspace/hello.txt", content)
 if err != nil {
     log.Fatal(err)
 }
-fmt.Println("File written successfully")`
+fmt.Println("File written successfully")`,
+      mode: "run",
+      needs: "infra",
+      session: "files-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
       language: "python",
       code: `# Write file content
 sandbox.write_file("/workspace/hello.txt", b"Hello from Sandbox0!\\n")
-print("File written successfully")`
+print("File written successfully")`,
+      mode: "run",
+      needs: "infra",
+      session: "files-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
       language: "typescript",
       code: `// Write file content
 await sandbox.writeFile('/workspace/hello.txt', 'Hello from Sandbox0!\\n');
-console.log('File written successfully');`
+console.log('File written successfully');`,
+      mode: "run",
+      needs: "infra",
+      session: "files-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 file write sb_abc123 /workspace/hello.txt --content "Hello from Sandbox0!"`
+      code: `s0 file write "$SANDBOX_ID" /workspace/hello.txt --content "Hello from Sandbox0!"`,
+      mode: "run",
+      needs: "infra",
+      session: "files-cli"
     }
   ]}
 />
@@ -153,26 +183,41 @@ _, err := sandbox.Mkdir(ctx, "/workspace/project/src", true)
 if err != nil {
     log.Fatal(err)
 }
-fmt.Println("Directory created")`
+fmt.Println("Directory created")`,
+      mode: "run",
+      needs: "infra",
+      session: "files-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
       language: "python",
       code: `# Create directory (with parent directories)
 sandbox.mkdir("/workspace/project/src", recursive=True)
-print("Directory created")`
+print("Directory created")`,
+      mode: "run",
+      needs: "infra",
+      session: "files-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
       language: "typescript",
       code: `// Create directory (with parent directories)
 await sandbox.mkdir('/workspace/project/src', true);
-console.log('Directory created');`
+console.log('Directory created');`,
+      mode: "run",
+      needs: "infra",
+      session: "files-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 file mkdir sb_abc123 /workspace/project/src --recursive`
+      code: `s0 file mkdir "$SANDBOX_ID" /workspace/project/src --recursive`,
+      mode: "run",
+      needs: "infra",
+      session: "files-cli"
     }
   ]}
 />
@@ -207,26 +252,41 @@ _, err := sandbox.DeleteFile(ctx, "/workspace/hello.txt")
 if err != nil {
     log.Fatal(err)
 }
-fmt.Println("File deleted")`
+fmt.Println("File deleted")`,
+      mode: "run",
+      needs: "infra",
+      session: "files-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
       language: "python",
       code: `# Delete file
 sandbox.delete_file("/workspace/hello.txt")
-print("File deleted")`
+print("File deleted")`,
+      mode: "run",
+      needs: "infra",
+      session: "files-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
       language: "typescript",
       code: `// Delete file
 await sandbox.deleteFile('/workspace/hello.txt');
-console.log('File deleted');`
+console.log('File deleted');`,
+      mode: "run",
+      needs: "infra",
+      session: "files-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 file delete sb_abc123 /workspace/hello.txt`
+      code: `s0 file delete "$SANDBOX_ID" /workspace/hello.txt`,
+      mode: "run",
+      needs: "infra",
+      session: "files-cli"
     }
   ]}
 />
@@ -253,31 +313,59 @@ Move or rename a file or directory.
     {
       label: "Go",
       language: "go",
-      code: `// Move/rename file
+      code: `// Prepare source file
+_, err := sandbox.WriteFile(ctx, "/workspace/old.txt", []byte("to-be-moved\\n"))
+if err != nil {
+    log.Fatal(err)
+}
+
+// Move/rename file
 _, err := sandbox.MoveFile(ctx, "/workspace/old.txt", "/workspace/new.txt")
 if err != nil {
     log.Fatal(err)
 }
-fmt.Println("File moved")`
+fmt.Println("File moved")`,
+      mode: "run",
+      needs: "infra",
+      session: "files-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
       language: "python",
-      code: `# Move/rename file
+      code: `# Prepare source file
+sandbox.write_file("/workspace/old.txt", b"to-be-moved\\n")
+
+# Move/rename file
 sandbox.move_file("/workspace/old.txt", "/workspace/new.txt")
-print("File moved")`
+print("File moved")`,
+      mode: "run",
+      needs: "infra",
+      session: "files-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
       language: "typescript",
-      code: `// Move/rename file
+      code: `// Prepare source file
+await sandbox.writeFile('/workspace/old.txt', 'to-be-moved\\n');
+
+// Move/rename file
 await sandbox.moveFile('/workspace/old.txt', '/workspace/new.txt');
-console.log('File moved');`
+console.log('File moved');`,
+      mode: "run",
+      needs: "infra",
+      session: "files-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 file move sb_abc123 /workspace/old.txt /workspace/new.txt`
+      code: `s0 file write "$SANDBOX_ID" /workspace/old.txt --content "to-be-moved"
+s0 file move "$SANDBOX_ID" /workspace/old.txt /workspace/new.txt`,
+      mode: "run",
+      needs: "infra",
+      session: "files-cli"
     }
   ]}
 />
@@ -303,7 +391,13 @@ Get metadata about a file or directory.
     {
       label: "Go",
       language: "go",
-      code: `// Get file info
+      code: `// Ensure file exists before stat
+_, err := sandbox.WriteFile(ctx, "/workspace/hello.txt", []byte("hello\\n"))
+if err != nil {
+    log.Fatal(err)
+}
+
+// Get file info
 info, err := sandbox.StatFile(ctx, "/workspace/hello.txt")
 if err != nil {
     log.Fatal(err)
@@ -311,39 +405,54 @@ if err != nil {
 fmt.Printf("Name: %s\\n", info.Name)
 fmt.Printf("Size: %d bytes\\n", info.Size)
 fmt.Printf("Type: %s\\n", info.Type)
-fmt.Printf("Mode: %s\\n", info.Mode)`
+fmt.Printf("Mode: %s\\n", info.Mode)`,
+      mode: "run",
+      needs: "infra",
+      session: "files-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
       language: "python",
-      code: `# Get file info
+      code: `# Ensure file exists before stat
+sandbox.write_file("/workspace/hello.txt", b"hello\\n")
+
+# Get file info
 info = sandbox.stat_file("/workspace/hello.txt")
 print(f"Name: {info.name}")
 print(f"Size: {info.size} bytes")
 print(f"Type: {info.type}")
-print(f"Mode: {info.mode}")`
+print(f"Mode: {info.mode}")`,
+      mode: "run",
+      needs: "infra",
+      session: "files-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
       language: "typescript",
-      code: `// Get file info
+      code: `// Ensure file exists before stat
+await sandbox.writeFile('/workspace/hello.txt', 'hello\\n');
+
+// Get file info
 const info = await sandbox.statFile('/workspace/hello.txt');
 console.log('Name:', info.name);
 console.log('Size:', info.size, 'bytes');
 console.log('Type:', info.type);
-console.log('Mode:', info.mode);`
+console.log('Mode:', info.mode);`,
+      mode: "run",
+      needs: "infra",
+      session: "files-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 file stat sb_abc123 /workspace/hello.txt
-
-# Output:
-# Name: hello.txt
-# Size: 24 bytes
-# Type: file
-# Mode: 0644
-# Modified: 2024-01-15T10:30:00Z`
+      code: `s0 file write "$SANDBOX_ID" /workspace/hello.txt --content "hello"
+s0 file stat "$SANDBOX_ID" /workspace/hello.txt`,
+      mode: "run",
+      needs: "infra",
+      session: "files-cli"
     }
   ]}
 />
@@ -378,7 +487,11 @@ for _, entry := range entries {
     if path, ok := entry.Path.Get(); ok {
         fmt.Printf("- %s (%s, %d bytes)\\n", path, entry.Type, entry.Size)
     }
-}`
+}`,
+      mode: "run",
+      needs: "infra",
+      session: "files-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
@@ -386,7 +499,11 @@ for _, entry := range entries {
       code: `# List directory contents
 entries = sandbox.list_files("/workspace")
 for entry in entries:
-    print(f"- {entry.path} ({entry.type}, {entry.size} bytes)")`
+    print(f"- {entry.path} ({entry.type}, {entry.size} bytes)")`,
+      mode: "run",
+      needs: "infra",
+      session: "files-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
@@ -395,17 +512,19 @@ for entry in entries:
 const { entries } = await sandbox.listFiles('/workspace');
 for (const entry of entries) {
     console.log(\`- \${entry.path} (\${entry.type}, \${entry.size} bytes)\`);
-}`
+}`,
+      mode: "run",
+      needs: "infra",
+      session: "files-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 file list sb_abc123 /workspace
-
-# Output:
-# hello.txt    file   24 bytes
-# project/     dir    4096 bytes
-# data.json    file   1024 bytes`
+      code: `s0 file list "$SANDBOX_ID" /workspace`,
+      mode: "run",
+      needs: "infra",
+      session: "files-cli"
     }
   ]}
 />
@@ -453,56 +572,56 @@ Watch a directory for file system changes in real-time via WebSocket.
     {
       label: "Go",
       language: "go",
-      code: `// Watch files for changes
-watchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-defer cancel()
-
-events, errs, unsubscribe, err := sandbox.WatchFiles(watchCtx, "/workspace", true)
+      code: `// Start watch session
+events, errs, unsubscribe, err := sandbox.WatchFiles(ctx, "/workspace", true)
 if err != nil {
     log.Fatal(err)
 }
 defer unsubscribe()
 
-// Process events
-for {
-    select {
-    case ev, ok := <-events:
-        if !ok {
-            return
-        }
-        fmt.Printf("Event: %s on %s\\n", ev.Event, ev.Path)
-    case err, ok := <-errs:
-        if ok && err != nil {
-            log.Printf("Watch error: %v", err)
-        }
-    case <-watchCtx.Done():
-        fmt.Println("Watch timeout")
-        return
+// Trigger one change and read at most one event.
+_, err = sandbox.WriteFile(ctx, "/workspace/watch-demo.txt", []byte("watch\\n"))
+if err != nil {
+    log.Fatal(err)
+}
+
+select {
+case ev := <-events:
+    fmt.Printf("Event: %s on %s\\n", ev.Event, ev.Path)
+case err := <-errs:
+    if err != nil {
+        log.Printf("Watch error: %v", err)
     }
-}`
+default:
+    fmt.Println("No event yet; watch setup verified")
+}`,
+      mode: "run",
+      needs: "infra",
+      session: "files-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
       language: "python",
-      code: `# Watch files for changes
-import time
-
+      code: `# Start watch session
 events, errors, unsubscribe = sandbox.watch_files("/workspace", recursive=True)
 
 try:
-    for event in events:
-        print(f"Event: {event.event} on {event.path}")
-        if event.event == "write":
-            print(f"File modified: {event.path}")
-except KeyboardInterrupt:
-    pass
+    # Trigger one change and close quickly.
+    sandbox.write_file("/workspace/watch-demo.txt", b"watch\\n")
+    print("Watch started; triggered one write event")
 finally:
-    unsubscribe()`
+    unsubscribe()
+    print("Watch stopped")`,
+      mode: "run",
+      needs: "infra",
+      session: "files-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
       language: "typescript",
-      code: `// Watch files for changes
+      code: `// Start watch session
 const { events, errors, unsubscribe } = await sandbox.watchFiles('/workspace', true);
 
 events.on('data', (event) => {
@@ -516,22 +635,30 @@ errors.on('data', (error) => {
     console.error('Watch error:', error);
 });
 
-// Unsubscribe after 30 seconds
-setTimeout(() => {
-    unsubscribe();
-}, 30000);`
+// Trigger one change, then stop soon so example converges.
+await sandbox.writeFile('/workspace/watch-demo.txt', 'watch\\n');
+await new Promise((r) => setTimeout(r, 1000));
+unsubscribe();`,
+      mode: "run",
+      needs: "infra",
+      session: "files-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `# Watch files for changes
-s0 file watch sb_abc123 /workspace --recursive
+      code: `# Start watch in background and stop shortly after
+s0 file watch "$SANDBOX_ID" /workspace --recursive > /tmp/s0-watch.log 2>&1 &
+WATCH_PID=$!
 
-# Output (live):
-# [create] /workspace/newfile.txt
-# [write] /workspace/newfile.txt
-# [rename] /workspace/newfile.txt -> /workspace/renamed.txt
-# [remove] /workspace/renamed.txt`
+s0 file write "$SANDBOX_ID" /workspace/watch-demo.txt --content "watch"
+sleep 1
+kill "$WATCH_PID" || true
+wait "$WATCH_PID" || true
+echo "Watch ended"`,
+      mode: "run",
+      needs: "infra",
+      session: "files-cli"
     }
   ]}
 />
@@ -583,7 +710,11 @@ if err != nil {
 _, err = sandbox.DeleteFile(ctx, "/tmp/sdk-go/hello-renamed.txt")
 if err != nil {
     log.Fatal(err)
-}`
+}`,
+      mode: "run",
+      needs: "infra",
+      session: "files-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
@@ -606,7 +737,11 @@ print(f"Directory entries: {len(entries)}")
 sandbox.move_file("/tmp/sdk-py/hello.txt", "/tmp/sdk-py/hello-renamed.txt")
 
 # Delete file
-sandbox.delete_file("/tmp/sdk-py/hello-renamed.txt")`
+sandbox.delete_file("/tmp/sdk-py/hello-renamed.txt")`,
+      mode: "run",
+      needs: "infra",
+      session: "files-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
@@ -629,28 +764,35 @@ console.log('Directory entries:', entries.length);
 await sandbox.moveFile('/tmp/sdk-js/hello.txt', '/tmp/sdk-js/hello-renamed.txt');
 
 // Delete file
-await sandbox.deleteFile('/tmp/sdk-js/hello-renamed.txt');`
+await sandbox.deleteFile('/tmp/sdk-js/hello-renamed.txt');`,
+      mode: "run",
+      needs: "infra",
+      session: "files-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
       code: `# Create directory
-s0 file mkdir sb_abc123 /tmp/sdk-cli --recursive
+s0 file mkdir "$SANDBOX_ID" /tmp/sdk-cli --recursive
 
 # Write a file
-s0 file write sb_abc123 /tmp/sdk-cli/hello.txt --content "hello from file"
+s0 file write "$SANDBOX_ID" /tmp/sdk-cli/hello.txt --content "hello from file"
 
 # Read the file
-s0 file read sb_abc123 /tmp/sdk-cli/hello.txt
+s0 file read "$SANDBOX_ID" /tmp/sdk-cli/hello.txt
 
 # List directory
-s0 file list sb_abc123 /tmp/sdk-cli
+s0 file list "$SANDBOX_ID" /tmp/sdk-cli
 
 # Move/rename file
-s0 file move sb_abc123 /tmp/sdk-cli/hello.txt /tmp/sdk-cli/hello-renamed.txt
+s0 file move "$SANDBOX_ID" /tmp/sdk-cli/hello.txt /tmp/sdk-cli/hello-renamed.txt
 
 # Delete file
-s0 file delete sb_abc123 /tmp/sdk-cli/hello-renamed.txt`
+s0 file delete "$SANDBOX_ID" /tmp/sdk-cli/hello-renamed.txt`,
+      mode: "run",
+      needs: "infra",
+      session: "files-cli"
     }
   ]}
 />

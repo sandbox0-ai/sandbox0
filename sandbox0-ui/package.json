@@ -13,11 +13,17 @@
     "dev:website": "npm run dev -w @sandbox0/website",
     "dev:dashboard": "npm run dev -w @sandbox0/dashboard",
     "lint": "npm run lint -w @sandbox0/website && npm run lint -w @sandbox0/dashboard",
+    "docs:check": "npm run docs:examples:check -w @sandbox0/website",
+    "docs:run": "npm run docs:examples:run -w @sandbox0/website",
+    "docs:examples:test": "node --test ./tools/docs-examples/tests/*.test.mjs",
     "format": "prettier --write \"**/*.{ts,tsx,md}\"",
     "clean": "rm -rf node_modules apps/*/node_modules components/*/node_modules"
   },
   "devDependencies": {
+    "@mdx-js/mdx": "^3.1.1",
     "prettier": "^3.4.2",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "unist-util-visit": "^5.0.0",
+    "yaml": "^2.8.1"
   }
 }

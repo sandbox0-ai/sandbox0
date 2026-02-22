@@ -6,8 +6,12 @@ Understanding sandbox0's architecture helps you make informed deployment decisio
 
 Sandbox0 is designed with a clear separation between control plane and data plane:
 
-```
-                    ┌─────────────────────────────────────┐
+<Tabs
+  tabs={[
+    {
+      label: "Diagram",
+      language: "text",
+      code: `                    ┌─────────────────────────────────────┐
                     │           Control Plane              │
                     │  ┌─────────────┐  ┌───────────────┐  │
                     │  │ edge-gateway│  │   scheduler   │  │
@@ -35,8 +39,13 @@ Sandbox0 is designed with a clear separation between control plane and data plan
                     │ ┌────────────────────────┐          │
                     │ │    Sandbox Pods        │          │
                     │ └────────────────────────┘          │
-                    └─────────────────────────────────────┘
-```
+                    └─────────────────────────────────────┘`,
+      mode: "read",
+      needs: "none",
+      session: "selfhosted-architecture-overview-diagram"
+    }
+  ]}
+/>
 
 ## Control Plane Components
 
@@ -119,8 +128,12 @@ Node-level network policy enforcement (DaemonSet).
 
 ### Sandbox Creation Flow
 
-```
-1. Client Request
+<Tabs
+  tabs={[
+    {
+      label: "Flow",
+      language: "text",
+      code: `1. Client Request
    │
    ▼
 2. edge-gateway (auth + routing)
@@ -139,15 +152,24 @@ Node-level network policy enforcement (DaemonSet).
    └──► netd (apply network policy if needed)
    │
    ▼
-6. Sandbox Ready
-```
+6. Sandbox Ready`,
+      mode: "read",
+      needs: "none",
+      session: "selfhosted-architecture-sandbox-flow"
+    }
+  ]}
+/>
 
 ## Storage Architecture
 
 Sandbox0 uses JuiceFS for persistent storage:
 
-```
-┌─────────────────────────────────────────────┐
+<Tabs
+  tabs={[
+    {
+      label: "Diagram",
+      language: "text",
+      code: `┌─────────────────────────────────────────────┐
 │              storage-proxy                   │
 │  ┌─────────────┐    ┌─────────────────────┐ │
 │  │   JuiceFS   │◄───│  PostgreSQL (meta)  │ │
@@ -159,8 +181,13 @@ Sandbox0 uses JuiceFS for persistent storage:
 │  │         S3 / OSS / RustFS               ││
 │  │         (object storage)                ││
 │  └─────────────────────────────────────────┘│
-└─────────────────────────────────────────────┘
-```
+└─────────────────────────────────────────────┘`,
+      mode: "read",
+      needs: "none",
+      session: "selfhosted-architecture-storage-diagram"
+    }
+  ]}
+/>
 
 **Components:**
 - **JuiceFS**: POSIX filesystem with metadata in PostgreSQL and data in object storage
@@ -171,12 +198,21 @@ Sandbox0 uses JuiceFS for persistent storage:
 
 Services communicate using JWT tokens signed with ed25519 keys:
 
-```
-┌─────────────────┐     JWT Token      ┌─────────────────┐
+<Tabs
+  tabs={[
+    {
+      label: "Diagram",
+      language: "text",
+      code: `┌─────────────────┐     JWT Token      ┌─────────────────┐
 │  Control Plane  │ ─────────────────► │   Data Plane    │
 │  (private key)  │                    │  (public key)   │
-└─────────────────┘                    └─────────────────┘
-```
+└─────────────────┘                    └─────────────────┘`,
+      mode: "read",
+      needs: "none",
+      session: "selfhosted-architecture-internal-auth-diagram"
+    }
+  ]}
+/>
 
 **Key Pairs:**
 - **Control Plane Key**: Signs tokens for control plane requests
@@ -190,8 +226,12 @@ Keys can be auto-generated or provided via Kubernetes secrets.
 
 All services in one cluster, sharing one PostgreSQL and S3:
 
-```
-┌────────────────────────────────────────┐
+<Tabs
+  tabs={[
+    {
+      label: "Diagram",
+      language: "text",
+      code: `┌────────────────────────────────────────┐
 │           Single Cluster               │
 │  ┌──────────────────────────────────┐  │
 │  │ internal-gateway + manager + ... │  │
@@ -199,15 +239,24 @@ All services in one cluster, sharing one PostgreSQL and S3:
 │  ┌──────────────────────────────────┐  │
 │  │     PostgreSQL + S3              │  │
 │  └──────────────────────────────────┘  │
-└────────────────────────────────────────┘
-```
+└────────────────────────────────────────┘`,
+      mode: "read",
+      needs: "none",
+      session: "selfhosted-architecture-singlecluster-diagram"
+    }
+  ]}
+/>
 
 ### Multi-Cluster
 
 Control plane and multiple data planes share PostgreSQL:
 
-```
-┌──────────────────────────────────────────────────────────┐
+<Tabs
+  tabs={[
+    {
+      label: "Diagram",
+      language: "text",
+      code: `┌──────────────────────────────────────────────────────────┐
 │                    Shared PostgreSQL                      │
 └──────────────────────────────────────────────────────────┘
          │                    │                    │
@@ -216,7 +265,12 @@ Control plane and multiple data planes share PostgreSQL:
 │  Control Plane  │  │  Data Plane 1   │  │  Data Plane 2   │
 │  edge-gateway   │  │  internal-gw    │  │  internal-gw    │
 │  scheduler      │  │  manager        │  │  manager        │
-└─────────────────┘  └─────────────────┘  └─────────────────┘
-```
+└─────────────────┘  └─────────────────┘  └─────────────────┘`,
+      mode: "read",
+      needs: "none",
+      session: "selfhosted-architecture-multicluster-diagram"
+    }
+  ]}
+/>
 
 Each data plane has its own S3 bucket for isolation.

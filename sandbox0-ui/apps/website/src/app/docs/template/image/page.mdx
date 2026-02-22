@@ -47,7 +47,10 @@ mainContainer := &sandbox0.ContainerSpec{
 mainContainer := &sandbox0.ContainerSpec{
     Image: "python@sha256:abc123...",
     ImagePullPolicy: sandbox0.NewOptString("Always"),
-}`
+}`,
+      mode: "run",
+      needs: "none",
+      session: "template-image-go"
     },
     {
       label: "Python",
@@ -62,7 +65,10 @@ main_container = {
 main_container = {
     "image": "python@sha256:abc123...",
     "imagePullPolicy": "Always",
-}`
+}`,
+      mode: "run",
+      needs: "none",
+      session: "template-image-python"
     },
     {
       label: "JavaScript",
@@ -77,7 +83,10 @@ const mainContainer = {
 const mainContainer = {
     image: 'python@sha256:abc123...',
     imagePullPolicy: 'Always',
-};`
+};`,
+      mode: "run",
+      needs: "none",
+      session: "template-image-typescript"
     },
     {
       label: "CLI",
@@ -90,7 +99,11 @@ s0 template create my-template \\
 # Using digest
 s0 template create my-template \\
     --image python@sha256:abc123... \\
-    --pull-policy Always`
+    --pull-policy Always`,
+      mode: "run",
+      needs: "none",
+      session: "template-image-cli",
+      setup: ["command -v s0 >/dev/null"]
     }
   ]}
 />
@@ -134,7 +147,11 @@ fmt.Printf("Username: %s\\n", creds.Username)
 fmt.Printf("Expires: %s\\n", creds.ExpiresAt)
 
 // Use credentials with docker client
-// docker login -u USERNAME -p PASSWORD REGISTRY`
+// docker login -u USERNAME -p PASSWORD REGISTRY`,
+      mode: "run",
+      needs: "infra",
+      session: "template-image-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
@@ -146,7 +163,11 @@ print(f"Username: {creds.username}")
 print(f"Expires: {creds.expires_at}")
 
 # Use credentials with docker client
-# docker login -u USERNAME -p PASSWORD REGISTRY`
+# docker login -u USERNAME -p PASSWORD REGISTRY`,
+      mode: "run",
+      needs: "infra",
+      session: "template-image-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
@@ -158,7 +179,11 @@ console.log('Username:', creds.username);
 console.log('Expires:', creds.expiresAt);
 
 // Use credentials with docker client
-// docker login -u USERNAME -p PASSWORD REGISTRY`
+// docker login -u USERNAME -p PASSWORD REGISTRY`,
+      mode: "run",
+      needs: "infra",
+      session: "template-image-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
@@ -172,7 +197,11 @@ console.log('Expires:', creds.expiresAt);
 # Expires: 2024-01-15T12:00:00Z
 
 # Login to registry
-s0 registry login`
+s0 registry login`,
+      mode: "run",
+      needs: "infra",
+      session: "template-image-cli",
+      setup: ["command -v s0 >/dev/null"]
     }
   ]}
 />
@@ -291,7 +320,11 @@ spec:
       code: `# Get and store credentials
 s0 registry login
 
-# This configures docker to use Sandbox0 registry`
+# This configures docker to use Sandbox0 registry`,
+      mode: "run",
+      needs: "none",
+      session: "template-image-cli",
+      setup: ["command -v s0 >/dev/null"]
     }
   ]}
 />
@@ -311,7 +344,11 @@ docker push registry.sandbox0.local:5000/my-app:v1.0.0
 
 # Use in template
 s0 template create my-template \\
-    --image registry.sandbox0.local:5000/my-app:v1.0.0`
+    --image registry.sandbox0.local:5000/my-app:v1.0.0`,
+      mode: "run",
+      needs: "none",
+      session: "template-image-cli",
+      setup: ["command -v s0 >/dev/null", "command -v docker >/dev/null"]
     }
   ]}
 />
@@ -379,7 +416,10 @@ kubectl create secret docker-registry my-registry-secret \
     Pod: &sandbox0.PodSpecOverride{
         ServiceAccountName: sandbox0.NewOptString("my-service-account"),
     },
-}`
+}`,
+      mode: "run",
+      needs: "none",
+      session: "template-image-go"
     },
     {
       label: "Python",
@@ -395,7 +435,10 @@ kubectl create secret docker-registry my-registry-secret \
     "pod": {
         "serviceAccountName": "my-service-account",
     },
-}`
+}`,
+      mode: "run",
+      needs: "none",
+      session: "template-image-python"
     },
     {
       label: "JavaScript",
@@ -411,14 +454,21 @@ kubectl create secret docker-registry my-registry-secret \
     pod: {
         serviceAccountName: 'my-service-account',
     },
-};`
+};`,
+      mode: "run",
+      needs: "none",
+      session: "template-image-typescript"
     },
     {
       label: "CLI",
       language: "bash",
       code: `s0 template create my-template \\
     --image registry.example.com/private/image:v1.0 \\
-    --service-account my-service-account`
+    --service-account my-service-account`,
+      mode: "run",
+      needs: "none",
+      session: "template-image-cli",
+      setup: ["command -v s0 >/dev/null"]
     }
   ]}
 />

@@ -81,7 +81,12 @@ ctxResp, err := sandbox.CreateContext(ctx, apispec.CreateContextRequest{
 if err != nil {
     log.Fatal(err)
 }
-fmt.Printf("Context ID: %s\\n", ctxResp.ID)`
+fmt.Printf("Context ID: %s\\n", ctxResp.ID)
+contextID := ctxResp.ID`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
@@ -94,7 +99,12 @@ context = sandbox.create_context(
     env_vars={"DEBUG": "true"},
     ttl_sec=120,
 )
-print(f"Context ID: {context.id}")`
+print(f"Context ID: {context.id}")
+context_id = context.id`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
@@ -107,15 +117,24 @@ const context = await sandbox.createContext({
     envVars: { DEBUG: 'true' },
     ttlSec: 120,
 });
-console.log('Context ID:', context.id);`
+console.log('Context ID:', context.id);
+let contextId = context.id;`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 context create sb_abc123 --type repl --language python
-
-# Output:
-# Context ID: ctx_xyz789`
+      code: `SANDBOX_ID="$(s0 sandbox create --template default --hard-ttl 300 | awk '/Sandbox ID:/ {print $3}')"
+CONTEXT_ID="$(s0 context create "$SANDBOX_ID" --type repl --language python | awk '/Context ID:/ {print $3}')"
+echo "Sandbox ID: $SANDBOX_ID"
+echo "Context ID: $CONTEXT_ID"`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-cli",
+      setup: ["command -v s0 >/dev/null"]
     }
   ]}
 />
@@ -147,7 +166,11 @@ result, err = sandbox.Run(ctx, "python", \`print(x)\`)
 if err != nil {
     log.Fatal(err)
 }
-fmt.Print(result.OutputRaw)  // Output: 2`
+fmt.Print(result.OutputRaw)  // Output: 2`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
@@ -158,7 +181,11 @@ print(result.output_raw)
 
 # Second call - variable preserved
 result = sandbox.run("python", "print(x)")
-print(result.output_raw)  # Output: 2`
+print(result.output_raw)  # Output: 2`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
@@ -169,14 +196,20 @@ console.log(result.outputRaw);
 
 // Second call - variable preserved
 result = await sandbox.run('python', 'print(x)');
-console.log(result.outputRaw);  // Output: 2`
+console.log(result.outputRaw);  // Output: 2`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 sandbox run sb_abc123 --language python --code "x = 2"
-s0 sandbox run sb_abc123 --language python --code "print(x)"
-# Output: 2`
+      code: `s0 sandbox run "$SANDBOX_ID" --language python --code "x = 2"
+s0 sandbox run "$SANDBOX_ID" --language python --code "print(x)"`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-cli"
     }
   ]}
 />
@@ -198,7 +231,11 @@ print(os.getenv("GREETING"))\`,
     sandbox0.WithEnvVars(map[string]string{"GREETING": "hello"}),
     sandbox0.WithContextTTL(120),
     sandbox0.WithIdleTimeout(60),
-)`
+)`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
@@ -212,7 +249,11 @@ print(os.getenv("GREETING"))\`,
     env_vars={"GREETING": "hello"},
     ttl_sec=120,
     idle_timeout_sec=60,
-)`
+)`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
@@ -224,15 +265,22 @@ print(os.getenv("GREETING"))\`, {
    envVars: { GREETING: 'hello' },
    ttlSec: 120,
    idleTimeoutSec: 60,
-});`
+});`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 sandbox run sb_abc123 --language python \\
+      code: `s0 sandbox run "$SANDBOX_ID" --language python \\
   --cwd /workspace \\
   --env GREETING=hello \\
-  --code 'print("hello")'`
+  --code 'print("hello")'`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-cli"
     }
   ]}
 />
@@ -256,7 +304,11 @@ fmt.Print(result.OutputRaw)  // Output: hello
 // Variables NOT preserved between Cmd calls
 sandbox.Cmd(ctx, \`/bin/sh -c "x=3"\`)
 result, _ = sandbox.Cmd(ctx, \`/bin/sh -c "echo \\$x"\`)
-fmt.Print(result.OutputRaw)  // Output: (empty)`
+fmt.Print(result.OutputRaw)  // Output: (empty)`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
@@ -268,7 +320,11 @@ print(result.output_raw)  # Output: hello
 # Variables NOT preserved between cmd calls
 sandbox.cmd('/bin/sh -c "x=3"')
 result = sandbox.cmd('/bin/sh -c "echo $x"')
-print(result.output_raw)  # Output: (empty)`
+print(result.output_raw)  # Output: (empty)`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
@@ -280,13 +336,19 @@ console.log(result.outputRaw);  // Output: hello
 // Variables NOT preserved between cmd calls
 await sandbox.cmd('/bin/sh -c "x=3"');
 result = await sandbox.cmd('/bin/sh -c "echo $x"');
-console.log(result.outputRaw);  // Output: (empty)`
+console.log(result.outputRaw);  // Output: (empty)`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 sandbox exec sb_abc123 -- /bin/sh -c "echo hello"
-# Output: hello`
+      code: `s0 sandbox exec "$SANDBOX_ID" -- /bin/sh -c "echo hello"`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-cli"
     }
   ]}
 />
@@ -306,7 +368,11 @@ console.log(result.outputRaw);  // Output: (empty)`
     sandbox0.WithCmdTTL(120),
     sandbox0.WithCmdIdleTimeout(60),
     sandbox0.WithCmdWait(false),  // Async execution
-)`
+)`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
@@ -318,7 +384,11 @@ console.log(result.outputRaw);  // Output: (empty)`
     ttl_sec=120,
     idle_timeout_sec=60,
     wait=False,  # Async execution
-)`
+)`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
@@ -329,15 +399,22 @@ console.log(result.outputRaw);  // Output: (empty)`
    ttlSec: 120,
    idleTimeoutSec: 60,
    wait: false,  // Async execution
-});`
+});`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 sandbox exec sb_abc123 \\
+      code: `s0 sandbox exec "$SANDBOX_ID" \\
   --cwd /tmp \\
   --env GREETING=hello \\
-  -- bash -c 'echo $GREETING && pwd'`
+  -- bash -c 'echo $GREETING && pwd'`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-cli"
     }
   ]}
 />
@@ -363,14 +440,22 @@ if err != nil {
 }
 for _, ctx := range contexts {
     fmt.Printf("- %s (type: %s, status: %s)\\n", ctx.ID, ctx.Type, ctx.Status)
-}`
+}`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
       language: "python",
       code: `contexts = sandbox.list_contexts()
 for ctx in contexts:
-    print(f"- {ctx.id} (type: {ctx.type}, status: {ctx.status})")`
+    print(f"- {ctx.id} (type: {ctx.type}, status: {ctx.status})")`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
@@ -378,16 +463,19 @@ for ctx in contexts:
       code: `const { contexts } = await sandbox.listContexts();
 for (const ctx of contexts) {
     console.log(\`- \${ctx.id} (type: \${ctx.type}, status: \${ctx.status})\`);
-}`
+}`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 context list sb_abc123
-
-# Output:
-# ctx_xyz789  repl   running
-# ctx_abc456  cmd    completed`
+      code: `s0 context list "$SANDBOX_ID"`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-cli"
     }
   ]}
 />
@@ -407,31 +495,46 @@ Get details of a specific context.
     {
       label: "Go",
       language: "go",
-      code: `ctx, err := sandbox.GetContext(ctx, "ctx_xyz789")
+      code: `ctx, err := sandbox.GetContext(ctx, contextID)
 if err != nil {
     log.Fatal(err)
 }
 fmt.Printf("Type: %s\\n", ctx.Type)
-fmt.Printf("Status: %s\\n", ctx.Status)`
+fmt.Printf("Status: %s\\n", ctx.Status)`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
       language: "python",
-      code: `ctx = sandbox.get_context("ctx_xyz789")
+      code: `ctx = sandbox.get_context(context_id)
 print(f"Type: {ctx.type}")
-print(f"Status: {ctx.status}")`
+print(f"Status: {ctx.status}")`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
       language: "typescript",
-      code: `const ctx = await sandbox.getContext('ctx_xyz789');
+      code: `const ctx = await sandbox.getContext(contextId);
 console.log('Type:', ctx.type);
-console.log('Status:', ctx.status);`
+console.log('Status:', ctx.status);`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 context get sb_abc123 ctx_xyz789`
+      code: `s0 context get "$SANDBOX_ID" "$CONTEXT_ID"`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-cli"
     }
   ]}
 />
@@ -451,28 +554,43 @@ Delete a context.
     {
       label: "Go",
       language: "go",
-      code: `_, err := sandbox.DeleteContext(ctx, "ctx_xyz789")
+      code: `_, err := sandbox.DeleteContext(ctx, contextID)
 if err != nil {
     log.Fatal(err)
 }
-fmt.Println("Context deleted")`
+fmt.Println("Context deleted")`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
       language: "python",
-      code: `sandbox.delete_context("ctx_xyz789")
-print("Context deleted")`
+      code: `sandbox.delete_context(context_id)
+print("Context deleted")`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
       language: "typescript",
-      code: `await sandbox.deleteContext('ctx_xyz789');
-console.log('Context deleted');`
+      code: `await sandbox.deleteContext(contextId);
+console.log('Context deleted');`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 context delete sb_abc123 ctx_xyz789`
+      code: `s0 context delete "$SANDBOX_ID" "$CONTEXT_ID"`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-cli"
     }
   ]}
 />
@@ -494,22 +612,37 @@ Restart a context process.
     {
       label: "Go",
       language: "go",
-      code: `_, err := sandbox.RestartContext(ctx, "ctx_xyz789")`
+      code: `_, err := sandbox.RestartContext(ctx, contextID)`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
       language: "python",
-      code: `sandbox.restart_context("ctx_xyz789")`
+      code: `sandbox.restart_context(context_id)`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
       language: "typescript",
-      code: `await sandbox.restartContext('ctx_xyz789');`
+      code: `await sandbox.restartContext(contextId);`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 context restart sb_abc123 ctx_xyz789`
+      code: `s0 context restart "$SANDBOX_ID" "$CONTEXT_ID"`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-cli"
     }
   ]}
 />
@@ -527,22 +660,37 @@ Send input to a context's stdin.
     {
       label: "Go",
       language: "go",
-      code: `_, err := sandbox.SendInput(ctx, "ctx_xyz789", "print('hello')\\n")`
+      code: `_, err := sandbox.SendInput(ctx, contextID, "print('hello')\\n")`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
       language: "python",
-      code: `sandbox.send_input("ctx_xyz789", "print('hello')\\n")`
+      code: `sandbox.send_input(context_id, "print('hello')\\n")`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
       language: "typescript",
-      code: `await sandbox.sendInput('ctx_xyz789', "print('hello')\\n");`
+      code: `await sandbox.sendInput(contextId, "print('hello')\\n");`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 context input sb_abc123 ctx_xyz789 --data "print('hello')"`
+      code: `s0 context input "$SANDBOX_ID" "$CONTEXT_ID" --data "print('hello')"`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-cli"
     }
   ]}
 />
@@ -560,22 +708,37 @@ Resize the terminal dimensions.
     {
       label: "Go",
       language: "go",
-      code: `_, err := sandbox.ResizeContext(ctx, "ctx_xyz789", 24, 80)`
+      code: `_, err := sandbox.ResizeContext(ctx, contextID, 24, 80)`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
       language: "python",
-      code: `sandbox.resize_context("ctx_xyz789", rows=24, cols=80)`
+      code: `sandbox.resize_context(context_id, rows=24, cols=80)`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
       language: "typescript",
-      code: `await sandbox.resizeContext('ctx_xyz789', 24, 80);`
+      code: `await sandbox.resizeContext(contextId, 24, 80);`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 context resize sb_abc123 ctx_xyz789 --rows 24 --cols 80`
+      code: `s0 context resize "$SANDBOX_ID" "$CONTEXT_ID" --rows 24 --cols 80`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-cli"
     }
   ]}
 />
@@ -594,33 +757,48 @@ Send a signal to the context process.
       label: "Go",
       language: "go",
       code: `// Send SIGINT (Ctrl+C)
-_, err := sandbox.SendSignal(ctx, "ctx_xyz789", "INT")
+_, err := sandbox.SendSignal(ctx, contextID, "INT")
 
 // Send SIGTERM
-_, err = sandbox.SendSignal(ctx, "ctx_xyz789", "TERM")`
+_, err = sandbox.SendSignal(ctx, contextID, "TERM")`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
       language: "python",
       code: `# Send SIGINT (Ctrl+C)
-sandbox.send_signal("ctx_xyz789", "INT")
+sandbox.send_signal(context_id, "INT")
 
 # Send SIGTERM
-sandbox.send_signal("ctx_xyz789", "TERM")`
+sandbox.send_signal(context_id, "TERM")`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
       language: "typescript",
       code: `// Send SIGINT (Ctrl+C)
-await sandbox.sendSignal('ctx_xyz789', 'INT');
+await sandbox.sendSignal(contextId, 'INT');
 
 // Send SIGTERM
-await sandbox.sendSignal('ctx_xyz789', 'TERM');`
+await sandbox.sendSignal(contextId, 'TERM');`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 context signal sb_abc123 ctx_xyz789 --signal INT`
+      code: `s0 context signal "$SANDBOX_ID" "$CONTEXT_ID" --signal INT`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-cli"
     }
   ]}
 />
@@ -638,36 +816,46 @@ Get resource usage statistics for a context.
     {
       label: "Go",
       language: "go",
-      code: `stats, err := sandbox.GetContextStats(ctx, "ctx_xyz789")
+      code: `stats, err := sandbox.GetContextStats(ctx, contextID)
 if err != nil {
     log.Fatal(err)
 }
 fmt.Printf("Memory: %d bytes\\n", stats.MemoryRss)
-fmt.Printf("CPU: %.2f%%\\n", stats.CpuPercent)`
+fmt.Printf("CPU: %.2f%%\\n", stats.CpuPercent)`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
       language: "python",
-      code: `stats = sandbox.get_context_stats("ctx_xyz789")
+      code: `stats = sandbox.get_context_stats(context_id)
 print(f"Memory: {stats.memory_rss} bytes")
-print(f"CPU: {stats.cpu_percent:.2f}%")`
+print(f"CPU: {stats.cpu_percent:.2f}%")`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
       language: "typescript",
-      code: `const stats = await sandbox.getContextStats('ctx_xyz789');
+      code: `const stats = await sandbox.getContextStats(contextId);
 console.log('Memory:', stats.memoryRss, 'bytes');
-console.log('CPU:', stats.cpuPercent, '%');`
+console.log('CPU:', stats.cpuPercent, '%');`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 context stats sb_abc123 ctx_xyz789
-
-# Output:
-# Memory RSS: 52428800 bytes
-# CPU: 2.5%
-# Threads: 4`
+      code: `s0 context stats "$SANDBOX_ID" "$CONTEXT_ID"`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-cli"
     }
   ]}
 />
@@ -742,7 +930,11 @@ for {
     if msg.Type == "output" {
         fmt.Print(msg.Data)
     }
-}`
+}`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
@@ -764,13 +956,18 @@ ws.send(json.dumps({
 for message in ws:
     msg = json.loads(message)
     if msg.get("type") == "output":
-        print(msg["data"], end="")`
+        print(msg["data"], end="")`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-python",
+      env: ["SANDBOX0_TOKEN"],
+      deps: ["websocket-client"]
     },
     {
       label: "JavaScript",
       language: "typescript",
       code: `// Connect to WebSocket
-const ws = sandbox.connectWebSocket('ctx_xyz789');
+const ws = sandbox.connectWebSocket(contextId);
 
 // Send input
 ws.send(JSON.stringify({
@@ -785,13 +982,20 @@ ws.onmessage = (event) => {
   if (msg.type === 'output') {
     process.stdout.write(msg.data);
   }
-};`
+};`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
       code: `# CLI uses WebSocket internally for interactive sessions
-s0 sandbox attach sb_abc123 ctx_xyz789`
+s0 sandbox attach "$SANDBOX_ID" "$CONTEXT_ID"`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-cli"
     }
   ]}
 />
@@ -811,30 +1015,45 @@ Execute input and wait for completion.
     {
       label: "Go",
       language: "go",
-      code: `result, err := sandbox.ExecContext(ctx, "ctx_xyz789", apispec.ContextInputRequest{
+      code: `result, err := sandbox.ExecContext(ctx, contextID, apispec.ContextInputRequest{
     Data: "print(1 + 2)\\n",
 })
 if err != nil {
     log.Fatal(err)
 }
-fmt.Print(result.OutputRaw)  // Output: 3`
+fmt.Print(result.OutputRaw)  // Output: 3`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
       language: "python",
-      code: `result = sandbox.exec_context("ctx_xyz789", "print(1 + 2)\\n")
-print(result.output_raw)  # Output: 3`
+      code: `result = sandbox.exec_context(context_id, "print(1 + 2)\\n")
+print(result.output_raw)  # Output: 3`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
       language: "typescript",
-      code: `const result = await sandbox.execContext('ctx_xyz789', "print(1 + 2)\\n");
-console.log(result.outputRaw);  // Output: 3`
+      code: `const result = await sandbox.execContext(contextId, "print(1 + 2)\\n");
+console.log(result.outputRaw);  // Output: 3`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 context exec sb_abc123 ctx_xyz789 --input "print(1 + 2)"`
+      code: `s0 context exec "$SANDBOX_ID" "$CONTEXT_ID" --input "print(1 + 2)"`,
+      mode: "run",
+      needs: "infra",
+      session: "contexts-cli"
     }
   ]}
 />

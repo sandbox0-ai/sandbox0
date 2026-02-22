@@ -8,19 +8,37 @@ This page documents all available configuration options in the `Sandbox0Infra` c
 
 Specifies the version of sandbox0 components to deploy.
 
-```yaml
-spec:
-  version: "latest"  # or specific version like "v1.0.0"
-```
+<Tabs
+  tabs={[
+    {
+      label: "YAML",
+      language: "yaml",
+      code: `spec:
+  version: "latest"  # or specific version like "v1.0.0"`,
+      mode: "read",
+      needs: "none",
+      session: "selfhosted-config-version-yaml"
+    }
+  ]}
+/>
 
 ### Region
 
 Identifies the region for multi-cluster deployments.
 
-```yaml
-spec:
-  region: "aws/us-east-1"
-```
+<Tabs
+  tabs={[
+    {
+      label: "YAML",
+      language: "yaml",
+      code: `spec:
+  region: "aws/us-east-1"`,
+      mode: "read",
+      needs: "none",
+      session: "selfhosted-config-region-yaml"
+    }
+  ]}
+/>
 
 ## Database Configuration
 
@@ -30,8 +48,12 @@ Configure the PostgreSQL database for sandbox0 metadata.
 
 For development and testing:
 
-```yaml
-spec:
+<Tabs
+  tabs={[
+    {
+      label: "YAML",
+      language: "yaml",
+      code: `spec:
   database:
     type: builtin
     builtin:
@@ -44,15 +66,24 @@ spec:
       persistence:
         enabled: true
         size: "20Gi"
-        storageClass: ""  # empty for default
-```
+        storageClass: ""  # empty for default`,
+      mode: "read",
+      needs: "none",
+      session: "selfhosted-config-db-builtin-yaml"
+    }
+  ]}
+/>
 
 ### External Database
 
 For production:
 
-```yaml
-spec:
+<Tabs
+  tabs={[
+    {
+      label: "YAML",
+      language: "yaml",
+      code: `spec:
   database:
     type: external
     external:
@@ -63,22 +94,36 @@ spec:
       passwordSecret:
         name: "db-credentials"
         key: "password"
-      sslMode: "require"
-```
+      sslMode: "require"`,
+      mode: "read",
+      needs: "none",
+      session: "selfhosted-config-db-external-yaml"
+    }
+  ]}
+/>
 
 ### JuiceFS Database
 
 JuiceFS can share the main database or use a separate one:
 
-```yaml
-spec:
+<Tabs
+  tabs={[
+    {
+      label: "YAML",
+      language: "yaml",
+      code: `spec:
   juicefsDatabase:
     shareWithMain: true  # default
     # Or use separate database:
     # external:
     #   host: "juicefs-db.rds.amazonaws.com"
-    #   ...
-```
+    #   ...`,
+      mode: "read",
+      needs: "none",
+      session: "selfhosted-config-juicefs-db-yaml"
+    }
+  ]}
+/>
 
 ## Storage Configuration
 
@@ -88,8 +133,12 @@ Configure the object storage backend for JuiceFS.
 
 For development only:
 
-```yaml
-spec:
+<Tabs
+  tabs={[
+    {
+      label: "YAML",
+      language: "yaml",
+      code: `spec:
   storage:
     type: builtin
     builtin:
@@ -106,13 +155,22 @@ spec:
         size: "20Gi"
       credentials:  # optional, auto-generated if omitted
         accessKey: "minioadmin"
-        secretKey: "minioadmin"
-```
+        secretKey: "minioadmin"`,
+      mode: "read",
+      needs: "none",
+      session: "selfhosted-config-storage-builtin-yaml"
+    }
+  ]}
+/>
 
 ### AWS S3
 
-```yaml
-spec:
+<Tabs
+  tabs={[
+    {
+      label: "YAML",
+      language: "yaml",
+      code: `spec:
   storage:
     type: s3
     s3:
@@ -123,13 +181,22 @@ spec:
         name: "aws-credentials"
         accessKeyKey: "accessKeyId"
         secretKeyKey: "secretAccessKey"
-      sessionTokenKey: "sessionToken"  # optional
-```
+      sessionTokenKey: "sessionToken"  # optional`,
+      mode: "read",
+      needs: "none",
+      session: "selfhosted-config-storage-s3-yaml"
+    }
+  ]}
+/>
 
 ### Aliyun OSS
 
-```yaml
-spec:
+<Tabs
+  tabs={[
+    {
+      label: "YAML",
+      language: "yaml",
+      code: `spec:
   storage:
     type: oss
     oss:
@@ -139,8 +206,13 @@ spec:
       credentialsSecret:
         name: "oss-credentials"
         accessKeyKey: "accessKeyId"
-        secretKeyKey: "accessKeySecret"
-```
+        secretKeyKey: "accessKeySecret"`,
+      mode: "read",
+      needs: "none",
+      session: "selfhosted-config-storage-oss-yaml"
+    }
+  ]}
+/>
 
 ## Registry Configuration
 

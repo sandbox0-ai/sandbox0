@@ -49,7 +49,11 @@ if err != nil {
 fmt.Printf("Mode: %s\\n", policy.Mode)
 if egress, ok := policy.Egress.Get(); ok {
     fmt.Printf("Allowed domains: %v\\n", egress.AllowedDomains)
-}`
+}`,
+      mode: "run",
+      needs: "infra",
+      session: "network-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
@@ -58,7 +62,11 @@ if egress, ok := policy.Egress.Get(); ok {
 policy = sandbox.get_network_policy()
 print(f"Mode: {policy.mode}")
 if policy.egress:
-    print(f"Allowed domains: {policy.egress.allowed_domains}")`
+    print(f"Allowed domains: {policy.egress.allowed_domains}")`,
+      mode: "run",
+      needs: "infra",
+      session: "network-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
@@ -68,16 +76,21 @@ const policy = await sandbox.getNetworkPolicy();
 console.log('Mode:', policy.mode);
 if (policy.egress) {
     console.log('Allowed domains:', policy.egress.allowedDomains);
-}`
+}`,
+      mode: "run",
+      needs: "infra",
+      session: "network-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 network get sb_abc123
-
-# Output:
-# Mode: allow-all
-# Allowed domains: []`
+      code: `SANDBOX_ID="$(s0 sandbox create --template default --hard-ttl 600 | awk '/Sandbox ID:/ {print $3}')"
+s0 network get "$SANDBOX_ID"`,
+      mode: "run",
+      needs: "infra",
+      session: "network-cli",
+      setup: ["command -v s0 >/dev/null"]
     }
   ]}
 />
@@ -117,26 +130,41 @@ _, err := sandbox.UpdateNetworkPolicy(ctx, apispec.TplSandboxNetworkPolicy{
 if err != nil {
     log.Fatal(err)
 }
-fmt.Println("Network policy updated: allow-all")`
+fmt.Println("Network policy updated: allow-all")`,
+      mode: "run",
+      needs: "infra",
+      session: "network-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
       language: "python",
       code: `# Allow all traffic
 sandbox.update_network_policy(mode="allow-all")
-print("Network policy updated: allow-all")`
+print("Network policy updated: allow-all")`,
+      mode: "run",
+      needs: "infra",
+      session: "network-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
       language: "typescript",
       code: `// Allow all traffic
 await sandbox.updateNetworkPolicy({ mode: 'allow-all' });
-console.log('Network policy updated: allow-all');`
+console.log('Network policy updated: allow-all');`,
+      mode: "run",
+      needs: "infra",
+      session: "network-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 network update sb_abc123 --mode allow-all`
+      code: `s0 network update "$SANDBOX_ID" --mode allow-all`,
+      mode: "run",
+      needs: "infra",
+      session: "network-cli"
     }
   ]}
 />
@@ -159,26 +187,41 @@ _, err := sandbox.UpdateNetworkPolicy(ctx, apispec.TplSandboxNetworkPolicy{
 if err != nil {
     log.Fatal(err)
 }
-fmt.Println("Network policy updated: block-all")`
+fmt.Println("Network policy updated: block-all")`,
+      mode: "run",
+      needs: "infra",
+      session: "network-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
       language: "python",
       code: `# Block all traffic
 sandbox.update_network_policy(mode="block-all")
-print("Network policy updated: block-all")`
+print("Network policy updated: block-all")`,
+      mode: "run",
+      needs: "infra",
+      session: "network-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
       language: "typescript",
       code: `// Block all traffic
 await sandbox.updateNetworkPolicy({ mode: 'block-all' });
-console.log('Network policy updated: block-all');`
+console.log('Network policy updated: block-all');`,
+      mode: "run",
+      needs: "infra",
+      session: "network-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 network update sb_abc123 --mode block-all`
+      code: `s0 network update "$SANDBOX_ID" --mode block-all`,
+      mode: "run",
+      needs: "infra",
+      session: "network-cli"
     }
   ]}
 />
@@ -204,7 +247,11 @@ _, err := sandbox.UpdateNetworkPolicy(ctx, apispec.TplSandboxNetworkPolicy{
 if err != nil {
     log.Fatal(err)
 }
-fmt.Println("Network policy updated: only github.com, pypi.org, api.openai.com allowed")`
+fmt.Println("Network policy updated: only github.com, pypi.org, api.openai.com allowed")`,
+      mode: "run",
+      needs: "infra",
+      session: "network-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
@@ -216,7 +263,11 @@ sandbox.update_network_policy(
         "allowed_domains": ["github.com", "pypi.org", "api.openai.com"],
     },
 )
-print("Network policy updated: only allowed domains")`
+print("Network policy updated: only allowed domains")`,
+      mode: "run",
+      needs: "infra",
+      session: "network-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
@@ -228,15 +279,22 @@ await sandbox.updateNetworkPolicy({
         allowedDomains: ['github.com', 'pypi.org', 'api.openai.com'],
     },
 });
-console.log('Network policy updated: only allowed domains');`
+console.log('Network policy updated: only allowed domains');`,
+      mode: "run",
+      needs: "infra",
+      session: "network-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 network update sb_abc123 --mode block-all \\
+      code: `s0 network update "$SANDBOX_ID" --mode block-all \\
   --allow-domain github.com \\
   --allow-domain pypi.org \\
-  --allow-domain api.openai.com`
+  --allow-domain api.openai.com`,
+      mode: "run",
+      needs: "infra",
+      session: "network-cli"
     }
   ]}
 />
@@ -258,7 +316,11 @@ _, err := sandbox.UpdateNetworkPolicy(ctx, apispec.TplSandboxNetworkPolicy{
     Egress: apispec.NewOptNetworkEgressPolicy(apispec.NetworkEgressPolicy{
         BlockedDomains: []string{"facebook.com", "twitter.com"},
     }),
-})`
+})`,
+      mode: "run",
+      needs: "infra",
+      session: "network-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
@@ -269,7 +331,11 @@ sandbox.update_network_policy(
     egress={
         "blocked_domains": ["facebook.com", "twitter.com"],
     },
-)`
+)`,
+      mode: "run",
+      needs: "infra",
+      session: "network-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
@@ -280,14 +346,21 @@ await sandbox.updateNetworkPolicy({
     egress: {
         blockedDomains: ['facebook.com', 'twitter.com'],
     },
-});`
+});`,
+      mode: "run",
+      needs: "infra",
+      session: "network-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 network update sb_abc123 --mode allow-all \\
+      code: `s0 network update "$SANDBOX_ID" --mode allow-all \\
   --block-domain facebook.com \\
-  --block-domain twitter.com`
+  --block-domain twitter.com`,
+      mode: "run",
+      needs: "infra",
+      session: "network-cli"
     }
   ]}
 />
@@ -309,7 +382,11 @@ sandbox, err := client.ClaimSandbox(ctx, "default",
     sandbox0.WithSandboxNetworkPolicy(apispec.TplSandboxNetworkPolicy{
         Mode: apispec.TplSandboxNetworkPolicyModeAllowAll,
     }),
-)`
+)`,
+      mode: "run",
+      needs: "infra",
+      session: "network-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
@@ -323,7 +400,11 @@ sandbox = client.claim_sandbox(
             "mode": "allow-all",
         },
     },
-)`
+)`,
+      mode: "run",
+      needs: "infra",
+      session: "network-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
@@ -335,13 +416,20 @@ const sandbox = await client.claimSandbox({
         hardTtl: 600,
         network: { mode: 'allow-all' },
     },
-});`
+});`,
+      mode: "run",
+      needs: "infra",
+      session: "network-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
       code: `s0 sandbox create --template default --hard-ttl 600 \\
-  --network-mode allow-all`
+  --network-mode allow-all`,
+      mode: "run",
+      needs: "infra",
+      session: "network-cli"
     }
   ]}
 />
@@ -377,7 +465,11 @@ if err != nil {
 resp, err = sandbox.Cmd(ctx, shell)
 if err != nil {
     fmt.Println("Request blocked as expected")
-}`
+}`,
+      mode: "run",
+      needs: "infra",
+      session: "network-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
@@ -394,7 +486,11 @@ sandbox.update_network_policy(mode="block-all")
 try:
     resp = sandbox.cmd(shell)
 except Exception as e:
-    print("Request blocked as expected")`
+    print("Request blocked as expected")`,
+      mode: "run",
+      needs: "infra",
+      session: "network-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
@@ -412,21 +508,26 @@ try {
     resp = await sandbox.cmd(shell);
 } catch (e) {
     console.log('Request blocked as expected');
-}`
+}`,
+      mode: "run",
+      needs: "infra",
+      session: "network-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
       code: `# Test network connectivity
-s0 sandbox exec sb_abc123 -- curl -s -o /dev/null -w "%{http_code}" https://github.com
-# Output: 200
+s0 sandbox exec "$SANDBOX_ID" -- curl -s -o /dev/null -w "%{http_code}" https://github.com
 
 # Block all traffic
-s0 network update sb_abc123 --mode block-all
+s0 network update "$SANDBOX_ID" --mode block-all
 
 # Test again (should timeout/fail)
-s0 sandbox exec sb_abc123 -- curl -s -o /dev/null -w "%{http_code}" --max-time 3 https://github.com
-# Output: (timeout)`
+s0 sandbox exec "$SANDBOX_ID" -- curl -s -o /dev/null -w "%{http_code}" --max-time 3 https://github.com`,
+      mode: "run",
+      needs: "infra",
+      session: "network-cli"
     }
   ]}
 />
@@ -475,7 +576,11 @@ _, err = sandbox.UpdateNetworkPolicy(ctx, apispec.TplSandboxNetworkPolicy{
 if err != nil {
     log.Fatal(err)
 }
-fmt.Println("Only github.com is now allowed")`
+fmt.Println("Only github.com is now allowed")`,
+      mode: "run",
+      needs: "infra",
+      session: "network-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
@@ -497,7 +602,11 @@ sandbox.update_network_policy(
     mode="block-all",
     egress={"allowed_domains": ["github.com"]},
 )
-print("Only github.com is now allowed")`
+print("Only github.com is now allowed")`,
+      mode: "run",
+      needs: "infra",
+      session: "network-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
@@ -519,22 +628,29 @@ await sandbox.updateNetworkPolicy({
     mode: 'block-all',
     egress: { allowedDomains: ['github.com'] },
 });
-console.log('Only github.com is now allowed');`
+console.log('Only github.com is now allowed');`,
+      mode: "run",
+      needs: "infra",
+      session: "network-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
       language: "bash",
       code: `# Get current policy
-s0 network get sb_abc123
+s0 network get "$SANDBOX_ID"
 
 # Test network connectivity
-s0 sandbox exec sb_abc123 -- curl -s -o /dev/null -w "%{http_code}" https://github.com
+s0 sandbox exec "$SANDBOX_ID" -- curl -s -o /dev/null -w "%{http_code}" https://github.com
 
 # Block all traffic
-s0 network update sb_abc123 --mode block-all
+s0 network update "$SANDBOX_ID" --mode block-all
 
 # Allow specific domains only
-s0 network update sb_abc123 --mode block-all --allow-domain github.com`
+s0 network update "$SANDBOX_ID" --mode block-all --allow-domain github.com`,
+      mode: "run",
+      needs: "infra",
+      session: "network-cli"
     }
   ]}
 />

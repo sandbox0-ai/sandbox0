@@ -1,0 +1,62 @@
+name: Docs Examples Kind
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * *"
+
+jobs:
+  docs-examples-kind:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      KIND_CLUSTER_NAME: sandbox0-docs-examples
+      INFRA_NAMESPACE: sandbox0-system
+      INFRA_NAME: fullmode
+      INFRA_MANIFEST: infra-operator/chart/samples/single-cluster/fullmode.yaml
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare infra environment
+        uses: ./.github/actions/prepare-infra
+        with:
+          infra-dir: .
+          kind-config: tests/e2e/kind-config.yaml
+          kind-cluster-name: ${{ env.KIND_CLUSTER_NAME }}
+          cache-key-suffix: amd64
+
+      - name: Install infra-operator
+        run: |
+          helm upgrade --install infra-operator infra-operator/chart \
+            --namespace infra-operator --create-namespace \
+            --set config.imagePullPolicy=IfNotPresent
+
+      - name: Apply infra manifest
+        run: kubectl apply -f "${INFRA_MANIFEST}"
+
+      - name: Wait for Sandbox0Infra ready
+        run: |
+          kubectl -n "${INFRA_NAMESPACE}" wait --for=condition=Ready "sandbox0infra/${INFRA_NAME}" --timeout=9m
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: sandbox0-ui/package-lock.json
+
+      - name: Runtime toolchain check
+        run: |
+          go version
+          python3 --version
+          node --version
+
+      - name: Validate run examples via Makefile (needs=infra)
+        run: make docs-examples-ci-kind
+
+      - name: Cleanup infra
+        if: always()
+        run: |
+          kubectl delete -f "${INFRA_MANIFEST}" --ignore-not-found=true
+          helm uninstall infra-operator --namespace infra-operator || true
+          kind delete cluster --name "${KIND_CLUSTER_NAME}" || true
+

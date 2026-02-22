@@ -1,4 +1,4 @@
-.PHONY: all build test test-all test-integration test-integration-verbose test-e2e test-e2e-kind test-e2e-destroy test-e2e-specific lint tidy vendor clean helm-update helm-configs release docker-build docker-build-local build-local-all docker-push proto manifests apispec oapi-codegen
+.PHONY: all build test test-all test-integration test-integration-verbose test-e2e test-e2e-kind test-e2e-destroy test-e2e-specific lint tidy vendor clean helm-update helm-configs release docker-build docker-build-local build-local-all docker-push proto manifests apispec oapi-codegen docs-examples-install docs-examples-extract docs-examples-filter-file docs-examples-check docs-examples-run docs-examples-run-infra docs-examples-ci-kind
 
 # Tool Binaries
 LOCALBIN ?= $(shell pwd)/bin
@@ -263,3 +263,54 @@ operator-install: operator-manifests
 .PHONY: operator-run
 operator-run: operator-install
 	S0_DEV=true go run ./infra-operator/cmd/infra-operator
+
+# Docs examples validation (sandbox0-ui)
+DOCS_EXAMPLES_CLI ?= ./sandbox0-ui/tools/docs-examples/cli.mjs
+DOCS_EXAMPLES_DOCS_DIR ?= ./sandbox0-ui/apps/website/src/app/docs
+DOCS_EXAMPLES_OUT_DIR ?= ./sandbox0-ui/apps/website/tmp/docs-examples
+DOCS_EXAMPLES_MANIFEST ?= $(DOCS_EXAMPLES_OUT_DIR)/manifest.json
+DOCS_EXAMPLES_FILE_MANIFEST ?= $(DOCS_EXAMPLES_OUT_DIR)/manifest.file.json
+DOCS_EXAMPLES_FILE ?=
+DOCS_EXAMPLES_NEEDS ?= all
+DOCS_EXAMPLES_STRICT_DEPS ?= true
+
+docs-examples-install:
+	@printf "$(CYAN)Installing sandbox0-ui dependencies...$(RESET)\n"
+	cd sandbox0-ui && npm ci
+
+docs-examples-extract:
+	@printf "$(CYAN)Extracting docs examples...$(RESET)\n"
+	node "$(DOCS_EXAMPLES_CLI)" extract --docs-dir "$(DOCS_EXAMPLES_DOCS_DIR)" --out-file "$(DOCS_EXAMPLES_MANIFEST)"
+
+docs-examples-filter-file: docs-examples-extract
+	@if [ -z "$(DOCS_EXAMPLES_FILE)" ]; then \
+		echo "Error: DOCS_EXAMPLES_FILE is required"; \
+		echo "Example: make docs-examples-run DOCS_EXAMPLES_FILE=sandbox/ports/page.mdx"; \
+		exit 1; \
+	fi
+	@printf "$(CYAN)Filtering manifest to file $(DOCS_EXAMPLES_FILE)...$(RESET)\n"
+	node -e 'const fs=require("fs"); const path=require("path"); const docsRoot=path.resolve(process.cwd(), process.argv[1]); const inFile=path.resolve(process.cwd(), process.argv[2]); const outFile=path.resolve(process.cwd(), process.argv[3]); const fileArg=process.argv[4]; const toPosix=(p)=>p.split(path.sep).join("/"); const manifest=JSON.parse(fs.readFileSync(inFile,"utf8")); const absCandidate=path.resolve(process.cwd(), fileArg); let rel=fileArg; if (absCandidate.startsWith(docsRoot + path.sep)) rel=path.relative(docsRoot, absCandidate); rel=toPosix(rel).replace(/^\.\//,""); manifest.examples=manifest.examples.filter((e)=>e.sourceFile===rel); const byLanguage={}; const bySourceType={}; for (const e of manifest.examples){byLanguage[e.language]=(byLanguage[e.language]||0)+1; bySourceType[e.sourceType]=(bySourceType[e.sourceType]||0)+1;} manifest.summary={total:manifest.examples.length,byLanguage,bySourceType}; fs.writeFileSync(outFile, JSON.stringify(manifest,null,2)); console.log(`Filtered to ${manifest.examples.length} examples from ${rel}`);' "$(DOCS_EXAMPLES_DOCS_DIR)" "$(DOCS_EXAMPLES_MANIFEST)" "$(DOCS_EXAMPLES_FILE_MANIFEST)" "$(DOCS_EXAMPLES_FILE)"
+
+docs-examples-check: docs-examples-extract
+	@manifest="$(DOCS_EXAMPLES_MANIFEST)"; \
+	if [ -n "$(DOCS_EXAMPLES_FILE)" ]; then \
+		$(MAKE) docs-examples-filter-file DOCS_EXAMPLES_FILE="$(DOCS_EXAMPLES_FILE)"; \
+		manifest="$(DOCS_EXAMPLES_FILE_MANIFEST)"; \
+	fi; \
+	printf "$(CYAN)Running docs examples fast validation...$(RESET)\n"; \
+	node "$(DOCS_EXAMPLES_CLI)" validate-fast --manifest "$$manifest"
+
+docs-examples-run: docs-examples-extract
+	@manifest="$(DOCS_EXAMPLES_MANIFEST)"; \
+	if [ -n "$(DOCS_EXAMPLES_FILE)" ]; then \
+		$(MAKE) docs-examples-filter-file DOCS_EXAMPLES_FILE="$(DOCS_EXAMPLES_FILE)"; \
+		manifest="$(DOCS_EXAMPLES_FILE_MANIFEST)"; \
+	fi; \
+	printf "$(CYAN)Running docs examples runtime validation (needs=$(DOCS_EXAMPLES_NEEDS))...$(RESET)\n"; \
+	node "$(DOCS_EXAMPLES_CLI)" validate-run --manifest "$$manifest" --needs "$(DOCS_EXAMPLES_NEEDS)" --strict-deps "$(DOCS_EXAMPLES_STRICT_DEPS)"
+
+docs-examples-run-infra:
+	@$(MAKE) docs-examples-run DOCS_EXAMPLES_NEEDS=infra DOCS_EXAMPLES_STRICT_DEPS=true DOCS_EXAMPLES_FILE="$(DOCS_EXAMPLES_FILE)"
+
+docs-examples-ci-kind: docs-examples-install
+	@$(MAKE) docs-examples-run-infra

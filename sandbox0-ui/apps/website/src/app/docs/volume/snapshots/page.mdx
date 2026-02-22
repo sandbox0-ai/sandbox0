@@ -1,13 +1,15 @@
 # Volume Snapshots
 
-A Snapshot is a point-in-time read-only copy of a Volume. Snapshots support data backup, version management, and fast environment cloning.
+{/* TODO(volume-snapshots-page): add retention policy and lifecycle automation examples */}
+
+A snapshot is a point-in-time read-only copy of a volume. Use snapshots for backup, rollback, and reproducible environment state.
 
 ## Snapshot Features
 
-- **Instant Creation**: Based on JuiceFS Copy-on-Write technology, snapshots are created almost instantly
-- **Space Efficient**: Snapshots only store differential data, not full copies
-- **Fast Recovery**: Restoring Volume data from snapshots is extremely fast
-- **Version Management**: Support naming and describing snapshots for easy tracking
+- **Instant Creation**: Copy-on-write snapshot creation is fast
+- **Space Efficient**: Only changed blocks consume extra storage
+- **Fast Recovery**: Restore volume state quickly
+- **Version Tracking**: Use names and descriptions for release checkpoints
 
 ## Snapshot Lifecycle
 
@@ -34,10 +36,97 @@ A Snapshot is a point-in-time read-only copy of a Volume. Snapshots support data
 
 <Tabs
   tabs={[
-    { label: "Go", language: "go", code: "package main\n\nimport (\n    \"context\"\n    \"fmt\"\n    \n    \"github.com/sandbox0-ai/sdk-go\"\n    \"github.com/sandbox0-ai/sdk-go/pkg/apispec\"\n)\n\nfunc main() {\n    client := sandbox0.NewClient()\n    ctx := context.Background()\n\n    volumeID := \"vol_abc123xyz\"\n\n    // Create snapshot with name only\n    snapshot, err := client.CreateVolumeSnapshot(ctx, volumeID, apispec.CreateSnapshotRequest{\n        Name: \"v1.0-release\",\n    })\n    if err != nil {\n        panic(err)\n    }\n    fmt.Printf(\"Snapshot created: %s\\n\", snapshot.ID)\n    \n    // Create snapshot with description\n    snapshot, err = client.CreateVolumeSnapshot(ctx, volumeID, apispec.CreateSnapshotRequest{\n        Name:        \"v1.1-beta\",\n        Description: apispec.NewOptString(\"Feature: Added user authentication module\"),\n    })\n    if err != nil {\n        panic(err)\n    }\n    fmt.Printf(\"Snapshot created: %s (%s)\\n\", snapshot.ID, snapshot.Name)\n}" },
-    { label: "Python", language: "python", code: "from sandbox0 import Client\nfrom sandbox0.models import CreateSnapshotRequest\n\nclient = Client()\n\nvolume_id = \"vol_abc123xyz\"\n\n# Create snapshot with name only\nsnapshot = client.volumes.create_snapshot(\n    volume_id,\n    CreateSnapshotRequest(name=\"v1.0-release\")\n)\nprint(f\"Snapshot created: {snapshot.id}\")\n\n# Create snapshot with description\nsnapshot = client.volumes.create_snapshot(\n    volume_id,\n    CreateSnapshotRequest(\n        name=\"v1.1-beta\",\n        description=\"Feature: Added user authentication module\"\n    )\n)\nprint(f\"Snapshot created: {snapshot.id} ({snapshot.name})\")" },
-    { label: "TypeScript", language: "typescript", code: "import { Sandbox0 } from '@sandbox0/sdk';\n\nconst client = new Sandbox0();\n\nconst volumeId = 'vol_abc123xyz';\n\n// Create snapshot with name only\nconst snapshot = await client.volumes.createSnapshot(volumeId, {\n    name: 'v1.0-release',\n});\nconsole.log(`Snapshot created: ${snapshot.id}`);\n\n// Create snapshot with description\nconst snapshotWithDesc = await client.volumes.createSnapshot(volumeId, {\n    name: 'v1.1-beta',\n    description: 'Feature: Added user authentication module',\n});\nconsole.log(`Snapshot created: ${snapshotWithDesc.id} (${snapshotWithDesc.name})`);" },
-    { label: "CLI", language: "bash", code: "# Create snapshot with name only\ns0 snapshot create vol_abc123xyz --name \"v1.0-release\"\n\n# Output:\n# Snapshot created successfully\n# ID: snap_def456uvw\n# Name: v1.0-release\n\n# Create snapshot with description\ns0 snapshot create vol_abc123xyz \\\n    --name \"v1.1-beta\" \\\n    --description \"Feature: Added user authentication module\"\n\n# Output:\n# Snapshot created successfully\n# ID: snap_ghi789rst\n# Name: v1.1-beta" }
+    {
+      label: "Go",
+      language: "go",
+      code: `import (
+    "context"
+    "fmt"
+    "log"
+    "os"
+
+    sandbox0 "github.com/sandbox0-ai/sdk-go"
+    "github.com/sandbox0-ai/sdk-go/pkg/apispec"
+)
+
+ctx := context.Background()
+client, err := sandbox0.NewClient(
+    sandbox0.WithToken(os.Getenv("SANDBOX0_TOKEN")),
+)
+if err != nil {
+    log.Fatal(err)
+}
+
+volumeID := "vol_abc123xyz"
+snapshot, err := client.CreateVolumeSnapshot(ctx, volumeID, apispec.CreateSnapshotRequest{
+    Name: "v1.0-release",
+})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println("Snapshot created:", snapshot.ID)`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-snapshot-create-go",
+      deps: ["github.com/sandbox0-ai/sdk-go"],
+      env: ["SANDBOX0_TOKEN"],
+      setup: ["go version"]
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `import os
+
+from sandbox0 import Client
+from sandbox0.models import CreateSnapshotRequest
+
+client = Client(token=os.environ["SANDBOX0_TOKEN"])
+
+volume_id = "vol_abc123xyz"
+snapshot = client.volumes.create_snapshot(
+    volume_id,
+    CreateSnapshotRequest(name="v1.0-release"),
+)
+print("Snapshot created:", snapshot.id)`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-snapshot-create-python",
+      deps: ["sandbox0"],
+      env: ["SANDBOX0_TOKEN"],
+      setup: ["python3 --version"]
+    },
+    {
+      label: "JavaScript",
+      language: "typescript",
+      code: `import { Sandbox0 } from '@sandbox0/sdk';
+
+if (!process.env.SANDBOX0_TOKEN) {
+    throw new Error('Missing SANDBOX0_TOKEN');
+}
+
+const client = new Sandbox0({ token: process.env.SANDBOX0_TOKEN });
+
+const volumeId = 'vol_abc123xyz';
+const snapshot = await client.volumes.createSnapshot(volumeId, {
+    name: 'v1.0-release',
+});
+console.log('Snapshot created:', snapshot.id);`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-snapshot-create-typescript",
+      deps: ["@sandbox0/sdk"],
+      env: ["SANDBOX0_TOKEN"],
+      setup: ["node --version"]
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 snapshot create vol_abc123xyz --name v1.0-release`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-snapshot-create-cli",
+      setup: ["command -v s0 >/dev/null"]
+    }
   ]}
 />
 
@@ -45,10 +134,54 @@ A Snapshot is a point-in-time read-only copy of a Volume. Snapshots support data
 
 <Tabs
   tabs={[
-    { label: "Go", language: "go", code: "volumeID := \"vol_abc123xyz\"\n\nsnapshots, err := client.ListVolumeSnapshots(ctx, volumeID)\nif err != nil {\n    panic(err)\n}\n\nfmt.Printf(\"Total snapshots: %d\\n\", len(snapshots))\nfor _, snap := range snapshots {\n    fmt.Printf(\"  - %s: %s (%d bytes)\\n\", \n        snap.ID, snap.Name, snap.SizeBytes)\n}" },
-    { label: "Python", language: "python", code: "volume_id = \"vol_abc123xyz\"\n\nsnapshots = client.volumes.list_snapshots(volume_id)\n\nprint(f\"Total snapshots: {len(snapshots)}\")\nfor snap in snapshots:\n    print(f\"  - {snap.id}: {snap.name} ({snap.size_bytes} bytes)\")" },
-    { label: "TypeScript", language: "typescript", code: "const volumeId = 'vol_abc123xyz';\n\nconst snapshots = await client.volumes.listSnapshots(volumeId);\n\nconsole.log(`Total snapshots: ${snapshots.length}`);\nfor (const snap of snapshots) {\n    console.log(`  - ${snap.id}: ${snap.name} (${snap.sizeBytes} bytes)`);\n}" },
-    { label: "CLI", language: "bash", code: "s0 snapshot list vol_abc123xyz\n\n# Output:\n# ID                NAME           SIZE      CREATED AT\n# snap_def456uvw    v1.0-release   1.2 GB    2024-01-15 10:30:00\n# snap_ghi789rst    v1.1-beta      1.5 GB    2024-01-16 14:20:00\n# snap_jkl012mno    v2.0-dev       1.8 GB    2024-01-17 09:00:00" }
+    {
+      label: "Go",
+      language: "go",
+      code: `snapshots, err := client.ListVolumeSnapshots(ctx, "vol_abc123xyz")
+if err != nil {
+    log.Fatal(err)
+}
+
+for _, snap := range snapshots {
+    fmt.Println("Snapshot:", snap.ID, snap.Name, snap.SizeBytes)
+}`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-snapshot-list-go",
+      env: ["SANDBOX0_TOKEN"]
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `snapshots = client.volumes.list_snapshots("vol_abc123xyz")
+for snap in snapshots:
+    print("Snapshot:", snap.id, snap.name, snap.size_bytes)`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-snapshot-list-python",
+      env: ["SANDBOX0_TOKEN"]
+    },
+    {
+      label: "JavaScript",
+      language: "typescript",
+      code: `const snapshots = await client.volumes.listSnapshots('vol_abc123xyz');
+for (const snap of snapshots) {
+    console.log('Snapshot:', snap.id, snap.name, snap.sizeBytes);
+}`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-snapshot-list-typescript",
+      env: ["SANDBOX0_TOKEN"]
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 snapshot list vol_abc123xyz`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-snapshot-list-cli",
+      setup: ["command -v s0 >/dev/null"]
+    }
   ]}
 />
 
@@ -56,27 +189,107 @@ A Snapshot is a point-in-time read-only copy of a Volume. Snapshots support data
 
 <Tabs
   tabs={[
-    { label: "Go", language: "go", code: "volumeID := \"vol_abc123xyz\"\nsnapshotID := \"snap_def456uvw\"\n\nsnapshot, err := client.GetVolumeSnapshot(ctx, volumeID, snapshotID)\nif err != nil {\n    panic(err)\n}\n\nfmt.Printf(\"Snapshot ID: %s\\n\", snapshot.ID)\nfmt.Printf(\"Name: %s\\n\", snapshot.Name)\nfmt.Printf(\"Description: %s\\n\", snapshot.Description.Value)\nfmt.Printf(\"Size: %d bytes\\n\", snapshot.SizeBytes)\nfmt.Printf(\"Created At: %s\\n\", snapshot.CreatedAt)" },
-    { label: "Python", language: "python", code: "volume_id = \"vol_abc123xyz\"\nsnapshot_id = \"snap_def456uvw\"\n\nsnapshot = client.volumes.get_snapshot(volume_id, snapshot_id)\n\nprint(f\"Snapshot ID: {snapshot.id}\")\nprint(f\"Name: {snapshot.name}\")\nprint(f\"Description: {snapshot.description}\")\nprint(f\"Size: {snapshot.size_bytes} bytes\")\nprint(f\"Created At: {snapshot.created_at}\")" },
-    { label: "TypeScript", language: "typescript", code: "const volumeId = 'vol_abc123xyz';\nconst snapshotId = 'snap_def456uvw';\n\nconst snapshot = await client.volumes.getSnapshot(volumeId, snapshotId);\n\nconsole.log(`Snapshot ID: ${snapshot.id}`);\nconsole.log(`Name: ${snapshot.name}`);\nconsole.log(`Description: ${snapshot.description}`);\nconsole.log(`Size: ${snapshot.sizeBytes} bytes`);\nconsole.log(`Created At: ${snapshot.createdAt}`);" },
-    { label: "CLI", language: "bash", code: "s0 snapshot get vol_abc123xyz snap_def456uvw\n\n# Output:\n# ID: snap_def456uvw\n# Name: v1.0-release\n# Description: Initial release version\n# Size: 1.2 GB (1288490188 bytes)\n# Created At: 2024-01-15T10:30:00Z\n# Expires At: -" }
+    {
+      label: "Go",
+      language: "go",
+      code: `snapshot, err := client.GetVolumeSnapshot(ctx, "vol_abc123xyz", "snap_def456uvw")
+if err != nil {
+    log.Fatal(err)
+}
+
+fmt.Println("Snapshot ID:", snapshot.ID)
+fmt.Println("Name:", snapshot.Name)`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-snapshot-get-go",
+      env: ["SANDBOX0_TOKEN"]
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `snapshot = client.volumes.get_snapshot("vol_abc123xyz", "snap_def456uvw")
+print("Snapshot ID:", snapshot.id)
+print("Name:", snapshot.name)`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-snapshot-get-python",
+      env: ["SANDBOX0_TOKEN"]
+    },
+    {
+      label: "JavaScript",
+      language: "typescript",
+      code: `const snapshot = await client.volumes.getSnapshot('vol_abc123xyz', 'snap_def456uvw');
+console.log('Snapshot ID:', snapshot.id);
+console.log('Name:', snapshot.name);`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-snapshot-get-typescript",
+      env: ["SANDBOX0_TOKEN"]
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 snapshot get vol_abc123xyz snap_def456uvw`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-snapshot-get-cli",
+      setup: ["command -v s0 >/dev/null"]
+    }
   ]}
 />
 
 ## Restore a Snapshot
 
-Restoring a snapshot rolls the Volume data back to the state when the snapshot was created.
+Restoring a snapshot reverts volume data to the selected checkpoint.
 
 <Callout variant="warning">
-Restore is irreversible. All data changes made after the snapshot was created will be lost. Create a new snapshot as backup before restoring.
+Restore is irreversible for current state changes made after that snapshot point.
 </Callout>
 
 <Tabs
   tabs={[
-    { label: "Go", language: "go", code: "volumeID := \"vol_abc123xyz\"\nsnapshotID := \"snap_def456uvw\"\n\n// Create backup snapshot before restore\n_, err := client.CreateVolumeSnapshot(ctx, volumeID, apispec.CreateSnapshotRequest{\n    Name: \"pre-restore-backup\",\n})\nif err != nil {\n    panic(err)\n}\n\n// Execute restore\nresult, err := client.RestoreVolumeSnapshot(ctx, volumeID, snapshotID)\nif err != nil {\n    panic(err)\n}\nfmt.Printf(\"Volume restored to snapshot: %s\\n\", result.SnapshotID)" },
-    { label: "Python", language: "python", code: "volume_id = \"vol_abc123xyz\"\nsnapshot_id = \"snap_def456uvw\"\n\n# Create backup snapshot before restore\nclient.volumes.create_snapshot(\n    volume_id,\n    CreateSnapshotRequest(name=\"pre-restore-backup\")\n)\n\n# Execute restore\nresult = client.volumes.restore_snapshot(volume_id, snapshot_id)\nprint(f\"Volume restored to snapshot: {result.snapshot_id}\")" },
-    { label: "TypeScript", language: "typescript", code: "const volumeId = 'vol_abc123xyz';\nconst snapshotId = 'snap_def456uvw';\n\n// Create backup snapshot before restore\nawait client.volumes.createSnapshot(volumeId, {\n    name: 'pre-restore-backup',\n});\n\n// Execute restore\nconst result = await client.volumes.restoreSnapshot(volumeId, snapshotId);\nconsole.log(`Volume restored to snapshot: ${result.snapshotId}`);" },
-    { label: "CLI", language: "bash", code: "# Create backup snapshot before restore\ns0 snapshot create vol_abc123xyz --name \"pre-restore-backup\"\n\n# Execute restore\ns0 snapshot restore vol_abc123xyz snap_def456uvw\n\n# Output:\n# Volume restored successfully\n# Restored to snapshot: snap_def456uvw\n# Backup snapshot created: snap_xyz789abc" }
+    {
+      label: "Go",
+      language: "go",
+      code: `result, err := client.RestoreVolumeSnapshot(ctx, "vol_abc123xyz", "snap_def456uvw")
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println("Restored to snapshot:", result.SnapshotID)`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-snapshot-restore-go",
+      env: ["SANDBOX0_TOKEN"]
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `result = client.volumes.restore_snapshot("vol_abc123xyz", "snap_def456uvw")
+print("Restored to snapshot:", result.snapshot_id)`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-snapshot-restore-python",
+      env: ["SANDBOX0_TOKEN"]
+    },
+    {
+      label: "JavaScript",
+      language: "typescript",
+      code: `const result = await client.volumes.restoreSnapshot('vol_abc123xyz', 'snap_def456uvw');
+console.log('Restored to snapshot:', result.snapshotId);`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-snapshot-restore-typescript",
+      env: ["SANDBOX0_TOKEN"]
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 snapshot restore vol_abc123xyz snap_def456uvw`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-snapshot-restore-cli",
+      setup: ["command -v s0 >/dev/null"]
+    }
   ]}
 />
 
@@ -84,54 +297,72 @@ Restore is irreversible. All data changes made after the snapshot was created wi
 
 <Tabs
   tabs={[
-    { label: "Go", language: "go", code: "volumeID := \"vol_abc123xyz\"\nsnapshotID := \"snap_def456uvw\"\n\nerr := client.DeleteVolumeSnapshot(ctx, volumeID, snapshotID)\nif err != nil {\n    panic(err)\n}\nfmt.Println(\"Snapshot deleted\")" },
-    { label: "Python", language: "python", code: "volume_id = \"vol_abc123xyz\"\nsnapshot_id = \"snap_def456uvw\"\n\nclient.volumes.delete_snapshot(volume_id, snapshot_id)\nprint(\"Snapshot deleted\")" },
-    { label: "TypeScript", language: "typescript", code: "const volumeId = 'vol_abc123xyz';\nconst snapshotId = 'snap_def456uvw';\n\nawait client.volumes.deleteSnapshot(volumeId, snapshotId);\nconsole.log('Snapshot deleted');" },
-    { label: "CLI", language: "bash", code: "s0 snapshot delete vol_abc123xyz snap_def456uvw\n\n# Output:\n# Snapshot snap_def456uvw deleted successfully" }
+    {
+      label: "Go",
+      language: "go",
+      code: `if err := client.DeleteVolumeSnapshot(ctx, "vol_abc123xyz", "snap_def456uvw"); err != nil {
+    log.Fatal(err)
+}
+fmt.Println("Snapshot deleted")`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-snapshot-delete-go",
+      env: ["SANDBOX0_TOKEN"]
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `client.volumes.delete_snapshot("vol_abc123xyz", "snap_def456uvw")
+print("Snapshot deleted")`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-snapshot-delete-python",
+      env: ["SANDBOX0_TOKEN"]
+    },
+    {
+      label: "JavaScript",
+      language: "typescript",
+      code: `await client.volumes.deleteSnapshot('vol_abc123xyz', 'snap_def456uvw');
+console.log('Snapshot deleted');`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-snapshot-delete-typescript",
+      env: ["SANDBOX0_TOKEN"]
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 snapshot delete vol_abc123xyz snap_def456uvw`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-snapshot-delete-cli",
+      setup: ["command -v s0 >/dev/null"]
+    }
   ]}
 />
 
 <Callout variant="info">
-Deleting a snapshot does not affect current Volume data. Volume data remains intact even if all snapshots are deleted.
+Deleting snapshots does not delete current volume data.
 </Callout>
-
-## Complete Example: Version Management with Snapshots
-
-The following example demonstrates using snapshots to manage different versions of an AI model:
-
-<Tabs
-  tabs={[
-    { label: "Go", language: "go", code: "package main\n\nimport (\n    \"context\"\n    \"fmt\"\n    \n    \"github.com/sandbox0-ai/sdk-go\"\n    \"github.com/sandbox0-ai/sdk-go/pkg/apispec\"\n)\n\nfunc main() {\n    client := sandbox0.NewClient()\n    ctx := context.Background()\n\n    // Create Volume for model storage\n    volume, _ := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{\n        AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeRWX),\n    })\n    defer client.DeleteVolume(ctx, volume.ID)\n\n    // Create Sandbox and mount Volume\n    sandbox, _ := client.ClaimSandbox(ctx, apispec.ClaimSandboxRequest{})\n    defer client.DeleteSandbox(ctx, sandbox.ID)\n    \n    mount, _ := client.MountVolume(ctx, sandbox.ID, apispec.MountRequest{\n        SandboxvolumeID: volume.ID,\n        MountPoint:      \"/mnt/models\",\n    })\n    defer client.UnmountVolume(ctx, sandbox.ID, apispec.UnmountRequest{\n        SandboxvolumeID: volume.ID,\n        MountSessionID:  mount.MountSessionID,\n    })\n\n    // Train v1.0 model and create snapshot\n    trainModel(sandbox, \"/mnt/models\", \"v1.0\")\n    snapV1, _ := client.CreateVolumeSnapshot(ctx, volume.ID, apispec.CreateSnapshotRequest{\n        Name:        \"model-v1.0\",\n        Description: apispec.NewOptString(\"Initial model training\"),\n    })\n    fmt.Printf(\"Created snapshot: %s\\n\", snapV1.Name)\n\n    // Train v2.0 model and create snapshot\n    trainModel(sandbox, \"/mnt/models\", \"v2.0\")\n    snapV2, _ := client.CreateVolumeSnapshot(ctx, volume.ID, apispec.CreateSnapshotRequest{\n        Name:        \"model-v2.0\",\n        Description: apispec.NewOptString(\"Improved accuracy\"),\n    })\n    fmt.Printf(\"Created snapshot: %s\\n\", snapV2.Name)\n\n    // v2.0 has issues, rollback to v1.0\n    fmt.Println(\"Rolling back to v1.0...\")\n    client.RestoreVolumeSnapshot(ctx, volume.ID, snapV1.ID)\n    fmt.Println(\"Restored to model-v1.0\")\n}\n\nfunc trainModel(sandbox apispec.Sandbox, path, version string) {\n    fmt.Printf(\"Training model %s...\\n\", version)\n}" },
-    { label: "Python", language: "python", code: "from sandbox0 import Client\nfrom sandbox0.models import (\n    ClaimSandboxRequest,\n    CreateSandboxVolumeRequest,\n    CreateSnapshotRequest,\n    VolumeAccessMode,\n)\n\nclient = Client()\n\n# Create Volume for model storage\nwith client.volumes.create(CreateSandboxVolumeRequest(\n    access_mode=VolumeAccessMode.RWX,\n)) as volume:\n    \n    # Create Sandbox and mount Volume\n    sandbox = client.sandboxes.claim(ClaimSandboxRequest())\n    \n    try:\n        with sandbox.mount(volume.id, \"/mnt/models\"):\n            # Train v1.0 model and create snapshot\n            train_model(sandbox, \"/mnt/models\", \"v1.0\")\n            snap_v1 = client.volumes.create_snapshot(\n                volume.id,\n                CreateSnapshotRequest(\n                    name=\"model-v1.0\",\n                    description=\"Initial model training\"\n                )\n            )\n            print(f\"Created snapshot: {snap_v1.name}\")\n\n            # Train v2.0 model and create snapshot\n            train_model(sandbox, \"/mnt/models\", \"v2.0\")\n            snap_v2 = client.volumes.create_snapshot(\n                volume.id,\n                CreateSnapshotRequest(\n                    name=\"model-v2.0\",\n                    description=\"Improved accuracy\"\n                )\n            )\n            print(f\"Created snapshot: {snap_v2.name}\")\n\n            # v2.0 has issues, rollback to v1.0\n            print(\"Rolling back to v1.0...\")\n            client.volumes.restore_snapshot(volume.id, snap_v1.id)\n            print(\"Restored to model-v1.0\")\n    finally:\n        client.sandboxes.delete(sandbox.id)\n\ndef train_model(sandbox, path, version):\n    print(f\"Training model {version}...\")" },
-    { label: "TypeScript", language: "typescript", code: "import { Sandbox0 } from '@sandbox0/sdk';\nimport { VolumeAccessMode } from '@sandbox0/sdk/models';\n\nconst client = new Sandbox0();\n\nasync function main() {\n    // Create Volume for model storage\n    const volume = await client.volumes.create({\n        accessMode: VolumeAccessMode.Rwx,\n    });\n\n    try {\n        // Create Sandbox and mount Volume\n        const sandbox = await client.sandboxes.claim({});\n        \n        try {\n            const mount = await client.sandboxes.mount(sandbox.id, {\n                sandboxvolumeId: volume.id,\n                mountPoint: '/mnt/models',\n            });\n\n            try {\n                // Train v1.0 model and create snapshot\n                await trainModel(sandbox, '/mnt/models', 'v1.0');\n                const snapV1 = await client.volumes.createSnapshot(volume.id, {\n                    name: 'model-v1.0',\n                    description: 'Initial model training',\n                });\n                console.log(`Created snapshot: ${snapV1.name}`);\n\n                // Train v2.0 model and create snapshot\n                await trainModel(sandbox, '/mnt/models', 'v2.0');\n                const snapV2 = await client.volumes.createSnapshot(volume.id, {\n                    name: 'model-v2.0',\n                    description: 'Improved accuracy',\n                });\n                console.log(`Created snapshot: ${snapV2.name}`);\n\n                // v2.0 has issues, rollback to v1.0\n                console.log('Rolling back to v1.0...');\n                await client.volumes.restoreSnapshot(volume.id, snapV1.id);\n                console.log('Restored to model-v1.0');\n            } finally {\n                await client.sandboxes.unmount(sandbox.id, {\n                    sandboxvolumeId: volume.id,\n                    mountSessionId: mount.mountSessionId,\n                });\n            }\n        } finally {\n            await client.sandboxes.delete(sandbox.id);\n        }\n    } finally {\n        await client.volumes.delete(volume.id);\n    }\n}\n\nasync function trainModel(sandbox: any, path: string, version: string) {\n    console.log(`Training model ${version}...`);\n}\n\nmain().catch(console.error);" },
-    { label: "CLI", language: "bash", code: "#!/bin/bash\n\n# Create Volume\nVOLUME_ID=$(s0 volume create --access-mode RWX | grep ID | awk '{print $2}')\necho \"Created volume: $VOLUME_ID\"\n\n# Create Sandbox\nSANDBOX_ID=$(s0 sandbox create | grep ID | awk '{print $2}')\necho \"Created sandbox: $SANDBOX_ID\"\n\n# Mount Volume\ns0 sandbox mount $SANDBOX_ID --volume $VOLUME_ID --path /mnt/models\n\n# Train v1.0 model\necho \"Training model v1.0...\"\ns0 sandbox exec $SANDBOX_ID -- python train.py --output /mnt/models/v1.0\n\n# Create v1.0 snapshot\nSNAP_V1=$(s0 snapshot create $VOLUME_ID --name \"model-v1.0\" | grep ID | awk '{print $2}')\necho \"Created snapshot: model-v1.0 ($SNAP_V1)\"\n\n# Train v2.0 model\necho \"Training model v2.0...\"\ns0 sandbox exec $SANDBOX_ID -- python train.py --output /mnt/models/v2.0\n\n# Create v2.0 snapshot\nSNAP_V2=$(s0 snapshot create $VOLUME_ID --name \"model-v2.0\" | grep ID | awk '{print $2}')\necho \"Created snapshot: model-v2.0 ($SNAP_V2)\"\n\n# Rollback to v1.0\necho \"Rolling back to v1.0...\"\ns0 snapshot restore $VOLUME_ID $SNAP_V1\necho \"Restored to model-v1.0\"\n\n# Cleanup\ns0 sandbox unmount $SANDBOX_ID --volume $VOLUME_ID\ns0 sandbox delete $SANDBOX_ID\ns0 volume delete $VOLUME_ID" }
-  ]}
-/>
 
 ## Best Practices
 
-### Naming Conventions
+### Naming
 
 <Callout variant="info">
-Use meaningful naming conventions for easy identification:
-- Version-based: `v1.0.0`, `v1.1.0-beta`, `v2.0-rc1`
-- Time-based: `2024-01-15-daily`, `before-migration`
-- Event-based: `pre-deploy`, `post-cleanup`, `client-demo`
+Use release-aligned names such as `v1.0.0`, `before-migration`, `post-import-check`.
 </Callout>
 
-### Regular Cleanup
+### Cleanup
 
 <Callout variant="warning">
-Snapshots consume storage space. Regularly clean up old snapshots that are no longer needed. Consider:
-- Keep the most recent N snapshots
-- Keep snapshots within a specific time range
-- Delete snapshots marked as deprecated
+Snapshots consume storage over time. Define retention policy by age, count, and business milestones.
 </Callout>
 
 ### Backup Before Restore
 
 <Callout variant="danger">
-Restore is irreversible. Always create a snapshot of the current state as backup before restoring.
+Create a fresh safety snapshot before any production restore operation.
 </Callout>
 
 ---

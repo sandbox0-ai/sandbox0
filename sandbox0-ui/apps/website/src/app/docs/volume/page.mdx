@@ -1,15 +1,15 @@
 # Volume
 
-Volume provides persistent storage for Sandbox0. It is a storage unit independent of the Sandbox lifecycle, allowing data sharing and reuse across multiple Sandboxes.
+{/* TODO(volume-page): align examples with latest generated SDK signatures */}
+
+Volume provides persistent storage for Sandbox0. A volume is independent from sandbox lifecycle, so data can outlive a single runtime and be shared across workloads.
 
 ## Why Volumes?
 
-The default Sandbox filesystem is ephemeral—when a Sandbox is deleted, all its data is lost. Volumes solve this problem:
-
-- **Data Persistence**: Store data that needs long-term retention, such as databases, model files, and user uploads
-- **Cross-Sandbox Sharing**: Mount the same Volume to multiple Sandboxes for data sharing
-- **Fast Snapshots**: Create point-in-time snapshots in seconds for backup and versioning
-- **Quick Recovery**: Restore from snapshots quickly, ideal for rollbacks and environment cloning
+- **Persistence**: Keep data after sandbox deletion
+- **Sharing**: Reuse one volume across multiple sandboxes
+- **Snapshots**: Capture point-in-time state for backup and rollback
+- **Recovery**: Restore quickly when deployment or data changes fail
 
 ## Volume and Sandbox Relationship
 
@@ -33,41 +33,132 @@ The default Sandbox filesystem is ephemeral—when a Sandbox is deleted, all its
 
 ## Access Modes
 
-Volumes support three access modes:
-
 | Mode | Full Name | Description | Typical Use Cases |
 |------|-----------|-------------|-------------------|
 | `RWO` | Read-Write Once | Single-node read-write | Database storage, exclusive workspaces |
-| `ROX` | Read-Only Cross | Multi-node read-only | Shared model files, static resource distribution |
-| `RWX` | Read-Write Cross | Multi-node read-write | Collaborative workspaces, shared caches |
+| `ROX` | Read-Only Cross | Multi-node read-only | Shared model files, static resources |
+| `RWX` | Read-Write Cross | Multi-node read-write | Shared caches, collaborative workloads |
 
 <Callout variant="info">
-The default access mode is `RWO`. Specify `RWX` mode when creating a Volume if you need cross-Sandbox sharing.
+Default mode is `RWO`. Use `RWX` when a volume must be mounted by multiple sandboxes.
 </Callout>
 
 ## Performance Configuration
 
-Volumes support the following performance tuning parameters:
-
-| Parameter | Type | Description | Example Values |
-|-----------|------|-------------|----------------|
-| `cache_size` | string | Cache size | `512M`, `1G` |
-| `buffer_size` | string | Buffer size | `128M`, `256M` |
-| `prefetch` | integer | Number of blocks to prefetch | `1`, `2`, `4` |
-| `writeback` | boolean | Enable write-back cache | `true`, `false` |
+| Parameter | Type | Description | Example |
+|-----------|------|-------------|---------|
+| `cache_size` | string | Local read cache size | `512M`, `1G` |
+| `buffer_size` | string | Write buffer size | `128M`, `256M` |
+| `prefetch` | integer | Prefetch blocks | `1`, `2`, `4` |
+| `writeback` | boolean | Async writeback mode | `true`, `false` |
 
 <Callout variant="warning">
-Enabling `writeback` improves write performance but may lose unwritten data in exceptional cases. Disable it for scenarios requiring strong data consistency.
+`writeback=true` improves throughput but may lose buffered data on abnormal shutdown.
 </Callout>
 
 ## Create a Volume
 
 <Tabs
   tabs={[
-    { label: "Go", language: "go", code: "package main\n\nimport (\n    \"context\"\n    \"fmt\"\n    \n    \"github.com/sandbox0-ai/sdk-go\"\n    \"github.com/sandbox0-ai/sdk-go/pkg/apispec\"\n)\n\nfunc main() {\n    client := sandbox0.NewClient()\n    ctx := context.Background()\n\n    // Create Volume with default settings\n    volume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{})\n    if err != nil {\n        panic(err)\n    }\n    fmt.Printf(\"Volume created: %s\\n\", volume.ID)\n    \n    // Create Volume with custom access mode and performance settings\n    volume, err = client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{\n        AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeRWX),\n        CacheSize:  apispec.NewOptString(\"512M\"),\n        BufferSize: apispec.NewOptString(\"128M\"),\n        Writeback:  apispec.NewOptBool(true),\n    })\n    if err != nil {\n        panic(err)\n    }\n    fmt.Printf(\"Volume created with RWX mode: %s\\n\", volume.ID)\n}" },
-    { label: "Python", language: "python", code: "from sandbox0 import Client\nfrom sandbox0.models import CreateSandboxVolumeRequest, VolumeAccessMode\n\nclient = Client()\n\n# Create Volume with default settings\nvolume = client.volumes.create(CreateSandboxVolumeRequest())\nprint(f\"Volume created: {volume.id}\")\n\n# Create Volume with custom access mode and performance settings\nvolume = client.volumes.create(CreateSandboxVolumeRequest(\n    access_mode=VolumeAccessMode.RWX,\n    cache_size=\"512M\",\n    buffer_size=\"128M\",\n    writeback=True,\n))\nprint(f\"Volume created with RWX mode: {volume.id}\")\n\n# Using context manager for auto-cleanup\nwith client.volumes.create(CreateSandboxVolumeRequest(\n    access_mode=VolumeAccessMode.RWX,\n)) as volume:\n    print(f\"Volume created: {volume.id}\")\n    # Use volume here...\n# Volume is automatically deleted when exiting context" },
-    { label: "TypeScript", language: "typescript", code: "import { Sandbox0 } from '@sandbox0/sdk';\nimport { VolumeAccessMode } from '@sandbox0/sdk/models';\n\nconst client = new Sandbox0();\n\n// Create Volume with default settings\nconst volume = await client.volumes.create({});\nconsole.log(`Volume created: ${volume.id}`);\n\n// Create Volume with custom access mode and performance settings\nconst volumeWithConfig = await client.volumes.create({\n    accessMode: VolumeAccessMode.Rwx,\n    cacheSize: '512M',\n    bufferSize: '128M',\n    writeback: true,\n});\nconsole.log(`Volume created with RWX mode: ${volumeWithConfig.id}`);" },
-    { label: "CLI", language: "bash", code: "# Create Volume with default settings\ns0 volume create\n\n# Output:\n# Volume created successfully\n# ID: vol_abc123xyz\n# Access Mode: RWO" }
+    {
+      label: "Go",
+      language: "go",
+      code: `import (
+    "context"
+    "fmt"
+    "log"
+    "os"
+
+    sandbox0 "github.com/sandbox0-ai/sdk-go"
+    "github.com/sandbox0-ai/sdk-go/pkg/apispec"
+)
+
+ctx := context.Background()
+client, err := sandbox0.NewClient(
+    sandbox0.WithToken(os.Getenv("SANDBOX0_TOKEN")),
+)
+if err != nil {
+    log.Fatal(err)
+}
+
+volume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{
+    AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeRWX),
+    CacheSize:  apispec.NewOptString("512M"),
+    BufferSize: apispec.NewOptString("128M"),
+    Writeback:  apispec.NewOptBool(true),
+})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println("Volume created:", volume.ID)`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-create-go",
+      deps: ["github.com/sandbox0-ai/sdk-go"],
+      env: ["SANDBOX0_TOKEN"],
+      setup: ["go version"]
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `import os
+
+from sandbox0 import Client
+from sandbox0.models import CreateSandboxVolumeRequest, VolumeAccessMode
+
+client = Client(token=os.environ["SANDBOX0_TOKEN"])
+
+volume = client.volumes.create(
+    CreateSandboxVolumeRequest(
+        access_mode=VolumeAccessMode.RWX,
+        cache_size="512M",
+        buffer_size="128M",
+        writeback=True,
+    )
+)
+print("Volume created:", volume.id)`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-create-python",
+      deps: ["sandbox0"],
+      env: ["SANDBOX0_TOKEN"],
+      setup: ["python3 --version"]
+    },
+    {
+      label: "JavaScript",
+      language: "typescript",
+      code: `import { Sandbox0 } from '@sandbox0/sdk';
+import { VolumeAccessMode } from '@sandbox0/sdk/models';
+
+if (!process.env.SANDBOX0_TOKEN) {
+    throw new Error('Missing SANDBOX0_TOKEN');
+}
+
+const client = new Sandbox0({ token: process.env.SANDBOX0_TOKEN });
+
+const volume = await client.volumes.create({
+    accessMode: VolumeAccessMode.Rwx,
+    cacheSize: '512M',
+    bufferSize: '128M',
+    writeback: true,
+});
+console.log('Volume created:', volume.id);`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-create-typescript",
+      deps: ["@sandbox0/sdk"],
+      env: ["SANDBOX0_TOKEN"],
+      setup: ["node --version"]
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 volume create --access-mode RWX --cache-size 512M --buffer-size 128M --writeback`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-create-cli",
+      setup: ["command -v s0 >/dev/null"]
+    }
   ]}
 />
 
@@ -75,10 +166,54 @@ Enabling `writeback` improves write performance but may lose unwritten data in e
 
 <Tabs
   tabs={[
-    { label: "Go", language: "go", code: "volumes, err := client.ListVolumes(ctx)\nif err != nil {\n    panic(err)\n}\n\nfor _, v := range volumes {\n    fmt.Printf(\"Volume: %s, Mode: %s\\n\", v.ID, v.AccessMode)\n}" },
-    { label: "Python", language: "python", code: "volumes = client.volumes.list()\n\nfor v in volumes:\n    print(f\"Volume: {v.id}, Mode: {v.access_mode}\")" },
-    { label: "TypeScript", language: "typescript", code: "const volumes = await client.volumes.list();\n\nfor (const v of volumes) {\n    console.log(`Volume: ${v.id}, Mode: ${v.accessMode}`);\n}" },
-    { label: "CLI", language: "bash", code: "# List all Volumes\ns0 volume list\n\n# Output:\n# ID              ACCESS MODE   CREATED AT\n# vol_abc123xyz   RWX           2024-01-15 10:30:00\n# vol_def456uvw   RWO           2024-01-14 15:20:00" }
+    {
+      label: "Go",
+      language: "go",
+      code: `volumes, err := client.ListVolumes(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+
+for _, v := range volumes {
+    fmt.Println("Volume:", v.ID, "Mode:", v.AccessMode)
+}`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-list-go",
+      env: ["SANDBOX0_TOKEN"]
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `volumes = client.volumes.list()
+for v in volumes:
+    print("Volume:", v.id, "Mode:", v.access_mode)`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-list-python",
+      env: ["SANDBOX0_TOKEN"]
+    },
+    {
+      label: "JavaScript",
+      language: "typescript",
+      code: `const volumes = await client.volumes.list();
+for (const v of volumes) {
+    console.log('Volume:', v.id, 'Mode:', v.accessMode);
+}`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-list-typescript",
+      env: ["SANDBOX0_TOKEN"]
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 volume list`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-list-cli",
+      setup: ["command -v s0 >/dev/null"]
+    }
   ]}
 />
 
@@ -86,10 +221,52 @@ Enabling `writeback` improves write performance but may lose unwritten data in e
 
 <Tabs
   tabs={[
-    { label: "Go", language: "go", code: "volume, err := client.GetVolume(ctx, \"vol_abc123xyz\")\nif err != nil {\n    panic(err)\n}\n\nfmt.Printf(\"Volume ID: %s\\n\", volume.ID)\nfmt.Printf(\"Access Mode: %s\\n\", volume.AccessMode)\nfmt.Printf(\"Cache Size: %s\\n\", volume.CacheSize.Value)\nfmt.Printf(\"Created At: %s\\n\", volume.CreatedAt)" },
-    { label: "Python", language: "python", code: "volume = client.volumes.get(\"vol_abc123xyz\")\n\nprint(f\"Volume ID: {volume.id}\")\nprint(f\"Access Mode: {volume.access_mode}\")\nprint(f\"Cache Size: {volume.cache_size}\")\nprint(f\"Created At: {volume.created_at}\")" },
-    { label: "TypeScript", language: "typescript", code: "const volume = await client.volumes.get('vol_abc123xyz');\n\nconsole.log(`Volume ID: ${volume.id}`);\nconsole.log(`Access Mode: ${volume.accessMode}`);\nconsole.log(`Cache Size: ${volume.cacheSize}`);\nconsole.log(`Created At: ${volume.createdAt}`);" },
-    { label: "CLI", language: "bash", code: "# Get Volume details\ns0 volume get vol_abc123xyz\n\n# Output:\n# ID: vol_abc123xyz\n# Access Mode: RWX\n# Cache Size: 512M\n# Buffer Size: 128M\n# Writeback: true\n# Created At: 2024-01-15T10:30:00Z" }
+    {
+      label: "Go",
+      language: "go",
+      code: `volume, err := client.GetVolume(ctx, "vol_abc123xyz")
+if err != nil {
+    log.Fatal(err)
+}
+
+fmt.Println("Volume ID:", volume.ID)
+fmt.Println("Access Mode:", volume.AccessMode)`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-get-go",
+      env: ["SANDBOX0_TOKEN"]
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `volume = client.volumes.get("vol_abc123xyz")
+print("Volume ID:", volume.id)
+print("Access Mode:", volume.access_mode)`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-get-python",
+      env: ["SANDBOX0_TOKEN"]
+    },
+    {
+      label: "JavaScript",
+      language: "typescript",
+      code: `const volume = await client.volumes.get('vol_abc123xyz');
+console.log('Volume ID:', volume.id);
+console.log('Access Mode:', volume.accessMode);`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-get-typescript",
+      env: ["SANDBOX0_TOKEN"]
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 volume get vol_abc123xyz`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-get-cli",
+      setup: ["command -v s0 >/dev/null"]
+    }
   ]}
 />
 
@@ -97,15 +274,52 @@ Enabling `writeback` improves write performance but may lose unwritten data in e
 
 <Tabs
   tabs={[
-    { label: "Go", language: "go", code: "err := client.DeleteVolume(ctx, \"vol_abc123xyz\")\nif err != nil {\n    panic(err)\n}\nfmt.Println(\"Volume deleted\")" },
-    { label: "Python", language: "python", code: "client.volumes.delete(\"vol_abc123xyz\")\nprint(\"Volume deleted\")" },
-    { label: "TypeScript", language: "typescript", code: "await client.volumes.delete('vol_abc123xyz');\nconsole.log('Volume deleted');" },
-    { label: "CLI", language: "bash", code: "# Delete Volume\ns0 volume delete vol_abc123xyz\n\n# Output:\n# Volume vol_abc123xyz deleted successfully" }
+    {
+      label: "Go",
+      language: "go",
+      code: `if err := client.DeleteVolume(ctx, "vol_abc123xyz"); err != nil {
+    log.Fatal(err)
+}
+fmt.Println("Volume deleted")`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-delete-go",
+      env: ["SANDBOX0_TOKEN"]
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `client.volumes.delete("vol_abc123xyz")
+print("Volume deleted")`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-delete-python",
+      env: ["SANDBOX0_TOKEN"]
+    },
+    {
+      label: "JavaScript",
+      language: "typescript",
+      code: `await client.volumes.delete('vol_abc123xyz');
+console.log('Volume deleted');`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-delete-typescript",
+      env: ["SANDBOX0_TOKEN"]
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 volume delete vol_abc123xyz`,
+      mode: "run",
+      needs: "infra",
+      session: "volume-delete-cli",
+      setup: ["command -v s0 >/dev/null"]
+    }
   ]}
 />
 
 <Callout variant="warning">
-Ensure all mounts are unmounted before deleting a Volume. If active mounts exist, the delete operation returns a 409 Conflict error.
+Delete fails with `409 Conflict` when active mounts still exist.
 </Callout>
 
 ---

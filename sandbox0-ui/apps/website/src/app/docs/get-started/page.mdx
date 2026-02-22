@@ -40,23 +40,42 @@ Get your first sandbox running in minutes.
     {
       label: "Go",
       language: "go",
-      code: `go get github.com/sandbox0-ai/sdk-go`
+      code: `go get github.com/sandbox0-ai/sdk-go`,
+      mode: "run",
+      needs: "none",
+      session: "get-started-go",
+      deps: ["github.com/sandbox0-ai/sdk-go"],
+      setup: ["go version"]
     },
     {
       label: "Python",
       language: "python",
-      code: `pip install sandbox0`
+      code: `pip install sandbox0`,
+      mode: "run",
+      needs: "none",
+      session: "get-started-python",
+      deps: ["sandbox0"],
+      setup: ["python3 --version"]
     },
     {
       label: "JavaScript",
       language: "bash",
-      code: `npm install @sandbox0/sdk`
+      code: `npm install @sandbox0/sdk`,
+      mode: "run",
+      needs: "none",
+      session: "get-started-typescript",
+      deps: ["@sandbox0/sdk"],
+      setup: ["node --version"]
     },
     {
       label: "CLI",
       language: "bash",
       code: `# Download from https://github.com/sandbox0/sandbox0/releases
-# Or use the API directly with curl`
+# Or use the API directly with curl`,
+      mode: "run",
+      needs: "none",
+      session: "get-started-cli",
+      setup: ["command -v s0 >/dev/null"]
     }
   ]}
 />
@@ -80,7 +99,11 @@ client, err := sandbox0.NewClient(
 // Option 2: Using API key (for server-to-server)
 client, err := sandbox0.NewClient(
     sandbox0.WithAPIKey(os.Getenv("SANDBOX0_API_KEY")),
-)`
+)`,
+      mode: "run",
+      needs: "none",
+      session: "get-started-go",
+      env: ["SANDBOX0_TOKEN", "SANDBOX0_API_KEY"]
     },
     {
       label: "Python",
@@ -92,7 +115,11 @@ import os
 client = Client(token=os.environ["SANDBOX0_TOKEN"])
 
 # Option 2: Using API key
-client = Client(api_key=os.environ["SANDBOX0_API_KEY"])`
+client = Client(api_key=os.environ["SANDBOX0_API_KEY"])`,
+      mode: "run",
+      needs: "none",
+      session: "get-started-python",
+      env: ["SANDBOX0_TOKEN", "SANDBOX0_API_KEY"]
     },
     {
       label: "JavaScript",
@@ -103,7 +130,11 @@ client = Client(api_key=os.environ["SANDBOX0_API_KEY"])`
 const client = new Sandbox0({ token: process.env.SANDBOX0_TOKEN });
 
 // Option 2: Using API key
-const client = new Sandbox0({ apiKey: process.env.SANDBOX0_API_KEY });`
+const client = new Sandbox0({ apiKey: process.env.SANDBOX0_API_KEY });`,
+      mode: "run",
+      needs: "none",
+      session: "get-started-typescript",
+      env: ["SANDBOX0_TOKEN", "SANDBOX0_API_KEY"]
     },
     {
       label: "CLI",
@@ -112,7 +143,11 @@ const client = new Sandbox0({ apiKey: process.env.SANDBOX0_API_KEY });`
 export SANDBOX0_TOKEN="your-token-here"
 
 # Or configure via config file
-s0 config set token your-token-here`
+s0 config set token your-token-here`,
+      mode: "run",
+      needs: "none",
+      session: "get-started-cli",
+      setup: ["command -v s0 >/dev/null"]
     }
   ]}
 />
@@ -159,7 +194,11 @@ func main() {
 
     // Clean up when done
     defer client.DeleteSandbox(ctx, sandbox.ID)
-}`
+}`,
+      mode: "run",
+      needs: "infra",
+      session: "get-started-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
@@ -178,7 +217,11 @@ print(f"Sandbox ID: {sandbox.id}")
 print(f"Status: {sandbox.status}")
 
 # Clean up when done
-client.delete_sandbox(sandbox.id)`
+client.delete_sandbox(sandbox.id)`,
+      mode: "run",
+      needs: "infra",
+      session: "get-started-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
@@ -196,7 +239,11 @@ console.log('Sandbox ID:', sandbox.id);
 console.log('Status:', sandbox.status);
 
 // Clean up when done
-await client.deleteSandbox(sandbox.id);`
+await client.deleteSandbox(sandbox.id);`,
+      mode: "run",
+      needs: "infra",
+      session: "get-started-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
@@ -209,7 +256,11 @@ s0 sandbox create --template default --ttl 300
 # Status: running
 
 # Clean up when done
-s0 sandbox delete sb_abc123`
+s0 sandbox delete sb_abc123`,
+      mode: "run",
+      needs: "infra",
+      session: "get-started-cli",
+      setup: ["command -v s0 >/dev/null"]
     }
   ]}
 />
@@ -234,7 +285,11 @@ ctxResp, err := client.CreateContext(ctx, sandbox.ID, &sandbox0.CreateContextReq
 if err != nil {
     log.Fatal(err)
 }
-fmt.Printf("Context ID: %s\\n", ctxResp.ID)`
+fmt.Printf("Context ID: %s\\n", ctxResp.ID)`,
+      mode: "run",
+      needs: "infra",
+      session: "get-started-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
@@ -244,7 +299,11 @@ result = client.exec_command(
     sandbox.id,
     command=["/bin/sh", "-c", "echo 'Hello, Sandbox0!'"],
 )
-print(f"Output: {result.stdout}")`
+print(f"Output: {result.stdout}")`,
+      mode: "run",
+      needs: "infra",
+      session: "get-started-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
@@ -253,7 +312,11 @@ print(f"Output: {result.stdout}")`
 const result = await client.execCommand(sandbox.id, {
     command: ['/bin/sh', '-c', "echo 'Hello, Sandbox0!'"],
 });
-console.log('Output:', result.stdout);`
+console.log('Output:', result.stdout);`,
+      mode: "run",
+      needs: "infra",
+      session: "get-started-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
@@ -262,7 +325,11 @@ console.log('Output:', result.stdout);`
 s0 sandbox exec sb_abc123 -- echo "Hello, Sandbox0!"
 
 # Output:
-# Hello, Sandbox0!`
+# Hello, Sandbox0!`,
+      mode: "run",
+      needs: "infra",
+      session: "get-started-cli",
+      setup: ["command -v s0 >/dev/null"]
     }
   ]}
 />
@@ -287,7 +354,11 @@ content, err := client.ReadFile(ctx, sandbox.ID, "/tmp/hello.txt")
 if err != nil {
     log.Fatal(err)
 }
-fmt.Printf("File content: %s\\n", string(content))`
+fmt.Printf("File content: %s\\n", string(content))`,
+      mode: "run",
+      needs: "infra",
+      session: "get-started-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
@@ -297,7 +368,11 @@ client.write_file(sandbox.id, "/tmp/hello.txt", b"Hello from Sandbox0!")
 
 # Read the file back
 content = client.read_file(sandbox.id, "/tmp/hello.txt")
-print(f"File content: {content.decode()}")`
+print(f"File content: {content.decode()}")`,
+      mode: "run",
+      needs: "infra",
+      session: "get-started-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
@@ -307,7 +382,11 @@ await client.writeFile(sandbox.id, '/tmp/hello.txt', 'Hello from Sandbox0!');
 
 // Read the file back
 const content = await client.readFile(sandbox.id, '/tmp/hello.txt');
-console.log('File content:', content.toString());`
+console.log('File content:', content.toString());`,
+      mode: "run",
+      needs: "infra",
+      session: "get-started-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
@@ -319,7 +398,11 @@ s0 file write sb_abc123 /tmp/hello.txt "Hello from Sandbox0!"
 s0 file read sb_abc123 /tmp/hello.txt
 
 # Output:
-# Hello from Sandbox0!`
+# Hello from Sandbox0!`,
+      mode: "run",
+      needs: "infra",
+      session: "get-started-cli",
+      setup: ["command -v s0 >/dev/null"]
     }
   ]}
 />

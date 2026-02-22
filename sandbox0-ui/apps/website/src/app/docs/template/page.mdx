@@ -69,7 +69,11 @@ if err != nil {
 
 for _, tpl := range templates {
     fmt.Printf("- %s (scope: %s)\\n", tpl.TemplateID, tpl.Scope)
-}`
+}`,
+      mode: "run",
+      needs: "infra",
+      session: "template-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
@@ -80,7 +84,11 @@ client = Client(token=os.environ["SANDBOX0_TOKEN"])
 
 templates = client.list_templates()
 for tpl in templates:
-    print(f"- {tpl.template_id} (scope: {tpl.scope})")`
+    print(f"- {tpl.template_id} (scope: {tpl.scope})")`,
+      mode: "run",
+      needs: "infra",
+      session: "template-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
@@ -92,7 +100,11 @@ const client = new Sandbox0({ token: process.env.SANDBOX0_TOKEN });
 const { templates } = await client.listTemplates();
 for (const tpl of templates) {
     console.log(\`- \${tpl.templateId} (scope: \${tpl.scope})\`);
-}`
+}`,
+      mode: "run",
+      needs: "infra",
+      session: "template-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
@@ -102,7 +114,11 @@ for (const tpl of templates) {
 # Output:
 # default      public    2024-01-10T10:00:00Z
 # python-3.11  private   2024-01-12T14:30:00Z
-# node-20      private   2024-01-13T09:15:00Z`
+# node-20      private   2024-01-13T09:15:00Z`,
+      mode: "run",
+      needs: "infra",
+      session: "template-cli",
+      setup: ["command -v s0 >/dev/null"]
     }
   ]}
 />
@@ -155,7 +171,11 @@ template, err := client.CreateTemplate(ctx, "python-3.11", spec)
 if err != nil {
     log.Fatal(err)
 }
-fmt.Printf("Created template: %s\\n", template.TemplateID)`
+fmt.Printf("Created template: %s\\n", template.TemplateID)`,
+      mode: "run",
+      needs: "infra",
+      session: "template-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
@@ -183,7 +203,11 @@ fmt.Printf("Created template: %s\\n", template.TemplateID)`
 }
 
 template = client.create_template("python-3.11", spec)
-print(f"Created template: {template.template_id}")`
+print(f"Created template: {template.template_id}")`,
+      mode: "run",
+      needs: "infra",
+      session: "template-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
@@ -211,7 +235,11 @@ print(f"Created template: {template.template_id}")`
 };
 
 const template = await client.createTemplate('python-3.11', spec);
-console.log('Created template:', template.templateId);`
+console.log('Created template:', template.templateId);`,
+      mode: "run",
+      needs: "infra",
+      session: "template-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
@@ -223,7 +251,11 @@ console.log('Created template:', template.templateId);`
     --default-ttl 3600 --max-ttl 7200
 
 # Output:
-# Template created: python-3.11`
+# Template created: python-3.11`,
+      mode: "run",
+      needs: "infra",
+      session: "template-cli",
+      setup: ["command -v s0 >/dev/null"]
     }
   ]}
 />
@@ -250,7 +282,11 @@ if err != nil {
 fmt.Printf("Template: %s\\n", template.TemplateID)
 if name, ok := template.Spec.DisplayName.Get(); ok {
     fmt.Printf("Display Name: %s\\n", name)
-}`
+}`,
+      mode: "run",
+      needs: "infra",
+      session: "template-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
@@ -258,7 +294,11 @@ if name, ok := template.Spec.DisplayName.Get(); ok {
       code: `template = client.get_template("python-3.11")
 print(f"Template: {template.template_id}")
 if template.spec.display_name:
-    print(f"Display Name: {template.spec.display_name}")`
+    print(f"Display Name: {template.spec.display_name}")`,
+      mode: "run",
+      needs: "infra",
+      session: "template-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
@@ -267,7 +307,11 @@ if template.spec.display_name:
 console.log('Template:', template.templateId);
 if (template.spec.displayName) {
     console.log('Display Name:', template.spec.displayName);
-}`
+}`,
+      mode: "run",
+      needs: "infra",
+      session: "template-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
@@ -279,7 +323,11 @@ if (template.spec.displayName) {
 # Display Name: Python 3.11
 # Image: python:3.11-slim
 # Pool: 1-5 (auto-scale)
-# Scope: private`
+# Scope: private`,
+      mode: "run",
+      needs: "infra",
+      session: "template-cli",
+      setup: ["command -v s0 >/dev/null"]
     }
   ]}
 />
@@ -319,7 +367,11 @@ updated, err := client.UpdateTemplate(ctx, "python-3.11", template.Spec)
 if err != nil {
     log.Fatal(err)
 }
-fmt.Printf("Updated template: %s\\n", updated.TemplateID)`
+fmt.Printf("Updated template: %s\\n", updated.TemplateID)`,
+      mode: "run",
+      needs: "infra",
+      session: "template-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
@@ -333,7 +385,11 @@ template.spec.pool.max_idle = 10
 
 # Save changes
 updated = client.update_template("python-3.11", template.spec)
-print(f"Updated template: {updated.template_id}")`
+print(f"Updated template: {updated.template_id}")`,
+      mode: "run",
+      needs: "infra",
+      session: "template-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
@@ -347,7 +403,11 @@ template.spec.pool.maxIdle = 10;
 
 // Save changes
 const updated = await client.updateTemplate('python-3.11', template.spec);
-console.log('Updated template:', updated.templateId);`
+console.log('Updated template:', updated.templateId);`,
+      mode: "run",
+      needs: "infra",
+      session: "template-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
@@ -357,7 +417,11 @@ console.log('Updated template:', updated.templateId);`
     --max-idle 10
 
 # Output:
-# Template updated: python-3.11`
+# Template updated: python-3.11`,
+      mode: "run",
+      needs: "infra",
+      session: "template-cli",
+      setup: ["command -v s0 >/dev/null"]
     }
   ]}
 />
@@ -385,19 +449,31 @@ Deleting a template is irreversible. You cannot create new sandboxes from a dele
 if err != nil {
     log.Fatal(err)
 }
-fmt.Println("Template deleted")`
+fmt.Println("Template deleted")`,
+      mode: "run",
+      needs: "infra",
+      session: "template-go",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "Python",
       language: "python",
       code: `client.delete_template("python-3.11")
-print("Template deleted")`
+print("Template deleted")`,
+      mode: "run",
+      needs: "infra",
+      session: "template-python",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "JavaScript",
       language: "typescript",
       code: `await client.deleteTemplate('python-3.11');
-console.log('Template deleted');`
+console.log('Template deleted');`,
+      mode: "run",
+      needs: "infra",
+      session: "template-typescript",
+      env: ["SANDBOX0_TOKEN"]
     },
     {
       label: "CLI",
@@ -405,7 +481,11 @@ console.log('Template deleted');`
       code: `s0 template delete python-3.11
 
 # Output:
-# Template deleted: python-3.11`
+# Template deleted: python-3.11`,
+      mode: "run",
+      needs: "infra",
+      session: "template-cli",
+      setup: ["command -v s0 >/dev/null"]
     }
   ]}
 />

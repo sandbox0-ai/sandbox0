@@ -1,0 +1,46 @@
+name: Docs Examples Fast
+
+on:
+  pull_request:
+    paths:
+      - "sandbox0-ui/apps/website/src/app/docs/**"
+      - "sandbox0-ui/tools/docs-examples/**"
+      - "sandbox0-ui/apps/website/package.json"
+      - "sandbox0-ui/package.json"
+      - "sandbox0-ui/package-lock.json"
+      - ".github/workflows/docs-examples-fast.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "sandbox0-ui/apps/website/src/app/docs/**"
+      - "sandbox0-ui/tools/docs-examples/**"
+      - "sandbox0-ui/apps/website/package.json"
+      - "sandbox0-ui/package.json"
+      - "sandbox0-ui/package-lock.json"
+
+jobs:
+  docs-examples-fast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: sandbox0-ui/package-lock.json
+
+      - name: Install dependencies
+        working-directory: sandbox0-ui
+        run: npm ci
+
+      - name: Validate docs examples (fast)
+        working-directory: sandbox0-ui
+        run: npm run docs:check
+
+      - name: Run docs examples unit tests
+        working-directory: sandbox0-ui
+        run: npm run docs:examples:test
+

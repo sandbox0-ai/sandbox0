@@ -24,45 +24,85 @@ For production deployments, you'll also need:
 
 ### Verify Prerequisites
 
-```bash
-# Check Kubernetes version
+<Tabs
+  tabs={[
+    {
+      label: "CLI",
+      language: "bash",
+      code: `# Check Kubernetes version
 kubectl version
 
 # Check Helm version
 helm version
 
 # Verify default storage class
-kubectl get storageclass
-```
+kubectl get storageclass`,
+      mode: "run",
+      needs: "k8s",
+      session: "selfhosted-install-prereq",
+      setup: ["command -v kubectl >/dev/null", "command -v helm >/dev/null"]
+    }
+  ]}
+/>
 
 ## Install the Operator
 
 ### Step 1: Add the Helm Repository
 
-```bash
-helm repo add sandbox0 https://charts.sandbox0.ai
-helm repo update
-```
+<Tabs
+  tabs={[
+    {
+      label: "CLI",
+      language: "bash",
+      code: `helm repo add sandbox0 https://charts.sandbox0.ai
+helm repo update`,
+      mode: "run",
+      needs: "k8s",
+      session: "selfhosted-install-helm-repo",
+      setup: ["command -v helm >/dev/null"]
+    }
+  ]}
+/>
 
 ### Step 2: Install the Operator
 
 Install the infra-operator in the `sandbox0-system` namespace:
 
-```bash
-helm install infra-operator sandbox0/infra-operator \
+<Tabs
+  tabs={[
+    {
+      label: "CLI",
+      language: "bash",
+      code: `helm install infra-operator sandbox0/infra-operator \
   --namespace sandbox0-system \
-  --create-namespace
-```
+  --create-namespace`,
+      mode: "run",
+      needs: "k8s",
+      session: "selfhosted-install-operator",
+      setup: ["command -v helm >/dev/null"]
+    }
+  ]}
+/>
 
 ### Step 3: Verify Installation
 
-```bash
-# Check operator pod status
+<Tabs
+  tabs={[
+    {
+      label: "CLI",
+      language: "bash",
+      code: `# Check operator pod status
 kubectl get pods -n sandbox0-system
 
 # Check CRD installation
-kubectl get crd sandbox0infras.infra.sandbox0.io
-```
+kubectl get crd sandbox0infras.infra.sandbox0.io`,
+      mode: "run",
+      needs: "k8s",
+      session: "selfhosted-install-verify-operator",
+      setup: ["command -v kubectl >/dev/null"]
+    }
+  ]}
+/>
 
 Expected output:
 
@@ -77,8 +117,12 @@ infra-operator-xxx-xxx      1/1     Running   0          30s
 
 Create a file named `sandbox0infra-minimal.yaml`:
 
-```yaml
-apiVersion: v1
+<Tabs
+  tabs={[
+    {
+      label: "YAML",
+      language: "yaml",
+      code: `apiVersion: v1
 kind: Namespace
 metadata:
   name: sandbox0-system
@@ -123,24 +167,49 @@ spec:
       enabled: true
       replicas: 1
   initUser:
-    email: "admin@example.com"
-```
+    email: "admin@example.com"`,
+      mode: "read",
+      needs: "none",
+      session: "selfhosted-install-minimal-yaml"
+    }
+  ]}
+/>
 
 Apply the configuration:
 
-```bash
-kubectl apply -f sandbox0infra-minimal.yaml
-```
+<Tabs
+  tabs={[
+    {
+      label: "CLI",
+      language: "bash",
+      code: `kubectl apply -f sandbox0infra-minimal.yaml`,
+      mode: "run",
+      needs: "k8s",
+      session: "selfhosted-install-apply-minimal",
+      setup: ["command -v kubectl >/dev/null"]
+    }
+  ]}
+/>
 
 ### Monitor Installation Progress
 
-```bash
-# Watch the Sandbox0Infra status
+<Tabs
+  tabs={[
+    {
+      label: "CLI",
+      language: "bash",
+      code: `# Watch the Sandbox0Infra status
 kubectl get sandbox0infra -n sandbox0-system -w
 
 # Check detailed status
-kubectl describe sandbox0infra minimal -n sandbox0-system
-```
+kubectl describe sandbox0infra minimal -n sandbox0-system`,
+      mode: "run",
+      needs: "k8s",
+      session: "selfhosted-install-monitor",
+      setup: ["command -v kubectl >/dev/null"]
+    }
+  ]}
+/>
 
 The `Phase` field will transition through:
 
@@ -153,16 +222,26 @@ The `Phase` field will transition through:
 
 Once `Phase` is `Ready`:
 
-```bash
-# Check all pods
+<Tabs
+  tabs={[
+    {
+      label: "CLI",
+      language: "bash",
+      code: `# Check all pods
 kubectl get pods -n sandbox0-system
 
 # Check services
 kubectl get svc -n sandbox0-system
 
 # Get the API endpoint (NodePort)
-kubectl get svc -n sandbox0-system -l app.kubernetes.io/component=internal-gateway
-```
+kubectl get svc -n sandbox0-system -l app.kubernetes.io/component=internal-gateway`,
+      mode: "run",
+      needs: "k8s",
+      session: "selfhosted-install-verify-deploy",
+      setup: ["command -v kubectl >/dev/null"]
+    }
+  ]}
+/>
 
 ## Access the API
 
@@ -170,45 +249,84 @@ kubectl get svc -n sandbox0-system -l app.kubernetes.io/component=internal-gatew
 
 For NodePort service:
 
-```bash
-# Get node IP
+<Tabs
+  tabs={[
+    {
+      label: "CLI",
+      language: "bash",
+      code: `# Get node IP
 NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[0].address}')
 
 # Get node port
 NODE_PORT=$(kubectl get svc -n sandbox0-system -l app.kubernetes.io/component=internal-gateway -o jsonpath='{.items[0].spec.ports[0].nodePort}')
 
-echo "API endpoint: http://${'$'}{NODE_IP}:${'$'}{NODE_PORT}"
-```
+echo "API endpoint: http://${'$'}{NODE_IP}:${'$'}{NODE_PORT}"`,
+      mode: "run",
+      needs: "k8s",
+      session: "selfhosted-install-get-endpoint",
+      setup: ["command -v kubectl >/dev/null"]
+    }
+  ]}
+/>
 
 ### Test the Connection
 
-```bash
-# Health check
+<Tabs
+  tabs={[
+    {
+      label: "CLI",
+      language: "bash",
+      code: `# Health check
 curl http://${'$'}{NODE_IP}:${'$'}{NODE_PORT}/health
 
 # List templates
-curl http://${'$'}{NODE_IP}:${'$'}{NODE_PORT}/api/v1/templates
-```
+curl http://${'$'}{NODE_IP}:${'$'}{NODE_PORT}/api/v1/templates`,
+      mode: "run",
+      needs: "k8s",
+      session: "selfhosted-install-test-connection",
+      setup: ["command -v curl >/dev/null"]
+    }
+  ]}
+/>
 
 ## Initial User
 
 The `initUser` configuration creates an initial admin user:
 
-```yaml
-initUser:
+<Tabs
+  tabs={[
+    {
+      label: "YAML",
+      language: "yaml",
+      code: `initUser:
   email: "admin@example.com"
   # Optional: reference a secret for password
   # passwordSecret:
   #   name: admin-password
-  #   key: password
-```
+  #   key: password`,
+      mode: "read",
+      needs: "none",
+      session: "selfhosted-install-inituser-yaml"
+    }
+  ]}
+/>
 
 If `passwordSecret` is not specified, a random password is generated and stored in a secret:
 
-```bash
-# Get the generated password
-kubectl get secret -n sandbox0-system -l app.kubernetes.io/component=init-user -o jsonpath='{.items[0].data.password}' | base64 -d
-```
+<Tabs
+  tabs={[
+    {
+      label: "CLI",
+      language: "bash",
+      code: `# Get the generated password
+kubectl get secret -n sandbox0-system -l app.kubernetes.io/component=init-user -o jsonpath='{.items[0].data.password}' | base64 -d`,
+      mode: "run",
+      needs: "k8s",
+      session: "selfhosted-install-init-user-password",
+      setup: ["command -v kubectl >/dev/null"]
+    }
+  ]}
+/>
 
 ## Next Steps
 

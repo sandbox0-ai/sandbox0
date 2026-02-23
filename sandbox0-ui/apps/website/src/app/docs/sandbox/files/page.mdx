@@ -53,7 +53,7 @@ content = sandbox.read_file("/workspace/hello.txt")
 print(f"Content: {content.decode()}")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Read file content
 const content = await sandbox.readFile('/workspace/hello.txt');
@@ -111,7 +111,7 @@ sandbox.write_file("/workspace/hello.txt", b"Hello from Sandbox0!\\n")
 print("File written successfully")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Write file content
 await sandbox.writeFile('/workspace/hello.txt', 'Hello from Sandbox0!\\n');
@@ -163,7 +163,7 @@ sandbox.mkdir("/workspace/project/src", recursive=True)
 print("Directory created")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Create directory (with parent directories)
 await sandbox.mkdir('/workspace/project/src', true);
@@ -217,7 +217,7 @@ sandbox.delete_file("/workspace/hello.txt")
 print("File deleted")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Delete file
 await sandbox.deleteFile('/workspace/hello.txt');
@@ -268,7 +268,7 @@ sandbox.move_file("/workspace/old.txt", "/workspace/new.txt")
 print("File moved")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Move/rename file
 await sandbox.moveFile('/workspace/old.txt', '/workspace/new.txt');
@@ -324,7 +324,7 @@ print(f"Type: {info.type}")
 print(f"Mode: {info.mode}")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Get file info
 const info = await sandbox.statFile('/workspace/hello.txt');
@@ -389,7 +389,7 @@ for entry in entries:
     print(f"- {entry.path} ({entry.type}, {entry.size} bytes)")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// List directory contents
 const { entries } = await sandbox.listFiles('/workspace');
@@ -500,7 +500,7 @@ finally:
     unsubscribe()`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Watch files for changes
 const { events, errors, unsubscribe } = await sandbox.watchFiles('/workspace', true);
@@ -609,7 +609,7 @@ sandbox.move_file("/tmp/sdk-py/hello.txt", "/tmp/sdk-py/hello-renamed.txt")
 sandbox.delete_file("/tmp/sdk-py/hello-renamed.txt")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Create directory
 await sandbox.mkdir('/tmp/sdk-js', true);

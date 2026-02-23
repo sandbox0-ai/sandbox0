@@ -8,7 +8,7 @@ import (
 )
 
 func TestCreateREPLProcess_CustomConfigNameRequired(t *testing.T) {
-	_, err := createREPLProcess("ctx", process.ProcessConfig{Language: ""}, &repl.REPLConfig{
+	_, err := createREPLProcess("ctx", process.ProcessConfig{Alias: ""}, &repl.REPLConfig{
 		Candidates: []repl.ExecCandidate{
 			{Name: "sh", Args: []string{"-i"}},
 		},
@@ -18,15 +18,15 @@ func TestCreateREPLProcess_CustomConfigNameRequired(t *testing.T) {
 	}
 }
 
-func TestCreateREPLProcess_CustomConfigLanguageMismatch(t *testing.T) {
-	_, err := createREPLProcess("ctx", process.ProcessConfig{Language: "python"}, &repl.REPLConfig{
+func TestCreateREPLProcess_CustomConfigAliasMismatch(t *testing.T) {
+	_, err := createREPLProcess("ctx", process.ProcessConfig{Alias: "python"}, &repl.REPLConfig{
 		Name: "psql",
 		Candidates: []repl.ExecCandidate{
 			{Name: "sh", Args: []string{"-i"}},
 		},
 	})
 	if err == nil {
-		t.Fatal("expected error for language mismatch")
+		t.Fatal("expected error for alias mismatch")
 	}
 }
 
@@ -44,7 +44,7 @@ func TestCreateREPLProcess_CustomConfigUsesName(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected repl.REPL, got %T", proc)
 	}
-	if replProc.Language() != "custom" {
-		t.Fatalf("unexpected language: %s", replProc.Language())
+	if replProc.Alias() != "custom" {
+		t.Fatalf("unexpected alias: %s", replProc.Alias())
 	}
 }

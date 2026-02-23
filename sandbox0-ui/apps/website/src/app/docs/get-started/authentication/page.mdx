@@ -35,7 +35,7 @@ Access tokens are JWT tokens obtained through the authentication flow. They have
     {
       label: "Go",
       language: "go",
-      code: `import "github.com/sandbox0-ai/sdk-go"
+      code: `import sandbox0 "github.com/sandbox0-ai/sdk-go"
 
 client, err := sandbox0.NewClient(
     sandbox0.WithBaseURL("https://api.sandbox0.ai"),
@@ -73,11 +73,11 @@ print(f"Access token: {resp.access_token}")
 print(f"Refresh token: {resp.refresh_token}")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
-      code: `import { Sandbox0 } from '@sandbox0/sdk';
+      code: `import { Client } from 'sandbox0';
 
-const client = new Sandbox0({ baseURL: 'https://api.sandbox0.ai' });
+const client = new Client({ baseUrl: 'https://api.sandbox0.ai' });
 
 // Login to get access token
 const resp = await client.login({
@@ -138,7 +138,7 @@ for p in providers:
     print(f"- {p.name} ({p.type})")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Get available auth providers
 const providers = await client.getAuthProviders();
@@ -193,7 +193,7 @@ resp = client.refresh_token(refresh_token=stored_refresh_token)
 print(f"New access token: {resp.access_token}")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Refresh the access token
 const resp = await client.refreshToken({
@@ -249,10 +249,10 @@ Pass the API key in the `Authorization` header as a Bearer token:
     {
       label: "Go",
       language: "go",
-      code: `import "github.com/sandbox0-ai/sdk-go"
+      code: `import sandbox0 "github.com/sandbox0-ai/sdk-go"
 
 client, err := sandbox0.NewClient(
-    sandbox0.WithAPIKey(os.Getenv("SANDBOX0_API_KEY")),
+    sandbox0.WithToken(os.Getenv("SANDBOX0_TOKEN")),
 )`
     },
     {
@@ -261,25 +261,27 @@ client, err := sandbox0.NewClient(
       code: `from sandbox0 import Client
 import os
 
-client = Client(api_key=os.environ["SANDBOX0_API_KEY"])`
+client = Client(api_key=os.environ["SANDBOX0_TOKEN"])`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
-      code: `import { Sandbox0 } from '@sandbox0/sdk';
+      code: `import { Client } from 'sandbox0';
 
-const client = new Sandbox0({
-    apiKey: process.env.SANDBOX0_API_KEY,
+const client = new Client({
+    token: process.env.SANDBOX0_TOKEN!,
 });`
     },
     {
       label: "CLI",
       language: "bash",
       code: `# Set API key via environment
-export SANDBOX0_API_KEY="your-api-key"
+export SANDBOX0_TOKEN="your-api-key"
 
-# Or in config
-s0 config set api-key your-api-key`
+# Or create config file at ~/.s0/config.yaml:
+# profiles:
+#   default:
+#     token: your-api-key`
     }
   ]}
 />
@@ -328,7 +330,7 @@ for team in teams:
     print(f"- {team.name} ({team.id})")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// List teams
 const { teams } = await client.listTeams();
@@ -342,8 +344,10 @@ for (const team of teams) {
       code: `# List teams
 s0 team list
 
-# Switch team context
-s0 config set team team-id-here`
+# Switch team context via config file ~/.s0/config.yaml:
+# profiles:
+#   default:
+#     team-id: team-id-here`
     }
   ]}
 />
@@ -420,19 +424,21 @@ except errors.ForbiddenError:
     print("Insufficient permissions for this operation")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
-      code: `import { Sandbox0, UnauthorizedError, ForbiddenError } from '@sandbox0/sdk';
+      code: `import { Client, APIError } from 'sandbox0';
 
 try {
-    const sandbox = await client.claimSandbox({ template: 'default' });
+    const sandbox = await client.sandboxes.claim('default');
 } catch (error) {
-    if (error instanceof UnauthorizedError) {
-        // Token expired or invalid
-        console.log('Token expired, please re-authenticate');
-    } else if (error instanceof ForbiddenError) {
-        // Insufficient permissions
-        console.log('Insufficient permissions for this operation');
+    if (error instanceof APIError) {
+        if (error.statusCode === 401) {
+            // Token expired or invalid
+            console.log('Token expired, please re-authenticate');
+        } else if (error.statusCode === 403) {
+            // Insufficient permissions
+            console.log('Insufficient permissions for this operation');
+        }
     }
 }`
     },

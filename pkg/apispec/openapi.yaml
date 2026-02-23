@@ -2819,8 +2819,9 @@ components:
           type: string
         type:
           type: string
-        language:
+        alias:
           type: string
+          description: Alias for the REPL or CLI tool (e.g., python, node, bash, redis-cli)
         running:
           type: boolean
         paused:
@@ -2996,8 +2997,9 @@ components:
     CreateREPLContextRequest:
       type: object
       properties:
-        language:
+        alias:
           type: string
+          description: Alias for the REPL or CLI tool (e.g., python, node, bash, redis-cli)
         input:
           type: string
         repl_config:
@@ -3042,8 +3044,9 @@ components:
           type: string
         type:
           $ref: "#/components/schemas/ProcessType"
-        language:
+        alias:
           type: string
+          description: Alias for the REPL or CLI tool (e.g., python, node, bash, redis-cli)
         cwd:
           type: string
         env_vars:
@@ -3067,8 +3070,9 @@ components:
           type: string
         type:
           type: string
-        language:
+        alias:
           type: string
+          description: Alias for the REPL or CLI tool (e.g., python, node, bash, redis-cli)
         running:
           type: boolean
         paused:

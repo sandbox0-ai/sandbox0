@@ -61,7 +61,7 @@ type CreateContextRequest struct {
 
 // CreateREPLContextRequest is the request body for creating a REPL context.
 type CreateREPLContextRequest struct {
-	Language   string           `json:"language"`              // python, node, bash, zsh, etc.
+	Alias      string           `json:"alias"`                 // python, node, bash, zsh, etc.
 	Input      string           `json:"input"`                 // code to execute
 	ReplConfig *repl.REPLConfig `json:"repl_config,omitempty"` // custom config
 }
@@ -75,7 +75,7 @@ type CreateCMDContextRequest struct {
 type ContextResponse struct {
 	ID        string              `json:"id"`
 	Type      process.ProcessType `json:"type"`
-	Language  string              `json:"language"`
+	Alias     string              `json:"alias"`
 	CWD       string              `json:"cwd"`
 	EnvVars   map[string]string   `json:"env_vars"`
 	Running   bool                `json:"running"`
@@ -88,7 +88,7 @@ type ContextResponse struct {
 type ContextStatsResponse struct {
 	ContextID string                `json:"context_id"`
 	Type      string                `json:"type"`
-	Language  string                `json:"language"`
+	Alias     string                `json:"alias"`
 	Running   bool                  `json:"running"`
 	Paused    bool                  `json:"paused"`
 	Usage     process.ResourceUsage `json:"usage"`
@@ -145,7 +145,7 @@ func (h *ContextHandler) List(w http.ResponseWriter, r *http.Request) {
 		response = append(response, ContextResponse{
 			ID:        ctx.ID,
 			Type:      ctx.Type,
-			Language:  ctx.Language,
+			Alias:     ctx.Alias,
 			CWD:       ctx.CWD,
 			EnvVars:   ctx.EnvVars,
 			Running:   ctx.IsRunning(),
@@ -172,7 +172,7 @@ func (h *ContextHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var (
-		language   string
+		alias      string
 		command    []string
 		replConfig *repl.REPLConfig
 		input      string
@@ -186,7 +186,7 @@ func (h *ContextHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Repl != nil {
-		language = req.Repl.Language
+		alias = req.Repl.Alias
 		replConfig = req.Repl.ReplConfig
 		input = req.Repl.Input
 	}
@@ -195,16 +195,16 @@ func (h *ContextHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	if replConfig != nil {
 		if replConfig.Name == "" {
-			replConfig.Name = language
+			replConfig.Name = alias
 		}
 		if replConfig.Name == "" {
 			writeError(w, http.StatusBadRequest, "invalid_request", "repl.repl_config.name is required")
 			return
 		}
-		if language == "" {
-			language = replConfig.Name
-		} else if language != replConfig.Name {
-			writeError(w, http.StatusBadRequest, "invalid_request", "repl.language must match repl.repl_config.name")
+		if alias == "" {
+			alias = replConfig.Name
+		} else if alias != replConfig.Name {
+			writeError(w, http.StatusBadRequest, "invalid_request", "repl.alias must match repl.repl_config.name")
 			return
 		}
 		if err := replConfig.Validate(); err != nil {
@@ -222,12 +222,12 @@ func (h *ContextHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx, err := h.manager.CreateContextWithPolicyAndREPLConfig(process.ProcessConfig{
-		Type:     req.Type,
-		Language: language,
-		Command:  command,
-		CWD:      req.CWD,
-		EnvVars:  req.EnvVars,
-		PTYSize:  req.PTYSize,
+		Type:    req.Type,
+		Alias:   alias,
+		Command: command,
+		CWD:     req.CWD,
+		EnvVars: req.EnvVars,
+		PTYSize: req.PTYSize,
 	}, replConfig, policy)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "create_failed", err.Error())
@@ -246,7 +246,7 @@ func (h *ContextHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusCreated, ContextResponse{
 			ID:        ctx.ID,
 			Type:      ctx.Type,
-			Language:  ctx.Language,
+			Alias:     ctx.Alias,
 			CWD:       ctx.CWD,
 			EnvVars:   ctx.EnvVars,
 			Running:   ctx.IsRunning(),
@@ -260,7 +260,7 @@ func (h *ContextHandler) Create(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, ContextResponse{
 		ID:        ctx.ID,
 		Type:      ctx.Type,
-		Language:  ctx.Language,
+		Alias:     ctx.Alias,
 		CWD:       ctx.CWD,
 		EnvVars:   ctx.EnvVars,
 		Running:   ctx.IsRunning(),
@@ -287,7 +287,7 @@ func (h *ContextHandler) Get(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ContextResponse{
 		ID:        ctx.ID,
 		Type:      ctx.Type,
-		Language:  ctx.Language,
+		Alias:     ctx.Alias,
 		CWD:       ctx.CWD,
 		EnvVars:   ctx.EnvVars,
 		Running:   ctx.IsRunning(),
@@ -332,7 +332,7 @@ func (h *ContextHandler) Restart(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ContextResponse{
 		ID:        ctx.ID,
 		Type:      ctx.Type,
-		Language:  ctx.Language,
+		Alias:     ctx.Alias,
 		CWD:       ctx.CWD,
 		EnvVars:   ctx.EnvVars,
 		Running:   ctx.IsRunning(),
@@ -424,7 +424,7 @@ func (h *ContextHandler) Stats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ContextStatsResponse{
 		ContextID: usage.ContextID,
 		Type:      string(usage.Type),
-		Language:  usage.Language,
+		Alias:     usage.Alias,
 		Running:   usage.Running,
 		Paused:    usage.Paused,
 		Usage:     usage.Usage,

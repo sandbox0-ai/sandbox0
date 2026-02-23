@@ -16,7 +16,7 @@ import (
 type Context struct {
 	ID             string              `json:"id"`
 	Type           process.ProcessType `json:"type"`
-	Language       string              `json:"language"`
+	Alias          string              `json:"alias"`
 	CWD            string              `json:"cwd"`
 	EnvVars        map[string]string   `json:"env_vars"`
 	MainProcess    process.Process     `json:"-"`
@@ -47,8 +47,8 @@ func NewContext(config process.ProcessConfig, replConfig *repl.REPLConfig, exitH
 	var proc process.Process
 	var err error
 
-	if config.Type == process.ProcessTypeREPL && replConfig != nil && config.Language == "" {
-		config.Language = replConfig.Name
+	if config.Type == process.ProcessTypeREPL && replConfig != nil && config.Alias == "" {
+		config.Alias = replConfig.Name
 	}
 
 	switch config.Type {
@@ -71,7 +71,7 @@ func NewContext(config process.ProcessConfig, replConfig *repl.REPLConfig, exitH
 	ctx := &Context{
 		ID:             id,
 		Type:           config.Type,
-		Language:       config.Language,
+		Alias:          config.Alias,
 		CWD:            config.CWD,
 		EnvVars:        config.EnvVars,
 		MainProcess:    proc,

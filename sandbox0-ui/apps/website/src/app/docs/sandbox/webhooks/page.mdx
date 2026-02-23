@@ -96,7 +96,7 @@ sandbox = client.claim_sandbox(
 print(f"Sandbox ID: {sandbox.id}")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `const webhookUrl = process.env.SANDBOX0_WEBHOOK_URL;
 const webhookSecret = process.env.SANDBOX0_WEBHOOK_SECRET || '';
@@ -313,7 +313,7 @@ def webhook():
     return 'OK', 200`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `import crypto from 'crypto';
 import express from 'express';
@@ -399,7 +399,7 @@ except Exception as e:
 print("Process exited with error code")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Trigger process.started and process.exited events
 await sandbox.run('bash', 'echo "hello world"');
@@ -458,7 +458,7 @@ client.resume_sandbox(sandbox.id)
 print("Sandbox resumed - webhook triggered")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Trigger sandbox.paused event
 await client.pauseSandbox(sandbox.id);
@@ -544,7 +544,7 @@ sandbox.delete_file("/tmp/webhook-demo/file-renamed.txt")
 print("File removed - webhook triggered")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Ensure watch directory exists
 await sandbox.mkdir('/tmp/webhook-demo', true);

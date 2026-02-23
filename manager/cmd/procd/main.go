@@ -107,7 +107,7 @@ func main() {
 			"command":      event.Config.Command,
 			"env_vars":     event.Config.EnvVars,
 			"cwd":          event.Config.CWD,
-			"language":     event.Config.Language,
+			"alias":        event.Config.Alias,
 		}
 		if event.Config.PTYSize != nil {
 			payload["pty_size"] = event.Config.PTYSize

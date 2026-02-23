@@ -59,7 +59,7 @@ func newHandlerWithContext(proc process.Process, processType process.ProcessType
 	ctx := &ctxpkg.Context{
 		ID:          "ctx-test",
 		Type:        processType,
-		Language:    "python",
+		Alias:       "python",
 		MainProcess: proc,
 	}
 	attachContext(manager, ctx)

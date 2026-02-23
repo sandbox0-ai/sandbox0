@@ -61,10 +61,10 @@ func New(id string, replConfig *REPLConfig, processConfig process.ProcessConfig)
 }
 
 // NewFromRegistry creates a REPL using a config from the registry.
-func NewFromRegistry(id string, language string, processConfig process.ProcessConfig) (*REPL, error) {
-	replConfig, ok := DefaultRegistry.Get(language)
+func NewFromRegistry(id string, alias string, processConfig process.ProcessConfig) (*REPL, error) {
+	replConfig, ok := DefaultRegistry.Get(alias)
 	if !ok {
-		return nil, fmt.Errorf("unknown REPL language: %s", language)
+		return nil, fmt.Errorf("unknown REPL alias: %s", alias)
 	}
 	return New(id, replConfig, processConfig)
 }
@@ -166,8 +166,8 @@ func (r *REPL) filterOutput(data []byte) ([]byte, bool) {
 	return data, promptDetected
 }
 
-// Language returns the REPL language/name.
-func (r *REPL) Language() string {
+// Alias returns the REPL alias/name.
+func (r *REPL) Alias() string {
 	return r.config.Name
 }
 

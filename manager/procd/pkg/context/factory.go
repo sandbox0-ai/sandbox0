@@ -8,8 +8,8 @@ import (
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/process/repl"
 )
 
-// Language aliases map alternative names to canonical REPL names.
-var languageAliases = map[string]string{
+// Alias aliases map alternative names to canonical REPL names.
+var aliasAliases = map[string]string{
 	"python3":    "python",
 	"javascript": "node",
 	"nodejs":     "node",
@@ -18,34 +18,34 @@ var languageAliases = map[string]string{
 	"pl":         "perl",
 }
 
-// createREPLProcess creates a REPL process based on language or a custom config.
-// Supports built-in languages registered in the REPL registry and custom per-context configs.
+// createREPLProcess creates a REPL process based on alias or a custom config.
+// Supports built-in aliases registered in the REPL registry and custom per-context configs.
 func createREPLProcess(ctxID string, config process.ProcessConfig, replConfig *repl.REPLConfig) (process.Process, error) {
 	procID := ctxID + "-proc"
-	lang := config.Language
-	if lang == "" {
-		lang = "python"
+	alias := config.Alias
+	if alias == "" {
+		alias = "python"
 	}
 
 	if replConfig != nil {
 		if replConfig.Name == "" {
 			return nil, fmt.Errorf("repl_config.name is required")
 		}
-		if config.Language == "" {
-			config.Language = replConfig.Name
-		} else if config.Language != replConfig.Name {
-			return nil, fmt.Errorf("language must match repl_config.name")
+		if config.Alias == "" {
+			config.Alias = replConfig.Name
+		} else if config.Alias != replConfig.Name {
+			return nil, fmt.Errorf("alias must match repl_config.name")
 		}
 		return repl.NewCustomREPL(procID, replConfig, config)
 	}
 
-	// Resolve language aliases
-	if canonical, ok := languageAliases[lang]; ok {
-		lang = canonical
+	// Resolve alias aliases
+	if canonical, ok := aliasAliases[alias]; ok {
+		alias = canonical
 	}
 
-	// Update config with resolved language
-	config.Language = lang
+	// Update config with resolved alias
+	config.Alias = alias
 
 	// Use the unified REPL factory
 	return repl.NewREPL(procID, config)

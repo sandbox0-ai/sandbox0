@@ -97,7 +97,7 @@ context = sandbox.create_context(
 print(f"Context ID: {context.id}")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Create REPL context
 const context = await sandbox.createContext({
@@ -161,7 +161,7 @@ result = sandbox.run("python", "print(x)")
 print(result.output_raw)  # Output: 2`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// First call - set variable
 let result = await sandbox.run('python', 'x = 2');
@@ -215,7 +215,7 @@ print(os.getenv("GREETING"))\`,
 )`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `const result = await sandbox.run('python', \`import os, pathlib;
 print(pathlib.Path.cwd());
@@ -271,7 +271,7 @@ result = sandbox.cmd('/bin/sh -c "echo $x"')
 print(result.output_raw)  # Output: (empty)`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// One-shot command - stateless
 let result = await sandbox.cmd('/bin/sh -c "echo hello"');
@@ -321,7 +321,7 @@ console.log(result.outputRaw);  // Output: (empty)`
 )`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `const result = await sandbox.cmd("bash -c 'echo $GREETING && pwd'", {
    cwd: '/tmp',
@@ -373,7 +373,7 @@ for ctx in contexts:
     print(f"- {ctx.id} (type: {ctx.type}, status: {ctx.status})")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `const { contexts } = await sandbox.listContexts();
 for (const ctx of contexts) {
@@ -422,7 +422,7 @@ print(f"Type: {ctx.type}")
 print(f"Status: {ctx.status}")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `const ctx = await sandbox.getContext('ctx_xyz789');
 console.log('Type:', ctx.type);
@@ -464,7 +464,7 @@ fmt.Println("Context deleted")`
 print("Context deleted")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `await sandbox.deleteContext('ctx_xyz789');
 console.log('Context deleted');`
@@ -502,7 +502,7 @@ Restart a context process.
       code: `sandbox.restart_context("ctx_xyz789")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `await sandbox.restartContext('ctx_xyz789');`
     },
@@ -535,7 +535,7 @@ Send input to a context's stdin.
       code: `sandbox.send_input("ctx_xyz789", "print('hello')\\n")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `await sandbox.sendInput('ctx_xyz789', "print('hello')\\n");`
     },
@@ -568,7 +568,7 @@ Resize the terminal dimensions.
       code: `sandbox.resize_context("ctx_xyz789", rows=24, cols=80)`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `await sandbox.resizeContext('ctx_xyz789', 24, 80);`
     },
@@ -609,7 +609,7 @@ sandbox.send_signal("ctx_xyz789", "INT")
 sandbox.send_signal("ctx_xyz789", "TERM")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Send SIGINT (Ctrl+C)
 await sandbox.sendSignal('ctx_xyz789', 'INT');
@@ -653,7 +653,7 @@ print(f"Memory: {stats.memory_rss} bytes")
 print(f"CPU: {stats.cpu_percent:.2f}%")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `const stats = await sandbox.getContextStats('ctx_xyz789');
 console.log('Memory:', stats.memoryRss, 'bytes');
@@ -767,7 +767,7 @@ for message in ws:
         print(msg["data"], end="")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Connect to WebSocket
 const ws = sandbox.connectWebSocket('ctx_xyz789');
@@ -783,7 +783,7 @@ ws.send(JSON.stringify({
 ws.onmessage = (event) => {
   const msg = JSON.parse(event.data);
   if (msg.type === 'output') {
-    process.stdout.write(msg.data);
+    console.log(msg.data);
   }
 };`
     },
@@ -826,7 +826,7 @@ fmt.Print(result.OutputRaw)  // Output: 3`
 print(result.output_raw)  # Output: 3`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `const result = await sandbox.execContext('ctx_xyz789', "print(1 + 2)\\n");
 console.log(result.outputRaw);  // Output: 3`

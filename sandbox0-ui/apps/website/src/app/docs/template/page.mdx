@@ -53,9 +53,7 @@ List all templates available to your team.
     {
       label: "Go",
       language: "go",
-      code: `import "github.com/sandbox0-ai/sdk-go"
-
-client, err := sandbox0.NewClient(
+      code: `client, err := sandbox0.NewClient(
     sandbox0.WithToken(os.Getenv("SANDBOX0_TOKEN")),
 )
 if err != nil {
@@ -83,13 +81,14 @@ for tpl in templates:
     print(f"- {tpl.template_id} (scope: {tpl.scope})")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
-      code: `import { Sandbox0 } from '@sandbox0/sdk';
+      code: `import { Client } from 'sandbox0';
 
-const client = new Sandbox0({ token: process.env.SANDBOX0_TOKEN });
+const client = new Client({ token: process.env.SANDBOX0_TOKEN! });
 
-const { templates } = await client.listTemplates();
+const response = await client.apispec.templates.apiV1TemplatesGet();
+const templates = response.data?.templates ?? [];
 for (const tpl of templates) {
     console.log(\`- \${tpl.templateId} (scope: \${tpl.scope})\`);
 }`
@@ -186,7 +185,7 @@ template = client.create_template("python-3.11", spec)
 print(f"Created template: {template.template_id}")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `const spec = {
     displayName: 'Python 3.11',
@@ -261,7 +260,7 @@ if template.spec.display_name:
     print(f"Display Name: {template.spec.display_name}")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `const template = await client.getTemplate('python-3.11');
 console.log('Template:', template.templateId);
@@ -336,7 +335,7 @@ updated = client.update_template("python-3.11", template.spec)
 print(f"Updated template: {updated.template_id}")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Get current template
 const template = await client.getTemplate('python-3.11');
@@ -394,7 +393,7 @@ fmt.Println("Template deleted")`
 print("Template deleted")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `await client.deleteTemplate('python-3.11');
 console.log('Template deleted');`

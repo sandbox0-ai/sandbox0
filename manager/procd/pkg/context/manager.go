@@ -16,7 +16,7 @@ import (
 type ContextResourceUsage struct {
 	ContextID string                `json:"context_id"`
 	Type      process.ProcessType   `json:"type"`
-	Language  string                `json:"language"`
+	Alias     string                `json:"alias"`
 	Running   bool                  `json:"running"`
 	Paused    bool                  `json:"paused"`
 	Usage     process.ResourceUsage `json:"usage"`
@@ -329,7 +329,7 @@ func (m *Manager) GetResourceUsage(contextID string) (*ContextResourceUsage, err
 	return &ContextResourceUsage{
 		ContextID: ctx.ID,
 		Type:      ctx.Type,
-		Language:  ctx.Language,
+		Alias:     ctx.Alias,
 		Running:   ctx.IsRunning(),
 		Paused:    ctx.IsPaused(),
 		Usage:     ctx.ResourceUsage(),
@@ -357,7 +357,7 @@ func (m *Manager) GetAllResourceUsage() *SandboxResourceUsage {
 		ctxUsage := ContextResourceUsage{
 			ContextID: ctx.ID,
 			Type:      ctx.Type,
-			Language:  ctx.Language,
+			Alias:     ctx.Alias,
 			Running:   ctx.IsRunning(),
 			Paused:    ctx.IsPaused(),
 			Usage:     usage,

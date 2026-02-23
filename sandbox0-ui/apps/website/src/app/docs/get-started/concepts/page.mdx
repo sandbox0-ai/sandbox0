@@ -100,7 +100,7 @@ output = client.exec_context(sandbox.id, context.id, "print(x * 2)")
 print(output.stdout)  # Output: 6`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Create a Python REPL context
 const context = await client.createContext(sandbox.id, {
@@ -171,7 +171,7 @@ status = client.get_context(sandbox.id, context.id)
 print(f"Exit code: {status.exit_code}")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Create a command context
 const context = await client.createContext(sandbox.id, {
@@ -302,7 +302,7 @@ client.mount_volume(
 )`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Create a volume
 const volume = await client.createVolume({ name: 'my-persistent-data' });
@@ -391,7 +391,7 @@ client.update_network_policy(
 )`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Set custom network policy
 await client.updateNetworkPolicy(sandbox.id, {

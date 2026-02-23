@@ -227,7 +227,7 @@ Standard fenced code blocks with syntax highlighting:
 
 ```mdx
 ```bash
-npm install @sandbox0/sdk
+npm install sandbox0
 ```
 
 ```python
@@ -237,15 +237,15 @@ client = Client(api_key="your-api-key")
 ```
 
 ```typescript
-import { Sandbox0 } from '@sandbox0/sdk';
+import { Client } from 'sandbox0';
 
-const client = new Sandbox0({ apiKey: 'your-api-key' });
+const client = new Client({ token: 'your-api-key' });
 ```
 
 ```go
-import "github.com/sandbox0-ai/sdk-go"
+import sandbox0 "github.com/sandbox0-ai/sdk-go"
 
-client := sandbox0.NewClient(sandbox0.WithAPIKey("your-api-key"))
+client := sandbox0.NewClient(sandbox0.WithToken("your-api-key"))
 ```
 
 ```json

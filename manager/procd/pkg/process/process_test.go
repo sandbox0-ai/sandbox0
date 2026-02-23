@@ -12,9 +12,9 @@ import (
 // TestBaseProcess_StateTransitions tests process state transitions.
 func TestBaseProcess_StateTransitions(t *testing.T) {
 	config := ProcessConfig{
-		Type:     ProcessTypeREPL,
-		Language: "python",
-		CWD:      "/tmp",
+		Type:  ProcessTypeREPL,
+		Alias: "python",
+		CWD:   "/tmp",
 	}
 
 	bp := NewBaseProcess("test-id", ProcessTypeREPL, config)
@@ -72,8 +72,8 @@ func TestBaseProcess_StateTransitions(t *testing.T) {
 // TestBaseProcess_PIDAndExitCode tests PID and exit code management.
 func TestBaseProcess_PIDAndExitCode(t *testing.T) {
 	config := ProcessConfig{
-		Type:     ProcessTypeREPL,
-		Language: "python",
+		Type:  ProcessTypeREPL,
+		Alias: "python",
 	}
 
 	bp := NewBaseProcess("test-id", ProcessTypeREPL, config)
@@ -112,8 +112,8 @@ func TestBaseProcess_PIDAndExitCode(t *testing.T) {
 // TestBaseProcess_IDAndType tests ID and type getters.
 func TestBaseProcess_IDAndType(t *testing.T) {
 	config := ProcessConfig{
-		Type:     ProcessTypeREPL,
-		Language: "python",
+		Type:  ProcessTypeREPL,
+		Alias: "python",
 	}
 
 	bp := NewBaseProcess("test-id-123", ProcessTypeREPL, config)
@@ -130,8 +130,8 @@ func TestBaseProcess_IDAndType(t *testing.T) {
 // TestBaseProcess_PTYManagement tests PTY management.
 func TestBaseProcess_PTYManagement(t *testing.T) {
 	config := ProcessConfig{
-		Type:     ProcessTypeREPL,
-		Language: "python",
+		Type:  ProcessTypeREPL,
+		Alias: "python",
 	}
 
 	bp := NewBaseProcess("test-id", ProcessTypeREPL, config)
@@ -165,8 +165,8 @@ func TestBaseProcess_PTYManagement(t *testing.T) {
 // TestBaseProcess_ResourceUsageWithNoPID tests ResourceUsage with no PID set.
 func TestBaseProcess_ResourceUsageWithNoPID(t *testing.T) {
 	config := ProcessConfig{
-		Type:     ProcessTypeREPL,
-		Language: "python",
+		Type:  ProcessTypeREPL,
+		Alias: "python",
 	}
 
 	bp := NewBaseProcess("test-id", ProcessTypeREPL, config)
@@ -194,8 +194,8 @@ func TestBaseProcess_ResourceUsageWithNoPID(t *testing.T) {
 // TestBaseProcess_PublishAndReadOutput tests output publishing and reading.
 func TestBaseProcess_PublishAndReadOutput(t *testing.T) {
 	config := ProcessConfig{
-		Type:     ProcessTypeREPL,
-		Language: "python",
+		Type:  ProcessTypeREPL,
+		Alias: "python",
 	}
 
 	bp := NewBaseProcess("test-id", ProcessTypeREPL, config)
@@ -238,8 +238,8 @@ func TestBaseProcess_PublishAndReadOutput(t *testing.T) {
 // TestBaseProcess_ConcurrentStateAccess tests concurrent state access.
 func TestBaseProcess_ConcurrentStateAccess(t *testing.T) {
 	config := ProcessConfig{
-		Type:     ProcessTypeREPL,
-		Language: "python",
+		Type:  ProcessTypeREPL,
+		Alias: "python",
 	}
 
 	bp := NewBaseProcess("test-id", ProcessTypeREPL, config)
@@ -375,8 +375,8 @@ func TestProcessState_Values(t *testing.T) {
 // TestBaseProcess_WriteInputNoPTY tests WriteInput when no PTY is set.
 func TestBaseProcess_WriteInputNoPTY(t *testing.T) {
 	config := ProcessConfig{
-		Type:     ProcessTypeREPL,
-		Language: "python",
+		Type:  ProcessTypeREPL,
+		Alias: "python",
 	}
 
 	bp := NewBaseProcess("test-id", ProcessTypeREPL, config)
@@ -392,7 +392,7 @@ func TestBaseProcess_WriteInputNoPTY(t *testing.T) {
 func TestBaseProcess_WriteInputBufferFull(t *testing.T) {
 	config := ProcessConfig{
 		Type:       ProcessTypeREPL,
-		Language:   "python",
+		Alias:      "python",
 		BufferSize: 1,
 	}
 
@@ -421,7 +421,7 @@ func TestBaseProcess_WriteInputBufferFull(t *testing.T) {
 func TestBaseProcess_InputReadyFlushesQueue(t *testing.T) {
 	config := ProcessConfig{
 		Type:       ProcessTypeREPL,
-		Language:   "python",
+		Alias:      "python",
 		BufferSize: 2,
 	}
 
@@ -468,8 +468,8 @@ func TestBaseProcess_InputReadyFlushesQueue(t *testing.T) {
 // TestBaseProcess_WriteInputFinished tests rejecting input on finished process.
 func TestBaseProcess_WriteInputFinished(t *testing.T) {
 	config := ProcessConfig{
-		Type:     ProcessTypeREPL,
-		Language: "python",
+		Type:  ProcessTypeREPL,
+		Alias: "python",
 	}
 
 	bp := NewBaseProcess("test-id", ProcessTypeREPL, config)
@@ -494,8 +494,8 @@ func TestBaseProcess_WriteInputFinished(t *testing.T) {
 // BenchmarkBaseProcess_StateRead benchmarks concurrent state reading.
 func BenchmarkBaseProcess_StateRead(b *testing.B) {
 	config := ProcessConfig{
-		Type:     ProcessTypeREPL,
-		Language: "python",
+		Type:  ProcessTypeREPL,
+		Alias: "python",
 	}
 
 	bp := NewBaseProcess("test-id", ProcessTypeREPL, config)
@@ -513,8 +513,8 @@ func BenchmarkBaseProcess_StateRead(b *testing.B) {
 // BenchmarkBaseProcess_ResourceUsage benchmarks resource usage calculation.
 func BenchmarkBaseProcess_ResourceUsage(b *testing.B) {
 	config := ProcessConfig{
-		Type:     ProcessTypeREPL,
-		Language: "python",
+		Type:  ProcessTypeREPL,
+		Alias: "python",
 	}
 
 	bp := NewBaseProcess("test-id", ProcessTypeREPL, config)

@@ -30,8 +30,8 @@ Get your first sandbox running in minutes.
 
 ### Prerequisites
 
-- A Sandbox0 account (or self-hosted deployment)
-- An API key or access token
+- A self-hosted deployment
+- An access token 
 
 ### Install SDK
 
@@ -48,38 +48,36 @@ Get your first sandbox running in minutes.
       code: `pip install sandbox0`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "bash",
-      code: `npm install @sandbox0/sdk`
+      code: `npm install sandbox0`
     },
     {
       label: "CLI",
       language: "bash",
-      code: `# Download from https://github.com/sandbox0/sandbox0/releases
-# Or use the API directly with curl`
+      code: `# Install from GitHub Releases:
+# https://github.com/sandbox0-ai/s0
+
+# Or with Go (requires Go 1.21+):
+go install github.com/sandbox0-ai/s0/cmd/s0@latest`
     }
   ]}
 />
 
 ### Authenticate
 
-Set up your credentials. You can use either an API key or a token:
+Set up your credentials. Configure the base URL for your [self-hosted deployment](/docs/self-hosted):
 
 <Tabs
   tabs={[
     {
       label: "Go",
       language: "go",
-      code: `import "github.com/sandbox0-ai/sdk-go"
+      code: `import sandbox0 "github.com/sandbox0-ai/sdk-go"
 
-// Option 1: Using API token
 client, err := sandbox0.NewClient(
     sandbox0.WithToken(os.Getenv("SANDBOX0_TOKEN")),
-)
-
-// Option 2: Using API key (for server-to-server)
-client, err := sandbox0.NewClient(
-    sandbox0.WithAPIKey(os.Getenv("SANDBOX0_API_KEY")),
+    sandbox0.WithBaseURL(os.Getenv("SANDBOX0_BASE_URL")),
 )`
     },
     {
@@ -88,31 +86,36 @@ client, err := sandbox0.NewClient(
       code: `from sandbox0 import Client
 import os
 
-# Option 1: Using API token
-client = Client(token=os.environ["SANDBOX0_TOKEN"])
-
-# Option 2: Using API key
-client = Client(api_key=os.environ["SANDBOX0_API_KEY"])`
+client = Client(
+    token=os.environ["SANDBOX0_TOKEN"],
+    base_url=os.environ.get("SANDBOX0_BASE_URL", "http://localhost:30080"),
+)`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
-      code: `import { Sandbox0 } from '@sandbox0/sdk';
+      code: `import { Client } from 'sandbox0';
 
-// Option 1: Using API token
-const client = new Sandbox0({ token: process.env.SANDBOX0_TOKEN });
-
-// Option 2: Using API key
-const client = new Sandbox0({ apiKey: process.env.SANDBOX0_API_KEY });`
+const client = new Client({
+    token: process.env.SANDBOX0_TOKEN!,
+    baseUrl: process.env.SANDBOX0_BASE_URL || 'http://localhost:30080',
+});`
     },
     {
       label: "CLI",
       language: "bash",
-      code: `# Set environment variable
+      code: `# Set environment variables
 export SANDBOX0_TOKEN="your-token-here"
+export SANDBOX0_BASE_URL="http://localhost:30080"
 
-# Or configure via config file
-s0 config set token your-token-here`
+# Or use flags
+s0 --token your-token-here --api-url http://localhost:30080 sandbox list
+
+# Or create config file at ~/.s0/config.yaml:
+# profiles:
+#   default:
+#     api-url: http://localhost:30080
+#     token: your-token-here`
     }
   ]}
 />
@@ -134,12 +137,13 @@ import (
     "log"
     "os"
 
-    "github.com/sandbox0-ai/sdk-go"
+    sandbox0 "github.com/sandbox0-ai/sdk-go"
 )
 
 func main() {
     client, err := sandbox0.NewClient(
         sandbox0.WithToken(os.Getenv("SANDBOX0_TOKEN")),
+        sandbox0.WithBaseURL(os.Getenv("SANDBOX0_BASE_URL")),
     )
     if err != nil {
         log.Fatal(err)
@@ -149,7 +153,8 @@ func main() {
 
     // Claim a sandbox from the "default" template
     sandbox, err := client.ClaimSandbox(ctx, "default",
-        sandbox0.WithSandboxTTL(300), // 5 minutes TTL
+        sandbox0.WithSandboxTTL(300),      // Auto-pause after 5 minutes (default: 5m)
+        sandbox0.WithSandboxHardTTL(3600), // Auto-delete after 1 hour (optional, 0 disables)
     )
     if err != nil {
         log.Fatal(err)
@@ -165,44 +170,50 @@ func main() {
       label: "Python",
       language: "python",
       code: `from sandbox0 import Client
+from sandbox0.apispec.models.sandbox_config import SandboxConfig
 import os
 
-client = Client(token=os.environ["SANDBOX0_TOKEN"])
+client = Client(
+    token=os.environ["SANDBOX0_TOKEN"],
+    base_url=os.environ.get("SANDBOX0_BASE_URL", "http://localhost:30080"),
+)
 
 # Claim a sandbox from the "default" template
-sandbox = client.claim_sandbox(
-    template="default",
-    config={"ttl": 300},  # 5 minutes TTL
-)
-print(f"Sandbox ID: {sandbox.id}")
-print(f"Status: {sandbox.status}")
-
-# Clean up when done
-client.delete_sandbox(sandbox.id)`
+with client.sandboxes.open("default", config=SandboxConfig(
+    ttl=300,       # Auto-pause after 5 minutes (default: 5m)
+    hard_ttl=3600, # Auto-delete after 1 hour (optional, 0 disables)
+)) as sandbox:
+    print(f"Sandbox ID: {sandbox.id}")
+    print(f"Status: {sandbox.status}")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
-      code: `import { Sandbox0 } from '@sandbox0/sdk';
+      code: `// Run with: bun run main.ts
+// Or: npx tsx main.ts (requires @types/node)
+import { Client } from 'sandbox0';
 
-const client = new Sandbox0({ token: process.env.SANDBOX0_TOKEN });
+const client = new Client({
+    token: process.env.SANDBOX0_TOKEN!,
+    baseUrl: process.env.SANDBOX0_BASE_URL || 'http://localhost:30080',
+});
 
 // Claim a sandbox from the "default" template
-const sandbox = await client.claimSandbox({
-    template: 'default',
-    config: { ttl: 300 },  // 5 minutes TTL
+const sandbox = await client.sandboxes.claim('default', {
+    ttl: 300,       // Auto-pause after 5 minutes (default: 5m)
+    hardTtl: 3600,  // Auto-delete after 1 hour (optional, 0 disables)
 });
 console.log('Sandbox ID:', sandbox.id);
 console.log('Status:', sandbox.status);
 
 // Clean up when done
-await client.deleteSandbox(sandbox.id);`
+await client.sandboxes.delete(sandbox.id);`
     },
     {
       label: "CLI",
       language: "bash",
       code: `# Claim a sandbox
-s0 sandbox create --template default --ttl 300
+s0 sandbox create --template default --ttl 300 --hard-ttl 3600
 
 # Output:
 # Sandbox ID: sb_abc123
@@ -216,44 +227,60 @@ s0 sandbox delete sb_abc123`
 
 ### Run Your First Command
 
-Execute a command in your sandbox:
+Execute code in your sandbox using `Run` (REPL-style, stateful) or `Cmd` (one-shot command):
 
 <Tabs
   tabs={[
     {
       label: "Go",
       language: "go",
-      code: `// Create a command context
-processType := sandbox0.Cmd
-ctxResp, err := client.CreateContext(ctx, sandbox.ID, &sandbox0.CreateContextRequest{
-    Type: &processType,
-    Cmd: &sandbox0.CreateCMDContextRequest{
-        Command: []string{"/bin/sh", "-c", "echo 'Hello, Sandbox0!'"},
-    },
-})
+      code: `// Run a REPL-style snippet (stateful; env/vars preserved between calls)
+runResult, err := sandbox.Run(ctx, "python", "x = 2")
 if err != nil {
     log.Fatal(err)
 }
-fmt.Printf("Context ID: %s\\n", ctxResp.ID)`
+fmt.Print(runResult.OutputRaw)
+
+runResult, err = sandbox.Run(ctx, "python", "print(x)")
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Print(runResult.OutputRaw)
+
+// Run a one-shot command (stateless)
+cmdResult, err := sandbox.Cmd(ctx, "/bin/sh -c 'echo Hello, Sandbox0!'")
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Print(cmdResult.OutputRaw)`
     },
     {
       label: "Python",
       language: "python",
-      code: `# Create and execute a command
-result = client.exec_command(
-    sandbox.id,
-    command=["/bin/sh", "-c", "echo 'Hello, Sandbox0!'"],
-)
-print(f"Output: {result.stdout}")`
+      code: `# Run a REPL-style snippet (stateful; env/vars preserved between calls)
+run_result = sandbox.run("python", "x = 2")
+print(run_result.output_raw, end="")
+
+run_result = sandbox.run("python", "print(x)")
+print(run_result.output_raw, end="")
+
+# Run a one-shot command (stateless)
+cmd_result = sandbox.cmd("/bin/sh -c 'echo Hello, Sandbox0!'")
+print(cmd_result.output_raw, end="")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
-      code: `// Create and execute a command
-const result = await client.execCommand(sandbox.id, {
-    command: ['/bin/sh', '-c', "echo 'Hello, Sandbox0!'"],
-});
-console.log('Output:', result.stdout);`
+      code: `// Run a REPL-style snippet (stateful; env/vars preserved between calls)
+const runResult = await sandbox.run('python', 'x = 2');
+process.stdout.write(runResult.outputRaw);
+
+const runResult2 = await sandbox.run('python', 'print(x)');
+process.stdout.write(runResult2.outputRaw);
+
+// Run a one-shot command (stateless)
+const cmdResult = await sandbox.cmd("/bin/sh -c 'echo Hello, Sandbox0!'");
+process.stdout.write(cmdResult.outputRaw);`
     },
     {
       label: "CLI",
@@ -277,13 +304,13 @@ Read and write files in your sandbox:
       label: "Go",
       language: "go",
       code: `// Write a file
-err = client.WriteFile(ctx, sandbox.ID, "/tmp/hello.txt", []byte("Hello from Sandbox0!"), "")
+_, err = sandbox.WriteFile(ctx, "/tmp/hello.txt", []byte("Hello from Sandbox0!"))
 if err != nil {
     log.Fatal(err)
 }
 
 // Read the file back
-content, err := client.ReadFile(ctx, sandbox.ID, "/tmp/hello.txt")
+content, err := sandbox.ReadFile(ctx, "/tmp/hello.txt")
 if err != nil {
     log.Fatal(err)
 }
@@ -293,21 +320,21 @@ fmt.Printf("File content: %s\\n", string(content))`
       label: "Python",
       language: "python",
       code: `# Write a file
-client.write_file(sandbox.id, "/tmp/hello.txt", b"Hello from Sandbox0!")
+sandbox.write_file("/tmp/hello.txt", b"Hello from Sandbox0!")
 
 # Read the file back
-content = client.read_file(sandbox.id, "/tmp/hello.txt")
+content = sandbox.read_file("/tmp/hello.txt")
 print(f"File content: {content.decode()}")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Write a file
-await client.writeFile(sandbox.id, '/tmp/hello.txt', 'Hello from Sandbox0!');
+await sandbox.writeFile('/tmp/hello.txt', 'Hello from Sandbox0!');
 
 // Read the file back
-const content = await client.readFile(sandbox.id, '/tmp/hello.txt');
-console.log('File content:', content.toString());`
+const content = await sandbox.readFile('/tmp/hello.txt');
+console.log('File content:', Buffer.from(content).toString());`
     },
     {
       label: "CLI",

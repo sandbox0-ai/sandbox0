@@ -614,15 +614,15 @@ func TestSandboxResourceUsage_Fields(t *testing.T) {
 	m.Cleanup()
 }
 
-// TestContext_TypesAndLanguage tests context type and language fields.
-func TestContext_TypesAndLanguage(t *testing.T) {
+// TestContext_TypesAndAlias tests context type and alias fields.
+func TestContext_TypesAndAlias(t *testing.T) {
 	m := NewManager()
 
 	tests := []struct {
-		name     string
-		config   process.ProcessConfig
-		wantType process.ProcessType
-		wantLang string
+		name      string
+		config    process.ProcessConfig
+		wantType  process.ProcessType
+		wantAlias string
 	}{
 		{
 			name: "CMD type",
@@ -630,17 +630,17 @@ func TestContext_TypesAndLanguage(t *testing.T) {
 				Type:    process.ProcessTypeCMD,
 				Command: []string{"/bin/echo", "test"},
 			},
-			wantType: process.ProcessTypeCMD,
-			wantLang: "",
+			wantType:  process.ProcessTypeCMD,
+			wantAlias: "",
 		},
 		{
 			name: "REPL Python type",
 			config: process.ProcessConfig{
-				Type:     process.ProcessTypeREPL,
-				Language: "python",
+				Type:  process.ProcessTypeREPL,
+				Alias: "python",
 			},
-			wantType: process.ProcessTypeREPL,
-			wantLang: "python",
+			wantType:  process.ProcessTypeREPL,
+			wantAlias: "python",
 		},
 	}
 
@@ -657,8 +657,8 @@ func TestContext_TypesAndLanguage(t *testing.T) {
 				t.Errorf("Context Type = %s, want %s", ctx.Type, tt.wantType)
 			}
 
-			if ctx.Language != tt.wantLang {
-				t.Errorf("Context Language = %s, want %s", ctx.Language, tt.wantLang)
+			if ctx.Alias != tt.wantAlias {
+				t.Errorf("Context Alias = %s, want %s", ctx.Alias, tt.wantAlias)
 			}
 
 			m.Cleanup()

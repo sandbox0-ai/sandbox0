@@ -61,7 +61,7 @@ if policy.egress:
     print(f"Allowed domains: {policy.egress.allowed_domains}")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Get current network policy
 const policy = await sandbox.getNetworkPolicy();
@@ -127,7 +127,7 @@ sandbox.update_network_policy(mode="allow-all")
 print("Network policy updated: allow-all")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Allow all traffic
 await sandbox.updateNetworkPolicy({ mode: 'allow-all' });
@@ -169,7 +169,7 @@ sandbox.update_network_policy(mode="block-all")
 print("Network policy updated: block-all")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Block all traffic
 await sandbox.updateNetworkPolicy({ mode: 'block-all' });
@@ -219,7 +219,7 @@ sandbox.update_network_policy(
 print("Network policy updated: only allowed domains")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Block all except specific domains
 await sandbox.updateNetworkPolicy({
@@ -272,7 +272,7 @@ sandbox.update_network_policy(
 )`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Block specific domains (allow all others)
 await sandbox.updateNetworkPolicy({
@@ -326,7 +326,7 @@ sandbox = client.claim_sandbox(
 )`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Claim sandbox with network policy
 const sandbox = await client.claimSandbox({
@@ -397,7 +397,7 @@ except Exception as e:
     print("Request blocked as expected")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Test network connectivity
 const shell = '/bin/curl -s -o /dev/null -w "%{http_code}\\n" --max-time 3 https://github.com';
@@ -500,7 +500,7 @@ sandbox.update_network_policy(
 print("Only github.com is now allowed")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Get current policy
 const current = await sandbox.getNetworkPolicy();

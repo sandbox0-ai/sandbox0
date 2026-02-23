@@ -6,16 +6,16 @@ import (
 	"github.com/sandbox0-ai/infra/manager/procd/pkg/process"
 )
 
-// NewREPL creates a REPL process based on the language specified in config.
+// NewREPL creates a REPL process based on the alias specified in config.
 func NewREPL(id string, config process.ProcessConfig) (*REPL, error) {
-	language := config.Language
-	if language == "" {
-		return nil, fmt.Errorf("language is required in process config")
+	alias := config.Alias
+	if alias == "" {
+		return nil, fmt.Errorf("alias is required in process config")
 	}
 
-	replConfig, ok := DefaultRegistry.Get(language)
+	replConfig, ok := DefaultRegistry.Get(alias)
 	if !ok {
-		return nil, fmt.Errorf("unknown REPL language: %s (available: %v)", language, DefaultRegistry.List())
+		return nil, fmt.Errorf("unknown REPL alias: %s (available: %v)", alias, DefaultRegistry.List())
 	}
 
 	return New(id, replConfig, config)

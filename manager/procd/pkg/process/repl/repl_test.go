@@ -216,8 +216,8 @@ func TestNewREPL(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			config := process.ProcessConfig{
-				Type:     process.ProcessTypeREPL,
-				Language: tt.language,
+				Type:  process.ProcessTypeREPL,
+				Alias: tt.language,
 			}
 
 			repl, err := NewREPL("test-"+tt.name, config)
@@ -230,8 +230,8 @@ func TestNewREPL(t *testing.T) {
 				if repl == nil {
 					t.Error("NewREPL() returned nil without error")
 				}
-				if repl.Language() != tt.language {
-					t.Errorf("Language() = %s, want %s", repl.Language(), tt.language)
+				if repl.Alias() != tt.language {
+					t.Errorf("Alias() = %s, want %s", repl.Alias(), tt.language)
 				}
 			}
 		})
@@ -241,10 +241,10 @@ func TestNewREPL(t *testing.T) {
 // TestREPL_Lifecycle tests basic REPL lifecycle operations.
 func TestREPL_Lifecycle(t *testing.T) {
 	config := process.ProcessConfig{
-		Type:     process.ProcessTypeREPL,
-		Language: "python",
-		CWD:      "/tmp",
-		EnvVars:  map[string]string{"TEST": "value"},
+		Type:    process.ProcessTypeREPL,
+		Alias:   "python",
+		CWD:     "/tmp",
+		EnvVars: map[string]string{"TEST": "value"},
 	}
 
 	repl, err := NewREPL("test-lifecycle", config)
@@ -262,8 +262,8 @@ func TestREPL_Lifecycle(t *testing.T) {
 	if repl.State() != process.ProcessStateCreated {
 		t.Errorf("State() = %s, want %s", repl.State(), process.ProcessStateCreated)
 	}
-	if repl.Language() != "python" {
-		t.Errorf("Language() = %s, want python", repl.Language())
+	if repl.Alias() != "python" {
+		t.Errorf("Language() = %s, want python", repl.Alias())
 	}
 
 	// Test ResizeTerminal when not running
@@ -282,8 +282,8 @@ func TestREPL_Lifecycle(t *testing.T) {
 // TestREPL_StartWithoutInterpreter tests starting when interpreter is not available.
 func TestREPL_StartWithoutInterpreter(t *testing.T) {
 	config := process.ProcessConfig{
-		Type:     process.ProcessTypeREPL,
-		Language: "python",
+		Type:  process.ProcessTypeREPL,
+		Alias: "python",
 	}
 
 	repl, err := NewREPL("test-no-interpreter", config)
@@ -307,8 +307,8 @@ func TestREPL_StartWithoutInterpreter(t *testing.T) {
 // TestREPL_DoubleStart tests starting an already running REPL.
 func TestREPL_DoubleStart(t *testing.T) {
 	config := process.ProcessConfig{
-		Type:     process.ProcessTypeREPL,
-		Language: "python",
+		Type:  process.ProcessTypeREPL,
+		Alias: "python",
 	}
 
 	repl, err := NewREPL("test-double", config)
@@ -337,8 +337,8 @@ func TestREPL_DoubleStart(t *testing.T) {
 // TestREPL_StateTransitions tests state transitions.
 func TestREPL_StateTransitions(t *testing.T) {
 	config := process.ProcessConfig{
-		Type:     process.ProcessTypeREPL,
-		Language: "bash",
+		Type:  process.ProcessTypeREPL,
+		Alias: "bash",
 	}
 
 	repl, err := NewREPL("test-states", config)
@@ -374,8 +374,8 @@ func TestREPL_DetectReadyToken(t *testing.T) {
 		},
 	}
 	processConfig := process.ProcessConfig{
-		Type:     process.ProcessTypeREPL,
-		Language: "test-ready",
+		Type:  process.ProcessTypeREPL,
+		Alias: "test-ready",
 	}
 
 	repl, err := NewCustomREPL("test-prompt", replConfig, processConfig)
@@ -405,8 +405,8 @@ func TestREPL_DetectReadyToken(t *testing.T) {
 // TestREPL_PauseResume tests Pause and Resume operations.
 func TestREPL_PauseResume(t *testing.T) {
 	config := process.ProcessConfig{
-		Type:     process.ProcessTypeREPL,
-		Language: "bash",
+		Type:  process.ProcessTypeREPL,
+		Alias: "bash",
 	}
 
 	repl, err := NewREPL("test-pause", config)
@@ -428,8 +428,8 @@ func TestREPL_PauseResume(t *testing.T) {
 // TestREPL_ResourceUsageWithNoPID tests ResourceUsage with no PID.
 func TestREPL_ResourceUsageWithNoPID(t *testing.T) {
 	config := process.ProcessConfig{
-		Type:     process.ProcessTypeREPL,
-		Language: "bash",
+		Type:  process.ProcessTypeREPL,
+		Alias: "bash",
 	}
 
 	repl, err := NewREPL("test-resource", config)
@@ -449,8 +449,8 @@ func TestREPL_ResourceUsageWithNoPID(t *testing.T) {
 // TestREPL_ReadOutput tests output channel creation.
 func TestREPL_ReadOutput(t *testing.T) {
 	config := process.ProcessConfig{
-		Type:     process.ProcessTypeREPL,
-		Language: "bash",
+		Type:  process.ProcessTypeREPL,
+		Alias: "bash",
 	}
 
 	repl, err := NewREPL("test-output", config)
@@ -479,8 +479,8 @@ func TestNewCustomREPL(t *testing.T) {
 	}
 
 	processConfig := process.ProcessConfig{
-		Type:     process.ProcessTypeREPL,
-		Language: "custom-cli",
+		Type:  process.ProcessTypeREPL,
+		Alias: "custom-cli",
 	}
 
 	repl, err := NewCustomREPL("test-custom", replConfig, processConfig)
@@ -488,8 +488,8 @@ func TestNewCustomREPL(t *testing.T) {
 		t.Fatalf("NewCustomREPL() failed: %v", err)
 	}
 
-	if repl.Language() != "custom-cli" {
-		t.Errorf("Language() = %s, want custom-cli", repl.Language())
+	if repl.Alias() != "custom-cli" {
+		t.Errorf("Language() = %s, want custom-cli", repl.Alias())
 	}
 }
 

@@ -404,8 +404,9 @@ type ContextInputRequest struct {
 
 // ContextResourceUsage defines model for ContextResourceUsage.
 type ContextResourceUsage struct {
+	// Alias Alias for the REPL or CLI tool (e.g., python, node, bash, redis-cli)
+	Alias     *string        `json:"alias,omitempty"`
 	ContextId *string        `json:"context_id,omitempty"`
-	Language  *string        `json:"language,omitempty"`
 	Paused    *bool          `json:"paused,omitempty"`
 	Running   *bool          `json:"running,omitempty"`
 	Type      *string        `json:"type,omitempty"`
@@ -414,11 +415,12 @@ type ContextResourceUsage struct {
 
 // ContextResponse defines model for ContextResponse.
 type ContextResponse struct {
+	// Alias Alias for the REPL or CLI tool (e.g., python, node, bash, redis-cli)
+	Alias     *string            `json:"alias,omitempty"`
 	CreatedAt string             `json:"created_at"`
 	Cwd       *string            `json:"cwd,omitempty"`
 	EnvVars   *map[string]string `json:"env_vars,omitempty"`
 	Id        string             `json:"id"`
-	Language  *string            `json:"language,omitempty"`
 
 	// OutputRaw Raw PTY output for CMD contexts with wait=true, may contain terminal control characters
 	OutputRaw *string     `json:"output_raw,omitempty"`
@@ -429,8 +431,9 @@ type ContextResponse struct {
 
 // ContextStatsResponse defines model for ContextStatsResponse.
 type ContextStatsResponse struct {
+	// Alias Alias for the REPL or CLI tool (e.g., python, node, bash, redis-cli)
+	Alias     *string        `json:"alias,omitempty"`
 	ContextId *string        `json:"context_id,omitempty"`
-	Language  *string        `json:"language,omitempty"`
 	Paused    *bool          `json:"paused,omitempty"`
 	Running   *bool          `json:"running,omitempty"`
 	Type      *string        `json:"type,omitempty"`
@@ -481,8 +484,9 @@ type CreateContextRequest struct {
 
 // CreateREPLContextRequest defines model for CreateREPLContextRequest.
 type CreateREPLContextRequest struct {
+	// Alias Alias for the REPL or CLI tool (e.g., python, node, bash, redis-cli)
+	Alias      *string     `json:"alias,omitempty"`
 	Input      *string     `json:"input,omitempty"`
-	Language   *string     `json:"language,omitempty"`
 	ReplConfig *REPLConfig `json:"repl_config,omitempty"`
 }
 

@@ -59,9 +59,7 @@ Claim a sandbox from a template. The sandbox is created from a pre-warmed pool f
     {
       label: "Go",
       language: "go",
-      code: `import "github.com/sandbox0-ai/sdk-go"
-
-client, err := sandbox0.NewClient(
+      code: `client, err := sandbox0.NewClient(
     sandbox0.WithToken(os.Getenv("SANDBOX0_TOKEN")),
 )
 if err != nil {
@@ -102,24 +100,21 @@ print(f"Sandbox ID: {sandbox.id}")
 client.delete_sandbox(sandbox.id)`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
-      code: `import { Sandbox0 } from '@sandbox0/sdk';
+      code: `import { Client } from 'sandbox0';
 
-const client = new Sandbox0({ token: process.env.SANDBOX0_TOKEN });
+const client = new Client({ token: process.env.SANDBOX0_TOKEN! });
 
 // Claim a sandbox from the "default" template
-const sandbox = await client.claimSandbox({
-    template: 'default',
-    config: {
-        hardTtl: 300,
-        envVars: { APP_ENV: 'development' },
-    },
+const sandbox = await client.sandboxes.claim('default', {
+    hardTtl: 300,
+    envVars: { APP_ENV: 'development' },
 });
 console.log('Sandbox ID:', sandbox.id);
 
 // Cleanup
-await client.deleteSandbox(sandbox.id);`
+await client.sandboxes.delete(sandbox.id);`
     },
     {
       label: "CLI",
@@ -166,7 +161,7 @@ print(f"Template: {sandbox.template_id}")
 print(f"Expires at: {sandbox.expires_at}")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `const sandbox = await client.getSandbox('sb_abc123');
 console.log('Status:', sandbox.status);
@@ -215,7 +210,7 @@ fmt.Printf("Status: %s\\n", status.Status)`
 print(f"Status: {status.status}")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `const status = await client.getSandboxStatus('sb_abc123');
 console.log('Status:', status.status);`
@@ -277,7 +272,7 @@ for sb in sandboxes:
     print(f"- {sb.id} (status: {sb.status})")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `const { sandboxes } = await client.listSandboxes({
     status: 'running',
@@ -332,7 +327,7 @@ Update sandbox configuration.
 )`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `await client.updateSandbox('sb_abc123', {
     config: { envVars: { DEBUG: 'true' } },
@@ -379,7 +374,7 @@ fmt.Println("Sandbox paused")`
 print("Sandbox paused")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `await client.pauseSandbox('sb_abc123');
 console.log('Sandbox paused');`
@@ -420,7 +415,7 @@ fmt.Println("Sandbox resumed")`
 print("Sandbox resumed")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `await client.resumeSandbox('sb_abc123');
 console.log('Sandbox resumed');`
@@ -465,7 +460,7 @@ fmt.Printf("New expires at: %s\\n", resp.ExpiresAt)`
 print(f"New expires at: {resp.expires_at}")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `const resp = await client.refreshSandbox('sb_abc123');
 console.log('New expires at:', resp.expiresAt);`
@@ -509,7 +504,7 @@ fmt.Println("Sandbox deleted")`
 print("Sandbox deleted")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `await client.deleteSandbox('sb_abc123');
 console.log('Sandbox deleted');`

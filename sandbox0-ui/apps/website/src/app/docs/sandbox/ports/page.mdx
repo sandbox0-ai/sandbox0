@@ -57,7 +57,7 @@ for p in ports.ports:
     print(f"Port {p.port}: {p.public_url}")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Get all exposed ports
 const ports = await sandbox.getExposedPorts();
@@ -119,7 +119,7 @@ for p in resp.ports:
     print(f"Port {p.port} -> {p.public_url}")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Expose port 8080 with auto-resume
 const resp = await sandbox.exposePort(8080, true);
@@ -177,7 +177,7 @@ for p in resp.ports:
     print(f"Port {p.port} -> {p.public_url} (resume: {p.resume})")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Expose multiple ports
 const resp = await sandbox.exposePorts([
@@ -229,7 +229,7 @@ sandbox.unexpose_port(8080)
 print("Port 8080 no longer exposed")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Remove exposed port 8080
 await sandbox.unexposePort(8080);
@@ -273,7 +273,7 @@ sandbox.clear_exposed_ports()
 print("All ports unexposed")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Clear all exposed ports
 await sandbox.clearExposedPorts();
@@ -356,7 +356,7 @@ resp = sandbox.cmd("curl -s http://localhost:8080/")
 print(f"Local response: {resp.output_raw}")`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Start a web server (async)
 const result = await sandbox.cmd(
@@ -435,7 +435,7 @@ client.pause_sandbox(sandbox.id)
 # resume the sandbox before routing the request`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Expose port with auto-resume
 await sandbox.exposePort(8080, true);

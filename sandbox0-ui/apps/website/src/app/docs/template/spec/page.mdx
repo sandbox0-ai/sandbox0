@@ -93,7 +93,7 @@ The primary container where your code runs.
 }`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `const mainContainer = {
     image: 'python:3.11-slim',
@@ -164,7 +164,7 @@ Sidecars are additional containers that run alongside the main container in the 
 ]`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `const sidecars = [
     {
@@ -224,7 +224,7 @@ Higher <code>minIdle</code> values provide faster response times but consume mor
 }`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `const pool = {
     minIdle: 2,     // Always keep 2 sandboxes ready
@@ -294,7 +294,7 @@ Control sandbox lifetime and cleanup behavior.
 }`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `const lifecycle = {
     defaultTtl: 3600,   // 1 hour default
@@ -359,7 +359,7 @@ network = {
 }`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Allow all network access
 const network = {
@@ -414,7 +414,7 @@ Define default environment variables for all sandboxes.
 }`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `const envVars = {
     APP_ENV: 'production',
@@ -471,7 +471,7 @@ Advanced Kubernetes pod configuration options.
 }`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `const pod = {
     nodeSelector: {
@@ -535,7 +535,7 @@ spec = {
 }`
     },
     {
-      label: "JavaScript",
+      label: "TypeScript",
       language: "typescript",
       code: `// Public template - visible to all teams
 const spec = {

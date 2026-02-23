@@ -52,9 +52,9 @@ type PTYSize struct {
 // ProcessConfig holds configuration for creating a process.
 type ProcessConfig struct {
 	Type       ProcessType       `json:"type"`
-	Language   string            `json:"language"` // For REPL: python, node, bash, zsh, ruby, lua, php, r, perl, etc.
-	Code       string            `json:"code"`     // For REPL: code to execute
-	Command    []string          `json:"command"`  // For CMD: command path and arguments, e.g., ["/bin/ls", "-la"]
+	Alias      string            `json:"alias"`   // For REPL: python, node, bash, zsh, ruby, lua, php, r, perl, etc.
+	Code       string            `json:"code"`    // For REPL: code to execute
+	Command    []string          `json:"command"` // For CMD: command path and arguments, e.g., ["/bin/ls", "-la"]
 	CWD        string            `json:"cwd"`
 	EnvVars    map[string]string `json:"env_vars"`
 	PTYSize    *PTYSize          `json:"pty_size"`

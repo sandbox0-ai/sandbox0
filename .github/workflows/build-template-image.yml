@@ -3,14 +3,6 @@ name: Build Template Image
 on:
   workflow_dispatch:
     inputs:
-      arch:
-        description: "Target CPU architecture"
-        required: true
-        default: "amd64"
-        type: choice
-        options:
-          - amd64
-          - arm64
       version:
         description: "Template image tag (e.g. default-v0.1.0)"
         required: true
@@ -19,6 +11,11 @@ on:
         description: "Dockerfile path relative to repo root"
         required: true
         default: "manager/procd/Dockerfile.default"
+      platforms:
+        description: "Target platforms (comma-separated)"
+        required: true
+        default: "linux/amd64,linux/arm64"
+        type: string
 
 jobs:
   build-template-image:
@@ -48,7 +45,7 @@ jobs:
         with:
           context: .
           file: ${{ inputs.dockerfile }}
-          platforms: linux/${{ inputs.arch }}
+          platforms: ${{ inputs.platforms }}
           push: true
           tags: ${{ env.IMAGE_REPO }}:${{ inputs.version }}
 
@@ -57,4 +54,4 @@ jobs:
         run: |
           echo "Published image: ${IMAGE_REPO}:${{ inputs.version }}"
           echo "Dockerfile: ${{ inputs.dockerfile }}"
-          echo "Platform: linux/${{ inputs.arch }}"
+          echo "Platforms: ${{ inputs.platforms }}"

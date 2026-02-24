@@ -2,6 +2,7 @@
 package cmd
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -662,5 +663,90 @@ func TestCMD_NonZeroExitCode(t *testing.T) {
 
 	if exitCode == 0 {
 		t.Errorf("ExitCode() = %d, want non-zero", exitCode)
+	}
+}
+
+func TestCMD_FastCommandOutputReliableRepeat(t *testing.T) {
+	const runs = 60
+
+	for i := 0; i < runs; i++ {
+		config := process.ProcessConfig{
+			Type: process.ProcessTypeCMD,
+			CWD:  "/bin",
+		}
+
+		cmd, err := NewCMD(fmt.Sprintf("test-fast-repeat-%d", i), config, []string{"/bin/ls"})
+		if err != nil {
+			t.Fatalf("NewCMD() failed on run %d: %v", i, err)
+		}
+
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("Start() failed on run %d: %v", i, err)
+		}
+
+		waitForCompletion(t, cmd, 5*time.Second)
+
+		stdout, stderr := cmd.GetOutput()
+		if strings.TrimSpace(stdout) == "" {
+			t.Fatalf("run %d: stdout is empty for fast ls command", i)
+		}
+		if strings.TrimSpace(stderr) != "" {
+			t.Fatalf("run %d: stderr is not empty: %q", i, stderr)
+		}
+	}
+}
+
+func TestCMD_ReadOutputFastCommandReceivesData(t *testing.T) {
+	config := process.ProcessConfig{
+		Type: process.ProcessTypeCMD,
+		CWD:  "/bin",
+	}
+
+	cmd, err := NewCMD("test-fast-readoutput", config, []string{"/bin/ls"})
+	if err != nil {
+		t.Fatalf("NewCMD() failed = %v", err)
+	}
+
+	ch := cmd.ReadOutput()
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start() failed = %v", err)
+	}
+
+	timeout := time.After(3 * time.Second)
+	receivedData := false
+	for {
+		select {
+		case <-timeout:
+			t.Fatal("timeout waiting fast command output")
+		case out, ok := <-ch:
+			if !ok {
+				if !receivedData {
+					t.Fatal("output channel closed without data for fast command")
+				}
+				waitForCompletion(t, cmd, 3*time.Second)
+				return
+			}
+			if len(out.Data) > 0 {
+				receivedData = true
+			}
+		}
+	}
+}
+
+func waitForCompletion(t *testing.T, cmd *CMD, timeout time.Duration) {
+	t.Helper()
+	deadline := time.After(timeout)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-deadline:
+			t.Fatalf("command %s did not complete in time", cmd.ID())
+		case <-ticker.C:
+			if !cmd.IsRunning() {
+				return
+			}
+		}
 	}
 }

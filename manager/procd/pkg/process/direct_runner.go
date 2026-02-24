@@ -3,9 +3,9 @@ package process
 import (
 	"context"
 	"fmt"
-	"io"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -17,11 +17,12 @@ type DirectRunner struct {
 	ctx          context.Context
 	stdout       *limitedBuffer
 	stderr       *limitedBuffer
-	stdoutPipe   io.ReadCloser
-	stderrPipe   io.ReadCloser
-	outputWG     sync.WaitGroup
 	onStop       func()
 	exitResolver func(error) (int, bool)
+	stdoutBytes  int64
+	stderrBytes  int64
+	stdoutChunks int64
+	stderrChunks int64
 }
 
 var _ OutputProvider = (*DirectRunner)(nil)
@@ -55,15 +56,15 @@ func (r *DirectRunner) Start(cmd *exec.Cmd) error {
 		Setpgid: true,
 	}
 
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		r.base.SetState(ProcessStateCrashed)
-		return fmt.Errorf("%w: %v", ErrProcessStartFailed, err)
+	cmd.Stdout = &directRunnerOutputWriter{
+		runner: r,
+		source: OutputSourceStdout,
+		buffer: r.stdout,
 	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		r.base.SetState(ProcessStateCrashed)
-		return fmt.Errorf("%w: %v", ErrProcessStartFailed, err)
+	cmd.Stderr = &directRunnerOutputWriter{
+		runner: r,
+		source: OutputSourceStderr,
+		buffer: r.stderr,
 	}
 
 	if err := cmd.Start(); err != nil {
@@ -72,8 +73,6 @@ func (r *DirectRunner) Start(cmd *exec.Cmd) error {
 	}
 
 	r.cmd = cmd
-	r.stdoutPipe = stdoutPipe
-	r.stderrPipe = stderrPipe
 	r.base.SetPID(cmd.Process.Pid)
 	r.base.SetStartTime(time.Now())
 	r.base.SetState(ProcessStateRunning)
@@ -86,9 +85,6 @@ func (r *DirectRunner) Start(cmd *exec.Cmd) error {
 		Config:      r.base.GetConfig(),
 	})
 
-	r.outputWG.Add(2)
-	go r.readPipe(OutputSourceStdout, stdoutPipe, r.stdout)
-	go r.readPipe(OutputSourceStderr, stderrPipe, r.stderr)
 	go r.monitorProcess()
 
 	return nil
@@ -108,12 +104,6 @@ func (r *DirectRunner) Stop() error {
 		if err := r.cmd.Process.Signal(syscall.SIGTERM); err != nil {
 			_ = r.cmd.Process.Kill()
 		}
-	}
-	if r.stdoutPipe != nil {
-		_ = r.stdoutPipe.Close()
-	}
-	if r.stderrPipe != nil {
-		_ = r.stderrPipe.Close()
 	}
 
 	r.base.SetState(ProcessStateStopped)
@@ -151,8 +141,6 @@ func (r *DirectRunner) monitorProcess() {
 	}
 
 	r.base.SetExitCode(exitCode)
-
-	r.outputWG.Wait()
 	duration := time.Since(r.base.StartTime())
 
 	stdoutPreview := truncatePreview(r.stdout.Bytes(), 2048)
@@ -181,24 +169,34 @@ func (r *DirectRunner) monitorProcess() {
 	r.base.CloseOutput()
 }
 
-func (r *DirectRunner) readPipe(source OutputSource, reader io.Reader, buffer *limitedBuffer) {
-	defer r.outputWG.Done()
-	buf := make([]byte, 4096)
-	for {
-		n, err := reader.Read(buf)
-		if n > 0 {
-			payload := make([]byte, n)
-			copy(payload, buf[:n])
-			buffer.Write(payload)
-			r.base.PublishOutput(ProcessOutput{
-				Source: source,
-				Data:   payload,
-			})
-		}
-		if err != nil {
-			return
-		}
+type directRunnerOutputWriter struct {
+	runner *DirectRunner
+	source OutputSource
+	buffer *limitedBuffer
+}
+
+func (w *directRunnerOutputWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
 	}
+
+	payload := make([]byte, len(p))
+	copy(payload, p)
+	w.buffer.Write(payload)
+	w.runner.base.PublishOutput(ProcessOutput{
+		Source: w.source,
+		Data:   payload,
+	})
+
+	if w.source == OutputSourceStdout {
+		atomic.AddInt64(&w.runner.stdoutBytes, int64(len(p)))
+		atomic.AddInt64(&w.runner.stdoutChunks, 1)
+	} else if w.source == OutputSourceStderr {
+		atomic.AddInt64(&w.runner.stderrBytes, int64(len(p)))
+		atomic.AddInt64(&w.runner.stderrChunks, 1)
+	}
+
+	return len(p), nil
 }
 
 const maxDirectRunnerOutputBytes = 1 << 20

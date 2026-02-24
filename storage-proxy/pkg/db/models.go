@@ -10,6 +10,8 @@ type SandboxVolume struct {
 	ID     string `json:"id"`
 	TeamID string `json:"team_id"`
 	UserID string `json:"user_id"`
+	// SourceVolumeID references the volume this one was forked from.
+	SourceVolumeID *string `json:"source_volume_id,omitempty"`
 
 	// Volume Configuration
 	CacheSize  string `json:"cache_size"`

@@ -1,0 +1,101 @@
+# Volume Fork
+
+Volume Fork creates a new Volume from an existing Volume using JuiceFS Copy-on-Write (COW) clone.
+
+## Why Use Fork?
+
+- **Fast Clone**: Create a new volume quickly without copying all data blocks
+- **Storage Efficient**: Source and fork share unchanged data blocks
+- **Write Isolation**: Writes to the fork do not affect the source volume
+- **Great for Branching**: Create per-task or per-experiment data branches
+
+## How Fork Works
+
+```
+Source Volume (vol_src)
+    ├── /data/a.txt
+    └── /data/b.txt
+            │
+            │ Fork (COW clone)
+            ▼
+Forked Volume (vol_fork)
+    ├── /data/a.txt  (shared blocks)
+    └── /data/b.txt  (shared blocks)
+
+After writing in fork:
+    vol_fork /data/b.txt -> new blocks
+    vol_src  /data/b.txt -> unchanged
+```
+
+## API
+
+- **Endpoint**: `POST /api/v1/sandboxvolumes/{id}/fork`
+- **Path Param**: `id` = source volume id
+- **Request Body**: optional
+- **Response**: returns the new `SandboxVolume`, including `source_volume_id`
+
+## Optional Request Fields
+
+| Field | Type | Description |
+|---|---|---|
+| `cache_size` | string | Cache size for the forked volume |
+| `prefetch` | integer | Prefetch blocks |
+| `buffer_size` | string | Buffer size |
+| `writeback` | boolean | Writeback cache switch |
+| `access_mode` | enum | Access mode for the forked volume, defaults to `RWO` |
+
+## Fork a Volume
+
+<Tabs
+  tabs={[
+    { label: "Go", language: "go", code: "sourceID := \"vol_src_123\"\n\nforked, err := client.ForkVolume(ctx, sourceID, &apispec.ForkVolumeRequest{\n    AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeRWO),\n    CacheSize:  apispec.NewOptString(\"2G\"),\n    BufferSize: apispec.NewOptString(\"64M\"),\n    Prefetch:   apispec.NewOptInt(10),\n    Writeback:  apispec.NewOptBool(false),\n})\nif err != nil {\n    panic(err)\n}\n\nfmt.Printf(\"forked volume: %s\\n\", forked.ID)\nfmt.Printf(\"source volume: %s\\n\", forked.SourceVolumeID.Value)\n" },
+    { label: "Python", language: "python", code: "from sandbox0.apispec.models.fork_volume_request import ForkVolumeRequest\nfrom sandbox0.apispec.models.volume_access_mode import VolumeAccessMode\n\nsource_id = \"vol_src_123\"\n\nforked = client.volumes.fork(\n    source_id,\n    ForkVolumeRequest(\n        access_mode=VolumeAccessMode.RWO,\n        cache_size=\"2G\",\n        buffer_size=\"64M\",\n        prefetch=10,\n        writeback=False,\n    ),\n)\n\nprint(f\"forked volume: {forked.id}\")\nprint(f\"source volume: {forked.source_volume_id}\")\n" },
+    { label: "TypeScript", language: "typescript", code: "const sourceId = 'vol_src_123';\n\nconst forked = await client.volumes.fork(sourceId, {\n  accessMode: models.VolumeAccessMode.Rwo,\n  cacheSize: '2G',\n  bufferSize: '64M',\n  prefetch: 10,\n  writeback: false,\n});\n\nconsole.log(`forked volume: ${forked.id}`);\nconsole.log(`source volume: ${forked.sourceVolumeId}`);\n" }
+  ]}
+/>
+
+## Verify Isolation
+
+1. Mount both source and forked volumes to a sandbox at different paths.
+2. Modify a file only in the forked volume.
+3. Read the same file from source volume and verify it is unchanged.
+
+<Callout variant="info">
+Fork uses COW at filesystem metadata layer, so unchanged data is shared and changed data is isolated.
+</Callout>
+
+## Best Practices
+
+- Use fork for short-lived branches (feature experiments, data transformations, CI tasks)
+- Keep a clear naming convention for source/fork relationship
+- Clean up unused forks to reduce metadata and management overhead
+
+---
+
+## Next Steps
+
+<CardGrid>
+  <LinkCard
+    title="Volume Overview"
+    href="/docs/volume"
+    cta="Learn More"
+  >
+    Volume lifecycle and configuration
+  </LinkCard>
+
+  <LinkCard
+    title="Snapshots"
+    href="/docs/volume/snapshots"
+    cta="Learn More"
+  >
+    Create and restore point-in-time snapshots
+  </LinkCard>
+
+  <LinkCard
+    title="Volume Mounts"
+    href="/docs/volume/mounts"
+    cta="Learn More"
+  >
+    Mount volumes into sandbox runtime
+  </LinkCard>
+</CardGrid>

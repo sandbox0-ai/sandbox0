@@ -380,6 +380,7 @@ func (s *Server) setupRoutes() {
 			sandboxvolumes.GET("", s.authMiddleware.RequirePermission(auth.PermSandboxVolumeRead), s.listSandboxVolumes)
 			sandboxvolumes.GET("/:id", s.authMiddleware.RequirePermission(auth.PermSandboxVolumeRead), s.getSandboxVolume)
 			sandboxvolumes.DELETE("/:id", s.authMiddleware.RequirePermission(auth.PermSandboxVolumeDelete), s.deleteSandboxVolume)
+			sandboxvolumes.POST("/:id/fork", s.authMiddleware.RequirePermission(auth.PermSandboxVolumeWrite), s.forkSandboxVolume)
 			// Snapshot/Restore (→ Storage Proxy)
 			snapshots := sandboxvolumes.Group("/:id/snapshots")
 			{

@@ -578,6 +578,16 @@ type FileInfo struct {
 // FileInfoType defines model for FileInfo.Type.
 type FileInfoType string
 
+// ForkVolumeRequest defines model for ForkVolumeRequest.
+type ForkVolumeRequest struct {
+	// AccessMode Access mode for sandbox volumes. Enforcement is scoped to storage-proxy instances. RWO allows read-write mounts on a single instance; ROX allows read-only mounts across instances; RWX allows read-write mounts across instances.
+	AccessMode *VolumeAccessMode `json:"access_mode,omitempty"`
+	BufferSize *string           `json:"buffer_size,omitempty"`
+	CacheSize  *string           `json:"cache_size,omitempty"`
+	Prefetch   *int              `json:"prefetch,omitempty"`
+	Writeback  *bool             `json:"writeback,omitempty"`
+}
+
 // Identity defines model for Identity.
 type Identity struct {
 	CreatedAt int64  `json:"created_at"`
@@ -945,16 +955,17 @@ type SandboxUpdateRequest struct {
 // SandboxVolume defines model for SandboxVolume.
 type SandboxVolume struct {
 	// AccessMode Access mode for sandbox volumes. Enforcement is scoped to storage-proxy instances. RWO allows read-write mounts on a single instance; ROX allows read-only mounts across instances; RWX allows read-write mounts across instances.
-	AccessMode *VolumeAccessMode `json:"access_mode,omitempty"`
-	BufferSize string            `json:"buffer_size"`
-	CacheSize  string            `json:"cache_size"`
-	CreatedAt  time.Time         `json:"created_at"`
-	Id         string            `json:"id"`
-	Prefetch   *int              `json:"prefetch,omitempty"`
-	TeamId     string            `json:"team_id"`
-	UpdatedAt  time.Time         `json:"updated_at"`
-	UserId     string            `json:"user_id"`
-	Writeback  *bool             `json:"writeback,omitempty"`
+	AccessMode     *VolumeAccessMode `json:"access_mode,omitempty"`
+	BufferSize     string            `json:"buffer_size"`
+	CacheSize      string            `json:"cache_size"`
+	CreatedAt      time.Time         `json:"created_at"`
+	Id             string            `json:"id"`
+	Prefetch       *int              `json:"prefetch,omitempty"`
+	SourceVolumeId *string           `json:"source_volume_id"`
+	TeamId         string            `json:"team_id"`
+	UpdatedAt      time.Time         `json:"updated_at"`
+	UserId         string            `json:"user_id"`
+	Writeback      *bool             `json:"writeback,omitempty"`
 }
 
 // SecurityContext defines model for SecurityContext.
@@ -1713,6 +1724,9 @@ type PostApiV1SandboxesIdSandboxvolumesUnmountJSONRequestBody = UnmountRequest
 
 // PostApiV1SandboxvolumesJSONRequestBody defines body for PostApiV1Sandboxvolumes for application/json ContentType.
 type PostApiV1SandboxvolumesJSONRequestBody = CreateSandboxVolumeRequest
+
+// PostApiV1SandboxvolumesIdForkJSONRequestBody defines body for PostApiV1SandboxvolumesIdFork for application/json ContentType.
+type PostApiV1SandboxvolumesIdForkJSONRequestBody = ForkVolumeRequest
 
 // PostApiV1SandboxvolumesIdSnapshotsJSONRequestBody defines body for PostApiV1SandboxvolumesIdSnapshots for application/json ContentType.
 type PostApiV1SandboxvolumesIdSnapshotsJSONRequestBody = CreateSnapshotRequest

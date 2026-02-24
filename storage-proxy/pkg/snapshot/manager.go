@@ -33,6 +33,7 @@ type volumeProvider interface {
 
 type repository interface {
 	GetSandboxVolume(context.Context, string) (*db.SandboxVolume, error)
+	CreateSandboxVolume(context.Context, *db.SandboxVolume) error
 	ListSnapshotsByVolume(context.Context, string) ([]*db.Snapshot, error)
 	GetSnapshot(context.Context, string) (*db.Snapshot, error)
 	CreateSnapshot(context.Context, *db.Snapshot) error
@@ -63,6 +64,7 @@ var (
 	ErrCloneFailed               = errors.New("clone operation failed")
 	ErrVolumeBusy                = errors.New("volume is busy, try again later")
 	ErrRemountTimeout            = errors.New("remount timeout")
+	ErrInvalidAccessMode         = errors.New("invalid access mode")
 	errPathNotFound              = errors.New("path not found")
 )
 
@@ -142,6 +144,18 @@ type CreateSnapshotRequest struct {
 	Description string
 	TeamID      string
 	UserID      string
+}
+
+// ForkVolumeRequest contains parameters for forking a volume.
+type ForkVolumeRequest struct {
+	SourceVolumeID string
+	TeamID         string
+	UserID         string
+	CacheSize      *string
+	Prefetch       *int
+	BufferSize     *string
+	Writeback      *bool
+	AccessMode     *string
 }
 
 // CreateSnapshot creates a new snapshot of a volume using JuiceFS COW clone.
@@ -336,6 +350,160 @@ func (m *Manager) CreateSnapshot(ctx context.Context, req *CreateSnapshotRequest
 // CreateSnapshotSimple is a simplified version for use by HTTP handlers
 func (m *Manager) CreateSnapshotSimple(ctx context.Context, req *CreateSnapshotRequest) (*db.Snapshot, error) {
 	return m.CreateSnapshot(ctx, req)
+}
+
+// ForkVolume creates a new volume using JuiceFS COW clone.
+// This operation does NOT require the source volume to be mounted.
+func (m *Manager) ForkVolume(ctx context.Context, req *ForkVolumeRequest) (*db.SandboxVolume, error) {
+	startTime := time.Now()
+	metrics := m.metrics
+	m.logger.WithFields(logrus.Fields{
+		"source_volume_id": req.SourceVolumeID,
+		"team_id":          req.TeamID,
+	}).Info("Forking volume")
+
+	// 0. Distributed flush coordination (if coordinator is set)
+	m.mu.RLock()
+	coordinator := m.coordinator
+	m.mu.RUnlock()
+
+	if coordinator != nil {
+		m.logger.WithField("volume_id", req.SourceVolumeID).Info("Coordinating flush across all instances")
+		if err := coordinator.CoordinateFlush(ctx, req.SourceVolumeID); err != nil {
+			m.logger.WithError(err).Error("Distributed flush coordination failed")
+			return nil, fmt.Errorf("distributed flush coordination: %w", err)
+		}
+		m.logger.WithField("volume_id", req.SourceVolumeID).Info("Distributed flush coordination completed")
+	}
+
+	// 1. Get source volume and verify ownership
+	sourceVol, err := m.repo.GetSandboxVolume(ctx, req.SourceVolumeID)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			return nil, ErrVolumeNotFound
+		}
+		return nil, fmt.Errorf("get source volume: %w", err)
+	}
+	if sourceVol.TeamID != req.TeamID {
+		return nil, ErrVolumeNotFound
+	}
+
+	// 2. Optional: Try to flush local cached data if volume is mounted on this instance.
+	if volCtx, err := m.volMgr.GetVolume(req.SourceVolumeID); err == nil {
+		if err := volCtx.VFS.FlushAll(""); err != nil {
+			m.logger.WithError(err).Warn("Failed to flush VFS data before fork")
+		}
+	}
+
+	// 3. Look up source volume path
+	sourcePath, err := naming.JuiceFSVolumePath(req.SourceVolumeID)
+	if err != nil {
+		return nil, err
+	}
+	sourceParentIno, sourceRootIno, err := m.lookupPath(sourcePath)
+	if err != nil {
+		if errors.Is(err, errPathNotFound) {
+			if _, ensureErr := m.ensurePathExists(ctx, sourcePath); ensureErr != nil {
+				return nil, fmt.Errorf("ensure volume path: %w", ensureErr)
+			}
+			sourceParentIno, sourceRootIno, err = m.lookupPath(sourcePath)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("lookup source volume path: %w", err)
+		}
+	}
+
+	// 4. Ensure volume parent directory exists
+	volumesParentPath := filepath.Dir(sourcePath)
+	volumesParentIno, err := m.ensurePathExists(ctx, volumesParentPath)
+	if err != nil {
+		return nil, fmt.Errorf("ensure volume parent path: %w", err)
+	}
+
+	// 5. Clone source to new volume using JuiceFS COW
+	newVolumeID := uuid.New().String()
+	var cloneCount, cloneTotal uint64
+	jfsCtx := meta.Background()
+	errno := m.metaClient.Clone(jfsCtx, sourceParentIno, sourceRootIno, volumesParentIno, newVolumeID, 0, 0, &cloneCount, &cloneTotal)
+	if errno != 0 {
+		return nil, fmt.Errorf("%w: %s", ErrCloneFailed, errno.Error())
+	}
+
+	m.logger.WithFields(logrus.Fields{
+		"source_volume_id": req.SourceVolumeID,
+		"new_volume_id":    newVolumeID,
+		"clone_count":      cloneCount,
+		"clone_total":      cloneTotal,
+	}).Info("JuiceFS clone completed")
+
+	// 6. Resolve volume configuration
+	cacheSize := sourceVol.CacheSize
+	if req.CacheSize != nil && strings.TrimSpace(*req.CacheSize) != "" {
+		cacheSize = *req.CacheSize
+	}
+	if cacheSize == "" {
+		cacheSize = "1G"
+	}
+
+	bufferSize := sourceVol.BufferSize
+	if req.BufferSize != nil && strings.TrimSpace(*req.BufferSize) != "" {
+		bufferSize = *req.BufferSize
+	}
+	if bufferSize == "" {
+		bufferSize = "32M"
+	}
+
+	prefetch := sourceVol.Prefetch
+	if req.Prefetch != nil {
+		prefetch = *req.Prefetch
+	}
+
+	writeback := sourceVol.Writeback
+	if req.Writeback != nil {
+		writeback = *req.Writeback
+	}
+
+	accessMode := volume.AccessModeRWO
+	if req.AccessMode != nil && strings.TrimSpace(*req.AccessMode) != "" {
+		parsedMode, ok := volume.ParseAccessMode(*req.AccessMode)
+		if !ok {
+			return nil, ErrInvalidAccessMode
+		}
+		accessMode = parsedMode
+	}
+
+	now := time.Now()
+	sourceID := sourceVol.ID
+	newVol := &db.SandboxVolume{
+		ID:             newVolumeID,
+		TeamID:         req.TeamID,
+		UserID:         req.UserID,
+		SourceVolumeID: &sourceID,
+		CacheSize:      cacheSize,
+		Prefetch:       prefetch,
+		BufferSize:     bufferSize,
+		Writeback:      writeback,
+		AccessMode:     string(accessMode),
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+
+	if err := m.repo.CreateSandboxVolume(ctx, newVol); err != nil {
+		m.logger.WithError(err).Error("Failed to create forked volume record, cleaning up")
+		m.deleteVolumeDir(ctx, newVolumeID)
+		if metrics != nil {
+			metrics.SnapshotOperationsTotal.WithLabelValues("fork", "failure").Inc()
+			metrics.SnapshotOperationDuration.WithLabelValues("fork").Observe(time.Since(startTime).Seconds())
+		}
+		return nil, fmt.Errorf("create forked volume: %w", err)
+	}
+
+	if metrics != nil {
+		metrics.SnapshotOperationsTotal.WithLabelValues("fork", "success").Inc()
+		metrics.SnapshotOperationDuration.WithLabelValues("fork").Observe(time.Since(startTime).Seconds())
+	}
+
+	return newVol, nil
 }
 
 // ListSnapshots returns all snapshots for a volume
@@ -725,6 +893,33 @@ func (m *Manager) deleteSnapshotDir(ctx context.Context, snapshotPath string) {
 	errno := m.metaClient.Remove(jfsCtx, parentIno, snapshotName, true, 4, &removeCount)
 	if errno != 0 && errno != syscall.ENOENT {
 		m.logger.WithError(errno).Warn("Failed to delete snapshot directory")
+	}
+}
+
+func (m *Manager) deleteVolumeDir(ctx context.Context, volumeID string) {
+	volumePath, err := naming.JuiceFSVolumePath(volumeID)
+	if err != nil {
+		m.logger.WithError(err).Warn("Invalid volume path, skipping JuiceFS cleanup")
+		return
+	}
+
+	parentIno, volumeIno, err := m.lookupPath(volumePath)
+	if err != nil {
+		m.logger.WithError(err).Warn("Failed to lookup volume path for deletion")
+		return
+	}
+
+	if volumeIno == 0 {
+		return
+	}
+
+	jfsCtx := meta.Background()
+	volumeName := filepath.Base(volumePath)
+
+	var removeCount uint64
+	errno := m.metaClient.Remove(jfsCtx, parentIno, volumeName, true, 4, &removeCount)
+	if errno != 0 && errno != syscall.ENOENT {
+		m.logger.WithError(errno).Warn("Failed to delete volume directory")
 	}
 }
 

@@ -42,6 +42,7 @@ func NewServer(logger *logrus.Logger, repo *db.Repository, authenticator *auth.H
 	s.mux.HandleFunc("GET /sandboxvolumes", s.listSandboxVolumes)
 	s.mux.HandleFunc("GET /sandboxvolumes/{id}", s.getSandboxVolume)
 	s.mux.HandleFunc("DELETE /sandboxvolumes/{id}", s.deleteSandboxVolume)
+	s.mux.HandleFunc("POST /sandboxvolumes/{id}/fork", s.forkVolume)
 
 	// Snapshot handlers
 	s.mux.HandleFunc("POST /sandboxvolumes/{volume_id}/snapshots", s.createSnapshot)

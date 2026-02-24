@@ -55,6 +55,14 @@ func (r *fakeRepo) GetSandboxVolume(ctx context.Context, id string) (*db.Sandbox
 	return v, nil
 }
 
+func (r *fakeRepo) CreateSandboxVolume(ctx context.Context, volume *db.SandboxVolume) error {
+	if volume == nil {
+		return nil
+	}
+	r.volumes[volume.ID] = volume
+	return nil
+}
+
 func (r *fakeRepo) ListSnapshotsByVolume(ctx context.Context, volumeID string) ([]*db.Snapshot, error) {
 	var snaps []*db.Snapshot
 	for _, s := range r.snapshots {

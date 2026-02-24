@@ -1837,6 +1837,35 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/sandboxvolumes/{id}/fork:
+    post:
+      tags: [sandbox-volumes]
+      summary: Fork sandbox volume
+      security:
+        - bearerAuth: []
+      x-upstream-service: storage-proxy
+      x-upstream-path: /sandboxvolumes/{id}/fork
+      parameters:
+        - $ref: "#/components/parameters/SandboxVolumeID"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ForkVolumeRequest"
+      responses:
+        "201":
+          description: Volume forked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessSandboxVolumeResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
   /api/v1/sandboxvolumes/{id}/snapshots:
     post:
       tags: [snapshots]
@@ -3447,6 +3476,20 @@ components:
         access_mode:
           $ref: "#/components/schemas/VolumeAccessMode"
           description: Access mode for the volume. Defaults to RWO when omitted.
+    ForkVolumeRequest:
+      type: object
+      properties:
+        cache_size:
+          type: string
+        prefetch:
+          type: integer
+        buffer_size:
+          type: string
+        writeback:
+          type: boolean
+        access_mode:
+          $ref: "#/components/schemas/VolumeAccessMode"
+          description: Access mode for the volume. Defaults to RWO when omitted.
     SandboxVolume:
       type: object
       properties:
@@ -3456,6 +3499,9 @@ components:
           type: string
         user_id:
           type: string
+        source_volume_id:
+          type: string
+          nullable: true
         cache_size:
           type: string
         prefetch:

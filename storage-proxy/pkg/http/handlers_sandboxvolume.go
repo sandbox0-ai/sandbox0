@@ -3,6 +3,7 @@ package http
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/sandbox0-ai/infra/pkg/gateway/spec"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/db"
+	"github.com/sandbox0-ai/infra/storage-proxy/pkg/snapshot"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/volume"
 )
 
@@ -19,6 +21,14 @@ type createSandboxVolumeRequest struct {
 	BufferSize string `json:"buffer_size"`
 	Writeback  bool   `json:"writeback"`
 	AccessMode string `json:"access_mode"`
+}
+
+type forkSandboxVolumeRequest struct {
+	CacheSize  *string `json:"cache_size"`
+	Prefetch   *int    `json:"prefetch"`
+	BufferSize *string `json:"buffer_size"`
+	Writeback  *bool   `json:"writeback"`
+	AccessMode *string `json:"access_mode"`
 }
 
 func (s *Server) createSandboxVolume(w http.ResponseWriter, r *http.Request) {
@@ -207,4 +217,56 @@ func (s *Server) deleteSandboxVolume(w http.ResponseWriter, r *http.Request) {
 
 	s.logger.WithField("volume_id", id).WithField("team_id", vol.TeamID).Info("Sandbox volume deleted")
 	_ = spec.WriteSuccess(w, http.StatusOK, map[string]bool{"deleted": true})
+}
+
+func (s *Server) forkVolume(w http.ResponseWriter, r *http.Request) {
+	claims := internalauth.ClaimsFromContext(r.Context())
+	if claims == nil {
+		_ = spec.WriteError(w, http.StatusUnauthorized, spec.CodeUnauthorized, "unauthorized")
+		return
+	}
+
+	id := r.PathValue("id")
+	if id == "" {
+		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "id is required")
+		return
+	}
+
+	var req forkSandboxVolumeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
+
+	if s.snapshotMgr == nil {
+		_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "snapshot manager is not configured")
+		return
+	}
+
+	vol, err := s.snapshotMgr.ForkVolume(r.Context(), &snapshot.ForkVolumeRequest{
+		SourceVolumeID: id,
+		TeamID:         claims.TeamID,
+		UserID:         claims.UserID,
+		CacheSize:      req.CacheSize,
+		Prefetch:       req.Prefetch,
+		BufferSize:     req.BufferSize,
+		Writeback:      req.Writeback,
+		AccessMode:     req.AccessMode,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, snapshot.ErrVolumeNotFound):
+			_ = spec.WriteError(w, http.StatusNotFound, spec.CodeNotFound, "volume not found")
+		case errors.Is(err, snapshot.ErrInvalidAccessMode):
+			_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "invalid access_mode")
+		case errors.Is(err, snapshot.ErrCloneFailed):
+			_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "clone operation failed")
+		default:
+			s.logger.WithError(err).Error("Failed to fork sandbox volume")
+			_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "internal server error")
+		}
+		return
+	}
+
+	_ = spec.WriteSuccess(w, http.StatusCreated, vol)
 }

@@ -9,6 +9,7 @@ The default Sandbox filesystem is ephemeral—when a Sandbox is deleted, all its
 - **Data Persistence**: Store data that needs long-term retention, such as databases, model files, and user uploads
 - **Cross-Sandbox Sharing**: Mount the same Volume to multiple Sandboxes for data sharing
 - **Fast Snapshots**: Create point-in-time snapshots in seconds for backup and versioning
+- **Fast Forking**: Create independent child Volumes with Copy-on-Write isolation
 - **Quick Recovery**: Restore from snapshots quickly, ideal for rollbacks and environment cloning
 
 ## Volume and Sandbox Relationship
@@ -127,6 +128,14 @@ Ensure all mounts are unmounted before deleting a Volume. If active mounts exist
     cta="Learn More"
   >
     Create, restore, and manage volume snapshots
+  </LinkCard>
+
+  <LinkCard
+    title="Volume Fork"
+    href="/docs/volume/fork"
+    cta="Learn More"
+  >
+    Clone a volume with Copy-on-Write isolation
   </LinkCard>
 
   <LinkCard

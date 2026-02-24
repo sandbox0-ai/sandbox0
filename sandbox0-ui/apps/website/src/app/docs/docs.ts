@@ -29,6 +29,7 @@ export const docsNavigation: PixelSidebarItem[] = [
       { label: "Overview", href: "/docs/volume" },
       { label: "Mounts", href: "/docs/volume/mounts" },
       { label: "Snapshots", href: "/docs/volume/snapshots" },
+      { label: "Fork", href: "/docs/volume/fork" },
     ],
   },
   {

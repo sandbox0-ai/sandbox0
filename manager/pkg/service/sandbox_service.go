@@ -33,19 +33,20 @@ import (
 
 // Sandbox represents a sandbox instance
 type Sandbox struct {
-	ID           string              `json:"id"`
-	TemplateID   string              `json:"template_id"`
-	TeamID       string              `json:"team_id"`
-	UserID       string              `json:"user_id"`
-	InternalAddr string              `json:"internal_addr"`
-	Status       string              `json:"status"`
-	Paused       bool                `json:"paused"`
-	AutoResume   bool                `json:"auto_resume"`
-	ExposedPorts []ExposedPortConfig `json:"exposed_ports,omitempty"`
-	PodName      string              `json:"pod_name"`
-	ExpiresAt    time.Time           `json:"expires_at"`
-	ClaimedAt    time.Time           `json:"claimed_at"`
-	CreatedAt    time.Time           `json:"created_at"`
+	ID            string              `json:"id"`
+	TemplateID    string              `json:"template_id"`
+	TeamID        string              `json:"team_id"`
+	UserID        string              `json:"user_id"`
+	InternalAddr  string              `json:"internal_addr"`
+	Status        string              `json:"status"`
+	Paused        bool                `json:"paused"`
+	AutoResume    bool                `json:"auto_resume"`
+	ExposedPorts  []ExposedPortConfig `json:"exposed_ports,omitempty"`
+	PodName       string              `json:"pod_name"`
+	ExpiresAt     time.Time           `json:"expires_at"`
+	HardExpiresAt time.Time           `json:"hard_expires_at"`
+	ClaimedAt     time.Time           `json:"claimed_at"`
+	CreatedAt     time.Time           `json:"created_at"`
 }
 
 // SandboxStatus represents possible sandbox statuses
@@ -1141,13 +1142,10 @@ func (s *SandboxService) podToSandbox(ctx context.Context, pod *corev1.Pod, sand
 	status := s.podPhaseToSandboxStatus(pod.Status.Phase)
 
 	// Parse timestamps
-	var claimedAt, expiresAt, createdAt time.Time
-	if claimedAtStr := pod.Annotations[controller.AnnotationClaimedAt]; claimedAtStr != "" {
-		claimedAt, _ = time.Parse(time.RFC3339, claimedAtStr)
-	}
-	if expiresAtStr := pod.Annotations[controller.AnnotationExpiresAt]; expiresAtStr != "" {
-		expiresAt, _ = time.Parse(time.RFC3339, expiresAtStr)
-	}
+	claimedAt := parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationClaimedAt)
+	expiresAt := parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt)
+	hardExpiresAt := parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt)
+	var createdAt time.Time
 	createdAt = pod.CreationTimestamp.Time
 
 	internalAddr, err := s.prodAddress(ctx, pod)
@@ -1162,20 +1160,36 @@ func (s *SandboxService) podToSandbox(ctx context.Context, pod *corev1.Pod, sand
 	}
 
 	return &Sandbox{
-		ID:           sandboxID,
-		TemplateID:   pod.Labels[controller.LabelTemplateID],
-		TeamID:       pod.Annotations[controller.AnnotationTeamID],
-		UserID:       pod.Annotations[controller.AnnotationUserID],
-		InternalAddr: internalAddr,
-		Status:       status,
-		Paused:       pod.Annotations[controller.AnnotationPaused] == "true",
-		AutoResume:   autoResume,
-		ExposedPorts: cfg.ExposedPorts,
-		PodName:      pod.Name,
-		ExpiresAt:    expiresAt,
-		ClaimedAt:    claimedAt,
-		CreatedAt:    createdAt,
+		ID:            sandboxID,
+		TemplateID:    pod.Labels[controller.LabelTemplateID],
+		TeamID:        pod.Annotations[controller.AnnotationTeamID],
+		UserID:        pod.Annotations[controller.AnnotationUserID],
+		InternalAddr:  internalAddr,
+		Status:        status,
+		Paused:        pod.Annotations[controller.AnnotationPaused] == "true",
+		AutoResume:    autoResume,
+		ExposedPorts:  cfg.ExposedPorts,
+		PodName:       pod.Name,
+		ExpiresAt:     expiresAt,
+		HardExpiresAt: hardExpiresAt,
+		ClaimedAt:     claimedAt,
+		CreatedAt:     createdAt,
 	}
+}
+
+func parseRFC3339AnnotationTime(annotations map[string]string, key string) time.Time {
+	if len(annotations) == 0 {
+		return time.Time{}
+	}
+	raw := annotations[key]
+	if raw == "" {
+		return time.Time{}
+	}
+	parsed, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed
 }
 
 func parseSandboxConfig(configJSON string) SandboxConfig {
@@ -1250,15 +1264,16 @@ func (s *SandboxService) GetSandboxStatus(ctx context.Context, sandboxID string)
 	}
 
 	status := map[string]any{
-		"sandbox_id":  sandbox.ID,
-		"template_id": sandbox.TemplateID,
-		"team_id":     sandbox.TeamID,
-		"user_id":     sandbox.UserID,
-		"pod_name":    sandbox.PodName,
-		"status":      sandbox.Status,
-		"claimed_at":  sandbox.ClaimedAt.Format(time.RFC3339),
-		"expires_at":  sandbox.ExpiresAt.Format(time.RFC3339),
-		"created_at":  sandbox.CreatedAt.Format(time.RFC3339),
+		"sandbox_id":      sandbox.ID,
+		"template_id":     sandbox.TemplateID,
+		"team_id":         sandbox.TeamID,
+		"user_id":         sandbox.UserID,
+		"pod_name":        sandbox.PodName,
+		"status":          sandbox.Status,
+		"claimed_at":      sandbox.ClaimedAt.Format(time.RFC3339),
+		"expires_at":      sandbox.ExpiresAt.Format(time.RFC3339),
+		"hard_expires_at": sandbox.HardExpiresAt.Format(time.RFC3339),
+		"created_at":      sandbox.CreatedAt.Format(time.RFC3339),
 	}
 
 	return status, nil
@@ -1654,8 +1669,9 @@ type RefreshRequest struct {
 
 // RefreshResponse represents a sandbox refresh response
 type RefreshResponse struct {
-	SandboxID string    `json:"sandbox_id"`
-	ExpiresAt time.Time `json:"expires_at"`
+	SandboxID     string    `json:"sandbox_id"`
+	ExpiresAt     time.Time `json:"expires_at"`
+	HardExpiresAt time.Time `json:"hard_expires_at"`
 }
 
 // RefreshSandbox refreshes the TTL and HardTTL of a sandbox
@@ -1705,8 +1721,9 @@ func (s *SandboxService) RefreshSandbox(ctx context.Context, sandboxID string, r
 	podCopy.Annotations[controller.AnnotationExpiresAt] = newExpiresAt.Format(time.RFC3339)
 
 	// Also refresh HardTTL if configured
+	var newHardExpiresAt time.Time
 	if hardTTLDuration > 0 {
-		newHardExpiresAt := s.clock.Now().Add(hardTTLDuration)
+		newHardExpiresAt = s.clock.Now().Add(hardTTLDuration)
 		podCopy.Annotations[controller.AnnotationHardExpiresAt] = newHardExpiresAt.Format(time.RFC3339)
 		s.logger.Info("Refreshing hard TTL",
 			zap.String("sandboxID", sandboxID),
@@ -1728,8 +1745,9 @@ func (s *SandboxService) RefreshSandbox(ctx context.Context, sandboxID string, r
 	)
 
 	return &RefreshResponse{
-		SandboxID: sandboxID,
-		ExpiresAt: newExpiresAt,
+		SandboxID:     sandboxID,
+		ExpiresAt:     newExpiresAt,
+		HardExpiresAt: newHardExpiresAt,
 	}, nil
 }
 
@@ -1766,12 +1784,13 @@ type ListSandboxesResponse struct {
 
 // SandboxSummary represents a summary of a sandbox for listing
 type SandboxSummary struct {
-	ID         string    `json:"id"`
-	TemplateID string    `json:"template_id"`
-	Status     string    `json:"status"`
-	Paused     bool      `json:"paused"`
-	CreatedAt  time.Time `json:"created_at"`
-	ExpiresAt  time.Time `json:"expires_at"`
+	ID            string    `json:"id"`
+	TemplateID    string    `json:"template_id"`
+	Status        string    `json:"status"`
+	Paused        bool      `json:"paused"`
+	CreatedAt     time.Time `json:"created_at"`
+	ExpiresAt     time.Time `json:"expires_at"`
+	HardExpiresAt time.Time `json:"hard_expires_at"`
 }
 
 // ListSandboxes lists all sandboxes for a team with optional filters
@@ -1827,19 +1846,18 @@ func (s *SandboxService) ListSandboxes(ctx context.Context, req *ListSandboxesRe
 			continue
 		}
 
-		// Parse timestamps
-		var expiresAt time.Time
-		if expiresAtStr := pod.Annotations[controller.AnnotationExpiresAt]; expiresAtStr != "" {
-			expiresAt, _ = time.Parse(time.RFC3339, expiresAtStr)
-		}
+		// Parse timestamps (both can be zero when disabled or not set).
+		expiresAt := parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt)
+		hardExpiresAt := parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt)
 
 		summaries = append(summaries, &SandboxSummary{
-			ID:         pod.Name,
-			TemplateID: templateID,
-			Status:     status,
-			Paused:     paused,
-			CreatedAt:  pod.CreationTimestamp.Time,
-			ExpiresAt:  expiresAt,
+			ID:            pod.Name,
+			TemplateID:    templateID,
+			Status:        status,
+			Paused:        paused,
+			CreatedAt:     pod.CreationTimestamp.Time,
+			ExpiresAt:     expiresAt,
+			HardExpiresAt: hardExpiresAt,
 		})
 	}
 

@@ -211,6 +211,57 @@ func TestListSandboxes(t *testing.T) {
 	}
 }
 
+func TestListSandboxes_HardExpiresAt(t *testing.T) {
+	logger := zap.NewNop()
+	now := time.Now()
+
+	hardExpiresAt := now.Add(4 * time.Hour)
+	withHard := createTestPod("sandbox-with-hard", "team-a", "template-1", controller.PoolTypeActive, now.Add(-2*time.Minute), now.Add(20*time.Minute), false)
+	withHard.Annotations[controller.AnnotationHardExpiresAt] = hardExpiresAt.Format(time.RFC3339)
+
+	withoutHard := createTestPod("sandbox-without-hard", "team-a", "template-1", controller.PoolTypeActive, now.Add(-1*time.Minute), now.Add(10*time.Minute), false)
+
+	pods := []*corev1.Pod{withHard, withoutHard}
+
+	k8sClient := fake.NewSimpleClientset()
+	for _, pod := range pods {
+		_, err := k8sClient.CoreV1().Pods(pod.Namespace).Create(context.Background(), pod, metav1.CreateOptions{})
+		require.NoError(t, err)
+	}
+
+	svc := &SandboxService{
+		k8sClient: k8sClient,
+		podLister: newTestPodLister(t, pods...),
+		clock:     systemTime{},
+		logger:    logger,
+	}
+
+	resp, err := svc.ListSandboxes(context.Background(), &ListSandboxesRequest{
+		TeamID: "team-a",
+		Limit:  50,
+		Offset: 0,
+	})
+	require.NoError(t, err)
+	require.Len(t, resp.Sandboxes, 2)
+
+	var gotWithHard *SandboxSummary
+	var gotWithoutHard *SandboxSummary
+	for _, item := range resp.Sandboxes {
+		switch item.ID {
+		case "sandbox-with-hard":
+			gotWithHard = item
+		case "sandbox-without-hard":
+			gotWithoutHard = item
+		}
+	}
+
+	require.NotNil(t, gotWithHard)
+	assert.Equal(t, hardExpiresAt.Format(time.RFC3339), gotWithHard.HardExpiresAt.Format(time.RFC3339))
+
+	require.NotNil(t, gotWithoutHard)
+	assert.True(t, gotWithoutHard.HardExpiresAt.IsZero())
+}
+
 func createTestPod(name, teamID, templateID, poolType string, createdAt, expiresAt time.Time, paused bool) *corev1.Pod {
 	return createTestPodWithPhase(name, teamID, templateID, poolType, createdAt, expiresAt, paused, corev1.PodRunning)
 }

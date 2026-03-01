@@ -802,7 +802,10 @@ type RefreshRequest struct {
 // RefreshResponse defines model for RefreshResponse.
 type RefreshResponse struct {
 	ExpiresAt time.Time `json:"expires_at"`
-	SandboxId string    `json:"sandbox_id"`
+
+	// HardExpiresAt Hard expiration timestamp. Zero value means not set.
+	HardExpiresAt time.Time `json:"hard_expires_at"`
+	SandboxId     string    `json:"sandbox_id"`
 }
 
 // RegisterRequest defines model for RegisterRequest.
@@ -857,18 +860,23 @@ type ResumeSandboxResponse struct {
 
 // Sandbox defines model for Sandbox.
 type Sandbox struct {
-	AutoResume   bool                 `json:"auto_resume"`
-	ClaimedAt    time.Time            `json:"claimed_at"`
-	CreatedAt    time.Time            `json:"created_at"`
+	AutoResume bool      `json:"auto_resume"`
+	ClaimedAt  time.Time `json:"claimed_at"`
+	CreatedAt  time.Time `json:"created_at"`
+
+	// ExpiresAt Soft expiration timestamp. Zero value means not set.
 	ExpiresAt    time.Time            `json:"expires_at"`
 	ExposedPorts *[]ExposedPortConfig `json:"exposed_ports,omitempty"`
-	Id           string               `json:"id"`
-	Paused       bool                 `json:"paused"`
-	PodName      string               `json:"pod_name"`
-	Status       string               `json:"status"`
-	TeamId       string               `json:"team_id"`
-	TemplateId   string               `json:"template_id"`
-	UserId       *string              `json:"user_id,omitempty"`
+
+	// HardExpiresAt Hard expiration timestamp. Zero value means not set.
+	HardExpiresAt time.Time `json:"hard_expires_at"`
+	Id            string    `json:"id"`
+	Paused        bool      `json:"paused"`
+	PodName       string    `json:"pod_name"`
+	Status        string    `json:"status"`
+	TeamId        string    `json:"team_id"`
+	TemplateId    string    `json:"template_id"`
+	UserId        *string   `json:"user_id,omitempty"`
 }
 
 // SandboxConfig defines model for SandboxConfig.
@@ -909,27 +917,31 @@ type SandboxResourceUsage struct {
 
 // SandboxStatus defines model for SandboxStatus.
 type SandboxStatus struct {
-	ClaimedAt  *string `json:"claimed_at,omitempty"`
-	CreatedAt  *string `json:"created_at,omitempty"`
-	ExpiresAt  *string `json:"expires_at,omitempty"`
-	PodName    *string `json:"pod_name,omitempty"`
-	SandboxId  *string `json:"sandbox_id,omitempty"`
-	Status     *string `json:"status,omitempty"`
-	TeamId     *string `json:"team_id,omitempty"`
-	TemplateId *string `json:"template_id,omitempty"`
-	UserId     *string `json:"user_id,omitempty"`
+	ClaimedAt     *string `json:"claimed_at,omitempty"`
+	CreatedAt     *string `json:"created_at,omitempty"`
+	ExpiresAt     *string `json:"expires_at,omitempty"`
+	HardExpiresAt *string `json:"hard_expires_at,omitempty"`
+	PodName       *string `json:"pod_name,omitempty"`
+	SandboxId     *string `json:"sandbox_id,omitempty"`
+	Status        *string `json:"status,omitempty"`
+	TeamId        *string `json:"team_id,omitempty"`
+	TemplateId    *string `json:"template_id,omitempty"`
+	UserId        *string `json:"user_id,omitempty"`
 }
 
 // SandboxSummary defines model for SandboxSummary.
 type SandboxSummary struct {
 	// ClusterId Cluster where sandbox runs (multi-cluster only)
-	ClusterId  *string              `json:"cluster_id"`
-	CreatedAt  time.Time            `json:"created_at"`
-	ExpiresAt  time.Time            `json:"expires_at"`
-	Id         string               `json:"id"`
-	Paused     bool                 `json:"paused"`
-	Status     SandboxSummaryStatus `json:"status"`
-	TemplateId string               `json:"template_id"`
+	ClusterId *string   `json:"cluster_id"`
+	CreatedAt time.Time `json:"created_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+
+	// HardExpiresAt Hard expiration timestamp. Zero value means not set.
+	HardExpiresAt time.Time            `json:"hard_expires_at"`
+	Id            string               `json:"id"`
+	Paused        bool                 `json:"paused"`
+	Status        SandboxSummaryStatus `json:"status"`
+	TemplateId    string               `json:"template_id"`
 }
 
 // SandboxSummaryStatus defines model for SandboxSummary.Status.

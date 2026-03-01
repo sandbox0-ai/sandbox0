@@ -37,7 +37,21 @@ List all exposed ports for a sandbox.
     {
       label: "Go",
       language: "go",
-      code: `// Get all exposed ports
+      code: `// Claim a sandbox from the "default" template
+sandbox, err := client.ClaimSandbox(ctx, "default",
+    sandbox0.WithSandboxHardTTL(300),
+    sandbox0.WithSandboxEnvVars(map[string]string{
+        "APP_ENV": "development",
+    }),
+    sandbox0.WithSandboxAutoResume(true),
+)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("Sandbox ID: %s\\n", sandbox.ID)
+defer client.DeleteSandbox(ctx, sandbox.ID)
+
+// Get all exposed ports
 ports, err := sandbox.GetExposedPorts(ctx)
 if err != nil {
     log.Fatal(err)
@@ -50,7 +64,18 @@ for _, p := range ports.Ports {
     {
       label: "Python",
       language: "python",
-      code: `# Get all exposed ports
+      code: `# Claim a sandbox from the "default" template
+sandbox = client.claim_sandbox(
+    template="default",
+    config=SandboxConfig.from_dict({
+        "hard_ttl": 300,
+        "env_vars": {"APP_ENV": "development"},
+        "auto_resume": True,
+    }),
+)
+print(f"Sandbox ID: {sandbox.id}")
+
+# Get all exposed ports
 ports = sandbox.get_exposed_ports()
 print(f"Exposure domain: {ports.exposure_domain}")
 for p in ports.ports:
@@ -59,7 +84,15 @@ for p in ports.ports:
     {
       label: "TypeScript",
       language: "typescript",
-      code: `// Get all exposed ports
+      code: `// Claim a sandbox from the "default" template
+const sandbox = await client.sandboxes.claim('default', {
+    hardTtl: 300,
+    envVars: { APP_ENV: 'development' },
+    autoResume: true,
+});
+console.log('Sandbox ID:', sandbox.id);
+
+// Get all exposed ports
 const ports = await sandbox.getExposedPorts();
 console.log('Exposure domain:', ports.exposureDomain);
 for (const p of ports.ports) {
@@ -69,11 +102,7 @@ for (const p of ports.ports) {
     {
       label: "CLI",
       language: "bash",
-      code: `s0 ports list sb_abc123
-
-# Output:
-# Exposure domain: aws-us-east-1.sandbox0.app
-# Port 8080: https://sb-abc123-8080.aws-us-east-1.sandbox0.app`
+      code: `s0 sandbox ports list -s sb_abc123`
     }
   ]}
 />
@@ -122,7 +151,7 @@ for p in resp.ports:
       label: "TypeScript",
       language: "typescript",
       code: `// Expose port 8080 with auto-resume
-const resp = await sandbox.exposePort(8080, true);
+var resp = await sandbox.exposePort(8080, true);
 console.log('Exposure domain:', resp.exposureDomain);
 for (const p of resp.ports) {
     console.log(\`Port \${p.port} -> \${p.publicUrl}\`);
@@ -131,11 +160,7 @@ for (const p of resp.ports) {
     {
       label: "CLI",
       language: "bash",
-      code: `s0 ports expose sb_abc123 8080 --resume
-
-# Output:
-# Port 8080 exposed at:
-# https://sb-abc123-8080.aws-us-east-1.sandbox0.app`
+      code: `s0 sandbox ports expose 8080 -s sb_abc123 --resume`
     }
   ]}
 />
@@ -152,7 +177,7 @@ Expose multiple ports at once.
       label: "Go",
       language: "go",
       code: `// Expose multiple ports
-resp, err := sandbox.ExposePorts(ctx, []sandbox0.ExposedPortConfig{
+resp, err = sandbox.UpdateExposedPorts(ctx, []sandbox0.ExposedPort{
     {Port: 8080, Resume: true},
     {Port: 3000, Resume: false},
     {Port: 9000, Resume: true},
@@ -168,10 +193,12 @@ for _, p := range resp.Ports {
       label: "Python",
       language: "python",
       code: `# Expose multiple ports
-resp = sandbox.expose_ports([
-    {"port": 8080, "resume": True},
-    {"port": 3000, "resume": False},
-    {"port": 9000, "resume": True},
+from sandbox0 import ExposedPort
+
+resp = sandbox.update_exposed_ports([
+    ExposedPort(port=8080, resume=True),
+    ExposedPort(port=3000, resume=False),
+    ExposedPort(port=9000, resume=True),
 ])
 for p in resp.ports:
     print(f"Port {p.port} -> {p.public_url} (resume: {p.resume})")`
@@ -180,7 +207,7 @@ for p in resp.ports:
       label: "TypeScript",
       language: "typescript",
       code: `// Expose multiple ports
-const resp = await sandbox.exposePorts([
+resp = await sandbox.updateExposedPorts([
     { port: 8080, resume: true },
     { port: 3000, resume: false },
     { port: 9000, resume: true },
@@ -192,9 +219,9 @@ for (const p of resp.ports) {
     {
       label: "CLI",
       language: "bash",
-      code: `s0 ports expose sb_abc123 8080 --resume
-s0 ports expose sb_abc123 3000
-s0 ports expose sb_abc123 9000 --resume`
+      code: `s0 sandbox ports expose 8080 -s sb_abc123 --resume
+s0 sandbox ports expose 3000 -s sb_abc123
+s0 sandbox ports expose 9000 -s sb_abc123 --resume`
     }
   ]}
 />
@@ -215,7 +242,7 @@ Remove a specific exposed port.
       label: "Go",
       language: "go",
       code: `// Remove exposed port 8080
-_, err := sandbox.UnexposePort(ctx, 8080)
+_, err = sandbox.UnexposePort(ctx, 8080)
 if err != nil {
     log.Fatal(err)
 }
@@ -238,7 +265,7 @@ console.log('Port 8080 no longer exposed');`
     {
       label: "CLI",
       language: "bash",
-      code: `s0 ports unexpose sb_abc123 8080`
+      code: `s0 sandbox ports unexpose 8080 -s sb_abc123`
     }
   ]}
 />
@@ -259,7 +286,7 @@ Remove all exposed ports from a sandbox.
       label: "Go",
       language: "go",
       code: `// Clear all exposed ports
-_, err := sandbox.ClearExposedPorts(ctx)
+err = sandbox.ClearExposedPorts(ctx)
 if err != nil {
     log.Fatal(err)
 }
@@ -282,122 +309,7 @@ console.log('All ports unexposed');`
     {
       label: "CLI",
       language: "bash",
-      code: `s0 ports clear sb_abc123`
-    }
-  ]}
-/>
-
----
-
-## Complete Example: Web Server
-
-Start a web server and expose it publicly.
-
-<Tabs
-  tabs={[
-    {
-      label: "Go",
-      language: "go",
-      code: `// Start a web server (async, don't wait for completion)
-result, err := sandbox.Cmd(ctx,
-    "python3 -m http.server 8080 --directory /tmp",
-    sandbox0.WithCmdWait(false),
-)
-if err != nil {
-    log.Fatal(err)
-}
-fmt.Printf("Server started, context: %s\\n", result.ContextID)
-
-// Wait for server to start
-time.Sleep(2 * time.Second)
-
-// Expose port 8080
-portsResp, err := sandbox.ExposePort(ctx, 8080, true)
-if err != nil {
-    log.Fatal(err)
-}
-
-fmt.Printf("Server accessible at:\\n")
-for _, p := range portsResp.Ports {
-    fmt.Printf("  %s\\n", p.PublicURL)
-}
-
-// Verify the server is working
-resp, err := sandbox.Cmd(ctx, "curl -s http://localhost:8080/")
-if err != nil {
-    log.Fatal(err)
-}
-fmt.Printf("Local response: %s\\n", resp.OutputRaw)`
-    },
-    {
-      label: "Python",
-      language: "python",
-      code: `import time
-
-# Start a web server (async)
-result = sandbox.cmd(
-    "python3 -m http.server 8080 --directory /tmp",
-    wait=False,
-)
-print(f"Server started, context: {result.context_id}")
-
-# Wait for server to start
-time.sleep(2)
-
-# Expose port 8080
-ports_resp = sandbox.expose_port(8080, resume=True)
-
-print("Server accessible at:")
-for p in ports_resp.ports:
-    print(f"  {p.public_url}")
-
-# Verify the server is working
-resp = sandbox.cmd("curl -s http://localhost:8080/")
-print(f"Local response: {resp.output_raw}")`
-    },
-    {
-      label: "TypeScript",
-      language: "typescript",
-      code: `// Start a web server (async)
-const result = await sandbox.cmd(
-    'python3 -m http.server 8080 --directory /tmp',
-    { wait: false },
-);
-console.log('Server started, context:', result.contextId);
-
-// Wait for server to start
-await new Promise((r) => setTimeout(r, 2000));
-
-// Expose port 8080
-const portsResp = await sandbox.exposePort(8080, true);
-
-console.log('Server accessible at:');
-for (const p of portsResp.ports) {
-    console.log(\`  \${p.publicUrl}\`);
-}
-
-// Verify the server is working
-const resp = await sandbox.cmd('curl -s http://localhost:8080/');
-console.log('Local response:', resp.outputRaw);`
-    },
-    {
-      label: "CLI",
-      language: "bash",
-      code: `# Start a web server in background
-s0 sandbox exec sb_abc123 -- python3 -m http.server 8080 --directory /tmp &
-
-# Wait for server to start
-sleep 2
-
-# Expose port 8080
-s0 ports expose sb_abc123 8080 --resume
-
-# Output:
-# Port 8080 exposed at:
-# https://sb-abc123-8080.aws-us-east-1.sandbox0.app
-
-# Test locally
-s0 sandbox exec sb_abc123 -- curl -s http://localhost:8080/`
+      code: `s0 sandbox ports clear -s sb_abc123`
     }
   ]}
 />
@@ -414,10 +326,16 @@ When a sandbox is paused with `resume: true` on an exposed port, incoming traffi
       label: "Go",
       language: "go",
       code: `// Expose port with auto-resume
-_, err := sandbox.ExposePort(ctx, 8080, true)
+_, err = sandbox.ExposePort(ctx, 8080, true)
+if err != nil {
+    log.Fatal(err)
+}
 
 // Pause the sandbox
 _, err = client.PauseSandbox(ctx, sandbox.ID)
+if err != nil {
+    log.Fatal(err)
+}
 
 // Incoming HTTP request to the public URL will automatically
 // resume the sandbox before routing the request`
@@ -429,7 +347,7 @@ _, err = client.PauseSandbox(ctx, sandbox.ID)
 sandbox.expose_port(8080, resume=True)
 
 # Pause the sandbox
-client.pause_sandbox(sandbox.id)
+client.sandboxes.pause(sandbox.id)
 
 # Incoming HTTP request to the public URL will automatically
 # resume the sandbox before routing the request`
@@ -441,7 +359,7 @@ client.pause_sandbox(sandbox.id)
 await sandbox.exposePort(8080, true);
 
 // Pause the sandbox
-await client.pauseSandbox(sandbox.id);
+await client.sandboxes.pause(sandbox.id);
 
 // Incoming HTTP request to the public URL will automatically
 // resume the sandbox before routing the request`
@@ -450,7 +368,7 @@ await client.pauseSandbox(sandbox.id);
       label: "CLI",
       language: "bash",
       code: `# Expose port with auto-resume
-s0 ports expose sb_abc123 8080 --resume
+s0 sandbox ports expose 8080 -s sb_abc123 --resume
 
 # Pause the sandbox
 s0 sandbox pause sb_abc123
@@ -462,7 +380,7 @@ s0 sandbox pause sb_abc123
 />
 
 <Callout variant="info">
-Auto-resume adds a small delay to the first request after pausing (typically 2-5 seconds) while the sandbox resumes. Subsequent requests are served immediately.
+Auto-resume adds a small delay to the first request after pausing while the sandbox resumes. Subsequent requests are served immediately.
 </Callout>
 
 ---

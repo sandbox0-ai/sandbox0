@@ -553,44 +553,51 @@ func (m *Manager) TrackVolume(sandboxID, volumeID string) {
 // UnmountSandboxVolumes unmounts all volumes associated with a sandbox
 // This is called automatically when a sandbox pod is deleted
 func (m *Manager) UnmountSandboxVolumes(ctx context.Context, sandboxID string) []error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	m.mu.RLock()
 	volumes, ok := m.sandboxToVolumes[sandboxID]
 	if !ok {
+		m.mu.RUnlock()
 		return nil // No volumes for this sandbox
 	}
+	volumeIDs := make([]string, 0, len(volumes))
+	for volumeID := range volumes {
+		volumeIDs = append(volumeIDs, volumeID)
+	}
+	m.mu.RUnlock()
 
 	var errs []error
-	for volumeID := range volumes {
+	for _, volumeID := range volumeIDs {
 		m.logger.WithFields(logrus.Fields{
 			"sandbox_id": sandboxID,
 			"volume_id":  volumeID,
 		}).Info("Auto-unmounting volume for deleted sandbox")
 
-		if volCtx, exists := m.volumes[volumeID]; exists {
-			// Flush all buffered data in VFS
-			if err := volCtx.VFS.FlushAll(""); err != nil {
-				m.logger.WithError(err).Warn("Failed to flush VFS data")
-			}
-
-			// Close metadata session
-			if err := volCtx.Meta.CloseSession(); err != nil {
-				m.logger.WithError(err).Warn("Failed to close metadata session")
-			}
-
+		sessionIDs := m.ListMountSessions(volumeID)
+		if len(sessionIDs) == 0 {
+			// Best-effort cleanup for legacy/no-session state.
+			m.mu.Lock()
 			delete(m.volumes, volumeID)
 			delete(m.mountSessions, volumeID)
 			delete(m.invalidates, volumeID)
+			m.mu.Unlock()
 		}
-
-		delete(m.sandboxToVolumes[sandboxID], volumeID)
+		for _, sessionID := range sessionIDs {
+			if err := m.UnmountVolume(ctx, volumeID, sessionID); err != nil {
+				errs = append(errs, err)
+				m.logger.WithError(err).WithFields(logrus.Fields{
+					"sandbox_id": sandboxID,
+					"volume_id":  volumeID,
+					"session_id": sessionID,
+				}).Warn("Failed to auto-unmount volume session")
+			}
+		}
 	}
 
-	// Clean up empty sandbox entry
-	if len(m.sandboxToVolumes[sandboxID]) == 0 {
-		delete(m.sandboxToVolumes, sandboxID)
-	}
+	// Cleanup sandbox index regardless of unmount result to avoid repeated retries
+	// against already-terminated sandboxes.
+	m.mu.Lock()
+	delete(m.sandboxToVolumes, sandboxID)
+	m.mu.Unlock()
 
 	return errs
 }

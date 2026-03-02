@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,9 @@ import (
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/volume"
 	"github.com/sirupsen/logrus"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 
 	obsmetrics "github.com/sandbox0-ai/infra/pkg/observability/metrics"
 
@@ -86,6 +90,7 @@ type Coordinator struct {
 	logger     *logrus.Logger
 	clusterID  string
 	podID      string
+	k8sClient  kubernetes.Interface
 	listenConn *pgxpool.Conn // Dedicated connection for LISTEN
 	metrics    *obsmetrics.StorageProxyMetrics
 
@@ -114,19 +119,26 @@ func NewCoordinator(
 	repo db.CoordinatorRepository,
 	volMgr VolumeProvider,
 	eventHub EventHub,
+	k8sClient kubernetes.Interface,
 	cfg *config.StorageProxyConfig,
 	logger *logrus.Logger,
 	metrics *obsmetrics.StorageProxyMetrics,
 ) *Coordinator {
+	podID, err := os.Hostname()
+	if err != nil || podID == "" {
+		podID = uuid.New().String()
+	}
+
 	return &Coordinator{
 		pool:           pool,
 		repo:           repo,
 		volMgr:         volMgr,
 		eventHub:       eventHub,
+		k8sClient:      k8sClient,
 		config:         cfg,
 		logger:         logger,
 		clusterID:      cfg.DefaultClusterId,
-		podID:          uuid.New().String(),
+		podID:          podID,
 		metrics:        metrics,
 		mountedVolumes: make(map[string]struct{}),
 		stopCh:         make(chan struct{}),
@@ -802,6 +814,35 @@ func (c *Coordinator) runCleanup(ctx context.Context) {
 			close(c.doneCh)
 			return
 		case <-ticker.C:
+			mounts, err := c.repo.GetAllMounts(ctx)
+			if err != nil {
+				c.logger.WithError(err).Warn("Failed to list mounts for orphan cleanup")
+			} else {
+				var orphaned int64
+				seenPods := make(map[string]struct{}, len(mounts))
+				for _, mount := range mounts {
+					podKey := mount.ClusterID + "/" + mount.PodID
+					if _, ok := seenPods[podKey]; ok {
+						continue
+					}
+					seenPods[podKey] = struct{}{}
+					if c.podExists(ctx, mount.PodID) {
+						continue
+					}
+					if err := c.repo.DeleteMountByPodID(ctx, mount.ClusterID, mount.PodID); err != nil {
+						c.logger.WithError(err).WithFields(logrus.Fields{
+							"cluster_id": mount.ClusterID,
+							"pod_id":     mount.PodID,
+						}).Warn("Failed to delete orphaned mounts by pod")
+						continue
+					}
+					orphaned++
+				}
+				if orphaned > 0 {
+					c.logger.WithField("orphaned_pods", orphaned).Info("Cleaned up orphaned mounts by pod lookup")
+				}
+			}
+
 			deleted, err := c.repo.DeleteStaleMounts(ctx, heartbeatTimeout)
 			if err != nil {
 				c.logger.WithError(err).Warn("Failed to cleanup stale mounts")
@@ -813,6 +854,31 @@ func (c *Coordinator) runCleanup(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func (c *Coordinator) podExists(ctx context.Context, podID string) bool {
+	if c.k8sClient == nil || podID == "" {
+		return true
+	}
+
+	if strings.Contains(podID, "/") {
+		parts := strings.SplitN(podID, "/", 2)
+		_, err := c.k8sClient.CoreV1().Pods(parts[0]).Get(ctx, parts[1], metav1.GetOptions{})
+		if err == nil {
+			return true
+		}
+		return !apierrors.IsNotFound(err)
+	}
+
+	pods, err := c.k8sClient.CoreV1().Pods("").List(ctx, metav1.ListOptions{
+		FieldSelector: "metadata.name=" + podID,
+		Limit:         1,
+	})
+	if err != nil {
+		c.logger.WithError(err).WithField("pod_id", podID).Warn("Failed to check pod existence")
+		return true
+	}
+	return len(pods.Items) > 0
 }
 
 // GetInstanceID returns the unique identifier for this instance

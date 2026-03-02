@@ -80,6 +80,9 @@ type GenerateOptions struct {
 	// If empty, the token will have no specific permissions.
 	Permissions []string
 
+	// SandboxID is the optional sandbox ID for mount/volume tracking.
+	SandboxID string
+
 	// TTL is the token time-to-live.
 	// If zero, the generator's default TTL is used.
 	TTL time.Duration

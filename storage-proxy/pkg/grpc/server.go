@@ -99,6 +99,10 @@ func (s *FileSystemServer) MountVolume(ctx context.Context, req *pb.MountVolumeR
 		"prefix":    prefix,
 	}).Info("Volume mounted with team prefix")
 
+	if claims.SandboxID != "" {
+		s.volMgr.TrackVolume(claims.SandboxID, req.VolumeId)
+	}
+
 	return &pb.MountVolumeResponse{
 		VolumeId:       req.VolumeId,
 		MountedAt:      mountedAt.Unix(),

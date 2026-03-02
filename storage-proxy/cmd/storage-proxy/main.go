@@ -132,12 +132,21 @@ func main() {
 		eventBroadcaster = notify.NewLocalBroadcaster(eventHub)
 	}
 
+	// Create Kubernetes client (used by coordinator orphan cleanup and pod watcher)
+	k8sClient, err := k8s.NewClientWithObservability(cfg.KubeconfigPath, obsProvider)
+	if err != nil {
+		zapLogger.Warn("Failed to create Kubernetes client",
+			zap.Error(err),
+		)
+		k8sClient = nil
+	}
+
 	// Create and start coordinator for distributed flush coordination
 	var coord *coordinator.Coordinator
 	if pool != nil && repo != nil {
 		// Create volume provider adapter for coordinator
 		volProvider := &volumeProviderAdapter{volMgr: volMgr}
-		coord = coordinator.NewCoordinator(pool, repo, volProvider, eventHub, cfg, logrusLogger, storageProxyMetrics)
+		coord = coordinator.NewCoordinator(pool, repo, volProvider, eventHub, k8sClient, cfg, logrusLogger, storageProxyMetrics)
 
 		// Set coordinator as mount registrar for volume manager
 		volMgr.SetMountRegistrar(coord)
@@ -157,13 +166,8 @@ func main() {
 		}
 	}
 
-	// Create Kubernetes client for pod watching
-	k8sClient, err := k8s.NewClientWithObservability(cfg.KubeconfigPath, obsProvider)
-	if err != nil {
-		zapLogger.Warn("Failed to create Kubernetes client, pod watcher disabled",
-			zap.Error(err),
-		)
-	} else {
+	// Create and start pod watcher
+	if k8sClient != nil {
 		// Create and start sandbox watcher
 		podWatcher := watcher.NewWatcher(
 			k8sClient,
@@ -193,6 +197,8 @@ func main() {
 		}()
 
 		zapLogger.Info("Sandbox watcher started")
+	} else {
+		zapLogger.Warn("Pod watcher disabled because Kubernetes client is unavailable")
 	}
 
 	// Create authenticator based on config

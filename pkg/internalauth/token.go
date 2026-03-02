@@ -72,6 +72,7 @@ func (g *Generator) Generate(target, teamID, userID string, opts GenerateOptions
 		Target:      target,
 		TeamID:      teamID,
 		UserID:      userID,
+		SandboxID:   opts.SandboxID,
 		Permissions: opts.Permissions,
 	}
 

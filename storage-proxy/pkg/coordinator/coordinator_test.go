@@ -12,6 +12,9 @@ import (
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/infra/storage-proxy/pkg/volume"
 	"github.com/sirupsen/logrus"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 // Mock implementations using simple Go structs
@@ -19,7 +22,9 @@ type MockRepository struct {
 	createMountFunc              func(ctx context.Context, mount *db.VolumeMount) error
 	updateMountHeartbeatFunc     func(ctx context.Context, volumeID, clusterID, podID string) error
 	deleteMountFunc              func(ctx context.Context, volumeID, clusterID, podID string) error
+	deleteMountByPodIDFunc       func(ctx context.Context, clusterID, podID string) error
 	getActiveMountsFunc          func(ctx context.Context, volumeID string, timeout int) ([]*db.VolumeMount, error)
+	getAllMountsFunc             func(ctx context.Context) ([]*db.VolumeMount, error)
 	deleteStaleMountsFunc        func(ctx context.Context, timeout int) (int64, error)
 	createCoordinationFunc       func(ctx context.Context, coord *db.SnapshotCoordination) error
 	getCoordinationFunc          func(ctx context.Context, id string) (*db.SnapshotCoordination, error)
@@ -50,9 +55,23 @@ func (m *MockRepository) DeleteMount(ctx context.Context, volumeID, clusterID, p
 	return nil
 }
 
+func (m *MockRepository) DeleteMountByPodID(ctx context.Context, clusterID, podID string) error {
+	if m.deleteMountByPodIDFunc != nil {
+		return m.deleteMountByPodIDFunc(ctx, clusterID, podID)
+	}
+	return nil
+}
+
 func (m *MockRepository) GetActiveMounts(ctx context.Context, volumeID string, timeout int) ([]*db.VolumeMount, error) {
 	if m.getActiveMountsFunc != nil {
 		return m.getActiveMountsFunc(ctx, volumeID, timeout)
+	}
+	return nil, nil
+}
+
+func (m *MockRepository) GetAllMounts(ctx context.Context) ([]*db.VolumeMount, error) {
+	if m.getAllMountsFunc != nil {
+		return m.getAllMountsFunc(ctx)
 	}
 	return nil, nil
 }
@@ -537,6 +556,24 @@ func TestGetInstanceID(t *testing.T) {
 
 	if instanceID != expected {
 		t.Errorf("Expected instance ID %q, got %q", expected, instanceID)
+	}
+}
+
+func TestPodExists(t *testing.T) {
+	coord, _, _ := newTestCoordinator(t)
+	coord.k8sClient = fake.NewSimpleClientset(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pod-1",
+			Namespace: "ns-1",
+		},
+	})
+
+	ctx := context.Background()
+	if !coord.podExists(ctx, "ns-1/pod-1") {
+		t.Fatalf("expected existing pod to be found")
+	}
+	if coord.podExists(ctx, "ns-1/missing") {
+		t.Fatalf("expected missing pod to return false")
 	}
 }
 

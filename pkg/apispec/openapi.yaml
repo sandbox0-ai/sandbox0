@@ -1824,6 +1824,13 @@ paths:
       x-upstream-path: /sandboxvolumes/{id}
       parameters:
         - $ref: "#/components/parameters/SandboxVolumeID"
+        - name: force
+          in: query
+          required: false
+          description: Force delete even if volume has active mounts
+          schema:
+            type: boolean
+            default: false
       responses:
         "200":
           description: Deleted

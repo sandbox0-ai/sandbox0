@@ -96,6 +96,9 @@ type Claims struct {
 	// UserID is the optional user ID for audit logging.
 	UserID string `json:"user_id,omitempty"`
 
+	// SandboxID is the optional sandbox ID for volume tracking.
+	SandboxID string `json:"sandbox_id,omitempty"`
+
 	// Permissions is the list of granted permissions.
 	Permissions []string `json:"permissions,omitempty"`
 

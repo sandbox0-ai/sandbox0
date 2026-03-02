@@ -21,7 +21,9 @@ type CoordinatorRepository interface {
 	CreateMount(ctx context.Context, mount *VolumeMount) error
 	UpdateMountHeartbeat(ctx context.Context, volumeID, clusterID, podID string) error
 	DeleteMount(ctx context.Context, volumeID, clusterID, podID string) error
+	DeleteMountByPodID(ctx context.Context, clusterID, podID string) error
 	GetActiveMounts(ctx context.Context, volumeID string, heartbeatTimeout int) ([]*VolumeMount, error)
+	GetAllMounts(ctx context.Context) ([]*VolumeMount, error)
 	DeleteStaleMounts(ctx context.Context, heartbeatTimeout int) (int64, error)
 
 	// Coordination operations
@@ -462,6 +464,18 @@ func (r *Repository) DeleteMount(ctx context.Context, volumeID, clusterID, podID
 	return nil
 }
 
+// DeleteMountByPodID deletes all mount records for a pod in a cluster.
+func (r *Repository) DeleteMountByPodID(ctx context.Context, clusterID, podID string) error {
+	_, err := r.pool.Exec(ctx, `
+		DELETE FROM sandbox_volume_mounts
+		WHERE cluster_id = $1 AND pod_id = $2
+	`, clusterID, podID)
+	if err != nil {
+		return fmt.Errorf("delete mount by pod id: %w", err)
+	}
+	return nil
+}
+
 // GetActiveMounts retrieves active mounts for a volume (heartbeat within threshold)
 func (r *Repository) GetActiveMounts(ctx context.Context, volumeID string, heartbeatTimeout int) ([]*VolumeMount, error) {
 	rows, err := r.pool.Query(ctx, `
@@ -475,6 +489,35 @@ func (r *Repository) GetActiveMounts(ctx context.Context, volumeID string, heart
 	`, volumeID, heartbeatTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("query active mounts: %w", err)
+	}
+	defer rows.Close()
+
+	var mounts []*VolumeMount
+	for rows.Next() {
+		var m VolumeMount
+		err := rows.Scan(
+			&m.ID, &m.VolumeID, &m.ClusterID, &m.PodID,
+			&m.LastHeartbeat, &m.MountedAt, &m.MountOptions,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scan mount: %w", err)
+		}
+		mounts = append(mounts, &m)
+	}
+
+	return mounts, nil
+}
+
+// GetAllMounts retrieves all mount records.
+func (r *Repository) GetAllMounts(ctx context.Context) ([]*VolumeMount, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT
+			id, volume_id, cluster_id, pod_id,
+			last_heartbeat, mounted_at, mount_options
+		FROM sandbox_volume_mounts
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query all mounts: %w", err)
 	}
 	defer rows.Close()
 

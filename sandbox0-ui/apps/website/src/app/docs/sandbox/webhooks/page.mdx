@@ -16,9 +16,22 @@ Configure webhooks when claiming a sandbox:
 Webhooks are configured per-sandbox at creation time. Each sandbox can have its own webhook configuration.
 </Callout>
 
+<Callout variant="success">
+`secret` is optional. For quick debugging, you can leave it empty and use services like <a href="https://webhook.site" target="_blank" rel="noopener noreferrer" className="text-blue-600 decoration-blue-500 underline-offset-2 hover:text-blue-500 dark:text-blue-400 dark:decoration-blue-400">webhook.site</a> to inspect incoming events directly.
+</Callout>
+
 ---
 
 ## Event Types
+
+### Sandbox Events
+
+| Event | Description |
+|-------|-------------|
+| `sandbox.ready` | Sandbox has been initialized and is ready |
+| `sandbox.paused` | Sandbox has been paused |
+| `sandbox.resumed` | Sandbox has been resumed |
+| `sandbox.killed` | Sandbox has been killed |
 
 ### Process Events
 
@@ -26,27 +39,23 @@ Webhooks are configured per-sandbox at creation time. Each sandbox can have its 
 |-------|-------------|
 | `process.started` | A new process/context has started |
 | `process.exited` | A process has exited (includes exit code) |
-
-### Sandbox Events
-
-| Event | Description |
-|-------|-------------|
-| `sandbox.paused` | Sandbox has been paused |
-| `sandbox.resumed` | Sandbox has been resumed |
+| `process.crashed` | A process has crashed unexpectedly |
 
 ### File Events
 
 | Event | Description |
 |-------|-------------|
-| `file.created` | A file was created |
-| `file.written` | A file was modified |
-| `file.renamed` | A file was renamed |
-| `file.chmodded` | File permissions were changed |
-| `file.removed` | A file was deleted |
+| `file.modified` | A file event occurred (create, write, remove, rename, or chmod) |
 
 <Callout variant="info">
-File events require setting <code>watch_dir</code> in the webhook configuration.
+File events require setting <code>watch_dir</code> in the webhook configuration. The specific operation type is included in the payload's <code>event_type</code> field.
 </Callout>
+
+### Agent Events
+
+| Event | Description |
+|-------|-------------|
+| `agent.event` | Custom event published by the sandbox via the webhook publish API |
 
 ---
 
@@ -79,19 +88,22 @@ fmt.Printf("Sandbox ID: %s\\n", sandbox.ID)`
       language: "python",
       code: `import os
 
+from sandbox0.apispec.models.sandbox_config import SandboxConfig
+from sandbox0.apispec.models.webhook_config import WebhookConfig
+
 webhook_url = os.environ["SANDBOX0_WEBHOOK_URL"]
 webhook_secret = os.environ.get("SANDBOX0_WEBHOOK_SECRET", "")
 
 sandbox = client.claim_sandbox(
     template="default",
-    config={
-        "hard_ttl": 300,
-        "webhook": {
-            "url": webhook_url,
-            "secret": webhook_secret,
-            "watch_dir": "/tmp/webhook-demo",
-        },
-    },
+    config=SandboxConfig(
+        hard_ttl=300,
+        webhook=WebhookConfig(
+            url=webhook_url,
+            secret=webhook_secret,
+            watch_dir="/tmp/webhook-demo",
+        ),
+    ),
 )
 print(f"Sandbox ID: {sandbox.id}")`
     },
@@ -101,15 +113,12 @@ print(f"Sandbox ID: {sandbox.id}")`
       code: `const webhookUrl = process.env.SANDBOX0_WEBHOOK_URL;
 const webhookSecret = process.env.SANDBOX0_WEBHOOK_SECRET || '';
 
-const sandbox = await client.claimSandbox({
-    template: 'default',
-    config: {
-        hardTtl: 300,
-        webhook: {
-            url: webhookUrl,
-            secret: webhookSecret,
-            watchDir: '/tmp/webhook-demo',
-        },
+const sandbox = await client.sandboxes.claim('default', {
+    hardTtl: 300,
+    webhook: {
+        url: webhookUrl,
+        secret: webhookSecret,
+        watchDir: '/tmp/webhook-demo',
     },
 });
 console.log('Sandbox ID:', sandbox.id);`
@@ -117,112 +126,12 @@ console.log('Sandbox ID:', sandbox.id);`
     {
       label: "CLI",
       language: "bash",
-      code: `s0 sandbox create --template default --hard-ttl 300 \\
-  --webhook-url https://my-server.com/webhook \\
-  --webhook-secret my-secret \\
-  --webhook-watch-dir /tmp/webhook-demo`
+      code: `# Note: Webhook configuration via CLI is not yet supported.
+# Use SDK (Go, Python, TypeScript) to configure webhooks.
+s0 sandbox create --template default --hard-ttl 300`
     }
   ]}
 />
-
----
-
-## Webhook Payload Format
-
-### Payload Structure
-
-```json
-{
-  "event": "process.exited",
-  "sandbox_id": "sb_abc123",
-  "timestamp": "2024-01-15T10:30:00Z",
-  "data": {
-    "context_id": "ctx_xyz789",
-    "exit_code": 0
-  }
-}
-```
-
-### Process Events
-
-```json
-// process.started
-{
-  "event": "process.started",
-  "sandbox_id": "sb_abc123",
-  "timestamp": "2024-01-15T10:30:00Z",
-  "data": {
-    "context_id": "ctx_xyz789",
-    "type": "repl",
-    "language": "python"
-  }
-}
-
-// process.exited
-{
-  "event": "process.exited",
-  "sandbox_id": "sb_abc123",
-  "timestamp": "2024-01-15T10:30:05Z",
-  "data": {
-    "context_id": "ctx_xyz789",
-    "exit_code": 0
-  }
-}
-```
-
-### Sandbox Events
-
-```json
-// sandbox.paused
-{
-  "event": "sandbox.paused",
-  "sandbox_id": "sb_abc123",
-  "timestamp": "2024-01-15T10:30:00Z",
-  "data": {}
-}
-
-// sandbox.resumed
-{
-  "event": "sandbox.resumed",
-  "sandbox_id": "sb_abc123",
-  "timestamp": "2024-01-15T10:30:05Z",
-  "data": {}
-}
-```
-
-### File Events
-
-```json
-// file.created
-{
-  "event": "file.created",
-  "sandbox_id": "sb_abc123",
-  "timestamp": "2024-01-15T10:30:00Z",
-  "data": {
-    "path": "/tmp/webhook-demo/hello.txt"
-  }
-}
-
-// file.written
-{
-  "event": "file.written",
-  "sandbox_id": "sb_abc123",
-  "timestamp": "2024-01-15T10:30:01Z",
-  "data": {
-    "path": "/tmp/webhook-demo/hello.txt"
-  }
-}
-
-// file.removed
-{
-  "event": "file.removed",
-  "sandbox_id": "sb_abc123",
-  "timestamp": "2024-01-15T10:30:02Z",
-  "data": {
-    "path": "/tmp/webhook-demo/hello.txt"
-  }
-}
-```
 
 ---
 
@@ -230,11 +139,17 @@ console.log('Sandbox ID:', sandbox.id);`
 
 When a secret is configured, webhook payloads are signed using HMAC-SHA256.
 
+<Callout variant="info">
+If `secret` is not configured, Sandbox0 will not send the `X-Sandbox0-Signature` header.
+</Callout>
+
 ### Header
 
 ```
-X-Sandbox0-Signature: sha256=<hex-encoded-signature>
+X-Sandbox0-Signature: <hex-encoded-signature>
 ```
+
+The signature is the hex-encoded HMAC-SHA256 of the request body.
 
 ### Verification Example
 
@@ -244,106 +159,77 @@ X-Sandbox0-Signature: sha256=<hex-encoded-signature>
       label: "Go",
       language: "go",
       code: `import (
-    "crypto/hmac"
-    "crypto/sha256"
-    "encoding/hex"
-    "strings"
+    "io"
+    "net/http"
+    "os"
+
+    sandbox0 "github.com/sandbox0-ai/sdk-go"
 )
 
-func verifySignature(payload []byte, signature string, secret string) bool {
-    // Parse signature header
-    if !strings.HasPrefix(signature, "sha256=") {
-        return false
-    }
-    expectedMAC, _ := hex.DecodeString(signature[7:])
-
-    // Calculate HMAC
-    mac := hmac.New(sha256.New, []byte(secret))
-    mac.Write(payload)
-    actualMAC := mac.Sum(nil)
-
-    return hmac.Equal(expectedMAC, actualMAC)
-}
-
-// Usage in HTTP handler
 func webhookHandler(w http.ResponseWriter, r *http.Request) {
-    payload, _ := io.ReadAll(r.Body)
+    // Verify against raw request bytes, not a re-serialized JSON object.
+    payload, err := io.ReadAll(r.Body)
+    if err != nil {
+        http.Error(w, "read body failed", http.StatusBadRequest)
+        return
+    }
     signature := r.Header.Get("X-Sandbox0-Signature")
     secret := os.Getenv("SANDBOX0_WEBHOOK_SECRET")
 
-    if !verifySignature(payload, signature, secret) {
-        http.Error(w, "Invalid signature", 401)
+    if !sandbox0.VerifyWebhookSignature(secret, payload, signature) {
+        http.Error(w, "invalid signature", http.StatusUnauthorized)
         return
     }
 
     // Process webhook...
+    w.WriteHeader(http.StatusOK)
 }`
     },
     {
       label: "Python",
       language: "python",
-      code: `import hmac
-import hashlib
+      code: `import os
 from flask import Flask, request
+from sandbox0 import verify_webhook_signature
 
 app = Flask(__name__)
 
-def verify_signature(payload, signature, secret):
-    if not signature.startswith('sha256='):
-        return False
-    expected = signature[7:]
-    mac = hmac.new(
-        secret.encode(),
-        payload,
-        hashlib.sha256
-    )
-    return hmac.compare_digest(expected, mac.hexdigest())
-
 @app.route('/webhook', methods=['POST'])
 def webhook():
+    # Verify against raw request bytes, not a re-serialized JSON object.
     payload = request.get_data()
-    signature = request.headers.get('X-Sandbox0-Signature')
-    secret = os.environ.get('SANDBOX0_WEBHOOK_SECRET')
+    signature = request.headers.get('X-Sandbox0-Signature', '')
+    secret = os.environ.get('SANDBOX0_WEBHOOK_SECRET', '')
 
-    if not verify_signature(payload, signature, secret):
+    if not verify_webhook_signature(secret, payload, signature):
         return 'Invalid signature', 401
 
     event = request.json
-    print(f"Received event: {event['event']}")
+    print(f"Received event: {event['event_type']}")
     return 'OK', 200`
     },
     {
       label: "TypeScript",
       language: "typescript",
-      code: `import crypto from 'crypto';
+      code: `import { verifyWebhookSignature } from 'sandbox0';
 import express from 'express';
 
 const app = express();
 
-function verifySignature(payload: string, signature: string, secret: string): boolean {
-    if (!signature.startsWith('sha256=')) {
-        return false;
-    }
-    const expected = signature.slice(7);
-    const hmac = crypto.createHmac('sha256', secret);
-    hmac.update(payload);
-    const actual = hmac.digest('hex');
-    return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(actual));
-}
-
 app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
-  const payload = req.body.toString();
-  const signature = req.headers['x-sandbox0-signature'] as string;
-  const secret = process.env.SANDBOX0_WEBHOOK_SECRET || '';
+    // Verify against raw request bytes, not a re-serialized JSON object.
+    const payload = req.body as Buffer;
+    const signature = (req.headers['x-sandbox0-signature'] as string) || '';
+    const secret = process.env.SANDBOX0_WEBHOOK_SECRET || '';
 
-  if (!verifySignature(payload, signature, secret)) {
-    res.status(401).send('Invalid signature');
-    return;
-  }
+    if (!verifyWebhookSignature(secret, payload, signature)) {
+        res.status(401).send('Invalid signature');
+        return;
+    }
 
-  const event = JSON.parse(payload);
-  console.log('Received event:', event.event);
-  res.status(200).send('OK');
+    const event = JSON.parse(payload.toString('utf8'));
+    console.log('Received event:', event.event_type);
+    res.status(200).send('OK');
 });`
     },
     {
@@ -363,6 +249,69 @@ done`
 
 ## Triggering Webhook Events
 
+### Sandbox Events
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `// sandbox.ready is triggered automatically when the sandbox initializes
+
+// Trigger sandbox.paused event
+_, err = client.PauseSandbox(ctx, sandbox.ID)
+if err != nil {
+    log.Fatal(err)
+}
+log.Println("Sandbox paused - webhook triggered")
+
+// Trigger sandbox.resumed event
+_, err = client.ResumeSandbox(ctx, sandbox.ID)
+if err != nil {
+    log.Fatal(err)
+}
+log.Println("Sandbox resumed - webhook triggered")`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `# sandbox.ready is triggered automatically when the sandbox initializes
+
+# Trigger sandbox.paused event
+client.pause_sandbox(sandbox.id)
+print("Sandbox paused - webhook triggered")
+
+# Trigger sandbox.resumed event
+client.resume_sandbox(sandbox.id)
+print("Sandbox resumed - webhook triggered")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `// sandbox.ready is triggered automatically when the sandbox initializes
+
+// Trigger sandbox.paused event
+await client.sandboxes.pause(sandbox.id);
+console.log('Sandbox paused - webhook triggered');
+
+// Trigger sandbox.resumed event
+await client.sandboxes.resume(sandbox.id);
+console.log('Sandbox resumed - webhook triggered');`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `# sandbox.ready is triggered automatically when the sandbox initializes
+
+# Trigger sandbox.paused event
+s0 sandbox pause sb_abc123
+
+# Trigger sandbox.resumed event
+s0 sandbox resume sb_abc123`
+    }
+  ]}
+/>
+
 ### Process Events
 
 <Tabs
@@ -371,7 +320,7 @@ done`
       label: "Go",
       language: "go",
       code: `// Trigger process.started and process.exited events
-_, err := sandbox.Run(ctx, "bash", \`echo "hello world"\`)
+_, err = sandbox.Run(ctx, "bash", \`echo "hello world"\`)
 if err != nil {
     log.Fatal(err)
 }
@@ -417,65 +366,10 @@ console.log('Process exited with error code');`
       label: "CLI",
       language: "bash",
       code: `# Trigger process events
-s0 sandbox run sb_abc123 --language bash --code 'echo hello'
+s0 sandbox exec sb_abc123 -- echo "hello world"
 
 # Trigger process with exit code
 s0 sandbox exec sb_abc123 -- /bin/sh -c "exit 2"`
-    }
-  ]}
-/>
-
-### Sandbox Events
-
-<Tabs
-  tabs={[
-    {
-      label: "Go",
-      language: "go",
-      code: `// Trigger sandbox.paused event
-_, err := client.PauseSandbox(ctx, sandbox.ID)
-if err != nil {
-    log.Fatal(err)
-}
-log.Println("Sandbox paused - webhook triggered")
-
-// Trigger sandbox.resumed event
-_, err = client.ResumeSandbox(ctx, sandbox.ID)
-if err != nil {
-    log.Fatal(err)
-}
-log.Println("Sandbox resumed - webhook triggered")`
-    },
-    {
-      label: "Python",
-      language: "python",
-      code: `# Trigger sandbox.paused event
-client.pause_sandbox(sandbox.id)
-print("Sandbox paused - webhook triggered")
-
-# Trigger sandbox.resumed event
-client.resume_sandbox(sandbox.id)
-print("Sandbox resumed - webhook triggered")`
-    },
-    {
-      label: "TypeScript",
-      language: "typescript",
-      code: `// Trigger sandbox.paused event
-await client.pauseSandbox(sandbox.id);
-console.log('Sandbox paused - webhook triggered');
-
-// Trigger sandbox.resumed event
-await client.resumeSandbox(sandbox.id);
-console.log('Sandbox resumed - webhook triggered');`
-    },
-    {
-      label: "CLI",
-      language: "bash",
-      code: `# Trigger sandbox.paused event
-s0 sandbox pause sb_abc123
-
-# Trigger sandbox.resumed event
-s0 sandbox resume sb_abc123`
     }
   ]}
 />
@@ -488,33 +382,33 @@ s0 sandbox resume sb_abc123`
       label: "Go",
       language: "go",
       code: `// Ensure watch directory exists
-_, err := sandbox.Mkdir(ctx, "/tmp/webhook-demo", true)
+_, err = sandbox.Mkdir(ctx, "/tmp/webhook-demo", true)
 if err != nil {
     log.Fatal(err)
 }
 
-// Trigger file.created and file.written events
+// Trigger file.modified events (with payload.event_type: "create", "write")
 _, err = sandbox.WriteFile(ctx, "/tmp/webhook-demo/file.txt", []byte("hello"))
 if err != nil {
     log.Fatal(err)
 }
 log.Println("File created/written - webhook triggered")
 
-// Trigger file.renamed event
+// Trigger file.modified event (with payload.event_type: "rename")
 _, err = sandbox.MoveFile(ctx, "/tmp/webhook-demo/file.txt", "/tmp/webhook-demo/file-renamed.txt")
 if err != nil {
     log.Fatal(err)
 }
 log.Println("File renamed - webhook triggered")
 
-// Trigger file.chmodded event
+// Trigger file.modified event (with payload.event_type: "chmod")
 _, err = sandbox.Cmd(ctx, \`/bin/sh -c "chmod 600 /tmp/webhook-demo/file-renamed.txt"\`)
 if err != nil {
     log.Fatal(err)
 }
 log.Println("File chmodded - webhook triggered")
 
-// Trigger file.removed event
+// Trigger file.modified event (with payload.event_type: "remove")
 _, err = sandbox.DeleteFile(ctx, "/tmp/webhook-demo/file-renamed.txt")
 if err != nil {
     log.Fatal(err)
@@ -527,19 +421,19 @@ log.Println("File removed - webhook triggered")`
       code: `# Ensure watch directory exists
 sandbox.mkdir("/tmp/webhook-demo", recursive=True)
 
-# Trigger file.created and file.written events
+# Trigger file.modified events (with payload.event_type: "create", "write")
 sandbox.write_file("/tmp/webhook-demo/file.txt", b"hello")
 print("File created/written - webhook triggered")
 
-# Trigger file.renamed event
+# Trigger file.modified event (with payload.event_type: "rename")
 sandbox.move_file("/tmp/webhook-demo/file.txt", "/tmp/webhook-demo/file-renamed.txt")
 print("File renamed - webhook triggered")
 
-# Trigger file.chmodded event
+# Trigger file.modified event (with payload.event_type: "chmod")
 sandbox.cmd('/bin/sh -c "chmod 600 /tmp/webhook-demo/file-renamed.txt"')
 print("File chmodded - webhook triggered")
 
-# Trigger file.removed event
+# Trigger file.modified event (with payload.event_type: "remove")
 sandbox.delete_file("/tmp/webhook-demo/file-renamed.txt")
 print("File removed - webhook triggered")`
     },
@@ -549,19 +443,19 @@ print("File removed - webhook triggered")`
       code: `// Ensure watch directory exists
 await sandbox.mkdir('/tmp/webhook-demo', true);
 
-// Trigger file.created and file.written events
+// Trigger file.modified events (with payload.event_type: "create", "write")
 await sandbox.writeFile('/tmp/webhook-demo/file.txt', 'hello');
 console.log('File created/written - webhook triggered');
 
-// Trigger file.renamed event
+// Trigger file.modified event (with payload.event_type: "rename")
 await sandbox.moveFile('/tmp/webhook-demo/file.txt', '/tmp/webhook-demo/file-renamed.txt');
 console.log('File renamed - webhook triggered');
 
-// Trigger file.chmodded event
+// Trigger file.modified event (with payload.event_type: "chmod")
 await sandbox.cmd('/bin/sh -c "chmod 600 /tmp/webhook-demo/file-renamed.txt"');
 console.log('File chmodded - webhook triggered');
 
-// Trigger file.removed event
+// Trigger file.modified event (with payload.event_type: "remove")
 await sandbox.deleteFile('/tmp/webhook-demo/file-renamed.txt');
 console.log('File removed - webhook triggered');`
     },
@@ -569,32 +463,67 @@ console.log('File removed - webhook triggered');`
       label: "CLI",
       language: "bash",
       code: `# Create watch directory
-s0 file mkdir sb_abc123 /tmp/webhook-demo
+s0 sandbox files mkdir -s sb_abc123 /tmp/webhook-demo --parents
 
-# Trigger file events
-s0 file write sb_abc123 /tmp/webhook-demo/file.txt --content "hello"
-s0 file move sb_abc123 /tmp/webhook-demo/file.txt /tmp/webhook-demo/file-renamed.txt
+# Trigger file.modified events
+s0 sandbox files write -s sb_abc123 /tmp/webhook-demo/file.txt --data "hello"
+s0 sandbox files mv -s sb_abc123 /tmp/webhook-demo/file.txt /tmp/webhook-demo/file-renamed.txt
 s0 sandbox exec sb_abc123 -- chmod 600 /tmp/webhook-demo/file-renamed.txt
-s0 file delete sb_abc123 /tmp/webhook-demo/file-renamed.txt`
+s0 sandbox files rm -s sb_abc123 /tmp/webhook-demo/file-renamed.txt`
     }
   ]}
 />
 
----
+### Agent Events
 
-## Best Practices
+Publish custom events from within the sandbox using the webhook publish API:
 
-<Callout variant="success">
-**Use a queue** - Webhook endpoints should respond quickly (within 5 seconds). Process events asynchronously using a message queue for reliability.
-</Callout>
-
-<Callout variant="warning">
-**Verify signatures** - Always verify the webhook signature to ensure requests are from Sandbox0.
-</Callout>
-
-<Callout variant="info">
-**Handle retries** - Sandbox0 retries failed webhook deliveries with exponential backoff. Make your endpoint idempotent.
-</Callout>
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `// Publish a custom agent event from within the sandbox
+_, err = sandbox.Run(ctx, "bash", \`curl -X POST http://localhost:49983/webhook/publish \\
+  -H "Content-Type: application/json" \\
+  -d '{"payload": {"message": "Task completed", "progress": 100}}'\`)
+if err != nil {
+    log.Fatal(err)
+}
+log.Println("Agent event published")`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `# Publish a custom agent event from within the sandbox
+sandbox.run(
+    "bash",
+    """curl -X POST http://localhost:49983/webhook/publish \\
+    -H "Content-Type: application/json" \\
+    -d '{"payload": {"message": "Task completed", "progress": 100}}'"""
+)
+print("Agent event published")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `// Publish a custom agent event from within the sandbox
+await sandbox.run('bash', \`curl -X POST http://localhost:49983/webhook/publish \\
+    -H "Content-Type: application/json" \\
+    -d '{"payload": {"message": "Task completed", "progress": 100}}'\`);
+console.log('Agent event published');`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `# Publish a custom agent event from within the sandbox
+# Using curl inside the sandbox
+s0 sandbox exec sb_abc123 -- curl -X POST http://localhost:49983/webhook/publish \\
+    -H "Content-Type: application/json" \\
+    -d '{"payload": {"message": "Task completed", "progress": 100}}'`
+    }
+  ]}
+/>
 
 ---
 

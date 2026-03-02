@@ -1701,6 +1701,12 @@ type GetApiV1SandboxesIdFilesStatParams struct {
 	Path FilePath `form:"path" json:"path"`
 }
 
+// DeleteApiV1SandboxvolumesIdParams defines parameters for DeleteApiV1SandboxvolumesId.
+type DeleteApiV1SandboxvolumesIdParams struct {
+	// Force Force delete even if volume has active mounts
+	Force *bool `form:"force,omitempty" json:"force,omitempty"`
+}
+
 // GetAuthOidcProviderCallbackParams defines parameters for GetAuthOidcProviderCallback.
 type GetAuthOidcProviderCallbackParams struct {
 	Code  string `form:"code" json:"code"`

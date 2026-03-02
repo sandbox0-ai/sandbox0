@@ -4,9 +4,9 @@ Volume Fork creates a new Volume from an existing Volume using JuiceFS Copy-on-W
 
 ## Why Use Fork?
 
-- **Fast Clone**: Create a new volume quickly without copying all data blocks
+- **Fast Clone**: Create a new Volume quickly without copying all data blocks
 - **Storage Efficient**: Source and fork share unchanged data blocks
-- **Write Isolation**: Writes to the fork do not affect the source volume
+- **Write Isolation**: Writes to the fork do not affect the source Volume
 - **Great for Branching**: Create per-task or per-experiment data branches
 
 ## How Fork Works
@@ -30,44 +30,118 @@ After writing in fork:
 ## API
 
 - **Endpoint**: `POST /api/v1/sandboxvolumes/{id}/fork`
-- **Path Param**: `id` = source volume id
-- **Request Body**: optional
-- **Response**: returns the new `SandboxVolume`, including `source_volume_id`
+- **Path Parameter**: `id` is the source Volume ID
+- **Request Body**: Optional, used to override inherited configuration from the source Volume
+- **Success Response**: `201 Created`, returns the new `SandboxVolume` including `source_volume_id`
+- **Common Errors**: `400` (invalid `access_mode`), `404` (source Volume not found or not visible to your team)
 
 ## Optional Request Fields
 
 | Field | Type | Description |
-|---|---|---|
-| `cache_size` | string | Cache size for the forked volume |
-| `prefetch` | integer | Prefetch blocks |
-| `buffer_size` | string | Buffer size |
-| `writeback` | boolean | Writeback cache switch |
-| `access_mode` | enum | Access mode for the forked volume, defaults to `RWO` |
+|------|------|-------------|
+| `access_mode` | enum | Access mode for the forked Volume. If omitted, defaults to `RWO` |
+| `cache_size` | string | Cache size for the forked Volume. If omitted, inherits from source Volume |
+| `buffer_size` | string | Buffer size for the forked Volume. If omitted, inherits from source Volume |
+| `prefetch` | integer | Number of blocks to prefetch. If omitted, inherits from source Volume |
+| `writeback` | boolean | Enable or disable write-back cache. If omitted, inherits from source Volume |
 
 ## Fork a Volume
 
 <Tabs
   tabs={[
-    { label: "Go", language: "go", code: "sourceID := \"vol_src_123\"\n\nforked, err := client.ForkVolume(ctx, sourceID, &apispec.ForkVolumeRequest{\n    AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeRWO),\n    CacheSize:  apispec.NewOptString(\"2G\"),\n    BufferSize: apispec.NewOptString(\"64M\"),\n    Prefetch:   apispec.NewOptInt(10),\n    Writeback:  apispec.NewOptBool(false),\n})\nif err != nil {\n    panic(err)\n}\n\nfmt.Printf(\"forked volume: %s\\n\", forked.ID)\nfmt.Printf(\"source volume: %s\\n\", forked.SourceVolumeID.Value)\n" },
-    { label: "Python", language: "python", code: "from sandbox0.apispec.models.fork_volume_request import ForkVolumeRequest\nfrom sandbox0.apispec.models.volume_access_mode import VolumeAccessMode\n\nsource_id = \"vol_src_123\"\n\nforked = client.volumes.fork(\n    source_id,\n    ForkVolumeRequest(\n        access_mode=VolumeAccessMode.RWO,\n        cache_size=\"2G\",\n        buffer_size=\"64M\",\n        prefetch=10,\n        writeback=False,\n    ),\n)\n\nprint(f\"forked volume: {forked.id}\")\nprint(f\"source volume: {forked.source_volume_id}\")\n" },
-    { label: "TypeScript", language: "typescript", code: "const sourceId = 'vol_src_123';\n\nconst forked = await client.volumes.fork(sourceId, {\n  accessMode: models.VolumeAccessMode.Rwo,\n  cacheSize: '2G',\n  bufferSize: '64M',\n  prefetch: 10,\n  writeback: false,\n});\n\nconsole.log(`forked volume: ${forked.id}`);\nconsole.log(`source volume: ${forked.sourceVolumeId}`);\n" }
+    {
+      label: "Go",
+      language: "go",
+      code: `sourceID := "vol_src_123"
+
+forked, err := client.ForkVolume(ctx, sourceID, &apispec.ForkVolumeRequest{
+    AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeRWO),
+    CacheSize:  apispec.NewOptString("2G"),
+    BufferSize: apispec.NewOptString("64M"),
+    Prefetch:   apispec.NewOptInt(10),
+    Writeback:  apispec.NewOptBool(false),
+})
+if err != nil {
+    panic(err)
+}
+
+fmt.Printf("Forked Volume: %s\\n", forked.ID)
+if sourceVolumeID, ok := forked.SourceVolumeID.Get(); ok {
+    fmt.Printf("Source Volume: %s\\n", sourceVolumeID)
+} else {
+    fmt.Println("Source Volume: <nil>")
+}`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0.apispec.models.fork_volume_request import ForkVolumeRequest
+from sandbox0.apispec.models.volume_access_mode import VolumeAccessMode
+from sandbox0.apispec.types import Unset
+
+source_id = "vol_src_123"
+
+forked = client.volumes.fork(
+    source_id,
+    ForkVolumeRequest(
+        access_mode=VolumeAccessMode.RWO,
+        cache_size="2G",
+        buffer_size="64M",
+        prefetch=10,
+        writeback=False,
+    ),
+)
+
+print(f"Forked Volume: {forked.id}")
+source_volume_id = forked.source_volume_id
+if isinstance(source_volume_id, Unset) or source_volume_id is None:
+    print("Source Volume: <nil>")
+else:
+    print(f"Source Volume: {source_volume_id}")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `import { models } from "sandbox0";
+
+const sourceId = "vol_src_123";
+
+const forked = await client.volumes.fork(sourceId, {
+    accessMode: models.VolumeAccessMode.Rwo,
+    cacheSize: "2G",
+    bufferSize: "64M",
+    prefetch: 10,
+    writeback: false,
+});
+
+console.log("Forked Volume:", forked.id);
+if (forked.sourceVolumeId) {
+    console.log("Source Volume:", forked.sourceVolumeId);
+} else {
+    console.log("Source Volume: <nil>");
+}`
+    }
   ]}
 />
 
 ## Verify Isolation
 
-1. Mount both source and forked volumes to a sandbox at different paths.
-2. Modify a file only in the forked volume.
-3. Read the same file from source volume and verify it is unchanged.
+1. Mount both the source and the forked Volume to a Sandbox at different paths.
+2. Modify a file only in the forked Volume.
+3. Read the same file from the source Volume and verify it is unchanged.
 
 <Callout variant="info">
-Fork uses COW at filesystem metadata layer, so unchanged data is shared and changed data is isolated.
+Fork uses COW at the filesystem metadata layer, so unchanged data is shared while changed data is isolated.
+</Callout>
+
+<Callout variant="info">
+Fork does not require the source Volume to be mounted.
 </Callout>
 
 ## Best Practices
 
-- Use fork for short-lived branches (feature experiments, data transformations, CI tasks)
-- Keep a clear naming convention for source/fork relationship
+- Use fork for short-lived branches, such as feature experiments, data transformations, and CI tasks
+- Keep a clear naming convention for source and fork relationships
 - Clean up unused forks to reduce metadata and management overhead
 
 ---
@@ -96,6 +170,6 @@ Fork uses COW at filesystem metadata layer, so unchanged data is shared and chan
     href="/docs/volume/mounts"
     cta="Learn More"
   >
-    Mount volumes into sandbox runtime
+    Mount Volumes into Sandbox runtime
   </LinkCard>
 </CardGrid>

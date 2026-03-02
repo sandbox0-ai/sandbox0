@@ -187,6 +187,7 @@ func (s *Server) deleteSandboxVolume(w http.ResponseWriter, r *http.Request) {
 	// Check for active mounts via repository
 	// Using 15 seconds as heartbeat timeout (same as coordinator.HeartbeatTimeout)
 	const heartbeatTimeout = 15
+	force := r.URL.Query().Get("force") == "true"
 	mounts, err := s.repo.GetActiveMounts(r.Context(), id, heartbeatTimeout)
 	if err != nil {
 		s.logger.WithError(err).Error("Failed to check active mounts")
@@ -194,14 +195,29 @@ func (s *Server) deleteSandboxVolume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(mounts) > 0 {
+	if len(mounts) > 0 && !force {
 		// Volume has active mounts, cannot delete
 		s.logger.WithField("volume_id", id).WithField("active_mounts", len(mounts)).Warn("Attempted to delete volume with active mounts")
 		_ = spec.WriteError(w, http.StatusConflict, spec.CodeConflict, "volume has active mounts", map[string]any{
 			"active_mounts": len(mounts),
 			"mounts":        mounts,
+			"hint":          "retry with force=true to remove orphan mount records",
 		})
 		return
+	}
+
+	if len(mounts) > 0 && force {
+		for _, mount := range mounts {
+			if err := s.repo.DeleteMount(r.Context(), id, mount.ClusterID, mount.PodID); err != nil {
+				s.logger.WithError(err).WithFields(map[string]any{
+					"volume_id":  id,
+					"cluster_id": mount.ClusterID,
+					"pod_id":     mount.PodID,
+				}).Error("Failed to delete mount during force delete")
+				_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "failed to cleanup mount records")
+				return
+			}
+		}
 	}
 
 	// No active mounts, proceed with deletion

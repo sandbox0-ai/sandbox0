@@ -40,5 +40,6 @@ func (g *ProcdTokenGenerator) GenerateToken(teamID, userID, sandboxID string) (s
 	// Permissions required by procd to access storage-proxy
 	return g.generator.Generate("storage-proxy", teamID, userID, internalauth.GenerateOptions{
 		Permissions: []string{"sandboxvolume:read", "sandboxvolume:write"},
+		SandboxID:   sandboxID,
 	})
 }

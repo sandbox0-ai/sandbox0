@@ -60,6 +60,7 @@ func TestValidatorValidate(t *testing.T) {
 
 	token, _ := generator.Generate("storage-proxy", "team-123", "user-456", GenerateOptions{
 		Permissions: []string{"sandboxvolume:read"},
+		SandboxID:   "sandbox-123",
 	})
 
 	claims, err := validator.Validate(token)
@@ -78,6 +79,10 @@ func TestValidatorValidate(t *testing.T) {
 
 	if claims.UserID != "user-456" {
 		t.Errorf("Expected user_id 'user-456', got '%s'", claims.UserID)
+	}
+
+	if claims.SandboxID != "sandbox-123" {
+		t.Errorf("Expected sandbox_id 'sandbox-123', got '%s'", claims.SandboxID)
 	}
 }
 

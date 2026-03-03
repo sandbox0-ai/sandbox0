@@ -1,116 +1,23 @@
 # Template
 
-A Template defines a reusable blueprint for creating [Sandboxes](/docs/sandbox). It specifies the container image, resource requirements, pool configuration, lifecycle policies, and other runtime settings.
+A Template is the blueprint for creating Sandboxes. It defines the container image, resource limits, warm pool size, default network policy, and lifecycle behavior. Every Sandbox is created from a Template.
 
-## What is a Template?
+## Template Types
 
-Templates provide:
+Sandbox0 has two categories of templates:
 
-- **Consistency**: Ensure all sandboxes created from a template have identical configurations
-- **Fast startup**: Pre-warmed sandbox pools enable &lt;200ms cold starts
-- **Reusability**: Define once, use across your organization
-- **Governance**: Control access with team-level visibility settings
+| Type | Description | Visibility |
+|------|-------------|------------|
+| **Builtin** | System-provided templates managed by the platform operator | Public — visible to all teams |
+| **Custom** | Templates created and owned by your team | Private — visible to your team only (configurable) |
 
-<Callout variant="info">
-Templates are immutable blueprints. When you update a template, existing sandboxes are not affected—only new sandboxes claimed after the update use the new configuration.
-</Callout>
-
----
-
-## Template Model
-
-### Key Fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `template_id` | string | Unique identifier for the template |
-| `scope` | string | Visibility scope (`public` or team-scoped) |
-| `team_id` | string | Team that owns this template |
-| `user_id` | string | User who created this template |
-| `spec` | object | Template specification (see [Spec](/docs/template/spec)) |
-| `created_at` | timestamp | Creation timestamp |
-| `updated_at` | timestamp | Last update timestamp |
-
-### Template Scope
-
-| Scope | Description |
-|-------|-------------|
-| `public` | Visible to all teams in the cluster |
-| Team-scoped | Visible only to the owning team and allowed teams |
-
----
-
-## List Templates
-
-List all templates available to your team.
-
-<Endpoint method="GET">
-/api/v1/templates
-</Endpoint>
-
-<Tabs
-  tabs={[
-    {
-      label: "Go",
-      language: "go",
-      code: `client, err := sandbox0.NewClient(
-    sandbox0.WithToken(os.Getenv("SANDBOX0_TOKEN")),
-)
-if err != nil {
-    log.Fatal(err)
-}
-
-templates, err := client.ListTemplate(ctx)
-if err != nil {
-    log.Fatal(err)
-}
-
-for _, tpl := range templates {
-    fmt.Printf("- %s (scope: %s)\\n", tpl.TemplateID, tpl.Scope)
-}`
-    },
-    {
-      label: "Python",
-      language: "python",
-      code: `from sandbox0 import Client
-
-client = Client(token=os.environ["SANDBOX0_TOKEN"])
-
-templates = client.list_templates()
-for tpl in templates:
-    print(f"- {tpl.template_id} (scope: {tpl.scope})")`
-    },
-    {
-      label: "TypeScript",
-      language: "typescript",
-      code: `import { Client } from 'sandbox0';
-
-const client = new Client({ token: process.env.SANDBOX0_TOKEN! });
-
-const response = await client.apispec.templates.apiV1TemplatesGet();
-const templates = response.data?.templates ?? [];
-for (const tpl of templates) {
-    console.log(\`- \${tpl.templateId} (scope: \${tpl.scope})\`);
-}`
-    },
-    {
-      label: "CLI",
-      language: "bash",
-      code: `s0 template list
-
-# Output:
-# default      public    2024-01-10T10:00:00Z
-# python-3.11  private   2024-01-12T14:30:00Z
-# node-20      private   2024-01-13T09:15:00Z`
-    }
-  ]}
-/>
+Builtin templates use curated public images and are ready to use immediately. Custom templates let you bring your own image, fine-tune resources, and set lifecycle defaults tailored to your workload.
 
 ---
 
 ## Create Template
 
-Create a new template with your desired configuration.
+Create a custom template for your team. The template spec is defined in a YAML file.
 
 <Endpoint method="POST">
 /api/v1/templates
@@ -118,111 +25,96 @@ Create a new template with your desired configuration.
 
 ### Request Body
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `template_id` | string | Yes | Unique template identifier |
-| `spec` | object | Yes | Template specification |
+| Field | Type | Description |
+|-------|------|-------------|
+| `template_id` | string | Unique identifier for the template (e.g., `my-python-env`) |
+| `spec` | object | Full template specification |
+
+<Callout variant="info">
+Template IDs must be unique within your team. Once created, the ID cannot be changed — create a new template if you need a different ID.
+</Callout>
+
+**Example spec file (`template.yaml`):**
+
+```yaml
+spec:
+    mainContainer:
+        image: python:3.12-slim
+        resources:
+            cpu: "1"
+            memory: 2Gi
+    pool:
+        minIdle: 2
+        maxIdle: 10
+    lifecycle:
+        defaultTTL: 600
+        maxTTL: 3600
+```
 
 <Tabs
   tabs={[
     {
       label: "Go",
       language: "go",
-      code: `spec := &sandbox0.SandboxTemplateSpec{
-    DisplayName: sandbox0.NewOptString("Python 3.11"),
-    Description: sandbox0.NewOptString("Python 3.11 runtime environment"),
-    MainContainer: &sandbox0.ContainerSpec{
-        Image: "python:3.11-slim",
-        Resources: &sandbox0.ResourceQuota{
-            Cpu:    sandbox0.NewOptString("1"),
-            Memory: sandbox0.NewOptString("512Mi"),
+      code: `tpl, err := client.CreateTemplate(ctx, apispec.TemplateCreateRequest{
+    TemplateID: "my-python-env",
+    Spec: apispec.SandboxTemplateSpec{
+        MainContainer: apispec.ContainerSpec{
+            Image: "python:3.12-slim",
+            Resources: apispec.ResourceQuota{
+                CPU:    apispec.NewOptString("1"),
+                Memory: apispec.NewOptString("2Gi"),
+            },
+        },
+        Pool: apispec.PoolStrategy{
+            MinIdle: 2,
+            MaxIdle: 10,
         },
     },
-    Pool: &sandbox0.PoolStrategy{
-        MinIdle:   1,
-        MaxIdle:   5,
-        AutoScale: true,
-    },
-    Lifecycle: &sandbox0.LifecyclePolicy{
-        DefaultTTL: sandbox0.NewOptInt32(3600),
-        MaxTTL:     sandbox0.NewOptInt32(7200),
-    },
-    Public: sandbox0.NewOptBool(false),
-}
-
-template, err := client.CreateTemplate(ctx, "python-3.11", spec)
+})
 if err != nil {
     log.Fatal(err)
 }
-fmt.Printf("Created template: %s\\n", template.TemplateID)`
+fmt.Printf("Template created: %s\\n", tpl.TemplateID)`
     },
     {
       label: "Python",
       language: "python",
-      code: `spec = {
-    "displayName": "Python 3.11",
-    "description": "Python 3.11 runtime environment",
-    "mainContainer": {
-        "image": "python:3.11-slim",
-        "resources": {
-            "cpu": "1",
-            "memory": "512Mi",
-        },
-    },
-    "pool": {
-        "minIdle": 1,
-        "maxIdle": 5,
-        "autoScale": True,
-    },
-    "lifecycle": {
-        "defaultTTL": 3600,
-        "maxTTL": 7200,
-    },
-    "public": False,
-}
+      code: `from sandbox0.apispec.models.template_create_request import TemplateCreateRequest
+from sandbox0.apispec.models.sandbox_template_spec import SandboxTemplateSpec
 
-template = client.create_template("python-3.11", spec)
-print(f"Created template: {template.template_id}")`
+tpl = client.templates.create(TemplateCreateRequest(
+    template_id="my-python-env",
+    spec=SandboxTemplateSpec.from_dict({
+        "mainContainer": {
+            "image": "python:3.12-slim",
+            "resources": {"cpu": "1", "memory": "2Gi"},
+        },
+        "pool": {"minIdle": 2, "maxIdle": 10},
+    }),
+))
+print(f"Template created: {tpl.template_id}")`
     },
     {
       label: "TypeScript",
       language: "typescript",
-      code: `const spec = {
-    displayName: 'Python 3.11',
-    description: 'Python 3.11 runtime environment',
-    mainContainer: {
-        image: 'python:3.11-slim',
-        resources: {
-            cpu: '1',
-            memory: '512Mi',
+      code: `const tpl = await client.templates.create({
+    templateId: "my-python-env",
+    spec: {
+        mainContainer: {
+            image: "python:3.12-slim",
+            resources: { cpu: "1", memory: "2Gi" },
         },
+        pool: { minIdle: 2, maxIdle: 10 },
     },
-    pool: {
-        minIdle: 1,
-        maxIdle: 5,
-        autoScale: true,
-    },
-    lifecycle: {
-        defaultTtl: 3600,
-        maxTtl: 7200,
-    },
-    public: false,
-};
-
-const template = await client.createTemplate('python-3.11', spec);
-console.log('Created template:', template.templateId);`
+});
+console.log("Template created:", tpl.templateId);`
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 template create python-3.11 \\
-    --image python:3.11-slim \\
-    --cpu 1 --memory 512Mi \\
-    --min-idle 1 --max-idle 5 \\
-    --default-ttl 3600 --max-ttl 7200
-
-# Output:
-# Template created: python-3.11`
+      code: `# Create from a YAML spec file
+s0 template create --id my-python-env --spec-file template.yaml`
     }
   ]}
 />
@@ -231,7 +123,7 @@ console.log('Created template:', template.templateId);`
 
 ## Get Template
 
-Retrieve details of a specific template.
+Retrieve a specific template by ID. Your team can access both its own templates and builtin templates.
 
 <Endpoint method="GET">
 /api/v1/templates/{'{id}'}
@@ -242,43 +134,75 @@ Retrieve details of a specific template.
     {
       label: "Go",
       language: "go",
-      code: `template, err := client.GetTemplate(ctx, "python-3.11")
+      code: `tpl, err := client.GetTemplate(ctx, "my-python-env")
 if err != nil {
     log.Fatal(err)
 }
-fmt.Printf("Template: %s\\n", template.TemplateID)
-if name, ok := template.Spec.DisplayName.Get(); ok {
-    fmt.Printf("Display Name: %s\\n", name)
+fmt.Printf("Template: %s (scope: %s)\\n", tpl.TemplateID, tpl.Scope)`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `tpl = client.templates.get("my-python-env")
+print(f"Template: {tpl.template_id} (scope: {tpl.scope})")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const tpl = await client.templates.get("my-python-env");
+console.log("Template:", tpl.templateId, "scope:", tpl.scope);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 template get my-python-env`
+    }
+  ]}
+/>
+
+---
+
+## List Templates
+
+List all templates visible to your team — including your team's custom templates and all public builtin templates.
+
+<Endpoint method="GET">
+/api/v1/templates
+</Endpoint>
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `templates, err := client.ListTemplate(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+for _, tpl := range templates {
+    display, _ := tpl.Spec.DisplayName.Get()
+    fmt.Printf("- %s (%s) scope=%s\\n", tpl.TemplateID, display, tpl.Scope)
 }`
     },
     {
       label: "Python",
       language: "python",
-      code: `template = client.get_template("python-3.11")
-print(f"Template: {template.template_id}")
-if template.spec.display_name:
-    print(f"Display Name: {template.spec.display_name}")`
+      code: `templates = client.templates.list()
+for tpl in templates:
+    print(f"- {tpl.template_id} ({tpl.scope})")`
     },
     {
       label: "TypeScript",
       language: "typescript",
-      code: `const template = await client.getTemplate('python-3.11');
-console.log('Template:', template.templateId);
-if (template.spec.displayName) {
-    console.log('Display Name:', template.spec.displayName);
+      code: `const templates = await client.templates.list();
+for (const tpl of templates) {
+    console.log(\`- \${tpl.templateId} (\${tpl.scope})\`);
 }`
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 template get python-3.11
-
-# Output:
-# ID: python-3.11
-# Display Name: Python 3.11
-# Image: python:3.11-slim
-# Pool: 1-5 (auto-scale)
-# Scope: private`
+      code: `s0 template list`
     }
   ]}
 />
@@ -287,14 +211,14 @@ if (template.spec.displayName) {
 
 ## Update Template
 
-Update an existing template's specification.
+Update the spec of an existing custom template. The update triggers a reconciliation across all clusters — running sandboxes are not affected.
 
 <Endpoint method="PUT">
 /api/v1/templates/{'{id}'}
 </Endpoint>
 
 <Callout variant="warning">
-Updating a template does not affect existing sandboxes. New sandboxes claimed after the update will use the new configuration.
+Updating a template does not affect already-running Sandboxes. New Sandboxes claimed after the update will use the new spec. Idle pods in the pre-warm pool are recycled and replaced with pods matching the new spec.
 </Callout>
 
 <Tabs
@@ -302,61 +226,62 @@ Updating a template does not affect existing sandboxes. New sandboxes claimed af
     {
       label: "Go",
       language: "go",
-      code: `// Get current template
-template, err := client.GetTemplate(ctx, "python-3.11")
+      code: `tpl, err := client.UpdateTemplate(ctx, "my-python-env", apispec.TemplateUpdateRequest{
+    Spec: apispec.SandboxTemplateSpec{
+        MainContainer: apispec.ContainerSpec{
+            Image: "python:3.12-slim",
+            Resources: apispec.ResourceQuota{
+                CPU:    apispec.NewOptString("2"),
+                Memory: apispec.NewOptString("4Gi"),
+            },
+        },
+        Pool: apispec.PoolStrategy{
+            MinIdle: 3,
+            MaxIdle: 10,
+        },
+    },
+})
 if err != nil {
     log.Fatal(err)
 }
-
-// Update spec
-desc := "Updated description"
-template.Spec.Description = &desc
-template.Spec.Pool.MaxIdle = 10
-
-// Save changes
-updated, err := client.UpdateTemplate(ctx, "python-3.11", template.Spec)
-if err != nil {
-    log.Fatal(err)
-}
-fmt.Printf("Updated template: %s\\n", updated.TemplateID)`
+fmt.Printf("Template updated: %s\\n", tpl.TemplateID)`
     },
     {
       label: "Python",
       language: "python",
-      code: `# Get current template
-template = client.get_template("python-3.11")
-
-# Update spec
-template.spec.description = "Updated description"
-template.spec.pool.max_idle = 10
-
-# Save changes
-updated = client.update_template("python-3.11", template.spec)
-print(f"Updated template: {updated.template_id}")`
+      code: `tpl = client.templates.update(
+    "my-python-env",
+    TemplateUpdateRequest(
+        spec=SandboxTemplateSpec.from_dict({
+            "mainContainer": {
+                "image": "python:3.12-slim",
+                "resources": {"cpu": "2", "memory": "4Gi"},
+            },
+            "pool": {"minIdle": 3, "maxIdle": 10},
+        }),
+    ),
+)
+print(f"Template updated: {tpl.template_id}")`
     },
     {
       label: "TypeScript",
       language: "typescript",
-      code: `// Get current template
-const template = await client.getTemplate('python-3.11');
-
-// Update spec
-template.spec.description = 'Updated description';
-template.spec.pool.maxIdle = 10;
-
-// Save changes
-const updated = await client.updateTemplate('python-3.11', template.spec);
-console.log('Updated template:', updated.templateId);`
+      code: `const tpl = await client.templates.update("my-python-env", {
+    spec: {
+        mainContainer: {
+            image: "python:3.12-slim",
+            resources: { cpu: "2", memory: "4Gi" },
+        },
+        pool: { minIdle: 3, maxIdle: 10 },
+    },
+});
+console.log("Template updated:", tpl.templateId);`
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 template update python-3.11 \\
-    --description "Updated description" \\
-    --max-idle 10
-
-# Output:
-# Template updated: python-3.11`
+      code: `# Update from an updated spec file
+s0 template update my-python-env --spec-file template.yaml`
     }
   ]}
 />
@@ -365,14 +290,14 @@ console.log('Updated template:', updated.templateId);`
 
 ## Delete Template
 
-Delete a template. Sandboxes created from this template will continue to run.
+Delete a custom template. All cluster allocations for the template are cleaned up via reconciliation.
 
 <Endpoint method="DELETE">
 /api/v1/templates/{'{id}'}
 </Endpoint>
 
-<Callout variant="danger">
-Deleting a template is irreversible. You cannot create new sandboxes from a deleted template.
+<Callout variant="warning">
+Deleting a template does not terminate running Sandboxes created from it, but no new Sandboxes can be created from the deleted template.
 </Callout>
 
 <Tabs
@@ -380,7 +305,7 @@ Deleting a template is irreversible. You cannot create new sandboxes from a dele
     {
       label: "Go",
       language: "go",
-      code: `_, err := client.DeleteTemplate(ctx, "python-3.11")
+      code: `_, err = client.DeleteTemplate(ctx, "my-python-env")
 if err != nil {
     log.Fatal(err)
 }
@@ -389,22 +314,19 @@ fmt.Println("Template deleted")`
     {
       label: "Python",
       language: "python",
-      code: `client.delete_template("python-3.11")
+      code: `client.templates.delete("my-python-env")
 print("Template deleted")`
     },
     {
       label: "TypeScript",
       language: "typescript",
-      code: `await client.deleteTemplate('python-3.11');
-console.log('Template deleted');`
+      code: `await client.templates.delete("my-python-env");
+console.log("Template deleted");`
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 template delete python-3.11
-
-# Output:
-# Template deleted: python-3.11`
+      code: `s0 template delete my-python-env`
     }
   ]}
 />
@@ -415,19 +337,27 @@ console.log('Template deleted');`
 
 <CardGrid>
   <LinkCard
-    title="Template Spec"
-    href="/docs/template/spec"
+    title="Custom Images"
+    href="/docs/template/images"
     cta="Learn More"
   >
-    Deep dive into SandboxTemplateSpec configuration options
+    Build and push private container images for your templates
   </LinkCard>
 
   <LinkCard
-    title="Images & Registry"
-    href="/docs/template/image"
+    title="Warm Pool"
+    href="/docs/template/pool"
     cta="Learn More"
   >
-    Configure container images and registry credentials
+    Pre-warm idle sandboxes for sub-200ms cold start
+  </LinkCard>
+
+  <LinkCard
+    title="Configuration"
+    href="/docs/template/configuration"
+    cta="Learn More"
+  >
+    Full reference for all template spec fields
   </LinkCard>
 
   <LinkCard
@@ -435,6 +365,6 @@ console.log('Template deleted');`
     href="/docs/sandbox"
     cta="Learn More"
   >
-    Create and manage sandboxes from templates
+    Create sandboxes from templates
   </LinkCard>
 </CardGrid>

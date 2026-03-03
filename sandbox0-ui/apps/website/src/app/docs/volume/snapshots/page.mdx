@@ -37,49 +37,43 @@ A Snapshot is a point-in-time, read-only copy of a Volume. Snapshots are designe
     {
       label: "Go",
       language: "go",
-      code: `volumeID := "vol_abc123xyz"
-
-// Create snapshot with name only
-snapshot, err := client.CreateVolumeSnapshot(ctx, volumeID, apispec.CreateSnapshotRequest{
-    Name: "v1.0-release",
+      code: `volume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{
+    AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeRWX),
+    CacheSize:  apispec.NewOptString("1G"),
+    BufferSize: apispec.NewOptString("128M"),
 })
 if err != nil {
-    panic(err)
+    log.Fatal(err)
 }
-fmt.Printf("Snapshot created: %s\\n", snapshot.ID)
+fmt.Printf("Volume ID: %s\\n", volume.ID)
 
 // Create snapshot with description
-snapshot, err = client.CreateVolumeSnapshot(ctx, volumeID, apispec.CreateSnapshotRequest{
+snapshot, err := client.CreateVolumeSnapshot(ctx, volume.ID, apispec.CreateSnapshotRequest{
     Name:        "v1.1-beta",
     Description: apispec.NewOptString("Feature: Added user authentication module"),
 })
 if err != nil {
     panic(err)
 }
-fmt.Printf("Snapshot created: %s (%s)\\n", snapshot.ID, snapshot.Name)
-`
+fmt.Printf("Snapshot created: %s (%s)\\n", snapshot.ID, snapshot.Name)`
     },
     {
       label: "Python",
       language: "python",
-      code: `import os
-from sandbox0 import Client
-from sandbox0.apispec.models.create_snapshot_request import CreateSnapshotRequest
+      code: `from sandbox0.apispec.models.create_snapshot_request import CreateSnapshotRequest
+from sandbox0.apispec.models.create_sandbox_volume_request import CreateSandboxVolumeRequest
+from sandbox0.apispec.models.volume_access_mode import VolumeAccessMode
 
-client = Client(token=os.environ["SANDBOX0_TOKEN"])
-
-volume_id = "vol_abc123xyz"
-
-# Create snapshot with name only
-snapshot = client.volumes.create_snapshot(
-    volume_id,
-    CreateSnapshotRequest(name="v1.0-release"),
-)
-print(f"Snapshot created: {snapshot.id}")
+volume = client.volumes.create(CreateSandboxVolumeRequest(
+    access_mode=VolumeAccessMode.RWX,
+    cache_size="1G",
+    buffer_size="128M",
+))
+print(f"Volume ID: {volume.id}")
 
 # Create snapshot with description
 snapshot = client.volumes.create_snapshot(
-    volume_id,
+    volume.id,
     CreateSnapshotRequest(
         name="v1.1-beta",
         description="Feature: Added user authentication module",
@@ -90,40 +84,33 @@ print(f"Snapshot created: {snapshot.id} ({snapshot.name})")`
     {
       label: "TypeScript",
       language: "typescript",
-      code: `import { Client } from "sandbox0";
-
-const client = new Client({
-    token: process.env.SANDBOX0_TOKEN!,
+      code: `var volume = await client.volumes.create({
+    accessMode: models.VolumeAccessMode.Rwx,
+    cacheSize: "1G",
+    bufferSize: "128M",
 });
-
-const volumeId = "vol_abc123xyz";
-
-// Create snapshot with name only
-const snapshot = await client.volumes.createSnapshot(volumeId, {
-    name: "v1.0-release",
-});
-console.log("Snapshot created:", snapshot.id);
+console.log("Volume ID:", volume.id);
 
 // Create snapshot with description
-const snapshotWithDesc = await client.volumes.createSnapshot(volumeId, {
+var snapshot = await client.volumes.createSnapshot(volume.id, {
     name: "v1.1-beta",
     description: "Feature: Added user authentication module",
 });
-console.log("Snapshot created:", snapshotWithDesc.id, snapshotWithDesc.name);`
+console.log("Snapshot created:", snapshot.id, snapshot.name);`
     },
     {
       label: "CLI",
       language: "bash",
       code: `# Create snapshot with name only
-s0 snapshot create vol_abc123xyz --name "v1.0-release"
+s0 volume snapshot create vol_abc123xyz --name "v1.0-release"
 
 # Create snapshot with description
-s0 snapshot create vol_abc123xyz \
+s0 volume snapshot create vol_abc123xyz \
   --name "v1.1-beta" \
   --description "Feature: Added user authentication module"
 
 # For automation scripts, prefer JSON output:
-s0 snapshot create vol_abc123xyz --name "v1.2-prod" -o json`
+s0 volume snapshot create vol_abc123xyz --name "v1.2-prod" -o json`
     }
   ]}
 />
@@ -139,30 +126,19 @@ s0 snapshot create vol_abc123xyz --name "v1.2-prod" -o json`
     {
       label: "Go",
       language: "go",
-      code: `volumeID := "vol_abc123xyz"
-
-snapshots, err := client.ListVolumeSnapshots(ctx, volumeID)
+      code: `snapshots, err := client.ListVolumeSnapshots(ctx, volume.ID)
 if err != nil {
     panic(err)
 }
-
 fmt.Printf("Total snapshots: %d\\n", len(snapshots))
 for _, snap := range snapshots {
-    fmt.Printf(
-        "  - %s: %s (size_bytes=%d)\\n",
-        snap.ID,
-        snap.Name,
-        snap.SizeBytes,
-    )
+    fmt.Printf("  - %s: %s (size_bytes=%d)\\n", snap.ID, snap.Name, snap.SizeBytes)
 }`
     },
     {
       label: "Python",
       language: "python",
-      code: `volume_id = "vol_abc123xyz"
-
-snapshots = client.volumes.list_snapshots(volume_id)
-
+      code: `snapshots = client.volumes.list_snapshots(volume.id)
 print(f"Total snapshots: {len(snapshots)}")
 for snap in snapshots:
     print(f"  - {snap.id}: {snap.name} (size_bytes={snap.size_bytes})")`
@@ -170,10 +146,7 @@ for snap in snapshots:
     {
       label: "TypeScript",
       language: "typescript",
-      code: `const volumeId = "vol_abc123xyz";
-
-const snapshots = await client.volumes.listSnapshots(volumeId);
-
+      code: `const snapshots = await client.volumes.listSnapshots(volume.id);
 console.log("Total snapshots:", snapshots.length);
 for (const snap of snapshots) {
     console.log(\`  - \${snap.id}: \${snap.name} (size_bytes=\${snap.sizeBytes})\`);
@@ -182,12 +155,7 @@ for (const snap of snapshots) {
     {
       label: "CLI",
       language: "bash",
-      code: `s0 snapshot list vol_abc123xyz
-
-# Output (table):
-# ID                NAME           SIZE    CREATED
-# snap_def456uvw    v1.0-release   0 bytes 2024-01-15T10:30:00Z
-# snap_ghi789rst    v1.1-beta      0 bytes 2024-01-16T14:20:00Z`
+      code: `s0 volume snapshot list vol_abc123xyz`
     }
   ]}
 />
@@ -199,14 +167,10 @@ for (const snap of snapshots) {
     {
       label: "Go",
       language: "go",
-      code: `volumeID := "vol_abc123xyz"
-snapshotID := "snap_def456uvw"
-
-snapshot, err := client.GetVolumeSnapshot(ctx, volumeID, snapshotID)
+      code: `snapshot, err = client.GetVolumeSnapshot(ctx, volume.ID, snapshot.ID)
 if err != nil {
     panic(err)
 }
-
 fmt.Printf("Snapshot ID: %s\\n", snapshot.ID)
 fmt.Printf("Name: %s\\n", snapshot.Name)
 fmt.Printf("Description: %s\\n", snapshot.Description.Value)
@@ -216,11 +180,7 @@ fmt.Printf("Created At: %s\\n", snapshot.CreatedAt)`
     {
       label: "Python",
       language: "python",
-      code: `volume_id = "vol_abc123xyz"
-snapshot_id = "snap_def456uvw"
-
-snapshot = client.volumes.get_snapshot(volume_id, snapshot_id)
-
+      code: `snapshot = client.volumes.get_snapshot(volume.id, snapshot.id)
 print(f"Snapshot ID: {snapshot.id}")
 print(f"Name: {snapshot.name}")
 print(f"Description: {snapshot.description}")
@@ -230,11 +190,7 @@ print(f"Created At: {snapshot.created_at}")`
     {
       label: "TypeScript",
       language: "typescript",
-      code: `const volumeId = "vol_abc123xyz";
-const snapshotId = "snap_def456uvw";
-
-const snapshot = await client.volumes.getSnapshot(volumeId, snapshotId);
-
+      code: `snapshot = await client.volumes.getSnapshot(volume.id, snapshot.id);
 console.log("Snapshot ID:", snapshot.id);
 console.log("Name:", snapshot.name);
 console.log("Description:", snapshot.description);
@@ -244,15 +200,7 @@ console.log("Created At:", snapshot.createdAt);`
     {
       label: "CLI",
       language: "bash",
-      code: `s0 snapshot get vol_abc123xyz snap_def456uvw
-
-# Output:
-# ID: snap_def456uvw
-# Volume ID: vol_abc123xyz
-# Name: v1.0-release
-# Description: Initial release version
-# Size: 0 bytes
-# Created: 2024-01-15T10:30:00Z`
+      code: `s0 volume snapshot get vol_abc123xyz snap_def456uvw`
     }
   ]}
 />
@@ -274,19 +222,8 @@ Restore is irreversible. All data changes made after the snapshot was created ar
     {
       label: "Go",
       language: "go",
-      code: `volumeID := "vol_abc123xyz"
-snapshotID := "snap_def456uvw"
-
-// Create backup snapshot before restore
-_, err := client.CreateVolumeSnapshot(ctx, volumeID, apispec.CreateSnapshotRequest{
-    Name: "pre-restore-backup",
-})
-if err != nil {
-    panic(err)
-}
-
-// Execute restore
-result, err := client.RestoreVolumeSnapshot(ctx, volumeID, snapshotID)
+      code: `// Execute restore
+result, err := client.RestoreVolumeSnapshot(ctx, volume.ID, snapshot.ID)
 if err != nil {
     panic(err)
 }
@@ -299,19 +236,14 @@ fmt.Printf("Volume restore status: %s\\n", status)`
     {
       label: "Python",
       language: "python",
-      code: `from sandbox0.apispec.models.create_snapshot_request import CreateSnapshotRequest
-
-volume_id = "vol_abc123xyz"
-snapshot_id = "snap_def456uvw"
-
-# Create backup snapshot before restore
+      code: `# Create backup snapshot before restore
 client.volumes.create_snapshot(
-    volume_id,
+    volume.id,
     CreateSnapshotRequest(name="pre-restore-backup"),
 )
 
 # Execute restore
-result = client.volumes.restore_snapshot(volume_id, snapshot_id)
+result = client.volumes.restore_snapshot(volume.id, snapshot.id)
 print(f"Restore success: {result.success}")
 if hasattr(result.data, "status"):
     print(f"Restore status: {result.data.status}")`
@@ -319,16 +251,8 @@ if hasattr(result.data, "status"):
     {
       label: "TypeScript",
       language: "typescript",
-      code: `const volumeId = "vol_abc123xyz";
-const snapshotId = "snap_def456uvw";
-
-// Create backup snapshot before restore
-await client.volumes.createSnapshot(volumeId, {
-    name: "pre-restore-backup",
-});
-
-// Execute restore
-const result = await client.volumes.restoreSnapshot(volumeId, snapshotId);
+      code: `// Execute restore
+const result = await client.volumes.restoreSnapshot(volume.id, snapshot.id);
 console.log("Restore success:", result.success);
 if (result.data?.status) {
     console.log("Restore status:", result.data.status);
@@ -338,13 +262,10 @@ if (result.data?.status) {
       label: "CLI",
       language: "bash",
       code: `# Create backup snapshot before restore
-s0 snapshot create vol_abc123xyz --name "pre-restore-backup"
+s0 volume snapshot create vol_abc123xyz --name "pre-restore-backup"
 
 # Execute restore
-s0 snapshot restore vol_abc123xyz snap_def456uvw
-
-# Output:
-# Snapshot snap_def456uvw restored successfully`
+s0 volume snapshot restore vol_abc123xyz snap_def456uvw`
     }
   ]}
 />
@@ -360,10 +281,7 @@ Delete is idempotent in the current infra implementation: deleting an already-mi
     {
       label: "Go",
       language: "go",
-      code: `volumeID := "vol_abc123xyz"
-snapshotID := "snap_def456uvw"
-
-_, err := client.DeleteVolumeSnapshot(ctx, volumeID, snapshotID)
+      code: `_, err = client.DeleteVolumeSnapshot(ctx, volume.ID, snapshot.ID)
 if err != nil {
     panic(err)
 }
@@ -372,28 +290,19 @@ fmt.Println("Snapshot deleted")`
     {
       label: "Python",
       language: "python",
-      code: `volume_id = "vol_abc123xyz"
-snapshot_id = "snap_def456uvw"
-
-client.volumes.delete_snapshot(volume_id, snapshot_id)
+      code: `client.volumes.delete_snapshot(volume.id, snapshot.id)
 print("Snapshot deleted")`
     },
     {
       label: "TypeScript",
       language: "typescript",
-      code: `const volumeId = "vol_abc123xyz";
-const snapshotId = "snap_def456uvw";
-
-await client.volumes.deleteSnapshot(volumeId, snapshotId);
+      code: `await client.volumes.deleteSnapshot(volume.id, snapshot.id);
 console.log("Snapshot deleted");`
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 snapshot delete vol_abc123xyz snap_def456uvw
-
-# Output:
-# Snapshot snap_def456uvw deleted successfully`
+      code: `s0 volume snapshot delete vol_abc123xyz snap_def456uvw`
     }
   ]}
 />
@@ -404,37 +313,17 @@ Deleting a snapshot does not affect current Volume data. The live Volume state r
 
 ---
 
-## Best Practices
-
-### Naming Conventions
-
-<Callout variant="info">
-Use predictable names so rollback points are obvious:
-- Version-based: `v1.0.0`, `v1.1.0-beta`, `v2.0-rc1`
-- Time-based: `2026-03-02-daily`, `before-migration`
-- Event-based: `pre-deploy`, `post-cleanup`, `client-demo`
-</Callout>
-
-### Regular Cleanup
-
-<Callout variant="warning">
-Snapshots consume storage. Define retention policies such as:
-- Keep the latest N snapshots
-- Keep snapshots for a fixed time window
-- Remove snapshots marked deprecated
-</Callout>
-
-### Backup Before Restore
-
-<Callout variant="danger">
-Restore is irreversible. Always create a new snapshot of the current state before rollback.
-</Callout>
-
----
-
 ## Next Steps
 
 <CardGrid>
+  <LinkCard
+    title="Volume Fork"
+    href="/docs/volume/fork"
+    cta="Learn More"
+  >
+    Clone a volume with Copy-on-Write isolation
+  </LinkCard>
+
   <LinkCard
     title="Volume Mounts"
     href="/docs/volume/mounts"
@@ -451,11 +340,4 @@ Restore is irreversible. Always create a new snapshot of the current state befor
     Understand the full volume lifecycle and configuration
   </LinkCard>
 
-  <LinkCard
-    title="Volume Fork"
-    href="/docs/volume/fork"
-    cta="Learn More"
-  >
-    Clone a volume with Copy-on-Write isolation
-  </LinkCard>
 </CardGrid>

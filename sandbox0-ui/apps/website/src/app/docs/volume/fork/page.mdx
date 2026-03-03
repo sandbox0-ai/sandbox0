@@ -52,9 +52,7 @@ After writing in fork:
     {
       label: "Go",
       language: "go",
-      code: `sourceID := "vol_src_123"
-
-forked, err := client.ForkVolume(ctx, sourceID, &apispec.ForkVolumeRequest{
+      code: `forked, err := client.ForkVolume(ctx, volume.ID, &apispec.ForkVolumeRequest{
     AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeRWO),
     CacheSize:  apispec.NewOptString("2G"),
     BufferSize: apispec.NewOptString("64M"),
@@ -65,9 +63,9 @@ if err != nil {
     panic(err)
 }
 
-fmt.Printf("Forked Volume: %s\\n", forked.ID)
+fmt.Printf("Forked Volume: %s\n", forked.ID)
 if sourceVolumeID, ok := forked.SourceVolumeID.Get(); ok {
-    fmt.Printf("Source Volume: %s\\n", sourceVolumeID)
+    fmt.Printf("Source Volume: %s\n", sourceVolumeID)
 } else {
     fmt.Println("Source Volume: <nil>")
 }`
@@ -76,13 +74,10 @@ if sourceVolumeID, ok := forked.SourceVolumeID.Get(); ok {
       label: "Python",
       language: "python",
       code: `from sandbox0.apispec.models.fork_volume_request import ForkVolumeRequest
-from sandbox0.apispec.models.volume_access_mode import VolumeAccessMode
 from sandbox0.apispec.types import Unset
 
-source_id = "vol_src_123"
-
 forked = client.volumes.fork(
-    source_id,
+    volume.id,
     ForkVolumeRequest(
         access_mode=VolumeAccessMode.RWO,
         cache_size="2G",
@@ -102,11 +97,7 @@ else:
     {
       label: "TypeScript",
       language: "typescript",
-      code: `import { models } from "sandbox0";
-
-const sourceId = "vol_src_123";
-
-const forked = await client.volumes.fork(sourceId, {
+      code: `const forked = await client.volumes.fork(volume.id, {
     accessMode: models.VolumeAccessMode.Rwo,
     cacheSize: "2G",
     bufferSize: "64M",
@@ -120,6 +111,20 @@ if (forked.sourceVolumeId) {
 } else {
     console.log("Source Volume: <nil>");
 }`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `# Fork a volume with default settings
+s0 volume fork <source-volume-id>
+
+# Fork with configuration overrides
+s0 volume fork <source-volume-id> \\
+    --access-mode RWX \\
+    --cache-size 2G \\
+    --buffer-size 64M \\
+    --prefetch 10 \\
+    --writeback false`
     }
   ]}
 />
@@ -138,38 +143,32 @@ Fork uses COW at the filesystem metadata layer, so unchanged data is shared whil
 Fork does not require the source Volume to be mounted.
 </Callout>
 
-## Best Practices
-
-- Use fork for short-lived branches, such as feature experiments, data transformations, and CI tasks
-- Keep a clear naming convention for source and fork relationships
-- Clean up unused forks to reduce metadata and management overhead
-
 ---
 
 ## Next Steps
 
 <CardGrid>
   <LinkCard
-    title="Volume Overview"
-    href="/docs/volume"
+    title="Template"
+    href="/docs/template"
     cta="Learn More"
   >
-    Volume lifecycle and configuration
+    Define reusable blueprints for creating Sandboxes
   </LinkCard>
 
   <LinkCard
-    title="Snapshots"
-    href="/docs/volume/snapshots"
+    title="Template Spec"
+    href="/docs/template/spec"
     cta="Learn More"
   >
-    Create and restore point-in-time snapshots
+    Deep dive into SandboxTemplateSpec configuration options
   </LinkCard>
 
   <LinkCard
-    title="Volume Mounts"
-    href="/docs/volume/mounts"
+    title="Images & Registry"
+    href="/docs/template/image"
     cta="Learn More"
   >
-    Mount Volumes into Sandbox runtime
+    Configure container images and registry credentials
   </LinkCard>
 </CardGrid>

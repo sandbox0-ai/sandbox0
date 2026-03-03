@@ -1,0 +1,138 @@
+# Warm Pool
+
+Sandbox0 achieves sub-200ms sandbox creation by maintaining a pool of pre-warmed idle pods for each template. When you claim a sandbox, an idle pod is immediately assigned instead of waiting for a cold container start.
+
+## How the Pool Works
+
+```
+Template: my-python-env (minIdle=3, maxIdle=10)
+
+  Pre-warm Pool (idle pods)        Active Sandboxes
+  ┌──────────┐                     ┌──────────────────┐
+  │  pod-1   │  ←── claim ──────►  │  sandbox sb_abc  │
+  │  pod-2   │                     └──────────────────┘
+  │  pod-3   │
+  └──────────┘
+       ▲
+       │  ReplicaSet auto-replenishes after claim
+       │
+  ┌──────────┐
+  │  pod-4   │  (new idle pod starting up)
+  └──────────┘
+```
+
+When a sandbox is claimed:
+1. An idle pod from the pool is assigned immediately
+2. The ReplicaSet detects the pool dropped below `minIdle` and starts a replacement pod
+3. The replacement becomes available within a normal container start time (~seconds)
+
+As long as `minIdle` idle pods are available, every claim is a **zero-cold-start** operation.
+
+---
+
+## Pool Fields
+
+Configure the pool strategy in your template spec under the `pool` key:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `minIdle` | integer | Minimum number of idle pods to maintain (ReplicaSet replicas). Claims always succeed instantly while idle pods are available. |
+| `maxIdle` | integer | Maximum number of idle pods allowed. The CleanupController removes excess idle pods when the pool exceeds this limit. |
+| `autoScale` | boolean | Enable automatic pool scaling based on demand (default: `false`). |
+
+```yaml
+spec:
+    pool:
+        minIdle: 3
+        maxIdle: 10
+        autoScale: false
+```
+
+---
+
+## minIdle — Guaranteed Fast Starts
+
+`minIdle` is the number of idle pods the system keeps running at all times. The manager's ReplicaSet controller continuously reconciles towards this count:
+
+- If idle pods drop below `minIdle` (due to claims), new pods start immediately
+- If the node has capacity, `minIdle` pods are pre-warmed and ready before any request arrives
+
+**Choosing `minIdle`:**
+
+| Workload Pattern | Recommended `minIdle` |
+|------------------|-----------------------|
+| Low traffic / dev environments | 1–2 |
+| Steady interactive traffic | 3–5 |
+| Burst-heavy production | 5–20+ |
+| Single-user tool | 1 |
+
+<Callout variant="warning">
+Each idle pod consumes CPU and memory as defined in `mainContainer.resources`. Setting `minIdle` too high wastes cluster resources. Monitor your claim rate and set `minIdle` to match your typical concurrency.
+</Callout>
+
+---
+
+## maxIdle — Capping Idle Resources
+
+`maxIdle` puts an upper bound on idle pool size. The CleanupController enforces this limit by terminating excess idle pods:
+
+- Useful when `autoScale: true` is enabled — prevents runaway pool growth after a traffic burst subsides
+- Also useful to cap cost when `minIdle` is large and demand drops
+
+A common pattern: set `maxIdle` to 2–3x `minIdle` to absorb burst traffic while keeping costs bounded.
+
+```yaml
+pool:
+    minIdle: 3
+    maxIdle: 9   # burst headroom = 3x minIdle
+```
+
+---
+
+## Pool and Template Updates
+
+When you update a template spec, the warm pool is recycled:
+
+1. Existing idle pods (running the old spec) are drained
+2. New idle pods are created with the updated spec
+3. Running sandboxes are **not** affected
+
+During the transition, the pool may temporarily drop below `minIdle`. Plan updates during low-traffic windows if uninterrupted pool availability is critical.
+
+---
+
+## Pool Status
+
+The template status exposes real-time pool metrics:
+
+| Field | Description |
+|-------|-------------|
+| `idle_count` | Current number of idle pods ready to be claimed |
+| `active_count` | Number of sandboxes currently running from this template |
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `tpl, err := client.GetTemplate(ctx, "my-python-env")
+if err != nil {
+    log.Fatal(err)
+}
+idleCount, _ := tpl.Status.IdleCount.Get()
+activeCount, _ := tpl.Status.ActiveCount.Get()
+fmt.Printf("Idle: %d  Active: %d\\n", idleCount, activeCount)`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 template get my-python-env
+
+# Example output:
+# template_id:   my-python-env
+# scope:         team
+# idle_count:    3
+# active_count:  7`
+    }
+  ]}
+/>

@@ -23,6 +23,16 @@ export const docsNavigation: PixelSidebarItem[] = [
     ],
   },
   {
+    label: "TEMPLATE",
+    href: "/docs/template",
+    items: [
+      { label: "Overview", href: "/docs/template" },
+      { label: "Custom Images", href: "/docs/template/images" },
+      { label: "Warm Pool", href: "/docs/template/pool" },
+      { label: "Configuration", href: "/docs/template/configuration" },
+    ],
+  },
+  {
     label: "VOLUME",
     href: "/docs/volume",
     items: [
@@ -30,15 +40,6 @@ export const docsNavigation: PixelSidebarItem[] = [
       { label: "Mounts", href: "/docs/volume/mounts" },
       { label: "Snapshots", href: "/docs/volume/snapshots" },
       { label: "Fork", href: "/docs/volume/fork" },
-    ],
-  },
-  {
-    label: "TEMPLATE",
-    href: "/docs/template",
-    items: [
-      { label: "Overview", href: "/docs/template" },
-      { label: "Spec", href: "/docs/template/spec" },
-      { label: "Images", href: "/docs/template/image" },
     ],
   },
   {

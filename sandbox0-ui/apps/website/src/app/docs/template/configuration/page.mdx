@@ -1,0 +1,172 @@
+# Template Configuration
+
+A complete reference for all fields in a template spec. Pass the spec as the `spec` field when creating or updating a template.
+
+## Full Spec Example
+
+```yaml
+spec:
+    displayName: "Python 3.12 Data Science"
+    description: "Python with numpy, pandas, and jupyter pre-installed"
+    tags:
+        - python
+        - data-science
+
+    mainContainer:
+        image: registry.sandbox0.io/my-ds-env:v2.0
+        imagePullPolicy: IfNotPresent
+        resources:
+            cpu: "2"
+            memory: 4Gi
+        env:
+            - name: PYTHONPATH
+              value: /workspace
+
+    envVars:
+        LOG_LEVEL: info
+        TZ: UTC
+
+    pool:
+        minIdle: 3
+        maxIdle: 10
+
+    lifecycle:
+        defaultTTL: 600
+        maxTTL: 7200
+        idleTimeout: 300
+        preStop:
+            command: ["/bin/sh", "-c", "cleanup.sh"]
+            timeoutSeconds: 30
+
+    network:
+        mode: block-all
+        egress:
+            allowedDomains:
+                - "*.pypi.org"
+                - "*.anaconda.org"
+            allowedPorts:
+                - port: 443
+                  protocol: TCP
+```
+
+---
+
+## `mainContainer`
+
+The main sandbox container. Required.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `image` | string | — | Container image reference. Use a public image (e.g., `python:3.12-slim`) or a private image pushed to the Sandbox0 registry. |
+| `imagePullPolicy` | string | `IfNotPresent` | When to pull the image: `Always`, `IfNotPresent`, or `Never`. Use `Always` during active development to pick up the latest push. |
+| `resources.cpu` | string | — | CPU limit for the sandbox (e.g., `"1"`, `"2"`, `"500m"`). |
+| `resources.memory` | string | — | Memory limit for the sandbox (e.g., `"2Gi"`, `"512Mi"`). |
+| `env` | array | `[]` | Per-container environment variables. Each entry has `name` and `value`. |
+
+<Callout variant="info">
+`resources.cpu` and `resources.memory` are both limits and requests — the sandbox pod is guaranteed these resources on its node.
+</Callout>
+
+---
+
+## `envVars`
+
+Global environment variables shared across all containers (main container and sidecars).
+
+```yaml
+envVars:
+    LOG_LEVEL: info
+    TZ: UTC
+    APP_ENV: production
+```
+
+`envVars` are set at the template level and apply to every sandbox created from this template. Users can override or extend them at sandbox creation time via the `env_vars` field in the sandbox config.
+
+---
+
+## `pool`
+
+Warm pool configuration. See [Warm Pool](/docs/template/pool) for a detailed guide.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `minIdle` | integer | — | Minimum idle pods to pre-warm. Required. |
+| `maxIdle` | integer | — | Maximum idle pods allowed. Required. |
+| `autoScale` | boolean | `false` | Enable automatic pool scaling. |
+
+---
+
+## `lifecycle`
+
+Default lifecycle behavior for sandboxes created from this template. All values can be overridden at sandbox creation time.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `defaultTTL` | integer (seconds) | — | Default soft TTL. When a sandbox's TTL expires, it is automatically paused. |
+| `maxTTL` | integer (seconds) | — | Maximum TTL allowed. Sandbox requests with `hard_ttl` above this value are rejected. |
+| `idleTimeout` | integer (seconds) | — | Automatically pause a sandbox after it has been idle for this duration. |
+| `preStop.command` | string[] | — | Shell command to run before a sandbox pod is terminated. Useful for flushing caches or saving state. |
+| `preStop.timeoutSeconds` | integer | — | Maximum time to wait for the preStop command to complete. |
+
+```yaml
+lifecycle:
+    defaultTTL: 600        # auto-pause after 10 min of inactivity
+    maxTTL: 7200           # hard limit: 2 hours maximum
+    idleTimeout: 180       # pause if no activity for 3 min
+    preStop:
+        command: ["/bin/sh", "-c", "/app/scripts/cleanup.sh"]
+        timeoutSeconds: 30
+```
+
+---
+
+## `network`
+
+Default network policy applied to sandboxes created from this template. Users can override it at sandbox creation time or update it at runtime.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `mode` | string | `allow-all` | `allow-all` permits all outbound traffic. `block-all` denies all outbound traffic except what is explicitly allowed in `egress`. |
+| `egress.allowedDomains` | string[] | — | Wildcard-supported domain allowlist (e.g., `*.github.com`). Only used when `mode` is `block-all`. |
+| `egress.deniedDomains` | string[] | — | Domain blocklist. Takes precedence over `allowedDomains`. |
+| `egress.allowedCidrs` | string[] | — | CIDR allowlist (e.g., `10.0.0.0/8`). |
+| `egress.deniedCidrs` | string[] | — | CIDR blocklist. |
+| `egress.allowedPorts` | array | — | Port/protocol allowlist. Each entry: `{port: 443, protocol: TCP}`. |
+| `egress.deniedPorts` | array | — | Port/protocol blocklist. |
+
+See [Network Policy](/docs/sandbox/network) for detailed egress rule semantics and runtime update instructions.
+
+---
+
+## `displayName`, `description`, `tags`
+
+Metadata fields for human-readable identification. Not used by the runtime.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `displayName` | string | Short human-readable name shown in UI and `s0 template list`. |
+| `description` | string | Longer description of the template's purpose. |
+| `tags` | string[] | Labels for filtering and organization. |
+
+---
+
+## Privileged Fields
+
+The following fields require a system-level token. They are not available to regular team API keys and are intended for platform operators configuring multi-tenant or advanced deployments.
+
+| Field | Description |
+|-------|-------------|
+| `sidecars` | Additional containers running alongside the main container in the sandbox pod. Uses the standard Kubernetes container spec. |
+| `pod.nodeSelector` | Pin sandbox pods to nodes matching specific labels. |
+| `pod.affinity` | Node and pod affinity/anti-affinity rules. |
+| `pod.tolerations` | Allow pods to be scheduled on tainted nodes. |
+| `pod.serviceAccountName` | Kubernetes service account for sandbox pods. |
+| `mainContainer.securityContext` | Container security context: `runAsUser`, `runAsGroup`, `capabilities.drop`. Capability `add` is not permitted. |
+| `runtimeClassName` | Kubernetes runtime class (e.g., `gvisor` for gVisor isolation). |
+| `clusterId` | Pin the template to a specific cluster in a multi-cluster deployment. |
+| `public` | Set to `true` to make the template visible to all teams (builtin-style). |
+| `allowedTeams` | Explicit list of team IDs allowed to use this template. |
+
+<Callout variant="warning">
+Attempting to set privileged fields with a regular API key returns a `403 Forbidden` error. Contact your platform administrator if you need access to these fields.
+</Callout>

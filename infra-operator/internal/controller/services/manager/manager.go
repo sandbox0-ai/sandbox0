@@ -334,6 +334,15 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 					SecretKeyKey:      infra.Spec.Registry.Aliyun.CredentialsSecret.SecretKeyKey,
 				}
 			}
+		case infrav1alpha1.RegistryProviderHarbor:
+			if infra.Spec.Registry.Harbor != nil {
+				cfg.Registry.Harbor = &apiconfig.RegistryHarborConfig{
+					Registry:          infra.Spec.Registry.Harbor.Registry,
+					CredentialsSecret: infra.Spec.Registry.Harbor.CredentialsSecret.Name,
+					UsernameKey:       infra.Spec.Registry.Harbor.CredentialsSecret.UsernameKey,
+					PasswordKey:       infra.Spec.Registry.Harbor.CredentialsSecret.PasswordKey,
+				}
+			}
 		}
 	}
 

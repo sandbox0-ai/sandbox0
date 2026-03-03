@@ -113,9 +113,8 @@ func EnsureBuiltinTemplates(ctx context.Context, infra *infrav1alpha1.Sandbox0In
 				},
 			},
 			Pool: templatev1alpha1.PoolStrategy{
-				MinIdle:   poolCfg.MinIdle,
-				MaxIdle:   poolCfg.MaxIdle,
-				AutoScale: poolCfg.AutoScale,
+				MinIdle: poolCfg.MinIdle,
+				MaxIdle: poolCfg.MaxIdle,
 			},
 			Network: &templatev1alpha1.TplSandboxNetworkPolicy{
 				Mode: templatev1alpha1.NetworkModeAllowAll,
@@ -152,9 +151,8 @@ func EnsureBuiltinTemplates(ctx context.Context, infra *infrav1alpha1.Sandbox0In
 }
 
 func applyBuiltinTemplatePool(pool infrav1alpha1.BuiltinTemplatePoolConfig) infrav1alpha1.BuiltinTemplatePoolConfig {
-	minIdle, maxIdle, autoScale := template.ApplyDefaultPool(pool.MinIdle, pool.MaxIdle, pool.AutoScale)
+	minIdle, maxIdle := template.ApplyDefaultPool(pool.MinIdle, pool.MaxIdle)
 	pool.MinIdle = minIdle
 	pool.MaxIdle = maxIdle
-	pool.AutoScale = autoScale
 	return pool
 }

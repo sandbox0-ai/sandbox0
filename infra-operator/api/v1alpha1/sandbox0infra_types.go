@@ -44,7 +44,7 @@ const (
 )
 
 // RegistryProvider defines the registry provider type.
-// +kubebuilder:validation:Enum=builtin;aws;gcp;azure;aliyun
+// +kubebuilder:validation:Enum=builtin;aws;gcp;azure;aliyun;harbor
 type RegistryProvider string
 
 const (
@@ -53,6 +53,7 @@ const (
 	RegistryProviderGCP     RegistryProvider = "gcp"
 	RegistryProviderAzure   RegistryProvider = "azure"
 	RegistryProviderAliyun  RegistryProvider = "aliyun"
+	RegistryProviderHarbor  RegistryProvider = "harbor"
 )
 
 // Phase represents the current phase of the Sandbox0Infra
@@ -398,9 +399,9 @@ type OSSCredentialsSecret struct {
 
 // RegistryConfig defines container registry configuration.
 type RegistryConfig struct {
-	// Provider specifies the registry provider: builtin, aws, gcp, azure, or aliyun.
+	// Provider specifies the registry provider: builtin, aws, gcp, azure, aliyun, or harbor.
 	// +kubebuilder:default=builtin
-	// +kubebuilder:validation:Enum=builtin;aws;gcp;azure;aliyun
+	// +kubebuilder:validation:Enum=builtin;aws;gcp;azure;aliyun;harbor
 	Provider RegistryProvider `json:"provider,omitempty"`
 
 	// ImagePullSecretName is the secret name to create in template namespaces.
@@ -427,6 +428,10 @@ type RegistryConfig struct {
 	// Aliyun configures Aliyun registry integration.
 	// +optional
 	Aliyun *AliyunRegistryConfig `json:"aliyun,omitempty"`
+
+	// Harbor configures Harbor registry integration.
+	// +optional
+	Harbor *HarborRegistryConfig `json:"harbor,omitempty"`
 }
 
 // BuiltinRegistryConfig defines built-in registry configuration.
@@ -603,6 +608,32 @@ type AliyunRegistryCredentialsSecret struct {
 	// SecretKeyKey is the key for secret access key.
 	// +kubebuilder:default="accessKeySecret"
 	SecretKeyKey string `json:"secretKeyKey,omitempty"`
+}
+
+// HarborRegistryConfig defines Harbor registry configuration.
+type HarborRegistryConfig struct {
+	// Registry specifies the registry hostname.
+	Registry string `json:"registry"`
+
+	// PullSecret references the dockerconfigjson secret to use for image pulls.
+	PullSecret DockerConfigSecretRef `json:"pullSecret"`
+
+	// CredentialsSecret references Harbor credentials for push authentication.
+	CredentialsSecret HarborRegistryCredentialsSecret `json:"credentialsSecret"`
+}
+
+// HarborRegistryCredentialsSecret references Harbor credentials in a secret.
+type HarborRegistryCredentialsSecret struct {
+	// Name is the name of the secret.
+	Name string `json:"name"`
+
+	// UsernameKey is the key for username.
+	// +kubebuilder:default="username"
+	UsernameKey string `json:"usernameKey,omitempty"`
+
+	// PasswordKey is the key for password.
+	// +kubebuilder:default="password"
+	PasswordKey string `json:"passwordKey,omitempty"`
 }
 
 // ControlPlaneConfig defines external control plane configuration
@@ -860,7 +891,7 @@ func IsRegistryEnabled(infra *Sandbox0Infra) bool {
 			return infra.Spec.Registry.Builtin.Enabled
 		}
 		return true
-	case RegistryProviderAWS, RegistryProviderGCP, RegistryProviderAzure, RegistryProviderAliyun:
+	case RegistryProviderAWS, RegistryProviderGCP, RegistryProviderAzure, RegistryProviderAliyun, RegistryProviderHarbor:
 		return true
 	default:
 		return true
@@ -1001,9 +1032,6 @@ type BuiltinTemplatePoolConfig struct {
 	// +optional
 	// +kubebuilder:default=5
 	MaxIdle int32 `json:"maxIdle,omitempty"`
-	// +optional
-	// +kubebuilder:default=true
-	AutoScale bool `json:"autoScale,omitempty"`
 }
 
 // Sandbox0InfraStatus defines the observed state of Sandbox0Infra

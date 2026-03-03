@@ -10,9 +10,9 @@ const (
 )
 
 // ApplyDefaultPool applies default pool values when not explicitly set.
-func ApplyDefaultPool(minIdle, maxIdle int32, autoScale bool) (int32, int32, bool) {
-	if minIdle == 0 && maxIdle == 0 && !autoScale {
-		return DefaultTemplateMinIdle, DefaultTemplateMaxIdle, true
+func ApplyDefaultPool(minIdle, maxIdle int32) (int32, int32) {
+	if minIdle == 0 && maxIdle == 0 {
+		return DefaultTemplateMinIdle, DefaultTemplateMaxIdle
 	}
 	if minIdle == 0 {
 		minIdle = DefaultTemplateMinIdle
@@ -20,5 +20,5 @@ func ApplyDefaultPool(minIdle, maxIdle int32, autoScale bool) (int32, int32, boo
 	if maxIdle == 0 {
 		maxIdle = DefaultTemplateMaxIdle
 	}
-	return minIdle, maxIdle, autoScale
+	return minIdle, maxIdle
 }

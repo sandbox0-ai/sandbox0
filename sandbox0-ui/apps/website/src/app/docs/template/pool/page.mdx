@@ -7,7 +7,7 @@ Sandbox0 achieves sub-200ms sandbox creation by maintaining a pool of pre-warmed
 ```
 Template: my-python-env (minIdle=3, maxIdle=10)
 
-  Pre-warm Pool (idle pods)        Active Sandboxes
+  Pre-warm Pool (idle pods)          Active Sandboxes
   ┌──────────┐                     ┌──────────────────┐
   │  pod-1   │  ←── claim ──────►  │  sandbox sb_abc  │
   │  pod-2   │                     └──────────────────┘
@@ -136,3 +136,25 @@ fmt.Printf("Idle: %d  Active: %d\\n", idleCount, activeCount)`
     }
   ]}
 />
+
+---
+
+## Next Steps
+
+<CardGrid>
+  <LinkCard
+    title="Configuration"
+    href="/docs/template/configuration"
+    cta="Learn More"
+  >
+    Advanced template settings and lifecycle options
+  </LinkCard>
+
+  <LinkCard
+    title="Volumes"
+    href="/docs/volume"
+    cta="Learn More"
+  >
+    Add persistent storage to your sandboxes
+  </LinkCard>
+</CardGrid>

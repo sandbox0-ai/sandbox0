@@ -243,7 +243,7 @@ func (op *Operator) syncHandler(ctx context.Context, key string) error {
 
 	// Scale down for idle templates (async, background operation)
 	// Scale up is handled synchronously in SandboxService.OnColdClaim
-	if template.Spec.Pool.AutoScale && op.autoScaler != nil {
+	if op.autoScaler != nil {
 		if err := op.autoScaler.ReconcileScaleDown(ctx, template, op.clock.Now()); err != nil {
 			op.logger.Warn("Scale down reconcile failed",
 				zap.String("template", template.Name),

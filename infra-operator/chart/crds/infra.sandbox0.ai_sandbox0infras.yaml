@@ -667,6 +667,49 @@ spec:
                     - registry
                     - serviceAccountSecret
                     type: object
+                  harbor:
+                    description: Harbor configures Harbor registry integration.
+                    properties:
+                      credentialsSecret:
+                        description: CredentialsSecret references Harbor credentials
+                          for push authentication.
+                        properties:
+                          name:
+                            description: Name is the name of the secret.
+                            type: string
+                          passwordKey:
+                            default: password
+                            description: PasswordKey is the key for password.
+                            type: string
+                          usernameKey:
+                            default: username
+                            description: UsernameKey is the key for username.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      pullSecret:
+                        description: PullSecret references the dockerconfigjson secret
+                          to use for image pulls.
+                        properties:
+                          key:
+                            default: .dockerconfigjson
+                            description: Key is the key in the secret.
+                            type: string
+                          name:
+                            description: Name is the name of the secret.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      registry:
+                        description: Registry specifies the registry hostname.
+                        type: string
+                    required:
+                    - credentialsSecret
+                    - pullSecret
+                    - registry
+                    type: object
                   imagePullSecretName:
                     default: sandbox0-registry-pull
                     description: ImagePullSecretName is the secret name to create
@@ -680,15 +723,17 @@ spec:
                       - gcp
                       - azure
                       - aliyun
+                      - harbor
                     - enum:
                       - builtin
                       - aws
                       - gcp
                       - azure
                       - aliyun
+                      - harbor
                     default: builtin
                     description: 'Provider specifies the registry provider: builtin,
-                      aws, gcp, azure, or aliyun.'
+                      aws, gcp, azure, aliyun, or harbor.'
                     type: string
                 type: object
               services:

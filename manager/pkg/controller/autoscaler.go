@@ -428,7 +428,7 @@ func (s *AutoScaler) executeScaleUp(
 // ReconcileScaleDown performs async scale-down for templates with no traffic.
 // This is called from the background reconcile loop, not from the claim path.
 func (s *AutoScaler) ReconcileScaleDown(ctx context.Context, template *v1alpha1.SandboxTemplate, now time.Time) error {
-	if template == nil || !template.Spec.Pool.AutoScale {
+	if template == nil {
 		return nil
 	}
 

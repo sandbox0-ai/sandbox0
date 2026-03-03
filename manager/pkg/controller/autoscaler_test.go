@@ -43,9 +43,8 @@ func TestAutoScaler_OnColdClaim(t *testing.T) {
 				},
 				Spec: v1alpha1.SandboxTemplateSpec{
 					Pool: v1alpha1.PoolStrategy{
-						MinIdle:   2,
-						MaxIdle:   20,
-						AutoScale: true,
+						MinIdle: 2,
+						MaxIdle: 20,
 					},
 				},
 			},
@@ -92,9 +91,8 @@ func TestAutoScaler_OnColdClaim(t *testing.T) {
 				},
 				Spec: v1alpha1.SandboxTemplateSpec{
 					Pool: v1alpha1.PoolStrategy{
-						MinIdle:   2,
-						MaxIdle:   20,
-						AutoScale: true,
+						MinIdle: 2,
+						MaxIdle: 20,
 					},
 				},
 			},
@@ -141,9 +139,8 @@ func TestAutoScaler_OnColdClaim(t *testing.T) {
 				},
 				Spec: v1alpha1.SandboxTemplateSpec{
 					Pool: v1alpha1.PoolStrategy{
-						MinIdle:   5,
-						MaxIdle:   5,
-						AutoScale: true,
+						MinIdle: 5,
+						MaxIdle: 5,
 					},
 				},
 			},
@@ -185,9 +182,8 @@ func TestAutoScaler_OnColdClaim(t *testing.T) {
 				},
 				Spec: v1alpha1.SandboxTemplateSpec{
 					Pool: v1alpha1.PoolStrategy{
-						MinIdle:   1,
-						MaxIdle:   50,
-						AutoScale: true,
+						MinIdle: 1,
+						MaxIdle: 50,
 					},
 				},
 			},
@@ -236,9 +232,8 @@ func TestAutoScaler_OnColdClaim(t *testing.T) {
 				},
 				Spec: v1alpha1.SandboxTemplateSpec{
 					Pool: v1alpha1.PoolStrategy{
-						MinIdle:   2,
-						MaxIdle:   20,
-						AutoScale: true,
+						MinIdle: 2,
+						MaxIdle: 20,
 					},
 				},
 			},
@@ -389,9 +384,8 @@ func TestAutoScaler_CalculateDesiredReplicas(t *testing.T) {
 			template := &v1alpha1.SandboxTemplate{
 				Spec: v1alpha1.SandboxTemplateSpec{
 					Pool: v1alpha1.PoolStrategy{
-						MinIdle:   tt.minIdle,
-						MaxIdle:   tt.maxIdle,
-						AutoScale: true,
+						MinIdle: tt.minIdle,
+						MaxIdle: tt.maxIdle,
 					},
 				},
 			}

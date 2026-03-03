@@ -189,9 +189,8 @@ type ResourceQuota struct {
 
 // PoolStrategy defines pool strategy
 type PoolStrategy struct {
-	MinIdle   int32 `json:"minIdle"` // Minimum idle pods (ReplicaSet replicas)
-	MaxIdle   int32 `json:"maxIdle"` // Maximum idle pods (enforced by CleanupController)
-	AutoScale bool  `json:"autoScale"`
+	MinIdle int32 `json:"minIdle"` // Minimum idle pods (ReplicaSet replicas)
+	MaxIdle int32 `json:"maxIdle"` // Maximum idle pods (enforced by CleanupController)
 }
 
 // TplSandboxNetworkPolicy defines network policy (template-level default)

@@ -317,7 +317,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 
 		// Trigger async scale-up to replenish the idle pool
 		// This runs in a goroutine to not block the cold claim response
-		if s.autoScaler != nil && template.Spec.Pool.AutoScale {
+		if s.autoScaler != nil {
 			go func() {
 				scaleCtx := context.Background()
 				scaleDecision, scaleErr := s.autoScaler.OnColdClaim(scaleCtx, template)

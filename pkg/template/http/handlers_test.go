@@ -76,7 +76,7 @@ func TestCreateTemplate_RejectsPrivilegedFieldsForRegularTeam(t *testing.T) {
 		"template_id":"demo",
 		"spec":{
 			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"1Gi"}},
-			"pool":{"minIdle":0,"maxIdle":1,"autoScale":false},
+			"pool":{"minIdle":0,"maxIdle":1},
 			"pod":{"serviceAccountName":"custom-sa"}
 		}
 	}`)
@@ -114,7 +114,7 @@ func TestCreateTemplate_AllowsNetworkForRegularTeam(t *testing.T) {
 		"template_id":"demo",
 		"spec":{
 			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"1Gi"}},
-			"pool":{"minIdle":0,"maxIdle":1,"autoScale":false},
+			"pool":{"minIdle":0,"maxIdle":1},
 			"network":{"mode":"block-all"}
 		}
 	}`)
@@ -157,7 +157,7 @@ func TestCreateTemplate_AllowsPrivilegedFieldForSystemToken(t *testing.T) {
 				"resources":{"cpu":"1","memory":"1Gi"},
 				"securityContext":{"runAsUser":1000}
 			},
-			"pool":{"minIdle":0,"maxIdle":1,"autoScale":false}
+			"pool":{"minIdle":0,"maxIdle":1}
 		}
 	}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates", bytes.NewReader(body))
@@ -194,7 +194,7 @@ func TestCreateTemplate_RejectsMissingMainContainerImage(t *testing.T) {
 		"template_id":"demo",
 		"spec":{
 			"mainContainer":{"resources":{"cpu":"1","memory":"1Gi"}},
-			"pool":{"minIdle":0,"maxIdle":1,"autoScale":false}
+			"pool":{"minIdle":0,"maxIdle":1}
 		}
 	}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates", bytes.NewReader(body))
@@ -227,7 +227,7 @@ func TestUpdateTemplate_RejectsInvalidPoolRange(t *testing.T) {
 							Memory: resource.MustParse("1Gi"),
 						},
 					},
-					Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1, AutoScale: false},
+					Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
 				},
 			}, nil
 		},
@@ -244,7 +244,7 @@ func TestUpdateTemplate_RejectsInvalidPoolRange(t *testing.T) {
 	body := []byte(`{
 		"spec":{
 			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"1Gi"}},
-			"pool":{"minIdle":2,"maxIdle":1,"autoScale":false}
+			"pool":{"minIdle":2,"maxIdle":1}
 		}
 	}`)
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/templates/demo", bytes.NewReader(body))
@@ -277,7 +277,7 @@ func TestUpdateTemplate_RejectsPrivilegedFieldsForRegularTeam(t *testing.T) {
 							Memory: resource.MustParse("1Gi"),
 						},
 					},
-					Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1, AutoScale: false},
+					Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
 				},
 			}, nil
 		},
@@ -294,7 +294,7 @@ func TestUpdateTemplate_RejectsPrivilegedFieldsForRegularTeam(t *testing.T) {
 	body := []byte(`{
 		"spec":{
 			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"1Gi"}},
-			"pool":{"minIdle":0,"maxIdle":1,"autoScale":false},
+			"pool":{"minIdle":0,"maxIdle":1},
 			"sidecars":[{"name":"helper","image":"busybox","command":["sleep","3600"]}]
 		}
 	}`)
@@ -326,7 +326,7 @@ func TestValidateTemplateSpecForClaims_WildcardPermissionRejected(t *testing.T) 
 			},
 		},
 		Sidecars: []corev1.Container{{Name: "helper", Image: "busybox"}},
-		Pool:     v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1, AutoScale: false},
+		Pool:     v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
 	}
 
 	err := validateTemplateSpecForClaims(spec, &internalauth.Claims{
@@ -349,7 +349,7 @@ func TestValidateTemplateSpec_StrictValidation(t *testing.T) {
 					Memory: resource.MustParse("1Gi"),
 				},
 			},
-			Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1, AutoScale: false},
+			Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
 		}
 	}
 

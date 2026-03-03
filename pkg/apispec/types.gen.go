@@ -733,9 +733,8 @@ type PodSpecOverride struct {
 
 // PoolStrategy defines model for PoolStrategy.
 type PoolStrategy struct {
-	AutoScale bool  `json:"autoScale"`
-	MaxIdle   int32 `json:"maxIdle"`
-	MinIdle   int32 `json:"minIdle"`
+	MaxIdle int32 `json:"maxIdle"`
+	MinIdle int32 `json:"minIdle"`
 }
 
 // PortSpec defines model for PortSpec.

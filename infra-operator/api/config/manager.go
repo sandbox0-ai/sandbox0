@@ -234,6 +234,10 @@ type RegistryConfig struct {
 	// +optional
 	Aliyun *RegistryAliyunConfig `yaml:"aliyun" json:"-"`
 
+	// Harbor configures Harbor registry integration.
+	// +optional
+	Harbor *RegistryHarborConfig `yaml:"harbor" json:"-"`
+
 	// Builtin configures builtin registry integration.
 	// +optional
 	Builtin *RegistryBuiltinConfig `yaml:"builtin" json:"-"`
@@ -274,6 +278,14 @@ type RegistryAliyunConfig struct {
 	CredentialsSecret string `yaml:"credentials_secret" json:"-"`
 	AccessKeyKey      string `yaml:"access_key_key" json:"-"`
 	SecretKeyKey      string `yaml:"secret_key_key" json:"-"`
+}
+
+// RegistryHarborConfig defines Harbor registry config.
+type RegistryHarborConfig struct {
+	Registry          string `yaml:"registry" json:"-"`
+	CredentialsSecret string `yaml:"credentials_secret" json:"-"`
+	UsernameKey       string `yaml:"username_key" json:"-"`
+	PasswordKey       string `yaml:"password_key" json:"-"`
 }
 
 // RegistryBuiltinConfig defines builtin registry config.

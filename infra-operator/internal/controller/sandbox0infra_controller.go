@@ -712,7 +712,7 @@ func (r *Sandbox0InfraReconciler) waitBuiltinTemplatePodsReady(ctx context.Conte
 			return fmt.Errorf("invalid builtin template_id %q: %w", builtin.TemplateID, err)
 		}
 
-		minIdle, _, _ := template.ApplyDefaultPool(builtin.Pool.MinIdle, builtin.Pool.MaxIdle, builtin.Pool.AutoScale)
+		minIdle, _ := template.ApplyDefaultPool(builtin.Pool.MinIdle, builtin.Pool.MaxIdle)
 		if minIdle == 0 {
 			continue
 		}

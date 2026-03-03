@@ -117,6 +117,11 @@ func ResolveRegistryConfig(infra *infrav1alpha1.Sandbox0Infra) *ResolvedRegistry
 			return nil
 		}
 		return resolveExternalRegistry(provider, cfg.Aliyun, targetSecretName)
+	case infrav1alpha1.RegistryProviderHarbor:
+		if cfg == nil || cfg.Harbor == nil {
+			return nil
+		}
+		return resolveExternalRegistry(provider, cfg.Harbor, targetSecretName)
 	default:
 		return nil
 	}
@@ -139,7 +144,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	case infrav1alpha1.RegistryProviderAWS,
 		infrav1alpha1.RegistryProviderGCP,
 		infrav1alpha1.RegistryProviderAzure,
-		infrav1alpha1.RegistryProviderAliyun:
+		infrav1alpha1.RegistryProviderAliyun,
+		infrav1alpha1.RegistryProviderHarbor:
 		logger.Info("Validating external registry configuration")
 		return r.validateExternalRegistry(ctx, infra)
 	default:
@@ -171,6 +177,10 @@ func (r *Reconciler) validateExternalRegistry(ctx context.Context, infra *infrav
 	case infrav1alpha1.RegistryProviderAliyun:
 		if infra.Spec.Registry.Aliyun == nil {
 			return fmt.Errorf("registry.aliyun configuration is required")
+		}
+	case infrav1alpha1.RegistryProviderHarbor:
+		if infra.Spec.Registry.Harbor == nil {
+			return fmt.Errorf("registry.harbor configuration is required")
 		}
 	}
 	resolved := ResolveRegistryConfig(infra)
@@ -613,6 +623,12 @@ func resolveExternalRegistry(provider infrav1alpha1.RegistryProvider, cfg interf
 		resolved.Registry = typed.Registry
 		resolved.PullSecret = typed.PullSecret
 	case *infrav1alpha1.AliyunRegistryConfig:
+		if typed == nil {
+			return nil
+		}
+		resolved.Registry = typed.Registry
+		resolved.PullSecret = typed.PullSecret
+	case *infrav1alpha1.HarborRegistryConfig:
 		if typed == nil {
 			return nil
 		}

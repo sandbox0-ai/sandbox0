@@ -62,6 +62,11 @@ func NewProvider(cfg config.RegistryConfig, secretLister corelisters.SecretListe
 			return nil, fmt.Errorf("registry aliyun config is required")
 		}
 		return &aliyunProvider{cfg: *cfg.Aliyun, secrets: secretReader}, nil
+	case "harbor":
+		if cfg.Harbor == nil {
+			return nil, fmt.Errorf("registry harbor config is required")
+		}
+		return &harborProvider{cfg: *cfg.Harbor, secrets: secretReader}, nil
 	case "builtin":
 		if cfg.Builtin == nil {
 			return nil, fmt.Errorf("registry builtin config is required")

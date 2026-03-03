@@ -20,14 +20,12 @@ spec:
     mainContainer:
         image: python:3.12-slim
         resources:
-            cpu: "1"
-            memory: 2Gi
+            cpu: "0.5"
+            memory: 1Gi
     pool:
         minIdle: 2
         maxIdle: 10
 ```
-
-No additional configuration is needed.
 
 ---
 
@@ -35,25 +33,19 @@ No additional configuration is needed.
 
 Private images require a two-step workflow using the `s0` CLI:
 
-```
-┌──────────────────────────────────────────────────────┐
-│                                                      │
-│   1. Build          2. Push           3. Reference   │
-│                                                      │
-│   s0 template  →  s0 template  →  template spec     │
-│   image build     image push       mainContainer    │
-│                                       .image        │
-│                                                      │
-└──────────────────────────────────────────────────────┘
-```
-
 ### Step 1 — Build Your Image
 
-Build a container image from a Dockerfile using your local Docker daemon:
+Build a container image from a Dockerfile using your local Docker daemon. You can use either method:
 
 ```bash
+# Option 1: Using s0 CLI (recommended for convenience)
 s0 template image build . -t my-app:v1.2.3
+
+# Option 2: Using docker build directly
+docker build . -t my-app:v1.2.3
 ```
+
+Both commands are equivalent — `s0 template image build` is a thin wrapper around `docker build`.
 
 **Build options:**
 
@@ -77,7 +69,7 @@ s0 template image build . -t my-app:v1.2.3 --no-cache
 ```
 
 <Callout variant="info">
-`s0 template image build` uses your local Docker daemon to build the image. Make sure Docker is running before executing this command.
+Both methods use your local Docker daemon to build the image. Make sure Docker is running before executing these commands.
 </Callout>
 
 ### Step 2 — Push to the Sandbox0 Registry
@@ -138,8 +130,9 @@ s0 template update my-app --spec-file template.yaml
 ## Full Workflow Example
 
 ```bash
-# 1. Build the image
+# 1. Build the image (either method works)
 s0 template image build . -t my-app:v1.2.3
+# or: docker build . -t my-app:v1.2.3
 
 # 2. Push to Sandbox0 registry
 s0 template image push my-app:v1.2.3 -t my-app:v1.2.3
@@ -168,7 +161,7 @@ s0 sandbox create --template my-app
 
 ---
 
-## Registry Providers
+## Registry Providers (beta)
 
 Sandbox0 supports multiple container registry backends. The registry provider is configured by the platform operator:
 
@@ -179,6 +172,7 @@ Sandbox0 supports multiple container registry backends. The registry provider is
 | `gcp` | Google Artifact Registry / GCR | Uses service account credentials. |
 | `azure` | Azure Container Registry | Uses ACR credentials. |
 | `aliyun` | Alibaba Cloud Container Registry | Uses Aliyun ACR credentials. |
+| `harbor` | Harbor | Uses Harbor robot/user credentials from Kubernetes Secret. |
 
 For all providers, the `s0 template image push` command handles credential retrieval transparently — you always use the same CLI command regardless of the backend.
 
@@ -189,23 +183,44 @@ For all providers, the `s0 template image push` command handles credential retri
 Sandbox0 handles image pull authentication at the cluster level — you do not need to configure credentials in each template.
 
 ```
-┌───────────────────────────────────────────────────────────────┐
-│                                                               │
-│   s0 CLI           API               Sandbox0 Cluster        │
-│                                                               │
-│   image push  →  GET /registry/  →  short-lived creds        │
-│                  credentials                                  │
-│       ↓                                                       │
-│   docker push  →  Registry  ←───  imagePullSecret            │
-│                     ↑              (auto-injected into        │
-│                     │               all sandbox pods)         │
-│              image stored                                     │
-│                                                               │
-└───────────────────────────────────────────────────────────────┘
+
+                                                             
+   s0 CLI           API                         Sandbox0 Cluster       
+                                                             
+   image push  →  GET /registry/credentials  →  short-lived creds       
+                                                  
+       ↓                                                     
+   docker push  →  Registry  ←───  imagePullSecret (auto-injected into all sandbox pods)
+                     ↑                    
+                     │                      
+              image stored
+
 ```
 
 The platform operator maintains a cluster-wide `imagePullSecret` that is automatically injected into every sandbox pod. As a template author, you only need to reference the correct image name — no credential configuration is required in the template spec.
 
 <Callout variant="info">
-For self-hosted deployments, the `builtin` registry provider automatically provisions and manages the pull secret. For external registries (ECR, GCP, ACR, Aliyun), the platform operator pre-configures the credentials once during cluster setup.
+For self-hosted deployments, the `builtin` registry provider automatically provisions and manages the pull secret. For external registries (ECR, GCP, ACR, Aliyun, Harbor), the platform operator pre-configures the credentials once during cluster setup.
 </Callout>
+
+---
+
+## Next Steps
+
+<CardGrid>
+  <LinkCard
+    title="Warm Pool"
+    href="/docs/template/pool"
+    cta="Learn More"
+  >
+    Configure minIdle and maxIdle for fast sandbox creation
+  </LinkCard>
+
+  <LinkCard
+    title="Configuration"
+    href="/docs/template/configuration"
+    cta="Learn More"
+  >
+    Advanced template settings and lifecycle options
+  </LinkCard>
+</CardGrid>

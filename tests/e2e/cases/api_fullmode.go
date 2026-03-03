@@ -97,6 +97,38 @@ func registerApiFullModeSuite(envProvider func() *framework.ScenarioEnv) {
 				err = session.DeleteTemplate(env.TestCtx.Context, GinkgoT(), name)
 				Expect(err).NotTo(HaveOccurred())
 			})
+
+			It("returns template status with pool counters", func() {
+				templates, err := session.ListTemplates(env.TestCtx.Context, GinkgoT())
+				Expect(err).NotTo(HaveOccurred())
+				Expect(templates).NotTo(BeEmpty())
+
+				templateID := templates[0].TemplateId
+				Expect(templateID).NotTo(BeEmpty())
+
+				Eventually(func() error {
+					tpl, getErr := session.GetTemplate(env.TestCtx.Context, GinkgoT(), templateID)
+					if getErr != nil {
+						return getErr
+					}
+					if tpl.Status == nil {
+						return fmt.Errorf("template %s status not ready", templateID)
+					}
+					if tpl.Status.IdleCount == nil {
+						return fmt.Errorf("template %s idleCount is missing", templateID)
+					}
+					if *tpl.Status.IdleCount < 0 {
+						return fmt.Errorf("template %s idleCount is negative: %d", templateID, *tpl.Status.IdleCount)
+					}
+					if tpl.Status.ActiveCount == nil {
+						return fmt.Errorf("template %s activeCount is missing", templateID)
+					}
+					if *tpl.Status.ActiveCount < 0 {
+						return fmt.Errorf("template %s activeCount is negative: %d", templateID, *tpl.Status.ActiveCount)
+					}
+					return nil
+				}).WithTimeout(90 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
+			})
 		})
 
 		Context("sandbox lifecycle", func() {

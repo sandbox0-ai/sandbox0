@@ -6,7 +6,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/infra/manager/pkg/service"
 	"github.com/sandbox0-ai/infra/pkg/gateway/spec"
+	templatehttp "github.com/sandbox0-ai/infra/pkg/template/http"
 	"go.uber.org/zap"
 )
 
@@ -150,9 +152,31 @@ func (s *Server) deleteTemplateLegacy(c *gin.Context) {
 	spec.JSONSuccess(c, http.StatusOK, gin.H{"message": "template deleted"})
 }
 
-func (s *Server) triggerTemplateReconcile() {
-	if s.templateReconciler == nil {
-		return
+type clusterTemplateStatsProvider struct {
+	clusterService *service.ClusterService
+}
+
+func (p *clusterTemplateStatsProvider) GetTemplateStats(ctx context.Context) (*templatehttp.TemplateStats, error) {
+	if p == nil || p.clusterService == nil {
+		return nil, nil
 	}
-	go s.templateReconciler.TriggerReconcile(context.Background())
+
+	stats, err := p.clusterService.GetTemplateStats(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if stats == nil || len(stats.Templates) == 0 {
+		return &templatehttp.TemplateStats{Templates: nil}, nil
+	}
+
+	templates := make([]templatehttp.TemplateStat, 0, len(stats.Templates))
+	for _, stat := range stats.Templates {
+		templates = append(templates, templatehttp.TemplateStat{
+			TemplateID:  stat.TemplateID,
+			Namespace:   stat.Namespace,
+			IdleCount:   stat.IdleCount,
+			ActiveCount: stat.ActiveCount,
+		})
+	}
+	return &templatehttp.TemplateStats{Templates: templates}, nil
 }

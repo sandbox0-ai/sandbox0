@@ -88,9 +88,10 @@ func NewServer(
 	}
 	if templateStoreEnabled {
 		server.templateHandler = &templatehttp.Handler{
-			Store:      templateStore,
-			Reconciler: templateReconciler,
-			Logger:     logger,
+			Store:         templateStore,
+			Reconciler:    templateReconciler,
+			StatsProvider: &clusterTemplateStatsProvider{clusterService: clusterService},
+			Logger:        logger,
 		}
 	}
 

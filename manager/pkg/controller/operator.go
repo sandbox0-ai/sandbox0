@@ -101,7 +101,7 @@ func NewOperator(
 	podLister := corelisters.NewPodLister(podInformer.GetIndexer())
 	replicaSetLister := appslisters.NewReplicaSetLister(replicaSetInformer.GetIndexer())
 	secretLister := corelisters.NewSecretLister(secretInformer.GetIndexer())
-	poolManager := NewPoolManager(k8sClient, replicaSetLister, secretLister, recorder, logger)
+	poolManager := NewPoolManager(k8sClient, podLister, replicaSetLister, secretLister, recorder, logger)
 	autoScaler := NewAutoScalerWithConfig(k8sClient, podLister, replicaSetLister, logger, toAutoScaleConfig(autoscalerConfig))
 
 	op := &Operator{

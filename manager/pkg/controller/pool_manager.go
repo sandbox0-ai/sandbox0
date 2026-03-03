@@ -2,6 +2,9 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 
 	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
@@ -11,10 +14,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
 	appslisters "k8s.io/client-go/listers/apps/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 )
 
 const (
@@ -42,11 +47,13 @@ const (
 	AnnotationNetworkPolicyHash        = "sandbox0.ai/network-policy-hash"
 	AnnotationNetworkPolicyAppliedHash = "sandbox0.ai/network-policy-applied-hash"
 	AnnotationSandboxID                = "sandbox0.ai/sandbox-id"
+	AnnotationTemplateSpecHash         = "sandbox0.ai/template-spec-hash"
 )
 
 // PoolManager manages the idle pool (ReplicaSet)
 type PoolManager struct {
 	k8sClient        kubernetes.Interface
+	podLister        corelisters.PodLister
 	replicaSetLister appslisters.ReplicaSetLister
 	secretLister     corelisters.SecretLister
 	recorder         record.EventRecorder
@@ -56,6 +63,7 @@ type PoolManager struct {
 // NewPoolManager creates a new PoolManager
 func NewPoolManager(
 	k8sClient kubernetes.Interface,
+	podLister corelisters.PodLister,
 	replicaSetLister appslisters.ReplicaSetLister,
 	secretLister corelisters.SecretLister,
 	recorder record.EventRecorder,
@@ -63,6 +71,7 @@ func NewPoolManager(
 ) *PoolManager {
 	return &PoolManager{
 		k8sClient:        k8sClient,
+		podLister:        podLister,
 		replicaSetLister: replicaSetLister,
 		secretLister:     secretLister,
 		recorder:         recorder,
@@ -78,13 +87,29 @@ func (pm *PoolManager) ReconcilePool(ctx context.Context, template *v1alpha1.San
 		zap.Int32("minIdle", template.Spec.Pool.MinIdle),
 	)
 
+	desiredTemplateHash, err := templateSpecHash(template)
+	if err != nil {
+		return fmt.Errorf("compute template hash: %w", err)
+	}
+
 	// 1. Ensure ReplicaSet exists and is configured correctly
 	rs, err := pm.getOrCreateReplicaSet(ctx, template)
 	if err != nil {
 		return fmt.Errorf("get or create replicaset: %w", err)
 	}
 
-	// 2. Check if replicas match minIdle
+	// 2. Ensure newly created pods use the latest template spec hash.
+	rs, err = pm.reconcileReplicaSetTemplate(ctx, template, rs, desiredTemplateHash)
+	if err != nil {
+		return fmt.Errorf("reconcile replicaset template: %w", err)
+	}
+
+	// 3. Drain stale idle pods atomically with delete preconditions.
+	if err := pm.drainStaleIdlePods(ctx, template, desiredTemplateHash); err != nil {
+		return fmt.Errorf("drain stale idle pods: %w", err)
+	}
+
+	// 4. Check if replicas match minIdle
 	if rs.Spec.Replicas == nil || *rs.Spec.Replicas != template.Spec.Pool.MinIdle {
 		pm.logger.Info("Updating ReplicaSet replicas",
 			zap.String("template", template.ObjectMeta.Name),
@@ -129,7 +154,11 @@ func (pm *PoolManager) getOrCreateReplicaSet(ctx context.Context, template *v1al
 
 	// Create new ReplicaSet
 	pm.logger.Info("Creating new ReplicaSet", zap.String("name", rsName))
-	podTemplate, err := pm.buildPodTemplate(template, true)
+	hash, err := templateSpecHash(template)
+	if err != nil {
+		return nil, fmt.Errorf("compute template hash: %w", err)
+	}
+	podTemplate, err := pm.buildPodTemplate(template, true, hash)
 	if err != nil {
 		return nil, fmt.Errorf("build pod template: %w", err)
 	}
@@ -171,7 +200,7 @@ func (pm *PoolManager) getOrCreateReplicaSet(ctx context.Context, template *v1al
 }
 
 // buildPodTemplate builds the pod template for a template
-func (pm *PoolManager) buildPodTemplate(template *v1alpha1.SandboxTemplate, restart bool) (corev1.PodTemplateSpec, error) {
+func (pm *PoolManager) buildPodTemplate(template *v1alpha1.SandboxTemplate, restart bool, specHash string) (corev1.PodTemplateSpec, error) {
 	spec := v1alpha1.BuildPodSpec(template, restart)
 	return corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
@@ -179,9 +208,125 @@ func (pm *PoolManager) buildPodTemplate(template *v1alpha1.SandboxTemplate, rest
 				LabelTemplateID: template.ObjectMeta.Name,
 				LabelPoolType:   PoolTypeIdle,
 			},
+			Annotations: map[string]string{
+				AnnotationTemplateSpecHash: specHash,
+			},
 		},
 		Spec: spec,
 	}, nil
+}
+
+func (pm *PoolManager) reconcileReplicaSetTemplate(
+	ctx context.Context,
+	template *v1alpha1.SandboxTemplate,
+	rs *appsv1.ReplicaSet,
+	desiredTemplateHash string,
+) (*appsv1.ReplicaSet, error) {
+	currentTemplateHash := rs.Spec.Template.Annotations[AnnotationTemplateSpecHash]
+	if currentTemplateHash == desiredTemplateHash {
+		return rs, nil
+	}
+
+	newTemplate, err := pm.buildPodTemplate(template, true, desiredTemplateHash)
+	if err != nil {
+		return nil, fmt.Errorf("build pod template: %w", err)
+	}
+
+	updated := rs.DeepCopy()
+	updated.Spec.Template = newTemplate
+	updatedRS, err := pm.k8sClient.AppsV1().ReplicaSets(template.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	pm.recorder.Eventf(template, corev1.EventTypeNormal, "ReplicaSetTemplateUpdated",
+		"Updated ReplicaSet pod template hash to %s", desiredTemplateHash)
+	pm.logger.Info("Updated ReplicaSet pod template hash",
+		zap.String("template", template.ObjectMeta.Name),
+		zap.String("hash", desiredTemplateHash),
+	)
+	return updatedRS, nil
+}
+
+func (pm *PoolManager) drainStaleIdlePods(ctx context.Context, template *v1alpha1.SandboxTemplate, desiredTemplateHash string) error {
+	pods, err := pm.podLister.Pods(template.Namespace).List(labels.SelectorFromSet(map[string]string{
+		LabelTemplateID: template.Name,
+		LabelPoolType:   PoolTypeIdle,
+	}))
+	if err != nil {
+		return err
+	}
+
+	drained := 0
+	for _, pod := range pods {
+		if pod.Annotations[AnnotationTemplateSpecHash] == desiredTemplateHash {
+			continue
+		}
+		deleted, err := pm.deleteStaleIdlePodWithRetry(ctx, template.Namespace, pod.Name, desiredTemplateHash)
+		if err != nil {
+			return err
+		}
+		if deleted {
+			drained++
+		}
+	}
+
+	if drained > 0 {
+		pm.recorder.Eventf(template, corev1.EventTypeNormal, "StaleIdlePodsDrained",
+			"Drained %d stale idle pod(s) with outdated template hash", drained)
+		pm.logger.Info("Drained stale idle pods",
+			zap.String("template", template.ObjectMeta.Name),
+			zap.Int("count", drained),
+			zap.String("desiredHash", desiredTemplateHash),
+		)
+	}
+	return nil
+}
+
+func (pm *PoolManager) deleteStaleIdlePodWithRetry(ctx context.Context, namespace, podName, desiredTemplateHash string) (bool, error) {
+	// Retry small transient races while still validating the pod is stale+idle.
+	retryErr := retry.OnError(retry.DefaultRetry, func(err error) bool {
+		return errors.IsConflict(err) || errors.IsInvalid(err)
+	}, func() error {
+		pod, err := pm.k8sClient.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+		if err != nil {
+			if errors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+
+		// If pod has been claimed or already updated to latest hash, skip delete.
+		if pod.Labels[LabelPoolType] != PoolTypeIdle || pod.Annotations[AnnotationTemplateSpecHash] == desiredTemplateHash {
+			return nil
+		}
+
+		uid := pod.UID
+		resourceVersion := pod.ResourceVersion
+		err = pm.k8sClient.CoreV1().Pods(namespace).Delete(ctx, podName, metav1.DeleteOptions{
+			Preconditions: &metav1.Preconditions{
+				UID:             &uid,
+				ResourceVersion: &resourceVersion,
+			},
+		})
+		if err != nil && !errors.IsNotFound(err) {
+			return err
+		}
+		return nil
+	})
+	if retryErr != nil {
+		return false, retryErr
+	}
+	return false, nil
+}
+
+func templateSpecHash(template *v1alpha1.SandboxTemplate) (string, error) {
+	b, err := json.Marshal(template.Spec)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // Helper functions
@@ -190,21 +335,4 @@ func getInt32Value(val *int32) int32 {
 		return 0
 	}
 	return *val
-}
-
-func convertTolerations(tolerations []v1alpha1.Toleration) []corev1.Toleration {
-	if tolerations == nil {
-		return nil
-	}
-
-	result := make([]corev1.Toleration, len(tolerations))
-	for i, t := range tolerations {
-		result[i] = corev1.Toleration{
-			Key:      t.Key,
-			Operator: corev1.TolerationOperator(t.Operator),
-			Value:    t.Value,
-			Effect:   corev1.TaintEffect(t.Effect),
-		}
-	}
-	return result
 }

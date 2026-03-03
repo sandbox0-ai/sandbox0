@@ -946,6 +946,15 @@ type SandboxSummary struct {
 // SandboxSummaryStatus defines model for SandboxSummary.Status.
 type SandboxSummaryStatus string
 
+// SandboxTemplateCondition defines model for SandboxTemplateCondition.
+type SandboxTemplateCondition struct {
+	LastTransitionTime *time.Time `json:"lastTransitionTime,omitempty"`
+	Message            *string    `json:"message,omitempty"`
+	Reason             *string    `json:"reason,omitempty"`
+	Status             *string    `json:"status,omitempty"`
+	Type               *string    `json:"type,omitempty"`
+}
+
 // SandboxTemplateSpec defines model for SandboxTemplateSpec.
 type SandboxTemplateSpec struct {
 	AllowedTeams     *[]string                `json:"allowedTeams,omitempty"`
@@ -962,6 +971,14 @@ type SandboxTemplateSpec struct {
 	RuntimeClassName *string                  `json:"runtimeClassName,omitempty"`
 	Sidecars         *[]ContainerSpec         `json:"sidecars,omitempty"`
 	Tags             *[]string                `json:"tags,omitempty"`
+}
+
+// SandboxTemplateStatus defines model for SandboxTemplateStatus.
+type SandboxTemplateStatus struct {
+	ActiveCount    *int32                      `json:"activeCount,omitempty"`
+	Conditions     *[]SandboxTemplateCondition `json:"conditions,omitempty"`
+	IdleCount      *int32                      `json:"idleCount,omitempty"`
+	LastUpdateTime *time.Time                  `json:"lastUpdateTime,omitempty"`
 }
 
 // SandboxUpdateConfig Subset of SandboxConfig fields that can be updated at runtime without restarting the sandbox.
@@ -1502,13 +1519,14 @@ type TeamMember struct {
 
 // Template defines model for Template.
 type Template struct {
-	CreatedAt  time.Time           `json:"created_at"`
-	Scope      string              `json:"scope"`
-	Spec       SandboxTemplateSpec `json:"spec"`
-	TeamId     *string             `json:"team_id,omitempty"`
-	TemplateId string              `json:"template_id"`
-	UpdatedAt  time.Time           `json:"updated_at"`
-	UserId     *string             `json:"user_id,omitempty"`
+	CreatedAt  time.Time              `json:"created_at"`
+	Scope      string                 `json:"scope"`
+	Spec       SandboxTemplateSpec    `json:"spec"`
+	Status     *SandboxTemplateStatus `json:"status,omitempty"`
+	TeamId     *string                `json:"team_id,omitempty"`
+	TemplateId string                 `json:"template_id"`
+	UpdatedAt  time.Time              `json:"updated_at"`
+	UserId     *string                `json:"user_id,omitempty"`
 }
 
 // TemplateCreateRequest defines model for TemplateCreateRequest.

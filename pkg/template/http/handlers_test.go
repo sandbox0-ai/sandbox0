@@ -3,6 +3,7 @@ package http
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -14,14 +15,17 @@ import (
 
 	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
+	"github.com/sandbox0-ai/infra/pkg/naming"
 	"github.com/sandbox0-ai/infra/pkg/template"
 )
 
 type testTemplateStore struct {
-	getTemplateFn      func(ctx context.Context, scope, teamID, templateID string) (*template.Template, error)
-	createCalled       bool
-	updateCalled       bool
-	createdOrUpdatedID string
+	getTemplateFn        func(ctx context.Context, scope, teamID, templateID string) (*template.Template, error)
+	getTemplateForTeamFn func(ctx context.Context, teamID, templateID string) (*template.Template, error)
+	listVisibleFn        func(ctx context.Context, teamID string) ([]*template.Template, error)
+	createCalled         bool
+	updateCalled         bool
+	createdOrUpdatedID   string
 }
 
 func (s *testTemplateStore) CreateTemplate(_ context.Context, tpl *template.Template) error {
@@ -37,7 +41,10 @@ func (s *testTemplateStore) GetTemplate(ctx context.Context, scope, teamID, temp
 	return nil, nil
 }
 
-func (s *testTemplateStore) GetTemplateForTeam(context.Context, string, string) (*template.Template, error) {
+func (s *testTemplateStore) GetTemplateForTeam(ctx context.Context, teamID, templateID string) (*template.Template, error) {
+	if s.getTemplateForTeamFn != nil {
+		return s.getTemplateForTeamFn(ctx, teamID, templateID)
+	}
 	return nil, nil
 }
 
@@ -45,8 +52,23 @@ func (s *testTemplateStore) ListTemplates(context.Context) ([]*template.Template
 	return nil, nil
 }
 
-func (s *testTemplateStore) ListVisibleTemplates(context.Context, string) ([]*template.Template, error) {
+func (s *testTemplateStore) ListVisibleTemplates(ctx context.Context, teamID string) ([]*template.Template, error) {
+	if s.listVisibleFn != nil {
+		return s.listVisibleFn(ctx, teamID)
+	}
 	return nil, nil
+}
+
+type testTemplateStatsProvider struct {
+	stats *TemplateStats
+	err   error
+}
+
+func (p *testTemplateStatsProvider) GetTemplateStats(context.Context) (*TemplateStats, error) {
+	if p.err != nil {
+		return nil, p.err
+	}
+	return p.stats, nil
 }
 
 func (s *testTemplateStore) UpdateTemplate(_ context.Context, tpl *template.Template) error {
@@ -78,6 +100,43 @@ func TestCreateTemplate_RejectsPrivilegedFieldsForRegularTeam(t *testing.T) {
 			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"1Gi"}},
 			"pool":{"minIdle":0,"maxIdle":1},
 			"pod":{"serviceAccountName":"custom-sa"}
+		}
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected status %d, got %d", http.StatusForbidden, rec.Code)
+	}
+	if store.createCalled {
+		t.Fatalf("expected create not called for forbidden request")
+	}
+}
+
+func TestCreateTemplate_RejectsImagePullPolicyForRegularTeam(t *testing.T) {
+	t.Parallel()
+
+	store := &testTemplateStore{}
+	h := &Handler{Store: store, Logger: zap.NewNop()}
+
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	router.POST("/api/v1/templates", h.CreateTemplate)
+
+	body := []byte(`{
+		"template_id":"demo",
+		"spec":{
+			"mainContainer":{
+				"image":"ubuntu:22.04",
+				"imagePullPolicy":"Always",
+				"resources":{"cpu":"1","memory":"1Gi"}
+			},
+			"pool":{"minIdle":0,"maxIdle":1}
 		}
 	}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates", bytes.NewReader(body))
@@ -311,6 +370,60 @@ func TestUpdateTemplate_RejectsPrivilegedFieldsForRegularTeam(t *testing.T) {
 	}
 }
 
+func TestUpdateTemplate_RejectsImagePullPolicyForRegularTeam(t *testing.T) {
+	t.Parallel()
+
+	store := &testTemplateStore{
+		getTemplateFn: func(context.Context, string, string, string) (*template.Template, error) {
+			return &template.Template{
+				TemplateID: "demo",
+				Scope:      "team",
+				TeamID:     "team-1",
+				Spec: v1alpha1.SandboxTemplateSpec{
+					MainContainer: v1alpha1.ContainerSpec{
+						Image: "ubuntu:22.04",
+						Resources: v1alpha1.ResourceQuota{
+							CPU:    resource.MustParse("1"),
+							Memory: resource.MustParse("1Gi"),
+						},
+					},
+					Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
+				},
+			}, nil
+		},
+	}
+	h := &Handler{Store: store, Logger: zap.NewNop()}
+
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	router.PUT("/api/v1/templates/:id", h.UpdateTemplate)
+
+	body := []byte(`{
+		"spec":{
+			"mainContainer":{
+				"image":"ubuntu:22.04",
+				"imagePullPolicy":"Always",
+				"resources":{"cpu":"1","memory":"1Gi"}
+			},
+			"pool":{"minIdle":0,"maxIdle":1}
+		}
+	}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/templates/demo", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected status %d, got %d", http.StatusForbidden, rec.Code)
+	}
+	if store.updateCalled {
+		t.Fatalf("expected update not called for forbidden request")
+	}
+}
+
 func TestValidateTemplateSpecForClaims_WildcardPermissionRejected(t *testing.T) {
 	t.Parallel()
 
@@ -424,6 +537,72 @@ func TestValidateTemplateSpec_StrictValidation(t *testing.T) {
 				t.Fatalf("expected error containing %q, got %q", tc.wantErr, got)
 			}
 		})
+	}
+}
+
+func TestGetTemplate_IncludesPoolStatus(t *testing.T) {
+	t.Parallel()
+
+	namespace, err := naming.TemplateNamespaceForTeam("team-1")
+	if err != nil {
+		t.Fatalf("resolve team namespace: %v", err)
+	}
+
+	store := &testTemplateStore{
+		getTemplateForTeamFn: func(context.Context, string, string) (*template.Template, error) {
+			return &template.Template{
+				TemplateID: "demo",
+				Scope:      "team",
+				TeamID:     "team-1",
+			}, nil
+		},
+	}
+	statusProvider := &testTemplateStatsProvider{
+		stats: &TemplateStats{
+			Templates: []TemplateStat{
+				{
+					TemplateID:  naming.TemplateNameForCluster("team", "team-1", "demo"),
+					Namespace:   namespace,
+					IdleCount:   3,
+					ActiveCount: 7,
+				},
+			},
+		},
+	}
+	h := &Handler{Store: store, StatsProvider: statusProvider, Logger: zap.NewNop()}
+
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	router.GET("/api/v1/templates/:id", h.GetTemplate)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/templates/demo", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+
+	var resp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Status struct {
+				IdleCount   int32 `json:"idleCount"`
+				ActiveCount int32 `json:"activeCount"`
+			} `json:"status"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("expected success response")
+	}
+	if resp.Data.Status.IdleCount != 3 || resp.Data.Status.ActiveCount != 7 {
+		t.Fatalf("unexpected status payload: idle=%d active=%d", resp.Data.Status.IdleCount, resp.Data.Status.ActiveCount)
 	}
 }
 

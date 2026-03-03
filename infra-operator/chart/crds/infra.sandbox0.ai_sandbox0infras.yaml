@@ -74,9 +74,6 @@ spec:
                       description: BuiltinTemplatePoolConfig holds pool defaults for
                         builtin templates.
                       properties:
-                        autoScale:
-                          default: true
-                          type: boolean
                         maxIdle:
                           default: 5
                           format: int32

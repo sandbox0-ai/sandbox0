@@ -8,13 +8,14 @@ import (
 
 // Template represents a SandboxTemplate stored in PostgreSQL.
 type Template struct {
-	TemplateID string                       `json:"template_id"`
-	Scope      string                       `json:"scope"`             // public, team
-	TeamID     string                       `json:"team_id,omitempty"` // only for scope=team
-	UserID     string                       `json:"user_id,omitempty"` // creator/updater user id (best-effort)
-	Spec       v1alpha1.SandboxTemplateSpec `json:"spec"`
-	CreatedAt  time.Time                    `json:"created_at"`
-	UpdatedAt  time.Time                    `json:"updated_at"`
+	TemplateID string                          `json:"template_id"`
+	Scope      string                          `json:"scope"`             // public, team
+	TeamID     string                          `json:"team_id,omitempty"` // only for scope=team
+	UserID     string                          `json:"user_id,omitempty"` // creator/updater user id (best-effort)
+	Spec       v1alpha1.SandboxTemplateSpec    `json:"spec"`
+	Status     *v1alpha1.SandboxTemplateStatus `json:"status,omitempty"`
+	CreatedAt  time.Time                       `json:"created_at"`
+	UpdatedAt  time.Time                       `json:"updated_at"`
 }
 
 // TemplateAllocation represents how a template is allocated to a cluster.

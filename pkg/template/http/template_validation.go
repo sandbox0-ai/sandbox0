@@ -20,6 +20,9 @@ func validateTemplateSpecForClaims(spec v1alpha1.SandboxTemplateSpec, claims *in
 	if spec.MainContainer.SecurityContext != nil {
 		return fmt.Errorf("spec.mainContainer.securityContext requires system identity")
 	}
+	if strings.TrimSpace(spec.MainContainer.ImagePullPolicy) != "" {
+		return fmt.Errorf("spec.mainContainer.imagePullPolicy requires system identity")
+	}
 	if len(spec.Sidecars) > 0 {
 		return fmt.Errorf("spec.sidecars requires system identity")
 	}

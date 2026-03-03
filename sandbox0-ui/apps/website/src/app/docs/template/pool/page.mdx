@@ -9,7 +9,7 @@ Template: my-python-env (minIdle=3, maxIdle=10)
 
   Pre-warm Pool (idle pods)          Active Sandboxes
   ┌──────────┐                     ┌──────────────────┐
-  │  pod-1   │  ←── claim ──────►  │  sandbox sb_abc  │
+  │  pod-1   │  ──── claim ──────► │  sandbox sb_abc  │
   │  pod-2   │                     └──────────────────┘
   │  pod-3   │
   └──────────┘
@@ -37,15 +37,13 @@ Configure the pool strategy in your template spec under the `pool` key:
 | Field | Type | Description |
 |-------|------|-------------|
 | `minIdle` | integer | Minimum number of idle pods to maintain (ReplicaSet replicas). Claims always succeed instantly while idle pods are available. |
-| `maxIdle` | integer | Maximum number of idle pods allowed. The CleanupController removes excess idle pods when the pool exceeds this limit. |
-| `autoScale` | boolean | Enable automatic pool scaling based on demand (default: `false`). |
+| `maxIdle` | integer | Maximum number of idle pods allowed for autoscaling decisions. The autoscaler caps scale-up at this value, and template status reports `PoolHealthy=False` if idle pods exceed it. |
 
 ```yaml
 spec:
     pool:
         minIdle: 3
         maxIdle: 10
-        autoScale: false
 ```
 
 ---
@@ -74,10 +72,10 @@ Each idle pod consumes CPU and memory as defined in `mainContainer.resources`. S
 
 ## maxIdle — Capping Idle Resources
 
-`maxIdle` puts an upper bound on idle pool size. The CleanupController enforces this limit by terminating excess idle pods:
+`maxIdle` puts an upper bound on idle pool size for autoscaling decisions. The autoscaler uses it as a hard cap when deciding target replicas:
 
-- Useful when `autoScale: true` is enabled — prevents runaway pool growth after a traffic burst subsides
-- Also useful to cap cost when `minIdle` is large and demand drops
+- Prevents scale-up from growing beyond a configured ceiling
+- Works with template status conditions (`PoolHealthy=False`) to signal idle over-provisioning
 
 A common pattern: set `maxIdle` to 2–3x `minIdle` to absorb burst traffic while keeping costs bounded.
 
@@ -107,8 +105,8 @@ The template status exposes real-time pool metrics:
 
 | Field | Description |
 |-------|-------------|
-| `idle_count` | Current number of idle pods ready to be claimed |
-| `active_count` | Number of sandboxes currently running from this template |
+| `status.idleCount` | Current number of idle pods ready to be claimed |
+| `status.activeCount` | Number of sandboxes currently running from this template |
 
 <Tabs
   tabs={[
@@ -119,8 +117,12 @@ The template status exposes real-time pool metrics:
 if err != nil {
     log.Fatal(err)
 }
-idleCount, _ := tpl.Status.IdleCount.Get()
-activeCount, _ := tpl.Status.ActiveCount.Get()
+status, ok := tpl.Status.Get()
+if !ok {
+    log.Fatal("template status unavailable")
+}
+idleCount, _ := status.IdleCount.Get()
+activeCount, _ := status.ActiveCount.Get()
 fmt.Printf("Idle: %d  Active: %d\\n", idleCount, activeCount)`
     },
     {

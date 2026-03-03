@@ -45,6 +45,29 @@ func (s *Session) CreateTemplate(ctx context.Context, t ContractT, template apis
 	return resp.Data, nil
 }
 
+func (s *Session) GetTemplate(ctx context.Context, t ContractT, templateID string) (*apispec.Template, error) {
+	if templateID == "" {
+		return nil, fmt.Errorf("template id is required")
+	}
+	specPath := "/api/v1/templates/{id}"
+	requestPath := "/api/v1/templates/" + templateID
+	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodGet, specPath, requestPath, nil, true)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("get template failed with status %d: %s", status, formatAPIError(body))
+	}
+	var resp apispec.SuccessTemplateResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, err
+	}
+	if !resp.Success || resp.Data == nil {
+		return nil, fmt.Errorf("get template response missing data")
+	}
+	return resp.Data, nil
+}
+
 func (s *Session) UpdateTemplate(ctx context.Context, t ContractT, templateID string, template apispec.TemplateUpdateRequest) (*apispec.Template, error) {
 	if templateID == "" {
 		return nil, fmt.Errorf("template id is required")

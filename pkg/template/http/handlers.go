@@ -24,12 +24,31 @@ type Reconciler interface {
 	TriggerReconcile(ctx context.Context)
 }
 
+// TemplateStat contains pool counters for a synced template.
+type TemplateStat struct {
+	TemplateID  string
+	Namespace   string
+	IdleCount   int32
+	ActiveCount int32
+}
+
+// TemplateStats is a container for all template stats.
+type TemplateStats struct {
+	Templates []TemplateStat
+}
+
+// TemplateStatsProvider resolves current pool status for templates.
+type TemplateStatsProvider interface {
+	GetTemplateStats(ctx context.Context) (*TemplateStats, error)
+}
+
 // Handler provides template HTTP handlers backed by a template store.
 type Handler struct {
 	Store           store.TemplateStore
 	AllocationStore store.AllocationStore
 	ClusterStore    ClusterStore
 	Reconciler      Reconciler
+	StatsProvider   TemplateStatsProvider
 	Logger          *zap.Logger
 }
 
@@ -56,6 +75,7 @@ func (h *Handler) ListTemplates(c *gin.Context) {
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to list templates")
 		return
 	}
+	h.enrichTemplatesStatus(c.Request.Context(), templates)
 
 	spec.JSONSuccess(c, http.StatusOK, gin.H{
 		"templates": templates,
@@ -98,8 +118,62 @@ func (h *Handler) GetTemplate(c *gin.Context) {
 		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "template not found")
 		return
 	}
+	h.enrichTemplatesStatus(c.Request.Context(), []*template.Template{tpl})
 
 	spec.JSONSuccess(c, http.StatusOK, tpl)
+}
+
+func (h *Handler) enrichTemplatesStatus(ctx context.Context, templates []*template.Template) {
+	if len(templates) == 0 || h.StatsProvider == nil {
+		return
+	}
+
+	stats, err := h.StatsProvider.GetTemplateStats(ctx)
+	if err != nil {
+		h.Logger.Warn("Failed to load template status", zap.Error(err))
+		return
+	}
+	if stats == nil || len(stats.Templates) == 0 {
+		return
+	}
+
+	statsMap := make(map[string]TemplateStat, len(stats.Templates))
+	for _, stat := range stats.Templates {
+		statsMap[templateStatKey(stat.Namespace, stat.TemplateID)] = stat
+	}
+
+	for _, tpl := range templates {
+		namespace, err := templateNamespaceForScope(tpl.Scope, tpl.TeamID, tpl.TemplateID)
+		if err != nil {
+			h.Logger.Warn("Failed to resolve template namespace for status",
+				zap.String("template_id", tpl.TemplateID),
+				zap.String("scope", tpl.Scope),
+				zap.String("team_id", tpl.TeamID),
+				zap.Error(err),
+			)
+			continue
+		}
+		clusterTemplateID := naming.TemplateNameForCluster(tpl.Scope, tpl.TeamID, tpl.TemplateID)
+		stat, ok := statsMap[templateStatKey(namespace, clusterTemplateID)]
+		if !ok {
+			continue
+		}
+		tpl.Status = &v1alpha1.SandboxTemplateStatus{
+			IdleCount:   stat.IdleCount,
+			ActiveCount: stat.ActiveCount,
+		}
+	}
+}
+
+func templateNamespaceForScope(scope, teamID, templateID string) (string, error) {
+	if scope == naming.ScopeTeam {
+		return naming.TemplateNamespaceForTeam(teamID)
+	}
+	return naming.TemplateNamespaceForBuiltin(templateID)
+}
+
+func templateStatKey(namespace, templateID string) string {
+	return namespace + "\x00" + templateID
 }
 
 // CreateTemplate creates a new template.

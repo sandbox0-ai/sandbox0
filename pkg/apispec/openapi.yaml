@@ -3672,6 +3672,8 @@ components:
           type: string
         spec:
           $ref: "#/components/schemas/SandboxTemplateSpec"
+        status:
+          $ref: "#/components/schemas/SandboxTemplateStatus"
         created_at:
           type: string
           format: date-time

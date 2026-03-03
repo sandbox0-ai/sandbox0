@@ -58,7 +58,6 @@ The main sandbox container. Required.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `image` | string | — | Container image reference. Use a public image (e.g., `python:3.12-slim`) or a private image pushed to the Sandbox0 registry. |
-| `imagePullPolicy` | string | `IfNotPresent` | When to pull the image: `Always`, `IfNotPresent`, or `Never`. Use `Always` during active development to pick up the latest push. |
 | `resources.cpu` | string | — | CPU limit for the sandbox (e.g., `"1"`, `"2"`, `"500m"`). |
 | `resources.memory` | string | — | Memory limit for the sandbox (e.g., `"2Gi"`, `"512Mi"`). |
 | `env` | array | `[]` | Per-container environment variables. Each entry has `name` and `value`. |
@@ -92,7 +91,6 @@ Warm pool configuration. See [Warm Pool](/docs/template/pool) for a detailed gui
 |-------|------|---------|-------------|
 | `minIdle` | integer | — | Minimum idle pods to pre-warm. Required. |
 | `maxIdle` | integer | — | Maximum idle pods allowed. Required. |
-| `autoScale` | boolean | `false` | Enable automatic pool scaling. |
 
 ---
 
@@ -162,6 +160,7 @@ The following fields require a system-level token. They are not available to reg
 | `pod.tolerations` | Allow pods to be scheduled on tainted nodes. |
 | `pod.serviceAccountName` | Kubernetes service account for sandbox pods. |
 | `mainContainer.securityContext` | Container security context: `runAsUser`, `runAsGroup`, `capabilities.drop`. Capability `add` is not permitted. |
+| `mainContainer.imagePullPolicy` | Pull policy override for the main container image. Only system administrators/system tokens can set this field. |
 | `runtimeClassName` | Kubernetes runtime class (e.g., `gvisor` for gVisor isolation). |
 | `clusterId` | Pin the template to a specific cluster in a multi-cluster deployment. |
 | `public` | Set to `true` to make the template visible to all teams (builtin-style). |

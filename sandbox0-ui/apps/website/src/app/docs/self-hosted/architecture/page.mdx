@@ -204,12 +204,12 @@ All services in one cluster, sharing one PostgreSQL and S3:
 
 ### Multi-Cluster
 
-Control plane and multiple data planes share PostgreSQL:
+Within one region, the control plane and all data plane clusters share the same PostgreSQL and S3/Object Storage:
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│                    Shared PostgreSQL                      │
-└──────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────┐
+│              Shared PostgreSQL (metadata) + Shared S3/Object Storage      │
+└────────────────────────────────────────────────────────────────────────────┘
          │                    │                    │
          ▼                    ▼                    ▼
 ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
@@ -219,4 +219,32 @@ Control plane and multiple data planes share PostgreSQL:
 └─────────────────┘  └─────────────────┘  └─────────────────┘
 ```
 
-Each data plane has its own S3 bucket for isolation.
+The scheduler distributes templates across multiple data plane clusters, and sandbox requests for the same template can be routed to different clusters for horizontal scaling.
+
+## Next Steps
+
+<CardGrid>
+  <LinkCard
+    title="Installation"
+    href="/docs/self-hosted/install"
+    cta="Get Started"
+  >
+    Install infra-operator and deploy your first sandbox0 environment
+  </LinkCard>
+
+  <LinkCard
+    title="Deploy Scenarios"
+    href="/docs/self-hosted/deploy-scenarios"
+    cta="Choose Mode"
+  >
+    Select the deployment model that matches your scale and reliability goals
+  </LinkCard>
+
+  <LinkCard
+    title="Configuration"
+    href="/docs/self-hosted/configuration"
+    cta="Configure"
+  >
+    Tune database, storage, registry, and service-level settings
+  </LinkCard>
+</CardGrid>

@@ -89,26 +89,28 @@ The push command:
 2. Re-tags the local image with the registry hostname prepended
 3. Pushes the image using your Docker daemon
 
-**Output:**
-
-```
-Pushing my-app:v1.2.3 → registry.sandbox0.io/my-app:v1.2.3
-...
-Image pushed successfully: registry.sandbox0.io/my-app:v1.2.3
-```
-
 <Callout variant="info">
 Credentials are short-lived and fetched automatically each time you push. You do not need to run `docker login` manually.
 </Callout>
 
-### Step 3 — Reference the Image in Your Template
+### Step 3 — Reference the Pull Image in Your Template
 
-Use the full image reference returned by the push command in your template spec:
+After `s0 template image push`, use the `Template image reference` value in your template spec.
+This reference is the in-cluster pull address and may differ from the external push address.
+
+```bash
+$ s0 template image push my-app:v1.2.3 -t my-app:v1.2.3
+...
+Image pushed successfully: 127.0.0.1:30500/my-app:v1.2.3
+Template image reference: registry.sandbox0-system.svc.cluster.local:5000/my-app:v1.2.3
+```
+
+Use that `Template image reference` value:
 
 ```yaml
 spec:
     mainContainer:
-        image: registry.sandbox0.io/my-app:v1.2.3
+        image: registry.sandbox0-system.svc.cluster.local:5000/my-app:v1.2.3
         resources:
             cpu: "2"
             memory: 4Gi
@@ -137,11 +139,11 @@ s0 template image build . -t my-app:v1.2.3
 # 2. Push to Sandbox0 registry
 s0 template image push my-app:v1.2.3 -t my-app:v1.2.3
 
-# 3. Create the template referencing the pushed image
+# 3. Create the template using "Template image reference"
 cat > template.yaml << 'EOF'
 spec:
     mainContainer:
-        image: registry.sandbox0.io/my-app:v1.2.3
+        image: registry.sandbox0-system.svc.cluster.local:5000/my-app:v1.2.3
         resources:
             cpu: "2"
             memory: 4Gi
@@ -184,7 +186,7 @@ Sandbox0 handles image pull authentication at the cluster level — you do not n
                                                              
    s0 CLI           API                         Sandbox0 Cluster       
                                                              
-   image push  →  GET /registry/credentials  →  short-lived creds       
+   image push  →  POST /registry/credentials  →  short-lived creds       
                                                   
        ↓                                                     
    docker push  →  Registry  ←───  imagePullSecret (auto-injected into all sandbox pods)

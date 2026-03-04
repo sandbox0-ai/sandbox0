@@ -16,6 +16,7 @@ import (
 type Credential struct {
 	Provider     string     `json:"provider"`
 	PushRegistry string     `json:"pushRegistry"`
+	PullRegistry string     `json:"pullRegistry,omitempty"`
 	Username     string     `json:"username"`
 	Password     string     `json:"password"`
 	ExpiresAt    *time.Time `json:"expiresAt,omitempty"`
@@ -40,45 +41,75 @@ func NewProvider(cfg config.RegistryConfig, secretLister corelisters.SecretListe
 		secretLister: secretLister,
 		namespace:    namespace,
 	}
+	pullRegistry := normalizeRegistryHost(cfg.PullRegistry)
 
+	var base Provider
 	switch provider {
 	case "aws":
 		if cfg.AWS == nil {
 			return nil, fmt.Errorf("registry aws config is required")
 		}
-		return &awsProvider{cfg: *cfg.AWS, secrets: secretReader}, nil
+		base = &awsProvider{cfg: *cfg.AWS, secrets: secretReader}
 	case "gcp":
 		if cfg.GCP == nil {
 			return nil, fmt.Errorf("registry gcp config is required")
 		}
-		return &gcpProvider{cfg: *cfg.GCP, secrets: secretReader}, nil
+		base = &gcpProvider{cfg: *cfg.GCP, secrets: secretReader}
 	case "azure":
 		if cfg.Azure == nil {
 			return nil, fmt.Errorf("registry azure config is required")
 		}
-		return &azureProvider{cfg: *cfg.Azure, secrets: secretReader}, nil
+		base = &azureProvider{cfg: *cfg.Azure, secrets: secretReader}
 	case "aliyun":
 		if cfg.Aliyun == nil {
 			return nil, fmt.Errorf("registry aliyun config is required")
 		}
-		return &aliyunProvider{cfg: *cfg.Aliyun, secrets: secretReader}, nil
+		base = &aliyunProvider{cfg: *cfg.Aliyun, secrets: secretReader}
 	case "harbor":
 		if cfg.Harbor == nil {
 			return nil, fmt.Errorf("registry harbor config is required")
 		}
-		return &harborProvider{cfg: *cfg.Harbor, secrets: secretReader}, nil
+		base = &harborProvider{cfg: *cfg.Harbor, secrets: secretReader}
 	case "builtin":
 		if cfg.Builtin == nil {
 			return nil, fmt.Errorf("registry builtin config is required")
 		}
-		return &builtinProvider{
+		base = &builtinProvider{
 			cfg:      *cfg.Builtin,
 			registry: normalizeRegistryHost(cfg.PushRegistry),
 			secrets:  secretReader,
-		}, nil
+		}
 	default:
 		return nil, fmt.Errorf("unsupported registry provider: %s", provider)
 	}
+
+	return &providerWithPullRegistry{
+		base:         base,
+		pullRegistry: pullRegistry,
+	}, nil
+}
+
+type providerWithPullRegistry struct {
+	base         Provider
+	pullRegistry string
+}
+
+func (p *providerWithPullRegistry) GetPushCredentials(ctx context.Context, teamID string) (*Credential, error) {
+	creds, err := p.base.GetPushCredentials(ctx, teamID)
+	if err != nil {
+		return nil, err
+	}
+	if creds == nil {
+		return nil, nil
+	}
+
+	if p.pullRegistry != "" {
+		creds.PullRegistry = p.pullRegistry
+	} else if creds.PullRegistry == "" {
+		// Default to push endpoint when no dedicated pull endpoint is configured.
+		creds.PullRegistry = creds.PushRegistry
+	}
+	return creds, nil
 }
 
 type secretReader struct {

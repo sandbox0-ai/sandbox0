@@ -11,5 +11,9 @@ nodes:
       extraArgs:
         enable-aggregator-routing: "true"
   extraPortMappings:
+  # edge-gateway / internal-gateway HTTP port
   - containerPort: 30080
     hostPort: 30080
+  # registry port for template image push
+  - containerPort: 30500
+    hostPort: 30500

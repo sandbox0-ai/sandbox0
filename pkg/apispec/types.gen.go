@@ -819,6 +819,7 @@ type RegistryCredentials struct {
 	ExpiresAt    *time.Time `json:"expiresAt,omitempty"`
 	Password     string     `json:"password"`
 	Provider     string     `json:"provider"`
+	PullRegistry string     `json:"pullRegistry"`
 	PushRegistry string     `json:"pushRegistry"`
 	Username     string     `json:"username"`
 }
@@ -978,7 +979,7 @@ type SandboxTemplateStatus struct {
 	ActiveCount    *int32                      `json:"activeCount,omitempty"`
 	Conditions     *[]SandboxTemplateCondition `json:"conditions,omitempty"`
 	IdleCount      *int32                      `json:"idleCount,omitempty"`
-	LastUpdateTime *time.Time                  `json:"lastUpdateTime,omitempty"`
+	LastUpdateTime *time.Time                  `json:"lastUpdateTime"`
 }
 
 // SandboxUpdateConfig Subset of SandboxConfig fields that can be updated at runtime without restarting the sandbox.

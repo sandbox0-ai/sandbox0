@@ -2120,6 +2120,8 @@ components:
           type: string
         pushRegistry:
           type: string
+        pullRegistry:
+          type: string
         username:
           type: string
         password:
@@ -2127,7 +2129,7 @@ components:
         expiresAt:
           type: string
           format: date-time
-      required: [provider, pushRegistry, username, password]
+      required: [provider, pushRegistry, pullRegistry, username, password]
     SuccessDeletedResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
@@ -4052,6 +4054,7 @@ components:
         lastUpdateTime:
           type: string
           format: date-time
+          nullable: true
     SandboxTemplateCondition:
       type: object
       properties:

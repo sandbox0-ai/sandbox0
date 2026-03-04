@@ -13,7 +13,7 @@ spec:
         - data-science
 
     mainContainer:
-        image: registry.sandbox0.ai/my-ds-env:v2.0
+        image: registry.sandbox0.svc.cluster.local:5000/my-ds-env:v2.0
         resources:
             cpu: "2"
             memory: 4Gi
@@ -48,7 +48,7 @@ The main sandbox container. Required.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `image` | string | — | Container image reference. Use a public image (e.g., `python:3.12-slim`) or a private image pushed to the Sandbox0 registry. |
+| `image` | string | — | Container image reference. Use a public image (e.g., `python:3.12-slim`) or the `Template image reference` returned by `s0 template image push` for private images. |
 | `resources.cpu` | string | — | CPU limit for the sandbox (e.g., `"1"`, `"2"`, `"500m"`). |
 | `resources.memory` | string | — | Memory limit for the sandbox (e.g., `"2Gi"`, `"512Mi"`). |
 | `env` | array | `[]` | Per-container environment variables. Each entry has `name` and `value`. |

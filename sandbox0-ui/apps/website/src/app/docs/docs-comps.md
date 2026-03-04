@@ -256,7 +256,7 @@ client := sandbox0.NewClient(sandbox0.WithToken("your-api-key"))
 ```
 
 ```yaml
-apiVersion: sandbox0.io/v1alpha1
+apiVersion: sandbox0.ai/v1alpha1
 kind: Sandbox0Infra
 metadata:
   name: example

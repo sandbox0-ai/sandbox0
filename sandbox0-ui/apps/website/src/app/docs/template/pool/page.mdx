@@ -4,27 +4,38 @@ Sandbox0 achieves sub-200ms sandbox creation by maintaining a pool of pre-warmed
 
 ## How the Pool Works
 
-```
-Template: my-python-env (minIdle=3, maxIdle=10)
+```mermaid
+flowchart TB
+    req["Claim request"]
+    check{"Any running idle pod?"}
 
-  Pre-warm Pool (idle pods)          Active Sandboxes
-  ┌──────────┐                     ┌──────────────────┐
-  │  pod-1   │  ──── claim ──────► │  sandbox sb_abc  │
-  │  pod-2   │                     └──────────────────┘
-  │  pod-3   │
-  └──────────┘
-       ▲
-       │  ReplicaSet auto-replenishes after claim
-       │
-  ┌──────────┐
-  │  pod-4   │  (new idle pod starting up)
-  └──────────┘
+    subgraph hot["Hot path (idle pod exists)"]
+        pick["Pick an idle pod"]
+        flip["Update pod label: idle -> active"]
+        sb1["Return sandbox immediately"]
+        rs1["ReplicaSet notices idle < minIdle"]
+        idle1["New idle pod created asynchronously"]
+    end
+
+    subgraph cold["Cold path (no idle pod)"]
+        create["createNewPod(): create active pod directly"]
+        sb2["Return sandbox after pod starts"]
+        scale["OnColdClaim(): async scale-up decision"]
+        idle2["ReplicaSet creates extra idle pods (bounded by maxIdle)"]
+    end
+
+    req --> check
+    check -->|Yes| pick --> flip --> sb1
+    flip --> rs1 --> idle1
+
+    check -->|No| create --> sb2
+    create --> scale --> idle2
 ```
 
 When a sandbox is claimed:
-1. An idle pod from the pool is assigned immediately
-2. The ReplicaSet detects the pool dropped below `minIdle` and starts a replacement pod
-3. The replacement becomes available within a normal container start time (~seconds)
+1. The manager first tries to claim a running idle pod (`claimIdlePod`)
+2. If successful (hot claim), the pod is relabeled to `active` and returned immediately; pool replenishment happens asynchronously via ReplicaSet reconcile
+3. If no idle pod exists (cold claim), the manager directly creates a new active pod (`createNewPod`) and asynchronously triggers scale-up (`OnColdClaim`) to rebuild idle capacity
 
 As long as `minIdle` idle pods are available, every claim is a **zero-cold-start** operation.
 

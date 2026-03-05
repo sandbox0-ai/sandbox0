@@ -14,22 +14,16 @@ The default Sandbox filesystem is ephemeral—when a Sandbox is deleted, all its
 
 ## Volume and Sandbox Relationship
 
-```
-┌─────────────────────────────────────────────────────┐
-│                      Volume                         │
-│                 (Persistent Storage)                │
-│                                                     │
-│    /data/                                           │
-│    ├── models/                                      │
-│    ├── cache/                                       │
-│    └── output/                                      │
-└──────────┬──────────────┬──────────────┬────────────┘
-           │              │              │
-           ▼              ▼              ▼
-     ┌──────────┐   ┌──────────┐   ┌──────────┐
-     │ Sandbox A│   │ Sandbox B│   │ Sandbox C│
-     │ (RWX)    │   │ (ROX)    │   │ (RWX)    │
-     └──────────┘   └──────────┘   └──────────┘
+```mermaid
+flowchart TB
+    vol["Volume (Persistent Storage)<br/>/data/<br/>- models/<br/>- cache/<br/>- output/"]
+    sa["Sandbox A (RWX)"]
+    sb["Sandbox B (ROX)"]
+    sc["Sandbox C (RWX)"]
+
+    vol --> sa
+    vol --> sb
+    vol --> sc
 ```
 
 ## Access Modes

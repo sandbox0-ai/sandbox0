@@ -11,23 +11,18 @@ A Snapshot is a point-in-time, read-only copy of a Volume. Snapshots are designe
 
 ## Snapshot Lifecycle
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                      Volume                             │
-│                                                         │
-│    Snapshot 1          Snapshot 2          Snapshot 3   │
-│    (v1.0-release)      (v1.1-beta)         (v2.0-dev)   │
-│         │                   │                   │       │
-│         ▼                   ▼                   ▼       │
-│    ┌─────────┐         ┌─────────┐         ┌─────────┐  │
-│    │ Snap A  │         │ Snap B  │         │ Snap C  │  │
-│    └─────────┘         └─────────┘         └─────────┘  │
-│                                                         │
-└─────────────────────────────────────────────────────────┘
-                          │
-                          │ Restore
-                          ▼
-                   Restore to specific snapshot
+```mermaid
+flowchart TB
+    vol["Volume"]
+    s1["Snapshot 1 (v1.0-release)<br/>Snap A"]
+    s2["Snapshot 2 (v1.1-beta)<br/>Snap B"]
+    s3["Snapshot 3 (v2.0-dev)<br/>Snap C"]
+    restore["Restore to specific snapshot"]
+
+    vol --> s1
+    vol --> s2
+    vol --> s3
+    s2 -->|"Restore"| restore
 ```
 
 ## Create a Snapshot

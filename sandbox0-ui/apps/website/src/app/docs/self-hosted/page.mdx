@@ -10,7 +10,7 @@ Sandbox0 self-hosted is **operator-first**.
 2. Apply a `Sandbox0Infra` resource
 3. Let the operator reconcile services and dependencies
 
-## Architecture (Merged)
+## Architecture
 
 ### Planes and Core Services
 
@@ -25,17 +25,44 @@ Sandbox0 self-hosted is **operator-first**.
 | Single-cluster | `internal-gateway` + `manager` | Most users, fastest path |
 | Multi-cluster | control plane (`edge-gateway` + `scheduler`) + one or more data planes | Regional scale-out |
 
-Official samples in source:
-- <DocLink href="https://github.com/sandbox0-ai/sandbox0/blob/main/infra-operator/chart/samples/single-cluster/minimal.yaml" newTab>single-cluster/minimal.yaml</DocLink>
-- <DocLink href="https://github.com/sandbox0-ai/sandbox0/blob/main/infra-operator/chart/samples/single-cluster/volumes.yaml" newTab>single-cluster/volumes.yaml</DocLink>
-- <DocLink href="https://github.com/sandbox0-ai/sandbox0/blob/main/infra-operator/chart/samples/single-cluster/network-policy.yaml" newTab>single-cluster/network-policy.yaml</DocLink>
-- <DocLink href="https://github.com/sandbox0-ai/sandbox0/blob/main/infra-operator/chart/samples/single-cluster/fullmode.yaml" newTab>single-cluster/fullmode.yaml</DocLink>
-- <DocLink href="https://github.com/sandbox0-ai/sandbox0/blob/main/infra-operator/chart/samples/multi-cluster/control-plane.yaml" newTab>multi-cluster/control-plane.yaml</DocLink>
-- <DocLink href="https://github.com/sandbox0-ai/sandbox0/blob/main/infra-operator/chart/samples/multi-cluster/data-plane.yaml" newTab>multi-cluster/data-plane.yaml</DocLink>
+### Full Mode Single-Cluster (Reference)
 
-### Request Flow (Short Version)
+```mermaid
+flowchart TD
+    client[Client / API SDK] --> igw[internal-gateway]
 
-- **Single-cluster**: client -> `internal-gateway` -> `manager` -> sandbox pod (`procd`)
+    subgraph cluster[Kubernetes Cluster - single cluster full mode]
+        direction TB
+
+        subgraph s0[Sandbox0 Services]
+            direction LR
+            igw --> mgr[manager]
+            igw --> pods[Sandbox Pods - procd inside]
+            mgr --> pods
+            mgr --> netd[netd]
+            mgr --> sp[storage-proxy]
+        end
+
+        subgraph mw[Middleware Dependencies]
+            direction LR
+            pg[(PostgreSQL - metadata and state)]
+            s3[(S3 / OSS - volume data)]
+            reg[(Image Registry - optional)]
+        end
+
+        igw --> pg
+        sp --> pg
+        sp --> s3
+        mgr --> reg
+    end
+```
+
+In full mode single-cluster, `internal-gateway`, `manager`, `storage-proxy`, and `netd` are Sandbox0 services. PostgreSQL, S3/OSS, and optional image registry are middleware dependencies.
+
+### Request Flow
+
+- **Single-cluster (typical)**: client -> `internal-gateway` -> `manager` -> sandbox pod (`procd`)
+- **Single-cluster (direct pod path)**: client -> `internal-gateway` -> sandbox pod (`procd`) (for applicable traffic paths)
 - **Multi-cluster**: client -> `edge-gateway` -> `scheduler` -> target cluster `internal-gateway` -> `manager`
 
 ### Regional Boundary

@@ -7,6 +7,7 @@ import {
 } from "@sandbox0/ui";
 import { PixelCodeBlock } from "./PixelCodeBlock";
 import { PixelTabs } from "./PixelTabs";
+import { MermaidDiagram } from "./MermaidDiagram";
 import {
   DocsHero,
   CardGrid,
@@ -302,6 +303,15 @@ export const mdxComponents: MDXComponents = {
     const className = codeElement?.props?.className || "";
     const language = typeof className === "string" ? className.replace("language-", "") : undefined;
     const codeChildren = codeElement?.props?.children;
+
+    if (language === "mermaid") {
+      const chart = Array.isArray(codeChildren) ? codeChildren.join("") : String(codeChildren ?? "");
+      return (
+        <div className="mb-6 overflow-x-auto border border-foreground/15 bg-surface p-4 shadow-pixel-sm">
+          <MermaidDiagram chart={chart} />
+        </div>
+      );
+    }
 
     return (
       <PixelCodeBlock language={language} scale="md" className="mb-6">

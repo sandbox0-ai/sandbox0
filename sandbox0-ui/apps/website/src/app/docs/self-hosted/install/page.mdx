@@ -9,10 +9,6 @@ This is the shortest production-like path from zero to a running self-hosted San
 - `kubectl` matching your cluster minor version
 - A default `StorageClass`
 
-<Callout variant="warning">
-`netd` and `storage-proxy` require Linux worker nodes. For local macOS/Windows testing, start with `minimal` mode.
-</Callout>
-
 ## 1) Install infra-operator
 
 ```bash
@@ -31,9 +27,22 @@ kubectl get pods -n sandbox0-system
 kubectl get crd sandbox0infras.infra.sandbox0.ai
 ```
 
-## 2) Deploy Minimal Mode
+## 2) Choose a Deployment Mode and Apply a Sample
 
-Apply the official sample from source:
+Pick one official sample from source based on your target mode:
+
+- <DocLink href="https://raw.githubusercontent.com/sandbox0-ai/sandbox0/main/infra-operator/chart/samples/single-cluster/minimal.yaml" newTab>single-cluster/minimal.yaml</DocLink>
+- <DocLink href="https://raw.githubusercontent.com/sandbox0-ai/sandbox0/main/infra-operator/chart/samples/single-cluster/volumes.yaml" newTab>single-cluster/volumes.yaml</DocLink>
+- <DocLink href="https://raw.githubusercontent.com/sandbox0-ai/sandbox0/main/infra-operator/chart/samples/single-cluster/network-policy.yaml" newTab>single-cluster/network-policy.yaml</DocLink>
+- <DocLink href="https://raw.githubusercontent.com/sandbox0-ai/sandbox0/main/infra-operator/chart/samples/single-cluster/fullmode.yaml" newTab>single-cluster/fullmode.yaml</DocLink>
+- <DocLink href="https://raw.githubusercontent.com/sandbox0-ai/sandbox0/main/infra-operator/chart/samples/multi-cluster/control-plane.yaml" newTab>multi-cluster/control-plane.yaml</DocLink>
+- <DocLink href="https://raw.githubusercontent.com/sandbox0-ai/sandbox0/main/infra-operator/chart/samples/multi-cluster/data-plane.yaml" newTab>multi-cluster/data-plane.yaml</DocLink>
+
+<Callout variant="warning">
+`netd` and `storage-proxy` require Linux worker nodes. For local macOS/Windows testing, start with `minimal` mode.
+</Callout>
+
+Apply the one you selected:
 
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/sandbox0-ai/sandbox0/main/infra-operator/chart/samples/single-cluster/minimal.yaml
@@ -51,22 +60,7 @@ Expected `status.phase` lifecycle:
 2. `Upgrading` (when reconciling changes)
 3. `Ready`
 
-## 3) Verify Endpoint
-
-```bash
-kubectl get svc -n sandbox0-system -l app.kubernetes.io/component=internal-gateway
-```
-
-If using `NodePort` sample:
-
-```bash
-NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[0].address}')
-NODE_PORT=$(kubectl get svc -n sandbox0-system -l app.kubernetes.io/component=internal-gateway -o jsonpath='{.items[0].spec.ports[0].nodePort}')
-
-curl http://${NODE_IP}:${NODE_PORT}/healthz
-```
-
-## 4) (Optional) Initial Admin User
+## 3) Initial Admin User
 
 If `spec.initUser.passwordSecret` is not provided, operator generates `admin-password`.
 
@@ -74,8 +68,21 @@ If `spec.initUser.passwordSecret` is not provided, operator generates `admin-pas
 kubectl get secret admin-password -n sandbox0-system -o jsonpath='{.data.password}' | base64 -d
 ```
 
-## Next
+## Next Steps
 
-- Need persistent volume + snapshots: enable `storageProxy` and `storage` backend in your `Sandbox0Infra`
-- Need network policy enforcement: enable `services.netd`
-- Need multi-cluster: use `multi-cluster/control-plane.yaml` + `multi-cluster/data-plane.yaml` as your baseline
+<CardGrid>
+  <LinkCard
+    title="Configuration"
+    href="/docs/self-hosted/configuration"
+    cta="Configure"
+  >
+    Enable `storageProxy`, `netd`, and production storage/database settings
+  </LinkCard>
+  <LinkCard
+    title="Get Started"
+    href="/docs/get-started"
+    cta="Start"
+  >
+    Configure your API token and make your first request
+  </LinkCard>
+</CardGrid>

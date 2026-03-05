@@ -181,19 +181,22 @@ For all providers, the `s0 template image push` command handles credential retri
 
 Sandbox0 handles image pull authentication at the cluster level — you do not need to configure credentials in each template.
 
-```
+```mermaid
+flowchart LR
+    cli["s0 CLI"]
+    api["POST /registry/credentials"]
+    creds["Short-lived creds"]
+    docker["docker push"]
+    registry["Registry"]
+    secret["imagePullSecret (auto-injected into all sandbox pods)"]
+    stored["image stored"]
 
-                                                             
-   s0 CLI           API                         Sandbox0 Cluster       
-                                                             
-   image push  →  POST /registry/credentials  →  short-lived creds       
-                                                  
-       ↓                                                     
-   docker push  →  Registry  ←───  imagePullSecret (auto-injected into all sandbox pods)
-                     ↑                    
-                     │                      
-              image stored
-
+    cli -->|"image push"| api
+    api --> creds
+    creds --> docker
+    docker --> registry
+    secret --> registry
+    registry --> stored
 ```
 
 The platform operator maintains a cluster-wide `imagePullSecret` that is automatically injected into every sandbox pod. As a template author, you only need to reference the correct image name — no credential configuration is required in the template spec.

@@ -4,12 +4,13 @@ After mounting a Volume to a Sandbox, you can access Volume data within the Sand
 
 ## Mount Flow
 
-```
-┌─────────────┐      Mount Request      ┌─────────────┐
-│   Sandbox   │ ──────────────────────► │    Volume   │
-│             │                         │             │
-│ /mnt/data   │ ◄───── Mounted ──────── │   /data     │
-└─────────────┘                         └─────────────┘
+```mermaid
+flowchart LR
+    sb["Sandbox<br/>/mnt/data"]
+    vol["Volume<br/>/data"]
+
+    sb -->|"Mount Request"| vol
+    vol -->|"Mounted"| sb
 ```
 
 ## Mount a Volume

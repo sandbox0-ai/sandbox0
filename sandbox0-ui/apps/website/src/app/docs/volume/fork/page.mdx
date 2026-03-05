@@ -11,20 +11,16 @@ Volume Fork creates a new Volume from an existing Volume using JuiceFS Copy-on-W
 
 ## How Fork Works
 
-```
-Source Volume (vol_src)
-    ├── /data/a.txt
-    └── /data/b.txt
-            │
-            │ Fork (COW clone)
-            ▼
-Forked Volume (vol_fork)
-    ├── /data/a.txt  (shared blocks)
-    └── /data/b.txt  (shared blocks)
+```mermaid
+flowchart TB
+    src["Source Volume (vol_src)<br/>/data/a.txt<br/>/data/b.txt"]
+    fork["Forked Volume (vol_fork)<br/>/data/a.txt (shared blocks)<br/>/data/b.txt (shared blocks)"]
+    wfork["After write: vol_fork /data/b.txt -> new blocks"]
+    wsrc["vol_src /data/b.txt -> unchanged"]
 
-After writing in fork:
-    vol_fork /data/b.txt -> new blocks
-    vol_src  /data/b.txt -> unchanged
+    src -->|"Fork (COW clone)"| fork
+    fork --> wfork
+    src --> wsrc
 ```
 
 ## API

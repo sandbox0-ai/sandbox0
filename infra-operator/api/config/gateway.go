@@ -156,3 +156,13 @@ type TeamMappingConfig struct {
 	// +optional
 	DefaultTeamID string `yaml:"default_team_id" json:"defaultTeamId"`
 }
+
+// HasEnabledOIDCProviders returns true when at least one OIDC provider is enabled.
+func HasEnabledOIDCProviders(providers []OIDCProviderConfig) bool {
+	for _, p := range providers {
+		if p.Enabled {
+			return true
+		}
+	}
+	return false
+}

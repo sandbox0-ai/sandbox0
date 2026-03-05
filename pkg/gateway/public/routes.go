@@ -16,12 +16,20 @@ type Deps struct {
 	AuthMiddleware  *middleware.AuthMiddleware
 	BuiltinProvider *builtin.Provider
 	OIDCManager     *oidc.Manager
+	SSOEnabled      bool
 	JWTIssuer       *jwt.Issuer
 	Logger          *zap.Logger
 }
 
 func RegisterRoutes(router *gin.Engine, deps Deps) {
-	authHandler := handlers.NewAuthHandler(deps.Repo, deps.BuiltinProvider, deps.OIDCManager, deps.JWTIssuer, deps.Logger)
+	authHandler := handlers.NewAuthHandler(
+		deps.Repo,
+		deps.BuiltinProvider,
+		deps.OIDCManager,
+		deps.SSOEnabled,
+		deps.JWTIssuer,
+		deps.Logger,
+	)
 	userHandler := handlers.NewUserHandler(deps.Repo, deps.Logger)
 	teamHandler := handlers.NewTeamHandler(deps.Repo, deps.Logger)
 	apiKeyHandler := handlers.NewAPIKeyHandler(deps.Repo, deps.Logger)

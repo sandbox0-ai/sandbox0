@@ -13,6 +13,7 @@ import (
 
 const (
 	FeatureMultiCluster = "multi_cluster"
+	FeatureSSO          = "sso"
 )
 
 var (

@@ -47,6 +47,7 @@ type Server struct {
 	clusterCache   map[string]string
 	clusterCacheAt time.Time
 	clusterCacheMu sync.RWMutex
+	ssoEnabled     bool
 
 	// Auth components
 	builtinProvider *builtin.Provider
@@ -72,6 +73,19 @@ func NewServer(
 	// Create repository
 	repo := db.NewRepository(pool)
 
+	licenseCheckerByFile := make(map[string]*license.Checker)
+	loadLicense := func(path string) (*license.Checker, error) {
+		if checker, ok := licenseCheckerByFile[path]; ok {
+			return checker, nil
+		}
+		checker, err := license.LoadFromFile(path)
+		if err != nil {
+			return nil, err
+		}
+		licenseCheckerByFile[path] = checker
+		return checker, nil
+	}
+
 	// Create observable HTTP client for proxy
 	httpClient := obsProvider.HTTP.NewClient(httpobs.Config{
 		Timeout: cfg.ProxyTimeout.Duration,
@@ -91,7 +105,7 @@ func NewServer(
 	// Create scheduler proxy router (optional, for multi-cluster mode)
 	var schedulerRouter *proxy.Router
 	if cfg.SchedulerEnabled && cfg.SchedulerURL != "" {
-		licenseChecker, err := license.LoadFromFile(cfg.LicenseFile)
+		licenseChecker, err := loadLicense(cfg.LicenseFile)
 		if err != nil {
 			return nil, fmt.Errorf("load enterprise license for multi-cluster: %w", err)
 		}
@@ -136,10 +150,31 @@ func NewServer(
 	builtinProvider := builtin.NewProvider(repo, &cfg.BuiltInAuth, cfg.DefaultTeamName)
 
 	// Initialize OIDC manager
-	oidcManager, err := oidc.NewManager(ctx, &cfg.GatewayConfig, repo, logger)
-	if err != nil {
-		logger.Warn("Failed to initialize OIDC manager", zap.Error(err))
-		// Continue without OIDC support
+	ssoEnabled := true
+	oidcConfigured := config.HasEnabledOIDCProviders(cfg.OIDCProviders)
+	if oidcConfigured {
+		licenseChecker, err := loadLicense(cfg.LicenseFile)
+		if err != nil {
+			ssoEnabled = false
+			logger.Warn("Disabling OIDC SSO because enterprise license cannot be loaded",
+				zap.String("feature", license.FeatureSSO),
+				zap.Error(err),
+			)
+		} else if !licenseChecker.HasFeature(license.FeatureSSO) {
+			ssoEnabled = false
+			logger.Warn("Disabling OIDC SSO because license does not include required feature",
+				zap.String("feature", license.FeatureSSO),
+			)
+		}
+	}
+
+	var oidcManager *oidc.Manager
+	if ssoEnabled {
+		oidcManager, err = oidc.NewManager(ctx, &cfg.GatewayConfig, repo, logger)
+		if err != nil {
+			logger.Warn("Failed to initialize OIDC manager", zap.Error(err))
+			// Continue without OIDC support
+		}
 	}
 
 	// Ensure initial user exists (for self-hosted deployments)
@@ -164,6 +199,7 @@ func NewServer(
 		obsProvider:            obsProvider,
 		internalGatewayProxies: make(map[string]*proxy.Router),
 		clusterCache:           make(map[string]string),
+		ssoEnabled:             ssoEnabled,
 
 		builtinProvider: builtinProvider,
 		oidcManager:     oidcManager,
@@ -196,6 +232,7 @@ func (s *Server) setupRoutes() {
 		AuthMiddleware:  s.authMiddleware,
 		BuiltinProvider: s.builtinProvider,
 		OIDCManager:     s.oidcManager,
+		SSOEnabled:      s.ssoEnabled,
 		JWTIssuer:       s.jwtIssuer,
 		Logger:          s.logger,
 	})

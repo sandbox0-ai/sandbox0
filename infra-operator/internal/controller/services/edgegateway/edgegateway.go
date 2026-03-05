@@ -69,7 +69,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	if err != nil {
 		return err
 	}
-	needEnterpriseLicense := config.SchedulerEnabled && strings.TrimSpace(config.SchedulerURL) != ""
+	needEnterpriseLicense := (config.SchedulerEnabled && strings.TrimSpace(config.SchedulerURL) != "") ||
+		apiconfig.HasEnabledOIDCProviders(config.OIDCProviders)
 	if needEnterpriseLicense && strings.TrimSpace(config.LicenseFile) == "" {
 		config.LicenseFile = common.EnterpriseLicenseDefaultPath
 	}
@@ -79,7 +80,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			Key:  common.EnterpriseLicenseSecretKey,
 		})
 		if err != nil {
-			return fmt.Errorf("enterprise license secret is required for scheduler mode: %w", err)
+			return fmt.Errorf("enterprise license secret is required for enterprise features: %w", err)
 		}
 	}
 	if err := r.Resources.ReconcileServiceConfigMap(ctx, infra, deploymentName, labels, config); err != nil {

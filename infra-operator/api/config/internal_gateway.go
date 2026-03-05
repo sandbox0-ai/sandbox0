@@ -52,6 +52,10 @@ type InternalGatewayConfig struct {
 
 	// Public gateway (external auth) configuration
 	DatabaseURL string `yaml:"database_url" json:"-"`
+	// License file path used to unlock enterprise SSO features.
+	// Required when OIDC providers are configured.
+	// +optional
+	LicenseFile string `yaml:"license_file" json:"-"`
 	// +optional
 	// +kubebuilder:default=30
 	DatabaseMaxConns int `yaml:"database_max_conns" json:"databaseMaxConns"`

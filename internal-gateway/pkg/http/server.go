@@ -25,6 +25,7 @@ import (
 	"github.com/sandbox0-ai/infra/pkg/gateway/public"
 	"github.com/sandbox0-ai/infra/pkg/gateway/spec"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
+	"github.com/sandbox0-ai/infra/pkg/license"
 	"github.com/sandbox0-ai/infra/pkg/observability"
 	httpobs "github.com/sandbox0-ai/infra/pkg/observability/http"
 	"github.com/sandbox0-ai/infra/pkg/proxy"
@@ -52,6 +53,7 @@ type Server struct {
 	internalAuthGen     *internalauth.Generator
 	procdAuthGen        *internalauth.Generator
 	internalAuthEnabled bool
+	ssoEnabled          bool
 	sandboxAddrCache    *cache.Cache[string, *url.URL]
 	obsProvider         *observability.Provider
 }
@@ -178,6 +180,7 @@ func NewServer(
 	var externalLimiter *middleware.ExternalRateLimiter
 	var publicBuiltin *gatewaybuiltin.Provider
 	var publicOIDC *gatewayoidc.Manager
+	ssoEnabled := true
 	var publicJWT *gatewayjwt.Issuer
 
 	if pool != nil {
@@ -198,9 +201,29 @@ func NewServer(
 		}
 
 		builtinProvider := gatewaybuiltin.NewProvider(publicRepo, &cfg.BuiltInAuth, cfg.DefaultTeamName)
-		oidcManager, err := gatewayoidc.NewManager(context.Background(), edgeCfg, publicRepo, logger)
-		if err != nil {
-			logger.Warn("Failed to initialize OIDC manager", zap.Error(err))
+		oidcConfigured := config.HasEnabledOIDCProviders(cfg.OIDCProviders)
+		if oidcConfigured {
+			licenseChecker, err := license.LoadFromFile(cfg.LicenseFile)
+			if err != nil {
+				ssoEnabled = false
+				logger.Warn("Disabling OIDC SSO because enterprise license cannot be loaded",
+					zap.String("feature", license.FeatureSSO),
+					zap.Error(err),
+				)
+			} else if !licenseChecker.HasFeature(license.FeatureSSO) {
+				ssoEnabled = false
+				logger.Warn("Disabling OIDC SSO because license does not include required feature",
+					zap.String("feature", license.FeatureSSO),
+				)
+			}
+		}
+
+		var oidcManager *gatewayoidc.Manager
+		if ssoEnabled {
+			oidcManager, err = gatewayoidc.NewManager(context.Background(), edgeCfg, publicRepo, logger)
+			if err != nil {
+				logger.Warn("Failed to initialize OIDC manager", zap.Error(err))
+			}
 		}
 		if cfg.BuiltInAuth.Enabled && cfg.BuiltInAuth.InitUser != nil {
 			if err := builtinProvider.EnsureInitUser(context.Background()); err != nil {
@@ -239,6 +262,7 @@ func NewServer(
 		internalAuthGen:     internalAuthGen,
 		procdAuthGen:        procdAuthGen,
 		internalAuthEnabled: internalAuthEnabled,
+		ssoEnabled:          ssoEnabled,
 		sandboxAddrCache:    sandboxAddrCache,
 		obsProvider:         obsProvider,
 	}
@@ -275,6 +299,7 @@ func (s *Server) setupRoutes() {
 			AuthMiddleware:  s.publicAuth,
 			BuiltinProvider: s.publicBuiltin,
 			OIDCManager:     s.publicOIDC,
+			SSOEnabled:      s.ssoEnabled,
 			JWTIssuer:       s.publicJWT,
 			Logger:          s.logger,
 		})

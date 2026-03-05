@@ -231,3 +231,70 @@ func TestAuthHandler_RefreshToken_FailsWhenTokenNeverPersisted(t *testing.T) {
 		t.Fatalf("expected 401 for non-persisted refresh token, got %d body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestAuthHandler_OIDCLogin_DeniedWhenSSONotLicensed(t *testing.T) {
+	t.Setenv("GIN_MODE", "release")
+	gin.SetMode(gin.ReleaseMode)
+
+	handler := &AuthHandler{
+		ssoEnabled: false,
+		logger:     zap.NewNop(),
+	}
+
+	router := gin.New()
+	router.GET("/auth/oidc/:provider/login", handler.OIDCLogin)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/auth/oidc/example/login", nil)
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	_, apiErr, err := spec.DecodeResponse[map[string]any](rec.Body)
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if apiErr == nil {
+		t.Fatalf("expected api error")
+	}
+	if apiErr.Code != spec.CodeNotLicensed {
+		t.Fatalf("expected code %q, got %q", spec.CodeNotLicensed, apiErr.Code)
+	}
+}
+
+func TestAuthHandler_GetAuthProviders_HandlesNilBuiltinAndDisabledSSO(t *testing.T) {
+	t.Setenv("GIN_MODE", "release")
+	gin.SetMode(gin.ReleaseMode)
+
+	handler := &AuthHandler{
+		ssoEnabled: false,
+		logger:     zap.NewNop(),
+	}
+
+	router := gin.New()
+	router.GET("/auth/providers", handler.GetAuthProviders)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/auth/providers", nil)
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	type authProvidersResponse struct {
+		Providers []map[string]any `json:"providers"`
+	}
+	data, apiErr, err := spec.DecodeResponse[authProvidersResponse](rec.Body)
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if apiErr != nil {
+		t.Fatalf("unexpected api error: %+v", *apiErr)
+	}
+	if len(data.Providers) != 0 {
+		t.Fatalf("expected no providers, got %d", len(data.Providers))
+	}
+}

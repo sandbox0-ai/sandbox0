@@ -1,73 +1,71 @@
 # Self-hosted Overview
 
-Sandbox0 can be deployed in your own infrastructure using the `infra-operator`, a Kubernetes operator that manages all sandbox0 components.
+This section is intentionally minimal: most teams only need to deploy `infra-operator`, apply one `Sandbox0Infra`, and tune a few fields.
 
-## What is infra-operator?
+## The One Thing to Know
 
-The `infra-operator` is a Kubernetes operator that simplifies sandbox0 deployment and management. It handles:
+Sandbox0 self-hosted is **operator-first**.
 
-- **Component Lifecycle**: Deploys and manages all sandbox0 services
-- **Configuration Management**: Centralizes configuration through the `Sandbox0Infra` CRD
-- **Dependency Setup**: Automatically provisions databases, storage, and registries when using built-in options
-- **Status Monitoring**: Provides real-time status and health information
+1. Install `infra-operator`
+2. Apply a `Sandbox0Infra` resource
+3. Let the operator reconcile services and dependencies
 
-## Operator-First Workflow
+## Architecture (Merged)
 
-As a self-hosted user, your primary interaction is with the `infra-operator`:
+### Planes and Core Services
 
-1. Install the operator via Helm
-2. Create a `Sandbox0Infra` custom resource with your configuration
-3. The operator reconciles and deploys all necessary components
-4. Monitor status through the CRD's status field
-
-## Deployment Modes
-
-Sandbox0 supports multiple deployment modes:
-
-| Mode | Components | Use Case |
-|------|------------|----------|
-| **Minimal** | internal-gateway + manager | Quick start, basic sandbox functionality |
-| **Volumes** | minimal + storage-proxy | Persistent volume management |
-| **Network Policy** | minimal + netd | Network isolation and egress control |
-| **Full** | all data plane services | Complete feature set |
-| **Multi-cluster** | control plane + data planes | Horizontal scaling across clusters |
-
-## Key Concepts
-
-### Control Plane vs Data Plane
-
-- **Control Plane**: Entry point for external traffic, handles authentication, routing, and template distribution. Components: `edge-gateway`, `scheduler`
-- **Data Plane**: Runs sandbox workloads, manages storage and networking. Components: `internal-gateway`, `manager`, `storage-proxy`, `netd`
+- **Control plane** (optional in single-cluster): `edge-gateway`, `scheduler`
+- **Data plane** (runtime): `internal-gateway`, `manager`, optional `storage-proxy`, optional `netd`
+- **In-pod runtime**: `procd` runs inside each sandbox pod and handles process/files/volume mount operations
 
 ### Single-Cluster vs Multi-Cluster
 
-- **Single-Cluster**: Control plane and data plane services in one cluster. Simplest setup.
-- **Multi-Cluster**: One control plane cluster manages multiple data plane clusters. Enables horizontal scaling.
+| Mode | Required services | Typical use |
+|---|---|---|
+| Single-cluster | `internal-gateway` + `manager` | Most users, fastest path |
+| Multi-cluster | control plane (`edge-gateway` + `scheduler`) + one or more data planes | Regional scale-out |
 
-## Next Steps
+Official samples in source:
+- <DocLink href="https://github.com/sandbox0-ai/sandbox0/blob/main/infra-operator/chart/samples/single-cluster/minimal.yaml" newTab>single-cluster/minimal.yaml</DocLink>
+- <DocLink href="https://github.com/sandbox0-ai/sandbox0/blob/main/infra-operator/chart/samples/single-cluster/volumes.yaml" newTab>single-cluster/volumes.yaml</DocLink>
+- <DocLink href="https://github.com/sandbox0-ai/sandbox0/blob/main/infra-operator/chart/samples/single-cluster/network-policy.yaml" newTab>single-cluster/network-policy.yaml</DocLink>
+- <DocLink href="https://github.com/sandbox0-ai/sandbox0/blob/main/infra-operator/chart/samples/single-cluster/fullmode.yaml" newTab>single-cluster/fullmode.yaml</DocLink>
+- <DocLink href="https://github.com/sandbox0-ai/sandbox0/blob/main/infra-operator/chart/samples/multi-cluster/control-plane.yaml" newTab>multi-cluster/control-plane.yaml</DocLink>
+- <DocLink href="https://github.com/sandbox0-ai/sandbox0/blob/main/infra-operator/chart/samples/multi-cluster/data-plane.yaml" newTab>multi-cluster/data-plane.yaml</DocLink>
+
+### Request Flow (Short Version)
+
+- **Single-cluster**: client -> `internal-gateway` -> `manager` -> sandbox pod (`procd`)
+- **Multi-cluster**: client -> `edge-gateway` -> `scheduler` -> target cluster `internal-gateway` -> `manager`
+
+### Regional Boundary
+
+One region should keep control plane and its managed data-plane clusters aligned to the same regional storage context (PostgreSQL + object storage/registry settings).
+
+## What to Configure First
+
+- `spec.database` (builtin for quick start, external for production)
+- `spec.storage` (builtin for quick start, S3/OSS for production)
+- `spec.registry`
+- `spec.services.*.enabled`
+- `spec.publicExposure`
+
+## Next
 
 <CardGrid>
   <LinkCard
-    title="Architecture"
-    href="/docs/self-hosted/architecture"
-    cta="Learn More"
-  >
-    Understand the system architecture and component responsibilities
-  </LinkCard>
-
-  <LinkCard
-    title="Installation"
+    title="Install"
     href="/docs/self-hosted/install"
-    cta="Get Started"
+    cta="Start"
   >
-    Install the infra-operator and deploy your first instance
+    Fastest path to your first running cluster
   </LinkCard>
 
   <LinkCard
-    title="Deploy Scenarios"
-    href="/docs/self-hosted/deploy-scenarios"
-    cta="Explore"
+    title="Configuration"
+    href="/docs/self-hosted/configuration"
+    cta="Configure"
   >
-    Choose the right deployment mode for your needs
+    Only the fields most teams actually need
   </LinkCard>
 </CardGrid>

@@ -269,7 +269,7 @@ export const mdxComponents: MDXComponents = {
     </ul>
   ),
   ol: ({ children, ...props }) => (
-    <ol className="mb-4 ml-4 space-y-2 list-decimal list-inside" {...props}>
+    <ol className="mb-4 ml-6 space-y-2 list-decimal list-outside" {...props}>
       {children}
     </ol>
   ),

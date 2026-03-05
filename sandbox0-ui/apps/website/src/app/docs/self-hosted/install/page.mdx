@@ -1,233 +1,81 @@
-# Install Infra Operator
+# Install
 
-This guide walks you through installing the sandbox0 infra-operator and deploying your first instance.
+This is the shortest production-like path from zero to a running self-hosted Sandbox0.
 
 ## Prerequisites
 
-Before installing, ensure you have:
-
-| Requirement | Version | Notes |
-|-------------|---------|-------|
-| Kubernetes | 1.35+ | Required for in-place CPU/memory request/limit updates |
-| Helm | 3.8+ | For chart installation |
-| kubectl | 1.23+ | For cluster interaction |
-| StorageClass | - | Default storage class for PVCs |
-
-### Kubernetes Requirements
-
-<Callout variant="info">
-Sandbox0 requires Kubernetes `1.35+` to support in-place Pod resource updates (`requests`/`limits`) without pod recreation.
-</Callout>
+- Kubernetes `1.35+`
+- Helm `3.8+`
+- `kubectl` matching your cluster minor version
+- A default `StorageClass`
 
 <Callout variant="warning">
-`netd` and `storage-proxy` can run only on Linux nodes. For local deployment on macOS/Windows, start with `minimal` mode.
+`netd` and `storage-proxy` require Linux worker nodes. For local macOS/Windows testing, start with `minimal` mode.
 </Callout>
 
-<Callout variant="info">
-For production deployments, you'll also need:
-- **PostgreSQL**: External managed database (RDS, Cloud SQL, etc.)
-- **Object Storage**: S3-compatible storage or Aliyun OSS
-- **Container Registry**: ECR, GCR, ACR, or built-in registry
-</Callout>
-
-### Quick Local Cluster with kind (Recommended)
-
-For the simplest local setup, use kind with the same config used by e2e tests:
-
-- <DocLink href="https://github.com/sandbox0-ai/sandbox0/blob/main/infra/tests/e2e/kind-config.yaml" newTab>infra/tests/e2e/kind-config.yaml</DocLink>
-
-```yaml
-kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-name: sandbox0-e2e
-nodes:
-    - role: control-plane
-      image: kindest/node:v1.35.0
-      kubeadmConfigPatches:
-        - |
-            kind: ClusterConfiguration
-            apiServer:
-                extraArgs:
-                    enable-aggregator-routing: "true"
-      extraPortMappings:
-        # edge-gateway / internal-gateway HTTP port
-        - containerPort: 30080
-          hostPort: 30080
-        # registry port for template image push
-        - containerPort: 30500
-          hostPort: 30500
-```
+## 1) Install infra-operator
 
 ```bash
-# Save the YAML above as kind-config.yaml, then create the cluster
-kind create cluster --name sandbox0-e2e --config kind-config.yaml
-```
-
-### Verify Prerequisites
-
-```bash
-# Check Kubernetes version
-kubectl version
-
-# Check Helm version
-helm version
-
-# Verify default storage class
-kubectl get storageclass
-```
-
-## Install the Operator
-
-### Step 1: Add the Helm Repository
-
-```bash
-helm repo add sandbox0 https://charts.sandbox0.ai
+helm repo add sandbox0 https://sandbox0-ai.github.io/sandbox0
 helm repo update
-```
 
-### Step 2: Install the Operator
-
-Install the infra-operator in the `sandbox0-system` namespace:
-
-```bash
 helm install infra-operator sandbox0/infra-operator \
-  --namespace sandbox0-system \
-  --create-namespace
+    --namespace sandbox0-system \
+    --create-namespace
 ```
 
-### Step 3: Verify Installation
+Verify operator + CRD:
 
 ```bash
-# Check operator pod status
 kubectl get pods -n sandbox0-system
-
-# Check CRD installation
 kubectl get crd sandbox0infras.infra.sandbox0.ai
 ```
 
-Expected output:
+## 2) Deploy Minimal Mode
 
-```
-NAME                        READY   STATUS    RESTARTS   AGE
-infra-operator-xxx-xxx      1/1     Running   0          30s
-```
-
-## Deploy Your First Instance
-
-### Quick Start: Minimal Mode
-
-Use the official sample manifest (source of truth):
-
-- <DocLink href="https://github.com/sandbox0-ai/sandbox0/blob/main/infra-operator/chart/samples/single-cluster/minimal.yaml" newTab>single-cluster/minimal.yaml</DocLink>
-
-Apply the configuration:
+Apply the official sample from source:
 
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/sandbox0-ai/sandbox0/main/infra-operator/chart/samples/single-cluster/minimal.yaml
 ```
 
-### Monitor Installation Progress
+Watch status:
 
 ```bash
-# Watch the Sandbox0Infra status
 kubectl get sandbox0infra -n sandbox0-system -w
-
-# Check detailed status
-kubectl describe sandbox0infra minimal -n sandbox0-system
 ```
 
-The `Phase` field will transition through:
+Expected `status.phase` lifecycle:
 
-1. `Installing` - Components are being deployed
-2. `Ready` - All components are healthy
-3. `Degraded` - Some components are unhealthy
-4. `Failed` - Installation failed
+1. `Installing`
+2. `Upgrading` (when reconciling changes)
+3. `Ready`
 
-### Verify Deployment
-
-Once `Phase` is `Ready`:
+## 3) Verify Endpoint
 
 ```bash
-# Check all pods
-kubectl get pods -n sandbox0-system
-
-# Check services
-kubectl get svc -n sandbox0-system
-
-# Get the API endpoint (NodePort)
 kubectl get svc -n sandbox0-system -l app.kubernetes.io/component=internal-gateway
 ```
 
-## Access the API
-
-### Get the Endpoint
-
-For NodePort service:
+If using `NodePort` sample:
 
 ```bash
-# Get node IP
 NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[0].address}')
-
-# Get node port
 NODE_PORT=$(kubectl get svc -n sandbox0-system -l app.kubernetes.io/component=internal-gateway -o jsonpath='{.items[0].spec.ports[0].nodePort}')
 
-echo "API endpoint: http://${'$'}{NODE_IP}:${'$'}{NODE_PORT}"
+curl http://${NODE_IP}:${NODE_PORT}/healthz
 ```
 
-### Test the Connection
+## 4) (Optional) Initial Admin User
+
+If `spec.initUser.passwordSecret` is not provided, operator generates `admin-password`.
 
 ```bash
-# Health check
-curl http://${'$'}{NODE_IP}:${'$'}{NODE_PORT}/health
-
-# List templates
-curl http://${'$'}{NODE_IP}:${'$'}{NODE_PORT}/api/v1/templates
+kubectl get secret admin-password -n sandbox0-system -o jsonpath='{.data.password}' | base64 -d
 ```
 
-## Initial User
+## Next
 
-The `initUser` configuration creates an initial admin user:
-
-```yaml
-initUser:
-  email: "admin@example.com"
-  # Optional: reference a secret for password
-  # passwordSecret:
-  #   name: admin-password
-  #   key: password
-```
-
-If `passwordSecret` is not specified, a random password is generated and stored in a secret:
-
-```bash
-# Get the generated password
-kubectl get secret -n sandbox0-system -l app.kubernetes.io/component=init-user -o jsonpath='{.items[0].data.password}' | base64 -d
-```
-
-## Next Steps
-
-<CardGrid>
-  <LinkCard
-    title="Deploy Scenarios"
-    href="/docs/self-hosted/deploy-scenarios"
-    cta="Explore Modes"
-  >
-    Learn about different deployment modes for various use cases
-  </LinkCard>
-
-  <LinkCard
-    title="Configuration"
-    href="/docs/self-hosted/configuration"
-    cta="View Options"
-  >
-    Explore all configuration options for Sandbox0Infra
-  </LinkCard>
-
-  <LinkCard
-    title="Troubleshooting"
-    href="/docs/self-hosted/troubleshooting"
-    cta="Get Help"
-  >
-    Common issues and solutions
-  </LinkCard>
-</CardGrid>
+- Need persistent volume + snapshots: enable `storageProxy` and `storage` backend in your `Sandbox0Infra`
+- Need network policy enforcement: enable `services.netd`
+- Need multi-cluster: use `multi-cluster/control-plane.yaml` + `multi-cluster/data-plane.yaml` as your baseline

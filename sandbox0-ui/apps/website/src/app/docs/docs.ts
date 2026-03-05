@@ -46,11 +46,8 @@ export const docsNavigation: PixelSidebarItem[] = [
     href: "/docs/self-hosted",
     items: [
       { label: "Overview", href: "/docs/self-hosted" },
-      { label: "Architecture", href: "/docs/self-hosted/architecture" },
       { label: "Install", href: "/docs/self-hosted/install" },
-      { label: "Deploy Scenarios", href: "/docs/self-hosted/deploy-scenarios" },
       { label: "Configuration", href: "/docs/self-hosted/configuration" },
-      { label: "Troubleshooting", href: "/docs/self-hosted/troubleshooting" },
     ],
   },
 ];

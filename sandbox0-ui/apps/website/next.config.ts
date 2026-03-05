@@ -4,6 +4,10 @@ import remarkGfm from "remark-gfm";
 import rehypePrettyCode from "rehype-pretty-code";
 
 const nextConfig: NextConfig = {
+  output: "export",
+  images: {
+    unoptimized: true,
+  },
   transpilePackages: ["@sandbox0/ui"],
   pageExtensions: ["js", "jsx", "md", "mdx", "ts", "tsx"],
 };

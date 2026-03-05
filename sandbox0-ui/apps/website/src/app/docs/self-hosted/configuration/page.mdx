@@ -1,514 +1,118 @@
-# Configuration Reference
+# Configuration
 
-This page documents all available configuration options in the `Sandbox0Infra` custom resource.
+This page focuses on the 20% of config that solves 80% of real deployments.
 
-## Core Configuration
+For full schema, use source of truth:
+- `infra-operator/api/v1alpha1/sandbox0infra_types.go`
+- `infra-operator/chart/crds/infra.sandbox0.ai_sandbox0infras.yaml`
 
-### Version
+## Most Important Fields
 
-Specifies the version of sandbox0 components to deploy.
+| Field | Why it matters |
+|---|---|
+| `spec.database` | Main metadata DB for platform services |
+| `spec.storage` | JuiceFS object backend (`builtin`/`s3`/`oss`) |
+| `spec.registry` | Image pull/push credential model |
+| `spec.services.*.enabled` | Selects deployed topology |
+| `spec.controlPlane` | Required for data-plane clusters in multi-cluster mode |
+| `spec.cluster.id` | Cluster identity used by scheduler registration |
+| `spec.publicExposure` | Public routing domain and region ID |
+| `spec.builtinTemplates` | Seeds default templates and pool sizes |
 
-```yaml
-spec:
-  version: "latest"  # or specific version like "v1.0.0"
-```
-
-### Region
-
-Identifies the region for multi-cluster deployments.
-
-```yaml
-spec:
-  region: "aws/us-east-1"
-```
-
-## Database Configuration
-
-Configure the PostgreSQL database for sandbox0 metadata.
-
-### Built-in Database
-
-For development and testing:
+## Minimal Single-Cluster (Recommended Start)
 
 ```yaml
+apiVersion: infra.sandbox0.ai/v1alpha1
+kind: Sandbox0Infra
+metadata:
+    name: minimal
+    namespace: sandbox0-system
 spec:
-  database:
-    type: builtin
-    builtin:
-      enabled: true
-      image: "postgres:16-alpine"
-      port: 5432
-      username: "sandbox0"
-      database: "sandbox0"
-      sslMode: "disable"
-      persistence:
+    version: latest
+    database:
+        type: builtin
+        builtin:
+            enabled: true
+    publicExposure:
         enabled: true
-        size: "20Gi"
-        storageClass: ""  # empty for default
+        rootDomain: sandbox0.app
+        regionId: aws-us-east-1
+    services:
+        internalGateway:
+            enabled: true
+            service:
+                type: NodePort
+                port: 30080
+            config:
+                authMode: public
+        manager:
+            enabled: true
+    builtinTemplates:
+        - templateId: default
+          image: sandbox0ai/otemplates:default-v0.1.0
+          pool:
+            minIdle: 1
+            maxIdle: 5
 ```
 
-### External Database
-
-For production:
+## Add Persistent Volume + Network Policy
 
 ```yaml
 spec:
-  database:
-    type: external
-    external:
-      host: "your-db.rds.amazonaws.com"
-      port: 5432
-      database: "sandbox0"
-      username: "sandbox0"
-      passwordSecret:
-        name: "db-credentials"
-        key: "password"
-      sslMode: "require"
+    storage:
+        type: s3
+        s3:
+            bucket: sandbox0-prod
+            region: us-east-1
+            endpoint: https://s3.amazonaws.com
+            credentialsSecret:
+                name: aws-credentials
+                accessKeyKey: accessKeyId
+                secretKeyKey: secretAccessKey
+    services:
+        storageProxy:
+            enabled: true
+        netd:
+            enabled: true
 ```
 
-### JuiceFS Database
-
-JuiceFS can share the main database or use a separate one:
+## Multi-Cluster Data Plane Essentials
 
 ```yaml
 spec:
-  juicefsDatabase:
-    shareWithMain: true  # default
-    # Or use separate database:
-    # external:
-    #   host: "juicefs-db.rds.amazonaws.com"
-    #   ...
-```
-
-## Storage Configuration
-
-Configure the object storage backend for JuiceFS.
-
-### Built-in Storage (RustFS)
-
-For development only:
-
-```yaml
-spec:
-  storage:
-    type: builtin
-    builtin:
-      enabled: true
-      image: "rustfs/rustfs:1.0.0-alpha.79"
-      port: 9000
-      consolePort: 9001
-      bucket: "sandbox0"
-      region: "us-east-1"
-      consoleEnabled: true
-      volumes: "/data"
-      persistence:
-        enabled: true
-        size: "20Gi"
-      credentials:  # optional, auto-generated if omitted
-        accessKey: "minioadmin"
-        secretKey: "minioadmin"
-```
-
-### AWS S3
-
-```yaml
-spec:
-  storage:
-    type: s3
-    s3:
-      bucket: "sandbox0-prod"
-      region: "us-east-1"
-      endpoint: "https://s3.amazonaws.com"  # optional for AWS
-      credentialsSecret:
-        name: "aws-credentials"
-        accessKeyKey: "accessKeyId"
-        secretKeyKey: "secretAccessKey"
-      sessionTokenKey: "sessionToken"  # optional
-```
-
-### Aliyun OSS
-
-```yaml
-spec:
-  storage:
-    type: oss
-    oss:
-      bucket: "sandbox0-prod"
-      region: "cn-hangzhou"
-      endpoint: "https://oss-cn-hangzhou.aliyuncs.com"
-      credentialsSecret:
-        name: "oss-credentials"
-        accessKeyKey: "accessKeyId"
-        secretKeyKey: "accessKeySecret"
-```
-
-## Registry Configuration
-
-Configure the container registry for template images.
-
-### Built-in Registry
-
-```yaml
-spec:
-  registry:
-    provider: builtin
-    imagePullSecretName: "sandbox0-registry-pull"
-    builtin:
-      enabled: true
-      image: "registry:2.8.3"
-      port: 5000
-      persistence:
-        enabled: true
-        size: "20Gi"
-      service:
-        type: ClusterIP
-        port: 5000
-      credentialsSecret:  # optional, auto-generated if omitted
-        name: "registry-credentials"
-        usernameKey: "username"
-        passwordKey: "password"
-```
-
-### AWS ECR
-
-```yaml
-spec:
-  registry:
-    provider: aws
-    imagePullSecretName: "ecr-pull-secret"
-    aws:
-      registry: "123456789012.dkr.ecr.us-east-1.amazonaws.com"
-      region: "us-east-1"
-      registryId: "123456789012"
-      pullSecret:
-        name: "ecr-docker-config"
-        key: ".dockerconfigjson"
-      credentialsSecret:
-        name: "aws-credentials"
-        accessKeyKey: "accessKeyId"
-        secretKeyKey: "secretAccessKey"
-        sessionTokenKey: "sessionToken"  # optional
-```
-
-### GCP GCR
-
-```yaml
-spec:
-  registry:
-    provider: gcp
-    gcp:
-      registry: "gcr.io/my-project"
-      pullSecret:
-        name: "gcr-docker-config"
-      serviceAccountSecret:
-        name: "gcp-service-account"
-        key: "serviceAccount.json"
-```
-
-### Azure ACR
-
-```yaml
-spec:
-  registry:
-    provider: azure
-    azure:
-      registry: "myregistry.azurecr.io"
-      pullSecret:
-        name: "acr-docker-config"
-      credentialsSecret:
-        name: "azure-credentials"
-        tenantIdKey: "tenantId"
-        clientIdKey: "clientId"
-        clientSecretKey: "clientSecret"
-```
-
-### Aliyun ACR
-
-```yaml
-spec:
-  registry:
-    provider: aliyun
-    aliyun:
-      registry: "registry.cn-hangzhou.aliyuncs.com"
-      region: "cn-hangzhou"
-      instanceId: "cri-xxx"
-      pullSecret:
-        name: "acr-docker-config"
-      credentialsSecret:
-        name: "aliyun-credentials"
-        accessKeyKey: "accessKeyId"
-        secretKeyKey: "accessKeySecret"
-```
-
-## Services Configuration
-
-Configure individual sandbox0 services.
-
-### Common Service Options
-
-All services support these common options:
-
-```yaml
-spec:
-  services:
-    <serviceName>:
-      enabled: true
-      replicas: 1
-      resources:
-        requests:
-          cpu: "100m"
-          memory: "128Mi"
-        limits:
-          cpu: "500m"
-          memory: "512Mi"
-      service:
-        type: ClusterIP  # ClusterIP, NodePort, or LoadBalancer
-        port: 80
-      ingress:
-        enabled: false
-        className: "nginx"
-        host: "api.example.com"
-        tlsSecret: "api-tls"
-```
-
-### internal-gateway
-
-```yaml
-spec:
-  services:
-    internalGateway:
-      enabled: true
-      replicas: 1
-      service:
-        type: NodePort
-        port: 30080
-      config:
-        authMode: public  # public or internal
-```
-
-### manager
-
-```yaml
-spec:
-  services:
-    manager:
-      enabled: true
-      replicas: 1
-```
-
-### storage-proxy
-
-```yaml
-spec:
-  services:
-    storageProxy:
-      enabled: true
-      replicas: 1
-      config:
-        juicefsEncryptionEnabled: false
-```
-
-### netd
-
-```yaml
-spec:
-  services:
-    netd:
-      enabled: true  # Deploys as DaemonSet
-```
-
-### edge-gateway
-
-```yaml
-spec:
-  services:
-    edgeGateway:
-      enabled: true
-      replicas: 1
-      service:
-        type: LoadBalancer
-      config:
-        schedulerEnabled: true
-```
-
-### scheduler
-
-```yaml
-spec:
-  services:
-    scheduler:
-      enabled: true
-      replicas: 1
-```
-
-## Control Plane Connection
-
-For data plane clusters, configure connection to control plane:
-
-```yaml
-spec:
-  controlPlane:
-    url: "https://api.sandbox0.ai"
-    internalAuthPublicKeySecret:
-      name: "control-plane-public-key"
-      key: "public.key"
-```
-
-## Cluster Configuration
-
-Identify and configure the data plane cluster:
-
-```yaml
-spec:
-  cluster:
-    id: "cluster-001"
-    name: "Production US East 1"
-    capacity:
-      maxSandboxes: 1000
-      cpu:
-        total: "100"
-        available: "80"
-      memory:
-        total: "256Gi"
-        available: "200Gi"
-```
-
-## Public Exposure
-
-Configure public URL generation for sandbox services:
-
-```yaml
-spec:
-  publicExposure:
-    enabled: true
-    rootDomain: "sandbox0.app"
-    regionId: "aws-us-east-1"
-```
-
-Generated URL format: `<exposureLabel>.<regionId>.<rootDomain>`
-
-## Internal Authentication
-
-Configure JWT key pairs for service-to-service authentication:
-
-```yaml
-spec:
-  internalAuth:
     controlPlane:
-      generate: true  # auto-generate key pair
-      # Or provide existing secret:
-      # secretRef:
-      #   name: "control-plane-keys"
-      #   privateKeyKey: "private.key"
-      #   publicKeyKey: "public.key"
-    dataPlane:
-      generate: true
+        url: https://api.sandbox0.example.com
+        internalAuthPublicKeySecret:
+            name: control-plane-public-key
+            key: public.key
+    cluster:
+        id: cluster-001
+        name: production-use1-a
+    services:
+        internalGateway:
+            enabled: true
+            config:
+                authMode: internal
+        manager:
+            enabled: true
+        storageProxy:
+            enabled: true
 ```
 
-## Initial User
+## Service Matrix
 
-Configure the initial admin user:
+| Service | Plane | Required |
+|---|---|---|
+| `internalGateway` | data plane | Yes |
+| `manager` | data plane | Yes |
+| `storageProxy` | data plane | Only when volume/snapshot features are needed |
+| `netd` | data plane | Only when network policy features are needed |
+| `edgeGateway` | control plane | Multi-cluster only |
+| `scheduler` | control plane | Multi-cluster only |
 
-```yaml
-spec:
-  initUser:
-    email: "admin@example.com"
-    name: "Admin User"
-    passwordSecret:
-      name: "admin-password"
-      key: "password"
-```
+## Practical Rules
 
-If `passwordSecret` is omitted, a random password is generated.
-
-## Builtin Templates
-
-Seed the template store with system templates:
-
-```yaml
-spec:
-  builtinTemplates:
-    - templateId: "default"
-      image: "sandbox0ai/otemplates:default-v0.1.0"
-      displayName: "Default"
-      description: "Builtin template installed by infra-operator."
-      pool:
-        minIdle: 1
-        maxIdle: 5
-    - templateId: "python"
-      image: "sandbox0ai/otemplates:python-v0.1.0"
-      displayName: "Python"
-      description: "Python runtime environment."
-      pool:
-        minIdle: 2
-        maxIdle: 10
-```
-
-## Status Fields
-
-The operator updates these status fields:
-
-```yaml
-status:
-  phase: Ready  # Installing, Ready, Degraded, Failed, Upgrading
-  progress: "8/8"
-  lastMessage: "All components are ready"
-  observedVersion: "v1.0.0"
-  endpoints:
-    edgeGateway: "https://api.sandbox0.ai"
-    internalGateway: "http://10.0.0.1:30080"
-  cluster:
-    id: "cluster-001"
-    registered: true
-    registeredAt: "2024-01-01T00:00:00Z"
-  conditions:
-    - type: Ready
-      status: "True"
-      message: "All components are healthy"
-```
-
-### Condition Types
-
-| Condition | Description |
-|-----------|-------------|
-| `Ready` | Overall infrastructure readiness |
-| `DatabaseReady` | Database is accessible |
-| `StorageReady` | Storage backend is configured |
-| `RegistryReady` | Container registry is accessible |
-| `InternalGatewayReady` | internal-gateway is running |
-| `ManagerReady` | Manager is running |
-| `StorageProxyReady` | storage-proxy is running |
-| `NetdReady` | netd DaemonSet is running |
-| `EdgeGatewayReady` | edge-gateway is running |
-| `SchedulerReady` | Scheduler is running |
-| `InternalAuthReady` | Auth keys are configured |
-| `InitUserReady` | Initial user is created |
-| `ClusterRegistered` | Cluster is registered with control plane |
-
-## Next Steps
-
-<CardGrid>
-  <LinkCard
-    title="Deploy Scenarios"
-    href="/docs/self-hosted/deploy-scenarios"
-    cta="Match Setup"
-  >
-    Map your configuration choices to real deployment topologies
-  </LinkCard>
-
-  <LinkCard
-    title="Troubleshooting"
-    href="/docs/self-hosted/troubleshooting"
-    cta="Resolve Issues"
-  >
-    Diagnose install and runtime problems when configs are applied
-  </LinkCard>
-
-  <LinkCard
-    title="Self-hosted Overview"
-    href="/docs/self-hosted"
-    cta="Review Basics"
-  >
-    Revisit core concepts to validate control plane and data plane decisions
-  </LinkCard>
-</CardGrid>
+- Use `builtin` database/storage only for eval or small internal environments.
+- Pin `spec.version` in production instead of leaving `latest`.
+- Keep control plane and data planes in the same regional storage context.
+- Enable only the services required by your feature set.

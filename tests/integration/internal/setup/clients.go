@@ -3,7 +3,7 @@ package setup
 import (
 	"time"
 
-	"github.com/sandbox0-ai/infra/tests/integration/internal/clients"
+	"github.com/sandbox0-ai/sandbox0/tests/integration/internal/clients"
 )
 
 // ClientOptions configures service clients for integration tests.

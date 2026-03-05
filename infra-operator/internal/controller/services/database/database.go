@@ -35,9 +35,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	infrav1alpha1 "github.com/sandbox0-ai/infra/infra-operator/api/v1alpha1"
-	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/pkg/common"
-	"github.com/sandbox0-ai/infra/pkg/framework"
+	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
+	"github.com/sandbox0-ai/sandbox0/pkg/framework"
 )
 
 const (

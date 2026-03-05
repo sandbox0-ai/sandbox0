@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/sandbox0-ai/infra/pkg/apispec"
+	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
 )
 
 func (s *Session) GetNetworkPolicy(ctx context.Context, t ContractT, sandboxID string) (*apispec.TplSandboxNetworkPolicy, int, *apispec.ErrorEnvelope, error) {

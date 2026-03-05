@@ -3,7 +3,7 @@ package licensing
 import (
 	"fmt"
 
-	"github.com/sandbox0-ai/infra/pkg/license"
+	"github.com/sandbox0-ai/sandbox0/pkg/license"
 )
 
 type Feature string

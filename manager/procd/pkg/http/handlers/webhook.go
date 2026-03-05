@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/sandbox0-ai/infra/manager/procd/pkg/webhook"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/webhook"
 )
 
 // WebhookHandler handles webhook publish requests.

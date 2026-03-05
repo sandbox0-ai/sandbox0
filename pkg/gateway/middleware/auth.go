@@ -7,9 +7,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/sandbox0-ai/infra/pkg/auth"
-	gatewayjwt "github.com/sandbox0-ai/infra/pkg/gateway/auth/jwt"
-	"github.com/sandbox0-ai/infra/pkg/gateway/db"
+	"github.com/sandbox0-ai/sandbox0/pkg/auth"
+	gatewayjwt "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/jwt"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/db"
 	"go.uber.org/zap"
 )
 

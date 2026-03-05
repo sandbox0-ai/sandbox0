@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/infra/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 )
 
 func TestResolveExposureFromRequestByHeader(t *testing.T) {

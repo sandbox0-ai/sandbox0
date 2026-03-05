@@ -12,10 +12,10 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/juicedata/juicefs/pkg/meta"
-	"github.com/sandbox0-ai/infra/infra-operator/api/config"
-	"github.com/sandbox0-ai/infra/pkg/naming"
-	"github.com/sandbox0-ai/infra/storage-proxy/pkg/db"
-	"github.com/sandbox0-ai/infra/storage-proxy/pkg/volume"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"github.com/sirupsen/logrus"
 )
 

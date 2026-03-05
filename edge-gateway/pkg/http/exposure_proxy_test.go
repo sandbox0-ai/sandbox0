@@ -3,7 +3,7 @@ package http
 import (
 	"testing"
 
-	"github.com/sandbox0-ai/infra/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 )
 
 func TestExposureLabelFromHost(t *testing.T) {

@@ -33,9 +33,9 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	infrav1alpha1 "github.com/sandbox0-ai/infra/infra-operator/api/v1alpha1"
-	"github.com/sandbox0-ai/infra/infra-operator/internal/controller"
-	managerv1alpha1 "github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
+	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller"
+	managerv1alpha1 "github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	//+kubebuilder:scaffold:imports
 )
 

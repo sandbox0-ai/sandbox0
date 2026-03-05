@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sandbox0-ai/infra/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"go.uber.org/zap"
 	corelisters "k8s.io/client-go/listers/core/v1"
 )

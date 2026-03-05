@@ -7,7 +7,7 @@ import (
 	"time"
 
 	cr "github.com/aliyun/alibaba-cloud-sdk-go/services/cr_ee"
-	"github.com/sandbox0-ai/infra/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 )
 
 type aliyunProvider struct {

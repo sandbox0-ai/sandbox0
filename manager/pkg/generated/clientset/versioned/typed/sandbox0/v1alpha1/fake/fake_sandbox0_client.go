@@ -8,7 +8,7 @@ All rights reserved.
 package fake
 
 import (
-	v1alpha1 "github.com/sandbox0-ai/infra/manager/pkg/generated/clientset/versioned/typed/sandbox0/v1alpha1"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/manager/pkg/generated/clientset/versioned/typed/sandbox0/v1alpha1"
 	rest "k8s.io/client-go/rest"
 	testing "k8s.io/client-go/testing"
 )

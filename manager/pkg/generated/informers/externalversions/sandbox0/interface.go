@@ -8,8 +8,8 @@ All rights reserved.
 package sandbox0
 
 import (
-	internalinterfaces "github.com/sandbox0-ai/infra/manager/pkg/generated/informers/externalversions/internalinterfaces"
-	v1alpha1 "github.com/sandbox0-ai/infra/manager/pkg/generated/informers/externalversions/sandbox0/v1alpha1"
+	internalinterfaces "github.com/sandbox0-ai/sandbox0/manager/pkg/generated/informers/externalversions/internalinterfaces"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/manager/pkg/generated/informers/externalversions/sandbox0/v1alpha1"
 )
 
 // Interface provides access to each of this group's versions.

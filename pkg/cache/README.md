@@ -16,7 +16,7 @@ Thread-safe in-memory cache with TTL (Time-To-Live) and LRU (Least Recently Used
 ### Basic Example
 
 ```go
-import "github.com/sandbox0-ai/infra/pkg/cache"
+import "github.com/sandbox0-ai/sandbox0/pkg/cache"
 
 // Create a cache that holds max 1000 entries, with 5-minute TTL
 c := cache.New[string, *MyStruct](cache.Config{

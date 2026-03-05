@@ -1,8 +1,8 @@
 package volume
 
 import (
-	"github.com/sandbox0-ai/infra/manager/procd/pkg/file"
-	pb "github.com/sandbox0-ai/infra/storage-proxy/proto/fs"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/file"
+	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 )
 
 func mapWatchEventType(eventType pb.WatchEventType) file.EventType {

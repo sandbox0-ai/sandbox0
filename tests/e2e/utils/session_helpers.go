@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sandbox0-ai/infra/pkg/apispec"
-	"github.com/sandbox0-ai/infra/pkg/framework"
+	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
+	"github.com/sandbox0-ai/sandbox0/pkg/framework"
 )
 
 type Session struct {

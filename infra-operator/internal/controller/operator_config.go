@@ -25,8 +25,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	operatorconfig "github.com/sandbox0-ai/infra/infra-operator/api/config"
-	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/pkg/common"
+	operatorconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 )
 
 func (r *Sandbox0InfraReconciler) getImageRepo(ctx context.Context) string {

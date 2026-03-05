@@ -3,7 +3,7 @@ package store
 import (
 	"context"
 
-	"github.com/sandbox0-ai/infra/pkg/template"
+	"github.com/sandbox0-ai/sandbox0/pkg/template"
 )
 
 // TemplateStore provides CRUD operations for templates.

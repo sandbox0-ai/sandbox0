@@ -7,8 +7,8 @@ import (
 	"testing"
 	"unsafe"
 
-	ctxpkg "github.com/sandbox0-ai/infra/manager/procd/pkg/context"
-	"github.com/sandbox0-ai/infra/manager/procd/pkg/process"
+	ctxpkg "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/context"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process"
 	"go.uber.org/zap"
 )
 

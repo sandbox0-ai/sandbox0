@@ -4,7 +4,7 @@ syntax = "proto3";
 
 package sandbox0.fs;
 
-option go_package = "github.com/sandbox0-ai/infra/storage-proxy/proto/fs";
+option go_package = "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs";
 
 // FileSystem service for remote file operations
 service FileSystem {

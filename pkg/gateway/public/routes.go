@@ -2,14 +2,14 @@ package public
 
 import (
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/infra/pkg/gateway/auth/builtin"
-	"github.com/sandbox0-ai/infra/pkg/gateway/auth/jwt"
-	"github.com/sandbox0-ai/infra/pkg/gateway/auth/oidc"
-	"github.com/sandbox0-ai/infra/pkg/gateway/db"
-	"github.com/sandbox0-ai/infra/pkg/gateway/http/handlers"
-	"github.com/sandbox0-ai/infra/pkg/gateway/middleware"
-	"github.com/sandbox0-ai/infra/pkg/licensing"
-	licensinghttp "github.com/sandbox0-ai/infra/pkg/licensing/http"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/builtin"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/jwt"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/oidc"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/db"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/http/handlers"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
+	"github.com/sandbox0-ai/sandbox0/pkg/licensing"
+	licensinghttp "github.com/sandbox0-ai/sandbox0/pkg/licensing/http"
 	"go.uber.org/zap"
 )
 

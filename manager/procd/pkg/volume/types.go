@@ -3,7 +3,7 @@ package volume
 import (
 	"time"
 
-	"github.com/sandbox0-ai/infra/manager/procd/pkg/file"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/file"
 )
 
 // Config holds configuration for the volume manager.

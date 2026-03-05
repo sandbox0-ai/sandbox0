@@ -5,9 +5,9 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
-	"github.com/sandbox0-ai/infra/pkg/gateway/spec"
-	"github.com/sandbox0-ai/infra/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
 )
 

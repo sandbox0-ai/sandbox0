@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/sandbox0-ai/infra/manager/pkg/registry"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/registry"
 	"go.uber.org/zap"
 )
 

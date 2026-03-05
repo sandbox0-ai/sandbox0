@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/sandbox0-ai/infra/pkg/apispec"
+	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
 )
 
 func (s *Session) CreateSandboxVolume(ctx context.Context, t ContractT, req apispec.CreateSandboxVolumeRequest) (*apispec.SandboxVolume, int, error) {

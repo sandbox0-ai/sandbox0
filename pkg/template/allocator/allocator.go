@@ -1,9 +1,9 @@
 package allocator
 
 import (
-	"github.com/sandbox0-ai/infra/pkg/naming"
-	obsmetrics "github.com/sandbox0-ai/infra/pkg/observability/metrics"
-	"github.com/sandbox0-ai/infra/pkg/template"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	"go.uber.org/zap"
 )
 

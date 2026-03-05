@@ -9,12 +9,12 @@ import (
 	"syscall"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/sandbox0-ai/infra/infra-operator/api/config"
-	"github.com/sandbox0-ai/infra/internal-gateway/pkg/http"
-	"github.com/sandbox0-ai/infra/pkg/dbpool"
-	gatewaymigrations "github.com/sandbox0-ai/infra/pkg/gateway/migrations"
-	"github.com/sandbox0-ai/infra/pkg/migrate"
-	"github.com/sandbox0-ai/infra/pkg/observability"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/internal-gateway/pkg/http"
+	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
+	gatewaymigrations "github.com/sandbox0-ai/sandbox0/pkg/gateway/migrations"
+	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
+	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )

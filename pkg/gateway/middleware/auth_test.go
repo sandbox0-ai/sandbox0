@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	gatewayjwt "github.com/sandbox0-ai/infra/pkg/gateway/auth/jwt"
+	gatewayjwt "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/jwt"
 	"go.uber.org/zap"
 )
 

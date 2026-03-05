@@ -13,11 +13,11 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/infra/pkg/gateway/spec"
-	"github.com/sandbox0-ai/infra/pkg/internalauth"
-	"github.com/sandbox0-ai/infra/pkg/naming"
-	"github.com/sandbox0-ai/infra/pkg/template"
-	"github.com/sandbox0-ai/infra/scheduler/pkg/client"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/template"
+	"github.com/sandbox0-ai/sandbox0/scheduler/pkg/client"
 	"go.uber.org/zap"
 )
 

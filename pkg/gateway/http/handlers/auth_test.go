@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/infra/pkg/auth"
-	gatewayjwt "github.com/sandbox0-ai/infra/pkg/gateway/auth/jwt"
-	"github.com/sandbox0-ai/infra/pkg/gateway/db"
-	"github.com/sandbox0-ai/infra/pkg/gateway/spec"
+	"github.com/sandbox0-ai/sandbox0/pkg/auth"
+	gatewayjwt "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/jwt"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/db"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"go.uber.org/zap"
 )
 

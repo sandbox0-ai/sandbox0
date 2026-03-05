@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/sandbox0-ai/infra/pkg/observability"
+	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"

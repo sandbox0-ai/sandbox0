@@ -4,13 +4,13 @@ import (
 	"context"
 	"time"
 
-	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
-	"github.com/sandbox0-ai/infra/pkg/clock"
-	obsmetrics "github.com/sandbox0-ai/infra/pkg/observability/metrics"
-	templreconciler "github.com/sandbox0-ai/infra/pkg/template/reconciler"
-	"github.com/sandbox0-ai/infra/pkg/template/store"
-	"github.com/sandbox0-ai/infra/scheduler/pkg/client"
-	"github.com/sandbox0-ai/infra/scheduler/pkg/db"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/pkg/clock"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	templreconciler "github.com/sandbox0-ai/sandbox0/pkg/template/reconciler"
+	"github.com/sandbox0-ai/sandbox0/pkg/template/store"
+	"github.com/sandbox0-ai/sandbox0/scheduler/pkg/client"
+	"github.com/sandbox0-ai/sandbox0/scheduler/pkg/db"
 	"go.uber.org/zap"
 )
 

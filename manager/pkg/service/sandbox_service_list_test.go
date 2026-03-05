@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sandbox0-ai/infra/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"

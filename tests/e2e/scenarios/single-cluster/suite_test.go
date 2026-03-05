@@ -3,8 +3,8 @@ package singlecluster
 import (
 	"testing"
 
-	"github.com/sandbox0-ai/infra/pkg/framework"
-	"github.com/sandbox0-ai/infra/tests/e2e/cases"
+	"github.com/sandbox0-ai/sandbox0/pkg/framework"
+	"github.com/sandbox0-ai/sandbox0/tests/e2e/cases"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"

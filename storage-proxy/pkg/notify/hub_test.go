@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	pb "github.com/sandbox0-ai/infra/storage-proxy/proto/fs"
+	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"github.com/sirupsen/logrus"
 )
 

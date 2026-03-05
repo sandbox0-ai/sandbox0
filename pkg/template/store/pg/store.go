@@ -7,7 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/sandbox0-ai/infra/pkg/template"
+	"github.com/sandbox0-ai/sandbox0/pkg/template"
 )
 
 // Store implements template and allocation storage in PostgreSQL.

@@ -4,7 +4,7 @@ import (
 	"crypto/ed25519"
 	"testing"
 
-	"github.com/sandbox0-ai/infra/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
 
 func TestProcdTokenGenerator_GenerateToken_IncludesSandboxID(t *testing.T) {

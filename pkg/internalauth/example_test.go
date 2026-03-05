@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sandbox0-ai/infra/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
 
 var (

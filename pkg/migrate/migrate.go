@@ -8,7 +8,7 @@
 //
 // Usage:
 //
-//	import "github.com/sandbox0-ai/infra/pkg/migrate"
+//	import "github.com/sandbox0-ai/sandbox0/pkg/migrate"
 //
 //	// Simple auto-migration on startup
 //	if err := migrate.Up(ctx, db, "migrations"); err != nil {

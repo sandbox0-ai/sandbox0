@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/sandbox0-ai/infra/pkg/framework"
+	"github.com/sandbox0-ai/sandbox0/pkg/framework"
 
 	. "github.com/onsi/ginkgo/v2"
 )

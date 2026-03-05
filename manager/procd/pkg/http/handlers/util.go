@@ -3,7 +3,7 @@ package handlers
 import (
 	"net/http"
 
-	"github.com/sandbox0-ai/infra/pkg/gateway/spec"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 )
 
 // writeJSON writes a JSON response.

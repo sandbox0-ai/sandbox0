@@ -8,11 +8,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/sandbox0-ai/infra/pkg/gateway/spec"
-	"github.com/sandbox0-ai/infra/pkg/internalauth"
-	"github.com/sandbox0-ai/infra/storage-proxy/pkg/db"
-	"github.com/sandbox0-ai/infra/storage-proxy/pkg/snapshot"
-	"github.com/sandbox0-ai/infra/storage-proxy/pkg/volume"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/snapshot"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 )
 
 type createSandboxVolumeRequest struct {

@@ -16,9 +16,9 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	apiconfig "github.com/sandbox0-ai/infra/infra-operator/api/config"
-	infrav1alpha1 "github.com/sandbox0-ai/infra/infra-operator/api/v1alpha1"
-	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/pkg/common"
+	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 )
 
 type Reconciler struct {

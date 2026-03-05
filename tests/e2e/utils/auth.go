@@ -7,7 +7,7 @@ import (
 	"net/http"
 
 	openapi_types "github.com/oapi-codegen/runtime/types"
-	"github.com/sandbox0-ai/infra/pkg/apispec"
+	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
 )
 
 func (s *Session) Login(ctx context.Context, t ContractT, email, password string) error {

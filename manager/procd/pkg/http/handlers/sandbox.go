@@ -4,8 +4,8 @@ package handlers
 import (
 	"net/http"
 
-	ctxpkg "github.com/sandbox0-ai/infra/manager/procd/pkg/context"
-	"github.com/sandbox0-ai/infra/manager/procd/pkg/webhook"
+	ctxpkg "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/context"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/webhook"
 	"go.uber.org/zap"
 )
 

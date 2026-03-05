@@ -4,8 +4,8 @@ import (
 	stdhttp "net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/infra/pkg/gateway/spec"
-	"github.com/sandbox0-ai/infra/pkg/licensing"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	"github.com/sandbox0-ai/sandbox0/pkg/licensing"
 	"go.uber.org/zap"
 )
 

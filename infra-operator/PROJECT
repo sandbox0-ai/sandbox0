@@ -6,7 +6,7 @@ domain: sandbox0.ai
 layout:
 - go.kubebuilder.io/v4
 projectName: sandbox0infra
-repo: github.com/sandbox0-ai/infra/infra-operator
+repo: github.com/sandbox0-ai/sandbox0/infra-operator
 resources:
 - api:
     crdVersion: v1
@@ -15,6 +15,6 @@ resources:
   domain: sandbox0.ai
   group: infra
   kind: Sandbox0Infra
-  path: github.com/sandbox0-ai/infra/infra-operator/api/v1alpha1
+  path: github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1
   version: v1alpha1
 version: "3"

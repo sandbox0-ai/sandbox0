@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/sandbox0-ai/infra/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
 
 const (

@@ -3,7 +3,7 @@ package repl
 import (
 	"fmt"
 
-	"github.com/sandbox0-ai/infra/manager/procd/pkg/process"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process"
 )
 
 // NewREPL creates a REPL process based on the alias specified in config.

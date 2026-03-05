@@ -6,7 +6,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/sandbox0-ai/infra/pkg/template"
+	"github.com/sandbox0-ai/sandbox0/pkg/template"
 )
 
 // Cluster represents a registered data-plane cluster.

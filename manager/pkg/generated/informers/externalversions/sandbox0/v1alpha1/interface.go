@@ -8,7 +8,7 @@ All rights reserved.
 package v1alpha1
 
 import (
-	internalinterfaces "github.com/sandbox0-ai/infra/manager/pkg/generated/informers/externalversions/internalinterfaces"
+	internalinterfaces "github.com/sandbox0-ai/sandbox0/manager/pkg/generated/informers/externalversions/internalinterfaces"
 )
 
 // Interface provides access to all the informers in this group version.

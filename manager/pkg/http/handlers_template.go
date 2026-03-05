@@ -5,10 +5,10 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
-	"github.com/sandbox0-ai/infra/manager/pkg/service"
-	"github.com/sandbox0-ai/infra/pkg/gateway/spec"
-	templatehttp "github.com/sandbox0-ai/infra/pkg/template/http"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	templatehttp "github.com/sandbox0-ai/sandbox0/pkg/template/http"
 	"go.uber.org/zap"
 )
 

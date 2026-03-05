@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	mgr "github.com/sandbox0-ai/infra/manager/pkg/service"
-	"github.com/sandbox0-ai/infra/pkg/cache"
+	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/pkg/cache"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

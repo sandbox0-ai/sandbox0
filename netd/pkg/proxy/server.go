@@ -15,9 +15,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sandbox0-ai/infra/infra-operator/api/config"
-	"github.com/sandbox0-ai/infra/netd/pkg/conntrack"
-	"github.com/sandbox0-ai/infra/netd/pkg/policy"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/netd/pkg/conntrack"
+	"github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
 	"go.uber.org/zap"
 )
 

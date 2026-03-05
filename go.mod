@@ -1,4 +1,4 @@
-module github.com/sandbox0-ai/infra
+module github.com/sandbox0-ai/sandbox0
 
 go 1.25.5
 

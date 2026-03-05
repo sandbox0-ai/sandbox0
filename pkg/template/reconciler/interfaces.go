@@ -3,8 +3,8 @@ package reconciler
 import (
 	"context"
 
-	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
-	"github.com/sandbox0-ai/infra/pkg/template"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/pkg/template"
 )
 
 // TemplateStore provides read access to templates for reconciliation.

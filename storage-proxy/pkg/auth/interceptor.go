@@ -3,7 +3,7 @@ package auth
 import (
 	"context"
 
-	"github.com/sandbox0-ai/infra/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"

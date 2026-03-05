@@ -2,8 +2,8 @@ package middleware
 
 import (
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/infra/pkg/auth"
-	gatewaymiddleware "github.com/sandbox0-ai/infra/pkg/gateway/middleware"
+	"github.com/sandbox0-ai/sandbox0/pkg/auth"
+	gatewaymiddleware "github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 )
 
 // ExternalRateLimiter applies rate limiting only for non-internal auth.

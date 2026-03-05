@@ -6,9 +6,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/sandbox0-ai/infra/manager/procd/pkg/file"
-	"github.com/sandbox0-ai/infra/manager/procd/pkg/webhook"
-	"github.com/sandbox0-ai/infra/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/file"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/webhook"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
 )
 

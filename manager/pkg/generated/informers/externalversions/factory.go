@@ -12,9 +12,9 @@ import (
 	sync "sync"
 	time "time"
 
-	versioned "github.com/sandbox0-ai/infra/manager/pkg/generated/clientset/versioned"
-	internalinterfaces "github.com/sandbox0-ai/infra/manager/pkg/generated/informers/externalversions/internalinterfaces"
-	sandbox0 "github.com/sandbox0-ai/infra/manager/pkg/generated/informers/externalversions/sandbox0"
+	versioned "github.com/sandbox0-ai/sandbox0/manager/pkg/generated/clientset/versioned"
+	internalinterfaces "github.com/sandbox0-ai/sandbox0/manager/pkg/generated/informers/externalversions/internalinterfaces"
+	sandbox0 "github.com/sandbox0-ai/sandbox0/manager/pkg/generated/informers/externalversions/sandbox0"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"

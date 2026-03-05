@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
-	"github.com/sandbox0-ai/infra/netd/pkg/watcher"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/netd/pkg/watcher"
 	"go.uber.org/zap"
 )
 

@@ -18,17 +18,17 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/sandbox0-ai/infra/infra-operator/api/config"
-	"github.com/sandbox0-ai/infra/storage-proxy/pkg/db"
-	"github.com/sandbox0-ai/infra/storage-proxy/pkg/volume"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"github.com/sirupsen/logrus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
-	obsmetrics "github.com/sandbox0-ai/infra/pkg/observability/metrics"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 
-	pb "github.com/sandbox0-ai/infra/storage-proxy/proto/fs"
+	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 )
 
 const (

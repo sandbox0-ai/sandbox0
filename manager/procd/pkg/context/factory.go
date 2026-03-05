@@ -3,9 +3,9 @@ package context
 import (
 	"fmt"
 
-	"github.com/sandbox0-ai/infra/manager/procd/pkg/process"
-	"github.com/sandbox0-ai/infra/manager/procd/pkg/process/cmd"
-	"github.com/sandbox0-ai/infra/manager/procd/pkg/process/repl"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process/cmd"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process/repl"
 )
 
 // Alias aliases map alternative names to canonical REPL names.

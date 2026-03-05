@@ -15,9 +15,9 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
-	ctxpkg "github.com/sandbox0-ai/infra/manager/procd/pkg/context"
-	"github.com/sandbox0-ai/infra/manager/procd/pkg/process"
-	"github.com/sandbox0-ai/infra/manager/procd/pkg/process/repl"
+	ctxpkg "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/context"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process/repl"
 	"go.uber.org/zap"
 )
 

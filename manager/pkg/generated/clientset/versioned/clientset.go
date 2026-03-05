@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"net/http"
 
-	sandbox0v1alpha1 "github.com/sandbox0-ai/infra/manager/pkg/generated/clientset/versioned/typed/sandbox0/v1alpha1"
+	sandbox0v1alpha1 "github.com/sandbox0-ai/sandbox0/manager/pkg/generated/clientset/versioned/typed/sandbox0/v1alpha1"
 	discovery "k8s.io/client-go/discovery"
 	rest "k8s.io/client-go/rest"
 	flowcontrol "k8s.io/client-go/util/flowcontrol"

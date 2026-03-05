@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sandbox0-ai/infra/pkg/internalauth"
-	"github.com/sandbox0-ai/infra/pkg/license"
-	"github.com/sandbox0-ai/infra/pkg/licensing"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/license"
+	"github.com/sandbox0-ai/sandbox0/pkg/licensing"
 )
 
 const (

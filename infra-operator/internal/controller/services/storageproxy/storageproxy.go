@@ -32,13 +32,13 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	apiconfig "github.com/sandbox0-ai/infra/infra-operator/api/config"
-	infrav1alpha1 "github.com/sandbox0-ai/infra/infra-operator/api/v1alpha1"
-	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/pkg/common"
-	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/database"
-	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/internalauth"
-	"github.com/sandbox0-ai/infra/infra-operator/internal/controller/services/storage"
-	pkginternalauth "github.com/sandbox0-ai/infra/pkg/internalauth"
+	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storage"
+	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
 
 const (

@@ -1,6 +1,6 @@
 package singlecluster
 
-import "github.com/sandbox0-ai/infra/pkg/framework"
+import "github.com/sandbox0-ai/sandbox0/pkg/framework"
 
 // LoadScenarios discovers and builds scenarios for single-cluster samples.
 func LoadScenarios(cfg framework.Config) ([]framework.Scenario, error) {

@@ -3,7 +3,7 @@ package pubsub
 import (
 	"time"
 
-	"github.com/sandbox0-ai/infra/pkg/clock"
+	"github.com/sandbox0-ai/sandbox0/pkg/clock"
 )
 
 // TemplateIdleChannel is the PostgreSQL NOTIFY channel for template stats updates.

@@ -16,9 +16,9 @@ import (
 	"go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/zap"
 
-	httpobs "github.com/sandbox0-ai/infra/pkg/observability/http"
-	k8sobs "github.com/sandbox0-ai/infra/pkg/observability/k8s"
-	pgxobs "github.com/sandbox0-ai/infra/pkg/observability/pgx"
+	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
+	k8sobs "github.com/sandbox0-ai/sandbox0/pkg/observability/k8s"
+	pgxobs "github.com/sandbox0-ai/sandbox0/pkg/observability/pgx"
 )
 
 var (

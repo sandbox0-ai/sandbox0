@@ -1,7 +1,7 @@
 package service
 
 import (
-	"github.com/sandbox0-ai/infra/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
 
 // InternalTokenGenerator generates internal tokens using Ed25519 signing.

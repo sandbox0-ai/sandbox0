@@ -5,9 +5,9 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/sandbox0-ai/infra/pkg/gateway/spec"
-	"github.com/sandbox0-ai/infra/pkg/internalauth"
-	"github.com/sandbox0-ai/infra/storage-proxy/pkg/snapshot"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/snapshot"
 )
 
 // CreateSnapshotRequest is the request body for creating a snapshot

@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/sandbox0-ai/infra/pkg/apispec"
-	"github.com/sandbox0-ai/infra/pkg/framework"
-	e2eutils "github.com/sandbox0-ai/infra/tests/e2e/utils"
+	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
+	"github.com/sandbox0-ai/sandbox0/pkg/framework"
+	e2eutils "github.com/sandbox0-ai/sandbox0/tests/e2e/utils"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"

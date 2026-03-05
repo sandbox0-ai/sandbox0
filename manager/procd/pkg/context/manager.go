@@ -8,8 +8,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sandbox0-ai/infra/manager/procd/pkg/process"
-	"github.com/sandbox0-ai/infra/manager/procd/pkg/process/repl"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process/repl"
 )
 
 // ContextResourceUsage represents resource usage for a single context.

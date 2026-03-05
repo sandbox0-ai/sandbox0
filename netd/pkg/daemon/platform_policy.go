@@ -5,9 +5,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/sandbox0-ai/infra/infra-operator/api/config"
-	"github.com/sandbox0-ai/infra/netd/pkg/policy"
-	"github.com/sandbox0-ai/infra/netd/pkg/watcher"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
+	"github.com/sandbox0-ai/sandbox0/netd/pkg/watcher"
 	"go.uber.org/zap"
 )
 

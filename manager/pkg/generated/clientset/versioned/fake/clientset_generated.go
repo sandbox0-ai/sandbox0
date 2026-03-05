@@ -8,9 +8,9 @@ All rights reserved.
 package fake
 
 import (
-	clientset "github.com/sandbox0-ai/infra/manager/pkg/generated/clientset/versioned"
-	sandbox0v1alpha1 "github.com/sandbox0-ai/infra/manager/pkg/generated/clientset/versioned/typed/sandbox0/v1alpha1"
-	fakesandbox0v1alpha1 "github.com/sandbox0-ai/infra/manager/pkg/generated/clientset/versioned/typed/sandbox0/v1alpha1/fake"
+	clientset "github.com/sandbox0-ai/sandbox0/manager/pkg/generated/clientset/versioned"
+	sandbox0v1alpha1 "github.com/sandbox0-ai/sandbox0/manager/pkg/generated/clientset/versioned/typed/sandbox0/v1alpha1"
+	fakesandbox0v1alpha1 "github.com/sandbox0-ai/sandbox0/manager/pkg/generated/clientset/versioned/typed/sandbox0/v1alpha1/fake"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/discovery"

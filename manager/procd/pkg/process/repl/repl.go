@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sandbox0-ai/infra/manager/procd/pkg/process"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process"
 )
 
 // REPL implements a configurable REPL process.

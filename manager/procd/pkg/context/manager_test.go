@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sandbox0-ai/infra/manager/procd/pkg/process"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process"
 )
 
 // TestNewManager tests manager creation.

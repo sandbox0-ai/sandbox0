@@ -11,8 +11,8 @@ import (
 	"context"
 	"time"
 
-	v1alpha1 "github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
-	scheme "github.com/sandbox0-ai/infra/manager/pkg/generated/clientset/versioned/scheme"
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	scheme "github.com/sandbox0-ai/sandbox0/manager/pkg/generated/clientset/versioned/scheme"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
 	watch "k8s.io/apimachinery/pkg/watch"

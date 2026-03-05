@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/sandbox0-ai/infra/pkg/pubsub"
+	"github.com/sandbox0-ai/sandbox0/pkg/pubsub"
 	"go.uber.org/zap"
 )
 

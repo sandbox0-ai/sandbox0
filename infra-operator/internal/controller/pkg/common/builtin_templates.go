@@ -24,14 +24,14 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	infrav1alpha1 "github.com/sandbox0-ai/infra/infra-operator/api/v1alpha1"
-	templatev1alpha1 "github.com/sandbox0-ai/infra/manager/pkg/apis/sandbox0/v1alpha1"
-	"github.com/sandbox0-ai/infra/pkg/dbpool"
-	"github.com/sandbox0-ai/infra/pkg/migrate"
-	"github.com/sandbox0-ai/infra/pkg/naming"
-	"github.com/sandbox0-ai/infra/pkg/template"
-	templmigrations "github.com/sandbox0-ai/infra/pkg/template/migrations"
-	templstorepg "github.com/sandbox0-ai/infra/pkg/template/store/pg"
+	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
+	templatev1alpha1 "github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
+	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/template"
+	templmigrations "github.com/sandbox0-ai/sandbox0/pkg/template/migrations"
+	templstorepg "github.com/sandbox0-ai/sandbox0/pkg/template/store/pg"
 )
 
 // BuiltinTemplateOptions controls builtin template synchronization.

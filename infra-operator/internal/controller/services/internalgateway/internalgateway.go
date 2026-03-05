@@ -68,17 +68,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	}
 	needEnterpriseLicense := internalGatewayPublicAuthEnabled(config.AuthMode) &&
 		apiconfig.HasEnabledOIDCProviders(config.OIDCProviders)
-	if needEnterpriseLicense && strings.TrimSpace(config.LicenseFile) == "" {
-		config.LicenseFile = common.EnterpriseLicenseDefaultPath
-	}
-	if needEnterpriseLicense {
-		_, err := common.GetSecretValue(ctx, r.Resources.Client, infra.Namespace, infrav1alpha1.SecretKeyRef{
-			Name: common.EnterpriseLicenseSecretName(infra.Name),
-			Key:  common.EnterpriseLicenseSecretKey,
-		})
-		if err != nil {
-			return fmt.Errorf("enterprise license secret is required for OIDC SSO: %w", err)
-		}
+	if err := common.EnsureEnterpriseLicense(ctx, r.Resources, infra, &config.LicenseFile, needEnterpriseLicense, "OIDC SSO"); err != nil {
+		return err
 	}
 	if err := r.Resources.ReconcileServiceConfigMap(ctx, infra, deploymentName, labels, config); err != nil {
 		return err
@@ -166,26 +157,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		})
 	}
 	if needEnterpriseLicense {
-		volumeMounts = append(volumeMounts, corev1.VolumeMount{
-			Name:      "enterprise-license",
-			MountPath: config.LicenseFile,
-			SubPath:   common.EnterpriseLicenseSecretKey,
-			ReadOnly:  true,
-		})
-		volumes = append(volumes, corev1.Volume{
-			Name: "enterprise-license",
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName: common.EnterpriseLicenseSecretName(infra.Name),
-					Items: []corev1.KeyToPath{
-						{
-							Key:  common.EnterpriseLicenseSecretKey,
-							Path: common.EnterpriseLicenseSecretKey,
-						},
-					},
-				},
-			},
-		})
+		volumeMounts, volumes = common.AppendEnterpriseLicenseVolume(infra.Name, config.LicenseFile, volumeMounts, volumes)
 	}
 
 	if err := r.Resources.ReconcileDeployment(ctx, infra, deploymentName, labels, replicas, common.ServiceDefinition{

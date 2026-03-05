@@ -19,7 +19,6 @@ package scheduler
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -60,15 +59,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(config.LicenseFile) == "" {
-		config.LicenseFile = common.EnterpriseLicenseDefaultPath
-	}
-	_, err = common.GetSecretValue(ctx, r.Resources.Client, infra.Namespace, infrav1alpha1.SecretKeyRef{
-		Name: common.EnterpriseLicenseSecretName(infra.Name),
-		Key:  common.EnterpriseLicenseSecretKey,
-	})
-	if err != nil {
-		return fmt.Errorf("enterprise license secret is required for scheduler: %w", err)
+	if err := common.EnsureEnterpriseLicense(ctx, r.Resources, infra, &config.LicenseFile, true, "scheduler"); err != nil {
+		return err
 	}
 	if err := common.EnsureBuiltinTemplates(ctx, infra, common.BuiltinTemplateOptions{
 		DatabaseURL:          config.DatabaseURL,
@@ -109,12 +101,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			SubPath:   "internal_jwt_public.key",
 			ReadOnly:  true,
 		},
-		{
-			Name:      "enterprise-license",
-			MountPath: config.LicenseFile,
-			SubPath:   common.EnterpriseLicenseSecretKey,
-			ReadOnly:  true,
-		},
 	}
 	volumes := []corev1.Volume{
 		{
@@ -153,21 +139,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 				},
 			},
 		},
-		{
-			Name: "enterprise-license",
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName: common.EnterpriseLicenseSecretName(infra.Name),
-					Items: []corev1.KeyToPath{
-						{
-							Key:  common.EnterpriseLicenseSecretKey,
-							Path: common.EnterpriseLicenseSecretKey,
-						},
-					},
-				},
-			},
-		},
 	}
+	volumeMounts, volumes = common.AppendEnterpriseLicenseVolume(infra.Name, config.LicenseFile, volumeMounts, volumes)
 
 	// Create deployment
 	httpPort := int32(config.HTTPPort)

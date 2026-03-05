@@ -12,6 +12,8 @@ import (
 	"time"
 )
 
+const featureMultiCluster = "multi_cluster"
+
 func TestLoadFromFile(t *testing.T) {
 	t.Parallel()
 
@@ -23,7 +25,7 @@ func TestLoadFromFile(t *testing.T) {
 		IssuedAt:  now.Add(-time.Hour).Unix(),
 		NotBefore: now.Add(-time.Minute).Unix(),
 		ExpiresAt: now.Add(time.Hour).Unix(),
-		Features:  []string{FeatureMultiCluster},
+		Features:  []string{featureMultiCluster},
 	})
 
 	checker, err := loadAt(map[string]ed25519.PublicKey{keyID: fixture.publicKey}, mustRead(t, licensePath), now)
@@ -33,8 +35,8 @@ func TestLoadFromFile(t *testing.T) {
 	if checker.KeyID() != keyID {
 		t.Fatalf("unexpected key id: %q", checker.KeyID())
 	}
-	if !checker.HasFeature(FeatureMultiCluster) {
-		t.Fatalf("expected %s feature to be enabled", FeatureMultiCluster)
+	if !checker.HasFeature(featureMultiCluster) {
+		t.Fatalf("expected %s feature to be enabled", featureMultiCluster)
 	}
 	if checker.Claims().Subject != "sandbox0-enterprise" {
 		t.Fatalf("unexpected subject: %q", checker.Claims().Subject)
@@ -50,7 +52,7 @@ func TestLoadFromFile_Expired(t *testing.T) {
 		Version:   "v1",
 		Subject:   "sandbox0-enterprise",
 		ExpiresAt: now.Add(-time.Minute).Unix(),
-		Features:  []string{FeatureMultiCluster},
+		Features:  []string{featureMultiCluster},
 	})
 
 	_, err := loadAt(map[string]ed25519.PublicKey{keyID: fixture.publicKey}, mustRead(t, licensePath), now)
@@ -70,7 +72,7 @@ func TestLoadFromFile_UnknownKeyID(t *testing.T) {
 		Version:   "v1",
 		Subject:   "sandbox0-enterprise",
 		ExpiresAt: now.Add(time.Hour).Unix(),
-		Features:  []string{FeatureMultiCluster},
+		Features:  []string{featureMultiCluster},
 	})
 
 	_, err := loadAt(map[string]ed25519.PublicKey{"other-key": fixture.publicKey}, mustRead(t, licensePath), now)

@@ -11,11 +11,6 @@ import (
 	"time"
 )
 
-const (
-	FeatureMultiCluster = "multi_cluster"
-	FeatureSSO          = "sso"
-)
-
 var (
 	ErrLicensePathRequired  = errors.New("license path is required")
 	ErrInvalidLicenseFormat = errors.New("invalid license format")

@@ -8,6 +8,8 @@ import (
 	"github.com/sandbox0-ai/infra/pkg/gateway/db"
 	"github.com/sandbox0-ai/infra/pkg/gateway/http/handlers"
 	"github.com/sandbox0-ai/infra/pkg/gateway/middleware"
+	"github.com/sandbox0-ai/infra/pkg/licensing"
+	licensinghttp "github.com/sandbox0-ai/infra/pkg/licensing/http"
 	"go.uber.org/zap"
 )
 
@@ -16,7 +18,7 @@ type Deps struct {
 	AuthMiddleware  *middleware.AuthMiddleware
 	BuiltinProvider *builtin.Provider
 	OIDCManager     *oidc.Manager
-	SSOEnabled      bool
+	Entitlements    licensing.Entitlements
 	JWTIssuer       *jwt.Issuer
 	Logger          *zap.Logger
 }
@@ -26,7 +28,6 @@ func RegisterRoutes(router *gin.Engine, deps Deps) {
 		deps.Repo,
 		deps.BuiltinProvider,
 		deps.OIDCManager,
-		deps.SSOEnabled,
 		deps.JWTIssuer,
 		deps.Logger,
 	)
@@ -46,8 +47,16 @@ func RegisterRoutes(router *gin.Engine, deps Deps) {
 		auth.POST("/refresh", authHandler.RefreshToken)
 
 		// OIDC auth
-		auth.GET("/oidc/:provider/login", authHandler.OIDCLogin)
-		auth.GET("/oidc/:provider/callback", authHandler.OIDCCallback)
+		auth.GET(
+			"/oidc/:provider/login",
+			licensinghttp.RequireFeature(deps.Entitlements, licensing.FeatureSSO, deps.Logger),
+			authHandler.OIDCLogin,
+		)
+		auth.GET(
+			"/oidc/:provider/callback",
+			licensinghttp.RequireFeature(deps.Entitlements, licensing.FeatureSSO, deps.Logger),
+			authHandler.OIDCCallback,
+		)
 	}
 
 	// ===== Protected Auth Routes =====

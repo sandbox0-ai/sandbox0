@@ -19,7 +19,7 @@ import (
 	"github.com/sandbox0-ai/infra/pkg/gateway/public"
 	"github.com/sandbox0-ai/infra/pkg/gateway/spec"
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
-	"github.com/sandbox0-ai/infra/pkg/license"
+	"github.com/sandbox0-ai/infra/pkg/licensing"
 	"github.com/sandbox0-ai/infra/pkg/observability"
 	httpobs "github.com/sandbox0-ai/infra/pkg/observability/http"
 	"github.com/sandbox0-ai/infra/pkg/proxy"
@@ -47,7 +47,7 @@ type Server struct {
 	clusterCache   map[string]string
 	clusterCacheAt time.Time
 	clusterCacheMu sync.RWMutex
-	ssoEnabled     bool
+	entitlements   licensing.Entitlements
 
 	// Auth components
 	builtinProvider *builtin.Provider
@@ -72,18 +72,22 @@ func NewServer(
 
 	// Create repository
 	repo := db.NewRepository(pool)
+	oidcConfigured := config.HasEnabledOIDCProviders(cfg.OIDCProviders)
+	schedulerConfigured := cfg.SchedulerEnabled && cfg.SchedulerURL != ""
+	enterpriseFeaturesEnabled := oidcConfigured || schedulerConfigured
 
-	licenseCheckerByFile := make(map[string]*license.Checker)
-	loadLicense := func(path string) (*license.Checker, error) {
-		if checker, ok := licenseCheckerByFile[path]; ok {
-			return checker, nil
+	licenseEntitlements := licensing.NewStaticEntitlements()
+	if enterpriseFeaturesEnabled {
+		if err := licensing.RequireLicenseFile(cfg.LicenseFile); err != nil {
+			return nil, fmt.Errorf("license_file is required when enterprise features are enabled: %w", err)
 		}
-		checker, err := license.LoadFromFile(path)
-		if err != nil {
-			return nil, err
-		}
-		licenseCheckerByFile[path] = checker
-		return checker, nil
+		licenseEntitlements = licensing.LoadFileEntitlements(cfg.LicenseFile)
+	}
+
+	// Keep OIDC endpoints consistent when OIDC is not configured.
+	publicEntitlements := licensing.NewStaticEntitlements(licensing.FeatureSSO)
+	if oidcConfigured {
+		publicEntitlements = licenseEntitlements
 	}
 
 	// Create observable HTTP client for proxy
@@ -104,13 +108,9 @@ func NewServer(
 
 	// Create scheduler proxy router (optional, for multi-cluster mode)
 	var schedulerRouter *proxy.Router
-	if cfg.SchedulerEnabled && cfg.SchedulerURL != "" {
-		licenseChecker, err := loadLicense(cfg.LicenseFile)
-		if err != nil {
-			return nil, fmt.Errorf("load enterprise license for multi-cluster: %w", err)
-		}
-		if !licenseChecker.HasFeature(license.FeatureMultiCluster) {
-			return nil, fmt.Errorf("enterprise license missing required feature: %s", license.FeatureMultiCluster)
+	if schedulerConfigured {
+		if err := licenseEntitlements.Require(licensing.FeatureMultiCluster); err != nil {
+			return nil, fmt.Errorf("enterprise multi-cluster feature is required for scheduler mode: %w", err)
 		}
 
 		schedulerRouter, err = proxy.NewRouter(
@@ -150,26 +150,14 @@ func NewServer(
 	builtinProvider := builtin.NewProvider(repo, &cfg.BuiltInAuth, cfg.DefaultTeamName)
 
 	// Initialize OIDC manager
-	ssoEnabled := true
-	oidcConfigured := config.HasEnabledOIDCProviders(cfg.OIDCProviders)
 	if oidcConfigured {
-		licenseChecker, err := loadLicense(cfg.LicenseFile)
-		if err != nil {
-			ssoEnabled = false
-			logger.Warn("Disabling OIDC SSO because enterprise license cannot be loaded",
-				zap.String("feature", license.FeatureSSO),
-				zap.Error(err),
-			)
-		} else if !licenseChecker.HasFeature(license.FeatureSSO) {
-			ssoEnabled = false
-			logger.Warn("Disabling OIDC SSO because license does not include required feature",
-				zap.String("feature", license.FeatureSSO),
-			)
+		if err := licenseEntitlements.Require(licensing.FeatureSSO); err != nil {
+			return nil, fmt.Errorf("enterprise SSO feature is required when OIDC providers are configured: %w", err)
 		}
 	}
 
 	var oidcManager *oidc.Manager
-	if ssoEnabled {
+	if oidcConfigured {
 		oidcManager, err = oidc.NewManager(ctx, &cfg.GatewayConfig, repo, logger)
 		if err != nil {
 			logger.Warn("Failed to initialize OIDC manager", zap.Error(err))
@@ -199,7 +187,7 @@ func NewServer(
 		obsProvider:            obsProvider,
 		internalGatewayProxies: make(map[string]*proxy.Router),
 		clusterCache:           make(map[string]string),
-		ssoEnabled:             ssoEnabled,
+		entitlements:           publicEntitlements,
 
 		builtinProvider: builtinProvider,
 		oidcManager:     oidcManager,
@@ -232,7 +220,7 @@ func (s *Server) setupRoutes() {
 		AuthMiddleware:  s.authMiddleware,
 		BuiltinProvider: s.builtinProvider,
 		OIDCManager:     s.oidcManager,
-		SSOEnabled:      s.ssoEnabled,
+		Entitlements:    s.entitlements,
 		JWTIssuer:       s.jwtIssuer,
 		Logger:          s.logger,
 	})

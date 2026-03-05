@@ -232,13 +232,12 @@ func TestAuthHandler_RefreshToken_FailsWhenTokenNeverPersisted(t *testing.T) {
 	}
 }
 
-func TestAuthHandler_OIDCLogin_DeniedWhenSSONotLicensed(t *testing.T) {
+func TestAuthHandler_OIDCLogin_ReturnsNotFoundWithoutOIDCManager(t *testing.T) {
 	t.Setenv("GIN_MODE", "release")
 	gin.SetMode(gin.ReleaseMode)
 
 	handler := &AuthHandler{
-		ssoEnabled: false,
-		logger:     zap.NewNop(),
+		logger: zap.NewNop(),
 	}
 
 	router := gin.New()
@@ -248,8 +247,8 @@ func TestAuthHandler_OIDCLogin_DeniedWhenSSONotLicensed(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/auth/oidc/example/login", nil)
 	router.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d body=%s", rec.Code, rec.Body.String())
 	}
 
 	_, apiErr, err := spec.DecodeResponse[map[string]any](rec.Body)
@@ -259,8 +258,8 @@ func TestAuthHandler_OIDCLogin_DeniedWhenSSONotLicensed(t *testing.T) {
 	if apiErr == nil {
 		t.Fatalf("expected api error")
 	}
-	if apiErr.Code != spec.CodeNotLicensed {
-		t.Fatalf("expected code %q, got %q", spec.CodeNotLicensed, apiErr.Code)
+	if apiErr.Code != spec.CodeNotFound {
+		t.Fatalf("expected code %q, got %q", spec.CodeNotFound, apiErr.Code)
 	}
 }
 
@@ -269,8 +268,7 @@ func TestAuthHandler_GetAuthProviders_HandlesNilBuiltinAndDisabledSSO(t *testing
 	gin.SetMode(gin.ReleaseMode)
 
 	handler := &AuthHandler{
-		ssoEnabled: false,
-		logger:     zap.NewNop(),
+		logger: zap.NewNop(),
 	}
 
 	router := gin.New()

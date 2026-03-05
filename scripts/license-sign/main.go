@@ -12,6 +12,7 @@ import (
 
 	"github.com/sandbox0-ai/infra/pkg/internalauth"
 	"github.com/sandbox0-ai/infra/pkg/license"
+	"github.com/sandbox0-ai/infra/pkg/licensing"
 )
 
 const (
@@ -36,7 +37,7 @@ func main() {
 	flag.StringVar(&keyID, "kid", license.CurrentKeyID, "Signing key id embedded in license envelope")
 	flag.StringVar(&subject, "subject", defaultLicenseSubject, "License subject/customer identifier")
 	flag.StringVar(&version, "version", "v1", "License payload version")
-	flag.StringVar(&featuresCSV, "features", license.FeatureMultiCluster, "Comma-separated feature list (e.g. multi_cluster)")
+	flag.StringVar(&featuresCSV, "features", string(licensing.FeatureMultiCluster), "Comma-separated feature list (e.g. multi_cluster)")
 	flag.StringVar(&notBeforeStr, "not-before", "", "RFC3339 timestamp for license activation time (default: now)")
 	flag.StringVar(&expiresAtStr, "expires-at", "", "RFC3339 timestamp for license expiration time")
 	flag.DurationVar(&expiresIn, "expires-in", 365*24*time.Hour, "Relative expiration from now (ignored when -expires-at is provided)")

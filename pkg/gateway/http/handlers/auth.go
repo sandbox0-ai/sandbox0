@@ -15,7 +15,6 @@ import (
 	"github.com/sandbox0-ai/infra/pkg/gateway/db"
 	"github.com/sandbox0-ai/infra/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/infra/pkg/gateway/spec"
-	"github.com/sandbox0-ai/infra/pkg/license"
 	"go.uber.org/zap"
 )
 
@@ -24,7 +23,6 @@ type AuthHandler struct {
 	repo            authRepository
 	builtinProvider *builtin.Provider
 	oidcManager     *oidc.Manager
-	ssoEnabled      bool
 	jwtIssuer       *jwt.Issuer
 	logger          *zap.Logger
 }
@@ -42,7 +40,6 @@ func NewAuthHandler(
 	repo *db.Repository,
 	builtinProvider *builtin.Provider,
 	oidcManager *oidc.Manager,
-	ssoEnabled bool,
 	jwtIssuer *jwt.Issuer,
 	logger *zap.Logger,
 ) *AuthHandler {
@@ -50,7 +47,6 @@ func NewAuthHandler(
 		repo:            repo,
 		builtinProvider: builtinProvider,
 		oidcManager:     oidcManager,
-		ssoEnabled:      ssoEnabled,
 		jwtIssuer:       jwtIssuer,
 		logger:          logger,
 	}
@@ -316,10 +312,6 @@ func (h *AuthHandler) resolveTeamRole(ctx context.Context, teamID, userID string
 
 // OIDCLogin initiates OIDC login
 func (h *AuthHandler) OIDCLogin(c *gin.Context) {
-	if !h.ssoEnabled {
-		spec.JSONError(c, http.StatusForbidden, spec.CodeNotLicensed, fmt.Sprintf("feature %q is not licensed", license.FeatureSSO))
-		return
-	}
 	if h.oidcManager == nil {
 		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, oidc.ErrProviderNotFound.Error())
 		return
@@ -350,10 +342,6 @@ func (h *AuthHandler) OIDCLogin(c *gin.Context) {
 
 // OIDCCallback handles OIDC callback
 func (h *AuthHandler) OIDCCallback(c *gin.Context) {
-	if !h.ssoEnabled {
-		spec.JSONError(c, http.StatusForbidden, spec.CodeNotLicensed, fmt.Sprintf("feature %q is not licensed", license.FeatureSSO))
-		return
-	}
 	if h.oidcManager == nil {
 		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, oidc.ErrProviderNotFound.Error())
 		return
@@ -425,8 +413,8 @@ func (h *AuthHandler) OIDCCallback(c *gin.Context) {
 func (h *AuthHandler) GetAuthProviders(c *gin.Context) {
 	providers := make([]gin.H, 0)
 
-	// Add OIDC providers when licensed.
-	if h.ssoEnabled && h.oidcManager != nil {
+	// Add OIDC providers when available.
+	if h.oidcManager != nil {
 		for _, info := range h.oidcManager.ListProviderInfo() {
 			providers = append(providers, gin.H{
 				"id":   info.ID,

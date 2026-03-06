@@ -25,7 +25,6 @@ This repository also contains:
 
 - the public API contract in `pkg/apispec/openapi.yaml`
 - the infrastructure operator in `infra-operator`
-- the dashboard and website applications in `sandbox0-ui`
 
 ## Claim A Sandbox
 
@@ -33,9 +32,14 @@ All examples below assume:
 
 - `SANDBOX0_TOKEN` contains a valid API token
 - `SANDBOX0_BASE_URL` optionally overrides the default endpoint for self-hosted deployments
-- the `default` template already exists
 
 ### Go
+
+Install:
+
+```bash
+go get github.com/sandbox0-ai/sdk-go
+```
 
 ```go
 package main
@@ -52,6 +56,7 @@ import (
 func main() {
     client, err := sandbox0.NewClient(
         sandbox0.WithToken(os.Getenv("SANDBOX0_TOKEN")),
+        sandbox0.WithBaseURL(os.Getenv("SANDBOX0_BASE_URL")),
     )
     if err != nil {
         log.Fatal(err)
@@ -76,6 +81,12 @@ func main() {
 
 ### Python
 
+Install:
+
+```bash
+pip install sandbox0
+```
+
 ```python
 import os
 
@@ -84,6 +95,7 @@ from sandbox0.apispec.models.sandbox_config import SandboxConfig
 
 client = Client(
     token=os.environ["SANDBOX0_TOKEN"],
+    base_url=os.environ.get("SANDBOX0_BASE_URL", "http://localhost:30080"),
 )
 
 with client.sandboxes.open(
@@ -95,6 +107,12 @@ with client.sandboxes.open(
 ```
 
 ### TypeScript
+
+Install:
+
+```bash
+npm install sandbox0
+```
 
 ```typescript
 import { Client } from "sandbox0";
@@ -123,6 +141,12 @@ main().catch(console.error);
 
 ### CLI
 
+Install:
+
+```bash
+go install github.com/sandbox0-ai/s0/cmd/s0@latest
+```
+
 ```bash
 # Claim a sandbox from the "default" template
 s0 sandbox create --template default --ttl 300 --hard-ttl 3600
@@ -133,6 +157,44 @@ s0 sandbox delete <sandbox-id>
 
 ## Self-Hosted
 
-For deployment and operational guidance, see the self-hosted documentation:
+The example below is a minimal `kind` installation for local evaluation. It does not include `netd` or `storage-proxy`, so it does not provide network policy enforcement or volume capabilities.
+
+Prerequisites:
+
+- `kind`
+- `kubectl`
+- `helm`
+
+Create a local cluster:
+
+```bash
+kind create cluster --name sandbox0
+```
+
+Install `infra-operator`:
+
+```bash
+helm repo add sandbox0 https://sandbox0-ai.github.io/sandbox0
+helm repo update
+
+helm install infra-operator sandbox0/infra-operator \
+    --namespace sandbox0-system \
+    --create-namespace
+```
+
+Apply the minimal single-cluster sample:
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/sandbox0-ai/sandbox0/main/infra-operator/chart/samples/single-cluster/minimal.yaml
+kubectl get sandbox0infra -n sandbox0-system -w
+```
+
+Get the initial admin password:
+
+```bash
+kubectl get secret admin-password -n sandbox0-system -o jsonpath='{.data.password}' | base64 -d
+```
+
+For the full self-hosted installation and production guidance, see:
 
 <https://sandbox0.ai/docs/self-hosted>

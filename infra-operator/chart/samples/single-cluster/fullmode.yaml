@@ -102,6 +102,9 @@ spec:
         authMode: public
     netd:
       enabled: true
+      # Set this only when your cluster defines a host-compatible RuntimeClass.
+      # Keep netd on a regular host runtime such as runc; do not run netd on gVisor or Kata.
+      # runtimeClassName: runc
     manager:
       enabled: true
       replicas: 1

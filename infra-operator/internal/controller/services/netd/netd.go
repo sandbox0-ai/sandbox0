@@ -49,8 +49,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	}
 
 	config := &apiconfig.NetdConfig{}
+	runtimeClassName := (*string)(nil)
 	if infra.Spec.Services != nil && infra.Spec.Services.Netd != nil && infra.Spec.Services.Netd.Config != nil {
 		config = infra.Spec.Services.Netd.Config
+	}
+	if infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
+		runtimeClassName = infra.Spec.Services.Netd.RuntimeClassName
 	}
 	if config.NodeName == "" {
 		config.NodeName = "${NODE_NAME}"
@@ -152,6 +156,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: name,
+					RuntimeClassName:   runtimeClassName,
 					HostNetwork:        true,
 					DNSPolicy:          corev1.DNSClusterFirstWithHostNet,
 					Containers: []corev1.Container{

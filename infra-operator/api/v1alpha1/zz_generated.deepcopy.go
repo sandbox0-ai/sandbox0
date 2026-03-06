@@ -689,6 +689,11 @@ func (in *ManagerServiceConfig) DeepCopy() *ManagerServiceConfig {
 func (in *NetdServiceConfig) DeepCopyInto(out *NetdServiceConfig) {
 	*out = *in
 	in.BaseServiceConfig.DeepCopyInto(&out.BaseServiceConfig)
+	if in.RuntimeClassName != nil {
+		in, out := &in.RuntimeClassName, &out.RuntimeClassName
+		*out = new(string)
+		**out = **in
+	}
 	if in.Config != nil {
 		in, out := &in.Config, &out.Config
 		*out = new(config.NetdConfig)

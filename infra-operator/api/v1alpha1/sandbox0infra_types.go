@@ -789,6 +789,10 @@ type StorageProxyServiceConfig struct {
 // NetdServiceConfig defines configuration for netd service
 type NetdServiceConfig struct {
 	BaseServiceConfig `json:",inline"`
+	// RuntimeClassName specifies the Kubernetes runtime class for the netd daemonset.
+	// Use a host-compatible runtime such as runc. Do not run netd on gVisor or Kata.
+	// +optional
+	RuntimeClassName *string `json:"runtimeClassName,omitempty"`
 	// Config contains netd specific configuration
 	// +optional
 	// +kubebuilder:default={}

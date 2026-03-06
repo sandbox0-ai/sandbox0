@@ -1782,6 +1782,11 @@ spec:
                               More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                             type: object
                         type: object
+                      runtimeClassName:
+                        description: |-
+                          RuntimeClassName specifies the Kubernetes runtime class for the netd daemonset.
+                          Use a host-compatible runtime such as runc. Do not run netd on gVisor or Kata.
+                        type: string
                       service:
                         description: Service configures the Kubernetes service
                         properties:

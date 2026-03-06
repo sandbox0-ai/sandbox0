@@ -165,16 +165,40 @@ Prerequisites:
 - `kubectl`
 - `helm`
 
-Create a local cluster:
+Create a local cluster with the same Kind config used by `infra/tests/e2e`:
 
 ```bash
-kind create cluster --name sandbox0
+kind create cluster --config kind-config.yaml
+```
+
+`kind-config.yaml`:
+
+```yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: sandbox0
+nodes:
+- role: control-plane
+  image: kindest/node:v1.35.0
+  kubeadmConfigPatches:
+  - |
+    kind: ClusterConfiguration
+    apiServer:
+      extraArgs:
+        enable-aggregator-routing: "true"
+  extraPortMappings:
+  # internal-gateway HTTP port
+  - containerPort: 30080
+    hostPort: 30080
+  # registry port for template image push
+  - containerPort: 30500
+    hostPort: 30500
 ```
 
 Install `infra-operator`:
 
 ```bash
-helm repo add sandbox0 https://sandbox0-ai.github.io/sandbox0
+helm repo add sandbox0 https://charts.sandbox0.ai
 helm repo update
 
 helm install infra-operator sandbox0/infra-operator \

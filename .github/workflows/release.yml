@@ -7,6 +7,8 @@ on:
 
 env:
   IMAGE_REPO: sandbox0ai/infra
+  HELM_REPO_URL: https://charts.sandbox0.ai
+  HELM_REPO_DOMAIN: charts.sandbox0.ai
 
 permissions:
   contents: write
@@ -136,11 +138,12 @@ jobs:
           pushd "${tmp_dir}"
           git init -b gh-pages
           touch .nojekyll
+          printf '%s\n' "${HELM_REPO_DOMAIN}" > CNAME
           cat > index.yaml <<'EOF'
           apiVersion: v1
           entries: {}
           EOF
-          git add .nojekyll index.yaml
+          git add .nojekyll CNAME index.yaml
           git \
             -c user.name='github-actions[bot]' \
             -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
@@ -155,7 +158,7 @@ jobs:
         run: |
           VERSION="${{ needs.prepare-release.outputs.version }}"
           CHART_PACKAGE=".cr-release-packages/infra-operator-${VERSION}.tgz"
-          PAGES_URL="https://sandbox0-ai.github.io/sandbox0"
+          PAGES_URL="${HELM_REPO_URL}"
           tmp_dir="$(mktemp -d)"
           trap 'rm -rf "${tmp_dir}"' EXIT
 
@@ -165,6 +168,7 @@ jobs:
 
           cp "${CHART_PACKAGE}" "${tmp_dir}/gh-pages/"
           touch "${tmp_dir}/gh-pages/.nojekyll"
+          printf '%s\n' "${HELM_REPO_DOMAIN}" > "${tmp_dir}/gh-pages/CNAME"
 
           if [[ -f "${tmp_dir}/gh-pages/index.yaml" ]]; then
             helm repo index "${tmp_dir}/gh-pages" \
@@ -180,7 +184,7 @@ jobs:
             exit 0
           fi
 
-          git add .nojekyll index.yaml "infra-operator-${VERSION}.tgz"
+          git add .nojekyll CNAME index.yaml "infra-operator-${VERSION}.tgz"
           git \
             -c user.name='github-actions[bot]' \
             -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \

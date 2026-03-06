@@ -3,7 +3,8 @@ replicaCount: 1
 image:
   repository: sandbox0ai/infra
   pullPolicy: IfNotPresent
-  tag: "latest"
+  # Leave empty so released charts follow Chart.appVersion by default.
+  tag: ""
 
 nameOverride: ""
 fullnameOverride: "infra-operator"

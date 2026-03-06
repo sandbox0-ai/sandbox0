@@ -2,8 +2,18 @@ apiVersion: v1
 entries:
   infra-operator:
   - apiVersion: v2
+    appVersion: 0.1.0-rc.4
+    created: "2026-03-06T19:46:19.877855484Z"
+    description: A Helm chart for sandbox0 infra-operator
+    digest: bf934368412ebd86f8e1ad99b83ffda1bfde52dcf2fe9610da2dd4b15744df38
+    name: infra-operator
+    type: application
+    urls:
+    - https://charts.sandbox0.ai/infra-operator-0.1.0-rc.4.tgz
+    version: 0.1.0-rc.4
+  - apiVersion: v2
     appVersion: 0.1.0-rc.3
-    created: "2026-03-07T02:03:33.755667+08:00"
+    created: "2026-03-06T19:46:19.876921985Z"
     description: A Helm chart for sandbox0 infra-operator
     digest: d343b10cdebdda5b7ebecde46f2fa1f7ddb7b786eaffbc78975fec2fb3de1345
     name: infra-operator
@@ -11,4 +21,4 @@ entries:
     urls:
     - https://charts.sandbox0.ai/infra-operator-0.1.0-rc.3.tgz
     version: 0.1.0-rc.3
-generated: "2026-03-07T02:03:33.754361+08:00"
+generated: "2026-03-06T19:46:19.875859386Z"

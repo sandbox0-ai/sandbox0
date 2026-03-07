@@ -27,6 +27,7 @@ func BuildPodSpec(template *SandboxTemplate, restart bool) corev1.PodSpec {
 	applyProcdSecretVolume(&spec, template)
 	applyProcdInit(&spec)
 	applyFuseResource(&spec)
+	applyDefaultSandboxPlacement(&spec)
 
 	// Apply runtime class if specified
 	if template.Spec.RuntimeClassName != nil {
@@ -36,13 +37,100 @@ func BuildPodSpec(template *SandboxTemplate, restart bool) corev1.PodSpec {
 	// Apply pod-level overrides
 	if template.Spec.Pod != nil {
 		if template.Spec.Pod.NodeSelector != nil {
-			spec.NodeSelector = template.Spec.Pod.NodeSelector
+			// Keep manager-injected placement authoritative on conflicting keys so
+			// sandbox workloads cannot drift outside the netd coverage set.
+			spec.NodeSelector = mergeNodeSelectors(template.Spec.Pod.NodeSelector, spec.NodeSelector)
 		}
+		spec.Tolerations = mergeTolerations(spec.Tolerations, convertTolerations(template.Spec.Pod.Tolerations))
 		if template.Spec.Pod.ServiceAccountName != "" {
 			spec.ServiceAccountName = template.Spec.Pod.ServiceAccountName
 		}
 	}
 	return spec
+}
+
+func applyDefaultSandboxPlacement(spec *corev1.PodSpec) {
+	if spec == nil {
+		return
+	}
+	cfg := config.LoadManagerConfig()
+	if cfg == nil {
+		return
+	}
+
+	spec.NodeSelector = mergeNodeSelectors(spec.NodeSelector, cfg.SandboxPodPlacement.NodeSelector)
+	spec.Tolerations = mergeTolerations(spec.Tolerations, cfg.SandboxPodPlacement.Tolerations)
+}
+
+func mergeNodeSelectors(base, override map[string]string) map[string]string {
+	switch {
+	case len(base) == 0 && len(override) == 0:
+		return nil
+	case len(base) == 0:
+		return cloneNodeSelector(override)
+	case len(override) == 0:
+		return cloneNodeSelector(base)
+	}
+
+	merged := cloneNodeSelector(base)
+	for key, value := range override {
+		merged[key] = value
+	}
+	return merged
+}
+
+func cloneNodeSelector(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+	cloned := make(map[string]string, len(src))
+	for key, value := range src {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func convertTolerations(in []Toleration) []corev1.Toleration {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]corev1.Toleration, 0, len(in))
+	for _, tol := range in {
+		out = append(out, corev1.Toleration{
+			Key:      tol.Key,
+			Operator: corev1.TolerationOperator(tol.Operator),
+			Value:    tol.Value,
+			Effect:   corev1.TaintEffect(tol.Effect),
+		})
+	}
+	return out
+}
+
+func mergeTolerations(base, override []corev1.Toleration) []corev1.Toleration {
+	if len(base) == 0 && len(override) == 0 {
+		return nil
+	}
+
+	merged := make([]corev1.Toleration, 0, len(base)+len(override))
+	seen := make(map[string]struct{}, len(base)+len(override))
+	appendUnique := func(items []corev1.Toleration) {
+		for _, tol := range items {
+			key := tolerationKey(tol)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			merged = append(merged, tol)
+		}
+	}
+
+	appendUnique(base)
+	appendUnique(override)
+	return merged
+}
+
+func tolerationKey(tol corev1.Toleration) string {
+	return string(tol.Operator) + "\x00" + tol.Key + "\x00" + tol.Value + "\x00" + string(tol.Effect)
 }
 
 func applyFuseResource(spec *corev1.PodSpec) {

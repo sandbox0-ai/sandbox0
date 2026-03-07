@@ -55,17 +55,17 @@ jobs:
             exit 1
           fi
 
-      - name: Verify go.mod/go.sum are tidy
-        shell: bash
-        run: |
-          go mod tidy
-          git diff --exit-code -- go.mod go.sum
-
       - name: Verify generated artifacts are up to date
         shell: bash
         run: |
           make proto manifests apispec
           git diff --exit-code
+
+      - name: Verify go.mod/go.sum are tidy
+        shell: bash
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
 
       - name: Helm lint
         run: helm lint infra-operator/chart

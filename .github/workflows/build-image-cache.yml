@@ -1,0 +1,38 @@
+name: Build Image Cache
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/build-image-cache.yml'
+      - 'Dockerfile'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Makefile'
+      - '**/*.go'
+  workflow_dispatch:
+
+jobs:
+  build-cache:
+    name: Refresh infra buildx cache
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Refresh Buildx cache
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha,scope=infra-release
+          cache-to: type=gha,mode=max,scope=infra-release
+          provenance: false

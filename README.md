@@ -195,7 +195,7 @@ export SANDBOX0_BASE_URL="http://localhost:30080"
 
 s0 auth login
 
-export SANDBOX0_TOKEN="$(s0 apikey create --name test-apikey --role admin --expires-in 30d --raw)"
+unset SANDBOX0_TOKEN && export SANDBOX0_TOKEN="$(s0 apikey create --name test-apikey --role admin --expires-in 30d --raw)"
 ```
 
 ## Production Notes

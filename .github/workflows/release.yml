@@ -80,6 +80,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.docker_tags.outputs.tags }}
+          cache-from: type=gha,scope=infra-release
+          cache-to: type=gha,mode=max,scope=infra-release
           provenance: false
 
   publish-helm:

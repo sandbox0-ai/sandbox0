@@ -7,11 +7,17 @@ RUN apk add --no-cache git make protobuf-dev protoc gcc musl-dev sqlite-dev zstd
 ENV GOPROXY=https://goproxy.cn,direct
 ENV GOSUMDB=sum.golang.google.cn
 
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go mod download
+
 COPY . .
-RUN go mod download
 
 # Generate protobuf code for storage-proxy
-RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@latest && \
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go install google.golang.org/protobuf/cmd/protoc-gen-go@latest && \
     go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest && \
     mkdir -p storage-proxy/proto/fs && \
     protoc --go_out=. --go_opt=paths=source_relative \
@@ -19,7 +25,9 @@ RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@latest && \
       storage-proxy/proto/filesystem.proto && \
     mv storage-proxy/proto/*.pb.go storage-proxy/proto/fs/
 
-RUN BUILD_GOOS="${TARGETOS:-$(go env GOOS)}" && \
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    BUILD_GOOS="${TARGETOS:-$(go env GOOS)}" && \
     BUILD_GOARCH="${TARGETARCH:-$(go env GOARCH)}" && \
     CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/edge-gateway ./edge-gateway/cmd/edge-gateway && \
     CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/internal-gateway ./internal-gateway/cmd/internal-gateway && \

@@ -105,3 +105,25 @@ func TestApplyRegistryConfigAWS(t *testing.T) {
 		t.Fatalf("unexpected secret name: %s", envVars[0].ValueFrom.SecretKeyRef.Name)
 	}
 }
+
+func TestApplyRegistryConfigSkipsWhenRegistryIsNotDeclared(t *testing.T) {
+	r := &Reconciler{}
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "s0cp",
+			Namespace: "sandbox0-system",
+		},
+	}
+	cfg := &apiconfig.EdgeGatewayConfig{}
+
+	envVars, err := r.applyRegistryConfig(infra, cfg)
+	if err != nil {
+		t.Fatalf("applyRegistryConfig returned error: %v", err)
+	}
+	if len(envVars) != 0 {
+		t.Fatalf("expected no env vars, got %d", len(envVars))
+	}
+	if cfg.Registry.Provider != "" || cfg.Registry.PushRegistry != "" || cfg.Registry.PullRegistry != "" {
+		t.Fatalf("expected empty registry config, got %#v", cfg.Registry)
+	}
+}

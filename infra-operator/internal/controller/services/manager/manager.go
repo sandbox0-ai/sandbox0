@@ -267,6 +267,7 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 
 	cfg.TemplateStoreEnabled = templateStoreEnabledByInternalGateway(infra)
 	cfg.NetworkPolicyProvider = resolveNetworkPolicyProvider(infra)
+	cfg.SandboxPodPlacement = resolveSandboxPodPlacement(infra)
 
 	if infra.Spec.Cluster != nil && infra.Spec.Cluster.ID != "" {
 		cfg.DefaultClusterId = infra.Spec.Cluster.ID
@@ -396,4 +397,23 @@ func resolveNetworkPolicyProvider(infra *infrav1alpha1.Sandbox0Infra) string {
 		return "netd"
 	}
 	return "noop"
+}
+
+func resolveSandboxPodPlacement(infra *infrav1alpha1.Sandbox0Infra) apiconfig.SandboxPodPlacementConfig {
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.Netd == nil {
+		return apiconfig.SandboxPodPlacementConfig{}
+	}
+
+	placement := apiconfig.SandboxPodPlacementConfig{}
+	if len(infra.Spec.Services.Netd.NodeSelector) > 0 {
+		placement.NodeSelector = make(map[string]string, len(infra.Spec.Services.Netd.NodeSelector))
+		for key, value := range infra.Spec.Services.Netd.NodeSelector {
+			placement.NodeSelector[key] = value
+		}
+	}
+	if len(infra.Spec.Services.Netd.Tolerations) > 0 {
+		placement.Tolerations = make([]corev1.Toleration, len(infra.Spec.Services.Netd.Tolerations))
+		copy(placement.Tolerations, infra.Spec.Services.Netd.Tolerations)
+	}
+	return placement
 }

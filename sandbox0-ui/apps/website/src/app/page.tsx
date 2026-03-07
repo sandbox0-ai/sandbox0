@@ -7,7 +7,6 @@ import {
   PixelBox,
   PixelHeading,
 } from "@sandbox0/ui";
-import Image from "next/image";
 import { Header } from "@/components/layout/Header";
 import { Footer } from "@/components/layout/Footer";
 
@@ -15,17 +14,17 @@ const runtimeCapabilities = [
   {
     title: "Template Runtime",
     body:
-      "Templates define the execution environment behind each tool call: image, resources, warm pool, and default network policy.",
+      "Templates define the execution environment for each sandbox: image, resources, warm pool, and default network policy.",
   },
   {
     title: "Persistent Volume",
     body:
-      "Volumes are the persistent layer created around tool execution, with snapshot, restore, fork, and reuse flows.",
+      "Volumes are the persistent layer for sandbox state, with snapshot, restore, fork, and reuse flows.",
   },
   {
     title: "Sub-200ms Cold Start",
     body:
-      "Warm pools keep tool runtimes ready so bash, Python, and app-serving environments can start quickly.",
+      "Warm pools keep sandbox runtimes ready so bash, Python, and app-serving environments can start quickly.",
   },
   {
     title: "Network Control",
@@ -36,9 +35,9 @@ const runtimeCapabilities = [
 
 const platformSections = [
   {
-    title: "Sandbox as tool",
+    title: "Persistent agent runtime",
     body:
-      "Sandbox0 is designed for agents that call an isolated environment as a tool, not for agents that live entirely inside a long-running sandbox.",
+      "Sandbox0 gives agents an isolated runtime with durable state, so each session can keep its workspace, processes, and environment boundaries intact across real work.",
   },
   {
     title: "Operator-first self-hosting",
@@ -46,9 +45,9 @@ const platformSections = [
       "Deploy Sandbox0 by installing infra-operator and applying a Sandbox0Infra resource. Single-cluster is the fastest path; multi-cluster is available when regional scale-out matters.",
   },
   {
-    title: "Tooling for real agent workflows",
+    title: "Interfaces for real agent workflows",
     body:
-      "Use the s0 CLI or SDKs to claim sandboxes, run bash and Python REPL-style tools, execute commands, expose app ports, and manage volumes from your application code.",
+      "Use the s0 CLI or SDKs to claim sandboxes, run bash and Python sessions, execute commands, expose app ports, and manage volumes from your application code.",
   },
 ];
 
@@ -66,12 +65,12 @@ export default function Home() {
             className="text-center text-3xl leading-[1.05] tracking-[-0.1em] md:text-5xl lg:text-6xl"
           >
             Sandbox
-            <span className="text-accent"> for agent</span>
+            <span className="text-accent"> for agents</span>
           </PixelHeading>
 
           <p className="mt-6 max-w-xl text-center text-sm leading-7 text-muted md:text-base">
-            Isolated runtime, persistent volume, and network control in one
-            simple layer.
+            Isolated runtime, persistent workspace state, and network control
+            in one layer for AI agents.
           </p>
 
           <div className="mt-8 flex flex-wrap justify-center gap-4">
@@ -102,7 +101,7 @@ export default function Home() {
               <div className="w-3 h-3 bg-yellow-500" />
               <div className="w-3 h-3 bg-green-500" />
               <span className="ml-2 text-xs text-muted font-mono">
-                tool-runtime-session
+                sandbox-runtime-session
               </span>
             </div>
             <pre className="font-mono text-sm text-accent overflow-x-auto">
@@ -149,7 +148,7 @@ print(result.output_raw, end="")`}</code>
       <section className="px-4 pb-20">
         <div className="max-w-6xl mx-auto">
           <PixelHeading as="h2" tone="site" className="mb-10 text-center">
-            Built For <span className="text-accent">Sandbox-As-Tool</span>
+            Built For <span className="text-accent">AI Agents</span>
           </PixelHeading>
 
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
@@ -167,15 +166,14 @@ print(result.output_raw, end="")`}</code>
           <PixelCard header="How Sandbox0 is structured" scale="lg" accent>
             <div className="space-y-4 text-muted">
               <p>
-                Sandbox0 gives agents isolated runtimes as tools. The agent
-                stays in your application, while Sandbox0 provides the
-                environment that executes code, serves apps, manages files, and
-                applies network policy.
+                Sandbox0 provides isolated runtimes for agents that need to
+                execute code, serve apps, manage files, and enforce network
+                policy without giving up deployment control.
               </p>
               <p>
                 Templates describe the runtime environment. Volumes add durable
-                storage for the outputs, caches, and working state that tool
-                calls produce over time.
+                storage for outputs, caches, and working state so sandbox
+                sessions can survive restarts and handoffs.
               </p>
               <p>
                 In the common single-cluster deployment, `internal-gateway` and
@@ -200,16 +198,16 @@ print(result.output_raw, end="")`}</code>
         <div className="max-w-6xl mx-auto grid gap-6 lg:grid-cols-3">
           <PixelCard header="Typical workflow" scale="md" accent>
             <p className="text-muted">
-              Your agent selects a template, claims a sandbox, runs tool calls
-              such as bash or Python, and attaches volumes when the work needs
-              to persist.
+              Your agent selects a template, claims a sandbox, runs bash or
+              Python sessions, and attaches volumes when the work needs to
+              persist.
             </p>
           </PixelCard>
           <PixelCard header="Storage model" scale="md">
             <p className="text-muted">
-              Volumes are first-class. They hold the persistent data produced by
-              tool execution instead of forcing every sandbox interaction to be
-              ephemeral.
+              Volumes are first-class. They hold persistent workspace data,
+              caches, and artifacts instead of forcing every sandbox session to
+              be ephemeral.
             </p>
           </PixelCard>
           <PixelCard header="Deployment target" scale="md">

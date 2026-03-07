@@ -10,7 +10,7 @@
 
 Sandbox0 is a Kubernetes-native sandbox runtime for AI agents and interactive workloads that need a real `bash` environment, durable workspace state, and private deployment boundaries.
 
-Modern AI agents need more than a disposable container or a toy code interpreter. They need to run shell commands, install dependencies, keep working directories warm across turns, persist workspace data across restarts, and work through a unified interface for interactive runtimes, for example shells, language interpreters, CLI tools, and custom REPLs.
+Modern AI agents need more than a disposable container or a toy code interpreter. They need to run shell commands, install dependencies, keep working directories warm across turns, persist workspace data across restarts, and manage interactive runtimes such as shells, language interpreters, database consoles, and custom REPLs through one consistent runtime layer.
 
 Sandbox0 is built for that operational reality. It combines warm sandbox pools, in-pod process management, persistent volumes with snapshot workflows, node-level network enforcement, and runtime-agnostic deployment choices. Through template-level `runtimeClassName`, teams can use a standard Kubernetes runtime in development and move to stricter isolation such as gVisor or Kata in production. The result is an agent runtime that feels closer to a reusable machine than a throwaway container.
 
@@ -32,7 +32,7 @@ Sandbox0 is built to solve those problems as one system, not as a pile of discon
 
 - Warm sandbox pools managed by `manager`, so agent claims can come from pre-created idle pods instead of waiting for a fresh boot on every task.
 - `procd` inside each sandbox pod, giving Sandbox0 a first-class runtime for command execution, stateful contexts, file I/O, directory watches, and webhook-triggered workflows.
-- Sandbox0 REPL contexts are a unified abstraction for interactive runtimes, so the same interface can back shells, language interpreters, CLI tools, and custom REPLs, for example `bash`, `python`, `sqlite`, or `redis-cli`.
+- Sandbox0 REPL contexts are a unified abstraction for interactive runtimes, so the same interface can back shells, language interpreters, database consoles, and custom REPLs, for example `bash`, `python`, `sqlite`, or `redis-cli`.
 - Persistent volumes decoupled from sandbox lifetime through `storage-proxy`, so agent workspaces, caches, checkpoints, and generated artifacts can outlive any single pod.
 - Snapshot, restore, and fork-oriented volume workflows built on JuiceFS plus object storage and PostgreSQL metadata, which is exactly what long-running agent systems need for recovery and reuse.
 - Node-level network control through `netd`, which watches sandbox policy, transparently redirects traffic, and applies L4/L7 enforcement close to the workload.

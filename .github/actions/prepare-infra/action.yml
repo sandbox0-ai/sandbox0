@@ -26,11 +26,9 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Free disk space (GitHub-hosted Linux)
+    - name: Free runner space
       if: runner.os == 'Linux' && inputs.free-disk-space == 'true'
-      shell: bash
-      run: |
-        bash "${{ github.action_path }}/free_disk_space.sh"
+      uses: ./.github/actions/free-runner-space
 
     - name: Restore shared infra build cache
       id: infra-build-cache

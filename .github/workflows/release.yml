@@ -55,11 +55,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Free runner space
+        uses: ./.github/actions/free-runner-space
+
       - name: Restore shared infra build cache
         id: infra-build-cache
         uses: ./.github/actions/restore-infra-build-cache
         with:
           cache-key-suffix: ${{ matrix.arch }}
+
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v3
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v3

@@ -1,0 +1,10 @@
+name: Free runner space
+description: Reclaim disk space on GitHub-hosted Linux runners.
+runs:
+  using: "composite"
+  steps:
+    - name: Free disk space (GitHub-hosted Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        bash "${{ github.action_path }}/free_disk_space.sh"

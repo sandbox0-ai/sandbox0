@@ -3116,6 +3116,7 @@ components:
           type: string
         env_vars:
           type: object
+          nullable: true
           additionalProperties:
             type: string
         pty_size:
@@ -3140,6 +3141,7 @@ components:
           type: string
         env_vars:
           type: object
+          nullable: true
           additionalProperties:
             type: string
         running:

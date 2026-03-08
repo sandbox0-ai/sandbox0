@@ -161,7 +161,7 @@ func (s *Session) GetSandboxStatus(ctx context.Context, t ContractT, sandboxID s
 func (s *Session) RefreshSandbox(ctx context.Context, t ContractT, sandboxID string) (*apispec.RefreshResponse, int, error) {
 	specPath := "/api/v1/sandboxes/{id}/refresh"
 	requestPath := "/api/v1/sandboxes/" + sandboxID + "/refresh"
-	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodPost, specPath, requestPath, nil, true)
+	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodPost, specPath, requestPath, apispec.SandboxRefreshRequest{}, true)
 	if err != nil {
 		return nil, status, err
 	}

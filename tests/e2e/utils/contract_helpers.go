@@ -35,7 +35,7 @@ func ValidateRequestExample(t ContractT, method, path, contentType string, paylo
 		t.Fatalf("resolve operation: %v", err)
 	}
 	if operation.RequestBody == nil || operation.RequestBody.Value == nil {
-		if payload == nil {
+		if isEmptyPayload(payload) {
 			return
 		}
 		t.Fatalf("request body not defined for %s %s", strings.ToUpper(method), path)

@@ -419,7 +419,7 @@ type ContextResponse struct {
 	Alias     *string            `json:"alias,omitempty"`
 	CreatedAt string             `json:"created_at"`
 	Cwd       *string            `json:"cwd,omitempty"`
-	EnvVars   *map[string]string `json:"env_vars,omitempty"`
+	EnvVars   *map[string]string `json:"env_vars"`
 	Id        string             `json:"id"`
 
 	// OutputRaw Raw PTY output for CMD contexts with wait=true, may contain terminal control characters
@@ -473,7 +473,7 @@ type CreateCMDContextRequest struct {
 type CreateContextRequest struct {
 	Cmd            *CreateCMDContextRequest  `json:"cmd,omitempty"`
 	Cwd            *string                   `json:"cwd,omitempty"`
-	EnvVars        *map[string]string        `json:"env_vars,omitempty"`
+	EnvVars        *map[string]string        `json:"env_vars"`
 	IdleTimeoutSec *int32                    `json:"idle_timeout_sec,omitempty"`
 	PtySize        *PTYSize                  `json:"pty_size,omitempty"`
 	Repl           *CreateREPLContextRequest `json:"repl,omitempty"`
@@ -884,7 +884,7 @@ type SandboxConfig struct {
 	// AutoResume Sandbox-level resume gate for paused sandboxes. When false, any inbound request
 	// (API or public exposure) must not auto resume the sandbox.
 	AutoResume   *bool                    `json:"auto_resume,omitempty"`
-	EnvVars      *map[string]string       `json:"env_vars,omitempty"`
+	EnvVars      *map[string]string       `json:"env_vars"`
 	ExposedPorts *[]ExposedPortConfig     `json:"exposed_ports,omitempty"`
 	HardTtl      *int32                   `json:"hard_ttl,omitempty"`
 	Network      *TplSandboxNetworkPolicy `json:"network,omitempty"`

@@ -3,10 +3,14 @@ package cases
 import (
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
 	"github.com/sandbox0-ai/sandbox0/pkg/framework"
+	e2eutils "github.com/sandbox0-ai/sandbox0/tests/e2e/utils"
 
 	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
 // RegisterApiSuite defines API coverage for a scenario.
@@ -61,4 +65,38 @@ func registerApiUnknownSuite(envProvider func() *framework.ScenarioEnv) {
 			Skip("no API suite registered for Sandbox0Infra name: " + env.Infra.Name)
 		})
 	})
+}
+
+func waitForDefaultTemplateReady(env *framework.ScenarioEnv, session *e2eutils.Session) {
+	Eventually(func() error {
+		templates, err := session.ListTemplates(env.TestCtx.Context, GinkgoT())
+		if err != nil {
+			return err
+		}
+		if len(templates) == 0 {
+			return fmt.Errorf("no templates found")
+		}
+
+		tpl, err := session.GetTemplate(env.TestCtx.Context, GinkgoT(), "default")
+		if err != nil {
+			return err
+		}
+		if tpl.Status == nil || tpl.Status.IdleCount == nil {
+			return fmt.Errorf("default template status is not ready")
+		}
+		if *tpl.Status.IdleCount < 1 {
+			return fmt.Errorf("default template idle pool is not ready: idleCount=%d", *tpl.Status.IdleCount)
+		}
+		return nil
+	}).WithTimeout(3 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
+}
+
+func claimSandboxEventually(env *framework.ScenarioEnv, session *e2eutils.Session, templateID string) *apispec.ClaimResponse {
+	var resp *apispec.ClaimResponse
+	Eventually(func() error {
+		var err error
+		resp, err = session.ClaimSandbox(env.TestCtx.Context, GinkgoT(), templateID)
+		return err
+	}).WithTimeout(2 * time.Minute).WithPolling(3 * time.Second).Should(Succeed())
+	return resp
 }

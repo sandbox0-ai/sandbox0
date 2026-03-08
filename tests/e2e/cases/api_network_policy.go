@@ -37,19 +37,9 @@ func registerApiNetworkPolicySuite(envProvider func() *framework.ScenarioEnv) {
 				return session.Login(env.TestCtx.Context, GinkgoT(), "admin@example.com", password)
 			}).WithTimeout(2 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
 
-			Eventually(func() error {
-				templates, err := session.ListTemplates(env.TestCtx.Context, GinkgoT())
-				if err != nil {
-					return err
-				}
-				if len(templates) == 0 {
-					return fmt.Errorf("no templates found")
-				}
-				return nil
-			}).WithTimeout(3 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
+			waitForDefaultTemplateReady(env, session)
 
-			resp, err := session.ClaimSandbox(env.TestCtx.Context, GinkgoT(), "default")
-			Expect(err).NotTo(HaveOccurred())
+			resp := claimSandboxEventually(env, session, "default")
 			sandboxID = resp.SandboxId
 		})
 

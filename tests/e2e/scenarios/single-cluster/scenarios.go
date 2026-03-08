@@ -1,16 +1,25 @@
 package singlecluster
 
-import "github.com/sandbox0-ai/sandbox0/pkg/framework"
+import (
+	"fmt"
+	"github.com/sandbox0-ai/sandbox0/pkg/framework"
+)
 
-// LoadScenarios discovers and builds scenarios for single-cluster samples.
+var scenarioManifestPaths = []string{
+	"single-cluster/fullmode.yaml",
+	"single-cluster/minimal.yaml",
+	"single-cluster/network-policy.yaml",
+	"single-cluster/volumes.yaml",
+}
+
+// LoadScenarios builds single-cluster scenarios from a fixed manifest allowlist.
 func LoadScenarios(cfg framework.Config) ([]framework.Scenario, error) {
-	manifests, err := framework.DiscoverSampleManifests(cfg, "single-cluster")
-	if err != nil {
-		return nil, err
-	}
-
 	var scenarios []framework.Scenario
-	for _, manifest := range manifests {
+	for _, relativePath := range scenarioManifestPaths {
+		manifest, err := framework.ResolveSamplePath(cfg, relativePath)
+		if err != nil {
+			return nil, fmt.Errorf("resolve sample path %q: %w", relativePath, err)
+		}
 		scenario, err := framework.BuildScenarioFromManifest(cfg, manifest)
 		if err != nil {
 			return nil, err

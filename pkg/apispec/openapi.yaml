@@ -2580,6 +2580,7 @@ components:
       properties:
         env_vars:
           type: object
+          nullable: true
           additionalProperties:
             type: string
         ttl:

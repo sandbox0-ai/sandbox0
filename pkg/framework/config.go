@@ -54,7 +54,7 @@ func LoadConfig() (Config, error) {
 		OperatorDeploymentName:  envString("E2E_OPERATOR_DEPLOYMENT", "infra-operator"),
 		OperatorValuesPath:      envString("E2E_OPERATOR_VALUES", defaultOperatorValues),
 		OperatorImageRepo:       envString("E2E_OPERATOR_IMAGE_REPO", ""),
-		OperatorImageTag:        envString("E2E_OPERATOR_IMAGE_TAG", ""),
+		OperatorImageTag:        envString("E2E_OPERATOR_IMAGE_TAG", "latest"),
 		OperatorImagePullPolicy: envString("E2E_OPERATOR_IMAGE_PULL_POLICY", "IfNotPresent"),
 
 		InfraNamespace: envString("E2E_INFRA_NAMESPACE", "sandbox0-system"),

@@ -1,7 +1,6 @@
 package cases
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
@@ -131,11 +130,7 @@ func registerApiNetworkPolicySuite(envProvider func() *framework.ScenarioEnv) {
 				Expect(err).NotTo(HaveOccurred())
 				Expect(status).To(Equal(http.StatusOK))
 
-				var listResp struct {
-					Entries []map[string]any `json:"entries"`
-				}
-				Expect(json.Unmarshal(body, &listResp)).To(Succeed())
-				Expect(listResp.Entries).NotTo(BeEmpty())
+				expectListedFiles(body)
 
 				processType := apispec.Cmd
 				command := []string{"/bin/sh", "-c", "sleep 30"}

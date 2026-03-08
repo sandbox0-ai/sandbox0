@@ -265,7 +265,7 @@ func assertFilesystemAndProcessCapabilities(env *framework.ScenarioEnv, session 
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
 	Expect(listResp).NotTo(BeNil())
-	Expect(listResp.Success).To(BeTrue())
+	Expect(bool(listResp.Success)).To(BeTrue())
 	Expect(listResp.Data).NotTo(BeNil())
 	Expect(listResp.Data.Entries).NotTo(BeNil())
 	Expect(*listResp.Data.Entries).NotTo(BeEmpty())

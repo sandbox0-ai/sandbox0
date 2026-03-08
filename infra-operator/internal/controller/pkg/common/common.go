@@ -648,6 +648,30 @@ func BoolPtr(b bool) *bool {
 	return &b
 }
 
+// ResolveSandboxNodePlacement derives the shared scheduling constraints for
+// sandbox workloads from the netd service placement.
+func ResolveSandboxNodePlacement(infra *infrav1alpha1.Sandbox0Infra) (map[string]string, []corev1.Toleration) {
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.Netd == nil {
+		return nil, nil
+	}
+
+	var nodeSelector map[string]string
+	if len(infra.Spec.Services.Netd.NodeSelector) > 0 {
+		nodeSelector = make(map[string]string, len(infra.Spec.Services.Netd.NodeSelector))
+		for key, value := range infra.Spec.Services.Netd.NodeSelector {
+			nodeSelector[key] = value
+		}
+	}
+
+	var tolerations []corev1.Toleration
+	if len(infra.Spec.Services.Netd.Tolerations) > 0 {
+		tolerations = make([]corev1.Toleration, len(infra.Spec.Services.Netd.Tolerations))
+		copy(tolerations, infra.Spec.Services.Netd.Tolerations)
+	}
+
+	return nodeSelector, tolerations
+}
+
 // EnsurePodTemplateAnnotations returns annotations with the current CR generation marker.
 func EnsurePodTemplateAnnotations(infra *infrav1alpha1.Sandbox0Infra, annotations map[string]string) map[string]string {
 	out := map[string]string{}

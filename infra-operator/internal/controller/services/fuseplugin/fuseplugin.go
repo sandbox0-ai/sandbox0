@@ -45,6 +45,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		return err
 	}
 
+	nodeSelector, tolerations := common.ResolveSandboxNodePlacement(infra)
+
 	desired := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -60,8 +62,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 					Annotations: common.EnsurePodTemplateAnnotations(infra, nil),
 				},
 				Spec: corev1.PodSpec{
-					HostNetwork: true,
-					DNSPolicy:   corev1.DNSClusterFirstWithHostNet,
+					NodeSelector: nodeSelector,
+					Tolerations:  tolerations,
+					HostNetwork:  true,
+					DNSPolicy:    corev1.DNSClusterFirstWithHostNet,
 					Containers: []corev1.Container{
 						{
 							Name:            "fuse-device-plugin",

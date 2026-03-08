@@ -1,0 +1,79 @@
+# Example: Single-cluster full mode on GKE with gVisor sandbox nodes
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sandbox0-system
+---
+apiVersion: infra.sandbox0.ai/v1alpha1
+kind: Sandbox0Infra
+metadata:
+  name: fullmode
+  namespace: sandbox0-system
+spec:
+  database:
+    type: builtin
+    builtin:
+      enabled: true
+      persistence:
+        enabled: true
+        size: "20Gi"
+  publicExposure:
+    enabled: true
+    rootDomain: sandbox0.app
+    regionId: gcp-us-east1
+  storage:
+    type: builtin
+    builtin:
+      enabled: true
+      persistence:
+        enabled: true
+        size: "20Gi"
+  registry:
+    provider: builtin
+    builtin:
+      enabled: true
+      service:
+        type: NodePort
+        port: 30500
+      pushEndpoint: 127.0.0.1:30500
+  builtinTemplates:
+    - templateId: default
+      image: sandbox0ai/otemplates:default-v0.1.0
+      displayName: Default
+      description: Builtin template installed by infra-operator.
+      pool:
+        minIdle: 1
+        maxIdle: 5
+  services:
+    internalGateway:
+      enabled: true
+      replicas: 1
+      service:
+        type: NodePort
+        port: 30080
+      config:
+        authMode: public
+    netd:
+      enabled: true
+      # Keep netd on the default host runtime; do not set runtimeClassName=gvisor.
+      nodeSelector:
+        sandbox0.ai/node-role: sandbox
+      tolerations:
+        - key: sandbox0.ai/sandbox
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+        - key: sandbox.gke.io/runtime
+          operator: Equal
+          value: gvisor
+          effect: NoSchedule
+    manager:
+      enabled: true
+      replicas: 1
+    storageProxy:
+      enabled: true
+      replicas: 1
+      config:
+        juicefsEncryptionEnabled: false
+  initUser:
+    email: "admin@example.com"

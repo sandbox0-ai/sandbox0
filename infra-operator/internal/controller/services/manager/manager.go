@@ -400,20 +400,7 @@ func resolveNetworkPolicyProvider(infra *infrav1alpha1.Sandbox0Infra) string {
 }
 
 func resolveSandboxPodPlacement(infra *infrav1alpha1.Sandbox0Infra) apiconfig.SandboxPodPlacementConfig {
-	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.Netd == nil {
-		return apiconfig.SandboxPodPlacementConfig{}
-	}
-
 	placement := apiconfig.SandboxPodPlacementConfig{}
-	if len(infra.Spec.Services.Netd.NodeSelector) > 0 {
-		placement.NodeSelector = make(map[string]string, len(infra.Spec.Services.Netd.NodeSelector))
-		for key, value := range infra.Spec.Services.Netd.NodeSelector {
-			placement.NodeSelector[key] = value
-		}
-	}
-	if len(infra.Spec.Services.Netd.Tolerations) > 0 {
-		placement.Tolerations = make([]corev1.Toleration, len(infra.Spec.Services.Netd.Tolerations))
-		copy(placement.Tolerations, infra.Spec.Services.Netd.Tolerations)
-	}
+	placement.NodeSelector, placement.Tolerations = common.ResolveSandboxNodePlacement(infra)
 	return placement
 }

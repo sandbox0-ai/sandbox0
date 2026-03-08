@@ -3,30 +3,47 @@ package common
 import (
 	"testing"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	corev1 "k8s.io/api/core/v1"
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 )
 
-func TestEnsurePodTemplateAnnotations(t *testing.T) {
+func TestResolveSandboxNodePlacementCopiesNetdPlacement(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
-		ObjectMeta: metav1.ObjectMeta{
-			Generation: 7,
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Services: &infrav1alpha1.ServicesConfig{
+				Netd: &infrav1alpha1.NetdServiceConfig{
+					NodeSelector: map[string]string{
+						"sandbox0.ai/node-role": "sandbox",
+					},
+					Tolerations: []corev1.Toleration{
+						{
+							Key:      "sandbox.gke.io/runtime",
+							Operator: corev1.TolerationOpEqual,
+							Value:    "gvisor",
+							Effect:   corev1.TaintEffectNoSchedule,
+						},
+					},
+				},
+			},
 		},
 	}
-	input := map[string]string{"existing": "value"}
 
-	out := EnsurePodTemplateAnnotations(infra, input)
-
-	if out["existing"] != "value" {
-		t.Fatalf("expected existing annotation to be preserved")
+	nodeSelector, tolerations := ResolveSandboxNodePlacement(infra)
+	if got := nodeSelector["sandbox0.ai/node-role"]; got != "sandbox" {
+		t.Fatalf("expected sandbox node selector, got %q", got)
 	}
-	if out[PodTemplateSpecGenerationAnnotation] != "7" {
-		t.Fatalf("expected generation annotation to be set, got %q", out[PodTemplateSpecGenerationAnnotation])
+	if len(tolerations) != 1 || tolerations[0].Key != "sandbox.gke.io/runtime" {
+		t.Fatalf("expected copied toleration, got %#v", tolerations)
 	}
 
-	input["existing"] = "changed"
-	if out["existing"] != "value" {
-		t.Fatalf("expected output map to be independent from input")
+	infra.Spec.Services.Netd.NodeSelector["sandbox0.ai/node-role"] = "system"
+	infra.Spec.Services.Netd.Tolerations[0].Value = "runc"
+
+	if got := nodeSelector["sandbox0.ai/node-role"]; got != "sandbox" {
+		t.Fatalf("expected copied node selector to remain unchanged, got %q", got)
+	}
+	if got := tolerations[0].Value; got != "gvisor" {
+		t.Fatalf("expected copied toleration to remain unchanged, got %q", got)
 	}
 }

@@ -45,6 +45,7 @@ const (
 	rustfsSecretName = "sandbox0-rustfs-credentials"
 	rustfsPort       = 9000
 	rustfsConsole    = 9001
+	rustfsUID        = int64(10001)
 )
 
 type Reconciler struct {
@@ -293,6 +294,7 @@ func (r *Reconciler) reconcileStorageStatefulSet(ctx context.Context, infra *inf
 					Annotations: common.EnsurePodTemplateAnnotations(infra, nil),
 				},
 				Spec: corev1.PodSpec{
+					SecurityContext: rustfsPodSecurityContext(),
 					Containers: []corev1.Container{
 						{
 							Name:    "rustfs",
@@ -716,6 +718,24 @@ func parsePortForwardURL(raw string) (string, int32, error) {
 		return "", 0, fmt.Errorf("parse port-forward port %q: %w", portValue, err)
 	}
 	return host, int32(portInt), nil
+}
+
+func int64Ptr(v int64) *int64 {
+	return &v
+}
+
+func fsGroupPolicyPtr(v corev1.PodFSGroupChangePolicy) *corev1.PodFSGroupChangePolicy {
+	return &v
+}
+
+func rustfsPodSecurityContext() *corev1.PodSecurityContext {
+	return &corev1.PodSecurityContext{
+		RunAsNonRoot:        common.BoolPtr(true),
+		RunAsUser:           int64Ptr(rustfsUID),
+		RunAsGroup:          int64Ptr(rustfsUID),
+		FSGroup:             int64Ptr(rustfsUID),
+		FSGroupChangePolicy: fsGroupPolicyPtr(corev1.FSGroupChangeOnRootMismatch),
+	}
 }
 
 func waitForTCP(ctx context.Context, host string, port int32, timeout time.Duration) error {

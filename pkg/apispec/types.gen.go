@@ -68,6 +68,16 @@ const (
 	SuccessAPIKeyListResponseSuccessTrue SuccessAPIKeyListResponseSuccess = true
 )
 
+// Defines values for SuccessAgentSkillListResponseSuccess.
+const (
+	SuccessAgentSkillListResponseSuccessTrue SuccessAgentSkillListResponseSuccess = true
+)
+
+// Defines values for SuccessAgentSkillResponseSuccess.
+const (
+	SuccessAgentSkillResponseSuccessTrue SuccessAgentSkillResponseSuccess = true
+)
+
 // Defines values for SuccessAuthProvidersResponseSuccess.
 const (
 	SuccessAuthProvidersResponseSuccessTrue SuccessAuthProvidersResponseSuccess = true
@@ -349,6 +359,18 @@ type Affinity struct {
 	PodAffinity  *PodAffinity  `json:"podAffinity,omitempty"`
 }
 
+// AgentSkillRelease defines model for AgentSkillRelease.
+type AgentSkillRelease struct {
+	ArtifactPrefix string   `json:"artifactPrefix"`
+	ChecksumUrl    string   `json:"checksumUrl"`
+	DownloadUrl    string   `json:"downloadUrl"`
+	ManifestUrl    string   `json:"manifestUrl"`
+	Name           string   `json:"name"`
+	ReleaseTag     string   `json:"releaseTag"`
+	ReleaseVersion string   `json:"releaseVersion"`
+	SourcePriority []string `json:"sourcePriority"`
+}
+
 // AuthProvider defines model for AuthProvider.
 type AuthProvider struct {
 	Id   string `json:"id"`
@@ -473,7 +495,7 @@ type CreateCMDContextRequest struct {
 type CreateContextRequest struct {
 	Cmd            *CreateCMDContextRequest  `json:"cmd,omitempty"`
 	Cwd            *string                   `json:"cwd,omitempty"`
-	EnvVars        *map[string]string        `json:"env_vars"`
+	EnvVars        *map[string]string        `json:"env_vars,omitempty"`
 	IdleTimeoutSec *int32                    `json:"idle_timeout_sec,omitempty"`
 	PtySize        *PTYSize                  `json:"pty_size,omitempty"`
 	Repl           *CreateREPLContextRequest `json:"repl,omitempty"`
@@ -884,7 +906,7 @@ type SandboxConfig struct {
 	// AutoResume Sandbox-level resume gate for paused sandboxes. When false, any inbound request
 	// (API or public exposure) must not auto resume the sandbox.
 	AutoResume   *bool                    `json:"auto_resume,omitempty"`
-	EnvVars      *map[string]string       `json:"env_vars"`
+	EnvVars      *map[string]string       `json:"env_vars,omitempty"`
 	ExposedPorts *[]ExposedPortConfig     `json:"exposed_ports,omitempty"`
 	HardTtl      *int32                   `json:"hard_ttl,omitempty"`
 	Network      *TplSandboxNetworkPolicy `json:"network,omitempty"`
@@ -1050,6 +1072,26 @@ type SuccessAPIKeyListResponse struct {
 
 // SuccessAPIKeyListResponseSuccess defines model for SuccessAPIKeyListResponse.Success.
 type SuccessAPIKeyListResponseSuccess bool
+
+// SuccessAgentSkillListResponse defines model for SuccessAgentSkillListResponse.
+type SuccessAgentSkillListResponse struct {
+	Data *struct {
+		Skills []AgentSkillRelease `json:"skills"`
+	} `json:"data,omitempty"`
+	Success SuccessAgentSkillListResponseSuccess `json:"success"`
+}
+
+// SuccessAgentSkillListResponseSuccess defines model for SuccessAgentSkillListResponse.Success.
+type SuccessAgentSkillListResponseSuccess bool
+
+// SuccessAgentSkillResponse defines model for SuccessAgentSkillResponse.
+type SuccessAgentSkillResponse struct {
+	Data    *AgentSkillRelease               `json:"data,omitempty"`
+	Success SuccessAgentSkillResponseSuccess `json:"success"`
+}
+
+// SuccessAgentSkillResponseSuccess defines model for SuccessAgentSkillResponse.Success.
+type SuccessAgentSkillResponseSuccess bool
 
 // SuccessAuthProvidersResponse defines model for SuccessAuthProvidersResponse.
 type SuccessAuthProvidersResponse struct {
@@ -1634,6 +1676,9 @@ type WeightedPodAffinityTerm struct {
 
 // APIKeyID defines model for APIKeyID.
 type APIKeyID = string
+
+// AgentSkillName defines model for AgentSkillName.
+type AgentSkillName = string
 
 // ContextID defines model for ContextID.
 type ContextID = string

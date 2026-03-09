@@ -5,11 +5,13 @@
   "scripts": {
     "docs:generate:sandbox0infra-schema": "cd ../../.. && mkdir -p .cache/go-build && GOCACHE=$PWD/.cache/go-build go run ./sandbox0-ui/apps/website/scripts/generate_sandbox0infra_schema.go",
     "docs:bundle:pack": "cd ../../.. && mkdir -p .cache/go-build && GOCACHE=$PWD/.cache/go-build go run ./sandbox0-ui/apps/website/scripts/docsbundle -version ${SANDBOX0_DOCS_VERSION:-dev}",
+    "skill:bundle:pack": "cd ../../.. && mkdir -p .cache/go-build && GOCACHE=$PWD/.cache/go-build go run ./sandbox0-ui/apps/website/scripts/skillbundle -version ${SANDBOX0_SKILL_VERSION:-${SANDBOX0_DOCS_VERSION:-dev}}",
     "predev": "npm run docs:generate:sandbox0infra-schema",
     "dev": "next dev --port 4300",
     "prebuild": "npm run docs:generate:sandbox0infra-schema",
     "build": "next build",
     "docs:bundle": "npm run build && npm run docs:bundle:pack",
+    "skill:bundle": "npm run docs:bundle && npm run skill:bundle:pack",
     "start": "next start --port 4300",
     "lint": "next lint"
   },

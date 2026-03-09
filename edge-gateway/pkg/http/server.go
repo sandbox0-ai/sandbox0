@@ -12,6 +12,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	registryprovider "github.com/sandbox0-ai/sandbox0/manager/pkg/registry"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/agentskill"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/builtin"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/jwt"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/oidc"
@@ -50,6 +51,7 @@ type Server struct {
 	clusterCacheMu sync.RWMutex
 	entitlements   licensing.Entitlements
 	registry       registryprovider.Provider
+	agentSkill     *agentskill.Metadata
 
 	// Auth components
 	builtinProvider *builtin.Provider
@@ -94,6 +96,11 @@ func NewServer(
 	publicEntitlements := licensing.NewStaticEntitlements(licensing.FeatureSSO)
 	if oidcConfigured {
 		publicEntitlements = licenseEntitlements
+	}
+
+	agentSkillMetadata, err := agentskill.Resolve(cfg.AgentSkill)
+	if err != nil && cfg.AgentSkill.Enabled {
+		return nil, fmt.Errorf("resolve agent skill metadata: %w", err)
 	}
 
 	// Create observable HTTP client for proxy
@@ -195,6 +202,7 @@ func NewServer(
 		clusterCache:           make(map[string]string),
 		entitlements:           publicEntitlements,
 		registry:               registryProvider,
+		agentSkill:             agentSkillMetadata,
 
 		builtinProvider: builtinProvider,
 		oidcManager:     oidcManager,
@@ -230,6 +238,7 @@ func (s *Server) setupRoutes() {
 		Entitlements:    s.entitlements,
 		JWTIssuer:       s.jwtIssuer,
 		Logger:          s.logger,
+		AgentSkill:      s.agentSkill,
 	})
 
 	// ===== API Proxy Routes =====
@@ -267,6 +276,11 @@ func (s *Server) setupRoutes() {
 		{
 			registry.POST("/credentials", s.getRegistryCredentials)
 		}
+
+		public.RegisterAPIV1Routes(api.Group("/v1"), public.Deps{
+			Logger:     s.logger,
+			AgentSkill: s.agentSkill,
+		})
 
 		// All other API routes go to default internal-gateway
 		api.Use(s.injectInternalToken())

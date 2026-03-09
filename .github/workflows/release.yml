@@ -10,6 +10,7 @@ env:
   HELM_REPO_URL: https://charts.sandbox0.ai
   HELM_REPO_DOMAIN: charts.sandbox0.ai
   DOCS_BUNDLE_PREFIX: sandbox0-docs-bundle
+  SKILL_BUNDLE_PREFIX: sandbox0-agent-skill
 
 permissions:
   contents: write
@@ -284,6 +285,50 @@ jobs:
             sandbox0-ui/apps/website/dist/docs-bundles/${{ env.DOCS_BUNDLE_PREFIX }}-${{ needs.prepare-release.outputs.version }}.tar.gz.sha256
           if-no-files-found: error
 
+  publish-skill-bundle:
+    name: Publish skill bundle artifact
+    runs-on: ubuntu-latest
+    needs: prepare-release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sandbox0-ui/package-lock.json
+
+      - name: Install website dependencies
+        run: npm ci --prefix sandbox0-ui
+
+      - name: Build release-aligned skill bundle
+        env:
+          SANDBOX0_DOCS_VERSION: ${{ needs.prepare-release.outputs.version }}
+          SANDBOX0_SKILL_VERSION: ${{ needs.prepare-release.outputs.version }}
+        run: |
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          npm run build:skill-bundle --prefix sandbox0-ui
+          test -f "sandbox0-ui/apps/website/dist/skill-bundles/${SKILL_BUNDLE_PREFIX}-${SANDBOX0_SKILL_VERSION}.tar.gz"
+          test -f "sandbox0-ui/apps/website/dist/skill-bundles/${SKILL_BUNDLE_PREFIX}-${SANDBOX0_SKILL_VERSION}.tar.gz.sha256"
+          test -f "sandbox0-ui/apps/website/dist/skill-bundles/${SKILL_BUNDLE_PREFIX}-${SANDBOX0_SKILL_VERSION}.manifest.json"
+
+      - name: Upload skill bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: skill-bundle-release-assets
+          path: |
+            sandbox0-ui/apps/website/dist/skill-bundles/${{ env.SKILL_BUNDLE_PREFIX }}-${{ needs.prepare-release.outputs.version }}.tar.gz
+            sandbox0-ui/apps/website/dist/skill-bundles/${{ env.SKILL_BUNDLE_PREFIX }}-${{ needs.prepare-release.outputs.version }}.tar.gz.sha256
+            sandbox0-ui/apps/website/dist/skill-bundles/${{ env.SKILL_BUNDLE_PREFIX }}-${{ needs.prepare-release.outputs.version }}.manifest.json
+          if-no-files-found: error
+
   publish-github-release:
     name: Publish GitHub release metadata
     runs-on: ubuntu-latest
@@ -291,11 +336,18 @@ jobs:
       - prepare-release
       - publish-helm
       - publish-docs-bundle
+      - publish-skill-bundle
     steps:
       - name: Download docs bundle release assets
         uses: actions/download-artifact@v4
         with:
           name: docs-bundle-release-assets
+          path: .release-assets
+
+      - name: Download skill bundle release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: skill-bundle-release-assets
           path: .release-assets
 
       - name: Create or update GitHub Release
@@ -307,6 +359,9 @@ jobs:
           OWNER_LOWER="${GITHUB_REPOSITORY_OWNER,,}"
           DOCS_ARCHIVE="${DOCS_BUNDLE_PREFIX}-${VERSION}.tar.gz"
           DOCS_CHECKSUM="${DOCS_ARCHIVE}.sha256"
+          SKILL_ARCHIVE="${SKILL_BUNDLE_PREFIX}-${VERSION}.tar.gz"
+          SKILL_CHECKSUM="${SKILL_ARCHIVE}.sha256"
+          SKILL_MANIFEST="${SKILL_BUNDLE_PREFIX}-${VERSION}.manifest.json"
           NOTES=$(cat <<EOF
           Automated release for ${TAG}.
 
@@ -314,6 +369,9 @@ jobs:
           - Docker image: docker.io/${IMAGE_REPO}:${VERSION}
           - Helm OCI: oci://ghcr.io/${OWNER_LOWER}/charts/infra-operator
           - Helm repo: https://sandbox0-ai.github.io/sandbox0
+          - Skill bundle: ${SKILL_ARCHIVE}
+          - Skill checksum: ${SKILL_CHECKSUM}
+          - Skill manifest: ${SKILL_MANIFEST}
           - Docs bundle: ${DOCS_ARCHIVE}
           - Docs checksum: ${DOCS_CHECKSUM}
           EOF

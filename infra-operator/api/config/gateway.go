@@ -2,6 +2,8 @@
 package config
 
 import (
+	"strings"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -67,6 +69,45 @@ type GatewayConfig struct {
 	// +optional
 	// +kubebuilder:default="aws-us-east-1"
 	PublicRegionID string `yaml:"public_region_id" json:"-"`
+
+	// Agent skill distribution configuration.
+	// +optional
+	// +kubebuilder:default={}
+	AgentSkill AgentSkillConfig `yaml:"agent_skill" json:"agentSkill"`
+}
+
+// AgentSkillConfig configures the deployment-matched coding-agent skill
+// artifact exposed by gateway APIs.
+type AgentSkillConfig struct {
+	// +optional
+	// +kubebuilder:default=true
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// +optional
+	// +kubebuilder:default="sandbox0"
+	Name string `yaml:"name" json:"name"`
+	// +optional
+	ReleaseVersion string `yaml:"release_version" json:"releaseVersion"`
+	// +optional
+	// +kubebuilder:default="https://github.com/sandbox0-ai/sandbox0/releases/download"
+	ArtifactBaseURL string `yaml:"artifact_base_url" json:"artifactBaseURL"`
+	// +optional
+	// +kubebuilder:default="sandbox0-agent-skill"
+	ArtifactPrefix string `yaml:"artifact_prefix" json:"artifactPrefix"`
+}
+
+func (c *GatewayConfig) ApplyDefaults() {
+	if strings.TrimSpace(c.AgentSkill.Name) == "" {
+		c.AgentSkill.Name = "sandbox0"
+	}
+	if strings.TrimSpace(c.AgentSkill.ArtifactBaseURL) == "" {
+		c.AgentSkill.ArtifactBaseURL = "https://github.com/sandbox0-ai/sandbox0/releases/download"
+	}
+	if strings.TrimSpace(c.AgentSkill.ArtifactPrefix) == "" {
+		c.AgentSkill.ArtifactPrefix = "sandbox0-agent-skill"
+	}
+	if strings.TrimSpace(c.AgentSkill.ReleaseVersion) != "" {
+		c.AgentSkill.Enabled = true
+	}
 }
 
 // BuiltInAuthConfig configures the built-in authentication.

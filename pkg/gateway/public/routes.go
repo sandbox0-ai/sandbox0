@@ -2,6 +2,7 @@ package public
 
 import (
 	"github.com/gin-gonic/gin"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/agentskill"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/builtin"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/jwt"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/oidc"
@@ -21,6 +22,7 @@ type Deps struct {
 	Entitlements    licensing.Entitlements
 	JWTIssuer       *jwt.Issuer
 	Logger          *zap.Logger
+	AgentSkill      *agentskill.Metadata
 }
 
 func RegisterRoutes(router *gin.Engine, deps Deps) {
@@ -106,5 +108,21 @@ func RegisterRoutes(router *gin.Engine, deps Deps) {
 		apiKeys.POST("", apiKeyHandler.CreateAPIKey)
 		apiKeys.DELETE("/:id", apiKeyHandler.DeleteAPIKey)
 		apiKeys.POST("/:id/deactivate", apiKeyHandler.DeactivateAPIKey)
+	}
+}
+
+func RegisterAPIV1Routes(v1 *gin.RouterGroup, deps Deps) {
+	if deps.AgentSkill == nil {
+		return
+	}
+
+	agentSkillHandler := handlers.NewAgentSkillHandler(deps.AgentSkill, deps.Logger)
+	agentSkills := v1.Group("/agent-skills")
+	{
+		agentSkills.GET("", agentSkillHandler.List)
+		agentSkills.GET("/:name", agentSkillHandler.Get)
+		agentSkills.GET("/:name/download", agentSkillHandler.Download)
+		agentSkills.GET("/:name/checksum", agentSkillHandler.Checksum)
+		agentSkills.GET("/:name/manifest", agentSkillHandler.Manifest)
 	}
 }

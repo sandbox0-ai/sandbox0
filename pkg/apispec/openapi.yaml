@@ -17,6 +17,7 @@ tags:
   - name: files
   - name: templates
   - name: registry
+  - name: agent-skills
   - name: sandbox-volumes
   - name: snapshots
 paths:
@@ -1759,6 +1760,131 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/agent-skills:
+    get:
+      tags: [agent-skills]
+      summary: List deployment-matched agent skills
+      security:
+        - bearerAuth: []
+      x-upstream-service: edge-gateway
+      x-upstream-path: /api/v1/agent-skills
+      responses:
+        "200":
+          description: Agent skill list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessAgentSkillListResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/agent-skills/{name}:
+    get:
+      tags: [agent-skills]
+      summary: Get deployment-matched agent skill metadata
+      security:
+        - bearerAuth: []
+      x-upstream-service: edge-gateway
+      x-upstream-path: /api/v1/agent-skills/{name}
+      parameters:
+        - $ref: "#/components/parameters/AgentSkillName"
+      responses:
+        "200":
+          description: Agent skill metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessAgentSkillResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          description: Agent skill not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/agent-skills/{name}/download:
+    get:
+      tags: [agent-skills]
+      summary: Redirect to the deployment-matched agent skill artifact
+      security:
+        - bearerAuth: []
+      x-upstream-service: edge-gateway
+      x-upstream-path: /api/v1/agent-skills/{name}/download
+      parameters:
+        - $ref: "#/components/parameters/AgentSkillName"
+      responses:
+        "307":
+          description: Redirect to the skill artifact
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          description: Agent skill not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/agent-skills/{name}/checksum:
+    get:
+      tags: [agent-skills]
+      summary: Redirect to the deployment-matched agent skill checksum
+      security:
+        - bearerAuth: []
+      x-upstream-service: edge-gateway
+      x-upstream-path: /api/v1/agent-skills/{name}/checksum
+      parameters:
+        - $ref: "#/components/parameters/AgentSkillName"
+      responses:
+        "307":
+          description: Redirect to the skill checksum
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          description: Agent skill not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/agent-skills/{name}/manifest:
+    get:
+      tags: [agent-skills]
+      summary: Redirect to the deployment-matched agent skill manifest
+      security:
+        - bearerAuth: []
+      x-upstream-service: edge-gateway
+      x-upstream-path: /api/v1/agent-skills/{name}/manifest
+      parameters:
+        - $ref: "#/components/parameters/AgentSkillName"
+      responses:
+        "307":
+          description: Redirect to the skill manifest
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          description: Agent skill not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
   /api/v1/sandboxvolumes:
     post:
       tags: [sandbox-volumes]
@@ -2040,6 +2166,12 @@ components:
       required: true
       schema:
         type: string
+    AgentSkillName:
+      name: name
+      in: path
+      required: true
+      schema:
+        type: string
     FilePath:
       name: path
       in: query
@@ -2115,6 +2247,48 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/RegistryCredentials"
+    SuccessAgentSkillResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/AgentSkillRelease"
+    SuccessAgentSkillListResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                skills:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/AgentSkillRelease"
+              required: [skills]
+    AgentSkillRelease:
+      type: object
+      properties:
+        name:
+          type: string
+        releaseVersion:
+          type: string
+        releaseTag:
+          type: string
+        artifactPrefix:
+          type: string
+        sourcePriority:
+          type: array
+          items:
+            type: string
+        downloadUrl:
+          type: string
+        checksumUrl:
+          type: string
+        manifestUrl:
+          type: string
+      required: [name, releaseVersion, releaseTag, artifactPrefix, sourcePriority, downloadUrl, checksumUrl, manifestUrl]
     RegistryCredentials:
       type: object
       properties:
@@ -2580,7 +2754,6 @@ components:
       properties:
         env_vars:
           type: object
-          nullable: true
           additionalProperties:
             type: string
         ttl:
@@ -3116,7 +3289,6 @@ components:
           type: string
         env_vars:
           type: object
-          nullable: true
           additionalProperties:
             type: string
         pty_size:

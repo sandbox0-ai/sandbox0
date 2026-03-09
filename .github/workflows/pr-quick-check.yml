@@ -84,6 +84,15 @@ jobs:
           test -f sandbox0-ui/apps/website/dist/docs-bundles/sandbox0-docs-bundle-pr-check.tar.gz
           test -f sandbox0-ui/apps/website/dist/docs-bundles/sandbox0-docs-bundle-pr-check.tar.gz.sha256
 
+      - name: Verify skill bundle generation
+        shell: bash
+        run: |
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          SANDBOX0_SKILL_VERSION=pr-check npm run build:skill-bundle --prefix sandbox0-ui
+          test -f sandbox0-ui/apps/website/dist/skill-bundles/sandbox0-agent-skill-pr-check.tar.gz
+          test -f sandbox0-ui/apps/website/dist/skill-bundles/sandbox0-agent-skill-pr-check.tar.gz.sha256
+          test -f sandbox0-ui/apps/website/dist/skill-bundles/sandbox0-agent-skill-pr-check.manifest.json
+
       - name: Verify go.mod/go.sum are tidy
         shell: bash
         run: |

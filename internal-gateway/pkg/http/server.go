@@ -17,6 +17,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/internal-gateway/pkg/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/auth"
 	"github.com/sandbox0-ai/sandbox0/pkg/cache"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/agentskill"
 	gatewaybuiltin "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/builtin"
 	gatewayjwt "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/jwt"
 	gatewayoidc "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/oidc"
@@ -56,6 +57,7 @@ type Server struct {
 	entitlements        licensing.Entitlements
 	sandboxAddrCache    *cache.Cache[string, *url.URL]
 	obsProvider         *observability.Provider
+	agentSkill          *agentskill.Metadata
 }
 
 // NewServer creates a new HTTP server
@@ -182,6 +184,10 @@ func NewServer(
 	var publicOIDC *gatewayoidc.Manager
 	entitlements := licensing.NewStaticEntitlements(licensing.FeatureSSO)
 	var publicJWT *gatewayjwt.Issuer
+	agentSkillMetadata, err := agentskill.Resolve(cfg.AgentSkill)
+	if err != nil && cfg.AgentSkill.Enabled {
+		return nil, fmt.Errorf("resolve agent skill metadata: %w", err)
+	}
 
 	if pool != nil {
 		publicRepo = gatewaydb.NewRepository(pool)
@@ -259,6 +265,7 @@ func NewServer(
 		entitlements:        entitlements,
 		sandboxAddrCache:    sandboxAddrCache,
 		obsProvider:         obsProvider,
+		agentSkill:          agentSkillMetadata,
 	}
 
 	server.setupRoutes()
@@ -311,6 +318,11 @@ func (s *Server) setupRoutes() {
 			// Apply internal auth to all v1 routes (requests come from edge-gateway)
 			v1.Use(s.authMiddleware.Authenticate())
 		}
+
+		public.RegisterAPIV1Routes(v1, public.Deps{
+			Logger:     s.logger,
+			AgentSkill: s.agentSkill,
+		})
 
 		// === Sandbox Management (→ Manager) ===
 		sandboxes := v1.Group("/sandboxes")

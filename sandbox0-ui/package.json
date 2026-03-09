@@ -10,6 +10,7 @@
     "build": "npm run build:website && npm run build:dashboard",
     "build:website": "npm run build -w @sandbox0/website",
     "build:docs-bundle": "npm run docs:bundle -w @sandbox0/website",
+    "build:skill-bundle": "npm run skill:bundle -w @sandbox0/website",
     "build:dashboard": "npm run build -w @sandbox0/dashboard",
     "dev:website": "npm run dev -w @sandbox0/website",
     "dev:dashboard": "npm run dev -w @sandbox0/dashboard",

@@ -118,6 +118,7 @@ func loadEdgeGatewayConfig(path string) (*EdgeGatewayConfig, error) {
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
+	cfg.GatewayConfig.ApplyDefaults()
 
 	return cfg, nil
 }

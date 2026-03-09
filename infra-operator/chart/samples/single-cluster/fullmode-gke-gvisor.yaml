@@ -56,8 +56,10 @@ spec:
     netd:
       enabled: true
       # Keep netd on the default host runtime; do not set runtimeClassName=gvisor.
+      # Reuse the native GKE Sandbox node label so sandbox placement does not
+      # depend on an extra custom node label.
       nodeSelector:
-        sandbox0.ai/node-role: sandbox
+        sandbox.gke.io/runtime: gvisor
       tolerations:
         - key: sandbox0.ai/sandbox
           operator: Equal

@@ -54,7 +54,7 @@ helm repo update
 helm install infra-operator sandbox0/infra-operator \
     --namespace sandbox0-system \
     --create-namespace \
-    --version 0.1.0-rc.12
+    --version 0.1.0-rc.13
 ```
 
 Verify operator + CRD:
@@ -121,6 +121,196 @@ unset SANDBOX0_TOKEN && export SANDBOX0_TOKEN="$(s0 apikey create --name test-ap
 ```
 
 After that, continue with [Get Started](/docs/get-started) to make your first Sandbox0 API request.
+
+## Advanced: Deploy on GCP
+
+For Google Cloud, use GKE Standard rather than GKE Autopilot.
+
+Recommended path:
+
+1. Create a GKE Standard **regional** cluster with Linux nodes.
+2. Pin Kubernetes to an explicit `1.35+` version. Do not rely on the GKE default version.
+3. Keep a regular node pool for host-level system components.
+4. Add a GKE Sandbox (`gVisor`) node pool for sandbox workloads.
+5. Install `infra-operator`.
+6. Apply the GCP `gVisor` sample.
+7. Expose `internal-gateway` through a `LoadBalancer`.
+8. Verify the deployment by logging in with `s0` and claiming a sandbox.
+
+### 1) Pick a Supported GKE Version
+
+Sandbox0 requires Kubernetes `1.35+`.
+
+Before creating the cluster, query the versions available in your region:
+
+```bash
+gcloud container get-server-config \
+    --zone us-east1-b \
+    --format='yaml(validMasterVersions)'
+```
+
+Choose any available `1.35.x` version from `validMasterVersions`, then reuse it below as `${GKE_VERSION}`.
+
+### 2) Create a Regional Cluster
+
+This creates a three-zone regional cluster in `us-east1`, with one regular Linux node per zone:
+
+```bash
+export GKE_VERSION="1.35.1-gke.1616000"
+
+gcloud container clusters create sandbox0-gke-gvisor \
+    --region us-east1 \
+    --node-locations us-east1-b,us-east1-c,us-east1-d \
+    --machine-type e2-standard-2 \
+    --disk-size 30 \
+    --num-nodes 1 \
+    --cluster-version "${GKE_VERSION}"
+```
+
+Get kubeconfig and confirm the nodes:
+
+```bash
+gcloud container clusters get-credentials sandbox0-gke-gvisor --region us-east1
+kubectl get nodes -o wide
+```
+
+Keep a regular node pool for core system services. In the current GKE `gVisor` sample, components such as `internal-gateway`, `manager`, `storage-proxy`, PostgreSQL, and the builtin registry run on the regular pool, while sandbox workloads run on the `gVisor` pool.
+
+### 3) Add a `gVisor` Node Pool
+
+Add one `gVisor` node per zone:
+
+```bash
+gcloud container node-pools create gvisor-pool \
+    --cluster sandbox0-gke-gvisor \
+    --region us-east1 \
+    --machine-type e2-standard-2 \
+    --disk-size 30 \
+    --num-nodes 1 \
+    --sandbox type=gvisor
+```
+
+Verify both pools:
+
+```bash
+kubectl get nodes -L cloud.google.com/gke-nodepool,sandbox.gke.io/runtime
+```
+
+Expected result:
+
+1. `default-pool` nodes have no `sandbox.gke.io/runtime` label
+2. `gvisor-pool` nodes show `sandbox.gke.io/runtime=gvisor`
+
+### 4) Install `infra-operator`
+
+```bash
+helm repo add sandbox0 https://charts.sandbox0.ai
+helm repo update
+
+helm install infra-operator sandbox0/infra-operator \
+    --namespace sandbox0-system \
+    --create-namespace \
+    --version 0.1.0-rc.13
+```
+
+Verify operator + CRD:
+
+```bash
+kubectl get pods -n sandbox0-system
+kubectl get crd sandbox0infras.infra.sandbox0.ai
+```
+
+### 5) Apply the GCP `gVisor` Sample
+
+Use the official `gVisor` sample, then switch `internal-gateway` to `LoadBalancer`:
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/sandbox0-ai/sandbox0/main/infra-operator/chart/samples/single-cluster/fullmode-gke-gvisor.yaml
+
+kubectl patch sandbox0infra fullmode -n sandbox0-system --type merge -p \
+    '{"spec":{"services":{"internalGateway":{"service":{"type":"LoadBalancer","port":80}}}}}'
+```
+
+Wait for the deployment to finish reconciling:
+
+```bash
+kubectl get sandbox0infra -n sandbox0-system -w
+kubectl get svc -n sandbox0-system
+```
+
+Expected result:
+
+1. `Sandbox0Infra` becomes `Ready`
+2. `fullmode-internal-gateway` is exposed as `LoadBalancer` on port `80`
+3. `fullmode-netd` and `fullmode-k8s-plugin` run on `gvisor-pool`
+4. sandbox pods in `tpl-default` run on `gvisor-pool`
+
+This sample uses the native GKE node label `sandbox.gke.io/runtime=gvisor` for sandbox placement. You do not need to add a separate custom node label just to target `gVisor` nodes.
+
+### 6) Expose the API Publicly
+
+After the `LoadBalancer` patch above, GKE allocates a public IP for `internal-gateway`.
+
+Check the service:
+
+```bash
+kubectl get svc fullmode-internal-gateway -n sandbox0-system -o wide
+```
+
+Wait until `EXTERNAL-IP` is no longer `<pending>`, then export the public base URL directly from the service:
+
+```bash
+export SANDBOX0_BASE_URL="http://$(kubectl get svc fullmode-internal-gateway -n sandbox0-system -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
+printf '%s\n' "$SANDBOX0_BASE_URL"
+```
+
+For production on GCP, this is a better default than exposing a node IP through `NodePort`.
+
+### 7) Verify with `s0`
+
+Retrieve the generated admin password:
+
+```bash
+ADMIN_PASSWORD="$(kubectl get secret admin-password -n sandbox0-system -o jsonpath='{.data.password}' | base64 -d)"
+printf 'username: %s\npassword: %s\n' 'admin@example.com' "$ADMIN_PASSWORD"
+```
+
+Log in from the public endpoint:
+
+```bash
+s0 auth login \
+    --api-url "${SANDBOX0_BASE_URL}" \
+    --email admin@example.com \
+    --password "${ADMIN_PASSWORD}"
+```
+
+Claim a sandbox to verify the deployment is actually usable:
+
+```bash
+s0 sandbox create --api-url "${SANDBOX0_BASE_URL}" -t default
+```
+
+Optional deeper check:
+
+```bash
+s0 sandbox list --api-url "${SANDBOX0_BASE_URL}"
+s0 sandbox exec <sandbox-id> --api-url "${SANDBOX0_BASE_URL}" -- sh -lc 'echo ready && uname -s'
+```
+
+If `s0 sandbox create` returns a sandbox ID and the sandbox reaches `running`, the GCP deployment is working end to end.
+
+### Important Notes
+
+- Sandbox0 requires different runtime behavior for different components. On GKE, keep a regular node pool for system services and a `gVisor` node pool for sandbox workloads.
+- `template` pods can run with `runtimeClassName: gvisor`, and the GCP `gVisor` sample places sandbox workloads onto nodes labeled `sandbox.gke.io/runtime=gvisor`.
+- Do not set `services.netd.runtimeClassName: gvisor`.
+- `netd` and `k8s-plugin` depend on host features such as `hostNetwork` and `hostPath`. This is why GKE Autopilot is not a good fit for full Sandbox0 deployments.
+- Even when `netd` and `k8s-plugin` are scheduled onto `gVisor` nodes, they still run on the node's default host runtime because `services.netd.runtimeClassName` remains unset.
+- If you hit GCP `SSD_TOTAL_GB` quota limits while creating node pools, reduce `--disk-size` explicitly instead of relying on the larger default boot disk size.
+
+### Why Not Autopilot
+
+Autopilot is not suitable for the full `fullmode` deployment because Sandbox0 host-level components need capabilities that Autopilot restricts. In practice, `netd` and `k8s-plugin` need node-level access, while template sandbox pods run on the `gVisor` pool.
 
 ## Next Steps
 

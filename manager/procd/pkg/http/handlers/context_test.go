@@ -252,18 +252,27 @@ func TestGetContext_EncodesNilEnvVarsAsEmptyObject(t *testing.T) {
 	}
 
 	var resp struct {
-		EnvVars map[string]string `json:"env_vars"`
+		Success bool `json:"success"`
+		Data    struct {
+			EnvVars map[string]string `json:"env_vars"`
+		} `json:"data"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	if resp.EnvVars == nil {
+	if !resp.Success {
+		t.Fatalf("success = false, body = %s", rec.Body.String())
+	}
+	if resp.Data.EnvVars == nil {
 		t.Fatal("env_vars decoded as nil, want empty object")
 	}
-	if len(resp.EnvVars) != 0 {
-		t.Fatalf("env_vars length = %d, want 0", len(resp.EnvVars))
+	if len(resp.Data.EnvVars) != 0 {
+		t.Fatalf("env_vars length = %d, want 0", len(resp.Data.EnvVars))
 	}
 	if strings.Contains(rec.Body.String(), "\"env_vars\":null") {
 		t.Fatalf("response body contains null env_vars: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "\"env_vars\":{}") {
+		t.Fatalf("response body does not contain empty object env_vars: %s", rec.Body.String())
 	}
 }

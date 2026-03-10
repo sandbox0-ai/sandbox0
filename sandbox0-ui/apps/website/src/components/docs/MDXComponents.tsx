@@ -1,5 +1,4 @@
 import React from "react";
-import Link from "next/link";
 import {
   PixelCallout,
   PixelBadge,
@@ -16,6 +15,7 @@ import {
   ResourceItem,
 } from "./DocsLanding";
 import { Sandbox0InfraReference } from "./Sandbox0InfraReference";
+import { DocsLink } from "./DocsLink";
 import type { MDXComponents } from "mdx/types";
 
 function cx(...classes: Array<string | undefined | null | false>) {
@@ -84,71 +84,6 @@ function HeadingWithAnchor(level: HeadingLevel, props: HeadingProps) {
   );
 }
 
-type DocLinkProps = React.AnchorHTMLAttributes<HTMLAnchorElement> & {
-  href: string;
-  newTab?: boolean;
-};
-
-function isExternalHref(href: string): boolean {
-  return /^(https?:)?\/\//.test(href) || href.startsWith("mailto:") || href.startsWith("tel:");
-}
-
-function DocLink({ href, newTab, children, className, rel, ...props }: DocLinkProps) {
-  const classes = cx(
-    "text-accent hover:text-foreground transition-colors font-medium inline-flex items-center gap-1",
-    className
-  );
-  const external = isExternalHref(href);
-  const openNewTab = Boolean(newTab);
-  const renderedChildren = (
-    <>
-      <span>{children}</span>
-      {openNewTab ? (
-        <svg
-          aria-hidden="true"
-          viewBox="0 0 24 24"
-          className="h-[0.9em] w-[0.9em] shrink-0 opacity-80"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <path d="M7 17 17 7" />
-          <path d="M8 7h9v9" />
-        </svg>
-      ) : null}
-    </>
-  );
-
-  if (external) {
-    return (
-      <a
-        href={href}
-        className={classes}
-        target={openNewTab ? "_blank" : undefined}
-        rel={openNewTab ? "noopener noreferrer" : rel}
-        {...props}
-      >
-        {renderedChildren}
-      </a>
-    );
-  }
-
-  const { download: _download, ...linkProps } = props;
-  return (
-    <Link
-      href={href}
-      className={classes}
-      target={openNewTab ? "_blank" : undefined}
-      rel={openNewTab ? "noopener noreferrer" : rel}
-      {...linkProps}
-    >
-      {renderedChildren}
-    </Link>
-  );
-}
-
 type LinkRowProps = React.HTMLAttributes<HTMLDivElement> & {
   /**
    * Pipe-separated list of "label=url" pairs.
@@ -188,7 +123,7 @@ function LinkRow({
     <div className={cx("flex flex-wrap gap-4 mt-4", className)} {...props}>
       {items
         ? items.map((it) => (
-            <a
+            <DocsLink
               key={`${it.label}:${it.href}`}
               href={it.href}
               className={cx(
@@ -197,7 +132,7 @@ function LinkRow({
               )}
             >
               {it.label}
-            </a>
+            </DocsLink>
           ))
         : children}
     </div>
@@ -404,13 +339,13 @@ export const mdxComponents: MDXComponents = {
 
   // Links
   a: ({ children, href, ...props }) => (
-    <a
-      href={href}
+    <DocsLink
+      href={href ?? "#"}
       className="text-accent hover:text-foreground transition-colors font-medium"
       {...props}
     >
       {children}
-    </a>
+    </DocsLink>
   ),
 
   // Blockquotes
@@ -474,7 +409,7 @@ export const mdxComponents: MDXComponents = {
   LinkRow,
   TerminalBlock,
   Endpoint,
-  DocLink,
+  DocLink: DocsLink,
   
   // Landing Page Components
   DocsHero,

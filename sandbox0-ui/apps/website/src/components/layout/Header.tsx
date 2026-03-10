@@ -5,6 +5,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { PixelButton } from "@sandbox0/ui";
+import { getResolvedDocsVersionFromPathname } from "@/components/docs/versioning";
 
 interface HeaderProps {
   onMenuClick?: () => void;
@@ -27,6 +28,7 @@ export function Header({
 }: HeaderProps) {
   const pathname = usePathname();
   const isDocs = pathname?.startsWith("/docs");
+  const docsVersion = getResolvedDocsVersionFromPathname(pathname);
 
   return (
     <nav
@@ -55,7 +57,7 @@ export function Header({
         {/* Desktop Navigation */}
         <div className="hidden lg:flex items-center gap-8">
           <Link
-            href="/docs/get-started"
+            href={`/docs/${docsVersion}/get-started`}
             className={`text-sm font-medium transition-colors ${
               isDocs ? "text-accent" : "text-muted hover:text-foreground"
             }`}

@@ -1,0 +1,16 @@
+{
+  "defaultVersion": "latest",
+  "versions": [
+    {
+      "id": "latest",
+      "label": "Latest",
+      "channel": "stable",
+      "target": "next"
+    },
+    {
+      "id": "next",
+      "label": "Next",
+      "channel": "next"
+    }
+  ]
+}

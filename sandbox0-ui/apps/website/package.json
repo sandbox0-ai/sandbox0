@@ -4,10 +4,13 @@
   "private": true,
   "scripts": {
     "docs:generate:sandbox0infra-schema": "cd ../../.. && mkdir -p .cache/go-build && GOCACHE=$PWD/.cache/go-build go run ./sandbox0-ui/apps/website/scripts/generate_sandbox0infra_schema.go",
-    "predev": "npm run docs:generate:sandbox0infra-schema",
+    "docs:prepare:versions": "node ./scripts/prepare_docs_versions.mjs",
+    "docs:finalize:build": "node ./scripts/finalize_docs_build.mjs",
+    "predev": "npm run docs:generate:sandbox0infra-schema && npm run docs:prepare:versions",
     "dev": "next dev --port 4300",
-    "prebuild": "npm run docs:generate:sandbox0infra-schema",
+    "prebuild": "npm run docs:generate:sandbox0infra-schema && npm run docs:prepare:versions",
     "build": "next build",
+    "postbuild": "npm run docs:finalize:build",
     "start": "next start --port 4300",
     "lint": "next lint"
   },

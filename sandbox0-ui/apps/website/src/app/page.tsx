@@ -79,7 +79,7 @@ export default function Home() {
               scale="lg"
               accent
               onClick={() => {
-                window.location.href = "/docs/get-started";
+                window.location.href = "/docs/latest/get-started";
               }}
             >
               READ DOCS
@@ -234,7 +234,7 @@ print(result.output_raw, end="")`}</code>
             scale="lg"
             accent
             onClick={() => {
-              window.location.href = "/docs/get-started";
+              window.location.href = "/docs/latest/get-started";
             }}
           >
             OPEN GET STARTED

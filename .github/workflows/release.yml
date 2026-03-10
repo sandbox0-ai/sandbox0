@@ -9,6 +9,7 @@ env:
   IMAGE_REPO: sandbox0ai/infra
   HELM_REPO_URL: https://charts.sandbox0.ai
   HELM_REPO_DOMAIN: charts.sandbox0.ai
+  DOCS_BUNDLE_PREFIX: sandbox0-docs
 
 permissions:
   contents: write
@@ -267,3 +268,51 @@ jobs:
             fi
             gh release create "${TAG}" "${args[@]}"
           fi
+
+  publish-docs:
+    name: Publish versioned docs bundle
+    runs-on: ubuntu-latest
+    needs:
+      - prepare-release
+      - publish-helm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sandbox0-ui/package-lock.json
+
+      - name: Install website dependencies
+        run: npm ci
+        working-directory: sandbox0-ui
+
+      - name: Build docs snapshot bundle
+        env:
+          DOCS_BUILD_VERSIONS: v${{ needs.prepare-release.outputs.version }}
+          DOCS_INCLUDE_NEXT: false
+        run: npm run build -w @sandbox0/website
+        working-directory: sandbox0-ui
+
+      - name: Package docs snapshot bundle
+        run: |
+          VERSION="v${{ needs.prepare-release.outputs.version }}"
+          BUNDLE_NAME="${DOCS_BUNDLE_PREFIX}-${VERSION}.tar.gz"
+          tar -czf "${BUNDLE_NAME}" \
+            -C sandbox0-ui/apps/website/out \
+            "docs/${VERSION}" \
+            "_next" \
+            "favicon.ico" \
+            "sandbox0.png"
+          echo "BUNDLE_NAME=${BUNDLE_NAME}" >> "$GITHUB_ENV"
+
+      - name: Upload docs snapshot bundle to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" "${BUNDLE_NAME}" --clobber

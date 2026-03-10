@@ -1,6 +1,7 @@
 import type { PixelSidebarItem } from "@/components/docs/PixelSidebar";
+import { toVersionedDocsHref } from "@/components/docs/versioning";
 
-export const docsNavigation: PixelSidebarItem[] = [
+const baseDocsNavigation: PixelSidebarItem[] = [
   {
     label: "GET STARTED",
     href: "/docs/get-started",
@@ -51,3 +52,15 @@ export const docsNavigation: PixelSidebarItem[] = [
     ],
   },
 ];
+
+function mapItem(version: string, item: PixelSidebarItem): PixelSidebarItem {
+  return {
+    ...item,
+    href: toVersionedDocsHref(version, item.href),
+    items: item.items?.map((child) => mapItem(version, child)),
+  };
+}
+
+export function buildDocsNavigation(version: string): PixelSidebarItem[] {
+  return baseDocsNavigation.map((item) => mapItem(version, item));
+}

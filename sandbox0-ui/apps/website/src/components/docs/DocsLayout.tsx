@@ -5,7 +5,9 @@ import { usePathname } from "next/navigation";
 import { Header } from "@/components/layout/Header";
 import { PixelSidebar } from "./PixelSidebar";
 import { PixelTableOfContents } from "./PixelTableOfContents";
-import { docsNavigation } from "@/app/docs/docs";
+import { buildDocsNavigation } from "@/app/docs/docs";
+import { DocsVersionSelect } from "./DocsVersionSelect";
+import { getResolvedDocsVersionFromPathname } from "./versioning";
 
 export interface DocsLayoutProps {
   children: React.ReactNode;
@@ -25,6 +27,8 @@ export function DocsLayout({ children, currentPath: propPath }: DocsLayoutProps)
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const pathname = usePathname();
   const currentPath = propPath ?? pathname;
+  const currentVersion = getResolvedDocsVersionFromPathname(currentPath);
+  const docsNavigation = buildDocsNavigation(currentVersion);
 
   return (
     <div className="min-h-screen bg-background">
@@ -41,9 +45,9 @@ export function DocsLayout({ children, currentPath: propPath }: DocsLayoutProps)
               ${sidebarOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"}
             `}
           >
-            <div className="px-6 relative h-full">
-              {/* Decorative pixel at the bottom of sidebar if needed, but let's keep it clean */}
+            <div className="px-6 relative">
               <PixelSidebar items={docsNavigation} currentPath={currentPath} />
+              <DocsVersionSelect />
             </div>
           </aside>
 

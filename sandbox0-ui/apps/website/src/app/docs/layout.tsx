@@ -1,5 +1,5 @@
-import { DocsLayout } from "@/components/docs/DocsLayout";
+import { DocsRouteGate } from "@/components/docs/DocsRouteGate";
 
 export default function Layout({ children }: { children: React.ReactNode }) {
-  return <DocsLayout>{children}</DocsLayout>;
+  return <DocsRouteGate>{children}</DocsRouteGate>;
 }

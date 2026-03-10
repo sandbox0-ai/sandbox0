@@ -21,7 +21,7 @@ export function Footer() {
         </div>
         
         <div className="flex flex-wrap justify-center gap-8 text-sm text-muted">
-          <Link href="/docs/get-started" className="hover:text-foreground transition-colors">
+          <Link href="/docs/latest/get-started" className="hover:text-foreground transition-colors">
             Documentation
           </Link>
           <a

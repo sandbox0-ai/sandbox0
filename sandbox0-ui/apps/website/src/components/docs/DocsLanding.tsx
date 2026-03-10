@@ -1,5 +1,6 @@
 import React from "react";
 import { PixelCard, PixelButton, PixelBadge } from "@sandbox0/ui";
+import { DocsLink } from "./DocsLink";
 
 export function DocsHero({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -31,7 +32,7 @@ export function LinkCard({
         <h3 className="font-pixel text-xs mb-2">{title}</h3>
         <div className="text-sm text-muted mb-4">{children}</div>
         <PixelButton variant="secondary" scale="sm">
-          <a href={href}>{cta} →</a>
+          <DocsLink href={href}>{cta} →</DocsLink>
         </PixelButton>
       </div>
     </PixelCard>
@@ -59,12 +60,12 @@ export function ResourceItem({
         {badge}
       </PixelBadge>
       <span className="text-sm text-muted">{description}</span>
-      <a
+      <DocsLink
         href={href}
         className="ml-auto text-accent text-sm font-medium hover:text-foreground transition-colors"
       >
         {cta}
-      </a>
+      </DocsLink>
     </div>
   );
 }

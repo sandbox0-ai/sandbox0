@@ -7,6 +7,7 @@ export { PixelBox } from "./components/PixelBox";
 export { PixelButton } from "./components/PixelButton";
 export { PixelCard } from "./components/PixelCard";
 export { PixelInput } from "./components/PixelInput";
+export { PixelSelect } from "./components/PixelSelect";
 export { PixelBadge } from "./components/PixelBadge";
 export { PixelCallout } from "./components/PixelCallout";
 export { PixelHeading } from "./components/PixelHeading";

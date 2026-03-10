@@ -84,6 +84,27 @@ type ContextResponse struct {
 	OutputRaw string              `json:"output_raw,omitempty"`
 }
 
+func normalizeStringMap(value map[string]string) map[string]string {
+	if value == nil {
+		return map[string]string{}
+	}
+	return value
+}
+
+func newContextResponse(ctx *ctxpkg.Context, outputRaw string) ContextResponse {
+	return ContextResponse{
+		ID:        ctx.ID,
+		Type:      ctx.Type,
+		Alias:     ctx.Alias,
+		CWD:       ctx.CWD,
+		EnvVars:   normalizeStringMap(ctx.EnvVars),
+		Running:   ctx.IsRunning(),
+		Paused:    ctx.IsPaused(),
+		CreatedAt: ctx.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		OutputRaw: outputRaw,
+	}
+}
+
 // ContextStatsResponse is the response body for context resource stats.
 type ContextStatsResponse struct {
 	ContextID string                `json:"context_id"`
@@ -142,16 +163,7 @@ func (h *ContextHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	var response []ContextResponse
 	for _, ctx := range contexts {
-		response = append(response, ContextResponse{
-			ID:        ctx.ID,
-			Type:      ctx.Type,
-			Alias:     ctx.Alias,
-			CWD:       ctx.CWD,
-			EnvVars:   ctx.EnvVars,
-			Running:   ctx.IsRunning(),
-			Paused:    ctx.IsPaused(),
-			CreatedAt: ctx.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
-		})
+		response = append(response, newContextResponse(ctx, ""))
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -243,30 +255,11 @@ func (h *ContextHandler) Create(w http.ResponseWriter, r *http.Request) {
 			writeError(w, execErr.status, execErr.code, execErr.message)
 			return
 		}
-		writeJSON(w, http.StatusCreated, ContextResponse{
-			ID:        ctx.ID,
-			Type:      ctx.Type,
-			Alias:     ctx.Alias,
-			CWD:       ctx.CWD,
-			EnvVars:   ctx.EnvVars,
-			Running:   ctx.IsRunning(),
-			Paused:    ctx.IsPaused(),
-			CreatedAt: ctx.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
-			OutputRaw: output,
-		})
+		writeJSON(w, http.StatusCreated, newContextResponse(ctx, output))
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, ContextResponse{
-		ID:        ctx.ID,
-		Type:      ctx.Type,
-		Alias:     ctx.Alias,
-		CWD:       ctx.CWD,
-		EnvVars:   ctx.EnvVars,
-		Running:   ctx.IsRunning(),
-		Paused:    ctx.IsPaused(),
-		CreatedAt: ctx.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
-	})
+	writeJSON(w, http.StatusCreated, newContextResponse(ctx, ""))
 }
 
 // Get gets a context by ID.
@@ -284,16 +277,7 @@ func (h *ContextHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, ContextResponse{
-		ID:        ctx.ID,
-		Type:      ctx.Type,
-		Alias:     ctx.Alias,
-		CWD:       ctx.CWD,
-		EnvVars:   ctx.EnvVars,
-		Running:   ctx.IsRunning(),
-		Paused:    ctx.IsPaused(),
-		CreatedAt: ctx.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
-	})
+	writeJSON(w, http.StatusOK, newContextResponse(ctx, ""))
 }
 
 // Delete deletes a context.
@@ -329,16 +313,7 @@ func (h *ContextHandler) Restart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, ContextResponse{
-		ID:        ctx.ID,
-		Type:      ctx.Type,
-		Alias:     ctx.Alias,
-		CWD:       ctx.CWD,
-		EnvVars:   ctx.EnvVars,
-		Running:   ctx.IsRunning(),
-		Paused:    ctx.IsPaused(),
-		CreatedAt: ctx.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
-	})
+	writeJSON(w, http.StatusOK, newContextResponse(ctx, ""))
 }
 
 // WriteInput writes input to a context's process.

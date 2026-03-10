@@ -2,11 +2,16 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"strings"
 	"syscall"
 	"testing"
 	"unsafe"
 
+	"github.com/gorilla/mux"
 	ctxpkg "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/context"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process"
 	"go.uber.org/zap"
@@ -218,5 +223,47 @@ func TestExecInputSync_DoesNotAppendNewlineForCMD(t *testing.T) {
 	}
 	if captured != "echo hello" {
 		t.Errorf("input = %q, want %q", captured, "echo hello")
+	}
+}
+
+func TestNormalizeStringMap_ReturnsEmptyMapForNil(t *testing.T) {
+	got := normalizeStringMap(nil)
+	if got == nil {
+		t.Fatal("normalizeStringMap(nil) returned nil")
+	}
+	if len(got) != 0 {
+		t.Fatalf("normalizeStringMap(nil) length = %d, want 0", len(got))
+	}
+}
+
+func TestGetContext_EncodesNilEnvVarsAsEmptyObject(t *testing.T) {
+	proc := &fakeProcess{outputCh: make(chan process.ProcessOutput)}
+	handler, ctx := newHandlerWithContext(proc, process.ProcessTypeREPL)
+	ctx.EnvVars = nil
+
+	req := httptest.NewRequest(http.MethodGet, "/contexts/"+ctx.ID, nil)
+	req = mux.SetURLVars(req, map[string]string{"id": ctx.ID})
+	rec := httptest.NewRecorder()
+
+	handler.Get(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var resp struct {
+		EnvVars map[string]string `json:"env_vars"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if resp.EnvVars == nil {
+		t.Fatal("env_vars decoded as nil, want empty object")
+	}
+	if len(resp.EnvVars) != 0 {
+		t.Fatalf("env_vars length = %d, want 0", len(resp.EnvVars))
+	}
+	if strings.Contains(rec.Body.String(), "\"env_vars\":null") {
+		t.Fatalf("response body contains null env_vars: %s", rec.Body.String())
 	}
 }

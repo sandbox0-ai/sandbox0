@@ -766,6 +766,25 @@ spec:
                         default: {}
                         description: Config contains edge-gateway specific configuration
                         properties:
+                          agentSkill:
+                            default: {}
+                            description: Agent skill distribution configuration.
+                            properties:
+                              artifactBaseURL:
+                                default: https://github.com/sandbox0-ai/sandbox0/releases/download
+                                type: string
+                              artifactPrefix:
+                                default: sandbox0-agent-skill
+                                type: string
+                              enabled:
+                                default: false
+                                type: boolean
+                              name:
+                                default: sandbox0
+                                type: string
+                              releaseVersion:
+                                type: string
+                            type: object
                           baseUrl:
                             default: http://localhost:8080
                             description: Base URL for OIDC callbacks
@@ -1035,6 +1054,25 @@ spec:
                         default: {}
                         description: Config contains internal-gateway specific configuration
                         properties:
+                          agentSkill:
+                            default: {}
+                            description: Agent skill distribution configuration.
+                            properties:
+                              artifactBaseURL:
+                                default: https://github.com/sandbox0-ai/sandbox0/releases/download
+                                type: string
+                              artifactPrefix:
+                                default: sandbox0-agent-skill
+                                type: string
+                              enabled:
+                                default: false
+                                type: boolean
+                              name:
+                                default: sandbox0
+                                type: string
+                              releaseVersion:
+                                type: string
+                            type: object
                           allowedCallers:
                             default:
                             - edge-gateway

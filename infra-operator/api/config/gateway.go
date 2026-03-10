@@ -80,7 +80,7 @@ type GatewayConfig struct {
 // artifact exposed by gateway APIs.
 type AgentSkillConfig struct {
 	// +optional
-	// +kubebuilder:default=true
+	// +kubebuilder:default=false
 	Enabled bool `yaml:"enabled" json:"enabled"`
 	// +optional
 	// +kubebuilder:default="sandbox0"

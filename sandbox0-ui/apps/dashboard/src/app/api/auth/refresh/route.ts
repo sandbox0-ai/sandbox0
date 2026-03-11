@@ -1,0 +1,63 @@
+import { cookies } from "next/headers";
+import { NextResponse } from "next/server";
+
+import {
+  clearDashboardAuthCookies,
+  dashboardRefreshTokenCookieName,
+  exchangeRefreshToken,
+  setDashboardAuthCookies,
+} from "@/lib/controlplane/auth";
+import { resolveDashboardRuntimeConfig } from "@/lib/controlplane/config";
+
+function refreshRedirectURL(
+  requestURL: string,
+  basePath: string,
+  error?: string,
+): URL {
+  const url = new URL(basePath, requestURL);
+  url.searchParams.set("refreshed", "1");
+  if (error) {
+    url.searchParams.set("login_error", error);
+  }
+  return url;
+}
+
+export async function GET(request: Request) {
+  const config = resolveDashboardRuntimeConfig();
+  const cookieStore = await cookies();
+  const refreshToken = cookieStore.get(dashboardRefreshTokenCookieName)?.value;
+
+  if (!refreshToken) {
+    const response = NextResponse.redirect(
+      refreshRedirectURL(
+        request.url,
+        config.dashboardBasePath,
+        "session expired, please sign in again",
+      ),
+      { status: 303 },
+    );
+    clearDashboardAuthCookies(response, config);
+    return response;
+  }
+
+  const result = await exchangeRefreshToken(config, refreshToken);
+  if (!result.tokens) {
+    const response = NextResponse.redirect(
+      refreshRedirectURL(
+        request.url,
+        config.dashboardBasePath,
+        result.error ?? "session expired, please sign in again",
+      ),
+      { status: 303 },
+    );
+    clearDashboardAuthCookies(response, config);
+    return response;
+  }
+
+  const response = NextResponse.redirect(
+    refreshRedirectURL(request.url, config.dashboardBasePath),
+    { status: 303 },
+  );
+  setDashboardAuthCookies(response, config, result.tokens);
+  return response;
+}

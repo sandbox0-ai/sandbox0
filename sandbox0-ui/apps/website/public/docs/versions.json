@@ -13,6 +13,12 @@
       "label": "Next",
       "channel": "next",
       "listed": true
+    },
+    {
+      "id": "v0.1.3-rc.2",
+      "label": "v0.1.3-rc.2",
+      "channel": "prerelease",
+      "listed": true
     }
   ]
 }

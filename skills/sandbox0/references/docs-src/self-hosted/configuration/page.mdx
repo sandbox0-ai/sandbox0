@@ -129,6 +129,8 @@ Examples:
 - `services.storageProxy.config.juicefs*` tunes JuiceFS behavior and cache sizing
 - `services.netd.config.*` controls proxy ports, policy enforcement, and node-level networking behavior
 
+Use `spec.sandboxNodePlacement` for the shared node placement consumed by sandbox template Pods, `netd`, and `k8s-plugin`. The older `services.netd.nodeSelector` and `services.netd.tolerations` fields remain as compatibility aliases when the shared placement is unset.
+
 <Callout variant="info">
 Use the generated reference below for exact field names, defaults, enums, and required flags. Use the sample manifests for operator-friendly starting points.
 </Callout>
@@ -149,5 +151,6 @@ The reference below is generated from the `Sandbox0Infra` CRD schema produced by
 - Prefer external PostgreSQL and external object storage for serious deployments.
 - Enable `storageProxy` only when you need volume and snapshot features.
 - Enable `netd` only on Linux nodes and only when you need network policy enforcement.
+- Use `sandboxNodePlacement` to keep sandbox workloads and node-local sandbox services on the same node set.
 - If sandbox workloads use `gvisor` or `kata`, keep `services.netd.runtimeClassName` on a host-compatible runtime such as the cluster default runtime.
 - Keep control-plane and data-plane components in the same storage and latency domain for a given region.

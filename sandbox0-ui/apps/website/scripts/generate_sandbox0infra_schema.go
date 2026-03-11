@@ -48,6 +48,7 @@ var sectionSpecs = []sectionSpec{
 	{Key: "spec.cluster", Title: "Cluster"},
 	{Key: "spec.initUser", Title: "Initial Admin User"},
 	{Key: "spec.builtinTemplates", Title: "Builtin Templates"},
+	{Key: "spec.sandboxNodePlacement", Title: "Sandbox Node Placement"},
 	{Key: "spec.services.edgeGateway", Title: "Service: edgeGateway"},
 	{Key: "spec.services.scheduler", Title: "Service: scheduler"},
 	{Key: "spec.services.internalGateway", Title: "Service: internalGateway"},

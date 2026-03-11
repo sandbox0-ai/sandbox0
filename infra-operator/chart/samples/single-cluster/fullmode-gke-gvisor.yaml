@@ -44,6 +44,22 @@ spec:
       pool:
         minIdle: 1
         maxIdle: 5
+  # Shared placement for sandbox template Pods plus node-local helpers such as
+  # netd and k8s-plugin.
+  sandboxNodePlacement:
+    # Reuse the native GKE Sandbox node label so sandbox placement does not
+    # depend on an extra custom node label.
+    nodeSelector:
+      sandbox.gke.io/runtime: gvisor
+    tolerations:
+      - key: sandbox0.ai/sandbox
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+      - key: sandbox.gke.io/runtime
+        operator: Equal
+        value: gvisor
+        effect: NoSchedule
   services:
     internalGateway:
       enabled: true
@@ -56,19 +72,6 @@ spec:
     netd:
       enabled: true
       # Keep netd on the default host runtime; do not set runtimeClassName=gvisor.
-      # Reuse the native GKE Sandbox node label so sandbox placement does not
-      # depend on an extra custom node label.
-      nodeSelector:
-        sandbox.gke.io/runtime: gvisor
-      tolerations:
-        - key: sandbox0.ai/sandbox
-          operator: Equal
-          value: "true"
-          effect: NoSchedule
-        - key: sandbox.gke.io/runtime
-          operator: Equal
-          value: gvisor
-          effect: NoSchedule
     manager:
       enabled: true
       replicas: 1

@@ -301,6 +301,7 @@ If `s0 sandbox create` returns a sandbox ID and the sandbox reaches `running`, t
 
 - Sandbox0 requires different runtime behavior for different components. On GKE, keep a regular node pool for system services and a `gVisor` node pool for sandbox workloads.
 - `template` pods can run with `runtimeClassName: gvisor`, and the GCP `gVisor` sample places sandbox workloads onto nodes labeled `sandbox.gke.io/runtime=gvisor`.
+- Use `sandboxNodePlacement` to place sandbox workloads, `netd`, and `k8s-plugin` onto the same sandbox node pool.
 - Do not set `services.netd.runtimeClassName: gvisor`.
 - `netd` and `k8s-plugin` depend on host features such as `hostNetwork` and `hostPath`. This is why GKE Autopilot is not a good fit for full Sandbox0 deployments.
 - Even when `netd` and `k8s-plugin` are scheduled onto `gVisor` nodes, they still run on the node's default host runtime because `services.netd.runtimeClassName` remains unset.

@@ -57,9 +57,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	}
 	if infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
 		runtimeClassName = infra.Spec.Services.Netd.RuntimeClassName
-		nodeSelector = infra.Spec.Services.Netd.NodeSelector
-		tolerations = infra.Spec.Services.Netd.Tolerations
 	}
+	nodeSelector, tolerations = common.ResolveSandboxNodePlacement(infra)
 	if config.NodeName == "" {
 		config.NodeName = "${NODE_NAME}"
 	}

@@ -36,7 +36,7 @@ sandbox_pod_placement:
 	}
 }
 
-func TestBuildPodSpecKeepsNetdPlacementAuthoritative(t *testing.T) {
+func TestBuildPodSpecKeepsInjectedPlacementAuthoritative(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test
 sandbox_pod_placement:

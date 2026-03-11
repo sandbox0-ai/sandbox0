@@ -649,27 +649,51 @@ func BoolPtr(b bool) *bool {
 }
 
 // ResolveSandboxNodePlacement derives the shared scheduling constraints for
-// sandbox workloads from the netd service placement.
+// sandbox workloads and node-local sandbox services. The shared spec-level
+// placement takes precedence, with netd placement kept as a compatibility
+// fallback for older manifests.
 func ResolveSandboxNodePlacement(infra *infrav1alpha1.Sandbox0Infra) (map[string]string, []corev1.Toleration) {
-	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.Netd == nil {
+	if infra == nil {
 		return nil, nil
 	}
 
 	var nodeSelector map[string]string
-	if len(infra.Spec.Services.Netd.NodeSelector) > 0 {
-		nodeSelector = make(map[string]string, len(infra.Spec.Services.Netd.NodeSelector))
-		for key, value := range infra.Spec.Services.Netd.NodeSelector {
-			nodeSelector[key] = value
-		}
+	if infra.Spec.SandboxNodePlacement != nil && len(infra.Spec.SandboxNodePlacement.NodeSelector) > 0 {
+		nodeSelector = cloneNodeSelector(infra.Spec.SandboxNodePlacement.NodeSelector)
+	} else if infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
+		nodeSelector = cloneNodeSelector(infra.Spec.Services.Netd.NodeSelector)
 	}
 
 	var tolerations []corev1.Toleration
-	if len(infra.Spec.Services.Netd.Tolerations) > 0 {
-		tolerations = make([]corev1.Toleration, len(infra.Spec.Services.Netd.Tolerations))
-		copy(tolerations, infra.Spec.Services.Netd.Tolerations)
+	if infra.Spec.SandboxNodePlacement != nil && len(infra.Spec.SandboxNodePlacement.Tolerations) > 0 {
+		tolerations = cloneTolerations(infra.Spec.SandboxNodePlacement.Tolerations)
+	} else if infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
+		tolerations = cloneTolerations(infra.Spec.Services.Netd.Tolerations)
 	}
 
 	return nodeSelector, tolerations
+}
+
+func cloneNodeSelector(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+
+	cloned := make(map[string]string, len(src))
+	for key, value := range src {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func cloneTolerations(src []corev1.Toleration) []corev1.Toleration {
+	if len(src) == 0 {
+		return nil
+	}
+
+	cloned := make([]corev1.Toleration, len(src))
+	copy(cloned, src)
+	return cloned
 }
 
 // EnsurePodTemplateAnnotations returns annotations with the current CR generation marker.

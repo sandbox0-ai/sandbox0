@@ -99,6 +99,11 @@ type Sandbox0InfraSpec struct {
 	// +kubebuilder:default={}
 	Services *ServicesConfig `json:"services,omitempty"`
 
+	// SandboxNodePlacement configures the shared node placement used by
+	// sandbox workloads and node-local sandbox services.
+	// +optional
+	SandboxNodePlacement *SandboxNodePlacementConfig `json:"sandboxNodePlacement,omitempty"`
+
 	// Region identifies the region for multi-cluster deployments
 	// +optional
 	Region string `json:"region,omitempty"`
@@ -119,6 +124,20 @@ type Sandbox0InfraSpec struct {
 	// +optional
 	// +kubebuilder:default={}
 	BuiltinTemplates []BuiltinTemplateConfig `json:"builtinTemplates,omitempty"`
+}
+
+// SandboxNodePlacementConfig defines shared scheduling constraints for sandbox
+// workloads and node-local sandbox services.
+type SandboxNodePlacementConfig struct {
+	// NodeSelector constrains sandbox workloads and node-local sandbox services
+	// onto a specific node set.
+	// +optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+
+	// Tolerations allow sandbox workloads and node-local sandbox services to run
+	// on tainted sandbox nodes.
+	// +optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 }
 
 // DatabaseConfig defines database configuration
@@ -808,11 +827,13 @@ type NetdServiceConfig struct {
 	// +optional
 	RuntimeClassName *string `json:"runtimeClassName,omitempty"`
 	// NodeSelector constrains netd onto a specific node set.
-	// On GKE with gVisor sandboxes, use this to place netd onto the sandbox nodes
-	// while leaving RuntimeClassName unset so netd still uses the default host runtime.
+	// Deprecated: use spec.sandboxNodePlacement.nodeSelector instead. This field
+	// remains as a backward-compatible alias when the shared placement is unset.
 	// +optional
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 	// Tolerations allow netd to run on tainted sandbox nodes.
+	// Deprecated: use spec.sandboxNodePlacement.tolerations instead. This field
+	// remains as a backward-compatible alias when the shared placement is unset.
 	// +optional
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 	// Config contains netd specific configuration

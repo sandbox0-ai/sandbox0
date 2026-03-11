@@ -1,5 +1,5 @@
 {
-  "generatedFrom": "/Users/huangzhihao/sandbox0/workspace/sandbox0/infra-operator/chart/crds/infra.sandbox0.ai_sandbox0infras.yaml",
+  "generatedFrom": "/Users/huangzhihao/sandbox0/workspace/sandbox0-issue-24-sandbox-node-placement-is-modeled-under-services/infra-operator/chart/crds/infra.sandbox0.ai_sandbox0infras.yaml",
   "sections": [
     {
       "key": "spec.database",
@@ -1123,7 +1123,7 @@
           "type": "string",
           "required": false,
           "default": "aws-us-east-1",
-          "description": "RegionID is the region identifier used in public URLs"
+          "description": "RegionID is the DNS-safe region label used in public URLs. It is not the canonical multi-region tenancy identifier."
         },
         {
           "path": "spec.publicExposure.rootDomain",
@@ -1310,6 +1310,67 @@
       ]
     },
     {
+      "key": "spec.sandboxNodePlacement",
+      "title": "Sandbox Node Placement",
+      "description": "SandboxNodePlacement configures the shared node placement used by\nsandbox workloads and node-local sandbox services.",
+      "entries": [
+        {
+          "path": "spec.sandboxNodePlacement",
+          "type": "object",
+          "required": false,
+          "description": "SandboxNodePlacement configures the shared node placement used by sandbox workloads and node-local sandbox services."
+        },
+        {
+          "path": "spec.sandboxNodePlacement.nodeSelector",
+          "type": "object",
+          "required": false,
+          "description": "NodeSelector constrains sandbox workloads and node-local sandbox services onto a specific node set."
+        },
+        {
+          "path": "spec.sandboxNodePlacement.tolerations",
+          "type": "array\u003cobject\u003e",
+          "required": false,
+          "description": "Tolerations allow sandbox workloads and node-local sandbox services to run on tainted sandbox nodes."
+        },
+        {
+          "path": "spec.sandboxNodePlacement.tolerations[]",
+          "type": "object",
+          "required": false,
+          "description": "The pod this Toleration is attached to tolerates any taint that matches the triple \u003ckey,value,effect\u003e using the matching operator \u003coperator\u003e."
+        },
+        {
+          "path": "spec.sandboxNodePlacement.tolerations[].effect",
+          "type": "string",
+          "required": false,
+          "description": "Effect indicates the taint effect to match. Empty means match all taint effects. When specified, allowed values are NoSchedule, PreferNoSchedule and NoExecute."
+        },
+        {
+          "path": "spec.sandboxNodePlacement.tolerations[].key",
+          "type": "string",
+          "required": false,
+          "description": "Key is the taint key that the toleration applies to. Empty means match all taint keys. If the key is empty, operator must be Exists; this combination means to match all values and all keys."
+        },
+        {
+          "path": "spec.sandboxNodePlacement.tolerations[].operator",
+          "type": "string",
+          "required": false,
+          "description": "Operator represents a key's relationship to the value. Valid operators are Exists, Equal, Lt, and Gt. Defaults to Equal. Exists is equivalent to wildcard for value, so that a pod can tolerate all taints of a particular category. Lt and Gt perform numeric comparisons (requires feature gate TaintTolerationComparisonOperators)."
+        },
+        {
+          "path": "spec.sandboxNodePlacement.tolerations[].tolerationSeconds",
+          "type": "integer",
+          "required": false,
+          "description": "TolerationSeconds represents the period of time the toleration (which must be of effect NoExecute, otherwise this field is ignored) tolerates the taint. By default, it is not set, which means tolerate the taint forever (do not evict). Zero and negative values will be treated as 0 (evict immediately) by the system."
+        },
+        {
+          "path": "spec.sandboxNodePlacement.tolerations[].value",
+          "type": "string",
+          "required": false,
+          "description": "Value is the taint value the toleration matches to. If the operator is Exists, the value should be empty, otherwise just a regular string."
+        }
+      ]
+    },
+    {
       "key": "spec.services.edgeGateway",
       "title": "Service: edgeGateway",
       "description": "EdgeGateway configures the edge-gateway service (control plane)",
@@ -1327,6 +1388,17 @@
           "required": false,
           "default": "{}",
           "description": "Config contains edge-gateway specific configuration"
+        },
+        {
+          "path": "spec.services.edgeGateway.config.authMode",
+          "type": "string",
+          "required": false,
+          "default": "self_hosted",
+          "enum": [
+            "self_hosted",
+            "federated_global"
+          ],
+          "description": "AuthMode controls how human-facing authentication is handled. Allowed values: \"self_hosted\", \"federated_global\"."
         },
         {
           "path": "spec.services.edgeGateway.config.baseUrl",
@@ -1570,6 +1642,12 @@
           "required": false,
           "default": "100",
           "description": "Rate limiting"
+        },
+        {
+          "path": "spec.services.edgeGateway.config.regionId",
+          "type": "string",
+          "required": false,
+          "description": "RegionID is the canonical region identifier used by tenancy and routing contracts, for example \"aws/us-east-1\"."
         },
         {
           "path": "spec.services.edgeGateway.config.schedulerEnabled",
@@ -2204,6 +2282,12 @@
           "required": false,
           "default": "100",
           "description": "Rate limiting"
+        },
+        {
+          "path": "spec.services.internalGateway.config.regionId",
+          "type": "string",
+          "required": false,
+          "description": "RegionID is the canonical region identifier used by tenancy and routing contracts, for example \"aws/us-east-1\"."
         },
         {
           "path": "spec.services.internalGateway.config.schedulerPermissions",
@@ -3393,7 +3477,7 @@
           "path": "spec.services.netd.nodeSelector",
           "type": "object",
           "required": false,
-          "description": "NodeSelector constrains netd onto a specific node set. On GKE with gVisor sandboxes, use this to place netd onto the sandbox nodes while leaving RuntimeClassName unset so netd still uses the default host runtime."
+          "description": "NodeSelector constrains netd onto a specific node set. Deprecated: use spec.sandboxNodePlacement.nodeSelector instead. This field remains as a backward-compatible alias when the shared placement is unset."
         },
         {
           "path": "spec.services.netd.replicas",
@@ -3474,7 +3558,7 @@
           "path": "spec.services.netd.tolerations",
           "type": "array\u003cobject\u003e",
           "required": false,
-          "description": "Tolerations allow netd to run on tainted sandbox nodes."
+          "description": "Tolerations allow netd to run on tainted sandbox nodes. Deprecated: use spec.sandboxNodePlacement.tolerations instead. This field remains as a backward-compatible alias when the shared placement is unset."
         },
         {
           "path": "spec.services.netd.tolerations[]",

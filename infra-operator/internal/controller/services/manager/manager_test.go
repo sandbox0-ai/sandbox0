@@ -3,6 +3,8 @@ package manager
 import (
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 )
 
@@ -30,4 +32,39 @@ func TestResolveNetworkPolicyProvider(t *testing.T) {
 			t.Fatalf("expected netd provider, got %q", got)
 		}
 	})
+}
+
+func TestResolveSandboxPodPlacementPrefersSharedPlacement(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			SandboxNodePlacement: &infrav1alpha1.SandboxNodePlacementConfig{
+				NodeSelector: map[string]string{
+					"sandbox0.ai/node-role": "shared",
+				},
+				Tolerations: []corev1.Toleration{
+					{
+						Key:      "sandbox0.ai/sandbox",
+						Operator: corev1.TolerationOpEqual,
+						Value:    "true",
+						Effect:   corev1.TaintEffectNoSchedule,
+					},
+				},
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				Netd: &infrav1alpha1.NetdServiceConfig{
+					NodeSelector: map[string]string{
+						"sandbox0.ai/node-role": "legacy",
+					},
+				},
+			},
+		},
+	}
+
+	placement := resolveSandboxPodPlacement(infra)
+	if got := placement.NodeSelector["sandbox0.ai/node-role"]; got != "shared" {
+		t.Fatalf("expected shared placement to win, got %q", got)
+	}
+	if len(placement.Tolerations) != 1 || placement.Tolerations[0].Key != "sandbox0.ai/sandbox" {
+		t.Fatalf("expected shared tolerations, got %#v", placement.Tolerations)
+	}
 }

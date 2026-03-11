@@ -38,7 +38,7 @@ func BuildPodSpec(template *SandboxTemplate, restart bool) corev1.PodSpec {
 	if template.Spec.Pod != nil {
 		if template.Spec.Pod.NodeSelector != nil {
 			// Keep manager-injected placement authoritative on conflicting keys so
-			// sandbox workloads cannot drift outside the netd coverage set.
+			// sandbox workloads cannot drift outside the shared sandbox placement.
 			spec.NodeSelector = mergeNodeSelectors(template.Spec.Pod.NodeSelector, spec.NodeSelector)
 		}
 		spec.Tolerations = mergeTolerations(spec.Tolerations, convertTolerations(template.Spec.Pod.Tolerations))

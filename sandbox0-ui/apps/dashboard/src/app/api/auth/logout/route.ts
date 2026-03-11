@@ -5,8 +5,8 @@ import {
   clearDashboardAuthCookies,
   dashboardCookieNames,
   forwardLogout,
-} from "@/lib/controlplane/auth";
-import { resolveDashboardRuntimeConfig } from "@/lib/controlplane/config";
+  resolveDashboardRuntimeConfig,
+} from "@sandbox0/dashboard-core";
 
 function redirectURL(requestURL: string, basePath: string): URL {
   return new URL(basePath, requestURL);

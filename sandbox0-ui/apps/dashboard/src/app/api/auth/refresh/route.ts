@@ -5,9 +5,9 @@ import {
   clearDashboardAuthCookies,
   dashboardRefreshTokenCookieName,
   exchangeRefreshToken,
+  resolveDashboardRuntimeConfig,
   setDashboardAuthCookies,
-} from "@/lib/controlplane/auth";
-import { resolveDashboardRuntimeConfig } from "@/lib/controlplane/config";
+} from "@sandbox0/dashboard-core";
 
 function refreshRedirectURL(
   requestURL: string,

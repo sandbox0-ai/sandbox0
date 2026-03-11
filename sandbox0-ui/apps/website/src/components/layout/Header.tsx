@@ -6,7 +6,6 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { PixelButton } from "@sandbox0/ui";
 import { getResolvedDocsVersionFromPathname } from "@/components/docs/versioning";
-import { resolveDashboardHref } from "@/components/layout/dashboard-link";
 
 interface HeaderProps {
   onMenuClick?: () => void;
@@ -30,7 +29,6 @@ export function Header({
   const pathname = usePathname();
   const isDocs = pathname?.startsWith("/docs");
   const docsVersion = getResolvedDocsVersionFromPathname(pathname);
-  const dashboardHref = resolveDashboardHref();
 
   return (
     <nav
@@ -63,12 +61,6 @@ export function Header({
             }`}
           >
             Docs
-          </Link>
-          <Link
-            href={dashboardHref}
-            className="text-sm text-muted hover:text-foreground transition-colors"
-          >
-            Dashboard
           </Link>
           <a
             href="https://github.com/sandbox0-ai/sandbox0"

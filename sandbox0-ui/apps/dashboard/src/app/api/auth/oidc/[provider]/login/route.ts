@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 
-import { resolveOIDCLoginLocation } from "@/lib/controlplane/auth";
-import { resolveDashboardRuntimeConfig } from "@/lib/controlplane/config";
+import {
+  resolveDashboardRuntimeConfig,
+  resolveOIDCLoginLocation,
+} from "@sandbox0/dashboard-core";
 
 function dashboardURL(
   requestURL: string,

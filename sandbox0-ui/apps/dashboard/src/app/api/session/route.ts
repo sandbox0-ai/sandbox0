@@ -4,13 +4,11 @@ import { NextResponse } from "next/server";
 import {
   dashboardRefreshTokenCookieName,
   exchangeRefreshToken,
-  setDashboardAuthCookies,
-} from "@/lib/controlplane/auth";
-import { resolveDashboardRuntimeConfig } from "@/lib/controlplane/config";
-import {
   readBearerToken,
+  resolveDashboardRuntimeConfig,
   resolveDashboardSession,
-} from "@/lib/controlplane/session";
+  setDashboardAuthCookies,
+} from "@sandbox0/dashboard-core";
 
 export const dynamic = "force-dynamic";
 

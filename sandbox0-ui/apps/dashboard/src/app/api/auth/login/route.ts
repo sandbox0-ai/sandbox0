@@ -2,9 +2,9 @@ import { NextResponse } from "next/server";
 
 import {
   exchangeBuiltinLogin,
+  resolveDashboardRuntimeConfig,
   setDashboardAuthCookies,
-} from "@/lib/controlplane/auth";
-import { resolveDashboardRuntimeConfig } from "@/lib/controlplane/config";
+} from "@sandbox0/dashboard-core";
 
 function redirectURL(
   requestURL: string,

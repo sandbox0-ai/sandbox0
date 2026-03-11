@@ -11,13 +11,11 @@ import {
 
 import {
   dashboardRefreshTokenCookieName,
-  resolveDashboardAuthProviders,
-} from "@/lib/controlplane/auth";
-import { resolveDashboardRuntimeConfig } from "@/lib/controlplane/config";
-import {
   readBearerToken,
+  resolveDashboardAuthProviders,
+  resolveDashboardRuntimeConfig,
   resolveDashboardSession,
-} from "@/lib/controlplane/session";
+} from "@sandbox0/dashboard-core";
 
 export const dynamic = "force-dynamic";
 

@@ -6,10 +6,10 @@ import {
   dashboardAccessTokenCookieName,
   dashboardRefreshTokenCookieName,
   exchangeRefreshToken,
+  resolveDashboardRuntimeConfig,
   setDashboardAuthCookies,
   updateDefaultTeam,
-} from "@/lib/controlplane/auth";
-import { resolveDashboardRuntimeConfig } from "@/lib/controlplane/config";
+} from "@sandbox0/dashboard-core";
 
 function dashboardURL(
   requestURL: string,

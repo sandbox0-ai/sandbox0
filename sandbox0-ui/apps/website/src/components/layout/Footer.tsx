@@ -3,11 +3,8 @@
 import React from "react";
 import Image from "next/image";
 import Link from "next/link";
-import { resolveDashboardHref } from "@/components/layout/dashboard-link";
 
 export function Footer() {
-  const dashboardHref = resolveDashboardHref();
-
   return (
     <footer className="border-t border-foreground/10">
       <div className="max-w-[1400px] mx-auto px-4 lg:px-8 py-4 flex flex-col md:flex-row items-center justify-between gap-8">
@@ -29,12 +26,6 @@ export function Footer() {
             className="hover:text-foreground transition-colors"
           >
             Documentation
-          </Link>
-          <Link
-            href={dashboardHref}
-            className="hover:text-foreground transition-colors"
-          >
-            Dashboard
           </Link>
           <a
             href="https://github.com/sandbox0-ai/sandbox0"

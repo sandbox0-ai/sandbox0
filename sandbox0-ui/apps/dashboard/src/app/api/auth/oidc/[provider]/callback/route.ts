@@ -2,9 +2,9 @@ import { NextResponse } from "next/server";
 
 import {
   exchangeOIDCCallback,
+  resolveDashboardRuntimeConfig,
   setDashboardAuthCookies,
-} from "@/lib/controlplane/auth";
-import { resolveDashboardRuntimeConfig } from "@/lib/controlplane/config";
+} from "@sandbox0/dashboard-core";
 
 function dashboardURL(
   requestURL: string,

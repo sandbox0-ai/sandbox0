@@ -3,7 +3,7 @@ import "@sandbox0/ui/globals.css";
 
 export const metadata: Metadata = {
   title: "Sandbox0 Dashboard",
-  description: "AI-native sandbox control panel",
+  description: "Topology-aware control plane for Sandbox0 deployments",
 };
 
 export default function RootLayout({

@@ -292,7 +292,7 @@ paths:
                 $ref: "#/components/schemas/ErrorEnvelope"
   /auth/region-token:
     post:
-      tags: [auth, tenant]
+      tags: [tenant]
       summary: Exchange a global user session for a region-scoped token
       security:
         - bearerAuth: []

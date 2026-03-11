@@ -4,7 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/sandbox0/pkg/auth"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -71,7 +71,7 @@ func (s *Server) proxySandbox(c *gin.Context) {
 	router.ProxyToTarget(c)
 }
 
-func (s *Server) proxyToScheduler(c *gin.Context, authCtx *auth.AuthContext) {
+func (s *Server) proxyToScheduler(c *gin.Context, authCtx *authn.AuthContext) {
 	if s.schedulerRouter == nil {
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "scheduler not available")
 		return
@@ -106,7 +106,7 @@ func (s *Server) proxyToDefaultInternalGateway(c *gin.Context) {
 	s.igRouter.ProxyToTarget(c)
 }
 
-func (s *Server) applyInternalHeaders(c *gin.Context, token string, authCtx *auth.AuthContext) {
+func (s *Server) applyInternalHeaders(c *gin.Context, token string, authCtx *authn.AuthContext) {
 	c.Request.Header.Set(internalauth.DefaultTokenHeader, token)
 	c.Request.Header.Set("X-Team-ID", authCtx.TeamID)
 	if authCtx.UserID != "" {

@@ -8,15 +8,14 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/sandbox0/pkg/auth"
-	gatewayjwt "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/jwt"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"go.uber.org/zap"
 )
 
 func TestAuthMiddleware_JWTAccessToken(t *testing.T) {
 	t.Setenv("GIN_MODE", "release")
 
-	issuer := gatewayjwt.NewIssuer("edge-gateway", "test-secret", time.Minute, time.Hour)
+	issuer := authn.NewIssuer("edge-gateway", "test-secret", time.Minute, time.Hour)
 	tokens, err := issuer.IssueTokenPair("user-1", "team-1", "admin", "user@example.com", "User", false)
 	if err != nil {
 		t.Fatalf("issue token pair: %v", err)
@@ -41,7 +40,7 @@ func TestAuthMiddleware_JWTAccessToken(t *testing.T) {
 func TestAuthMiddleware_JWTRefreshTokenRejected(t *testing.T) {
 	t.Setenv("GIN_MODE", "release")
 
-	issuer := gatewayjwt.NewIssuer("edge-gateway", "test-secret", time.Minute, time.Hour)
+	issuer := authn.NewIssuer("edge-gateway", "test-secret", time.Minute, time.Hour)
 	tokens, err := issuer.IssueTokenPair("user-1", "team-1", "admin", "user@example.com", "User", false)
 	if err != nil {
 		t.Fatalf("issue token pair: %v", err)
@@ -62,7 +61,7 @@ func TestAuthMiddleware_JWTRefreshTokenRejected(t *testing.T) {
 func TestAuthMiddleware_JWTRegionTokenAcceptedForMatchingRegion(t *testing.T) {
 	t.Setenv("GIN_MODE", "release")
 
-	issuer := gatewayjwt.NewIssuer("global-directory", "test-secret", time.Minute, time.Hour)
+	issuer := authn.NewIssuer("global-directory", "test-secret", time.Minute, time.Hour)
 	regionToken, _, err := issuer.IssueRegionToken("user-1", "team-1", "admin", "aws/us-east-1", false, time.Minute)
 	if err != nil {
 		t.Fatalf("issue region token: %v", err)
@@ -94,7 +93,7 @@ func TestAuthMiddleware_JWTRegionTokenAcceptedForMatchingRegion(t *testing.T) {
 func TestAuthMiddleware_JWTRegionTokenRejectedForWrongRegion(t *testing.T) {
 	t.Setenv("GIN_MODE", "release")
 
-	issuer := gatewayjwt.NewIssuer("global-directory", "test-secret", time.Minute, time.Hour)
+	issuer := authn.NewIssuer("global-directory", "test-secret", time.Minute, time.Hour)
 	regionToken, _, err := issuer.IssueRegionToken("user-1", "team-1", "admin", "aws/us-west-2", false, time.Minute)
 	if err != nil {
 		t.Fatalf("issue region token: %v", err)
@@ -124,13 +123,13 @@ func TestAuthMiddleware_RequireJWTAuth(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		authCtx    *auth.AuthContext
+		authCtx    *authn.AuthContext
 		wantStatus int
 	}{
 		{
 			name: "jwt user allowed",
-			authCtx: &auth.AuthContext{
-				AuthMethod: auth.AuthMethodJWT,
+			authCtx: &authn.AuthContext{
+				AuthMethod: authn.AuthMethodJWT,
 				UserID:     "user-1",
 				TeamID:     "team-1",
 			},
@@ -138,16 +137,16 @@ func TestAuthMiddleware_RequireJWTAuth(t *testing.T) {
 		},
 		{
 			name: "api key rejected",
-			authCtx: &auth.AuthContext{
-				AuthMethod: auth.AuthMethodAPIKey,
+			authCtx: &authn.AuthContext{
+				AuthMethod: authn.AuthMethodAPIKey,
 				TeamID:     "team-1",
 			},
 			wantStatus: http.StatusUnauthorized,
 		},
 		{
 			name: "jwt without user rejected",
-			authCtx: &auth.AuthContext{
-				AuthMethod: auth.AuthMethodJWT,
+			authCtx: &authn.AuthContext{
+				AuthMethod: authn.AuthMethodJWT,
 				TeamID:     "team-1",
 			},
 			wantStatus: http.StatusUnauthorized,

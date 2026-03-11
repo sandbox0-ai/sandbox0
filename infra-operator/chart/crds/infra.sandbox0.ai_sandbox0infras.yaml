@@ -1041,6 +1041,260 @@ spec:
                             type: string
                         type: object
                     type: object
+                  globalDirectory:
+                    default: {}
+                    description: GlobalDirectory configures the global-directory service
+                      (global service layer)
+                    properties:
+                      config:
+                        default: {}
+                        description: Config contains global-directory specific configuration
+                        properties:
+                          baseUrl:
+                            default: http://localhost:8080
+                            description: Base URL for OIDC callbacks
+                            type: string
+                          builtInAuth:
+                            default: {}
+                            description: Built-in Authentication
+                            properties:
+                              adminOnly:
+                                description: AdminOnly restricts built-in auth to
+                                  admin accounts only
+                                type: boolean
+                              allowRegistration:
+                                description: AllowRegistration allows new users to
+                                  register
+                                type: boolean
+                              emailVerificationRequired:
+                                description: EmailVerificationRequired requires email
+                                  verification
+                                type: boolean
+                              enabled:
+                                default: true
+                                description: Enabled enables built-in email/password
+                                  authentication
+                                type: boolean
+                            type: object
+                          databaseMaxConns:
+                            default: 30
+                            type: integer
+                          databaseMinConns:
+                            default: 8
+                            type: integer
+                          databaseSchema:
+                            default: gd
+                            type: string
+                          defaultTeamName:
+                            default: Personal Team
+                            description: Identity and Teams
+                            type: string
+                          httpPort:
+                            default: 8080
+                            type: integer
+                          jwtAccessTokenTTL:
+                            default: 15m
+                            type: string
+                          jwtIssuer:
+                            type: string
+                          jwtRefreshTokenTTL:
+                            default: 168h
+                            type: string
+                          logLevel:
+                            default: info
+                            type: string
+                          oidcProviders:
+                            description: OIDC Providers
+                            items:
+                              description: OIDCProviderConfig configures an OIDC provider.
+                              properties:
+                                autoProvision:
+                                  description: AutoProvision automatically creates
+                                    users on first login
+                                  type: boolean
+                                clientId:
+                                  description: ClientID is the OAuth client ID
+                                  type: string
+                                clientSecret:
+                                  description: ClientSecret is the OAuth client secret
+                                  type: string
+                                discoveryUrl:
+                                  description: DiscoveryURL is the OIDC discovery
+                                    URL (.well-known/openid-configuration)
+                                  type: string
+                                enabled:
+                                  description: Enabled toggles the provider
+                                  type: boolean
+                                id:
+                                  description: ID is the unique identifier for the
+                                    provider (e.g., "github", "google")
+                                  type: string
+                                name:
+                                  description: Name is the display name
+                                  type: string
+                                scopes:
+                                  default:
+                                  - openid
+                                  - email
+                                  - profile
+                                  description: Scopes are the OAuth scopes to request
+                                  items:
+                                    type: string
+                                  type: array
+                                teamMapping:
+                                  description: TeamMapping configures automatic team
+                                    assignment
+                                  properties:
+                                    defaultRole:
+                                      description: DefaultRole is the role assigned
+                                        to new users
+                                      type: string
+                                    defaultTeamId:
+                                      description: DefaultTeamID is the team to add
+                                        users to
+                                      type: string
+                                    domain:
+                                      description: Domain filters users by email domain
+                                      type: string
+                                  type: object
+                              type: object
+                            type: array
+                          oidcStateCleanupInterval:
+                            default: 5m
+                            type: string
+                          oidcStateTTL:
+                            default: 10m
+                            type: string
+                          rateLimitBurst:
+                            default: 200
+                            type: integer
+                          rateLimitCleanupInterval:
+                            default: 10m
+                            type: string
+                          rateLimitRPS:
+                            default: 100
+                            description: Rate limiting
+                            type: integer
+                          regionId:
+                            description: |-
+                              RegionID is the canonical region identifier used by tenancy and routing
+                              contracts, for example "aws/us-east-1".
+                            type: string
+                          regionTokenTTL:
+                            default: 5m
+                            type: string
+                          serverIdleTimeout:
+                            default: 120s
+                            type: string
+                          serverReadTimeout:
+                            default: 30s
+                            type: string
+                          serverWriteTimeout:
+                            default: 60s
+                            type: string
+                          shutdownTimeout:
+                            default: 30s
+                            type: string
+                        type: object
+                      enabled:
+                        default: false
+                        description: Enabled enables or disables the service
+                        type: boolean
+                      ingress:
+                        description: Ingress configures ingress settings
+                        properties:
+                          className:
+                            description: ClassName specifies the ingress class name
+                            type: string
+                          enabled:
+                            default: false
+                            description: Enabled enables ingress
+                            type: boolean
+                          host:
+                            description: Host specifies the ingress host
+                            type: string
+                          tlsSecret:
+                            description: TLSSecret specifies the TLS secret name
+                            type: string
+                        type: object
+                      replicas:
+                        default: 1
+                        description: Replicas specifies the number of replicas
+                        format: int32
+                        type: integer
+                      resources:
+                        description: Resources specifies resource requirements
+                        properties:
+                          claims:
+                            description: |-
+                              Claims lists the names of resources, defined in spec.resourceClaims,
+                              that are used by this container.
+
+                              This field depends on the
+                              DynamicResourceAllocation feature gate.
+
+                              This field is immutable. It can only be set for containers.
+                            items:
+                              description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                              properties:
+                                name:
+                                  description: |-
+                                    Name must match the name of one entry in pod.spec.resourceClaims of
+                                    the Pod where this field is used. It makes that resource available
+                                    inside a container.
+                                  type: string
+                                request:
+                                  description: |-
+                                    Request is the name chosen for a request in the referenced claim.
+                                    If empty, everything from the claim is made available, otherwise
+                                    only the result of this request.
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                            type: array
+                            x-kubernetes-list-map-keys:
+                            - name
+                            x-kubernetes-list-type: map
+                          limits:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: |-
+                              Limits describes the maximum amount of compute resources allowed.
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                            type: object
+                          requests:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: |-
+                              Requests describes the minimum amount of compute resources required.
+                              If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                              otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                            type: object
+                        type: object
+                      service:
+                        description: Service configures the Kubernetes service
+                        properties:
+                          port:
+                            default: 80
+                            description: Port specifies the service port
+                            format: int32
+                            type: integer
+                          type:
+                            default: ClusterIP
+                            description: Type specifies the service type
+                            type: string
+                        type: object
+                    type: object
                   internalGateway:
                     default: {}
                     description: InternalGateway configures the internal-gateway service
@@ -2525,6 +2779,9 @@ spec:
                   edgeGatewayInternal:
                     description: EdgeGatewayInternal is the internal edge-gateway
                       URL
+                    type: string
+                  globalDirectory:
+                    description: GlobalDirectory is the global-directory URL
                     type: string
                   internalGateway:
                     description: InternalGateway is the internal-gateway URL

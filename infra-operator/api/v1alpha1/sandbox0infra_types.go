@@ -688,6 +688,11 @@ type KeyPairSecretRef struct {
 
 // ServicesConfig defines configuration for all services
 type ServicesConfig struct {
+	// GlobalDirectory configures the global-directory service (global service layer)
+	// +optional
+	// +kubebuilder:default={}
+	GlobalDirectory *GlobalDirectoryServiceConfig `json:"globalDirectory,omitempty"`
+
 	// EdgeGateway configures the edge-gateway service (control plane)
 	// +optional
 	// +kubebuilder:default={}
@@ -739,6 +744,15 @@ type BaseServiceConfig struct {
 	// Ingress configures ingress settings
 	// +optional
 	Ingress *IngressConfig `json:"ingress,omitempty"`
+}
+
+// GlobalDirectoryServiceConfig defines configuration for global-directory service.
+type GlobalDirectoryServiceConfig struct {
+	BaseServiceConfig `json:",inline"`
+	// Config contains global-directory specific configuration
+	// +optional
+	// +kubebuilder:default={}
+	Config *config.GlobalDirectoryConfig `json:"config,omitempty"`
 }
 
 // EdgeGatewayServiceConfig defines configuration for edge-gateway service
@@ -805,6 +819,14 @@ type NetdServiceConfig struct {
 	// +optional
 	// +kubebuilder:default={}
 	Config *config.NetdConfig `json:"config,omitempty"`
+}
+
+// IsGlobalDirectoryEnabled returns true when global-directory is enabled.
+func IsGlobalDirectoryEnabled(infra *Sandbox0Infra) bool {
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.GlobalDirectory == nil {
+		return false
+	}
+	return infra.Spec.Services.GlobalDirectory.Enabled
 }
 
 // IsEdgeGatewayEnabled returns true when edge-gateway is enabled.
@@ -927,7 +949,7 @@ func HasDataPlaneServices(infra *Sandbox0Infra) bool {
 
 // HasAnyServiceEnabled returns true when at least one service is enabled.
 func HasAnyServiceEnabled(infra *Sandbox0Infra) bool {
-	return HasControlPlaneServices(infra) || HasDataPlaneServices(infra)
+	return IsGlobalDirectoryEnabled(infra) || HasControlPlaneServices(infra) || HasDataPlaneServices(infra)
 }
 
 // ServiceNetworkConfig defines service network configuration
@@ -1093,6 +1115,10 @@ type Sandbox0InfraStatus struct {
 
 // EndpointsStatus contains service endpoints
 type EndpointsStatus struct {
+	// GlobalDirectory is the global-directory URL
+	// +optional
+	GlobalDirectory string `json:"globalDirectory,omitempty"`
+
 	// EdgeGateway is the external edge-gateway URL
 	// +optional
 	EdgeGateway string `json:"edgeGateway,omitempty"`
@@ -1170,6 +1196,7 @@ const (
 	ConditionTypeDatabaseReady        = "DatabaseReady"
 	ConditionTypeStorageReady         = "StorageReady"
 	ConditionTypeRegistryReady        = "RegistryReady"
+	ConditionTypeGlobalDirectoryReady = "GlobalDirectoryReady"
 	ConditionTypeEdgeGatewayReady     = "EdgeGatewayReady"
 	ConditionTypeInternalGatewayReady = "InternalGatewayReady"
 	ConditionTypeManagerReady         = "ManagerReady"

@@ -5,7 +5,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/sandbox0/pkg/auth"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
 )
@@ -52,11 +52,11 @@ func (m *InternalAuthMiddleware) Authenticate() gin.HandlerFunc {
 }
 
 // AuthenticateRequest validates internal credentials and returns auth context.
-func (m *InternalAuthMiddleware) AuthenticateRequest(c *gin.Context) (*auth.AuthContext, *internalauth.Claims, error) {
+func (m *InternalAuthMiddleware) AuthenticateRequest(c *gin.Context) (*authn.AuthContext, *internalauth.Claims, error) {
 	return m.authenticateRequest(c, false)
 }
 
-func (m *InternalAuthMiddleware) authenticateRequest(c *gin.Context, allowAuthHeader bool) (*auth.AuthContext, *internalauth.Claims, error) {
+func (m *InternalAuthMiddleware) authenticateRequest(c *gin.Context, allowAuthHeader bool) (*authn.AuthContext, *internalauth.Claims, error) {
 	if m.validator == nil {
 		return nil, nil, ErrInvalidInternalToken
 	}
@@ -82,8 +82,8 @@ func (m *InternalAuthMiddleware) authenticateRequest(c *gin.Context, allowAuthHe
 		return nil, nil, ErrInvalidInternalToken
 	}
 
-	authCtx := &auth.AuthContext{
-		AuthMethod:  auth.AuthMethodInternal,
+	authCtx := &authn.AuthContext{
+		AuthMethod:  authn.AuthMethodInternal,
 		TeamID:      claims.TeamID,
 		UserID:      claims.UserID,
 		Permissions: claims.Permissions,
@@ -92,10 +92,10 @@ func (m *InternalAuthMiddleware) authenticateRequest(c *gin.Context, allowAuthHe
 	return authCtx, claims, nil
 }
 
-func (m *InternalAuthMiddleware) setAuthContext(c *gin.Context, authCtx *auth.AuthContext, claims *internalauth.Claims) {
+func (m *InternalAuthMiddleware) setAuthContext(c *gin.Context, authCtx *authn.AuthContext, claims *internalauth.Claims) {
 	c.Set("auth_context", authCtx)
 
-	ctx := auth.WithAuthContext(c.Request.Context(), authCtx)
+	ctx := authn.WithAuthContext(c.Request.Context(), authCtx)
 	c.Request = c.Request.WithContext(ctx)
 
 	if claims != nil {
@@ -127,9 +127,9 @@ func (m *InternalAuthMiddleware) RequirePermission(permission string) gin.Handle
 }
 
 // GetAuthContext extracts auth context from gin context
-func GetAuthContext(c *gin.Context) *auth.AuthContext {
+func GetAuthContext(c *gin.Context) *authn.AuthContext {
 	if v, exists := c.Get("auth_context"); exists {
-		return v.(*auth.AuthContext)
+		return v.(*authn.AuthContext)
 	}
 	return nil
 }

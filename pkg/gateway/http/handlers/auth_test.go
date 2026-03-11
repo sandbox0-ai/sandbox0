@@ -11,8 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/sandbox0/pkg/auth"
-	gatewayjwt "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/jwt"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"go.uber.org/zap"
@@ -86,14 +85,14 @@ func TestAuthHandler_RefreshToken_SucceedsWithPersistedToken(t *testing.T) {
 	}
 	repo.users[user.ID] = user
 
-	issuer := gatewayjwt.NewIssuer("edge-gateway", "test-secret", time.Minute, time.Hour)
+	issuer := authn.NewIssuer("edge-gateway", "test-secret", time.Minute, time.Hour)
 	initialTokens, err := issuer.IssueTokenPair(user.ID, "", "", user.Email, user.Name, user.IsAdmin)
 	if err != nil {
 		t.Fatalf("issue initial token pair: %v", err)
 	}
 	if err := repo.CreateRefreshToken(context.Background(), &identity.RefreshToken{
 		UserID:    user.ID,
-		TokenHash: gatewayjwt.HashRefreshToken(initialTokens.RefreshToken),
+		TokenHash: authn.HashRefreshToken(initialTokens.RefreshToken),
 		ExpiresAt: initialTokens.RefreshExpiresAt,
 	}); err != nil {
 		t.Fatalf("persist initial refresh token: %v", err)
@@ -147,14 +146,14 @@ func TestAuthHandler_LogoutRevocation_BlocksRefresh(t *testing.T) {
 	}
 	repo.users[user.ID] = user
 
-	issuer := gatewayjwt.NewIssuer("edge-gateway", "test-secret", time.Minute, time.Hour)
+	issuer := authn.NewIssuer("edge-gateway", "test-secret", time.Minute, time.Hour)
 	initialTokens, err := issuer.IssueTokenPair(user.ID, "", "", user.Email, user.Name, user.IsAdmin)
 	if err != nil {
 		t.Fatalf("issue initial token pair: %v", err)
 	}
 	if err := repo.CreateRefreshToken(context.Background(), &identity.RefreshToken{
 		UserID:    user.ID,
-		TokenHash: gatewayjwt.HashRefreshToken(initialTokens.RefreshToken),
+		TokenHash: authn.HashRefreshToken(initialTokens.RefreshToken),
 		ExpiresAt: initialTokens.RefreshExpiresAt,
 	}); err != nil {
 		t.Fatalf("persist initial refresh token: %v", err)
@@ -168,7 +167,7 @@ func TestAuthHandler_LogoutRevocation_BlocksRefresh(t *testing.T) {
 
 	router := gin.New()
 	router.POST("/auth/logout", func(c *gin.Context) {
-		c.Set("auth_context", &auth.AuthContext{UserID: user.ID})
+		c.Set("auth_context", &authn.AuthContext{UserID: user.ID})
 		handler.Logout(c)
 	})
 	router.POST("/auth/refresh", handler.RefreshToken)
@@ -205,7 +204,7 @@ func TestAuthHandler_RefreshToken_FailsWhenTokenNeverPersisted(t *testing.T) {
 	}
 	repo.users[user.ID] = user
 
-	issuer := gatewayjwt.NewIssuer("edge-gateway", "test-secret", time.Minute, time.Hour)
+	issuer := authn.NewIssuer("edge-gateway", "test-secret", time.Minute, time.Hour)
 	initialTokens, err := issuer.IssueTokenPair(user.ID, "", "", user.Email, user.Name, user.IsAdmin)
 	if err != nil {
 		t.Fatalf("issue initial token pair: %v", err)

@@ -1,4 +1,5 @@
-# Example: Multi-cluster control plane (edge-gateway + scheduler)
+# Example: Regional multi-cluster control plane (edge-gateway + scheduler)
+# Deploy the global-service layer separately when running self-hosted multi-region.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -67,7 +68,7 @@ spec:
       enabled: true
       replicas: 1
   initUser:
-    email: "admin@localhost"
+    email: "admin@example.com"
     # passwordSecret:
     #   name: admin-password
     #   key: password

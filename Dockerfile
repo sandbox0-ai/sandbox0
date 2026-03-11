@@ -30,6 +30,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     BUILD_GOOS="${TARGETOS:-$(go env GOOS)}" && \
     BUILD_GOARCH="${TARGETARCH:-$(go env GOARCH)}" && \
     CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/edge-gateway ./edge-gateway/cmd/edge-gateway && \
+    CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/global-directory ./global-directory/cmd/global-directory && \
     CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/internal-gateway ./internal-gateway/cmd/internal-gateway && \
     CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/manager ./manager/cmd/manager && \
     CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/procd ./manager/cmd/procd && \

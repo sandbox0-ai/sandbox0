@@ -15,7 +15,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/internal-gateway/pkg/client"
 	"github.com/sandbox0-ai/sandbox0/internal-gateway/pkg/middleware"
-	"github.com/sandbox0-ai/sandbox0/pkg/auth"
 	"github.com/sandbox0-ai/sandbox0/pkg/cache"
 	gatewayapikey "github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
 	gatewaybuiltin "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/builtin"
@@ -326,25 +325,25 @@ func (s *Server) setupRoutes() {
 		sandboxes := v1.Group("/sandboxes")
 		sandboxes.Use(s.managerUpstreamMiddleware())
 		{
-			sandboxes.GET("", s.authMiddleware.RequirePermission(auth.PermSandboxRead), s.listSandboxes)
-			sandboxes.POST("", s.authMiddleware.RequirePermission(auth.PermSandboxCreate), s.createSandbox)
-			sandboxes.GET("/:id", s.authMiddleware.RequirePermission(auth.PermSandboxRead), s.getSandbox)
-			sandboxes.GET("/:id/status", s.authMiddleware.RequirePermission(auth.PermSandboxRead), s.getSandboxStatus)
-			sandboxes.PUT("/:id", s.authMiddleware.RequirePermission(auth.PermSandboxWrite), s.updateSandbox)
-			sandboxes.DELETE("/:id", s.authMiddleware.RequirePermission(auth.PermSandboxDelete), s.deleteSandbox)
-			sandboxes.POST("/:id/pause", s.authMiddleware.RequirePermission(auth.PermSandboxWrite), s.pauseSandbox)
-			sandboxes.POST("/:id/resume", s.authMiddleware.RequirePermission(auth.PermSandboxWrite), s.resumeSandbox)
-			sandboxes.POST("/:id/refresh", s.authMiddleware.RequirePermission(auth.PermSandboxWrite), s.refreshSandbox)
+			sandboxes.GET("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.listSandboxes)
+			sandboxes.POST("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxCreate), s.createSandbox)
+			sandboxes.GET("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.getSandbox)
+			sandboxes.GET("/:id/status", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.getSandboxStatus)
+			sandboxes.PUT("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.updateSandbox)
+			sandboxes.DELETE("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxDelete), s.deleteSandbox)
+			sandboxes.POST("/:id/pause", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.pauseSandbox)
+			sandboxes.POST("/:id/resume", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.resumeSandbox)
+			sandboxes.POST("/:id/refresh", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.refreshSandbox)
 
 			// === Network Policy (→ Manager) ===
-			sandboxes.GET("/:id/network", s.authMiddleware.RequirePermission(auth.PermSandboxRead), s.getNetworkPolicy)
-			sandboxes.PUT("/:id/network", s.authMiddleware.RequirePermission(auth.PermSandboxWrite), s.updateNetworkPolicy)
+			sandboxes.GET("/:id/network", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.getNetworkPolicy)
+			sandboxes.PUT("/:id/network", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.updateNetworkPolicy)
 
 			// === Exposed Ports (→ Manager) ===
-			sandboxes.GET("/:id/exposed-ports", s.authMiddleware.RequirePermission(auth.PermSandboxRead), s.getExposedPorts)
-			sandboxes.PUT("/:id/exposed-ports", s.authMiddleware.RequirePermission(auth.PermSandboxWrite), s.updateExposedPorts)
-			sandboxes.DELETE("/:id/exposed-ports", s.authMiddleware.RequirePermission(auth.PermSandboxWrite), s.clearExposedPorts)
-			sandboxes.DELETE("/:id/exposed-ports/:port", s.authMiddleware.RequirePermission(auth.PermSandboxWrite), s.deleteExposedPort)
+			sandboxes.GET("/:id/exposed-ports", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.getExposedPorts)
+			sandboxes.PUT("/:id/exposed-ports", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.updateExposedPorts)
+			sandboxes.DELETE("/:id/exposed-ports", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.clearExposedPorts)
+			sandboxes.DELETE("/:id/exposed-ports/:port", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.deleteExposedPort)
 
 			// === Process/Context Management (→ Procd) ===
 			contexts := sandboxes.Group("/:id/contexts")
@@ -365,9 +364,9 @@ func (s *Server) setupRoutes() {
 			// === SandboxVolume Management (→ Procd) ===
 			sandboxvolumes := sandboxes.Group("/:id/sandboxvolumes")
 			{
-				sandboxvolumes.POST("/mount", s.authMiddleware.RequirePermission(auth.PermSandboxWrite), s.mountSandboxVolume)
-				sandboxvolumes.POST("/unmount", s.authMiddleware.RequirePermission(auth.PermSandboxWrite), s.unmountSandboxVolume)
-				sandboxvolumes.GET("/status", s.authMiddleware.RequirePermission(auth.PermSandboxRead), s.getSandboxVolumeStatus)
+				sandboxvolumes.POST("/mount", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.mountSandboxVolume)
+				sandboxvolumes.POST("/unmount", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.unmountSandboxVolume)
+				sandboxvolumes.GET("/status", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.getSandboxVolumeStatus)
 			}
 
 			// === File System (→ Procd) ===
@@ -387,11 +386,11 @@ func (s *Server) setupRoutes() {
 		templates := v1.Group("/templates")
 		templates.Use(s.managerUpstreamMiddleware())
 		{
-			templates.GET("", s.authMiddleware.RequirePermission(auth.PermTemplateRead), s.listTemplates)
-			templates.GET("/:id", s.authMiddleware.RequirePermission(auth.PermTemplateRead), s.getTemplate)
-			templates.POST("", s.authMiddleware.RequirePermission(auth.PermTemplateCreate), s.createTemplate)
-			templates.PUT("/:id", s.authMiddleware.RequirePermission(auth.PermTemplateWrite), s.updateTemplate)
-			templates.DELETE("/:id", s.authMiddleware.RequirePermission(auth.PermTemplateDelete), s.deleteTemplate)
+			templates.GET("", s.authMiddleware.RequirePermission(gatewayauthn.PermTemplateRead), s.listTemplates)
+			templates.GET("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermTemplateRead), s.getTemplate)
+			templates.POST("", s.authMiddleware.RequirePermission(gatewayauthn.PermTemplateCreate), s.createTemplate)
+			templates.PUT("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermTemplateWrite), s.updateTemplate)
+			templates.DELETE("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermTemplateDelete), s.deleteTemplate)
 		}
 
 		// === Registry Credentials (→ Manager) ===
@@ -405,19 +404,19 @@ func (s *Server) setupRoutes() {
 		sandboxvolumes := v1.Group("/sandboxvolumes")
 		sandboxvolumes.Use(s.storageProxyUpstreamMiddleware())
 		{
-			sandboxvolumes.POST("", s.authMiddleware.RequirePermission(auth.PermSandboxVolumeCreate), s.createSandboxVolume)
-			sandboxvolumes.GET("", s.authMiddleware.RequirePermission(auth.PermSandboxVolumeRead), s.listSandboxVolumes)
-			sandboxvolumes.GET("/:id", s.authMiddleware.RequirePermission(auth.PermSandboxVolumeRead), s.getSandboxVolume)
-			sandboxvolumes.DELETE("/:id", s.authMiddleware.RequirePermission(auth.PermSandboxVolumeDelete), s.deleteSandboxVolume)
-			sandboxvolumes.POST("/:id/fork", s.authMiddleware.RequirePermission(auth.PermSandboxVolumeWrite), s.forkSandboxVolume)
+			sandboxvolumes.POST("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeCreate), s.createSandboxVolume)
+			sandboxvolumes.GET("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeRead), s.listSandboxVolumes)
+			sandboxvolumes.GET("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeRead), s.getSandboxVolume)
+			sandboxvolumes.DELETE("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeDelete), s.deleteSandboxVolume)
+			sandboxvolumes.POST("/:id/fork", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeWrite), s.forkSandboxVolume)
 			// Snapshot/Restore (→ Storage Proxy)
 			snapshots := sandboxvolumes.Group("/:id/snapshots")
 			{
-				snapshots.POST("", s.authMiddleware.RequirePermission(auth.PermSandboxVolumeWrite), s.createSandboxVolumeSnapshot)
-				snapshots.GET("", s.authMiddleware.RequirePermission(auth.PermSandboxVolumeRead), s.listSandboxVolumeSnapshots)
-				snapshots.GET("/:snapshot_id", s.authMiddleware.RequirePermission(auth.PermSandboxVolumeRead), s.getSandboxVolumeSnapshot)
-				snapshots.POST("/:snapshot_id/restore", s.authMiddleware.RequirePermission(auth.PermSandboxVolumeWrite), s.restoreSandboxVolumeSnapshot)
-				snapshots.DELETE("/:snapshot_id", s.authMiddleware.RequirePermission(auth.PermSandboxVolumeDelete), s.deleteSandboxVolumeSnapshot)
+				snapshots.POST("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeWrite), s.createSandboxVolumeSnapshot)
+				snapshots.GET("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeRead), s.listSandboxVolumeSnapshots)
+				snapshots.GET("/:snapshot_id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeRead), s.getSandboxVolumeSnapshot)
+				snapshots.POST("/:snapshot_id/restore", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeWrite), s.restoreSandboxVolumeSnapshot)
+				snapshots.DELETE("/:snapshot_id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeDelete), s.deleteSandboxVolumeSnapshot)
 			}
 		}
 	}

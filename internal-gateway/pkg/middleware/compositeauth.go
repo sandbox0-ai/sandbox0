@@ -4,7 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/sandbox0/pkg/auth"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	gatewaymiddleware "github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
@@ -59,7 +59,7 @@ func (m *CompositeAuthMiddleware) Authenticate() gin.HandlerFunc {
 		}
 
 		c.Set("auth_context", authCtx)
-		ctx := auth.WithAuthContext(c.Request.Context(), authCtx)
+		ctx := authn.WithAuthContext(c.Request.Context(), authCtx)
 		c.Request = c.Request.WithContext(ctx)
 
 		c.Next()

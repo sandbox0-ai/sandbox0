@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/sandbox0/pkg/auth"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
@@ -49,7 +49,7 @@ func (s *Server) getInternalGatewayProxy(targetURL string) (*proxy.Router, error
 	return p, nil
 }
 
-func (s *Server) getInternalGatewayURLForCluster(ctx context.Context, clusterID string, authCtx *auth.AuthContext) (string, error) {
+func (s *Server) getInternalGatewayURLForCluster(ctx context.Context, clusterID string, authCtx *authn.AuthContext) (string, error) {
 	if clusterID == "" {
 		return "", fmt.Errorf("cluster_id is required")
 	}
@@ -71,7 +71,7 @@ func (s *Server) getClusterFromCache(clusterID string) string {
 	return s.clusterCache[clusterID]
 }
 
-func (s *Server) refreshClusterCache(ctx context.Context, authCtx *auth.AuthContext) error {
+func (s *Server) refreshClusterCache(ctx context.Context, authCtx *authn.AuthContext) error {
 	s.clusterCacheMu.RLock()
 	cacheAge := time.Since(s.clusterCacheAt)
 	s.clusterCacheMu.RUnlock()
@@ -158,7 +158,7 @@ func (s *Server) buildSchedulerClustersURL() (string, error) {
 	return base.String(), nil
 }
 
-func (s *Server) generateInternalToken(c *gin.Context, authCtx *auth.AuthContext, target string) (string, error) {
+func (s *Server) generateInternalToken(c *gin.Context, authCtx *authn.AuthContext, target string) (string, error) {
 	if s.internalAuthGen == nil {
 		return "", fmt.Errorf("internal auth generator not configured")
 	}

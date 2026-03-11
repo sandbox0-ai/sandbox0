@@ -45,6 +45,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/edgegateway"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/fuseplugin"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/globaldirectory"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalgateway"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/manager"
@@ -191,6 +192,7 @@ func (r *Sandbox0InfraReconciler) reconcileDelete(ctx context.Context, infra *in
 }
 
 type componentPlan struct {
+	EnableGlobalDirectory     bool
 	HasControlPlane           bool
 	HasDataPlane              bool
 	EnableEdgeGateway         bool
@@ -210,6 +212,7 @@ type componentPlan struct {
 }
 
 func (r *Sandbox0InfraReconciler) buildComponentPlan(infra *infrav1alpha1.Sandbox0Infra) componentPlan {
+	enableGlobalDirectory := infrav1alpha1.IsGlobalDirectoryEnabled(infra)
 	enableEdgeGateway := infrav1alpha1.IsEdgeGatewayEnabled(infra)
 	enableScheduler := infrav1alpha1.IsSchedulerEnabled(infra)
 	enableInternalGateway := infrav1alpha1.IsInternalGatewayEnabled(infra)
@@ -220,6 +223,7 @@ func (r *Sandbox0InfraReconciler) buildComponentPlan(infra *infrav1alpha1.Sandbo
 	hasDataPlane := enableInternalGateway || enableManager || enableStorageProxy
 
 	return componentPlan{
+		EnableGlobalDirectory:     enableGlobalDirectory,
 		HasControlPlane:           hasControlPlane,
 		HasDataPlane:              hasDataPlane,
 		EnableEdgeGateway:         enableEdgeGateway,
@@ -247,6 +251,9 @@ func (r *Sandbox0InfraReconciler) validateComponentPlan(infra *infrav1alpha1.San
 	if infra.Spec.InitUser != nil && !plan.EnableDatabase {
 		return fmt.Errorf("initUser can only be enabled when database is enabled")
 	}
+	if plan.EnableGlobalDirectory && !plan.EnableDatabase {
+		return fmt.Errorf("globalDirectory requires database to be enabled")
+	}
 	if infra.Spec.Cluster != nil && !plan.HasDataPlane {
 		return fmt.Errorf("cluster configuration requires at least one data-plane service")
 	}
@@ -272,6 +279,7 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 	dbReconciler := database.NewReconciler(resources)
 	storageReconciler := storage.NewReconciler(resources)
 	registryReconciler := registry.NewReconciler(resources)
+	globalDirectoryReconciler := globaldirectory.NewReconciler(resources)
 	edgeGatewayReconciler := edgegateway.NewReconciler(resources)
 	schedulerReconciler := scheduler.NewReconciler(resources)
 	internalGatewayReconciler := internalgateway.NewReconciler(resources)
@@ -348,6 +356,18 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 			SuccessReason:  "RegistryReady",
 			SuccessMessage: "Registry is ready",
 			ErrorReason:    "RegistryFailed",
+		})
+	}
+	if plan.EnableGlobalDirectory {
+		steps = append(steps, reconcileStep{
+			Name: "global-directory",
+			Run: func(ctx context.Context) error {
+				return globalDirectoryReconciler.Reconcile(ctx, infra, imageRepo, imageTag)
+			},
+			ConditionType:  infrav1alpha1.ConditionTypeGlobalDirectoryReady,
+			SuccessReason:  "GlobalDirectoryReady",
+			SuccessMessage: "Global directory is ready",
+			ErrorReason:    "GlobalDirectoryFailed",
 		})
 	}
 	if plan.EnableInitUser {
@@ -529,6 +549,22 @@ func (r *Sandbox0InfraReconciler) cleanupDisabledServiceResources(ctx context.Co
 			return err
 		}
 		return nil
+	}
+
+	globalDirectoryName := fmt.Sprintf("%s-global-directory", infra.Name)
+	if !plan.EnableGlobalDirectory {
+		if err := deleteNamespaced(globalDirectoryName, &appsv1.Deployment{}); err != nil {
+			return err
+		}
+		if err := deleteNamespaced(globalDirectoryName, &corev1.Service{}); err != nil {
+			return err
+		}
+		if err := deleteNamespaced(globalDirectoryName, &corev1.ConfigMap{}); err != nil {
+			return err
+		}
+		if err := deleteNamespaced(globalDirectoryName, &networkingv1.Ingress{}); err != nil {
+			return err
+		}
 	}
 
 	edgeName := fmt.Sprintf("%s-edge-gateway", infra.Name)
@@ -798,6 +834,9 @@ func (r *Sandbox0InfraReconciler) expectedConditionTypes(infra *infrav1alpha1.Sa
 	}
 	if plan.EnableRegistry {
 		conditions = append(conditions, infrav1alpha1.ConditionTypeRegistryReady)
+	}
+	if plan.EnableGlobalDirectory {
+		conditions = append(conditions, infrav1alpha1.ConditionTypeGlobalDirectoryReady)
 	}
 	if plan.EnableEdgeGateway {
 		conditions = append(conditions, infrav1alpha1.ConditionTypeEdgeGatewayReady)

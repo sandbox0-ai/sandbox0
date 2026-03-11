@@ -2,7 +2,7 @@ package middleware
 
 import (
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/sandbox0/pkg/auth"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	gatewaymiddleware "github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 )
 
@@ -18,7 +18,7 @@ func NewExternalRateLimiter(limiter *gatewaymiddleware.RateLimiter) *ExternalRat
 func (e *ExternalRateLimiter) RateLimit() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authCtx := GetAuthContext(c)
-		if authCtx != nil && authCtx.AuthMethod == auth.AuthMethodInternal {
+		if authCtx != nil && authCtx.AuthMethod == authn.AuthMethodInternal {
 			c.Next()
 			return
 		}

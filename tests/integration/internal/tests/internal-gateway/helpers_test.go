@@ -18,7 +18,8 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	gatewayhttp "github.com/sandbox0-ai/sandbox0/internal-gateway/pkg/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
-	gatewaydb "github.com/sandbox0-ai/sandbox0/pkg/gateway/db"
+	gatewayapikey "github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
+	gatewayidentity "github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
 	gatewaymigrations "github.com/sandbox0-ai/sandbox0/pkg/gateway/migrations"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
@@ -137,7 +138,7 @@ func requireTestDatabaseURL(t *testing.T) string {
 	return dbURL
 }
 
-func newGatewayTestDB(t *testing.T) (*pgxpool.Pool, *gatewaydb.Repository, string) {
+func newGatewayTestDB(t *testing.T) (*pgxpool.Pool, *gatewayidentity.Repository, *gatewayapikey.Repository, string) {
 	t.Helper()
 
 	ctx := context.Background()
@@ -160,7 +161,7 @@ func newGatewayTestDB(t *testing.T) (*pgxpool.Pool, *gatewaydb.Repository, strin
 		_, _ = pool.Exec(ctx, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schema))
 	})
 
-	return pool, gatewaydb.NewRepository(pool), schema
+	return pool, gatewayidentity.NewRepository(pool), gatewayapikey.NewRepository(pool), schema
 }
 
 func newTestObservability(t *testing.T, serviceName string) *observability.Provider {

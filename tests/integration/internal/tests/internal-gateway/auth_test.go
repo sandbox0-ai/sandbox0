@@ -8,9 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/pkg/auth"
-	gatewayjwt "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/jwt"
-	gatewaydb "github.com/sandbox0-ai/sandbox0/pkg/gateway/db"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
+	gatewayidentity "github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
 )
 
 func TestInternalGatewayIntegration_AuthRequired(t *testing.T) {
@@ -50,7 +49,7 @@ func TestInternalGatewayIntegration_PermissionDenied(t *testing.T) {
 	t.Cleanup(storageServer.Close)
 
 	env := newGatewayTestEnv(t, managerServer.URL, storageServer.URL, nil, keys)
-	token := newInternalToken(t, env.edgeGen, []string{auth.PermSandboxRead})
+	token := newInternalToken(t, env.edgeGen, []string{authn.PermSandboxRead})
 
 	resp, _ := doGatewayRequest(t, env.server.Client(), http.MethodGet, env.server.URL+"/api/v1/templates", token, nil)
 	if resp.StatusCode != http.StatusForbidden {
@@ -73,8 +72,8 @@ func TestInternalGatewayIntegration_VolumeEndpointsRequirePermissions(t *testing
 	t.Cleanup(storageServer.Close)
 
 	env := newGatewayTestEnv(t, managerServer.URL, storageServer.URL, nil, keys)
-	readToken := newInternalToken(t, env.edgeGen, []string{auth.PermSandboxRead})
-	writeToken := newInternalToken(t, env.edgeGen, []string{auth.PermSandboxWrite})
+	readToken := newInternalToken(t, env.edgeGen, []string{authn.PermSandboxRead})
+	writeToken := newInternalToken(t, env.edgeGen, []string{authn.PermSandboxWrite})
 
 	resp, _ := doGatewayRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/api/v1/sandboxvolumes", readToken, map[string]any{
 		"name": "vol-1",
@@ -95,7 +94,7 @@ func TestInternalGatewayIntegration_VolumeEndpointsRequirePermissions(t *testing
 }
 
 func TestInternalGatewayIntegration_PublicAuthJWT(t *testing.T) {
-	dbPool, repo, _ := newGatewayTestDB(t)
+	dbPool, identityRepo, _, _ := newGatewayTestDB(t)
 
 	keys := gatewayKeyPair{}
 	keys.privateKey, keys.publicKey = writeInternalGatewayKeys(t)
@@ -107,7 +106,7 @@ func TestInternalGatewayIntegration_PublicAuthJWT(t *testing.T) {
 
 	env := newGatewayPublicTestEnv(t, managerServer.URL, "", dbPool, "test-jwt-secret", "internal-gateway", keys)
 
-	user := &gatewaydb.User{
+	user := &gatewayidentity.User{
 		Email:         "jwt-user@example.com",
 		Name:          "JWT User",
 		PasswordHash:  "x",
@@ -115,12 +114,12 @@ func TestInternalGatewayIntegration_PublicAuthJWT(t *testing.T) {
 		IsAdmin:       false,
 	}
 	ctx := context.Background()
-	team, _, err := repo.CreateUserWithDefaultTeam(ctx, user, "JWT Team")
+	team, _, err := identityRepo.CreateUserWithDefaultTeam(ctx, user, "JWT Team")
 	if err != nil {
 		t.Fatalf("create user/team: %v", err)
 	}
 
-	issuer := gatewayjwt.NewIssuer("internal-gateway", "test-jwt-secret", time.Minute, time.Hour)
+	issuer := authn.NewIssuer("internal-gateway", "test-jwt-secret", time.Minute, time.Hour)
 	tokens, err := issuer.IssueTokenPair(user.ID, team.ID, "admin", user.Email, user.Name, user.IsAdmin)
 	if err != nil {
 		t.Fatalf("issue token pair: %v", err)
@@ -133,7 +132,7 @@ func TestInternalGatewayIntegration_PublicAuthJWT(t *testing.T) {
 }
 
 func TestInternalGatewayIntegration_PublicAuthAPIKey(t *testing.T) {
-	dbPool, repo, _ := newGatewayTestDB(t)
+	dbPool, identityRepo, apiKeyRepo, _ := newGatewayTestDB(t)
 
 	keys := gatewayKeyPair{}
 	keys.privateKey, keys.publicKey = writeInternalGatewayKeys(t)
@@ -145,7 +144,7 @@ func TestInternalGatewayIntegration_PublicAuthAPIKey(t *testing.T) {
 
 	env := newGatewayPublicTestEnv(t, managerServer.URL, "", dbPool, "test-jwt-secret", "internal-gateway", keys)
 
-	user := &gatewaydb.User{
+	user := &gatewayidentity.User{
 		Email:         "apikey-user@example.com",
 		Name:          "API Key User",
 		PasswordHash:  "x",
@@ -153,12 +152,12 @@ func TestInternalGatewayIntegration_PublicAuthAPIKey(t *testing.T) {
 		IsAdmin:       false,
 	}
 	ctx := context.Background()
-	team, _, err := repo.CreateUserWithDefaultTeam(ctx, user, "API Key Team")
+	team, _, err := identityRepo.CreateUserWithDefaultTeam(ctx, user, "API Key Team")
 	if err != nil {
 		t.Fatalf("create user/team: %v", err)
 	}
 
-	_, keyValue, err := repo.CreateAPIKey(ctx, team.ID, user.ID, "test-key", "user", []string{"admin"}, time.Now().Add(time.Hour))
+	_, keyValue, err := apiKeyRepo.CreateAPIKey(ctx, team.ID, user.ID, "test-key", "user", []string{"admin"}, time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("create api key: %v", err)
 	}
@@ -170,7 +169,7 @@ func TestInternalGatewayIntegration_PublicAuthAPIKey(t *testing.T) {
 }
 
 func TestInternalGatewayIntegration_PublicAuthUserResponseIncludesDefaultTeamHomeRegion(t *testing.T) {
-	dbPool, repo, _ := newGatewayTestDB(t)
+	dbPool, identityRepo, _, _ := newGatewayTestDB(t)
 
 	keys := gatewayKeyPair{}
 	keys.privateKey, keys.publicKey = writeInternalGatewayKeys(t)
@@ -182,7 +181,7 @@ func TestInternalGatewayIntegration_PublicAuthUserResponseIncludesDefaultTeamHom
 
 	env := newGatewayPublicTestEnv(t, managerServer.URL, "", dbPool, "test-jwt-secret", "internal-gateway", keys)
 
-	user := &gatewaydb.User{
+	user := &gatewayidentity.User{
 		Email:         "me-user@example.com",
 		Name:          "Me User",
 		PasswordHash:  "x",
@@ -190,7 +189,7 @@ func TestInternalGatewayIntegration_PublicAuthUserResponseIncludesDefaultTeamHom
 		IsAdmin:       false,
 	}
 	ctx := context.Background()
-	team, _, err := repo.CreateUserWithDefaultTeam(ctx, user, "Me Team")
+	team, _, err := identityRepo.CreateUserWithDefaultTeam(ctx, user, "Me Team")
 	if err != nil {
 		t.Fatalf("create user/team: %v", err)
 	}
@@ -198,7 +197,7 @@ func TestInternalGatewayIntegration_PublicAuthUserResponseIncludesDefaultTeamHom
 		t.Fatalf("set team home region: %v", err)
 	}
 
-	issuer := gatewayjwt.NewIssuer("internal-gateway", "test-jwt-secret", time.Minute, time.Hour)
+	issuer := authn.NewIssuer("internal-gateway", "test-jwt-secret", time.Minute, time.Hour)
 	tokens, err := issuer.IssueTokenPair(user.ID, team.ID, "admin", user.Email, user.Name, user.IsAdmin)
 	if err != nil {
 		t.Fatalf("issue token pair: %v", err)
@@ -230,7 +229,7 @@ func TestInternalGatewayIntegration_PublicAuthUserResponseIncludesDefaultTeamHom
 }
 
 func TestInternalGatewayIntegration_PublicAuthTeamsAcceptHomeRegionID(t *testing.T) {
-	dbPool, repo, _ := newGatewayTestDB(t)
+	dbPool, identityRepo, _, _ := newGatewayTestDB(t)
 
 	keys := gatewayKeyPair{}
 	keys.privateKey, keys.publicKey = writeInternalGatewayKeys(t)
@@ -242,7 +241,7 @@ func TestInternalGatewayIntegration_PublicAuthTeamsAcceptHomeRegionID(t *testing
 
 	env := newGatewayPublicTestEnv(t, managerServer.URL, "", dbPool, "test-jwt-secret", "internal-gateway", keys)
 
-	user := &gatewaydb.User{
+	user := &gatewayidentity.User{
 		Email:         "team-admin@example.com",
 		Name:          "Team Admin",
 		PasswordHash:  "x",
@@ -250,12 +249,12 @@ func TestInternalGatewayIntegration_PublicAuthTeamsAcceptHomeRegionID(t *testing
 		IsAdmin:       false,
 	}
 	ctx := context.Background()
-	team, _, err := repo.CreateUserWithDefaultTeam(ctx, user, "Admin Team")
+	team, _, err := identityRepo.CreateUserWithDefaultTeam(ctx, user, "Admin Team")
 	if err != nil {
 		t.Fatalf("create user/team: %v", err)
 	}
 
-	issuer := gatewayjwt.NewIssuer("internal-gateway", "test-jwt-secret", time.Minute, time.Hour)
+	issuer := authn.NewIssuer("internal-gateway", "test-jwt-secret", time.Minute, time.Hour)
 	tokens, err := issuer.IssueTokenPair(user.ID, team.ID, "admin", user.Email, user.Name, user.IsAdmin)
 	if err != nil {
 		t.Fatalf("issue token pair: %v", err)

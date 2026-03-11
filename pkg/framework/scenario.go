@@ -160,6 +160,9 @@ func scenarioNameFromPath(path string) string {
 
 func buildScenarioRollouts(infra *infrav1alpha1.Sandbox0Infra, infraName, namespace string) []RolloutTarget {
 	var rollouts []RolloutTarget
+	if infrav1alpha1.IsGlobalDirectoryEnabled(infra) {
+		rollouts = append(rollouts, RolloutTarget{Kind: "deployment", Name: infraName + "-global-directory", Namespace: namespace, Timeout: "5m"})
+	}
 	if infrav1alpha1.IsEdgeGatewayEnabled(infra) {
 		rollouts = append(rollouts, RolloutTarget{Kind: "deployment", Name: infraName + "-edge-gateway", Namespace: namespace, Timeout: "5m"})
 	}

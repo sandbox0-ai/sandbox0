@@ -1,0 +1,46 @@
+# Example: Global service layer for self-hosted multi-region deployments.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sandbox0-system
+---
+apiVersion: infra.sandbox0.ai/v1alpha1
+kind: Sandbox0Infra
+metadata:
+  name: s0global
+  namespace: sandbox0-system
+spec:
+  database:
+    # The global service layer should use a shared database reachable by operators.
+    type: external
+    external:
+      host: your-db.rds.amazonaws.com
+      port: 5432
+      database: sandbox0
+      username: sandbox0
+      passwordSecret:
+        name: db-credentials
+        key: password
+  services:
+    globalDirectory:
+      enabled: true
+      replicas: 1
+      service:
+        type: NodePort
+        port: 30070
+      # ingress:
+      #   enabled: true
+      #   className: nginx
+      #   host: global.example.com
+      #   tlsSecret: global-service-tls
+      config:
+        baseUrl: https://global.example.com
+        defaultTeamName: Personal Team
+        builtInAuth:
+          enabled: true
+          allowRegistration: false
+  initUser:
+    email: "admin@example.com"
+    # passwordSecret:
+    #   name: admin-password
+    #   key: password

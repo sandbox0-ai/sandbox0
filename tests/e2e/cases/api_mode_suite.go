@@ -7,6 +7,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
 	"github.com/sandbox0-ai/sandbox0/pkg/framework"
+	"github.com/sandbox0-ai/sandbox0/pkg/metering"
 	e2eutils "github.com/sandbox0-ai/sandbox0/tests/e2e/utils"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -14,16 +15,17 @@ import (
 )
 
 type apiModeSuiteOptions struct {
-	name                     string
-	describe                 string
-	templateNamePrefix       string
-	fileContent              string
-	includeSandboxListTests  bool
-	includeTemplateStatus    bool
-	includeNetworkPolicy     bool
-	includeVolumeLifecycle   bool
-	expectStorageUnavailable bool
-	expectNetworkUnavailable bool
+	name                      string
+	describe                  string
+	templateNamePrefix        string
+	fileContent               string
+	includeSandboxListTests   bool
+	includeTemplateStatus     bool
+	includeNetworkPolicy      bool
+	includeVolumeLifecycle    bool
+	includeMeteringAssertions bool
+	expectStorageUnavailable  bool
+	expectNetworkUnavailable  bool
 }
 
 func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiModeSuiteOptions) {
@@ -150,6 +152,119 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 						Expect(err).NotTo(HaveOccurred())
 						Expect(status).To(BeNumerically(">=", http.StatusBadRequest))
 					}
+				})
+			})
+		}
+
+		if opts.includeMeteringAssertions {
+			Context("metering export", func() {
+				It("exports sandbox and storage usage facts", func() {
+					Expect(sandboxID).NotTo(BeEmpty())
+
+					pausedResp, status, err := session.PauseSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(status).To(Equal(http.StatusOK))
+					Expect(pausedResp).NotTo(BeNil())
+					Expect(pausedResp.Paused).To(BeTrue())
+
+					resumeResp, status, err := session.ResumeSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(status).To(Equal(http.StatusOK))
+					Expect(resumeResp).NotTo(BeNil())
+					Expect(resumeResp.Resumed).To(BeTrue())
+
+					cacheSize := "512M"
+					volume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), apispec.CreateSandboxVolumeRequest{
+						CacheSize: &cacheSize,
+					})
+					Expect(err).NotTo(HaveOccurred())
+					Expect(status).To(Equal(http.StatusCreated))
+					Expect(volume).NotTo(BeNil())
+					Expect(volume.Id).NotTo(BeEmpty())
+
+					snapshot, status, err := session.CreateSnapshot(env.TestCtx.Context, GinkgoT(), volume.Id, apispec.CreateSnapshotRequest{
+						Name: "e2e-metering-snap",
+					})
+					Expect(err).NotTo(HaveOccurred())
+					Expect(status).To(Equal(http.StatusCreated))
+					Expect(snapshot).NotTo(BeNil())
+					Expect(snapshot.Id).NotTo(BeEmpty())
+
+					status, err = session.RestoreSnapshot(env.TestCtx.Context, GinkgoT(), volume.Id, snapshot.Id)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(status).To(Equal(http.StatusOK))
+
+					status, err = session.DeleteSnapshot(env.TestCtx.Context, GinkgoT(), volume.Id, snapshot.Id)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(status).To(Equal(http.StatusOK))
+
+					status, err = session.DeleteSandboxVolume(env.TestCtx.Context, GinkgoT(), volume.Id)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(status).To(Equal(http.StatusOK))
+
+					Expect(session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)).To(Succeed())
+					sandboxID = ""
+
+					Eventually(func() error {
+						statusResp, _, err := session.GetMeteringStatus(env.TestCtx.Context)
+						if err != nil {
+							return err
+						}
+						if statusResp.LatestEventSequence <= 0 {
+							return fmt.Errorf("latest_event_sequence not advanced")
+						}
+						if statusResp.LatestWindowSequence <= 0 {
+							return fmt.Errorf("latest_window_sequence not advanced")
+						}
+						if statusResp.CompleteBefore == nil {
+							return fmt.Errorf("complete_before is nil")
+						}
+
+						events, err := session.ListAllMeteringEvents(env.TestCtx.Context, 200)
+						if err != nil {
+							return err
+						}
+						if !hasMeteringEvent(events, metering.EventTypeSandboxClaimed, "sandbox", pausedResp.SandboxId) {
+							return fmt.Errorf("missing sandbox.claimed event")
+						}
+						if !hasMeteringEvent(events, metering.EventTypeSandboxPaused, "sandbox", pausedResp.SandboxId) {
+							return fmt.Errorf("missing sandbox.paused event")
+						}
+						if !hasMeteringEvent(events, metering.EventTypeSandboxResumed, "sandbox", pausedResp.SandboxId) {
+							return fmt.Errorf("missing sandbox.resumed event")
+						}
+						if !hasMeteringEvent(events, metering.EventTypeSandboxTerminated, "sandbox", pausedResp.SandboxId) {
+							return fmt.Errorf("missing sandbox.terminated event")
+						}
+						if !hasMeteringEvent(events, metering.EventTypeVolumeCreated, "volume", volume.Id) {
+							return fmt.Errorf("missing volume.created event")
+						}
+						if !hasMeteringEvent(events, metering.EventTypeVolumeDeleted, "volume", volume.Id) {
+							return fmt.Errorf("missing volume.deleted event")
+						}
+						if !hasMeteringEvent(events, metering.EventTypeSnapshotCreated, "snapshot", snapshot.Id) {
+							return fmt.Errorf("missing snapshot.created event")
+						}
+						if !hasMeteringEvent(events, metering.EventTypeSnapshotRestored, "snapshot", snapshot.Id) {
+							return fmt.Errorf("missing snapshot.restored event")
+						}
+						if !hasMeteringEvent(events, metering.EventTypeSnapshotDeleted, "snapshot", snapshot.Id) {
+							return fmt.Errorf("missing snapshot.deleted event")
+						}
+
+						windows, err := session.ListAllMeteringWindows(env.TestCtx.Context, 200)
+						if err != nil {
+							return err
+						}
+						if !hasMeteringWindow(windows, metering.WindowTypeSandboxActiveSeconds, pausedResp.SandboxId) {
+							return fmt.Errorf("missing sandbox.active_seconds window")
+						}
+						if !hasMeteringWindow(windows, metering.WindowTypeSandboxPausedSeconds, pausedResp.SandboxId) {
+							return fmt.Errorf("missing sandbox.paused_seconds window")
+						}
+
+						return nil
+					}).WithTimeout(90 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
 				})
 			})
 		}
@@ -328,4 +443,28 @@ func assertVolumeLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session
 	status, err = session.DeleteSandboxVolume(env.TestCtx.Context, GinkgoT(), volume.Id)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
+}
+
+func hasMeteringEvent(events []*metering.Event, eventType, subjectType, subjectID string) bool {
+	for _, event := range events {
+		if event == nil {
+			continue
+		}
+		if event.EventType == eventType && event.SubjectType == subjectType && event.SubjectID == subjectID {
+			return true
+		}
+	}
+	return false
+}
+
+func hasMeteringWindow(windows []*metering.Window, windowType, sandboxID string) bool {
+	for _, window := range windows {
+		if window == nil {
+			continue
+		}
+		if window.WindowType == windowType && window.SandboxID == sandboxID {
+			return true
+		}
+	}
+	return false
 }

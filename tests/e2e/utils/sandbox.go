@@ -177,3 +177,43 @@ func (s *Session) RefreshSandbox(ctx context.Context, t ContractT, sandboxID str
 	}
 	return resp.Data, status, nil
 }
+
+func (s *Session) PauseSandbox(ctx context.Context, t ContractT, sandboxID string) (*apispec.PauseSandboxResponse, int, error) {
+	specPath := "/api/v1/sandboxes/{id}/pause"
+	requestPath := "/api/v1/sandboxes/" + sandboxID + "/pause"
+	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodPost, specPath, requestPath, nil, true)
+	if err != nil {
+		return nil, status, err
+	}
+	if status != http.StatusOK {
+		return nil, status, fmt.Errorf("pause sandbox failed with status %d: %s", status, formatAPIError(body))
+	}
+	var resp apispec.SuccessPauseSandboxResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, status, err
+	}
+	if !resp.Success || resp.Data == nil {
+		return nil, status, fmt.Errorf("pause sandbox response missing data")
+	}
+	return resp.Data, status, nil
+}
+
+func (s *Session) ResumeSandbox(ctx context.Context, t ContractT, sandboxID string) (*apispec.ResumeSandboxResponse, int, error) {
+	specPath := "/api/v1/sandboxes/{id}/resume"
+	requestPath := "/api/v1/sandboxes/" + sandboxID + "/resume"
+	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodPost, specPath, requestPath, nil, true)
+	if err != nil {
+		return nil, status, err
+	}
+	if status != http.StatusOK {
+		return nil, status, fmt.Errorf("resume sandbox failed with status %d: %s", status, formatAPIError(body))
+	}
+	var resp apispec.SuccessResumeSandboxResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, status, err
+	}
+	if !resp.Success || resp.Data == nil {
+		return nil, status, fmt.Errorf("resume sandbox response missing data")
+	}
+	return resp.Data, status, nil
+}

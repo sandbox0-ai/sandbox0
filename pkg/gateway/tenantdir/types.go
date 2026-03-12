@@ -14,10 +14,11 @@ type TeamHomeRegion struct {
 
 // Region describes a routable region entry.
 type Region struct {
-	ID             string `json:"id"`
-	DisplayName    string `json:"display_name,omitempty"`
-	EdgeGatewayURL string `json:"edge_gateway_url,omitempty"`
-	Enabled        bool   `json:"enabled"`
+	ID                string `json:"id"`
+	DisplayName       string `json:"display_name,omitempty"`
+	EdgeGatewayURL    string `json:"edge_gateway_url,omitempty"`
+	MeteringExportURL string `json:"metering_export_url,omitempty"`
+	Enabled           bool   `json:"enabled"`
 }
 
 // ActiveTeam captures the resolved team and its regional ownership.

@@ -29,17 +29,19 @@ type RegionHandler struct {
 
 // CreateRegionRequest creates a new region directory entry.
 type CreateRegionRequest struct {
-	ID             string `json:"id" binding:"required"`
-	DisplayName    string `json:"display_name"`
-	EdgeGatewayURL string `json:"edge_gateway_url" binding:"required"`
-	Enabled        *bool  `json:"enabled"`
+	ID                string `json:"id" binding:"required"`
+	DisplayName       string `json:"display_name"`
+	EdgeGatewayURL    string `json:"edge_gateway_url" binding:"required"`
+	MeteringExportURL string `json:"metering_export_url"`
+	Enabled           *bool  `json:"enabled"`
 }
 
 // UpdateRegionRequest updates an existing region directory entry.
 type UpdateRegionRequest struct {
-	DisplayName    string `json:"display_name"`
-	EdgeGatewayURL string `json:"edge_gateway_url"`
-	Enabled        *bool  `json:"enabled"`
+	DisplayName       string  `json:"display_name"`
+	EdgeGatewayURL    string  `json:"edge_gateway_url"`
+	MeteringExportURL *string `json:"metering_export_url"`
+	Enabled           *bool   `json:"enabled"`
 }
 
 // NewRegionHandler creates a new region handler.
@@ -79,10 +81,11 @@ func (h *RegionHandler) CreateRegion(c *gin.Context) {
 		enabled = *req.Enabled
 	}
 	region := &tenantdir.Region{
-		ID:             strings.TrimSpace(req.ID),
-		DisplayName:    strings.TrimSpace(req.DisplayName),
-		EdgeGatewayURL: strings.TrimSpace(req.EdgeGatewayURL),
-		Enabled:        enabled,
+		ID:                strings.TrimSpace(req.ID),
+		DisplayName:       strings.TrimSpace(req.DisplayName),
+		EdgeGatewayURL:    strings.TrimSpace(req.EdgeGatewayURL),
+		MeteringExportURL: strings.TrimSpace(req.MeteringExportURL),
+		Enabled:           enabled,
 	}
 	if region.ID == "" || region.EdgeGatewayURL == "" {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "region id and edge gateway url are required")
@@ -147,6 +150,9 @@ func (h *RegionHandler) UpdateRegion(c *gin.Context) {
 	}
 	if req.EdgeGatewayURL != "" {
 		region.EdgeGatewayURL = strings.TrimSpace(req.EdgeGatewayURL)
+	}
+	if req.MeteringExportURL != nil {
+		region.MeteringExportURL = strings.TrimSpace(*req.MeteringExportURL)
 	}
 	if req.Enabled != nil {
 		region.Enabled = *req.Enabled

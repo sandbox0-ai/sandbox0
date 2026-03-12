@@ -522,10 +522,11 @@ type CreateREPLContextRequest struct {
 
 // CreateRegionRequest defines model for CreateRegionRequest.
 type CreateRegionRequest struct {
-	DisplayName    *string `json:"display_name,omitempty"`
-	EdgeGatewayUrl string  `json:"edge_gateway_url"`
-	Enabled        *bool   `json:"enabled,omitempty"`
-	Id             string  `json:"id"`
+	DisplayName       *string `json:"display_name,omitempty"`
+	EdgeGatewayUrl    string  `json:"edge_gateway_url"`
+	Enabled           *bool   `json:"enabled,omitempty"`
+	Id                string  `json:"id"`
+	MeteringExportUrl *string `json:"metering_export_url"`
 }
 
 // CreateSandboxVolumeRequest defines model for CreateSandboxVolumeRequest.
@@ -861,10 +862,11 @@ type RefreshResponse struct {
 
 // Region defines model for Region.
 type Region struct {
-	DisplayName    *string `json:"display_name,omitempty"`
-	EdgeGatewayUrl string  `json:"edge_gateway_url"`
-	Enabled        bool    `json:"enabled"`
-	Id             string  `json:"id"`
+	DisplayName       *string `json:"display_name,omitempty"`
+	EdgeGatewayUrl    string  `json:"edge_gateway_url"`
+	Enabled           bool    `json:"enabled"`
+	Id                string  `json:"id"`
+	MeteringExportUrl *string `json:"metering_export_url"`
 }
 
 // RegisterRequest defines model for RegisterRequest.
@@ -1670,9 +1672,10 @@ type UpdateExposedPortsRequest struct {
 
 // UpdateRegionRequest defines model for UpdateRegionRequest.
 type UpdateRegionRequest struct {
-	DisplayName    *string `json:"display_name,omitempty"`
-	EdgeGatewayUrl *string `json:"edge_gateway_url,omitempty"`
-	Enabled        *bool   `json:"enabled,omitempty"`
+	DisplayName       *string `json:"display_name,omitempty"`
+	EdgeGatewayUrl    *string `json:"edge_gateway_url,omitempty"`
+	Enabled           *bool   `json:"enabled,omitempty"`
+	MeteringExportUrl *string `json:"metering_export_url"`
 }
 
 // UpdateTeamMemberRequest defines model for UpdateTeamMemberRequest.

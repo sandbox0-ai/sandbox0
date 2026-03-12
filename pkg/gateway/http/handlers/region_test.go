@@ -78,7 +78,7 @@ func TestRegionHandlerCreateRegion(t *testing.T) {
 	})
 	router.POST("/regions", handler.CreateRegion)
 
-	req := httptest.NewRequest(http.MethodPost, "/regions", strings.NewReader(`{"id":"aws/us-east-1","display_name":"US East 1","edge_gateway_url":"https://use1.example.com"}`))
+	req := httptest.NewRequest(http.MethodPost, "/regions", strings.NewReader(`{"id":"aws/us-east-1","display_name":"US East 1","edge_gateway_url":"https://use1.example.com","metering_export_url":"https://metering.use1.example.com"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -98,5 +98,54 @@ func TestRegionHandlerCreateRegion(t *testing.T) {
 	}
 	if response.Data.EdgeGatewayURL != "https://use1.example.com" {
 		t.Fatalf("expected edge url, got %q", response.Data.EdgeGatewayURL)
+	}
+	if response.Data.MeteringExportURL != "https://metering.use1.example.com" {
+		t.Fatalf("expected metering export url, got %q", response.Data.MeteringExportURL)
+	}
+}
+
+func TestRegionHandlerUpdateRegionCanClearMeteringExportURL(t *testing.T) {
+	t.Setenv("GIN_MODE", "release")
+	gin.SetMode(gin.ReleaseMode)
+
+	repo := &stubRegionRepository{regions: map[string]*tenantdir.Region{
+		"aws-us-east-1": {
+			ID:                "aws-us-east-1",
+			DisplayName:       "US East 1",
+			EdgeGatewayURL:    "https://use1.example.com",
+			MeteringExportURL: "https://metering.use1.example.com",
+			Enabled:           true,
+		},
+	}}
+	handler := NewRegionHandler(repo, zap.NewNop())
+
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Set("auth_context", &authn.AuthContext{
+			AuthMethod:    authn.AuthMethodJWT,
+			UserID:        "admin-1",
+			IsSystemAdmin: true,
+		})
+		c.Next()
+	})
+	router.PUT("/regions/:id", handler.UpdateRegion)
+
+	req := httptest.NewRequest(http.MethodPut, "/regions/aws-us-east-1", strings.NewReader(`{"metering_export_url":""}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var response struct {
+		Data tenantdir.Region `json:"data"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Data.MeteringExportURL != "" {
+		t.Fatalf("expected metering export url to be cleared, got %q", response.Data.MeteringExportURL)
 	}
 }

@@ -2709,6 +2709,9 @@ components:
           type: string
         edge_gateway_url:
           type: string
+        metering_export_url:
+          type: string
+          nullable: true
         enabled:
           type: boolean
       required: [id, edge_gateway_url, enabled]
@@ -2721,6 +2724,9 @@ components:
           type: string
         edge_gateway_url:
           type: string
+        metering_export_url:
+          type: string
+          nullable: true
         enabled:
           type: boolean
       required: [id, edge_gateway_url]
@@ -2731,6 +2737,9 @@ components:
           type: string
         edge_gateway_url:
           type: string
+        metering_export_url:
+          type: string
+          nullable: true
         enabled:
           type: boolean
     SuccessRegionResponse:

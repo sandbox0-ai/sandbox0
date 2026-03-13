@@ -26,6 +26,22 @@ func KubectlOutput(ctx context.Context, kubeconfig string, args ...string) (stri
 	return RunCommandOutput(ctx, "kubectl", args...)
 }
 
+// KubectlExecOutput runs kubectl exec and returns output.
+func KubectlExecOutput(ctx context.Context, kubeconfig, namespace, pod string, command ...string) (string, error) {
+	if pod == "" {
+		return "", fmt.Errorf("pod name is required")
+	}
+	if len(command) == 0 {
+		return "", fmt.Errorf("command is required")
+	}
+
+	args := []string{"exec"}
+	args = append(args, withNamespace(namespace)...)
+	args = append(args, pod, "--")
+	args = append(args, command...)
+	return KubectlOutput(ctx, kubeconfig, args...)
+}
+
 // KubectlWaitForCondition waits for a condition on a resource.
 func KubectlWaitForCondition(ctx context.Context, kubeconfig, namespace, resource, name, condition, timeout string) error {
 	fmt.Printf("Waiting for condition %q on resource %q/%q in namespace %q with timeout %q...\n", condition, resource, name, namespace, timeout)

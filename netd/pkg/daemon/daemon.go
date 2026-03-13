@@ -142,6 +142,7 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 		if info == nil {
 			return
 		}
+		platformState.OnSandboxUpsert(info)
 		changed, prevHash := policyStore.UpsertFromSandbox(info)
 		if changed && info.PodIP != "" {
 			flows := tracker.PopBySrc(info.PodIP)
@@ -174,6 +175,7 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 		triggerSync()
 	}, func(info *watcher.SandboxInfo) {
 		if info != nil {
+			platformState.OnSandboxDelete(info)
 			policyStore.DeleteByKey(info.Namespace, info.Name)
 			flows := tracker.PopBySrc(info.PodIP)
 			conntrackManager.CleanupFlows(ctx, flows)

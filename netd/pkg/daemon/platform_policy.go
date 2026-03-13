@@ -22,6 +22,7 @@ type platformPolicyState struct {
 	store     *policy.Store
 	logger    *zap.Logger
 	mu        sync.RWMutex
+	sandboxes map[string]*watcher.SandboxInfo
 	services  map[string]*watcher.ServiceInfo
 	endpoints map[string]*watcher.EndpointsInfo
 }
@@ -34,11 +35,34 @@ func newPlatformPolicyState(cfg *config.NetdConfig, store *policy.Store, logger 
 		cfg:       cfg,
 		store:     store,
 		logger:    logger,
+		sandboxes: make(map[string]*watcher.SandboxInfo),
 		services:  make(map[string]*watcher.ServiceInfo),
 		endpoints: make(map[string]*watcher.EndpointsInfo),
 	}
 	state.rebuild()
 	return state
+}
+
+func (s *platformPolicyState) OnSandboxUpsert(info *watcher.SandboxInfo) {
+	if info == nil {
+		return
+	}
+	key := info.Namespace + "/" + info.Name
+	s.mu.Lock()
+	s.sandboxes[key] = info
+	s.mu.Unlock()
+	s.rebuild()
+}
+
+func (s *platformPolicyState) OnSandboxDelete(info *watcher.SandboxInfo) {
+	if info == nil {
+		return
+	}
+	key := info.Namespace + "/" + info.Name
+	s.mu.Lock()
+	delete(s.sandboxes, key)
+	s.mu.Unlock()
+	s.rebuild()
 }
 
 func (s *platformPolicyState) OnServiceUpsert(info *watcher.ServiceInfo) {
@@ -89,9 +113,18 @@ func (s *platformPolicyState) rebuild() {
 	if s.store == nil {
 		return
 	}
-	services, endpoints := s.snapshot()
+	sandboxes, services, endpoints := s.snapshot()
 	allowedCIDRs := make([]string, 0, len(services))
+	sandboxPodIPs := make(map[string]struct{}, len(sandboxes))
 	matchedServices := make([]string, 0, len(services))
+	for _, sandbox := range sandboxes {
+		if sandbox == nil {
+			continue
+		}
+		if ip := strings.TrimSpace(sandbox.PodIP); ip != "" {
+			sandboxPodIPs[ip] = struct{}{}
+		}
+	}
 	for key, svc := range services {
 		if !isPlatformService(svc) {
 			continue
@@ -128,9 +161,12 @@ func (s *platformPolicyState) rebuild() {
 		s.logger.Warn("Failed to build platform policy", zap.Error(err))
 		return
 	}
+	policyRules.SandboxPodIPs = sandboxPodIPs
 	s.store.SetPlatformPolicy(policyRules)
 	s.logger.Info(
 		"Platform policy updated",
+		zap.Int("sandboxes_total", len(sandboxes)),
+		zap.Int("sandbox_pod_ips", len(sandboxPodIPs)),
 		zap.Int("services_total", len(services)),
 		zap.Int("services_matched", len(matchedServices)),
 		zap.Int("endpoints_total", len(endpoints)),
@@ -142,9 +178,13 @@ func (s *platformPolicyState) rebuild() {
 	)
 }
 
-func (s *platformPolicyState) snapshot() (map[string]*watcher.ServiceInfo, map[string]*watcher.EndpointsInfo) {
+func (s *platformPolicyState) snapshot() (map[string]*watcher.SandboxInfo, map[string]*watcher.ServiceInfo, map[string]*watcher.EndpointsInfo) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	sandboxes := make(map[string]*watcher.SandboxInfo, len(s.sandboxes))
+	for key, info := range s.sandboxes {
+		sandboxes[key] = info
+	}
 	services := make(map[string]*watcher.ServiceInfo, len(s.services))
 	for key, info := range s.services {
 		services[key] = info
@@ -153,7 +193,7 @@ func (s *platformPolicyState) snapshot() (map[string]*watcher.ServiceInfo, map[s
 	for key, info := range s.endpoints {
 		endpoints[key] = info
 	}
-	return services, endpoints
+	return sandboxes, services, endpoints
 }
 
 func isPlatformService(info *watcher.ServiceInfo) bool {

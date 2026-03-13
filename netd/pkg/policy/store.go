@@ -113,7 +113,7 @@ func (s *Store) GetByIP(podIP string) *CompiledPolicy {
 	}
 	clone := *entry.compiled
 	clone.Egress = cloneRuleSet(entry.compiled.Egress)
-	clone.Platform = s.getPlatformPolicy()
+	clone.Platform = clonePlatformPolicy(s.getPlatformPolicy(), podIP)
 	return &clone
 }
 
@@ -153,5 +153,25 @@ func cloneRuleSet(in CompiledRuleSet) CompiledRuleSet {
 	out.DeniedPorts = append([]PortRange(nil), in.DeniedPorts...)
 	out.AllowedDomains = append([]DomainRule(nil), in.AllowedDomains...)
 	out.DeniedDomains = append([]DomainRule(nil), in.DeniedDomains...)
+	return out
+}
+
+func clonePlatformPolicy(in *PlatformPolicy, sourcePodIP string) *PlatformPolicy {
+	if in == nil {
+		return nil
+	}
+	out := &PlatformPolicy{
+		AllowedCIDRs:   append([]*net.IPNet(nil), in.AllowedCIDRs...),
+		DeniedCIDRs:    append([]*net.IPNet(nil), in.DeniedCIDRs...),
+		AllowedDomains: append([]DomainRule(nil), in.AllowedDomains...),
+		DeniedDomains:  append([]DomainRule(nil), in.DeniedDomains...),
+		SourcePodIP:    sourcePodIP,
+	}
+	if len(in.SandboxPodIPs) > 0 {
+		out.SandboxPodIPs = make(map[string]struct{}, len(in.SandboxPodIPs))
+		for ip := range in.SandboxPodIPs {
+			out.SandboxPodIPs[ip] = struct{}{}
+		}
+	}
 	return out
 }

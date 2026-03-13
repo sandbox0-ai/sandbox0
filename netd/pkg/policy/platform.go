@@ -11,6 +11,8 @@ type PlatformPolicy struct {
 	DeniedCIDRs    []*net.IPNet
 	AllowedDomains []DomainRule
 	DeniedDomains  []DomainRule
+	SandboxPodIPs  map[string]struct{}
+	SourcePodIP    string
 }
 
 // BuildPlatformPolicy compiles platform allow/deny lists into parsed rules.

@@ -3,6 +3,7 @@ package cases
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
@@ -126,6 +127,10 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					_, status, _, err := session.GetNetworkPolicy(env.TestCtx.Context, GinkgoT(), sandboxID)
 					Expect(err).NotTo(HaveOccurred())
 					Expect(status).To(Equal(http.StatusOK))
+				})
+
+				It("blocks private sandbox traffic while preserving public exposure and cluster service access", func() {
+					assertSandboxNetworkIsolation(env, session)
 				})
 			})
 		}
@@ -406,6 +411,255 @@ func assertFilesystemAndProcessCapabilities(env *framework.ScenarioEnv, session 
 	status, err = session.DeleteContext(env.TestCtx.Context, GinkgoT(), sandboxID, ctxResp.Id)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
+}
+
+func assertSandboxNetworkIsolation(env *framework.ScenarioEnv, session *e2eutils.Session) {
+	workerNodes, err := listWorkerNodes(env)
+	Expect(err).NotTo(HaveOccurred())
+	if len(workerNodes) < 2 {
+		Skip("network isolation e2e requires at least two worker nodes")
+	}
+
+	baseTemplate, err := session.GetTemplate(env.TestCtx.Context, GinkgoT(), "default")
+	Expect(err).NotTo(HaveOccurred())
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	templateAID := "e2e-net-a-" + suffix
+	templateBID := "e2e-net-b-" + suffix
+
+	_, err = session.CreateTemplate(env.TestCtx.Context, GinkgoT(), buildPinnedTemplate(*baseTemplate, templateAID, workerNodes[0]))
+	Expect(err).NotTo(HaveOccurred())
+	defer func() {
+		_ = session.DeleteTemplate(env.TestCtx.Context, GinkgoT(), templateAID)
+	}()
+
+	_, err = session.CreateTemplate(env.TestCtx.Context, GinkgoT(), buildPinnedTemplate(*baseTemplate, templateBID, workerNodes[1]))
+	Expect(err).NotTo(HaveOccurred())
+	defer func() {
+		_ = session.DeleteTemplate(env.TestCtx.Context, GinkgoT(), templateBID)
+	}()
+
+	waitForTemplateStatusEventually(env, session, templateAID)
+	waitForTemplateStatusEventually(env, session, templateBID)
+
+	sandboxAID := claimSandboxEventually(env, session, templateAID).SandboxId
+	defer func() {
+		_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), sandboxAID)
+	}()
+
+	sandboxBID := claimSandboxEventually(env, session, templateBID).SandboxId
+	defer func() {
+		_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), sandboxBID)
+	}()
+
+	sandboxA := waitForSandboxPodReadyEventually(env, session, sandboxAID)
+	sandboxB := waitForSandboxPodReadyEventually(env, session, sandboxBID)
+
+	nodeA, err := framework.KubectlGetJSONPath(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, "pod", sandboxA.PodName, "{.spec.nodeName}")
+	Expect(err).NotTo(HaveOccurred())
+	nodeB, err := framework.KubectlGetJSONPath(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, "pod", sandboxB.PodName, "{.spec.nodeName}")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(nodeA).To(Equal(workerNodes[0]))
+	Expect(nodeB).To(Equal(workerNodes[1]))
+	Expect(nodeA).NotTo(Equal(nodeB))
+
+	const exposedPort int32 = 18080
+	const expectedBody = "sandbox public route works\n"
+
+	startSandboxHTTPServer(env, sandboxB.PodName, exposedPort, expectedBody)
+	Eventually(func() error {
+		body, execErr := execInSandboxPod(env, sandboxB.PodName, fmt.Sprintf("curl -fsS --max-time 5 http://127.0.0.1:%d/", exposedPort))
+		if execErr != nil {
+			return execErr
+		}
+		if body != expectedBody {
+			return fmt.Errorf("unexpected local server body: %q", body)
+		}
+		return nil
+	}).WithTimeout(30 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
+
+	podIPB, err := framework.KubectlGetJSONPath(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, "pod", sandboxB.PodName, "{.status.podIP}")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(strings.TrimSpace(podIPB)).NotTo(BeEmpty())
+
+	Eventually(func() error {
+		_, execErr := execInSandboxPod(env, sandboxA.PodName, fmt.Sprintf("curl -fsS --max-time 5 http://%s:%d/", strings.TrimSpace(podIPB), exposedPort))
+		if execErr == nil {
+			return fmt.Errorf("expected private sandbox-to-sandbox request to fail")
+		}
+		return nil
+	}).WithTimeout(45 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
+
+	internalGatewayPort, err := framework.GetServicePort(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, env.Infra.Name+"-internal-gateway")
+	Expect(err).NotTo(HaveOccurred())
+	internalGatewayBaseURL := fmt.Sprintf("http://%s-internal-gateway.%s.svc.cluster.local:%d", env.Infra.Name, env.Infra.Namespace, internalGatewayPort)
+
+	Eventually(func() error {
+		body, execErr := execInSandboxPod(env, sandboxA.PodName, fmt.Sprintf("curl -fsS --max-time 5 %s/healthz", internalGatewayBaseURL))
+		if execErr != nil {
+			return execErr
+		}
+		if strings.TrimSpace(body) == "" {
+			return fmt.Errorf("internal-gateway healthz returned empty body")
+		}
+		return nil
+	}).WithTimeout(30 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
+
+	updatedPorts, status, err := session.UpdateExposedPorts(env.TestCtx.Context, GinkgoT(), sandboxBID, []apispec.ExposedPortConfig{{
+		Port:   exposedPort,
+		Resume: true,
+	}})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+
+	publicHost := publicExposureHostForPort(updatedPorts, exposedPort)
+	Expect(publicHost).NotTo(BeEmpty())
+
+	Eventually(func() error {
+		body, execErr := execInSandboxPod(env, sandboxA.PodName, fmt.Sprintf("curl -fsS --max-time 10 -H 'Host: %s' %s/", publicHost, internalGatewayBaseURL))
+		if execErr != nil {
+			return execErr
+		}
+		if body != expectedBody {
+			return fmt.Errorf("unexpected public exposure body: %q", body)
+		}
+		return nil
+	}).WithTimeout(45 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
+}
+
+func buildPinnedTemplate(base apispec.Template, templateID, nodeName string) apispec.TemplateCreateRequest {
+	spec := e2eutils.CloneTemplateForCreate(base, templateID).Spec
+	description := "E2E network isolation template pinned to " + nodeName
+	displayName := "E2E network isolation " + nodeName
+	spec.Description = &description
+	spec.DisplayName = &displayName
+	spec.Pool = &apispec.PoolStrategy{
+		MinIdle: 0,
+		MaxIdle: 0,
+	}
+
+	pod := clonePodSpecOverride(spec.Pod)
+	if pod == nil {
+		pod = &apispec.PodSpecOverride{}
+	}
+	nodeSelector := map[string]string{}
+	if pod.NodeSelector != nil {
+		for key, value := range *pod.NodeSelector {
+			nodeSelector[key] = value
+		}
+	}
+	nodeSelector["kubernetes.io/hostname"] = nodeName
+	pod.NodeSelector = &nodeSelector
+	spec.Pod = pod
+
+	return apispec.TemplateCreateRequest{
+		TemplateId: templateID,
+		Spec:       spec,
+	}
+}
+
+func clonePodSpecOverride(base *apispec.PodSpecOverride) *apispec.PodSpecOverride {
+	if base == nil {
+		return nil
+	}
+	cloned := *base
+	if base.NodeSelector != nil {
+		nodeSelector := make(map[string]string, len(*base.NodeSelector))
+		for key, value := range *base.NodeSelector {
+			nodeSelector[key] = value
+		}
+		cloned.NodeSelector = &nodeSelector
+	}
+	if base.Tolerations != nil {
+		tolerations := append([]apispec.Toleration(nil), (*base.Tolerations)...)
+		cloned.Tolerations = &tolerations
+	}
+	return &cloned
+}
+
+func waitForTemplateStatusEventually(env *framework.ScenarioEnv, session *e2eutils.Session, templateID string) {
+	Eventually(func() error {
+		tpl, err := session.GetTemplate(env.TestCtx.Context, GinkgoT(), templateID)
+		if err != nil {
+			return err
+		}
+		if tpl.Status == nil {
+			return fmt.Errorf("template %s status not ready", templateID)
+		}
+		return nil
+	}).WithTimeout(90 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
+}
+
+func waitForSandboxPodReadyEventually(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string) *apispec.Sandbox {
+	var sandbox *apispec.Sandbox
+	Eventually(func() error {
+		current, _, err := session.GetSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(current.PodName) == "" {
+			return fmt.Errorf("sandbox %s pod name not assigned", sandboxID)
+		}
+		if err := framework.KubectlWaitForCondition(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, "pod", current.PodName, "Ready", "10s"); err != nil {
+			return err
+		}
+		sandbox = current
+		return nil
+	}).WithTimeout(3 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
+	return sandbox
+}
+
+func listWorkerNodes(env *framework.ScenarioEnv) ([]string, error) {
+	output, err := framework.KubectlOutput(
+		env.TestCtx.Context,
+		env.Config.Kubeconfig,
+		"get", "nodes",
+		"--selector=!node-role.kubernetes.io/control-plane",
+		"-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}",
+	)
+	if err != nil {
+		return nil, err
+	}
+	nodes := strings.Fields(strings.TrimSpace(output))
+	return nodes, nil
+}
+
+func startSandboxHTTPServer(env *framework.ScenarioEnv, podName string, port int32, body string) {
+	script := fmt.Sprintf(
+		"set -eu; dir=/tmp/s0-e2e-http-%d; rm -rf \"$dir\"; mkdir -p \"$dir\"; cat <<'EOF' > \"$dir/index.html\"\n%sEOF\nnohup python3 -m http.server %d --bind 0.0.0.0 -d \"$dir\" >/tmp/s0-e2e-http.log 2>&1 &\n",
+		port,
+		body,
+		port,
+	)
+	_, err := execInSandboxPod(env, podName, script)
+	Expect(err).NotTo(HaveOccurred())
+}
+
+func execInSandboxPod(env *framework.ScenarioEnv, podName, script string) (string, error) {
+	output, err := framework.KubectlExecOutput(
+		env.TestCtx.Context,
+		env.Config.Kubeconfig,
+		env.Infra.Namespace,
+		podName,
+		"/bin/sh", "-lc", script,
+	)
+	return strings.ReplaceAll(output, "\r\n", "\n"), err
+}
+
+func publicExposureHostForPort(ports []apispec.ExposedPortConfig, port int32) string {
+	for _, item := range ports {
+		if item.Port != port || item.PublicUrl == nil {
+			continue
+		}
+		host := strings.TrimSpace(*item.PublicUrl)
+		host = strings.TrimPrefix(host, "https://")
+		host = strings.TrimPrefix(host, "http://")
+		host = strings.TrimSuffix(host, "/")
+		if host != "" {
+			return host
+		}
+	}
+	return ""
 }
 
 func assertVolumeLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session) {

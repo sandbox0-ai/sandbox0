@@ -17,3 +17,7 @@ nodes:
   # registry port for template image push
   - containerPort: 30500
     hostPort: 30500
+- role: worker
+  image: kindest/node:v1.35.0
+- role: worker
+  image: kindest/node:v1.35.0

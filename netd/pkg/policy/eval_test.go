@@ -120,6 +120,28 @@ func TestPlatformDenyOverridesUserAllow(t *testing.T) {
 	}
 }
 
+func TestSandboxPodDenyBlocksPeerButNotSelf(t *testing.T) {
+	p := &CompiledPolicy{
+		Mode: v1alpha1.NetworkModeAllowAll,
+		Platform: &PlatformPolicy{
+			SandboxPodIPs: map[string]struct{}{
+				"10.0.0.2": {},
+				"10.0.0.3": {},
+			},
+			SourcePodIP: "10.0.0.2",
+		},
+	}
+	if AllowEgressL4(p, net.ParseIP("10.0.0.3"), 443, "tcp") != false {
+		t.Fatalf("expected peer sandbox pod to be denied")
+	}
+	if AllowEgressL4(p, net.ParseIP("10.0.0.2"), 443, "tcp") != true {
+		t.Fatalf("expected self sandbox pod ip to be allowed")
+	}
+	if AllowEgressL4(p, net.ParseIP("8.8.8.8"), 443, "tcp") != true {
+		t.Fatalf("expected non-sandbox ip to be allowed")
+	}
+}
+
 func TestHasDomainRules(t *testing.T) {
 	if HasDomainRules(nil) {
 		t.Fatalf("expected false for nil policy")

@@ -16,6 +16,9 @@ func AllowEgressL4(policy *CompiledPolicy, destIP net.IP, destPort int, protocol
 		protocol = "tcp"
 	}
 	if policy.Platform != nil {
+		if isOtherSandboxPod(policy.Platform, destIP) {
+			return false
+		}
 		if matchCIDR(destIP, policy.Platform.DeniedCIDRs) {
 			return false
 		}
@@ -82,6 +85,21 @@ func HasDomainRules(policy *CompiledPolicy) bool {
 		return false
 	}
 	return len(policy.Egress.AllowedDomains) > 0 || len(policy.Egress.DeniedDomains) > 0
+}
+
+func isOtherSandboxPod(platform *PlatformPolicy, destIP net.IP) bool {
+	if platform == nil || destIP == nil || len(platform.SandboxPodIPs) == 0 {
+		return false
+	}
+	dest := destIP.String()
+	if dest == "" {
+		return false
+	}
+	if dest == platform.SourcePodIP {
+		return false
+	}
+	_, ok := platform.SandboxPodIPs[dest]
+	return ok
 }
 
 func matchCIDR(ip net.IP, nets []*net.IPNet) bool {

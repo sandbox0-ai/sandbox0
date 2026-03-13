@@ -2,7 +2,6 @@ export type DashboardControlPlaneMode = "single-cluster" | "global-directory";
 
 export interface DashboardRuntimeConfig {
   mode: DashboardControlPlaneMode;
-  dashboardBasePath: string;
   siteURL: string;
   singleClusterURL?: string;
   globalDirectoryURL?: string;
@@ -62,7 +61,6 @@ export interface DashboardTemplateSummary {
 export interface DashboardSession {
   authenticated: boolean;
   mode: DashboardControlPlaneMode;
-  dashboardBasePath: string;
   siteURL: string;
   configuredGlobalURL?: string;
   configuredRegionalURL?: string;

@@ -8,8 +8,8 @@ import {
   resolveDashboardRuntimeConfig,
 } from "@sandbox0/dashboard-core";
 
-function redirectURL(requestURL: string, basePath: string): URL {
-  return new URL(basePath, requestURL);
+function redirectURL(requestURL: string): URL {
+  return new URL("/", requestURL);
 }
 
 export async function POST(request: Request) {
@@ -22,7 +22,7 @@ export async function POST(request: Request) {
   await forwardLogout(config, accessToken);
 
   const response = NextResponse.redirect(
-    redirectURL(request.url, config.dashboardBasePath),
+    redirectURL(request.url),
     {
       status: 303,
     },

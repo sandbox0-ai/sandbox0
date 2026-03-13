@@ -3,8 +3,6 @@ import type {
   DashboardRuntimeConfig,
 } from "./types";
 
-const defaultDashboardBasePath = "/dashboard";
-
 function normalizeMode(value: string | undefined): DashboardControlPlaneMode {
   if (value === "global-directory") {
     return value;
@@ -29,7 +27,6 @@ export function resolveDashboardRuntimeConfig(
   if (mode === "global-directory") {
     return {
       mode,
-      dashboardBasePath: defaultDashboardBasePath,
       siteURL,
       globalDirectoryURL:
         env.SANDBOX0_DASHBOARD_GLOBAL_DIRECTORY_URL ??
@@ -40,7 +37,6 @@ export function resolveDashboardRuntimeConfig(
 
   return {
     mode,
-    dashboardBasePath: defaultDashboardBasePath,
     siteURL,
     singleClusterURL:
       env.SANDBOX0_DASHBOARD_SINGLE_CLUSTER_URL ??

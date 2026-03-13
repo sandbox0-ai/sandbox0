@@ -10,6 +10,8 @@ interface LoginResponse {
   expires_at: number;
 }
 
+const dashboardHomePath = "/";
+
 export const dashboardAccessTokenCookieName = "sandbox0_access_token";
 export const dashboardRefreshTokenCookieName = "sandbox0_refresh_token";
 
@@ -237,7 +239,7 @@ export async function resolveOIDCLoginLocation(
     const response = await fetchImpl(
       joinURL(
         baseURL,
-        `/auth/oidc/${encodeURIComponent(providerID)}/login?return_url=${encodeURIComponent(config.dashboardBasePath)}`,
+        `/auth/oidc/${encodeURIComponent(providerID)}/login?return_url=${encodeURIComponent(dashboardHomePath)}`,
       ),
       {
         method: "GET",
@@ -310,14 +312,14 @@ export function setDashboardAuthCookies(
     httpOnly: true,
     sameSite: "lax",
     secure,
-    path: config.dashboardBasePath,
+    path: dashboardHomePath,
     maxAge,
   });
   response.cookies.set(dashboardRefreshTokenCookieName, tokens.refresh_token, {
     httpOnly: true,
     sameSite: "lax",
     secure,
-    path: config.dashboardBasePath,
+    path: dashboardHomePath,
   });
 }
 
@@ -331,14 +333,14 @@ export function clearDashboardAuthCookies(
     httpOnly: true,
     sameSite: "lax",
     secure,
-    path: config.dashboardBasePath,
+    path: dashboardHomePath,
     maxAge: 0,
   });
   response.cookies.set(dashboardRefreshTokenCookieName, "", {
     httpOnly: true,
     sameSite: "lax",
     secure,
-    path: config.dashboardBasePath,
+    path: dashboardHomePath,
     maxAge: 0,
   });
 }

@@ -6,19 +6,15 @@ import {
   setDashboardAuthCookies,
 } from "@sandbox0/dashboard-core";
 
-function dashboardURL(
-  requestURL: string,
-  basePath: string,
-  error?: string,
-): URL {
+function dashboardURL(requestURL: string, error?: string): URL {
   const value = error
-    ? `${basePath}?login_error=${encodeURIComponent(error)}`
-    : basePath;
+    ? `/?login_error=${encodeURIComponent(error)}`
+    : "/";
   return new URL(value, requestURL);
 }
 
 // This callback assumes the control plane OIDC base URL is configured to point
-// at the public dashboard auth surface, for example /dashboard/api/auth/...
+// at the public dashboard auth surface, for example /api/auth/...
 // The route then proxies the callback to the actual control-plane service and
 // converts the returned token pair into dashboard cookies.
 export async function GET(
@@ -31,21 +27,14 @@ export async function GET(
   const result = await exchangeOIDCCallback(config, provider, rawQuery);
   if (!result.tokens) {
     return NextResponse.redirect(
-      dashboardURL(
-        request.url,
-        config.dashboardBasePath,
-        result.error ?? "oidc callback failed",
-      ),
+      dashboardURL(request.url, result.error ?? "oidc callback failed"),
       { status: 303 },
     );
   }
 
-  const response = NextResponse.redirect(
-    dashboardURL(request.url, config.dashboardBasePath),
-    {
-      status: 303,
-    },
-  );
+  const response = NextResponse.redirect(dashboardURL(request.url), {
+    status: 303,
+  });
   setDashboardAuthCookies(response, config, result.tokens);
   return response;
 }

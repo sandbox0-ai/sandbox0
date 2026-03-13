@@ -141,7 +141,6 @@ export async function resolveDashboardSession(
   const baseSession: DashboardSession = {
     authenticated: false,
     mode: config.mode,
-    dashboardBasePath: config.dashboardBasePath,
     siteURL: config.siteURL,
     configuredGlobalURL: config.globalDirectoryURL,
     configuredRegionalURL:

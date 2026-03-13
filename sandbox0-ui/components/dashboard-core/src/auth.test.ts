@@ -15,7 +15,6 @@ import type { DashboardRuntimeConfig } from "./types";
 
 const singleClusterConfig: DashboardRuntimeConfig = {
   mode: "single-cluster",
-  dashboardBasePath: "/dashboard",
   siteURL: "https://sandbox0.ai",
   singleClusterURL: "https://single.example.com",
 };
@@ -116,7 +115,7 @@ test("setDashboardAuthCookies stores dashboard auth cookies", () => {
   assert.equal(accessCookie?.value, "access-token");
   assert.equal(refreshCookie?.value, "refresh-token");
   assert.equal(accessCookie?.httpOnly, true);
-  assert.equal(accessCookie?.path, "/dashboard");
+  assert.equal(accessCookie?.path, "/");
 });
 
 test("clearDashboardAuthCookies expires dashboard auth cookies", () => {

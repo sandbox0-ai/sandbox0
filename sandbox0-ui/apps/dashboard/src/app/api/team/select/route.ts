@@ -13,11 +13,10 @@ import {
 
 function dashboardURL(
   requestURL: string,
-  basePath: string,
   error?: string,
   switched?: boolean,
 ): URL {
-  const url = new URL(basePath, requestURL);
+  const url = new URL("/", requestURL);
   if (switched) {
     url.searchParams.set("team_switched", "1");
   }
@@ -37,11 +36,7 @@ export async function POST(request: Request) {
 
   if (!teamID) {
     return NextResponse.redirect(
-      dashboardURL(
-        request.url,
-        config.dashboardBasePath,
-        "team_id is required",
-      ),
+      dashboardURL(request.url, "team_id is required"),
       { status: 303 },
     );
   }
@@ -60,7 +55,6 @@ export async function POST(request: Request) {
       const response = NextResponse.redirect(
         dashboardURL(
           request.url,
-          config.dashboardBasePath,
           refreshed.error ?? "session expired, please sign in again",
         ),
         { status: 303 },
@@ -74,11 +68,7 @@ export async function POST(request: Request) {
 
   if (!accessToken) {
     const response = NextResponse.redirect(
-      dashboardURL(
-        request.url,
-        config.dashboardBasePath,
-        "browser session not found, please sign in again",
-      ),
+      dashboardURL(request.url, "browser session not found, please sign in again"),
       { status: 303 },
     );
     clearDashboardAuthCookies(response, config);
@@ -97,23 +87,14 @@ export async function POST(request: Request) {
 
   if (!updateResult.ok) {
     return NextResponse.redirect(
-      dashboardURL(
-        request.url,
-        config.dashboardBasePath,
-        updateResult.error ?? "failed to switch active team",
-      ),
+      dashboardURL(request.url, updateResult.error ?? "failed to switch active team"),
       { status: 303 },
     );
   }
 
   if (!refreshToken) {
     return NextResponse.redirect(
-      dashboardURL(
-        request.url,
-        config.dashboardBasePath,
-        "team updated but browser session could not be refreshed",
-        true,
-      ),
+      dashboardURL(request.url, "team updated but browser session could not be refreshed", true),
       { status: 303 },
     );
   }
@@ -123,7 +104,6 @@ export async function POST(request: Request) {
     const response = NextResponse.redirect(
       dashboardURL(
         request.url,
-        config.dashboardBasePath,
         finalRefresh.error ?? "team updated but session refresh failed",
         true,
       ),
@@ -135,10 +115,9 @@ export async function POST(request: Request) {
     return response;
   }
 
-  const response = NextResponse.redirect(
-    dashboardURL(request.url, config.dashboardBasePath, undefined, true),
-    { status: 303 },
-  );
+  const response = NextResponse.redirect(dashboardURL(request.url, undefined, true), {
+    status: 303,
+  });
   setDashboardAuthCookies(response, config, finalRefresh.tokens);
   return response;
 }

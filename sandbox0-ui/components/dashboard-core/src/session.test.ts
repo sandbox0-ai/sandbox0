@@ -6,14 +6,12 @@ import { readBearerToken, resolveDashboardSession } from "./session";
 
 const singleClusterConfig: DashboardRuntimeConfig = {
   mode: "single-cluster",
-  dashboardBasePath: "/dashboard",
   siteURL: "https://sandbox0.ai",
   singleClusterURL: "https://single.example.com",
 };
 
 const globalDirectoryConfig: DashboardRuntimeConfig = {
   mode: "global-directory",
-  dashboardBasePath: "/dashboard",
   siteURL: "https://sandbox0.ai",
   globalDirectoryURL: "https://global.example.com",
 };

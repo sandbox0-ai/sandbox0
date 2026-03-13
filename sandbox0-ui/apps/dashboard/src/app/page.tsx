@@ -64,7 +64,7 @@ export default async function DashboardHome({
   );
 
   if (!session.authenticated && refreshToken && !refreshed && !loginError) {
-    redirect(`${config.dashboardBasePath}/api/auth/refresh`);
+    redirect("/api/auth/refresh");
   }
 
   return (
@@ -107,13 +107,13 @@ export default async function DashboardHome({
               Unified <span className="text-accent">control plane</span>
             </PixelHeading>
             <p className="mt-4 max-w-2xl text-sm leading-7 text-muted">
-              This dashboard runs as the same-domain <code>/dashboard</code>{" "}
-              product surface while adapting to either a single-cluster
-              deployment or a global-directory plus regional-gateway topology.
+              This dashboard runs as a dedicated control-plane site while
+              adapting to either a single-cluster deployment or a
+              global-directory plus regional-gateway topology.
             </p>
             <div className="mt-6 flex flex-wrap gap-3">
               <a
-                href={`${config.dashboardBasePath}/api/session`}
+                href="/api/session"
                 className="inline-flex items-center justify-center border border-foreground/20 bg-surface px-3 py-1.5 text-xs text-foreground transition-colors hover:bg-foreground hover:text-background"
               >
                 View session JSON
@@ -167,7 +167,7 @@ export default async function DashboardHome({
                     {oidcProviders.map((provider) => (
                       <a
                         key={provider.id}
-                        href={`${config.dashboardBasePath}/api/auth/oidc/${provider.id}/login`}
+                        href={`/api/auth/oidc/${provider.id}/login`}
                         className="inline-flex w-full items-center justify-center border border-foreground/20 bg-surface px-4 py-3 text-sm text-foreground transition-colors hover:bg-foreground hover:text-background"
                       >
                         Continue with {provider.name}
@@ -178,7 +178,7 @@ export default async function DashboardHome({
 
                 {builtinProvider && (
                   <form
-                    action={`${config.dashboardBasePath}/api/auth/login`}
+                    action="/api/auth/login"
                     method="post"
                     className="space-y-3 border border-foreground/10 bg-surface/60 p-4"
                   >
@@ -306,7 +306,7 @@ export default async function DashboardHome({
               </p>
               {session.authenticated && session.teams.length > 1 && (
                 <form
-                  action={`${config.dashboardBasePath}/api/team/select`}
+                  action="/api/team/select"
                   method="post"
                   className="pt-2"
                 >
@@ -421,7 +421,7 @@ export default async function DashboardHome({
 
             {session.authenticated && (
               <form
-                action={`${config.dashboardBasePath}/api/auth/logout`}
+                action="/api/auth/logout"
                 method="post"
                 className="mt-6"
               >

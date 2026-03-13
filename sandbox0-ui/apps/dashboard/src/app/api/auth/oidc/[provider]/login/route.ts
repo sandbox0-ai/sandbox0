@@ -5,14 +5,10 @@ import {
   resolveOIDCLoginLocation,
 } from "@sandbox0/dashboard-core";
 
-function dashboardURL(
-  requestURL: string,
-  basePath: string,
-  error?: string,
-): URL {
+function dashboardURL(requestURL: string, error?: string): URL {
   const value = error
-    ? `${basePath}?login_error=${encodeURIComponent(error)}`
-    : basePath;
+    ? `/?login_error=${encodeURIComponent(error)}`
+    : "/";
   return new URL(value, requestURL);
 }
 
@@ -25,11 +21,7 @@ export async function GET(
   const result = await resolveOIDCLoginLocation(config, provider);
   if (!result.location) {
     return NextResponse.redirect(
-      dashboardURL(
-        request.url,
-        config.dashboardBasePath,
-        result.error ?? "oidc login failed",
-      ),
+      dashboardURL(request.url, result.error ?? "oidc login failed"),
       { status: 303 },
     );
   }

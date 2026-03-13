@@ -12,6 +12,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
 	"github.com/sandbox0-ai/sandbox0/pkg/framework"
 	"github.com/sandbox0-ai/sandbox0/pkg/metering"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	e2eutils "github.com/sandbox0-ai/sandbox0/tests/e2e/utils"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
@@ -444,9 +445,6 @@ func assertSandboxNetworkIsolation(env *framework.ScenarioEnv, session *e2eutils
 		_ = deleteTemplateCR(env, templateBID)
 	}()
 
-	waitForTemplateStatusEventually(env, session, templateAID)
-	waitForTemplateStatusEventually(env, session, templateBID)
-
 	sandboxAID := claimSandboxEventually(env, session, templateAID).SandboxId
 	defer func() {
 		_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), sandboxAID)
@@ -533,8 +531,11 @@ func assertSandboxNetworkIsolation(env *framework.ScenarioEnv, session *e2eutils
 }
 
 func applyPinnedTemplate(env *framework.ScenarioEnv, base apispec.Template, templateID, nodeName string) error {
-	templateCR, err := buildPinnedTemplateCR(env, base, templateID, nodeName)
+	templateCR, err := buildPinnedTemplateCR(base, templateID, nodeName)
 	if err != nil {
+		return err
+	}
+	if err := framework.EnsureNamespace(env.TestCtx.Context, env.Config.Kubeconfig, templateCR.Namespace); err != nil {
 		return err
 	}
 	raw, err := yaml.Marshal(templateCR)
@@ -556,7 +557,7 @@ func applyPinnedTemplate(env *framework.ScenarioEnv, base apispec.Template, temp
 	return framework.ApplyManifest(env.TestCtx.Context, env.Config.Kubeconfig, file.Name())
 }
 
-func buildPinnedTemplateCR(env *framework.ScenarioEnv, base apispec.Template, templateID, nodeName string) (*mgrv1alpha1.SandboxTemplate, error) {
+func buildPinnedTemplateCR(base apispec.Template, templateID, nodeName string) (*mgrv1alpha1.SandboxTemplate, error) {
 	raw, err := json.Marshal(base.Spec)
 	if err != nil {
 		return nil, err
@@ -582,6 +583,10 @@ func buildPinnedTemplateCR(env *framework.ScenarioEnv, base apispec.Template, te
 	}
 	nodeSelector["kubernetes.io/hostname"] = nodeName
 	spec.Pod.NodeSelector = nodeSelector
+	namespace, err := naming.TemplateNamespaceForBuiltin(templateID)
+	if err != nil {
+		return nil, err
+	}
 
 	return &mgrv1alpha1.SandboxTemplate{
 		TypeMeta: metav1.TypeMeta{
@@ -590,13 +595,21 @@ func buildPinnedTemplateCR(env *framework.ScenarioEnv, base apispec.Template, te
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      templateID,
-			Namespace: env.Infra.Namespace,
+			Namespace: namespace,
+			Labels: map[string]string{
+				"sandbox0.ai/template-scope":      naming.ScopePublic,
+				"sandbox0.ai/template-logical-id": templateID,
+			},
 		},
 		Spec: spec,
 	}, nil
 }
 
 func deleteTemplateCR(env *framework.ScenarioEnv, templateID string) error {
+	namespace, err := naming.TemplateNamespaceForBuiltin(templateID)
+	if err != nil {
+		return err
+	}
 	return framework.Kubectl(
 		env.TestCtx.Context,
 		env.Config.Kubeconfig,
@@ -604,22 +617,9 @@ func deleteTemplateCR(env *framework.ScenarioEnv, templateID string) error {
 		"sandboxtemplate",
 		templateID,
 		"--namespace",
-		env.Infra.Namespace,
+		namespace,
 		"--ignore-not-found=true",
 	)
-}
-
-func waitForTemplateStatusEventually(env *framework.ScenarioEnv, session *e2eutils.Session, templateID string) {
-	Eventually(func() error {
-		tpl, err := session.GetTemplate(env.TestCtx.Context, GinkgoT(), templateID)
-		if err != nil {
-			return err
-		}
-		if tpl.Status == nil {
-			return fmt.Errorf("template %s status not ready", templateID)
-		}
-		return nil
-	}).WithTimeout(90 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
 }
 
 func waitForSandboxPodReadyEventually(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string) *apispec.Sandbox {

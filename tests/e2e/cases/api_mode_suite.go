@@ -672,11 +672,12 @@ func startSandboxHTTPServer(env *framework.ScenarioEnv, namespace, podName strin
 }
 
 func execInSandboxPod(env *framework.ScenarioEnv, namespace, podName, script string) (string, error) {
-	output, err := framework.KubectlExecOutput(
+	output, err := framework.KubectlExecContainerOutput(
 		env.TestCtx.Context,
 		env.Config.Kubeconfig,
 		namespace,
 		podName,
+		"procd",
 		"/bin/sh", "-lc", script,
 	)
 	return strings.ReplaceAll(output, "\r\n", "\n"), err

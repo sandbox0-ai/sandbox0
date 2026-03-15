@@ -16,6 +16,7 @@ import {
 } from "./DocsLanding";
 import { Sandbox0InfraReference } from "./Sandbox0InfraReference";
 import { DocsLink } from "./DocsLink";
+import { GitHubApplyCommand, GitHubRawLink, S0Install } from "./VersionedGitHub";
 import type { MDXComponents } from "mdx/types";
 
 function cx(...classes: Array<string | undefined | null | false>) {
@@ -410,6 +411,9 @@ export const mdxComponents: MDXComponents = {
   TerminalBlock,
   Endpoint,
   DocLink: DocsLink,
+  GitHubRawLink,
+  GitHubApplyCommand,
+  S0Install,
   
   // Landing Page Components
   DocsHero,

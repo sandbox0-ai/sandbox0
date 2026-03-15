@@ -67,20 +67,20 @@ kubectl get crd sandbox0infras.infra.sandbox0.ai
 
 Pick one official sample from source based on your target mode:
 
-- <DocLink href="https://raw.githubusercontent.com/sandbox0-ai/sandbox0/main/infra-operator/chart/samples/single-cluster/minimal.yaml" newTab>single-cluster/minimal.yaml</DocLink>
-- <DocLink href="https://raw.githubusercontent.com/sandbox0-ai/sandbox0/main/infra-operator/chart/samples/single-cluster/volumes.yaml" newTab>single-cluster/volumes.yaml</DocLink>
-- <DocLink href="https://raw.githubusercontent.com/sandbox0-ai/sandbox0/main/infra-operator/chart/samples/single-cluster/network-policy.yaml" newTab>single-cluster/network-policy.yaml</DocLink>
-- <DocLink href="https://raw.githubusercontent.com/sandbox0-ai/sandbox0/main/infra-operator/chart/samples/single-cluster/fullmode.yaml" newTab>single-cluster/fullmode.yaml</DocLink>
-- <DocLink href="https://raw.githubusercontent.com/sandbox0-ai/sandbox0/main/infra-operator/chart/samples/multi-cluster/control-plane.yaml" newTab>multi-cluster/control-plane.yaml</DocLink>
-- <DocLink href="https://raw.githubusercontent.com/sandbox0-ai/sandbox0/main/infra-operator/chart/samples/multi-cluster/data-plane.yaml" newTab>multi-cluster/data-plane.yaml</DocLink>
+- <GitHubRawLink repo="sandbox0" path="infra-operator/chart/samples/single-cluster/minimal.yaml">single-cluster/minimal.yaml</GitHubRawLink>
+- <GitHubRawLink repo="sandbox0" path="infra-operator/chart/samples/single-cluster/volumes.yaml">single-cluster/volumes.yaml</GitHubRawLink>
+- <GitHubRawLink repo="sandbox0" path="infra-operator/chart/samples/single-cluster/network-policy.yaml">single-cluster/network-policy.yaml</GitHubRawLink>
+- <GitHubRawLink repo="sandbox0" path="infra-operator/chart/samples/single-cluster/fullmode.yaml">single-cluster/fullmode.yaml</GitHubRawLink>
+- <GitHubRawLink repo="sandbox0" path="infra-operator/chart/samples/multi-cluster/control-plane.yaml">multi-cluster/control-plane.yaml</GitHubRawLink>
+- <GitHubRawLink repo="sandbox0" path="infra-operator/chart/samples/multi-cluster/data-plane.yaml">multi-cluster/data-plane.yaml</GitHubRawLink>
 
 Apply the one you selected:
 
-```bash
-# Default recommended mode: `fullmode` (Linux nodes only).
-# For local macOS/Windows testing, use `single-cluster/minimal.yaml` instead.
-kubectl apply -f https://raw.githubusercontent.com/sandbox0-ai/sandbox0/main/infra-operator/chart/samples/single-cluster/fullmode.yaml
-```
+<Callout variant="info">
+Default recommended mode: `fullmode` (Linux nodes only). For local macOS/Windows testing, use `single-cluster/minimal.yaml` instead.
+</Callout>
+
+<GitHubApplyCommand repo="sandbox0" path="infra-operator/chart/samples/single-cluster/fullmode.yaml" />
 
 Watch status:
 
@@ -103,7 +103,11 @@ ADMIN_PASSWORD="$(kubectl get secret admin-password -n sandbox0-system -o jsonpa
 printf 'username: %s\npassword: %s\n' 'admin@example.com' "$ADMIN_PASSWORD"
 ```
 
-## 4) Configure the API URL and Create a Token
+## 4) Install `s0`
+
+<S0Install />
+
+## 5) Configure the API URL and Create a Token
 
 For the local `kind` setup above, the API endpoint is `http://localhost:30080`.
 
@@ -222,9 +226,9 @@ kubectl get crd sandbox0infras.infra.sandbox0.ai
 
 Use the official `gVisor` sample, then switch `internal-gateway` to `LoadBalancer`:
 
-```bash
-kubectl apply -f https://raw.githubusercontent.com/sandbox0-ai/sandbox0/main/infra-operator/chart/samples/single-cluster/fullmode-gke-gvisor.yaml
+<GitHubApplyCommand repo="sandbox0" path="infra-operator/chart/samples/single-cluster/fullmode-gke-gvisor.yaml" />
 
+```bash
 kubectl patch sandbox0infra fullmode -n sandbox0-system --type merge -p \
     '{"spec":{"services":{"internalGateway":{"service":{"type":"LoadBalancer","port":80}}}}}'
 ```

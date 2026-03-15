@@ -74,6 +74,58 @@ export function getResolvedDocsVersionFromPathname(pathname?: string | null): st
   return getDocsVersionFromPathname(pathname) ?? DOCS_DEFAULT_VERSION;
 }
 
+function getDocsVersionEntry(version: string): DocsVersion | undefined {
+  return defaultDocsVersionsManifest.versions.find((entry) => entry.id === version);
+}
+
+export function resolveDocsVersionTarget(version: string): string {
+  const seen = new Set<string>();
+  let current = version;
+
+  while (!seen.has(current)) {
+    seen.add(current);
+    const target = getDocsVersionEntry(current)?.target;
+    if (!target) {
+      return current;
+    }
+    current = target;
+  }
+
+  return version;
+}
+
+export function resolveGitHubRefForDocsVersion(version: string): string {
+  const target = resolveDocsVersionTarget(version);
+  return target === "next" || target === "latest" ? "main" : target;
+}
+
+export function toGitHubRawHref(repo: string, version: string, filePath: string): string {
+  const ref = resolveGitHubRefForDocsVersion(version);
+  const normalizedPath = filePath.replace(/^\/+/, "");
+  return `https://raw.githubusercontent.com/${repo}/${ref}/${normalizedPath}`;
+}
+
+export function toGitHubReleaseHref(repo: string, version: string): string {
+  const ref = resolveGitHubRefForDocsVersion(version);
+  if (DOCS_VERSION_PATTERN.test(ref)) {
+    return `https://github.com/${repo}/releases/tag/${ref}`;
+  }
+  return `https://github.com/${repo}/releases/latest`;
+}
+
+export function toGitHubReadmeHref(
+  repo: string,
+  version: string,
+  anchor?: string
+): string {
+  const ref = resolveGitHubRefForDocsVersion(version);
+  const suffix = anchor ? `#${anchor}` : "";
+  if (ref === "main") {
+    return `https://github.com/${repo}${suffix}`;
+  }
+  return `https://github.com/${repo}/blob/${ref}/README.md${suffix}`;
+}
+
 export function getDocsContentPathFromPathname(pathname?: string | null): string {
   if (!pathname?.startsWith("/docs")) {
     return "/get-started";

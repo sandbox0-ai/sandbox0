@@ -45,8 +45,8 @@ func TestAllowEgressL4BlockAllNoAllowList(t *testing.T) {
 	p := &CompiledPolicy{
 		Mode: v1alpha1.NetworkModeBlockAll,
 	}
-	if AllowEgressL4(p, net.ParseIP("8.8.8.8"), 443, "tcp") != true {
-		t.Fatalf("expected allow without L4 allow list")
+	if AllowEgressL4(p, net.ParseIP("8.8.8.8"), 443, "tcp") != false {
+		t.Fatalf("expected deny without L4 allow list")
 	}
 }
 
@@ -153,6 +153,22 @@ func TestHasDomainRules(t *testing.T) {
 	}
 	if !HasDomainRules(p) {
 		t.Fatalf("expected true for policy with domains")
+	}
+}
+
+func TestUnknownFallbackAction(t *testing.T) {
+	if UnknownFallbackAction(nil) != UnknownTrafficPassThrough {
+		t.Fatalf("expected nil policy to pass through unknown traffic")
+	}
+
+	allowAll := &CompiledPolicy{Mode: v1alpha1.NetworkModeAllowAll}
+	if UnknownFallbackAction(allowAll) != UnknownTrafficPassThrough {
+		t.Fatalf("expected allow-all to pass through unknown traffic")
+	}
+
+	blockAll := &CompiledPolicy{Mode: v1alpha1.NetworkModeBlockAll}
+	if UnknownFallbackAction(blockAll) != UnknownTrafficDeny {
+		t.Fatalf("expected block-all to deny unknown traffic")
 	}
 }
 

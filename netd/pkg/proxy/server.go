@@ -189,13 +189,18 @@ func (s *Server) handleHTTPConn(conn net.Conn) {
 		return
 	}
 
-	reader := bufio.NewReader(conn)
+	observedConn := &recordingConn{Conn: conn}
+	reader := bufio.NewReader(observedConn)
 	req, err := http.ReadRequest(reader)
 	if err != nil {
-		s.logger.Error("HTTP parse failed", zap.Error(err))
+		s.handleUnknownTCP(conn, observedConn.RecordedReader(), p, srcIP, origIP, origPort, "http", "parse_failed", zap.Error(err))
 		return
 	}
 	host := normalizeHost(req.Host)
+	if host == "" {
+		s.handleUnknownTCP(conn, observedConn.RecordedReader(), p, srcIP, origIP, origPort, "http", "missing_host")
+		return
+	}
 	if !policy.AllowEgressDomain(p, host) {
 		s.logger.Info("HTTP L7 denied",
 			zap.String("src_ip", srcIP),
@@ -253,6 +258,10 @@ func (s *Server) handleHTTPSConn(conn net.Conn) {
 		return
 	}
 	host := normalizeHost(clientHello.ServerName)
+	if host == "" {
+		s.handleUnknownTCP(conn, bytes.NewReader(clientHello.Raw), p, srcIP, origIP, origPort, "tls", "missing_sni")
+		return
+	}
 	if !policy.AllowEgressDomain(p, host) {
 		s.logger.Info("TLS L7 denied",
 			zap.String("src_ip", srcIP),
@@ -264,16 +273,9 @@ func (s *Server) handleHTTPSConn(conn net.Conn) {
 	}
 	s.recordFlow(srcIP, origIP, origPort, "tcp", remotePort(conn.RemoteAddr()))
 
-	upstream, err := net.DialTimeout("tcp", net.JoinHostPort(origIP.String(), fmt.Sprintf("%d", origPort)), s.cfg.ProxyUpstreamTimeout.Duration)
-	if err != nil {
-		s.logger.Warn("TLS upstream dial failed", zap.Error(err))
-		return
+	if err := s.relayTCPConn(conn, bytes.NewReader(clientHello.Raw), origIP, origPort, p); err != nil {
+		s.logger.Warn("TLS upstream relay failed", zap.Error(err))
 	}
-	upstream = &countingConn{Conn: upstream}
-	defer upstream.Close()
-
-	reader := io.MultiReader(bytes.NewReader(clientHello.Raw), conn)
-	s.pipeWithReader(conn, upstream, reader, p)
 }
 
 func (s *Server) handleUDP(ctx context.Context) {
@@ -316,14 +318,10 @@ func (s *Server) handleUDPDatagram(src *net.UDPAddr, payload []byte, destIP net.
 	srcIP := src.IP.String()
 	p := s.store.GetByIP(srcIP)
 	if destIP == nil {
-		if s.cfg.FailClosed {
-			s.logger.Info("UDP L4 denied: missing original dst",
-				zap.String("src_ip", srcIP),
-				zap.Int("dst_port", destPort),
-			)
-			return
-		}
-	} else if !policy.AllowEgressL4(p, destIP, destPort, "udp") {
+		s.handleUnknownUDP(src, payload, p, destIP, destPort, "missing_original_dst")
+		return
+	}
+	if !policy.AllowEgressL4(p, destIP, destPort, "udp") {
 		s.logger.Info("UDP L4 denied",
 			zap.String("src_ip", srcIP),
 			zap.String("dst_ip", destIP.String()),
@@ -335,11 +333,7 @@ func (s *Server) handleUDPDatagram(src *net.UDPAddr, payload []byte, destIP net.
 	if policy.HasDomainRules(p) {
 		sni := s.reassembler.ParseSNI(payload, srcIP, destIP.String())
 		if sni == "" {
-			s.logger.Info("UDP L7 denied: missing SNI",
-				zap.String("src_ip", srcIP),
-				zap.String("dst_ip", destIP.String()),
-				zap.Int("dst_port", destPort),
-			)
+			s.handleUnknownUDP(src, payload, p, destIP, destPort, "missing_sni")
 			return
 		}
 		if !policy.AllowEgressDomain(p, sni) {
@@ -353,34 +347,9 @@ func (s *Server) handleUDPDatagram(src *net.UDPAddr, payload []byte, destIP net.
 		}
 	}
 	s.recordFlow(srcIP, destIP, destPort, "udp", src.Port)
-
-	if destIP == nil {
-		return
+	if err := s.forwardUDPDatagram(src, payload, destIP, destPort, p); err != nil {
+		s.logger.Warn("UDP upstream relay failed", zap.Error(err))
 	}
-	upstreamAddr := &net.UDPAddr{IP: destIP, Port: destPort}
-	upstreamConn, err := net.DialUDP("udp", nil, upstreamAddr)
-	if err != nil {
-		s.logger.Warn("UDP upstream dial failed", zap.Error(err))
-		return
-	}
-	defer upstreamConn.Close()
-
-	_ = upstreamConn.SetDeadline(time.Now().Add(s.cfg.ProxyUpstreamTimeout.Duration))
-	n, err := upstreamConn.Write(payload)
-	if err != nil {
-		s.logger.Warn("UDP upstream write failed", zap.Error(err))
-		return
-	}
-	s.recordEgressBytes(p, int64(n))
-
-	replyBuf := make([]byte, 64*1024)
-	n, _, err = upstreamConn.ReadFromUDP(replyBuf)
-	if err != nil {
-		s.logger.Warn("UDP upstream read failed", zap.Error(err))
-		return
-	}
-	s.recordIngressBytes(p, int64(n))
-	_, _ = s.udpConn.WriteToUDP(replyBuf[:n], src)
 }
 
 func (s *Server) pipe(client net.Conn, upstream net.Conn, reader *bufio.Reader, compiled *policy.CompiledPolicy) {
@@ -402,6 +371,127 @@ func (s *Server) pipeWithReader(client net.Conn, upstream net.Conn, reader io.Re
 		errCh <- err
 	}()
 	<-errCh
+}
+
+func (s *Server) handleUnknownTCP(
+	conn net.Conn,
+	prefix io.Reader,
+	compiled *policy.CompiledPolicy,
+	srcIP string,
+	destIP net.IP,
+	destPort int,
+	protocol string,
+	reason string,
+	fields ...zap.Field,
+) {
+	action := policy.UnknownFallbackAction(compiled)
+	baseFields := []zap.Field{
+		zap.String("src_ip", srcIP),
+		zap.String("dst_ip", ipString(destIP)),
+		zap.Int("dst_port", destPort),
+		zap.String("protocol", protocol),
+		zap.String("reason", reason),
+		zap.String("action", string(action)),
+	}
+	baseFields = append(baseFields, fields...)
+	if action != policy.UnknownTrafficPassThrough {
+		s.logger.Info("Unknown TCP fallback denied", baseFields...)
+		return
+	}
+
+	s.logger.Info("Unknown TCP fallback pass-through", baseFields...)
+	s.recordFlow(srcIP, destIP, destPort, "tcp", remotePort(conn.RemoteAddr()))
+	if err := s.relayTCPConn(conn, prefix, destIP, destPort, compiled); err != nil {
+		s.logger.Warn("Unknown TCP fallback relay failed", append(baseFields, zap.Error(err))...)
+	}
+}
+
+func (s *Server) relayTCPConn(client net.Conn, prefix io.Reader, destIP net.IP, destPort int, compiled *policy.CompiledPolicy) error {
+	if destIP == nil || destPort <= 0 {
+		return fmt.Errorf("missing destination")
+	}
+	upstream, err := net.DialTimeout("tcp", net.JoinHostPort(destIP.String(), fmt.Sprintf("%d", destPort)), s.cfg.ProxyUpstreamTimeout.Duration)
+	if err != nil {
+		return err
+	}
+	upstream = &countingConn{Conn: upstream}
+	defer upstream.Close()
+
+	reader := io.Reader(client)
+	if prefix != nil {
+		reader = io.MultiReader(prefix, client)
+	}
+	s.pipeWithReader(client, upstream, reader, compiled)
+	return nil
+}
+
+func (s *Server) handleUnknownUDP(
+	src *net.UDPAddr,
+	payload []byte,
+	compiled *policy.CompiledPolicy,
+	destIP net.IP,
+	destPort int,
+	reason string,
+) {
+	if src == nil {
+		return
+	}
+	action := policy.UnknownFallbackAction(compiled)
+	fields := []zap.Field{
+		zap.String("src_ip", src.IP.String()),
+		zap.String("dst_ip", ipString(destIP)),
+		zap.Int("dst_port", destPort),
+		zap.String("reason", reason),
+		zap.String("action", string(action)),
+	}
+	if action != policy.UnknownTrafficPassThrough {
+		s.logger.Info("Unknown UDP fallback denied", fields...)
+		return
+	}
+	if destIP == nil || destPort <= 0 {
+		s.logger.Warn("Unknown UDP fallback unavailable", fields...)
+		return
+	}
+
+	s.logger.Info("Unknown UDP fallback pass-through", fields...)
+	s.recordFlow(src.IP.String(), destIP, destPort, "udp", src.Port)
+	if err := s.forwardUDPDatagram(src, payload, destIP, destPort, compiled); err != nil {
+		s.logger.Warn("Unknown UDP fallback relay failed", append(fields, zap.Error(err))...)
+	}
+}
+
+func (s *Server) forwardUDPDatagram(
+	src *net.UDPAddr,
+	payload []byte,
+	destIP net.IP,
+	destPort int,
+	compiled *policy.CompiledPolicy,
+) error {
+	if src == nil || destIP == nil || destPort <= 0 {
+		return fmt.Errorf("missing destination")
+	}
+	upstreamAddr := &net.UDPAddr{IP: destIP, Port: destPort}
+	upstreamConn, err := net.DialUDP("udp", nil, upstreamAddr)
+	if err != nil {
+		return err
+	}
+	defer upstreamConn.Close()
+
+	_ = upstreamConn.SetDeadline(time.Now().Add(s.cfg.ProxyUpstreamTimeout.Duration))
+	n, err := upstreamConn.Write(payload)
+	if err != nil {
+		return err
+	}
+	s.recordEgressBytes(compiled, int64(n))
+
+	replyBuf := make([]byte, 64*1024)
+	n, _, err = upstreamConn.ReadFromUDP(replyBuf)
+	if err != nil {
+		return err
+	}
+	s.recordIngressBytes(compiled, int64(n))
+	_, err = s.udpConn.WriteToUDP(replyBuf[:n], src)
+	return err
 }
 
 func normalizeHost(host string) string {
@@ -436,6 +526,13 @@ func remotePort(addr net.Addr) int {
 		return 0
 	}
 	return value
+}
+
+func ipString(ip net.IP) string {
+	if ip == nil {
+		return ""
+	}
+	return ip.String()
 }
 
 func (s *Server) recordFlow(srcIP string, dstIP net.IP, dstPort int, proto string, srcPort int) {
@@ -502,6 +599,23 @@ func (c *countingConn) Write(p []byte) (int, error) {
 	n, err := c.Conn.Write(p)
 	c.written += int64(n)
 	return n, err
+}
+
+type recordingConn struct {
+	net.Conn
+	recorded bytes.Buffer
+}
+
+func (c *recordingConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if n > 0 {
+		_, _ = c.recorded.Write(p[:n])
+	}
+	return n, err
+}
+
+func (c *recordingConn) RecordedReader() io.Reader {
+	return bytes.NewReader(c.recorded.Bytes())
 }
 
 type clientHelloInfo struct {

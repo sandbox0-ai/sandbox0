@@ -7,6 +7,13 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 )
 
+type UnknownTrafficAction string
+
+const (
+	UnknownTrafficPassThrough UnknownTrafficAction = "pass-through"
+	UnknownTrafficDeny        UnknownTrafficAction = "deny"
+)
+
 func AllowEgressL4(policy *CompiledPolicy, destIP net.IP, destPort int, protocol string) bool {
 	if policy == nil {
 		return true
@@ -36,6 +43,9 @@ func AllowEgressL4(policy *CompiledPolicy, destIP net.IP, destPort int, protocol
 		}
 		return true
 	case v1alpha1.NetworkModeBlockAll:
+		if len(policy.Egress.AllowedCIDRs) == 0 && len(policy.Egress.AllowedPorts) == 0 {
+			return false
+		}
 		if len(policy.Egress.AllowedCIDRs) > 0 && !matchCIDR(destIP, policy.Egress.AllowedCIDRs) {
 			return false
 		}
@@ -45,6 +55,18 @@ func AllowEgressL4(policy *CompiledPolicy, destIP net.IP, destPort int, protocol
 		return true
 	default:
 		return false
+	}
+}
+
+func UnknownFallbackAction(policy *CompiledPolicy) UnknownTrafficAction {
+	if policy == nil {
+		return UnknownTrafficPassThrough
+	}
+	switch policy.Mode {
+	case v1alpha1.NetworkModeBlockAll:
+		return UnknownTrafficDeny
+	default:
+		return UnknownTrafficPassThrough
 	}
 }
 

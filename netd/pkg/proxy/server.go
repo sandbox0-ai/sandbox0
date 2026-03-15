@@ -31,6 +31,10 @@ type Server struct {
 	httpsListener net.Listener
 	udpConn       *net.UDPConn
 	reassembler   *quicReassembler
+	tcpAdapters   map[string]proxyAdapter
+	udpAdapters   map[string]proxyAdapter
+	tcpFallback   proxyAdapter
+	udpFallback   proxyAdapter
 	exitCh        chan error
 	exitOnce      sync.Once
 }
@@ -78,7 +82,16 @@ func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.T
 		httpsListener: httpsLn,
 		udpConn:       udpConn,
 		reassembler:   newQuicReassembler(),
-		exitCh:        make(chan error, 1),
+		tcpAdapters: map[string]proxyAdapter{
+			"http": &httpAdapter{},
+			"tls":  &tlsAdapter{},
+		},
+		udpAdapters: map[string]proxyAdapter{
+			"udp": &udpAdapter{},
+		},
+		tcpFallback: &tcpPassThroughAdapter{},
+		udpFallback: &udpPassThroughAdapter{},
+		exitCh:      make(chan error, 1),
 	}, nil
 }
 
@@ -185,39 +198,43 @@ func (s *Server) handleHTTPConn(conn net.Conn) {
 	req, err := http.ReadRequest(reader)
 	if err != nil {
 		decision := decideTraffic(p, classifyUnknownTraffic("tcp", "http", origIP, origPort, "parse_failed"))
-		s.handleTCPDecision(conn, observedConn.RecordedReader(), p, srcIP, decision, origIP, origPort, "", zap.Error(err))
+		s.handleTCPDecision(&adapterRequest{
+			Server:   s,
+			Compiled: p,
+			SrcIP:    srcIP,
+			DestIP:   origIP,
+			DestPort: origPort,
+			Conn:     conn,
+			Prefix:   observedConn.RecordedReader(),
+		}, decision, "", zap.Error(err))
 		return
 	}
 	host := normalizeHost(req.Host)
 	if host == "" {
 		decision := decideTraffic(p, classifyUnknownTraffic("tcp", "http", origIP, origPort, "missing_host"))
-		s.handleTCPDecision(conn, observedConn.RecordedReader(), p, srcIP, decision, origIP, origPort, "")
+		s.handleTCPDecision(&adapterRequest{
+			Server:   s,
+			Compiled: p,
+			SrcIP:    srcIP,
+			DestIP:   origIP,
+			DestPort: origPort,
+			Conn:     conn,
+			Prefix:   observedConn.RecordedReader(),
+		}, decision, "")
 		return
 	}
 	decision := decideTraffic(p, classifyKnownTraffic("tcp", "http", origIP, origPort, host))
-	if !s.handleTCPDecision(conn, nil, p, srcIP, decision, origIP, origPort, host) {
-		return
-	}
-	s.recordFlow(srcIP, origIP, origPort, "tcp", remotePort(conn.RemoteAddr()))
-
-	upstream, err := net.DialTimeout("tcp", net.JoinHostPort(origIP.String(), fmt.Sprintf("%d", origPort)), s.cfg.ProxyUpstreamTimeout.Duration)
-	if err != nil {
-		s.logger.Warn("HTTP upstream dial failed", zap.Error(err))
-		return
-	}
-	upstream = &countingConn{Conn: upstream}
-	defer upstream.Close()
-
-	if err := req.Write(upstream); err != nil {
-		s.logger.Warn("HTTP upstream write failed", zap.Error(err))
-		return
-	}
-	if counter, ok := upstream.(*countingConn); ok {
-		s.recordEgressBytes(p, counter.written)
-		counter.written = 0
-	}
-
-	s.pipe(conn, upstream, reader, p)
+	s.handleTCPDecision(&adapterRequest{
+		Server:      s,
+		Compiled:    p,
+		SrcIP:       srcIP,
+		DestIP:      origIP,
+		DestPort:    origPort,
+		Host:        host,
+		Conn:        conn,
+		HTTPRequest: req,
+		HTTPReader:  reader,
+	}, decision, host)
 }
 
 func (s *Server) handleHTTPSConn(conn net.Conn) {
@@ -234,24 +251,41 @@ func (s *Server) handleHTTPSConn(conn net.Conn) {
 	clientHello, err := readClientHello(conn, int(s.cfg.ProxyHeaderLimit))
 	if err != nil {
 		decision := decideTraffic(p, classifyUnknownTraffic("tcp", "tls", origIP, origPort, "parse_failed"))
-		s.handleTCPDecision(conn, nil, p, srcIP, decision, origIP, origPort, "", zap.Error(err))
+		s.handleTCPDecision(&adapterRequest{
+			Server:   s,
+			Compiled: p,
+			SrcIP:    srcIP,
+			DestIP:   origIP,
+			DestPort: origPort,
+			Conn:     conn,
+		}, decision, "", zap.Error(err))
 		return
 	}
 	host := normalizeHost(clientHello.ServerName)
 	if host == "" {
 		decision := decideTraffic(p, classifyUnknownTraffic("tcp", "tls", origIP, origPort, "missing_sni"))
-		s.handleTCPDecision(conn, bytes.NewReader(clientHello.Raw), p, srcIP, decision, origIP, origPort, "")
+		s.handleTCPDecision(&adapterRequest{
+			Server:   s,
+			Compiled: p,
+			SrcIP:    srcIP,
+			DestIP:   origIP,
+			DestPort: origPort,
+			Conn:     conn,
+			Prefix:   bytes.NewReader(clientHello.Raw),
+		}, decision, "")
 		return
 	}
 	decision := decideTraffic(p, classifyKnownTraffic("tcp", "tls", origIP, origPort, host))
-	if !s.handleTCPDecision(conn, nil, p, srcIP, decision, origIP, origPort, host) {
-		return
-	}
-	s.recordFlow(srcIP, origIP, origPort, "tcp", remotePort(conn.RemoteAddr()))
-
-	if err := s.relayTCPConn(conn, bytes.NewReader(clientHello.Raw), origIP, origPort, p); err != nil {
-		s.logger.Warn("TLS upstream relay failed", zap.Error(err))
-	}
+	s.handleTCPDecision(&adapterRequest{
+		Server:   s,
+		Compiled: p,
+		SrcIP:    srcIP,
+		DestIP:   origIP,
+		DestPort: origPort,
+		Host:     host,
+		Conn:     conn,
+		Prefix:   bytes.NewReader(clientHello.Raw),
+	}, decision, host)
 }
 
 func (s *Server) handleUDP(ctx context.Context) {
@@ -295,25 +329,54 @@ func (s *Server) handleUDPDatagram(src *net.UDPAddr, payload []byte, destIP net.
 	p := s.store.GetByIP(srcIP)
 	if destIP == nil {
 		decision := decideTraffic(p, classifyUnknownTraffic("udp", "udp", destIP, destPort, "missing_original_dst"))
-		s.handleUDPDecision(src, payload, p, decision, destIP, destPort, "")
+		s.handleUDPDecision(&adapterRequest{
+			Server:     s,
+			Compiled:   p,
+			SrcIP:      srcIP,
+			DestIP:     destIP,
+			DestPort:   destPort,
+			UDPSource:  src,
+			UDPPayload: payload,
+		}, decision, "")
 		return
 	}
 	if policy.HasDomainRules(p) {
 		sni := s.reassembler.ParseSNI(payload, srcIP, destIP.String())
 		if sni == "" {
 			decision := decideTraffic(p, classifyUnknownTraffic("udp", "udp", destIP, destPort, "missing_sni"))
-			s.handleUDPDecision(src, payload, p, decision, destIP, destPort, "")
+			s.handleUDPDecision(&adapterRequest{
+				Server:     s,
+				Compiled:   p,
+				SrcIP:      srcIP,
+				DestIP:     destIP,
+				DestPort:   destPort,
+				UDPSource:  src,
+				UDPPayload: payload,
+			}, decision, "")
 			return
 		}
 		decision := decideTraffic(p, classifyKnownTraffic("udp", "udp", destIP, destPort, sni))
-		if !s.handleUDPDecision(src, payload, p, decision, destIP, destPort, sni) {
-			return
-		}
+		s.handleUDPDecision(&adapterRequest{
+			Server:     s,
+			Compiled:   p,
+			SrcIP:      srcIP,
+			DestIP:     destIP,
+			DestPort:   destPort,
+			Host:       sni,
+			UDPSource:  src,
+			UDPPayload: payload,
+		}, decision, sni)
 	} else {
 		decision := decideTraffic(p, classifyKnownTraffic("udp", "udp", destIP, destPort, ""))
-		if !s.handleUDPDecision(src, payload, p, decision, destIP, destPort, "") {
-			return
-		}
+		s.handleUDPDecision(&adapterRequest{
+			Server:     s,
+			Compiled:   p,
+			SrcIP:      srcIP,
+			DestIP:     destIP,
+			DestPort:   destPort,
+			UDPSource:  src,
+			UDPPayload: payload,
+		}, decision, "")
 	}
 }
 
@@ -338,21 +401,14 @@ func (s *Server) pipeWithReader(client net.Conn, upstream net.Conn, reader io.Re
 	<-errCh
 }
 
-func (s *Server) handleTCPDecision(
-	conn net.Conn,
-	prefix io.Reader,
-	compiled *policy.CompiledPolicy,
-	srcIP string,
-	decision trafficDecision,
-	destIP net.IP,
-	destPort int,
-	host string,
-	fields ...zap.Field,
-) bool {
+func (s *Server) handleTCPDecision(req *adapterRequest, decision trafficDecision, host string, fields ...zap.Field) {
+	if req == nil {
+		return
+	}
 	baseFields := []zap.Field{
-		zap.String("src_ip", srcIP),
-		zap.String("dst_ip", ipString(destIP)),
-		zap.Int("dst_port", destPort),
+		zap.String("src_ip", req.SrcIP),
+		zap.String("dst_ip", ipString(req.DestIP)),
+		zap.Int("dst_port", req.DestPort),
 		zap.String("protocol", decision.Protocol),
 		zap.String("reason", decision.Reason),
 		zap.String("action", string(decision.Action)),
@@ -364,20 +420,22 @@ func (s *Server) handleTCPDecision(
 	switch decision.Action {
 	case decisionActionDeny:
 		s.logger.Info("TCP decision denied", baseFields...)
-		return false
+		return
 	case decisionActionPassThrough:
 		s.logger.Info("TCP decision pass-through", baseFields...)
-		s.recordFlow(srcIP, destIP, destPort, "tcp", remotePort(conn.RemoteAddr()))
-		if err := s.relayTCPConn(conn, prefix, destIP, destPort, compiled); err != nil {
-			s.logger.Warn("TCP decision relay failed", append(baseFields, zap.Error(err))...)
+		if err := s.runTCPFallbackAdapter(req); err != nil {
+			s.logger.Warn("TCP fallback adapter failed", append(baseFields, zap.Error(err))...)
 		}
-		return false
+		return
 	case decisionActionUseAdapter:
 		s.logger.Debug("TCP decision use adapter", baseFields...)
-		return true
+		if err := s.runTCPAdapter(decision.Protocol, req); err != nil {
+			s.logger.Warn("TCP adapter failed", append(baseFields, zap.Error(err))...)
+		}
+		return
 	default:
 		s.logger.Warn("TCP decision unknown action", baseFields...)
-		return false
+		return
 	}
 }
 
@@ -400,22 +458,14 @@ func (s *Server) relayTCPConn(client net.Conn, prefix io.Reader, destIP net.IP, 
 	return nil
 }
 
-func (s *Server) handleUDPDecision(
-	src *net.UDPAddr,
-	payload []byte,
-	compiled *policy.CompiledPolicy,
-	decision trafficDecision,
-	destIP net.IP,
-	destPort int,
-	host string,
-) bool {
-	if src == nil {
-		return false
+func (s *Server) handleUDPDecision(req *adapterRequest, decision trafficDecision, host string) {
+	if req == nil || req.UDPSource == nil {
+		return
 	}
 	fields := []zap.Field{
-		zap.String("src_ip", src.IP.String()),
-		zap.String("dst_ip", ipString(destIP)),
-		zap.Int("dst_port", destPort),
+		zap.String("src_ip", req.UDPSource.IP.String()),
+		zap.String("dst_ip", ipString(req.DestIP)),
+		zap.Int("dst_port", req.DestPort),
 		zap.String("protocol", decision.Protocol),
 		zap.String("reason", decision.Reason),
 		zap.String("action", string(decision.Action)),
@@ -426,29 +476,63 @@ func (s *Server) handleUDPDecision(
 	switch decision.Action {
 	case decisionActionDeny:
 		s.logger.Info("UDP decision denied", fields...)
-		return false
+		return
 	case decisionActionPassThrough:
-		if destIP == nil || destPort <= 0 {
+		if req.DestIP == nil || req.DestPort <= 0 {
 			s.logger.Warn("UDP decision pass-through unavailable", fields...)
-			return false
+			return
 		}
 		s.logger.Info("UDP decision pass-through", fields...)
-		s.recordFlow(src.IP.String(), destIP, destPort, "udp", src.Port)
-		if err := s.forwardUDPDatagram(src, payload, destIP, destPort, compiled); err != nil {
-			s.logger.Warn("UDP decision relay failed", append(fields, zap.Error(err))...)
+		if err := s.runUDPFallbackAdapter(req); err != nil {
+			s.logger.Warn("UDP fallback adapter failed", append(fields, zap.Error(err))...)
 		}
-		return false
+		return
 	case decisionActionUseAdapter:
 		s.logger.Debug("UDP decision use adapter", fields...)
-		s.recordFlow(src.IP.String(), destIP, destPort, "udp", src.Port)
-		if err := s.forwardUDPDatagram(src, payload, destIP, destPort, compiled); err != nil {
-			s.logger.Warn("UDP adapter relay failed", append(fields, zap.Error(err))...)
+		if err := s.runUDPAdapter(decision.Protocol, req); err != nil {
+			s.logger.Warn("UDP adapter failed", append(fields, zap.Error(err))...)
 		}
-		return false
+		return
 	default:
 		s.logger.Warn("UDP decision unknown action", fields...)
-		return false
+		return
 	}
+}
+
+func (s *Server) runTCPAdapter(protocol string, req *adapterRequest) error {
+	if s == nil {
+		return fmt.Errorf("server is nil")
+	}
+	adapter := s.tcpAdapters[protocol]
+	if adapter == nil {
+		return fmt.Errorf("tcp adapter not found for protocol %q", protocol)
+	}
+	return adapter.Handle(req)
+}
+
+func (s *Server) runUDPAdapter(protocol string, req *adapterRequest) error {
+	if s == nil {
+		return fmt.Errorf("server is nil")
+	}
+	adapter := s.udpAdapters[protocol]
+	if adapter == nil {
+		return fmt.Errorf("udp adapter not found for protocol %q", protocol)
+	}
+	return adapter.Handle(req)
+}
+
+func (s *Server) runTCPFallbackAdapter(req *adapterRequest) error {
+	if s == nil || s.tcpFallback == nil {
+		return fmt.Errorf("tcp fallback adapter is not configured")
+	}
+	return s.tcpFallback.Handle(req)
+}
+
+func (s *Server) runUDPFallbackAdapter(req *adapterRequest) error {
+	if s == nil || s.udpFallback == nil {
+		return fmt.Errorf("udp fallback adapter is not configured")
+	}
+	return s.udpFallback.Handle(req)
 }
 
 func (s *Server) forwardUDPDatagram(

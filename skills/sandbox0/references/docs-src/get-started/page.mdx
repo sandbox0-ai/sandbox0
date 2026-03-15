@@ -35,13 +35,25 @@ Get your first sandbox running in minutes.
 
 ### Install s0 CLI (Required)
 
-Install from <DocLink href="https://github.com/sandbox0-ai/s0/releases" newTab>GitHub Releases</DocLink>.
+macOS and Linux:
 
-Or with Go (requires Go 1.21+):
+```bash
+curl -fsSL https://raw.githubusercontent.com/sandbox0-ai/s0/main/scripts/install.sh | bash
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/sandbox0-ai/s0/main/scripts/install.ps1 | iex
+```
+
+Or with Go:
 
 ```bash
 go install github.com/sandbox0-ai/s0/cmd/s0@latest
 ```
+
+Manual release archives are available from <DocLink href="https://github.com/sandbox0-ai/s0/releases/latest" newTab>GitHub Releases</DocLink>. See the <DocLink href="https://github.com/sandbox0-ai/s0#installation" newTab>s0 README</DocLink> for platform-specific manual install steps.
 
 ### Install SDK
 

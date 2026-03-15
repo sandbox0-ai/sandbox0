@@ -103,7 +103,29 @@ ADMIN_PASSWORD="$(kubectl get secret admin-password -n sandbox0-system -o jsonpa
 printf 'username: %s\npassword: %s\n' 'admin@example.com' "$ADMIN_PASSWORD"
 ```
 
-## 4) Configure the API URL and Create a Token
+## 4) Install `s0`
+
+macOS and Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/sandbox0-ai/s0/main/scripts/install.sh | bash
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/sandbox0-ai/s0/main/scripts/install.ps1 | iex
+```
+
+Or with Go:
+
+```bash
+go install github.com/sandbox0-ai/s0/cmd/s0@latest
+```
+
+Manual release archives are available from <DocLink href="https://github.com/sandbox0-ai/s0/releases/latest" newTab>GitHub Releases</DocLink>. See the <DocLink href="https://github.com/sandbox0-ai/s0#installation" newTab>s0 README</DocLink> for platform-specific manual install steps.
+
+## 5) Configure the API URL and Create a Token
 
 For the local `kind` setup above, the API endpoint is `http://localhost:30080`.
 

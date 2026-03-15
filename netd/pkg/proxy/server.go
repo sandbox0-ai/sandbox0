@@ -179,35 +179,23 @@ func (s *Server) handleHTTPConn(conn net.Conn) {
 
 	srcIP := remoteIP(conn.RemoteAddr())
 	p := s.store.GetByIP(srcIP)
-	if !policy.AllowEgressL4(p, origIP, origPort, "tcp") {
-		s.logger.Info("HTTP L4 denied",
-			zap.String("src_ip", srcIP),
-			zap.String("dst_ip", origIP.String()),
-			zap.Int("dst_port", origPort),
-			zap.Bool("policy_exists", p != nil),
-		)
-		return
-	}
 
 	observedConn := &recordingConn{Conn: conn}
 	reader := bufio.NewReader(observedConn)
 	req, err := http.ReadRequest(reader)
 	if err != nil {
-		s.handleUnknownTCP(conn, observedConn.RecordedReader(), p, srcIP, origIP, origPort, "http", "parse_failed", zap.Error(err))
+		decision := decideTraffic(p, classifyUnknownTraffic("tcp", "http", origIP, origPort, "parse_failed"))
+		s.handleTCPDecision(conn, observedConn.RecordedReader(), p, srcIP, decision, origIP, origPort, "", zap.Error(err))
 		return
 	}
 	host := normalizeHost(req.Host)
 	if host == "" {
-		s.handleUnknownTCP(conn, observedConn.RecordedReader(), p, srcIP, origIP, origPort, "http", "missing_host")
+		decision := decideTraffic(p, classifyUnknownTraffic("tcp", "http", origIP, origPort, "missing_host"))
+		s.handleTCPDecision(conn, observedConn.RecordedReader(), p, srcIP, decision, origIP, origPort, "")
 		return
 	}
-	if !policy.AllowEgressDomain(p, host) {
-		s.logger.Info("HTTP L7 denied",
-			zap.String("src_ip", srcIP),
-			zap.String("host", host),
-			zap.String("dst_ip", origIP.String()),
-			zap.Int("dst_port", origPort),
-		)
+	decision := decideTraffic(p, classifyKnownTraffic("tcp", "http", origIP, origPort, host))
+	if !s.handleTCPDecision(conn, nil, p, srcIP, decision, origIP, origPort, host) {
 		return
 	}
 	s.recordFlow(srcIP, origIP, origPort, "tcp", remotePort(conn.RemoteAddr()))
@@ -242,33 +230,21 @@ func (s *Server) handleHTTPSConn(conn net.Conn) {
 
 	srcIP := remoteIP(conn.RemoteAddr())
 	p := s.store.GetByIP(srcIP)
-	if !policy.AllowEgressL4(p, origIP, origPort, "tcp") {
-		s.logger.Info("TLS L4 denied",
-			zap.String("src_ip", srcIP),
-			zap.String("dst_ip", origIP.String()),
-			zap.Int("dst_port", origPort),
-			zap.Bool("policy_exists", p != nil),
-		)
-		return
-	}
 
 	clientHello, err := readClientHello(conn, int(s.cfg.ProxyHeaderLimit))
 	if err != nil {
-		s.logger.Warn("TLS parse failed", zap.Error(err))
+		decision := decideTraffic(p, classifyUnknownTraffic("tcp", "tls", origIP, origPort, "parse_failed"))
+		s.handleTCPDecision(conn, nil, p, srcIP, decision, origIP, origPort, "", zap.Error(err))
 		return
 	}
 	host := normalizeHost(clientHello.ServerName)
 	if host == "" {
-		s.handleUnknownTCP(conn, bytes.NewReader(clientHello.Raw), p, srcIP, origIP, origPort, "tls", "missing_sni")
+		decision := decideTraffic(p, classifyUnknownTraffic("tcp", "tls", origIP, origPort, "missing_sni"))
+		s.handleTCPDecision(conn, bytes.NewReader(clientHello.Raw), p, srcIP, decision, origIP, origPort, "")
 		return
 	}
-	if !policy.AllowEgressDomain(p, host) {
-		s.logger.Info("TLS L7 denied",
-			zap.String("src_ip", srcIP),
-			zap.String("host", host),
-			zap.String("dst_ip", origIP.String()),
-			zap.Int("dst_port", origPort),
-		)
+	decision := decideTraffic(p, classifyKnownTraffic("tcp", "tls", origIP, origPort, host))
+	if !s.handleTCPDecision(conn, nil, p, srcIP, decision, origIP, origPort, host) {
 		return
 	}
 	s.recordFlow(srcIP, origIP, origPort, "tcp", remotePort(conn.RemoteAddr()))
@@ -318,37 +294,26 @@ func (s *Server) handleUDPDatagram(src *net.UDPAddr, payload []byte, destIP net.
 	srcIP := src.IP.String()
 	p := s.store.GetByIP(srcIP)
 	if destIP == nil {
-		s.handleUnknownUDP(src, payload, p, destIP, destPort, "missing_original_dst")
-		return
-	}
-	if !policy.AllowEgressL4(p, destIP, destPort, "udp") {
-		s.logger.Info("UDP L4 denied",
-			zap.String("src_ip", srcIP),
-			zap.String("dst_ip", destIP.String()),
-			zap.Int("dst_port", destPort),
-			zap.Bool("policy_exists", p != nil),
-		)
+		decision := decideTraffic(p, classifyUnknownTraffic("udp", "udp", destIP, destPort, "missing_original_dst"))
+		s.handleUDPDecision(src, payload, p, decision, destIP, destPort, "")
 		return
 	}
 	if policy.HasDomainRules(p) {
 		sni := s.reassembler.ParseSNI(payload, srcIP, destIP.String())
 		if sni == "" {
-			s.handleUnknownUDP(src, payload, p, destIP, destPort, "missing_sni")
+			decision := decideTraffic(p, classifyUnknownTraffic("udp", "udp", destIP, destPort, "missing_sni"))
+			s.handleUDPDecision(src, payload, p, decision, destIP, destPort, "")
 			return
 		}
-		if !policy.AllowEgressDomain(p, sni) {
-			s.logger.Info("UDP L7 denied",
-				zap.String("src_ip", srcIP),
-				zap.String("host", sni),
-				zap.String("dst_ip", destIP.String()),
-				zap.Int("dst_port", destPort),
-			)
+		decision := decideTraffic(p, classifyKnownTraffic("udp", "udp", destIP, destPort, sni))
+		if !s.handleUDPDecision(src, payload, p, decision, destIP, destPort, sni) {
 			return
 		}
-	}
-	s.recordFlow(srcIP, destIP, destPort, "udp", src.Port)
-	if err := s.forwardUDPDatagram(src, payload, destIP, destPort, p); err != nil {
-		s.logger.Warn("UDP upstream relay failed", zap.Error(err))
+	} else {
+		decision := decideTraffic(p, classifyKnownTraffic("udp", "udp", destIP, destPort, ""))
+		if !s.handleUDPDecision(src, payload, p, decision, destIP, destPort, "") {
+			return
+		}
 	}
 }
 
@@ -373,36 +338,46 @@ func (s *Server) pipeWithReader(client net.Conn, upstream net.Conn, reader io.Re
 	<-errCh
 }
 
-func (s *Server) handleUnknownTCP(
+func (s *Server) handleTCPDecision(
 	conn net.Conn,
 	prefix io.Reader,
 	compiled *policy.CompiledPolicy,
 	srcIP string,
+	decision trafficDecision,
 	destIP net.IP,
 	destPort int,
-	protocol string,
-	reason string,
+	host string,
 	fields ...zap.Field,
-) {
-	action := policy.UnknownFallbackAction(compiled)
+) bool {
 	baseFields := []zap.Field{
 		zap.String("src_ip", srcIP),
 		zap.String("dst_ip", ipString(destIP)),
 		zap.Int("dst_port", destPort),
-		zap.String("protocol", protocol),
-		zap.String("reason", reason),
-		zap.String("action", string(action)),
+		zap.String("protocol", decision.Protocol),
+		zap.String("reason", decision.Reason),
+		zap.String("action", string(decision.Action)),
+	}
+	if host != "" {
+		baseFields = append(baseFields, zap.String("host", host))
 	}
 	baseFields = append(baseFields, fields...)
-	if action != policy.UnknownTrafficPassThrough {
-		s.logger.Info("Unknown TCP fallback denied", baseFields...)
-		return
-	}
-
-	s.logger.Info("Unknown TCP fallback pass-through", baseFields...)
-	s.recordFlow(srcIP, destIP, destPort, "tcp", remotePort(conn.RemoteAddr()))
-	if err := s.relayTCPConn(conn, prefix, destIP, destPort, compiled); err != nil {
-		s.logger.Warn("Unknown TCP fallback relay failed", append(baseFields, zap.Error(err))...)
+	switch decision.Action {
+	case decisionActionDeny:
+		s.logger.Info("TCP decision denied", baseFields...)
+		return false
+	case decisionActionPassThrough:
+		s.logger.Info("TCP decision pass-through", baseFields...)
+		s.recordFlow(srcIP, destIP, destPort, "tcp", remotePort(conn.RemoteAddr()))
+		if err := s.relayTCPConn(conn, prefix, destIP, destPort, compiled); err != nil {
+			s.logger.Warn("TCP decision relay failed", append(baseFields, zap.Error(err))...)
+		}
+		return false
+	case decisionActionUseAdapter:
+		s.logger.Debug("TCP decision use adapter", baseFields...)
+		return true
+	default:
+		s.logger.Warn("TCP decision unknown action", baseFields...)
+		return false
 	}
 }
 
@@ -425,38 +400,54 @@ func (s *Server) relayTCPConn(client net.Conn, prefix io.Reader, destIP net.IP, 
 	return nil
 }
 
-func (s *Server) handleUnknownUDP(
+func (s *Server) handleUDPDecision(
 	src *net.UDPAddr,
 	payload []byte,
 	compiled *policy.CompiledPolicy,
+	decision trafficDecision,
 	destIP net.IP,
 	destPort int,
-	reason string,
-) {
+	host string,
+) bool {
 	if src == nil {
-		return
+		return false
 	}
-	action := policy.UnknownFallbackAction(compiled)
 	fields := []zap.Field{
 		zap.String("src_ip", src.IP.String()),
 		zap.String("dst_ip", ipString(destIP)),
 		zap.Int("dst_port", destPort),
-		zap.String("reason", reason),
-		zap.String("action", string(action)),
+		zap.String("protocol", decision.Protocol),
+		zap.String("reason", decision.Reason),
+		zap.String("action", string(decision.Action)),
 	}
-	if action != policy.UnknownTrafficPassThrough {
-		s.logger.Info("Unknown UDP fallback denied", fields...)
-		return
+	if host != "" {
+		fields = append(fields, zap.String("host", host))
 	}
-	if destIP == nil || destPort <= 0 {
-		s.logger.Warn("Unknown UDP fallback unavailable", fields...)
-		return
-	}
-
-	s.logger.Info("Unknown UDP fallback pass-through", fields...)
-	s.recordFlow(src.IP.String(), destIP, destPort, "udp", src.Port)
-	if err := s.forwardUDPDatagram(src, payload, destIP, destPort, compiled); err != nil {
-		s.logger.Warn("Unknown UDP fallback relay failed", append(fields, zap.Error(err))...)
+	switch decision.Action {
+	case decisionActionDeny:
+		s.logger.Info("UDP decision denied", fields...)
+		return false
+	case decisionActionPassThrough:
+		if destIP == nil || destPort <= 0 {
+			s.logger.Warn("UDP decision pass-through unavailable", fields...)
+			return false
+		}
+		s.logger.Info("UDP decision pass-through", fields...)
+		s.recordFlow(src.IP.String(), destIP, destPort, "udp", src.Port)
+		if err := s.forwardUDPDatagram(src, payload, destIP, destPort, compiled); err != nil {
+			s.logger.Warn("UDP decision relay failed", append(fields, zap.Error(err))...)
+		}
+		return false
+	case decisionActionUseAdapter:
+		s.logger.Debug("UDP decision use adapter", fields...)
+		s.recordFlow(src.IP.String(), destIP, destPort, "udp", src.Port)
+		if err := s.forwardUDPDatagram(src, payload, destIP, destPort, compiled); err != nil {
+			s.logger.Warn("UDP adapter relay failed", append(fields, zap.Error(err))...)
+		}
+		return false
+	default:
+		s.logger.Warn("UDP decision unknown action", fields...)
+		return false
 	}
 }
 

@@ -35,6 +35,7 @@ type Server struct {
 	udpAdapters   map[string]proxyAdapter
 	tcpFallback   proxyAdapter
 	udpFallback   proxyAdapter
+	auditor       *auditLogger
 	exitCh        chan error
 	exitOnce      sync.Once
 }
@@ -57,19 +58,32 @@ func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.T
 	if logger == nil {
 		logger = zap.NewNop()
 	}
+	auditor, err := newAuditLogger(cfg)
+	if err != nil {
+		return nil, err
+	}
 	httpLn, err := listenTCPTransparent(net.JoinHostPort(cfg.ProxyListenAddr, fmt.Sprintf("%d", cfg.ProxyHTTPPort)))
 	if err != nil {
+		if auditor != nil {
+			_ = auditor.Close()
+		}
 		return nil, err
 	}
 	httpsLn, err := listenTCPTransparent(net.JoinHostPort(cfg.ProxyListenAddr, fmt.Sprintf("%d", cfg.ProxyHTTPSPort)))
 	if err != nil {
 		_ = httpLn.Close()
+		if auditor != nil {
+			_ = auditor.Close()
+		}
 		return nil, err
 	}
 	udpConn, err := listenUDPTransparent(net.JoinHostPort(cfg.ProxyListenAddr, fmt.Sprintf("%d", cfg.ProxyHTTPSPort)))
 	if err != nil {
 		_ = httpLn.Close()
 		_ = httpsLn.Close()
+		if auditor != nil {
+			_ = auditor.Close()
+		}
 		return nil, err
 	}
 	return &Server{
@@ -84,6 +98,7 @@ func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.T
 		reassembler:   newQuicReassembler(),
 		tcpAdapters: map[string]proxyAdapter{
 			"http": &httpAdapter{},
+			"ssh":  &sshAdapter{},
 			"tls":  &tlsAdapter{},
 		},
 		udpAdapters: map[string]proxyAdapter{
@@ -91,6 +106,7 @@ func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.T
 		},
 		tcpFallback: &tcpPassThroughAdapter{},
 		udpFallback: &udpPassThroughAdapter{},
+		auditor:     auditor,
 		exitCh:      make(chan error, 1),
 	}, nil
 }
@@ -124,6 +140,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	if s.udpConn != nil {
 		if closeErr := s.udpConn.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}
+	if s.auditor != nil {
+		if closeErr := s.auditor.Close(); closeErr != nil && err == nil {
 			err = closeErr
 		}
 	}
@@ -197,6 +218,20 @@ func (s *Server) handleHTTPConn(conn net.Conn) {
 	reader := bufio.NewReader(observedConn)
 	req, err := http.ReadRequest(reader)
 	if err != nil {
+		recorded := observedConn.RecordedBytes()
+		if parseSSHBanner(recorded) != "" {
+			decision := decideTraffic(p, classifyKnownTraffic("tcp", "ssh", origIP, origPort, ""))
+			s.handleTCPDecision(&adapterRequest{
+				Server:   s,
+				Compiled: p,
+				SrcIP:    srcIP,
+				DestIP:   origIP,
+				DestPort: origPort,
+				Conn:     conn,
+				Prefix:   bytes.NewReader(recorded),
+			}, decision, "")
+			return
+		}
 		decision := decideTraffic(p, classifyUnknownTraffic("tcp", "http", origIP, origPort, "parse_failed"))
 		s.handleTCPDecision(&adapterRequest{
 			Server:   s,
@@ -420,21 +455,31 @@ func (s *Server) handleTCPDecision(req *adapterRequest, decision trafficDecision
 	switch decision.Action {
 	case decisionActionDeny:
 		s.logger.Info("TCP decision denied", baseFields...)
+		s.recordAuditEvent(req, decision, "", nil)
 		return
 	case decisionActionPassThrough:
 		s.logger.Info("TCP decision pass-through", baseFields...)
-		if err := s.runTCPFallbackAdapter(req); err != nil {
+		err := s.runTCPFallbackAdapter(req)
+		s.recordAuditEvent(req, decision, s.tcpFallback.Name(), err)
+		if err != nil {
 			s.logger.Warn("TCP fallback adapter failed", append(baseFields, zap.Error(err))...)
 		}
 		return
 	case decisionActionUseAdapter:
 		s.logger.Debug("TCP decision use adapter", baseFields...)
-		if err := s.runTCPAdapter(decision.Protocol, req); err != nil {
+		adapterName := decision.Protocol
+		if adapter, ok := s.tcpAdapters[decision.Protocol]; ok && adapter != nil {
+			adapterName = adapter.Name()
+		}
+		err := s.runTCPAdapter(decision.Protocol, req)
+		s.recordAuditEvent(req, decision, adapterName, err)
+		if err != nil {
 			s.logger.Warn("TCP adapter failed", append(baseFields, zap.Error(err))...)
 		}
 		return
 	default:
 		s.logger.Warn("TCP decision unknown action", baseFields...)
+		s.recordAuditEvent(req, decision, "", fmt.Errorf("unknown tcp decision action"))
 		return
 	}
 }
@@ -476,26 +521,47 @@ func (s *Server) handleUDPDecision(req *adapterRequest, decision trafficDecision
 	switch decision.Action {
 	case decisionActionDeny:
 		s.logger.Info("UDP decision denied", fields...)
+		s.recordAuditEvent(req, decision, "", nil)
 		return
 	case decisionActionPassThrough:
 		if req.DestIP == nil || req.DestPort <= 0 {
-			s.logger.Warn("UDP decision pass-through unavailable", fields...)
+			err := fmt.Errorf("destination unavailable for udp pass-through")
+			s.logger.Warn("UDP decision pass-through unavailable", append(fields, zap.Error(err))...)
+			s.recordAuditEvent(req, decision, s.udpFallback.Name(), err)
 			return
 		}
 		s.logger.Info("UDP decision pass-through", fields...)
-		if err := s.runUDPFallbackAdapter(req); err != nil {
+		err := s.runUDPFallbackAdapter(req)
+		s.recordAuditEvent(req, decision, s.udpFallback.Name(), err)
+		if err != nil {
 			s.logger.Warn("UDP fallback adapter failed", append(fields, zap.Error(err))...)
 		}
 		return
 	case decisionActionUseAdapter:
 		s.logger.Debug("UDP decision use adapter", fields...)
-		if err := s.runUDPAdapter(decision.Protocol, req); err != nil {
+		adapterName := decision.Protocol
+		if adapter, ok := s.udpAdapters[decision.Protocol]; ok && adapter != nil {
+			adapterName = adapter.Name()
+		}
+		err := s.runUDPAdapter(decision.Protocol, req)
+		s.recordAuditEvent(req, decision, adapterName, err)
+		if err != nil {
 			s.logger.Warn("UDP adapter failed", append(fields, zap.Error(err))...)
 		}
 		return
 	default:
 		s.logger.Warn("UDP decision unknown action", fields...)
+		s.recordAuditEvent(req, decision, "", fmt.Errorf("unknown udp decision action"))
 		return
+	}
+}
+
+func (s *Server) recordAuditEvent(req *adapterRequest, decision trafficDecision, adapterName string, err error) {
+	if s == nil || s.auditor == nil {
+		return
+	}
+	if auditErr := s.auditor.Record(req, decision, adapterName, err); auditErr != nil {
+		s.logger.Warn("Failed to record audit event", zap.Error(auditErr))
 	}
 }
 
@@ -691,6 +757,10 @@ func (c *recordingConn) Read(p []byte) (int, error) {
 
 func (c *recordingConn) RecordedReader() io.Reader {
 	return bytes.NewReader(c.recorded.Bytes())
+}
+
+func (c *recordingConn) RecordedBytes() []byte {
+	return append([]byte(nil), c.recorded.Bytes()...)
 }
 
 type clientHelloInfo struct {

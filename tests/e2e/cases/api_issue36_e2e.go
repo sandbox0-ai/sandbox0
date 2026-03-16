@@ -83,6 +83,7 @@ func assertIssue36TCPClassificationBehavior(env *framework.ScenarioEnv, session 
 	defer func() {
 		_ = session.DeleteTemplate(env.TestCtx.Context, GinkgoT(), templateID)
 	}()
+	waitForIssue36TemplateReady(env, session, templateID)
 
 	sandboxID := claimSandboxEventually(env, session, templateID).SandboxId
 	Expect(sandboxID).NotTo(BeEmpty())
@@ -139,6 +140,7 @@ func assertIssue36UDPSessionBehavior(env *framework.ScenarioEnv, session *e2euti
 	defer func() {
 		_ = session.DeleteTemplate(env.TestCtx.Context, GinkgoT(), templateID)
 	}()
+	waitForIssue36TemplateReady(env, session, templateID)
 
 	sandboxID := claimSandboxEventually(env, session, templateID).SandboxId
 	Expect(sandboxID).NotTo(BeEmpty())
@@ -170,8 +172,8 @@ func assertIssue36UDPSessionBehavior(env *framework.ScenarioEnv, session *e2euti
 func buildIssue36TemplateCreateRequest(base apispec.Template, templateID string, network *apispec.TplSandboxNetworkPolicy) apispec.TemplateCreateRequest {
 	req := e2eutils.CloneTemplateForCreate(base, templateID)
 	req.Spec.Pool = &apispec.PoolStrategy{
-		MinIdle: 0,
-		MaxIdle: 0,
+		MinIdle: 1,
+		MaxIdle: 1,
 	}
 	req.Spec.Network = network
 	description := "Issue36 auditable egress e2e template"
@@ -179,6 +181,22 @@ func buildIssue36TemplateCreateRequest(base apispec.Template, templateID string,
 	req.Spec.Description = &description
 	req.Spec.DisplayName = &displayName
 	return req
+}
+
+func waitForIssue36TemplateReady(env *framework.ScenarioEnv, session *e2eutils.Session, templateID string) {
+	Eventually(func() error {
+		tpl, err := session.GetTemplate(env.TestCtx.Context, GinkgoT(), templateID)
+		if err != nil {
+			return err
+		}
+		if tpl.Status == nil || tpl.Status.IdleCount == nil {
+			return fmt.Errorf("template %s status is not ready", templateID)
+		}
+		if *tpl.Status.IdleCount < 1 {
+			return fmt.Errorf("template %s idle pool is not ready: idleCount=%d", templateID, *tpl.Status.IdleCount)
+		}
+		return nil
+	}).WithTimeout(3 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
 }
 
 func applyIssue36HelperPod(env *framework.ScenarioEnv, podName, image string) (string, error) {

@@ -714,14 +714,27 @@ type MoveFileRequest struct {
 	Source      string `json:"source"`
 }
 
-// NetworkEgressPolicy defines model for NetworkEgressPolicy.
+// NetworkEgressPolicy Egress rule set interpreted by the selected network mode.
+// In `allow-all`, only `denied*` fields are enforced.
+// In `block-all`, only `allowed*` fields are enforced.
 type NetworkEgressPolicy struct {
-	AllowedCidrs   *[]string   `json:"allowedCidrs,omitempty"`
-	AllowedDomains *[]string   `json:"allowedDomains,omitempty"`
-	AllowedPorts   *[]PortSpec `json:"allowedPorts,omitempty"`
-	DeniedCidrs    *[]string   `json:"deniedCidrs,omitempty"`
-	DeniedDomains  *[]string   `json:"deniedDomains,omitempty"`
-	DeniedPorts    *[]PortSpec `json:"deniedPorts,omitempty"`
+	// AllowedCidrs CIDR allowlist used only when mode is `block-all`.
+	AllowedCidrs *[]string `json:"allowedCidrs,omitempty"`
+
+	// AllowedDomains Domain allowlist used only when mode is `block-all`.
+	AllowedDomains *[]string `json:"allowedDomains,omitempty"`
+
+	// AllowedPorts Port/protocol allowlist used only when mode is `block-all`.
+	AllowedPorts *[]PortSpec `json:"allowedPorts,omitempty"`
+
+	// DeniedCidrs CIDR denylist used only when mode is `allow-all`.
+	DeniedCidrs *[]string `json:"deniedCidrs,omitempty"`
+
+	// DeniedDomains Domain denylist used only when mode is `allow-all`.
+	DeniedDomains *[]string `json:"deniedDomains,omitempty"`
+
+	// DeniedPorts Port/protocol denylist used only when mode is `allow-all`.
+	DeniedPorts *[]PortSpec `json:"deniedPorts,omitempty"`
 }
 
 // NodeAffinity defines model for NodeAffinity.
@@ -945,13 +958,17 @@ type Sandbox struct {
 type SandboxConfig struct {
 	// AutoResume Sandbox-level resume gate for paused sandboxes. When false, any inbound request
 	// (API or public exposure) must not auto resume the sandbox.
-	AutoResume   *bool                    `json:"auto_resume,omitempty"`
-	EnvVars      *map[string]string       `json:"env_vars,omitempty"`
-	ExposedPorts *[]ExposedPortConfig     `json:"exposed_ports,omitempty"`
-	HardTtl      *int32                   `json:"hard_ttl,omitempty"`
-	Network      *TplSandboxNetworkPolicy `json:"network,omitempty"`
-	Ttl          *int32                   `json:"ttl,omitempty"`
-	Webhook      *WebhookConfig           `json:"webhook,omitempty"`
+	AutoResume   *bool                `json:"auto_resume,omitempty"`
+	EnvVars      *map[string]string   `json:"env_vars,omitempty"`
+	ExposedPorts *[]ExposedPortConfig `json:"exposed_ports,omitempty"`
+	HardTtl      *int32               `json:"hard_ttl,omitempty"`
+
+	// Network Template-level outbound network policy.
+	// `allow-all` permits traffic by default and applies `denied*` rules as subtractive filters.
+	// `block-all` denies traffic by default and applies `allowed*` rules as additive exceptions.
+	Network *TplSandboxNetworkPolicy `json:"network,omitempty"`
+	Ttl     *int32                   `json:"ttl,omitempty"`
+	Webhook *WebhookConfig           `json:"webhook,omitempty"`
 }
 
 // SandboxRefreshRequest defines model for SandboxRefreshRequest.
@@ -1020,13 +1037,17 @@ type SandboxTemplateCondition struct {
 
 // SandboxTemplateSpec defines model for SandboxTemplateSpec.
 type SandboxTemplateSpec struct {
-	AllowedTeams     *[]string                `json:"allowedTeams,omitempty"`
-	ClusterId        *string                  `json:"clusterId,omitempty"`
-	Description      *string                  `json:"description,omitempty"`
-	DisplayName      *string                  `json:"displayName,omitempty"`
-	EnvVars          *map[string]string       `json:"envVars,omitempty"`
-	Lifecycle        *LifecyclePolicy         `json:"lifecycle,omitempty"`
-	MainContainer    *ContainerSpec           `json:"mainContainer,omitempty"`
+	AllowedTeams  *[]string          `json:"allowedTeams,omitempty"`
+	ClusterId     *string            `json:"clusterId,omitempty"`
+	Description   *string            `json:"description,omitempty"`
+	DisplayName   *string            `json:"displayName,omitempty"`
+	EnvVars       *map[string]string `json:"envVars,omitempty"`
+	Lifecycle     *LifecyclePolicy   `json:"lifecycle,omitempty"`
+	MainContainer *ContainerSpec     `json:"mainContainer,omitempty"`
+
+	// Network Template-level outbound network policy.
+	// `allow-all` permits traffic by default and applies `denied*` rules as subtractive filters.
+	// `block-all` denies traffic by default and applies `allowed*` rules as additive exceptions.
 	Network          *TplSandboxNetworkPolicy `json:"network,omitempty"`
 	Pod              *PodSpecOverride         `json:"pod,omitempty"`
 	Pool             *PoolStrategy            `json:"pool,omitempty"`
@@ -1049,11 +1070,15 @@ type SandboxTemplateStatus struct {
 type SandboxUpdateConfig struct {
 	// AutoResume Sandbox-level resume gate for paused sandboxes. When false, any inbound request
 	// (API or public exposure) must not auto resume the sandbox.
-	AutoResume   *bool                    `json:"auto_resume,omitempty"`
-	ExposedPorts *[]ExposedPortConfig     `json:"exposed_ports,omitempty"`
-	HardTtl      *int32                   `json:"hard_ttl,omitempty"`
-	Network      *TplSandboxNetworkPolicy `json:"network,omitempty"`
-	Ttl          *int32                   `json:"ttl,omitempty"`
+	AutoResume   *bool                `json:"auto_resume,omitempty"`
+	ExposedPorts *[]ExposedPortConfig `json:"exposed_ports,omitempty"`
+	HardTtl      *int32               `json:"hard_ttl,omitempty"`
+
+	// Network Template-level outbound network policy.
+	// `allow-all` permits traffic by default and applies `denied*` rules as subtractive filters.
+	// `block-all` denies traffic by default and applies `allowed*` rules as additive exceptions.
+	Network *TplSandboxNetworkPolicy `json:"network,omitempty"`
+	Ttl     *int32                   `json:"ttl,omitempty"`
 }
 
 // SandboxUpdateRequest defines model for SandboxUpdateRequest.
@@ -1435,6 +1460,9 @@ type SuccessSandboxListResponseSuccess bool
 
 // SuccessSandboxNetworkPolicyResponse defines model for SuccessSandboxNetworkPolicyResponse.
 type SuccessSandboxNetworkPolicyResponse struct {
+	// Data Template-level outbound network policy.
+	// `allow-all` permits traffic by default and applies `denied*` rules as subtractive filters.
+	// `block-all` denies traffic by default and applies `allowed*` rules as additive exceptions.
 	Data    *TplSandboxNetworkPolicy                   `json:"data,omitempty"`
 	Success SuccessSandboxNetworkPolicyResponseSuccess `json:"success"`
 }
@@ -1650,8 +1678,13 @@ type Toleration struct {
 	Value    *string `json:"value,omitempty"`
 }
 
-// TplSandboxNetworkPolicy defines model for TplSandboxNetworkPolicy.
+// TplSandboxNetworkPolicy Template-level outbound network policy.
+// `allow-all` permits traffic by default and applies `denied*` rules as subtractive filters.
+// `block-all` denies traffic by default and applies `allowed*` rules as additive exceptions.
 type TplSandboxNetworkPolicy struct {
+	// Egress Egress rule set interpreted by the selected network mode.
+	// In `allow-all`, only `denied*` fields are enforced.
+	// In `block-all`, only `allowed*` fields are enforced.
 	Egress *NetworkEgressPolicy        `json:"egress,omitempty"`
 	Mode   TplSandboxNetworkPolicyMode `json:"mode"`
 }

@@ -287,7 +287,7 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 	if result.Apply != nil {
 		result.Apply(req)
 	}
-	result.Classification = verifyClassifiedHost(s.hostVerifier, result.Classification)
+	result.Classification = verifyClassifiedHost(s.hostVerifier, p, result.Classification)
 	decision := decideTraffic(p, result.Classification)
 	fields := []zap.Field{}
 	if result.Error != nil {
@@ -360,7 +360,7 @@ func (s *Server) handleUDPDatagram(conn *net.UDPConn, src *net.UDPAddr, payload 
 	if result.Apply != nil {
 		result.Apply(req)
 	}
-	result.Classification = verifyClassifiedHost(s.hostVerifier, result.Classification)
+	result.Classification = verifyClassifiedHost(s.hostVerifier, p, result.Classification)
 	decision := decideTraffic(p, result.Classification)
 	s.handleUDPDecision(req, decision, result.Host)
 }

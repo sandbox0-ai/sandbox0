@@ -3,6 +3,7 @@ package proxy
 import (
 	"net"
 
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
 )
 
@@ -21,6 +22,7 @@ type trafficClassification struct {
 	DestPort      int
 	Host          string
 	UnknownReason string
+	Verification  string
 }
 
 type trafficDecision struct {
@@ -89,9 +91,19 @@ func decideTraffic(compiled *policy.CompiledPolicy, classification trafficClassi
 		return decision
 	}
 
-	if classification.Host != "" && !policy.AllowEgressDomain(compiled, classification.Host) {
+	if classification.Host != "" && policy.HasDomainRules(compiled) && !policy.AllowEgressDomain(compiled, classification.Host) {
 		decision.Action = decisionActionDeny
 		decision.Reason = "l7_denied"
+		return decision
+	}
+
+	if classification.Verification != "" {
+		decision.Reason = classification.Verification
+		if compiled != nil && compiled.Mode == v1alpha1.NetworkModeBlockAll && policy.HasDomainRules(compiled) {
+			decision.Action = decisionActionDeny
+			return decision
+		}
+		decision.Action = decisionActionPassThrough
 		return decision
 	}
 

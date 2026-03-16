@@ -51,6 +51,27 @@ func (c *scriptedConn) SetWriteDeadline(time.Time) error {
 	return nil
 }
 
+type timeoutConn struct{}
+
+func (c *timeoutConn) Read(_ []byte) (int, error)  { return 0, stubTimeoutError{} }
+func (c *timeoutConn) Write(p []byte) (int, error) { return len(p), nil }
+func (c *timeoutConn) Close() error                { return nil }
+func (c *timeoutConn) LocalAddr() net.Addr         { return stubAddr("local") }
+func (c *timeoutConn) RemoteAddr() net.Addr        { return stubAddr("remote") }
+func (c *timeoutConn) SetDeadline(time.Time) error { return nil }
+func (c *timeoutConn) SetReadDeadline(time.Time) error {
+	return nil
+}
+func (c *timeoutConn) SetWriteDeadline(time.Time) error {
+	return nil
+}
+
+type stubTimeoutError struct{}
+
+func (stubTimeoutError) Error() string   { return "timeout" }
+func (stubTimeoutError) Timeout() bool   { return true }
+func (stubTimeoutError) Temporary() bool { return true }
+
 type stubAddr string
 
 func (a stubAddr) Network() string { return "tcp" }
@@ -355,6 +376,29 @@ func TestDefaultTCPClassifiersFallbackToUnknown(t *testing.T) {
 	}
 	if result.Classification.Protocol != "unknown" {
 		t.Fatalf("protocol = %q, want unknown", result.Classification.Protocol)
+	}
+}
+
+func TestDefaultTCPClassifiersFallbackToUnknownWhenClientIsIdle(t *testing.T) {
+	ctx := &tcpClassifyContext{
+		OrigIP:           net.ParseIP("8.8.8.8"),
+		OrigPort:         1234,
+		Conn:             &timeoutConn{},
+		HeaderLimit:      1024,
+		FirstByteTimeout: 10 * time.Millisecond,
+	}
+	result, err := classifyTCP(defaultTCPClassifiers(), ctx)
+	if err != nil {
+		t.Fatalf("classifyTCP returned error: %v", err)
+	}
+	if result.Classification.Protocol != "unknown" {
+		t.Fatalf("protocol = %q, want unknown", result.Classification.Protocol)
+	}
+	if result.Classification.UnknownReason != "client_idle" {
+		t.Fatalf("unknown reason = %q, want client_idle", result.Classification.UnknownReason)
+	}
+	if result.Error != nil {
+		t.Fatalf("unexpected error = %v", result.Error)
 	}
 }
 

@@ -116,6 +116,23 @@ func TestDecideTrafficUDPAllowedUsesAdapter(t *testing.T) {
 	}
 }
 
+func TestDecideTrafficBlockAllL4AllowWithoutDomainRulesUsesAdapter(t *testing.T) {
+	compiled := &policy.CompiledPolicy{
+		Mode: v1alpha1.NetworkModeBlockAll,
+		Egress: policy.CompiledRuleSet{
+			AllowedCIDRs: []*net.IPNet{mustCIDR("8.8.8.0/24")},
+			AllowedPorts: []policy.PortRange{{Protocol: "tcp", Start: 443, End: 443}},
+		},
+	}
+	decision := decideTraffic(compiled, classifyKnownTraffic("tcp", "http", net.ParseIP("8.8.8.8"), 443, "example.com"))
+	if decision.Action != decisionActionUseAdapter {
+		t.Fatalf("expected use-adapter, got %s", decision.Action)
+	}
+	if decision.Reason != "allowed" {
+		t.Fatalf("expected allowed reason, got %s", decision.Reason)
+	}
+}
+
 func mustCIDR(cidr string) *net.IPNet {
 	_, network, err := net.ParseCIDR(cidr)
 	if err != nil {

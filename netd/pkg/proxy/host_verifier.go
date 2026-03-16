@@ -6,6 +6,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
 )
 
 const (
@@ -142,17 +144,20 @@ func (v *dnsHostVerifier) store(host string, ips []net.IP) {
 	}
 }
 
-func verifyClassifiedHost(verifier hostVerifier, classification trafficClassification) trafficClassification {
-	if verifier == nil || classification.UnknownReason != "" || classification.Host == "" || classification.DestIP == nil {
+func verifyClassifiedHost(verifier hostVerifier, compiled *policy.CompiledPolicy, classification trafficClassification) trafficClassification {
+	if verifier == nil || compiled == nil || !policy.HasDomainRules(compiled) {
+		return classification
+	}
+	if classification.UnknownReason != "" || classification.Host == "" || classification.DestIP == nil {
 		return classification
 	}
 	ok, err := verifier.Verify(classification.Host, classification.DestIP)
 	if err != nil {
-		classification.UnknownReason = "host_resolution_failed"
+		classification.Verification = "host_resolution_failed"
 		return classification
 	}
 	if !ok {
-		classification.UnknownReason = "host_dest_mismatch"
+		classification.Verification = "host_dest_mismatch"
 	}
 	return classification
 }

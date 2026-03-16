@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"time"
@@ -14,6 +16,7 @@ import (
 
 const (
 	defaultTCPHeaderLimit          = 64 * 1024
+	defaultTCPFirstByteTimeout     = 500 * time.Millisecond
 	defaultTCPClassificationWindow = 5 * time.Second
 )
 
@@ -43,18 +46,20 @@ type udpClassifier interface {
 }
 
 type tcpClassifyContext struct {
-	Compiled    *policy.CompiledPolicy
-	SrcIP       string
-	OrigIP      net.IP
-	OrigPort    int
-	Conn        net.Conn
-	HeaderLimit int
+	Compiled         *policy.CompiledPolicy
+	SrcIP            string
+	OrigIP           net.IP
+	OrigPort         int
+	Conn             net.Conn
+	HeaderLimit      int
+	FirstByteTimeout time.Duration
+	ReadTimeout      time.Duration
 
 	Peeked       []byte
 	ReadErr      error
 	ReadDone     bool
 	LimitReached bool
-	readDeadline time.Time
+	TimedOut     bool
 }
 
 type udpClassifyContext struct {
@@ -163,6 +168,10 @@ func (c *tcpUnknownClassifier) Classify(ctx *tcpClassifyContext) (*classificatio
 	}
 	reason := "unclassified"
 	switch {
+	case len(ctx.Buffered()) == 0 && ctx.TimedOut:
+		reason = "client_idle"
+	case ctx.TimedOut:
+		reason = "classification_timeout"
 	case len(ctx.Buffered()) == 0 && ctx.ReadErr != nil:
 		reason = "read_failed"
 	case ctx.LimitReached:
@@ -177,7 +186,7 @@ func (c *tcpUnknownClassifier) Classify(ctx *tcpClassifyContext) (*classificatio
 			req.Prefix = bytes.NewReader(raw)
 		}
 	}
-	if len(raw) == 0 && ctx.ReadErr != nil {
+	if len(raw) == 0 && ctx.ReadErr != nil && !errors.Is(ctx.ReadErr, io.EOF) {
 		result.Error = ctx.ReadErr
 	}
 	return result, tcpClassifierMatched
@@ -323,7 +332,27 @@ func (ctx *tcpClassifyContext) headerLimit() int {
 }
 
 func (ctx *tcpClassifyContext) classificationTimeout() time.Duration {
-	return defaultTCPClassificationWindow
+	if ctx == nil || ctx.ReadTimeout <= 0 {
+		return defaultTCPClassificationWindow
+	}
+	return ctx.ReadTimeout
+}
+
+func (ctx *tcpClassifyContext) firstByteTimeout() time.Duration {
+	if ctx == nil || ctx.FirstByteTimeout <= 0 {
+		return defaultTCPFirstByteTimeout
+	}
+	return ctx.FirstByteTimeout
+}
+
+func (ctx *tcpClassifyContext) nextReadTimeout() time.Duration {
+	if ctx == nil {
+		return defaultTCPClassificationWindow
+	}
+	if len(ctx.Peeked) == 0 {
+		return ctx.firstByteTimeout()
+	}
+	return ctx.classificationTimeout()
 }
 
 func (ctx *tcpClassifyContext) readMore() (int, error) {
@@ -339,10 +368,7 @@ func (ctx *tcpClassifyContext) readMore() (int, error) {
 		ctx.ReadDone = true
 		return 0, nil
 	}
-	if ctx.readDeadline.IsZero() {
-		ctx.readDeadline = time.Now().Add(ctx.classificationTimeout())
-	}
-	_ = ctx.Conn.SetReadDeadline(ctx.readDeadline)
+	_ = ctx.Conn.SetReadDeadline(time.Now().Add(ctx.nextReadTimeout()))
 	buf := make([]byte, remaining)
 	n, err := ctx.Conn.Read(buf)
 	if n > 0 {
@@ -353,6 +379,12 @@ func (ctx *tcpClassifyContext) readMore() (int, error) {
 		ctx.ReadDone = true
 	}
 	if err != nil {
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			ctx.TimedOut = true
+			ctx.ReadDone = true
+			return n, nil
+		}
 		ctx.ReadErr = err
 		ctx.ReadDone = true
 	}

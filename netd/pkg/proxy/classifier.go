@@ -100,17 +100,28 @@ type sshBannerClassifier struct{}
 func (c *sshBannerClassifier) Name() string { return "ssh-banner" }
 
 func (c *sshBannerClassifier) Classify(ctx *tcpClassifyContext) (*classificationResult, bool) {
-	if ctx == nil || ctx.ObservedConn == nil {
+	if ctx == nil || ctx.Conn == nil {
 		return nil, false
 	}
-	recorded := ctx.ObservedConn.RecordedBytes()
-	if parseSSHBanner(recorded) == "" {
+	var raw []byte
+	if ctx.ObservedConn != nil {
+		raw = ctx.ObservedConn.RecordedBytes()
+	}
+	if len(raw) == 0 {
+		peeked, err := ctx.ensurePeek(ctx.HeaderLimit)
+		if err != nil {
+			ctx.ReadErr = err
+			return nil, false
+		}
+		raw = peeked
+	}
+	if parseSSHBanner(raw) == "" {
 		return nil, false
 	}
 	return &classificationResult{
 		Classification: classifyKnownTraffic("tcp", "ssh", ctx.OrigIP, ctx.OrigPort, ""),
 		Apply: func(req *adapterRequest) {
-			req.Prefix = bytes.NewReader(recorded)
+			req.Prefix = bytes.NewReader(raw)
 		},
 	}, true
 }
@@ -272,6 +283,7 @@ func defaultHTTPSClassifiers() []tcpClassifier {
 	return []tcpClassifier{
 		&tlsClientHelloClassifier{},
 		&postgresStartupClassifier{},
+		&sshBannerClassifier{},
 		&tcpParseErrorClassifier{
 			protocol:      "tls",
 			unknownReason: "parse_failed",

@@ -143,6 +143,40 @@ func TestDefaultHTTPSClassifiersClassifyPostgresStartup(t *testing.T) {
 	}
 }
 
+func TestDefaultHTTPSClassifiersClassifySSHBanner(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	go func() {
+		_, _ = io.WriteString(client, "SSH-2.0-OpenSSH_9.0\r\n")
+		_ = client.Close()
+	}()
+
+	ctx := &tcpClassifyContext{
+		OrigIP:      net.ParseIP("8.8.8.8"),
+		OrigPort:    443,
+		Conn:        server,
+		HeaderLimit: 1024,
+	}
+	result, err := classifyTCP(defaultHTTPSClassifiers(), ctx)
+	if err != nil {
+		t.Fatalf("classifyTCP returned error: %v", err)
+	}
+	if result.Classification.Protocol != "ssh" {
+		t.Fatalf("protocol = %q, want ssh", result.Classification.Protocol)
+	}
+	req := &adapterRequest{}
+	result.Apply(req)
+	data, readErr := io.ReadAll(req.Prefix)
+	if readErr != nil {
+		t.Fatalf("failed to read replay prefix: %v", readErr)
+	}
+	if string(data) != "SSH-2.0-OpenSSH_9.0\r\n" {
+		t.Fatalf("replay prefix = %q", string(data))
+	}
+}
+
 func TestDefaultUDPClassifiersFallbackToGenericUDP(t *testing.T) {
 	result, err := classifyUDP(defaultUDPClassifiers(), &udpClassifyContext{
 		Compiled: &policy.CompiledPolicy{Mode: v1alpha1.NetworkModeAllowAll},

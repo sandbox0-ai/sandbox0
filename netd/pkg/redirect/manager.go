@@ -3,7 +3,6 @@
 package redirect
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -17,12 +16,8 @@ import (
 )
 
 const (
-	chainName       = "NETD_PREROUTING"
-	ipsetName       = "netd-sandbox-ips"
-	tproxyMark      = "0x1/0x1"
-	ruleTableID     = 100
-	defaultLoopback = "127.0.0.0/8"
-	mangleTable     = "mangle"
+	ruleTableID = 100
+	mangleTable = "mangle"
 )
 
 type iptablesManager struct {
@@ -73,58 +68,11 @@ func (m *iptablesManager) Sync(ctx context.Context, sandboxIPs []string, bypassC
 		return err
 	}
 
-	// 2. Build iptables-restore input
-	var buf bytes.Buffer
-	buf.WriteString("*mangle\n")
-	// Explicitly flush the custom chain within the atomic transaction
-	buf.WriteString(fmt.Sprintf("-F %s\n", chainName))
-
-	bypass := append([]string{defaultLoopback}, bypassCIDRs...)
-	for _, cidr := range normalizeCIDRs(bypass) {
-		buf.WriteString(fmt.Sprintf("-A %s -d %s -j RETURN\n", chainName, cidr))
-	}
-
-	// TCP 443
-	buf.WriteString(fmt.Sprintf("-A %s -m set --match-set %s src -p tcp --dport 443 -m conntrack --ctstate NEW -j TPROXY --on-port %d --tproxy-mark %s\n",
-		chainName, ipsetName, m.cfg.ProxyHTTPSPort, tproxyMark))
-	buf.WriteString(fmt.Sprintf("-A %s -m set --match-set %s src -p tcp --dport 443 -m socket --transparent -j TPROXY --on-port %d --tproxy-mark %s\n",
-		chainName, ipsetName, m.cfg.ProxyHTTPSPort, tproxyMark))
-
-	// TCP 853
-	buf.WriteString(fmt.Sprintf("-A %s -m set --match-set %s src -p tcp --dport 853 -m conntrack --ctstate NEW -j TPROXY --on-port %d --tproxy-mark %s\n",
-		chainName, ipsetName, m.cfg.ProxyHTTPSPort, tproxyMark))
-	buf.WriteString(fmt.Sprintf("-A %s -m set --match-set %s src -p tcp --dport 853 -m socket --transparent -j TPROXY --on-port %d --tproxy-mark %s\n",
-		chainName, ipsetName, m.cfg.ProxyHTTPSPort, tproxyMark))
-
-	// UDP 443
-	buf.WriteString(fmt.Sprintf("-A %s -m set --match-set %s src -p udp --dport 443 -m conntrack --ctstate NEW -j TPROXY --on-port %d --tproxy-mark %s\n",
-		chainName, ipsetName, m.cfg.ProxyHTTPSPort, tproxyMark))
-	buf.WriteString(fmt.Sprintf("-A %s -m set --match-set %s src -p udp --dport 443 -m socket --transparent -j TPROXY --on-port %d --tproxy-mark %s\n",
-		chainName, ipsetName, m.cfg.ProxyHTTPSPort, tproxyMark))
-
-	// UDP 853
-	buf.WriteString(fmt.Sprintf("-A %s -m set --match-set %s src -p udp --dport 853 -m conntrack --ctstate NEW -j TPROXY --on-port %d --tproxy-mark %s\n",
-		chainName, ipsetName, m.cfg.ProxyHTTPSPort, tproxyMark))
-	buf.WriteString(fmt.Sprintf("-A %s -m set --match-set %s src -p udp --dport 853 -m socket --transparent -j TPROXY --on-port %d --tproxy-mark %s\n",
-		chainName, ipsetName, m.cfg.ProxyHTTPSPort, tproxyMark))
-
-	// TCP All
-	buf.WriteString(fmt.Sprintf("-A %s -m set --match-set %s src -p tcp -m conntrack --ctstate NEW -j TPROXY --on-port %d --tproxy-mark %s\n",
-		chainName, ipsetName, m.cfg.ProxyHTTPPort, tproxyMark))
-	buf.WriteString(fmt.Sprintf("-A %s -m set --match-set %s src -p tcp -m socket --transparent -j TPROXY --on-port %d --tproxy-mark %s\n",
-		chainName, ipsetName, m.cfg.ProxyHTTPPort, tproxyMark))
-
-	// UDP All
-	buf.WriteString(fmt.Sprintf("-A %s -m set --match-set %s src -p udp -m conntrack --ctstate NEW -j TPROXY --on-port %d --tproxy-mark %s\n",
-		chainName, ipsetName, m.cfg.ProxyHTTPPort, tproxyMark))
-	buf.WriteString(fmt.Sprintf("-A %s -m set --match-set %s src -p udp -m socket --transparent -j TPROXY --on-port %d --tproxy-mark %s\n",
-		chainName, ipsetName, m.cfg.ProxyHTTPPort, tproxyMark))
-
-	buf.WriteString("COMMIT\n")
+	restoreInput := buildIPTablesRestoreInput(m.cfg, bypassCIDRs)
 
 	// 3. Apply atomically
 	cmd := exec.CommandContext(ctx, "iptables-restore", "--noflush")
-	cmd.Stdin = &buf
+	cmd.Stdin = strings.NewReader(restoreInput)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("iptables-restore failed: %s: %w", string(out), err)
 	}
@@ -134,18 +82,8 @@ func (m *iptablesManager) Sync(ctx context.Context, sandboxIPs []string, bypassC
 }
 
 func (m *iptablesManager) syncIPSet(ctx context.Context, ips []string) error {
-	var buf bytes.Buffer
-	// Create set if not exists
-	buf.WriteString(fmt.Sprintf("create %s hash:ip family inet -exist\n", ipsetName))
-	// Flush set
-	buf.WriteString(fmt.Sprintf("flush %s\n", ipsetName))
-	// Add IPs
-	for _, ip := range ips {
-		buf.WriteString(fmt.Sprintf("add %s %s -exist\n", ipsetName, ip))
-	}
-
 	cmd := exec.CommandContext(ctx, "ipset", "restore")
-	cmd.Stdin = &buf
+	cmd.Stdin = strings.NewReader(buildIPSetRestoreInput(ips))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ipset restore failed: %s: %w", string(out), err)
@@ -193,40 +131,6 @@ func (m *iptablesManager) ensureJump(ctx context.Context) error {
 func (m *iptablesManager) flushCustomChain(ctx context.Context) error {
 	_ = ctx
 	return m.ipt.ClearChain(mangleTable, chainName)
-}
-
-func normalizeIPs(values []string) []string {
-	out := make([]string, 0, len(values))
-	seen := map[string]struct{}{}
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		out = append(out, value)
-	}
-	return out
-}
-
-func normalizeCIDRs(values []string) []string {
-	out := make([]string, 0, len(values))
-	seen := map[string]struct{}{}
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		out = append(out, value)
-	}
-	return out
 }
 
 func (m *iptablesManager) ensurePolicyRouting(ctx context.Context) error {

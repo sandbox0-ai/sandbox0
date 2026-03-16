@@ -44,6 +44,24 @@ func TestParseIPv4PktInfo(t *testing.T) {
 	}
 }
 
+func TestParseOriginalDstFromOOBRequiresOriginalPort(t *testing.T) {
+	data := make([]byte, unix.SizeofInet4Pktinfo)
+	info := (*unix.Inet4Pktinfo)(unsafePointer(&data[0]))
+	copy(info.Spec_dst[:], net.IPv4(1, 1, 1, 1).To4())
+
+	raw := make([]byte, unix.CmsgSpace(len(data)))
+	header := (*unix.Cmsghdr)(unsafePointer(&raw[0]))
+	header.Level = unix.SOL_IP
+	header.Type = unix.IP_PKTINFO
+	header.SetLen(unix.CmsgLen(len(data)))
+	copy(raw[unix.CmsgLen(0):], data)
+
+	ip, port := parseOriginalDstFromOOB(raw)
+	if ip != nil || port != 0 {
+		t.Fatalf("expected pktinfo-only oob to have no original dst, got %v:%d", ip, port)
+	}
+}
+
 func htons(port uint16) uint16 {
 	var buf [2]byte
 	binary.BigEndian.PutUint16(buf[:], port)

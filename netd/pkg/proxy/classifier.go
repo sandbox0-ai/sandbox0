@@ -37,13 +37,10 @@ type tcpClassifyContext struct {
 	Conn        net.Conn
 	HeaderLimit int
 
-	ObservedConn *recordingConn
-	HTTPReader   *bufio.Reader
-	HTTPRequest  *http.Request
-	TLSHello     *clientHelloInfo
-	Peeked       []byte
-	PeekDone     bool
-	ReadErr      error
+	TLSHello *clientHelloInfo
+	Peeked   []byte
+	PeekDone bool
+	ReadErr  error
 }
 
 type udpClassifyContext struct {
@@ -64,24 +61,20 @@ func (c *httpRequestClassifier) Classify(ctx *tcpClassifyContext) (*classificati
 	if ctx == nil || ctx.Conn == nil {
 		return nil, false
 	}
-	reader := ctx.ensureHTTPReader()
-	if ctx.HTTPRequest == nil && ctx.ReadErr == nil {
-		req, err := http.ReadRequest(reader)
-		if err != nil {
-			ctx.ReadErr = err
-			return nil, false
-		}
-		ctx.HTTPRequest = req
-	}
-	if ctx.HTTPRequest == nil {
+	raw, err := ctx.ensurePeek(ctx.HeaderLimit)
+	if err != nil {
 		return nil, false
 	}
-	host := normalizeHost(ctx.HTTPRequest.Host)
+	req, ok := parseHTTPRequest(raw)
+	if !ok || req == nil {
+		return nil, false
+	}
+	host := normalizeHost(req.Host)
 	if host == "" {
 		return &classificationResult{
 			Classification: classifyUnknownTraffic("tcp", "http", ctx.OrigIP, ctx.OrigPort, "missing_host"),
 			Apply: func(req *adapterRequest) {
-				req.Prefix = ctx.ObservedConn.RecordedReader()
+				req.Prefix = bytes.NewReader(raw)
 			},
 		}, true
 	}
@@ -89,8 +82,7 @@ func (c *httpRequestClassifier) Classify(ctx *tcpClassifyContext) (*classificati
 		Classification: classifyKnownTraffic("tcp", "http", ctx.OrigIP, ctx.OrigPort, host),
 		Host:           host,
 		Apply: func(req *adapterRequest) {
-			req.HTTPRequest = ctx.HTTPRequest
-			req.HTTPReader = ctx.HTTPReader
+			req.Prefix = bytes.NewReader(raw)
 		},
 	}, true
 }
@@ -103,17 +95,9 @@ func (c *sshBannerClassifier) Classify(ctx *tcpClassifyContext) (*classification
 	if ctx == nil || ctx.Conn == nil {
 		return nil, false
 	}
-	var raw []byte
-	if ctx.ObservedConn != nil {
-		raw = ctx.ObservedConn.RecordedBytes()
-	}
-	if len(raw) == 0 {
-		peeked, err := ctx.ensurePeek(ctx.HeaderLimit)
-		if err != nil {
-			ctx.ReadErr = err
-			return nil, false
-		}
-		raw = peeked
+	raw, err := ctx.ensurePeek(ctx.HeaderLimit)
+	if err != nil {
+		return nil, false
 	}
 	if parseSSHBanner(raw) == "" {
 		return nil, false
@@ -170,25 +154,27 @@ func (c *tlsClientHelloClassifier) Classify(ctx *tcpClassifyContext) (*classific
 	}, true
 }
 
-type tcpParseErrorClassifier struct {
-	protocol          string
-	unknownReason     string
-	useRecordedPrefix bool
-}
+type tcpUnknownClassifier struct{}
 
-func (c *tcpParseErrorClassifier) Name() string { return c.protocol + "-parse-error" }
+func (c *tcpUnknownClassifier) Name() string { return "tcp-unknown" }
 
-func (c *tcpParseErrorClassifier) Classify(ctx *tcpClassifyContext) (*classificationResult, bool) {
-	if ctx == nil || ctx.ReadErr == nil {
+func (c *tcpUnknownClassifier) Classify(ctx *tcpClassifyContext) (*classificationResult, bool) {
+	if ctx == nil || ctx.Conn == nil {
 		return nil, false
 	}
-	result := &classificationResult{
-		Classification: classifyUnknownTraffic("tcp", c.protocol, ctx.OrigIP, ctx.OrigPort, c.unknownReason),
-		Error:          ctx.ReadErr,
+	raw, err := ctx.ensurePeek(ctx.HeaderLimit)
+	if err != nil && len(raw) == 0 {
+		return &classificationResult{
+			Classification: classifyUnknownTraffic("tcp", "unknown", ctx.OrigIP, ctx.OrigPort, "read_failed"),
+			Error:          err,
+		}, true
 	}
-	if c.useRecordedPrefix && ctx.ObservedConn != nil {
+	result := &classificationResult{
+		Classification: classifyUnknownTraffic("tcp", "unknown", ctx.OrigIP, ctx.OrigPort, "unclassified"),
+	}
+	if len(raw) > 0 {
 		result.Apply = func(req *adapterRequest) {
-			req.Prefix = ctx.ObservedConn.RecordedReader()
+			req.Prefix = bytes.NewReader(raw)
 		}
 	}
 	return result, true
@@ -199,11 +185,11 @@ type udpMissingOriginalDstClassifier struct{}
 func (c *udpMissingOriginalDstClassifier) Name() string { return "udp-missing-original-dst" }
 
 func (c *udpMissingOriginalDstClassifier) Classify(ctx *udpClassifyContext) (*classificationResult, bool) {
-	if ctx == nil || ctx.DestIP != nil {
+	if ctx == nil || (ctx.DestIP != nil && ctx.DestPort > 0) {
 		return nil, false
 	}
 	return &classificationResult{
-		Classification: classifyUnknownTraffic("udp", "udp", ctx.DestIP, ctx.DestPort, "missing_original_dst"),
+		Classification: classifyUnknownTraffic("udp", "unknown", ctx.DestIP, ctx.DestPort, "missing_original_dst"),
 	}, true
 }
 
@@ -212,7 +198,7 @@ type udpSNIClassifier struct{}
 func (c *udpSNIClassifier) Name() string { return "udp-sni" }
 
 func (c *udpSNIClassifier) Classify(ctx *udpClassifyContext) (*classificationResult, bool) {
-	if ctx == nil || ctx.DestIP == nil || !policy.HasDomainRules(ctx.Compiled) {
+	if ctx == nil || ctx.DestIP == nil || ctx.DestPort <= 0 || !policy.HasDomainRules(ctx.Compiled) {
 		return nil, false
 	}
 	sni := ""
@@ -235,7 +221,7 @@ type udpGenericClassifier struct{}
 func (c *udpGenericClassifier) Name() string { return "udp-generic" }
 
 func (c *udpGenericClassifier) Classify(ctx *udpClassifyContext) (*classificationResult, bool) {
-	if ctx == nil || ctx.DestIP == nil {
+	if ctx == nil || ctx.DestIP == nil || ctx.DestPort <= 0 {
 		return nil, false
 	}
 	return &classificationResult{
@@ -243,51 +229,13 @@ func (c *udpGenericClassifier) Classify(ctx *udpClassifyContext) (*classificatio
 	}, true
 }
 
-func defaultHTTPClassifiers() []tcpClassifier {
+func defaultTCPClassifiers() []tcpClassifier {
 	return []tcpClassifier{
 		&httpRequestClassifier{},
-		&sshBannerClassifier{},
-		&tcpParseErrorClassifier{
-			protocol:          "http",
-			unknownReason:     "parse_failed",
-			useRecordedPrefix: true,
-		},
-	}
-}
-
-type postgresStartupClassifier struct{}
-
-func (c *postgresStartupClassifier) Name() string { return "postgres-startup" }
-
-func (c *postgresStartupClassifier) Classify(ctx *tcpClassifyContext) (*classificationResult, bool) {
-	if ctx == nil || ctx.Conn == nil {
-		return nil, false
-	}
-	raw, err := ctx.ensurePeek(ctx.HeaderLimit)
-	if err != nil {
-		ctx.ReadErr = err
-		return nil, false
-	}
-	if !looksLikePostgresStartup(raw) {
-		return nil, false
-	}
-	return &classificationResult{
-		Classification: classifyKnownTraffic("tcp", "postgres", ctx.OrigIP, ctx.OrigPort, ""),
-		Apply: func(req *adapterRequest) {
-			req.Prefix = bytes.NewReader(raw)
-		},
-	}, true
-}
-
-func defaultHTTPSClassifiers() []tcpClassifier {
-	return []tcpClassifier{
 		&tlsClientHelloClassifier{},
 		&postgresStartupClassifier{},
 		&sshBannerClassifier{},
-		&tcpParseErrorClassifier{
-			protocol:      "tls",
-			unknownReason: "parse_failed",
-		},
+		&tcpUnknownClassifier{},
 	}
 }
 
@@ -319,16 +267,6 @@ func classifyUDP(classifiers []udpClassifier, ctx *udpClassifyContext) (*classif
 	return nil, fmt.Errorf("no udp classifier matched")
 }
 
-func (ctx *tcpClassifyContext) ensureHTTPReader() *bufio.Reader {
-	if ctx.ObservedConn == nil {
-		ctx.ObservedConn = &recordingConn{Conn: ctx.Conn}
-	}
-	if ctx.HTTPReader == nil {
-		ctx.HTTPReader = bufio.NewReader(ctx.ObservedConn)
-	}
-	return ctx.HTTPReader
-}
-
 func (ctx *tcpClassifyContext) ensurePeek(limit int) ([]byte, error) {
 	if ctx.PeekDone {
 		return ctx.Peeked, ctx.ReadErr
@@ -348,6 +286,18 @@ func (ctx *tcpClassifyContext) ensurePeek(limit int) ([]byte, error) {
 	}
 	ctx.Peeked = append([]byte(nil), buf[:n]...)
 	return ctx.Peeked, nil
+}
+
+func parseHTTPRequest(data []byte) (*http.Request, bool) {
+	if len(data) == 0 {
+		return nil, false
+	}
+	reader := bufio.NewReader(bytes.NewReader(data))
+	req, err := http.ReadRequest(reader)
+	if err != nil {
+		return nil, false
+	}
+	return req, true
 }
 
 type clientHelloInfo struct {
@@ -443,4 +393,27 @@ func looksLikePostgresStartup(data []byte) bool {
 		return true
 	}
 	return code>>16 == 3
+}
+
+type postgresStartupClassifier struct{}
+
+func (c *postgresStartupClassifier) Name() string { return "postgres-startup" }
+
+func (c *postgresStartupClassifier) Classify(ctx *tcpClassifyContext) (*classificationResult, bool) {
+	if ctx == nil || ctx.Conn == nil {
+		return nil, false
+	}
+	raw, err := ctx.ensurePeek(ctx.HeaderLimit)
+	if err != nil {
+		return nil, false
+	}
+	if !looksLikePostgresStartup(raw) {
+		return nil, false
+	}
+	return &classificationResult{
+		Classification: classifyKnownTraffic("tcp", "postgres", ctx.OrigIP, ctx.OrigPort, ""),
+		Apply: func(req *adapterRequest) {
+			req.Prefix = bytes.NewReader(raw)
+		},
+	}, true
 }

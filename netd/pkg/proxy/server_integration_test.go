@@ -27,13 +27,20 @@ func TestHandleTCPDecisionPassThroughRelaysAndAudits(t *testing.T) {
 	defer proxyListener.Close()
 
 	var auditBuf bytes.Buffer
+	registry, err := newAdapterRegistry(
+		nil,
+		[]proxyAdapter{&tcpPassThroughAdapter{}, &udpPassThroughAdapter{}},
+	)
+	if err != nil {
+		t.Fatalf("newAdapterRegistry: %v", err)
+	}
 	server := &Server{
 		cfg: &config.NetdConfig{
 			ProxyUpstreamTimeout: metav1.Duration{Duration: 2 * time.Second},
 		},
-		logger:      zap.NewNop(),
-		tcpFallback: &tcpPassThroughAdapter{},
-		auditor:     newAuditLoggerFromWriter(nopWriteCloser{Writer: &auditBuf}),
+		logger:   zap.NewNop(),
+		adapters: registry,
+		auditor:  newAuditLoggerFromWriter(nopWriteCloser{Writer: &auditBuf}),
 	}
 
 	done := make(chan struct{})
@@ -136,13 +143,20 @@ func TestHandleUDPDecisionPassThroughRelaysAndAudits(t *testing.T) {
 	defer clientConn.Close()
 
 	var auditBuf bytes.Buffer
+	registry, err := newAdapterRegistry(
+		nil,
+		[]proxyAdapter{&tcpPassThroughAdapter{}, &udpPassThroughAdapter{}},
+	)
+	if err != nil {
+		t.Fatalf("newAdapterRegistry: %v", err)
+	}
 	server := &Server{
 		cfg: &config.NetdConfig{
 			ProxyUpstreamTimeout: metav1.Duration{Duration: 2 * time.Second},
 		},
 		logger:      zap.NewNop(),
-		udpConn:     proxyConn,
-		udpFallback: &udpPassThroughAdapter{},
+		udpHTTPConn: proxyConn,
+		adapters:    registry,
 		auditor:     newAuditLoggerFromWriter(nopWriteCloser{Writer: &auditBuf}),
 	}
 
@@ -154,6 +168,7 @@ func TestHandleUDPDecisionPassThroughRelaysAndAudits(t *testing.T) {
 		SrcIP:      clientConn.LocalAddr().(*net.UDPAddr).IP.String(),
 		DestIP:     upstreamConn.LocalAddr().(*net.UDPAddr).IP,
 		DestPort:   upstreamConn.LocalAddr().(*net.UDPAddr).Port,
+		UDPConn:    proxyConn,
 		UDPSource:  clientConn.LocalAddr().(*net.UDPAddr),
 		UDPPayload: payload,
 	}

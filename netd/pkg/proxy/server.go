@@ -22,26 +22,23 @@ import (
 )
 
 type Server struct {
-	cfg              *config.NetdConfig
-	store            *policy.Store
-	tracker          *conntrack.Tracker
-	usageRecorder    UsageRecorder
-	logger           *zap.Logger
-	httpListener     net.Listener
-	httpsListener    net.Listener
-	udpConn          *net.UDPConn
-	reassembler      *quicReassembler
-	httpClassifiers  []tcpClassifier
-	httpsClassifiers []tcpClassifier
-	udpClassifiers   []udpClassifier
-	tcpAdapters      map[string]proxyAdapter
-	tcpFallback      proxyAdapter
-	udpAdapters      map[string]proxyAdapter
-	udpFallback      proxyAdapter
-	auditor          *auditLogger
-	auditSeq         uint64
-	exitCh           chan error
-	exitOnce         sync.Once
+	cfg            *config.NetdConfig
+	store          *policy.Store
+	tracker        *conntrack.Tracker
+	usageRecorder  UsageRecorder
+	logger         *zap.Logger
+	httpListener   net.Listener
+	httpsListener  net.Listener
+	udpHTTPConn    *net.UDPConn
+	udpHTTPSConn   *net.UDPConn
+	reassembler    *quicReassembler
+	tcpClassifiers []tcpClassifier
+	udpClassifiers []udpClassifier
+	adapters       *adapterRegistry
+	auditor        *auditLogger
+	auditSeq       uint64
+	exitCh         chan error
+	exitOnce       sync.Once
 }
 
 type UsageRecorder interface {
@@ -90,32 +87,61 @@ func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.T
 		}
 		return nil, err
 	}
+	udpHTTPConn := udpConn
+	udpHTTPSConn := udpConn
+	if cfg.ProxyHTTPPort != cfg.ProxyHTTPSPort {
+		udpHTTPConn, err = listenUDPTransparent(net.JoinHostPort(cfg.ProxyListenAddr, fmt.Sprintf("%d", cfg.ProxyHTTPPort)))
+		if err != nil {
+			_ = httpLn.Close()
+			_ = httpsLn.Close()
+			_ = udpConn.Close()
+			if auditor != nil {
+				_ = auditor.Close()
+			}
+			return nil, err
+		}
+	}
+	adapters, err := newAdapterRegistry(
+		[]proxyAdapter{
+			&httpAdapter{},
+			&postgresAdapter{},
+			&sshAdapter{},
+			&tlsAdapter{},
+			&udpAdapter{},
+		},
+		[]proxyAdapter{
+			&tcpPassThroughAdapter{},
+			&udpPassThroughAdapter{},
+		},
+	)
+	if err != nil {
+		_ = httpLn.Close()
+		_ = httpsLn.Close()
+		_ = udpConn.Close()
+		if udpHTTPConn != nil && udpHTTPConn != udpConn {
+			_ = udpHTTPConn.Close()
+		}
+		if auditor != nil {
+			_ = auditor.Close()
+		}
+		return nil, err
+	}
 	return &Server{
-		cfg:              cfg,
-		store:            store,
-		tracker:          tracker,
-		usageRecorder:    usageRecorder,
-		logger:           logger,
-		httpListener:     httpLn,
-		httpsListener:    httpsLn,
-		udpConn:          udpConn,
-		reassembler:      newQuicReassembler(),
-		httpClassifiers:  defaultHTTPClassifiers(),
-		httpsClassifiers: defaultHTTPSClassifiers(),
-		udpClassifiers:   defaultUDPClassifiers(),
-		tcpAdapters: map[string]proxyAdapter{
-			"http":     &httpAdapter{},
-			"postgres": &postgresAdapter{},
-			"ssh":      &sshAdapter{},
-			"tls":      &tlsAdapter{},
-		},
-		udpAdapters: map[string]proxyAdapter{
-			"udp": &udpAdapter{},
-		},
-		tcpFallback: &tcpPassThroughAdapter{},
-		udpFallback: &udpPassThroughAdapter{},
-		auditor:     auditor,
-		exitCh:      make(chan error, 1),
+		cfg:            cfg,
+		store:          store,
+		tracker:        tracker,
+		usageRecorder:  usageRecorder,
+		logger:         logger,
+		httpListener:   httpLn,
+		httpsListener:  httpsLn,
+		udpHTTPConn:    udpHTTPConn,
+		udpHTTPSConn:   udpHTTPSConn,
+		reassembler:    newQuicReassembler(),
+		tcpClassifiers: defaultTCPClassifiers(),
+		udpClassifiers: defaultUDPClassifiers(),
+		adapters:       adapters,
+		auditor:        auditor,
+		exitCh:         make(chan error, 1),
 	}, nil
 }
 
@@ -124,14 +150,21 @@ func (s *Server) Start(ctx context.Context) {
 		s.exitCh = make(chan error, 1)
 	}
 	go s.runLoop(ctx, "http accept loop", func() {
-		s.acceptLoop(ctx, s.httpListener, s.handleHTTPConn)
+		s.acceptLoop(ctx, s.httpListener, s.handleTCPConn)
 	})
 	go s.runLoop(ctx, "https accept loop", func() {
-		s.acceptLoop(ctx, s.httpsListener, s.handleHTTPSConn)
+		s.acceptLoop(ctx, s.httpsListener, s.handleTCPConn)
 	})
-	go s.runLoop(ctx, "udp handler", func() {
-		s.handleUDP(ctx)
-	})
+	if s.udpHTTPConn != nil {
+		go s.runLoop(ctx, "udp http handler", func() {
+			s.handleUDP(ctx, s.udpHTTPConn)
+		})
+	}
+	if s.udpHTTPSConn != nil && s.udpHTTPSConn != s.udpHTTPConn {
+		go s.runLoop(ctx, "udp https handler", func() {
+			s.handleUDP(ctx, s.udpHTTPSConn)
+		})
+	}
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
@@ -146,8 +179,13 @@ func (s *Server) Shutdown(ctx context.Context) error {
 			err = closeErr
 		}
 	}
-	if s.udpConn != nil {
-		if closeErr := s.udpConn.Close(); closeErr != nil && err == nil {
+	if s.udpHTTPConn != nil {
+		if closeErr := s.udpHTTPConn.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}
+	if s.udpHTTPSConn != nil && s.udpHTTPSConn != s.udpHTTPConn {
+		if closeErr := s.udpHTTPSConn.Close(); closeErr != nil && err == nil {
 			err = closeErr
 		}
 	}
@@ -211,50 +249,7 @@ func (s *Server) acceptLoop(ctx context.Context, ln net.Listener, handler func(n
 	}
 }
 
-func (s *Server) handleHTTPConn(conn net.Conn) {
-	defer conn.Close()
-	origIP, origPort, err := originalDst(conn)
-	if err != nil {
-		s.logger.Warn("Failed to get original dst", zap.Error(err))
-		return
-	}
-
-	srcIP := remoteIP(conn.RemoteAddr())
-	p := s.store.GetByIP(srcIP)
-	ctx := &tcpClassifyContext{
-		Compiled:     p,
-		SrcIP:        srcIP,
-		OrigIP:       origIP,
-		OrigPort:     origPort,
-		Conn:         conn,
-		ObservedConn: &recordingConn{Conn: conn},
-	}
-	result, err := classifyTCP(s.httpClassifiers, ctx)
-	if err != nil {
-		s.logger.Warn("Failed to classify HTTP traffic", zap.Error(err))
-		return
-	}
-	req := &adapterRequest{
-		Server:   s,
-		Compiled: p,
-		SrcIP:    srcIP,
-		DestIP:   origIP,
-		DestPort: origPort,
-		Conn:     conn,
-		Host:     result.Host,
-	}
-	if result.Apply != nil {
-		result.Apply(req)
-	}
-	decision := decideTraffic(p, result.Classification)
-	fields := []zap.Field{}
-	if result.Error != nil {
-		fields = append(fields, zap.Error(result.Error))
-	}
-	s.handleTCPDecision(req, decision, result.Host, fields...)
-}
-
-func (s *Server) handleHTTPSConn(conn net.Conn) {
+func (s *Server) handleTCPConn(conn net.Conn) {
 	defer conn.Close()
 	origIP, origPort, err := originalDst(conn)
 	if err != nil {
@@ -272,9 +267,9 @@ func (s *Server) handleHTTPSConn(conn net.Conn) {
 		Conn:        conn,
 		HeaderLimit: int(s.cfg.ProxyHeaderLimit),
 	}
-	result, err := classifyTCP(s.httpsClassifiers, ctx)
+	result, err := classifyTCP(s.tcpClassifiers, ctx)
 	if err != nil {
-		s.logger.Warn("Failed to classify HTTPS traffic", zap.Error(err))
+		s.logger.Warn("Failed to classify TCP traffic", zap.Error(err))
 		return
 	}
 	req := &adapterRequest{
@@ -297,8 +292,8 @@ func (s *Server) handleHTTPSConn(conn net.Conn) {
 	s.handleTCPDecision(req, decision, result.Host, fields...)
 }
 
-func (s *Server) handleUDP(ctx context.Context) {
-	if s.udpConn == nil {
+func (s *Server) handleUDP(ctx context.Context, conn *net.UDPConn) {
+	if conn == nil {
 		return
 	}
 	buffer := make([]byte, 64*1024)
@@ -308,7 +303,7 @@ func (s *Server) handleUDP(ctx context.Context) {
 			return
 		default:
 		}
-		n, addr, destIP, destPort, err := readUDPDatagram(s.udpConn, buffer)
+		n, addr, destIP, destPort, err := readUDPDatagram(conn, buffer)
 		if err != nil {
 			if ctx.Err() != nil {
 				s.logger.Error("UDP read failed", zap.Error(err))
@@ -323,16 +318,13 @@ func (s *Server) handleUDP(ctx context.Context) {
 		}
 		payload := make([]byte, n)
 		copy(payload, buffer[:n])
-		go s.handleUDPDatagram(addr, payload, destIP, destPort)
+		go s.handleUDPDatagram(conn, addr, payload, destIP, destPort)
 	}
 }
 
-func (s *Server) handleUDPDatagram(src *net.UDPAddr, payload []byte, destIP net.IP, destPort int) {
+func (s *Server) handleUDPDatagram(conn *net.UDPConn, src *net.UDPAddr, payload []byte, destIP net.IP, destPort int) {
 	if src == nil {
 		return
-	}
-	if destPort == 0 {
-		destPort = 443
 	}
 	srcIP := src.IP.String()
 	p := s.store.GetByIP(srcIP)
@@ -357,6 +349,7 @@ func (s *Server) handleUDPDatagram(src *net.UDPAddr, payload []byte, destIP net.
 		DestIP:     destIP,
 		DestPort:   destPort,
 		Host:       result.Host,
+		UDPConn:    conn,
 		UDPSource:  src,
 		UDPPayload: payload,
 	}
@@ -418,26 +411,32 @@ func (s *Server) handleTCPDecision(req *adapterRequest, decision trafficDecision
 		s.recordAuditEvent(req, decision, nil, 0, nil)
 		return
 	case decisionActionPassThrough:
-		adapter := s.tcpFallback
-		if adapter != nil {
-			baseFields = append(baseFields, zap.String("adapter", adapter.Name()), zap.String("adapter_capability", string(adapter.Capability())))
+		adapter, resolveErr := s.resolveAdapter(decision)
+		if resolveErr != nil {
+			s.logger.Warn("TCP fallback adapter missing", append(baseFields, zap.Error(resolveErr))...)
+			s.recordAuditEvent(req, decision, nil, 0, resolveErr)
+			return
 		}
+		baseFields = append(baseFields, zap.String("adapter", adapter.Name()), zap.String("adapter_capability", string(adapter.Capability())))
 		s.logger.Info("TCP decision pass-through", baseFields...)
 		start := time.Now()
-		err := s.runTCPFallbackAdapter(req)
+		err := s.runAdapter(adapter, req)
 		s.recordAuditEvent(req, decision, adapter, time.Since(start), err)
 		if err != nil {
 			s.logger.Warn("TCP fallback adapter failed", append(baseFields, zap.Error(err))...)
 		}
 		return
 	case decisionActionUseAdapter:
-		adapter, ok := s.tcpAdapters[decision.Protocol]
-		if ok && adapter != nil {
-			baseFields = append(baseFields, zap.String("adapter", adapter.Name()), zap.String("adapter_capability", string(adapter.Capability())))
+		adapter, resolveErr := s.resolveAdapter(decision)
+		if resolveErr != nil {
+			s.logger.Warn("TCP adapter missing", append(baseFields, zap.Error(resolveErr))...)
+			s.recordAuditEvent(req, decision, nil, 0, resolveErr)
+			return
 		}
+		baseFields = append(baseFields, zap.String("adapter", adapter.Name()), zap.String("adapter_capability", string(adapter.Capability())))
 		s.logger.Debug("TCP decision use adapter", baseFields...)
 		start := time.Now()
-		err := s.runTCPAdapter(decision.Protocol, req)
+		err := s.runAdapter(adapter, req)
 		s.recordAuditEvent(req, decision, adapter, time.Since(start), err)
 		if err != nil {
 			s.logger.Warn("TCP adapter failed", append(baseFields, zap.Error(err))...)
@@ -494,10 +493,13 @@ func (s *Server) handleUDPDecision(req *adapterRequest, decision trafficDecision
 		s.recordAuditEvent(req, decision, nil, 0, nil)
 		return
 	case decisionActionPassThrough:
-		adapter := s.udpFallback
-		if adapter != nil {
-			fields = append(fields, zap.String("adapter", adapter.Name()), zap.String("adapter_capability", string(adapter.Capability())))
+		adapter, resolveErr := s.resolveAdapter(decision)
+		if resolveErr != nil {
+			s.logger.Warn("UDP fallback adapter missing", append(fields, zap.Error(resolveErr))...)
+			s.recordAuditEvent(req, decision, nil, 0, resolveErr)
+			return
 		}
+		fields = append(fields, zap.String("adapter", adapter.Name()), zap.String("adapter_capability", string(adapter.Capability())))
 		if req.DestIP == nil || req.DestPort <= 0 {
 			err := fmt.Errorf("destination unavailable for udp pass-through")
 			s.logger.Warn("UDP decision pass-through unavailable", append(fields, zap.Error(err))...)
@@ -506,20 +508,23 @@ func (s *Server) handleUDPDecision(req *adapterRequest, decision trafficDecision
 		}
 		s.logger.Info("UDP decision pass-through", fields...)
 		start := time.Now()
-		err := s.runUDPFallbackAdapter(req)
+		err := s.runAdapter(adapter, req)
 		s.recordAuditEvent(req, decision, adapter, time.Since(start), err)
 		if err != nil {
 			s.logger.Warn("UDP fallback adapter failed", append(fields, zap.Error(err))...)
 		}
 		return
 	case decisionActionUseAdapter:
-		adapter, ok := s.udpAdapters[decision.Protocol]
-		if ok && adapter != nil {
-			fields = append(fields, zap.String("adapter", adapter.Name()), zap.String("adapter_capability", string(adapter.Capability())))
+		adapter, resolveErr := s.resolveAdapter(decision)
+		if resolveErr != nil {
+			s.logger.Warn("UDP adapter missing", append(fields, zap.Error(resolveErr))...)
+			s.recordAuditEvent(req, decision, nil, 0, resolveErr)
+			return
 		}
+		fields = append(fields, zap.String("adapter", adapter.Name()), zap.String("adapter_capability", string(adapter.Capability())))
 		s.logger.Debug("UDP decision use adapter", fields...)
 		start := time.Now()
-		err := s.runUDPAdapter(decision.Protocol, req)
+		err := s.runAdapter(adapter, req)
 		s.recordAuditEvent(req, decision, adapter, time.Since(start), err)
 		if err != nil {
 			s.logger.Warn("UDP adapter failed", append(fields, zap.Error(err))...)
@@ -541,43 +546,28 @@ func (s *Server) recordAuditEvent(req *adapterRequest, decision trafficDecision,
 	}
 }
 
-func (s *Server) runTCPAdapter(protocol string, req *adapterRequest) error {
+func (s *Server) resolveAdapter(decision trafficDecision) (proxyAdapter, error) {
+	if s == nil {
+		return nil, fmt.Errorf("server is nil")
+	}
+	if s.adapters == nil {
+		return nil, fmt.Errorf("adapter registry is not configured")
+	}
+	return s.adapters.Resolve(decision)
+}
+
+func (s *Server) runAdapter(adapter proxyAdapter, req *adapterRequest) error {
 	if s == nil {
 		return fmt.Errorf("server is nil")
 	}
-	adapter := s.tcpAdapters[protocol]
 	if adapter == nil {
-		return fmt.Errorf("tcp adapter not found for protocol %q", protocol)
+		return fmt.Errorf("adapter is nil")
 	}
 	return adapter.Handle(req)
-}
-
-func (s *Server) runUDPAdapter(protocol string, req *adapterRequest) error {
-	if s == nil {
-		return fmt.Errorf("server is nil")
-	}
-	adapter := s.udpAdapters[protocol]
-	if adapter == nil {
-		return fmt.Errorf("udp adapter not found for protocol %q", protocol)
-	}
-	return adapter.Handle(req)
-}
-
-func (s *Server) runTCPFallbackAdapter(req *adapterRequest) error {
-	if s == nil || s.tcpFallback == nil {
-		return fmt.Errorf("tcp fallback adapter is not configured")
-	}
-	return s.tcpFallback.Handle(req)
-}
-
-func (s *Server) runUDPFallbackAdapter(req *adapterRequest) error {
-	if s == nil || s.udpFallback == nil {
-		return fmt.Errorf("udp fallback adapter is not configured")
-	}
-	return s.udpFallback.Handle(req)
 }
 
 func (s *Server) forwardUDPDatagram(
+	conn *net.UDPConn,
 	src *net.UDPAddr,
 	payload []byte,
 	destIP net.IP,
@@ -585,7 +575,7 @@ func (s *Server) forwardUDPDatagram(
 	compiled *policy.CompiledPolicy,
 	audit *flowAudit,
 ) error {
-	if src == nil || destIP == nil || destPort <= 0 {
+	if conn == nil || src == nil || destIP == nil || destPort <= 0 {
 		return fmt.Errorf("missing destination")
 	}
 	upstreamAddr := &net.UDPAddr{IP: destIP, Port: destPort}
@@ -608,7 +598,7 @@ func (s *Server) forwardUDPDatagram(
 		return err
 	}
 	s.recordIngressBytes(compiled, int64(n), audit)
-	_, err = s.udpConn.WriteToUDP(replyBuf[:n], src)
+	_, err = conn.WriteToUDP(replyBuf[:n], src)
 	return err
 }
 

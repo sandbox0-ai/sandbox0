@@ -49,12 +49,12 @@ func TestDefaultHTTPClassifiersClassifyHTTPRequest(t *testing.T) {
 	}()
 
 	ctx := &tcpClassifyContext{
-		OrigIP:       net.ParseIP("8.8.8.8"),
-		OrigPort:     80,
-		Conn:         server,
-		ObservedConn: &recordingConn{Conn: server},
+		OrigIP:      net.ParseIP("8.8.8.8"),
+		OrigPort:    80,
+		Conn:        server,
+		HeaderLimit: 1024,
 	}
-	result, err := classifyTCP(defaultHTTPClassifiers(), ctx)
+	result, err := classifyTCP(defaultTCPClassifiers(), ctx)
 	if err != nil {
 		t.Fatalf("classifyTCP returned error: %v", err)
 	}
@@ -66,8 +66,12 @@ func TestDefaultHTTPClassifiersClassifyHTTPRequest(t *testing.T) {
 	}
 	req := &adapterRequest{}
 	result.Apply(req)
-	if req.HTTPRequest == nil || req.HTTPReader == nil {
-		t.Fatalf("expected HTTP request and reader to be populated")
+	data, readErr := io.ReadAll(req.Prefix)
+	if readErr != nil {
+		t.Fatalf("failed to read replay prefix: %v", readErr)
+	}
+	if string(data) != "GET / HTTP/1.1\r\nHost: Example.COM\r\n\r\n" {
+		t.Fatalf("replay prefix = %q", string(data))
 	}
 }
 
@@ -82,12 +86,12 @@ func TestDefaultHTTPClassifiersFallbackToSSHBanner(t *testing.T) {
 	}()
 
 	ctx := &tcpClassifyContext{
-		OrigIP:       net.ParseIP("8.8.8.8"),
-		OrigPort:     22,
-		Conn:         server,
-		ObservedConn: &recordingConn{Conn: server},
+		OrigIP:      net.ParseIP("8.8.8.8"),
+		OrigPort:    22,
+		Conn:        server,
+		HeaderLimit: 1024,
 	}
-	result, err := classifyTCP(defaultHTTPClassifiers(), ctx)
+	result, err := classifyTCP(defaultTCPClassifiers(), ctx)
 	if err != nil {
 		t.Fatalf("classifyTCP returned error: %v", err)
 	}
@@ -105,7 +109,7 @@ func TestDefaultHTTPClassifiersFallbackToSSHBanner(t *testing.T) {
 	}
 }
 
-func TestDefaultHTTPSClassifiersClassifyPostgresStartup(t *testing.T) {
+func TestDefaultTCPClassifiersClassifyPostgresStartup(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
 	defer server.Close()
@@ -125,7 +129,7 @@ func TestDefaultHTTPSClassifiersClassifyPostgresStartup(t *testing.T) {
 		Conn:        server,
 		HeaderLimit: 1024,
 	}
-	result, err := classifyTCP(defaultHTTPSClassifiers(), ctx)
+	result, err := classifyTCP(defaultTCPClassifiers(), ctx)
 	if err != nil {
 		t.Fatalf("classifyTCP returned error: %v", err)
 	}
@@ -143,7 +147,7 @@ func TestDefaultHTTPSClassifiersClassifyPostgresStartup(t *testing.T) {
 	}
 }
 
-func TestDefaultHTTPSClassifiersClassifySSHBanner(t *testing.T) {
+func TestDefaultTCPClassifiersClassifySSHBanner(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
 	defer server.Close()
@@ -159,7 +163,7 @@ func TestDefaultHTTPSClassifiersClassifySSHBanner(t *testing.T) {
 		Conn:        server,
 		HeaderLimit: 1024,
 	}
-	result, err := classifyTCP(defaultHTTPSClassifiers(), ctx)
+	result, err := classifyTCP(defaultTCPClassifiers(), ctx)
 	if err != nil {
 		t.Fatalf("classifyTCP returned error: %v", err)
 	}
@@ -174,6 +178,34 @@ func TestDefaultHTTPSClassifiersClassifySSHBanner(t *testing.T) {
 	}
 	if string(data) != "SSH-2.0-OpenSSH_9.0\r\n" {
 		t.Fatalf("replay prefix = %q", string(data))
+	}
+}
+
+func TestDefaultTCPClassifiersFallbackToUnknown(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	go func() {
+		_, _ = io.WriteString(client, "opaque-binary-prefix")
+		_ = client.Close()
+	}()
+
+	ctx := &tcpClassifyContext{
+		OrigIP:      net.ParseIP("8.8.8.8"),
+		OrigPort:    1234,
+		Conn:        server,
+		HeaderLimit: 1024,
+	}
+	result, err := classifyTCP(defaultTCPClassifiers(), ctx)
+	if err != nil {
+		t.Fatalf("classifyTCP returned error: %v", err)
+	}
+	if result.Classification.UnknownReason != "unclassified" {
+		t.Fatalf("unknown reason = %q, want unclassified", result.Classification.UnknownReason)
+	}
+	if result.Classification.Protocol != "unknown" {
+		t.Fatalf("protocol = %q, want unknown", result.Classification.Protocol)
 	}
 }
 

@@ -1,11 +1,9 @@
 package proxy
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"net"
-	"net/http"
 
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
 )
@@ -27,19 +25,18 @@ const (
 )
 
 type adapterRequest struct {
-	Server      *Server
-	Compiled    *policy.CompiledPolicy
-	Audit       *flowAudit
-	SrcIP       string
-	DestIP      net.IP
-	DestPort    int
-	Host        string
-	Conn        net.Conn
-	Prefix      io.Reader
-	HTTPRequest *http.Request
-	HTTPReader  *bufio.Reader
-	UDPSource   *net.UDPAddr
-	UDPPayload  []byte
+	Server     *Server
+	Compiled   *policy.CompiledPolicy
+	Audit      *flowAudit
+	SrcIP      string
+	DestIP     net.IP
+	DestPort   int
+	Host       string
+	Conn       net.Conn
+	Prefix     io.Reader
+	UDPConn    *net.UDPConn
+	UDPSource  *net.UDPAddr
+	UDPPayload []byte
 }
 
 type httpAdapter struct{}
@@ -52,27 +49,11 @@ func (a *httpAdapter) Capability() adapterCapability {
 }
 
 func (a *httpAdapter) Handle(req *adapterRequest) error {
-	if req == nil || req.Server == nil || req.Conn == nil || req.HTTPRequest == nil || req.HTTPReader == nil {
-		return fmt.Errorf("http adapter requires request, reader, and connection")
+	if req == nil || req.Server == nil || req.Conn == nil {
+		return fmt.Errorf("http adapter requires connection")
 	}
 	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
-
-	upstream, err := net.DialTimeout("tcp", net.JoinHostPort(req.DestIP.String(), fmt.Sprintf("%d", req.DestPort)), req.Server.cfg.ProxyUpstreamTimeout.Duration)
-	if err != nil {
-		return err
-	}
-	upstream = &countingConn{Conn: upstream}
-	defer upstream.Close()
-
-	if err := req.HTTPRequest.Write(upstream); err != nil {
-		return err
-	}
-	if counter, ok := upstream.(*countingConn); ok {
-		req.Server.recordEgressBytes(req.Compiled, counter.written, req.Audit)
-		counter.written = 0
-	}
-	req.Server.pipe(req.Conn, upstream, req.HTTPReader, req.Compiled, req.Audit)
-	return nil
+	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
 }
 
 type tlsAdapter struct{}
@@ -136,11 +117,11 @@ func (a *udpAdapter) Capability() adapterCapability {
 }
 
 func (a *udpAdapter) Handle(req *adapterRequest) error {
-	if req == nil || req.Server == nil || req.UDPSource == nil {
+	if req == nil || req.Server == nil || req.UDPConn == nil || req.UDPSource == nil {
 		return fmt.Errorf("udp adapter requires source datagram")
 	}
 	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "udp", req.UDPSource.Port)
-	return req.Server.forwardUDPDatagram(req.UDPSource, req.UDPPayload, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+	return req.Server.forwardUDPDatagram(req.UDPConn, req.UDPSource, req.UDPPayload, req.DestIP, req.DestPort, req.Compiled, req.Audit)
 }
 
 type tcpPassThroughAdapter struct{}
@@ -170,9 +151,9 @@ func (a *udpPassThroughAdapter) Capability() adapterCapability {
 }
 
 func (a *udpPassThroughAdapter) Handle(req *adapterRequest) error {
-	if req == nil || req.Server == nil || req.UDPSource == nil {
+	if req == nil || req.Server == nil || req.UDPConn == nil || req.UDPSource == nil {
 		return fmt.Errorf("udp fallback adapter requires source datagram")
 	}
 	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "udp", req.UDPSource.Port)
-	return req.Server.forwardUDPDatagram(req.UDPSource, req.UDPPayload, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+	return req.Server.forwardUDPDatagram(req.UDPConn, req.UDPSource, req.UDPPayload, req.DestIP, req.DestPort, req.Compiled, req.Audit)
 }

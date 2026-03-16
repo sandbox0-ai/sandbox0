@@ -93,7 +93,7 @@ func assertIssue36TCPClassificationBehavior(env *framework.ScenarioEnv, session 
 
 	namespace, err := naming.TemplateNamespaceForBuiltin(templateID)
 	Expect(err).NotTo(HaveOccurred())
-	sandbox := waitForSandboxPodReadyEventually(env, session, sandboxID, namespace)
+	sandbox := waitForIssue36SandboxPodRunningEventually(env, session, sandboxID, namespace)
 
 	Eventually(func() error {
 		output, execErr := execInSandboxPod(env, namespace, sandbox.PodName, issue36FragmentedHTTPRequestCommand(helperIP))
@@ -150,7 +150,7 @@ func assertIssue36UDPSessionBehavior(env *framework.ScenarioEnv, session *e2euti
 
 	namespace, err := naming.TemplateNamespaceForBuiltin(templateID)
 	Expect(err).NotTo(HaveOccurred())
-	sandbox := waitForSandboxPodReadyEventually(env, session, sandboxID, namespace)
+	sandbox := waitForIssue36SandboxPodRunningEventually(env, session, sandboxID, namespace)
 
 	Eventually(func() error {
 		output, execErr := execInSandboxPod(env, namespace, sandbox.PodName, issue36UDPSessionCommand(helperIP, templateID))
@@ -197,6 +197,36 @@ func waitForIssue36TemplateReady(env *framework.ScenarioEnv, session *e2eutils.S
 		}
 		return nil
 	}).WithTimeout(3 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
+}
+
+func waitForIssue36SandboxPodRunningEventually(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID, namespace string) *apispec.Sandbox {
+	var sandbox *apispec.Sandbox
+	Eventually(func() error {
+		current, _, err := session.GetSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(current.PodName) == "" {
+			return fmt.Errorf("sandbox %s pod name not assigned", sandboxID)
+		}
+		phase, err := framework.KubectlGetJSONPath(
+			env.TestCtx.Context,
+			env.Config.Kubeconfig,
+			namespace,
+			"pod",
+			current.PodName,
+			"{.status.phase}",
+		)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(phase) != "Running" {
+			return fmt.Errorf("pod %s phase is %q", current.PodName, strings.TrimSpace(phase))
+		}
+		sandbox = current
+		return nil
+	}).WithTimeout(3 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
+	return sandbox
 }
 
 func applyIssue36HelperPod(env *framework.ScenarioEnv, podName, image string) (string, error) {

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/http"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -22,22 +21,25 @@ import (
 )
 
 type Server struct {
-	cfg           *config.NetdConfig
-	store         *policy.Store
-	tracker       *conntrack.Tracker
-	usageRecorder UsageRecorder
-	logger        *zap.Logger
-	httpListener  net.Listener
-	httpsListener net.Listener
-	udpConn       *net.UDPConn
-	reassembler   *quicReassembler
-	tcpAdapters   map[string]proxyAdapter
-	udpAdapters   map[string]proxyAdapter
-	tcpFallback   proxyAdapter
-	udpFallback   proxyAdapter
-	auditor       *auditLogger
-	exitCh        chan error
-	exitOnce      sync.Once
+	cfg              *config.NetdConfig
+	store            *policy.Store
+	tracker          *conntrack.Tracker
+	usageRecorder    UsageRecorder
+	logger           *zap.Logger
+	httpListener     net.Listener
+	httpsListener    net.Listener
+	udpConn          *net.UDPConn
+	reassembler      *quicReassembler
+	httpClassifiers  []tcpClassifier
+	httpsClassifiers []tcpClassifier
+	udpClassifiers   []udpClassifier
+	tcpAdapters      map[string]proxyAdapter
+	tcpFallback      proxyAdapter
+	udpAdapters      map[string]proxyAdapter
+	udpFallback      proxyAdapter
+	auditor          *auditLogger
+	exitCh           chan error
+	exitOnce         sync.Once
 }
 
 type UsageRecorder interface {
@@ -87,15 +89,18 @@ func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.T
 		return nil, err
 	}
 	return &Server{
-		cfg:           cfg,
-		store:         store,
-		tracker:       tracker,
-		usageRecorder: usageRecorder,
-		logger:        logger,
-		httpListener:  httpLn,
-		httpsListener: httpsLn,
-		udpConn:       udpConn,
-		reassembler:   newQuicReassembler(),
+		cfg:              cfg,
+		store:            store,
+		tracker:          tracker,
+		usageRecorder:    usageRecorder,
+		logger:           logger,
+		httpListener:     httpLn,
+		httpsListener:    httpsLn,
+		udpConn:          udpConn,
+		reassembler:      newQuicReassembler(),
+		httpClassifiers:  defaultHTTPClassifiers(),
+		httpsClassifiers: defaultHTTPSClassifiers(),
+		udpClassifiers:   defaultUDPClassifiers(),
 		tcpAdapters: map[string]proxyAdapter{
 			"http": &httpAdapter{},
 			"ssh":  &sshAdapter{},
@@ -213,63 +218,37 @@ func (s *Server) handleHTTPConn(conn net.Conn) {
 
 	srcIP := remoteIP(conn.RemoteAddr())
 	p := s.store.GetByIP(srcIP)
-
-	observedConn := &recordingConn{Conn: conn}
-	reader := bufio.NewReader(observedConn)
-	req, err := http.ReadRequest(reader)
+	ctx := &tcpClassifyContext{
+		Compiled:     p,
+		SrcIP:        srcIP,
+		OrigIP:       origIP,
+		OrigPort:     origPort,
+		Conn:         conn,
+		ObservedConn: &recordingConn{Conn: conn},
+	}
+	result, err := classifyTCP(s.httpClassifiers, ctx)
 	if err != nil {
-		recorded := observedConn.RecordedBytes()
-		if parseSSHBanner(recorded) != "" {
-			decision := decideTraffic(p, classifyKnownTraffic("tcp", "ssh", origIP, origPort, ""))
-			s.handleTCPDecision(&adapterRequest{
-				Server:   s,
-				Compiled: p,
-				SrcIP:    srcIP,
-				DestIP:   origIP,
-				DestPort: origPort,
-				Conn:     conn,
-				Prefix:   bytes.NewReader(recorded),
-			}, decision, "")
-			return
-		}
-		decision := decideTraffic(p, classifyUnknownTraffic("tcp", "http", origIP, origPort, "parse_failed"))
-		s.handleTCPDecision(&adapterRequest{
-			Server:   s,
-			Compiled: p,
-			SrcIP:    srcIP,
-			DestIP:   origIP,
-			DestPort: origPort,
-			Conn:     conn,
-			Prefix:   observedConn.RecordedReader(),
-		}, decision, "", zap.Error(err))
+		s.logger.Warn("Failed to classify HTTP traffic", zap.Error(err))
 		return
 	}
-	host := normalizeHost(req.Host)
-	if host == "" {
-		decision := decideTraffic(p, classifyUnknownTraffic("tcp", "http", origIP, origPort, "missing_host"))
-		s.handleTCPDecision(&adapterRequest{
-			Server:   s,
-			Compiled: p,
-			SrcIP:    srcIP,
-			DestIP:   origIP,
-			DestPort: origPort,
-			Conn:     conn,
-			Prefix:   observedConn.RecordedReader(),
-		}, decision, "")
-		return
+	req := &adapterRequest{
+		Server:   s,
+		Compiled: p,
+		SrcIP:    srcIP,
+		DestIP:   origIP,
+		DestPort: origPort,
+		Conn:     conn,
+		Host:     result.Host,
 	}
-	decision := decideTraffic(p, classifyKnownTraffic("tcp", "http", origIP, origPort, host))
-	s.handleTCPDecision(&adapterRequest{
-		Server:      s,
-		Compiled:    p,
-		SrcIP:       srcIP,
-		DestIP:      origIP,
-		DestPort:    origPort,
-		Host:        host,
-		Conn:        conn,
-		HTTPRequest: req,
-		HTTPReader:  reader,
-	}, decision, host)
+	if result.Apply != nil {
+		result.Apply(req)
+	}
+	decision := decideTraffic(p, result.Classification)
+	fields := []zap.Field{}
+	if result.Error != nil {
+		fields = append(fields, zap.Error(result.Error))
+	}
+	s.handleTCPDecision(req, decision, result.Host, fields...)
 }
 
 func (s *Server) handleHTTPSConn(conn net.Conn) {
@@ -282,45 +261,37 @@ func (s *Server) handleHTTPSConn(conn net.Conn) {
 
 	srcIP := remoteIP(conn.RemoteAddr())
 	p := s.store.GetByIP(srcIP)
-
-	clientHello, err := readClientHello(conn, int(s.cfg.ProxyHeaderLimit))
+	ctx := &tcpClassifyContext{
+		Compiled:    p,
+		SrcIP:       srcIP,
+		OrigIP:      origIP,
+		OrigPort:    origPort,
+		Conn:        conn,
+		HeaderLimit: int(s.cfg.ProxyHeaderLimit),
+	}
+	result, err := classifyTCP(s.httpsClassifiers, ctx)
 	if err != nil {
-		decision := decideTraffic(p, classifyUnknownTraffic("tcp", "tls", origIP, origPort, "parse_failed"))
-		s.handleTCPDecision(&adapterRequest{
-			Server:   s,
-			Compiled: p,
-			SrcIP:    srcIP,
-			DestIP:   origIP,
-			DestPort: origPort,
-			Conn:     conn,
-		}, decision, "", zap.Error(err))
+		s.logger.Warn("Failed to classify HTTPS traffic", zap.Error(err))
 		return
 	}
-	host := normalizeHost(clientHello.ServerName)
-	if host == "" {
-		decision := decideTraffic(p, classifyUnknownTraffic("tcp", "tls", origIP, origPort, "missing_sni"))
-		s.handleTCPDecision(&adapterRequest{
-			Server:   s,
-			Compiled: p,
-			SrcIP:    srcIP,
-			DestIP:   origIP,
-			DestPort: origPort,
-			Conn:     conn,
-			Prefix:   bytes.NewReader(clientHello.Raw),
-		}, decision, "")
-		return
-	}
-	decision := decideTraffic(p, classifyKnownTraffic("tcp", "tls", origIP, origPort, host))
-	s.handleTCPDecision(&adapterRequest{
+	req := &adapterRequest{
 		Server:   s,
 		Compiled: p,
 		SrcIP:    srcIP,
 		DestIP:   origIP,
 		DestPort: origPort,
-		Host:     host,
 		Conn:     conn,
-		Prefix:   bytes.NewReader(clientHello.Raw),
-	}, decision, host)
+		Host:     result.Host,
+	}
+	if result.Apply != nil {
+		result.Apply(req)
+	}
+	decision := decideTraffic(p, result.Classification)
+	fields := []zap.Field{}
+	if result.Error != nil {
+		fields = append(fields, zap.Error(result.Error))
+	}
+	s.handleTCPDecision(req, decision, result.Host, fields...)
 }
 
 func (s *Server) handleUDP(ctx context.Context) {
@@ -362,57 +333,35 @@ func (s *Server) handleUDPDatagram(src *net.UDPAddr, payload []byte, destIP net.
 	}
 	srcIP := src.IP.String()
 	p := s.store.GetByIP(srcIP)
-	if destIP == nil {
-		decision := decideTraffic(p, classifyUnknownTraffic("udp", "udp", destIP, destPort, "missing_original_dst"))
-		s.handleUDPDecision(&adapterRequest{
-			Server:     s,
-			Compiled:   p,
-			SrcIP:      srcIP,
-			DestIP:     destIP,
-			DestPort:   destPort,
-			UDPSource:  src,
-			UDPPayload: payload,
-		}, decision, "")
+	ctx := &udpClassifyContext{
+		Compiled:    p,
+		SrcIP:       srcIP,
+		SrcAddr:     src,
+		DestIP:      destIP,
+		DestPort:    destPort,
+		Payload:     payload,
+		Reassembler: s.reassembler,
+	}
+	result, err := classifyUDP(s.udpClassifiers, ctx)
+	if err != nil {
+		s.logger.Warn("Failed to classify UDP traffic", zap.Error(err))
 		return
 	}
-	if policy.HasDomainRules(p) {
-		sni := s.reassembler.ParseSNI(payload, srcIP, destIP.String())
-		if sni == "" {
-			decision := decideTraffic(p, classifyUnknownTraffic("udp", "udp", destIP, destPort, "missing_sni"))
-			s.handleUDPDecision(&adapterRequest{
-				Server:     s,
-				Compiled:   p,
-				SrcIP:      srcIP,
-				DestIP:     destIP,
-				DestPort:   destPort,
-				UDPSource:  src,
-				UDPPayload: payload,
-			}, decision, "")
-			return
-		}
-		decision := decideTraffic(p, classifyKnownTraffic("udp", "udp", destIP, destPort, sni))
-		s.handleUDPDecision(&adapterRequest{
-			Server:     s,
-			Compiled:   p,
-			SrcIP:      srcIP,
-			DestIP:     destIP,
-			DestPort:   destPort,
-			Host:       sni,
-			UDPSource:  src,
-			UDPPayload: payload,
-		}, decision, sni)
-	} else {
-		decision := decideTraffic(p, classifyKnownTraffic("udp", "udp", destIP, destPort, ""))
-		s.handleUDPDecision(&adapterRequest{
-			Server:     s,
-			Compiled:   p,
-			SrcIP:      srcIP,
-			DestIP:     destIP,
-			DestPort:   destPort,
-			UDPSource:  src,
-			UDPPayload: payload,
-		}, decision, "")
+	req := &adapterRequest{
+		Server:     s,
+		Compiled:   p,
+		SrcIP:      srcIP,
+		DestIP:     destIP,
+		DestPort:   destPort,
+		Host:       result.Host,
+		UDPSource:  src,
+		UDPPayload: payload,
 	}
+	if result.Apply != nil {
+		result.Apply(req)
+	}
+	decision := decideTraffic(p, result.Classification)
+	s.handleUDPDecision(req, decision, result.Host)
 }
 
 func (s *Server) pipe(client net.Conn, upstream net.Conn, reader *bufio.Reader, compiled *policy.CompiledPolicy) {
@@ -761,103 +710,4 @@ func (c *recordingConn) RecordedReader() io.Reader {
 
 func (c *recordingConn) RecordedBytes() []byte {
 	return append([]byte(nil), c.recorded.Bytes()...)
-}
-
-type clientHelloInfo struct {
-	ServerName string
-	Raw        []byte
-}
-
-func readClientHello(conn net.Conn, limit int) (*clientHelloInfo, error) {
-	if limit <= 0 {
-		limit = 64 * 1024
-	}
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	defer conn.SetReadDeadline(time.Time{})
-
-	buf := make([]byte, limit)
-	n, err := conn.Read(buf)
-	if err != nil {
-		return nil, err
-	}
-	buf = buf[:n]
-
-	ch := &clientHelloInfo{Raw: buf}
-	serverName := parseSNIFromTLS(buf)
-	ch.ServerName = serverName
-	return ch, nil
-}
-
-func parseSNIFromTLS(data []byte) string {
-	if len(data) < 5 {
-		return ""
-	}
-	if data[0] != 0x16 {
-		return ""
-	}
-	recordLen := int(data[3])<<8 | int(data[4])
-	if recordLen+5 > len(data) {
-		return ""
-	}
-	offset := 5
-	if data[offset] != 0x01 {
-		return ""
-	}
-	offset += 4
-	if offset+2 > len(data) {
-		return ""
-	}
-	offset += 2 + 32
-	if offset >= len(data) {
-		return ""
-	}
-	sessionLen := int(data[offset])
-	offset += 1 + sessionLen
-	if offset+2 > len(data) {
-		return ""
-	}
-	cipherLen := int(data[offset])<<8 | int(data[offset+1])
-	offset += 2 + cipherLen
-	if offset >= len(data) {
-		return ""
-	}
-	compLen := int(data[offset])
-	offset += 1 + compLen
-	if offset+2 > len(data) {
-		return ""
-	}
-	extLen := int(data[offset])<<8 | int(data[offset+1])
-	offset += 2
-	end := offset + extLen
-	if end > len(data) {
-		return ""
-	}
-	for offset+4 <= end {
-		extType := int(data[offset])<<8 | int(data[offset+1])
-		extSize := int(data[offset+2])<<8 | int(data[offset+3])
-		offset += 4
-		if offset+extSize > end {
-			return ""
-		}
-		if extType == 0x00 {
-			if offset+2 > end {
-				return ""
-			}
-			listLen := int(data[offset])<<8 | int(data[offset+1])
-			offset += 2
-			listEnd := offset + listLen
-			for offset+3 <= listEnd {
-				nameType := data[offset]
-				nameLen := int(data[offset+1])<<8 | int(data[offset+2])
-				offset += 3
-				if nameType == 0 && offset+nameLen <= listEnd {
-					return string(data[offset : offset+nameLen])
-				}
-				offset += nameLen
-			}
-			return ""
-		}
-		offset += extSize
-	}
-	return ""
 }

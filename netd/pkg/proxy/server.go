@@ -365,7 +365,7 @@ func (s *Server) handleUDPDatagram(conn *net.UDPConn, src *net.UDPAddr, payload 
 	s.handleUDPDecision(req, decision, result.Host)
 }
 
-func (s *Server) pipeWithReader(client net.Conn, upstream net.Conn, reader io.Reader, compiled *policy.CompiledPolicy, audit *flowAudit) {
+func (s *Server) pipeWithReader(client net.Conn, upstream net.Conn, reader io.Reader, compiled *policy.CompiledPolicy, audit *flowAudit) error {
 	upstreamCounter := &countingWriter{writer: upstream}
 	clientCounter := &countingWriter{writer: client}
 	errCh := make(chan error, 2)
@@ -381,9 +381,13 @@ func (s *Server) pipeWithReader(client net.Conn, upstream net.Conn, reader io.Re
 		closeConnWrite(client)
 		errCh <- err
 	}()
+	errs := make([]error, 0, 2)
 	for i := 0; i < 2; i++ {
-		<-errCh
+		if err := normalizeRelayError(<-errCh); err != nil {
+			errs = append(errs, err)
+		}
 	}
+	return errors.Join(errs...)
 }
 
 func (s *Server) handleTCPDecision(req *adapterRequest, decision trafficDecision, host string, fields ...zap.Field) {
@@ -465,8 +469,7 @@ func (s *Server) relayTCPConn(client net.Conn, prefix io.Reader, destIP net.IP, 
 	if prefix != nil {
 		reader = io.MultiReader(prefix, client)
 	}
-	s.pipeWithReader(client, upstream, reader, compiled, audit)
-	return nil
+	return s.pipeWithReader(client, upstream, reader, compiled, audit)
 }
 
 func (s *Server) handleUDPDecision(req *adapterRequest, decision trafficDecision, host string) {
@@ -728,6 +731,16 @@ func closeConnWrite(conn net.Conn) {
 	if writer, ok := conn.(closeWriter); ok {
 		_ = writer.CloseWrite()
 	}
+}
+
+func normalizeRelayError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+		return nil
+	}
+	return err
 }
 
 func (s *Server) recordFlow(srcIP string, dstIP net.IP, dstPort int, proto string, srcPort int) {

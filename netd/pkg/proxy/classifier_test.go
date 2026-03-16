@@ -237,6 +237,27 @@ func TestClassifyTCPReadsFragmentedPostgresStartup(t *testing.T) {
 	}
 }
 
+func TestUDPSNIClassifierEngagesForPlatformDomainRules(t *testing.T) {
+	classifier := &udpSNIClassifier{}
+	result, matched := classifier.Classify(&udpClassifyContext{
+		Compiled: &policy.CompiledPolicy{
+			Mode: v1alpha1.NetworkModeAllowAll,
+			Platform: &policy.PlatformPolicy{
+				DeniedDomains: []policy.DomainRule{{Pattern: "blocked.example.com", Type: policy.DomainMatchExact}},
+			},
+		},
+		SrcIP:    "10.0.0.2",
+		DestIP:   net.ParseIP("8.8.8.8"),
+		DestPort: 443,
+	})
+	if !matched {
+		t.Fatalf("expected udp sni classifier to engage when platform domain rules exist")
+	}
+	if result == nil || result.Classification.UnknownReason != "missing_sni" {
+		t.Fatalf("unexpected classifier result: %+v", result)
+	}
+}
+
 func TestDefaultTCPClassifiersClassifyPostgresStartup(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()

@@ -16,15 +16,16 @@ func readUDPDatagram(conn *net.UDPConn, buf []byte) (int, *net.UDPAddr, net.IP, 
 	if err != nil {
 		return 0, nil, nil, 0, err
 	}
-	dstIP, dstPort := parseOriginalDstFromOOB(oob[:oobn])
+	dstIP, dstPort := parseOriginalDstFromOOB(oob[:oobn], localUDPPort(conn))
 	return n, src, dstIP, dstPort, nil
 }
 
-func parseOriginalDstFromOOB(oob []byte) (net.IP, int) {
+func parseOriginalDstFromOOB(oob []byte, fallbackPort int) (net.IP, int) {
 	msgs, err := unix.ParseSocketControlMessage(oob)
 	if err != nil {
 		return nil, 0
 	}
+	var fallbackIP net.IP
 	for _, msg := range msgs {
 		if msg.Header.Level != unix.SOL_IP {
 			continue
@@ -34,7 +35,14 @@ func parseOriginalDstFromOOB(oob []byte) (net.IP, int) {
 			if ip, port, ok := parseIPv4OriginalDst(msg.Data); ok {
 				return ip, port
 			}
+		case unix.IP_PKTINFO:
+			if ip, ok := parseIPv4PktInfo(msg.Data); ok {
+				fallbackIP = ip
+			}
 		}
+	}
+	if fallbackIP != nil && fallbackPort > 0 {
+		return fallbackIP, fallbackPort
 	}
 	return nil, 0
 }
@@ -65,4 +73,15 @@ func parseIPv4PktInfo(data []byte) (net.IP, bool) {
 		return nil, false
 	}
 	return ip, true
+}
+
+func localUDPPort(conn *net.UDPConn) int {
+	if conn == nil {
+		return 0
+	}
+	addr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok || addr == nil {
+		return 0
+	}
+	return addr.Port
 }

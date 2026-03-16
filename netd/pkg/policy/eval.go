@@ -122,6 +122,11 @@ func HasDomainRules(policy *CompiledPolicy) bool {
 	if policy == nil {
 		return false
 	}
+	if policy.Platform != nil {
+		if len(policy.Platform.AllowedDomains) > 0 || len(policy.Platform.DeniedDomains) > 0 {
+			return true
+		}
+	}
 	return len(policy.Egress.AllowedDomains) > 0 || len(policy.Egress.DeniedDomains) > 0
 }
 
@@ -135,6 +140,9 @@ func hasExplicitL4AllowList(policy *CompiledPolicy) bool {
 func hasExplicitDomainAllowList(policy *CompiledPolicy) bool {
 	if policy == nil {
 		return false
+	}
+	if policy.Platform != nil && len(policy.Platform.AllowedDomains) > 0 {
+		return true
 	}
 	return len(policy.Egress.AllowedDomains) > 0
 }

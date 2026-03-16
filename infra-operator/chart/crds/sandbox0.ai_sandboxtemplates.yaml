@@ -115,7 +115,10 @@ spec:
                 description: Template Sandbox Network policy (template-level default)
                 properties:
                   egress:
-                    description: NetworkEgressPolicy defines egress policy
+                    description: |-
+                      NetworkEgressPolicy defines egress policy.
+                      In allow-all mode, denied* fields are enforced and allowed* fields are ignored.
+                      In block-all mode, allowed* fields are enforced and denied* fields are ignored.
                     properties:
                       allowedCidrs:
                         items:

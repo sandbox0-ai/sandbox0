@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net"
 	"testing"
@@ -136,4 +137,59 @@ func TestRunAdapterTerminateInvokesAdapterHandle(t *testing.T) {
 	if !adapter.called {
 		t.Fatalf("terminate adapter Handle should be called")
 	}
+}
+
+func TestPipeWithReaderPropagatesCopyErrors(t *testing.T) {
+	server := &Server{}
+	wantErr := errors.New("write failed")
+
+	err := server.pipeWithReader(
+		&stubConn{reader: bytes.NewReader(nil), writer: io.Discard},
+		&stubConn{reader: bytes.NewReader(nil), writer: errWriter{err: wantErr}},
+		bytes.NewReader([]byte("payload")),
+		nil,
+		nil,
+	)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("pipeWithReader error = %v, want %v", err, wantErr)
+	}
+}
+
+type stubConn struct {
+	reader io.Reader
+	writer io.Writer
+}
+
+func (c *stubConn) Read(p []byte) (int, error) {
+	if c.reader == nil {
+		return 0, io.EOF
+	}
+	return c.reader.Read(p)
+}
+
+func (c *stubConn) Write(p []byte) (int, error) {
+	if c.writer == nil {
+		return len(p), nil
+	}
+	return c.writer.Write(p)
+}
+
+func (c *stubConn) Close() error                     { return nil }
+func (c *stubConn) LocalAddr() net.Addr              { return stubNetAddr("local") }
+func (c *stubConn) RemoteAddr() net.Addr             { return stubNetAddr("remote") }
+func (c *stubConn) SetDeadline(time.Time) error      { return nil }
+func (c *stubConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *stubConn) SetWriteDeadline(time.Time) error { return nil }
+
+type stubNetAddr string
+
+func (a stubNetAddr) Network() string { return "tcp" }
+func (a stubNetAddr) String() string  { return string(a) }
+
+type errWriter struct {
+	err error
+}
+
+func (w errWriter) Write(_ []byte) (int, error) {
+	return 0, w.err
 }

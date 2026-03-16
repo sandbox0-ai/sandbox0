@@ -65,6 +65,21 @@ func TestAllowEgressDestinationBlockAllDomainOnly(t *testing.T) {
 	}
 }
 
+func TestAllowEgressDestinationBlockAllPlatformDomainOnly(t *testing.T) {
+	p := &CompiledPolicy{
+		Mode: v1alpha1.NetworkModeBlockAll,
+		Platform: &PlatformPolicy{
+			AllowedDomains: []DomainRule{{Pattern: "platform.example.com", Type: DomainMatchExact}},
+		},
+	}
+	if !AllowEgressDestination(p, net.ParseIP("8.8.8.8"), 443, "tcp", "platform.example.com") {
+		t.Fatalf("expected platform-classified domain traffic to pass L4 phase")
+	}
+	if AllowEgressDestination(p, net.ParseIP("8.8.8.8"), 443, "tcp", "") {
+		t.Fatalf("expected hostless traffic to fail closed without explicit domain host")
+	}
+}
+
 func TestAllowEgressDomain(t *testing.T) {
 	p := &CompiledPolicy{
 		Mode: v1alpha1.NetworkModeBlockAll,
@@ -168,6 +183,17 @@ func TestHasDomainRules(t *testing.T) {
 	}
 	if !HasDomainRules(p) {
 		t.Fatalf("expected true for policy with domains")
+	}
+}
+
+func TestHasDomainRulesIncludesPlatformDomains(t *testing.T) {
+	p := &CompiledPolicy{
+		Platform: &PlatformPolicy{
+			DeniedDomains: []DomainRule{{Pattern: "blocked.example.com", Type: DomainMatchExact}},
+		},
+	}
+	if !HasDomainRules(p) {
+		t.Fatalf("expected platform domain rules to trigger classification")
 	}
 }
 

@@ -56,9 +56,11 @@ func TestRunStepsSetsConditions(t *testing.T) {
 	condition := meta.FindStatusCondition(infra.Status.Conditions, infrav1alpha1.ConditionTypeDatabaseReady)
 	if condition == nil {
 		t.Fatalf("expected database condition to be set")
-	}
-	if condition.Status != metav1.ConditionTrue {
-		t.Fatalf("expected condition status true, got %v", condition.Status)
+	} else {
+		status := condition.Status
+		if status != metav1.ConditionTrue {
+			t.Fatalf("expected condition status true, got %v", status)
+		}
 	}
 }
 
@@ -97,9 +99,11 @@ func TestRunStepsErrorStopsAndSetsCondition(t *testing.T) {
 	condition := meta.FindStatusCondition(infra.Status.Conditions, infrav1alpha1.ConditionTypeInternalAuthReady)
 	if condition == nil {
 		t.Fatalf("expected internal auth condition to be set")
-	}
-	if condition.Status != metav1.ConditionFalse {
-		t.Fatalf("expected condition status false, got %v", condition.Status)
+	} else {
+		status := condition.Status
+		if status != metav1.ConditionFalse {
+			t.Fatalf("expected condition status false, got %v", status)
+		}
 	}
 }
 

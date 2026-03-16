@@ -563,7 +563,42 @@ func (s *Server) runAdapter(adapter proxyAdapter, req *adapterRequest) error {
 	if adapter == nil {
 		return fmt.Errorf("adapter is nil")
 	}
-	return adapter.Handle(req)
+	switch adapter.Capability() {
+	case adapterCapabilityPassThrough:
+		return s.runPassThrough(adapter, req)
+	case adapterCapabilityInspect, adapterCapabilityTerminate:
+		return adapter.Handle(req)
+	default:
+		return fmt.Errorf("unsupported adapter capability %q", adapter.Capability())
+	}
+}
+
+func (s *Server) runPassThrough(adapter proxyAdapter, req *adapterRequest) error {
+	if s == nil {
+		return fmt.Errorf("server is nil")
+	}
+	if adapter == nil {
+		return fmt.Errorf("adapter is nil")
+	}
+	if req == nil {
+		return fmt.Errorf("adapter request is nil")
+	}
+	switch adapter.Transport() {
+	case "tcp":
+		if req.Conn == nil {
+			return fmt.Errorf("tcp pass-through requires connection")
+		}
+		s.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
+		return s.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+	case "udp":
+		if req.UDPConn == nil || req.UDPSource == nil {
+			return fmt.Errorf("udp pass-through requires source datagram")
+		}
+		s.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "udp", req.UDPSource.Port)
+		return s.forwardUDPDatagram(req.UDPConn, req.UDPSource, req.UDPPayload, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+	default:
+		return fmt.Errorf("unsupported pass-through transport %q", adapter.Transport())
+	}
 }
 
 func (s *Server) forwardUDPDatagram(

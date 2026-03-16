@@ -378,14 +378,18 @@ func (s *Server) pipeWithReader(client net.Conn, upstream net.Conn, reader io.Re
 	go func() {
 		n, err := io.Copy(upstreamCounter, reader)
 		s.recordEgressBytes(compiled, n, audit)
+		closeConnWrite(upstream)
 		errCh <- err
 	}()
 	go func() {
 		n, err := io.Copy(clientCounter, upstream)
 		s.recordIngressBytes(compiled, n, audit)
+		closeConnWrite(client)
 		errCh <- err
 	}()
-	<-errCh
+	for i := 0; i < 2; i++ {
+		<-errCh
+	}
 }
 
 func (s *Server) handleTCPDecision(req *adapterRequest, decision trafficDecision, host string, fields ...zap.Field) {
@@ -647,6 +651,18 @@ func ipString(ip net.IP) string {
 		return ""
 	}
 	return ip.String()
+}
+
+func closeConnWrite(conn net.Conn) {
+	if conn == nil {
+		return
+	}
+	type closeWriter interface {
+		CloseWrite() error
+	}
+	if writer, ok := conn.(closeWriter); ok {
+		_ = writer.CloseWrite()
+	}
 }
 
 func (s *Server) recordFlow(srcIP string, dstIP net.IP, dstPort int, proto string, srcPort int) {

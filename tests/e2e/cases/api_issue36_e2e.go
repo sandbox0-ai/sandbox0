@@ -19,11 +19,10 @@ import (
 )
 
 const (
-	issue36AllowedHost       = "allowed.example.test"
-	issue36HTTPPort    int32 = 18081
-	issue36OpaquePort  int32 = 18082
-	issue36UDPPort     int32 = 18083
-	issue36HTTPBody          = "issue36-http-ok\n"
+	issue36HTTPPort   int32 = 18081
+	issue36OpaquePort int32 = 18082
+	issue36UDPPort    int32 = 18083
+	issue36HTTPBody         = "issue36-http-ok\n"
 )
 
 func assertAuditableEgressInterception(env *framework.ScenarioEnv, session *e2eutils.Session) {
@@ -69,7 +68,7 @@ func assertAuditableEgressInterception(env *framework.ScenarioEnv, session *e2eu
 }
 
 func assertIssue36TCPClassificationBehavior(env *framework.ScenarioEnv, session *e2eutils.Session, base apispec.Template, helperIP, suffix string) {
-	allowedDomains := []string{issue36AllowedHost}
+	allowedDomains := []string{helperIP}
 	templateID := "e2e-issue36-tcp-" + suffix
 	templateReq := buildIssue36TemplateCreateRequest(base, templateID, &apispec.TplSandboxNetworkPolicy{
 		Mode: apispec.BlockAll,
@@ -309,15 +308,15 @@ import socket
 import time
 
 addr = (%q, %d)
-sock = socket.create_connection(addr, timeout=5)
-sock.settimeout(5)
-sock.sendall(b"GET / HTTP/1.1\r\nHo")
-time.sleep(0.25)
-sock.sendall(b"st: %s\r\nConnection: close\r\n\r\n")
-chunks = []
-while True:
-    try:
-        chunk = sock.recv(4096)
+	sock = socket.create_connection(addr, timeout=5)
+	sock.settimeout(5)
+	sock.sendall(b"GET / HTTP/1.1\r\nHo")
+	time.sleep(0.25)
+	sock.sendall(b"st: %s\r\nConnection: close\r\n\r\n")
+	chunks = []
+	while True:
+	    try:
+	        chunk = sock.recv(4096)
     except socket.timeout:
         break
     if not chunk:
@@ -325,10 +324,10 @@ while True:
     chunks.append(chunk)
 sock.close()
 body = b"".join(chunks).decode("utf-8", "replace")
-if %q not in body:
-    raise SystemExit(body)
-print("ok")
-PY`, helperIP, issue36HTTPPort, issue36AllowedHost, issue36HTTPBody)
+	if %q not in body:
+	    raise SystemExit(body)
+	print("ok")
+PY`, helperIP, issue36HTTPPort, helperIP, issue36HTTPBody)
 }
 
 func issue36OpaqueTCPCommand(helperIP string) string {

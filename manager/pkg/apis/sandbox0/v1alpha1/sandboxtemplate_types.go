@@ -186,7 +186,9 @@ type PoolStrategy struct {
 	MaxIdle int32 `json:"maxIdle"` // Maximum idle pods (enforced by CleanupController)
 }
 
-// TplSandboxNetworkPolicy defines network policy (template-level default)
+// TplSandboxNetworkPolicy defines network policy (template-level default).
+// allow-all permits traffic by default and applies denied* rules as subtractive filters.
+// block-all denies traffic by default and applies allowed* rules as additive exceptions.
 type TplSandboxNetworkPolicy struct {
 	Mode   NetworkPolicyMode    `json:"mode"`
 	Egress *NetworkEgressPolicy `json:"egress,omitempty"`
@@ -200,7 +202,9 @@ const (
 	NetworkModeBlockAll NetworkPolicyMode = "block-all"
 )
 
-// NetworkEgressPolicy defines egress policy
+// NetworkEgressPolicy defines egress policy.
+// In allow-all mode, denied* fields are enforced and allowed* fields are ignored.
+// In block-all mode, allowed* fields are enforced and denied* fields are ignored.
 type NetworkEgressPolicy struct {
 	AllowedCIDRs   []string   `json:"allowedCidrs,omitempty"`
 	AllowedDomains []string   `json:"allowedDomains,omitempty"`

@@ -11,19 +11,19 @@ Control network access for sandboxes. Network policies allow you to restrict out
 
 ## Egress Policy
 
-When using `block-all` mode, you can define exceptions via egress rules:
+Egress fields are interpreted by the selected mode:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `allowed_domains` | array | Whitelist of allowed domains |
-| `denied_domains` | array | Blacklist of blocked domains |
-| `allowed_cidrs` | array | Whitelist of allowed IP CIDRs |
-| `denied_cidrs` | array | Blacklist of blocked IP CIDRs |
-| `allowed_ports` | array | Whitelist of allowed destination ports |
-| `denied_ports` | array | Blacklist of blocked destination ports |
+| `allowed_domains` | array | Whitelist of allowed domains. Used only in `block-all` mode. |
+| `denied_domains` | array | Blacklist of blocked domains. Used only in `allow-all` mode. |
+| `allowed_cidrs` | array | Whitelist of allowed IP CIDRs. Used only in `block-all` mode. |
+| `denied_cidrs` | array | Blacklist of blocked IP CIDRs. Used only in `allow-all` mode. |
+| `allowed_ports` | array | Whitelist of allowed destination ports. Used only in `block-all` mode. |
+| `denied_ports` | array | Blacklist of blocked destination ports. Used only in `allow-all` mode. |
 
 <Callout variant="info">
-Egress rules are only effective when combined with <code>block-all</code> mode. In <code>allow-all</code> mode, all traffic is permitted regardless of rules.
+In <code>allow-all</code> mode, traffic is permitted by default and only <code>denied*</code> fields are enforced. In <code>block-all</code> mode, traffic is denied by default and only <code>allowed*</code> fields are enforced.
 </Callout>
 
 ---

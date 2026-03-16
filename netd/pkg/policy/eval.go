@@ -45,6 +45,7 @@ func allowEgressDestination(policy *CompiledPolicy, destIP net.IP, destPort int,
 	}
 	switch policy.Mode {
 	case v1alpha1.NetworkModeAllowAll:
+		// allow-all defaults to permit and applies denied* fields as subtractive rules.
 		if matchCIDR(destIP, policy.Egress.DeniedCIDRs) {
 			return false
 		}
@@ -53,6 +54,8 @@ func allowEgressDestination(policy *CompiledPolicy, destIP net.IP, destPort int,
 		}
 		return true
 	case v1alpha1.NetworkModeBlockAll:
+		// block-all defaults to deny and applies allowed* fields as additive rules.
+		// denied* fields do not participate in block-all evaluation.
 		if !hasExplicitL4AllowList(policy) {
 			return host != "" && hasExplicitDomainAllowList(policy)
 		}
@@ -98,11 +101,14 @@ func AllowEgressDomain(policy *CompiledPolicy, host string) bool {
 	}
 	switch policy.Mode {
 	case v1alpha1.NetworkModeAllowAll:
+		// allow-all defaults to permit and applies denied* fields as subtractive rules.
 		if matchDomain(host, policy.Egress.DeniedDomains) {
 			return false
 		}
 		return true
 	case v1alpha1.NetworkModeBlockAll:
+		// block-all defaults to deny and applies allowed* fields as additive rules.
+		// denied* fields do not participate in block-all evaluation.
 		if len(policy.Egress.AllowedDomains) == 0 {
 			return false
 		}

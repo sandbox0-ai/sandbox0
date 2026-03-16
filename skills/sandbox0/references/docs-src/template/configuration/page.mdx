@@ -91,13 +91,13 @@ Template-level default network policy. If `network` is provided, `mode` is requi
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `mode` | string | — | Required when `network` is set. Allowed values: `allow-all`, `block-all`. |
-| `egress.allowedDomains` | string[] | — | Wildcard-supported domain allowlist (e.g., `*.github.com`). Only used when `mode` is `block-all`. |
-| `egress.deniedDomains` | string[] | — | Domain blocklist. |
-| `egress.allowedCidrs` | string[] | — | CIDR allowlist (e.g., `10.0.0.0/8`). |
-| `egress.deniedCidrs` | string[] | — | CIDR blocklist. |
-| `egress.allowedPorts` | array | — | Port/protocol allowlist. `port` must be `1..65535`. `protocol` is optional but must be `tcp` or `udp` if set. Supports optional `endPort` range. |
-| `egress.deniedPorts` | array | — | Port/protocol blocklist. |
+| `mode` | string | — | Required when `network` is set. Allowed values: `allow-all`, `block-all`. `allow-all` permits by default and evaluates `denied*`. `block-all` denies by default and evaluates `allowed*`. |
+| `egress.allowedDomains` | string[] | — | Wildcard-supported domain allowlist (e.g., `*.github.com`). Used only when `mode` is `block-all`. |
+| `egress.deniedDomains` | string[] | — | Domain blocklist. Used only when `mode` is `allow-all`. |
+| `egress.allowedCidrs` | string[] | — | CIDR allowlist (e.g., `10.0.0.0/8`). Used only when `mode` is `block-all`. |
+| `egress.deniedCidrs` | string[] | — | CIDR blocklist. Used only when `mode` is `allow-all`. |
+| `egress.allowedPorts` | array | — | Port/protocol allowlist. `port` must be `1..65535`. `protocol` is optional but must be `tcp` or `udp` if set. Supports optional `endPort` range. Used only when `mode` is `block-all`. |
+| `egress.deniedPorts` | array | — | Port/protocol blocklist. Used only when `mode` is `allow-all`. |
 
 See [Network Policy](/docs/sandbox/network) for detailed egress rule semantics and runtime update instructions.
 

@@ -4364,6 +4364,10 @@ components:
       required: [minIdle, maxIdle]
     TplSandboxNetworkPolicy:
       type: object
+      description: |
+        Template-level outbound network policy.
+        `allow-all` permits traffic by default and applies `denied*` rules as subtractive filters.
+        `block-all` denies traffic by default and applies `allowed*` rules as additive exceptions.
       properties:
         mode:
           type: string
@@ -4373,29 +4377,39 @@ components:
       required: [mode]
     NetworkEgressPolicy:
       type: object
+      description: |
+        Egress rule set interpreted by the selected network mode.
+        In `allow-all`, only `denied*` fields are enforced.
+        In `block-all`, only `allowed*` fields are enforced.
       properties:
         allowedCidrs:
           type: array
+          description: CIDR allowlist used only when mode is `block-all`.
           items:
             type: string
         allowedDomains:
           type: array
+          description: Domain allowlist used only when mode is `block-all`.
           items:
             type: string
         allowedPorts:
           type: array
+          description: Port/protocol allowlist used only when mode is `block-all`.
           items:
             $ref: "#/components/schemas/PortSpec"
         deniedDomains:
           type: array
+          description: Domain denylist used only when mode is `allow-all`.
           items:
             type: string
         deniedCidrs:
           type: array
+          description: CIDR denylist used only when mode is `allow-all`.
           items:
             type: string
         deniedPorts:
           type: array
+          description: Port/protocol denylist used only when mode is `allow-all`.
           items:
             $ref: "#/components/schemas/PortSpec"
     PortSpec:

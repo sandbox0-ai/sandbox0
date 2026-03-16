@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
 	"github.com/sandbox0-ai/sandbox0/pkg/framework"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
@@ -84,9 +83,8 @@ func assertIssue36TCPClassificationBehavior(env *framework.ScenarioEnv, session 
 	defer func() {
 		_ = session.DeleteTemplate(env.TestCtx.Context, GinkgoT(), templateID)
 	}()
-	waitForIssue36TemplateReady(env, session, templateID)
 
-	sandboxID := claimSandboxEventually(env, session, templateID).SandboxId
+	sandboxID := claimIssue36SandboxEventually(env, session, templateID).SandboxId
 	Expect(sandboxID).NotTo(BeEmpty())
 	defer func() {
 		_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
@@ -141,9 +139,8 @@ func assertIssue36UDPSessionBehavior(env *framework.ScenarioEnv, session *e2euti
 	defer func() {
 		_ = session.DeleteTemplate(env.TestCtx.Context, GinkgoT(), templateID)
 	}()
-	waitForIssue36TemplateReady(env, session, templateID)
 
-	sandboxID := claimSandboxEventually(env, session, templateID).SandboxId
+	sandboxID := claimIssue36SandboxEventually(env, session, templateID).SandboxId
 	Expect(sandboxID).NotTo(BeEmpty())
 	defer func() {
 		_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
@@ -173,8 +170,8 @@ func assertIssue36UDPSessionBehavior(env *framework.ScenarioEnv, session *e2euti
 func buildIssue36TemplateCreateRequest(base apispec.Template, templateID string, network *apispec.TplSandboxNetworkPolicy) apispec.TemplateCreateRequest {
 	req := e2eutils.CloneTemplateForCreate(base, templateID)
 	req.Spec.Pool = &apispec.PoolStrategy{
-		MinIdle: 1,
-		MaxIdle: 1,
+		MinIdle: 0,
+		MaxIdle: 0,
 	}
 	req.Spec.Network = network
 	description := "Issue36 auditable egress e2e template"
@@ -184,38 +181,14 @@ func buildIssue36TemplateCreateRequest(base apispec.Template, templateID string,
 	return req
 }
 
-func waitForIssue36TemplateReady(env *framework.ScenarioEnv, session *e2eutils.Session, templateID string) {
-	namespace, err := naming.TemplateNamespaceForBuiltin(templateID)
-	Expect(err).NotTo(HaveOccurred())
-
+func claimIssue36SandboxEventually(env *framework.ScenarioEnv, session *e2eutils.Session, templateID string) *apispec.ClaimResponse {
+	var resp *apispec.ClaimResponse
 	Eventually(func() error {
-		tpl, err := session.GetTemplate(env.TestCtx.Context, GinkgoT(), templateID)
-		if err != nil {
-			return err
-		}
-		if tpl.Status == nil || tpl.Status.IdleCount == nil {
-			return fmt.Errorf("template %s status is not ready", templateID)
-		}
-		if *tpl.Status.IdleCount < 1 {
-			return fmt.Errorf("template %s idle pool is not ready: idleCount=%d", templateID, *tpl.Status.IdleCount)
-		}
-		runningIdlePods, err := framework.KubectlOutput(
-			env.TestCtx.Context,
-			env.Config.Kubeconfig,
-			"-n", namespace,
-			"get", "pods",
-			"-l", fmt.Sprintf("%s=%s,%s=%s", controller.LabelTemplateID, templateID, controller.LabelPoolType, controller.PoolTypeIdle),
-			"--field-selector", "status.phase=Running",
-			"-o", "name",
-		)
-		if err != nil {
-			return err
-		}
-		if len(strings.Fields(strings.TrimSpace(runningIdlePods))) < 1 {
-			return fmt.Errorf("template %s has no running idle pods yet", templateID)
-		}
-		return nil
-	}).WithTimeout(3 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
+		var err error
+		resp, err = session.ClaimSandbox(env.TestCtx.Context, GinkgoT(), templateID)
+		return err
+	}).WithTimeout(5 * time.Minute).WithPolling(3 * time.Second).Should(Succeed())
+	return resp
 }
 
 func waitForIssue36SandboxPodRunningEventually(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID, namespace string) *apispec.Sandbox {

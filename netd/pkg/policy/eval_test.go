@@ -50,6 +50,21 @@ func TestAllowEgressL4BlockAllNoAllowList(t *testing.T) {
 	}
 }
 
+func TestAllowEgressDestinationBlockAllDomainOnly(t *testing.T) {
+	p := &CompiledPolicy{
+		Mode: v1alpha1.NetworkModeBlockAll,
+		Egress: CompiledRuleSet{
+			AllowedDomains: []DomainRule{{Pattern: "example.com", Type: DomainMatchExact}},
+		},
+	}
+	if !AllowEgressDestination(p, net.ParseIP("8.8.8.8"), 443, "tcp", "example.com") {
+		t.Fatalf("expected classified domain traffic to pass L4 phase")
+	}
+	if AllowEgressDestination(p, net.ParseIP("8.8.8.8"), 443, "tcp", "") {
+		t.Fatalf("expected hostless traffic to fail closed without L4 allow list")
+	}
+}
+
 func TestAllowEgressDomain(t *testing.T) {
 	p := &CompiledPolicy{
 		Mode: v1alpha1.NetworkModeBlockAll,

@@ -188,12 +188,122 @@ func TestHandleUDPDecisionPassThroughRelaysAndAudits(t *testing.T) {
 		t.Fatalf("upstream received = %q, want %q", got, payload)
 	}
 
+	server.closeUDPSessions()
 	event := decodeSingleAuditEvent(t, auditBuf.Bytes())
 	if event.Action != string(decisionActionPassThrough) || event.Adapter != "udp-pass-through" {
 		t.Fatalf("unexpected udp audit event: %+v", event)
 	}
 	if event.Outcome != "completed" || event.EgressBytes != int64(len(payload)) || event.IngressBytes != int64(len(payload)) {
 		t.Fatalf("unexpected udp audit bytes/outcome: %+v", event)
+	}
+}
+
+func TestHandleUDPDecisionPassThroughReusesUDPSession(t *testing.T) {
+	upstreamConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatalf("listen udp upstream: %v", err)
+	}
+	defer upstreamConn.Close()
+
+	upstreamAddrs := make(chan string, 2)
+	go func() {
+		buf := make([]byte, 1024)
+		for i := 0; i < 2; i++ {
+			_ = upstreamConn.SetDeadline(time.Now().Add(2 * time.Second))
+			n, addr, readErr := upstreamConn.ReadFromUDP(buf)
+			if readErr != nil {
+				t.Errorf("read upstream udp packet %d: %v", i, readErr)
+				return
+			}
+			upstreamAddrs <- addr.String()
+			if _, writeErr := upstreamConn.WriteToUDP(append([]byte(nil), buf[:n]...), addr); writeErr != nil {
+				t.Errorf("write upstream udp packet %d: %v", i, writeErr)
+				return
+			}
+		}
+	}()
+
+	proxyConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatalf("listen udp proxy: %v", err)
+	}
+	defer proxyConn.Close()
+
+	clientConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatalf("listen udp client: %v", err)
+	}
+	defer clientConn.Close()
+
+	var auditBuf bytes.Buffer
+	registry, err := newAdapterRegistry(
+		nil,
+		[]proxyAdapter{&tcpPassThroughAdapter{}, &udpPassThroughAdapter{}},
+	)
+	if err != nil {
+		t.Fatalf("newAdapterRegistry: %v", err)
+	}
+	server := &Server{
+		cfg: &config.NetdConfig{
+			ProxyUpstreamTimeout: metav1.Duration{Duration: 2 * time.Second},
+		},
+		logger:      zap.NewNop(),
+		udpHTTPConn: proxyConn,
+		adapters:    registry,
+		auditor:     newAuditLoggerFromWriter(nopWriteCloser{Writer: &auditBuf}),
+	}
+	defer server.closeUDPSessions()
+
+	compiled := &policy.CompiledPolicy{Mode: v1alpha1.NetworkModeAllowAll}
+	payloads := [][]byte{[]byte("udp-one"), []byte("udp-two")}
+	for _, payload := range payloads {
+		req := &adapterRequest{
+			Server:     server,
+			Compiled:   compiled,
+			SrcIP:      clientConn.LocalAddr().(*net.UDPAddr).IP.String(),
+			DestIP:     upstreamConn.LocalAddr().(*net.UDPAddr).IP,
+			DestPort:   upstreamConn.LocalAddr().(*net.UDPAddr).Port,
+			UDPConn:    proxyConn,
+			UDPSource:  clientConn.LocalAddr().(*net.UDPAddr),
+			UDPPayload: payload,
+		}
+		decision := decideTraffic(compiled, classifyUnknownTraffic("udp", "udp", req.DestIP, req.DestPort, "missing_sni"))
+		server.handleUDPDecision(req, decision, "")
+
+		reply := make([]byte, 1024)
+		_ = clientConn.SetDeadline(time.Now().Add(2 * time.Second))
+		n, _, readErr := clientConn.ReadFromUDP(reply)
+		if readErr != nil {
+			t.Fatalf("read udp reply: %v", readErr)
+		}
+		if got := reply[:n]; !bytes.Equal(got, payload) {
+			t.Fatalf("udp reply = %q, want %q", got, payload)
+		}
+	}
+
+	firstAddr := <-upstreamAddrs
+	secondAddr := <-upstreamAddrs
+	if firstAddr != secondAddr {
+		t.Fatalf("expected reused upstream socket, got %q and %q", firstAddr, secondAddr)
+	}
+	server.udpSessionMu.Lock()
+	sessionCount := len(server.udpSessions)
+	server.udpSessionMu.Unlock()
+	if got := sessionCount; got != 1 {
+		t.Fatalf("udp session count = %d, want 1", got)
+	}
+
+	server.closeUDPSessions()
+	events := decodeAuditEvents(t, auditBuf.Bytes())
+	if len(events) != 1 {
+		t.Fatalf("audit event count = %d, want 1", len(events))
+	}
+	wantBytes := int64(len(payloads[0]) + len(payloads[1]))
+	if events[0].FlowID == "" {
+		t.Fatalf("expected udp flow id, got %+v", events[0])
+	}
+	if events[0].EgressBytes != wantBytes || events[0].IngressBytes != wantBytes {
+		t.Fatalf("unexpected aggregated udp bytes: %+v", events[0])
 	}
 }
 
@@ -234,4 +344,21 @@ func decodeSingleAuditEvent(t *testing.T, data []byte) auditEvent {
 		t.Fatalf("decode audit event: %v", err)
 	}
 	return event
+}
+
+func decodeAuditEvents(t *testing.T, data []byte) []auditEvent {
+	t.Helper()
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	events := []auditEvent{}
+	for {
+		var event auditEvent
+		if err := decoder.Decode(&event); err != nil {
+			if err == io.EOF {
+				break
+			}
+			t.Fatalf("decode audit event stream: %v", err)
+		}
+		events = append(events, event)
+	}
+	return events
 }

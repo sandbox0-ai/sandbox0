@@ -56,6 +56,22 @@ func TestDecideTrafficL7Denied(t *testing.T) {
 	}
 }
 
+func TestDecideTrafficBlockAllDomainOnlyAllowedUsesAdapter(t *testing.T) {
+	compiled := &policy.CompiledPolicy{
+		Mode: v1alpha1.NetworkModeBlockAll,
+		Egress: policy.CompiledRuleSet{
+			AllowedDomains: []policy.DomainRule{{Pattern: "example.com", Type: policy.DomainMatchExact}},
+		},
+	}
+	decision := decideTraffic(compiled, classifyKnownTraffic("tcp", "http", net.ParseIP("8.8.8.8"), 443, "example.com"))
+	if decision.Action != decisionActionUseAdapter {
+		t.Fatalf("expected use-adapter, got %s", decision.Action)
+	}
+	if decision.Reason != "allowed" {
+		t.Fatalf("expected allowed reason, got %s", decision.Reason)
+	}
+}
+
 func TestDecideTrafficUnknownAllowAllPassesThrough(t *testing.T) {
 	compiled := &policy.CompiledPolicy{
 		Mode: v1alpha1.NetworkModeAllowAll,

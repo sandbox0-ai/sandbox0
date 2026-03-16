@@ -28,6 +28,7 @@ type adapterRequest struct {
 	Server     *Server
 	Compiled   *policy.CompiledPolicy
 	Audit      *flowAudit
+	UDPSession *udpSession
 	SrcIP      string
 	DestIP     net.IP
 	DestPort   int

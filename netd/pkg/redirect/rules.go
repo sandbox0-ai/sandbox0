@@ -42,10 +42,10 @@ func appendTPROXYRules(buf *bytes.Buffer, protocol string, destPort int, proxyPo
 	if destPort > 0 {
 		base += fmt.Sprintf(" --dport %d", destPort)
 	}
-	buf.WriteString(fmt.Sprintf("%s -m conntrack --ctstate NEW -j TPROXY --on-port %d --tproxy-mark %s\n",
-		base, proxyPort, tproxyMark))
-	buf.WriteString(fmt.Sprintf("%s -m socket --transparent -j TPROXY --on-port %d --tproxy-mark %s\n",
-		base, proxyPort, tproxyMark))
+	_, _ = fmt.Fprintf(buf, "%s -m conntrack --ctstate NEW -j TPROXY --on-port %d --tproxy-mark %s\n",
+		base, proxyPort, tproxyMark)
+	_, _ = fmt.Fprintf(buf, "%s -m socket --transparent -j TPROXY --on-port %d --tproxy-mark %s\n",
+		base, proxyPort, tproxyMark)
 }
 
 func buildIPSetRestoreInput(ips []string) string {

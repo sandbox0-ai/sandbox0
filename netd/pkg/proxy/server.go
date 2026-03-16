@@ -1,8 +1,6 @@
 package proxy
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -37,6 +35,8 @@ type Server struct {
 	adapters       *adapterRegistry
 	auditor        *auditLogger
 	auditSeq       uint64
+	udpSessionMu   sync.Mutex
+	udpSessions    map[udpSessionKey]*udpSession
 	exitCh         chan error
 	exitOnce       sync.Once
 }
@@ -194,6 +194,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 			err = closeErr
 		}
 	}
+	s.closeUDPSessions()
 	return err
 }
 
@@ -360,10 +361,6 @@ func (s *Server) handleUDPDatagram(conn *net.UDPConn, src *net.UDPAddr, payload 
 	s.handleUDPDecision(req, decision, result.Host)
 }
 
-func (s *Server) pipe(client net.Conn, upstream net.Conn, reader *bufio.Reader, compiled *policy.CompiledPolicy, audit *flowAudit) {
-	s.pipeWithReader(client, upstream, reader, compiled, audit)
-}
-
 func (s *Server) pipeWithReader(client net.Conn, upstream net.Conn, reader io.Reader, compiled *policy.CompiledPolicy, audit *flowAudit) {
 	upstreamCounter := &countingWriter{writer: upstream}
 	clientCounter := &countingWriter{writer: client}
@@ -472,6 +469,25 @@ func (s *Server) handleUDPDecision(req *adapterRequest, decision trafficDecision
 	if req == nil || req.UDPSource == nil {
 		return
 	}
+	if decision.Action != decisionActionDeny && req.DestIP != nil && req.DestPort > 0 {
+		session, err := s.ensureUDPSession(req)
+		if err != nil {
+			req.Audit = s.newFlowAudit(decision.Transport)
+			fields := []zap.Field{
+				zap.String("src_ip", req.UDPSource.IP.String()),
+				zap.String("dst_ip", ipString(req.DestIP)),
+				zap.Int("dst_port", req.DestPort),
+				zap.String("protocol", decision.Protocol),
+				zap.String("reason", decision.Reason),
+				zap.String("action", string(decision.Action)),
+			}
+			s.logger.Warn("UDP session setup failed", append(fields, zap.Error(err))...)
+			s.recordAuditEvent(req, decision, nil, 0, err)
+			return
+		}
+		req.UDPSession = session
+		req.Audit = session.Audit()
+	}
 	fields := []zap.Field{
 		zap.String("src_ip", req.UDPSource.IP.String()),
 		zap.String("dst_ip", ipString(req.DestIP)),
@@ -496,38 +512,64 @@ func (s *Server) handleUDPDecision(req *adapterRequest, decision trafficDecision
 		adapter, resolveErr := s.resolveAdapter(decision)
 		if resolveErr != nil {
 			s.logger.Warn("UDP fallback adapter missing", append(fields, zap.Error(resolveErr))...)
+			if req.UDPSession != nil {
+				req.UDPSession.closeWithError(resolveErr)
+			}
 			s.recordAuditEvent(req, decision, nil, 0, resolveErr)
 			return
+		}
+		if req.UDPSession != nil {
+			req.UDPSession.bindAudit(req, decision, adapter)
 		}
 		fields = append(fields, zap.String("adapter", adapter.Name()), zap.String("adapter_capability", string(adapter.Capability())))
 		if req.DestIP == nil || req.DestPort <= 0 {
 			err := fmt.Errorf("destination unavailable for udp pass-through")
 			s.logger.Warn("UDP decision pass-through unavailable", append(fields, zap.Error(err))...)
+			if req.UDPSession != nil {
+				req.UDPSession.closeWithError(err)
+				return
+			}
 			s.recordAuditEvent(req, decision, adapter, 0, err)
 			return
 		}
 		s.logger.Info("UDP decision pass-through", fields...)
 		start := time.Now()
 		err := s.runAdapter(adapter, req)
-		s.recordAuditEvent(req, decision, adapter, time.Since(start), err)
 		if err != nil {
 			s.logger.Warn("UDP fallback adapter failed", append(fields, zap.Error(err))...)
+			if req.UDPSession != nil {
+				req.UDPSession.closeWithError(err)
+				return
+			}
+			s.recordAuditEvent(req, decision, adapter, time.Since(start), err)
+			return
 		}
 		return
 	case decisionActionUseAdapter:
 		adapter, resolveErr := s.resolveAdapter(decision)
 		if resolveErr != nil {
 			s.logger.Warn("UDP adapter missing", append(fields, zap.Error(resolveErr))...)
+			if req.UDPSession != nil {
+				req.UDPSession.closeWithError(resolveErr)
+			}
 			s.recordAuditEvent(req, decision, nil, 0, resolveErr)
 			return
+		}
+		if req.UDPSession != nil {
+			req.UDPSession.bindAudit(req, decision, adapter)
 		}
 		fields = append(fields, zap.String("adapter", adapter.Name()), zap.String("adapter_capability", string(adapter.Capability())))
 		s.logger.Debug("UDP decision use adapter", fields...)
 		start := time.Now()
 		err := s.runAdapter(adapter, req)
-		s.recordAuditEvent(req, decision, adapter, time.Since(start), err)
 		if err != nil {
 			s.logger.Warn("UDP adapter failed", append(fields, zap.Error(err))...)
+			if req.UDPSession != nil {
+				req.UDPSession.closeWithError(err)
+				return
+			}
+			s.recordAuditEvent(req, decision, adapter, time.Since(start), err)
+			return
 		}
 		return
 	default:
@@ -613,28 +655,22 @@ func (s *Server) forwardUDPDatagram(
 	if conn == nil || src == nil || destIP == nil || destPort <= 0 {
 		return fmt.Errorf("missing destination")
 	}
-	upstreamAddr := &net.UDPAddr{IP: destIP, Port: destPort}
-	upstreamConn, err := net.DialUDP("udp", nil, upstreamAddr)
+	req := &adapterRequest{
+		Server:     s,
+		Compiled:   compiled,
+		Audit:      audit,
+		SrcIP:      src.IP.String(),
+		DestIP:     destIP,
+		DestPort:   destPort,
+		UDPConn:    conn,
+		UDPSource:  src,
+		UDPPayload: payload,
+	}
+	session, err := s.ensureUDPSession(req)
 	if err != nil {
 		return err
 	}
-	defer upstreamConn.Close()
-
-	_ = upstreamConn.SetDeadline(time.Now().Add(s.cfg.ProxyUpstreamTimeout.Duration))
-	n, err := upstreamConn.Write(payload)
-	if err != nil {
-		return err
-	}
-	s.recordEgressBytes(compiled, int64(n), audit)
-
-	replyBuf := make([]byte, 64*1024)
-	n, _, err = upstreamConn.ReadFromUDP(replyBuf)
-	if err != nil {
-		return err
-	}
-	s.recordIngressBytes(compiled, int64(n), audit)
-	_, err = conn.WriteToUDP(replyBuf[:n], src)
-	return err
+	return session.Forward(payload)
 }
 
 func normalizeHost(host string) string {
@@ -761,6 +797,21 @@ func (s *Server) newFlowAudit(transport string) *flowAudit {
 	return newFlowAudit(fmt.Sprintf("%s-%d", prefix, sequence), time.Now())
 }
 
+func (s *Server) closeUDPSessions() {
+	if s == nil {
+		return
+	}
+	s.udpSessionMu.Lock()
+	sessions := make([]*udpSession, 0, len(s.udpSessions))
+	for _, session := range s.udpSessions {
+		sessions = append(sessions, session)
+	}
+	s.udpSessionMu.Unlock()
+	for _, session := range sessions {
+		session.close()
+	}
+}
+
 type countingWriter struct {
 	writer io.Writer
 }
@@ -778,25 +829,4 @@ func (c *countingConn) Write(p []byte) (int, error) {
 	n, err := c.Conn.Write(p)
 	c.written += int64(n)
 	return n, err
-}
-
-type recordingConn struct {
-	net.Conn
-	recorded bytes.Buffer
-}
-
-func (c *recordingConn) Read(p []byte) (int, error) {
-	n, err := c.Conn.Read(p)
-	if n > 0 {
-		_, _ = c.recorded.Write(p[:n])
-	}
-	return n, err
-}
-
-func (c *recordingConn) RecordedReader() io.Reader {
-	return bytes.NewReader(c.recorded.Bytes())
-}
-
-func (c *recordingConn) RecordedBytes() []byte {
-	return append([]byte(nil), c.recorded.Bytes()...)
 }

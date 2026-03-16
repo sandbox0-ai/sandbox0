@@ -1,25 +1,79 @@
 package proxy
 
 import (
+	"crypto/tls"
 	"encoding/binary"
 	"io"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
 )
 
 type stubTCPClassifier struct {
-	name   string
-	result *classificationResult
-	match  bool
+	name     string
+	result   *classificationResult
+	decision tcpClassifierDecision
 }
 
 func (c stubTCPClassifier) Name() string { return c.name }
 
-func (c stubTCPClassifier) Classify(_ *tcpClassifyContext) (*classificationResult, bool) {
-	return c.result, c.match
+func (c stubTCPClassifier) Classify(_ *tcpClassifyContext) (*classificationResult, tcpClassifierDecision) {
+	return c.result, c.decision
+}
+
+type scriptedConn struct {
+	fragments [][]byte
+	readIndex int
+}
+
+func (c *scriptedConn) Read(p []byte) (int, error) {
+	if c.readIndex >= len(c.fragments) {
+		return 0, io.EOF
+	}
+	fragment := c.fragments[c.readIndex]
+	c.readIndex++
+	n := copy(p, fragment)
+	return n, nil
+}
+
+func (c *scriptedConn) Write(p []byte) (int, error) { return len(p), nil }
+func (c *scriptedConn) Close() error                { return nil }
+func (c *scriptedConn) LocalAddr() net.Addr         { return stubAddr("local") }
+func (c *scriptedConn) RemoteAddr() net.Addr        { return stubAddr("remote") }
+func (c *scriptedConn) SetDeadline(time.Time) error { return nil }
+func (c *scriptedConn) SetReadDeadline(time.Time) error {
+	return nil
+}
+func (c *scriptedConn) SetWriteDeadline(time.Time) error {
+	return nil
+}
+
+type stubAddr string
+
+func (a stubAddr) Network() string { return "tcp" }
+func (a stubAddr) String() string  { return string(a) }
+
+type captureConn struct {
+	written []byte
+}
+
+func (c *captureConn) Read(p []byte) (int, error) { return 0, io.EOF }
+func (c *captureConn) Write(p []byte) (int, error) {
+	c.written = append(c.written, p...)
+	return len(p), nil
+}
+func (c *captureConn) Close() error                { return nil }
+func (c *captureConn) LocalAddr() net.Addr         { return stubAddr("local") }
+func (c *captureConn) RemoteAddr() net.Addr        { return stubAddr("remote") }
+func (c *captureConn) SetDeadline(time.Time) error { return nil }
+func (c *captureConn) SetReadDeadline(time.Time) error {
+	return nil
+}
+func (c *captureConn) SetWriteDeadline(time.Time) error {
+	return nil
 }
 
 func TestClassifyTCPUsesRegistryOrder(t *testing.T) {
@@ -27,14 +81,42 @@ func TestClassifyTCPUsesRegistryOrder(t *testing.T) {
 		Classification: classifyKnownTraffic("tcp", "ssh", net.ParseIP("8.8.8.8"), 22, ""),
 	}
 	result, err := classifyTCP([]tcpClassifier{
-		stubTCPClassifier{name: "miss", match: false},
-		stubTCPClassifier{name: "hit", result: want, match: true},
+		stubTCPClassifier{name: "miss", decision: tcpClassifierNoMatch},
+		stubTCPClassifier{name: "hit", result: want, decision: tcpClassifierMatched},
 	}, &tcpClassifyContext{})
 	if err != nil {
 		t.Fatalf("classifyTCP returned error: %v", err)
 	}
 	if result != want {
 		t.Fatalf("classifyTCP returned %+v, want %+v", result, want)
+	}
+}
+
+func TestClassifyTCPReadsFragmentedHTTPRequest(t *testing.T) {
+	ctx := &tcpClassifyContext{
+		OrigIP:      net.ParseIP("8.8.8.8"),
+		OrigPort:    80,
+		Conn:        &scriptedConn{fragments: [][]byte{[]byte("GET / HTTP/1.1\r\nHo"), []byte("st: Example.COM\r\n"), []byte("\r\n")}},
+		HeaderLimit: 1024,
+	}
+	result, err := classifyTCP(defaultTCPClassifiers(), ctx)
+	if err != nil {
+		t.Fatalf("classifyTCP returned error: %v", err)
+	}
+	if result.Classification.Protocol != "http" {
+		t.Fatalf("protocol = %q, want http", result.Classification.Protocol)
+	}
+	if result.Host != "example.com" {
+		t.Fatalf("host = %q, want example.com", result.Host)
+	}
+	req := &adapterRequest{}
+	result.Apply(req)
+	data, readErr := io.ReadAll(req.Prefix)
+	if readErr != nil {
+		t.Fatalf("failed to read replay prefix: %v", readErr)
+	}
+	if string(data) != "GET / HTTP/1.1\r\nHost: Example.COM\r\n\r\n" {
+		t.Fatalf("replay prefix = %q", string(data))
 	}
 }
 
@@ -75,6 +157,33 @@ func TestDefaultHTTPClassifiersClassifyHTTPRequest(t *testing.T) {
 	}
 }
 
+func TestClassifyTCPReadsFragmentedTLSClientHello(t *testing.T) {
+	hello := buildTLSClientHello(t)
+	if len(hello) < 32 {
+		t.Fatalf("unexpected client hello length: %d", len(hello))
+	}
+	ctx := &tcpClassifyContext{
+		OrigIP:   net.ParseIP("8.8.8.8"),
+		OrigPort: 443,
+		Conn: &scriptedConn{fragments: [][]byte{
+			append([]byte(nil), hello[:9]...),
+			append([]byte(nil), hello[9:24]...),
+			append([]byte(nil), hello[24:]...),
+		}},
+		HeaderLimit: 4096,
+	}
+	result, err := classifyTCP(defaultTCPClassifiers(), ctx)
+	if err != nil {
+		t.Fatalf("classifyTCP returned error: %v", err)
+	}
+	if result.Classification.Protocol != "tls" {
+		t.Fatalf("protocol = %q, want tls", result.Classification.Protocol)
+	}
+	if result.Host != "example.com" {
+		t.Fatalf("host = %q, want example.com", result.Host)
+	}
+}
+
 func TestDefaultHTTPClassifiersFallbackToSSHBanner(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
@@ -106,6 +215,25 @@ func TestDefaultHTTPClassifiersFallbackToSSHBanner(t *testing.T) {
 	}
 	if string(data) != "SSH-2.0-OpenSSH_9.0\r\n" {
 		t.Fatalf("replay prefix = %q", string(data))
+	}
+}
+
+func TestClassifyTCPReadsFragmentedPostgresStartup(t *testing.T) {
+	packet := make([]byte, 8)
+	binary.BigEndian.PutUint32(packet[:4], 8)
+	binary.BigEndian.PutUint32(packet[4:8], 80877103)
+	ctx := &tcpClassifyContext{
+		OrigIP:      net.ParseIP("8.8.8.8"),
+		OrigPort:    5432,
+		Conn:        &scriptedConn{fragments: [][]byte{packet[:4], packet[4:]}},
+		HeaderLimit: 1024,
+	}
+	result, err := classifyTCP(defaultTCPClassifiers(), ctx)
+	if err != nil {
+		t.Fatalf("classifyTCP returned error: %v", err)
+	}
+	if result.Classification.Protocol != "postgres" {
+		t.Fatalf("protocol = %q, want postgres", result.Classification.Protocol)
 	}
 }
 
@@ -225,4 +353,20 @@ func TestDefaultUDPClassifiersFallbackToGenericUDP(t *testing.T) {
 	if result.Classification.UnknownReason != "" {
 		t.Fatalf("unknown reason = %q, want empty", result.Classification.UnknownReason)
 	}
+}
+
+func buildTLSClientHello(t *testing.T) []byte {
+	t.Helper()
+	conn := &captureConn{}
+	tlsConn := tls.Client(conn, &tls.Config{
+		ServerName:         "example.com",
+		InsecureSkipVerify: true,
+	})
+	_ = tlsConn.SetDeadline(time.Now().Add(250 * time.Millisecond))
+	_ = tlsConn.Handshake()
+	_ = tlsConn.Close()
+	if len(conn.written) == 0 {
+		t.Fatalf("expected tls client hello bytes")
+	}
+	return append([]byte(nil), conn.written...)
 }

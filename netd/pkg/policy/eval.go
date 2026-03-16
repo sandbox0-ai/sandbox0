@@ -15,6 +15,16 @@ const (
 )
 
 func AllowEgressL4(policy *CompiledPolicy, destIP net.IP, destPort int, protocol string) bool {
+	return allowEgressDestination(policy, destIP, destPort, protocol, "")
+}
+
+// AllowEgressDestination evaluates the L4 phase of an egress decision with
+// optional host classification context.
+func AllowEgressDestination(policy *CompiledPolicy, destIP net.IP, destPort int, protocol string, host string) bool {
+	return allowEgressDestination(policy, destIP, destPort, protocol, host)
+}
+
+func allowEgressDestination(policy *CompiledPolicy, destIP net.IP, destPort int, protocol string, host string) bool {
 	if policy == nil {
 		return true
 	}
@@ -43,8 +53,8 @@ func AllowEgressL4(policy *CompiledPolicy, destIP net.IP, destPort int, protocol
 		}
 		return true
 	case v1alpha1.NetworkModeBlockAll:
-		if len(policy.Egress.AllowedCIDRs) == 0 && len(policy.Egress.AllowedPorts) == 0 {
-			return false
+		if !hasExplicitL4AllowList(policy) {
+			return host != "" && hasExplicitDomainAllowList(policy)
 		}
 		if len(policy.Egress.AllowedCIDRs) > 0 && !matchCIDR(destIP, policy.Egress.AllowedCIDRs) {
 			return false
@@ -107,6 +117,20 @@ func HasDomainRules(policy *CompiledPolicy) bool {
 		return false
 	}
 	return len(policy.Egress.AllowedDomains) > 0 || len(policy.Egress.DeniedDomains) > 0
+}
+
+func hasExplicitL4AllowList(policy *CompiledPolicy) bool {
+	if policy == nil {
+		return false
+	}
+	return len(policy.Egress.AllowedCIDRs) > 0 || len(policy.Egress.AllowedPorts) > 0
+}
+
+func hasExplicitDomainAllowList(policy *CompiledPolicy) bool {
+	if policy == nil {
+		return false
+	}
+	return len(policy.Egress.AllowedDomains) > 0
 }
 
 func isOtherSandboxPod(platform *PlatformPolicy, destIP net.IP) bool {

@@ -2,6 +2,19 @@ package proxy
 
 import "testing"
 
+type stubAdapter struct {
+	name       string
+	transport  string
+	protocol   string
+	capability adapterCapability
+}
+
+func (a stubAdapter) Name() string                  { return a.name }
+func (a stubAdapter) Transport() string             { return a.transport }
+func (a stubAdapter) Protocol() string              { return a.protocol }
+func (a stubAdapter) Capability() adapterCapability { return a.capability }
+func (a stubAdapter) Handle(*adapterRequest) error  { return nil }
+
 func TestNewAdapterRegistryResolvesAdapters(t *testing.T) {
 	registry, err := newAdapterRegistry(
 		[]proxyAdapter{&httpAdapter{}, &udpAdapter{}},
@@ -45,6 +58,23 @@ func TestNewAdapterRegistryRejectsDuplicateProtocolRegistration(t *testing.T) {
 	}
 }
 
+func TestNewAdapterRegistryRejectsNonPassthroughFallback(t *testing.T) {
+	_, err := newAdapterRegistry(
+		nil,
+		[]proxyAdapter{
+			stubAdapter{
+				name:       "tcp-inspect-fallback",
+				transport:  "tcp",
+				protocol:   "unknown",
+				capability: adapterCapabilityInspect,
+			},
+		},
+	)
+	if err == nil {
+		t.Fatalf("expected non-passthrough fallback registration to fail")
+	}
+}
+
 func TestNewAdapterRegistryRejectsFallbackInPrimaryRegistry(t *testing.T) {
 	_, err := newAdapterRegistry(
 		[]proxyAdapter{&tcpPassThroughAdapter{}},
@@ -71,5 +101,26 @@ func TestResolveReturnsErrorForMissingAdapter(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("expected missing adapter lookup to fail")
+	}
+}
+
+func TestResolveRejectsFallbackCapabilityMismatch(t *testing.T) {
+	registry := &adapterRegistry{
+		fallbacks: map[string]proxyAdapter{
+			"tcp": stubAdapter{
+				name:       "bad-fallback",
+				transport:  "tcp",
+				protocol:   "unknown",
+				capability: adapterCapabilityInspect,
+			},
+		},
+	}
+
+	_, err := registry.Resolve(trafficDecision{
+		Action:    decisionActionPassThrough,
+		Transport: "tcp",
+	})
+	if err == nil {
+		t.Fatalf("expected fallback capability mismatch to fail")
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
@@ -38,6 +39,7 @@ type Server struct {
 	udpAdapters      map[string]proxyAdapter
 	udpFallback      proxyAdapter
 	auditor          *auditLogger
+	auditSeq         uint64
 	exitCh           chan error
 	exitOnce         sync.Once
 }
@@ -365,22 +367,22 @@ func (s *Server) handleUDPDatagram(src *net.UDPAddr, payload []byte, destIP net.
 	s.handleUDPDecision(req, decision, result.Host)
 }
 
-func (s *Server) pipe(client net.Conn, upstream net.Conn, reader *bufio.Reader, compiled *policy.CompiledPolicy) {
-	s.pipeWithReader(client, upstream, reader, compiled)
+func (s *Server) pipe(client net.Conn, upstream net.Conn, reader *bufio.Reader, compiled *policy.CompiledPolicy, audit *flowAudit) {
+	s.pipeWithReader(client, upstream, reader, compiled, audit)
 }
 
-func (s *Server) pipeWithReader(client net.Conn, upstream net.Conn, reader io.Reader, compiled *policy.CompiledPolicy) {
+func (s *Server) pipeWithReader(client net.Conn, upstream net.Conn, reader io.Reader, compiled *policy.CompiledPolicy, audit *flowAudit) {
 	upstreamCounter := &countingWriter{writer: upstream}
 	clientCounter := &countingWriter{writer: client}
 	errCh := make(chan error, 2)
 	go func() {
 		n, err := io.Copy(upstreamCounter, reader)
-		s.recordEgressBytes(compiled, n)
+		s.recordEgressBytes(compiled, n, audit)
 		errCh <- err
 	}()
 	go func() {
 		n, err := io.Copy(clientCounter, upstream)
-		s.recordIngressBytes(compiled, n)
+		s.recordIngressBytes(compiled, n, audit)
 		errCh <- err
 	}()
 	<-errCh
@@ -398,6 +400,10 @@ func (s *Server) handleTCPDecision(req *adapterRequest, decision trafficDecision
 		zap.String("reason", decision.Reason),
 		zap.String("action", string(decision.Action)),
 	}
+	if req.Audit == nil {
+		req.Audit = s.newFlowAudit(decision.Transport)
+	}
+	baseFields = append(baseFields, zap.String("flow_id", req.Audit.ID))
 	if host != "" {
 		baseFields = append(baseFields, zap.String("host", host))
 	}
@@ -405,7 +411,7 @@ func (s *Server) handleTCPDecision(req *adapterRequest, decision trafficDecision
 	switch decision.Action {
 	case decisionActionDeny:
 		s.logger.Info("TCP decision denied", baseFields...)
-		s.recordAuditEvent(req, decision, nil, nil)
+		s.recordAuditEvent(req, decision, nil, 0, nil)
 		return
 	case decisionActionPassThrough:
 		adapter := s.tcpFallback
@@ -413,8 +419,9 @@ func (s *Server) handleTCPDecision(req *adapterRequest, decision trafficDecision
 			baseFields = append(baseFields, zap.String("adapter", adapter.Name()), zap.String("adapter_capability", string(adapter.Capability())))
 		}
 		s.logger.Info("TCP decision pass-through", baseFields...)
+		start := time.Now()
 		err := s.runTCPFallbackAdapter(req)
-		s.recordAuditEvent(req, decision, adapter, err)
+		s.recordAuditEvent(req, decision, adapter, time.Since(start), err)
 		if err != nil {
 			s.logger.Warn("TCP fallback adapter failed", append(baseFields, zap.Error(err))...)
 		}
@@ -425,20 +432,21 @@ func (s *Server) handleTCPDecision(req *adapterRequest, decision trafficDecision
 			baseFields = append(baseFields, zap.String("adapter", adapter.Name()), zap.String("adapter_capability", string(adapter.Capability())))
 		}
 		s.logger.Debug("TCP decision use adapter", baseFields...)
+		start := time.Now()
 		err := s.runTCPAdapter(decision.Protocol, req)
-		s.recordAuditEvent(req, decision, adapter, err)
+		s.recordAuditEvent(req, decision, adapter, time.Since(start), err)
 		if err != nil {
 			s.logger.Warn("TCP adapter failed", append(baseFields, zap.Error(err))...)
 		}
 		return
 	default:
 		s.logger.Warn("TCP decision unknown action", baseFields...)
-		s.recordAuditEvent(req, decision, nil, fmt.Errorf("unknown tcp decision action"))
+		s.recordAuditEvent(req, decision, nil, 0, fmt.Errorf("unknown tcp decision action"))
 		return
 	}
 }
 
-func (s *Server) relayTCPConn(client net.Conn, prefix io.Reader, destIP net.IP, destPort int, compiled *policy.CompiledPolicy) error {
+func (s *Server) relayTCPConn(client net.Conn, prefix io.Reader, destIP net.IP, destPort int, compiled *policy.CompiledPolicy, audit *flowAudit) error {
 	if destIP == nil || destPort <= 0 {
 		return fmt.Errorf("missing destination")
 	}
@@ -453,7 +461,7 @@ func (s *Server) relayTCPConn(client net.Conn, prefix io.Reader, destIP net.IP, 
 	if prefix != nil {
 		reader = io.MultiReader(prefix, client)
 	}
-	s.pipeWithReader(client, upstream, reader, compiled)
+	s.pipeWithReader(client, upstream, reader, compiled, audit)
 	return nil
 }
 
@@ -469,13 +477,17 @@ func (s *Server) handleUDPDecision(req *adapterRequest, decision trafficDecision
 		zap.String("reason", decision.Reason),
 		zap.String("action", string(decision.Action)),
 	}
+	if req.Audit == nil {
+		req.Audit = s.newFlowAudit(decision.Transport)
+	}
+	fields = append(fields, zap.String("flow_id", req.Audit.ID))
 	if host != "" {
 		fields = append(fields, zap.String("host", host))
 	}
 	switch decision.Action {
 	case decisionActionDeny:
 		s.logger.Info("UDP decision denied", fields...)
-		s.recordAuditEvent(req, decision, nil, nil)
+		s.recordAuditEvent(req, decision, nil, 0, nil)
 		return
 	case decisionActionPassThrough:
 		adapter := s.udpFallback
@@ -485,12 +497,13 @@ func (s *Server) handleUDPDecision(req *adapterRequest, decision trafficDecision
 		if req.DestIP == nil || req.DestPort <= 0 {
 			err := fmt.Errorf("destination unavailable for udp pass-through")
 			s.logger.Warn("UDP decision pass-through unavailable", append(fields, zap.Error(err))...)
-			s.recordAuditEvent(req, decision, adapter, err)
+			s.recordAuditEvent(req, decision, adapter, 0, err)
 			return
 		}
 		s.logger.Info("UDP decision pass-through", fields...)
+		start := time.Now()
 		err := s.runUDPFallbackAdapter(req)
-		s.recordAuditEvent(req, decision, adapter, err)
+		s.recordAuditEvent(req, decision, adapter, time.Since(start), err)
 		if err != nil {
 			s.logger.Warn("UDP fallback adapter failed", append(fields, zap.Error(err))...)
 		}
@@ -501,24 +514,25 @@ func (s *Server) handleUDPDecision(req *adapterRequest, decision trafficDecision
 			fields = append(fields, zap.String("adapter", adapter.Name()), zap.String("adapter_capability", string(adapter.Capability())))
 		}
 		s.logger.Debug("UDP decision use adapter", fields...)
+		start := time.Now()
 		err := s.runUDPAdapter(decision.Protocol, req)
-		s.recordAuditEvent(req, decision, adapter, err)
+		s.recordAuditEvent(req, decision, adapter, time.Since(start), err)
 		if err != nil {
 			s.logger.Warn("UDP adapter failed", append(fields, zap.Error(err))...)
 		}
 		return
 	default:
 		s.logger.Warn("UDP decision unknown action", fields...)
-		s.recordAuditEvent(req, decision, nil, fmt.Errorf("unknown udp decision action"))
+		s.recordAuditEvent(req, decision, nil, 0, fmt.Errorf("unknown udp decision action"))
 		return
 	}
 }
 
-func (s *Server) recordAuditEvent(req *adapterRequest, decision trafficDecision, adapter proxyAdapter, err error) {
+func (s *Server) recordAuditEvent(req *adapterRequest, decision trafficDecision, adapter proxyAdapter, duration time.Duration, err error) {
 	if s == nil || s.auditor == nil {
 		return
 	}
-	if auditErr := s.auditor.Record(req, decision, adapter, err); auditErr != nil {
+	if auditErr := s.auditor.Record(req, decision, adapter, duration, err); auditErr != nil {
 		s.logger.Warn("Failed to record audit event", zap.Error(auditErr))
 	}
 }
@@ -565,6 +579,7 @@ func (s *Server) forwardUDPDatagram(
 	destIP net.IP,
 	destPort int,
 	compiled *policy.CompiledPolicy,
+	audit *flowAudit,
 ) error {
 	if src == nil || destIP == nil || destPort <= 0 {
 		return fmt.Errorf("missing destination")
@@ -581,14 +596,14 @@ func (s *Server) forwardUDPDatagram(
 	if err != nil {
 		return err
 	}
-	s.recordEgressBytes(compiled, int64(n))
+	s.recordEgressBytes(compiled, int64(n), audit)
 
 	replyBuf := make([]byte, 64*1024)
 	n, _, err = upstreamConn.ReadFromUDP(replyBuf)
 	if err != nil {
 		return err
 	}
-	s.recordIngressBytes(compiled, int64(n))
+	s.recordIngressBytes(compiled, int64(n), audit)
 	_, err = s.udpConn.WriteToUDP(replyBuf[:n], src)
 	return err
 }
@@ -667,18 +682,42 @@ func (s *Server) recordFlow(srcIP string, dstIP net.IP, dstPort int, proto strin
 	})
 }
 
-func (s *Server) recordEgressBytes(compiled *policy.CompiledPolicy, bytes int64) {
-	if s.usageRecorder == nil || bytes <= 0 {
+func (s *Server) recordEgressBytes(compiled *policy.CompiledPolicy, bytes int64, audit *flowAudit) {
+	if bytes <= 0 {
+		return
+	}
+	if audit != nil {
+		audit.RecordEgress(bytes)
+	}
+	if s.usageRecorder == nil {
 		return
 	}
 	s.usageRecorder.RecordEgress(compiled, bytes)
 }
 
-func (s *Server) recordIngressBytes(compiled *policy.CompiledPolicy, bytes int64) {
-	if s.usageRecorder == nil || bytes <= 0 {
+func (s *Server) recordIngressBytes(compiled *policy.CompiledPolicy, bytes int64, audit *flowAudit) {
+	if bytes <= 0 {
+		return
+	}
+	if audit != nil {
+		audit.RecordIngress(bytes)
+	}
+	if s.usageRecorder == nil {
 		return
 	}
 	s.usageRecorder.RecordIngress(compiled, bytes)
+}
+
+func (s *Server) newFlowAudit(transport string) *flowAudit {
+	if s == nil {
+		return newFlowAudit("flow-0", time.Now())
+	}
+	sequence := atomic.AddUint64(&s.auditSeq, 1)
+	prefix := transport
+	if prefix == "" {
+		prefix = "flow"
+	}
+	return newFlowAudit(fmt.Sprintf("%s-%d", prefix, sequence), time.Now())
 }
 
 type countingWriter struct {

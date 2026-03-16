@@ -29,11 +29,14 @@ func TestAuditLoggerRecord(t *testing.T) {
 			SandboxID: "sb-1",
 			TeamID:    "team-1",
 		},
+		Audit:    newFlowAudit("tcp-1", time.Date(2026, 3, 16, 0, 0, 0, 0, time.UTC)),
 		SrcIP:    "10.0.0.2",
 		DestIP:   net.IPv4(8, 8, 8, 8),
 		DestPort: 443,
 		Host:     "example.com",
 	}
+	req.Audit.RecordEgress(128)
+	req.Audit.RecordIngress(64)
 	decision := trafficDecision{
 		Action:           decisionActionUseAdapter,
 		Transport:        "tcp",
@@ -42,7 +45,7 @@ func TestAuditLoggerRecord(t *testing.T) {
 		ClassifierResult: "known",
 	}
 
-	if err := logger.Record(req, decision, &sshAdapter{}, nil); err != nil {
+	if err := logger.Record(req, decision, &sshAdapter{}, 250*time.Millisecond, nil); err != nil {
 		t.Fatalf("Record returned error: %v", err)
 	}
 
@@ -58,6 +61,12 @@ func TestAuditLoggerRecord(t *testing.T) {
 	}
 	if event.AdapterCapability != string(adapterCapabilityPassThrough) {
 		t.Fatalf("unexpected adapter capability: %+v", event)
+	}
+	if event.FlowID != "tcp-1" || event.EgressBytes != 128 || event.IngressBytes != 64 {
+		t.Fatalf("unexpected flow stats: %+v", event)
+	}
+	if event.Outcome != "completed" || event.DurationMS != 250 {
+		t.Fatalf("unexpected outcome fields: %+v", event)
 	}
 	if event.ClassifierResult != "known" || event.Action != "use-adapter" {
 		t.Fatalf("unexpected decision fields: %+v", event)

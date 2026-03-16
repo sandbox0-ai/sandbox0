@@ -29,6 +29,7 @@ const (
 type adapterRequest struct {
 	Server      *Server
 	Compiled    *policy.CompiledPolicy
+	Audit       *flowAudit
 	SrcIP       string
 	DestIP      net.IP
 	DestPort    int
@@ -67,10 +68,10 @@ func (a *httpAdapter) Handle(req *adapterRequest) error {
 		return err
 	}
 	if counter, ok := upstream.(*countingConn); ok {
-		req.Server.recordEgressBytes(req.Compiled, counter.written)
+		req.Server.recordEgressBytes(req.Compiled, counter.written, req.Audit)
 		counter.written = 0
 	}
-	req.Server.pipe(req.Conn, upstream, req.HTTPReader, req.Compiled)
+	req.Server.pipe(req.Conn, upstream, req.HTTPReader, req.Compiled, req.Audit)
 	return nil
 }
 
@@ -88,7 +89,7 @@ func (a *tlsAdapter) Handle(req *adapterRequest) error {
 		return fmt.Errorf("tls adapter requires connection")
 	}
 	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
-	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled)
+	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
 }
 
 type sshAdapter struct{}
@@ -105,7 +106,7 @@ func (a *sshAdapter) Handle(req *adapterRequest) error {
 		return fmt.Errorf("ssh adapter requires connection")
 	}
 	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
-	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled)
+	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
 }
 
 type postgresAdapter struct{}
@@ -122,7 +123,7 @@ func (a *postgresAdapter) Handle(req *adapterRequest) error {
 		return fmt.Errorf("postgres adapter requires connection")
 	}
 	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
-	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled)
+	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
 }
 
 type udpAdapter struct{}
@@ -139,7 +140,7 @@ func (a *udpAdapter) Handle(req *adapterRequest) error {
 		return fmt.Errorf("udp adapter requires source datagram")
 	}
 	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "udp", req.UDPSource.Port)
-	return req.Server.forwardUDPDatagram(req.UDPSource, req.UDPPayload, req.DestIP, req.DestPort, req.Compiled)
+	return req.Server.forwardUDPDatagram(req.UDPSource, req.UDPPayload, req.DestIP, req.DestPort, req.Compiled, req.Audit)
 }
 
 type tcpPassThroughAdapter struct{}
@@ -156,7 +157,7 @@ func (a *tcpPassThroughAdapter) Handle(req *adapterRequest) error {
 		return fmt.Errorf("tcp fallback adapter requires connection")
 	}
 	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
-	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled)
+	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
 }
 
 type udpPassThroughAdapter struct{}
@@ -173,5 +174,5 @@ func (a *udpPassThroughAdapter) Handle(req *adapterRequest) error {
 		return fmt.Errorf("udp fallback adapter requires source datagram")
 	}
 	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "udp", req.UDPSource.Port)
-	return req.Server.forwardUDPDatagram(req.UDPSource, req.UDPPayload, req.DestIP, req.DestPort, req.Compiled)
+	return req.Server.forwardUDPDatagram(req.UDPSource, req.UDPPayload, req.DestIP, req.DestPort, req.Compiled, req.Audit)
 }

@@ -141,7 +141,7 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 
 				if opts.name == "network-policy" {
 					It("keeps auditable egress decisions stable for classified TCP traffic and UDP sessions", func() {
-						assertAuditableEgressInterception(env, session)
+						assertAuditableEgressInterception(env, session, sandboxID)
 					})
 				}
 			})

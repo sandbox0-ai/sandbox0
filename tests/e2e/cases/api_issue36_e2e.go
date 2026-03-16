@@ -308,15 +308,15 @@ import socket
 import time
 
 addr = (%q, %d)
-	sock = socket.create_connection(addr, timeout=5)
-	sock.settimeout(5)
-	sock.sendall(b"GET / HTTP/1.1\r\nHo")
-	time.sleep(0.25)
-	sock.sendall(b"st: %s\r\nConnection: close\r\n\r\n")
-	chunks = []
-	while True:
-	    try:
-	        chunk = sock.recv(4096)
+sock = socket.create_connection(addr, timeout=5)
+sock.settimeout(5)
+sock.sendall(b"GET / HTTP/1.1\r\nHo")
+time.sleep(0.25)
+sock.sendall(b"st: %s\r\nConnection: close\r\n\r\n")
+chunks = []
+while True:
+    try:
+        chunk = sock.recv(4096)
     except socket.timeout:
         break
     if not chunk:
@@ -324,9 +324,9 @@ addr = (%q, %d)
     chunks.append(chunk)
 sock.close()
 body = b"".join(chunks).decode("utf-8", "replace")
-	if %q not in body:
-	    raise SystemExit(body)
-	print("ok")
+if %q not in body:
+    raise SystemExit(body)
+print("ok")
 PY`, helperIP, issue36HTTPPort, helperIP, issue36HTTPBody)
 }
 

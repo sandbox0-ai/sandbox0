@@ -102,9 +102,10 @@ func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.T
 		httpsClassifiers: defaultHTTPSClassifiers(),
 		udpClassifiers:   defaultUDPClassifiers(),
 		tcpAdapters: map[string]proxyAdapter{
-			"http": &httpAdapter{},
-			"ssh":  &sshAdapter{},
-			"tls":  &tlsAdapter{},
+			"http":     &httpAdapter{},
+			"postgres": &postgresAdapter{},
+			"ssh":      &sshAdapter{},
+			"tls":      &tlsAdapter{},
 		},
 		udpAdapters: map[string]proxyAdapter{
 			"udp": &udpAdapter{},

@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"net/http"
@@ -40,6 +41,8 @@ type tcpClassifyContext struct {
 	HTTPReader   *bufio.Reader
 	HTTPRequest  *http.Request
 	TLSHello     *clientHelloInfo
+	Peeked       []byte
+	PeekDone     bool
 	ReadErr      error
 }
 
@@ -121,12 +124,19 @@ func (c *tlsClientHelloClassifier) Classify(ctx *tcpClassifyContext) (*classific
 		return nil, false
 	}
 	if ctx.TLSHello == nil && ctx.ReadErr == nil {
-		hello, err := readClientHello(ctx.Conn, ctx.HeaderLimit)
+		raw, err := ctx.ensurePeek(ctx.HeaderLimit)
 		if err != nil {
 			ctx.ReadErr = err
 			return nil, false
 		}
-		ctx.TLSHello = hello
+		serverName, ok := parseSNIFromTLS(raw)
+		if !ok {
+			return nil, false
+		}
+		ctx.TLSHello = &clientHelloInfo{
+			ServerName: serverName,
+			Raw:        raw,
+		}
 	}
 	if ctx.TLSHello == nil {
 		return nil, false
@@ -234,9 +244,34 @@ func defaultHTTPClassifiers() []tcpClassifier {
 	}
 }
 
+type postgresStartupClassifier struct{}
+
+func (c *postgresStartupClassifier) Name() string { return "postgres-startup" }
+
+func (c *postgresStartupClassifier) Classify(ctx *tcpClassifyContext) (*classificationResult, bool) {
+	if ctx == nil || ctx.Conn == nil {
+		return nil, false
+	}
+	raw, err := ctx.ensurePeek(ctx.HeaderLimit)
+	if err != nil {
+		ctx.ReadErr = err
+		return nil, false
+	}
+	if !looksLikePostgresStartup(raw) {
+		return nil, false
+	}
+	return &classificationResult{
+		Classification: classifyKnownTraffic("tcp", "postgres", ctx.OrigIP, ctx.OrigPort, ""),
+		Apply: func(req *adapterRequest) {
+			req.Prefix = bytes.NewReader(raw)
+		},
+	}, true
+}
+
 func defaultHTTPSClassifiers() []tcpClassifier {
 	return []tcpClassifier{
 		&tlsClientHelloClassifier{},
+		&postgresStartupClassifier{},
 		&tcpParseErrorClassifier{
 			protocol:      "tls",
 			unknownReason: "parse_failed",
@@ -282,84 +317,86 @@ func (ctx *tcpClassifyContext) ensureHTTPReader() *bufio.Reader {
 	return ctx.HTTPReader
 }
 
+func (ctx *tcpClassifyContext) ensurePeek(limit int) ([]byte, error) {
+	if ctx.PeekDone {
+		return ctx.Peeked, ctx.ReadErr
+	}
+	ctx.PeekDone = true
+	if limit <= 0 {
+		limit = 64 * 1024
+	}
+	_ = ctx.Conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	defer ctx.Conn.SetReadDeadline(time.Time{})
+
+	buf := make([]byte, limit)
+	n, err := ctx.Conn.Read(buf)
+	if err != nil {
+		ctx.ReadErr = err
+		return nil, err
+	}
+	ctx.Peeked = append([]byte(nil), buf[:n]...)
+	return ctx.Peeked, nil
+}
+
 type clientHelloInfo struct {
 	ServerName string
 	Raw        []byte
 }
 
-func readClientHello(conn net.Conn, limit int) (*clientHelloInfo, error) {
-	if limit <= 0 {
-		limit = 64 * 1024
-	}
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	defer conn.SetReadDeadline(time.Time{})
-
-	buf := make([]byte, limit)
-	n, err := conn.Read(buf)
-	if err != nil {
-		return nil, err
-	}
-	buf = buf[:n]
-
-	ch := &clientHelloInfo{Raw: buf}
-	ch.ServerName = parseSNIFromTLS(buf)
-	return ch, nil
-}
-
-func parseSNIFromTLS(data []byte) string {
+func parseSNIFromTLS(data []byte) (string, bool) {
 	if len(data) < 5 {
-		return ""
+		return "", false
 	}
 	if data[0] != 0x16 {
-		return ""
+		return "", false
 	}
 	recordLen := int(data[3])<<8 | int(data[4])
 	if recordLen+5 > len(data) {
-		return ""
+		return "", false
 	}
 	offset := 5
 	if data[offset] != 0x01 {
-		return ""
+		return "", false
 	}
 	offset += 4
 	if offset+2 > len(data) {
-		return ""
+		return "", false
 	}
 	offset += 2 + 32
 	if offset >= len(data) {
-		return ""
+		return "", false
 	}
 	sessionLen := int(data[offset])
 	offset += 1 + sessionLen
 	if offset+2 > len(data) {
-		return ""
+		return "", false
 	}
 	cipherLen := int(data[offset])<<8 | int(data[offset+1])
 	offset += 2 + cipherLen
 	if offset >= len(data) {
-		return ""
+		return "", false
 	}
 	compLen := int(data[offset])
 	offset += 1 + compLen
 	if offset+2 > len(data) {
-		return ""
+		return "", false
 	}
 	extLen := int(data[offset])<<8 | int(data[offset+1])
 	offset += 2
 	end := offset + extLen
 	if end > len(data) {
-		return ""
+		return "", false
 	}
 	for offset+4 <= end {
 		extType := int(data[offset])<<8 | int(data[offset+1])
 		extSize := int(data[offset+2])<<8 | int(data[offset+3])
 		offset += 4
 		if offset+extSize > end {
-			return ""
+			return "", false
 		}
 		if extType == 0x00 {
 			if offset+2 > end {
-				return ""
+				return "", false
 			}
 			listLen := int(data[offset])<<8 | int(data[offset+1])
 			offset += 2
@@ -369,13 +406,29 @@ func parseSNIFromTLS(data []byte) string {
 				nameLen := int(data[offset+1])<<8 | int(data[offset+2])
 				offset += 3
 				if nameType == 0 && offset+nameLen <= listEnd {
-					return string(data[offset : offset+nameLen])
+					return string(data[offset : offset+nameLen]), true
 				}
 				offset += nameLen
 			}
-			return ""
+			return "", true
 		}
 		offset += extSize
 	}
-	return ""
+	return "", true
+}
+
+func looksLikePostgresStartup(data []byte) bool {
+	if len(data) < 8 {
+		return false
+	}
+	length := binary.BigEndian.Uint32(data[:4])
+	if length < 8 || length > 64*1024 {
+		return false
+	}
+	code := binary.BigEndian.Uint32(data[4:8])
+	switch code {
+	case 80877102, 80877103, 80877104:
+		return true
+	}
+	return code>>16 == 3
 }

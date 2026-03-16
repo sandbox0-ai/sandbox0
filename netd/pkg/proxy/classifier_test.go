@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/binary"
 	"io"
 	"net"
 	"testing"
@@ -101,6 +102,44 @@ func TestDefaultHTTPClassifiersFallbackToSSHBanner(t *testing.T) {
 	}
 	if string(data) != "SSH-2.0-OpenSSH_9.0\r\n" {
 		t.Fatalf("replay prefix = %q", string(data))
+	}
+}
+
+func TestDefaultHTTPSClassifiersClassifyPostgresStartup(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	packet := make([]byte, 8)
+	binary.BigEndian.PutUint32(packet[:4], 8)
+	binary.BigEndian.PutUint32(packet[4:8], 80877103)
+
+	go func() {
+		_, _ = client.Write(packet)
+		_ = client.Close()
+	}()
+
+	ctx := &tcpClassifyContext{
+		OrigIP:      net.ParseIP("8.8.8.8"),
+		OrigPort:    5432,
+		Conn:        server,
+		HeaderLimit: 1024,
+	}
+	result, err := classifyTCP(defaultHTTPSClassifiers(), ctx)
+	if err != nil {
+		t.Fatalf("classifyTCP returned error: %v", err)
+	}
+	if result.Classification.Protocol != "postgres" {
+		t.Fatalf("protocol = %q, want postgres", result.Classification.Protocol)
+	}
+	req := &adapterRequest{}
+	result.Apply(req)
+	data, readErr := io.ReadAll(req.Prefix)
+	if readErr != nil {
+		t.Fatalf("failed to read replay prefix: %v", readErr)
+	}
+	if string(data) != string(packet) {
+		t.Fatalf("replay prefix = %v, want %v", data, packet)
 	}
 }
 

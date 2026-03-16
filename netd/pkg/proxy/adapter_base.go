@@ -108,6 +108,23 @@ func (a *sshAdapter) Handle(req *adapterRequest) error {
 	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled)
 }
 
+type postgresAdapter struct{}
+
+func (a *postgresAdapter) Name() string      { return "postgres" }
+func (a *postgresAdapter) Transport() string { return "tcp" }
+func (a *postgresAdapter) Protocol() string  { return "postgres" }
+func (a *postgresAdapter) Capability() adapterCapability {
+	return adapterCapabilityPassThrough
+}
+
+func (a *postgresAdapter) Handle(req *adapterRequest) error {
+	if req == nil || req.Server == nil || req.Conn == nil {
+		return fmt.Errorf("postgres adapter requires connection")
+	}
+	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
+	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled)
+}
+
 type udpAdapter struct{}
 
 func (a *udpAdapter) Name() string      { return "udp" }

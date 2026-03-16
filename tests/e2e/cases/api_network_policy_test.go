@@ -14,19 +14,19 @@ func TestIssue36PythonScriptsCompile(t *testing.T) {
 	}{
 		{
 			name:   "helper services",
-			script: extractIssue36HelperPython(t, issue36HelperServicesCommand()),
+			script: extractAuditableEgressHelperPython(t, auditableEgressHelperServicesCommand()),
 		},
 		{
 			name:   "fragmented http command",
-			script: extractInlinePython(t, issue36FragmentedHTTPRequestCommand("127.0.0.1")),
+			script: extractInlinePython(t, auditableEgressFragmentedHTTPRequestCommand("127.0.0.1")),
 		},
 		{
 			name:   "opaque tcp command",
-			script: extractInlinePython(t, issue36OpaqueTCPCommand("127.0.0.1")),
+			script: extractInlinePython(t, auditableEgressOpaqueTCPCommand("127.0.0.1")),
 		},
 		{
 			name:   "udp session command",
-			script: extractInlinePython(t, issue36UDPSessionCommand("127.0.0.1", "token")),
+			script: extractInlinePython(t, auditableEgressUDPSessionCommand("127.0.0.1", "token")),
 		},
 	}
 
@@ -47,10 +47,10 @@ func extractInlinePython(t *testing.T, command string) string {
 	return strings.TrimSuffix(strings.TrimPrefix(command, prefix), suffix)
 }
 
-func extractIssue36HelperPython(t *testing.T, command string) string {
+func extractAuditableEgressHelperPython(t *testing.T, command string) string {
 	t.Helper()
-	const prefix = "set -eu\ncat <<'PY' >/tmp/issue36-helper.py\n"
-	const suffix = "\nPY\nnohup python3 /tmp/issue36-helper.py >/tmp/issue36-helper.log 2>&1 &\n"
+	const prefix = "set -eu\ncat <<'PY' >/tmp/auditable-egress-helper.py\n"
+	const suffix = "\nPY\nnohup python3 /tmp/auditable-egress-helper.py >/tmp/auditable-egress-helper.log 2>&1 &\n"
 	if !strings.HasPrefix(command, prefix) || !strings.HasSuffix(command, suffix) {
 		t.Fatalf("unexpected helper command:\n%s", command)
 	}
@@ -60,7 +60,7 @@ func extractIssue36HelperPython(t *testing.T, command string) string {
 func compilePythonScript(t *testing.T, script string) {
 	t.Helper()
 
-	file, err := os.CreateTemp("", "issue36-python-*.py")
+	file, err := os.CreateTemp("", "auditable-egress-python-*.py")
 	if err != nil {
 		t.Fatalf("create temp file: %v", err)
 	}

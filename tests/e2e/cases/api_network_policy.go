@@ -1,11 +1,15 @@
 package cases
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/framework"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	e2eutils "github.com/sandbox0-ai/sandbox0/tests/e2e/utils"
@@ -15,10 +19,10 @@ import (
 )
 
 const (
-	issue36HTTPPort   int32 = 18081
-	issue36OpaquePort int32 = 18082
-	issue36UDPPort    int32 = 18083
-	issue36HTTPBody         = "issue36-http-ok\n"
+	auditableEgressHTTPPort   int32 = 18081
+	auditableEgressOpaquePort int32 = 18082
+	auditableEgressUDPPort    int32 = 18083
+	auditableEgressHTTPBody         = "auditable-egress-http-ok\n"
 )
 
 func registerApiNetworkPolicySuite(envProvider func() *framework.ScenarioEnv) {
@@ -33,10 +37,6 @@ func registerApiNetworkPolicySuite(envProvider func() *framework.ScenarioEnv) {
 }
 
 func assertAuditableEgressInterception(env *framework.ScenarioEnv, session *e2eutils.Session, helperSandboxID string) {
-	baseTemplate, err := session.GetTemplate(env.TestCtx.Context, GinkgoT(), "default")
-	Expect(err).NotTo(HaveOccurred())
-	Expect(baseTemplate).NotTo(BeNil())
-
 	helperNamespace, err := naming.TemplateNamespaceForBuiltin("default")
 	Expect(err).NotTo(HaveOccurred())
 	helperSandbox := waitForSandboxPodReadyEventually(env, session, helperSandboxID, helperNamespace)
@@ -56,42 +56,32 @@ func assertAuditableEgressInterception(env *framework.ScenarioEnv, session *e2eu
 	Expect(helperIP).NotTo(BeEmpty())
 
 	Eventually(func() error {
-		output, execErr := execInSandboxPod(env, helperNamespace, helperSandbox.PodName, fmt.Sprintf("curl -fsS --max-time 5 http://127.0.0.1:%d/", issue36HTTPPort))
+		output, execErr := execInSandboxPod(env, helperNamespace, helperSandbox.PodName, fmt.Sprintf("curl -fsS --max-time 5 http://127.0.0.1:%d/", auditableEgressHTTPPort))
 		if execErr != nil {
 			return execErr
 		}
-		if output != issue36HTTPBody {
+		if output != auditableEgressHTTPBody {
 			return fmt.Errorf("unexpected helper http body: %q", output)
 		}
 		return nil
 	}).WithTimeout(30 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
 
-	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
-	assertIssue36TCPClassificationBehavior(env, session, *baseTemplate, helperIP, suffix)
-	assertIssue36UDPSessionBehavior(env, session, *baseTemplate, helperIP, suffix)
-}
+	targetSandboxID := claimSandboxEventually(env, session, "default").SandboxId
+	Expect(targetSandboxID).NotTo(BeEmpty())
+	defer func() {
+		_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), targetSandboxID)
+	}()
+	targetSandbox := waitForSandboxPodReadyEventually(env, session, targetSandboxID, helperNamespace)
 
-func assertIssue36TCPClassificationBehavior(env *framework.ScenarioEnv, session *e2eutils.Session, base apispec.Template, helperIP, suffix string) {
-	allowedDomains := []string{helperIP}
-	templateID := "e2e-issue36-tcp-" + suffix
-	templateReq := buildIssue36TemplateCreateRequest(base, templateID, &apispec.TplSandboxNetworkPolicy{
-		Mode: apispec.BlockAll,
-		Egress: &apispec.NetworkEgressPolicy{
-			AllowedDomains: &allowedDomains,
+	applyIssue36NetworkPolicyToSandboxPod(env, helperNamespace, targetSandboxID, targetSandbox.PodName, &v1alpha1.TplSandboxNetworkPolicy{
+		Mode: v1alpha1.NetworkModeBlockAll,
+		Egress: &v1alpha1.NetworkEgressPolicy{
+			AllowedDomains: []string{helperIP},
 		},
 	})
 
-	created, err := session.CreateTemplate(env.TestCtx.Context, GinkgoT(), templateReq)
-	Expect(err).NotTo(HaveOccurred())
-	Expect(created).NotTo(BeNil())
-	defer func() {
-		_ = session.DeleteTemplate(env.TestCtx.Context, GinkgoT(), templateID)
-	}()
-
-	namespace, podName := waitForIssue36IdlePodEventually(env, templateID)
-
 	Eventually(func() error {
-		output, execErr := execInSandboxPod(env, namespace, podName, issue36FragmentedHTTPRequestCommand(helperIP))
+		output, execErr := execInSandboxPod(env, helperNamespace, targetSandbox.PodName, auditableEgressFragmentedHTTPRequestCommand(helperIP))
 		if execErr != nil {
 			return execErr
 		}
@@ -102,7 +92,7 @@ func assertIssue36TCPClassificationBehavior(env *framework.ScenarioEnv, session 
 	}).WithTimeout(90 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
 
 	Eventually(func() error {
-		output, execErr := execInSandboxPod(env, namespace, podName, issue36OpaqueTCPCommand(helperIP))
+		output, execErr := execInSandboxPod(env, helperNamespace, targetSandbox.PodName, auditableEgressOpaqueTCPCommand(helperIP))
 		if execErr != nil {
 			return execErr
 		}
@@ -111,35 +101,20 @@ func assertIssue36TCPClassificationBehavior(env *framework.ScenarioEnv, session 
 		}
 		return nil
 	}).WithTimeout(45 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
-}
 
-func assertIssue36UDPSessionBehavior(env *framework.ScenarioEnv, session *e2eutils.Session, base apispec.Template, helperIP, suffix string) {
-	allowedCIDRs := []string{helperIP + "/32"}
-	udpProtocol := "udp"
-	allowedPorts := []apispec.PortSpec{{
-		Port:     issue36UDPPort,
-		Protocol: &udpProtocol,
-	}}
-	templateID := "e2e-issue36-udp-" + suffix
-	templateReq := buildIssue36TemplateCreateRequest(base, templateID, &apispec.TplSandboxNetworkPolicy{
-		Mode: apispec.BlockAll,
-		Egress: &apispec.NetworkEgressPolicy{
-			AllowedCidrs: &allowedCIDRs,
-			AllowedPorts: &allowedPorts,
+	applyIssue36NetworkPolicyToSandboxPod(env, helperNamespace, targetSandboxID, targetSandbox.PodName, &v1alpha1.TplSandboxNetworkPolicy{
+		Mode: v1alpha1.NetworkModeBlockAll,
+		Egress: &v1alpha1.NetworkEgressPolicy{
+			AllowedCIDRs: []string{helperIP + "/32"},
+			AllowedPorts: []v1alpha1.PortSpec{{
+				Port:     auditableEgressUDPPort,
+				Protocol: "udp",
+			}},
 		},
 	})
 
-	created, err := session.CreateTemplate(env.TestCtx.Context, GinkgoT(), templateReq)
-	Expect(err).NotTo(HaveOccurred())
-	Expect(created).NotTo(BeNil())
-	defer func() {
-		_ = session.DeleteTemplate(env.TestCtx.Context, GinkgoT(), templateID)
-	}()
-
-	namespace, podName := waitForIssue36IdlePodEventually(env, templateID)
-
 	Eventually(func() error {
-		output, execErr := execInSandboxPod(env, namespace, podName, issue36UDPSessionCommand(helperIP, templateID))
+		output, execErr := execInSandboxPod(env, helperNamespace, targetSandbox.PodName, auditableEgressUDPSessionCommand(helperIP, targetSandboxID))
 		if execErr != nil {
 			return execErr
 		}
@@ -155,55 +130,105 @@ func assertIssue36UDPSessionBehavior(env *framework.ScenarioEnv, session *e2euti
 	}).WithTimeout(45 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
 }
 
-func buildIssue36TemplateCreateRequest(base apispec.Template, templateID string, network *apispec.TplSandboxNetworkPolicy) apispec.TemplateCreateRequest {
-	req := e2eutils.CloneTemplateForCreate(base, templateID)
-	req.Spec.Pool = &apispec.PoolStrategy{
-		MinIdle: 1,
-		MaxIdle: 1,
+func applyIssue36NetworkPolicyToSandboxPod(env *framework.ScenarioEnv, namespace, sandboxID, podName string, policyTpl *v1alpha1.TplSandboxNetworkPolicy) {
+	annotations := getSandboxPodAnnotationsEventually(env, namespace, podName)
+	existingAnnotation := annotations[controller.AnnotationNetworkPolicy]
+	existingSpec, err := v1alpha1.ParseNetworkPolicyFromAnnotation(existingAnnotation)
+	Expect(err).NotTo(HaveOccurred())
+	if existingSpec == nil {
+		existingSpec = &v1alpha1.NetworkPolicySpec{
+			Version:   "v1",
+			SandboxID: sandboxID,
+		}
 	}
-	req.Spec.Network = network
-	description := "Issue36 auditable egress e2e template"
-	displayName := "Issue36 E2E " + templateID
-	req.Spec.Description = &description
-	req.Spec.DisplayName = &displayName
-	return req
+	existingSpec.Mode = policyTpl.Mode
+	existingSpec.Egress = v1alpha1.BuildEgressSpec(policyTpl)
+
+	annotation, err := v1alpha1.NetworkPolicyToAnnotation(existingSpec)
+	Expect(err).NotTo(HaveOccurred())
+	hash := auditableEgressPolicyAnnotationHash(annotation)
+	patchBytes, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{
+			"annotations": map[string]any{
+				controller.AnnotationNetworkPolicy:            annotation,
+				controller.AnnotationNetworkPolicyHash:        hash,
+				controller.AnnotationNetworkPolicyAppliedHash: nil,
+			},
+		},
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(framework.Kubectl(
+		env.TestCtx.Context,
+		env.Config.Kubeconfig,
+		"patch",
+		"pod",
+		podName,
+		"--namespace",
+		namespace,
+		"--type",
+		"merge",
+		"-p",
+		string(patchBytes),
+	)).To(Succeed())
+
+	Eventually(func() error {
+		current := getSandboxPodAnnotationsEventually(env, namespace, podName)
+		if current[controller.AnnotationNetworkPolicyHash] != hash {
+			return fmt.Errorf("sandbox %s network policy hash not updated yet", sandboxID)
+		}
+		if current[controller.AnnotationNetworkPolicyAppliedHash] != hash {
+			return fmt.Errorf("sandbox %s network policy not applied yet", sandboxID)
+		}
+		return nil
+	}).WithTimeout(90 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
 }
 
-func waitForIssue36IdlePodEventually(env *framework.ScenarioEnv, templateID string) (string, string) {
-	namespace, err := naming.TemplateNamespaceForBuiltin(templateID)
-	Expect(err).NotTo(HaveOccurred())
-
-	var podName string
+func getSandboxPodAnnotationsEventually(env *framework.ScenarioEnv, namespace, podName string) map[string]string {
+	var annotations map[string]string
 	Eventually(func() error {
 		output, err := framework.KubectlOutput(
 			env.TestCtx.Context,
 			env.Config.Kubeconfig,
 			"-n", namespace,
-			"get", "pods",
-			"-l", fmt.Sprintf("sandbox0.ai/template-id=%s,sandbox0.ai/pool-type=idle", templateID),
-			"--field-selector", "status.phase=Running",
-			"-o", "jsonpath={.items[0].metadata.name}",
+			"get", "pod", podName,
+			"-o", "json",
 		)
 		if err != nil {
 			return err
 		}
-		podName = strings.TrimSpace(output)
-		if podName == "" {
-			return fmt.Errorf("template %s has no running idle pod yet", templateID)
+		var payload struct {
+			Metadata struct {
+				Annotations map[string]string `json:"annotations"`
+			} `json:"metadata"`
+		}
+		if err := json.Unmarshal([]byte(output), &payload); err != nil {
+			return err
+		}
+		annotations = payload.Metadata.Annotations
+		if annotations == nil {
+			return fmt.Errorf("pod %s annotations not available", podName)
 		}
 		return nil
-	}).WithTimeout(5 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
-	return namespace, podName
+	}).WithTimeout(30 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
+	return annotations
+}
+
+func auditableEgressPolicyAnnotationHash(annotation string) string {
+	if annotation == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(annotation))
+	return hex.EncodeToString(sum[:])
 }
 
 func execIssue36HelperServices(env *framework.ScenarioEnv, namespace, podName string) error {
-	_, err := execInSandboxPod(env, namespace, podName, issue36HelperServicesCommand())
+	_, err := execInSandboxPod(env, namespace, podName, auditableEgressHelperServicesCommand())
 	return err
 }
 
-func issue36HelperServicesCommand() string {
+func auditableEgressHelperServicesCommand() string {
 	return fmt.Sprintf(`set -eu
-cat <<'PY' >/tmp/issue36-helper.py
+cat <<'PY' >/tmp/auditable-egress-helper.py
 import http.server
 import socket
 import socketserver
@@ -273,11 +298,11 @@ for target in (run_http, run_opaque, run_udp):
 while True:
     time.sleep(1)
 PY
-nohup python3 /tmp/issue36-helper.py >/tmp/issue36-helper.log 2>&1 &
-`, issue36HTTPPort, issue36OpaquePort, issue36UDPPort, issue36HTTPBody)
+nohup python3 /tmp/auditable-egress-helper.py >/tmp/auditable-egress-helper.log 2>&1 &
+`, auditableEgressHTTPPort, auditableEgressOpaquePort, auditableEgressUDPPort, auditableEgressHTTPBody)
 }
 
-func issue36FragmentedHTTPRequestCommand(helperIP string) string {
+func auditableEgressFragmentedHTTPRequestCommand(helperIP string) string {
 	return fmt.Sprintf(`cat <<'PY' | python3
 import socket
 
@@ -298,10 +323,10 @@ body = b"".join(data).decode(errors="ignore")
 if %q not in body:
     raise SystemExit(body)
 print("ok")
-PY`, helperIP, issue36HTTPPort, helperIP, issue36HTTPBody)
+PY`, helperIP, auditableEgressHTTPPort, helperIP, auditableEgressHTTPBody)
 }
 
-func issue36OpaqueTCPCommand(helperIP string) string {
+func auditableEgressOpaqueTCPCommand(helperIP string) string {
 	return fmt.Sprintf(`cat <<'PY' | python3
 import socket
 try:
@@ -316,10 +341,10 @@ try:
 except (TimeoutError, OSError):
     pass
 print("denied")
-PY`, helperIP, issue36OpaquePort)
+PY`, helperIP, auditableEgressOpaquePort)
 }
 
-func issue36UDPSessionCommand(helperIP, tokenSeed string) string {
+func auditableEgressUDPSessionCommand(helperIP, tokenSeed string) string {
 	return fmt.Sprintf(`cat <<'PY' | python3
 import socket
 
@@ -341,5 +366,5 @@ def parse_port(message):
 port1 = parse_port(first)
 port2 = parse_port(second)
 print(f"ports={1 if port1 == port2 else 2} same={'true' if port1 == port2 else 'false'}")
-PY`, "issue36-"+tokenSeed, helperIP, issue36UDPPort, helperIP, issue36UDPPort)
+PY`, "auditable-egress-"+tokenSeed, helperIP, auditableEgressUDPPort, helperIP, auditableEgressUDPPort)
 }

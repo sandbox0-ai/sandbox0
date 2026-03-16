@@ -14,8 +14,17 @@ type proxyAdapter interface {
 	Name() string
 	Transport() string
 	Protocol() string
+	Capability() adapterCapability
 	Handle(*adapterRequest) error
 }
+
+type adapterCapability string
+
+const (
+	adapterCapabilityPassThrough adapterCapability = "pass-through"
+	adapterCapabilityInspect     adapterCapability = "inspect"
+	adapterCapabilityTerminate   adapterCapability = "terminate"
+)
 
 type adapterRequest struct {
 	Server      *Server
@@ -37,6 +46,9 @@ type httpAdapter struct{}
 func (a *httpAdapter) Name() string      { return "http" }
 func (a *httpAdapter) Transport() string { return "tcp" }
 func (a *httpAdapter) Protocol() string  { return "http" }
+func (a *httpAdapter) Capability() adapterCapability {
+	return adapterCapabilityInspect
+}
 
 func (a *httpAdapter) Handle(req *adapterRequest) error {
 	if req == nil || req.Server == nil || req.Conn == nil || req.HTTPRequest == nil || req.HTTPReader == nil {
@@ -67,6 +79,9 @@ type tlsAdapter struct{}
 func (a *tlsAdapter) Name() string      { return "tls" }
 func (a *tlsAdapter) Transport() string { return "tcp" }
 func (a *tlsAdapter) Protocol() string  { return "tls" }
+func (a *tlsAdapter) Capability() adapterCapability {
+	return adapterCapabilityPassThrough
+}
 
 func (a *tlsAdapter) Handle(req *adapterRequest) error {
 	if req == nil || req.Server == nil || req.Conn == nil {
@@ -81,6 +96,9 @@ type sshAdapter struct{}
 func (a *sshAdapter) Name() string      { return "ssh" }
 func (a *sshAdapter) Transport() string { return "tcp" }
 func (a *sshAdapter) Protocol() string  { return "ssh" }
+func (a *sshAdapter) Capability() adapterCapability {
+	return adapterCapabilityPassThrough
+}
 
 func (a *sshAdapter) Handle(req *adapterRequest) error {
 	if req == nil || req.Server == nil || req.Conn == nil {
@@ -95,6 +113,9 @@ type udpAdapter struct{}
 func (a *udpAdapter) Name() string      { return "udp" }
 func (a *udpAdapter) Transport() string { return "udp" }
 func (a *udpAdapter) Protocol() string  { return "udp" }
+func (a *udpAdapter) Capability() adapterCapability {
+	return adapterCapabilityPassThrough
+}
 
 func (a *udpAdapter) Handle(req *adapterRequest) error {
 	if req == nil || req.Server == nil || req.UDPSource == nil {
@@ -109,6 +130,9 @@ type tcpPassThroughAdapter struct{}
 func (a *tcpPassThroughAdapter) Name() string      { return "tcp-pass-through" }
 func (a *tcpPassThroughAdapter) Transport() string { return "tcp" }
 func (a *tcpPassThroughAdapter) Protocol() string  { return "unknown" }
+func (a *tcpPassThroughAdapter) Capability() adapterCapability {
+	return adapterCapabilityPassThrough
+}
 
 func (a *tcpPassThroughAdapter) Handle(req *adapterRequest) error {
 	if req == nil || req.Server == nil || req.Conn == nil {
@@ -123,6 +147,9 @@ type udpPassThroughAdapter struct{}
 func (a *udpPassThroughAdapter) Name() string      { return "udp-pass-through" }
 func (a *udpPassThroughAdapter) Transport() string { return "udp" }
 func (a *udpPassThroughAdapter) Protocol() string  { return "unknown" }
+func (a *udpPassThroughAdapter) Capability() adapterCapability {
+	return adapterCapabilityPassThrough
+}
 
 func (a *udpPassThroughAdapter) Handle(req *adapterRequest) error {
 	if req == nil || req.Server == nil || req.UDPSource == nil {

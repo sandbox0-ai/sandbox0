@@ -42,7 +42,7 @@ func TestAuditLoggerRecord(t *testing.T) {
 		ClassifierResult: "known",
 	}
 
-	if err := logger.Record(req, decision, "ssh", nil); err != nil {
+	if err := logger.Record(req, decision, &sshAdapter{}, nil); err != nil {
 		t.Fatalf("Record returned error: %v", err)
 	}
 
@@ -55,6 +55,9 @@ func TestAuditLoggerRecord(t *testing.T) {
 	}
 	if event.Protocol != "ssh" || event.Adapter != "ssh" {
 		t.Fatalf("unexpected protocol fields: %+v", event)
+	}
+	if event.AdapterCapability != string(adapterCapabilityPassThrough) {
+		t.Fatalf("unexpected adapter capability: %+v", event)
 	}
 	if event.ClassifierResult != "known" || event.Action != "use-adapter" {
 		t.Fatalf("unexpected decision fields: %+v", event)

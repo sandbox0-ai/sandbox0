@@ -19,20 +19,21 @@ type auditLogger struct {
 }
 
 type auditEvent struct {
-	Timestamp        time.Time `json:"timestamp"`
-	SandboxID        string    `json:"sandbox_id,omitempty"`
-	TeamID           string    `json:"team_id,omitempty"`
-	SrcIP            string    `json:"src_ip,omitempty"`
-	DestIP           string    `json:"dest_ip,omitempty"`
-	DestPort         int       `json:"dest_port,omitempty"`
-	Transport        string    `json:"transport,omitempty"`
-	Protocol         string    `json:"protocol,omitempty"`
-	Host             string    `json:"host,omitempty"`
-	ClassifierResult string    `json:"classifier_result,omitempty"`
-	Action           string    `json:"action,omitempty"`
-	Reason           string    `json:"reason,omitempty"`
-	Adapter          string    `json:"adapter,omitempty"`
-	Error            string    `json:"error,omitempty"`
+	Timestamp         time.Time `json:"timestamp"`
+	SandboxID         string    `json:"sandbox_id,omitempty"`
+	TeamID            string    `json:"team_id,omitempty"`
+	SrcIP             string    `json:"src_ip,omitempty"`
+	DestIP            string    `json:"dest_ip,omitempty"`
+	DestPort          int       `json:"dest_port,omitempty"`
+	Transport         string    `json:"transport,omitempty"`
+	Protocol          string    `json:"protocol,omitempty"`
+	Host              string    `json:"host,omitempty"`
+	ClassifierResult  string    `json:"classifier_result,omitempty"`
+	Action            string    `json:"action,omitempty"`
+	Reason            string    `json:"reason,omitempty"`
+	Adapter           string    `json:"adapter,omitempty"`
+	AdapterCapability string    `json:"adapter_capability,omitempty"`
+	Error             string    `json:"error,omitempty"`
 }
 
 func newAuditLogger(cfg *config.NetdConfig) (*auditLogger, error) {
@@ -72,22 +73,23 @@ func (l *auditLogger) Close() error {
 	return l.writer.Close()
 }
 
-func (l *auditLogger) Record(req *adapterRequest, decision trafficDecision, adapterName string, err error) error {
+func (l *auditLogger) Record(req *adapterRequest, decision trafficDecision, adapter proxyAdapter, err error) error {
 	if l == nil {
 		return nil
 	}
 	event := auditEvent{
-		Timestamp:        l.now(),
-		SrcIP:            "",
-		DestIP:           "",
-		DestPort:         0,
-		Transport:        decision.Transport,
-		Protocol:         decision.Protocol,
-		Host:             "",
-		ClassifierResult: decision.ClassifierResult,
-		Action:           string(decision.Action),
-		Reason:           decision.Reason,
-		Adapter:          adapterName,
+		Timestamp:         l.now(),
+		SrcIP:             "",
+		DestIP:            "",
+		DestPort:          0,
+		Transport:         decision.Transport,
+		Protocol:          decision.Protocol,
+		Host:              "",
+		ClassifierResult:  decision.ClassifierResult,
+		Action:            string(decision.Action),
+		Reason:            decision.Reason,
+		Adapter:           adapterName(adapter),
+		AdapterCapability: string(adapterCapabilityOf(adapter)),
 	}
 	if req != nil {
 		event.SrcIP = req.SrcIP
@@ -109,4 +111,18 @@ func (l *auditLogger) Record(req *adapterRequest, decision trafficDecision, adap
 		return fmt.Errorf("encode audit event: %w", encodeErr)
 	}
 	return nil
+}
+
+func adapterName(adapter proxyAdapter) string {
+	if adapter == nil {
+		return ""
+	}
+	return adapter.Name()
+}
+
+func adapterCapabilityOf(adapter proxyAdapter) adapterCapability {
+	if adapter == nil {
+		return ""
+	}
+	return adapter.Capability()
 }

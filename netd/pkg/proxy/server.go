@@ -404,31 +404,35 @@ func (s *Server) handleTCPDecision(req *adapterRequest, decision trafficDecision
 	switch decision.Action {
 	case decisionActionDeny:
 		s.logger.Info("TCP decision denied", baseFields...)
-		s.recordAuditEvent(req, decision, "", nil)
+		s.recordAuditEvent(req, decision, nil, nil)
 		return
 	case decisionActionPassThrough:
+		adapter := s.tcpFallback
+		if adapter != nil {
+			baseFields = append(baseFields, zap.String("adapter", adapter.Name()), zap.String("adapter_capability", string(adapter.Capability())))
+		}
 		s.logger.Info("TCP decision pass-through", baseFields...)
 		err := s.runTCPFallbackAdapter(req)
-		s.recordAuditEvent(req, decision, s.tcpFallback.Name(), err)
+		s.recordAuditEvent(req, decision, adapter, err)
 		if err != nil {
 			s.logger.Warn("TCP fallback adapter failed", append(baseFields, zap.Error(err))...)
 		}
 		return
 	case decisionActionUseAdapter:
-		s.logger.Debug("TCP decision use adapter", baseFields...)
-		adapterName := decision.Protocol
-		if adapter, ok := s.tcpAdapters[decision.Protocol]; ok && adapter != nil {
-			adapterName = adapter.Name()
+		adapter, ok := s.tcpAdapters[decision.Protocol]
+		if ok && adapter != nil {
+			baseFields = append(baseFields, zap.String("adapter", adapter.Name()), zap.String("adapter_capability", string(adapter.Capability())))
 		}
+		s.logger.Debug("TCP decision use adapter", baseFields...)
 		err := s.runTCPAdapter(decision.Protocol, req)
-		s.recordAuditEvent(req, decision, adapterName, err)
+		s.recordAuditEvent(req, decision, adapter, err)
 		if err != nil {
 			s.logger.Warn("TCP adapter failed", append(baseFields, zap.Error(err))...)
 		}
 		return
 	default:
 		s.logger.Warn("TCP decision unknown action", baseFields...)
-		s.recordAuditEvent(req, decision, "", fmt.Errorf("unknown tcp decision action"))
+		s.recordAuditEvent(req, decision, nil, fmt.Errorf("unknown tcp decision action"))
 		return
 	}
 }
@@ -470,46 +474,50 @@ func (s *Server) handleUDPDecision(req *adapterRequest, decision trafficDecision
 	switch decision.Action {
 	case decisionActionDeny:
 		s.logger.Info("UDP decision denied", fields...)
-		s.recordAuditEvent(req, decision, "", nil)
+		s.recordAuditEvent(req, decision, nil, nil)
 		return
 	case decisionActionPassThrough:
+		adapter := s.udpFallback
+		if adapter != nil {
+			fields = append(fields, zap.String("adapter", adapter.Name()), zap.String("adapter_capability", string(adapter.Capability())))
+		}
 		if req.DestIP == nil || req.DestPort <= 0 {
 			err := fmt.Errorf("destination unavailable for udp pass-through")
 			s.logger.Warn("UDP decision pass-through unavailable", append(fields, zap.Error(err))...)
-			s.recordAuditEvent(req, decision, s.udpFallback.Name(), err)
+			s.recordAuditEvent(req, decision, adapter, err)
 			return
 		}
 		s.logger.Info("UDP decision pass-through", fields...)
 		err := s.runUDPFallbackAdapter(req)
-		s.recordAuditEvent(req, decision, s.udpFallback.Name(), err)
+		s.recordAuditEvent(req, decision, adapter, err)
 		if err != nil {
 			s.logger.Warn("UDP fallback adapter failed", append(fields, zap.Error(err))...)
 		}
 		return
 	case decisionActionUseAdapter:
-		s.logger.Debug("UDP decision use adapter", fields...)
-		adapterName := decision.Protocol
-		if adapter, ok := s.udpAdapters[decision.Protocol]; ok && adapter != nil {
-			adapterName = adapter.Name()
+		adapter, ok := s.udpAdapters[decision.Protocol]
+		if ok && adapter != nil {
+			fields = append(fields, zap.String("adapter", adapter.Name()), zap.String("adapter_capability", string(adapter.Capability())))
 		}
+		s.logger.Debug("UDP decision use adapter", fields...)
 		err := s.runUDPAdapter(decision.Protocol, req)
-		s.recordAuditEvent(req, decision, adapterName, err)
+		s.recordAuditEvent(req, decision, adapter, err)
 		if err != nil {
 			s.logger.Warn("UDP adapter failed", append(fields, zap.Error(err))...)
 		}
 		return
 	default:
 		s.logger.Warn("UDP decision unknown action", fields...)
-		s.recordAuditEvent(req, decision, "", fmt.Errorf("unknown udp decision action"))
+		s.recordAuditEvent(req, decision, nil, fmt.Errorf("unknown udp decision action"))
 		return
 	}
 }
 
-func (s *Server) recordAuditEvent(req *adapterRequest, decision trafficDecision, adapterName string, err error) {
+func (s *Server) recordAuditEvent(req *adapterRequest, decision trafficDecision, adapter proxyAdapter, err error) {
 	if s == nil || s.auditor == nil {
 		return
 	}
-	if auditErr := s.auditor.Record(req, decision, adapterName, err); auditErr != nil {
+	if auditErr := s.auditor.Record(req, decision, adapter, err); auditErr != nil {
 		s.logger.Warn("Failed to record audit event", zap.Error(auditErr))
 	}
 }

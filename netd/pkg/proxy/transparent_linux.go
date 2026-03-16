@@ -30,6 +30,10 @@ func transparentListenConfig() net.ListenConfig {
 						controlErr = err
 						return
 					}
+					if err := unix.SetsockoptInt(int(fd), unix.SOL_IP, unix.IP_PKTINFO, 1); err != nil {
+						controlErr = err
+						return
+					}
 				}
 			})
 			if err != nil {

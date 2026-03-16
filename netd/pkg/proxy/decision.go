@@ -83,7 +83,7 @@ func decideTraffic(compiled *policy.CompiledPolicy, classification trafficClassi
 
 	if classification.UnknownReason != "" {
 		decision.Reason = classification.UnknownReason
-		if policy.UnknownFallbackAction(compiled) == policy.UnknownTrafficPassThrough {
+		if policy.AllowUnknownEgressFallback(compiled, classification.DestIP, classification.Host) {
 			decision.Action = decisionActionPassThrough
 			return decision
 		}

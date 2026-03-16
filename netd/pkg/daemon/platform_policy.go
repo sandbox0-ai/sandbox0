@@ -17,6 +17,11 @@ var platformServiceNames = map[string]struct{}{
 	"storage-proxy":    {},
 }
 
+var clusterDNSServiceNames = map[string]struct{}{
+	"kube-dns": {},
+	"coredns":  {},
+}
+
 type platformPolicyState struct {
 	cfg       *config.NetdConfig
 	store     *policy.Store
@@ -115,6 +120,7 @@ func (s *platformPolicyState) rebuild() {
 	}
 	sandboxes, services, endpoints := s.snapshot()
 	allowedCIDRs := make([]string, 0, len(services))
+	allowedDomains := []string{}
 	sandboxPodIPs := make(map[string]struct{}, len(sandboxes))
 	matchedServices := make([]string, 0, len(services))
 	for _, sandbox := range sandboxes {
@@ -133,6 +139,7 @@ func (s *platformPolicyState) rebuild() {
 		if svc.ClusterIP != "" && strings.ToLower(svc.ClusterIP) != "none" {
 			allowedCIDRs = append(allowedCIDRs, svc.ClusterIP)
 		}
+		allowedDomains = append(allowedDomains, platformServiceDomains(svc)...)
 		if ep := endpoints[key]; ep != nil {
 			allowedCIDRs = append(allowedCIDRs, ep.Addresses...)
 		}
@@ -149,12 +156,13 @@ func (s *platformPolicyState) rebuild() {
 		platformDeniedDomains = s.cfg.PlatformDeniedDomains
 	}
 	allowedCIDRs = normalizeCIDRInputs(append(allowedCIDRs, platformAllowedCIDRs...), s.logger)
+	allowedDomains = normalizeDomainInputs(append(allowedDomains, platformAllowedDomains...))
 	deniedCIDRs := normalizeCIDRInputs(platformDeniedCIDRs, s.logger)
 
 	policyRules, err := policy.BuildPlatformPolicy(
 		allowedCIDRs,
 		deniedCIDRs,
-		platformAllowedDomains,
+		allowedDomains,
 		platformDeniedDomains,
 	)
 	if err != nil {
@@ -172,7 +180,7 @@ func (s *platformPolicyState) rebuild() {
 		zap.Int("endpoints_total", len(endpoints)),
 		zap.Int("allowed_cidrs", len(allowedCIDRs)),
 		zap.Int("denied_cidrs", len(deniedCIDRs)),
-		zap.Int("allowed_domains", len(platformAllowedDomains)),
+		zap.Int("allowed_domains", len(allowedDomains)),
 		zap.Int("denied_domains", len(platformDeniedDomains)),
 		zap.Strings("matched_services", matchedServices),
 	)
@@ -198,7 +206,10 @@ func (s *platformPolicyState) snapshot() (map[string]*watcher.SandboxInfo, map[s
 
 func isPlatformService(info *watcher.ServiceInfo) bool {
 	if info == nil || info.Labels == nil {
-		return false
+		return isClusterDNSService(info)
+	}
+	if isClusterDNSService(info) {
+		return true
 	}
 	if info.Labels["app.kubernetes.io/managed-by"] != "sandbox0infra-operator" {
 		return false
@@ -210,6 +221,34 @@ func isPlatformService(info *watcher.ServiceInfo) bool {
 		}
 	}
 	return false
+}
+
+func isClusterDNSService(info *watcher.ServiceInfo) bool {
+	if info == nil {
+		return false
+	}
+	if info.Namespace != "kube-system" {
+		return false
+	}
+	_, ok := clusterDNSServiceNames[info.Name]
+	return ok
+}
+
+func platformServiceDomains(info *watcher.ServiceInfo) []string {
+	if info == nil {
+		return nil
+	}
+	name := strings.TrimSpace(info.Name)
+	namespace := strings.TrimSpace(info.Namespace)
+	if name == "" || namespace == "" {
+		return nil
+	}
+	return []string{
+		name,
+		name + "." + namespace,
+		name + "." + namespace + ".svc",
+		name + "." + namespace + ".svc.cluster.local",
+	}
 }
 
 func normalizeCIDRInputs(values []string, logger *zap.Logger) []string {
@@ -248,6 +287,26 @@ func normalizeCIDRInputs(values []string, logger *zap.Logger) []string {
 		}
 		seen[cidr] = struct{}{}
 		out = append(out, cidr)
+	}
+	return out
+}
+
+func normalizeDomainInputs(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
 	}
 	return out
 }

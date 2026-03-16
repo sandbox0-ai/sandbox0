@@ -643,7 +643,16 @@ func waitForSandboxPodReadyEventually(env *framework.ScenarioEnv, session *e2eut
 			return fmt.Errorf("sandbox %s pod name not assigned", sandboxID)
 		}
 		if err := framework.KubectlWaitForCondition(env.TestCtx.Context, env.Config.Kubeconfig, namespace, "pod", current.PodName, "Ready", "10s"); err != nil {
-			return err
+			describe, describeErr := framework.KubectlOutput(
+				env.TestCtx.Context,
+				env.Config.Kubeconfig,
+				"-n", namespace,
+				"describe", "pod", current.PodName,
+			)
+			if describeErr != nil {
+				return fmt.Errorf("wait for pod %s ready: %w (describe failed: %v)", current.PodName, err, describeErr)
+			}
+			return fmt.Errorf("wait for pod %s ready: %w\n%s", current.PodName, err, strings.TrimSpace(describe))
 		}
 		sandbox = current
 		return nil

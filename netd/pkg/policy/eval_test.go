@@ -213,6 +213,36 @@ func TestUnknownFallbackAction(t *testing.T) {
 	}
 }
 
+func TestAllowUnknownEgressFallbackAllowsPlatformDestinationUnderBlockAll(t *testing.T) {
+	p := &CompiledPolicy{
+		Mode: v1alpha1.NetworkModeBlockAll,
+		Platform: &PlatformPolicy{
+			AllowedCIDRs: []*net.IPNet{mustCIDR("10.96.0.10/32")},
+		},
+	}
+	if !AllowUnknownEgressFallback(p, net.ParseIP("10.96.0.10"), "") {
+		t.Fatalf("expected platform destination to pass through unknown fallback")
+	}
+	if AllowUnknownEgressFallback(p, net.ParseIP("8.8.8.8"), "") {
+		t.Fatalf("expected non-platform destination to remain denied under block-all")
+	}
+}
+
+func TestAllowUnknownEgressFallbackHonorsPlatformDomainDeny(t *testing.T) {
+	p := &CompiledPolicy{
+		Mode: v1alpha1.NetworkModeAllowAll,
+		Platform: &PlatformPolicy{
+			DeniedDomains: []DomainRule{{Pattern: "blocked.platform.local", Type: DomainMatchExact}},
+		},
+	}
+	if AllowUnknownEgressFallback(p, nil, "blocked.platform.local") {
+		t.Fatalf("expected platform deny to override allow-all unknown fallback")
+	}
+	if !AllowUnknownEgressFallback(p, nil, "other.example.com") {
+		t.Fatalf("expected allow-all to keep passing non-platform unknown traffic")
+	}
+}
+
 func mustCIDR(cidr string) *net.IPNet {
 	_, netCIDR, err := net.ParseCIDR(cidr)
 	if err != nil {

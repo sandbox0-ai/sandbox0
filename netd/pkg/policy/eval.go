@@ -83,6 +83,35 @@ func UnknownFallbackAction(policy *CompiledPolicy) UnknownTrafficAction {
 	}
 }
 
+// AllowUnknownEgressFallback evaluates whether unknown traffic should be
+// passed through after L4 evaluation. Platform-managed destinations retain
+// pass-through behavior even under block-all so sandbox bootstrap traffic
+// to core services remains functional.
+func AllowUnknownEgressFallback(policy *CompiledPolicy, destIP net.IP, host string) bool {
+	if policy == nil {
+		return true
+	}
+	host = strings.ToLower(strings.TrimSpace(host))
+	if policy.Platform != nil {
+		if isOtherSandboxPod(policy.Platform, destIP) {
+			return false
+		}
+		if matchCIDR(destIP, policy.Platform.DeniedCIDRs) {
+			return false
+		}
+		if host != "" && matchDomain(host, policy.Platform.DeniedDomains) {
+			return false
+		}
+		if matchCIDR(destIP, policy.Platform.AllowedCIDRs) {
+			return true
+		}
+		if host != "" && matchDomain(host, policy.Platform.AllowedDomains) {
+			return true
+		}
+	}
+	return UnknownFallbackAction(policy) == UnknownTrafficPassThrough
+}
+
 func AllowEgressDomain(policy *CompiledPolicy, host string) bool {
 	if policy == nil {
 		return true

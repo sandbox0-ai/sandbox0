@@ -102,6 +102,38 @@ func TestDecideTrafficUnknownBlockAllDenies(t *testing.T) {
 	}
 }
 
+func TestDecideTrafficUnknownBlockAllPlatformDestinationPassesThrough(t *testing.T) {
+	compiled := &policy.CompiledPolicy{
+		Mode: v1alpha1.NetworkModeBlockAll,
+		Platform: &policy.PlatformPolicy{
+			AllowedCIDRs: []*net.IPNet{mustCIDR("10.96.0.10/32")},
+		},
+	}
+	decision := decideTraffic(compiled, classifyUnknownTraffic("tcp", "opaque", net.ParseIP("10.96.0.10"), 8090, "unclassified"))
+	if decision.Action != decisionActionPassThrough {
+		t.Fatalf("expected pass-through, got %s", decision.Action)
+	}
+	if decision.Reason != "unclassified" {
+		t.Fatalf("expected unclassified reason, got %s", decision.Reason)
+	}
+}
+
+func TestDecideTrafficUnknownAllowAllPlatformDeniedStillDenies(t *testing.T) {
+	compiled := &policy.CompiledPolicy{
+		Mode: v1alpha1.NetworkModeAllowAll,
+		Platform: &policy.PlatformPolicy{
+			DeniedCIDRs: []*net.IPNet{mustCIDR("10.96.0.10/32")},
+		},
+	}
+	decision := decideTraffic(compiled, classifyUnknownTraffic("tcp", "opaque", net.ParseIP("10.96.0.10"), 8090, "unclassified"))
+	if decision.Action != decisionActionDeny {
+		t.Fatalf("expected deny, got %s", decision.Action)
+	}
+	if decision.Reason != "l4_denied" {
+		t.Fatalf("expected l4_denied reason, got %s", decision.Reason)
+	}
+}
+
 func TestDecideTrafficUDPAllowedUsesAdapter(t *testing.T) {
 	compiled := &policy.CompiledPolicy{
 		Mode: v1alpha1.NetworkModeBlockAll,

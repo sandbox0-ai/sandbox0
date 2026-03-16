@@ -24,6 +24,7 @@ const (
 	auditableEgressOpaquePort int32 = 18082
 	auditableEgressUDPPort    int32 = 18083
 	auditableEgressHTTPBody         = "auditable-egress-http-ok\n"
+	auditableEgressHelperSvc        = "auditable-egress-helper"
 )
 
 func registerApiNetworkPolicySuite(envProvider func() *framework.ScenarioEnv) {
@@ -83,27 +84,39 @@ func assertAuditableEgressInterception(env *framework.ScenarioEnv, session *e2eu
 		},
 	})
 
-	Eventually(func() error {
-		output, execErr := execInSandboxPod(env, helperNamespace, targetSandbox.PodName, auditableEgressFragmentedHTTPRequestCommand(helperServiceHost))
-		if execErr != nil {
-			return execErr
-		}
-		if strings.TrimSpace(output) != "ok" {
-			return fmt.Errorf("unexpected fragmented http result: %q", output)
-		}
-		return nil
-	}).WithTimeout(90 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
+	expectAuditableEgressCommandEventually(
+		env,
+		helperNamespace,
+		targetSandbox.PodName,
+		helperServiceHost,
+		"fragmented_http",
+		auditableEgressFragmentedHTTPRequestCommand(helperServiceHost),
+		90*time.Second,
+		3*time.Second,
+		func(output string) error {
+			if strings.TrimSpace(output) != "ok" {
+				return fmt.Errorf("unexpected fragmented http result: %q", output)
+			}
+			return nil
+		},
+	)
 
-	Eventually(func() error {
-		output, execErr := execInSandboxPod(env, helperNamespace, targetSandbox.PodName, auditableEgressOpaqueTCPCommand(helperIP))
-		if execErr != nil {
-			return execErr
-		}
-		if strings.TrimSpace(output) != "denied" {
-			return fmt.Errorf("expected opaque tcp traffic to be denied, got %q", output)
-		}
-		return nil
-	}).WithTimeout(45 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
+	expectAuditableEgressCommandEventually(
+		env,
+		helperNamespace,
+		targetSandbox.PodName,
+		helperServiceHost,
+		"opaque_tcp",
+		auditableEgressOpaqueTCPCommand(helperIP),
+		45*time.Second,
+		3*time.Second,
+		func(output string) error {
+			if strings.TrimSpace(output) != "denied" {
+				return fmt.Errorf("expected opaque tcp traffic to be denied, got %q", output)
+			}
+			return nil
+		},
+	)
 
 	applyAuditableEgressNetworkPolicyToSandboxPod(env, helperNamespace, targetSandboxID, targetSandbox.PodName, &v1alpha1.TplSandboxNetworkPolicy{
 		Mode: v1alpha1.NetworkModeBlockAll,
@@ -116,21 +129,56 @@ func assertAuditableEgressInterception(env *framework.ScenarioEnv, session *e2eu
 		},
 	})
 
+	expectAuditableEgressCommandEventually(
+		env,
+		helperNamespace,
+		targetSandbox.PodName,
+		helperServiceHost,
+		"udp_session",
+		auditableEgressUDPSessionCommand(helperIP, targetSandboxID),
+		45*time.Second,
+		3*time.Second,
+		func(output string) error {
+			lines := strings.Split(strings.TrimSpace(output), "\n")
+			if len(lines) == 0 {
+				return fmt.Errorf("udp session command returned no output")
+			}
+			last := lines[len(lines)-1]
+			if !strings.Contains(last, "ports=1") || !strings.Contains(last, "same=true") {
+				return fmt.Errorf("unexpected udp session response: %q", output)
+			}
+			return nil
+		},
+	)
+}
+
+func expectAuditableEgressCommandEventually(
+	env *framework.ScenarioEnv,
+	namespace, podName, helperServiceHost, checkName, script string,
+	timeout, polling time.Duration,
+	validate func(string) error,
+) {
 	Eventually(func() error {
-		output, execErr := execInSandboxPod(env, helperNamespace, targetSandbox.PodName, auditableEgressUDPSessionCommand(helperIP, targetSandboxID))
+		output, execErr := execInSandboxPod(env, namespace, podName, script)
 		if execErr != nil {
-			return execErr
+			return fmt.Errorf(
+				"%s exec failed: err=%v output=%q diagnostics=%s",
+				checkName,
+				execErr,
+				output,
+				auditableEgressDiagnostics(env, namespace, podName, helperServiceHost),
+			)
 		}
-		lines := strings.Split(strings.TrimSpace(output), "\n")
-		if len(lines) == 0 {
-			return fmt.Errorf("udp session command returned no output")
-		}
-		last := lines[len(lines)-1]
-		if !strings.Contains(last, "ports=1") || !strings.Contains(last, "same=true") {
-			return fmt.Errorf("unexpected udp session response: %q", output)
+		if validateErr := validate(output); validateErr != nil {
+			return fmt.Errorf(
+				"%s validation failed: %v diagnostics=%s",
+				checkName,
+				validateErr,
+				auditableEgressDiagnostics(env, namespace, podName, helperServiceHost),
+			)
 		}
 		return nil
-	}).WithTimeout(45 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
+	}).WithTimeout(timeout).WithPolling(polling).Should(Succeed())
 }
 
 func applyAuditableEgressNetworkPolicyToSandboxPod(env *framework.ScenarioEnv, namespace, sandboxID, podName string, policyTpl *v1alpha1.TplSandboxNetworkPolicy) {
@@ -216,6 +264,40 @@ func getSandboxPodAnnotationsEventually(env *framework.ScenarioEnv, namespace, p
 	return annotations
 }
 
+func auditableEgressDiagnostics(env *framework.ScenarioEnv, namespace, podName, helperServiceHost string) string {
+	podIP := strings.TrimSpace(auditableEgressKubectlOutput(env, "-n", namespace, "get", "pod", podName, "-o", "jsonpath={.status.podIP}"))
+	policyHash := strings.TrimSpace(auditableEgressKubectlOutput(env, "-n", namespace, "get", "pod", podName, "-o", fmt.Sprintf("jsonpath={.metadata.annotations.%s}", escapeJSONPathKey(controller.AnnotationNetworkPolicyHash))))
+	appliedHash := strings.TrimSpace(auditableEgressKubectlOutput(env, "-n", namespace, "get", "pod", podName, "-o", fmt.Sprintf("jsonpath={.metadata.annotations.%s}", escapeJSONPathKey(controller.AnnotationNetworkPolicyAppliedHash))))
+	policyAnnotation := strings.TrimSpace(auditableEgressKubectlOutput(env, "-n", namespace, "get", "pod", podName, "-o", fmt.Sprintf("jsonpath={.metadata.annotations.%s}", escapeJSONPathKey(controller.AnnotationNetworkPolicy))))
+	serviceClusterIP := strings.TrimSpace(auditableEgressKubectlOutput(env, "-n", namespace, "get", "svc", auditableEgressHelperSvc, "-o", "jsonpath={.spec.clusterIP}"))
+	endpointIPs := strings.TrimSpace(auditableEgressKubectlOutput(env, "-n", namespace, "get", "endpoints", auditableEgressHelperSvc, "-o", "jsonpath={range .subsets[*].addresses[*]}{.ip}{\" \"}{end}"))
+
+	return fmt.Sprintf(
+		"pod=%s podIP=%s helperHost=%s policyHash=%q appliedHash=%q serviceClusterIP=%q endpointIPs=%q policyAnnotation=%q",
+		podName,
+		podIP,
+		helperServiceHost,
+		policyHash,
+		appliedHash,
+		serviceClusterIP,
+		endpointIPs,
+		policyAnnotation,
+	)
+}
+
+func auditableEgressKubectlOutput(env *framework.ScenarioEnv, args ...string) string {
+	output, err := framework.KubectlOutput(env.TestCtx.Context, env.Config.Kubeconfig, args...)
+	if err != nil {
+		return fmt.Sprintf("<kubectl error: %v>", err)
+	}
+	return strings.ReplaceAll(output, "\r\n", "\n")
+}
+
+func escapeJSONPathKey(key string) string {
+	replacer := strings.NewReplacer(".", "\\.", "/", "\\/")
+	return replacer.Replace(key)
+}
+
 func auditableEgressPolicyAnnotationHash(annotation string) string {
 	if annotation == "" {
 		return ""
@@ -237,7 +319,7 @@ func upsertAuditableEgressHelperService(env *framework.ScenarioEnv, namespace, s
 	manifest := fmt.Sprintf(`apiVersion: v1
 kind: Service
 metadata:
-  name: auditable-egress-helper
+  name: %s
   namespace: %s
 spec:
   clusterIP: None
@@ -248,12 +330,12 @@ spec:
       port: %d
       protocol: TCP
       targetPort: %d
-`, namespace, controller.LabelSandboxID, sandboxID, auditableEgressHTTPPort, auditableEgressHTTPPort)
+`, auditableEgressHelperSvc, namespace, controller.LabelSandboxID, sandboxID, auditableEgressHTTPPort, auditableEgressHTTPPort)
 	_, err = file.WriteString(manifest)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(file.Close()).To(Succeed())
 	Expect(framework.ApplyManifest(env.TestCtx.Context, env.Config.Kubeconfig, file.Name())).To(Succeed())
-	return fmt.Sprintf("auditable-egress-helper.%s.svc.cluster.local", namespace)
+	return fmt.Sprintf("%s.%s.svc.cluster.local", auditableEgressHelperSvc, namespace)
 }
 
 func deleteAuditableEgressHelperService(env *framework.ScenarioEnv, namespace string) {
@@ -262,7 +344,7 @@ func deleteAuditableEgressHelperService(env *framework.ScenarioEnv, namespace st
 		env.Config.Kubeconfig,
 		"delete",
 		"service",
-		"auditable-egress-helper",
+		auditableEgressHelperSvc,
 		"--namespace",
 		namespace,
 		"--ignore-not-found=true",

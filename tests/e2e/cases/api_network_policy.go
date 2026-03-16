@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -41,7 +42,7 @@ func assertAuditableEgressInterception(env *framework.ScenarioEnv, session *e2eu
 	Expect(err).NotTo(HaveOccurred())
 	helperSandbox := waitForSandboxPodReadyEventually(env, session, helperSandboxID, helperNamespace)
 
-	Expect(execIssue36HelperServices(env, helperNamespace, helperSandbox.PodName)).To(Succeed())
+	Expect(execAuditableEgressHelperServices(env, helperNamespace, helperSandbox.PodName)).To(Succeed())
 
 	helperIP, err := framework.KubectlGetJSONPath(
 		env.TestCtx.Context,
@@ -54,6 +55,8 @@ func assertAuditableEgressInterception(env *framework.ScenarioEnv, session *e2eu
 	Expect(err).NotTo(HaveOccurred())
 	helperIP = strings.TrimSpace(helperIP)
 	Expect(helperIP).NotTo(BeEmpty())
+	helperServiceHost := upsertAuditableEgressHelperService(env, helperNamespace, helperSandbox.PodName)
+	defer deleteAuditableEgressHelperService(env, helperNamespace)
 
 	Eventually(func() error {
 		output, execErr := execInSandboxPod(env, helperNamespace, helperSandbox.PodName, fmt.Sprintf("curl -fsS --max-time 5 http://127.0.0.1:%d/", auditableEgressHTTPPort))
@@ -73,15 +76,15 @@ func assertAuditableEgressInterception(env *framework.ScenarioEnv, session *e2eu
 	}()
 	targetSandbox := waitForSandboxPodReadyEventually(env, session, targetSandboxID, helperNamespace)
 
-	applyIssue36NetworkPolicyToSandboxPod(env, helperNamespace, targetSandboxID, targetSandbox.PodName, &v1alpha1.TplSandboxNetworkPolicy{
+	applyAuditableEgressNetworkPolicyToSandboxPod(env, helperNamespace, targetSandboxID, targetSandbox.PodName, &v1alpha1.TplSandboxNetworkPolicy{
 		Mode: v1alpha1.NetworkModeBlockAll,
 		Egress: &v1alpha1.NetworkEgressPolicy{
-			AllowedDomains: []string{helperIP},
+			AllowedDomains: []string{helperServiceHost},
 		},
 	})
 
 	Eventually(func() error {
-		output, execErr := execInSandboxPod(env, helperNamespace, targetSandbox.PodName, auditableEgressFragmentedHTTPRequestCommand(helperIP))
+		output, execErr := execInSandboxPod(env, helperNamespace, targetSandbox.PodName, auditableEgressFragmentedHTTPRequestCommand(helperServiceHost))
 		if execErr != nil {
 			return execErr
 		}
@@ -102,7 +105,7 @@ func assertAuditableEgressInterception(env *framework.ScenarioEnv, session *e2eu
 		return nil
 	}).WithTimeout(45 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
 
-	applyIssue36NetworkPolicyToSandboxPod(env, helperNamespace, targetSandboxID, targetSandbox.PodName, &v1alpha1.TplSandboxNetworkPolicy{
+	applyAuditableEgressNetworkPolicyToSandboxPod(env, helperNamespace, targetSandboxID, targetSandbox.PodName, &v1alpha1.TplSandboxNetworkPolicy{
 		Mode: v1alpha1.NetworkModeBlockAll,
 		Egress: &v1alpha1.NetworkEgressPolicy{
 			AllowedCIDRs: []string{helperIP + "/32"},
@@ -130,7 +133,7 @@ func assertAuditableEgressInterception(env *framework.ScenarioEnv, session *e2eu
 	}).WithTimeout(45 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
 }
 
-func applyIssue36NetworkPolicyToSandboxPod(env *framework.ScenarioEnv, namespace, sandboxID, podName string, policyTpl *v1alpha1.TplSandboxNetworkPolicy) {
+func applyAuditableEgressNetworkPolicyToSandboxPod(env *framework.ScenarioEnv, namespace, sandboxID, podName string, policyTpl *v1alpha1.TplSandboxNetworkPolicy) {
 	annotations := getSandboxPodAnnotationsEventually(env, namespace, podName)
 	existingAnnotation := annotations[controller.AnnotationNetworkPolicy]
 	existingSpec, err := v1alpha1.ParseNetworkPolicyFromAnnotation(existingAnnotation)
@@ -221,9 +224,48 @@ func auditableEgressPolicyAnnotationHash(annotation string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func execIssue36HelperServices(env *framework.ScenarioEnv, namespace, podName string) error {
+func execAuditableEgressHelperServices(env *framework.ScenarioEnv, namespace, podName string) error {
 	_, err := execInSandboxPod(env, namespace, podName, auditableEgressHelperServicesCommand())
 	return err
+}
+
+func upsertAuditableEgressHelperService(env *framework.ScenarioEnv, namespace, sandboxID string) string {
+	file, err := os.CreateTemp("", "sandbox0-e2e-auditable-egress-service-*.yaml")
+	Expect(err).NotTo(HaveOccurred())
+	defer os.Remove(file.Name())
+
+	manifest := fmt.Sprintf(`apiVersion: v1
+kind: Service
+metadata:
+  name: auditable-egress-helper
+  namespace: %s
+spec:
+  selector:
+    %s: %s
+  ports:
+    - name: http
+      port: %d
+      protocol: TCP
+      targetPort: %d
+`, namespace, controller.LabelSandboxID, sandboxID, auditableEgressHTTPPort, auditableEgressHTTPPort)
+	_, err = file.WriteString(manifest)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(file.Close()).To(Succeed())
+	Expect(framework.ApplyManifest(env.TestCtx.Context, env.Config.Kubeconfig, file.Name())).To(Succeed())
+	return fmt.Sprintf("auditable-egress-helper.%s.svc.cluster.local", namespace)
+}
+
+func deleteAuditableEgressHelperService(env *framework.ScenarioEnv, namespace string) {
+	_ = framework.Kubectl(
+		env.TestCtx.Context,
+		env.Config.Kubeconfig,
+		"delete",
+		"service",
+		"auditable-egress-helper",
+		"--namespace",
+		namespace,
+		"--ignore-not-found=true",
+	)
 }
 
 func auditableEgressHelperServicesCommand() string {

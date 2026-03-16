@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestIssue36PythonScriptsCompile(t *testing.T) {
+func TestAuditableEgressPythonScriptsCompile(t *testing.T) {
 	testCases := []struct {
 		name   string
 		script string

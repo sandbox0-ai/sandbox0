@@ -240,6 +240,7 @@ metadata:
   name: auditable-egress-helper
   namespace: %s
 spec:
+  clusterIP: None
   selector:
     %s: %s
   ports:

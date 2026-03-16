@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import "@sandbox0/ui/globals.css";
 
 export const metadata: Metadata = {
-  title: "Sandbox0 - AI-Native Sandbox Infrastructure",
+  title: "Sandbox0 Docs",
   description:
-    "Persistent storage, session state maintenance, sub-200ms cold starts, and operator-first self-hosted deployment for AI agents.",
+    "Open-source documentation for Sandbox0 architecture, runtime behavior, APIs, and self-hosted deployment.",
 };
 
 export default function RootLayout({

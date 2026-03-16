@@ -36,17 +36,19 @@ export function Footer() {
             GitHub
           </a>
           <a
-            href="mailto:contact@sandbox0.ai"
+            href="https://github.com/sandbox0-ai/sandbox0/releases"
+            target="_blank"
+            rel="noopener noreferrer"
             className="hover:text-foreground transition-colors"
           >
-            contact@sandbox0.ai
+            Releases
           </a>
         </div>
 
         <div className="flex flex-col items-center md:items-end gap-1">
           <p className="text-xs text-muted">© 2026 Sandbox0</p>
           <p className="text-[10px] text-muted/50 font-mono uppercase tracking-widest">
-            AI-Native Infrastructure
+            Open-source docs site
           </p>
         </div>
       </div>

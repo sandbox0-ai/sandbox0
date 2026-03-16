@@ -4,19 +4,12 @@ import React from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { PixelButton } from "@sandbox0/ui";
 import { getResolvedDocsVersionFromPathname } from "@/components/docs/versioning";
 
 interface HeaderProps {
   onMenuClick?: () => void;
   isSidebarOpen?: boolean;
-  /**
-   * Header position style.
-   * - sticky: default for docs
-   * - fixed: useful for the homepage hero
-   */
   position?: "sticky" | "fixed";
-  /** Optional override for background opacity. */
   background?: "solid" | "translucent";
 }
 
@@ -70,15 +63,14 @@ export function Header({
           >
             GitHub
           </a>
-          <PixelButton
-            variant="primary"
-            scale="sm"
-            onClick={() => {
-              window.location.href = "mailto:contact@sandbox0.ai";
-            }}
+          <a
+            href="https://github.com/sandbox0-ai/sandbox0/releases"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-sm text-muted hover:text-foreground transition-colors"
           >
-            Contact
-          </PixelButton>
+            Releases
+          </a>
         </div>
 
         {/* Mobile Actions */}

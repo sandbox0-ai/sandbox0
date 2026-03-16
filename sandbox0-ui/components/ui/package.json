@@ -1,16 +1,39 @@
 {
   "name": "@sandbox0/ui",
-  "version": "0.0.1",
-  "private": true,
-  "sideEffects": false,
+  "version": "0.1.0",
+  "description": "Shared Sandbox0 pixel-art design system",
+  "license": "Apache-2.0",
+  "type": "module",
+  "sideEffects": [
+    "./dist/globals.css"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
   "exports": {
-    ".": "./src/index.ts",
-    "./globals.css": "./src/globals.css"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./globals.css": "./dist/globals.css"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && cp src/globals.css dist/globals.css",
+    "prepare": "npm run build",
     "lint": "eslint src/",
     "clean": "rm -rf dist .turbo"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sandbox0-ai/sandbox0.git",
+    "directory": "sandbox0-ui/components/ui"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   },
   "peerDependencies": {
     "react": "^18 || ^19",

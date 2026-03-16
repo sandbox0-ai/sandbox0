@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
 	"github.com/sandbox0-ai/sandbox0/pkg/framework"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
@@ -184,6 +185,9 @@ func buildIssue36TemplateCreateRequest(base apispec.Template, templateID string,
 }
 
 func waitForIssue36TemplateReady(env *framework.ScenarioEnv, session *e2eutils.Session, templateID string) {
+	namespace, err := naming.TemplateNamespaceForBuiltin(templateID)
+	Expect(err).NotTo(HaveOccurred())
+
 	Eventually(func() error {
 		tpl, err := session.GetTemplate(env.TestCtx.Context, GinkgoT(), templateID)
 		if err != nil {
@@ -194,6 +198,21 @@ func waitForIssue36TemplateReady(env *framework.ScenarioEnv, session *e2eutils.S
 		}
 		if *tpl.Status.IdleCount < 1 {
 			return fmt.Errorf("template %s idle pool is not ready: idleCount=%d", templateID, *tpl.Status.IdleCount)
+		}
+		runningIdlePods, err := framework.KubectlOutput(
+			env.TestCtx.Context,
+			env.Config.Kubeconfig,
+			"-n", namespace,
+			"get", "pods",
+			"-l", fmt.Sprintf("%s=%s,%s=%s", controller.LabelTemplateID, templateID, controller.LabelPoolType, controller.PoolTypeIdle),
+			"--field-selector", "status.phase=Running",
+			"-o", "name",
+		)
+		if err != nil {
+			return err
+		}
+		if len(strings.Fields(strings.TrimSpace(runningIdlePods))) < 1 {
+			return fmt.Errorf("template %s has no running idle pods yet", templateID)
 		}
 		return nil
 	}).WithTimeout(3 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())

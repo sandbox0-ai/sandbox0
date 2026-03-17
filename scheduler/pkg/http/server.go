@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/licensing"
@@ -129,22 +130,22 @@ func (s *Server) setupRoutes() {
 		// Template Management (source of truth)
 		templates := v1.Group("/templates")
 		{
-			templates.GET("", s.templateHandler.ListTemplates)
-			templates.GET("/:id", s.templateHandler.GetTemplate)
-			templates.POST("", s.templateHandler.CreateTemplate)
-			templates.PUT("/:id", s.templateHandler.UpdateTemplate)
-			templates.DELETE("/:id", s.templateHandler.DeleteTemplate)
-			templates.GET("/:id/allocations", s.templateHandler.GetTemplateAllocations)
+			templates.GET("", s.requireAnyPermission(authn.PermTemplateRead), s.templateHandler.ListTemplates)
+			templates.GET("/:id", s.requireAnyPermission(authn.PermTemplateRead), s.templateHandler.GetTemplate)
+			templates.POST("", s.requireAnyPermission(authn.PermTemplateCreate), s.templateHandler.CreateTemplate)
+			templates.PUT("/:id", s.requireAnyPermission(authn.PermTemplateWrite), s.templateHandler.UpdateTemplate)
+			templates.DELETE("/:id", s.requireAnyPermission(authn.PermTemplateDelete), s.templateHandler.DeleteTemplate)
+			templates.GET("/:id/allocations", s.requireAnyPermission(authn.PermTemplateRead), s.templateHandler.GetTemplateAllocations)
 		}
 
 		// Cluster Management (admin API)
 		clusters := v1.Group("/clusters")
 		{
-			clusters.GET("", s.listClusters)
-			clusters.GET("/:id", s.getCluster)
-			clusters.POST("", s.createCluster)
-			clusters.PUT("/:id", s.updateCluster)
-			clusters.DELETE("/:id", s.deleteCluster)
+			clusters.GET("", s.requireAnyPermission(authn.PermTemplateRead), s.listClusters)
+			clusters.GET("/:id", s.requireAnyPermission(authn.PermTemplateRead), s.getCluster)
+			clusters.POST("", s.requireAnyPermission(authn.PermTemplateWrite, authn.PermTemplateCreate), s.createCluster)
+			clusters.PUT("/:id", s.requireAnyPermission(authn.PermTemplateWrite), s.updateCluster)
+			clusters.DELETE("/:id", s.requireAnyPermission(authn.PermTemplateDelete), s.deleteCluster)
 		}
 
 		// Sandbox routing (edge-gateway)
@@ -155,6 +156,32 @@ func (s *Server) setupRoutes() {
 			sandboxes.Any("/:id", s.proxySandbox)
 			sandboxes.Any("/:id/*path", s.proxySandbox)
 		}
+	}
+}
+
+func (s *Server) requireAnyPermission(permissions ...string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		claims := internalauth.ClaimsFromContext(c.Request.Context())
+		if claims == nil {
+			spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication claims")
+			return
+		}
+
+		if claims.IsSystemToken() {
+			c.Next()
+			return
+		}
+
+		for _, required := range permissions {
+			for _, granted := range claims.Permissions {
+				if granted == required || granted == "*" || granted == "*:*" {
+					c.Next()
+					return
+				}
+			}
+		}
+
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "insufficient permissions")
 	}
 }
 

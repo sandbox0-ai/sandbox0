@@ -393,8 +393,8 @@ func (r *Repository) PutSourceRecord(ctx context.Context, teamID string, record 
 		WHERE team_id = $1 AND name = $2
 		FOR UPDATE
 	`, teamID, record.Name).Scan(&sourceID, &currentVersion)
-	switch {
-	case err == nil:
+	switch err {
+	case nil:
 		currentVersion++
 		if _, err := tx.Exec(ctx, `
 			UPDATE credential_sources
@@ -405,7 +405,7 @@ func (r *Repository) PutSourceRecord(ctx context.Context, teamID string, record 
 		`, teamID, record.Name, record.ResolverKind, currentVersion, normalizeSourceStatus(record.Status)); err != nil {
 			return nil, fmt.Errorf("update source record: %w", err)
 		}
-	case err == pgx.ErrNoRows:
+	case pgx.ErrNoRows:
 		currentVersion = 1
 		err = tx.QueryRow(ctx, `
 			INSERT INTO credential_sources (team_id, name, resolver_kind, current_version, status)

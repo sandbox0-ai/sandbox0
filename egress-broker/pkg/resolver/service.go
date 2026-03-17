@@ -213,14 +213,3 @@ func staticCacheKey(req *egressauth.ResolveRequest) string {
 func cloneResolveResponse(in *egressauth.ResolveResponse) *egressauth.ResolveResponse {
 	return egressauth.CloneResolveResponse(in)
 }
-
-func cloneHeaders(in map[string]string) map[string]string {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
-	return out
-}

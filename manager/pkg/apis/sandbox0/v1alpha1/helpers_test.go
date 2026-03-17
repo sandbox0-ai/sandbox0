@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -87,6 +88,67 @@ sandbox_pod_placement:
 	}
 	if len(spec.Tolerations) != 2 {
 		t.Fatalf("expected merged tolerations without duplicates, got %d", len(spec.Tolerations))
+	}
+}
+
+func TestBuildPodSpecSanitizesSidecarSecurityContext(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	runAsUser := int64(1000)
+	runAsGroup := int64(1001)
+	allowPrivilegeEscalation := true
+	privileged := true
+
+	template := newTestTemplate()
+	template.Spec.Sidecars = []corev1.Container{
+		{
+			Name:  "sidecar",
+			Image: "busybox:latest",
+			SecurityContext: &corev1.SecurityContext{
+				RunAsUser:                &runAsUser,
+				RunAsGroup:               &runAsGroup,
+				AllowPrivilegeEscalation: &allowPrivilegeEscalation,
+				Privileged:               &privileged,
+				Capabilities: &corev1.Capabilities{
+					Add:  []corev1.Capability{"NET_ADMIN"},
+					Drop: []corev1.Capability{"NET_RAW"},
+				},
+			},
+		},
+	}
+
+	spec := BuildPodSpec(template, false)
+	if len(spec.Containers) != 2 {
+		t.Fatalf("expected 2 containers, got %d", len(spec.Containers))
+	}
+
+	sidecar := spec.Containers[1]
+	if sidecar.SecurityContext == nil {
+		t.Fatal("expected sidecar security context")
+	}
+	if sidecar.SecurityContext.RunAsUser == nil || *sidecar.SecurityContext.RunAsUser != runAsUser {
+		t.Fatalf("expected runAsUser %d, got %v", runAsUser, sidecar.SecurityContext.RunAsUser)
+	}
+	if sidecar.SecurityContext.RunAsGroup == nil || *sidecar.SecurityContext.RunAsGroup != runAsGroup {
+		t.Fatalf("expected runAsGroup %d, got %v", runAsGroup, sidecar.SecurityContext.RunAsGroup)
+	}
+	if sidecar.SecurityContext.AllowPrivilegeEscalation != nil {
+		t.Fatalf("expected allowPrivilegeEscalation to be stripped, got %v", *sidecar.SecurityContext.AllowPrivilegeEscalation)
+	}
+	if sidecar.SecurityContext.Privileged != nil {
+		t.Fatalf("expected privileged to be stripped, got %v", *sidecar.SecurityContext.Privileged)
+	}
+	if sidecar.SecurityContext.Capabilities == nil {
+		t.Fatal("expected capabilities to exist")
+	}
+	if len(sidecar.SecurityContext.Capabilities.Add) != 0 {
+		t.Fatalf("expected capabilities.add to be stripped, got %v", sidecar.SecurityContext.Capabilities.Add)
+	}
+	if len(sidecar.SecurityContext.Capabilities.Drop) != 1 || sidecar.SecurityContext.Capabilities.Drop[0] != "NET_RAW" {
+		t.Fatalf("expected capabilities.drop to be preserved, got %v", sidecar.SecurityContext.Capabilities.Drop)
 	}
 }
 

@@ -167,8 +167,32 @@ func buildContainers(template *SandboxTemplate) []corev1.Container {
 		buildContainer(&template.Spec.MainContainer, template),
 	}
 
-	containers = append(containers, template.Spec.Sidecars...)
+	for _, sidecar := range template.Spec.Sidecars {
+		containers = append(containers, sanitizeSidecarContainer(sidecar))
+	}
 	return containers
+}
+
+func sanitizeSidecarContainer(container corev1.Container) corev1.Container {
+	if container.SecurityContext == nil {
+		return container
+	}
+
+	sanitized := &corev1.SecurityContext{}
+	if container.SecurityContext.RunAsUser != nil {
+		sanitized.RunAsUser = container.SecurityContext.RunAsUser
+	}
+	if container.SecurityContext.RunAsGroup != nil {
+		sanitized.RunAsGroup = container.SecurityContext.RunAsGroup
+	}
+	if container.SecurityContext.Capabilities != nil {
+		sanitized.Capabilities = &corev1.Capabilities{
+			Drop: append([]corev1.Capability(nil), container.SecurityContext.Capabilities.Drop...),
+		}
+	}
+
+	container.SecurityContext = sanitized
+	return container
 }
 
 // buildContainer builds a single container

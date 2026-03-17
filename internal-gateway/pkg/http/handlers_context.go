@@ -259,14 +259,19 @@ func (s *Server) contextWebSocket(c *gin.Context) {
 	wsProxy.Proxy(procdURL)(c)
 }
 
+func sandboxCacheKey(teamID, sandboxID string) string {
+	return teamID + ":" + sandboxID
+}
+
 // getProcdURL resolves the procd URL for a sandbox
 // Uses in-memory cache to reduce manager API calls and improve performance
 func (s *Server) getProcdURL(c *gin.Context, sandboxID string) (*url.URL, error) {
 	authCtx := middleware.GetAuthContext(c)
+	cacheKey := sandboxCacheKey(authCtx.TeamID, sandboxID)
 
 	// Try to get from cache first
 	var addr *url.URL
-	if cached, ok := s.sandboxAddrCache.Get(sandboxID); ok {
+	if cached, ok := s.sandboxAddrCache.Get(cacheKey); ok {
 		addr = cached
 		s.logger.Debug("Sandbox cache hit",
 			zap.String("sandbox_id", sandboxID),
@@ -339,7 +344,7 @@ func (s *Server) getProcdURL(c *gin.Context, sandboxID string) (*url.URL, error)
 		}
 
 		// Store in cache for future requests
-		s.sandboxAddrCache.Set(sandboxID, addr)
+		s.sandboxAddrCache.Set(cacheKey, addr)
 		s.logger.Debug("Sandbox cached",
 			zap.String("sandbox_id", sandboxID),
 			zap.String("internal_addr", addr.String()),

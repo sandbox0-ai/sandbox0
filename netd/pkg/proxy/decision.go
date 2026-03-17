@@ -32,6 +32,8 @@ type trafficDecision struct {
 	Reason           string
 	ClassifierResult string
 	NeedsAdapter     bool
+	NeedsEgressAuth  bool
+	MatchedAuthRule  *policy.CompiledEgressAuthRule
 }
 
 func classifyKnownTraffic(transport, protocol string, destIP net.IP, destPort int, host string) trafficClassification {
@@ -110,5 +112,7 @@ func decideTraffic(compiled *policy.CompiledPolicy, classification trafficClassi
 	decision.Action = decisionActionUseAdapter
 	decision.Reason = "allowed"
 	decision.NeedsAdapter = true
+	decision.MatchedAuthRule = policy.MatchEgressAuthRule(compiled, classification.Transport, classification.Protocol, classification.DestPort, classification.Host)
+	decision.NeedsEgressAuth = decision.MatchedAuthRule != nil
 	return decision
 }

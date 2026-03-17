@@ -34,6 +34,8 @@ type Server struct {
 	tcpClassifiers []tcpClassifier
 	udpClassifiers []udpClassifier
 	adapters       *adapterRegistry
+	authResolver   egressAuthResolver
+	authCache      egressAuthCache
 	auditor        *auditLogger
 	auditSeq       uint64
 	udpSessionMu   sync.Mutex
@@ -47,7 +49,7 @@ type UsageRecorder interface {
 	RecordIngress(compiled *policy.CompiledPolicy, bytes int64)
 }
 
-func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.Tracker, usageRecorder UsageRecorder, logger *zap.Logger) (*Server, error) {
+func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.Tracker, usageRecorder UsageRecorder, logger *zap.Logger, opts ...ServerOption) (*Server, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("netd config is nil")
 	}
@@ -133,7 +135,7 @@ func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.T
 		}
 		return nil, err
 	}
-	return &Server{
+	server := &Server{
 		cfg:            cfg,
 		store:          store,
 		tracker:        tracker,
@@ -148,9 +150,17 @@ func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.T
 		tcpClassifiers: defaultTCPClassifiers(),
 		udpClassifiers: defaultUDPClassifiers(),
 		adapters:       adapters,
+		authResolver:   noopEgressAuthResolver{},
+		authCache:      newMemoryEgressAuthCache(),
 		auditor:        auditor,
 		exitCh:         make(chan error, 1),
-	}, nil
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(server)
+		}
+	}
+	return server, nil
 }
 
 func (s *Server) Start(ctx context.Context) {
@@ -415,6 +425,12 @@ func (s *Server) handleTCPDecision(req *adapterRequest, decision trafficDecision
 	if host != "" {
 		baseFields = append(baseFields, zap.String("host", host))
 	}
+	if decision.MatchedAuthRule != nil {
+		baseFields = append(baseFields,
+			zap.String("auth_ref", decision.MatchedAuthRule.AuthRef),
+			zap.String("auth_rule", decision.MatchedAuthRule.Name),
+		)
+	}
 	baseFields = append(baseFields, fields...)
 	switch decision.Action {
 	case decisionActionDeny:
@@ -438,6 +454,16 @@ func (s *Server) handleTCPDecision(req *adapterRequest, decision trafficDecision
 		}
 		return
 	case decisionActionUseAdapter:
+		s.attachEgressAuth(req, decision)
+		if req.EgressAuth != nil {
+			baseFields = append(baseFields,
+				zap.Bool("auth_cache_hit", req.EgressAuth.CacheHit),
+				zap.Bool("auth_resolved", req.EgressAuth.Resolved != nil),
+			)
+			if req.EgressAuth.ResolveError != nil {
+				baseFields = append(baseFields, zap.Error(req.EgressAuth.ResolveError))
+			}
+		}
 		adapter, resolveErr := s.resolveAdapter(decision)
 		if resolveErr != nil {
 			s.logger.Warn("TCP adapter missing", append(baseFields, zap.Error(resolveErr))...)
@@ -516,6 +542,12 @@ func (s *Server) handleUDPDecision(req *adapterRequest, decision trafficDecision
 	if host != "" {
 		fields = append(fields, zap.String("host", host))
 	}
+	if decision.MatchedAuthRule != nil {
+		fields = append(fields,
+			zap.String("auth_ref", decision.MatchedAuthRule.AuthRef),
+			zap.String("auth_rule", decision.MatchedAuthRule.Name),
+		)
+	}
 	switch decision.Action {
 	case decisionActionDeny:
 		s.logger.Info("UDP decision denied", fields...)
@@ -559,6 +591,16 @@ func (s *Server) handleUDPDecision(req *adapterRequest, decision trafficDecision
 		}
 		return
 	case decisionActionUseAdapter:
+		s.attachEgressAuth(req, decision)
+		if req.EgressAuth != nil {
+			fields = append(fields,
+				zap.Bool("auth_cache_hit", req.EgressAuth.CacheHit),
+				zap.Bool("auth_resolved", req.EgressAuth.Resolved != nil),
+			)
+			if req.EgressAuth.ResolveError != nil {
+				fields = append(fields, zap.Error(req.EgressAuth.ResolveError))
+			}
+		}
 		adapter, resolveErr := s.resolveAdapter(decision)
 		if resolveErr != nil {
 			s.logger.Warn("UDP adapter missing", append(fields, zap.Error(resolveErr))...)

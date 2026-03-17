@@ -9,25 +9,10 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"go.uber.org/zap"
 )
-
-// ResolveRequest describes a future auth resolution request from netd.
-type ResolveRequest struct {
-	SandboxID   string `json:"sandboxId"`
-	TeamID      string `json:"teamId,omitempty"`
-	AuthRef     string `json:"authRef"`
-	Destination string `json:"destination,omitempty"`
-	Protocol    string `json:"protocol,omitempty"`
-}
-
-// ResolveResponse describes the resolved egress auth material shape.
-type ResolveResponse struct {
-	AuthRef   string            `json:"authRef"`
-	Headers   map[string]string `json:"headers,omitempty"`
-	ExpiresAt *time.Time        `json:"expiresAt,omitempty"`
-}
 
 // Server serves egress-broker HTTP endpoints.
 type Server struct {
@@ -104,7 +89,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req ResolveRequest
+	var req egressauth.ResolveRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
 		return

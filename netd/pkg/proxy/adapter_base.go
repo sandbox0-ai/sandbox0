@@ -28,6 +28,7 @@ type adapterRequest struct {
 	Server     *Server
 	Compiled   *policy.CompiledPolicy
 	Audit      *flowAudit
+	EgressAuth *egressAuthContext
 	UDPSession *udpSession
 	SrcIP      string
 	DestIP     net.IP

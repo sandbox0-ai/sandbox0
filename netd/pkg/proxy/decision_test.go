@@ -11,6 +11,18 @@ import (
 func TestDecideTrafficKnownAllowedUsesAdapter(t *testing.T) {
 	compiled := &policy.CompiledPolicy{
 		Mode: v1alpha1.NetworkModeAllowAll,
+		Egress: policy.CompiledRuleSet{
+			AuthRules: []policy.CompiledEgressAuthRule{
+				{
+					Name:     "example-http",
+					AuthRef:  "example-api",
+					Protocol: v1alpha1.EgressAuthProtocolHTTP,
+					Domains: []policy.DomainRule{
+						{Pattern: "example.com", Type: policy.DomainMatchExact},
+					},
+				},
+			},
+		},
 	}
 	decision := decideTraffic(compiled, classifyKnownTraffic("tcp", "http", net.ParseIP("8.8.8.8"), 443, "example.com"))
 	if decision.Action != decisionActionUseAdapter {
@@ -21,6 +33,12 @@ func TestDecideTrafficKnownAllowedUsesAdapter(t *testing.T) {
 	}
 	if decision.Reason != "allowed" {
 		t.Fatalf("expected allowed reason, got %s", decision.Reason)
+	}
+	if !decision.NeedsEgressAuth || decision.MatchedAuthRule == nil {
+		t.Fatalf("expected matched auth rule")
+	}
+	if decision.MatchedAuthRule.AuthRef != "example-api" {
+		t.Fatalf("unexpected auth ref %q", decision.MatchedAuthRule.AuthRef)
 	}
 }
 
@@ -162,6 +180,29 @@ func TestDecideTrafficBlockAllL4AllowWithoutDomainRulesUsesAdapter(t *testing.T)
 	}
 	if decision.Reason != "allowed" {
 		t.Fatalf("expected allowed reason, got %s", decision.Reason)
+	}
+}
+
+func TestDecideTrafficUnknownTrafficDoesNotMatchAuthRule(t *testing.T) {
+	compiled := &policy.CompiledPolicy{
+		Mode: v1alpha1.NetworkModeAllowAll,
+		Egress: policy.CompiledRuleSet{
+			AuthRules: []policy.CompiledEgressAuthRule{
+				{
+					Name:     "example-http",
+					AuthRef:  "example-api",
+					Protocol: v1alpha1.EgressAuthProtocolHTTP,
+				},
+			},
+		},
+	}
+
+	decision := decideTraffic(compiled, classifyUnknownTraffic("tcp", "tls", net.ParseIP("8.8.8.8"), 443, "parse_failed"))
+	if decision.NeedsEgressAuth {
+		t.Fatalf("expected unknown traffic to skip auth matching")
+	}
+	if decision.MatchedAuthRule != nil {
+		t.Fatalf("expected no matched auth rule, got %+v", decision.MatchedAuthRule)
 	}
 }
 

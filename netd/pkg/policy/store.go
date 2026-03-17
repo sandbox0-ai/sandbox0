@@ -153,6 +153,7 @@ func cloneRuleSet(in CompiledRuleSet) CompiledRuleSet {
 	out.DeniedPorts = append([]PortRange(nil), in.DeniedPorts...)
 	out.AllowedDomains = append([]DomainRule(nil), in.AllowedDomains...)
 	out.DeniedDomains = append([]DomainRule(nil), in.DeniedDomains...)
+	out.AuthRules = append([]CompiledEgressAuthRule(nil), in.AuthRules...)
 	return out
 }
 

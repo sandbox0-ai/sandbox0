@@ -33,6 +33,16 @@ type CompiledRuleSet struct {
 	DeniedPorts    []PortRange
 	AllowedDomains []DomainRule
 	DeniedDomains  []DomainRule
+	AuthRules      []CompiledEgressAuthRule
+}
+
+type CompiledEgressAuthRule struct {
+	Name     string
+	AuthRef  string
+	Protocol v1alpha1.EgressAuthProtocol
+	TLSMode  v1alpha1.EgressTLSMode
+	Domains  []DomainRule
+	Ports    []PortRange
 }
 
 type CompiledPolicy struct {
@@ -67,6 +77,11 @@ func CompileNetworkPolicy(spec *v1alpha1.NetworkPolicySpec) (*CompiledPolicy, er
 		if err != nil {
 			return nil, fmt.Errorf("compile egress: %w", err)
 		}
+		authRules, err := compileEgressAuthRules(spec.Egress.AuthRules)
+		if err != nil {
+			return nil, fmt.Errorf("compile egress auth rules: %w", err)
+		}
+		egress.AuthRules = authRules
 		compiled.Egress = egress
 	}
 
@@ -185,6 +200,47 @@ func parseDomains(values []string) ([]DomainRule, error) {
 			continue
 		}
 		out = append(out, DomainRule{Pattern: value, Type: DomainMatchExact})
+	}
+	return out, nil
+}
+
+func compileEgressAuthRules(values []v1alpha1.EgressAuthRule) ([]CompiledEgressAuthRule, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	out := make([]CompiledEgressAuthRule, 0, len(values))
+	for _, value := range values {
+		authRef := strings.TrimSpace(value.AuthRef)
+		if authRef == "" {
+			return nil, fmt.Errorf("authRef is required")
+		}
+		domains, err := parseDomains(value.Domains)
+		if err != nil {
+			return nil, fmt.Errorf("parse auth rule domains for %q: %w", authRef, err)
+		}
+		ports, err := parsePorts(value.Ports)
+		if err != nil {
+			return nil, fmt.Errorf("parse auth rule ports for %q: %w", authRef, err)
+		}
+		rule := CompiledEgressAuthRule{
+			Name:     strings.TrimSpace(value.Name),
+			AuthRef:  authRef,
+			Protocol: value.Protocol,
+			TLSMode:  value.TLSMode,
+			Domains:  domains,
+			Ports:    ports,
+		}
+		switch rule.Protocol {
+		case "", v1alpha1.EgressAuthProtocolHTTP, v1alpha1.EgressAuthProtocolHTTPS, v1alpha1.EgressAuthProtocolGRPC:
+		default:
+			return nil, fmt.Errorf("unsupported auth rule protocol %q", value.Protocol)
+		}
+		switch rule.TLSMode {
+		case "", v1alpha1.EgressTLSModePassthrough, v1alpha1.EgressTLSModeTerminateReoriginate:
+		default:
+			return nil, fmt.Errorf("unsupported auth rule tls mode %q", value.TLSMode)
+		}
+		out = append(out, rule)
 	}
 	return out, nil
 }

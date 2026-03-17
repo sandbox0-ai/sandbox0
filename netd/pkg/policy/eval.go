@@ -159,6 +159,46 @@ func HasDomainRules(policy *CompiledPolicy) bool {
 	return len(policy.Egress.AllowedDomains) > 0 || len(policy.Egress.DeniedDomains) > 0
 }
 
+func MatchEgressAuthRule(policy *CompiledPolicy, transport, protocol string, destPort int, host string) *CompiledEgressAuthRule {
+	if policy == nil || len(policy.Egress.AuthRules) == 0 {
+		return nil
+	}
+	transport = strings.ToLower(strings.TrimSpace(transport))
+	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	host = strings.ToLower(strings.TrimSpace(host))
+	for idx := range policy.Egress.AuthRules {
+		rule := &policy.Egress.AuthRules[idx]
+		if !matchEgressAuthProtocol(rule.Protocol, transport, protocol) {
+			continue
+		}
+		if len(rule.Ports) > 0 && !matchPort(destPort, transport, rule.Ports) {
+			continue
+		}
+		if len(rule.Domains) > 0 {
+			if host == "" || !matchDomain(host, rule.Domains) {
+				continue
+			}
+		}
+		return rule
+	}
+	return nil
+}
+
+func matchEgressAuthProtocol(ruleProtocol v1alpha1.EgressAuthProtocol, transport, classifiedProtocol string) bool {
+	switch ruleProtocol {
+	case "":
+		return true
+	case v1alpha1.EgressAuthProtocolHTTP:
+		return transport == "tcp" && classifiedProtocol == "http"
+	case v1alpha1.EgressAuthProtocolHTTPS:
+		return transport == "tcp" && classifiedProtocol == "tls"
+	case v1alpha1.EgressAuthProtocolGRPC:
+		return transport == "tcp" && classifiedProtocol == "grpc"
+	default:
+		return false
+	}
+}
+
 func hasExplicitL4AllowList(policy *CompiledPolicy) bool {
 	if policy == nil {
 		return false

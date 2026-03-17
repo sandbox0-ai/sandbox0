@@ -39,6 +39,11 @@ type auditEvent struct {
 	IngressBytes      int64     `json:"ingress_bytes,omitempty"`
 	Adapter           string    `json:"adapter,omitempty"`
 	AdapterCapability string    `json:"adapter_capability,omitempty"`
+	AuthRuleName      string    `json:"auth_rule_name,omitempty"`
+	AuthRef           string    `json:"auth_ref,omitempty"`
+	AuthResolved      bool      `json:"auth_resolved,omitempty"`
+	AuthCacheHit      bool      `json:"auth_cache_hit,omitempty"`
+	AuthResolveError  string    `json:"auth_resolve_error,omitempty"`
 	Error             string    `json:"error,omitempty"`
 }
 
@@ -119,6 +124,17 @@ func (l *auditLogger) Record(req *adapterRequest, decision trafficDecision, adap
 		if req.Compiled != nil {
 			event.SandboxID = req.Compiled.SandboxID
 			event.TeamID = req.Compiled.TeamID
+		}
+		if req.EgressAuth != nil {
+			if req.EgressAuth.Rule != nil {
+				event.AuthRuleName = req.EgressAuth.Rule.Name
+				event.AuthRef = req.EgressAuth.Rule.AuthRef
+			}
+			event.AuthResolved = req.EgressAuth.Resolved != nil
+			event.AuthCacheHit = req.EgressAuth.CacheHit
+			if req.EgressAuth.ResolveError != nil {
+				event.AuthResolveError = req.EgressAuth.ResolveError.Error()
+			}
 		}
 	}
 	if err != nil {

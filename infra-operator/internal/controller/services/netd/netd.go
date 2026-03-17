@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 
 	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
@@ -54,7 +55,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	nodeSelector := map[string]string(nil)
 	tolerations := []corev1.Toleration(nil)
 	if infra.Spec.Services != nil && infra.Spec.Services.Netd != nil && infra.Spec.Services.Netd.Config != nil {
-		config = infra.Spec.Services.Netd.Config
+		config = infra.Spec.Services.Netd.Config.DeepCopy()
 	}
 	if infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
 		runtimeClassName = infra.Spec.Services.Netd.RuntimeClassName
@@ -94,9 +95,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		}
 		config.EgressBrokerURL = fmt.Sprintf("http://%s-egress-broker.%s.svc.cluster.local:%d", infra.Name, infra.Namespace, port)
 	}
-	mitmCASecretName := ""
-	if infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
-		mitmCASecretName = infra.Spec.Services.Netd.MITMCASecretName
+	mitmCASecretName, err := r.resolveMITMCASecretName(ctx, infra, labels)
+	if err != nil {
+		return err
 	}
 	if mitmCASecretName != "" {
 		if config.MITMCACertPath == "" {
@@ -112,7 +113,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	}
 
 	ds := &appsv1.DaemonSet{}
-	err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, ds)
+	err = r.Resources.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, ds)
 	if err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
@@ -283,6 +284,22 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 
 	ds.Spec = desired.Spec
 	return r.Resources.Client.Update(ctx, ds)
+}
+
+func (r *Reconciler) resolveMITMCASecretName(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, labels map[string]string) (string, error) {
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.Netd == nil {
+		return "", nil
+	}
+
+	if secretName := strings.TrimSpace(infra.Spec.Services.Netd.MITMCASecretName); secretName != "" {
+		return secretName, nil
+	}
+
+	secretName := managedMITMCASecretName(infra)
+	if err := r.reconcileManagedMITMCASecret(ctx, infra, secretName, labels); err != nil {
+		return "", err
+	}
+	return secretName, nil
 }
 
 func resolveClusterDNSCIDR(ctx context.Context, client ctrlclient.Client, logger logr.Logger) (string, error) {

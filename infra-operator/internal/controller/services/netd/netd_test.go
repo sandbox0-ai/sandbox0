@@ -2,14 +2,19 @@ package netd
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
@@ -82,9 +87,159 @@ func TestReconcileFallsBackToLegacyNetdPlacement(t *testing.T) {
 	}
 }
 
-func TestReconcileMountsMITMCASecret(t *testing.T) {
+func TestReconcileMountsExplicitMITMCASecret(t *testing.T) {
 	infra := newNetdTestInfra()
 	infra.Spec.Services.Netd.MITMCASecretName = "netd-mitm-ca"
+	client, scheme := newNetdTestClient(t, infra.DeepCopy())
+
+	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
+	if err := reconciler.Reconcile(context.Background(), infra, "ghcr.io/sandbox0-ai/sandbox0", "latest"); err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+
+	assertNetdMITMSecretMounted(t, client, infra, "netd-mitm-ca")
+
+	if got := infra.Spec.Services.Netd.Config.MITMCACertPath; got != "" {
+		t.Fatalf("expected input config to remain unchanged, got cert path %q", got)
+	}
+	if got := infra.Spec.Services.Netd.Config.MITMCAKeyPath; got != "" {
+		t.Fatalf("expected input config to remain unchanged, got key path %q", got)
+	}
+}
+
+func TestReconcileAutoGeneratesManagedMITMCASecret(t *testing.T) {
+	infra := newNetdTestInfra()
+	client, scheme := newNetdTestClient(t, infra.DeepCopy())
+
+	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
+	if err := reconciler.Reconcile(context.Background(), infra, "ghcr.io/sandbox0-ai/sandbox0", "latest"); err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+
+	secretName := managedMITMCASecretName(infra)
+	assertNetdMITMSecretMounted(t, client, infra, secretName)
+
+	secret := &corev1.Secret{}
+	if err := client.Get(context.Background(), types.NamespacedName{
+		Name:      secretName,
+		Namespace: infra.Namespace,
+	}, secret); err != nil {
+		t.Fatalf("expected managed secret: %v", err)
+	}
+	assertValidManagedMITMCASecret(t, secret)
+	if len(secret.OwnerReferences) != 1 || secret.OwnerReferences[0].Name != infra.Name {
+		t.Fatalf("expected secret to be owned by infra, got %#v", secret.OwnerReferences)
+	}
+}
+
+func TestReconcileReusesManagedMITMCASecretAcrossReconciles(t *testing.T) {
+	infra := newNetdTestInfra()
+	client, scheme := newNetdTestClient(t, infra.DeepCopy())
+	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
+
+	if err := reconciler.Reconcile(context.Background(), infra, "ghcr.io/sandbox0-ai/sandbox0", "latest"); err != nil {
+		t.Fatalf("first reconcile returned error: %v", err)
+	}
+
+	secretName := managedMITMCASecretName(infra)
+	secret := &corev1.Secret{}
+	if err := client.Get(context.Background(), types.NamespacedName{
+		Name:      secretName,
+		Namespace: infra.Namespace,
+	}, secret); err != nil {
+		t.Fatalf("expected managed secret after first reconcile: %v", err)
+	}
+	firstCert := append([]byte(nil), secret.Data[mitmCACertKey]...)
+	firstKey := append([]byte(nil), secret.Data[mitmCAKeyKey]...)
+
+	if err := reconciler.Reconcile(context.Background(), infra, "ghcr.io/sandbox0-ai/sandbox0", "latest"); err != nil {
+		t.Fatalf("second reconcile returned error: %v", err)
+	}
+	if err := client.Get(context.Background(), types.NamespacedName{
+		Name:      secretName,
+		Namespace: infra.Namespace,
+	}, secret); err != nil {
+		t.Fatalf("expected managed secret after second reconcile: %v", err)
+	}
+	if string(secret.Data[mitmCACertKey]) != string(firstCert) || string(secret.Data[mitmCAKeyKey]) != string(firstKey) {
+		t.Fatalf("expected managed secret to be reused across reconciles")
+	}
+}
+
+func TestReconcileRepairsInvalidManagedMITMCASecret(t *testing.T) {
+	infra := newNetdTestInfra()
+	invalidSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      managedMITMCASecretName(infra),
+			Namespace: infra.Namespace,
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			mitmCACertKey: []byte("invalid cert"),
+			mitmCAKeyKey:  []byte("invalid key"),
+		},
+	}
+	client, scheme := newNetdTestClient(t, infra.DeepCopy(), invalidSecret)
+	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
+
+	if err := reconciler.Reconcile(context.Background(), infra, "ghcr.io/sandbox0-ai/sandbox0", "latest"); err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+
+	secret := &corev1.Secret{}
+	if err := client.Get(context.Background(), types.NamespacedName{
+		Name:      managedMITMCASecretName(infra),
+		Namespace: infra.Namespace,
+	}, secret); err != nil {
+		t.Fatalf("expected repaired secret: %v", err)
+	}
+	assertValidManagedMITMCASecret(t, secret)
+}
+
+func TestReconcileExplicitMITMCASecretSkipsManagedSecret(t *testing.T) {
+	infra := newNetdTestInfra()
+	infra.Spec.Services.Netd.MITMCASecretName = "custom-mitm-ca"
+	client, scheme := newNetdTestClient(t, infra.DeepCopy())
+	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
+
+	if err := reconciler.Reconcile(context.Background(), infra, "ghcr.io/sandbox0-ai/sandbox0", "latest"); err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+
+	assertNetdMITMSecretMounted(t, client, infra, "custom-mitm-ca")
+
+	managedSecret := &corev1.Secret{}
+	err := client.Get(context.Background(), types.NamespacedName{
+		Name:      managedMITMCASecretName(infra),
+		Namespace: infra.Namespace,
+	}, managedSecret)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected no managed secret when explicit secret is configured, got %v", err)
+	}
+}
+
+func reconcileNetdDaemonSet(t *testing.T, infra *infrav1alpha1.Sandbox0Infra) *appsv1.DaemonSet {
+	t.Helper()
+
+	client, scheme := newNetdTestClient(t, infra.DeepCopy())
+	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
+	if err := reconciler.Reconcile(context.Background(), infra, "ghcr.io/sandbox0-ai/sandbox0", "latest"); err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+
+	ds := &appsv1.DaemonSet{}
+	if err := client.Get(context.Background(), types.NamespacedName{
+		Name:      infra.Name + "-netd",
+		Namespace: infra.Namespace,
+	}, ds); err != nil {
+		t.Fatalf("expected daemonset to be created: %v", err)
+	}
+
+	return ds
+}
+
+func newNetdTestClient(t *testing.T, objects ...ctrlclient.Object) (ctrlclient.Client, *runtime.Scheme) {
+	t.Helper()
 
 	scheme := runtime.NewScheme()
 	if err := appsv1.AddToScheme(scheme); err != nil {
@@ -99,13 +254,13 @@ func TestReconcileMountsMITMCASecret(t *testing.T) {
 
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(infra.DeepCopy()).
+		WithObjects(objects...).
 		Build()
+	return client, scheme
+}
 
-	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
-	if err := reconciler.Reconcile(context.Background(), infra, "ghcr.io/sandbox0-ai/sandbox0", "latest"); err != nil {
-		t.Fatalf("reconcile returned error: %v", err)
-	}
+func assertNetdMITMSecretMounted(t *testing.T, client ctrlclient.Client, infra *infrav1alpha1.Sandbox0Infra, secretName string) {
+	t.Helper()
 
 	ds := &appsv1.DaemonSet{}
 	if err := client.Get(context.Background(), types.NamespacedName{
@@ -117,7 +272,7 @@ func TestReconcileMountsMITMCASecret(t *testing.T) {
 	foundVolume := false
 	foundMount := false
 	for _, volume := range ds.Spec.Template.Spec.Volumes {
-		if volume.Name == "mitm-ca" && volume.Secret != nil && volume.Secret.SecretName == "netd-mitm-ca" {
+		if volume.Name == "mitm-ca" && volume.Secret != nil && volume.Secret.SecretName == secretName {
 			foundVolume = true
 		}
 	}
@@ -137,47 +292,37 @@ func TestReconcileMountsMITMCASecret(t *testing.T) {
 	}, cm); err != nil {
 		t.Fatalf("expected configmap: %v", err)
 	}
-	if !strings.Contains(cm.Data["config.yaml"], "mitm_ca_cert_path: /tls/ca.crt") {
-		t.Fatalf("expected mitm ca cert path in config, got %q", cm.Data["config.yaml"])
-	}
-	if !strings.Contains(cm.Data["config.yaml"], "mitm_ca_key_path: /tls/ca.key") {
-		t.Fatalf("expected mitm ca key path in config, got %q", cm.Data["config.yaml"])
+	if got := cm.Data["config.yaml"]; !containsMITMPaths(got) {
+		t.Fatalf("expected mitm ca paths in config, got %q", got)
 	}
 }
 
-func reconcileNetdDaemonSet(t *testing.T, infra *infrav1alpha1.Sandbox0Infra) *appsv1.DaemonSet {
+func assertValidManagedMITMCASecret(t *testing.T, secret *corev1.Secret) {
 	t.Helper()
 
-	scheme := runtime.NewScheme()
-	if err := appsv1.AddToScheme(scheme); err != nil {
-		t.Fatalf("add appsv1 scheme: %v", err)
+	if err := validateMITMCASecret(secret); err != nil {
+		t.Fatalf("expected valid managed MITM CA secret: %v", err)
 	}
-	if err := corev1.AddToScheme(scheme); err != nil {
-		t.Fatalf("add corev1 scheme: %v", err)
-	}
-	if err := infrav1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("add infra scheme: %v", err)
+	if _, err := tls.X509KeyPair(secret.Data[mitmCACertKey], secret.Data[mitmCAKeyKey]); err != nil {
+		t.Fatalf("expected managed secret keypair to load: %v", err)
 	}
 
-	client := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(infra.DeepCopy()).
-		Build()
-
-	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
-	if err := reconciler.Reconcile(context.Background(), infra, "ghcr.io/sandbox0-ai/sandbox0", "latest"); err != nil {
-		t.Fatalf("reconcile returned error: %v", err)
+	block, _ := pem.Decode(secret.Data[mitmCACertKey])
+	if block == nil {
+		t.Fatalf("expected managed secret certificate PEM")
 	}
-
-	ds := &appsv1.DaemonSet{}
-	if err := client.Get(context.Background(), types.NamespacedName{
-		Name:      infra.Name + "-netd",
-		Namespace: infra.Namespace,
-	}, ds); err != nil {
-		t.Fatalf("expected daemonset to be created: %v", err)
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse managed secret certificate: %v", err)
 	}
+	if !cert.IsCA {
+		t.Fatalf("expected managed certificate to be a CA")
+	}
+}
 
-	return ds
+func containsMITMPaths(config string) bool {
+	return strings.Contains(config, "mitm_ca_cert_path: /tls/ca.crt") &&
+		strings.Contains(config, "mitm_ca_key_path: /tls/ca.key")
 }
 
 func newNetdTestInfra() *infrav1alpha1.Sandbox0Infra {

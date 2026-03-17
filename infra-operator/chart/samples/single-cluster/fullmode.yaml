@@ -118,7 +118,8 @@ spec:
       enabled: true
       # Keep netd on a regular host runtime such as runc; do not run netd on gVisor or Kata.
       # runtimeClassName: runc
-      # For HTTPS/gRPC auth injection, point this at a secret containing ca.crt and ca.key.
+      # By default infra-operator manages a cluster-local MITM CA secret for HTTPS/gRPC auth injection.
+      # Set this only when you want to provide your own secret containing ca.crt and ca.key.
       # mitmCaSecretName: netd-mitm-ca
       config:
         egressAuthEnabled: true

@@ -190,8 +190,9 @@ type PoolStrategy struct {
 // allow-all permits traffic by default and applies denied* rules as subtractive filters.
 // block-all denies traffic by default and applies allowed* rules as additive exceptions.
 type TplSandboxNetworkPolicy struct {
-	Mode   NetworkPolicyMode    `json:"mode"`
-	Egress *NetworkEgressPolicy `json:"egress,omitempty"`
+	Mode        NetworkPolicyMode       `json:"mode"`
+	Egress      *NetworkEgressPolicy    `json:"egress,omitempty"`
+	Credentials *NetworkCredentialsSpec `json:"credentials,omitempty"`
 }
 
 // NetworkPolicyMode defines network policy mode
@@ -206,24 +207,29 @@ const (
 // In allow-all mode, denied* fields are enforced and allowed* fields are ignored.
 // In block-all mode, allowed* fields are enforced and denied* fields are ignored.
 type NetworkEgressPolicy struct {
-	AllowedCIDRs   []string         `json:"allowedCidrs,omitempty"`
-	AllowedDomains []string         `json:"allowedDomains,omitempty"`
-	DeniedCIDRs    []string         `json:"deniedCidrs,omitempty"`
-	DeniedDomains  []string         `json:"deniedDomains,omitempty"`
-	AllowedPorts   []PortSpec       `json:"allowedPorts,omitempty"`
-	DeniedPorts    []PortSpec       `json:"deniedPorts,omitempty"`
-	AuthRules      []EgressAuthRule `json:"authRules,omitempty"`
+	AllowedCIDRs   []string               `json:"allowedCidrs,omitempty"`
+	AllowedDomains []string               `json:"allowedDomains,omitempty"`
+	DeniedCIDRs    []string               `json:"deniedCidrs,omitempty"`
+	DeniedDomains  []string               `json:"deniedDomains,omitempty"`
+	AllowedPorts   []PortSpec             `json:"allowedPorts,omitempty"`
+	DeniedPorts    []PortSpec             `json:"deniedPorts,omitempty"`
+	Rules          []EgressCredentialRule `json:"rules,omitempty"`
 }
 
-// EgressAuthRule defines an auth injection rule matched against outbound traffic.
-type EgressAuthRule struct {
+// NetworkCredentialsSpec defines sandbox-scoped credential bindings.
+type NetworkCredentialsSpec struct {
+	Bindings []CredentialBinding `json:"bindings,omitempty"`
+}
+
+// EgressCredentialRule defines a credential injection rule matched against outbound traffic.
+type EgressCredentialRule struct {
 	// Name is an optional stable identifier used for merge and replacement.
 	Name string `json:"name,omitempty"`
 
-	// AuthRef identifies the auth material or policy resolved by egress-broker.
-	AuthRef string `json:"authRef"`
+	// CredentialRef identifies the binding resolved by egress-broker.
+	CredentialRef string `json:"credentialRef"`
 
-	// Rollout controls whether this auth rule is active. Empty defaults to enabled.
+	// Rollout controls whether this rule is active. Empty defaults to enabled.
 	Rollout EgressAuthRolloutMode `json:"rollout,omitempty"`
 
 	// Protocol is the intended application protocol for the rule.
@@ -240,6 +246,30 @@ type EgressAuthRule struct {
 
 	// Ports constrains the rule to specific ports/protocols.
 	Ports []PortSpec `json:"ports,omitempty"`
+}
+
+// CredentialBinding defines how a credential reference should be resolved.
+type CredentialBinding struct {
+	Ref        string                `json:"ref"`
+	Provider   string                `json:"provider,omitempty"`
+	Headers    map[string]string     `json:"headers,omitempty"`
+	Config     map[string]string     `json:"config,omitempty"`
+	SecretRefs []CredentialSecretRef `json:"secretRefs,omitempty"`
+	SourceRef  *CredentialSourceRef  `json:"sourceRef,omitempty"`
+}
+
+// CredentialSecretRef identifies a secret-backed input used by a binding.
+type CredentialSecretRef struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace,omitempty"`
+	Key       string `json:"key"`
+}
+
+// CredentialSourceRef points to an external logical source for a binding.
+type CredentialSourceRef struct {
+	Kind      string `json:"kind"`
+	Name      string `json:"name"`
+	Namespace string `json:"namespace,omitempty"`
 }
 
 // EgressAuthProtocol defines the supported application protocols for egress auth rules.

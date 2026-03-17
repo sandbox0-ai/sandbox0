@@ -114,6 +114,62 @@ spec:
               network:
                 description: Template Sandbox Network policy (template-level default)
                 properties:
+                  credentials:
+                    description: NetworkCredentialsSpec defines sandbox-scoped credential
+                      bindings.
+                    properties:
+                      bindings:
+                        items:
+                          description: CredentialBinding defines how a credential
+                            reference should be resolved.
+                          properties:
+                            config:
+                              additionalProperties:
+                                type: string
+                              type: object
+                            headers:
+                              additionalProperties:
+                                type: string
+                              type: object
+                            provider:
+                              type: string
+                            ref:
+                              type: string
+                            secretRefs:
+                              items:
+                                description: CredentialSecretRef identifies a secret-backed
+                                  input used by a binding.
+                                properties:
+                                  key:
+                                    type: string
+                                  name:
+                                    type: string
+                                  namespace:
+                                    type: string
+                                required:
+                                - key
+                                - name
+                                type: object
+                              type: array
+                            sourceRef:
+                              description: CredentialSourceRef points to an external
+                                logical source for a binding.
+                              properties:
+                                kind:
+                                  type: string
+                                name:
+                                  type: string
+                                namespace:
+                                  type: string
+                              required:
+                              - kind
+                              - name
+                              type: object
+                          required:
+                          - ref
+                          type: object
+                        type: array
+                    type: object
                   egress:
                     description: |-
                       NetworkEgressPolicy defines egress policy.
@@ -147,14 +203,41 @@ spec:
                           - port
                           type: object
                         type: array
-                      authRules:
+                      deniedCidrs:
                         items:
-                          description: EgressAuthRule defines an auth injection rule
-                            matched against outbound traffic.
+                          type: string
+                        type: array
+                      deniedDomains:
+                        items:
+                          type: string
+                        type: array
+                      deniedPorts:
+                        items:
+                          description: PortSpec defines a port specification
                           properties:
-                            authRef:
-                              description: AuthRef identifies the auth material or
-                                policy resolved by egress-broker.
+                            endPort:
+                              description: EndPort for port ranges (optional)
+                              format: int32
+                              type: integer
+                            port:
+                              description: Port number
+                              format: int32
+                              type: integer
+                            protocol:
+                              description: Protocol (tcp or udp)
+                              type: string
+                          required:
+                          - port
+                          type: object
+                        type: array
+                      rules:
+                        items:
+                          description: EgressCredentialRule defines a credential injection
+                            rule matched against outbound traffic.
+                          properties:
+                            credentialRef:
+                              description: CredentialRef identifies the binding resolved
+                                by egress-broker.
                               type: string
                             domains:
                               description: Domains matches outbound destinations by
@@ -196,42 +279,15 @@ spec:
                                 for the rule.
                               type: string
                             rollout:
-                              description: Rollout controls whether this auth rule
-                                is active. Empty defaults to enabled.
+                              description: Rollout controls whether this rule is active.
+                                Empty defaults to enabled.
                               type: string
                             tlsMode:
                               description: TLSMode indicates whether netd should intercept
                                 TLS for matching flows.
                               type: string
                           required:
-                          - authRef
-                          type: object
-                        type: array
-                      deniedCidrs:
-                        items:
-                          type: string
-                        type: array
-                      deniedDomains:
-                        items:
-                          type: string
-                        type: array
-                      deniedPorts:
-                        items:
-                          description: PortSpec defines a port specification
-                          properties:
-                            endPort:
-                              description: EndPort for port ranges (optional)
-                              format: int32
-                              type: integer
-                            port:
-                              description: Port number
-                              format: int32
-                              type: integer
-                            protocol:
-                              description: Protocol (tcp or udp)
-                              type: string
-                          required:
-                          - port
+                          - credentialRef
                           type: object
                         type: array
                     type: object

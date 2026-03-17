@@ -4374,6 +4374,8 @@ components:
           enum: [allow-all, block-all]
         egress:
           $ref: "#/components/schemas/NetworkEgressPolicy"
+        credentials:
+          $ref: "#/components/schemas/NetworkCredentialsSpec"
       required: [mode]
     NetworkEgressPolicy:
       type: object
@@ -4412,23 +4414,31 @@ components:
           description: Port/protocol denylist used only when mode is `allow-all`.
           items:
             $ref: "#/components/schemas/PortSpec"
-        authRules:
+        rules:
           type: array
           description: |
             Structured egress auth injection rules resolved by `egress-broker`.
             These rules are orthogonal to allow/deny matching and are intended for
             destination-scoped outbound auth behavior.
           items:
-            $ref: "#/components/schemas/EgressAuthRule"
-    EgressAuthRule:
+            $ref: "#/components/schemas/EgressCredentialRule"
+    NetworkCredentialsSpec:
+      type: object
+      description: Sandbox-scoped credential bindings resolved by `egress-broker`.
+      properties:
+        bindings:
+          type: array
+          items:
+            $ref: "#/components/schemas/CredentialBinding"
+    EgressCredentialRule:
       type: object
       properties:
         name:
           type: string
           description: Optional stable identifier used for merge and replacement.
-        authRef:
+        credentialRef:
           type: string
-          description: Broker-managed auth reference to resolve for matching traffic.
+          description: Broker-managed credential binding reference to resolve for matching traffic.
         rollout:
           $ref: "#/components/schemas/EgressAuthRolloutMode"
         protocol:
@@ -4447,7 +4457,51 @@ components:
           description: Port/protocol constraints for the rule.
           items:
             $ref: "#/components/schemas/PortSpec"
-      required: [authRef]
+      required: [credentialRef]
+    CredentialBinding:
+      type: object
+      properties:
+        ref:
+          type: string
+          description: Stable credential binding reference matched by `credentialRef`.
+        provider:
+          type: string
+          description: Binding provider name interpreted by `egress-broker`.
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+        config:
+          type: object
+          additionalProperties:
+            type: string
+        secretRefs:
+          type: array
+          items:
+            $ref: "#/components/schemas/CredentialSecretRef"
+        sourceRef:
+          $ref: "#/components/schemas/CredentialSourceRef"
+      required: [ref]
+    CredentialSecretRef:
+      type: object
+      properties:
+        name:
+          type: string
+        namespace:
+          type: string
+        key:
+          type: string
+      required: [name, key]
+    CredentialSourceRef:
+      type: object
+      properties:
+        kind:
+          type: string
+        name:
+          type: string
+        namespace:
+          type: string
+      required: [kind, name]
     EgressAuthProtocol:
       type: string
       enum: [http, https, grpc]

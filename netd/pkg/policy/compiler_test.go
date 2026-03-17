@@ -17,12 +17,12 @@ func TestCompileNetworkPolicy(t *testing.T) {
 			AllowedPorts: []v1alpha1.PortSpec{
 				{Port: 80, Protocol: "tcp"},
 			},
-			AuthRules: []v1alpha1.EgressAuthRule{
+			Rules: []v1alpha1.EgressCredentialRule{
 				{
-					Name:     "example-http",
-					AuthRef:  "example-api",
-					Protocol: v1alpha1.EgressAuthProtocolHTTP,
-					Domains:  []string{"api.example.com"},
+					Name:          "example-http",
+					CredentialRef: "example-api",
+					Protocol:      v1alpha1.EgressAuthProtocolHTTP,
+					Domains:       []string{"api.example.com"},
 					Ports: []v1alpha1.PortSpec{
 						{Port: 80, Protocol: "tcp"},
 					},

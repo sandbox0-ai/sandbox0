@@ -577,6 +577,34 @@ type CreateTeamRequest struct {
 	Slug         *string `json:"slug,omitempty"`
 }
 
+// CredentialBinding defines model for CredentialBinding.
+type CredentialBinding struct {
+	Config  *map[string]string `json:"config,omitempty"`
+	Headers *map[string]string `json:"headers,omitempty"`
+
+	// Provider Binding provider name interpreted by `egress-broker`.
+	Provider *string `json:"provider,omitempty"`
+
+	// Ref Stable credential binding reference matched by `credentialRef`.
+	Ref        string                 `json:"ref"`
+	SecretRefs *[]CredentialSecretRef `json:"secretRefs,omitempty"`
+	SourceRef  *CredentialSourceRef   `json:"sourceRef,omitempty"`
+}
+
+// CredentialSecretRef defines model for CredentialSecretRef.
+type CredentialSecretRef struct {
+	Key       string  `json:"key"`
+	Name      string  `json:"name"`
+	Namespace *string `json:"namespace,omitempty"`
+}
+
+// CredentialSourceRef defines model for CredentialSourceRef.
+type CredentialSourceRef struct {
+	Kind      string  `json:"kind"`
+	Name      string  `json:"name"`
+	Namespace *string `json:"namespace,omitempty"`
+}
+
 // EgressAuthFailurePolicy defines model for EgressAuthFailurePolicy.
 type EgressAuthFailurePolicy string
 
@@ -586,10 +614,10 @@ type EgressAuthProtocol string
 // EgressAuthRolloutMode defines model for EgressAuthRolloutMode.
 type EgressAuthRolloutMode string
 
-// EgressAuthRule defines model for EgressAuthRule.
-type EgressAuthRule struct {
-	// AuthRef Broker-managed auth reference to resolve for matching traffic.
-	AuthRef string `json:"authRef"`
+// EgressCredentialRule defines model for EgressCredentialRule.
+type EgressCredentialRule struct {
+	// CredentialRef Broker-managed credential binding reference to resolve for matching traffic.
+	CredentialRef string `json:"credentialRef"`
 
 	// Domains Domain match list for the rule.
 	Domains       *[]string                `json:"domains,omitempty"`
@@ -770,6 +798,11 @@ type MoveFileRequest struct {
 	Source      string `json:"source"`
 }
 
+// NetworkCredentialsSpec Sandbox-scoped credential bindings resolved by `egress-broker`.
+type NetworkCredentialsSpec struct {
+	Bindings *[]CredentialBinding `json:"bindings,omitempty"`
+}
+
 // NetworkEgressPolicy Egress rule set interpreted by the selected network mode.
 // In `allow-all`, only `denied*` fields are enforced.
 // In `block-all`, only `allowed*` fields are enforced.
@@ -783,11 +816,6 @@ type NetworkEgressPolicy struct {
 	// AllowedPorts Port/protocol allowlist used only when mode is `block-all`.
 	AllowedPorts *[]PortSpec `json:"allowedPorts,omitempty"`
 
-	// AuthRules Structured egress auth injection rules resolved by `egress-broker`.
-	// These rules are orthogonal to allow/deny matching and are intended for
-	// destination-scoped outbound auth behavior.
-	AuthRules *[]EgressAuthRule `json:"authRules,omitempty"`
-
 	// DeniedCidrs CIDR denylist used only when mode is `allow-all`.
 	DeniedCidrs *[]string `json:"deniedCidrs,omitempty"`
 
@@ -796,6 +824,11 @@ type NetworkEgressPolicy struct {
 
 	// DeniedPorts Port/protocol denylist used only when mode is `allow-all`.
 	DeniedPorts *[]PortSpec `json:"deniedPorts,omitempty"`
+
+	// Rules Structured egress auth injection rules resolved by `egress-broker`.
+	// These rules are orthogonal to allow/deny matching and are intended for
+	// destination-scoped outbound auth behavior.
+	Rules *[]EgressCredentialRule `json:"rules,omitempty"`
 }
 
 // NodeAffinity defines model for NodeAffinity.
@@ -1743,6 +1776,9 @@ type Toleration struct {
 // `allow-all` permits traffic by default and applies `denied*` rules as subtractive filters.
 // `block-all` denies traffic by default and applies `allowed*` rules as additive exceptions.
 type TplSandboxNetworkPolicy struct {
+	// Credentials Sandbox-scoped credential bindings resolved by `egress-broker`.
+	Credentials *NetworkCredentialsSpec `json:"credentials,omitempty"`
+
 	// Egress Egress rule set interpreted by the selected network mode.
 	// In `allow-all`, only `denied*` fields are enforced.
 	// In `block-all`, only `allowed*` fields are enforced.

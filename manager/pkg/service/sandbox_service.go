@@ -15,6 +15,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
+	egressauth "github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"go.uber.org/zap"
@@ -102,6 +103,7 @@ type SandboxService struct {
 	logger                 *zap.Logger
 	metrics                *obsmetrics.ManagerMetrics
 	autoScaler             AutoScalerInterface
+	credentialStore        egressauth.BindingStore
 }
 
 // AutoScalerInterface defines the interface for auto scaling.
@@ -192,6 +194,11 @@ func (s *SandboxService) SetAutoScaler(scaler AutoScalerInterface) {
 	s.autoScaler = scaler
 }
 
+// SetCredentialStore injects the sandbox credential binding store.
+func (s *SandboxService) SetCredentialStore(store egressauth.BindingStore) {
+	s.credentialStore = store
+}
+
 // ClaimRequest represents a sandbox claim request
 type ClaimRequest struct {
 	TeamID   string
@@ -236,6 +243,9 @@ func cloneSandboxConfig(cfg *SandboxConfig) *SandboxConfig {
 		return nil
 	}
 	cloned := *cfg
+	if cloned.Network != nil {
+		cloned.Network = sanitizedNetworkPolicyForPersistence(cloned.Network)
+	}
 	return &cloned
 }
 
@@ -497,9 +507,12 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		}
 
 		// Build and add network policy annotation
-		networkSpec, policyErr := s.applyPoliciesForPod(ctx, pod, template, req)
+		networkState, policyErr := s.applyPoliciesForPod(ctx, pod, template, req)
 		if policyErr != nil {
 			return policyErr
+		}
+		if err := s.stageCredentialBindings(ctx, pod, req.TeamID, networkState); err != nil {
+			return fmt.Errorf("stage credential bindings: %w", err)
 		}
 
 		// Update the pod
@@ -508,7 +521,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			return updateErr
 		}
 
-		if applyErr := s.applyNetworkProvider(ctx, updatedPod, req.TeamID, networkSpec); applyErr != nil {
+		if applyErr := s.applyNetworkProvider(ctx, updatedPod, req.TeamID, policySpecFromState(networkState)); applyErr != nil {
 			return fmt.Errorf("apply network policy: %w", applyErr)
 		}
 
@@ -581,18 +594,27 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 	}
 
 	// Build and add network policy annotation
-	networkSpec, err := s.applyPoliciesForPod(ctx, pod, template, req)
+	networkState, err := s.applyPoliciesForPod(ctx, pod, template, req)
 	if err != nil {
 		return nil, err
+	}
+	if err := s.stageCredentialBindings(ctx, pod, req.TeamID, networkState); err != nil {
+		return nil, fmt.Errorf("stage credential bindings: %w", err)
 	}
 
 	// Create the pod
 	createdPod, err := s.k8sClient.CoreV1().Pods(template.ObjectMeta.Namespace).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
+		if cleanupErr := s.cleanupStagedCredentialBindings(ctx, pod, networkState); cleanupErr != nil {
+			s.logger.Warn("Failed to clean up staged credential bindings after create failure",
+				zap.String("sandboxID", pod.Name),
+				zap.Error(cleanupErr),
+			)
+		}
 		return nil, fmt.Errorf("create pod: %w", err)
 	}
 
-	if err := s.applyNetworkProvider(ctx, createdPod, req.TeamID, networkSpec); err != nil {
+	if err := s.applyNetworkProvider(ctx, createdPod, req.TeamID, policySpecFromState(networkState)); err != nil {
 		return nil, fmt.Errorf("apply network policy: %w", err)
 	}
 
@@ -674,7 +696,7 @@ func (s *SandboxService) applyPoliciesForPod(
 	pod *corev1.Pod,
 	template *v1alpha1.SandboxTemplate,
 	req *ClaimRequest,
-) (*v1alpha1.NetworkPolicySpec, error) {
+) (*BuildNetworkPolicyResult, error) {
 	if s.NetworkPolicyService == nil || pod == nil || template == nil || req == nil {
 		return nil, nil
 	}
@@ -688,19 +710,19 @@ func (s *SandboxService) applyPoliciesForPod(
 		requestNetwork = s.appendWebhookNetworkPolicy(requestNetwork, webhookInfo.URL)
 	}
 
-	networkSpec := s.NetworkPolicyService.BuildNetworkPolicySpec(&BuildNetworkPolicyRequest{
+	networkState := s.NetworkPolicyService.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
 		SandboxID:    pod.Name,
 		TeamID:       req.TeamID,
 		TemplateSpec: template.Spec.Network,
 		RequestSpec:  requestNetwork,
 	})
-	if networkSpec != nil {
-		if _, err := s.setNetworkPolicyAnnotations(pod, networkSpec); err != nil {
+	if networkState != nil && networkState.PolicySpec != nil {
+		if _, err := s.setNetworkPolicyAnnotations(pod, networkState.PolicySpec); err != nil {
 			return nil, err
 		}
 	}
 
-	return networkSpec, nil
+	return networkState, nil
 }
 
 func (s *SandboxService) setNetworkPolicyAnnotations(pod *corev1.Pod, spec *v1alpha1.NetworkPolicySpec) (string, error) {
@@ -723,6 +745,157 @@ func (s *SandboxService) setNetworkPolicyAnnotations(pod *corev1.Pod, spec *v1al
 		delete(pod.Annotations, controller.AnnotationNetworkPolicyAppliedHash)
 	}
 	return newHash, nil
+}
+
+func policySpecFromState(state *BuildNetworkPolicyResult) *v1alpha1.NetworkPolicySpec {
+	if state == nil {
+		return nil
+	}
+	return state.PolicySpec
+}
+
+func (s *SandboxService) stageCredentialBindings(
+	ctx context.Context,
+	pod *corev1.Pod,
+	teamID string,
+	state *BuildNetworkPolicyResult,
+) error {
+	if s.credentialStore == nil || pod == nil || state == nil || len(state.CredentialBindings) == 0 {
+		return nil
+	}
+	clusterID := sandboxClusterID(pod)
+	return s.credentialStore.UpsertBindings(ctx, &egressauth.BindingRecord{
+		ClusterID: clusterID,
+		SandboxID: pod.Name,
+		TeamID:    teamID,
+		Bindings:  toStoreCredentialBindings(state.CredentialBindings),
+	})
+}
+
+func (s *SandboxService) cleanupStagedCredentialBindings(ctx context.Context, pod *corev1.Pod, state *BuildNetworkPolicyResult) error {
+	if s.credentialStore == nil || pod == nil || state == nil || len(state.CredentialBindings) == 0 {
+		return nil
+	}
+	return s.credentialStore.DeleteBindings(ctx, sandboxClusterID(pod), pod.Name)
+}
+
+func (s *SandboxService) deleteCredentialBindings(ctx context.Context, pod *corev1.Pod) error {
+	if s.credentialStore == nil || pod == nil {
+		return nil
+	}
+	return s.credentialStore.DeleteBindings(ctx, sandboxClusterID(pod), pod.Name)
+}
+
+func (s *SandboxService) loadCredentialBindings(ctx context.Context, pod *corev1.Pod) ([]v1alpha1.CredentialBinding, error) {
+	if s.credentialStore == nil || pod == nil {
+		return nil, nil
+	}
+	record, err := s.credentialStore.GetBindings(ctx, sandboxClusterID(pod), pod.Name)
+	if err != nil {
+		return nil, err
+	}
+	if record == nil || len(record.Bindings) == 0 {
+		return nil, nil
+	}
+	return fromStoreCredentialBindings(record.Bindings), nil
+}
+
+func sandboxClusterID(pod *corev1.Pod) string {
+	if pod != nil && pod.Name != "" {
+		parsed, err := naming.ParseSandboxName(pod.Name)
+		if err == nil && parsed != nil && parsed.ClusterID != "" {
+			return parsed.ClusterID
+		}
+	}
+	return naming.DefaultClusterID
+}
+
+func toStoreCredentialBindings(in []v1alpha1.CredentialBinding) []egressauth.CredentialBinding {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]egressauth.CredentialBinding, 0, len(in))
+	for _, binding := range in {
+		storeBinding := egressauth.CredentialBinding{
+			Ref:      binding.Ref,
+			Provider: binding.Provider,
+			Headers:  cloneStringMap(binding.Headers),
+			Config:   cloneStringMap(binding.Config),
+		}
+		if len(binding.SecretRefs) > 0 {
+			storeBinding.SecretRefs = make([]egressauth.CredentialSecretRef, 0, len(binding.SecretRefs))
+			for _, secretRef := range binding.SecretRefs {
+				storeBinding.SecretRefs = append(storeBinding.SecretRefs, egressauth.CredentialSecretRef{
+					Name:      secretRef.Name,
+					Namespace: secretRef.Namespace,
+					Key:       secretRef.Key,
+				})
+			}
+		}
+		if binding.SourceRef != nil {
+			storeBinding.SourceRef = &egressauth.CredentialSourceRef{
+				Kind:      binding.SourceRef.Kind,
+				Name:      binding.SourceRef.Name,
+				Namespace: binding.SourceRef.Namespace,
+			}
+		}
+		out = append(out, storeBinding)
+	}
+	return out
+}
+
+func fromStoreCredentialBindings(in []egressauth.CredentialBinding) []v1alpha1.CredentialBinding {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]v1alpha1.CredentialBinding, 0, len(in))
+	for _, binding := range in {
+		policyBinding := v1alpha1.CredentialBinding{
+			Ref:      binding.Ref,
+			Provider: binding.Provider,
+			Headers:  cloneStringMap(binding.Headers),
+			Config:   cloneStringMap(binding.Config),
+		}
+		if len(binding.SecretRefs) > 0 {
+			policyBinding.SecretRefs = make([]v1alpha1.CredentialSecretRef, 0, len(binding.SecretRefs))
+			for _, secretRef := range binding.SecretRefs {
+				policyBinding.SecretRefs = append(policyBinding.SecretRefs, v1alpha1.CredentialSecretRef{
+					Name:      secretRef.Name,
+					Namespace: secretRef.Namespace,
+					Key:       secretRef.Key,
+				})
+			}
+		}
+		if binding.SourceRef != nil {
+			policyBinding.SourceRef = &v1alpha1.CredentialSourceRef{
+				Kind:      binding.SourceRef.Kind,
+				Name:      binding.SourceRef.Name,
+				Namespace: binding.SourceRef.Namespace,
+			}
+		}
+		out = append(out, policyBinding)
+	}
+	return out
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func sanitizedNetworkPolicyForPersistence(policy *v1alpha1.TplSandboxNetworkPolicy) *v1alpha1.TplSandboxNetworkPolicy {
+	if policy == nil {
+		return nil
+	}
+	cloned := policy.DeepCopy()
+	cloned.Credentials = nil
+	return cloned
 }
 
 func (s *SandboxService) applyNetworkProvider(
@@ -850,6 +1023,12 @@ func (s *SandboxService) TerminateSandbox(ctx context.Context, sandboxID string)
 	if err != nil {
 		return fmt.Errorf("delete pod: %w", err)
 	}
+	if err := s.deleteCredentialBindings(ctx, pod); err != nil {
+		s.logger.Warn("Credential binding cleanup failed",
+			zap.String("sandboxID", pod.Name),
+			zap.Error(err),
+		)
+	}
 
 	s.logger.Info("Sandbox terminated", zap.String("sandboxID", sandboxID), zap.String("pod", pod.Name))
 
@@ -878,7 +1057,7 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 		return nil, fmt.Errorf("get pod: %w", err)
 	}
 
-	var networkSpec *v1alpha1.NetworkPolicySpec
+	var networkState *BuildNetworkPolicyResult
 	var updatedPod *corev1.Pod
 
 	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -919,20 +1098,23 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 		}
 
 		if cfg.Network != nil {
-			merged.Network = cfg.Network
+			merged.Network = sanitizedNetworkPolicyForPersistence(cfg.Network)
 			if s.NetworkPolicyService == nil {
 				return fmt.Errorf("network policy service not configured")
 			}
 
 			teamID := updatedPod.Annotations[controller.AnnotationTeamID]
 			templateSpec := s.templateNetworkSpec(updatedPod)
-			networkSpec = s.NetworkPolicyService.BuildNetworkPolicySpec(&BuildNetworkPolicyRequest{
+			networkState = s.NetworkPolicyService.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
 				SandboxID:    updatedPod.Name,
 				TeamID:       teamID,
 				TemplateSpec: templateSpec,
 				RequestSpec:  cfg.Network,
 			})
-			if _, err := s.setNetworkPolicyAnnotations(updatedPod, networkSpec); err != nil {
+			if err := s.stageCredentialBindings(ctx, updatedPod, teamID, networkState); err != nil {
+				return fmt.Errorf("stage credential bindings: %w", err)
+			}
+			if _, err := s.setNetworkPolicyAnnotations(updatedPod, policySpecFromState(networkState)); err != nil {
 				return err
 			}
 		}
@@ -950,9 +1132,14 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 		return nil, fmt.Errorf("update pod: %w", err)
 	}
 
-	if networkSpec != nil {
+	if networkState != nil {
+		if len(networkState.CredentialBindings) == 0 {
+			if err := s.deleteCredentialBindings(ctx, updatedPod); err != nil {
+				return nil, fmt.Errorf("delete credential bindings: %w", err)
+			}
+		}
 		teamID := updatedPod.Annotations[controller.AnnotationTeamID]
-		if err := s.applyNetworkProvider(ctx, updatedPod, teamID, networkSpec); err != nil {
+		if err := s.applyNetworkProvider(ctx, updatedPod, teamID, policySpecFromState(networkState)); err != nil {
 			return nil, fmt.Errorf("apply network policy: %w", err)
 		}
 	}
@@ -976,7 +1163,15 @@ func (s *SandboxService) GetNetworkPolicy(ctx context.Context, sandboxID string)
 		return nil, fmt.Errorf("parse network policy annotation: %w", err)
 	}
 	if spec != nil {
-		return networkPolicyFromSpec(spec), nil
+		policy := networkPolicyFromSpec(spec)
+		bindings, err := s.loadCredentialBindings(ctx, pod)
+		if err != nil {
+			return nil, fmt.Errorf("load credential bindings: %w", err)
+		}
+		if len(bindings) > 0 {
+			policy.Credentials = &v1alpha1.NetworkCredentialsSpec{Bindings: bindings}
+		}
+		return policy, nil
 	}
 
 	templateSpec := s.templateNetworkSpec(pod)
@@ -1005,7 +1200,7 @@ func (s *SandboxService) UpdateNetworkPolicy(
 		return nil, fmt.Errorf("get pod: %w", err)
 	}
 
-	var networkSpec *v1alpha1.NetworkPolicySpec
+	var networkState *BuildNetworkPolicyResult
 	var updatedPod *corev1.Pod
 
 	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -1021,18 +1216,21 @@ func (s *SandboxService) UpdateNetworkPolicy(
 		}
 		templateSpec := s.templateNetworkSpec(current)
 
-		networkSpec = s.NetworkPolicyService.BuildNetworkPolicySpec(&BuildNetworkPolicyRequest{
+		networkState = s.NetworkPolicyService.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
 			SandboxID:    current.Name,
 			TeamID:       teamID,
 			TemplateSpec: templateSpec,
 			RequestSpec:  policy,
 		})
+		if err := s.stageCredentialBindings(ctx, current, teamID, networkState); err != nil {
+			return fmt.Errorf("stage credential bindings: %w", err)
+		}
 
 		updatedPod = current.DeepCopy()
 		if updatedPod.Annotations == nil {
 			updatedPod.Annotations = make(map[string]string)
 		}
-		if _, err := s.setNetworkPolicyAnnotations(updatedPod, networkSpec); err != nil {
+		if _, err := s.setNetworkPolicyAnnotations(updatedPod, policySpecFromState(networkState)); err != nil {
 			return err
 		}
 
@@ -1044,7 +1242,7 @@ func (s *SandboxService) UpdateNetworkPolicy(
 					zap.Error(err),
 				)
 			} else {
-				config.Network = policy
+				config.Network = sanitizedNetworkPolicyForPersistence(policy)
 				updatedConfigJSON, err := json.Marshal(config)
 				if err != nil {
 					return fmt.Errorf("marshal sandbox config: %w", err)
@@ -1052,7 +1250,7 @@ func (s *SandboxService) UpdateNetworkPolicy(
 				updatedPod.Annotations[controller.AnnotationConfig] = string(updatedConfigJSON)
 			}
 		} else {
-			config := SandboxConfig{Network: policy}
+			config := SandboxConfig{Network: sanitizedNetworkPolicyForPersistence(policy)}
 			updatedConfigJSON, err := json.Marshal(config)
 			if err != nil {
 				return fmt.Errorf("marshal sandbox config: %w", err)
@@ -1071,11 +1269,20 @@ func (s *SandboxService) UpdateNetworkPolicy(
 	if updatedPod.Annotations != nil {
 		teamID = updatedPod.Annotations[controller.AnnotationTeamID]
 	}
-	if err := s.applyNetworkProvider(ctx, updatedPod, teamID, networkSpec); err != nil {
+	if networkState != nil && len(networkState.CredentialBindings) == 0 {
+		if err := s.deleteCredentialBindings(ctx, updatedPod); err != nil {
+			return nil, fmt.Errorf("delete credential bindings: %w", err)
+		}
+	}
+	if err := s.applyNetworkProvider(ctx, updatedPod, teamID, policySpecFromState(networkState)); err != nil {
 		return nil, fmt.Errorf("apply network policy: %w", err)
 	}
 
-	return networkPolicyFromSpec(networkSpec), nil
+	result := networkPolicyFromSpec(policySpecFromState(networkState))
+	if networkState != nil && len(networkState.CredentialBindings) > 0 {
+		result.Credentials = &v1alpha1.NetworkCredentialsSpec{Bindings: networkState.CredentialBindings}
+	}
+	return result, nil
 }
 
 func (s *SandboxService) getSandboxPod(ctx context.Context, sandboxID string) (*corev1.Pod, error) {
@@ -1148,7 +1355,7 @@ func networkPolicyFromSpec(spec *v1alpha1.NetworkPolicySpec) *v1alpha1.TplSandbo
 		egressDeniedDomains  []string
 		egressAllowedPorts   []v1alpha1.PortSpec
 		egressDeniedPorts    []v1alpha1.PortSpec
-		egressAuthRules      []v1alpha1.EgressAuthRule
+		egressRules          []v1alpha1.EgressCredentialRule
 	)
 	if spec.Egress != nil {
 		egressAllowedCIDRs = append(egressAllowedCIDRs, spec.Egress.AllowedCIDRs...)
@@ -1157,7 +1364,7 @@ func networkPolicyFromSpec(spec *v1alpha1.NetworkPolicySpec) *v1alpha1.TplSandbo
 		egressDeniedDomains = append(egressDeniedDomains, spec.Egress.DeniedDomains...)
 		egressAllowedPorts = append(egressAllowedPorts, spec.Egress.AllowedPorts...)
 		egressDeniedPorts = append(egressDeniedPorts, spec.Egress.DeniedPorts...)
-		egressAuthRules = append(egressAuthRules, spec.Egress.AuthRules...)
+		egressRules = append(egressRules, spec.Egress.Rules...)
 	}
 
 	mode := v1alpha1.NetworkModeAllowAll
@@ -1168,7 +1375,7 @@ func networkPolicyFromSpec(spec *v1alpha1.NetworkPolicySpec) *v1alpha1.TplSandbo
 	policy := &v1alpha1.TplSandboxNetworkPolicy{
 		Mode: mode,
 	}
-	if len(egressAllowedCIDRs)+len(egressDeniedCIDRs)+len(egressAllowedDomains)+len(egressDeniedDomains)+len(egressAllowedPorts)+len(egressDeniedPorts)+len(egressAuthRules) > 0 {
+	if len(egressAllowedCIDRs)+len(egressDeniedCIDRs)+len(egressAllowedDomains)+len(egressDeniedDomains)+len(egressAllowedPorts)+len(egressDeniedPorts)+len(egressRules) > 0 {
 		policy.Egress = &v1alpha1.NetworkEgressPolicy{
 			AllowedCIDRs:   egressAllowedCIDRs,
 			DeniedCIDRs:    egressDeniedCIDRs,
@@ -1176,7 +1383,7 @@ func networkPolicyFromSpec(spec *v1alpha1.NetworkPolicySpec) *v1alpha1.TplSandbo
 			DeniedDomains:  egressDeniedDomains,
 			AllowedPorts:   egressAllowedPorts,
 			DeniedPorts:    egressDeniedPorts,
-			AuthRules:      egressAuthRules,
+			Rules:          egressRules,
 		}
 	}
 

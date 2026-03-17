@@ -17,14 +17,15 @@ import (
 
 // Server serves egress-broker HTTP endpoints.
 type Server struct {
-	cfg     *config.EgressBrokerConfig
-	logger  *zap.Logger
-	server  *http.Server
-	authMap map[string]config.StaticEgressAuthConfig
+	cfg          *config.EgressBrokerConfig
+	logger       *zap.Logger
+	server       *http.Server
+	authMap      map[string]config.StaticEgressAuthConfig
+	bindingStore egressauth.BindingStore
 }
 
 // NewServer creates a new egress-broker HTTP server.
-func NewServer(cfg *config.EgressBrokerConfig, logger *zap.Logger) *Server {
+func NewServer(cfg *config.EgressBrokerConfig, logger *zap.Logger, bindingStore egressauth.BindingStore) *Server {
 	if cfg == nil {
 		cfg = &config.EgressBrokerConfig{}
 	}
@@ -34,9 +35,10 @@ func NewServer(cfg *config.EgressBrokerConfig, logger *zap.Logger) *Server {
 
 	mux := http.NewServeMux()
 	s := &Server{
-		cfg:     cfg,
-		logger:  logger,
-		authMap: buildStaticAuthMap(cfg),
+		cfg:          cfg,
+		logger:       logger,
+		authMap:      buildStaticAuthMap(cfg),
+		bindingStore: bindingStore,
 		server: &http.Server{
 			Addr:              fmt.Sprintf(":%d", resolveHTTPPort(cfg)),
 			Handler:           mux,
@@ -109,18 +111,86 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		zap.String("destination", req.Destination),
 		zap.String("protocol", req.Protocol),
 	)
-	entry, ok := s.lookupStaticAuth(req.AuthRef)
-	if !ok {
-		_ = spec.WriteError(w, http.StatusNotFound, spec.CodeNotFound, "authRef not found")
+	resp, statusCode, code, message := s.resolveRequest(r.Context(), &req)
+	if statusCode != http.StatusOK {
+		_ = spec.WriteError(w, statusCode, code, message)
 		return
 	}
+	_ = spec.WriteSuccess(w, http.StatusOK, resp)
+}
+
+func (s *Server) resolveRequest(ctx context.Context, req *egressauth.ResolveRequest) (*egressauth.ResolveResponse, int, string, string) {
+	if binding := s.lookupBinding(ctx, req); binding != nil {
+		resp, err := s.responseFromBinding(binding)
+		if err != nil {
+			s.logger.Warn("Unsupported credential binding provider",
+				zap.String("sandbox_id", req.SandboxID),
+				zap.String("auth_ref", req.AuthRef),
+				zap.String("provider", binding.Provider),
+				zap.Error(err),
+			)
+			return nil, http.StatusConflict, spec.CodeConflict, err.Error()
+		}
+		return resp, http.StatusOK, "", ""
+	}
+
+	entry, ok := s.lookupStaticAuth(req.AuthRef)
+	if !ok {
+		return nil, http.StatusNotFound, spec.CodeNotFound, "authRef not found"
+	}
 	expiresAt := time.Now().UTC().Add(entry.TTL.Duration)
-	resp := &egressauth.ResolveResponse{
+	return &egressauth.ResolveResponse{
 		AuthRef:   entry.AuthRef,
 		Headers:   cloneHeaders(entry.Headers),
 		ExpiresAt: &expiresAt,
+	}, http.StatusOK, "", ""
+}
+
+func (s *Server) lookupBinding(ctx context.Context, req *egressauth.ResolveRequest) *egressauth.CredentialBinding {
+	if s == nil || s.bindingStore == nil || req == nil {
+		return nil
 	}
-	_ = spec.WriteSuccess(w, http.StatusOK, resp)
+	clusterID := strings.TrimSpace(s.cfg.ClusterID)
+	if clusterID == "" || strings.TrimSpace(req.SandboxID) == "" {
+		return nil
+	}
+	record, err := s.bindingStore.GetBindings(ctx, clusterID, req.SandboxID)
+	if err != nil {
+		s.logger.Warn("Failed to load credential bindings",
+			zap.String("cluster_id", clusterID),
+			zap.String("sandbox_id", req.SandboxID),
+			zap.Error(err),
+		)
+		return nil
+	}
+	if record == nil {
+		return nil
+	}
+	authRef := strings.TrimSpace(req.AuthRef)
+	for idx := range record.Bindings {
+		if strings.TrimSpace(record.Bindings[idx].Ref) == authRef {
+			return &record.Bindings[idx]
+		}
+	}
+	return nil
+}
+
+func (s *Server) responseFromBinding(binding *egressauth.CredentialBinding) (*egressauth.ResolveResponse, error) {
+	if binding == nil {
+		return nil, fmt.Errorf("credential binding is required")
+	}
+	provider := strings.TrimSpace(strings.ToLower(binding.Provider))
+	switch provider {
+	case "static":
+		expiresAt := time.Now().UTC().Add(s.cfg.DefaultResolveTTL.Duration)
+		return &egressauth.ResolveResponse{
+			AuthRef:   binding.Ref,
+			Headers:   cloneHeaders(binding.Headers),
+			ExpiresAt: &expiresAt,
+		}, nil
+	default:
+		return nil, fmt.Errorf("credential binding provider %q is not supported", binding.Provider)
+	}
 }
 
 func resolveHTTPPort(cfg *config.EgressBrokerConfig) int {

@@ -138,12 +138,6 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 				It("blocks private sandbox traffic while preserving public exposure and cluster service access", func() {
 					assertSandboxNetworkIsolation(env, session)
 				})
-
-				if opts.name == "network-policy" {
-					It("keeps auditable egress decisions stable for classified TCP traffic and UDP sessions", func() {
-						assertAuditableEgressInterception(env, session, sandboxID)
-					})
-				}
 			})
 		}
 

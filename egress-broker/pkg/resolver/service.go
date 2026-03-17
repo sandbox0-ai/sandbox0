@@ -113,11 +113,7 @@ func (s *Service) resolveStatic(req *egressauth.ResolveRequest) (*egressauth.Res
 	}
 
 	expiresAt := now.Add(entry.TTL.Duration)
-	response := &egressauth.ResolveResponse{
-		AuthRef:   entry.AuthRef,
-		Headers:   cloneHeaders(entry.Headers),
-		ExpiresAt: &expiresAt,
-	}
+	response := egressauth.NewHTTPHeadersResolveResponse(entry.AuthRef, entry.Headers, &expiresAt)
 	s.resolveCache.Set(cacheKey, response, entry.TTL.Duration, now)
 	return response, nil
 }
@@ -205,18 +201,7 @@ func staticCacheKey(req *egressauth.ResolveRequest) string {
 }
 
 func cloneResolveResponse(in *egressauth.ResolveResponse) *egressauth.ResolveResponse {
-	if in == nil {
-		return nil
-	}
-	out := &egressauth.ResolveResponse{
-		AuthRef: in.AuthRef,
-		Headers: cloneHeaders(in.Headers),
-	}
-	if in.ExpiresAt != nil {
-		expiresAt := *in.ExpiresAt
-		out.ExpiresAt = &expiresAt
-	}
-	return out
+	return egressauth.CloneResolveResponse(in)
 }
 
 func cloneHeaders(in map[string]string) map[string]string {

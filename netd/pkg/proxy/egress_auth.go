@@ -131,23 +131,7 @@ func (noopEgressAuthResolver) Resolve(_ context.Context, _ *egressauth.ResolveRe
 }
 
 func cloneResolveResponse(in *egressauth.ResolveResponse) *egressauth.ResolveResponse {
-	if in == nil {
-		return nil
-	}
-	out := &egressauth.ResolveResponse{
-		AuthRef: in.AuthRef,
-	}
-	if len(in.Headers) > 0 {
-		out.Headers = make(map[string]string, len(in.Headers))
-		for key, value := range in.Headers {
-			out.Headers[key] = value
-		}
-	}
-	if in.ExpiresAt != nil {
-		expiresAt := *in.ExpiresAt
-		out.ExpiresAt = &expiresAt
-	}
-	return out
+	return egressauth.CloneResolveResponse(in)
 }
 
 func (s *Server) attachEgressAuth(req *adapterRequest, decision trafficDecision) {

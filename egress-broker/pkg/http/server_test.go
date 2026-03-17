@@ -77,6 +77,9 @@ func TestHandleResolveReturnsStaticAuthDirective(t *testing.T) {
 	if resp.ExpiresAt == nil {
 		t.Fatal("expected expiresAt")
 	}
+	if len(resp.Directives) != 1 || resp.Directives[0].Kind != egressauth.ResolveDirectiveKindHTTPHeaders {
+		t.Fatalf("unexpected directives: %+v", resp.Directives)
+	}
 }
 
 func TestHandleResolveReturnsNotFoundForUnknownAuthRef(t *testing.T) {

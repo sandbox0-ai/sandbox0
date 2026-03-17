@@ -21,11 +21,7 @@ func (p *staticProvider) Resolve(_ context.Context, _ *egressauth.ResolveRequest
 	}
 	expiresAt := time.Now().UTC().Add(ttl)
 	return &ResolveResult{
-		Response: &egressauth.ResolveResponse{
-			AuthRef:   binding.Ref,
-			Headers:   cloneHeaders(binding.Headers),
-			ExpiresAt: &expiresAt,
-		},
+		Response: egressauth.NewHTTPHeadersResolveResponse(binding.Ref, binding.Headers, &expiresAt),
 		TTL: ttl,
 	}, nil
 }

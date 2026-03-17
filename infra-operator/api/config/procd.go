@@ -140,6 +140,33 @@ func (c ProcdConfig) EnvMap() map[string]string {
 	return env
 }
 
+// EnvKeys returns all yaml-tagged procd environment keys.
+func (c ProcdConfig) EnvKeys() []string {
+	return procdEnvKeys()
+}
+
+func procdEnvKeys() []string {
+	value := reflect.ValueOf(ProcdConfig{})
+	typ := value.Type()
+	keys := make([]string, 0, value.NumField())
+	for i := 0; i < value.NumField(); i++ {
+		field := typ.Field(i)
+		if field.PkgPath != "" {
+			continue
+		}
+		tag := field.Tag.Get("yaml")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		key := strings.Split(tag, ",")[0]
+		if key == "" {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	return keys
+}
+
 var (
 	procdCfg     *ProcdConfig
 	procdCfgOnce sync.Once

@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	"os"
 	"path/filepath"
 	"testing"
@@ -121,4 +122,36 @@ func writeManagerConfig(t *testing.T, contents string) string {
 		t.Fatalf("write manager config: %v", err)
 	}
 	return path
+}
+
+func TestBuildPodSpecOverridesTenantProcdEnvVars(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	template := newTestTemplate()
+	template.Spec.EnvVars = map[string]string{
+		"storage_proxy_base_url": "evil.local",
+		"storage_proxy_port":     "65535",
+		"node_name":              "tenant-node",
+	}
+
+	spec := BuildPodSpec(template, false)
+	container := spec.Containers[0]
+	envByName := map[string]corev1.EnvVar{}
+	for _, env := range container.Env {
+		envByName[env.Name] = env
+	}
+
+	if got := envByName["storage_proxy_base_url"].Value; got != "" {
+		t.Fatalf("expected storage_proxy_base_url to be manager-controlled default, got %q", got)
+	}
+	if got := envByName["storage_proxy_port"].Value; got != "0" {
+		t.Fatalf("expected storage_proxy_port to be manager-controlled default, got %q", got)
+	}
+	nodeName := envByName["node_name"]
+	if nodeName.ValueFrom == nil || nodeName.ValueFrom.FieldRef == nil || nodeName.ValueFrom.FieldRef.FieldPath != "spec.nodeName" {
+		t.Fatalf("expected node_name to come from pod fieldRef spec.nodeName")
+	}
 }

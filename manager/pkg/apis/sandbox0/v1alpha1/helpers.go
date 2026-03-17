@@ -234,20 +234,22 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Conta
 }
 
 func appendProcdConfigEnvVars(envVars []corev1.EnvVar) []corev1.EnvVar {
-	hasNodeName := false
-	for _, ev := range envVars {
-		if ev.Name == "node_name" {
-			hasNodeName = true
-			break
-		}
+	envIndex := make(map[string]int, len(envVars))
+	for i, ev := range envVars {
+		envIndex[ev.Name] = i
 	}
-	if !hasNodeName {
-		envVars = append(envVars, corev1.EnvVar{
-			Name: "node_name",
-			ValueFrom: &corev1.EnvVarSource{
-				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.nodeName"},
-			},
-		})
+
+	nodeNameVar := corev1.EnvVar{
+		Name: "node_name",
+		ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.nodeName"},
+		},
+	}
+	if idx, ok := envIndex["node_name"]; ok {
+		envVars[idx] = nodeNameVar
+	} else {
+		envVars = append(envVars, nodeNameVar)
+		envIndex["node_name"] = len(envVars) - 1
 	}
 
 	cfg := config.LoadManagerConfig()
@@ -256,27 +258,21 @@ func appendProcdConfigEnvVars(envVars []corev1.EnvVar) []corev1.EnvVar {
 	}
 
 	envMap := cfg.ProcdConfig.EnvMap()
-	if len(envMap) == 0 {
-		return envVars
-	}
-
-	keys := make([]string, 0, len(envMap))
-	for key := range envMap {
-		if key == "" {
-			continue
-		}
-		keys = append(keys, key)
-	}
+	keys := cfg.ProcdConfig.EnvKeys()
 	sort.Strings(keys)
 
 	for _, key := range keys {
-		if key == "node_name" {
+		if key == "" || key == "node_name" {
 			continue
 		}
-		envVars = append(envVars, corev1.EnvVar{
-			Name:  key,
-			Value: envMap[key],
-		})
+		value := envMap[key]
+		e := corev1.EnvVar{Name: key, Value: value}
+		if idx, ok := envIndex[key]; ok {
+			envVars[idx] = e
+			continue
+		}
+		envVars = append(envVars, e)
+		envIndex[key] = len(envVars) - 1
 	}
 
 	return envVars

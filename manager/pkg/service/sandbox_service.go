@@ -511,13 +511,20 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		if policyErr != nil {
 			return policyErr
 		}
-		if err := s.stageCredentialBindings(ctx, pod, req.TeamID, networkState); err != nil {
+		rollbackBindings, err := s.syncCredentialBindings(ctx, pod, req.TeamID, networkState)
+		if err != nil {
 			return fmt.Errorf("stage credential bindings: %w", err)
 		}
 
 		// Update the pod
 		updatedPod, updateErr := s.k8sClient.CoreV1().Pods(pod.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
 		if updateErr != nil {
+			if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
+				s.logger.Warn("Failed to roll back credential bindings after hot-claim update failure",
+					zap.String("sandboxID", pod.Name),
+					zap.Error(rollbackErr),
+				)
+			}
 			return updateErr
 		}
 
@@ -598,17 +605,18 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 	if err != nil {
 		return nil, err
 	}
-	if err := s.stageCredentialBindings(ctx, pod, req.TeamID, networkState); err != nil {
+	rollbackBindings, err := s.syncCredentialBindings(ctx, pod, req.TeamID, networkState)
+	if err != nil {
 		return nil, fmt.Errorf("stage credential bindings: %w", err)
 	}
 
 	// Create the pod
 	createdPod, err := s.k8sClient.CoreV1().Pods(template.ObjectMeta.Namespace).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
-		if cleanupErr := s.cleanupStagedCredentialBindings(ctx, pod, networkState); cleanupErr != nil {
+		if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
 			s.logger.Warn("Failed to clean up staged credential bindings after create failure",
 				zap.String("sandboxID", pod.Name),
-				zap.Error(cleanupErr),
+				zap.Error(rollbackErr),
 			)
 		}
 		return nil, fmt.Errorf("create pod: %w", err)
@@ -754,29 +762,62 @@ func policySpecFromState(state *BuildNetworkPolicyResult) *v1alpha1.NetworkPolic
 	return state.PolicySpec
 }
 
-func (s *SandboxService) stageCredentialBindings(
+func noopCredentialBindingRollback(context.Context) error {
+	return nil
+}
+
+func (s *SandboxService) syncCredentialBindings(
 	ctx context.Context,
 	pod *corev1.Pod,
 	teamID string,
 	state *BuildNetworkPolicyResult,
-) error {
-	if s.credentialStore == nil || pod == nil || state == nil || len(state.CredentialBindings) == 0 {
-		return nil
+) (func(context.Context) error, error) {
+	if s.credentialStore == nil || pod == nil || state == nil {
+		return noopCredentialBindingRollback, nil
 	}
+
 	clusterID := sandboxClusterID(pod)
-	return s.credentialStore.UpsertBindings(ctx, &egressauth.BindingRecord{
+	previous, err := s.credentialStore.GetBindings(ctx, clusterID, pod.Name)
+	if err != nil {
+		return nil, err
+	}
+	previous = cloneBindingRecord(previous)
+
+	rollback := func(rollbackCtx context.Context) error {
+		if previous == nil || len(previous.Bindings) == 0 {
+			return s.credentialStore.DeleteBindings(rollbackCtx, clusterID, pod.Name)
+		}
+		return s.credentialStore.UpsertBindings(rollbackCtx, previous)
+	}
+
+	if len(state.CredentialBindings) == 0 {
+		if previous == nil || len(previous.Bindings) == 0 {
+			return rollback, nil
+		}
+		if err := s.credentialStore.DeleteBindings(ctx, clusterID, pod.Name); err != nil {
+			return nil, err
+		}
+		return rollback, nil
+	}
+
+	if err := s.credentialStore.UpsertBindings(ctx, &egressauth.BindingRecord{
 		ClusterID: clusterID,
 		SandboxID: pod.Name,
 		TeamID:    teamID,
 		Bindings:  toStoreCredentialBindings(state.CredentialBindings),
-	})
+	}); err != nil {
+		return nil, err
+	}
+	return rollback, nil
 }
 
-func (s *SandboxService) cleanupStagedCredentialBindings(ctx context.Context, pod *corev1.Pod, state *BuildNetworkPolicyResult) error {
-	if s.credentialStore == nil || pod == nil || state == nil || len(state.CredentialBindings) == 0 {
+func cloneBindingRecord(record *egressauth.BindingRecord) *egressauth.BindingRecord {
+	if record == nil {
 		return nil
 	}
-	return s.credentialStore.DeleteBindings(ctx, sandboxClusterID(pod), pod.Name)
+	cloned := *record
+	cloned.Bindings = cloneStoreCredentialBindings(record.Bindings)
+	return &cloned
 }
 
 func (s *SandboxService) deleteCredentialBindings(ctx context.Context, pod *corev1.Pod) error {
@@ -840,6 +881,40 @@ func toStoreCredentialBindings(in []v1alpha1.CredentialBinding) []egressauth.Cre
 			}
 		}
 		out = append(out, storeBinding)
+	}
+	return out
+}
+
+func cloneStoreCredentialBindings(in []egressauth.CredentialBinding) []egressauth.CredentialBinding {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]egressauth.CredentialBinding, 0, len(in))
+	for _, binding := range in {
+		cloned := egressauth.CredentialBinding{
+			Ref:      binding.Ref,
+			Provider: binding.Provider,
+			Headers:  cloneStringMap(binding.Headers),
+			Config:   cloneStringMap(binding.Config),
+		}
+		if len(binding.SecretRefs) > 0 {
+			cloned.SecretRefs = make([]egressauth.CredentialSecretRef, 0, len(binding.SecretRefs))
+			for _, secretRef := range binding.SecretRefs {
+				cloned.SecretRefs = append(cloned.SecretRefs, egressauth.CredentialSecretRef{
+					Name:      secretRef.Name,
+					Namespace: secretRef.Namespace,
+					Key:       secretRef.Key,
+				})
+			}
+		}
+		if binding.SourceRef != nil {
+			cloned.SourceRef = &egressauth.CredentialSourceRef{
+				Kind:      binding.SourceRef.Kind,
+				Name:      binding.SourceRef.Name,
+				Namespace: binding.SourceRef.Namespace,
+			}
+		}
+		out = append(out, cloned)
 	}
 	return out
 }
@@ -1059,6 +1134,7 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 
 	var networkState *BuildNetworkPolicyResult
 	var updatedPod *corev1.Pod
+	var rollbackBindings func(context.Context) error
 
 	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		// Get the latest version of the pod
@@ -1111,7 +1187,8 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 				TemplateSpec: templateSpec,
 				RequestSpec:  cfg.Network,
 			})
-			if err := s.stageCredentialBindings(ctx, updatedPod, teamID, networkState); err != nil {
+			rollbackBindings, err = s.syncCredentialBindings(ctx, updatedPod, teamID, networkState)
+			if err != nil {
 				return fmt.Errorf("stage credential bindings: %w", err)
 			}
 			if _, err := s.setNetworkPolicyAnnotations(updatedPod, policySpecFromState(networkState)); err != nil {
@@ -1126,6 +1203,14 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 		updatedPod.Annotations[controller.AnnotationConfig] = string(updatedConfigJSON)
 
 		updatedPod, err = s.k8sClient.CoreV1().Pods(pod.Namespace).Update(ctx, updatedPod, metav1.UpdateOptions{})
+		if err != nil && rollbackBindings != nil {
+			if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
+				s.logger.Warn("Failed to roll back credential bindings after sandbox update failure",
+					zap.String("sandboxID", sandboxID),
+					zap.Error(rollbackErr),
+				)
+			}
+		}
 		return err
 	})
 	if err != nil {
@@ -1133,11 +1218,6 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 	}
 
 	if networkState != nil {
-		if len(networkState.CredentialBindings) == 0 {
-			if err := s.deleteCredentialBindings(ctx, updatedPod); err != nil {
-				return nil, fmt.Errorf("delete credential bindings: %w", err)
-			}
-		}
 		teamID := updatedPod.Annotations[controller.AnnotationTeamID]
 		if err := s.applyNetworkProvider(ctx, updatedPod, teamID, policySpecFromState(networkState)); err != nil {
 			return nil, fmt.Errorf("apply network policy: %w", err)
@@ -1202,6 +1282,7 @@ func (s *SandboxService) UpdateNetworkPolicy(
 
 	var networkState *BuildNetworkPolicyResult
 	var updatedPod *corev1.Pod
+	var rollbackBindings func(context.Context) error
 
 	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		// Get the latest version of the pod
@@ -1222,7 +1303,8 @@ func (s *SandboxService) UpdateNetworkPolicy(
 			TemplateSpec: templateSpec,
 			RequestSpec:  policy,
 		})
-		if err := s.stageCredentialBindings(ctx, current, teamID, networkState); err != nil {
+		rollbackBindings, err = s.syncCredentialBindings(ctx, current, teamID, networkState)
+		if err != nil {
 			return fmt.Errorf("stage credential bindings: %w", err)
 		}
 
@@ -1259,6 +1341,14 @@ func (s *SandboxService) UpdateNetworkPolicy(
 		}
 
 		updatedPod, err = s.k8sClient.CoreV1().Pods(pod.Namespace).Update(ctx, updatedPod, metav1.UpdateOptions{})
+		if err != nil && rollbackBindings != nil {
+			if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
+				s.logger.Warn("Failed to roll back credential bindings after network policy update failure",
+					zap.String("sandboxID", sandboxID),
+					zap.Error(rollbackErr),
+				)
+			}
+		}
 		return err
 	})
 	if err != nil {
@@ -1268,11 +1358,6 @@ func (s *SandboxService) UpdateNetworkPolicy(
 	teamID := ""
 	if updatedPod.Annotations != nil {
 		teamID = updatedPod.Annotations[controller.AnnotationTeamID]
-	}
-	if networkState != nil && len(networkState.CredentialBindings) == 0 {
-		if err := s.deleteCredentialBindings(ctx, updatedPod); err != nil {
-			return nil, fmt.Errorf("delete credential bindings: %w", err)
-		}
 	}
 	if err := s.applyNetworkProvider(ctx, updatedPod, teamID, policySpecFromState(networkState)); err != nil {
 		return nil, fmt.Errorf("apply network policy: %w", err)

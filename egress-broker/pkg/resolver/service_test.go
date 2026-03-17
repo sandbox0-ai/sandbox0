@@ -48,6 +48,28 @@ func (p *countingProvider) Resolve(_ context.Context, req *egressauth.ResolveReq
 	}, nil
 }
 
+type ttlCountingProvider struct {
+	calls int
+	ttl   time.Duration
+}
+
+func (p *ttlCountingProvider) Resolve(_ context.Context, req *egressauth.ResolveRequest, binding *egressauth.CredentialBinding, defaultTTL time.Duration) (*ResolveResult, error) {
+	p.calls++
+	ttl := p.ttl
+	if ttl <= 0 {
+		ttl = defaultTTL
+	}
+	expiresAt := time.Now().UTC().Add(ttl)
+	return &ResolveResult{
+		Response: egressauth.NewHTTPHeadersResolveResponse(
+			req.AuthRef,
+			map[string]string{"Authorization": binding.Headers["Authorization"]},
+			&expiresAt,
+		),
+		TTL: ttl,
+	}, nil
+}
+
 func TestResolveUsesBindingProviderAndCache(t *testing.T) {
 	provider := &countingProvider{}
 	store := &fakeBindingStore{
@@ -140,6 +162,53 @@ func TestResolveFallsBackToStaticAuth(t *testing.T) {
 	}
 	if got := resp.Headers["Authorization"]; got != "Bearer static" {
 		t.Fatalf("authorization header = %q", got)
+	}
+}
+
+func TestResolveRefreshesAfterCacheTTLExpires(t *testing.T) {
+	provider := &ttlCountingProvider{ttl: 15 * time.Millisecond}
+	store := &fakeBindingStore{
+		recordFn: func() *egressauth.BindingRecord {
+			return &egressauth.BindingRecord{
+				ClusterID: "cluster-a",
+				SandboxID: "sbx-1",
+				UpdatedAt: time.Unix(10, 0).UTC(),
+				Bindings: []egressauth.CredentialBinding{{
+					Ref:      "example-api",
+					Provider: "static",
+					Headers:  map[string]string{"Authorization": "Bearer binding"},
+				}},
+			}
+		},
+	}
+
+	service := NewService(&config.EgressBrokerConfig{
+		ClusterID:         "cluster-a",
+		DefaultResolveTTL: metav1.Duration{Duration: time.Minute},
+	}, store, zap.NewNop())
+	service.RegisterProvider("static", provider)
+
+	req := &egressauth.ResolveRequest{SandboxID: "sbx-1", AuthRef: "example-api", Destination: "api.example.com", Protocol: "http"}
+	_, err := service.Resolve(context.Background(), req)
+	if err != nil {
+		t.Fatalf("first resolve: %v", err)
+	}
+	_, err = service.Resolve(context.Background(), req)
+	if err != nil {
+		t.Fatalf("second resolve: %v", err)
+	}
+	if provider.calls != 1 {
+		t.Fatalf("provider calls before expiry = %d, want 1", provider.calls)
+	}
+
+	time.Sleep(25 * time.Millisecond)
+
+	_, err = service.Resolve(context.Background(), req)
+	if err != nil {
+		t.Fatalf("third resolve after expiry: %v", err)
+	}
+	if provider.calls != 2 {
+		t.Fatalf("provider calls after expiry = %d, want 2", provider.calls)
 	}
 }
 

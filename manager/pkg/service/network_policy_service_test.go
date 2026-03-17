@@ -7,6 +7,22 @@ import (
 	"go.uber.org/zap"
 )
 
+func testCredentialBinding(ref string) v1alpha1.CredentialBinding {
+	return v1alpha1.CredentialBinding{
+		Ref:       ref,
+		SourceRef: ref + "-source",
+		Projection: v1alpha1.ProjectionSpec{
+			Type: v1alpha1.CredentialProjectionTypeHTTPHeaders,
+			HTTPHeaders: &v1alpha1.HTTPHeadersProjection{
+				Headers: []v1alpha1.ProjectedHeader{{
+					Name:          "Authorization",
+					ValueTemplate: "Bearer {{ .token }}",
+				}},
+			},
+		},
+	}
+}
+
 func TestBuildNetworkPolicyStateMergesNamedRulesAndBindings(t *testing.T) {
 	svc := NewNetworkPolicyService(zap.NewNop())
 	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
@@ -26,7 +42,7 @@ func TestBuildNetworkPolicyStateMergesNamedRulesAndBindings(t *testing.T) {
 			},
 			Credentials: &v1alpha1.NetworkCredentialsSpec{
 				Bindings: []v1alpha1.CredentialBinding{
-					{Ref: "template-ref", Provider: "static"},
+					testCredentialBinding("template-ref"),
 				},
 			},
 		},
@@ -43,7 +59,7 @@ func TestBuildNetworkPolicyStateMergesNamedRulesAndBindings(t *testing.T) {
 			},
 			Credentials: &v1alpha1.NetworkCredentialsSpec{
 				Bindings: []v1alpha1.CredentialBinding{
-					{Ref: "request-ref", Provider: "static"},
+					testCredentialBinding("request-ref"),
 				},
 			},
 		},
@@ -81,8 +97,8 @@ func TestBuildNetworkPolicyStateAppendsUnnamedRules(t *testing.T) {
 			},
 			Credentials: &v1alpha1.NetworkCredentialsSpec{
 				Bindings: []v1alpha1.CredentialBinding{
-					{Ref: "template-ref", Provider: "static"},
-					{Ref: "request-ref", Provider: "static"},
+					testCredentialBinding("template-ref"),
+					testCredentialBinding("request-ref"),
 				},
 			},
 		},
@@ -117,7 +133,7 @@ func TestBuildNetworkPolicyStateDropsInvalidBindingReferences(t *testing.T) {
 			},
 			Credentials: &v1alpha1.NetworkCredentialsSpec{
 				Bindings: []v1alpha1.CredentialBinding{
-					{Ref: "other", Provider: "static"},
+					testCredentialBinding("other"),
 				},
 			},
 		},

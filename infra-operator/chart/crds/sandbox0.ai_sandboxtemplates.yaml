@@ -123,50 +123,51 @@ spec:
                           description: CredentialBinding defines how a credential
                             reference should be resolved.
                           properties:
-                            config:
-                              additionalProperties:
-                                type: string
-                              type: object
-                            headers:
-                              additionalProperties:
-                                type: string
-                              type: object
-                            provider:
-                              type: string
-                            ref:
-                              type: string
-                            secretRefs:
-                              items:
-                                description: CredentialSecretRef identifies a secret-backed
-                                  input used by a binding.
-                                properties:
-                                  key:
-                                    type: string
-                                  name:
-                                    type: string
-                                  namespace:
-                                    type: string
-                                required:
-                                - key
-                                - name
-                                type: object
-                              type: array
-                            sourceRef:
-                              description: CredentialSourceRef points to an external
-                                logical source for a binding.
+                            cachePolicy:
+                              description: CachePolicySpec controls broker-side caching
+                                for one binding.
                               properties:
-                                kind:
+                                ttl:
                                   type: string
-                                name:
-                                  type: string
-                                namespace:
+                              type: object
+                            projection:
+                              description: ProjectionSpec defines how resolved source
+                                data should be projected into runtime directives.
+                              properties:
+                                httpHeaders:
+                                  description: HTTPHeadersProjection injects HTTP
+                                    headers derived from source data.
+                                  properties:
+                                    headers:
+                                      items:
+                                        description: ProjectedHeader defines one projected
+                                          header template.
+                                        properties:
+                                          name:
+                                            type: string
+                                          valueTemplate:
+                                            type: string
+                                        required:
+                                        - name
+                                        - valueTemplate
+                                        type: object
+                                      type: array
+                                  type: object
+                                type:
+                                  description: CredentialProjectionType identifies
+                                    the runtime projection shape.
                                   type: string
                               required:
-                              - kind
-                              - name
+                              - type
                               type: object
+                            ref:
+                              type: string
+                            sourceRef:
+                              type: string
                           required:
+                          - projection
                           - ref
+                          - sourceRef
                           type: object
                         type: array
                     type: object

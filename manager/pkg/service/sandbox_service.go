@@ -800,11 +800,16 @@ func (s *SandboxService) syncCredentialBindings(
 		return rollback, nil
 	}
 
+	storeBindings, err := toStoreCredentialBindings(ctx, s.credentialStore, teamID, state.CredentialBindings)
+	if err != nil {
+		return nil, err
+	}
+
 	if err := s.credentialStore.UpsertBindings(ctx, &egressauth.BindingRecord{
 		ClusterID: clusterID,
 		SandboxID: pod.Name,
 		TeamID:    teamID,
-		Bindings:  toStoreCredentialBindings(state.CredentialBindings),
+		Bindings:  storeBindings,
 	}); err != nil {
 		return nil, err
 	}
@@ -851,38 +856,35 @@ func sandboxClusterID(pod *corev1.Pod) string {
 	return naming.DefaultClusterID
 }
 
-func toStoreCredentialBindings(in []v1alpha1.CredentialBinding) []egressauth.CredentialBinding {
+func toStoreCredentialBindings(
+	ctx context.Context,
+	store egressauth.BindingStore,
+	teamID string,
+	in []v1alpha1.CredentialBinding,
+) ([]egressauth.CredentialBinding, error) {
 	if len(in) == 0 {
-		return nil
+		return nil, nil
 	}
 	out := make([]egressauth.CredentialBinding, 0, len(in))
 	for _, binding := range in {
+		source, err := store.GetSourceByRef(ctx, teamID, binding.SourceRef)
+		if err != nil {
+			return nil, fmt.Errorf("resolve credential source %q: %w", binding.SourceRef, err)
+		}
+		if source == nil {
+			return nil, fmt.Errorf("credential source %q not found", binding.SourceRef)
+		}
 		storeBinding := egressauth.CredentialBinding{
-			Ref:      binding.Ref,
-			Provider: binding.Provider,
-			Headers:  cloneStringMap(binding.Headers),
-			Config:   cloneStringMap(binding.Config),
-		}
-		if len(binding.SecretRefs) > 0 {
-			storeBinding.SecretRefs = make([]egressauth.CredentialSecretRef, 0, len(binding.SecretRefs))
-			for _, secretRef := range binding.SecretRefs {
-				storeBinding.SecretRefs = append(storeBinding.SecretRefs, egressauth.CredentialSecretRef{
-					Name:      secretRef.Name,
-					Namespace: secretRef.Namespace,
-					Key:       secretRef.Key,
-				})
-			}
-		}
-		if binding.SourceRef != nil {
-			storeBinding.SourceRef = &egressauth.CredentialSourceRef{
-				Kind:      binding.SourceRef.Kind,
-				Name:      binding.SourceRef.Name,
-				Namespace: binding.SourceRef.Namespace,
-			}
+			Ref:           binding.Ref,
+			SourceRef:     binding.SourceRef,
+			SourceID:      source.ID,
+			SourceVersion: source.CurrentVersion,
+			Projection:    toStoreProjection(binding.Projection),
+			CachePolicy:   toStoreCachePolicy(binding.CachePolicy),
 		}
 		out = append(out, storeBinding)
 	}
-	return out
+	return out, nil
 }
 
 func cloneStoreCredentialBindings(in []egressauth.CredentialBinding) []egressauth.CredentialBinding {
@@ -892,27 +894,12 @@ func cloneStoreCredentialBindings(in []egressauth.CredentialBinding) []egressaut
 	out := make([]egressauth.CredentialBinding, 0, len(in))
 	for _, binding := range in {
 		cloned := egressauth.CredentialBinding{
-			Ref:      binding.Ref,
-			Provider: binding.Provider,
-			Headers:  cloneStringMap(binding.Headers),
-			Config:   cloneStringMap(binding.Config),
-		}
-		if len(binding.SecretRefs) > 0 {
-			cloned.SecretRefs = make([]egressauth.CredentialSecretRef, 0, len(binding.SecretRefs))
-			for _, secretRef := range binding.SecretRefs {
-				cloned.SecretRefs = append(cloned.SecretRefs, egressauth.CredentialSecretRef{
-					Name:      secretRef.Name,
-					Namespace: secretRef.Namespace,
-					Key:       secretRef.Key,
-				})
-			}
-		}
-		if binding.SourceRef != nil {
-			cloned.SourceRef = &egressauth.CredentialSourceRef{
-				Kind:      binding.SourceRef.Kind,
-				Name:      binding.SourceRef.Name,
-				Namespace: binding.SourceRef.Namespace,
-			}
+			Ref:           binding.Ref,
+			SourceRef:     binding.SourceRef,
+			SourceID:      binding.SourceID,
+			SourceVersion: binding.SourceVersion,
+			Projection:    cloneStoreProjection(binding.Projection),
+			CachePolicy:   cloneStoreCachePolicy(binding.CachePolicy),
 		}
 		out = append(out, cloned)
 	}
@@ -926,42 +913,84 @@ func fromStoreCredentialBindings(in []egressauth.CredentialBinding) []v1alpha1.C
 	out := make([]v1alpha1.CredentialBinding, 0, len(in))
 	for _, binding := range in {
 		policyBinding := v1alpha1.CredentialBinding{
-			Ref:      binding.Ref,
-			Provider: binding.Provider,
-			Headers:  cloneStringMap(binding.Headers),
-			Config:   cloneStringMap(binding.Config),
-		}
-		if len(binding.SecretRefs) > 0 {
-			policyBinding.SecretRefs = make([]v1alpha1.CredentialSecretRef, 0, len(binding.SecretRefs))
-			for _, secretRef := range binding.SecretRefs {
-				policyBinding.SecretRefs = append(policyBinding.SecretRefs, v1alpha1.CredentialSecretRef{
-					Name:      secretRef.Name,
-					Namespace: secretRef.Namespace,
-					Key:       secretRef.Key,
-				})
-			}
-		}
-		if binding.SourceRef != nil {
-			policyBinding.SourceRef = &v1alpha1.CredentialSourceRef{
-				Kind:      binding.SourceRef.Kind,
-				Name:      binding.SourceRef.Name,
-				Namespace: binding.SourceRef.Namespace,
-			}
+			Ref:         binding.Ref,
+			SourceRef:   binding.SourceRef,
+			Projection:  fromStoreProjection(binding.Projection),
+			CachePolicy: fromStoreCachePolicy(binding.CachePolicy),
 		}
 		out = append(out, policyBinding)
 	}
 	return out
 }
 
-func cloneStringMap(in map[string]string) map[string]string {
-	if len(in) == 0 {
-		return nil
+func toStoreProjection(in v1alpha1.ProjectionSpec) egressauth.ProjectionSpec {
+	out := egressauth.ProjectionSpec{
+		Type: egressauth.CredentialProjectionType(in.Type),
 	}
-	out := make(map[string]string, len(in))
-	for key, value := range in {
-		out[key] = value
+	if in.HTTPHeaders != nil {
+		out.HTTPHeaders = &egressauth.HTTPHeadersProjection{
+			Headers: make([]egressauth.ProjectedHeader, 0, len(in.HTTPHeaders.Headers)),
+		}
+		for _, header := range in.HTTPHeaders.Headers {
+			out.HTTPHeaders.Headers = append(out.HTTPHeaders.Headers, egressauth.ProjectedHeader{
+				Name:          header.Name,
+				ValueTemplate: header.ValueTemplate,
+			})
+		}
 	}
 	return out
+}
+
+func cloneStoreProjection(in egressauth.ProjectionSpec) egressauth.ProjectionSpec {
+	out := egressauth.ProjectionSpec{
+		Type: in.Type,
+	}
+	if in.HTTPHeaders != nil {
+		out.HTTPHeaders = &egressauth.HTTPHeadersProjection{
+			Headers: make([]egressauth.ProjectedHeader, 0, len(in.HTTPHeaders.Headers)),
+		}
+		out.HTTPHeaders.Headers = append(out.HTTPHeaders.Headers, in.HTTPHeaders.Headers...)
+	}
+	return out
+}
+
+func fromStoreProjection(in egressauth.ProjectionSpec) v1alpha1.ProjectionSpec {
+	out := v1alpha1.ProjectionSpec{
+		Type: v1alpha1.CredentialProjectionType(in.Type),
+	}
+	if in.HTTPHeaders != nil {
+		out.HTTPHeaders = &v1alpha1.HTTPHeadersProjection{
+			Headers: make([]v1alpha1.ProjectedHeader, 0, len(in.HTTPHeaders.Headers)),
+		}
+		for _, header := range in.HTTPHeaders.Headers {
+			out.HTTPHeaders.Headers = append(out.HTTPHeaders.Headers, v1alpha1.ProjectedHeader{
+				Name:          header.Name,
+				ValueTemplate: header.ValueTemplate,
+			})
+		}
+	}
+	return out
+}
+
+func toStoreCachePolicy(in *v1alpha1.CachePolicySpec) *egressauth.CachePolicySpec {
+	if in == nil {
+		return nil
+	}
+	return &egressauth.CachePolicySpec{TTL: in.TTL}
+}
+
+func cloneStoreCachePolicy(in *egressauth.CachePolicySpec) *egressauth.CachePolicySpec {
+	if in == nil {
+		return nil
+	}
+	return &egressauth.CachePolicySpec{TTL: in.TTL}
+}
+
+func fromStoreCachePolicy(in *egressauth.CachePolicySpec) *v1alpha1.CachePolicySpec {
+	if in == nil {
+		return nil
+	}
+	return &v1alpha1.CachePolicySpec{TTL: in.TTL}
 }
 
 func sanitizedNetworkPolicyForPersistence(policy *v1alpha1.TplSandboxNetworkPolicy) *v1alpha1.TplSandboxNetworkPolicy {

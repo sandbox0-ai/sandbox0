@@ -42,7 +42,7 @@ func NewService(cfg *config.EgressBrokerConfig, bindingStore egressauth.BindingS
 		providers:    make(map[string]Provider),
 		resolveCache: newResultCache(2048),
 	}
-	service.RegisterProvider("static", &staticProvider{})
+	service.RegisterProvider("static_headers", &staticHeadersProvider{})
 	return service
 }
 
@@ -78,13 +78,21 @@ func (s *Service) resolveBinding(ctx context.Context, req *egressauth.ResolveReq
 		return response, nil
 	}
 
-	providerName := strings.ToLower(strings.TrimSpace(binding.Provider))
-	provider, ok := s.providers[providerName]
-	if !ok {
-		return nil, &UnsupportedProviderError{Provider: binding.Provider}
+	sourceVersion, err := s.bindingStore.GetSourceVersion(ctx, binding.SourceID, binding.SourceVersion)
+	if err != nil {
+		return nil, err
+	}
+	if sourceVersion == nil {
+		return nil, fmt.Errorf("credential source version not found for %q", binding.Ref)
 	}
 
-	result, err := provider.Resolve(ctx, req, binding, s.defaultTTL)
+	providerName := strings.ToLower(strings.TrimSpace(sourceVersion.ResolverKind))
+	provider, ok := s.providers[providerName]
+	if !ok {
+		return nil, &UnsupportedProviderError{Provider: sourceVersion.ResolverKind}
+	}
+
+	result, err := provider.Resolve(ctx, req, binding, sourceVersion, s.defaultTTL)
 	if err != nil {
 		return nil, err
 	}
@@ -177,7 +185,9 @@ func bindingCacheKey(clusterID string, req *egressauth.ResolveRequest, binding *
 		clusterID,
 		strings.TrimSpace(req.SandboxID),
 		strings.TrimSpace(req.AuthRef),
-		strings.TrimSpace(binding.Provider),
+		binding.SourceRef,
+		fmt.Sprintf("%d", binding.SourceID),
+		fmt.Sprintf("%d", binding.SourceVersion),
 		updatedAt.UTC().Format(time.RFC3339Nano),
 		strings.ToLower(strings.TrimSpace(req.Destination)),
 		fmt.Sprintf("%d", req.DestinationPort),

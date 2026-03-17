@@ -24,19 +24,20 @@ import (
 
 // Server represents the HTTP server
 type Server struct {
-	router               *gin.Engine
-	sandboxService       *service.SandboxService
-	templateService      *service.TemplateService
-	registryService      *service.RegistryService
-	templateStore        store.TemplateStore
-	templateReconciler   TemplateReconciler
-	templateStoreEnabled bool
-	templateHandler      *templatehttp.Handler
-	clusterService       *service.ClusterService
-	authValidator        *internalauth.Validator
-	logger               *zap.Logger
-	port                 int
-	obsProvider          *observability.Provider
+	router                  *gin.Engine
+	sandboxService          *service.SandboxService
+	credentialSourceService *service.CredentialSourceService
+	templateService         *service.TemplateService
+	registryService         *service.RegistryService
+	templateStore           store.TemplateStore
+	templateReconciler      TemplateReconciler
+	templateStoreEnabled    bool
+	templateHandler         *templatehttp.Handler
+	clusterService          *service.ClusterService
+	authValidator           *internalauth.Validator
+	logger                  *zap.Logger
+	port                    int
+	obsProvider             *observability.Provider
 	// Public exposure config
 	publicRootDomain string
 	publicRegionID   string
@@ -64,6 +65,7 @@ type TemplateReconciler interface {
 // NewServer creates a new HTTP server
 func NewServer(
 	sandboxService *service.SandboxService,
+	credentialSourceService *service.CredentialSourceService,
 	templateService *service.TemplateService,
 	registryService *service.RegistryService,
 	templateStore store.TemplateStore,
@@ -88,20 +90,21 @@ func NewServer(
 	router.Use(requestLogger(logger))
 
 	server := &Server{
-		router:               router,
-		sandboxService:       sandboxService,
-		templateService:      templateService,
-		registryService:      registryService,
-		templateStore:        templateStore,
-		templateReconciler:   templateReconciler,
-		templateStoreEnabled: templateStoreEnabled,
-		clusterService:       clusterService,
-		authValidator:        authValidator,
-		logger:               logger,
-		port:                 port,
-		obsProvider:          obsProvider,
-		publicRootDomain:     publicRootDomain,
-		publicRegionID:       publicRegionID,
+		router:                  router,
+		sandboxService:          sandboxService,
+		credentialSourceService: credentialSourceService,
+		templateService:         templateService,
+		registryService:         registryService,
+		templateStore:           templateStore,
+		templateReconciler:      templateReconciler,
+		templateStoreEnabled:    templateStoreEnabled,
+		clusterService:          clusterService,
+		authValidator:           authValidator,
+		logger:                  logger,
+		port:                    port,
+		obsProvider:             obsProvider,
+		publicRootDomain:        publicRootDomain,
+		publicRegionID:          publicRegionID,
 	}
 	if templateStoreEnabled {
 		server.templateHandler = &templatehttp.Handler{
@@ -168,6 +171,16 @@ func (s *Server) setupRoutes() {
 		registry.Use(s.requireRegistryCapability())
 		{
 			registry.POST("/credentials", s.getRegistryCredentials)
+		}
+
+		credentialSources := v1.Group("/credential-sources")
+		credentialSources.Use(s.requireCredentialSourceCapability())
+		{
+			credentialSources.GET("", s.listCredentialSources)
+			credentialSources.POST("", s.createCredentialSource)
+			credentialSources.GET("/:name", s.getCredentialSource)
+			credentialSources.PUT("/:name", s.updateCredentialSource)
+			credentialSources.DELETE("/:name", s.deleteCredentialSource)
 		}
 	}
 
@@ -362,6 +375,12 @@ func (s *Server) requireRegistryCapability() gin.HandlerFunc {
 	return s.requireCapability(func() bool {
 		return s.registryService != nil
 	}, "registry provider is not configured")
+}
+
+func (s *Server) requireCredentialSourceCapability() gin.HandlerFunc {
+	return s.requireCapability(func() bool {
+		return s.credentialSourceService != nil
+	}, "credential source store is not configured")
 }
 
 func (s *Server) requireCapability(enabled func() bool, message string) gin.HandlerFunc {

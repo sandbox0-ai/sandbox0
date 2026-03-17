@@ -250,26 +250,39 @@ type EgressCredentialRule struct {
 
 // CredentialBinding defines how a credential reference should be resolved.
 type CredentialBinding struct {
-	Ref        string                `json:"ref"`
-	Provider   string                `json:"provider,omitempty"`
-	Headers    map[string]string     `json:"headers,omitempty"`
-	Config     map[string]string     `json:"config,omitempty"`
-	SecretRefs []CredentialSecretRef `json:"secretRefs,omitempty"`
-	SourceRef  *CredentialSourceRef  `json:"sourceRef,omitempty"`
+	Ref         string           `json:"ref"`
+	SourceRef   string           `json:"sourceRef"`
+	Projection  ProjectionSpec   `json:"projection"`
+	CachePolicy *CachePolicySpec `json:"cachePolicy,omitempty"`
 }
 
-// CredentialSecretRef identifies a secret-backed input used by a binding.
-type CredentialSecretRef struct {
-	Name      string `json:"name"`
-	Namespace string `json:"namespace,omitempty"`
-	Key       string `json:"key"`
+// ProjectionSpec defines how resolved source data should be projected into runtime directives.
+type ProjectionSpec struct {
+	Type        CredentialProjectionType `json:"type"`
+	HTTPHeaders *HTTPHeadersProjection   `json:"httpHeaders,omitempty"`
 }
 
-// CredentialSourceRef points to an external logical source for a binding.
-type CredentialSourceRef struct {
-	Kind      string `json:"kind"`
-	Name      string `json:"name"`
-	Namespace string `json:"namespace,omitempty"`
+// CredentialProjectionType identifies the runtime projection shape.
+type CredentialProjectionType string
+
+const (
+	CredentialProjectionTypeHTTPHeaders CredentialProjectionType = "http_headers"
+)
+
+// HTTPHeadersProjection injects HTTP headers derived from source data.
+type HTTPHeadersProjection struct {
+	Headers []ProjectedHeader `json:"headers,omitempty"`
+}
+
+// ProjectedHeader defines one projected header template.
+type ProjectedHeader struct {
+	Name          string `json:"name"`
+	ValueTemplate string `json:"valueTemplate"`
+}
+
+// CachePolicySpec controls broker-side caching for one binding.
+type CachePolicySpec struct {
+	TTL string `json:"ttl,omitempty"`
 }
 
 // EgressAuthProtocol defines the supported application protocols for egress auth rules.

@@ -13,7 +13,8 @@ import (
 )
 
 type fakeBindingStore struct {
-	recordFn func() *egressauth.BindingRecord
+	recordFn        func() *egressauth.BindingRecord
+	sourceVersionFn func(int64, int64) *egressauth.CredentialSourceVersion
 }
 
 func (f *fakeBindingStore) GetBindings(context.Context, string, string) (*egressauth.BindingRecord, error) {
@@ -31,17 +32,28 @@ func (f *fakeBindingStore) DeleteBindings(context.Context, string, string) error
 	return errors.New("not implemented")
 }
 
+func (f *fakeBindingStore) GetSourceByRef(context.Context, string, string) (*egressauth.CredentialSource, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (f *fakeBindingStore) GetSourceVersion(_ context.Context, sourceID, version int64) (*egressauth.CredentialSourceVersion, error) {
+	if f.sourceVersionFn == nil {
+		return nil, nil
+	}
+	return f.sourceVersionFn(sourceID, version), nil
+}
+
 type countingProvider struct {
 	calls int
 }
 
-func (p *countingProvider) Resolve(_ context.Context, req *egressauth.ResolveRequest, binding *egressauth.CredentialBinding, defaultTTL time.Duration) (*ResolveResult, error) {
+func (p *countingProvider) Resolve(_ context.Context, req *egressauth.ResolveRequest, _ *egressauth.CredentialBinding, source *egressauth.CredentialSourceVersion, defaultTTL time.Duration) (*ResolveResult, error) {
 	p.calls++
 	expiresAt := time.Now().UTC().Add(defaultTTL)
 	return &ResolveResult{
 		Response: &egressauth.ResolveResponse{
 			AuthRef:   req.AuthRef,
-			Headers:   map[string]string{"Authorization": binding.Headers["Authorization"]},
+			Headers:   map[string]string{"Authorization": "Bearer " + source.Spec.StaticHeaders.Values["token"]},
 			ExpiresAt: &expiresAt,
 		},
 		TTL: defaultTTL,
@@ -53,7 +65,7 @@ type ttlCountingProvider struct {
 	ttl   time.Duration
 }
 
-func (p *ttlCountingProvider) Resolve(_ context.Context, req *egressauth.ResolveRequest, binding *egressauth.CredentialBinding, defaultTTL time.Duration) (*ResolveResult, error) {
+func (p *ttlCountingProvider) Resolve(_ context.Context, req *egressauth.ResolveRequest, _ *egressauth.CredentialBinding, source *egressauth.CredentialSourceVersion, defaultTTL time.Duration) (*ResolveResult, error) {
 	p.calls++
 	ttl := p.ttl
 	if ttl <= 0 {
@@ -63,27 +75,51 @@ func (p *ttlCountingProvider) Resolve(_ context.Context, req *egressauth.Resolve
 	return &ResolveResult{
 		Response: egressauth.NewHTTPHeadersResolveResponse(
 			req.AuthRef,
-			map[string]string{"Authorization": binding.Headers["Authorization"]},
+			map[string]string{"Authorization": "Bearer " + source.Spec.StaticHeaders.Values["token"]},
 			&expiresAt,
 		),
 		TTL: ttl,
 	}, nil
 }
 
+func testStaticSourceVersion(token string) *egressauth.CredentialSourceVersion {
+	return &egressauth.CredentialSourceVersion{
+		SourceID:     1,
+		Version:      1,
+		ResolverKind: "static_headers",
+		Spec: egressauth.CredentialSourceSpec{
+			StaticHeaders: &egressauth.StaticHeadersSourceSpec{
+				Values: map[string]string{"token": token},
+			},
+		},
+	}
+}
+
+func testBindingRecord(updatedAt time.Time) *egressauth.BindingRecord {
+	return &egressauth.BindingRecord{
+		ClusterID: "cluster-a",
+		SandboxID: "sbx-1",
+		UpdatedAt: updatedAt,
+		Bindings: []egressauth.CredentialBinding{{
+			Ref:           "example-api",
+			SourceRef:     "example-source",
+			SourceID:      1,
+			SourceVersion: 1,
+			Projection: egressauth.ProjectionSpec{
+				Type: egressauth.CredentialProjectionTypeHTTPHeaders,
+			},
+		}},
+	}
+}
+
 func TestResolveUsesBindingProviderAndCache(t *testing.T) {
 	provider := &countingProvider{}
 	store := &fakeBindingStore{
 		recordFn: func() *egressauth.BindingRecord {
-			return &egressauth.BindingRecord{
-				ClusterID: "cluster-a",
-				SandboxID: "sbx-1",
-				UpdatedAt: time.Unix(10, 0).UTC(),
-				Bindings: []egressauth.CredentialBinding{{
-					Ref:      "example-api",
-					Provider: "static",
-					Headers:  map[string]string{"Authorization": "Bearer binding"},
-				}},
-			}
+			return testBindingRecord(time.Unix(10, 0).UTC())
+		},
+		sourceVersionFn: func(int64, int64) *egressauth.CredentialSourceVersion {
+			return testStaticSourceVersion("binding")
 		},
 	}
 
@@ -91,7 +127,7 @@ func TestResolveUsesBindingProviderAndCache(t *testing.T) {
 		ClusterID:         "cluster-a",
 		DefaultResolveTTL: metav1.Duration{Duration: time.Minute},
 	}, store, zap.NewNop())
-	service.RegisterProvider("static", provider)
+	service.RegisterProvider("static_headers", provider)
 
 	req := &egressauth.ResolveRequest{SandboxID: "sbx-1", AuthRef: "example-api", Destination: "api.example.com", Protocol: "http"}
 	first, err := service.Resolve(context.Background(), req)
@@ -115,16 +151,10 @@ func TestResolveInvalidatesCacheWhenBindingsRevisionChanges(t *testing.T) {
 	updatedAt := time.Unix(10, 0).UTC()
 	store := &fakeBindingStore{
 		recordFn: func() *egressauth.BindingRecord {
-			return &egressauth.BindingRecord{
-				ClusterID: "cluster-a",
-				SandboxID: "sbx-1",
-				UpdatedAt: updatedAt,
-				Bindings: []egressauth.CredentialBinding{{
-					Ref:      "example-api",
-					Provider: "static",
-					Headers:  map[string]string{"Authorization": "Bearer binding"},
-				}},
-			}
+			return testBindingRecord(updatedAt)
+		},
+		sourceVersionFn: func(int64, int64) *egressauth.CredentialSourceVersion {
+			return testStaticSourceVersion("binding")
 		},
 	}
 
@@ -132,7 +162,7 @@ func TestResolveInvalidatesCacheWhenBindingsRevisionChanges(t *testing.T) {
 		ClusterID:         "cluster-a",
 		DefaultResolveTTL: metav1.Duration{Duration: time.Minute},
 	}, store, zap.NewNop())
-	service.RegisterProvider("static", provider)
+	service.RegisterProvider("static_headers", provider)
 
 	req := &egressauth.ResolveRequest{SandboxID: "sbx-1", AuthRef: "example-api"}
 	if _, err := service.Resolve(context.Background(), req); err != nil {
@@ -169,16 +199,10 @@ func TestResolveRefreshesAfterCacheTTLExpires(t *testing.T) {
 	provider := &ttlCountingProvider{ttl: 15 * time.Millisecond}
 	store := &fakeBindingStore{
 		recordFn: func() *egressauth.BindingRecord {
-			return &egressauth.BindingRecord{
-				ClusterID: "cluster-a",
-				SandboxID: "sbx-1",
-				UpdatedAt: time.Unix(10, 0).UTC(),
-				Bindings: []egressauth.CredentialBinding{{
-					Ref:      "example-api",
-					Provider: "static",
-					Headers:  map[string]string{"Authorization": "Bearer binding"},
-				}},
-			}
+			return testBindingRecord(time.Unix(10, 0).UTC())
+		},
+		sourceVersionFn: func(int64, int64) *egressauth.CredentialSourceVersion {
+			return testStaticSourceVersion("binding")
 		},
 	}
 
@@ -186,7 +210,7 @@ func TestResolveRefreshesAfterCacheTTLExpires(t *testing.T) {
 		ClusterID:         "cluster-a",
 		DefaultResolveTTL: metav1.Duration{Duration: time.Minute},
 	}, store, zap.NewNop())
-	service.RegisterProvider("static", provider)
+	service.RegisterProvider("static_headers", provider)
 
 	req := &egressauth.ResolveRequest{SandboxID: "sbx-1", AuthRef: "example-api", Destination: "api.example.com", Protocol: "http"}
 	_, err := service.Resolve(context.Background(), req)

@@ -2,6 +2,8 @@ package service
 
 import (
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"go.uber.org/zap"
@@ -196,8 +198,18 @@ func validateNetworkCredentialConfig(policy *v1alpha1.TplSandboxNetworkPolicy) e
 			if binding.Ref == "" {
 				return fmt.Errorf("credential binding ref is required")
 			}
-			if binding.Provider == "" {
-				return fmt.Errorf("credential binding provider is required for %q", binding.Ref)
+			if strings.TrimSpace(binding.SourceRef) == "" {
+				return fmt.Errorf("credential binding sourceRef is required for %q", binding.Ref)
+			}
+			if err := validateProjection(binding.Ref, binding.Projection); err != nil {
+				return err
+			}
+			if binding.CachePolicy != nil {
+				if ttl := strings.TrimSpace(binding.CachePolicy.TTL); ttl != "" {
+					if _, err := time.ParseDuration(ttl); err != nil {
+						return fmt.Errorf("credential binding cachePolicy ttl is invalid for %q: %w", binding.Ref, err)
+					}
+				}
 			}
 			if _, ok := bindingRefs[binding.Ref]; ok {
 				return fmt.Errorf("duplicate credential binding ref %q", binding.Ref)
@@ -226,6 +238,26 @@ func validateNetworkCredentialConfig(policy *v1alpha1.TplSandboxNetworkPolicy) e
 			return fmt.Errorf("duplicate egress rule name %q", rule.Name)
 		}
 		seenNames[rule.Name] = struct{}{}
+	}
+	return nil
+}
+
+func validateProjection(ref string, projection v1alpha1.ProjectionSpec) error {
+	switch projection.Type {
+	case v1alpha1.CredentialProjectionTypeHTTPHeaders:
+		if projection.HTTPHeaders == nil {
+			return fmt.Errorf("credential binding projection.httpHeaders is required for %q", ref)
+		}
+		for _, header := range projection.HTTPHeaders.Headers {
+			if strings.TrimSpace(header.Name) == "" {
+				return fmt.Errorf("credential binding projected header name is required for %q", ref)
+			}
+			if strings.TrimSpace(header.ValueTemplate) == "" {
+				return fmt.Errorf("credential binding projected header valueTemplate is required for %q", ref)
+			}
+		}
+	default:
+		return fmt.Errorf("credential binding projection type %q is not supported for %q", projection.Type, ref)
 	}
 	return nil
 }

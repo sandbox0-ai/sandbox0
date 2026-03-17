@@ -17,7 +17,8 @@ import (
 )
 
 type fakeBindingStore struct {
-	record *egressauth.BindingRecord
+	record        *egressauth.BindingRecord
+	sourceVersion *egressauth.CredentialSourceVersion
 }
 
 func (f *fakeBindingStore) GetBindings(_ context.Context, _, _ string) (*egressauth.BindingRecord, error) {
@@ -30,6 +31,14 @@ func (f *fakeBindingStore) UpsertBindings(context.Context, *egressauth.BindingRe
 
 func (f *fakeBindingStore) DeleteBindings(context.Context, string, string) error {
 	return nil
+}
+
+func (f *fakeBindingStore) GetSourceByRef(context.Context, string, string) (*egressauth.CredentialSource, error) {
+	return nil, nil
+}
+
+func (f *fakeBindingStore) GetSourceVersion(context.Context, int64, int64) (*egressauth.CredentialSourceVersion, error) {
+	return f.sourceVersion, nil
 }
 
 func TestHandleResolveReturnsStaticAuthDirective(t *testing.T) {
@@ -100,8 +109,8 @@ func TestHandleResolveReturnsNotFoundForUnknownAuthRef(t *testing.T) {
 
 func TestHandleResolvePrefersBindingStore(t *testing.T) {
 	server := NewServer(&config.EgressBrokerConfig{
-		ClusterID:          "cluster-a",
-		DefaultResolveTTL:  metav1.Duration{Duration: time.Minute},
+		ClusterID:         "cluster-a",
+		DefaultResolveTTL: metav1.Duration{Duration: time.Minute},
 		StaticAuth: []config.StaticEgressAuthConfig{{
 			AuthRef: "example-api",
 			Headers: map[string]string{"Authorization": "Bearer static"},
@@ -112,10 +121,30 @@ func TestHandleResolvePrefersBindingStore(t *testing.T) {
 			ClusterID: "cluster-a",
 			SandboxID: "sbx_123",
 			Bindings: []egressauth.CredentialBinding{{
-				Ref:      "example-api",
-				Provider: "static",
-				Headers:  map[string]string{"Authorization": "Bearer store"},
+				Ref:           "example-api",
+				SourceRef:     "example-source",
+				SourceID:      1,
+				SourceVersion: 1,
+				Projection: egressauth.ProjectionSpec{
+					Type: egressauth.CredentialProjectionTypeHTTPHeaders,
+					HTTPHeaders: &egressauth.HTTPHeadersProjection{
+						Headers: []egressauth.ProjectedHeader{{
+							Name:          "Authorization",
+							ValueTemplate: "Bearer {{ .token }}",
+						}},
+					},
+				},
 			}},
+		},
+		sourceVersion: &egressauth.CredentialSourceVersion{
+			SourceID:     1,
+			Version:      1,
+			ResolverKind: "static_headers",
+			Spec: egressauth.CredentialSourceSpec{
+				StaticHeaders: &egressauth.StaticHeadersSourceSpec{
+					Values: map[string]string{"token": "store"},
+				},
+			},
 		},
 	})
 

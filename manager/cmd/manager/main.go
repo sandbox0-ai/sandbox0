@@ -126,6 +126,7 @@ func main() {
 	if err := runEgressAuthMigrations(ctx, pool, logger); err != nil {
 		logger.Fatal("Failed to run egress auth migrations", zap.Error(err))
 	}
+	credentialStore := egressauth.NewRepository(pool)
 
 	// Initialize clock for cross-cluster time synchronization
 	var clk *clock.Clock
@@ -276,7 +277,8 @@ func main() {
 		logger,
 		managerMetrics,
 	)
-	sandboxService.SetCredentialStore(egressauth.NewRepository(pool))
+	sandboxService.SetCredentialStore(credentialStore)
+	credentialSourceService := service.NewCredentialSourceService(credentialStore, logger)
 
 	templateService := service.NewTemplateService(
 		k8sClient,
@@ -358,6 +360,7 @@ func main() {
 	// Create HTTP server
 	httpServer := httpserver.NewServer(
 		sandboxService,
+		credentialSourceService,
 		templateService,
 		registryService,
 		templateStore,

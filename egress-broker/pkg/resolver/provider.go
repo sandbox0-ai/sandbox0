@@ -16,7 +16,13 @@ type ResolveResult struct {
 
 // Provider resolves one credential binding into runtime auth material.
 type Provider interface {
-	Resolve(ctx context.Context, req *egressauth.ResolveRequest, binding *egressauth.CredentialBinding, defaultTTL time.Duration) (*ResolveResult, error)
+	Resolve(
+		ctx context.Context,
+		req *egressauth.ResolveRequest,
+		binding *egressauth.CredentialBinding,
+		source *egressauth.CredentialSourceVersion,
+		defaultTTL time.Duration,
+	) (*ResolveResult, error)
 }
 
 // UnsupportedProviderError indicates the binding references a provider that is

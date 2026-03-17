@@ -26,6 +26,16 @@ const (
 	CreateAPIKeyRequestTypeUser    CreateAPIKeyRequestType = "user"
 )
 
+// Defines values for CredentialProjectionType.
+const (
+	HttpHeaders CredentialProjectionType = "http_headers"
+)
+
+// Defines values for CredentialSourceRecordResolverKind.
+const (
+	StaticHeaders CredentialSourceRecordResolverKind = "static_headers"
+)
+
 // Defines values for EgressAuthFailurePolicy.
 const (
 	FailClosed EgressAuthFailurePolicy = "fail-closed"
@@ -136,6 +146,16 @@ const (
 // Defines values for SuccessCreatedResponseSuccess.
 const (
 	SuccessCreatedResponseSuccessTrue SuccessCreatedResponseSuccess = true
+)
+
+// Defines values for SuccessCredentialSourceListResponseSuccess.
+const (
+	SuccessCredentialSourceListResponseSuccessTrue SuccessCredentialSourceListResponseSuccess = true
+)
+
+// Defines values for SuccessCredentialSourceResponseSuccess.
+const (
+	SuccessCredentialSourceResponseSuccessTrue SuccessCredentialSourceResponseSuccess = true
 )
 
 // Defines values for SuccessDeletedResponseSuccess.
@@ -411,6 +431,11 @@ type AuthProvider struct {
 	Type string `json:"type"`
 }
 
+// CachePolicySpec defines model for CachePolicySpec.
+type CachePolicySpec struct {
+	Ttl *string `json:"ttl,omitempty"`
+}
+
 // Capabilities defines model for Capabilities.
 type Capabilities struct {
 	Drop *[]string `json:"drop,omitempty"`
@@ -579,30 +604,36 @@ type CreateTeamRequest struct {
 
 // CredentialBinding defines model for CredentialBinding.
 type CredentialBinding struct {
-	Config  *map[string]string `json:"config,omitempty"`
-	Headers *map[string]string `json:"headers,omitempty"`
-
-	// Provider Binding provider name interpreted by `egress-broker`.
-	Provider *string `json:"provider,omitempty"`
+	CachePolicy *CachePolicySpec `json:"cachePolicy,omitempty"`
+	Projection  ProjectionSpec   `json:"projection"`
 
 	// Ref Stable credential binding reference matched by `credentialRef`.
-	Ref        string                 `json:"ref"`
-	SecretRefs *[]CredentialSecretRef `json:"secretRefs,omitempty"`
-	SourceRef  *CredentialSourceRef   `json:"sourceRef,omitempty"`
+	Ref string `json:"ref"`
+
+	// SourceRef Region-scoped credential source reference resolved by `manager`.
+	SourceRef string `json:"sourceRef"`
 }
 
-// CredentialSecretRef defines model for CredentialSecretRef.
-type CredentialSecretRef struct {
-	Key       string  `json:"key"`
-	Name      string  `json:"name"`
-	Namespace *string `json:"namespace,omitempty"`
+// CredentialProjectionType defines model for CredentialProjectionType.
+type CredentialProjectionType string
+
+// CredentialSourceRecord defines model for CredentialSourceRecord.
+type CredentialSourceRecord struct {
+	CreatedAt      *time.Time                         `json:"createdAt"`
+	CurrentVersion *int64                             `json:"currentVersion,omitempty"`
+	Name           string                             `json:"name"`
+	ResolverKind   CredentialSourceRecordResolverKind `json:"resolverKind"`
+	Spec           CredentialSourceSpec               `json:"spec"`
+	Status         *string                            `json:"status,omitempty"`
+	UpdatedAt      *time.Time                         `json:"updatedAt"`
 }
 
-// CredentialSourceRef defines model for CredentialSourceRef.
-type CredentialSourceRef struct {
-	Kind      string  `json:"kind"`
-	Name      string  `json:"name"`
-	Namespace *string `json:"namespace,omitempty"`
+// CredentialSourceRecordResolverKind defines model for CredentialSourceRecord.ResolverKind.
+type CredentialSourceRecordResolverKind string
+
+// CredentialSourceSpec defines model for CredentialSourceSpec.
+type CredentialSourceSpec struct {
+	StaticHeaders *StaticHeadersSourceSpec `json:"staticHeaders,omitempty"`
 }
 
 // EgressAuthFailurePolicy defines model for EgressAuthFailurePolicy.
@@ -710,6 +741,11 @@ type ForkVolumeRequest struct {
 	CacheSize  *string           `json:"cache_size,omitempty"`
 	Prefetch   *int              `json:"prefetch,omitempty"`
 	Writeback  *bool             `json:"writeback,omitempty"`
+}
+
+// HTTPHeadersProjection defines model for HTTPHeadersProjection.
+type HTTPHeadersProjection struct {
+	Headers *[]ProjectedHeader `json:"headers,omitempty"`
 }
 
 // Identity defines model for Identity.
@@ -918,6 +954,18 @@ type PreferredSchedulingTerm struct {
 
 // ProcessType defines model for ProcessType.
 type ProcessType string
+
+// ProjectedHeader defines model for ProjectedHeader.
+type ProjectedHeader struct {
+	Name          string `json:"name"`
+	ValueTemplate string `json:"valueTemplate"`
+}
+
+// ProjectionSpec defines model for ProjectionSpec.
+type ProjectionSpec struct {
+	HttpHeaders *HTTPHeadersProjection   `json:"httpHeaders,omitempty"`
+	Type        CredentialProjectionType `json:"type"`
+}
 
 // REPLConfig defines model for REPLConfig.
 type REPLConfig struct {
@@ -1221,6 +1269,11 @@ type Snapshot struct {
 	VolumeId    string  `json:"volume_id"`
 }
 
+// StaticHeadersSourceSpec defines model for StaticHeadersSourceSpec.
+type StaticHeadersSourceSpec struct {
+	Values *map[string]string `json:"values,omitempty"`
+}
+
 // SuccessAPIKeyListResponse defines model for SuccessAPIKeyListResponse.
 type SuccessAPIKeyListResponse struct {
 	Data *struct {
@@ -1318,6 +1371,24 @@ type SuccessCreatedResponse struct {
 
 // SuccessCreatedResponseSuccess defines model for SuccessCreatedResponse.Success.
 type SuccessCreatedResponseSuccess bool
+
+// SuccessCredentialSourceListResponse defines model for SuccessCredentialSourceListResponse.
+type SuccessCredentialSourceListResponse struct {
+	Data    *[]CredentialSourceRecord                  `json:"data,omitempty"`
+	Success SuccessCredentialSourceListResponseSuccess `json:"success"`
+}
+
+// SuccessCredentialSourceListResponseSuccess defines model for SuccessCredentialSourceListResponse.Success.
+type SuccessCredentialSourceListResponseSuccess bool
+
+// SuccessCredentialSourceResponse defines model for SuccessCredentialSourceResponse.
+type SuccessCredentialSourceResponse struct {
+	Data    *CredentialSourceRecord                `json:"data,omitempty"`
+	Success SuccessCredentialSourceResponseSuccess `json:"success"`
+}
+
+// SuccessCredentialSourceResponseSuccess defines model for SuccessCredentialSourceResponse.Success.
+type SuccessCredentialSourceResponseSuccess bool
 
 // SuccessDeletedResponse defines model for SuccessDeletedResponse.
 type SuccessDeletedResponse struct {
@@ -1987,6 +2058,12 @@ type GetTenantActiveParams struct {
 
 // PostApiKeysJSONRequestBody defines body for PostApiKeys for application/json ContentType.
 type PostApiKeysJSONRequestBody = CreateAPIKeyRequest
+
+// PostApiV1CredentialSourcesJSONRequestBody defines body for PostApiV1CredentialSources for application/json ContentType.
+type PostApiV1CredentialSourcesJSONRequestBody = CredentialSourceRecord
+
+// PutApiV1CredentialSourcesNameJSONRequestBody defines body for PutApiV1CredentialSourcesName for application/json ContentType.
+type PutApiV1CredentialSourcesNameJSONRequestBody = CredentialSourceRecord
 
 // PostApiV1SandboxesJSONRequestBody defines body for PostApiV1Sandboxes for application/json ContentType.
 type PostApiV1SandboxesJSONRequestBody = ClaimRequest

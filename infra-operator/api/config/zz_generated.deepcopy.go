@@ -254,6 +254,7 @@ func (in *ManagerConfig) DeepCopy() *ManagerConfig {
 func (in *NetdConfig) DeepCopyInto(out *NetdConfig) {
 	*out = *in
 	out.EgressBrokerTimeout = in.EgressBrokerTimeout
+	out.MITMLeafTTL = in.MITMLeafTTL
 	out.ResyncPeriod = in.ResyncPeriod
 	if in.PreferNFT != nil {
 		in, out := &in.PreferNFT, &out.PreferNFT

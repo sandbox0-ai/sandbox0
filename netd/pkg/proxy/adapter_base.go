@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
 )
 
@@ -120,7 +121,7 @@ func (a *tlsAdapter) Name() string      { return "tls" }
 func (a *tlsAdapter) Transport() string { return "tcp" }
 func (a *tlsAdapter) Protocol() string  { return "tls" }
 func (a *tlsAdapter) Capability() adapterCapability {
-	return adapterCapabilityPassThrough
+	return adapterCapabilityTerminate
 }
 
 func (a *tlsAdapter) Handle(req *adapterRequest) error {
@@ -128,6 +129,12 @@ func (a *tlsAdapter) Handle(req *adapterRequest) error {
 		return fmt.Errorf("tls adapter requires connection")
 	}
 	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
+	if tlsTerminationRequired(req) {
+		return req.Server.proxyHTTPSRequest(req)
+	}
+	if req.EgressAuth != nil && req.EgressAuth.Rule != nil && req.EgressAuth.Rule.Protocol == v1alpha1.EgressAuthProtocolHTTPS && req.EgressAuth.Rule.TLSMode == "" {
+		return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+	}
 	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
 }
 

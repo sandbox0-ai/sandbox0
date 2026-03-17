@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -22,28 +23,30 @@ import (
 )
 
 type Server struct {
-	cfg            *config.NetdConfig
-	store          *policy.Store
-	tracker        *conntrack.Tracker
-	usageRecorder  UsageRecorder
-	logger         *zap.Logger
-	hostVerifier   hostVerifier
-	httpListener   net.Listener
-	httpsListener  net.Listener
-	udpHTTPConn    *net.UDPConn
-	udpHTTPSConn   *net.UDPConn
-	reassembler    *quicReassembler
-	tcpClassifiers []tcpClassifier
-	udpClassifiers []udpClassifier
-	adapters       *adapterRegistry
-	authResolver   egressAuthResolver
-	authCache      egressAuthCache
-	auditor        *auditLogger
-	auditSeq       uint64
-	udpSessionMu   sync.Mutex
-	udpSessions    map[udpSessionKey]*udpSession
-	exitCh         chan error
-	exitOnce       sync.Once
+	cfg               *config.NetdConfig
+	store             *policy.Store
+	tracker           *conntrack.Tracker
+	usageRecorder     UsageRecorder
+	logger            *zap.Logger
+	hostVerifier      hostVerifier
+	httpListener      net.Listener
+	httpsListener     net.Listener
+	udpHTTPConn       *net.UDPConn
+	udpHTTPSConn      *net.UDPConn
+	reassembler       *quicReassembler
+	tcpClassifiers    []tcpClassifier
+	udpClassifiers    []udpClassifier
+	adapters          *adapterRegistry
+	authResolver      egressAuthResolver
+	authCache         egressAuthCache
+	tlsAuthority      tlsInterceptAuthority
+	upstreamTLSConfig *tls.Config
+	auditor           *auditLogger
+	auditSeq          uint64
+	udpSessionMu      sync.Mutex
+	udpSessions       map[udpSessionKey]*udpSession
+	exitCh            chan error
+	exitOnce          sync.Once
 }
 
 type UsageRecorder interface {
@@ -159,6 +162,22 @@ func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.T
 	}
 	if cfg.EgressBrokerURL != "" {
 		server.authResolver = newHTTPEgressAuthResolver(cfg.EgressBrokerURL, cfg.EgressBrokerTimeout.Duration)
+	}
+	if cfg.MITMCACertPath != "" && cfg.MITMCAKeyPath != "" {
+		authority, authorityErr := newCertificateAuthorityFromFiles(cfg.MITMCACertPath, cfg.MITMCAKeyPath, cfg.MITMLeafTTL.Duration)
+		if authorityErr != nil {
+			_ = httpLn.Close()
+			_ = httpsLn.Close()
+			_ = udpConn.Close()
+			if udpHTTPConn != nil && udpHTTPConn != udpConn {
+				_ = udpHTTPConn.Close()
+			}
+			if auditor != nil {
+				_ = auditor.Close()
+			}
+			return nil, authorityErr
+		}
+		server.tlsAuthority = authority
 	}
 	for _, opt := range opts {
 		if opt != nil {

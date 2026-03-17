@@ -2119,6 +2119,13 @@ spec:
                           metricsReportInterval:
                             default: 10s
                             type: string
+                          mitmCaCertPath:
+                            type: string
+                          mitmCaKeyPath:
+                            type: string
+                          mitmLeafTtl:
+                            default: 1h
+                            type: string
                           nodeName:
                             type: string
                           platformAllowedCidrs:
@@ -2193,6 +2200,11 @@ spec:
                             description: TLSSecret specifies the TLS secret name
                             type: string
                         type: object
+                      mitmCaSecretName:
+                        description: |-
+                          MITMCASecretName mounts a secret containing cluster-local MITM CA material for HTTPS interception.
+                          Expected keys are ca.crt and ca.key.
+                        type: string
                       nodeSelector:
                         additionalProperties:
                           type: string

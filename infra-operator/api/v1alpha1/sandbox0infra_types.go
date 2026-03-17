@@ -836,6 +836,10 @@ type EgressBrokerServiceConfig struct {
 // NetdServiceConfig defines configuration for netd service
 type NetdServiceConfig struct {
 	BaseServiceConfig `json:",inline"`
+	// MITMCASecretName mounts a secret containing cluster-local MITM CA material for HTTPS interception.
+	// Expected keys are ca.crt and ca.key.
+	// +optional
+	MITMCASecretName string `json:"mitmCaSecretName,omitempty"`
 	// RuntimeClassName specifies the Kubernetes runtime class for the netd daemonset.
 	// Use a host-compatible runtime such as runc. Do not run netd on gVisor or Kata.
 	// +optional

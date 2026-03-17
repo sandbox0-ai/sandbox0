@@ -2,6 +2,7 @@ package netd
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -78,6 +79,69 @@ func TestReconcileFallsBackToLegacyNetdPlacement(t *testing.T) {
 	}
 	if len(ds.Spec.Template.Spec.Tolerations) != 1 || ds.Spec.Template.Spec.Tolerations[0].Value != legacyRuntime {
 		t.Fatalf("expected legacy toleration fallback, got %#v", ds.Spec.Template.Spec.Tolerations)
+	}
+}
+
+func TestReconcileMountsMITMCASecret(t *testing.T) {
+	infra := newNetdTestInfra()
+	infra.Spec.Services.Netd.MITMCASecretName = "netd-mitm-ca"
+
+	scheme := runtime.NewScheme()
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add appsv1 scheme: %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add corev1 scheme: %v", err)
+	}
+	if err := infrav1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add infra scheme: %v", err)
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(infra.DeepCopy()).
+		Build()
+
+	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
+	if err := reconciler.Reconcile(context.Background(), infra, "ghcr.io/sandbox0-ai/sandbox0", "latest"); err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+
+	ds := &appsv1.DaemonSet{}
+	if err := client.Get(context.Background(), types.NamespacedName{
+		Name:      infra.Name + "-netd",
+		Namespace: infra.Namespace,
+	}, ds); err != nil {
+		t.Fatalf("expected daemonset: %v", err)
+	}
+	foundVolume := false
+	foundMount := false
+	for _, volume := range ds.Spec.Template.Spec.Volumes {
+		if volume.Name == "mitm-ca" && volume.Secret != nil && volume.Secret.SecretName == "netd-mitm-ca" {
+			foundVolume = true
+		}
+	}
+	for _, mount := range ds.Spec.Template.Spec.Containers[0].VolumeMounts {
+		if mount.Name == "mitm-ca" && mount.MountPath == "/tls" && mount.ReadOnly {
+			foundMount = true
+		}
+	}
+	if !foundVolume || !foundMount {
+		t.Fatalf("expected mitm-ca volume and mount, got volumes=%#v mounts=%#v", ds.Spec.Template.Spec.Volumes, ds.Spec.Template.Spec.Containers[0].VolumeMounts)
+	}
+
+	cm := &corev1.ConfigMap{}
+	if err := client.Get(context.Background(), types.NamespacedName{
+		Name:      infra.Name + "-netd",
+		Namespace: infra.Namespace,
+	}, cm); err != nil {
+		t.Fatalf("expected configmap: %v", err)
+	}
+	if !strings.Contains(cm.Data["config.yaml"], "mitm_ca_cert_path: /tls/ca.crt") {
+		t.Fatalf("expected mitm ca cert path in config, got %q", cm.Data["config.yaml"])
+	}
+	if !strings.Contains(cm.Data["config.yaml"], "mitm_ca_key_path: /tls/ca.key") {
+		t.Fatalf("expected mitm ca key path in config, got %q", cm.Data["config.yaml"])
 	}
 }
 

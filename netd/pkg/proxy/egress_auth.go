@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"strings"
 	"sync"
 	"time"
@@ -58,6 +59,22 @@ func WithEgressAuthCache(cache egressAuthCache) ServerOption {
 	return func(s *Server) {
 		if s != nil {
 			s.authCache = cache
+		}
+	}
+}
+
+func WithTLSInterceptAuthority(authority tlsInterceptAuthority) ServerOption {
+	return func(s *Server) {
+		if s != nil {
+			s.tlsAuthority = authority
+		}
+	}
+}
+
+func WithUpstreamTLSConfig(cfg *tls.Config) ServerOption {
+	return func(s *Server) {
+		if s != nil {
+			s.upstreamTLSConfig = cloneTLSConfig(cfg)
 		}
 	}
 }

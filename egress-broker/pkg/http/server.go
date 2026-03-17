@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
@@ -16,9 +17,10 @@ import (
 
 // Server serves egress-broker HTTP endpoints.
 type Server struct {
-	cfg    *config.EgressBrokerConfig
-	logger *zap.Logger
-	server *http.Server
+	cfg     *config.EgressBrokerConfig
+	logger  *zap.Logger
+	server  *http.Server
+	authMap map[string]config.StaticEgressAuthConfig
 }
 
 // NewServer creates a new egress-broker HTTP server.
@@ -32,8 +34,9 @@ func NewServer(cfg *config.EgressBrokerConfig, logger *zap.Logger) *Server {
 
 	mux := http.NewServeMux()
 	s := &Server{
-		cfg:    cfg,
-		logger: logger,
+		cfg:     cfg,
+		logger:  logger,
+		authMap: buildStaticAuthMap(cfg),
 		server: &http.Server{
 			Addr:              fmt.Sprintf(":%d", resolveHTTPPort(cfg)),
 			Handler:           mux,
@@ -106,7 +109,18 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		zap.String("destination", req.Destination),
 		zap.String("protocol", req.Protocol),
 	)
-	_ = spec.WriteError(w, http.StatusServiceUnavailable, spec.CodeUnavailable, "egress auth resolution is not implemented yet")
+	entry, ok := s.lookupStaticAuth(req.AuthRef)
+	if !ok {
+		_ = spec.WriteError(w, http.StatusNotFound, spec.CodeNotFound, "authRef not found")
+		return
+	}
+	expiresAt := time.Now().UTC().Add(entry.TTL.Duration)
+	resp := &egressauth.ResolveResponse{
+		AuthRef:   entry.AuthRef,
+		Headers:   cloneHeaders(entry.Headers),
+		ExpiresAt: &expiresAt,
+	}
+	_ = spec.WriteSuccess(w, http.StatusOK, resp)
 }
 
 func resolveHTTPPort(cfg *config.EgressBrokerConfig) int {
@@ -114,4 +128,38 @@ func resolveHTTPPort(cfg *config.EgressBrokerConfig) int {
 		return 8082
 	}
 	return cfg.HTTPPort
+}
+
+func buildStaticAuthMap(cfg *config.EgressBrokerConfig) map[string]config.StaticEgressAuthConfig {
+	if cfg == nil || len(cfg.StaticAuth) == 0 {
+		return nil
+	}
+	out := make(map[string]config.StaticEgressAuthConfig, len(cfg.StaticAuth))
+	for _, entry := range cfg.StaticAuth {
+		authRef := strings.TrimSpace(entry.AuthRef)
+		if authRef == "" {
+			continue
+		}
+		out[authRef] = entry
+	}
+	return out
+}
+
+func (s *Server) lookupStaticAuth(authRef string) (config.StaticEgressAuthConfig, bool) {
+	if s == nil || len(s.authMap) == 0 {
+		return config.StaticEgressAuthConfig{}, false
+	}
+	entry, ok := s.authMap[strings.TrimSpace(authRef)]
+	return entry, ok
+}
+
+func cloneHeaders(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }

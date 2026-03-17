@@ -1,11 +1,13 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -154,6 +156,9 @@ func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.T
 		authCache:      newMemoryEgressAuthCache(),
 		auditor:        auditor,
 		exitCh:         make(chan error, 1),
+	}
+	if cfg.EgressBrokerURL != "" {
+		server.authResolver = newHTTPEgressAuthResolver(cfg.EgressBrokerURL, cfg.EgressBrokerTimeout.Duration)
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -502,6 +507,63 @@ func (s *Server) relayTCPConn(client net.Conn, prefix io.Reader, destIP net.IP, 
 		reader = io.MultiReader(prefix, client)
 	}
 	return s.pipeWithReader(client, upstream, reader, compiled, audit)
+}
+
+func (s *Server) proxyHTTPRequest(req *adapterRequest) error {
+	if s == nil {
+		return fmt.Errorf("server is nil")
+	}
+	if req == nil || req.Conn == nil {
+		return fmt.Errorf("http proxy request is nil")
+	}
+	prefixBytes, err := io.ReadAll(req.Prefix)
+	if err != nil {
+		return fmt.Errorf("read buffered http request: %w", err)
+	}
+	headerEnd := findHTTPHeaderTerminator(prefixBytes)
+	if headerEnd < 0 {
+		return fmt.Errorf("http request headers are incomplete")
+	}
+	httpReq, err := parseBufferedHTTPRequest(prefixBytes[:headerEnd])
+	if err != nil {
+		return fmt.Errorf("parse buffered http request: %w", err)
+	}
+	bodyReader := io.MultiReader(bytes.NewReader(prefixBytes[headerEnd:]), req.Conn)
+	switch {
+	case httpReq.ContentLength > 0:
+		httpReq.Body = io.NopCloser(io.LimitReader(bodyReader, httpReq.ContentLength))
+	case httpReq.ContentLength == 0 && len(httpReq.TransferEncoding) == 0:
+		httpReq.Body = http.NoBody
+	default:
+		httpReq.Body = io.NopCloser(bodyReader)
+	}
+	httpReq.RequestURI = ""
+	httpReq.Close = true
+	httpReq.Header.Set("Connection", "close")
+	if httpReq.Host == "" && req.Host != "" {
+		httpReq.Host = req.Host
+	}
+	if req.EgressAuth != nil && req.EgressAuth.Resolved != nil {
+		injectHTTPHeaders(httpReq, req.EgressAuth.Resolved.Headers)
+	}
+
+	upstream, err := net.DialTimeout("tcp", net.JoinHostPort(req.DestIP.String(), fmt.Sprintf("%d", req.DestPort)), s.cfg.ProxyUpstreamTimeout.Duration)
+	if err != nil {
+		return err
+	}
+	upstream = &countingConn{Conn: upstream}
+	defer upstream.Close()
+
+	if err := httpReq.Write(upstream); err != nil {
+		s.recordEgressBytes(req.Compiled, upstream.(*countingConn).written, req.Audit)
+		return fmt.Errorf("write upstream http request: %w", err)
+	}
+	s.recordEgressBytes(req.Compiled, upstream.(*countingConn).written, req.Audit)
+
+	clientCounter := &countingWriter{writer: req.Conn}
+	n, err := io.Copy(clientCounter, upstream)
+	s.recordIngressBytes(req.Compiled, n, req.Audit)
+	return normalizeRelayError(err)
 }
 
 func (s *Server) handleUDPDecision(req *adapterRequest, decision trafficDecision, host string) {

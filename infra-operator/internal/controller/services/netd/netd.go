@@ -87,6 +87,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	if infra.Spec.Cluster != nil && infra.Spec.Cluster.ID != "" {
 		config.ClusterID = infra.Spec.Cluster.ID
 	}
+	if infrav1alpha1.IsEgressBrokerEnabled(infra) && config.EgressBrokerURL == "" {
+		port := 8082
+		if infra.Spec.Services != nil && infra.Spec.Services.EgressBroker != nil && infra.Spec.Services.EgressBroker.Config != nil && infra.Spec.Services.EgressBroker.Config.HTTPPort > 0 {
+			port = infra.Spec.Services.EgressBroker.Config.HTTPPort
+		}
+		config.EgressBrokerURL = fmt.Sprintf("http://%s-egress-broker.%s.svc.cluster.local:%d", infra.Name, infra.Namespace, port)
+	}
 
 	if err := r.Resources.ReconcileServiceConfigMap(ctx, infra, name, labels, config); err != nil {
 		return err

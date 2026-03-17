@@ -1105,6 +1105,8 @@ spec:
                         default: {}
                         description: Config contains egress-broker specific configuration.
                         properties:
+                          defaultResolveTtl:
+                            type: string
                           httpPort:
                             default: 8082
                             type: integer
@@ -1114,6 +1116,24 @@ spec:
                           shutdownTimeout:
                             default: 10s
                             type: string
+                          staticAuth:
+                            items:
+                              description: StaticEgressAuthConfig defines a static
+                                auth directive for phase4 HTTP injection.
+                              properties:
+                                authRef:
+                                  type: string
+                                headers:
+                                  additionalProperties:
+                                    type: string
+                                  type: object
+                                ttl:
+                                  type: string
+                              required:
+                              - authRef
+                              - ttl
+                              type: object
+                            type: array
                         type: object
                       enabled:
                         default: false
@@ -2075,6 +2095,11 @@ spec:
                             type: integer
                           edtHorizon:
                             default: 200ms
+                            type: string
+                          egressBrokerTimeout:
+                            default: 2s
+                            type: string
+                          egressBrokerUrl:
                             type: string
                           failClosed:
                             default: true

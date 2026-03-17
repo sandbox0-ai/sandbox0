@@ -26,6 +26,13 @@ type NetdConfig struct {
 	ClusterID string `yaml:"cluster_id" json:"-"`
 
 	// +optional
+	EgressBrokerURL string `yaml:"egress_broker_url" json:"egressBrokerUrl"`
+
+	// +optional
+	// +kubebuilder:default="2s"
+	EgressBrokerTimeout metav1.Duration `yaml:"egress_broker_timeout" json:"egressBrokerTimeout"`
+
+	// +optional
 	DatabaseURL string `yaml:"database_url" json:"-"`
 
 	// +optional
@@ -197,6 +204,9 @@ func applyNetdDefaults(cfg *NetdConfig) {
 	}
 	if cfg.ResyncPeriod.Duration == 0 {
 		cfg.ResyncPeriod = metav1.Duration{Duration: 30 * time.Second}
+	}
+	if cfg.EgressBrokerTimeout.Duration == 0 {
+		cfg.EgressBrokerTimeout = metav1.Duration{Duration: 2 * time.Second}
 	}
 	if cfg.EDTHorizon.Duration == 0 {
 		cfg.EDTHorizon = metav1.Duration{Duration: 200 * time.Millisecond}

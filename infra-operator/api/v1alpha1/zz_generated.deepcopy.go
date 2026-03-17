@@ -396,7 +396,7 @@ func (in *EgressBrokerServiceConfig) DeepCopyInto(out *EgressBrokerServiceConfig
 	if in.Config != nil {
 		in, out := &in.Config, &out.Config
 		*out = new(config.EgressBrokerConfig)
-		**out = **in
+		(*in).DeepCopyInto(*out)
 	}
 }
 

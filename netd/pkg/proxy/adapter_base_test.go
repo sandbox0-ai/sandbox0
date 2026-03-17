@@ -16,7 +16,7 @@ func TestAdapterCapabilities(t *testing.T) {
 		{name: "postgres passthrough", adapter: &postgresAdapter{}, capability: adapterCapabilityPassThrough},
 		{name: "redis passthrough", adapter: &redisAdapter{}, capability: adapterCapabilityPassThrough},
 		{name: "socks5 passthrough", adapter: &socks5Adapter{}, capability: adapterCapabilityPassThrough},
-		{name: "tls passthrough", adapter: &tlsAdapter{}, capability: adapterCapabilityPassThrough},
+		{name: "tls terminate", adapter: &tlsAdapter{}, capability: adapterCapabilityTerminate},
 		{name: "ssh passthrough", adapter: &sshAdapter{}, capability: adapterCapabilityPassThrough},
 		{name: "udp passthrough", adapter: &udpAdapter{}, capability: adapterCapabilityPassThrough},
 		{name: "tcp fallback passthrough", adapter: &tcpPassThroughAdapter{}, capability: adapterCapabilityPassThrough},

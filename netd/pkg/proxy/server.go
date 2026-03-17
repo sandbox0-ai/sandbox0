@@ -1,16 +1,20 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
@@ -20,26 +24,30 @@ import (
 )
 
 type Server struct {
-	cfg            *config.NetdConfig
-	store          *policy.Store
-	tracker        *conntrack.Tracker
-	usageRecorder  UsageRecorder
-	logger         *zap.Logger
-	hostVerifier   hostVerifier
-	httpListener   net.Listener
-	httpsListener  net.Listener
-	udpHTTPConn    *net.UDPConn
-	udpHTTPSConn   *net.UDPConn
-	reassembler    *quicReassembler
-	tcpClassifiers []tcpClassifier
-	udpClassifiers []udpClassifier
-	adapters       *adapterRegistry
-	auditor        *auditLogger
-	auditSeq       uint64
-	udpSessionMu   sync.Mutex
-	udpSessions    map[udpSessionKey]*udpSession
-	exitCh         chan error
-	exitOnce       sync.Once
+	cfg               *config.NetdConfig
+	store             *policy.Store
+	tracker           *conntrack.Tracker
+	usageRecorder     UsageRecorder
+	logger            *zap.Logger
+	hostVerifier      hostVerifier
+	httpListener      net.Listener
+	httpsListener     net.Listener
+	udpHTTPConn       *net.UDPConn
+	udpHTTPSConn      *net.UDPConn
+	reassembler       *quicReassembler
+	tcpClassifiers    []tcpClassifier
+	udpClassifiers    []udpClassifier
+	adapters          *adapterRegistry
+	authResolver      egressAuthResolver
+	authCache         egressAuthCache
+	tlsAuthority      tlsInterceptAuthority
+	upstreamTLSConfig *tls.Config
+	auditor           *auditLogger
+	auditSeq          uint64
+	udpSessionMu      sync.Mutex
+	udpSessions       map[udpSessionKey]*udpSession
+	exitCh            chan error
+	exitOnce          sync.Once
 }
 
 type UsageRecorder interface {
@@ -47,7 +55,7 @@ type UsageRecorder interface {
 	RecordIngress(compiled *policy.CompiledPolicy, bytes int64)
 }
 
-func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.Tracker, usageRecorder UsageRecorder, logger *zap.Logger) (*Server, error) {
+func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.Tracker, usageRecorder UsageRecorder, logger *zap.Logger, opts ...ServerOption) (*Server, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("netd config is nil")
 	}
@@ -133,7 +141,7 @@ func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.T
 		}
 		return nil, err
 	}
-	return &Server{
+	server := &Server{
 		cfg:            cfg,
 		store:          store,
 		tracker:        tracker,
@@ -148,9 +156,36 @@ func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.T
 		tcpClassifiers: defaultTCPClassifiers(),
 		udpClassifiers: defaultUDPClassifiers(),
 		adapters:       adapters,
+		authResolver:   noopEgressAuthResolver{},
+		authCache:      newMemoryEgressAuthCache(),
 		auditor:        auditor,
 		exitCh:         make(chan error, 1),
-	}, nil
+	}
+	if cfg.EgressBrokerURL != "" {
+		server.authResolver = newHTTPEgressAuthResolver(cfg.EgressBrokerURL, cfg.EgressBrokerTimeout.Duration)
+	}
+	if cfg.MITMCACertPath != "" && cfg.MITMCAKeyPath != "" {
+		authority, authorityErr := newCertificateAuthorityFromFiles(cfg.MITMCACertPath, cfg.MITMCAKeyPath, cfg.MITMLeafTTL.Duration)
+		if authorityErr != nil {
+			_ = httpLn.Close()
+			_ = httpsLn.Close()
+			_ = udpConn.Close()
+			if udpHTTPConn != nil && udpHTTPConn != udpConn {
+				_ = udpHTTPConn.Close()
+			}
+			if auditor != nil {
+				_ = auditor.Close()
+			}
+			return nil, authorityErr
+		}
+		server.tlsAuthority = authority
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(server)
+		}
+	}
+	return server, nil
 }
 
 func (s *Server) Start(ctx context.Context) {
@@ -415,6 +450,12 @@ func (s *Server) handleTCPDecision(req *adapterRequest, decision trafficDecision
 	if host != "" {
 		baseFields = append(baseFields, zap.String("host", host))
 	}
+	if decision.MatchedAuthRule != nil {
+		baseFields = append(baseFields,
+			zap.String("auth_ref", decision.MatchedAuthRule.AuthRef),
+			zap.String("auth_rule", decision.MatchedAuthRule.Name),
+		)
+	}
 	baseFields = append(baseFields, fields...)
 	switch decision.Action {
 	case decisionActionDeny:
@@ -438,6 +479,20 @@ func (s *Server) handleTCPDecision(req *adapterRequest, decision trafficDecision
 		}
 		return
 	case decisionActionUseAdapter:
+		s.attachEgressAuth(req, decision)
+		if req.EgressAuth != nil {
+			baseFields = append(baseFields,
+				zap.Bool("auth_cache_hit", req.EgressAuth.CacheHit),
+				zap.Bool("auth_resolved", req.EgressAuth.Resolved != nil),
+				zap.String("auth_failure_policy", req.EgressAuth.FailurePolicy),
+			)
+			if req.EgressAuth.BypassReason != "" {
+				baseFields = append(baseFields, zap.String("auth_bypass_reason", req.EgressAuth.BypassReason))
+			}
+			if req.EgressAuth.ResolveError != nil {
+				baseFields = append(baseFields, zap.Error(req.EgressAuth.ResolveError))
+			}
+		}
 		adapter, resolveErr := s.resolveAdapter(decision)
 		if resolveErr != nil {
 			s.logger.Warn("TCP adapter missing", append(baseFields, zap.Error(resolveErr))...)
@@ -478,6 +533,63 @@ func (s *Server) relayTCPConn(client net.Conn, prefix io.Reader, destIP net.IP, 
 	return s.pipeWithReader(client, upstream, reader, compiled, audit)
 }
 
+func (s *Server) proxyHTTPRequest(req *adapterRequest) error {
+	if s == nil {
+		return fmt.Errorf("server is nil")
+	}
+	if req == nil || req.Conn == nil {
+		return fmt.Errorf("http proxy request is nil")
+	}
+	prefixBytes, err := io.ReadAll(req.Prefix)
+	if err != nil {
+		return fmt.Errorf("read buffered http request: %w", err)
+	}
+	headerEnd := findHTTPHeaderTerminator(prefixBytes)
+	if headerEnd < 0 {
+		return fmt.Errorf("http request headers are incomplete")
+	}
+	httpReq, err := parseBufferedHTTPRequest(prefixBytes[:headerEnd])
+	if err != nil {
+		return fmt.Errorf("parse buffered http request: %w", err)
+	}
+	bodyReader := io.MultiReader(bytes.NewReader(prefixBytes[headerEnd:]), req.Conn)
+	switch {
+	case httpReq.ContentLength > 0:
+		httpReq.Body = io.NopCloser(io.LimitReader(bodyReader, httpReq.ContentLength))
+	case httpReq.ContentLength == 0 && len(httpReq.TransferEncoding) == 0:
+		httpReq.Body = http.NoBody
+	default:
+		httpReq.Body = io.NopCloser(bodyReader)
+	}
+	httpReq.RequestURI = ""
+	httpReq.Close = true
+	httpReq.Header.Set("Connection", "close")
+	if httpReq.Host == "" && req.Host != "" {
+		httpReq.Host = req.Host
+	}
+	if req.EgressAuth != nil && req.EgressAuth.Resolved != nil {
+		injectHTTPHeaders(httpReq, req.EgressAuth.Resolved.Headers)
+	}
+
+	upstream, err := net.DialTimeout("tcp", net.JoinHostPort(req.DestIP.String(), fmt.Sprintf("%d", req.DestPort)), s.cfg.ProxyUpstreamTimeout.Duration)
+	if err != nil {
+		return err
+	}
+	upstream = &countingConn{Conn: upstream}
+	defer upstream.Close()
+
+	if err := httpReq.Write(upstream); err != nil {
+		s.recordEgressBytes(req.Compiled, upstream.(*countingConn).WrittenBytes(), req.Audit)
+		return fmt.Errorf("write upstream http request: %w", err)
+	}
+	s.recordEgressBytes(req.Compiled, upstream.(*countingConn).WrittenBytes(), req.Audit)
+
+	clientCounter := &countingWriter{writer: req.Conn}
+	n, err := io.Copy(clientCounter, upstream)
+	s.recordIngressBytes(req.Compiled, n, req.Audit)
+	return normalizeRelayError(err)
+}
+
 func (s *Server) handleUDPDecision(req *adapterRequest, decision trafficDecision, host string) {
 	if req == nil || req.UDPSource == nil {
 		return
@@ -515,6 +627,12 @@ func (s *Server) handleUDPDecision(req *adapterRequest, decision trafficDecision
 	fields = append(fields, zap.String("flow_id", req.Audit.ID))
 	if host != "" {
 		fields = append(fields, zap.String("host", host))
+	}
+	if decision.MatchedAuthRule != nil {
+		fields = append(fields,
+			zap.String("auth_ref", decision.MatchedAuthRule.AuthRef),
+			zap.String("auth_rule", decision.MatchedAuthRule.Name),
+		)
 	}
 	switch decision.Action {
 	case decisionActionDeny:
@@ -559,6 +677,20 @@ func (s *Server) handleUDPDecision(req *adapterRequest, decision trafficDecision
 		}
 		return
 	case decisionActionUseAdapter:
+		s.attachEgressAuth(req, decision)
+		if req.EgressAuth != nil {
+			fields = append(fields,
+				zap.Bool("auth_cache_hit", req.EgressAuth.CacheHit),
+				zap.Bool("auth_resolved", req.EgressAuth.Resolved != nil),
+				zap.String("auth_failure_policy", req.EgressAuth.FailurePolicy),
+			)
+			if req.EgressAuth.BypassReason != "" {
+				fields = append(fields, zap.String("auth_bypass_reason", req.EgressAuth.BypassReason))
+			}
+			if req.EgressAuth.ResolveError != nil {
+				fields = append(fields, zap.Error(req.EgressAuth.ResolveError))
+			}
+		}
 		adapter, resolveErr := s.resolveAdapter(decision)
 		if resolveErr != nil {
 			s.logger.Warn("UDP adapter missing", append(fields, zap.Error(resolveErr))...)
@@ -746,6 +878,9 @@ func normalizeRelayError(err error) error {
 	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
 		return nil
 	}
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
+		return nil
+	}
 	return err
 }
 
@@ -845,11 +980,32 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 
 type countingConn struct {
 	net.Conn
+	read    int64
 	written int64
+}
+
+func (c *countingConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	atomic.AddInt64(&c.read, int64(n))
+	return n, err
 }
 
 func (c *countingConn) Write(p []byte) (int, error) {
 	n, err := c.Conn.Write(p)
-	c.written += int64(n)
+	atomic.AddInt64(&c.written, int64(n))
 	return n, err
+}
+
+func (c *countingConn) ReadBytes() int64 {
+	if c == nil {
+		return 0
+	}
+	return atomic.LoadInt64(&c.read)
+}
+
+func (c *countingConn) WrittenBytes() int64 {
+	if c == nil {
+		return 0
+	}
+	return atomic.LoadInt64(&c.written)
 }

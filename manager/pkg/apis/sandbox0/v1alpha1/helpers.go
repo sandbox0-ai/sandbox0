@@ -420,5 +420,6 @@ func BuildEgressSpec(policy *TplSandboxNetworkPolicy) *NetworkEgressPolicy {
 		DeniedDomains:  policy.Egress.DeniedDomains,
 		AllowedPorts:   policy.Egress.AllowedPorts,
 		DeniedPorts:    policy.Egress.DeniedPorts,
+		AuthRules:      policy.Egress.AuthRules,
 	}
 }

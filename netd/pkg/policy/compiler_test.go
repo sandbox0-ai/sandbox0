@@ -17,6 +17,17 @@ func TestCompileNetworkPolicy(t *testing.T) {
 			AllowedPorts: []v1alpha1.PortSpec{
 				{Port: 80, Protocol: "tcp"},
 			},
+			AuthRules: []v1alpha1.EgressAuthRule{
+				{
+					Name:     "example-http",
+					AuthRef:  "example-api",
+					Protocol: v1alpha1.EgressAuthProtocolHTTP,
+					Domains:  []string{"api.example.com"},
+					Ports: []v1alpha1.PortSpec{
+						{Port: 80, Protocol: "tcp"},
+					},
+				},
+			},
 		},
 	}
 
@@ -38,5 +49,11 @@ func TestCompileNetworkPolicy(t *testing.T) {
 	}
 	if len(compiled.Egress.AllowedPorts) != 1 {
 		t.Fatalf("expected allowed ports")
+	}
+	if len(compiled.Egress.AuthRules) != 1 {
+		t.Fatalf("expected auth rules")
+	}
+	if compiled.Egress.AuthRules[0].AuthRef != "example-api" {
+		t.Fatalf("unexpected auth ref: %s", compiled.Egress.AuthRules[0].AuthRef)
 	}
 }

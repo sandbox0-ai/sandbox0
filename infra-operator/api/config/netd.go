@@ -26,6 +26,31 @@ type NetdConfig struct {
 	ClusterID string `yaml:"cluster_id" json:"-"`
 
 	// +optional
+	EgressBrokerURL string `yaml:"egress_broker_url" json:"egressBrokerUrl"`
+
+	// +optional
+	// +kubebuilder:default=false
+	EgressAuthEnabled bool `yaml:"egress_auth_enabled" json:"egressAuthEnabled"`
+
+	// +optional
+	// +kubebuilder:default="2s"
+	EgressBrokerTimeout metav1.Duration `yaml:"egress_broker_timeout" json:"egressBrokerTimeout"`
+
+	// +optional
+	// +kubebuilder:default="fail-closed"
+	EgressAuthFailurePolicy string `yaml:"egress_auth_failure_policy" json:"egressAuthFailurePolicy"`
+
+	// +optional
+	MITMCACertPath string `yaml:"mitm_ca_cert_path" json:"mitmCaCertPath"`
+
+	// +optional
+	MITMCAKeyPath string `yaml:"mitm_ca_key_path" json:"mitmCaKeyPath"`
+
+	// +optional
+	// +kubebuilder:default="1h"
+	MITMLeafTTL metav1.Duration `yaml:"mitm_leaf_ttl" json:"mitmLeafTtl"`
+
+	// +optional
 	DatabaseURL string `yaml:"database_url" json:"-"`
 
 	// +optional
@@ -197,6 +222,15 @@ func applyNetdDefaults(cfg *NetdConfig) {
 	}
 	if cfg.ResyncPeriod.Duration == 0 {
 		cfg.ResyncPeriod = metav1.Duration{Duration: 30 * time.Second}
+	}
+	if cfg.EgressBrokerTimeout.Duration == 0 {
+		cfg.EgressBrokerTimeout = metav1.Duration{Duration: 2 * time.Second}
+	}
+	if cfg.EgressAuthFailurePolicy == "" {
+		cfg.EgressAuthFailurePolicy = "fail-closed"
+	}
+	if cfg.MITMLeafTTL.Duration == 0 {
+		cfg.MITMLeafTTL = metav1.Duration{Duration: time.Hour}
 	}
 	if cfg.EDTHorizon.Duration == 0 {
 		cfg.EDTHorizon = metav1.Duration{Duration: 200 * time.Millisecond}

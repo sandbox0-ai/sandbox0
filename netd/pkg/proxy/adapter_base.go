@@ -1,10 +1,15 @@
 package proxy
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"strings"
 
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
 )
 
@@ -28,6 +33,7 @@ type adapterRequest struct {
 	Server     *Server
 	Compiled   *policy.CompiledPolicy
 	Audit      *flowAudit
+	EgressAuth *egressAuthContext
 	UDPSession *udpSession
 	SrcIP      string
 	DestIP     net.IP
@@ -54,7 +60,62 @@ func (a *httpAdapter) Handle(req *adapterRequest) error {
 		return fmt.Errorf("http adapter requires connection")
 	}
 	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
+	if req.EgressAuth != nil && req.EgressAuth.Rule != nil {
+		if req.EgressAuth.ShouldBypass() {
+			return req.Server.proxyHTTPRequest(req)
+		}
+		if req.EgressAuth.ResolveError != nil {
+			_ = writeHTTPProxyError(req.Conn, http.StatusServiceUnavailable, "egress auth resolution failed")
+			return fmt.Errorf("resolve egress auth for %q: %w", req.EgressAuth.Rule.AuthRef, req.EgressAuth.ResolveError)
+		}
+		if req.EgressAuth.Resolved == nil {
+			_ = writeHTTPProxyError(req.Conn, http.StatusServiceUnavailable, "egress auth material unavailable")
+			return fmt.Errorf("egress auth material missing for %q", req.EgressAuth.Rule.AuthRef)
+		}
+		return req.Server.proxyHTTPRequest(req)
+	}
 	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+}
+
+func parseBufferedHTTPRequest(headerBytes []byte) (*http.Request, error) {
+	reader := bufio.NewReader(bytes.NewReader(headerBytes))
+	req, err := http.ReadRequest(reader)
+	if err != nil {
+		return nil, err
+	}
+	return req, nil
+}
+
+func injectHTTPHeaders(req *http.Request, headers map[string]string) {
+	if req == nil || len(headers) == 0 {
+		return
+	}
+	for key, value := range headers {
+		key = http.CanonicalHeaderKey(strings.TrimSpace(key))
+		if key == "" {
+			continue
+		}
+		req.Header.Set(key, value)
+	}
+}
+
+func writeHTTPProxyError(conn net.Conn, statusCode int, message string) error {
+	if conn == nil {
+		return nil
+	}
+	resp := &http.Response{
+		StatusCode:    statusCode,
+		Proto:         "HTTP/1.1",
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		ContentLength: int64(len(message)),
+		Body:          io.NopCloser(strings.NewReader(message)),
+		Header:        make(http.Header),
+		Close:         true,
+	}
+	resp.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	resp.Header.Set("Connection", "close")
+	return resp.Write(conn)
 }
 
 type tlsAdapter struct{}
@@ -63,7 +124,7 @@ func (a *tlsAdapter) Name() string      { return "tls" }
 func (a *tlsAdapter) Transport() string { return "tcp" }
 func (a *tlsAdapter) Protocol() string  { return "tls" }
 func (a *tlsAdapter) Capability() adapterCapability {
-	return adapterCapabilityPassThrough
+	return adapterCapabilityTerminate
 }
 
 func (a *tlsAdapter) Handle(req *adapterRequest) error {
@@ -71,6 +132,15 @@ func (a *tlsAdapter) Handle(req *adapterRequest) error {
 		return fmt.Errorf("tls adapter requires connection")
 	}
 	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
+	if tlsTerminationRequired(req) {
+		if req.EgressAuth != nil && req.EgressAuth.ShouldBypass() {
+			return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+		}
+		return req.Server.proxyHTTPSRequest(req)
+	}
+	if req.EgressAuth != nil && req.EgressAuth.Rule != nil && req.EgressAuth.Rule.Protocol == v1alpha1.EgressAuthProtocolHTTPS && req.EgressAuth.Rule.TLSMode == "" {
+		return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+	}
 	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
 }
 

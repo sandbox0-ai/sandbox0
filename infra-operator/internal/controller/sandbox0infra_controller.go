@@ -44,6 +44,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/rbac"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/edgegateway"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/egressbroker"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/fuseplugin"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/globaldirectory"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
@@ -200,6 +201,7 @@ type componentPlan struct {
 	EnableInternalGateway     bool
 	EnableManager             bool
 	EnableStorageProxy        bool
+	EnableEgressBroker        bool
 	EnableFusePlugin          bool
 	EnableNetd                bool
 	EnableInternalAuth        bool
@@ -218,9 +220,10 @@ func (r *Sandbox0InfraReconciler) buildComponentPlan(infra *infrav1alpha1.Sandbo
 	enableInternalGateway := infrav1alpha1.IsInternalGatewayEnabled(infra)
 	enableManager := infrav1alpha1.IsManagerEnabled(infra)
 	enableStorageProxy := infrav1alpha1.IsStorageProxyEnabled(infra)
+	enableEgressBroker := infrav1alpha1.IsEgressBrokerEnabled(infra)
 
 	hasControlPlane := enableEdgeGateway || enableScheduler
-	hasDataPlane := enableInternalGateway || enableManager || enableStorageProxy
+	hasDataPlane := enableInternalGateway || enableManager || enableStorageProxy || enableEgressBroker
 
 	return componentPlan{
 		EnableGlobalDirectory:     enableGlobalDirectory,
@@ -231,6 +234,7 @@ func (r *Sandbox0InfraReconciler) buildComponentPlan(infra *infrav1alpha1.Sandbo
 		EnableInternalGateway:     enableInternalGateway,
 		EnableManager:             enableManager,
 		EnableStorageProxy:        enableStorageProxy,
+		EnableEgressBroker:        enableEgressBroker,
 		EnableFusePlugin:          enableManager,
 		EnableNetd:                infrav1alpha1.IsNetdEnabled(infra),
 		EnableInternalAuth:        hasControlPlane || hasDataPlane,
@@ -285,6 +289,7 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 	internalGatewayReconciler := internalgateway.NewReconciler(resources)
 	managerReconciler := manager.NewReconciler(resources)
 	storageProxyReconciler := storageproxy.NewReconciler(resources)
+	egressBrokerReconciler := egressbroker.NewReconciler(resources)
 	fusePluginReconciler := fuseplugin.NewReconciler(resources)
 	netdReconciler := netd.NewReconciler(resources)
 	rbacReconciler := rbac.NewReconciler(resources)
@@ -499,6 +504,18 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 			},
 		)
 	}
+	if plan.EnableEgressBroker {
+		steps = append(steps, reconcileStep{
+			Name: "egress-broker",
+			Run: func(ctx context.Context) error {
+				return egressBrokerReconciler.Reconcile(ctx, infra, imageRepo, imageTag)
+			},
+			ConditionType:  infrav1alpha1.ConditionTypeEgressBrokerReady,
+			SuccessReason:  "EgressBrokerReady",
+			SuccessMessage: "Egress broker is ready",
+			ErrorReason:    "EgressBrokerFailed",
+		})
+	}
 	if plan.EnableInitUser {
 		steps = append(steps, reconcileStep{
 			Name:           "init-user",
@@ -652,6 +669,19 @@ func (r *Sandbox0InfraReconciler) cleanupDisabledServiceResources(ctx context.Co
 			return err
 		}
 		if err := deleteClusterScoped(storageProxyName, &rbacv1.ClusterRoleBinding{}); err != nil {
+			return err
+		}
+	}
+
+	egressBrokerName := fmt.Sprintf("%s-egress-broker", infra.Name)
+	if !plan.EnableEgressBroker {
+		if err := deleteNamespaced(egressBrokerName, &appsv1.Deployment{}); err != nil {
+			return err
+		}
+		if err := deleteNamespaced(egressBrokerName, &corev1.Service{}); err != nil {
+			return err
+		}
+		if err := deleteNamespaced(egressBrokerName, &corev1.ConfigMap{}); err != nil {
 			return err
 		}
 	}
@@ -852,6 +882,9 @@ func (r *Sandbox0InfraReconciler) expectedConditionTypes(infra *infrav1alpha1.Sa
 	}
 	if plan.EnableStorageProxy {
 		conditions = append(conditions, infrav1alpha1.ConditionTypeStorageProxyReady)
+	}
+	if plan.EnableEgressBroker {
+		conditions = append(conditions, infrav1alpha1.ConditionTypeEgressBrokerReady)
 	}
 	if plan.EnableNetd {
 		conditions = append(conditions, infrav1alpha1.ConditionTypeNetdReady)

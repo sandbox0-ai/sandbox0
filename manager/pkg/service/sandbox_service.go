@@ -1148,6 +1148,7 @@ func networkPolicyFromSpec(spec *v1alpha1.NetworkPolicySpec) *v1alpha1.TplSandbo
 		egressDeniedDomains  []string
 		egressAllowedPorts   []v1alpha1.PortSpec
 		egressDeniedPorts    []v1alpha1.PortSpec
+		egressAuthRules      []v1alpha1.EgressAuthRule
 	)
 	if spec.Egress != nil {
 		egressAllowedCIDRs = append(egressAllowedCIDRs, spec.Egress.AllowedCIDRs...)
@@ -1156,6 +1157,7 @@ func networkPolicyFromSpec(spec *v1alpha1.NetworkPolicySpec) *v1alpha1.TplSandbo
 		egressDeniedDomains = append(egressDeniedDomains, spec.Egress.DeniedDomains...)
 		egressAllowedPorts = append(egressAllowedPorts, spec.Egress.AllowedPorts...)
 		egressDeniedPorts = append(egressDeniedPorts, spec.Egress.DeniedPorts...)
+		egressAuthRules = append(egressAuthRules, spec.Egress.AuthRules...)
 	}
 
 	mode := v1alpha1.NetworkModeAllowAll
@@ -1166,7 +1168,7 @@ func networkPolicyFromSpec(spec *v1alpha1.NetworkPolicySpec) *v1alpha1.TplSandbo
 	policy := &v1alpha1.TplSandboxNetworkPolicy{
 		Mode: mode,
 	}
-	if len(egressAllowedCIDRs)+len(egressDeniedCIDRs)+len(egressAllowedDomains)+len(egressDeniedDomains)+len(egressAllowedPorts)+len(egressDeniedPorts) > 0 {
+	if len(egressAllowedCIDRs)+len(egressDeniedCIDRs)+len(egressAllowedDomains)+len(egressDeniedDomains)+len(egressAllowedPorts)+len(egressDeniedPorts)+len(egressAuthRules) > 0 {
 		policy.Egress = &v1alpha1.NetworkEgressPolicy{
 			AllowedCIDRs:   egressAllowedCIDRs,
 			DeniedCIDRs:    egressDeniedCIDRs,
@@ -1174,6 +1176,7 @@ func networkPolicyFromSpec(spec *v1alpha1.NetworkPolicySpec) *v1alpha1.TplSandbo
 			DeniedDomains:  egressDeniedDomains,
 			AllowedPorts:   egressAllowedPorts,
 			DeniedPorts:    egressDeniedPorts,
+			AuthRules:      egressAuthRules,
 		}
 	}
 

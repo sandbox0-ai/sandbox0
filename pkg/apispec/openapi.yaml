@@ -4412,6 +4412,54 @@ components:
           description: Port/protocol denylist used only when mode is `allow-all`.
           items:
             $ref: "#/components/schemas/PortSpec"
+        authRules:
+          type: array
+          description: |
+            Structured egress auth injection rules resolved by `egress-broker`.
+            These rules are orthogonal to allow/deny matching and are intended for
+            destination-scoped outbound auth behavior.
+          items:
+            $ref: "#/components/schemas/EgressAuthRule"
+    EgressAuthRule:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Optional stable identifier used for merge and replacement.
+        authRef:
+          type: string
+          description: Broker-managed auth reference to resolve for matching traffic.
+        rollout:
+          $ref: "#/components/schemas/EgressAuthRolloutMode"
+        protocol:
+          $ref: "#/components/schemas/EgressAuthProtocol"
+        tlsMode:
+          $ref: "#/components/schemas/EgressTLSMode"
+        failurePolicy:
+          $ref: "#/components/schemas/EgressAuthFailurePolicy"
+        domains:
+          type: array
+          description: Domain match list for the rule.
+          items:
+            type: string
+        ports:
+          type: array
+          description: Port/protocol constraints for the rule.
+          items:
+            $ref: "#/components/schemas/PortSpec"
+      required: [authRef]
+    EgressAuthProtocol:
+      type: string
+      enum: [http, https, grpc]
+    EgressAuthRolloutMode:
+      type: string
+      enum: [enabled, disabled]
+    EgressTLSMode:
+      type: string
+      enum: [passthrough, terminate-reoriginate]
+    EgressAuthFailurePolicy:
+      type: string
+      enum: [fail-closed, fail-open]
     PortSpec:
       type: object
       properties:

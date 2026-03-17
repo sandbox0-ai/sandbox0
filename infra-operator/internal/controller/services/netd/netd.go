@@ -87,6 +87,25 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	if infra.Spec.Cluster != nil && infra.Spec.Cluster.ID != "" {
 		config.ClusterID = infra.Spec.Cluster.ID
 	}
+	if infrav1alpha1.IsEgressBrokerEnabled(infra) && config.EgressBrokerURL == "" {
+		port := 8082
+		if infra.Spec.Services != nil && infra.Spec.Services.EgressBroker != nil && infra.Spec.Services.EgressBroker.Config != nil && infra.Spec.Services.EgressBroker.Config.HTTPPort > 0 {
+			port = infra.Spec.Services.EgressBroker.Config.HTTPPort
+		}
+		config.EgressBrokerURL = fmt.Sprintf("http://%s-egress-broker.%s.svc.cluster.local:%d", infra.Name, infra.Namespace, port)
+	}
+	mitmCASecretName := ""
+	if infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
+		mitmCASecretName = infra.Spec.Services.Netd.MITMCASecretName
+	}
+	if mitmCASecretName != "" {
+		if config.MITMCACertPath == "" {
+			config.MITMCACertPath = "/tls/ca.crt"
+		}
+		if config.MITMCAKeyPath == "" {
+			config.MITMCAKeyPath = "/tls/ca.key"
+		}
+	}
 
 	if err := r.Resources.ReconcileServiceConfigMap(ctx, infra, name, labels, config); err != nil {
 		return err
@@ -132,6 +151,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			},
 		},
 	}
+	if mitmCASecretName != "" {
+		volumes = append(volumes, corev1.Volume{
+			Name: "mitm-ca",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: mitmCASecretName,
+				},
+			},
+		})
+	}
 
 	volumeMounts := []corev1.VolumeMount{
 		{
@@ -153,6 +182,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			Name:      "run",
 			MountPath: "/run",
 		},
+	}
+	if mitmCASecretName != "" {
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "mitm-ca",
+			MountPath: "/tls",
+			ReadOnly:  true,
+		})
 	}
 
 	desired := &appsv1.DaemonSet{

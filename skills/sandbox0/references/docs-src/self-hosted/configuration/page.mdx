@@ -142,7 +142,6 @@ spec:
             replicas: 2
         netd:
             enabled: true
-            mitmCaSecretName: netd-mitm-ca
             config:
                 egressAuthEnabled: true
                 egressAuthFailurePolicy: fail-closed
@@ -151,7 +150,8 @@ spec:
 Operational notes:
 
 - `egressBroker` is cluster-local. It should not be placed behind a region-scoped dependency on the outbound hot path.
-- `services.netd.mitmCaSecretName` must reference a secret with `ca.crt` and `ca.key` when you use TLS interception for HTTPS or gRPC auth injection.
+- By default, `infra-operator` generates and reuses a cluster-local MITM CA secret for `netd` when `services.netd.mitmCaSecretName` is unset.
+- Set `services.netd.mitmCaSecretName` only when you want to override that behavior with your own secret containing `ca.crt` and `ca.key`.
 - `services.netd.config.egressAuthEnabled` is the cluster-level gate. `authRules` inside sandbox network policy remain the per-policy gate.
 - `fail-open` is possible for some pre-interception failures, but transparent recovery is not guaranteed once downstream TLS interception has already started.
 

@@ -74,7 +74,7 @@ egress:
 ```
 
 <Callout variant="warning">
-HTTPS and gRPC interception require cluster-level support in self-hosted deployments: `egress-broker` must be enabled, `netd` egress auth must be turned on, and `netd` needs a cluster-local MITM CA secret.
+HTTPS and gRPC interception require cluster-level support in self-hosted deployments: `egress-broker` must be enabled, `netd` egress auth must be turned on, and `netd` needs a cluster-local MITM CA. `infra-operator` manages that CA by default, or you can override it with `services.netd.mitmCaSecretName`.
 </Callout>
 
 ---

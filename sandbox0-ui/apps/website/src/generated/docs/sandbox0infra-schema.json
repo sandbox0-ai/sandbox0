@@ -3522,7 +3522,7 @@
           "path": "spec.services.netd.mitmCaSecretName",
           "type": "string",
           "required": false,
-          "description": "MITMCASecretName mounts a secret containing cluster-local MITM CA material for HTTPS interception. Expected keys are ca.crt and ca.key."
+          "description": "MITMCASecretName overrides the operator-managed cluster-local MITM CA secret for HTTPS interception. Expected keys are ca.crt and ca.key. When unset, infra-operator generates and reuses a managed secret."
         },
         {
           "path": "spec.services.netd.nodeSelector",

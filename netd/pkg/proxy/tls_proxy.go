@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 )
 
 func (s *Server) proxyHTTPSRequest(req *adapterRequest) error {
@@ -38,7 +40,7 @@ func (s *Server) proxyHTTPSRequest(req *adapterRequest) error {
 	downstreamTLS := tls.Server(clientConn, &tls.Config{
 		Certificates: []tls.Certificate{*cert},
 		MinVersion:   tls.VersionTLS12,
-		NextProtos:   []string{"http/1.1"},
+		NextProtos:   downstreamTLSNextProtos(req),
 	})
 	if err := downstreamTLS.Handshake(); err != nil {
 		return fmt.Errorf("handshake downstream tls: %w", err)
@@ -54,6 +56,13 @@ func (s *Server) proxyHTTPSRequest(req *adapterRequest) error {
 			return fmt.Errorf("egress auth material missing for %q", req.EgressAuth.Rule.AuthRef)
 		}
 	}
+	if req.EgressAuth != nil && req.EgressAuth.Rule != nil && req.EgressAuth.Rule.Protocol == v1alpha1.EgressAuthProtocolGRPC && downstreamTLS.ConnectionState().NegotiatedProtocol != "h2" {
+		_ = writeHTTPProxyError(downstreamTLS, http.StatusBadRequest, "grpc interception requires h2 alpn")
+		return fmt.Errorf("grpc interception requires h2 alpn for host %q", req.Host)
+	}
+	if shouldProxyHTTP2(req, downstreamTLS.ConnectionState()) {
+		return s.proxyHTTP2FromConn(downstreamTLS, req)
+	}
 	upstream, err := s.dialUpstreamTLS(req)
 	if err != nil {
 		_ = writeHTTPProxyError(downstreamTLS, http.StatusBadGateway, "upstream tls connection failed")
@@ -61,6 +70,23 @@ func (s *Server) proxyHTTPSRequest(req *adapterRequest) error {
 	}
 	defer upstream.Close()
 	return s.proxyHTTPFromConn(downstreamTLS, req, upstream)
+}
+
+func downstreamTLSNextProtos(req *adapterRequest) []string {
+	if req != nil && req.EgressAuth != nil && req.EgressAuth.Rule != nil && req.EgressAuth.Rule.Protocol == v1alpha1.EgressAuthProtocolGRPC {
+		return []string{"h2"}
+	}
+	return []string{"http/1.1"}
+}
+
+func shouldProxyHTTP2(req *adapterRequest, state tls.ConnectionState) bool {
+	if req == nil || req.EgressAuth == nil || req.EgressAuth.Rule == nil {
+		return false
+	}
+	if state.NegotiatedProtocol == "h2" {
+		return true
+	}
+	return req.EgressAuth.Rule.Protocol == v1alpha1.EgressAuthProtocolGRPC
 }
 
 func (s *Server) dialUpstreamTLS(req *adapterRequest) (net.Conn, error) {

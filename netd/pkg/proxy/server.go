@@ -968,7 +968,14 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 
 type countingConn struct {
 	net.Conn
+	read    int64
 	written int64
+}
+
+func (c *countingConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	c.read += int64(n)
+	return n, err
 }
 
 func (c *countingConn) Write(p []byte) (int, error) {

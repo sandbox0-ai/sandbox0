@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"io"
@@ -16,6 +17,11 @@ import (
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/metadata"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -210,6 +216,154 @@ func TestTLSAdapterInterceptsHTTPSAndInjectsHeaders(t *testing.T) {
 	}
 	if got := <-requestBody; got != "payload" {
 		t.Fatalf("request body = %q", got)
+	}
+}
+
+func TestTLSAdapterInterceptsGRPCAndInjectsMetadata(t *testing.T) {
+	mitmCertPEM, mitmKeyPEM, err := newSelfSignedCertificateAuthority("sandbox0-mitm", time.Hour)
+	if err != nil {
+		t.Fatalf("new mitm ca: %v", err)
+	}
+	mitmAuthority, err := newCertificateAuthority(mitmCertPEM, mitmKeyPEM, time.Hour)
+	if err != nil {
+		t.Fatalf("new mitm authority: %v", err)
+	}
+
+	upstreamCAPEM, upstreamCAKeyPEM, err := newSelfSignedCertificateAuthority("sandbox0-upstream", time.Hour)
+	if err != nil {
+		t.Fatalf("new upstream ca: %v", err)
+	}
+	upstreamAuthority, err := newCertificateAuthority(upstreamCAPEM, upstreamCAKeyPEM, time.Hour)
+	if err != nil {
+		t.Fatalf("new upstream authority: %v", err)
+	}
+	upstreamLeaf, err := upstreamAuthority.CertificateForHost("api.example.com")
+	if err != nil {
+		t.Fatalf("upstream leaf: %v", err)
+	}
+	upstreamRootPool := x509.NewCertPool()
+	if !upstreamRootPool.AppendCertsFromPEM(upstreamCAPEM) {
+		t.Fatal("append upstream ca")
+	}
+
+	receivedAuth := make(chan string, 1)
+	grpcListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen grpc upstream: %v", err)
+	}
+	defer grpcListener.Close()
+	grpcServer := grpc.NewServer(
+		grpc.Creds(credentials.NewTLS(&tls.Config{
+			Certificates: []tls.Certificate{*upstreamLeaf},
+			NextProtos:   []string{"h2"},
+			MinVersion:   tls.VersionTLS12,
+		})),
+		grpc.UnaryInterceptor(func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+			md, _ := metadata.FromIncomingContext(ctx)
+			values := md.Get("authorization")
+			if len(values) > 0 {
+				receivedAuth <- values[0]
+			} else {
+				receivedAuth <- ""
+			}
+			return handler(ctx, req)
+		}),
+	)
+	defer grpcServer.Stop()
+	healthServer := health.NewServer()
+	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+	healthpb.RegisterHealthServer(grpcServer, healthServer)
+	go func() {
+		_ = grpcServer.Serve(grpcListener)
+	}()
+
+	proxyListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen proxy: %v", err)
+	}
+	defer proxyListener.Close()
+
+	server := &Server{
+		cfg: &config.NetdConfig{
+			ProxyUpstreamTimeout: metav1.Duration{Duration: 3 * time.Second},
+		},
+		logger:            zap.NewNop(),
+		tlsAuthority:      mitmAuthority,
+		upstreamTLSConfig: &tls.Config{RootCAs: upstreamRootPool, NextProtos: []string{"h2"}},
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		conn, acceptErr := proxyListener.Accept()
+		if acceptErr != nil {
+			done <- acceptErr
+			return
+		}
+		defer conn.Close()
+		req := &adapterRequest{
+			Server:   server,
+			Compiled: &policy.CompiledPolicy{SandboxID: "sbx_123", TeamID: "team_123", Mode: v1alpha1.NetworkModeAllowAll},
+			SrcIP:    "10.0.0.2",
+			DestIP:   grpcListener.Addr().(*net.TCPAddr).IP,
+			DestPort: grpcListener.Addr().(*net.TCPAddr).Port,
+			Host:     "api.example.com",
+			Conn:     conn,
+			EgressAuth: &egressAuthContext{
+				Rule: &policy.CompiledEgressAuthRule{
+					Name:     "example-grpc",
+					AuthRef:  "example-api",
+					Protocol: v1alpha1.EgressAuthProtocolGRPC,
+					TLSMode:  v1alpha1.EgressTLSModeTerminateReoriginate,
+				},
+				Resolved: &egressauth.ResolveResponse{
+					AuthRef: "example-api",
+					Headers: map[string]string{
+						"Authorization": "Bearer grpc-token",
+					},
+				},
+			},
+		}
+		done <- (&tlsAdapter{}).Handle(req)
+	}()
+
+	clientRootPool := x509.NewCertPool()
+	if !clientRootPool.AppendCertsFromPEM(mitmCertPEM) {
+		t.Fatal("append mitm ca")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	clientConn, err := grpc.DialContext(
+		ctx,
+		proxyListener.Addr().String(),
+		grpc.WithBlock(),
+		grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
+			ServerName: "api.example.com",
+			RootCAs:    clientRootPool,
+			NextProtos: []string{"h2"},
+			MinVersion: tls.VersionTLS12,
+		})),
+	)
+	if err != nil {
+		t.Fatalf("dial grpc proxy: %v", err)
+	}
+
+	client := healthpb.NewHealthClient(clientConn)
+	resp, err := client.Check(ctx, &healthpb.HealthCheckRequest{})
+	if err != nil {
+		t.Fatalf("grpc health check: %v", err)
+	}
+	if resp.GetStatus() != healthpb.HealthCheckResponse_SERVING {
+		t.Fatalf("unexpected health status %v", resp.GetStatus())
+	}
+	if got := <-receivedAuth; got != "Bearer grpc-token" {
+		t.Fatalf("authorization metadata = %q", got)
+	}
+	if err := clientConn.Close(); err != nil {
+		t.Fatalf("close grpc client: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("tls adapter handle: %v", err)
 	}
 }
 

@@ -56,6 +56,35 @@ func TestMatchEgressAuthRuleSkipsTLSRuleForHTTPClassifier(t *testing.T) {
 	}
 }
 
+func TestMatchEgressAuthRuleMatchesGRPCRuleForTLSClassifier(t *testing.T) {
+	p := &CompiledPolicy{
+		Egress: CompiledRuleSet{
+			AuthRules: []CompiledEgressAuthRule{
+				{
+					Name:     "example-grpc",
+					AuthRef:  "example-api",
+					Protocol: v1alpha1.EgressAuthProtocolGRPC,
+					TLSMode:  v1alpha1.EgressTLSModeTerminateReoriginate,
+					Domains: []DomainRule{
+						{Pattern: "api.example.com", Type: DomainMatchExact},
+					},
+					Ports: []PortRange{
+						{Protocol: "tcp", Start: 443, End: 443},
+					},
+				},
+			},
+		},
+	}
+
+	rule := MatchEgressAuthRule(p, "tcp", "tls", 443, "api.example.com")
+	if rule == nil {
+		t.Fatal("expected grpc auth rule match for tls classifier")
+	}
+	if rule.AuthRef != "example-api" {
+		t.Fatalf("unexpected auth ref %q", rule.AuthRef)
+	}
+}
+
 func TestCloneRuleSetCopiesAuthRules(t *testing.T) {
 	in := CompiledRuleSet{
 		AuthRules: []CompiledEgressAuthRule{

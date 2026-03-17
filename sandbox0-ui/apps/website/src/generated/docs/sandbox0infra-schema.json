@@ -3296,6 +3296,29 @@
           "default": "200ms"
         },
         {
+          "path": "spec.services.netd.config.egressAuthEnabled",
+          "type": "boolean",
+          "required": false,
+          "default": "false"
+        },
+        {
+          "path": "spec.services.netd.config.egressAuthFailurePolicy",
+          "type": "string",
+          "required": false,
+          "default": "fail-closed"
+        },
+        {
+          "path": "spec.services.netd.config.egressBrokerTimeout",
+          "type": "string",
+          "required": false,
+          "default": "2s"
+        },
+        {
+          "path": "spec.services.netd.config.egressBrokerUrl",
+          "type": "string",
+          "required": false
+        },
+        {
           "path": "spec.services.netd.config.failClosed",
           "type": "boolean",
           "required": false,
@@ -3330,6 +3353,22 @@
           "type": "string",
           "required": false,
           "default": "10s"
+        },
+        {
+          "path": "spec.services.netd.config.mitmCaCertPath",
+          "type": "string",
+          "required": false
+        },
+        {
+          "path": "spec.services.netd.config.mitmCaKeyPath",
+          "type": "string",
+          "required": false
+        },
+        {
+          "path": "spec.services.netd.config.mitmLeafTtl",
+          "type": "string",
+          "required": false,
+          "default": "1h"
         },
         {
           "path": "spec.services.netd.config.nodeName",
@@ -3478,6 +3517,12 @@
           "type": "string",
           "required": false,
           "description": "TLSSecret specifies the TLS secret name"
+        },
+        {
+          "path": "spec.services.netd.mitmCaSecretName",
+          "type": "string",
+          "required": false,
+          "description": "MITMCASecretName mounts a secret containing cluster-local MITM CA material for HTTPS interception. Expected keys are ca.crt and ca.key."
         },
         {
           "path": "spec.services.netd.nodeSelector",

@@ -78,6 +78,14 @@ spec:
       enabled: true
       # Keep netd on a regular host runtime such as runc; do not run netd on gVisor or Kata.
       # runtimeClassName: runc
+      # For HTTPS/gRPC auth injection, point this at a secret containing ca.crt and ca.key.
+      # mitmCaSecretName: netd-mitm-ca
+      config:
+        egressAuthEnabled: true
+        egressAuthFailurePolicy: fail-closed
+    egressBroker:
+      enabled: true
+      replicas: 1
     manager:
       enabled: true
       replicas: 1

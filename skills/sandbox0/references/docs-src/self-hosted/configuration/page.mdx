@@ -128,6 +128,32 @@ Examples:
 - `services.manager.config.autoscaler.*` tunes pool scale behavior
 - `services.storageProxy.config.juicefs*` tunes JuiceFS behavior and cache sizing
 - `services.netd.config.*` controls proxy ports, policy enforcement, and node-level networking behavior
+- `services.egressBroker.config.*` controls cluster-local outbound auth resolution used by `netd`
+
+### Egress Auth Injection
+
+If you want `netd` to inject outbound auth for selected HTTP, HTTPS, or gRPC destinations, enable `egressBroker` together with `netd`.
+
+```yaml
+spec:
+    services:
+        egressBroker:
+            enabled: true
+            replicas: 2
+        netd:
+            enabled: true
+            mitmCaSecretName: netd-mitm-ca
+            config:
+                egressAuthEnabled: true
+                egressAuthFailurePolicy: fail-closed
+```
+
+Operational notes:
+
+- `egressBroker` is cluster-local. It should not be placed behind a region-scoped dependency on the outbound hot path.
+- `services.netd.mitmCaSecretName` must reference a secret with `ca.crt` and `ca.key` when you use TLS interception for HTTPS or gRPC auth injection.
+- `services.netd.config.egressAuthEnabled` is the cluster-level gate. `authRules` inside sandbox network policy remain the per-policy gate.
+- `fail-open` is possible for some pre-interception failures, but transparent recovery is not guaranteed once downstream TLS interception has already started.
 
 Use `spec.sandboxNodePlacement` for the shared node placement consumed by sandbox template Pods, `netd`, and `k8s-plugin`. The older `services.netd.nodeSelector` and `services.netd.tolerations` fields remain as compatibility aliases when the shared placement is unset.
 
@@ -151,6 +177,7 @@ The reference below is generated from the `Sandbox0Infra` CRD schema produced by
 - Prefer external PostgreSQL and external object storage for serious deployments.
 - Enable `storageProxy` only when you need volume and snapshot features.
 - Enable `netd` only on Linux nodes and only when you need network policy enforcement.
+- Enable `egressBroker` together with `netd` when you need outbound auth injection.
 - Use `sandboxNodePlacement` to keep sandbox workloads and node-local sandbox services on the same node set.
 - If sandbox workloads use `gvisor` or `kata`, keep `services.netd.runtimeClassName` on a host-compatible runtime such as the cluster default runtime.
 - Keep control-plane and data-plane components in the same storage and latency domain for a given region.

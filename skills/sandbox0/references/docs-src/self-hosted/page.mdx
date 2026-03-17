@@ -15,7 +15,7 @@ Sandbox0 self-hosted is **operator-first**.
 ### Planes and Core Services
 
 - **Control plane** (optional in single-cluster): `edge-gateway`, `scheduler`
-- **Data plane** (runtime): `internal-gateway`, `manager`, optional `storage-proxy`, optional `netd`
+- **Data plane** (runtime): `internal-gateway`, `manager`, optional `storage-proxy`, optional `netd`, optional `egress-broker`
 - **In-pod runtime**: `procd` runs inside each sandbox pod and handles process/files/volume mount operations
 
 ### Single-Cluster vs Multi-Cluster
@@ -40,6 +40,7 @@ flowchart TD
             igw --> pods[Sandbox Pods - procd inside]
             mgr --> pods
             mgr --> netd[netd]
+            netd --> eb[egress-broker]
             mgr --> sp[storage-proxy]
         end
 

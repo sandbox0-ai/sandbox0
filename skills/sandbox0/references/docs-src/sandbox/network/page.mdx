@@ -26,6 +26,57 @@ Egress fields are interpreted by the selected mode:
 In <code>allow-all</code> mode, traffic is permitted by default and only <code>denied*</code> fields are enforced. In <code>block-all</code> mode, traffic is denied by default and only <code>allowed*</code> fields are enforced.
 </Callout>
 
+## Egress Auth Injection
+
+`authRules` let `netd` call cluster-local `egress-broker` and inject outbound auth for selected destinations without handing the original credential to the sandbox.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `authRules` | array | List of destination-scoped auth injection rules. |
+| `authRules[].authRef` | string | Required reference resolved by `egress-broker`. |
+| `authRules[].rollout` | string | Optional rollout control: `enabled` or `disabled`. Empty defaults to enabled. |
+| `authRules[].protocol` | string | Optional protocol hint: `http`, `https`, or `grpc`. |
+| `authRules[].tlsMode` | string | TLS handling mode for HTTPS/gRPC: `passthrough` or `terminate-reoriginate`. |
+| `authRules[].failurePolicy` | string | Optional enforcement policy: `fail-closed` or `fail-open`. |
+| `authRules[].domains` | array | Domain match list for the rule. |
+| `authRules[].ports` | array | Destination port constraints for the rule. |
+
+Supported cases:
+
+- plain HTTP header injection
+- HTTPS when `netd` terminates downstream TLS and re-establishes upstream TLS
+- gRPC over TLS when `netd` proxies HTTP/2 correctly and injects metadata
+
+Not supported or not transparent:
+
+- certificate pinning
+- runtimes that do not trust the injected cluster CA
+- legacy applications that must read a static key from disk or env
+
+Example request body:
+
+```yaml
+mode: block-all
+egress:
+    allowedDomains:
+        - api.example.com
+    authRules:
+        - name: example-api
+          authRef: example-api
+          protocol: https
+          tlsMode: terminate-reoriginate
+          failurePolicy: fail-closed
+          domains:
+              - api.example.com
+          ports:
+              - port: 443
+                protocol: tcp
+```
+
+<Callout variant="warning">
+HTTPS and gRPC interception require cluster-level support in self-hosted deployments: `egress-broker` must be enabled, `netd` egress auth must be turned on, and `netd` needs a cluster-local MITM CA secret.
+</Callout>
+
 ---
 
 ## Get Network Policy

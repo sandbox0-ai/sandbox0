@@ -32,11 +32,11 @@ type ResolveResponse struct {
 type ResolveDirectiveKind string
 
 const (
-	ResolveDirectiveKindHTTPHeaders         ResolveDirectiveKind = "http_headers"
-	ResolveDirectiveKindGRPCMetadata        ResolveDirectiveKind = "grpc_metadata"
+	ResolveDirectiveKindHTTPHeaders          ResolveDirectiveKind = "http_headers"
+	ResolveDirectiveKindGRPCMetadata         ResolveDirectiveKind = "grpc_metadata"
 	ResolveDirectiveKindTLSClientCertificate ResolveDirectiveKind = "tls_client_certificate"
-	ResolveDirectiveKindSSHAgentSign        ResolveDirectiveKind = "ssh_agent_sign"
-	ResolveDirectiveKindCustom              ResolveDirectiveKind = "custom"
+	ResolveDirectiveKindSSHAgentSign         ResolveDirectiveKind = "ssh_agent_sign"
+	ResolveDirectiveKindCustom               ResolveDirectiveKind = "custom"
 )
 
 // ResolveDirective is a typed outbound auth directive.

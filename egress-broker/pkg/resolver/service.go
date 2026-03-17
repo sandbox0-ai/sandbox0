@@ -16,13 +16,13 @@ var ErrAuthRefNotFound = errors.New("authRef not found")
 
 // Service owns broker-side runtime resolution and caching.
 type Service struct {
-	clusterID     string
-	defaultTTL    time.Duration
-	logger        *zap.Logger
-	bindingStore  egressauth.BindingStore
-	staticAuth    map[string]config.StaticEgressAuthConfig
-	providers     map[string]Provider
-	resolveCache  *resultCache
+	clusterID    string
+	defaultTTL   time.Duration
+	logger       *zap.Logger
+	bindingStore egressauth.BindingStore
+	staticAuth   map[string]config.StaticEgressAuthConfig
+	providers    map[string]Provider
+	resolveCache *resultCache
 }
 
 func NewService(cfg *config.EgressBrokerConfig, bindingStore egressauth.BindingStore, logger *zap.Logger) *Service {

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
@@ -245,7 +246,13 @@ func defaultTCPClassifiers() []tcpClassifier {
 	return []tcpClassifier{
 		&httpRequestClassifier{},
 		&tlsClientHelloClassifier{},
+		&amqpProtocolClassifier{},
+		&dnsTCPQueryClassifier{},
+		&mqttConnectClassifier{},
 		&postgresStartupClassifier{},
+		&mongoMessageClassifier{},
+		&redisRESPClassifier{},
+		&socks5GreetingClassifier{},
 		&sshBannerClassifier{},
 		&tcpUnknownClassifier{},
 	}
@@ -721,4 +728,433 @@ func (c *postgresStartupClassifier) Classify(ctx *tcpClassifyContext) (*classifi
 			req.Prefix = bytes.NewReader(raw)
 		},
 	}, tcpClassifierMatched
+}
+
+type socks5GreetingClassifier struct{}
+
+func (c *socks5GreetingClassifier) Name() string { return "socks5-greeting" }
+
+func (c *socks5GreetingClassifier) Classify(ctx *tcpClassifyContext) (*classificationResult, tcpClassifierDecision) {
+	if ctx == nil || ctx.Conn == nil {
+		return nil, tcpClassifierNoMatch
+	}
+	decision := looksLikeSOCKS5Greeting(ctx.Buffered(), ctx.IsComplete())
+	if decision != tcpClassifierMatched {
+		return nil, decision
+	}
+	raw := append([]byte(nil), ctx.Buffered()...)
+	return &classificationResult{
+		Classification: classifyKnownTraffic("tcp", "socks5", ctx.OrigIP, ctx.OrigPort, ""),
+		Apply: func(req *adapterRequest) {
+			req.Prefix = bytes.NewReader(raw)
+		},
+	}, tcpClassifierMatched
+}
+
+func looksLikeSOCKS5Greeting(data []byte, complete bool) tcpClassifierDecision {
+	if len(data) == 0 {
+		if complete {
+			return tcpClassifierNoMatch
+		}
+		return tcpClassifierNeedMore
+	}
+	if data[0] != 0x05 {
+		return tcpClassifierNoMatch
+	}
+	if len(data) < 2 {
+		if complete {
+			return tcpClassifierNoMatch
+		}
+		return tcpClassifierNeedMore
+	}
+	methods := int(data[1])
+	if methods <= 0 {
+		return tcpClassifierNoMatch
+	}
+	total := 2 + methods
+	if len(data) < total {
+		if complete {
+			return tcpClassifierNoMatch
+		}
+		return tcpClassifierNeedMore
+	}
+	return tcpClassifierMatched
+}
+
+type amqpProtocolClassifier struct{}
+
+func (c *amqpProtocolClassifier) Name() string { return "amqp-protocol" }
+
+func (c *amqpProtocolClassifier) Classify(ctx *tcpClassifyContext) (*classificationResult, tcpClassifierDecision) {
+	if ctx == nil || ctx.Conn == nil {
+		return nil, tcpClassifierNoMatch
+	}
+	decision := looksLikeAMQPProtocolHeader(ctx.Buffered(), ctx.IsComplete())
+	if decision != tcpClassifierMatched {
+		return nil, decision
+	}
+	raw := append([]byte(nil), ctx.Buffered()...)
+	return &classificationResult{
+		Classification: classifyKnownTraffic("tcp", "amqp", ctx.OrigIP, ctx.OrigPort, ""),
+		Apply: func(req *adapterRequest) {
+			req.Prefix = bytes.NewReader(raw)
+		},
+	}, tcpClassifierMatched
+}
+
+func looksLikeAMQPProtocolHeader(data []byte, complete bool) tcpClassifierDecision {
+	prefix := []byte("AMQP")
+	if len(data) < len(prefix) {
+		if bytes.HasPrefix(prefix, data) && !complete {
+			return tcpClassifierNeedMore
+		}
+		return tcpClassifierNoMatch
+	}
+	if !bytes.Equal(data[:len(prefix)], prefix) {
+		return tcpClassifierNoMatch
+	}
+	if len(data) < 8 {
+		if complete {
+			return tcpClassifierNoMatch
+		}
+		return tcpClassifierNeedMore
+	}
+	return tcpClassifierMatched
+}
+
+type dnsTCPQueryClassifier struct{}
+
+func (c *dnsTCPQueryClassifier) Name() string { return "dns-tcp-query" }
+
+func (c *dnsTCPQueryClassifier) Classify(ctx *tcpClassifyContext) (*classificationResult, tcpClassifierDecision) {
+	if ctx == nil || ctx.Conn == nil {
+		return nil, tcpClassifierNoMatch
+	}
+	host, decision := parseDNSQueryHost(ctx.Buffered(), ctx.IsComplete())
+	if decision != tcpClassifierMatched {
+		return nil, decision
+	}
+	raw := append([]byte(nil), ctx.Buffered()...)
+	return &classificationResult{
+		Classification: classifyKnownTraffic("tcp", "dns", ctx.OrigIP, ctx.OrigPort, host),
+		Host:           host,
+		Apply: func(req *adapterRequest) {
+			req.Prefix = bytes.NewReader(raw)
+		},
+	}, tcpClassifierMatched
+}
+
+func parseDNSQueryHost(data []byte, complete bool) (string, tcpClassifierDecision) {
+	if len(data) < 2 {
+		if complete {
+			return "", tcpClassifierNoMatch
+		}
+		return "", tcpClassifierNeedMore
+	}
+	messageLength := int(binary.BigEndian.Uint16(data[:2]))
+	if messageLength < 17 || messageLength > defaultTCPHeaderLimit-2 {
+		return "", tcpClassifierNoMatch
+	}
+	if len(data) < 14 {
+		if complete {
+			return "", tcpClassifierNoMatch
+		}
+		return "", tcpClassifierNeedMore
+	}
+	message := data[2:]
+	flags := binary.BigEndian.Uint16(message[2:4])
+	if flags&0x8000 != 0 || (flags>>11)&0x0f != 0 {
+		return "", tcpClassifierNoMatch
+	}
+	if binary.BigEndian.Uint16(message[4:6]) != 1 {
+		return "", tcpClassifierNoMatch
+	}
+	if binary.BigEndian.Uint16(message[6:8]) != 0 || binary.BigEndian.Uint16(message[8:10]) != 0 {
+		return "", tcpClassifierNoMatch
+	}
+	labels := make([]string, 0, 4)
+	pos := 12
+	for {
+		if len(message) < pos+1 {
+			if complete {
+				return "", tcpClassifierNoMatch
+			}
+			return "", tcpClassifierNeedMore
+		}
+		labelLen := int(message[pos])
+		pos++
+		if labelLen == 0 {
+			break
+		}
+		if labelLen > 63 {
+			return "", tcpClassifierNoMatch
+		}
+		if len(message) < pos+labelLen {
+			if complete {
+				return "", tcpClassifierNoMatch
+			}
+			return "", tcpClassifierNeedMore
+		}
+		label := message[pos : pos+labelLen]
+		for _, b := range label {
+			if !isDNSLabelByte(b) {
+				return "", tcpClassifierNoMatch
+			}
+		}
+		labels = append(labels, string(label))
+		pos += labelLen
+	}
+	if len(labels) == 0 {
+		return "", tcpClassifierNoMatch
+	}
+	if messageLength < pos+4 {
+		return "", tcpClassifierNoMatch
+	}
+	if len(message) < pos+4 {
+		if complete {
+			return "", tcpClassifierNoMatch
+		}
+		return "", tcpClassifierNeedMore
+	}
+	host := normalizeHost(strings.Join(labels, "."))
+	if host == "" {
+		return "", tcpClassifierNoMatch
+	}
+	return host, tcpClassifierMatched
+}
+
+func isDNSLabelByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '-' || b == '_'
+}
+
+type mqttConnectClassifier struct{}
+
+func (c *mqttConnectClassifier) Name() string { return "mqtt-connect" }
+
+func (c *mqttConnectClassifier) Classify(ctx *tcpClassifyContext) (*classificationResult, tcpClassifierDecision) {
+	if ctx == nil || ctx.Conn == nil {
+		return nil, tcpClassifierNoMatch
+	}
+	decision := looksLikeMQTTConnect(ctx.Buffered(), ctx.IsComplete())
+	if decision != tcpClassifierMatched {
+		return nil, decision
+	}
+	raw := append([]byte(nil), ctx.Buffered()...)
+	return &classificationResult{
+		Classification: classifyKnownTraffic("tcp", "mqtt", ctx.OrigIP, ctx.OrigPort, ""),
+		Apply: func(req *adapterRequest) {
+			req.Prefix = bytes.NewReader(raw)
+		},
+	}, tcpClassifierMatched
+}
+
+func looksLikeMQTTConnect(data []byte, complete bool) tcpClassifierDecision {
+	if len(data) == 0 {
+		if complete {
+			return tcpClassifierNoMatch
+		}
+		return tcpClassifierNeedMore
+	}
+	if data[0] != 0x10 {
+		return tcpClassifierNoMatch
+	}
+	remainingLength, consumed, ok, needMore := parseMQTTRemainingLength(data[1:])
+	if !ok {
+		if needMore && !complete {
+			return tcpClassifierNeedMore
+		}
+		return tcpClassifierNoMatch
+	}
+	if remainingLength < 10 {
+		return tcpClassifierNoMatch
+	}
+	pos := 1 + consumed
+	if len(data) < pos+2 {
+		if complete {
+			return tcpClassifierNoMatch
+		}
+		return tcpClassifierNeedMore
+	}
+	nameLen := int(binary.BigEndian.Uint16(data[pos : pos+2]))
+	pos += 2
+	if nameLen <= 0 {
+		return tcpClassifierNoMatch
+	}
+	if len(data) < pos+nameLen+4 {
+		if complete {
+			return tcpClassifierNoMatch
+		}
+		return tcpClassifierNeedMore
+	}
+	protocolName := string(data[pos : pos+nameLen])
+	pos += nameLen
+	protocolLevel := data[pos]
+	pos++
+	connectFlags := data[pos]
+	if connectFlags&0x01 != 0 {
+		return tcpClassifierNoMatch
+	}
+	if (connectFlags>>3)&0x03 == 0x03 {
+		return tcpClassifierNoMatch
+	}
+	switch protocolName {
+	case "MQTT":
+		if protocolLevel != 0x04 && protocolLevel != 0x05 {
+			return tcpClassifierNoMatch
+		}
+	case "MQIsdp":
+		if protocolLevel != 0x03 {
+			return tcpClassifierNoMatch
+		}
+	default:
+		return tcpClassifierNoMatch
+	}
+	return tcpClassifierMatched
+}
+
+func parseMQTTRemainingLength(data []byte) (value int, consumed int, ok bool, needMore bool) {
+	multiplier := 1
+	for i := 0; i < len(data) && i < 4; i++ {
+		encodedByte := int(data[i])
+		value += (encodedByte & 127) * multiplier
+		consumed++
+		if encodedByte&128 == 0 {
+			return value, consumed, true, false
+		}
+		multiplier *= 128
+	}
+	if len(data) < 4 {
+		return 0, 0, false, true
+	}
+	return 0, 0, false, false
+}
+
+type mongoMessageClassifier struct{}
+
+func (c *mongoMessageClassifier) Name() string { return "mongodb-message" }
+
+func (c *mongoMessageClassifier) Classify(ctx *tcpClassifyContext) (*classificationResult, tcpClassifierDecision) {
+	if ctx == nil || ctx.Conn == nil {
+		return nil, tcpClassifierNoMatch
+	}
+	decision := looksLikeMongoMessage(ctx.Buffered(), ctx.IsComplete())
+	if decision != tcpClassifierMatched {
+		return nil, decision
+	}
+	raw := append([]byte(nil), ctx.Buffered()...)
+	return &classificationResult{
+		Classification: classifyKnownTraffic("tcp", "mongodb", ctx.OrigIP, ctx.OrigPort, ""),
+		Apply: func(req *adapterRequest) {
+			req.Prefix = bytes.NewReader(raw)
+		},
+	}, tcpClassifierMatched
+}
+
+func looksLikeMongoMessage(data []byte, complete bool) tcpClassifierDecision {
+	if len(data) < 16 {
+		if complete {
+			return tcpClassifierNoMatch
+		}
+		return tcpClassifierNeedMore
+	}
+	messageLength := int(binary.LittleEndian.Uint32(data[:4]))
+	if messageLength < 21 || messageLength > defaultTCPHeaderLimit {
+		return tcpClassifierNoMatch
+	}
+	if int32(binary.LittleEndian.Uint32(data[8:12])) != 0 {
+		return tcpClassifierNoMatch
+	}
+	switch int32(binary.LittleEndian.Uint32(data[12:16])) {
+	case 2013:
+		if len(data) < 21 {
+			if complete {
+				return tcpClassifierNoMatch
+			}
+			return tcpClassifierNeedMore
+		}
+		flags := binary.LittleEndian.Uint32(data[16:20])
+		if flags&^uint32(0x00010003) != 0 {
+			return tcpClassifierNoMatch
+		}
+		if data[20] != 0x00 && data[20] != 0x01 {
+			return tcpClassifierNoMatch
+		}
+		return tcpClassifierMatched
+	case 2004:
+		if len(data) < 21 {
+			if complete {
+				return tcpClassifierNoMatch
+			}
+			return tcpClassifierNeedMore
+		}
+		flags := binary.LittleEndian.Uint32(data[16:20])
+		if flags&^uint32(0x000000ff) != 0 {
+			return tcpClassifierNoMatch
+		}
+		if data[20] == 0x00 {
+			return tcpClassifierNoMatch
+		}
+		return tcpClassifierMatched
+	default:
+		return tcpClassifierNoMatch
+	}
+}
+
+type redisRESPClassifier struct{}
+
+func (c *redisRESPClassifier) Name() string { return "redis-resp" }
+
+func (c *redisRESPClassifier) Classify(ctx *tcpClassifyContext) (*classificationResult, tcpClassifierDecision) {
+	if ctx == nil || ctx.Conn == nil {
+		return nil, tcpClassifierNoMatch
+	}
+	decision := looksLikeRedisRESPArray(ctx.Buffered(), ctx.IsComplete())
+	if decision != tcpClassifierMatched {
+		return nil, decision
+	}
+	raw := append([]byte(nil), ctx.Buffered()...)
+	return &classificationResult{
+		Classification: classifyKnownTraffic("tcp", "redis", ctx.OrigIP, ctx.OrigPort, ""),
+		Apply: func(req *adapterRequest) {
+			req.Prefix = bytes.NewReader(raw)
+		},
+	}, tcpClassifierMatched
+}
+
+func looksLikeRedisRESPArray(data []byte, complete bool) tcpClassifierDecision {
+	if len(data) == 0 {
+		if complete {
+			return tcpClassifierNoMatch
+		}
+		return tcpClassifierNeedMore
+	}
+	if data[0] != '*' {
+		return tcpClassifierNoMatch
+	}
+	lineEnd := bytes.Index(data, []byte("\r\n"))
+	if lineEnd < 0 {
+		if complete {
+			return tcpClassifierNoMatch
+		}
+		return tcpClassifierNeedMore
+	}
+	if lineEnd == 1 {
+		return tcpClassifierNoMatch
+	}
+	for _, b := range data[1:lineEnd] {
+		if b < '0' || b > '9' {
+			return tcpClassifierNoMatch
+		}
+	}
+	next := lineEnd + 2
+	if len(data) <= next {
+		if complete {
+			return tcpClassifierNoMatch
+		}
+		return tcpClassifierNeedMore
+	}
+	if data[next] != '$' && data[next] != '*' {
+		return tcpClassifierNoMatch
+	}
+	return tcpClassifierMatched
 }

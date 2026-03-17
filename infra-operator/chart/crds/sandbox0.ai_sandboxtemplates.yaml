@@ -147,6 +147,57 @@ spec:
                           - port
                           type: object
                         type: array
+                      authRules:
+                        items:
+                          description: EgressAuthRule defines an auth injection rule
+                            matched against outbound traffic.
+                          properties:
+                            authRef:
+                              description: AuthRef identifies the auth material or
+                                policy resolved by egress-broker.
+                              type: string
+                            domains:
+                              description: Domains matches outbound destinations by
+                                DNS name or wildcard suffix.
+                              items:
+                                type: string
+                              type: array
+                            name:
+                              description: Name is an optional stable identifier used
+                                for merge and replacement.
+                              type: string
+                            ports:
+                              description: Ports constrains the rule to specific ports/protocols.
+                              items:
+                                description: PortSpec defines a port specification
+                                properties:
+                                  endPort:
+                                    description: EndPort for port ranges (optional)
+                                    format: int32
+                                    type: integer
+                                  port:
+                                    description: Port number
+                                    format: int32
+                                    type: integer
+                                  protocol:
+                                    description: Protocol (tcp or udp)
+                                    type: string
+                                required:
+                                - port
+                                type: object
+                              type: array
+                            protocol:
+                              description: Protocol is the intended application protocol
+                                for the rule.
+                              type: string
+                            tlsMode:
+                              description: TLSMode indicates whether netd should intercept
+                                TLS for matching flows.
+                              type: string
+                          required:
+                          - authRef
+                          type: object
+                        type: array
                       deniedCidrs:
                         items:
                           type: string

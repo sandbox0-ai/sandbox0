@@ -206,13 +206,52 @@ const (
 // In allow-all mode, denied* fields are enforced and allowed* fields are ignored.
 // In block-all mode, allowed* fields are enforced and denied* fields are ignored.
 type NetworkEgressPolicy struct {
-	AllowedCIDRs   []string   `json:"allowedCidrs,omitempty"`
-	AllowedDomains []string   `json:"allowedDomains,omitempty"`
-	DeniedCIDRs    []string   `json:"deniedCidrs,omitempty"`
-	DeniedDomains  []string   `json:"deniedDomains,omitempty"`
-	AllowedPorts   []PortSpec `json:"allowedPorts,omitempty"`
-	DeniedPorts    []PortSpec `json:"deniedPorts,omitempty"`
+	AllowedCIDRs   []string         `json:"allowedCidrs,omitempty"`
+	AllowedDomains []string         `json:"allowedDomains,omitempty"`
+	DeniedCIDRs    []string         `json:"deniedCidrs,omitempty"`
+	DeniedDomains  []string         `json:"deniedDomains,omitempty"`
+	AllowedPorts   []PortSpec       `json:"allowedPorts,omitempty"`
+	DeniedPorts    []PortSpec       `json:"deniedPorts,omitempty"`
+	AuthRules      []EgressAuthRule `json:"authRules,omitempty"`
 }
+
+// EgressAuthRule defines an auth injection rule matched against outbound traffic.
+type EgressAuthRule struct {
+	// Name is an optional stable identifier used for merge and replacement.
+	Name string `json:"name,omitempty"`
+
+	// AuthRef identifies the auth material or policy resolved by egress-broker.
+	AuthRef string `json:"authRef"`
+
+	// Protocol is the intended application protocol for the rule.
+	Protocol EgressAuthProtocol `json:"protocol,omitempty"`
+
+	// TLSMode indicates whether netd should intercept TLS for matching flows.
+	TLSMode EgressTLSMode `json:"tlsMode,omitempty"`
+
+	// Domains matches outbound destinations by DNS name or wildcard suffix.
+	Domains []string `json:"domains,omitempty"`
+
+	// Ports constrains the rule to specific ports/protocols.
+	Ports []PortSpec `json:"ports,omitempty"`
+}
+
+// EgressAuthProtocol defines the supported application protocols for egress auth rules.
+type EgressAuthProtocol string
+
+const (
+	EgressAuthProtocolHTTP  EgressAuthProtocol = "http"
+	EgressAuthProtocolHTTPS EgressAuthProtocol = "https"
+	EgressAuthProtocolGRPC  EgressAuthProtocol = "grpc"
+)
+
+// EgressTLSMode defines how netd should handle TLS for auth-enabled egress traffic.
+type EgressTLSMode string
+
+const (
+	EgressTLSModePassthrough          EgressTLSMode = "passthrough"
+	EgressTLSModeTerminateReoriginate EgressTLSMode = "terminate-reoriginate"
+)
 
 // SandboxTemplateStatus defines the observed state of SandboxTemplate
 type SandboxTemplateStatus struct {

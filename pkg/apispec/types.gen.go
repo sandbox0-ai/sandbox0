@@ -26,6 +26,19 @@ const (
 	CreateAPIKeyRequestTypeUser    CreateAPIKeyRequestType = "user"
 )
 
+// Defines values for EgressAuthProtocol.
+const (
+	Grpc  EgressAuthProtocol = "grpc"
+	Http  EgressAuthProtocol = "http"
+	Https EgressAuthProtocol = "https"
+)
+
+// Defines values for EgressTLSMode.
+const (
+	Passthrough          EgressTLSMode = "passthrough"
+	TerminateReoriginate EgressTLSMode = "terminate-reoriginate"
+)
+
 // Defines values for ErrorEnvelopeSuccess.
 const (
 	False ErrorEnvelopeSuccess = false
@@ -552,6 +565,29 @@ type CreateTeamRequest struct {
 	Slug         *string `json:"slug,omitempty"`
 }
 
+// EgressAuthProtocol defines model for EgressAuthProtocol.
+type EgressAuthProtocol string
+
+// EgressAuthRule defines model for EgressAuthRule.
+type EgressAuthRule struct {
+	// AuthRef Broker-managed auth reference to resolve for matching traffic.
+	AuthRef string `json:"authRef"`
+
+	// Domains Domain match list for the rule.
+	Domains *[]string `json:"domains,omitempty"`
+
+	// Name Optional stable identifier used for merge and replacement.
+	Name *string `json:"name,omitempty"`
+
+	// Ports Port/protocol constraints for the rule.
+	Ports    *[]PortSpec         `json:"ports,omitempty"`
+	Protocol *EgressAuthProtocol `json:"protocol,omitempty"`
+	TlsMode  *EgressTLSMode      `json:"tlsMode,omitempty"`
+}
+
+// EgressTLSMode defines model for EgressTLSMode.
+type EgressTLSMode string
+
 // EnvVar defines model for EnvVar.
 type EnvVar struct {
 	Name  string `json:"name"`
@@ -726,6 +762,11 @@ type NetworkEgressPolicy struct {
 
 	// AllowedPorts Port/protocol allowlist used only when mode is `block-all`.
 	AllowedPorts *[]PortSpec `json:"allowedPorts,omitempty"`
+
+	// AuthRules Structured egress auth injection rules resolved by `egress-broker`.
+	// These rules are orthogonal to allow/deny matching and are intended for
+	// destination-scoped outbound auth behavior.
+	AuthRules *[]EgressAuthRule `json:"authRules,omitempty"`
 
 	// DeniedCidrs CIDR denylist used only when mode is `allow-all`.
 	DeniedCidrs *[]string `json:"deniedCidrs,omitempty"`

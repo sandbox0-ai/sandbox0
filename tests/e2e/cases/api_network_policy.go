@@ -20,11 +20,14 @@ import (
 )
 
 const (
-	auditableEgressHTTPPort   int32 = 18081
-	auditableEgressOpaquePort int32 = 18082
-	auditableEgressUDPPort    int32 = 18083
-	auditableEgressHTTPBody         = "auditable-egress-http-ok\n"
-	auditableEgressHelperSvc        = "auditable-egress-helper"
+	auditableEgressHTTPPort        int32 = 18081
+	auditableEgressOpaquePort      int32 = 18082
+	auditableEgressUDPPort         int32 = 18083
+	auditableEgressHTTPBody              = "auditable-egress-http-ok\n"
+	auditableEgressHelperPod             = "auditable-egress-helper"
+	auditableEgressHelperSvc             = "auditable-egress-helper"
+	auditableEgressHelperContainer       = "helper"
+	auditableEgressHelperImage           = "sandbox0ai/otemplates:default-v0.1.0"
 )
 
 func registerApiNetworkPolicySuite(envProvider func() *framework.ScenarioEnv) {
@@ -38,29 +41,30 @@ func registerApiNetworkPolicySuite(envProvider func() *framework.ScenarioEnv) {
 	})
 }
 
-func assertAuditableEgressInterception(env *framework.ScenarioEnv, session *e2eutils.Session, helperSandboxID string) {
+func assertAuditableEgressInterception(env *framework.ScenarioEnv, session *e2eutils.Session, _ string) {
 	helperNamespace, err := naming.TemplateNamespaceForBuiltin("default")
 	Expect(err).NotTo(HaveOccurred())
-	helperSandbox := waitForSandboxPodReadyEventually(env, session, helperSandboxID, helperNamespace)
 
-	Expect(execAuditableEgressHelperServices(env, helperNamespace, helperSandbox.PodName)).To(Succeed())
+	createAuditableEgressHelperPod(env, helperNamespace)
+	defer deleteAuditableEgressHelperPod(env, helperNamespace)
+	Expect(execAuditableEgressHelperServices(env, helperNamespace, auditableEgressHelperPod)).To(Succeed())
 
 	helperIP, err := framework.KubectlGetJSONPath(
 		env.TestCtx.Context,
 		env.Config.Kubeconfig,
 		helperNamespace,
 		"pod",
-		helperSandbox.PodName,
+		auditableEgressHelperPod,
 		"{.status.podIP}",
 	)
 	Expect(err).NotTo(HaveOccurred())
 	helperIP = strings.TrimSpace(helperIP)
 	Expect(helperIP).NotTo(BeEmpty())
-	helperServiceHost := upsertAuditableEgressHelperService(env, helperNamespace, helperSandbox.PodName)
+	helperServiceHost := upsertAuditableEgressHelperService(env, helperNamespace)
 	defer deleteAuditableEgressHelperService(env, helperNamespace)
 
 	Eventually(func() error {
-		output, execErr := execInSandboxPod(env, helperNamespace, helperSandbox.PodName, fmt.Sprintf("curl -fsS --max-time 5 http://127.0.0.1:%d/", auditableEgressHTTPPort))
+		output, execErr := execInAuditableEgressHelperPod(env, helperNamespace, fmt.Sprintf("curl -fsS --max-time 5 http://127.0.0.1:%d/", auditableEgressHTTPPort))
 		if execErr != nil {
 			return execErr
 		}
@@ -307,11 +311,59 @@ func auditableEgressPolicyAnnotationHash(annotation string) string {
 }
 
 func execAuditableEgressHelperServices(env *framework.ScenarioEnv, namespace, podName string) error {
-	_, err := execInSandboxPod(env, namespace, podName, auditableEgressHelperServicesCommand())
+	_, err := execInAuditableEgressHelperPod(env, namespace, auditableEgressHelperServicesCommand())
 	return err
 }
 
-func upsertAuditableEgressHelperService(env *framework.ScenarioEnv, namespace, sandboxID string) string {
+func createAuditableEgressHelperPod(env *framework.ScenarioEnv, namespace string) {
+	file, err := os.CreateTemp("", "sandbox0-e2e-auditable-egress-pod-*.yaml")
+	Expect(err).NotTo(HaveOccurred())
+	defer os.Remove(file.Name())
+
+	manifest := fmt.Sprintf(`apiVersion: v1
+kind: Pod
+metadata:
+  name: %s
+  namespace: %s
+  labels:
+    app: %s
+spec:
+  restartPolicy: Never
+  containers:
+    - name: %s
+      image: %s
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-lc", "sleep infinity"]
+`, auditableEgressHelperPod, namespace, auditableEgressHelperPod, auditableEgressHelperContainer, auditableEgressHelperImage)
+	_, err = file.WriteString(manifest)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(file.Close()).To(Succeed())
+	Expect(framework.ApplyManifest(env.TestCtx.Context, env.Config.Kubeconfig, file.Name())).To(Succeed())
+	Expect(framework.KubectlWaitForCondition(
+		env.TestCtx.Context,
+		env.Config.Kubeconfig,
+		namespace,
+		"pod",
+		auditableEgressHelperPod,
+		"Ready",
+		"2m",
+	)).To(Succeed())
+}
+
+func deleteAuditableEgressHelperPod(env *framework.ScenarioEnv, namespace string) {
+	_ = framework.Kubectl(
+		env.TestCtx.Context,
+		env.Config.Kubeconfig,
+		"delete",
+		"pod",
+		auditableEgressHelperPod,
+		"--namespace",
+		namespace,
+		"--ignore-not-found=true",
+	)
+}
+
+func upsertAuditableEgressHelperService(env *framework.ScenarioEnv, namespace string) string {
 	file, err := os.CreateTemp("", "sandbox0-e2e-auditable-egress-service-*.yaml")
 	Expect(err).NotTo(HaveOccurred())
 	defer os.Remove(file.Name())
@@ -324,13 +376,13 @@ metadata:
 spec:
   clusterIP: None
   selector:
-    %s: %s
+    app: %s
   ports:
     - name: http
       port: %d
       protocol: TCP
       targetPort: %d
-`, auditableEgressHelperSvc, namespace, controller.LabelSandboxID, sandboxID, auditableEgressHTTPPort, auditableEgressHTTPPort)
+`, auditableEgressHelperSvc, namespace, auditableEgressHelperPod, auditableEgressHTTPPort, auditableEgressHTTPPort)
 	_, err = file.WriteString(manifest)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(file.Close()).To(Succeed())
@@ -349,6 +401,18 @@ func deleteAuditableEgressHelperService(env *framework.ScenarioEnv, namespace st
 		namespace,
 		"--ignore-not-found=true",
 	)
+}
+
+func execInAuditableEgressHelperPod(env *framework.ScenarioEnv, namespace, script string) (string, error) {
+	output, err := framework.KubectlExecContainerOutput(
+		env.TestCtx.Context,
+		env.Config.Kubeconfig,
+		namespace,
+		auditableEgressHelperPod,
+		auditableEgressHelperContainer,
+		"/bin/sh", "-lc", script,
+	)
+	return strings.ReplaceAll(output, "\r\n", "\n"), err
 }
 
 func auditableEgressHelperServicesCommand() string {

@@ -317,6 +317,324 @@ func TestDefaultTCPClassifiersClassifyPostgresStartup(t *testing.T) {
 	}
 }
 
+func TestClassifyTCPReadsFragmentedAMQPProtocolHeader(t *testing.T) {
+	header := []byte{'A', 'M', 'Q', 'P', 0, 0, 9, 1}
+	ctx := &tcpClassifyContext{
+		OrigIP:      net.ParseIP("8.8.8.8"),
+		OrigPort:    5672,
+		Conn:        &scriptedConn{fragments: [][]byte{header[:3], header[3:6], header[6:]}},
+		HeaderLimit: 1024,
+	}
+	result, err := classifyTCP(defaultTCPClassifiers(), ctx)
+	if err != nil {
+		t.Fatalf("classifyTCP returned error: %v", err)
+	}
+	if result.Classification.Protocol != "amqp" {
+		t.Fatalf("protocol = %q, want amqp", result.Classification.Protocol)
+	}
+}
+
+func TestDefaultTCPClassifiersClassifyAMQPProtocolHeader(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	header := []byte{'A', 'M', 'Q', 'P', 0, 0, 9, 1}
+	go func() {
+		_, _ = client.Write(header)
+		_ = client.Close()
+	}()
+
+	ctx := &tcpClassifyContext{
+		OrigIP:      net.ParseIP("8.8.8.8"),
+		OrigPort:    5672,
+		Conn:        server,
+		HeaderLimit: 1024,
+	}
+	result, err := classifyTCP(defaultTCPClassifiers(), ctx)
+	if err != nil {
+		t.Fatalf("classifyTCP returned error: %v", err)
+	}
+	if result.Classification.Protocol != "amqp" {
+		t.Fatalf("protocol = %q, want amqp", result.Classification.Protocol)
+	}
+	req := &adapterRequest{}
+	result.Apply(req)
+	data, readErr := io.ReadAll(req.Prefix)
+	if readErr != nil {
+		t.Fatalf("failed to read replay prefix: %v", readErr)
+	}
+	if string(data) != string(header) {
+		t.Fatalf("replay prefix = %v, want %v", data, header)
+	}
+}
+
+func TestClassifyTCPReadsFragmentedDNSTCPQuery(t *testing.T) {
+	packet := buildDNSTCPQueryPacket()
+	ctx := &tcpClassifyContext{
+		OrigIP:      net.ParseIP("8.8.8.8"),
+		OrigPort:    53,
+		Conn:        &scriptedConn{fragments: [][]byte{packet[:2], packet[2:9], packet[9:]}},
+		HeaderLimit: 1024,
+	}
+	result, err := classifyTCP(defaultTCPClassifiers(), ctx)
+	if err != nil {
+		t.Fatalf("classifyTCP returned error: %v", err)
+	}
+	if result.Classification.Protocol != "dns" {
+		t.Fatalf("protocol = %q, want dns", result.Classification.Protocol)
+	}
+	if result.Host != "www.example.com" {
+		t.Fatalf("host = %q, want www.example.com", result.Host)
+	}
+}
+
+func TestDefaultTCPClassifiersClassifyDNSTCPQuery(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	packet := buildDNSTCPQueryPacket()
+	go func() {
+		_, _ = client.Write(packet)
+		_ = client.Close()
+	}()
+
+	ctx := &tcpClassifyContext{
+		OrigIP:      net.ParseIP("8.8.8.8"),
+		OrigPort:    53,
+		Conn:        server,
+		HeaderLimit: 1024,
+	}
+	result, err := classifyTCP(defaultTCPClassifiers(), ctx)
+	if err != nil {
+		t.Fatalf("classifyTCP returned error: %v", err)
+	}
+	if result.Classification.Protocol != "dns" {
+		t.Fatalf("protocol = %q, want dns", result.Classification.Protocol)
+	}
+	if result.Host != "www.example.com" {
+		t.Fatalf("host = %q, want www.example.com", result.Host)
+	}
+	req := &adapterRequest{}
+	result.Apply(req)
+	data, readErr := io.ReadAll(req.Prefix)
+	if readErr != nil {
+		t.Fatalf("failed to read replay prefix: %v", readErr)
+	}
+	if string(data) != string(packet) {
+		t.Fatalf("replay prefix = %v, want %v", data, packet)
+	}
+}
+
+func TestClassifyTCPReadsFragmentedMQTTConnect(t *testing.T) {
+	packet := buildMQTTConnectPacket()
+	ctx := &tcpClassifyContext{
+		OrigIP:      net.ParseIP("8.8.8.8"),
+		OrigPort:    1883,
+		Conn:        &scriptedConn{fragments: [][]byte{packet[:2], packet[2:8], packet[8:]}},
+		HeaderLimit: 1024,
+	}
+	result, err := classifyTCP(defaultTCPClassifiers(), ctx)
+	if err != nil {
+		t.Fatalf("classifyTCP returned error: %v", err)
+	}
+	if result.Classification.Protocol != "mqtt" {
+		t.Fatalf("protocol = %q, want mqtt", result.Classification.Protocol)
+	}
+}
+
+func TestDefaultTCPClassifiersClassifyMQTTConnect(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	packet := buildMQTTConnectPacket()
+	go func() {
+		_, _ = client.Write(packet)
+		_ = client.Close()
+	}()
+
+	ctx := &tcpClassifyContext{
+		OrigIP:      net.ParseIP("8.8.8.8"),
+		OrigPort:    1883,
+		Conn:        server,
+		HeaderLimit: 1024,
+	}
+	result, err := classifyTCP(defaultTCPClassifiers(), ctx)
+	if err != nil {
+		t.Fatalf("classifyTCP returned error: %v", err)
+	}
+	if result.Classification.Protocol != "mqtt" {
+		t.Fatalf("protocol = %q, want mqtt", result.Classification.Protocol)
+	}
+	req := &adapterRequest{}
+	result.Apply(req)
+	data, readErr := io.ReadAll(req.Prefix)
+	if readErr != nil {
+		t.Fatalf("failed to read replay prefix: %v", readErr)
+	}
+	if string(data) != string(packet) {
+		t.Fatalf("replay prefix = %v, want %v", data, packet)
+	}
+}
+
+func TestClassifyTCPReadsFragmentedMongoMessage(t *testing.T) {
+	packet := buildMongoOPMessage()
+	ctx := &tcpClassifyContext{
+		OrigIP:      net.ParseIP("8.8.8.8"),
+		OrigPort:    27017,
+		Conn:        &scriptedConn{fragments: [][]byte{packet[:7], packet[7:17], packet[17:]}},
+		HeaderLimit: 1024,
+	}
+	result, err := classifyTCP(defaultTCPClassifiers(), ctx)
+	if err != nil {
+		t.Fatalf("classifyTCP returned error: %v", err)
+	}
+	if result.Classification.Protocol != "mongodb" {
+		t.Fatalf("protocol = %q, want mongodb", result.Classification.Protocol)
+	}
+}
+
+func TestDefaultTCPClassifiersClassifyMongoMessage(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	packet := buildMongoOPMessage()
+	go func() {
+		_, _ = client.Write(packet)
+		_ = client.Close()
+	}()
+
+	ctx := &tcpClassifyContext{
+		OrigIP:      net.ParseIP("8.8.8.8"),
+		OrigPort:    27017,
+		Conn:        server,
+		HeaderLimit: 1024,
+	}
+	result, err := classifyTCP(defaultTCPClassifiers(), ctx)
+	if err != nil {
+		t.Fatalf("classifyTCP returned error: %v", err)
+	}
+	if result.Classification.Protocol != "mongodb" {
+		t.Fatalf("protocol = %q, want mongodb", result.Classification.Protocol)
+	}
+	req := &adapterRequest{}
+	result.Apply(req)
+	data, readErr := io.ReadAll(req.Prefix)
+	if readErr != nil {
+		t.Fatalf("failed to read replay prefix: %v", readErr)
+	}
+	if string(data) != string(packet) {
+		t.Fatalf("replay prefix = %v, want %v", data, packet)
+	}
+}
+
+func TestClassifyTCPReadsFragmentedRedisRESPArray(t *testing.T) {
+	payload := []byte("*2\r\n$4\r\nPING\r\n$4\r\nPONG\r\n")
+	ctx := &tcpClassifyContext{
+		OrigIP:      net.ParseIP("8.8.8.8"),
+		OrigPort:    6379,
+		Conn:        &scriptedConn{fragments: [][]byte{payload[:4], payload[4:8], payload[8:]}},
+		HeaderLimit: 1024,
+	}
+	result, err := classifyTCP(defaultTCPClassifiers(), ctx)
+	if err != nil {
+		t.Fatalf("classifyTCP returned error: %v", err)
+	}
+	if result.Classification.Protocol != "redis" {
+		t.Fatalf("protocol = %q, want redis", result.Classification.Protocol)
+	}
+}
+
+func TestDefaultTCPClassifiersClassifyRedisRESPArray(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	payload := []byte("*1\r\n$4\r\nPING\r\n")
+	go func() {
+		_, _ = client.Write(payload)
+		_ = client.Close()
+	}()
+
+	ctx := &tcpClassifyContext{
+		OrigIP:      net.ParseIP("8.8.8.8"),
+		OrigPort:    6379,
+		Conn:        server,
+		HeaderLimit: 1024,
+	}
+	result, err := classifyTCP(defaultTCPClassifiers(), ctx)
+	if err != nil {
+		t.Fatalf("classifyTCP returned error: %v", err)
+	}
+	if result.Classification.Protocol != "redis" {
+		t.Fatalf("protocol = %q, want redis", result.Classification.Protocol)
+	}
+	req := &adapterRequest{}
+	result.Apply(req)
+	data, readErr := io.ReadAll(req.Prefix)
+	if readErr != nil {
+		t.Fatalf("failed to read replay prefix: %v", readErr)
+	}
+	if string(data) != string(payload) {
+		t.Fatalf("replay prefix = %q, want %q", string(data), string(payload))
+	}
+}
+
+func TestClassifyTCPReadsFragmentedSOCKS5Greeting(t *testing.T) {
+	greeting := []byte{0x05, 0x02, 0x00, 0x02}
+	ctx := &tcpClassifyContext{
+		OrigIP:      net.ParseIP("8.8.8.8"),
+		OrigPort:    1080,
+		Conn:        &scriptedConn{fragments: [][]byte{greeting[:1], greeting[1:3], greeting[3:]}},
+		HeaderLimit: 1024,
+	}
+	result, err := classifyTCP(defaultTCPClassifiers(), ctx)
+	if err != nil {
+		t.Fatalf("classifyTCP returned error: %v", err)
+	}
+	if result.Classification.Protocol != "socks5" {
+		t.Fatalf("protocol = %q, want socks5", result.Classification.Protocol)
+	}
+}
+
+func TestDefaultTCPClassifiersClassifySOCKS5Greeting(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	greeting := []byte{0x05, 0x01, 0x00}
+	go func() {
+		_, _ = client.Write(greeting)
+		_ = client.Close()
+	}()
+
+	ctx := &tcpClassifyContext{
+		OrigIP:      net.ParseIP("8.8.8.8"),
+		OrigPort:    1080,
+		Conn:        server,
+		HeaderLimit: 1024,
+	}
+	result, err := classifyTCP(defaultTCPClassifiers(), ctx)
+	if err != nil {
+		t.Fatalf("classifyTCP returned error: %v", err)
+	}
+	if result.Classification.Protocol != "socks5" {
+		t.Fatalf("protocol = %q, want socks5", result.Classification.Protocol)
+	}
+	req := &adapterRequest{}
+	result.Apply(req)
+	data, readErr := io.ReadAll(req.Prefix)
+	if readErr != nil {
+		t.Fatalf("failed to read replay prefix: %v", readErr)
+	}
+	if string(data) != string(greeting) {
+		t.Fatalf("replay prefix = %v, want %v", data, greeting)
+	}
+}
+
 func TestDefaultTCPClassifiersClassifySSHBanner(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
@@ -434,4 +752,47 @@ func buildTLSClientHello(t *testing.T) []byte {
 		t.Fatalf("expected tls client hello bytes")
 	}
 	return append([]byte(nil), conn.written...)
+}
+
+func buildMQTTConnectPacket() []byte {
+	return []byte{
+		0x10, 0x0f,
+		0x00, 0x04, 'M', 'Q', 'T', 'T',
+		0x04, 0x02,
+		0x00, 0x3c,
+		0x00, 0x03, 'c', 'i', 'd',
+	}
+}
+
+func buildDNSTCPQueryPacket() []byte {
+	query := []byte{
+		0x12, 0x34,
+		0x01, 0x00,
+		0x00, 0x01,
+		0x00, 0x00,
+		0x00, 0x00,
+		0x00, 0x01,
+		0x03, 'w', 'w', 'w',
+		0x07, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
+		0x03, 'c', 'o', 'm',
+		0x00,
+		0x00, 0x01,
+		0x00, 0x01,
+	}
+	packet := make([]byte, 2+len(query))
+	binary.BigEndian.PutUint16(packet[:2], uint16(len(query)))
+	copy(packet[2:], query)
+	return packet
+}
+
+func buildMongoOPMessage() []byte {
+	packet := make([]byte, 26)
+	binary.LittleEndian.PutUint32(packet[:4], uint32(len(packet)))
+	binary.LittleEndian.PutUint32(packet[4:8], 1)
+	binary.LittleEndian.PutUint32(packet[8:12], 0)
+	binary.LittleEndian.PutUint32(packet[12:16], 2013)
+	binary.LittleEndian.PutUint32(packet[16:20], 0)
+	packet[20] = 0
+	copy(packet[21:], []byte{0x05, 0x00, 0x00, 0x00, 0x00})
+	return packet
 }

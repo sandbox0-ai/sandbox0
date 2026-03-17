@@ -105,7 +105,13 @@ func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.T
 	adapters, err := newAdapterRegistry(
 		[]proxyAdapter{
 			&httpAdapter{},
+			&amqpAdapter{},
+			&dnsAdapter{},
+			&mqttAdapter{},
 			&postgresAdapter{},
+			&mongodbAdapter{},
+			&redisAdapter{},
+			&socks5Adapter{},
 			&sshAdapter{},
 			&tlsAdapter{},
 			&udpAdapter{},

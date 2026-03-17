@@ -8,8 +8,14 @@ func TestAdapterCapabilities(t *testing.T) {
 		adapter    proxyAdapter
 		capability adapterCapability
 	}{
+		{name: "amqp passthrough", adapter: &amqpAdapter{}, capability: adapterCapabilityPassThrough},
+		{name: "dns passthrough", adapter: &dnsAdapter{}, capability: adapterCapabilityPassThrough},
 		{name: "http inspect", adapter: &httpAdapter{}, capability: adapterCapabilityInspect},
+		{name: "mongodb passthrough", adapter: &mongodbAdapter{}, capability: adapterCapabilityPassThrough},
+		{name: "mqtt passthrough", adapter: &mqttAdapter{}, capability: adapterCapabilityPassThrough},
 		{name: "postgres passthrough", adapter: &postgresAdapter{}, capability: adapterCapabilityPassThrough},
+		{name: "redis passthrough", adapter: &redisAdapter{}, capability: adapterCapabilityPassThrough},
+		{name: "socks5 passthrough", adapter: &socks5Adapter{}, capability: adapterCapabilityPassThrough},
 		{name: "tls passthrough", adapter: &tlsAdapter{}, capability: adapterCapabilityPassThrough},
 		{name: "ssh passthrough", adapter: &sshAdapter{}, capability: adapterCapabilityPassThrough},
 		{name: "udp passthrough", adapter: &udpAdapter{}, capability: adapterCapabilityPassThrough},

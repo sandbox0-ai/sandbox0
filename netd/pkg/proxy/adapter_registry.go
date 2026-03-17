@@ -44,7 +44,10 @@ func (r *adapterRegistry) Resolve(decision trafficDecision) (proxyAdapter, error
 	case decisionActionUseAdapter:
 		adapter = r.adapters[adapterKey{Transport: decision.Transport, Protocol: decision.Protocol}]
 		if adapter == nil {
-			return nil, fmt.Errorf("adapter not found for transport %q protocol %q", decision.Transport, decision.Protocol)
+			adapter = r.fallbacks[decision.Transport]
+			if adapter == nil {
+				return nil, fmt.Errorf("adapter not found for transport %q protocol %q", decision.Transport, decision.Protocol)
+			}
 		}
 	default:
 		return nil, nil

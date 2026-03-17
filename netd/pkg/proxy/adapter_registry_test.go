@@ -94,13 +94,35 @@ func TestResolveReturnsErrorForMissingAdapter(t *testing.T) {
 		t.Fatalf("newAdapterRegistry returned error: %v", err)
 	}
 
+	adapter, err := registry.Resolve(trafficDecision{
+		Action:    decisionActionUseAdapter,
+		Transport: "tcp",
+		Protocol:  "postgres",
+	})
+	if err != nil {
+		t.Fatalf("expected missing adapter lookup to fall back, got error: %v", err)
+	}
+	if adapter.Name() != "tcp-pass-through" {
+		t.Fatalf("resolved adapter = %q, want tcp-pass-through", adapter.Name())
+	}
+}
+
+func TestResolveReturnsErrorForMissingAdapterWithoutFallback(t *testing.T) {
+	registry, err := newAdapterRegistry(
+		[]proxyAdapter{&httpAdapter{}},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("newAdapterRegistry returned error: %v", err)
+	}
+
 	_, err = registry.Resolve(trafficDecision{
 		Action:    decisionActionUseAdapter,
 		Transport: "tcp",
 		Protocol:  "postgres",
 	})
 	if err == nil {
-		t.Fatalf("expected missing adapter lookup to fail")
+		t.Fatalf("expected missing adapter lookup without fallback to fail")
 	}
 }
 

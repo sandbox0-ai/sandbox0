@@ -108,6 +108,108 @@ func (a *postgresAdapter) Handle(req *adapterRequest) error {
 	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
 }
 
+type socks5Adapter struct{}
+
+func (a *socks5Adapter) Name() string      { return "socks5" }
+func (a *socks5Adapter) Transport() string { return "tcp" }
+func (a *socks5Adapter) Protocol() string  { return "socks5" }
+func (a *socks5Adapter) Capability() adapterCapability {
+	return adapterCapabilityPassThrough
+}
+
+func (a *socks5Adapter) Handle(req *adapterRequest) error {
+	if req == nil || req.Server == nil || req.Conn == nil {
+		return fmt.Errorf("socks5 adapter requires connection")
+	}
+	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
+	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+}
+
+type amqpAdapter struct{}
+
+func (a *amqpAdapter) Name() string      { return "amqp" }
+func (a *amqpAdapter) Transport() string { return "tcp" }
+func (a *amqpAdapter) Protocol() string  { return "amqp" }
+func (a *amqpAdapter) Capability() adapterCapability {
+	return adapterCapabilityPassThrough
+}
+
+func (a *amqpAdapter) Handle(req *adapterRequest) error {
+	if req == nil || req.Server == nil || req.Conn == nil {
+		return fmt.Errorf("amqp adapter requires connection")
+	}
+	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
+	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+}
+
+type dnsAdapter struct{}
+
+func (a *dnsAdapter) Name() string      { return "dns" }
+func (a *dnsAdapter) Transport() string { return "tcp" }
+func (a *dnsAdapter) Protocol() string  { return "dns" }
+func (a *dnsAdapter) Capability() adapterCapability {
+	return adapterCapabilityPassThrough
+}
+
+func (a *dnsAdapter) Handle(req *adapterRequest) error {
+	if req == nil || req.Server == nil || req.Conn == nil {
+		return fmt.Errorf("dns adapter requires connection")
+	}
+	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
+	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+}
+
+type mqttAdapter struct{}
+
+func (a *mqttAdapter) Name() string      { return "mqtt" }
+func (a *mqttAdapter) Transport() string { return "tcp" }
+func (a *mqttAdapter) Protocol() string  { return "mqtt" }
+func (a *mqttAdapter) Capability() adapterCapability {
+	return adapterCapabilityPassThrough
+}
+
+func (a *mqttAdapter) Handle(req *adapterRequest) error {
+	if req == nil || req.Server == nil || req.Conn == nil {
+		return fmt.Errorf("mqtt adapter requires connection")
+	}
+	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
+	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+}
+
+type mongodbAdapter struct{}
+
+func (a *mongodbAdapter) Name() string      { return "mongodb" }
+func (a *mongodbAdapter) Transport() string { return "tcp" }
+func (a *mongodbAdapter) Protocol() string  { return "mongodb" }
+func (a *mongodbAdapter) Capability() adapterCapability {
+	return adapterCapabilityPassThrough
+}
+
+func (a *mongodbAdapter) Handle(req *adapterRequest) error {
+	if req == nil || req.Server == nil || req.Conn == nil {
+		return fmt.Errorf("mongodb adapter requires connection")
+	}
+	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
+	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+}
+
+type redisAdapter struct{}
+
+func (a *redisAdapter) Name() string      { return "redis" }
+func (a *redisAdapter) Transport() string { return "tcp" }
+func (a *redisAdapter) Protocol() string  { return "redis" }
+func (a *redisAdapter) Capability() adapterCapability {
+	return adapterCapabilityPassThrough
+}
+
+func (a *redisAdapter) Handle(req *adapterRequest) error {
+	if req == nil || req.Server == nil || req.Conn == nil {
+		return fmt.Errorf("redis adapter requires connection")
+	}
+	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
+	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+}
+
 type udpAdapter struct{}
 
 func (a *udpAdapter) Name() string      { return "udp" }

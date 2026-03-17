@@ -29,8 +29,16 @@ type NetdConfig struct {
 	EgressBrokerURL string `yaml:"egress_broker_url" json:"egressBrokerUrl"`
 
 	// +optional
+	// +kubebuilder:default=false
+	EgressAuthEnabled bool `yaml:"egress_auth_enabled" json:"egressAuthEnabled"`
+
+	// +optional
 	// +kubebuilder:default="2s"
 	EgressBrokerTimeout metav1.Duration `yaml:"egress_broker_timeout" json:"egressBrokerTimeout"`
+
+	// +optional
+	// +kubebuilder:default="fail-closed"
+	EgressAuthFailurePolicy string `yaml:"egress_auth_failure_policy" json:"egressAuthFailurePolicy"`
 
 	// +optional
 	MITMCACertPath string `yaml:"mitm_ca_cert_path" json:"mitmCaCertPath"`
@@ -217,6 +225,9 @@ func applyNetdDefaults(cfg *NetdConfig) {
 	}
 	if cfg.EgressBrokerTimeout.Duration == 0 {
 		cfg.EgressBrokerTimeout = metav1.Duration{Duration: 2 * time.Second}
+	}
+	if cfg.EgressAuthFailurePolicy == "" {
+		cfg.EgressAuthFailurePolicy = "fail-closed"
 	}
 	if cfg.MITMLeafTTL.Duration == 0 {
 		cfg.MITMLeafTTL = metav1.Duration{Duration: time.Hour}

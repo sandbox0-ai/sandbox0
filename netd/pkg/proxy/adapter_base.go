@@ -61,6 +61,9 @@ func (a *httpAdapter) Handle(req *adapterRequest) error {
 	}
 	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
 	if req.EgressAuth != nil && req.EgressAuth.Rule != nil {
+		if req.EgressAuth.ShouldBypass() {
+			return req.Server.proxyHTTPRequest(req)
+		}
 		if req.EgressAuth.ResolveError != nil {
 			_ = writeHTTPProxyError(req.Conn, http.StatusServiceUnavailable, "egress auth resolution failed")
 			return fmt.Errorf("resolve egress auth for %q: %w", req.EgressAuth.Rule.AuthRef, req.EgressAuth.ResolveError)
@@ -130,6 +133,9 @@ func (a *tlsAdapter) Handle(req *adapterRequest) error {
 	}
 	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
 	if tlsTerminationRequired(req) {
+		if req.EgressAuth != nil && req.EgressAuth.ShouldBypass() {
+			return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+		}
 		return req.Server.proxyHTTPSRequest(req)
 	}
 	if req.EgressAuth != nil && req.EgressAuth.Rule != nil && req.EgressAuth.Rule.Protocol == v1alpha1.EgressAuthProtocolHTTPS && req.EgressAuth.Rule.TLSMode == "" {

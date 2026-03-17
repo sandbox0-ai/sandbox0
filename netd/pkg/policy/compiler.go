@@ -37,12 +37,14 @@ type CompiledRuleSet struct {
 }
 
 type CompiledEgressAuthRule struct {
-	Name     string
-	AuthRef  string
-	Protocol v1alpha1.EgressAuthProtocol
-	TLSMode  v1alpha1.EgressTLSMode
-	Domains  []DomainRule
-	Ports    []PortRange
+	Name          string
+	AuthRef       string
+	Rollout       v1alpha1.EgressAuthRolloutMode
+	Protocol      v1alpha1.EgressAuthProtocol
+	TLSMode       v1alpha1.EgressTLSMode
+	FailurePolicy v1alpha1.EgressAuthFailurePolicy
+	Domains       []DomainRule
+	Ports         []PortRange
 }
 
 type CompiledPolicy struct {
@@ -223,12 +225,19 @@ func compileEgressAuthRules(values []v1alpha1.EgressAuthRule) ([]CompiledEgressA
 			return nil, fmt.Errorf("parse auth rule ports for %q: %w", authRef, err)
 		}
 		rule := CompiledEgressAuthRule{
-			Name:     strings.TrimSpace(value.Name),
-			AuthRef:  authRef,
-			Protocol: value.Protocol,
-			TLSMode:  value.TLSMode,
-			Domains:  domains,
-			Ports:    ports,
+			Name:          strings.TrimSpace(value.Name),
+			AuthRef:       authRef,
+			Rollout:       value.Rollout,
+			Protocol:      value.Protocol,
+			TLSMode:       value.TLSMode,
+			FailurePolicy: value.FailurePolicy,
+			Domains:       domains,
+			Ports:         ports,
+		}
+		switch rule.Rollout {
+		case "", v1alpha1.EgressAuthRolloutEnabled, v1alpha1.EgressAuthRolloutDisabled:
+		default:
+			return nil, fmt.Errorf("unsupported auth rule rollout %q", value.Rollout)
 		}
 		switch rule.Protocol {
 		case "", v1alpha1.EgressAuthProtocolHTTP, v1alpha1.EgressAuthProtocolHTTPS, v1alpha1.EgressAuthProtocolGRPC:
@@ -239,6 +248,11 @@ func compileEgressAuthRules(values []v1alpha1.EgressAuthRule) ([]CompiledEgressA
 		case "", v1alpha1.EgressTLSModePassthrough, v1alpha1.EgressTLSModeTerminateReoriginate:
 		default:
 			return nil, fmt.Errorf("unsupported auth rule tls mode %q", value.TLSMode)
+		}
+		switch rule.FailurePolicy {
+		case "", v1alpha1.EgressAuthFailurePolicyFailClosed, v1alpha1.EgressAuthFailurePolicyFailOpen:
+		default:
+			return nil, fmt.Errorf("unsupported auth rule failure policy %q", value.FailurePolicy)
 		}
 		out = append(out, rule)
 	}

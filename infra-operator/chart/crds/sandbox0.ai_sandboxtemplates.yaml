@@ -162,6 +162,11 @@ spec:
                               items:
                                 type: string
                               type: array
+                            failurePolicy:
+                              description: FailurePolicy controls whether netd should
+                                fail-open or fail-closed when auth material cannot
+                                be enforced.
+                              type: string
                             name:
                               description: Name is an optional stable identifier used
                                 for merge and replacement.
@@ -189,6 +194,10 @@ spec:
                             protocol:
                               description: Protocol is the intended application protocol
                                 for the rule.
+                              type: string
+                            rollout:
+                              description: Rollout controls whether this auth rule
+                                is active. Empty defaults to enabled.
                               type: string
                             tlsMode:
                               description: TLSMode indicates whether netd should intercept

@@ -3,20 +3,26 @@ package proxy
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 )
 
 type egressAuthContext struct {
-	Rule           *policy.CompiledEgressAuthRule
-	Resolved       *egressauth.ResolveResponse
-	CacheHit       bool
-	ResolveAttempt bool
-	ResolveError   error
+	Rule              *policy.CompiledEgressAuthRule
+	Resolved          *egressauth.ResolveResponse
+	CacheHit          bool
+	ResolveAttempt    bool
+	ResolveError      error
+	FailurePolicy     string
+	BypassReason      string
+	EnforcementReason string
 }
 
 type egressAuthResolver interface {
@@ -46,6 +52,8 @@ type memoryEgressAuthCache struct {
 type noopEgressAuthResolver struct{}
 
 type ServerOption func(*Server)
+
+var errEgressAuthResolverUnconfigured = errors.New("egress auth resolver is not configured")
 
 func WithEgressAuthResolver(resolver egressAuthResolver) ServerOption {
 	return func(s *Server) {
@@ -101,6 +109,7 @@ func (c *memoryEgressAuthCache) Get(key egressAuthCacheKey) (*egressauth.Resolve
 	if entry.ExpiresAt != nil && !entry.ExpiresAt.After(c.now()) {
 		c.mu.Lock()
 		delete(c.entries, key)
+		proxyMetrics.SetEgressAuthCacheEntries(len(c.entries))
 		c.mu.Unlock()
 		return nil, false
 	}
@@ -113,6 +122,7 @@ func (c *memoryEgressAuthCache) Put(key egressAuthCacheKey, value *egressauth.Re
 	}
 	c.mu.Lock()
 	c.entries[key] = cloneResolveResponse(value)
+	proxyMetrics.SetEgressAuthCacheEntries(len(c.entries))
 	c.mu.Unlock()
 }
 
@@ -145,20 +155,33 @@ func (s *Server) attachEgressAuth(req *adapterRequest, decision trafficDecision)
 		return
 	}
 	ctx := &egressAuthContext{
-		Rule: decision.MatchedAuthRule,
+		Rule:          decision.MatchedAuthRule,
+		FailurePolicy: egressAuthFailurePolicy(s.cfg, decision.MatchedAuthRule),
 	}
 	req.EgressAuth = ctx
-	if s == nil || s.authCache == nil {
+	if !egressAuthEnabled(s.cfg) {
+		ctx.BypassReason = "cluster_disabled"
+		proxyMetrics.RecordEgressAuthDecision(decision.Protocol, "bypassed", ctx.BypassReason)
+		return
+	}
+	if s == nil {
 		return
 	}
 
 	key := buildEgressAuthCacheKey(req, decision)
-	if resolved, ok := s.authCache.Get(key); ok {
-		ctx.Resolved = resolved
-		ctx.CacheHit = true
-		return
+	if s.authCache != nil {
+		if resolved, ok := s.authCache.Get(key); ok {
+			ctx.Resolved = resolved
+			ctx.CacheHit = true
+			ctx.EnforcementReason = "cache_hit"
+			proxyMetrics.RecordEgressAuthResolve(decision.Protocol, "cache_hit", 0)
+			proxyMetrics.RecordEgressAuthDecision(decision.Protocol, "enforced", ctx.EnforcementReason)
+			return
+		}
 	}
 	if s.authResolver == nil {
+		ctx.ResolveError = errEgressAuthResolverUnconfigured
+		applyEgressAuthFailurePolicy(ctx, decision.Protocol, "resolver_unconfigured")
 		return
 	}
 
@@ -173,16 +196,70 @@ func (s *Server) attachEgressAuth(req *adapterRequest, decision trafficDecision)
 		Protocol:        decision.Protocol,
 	}
 	ctx.ResolveAttempt = true
+	start := time.Now()
 	resolved, err := s.authResolver.Resolve(context.Background(), resolveReq)
+	duration := time.Since(start)
 	if err != nil {
 		ctx.ResolveError = err
+		proxyMetrics.RecordEgressAuthResolve(decision.Protocol, "error", duration)
+		applyEgressAuthFailurePolicy(ctx, decision.Protocol, "resolve_error")
 		return
 	}
 	if resolved == nil {
+		proxyMetrics.RecordEgressAuthResolve(decision.Protocol, "empty", duration)
+		applyEgressAuthFailurePolicy(ctx, decision.Protocol, "material_unavailable")
 		return
 	}
 	ctx.Resolved = resolved
-	s.authCache.Put(key, resolved)
+	ctx.EnforcementReason = "resolved"
+	if s.authCache != nil {
+		s.authCache.Put(key, resolved)
+	}
+	proxyMetrics.RecordEgressAuthResolve(decision.Protocol, "resolved", duration)
+	proxyMetrics.RecordEgressAuthDecision(decision.Protocol, "enforced", ctx.EnforcementReason)
+}
+
+func (c *egressAuthContext) ShouldBypass() bool {
+	return c != nil && c.BypassReason != ""
+}
+
+func (c *egressAuthContext) FailOpen() bool {
+	return c != nil && c.FailurePolicy == string(policyFailureOpen())
+}
+
+func egressAuthEnabled(cfg *config.NetdConfig) bool {
+	return cfg != nil && cfg.EgressAuthEnabled
+}
+
+func egressAuthFailurePolicy(cfg *config.NetdConfig, rule *policy.CompiledEgressAuthRule) string {
+	if rule != nil && rule.FailurePolicy != "" {
+		return string(rule.FailurePolicy)
+	}
+	if cfg != nil && strings.TrimSpace(cfg.EgressAuthFailurePolicy) != "" {
+		return strings.TrimSpace(cfg.EgressAuthFailurePolicy)
+	}
+	return string(policyFailureClosed())
+}
+
+func applyEgressAuthFailurePolicy(ctx *egressAuthContext, protocol, reason string) {
+	if ctx == nil {
+		return
+	}
+	if ctx.FailOpen() {
+		ctx.BypassReason = reason
+		proxyMetrics.RecordEgressAuthDecision(protocol, "bypassed", reason)
+		return
+	}
+	ctx.EnforcementReason = reason
+	proxyMetrics.RecordEgressAuthDecision(protocol, "blocked", reason)
+}
+
+func policyFailureClosed() v1alpha1.EgressAuthFailurePolicy {
+	return v1alpha1.EgressAuthFailurePolicyFailClosed
+}
+
+func policyFailureOpen() v1alpha1.EgressAuthFailurePolicy {
+	return v1alpha1.EgressAuthFailurePolicyFailOpen
 }
 
 func buildEgressAuthCacheKey(req *adapterRequest, decision trafficDecision) egressAuthCacheKey {

@@ -4429,10 +4429,14 @@ components:
         authRef:
           type: string
           description: Broker-managed auth reference to resolve for matching traffic.
+        rollout:
+          $ref: "#/components/schemas/EgressAuthRolloutMode"
         protocol:
           $ref: "#/components/schemas/EgressAuthProtocol"
         tlsMode:
           $ref: "#/components/schemas/EgressTLSMode"
+        failurePolicy:
+          $ref: "#/components/schemas/EgressAuthFailurePolicy"
         domains:
           type: array
           description: Domain match list for the rule.
@@ -4447,9 +4451,15 @@ components:
     EgressAuthProtocol:
       type: string
       enum: [http, https, grpc]
+    EgressAuthRolloutMode:
+      type: string
+      enum: [enabled, disabled]
     EgressTLSMode:
       type: string
       enum: [passthrough, terminate-reoriginate]
+    EgressAuthFailurePolicy:
+      type: string
+      enum: [fail-closed, fail-open]
     PortSpec:
       type: object
       properties:

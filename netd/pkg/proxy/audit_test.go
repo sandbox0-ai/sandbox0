@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
 )
 
@@ -70,5 +71,50 @@ func TestAuditLoggerRecord(t *testing.T) {
 	}
 	if event.ClassifierResult != "known" || event.Action != "use-adapter" {
 		t.Fatalf("unexpected decision fields: %+v", event)
+	}
+}
+
+func TestAuditLoggerRecordIncludesEgressAuthFields(t *testing.T) {
+	var buf bytes.Buffer
+	logger := newAuditLoggerFromWriter(nopWriteCloser{Writer: &buf})
+	req := &adapterRequest{
+		Compiled: &policy.CompiledPolicy{SandboxID: "sb-1", TeamID: "team-1"},
+		Audit:    newFlowAudit("tcp-2", time.Now().UTC()),
+		SrcIP:    "10.0.0.2",
+		DestIP:   net.IPv4(1, 1, 1, 1),
+		DestPort: 443,
+		Host:     "api.example.com",
+		EgressAuth: &egressAuthContext{
+			Rule: &policy.CompiledEgressAuthRule{
+				Name:          "example-https",
+				AuthRef:       "example-api",
+				FailurePolicy: v1alpha1.EgressAuthFailurePolicyFailOpen,
+			},
+			FailurePolicy:     string(v1alpha1.EgressAuthFailurePolicyFailOpen),
+			BypassReason:      "cluster_disabled",
+			EnforcementReason: "cache_hit",
+		},
+	}
+	decision := trafficDecision{
+		Action:           decisionActionUseAdapter,
+		Transport:        "tcp",
+		Protocol:         "tls",
+		Reason:           "allowed",
+		ClassifierResult: "known",
+	}
+
+	if err := logger.Record(req, decision, &tlsAdapter{}, 10*time.Millisecond, nil); err != nil {
+		t.Fatalf("Record returned error: %v", err)
+	}
+
+	var event auditEvent
+	if err := json.Unmarshal(buf.Bytes(), &event); err != nil {
+		t.Fatalf("failed to decode audit event: %v", err)
+	}
+	if event.AuthFailurePolicy != "fail-open" || !event.AuthBypassed || event.AuthBypassReason != "cluster_disabled" {
+		t.Fatalf("unexpected auth bypass fields: %+v", event)
+	}
+	if event.AuthEnforcement != "cache_hit" || event.AuthRef != "example-api" || event.AuthRuleName != "example-https" {
+		t.Fatalf("unexpected auth enforcement fields: %+v", event)
 	}
 }

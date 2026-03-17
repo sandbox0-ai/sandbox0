@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 	"go.uber.org/zap"
@@ -162,6 +163,81 @@ func TestHTTPAdapterReturns503WhenAuthResolutionFails(t *testing.T) {
 	}
 	if err := <-errCh; err == nil {
 		t.Fatal("expected adapter error")
+	}
+}
+
+func TestHTTPAdapterFailOpenBypassesInjectionOnResolveError(t *testing.T) {
+	requestHeaders := make(chan http.Header, 1)
+	upstream := httptestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		requestHeaders <- r.Header.Clone()
+		_, _ = w.Write([]byte("ok"))
+	})
+	defer upstream.Close()
+
+	addr := upstream.Listener.Addr().(*net.TCPAddr)
+	proxyListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen proxy: %v", err)
+	}
+	defer proxyListener.Close()
+
+	server := &Server{
+		cfg: &config.NetdConfig{
+			ProxyUpstreamTimeout: metav1.Duration{Duration: 2 * time.Second},
+		},
+		logger: zap.NewNop(),
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		conn, acceptErr := proxyListener.Accept()
+		if acceptErr != nil {
+			done <- acceptErr
+			return
+		}
+		defer conn.Close()
+		rawReq := "GET /v1/test HTTP/1.1\r\nHost: api.example.com\r\n\r\n"
+		req := &adapterRequest{
+			Server:   server,
+			Compiled: &policy.CompiledPolicy{SandboxID: "sbx_123", TeamID: "team_123"},
+			SrcIP:    "10.0.0.2",
+			DestIP:   addr.IP,
+			DestPort: addr.Port,
+			Host:     "api.example.com",
+			Conn:     conn,
+			Prefix:   bytes.NewReader([]byte(rawReq)),
+			EgressAuth: &egressAuthContext{
+				Rule: &policy.CompiledEgressAuthRule{
+					Name:          "example-http",
+					AuthRef:       "example-api",
+					FailurePolicy: v1alpha1.EgressAuthFailurePolicyFailOpen,
+				},
+				FailurePolicy: string(v1alpha1.EgressAuthFailurePolicyFailOpen),
+				ResolveError:  io.EOF,
+				BypassReason:  "resolve_error",
+			},
+		}
+		done <- (&httpAdapter{}).Handle(req)
+	}()
+
+	clientConn, err := net.Dial("tcp4", proxyListener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer clientConn.Close()
+	resp, err := http.ReadResponse(bufio.NewReader(clientConn), nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err := <-done; err != nil {
+		t.Fatalf("adapter handle: %v", err)
+	}
+
+	headers := <-requestHeaders
+	if got := headers.Get("Authorization"); got != "" {
+		t.Fatalf("authorization header = %q, want empty", got)
 	}
 }
 

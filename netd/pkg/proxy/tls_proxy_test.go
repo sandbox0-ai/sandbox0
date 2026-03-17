@@ -367,6 +367,123 @@ func TestTLSAdapterInterceptsGRPCAndInjectsMetadata(t *testing.T) {
 	}
 }
 
+func TestTLSAdapterFailOpenRelaysRawTLSWhenMITMCAIsMissing(t *testing.T) {
+	upstreamCAPEM, upstreamCAKeyPEM, err := newSelfSignedCertificateAuthority("sandbox0-upstream", time.Hour)
+	if err != nil {
+		t.Fatalf("new upstream ca: %v", err)
+	}
+	upstreamAuthority, err := newCertificateAuthority(upstreamCAPEM, upstreamCAKeyPEM, time.Hour)
+	if err != nil {
+		t.Fatalf("new upstream authority: %v", err)
+	}
+	upstreamLeaf, err := upstreamAuthority.CertificateForHost("api.example.com")
+	if err != nil {
+		t.Fatalf("upstream leaf: %v", err)
+	}
+
+	upstreamListener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{*upstreamLeaf},
+		NextProtos:   []string{"http/1.1"},
+		MinVersion:   tls.VersionTLS12,
+	})
+	if err != nil {
+		t.Fatalf("tls listen upstream: %v", err)
+	}
+	defer upstreamListener.Close()
+	upstreamServer := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("passthrough-ok"))
+		}),
+	}
+	defer upstreamServer.Close()
+	go func() {
+		_ = upstreamServer.Serve(upstreamListener)
+	}()
+
+	proxyListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen proxy: %v", err)
+	}
+	defer proxyListener.Close()
+
+	server := &Server{
+		cfg: &config.NetdConfig{
+			ProxyUpstreamTimeout: metav1.Duration{Duration: 2 * time.Second},
+		},
+		logger: zap.NewNop(),
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		conn, acceptErr := proxyListener.Accept()
+		if acceptErr != nil {
+			done <- acceptErr
+			return
+		}
+		defer conn.Close()
+		req := &adapterRequest{
+			Server:   server,
+			Compiled: &policy.CompiledPolicy{SandboxID: "sbx_123", TeamID: "team_123", Mode: v1alpha1.NetworkModeAllowAll},
+			SrcIP:    "10.0.0.2",
+			DestIP:   upstreamListener.Addr().(*net.TCPAddr).IP,
+			DestPort: upstreamListener.Addr().(*net.TCPAddr).Port,
+			Host:     "api.example.com",
+			Conn:     conn,
+			EgressAuth: &egressAuthContext{
+				Rule: &policy.CompiledEgressAuthRule{
+					Name:          "example-https",
+					AuthRef:       "example-api",
+					TLSMode:       v1alpha1.EgressTLSModeTerminateReoriginate,
+					FailurePolicy: v1alpha1.EgressAuthFailurePolicyFailOpen,
+				},
+				FailurePolicy: string(v1alpha1.EgressAuthFailurePolicyFailOpen),
+				ResolveError:  io.EOF,
+				BypassReason:  "resolve_error",
+			},
+		}
+		done <- (&tlsAdapter{}).Handle(req)
+	}()
+
+	clientRootPool := x509.NewCertPool()
+	if !clientRootPool.AppendCertsFromPEM(upstreamCAPEM) {
+		t.Fatal("append upstream ca")
+	}
+	rawConn, err := net.Dial("tcp4", proxyListener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer rawConn.Close()
+	clientTLS := tls.Client(rawConn, &tls.Config{
+		ServerName: "api.example.com",
+		RootCAs:    clientRootPool,
+		NextProtos: []string{"http/1.1"},
+		MinVersion: tls.VersionTLS12,
+	})
+	defer clientTLS.Close()
+
+	if _, err := io.WriteString(clientTLS, "GET /v1/test HTTP/1.1\r\nHost: api.example.com\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatalf("write tls request: %v", err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(clientTLS), nil)
+	if err != nil {
+		t.Fatalf("read https response: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read https response body: %v", err)
+	}
+	_ = resp.Body.Close()
+	if got := string(body); got != "passthrough-ok" {
+		t.Fatalf("response body = %q", got)
+	}
+	if err := clientTLS.Close(); err != nil {
+		t.Fatalf("close client tls: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("tls adapter handle: %v", err)
+	}
+}
+
 func TestTLSAdapterReturnsErrorWhenMITMCAIsMissing(t *testing.T) {
 	server := &Server{
 		cfg: &config.NetdConfig{

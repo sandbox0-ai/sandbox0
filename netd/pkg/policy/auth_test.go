@@ -85,6 +85,28 @@ func TestMatchEgressAuthRuleMatchesGRPCRuleForTLSClassifier(t *testing.T) {
 	}
 }
 
+func TestMatchEgressAuthRuleSkipsDisabledRolloutRule(t *testing.T) {
+	p := &CompiledPolicy{
+		Egress: CompiledRuleSet{
+			AuthRules: []CompiledEgressAuthRule{
+				{
+					Name:     "example-http",
+					AuthRef:  "example-api",
+					Rollout:  v1alpha1.EgressAuthRolloutDisabled,
+					Protocol: v1alpha1.EgressAuthProtocolHTTP,
+					Domains: []DomainRule{
+						{Pattern: "api.example.com", Type: DomainMatchExact},
+					},
+				},
+			},
+		},
+	}
+
+	if rule := MatchEgressAuthRule(p, "tcp", "http", 80, "api.example.com"); rule != nil {
+		t.Fatalf("expected disabled rollout rule to be ignored, got %+v", rule)
+	}
+}
+
 func TestCloneRuleSetCopiesAuthRules(t *testing.T) {
 	in := CompiledRuleSet{
 		AuthRules: []CompiledEgressAuthRule{

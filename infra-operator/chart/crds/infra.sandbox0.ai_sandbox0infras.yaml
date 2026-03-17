@@ -2096,6 +2096,12 @@ spec:
                           edtHorizon:
                             default: 200ms
                             type: string
+                          egressAuthEnabled:
+                            default: false
+                            type: boolean
+                          egressAuthFailurePolicy:
+                            default: fail-closed
+                            type: string
                           egressBrokerTimeout:
                             default: 2s
                             type: string

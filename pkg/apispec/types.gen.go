@@ -26,11 +26,23 @@ const (
 	CreateAPIKeyRequestTypeUser    CreateAPIKeyRequestType = "user"
 )
 
+// Defines values for EgressAuthFailurePolicy.
+const (
+	FailClosed EgressAuthFailurePolicy = "fail-closed"
+	FailOpen   EgressAuthFailurePolicy = "fail-open"
+)
+
 // Defines values for EgressAuthProtocol.
 const (
 	Grpc  EgressAuthProtocol = "grpc"
 	Http  EgressAuthProtocol = "http"
 	Https EgressAuthProtocol = "https"
+)
+
+// Defines values for EgressAuthRolloutMode.
+const (
+	Disabled EgressAuthRolloutMode = "disabled"
+	Enabled  EgressAuthRolloutMode = "enabled"
 )
 
 // Defines values for EgressTLSMode.
@@ -565,8 +577,14 @@ type CreateTeamRequest struct {
 	Slug         *string `json:"slug,omitempty"`
 }
 
+// EgressAuthFailurePolicy defines model for EgressAuthFailurePolicy.
+type EgressAuthFailurePolicy string
+
 // EgressAuthProtocol defines model for EgressAuthProtocol.
 type EgressAuthProtocol string
+
+// EgressAuthRolloutMode defines model for EgressAuthRolloutMode.
+type EgressAuthRolloutMode string
 
 // EgressAuthRule defines model for EgressAuthRule.
 type EgressAuthRule struct {
@@ -574,15 +592,17 @@ type EgressAuthRule struct {
 	AuthRef string `json:"authRef"`
 
 	// Domains Domain match list for the rule.
-	Domains *[]string `json:"domains,omitempty"`
+	Domains       *[]string                `json:"domains,omitempty"`
+	FailurePolicy *EgressAuthFailurePolicy `json:"failurePolicy,omitempty"`
 
 	// Name Optional stable identifier used for merge and replacement.
 	Name *string `json:"name,omitempty"`
 
 	// Ports Port/protocol constraints for the rule.
-	Ports    *[]PortSpec         `json:"ports,omitempty"`
-	Protocol *EgressAuthProtocol `json:"protocol,omitempty"`
-	TlsMode  *EgressTLSMode      `json:"tlsMode,omitempty"`
+	Ports    *[]PortSpec            `json:"ports,omitempty"`
+	Protocol *EgressAuthProtocol    `json:"protocol,omitempty"`
+	Rollout  *EgressAuthRolloutMode `json:"rollout,omitempty"`
+	TlsMode  *EgressTLSMode         `json:"tlsMode,omitempty"`
 }
 
 // EgressTLSMode defines model for EgressTLSMode.

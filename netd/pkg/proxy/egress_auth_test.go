@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
@@ -48,6 +49,7 @@ func TestAttachEgressAuthUsesCacheBeforeResolver(t *testing.T) {
 		},
 	}
 	server := &Server{
+		cfg:          &config.NetdConfig{EgressAuthEnabled: true},
 		authResolver: resolver,
 		authCache:    cache,
 	}
@@ -90,6 +92,7 @@ func TestAttachEgressAuthResolvesAndCaches(t *testing.T) {
 		},
 	}
 	server := &Server{
+		cfg:          &config.NetdConfig{EgressAuthEnabled: true},
 		authResolver: resolver,
 		authCache:    newMemoryEgressAuthCache(),
 	}
@@ -136,6 +139,7 @@ func TestAttachEgressAuthResolvesAndCaches(t *testing.T) {
 func TestAttachEgressAuthRecordsResolveError(t *testing.T) {
 	resolveErr := errors.New("broker unavailable")
 	server := &Server{
+		cfg:          &config.NetdConfig{EgressAuthEnabled: true},
 		authResolver: &stubEgressAuthResolver{err: resolveErr},
 		authCache:    newMemoryEgressAuthCache(),
 	}
@@ -170,6 +174,7 @@ func TestAttachEgressAuthRecordsResolveError(t *testing.T) {
 
 func TestAttachEgressAuthSkipsWhenDecisionHasNoRule(t *testing.T) {
 	server := &Server{
+		cfg:          &config.NetdConfig{EgressAuthEnabled: true},
 		authResolver: &stubEgressAuthResolver{},
 		authCache:    newMemoryEgressAuthCache(),
 	}
@@ -183,5 +188,76 @@ func TestAttachEgressAuthSkipsWhenDecisionHasNoRule(t *testing.T) {
 
 	if req.EgressAuth != nil {
 		t.Fatalf("expected no egress auth context, got %+v", req.EgressAuth)
+	}
+}
+
+func TestAttachEgressAuthBypassesWhenClusterFeatureDisabled(t *testing.T) {
+	server := &Server{
+		cfg:          &config.NetdConfig{EgressAuthEnabled: false},
+		authResolver: &stubEgressAuthResolver{},
+		authCache:    newMemoryEgressAuthCache(),
+	}
+	req := &adapterRequest{
+		Compiled: &policy.CompiledPolicy{SandboxID: "sbx_123", TeamID: "team_123"},
+		DestIP:   net.ParseIP("8.8.8.8"),
+		DestPort: 443,
+		Host:     "api.example.com",
+	}
+	decision := trafficDecision{
+		Action:          decisionActionUseAdapter,
+		Transport:       "tcp",
+		Protocol:        "tls",
+		MatchedAuthRule: &policy.CompiledEgressAuthRule{Name: "example-https", AuthRef: "example-api"},
+	}
+
+	server.attachEgressAuth(req, decision)
+
+	if req.EgressAuth == nil {
+		t.Fatal("expected egress auth context")
+	}
+	if !req.EgressAuth.ShouldBypass() {
+		t.Fatal("expected auth enforcement to bypass")
+	}
+	if req.EgressAuth.BypassReason != "cluster_disabled" {
+		t.Fatalf("bypass reason = %q, want cluster_disabled", req.EgressAuth.BypassReason)
+	}
+}
+
+func TestAttachEgressAuthFailOpenBypassesOnResolverError(t *testing.T) {
+	resolveErr := errors.New("broker unavailable")
+	server := &Server{
+		cfg: &config.NetdConfig{
+			EgressAuthEnabled:       true,
+			EgressAuthFailurePolicy: string(v1alpha1.EgressAuthFailurePolicyFailOpen),
+		},
+		authResolver: &stubEgressAuthResolver{err: resolveErr},
+		authCache:    newMemoryEgressAuthCache(),
+	}
+	req := &adapterRequest{
+		Compiled: &policy.CompiledPolicy{SandboxID: "sbx_123", TeamID: "team_123"},
+		DestIP:   net.ParseIP("8.8.8.8"),
+		DestPort: 80,
+		Host:     "api.example.com",
+	}
+	decision := trafficDecision{
+		Action:          decisionActionUseAdapter,
+		Transport:       "tcp",
+		Protocol:        "http",
+		MatchedAuthRule: &policy.CompiledEgressAuthRule{Name: "example-http", AuthRef: "example-api"},
+	}
+
+	server.attachEgressAuth(req, decision)
+
+	if req.EgressAuth == nil {
+		t.Fatal("expected egress auth context")
+	}
+	if !req.EgressAuth.ShouldBypass() {
+		t.Fatal("expected fail-open bypass")
+	}
+	if req.EgressAuth.BypassReason != "resolve_error" {
+		t.Fatalf("bypass reason = %q, want resolve_error", req.EgressAuth.BypassReason)
+	}
+	if !errors.Is(req.EgressAuth.ResolveError, resolveErr) {
+		t.Fatalf("resolve error = %v, want %v", req.EgressAuth.ResolveError, resolveErr)
 	}
 }

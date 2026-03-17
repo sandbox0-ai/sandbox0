@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -25,16 +26,28 @@ func (s *Server) proxyHTTPSRequest(req *adapterRequest) error {
 	if req.Host == "" {
 		return fmt.Errorf("https interception requires host")
 	}
-	if s.tlsAuthority == nil {
-		return fmt.Errorf("https interception authority is not configured")
-	}
 	prefixBytes, err := readPrefixBytes(req.Prefix)
 	if err != nil {
 		return fmt.Errorf("read tls client hello prefix: %w", err)
 	}
+	prefixReader := bytes.NewReader(prefixBytes)
+	if req.EgressAuth != nil && req.EgressAuth.ShouldBypass() {
+		return s.relayTCPConn(req.Conn, prefixReader, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+	}
 	clientConn := newPrefixedConn(req.Conn, prefixBytes)
+	if s.tlsAuthority == nil {
+		if req.EgressAuth != nil && req.EgressAuth.FailOpen() {
+			req.EgressAuth.BypassReason = "tls_intercept_unavailable"
+			return s.relayTCPConn(req.Conn, prefixReader, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+		}
+		return fmt.Errorf("https interception authority is not configured")
+	}
 	cert, err := s.tlsAuthority.CertificateForHost(req.Host)
 	if err != nil {
+		if req.EgressAuth != nil && req.EgressAuth.FailOpen() {
+			req.EgressAuth.BypassReason = "tls_certificate_issue"
+			return s.relayTCPConn(req.Conn, prefixReader, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+		}
 		return fmt.Errorf("issue downstream tls certificate: %w", err)
 	}
 	downstreamTLS := tls.Server(clientConn, &tls.Config{

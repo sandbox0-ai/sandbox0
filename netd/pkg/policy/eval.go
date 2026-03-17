@@ -168,6 +168,9 @@ func MatchEgressAuthRule(policy *CompiledPolicy, transport, protocol string, des
 	host = strings.ToLower(strings.TrimSpace(host))
 	for idx := range policy.Egress.AuthRules {
 		rule := &policy.Egress.AuthRules[idx]
+		if rule.Rollout == v1alpha1.EgressAuthRolloutDisabled {
+			continue
+		}
 		if !matchEgressAuthProtocol(rule.Protocol, transport, protocol) {
 			continue
 		}

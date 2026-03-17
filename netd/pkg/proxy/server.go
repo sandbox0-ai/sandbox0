@@ -483,7 +483,11 @@ func (s *Server) handleTCPDecision(req *adapterRequest, decision trafficDecision
 			baseFields = append(baseFields,
 				zap.Bool("auth_cache_hit", req.EgressAuth.CacheHit),
 				zap.Bool("auth_resolved", req.EgressAuth.Resolved != nil),
+				zap.String("auth_failure_policy", req.EgressAuth.FailurePolicy),
 			)
+			if req.EgressAuth.BypassReason != "" {
+				baseFields = append(baseFields, zap.String("auth_bypass_reason", req.EgressAuth.BypassReason))
+			}
 			if req.EgressAuth.ResolveError != nil {
 				baseFields = append(baseFields, zap.Error(req.EgressAuth.ResolveError))
 			}
@@ -677,7 +681,11 @@ func (s *Server) handleUDPDecision(req *adapterRequest, decision trafficDecision
 			fields = append(fields,
 				zap.Bool("auth_cache_hit", req.EgressAuth.CacheHit),
 				zap.Bool("auth_resolved", req.EgressAuth.Resolved != nil),
+				zap.String("auth_failure_policy", req.EgressAuth.FailurePolicy),
 			)
+			if req.EgressAuth.BypassReason != "" {
+				fields = append(fields, zap.String("auth_bypass_reason", req.EgressAuth.BypassReason))
+			}
 			if req.EgressAuth.ResolveError != nil {
 				fields = append(fields, zap.Error(req.EgressAuth.ResolveError))
 			}

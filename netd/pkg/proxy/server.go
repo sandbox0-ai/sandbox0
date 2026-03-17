@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
@@ -578,10 +579,10 @@ func (s *Server) proxyHTTPRequest(req *adapterRequest) error {
 	defer upstream.Close()
 
 	if err := httpReq.Write(upstream); err != nil {
-		s.recordEgressBytes(req.Compiled, upstream.(*countingConn).written, req.Audit)
+		s.recordEgressBytes(req.Compiled, upstream.(*countingConn).WrittenBytes(), req.Audit)
 		return fmt.Errorf("write upstream http request: %w", err)
 	}
-	s.recordEgressBytes(req.Compiled, upstream.(*countingConn).written, req.Audit)
+	s.recordEgressBytes(req.Compiled, upstream.(*countingConn).WrittenBytes(), req.Audit)
 
 	clientCounter := &countingWriter{writer: req.Conn}
 	n, err := io.Copy(clientCounter, upstream)
@@ -877,6 +878,9 @@ func normalizeRelayError(err error) error {
 	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
 		return nil
 	}
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
+		return nil
+	}
 	return err
 }
 
@@ -982,12 +986,26 @@ type countingConn struct {
 
 func (c *countingConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
-	c.read += int64(n)
+	atomic.AddInt64(&c.read, int64(n))
 	return n, err
 }
 
 func (c *countingConn) Write(p []byte) (int, error) {
 	n, err := c.Conn.Write(p)
-	c.written += int64(n)
+	atomic.AddInt64(&c.written, int64(n))
 	return n, err
+}
+
+func (c *countingConn) ReadBytes() int64 {
+	if c == nil {
+		return 0
+	}
+	return atomic.LoadInt64(&c.read)
+}
+
+func (c *countingConn) WrittenBytes() int64 {
+	if c == nil {
+		return 0
+	}
+	return atomic.LoadInt64(&c.written)
 }

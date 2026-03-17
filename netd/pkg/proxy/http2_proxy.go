@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
@@ -22,14 +23,28 @@ type countingTLSConn struct {
 
 func (c *countingTLSConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
-	c.read += int64(n)
+	atomic.AddInt64(&c.read, int64(n))
 	return n, err
 }
 
 func (c *countingTLSConn) Write(p []byte) (int, error) {
 	n, err := c.Conn.Write(p)
-	c.written += int64(n)
+	atomic.AddInt64(&c.written, int64(n))
 	return n, err
+}
+
+func (c *countingTLSConn) ReadBytes() int64 {
+	if c == nil {
+		return 0
+	}
+	return atomic.LoadInt64(&c.read)
+}
+
+func (c *countingTLSConn) WrittenBytes() int64 {
+	if c == nil {
+		return 0
+	}
+	return atomic.LoadInt64(&c.written)
 }
 
 type flushWriter struct {
@@ -84,8 +99,8 @@ func (s *Server) proxyHTTP2FromConn(downstream *tls.Conn, req *adapterRequest) e
 	})
 
 	if upstreamCounter != nil {
-		s.recordEgressBytes(req.Compiled, upstreamCounter.written, req.Audit)
-		s.recordIngressBytes(req.Compiled, upstreamCounter.read, req.Audit)
+		s.recordEgressBytes(req.Compiled, upstreamCounter.WrittenBytes(), req.Audit)
+		s.recordIngressBytes(req.Compiled, upstreamCounter.ReadBytes(), req.Audit)
 	}
 	return nil
 }

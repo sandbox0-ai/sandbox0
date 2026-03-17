@@ -146,12 +146,12 @@ func (s *Server) proxyHTTPFromConn(downstream net.Conn, req *adapterRequest, ups
 	}
 	if err := httpReq.Write(upstream); err != nil {
 		if counter, ok := upstream.(*countingConn); ok {
-			s.recordEgressBytes(req.Compiled, counter.written, req.Audit)
+			s.recordEgressBytes(req.Compiled, counter.WrittenBytes(), req.Audit)
 		}
 		return fmt.Errorf("write upstream http request: %w", err)
 	}
 	if counter, ok := upstream.(*countingConn); ok {
-		s.recordEgressBytes(req.Compiled, counter.written, req.Audit)
+		s.recordEgressBytes(req.Compiled, counter.WrittenBytes(), req.Audit)
 	}
 	clientCounter := &countingWriter{writer: downstream}
 	n, err := io.Copy(clientCounter, upstream)

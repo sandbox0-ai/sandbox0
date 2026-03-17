@@ -73,13 +73,10 @@ func TestHTTPAdapterInjectsResolvedHeaders(t *testing.T) {
 					Name:    "example-http",
 					AuthRef: "example-api",
 				},
-				Resolved: &egressauth.ResolveResponse{
-					AuthRef: "example-api",
-					Headers: map[string]string{
-						"Authorization": "Bearer injected-token",
-						"X-Auth-Ref":    "example-api",
-					},
-				},
+				Resolved: egressauth.NewHTTPHeadersResolveResponse("example-api", map[string]string{
+					"Authorization": "Bearer injected-token",
+					"X-Auth-Ref":    "example-api",
+				}, nil),
 			},
 		}
 		done <- (&httpAdapter{}).Handle(req)
@@ -238,6 +235,56 @@ func TestHTTPAdapterFailOpenBypassesInjectionOnResolveError(t *testing.T) {
 	headers := <-requestHeaders
 	if got := headers.Get("Authorization"); got != "" {
 		t.Fatalf("authorization header = %q, want empty", got)
+	}
+}
+
+func TestHTTPAdapterReturns503WhenDirectiveUnsupported(t *testing.T) {
+	server := &Server{
+		cfg: &config.NetdConfig{
+			ProxyUpstreamTimeout: metav1.Duration{Duration: time.Second},
+		},
+		logger: zap.NewNop(),
+	}
+	clientConn, upstreamConn := net.Pipe()
+	defer clientConn.Close()
+	defer upstreamConn.Close()
+
+	errCh := make(chan error, 1)
+	go func() {
+		req := &adapterRequest{
+			Server: upstreamConnServer(server),
+			Conn:   upstreamConn,
+			EgressAuth: &egressAuthContext{
+				Rule: &policy.CompiledEgressAuthRule{Name: "example-http", AuthRef: "example-api"},
+				Resolved: &egressauth.ResolveResponse{
+					AuthRef: "example-api",
+					Directives: []egressauth.ResolveDirective{{
+						Kind: egressauth.ResolveDirectiveKindCustom,
+					}},
+				},
+			},
+		}
+		errCh <- (&httpAdapter{}).Handle(req)
+	}()
+
+	resp, err := http.ReadResponse(bufio.NewReader(clientConn), nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusServiceUnavailable)
+	}
+	if !strings.Contains(string(body), "egress auth directives unsupported") {
+		t.Fatalf("body = %q", body)
+	}
+	if err := <-errCh; err == nil {
+		t.Fatal("expected adapter error")
 	}
 }
 

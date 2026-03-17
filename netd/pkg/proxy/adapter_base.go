@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -61,6 +62,15 @@ func (a *httpAdapter) Handle(req *adapterRequest) error {
 	}
 	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
 	if req.EgressAuth != nil && req.EgressAuth.Rule != nil {
+		if err := prepareHTTPHeaderDirectives(req.EgressAuth, "http", true); err != nil {
+			if req.EgressAuth.ShouldBypass() {
+				return req.Server.proxyHTTPRequest(req)
+			}
+			if errors.Is(err, errEgressAuthDirectiveUnsupported) {
+				_ = writeHTTPProxyError(req.Conn, http.StatusServiceUnavailable, "egress auth directives unsupported")
+				return fmt.Errorf("egress auth directives unsupported for %q", req.EgressAuth.Rule.AuthRef)
+			}
+		}
 		if req.EgressAuth.ShouldBypass() {
 			return req.Server.proxyHTTPRequest(req)
 		}
@@ -68,7 +78,7 @@ func (a *httpAdapter) Handle(req *adapterRequest) error {
 			_ = writeHTTPProxyError(req.Conn, http.StatusServiceUnavailable, "egress auth resolution failed")
 			return fmt.Errorf("resolve egress auth for %q: %w", req.EgressAuth.Rule.AuthRef, req.EgressAuth.ResolveError)
 		}
-		if req.EgressAuth.Resolved == nil {
+		if req.EgressAuth.Resolved == nil || len(req.EgressAuth.ResolvedHeaders) == 0 {
 			_ = writeHTTPProxyError(req.Conn, http.StatusServiceUnavailable, "egress auth material unavailable")
 			return fmt.Errorf("egress auth material missing for %q", req.EgressAuth.Rule.AuthRef)
 		}
@@ -132,6 +142,16 @@ func (a *tlsAdapter) Handle(req *adapterRequest) error {
 		return fmt.Errorf("tls adapter requires connection")
 	}
 	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
+	if req.EgressAuth != nil && req.EgressAuth.Rule != nil {
+		if err := prepareHTTPHeaderDirectives(req.EgressAuth, "tls", tlsTerminationRequired(req)); err != nil {
+			if req.EgressAuth.ShouldBypass() {
+				return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+			}
+			if errors.Is(err, errEgressAuthDirectiveUnsupported) {
+				return fmt.Errorf("egress auth directives unsupported for %q", req.EgressAuth.Rule.AuthRef)
+			}
+		}
+	}
 	if tlsTerminationRequired(req) {
 		if req.EgressAuth != nil && req.EgressAuth.ShouldBypass() {
 			return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)

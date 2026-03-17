@@ -261,3 +261,53 @@ func TestAttachEgressAuthFailOpenBypassesOnResolverError(t *testing.T) {
 		t.Fatalf("resolve error = %v, want %v", req.EgressAuth.ResolveError, resolveErr)
 	}
 }
+
+func TestPrepareHTTPHeaderDirectivesRejectsUnsupportedDirective(t *testing.T) {
+	ctx := &egressAuthContext{
+		Rule: &policy.CompiledEgressAuthRule{Name: "example-http", AuthRef: "example-api"},
+		Resolved: &egressauth.ResolveResponse{
+			AuthRef: "example-api",
+			Directives: []egressauth.ResolveDirective{{
+				Kind: egressauth.ResolveDirectiveKindCustom,
+			}},
+		},
+		FailurePolicy: string(v1alpha1.EgressAuthFailurePolicyFailClosed),
+	}
+
+	err := prepareHTTPHeaderDirectives(ctx, "http", true)
+
+	if !errors.Is(err, errEgressAuthDirectiveUnsupported) {
+		t.Fatalf("err = %v, want unsupported directive", err)
+	}
+	if ctx.ShouldBypass() {
+		t.Fatal("expected fail-closed enforcement")
+	}
+	if ctx.EnforcementReason != "unsupported_directive" {
+		t.Fatalf("enforcement reason = %q", ctx.EnforcementReason)
+	}
+}
+
+func TestPrepareHTTPHeaderDirectivesFailOpenBypassesUnsupportedDirective(t *testing.T) {
+	ctx := &egressAuthContext{
+		Rule: &policy.CompiledEgressAuthRule{Name: "example-http", AuthRef: "example-api"},
+		Resolved: &egressauth.ResolveResponse{
+			AuthRef: "example-api",
+			Directives: []egressauth.ResolveDirective{{
+				Kind: egressauth.ResolveDirectiveKindCustom,
+			}},
+		},
+		FailurePolicy: string(v1alpha1.EgressAuthFailurePolicyFailOpen),
+	}
+
+	err := prepareHTTPHeaderDirectives(ctx, "http", true)
+
+	if !errors.Is(err, errEgressAuthDirectiveUnsupported) {
+		t.Fatalf("err = %v, want unsupported directive", err)
+	}
+	if !ctx.ShouldBypass() {
+		t.Fatal("expected fail-open bypass")
+	}
+	if ctx.BypassReason != "unsupported_directive" {
+		t.Fatalf("bypass reason = %q", ctx.BypassReason)
+	}
+}

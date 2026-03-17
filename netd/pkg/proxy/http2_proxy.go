@@ -119,8 +119,8 @@ func (s *Server) handleHTTP2ProxyRequest(w http.ResponseWriter, downstreamReq *h
 	if err != nil {
 		return err
 	}
-	if req.EgressAuth != nil && req.EgressAuth.Resolved != nil {
-		injectHTTPHeaders(upstreamReq, req.EgressAuth.Resolved.Headers)
+	if req.EgressAuth != nil && len(req.EgressAuth.ResolvedHeaders) > 0 {
+		injectHTTPHeaders(upstreamReq, req.EgressAuth.ResolvedHeaders)
 	}
 
 	resp, err := transport.RoundTrip(upstreamReq)

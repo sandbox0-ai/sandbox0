@@ -567,8 +567,8 @@ func (s *Server) proxyHTTPRequest(req *adapterRequest) error {
 	if httpReq.Host == "" && req.Host != "" {
 		httpReq.Host = req.Host
 	}
-	if req.EgressAuth != nil && req.EgressAuth.Resolved != nil {
-		injectHTTPHeaders(httpReq, req.EgressAuth.Resolved.Headers)
+	if req.EgressAuth != nil && len(req.EgressAuth.ResolvedHeaders) > 0 {
+		injectHTTPHeaders(httpReq, req.EgressAuth.ResolvedHeaders)
 	}
 
 	upstream, err := net.DialTimeout("tcp", net.JoinHostPort(req.DestIP.String(), fmt.Sprintf("%d", req.DestPort)), s.cfg.ProxyUpstreamTimeout.Duration)

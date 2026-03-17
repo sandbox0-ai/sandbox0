@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"math/big"
 	"os"
-	"strings"
 	"sync"
 	"time"
 )
@@ -200,8 +199,4 @@ func newSelfSignedCertificateAuthority(commonName string, leafTTL time.Duration)
 		_ = leafTTL
 	}
 	return certPEM, keyPEM, nil
-}
-
-func normalizeTLSHost(host string) string {
-	return strings.ToLower(strings.TrimSpace(host))
 }

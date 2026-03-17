@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 )
@@ -172,11 +171,4 @@ func tlsTerminationRequired(req *adapterRequest) bool {
 		return false
 	}
 	return req.EgressAuth.Rule.TLSMode == "terminate-reoriginate"
-}
-
-func handshakeTimeout(timeout time.Duration) time.Duration {
-	if timeout <= 0 {
-		return 5 * time.Second
-	}
-	return timeout
 }

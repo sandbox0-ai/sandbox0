@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/juicedata/juicefs/pkg/vfs"
@@ -22,11 +23,19 @@ import (
 type FileSystemServer struct {
 	pb.UnimplementedFileSystemServer
 
-	volMgr           *volume.Manager
+	volMgr           volumeManager
 	volumeRepo       VolumeRepository
 	eventHub         *notify.Hub
 	eventBroadcaster notify.Broadcaster
 	logger           *logrus.Logger
+}
+
+type volumeManager interface {
+	MountVolume(ctx context.Context, s3Prefix, volumeID, teamID string, config *volume.VolumeConfig, accessMode volume.AccessMode) (string, time.Time, error)
+	UnmountVolume(ctx context.Context, volumeID, sessionID string) error
+	AckInvalidate(volumeID, sessionID, invalidateID string, success bool, errorMessage string) error
+	GetVolume(volumeID string) (*volume.VolumeContext, error)
+	TrackVolume(sandboxID, volumeID string)
 }
 
 // VolumeRepository provides volume metadata lookup for access mode enforcement.
@@ -35,7 +44,7 @@ type VolumeRepository interface {
 }
 
 // NewFileSystemServer creates a new file system server
-func NewFileSystemServer(volMgr *volume.Manager, volumeRepo VolumeRepository, eventHub *notify.Hub, eventBroadcaster notify.Broadcaster, logger *logrus.Logger) *FileSystemServer {
+func NewFileSystemServer(volMgr volumeManager, volumeRepo VolumeRepository, eventHub *notify.Hub, eventBroadcaster notify.Broadcaster, logger *logrus.Logger) *FileSystemServer {
 	if eventBroadcaster == nil && eventHub != nil {
 		eventBroadcaster = notify.NewLocalBroadcaster(eventHub)
 	}
@@ -61,18 +70,11 @@ func (s *FileSystemServer) MountVolume(ctx context.Context, req *pb.MountVolumeR
 		req.Config = &pb.VolumeConfig{}
 	}
 
-	accessMode := volume.AccessModeRWO
-	if s.volumeRepo != nil {
-		vol, err := s.volumeRepo.GetSandboxVolume(ctx, req.VolumeId)
-		if err != nil {
-			if err == db.ErrNotFound {
-				return nil, status.Error(codes.NotFound, "sandbox volume not found")
-			}
-			s.logger.WithError(err).WithField("volume_id", req.VolumeId).Error("Failed to load sandbox volume")
-			return nil, status.Error(codes.Internal, "failed to load sandbox volume")
-		}
-		accessMode = volume.NormalizeAccessMode(vol.AccessMode)
+	vol, err := s.authorizeVolumeMount(ctx, req.VolumeId)
+	if err != nil {
+		return nil, err
 	}
+	accessMode := volume.NormalizeAccessMode(vol.AccessMode)
 
 	config := &volume.VolumeConfig{
 		CacheSize:  req.Config.CacheSize,
@@ -87,9 +89,12 @@ func (s *FileSystemServer) MountVolume(ctx context.Context, req *pb.MountVolumeR
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
-	sessionID, mountedAt, err := s.volMgr.MountVolume(ctx, prefix, req.VolumeId, config, accessMode)
+	sessionID, mountedAt, err := s.volMgr.MountVolume(ctx, prefix, req.VolumeId, claims.TeamID, config, accessMode)
 	if err != nil {
 		s.logger.WithError(err).WithField("volume_id", req.VolumeId).Error("Failed to mount volume")
+		if strings.Contains(err.Error(), "another team") {
+			return nil, status.Error(codes.PermissionDenied, err.Error())
+		}
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
@@ -115,6 +120,9 @@ func (s *FileSystemServer) UnmountVolume(ctx context.Context, req *pb.UnmountVol
 	if req.MountSessionId == "" {
 		return nil, status.Error(codes.InvalidArgument, "mount_session_id is required")
 	}
+	if _, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId); err != nil {
+		return nil, err
+	}
 	err := s.volMgr.UnmountVolume(ctx, req.VolumeId, req.MountSessionId)
 	if err != nil {
 		s.logger.WithError(err).WithField("volume_id", req.VolumeId).Error("Failed to unmount volume")
@@ -132,6 +140,9 @@ func (s *FileSystemServer) AckInvalidate(ctx context.Context, req *pb.AckInvalid
 	if req == nil || req.VolumeId == "" || req.MountSessionId == "" || req.InvalidateId == "" {
 		return nil, status.Error(codes.InvalidArgument, "volume_id, mount_session_id and invalidate_id are required")
 	}
+	if _, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId); err != nil {
+		return nil, err
+	}
 	if err := s.volMgr.AckInvalidate(req.VolumeId, req.MountSessionId, req.InvalidateId, req.Success, req.ErrorMessage); err != nil {
 		s.logger.WithError(err).WithField("volume_id", req.VolumeId).Error("Failed to ack invalidate")
 		return nil, status.Error(codes.Internal, err.Error())
@@ -146,6 +157,9 @@ func (s *FileSystemServer) WatchVolumeEvents(req *pb.WatchRequest, stream pb.Fil
 	}
 	if req == nil || req.VolumeId == "" {
 		return status.Error(codes.InvalidArgument, "volume_id is required")
+	}
+	if _, err := s.getAuthorizedMountedVolume(stream.Context(), req.VolumeId); err != nil {
+		return err
 	}
 
 	_, ch, cancel := s.eventHub.Subscribe(req)
@@ -173,13 +187,85 @@ func (s *FileSystemServer) publishEvent(ctx context.Context, event *pb.WatchEven
 	s.eventBroadcaster.Publish(ctx, event)
 }
 
+func (s *FileSystemServer) authorizeVolumeMount(ctx context.Context, volumeID string) (*db.SandboxVolume, error) {
+	claims := internalauth.ClaimsFromContext(ctx)
+	if claims == nil || claims.TeamID == "" {
+		return nil, status.Error(codes.Unauthenticated, "team id not found in context")
+	}
+	if s.volumeRepo == nil {
+		return nil, status.Error(codes.FailedPrecondition, "volume authorization unavailable")
+	}
+
+	vol, err := s.volumeRepo.GetSandboxVolume(ctx, volumeID)
+	if err != nil {
+		if err == db.ErrNotFound {
+			return nil, status.Error(codes.NotFound, "sandbox volume not found")
+		}
+		s.logger.WithError(err).WithField("volume_id", volumeID).Error("Failed to load sandbox volume")
+		return nil, status.Error(codes.Internal, "failed to load sandbox volume")
+	}
+	if vol.TeamID != claims.TeamID {
+		s.logUnauthorizedVolumeAccess(volumeID, claims.TeamID, vol.TeamID, "mount")
+		return nil, status.Error(codes.PermissionDenied, "access denied to volume")
+	}
+	return vol, nil
+}
+
+func (s *FileSystemServer) getAuthorizedMountedVolume(ctx context.Context, volumeID string) (*volume.VolumeContext, error) {
+	claims := internalauth.ClaimsFromContext(ctx)
+	if claims == nil {
+		return nil, status.Error(codes.Unauthenticated, "missing auth claims")
+	}
+
+	volCtx, err := s.volMgr.GetVolume(volumeID)
+	if err != nil {
+		return nil, status.Error(codes.NotFound, err.Error())
+	}
+	if claims.IsSystemToken() {
+		return volCtx, nil
+	}
+	if claims.TeamID == "" {
+		return nil, status.Error(codes.Unauthenticated, "team id not found in context")
+	}
+
+	ownerTeamID := volCtx.TeamID
+	if ownerTeamID == "" && s.volumeRepo != nil {
+		vol, repoErr := s.volumeRepo.GetSandboxVolume(ctx, volumeID)
+		if repoErr != nil {
+			if repoErr == db.ErrNotFound {
+				return nil, status.Error(codes.NotFound, "sandbox volume not found")
+			}
+			s.logger.WithError(repoErr).WithField("volume_id", volumeID).Error("Failed to load sandbox volume")
+			return nil, status.Error(codes.Internal, "failed to load sandbox volume")
+		}
+		ownerTeamID = vol.TeamID
+	}
+	if ownerTeamID == "" {
+		return nil, status.Error(codes.FailedPrecondition, "volume authorization unavailable")
+	}
+	if ownerTeamID != claims.TeamID {
+		s.logUnauthorizedVolumeAccess(volumeID, claims.TeamID, ownerTeamID, "access")
+		return nil, status.Error(codes.PermissionDenied, "access denied to volume")
+	}
+	return volCtx, nil
+}
+
+func (s *FileSystemServer) logUnauthorizedVolumeAccess(volumeID, tokenTeamID, ownerTeamID, action string) {
+	s.logger.WithFields(logrus.Fields{
+		"volume_id":  volumeID,
+		"token_team": tokenTeamID,
+		"owner_team": ownerTeamID,
+		"action":     action,
+	}).Warn("Unauthorized volume access attempt")
+}
+
 // GetAttr implements FUSE getattr
 func (s *FileSystemServer) GetAttr(ctx context.Context, req *pb.GetAttrRequest) (*pb.GetAttrResponse, error) {
 
 	// Get volume context
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 
 	inode := mapInode(volCtx, req.Inode)
@@ -200,9 +286,9 @@ func (s *FileSystemServer) GetAttr(ctx context.Context, req *pb.GetAttrRequest) 
 // Lookup implements FUSE lookup
 func (s *FileSystemServer) Lookup(ctx context.Context, req *pb.LookupRequest) (*pb.NodeResponse, error) {
 
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 
 	parent := mapInode(volCtx, req.Parent)
@@ -225,9 +311,9 @@ func (s *FileSystemServer) Lookup(ctx context.Context, req *pb.LookupRequest) (*
 // Open implements FUSE open using JuiceFS VFS layer
 func (s *FileSystemServer) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenResponse, error) {
 
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 
 	inode := mapInode(volCtx, req.Inode)
@@ -255,9 +341,9 @@ func (s *FileSystemServer) Open(ctx context.Context, req *pb.OpenRequest) (*pb.O
 // Read implements FUSE read using JuiceFS VFS layer
 func (s *FileSystemServer) Read(ctx context.Context, req *pb.ReadRequest) (*pb.ReadResponse, error) {
 
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 
 	// Allocate buffer for read
@@ -297,9 +383,9 @@ func (s *FileSystemServer) Read(ctx context.Context, req *pb.ReadRequest) (*pb.R
 // Write implements FUSE write using JuiceFS VFS layer
 func (s *FileSystemServer) Write(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResponse, error) {
 
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 
 	// Create VFS context
@@ -340,9 +426,9 @@ func (s *FileSystemServer) Write(ctx context.Context, req *pb.WriteRequest) (*pb
 // Create implements FUSE create using JuiceFS VFS layer
 func (s *FileSystemServer) Create(ctx context.Context, req *pb.CreateRequest) (*pb.NodeResponse, error) {
 
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 
 	// Create file using VFS (which creates proper handle with reader/writer)
@@ -385,9 +471,9 @@ func (s *FileSystemServer) Create(ctx context.Context, req *pb.CreateRequest) (*
 // Mkdir implements FUSE mkdir
 func (s *FileSystemServer) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb.NodeResponse, error) {
 
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 
 	parent := mapInode(volCtx, req.Parent)
@@ -418,9 +504,9 @@ func (s *FileSystemServer) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb
 
 // Mknod implements FUSE mknod
 func (s *FileSystemServer) Mknod(ctx context.Context, req *pb.MknodRequest) (*pb.NodeResponse, error) {
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 
 	parent := mapInode(volCtx, req.Parent)
@@ -469,9 +555,9 @@ func mapErrnoToCode(errno syscall.Errno) codes.Code {
 // Unlink implements FUSE unlink
 func (s *FileSystemServer) Unlink(ctx context.Context, req *pb.UnlinkRequest) (*pb.Empty, error) {
 
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 
 	// Unlink file in JuiceFS
@@ -499,9 +585,9 @@ func (s *FileSystemServer) Unlink(ctx context.Context, req *pb.UnlinkRequest) (*
 // ReadDir implements FUSE readdir
 func (s *FileSystemServer) ReadDir(ctx context.Context, req *pb.ReadDirRequest) (*pb.ReadDirResponse, error) {
 
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 
 	inode := mapInode(volCtx, req.Inode)
@@ -538,9 +624,9 @@ func (s *FileSystemServer) ReadDir(ctx context.Context, req *pb.ReadDirRequest) 
 
 // OpenDir implements FUSE opendir
 func (s *FileSystemServer) OpenDir(ctx context.Context, req *pb.OpenDirRequest) (*pb.OpenDirResponse, error) {
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 
 	inode := mapInode(volCtx, req.Inode)
@@ -557,9 +643,9 @@ func (s *FileSystemServer) OpenDir(ctx context.Context, req *pb.OpenDirRequest) 
 
 // ReleaseDir implements FUSE releasedir
 func (s *FileSystemServer) ReleaseDir(ctx context.Context, req *pb.ReleaseDirRequest) (*pb.Empty, error) {
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 
 	inode := mapInode(volCtx, req.Inode)
@@ -571,9 +657,9 @@ func (s *FileSystemServer) ReleaseDir(ctx context.Context, req *pb.ReleaseDirReq
 // Rename implements FUSE rename
 func (s *FileSystemServer) Rename(ctx context.Context, req *pb.RenameRequest) (*pb.Empty, error) {
 
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 
 	// Rename in JuiceFS
@@ -605,9 +691,9 @@ func (s *FileSystemServer) Rename(ctx context.Context, req *pb.RenameRequest) (*
 // SetAttr implements FUSE setattr
 func (s *FileSystemServer) SetAttr(ctx context.Context, req *pb.SetAttrRequest) (*pb.SetAttrResponse, error) {
 
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 
 	inode := mapInode(volCtx, req.Inode)
@@ -672,9 +758,9 @@ func (s *FileSystemServer) Fsync(ctx context.Context, req *pb.FsyncRequest) (*pb
 
 // Release implements FUSE release (close) using JuiceFS VFS layer
 func (s *FileSystemServer) Release(ctx context.Context, req *pb.ReleaseRequest) (*pb.Empty, error) {
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 
 	// Release the file handle in VFS
@@ -692,9 +778,9 @@ func (s *FileSystemServer) Release(ctx context.Context, req *pb.ReleaseRequest) 
 
 // Rmdir implements FUSE rmdir (remove directory)
 func (s *FileSystemServer) Rmdir(ctx context.Context, req *pb.RmdirRequest) (*pb.Empty, error) {
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 
 	// Remove directory in JuiceFS
@@ -724,9 +810,9 @@ func (s *FileSystemServer) Rmdir(ctx context.Context, req *pb.RmdirRequest) (*pb
 
 // StatFs implements FUSE statfs (filesystem statistics)
 func (s *FileSystemServer) StatFs(ctx context.Context, req *pb.StatFsRequest) (*pb.StatFsResponse, error) {
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 
 	// Get filesystem statistics from JuiceFS
@@ -759,9 +845,9 @@ func (s *FileSystemServer) StatFs(ctx context.Context, req *pb.StatFsRequest) (*
 
 // Symlink implements FUSE symlink (create symbolic link)
 func (s *FileSystemServer) Symlink(ctx context.Context, req *pb.SymlinkRequest) (*pb.NodeResponse, error) {
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 
 	// Create symbolic link in JuiceFS
@@ -794,9 +880,9 @@ func (s *FileSystemServer) Symlink(ctx context.Context, req *pb.SymlinkRequest) 
 
 // Readlink implements FUSE readlink (read symbolic link target)
 func (s *FileSystemServer) Readlink(ctx context.Context, req *pb.ReadlinkRequest) (*pb.ReadlinkResponse, error) {
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 
 	// Read symbolic link from JuiceFS
@@ -814,9 +900,9 @@ func (s *FileSystemServer) Readlink(ctx context.Context, req *pb.ReadlinkRequest
 
 // Link implements FUSE link (create hard link)
 func (s *FileSystemServer) Link(ctx context.Context, req *pb.LinkRequest) (*pb.NodeResponse, error) {
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 
 	// Create hard link in JuiceFS
@@ -850,9 +936,9 @@ func (s *FileSystemServer) Link(ctx context.Context, req *pb.LinkRequest) (*pb.N
 
 // Access implements FUSE access (check file access permissions)
 func (s *FileSystemServer) Access(ctx context.Context, req *pb.AccessRequest) (*pb.Empty, error) {
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 
 	// Create JuiceFS context with caller's uid/gid for permission checking
@@ -887,9 +973,9 @@ func (s *FileSystemServer) Access(ctx context.Context, req *pb.AccessRequest) (*
 
 // Fallocate preallocates or deallocates space for a file
 func (s *FileSystemServer) Fallocate(ctx context.Context, req *pb.FallocateRequest) (*pb.Empty, error) {
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 
 	// Call JuiceFS VFS Fallocate
@@ -933,9 +1019,9 @@ func (s *FileSystemServer) Fallocate(ctx context.Context, req *pb.FallocateReque
 
 // CopyFileRange implements FUSE copy_file_range
 func (s *FileSystemServer) CopyFileRange(ctx context.Context, req *pb.CopyFileRangeRequest) (*pb.CopyFileRangeResponse, error) {
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 
 	vfsCtx := vfs.NewLogContext(meta.Background())
@@ -973,9 +1059,9 @@ func (s *FileSystemServer) CopyFileRange(ctx context.Context, req *pb.CopyFileRa
 
 // GetLk implements FUSE getlk
 func (s *FileSystemServer) GetLk(ctx context.Context, req *pb.GetLkRequest) (*pb.GetLkResponse, error) {
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 	if req.Lock == nil {
 		return nil, status.Error(codes.InvalidArgument, "lock is required")
@@ -1004,9 +1090,9 @@ func (s *FileSystemServer) GetLk(ctx context.Context, req *pb.GetLkRequest) (*pb
 
 // SetLk implements FUSE setlk/setlkw
 func (s *FileSystemServer) SetLk(ctx context.Context, req *pb.SetLkRequest) (*pb.Empty, error) {
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 	if req.Lock == nil {
 		return nil, status.Error(codes.InvalidArgument, "lock is required")
@@ -1040,9 +1126,9 @@ func (s *FileSystemServer) SetLkw(ctx context.Context, req *pb.SetLkRequest) (*p
 
 // Flock implements FUSE flock
 func (s *FileSystemServer) Flock(ctx context.Context, req *pb.FlockRequest) (*pb.Empty, error) {
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 
 	vfsCtx := vfs.NewLogContext(meta.Background())
@@ -1062,9 +1148,9 @@ func (s *FileSystemServer) Flock(ctx context.Context, req *pb.FlockRequest) (*pb
 
 // Ioctl implements FUSE ioctl
 func (s *FileSystemServer) Ioctl(ctx context.Context, req *pb.IoctlRequest) (*pb.IoctlResponse, error) {
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 
 	bufOut := make([]byte, req.DataOutSize)
@@ -1081,9 +1167,9 @@ func (s *FileSystemServer) Ioctl(ctx context.Context, req *pb.IoctlRequest) (*pb
 
 // GetXattr gets an extended attribute
 func (s *FileSystemServer) GetXattr(ctx context.Context, req *pb.GetXattrRequest) (*pb.GetXattrResponse, error) {
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 
 	// Call JuiceFS VFS GetXattr
@@ -1111,9 +1197,9 @@ func (s *FileSystemServer) GetXattr(ctx context.Context, req *pb.GetXattrRequest
 
 // SetXattr sets an extended attribute
 func (s *FileSystemServer) SetXattr(ctx context.Context, req *pb.SetXattrRequest) (*pb.Empty, error) {
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 
 	// Call JuiceFS VFS SetXattr
@@ -1148,9 +1234,9 @@ func (s *FileSystemServer) SetXattr(ctx context.Context, req *pb.SetXattrRequest
 
 // ListXattr lists all extended attributes
 func (s *FileSystemServer) ListXattr(ctx context.Context, req *pb.ListXattrRequest) (*pb.ListXattrResponse, error) {
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 
 	// Call JuiceFS VFS ListXattr
@@ -1173,9 +1259,9 @@ func (s *FileSystemServer) ListXattr(ctx context.Context, req *pb.ListXattrReque
 
 // RemoveXattr removes an extended attribute
 func (s *FileSystemServer) RemoveXattr(ctx context.Context, req *pb.RemoveXattrRequest) (*pb.Empty, error) {
-	volCtx, err := s.volMgr.GetVolume(req.VolumeId)
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, err
 	}
 
 	// Call JuiceFS VFS RemoveXattr

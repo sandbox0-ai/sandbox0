@@ -197,7 +197,7 @@ procd_config:
 
 	template := newTestTemplate()
 	template.Spec.EnvVars = map[string]string{
-		"root_path":               "/tenant-override",
+		"root_path":              "/tenant-override",
 		"storage_proxy_base_url": "evil.local",
 		"storage_proxy_port":     "65535",
 		"node_name":              "tenant-node",
@@ -233,7 +233,7 @@ manager_image: sandbox0/manager:test
 
 	template := newTestTemplate()
 	template.Spec.EnvVars = map[string]string{
-		"root_path":               "/tenant-override",
+		"root_path":              "/tenant-override",
 		"storage_proxy_base_url": "evil.local",
 		"storage_proxy_port":     "65535",
 		"node_name":              "tenant-node",

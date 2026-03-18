@@ -562,7 +562,10 @@ func assertCredentialSourceBindingLifecycle(env *framework.ScenarioEnv, session 
 
 	cleanupSource := true
 	defer func() {
-		clearPolicy := apispec.SandboxNetworkPolicy{Mode: apispec.SandboxNetworkPolicyModeAllowAll}
+		clearPolicy := apispec.SandboxNetworkPolicy{
+			Mode:               apispec.SandboxNetworkPolicyModeAllowAll,
+			CredentialBindings: &[]apispec.CredentialBinding{},
+		}
 		_, _, _, _ = session.UpdateNetworkPolicy(env.TestCtx.Context, GinkgoT(), sandboxID, clearPolicy)
 		if !cleanupSource {
 			return
@@ -658,7 +661,8 @@ func assertCredentialSourceBindingLifecycle(env *framework.ScenarioEnv, session 
 	Expect(status).To(Equal(http.StatusConflict))
 
 	clearPolicy, status, apiErr, err := session.UpdateNetworkPolicy(env.TestCtx.Context, GinkgoT(), sandboxID, apispec.SandboxNetworkPolicy{
-		Mode: apispec.SandboxNetworkPolicyModeAllowAll,
+		Mode:               apispec.SandboxNetworkPolicyModeAllowAll,
+		CredentialBindings: &[]apispec.CredentialBinding{},
 	})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(apiErr).To(BeNil())

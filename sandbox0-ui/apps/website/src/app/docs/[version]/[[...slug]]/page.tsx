@@ -10,13 +10,18 @@ import {
 export const dynamicParams = false;
 
 export function generateStaticParams() {
-  const versionedParams = getRenderedDocsVersions().flatMap((version) => [
+  const renderedVersions = getRenderedDocsVersions();
+  const versionedParams = renderedVersions.flatMap((version) => [
     { version, slug: [] as string[] },
     ...docsPageSlugs.map((pageSlug) => ({
       version,
       slug: pageSlug.split("/"),
     })),
   ]);
+
+  if (!renderedVersions.includes(DOCS_DEFAULT_VERSION)) {
+    return versionedParams;
+  }
 
   const legacyParams = docsPageSlugs.map((pageSlug) => {
     const [legacyVersion, ...legacySlug] = pageSlug.split("/");

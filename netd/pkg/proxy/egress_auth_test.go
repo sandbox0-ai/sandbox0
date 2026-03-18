@@ -136,6 +136,85 @@ func TestAttachEgressAuthResolvesAndCaches(t *testing.T) {
 	}
 }
 
+func TestAttachEgressAuthRefreshesExpiredCacheEntry(t *testing.T) {
+	now := time.Date(2026, time.March, 18, 12, 0, 0, 0, time.UTC)
+	cache := newMemoryEgressAuthCache()
+	cache.now = func() time.Time { return now }
+
+	key := egressAuthCacheKey{
+		SandboxID:       "sbx_123",
+		AuthRef:         "example-api",
+		Destination:     "api.example.com",
+		DestinationPort: 80,
+		Transport:       "tcp",
+		Protocol:        "http",
+	}
+	expiredAt := now.Add(-time.Second)
+	cache.Put(key, &egressauth.ResolveResponse{
+		AuthRef:   "example-api",
+		Headers:   map[string]string{"Authorization": "Bearer expired"},
+		ExpiresAt: &expiredAt,
+	})
+
+	freshExpiresAt := now.Add(time.Minute)
+	resolver := &stubEgressAuthResolver{
+		resp: &egressauth.ResolveResponse{
+			AuthRef:   "example-api",
+			Headers:   map[string]string{"Authorization": "Bearer fresh"},
+			ExpiresAt: &freshExpiresAt,
+		},
+	}
+	server := &Server{
+		cfg:          &config.NetdConfig{EgressAuthEnabled: true},
+		authResolver: resolver,
+		authCache:    cache,
+	}
+	req := &adapterRequest{
+		Compiled: &policy.CompiledPolicy{
+			SandboxID: "sbx_123",
+			TeamID:    "team_123",
+		},
+		DestIP:   net.ParseIP("8.8.8.8"),
+		DestPort: 80,
+		Host:     "api.example.com",
+	}
+	decision := trafficDecision{
+		Action:          decisionActionUseAdapter,
+		Transport:       "tcp",
+		Protocol:        "http",
+		MatchedAuthRule: &policy.CompiledEgressAuthRule{Name: "example-http", AuthRef: "example-api"},
+	}
+
+	server.attachEgressAuth(req, decision)
+
+	if req.EgressAuth == nil || req.EgressAuth.Resolved == nil {
+		t.Fatal("expected resolved auth material")
+	}
+	if req.EgressAuth.CacheHit {
+		t.Fatal("expected expired cache entry to trigger re-resolve")
+	}
+	if resolver.calls != 1 {
+		t.Fatalf("resolver calls = %d, want 1", resolver.calls)
+	}
+	if got := req.EgressAuth.Resolved.Headers["Authorization"]; got != "Bearer fresh" {
+		t.Fatalf("authorization header = %q, want Bearer fresh", got)
+	}
+
+	nextReq := &adapterRequest{
+		Compiled: req.Compiled,
+		DestIP:   req.DestIP,
+		DestPort: req.DestPort,
+		Host:     req.Host,
+	}
+	server.attachEgressAuth(nextReq, decision)
+	if nextReq.EgressAuth == nil || !nextReq.EgressAuth.CacheHit {
+		t.Fatal("expected refreshed cache entry on second request")
+	}
+	if resolver.calls != 1 {
+		t.Fatalf("resolver calls after refresh = %d, want 1", resolver.calls)
+	}
+}
+
 func TestAttachEgressAuthRecordsResolveError(t *testing.T) {
 	resolveErr := errors.New("broker unavailable")
 	server := &Server{
@@ -259,5 +338,55 @@ func TestAttachEgressAuthFailOpenBypassesOnResolverError(t *testing.T) {
 	}
 	if !errors.Is(req.EgressAuth.ResolveError, resolveErr) {
 		t.Fatalf("resolve error = %v, want %v", req.EgressAuth.ResolveError, resolveErr)
+	}
+}
+
+func TestPrepareHTTPHeaderDirectivesRejectsUnsupportedDirective(t *testing.T) {
+	ctx := &egressAuthContext{
+		Rule: &policy.CompiledEgressAuthRule{Name: "example-http", AuthRef: "example-api"},
+		Resolved: &egressauth.ResolveResponse{
+			AuthRef: "example-api",
+			Directives: []egressauth.ResolveDirective{{
+				Kind: egressauth.ResolveDirectiveKindCustom,
+			}},
+		},
+		FailurePolicy: string(v1alpha1.EgressAuthFailurePolicyFailClosed),
+	}
+
+	err := prepareHTTPHeaderDirectives(ctx, "http", true)
+
+	if !errors.Is(err, errEgressAuthDirectiveUnsupported) {
+		t.Fatalf("err = %v, want unsupported directive", err)
+	}
+	if ctx.ShouldBypass() {
+		t.Fatal("expected fail-closed enforcement")
+	}
+	if ctx.EnforcementReason != "unsupported_directive" {
+		t.Fatalf("enforcement reason = %q", ctx.EnforcementReason)
+	}
+}
+
+func TestPrepareHTTPHeaderDirectivesFailOpenBypassesUnsupportedDirective(t *testing.T) {
+	ctx := &egressAuthContext{
+		Rule: &policy.CompiledEgressAuthRule{Name: "example-http", AuthRef: "example-api"},
+		Resolved: &egressauth.ResolveResponse{
+			AuthRef: "example-api",
+			Directives: []egressauth.ResolveDirective{{
+				Kind: egressauth.ResolveDirectiveKindCustom,
+			}},
+		},
+		FailurePolicy: string(v1alpha1.EgressAuthFailurePolicyFailOpen),
+	}
+
+	err := prepareHTTPHeaderDirectives(ctx, "http", true)
+
+	if !errors.Is(err, errEgressAuthDirectiveUnsupported) {
+		t.Fatalf("err = %v, want unsupported directive", err)
+	}
+	if !ctx.ShouldBypass() {
+		t.Fatal("expected fail-open bypass")
+	}
+	if ctx.BypassReason != "unsupported_directive" {
+		t.Fatalf("bypass reason = %q", ctx.BypassReason)
 	}
 }

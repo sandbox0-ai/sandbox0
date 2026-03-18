@@ -163,12 +163,9 @@ func TestTLSAdapterInterceptsHTTPSAndInjectsHeaders(t *testing.T) {
 					AuthRef: "example-api",
 					TLSMode: v1alpha1.EgressTLSModeTerminateReoriginate,
 				},
-				Resolved: &egressauth.ResolveResponse{
-					AuthRef: "example-api",
-					Headers: map[string]string{
-						"Authorization": "Bearer secure-token",
-					},
-				},
+				Resolved: egressauth.NewHTTPHeadersResolveResponse("example-api", map[string]string{
+					"Authorization": "Bearer secure-token",
+				}, nil),
 			},
 		}
 		done <- (&tlsAdapter{}).Handle(req)

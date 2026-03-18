@@ -11,6 +11,7 @@ import (
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
 )
 
 type Reconciler struct {
@@ -50,6 +51,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	}
 	if infra.Spec.Cluster != nil && infra.Spec.Cluster.ID != "" {
 		config.ClusterID = infra.Spec.Cluster.ID
+	}
+	if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {
+		config.DatabaseURL = dsn
 	}
 
 	if err := r.Resources.ReconcileServiceConfigMap(ctx, infra, deploymentName, labels, config); err != nil {

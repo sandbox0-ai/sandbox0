@@ -82,6 +82,29 @@ func TestRequireRegistryCapability(t *testing.T) {
 	}
 }
 
+func TestRequireCredentialSourceCapability(t *testing.T) {
+	server := &Server{}
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/credential-sources", nil)
+
+	called := false
+	engine := gin.New()
+	engine.Use(server.requireCredentialSourceCapability())
+	engine.GET("/api/v1/credential-sources", func(c *gin.Context) {
+		called = true
+		c.Status(http.StatusOK)
+	})
+
+	engine.ServeHTTP(recorder, req)
+
+	if called {
+		t.Fatal("handler should not be called when credential source store is disabled")
+	}
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+	}
+}
+
 func TestRequireNetworkPolicyInBody(t *testing.T) {
 	t.Run("allows request without network config", func(t *testing.T) {
 		server := newTestServerForCapability(t, network.NewNoopProvider())

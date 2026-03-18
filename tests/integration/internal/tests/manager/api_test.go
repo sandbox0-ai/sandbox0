@@ -173,6 +173,7 @@ func newManagerTestEnvWithOptions(t *testing.T, opts managerTestEnvOptions) *man
 
 	server := managerhttp.NewServer(
 		sandboxService,
+		nil,
 		templateService,
 		registryService,
 		nil,

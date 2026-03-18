@@ -79,7 +79,7 @@ func CompileNetworkPolicy(spec *v1alpha1.NetworkPolicySpec) (*CompiledPolicy, er
 		if err != nil {
 			return nil, fmt.Errorf("compile egress: %w", err)
 		}
-		authRules, err := compileEgressAuthRules(spec.Egress.AuthRules)
+		authRules, err := compileEgressAuthRules(spec.Egress.Rules)
 		if err != nil {
 			return nil, fmt.Errorf("compile egress auth rules: %w", err)
 		}
@@ -206,15 +206,15 @@ func parseDomains(values []string) ([]DomainRule, error) {
 	return out, nil
 }
 
-func compileEgressAuthRules(values []v1alpha1.EgressAuthRule) ([]CompiledEgressAuthRule, error) {
+func compileEgressAuthRules(values []v1alpha1.EgressCredentialRule) ([]CompiledEgressAuthRule, error) {
 	if len(values) == 0 {
 		return nil, nil
 	}
 	out := make([]CompiledEgressAuthRule, 0, len(values))
 	for _, value := range values {
-		authRef := strings.TrimSpace(value.AuthRef)
+		authRef := strings.TrimSpace(value.CredentialRef)
 		if authRef == "" {
-			return nil, fmt.Errorf("authRef is required")
+			return nil, fmt.Errorf("credentialRef is required")
 		}
 		domains, err := parseDomains(value.Domains)
 		if err != nil {

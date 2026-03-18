@@ -9,6 +9,8 @@ import (
 
 	egressbrokerhttp "github.com/sandbox0-ai/sandbox0/egress-broker/pkg/http"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
+	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -32,7 +34,26 @@ func main() {
 		zap.String("cluster_id", cfg.ClusterID),
 	)
 
-	server := egressbrokerhttp.NewServer(cfg, logger)
+	var bindingStore egressauth.BindingStore
+	if cfg.DatabaseURL != "" {
+		pool, err := dbpool.New(ctx, dbpool.Options{
+			DatabaseURL: cfg.DatabaseURL,
+			MaxConns:    cfg.DatabaseMaxConns,
+			MinConns:    cfg.DatabaseMinConns,
+			Schema:      "sched",
+		})
+		if err != nil {
+			logger.Fatal("Failed to connect to database", zap.Error(err))
+		}
+		defer pool.Close()
+
+		if err := egressauth.RunMigrations(ctx, pool, &zapMigrateLogger{logger: logger}); err != nil {
+			logger.Fatal("Failed to run egress auth migrations", zap.Error(err))
+		}
+		bindingStore = egressauth.NewRepository(pool)
+	}
+
+	server := egressbrokerhttp.NewServer(cfg, logger, bindingStore)
 	if err := server.Start(ctx); err != nil {
 		logger.Fatal("egress-broker exited with error", zap.Error(err))
 	}
@@ -82,4 +103,16 @@ func resolvedHTTPPort(cfg *config.EgressBrokerConfig) int {
 		return 8082
 	}
 	return cfg.HTTPPort
+}
+
+type zapMigrateLogger struct {
+	logger *zap.Logger
+}
+
+func (z *zapMigrateLogger) Printf(format string, args ...any) {
+	z.logger.Info(fmt.Sprintf(format, args...))
+}
+
+func (z *zapMigrateLogger) Fatalf(format string, args ...any) {
+	z.logger.Fatal(fmt.Sprintf(format, args...))
 }

@@ -63,7 +63,7 @@ func (s *Server) proxyHTTPSRequest(req *adapterRequest) error {
 			_ = writeHTTPProxyError(downstreamTLS, http.StatusServiceUnavailable, "egress auth resolution failed")
 			return fmt.Errorf("resolve egress auth for %q: %w", req.EgressAuth.Rule.AuthRef, req.EgressAuth.ResolveError)
 		}
-		if req.EgressAuth.Resolved == nil {
+		if req.EgressAuth.Resolved == nil || len(req.EgressAuth.ResolvedHeaders) == 0 {
 			_ = writeHTTPProxyError(downstreamTLS, http.StatusServiceUnavailable, "egress auth material unavailable")
 			return fmt.Errorf("egress auth material missing for %q", req.EgressAuth.Rule.AuthRef)
 		}
@@ -141,8 +141,8 @@ func (s *Server) proxyHTTPFromConn(downstream net.Conn, req *adapterRequest, ups
 	if httpReq.Host == "" && req.Host != "" {
 		httpReq.Host = req.Host
 	}
-	if req.EgressAuth != nil && req.EgressAuth.Resolved != nil {
-		injectHTTPHeaders(httpReq, req.EgressAuth.Resolved.Headers)
+	if req.EgressAuth != nil && len(req.EgressAuth.ResolvedHeaders) > 0 {
+		injectHTTPHeaders(httpReq, req.EgressAuth.ResolvedHeaders)
 	}
 	if err := httpReq.Write(upstream); err != nil {
 		if counter, ok := upstream.(*countingConn); ok {

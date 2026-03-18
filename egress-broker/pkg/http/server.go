@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
-	"strings"
+	"strconv"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/egress-broker/pkg/resolver"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
@@ -17,14 +17,14 @@ import (
 
 // Server serves egress-broker HTTP endpoints.
 type Server struct {
-	cfg     *config.EgressBrokerConfig
-	logger  *zap.Logger
-	server  *http.Server
-	authMap map[string]config.StaticEgressAuthConfig
+	cfg      *config.EgressBrokerConfig
+	logger   *zap.Logger
+	server   *http.Server
+	resolver *resolver.Service
 }
 
 // NewServer creates a new egress-broker HTTP server.
-func NewServer(cfg *config.EgressBrokerConfig, logger *zap.Logger) *Server {
+func NewServer(cfg *config.EgressBrokerConfig, logger *zap.Logger, bindingStore egressauth.BindingStore) *Server {
 	if cfg == nil {
 		cfg = &config.EgressBrokerConfig{}
 	}
@@ -34,11 +34,11 @@ func NewServer(cfg *config.EgressBrokerConfig, logger *zap.Logger) *Server {
 
 	mux := http.NewServeMux()
 	s := &Server{
-		cfg:     cfg,
-		logger:  logger,
-		authMap: buildStaticAuthMap(cfg),
+		cfg:      cfg,
+		logger:   logger,
+		resolver: resolver.NewService(cfg, bindingStore, logger),
 		server: &http.Server{
-			Addr:              fmt.Sprintf(":%d", resolveHTTPPort(cfg)),
+			Addr:              ":" + formatHTTPPort(resolveHTTPPort(cfg)),
 			Handler:           mux,
 			ReadHeaderTimeout: 5 * time.Second,
 		},
@@ -109,16 +109,11 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		zap.String("destination", req.Destination),
 		zap.String("protocol", req.Protocol),
 	)
-	entry, ok := s.lookupStaticAuth(req.AuthRef)
-	if !ok {
-		_ = spec.WriteError(w, http.StatusNotFound, spec.CodeNotFound, "authRef not found")
+	resp, err := s.resolver.Resolve(r.Context(), &req)
+	if err != nil {
+		statusCode, code, message := mapResolveError(err)
+		_ = spec.WriteError(w, statusCode, code, message)
 		return
-	}
-	expiresAt := time.Now().UTC().Add(entry.TTL.Duration)
-	resp := &egressauth.ResolveResponse{
-		AuthRef:   entry.AuthRef,
-		Headers:   cloneHeaders(entry.Headers),
-		ExpiresAt: &expiresAt,
 	}
 	_ = spec.WriteSuccess(w, http.StatusOK, resp)
 }
@@ -130,36 +125,21 @@ func resolveHTTPPort(cfg *config.EgressBrokerConfig) int {
 	return cfg.HTTPPort
 }
 
-func buildStaticAuthMap(cfg *config.EgressBrokerConfig) map[string]config.StaticEgressAuthConfig {
-	if cfg == nil || len(cfg.StaticAuth) == 0 {
-		return nil
+func mapResolveError(err error) (int, string, string) {
+	if err == nil {
+		return http.StatusOK, "", ""
 	}
-	out := make(map[string]config.StaticEgressAuthConfig, len(cfg.StaticAuth))
-	for _, entry := range cfg.StaticAuth {
-		authRef := strings.TrimSpace(entry.AuthRef)
-		if authRef == "" {
-			continue
-		}
-		out[authRef] = entry
+	if errors.Is(err, resolver.ErrAuthRefNotFound) {
+		return http.StatusNotFound, spec.CodeNotFound, "authRef not found"
 	}
-	return out
+
+	var unsupported *resolver.UnsupportedProviderError
+	if errors.As(err, &unsupported) {
+		return http.StatusConflict, spec.CodeConflict, err.Error()
+	}
+	return http.StatusInternalServerError, spec.CodeInternal, "resolve authRef failed"
 }
 
-func (s *Server) lookupStaticAuth(authRef string) (config.StaticEgressAuthConfig, bool) {
-	if s == nil || len(s.authMap) == 0 {
-		return config.StaticEgressAuthConfig{}, false
-	}
-	entry, ok := s.authMap[strings.TrimSpace(authRef)]
-	return entry, ok
-}
-
-func cloneHeaders(in map[string]string) map[string]string {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
-	return out
+func formatHTTPPort(port int) string {
+	return strconv.Itoa(port)
 }

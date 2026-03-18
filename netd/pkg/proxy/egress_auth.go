@@ -17,6 +17,7 @@ import (
 type egressAuthContext struct {
 	Rule              *policy.CompiledEgressAuthRule
 	Resolved          *egressauth.ResolveResponse
+	ResolvedHeaders   map[string]string
 	CacheHit          bool
 	ResolveAttempt    bool
 	ResolveError      error
@@ -54,6 +55,8 @@ type noopEgressAuthResolver struct{}
 type ServerOption func(*Server)
 
 var errEgressAuthResolverUnconfigured = errors.New("egress auth resolver is not configured")
+var errEgressAuthDirectiveUnsupported = errors.New("egress auth directives unsupported by adapter")
+var errEgressAuthMaterialUnavailable = errors.New("egress auth material unavailable")
 
 func WithEgressAuthResolver(resolver egressAuthResolver) ServerOption {
 	return func(s *Server) {
@@ -131,23 +134,89 @@ func (noopEgressAuthResolver) Resolve(_ context.Context, _ *egressauth.ResolveRe
 }
 
 func cloneResolveResponse(in *egressauth.ResolveResponse) *egressauth.ResolveResponse {
-	if in == nil {
+	return egressauth.CloneResolveResponse(in)
+}
+
+func cloneResolvedHeaders(in map[string]string) map[string]string {
+	if len(in) == 0 {
 		return nil
 	}
-	out := &egressauth.ResolveResponse{
-		AuthRef: in.AuthRef,
-	}
-	if len(in.Headers) > 0 {
-		out.Headers = make(map[string]string, len(in.Headers))
-		for key, value := range in.Headers {
-			out.Headers[key] = value
-		}
-	}
-	if in.ExpiresAt != nil {
-		expiresAt := *in.ExpiresAt
-		out.ExpiresAt = &expiresAt
+	out := make(map[string]string, len(in))
+	for key, value := range in {
+		out[key] = value
 	}
 	return out
+}
+
+func resolveHTTPHeadersForAdapter(ctx *egressAuthContext, allowHTTPHeaders bool) (map[string]string, error) {
+	if ctx == nil || ctx.Resolved == nil {
+		return nil, errEgressAuthMaterialUnavailable
+	}
+
+	if len(ctx.Resolved.Directives) == 0 && len(ctx.Resolved.Headers) > 0 {
+		if !allowHTTPHeaders {
+			return nil, errEgressAuthDirectiveUnsupported
+		}
+		return cloneResolvedHeaders(ctx.Resolved.Headers), nil
+	}
+
+	if !allowHTTPHeaders {
+		if len(ctx.Resolved.Directives) > 0 || len(ctx.Resolved.Headers) > 0 {
+			return nil, errEgressAuthDirectiveUnsupported
+		}
+		return nil, errEgressAuthMaterialUnavailable
+	}
+
+	headers := map[string]string{}
+	for _, directive := range ctx.Resolved.Directives {
+		switch directive.Kind {
+		case egressauth.ResolveDirectiveKindHTTPHeaders:
+			if directive.HTTPHeaders == nil {
+				continue
+			}
+			for key, value := range directive.HTTPHeaders.Headers {
+				headers[key] = value
+			}
+		default:
+			return nil, errEgressAuthDirectiveUnsupported
+		}
+	}
+	if len(headers) == 0 {
+		return nil, errEgressAuthMaterialUnavailable
+	}
+	return headers, nil
+}
+
+func prepareHTTPHeaderDirectives(ctx *egressAuthContext, protocol string, allowHTTPHeaders bool) error {
+	if ctx == nil || ctx.Rule == nil {
+		return nil
+	}
+	if ctx.ShouldBypass() {
+		return nil
+	}
+	if ctx.ResolveError != nil {
+		return ctx.ResolveError
+	}
+	if ctx.Resolved == nil {
+		applyEgressAuthFailurePolicy(ctx, protocol, "material_unavailable")
+		return errEgressAuthMaterialUnavailable
+	}
+
+	headers, err := resolveHTTPHeadersForAdapter(ctx, allowHTTPHeaders)
+	if err == nil {
+		ctx.ResolvedHeaders = headers
+		return nil
+	}
+
+	switch {
+	case errors.Is(err, errEgressAuthDirectiveUnsupported):
+		applyEgressAuthFailurePolicy(ctx, protocol, "unsupported_directive")
+	case errors.Is(err, errEgressAuthMaterialUnavailable):
+		applyEgressAuthFailurePolicy(ctx, protocol, "material_unavailable")
+	default:
+		applyEgressAuthFailurePolicy(ctx, protocol, "resolve_error")
+	}
+	return err
 }
 
 func (s *Server) attachEgressAuth(req *adapterRequest, decision trafficDecision) {

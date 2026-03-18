@@ -114,6 +114,63 @@ spec:
               network:
                 description: Template Sandbox Network policy (template-level default)
                 properties:
+                  credentials:
+                    description: NetworkCredentialsSpec defines sandbox-scoped credential
+                      bindings.
+                    properties:
+                      bindings:
+                        items:
+                          description: CredentialBinding defines how a credential
+                            reference should be resolved.
+                          properties:
+                            cachePolicy:
+                              description: CachePolicySpec controls broker-side caching
+                                for one binding.
+                              properties:
+                                ttl:
+                                  type: string
+                              type: object
+                            projection:
+                              description: ProjectionSpec defines how resolved source
+                                data should be projected into runtime directives.
+                              properties:
+                                httpHeaders:
+                                  description: HTTPHeadersProjection injects HTTP
+                                    headers derived from source data.
+                                  properties:
+                                    headers:
+                                      items:
+                                        description: ProjectedHeader defines one projected
+                                          header template.
+                                        properties:
+                                          name:
+                                            type: string
+                                          valueTemplate:
+                                            type: string
+                                        required:
+                                        - name
+                                        - valueTemplate
+                                        type: object
+                                      type: array
+                                  type: object
+                                type:
+                                  description: CredentialProjectionType identifies
+                                    the runtime projection shape.
+                                  type: string
+                              required:
+                              - type
+                              type: object
+                            ref:
+                              type: string
+                            sourceRef:
+                              type: string
+                          required:
+                          - projection
+                          - ref
+                          - sourceRef
+                          type: object
+                        type: array
+                    type: object
                   egress:
                     description: |-
                       NetworkEgressPolicy defines egress policy.
@@ -147,14 +204,41 @@ spec:
                           - port
                           type: object
                         type: array
-                      authRules:
+                      deniedCidrs:
                         items:
-                          description: EgressAuthRule defines an auth injection rule
-                            matched against outbound traffic.
+                          type: string
+                        type: array
+                      deniedDomains:
+                        items:
+                          type: string
+                        type: array
+                      deniedPorts:
+                        items:
+                          description: PortSpec defines a port specification
                           properties:
-                            authRef:
-                              description: AuthRef identifies the auth material or
-                                policy resolved by egress-broker.
+                            endPort:
+                              description: EndPort for port ranges (optional)
+                              format: int32
+                              type: integer
+                            port:
+                              description: Port number
+                              format: int32
+                              type: integer
+                            protocol:
+                              description: Protocol (tcp or udp)
+                              type: string
+                          required:
+                          - port
+                          type: object
+                        type: array
+                      rules:
+                        items:
+                          description: EgressCredentialRule defines a credential injection
+                            rule matched against outbound traffic.
+                          properties:
+                            credentialRef:
+                              description: CredentialRef identifies the binding resolved
+                                by egress-broker.
                               type: string
                             domains:
                               description: Domains matches outbound destinations by
@@ -196,42 +280,15 @@ spec:
                                 for the rule.
                               type: string
                             rollout:
-                              description: Rollout controls whether this auth rule
-                                is active. Empty defaults to enabled.
+                              description: Rollout controls whether this rule is active.
+                                Empty defaults to enabled.
                               type: string
                             tlsMode:
                               description: TLSMode indicates whether netd should intercept
                                 TLS for matching flows.
                               type: string
                           required:
-                          - authRef
-                          type: object
-                        type: array
-                      deniedCidrs:
-                        items:
-                          type: string
-                        type: array
-                      deniedDomains:
-                        items:
-                          type: string
-                        type: array
-                      deniedPorts:
-                        items:
-                          description: PortSpec defines a port specification
-                          properties:
-                            endPort:
-                              description: EndPort for port ranges (optional)
-                              format: int32
-                              type: integer
-                            port:
-                              description: Port number
-                              format: int32
-                              type: integer
-                            protocol:
-                              description: Protocol (tcp or udp)
-                              type: string
-                          required:
-                          - port
+                          - credentialRef
                           type: object
                         type: array
                     type: object

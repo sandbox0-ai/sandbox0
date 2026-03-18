@@ -26,6 +26,16 @@ const (
 	CreateAPIKeyRequestTypeUser    CreateAPIKeyRequestType = "user"
 )
 
+// Defines values for CredentialProjectionType.
+const (
+	HttpHeaders CredentialProjectionType = "http_headers"
+)
+
+// Defines values for CredentialSourceRecordResolverKind.
+const (
+	StaticHeaders CredentialSourceRecordResolverKind = "static_headers"
+)
+
 // Defines values for EgressAuthFailurePolicy.
 const (
 	FailClosed EgressAuthFailurePolicy = "fail-closed"
@@ -136,6 +146,16 @@ const (
 // Defines values for SuccessCreatedResponseSuccess.
 const (
 	SuccessCreatedResponseSuccessTrue SuccessCreatedResponseSuccess = true
+)
+
+// Defines values for SuccessCredentialSourceListResponseSuccess.
+const (
+	SuccessCredentialSourceListResponseSuccessTrue SuccessCredentialSourceListResponseSuccess = true
+)
+
+// Defines values for SuccessCredentialSourceResponseSuccess.
+const (
+	SuccessCredentialSourceResponseSuccessTrue SuccessCredentialSourceResponseSuccess = true
 )
 
 // Defines values for SuccessDeletedResponseSuccess.
@@ -411,6 +431,11 @@ type AuthProvider struct {
 	Type string `json:"type"`
 }
 
+// CachePolicySpec defines model for CachePolicySpec.
+type CachePolicySpec struct {
+	Ttl *string `json:"ttl,omitempty"`
+}
+
 // Capabilities defines model for Capabilities.
 type Capabilities struct {
 	Drop *[]string `json:"drop,omitempty"`
@@ -577,6 +602,40 @@ type CreateTeamRequest struct {
 	Slug         *string `json:"slug,omitempty"`
 }
 
+// CredentialBinding defines model for CredentialBinding.
+type CredentialBinding struct {
+	CachePolicy *CachePolicySpec `json:"cachePolicy,omitempty"`
+	Projection  ProjectionSpec   `json:"projection"`
+
+	// Ref Stable credential binding reference matched by `credentialRef`.
+	Ref string `json:"ref"`
+
+	// SourceRef Region-scoped credential source reference resolved by `manager`.
+	SourceRef string `json:"sourceRef"`
+}
+
+// CredentialProjectionType defines model for CredentialProjectionType.
+type CredentialProjectionType string
+
+// CredentialSourceRecord defines model for CredentialSourceRecord.
+type CredentialSourceRecord struct {
+	CreatedAt      *time.Time                         `json:"createdAt"`
+	CurrentVersion *int64                             `json:"currentVersion,omitempty"`
+	Name           string                             `json:"name"`
+	ResolverKind   CredentialSourceRecordResolverKind `json:"resolverKind"`
+	Spec           CredentialSourceSpec               `json:"spec"`
+	Status         *string                            `json:"status,omitempty"`
+	UpdatedAt      *time.Time                         `json:"updatedAt"`
+}
+
+// CredentialSourceRecordResolverKind defines model for CredentialSourceRecord.ResolverKind.
+type CredentialSourceRecordResolverKind string
+
+// CredentialSourceSpec defines model for CredentialSourceSpec.
+type CredentialSourceSpec struct {
+	StaticHeaders *StaticHeadersSourceSpec `json:"staticHeaders,omitempty"`
+}
+
 // EgressAuthFailurePolicy defines model for EgressAuthFailurePolicy.
 type EgressAuthFailurePolicy string
 
@@ -586,10 +645,10 @@ type EgressAuthProtocol string
 // EgressAuthRolloutMode defines model for EgressAuthRolloutMode.
 type EgressAuthRolloutMode string
 
-// EgressAuthRule defines model for EgressAuthRule.
-type EgressAuthRule struct {
-	// AuthRef Broker-managed auth reference to resolve for matching traffic.
-	AuthRef string `json:"authRef"`
+// EgressCredentialRule defines model for EgressCredentialRule.
+type EgressCredentialRule struct {
+	// CredentialRef Broker-managed credential binding reference to resolve for matching traffic.
+	CredentialRef string `json:"credentialRef"`
 
 	// Domains Domain match list for the rule.
 	Domains       *[]string                `json:"domains,omitempty"`
@@ -684,6 +743,11 @@ type ForkVolumeRequest struct {
 	Writeback  *bool             `json:"writeback,omitempty"`
 }
 
+// HTTPHeadersProjection defines model for HTTPHeadersProjection.
+type HTTPHeadersProjection struct {
+	Headers *[]ProjectedHeader `json:"headers,omitempty"`
+}
+
 // Identity defines model for Identity.
 type Identity struct {
 	CreatedAt int64  `json:"created_at"`
@@ -770,6 +834,11 @@ type MoveFileRequest struct {
 	Source      string `json:"source"`
 }
 
+// NetworkCredentialsSpec Sandbox-scoped credential bindings resolved by `egress-broker`.
+type NetworkCredentialsSpec struct {
+	Bindings *[]CredentialBinding `json:"bindings,omitempty"`
+}
+
 // NetworkEgressPolicy Egress rule set interpreted by the selected network mode.
 // In `allow-all`, only `denied*` fields are enforced.
 // In `block-all`, only `allowed*` fields are enforced.
@@ -783,11 +852,6 @@ type NetworkEgressPolicy struct {
 	// AllowedPorts Port/protocol allowlist used only when mode is `block-all`.
 	AllowedPorts *[]PortSpec `json:"allowedPorts,omitempty"`
 
-	// AuthRules Structured egress auth injection rules resolved by `egress-broker`.
-	// These rules are orthogonal to allow/deny matching and are intended for
-	// destination-scoped outbound auth behavior.
-	AuthRules *[]EgressAuthRule `json:"authRules,omitempty"`
-
 	// DeniedCidrs CIDR denylist used only when mode is `allow-all`.
 	DeniedCidrs *[]string `json:"deniedCidrs,omitempty"`
 
@@ -796,6 +860,11 @@ type NetworkEgressPolicy struct {
 
 	// DeniedPorts Port/protocol denylist used only when mode is `allow-all`.
 	DeniedPorts *[]PortSpec `json:"deniedPorts,omitempty"`
+
+	// Rules Structured egress auth injection rules resolved by `egress-broker`.
+	// These rules are orthogonal to allow/deny matching and are intended for
+	// destination-scoped outbound auth behavior.
+	Rules *[]EgressCredentialRule `json:"rules,omitempty"`
 }
 
 // NodeAffinity defines model for NodeAffinity.
@@ -885,6 +954,18 @@ type PreferredSchedulingTerm struct {
 
 // ProcessType defines model for ProcessType.
 type ProcessType string
+
+// ProjectedHeader defines model for ProjectedHeader.
+type ProjectedHeader struct {
+	Name          string `json:"name"`
+	ValueTemplate string `json:"valueTemplate"`
+}
+
+// ProjectionSpec defines model for ProjectionSpec.
+type ProjectionSpec struct {
+	HttpHeaders *HTTPHeadersProjection   `json:"httpHeaders,omitempty"`
+	Type        CredentialProjectionType `json:"type"`
+}
 
 // REPLConfig defines model for REPLConfig.
 type REPLConfig struct {
@@ -1188,6 +1269,11 @@ type Snapshot struct {
 	VolumeId    string  `json:"volume_id"`
 }
 
+// StaticHeadersSourceSpec defines model for StaticHeadersSourceSpec.
+type StaticHeadersSourceSpec struct {
+	Values *map[string]string `json:"values,omitempty"`
+}
+
 // SuccessAPIKeyListResponse defines model for SuccessAPIKeyListResponse.
 type SuccessAPIKeyListResponse struct {
 	Data *struct {
@@ -1285,6 +1371,24 @@ type SuccessCreatedResponse struct {
 
 // SuccessCreatedResponseSuccess defines model for SuccessCreatedResponse.Success.
 type SuccessCreatedResponseSuccess bool
+
+// SuccessCredentialSourceListResponse defines model for SuccessCredentialSourceListResponse.
+type SuccessCredentialSourceListResponse struct {
+	Data    *[]CredentialSourceRecord                  `json:"data,omitempty"`
+	Success SuccessCredentialSourceListResponseSuccess `json:"success"`
+}
+
+// SuccessCredentialSourceListResponseSuccess defines model for SuccessCredentialSourceListResponse.Success.
+type SuccessCredentialSourceListResponseSuccess bool
+
+// SuccessCredentialSourceResponse defines model for SuccessCredentialSourceResponse.
+type SuccessCredentialSourceResponse struct {
+	Data    *CredentialSourceRecord                `json:"data,omitempty"`
+	Success SuccessCredentialSourceResponseSuccess `json:"success"`
+}
+
+// SuccessCredentialSourceResponseSuccess defines model for SuccessCredentialSourceResponse.Success.
+type SuccessCredentialSourceResponseSuccess bool
 
 // SuccessDeletedResponse defines model for SuccessDeletedResponse.
 type SuccessDeletedResponse struct {
@@ -1743,6 +1847,9 @@ type Toleration struct {
 // `allow-all` permits traffic by default and applies `denied*` rules as subtractive filters.
 // `block-all` denies traffic by default and applies `allowed*` rules as additive exceptions.
 type TplSandboxNetworkPolicy struct {
+	// Credentials Sandbox-scoped credential bindings resolved by `egress-broker`.
+	Credentials *NetworkCredentialsSpec `json:"credentials,omitempty"`
+
 	// Egress Egress rule set interpreted by the selected network mode.
 	// In `allow-all`, only `denied*` fields are enforced.
 	// In `block-all`, only `allowed*` fields are enforced.
@@ -1951,6 +2058,12 @@ type GetTenantActiveParams struct {
 
 // PostApiKeysJSONRequestBody defines body for PostApiKeys for application/json ContentType.
 type PostApiKeysJSONRequestBody = CreateAPIKeyRequest
+
+// PostApiV1CredentialSourcesJSONRequestBody defines body for PostApiV1CredentialSources for application/json ContentType.
+type PostApiV1CredentialSourcesJSONRequestBody = CredentialSourceRecord
+
+// PutApiV1CredentialSourcesNameJSONRequestBody defines body for PutApiV1CredentialSourcesName for application/json ContentType.
+type PutApiV1CredentialSourcesNameJSONRequestBody = CredentialSourceRecord
 
 // PostApiV1SandboxesJSONRequestBody defines body for PostApiV1Sandboxes for application/json ContentType.
 type PostApiV1SandboxesJSONRequestBody = ClaimRequest

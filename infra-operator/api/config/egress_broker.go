@@ -34,6 +34,17 @@ type EgressBrokerConfig struct {
 	DefaultResolveTTL metav1.Duration `yaml:"default_resolve_ttl" json:"defaultResolveTtl"`
 
 	// +optional
+	DatabaseURL string `yaml:"database_url" json:"-"`
+
+	// +optional
+	// +kubebuilder:default=10
+	DatabaseMaxConns int32 `yaml:"database_max_conns" json:"databaseMaxConns"`
+
+	// +optional
+	// +kubebuilder:default=2
+	DatabaseMinConns int32 `yaml:"database_min_conns" json:"databaseMinConns"`
+
+	// +optional
 	StaticAuth []StaticEgressAuthConfig `yaml:"static_auth" json:"staticAuth"`
 }
 
@@ -85,6 +96,12 @@ func applyEgressBrokerDefaults(cfg *EgressBrokerConfig) {
 	}
 	if cfg.DefaultResolveTTL.Duration == 0 {
 		cfg.DefaultResolveTTL = metav1.Duration{Duration: 5 * time.Minute}
+	}
+	if cfg.DatabaseMaxConns == 0 {
+		cfg.DatabaseMaxConns = 10
+	}
+	if cfg.DatabaseMinConns == 0 {
+		cfg.DatabaseMinConns = 2
 	}
 	for idx := range cfg.StaticAuth {
 		if cfg.StaticAuth[idx].TTL.Duration == 0 {

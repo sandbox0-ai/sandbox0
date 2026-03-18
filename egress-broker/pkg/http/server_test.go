@@ -2,6 +2,7 @@ package http
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,31 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+type fakeBindingStore struct {
+	record        *egressauth.BindingRecord
+	sourceVersion *egressauth.CredentialSourceVersion
+}
+
+func (f *fakeBindingStore) GetBindings(_ context.Context, _, _ string) (*egressauth.BindingRecord, error) {
+	return f.record, nil
+}
+
+func (f *fakeBindingStore) UpsertBindings(context.Context, *egressauth.BindingRecord) error {
+	return nil
+}
+
+func (f *fakeBindingStore) DeleteBindings(context.Context, string, string) error {
+	return nil
+}
+
+func (f *fakeBindingStore) GetSourceByRef(context.Context, string, string) (*egressauth.CredentialSource, error) {
+	return nil, nil
+}
+
+func (f *fakeBindingStore) GetSourceVersion(context.Context, int64, int64) (*egressauth.CredentialSourceVersion, error) {
+	return f.sourceVersion, nil
+}
+
 func TestHandleResolveReturnsStaticAuthDirective(t *testing.T) {
 	server := NewServer(&config.EgressBrokerConfig{
 		StaticAuth: []config.StaticEgressAuthConfig{
@@ -24,7 +50,7 @@ func TestHandleResolveReturnsStaticAuthDirective(t *testing.T) {
 				TTL:     metav1.Duration{Duration: time.Minute},
 			},
 		},
-	}, zap.NewNop())
+	}, zap.NewNop(), nil)
 
 	body, err := json.Marshal(&egressauth.ResolveRequest{
 		SandboxID:   "sbx_123",
@@ -60,10 +86,13 @@ func TestHandleResolveReturnsStaticAuthDirective(t *testing.T) {
 	if resp.ExpiresAt == nil {
 		t.Fatal("expected expiresAt")
 	}
+	if len(resp.Directives) != 1 || resp.Directives[0].Kind != egressauth.ResolveDirectiveKindHTTPHeaders {
+		t.Fatalf("unexpected directives: %+v", resp.Directives)
+	}
 }
 
 func TestHandleResolveReturnsNotFoundForUnknownAuthRef(t *testing.T) {
-	server := NewServer(&config.EgressBrokerConfig{}, zap.NewNop())
+	server := NewServer(&config.EgressBrokerConfig{}, zap.NewNop(), nil)
 	body, err := json.Marshal(&egressauth.ResolveRequest{AuthRef: "missing"})
 	if err != nil {
 		t.Fatalf("marshal request: %v", err)
@@ -75,5 +104,73 @@ func TestHandleResolveReturnsNotFoundForUnknownAuthRef(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+func TestHandleResolvePrefersBindingStore(t *testing.T) {
+	server := NewServer(&config.EgressBrokerConfig{
+		ClusterID:         "cluster-a",
+		DefaultResolveTTL: metav1.Duration{Duration: time.Minute},
+		StaticAuth: []config.StaticEgressAuthConfig{{
+			AuthRef: "example-api",
+			Headers: map[string]string{"Authorization": "Bearer static"},
+			TTL:     metav1.Duration{Duration: time.Minute},
+		}},
+	}, zap.NewNop(), &fakeBindingStore{
+		record: &egressauth.BindingRecord{
+			ClusterID: "cluster-a",
+			SandboxID: "sbx_123",
+			Bindings: []egressauth.CredentialBinding{{
+				Ref:           "example-api",
+				SourceRef:     "example-source",
+				SourceID:      1,
+				SourceVersion: 1,
+				Projection: egressauth.ProjectionSpec{
+					Type: egressauth.CredentialProjectionTypeHTTPHeaders,
+					HTTPHeaders: &egressauth.HTTPHeadersProjection{
+						Headers: []egressauth.ProjectedHeader{{
+							Name:          "Authorization",
+							ValueTemplate: "Bearer {{ .token }}",
+						}},
+					},
+				},
+			}},
+		},
+		sourceVersion: &egressauth.CredentialSourceVersion{
+			SourceID:     1,
+			Version:      1,
+			ResolverKind: "static_headers",
+			Spec: egressauth.CredentialSourceSpec{
+				StaticHeaders: &egressauth.StaticHeadersSourceSpec{
+					Values: map[string]string{"token": "store"},
+				},
+			},
+		},
+	})
+
+	body, err := json.Marshal(&egressauth.ResolveRequest{
+		SandboxID: "sbx_123",
+		AuthRef:   "example-api",
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/resolve", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	server.handleResolve(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	resp, apiErr, err := spec.DecodeResponse[egressauth.ResolveResponse](rec.Body)
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if apiErr != nil {
+		t.Fatalf("unexpected api error: %+v", apiErr)
+	}
+	if got := resp.Headers["Authorization"]; got != "Bearer store" {
+		t.Fatalf("authorization header = %q, want store value", got)
 	}
 }

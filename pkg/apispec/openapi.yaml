@@ -2023,6 +2023,114 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/credential-sources:
+    get:
+      tags: [credential-sources]
+      summary: List credential sources
+      security:
+        - bearerAuth: []
+      x-upstream-service: manager
+      x-upstream-path: /api/v1/credential-sources
+      responses:
+        "200":
+          description: Credential sources
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessCredentialSourceListResponse"
+    post:
+      tags: [credential-sources]
+      summary: Create credential source
+      security:
+        - bearerAuth: []
+      x-upstream-service: manager
+      x-upstream-path: /api/v1/credential-sources
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CredentialSourceRecord"
+      responses:
+        "201":
+          description: Credential source created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessCredentialSourceResponse"
+  /api/v1/credential-sources/{name}:
+    get:
+      tags: [credential-sources]
+      summary: Get credential source
+      security:
+        - bearerAuth: []
+      x-upstream-service: manager
+      x-upstream-path: /api/v1/credential-sources/{name}
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Credential source
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessCredentialSourceResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+    put:
+      tags: [credential-sources]
+      summary: Update credential source
+      security:
+        - bearerAuth: []
+      x-upstream-service: manager
+      x-upstream-path: /api/v1/credential-sources/{name}
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CredentialSourceRecord"
+      responses:
+        "200":
+          description: Credential source updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessCredentialSourceResponse"
+    delete:
+      tags: [credential-sources]
+      summary: Delete credential source
+      security:
+        - bearerAuth: []
+      x-upstream-service: manager
+      x-upstream-path: /api/v1/credential-sources/{name}
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Credential source deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessMessageResponse"
   /api/v1/sandboxvolumes:
     post:
       tags: [sandbox-volumes]
@@ -2385,6 +2493,22 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/RegistryCredentials"
+    SuccessCredentialSourceResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/CredentialSourceRecord"
+    SuccessCredentialSourceListResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: "#/components/schemas/CredentialSourceRecord"
     RegistryCredentials:
       type: object
       properties:
@@ -4374,6 +4498,8 @@ components:
           enum: [allow-all, block-all]
         egress:
           $ref: "#/components/schemas/NetworkEgressPolicy"
+        credentials:
+          $ref: "#/components/schemas/NetworkCredentialsSpec"
       required: [mode]
     NetworkEgressPolicy:
       type: object
@@ -4412,23 +4538,31 @@ components:
           description: Port/protocol denylist used only when mode is `allow-all`.
           items:
             $ref: "#/components/schemas/PortSpec"
-        authRules:
+        rules:
           type: array
           description: |
             Structured egress auth injection rules resolved by `egress-broker`.
             These rules are orthogonal to allow/deny matching and are intended for
             destination-scoped outbound auth behavior.
           items:
-            $ref: "#/components/schemas/EgressAuthRule"
-    EgressAuthRule:
+            $ref: "#/components/schemas/EgressCredentialRule"
+    NetworkCredentialsSpec:
+      type: object
+      description: Sandbox-scoped credential bindings resolved by `egress-broker`.
+      properties:
+        bindings:
+          type: array
+          items:
+            $ref: "#/components/schemas/CredentialBinding"
+    EgressCredentialRule:
       type: object
       properties:
         name:
           type: string
           description: Optional stable identifier used for merge and replacement.
-        authRef:
+        credentialRef:
           type: string
-          description: Broker-managed auth reference to resolve for matching traffic.
+          description: Broker-managed credential binding reference to resolve for matching traffic.
         rollout:
           $ref: "#/components/schemas/EgressAuthRolloutMode"
         protocol:
@@ -4447,7 +4581,88 @@ components:
           description: Port/protocol constraints for the rule.
           items:
             $ref: "#/components/schemas/PortSpec"
-      required: [authRef]
+      required: [credentialRef]
+    CredentialBinding:
+      type: object
+      properties:
+        ref:
+          type: string
+          description: Stable credential binding reference matched by `credentialRef`.
+        sourceRef:
+          type: string
+          description: Region-scoped credential source reference resolved by `manager`.
+        projection:
+          $ref: "#/components/schemas/ProjectionSpec"
+        cachePolicy:
+          $ref: "#/components/schemas/CachePolicySpec"
+      required: [ref, sourceRef, projection]
+    ProjectionSpec:
+      type: object
+      properties:
+        type:
+          $ref: "#/components/schemas/CredentialProjectionType"
+        httpHeaders:
+          $ref: "#/components/schemas/HTTPHeadersProjection"
+      required: [type]
+    CredentialProjectionType:
+      type: string
+      enum: [http_headers]
+    HTTPHeadersProjection:
+      type: object
+      properties:
+        headers:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProjectedHeader"
+    ProjectedHeader:
+      type: object
+      properties:
+        name:
+          type: string
+        valueTemplate:
+          type: string
+      required: [name, valueTemplate]
+    CachePolicySpec:
+      type: object
+      properties:
+        ttl:
+          type: string
+    CredentialSourceRecord:
+      type: object
+      properties:
+        name:
+          type: string
+        resolverKind:
+          type: string
+          enum: [static_headers]
+        currentVersion:
+          type: integer
+          format: int64
+        status:
+          type: string
+        spec:
+          $ref: "#/components/schemas/CredentialSourceSpec"
+        createdAt:
+          type: string
+          format: date-time
+          nullable: true
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
+      required: [name, resolverKind, spec]
+    CredentialSourceSpec:
+      type: object
+      properties:
+        staticHeaders:
+          $ref: "#/components/schemas/StaticHeadersSourceSpec"
+    StaticHeadersSourceSpec:
+      type: object
+      properties:
+        values:
+          type: object
+          additionalProperties:
+            type: string
     EgressAuthProtocol:
       type: string
       enum: [http, https, grpc]

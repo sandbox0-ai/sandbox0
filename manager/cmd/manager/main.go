@@ -25,6 +25,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/clock"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
+	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
@@ -122,6 +123,10 @@ func main() {
 	if err := runMeteringMigrations(ctx, pool, logger); err != nil {
 		logger.Fatal("Failed to run metering migrations", zap.Error(err))
 	}
+	if err := runEgressAuthMigrations(ctx, pool, logger); err != nil {
+		logger.Fatal("Failed to run egress auth migrations", zap.Error(err))
+	}
+	credentialStore := egressauth.NewRepository(pool)
 
 	// Initialize clock for cross-cluster time synchronization
 	var clk *clock.Clock
@@ -272,6 +277,8 @@ func main() {
 		logger,
 		managerMetrics,
 	)
+	sandboxService.SetCredentialStore(credentialStore)
+	credentialSourceService := service.NewCredentialSourceService(credentialStore, logger)
 
 	templateService := service.NewTemplateService(
 		k8sClient,
@@ -353,6 +360,7 @@ func main() {
 	// Create HTTP server
 	httpServer := httpserver.NewServer(
 		sandboxService,
+		credentialSourceService,
 		templateService,
 		registryService,
 		templateStore,
@@ -494,6 +502,18 @@ func runMeteringMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.
 	}
 
 	logger.Info("Metering migrations completed successfully")
+	return nil
+}
+
+func runEgressAuthMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) error {
+	logger.Info("Running egress auth migrations")
+
+	migrateLogger := &zapMigrateLogger{logger: logger}
+	if err := egressauth.RunMigrations(ctx, pool, migrateLogger); err != nil {
+		return fmt.Errorf("egress auth migrations: %w", err)
+	}
+
+	logger.Info("Egress auth migrations completed successfully")
 	return nil
 }
 

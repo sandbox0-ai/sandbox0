@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	"sort"
+	"strconv"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
@@ -258,52 +259,45 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Conta
 }
 
 func appendProcdConfigEnvVars(envVars []corev1.EnvVar) []corev1.EnvVar {
-	hasNodeName := false
-	for _, ev := range envVars {
-		if ev.Name == "node_name" {
-			hasNodeName = true
-			break
-		}
+	envIndex := make(map[string]int, len(envVars))
+	for i, envVar := range envVars {
+		envIndex[envVar.Name] = i
 	}
-	if !hasNodeName {
-		envVars = append(envVars, corev1.EnvVar{
-			Name: "node_name",
-			ValueFrom: &corev1.EnvVarSource{
-				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.nodeName"},
-			},
-		})
-	}
+
+	upsertProcdEnvVar(envIndex, &envVars, corev1.EnvVar{
+		Name: "node_name",
+		ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.nodeName"},
+		},
+	})
 
 	cfg := config.LoadManagerConfig()
 	if cfg == nil {
 		return envVars
 	}
 
-	envMap := cfg.ProcdConfig.EnvMap()
-	if len(envMap) == 0 {
-		return envVars
-	}
-
-	keys := make([]string, 0, len(envMap))
-	for key := range envMap {
-		if key == "" {
-			continue
-		}
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-
-	for _, key := range keys {
-		if key == "node_name" {
-			continue
-		}
-		envVars = append(envVars, corev1.EnvVar{
-			Name:  key,
-			Value: envMap[key],
-		})
-	}
+	// These env vars control how procd reaches storage-proxy and must remain
+	// manager-controlled, regardless of tenant template env overrides.
+	upsertProcdEnvVar(envIndex, &envVars, corev1.EnvVar{
+		Name:  "storage_proxy_base_url",
+		Value: cfg.ProcdConfig.StorageProxyBaseURL,
+	})
+	upsertProcdEnvVar(envIndex, &envVars, corev1.EnvVar{
+		Name:  "storage_proxy_port",
+		Value: strconv.Itoa(cfg.ProcdConfig.StorageProxyPort),
+	})
 
 	return envVars
+}
+
+func upsertProcdEnvVar(envIndex map[string]int, envVars *[]corev1.EnvVar, envVar corev1.EnvVar) {
+	if idx, ok := envIndex[envVar.Name]; ok {
+		(*envVars)[idx] = envVar
+		return
+	}
+
+	*envVars = append(*envVars, envVar)
+	envIndex[envVar.Name] = len(*envVars) - 1
 }
 
 func applyProcdInit(spec *corev1.PodSpec) {

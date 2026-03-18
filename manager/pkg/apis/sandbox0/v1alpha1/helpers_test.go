@@ -184,3 +184,70 @@ func writeManagerConfig(t *testing.T, contents string) string {
 	}
 	return path
 }
+
+func TestBuildPodSpecOverridesTenantStorageProxyEnvVars(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+procd_config:
+  storage_proxy_base_url: storage-proxy.sandbox0-system.svc.cluster.local
+  storage_proxy_port: 4001
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	template := newTestTemplate()
+	template.Spec.EnvVars = map[string]string{
+		"storage_proxy_base_url": "evil.local",
+		"storage_proxy_port":     "65535",
+		"node_name":              "tenant-node",
+	}
+
+	spec := BuildPodSpec(template, false)
+	envByName := map[string]corev1.EnvVar{}
+	for _, env := range spec.Containers[0].Env {
+		envByName[env.Name] = env
+	}
+
+	if got := envByName["storage_proxy_base_url"].Value; got != "storage-proxy.sandbox0-system.svc.cluster.local" {
+		t.Fatalf("storage_proxy_base_url = %q, want manager-controlled value", got)
+	}
+	if got := envByName["storage_proxy_port"].Value; got != "4001" {
+		t.Fatalf("storage_proxy_port = %q, want manager-controlled value", got)
+	}
+
+	nodeName := envByName["node_name"]
+	if nodeName.ValueFrom == nil || nodeName.ValueFrom.FieldRef == nil || nodeName.ValueFrom.FieldRef.FieldPath != "spec.nodeName" {
+		t.Fatalf("expected node_name to come from pod fieldRef spec.nodeName")
+	}
+}
+
+func TestBuildPodSpecFailsClosedForStorageProxyEnvOverridesWhenManagerConfigUnset(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	template := newTestTemplate()
+	template.Spec.EnvVars = map[string]string{
+		"storage_proxy_base_url": "evil.local",
+		"storage_proxy_port":     "65535",
+		"node_name":              "tenant-node",
+	}
+
+	spec := BuildPodSpec(template, false)
+	envByName := map[string]corev1.EnvVar{}
+	for _, env := range spec.Containers[0].Env {
+		envByName[env.Name] = env
+	}
+
+	if got := envByName["storage_proxy_base_url"].Value; got != "" {
+		t.Fatalf("storage_proxy_base_url = %q, want empty manager-controlled value", got)
+	}
+	if got := envByName["storage_proxy_port"].Value; got != "0" {
+		t.Fatalf("storage_proxy_port = %q, want 0 manager-controlled value", got)
+	}
+
+	nodeName := envByName["node_name"]
+	if nodeName.ValueFrom == nil || nodeName.ValueFrom.FieldRef == nil || nodeName.ValueFrom.FieldRef.FieldPath != "spec.nodeName" {
+		t.Fatalf("expected node_name to come from pod fieldRef spec.nodeName")
+	}
+}

@@ -77,7 +77,7 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
 			return
 		}
-		s.sandboxAddrCache.Delete(sandboxID)
+		s.sandboxAddrCache.Delete(sandboxCacheKey(sandbox.TeamID, sandboxID))
 		sandbox, err = s.managerClient.GetSandboxInternal(c.Request.Context(), sandboxID)
 		if err != nil {
 			s.logger.Warn("Failed to get sandbox after resume for public exposure",

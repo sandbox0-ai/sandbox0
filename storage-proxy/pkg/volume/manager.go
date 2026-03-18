@@ -39,6 +39,7 @@ type VolumeConfig struct {
 // VolumeContext holds JuiceFS VFS instance for a volume
 type VolumeContext struct {
 	VolumeID  string
+	TeamID    string
 	Meta      meta.Meta
 	Store     chunk.ChunkStore
 	VFS       *vfs.VFS
@@ -96,7 +97,7 @@ func (m *Manager) SetMountRegistrar(registrar MountRegistrar) {
 
 // MountVolume mounts a JuiceFS volume using SDK mode (in-memory, no FUSE).
 // AccessMode is enforced per storage-proxy instance (not per sandbox).
-func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID string, config *VolumeConfig, accessMode AccessMode) (string, time.Time, error) {
+func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID string, config *VolumeConfig, accessMode AccessMode) (string, time.Time, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -104,6 +105,10 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID string, co
 	readOnly := accessMode == AccessModeROX
 	sessionID := uuid.New().String()
 	sessionTime := time.Now()
+
+	if teamID == "" {
+		return "", time.Time{}, fmt.Errorf("missing team id for volume mount")
+	}
 
 	// Validate mount with coordinator if available.
 	if m.registrar != nil {
@@ -114,6 +119,9 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID string, co
 
 	// Check if already mounted
 	if existing, exists := m.volumes[volumeID]; exists {
+		if existing.TeamID != "" && existing.TeamID != teamID {
+			return "", time.Time{}, fmt.Errorf("volume %s already mounted by another team", volumeID)
+		}
 		if existing.Access != accessMode {
 			return "", time.Time{}, fmt.Errorf("volume %s already mounted with access_mode=%s", volumeID, existing.Access)
 		}
@@ -218,6 +226,7 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID string, co
 	// 6. Store volume context
 	m.volumes[volumeID] = &VolumeContext{
 		VolumeID:  volumeID,
+		TeamID:    teamID,
 		Meta:      metaClient,
 		Store:     store,
 		VFS:       vfsInst,

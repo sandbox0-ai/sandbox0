@@ -285,6 +285,15 @@ func (s *Server) setupRoutes() {
 			registry.POST("/credentials", s.authMiddleware.RequirePermission(authn.PermTemplateWrite), s.getRegistryCredentials)
 		}
 
+		credentialSources := api.Group("/v1/credential-sources")
+		{
+			credentialSources.GET("", s.authMiddleware.RequirePermission(authn.PermCredentialSourceRead), s.injectInternalToken(), s.igRouter.ProxyToTarget)
+			credentialSources.POST("", s.authMiddleware.RequirePermission(authn.PermCredentialSourceWrite), s.injectInternalToken(), s.igRouter.ProxyToTarget)
+			credentialSources.GET("/:name", s.authMiddleware.RequirePermission(authn.PermCredentialSourceRead), s.injectInternalToken(), s.igRouter.ProxyToTarget)
+			credentialSources.PUT("/:name", s.authMiddleware.RequirePermission(authn.PermCredentialSourceWrite), s.injectInternalToken(), s.igRouter.ProxyToTarget)
+			credentialSources.DELETE("/:name", s.authMiddleware.RequirePermission(authn.PermCredentialSourceDelete), s.injectInternalToken(), s.igRouter.ProxyToTarget)
+		}
+
 		// All other API routes go to default internal-gateway
 		api.Use(s.injectInternalToken())
 		api.Any("/*path", s.igRouter.ProxyToTarget)

@@ -23,10 +23,12 @@ func NewNetworkPolicyService(logger *zap.Logger) *NetworkPolicyService {
 
 // BuildNetworkPolicyRequest contains the request to build a network policy.
 type BuildNetworkPolicyRequest struct {
-	SandboxID    string
-	TeamID       string
-	TemplateSpec *v1alpha1.TplSandboxNetworkPolicy // From template.
-	RequestSpec  *v1alpha1.TplSandboxNetworkPolicy // From claim/update request.
+	SandboxID        string
+	TeamID           string
+	TemplateSpec     *v1alpha1.TplSandboxNetworkPolicy // From template.
+	RequestSpec      *v1alpha1.TplSandboxNetworkPolicy // From claim/update request.
+	TemplateBindings []v1alpha1.CredentialBinding      // From template.
+	RequestBindings  []v1alpha1.CredentialBinding      // From claim/update request.
 }
 
 // BuildNetworkPolicyResult contains the split effective runtime state.
@@ -52,18 +54,14 @@ func (s *NetworkPolicyService) BuildNetworkPolicyState(req *BuildNetworkPolicyRe
 	if mergedSpec == nil {
 		mergedSpec = &v1alpha1.TplSandboxNetworkPolicy{Mode: v1alpha1.NetworkModeAllowAll}
 	}
-	if err := validateNetworkCredentialConfig(mergedSpec); err != nil {
+	mergedBindings := mergeCredentialBindings(req.TemplateBindings, req.RequestBindings)
+	if err := validateNetworkCredentialConfig(mergedSpec, mergedBindings); err != nil {
 		s.logger.Warn("Ignoring invalid credential bindings and rules", zap.Error(err))
 		mergedSpec = mergedSpec.DeepCopy()
 		if mergedSpec.Egress != nil {
 			mergedSpec.Egress.Rules = nil
 		}
-		mergedSpec.Credentials = nil
-	}
-
-	var bindings []v1alpha1.CredentialBinding
-	if mergedSpec.Credentials != nil && len(mergedSpec.Credentials.Bindings) > 0 {
-		bindings = append([]v1alpha1.CredentialBinding(nil), mergedSpec.Credentials.Bindings...)
+		mergedBindings = nil
 	}
 
 	return &BuildNetworkPolicyResult{
@@ -74,7 +72,7 @@ func (s *NetworkPolicyService) BuildNetworkPolicyState(req *BuildNetworkPolicyRe
 			Mode:      mergedSpec.Mode,
 			Egress:    v1alpha1.BuildEgressSpec(mergedSpec),
 		},
-		CredentialBindings: bindings,
+		CredentialBindings: mergedBindings,
 	}
 }
 
@@ -111,13 +109,6 @@ func (s *NetworkPolicyService) mergeNetworkPolicies(
 			merged.Egress.AllowedPorts = append(merged.Egress.AllowedPorts, request.Egress.AllowedPorts...)
 			merged.Egress.DeniedPorts = append(merged.Egress.DeniedPorts, request.Egress.DeniedPorts...)
 			merged.Egress.Rules = mergeEgressCredentialRules(merged.Egress.Rules, request.Egress.Rules)
-		}
-	}
-	if request.Credentials != nil {
-		if merged.Credentials == nil {
-			merged.Credentials = request.Credentials
-		} else {
-			merged.Credentials.Bindings = mergeCredentialBindings(merged.Credentials.Bindings, request.Credentials.Bindings)
 		}
 	}
 	return merged
@@ -187,35 +178,33 @@ func mergeCredentialBindings(base, override []v1alpha1.CredentialBinding) []v1al
 	return out
 }
 
-func validateNetworkCredentialConfig(policy *v1alpha1.TplSandboxNetworkPolicy) error {
+func validateNetworkCredentialConfig(policy *v1alpha1.TplSandboxNetworkPolicy, bindings []v1alpha1.CredentialBinding) error {
 	if policy == nil {
 		return nil
 	}
 
 	bindingRefs := make(map[string]struct{})
-	if policy.Credentials != nil {
-		for _, binding := range policy.Credentials.Bindings {
-			if binding.Ref == "" {
-				return fmt.Errorf("credential binding ref is required")
-			}
-			if strings.TrimSpace(binding.SourceRef) == "" {
-				return fmt.Errorf("credential binding sourceRef is required for %q", binding.Ref)
-			}
-			if err := validateProjection(binding.Ref, binding.Projection); err != nil {
-				return err
-			}
-			if binding.CachePolicy != nil {
-				if ttl := strings.TrimSpace(binding.CachePolicy.TTL); ttl != "" {
-					if _, err := time.ParseDuration(ttl); err != nil {
-						return fmt.Errorf("credential binding cachePolicy ttl is invalid for %q: %w", binding.Ref, err)
-					}
+	for _, binding := range bindings {
+		if binding.Ref == "" {
+			return fmt.Errorf("credential binding ref is required")
+		}
+		if strings.TrimSpace(binding.SourceRef) == "" {
+			return fmt.Errorf("credential binding sourceRef is required for %q", binding.Ref)
+		}
+		if err := validateProjection(binding.Ref, binding.Projection); err != nil {
+			return err
+		}
+		if binding.CachePolicy != nil {
+			if ttl := strings.TrimSpace(binding.CachePolicy.TTL); ttl != "" {
+				if _, err := time.ParseDuration(ttl); err != nil {
+					return fmt.Errorf("credential binding cachePolicy ttl is invalid for %q: %w", binding.Ref, err)
 				}
 			}
-			if _, ok := bindingRefs[binding.Ref]; ok {
-				return fmt.Errorf("duplicate credential binding ref %q", binding.Ref)
-			}
-			bindingRefs[binding.Ref] = struct{}{}
 		}
+		if _, ok := bindingRefs[binding.Ref]; ok {
+			return fmt.Errorf("duplicate credential binding ref %q", binding.Ref)
+		}
+		bindingRefs[binding.Ref] = struct{}{}
 	}
 	if policy.Egress == nil {
 		return nil

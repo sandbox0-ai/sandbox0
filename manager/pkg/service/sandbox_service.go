@@ -209,24 +209,26 @@ type ClaimRequest struct {
 
 // SandboxConfig represents sandbox configuration
 type SandboxConfig struct {
-	EnvVars      map[string]string                 `json:"env_vars,omitempty"`
-	TTL          *int32                            `json:"ttl,omitempty"`      // Time-to-live in seconds (0 disables)
-	HardTTL      *int32                            `json:"hard_ttl,omitempty"` // Hard time-to-live in seconds (0 disables)
-	Network      *v1alpha1.TplSandboxNetworkPolicy `json:"network,omitempty"`
-	Webhook      *WebhookConfig                    `json:"webhook,omitempty"`
-	AutoResume   *bool                             `json:"auto_resume,omitempty"`
-	ExposedPorts []ExposedPortConfig               `json:"exposed_ports,omitempty"`
+	EnvVars            map[string]string                 `json:"env_vars,omitempty"`
+	TTL                *int32                            `json:"ttl,omitempty"`      // Time-to-live in seconds (0 disables)
+	HardTTL            *int32                            `json:"hard_ttl,omitempty"` // Hard time-to-live in seconds (0 disables)
+	Network            *v1alpha1.TplSandboxNetworkPolicy `json:"network,omitempty"`
+	CredentialBindings []v1alpha1.CredentialBinding      `json:"credential_bindings,omitempty"`
+	Webhook            *WebhookConfig                    `json:"webhook,omitempty"`
+	AutoResume         *bool                             `json:"auto_resume,omitempty"`
+	ExposedPorts       []ExposedPortConfig               `json:"exposed_ports,omitempty"`
 }
 
 // SandboxUpdateConfig represents sandbox configuration fields that can be updated at runtime.
 // Unlike SandboxConfig, env_vars and webhook are excluded as they only affect new processes
 // or require restart to take effect.
 type SandboxUpdateConfig struct {
-	TTL          *int32                            `json:"ttl,omitempty"`
-	HardTTL      *int32                            `json:"hard_ttl,omitempty"`
-	Network      *v1alpha1.TplSandboxNetworkPolicy `json:"network,omitempty"`
-	AutoResume   *bool                             `json:"auto_resume,omitempty"`
-	ExposedPorts []ExposedPortConfig               `json:"exposed_ports,omitempty"`
+	TTL                *int32                            `json:"ttl,omitempty"`
+	HardTTL            *int32                            `json:"hard_ttl,omitempty"`
+	Network            *v1alpha1.TplSandboxNetworkPolicy `json:"network,omitempty"`
+	CredentialBindings []v1alpha1.CredentialBinding      `json:"credential_bindings,omitempty"`
+	AutoResume         *bool                             `json:"auto_resume,omitempty"`
+	ExposedPorts       []ExposedPortConfig               `json:"exposed_ports,omitempty"`
 }
 
 type ExposedPortConfig struct {
@@ -246,6 +248,7 @@ func cloneSandboxConfig(cfg *SandboxConfig) *SandboxConfig {
 	if cloned.Network != nil {
 		cloned.Network = sanitizedNetworkPolicyForPersistence(cloned.Network)
 	}
+	cloned.CredentialBindings = nil
 	return &cloned
 }
 
@@ -719,10 +722,12 @@ func (s *SandboxService) applyPoliciesForPod(
 	}
 
 	networkState := s.NetworkPolicyService.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
-		SandboxID:    pod.Name,
-		TeamID:       req.TeamID,
-		TemplateSpec: template.Spec.Network,
-		RequestSpec:  requestNetwork,
+		SandboxID:        pod.Name,
+		TeamID:           req.TeamID,
+		TemplateSpec:     template.Spec.Network,
+		RequestSpec:      requestNetwork,
+		TemplateBindings: template.Spec.CredentialBindings,
+		RequestBindings:  requestCredentialBindings(req.Config),
 	})
 	if networkState != nil && networkState.PolicySpec != nil {
 		if _, err := s.setNetworkPolicyAnnotations(pod, networkState.PolicySpec); err != nil {
@@ -764,6 +769,13 @@ func policySpecFromState(state *BuildNetworkPolicyResult) *v1alpha1.NetworkPolic
 
 func noopCredentialBindingRollback(context.Context) error {
 	return nil
+}
+
+func requestCredentialBindings(cfg *SandboxConfig) []v1alpha1.CredentialBinding {
+	if cfg == nil || cfg.CredentialBindings == nil {
+		return nil
+	}
+	return append([]v1alpha1.CredentialBinding(nil), cfg.CredentialBindings...)
 }
 
 func (s *SandboxService) syncCredentialBindings(
@@ -998,7 +1010,6 @@ func sanitizedNetworkPolicyForPersistence(policy *v1alpha1.TplSandboxNetworkPoli
 		return nil
 	}
 	cloned := policy.DeepCopy()
-	cloned.Credentials = nil
 	return cloned
 }
 
@@ -1202,19 +1213,32 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 			merged.ExposedPorts = cfg.ExposedPorts
 		}
 
-		if cfg.Network != nil {
-			merged.Network = sanitizedNetworkPolicyForPersistence(cfg.Network)
+		if cfg.Network != nil || cfg.CredentialBindings != nil {
 			if s.NetworkPolicyService == nil {
 				return fmt.Errorf("network policy service not configured")
 			}
 
 			teamID := updatedPod.Annotations[controller.AnnotationTeamID]
-			templateSpec := s.templateNetworkSpec(updatedPod)
+			templateSpec, templateBindings := s.templateNetworkDefaults(updatedPod)
+			requestSpec := merged.Network
+			if cfg.Network != nil {
+				requestSpec = cfg.Network
+				merged.Network = sanitizedNetworkPolicyForPersistence(cfg.Network)
+			}
+			requestBindings := append([]v1alpha1.CredentialBinding(nil), cfg.CredentialBindings...)
+			if cfg.CredentialBindings == nil {
+				requestBindings, err = s.loadCredentialBindings(ctx, updatedPod)
+				if err != nil {
+					return fmt.Errorf("load credential bindings: %w", err)
+				}
+			}
 			networkState = s.NetworkPolicyService.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
-				SandboxID:    updatedPod.Name,
-				TeamID:       teamID,
-				TemplateSpec: templateSpec,
-				RequestSpec:  cfg.Network,
+				SandboxID:        updatedPod.Name,
+				TeamID:           teamID,
+				TemplateSpec:     templateSpec,
+				RequestSpec:      requestSpec,
+				TemplateBindings: templateBindings,
+				RequestBindings:  requestBindings,
 			})
 			rollbackBindings, err = s.syncCredentialBindings(ctx, updatedPod, teamID, networkState)
 			if err != nil {
@@ -1256,8 +1280,8 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 	return s.podToSandbox(ctx, updatedPod, sandboxID), nil
 }
 
-// GetNetworkPolicy gets the effective network policy for a sandbox.
-func (s *SandboxService) GetNetworkPolicy(ctx context.Context, sandboxID string) (*v1alpha1.TplSandboxNetworkPolicy, error) {
+// GetNetworkPolicy gets the effective sandbox network policy.
+func (s *SandboxService) GetNetworkPolicy(ctx context.Context, sandboxID string) (*v1alpha1.SandboxNetworkPolicy, error) {
 	pod, err := s.getSandboxPod(ctx, sandboxID)
 	if err != nil {
 		return nil, fmt.Errorf("get pod: %w", err)
@@ -1272,31 +1296,27 @@ func (s *SandboxService) GetNetworkPolicy(ctx context.Context, sandboxID string)
 		return nil, fmt.Errorf("parse network policy annotation: %w", err)
 	}
 	if spec != nil {
-		policy := networkPolicyFromSpec(spec)
 		bindings, err := s.loadCredentialBindings(ctx, pod)
 		if err != nil {
 			return nil, fmt.Errorf("load credential bindings: %w", err)
 		}
-		if len(bindings) > 0 {
-			policy.Credentials = &v1alpha1.NetworkCredentialsSpec{Bindings: bindings}
-		}
-		return policy, nil
+		return sandboxNetworkPolicyFromParts(spec, bindings), nil
 	}
 
-	templateSpec := s.templateNetworkSpec(pod)
-	if templateSpec != nil {
-		return templateSpec.DeepCopy(), nil
+	templateSpec, templateBindings := s.templateNetworkDefaults(pod)
+	if templateSpec != nil || len(templateBindings) > 0 {
+		return sandboxNetworkPolicyFromTemplatePolicy(templateSpec, templateBindings), nil
 	}
 
-	return &v1alpha1.TplSandboxNetworkPolicy{Mode: v1alpha1.NetworkModeAllowAll}, nil
+	return &v1alpha1.SandboxNetworkPolicy{Mode: v1alpha1.NetworkModeAllowAll}, nil
 }
 
-// UpdateNetworkPolicy updates the network policy for a sandbox.
+// UpdateNetworkPolicy updates the sandbox network policy.
 func (s *SandboxService) UpdateNetworkPolicy(
 	ctx context.Context,
 	sandboxID string,
-	policy *v1alpha1.TplSandboxNetworkPolicy,
-) (*v1alpha1.TplSandboxNetworkPolicy, error) {
+	policy *v1alpha1.SandboxNetworkPolicy,
+) (*v1alpha1.SandboxNetworkPolicy, error) {
 	if policy == nil {
 		return nil, fmt.Errorf("network policy is required")
 	}
@@ -1324,13 +1344,22 @@ func (s *SandboxService) UpdateNetworkPolicy(
 		if current.Annotations != nil {
 			teamID = current.Annotations[controller.AnnotationTeamID]
 		}
-		templateSpec := s.templateNetworkSpec(current)
+		templateSpec, templateBindings := s.templateNetworkDefaults(current)
+		requestBindings := append([]v1alpha1.CredentialBinding(nil), policy.CredentialBindings...)
+		if policy.CredentialBindings == nil {
+			requestBindings, err = s.loadCredentialBindings(ctx, current)
+			if err != nil {
+				return fmt.Errorf("load credential bindings: %w", err)
+			}
+		}
 
 		networkState = s.NetworkPolicyService.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
-			SandboxID:    current.Name,
-			TeamID:       teamID,
-			TemplateSpec: templateSpec,
-			RequestSpec:  policy,
+			SandboxID:        current.Name,
+			TeamID:           teamID,
+			TemplateSpec:     templateSpec,
+			RequestSpec:      templatePolicyFromSandboxPolicy(policy),
+			TemplateBindings: templateBindings,
+			RequestBindings:  requestBindings,
 		})
 		rollbackBindings, err = s.syncCredentialBindings(ctx, current, teamID, networkState)
 		if err != nil {
@@ -1346,23 +1375,23 @@ func (s *SandboxService) UpdateNetworkPolicy(
 		}
 
 		if configJSON := updatedPod.Annotations[controller.AnnotationConfig]; configJSON != "" {
-			var config SandboxConfig
-			if err := json.Unmarshal([]byte(configJSON), &config); err != nil {
+			var storedConfig SandboxConfig
+			if err := json.Unmarshal([]byte(configJSON), &storedConfig); err != nil {
 				s.logger.Warn("Failed to parse sandbox config annotation",
 					zap.String("sandboxID", sandboxID),
 					zap.Error(err),
 				)
 			} else {
-				config.Network = sanitizedNetworkPolicyForPersistence(policy)
-				updatedConfigJSON, err := json.Marshal(config)
+				storedConfig.Network = sanitizedNetworkPolicyForPersistence(templatePolicyFromSandboxPolicy(policy))
+				updatedConfigJSON, err := json.Marshal(storedConfig)
 				if err != nil {
 					return fmt.Errorf("marshal sandbox config: %w", err)
 				}
 				updatedPod.Annotations[controller.AnnotationConfig] = string(updatedConfigJSON)
 			}
 		} else {
-			config := SandboxConfig{Network: sanitizedNetworkPolicyForPersistence(policy)}
-			updatedConfigJSON, err := json.Marshal(config)
+			storedConfig := SandboxConfig{Network: sanitizedNetworkPolicyForPersistence(templatePolicyFromSandboxPolicy(policy))}
+			updatedConfigJSON, err := json.Marshal(storedConfig)
 			if err != nil {
 				return fmt.Errorf("marshal sandbox config: %w", err)
 			}
@@ -1392,11 +1421,7 @@ func (s *SandboxService) UpdateNetworkPolicy(
 		return nil, fmt.Errorf("apply network policy: %w", err)
 	}
 
-	result := networkPolicyFromSpec(policySpecFromState(networkState))
-	if networkState != nil && len(networkState.CredentialBindings) > 0 {
-		result.Credentials = &v1alpha1.NetworkCredentialsSpec{Bindings: networkState.CredentialBindings}
-	}
-	return result, nil
+	return sandboxNetworkPolicyFromState(networkState), nil
 }
 
 func (s *SandboxService) getSandboxPod(ctx context.Context, sandboxID string) (*corev1.Pod, error) {
@@ -1418,7 +1443,19 @@ func (s *SandboxService) getSandboxPod(ctx context.Context, sandboxID string) (*
 	return pods[0], nil
 }
 
-func (s *SandboxService) templateNetworkSpec(pod *corev1.Pod) *v1alpha1.TplSandboxNetworkPolicy {
+func (s *SandboxService) templateNetworkDefaults(pod *corev1.Pod) (*v1alpha1.TplSandboxNetworkPolicy, []v1alpha1.CredentialBinding) {
+	template := s.templateForPod(pod)
+	if template == nil {
+		return nil, nil
+	}
+	var bindings []v1alpha1.CredentialBinding
+	if len(template.Spec.CredentialBindings) > 0 {
+		bindings = append(bindings, template.Spec.CredentialBindings...)
+	}
+	return template.Spec.Network, bindings
+}
+
+func (s *SandboxService) templateForPod(pod *corev1.Pod) *v1alpha1.SandboxTemplate {
 	if pod == nil || s.templateLister == nil {
 		return nil
 	}
@@ -1432,7 +1469,7 @@ func (s *SandboxService) templateNetworkSpec(pod *corev1.Pod) *v1alpha1.TplSandb
 		if err == nil {
 			template, getErr := s.templateLister.Get(namespace, templateID)
 			if getErr == nil {
-				return template.Spec.Network
+				return template
 			}
 		}
 	}
@@ -1454,7 +1491,7 @@ func (s *SandboxService) templateNetworkSpec(pod *corev1.Pod) *v1alpha1.TplSandb
 		)
 		return nil
 	}
-	return template.Spec.Network
+	return template
 }
 
 func networkPolicyFromSpec(spec *v1alpha1.NetworkPolicySpec) *v1alpha1.TplSandboxNetworkPolicy {
@@ -1502,6 +1539,39 @@ func networkPolicyFromSpec(spec *v1alpha1.NetworkPolicySpec) *v1alpha1.TplSandbo
 	}
 
 	return policy
+}
+
+func templatePolicyFromSandboxPolicy(policy *v1alpha1.SandboxNetworkPolicy) *v1alpha1.TplSandboxNetworkPolicy {
+	if policy == nil {
+		return nil
+	}
+	return &v1alpha1.TplSandboxNetworkPolicy{
+		Mode:   policy.Mode,
+		Egress: policy.Egress,
+	}
+}
+
+func sandboxNetworkPolicyFromTemplatePolicy(policy *v1alpha1.TplSandboxNetworkPolicy, bindings []v1alpha1.CredentialBinding) *v1alpha1.SandboxNetworkPolicy {
+	result := &v1alpha1.SandboxNetworkPolicy{Mode: v1alpha1.NetworkModeAllowAll}
+	if policy != nil {
+		result.Mode = policy.Mode
+		result.Egress = policy.Egress.DeepCopy()
+	}
+	if len(bindings) > 0 {
+		result.CredentialBindings = append(result.CredentialBindings, bindings...)
+	}
+	return result
+}
+
+func sandboxNetworkPolicyFromParts(spec *v1alpha1.NetworkPolicySpec, bindings []v1alpha1.CredentialBinding) *v1alpha1.SandboxNetworkPolicy {
+	return sandboxNetworkPolicyFromTemplatePolicy(networkPolicyFromSpec(spec), bindings)
+}
+
+func sandboxNetworkPolicyFromState(state *BuildNetworkPolicyResult) *v1alpha1.SandboxNetworkPolicy {
+	if state == nil {
+		return &v1alpha1.SandboxNetworkPolicy{Mode: v1alpha1.NetworkModeAllowAll}
+	}
+	return sandboxNetworkPolicyFromParts(state.PolicySpec, state.CredentialBindings)
 }
 
 // podToSandbox converts a pod to a sandbox object

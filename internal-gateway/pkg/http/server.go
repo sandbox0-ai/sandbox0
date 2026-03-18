@@ -407,6 +407,16 @@ func (s *Server) setupRoutes() {
 			registry.POST("/credentials", s.authMiddleware.RequirePermission(gatewayauthn.PermTemplateWrite), s.getRegistryCredentials)
 		}
 
+		credentialSources := v1.Group("/credential-sources")
+		credentialSources.Use(s.managerUpstreamMiddleware())
+		{
+			credentialSources.GET("", s.authMiddleware.RequirePermission(gatewayauthn.PermCredentialSourceRead), s.listCredentialSources)
+			credentialSources.POST("", s.authMiddleware.RequirePermission(gatewayauthn.PermCredentialSourceWrite), s.createCredentialSource)
+			credentialSources.GET("/:name", s.authMiddleware.RequirePermission(gatewayauthn.PermCredentialSourceRead), s.getCredentialSource)
+			credentialSources.PUT("/:name", s.authMiddleware.RequirePermission(gatewayauthn.PermCredentialSourceWrite), s.updateCredentialSource)
+			credentialSources.DELETE("/:name", s.authMiddleware.RequirePermission(gatewayauthn.PermCredentialSourceDelete), s.deleteCredentialSource)
+		}
+
 		// === SandboxVolume Management (→ Storage Proxy) ===
 		sandboxvolumes := v1.Group("/sandboxvolumes")
 		sandboxvolumes.Use(s.storageProxyUpstreamMiddleware())

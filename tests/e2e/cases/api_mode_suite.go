@@ -135,6 +135,10 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					Expect(status).To(Equal(http.StatusOK))
 				})
 
+				It("manages credential sources and binds them through sandbox network policy", func() {
+					assertCredentialSourceBindingLifecycle(env, session, sandboxID)
+				})
+
 				It("blocks private sandbox traffic while preserving public exposure and cluster service access", func() {
 					assertSandboxNetworkIsolation(env, session)
 				})
@@ -532,6 +536,145 @@ func assertSandboxNetworkIsolation(env *framework.ScenarioEnv, session *e2eutils
 		}
 		return nil
 	}).WithTimeout(45 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
+}
+
+func assertCredentialSourceBindingLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string) {
+	Expect(sandboxID).NotTo(BeEmpty())
+
+	sourceName := fmt.Sprintf("e2e-headers-%d", time.Now().UnixNano())
+	refName := "api-egress-auth"
+	ruleName := "api-egress-auth-rule"
+	domains := []string{"httpbin.org"}
+	headers := map[string]string{"token": "initial-token"}
+
+	created, err := session.CreateCredentialSource(env.TestCtx.Context, GinkgoT(), apispec.CredentialSourceRecord{
+		Name:         sourceName,
+		ResolverKind: apispec.StaticHeaders,
+		Spec: apispec.CredentialSourceSpec{
+			StaticHeaders: &apispec.StaticHeadersSourceSpec{
+				Values: &headers,
+			},
+		},
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(created).NotTo(BeNil())
+	Expect(created.Name).To(Equal(sourceName))
+
+	cleanupSource := true
+	defer func() {
+		clearPolicy := apispec.SandboxNetworkPolicy{Mode: apispec.SandboxNetworkPolicyModeAllowAll}
+		_, _, _, _ = session.UpdateNetworkPolicy(env.TestCtx.Context, GinkgoT(), sandboxID, clearPolicy)
+		if !cleanupSource {
+			return
+		}
+		status, _, deleteErr := session.DeleteCredentialSource(env.TestCtx.Context, sourceName)
+		Expect(deleteErr).NotTo(HaveOccurred())
+		Expect(status).To(Equal(http.StatusOK))
+	}()
+
+	records, err := session.ListCredentialSources(env.TestCtx.Context, GinkgoT())
+	Expect(err).NotTo(HaveOccurred())
+	found := false
+	for _, record := range records {
+		if record.Name == sourceName {
+			found = true
+			break
+		}
+	}
+	Expect(found).To(BeTrue())
+
+	fetched, status, apiErr, err := session.GetCredentialSource(env.TestCtx.Context, GinkgoT(), sourceName)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(apiErr).To(BeNil())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(fetched).NotTo(BeNil())
+	Expect(fetched.Name).To(Equal(sourceName))
+
+	updatedHeaders := map[string]string{"token": "updated-token"}
+	updatedSource, err := session.UpdateCredentialSource(env.TestCtx.Context, GinkgoT(), sourceName, apispec.CredentialSourceRecord{
+		ResolverKind: apispec.StaticHeaders,
+		Spec: apispec.CredentialSourceSpec{
+			StaticHeaders: &apispec.StaticHeadersSourceSpec{
+				Values: &updatedHeaders,
+			},
+		},
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(updatedSource).NotTo(BeNil())
+	Expect(updatedSource.Name).To(Equal(sourceName))
+	Expect(updatedSource.CurrentVersion).NotTo(BeNil())
+
+	policy, status, apiErr, err := session.UpdateNetworkPolicy(env.TestCtx.Context, GinkgoT(), sandboxID, apispec.SandboxNetworkPolicy{
+		Mode: apispec.SandboxNetworkPolicyModeAllowAll,
+		Egress: &apispec.NetworkEgressPolicy{
+			Rules: &[]apispec.EgressCredentialRule{{
+				Name:          &ruleName,
+				CredentialRef: refName,
+				Domains:       &domains,
+				Protocol:      ptrTo(apispec.Https),
+				Rollout:       ptrTo(apispec.Enabled),
+			}},
+		},
+		CredentialBindings: &[]apispec.CredentialBinding{{
+			Ref:       refName,
+			SourceRef: sourceName,
+			Projection: apispec.ProjectionSpec{
+				Type: apispec.HttpHeaders,
+				HttpHeaders: &apispec.HTTPHeadersProjection{
+					Headers: &[]apispec.ProjectedHeader{{
+						Name:          "Authorization",
+						ValueTemplate: "Bearer {{ .token }}",
+					}},
+				},
+			},
+		}},
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(apiErr).To(BeNil())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(policy).NotTo(BeNil())
+	Expect(policy.CredentialBindings).NotTo(BeNil())
+	Expect(*policy.CredentialBindings).To(HaveLen(1))
+	Expect((*policy.CredentialBindings)[0].Ref).To(Equal(refName))
+	Expect((*policy.CredentialBindings)[0].SourceRef).To(Equal(sourceName))
+	Expect(policy.Egress).NotTo(BeNil())
+	Expect(policy.Egress.Rules).NotTo(BeNil())
+	Expect(*policy.Egress.Rules).To(HaveLen(1))
+	Expect((*policy.Egress.Rules)[0].CredentialRef).To(Equal(refName))
+
+	effective, status, apiErr, err := session.GetNetworkPolicy(env.TestCtx.Context, GinkgoT(), sandboxID)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(apiErr).To(BeNil())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(effective).NotTo(BeNil())
+	Expect(effective.CredentialBindings).NotTo(BeNil())
+	Expect(*effective.CredentialBindings).To(HaveLen(1))
+	Expect((*effective.CredentialBindings)[0].Ref).To(Equal(refName))
+	Expect((*effective.CredentialBindings)[0].SourceRef).To(Equal(sourceName))
+
+	status, apiErr, err = session.DeleteCredentialSource(env.TestCtx.Context, sourceName)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(apiErr).NotTo(BeNil())
+	Expect(status).To(Equal(http.StatusConflict))
+
+	clearPolicy, status, apiErr, err := session.UpdateNetworkPolicy(env.TestCtx.Context, GinkgoT(), sandboxID, apispec.SandboxNetworkPolicy{
+		Mode: apispec.SandboxNetworkPolicyModeAllowAll,
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(apiErr).To(BeNil())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(clearPolicy).NotTo(BeNil())
+	Expect(clearPolicy.CredentialBindings).To(BeNil())
+	cleanupSource = false
+
+	status, apiErr, err = session.DeleteCredentialSource(env.TestCtx.Context, sourceName)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(apiErr).To(BeNil())
+	Expect(status).To(Equal(http.StatusOK))
+}
+
+func ptrTo[T any](value T) *T {
+	return &value
 }
 
 func applyPinnedTemplate(env *framework.ScenarioEnv, base apispec.Template, templateID, nodeName string) error {

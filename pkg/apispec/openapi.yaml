@@ -1316,7 +1316,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/TplSandboxNetworkPolicy"
+              $ref: "#/components/schemas/SandboxNetworkPolicy"
       responses:
         "200":
           description: Network policy updated
@@ -3114,6 +3114,10 @@ components:
           format: int32
         network:
           $ref: "#/components/schemas/TplSandboxNetworkPolicy"
+        credential_bindings:
+          type: array
+          items:
+            $ref: "#/components/schemas/CredentialBinding"
         webhook:
           $ref: "#/components/schemas/WebhookConfig"
         auto_resume:
@@ -3271,6 +3275,10 @@ components:
           format: int32
         network:
           $ref: "#/components/schemas/TplSandboxNetworkPolicy"
+        credential_bindings:
+          type: array
+          items:
+            $ref: "#/components/schemas/CredentialBinding"
         auto_resume:
           type: boolean
           default: true
@@ -4279,6 +4287,10 @@ components:
           $ref: "#/components/schemas/PodSpecOverride"
         network:
           $ref: "#/components/schemas/TplSandboxNetworkPolicy"
+        credentialBindings:
+          type: array
+          items:
+            $ref: "#/components/schemas/CredentialBinding"
         pool:
           $ref: "#/components/schemas/PoolStrategy"
         lifecycle:
@@ -4504,8 +4516,19 @@ components:
           enum: [allow-all, block-all]
         egress:
           $ref: "#/components/schemas/NetworkEgressPolicy"
-        credentials:
-          $ref: "#/components/schemas/NetworkCredentialsSpec"
+      required: [mode]
+    SandboxNetworkPolicy:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: [allow-all, block-all]
+        egress:
+          $ref: "#/components/schemas/NetworkEgressPolicy"
+        credentialBindings:
+          type: array
+          items:
+            $ref: "#/components/schemas/CredentialBinding"
       required: [mode]
     NetworkEgressPolicy:
       type: object
@@ -4552,14 +4575,6 @@ components:
             destination-scoped outbound auth behavior.
           items:
             $ref: "#/components/schemas/EgressCredentialRule"
-    NetworkCredentialsSpec:
-      type: object
-      description: Sandbox-scoped credential bindings resolved by `egress-broker`.
-      properties:
-        bindings:
-          type: array
-          items:
-            $ref: "#/components/schemas/CredentialBinding"
     EgressCredentialRule:
       type: object
       properties:
@@ -4754,4 +4769,4 @@ components:
         - type: object
           properties:
             data:
-              $ref: "#/components/schemas/TplSandboxNetworkPolicy"
+              $ref: "#/components/schemas/SandboxNetworkPolicy"

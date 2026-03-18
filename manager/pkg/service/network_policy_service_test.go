@@ -40,11 +40,9 @@ func TestBuildNetworkPolicyStateMergesNamedRulesAndBindings(t *testing.T) {
 					},
 				},
 			},
-			Credentials: &v1alpha1.NetworkCredentialsSpec{
-				Bindings: []v1alpha1.CredentialBinding{
-					testCredentialBinding("template-ref"),
-				},
-			},
+		},
+		TemplateBindings: []v1alpha1.CredentialBinding{
+			testCredentialBinding("template-ref"),
 		},
 		RequestSpec: &v1alpha1.TplSandboxNetworkPolicy{
 			Egress: &v1alpha1.NetworkEgressPolicy{
@@ -57,11 +55,9 @@ func TestBuildNetworkPolicyStateMergesNamedRulesAndBindings(t *testing.T) {
 					},
 				},
 			},
-			Credentials: &v1alpha1.NetworkCredentialsSpec{
-				Bindings: []v1alpha1.CredentialBinding{
-					testCredentialBinding("request-ref"),
-				},
-			},
+		},
+		RequestBindings: []v1alpha1.CredentialBinding{
+			testCredentialBinding("request-ref"),
 		},
 	})
 
@@ -95,12 +91,10 @@ func TestBuildNetworkPolicyStateAppendsUnnamedRules(t *testing.T) {
 					{CredentialRef: "template-ref"},
 				},
 			},
-			Credentials: &v1alpha1.NetworkCredentialsSpec{
-				Bindings: []v1alpha1.CredentialBinding{
-					testCredentialBinding("template-ref"),
-					testCredentialBinding("request-ref"),
-				},
-			},
+		},
+		TemplateBindings: []v1alpha1.CredentialBinding{
+			testCredentialBinding("template-ref"),
+			testCredentialBinding("request-ref"),
 		},
 		RequestSpec: &v1alpha1.TplSandboxNetworkPolicy{
 			Egress: &v1alpha1.NetworkEgressPolicy{
@@ -131,11 +125,9 @@ func TestBuildNetworkPolicyStateDropsInvalidBindingReferences(t *testing.T) {
 					{Name: "missing-binding", CredentialRef: "missing"},
 				},
 			},
-			Credentials: &v1alpha1.NetworkCredentialsSpec{
-				Bindings: []v1alpha1.CredentialBinding{
-					testCredentialBinding("other"),
-				},
-			},
+		},
+		RequestBindings: []v1alpha1.CredentialBinding{
+			testCredentialBinding("other"),
 		},
 	})
 

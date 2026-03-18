@@ -41,6 +41,60 @@ spec:
             properties:
               clusterId:
                 type: string
+              credentialBindings:
+                description: CredentialBindings defines template-level default sandbox
+                  credential bindings.
+                items:
+                  description: CredentialBinding defines how a credential reference
+                    should be resolved.
+                  properties:
+                    cachePolicy:
+                      description: CachePolicySpec controls broker-side caching for
+                        one binding.
+                      properties:
+                        ttl:
+                          type: string
+                      type: object
+                    projection:
+                      description: ProjectionSpec defines how resolved source data
+                        should be projected into runtime directives.
+                      properties:
+                        httpHeaders:
+                          description: HTTPHeadersProjection injects HTTP headers
+                            derived from source data.
+                          properties:
+                            headers:
+                              items:
+                                description: ProjectedHeader defines one projected
+                                  header template.
+                                properties:
+                                  name:
+                                    type: string
+                                  valueTemplate:
+                                    type: string
+                                required:
+                                - name
+                                - valueTemplate
+                                type: object
+                              type: array
+                          type: object
+                        type:
+                          description: CredentialProjectionType identifies the runtime
+                            projection shape.
+                          type: string
+                      required:
+                      - type
+                      type: object
+                    ref:
+                      type: string
+                    sourceRef:
+                      type: string
+                  required:
+                  - projection
+                  - ref
+                  - sourceRef
+                  type: object
+                type: array
               description:
                 description: Description of the template
                 type: string
@@ -114,63 +168,6 @@ spec:
               network:
                 description: Template Sandbox Network policy (template-level default)
                 properties:
-                  credentials:
-                    description: NetworkCredentialsSpec defines sandbox-scoped credential
-                      bindings.
-                    properties:
-                      bindings:
-                        items:
-                          description: CredentialBinding defines how a credential
-                            reference should be resolved.
-                          properties:
-                            cachePolicy:
-                              description: CachePolicySpec controls broker-side caching
-                                for one binding.
-                              properties:
-                                ttl:
-                                  type: string
-                              type: object
-                            projection:
-                              description: ProjectionSpec defines how resolved source
-                                data should be projected into runtime directives.
-                              properties:
-                                httpHeaders:
-                                  description: HTTPHeadersProjection injects HTTP
-                                    headers derived from source data.
-                                  properties:
-                                    headers:
-                                      items:
-                                        description: ProjectedHeader defines one projected
-                                          header template.
-                                        properties:
-                                          name:
-                                            type: string
-                                          valueTemplate:
-                                            type: string
-                                        required:
-                                        - name
-                                        - valueTemplate
-                                        type: object
-                                      type: array
-                                  type: object
-                                type:
-                                  description: CredentialProjectionType identifies
-                                    the runtime projection shape.
-                                  type: string
-                              required:
-                              - type
-                              type: object
-                            ref:
-                              type: string
-                            sourceRef:
-                              type: string
-                          required:
-                          - projection
-                          - ref
-                          - sourceRef
-                          type: object
-                        type: array
-                    type: object
                   egress:
                     description: |-
                       NetworkEgressPolicy defines egress policy.

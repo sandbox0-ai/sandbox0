@@ -46,6 +46,9 @@ type SandboxTemplateSpec struct {
 	// Template Sandbox Network policy (template-level default)
 	Network *TplSandboxNetworkPolicy `json:"network,omitempty"`
 
+	// CredentialBindings defines template-level default sandbox credential bindings.
+	CredentialBindings []CredentialBinding `json:"credentialBindings,omitempty"`
+
 	// Pool strategy
 	Pool PoolStrategy `json:"pool"`
 
@@ -190,9 +193,8 @@ type PoolStrategy struct {
 // allow-all permits traffic by default and applies denied* rules as subtractive filters.
 // block-all denies traffic by default and applies allowed* rules as additive exceptions.
 type TplSandboxNetworkPolicy struct {
-	Mode        NetworkPolicyMode       `json:"mode"`
-	Egress      *NetworkEgressPolicy    `json:"egress,omitempty"`
-	Credentials *NetworkCredentialsSpec `json:"credentials,omitempty"`
+	Mode   NetworkPolicyMode    `json:"mode"`
+	Egress *NetworkEgressPolicy `json:"egress,omitempty"`
 }
 
 // NetworkPolicyMode defines network policy mode
@@ -216,9 +218,11 @@ type NetworkEgressPolicy struct {
 	Rules          []EgressCredentialRule `json:"rules,omitempty"`
 }
 
-// NetworkCredentialsSpec defines sandbox-scoped credential bindings.
-type NetworkCredentialsSpec struct {
-	Bindings []CredentialBinding `json:"bindings,omitempty"`
+// SandboxNetworkPolicy defines the sandbox-scoped network policy API shape.
+type SandboxNetworkPolicy struct {
+	Mode               NetworkPolicyMode    `json:"mode"`
+	Egress             *NetworkEgressPolicy `json:"egress,omitempty"`
+	CredentialBindings []CredentialBinding  `json:"credentialBindings,omitempty"`
 }
 
 // EgressCredentialRule defines a credential injection rule matched against outbound traffic.

@@ -70,6 +70,10 @@ const (
 	PermTemplateWrite  = "template:write"
 	PermTemplateDelete = "template:delete"
 
+	PermCredentialSourceRead   = "credentialsource:read"
+	PermCredentialSourceWrite  = "credentialsource:write"
+	PermCredentialSourceDelete = "credentialsource:delete"
+
 	PermSandboxVolumeCreate = "sandboxvolume:create"
 	PermSandboxVolumeRead   = "sandboxvolume:read"
 	PermSandboxVolumeWrite  = "sandboxvolume:write"
@@ -87,6 +91,9 @@ var RolePermissions = map[string][]string{
 		PermTemplateRead,
 		PermTemplateWrite,
 		PermTemplateDelete,
+		PermCredentialSourceRead,
+		PermCredentialSourceWrite,
+		PermCredentialSourceDelete,
 		PermSandboxVolumeCreate,
 		PermSandboxVolumeRead,
 		PermSandboxVolumeWrite,
@@ -98,6 +105,9 @@ var RolePermissions = map[string][]string{
 		PermSandboxWrite,
 		PermSandboxDelete,
 		PermTemplateRead,
+		PermCredentialSourceRead,
+		PermCredentialSourceWrite,
+		PermCredentialSourceDelete,
 		PermSandboxVolumeCreate,
 		PermSandboxVolumeRead,
 		PermSandboxVolumeWrite,
@@ -106,6 +116,7 @@ var RolePermissions = map[string][]string{
 	"viewer": {
 		PermSandboxRead,
 		PermTemplateRead,
+		PermCredentialSourceRead,
 		PermSandboxVolumeRead,
 	},
 }

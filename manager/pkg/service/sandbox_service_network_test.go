@@ -159,7 +159,7 @@ func testSandboxNetworkPod() *corev1.Pod {
 	}
 }
 
-func testCredentialPolicy(ref, authHeader string) *v1alpha1.TplSandboxNetworkPolicy {
+func testCredentialPolicy(ref string) *v1alpha1.TplSandboxNetworkPolicy {
 	return &v1alpha1.TplSandboxNetworkPolicy{
 		Mode: v1alpha1.NetworkModeBlockAll,
 		Egress: &v1alpha1.NetworkEgressPolicy{
@@ -170,21 +170,30 @@ func testCredentialPolicy(ref, authHeader string) *v1alpha1.TplSandboxNetworkPol
 				Domains:       []string{"api.example.com"},
 			}},
 		},
-		Credentials: &v1alpha1.NetworkCredentialsSpec{
-			Bindings: []v1alpha1.CredentialBinding{{
-				Ref:       ref,
-				SourceRef: ref,
-				Projection: v1alpha1.ProjectionSpec{
-					Type: v1alpha1.CredentialProjectionTypeHTTPHeaders,
-					HTTPHeaders: &v1alpha1.HTTPHeadersProjection{
-						Headers: []v1alpha1.ProjectedHeader{{
-							Name:          "Authorization",
-							ValueTemplate: authHeader,
-						}},
-					},
-				},
-			}},
+	}
+}
+
+func testCredentialBindings(ref, authHeader string) []v1alpha1.CredentialBinding {
+	return []v1alpha1.CredentialBinding{{
+		Ref:       ref,
+		SourceRef: ref,
+		Projection: v1alpha1.ProjectionSpec{
+			Type: v1alpha1.CredentialProjectionTypeHTTPHeaders,
+			HTTPHeaders: &v1alpha1.HTTPHeadersProjection{
+				Headers: []v1alpha1.ProjectedHeader{{
+					Name:          "Authorization",
+					ValueTemplate: authHeader,
+				}},
+			},
 		},
+	}}
+}
+
+func testNetworkPolicy(ref, authHeader string) *v1alpha1.SandboxNetworkPolicy {
+	return &v1alpha1.SandboxNetworkPolicy{
+		Mode:               v1alpha1.NetworkModeBlockAll,
+		Egress:             testCredentialPolicy(ref).Egress,
+		CredentialBindings: testCredentialBindings(ref, authHeader),
 	}
 }
 
@@ -219,7 +228,7 @@ func TestUpdateNetworkPolicyRollsBackBindingsWhenPodUpdateFails(t *testing.T) {
 		return true, nil, errors.New("boom")
 	})
 
-	_, err := svc.UpdateNetworkPolicy(ctx, pod.Name, testCredentialPolicy("new-ref", "Bearer new"))
+	_, err := svc.UpdateNetworkPolicy(ctx, pod.Name, testNetworkPolicy("new-ref", "Bearer new"))
 	require.Error(t, err)
 
 	record, err := store.GetBindings(ctx, naming.DefaultClusterID, pod.Name)
@@ -261,7 +270,8 @@ func TestUpdateSandboxRollsBackBindingsWhenPodUpdateFails(t *testing.T) {
 	})
 
 	_, err := svc.UpdateSandbox(ctx, pod.Name, &SandboxUpdateConfig{
-		Network: testCredentialPolicy("new-ref", "Bearer new"),
+		Network:            testCredentialPolicy("new-ref"),
+		CredentialBindings: testCredentialBindings("new-ref", "Bearer new"),
 	})
 	require.Error(t, err)
 
@@ -293,7 +303,7 @@ func TestUpdateNetworkPolicyStoresBindingsOutsidePodConfig(t *testing.T) {
 
 	svc, client, indexer := newSandboxServiceForNetworkTests(t, pod, store, provider)
 
-	updated, err := svc.UpdateNetworkPolicy(ctx, pod.Name, testCredentialPolicy("example-ref", "Bearer stored"))
+	updated, err := svc.UpdateNetworkPolicy(ctx, pod.Name, testNetworkPolicy("example-ref", "Bearer stored"))
 	require.NoError(t, err)
 	require.NotNil(t, updated)
 
@@ -305,13 +315,12 @@ func TestUpdateNetworkPolicyStoresBindingsOutsidePodConfig(t *testing.T) {
 	var cfg SandboxConfig
 	require.NoError(t, json.Unmarshal([]byte(storedPod.Annotations[controller.AnnotationConfig]), &cfg))
 	require.NotNil(t, cfg.Network)
-	assert.Nil(t, cfg.Network.Credentials)
+	assert.Nil(t, cfg.CredentialBindings)
 
 	effective, err := svc.GetNetworkPolicy(ctx, pod.Name)
 	require.NoError(t, err)
-	require.NotNil(t, effective.Credentials)
-	require.Len(t, effective.Credentials.Bindings, 1)
-	assert.Equal(t, "example-ref", effective.Credentials.Bindings[0].Ref)
+	require.Len(t, effective.CredentialBindings, 1)
+	assert.Equal(t, "example-ref", effective.CredentialBindings[0].Ref)
 }
 
 func cloneCredentialSource(in *egressauth.CredentialSource) *egressauth.CredentialSource {

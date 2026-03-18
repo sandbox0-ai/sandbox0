@@ -40,7 +40,7 @@ func (s *Server) getNetworkPolicy(c *gin.Context) {
 		return
 	}
 
-	policy, err := s.sandboxService.GetNetworkPolicy(c.Request.Context(), sandboxID)
+	networkPolicy, err := s.sandboxService.GetNetworkPolicy(c.Request.Context(), sandboxID)
 	if err != nil {
 		s.logger.Error("Failed to get network policy",
 			zap.String("sandboxID", sandboxID),
@@ -50,7 +50,7 @@ func (s *Server) getNetworkPolicy(c *gin.Context) {
 		return
 	}
 
-	spec.JSONSuccess(c, http.StatusOK, policy)
+	spec.JSONSuccess(c, http.StatusOK, networkPolicy)
 }
 
 // updateNetworkPolicy updates the network policy for a sandbox.
@@ -61,7 +61,7 @@ func (s *Server) updateNetworkPolicy(c *gin.Context) {
 		return
 	}
 
-	var req v1alpha1.TplSandboxNetworkPolicy
+	var req v1alpha1.SandboxNetworkPolicy
 	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("invalid request: %v", err))
 		return

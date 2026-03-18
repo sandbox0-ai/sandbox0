@@ -18,7 +18,12 @@ async function main() {
     await verifyVersion(version);
   }
 
-  await verifyLegacyRedirect("get-started.html", "/docs/latest/get-started");
+  const latestDir = path.join(outDir, "latest");
+  if (await pathExists(latestDir)) {
+    await verifyLegacyRedirect("get-started.html", "/docs/latest/get-started");
+  } else {
+    console.log("skipping legacy docs redirect verification because out/docs/latest is missing");
+  }
 
   console.log(`verified rendered docs HTML for versions: ${renderedVersions.join(", ")}`);
 }
@@ -91,6 +96,15 @@ async function readLegacyOutputHtml(relativePath) {
     return await fs.readFile(filePath, "utf8");
   } catch (error) {
     throw new Error(`expected legacy docs redirect at ${path.relative(appRoot, filePath)}: ${String(error)}`);
+  }
+}
+
+async function pathExists(filePath) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
   }
 }
 

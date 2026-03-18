@@ -276,8 +276,27 @@ func appendProcdConfigEnvVars(envVars []corev1.EnvVar) []corev1.EnvVar {
 		return envVars
 	}
 
-	// These env vars control how procd reaches storage-proxy and must remain
-	// manager-controlled, regardless of tenant template env overrides.
+	// Procd runtime configuration is injected by manager and must remain
+	// authoritative over any tenant-provided env vars with the same names.
+	envMap := cfg.ProcdConfig.EnvMap()
+	keys := make([]string, 0, len(envMap))
+	for key := range envMap {
+		if key == "" || key == "node_name" {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	for _, key := range keys {
+		upsertProcdEnvVar(envIndex, &envVars, corev1.EnvVar{
+			Name:  key,
+			Value: envMap[key],
+		})
+	}
+
+	// Storage-proxy connectivity must always remain manager-controlled, even
+	// when the corresponding fields are omitted from manager config.
 	upsertProcdEnvVar(envIndex, &envVars, corev1.EnvVar{
 		Name:  "storage_proxy_base_url",
 		Value: cfg.ProcdConfig.StorageProxyBaseURL,

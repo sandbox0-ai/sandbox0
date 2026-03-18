@@ -146,8 +146,13 @@ async function fetchGithubReleases(repo, token) {
  * @returns {DocsVersionsManifest}
  */
 function buildManifest(releases, cachedManifest) {
+  const includePrerelease = process.env.DOCS_INCLUDE_PRERELEASE === "true";
   const actualVersions = releases
     .map((release) => {
+      if (release.prerelease && !includePrerelease) {
+        return null;
+      }
+
       const id = normalizeReleaseTag(release.tag_name);
       if (!id || !hasDocsBundleAsset(release)) {
         return null;

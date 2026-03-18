@@ -3,19 +3,30 @@ import { defaultDocsPageSlug, docsPageSlugs, renderDocsPage } from "@/app/docs/c
 import {
   DOCS_DEFAULT_VERSION,
   getRenderedDocsVersions,
+  isDocsVersionSegment,
   isRenderedDocsVersion,
 } from "@/components/docs/versioning";
 
 export const dynamicParams = false;
 
 export function generateStaticParams() {
-  return getRenderedDocsVersions().flatMap((version) => [
+  const versionedParams = getRenderedDocsVersions().flatMap((version) => [
     { version, slug: [] as string[] },
     ...docsPageSlugs.map((pageSlug) => ({
       version,
       slug: pageSlug.split("/"),
     })),
   ]);
+
+  const legacyParams = docsPageSlugs.map((pageSlug) => {
+    const [legacyVersion, ...legacySlug] = pageSlug.split("/");
+    return {
+      version: legacyVersion,
+      slug: legacySlug,
+    };
+  });
+
+  return [...versionedParams, ...legacyParams];
 }
 
 export default async function VersionedDocsPage({
@@ -30,7 +41,11 @@ export default async function VersionedDocsPage({
   const slug = resolvedParams.slug ?? [];
 
   if (!isRenderedDocsVersion(resolvedParams.version)) {
-    notFound();
+    if (isDocsVersionSegment(resolvedParams.version)) {
+      notFound();
+    }
+
+    redirect(`/docs/${DOCS_DEFAULT_VERSION}/${[resolvedParams.version, ...slug].join("/")}`);
   }
 
   if (resolvedParams.version === DOCS_DEFAULT_VERSION && slug.length === 0) {

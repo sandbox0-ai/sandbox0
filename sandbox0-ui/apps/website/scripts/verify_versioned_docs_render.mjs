@@ -18,6 +18,8 @@ async function main() {
     await verifyVersion(version);
   }
 
+  await verifyLegacyRedirect("get-started.html", "/docs/latest/get-started");
+
   console.log(`verified rendered docs HTML for versions: ${renderedVersions.join(", ")}`);
 }
 
@@ -58,12 +60,37 @@ async function verifyVersion(version) {
   });
 }
 
+async function verifyLegacyRedirect(relativePath, redirectTarget) {
+  const html = await readLegacyOutputHtml(relativePath);
+
+  if (!html.includes(`content="0;url=${redirectTarget}"`)) {
+    throw new Error(
+      `legacy docs redirect ${relativePath} is missing meta refresh to ${redirectTarget}`
+    );
+  }
+
+  if (!html.includes(`window.location.replace(${JSON.stringify(redirectTarget)})`)) {
+    throw new Error(
+      `legacy docs redirect ${relativePath} is missing script redirect to ${redirectTarget}`
+    );
+  }
+}
+
 async function readOutputHtml(version, relativePath) {
   const filePath = path.join(outDir, version, relativePath);
   try {
     return await fs.readFile(filePath, "utf8");
   } catch (error) {
     throw new Error(`expected rendered docs output at ${path.relative(appRoot, filePath)}: ${String(error)}`);
+  }
+}
+
+async function readLegacyOutputHtml(relativePath) {
+  const filePath = path.join(outDir, relativePath);
+  try {
+    return await fs.readFile(filePath, "utf8");
+  } catch (error) {
+    throw new Error(`expected legacy docs redirect at ${path.relative(appRoot, filePath)}: ${String(error)}`);
   }
 }
 

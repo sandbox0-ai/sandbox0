@@ -1,3 +1,5 @@
+-- +goose Up
+
 CREATE TABLE IF NOT EXISTS credential_sources (
     id BIGSERIAL PRIMARY KEY,
     team_id TEXT NOT NULL,
@@ -54,3 +56,15 @@ CREATE TRIGGER update_sandbox_egress_credential_bindings_updated_at
     BEFORE UPDATE ON sandbox_egress_credential_bindings
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_column();
+
+-- +goose Down
+
+DROP TRIGGER IF EXISTS update_sandbox_egress_credential_bindings_updated_at
+    ON sandbox_egress_credential_bindings;
+DROP TRIGGER IF EXISTS update_credential_sources_updated_at
+    ON credential_sources;
+DROP INDEX IF EXISTS idx_sandbox_egress_credential_bindings_team;
+DROP INDEX IF EXISTS idx_sandbox_egress_credential_bindings_lookup;
+DROP TABLE IF EXISTS sandbox_egress_credential_bindings;
+DROP TABLE IF EXISTS credential_source_versions;
+DROP TABLE IF EXISTS credential_sources;

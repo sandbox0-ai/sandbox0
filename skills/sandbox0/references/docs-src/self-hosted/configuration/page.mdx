@@ -126,20 +126,26 @@ Examples:
 
 - `services.internalGateway.config.authMode` switches between `public`, `internal`, and `both`
 - `services.manager.config.autoscaler.*` tunes pool scale behavior
+- `services.manager.config.egressAuth*` tunes runtime outbound auth resolution used by `netd`
 - `services.storageProxy.config.juicefs*` tunes JuiceFS behavior and cache sizing
 - `services.netd.config.*` controls proxy ports, policy enforcement, and node-level networking behavior
-- `services.egressBroker.config.*` controls cluster-local outbound auth resolution used by `netd`
 
 ### Egress Auth Injection
 
-If you want `netd` to inject outbound auth for selected HTTP, HTTPS, or gRPC destinations, enable `egressBroker` together with `netd`.
+If you want `netd` to inject outbound auth for selected HTTP, HTTPS, or gRPC destinations, enable `manager` together with `netd`.
 
 ```yaml
 spec:
     services:
-        egressBroker:
+        manager:
             enabled: true
-            replicas: 2
+            config:
+                egressAuthDefaultResolveTtl: 5m
+                egressAuthStaticAuth:
+                    - authRef: example-api
+                      headers:
+                          Authorization: Bearer static-token
+                      ttl: 5m
         netd:
             enabled: true
             config:
@@ -149,10 +155,10 @@ spec:
 
 Operational notes:
 
-- `egressBroker` is cluster-local. It should not be placed behind a region-scoped dependency on the outbound hot path.
+- Runtime egress auth resolution is cluster-local inside `manager`, so `netd` does not depend on a separate broker deployment on the outbound hot path.
 - By default, `infra-operator` generates and reuses a cluster-local MITM CA secret for `netd` when `services.netd.mitmCaSecretName` is unset.
 - Set `services.netd.mitmCaSecretName` only when you want to override that behavior with your own secret containing `ca.crt` and `ca.key`.
-- `services.netd.config.egressAuthEnabled` is the cluster-level gate. Sandbox network policy remains the per-sandbox gate through `credentials.bindings` and `egress.rules`.
+- `services.netd.config.egressAuthEnabled` is the cluster-level gate. Sandbox network policy remains the per-sandbox gate through `credentialBindings` and `egress.rules`.
 - `fail-open` is possible for some pre-interception failures, but transparent recovery is not guaranteed once downstream TLS interception has already started.
 
 Use `spec.sandboxNodePlacement` for the shared node placement consumed by sandbox template Pods, `netd`, and `k8s-plugin`. The older `services.netd.nodeSelector` and `services.netd.tolerations` fields remain as compatibility aliases when the shared placement is unset.
@@ -177,7 +183,7 @@ The reference below is generated from the `Sandbox0Infra` CRD schema produced by
 - Prefer external PostgreSQL and external object storage for serious deployments.
 - Enable `storageProxy` only when you need volume and snapshot features.
 - Enable `netd` only on Linux nodes and only when you need network policy enforcement.
-- Enable `egressBroker` together with `netd` when you need outbound auth injection.
+- Enable `manager` together with `netd` when you need outbound auth injection.
 - Use `sandboxNodePlacement` to keep sandbox workloads and node-local sandbox services on the same node set.
 - If sandbox workloads use `gvisor` or `kata`, keep `services.netd.runtimeClassName` on a host-compatible runtime such as the cluster default runtime.
 - Keep control-plane and data-plane components in the same storage and latency domain for a given region.

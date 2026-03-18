@@ -30,10 +30,10 @@ In <code>allow-all</code> mode, traffic is permitted by default and only <code>d
 
 Credential injection now has two layers:
 
-- `credentials.bindings` defines sandbox-scoped bindings that map a stable `ref` to a manager-managed credential source.
+- `credentialBindings` defines sandbox-scoped bindings that map a stable `ref` to a manager-managed credential source.
 - `egress.rules` matches destinations and points to one binding with `credentialRef`.
 
-This lets `netd` call cluster-local `egress-broker` and inject outbound credentials for selected destinations without handing the original source material to the sandbox.
+This lets `netd` call the cluster-local runtime egress auth path in `manager` and inject outbound credentials for selected destinations without handing the original source material to the sandbox.
 
 ### Credential Sources
 
@@ -57,15 +57,15 @@ The current public source kind is `static_headers`. It stores named values that 
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `credentials.bindings` | array | Sandbox-scoped credential bindings. |
-| `credentials.bindings[].ref` | string | Stable binding reference matched by `egress.rules[].credentialRef`. |
-| `credentials.bindings[].sourceRef` | string | Credential source name resolved by `manager`. |
-| `credentials.bindings[].projection.type` | string | Projection type. Current public value: `http_headers`. |
-| `credentials.bindings[].projection.httpHeaders.headers[].name` | string | Header name to inject. |
-| `credentials.bindings[].projection.httpHeaders.headers[].valueTemplate` | string | Go template rendered against source values, for example `Bearer {{.token}}`. |
-| `credentials.bindings[].cachePolicy.ttl` | string | Optional broker-side cache TTL override, such as `5m`. |
+| `credentialBindings` | array | Sandbox-scoped credential bindings. |
+| `credentialBindings[].ref` | string | Stable binding reference matched by `egress.rules[].credentialRef`. |
+| `credentialBindings[].sourceRef` | string | Credential source name resolved by `manager`. |
+| `credentialBindings[].projection.type` | string | Projection type. Current public value: `http_headers`. |
+| `credentialBindings[].projection.httpHeaders.headers[].name` | string | Header name to inject. |
+| `credentialBindings[].projection.httpHeaders.headers[].valueTemplate` | string | Go template rendered against source values, for example `Bearer {{.token}}`. |
+| `credentialBindings[].cachePolicy.ttl` | string | Optional runtime resolver-side cache TTL override, such as `5m`. |
 | `egress.rules` | array | Destination-scoped egress credential rules. |
-| `egress.rules[].credentialRef` | string | Required binding reference resolved against `credentials.bindings[].ref`. |
+| `egress.rules[].credentialRef` | string | Required binding reference resolved against `credentialBindings[].ref`. |
 | `egress.rules[].rollout` | string | Optional rollout control: `enabled` or `disabled`. Empty defaults to enabled. |
 | `egress.rules[].protocol` | string | Optional protocol hint: `http`, `https`, or `grpc`. |
 | `egress.rules[].tlsMode` | string | TLS handling mode for HTTPS/gRPC: `passthrough` or `terminate-reoriginate`. |
@@ -88,7 +88,7 @@ Not supported or not transparent:
 Typical flow:
 
 1. Create or update a credential source.
-2. Bind that source into the sandbox with `credentials.bindings`.
+2. Bind that source into the sandbox with `credentialBindings`.
 3. Match outbound destinations with `egress.rules`.
 
 Example credential source payload:
@@ -106,18 +106,17 @@ Example network policy payload:
 
 ```yaml
 mode: block-all
-credentials:
-    bindings:
-        - ref: example-api
-          sourceRef: example-api
-          projection:
-              type: http_headers
-              httpHeaders:
-                  headers:
-                      - name: Authorization
-                        valueTemplate: Bearer {{.token}}
-          cachePolicy:
-              ttl: 5m
+credentialBindings:
+    - ref: example-api
+      sourceRef: example-api
+      projection:
+          type: http_headers
+          httpHeaders:
+              headers:
+                  - name: Authorization
+                    valueTemplate: Bearer {{.token}}
+      cachePolicy:
+          ttl: 5m
 egress:
     allowedDomains:
         - api.example.com
@@ -135,7 +134,7 @@ egress:
 ```
 
 <Callout variant="warning">
-HTTPS and gRPC interception require cluster-level support in self-hosted deployments: `egress-broker` must be enabled, `netd` egress auth must be turned on, and `netd` needs a cluster-local MITM CA. `infra-operator` manages that CA by default, or you can override it with `services.netd.mitmCaSecretName`.
+HTTPS and gRPC interception require cluster-level support in self-hosted deployments: `manager` and `netd` must be enabled, `services.netd.config.egressAuthEnabled` must be turned on, and `netd` needs a cluster-local MITM CA. `infra-operator` manages that CA by default, or you can override it with `services.netd.mitmCaSecretName`.
 </Callout>
 
 ---
@@ -207,7 +206,7 @@ Update the network policy for a sandbox.
 | Field | Type | Description |
 |-------|------|-------------|
 | `mode` | string | Network mode: `allow-all` or `block-all` |
-| `credentials` | object | Sandbox credential bindings resolved by `egress-broker` (optional) |
+| `credentialBindings` | array | Sandbox credential bindings resolved by the manager runtime egress auth path (optional) |
 | `egress` | object | Egress policy rules (optional) |
 
 ---

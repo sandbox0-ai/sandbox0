@@ -404,7 +404,7 @@ func (s *Server) setupRoutes() {
 		registry := v1.Group("/registry")
 		registry.Use(s.managerUpstreamMiddleware())
 		{
-			registry.POST("/credentials", s.getRegistryCredentials)
+			registry.POST("/credentials", s.authMiddleware.RequirePermission(gatewayauthn.PermTemplateWrite), s.getRegistryCredentials)
 		}
 
 		// === SandboxVolume Management (→ Storage Proxy) ===

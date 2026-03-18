@@ -230,7 +230,7 @@ type EgressCredentialRule struct {
 	// Name is an optional stable identifier used for merge and replacement.
 	Name string `json:"name,omitempty"`
 
-	// CredentialRef identifies the binding resolved by egress-broker.
+	// CredentialRef identifies the binding resolved by the runtime egress auth resolver.
 	CredentialRef string `json:"credentialRef"`
 
 	// Rollout controls whether this rule is active. Empty defaults to enabled.

@@ -10,7 +10,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EgressBrokerConfig holds configuration for egress-broker.
+// EgressBrokerConfig holds deprecated compatibility config for the legacy
+// standalone egress auth resolver service. Runtime resolution now runs inside
+// manager, and infra-operator maps the compatible fields forward.
 type EgressBrokerConfig struct {
 	// +optional
 	// +kubebuilder:default=8082
@@ -55,7 +57,7 @@ type StaticEgressAuthConfig struct {
 	TTL     metav1.Duration   `yaml:"ttl" json:"ttl"`
 }
 
-// LoadEgressBrokerConfig returns the egress-broker configuration.
+// LoadEgressBrokerConfig returns the legacy runtime resolver configuration.
 func LoadEgressBrokerConfig() *EgressBrokerConfig {
 	path := os.Getenv("CONFIG_PATH")
 	if path == "" {

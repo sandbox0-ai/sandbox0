@@ -20,6 +20,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/redirect"
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/watcher"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"go.uber.org/zap"
 	"k8s.io/client-go/kubernetes"
@@ -192,7 +193,24 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 		return err
 	}
 
-	proxyServer, err := proxy.NewServer(d.cfg, policyStore, tracker, usageAggregator, d.logger)
+	proxyOpts := []proxy.ServerOption{}
+	if d.cfg.EgressBrokerURL != "" {
+		privateKey, keyErr := internalauth.LoadEd25519PrivateKeyFromFile(internalauth.DefaultInternalJWTPrivateKeyPath)
+		if keyErr != nil {
+			return fmt.Errorf("load netd internal auth private key: %w", keyErr)
+		}
+		tokenGenerator := internalauth.NewGenerator(internalauth.GeneratorConfig{
+			Caller:     "netd",
+			PrivateKey: privateKey,
+			TTL:        30 * time.Second,
+		})
+		proxyOpts = append(proxyOpts, proxy.WithEgressAuthResolver(proxy.NewHTTPEgressAuthResolver(
+			d.cfg.EgressBrokerURL,
+			d.cfg.EgressBrokerTimeout.Duration,
+			netdEgressAuthTokenProvider{generator: tokenGenerator},
+		)))
+	}
+	proxyServer, err := proxy.NewServer(d.cfg, policyStore, tracker, usageAggregator, d.logger, proxyOpts...)
 	if err != nil {
 		return err
 	}
@@ -255,6 +273,17 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+type netdEgressAuthTokenProvider struct {
+	generator *internalauth.Generator
+}
+
+func (p netdEgressAuthTokenProvider) Token(context.Context) (string, error) {
+	if p.generator == nil {
+		return "", fmt.Errorf("internal auth generator is not configured")
+	}
+	return p.generator.GenerateSystem("manager", internalauth.GenerateOptions{})
 }
 
 func (d *Daemon) runMeteringFlushLoop(ctx context.Context, aggregator *netdmetering.Aggregator) {

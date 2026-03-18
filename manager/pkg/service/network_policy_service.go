@@ -48,7 +48,7 @@ func (s *NetworkPolicyService) BuildNetworkPolicySpec(req *BuildNetworkPolicyReq
 	return s.BuildNetworkPolicyState(req).PolicySpec
 }
 
-// BuildNetworkPolicyState builds the split runtime state used by netd and egress-broker.
+// BuildNetworkPolicyState builds the split runtime state used by netd and the manager runtime resolver.
 func (s *NetworkPolicyService) BuildNetworkPolicyState(req *BuildNetworkPolicyRequest) *BuildNetworkPolicyResult {
 	mergedSpec := s.mergeNetworkPolicies(req.TemplateSpec, req.RequestSpec)
 	if mergedSpec == nil {

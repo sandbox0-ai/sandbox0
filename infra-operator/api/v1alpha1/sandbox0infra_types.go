@@ -736,7 +736,9 @@ type ServicesConfig struct {
 	// +kubebuilder:default={}
 	StorageProxy *StorageProxyServiceConfig `json:"storageProxy,omitempty"`
 
-	// EgressBroker configures the egress-broker service (data plane)
+	// EgressBroker carries legacy compatibility config for runtime egress auth
+	// resolution. The standalone egress-broker deployment has been removed and
+	// these settings are forwarded into manager/netd wiring.
 	// +optional
 	// +kubebuilder:default={}
 	EgressBroker *EgressBrokerServiceConfig `json:"egressBroker,omitempty"`
@@ -824,10 +826,11 @@ type StorageProxyServiceConfig struct {
 	Config *config.StorageProxyConfig `json:"config,omitempty"`
 }
 
-// EgressBrokerServiceConfig defines configuration for egress-broker service.
+// EgressBrokerServiceConfig defines legacy compatibility configuration for the
+// removed standalone egress-broker service.
 type EgressBrokerServiceConfig struct {
 	BaseServiceConfig `json:",inline"`
-	// Config contains egress-broker specific configuration.
+	// Config contains legacy runtime egress auth resolver settings.
 	// +optional
 	// +kubebuilder:default={}
 	Config *config.EgressBrokerConfig `json:"config,omitempty"`
@@ -908,7 +911,7 @@ func IsStorageProxyEnabled(infra *Sandbox0Infra) bool {
 	return infra.Spec.Services.StorageProxy.Enabled
 }
 
-// IsEgressBrokerEnabled returns true when egress-broker is enabled.
+// IsEgressBrokerEnabled returns true when the legacy compatibility block is enabled.
 func IsEgressBrokerEnabled(infra *Sandbox0Infra) bool {
 	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.EgressBroker == nil {
 		return false

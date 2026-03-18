@@ -1,4 +1,4 @@
-package resolver
+package runtime
 
 import (
 	"bytes"
@@ -15,12 +15,12 @@ type staticHeadersProvider struct{}
 
 func (p *staticHeadersProvider) Resolve(
 	_ context.Context,
-	_ *egressauth.ResolveRequest,
+	req *egressauth.ResolveRequest,
 	binding *egressauth.CredentialBinding,
 	source *egressauth.CredentialSourceVersion,
 	defaultTTL time.Duration,
 ) (*ResolveResult, error) {
-	if binding == nil || source == nil {
+	if binding == nil || source == nil || req == nil {
 		return nil, nil
 	}
 	if source.Spec.StaticHeaders == nil {
@@ -41,7 +41,7 @@ func (p *staticHeadersProvider) Resolve(
 	}
 	expiresAt := time.Now().UTC().Add(ttl)
 	return &ResolveResult{
-		Response: egressauth.NewHTTPHeadersResolveResponse(binding.Ref, headers, &expiresAt),
+		Response: egressauth.NewHTTPHeadersResolveResponse(req.AuthRef, headers, &expiresAt),
 		TTL:      ttl,
 	}, nil
 }

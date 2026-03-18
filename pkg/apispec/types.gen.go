@@ -862,7 +862,7 @@ type NetworkEgressPolicy struct {
 	// DeniedPorts Port/protocol denylist used only when mode is `allow-all`.
 	DeniedPorts *[]PortSpec `json:"deniedPorts,omitempty"`
 
-	// Rules Structured egress auth injection rules resolved by `egress-broker`.
+	// Rules Structured egress auth injection rules resolved by the manager runtime egress auth path.
 	// These rules are orthogonal to allow/deny matching and are intended for
 	// destination-scoped outbound auth behavior.
 	Rules *[]EgressCredentialRule `json:"rules,omitempty"`

@@ -1,4 +1,4 @@
-package resolver
+package runtime
 
 import (
 	"context"
@@ -7,38 +7,49 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 	"go.uber.org/zap"
 )
 
 var ErrAuthRefNotFound = errors.New("authRef not found")
 
-// Service owns broker-side runtime resolution and caching.
+type StaticAuthConfig struct {
+	AuthRef string
+	Headers map[string]string
+	TTL     time.Duration
+}
+
+type Config struct {
+	ClusterID         string
+	DefaultResolveTTL time.Duration
+	StaticAuth        []StaticAuthConfig
+}
+
+// Service owns runtime credential resolution and caching.
 type Service struct {
 	clusterID    string
 	defaultTTL   time.Duration
 	logger       *zap.Logger
 	bindingStore egressauth.BindingStore
-	staticAuth   map[string]config.StaticEgressAuthConfig
+	staticAuth   map[string]StaticAuthConfig
 	providers    map[string]Provider
 	resolveCache *resultCache
 }
 
-func NewService(cfg *config.EgressBrokerConfig, bindingStore egressauth.BindingStore, logger *zap.Logger) *Service {
-	if cfg == nil {
-		cfg = &config.EgressBrokerConfig{}
-	}
+func NewService(cfg Config, bindingStore egressauth.BindingStore, logger *zap.Logger) *Service {
 	if logger == nil {
 		logger = zap.NewNop()
+	}
+	if cfg.DefaultResolveTTL <= 0 {
+		cfg.DefaultResolveTTL = 5 * time.Minute
 	}
 
 	service := &Service{
 		clusterID:    strings.TrimSpace(cfg.ClusterID),
-		defaultTTL:   cfg.DefaultResolveTTL.Duration,
+		defaultTTL:   cfg.DefaultResolveTTL,
 		logger:       logger,
 		bindingStore: bindingStore,
-		staticAuth:   buildStaticAuthMap(cfg),
+		staticAuth:   buildStaticAuthMap(cfg.StaticAuth),
 		providers:    make(map[string]Provider),
 		resolveCache: newResultCache(2048),
 	}
@@ -120,9 +131,9 @@ func (s *Service) resolveStatic(req *egressauth.ResolveRequest) (*egressauth.Res
 		return response, nil
 	}
 
-	expiresAt := now.Add(entry.TTL.Duration)
+	expiresAt := now.Add(entry.TTL)
 	response := egressauth.NewHTTPHeadersResolveResponse(entry.AuthRef, entry.Headers, &expiresAt)
-	s.resolveCache.Set(cacheKey, response, entry.TTL.Duration, now)
+	s.resolveCache.Set(cacheKey, response, entry.TTL, now)
 	return response, nil
 }
 
@@ -156,25 +167,32 @@ func (s *Service) lookupBinding(ctx context.Context, req *egressauth.ResolveRequ
 	return nil, time.Time{}
 }
 
-func (s *Service) lookupStaticAuth(authRef string) (config.StaticEgressAuthConfig, bool) {
+func (s *Service) lookupStaticAuth(authRef string) (StaticAuthConfig, bool) {
 	if s == nil || len(s.staticAuth) == 0 {
-		return config.StaticEgressAuthConfig{}, false
+		return StaticAuthConfig{}, false
 	}
 	entry, ok := s.staticAuth[strings.TrimSpace(authRef)]
 	return entry, ok
 }
 
-func buildStaticAuthMap(cfg *config.EgressBrokerConfig) map[string]config.StaticEgressAuthConfig {
-	if cfg == nil || len(cfg.StaticAuth) == 0 {
+func buildStaticAuthMap(entries []StaticAuthConfig) map[string]StaticAuthConfig {
+	if len(entries) == 0 {
 		return nil
 	}
-	out := make(map[string]config.StaticEgressAuthConfig, len(cfg.StaticAuth))
-	for _, entry := range cfg.StaticAuth {
+	out := make(map[string]StaticAuthConfig, len(entries))
+	for _, entry := range entries {
 		authRef := strings.TrimSpace(entry.AuthRef)
 		if authRef == "" {
 			continue
 		}
-		out[authRef] = entry
+		if entry.TTL <= 0 {
+			entry.TTL = 5 * time.Minute
+		}
+		out[authRef] = StaticAuthConfig{
+			AuthRef: authRef,
+			Headers: cloneStringMap(entry.Headers),
+			TTL:     entry.TTL,
+		}
 	}
 	return out
 }
@@ -212,4 +230,15 @@ func staticCacheKey(req *egressauth.ResolveRequest) string {
 
 func cloneResolveResponse(in *egressauth.ResolveResponse) *egressauth.ResolveResponse {
 	return egressauth.CloneResolveResponse(in)
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }

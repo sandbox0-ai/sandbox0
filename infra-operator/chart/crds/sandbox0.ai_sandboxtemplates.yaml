@@ -235,7 +235,7 @@ spec:
                           properties:
                             credentialRef:
                               description: CredentialRef identifies the binding resolved
-                                by egress-broker.
+                                by the runtime egress auth resolver.
                               type: string
                             domains:
                               description: Domains matches outbound destinations by

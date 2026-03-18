@@ -1,4 +1,4 @@
-package resolver
+package runtime
 
 import (
 	"context"
@@ -6,10 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 	"go.uber.org/zap"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 type fakeBindingStore struct {
@@ -123,9 +121,9 @@ func TestResolveUsesBindingProviderAndCache(t *testing.T) {
 		},
 	}
 
-	service := NewService(&config.EgressBrokerConfig{
+	service := NewService(Config{
 		ClusterID:         "cluster-a",
-		DefaultResolveTTL: metav1.Duration{Duration: time.Minute},
+		DefaultResolveTTL: time.Minute,
 	}, store, zap.NewNop())
 	service.RegisterProvider("static_headers", provider)
 
@@ -158,9 +156,9 @@ func TestResolveInvalidatesCacheWhenBindingsRevisionChanges(t *testing.T) {
 		},
 	}
 
-	service := NewService(&config.EgressBrokerConfig{
+	service := NewService(Config{
 		ClusterID:         "cluster-a",
-		DefaultResolveTTL: metav1.Duration{Duration: time.Minute},
+		DefaultResolveTTL: time.Minute,
 	}, store, zap.NewNop())
 	service.RegisterProvider("static_headers", provider)
 
@@ -178,11 +176,11 @@ func TestResolveInvalidatesCacheWhenBindingsRevisionChanges(t *testing.T) {
 }
 
 func TestResolveFallsBackToStaticAuth(t *testing.T) {
-	service := NewService(&config.EgressBrokerConfig{
-		StaticAuth: []config.StaticEgressAuthConfig{{
+	service := NewService(Config{
+		StaticAuth: []StaticAuthConfig{{
 			AuthRef: "example-api",
 			Headers: map[string]string{"Authorization": "Bearer static"},
-			TTL:     metav1.Duration{Duration: time.Minute},
+			TTL:     time.Minute,
 		}},
 	}, nil, zap.NewNop())
 
@@ -206,9 +204,9 @@ func TestResolveRefreshesAfterCacheTTLExpires(t *testing.T) {
 		},
 	}
 
-	service := NewService(&config.EgressBrokerConfig{
+	service := NewService(Config{
 		ClusterID:         "cluster-a",
-		DefaultResolveTTL: metav1.Duration{Duration: time.Minute},
+		DefaultResolveTTL: time.Minute,
 	}, store, zap.NewNop())
 	service.RegisterProvider("static_headers", provider)
 
@@ -237,7 +235,7 @@ func TestResolveRefreshesAfterCacheTTLExpires(t *testing.T) {
 }
 
 func TestResolveReturnsNotFoundWhenAuthRefMissing(t *testing.T) {
-	service := NewService(&config.EgressBrokerConfig{}, nil, zap.NewNop())
+	service := NewService(Config{}, nil, zap.NewNop())
 	_, err := service.Resolve(context.Background(), &egressauth.ResolveRequest{AuthRef: "missing"})
 	if !errors.Is(err, ErrAuthRefNotFound) {
 		t.Fatalf("err = %v, want ErrAuthRefNotFound", err)

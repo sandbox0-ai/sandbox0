@@ -26,6 +26,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/clock"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
+	egressauthruntime "github.com/sandbox0-ai/sandbox0/pkg/egressauth/runtime"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
@@ -278,6 +279,19 @@ func main() {
 		managerMetrics,
 	)
 	sandboxService.SetCredentialStore(credentialStore)
+	staticAuth := make([]egressauthruntime.StaticAuthConfig, 0, len(cfg.EgressAuthStaticAuth))
+	for _, entry := range cfg.EgressAuthStaticAuth {
+		staticAuth = append(staticAuth, egressauthruntime.StaticAuthConfig{
+			AuthRef: entry.AuthRef,
+			Headers: entry.Headers,
+			TTL:     entry.TTL.Duration,
+		})
+	}
+	egressAuthService := service.NewEgressAuthService(service.EgressAuthServiceConfig{
+		ClusterID:         cfg.DefaultClusterId,
+		DefaultResolveTTL: cfg.EgressAuthDefaultResolveTTL.Duration,
+		StaticAuth:        staticAuth,
+	}, credentialStore, logger)
 	credentialSourceService := service.NewCredentialSourceService(credentialStore, logger)
 
 	templateService := service.NewTemplateService(
@@ -349,7 +363,7 @@ func main() {
 	}
 
 	validatorConfig := internalauth.DefaultValidatorConfig("manager", publicKey)
-	validatorConfig.AllowedCallers = []string{"internal-gateway"}
+	validatorConfig.AllowedCallers = []string{"internal-gateway", "netd"}
 	authValidator := internalauth.NewValidator(validatorConfig)
 
 	logger.Info("Internal authentication enabled",
@@ -360,6 +374,7 @@ func main() {
 	// Create HTTP server
 	httpServer := httpserver.NewServer(
 		sandboxService,
+		egressAuthService,
 		credentialSourceService,
 		templateService,
 		registryService,

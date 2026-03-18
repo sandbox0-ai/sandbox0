@@ -4570,7 +4570,7 @@ components:
         rules:
           type: array
           description: |
-            Structured egress auth injection rules resolved by `egress-broker`.
+            Structured egress auth injection rules resolved by the manager runtime egress auth path.
             These rules are orthogonal to allow/deny matching and are intended for
             destination-scoped outbound auth behavior.
           items:

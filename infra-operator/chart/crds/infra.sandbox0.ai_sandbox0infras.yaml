@@ -1098,12 +1098,12 @@ spec:
                     type: object
                   egressBroker:
                     default: {}
-                    description: EgressBroker configures the egress-broker service
+                    description: EgressBroker carries legacy compatibility config for runtime egress auth resolution
                       (data plane)
                     properties:
                       config:
                         default: {}
-                        description: Config contains egress-broker specific configuration.
+                        description: Config contains legacy runtime egress auth resolver settings.
                         properties:
                           databaseMaxConns:
                             default: 10

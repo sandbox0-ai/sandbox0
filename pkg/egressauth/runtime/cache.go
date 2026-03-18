@@ -1,4 +1,4 @@
-package resolver
+package runtime
 
 import (
 	"sync"

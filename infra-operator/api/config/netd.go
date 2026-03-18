@@ -26,6 +26,8 @@ type NetdConfig struct {
 	ClusterID string `yaml:"cluster_id" json:"-"`
 
 	// +optional
+	// EgressBrokerURL is the base URL for the runtime egress auth resolver.
+	// The legacy field name is kept for compatibility.
 	EgressBrokerURL string `yaml:"egress_broker_url" json:"egressBrokerUrl"`
 
 	// +optional
@@ -34,6 +36,8 @@ type NetdConfig struct {
 
 	// +optional
 	// +kubebuilder:default="2s"
+	// EgressBrokerTimeout is the timeout for runtime egress auth resolve calls.
+	// The legacy field name is kept for compatibility.
 	EgressBrokerTimeout metav1.Duration `yaml:"egress_broker_timeout" json:"egressBrokerTimeout"`
 
 	// +optional

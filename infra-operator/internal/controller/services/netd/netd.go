@@ -21,6 +21,8 @@ import (
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
+	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
 
 type Reconciler struct {
@@ -88,17 +90,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	if infra.Spec.Cluster != nil && infra.Spec.Cluster.ID != "" {
 		config.ClusterID = infra.Spec.Cluster.ID
 	}
-	if infrav1alpha1.IsEgressBrokerEnabled(infra) && config.EgressBrokerURL == "" {
-		port := 8082
-		if infra.Spec.Services != nil && infra.Spec.Services.EgressBroker != nil && infra.Spec.Services.EgressBroker.Config != nil && infra.Spec.Services.EgressBroker.Config.HTTPPort > 0 {
-			port = infra.Spec.Services.EgressBroker.Config.HTTPPort
+	if infrav1alpha1.IsManagerEnabled(infra) && config.EgressBrokerURL == "" {
+		port := 8080
+		if infra.Spec.Services != nil && infra.Spec.Services.Manager != nil && infra.Spec.Services.Manager.Config != nil && infra.Spec.Services.Manager.Config.HTTPPort > 0 {
+			port = infra.Spec.Services.Manager.Config.HTTPPort
 		}
-		config.EgressBrokerURL = fmt.Sprintf("http://%s-egress-broker.%s.svc.cluster.local:%d", infra.Name, infra.Namespace, port)
+		config.EgressBrokerURL = fmt.Sprintf("http://%s-manager.%s.svc.cluster.local:%d", infra.Name, infra.Namespace, port)
 	}
 	mitmCASecretName, err := r.resolveMITMCASecretName(ctx, infra, labels)
 	if err != nil {
 		return err
 	}
+	keySecretName, privateKeyKey, _ := internalauth.GetDataPlaneKeyRefs(infra)
 	if mitmCASecretName != "" {
 		if config.MITMCACertPath == "" {
 			config.MITMCACertPath = "/tls/ca.crt"
@@ -151,6 +154,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 				EmptyDir: &corev1.EmptyDirVolumeSource{},
 			},
 		},
+		{
+			Name: "internal-jwt-private-key",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: keySecretName,
+					Items: []corev1.KeyToPath{{
+						Key:  privateKeyKey,
+						Path: "internal_jwt_private.key",
+					}},
+				},
+			},
+		},
 	}
 	if mitmCASecretName != "" {
 		volumes = append(volumes, corev1.Volume{
@@ -182,6 +197,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		{
 			Name:      "run",
 			MountPath: "/run",
+		},
+		{
+			Name:      "internal-jwt-private-key",
+			MountPath: pkginternalauth.DefaultInternalJWTPrivateKeyPath,
+			SubPath:   "internal_jwt_private.key",
+			ReadOnly:  true,
 		},
 	}
 	if mitmCASecretName != "" {

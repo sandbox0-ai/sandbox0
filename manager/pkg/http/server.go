@@ -26,6 +26,7 @@ import (
 type Server struct {
 	router                  *gin.Engine
 	sandboxService          *service.SandboxService
+	egressAuthService       *service.EgressAuthService
 	credentialSourceService *service.CredentialSourceService
 	templateService         *service.TemplateService
 	registryService         *service.RegistryService
@@ -65,6 +66,7 @@ type TemplateReconciler interface {
 // NewServer creates a new HTTP server
 func NewServer(
 	sandboxService *service.SandboxService,
+	egressAuthService *service.EgressAuthService,
 	credentialSourceService *service.CredentialSourceService,
 	templateService *service.TemplateService,
 	registryService *service.RegistryService,
@@ -92,6 +94,7 @@ func NewServer(
 	server := &Server{
 		router:                  router,
 		sandboxService:          sandboxService,
+		egressAuthService:       egressAuthService,
 		credentialSourceService: credentialSourceService,
 		templateService:         templateService,
 		registryService:         registryService,
@@ -208,6 +211,11 @@ func (s *Server) setupRoutes() {
 		internalCluster := internal.Group("/cluster")
 		{
 			internalCluster.GET("/summary", s.getClusterSummary)
+		}
+
+		internalEgressAuth := internal.Group("/egress-auth")
+		{
+			internalEgressAuth.POST("/resolve", s.resolveEgressAuth)
 		}
 	}
 }

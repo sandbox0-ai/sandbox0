@@ -14,11 +14,16 @@ import (
 )
 
 type httpEgressAuthResolver struct {
-	baseURL string
-	client  *http.Client
+	baseURL       string
+	client        *http.Client
+	tokenProvider EgressAuthTokenProvider
 }
 
-func newHTTPEgressAuthResolver(baseURL string, timeout time.Duration) egressAuthResolver {
+type EgressAuthTokenProvider interface {
+	Token(ctx context.Context) (string, error)
+}
+
+func NewHTTPEgressAuthResolver(baseURL string, timeout time.Duration, tokenProvider EgressAuthTokenProvider) egressAuthResolver {
 	baseURL = strings.TrimSpace(baseURL)
 	if baseURL == "" {
 		return noopEgressAuthResolver{}
@@ -27,7 +32,8 @@ func newHTTPEgressAuthResolver(baseURL string, timeout time.Duration) egressAuth
 		timeout = 2 * time.Second
 	}
 	return &httpEgressAuthResolver{
-		baseURL: strings.TrimRight(baseURL, "/"),
+		baseURL:       strings.TrimRight(baseURL, "/"),
+		tokenProvider: tokenProvider,
 		client: &http.Client{
 			Timeout: timeout,
 		},
@@ -45,11 +51,21 @@ func (r *httpEgressAuthResolver) Resolve(ctx context.Context, req *egressauth.Re
 	if err != nil {
 		return nil, fmt.Errorf("marshal resolve request: %w", err)
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, r.baseURL+"/api/v1/resolve", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, r.baseURL+"/internal/v1/egress-auth/resolve", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("build resolve request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if r.tokenProvider != nil {
+		token, err := r.tokenProvider.Token(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("generate internal token: %w", err)
+		}
+		if token == "" {
+			return nil, fmt.Errorf("generate internal token: empty token")
+		}
+		httpReq.Header.Set("X-Internal-Token", token)
+	}
 
 	resp, err := r.client.Do(httpReq)
 	if err != nil {
@@ -65,7 +81,7 @@ func (r *httpEgressAuthResolver) Resolve(ctx context.Context, req *egressauth.Re
 		if apiErr != nil {
 			return nil, fmt.Errorf("resolve egress auth: %s", apiErr.Message)
 		}
-		return nil, fmt.Errorf("resolve egress auth: broker returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("resolve egress auth: resolver returned status %d", resp.StatusCode)
 	}
 	if apiErr != nil {
 		return nil, fmt.Errorf("resolve egress auth: %s", apiErr.Message)

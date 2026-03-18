@@ -13,7 +13,7 @@ OAPI_CODEGEN_VERSION ?= v2.4.1
 
 PROTOC ?= protoc
 
-SERVICES := edge-gateway global-directory internal-gateway manager scheduler storage-proxy egress-broker k8s-plugin procd netd infra-operator
+SERVICES := edge-gateway global-directory internal-gateway manager scheduler storage-proxy k8s-plugin procd netd infra-operator
 
 # Default version
 VERSION ?= latest
@@ -109,8 +109,6 @@ test:
 			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./scheduler/...; \
 		elif [ "$$service" = "storage-proxy" ]; then \
 			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./storage-proxy/...; \
-		elif [ "$$service" = "egress-broker" ]; then \
-			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./egress-broker/...; \
 		elif [ "$$service" = "k8s-plugin" ]; then \
 			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./k8s-plugin/...; \
 		elif [ "$$service" = "infra-operator" ]; then \

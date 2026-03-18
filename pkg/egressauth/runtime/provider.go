@@ -1,4 +1,4 @@
-package resolver
+package runtime
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 )
 
-// ResolveResult contains one resolved broker response and its cache lifetime.
+// ResolveResult contains one resolved response and its cache lifetime.
 type ResolveResult struct {
 	Response *egressauth.ResolveResponse
 	TTL      time.Duration
@@ -26,7 +26,7 @@ type Provider interface {
 }
 
 // UnsupportedProviderError indicates the binding references a provider that is
-// not available in this broker process.
+// not available in this runtime resolver process.
 type UnsupportedProviderError struct {
 	Provider string
 }

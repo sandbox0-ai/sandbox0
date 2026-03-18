@@ -234,8 +234,16 @@ func (in *ManagerConfig) DeepCopyInto(out *ManagerConfig) {
 	out.ProcdClientTimeout = in.ProcdClientTimeout
 	out.ProcdInitTimeout = in.ProcdInitTimeout
 	out.ShutdownTimeout = in.ShutdownTimeout
+	out.EgressAuthDefaultResolveTTL = in.EgressAuthDefaultResolveTTL
 	in.ProcdConfig.DeepCopyInto(&out.ProcdConfig)
 	in.Registry.DeepCopyInto(&out.Registry)
+	if in.EgressAuthStaticAuth != nil {
+		in, out := &in.EgressAuthStaticAuth, &out.EgressAuthStaticAuth
+		*out = make([]StaticEgressAuthConfig, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
 	out.Autoscaler = in.Autoscaler
 	in.SandboxPodPlacement.DeepCopyInto(&out.SandboxPodPlacement)
 }

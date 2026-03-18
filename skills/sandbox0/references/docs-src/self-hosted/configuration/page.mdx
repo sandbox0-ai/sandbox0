@@ -152,7 +152,7 @@ Operational notes:
 - `egressBroker` is cluster-local. It should not be placed behind a region-scoped dependency on the outbound hot path.
 - By default, `infra-operator` generates and reuses a cluster-local MITM CA secret for `netd` when `services.netd.mitmCaSecretName` is unset.
 - Set `services.netd.mitmCaSecretName` only when you want to override that behavior with your own secret containing `ca.crt` and `ca.key`.
-- `services.netd.config.egressAuthEnabled` is the cluster-level gate. `authRules` inside sandbox network policy remain the per-policy gate.
+- `services.netd.config.egressAuthEnabled` is the cluster-level gate. Sandbox network policy remains the per-sandbox gate through `credentials.bindings` and `egress.rules`.
 - `fail-open` is possible for some pre-interception failures, but transparent recovery is not guaranteed once downstream TLS interception has already started.
 
 Use `spec.sandboxNodePlacement` for the shared node placement consumed by sandbox template Pods, `netd`, and `k8s-plugin`. The older `services.netd.nodeSelector` and `services.netd.tolerations` fields remain as compatibility aliases when the shared placement is unset.

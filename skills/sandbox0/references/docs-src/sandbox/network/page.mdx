@@ -26,20 +26,52 @@ Egress fields are interpreted by the selected mode:
 In <code>allow-all</code> mode, traffic is permitted by default and only <code>denied*</code> fields are enforced. In <code>block-all</code> mode, traffic is denied by default and only <code>allowed*</code> fields are enforced.
 </Callout>
 
-## Egress Auth Injection
+## Egress Credential Injection
 
-`authRules` let `netd` call cluster-local `egress-broker` and inject outbound auth for selected destinations without handing the original credential to the sandbox.
+Credential injection now has two layers:
+
+- `credentials.bindings` defines sandbox-scoped bindings that map a stable `ref` to a manager-managed credential source.
+- `egress.rules` matches destinations and points to one binding with `credentialRef`.
+
+This lets `netd` call cluster-local `egress-broker` and inject outbound credentials for selected destinations without handing the original source material to the sandbox.
+
+### Credential Sources
+
+Credential sources are managed through the manager API:
+
+- `GET /api/v1/credential-sources`
+- `POST /api/v1/credential-sources`
+- `GET /api/v1/credential-sources/{name}`
+- `PUT /api/v1/credential-sources/{name}`
+- `DELETE /api/v1/credential-sources/{name}`
+
+The current public source kind is `static_headers`. It stores named values that bindings can project into outbound headers.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `authRules` | array | List of destination-scoped auth injection rules. |
-| `authRules[].authRef` | string | Required reference resolved by `egress-broker`. |
-| `authRules[].rollout` | string | Optional rollout control: `enabled` or `disabled`. Empty defaults to enabled. |
-| `authRules[].protocol` | string | Optional protocol hint: `http`, `https`, or `grpc`. |
-| `authRules[].tlsMode` | string | TLS handling mode for HTTPS/gRPC: `passthrough` or `terminate-reoriginate`. |
-| `authRules[].failurePolicy` | string | Optional enforcement policy: `fail-closed` or `fail-open`. |
-| `authRules[].domains` | array | Domain match list for the rule. |
-| `authRules[].ports` | array | Destination port constraints for the rule. |
+| `name` | string | Stable source name used by `sourceRef`. |
+| `resolverKind` | string | Resolver kind. Current public value: `static_headers`. |
+| `spec.staticHeaders.values` | object | Named source values consumed by binding templates. |
+
+### Sandbox Bindings And Egress Rules
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `credentials.bindings` | array | Sandbox-scoped credential bindings. |
+| `credentials.bindings[].ref` | string | Stable binding reference matched by `egress.rules[].credentialRef`. |
+| `credentials.bindings[].sourceRef` | string | Credential source name resolved by `manager`. |
+| `credentials.bindings[].projection.type` | string | Projection type. Current public value: `http_headers`. |
+| `credentials.bindings[].projection.httpHeaders.headers[].name` | string | Header name to inject. |
+| `credentials.bindings[].projection.httpHeaders.headers[].valueTemplate` | string | Go template rendered against source values, for example `Bearer {{.token}}`. |
+| `credentials.bindings[].cachePolicy.ttl` | string | Optional broker-side cache TTL override, such as `5m`. |
+| `egress.rules` | array | Destination-scoped egress credential rules. |
+| `egress.rules[].credentialRef` | string | Required binding reference resolved against `credentials.bindings[].ref`. |
+| `egress.rules[].rollout` | string | Optional rollout control: `enabled` or `disabled`. Empty defaults to enabled. |
+| `egress.rules[].protocol` | string | Optional protocol hint: `http`, `https`, or `grpc`. |
+| `egress.rules[].tlsMode` | string | TLS handling mode for HTTPS/gRPC: `passthrough` or `terminate-reoriginate`. |
+| `egress.rules[].failurePolicy` | string | Optional enforcement policy: `fail-closed` or `fail-open`. |
+| `egress.rules[].domains` | array | Domain match list for the rule. |
+| `egress.rules[].ports` | array | Destination port constraints for the rule. |
 
 Supported cases:
 
@@ -53,16 +85,45 @@ Not supported or not transparent:
 - runtimes that do not trust the injected cluster CA
 - legacy applications that must read a static key from disk or env
 
-Example request body:
+Typical flow:
+
+1. Create or update a credential source.
+2. Bind that source into the sandbox with `credentials.bindings`.
+3. Match outbound destinations with `egress.rules`.
+
+Example credential source payload:
+
+```yaml
+name: example-api
+resolverKind: static_headers
+spec:
+    staticHeaders:
+        values:
+            token: secret-token
+```
+
+Example network policy payload:
 
 ```yaml
 mode: block-all
+credentials:
+    bindings:
+        - ref: example-api
+          sourceRef: example-api
+          projection:
+              type: http_headers
+              httpHeaders:
+                  headers:
+                      - name: Authorization
+                        valueTemplate: Bearer {{.token}}
+          cachePolicy:
+              ttl: 5m
 egress:
     allowedDomains:
         - api.example.com
-    authRules:
+    rules:
         - name: example-api
-          authRef: example-api
+          credentialRef: example-api
           protocol: https
           tlsMode: terminate-reoriginate
           failurePolicy: fail-closed
@@ -146,6 +207,7 @@ Update the network policy for a sandbox.
 | Field | Type | Description |
 |-------|------|-------------|
 | `mode` | string | Network mode: `allow-all` or `block-all` |
+| `credentials` | object | Sandbox credential bindings resolved by `egress-broker` (optional) |
 | `egress` | object | Egress policy rules (optional) |
 
 ---

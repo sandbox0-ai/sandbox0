@@ -57,7 +57,7 @@ type Server struct {
 	internalAuthGen    *internalauth.Generator
 	procdAuthGen       *internalauth.Generator
 	entitlements       licensing.Entitlements
-	sandboxAddrCache   *cache.Cache[string, *url.URL]
+	sandboxAddrCache   *cache.Cache[sandboxAddrCacheKey, *url.URL]
 	obsProvider        *observability.Provider
 }
 
@@ -169,7 +169,7 @@ func NewServer(
 
 	// Create sandbox cache to reduce manager API calls
 	// TTL of 2 minutes balances performance and data freshness
-	sandboxAddrCache := cache.New[string, *url.URL](cache.Config{
+	sandboxAddrCache := cache.New[sandboxAddrCacheKey, *url.URL](cache.Config{
 		MaxSize:         10000,           // Support up to 10k active sandboxes
 		TTL:             2 * time.Minute, // Cache sandbox info for 2 minutes
 		CleanupInterval: 1 * time.Minute, // Cleanup expired entries every minute

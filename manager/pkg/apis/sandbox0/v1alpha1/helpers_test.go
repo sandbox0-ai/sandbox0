@@ -189,6 +189,7 @@ func TestBuildPodSpecOverridesTenantStorageProxyEnvVars(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test
 procd_config:
+  root_path: /workspace
   storage_proxy_base_url: storage-proxy.sandbox0-system.svc.cluster.local
   storage_proxy_port: 4001
 `)
@@ -196,6 +197,7 @@ procd_config:
 
 	template := newTestTemplate()
 	template.Spec.EnvVars = map[string]string{
+		"root_path":               "/tenant-override",
 		"storage_proxy_base_url": "evil.local",
 		"storage_proxy_port":     "65535",
 		"node_name":              "tenant-node",
@@ -213,6 +215,9 @@ procd_config:
 	if got := envByName["storage_proxy_port"].Value; got != "4001" {
 		t.Fatalf("storage_proxy_port = %q, want manager-controlled value", got)
 	}
+	if got := envByName["root_path"].Value; got != "/workspace" {
+		t.Fatalf("root_path = %q, want manager-controlled value", got)
+	}
 
 	nodeName := envByName["node_name"]
 	if nodeName.ValueFrom == nil || nodeName.ValueFrom.FieldRef == nil || nodeName.ValueFrom.FieldRef.FieldPath != "spec.nodeName" {
@@ -228,6 +233,7 @@ manager_image: sandbox0/manager:test
 
 	template := newTestTemplate()
 	template.Spec.EnvVars = map[string]string{
+		"root_path":               "/tenant-override",
 		"storage_proxy_base_url": "evil.local",
 		"storage_proxy_port":     "65535",
 		"node_name":              "tenant-node",
@@ -244,6 +250,9 @@ manager_image: sandbox0/manager:test
 	}
 	if got := envByName["storage_proxy_port"].Value; got != "0" {
 		t.Fatalf("storage_proxy_port = %q, want 0 manager-controlled value", got)
+	}
+	if got := envByName["root_path"].Value; got != "/tenant-override" {
+		t.Fatalf("root_path = %q, want tenant value when manager config omits it", got)
 	}
 
 	nodeName := envByName["node_name"]

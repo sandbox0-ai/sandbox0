@@ -90,12 +90,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	if infra.Spec.Cluster != nil && infra.Spec.Cluster.ID != "" {
 		config.ClusterID = infra.Spec.Cluster.ID
 	}
-	if infrav1alpha1.IsManagerEnabled(infra) && config.EgressBrokerURL == "" {
+	if infrav1alpha1.IsManagerEnabled(infra) && config.EgressAuthResolverURL == "" {
 		port := 8080
 		if infra.Spec.Services != nil && infra.Spec.Services.Manager != nil && infra.Spec.Services.Manager.Config != nil && infra.Spec.Services.Manager.Config.HTTPPort > 0 {
 			port = infra.Spec.Services.Manager.Config.HTTPPort
 		}
-		config.EgressBrokerURL = fmt.Sprintf("http://%s-manager.%s.svc.cluster.local:%d", infra.Name, infra.Namespace, port)
+		config.EgressAuthResolverURL = fmt.Sprintf("http://%s-manager.%s.svc.cluster.local:%d", infra.Name, infra.Namespace, port)
 	}
 	mitmCASecretName, err := r.resolveMITMCASecretName(ctx, infra, labels)
 	if err != nil {

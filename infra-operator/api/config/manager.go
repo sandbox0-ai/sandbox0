@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 
 	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
@@ -149,6 +150,13 @@ type ManagerConfig struct {
 	// topology without requiring users to duplicate netd settings per template.
 	// +optional
 	SandboxPodPlacement SandboxPodPlacementConfig `yaml:"sandbox_pod_placement" json:"-"`
+}
+
+// StaticEgressAuthConfig defines a static auth directive for runtime egress auth injection.
+type StaticEgressAuthConfig struct {
+	AuthRef string            `yaml:"auth_ref" json:"authRef"`
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+	TTL     metav1.Duration   `yaml:"ttl" json:"ttl"`
 }
 
 // SandboxPodPlacementConfig defines default scheduling constraints for sandbox
@@ -357,8 +365,11 @@ func LoadManagerConfig() *ManagerConfig {
 		fmt.Fprintf(os.Stderr, "Failed to load config from %s: %v, using empty config\n", path, err)
 		cfg = &ManagerConfig{}
 	}
+	if cfg.EgressAuthDefaultResolveTTL.Duration == 0 {
+		cfg.EgressAuthDefaultResolveTTL = metav1.Duration{Duration: 5 * time.Minute}
+	}
 	for idx := range cfg.EgressAuthStaticAuth {
-		if cfg.EgressAuthStaticAuth[idx].TTL.Duration == 0 && cfg.EgressAuthDefaultResolveTTL.Duration > 0 {
+		if cfg.EgressAuthStaticAuth[idx].TTL.Duration == 0 {
 			cfg.EgressAuthStaticAuth[idx].TTL = cfg.EgressAuthDefaultResolveTTL
 		}
 	}

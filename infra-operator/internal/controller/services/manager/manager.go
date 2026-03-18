@@ -374,15 +374,6 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		cfg.PublicRootDomain = infra.Spec.PublicExposure.RootDomain
 		cfg.PublicRegionID = infra.Spec.PublicExposure.RegionID
 	}
-	if infra.Spec.Services != nil && infra.Spec.Services.EgressBroker != nil && infra.Spec.Services.EgressBroker.Config != nil {
-		legacy := infra.Spec.Services.EgressBroker.Config
-		if cfg.EgressAuthDefaultResolveTTL.Duration == 0 && legacy.DefaultResolveTTL.Duration > 0 {
-			cfg.EgressAuthDefaultResolveTTL = legacy.DefaultResolveTTL
-		}
-		if len(cfg.EgressAuthStaticAuth) == 0 && len(legacy.StaticAuth) > 0 {
-			cfg.EgressAuthStaticAuth = append([]apiconfig.StaticEgressAuthConfig(nil), legacy.StaticAuth...)
-		}
-	}
 
 	return cfg, nil
 }

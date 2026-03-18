@@ -161,8 +161,8 @@ func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.T
 		auditor:        auditor,
 		exitCh:         make(chan error, 1),
 	}
-	if cfg.EgressBrokerURL != "" {
-		server.authResolver = NewHTTPEgressAuthResolver(cfg.EgressBrokerURL, cfg.EgressBrokerTimeout.Duration, nil)
+	if cfg.EgressAuthResolverURL != "" {
+		server.authResolver = NewHTTPEgressAuthResolver(cfg.EgressAuthResolverURL, cfg.EgressAuthResolverTimeout.Duration, nil)
 	}
 	if cfg.MITMCACertPath != "" && cfg.MITMCAKeyPath != "" {
 		authority, authorityErr := newCertificateAuthorityFromFiles(cfg.MITMCACertPath, cfg.MITMCAKeyPath, cfg.MITMLeafTTL.Duration)

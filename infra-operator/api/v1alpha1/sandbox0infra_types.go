@@ -736,13 +736,6 @@ type ServicesConfig struct {
 	// +kubebuilder:default={}
 	StorageProxy *StorageProxyServiceConfig `json:"storageProxy,omitempty"`
 
-	// EgressBroker carries legacy compatibility config for runtime egress auth
-	// resolution. The standalone egress-broker deployment has been removed and
-	// these settings are forwarded into manager/netd wiring.
-	// +optional
-	// +kubebuilder:default={}
-	EgressBroker *EgressBrokerServiceConfig `json:"egressBroker,omitempty"`
-
 	// Netd configures the netd service (data plane)
 	// +optional
 	// +kubebuilder:default={}
@@ -826,16 +819,6 @@ type StorageProxyServiceConfig struct {
 	Config *config.StorageProxyConfig `json:"config,omitempty"`
 }
 
-// EgressBrokerServiceConfig defines legacy compatibility configuration for the
-// removed standalone egress-broker service.
-type EgressBrokerServiceConfig struct {
-	BaseServiceConfig `json:",inline"`
-	// Config contains legacy runtime egress auth resolver settings.
-	// +optional
-	// +kubebuilder:default={}
-	Config *config.EgressBrokerConfig `json:"config,omitempty"`
-}
-
 // NetdServiceConfig defines configuration for netd service
 type NetdServiceConfig struct {
 	BaseServiceConfig `json:",inline"`
@@ -909,14 +892,6 @@ func IsStorageProxyEnabled(infra *Sandbox0Infra) bool {
 		return false
 	}
 	return infra.Spec.Services.StorageProxy.Enabled
-}
-
-// IsEgressBrokerEnabled returns true when the legacy compatibility block is enabled.
-func IsEgressBrokerEnabled(infra *Sandbox0Infra) bool {
-	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.EgressBroker == nil {
-		return false
-	}
-	return infra.Spec.Services.EgressBroker.Enabled
 }
 
 // IsNetdEnabled returns true when netd is enabled.
@@ -1251,7 +1226,6 @@ const (
 	ConditionTypeInternalGatewayReady = "InternalGatewayReady"
 	ConditionTypeManagerReady         = "ManagerReady"
 	ConditionTypeStorageProxyReady    = "StorageProxyReady"
-	ConditionTypeEgressBrokerReady    = "EgressBrokerReady"
 	ConditionTypeFusePluginReady      = "FusePluginReady"
 	ConditionTypeNetdReady            = "NetdReady"
 	ConditionTypeSchedulerReady       = "SchedulerReady"

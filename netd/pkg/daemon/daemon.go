@@ -194,7 +194,7 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 	}
 
 	proxyOpts := []proxy.ServerOption{}
-	if d.cfg.EgressBrokerURL != "" {
+	if d.cfg.EgressAuthResolverURL != "" {
 		privateKey, keyErr := internalauth.LoadEd25519PrivateKeyFromFile(internalauth.DefaultInternalJWTPrivateKeyPath)
 		if keyErr != nil {
 			return fmt.Errorf("load netd internal auth private key: %w", keyErr)
@@ -205,8 +205,8 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 			TTL:        30 * time.Second,
 		})
 		proxyOpts = append(proxyOpts, proxy.WithEgressAuthResolver(proxy.NewHTTPEgressAuthResolver(
-			d.cfg.EgressBrokerURL,
-			d.cfg.EgressBrokerTimeout.Duration,
+			d.cfg.EgressAuthResolverURL,
+			d.cfg.EgressAuthResolverTimeout.Duration,
 			netdEgressAuthTokenProvider{generator: tokenGenerator},
 		)))
 	}

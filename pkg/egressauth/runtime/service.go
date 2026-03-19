@@ -20,14 +20,12 @@ type StaticAuthConfig struct {
 }
 
 type Config struct {
-	ClusterID         string
 	DefaultResolveTTL time.Duration
 	StaticAuth        []StaticAuthConfig
 }
 
 // Service owns runtime credential resolution and caching.
 type Service struct {
-	clusterID    string
 	defaultTTL   time.Duration
 	logger       *zap.Logger
 	bindingStore egressauth.BindingStore
@@ -45,7 +43,6 @@ func NewService(cfg Config, bindingStore egressauth.BindingStore, logger *zap.Lo
 	}
 
 	service := &Service{
-		clusterID:    strings.TrimSpace(cfg.ClusterID),
 		defaultTTL:   cfg.DefaultResolveTTL,
 		logger:       logger,
 		bindingStore: bindingStore,
@@ -85,7 +82,7 @@ func (s *Service) Resolve(ctx context.Context, req *egressauth.ResolveRequest) (
 }
 
 func (s *Service) resolveBinding(ctx context.Context, req *egressauth.ResolveRequest, binding *egressauth.CredentialBinding, updatedAt time.Time) (*egressauth.ResolveResponse, error) {
-	cacheKey := bindingCacheKey(s.clusterID, req, binding, updatedAt)
+	cacheKey := bindingCacheKey(req, binding, updatedAt)
 	now := time.Now().UTC()
 	if response, ok := s.resolveCache.Get(cacheKey, now); ok {
 		return response, nil
@@ -143,14 +140,14 @@ func (s *Service) lookupBinding(ctx context.Context, req *egressauth.ResolveRequ
 	if s == nil || s.bindingStore == nil || req == nil {
 		return nil, time.Time{}
 	}
-	if s.clusterID == "" || strings.TrimSpace(req.SandboxID) == "" {
+	if strings.TrimSpace(req.TeamID) == "" || strings.TrimSpace(req.SandboxID) == "" {
 		return nil, time.Time{}
 	}
 
-	record, err := s.bindingStore.GetBindings(ctx, s.clusterID, req.SandboxID)
+	record, err := s.bindingStore.GetBindings(ctx, req.TeamID, req.SandboxID)
 	if err != nil {
 		s.logger.Warn("Failed to load credential bindings",
-			zap.String("cluster_id", s.clusterID),
+			zap.String("team_id", req.TeamID),
 			zap.String("sandbox_id", req.SandboxID),
 			zap.Error(err),
 		)
@@ -199,10 +196,10 @@ func buildStaticAuthMap(entries []StaticAuthConfig) map[string]StaticAuthConfig 
 	return out
 }
 
-func bindingCacheKey(clusterID string, req *egressauth.ResolveRequest, binding *egressauth.CredentialBinding, updatedAt time.Time) string {
+func bindingCacheKey(req *egressauth.ResolveRequest, binding *egressauth.CredentialBinding, updatedAt time.Time) string {
 	return strings.Join([]string{
 		"binding",
-		clusterID,
+		strings.TrimSpace(req.TeamID),
 		strings.TrimSpace(req.SandboxID),
 		strings.TrimSpace(req.AuthRef),
 		binding.SourceRef,

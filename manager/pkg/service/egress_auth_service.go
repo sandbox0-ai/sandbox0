@@ -13,7 +13,6 @@ import (
 )
 
 type EgressAuthServiceConfig struct {
-	ClusterID         string
 	DefaultResolveTTL time.Duration
 	StaticAuth        []egressauthruntime.StaticAuthConfig
 }
@@ -25,7 +24,6 @@ type EgressAuthService struct {
 func NewEgressAuthService(cfg EgressAuthServiceConfig, bindingStore egressauth.BindingStore, logger *zap.Logger) *EgressAuthService {
 	return &EgressAuthService{
 		resolver: egressauthruntime.NewService(egressauthruntime.Config{
-			ClusterID:         cfg.ClusterID,
 			DefaultResolveTTL: cfg.DefaultResolveTTL,
 			StaticAuth:        cfg.StaticAuth,
 		}, bindingStore, logger),

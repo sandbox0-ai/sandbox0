@@ -51,9 +51,8 @@ type CachePolicySpec struct {
 	TTL string `json:"ttl,omitempty"`
 }
 
-// BindingRecord stores the effective bindings for one sandbox in one cluster.
+// BindingRecord stores the effective bindings for one sandbox owned by one team.
 type BindingRecord struct {
-	ClusterID string              `json:"clusterId"`
 	SandboxID string              `json:"sandboxId"`
 	TeamID    string              `json:"teamId,omitempty"`
 	Bindings  []CredentialBinding `json:"bindings,omitempty"`

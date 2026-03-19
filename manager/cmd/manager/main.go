@@ -288,7 +288,6 @@ func main() {
 		})
 	}
 	egressAuthService := service.NewEgressAuthService(service.EgressAuthServiceConfig{
-		ClusterID:         cfg.DefaultClusterId,
 		DefaultResolveTTL: cfg.EgressAuthDefaultResolveTTL.Duration,
 		StaticAuth:        staticAuth,
 	}, credentialStore, logger)

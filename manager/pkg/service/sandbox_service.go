@@ -788,8 +788,7 @@ func (s *SandboxService) syncCredentialBindings(
 		return noopCredentialBindingRollback, nil
 	}
 
-	clusterID := sandboxClusterID(pod)
-	previous, err := s.credentialStore.GetBindings(ctx, clusterID, pod.Name)
+	previous, err := s.credentialStore.GetBindings(ctx, teamID, pod.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -797,7 +796,7 @@ func (s *SandboxService) syncCredentialBindings(
 
 	rollback := func(rollbackCtx context.Context) error {
 		if previous == nil || len(previous.Bindings) == 0 {
-			return s.credentialStore.DeleteBindings(rollbackCtx, clusterID, pod.Name)
+			return s.credentialStore.DeleteBindings(rollbackCtx, teamID, pod.Name)
 		}
 		return s.credentialStore.UpsertBindings(rollbackCtx, previous)
 	}
@@ -806,7 +805,7 @@ func (s *SandboxService) syncCredentialBindings(
 		if previous == nil || len(previous.Bindings) == 0 {
 			return rollback, nil
 		}
-		if err := s.credentialStore.DeleteBindings(ctx, clusterID, pod.Name); err != nil {
+		if err := s.credentialStore.DeleteBindings(ctx, teamID, pod.Name); err != nil {
 			return nil, err
 		}
 		return rollback, nil
@@ -818,7 +817,6 @@ func (s *SandboxService) syncCredentialBindings(
 	}
 
 	if err := s.credentialStore.UpsertBindings(ctx, &egressauth.BindingRecord{
-		ClusterID: clusterID,
 		SandboxID: pod.Name,
 		TeamID:    teamID,
 		Bindings:  storeBindings,
@@ -841,14 +839,14 @@ func (s *SandboxService) deleteCredentialBindings(ctx context.Context, pod *core
 	if s.credentialStore == nil || pod == nil {
 		return nil
 	}
-	return s.credentialStore.DeleteBindings(ctx, sandboxClusterID(pod), pod.Name)
+	return s.credentialStore.DeleteBindings(ctx, sandboxTeamID(pod), pod.Name)
 }
 
 func (s *SandboxService) loadCredentialBindings(ctx context.Context, pod *corev1.Pod) ([]v1alpha1.CredentialBinding, error) {
 	if s.credentialStore == nil || pod == nil {
 		return nil, nil
 	}
-	record, err := s.credentialStore.GetBindings(ctx, sandboxClusterID(pod), pod.Name)
+	record, err := s.credentialStore.GetBindings(ctx, sandboxTeamID(pod), pod.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -858,14 +856,13 @@ func (s *SandboxService) loadCredentialBindings(ctx context.Context, pod *corev1
 	return fromStoreCredentialBindings(record.Bindings), nil
 }
 
-func sandboxClusterID(pod *corev1.Pod) string {
-	if pod != nil && pod.Name != "" {
-		parsed, err := naming.ParseSandboxName(pod.Name)
-		if err == nil && parsed != nil && parsed.ClusterID != "" {
-			return parsed.ClusterID
+func sandboxTeamID(pod *corev1.Pod) string {
+	if pod != nil && pod.Annotations != nil {
+		if teamID := pod.Annotations[controller.AnnotationTeamID]; teamID != "" {
+			return teamID
 		}
 	}
-	return naming.DefaultClusterID
+	return ""
 }
 
 func toStoreCredentialBindings(

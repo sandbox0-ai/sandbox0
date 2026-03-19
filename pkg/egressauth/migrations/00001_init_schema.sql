@@ -21,9 +21,8 @@ CREATE TABLE IF NOT EXISTS credential_source_versions (
 );
 
 CREATE TABLE IF NOT EXISTS sandbox_egress_credential_bindings (
-    cluster_id TEXT NOT NULL,
+    team_id TEXT NOT NULL,
     sandbox_id TEXT NOT NULL,
-    team_id TEXT NOT NULL DEFAULT '',
     ref TEXT NOT NULL,
     source_ref TEXT NOT NULL,
     source_id BIGINT NOT NULL REFERENCES credential_sources(id),
@@ -32,16 +31,13 @@ CREATE TABLE IF NOT EXISTS sandbox_egress_credential_bindings (
     cache_policy JSONB NOT NULL DEFAULT '{}'::jsonb,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (cluster_id, sandbox_id, ref),
+    PRIMARY KEY (team_id, sandbox_id, ref),
     FOREIGN KEY (source_id, source_version)
         REFERENCES credential_source_versions(source_id, version)
 );
 
 CREATE INDEX IF NOT EXISTS idx_sandbox_egress_credential_bindings_lookup
-    ON sandbox_egress_credential_bindings (cluster_id, sandbox_id);
-
-CREATE INDEX IF NOT EXISTS idx_sandbox_egress_credential_bindings_team
-    ON sandbox_egress_credential_bindings (team_id);
+    ON sandbox_egress_credential_bindings (team_id, sandbox_id);
 
 DROP TRIGGER IF EXISTS update_credential_sources_updated_at
     ON credential_sources;
@@ -63,7 +59,6 @@ DROP TRIGGER IF EXISTS update_sandbox_egress_credential_bindings_updated_at
     ON sandbox_egress_credential_bindings;
 DROP TRIGGER IF EXISTS update_credential_sources_updated_at
     ON credential_sources;
-DROP INDEX IF EXISTS idx_sandbox_egress_credential_bindings_team;
 DROP INDEX IF EXISTS idx_sandbox_egress_credential_bindings_lookup;
 DROP TABLE IF EXISTS sandbox_egress_credential_bindings;
 DROP TABLE IF EXISTS credential_source_versions;

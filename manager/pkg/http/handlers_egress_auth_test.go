@@ -48,7 +48,6 @@ func TestResolveEgressAuthAllowsNetdCaller(t *testing.T) {
 	srv := &Server{
 		logger: zap.NewNop(),
 		egressAuthService: service.NewEgressAuthService(service.EgressAuthServiceConfig{
-			ClusterID:         "cluster-a",
 			DefaultResolveTTL: time.Minute,
 			StaticAuth: []egressauthruntime.StaticAuthConfig{{
 				AuthRef: "example-api",

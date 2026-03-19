@@ -107,6 +107,95 @@ func TestMatchEgressAuthRuleSkipsDisabledRolloutRule(t *testing.T) {
 	}
 }
 
+func TestMatchEgressAuthRuleMatchesTLSRuleForTLSClassifier(t *testing.T) {
+	p := &CompiledPolicy{
+		Egress: CompiledRuleSet{
+			AuthRules: []CompiledEgressAuthRule{
+				{
+					Name:     "example-mtls",
+					AuthRef:  "example-cert",
+					Protocol: v1alpha1.EgressAuthProtocolTLS,
+					TLSMode:  v1alpha1.EgressTLSModeTerminateReoriginate,
+					Domains: []DomainRule{
+						{Pattern: "db.example.com", Type: DomainMatchExact},
+					},
+					Ports: []PortRange{
+						{Protocol: "tcp", Start: 5432, End: 5432},
+					},
+				},
+			},
+		},
+	}
+
+	rule := MatchEgressAuthRule(p, "tcp", "tls", 5432, "db.example.com")
+	if rule == nil {
+		t.Fatal("expected tls auth rule match for tls classifier")
+	}
+	if rule.AuthRef != "example-cert" {
+		t.Fatalf("unexpected auth ref %q", rule.AuthRef)
+	}
+}
+
+func TestMatchEgressAuthRuleMatchesSOCKS5Rule(t *testing.T) {
+	p := &CompiledPolicy{
+		Egress: CompiledRuleSet{
+			AuthRules: []CompiledEgressAuthRule{{
+				Name:     "corp-socks",
+				AuthRef:  "proxy-cred",
+				Protocol: v1alpha1.EgressAuthProtocolSOCKS5,
+				Ports: []PortRange{
+					{Protocol: "tcp", Start: 1080, End: 1080},
+				},
+			}},
+		},
+	}
+
+	rule := MatchEgressAuthRule(p, "tcp", "socks5", 1080, "")
+	if rule == nil || rule.AuthRef != "proxy-cred" {
+		t.Fatalf("unexpected socks5 rule match: %+v", rule)
+	}
+}
+
+func TestMatchEgressAuthRuleMatchesMQTTRule(t *testing.T) {
+	p := &CompiledPolicy{
+		Egress: CompiledRuleSet{
+			AuthRules: []CompiledEgressAuthRule{{
+				Name:     "broker-auth",
+				AuthRef:  "mqtt-cred",
+				Protocol: v1alpha1.EgressAuthProtocolMQTT,
+				Domains: []DomainRule{
+					{Pattern: "broker.example.com", Type: DomainMatchExact},
+				},
+			}},
+		},
+	}
+
+	rule := MatchEgressAuthRule(p, "tcp", "mqtt", 1883, "broker.example.com")
+	if rule == nil || rule.AuthRef != "mqtt-cred" {
+		t.Fatalf("unexpected mqtt rule match: %+v", rule)
+	}
+}
+
+func TestMatchEgressAuthRuleMatchesRedisRule(t *testing.T) {
+	p := &CompiledPolicy{
+		Egress: CompiledRuleSet{
+			AuthRules: []CompiledEgressAuthRule{{
+				Name:     "redis-auth",
+				AuthRef:  "redis-cred",
+				Protocol: v1alpha1.EgressAuthProtocolRedis,
+				Ports: []PortRange{
+					{Protocol: "tcp", Start: 6379, End: 6379},
+				},
+			}},
+		},
+	}
+
+	rule := MatchEgressAuthRule(p, "tcp", "redis", 6379, "")
+	if rule == nil || rule.AuthRef != "redis-cred" {
+		t.Fatalf("unexpected redis rule match: %+v", rule)
+	}
+}
+
 func TestCloneRuleSetCopiesAuthRules(t *testing.T) {
 	in := CompiledRuleSet{
 		AuthRules: []CompiledEgressAuthRule{

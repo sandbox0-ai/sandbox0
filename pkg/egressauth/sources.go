@@ -25,12 +25,27 @@ type CredentialSourceVersion struct {
 
 // CredentialSourceSpec is the typed source config stored in PostgreSQL.
 type CredentialSourceSpec struct {
-	StaticHeaders *StaticHeadersSourceSpec `json:"staticHeaders,omitempty"`
+	StaticHeaders              *StaticHeadersSourceSpec              `json:"staticHeaders,omitempty"`
+	StaticTLSClientCertificate *StaticTLSClientCertificateSourceSpec `json:"staticTLSClientCertificate,omitempty"`
+	StaticUsernamePassword     *StaticUsernamePasswordSourceSpec     `json:"staticUsernamePassword,omitempty"`
 }
 
 // StaticHeadersSourceSpec stores named values used by header projections.
 type StaticHeadersSourceSpec struct {
 	Values map[string]string `json:"values,omitempty"`
+}
+
+// StaticTLSClientCertificateSourceSpec stores a PEM-encoded client certificate bundle.
+type StaticTLSClientCertificateSourceSpec struct {
+	CertificatePEM string `json:"certificatePem,omitempty"`
+	PrivateKeyPEM  string `json:"privateKeyPem,omitempty"`
+	CAPEM          string `json:"caPem,omitempty"`
+}
+
+// StaticUsernamePasswordSourceSpec stores one username/password pair for early protocol auth.
+type StaticUsernamePasswordSourceSpec struct {
+	Username string `json:"username,omitempty"`
+	Password string `json:"password,omitempty"`
 }
 
 // CredentialSourceRecord is the public control-plane view of one source.

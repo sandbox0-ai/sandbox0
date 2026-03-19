@@ -78,10 +78,18 @@ spec:
                                 type: object
                               type: array
                           type: object
+                        tlsClientCertificate:
+                          description: TLSClientCertificateProjection projects one
+                            client certificate for TLS re-origination.
+                          type: object
                         type:
                           description: CredentialProjectionType identifies the runtime
                             projection shape.
                           type: string
+                        usernamePassword:
+                          description: UsernamePasswordProjection projects one username/password
+                            pair into an early auth exchange.
+                          type: object
                       required:
                       - type
                       type: object

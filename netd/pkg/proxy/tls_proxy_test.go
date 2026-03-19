@@ -3,9 +3,14 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"strings"
@@ -510,4 +515,203 @@ func TestTLSAdapterReturnsErrorWhenMITMCAIsMissing(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "authority") {
 		t.Fatalf("expected tls authority error, got %v", err)
 	}
+}
+
+func TestTLSAdapterTerminatesTLSAndPresentsClientCertificate(t *testing.T) {
+	mitmCertPEM, mitmKeyPEM, err := newSelfSignedCertificateAuthority("sandbox0-mitm", time.Hour)
+	if err != nil {
+		t.Fatalf("new mitm ca: %v", err)
+	}
+	mitmAuthority, err := newCertificateAuthority(mitmCertPEM, mitmKeyPEM, time.Hour)
+	if err != nil {
+		t.Fatalf("new mitm authority: %v", err)
+	}
+
+	upstreamCAPEM, upstreamCAKeyPEM, err := newSelfSignedCertificateAuthority("sandbox0-upstream", time.Hour)
+	if err != nil {
+		t.Fatalf("new upstream ca: %v", err)
+	}
+	upstreamAuthority, err := newCertificateAuthority(upstreamCAPEM, upstreamCAKeyPEM, time.Hour)
+	if err != nil {
+		t.Fatalf("new upstream authority: %v", err)
+	}
+	upstreamLeaf, err := upstreamAuthority.CertificateForHost("db.example.com")
+	if err != nil {
+		t.Fatalf("upstream leaf: %v", err)
+	}
+	upstreamRootPool := x509.NewCertPool()
+	if !upstreamRootPool.AppendCertsFromPEM(upstreamCAPEM) {
+		t.Fatal("append upstream ca")
+	}
+
+	clientCertPEM, clientKeyPEM, err := newSelfSignedClientCertificate("sandbox0-client", time.Hour)
+	if err != nil {
+		t.Fatalf("new client cert: %v", err)
+	}
+	clientCAPool := x509.NewCertPool()
+	if !clientCAPool.AppendCertsFromPEM(clientCertPEM) {
+		t.Fatal("append client ca")
+	}
+
+	upstreamListener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{*upstreamLeaf},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    clientCAPool,
+		MinVersion:   tls.VersionTLS12,
+	})
+	if err != nil {
+		t.Fatalf("tls listen upstream: %v", err)
+	}
+	defer upstreamListener.Close()
+
+	received := make(chan string, 1)
+	upstreamDone := make(chan error, 1)
+	go func() {
+		conn, acceptErr := upstreamListener.Accept()
+		if acceptErr != nil {
+			upstreamDone <- acceptErr
+			return
+		}
+		defer conn.Close()
+		tlsConn := conn.(*tls.Conn)
+		if err := tlsConn.Handshake(); err != nil {
+			upstreamDone <- err
+			return
+		}
+		state := tlsConn.ConnectionState()
+		if len(state.PeerCertificates) == 0 {
+			upstreamDone <- io.EOF
+			return
+		}
+		buf := make([]byte, len("hello over tls"))
+		if _, err := io.ReadFull(tlsConn, buf); err != nil {
+			upstreamDone <- err
+			return
+		}
+		received <- string(buf)
+		_, err = tlsConn.Write([]byte("secure reply"))
+		upstreamDone <- err
+	}()
+
+	proxyListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen proxy: %v", err)
+	}
+	defer proxyListener.Close()
+
+	server := &Server{
+		cfg: &config.NetdConfig{
+			ProxyUpstreamTimeout: metav1.Duration{Duration: 3 * time.Second},
+		},
+		logger:            zap.NewNop(),
+		tlsAuthority:      mitmAuthority,
+		upstreamTLSConfig: &tls.Config{RootCAs: upstreamRootPool},
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		conn, acceptErr := proxyListener.Accept()
+		if acceptErr != nil {
+			done <- acceptErr
+			return
+		}
+		defer conn.Close()
+		req := &adapterRequest{
+			Server:   server,
+			Compiled: &policy.CompiledPolicy{SandboxID: "sbx_123", TeamID: "team_123", Mode: v1alpha1.NetworkModeAllowAll},
+			SrcIP:    "10.0.0.2",
+			DestIP:   upstreamListener.Addr().(*net.TCPAddr).IP,
+			DestPort: upstreamListener.Addr().(*net.TCPAddr).Port,
+			Host:     "db.example.com",
+			Conn:     conn,
+			EgressAuth: &egressAuthContext{
+				Rule: &policy.CompiledEgressAuthRule{
+					Name:     "example-mtls",
+					AuthRef:  "example-cert",
+					Protocol: v1alpha1.EgressAuthProtocolTLS,
+					TLSMode:  v1alpha1.EgressTLSModeTerminateReoriginate,
+				},
+				Resolved: egressauth.NewTLSClientCertificateResolveResponse("example-cert", &egressauth.TLSClientCertificateDirective{
+					CertificatePEM: string(clientCertPEM),
+					PrivateKeyPEM:  string(clientKeyPEM),
+				}, nil),
+			},
+		}
+		done <- (&tlsAdapter{}).Handle(req)
+	}()
+
+	clientRootPool := x509.NewCertPool()
+	if !clientRootPool.AppendCertsFromPEM(mitmCertPEM) {
+		t.Fatal("append mitm ca")
+	}
+	rawConn, err := net.Dial("tcp4", proxyListener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer rawConn.Close()
+	clientTLS := tls.Client(rawConn, &tls.Config{
+		ServerName: "db.example.com",
+		RootCAs:    clientRootPool,
+		MinVersion: tls.VersionTLS12,
+	})
+	defer clientTLS.Close()
+
+	if _, err := io.WriteString(clientTLS, "hello over tls"); err != nil {
+		t.Fatalf("write tls payload: %v", err)
+	}
+	reply := make([]byte, len("secure reply"))
+	if _, err := io.ReadFull(clientTLS, reply); err != nil {
+		t.Fatalf("read tls reply: %v", err)
+	}
+	if got := string(reply); got != "secure reply" {
+		t.Fatalf("reply = %q", got)
+	}
+	if err := clientTLS.Close(); err != nil {
+		t.Fatalf("close client tls: %v", err)
+	}
+	if got := <-received; got != "hello over tls" {
+		t.Fatalf("upstream payload = %q", got)
+	}
+	if err := <-upstreamDone; err != nil {
+		t.Fatalf("upstream server: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("tls adapter handle: %v", err)
+	}
+}
+
+func newSelfSignedClientCertificate(commonName string, validity time.Duration) ([]byte, []byte, error) {
+	if commonName == "" {
+		commonName = "sandbox0-client"
+	}
+	if validity <= 0 {
+		validity = time.Hour
+	}
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, nil, err
+	}
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, nil, err
+	}
+	now := time.Now().UTC()
+	template := &x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			CommonName: commonName,
+		},
+		NotBefore:             now.Add(-time.Minute),
+		NotAfter:              now.Add(validity),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)})
+	return certPEM, keyPEM, nil
 }

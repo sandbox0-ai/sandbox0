@@ -184,6 +184,7 @@ func validateNetworkCredentialConfig(policy *v1alpha1.TplSandboxNetworkPolicy, b
 	}
 
 	bindingRefs := make(map[string]struct{})
+	bindingProjectionTypes := make(map[string]v1alpha1.CredentialProjectionType, len(bindings))
 	for _, binding := range bindings {
 		if binding.Ref == "" {
 			return fmt.Errorf("credential binding ref is required")
@@ -205,6 +206,7 @@ func validateNetworkCredentialConfig(policy *v1alpha1.TplSandboxNetworkPolicy, b
 			return fmt.Errorf("duplicate credential binding ref %q", binding.Ref)
 		}
 		bindingRefs[binding.Ref] = struct{}{}
+		bindingProjectionTypes[binding.Ref] = binding.Projection.Type
 	}
 	if policy.Egress == nil {
 		return nil
@@ -218,6 +220,19 @@ func validateNetworkCredentialConfig(policy *v1alpha1.TplSandboxNetworkPolicy, b
 		if len(bindingRefs) > 0 {
 			if _, ok := bindingRefs[rule.CredentialRef]; !ok {
 				return fmt.Errorf("egress rule credentialRef %q not found", rule.CredentialRef)
+			}
+		}
+		if rule.Protocol == v1alpha1.EgressAuthProtocolTLS {
+			if rule.TLSMode != v1alpha1.EgressTLSModeTerminateReoriginate {
+				return fmt.Errorf("egress rule %q with protocol tls requires tlsMode terminate-reoriginate", rule.Name)
+			}
+			if projectionType, ok := bindingProjectionTypes[rule.CredentialRef]; !ok || projectionType != v1alpha1.CredentialProjectionTypeTLSClientCertificate {
+				return fmt.Errorf("egress rule %q with protocol tls requires tls_client_certificate projection on %q", rule.Name, rule.CredentialRef)
+			}
+		}
+		if rule.Protocol == v1alpha1.EgressAuthProtocolSOCKS5 || rule.Protocol == v1alpha1.EgressAuthProtocolMQTT || rule.Protocol == v1alpha1.EgressAuthProtocolRedis {
+			if projectionType, ok := bindingProjectionTypes[rule.CredentialRef]; !ok || projectionType != v1alpha1.CredentialProjectionTypeUsernamePassword {
+				return fmt.Errorf("egress rule %q with protocol %s requires username_password projection on %q", rule.Name, rule.Protocol, rule.CredentialRef)
 			}
 		}
 		if rule.Name == "" {
@@ -244,6 +259,14 @@ func validateProjection(ref string, projection v1alpha1.ProjectionSpec) error {
 			if strings.TrimSpace(header.ValueTemplate) == "" {
 				return fmt.Errorf("credential binding projected header valueTemplate is required for %q", ref)
 			}
+		}
+	case v1alpha1.CredentialProjectionTypeTLSClientCertificate:
+		if projection.TLSClientCertificate == nil {
+			return fmt.Errorf("credential binding projection.tlsClientCertificate is required for %q", ref)
+		}
+	case v1alpha1.CredentialProjectionTypeUsernamePassword:
+		if projection.UsernamePassword == nil {
+			return fmt.Errorf("credential binding projection.usernamePassword is required for %q", ref)
 		}
 	default:
 		return fmt.Errorf("credential binding projection type %q is not supported for %q", projection.Type, ref)

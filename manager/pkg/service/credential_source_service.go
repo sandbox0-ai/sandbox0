@@ -2,7 +2,10 @@ package service
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
+	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 	"go.uber.org/zap"
@@ -63,6 +66,38 @@ func validateCredentialSourceRecord(record *egressauth.CredentialSourceRecord) e
 	case "static_headers":
 		if record.Spec.StaticHeaders == nil {
 			return fmt.Errorf("static_headers spec is required")
+		}
+	case "static_username_password":
+		if record.Spec.StaticUsernamePassword == nil {
+			return fmt.Errorf("static_username_password spec is required")
+		}
+		if strings.TrimSpace(record.Spec.StaticUsernamePassword.Username) == "" {
+			return fmt.Errorf("static_username_password username is required")
+		}
+		if strings.TrimSpace(record.Spec.StaticUsernamePassword.Password) == "" {
+			return fmt.Errorf("static_username_password password is required")
+		}
+	case "static_tls_client_certificate":
+		if record.Spec.StaticTLSClientCertificate == nil {
+			return fmt.Errorf("static_tls_client_certificate spec is required")
+		}
+		if strings.TrimSpace(record.Spec.StaticTLSClientCertificate.CertificatePEM) == "" {
+			return fmt.Errorf("static_tls_client_certificate certificatePem is required")
+		}
+		if strings.TrimSpace(record.Spec.StaticTLSClientCertificate.PrivateKeyPEM) == "" {
+			return fmt.Errorf("static_tls_client_certificate privateKeyPem is required")
+		}
+		if _, err := tls.X509KeyPair(
+			[]byte(record.Spec.StaticTLSClientCertificate.CertificatePEM),
+			[]byte(record.Spec.StaticTLSClientCertificate.PrivateKeyPEM),
+		); err != nil {
+			return fmt.Errorf("static_tls_client_certificate keypair is invalid: %w", err)
+		}
+		if caPEM := strings.TrimSpace(record.Spec.StaticTLSClientCertificate.CAPEM); caPEM != "" {
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM([]byte(caPEM)) {
+				return fmt.Errorf("static_tls_client_certificate caPem is invalid")
+			}
 		}
 	default:
 		return fmt.Errorf("credential source resolver_kind %q is not supported", record.ResolverKind)

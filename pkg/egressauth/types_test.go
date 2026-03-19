@@ -45,3 +45,46 @@ func TestResolveResponseUnmarshalHydratesCompatibilityHeaders(t *testing.T) {
 		t.Fatalf("authorization header = %q", got)
 	}
 }
+
+func TestResolveResponseMarshalPreservesTLSClientCertificateDirective(t *testing.T) {
+	payload, err := json.Marshal(NewTLSClientCertificateResolveResponse("example-cert", &TLSClientCertificateDirective{
+		CertificatePEM: "cert",
+		PrivateKeyPEM:  "key",
+		CAPEM:          "ca",
+	}, nil))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var resp ResolveResponse
+	if err := json.Unmarshal(payload, &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Directives) != 1 || resp.Directives[0].TLSClientCertificate == nil {
+		t.Fatalf("unexpected directives: %#v", resp.Directives)
+	}
+	if resp.Directives[0].TLSClientCertificate.CertificatePEM != "cert" {
+		t.Fatalf("certificate pem = %q", resp.Directives[0].TLSClientCertificate.CertificatePEM)
+	}
+}
+
+func TestResolveResponseMarshalPreservesUsernamePasswordDirective(t *testing.T) {
+	payload, err := json.Marshal(NewUsernamePasswordResolveResponse("corp-proxy", &UsernamePasswordDirective{
+		Username: "alice",
+		Password: "secret",
+	}, nil))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var resp ResolveResponse
+	if err := json.Unmarshal(payload, &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Directives) != 1 || resp.Directives[0].UsernamePassword == nil {
+		t.Fatalf("unexpected directives: %#v", resp.Directives)
+	}
+	if resp.Directives[0].UsernamePassword.Username != "alice" {
+		t.Fatalf("username = %q", resp.Directives[0].UsernamePassword.Username)
+	}
+}

@@ -4624,10 +4624,14 @@ components:
           $ref: "#/components/schemas/CredentialProjectionType"
         httpHeaders:
           $ref: "#/components/schemas/HTTPHeadersProjection"
+        tlsClientCertificate:
+          $ref: "#/components/schemas/TLSClientCertificateProjection"
+        usernamePassword:
+          $ref: "#/components/schemas/UsernamePasswordProjection"
       required: [type]
     CredentialProjectionType:
       type: string
-      enum: [http_headers]
+      enum: [http_headers, tls_client_certificate, username_password]
     HTTPHeadersProjection:
       type: object
       properties:
@@ -4635,6 +4639,12 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ProjectedHeader"
+    TLSClientCertificateProjection:
+      type: object
+      description: Client certificate projection used for TLS terminate-reoriginate auth.
+    UsernamePasswordProjection:
+      type: object
+      description: Username/password projection used for SOCKS5 and MQTT auth handshakes.
     ProjectedHeader:
       type: object
       properties:
@@ -4655,7 +4665,7 @@ components:
           type: string
         resolverKind:
           type: string
-          enum: [static_headers]
+          enum: [static_headers, static_tls_client_certificate, static_username_password]
         currentVersion:
           type: integer
           format: int64
@@ -4677,6 +4687,10 @@ components:
       properties:
         staticHeaders:
           $ref: "#/components/schemas/StaticHeadersSourceSpec"
+        staticTLSClientCertificate:
+          $ref: "#/components/schemas/StaticTLSClientCertificateSourceSpec"
+        staticUsernamePassword:
+          $ref: "#/components/schemas/StaticUsernamePasswordSourceSpec"
     StaticHeadersSourceSpec:
       type: object
       properties:
@@ -4684,9 +4698,27 @@ components:
           type: object
           additionalProperties:
             type: string
+    StaticTLSClientCertificateSourceSpec:
+      type: object
+      properties:
+        certificatePem:
+          type: string
+        privateKeyPem:
+          type: string
+        caPem:
+          type: string
+      required: [certificatePem, privateKeyPem]
+    StaticUsernamePasswordSourceSpec:
+      type: object
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+      required: [username, password]
     EgressAuthProtocol:
       type: string
-      enum: [http, https, grpc]
+      enum: [http, https, grpc, tls, socks5, mqtt, redis]
     EgressAuthRolloutMode:
       type: string
       enum: [enabled, disabled]

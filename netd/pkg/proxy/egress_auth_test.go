@@ -270,6 +270,29 @@ func TestAttachEgressAuthSkipsWhenDecisionHasNoRule(t *testing.T) {
 	}
 }
 
+func TestPrepareUsernamePasswordDirectives(t *testing.T) {
+	ctx := &egressAuthContext{
+		Rule: &policy.CompiledEgressAuthRule{
+			AuthRef: "corp-proxy",
+		},
+		Resolved: egressauth.NewUsernamePasswordResolveResponse("corp-proxy", &egressauth.UsernamePasswordDirective{
+			Username: "alice",
+			Password: "secret",
+		}, nil),
+		FailurePolicy: string(v1alpha1.EgressAuthFailurePolicyFailClosed),
+	}
+
+	if err := prepareUsernamePasswordDirectives(ctx, "socks5", true); err != nil {
+		t.Fatalf("prepare username/password directives: %v", err)
+	}
+	if ctx.ResolvedUsernamePassword == nil {
+		t.Fatal("expected resolved username/password")
+	}
+	if ctx.ResolvedUsernamePassword.Username != "alice" {
+		t.Fatalf("username = %q, want alice", ctx.ResolvedUsernamePassword.Username)
+	}
+}
+
 func TestAttachEgressAuthBypassesWhenClusterFeatureDisabled(t *testing.T) {
 	server := &Server{
 		cfg:          &config.NetdConfig{EgressAuthEnabled: false},
@@ -388,5 +411,51 @@ func TestPrepareHTTPHeaderDirectivesFailOpenBypassesUnsupportedDirective(t *test
 	}
 	if ctx.BypassReason != "unsupported_directive" {
 		t.Fatalf("bypass reason = %q", ctx.BypassReason)
+	}
+}
+
+func TestPrepareTLSClientCertificateDirectivesLoadsMaterial(t *testing.T) {
+	certPEM, keyPEM, err := newSelfSignedCertificateAuthority("sandbox0-client", time.Hour)
+	if err != nil {
+		t.Fatalf("new client cert: %v", err)
+	}
+	ctx := &egressAuthContext{
+		Rule: &policy.CompiledEgressAuthRule{Name: "example-mtls", AuthRef: "example-cert"},
+		Resolved: egressauth.NewTLSClientCertificateResolveResponse("example-cert", &egressauth.TLSClientCertificateDirective{
+			CertificatePEM: string(certPEM),
+			PrivateKeyPEM:  string(keyPEM),
+		}, nil),
+		FailurePolicy: string(v1alpha1.EgressAuthFailurePolicyFailClosed),
+	}
+
+	err = prepareTLSClientCertificateDirectives(ctx, "tls", true)
+	if err != nil {
+		t.Fatalf("prepare tls client certificate directives: %v", err)
+	}
+	if ctx.ResolvedTLSClientCertificate == nil {
+		t.Fatal("expected tls client certificate material")
+	}
+}
+
+func TestPrepareTLSClientCertificateDirectivesRejectsWhenTerminationUnavailable(t *testing.T) {
+	certPEM, keyPEM, err := newSelfSignedCertificateAuthority("sandbox0-client", time.Hour)
+	if err != nil {
+		t.Fatalf("new client cert: %v", err)
+	}
+	ctx := &egressAuthContext{
+		Rule: &policy.CompiledEgressAuthRule{Name: "example-mtls", AuthRef: "example-cert"},
+		Resolved: egressauth.NewTLSClientCertificateResolveResponse("example-cert", &egressauth.TLSClientCertificateDirective{
+			CertificatePEM: string(certPEM),
+			PrivateKeyPEM:  string(keyPEM),
+		}, nil),
+		FailurePolicy: string(v1alpha1.EgressAuthFailurePolicyFailClosed),
+	}
+
+	err = prepareTLSClientCertificateDirectives(ctx, "tls", false)
+	if !errors.Is(err, errEgressAuthDirectiveUnsupported) {
+		t.Fatalf("err = %v, want unsupported directive", err)
+	}
+	if ctx.EnforcementReason != "unsupported_directive" {
+		t.Fatalf("enforcement reason = %q", ctx.EnforcementReason)
 	}
 }

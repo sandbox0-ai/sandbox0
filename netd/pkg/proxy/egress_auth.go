@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"strings"
 	"sync"
@@ -15,15 +16,21 @@ import (
 )
 
 type egressAuthContext struct {
-	Rule              *policy.CompiledEgressAuthRule
-	Resolved          *egressauth.ResolveResponse
-	ResolvedHeaders   map[string]string
-	CacheHit          bool
-	ResolveAttempt    bool
-	ResolveError      error
-	FailurePolicy     string
-	BypassReason      string
-	EnforcementReason string
+	Rule                         *policy.CompiledEgressAuthRule
+	Resolved                     *egressauth.ResolveResponse
+	ResolvedHeaders              map[string]string
+	ResolvedTLSClientCertificate *resolvedTLSClientCertificate
+	CacheHit                     bool
+	ResolveAttempt               bool
+	ResolveError                 error
+	FailurePolicy                string
+	BypassReason                 string
+	EnforcementReason            string
+}
+
+type resolvedTLSClientCertificate struct {
+	Certificate tls.Certificate
+	RootCAs     *x509.CertPool
 }
 
 type egressAuthResolver interface {
@@ -57,6 +64,7 @@ type ServerOption func(*Server)
 var errEgressAuthResolverUnconfigured = errors.New("egress auth resolver is not configured")
 var errEgressAuthDirectiveUnsupported = errors.New("egress auth directives unsupported by adapter")
 var errEgressAuthMaterialUnavailable = errors.New("egress auth material unavailable")
+var errEgressAuthDirectiveInvalid = errors.New("egress auth directive invalid")
 
 func WithEgressAuthResolver(resolver egressAuthResolver) ServerOption {
 	return func(s *Server) {
@@ -207,16 +215,89 @@ func prepareHTTPHeaderDirectives(ctx *egressAuthContext, protocol string, allowH
 		ctx.ResolvedHeaders = headers
 		return nil
 	}
+	applyEgressAuthDirectiveError(ctx, protocol, err)
+	return err
+}
 
+func resolveTLSClientCertificateForAdapter(ctx *egressAuthContext, allowTLSClientCertificate bool) (*resolvedTLSClientCertificate, error) {
+	if ctx == nil || ctx.Resolved == nil {
+		return nil, errEgressAuthMaterialUnavailable
+	}
+	if !allowTLSClientCertificate {
+		if len(ctx.Resolved.Directives) > 0 || len(ctx.Resolved.Headers) > 0 {
+			return nil, errEgressAuthDirectiveUnsupported
+		}
+		return nil, errEgressAuthMaterialUnavailable
+	}
+	for _, directive := range ctx.Resolved.Directives {
+		switch directive.Kind {
+		case egressauth.ResolveDirectiveKindTLSClientCertificate:
+			if directive.TLSClientCertificate == nil {
+				continue
+			}
+			keyPair, err := tls.X509KeyPair(
+				[]byte(directive.TLSClientCertificate.CertificatePEM),
+				[]byte(directive.TLSClientCertificate.PrivateKeyPEM),
+			)
+			if err != nil {
+				return nil, errEgressAuthDirectiveInvalid
+			}
+			var rootCAs *x509.CertPool
+			if caPEM := strings.TrimSpace(directive.TLSClientCertificate.CAPEM); caPEM != "" {
+				rootCAs = x509.NewCertPool()
+				if !rootCAs.AppendCertsFromPEM([]byte(caPEM)) {
+					return nil, errEgressAuthDirectiveInvalid
+				}
+			}
+			return &resolvedTLSClientCertificate{
+				Certificate: keyPair,
+				RootCAs:     rootCAs,
+			}, nil
+		default:
+			return nil, errEgressAuthDirectiveUnsupported
+		}
+	}
+	if len(ctx.Resolved.Headers) > 0 {
+		return nil, errEgressAuthDirectiveUnsupported
+	}
+	return nil, errEgressAuthMaterialUnavailable
+}
+
+func prepareTLSClientCertificateDirectives(ctx *egressAuthContext, protocol string, allowTLSClientCertificate bool) error {
+	if ctx == nil || ctx.Rule == nil {
+		return nil
+	}
+	if ctx.ShouldBypass() {
+		return nil
+	}
+	if ctx.ResolveError != nil {
+		return ctx.ResolveError
+	}
+	if ctx.Resolved == nil {
+		applyEgressAuthFailurePolicy(ctx, protocol, "material_unavailable")
+		return errEgressAuthMaterialUnavailable
+	}
+
+	material, err := resolveTLSClientCertificateForAdapter(ctx, allowTLSClientCertificate)
+	if err == nil {
+		ctx.ResolvedTLSClientCertificate = material
+		return nil
+	}
+	applyEgressAuthDirectiveError(ctx, protocol, err)
+	return err
+}
+
+func applyEgressAuthDirectiveError(ctx *egressAuthContext, protocol string, err error) {
 	switch {
 	case errors.Is(err, errEgressAuthDirectiveUnsupported):
 		applyEgressAuthFailurePolicy(ctx, protocol, "unsupported_directive")
 	case errors.Is(err, errEgressAuthMaterialUnavailable):
 		applyEgressAuthFailurePolicy(ctx, protocol, "material_unavailable")
+	case errors.Is(err, errEgressAuthDirectiveInvalid):
+		applyEgressAuthFailurePolicy(ctx, protocol, "invalid_directive")
 	default:
 		applyEgressAuthFailurePolicy(ctx, protocol, "resolve_error")
 	}
-	return err
 }
 
 func (s *Server) attachEgressAuth(req *adapterRequest, decision trafficDecision) {

@@ -28,12 +28,14 @@ const (
 
 // Defines values for CredentialProjectionType.
 const (
-	HttpHeaders CredentialProjectionType = "http_headers"
+	HttpHeaders          CredentialProjectionType = "http_headers"
+	TlsClientCertificate CredentialProjectionType = "tls_client_certificate"
 )
 
 // Defines values for CredentialSourceRecordResolverKind.
 const (
-	StaticHeaders CredentialSourceRecordResolverKind = "static_headers"
+	StaticHeaders              CredentialSourceRecordResolverKind = "static_headers"
+	StaticTlsClientCertificate CredentialSourceRecordResolverKind = "static_tls_client_certificate"
 )
 
 // Defines values for EgressAuthFailurePolicy.
@@ -47,6 +49,7 @@ const (
 	Grpc  EgressAuthProtocol = "grpc"
 	Http  EgressAuthProtocol = "http"
 	Https EgressAuthProtocol = "https"
+	Tls   EgressAuthProtocol = "tls"
 )
 
 // Defines values for EgressAuthRolloutMode.
@@ -639,7 +642,8 @@ type CredentialSourceRecordResolverKind string
 
 // CredentialSourceSpec defines model for CredentialSourceSpec.
 type CredentialSourceSpec struct {
-	StaticHeaders *StaticHeadersSourceSpec `json:"staticHeaders,omitempty"`
+	StaticHeaders              *StaticHeadersSourceSpec              `json:"staticHeaders,omitempty"`
+	StaticTLSClientCertificate *StaticTLSClientCertificateSourceSpec `json:"staticTLSClientCertificate,omitempty"`
 }
 
 // EgressAuthFailurePolicy defines model for EgressAuthFailurePolicy.
@@ -964,8 +968,11 @@ type ProjectedHeader struct {
 
 // ProjectionSpec defines model for ProjectionSpec.
 type ProjectionSpec struct {
-	HttpHeaders *HTTPHeadersProjection   `json:"httpHeaders,omitempty"`
-	Type        CredentialProjectionType `json:"type"`
+	HttpHeaders *HTTPHeadersProjection `json:"httpHeaders,omitempty"`
+
+	// TlsClientCertificate Client certificate projection used for TLS terminate-reoriginate auth.
+	TlsClientCertificate *TLSClientCertificateProjection `json:"tlsClientCertificate,omitempty"`
+	Type                 CredentialProjectionType        `json:"type"`
 }
 
 // REPLConfig defines model for REPLConfig.
@@ -1290,6 +1297,13 @@ type Snapshot struct {
 // StaticHeadersSourceSpec defines model for StaticHeadersSourceSpec.
 type StaticHeadersSourceSpec struct {
 	Values *map[string]string `json:"values,omitempty"`
+}
+
+// StaticTLSClientCertificateSourceSpec defines model for StaticTLSClientCertificateSourceSpec.
+type StaticTLSClientCertificateSourceSpec struct {
+	CaPem          *string `json:"caPem,omitempty"`
+	CertificatePem string  `json:"certificatePem"`
+	PrivateKeyPem  string  `json:"privateKeyPem"`
 }
 
 // SuccessAPIKeyListResponse defines model for SuccessAPIKeyListResponse.
@@ -1806,6 +1820,9 @@ type SuccessWrittenResponse struct {
 
 // SuccessWrittenResponseSuccess defines model for SuccessWrittenResponse.Success.
 type SuccessWrittenResponseSuccess bool
+
+// TLSClientCertificateProjection Client certificate projection used for TLS terminate-reoriginate auth.
+type TLSClientCertificateProjection = map[string]interface{}
 
 // Team defines model for Team.
 type Team struct {

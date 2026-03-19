@@ -240,7 +240,7 @@ func compileEgressAuthRules(values []v1alpha1.EgressCredentialRule) ([]CompiledE
 			return nil, fmt.Errorf("unsupported auth rule rollout %q", value.Rollout)
 		}
 		switch rule.Protocol {
-		case "", v1alpha1.EgressAuthProtocolHTTP, v1alpha1.EgressAuthProtocolHTTPS, v1alpha1.EgressAuthProtocolGRPC:
+		case "", v1alpha1.EgressAuthProtocolHTTP, v1alpha1.EgressAuthProtocolHTTPS, v1alpha1.EgressAuthProtocolGRPC, v1alpha1.EgressAuthProtocolTLS:
 		default:
 			return nil, fmt.Errorf("unsupported auth rule protocol %q", value.Protocol)
 		}

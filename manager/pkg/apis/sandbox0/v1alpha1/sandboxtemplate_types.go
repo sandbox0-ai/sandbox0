@@ -262,21 +262,26 @@ type CredentialBinding struct {
 
 // ProjectionSpec defines how resolved source data should be projected into runtime directives.
 type ProjectionSpec struct {
-	Type        CredentialProjectionType `json:"type"`
-	HTTPHeaders *HTTPHeadersProjection   `json:"httpHeaders,omitempty"`
+	Type                 CredentialProjectionType        `json:"type"`
+	HTTPHeaders          *HTTPHeadersProjection          `json:"httpHeaders,omitempty"`
+	TLSClientCertificate *TLSClientCertificateProjection `json:"tlsClientCertificate,omitempty"`
 }
 
 // CredentialProjectionType identifies the runtime projection shape.
 type CredentialProjectionType string
 
 const (
-	CredentialProjectionTypeHTTPHeaders CredentialProjectionType = "http_headers"
+	CredentialProjectionTypeHTTPHeaders          CredentialProjectionType = "http_headers"
+	CredentialProjectionTypeTLSClientCertificate CredentialProjectionType = "tls_client_certificate"
 )
 
 // HTTPHeadersProjection injects HTTP headers derived from source data.
 type HTTPHeadersProjection struct {
 	Headers []ProjectedHeader `json:"headers,omitempty"`
 }
+
+// TLSClientCertificateProjection projects one client certificate for TLS re-origination.
+type TLSClientCertificateProjection struct{}
 
 // ProjectedHeader defines one projected header template.
 type ProjectedHeader struct {
@@ -296,6 +301,7 @@ const (
 	EgressAuthProtocolHTTP  EgressAuthProtocol = "http"
 	EgressAuthProtocolHTTPS EgressAuthProtocol = "https"
 	EgressAuthProtocolGRPC  EgressAuthProtocol = "grpc"
+	EgressAuthProtocolTLS   EgressAuthProtocol = "tls"
 )
 
 // EgressAuthRolloutMode defines whether a matched auth rule is active.

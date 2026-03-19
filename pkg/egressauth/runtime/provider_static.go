@@ -13,6 +13,8 @@ import (
 
 type staticHeadersProvider struct{}
 
+type staticTLSClientCertificateProvider struct{}
+
 func (p *staticHeadersProvider) Resolve(
 	_ context.Context,
 	req *egressauth.ResolveRequest,
@@ -43,6 +45,39 @@ func (p *staticHeadersProvider) Resolve(
 	return &ResolveResult{
 		Response: egressauth.NewHTTPHeadersResolveResponse(req.AuthRef, headers, &expiresAt),
 		TTL:      ttl,
+	}, nil
+}
+
+func (p *staticTLSClientCertificateProvider) Resolve(
+	_ context.Context,
+	req *egressauth.ResolveRequest,
+	binding *egressauth.CredentialBinding,
+	source *egressauth.CredentialSourceVersion,
+	defaultTTL time.Duration,
+) (*ResolveResult, error) {
+	if binding == nil || source == nil || req == nil {
+		return nil, nil
+	}
+	if source.Spec.StaticTLSClientCertificate == nil {
+		return nil, fmt.Errorf("static_tls_client_certificate source spec is required")
+	}
+	if binding.Projection.Type != egressauth.CredentialProjectionTypeTLSClientCertificate || binding.Projection.TLSClientCertificate == nil {
+		return nil, fmt.Errorf("tls_client_certificate projection is required")
+	}
+
+	spec := source.Spec.StaticTLSClientCertificate
+	ttl := defaultTTL
+	if ttlOverride, ok := parseBindingTTL(binding.CachePolicy, defaultTTL); ok {
+		ttl = ttlOverride
+	}
+	expiresAt := time.Now().UTC().Add(ttl)
+	return &ResolveResult{
+		Response: egressauth.NewTLSClientCertificateResolveResponse(req.AuthRef, &egressauth.TLSClientCertificateDirective{
+			CertificatePEM: spec.CertificatePEM,
+			PrivateKeyPEM:  spec.PrivateKeyPEM,
+			CAPEM:          spec.CAPEM,
+		}, &expiresAt),
+		TTL: ttl,
 	}, nil
 }
 

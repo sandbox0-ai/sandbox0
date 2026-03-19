@@ -23,6 +23,17 @@ func testCredentialBinding(ref string) v1alpha1.CredentialBinding {
 	}
 }
 
+func testTLSCredentialBinding(ref string) v1alpha1.CredentialBinding {
+	return v1alpha1.CredentialBinding{
+		Ref:       ref,
+		SourceRef: ref + "-source",
+		Projection: v1alpha1.ProjectionSpec{
+			Type:                 v1alpha1.CredentialProjectionTypeTLSClientCertificate,
+			TLSClientCertificate: &v1alpha1.TLSClientCertificateProjection{},
+		},
+	}
+}
+
 func TestBuildNetworkPolicyStateMergesNamedRulesAndBindings(t *testing.T) {
 	svc := NewNetworkPolicyService(zap.NewNop())
 	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
@@ -139,5 +150,68 @@ func TestBuildNetworkPolicyStateDropsInvalidBindingReferences(t *testing.T) {
 	}
 	if len(result.CredentialBindings) != 0 {
 		t.Fatalf("bindings = %#v, want invalid bindings dropped", result.CredentialBindings)
+	}
+}
+
+func TestBuildNetworkPolicyStateDropsTLSRulesWithoutTLSProjection(t *testing.T) {
+	svc := NewNetworkPolicyService(zap.NewNop())
+	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
+		SandboxID: "sb-1",
+		TeamID:    "team-1",
+		RequestSpec: &v1alpha1.TplSandboxNetworkPolicy{
+			Mode: v1alpha1.NetworkModeBlockAll,
+			Egress: &v1alpha1.NetworkEgressPolicy{
+				Rules: []v1alpha1.EgressCredentialRule{{
+					Name:          "db-mtls",
+					CredentialRef: "db-cert",
+					Protocol:      v1alpha1.EgressAuthProtocolTLS,
+					TLSMode:       v1alpha1.EgressTLSModeTerminateReoriginate,
+					Domains:       []string{"db.example.com"},
+				}},
+			},
+		},
+		RequestBindings: []v1alpha1.CredentialBinding{
+			testCredentialBinding("db-cert"),
+		},
+	})
+
+	if result == nil || result.PolicySpec == nil || result.PolicySpec.Egress == nil {
+		t.Fatalf("expected egress policy")
+	}
+	if len(result.PolicySpec.Egress.Rules) != 0 {
+		t.Fatalf("rules = %#v, want invalid tls rules dropped", result.PolicySpec.Egress.Rules)
+	}
+	if len(result.CredentialBindings) != 0 {
+		t.Fatalf("bindings = %#v, want invalid bindings dropped with tls rule", result.CredentialBindings)
+	}
+}
+
+func TestBuildNetworkPolicyStateKeepsValidTLSRules(t *testing.T) {
+	svc := NewNetworkPolicyService(zap.NewNop())
+	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
+		SandboxID: "sb-1",
+		TeamID:    "team-1",
+		RequestSpec: &v1alpha1.TplSandboxNetworkPolicy{
+			Mode: v1alpha1.NetworkModeBlockAll,
+			Egress: &v1alpha1.NetworkEgressPolicy{
+				Rules: []v1alpha1.EgressCredentialRule{{
+					Name:          "db-mtls",
+					CredentialRef: "db-cert",
+					Protocol:      v1alpha1.EgressAuthProtocolTLS,
+					TLSMode:       v1alpha1.EgressTLSModeTerminateReoriginate,
+					Domains:       []string{"db.example.com"},
+				}},
+			},
+		},
+		RequestBindings: []v1alpha1.CredentialBinding{
+			testTLSCredentialBinding("db-cert"),
+		},
+	})
+
+	if result == nil || result.PolicySpec == nil || result.PolicySpec.Egress == nil {
+		t.Fatalf("expected egress policy")
+	}
+	if len(result.PolicySpec.Egress.Rules) != 1 {
+		t.Fatalf("rule count = %d, want 1", len(result.PolicySpec.Egress.Rules))
 	}
 }

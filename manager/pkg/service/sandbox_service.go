@@ -950,6 +950,9 @@ func toStoreProjection(in v1alpha1.ProjectionSpec) egressauth.ProjectionSpec {
 			})
 		}
 	}
+	if in.TLSClientCertificate != nil {
+		out.TLSClientCertificate = &egressauth.TLSClientCertificateProjection{}
+	}
 	return out
 }
 
@@ -962,6 +965,9 @@ func cloneStoreProjection(in egressauth.ProjectionSpec) egressauth.ProjectionSpe
 			Headers: make([]egressauth.ProjectedHeader, 0, len(in.HTTPHeaders.Headers)),
 		}
 		out.HTTPHeaders.Headers = append(out.HTTPHeaders.Headers, in.HTTPHeaders.Headers...)
+	}
+	if in.TLSClientCertificate != nil {
+		out.TLSClientCertificate = &egressauth.TLSClientCertificateProjection{}
 	}
 	return out
 }
@@ -980,6 +986,9 @@ func fromStoreProjection(in egressauth.ProjectionSpec) v1alpha1.ProjectionSpec {
 				ValueTemplate: header.ValueTemplate,
 			})
 		}
+	}
+	if in.TLSClientCertificate != nil {
+		out.TLSClientCertificate = &v1alpha1.TLSClientCertificateProjection{}
 	}
 	return out
 }

@@ -2,7 +2,13 @@ package runtime
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
+	"math/big"
 	"testing"
 	"time"
 
@@ -88,6 +94,21 @@ func testStaticSourceVersion(token string) *egressauth.CredentialSourceVersion {
 		Spec: egressauth.CredentialSourceSpec{
 			StaticHeaders: &egressauth.StaticHeadersSourceSpec{
 				Values: map[string]string{"token": token},
+			},
+		},
+	}
+}
+
+func testStaticTLSClientCertificateSourceVersion(certPEM, keyPEM, caPEM string) *egressauth.CredentialSourceVersion {
+	return &egressauth.CredentialSourceVersion{
+		SourceID:     1,
+		Version:      1,
+		ResolverKind: "static_tls_client_certificate",
+		Spec: egressauth.CredentialSourceSpec{
+			StaticTLSClientCertificate: &egressauth.StaticTLSClientCertificateSourceSpec{
+				CertificatePEM: certPEM,
+				PrivateKeyPEM:  keyPEM,
+				CAPEM:          caPEM,
 			},
 		},
 	}
@@ -240,4 +261,71 @@ func TestResolveReturnsNotFoundWhenAuthRefMissing(t *testing.T) {
 	if !errors.Is(err, ErrAuthRefNotFound) {
 		t.Fatalf("err = %v, want ErrAuthRefNotFound", err)
 	}
+}
+
+func TestResolveUsesStaticTLSClientCertificateProvider(t *testing.T) {
+	certPEM, keyPEM, err := testTLSKeyPair(t)
+	if err != nil {
+		t.Fatalf("test tls keypair: %v", err)
+	}
+	store := &fakeBindingStore{
+		recordFn: func() *egressauth.BindingRecord {
+			record := testBindingRecord(time.Unix(10, 0).UTC())
+			record.Bindings[0].Projection = egressauth.ProjectionSpec{
+				Type:                 egressauth.CredentialProjectionTypeTLSClientCertificate,
+				TLSClientCertificate: &egressauth.TLSClientCertificateProjection{},
+			}
+			return record
+		},
+		sourceVersionFn: func(int64, int64) *egressauth.CredentialSourceVersion {
+			return testStaticTLSClientCertificateSourceVersion(certPEM, keyPEM, "")
+		},
+	}
+
+	service := NewService(Config{
+		ClusterID:         "cluster-a",
+		DefaultResolveTTL: time.Minute,
+	}, store, zap.NewNop())
+
+	resp, err := service.Resolve(context.Background(), &egressauth.ResolveRequest{
+		SandboxID: "sbx-1",
+		AuthRef:   "example-api",
+		Protocol:  "tls",
+	})
+	if err != nil {
+		t.Fatalf("resolve tls client certificate: %v", err)
+	}
+	if len(resp.Directives) != 1 || resp.Directives[0].Kind != egressauth.ResolveDirectiveKindTLSClientCertificate {
+		t.Fatalf("unexpected directives: %#v", resp.Directives)
+	}
+	if resp.Directives[0].TLSClientCertificate == nil || resp.Directives[0].TLSClientCertificate.CertificatePEM == "" {
+		t.Fatalf("expected tls client certificate payload, got %#v", resp.Directives[0].TLSClientCertificate)
+	}
+}
+
+func testTLSKeyPair(t *testing.T) (string, string, error) {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return "", "", err
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			CommonName: "test-client",
+		},
+		NotBefore:             time.Now().Add(-time.Minute),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		return "", "", err
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	return string(certPEM), string(keyPEM), nil
 }

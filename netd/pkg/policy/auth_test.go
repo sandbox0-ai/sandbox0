@@ -107,6 +107,35 @@ func TestMatchEgressAuthRuleSkipsDisabledRolloutRule(t *testing.T) {
 	}
 }
 
+func TestMatchEgressAuthRuleMatchesTLSRuleForTLSClassifier(t *testing.T) {
+	p := &CompiledPolicy{
+		Egress: CompiledRuleSet{
+			AuthRules: []CompiledEgressAuthRule{
+				{
+					Name:     "example-mtls",
+					AuthRef:  "example-cert",
+					Protocol: v1alpha1.EgressAuthProtocolTLS,
+					TLSMode:  v1alpha1.EgressTLSModeTerminateReoriginate,
+					Domains: []DomainRule{
+						{Pattern: "db.example.com", Type: DomainMatchExact},
+					},
+					Ports: []PortRange{
+						{Protocol: "tcp", Start: 5432, End: 5432},
+					},
+				},
+			},
+		},
+	}
+
+	rule := MatchEgressAuthRule(p, "tcp", "tls", 5432, "db.example.com")
+	if rule == nil {
+		t.Fatal("expected tls auth rule match for tls classifier")
+	}
+	if rule.AuthRef != "example-cert" {
+		t.Fatalf("unexpected auth ref %q", rule.AuthRef)
+	}
+}
+
 func TestCloneRuleSetCopiesAuthRules(t *testing.T) {
 	in := CompiledRuleSet{
 		AuthRules: []CompiledEgressAuthRule{

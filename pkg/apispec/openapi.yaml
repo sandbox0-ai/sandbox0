@@ -4624,10 +4624,12 @@ components:
           $ref: "#/components/schemas/CredentialProjectionType"
         httpHeaders:
           $ref: "#/components/schemas/HTTPHeadersProjection"
+        tlsClientCertificate:
+          $ref: "#/components/schemas/TLSClientCertificateProjection"
       required: [type]
     CredentialProjectionType:
       type: string
-      enum: [http_headers]
+      enum: [http_headers, tls_client_certificate]
     HTTPHeadersProjection:
       type: object
       properties:
@@ -4635,6 +4637,9 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ProjectedHeader"
+    TLSClientCertificateProjection:
+      type: object
+      description: Client certificate projection used for TLS terminate-reoriginate auth.
     ProjectedHeader:
       type: object
       properties:
@@ -4655,7 +4660,7 @@ components:
           type: string
         resolverKind:
           type: string
-          enum: [static_headers]
+          enum: [static_headers, static_tls_client_certificate]
         currentVersion:
           type: integer
           format: int64
@@ -4677,6 +4682,8 @@ components:
       properties:
         staticHeaders:
           $ref: "#/components/schemas/StaticHeadersSourceSpec"
+        staticTLSClientCertificate:
+          $ref: "#/components/schemas/StaticTLSClientCertificateSourceSpec"
     StaticHeadersSourceSpec:
       type: object
       properties:
@@ -4684,9 +4691,19 @@ components:
           type: object
           additionalProperties:
             type: string
+    StaticTLSClientCertificateSourceSpec:
+      type: object
+      properties:
+        certificatePem:
+          type: string
+        privateKeyPem:
+          type: string
+        caPem:
+          type: string
+      required: [certificatePem, privateKeyPem]
     EgressAuthProtocol:
       type: string
-      enum: [http, https, grpc]
+      enum: [http, https, grpc, tls]
     EgressAuthRolloutMode:
       type: string
       enum: [enabled, disabled]

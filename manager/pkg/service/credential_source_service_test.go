@@ -2,7 +2,14 @@ package service
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"testing"
+	"time"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 	"go.uber.org/zap"
@@ -67,6 +74,33 @@ func TestCredentialSourceServicePutSource(t *testing.T) {
 	}
 }
 
+func TestCredentialSourceServicePutTLSClientCertificateSource(t *testing.T) {
+	store := newMemorySourceStore()
+	svc := NewCredentialSourceService(store, zap.NewNop())
+
+	certPEM, keyPEM, err := testTLSKeyPair(t)
+	if err != nil {
+		t.Fatalf("test tls keypair: %v", err)
+	}
+
+	record, err := svc.PutSource(context.Background(), "team-1", &egressauth.CredentialSourceRecord{
+		Name:         "db-cert",
+		ResolverKind: "static_tls_client_certificate",
+		Spec: egressauth.CredentialSourceSpec{
+			StaticTLSClientCertificate: &egressauth.StaticTLSClientCertificateSourceSpec{
+				CertificatePEM: certPEM,
+				PrivateKeyPEM:  keyPEM,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("put tls client certificate source: %v", err)
+	}
+	if record.CurrentVersion != 1 {
+		t.Fatalf("current version = %d, want 1", record.CurrentVersion)
+	}
+}
+
 func cloneSourceRecord(in *egressauth.CredentialSourceRecord) *egressauth.CredentialSourceRecord {
 	if in == nil {
 		return nil
@@ -75,6 +109,13 @@ func cloneSourceRecord(in *egressauth.CredentialSourceRecord) *egressauth.Creden
 	if in.Spec.StaticHeaders != nil {
 		cloned.Spec.StaticHeaders = &egressauth.StaticHeadersSourceSpec{
 			Values: cloneSourceValues(in.Spec.StaticHeaders.Values),
+		}
+	}
+	if in.Spec.StaticTLSClientCertificate != nil {
+		cloned.Spec.StaticTLSClientCertificate = &egressauth.StaticTLSClientCertificateSourceSpec{
+			CertificatePEM: in.Spec.StaticTLSClientCertificate.CertificatePEM,
+			PrivateKeyPEM:  in.Spec.StaticTLSClientCertificate.PrivateKeyPEM,
+			CAPEM:          in.Spec.StaticTLSClientCertificate.CAPEM,
 		}
 	}
 	return &cloned
@@ -89,4 +130,31 @@ func cloneSourceValues(in map[string]string) map[string]string {
 		out[key] = value
 	}
 	return out
+}
+
+func testTLSKeyPair(t *testing.T) (string, string, error) {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return "", "", err
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			CommonName: "test-client",
+		},
+		NotBefore:             time.Now().Add(-time.Minute),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		return "", "", err
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	return string(certPEM), string(keyPEM), nil
 }

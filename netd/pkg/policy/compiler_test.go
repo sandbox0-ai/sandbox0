@@ -27,6 +27,16 @@ func TestCompileNetworkPolicy(t *testing.T) {
 						{Port: 80, Protocol: "tcp"},
 					},
 				},
+				{
+					Name:          "example-mtls",
+					CredentialRef: "example-cert",
+					Protocol:      v1alpha1.EgressAuthProtocolTLS,
+					TLSMode:       v1alpha1.EgressTLSModeTerminateReoriginate,
+					Domains:       []string{"db.example.com"},
+					Ports: []v1alpha1.PortSpec{
+						{Port: 5432, Protocol: "tcp"},
+					},
+				},
 			},
 		},
 	}
@@ -50,10 +60,10 @@ func TestCompileNetworkPolicy(t *testing.T) {
 	if len(compiled.Egress.AllowedPorts) != 1 {
 		t.Fatalf("expected allowed ports")
 	}
-	if len(compiled.Egress.AuthRules) != 1 {
+	if len(compiled.Egress.AuthRules) != 2 {
 		t.Fatalf("expected auth rules")
 	}
-	if compiled.Egress.AuthRules[0].AuthRef != "example-api" {
-		t.Fatalf("unexpected auth ref: %s", compiled.Egress.AuthRules[0].AuthRef)
+	if compiled.Egress.AuthRules[1].Protocol != v1alpha1.EgressAuthProtocolTLS {
+		t.Fatalf("unexpected second auth rule protocol: %s", compiled.Egress.AuthRules[1].Protocol)
 	}
 }

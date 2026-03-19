@@ -143,6 +143,24 @@ func (a *tlsAdapter) Handle(req *adapterRequest) error {
 	}
 	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
 	if req.EgressAuth != nil && req.EgressAuth.Rule != nil {
+		if req.EgressAuth.Rule.Protocol == v1alpha1.EgressAuthProtocolTLS {
+			if err := prepareTLSClientCertificateDirectives(req.EgressAuth, "tls", tlsTerminationRequired(req)); err != nil {
+				if req.EgressAuth.ShouldBypass() {
+					return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+				}
+				return fmt.Errorf("prepare tls client certificate directives for %q: %w", req.EgressAuth.Rule.AuthRef, err)
+			}
+			if req.EgressAuth.ShouldBypass() {
+				return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+			}
+			if req.EgressAuth.ResolveError != nil {
+				return fmt.Errorf("resolve egress auth for %q: %w", req.EgressAuth.Rule.AuthRef, req.EgressAuth.ResolveError)
+			}
+			if req.EgressAuth.ResolvedTLSClientCertificate == nil {
+				return fmt.Errorf("egress auth material missing for %q", req.EgressAuth.Rule.AuthRef)
+			}
+			return req.Server.proxyTLSStream(req)
+		}
 		if err := prepareHTTPHeaderDirectives(req.EgressAuth, "tls", tlsTerminationRequired(req)); err != nil {
 			if req.EgressAuth.ShouldBypass() {
 				return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)

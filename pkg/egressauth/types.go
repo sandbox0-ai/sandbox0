@@ -41,13 +41,21 @@ const (
 
 // ResolveDirective is a typed outbound auth directive.
 type ResolveDirective struct {
-	Kind        ResolveDirectiveKind  `json:"kind"`
-	HTTPHeaders *HTTPHeadersDirective `json:"httpHeaders,omitempty"`
+	Kind                 ResolveDirectiveKind           `json:"kind"`
+	HTTPHeaders          *HTTPHeadersDirective          `json:"httpHeaders,omitempty"`
+	TLSClientCertificate *TLSClientCertificateDirective `json:"tlsClientCertificate,omitempty"`
 }
 
 // HTTPHeadersDirective injects HTTP headers into a matching request.
 type HTTPHeadersDirective struct {
 	Headers map[string]string `json:"headers,omitempty"`
+}
+
+// TLSClientCertificateDirective configures one upstream mTLS client certificate.
+type TLSClientCertificateDirective struct {
+	CertificatePEM string `json:"certificatePem,omitempty"`
+	PrivateKeyPEM  string `json:"privateKeyPem,omitempty"`
+	CAPEM          string `json:"caPem,omitempty"`
 }
 
 type resolveResponseWire struct {
@@ -68,6 +76,29 @@ func NewHTTPHeadersResolveResponse(authRef string, headers map[string]string, ex
 			Kind: ResolveDirectiveKindHTTPHeaders,
 			HTTPHeaders: &HTTPHeadersDirective{
 				Headers: cloneStringMap(headers),
+			},
+		}}
+	}
+	if expiresAt != nil {
+		expiresCopy := *expiresAt
+		resp.ExpiresAt = &expiresCopy
+	}
+	resp.EnsureCompatibilityFields()
+	return resp
+}
+
+// NewTLSClientCertificateResolveResponse constructs a typed TLS client certificate response.
+func NewTLSClientCertificateResolveResponse(authRef string, directive *TLSClientCertificateDirective, expiresAt *time.Time) *ResolveResponse {
+	resp := &ResolveResponse{
+		AuthRef: authRef,
+	}
+	if directive != nil {
+		resp.Directives = []ResolveDirective{{
+			Kind: ResolveDirectiveKindTLSClientCertificate,
+			TLSClientCertificate: &TLSClientCertificateDirective{
+				CertificatePEM: directive.CertificatePEM,
+				PrivateKeyPEM:  directive.PrivateKeyPEM,
+				CAPEM:          directive.CAPEM,
 			},
 		}}
 	}
@@ -176,6 +207,13 @@ func cloneDirectives(in []ResolveDirective) []ResolveDirective {
 		if directive.HTTPHeaders != nil {
 			cloned.HTTPHeaders = &HTTPHeadersDirective{
 				Headers: cloneStringMap(directive.HTTPHeaders.Headers),
+			}
+		}
+		if directive.TLSClientCertificate != nil {
+			cloned.TLSClientCertificate = &TLSClientCertificateDirective{
+				CertificatePEM: directive.TLSClientCertificate.CertificatePEM,
+				PrivateKeyPEM:  directive.TLSClientCertificate.PrivateKeyPEM,
+				CAPEM:          directive.TLSClientCertificate.CAPEM,
 			}
 		}
 		out = append(out, cloned)

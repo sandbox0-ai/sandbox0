@@ -9,7 +9,6 @@ env:
   IMAGE_REPO: sandbox0ai/infra
   HELM_REPO_URL: https://charts.sandbox0.ai
   HELM_REPO_DOMAIN: charts.sandbox0.ai
-  DOCS_BUNDLE_PREFIX: sandbox0-docs
 
 permissions:
   actions: read
@@ -306,32 +305,13 @@ jobs:
           git push origin gh-pages
           popd
 
-  publish-docs:
-    name: Publish versioned docs bundle
+  publish-release-record:
+    name: Create or update GitHub Release
     runs-on: ubuntu-latest
     needs:
       - prepare-release
-      - package
       - publish-helm
     steps:
-      - name: Download docs bundle artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: docs-bundle-v${{ needs.prepare-release.outputs.version }}
-          path: .release-docs
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          repository: ${{ github.repository }}
-          run-id: ${{ needs.package.outputs.artifact_run_id }}
-
-      - name: Resolve docs bundle path
-        run: |
-          VERSION="v${{ needs.prepare-release.outputs.version }}"
-          BUNDLE_NAME="${DOCS_BUNDLE_PREFIX}-${VERSION}.tar.gz"
-          BUNDLE_PATH=".release-docs/${BUNDLE_NAME}"
-          test -f "${BUNDLE_PATH}"
-          echo "BUNDLE_NAME=${BUNDLE_NAME}" >> "$GITHUB_ENV"
-          echo "BUNDLE_PATH=${BUNDLE_PATH}" >> "$GITHUB_ENV"
-
       - name: Create or update GitHub Release with docs bundle
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -346,7 +326,7 @@ jobs:
           - Docker image: docker.io/${IMAGE_REPO}:${{ needs.prepare-release.outputs.version }}
           - Helm OCI: oci://ghcr.io/${OWNER_LOWER}/charts/infra-operator
           - Helm repo: https://sandbox0-ai.github.io/sandbox0
-          - Docs bundle: ${BUNDLE_NAME}
+          - Website/docs build and Pages deploy are handled by sandbox0-cloud
           EOF
           )
 
@@ -358,29 +338,28 @@ jobs:
             fi
 
             gh release edit "${TAG}" --title "${TAG}" --notes "${NOTES}"
-            gh release upload "${TAG}" "${BUNDLE_PATH}" --clobber
           else
-            args=("${BUNDLE_PATH}" --title "${TAG}" --notes "${NOTES}")
+            args=(--title "${TAG}" --notes "${NOTES}")
             if [[ "${{ needs.prepare-release.outputs.is_prerelease }}" == "true" ]]; then
               args+=(--prerelease)
             fi
             gh release create "${TAG}" "${args[@]}"
           fi
 
-  trigger-cloudflare-pages:
-    name: Trigger Cloudflare Pages deploy
+  trigger-cloud-website-release:
+    name: Trigger sandbox0-cloud website release
     runs-on: ubuntu-latest
     needs:
-      - publish-docs
+      - prepare-release
+      - publish-release-record
     steps:
-      - name: Trigger website build hook
+      - name: Dispatch website release to sandbox0-cloud
         env:
-          CLOUDFLARE_PAGES_BUILD_HOOK_URL: ${{ secrets.CLOUDFLARE_PAGES_BUILD_HOOK_URL }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          SANDBOX0_CLOUD_REPO_TOKEN: ${{ secrets.SANDBOX0_CLOUD_REPO_TOKEN }}
         run: |
-          if [[ -z "${CLOUDFLARE_PAGES_BUILD_HOOK_URL}" ]]; then
-            echo "CLOUDFLARE_PAGES_BUILD_HOOK_URL is not configured; skipping Cloudflare Pages deploy trigger."
-            exit 0
+          if [[ -z "${SANDBOX0_CLOUD_REPO_TOKEN}" ]]; then
+            echo "SANDBOX0_CLOUD_REPO_TOKEN is required to dispatch the sandbox0-cloud website release workflow."
+            exit 1
           fi
 
           curl \
@@ -390,7 +369,21 @@ jobs:
             --retry 5 \
             --retry-all-errors \
             --max-time 30 \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${SANDBOX0_CLOUD_REPO_TOKEN}" \
             -X POST \
-            "${CLOUDFLARE_PAGES_BUILD_HOOK_URL}"
+            "https://api.github.com/repos/sandbox0-ai/sandbox0-cloud/dispatches" \
+            -d @- <<EOF
+          {
+            "event_type": "sandbox0-release",
+            "client_payload": {
+              "sandbox0_repository": "${GITHUB_REPOSITORY}",
+              "sandbox0_ref": "${GITHUB_REF_NAME}",
+              "tag": "${GITHUB_REF_NAME}",
+              "version": "${{ needs.prepare-release.outputs.version }}",
+              "is_prerelease": "${{ needs.prepare-release.outputs.is_prerelease }}"
+            }
+          }
+          EOF
 
-          echo "Triggered Cloudflare Pages deploy after publishing docs bundle for ${RELEASE_TAG}."
+          echo "Dispatched sandbox0-cloud website release for ${GITHUB_REF_NAME}."

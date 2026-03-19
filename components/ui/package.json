@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "lint": "eslint src/",
+    "lint": "tsc -p tsconfig.json --noEmit",
     "clean": "rm -rf dist .turbo"
   },
   "peerDependencies": {

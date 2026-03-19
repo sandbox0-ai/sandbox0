@@ -10,11 +10,13 @@ bin/
 *.test
 test
 
-# document codes
-sandbox0-ui/apps/website/src/app/docs/docs-codes
-sandbox0-ui/apps/website/src/generated/docs/content.tsx
-sandbox0-ui/apps/website/src/generated/docs/navigation.ts
-sandbox0-ui/apps/website/src/generated/docs/pages/
+# Frontend dependencies and outputs
+node_modules/
+apps/*/node_modules/
+components/*/node_modules/
+apps/*/.next/
+apps/*/out/
+components/*/dist/
 
 # Output of the go coverage tool
 *.out

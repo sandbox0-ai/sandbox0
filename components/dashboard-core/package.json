@@ -32,7 +32,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/sandbox0-ai/sandbox0.git",
-    "directory": "sandbox0-ui/components/dashboard-core"
+    "directory": "components/dashboard-core"
   },
   "publishConfig": {
     "access": "public",

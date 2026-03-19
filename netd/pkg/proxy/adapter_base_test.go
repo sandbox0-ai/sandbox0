@@ -14,7 +14,7 @@ func TestAdapterCapabilities(t *testing.T) {
 		{name: "mongodb passthrough", adapter: &mongodbAdapter{}, capability: adapterCapabilityPassThrough},
 		{name: "mqtt inspect", adapter: &mqttAdapter{}, capability: adapterCapabilityInspect},
 		{name: "postgres passthrough", adapter: &postgresAdapter{}, capability: adapterCapabilityPassThrough},
-		{name: "redis passthrough", adapter: &redisAdapter{}, capability: adapterCapabilityPassThrough},
+		{name: "redis inspect", adapter: &redisAdapter{}, capability: adapterCapabilityInspect},
 		{name: "socks5 inspect", adapter: &socks5Adapter{}, capability: adapterCapabilityInspect},
 		{name: "tls terminate", adapter: &tlsAdapter{}, capability: adapterCapabilityTerminate},
 		{name: "ssh passthrough", adapter: &sshAdapter{}, capability: adapterCapabilityPassThrough},

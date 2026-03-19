@@ -246,7 +246,8 @@ func compileEgressAuthRules(values []v1alpha1.EgressCredentialRule) ([]CompiledE
 			v1alpha1.EgressAuthProtocolGRPC,
 			v1alpha1.EgressAuthProtocolTLS,
 			v1alpha1.EgressAuthProtocolSOCKS5,
-			v1alpha1.EgressAuthProtocolMQTT:
+			v1alpha1.EgressAuthProtocolMQTT,
+			v1alpha1.EgressAuthProtocolRedis:
 		default:
 			return nil, fmt.Errorf("unsupported auth rule protocol %q", value.Protocol)
 		}

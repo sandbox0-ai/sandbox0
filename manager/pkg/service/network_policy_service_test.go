@@ -286,3 +286,31 @@ func TestBuildNetworkPolicyStateKeepsValidMQTTRules(t *testing.T) {
 		t.Fatalf("rule count = %d, want 1", len(result.PolicySpec.Egress.Rules))
 	}
 }
+
+func TestBuildNetworkPolicyStateKeepsValidRedisRules(t *testing.T) {
+	svc := NewNetworkPolicyService(zap.NewNop())
+	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
+		SandboxID: "sb-1",
+		TeamID:    "team-1",
+		RequestSpec: &v1alpha1.TplSandboxNetworkPolicy{
+			Mode: v1alpha1.NetworkModeBlockAll,
+			Egress: &v1alpha1.NetworkEgressPolicy{
+				Rules: []v1alpha1.EgressCredentialRule{{
+					Name:          "redis-auth",
+					CredentialRef: "redis-cred",
+					Protocol:      v1alpha1.EgressAuthProtocolRedis,
+				}},
+			},
+		},
+		RequestBindings: []v1alpha1.CredentialBinding{
+			testUsernamePasswordCredentialBinding("redis-cred"),
+		},
+	})
+
+	if result == nil || result.PolicySpec == nil || result.PolicySpec.Egress == nil {
+		t.Fatalf("expected egress policy")
+	}
+	if len(result.PolicySpec.Egress.Rules) != 1 {
+		t.Fatalf("rule count = %d, want 1", len(result.PolicySpec.Egress.Rules))
+	}
+}

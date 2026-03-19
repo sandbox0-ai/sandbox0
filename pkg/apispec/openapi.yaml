@@ -4718,7 +4718,7 @@ components:
       required: [username, password]
     EgressAuthProtocol:
       type: string
-      enum: [http, https, grpc, tls, socks5, mqtt]
+      enum: [http, https, grpc, tls, socks5, mqtt, redis]
     EgressAuthRolloutMode:
       type: string
       enum: [enabled, disabled]

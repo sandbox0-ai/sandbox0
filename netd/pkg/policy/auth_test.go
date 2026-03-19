@@ -176,6 +176,26 @@ func TestMatchEgressAuthRuleMatchesMQTTRule(t *testing.T) {
 	}
 }
 
+func TestMatchEgressAuthRuleMatchesRedisRule(t *testing.T) {
+	p := &CompiledPolicy{
+		Egress: CompiledRuleSet{
+			AuthRules: []CompiledEgressAuthRule{{
+				Name:     "redis-auth",
+				AuthRef:  "redis-cred",
+				Protocol: v1alpha1.EgressAuthProtocolRedis,
+				Ports: []PortRange{
+					{Protocol: "tcp", Start: 6379, End: 6379},
+				},
+			}},
+		},
+	}
+
+	rule := MatchEgressAuthRule(p, "tcp", "redis", 6379, "")
+	if rule == nil || rule.AuthRef != "redis-cred" {
+		t.Fatalf("unexpected redis rule match: %+v", rule)
+	}
+}
+
 func TestCloneRuleSetCopiesAuthRules(t *testing.T) {
 	in := CompiledRuleSet{
 		AuthRules: []CompiledEgressAuthRule{

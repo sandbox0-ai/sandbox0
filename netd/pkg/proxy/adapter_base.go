@@ -349,7 +349,7 @@ func (a *redisAdapter) Name() string      { return "redis" }
 func (a *redisAdapter) Transport() string { return "tcp" }
 func (a *redisAdapter) Protocol() string  { return "redis" }
 func (a *redisAdapter) Capability() adapterCapability {
-	return adapterCapabilityPassThrough
+	return adapterCapabilityInspect
 }
 
 func (a *redisAdapter) Handle(req *adapterRequest) error {
@@ -357,6 +357,27 @@ func (a *redisAdapter) Handle(req *adapterRequest) error {
 		return fmt.Errorf("redis adapter requires connection")
 	}
 	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
+	if req.EgressAuth != nil && req.EgressAuth.Rule != nil {
+		if err := prepareUsernamePasswordDirectives(req.EgressAuth, "redis", true); err != nil {
+			if req.EgressAuth.ShouldBypass() {
+				return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+			}
+			if errors.Is(err, errEgressAuthDirectiveUnsupported) {
+				return fmt.Errorf("egress auth directives unsupported for %q", req.EgressAuth.Rule.AuthRef)
+			}
+			return fmt.Errorf("prepare username/password directives for %q: %w", req.EgressAuth.Rule.AuthRef, err)
+		}
+		if req.EgressAuth.ShouldBypass() {
+			return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+		}
+		if req.EgressAuth.ResolveError != nil {
+			return fmt.Errorf("resolve egress auth for %q: %w", req.EgressAuth.Rule.AuthRef, req.EgressAuth.ResolveError)
+		}
+		if req.EgressAuth.ResolvedUsernamePassword == nil {
+			return fmt.Errorf("egress auth material missing for %q", req.EgressAuth.Rule.AuthRef)
+		}
+		return req.Server.proxyRedisSession(req)
+	}
 	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
 }
 

@@ -309,6 +309,7 @@ const (
 	EgressAuthProtocolTLS    EgressAuthProtocol = "tls"
 	EgressAuthProtocolSOCKS5 EgressAuthProtocol = "socks5"
 	EgressAuthProtocolMQTT   EgressAuthProtocol = "mqtt"
+	EgressAuthProtocolRedis  EgressAuthProtocol = "redis"
 )
 
 // EgressAuthRolloutMode defines whether a matched auth rule is active.

@@ -254,6 +254,111 @@ func TestProxyMQTTSessionInjectsUsernamePassword(t *testing.T) {
 	}
 }
 
+func TestProxyRedisSessionInjectsUsernamePassword(t *testing.T) {
+	upstreamListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen upstream: %v", err)
+	}
+	defer upstreamListener.Close()
+
+	upstreamDone := make(chan error, 1)
+	go func() {
+		conn, err := upstreamListener.Accept()
+		if err != nil {
+			upstreamDone <- err
+			return
+		}
+		defer conn.Close()
+
+		reader := bufio.NewReader(conn)
+		authFrame, err := readRESPFrame(reader)
+		if err != nil {
+			upstreamDone <- err
+			return
+		}
+		values, err := parseRESPArrayStrings(authFrame)
+		if err != nil {
+			upstreamDone <- err
+			return
+		}
+		if len(values) != 3 || values[0] != "AUTH" || values[1] != "alice" || values[2] != "secret" {
+			upstreamDone <- io.ErrUnexpectedEOF
+			return
+		}
+		if _, err := conn.Write([]byte("+OK\r\n")); err != nil {
+			upstreamDone <- err
+			return
+		}
+
+		firstCommand, err := readRESPFrame(reader)
+		if err != nil {
+			upstreamDone <- err
+			return
+		}
+		firstValues, err := parseRESPArrayStrings(firstCommand)
+		if err != nil {
+			upstreamDone <- err
+			return
+		}
+		if len(firstValues) != 1 || firstValues[0] != "PING" {
+			upstreamDone <- io.ErrUnexpectedEOF
+			return
+		}
+		if _, err := conn.Write([]byte("+PONG\r\n")); err != nil {
+			upstreamDone <- err
+			return
+		}
+		upstreamDone <- nil
+	}()
+
+	clientConn, proxyConn := net.Pipe()
+	defer proxyConn.Close()
+
+	server := &Server{
+		cfg: &config.NetdConfig{
+			ProxyUpstreamTimeout: metav1.Duration{Duration: time.Second},
+		},
+	}
+
+	proxyDone := make(chan error, 1)
+	go func() {
+		proxyDone <- server.proxyRedisSession(&adapterRequest{
+			Server:   server,
+			Conn:     proxyConn,
+			DestIP:   net.ParseIP("127.0.0.1"),
+			DestPort: upstreamListener.Addr().(*net.TCPAddr).Port,
+			Compiled: &policy.CompiledPolicy{},
+			EgressAuth: &egressAuthContext{
+				ResolvedUsernamePassword: &resolvedUsernamePassword{
+					Username: "alice",
+					Password: "secret",
+				},
+			},
+		})
+	}()
+
+	if _, err := clientConn.Write(buildRESPArray([]string{"PING"})); err != nil {
+		t.Fatalf("write redis command: %v", err)
+	}
+	reply := make([]byte, len("+PONG\r\n"))
+	if _, err := io.ReadFull(clientConn, reply); err != nil {
+		t.Fatalf("read redis reply: %v", err)
+	}
+	if string(reply) != "+PONG\r\n" {
+		t.Fatalf("reply = %q, want +PONG\\r\\n", reply)
+	}
+	if err := clientConn.Close(); err != nil {
+		t.Fatalf("close client conn: %v", err)
+	}
+
+	if err := <-proxyDone; err != nil {
+		t.Fatalf("proxy redis session: %v", err)
+	}
+	if err := <-upstreamDone; err != nil {
+		t.Fatalf("upstream redis session: %v", err)
+	}
+}
+
 func parseSOCKS5UsernamePasswordRequest(packet []byte) (string, string, error) {
 	if len(packet) < 3 || packet[0] != socks5UserPassAuthVersion {
 		return "", "", io.ErrUnexpectedEOF

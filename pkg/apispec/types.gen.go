@@ -52,6 +52,7 @@ const (
 	Http   EgressAuthProtocol = "http"
 	Https  EgressAuthProtocol = "https"
 	Mqtt   EgressAuthProtocol = "mqtt"
+	Redis  EgressAuthProtocol = "redis"
 	Socks5 EgressAuthProtocol = "socks5"
 	Tls    EgressAuthProtocol = "tls"
 )

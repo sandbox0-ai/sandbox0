@@ -249,7 +249,6 @@ func defaultTCPClassifiers() []tcpClassifier {
 		&amqpProtocolClassifier{},
 		&dnsTCPQueryClassifier{},
 		&mqttConnectClassifier{},
-		&postgresStartupClassifier{},
 		&mongoMessageClassifier{},
 		&redisRESPClassifier{},
 		&socks5GreetingClassifier{},
@@ -679,55 +678,6 @@ func cutSSHLine(data []byte) ([]byte, bool) {
 		return data[:index], true
 	}
 	return nil, false
-}
-
-func looksLikePostgresStartup(data []byte, complete bool) tcpClassifierDecision {
-	if len(data) < 8 {
-		if complete {
-			return tcpClassifierNoMatch
-		}
-		return tcpClassifierNeedMore
-	}
-	length := binary.BigEndian.Uint32(data[:4])
-	if length < 8 || length > uint32(defaultTCPHeaderLimit) {
-		return tcpClassifierNoMatch
-	}
-	if int(length) > len(data) {
-		if complete {
-			return tcpClassifierNoMatch
-		}
-		return tcpClassifierNeedMore
-	}
-	code := binary.BigEndian.Uint32(data[4:8])
-	switch code {
-	case 80877102, 80877103, 80877104:
-		return tcpClassifierMatched
-	}
-	if code>>16 == 3 {
-		return tcpClassifierMatched
-	}
-	return tcpClassifierNoMatch
-}
-
-type postgresStartupClassifier struct{}
-
-func (c *postgresStartupClassifier) Name() string { return "postgres-startup" }
-
-func (c *postgresStartupClassifier) Classify(ctx *tcpClassifyContext) (*classificationResult, tcpClassifierDecision) {
-	if ctx == nil || ctx.Conn == nil {
-		return nil, tcpClassifierNoMatch
-	}
-	decision := looksLikePostgresStartup(ctx.Buffered(), ctx.IsComplete())
-	if decision != tcpClassifierMatched {
-		return nil, decision
-	}
-	raw := append([]byte(nil), ctx.Buffered()...)
-	return &classificationResult{
-		Classification: classifyKnownTraffic("tcp", "postgres", ctx.OrigIP, ctx.OrigPort, ""),
-		Apply: func(req *adapterRequest) {
-			req.Prefix = bytes.NewReader(raw)
-		},
-	}, tcpClassifierMatched
 }
 
 type socks5GreetingClassifier struct{}

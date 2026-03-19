@@ -239,25 +239,6 @@ func TestDefaultHTTPClassifiersFallbackToSSHBanner(t *testing.T) {
 	}
 }
 
-func TestClassifyTCPReadsFragmentedPostgresStartup(t *testing.T) {
-	packet := make([]byte, 8)
-	binary.BigEndian.PutUint32(packet[:4], 8)
-	binary.BigEndian.PutUint32(packet[4:8], 80877103)
-	ctx := &tcpClassifyContext{
-		OrigIP:      net.ParseIP("8.8.8.8"),
-		OrigPort:    5432,
-		Conn:        &scriptedConn{fragments: [][]byte{packet[:4], packet[4:]}},
-		HeaderLimit: 1024,
-	}
-	result, err := classifyTCP(defaultTCPClassifiers(), ctx)
-	if err != nil {
-		t.Fatalf("classifyTCP returned error: %v", err)
-	}
-	if result.Classification.Protocol != "postgres" {
-		t.Fatalf("protocol = %q, want postgres", result.Classification.Protocol)
-	}
-}
-
 func TestUDPSNIClassifierEngagesForPlatformDomainRules(t *testing.T) {
 	classifier := &udpSNIClassifier{}
 	result, matched := classifier.Classify(&udpClassifyContext{
@@ -276,44 +257,6 @@ func TestUDPSNIClassifierEngagesForPlatformDomainRules(t *testing.T) {
 	}
 	if result == nil || result.Classification.UnknownReason != "missing_sni" {
 		t.Fatalf("unexpected classifier result: %+v", result)
-	}
-}
-
-func TestDefaultTCPClassifiersClassifyPostgresStartup(t *testing.T) {
-	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
-
-	packet := make([]byte, 8)
-	binary.BigEndian.PutUint32(packet[:4], 8)
-	binary.BigEndian.PutUint32(packet[4:8], 80877103)
-
-	go func() {
-		_, _ = client.Write(packet)
-		_ = client.Close()
-	}()
-
-	ctx := &tcpClassifyContext{
-		OrigIP:      net.ParseIP("8.8.8.8"),
-		OrigPort:    5432,
-		Conn:        server,
-		HeaderLimit: 1024,
-	}
-	result, err := classifyTCP(defaultTCPClassifiers(), ctx)
-	if err != nil {
-		t.Fatalf("classifyTCP returned error: %v", err)
-	}
-	if result.Classification.Protocol != "postgres" {
-		t.Fatalf("protocol = %q, want postgres", result.Classification.Protocol)
-	}
-	req := &adapterRequest{}
-	result.Apply(req)
-	data, readErr := io.ReadAll(req.Prefix)
-	if readErr != nil {
-		t.Fatalf("failed to read replay prefix: %v", readErr)
-	}
-	if string(data) != string(packet) {
-		t.Fatalf("replay prefix = %v, want %v", data, packet)
 	}
 }
 

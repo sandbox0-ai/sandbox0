@@ -116,7 +116,6 @@ func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.T
 			&amqpAdapter{},
 			&dnsAdapter{},
 			&mqttAdapter{},
-			&postgresAdapter{},
 			&mongodbAdapter{},
 			&redisAdapter{},
 			&socks5Adapter{},

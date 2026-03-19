@@ -314,31 +314,3 @@ func TestBuildNetworkPolicyStateKeepsValidRedisRules(t *testing.T) {
 		t.Fatalf("rule count = %d, want 1", len(result.PolicySpec.Egress.Rules))
 	}
 }
-
-func TestBuildNetworkPolicyStateKeepsValidPostgresRules(t *testing.T) {
-	svc := NewNetworkPolicyService(zap.NewNop())
-	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
-		SandboxID: "sb-1",
-		TeamID:    "team-1",
-		RequestSpec: &v1alpha1.TplSandboxNetworkPolicy{
-			Mode: v1alpha1.NetworkModeBlockAll,
-			Egress: &v1alpha1.NetworkEgressPolicy{
-				Rules: []v1alpha1.EgressCredentialRule{{
-					Name:          "db-auth",
-					CredentialRef: "db-cred",
-					Protocol:      v1alpha1.EgressAuthProtocolPostgres,
-				}},
-			},
-		},
-		RequestBindings: []v1alpha1.CredentialBinding{
-			testUsernamePasswordCredentialBinding("db-cred"),
-		},
-	})
-
-	if result == nil || result.PolicySpec == nil || result.PolicySpec.Egress == nil {
-		t.Fatalf("expected egress policy")
-	}
-	if len(result.PolicySpec.Egress.Rules) != 1 {
-		t.Fatalf("rule count = %d, want 1", len(result.PolicySpec.Egress.Rules))
-	}
-}

@@ -230,7 +230,7 @@ func validateNetworkCredentialConfig(policy *v1alpha1.TplSandboxNetworkPolicy, b
 				return fmt.Errorf("egress rule %q with protocol tls requires tls_client_certificate projection on %q", rule.Name, rule.CredentialRef)
 			}
 		}
-		if rule.Protocol == v1alpha1.EgressAuthProtocolSOCKS5 || rule.Protocol == v1alpha1.EgressAuthProtocolMQTT || rule.Protocol == v1alpha1.EgressAuthProtocolPostgres || rule.Protocol == v1alpha1.EgressAuthProtocolRedis {
+		if rule.Protocol == v1alpha1.EgressAuthProtocolSOCKS5 || rule.Protocol == v1alpha1.EgressAuthProtocolMQTT || rule.Protocol == v1alpha1.EgressAuthProtocolRedis {
 			if projectionType, ok := bindingProjectionTypes[rule.CredentialRef]; !ok || projectionType != v1alpha1.CredentialProjectionTypeUsernamePassword {
 				return fmt.Errorf("egress rule %q with protocol %s requires username_password projection on %q", rule.Name, rule.Protocol, rule.CredentialRef)
 			}

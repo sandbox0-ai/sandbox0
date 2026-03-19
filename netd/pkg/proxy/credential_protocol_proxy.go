@@ -3,15 +3,11 @@ package proxy
 import (
 	"bufio"
 	"bytes"
-	"crypto/md5"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
 	"strconv"
 	"strings"
-
-	"github.com/jackc/pgx/v5/pgproto3"
 )
 
 const (
@@ -153,109 +149,6 @@ func (s *Server) proxyMQTTSession(req *adapterRequest) error {
 		return fmt.Errorf("write rewritten mqtt connect packet upstream: %w", err)
 	}
 	return s.pipeWithReader(req.Conn, upstream, reader, req.Compiled, req.Audit)
-}
-
-func (s *Server) proxyPostgresSession(req *adapterRequest) error {
-	if s == nil {
-		return fmt.Errorf("server is nil")
-	}
-	if req == nil || req.Conn == nil || req.DestIP == nil || req.DestPort <= 0 {
-		return fmt.Errorf("postgres proxy request is incomplete")
-	}
-	if req.EgressAuth == nil || req.EgressAuth.ResolvedUsernamePassword == nil {
-		return fmt.Errorf("postgres egress auth material is missing")
-	}
-
-	prefixBytes, err := readPrefixBytes(req.Prefix)
-	if err != nil {
-		return fmt.Errorf("read postgres startup prefix: %w", err)
-	}
-	clientConn := newPrefixedConn(req.Conn, prefixBytes)
-	clientBackend := pgproto3.NewBackend(clientConn, req.Conn)
-
-	startupMessage, err := clientBackend.ReceiveStartupMessage()
-	if err != nil {
-		return fmt.Errorf("read postgres startup message: %w", err)
-	}
-	startup, ok := startupMessage.(*pgproto3.StartupMessage)
-	if !ok {
-		applyEgressAuthFailurePolicy(req.EgressAuth, "postgres", "startup_unsupported")
-		if req.EgressAuth.ShouldBypass() {
-			return s.relayTCPConn(req.Conn, bytes.NewReader(prefixBytes), req.DestIP, req.DestPort, req.Compiled, req.Audit)
-		}
-		return fmt.Errorf("postgres startup message %T is unsupported", startupMessage)
-	}
-
-	upstream, err := s.dialUpstreamTCP(req)
-	if err != nil {
-		return err
-	}
-	defer upstream.Close()
-	upstreamFrontend := pgproto3.NewFrontend(upstream, upstream)
-
-	startupParameters := make(map[string]string, len(startup.Parameters))
-	for key, value := range startup.Parameters {
-		startupParameters[key] = value
-	}
-	startupParameters["user"] = req.EgressAuth.ResolvedUsernamePassword.Username
-	upstreamFrontend.Send(&pgproto3.StartupMessage{
-		ProtocolVersion: startup.ProtocolVersion,
-		Parameters:      startupParameters,
-	})
-	if err := upstreamFrontend.Flush(); err != nil {
-		return fmt.Errorf("write postgres startup message upstream: %w", err)
-	}
-
-	for {
-		msg, err := upstreamFrontend.Receive()
-		if err != nil {
-			return fmt.Errorf("read postgres startup response: %w", err)
-		}
-		switch typed := msg.(type) {
-		case *pgproto3.AuthenticationCleartextPassword:
-			upstreamFrontend.Send(&pgproto3.PasswordMessage{Password: req.EgressAuth.ResolvedUsernamePassword.Password})
-			if err := upstreamFrontend.Flush(); err != nil {
-				return fmt.Errorf("write postgres cleartext password upstream: %w", err)
-			}
-		case *pgproto3.AuthenticationMD5Password:
-			upstreamFrontend.Send(&pgproto3.PasswordMessage{
-				Password: postgresMD5Password(req.EgressAuth.ResolvedUsernamePassword.Password, req.EgressAuth.ResolvedUsernamePassword.Username, typed.Salt),
-			})
-			if err := upstreamFrontend.Flush(); err != nil {
-				return fmt.Errorf("write postgres md5 password upstream: %w", err)
-			}
-		case *pgproto3.AuthenticationOk,
-			*pgproto3.BackendKeyData,
-			*pgproto3.ParameterStatus,
-			*pgproto3.NoticeResponse:
-			if err := sendPostgresBackendMessage(clientBackend, msg); err != nil {
-				return err
-			}
-		case *pgproto3.ReadyForQuery:
-			if err := sendPostgresBackendMessage(clientBackend, typed); err != nil {
-				return err
-			}
-			return s.pipeWithReader(req.Conn, upstream, clientConn, req.Compiled, req.Audit)
-		case *pgproto3.ErrorResponse:
-			applyEgressAuthFailurePolicy(req.EgressAuth, "postgres", "upstream_auth_rejected")
-			if req.EgressAuth.ShouldBypass() {
-				return s.relayTCPConn(req.Conn, bytes.NewReader(prefixBytes), req.DestIP, req.DestPort, req.Compiled, req.Audit)
-			}
-			_ = sendPostgresBackendMessage(clientBackend, typed)
-			return fmt.Errorf("postgres upstream rejected injected credentials: %s", typed.Message)
-		default:
-			applyEgressAuthFailurePolicy(req.EgressAuth, "postgres", "unsupported_auth_flow")
-			if req.EgressAuth.ShouldBypass() {
-				return s.relayTCPConn(req.Conn, bytes.NewReader(prefixBytes), req.DestIP, req.DestPort, req.Compiled, req.Audit)
-			}
-			_ = sendPostgresBackendMessage(clientBackend, &pgproto3.ErrorResponse{
-				Severity: "FATAL",
-				Code:     "28000",
-				Message:  "postgres auth flow unsupported by sandbox0 egress auth",
-			})
-			return fmt.Errorf("postgres upstream auth flow %T is unsupported", typed)
-		}
-	}
 }
 
 func (s *Server) proxyRedisSession(req *adapterRequest) error {
@@ -772,25 +665,4 @@ func isRedisAUTHCommand(frame []byte) bool {
 
 func isRedisOKReply(frame []byte) bool {
 	return bytes.Equal(frame, []byte("+OK\r\n"))
-}
-
-func sendPostgresBackendMessage(backend *pgproto3.Backend, msg pgproto3.BackendMessage) error {
-	if backend == nil || msg == nil {
-		return nil
-	}
-	backend.Send(msg)
-	if err := backend.Flush(); err != nil {
-		return fmt.Errorf("write postgres backend message: %w", err)
-	}
-	return nil
-}
-
-func postgresMD5Password(password, user string, salt [4]byte) string {
-	return "md5" + hexMD5(hexMD5(password+user)+string(salt[:]))
-}
-
-func hexMD5(value string) string {
-	hash := md5.New()
-	_, _ = io.WriteString(hash, value)
-	return hex.EncodeToString(hash.Sum(nil))
 }

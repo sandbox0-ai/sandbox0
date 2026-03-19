@@ -48,14 +48,13 @@ const (
 
 // Defines values for EgressAuthProtocol.
 const (
-	Grpc     EgressAuthProtocol = "grpc"
-	Http     EgressAuthProtocol = "http"
-	Https    EgressAuthProtocol = "https"
-	Mqtt     EgressAuthProtocol = "mqtt"
-	Postgres EgressAuthProtocol = "postgres"
-	Redis    EgressAuthProtocol = "redis"
-	Socks5   EgressAuthProtocol = "socks5"
-	Tls      EgressAuthProtocol = "tls"
+	Grpc   EgressAuthProtocol = "grpc"
+	Http   EgressAuthProtocol = "http"
+	Https  EgressAuthProtocol = "https"
+	Mqtt   EgressAuthProtocol = "mqtt"
+	Redis  EgressAuthProtocol = "redis"
+	Socks5 EgressAuthProtocol = "socks5"
+	Tls    EgressAuthProtocol = "tls"
 )
 
 // Defines values for EgressAuthRolloutMode.
@@ -981,7 +980,7 @@ type ProjectionSpec struct {
 	TlsClientCertificate *TLSClientCertificateProjection `json:"tlsClientCertificate,omitempty"`
 	Type                 CredentialProjectionType        `json:"type"`
 
-	// UsernamePassword Username/password projection used for SOCKS5, MQTT, Redis, and PostgreSQL auth handshakes.
+	// UsernamePassword Username/password projection used for SOCKS5 and MQTT auth handshakes.
 	UsernamePassword *UsernamePasswordProjection `json:"usernamePassword,omitempty"`
 }
 
@@ -1960,7 +1959,7 @@ type User struct {
 	UpdatedAt     time.Time           `json:"updated_at"`
 }
 
-// UsernamePasswordProjection Username/password projection used for SOCKS5, MQTT, Redis, and PostgreSQL auth handshakes.
+// UsernamePasswordProjection Username/password projection used for SOCKS5 and MQTT auth handshakes.
 type UsernamePasswordProjection = map[string]interface{}
 
 // VolumeAccessMode Access mode for sandbox volumes. Enforcement is scoped to storage-proxy instances. RWO allows read-write mounts on a single instance; ROX allows read-only mounts across instances; RWX allows read-write mounts across instances.

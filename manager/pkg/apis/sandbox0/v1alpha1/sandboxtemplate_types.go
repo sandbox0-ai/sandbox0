@@ -303,14 +303,13 @@ type CachePolicySpec struct {
 type EgressAuthProtocol string
 
 const (
-	EgressAuthProtocolHTTP     EgressAuthProtocol = "http"
-	EgressAuthProtocolHTTPS    EgressAuthProtocol = "https"
-	EgressAuthProtocolGRPC     EgressAuthProtocol = "grpc"
-	EgressAuthProtocolTLS      EgressAuthProtocol = "tls"
-	EgressAuthProtocolSOCKS5   EgressAuthProtocol = "socks5"
-	EgressAuthProtocolMQTT     EgressAuthProtocol = "mqtt"
-	EgressAuthProtocolPostgres EgressAuthProtocol = "postgres"
-	EgressAuthProtocolRedis    EgressAuthProtocol = "redis"
+	EgressAuthProtocolHTTP   EgressAuthProtocol = "http"
+	EgressAuthProtocolHTTPS  EgressAuthProtocol = "https"
+	EgressAuthProtocolGRPC   EgressAuthProtocol = "grpc"
+	EgressAuthProtocolTLS    EgressAuthProtocol = "tls"
+	EgressAuthProtocolSOCKS5 EgressAuthProtocol = "socks5"
+	EgressAuthProtocolMQTT   EgressAuthProtocol = "mqtt"
+	EgressAuthProtocolRedis  EgressAuthProtocol = "redis"
 )
 
 // EgressAuthRolloutMode defines whether a matched auth rule is active.

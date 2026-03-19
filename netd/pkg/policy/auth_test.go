@@ -196,26 +196,6 @@ func TestMatchEgressAuthRuleMatchesRedisRule(t *testing.T) {
 	}
 }
 
-func TestMatchEgressAuthRuleMatchesPostgresRule(t *testing.T) {
-	p := &CompiledPolicy{
-		Egress: CompiledRuleSet{
-			AuthRules: []CompiledEgressAuthRule{{
-				Name:     "db-auth",
-				AuthRef:  "db-cred",
-				Protocol: v1alpha1.EgressAuthProtocolPostgres,
-				Ports: []PortRange{
-					{Protocol: "tcp", Start: 5432, End: 5432},
-				},
-			}},
-		},
-	}
-
-	rule := MatchEgressAuthRule(p, "tcp", "postgres", 5432, "")
-	if rule == nil || rule.AuthRef != "db-cred" {
-		t.Fatalf("unexpected postgres rule match: %+v", rule)
-	}
-}
-
 func TestCloneRuleSetCopiesAuthRules(t *testing.T) {
 	in := CompiledRuleSet{
 		AuthRules: []CompiledEgressAuthRule{

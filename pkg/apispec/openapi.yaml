@@ -4644,7 +4644,7 @@ components:
       description: Client certificate projection used for TLS terminate-reoriginate auth.
     UsernamePasswordProjection:
       type: object
-      description: Username/password projection used for SOCKS5, MQTT, Redis, and PostgreSQL auth handshakes.
+      description: Username/password projection used for SOCKS5 and MQTT auth handshakes.
     ProjectedHeader:
       type: object
       properties:
@@ -4718,7 +4718,7 @@ components:
       required: [username, password]
     EgressAuthProtocol:
       type: string
-      enum: [http, https, grpc, tls, socks5, mqtt, redis, postgres]
+      enum: [http, https, grpc, tls, socks5, mqtt, redis]
     EgressAuthRolloutMode:
       type: string
       enum: [enabled, disabled]

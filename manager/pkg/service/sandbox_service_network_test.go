@@ -88,7 +88,7 @@ func (s *memoryBindingStore) addStaticHeadersSource(teamID, ref string, sourceID
 		SourceID:     sourceID,
 		Version:      version,
 		ResolverKind: "static_headers",
-		Spec: egressauth.CredentialSourceSpec{
+		Spec: egressauth.CredentialSourceSecretSpec{
 			StaticHeaders: &egressauth.StaticHeadersSourceSpec{
 				Values: cloneStringMap(values),
 			},

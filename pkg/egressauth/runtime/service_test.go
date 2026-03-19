@@ -91,7 +91,7 @@ func testStaticSourceVersion(token string) *egressauth.CredentialSourceVersion {
 		SourceID:     1,
 		Version:      1,
 		ResolverKind: "static_headers",
-		Spec: egressauth.CredentialSourceSpec{
+		Spec: egressauth.CredentialSourceSecretSpec{
 			StaticHeaders: &egressauth.StaticHeadersSourceSpec{
 				Values: map[string]string{"token": token},
 			},
@@ -104,7 +104,7 @@ func testStaticTLSClientCertificateSourceVersion(certPEM, keyPEM, caPEM string) 
 		SourceID:     1,
 		Version:      1,
 		ResolverKind: "static_tls_client_certificate",
-		Spec: egressauth.CredentialSourceSpec{
+		Spec: egressauth.CredentialSourceSecretSpec{
 			StaticTLSClientCertificate: &egressauth.StaticTLSClientCertificateSourceSpec{
 				CertificatePEM: certPEM,
 				PrivateKeyPEM:  keyPEM,
@@ -119,7 +119,7 @@ func testStaticUsernamePasswordSourceVersion(username, password string) *egressa
 		SourceID:     1,
 		Version:      1,
 		ResolverKind: "static_username_password",
-		Spec: egressauth.CredentialSourceSpec{
+		Spec: egressauth.CredentialSourceSecretSpec{
 			StaticUsernamePassword: &egressauth.StaticUsernamePasswordSourceSpec{
 				Username: username,
 				Password: password,

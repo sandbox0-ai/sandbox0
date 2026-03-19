@@ -24,38 +24,38 @@ func NewCredentialSourceService(store egressauth.SourceStore, logger *zap.Logger
 	}
 }
 
-func (s *CredentialSourceService) ListSources(ctx context.Context, teamID string) ([]egressauth.CredentialSourceRecord, error) {
+func (s *CredentialSourceService) ListSources(ctx context.Context, teamID string) ([]egressauth.CredentialSourceMetadata, error) {
 	if s == nil || s.store == nil {
 		return nil, fmt.Errorf("credential source store is not configured")
 	}
-	return s.store.ListSourceRecords(ctx, teamID)
+	return s.store.ListSourceMetadata(ctx, teamID)
 }
 
-func (s *CredentialSourceService) GetSource(ctx context.Context, teamID, name string) (*egressauth.CredentialSourceRecord, error) {
+func (s *CredentialSourceService) GetSource(ctx context.Context, teamID, name string) (*egressauth.CredentialSourceMetadata, error) {
 	if s == nil || s.store == nil {
 		return nil, fmt.Errorf("credential source store is not configured")
 	}
-	return s.store.GetSourceRecord(ctx, teamID, name)
+	return s.store.GetSourceMetadata(ctx, teamID, name)
 }
 
-func (s *CredentialSourceService) PutSource(ctx context.Context, teamID string, record *egressauth.CredentialSourceRecord) (*egressauth.CredentialSourceRecord, error) {
+func (s *CredentialSourceService) PutSource(ctx context.Context, teamID string, record *egressauth.CredentialSourceWriteRequest) (*egressauth.CredentialSourceMetadata, error) {
 	if s == nil || s.store == nil {
 		return nil, fmt.Errorf("credential source store is not configured")
 	}
-	if err := validateCredentialSourceRecord(record); err != nil {
+	if err := validateCredentialSourceWriteRequest(record); err != nil {
 		return nil, err
 	}
-	return s.store.PutSourceRecord(ctx, teamID, record)
+	return s.store.PutSource(ctx, teamID, record)
 }
 
 func (s *CredentialSourceService) DeleteSource(ctx context.Context, teamID, name string) error {
 	if s == nil || s.store == nil {
 		return fmt.Errorf("credential source store is not configured")
 	}
-	return s.store.DeleteSourceRecord(ctx, teamID, name)
+	return s.store.DeleteSource(ctx, teamID, name)
 }
 
-func validateCredentialSourceRecord(record *egressauth.CredentialSourceRecord) error {
+func validateCredentialSourceWriteRequest(record *egressauth.CredentialSourceWriteRequest) error {
 	if record == nil {
 		return fmt.Errorf("credential source record is required")
 	}

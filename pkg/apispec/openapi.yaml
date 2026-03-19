@@ -2056,7 +2056,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/CredentialSourceRecord"
+              $ref: "#/components/schemas/CredentialSourceWriteRequest"
       responses:
         "201":
           description: Credential source created
@@ -2109,7 +2109,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/CredentialSourceRecord"
+              $ref: "#/components/schemas/CredentialSourceWriteRequest"
       responses:
         "200":
           description: Credential source updated
@@ -2505,7 +2505,7 @@ components:
         - type: object
           properties:
             data:
-              $ref: "#/components/schemas/CredentialSourceRecord"
+              $ref: "#/components/schemas/CredentialSourceMetadata"
     SuccessCredentialSourceListResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
@@ -2514,7 +2514,7 @@ components:
             data:
               type: array
               items:
-                $ref: "#/components/schemas/CredentialSourceRecord"
+                $ref: "#/components/schemas/CredentialSourceMetadata"
     RegistryCredentials:
       type: object
       properties:
@@ -4658,21 +4658,18 @@ components:
       properties:
         ttl:
           type: string
-    CredentialSourceRecord:
+    CredentialSourceMetadata:
       type: object
       properties:
         name:
           type: string
         resolverKind:
-          type: string
-          enum: [static_headers, static_tls_client_certificate, static_username_password]
+          $ref: "#/components/schemas/CredentialSourceResolverKind"
         currentVersion:
           type: integer
           format: int64
         status:
           type: string
-        spec:
-          $ref: "#/components/schemas/CredentialSourceSpec"
         createdAt:
           type: string
           format: date-time
@@ -4681,8 +4678,21 @@ components:
           type: string
           format: date-time
           nullable: true
+      required: [name, resolverKind]
+    CredentialSourceWriteRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        resolverKind:
+          $ref: "#/components/schemas/CredentialSourceResolverKind"
+        spec:
+          $ref: "#/components/schemas/CredentialSourceWriteSpec"
       required: [name, resolverKind, spec]
-    CredentialSourceSpec:
+    CredentialSourceResolverKind:
+      type: string
+      enum: [static_headers, static_tls_client_certificate, static_username_password]
+    CredentialSourceWriteSpec:
       type: object
       properties:
         staticHeaders:
@@ -4696,6 +4706,7 @@ components:
       properties:
         values:
           type: object
+          writeOnly: true
           additionalProperties:
             type: string
     StaticTLSClientCertificateSourceSpec:
@@ -4703,18 +4714,23 @@ components:
       properties:
         certificatePem:
           type: string
+          writeOnly: true
         privateKeyPem:
           type: string
+          writeOnly: true
         caPem:
           type: string
+          writeOnly: true
       required: [certificatePem, privateKeyPem]
     StaticUsernamePasswordSourceSpec:
       type: object
       properties:
         username:
           type: string
+          writeOnly: true
         password:
           type: string
+          writeOnly: true
       required: [username, password]
     EgressAuthProtocol:
       type: string

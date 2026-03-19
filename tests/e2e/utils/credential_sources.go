@@ -9,7 +9,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
 )
 
-func (s *Session) ListCredentialSources(ctx context.Context, t ContractT) ([]apispec.CredentialSourceRecord, error) {
+func (s *Session) ListCredentialSources(ctx context.Context, t ContractT) ([]apispec.CredentialSourceMetadata, error) {
 	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodGet, "/api/v1/credential-sources", "/api/v1/credential-sources", nil, true)
 	if err != nil {
 		return nil, err
@@ -27,7 +27,7 @@ func (s *Session) ListCredentialSources(ctx context.Context, t ContractT) ([]api
 	return *resp.Data, nil
 }
 
-func (s *Session) CreateCredentialSource(ctx context.Context, t ContractT, req apispec.CredentialSourceRecord) (*apispec.CredentialSourceRecord, error) {
+func (s *Session) CreateCredentialSource(ctx context.Context, t ContractT, req apispec.CredentialSourceWriteRequest) (*apispec.CredentialSourceMetadata, error) {
 	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodPost, "/api/v1/credential-sources", "/api/v1/credential-sources", req, true)
 	if err != nil {
 		return nil, err
@@ -45,7 +45,7 @@ func (s *Session) CreateCredentialSource(ctx context.Context, t ContractT, req a
 	return resp.Data, nil
 }
 
-func (s *Session) GetCredentialSource(ctx context.Context, t ContractT, name string) (*apispec.CredentialSourceRecord, int, *apispec.ErrorEnvelope, error) {
+func (s *Session) GetCredentialSource(ctx context.Context, t ContractT, name string) (*apispec.CredentialSourceMetadata, int, *apispec.ErrorEnvelope, error) {
 	specPath := "/api/v1/credential-sources/{name}"
 	requestPath := "/api/v1/credential-sources/" + name
 	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodGet, specPath, requestPath, nil, true)
@@ -69,7 +69,7 @@ func (s *Session) GetCredentialSource(ctx context.Context, t ContractT, name str
 	return resp.Data, status, nil, nil
 }
 
-func (s *Session) UpdateCredentialSource(ctx context.Context, t ContractT, name string, req apispec.CredentialSourceRecord) (*apispec.CredentialSourceRecord, error) {
+func (s *Session) UpdateCredentialSource(ctx context.Context, t ContractT, name string, req apispec.CredentialSourceWriteRequest) (*apispec.CredentialSourceMetadata, error) {
 	specPath := "/api/v1/credential-sources/{name}"
 	requestPath := "/api/v1/credential-sources/" + name
 	req.Name = name

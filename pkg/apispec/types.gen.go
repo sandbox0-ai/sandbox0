@@ -33,11 +33,11 @@ const (
 	UsernamePassword     CredentialProjectionType = "username_password"
 )
 
-// Defines values for CredentialSourceRecordResolverKind.
+// Defines values for CredentialSourceResolverKind.
 const (
-	StaticHeaders              CredentialSourceRecordResolverKind = "static_headers"
-	StaticTlsClientCertificate CredentialSourceRecordResolverKind = "static_tls_client_certificate"
-	StaticUsernamePassword     CredentialSourceRecordResolverKind = "static_username_password"
+	StaticHeaders              CredentialSourceResolverKind = "static_headers"
+	StaticTlsClientCertificate CredentialSourceResolverKind = "static_tls_client_certificate"
+	StaticUsernamePassword     CredentialSourceResolverKind = "static_username_password"
 )
 
 // Defines values for EgressAuthFailurePolicy.
@@ -631,22 +631,28 @@ type CredentialBinding struct {
 // CredentialProjectionType defines model for CredentialProjectionType.
 type CredentialProjectionType string
 
-// CredentialSourceRecord defines model for CredentialSourceRecord.
-type CredentialSourceRecord struct {
-	CreatedAt      *time.Time                         `json:"createdAt"`
-	CurrentVersion *int64                             `json:"currentVersion,omitempty"`
-	Name           string                             `json:"name"`
-	ResolverKind   CredentialSourceRecordResolverKind `json:"resolverKind"`
-	Spec           CredentialSourceSpec               `json:"spec"`
-	Status         *string                            `json:"status,omitempty"`
-	UpdatedAt      *time.Time                         `json:"updatedAt"`
+// CredentialSourceMetadata defines model for CredentialSourceMetadata.
+type CredentialSourceMetadata struct {
+	CreatedAt      *time.Time                   `json:"createdAt"`
+	CurrentVersion *int64                       `json:"currentVersion,omitempty"`
+	Name           string                       `json:"name"`
+	ResolverKind   CredentialSourceResolverKind `json:"resolverKind"`
+	Status         *string                      `json:"status,omitempty"`
+	UpdatedAt      *time.Time                   `json:"updatedAt"`
 }
 
-// CredentialSourceRecordResolverKind defines model for CredentialSourceRecord.ResolverKind.
-type CredentialSourceRecordResolverKind string
+// CredentialSourceResolverKind defines model for CredentialSourceResolverKind.
+type CredentialSourceResolverKind string
 
-// CredentialSourceSpec defines model for CredentialSourceSpec.
-type CredentialSourceSpec struct {
+// CredentialSourceWriteRequest defines model for CredentialSourceWriteRequest.
+type CredentialSourceWriteRequest struct {
+	Name         string                       `json:"name"`
+	ResolverKind CredentialSourceResolverKind `json:"resolverKind"`
+	Spec         CredentialSourceWriteSpec    `json:"spec"`
+}
+
+// CredentialSourceWriteSpec defines model for CredentialSourceWriteSpec.
+type CredentialSourceWriteSpec struct {
 	StaticHeaders              *StaticHeadersSourceSpec              `json:"staticHeaders,omitempty"`
 	StaticTLSClientCertificate *StaticTLSClientCertificateSourceSpec `json:"staticTLSClientCertificate,omitempty"`
 	StaticUsernamePassword     *StaticUsernamePasswordSourceSpec     `json:"staticUsernamePassword,omitempty"`
@@ -1311,14 +1317,14 @@ type StaticHeadersSourceSpec struct {
 // StaticTLSClientCertificateSourceSpec defines model for StaticTLSClientCertificateSourceSpec.
 type StaticTLSClientCertificateSourceSpec struct {
 	CaPem          *string `json:"caPem,omitempty"`
-	CertificatePem string  `json:"certificatePem"`
-	PrivateKeyPem  string  `json:"privateKeyPem"`
+	CertificatePem *string `json:"certificatePem,omitempty"`
+	PrivateKeyPem  *string `json:"privateKeyPem,omitempty"`
 }
 
 // StaticUsernamePasswordSourceSpec defines model for StaticUsernamePasswordSourceSpec.
 type StaticUsernamePasswordSourceSpec struct {
-	Password string `json:"password"`
-	Username string `json:"username"`
+	Password *string `json:"password,omitempty"`
+	Username *string `json:"username,omitempty"`
 }
 
 // SuccessAPIKeyListResponse defines model for SuccessAPIKeyListResponse.
@@ -1421,7 +1427,7 @@ type SuccessCreatedResponseSuccess bool
 
 // SuccessCredentialSourceListResponse defines model for SuccessCredentialSourceListResponse.
 type SuccessCredentialSourceListResponse struct {
-	Data    *[]CredentialSourceRecord                  `json:"data,omitempty"`
+	Data    *[]CredentialSourceMetadata                `json:"data,omitempty"`
 	Success SuccessCredentialSourceListResponseSuccess `json:"success"`
 }
 
@@ -1430,7 +1436,7 @@ type SuccessCredentialSourceListResponseSuccess bool
 
 // SuccessCredentialSourceResponse defines model for SuccessCredentialSourceResponse.
 type SuccessCredentialSourceResponse struct {
-	Data    *CredentialSourceRecord                `json:"data,omitempty"`
+	Data    *CredentialSourceMetadata              `json:"data,omitempty"`
 	Success SuccessCredentialSourceResponseSuccess `json:"success"`
 }
 
@@ -2107,10 +2113,10 @@ type GetTenantActiveParams struct {
 type PostApiKeysJSONRequestBody = CreateAPIKeyRequest
 
 // PostApiV1CredentialSourcesJSONRequestBody defines body for PostApiV1CredentialSources for application/json ContentType.
-type PostApiV1CredentialSourcesJSONRequestBody = CredentialSourceRecord
+type PostApiV1CredentialSourcesJSONRequestBody = CredentialSourceWriteRequest
 
 // PutApiV1CredentialSourcesNameJSONRequestBody defines body for PutApiV1CredentialSourcesName for application/json ContentType.
-type PutApiV1CredentialSourcesNameJSONRequestBody = CredentialSourceRecord
+type PutApiV1CredentialSourcesNameJSONRequestBody = CredentialSourceWriteRequest
 
 // PostApiV1SandboxesJSONRequestBody defines body for PostApiV1Sandboxes for application/json ContentType.
 type PostApiV1SandboxesJSONRequestBody = ClaimRequest

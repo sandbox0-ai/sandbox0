@@ -50,7 +50,7 @@ func (s *Server) getCredentialSource(c *gin.Context) {
 }
 
 func (s *Server) createCredentialSource(c *gin.Context) {
-	var req egressauth.CredentialSourceRecord
+	var req egressauth.CredentialSourceWriteRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("invalid request: %v", err))
 		return
@@ -72,7 +72,7 @@ func (s *Server) createCredentialSource(c *gin.Context) {
 }
 
 func (s *Server) updateCredentialSource(c *gin.Context) {
-	var req egressauth.CredentialSourceRecord
+	var req egressauth.CredentialSourceWriteRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("invalid request: %v", err))
 		return

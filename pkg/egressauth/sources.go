@@ -16,15 +16,15 @@ type CredentialSource struct {
 
 // CredentialSourceVersion stores one versioned resolver config.
 type CredentialSourceVersion struct {
-	SourceID     int64                `json:"sourceId"`
-	Version      int64                `json:"version"`
-	ResolverKind string               `json:"resolverKind"`
-	Spec         CredentialSourceSpec `json:"spec"`
-	CreatedAt    time.Time            `json:"createdAt,omitempty"`
+	SourceID     int64                      `json:"sourceId"`
+	Version      int64                      `json:"version"`
+	ResolverKind string                     `json:"resolverKind"`
+	Spec         CredentialSourceSecretSpec `json:"spec"`
+	CreatedAt    time.Time                  `json:"createdAt,omitempty"`
 }
 
-// CredentialSourceSpec is the typed source config stored in PostgreSQL.
-type CredentialSourceSpec struct {
+// CredentialSourceSecretSpec is the typed source config stored in PostgreSQL.
+type CredentialSourceSecretSpec struct {
 	StaticHeaders              *StaticHeadersSourceSpec              `json:"staticHeaders,omitempty"`
 	StaticTLSClientCertificate *StaticTLSClientCertificateSourceSpec `json:"staticTLSClientCertificate,omitempty"`
 	StaticUsernamePassword     *StaticUsernamePasswordSourceSpec     `json:"staticUsernamePassword,omitempty"`
@@ -48,13 +48,19 @@ type StaticUsernamePasswordSourceSpec struct {
 	Password string `json:"password,omitempty"`
 }
 
-// CredentialSourceRecord is the public control-plane view of one source.
-type CredentialSourceRecord struct {
-	Name           string               `json:"name"`
-	ResolverKind   string               `json:"resolverKind"`
-	CurrentVersion int64                `json:"currentVersion"`
-	Status         string               `json:"status"`
-	Spec           CredentialSourceSpec `json:"spec"`
-	CreatedAt      time.Time            `json:"createdAt,omitempty"`
-	UpdatedAt      time.Time            `json:"updatedAt,omitempty"`
+// CredentialSourceWriteRequest is the secret-bearing public write model.
+type CredentialSourceWriteRequest struct {
+	Name         string                     `json:"name"`
+	ResolverKind string                     `json:"resolverKind"`
+	Spec         CredentialSourceSecretSpec `json:"spec"`
+}
+
+// CredentialSourceMetadata is the public metadata view of one source.
+type CredentialSourceMetadata struct {
+	Name           string    `json:"name"`
+	ResolverKind   string    `json:"resolverKind"`
+	CurrentVersion int64     `json:"currentVersion"`
+	Status         string    `json:"status"`
+	CreatedAt      time.Time `json:"createdAt,omitempty"`
+	UpdatedAt      time.Time `json:"updatedAt,omitempty"`
 }

@@ -30,10 +30,10 @@ type BindingStore interface {
 
 // SourceStore owns control-plane CRUD for credential sources.
 type SourceStore interface {
-	ListSourceRecords(ctx context.Context, teamID string) ([]CredentialSourceRecord, error)
-	GetSourceRecord(ctx context.Context, teamID, name string) (*CredentialSourceRecord, error)
-	PutSourceRecord(ctx context.Context, teamID string, record *CredentialSourceRecord) (*CredentialSourceRecord, error)
-	DeleteSourceRecord(ctx context.Context, teamID, name string) error
+	ListSourceMetadata(ctx context.Context, teamID string) ([]CredentialSourceMetadata, error)
+	GetSourceMetadata(ctx context.Context, teamID, name string) (*CredentialSourceMetadata, error)
+	PutSource(ctx context.Context, teamID string, record *CredentialSourceWriteRequest) (*CredentialSourceMetadata, error)
+	DeleteSource(ctx context.Context, teamID, name string) error
 }
 
 // Repository persists effective credential bindings in PostgreSQL.
@@ -274,7 +274,7 @@ func (r *Repository) GetSourceVersion(ctx context.Context, sourceID, version int
 	return &source, nil
 }
 
-func (r *Repository) ListSourceRecords(ctx context.Context, teamID string) ([]CredentialSourceRecord, error) {
+func (r *Repository) ListSourceMetadata(ctx context.Context, teamID string) ([]CredentialSourceMetadata, error) {
 	if r == nil || r.db == nil {
 		return nil, fmt.Errorf("binding repository is not configured")
 	}
@@ -295,9 +295,9 @@ func (r *Repository) ListSourceRecords(ctx context.Context, teamID string) ([]Cr
 	}
 	defer rows.Close()
 
-	var out []CredentialSourceRecord
+	var out []CredentialSourceMetadata
 	for rows.Next() {
-		record, err := r.scanSourceRecord(rows)
+		record, err := r.scanSourceMetadata(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -309,7 +309,7 @@ func (r *Repository) ListSourceRecords(ctx context.Context, teamID string) ([]Cr
 	return out, nil
 }
 
-func (r *Repository) GetSourceRecord(ctx context.Context, teamID, name string) (*CredentialSourceRecord, error) {
+func (r *Repository) GetSourceMetadata(ctx context.Context, teamID, name string) (*CredentialSourceMetadata, error) {
 	if r == nil || r.db == nil {
 		return nil, fmt.Errorf("binding repository is not configured")
 	}
@@ -321,7 +321,7 @@ func (r *Repository) GetSourceRecord(ctx context.Context, teamID, name string) (
 	}
 
 	var (
-		record   CredentialSourceRecord
+		record   CredentialSourceMetadata
 		specJSON []byte
 	)
 	err := r.db.QueryRow(ctx, `
@@ -345,15 +345,10 @@ func (r *Repository) GetSourceRecord(ctx context.Context, teamID, name string) (
 	if err != nil {
 		return nil, fmt.Errorf("get source record: %w", err)
 	}
-	if len(specJSON) > 0 {
-		if err := json.Unmarshal(specJSON, &record.Spec); err != nil {
-			return nil, fmt.Errorf("unmarshal source record spec: %w", err)
-		}
-	}
 	return &record, nil
 }
 
-func (r *Repository) PutSourceRecord(ctx context.Context, teamID string, record *CredentialSourceRecord) (*CredentialSourceRecord, error) {
+func (r *Repository) PutSource(ctx context.Context, teamID string, record *CredentialSourceWriteRequest) (*CredentialSourceMetadata, error) {
 	if r == nil || r.pool == nil {
 		return nil, fmt.Errorf("binding repository pool is not configured")
 	}
@@ -402,7 +397,7 @@ func (r *Repository) PutSourceRecord(ctx context.Context, teamID string, record 
 			    current_version = $4,
 			    status = $5
 			WHERE team_id = $1 AND name = $2
-		`, teamID, record.Name, record.ResolverKind, currentVersion, normalizeSourceStatus(record.Status)); err != nil {
+			`, teamID, record.Name, record.ResolverKind, currentVersion, normalizeSourceStatus("")); err != nil {
 			return nil, fmt.Errorf("update source record: %w", err)
 		}
 	case pgx.ErrNoRows:
@@ -411,7 +406,7 @@ func (r *Repository) PutSourceRecord(ctx context.Context, teamID string, record 
 			INSERT INTO credential_sources (team_id, name, resolver_kind, current_version, status)
 			VALUES ($1, $2, $3, $4, $5)
 			RETURNING id
-		`, teamID, record.Name, record.ResolverKind, currentVersion, normalizeSourceStatus(record.Status)).Scan(&sourceID)
+		`, teamID, record.Name, record.ResolverKind, currentVersion, normalizeSourceStatus("")).Scan(&sourceID)
 		if err != nil {
 			return nil, fmt.Errorf("insert source record: %w", err)
 		}
@@ -429,10 +424,10 @@ func (r *Repository) PutSourceRecord(ctx context.Context, teamID string, record 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit source upsert: %w", err)
 	}
-	return r.GetSourceRecord(ctx, teamID, record.Name)
+	return r.GetSourceMetadata(ctx, teamID, record.Name)
 }
 
-func (r *Repository) DeleteSourceRecord(ctx context.Context, teamID, name string) error {
+func (r *Repository) DeleteSource(ctx context.Context, teamID, name string) error {
 	if r == nil || r.db == nil {
 		return fmt.Errorf("binding repository is not configured")
 	}
@@ -456,9 +451,9 @@ func (r *Repository) DeleteSourceRecord(ctx context.Context, teamID, name string
 	return nil
 }
 
-func (r *Repository) scanSourceRecord(rows pgx.Rows) (*CredentialSourceRecord, error) {
+func (r *Repository) scanSourceMetadata(rows pgx.Rows) (*CredentialSourceMetadata, error) {
 	var (
-		record   CredentialSourceRecord
+		record   CredentialSourceMetadata
 		specJSON []byte
 	)
 	if err := rows.Scan(
@@ -471,11 +466,6 @@ func (r *Repository) scanSourceRecord(rows pgx.Rows) (*CredentialSourceRecord, e
 		&record.UpdatedAt,
 	); err != nil {
 		return nil, fmt.Errorf("scan source record: %w", err)
-	}
-	if len(specJSON) > 0 {
-		if err := json.Unmarshal(specJSON, &record.Spec); err != nil {
-			return nil, fmt.Errorf("unmarshal source record spec: %w", err)
-		}
 	}
 	return &record, nil
 }

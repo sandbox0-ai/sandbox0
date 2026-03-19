@@ -7,6 +7,7 @@ export type PixelHeadingTone = "site" | "docs";
 export type PixelHeadingAs = "h1" | "h2" | "h3" | "h4" | "h5" | "h6";
 
 export interface PixelHeadingProps extends React.HTMLAttributes<HTMLHeadingElement> {
+  children?: React.ReactNode;
   /**
    * Which semantic heading tag to render.
    * Defaults to `h2`.
@@ -63,4 +64,3 @@ export function PixelHeading({
     </Tag>
   );
 }
-

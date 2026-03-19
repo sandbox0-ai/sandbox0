@@ -199,6 +199,44 @@ func (a *sshAdapter) Handle(req *adapterRequest) error {
 	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
 }
 
+type postgresAdapter struct{}
+
+func (a *postgresAdapter) Name() string      { return "postgres" }
+func (a *postgresAdapter) Transport() string { return "tcp" }
+func (a *postgresAdapter) Protocol() string  { return "postgres" }
+func (a *postgresAdapter) Capability() adapterCapability {
+	return adapterCapabilityInspect
+}
+
+func (a *postgresAdapter) Handle(req *adapterRequest) error {
+	if req == nil || req.Server == nil || req.Conn == nil {
+		return fmt.Errorf("postgres adapter requires connection")
+	}
+	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
+	if req.EgressAuth != nil && req.EgressAuth.Rule != nil {
+		if err := prepareUsernamePasswordDirectives(req.EgressAuth, "postgres", true); err != nil {
+			if req.EgressAuth.ShouldBypass() {
+				return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+			}
+			if errors.Is(err, errEgressAuthDirectiveUnsupported) {
+				return fmt.Errorf("egress auth directives unsupported for %q", req.EgressAuth.Rule.AuthRef)
+			}
+			return fmt.Errorf("prepare username/password directives for %q: %w", req.EgressAuth.Rule.AuthRef, err)
+		}
+		if req.EgressAuth.ShouldBypass() {
+			return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+		}
+		if req.EgressAuth.ResolveError != nil {
+			return fmt.Errorf("resolve egress auth for %q: %w", req.EgressAuth.Rule.AuthRef, req.EgressAuth.ResolveError)
+		}
+		if req.EgressAuth.ResolvedUsernamePassword == nil {
+			return fmt.Errorf("egress auth material missing for %q", req.EgressAuth.Rule.AuthRef)
+		}
+		return req.Server.proxyPostgresSession(req)
+	}
+	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+}
+
 type socks5Adapter struct{}
 
 func (a *socks5Adapter) Name() string      { return "socks5" }

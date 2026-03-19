@@ -52,6 +52,14 @@ func TestCompileNetworkPolicy(t *testing.T) {
 					Domains:       []string{"broker.example.com"},
 				},
 				{
+					Name:          "db-auth",
+					CredentialRef: "db-cred",
+					Protocol:      v1alpha1.EgressAuthProtocolPostgres,
+					Ports: []v1alpha1.PortSpec{
+						{Port: 5432, Protocol: "tcp"},
+					},
+				},
+				{
 					Name:          "redis-auth",
 					CredentialRef: "redis-cred",
 					Protocol:      v1alpha1.EgressAuthProtocolRedis,
@@ -82,7 +90,7 @@ func TestCompileNetworkPolicy(t *testing.T) {
 	if len(compiled.Egress.AllowedPorts) != 1 {
 		t.Fatalf("expected allowed ports")
 	}
-	if len(compiled.Egress.AuthRules) != 5 {
+	if len(compiled.Egress.AuthRules) != 6 {
 		t.Fatalf("expected auth rules")
 	}
 	if compiled.Egress.AuthRules[2].Protocol != v1alpha1.EgressAuthProtocolSOCKS5 {
@@ -91,7 +99,10 @@ func TestCompileNetworkPolicy(t *testing.T) {
 	if compiled.Egress.AuthRules[3].Protocol != v1alpha1.EgressAuthProtocolMQTT {
 		t.Fatalf("unexpected fourth auth rule protocol: %s", compiled.Egress.AuthRules[3].Protocol)
 	}
-	if compiled.Egress.AuthRules[4].Protocol != v1alpha1.EgressAuthProtocolRedis {
+	if compiled.Egress.AuthRules[4].Protocol != v1alpha1.EgressAuthProtocolPostgres {
 		t.Fatalf("unexpected fifth auth rule protocol: %s", compiled.Egress.AuthRules[4].Protocol)
+	}
+	if compiled.Egress.AuthRules[5].Protocol != v1alpha1.EgressAuthProtocolRedis {
+		t.Fatalf("unexpected sixth auth rule protocol: %s", compiled.Egress.AuthRules[5].Protocol)
 	}
 }

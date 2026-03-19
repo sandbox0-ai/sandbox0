@@ -203,6 +203,8 @@ func matchEgressAuthProtocol(ruleProtocol v1alpha1.EgressAuthProtocol, transport
 		return transport == "tcp" && classifiedProtocol == "socks5"
 	case v1alpha1.EgressAuthProtocolMQTT:
 		return transport == "tcp" && classifiedProtocol == "mqtt"
+	case v1alpha1.EgressAuthProtocolPostgres:
+		return transport == "tcp" && classifiedProtocol == "postgres"
 	case v1alpha1.EgressAuthProtocolRedis:
 		return transport == "tcp" && classifiedProtocol == "redis"
 	default:

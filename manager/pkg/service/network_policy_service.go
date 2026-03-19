@@ -230,6 +230,11 @@ func validateNetworkCredentialConfig(policy *v1alpha1.TplSandboxNetworkPolicy, b
 				return fmt.Errorf("egress rule %q with protocol tls requires tls_client_certificate projection on %q", rule.Name, rule.CredentialRef)
 			}
 		}
+		if rule.Protocol == v1alpha1.EgressAuthProtocolSOCKS5 || rule.Protocol == v1alpha1.EgressAuthProtocolMQTT {
+			if projectionType, ok := bindingProjectionTypes[rule.CredentialRef]; !ok || projectionType != v1alpha1.CredentialProjectionTypeUsernamePassword {
+				return fmt.Errorf("egress rule %q with protocol %s requires username_password projection on %q", rule.Name, rule.Protocol, rule.CredentialRef)
+			}
+		}
 		if rule.Name == "" {
 			continue
 		}
@@ -258,6 +263,10 @@ func validateProjection(ref string, projection v1alpha1.ProjectionSpec) error {
 	case v1alpha1.CredentialProjectionTypeTLSClientCertificate:
 		if projection.TLSClientCertificate == nil {
 			return fmt.Errorf("credential binding projection.tlsClientCertificate is required for %q", ref)
+		}
+	case v1alpha1.CredentialProjectionTypeUsernamePassword:
+		if projection.UsernamePassword == nil {
+			return fmt.Errorf("credential binding projection.usernamePassword is required for %q", ref)
 		}
 	default:
 		return fmt.Errorf("credential binding projection type %q is not supported for %q", projection.Type, ref)

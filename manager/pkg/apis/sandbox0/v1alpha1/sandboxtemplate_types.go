@@ -265,6 +265,7 @@ type ProjectionSpec struct {
 	Type                 CredentialProjectionType        `json:"type"`
 	HTTPHeaders          *HTTPHeadersProjection          `json:"httpHeaders,omitempty"`
 	TLSClientCertificate *TLSClientCertificateProjection `json:"tlsClientCertificate,omitempty"`
+	UsernamePassword     *UsernamePasswordProjection     `json:"usernamePassword,omitempty"`
 }
 
 // CredentialProjectionType identifies the runtime projection shape.
@@ -273,6 +274,7 @@ type CredentialProjectionType string
 const (
 	CredentialProjectionTypeHTTPHeaders          CredentialProjectionType = "http_headers"
 	CredentialProjectionTypeTLSClientCertificate CredentialProjectionType = "tls_client_certificate"
+	CredentialProjectionTypeUsernamePassword     CredentialProjectionType = "username_password"
 )
 
 // HTTPHeadersProjection injects HTTP headers derived from source data.
@@ -282,6 +284,9 @@ type HTTPHeadersProjection struct {
 
 // TLSClientCertificateProjection projects one client certificate for TLS re-origination.
 type TLSClientCertificateProjection struct{}
+
+// UsernamePasswordProjection projects one username/password pair into an early auth exchange.
+type UsernamePasswordProjection struct{}
 
 // ProjectedHeader defines one projected header template.
 type ProjectedHeader struct {
@@ -298,10 +303,12 @@ type CachePolicySpec struct {
 type EgressAuthProtocol string
 
 const (
-	EgressAuthProtocolHTTP  EgressAuthProtocol = "http"
-	EgressAuthProtocolHTTPS EgressAuthProtocol = "https"
-	EgressAuthProtocolGRPC  EgressAuthProtocol = "grpc"
-	EgressAuthProtocolTLS   EgressAuthProtocol = "tls"
+	EgressAuthProtocolHTTP   EgressAuthProtocol = "http"
+	EgressAuthProtocolHTTPS  EgressAuthProtocol = "https"
+	EgressAuthProtocolGRPC   EgressAuthProtocol = "grpc"
+	EgressAuthProtocolTLS    EgressAuthProtocol = "tls"
+	EgressAuthProtocolSOCKS5 EgressAuthProtocol = "socks5"
+	EgressAuthProtocolMQTT   EgressAuthProtocol = "mqtt"
 )
 
 // EgressAuthRolloutMode defines whether a matched auth rule is active.

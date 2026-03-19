@@ -114,6 +114,20 @@ func testStaticTLSClientCertificateSourceVersion(certPEM, keyPEM, caPEM string) 
 	}
 }
 
+func testStaticUsernamePasswordSourceVersion(username, password string) *egressauth.CredentialSourceVersion {
+	return &egressauth.CredentialSourceVersion{
+		SourceID:     1,
+		Version:      1,
+		ResolverKind: "static_username_password",
+		Spec: egressauth.CredentialSourceSpec{
+			StaticUsernamePassword: &egressauth.StaticUsernamePasswordSourceSpec{
+				Username: username,
+				Password: password,
+			},
+		},
+	}
+}
+
 func testBindingRecord(updatedAt time.Time) *egressauth.BindingRecord {
 	return &egressauth.BindingRecord{
 		ClusterID: "cluster-a",
@@ -126,6 +140,24 @@ func testBindingRecord(updatedAt time.Time) *egressauth.BindingRecord {
 			SourceVersion: 1,
 			Projection: egressauth.ProjectionSpec{
 				Type: egressauth.CredentialProjectionTypeHTTPHeaders,
+			},
+		}},
+	}
+}
+
+func testUsernamePasswordBindingRecord(updatedAt time.Time) *egressauth.BindingRecord {
+	return &egressauth.BindingRecord{
+		ClusterID: "cluster-a",
+		SandboxID: "sbx-1",
+		UpdatedAt: updatedAt,
+		Bindings: []egressauth.CredentialBinding{{
+			Ref:           "corp-proxy",
+			SourceRef:     "corp-proxy-source",
+			SourceID:      1,
+			SourceVersion: 1,
+			Projection: egressauth.ProjectionSpec{
+				Type:             egressauth.CredentialProjectionTypeUsernamePassword,
+				UsernamePassword: &egressauth.UsernamePasswordProjection{},
 			},
 		}},
 	}
@@ -260,6 +292,33 @@ func TestResolveReturnsNotFoundWhenAuthRefMissing(t *testing.T) {
 	_, err := service.Resolve(context.Background(), &egressauth.ResolveRequest{AuthRef: "missing"})
 	if !errors.Is(err, ErrAuthRefNotFound) {
 		t.Fatalf("err = %v, want ErrAuthRefNotFound", err)
+	}
+}
+
+func TestResolveReturnsUsernamePasswordDirective(t *testing.T) {
+	store := &fakeBindingStore{
+		recordFn: func() *egressauth.BindingRecord {
+			return testUsernamePasswordBindingRecord(time.Unix(10, 0).UTC())
+		},
+		sourceVersionFn: func(int64, int64) *egressauth.CredentialSourceVersion {
+			return testStaticUsernamePasswordSourceVersion("alice", "secret")
+		},
+	}
+
+	service := NewService(Config{
+		ClusterID:         "cluster-a",
+		DefaultResolveTTL: time.Minute,
+	}, store, zap.NewNop())
+
+	resp, err := service.Resolve(context.Background(), &egressauth.ResolveRequest{SandboxID: "sbx-1", AuthRef: "corp-proxy", Protocol: "socks5"})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if len(resp.Directives) != 1 || resp.Directives[0].UsernamePassword == nil {
+		t.Fatalf("unexpected directives: %#v", resp.Directives)
+	}
+	if resp.Directives[0].UsernamePassword.Username != "alice" {
+		t.Fatalf("username = %q, want alice", resp.Directives[0].UsernamePassword.Username)
 	}
 }
 

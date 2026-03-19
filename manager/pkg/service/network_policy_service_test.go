@@ -34,6 +34,17 @@ func testTLSCredentialBinding(ref string) v1alpha1.CredentialBinding {
 	}
 }
 
+func testUsernamePasswordCredentialBinding(ref string) v1alpha1.CredentialBinding {
+	return v1alpha1.CredentialBinding{
+		Ref:       ref,
+		SourceRef: ref + "-source",
+		Projection: v1alpha1.ProjectionSpec{
+			Type:             v1alpha1.CredentialProjectionTypeUsernamePassword,
+			UsernamePassword: &v1alpha1.UsernamePasswordProjection{},
+		},
+	}
+}
+
 func TestBuildNetworkPolicyStateMergesNamedRulesAndBindings(t *testing.T) {
 	svc := NewNetworkPolicyService(zap.NewNop())
 	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
@@ -205,6 +216,66 @@ func TestBuildNetworkPolicyStateKeepsValidTLSRules(t *testing.T) {
 		},
 		RequestBindings: []v1alpha1.CredentialBinding{
 			testTLSCredentialBinding("db-cert"),
+		},
+	})
+
+	if result == nil || result.PolicySpec == nil || result.PolicySpec.Egress == nil {
+		t.Fatalf("expected egress policy")
+	}
+	if len(result.PolicySpec.Egress.Rules) != 1 {
+		t.Fatalf("rule count = %d, want 1", len(result.PolicySpec.Egress.Rules))
+	}
+}
+
+func TestBuildNetworkPolicyStateDropsSOCKS5RulesWithoutUsernamePasswordProjection(t *testing.T) {
+	svc := NewNetworkPolicyService(zap.NewNop())
+	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
+		SandboxID: "sb-1",
+		TeamID:    "team-1",
+		RequestSpec: &v1alpha1.TplSandboxNetworkPolicy{
+			Mode: v1alpha1.NetworkModeBlockAll,
+			Egress: &v1alpha1.NetworkEgressPolicy{
+				Rules: []v1alpha1.EgressCredentialRule{{
+					Name:          "corp-socks",
+					CredentialRef: "proxy-cred",
+					Protocol:      v1alpha1.EgressAuthProtocolSOCKS5,
+				}},
+			},
+		},
+		RequestBindings: []v1alpha1.CredentialBinding{
+			testCredentialBinding("proxy-cred"),
+		},
+	})
+
+	if result == nil || result.PolicySpec == nil || result.PolicySpec.Egress == nil {
+		t.Fatalf("expected egress policy")
+	}
+	if len(result.PolicySpec.Egress.Rules) != 0 {
+		t.Fatalf("rules = %#v, want invalid socks5 rules dropped", result.PolicySpec.Egress.Rules)
+	}
+	if len(result.CredentialBindings) != 0 {
+		t.Fatalf("bindings = %#v, want invalid bindings dropped with socks5 rule", result.CredentialBindings)
+	}
+}
+
+func TestBuildNetworkPolicyStateKeepsValidMQTTRules(t *testing.T) {
+	svc := NewNetworkPolicyService(zap.NewNop())
+	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
+		SandboxID: "sb-1",
+		TeamID:    "team-1",
+		RequestSpec: &v1alpha1.TplSandboxNetworkPolicy{
+			Mode: v1alpha1.NetworkModeBlockAll,
+			Egress: &v1alpha1.NetworkEgressPolicy{
+				Rules: []v1alpha1.EgressCredentialRule{{
+					Name:          "broker-auth",
+					CredentialRef: "mqtt-cred",
+					Protocol:      v1alpha1.EgressAuthProtocolMQTT,
+					Domains:       []string{"broker.example.com"},
+				}},
+			},
+		},
+		RequestBindings: []v1alpha1.CredentialBinding{
+			testUsernamePasswordCredentialBinding("mqtt-cred"),
 		},
 	})
 

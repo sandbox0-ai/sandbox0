@@ -20,6 +20,7 @@ type egressAuthContext struct {
 	Resolved                     *egressauth.ResolveResponse
 	ResolvedHeaders              map[string]string
 	ResolvedTLSClientCertificate *resolvedTLSClientCertificate
+	ResolvedUsernamePassword     *resolvedUsernamePassword
 	CacheHit                     bool
 	ResolveAttempt               bool
 	ResolveError                 error
@@ -31,6 +32,11 @@ type egressAuthContext struct {
 type resolvedTLSClientCertificate struct {
 	Certificate tls.Certificate
 	RootCAs     *x509.CertPool
+}
+
+type resolvedUsernamePassword struct {
+	Username string
+	Password string
 }
 
 type egressAuthResolver interface {
@@ -281,6 +287,65 @@ func prepareTLSClientCertificateDirectives(ctx *egressAuthContext, protocol stri
 	material, err := resolveTLSClientCertificateForAdapter(ctx, allowTLSClientCertificate)
 	if err == nil {
 		ctx.ResolvedTLSClientCertificate = material
+		return nil
+	}
+	applyEgressAuthDirectiveError(ctx, protocol, err)
+	return err
+}
+
+func resolveUsernamePasswordForAdapter(ctx *egressAuthContext, allowUsernamePassword bool) (*resolvedUsernamePassword, error) {
+	if ctx == nil || ctx.Resolved == nil {
+		return nil, errEgressAuthMaterialUnavailable
+	}
+	if !allowUsernamePassword {
+		if len(ctx.Resolved.Directives) > 0 || len(ctx.Resolved.Headers) > 0 {
+			return nil, errEgressAuthDirectiveUnsupported
+		}
+		return nil, errEgressAuthMaterialUnavailable
+	}
+	for _, directive := range ctx.Resolved.Directives {
+		switch directive.Kind {
+		case egressauth.ResolveDirectiveKindUsernamePassword:
+			if directive.UsernamePassword == nil {
+				continue
+			}
+			username := strings.TrimSpace(directive.UsernamePassword.Username)
+			password := strings.TrimSpace(directive.UsernamePassword.Password)
+			if username == "" || password == "" {
+				return nil, errEgressAuthDirectiveInvalid
+			}
+			return &resolvedUsernamePassword{
+				Username: username,
+				Password: password,
+			}, nil
+		default:
+			return nil, errEgressAuthDirectiveUnsupported
+		}
+	}
+	if len(ctx.Resolved.Headers) > 0 {
+		return nil, errEgressAuthDirectiveUnsupported
+	}
+	return nil, errEgressAuthMaterialUnavailable
+}
+
+func prepareUsernamePasswordDirectives(ctx *egressAuthContext, protocol string, allowUsernamePassword bool) error {
+	if ctx == nil || ctx.Rule == nil {
+		return nil
+	}
+	if ctx.ShouldBypass() {
+		return nil
+	}
+	if ctx.ResolveError != nil {
+		return ctx.ResolveError
+	}
+	if ctx.Resolved == nil {
+		applyEgressAuthFailurePolicy(ctx, protocol, "material_unavailable")
+		return errEgressAuthMaterialUnavailable
+	}
+
+	material, err := resolveUsernamePasswordForAdapter(ctx, allowUsernamePassword)
+	if err == nil {
+		ctx.ResolvedUsernamePassword = material
 		return nil
 	}
 	applyEgressAuthDirectiveError(ctx, protocol, err)

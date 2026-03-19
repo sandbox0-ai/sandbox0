@@ -222,7 +222,7 @@ func (a *socks5Adapter) Name() string      { return "socks5" }
 func (a *socks5Adapter) Transport() string { return "tcp" }
 func (a *socks5Adapter) Protocol() string  { return "socks5" }
 func (a *socks5Adapter) Capability() adapterCapability {
-	return adapterCapabilityPassThrough
+	return adapterCapabilityInspect
 }
 
 func (a *socks5Adapter) Handle(req *adapterRequest) error {
@@ -230,6 +230,27 @@ func (a *socks5Adapter) Handle(req *adapterRequest) error {
 		return fmt.Errorf("socks5 adapter requires connection")
 	}
 	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
+	if req.EgressAuth != nil && req.EgressAuth.Rule != nil {
+		if err := prepareUsernamePasswordDirectives(req.EgressAuth, "socks5", true); err != nil {
+			if req.EgressAuth.ShouldBypass() {
+				return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+			}
+			if errors.Is(err, errEgressAuthDirectiveUnsupported) {
+				return fmt.Errorf("egress auth directives unsupported for %q", req.EgressAuth.Rule.AuthRef)
+			}
+			return fmt.Errorf("prepare username/password directives for %q: %w", req.EgressAuth.Rule.AuthRef, err)
+		}
+		if req.EgressAuth.ShouldBypass() {
+			return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+		}
+		if req.EgressAuth.ResolveError != nil {
+			return fmt.Errorf("resolve egress auth for %q: %w", req.EgressAuth.Rule.AuthRef, req.EgressAuth.ResolveError)
+		}
+		if req.EgressAuth.ResolvedUsernamePassword == nil {
+			return fmt.Errorf("egress auth material missing for %q", req.EgressAuth.Rule.AuthRef)
+		}
+		return req.Server.proxySOCKS5Session(req)
+	}
 	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
 }
 
@@ -273,7 +294,7 @@ func (a *mqttAdapter) Name() string      { return "mqtt" }
 func (a *mqttAdapter) Transport() string { return "tcp" }
 func (a *mqttAdapter) Protocol() string  { return "mqtt" }
 func (a *mqttAdapter) Capability() adapterCapability {
-	return adapterCapabilityPassThrough
+	return adapterCapabilityInspect
 }
 
 func (a *mqttAdapter) Handle(req *adapterRequest) error {
@@ -281,6 +302,27 @@ func (a *mqttAdapter) Handle(req *adapterRequest) error {
 		return fmt.Errorf("mqtt adapter requires connection")
 	}
 	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
+	if req.EgressAuth != nil && req.EgressAuth.Rule != nil {
+		if err := prepareUsernamePasswordDirectives(req.EgressAuth, "mqtt", true); err != nil {
+			if req.EgressAuth.ShouldBypass() {
+				return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+			}
+			if errors.Is(err, errEgressAuthDirectiveUnsupported) {
+				return fmt.Errorf("egress auth directives unsupported for %q", req.EgressAuth.Rule.AuthRef)
+			}
+			return fmt.Errorf("prepare username/password directives for %q: %w", req.EgressAuth.Rule.AuthRef, err)
+		}
+		if req.EgressAuth.ShouldBypass() {
+			return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+		}
+		if req.EgressAuth.ResolveError != nil {
+			return fmt.Errorf("resolve egress auth for %q: %w", req.EgressAuth.Rule.AuthRef, req.EgressAuth.ResolveError)
+		}
+		if req.EgressAuth.ResolvedUsernamePassword == nil {
+			return fmt.Errorf("egress auth material missing for %q", req.EgressAuth.Rule.AuthRef)
+		}
+		return req.Server.proxyMQTTSession(req)
+	}
 	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
 }
 

@@ -67,3 +67,24 @@ func TestResolveResponseMarshalPreservesTLSClientCertificateDirective(t *testing
 		t.Fatalf("certificate pem = %q", resp.Directives[0].TLSClientCertificate.CertificatePEM)
 	}
 }
+
+func TestResolveResponseMarshalPreservesUsernamePasswordDirective(t *testing.T) {
+	payload, err := json.Marshal(NewUsernamePasswordResolveResponse("corp-proxy", &UsernamePasswordDirective{
+		Username: "alice",
+		Password: "secret",
+	}, nil))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var resp ResolveResponse
+	if err := json.Unmarshal(payload, &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Directives) != 1 || resp.Directives[0].UsernamePassword == nil {
+		t.Fatalf("unexpected directives: %#v", resp.Directives)
+	}
+	if resp.Directives[0].UsernamePassword.Username != "alice" {
+		t.Fatalf("username = %q", resp.Directives[0].UsernamePassword.Username)
+	}
+}

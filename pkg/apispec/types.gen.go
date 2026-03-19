@@ -30,12 +30,14 @@ const (
 const (
 	HttpHeaders          CredentialProjectionType = "http_headers"
 	TlsClientCertificate CredentialProjectionType = "tls_client_certificate"
+	UsernamePassword     CredentialProjectionType = "username_password"
 )
 
 // Defines values for CredentialSourceRecordResolverKind.
 const (
 	StaticHeaders              CredentialSourceRecordResolverKind = "static_headers"
 	StaticTlsClientCertificate CredentialSourceRecordResolverKind = "static_tls_client_certificate"
+	StaticUsernamePassword     CredentialSourceRecordResolverKind = "static_username_password"
 )
 
 // Defines values for EgressAuthFailurePolicy.
@@ -46,10 +48,12 @@ const (
 
 // Defines values for EgressAuthProtocol.
 const (
-	Grpc  EgressAuthProtocol = "grpc"
-	Http  EgressAuthProtocol = "http"
-	Https EgressAuthProtocol = "https"
-	Tls   EgressAuthProtocol = "tls"
+	Grpc   EgressAuthProtocol = "grpc"
+	Http   EgressAuthProtocol = "http"
+	Https  EgressAuthProtocol = "https"
+	Mqtt   EgressAuthProtocol = "mqtt"
+	Socks5 EgressAuthProtocol = "socks5"
+	Tls    EgressAuthProtocol = "tls"
 )
 
 // Defines values for EgressAuthRolloutMode.
@@ -644,6 +648,7 @@ type CredentialSourceRecordResolverKind string
 type CredentialSourceSpec struct {
 	StaticHeaders              *StaticHeadersSourceSpec              `json:"staticHeaders,omitempty"`
 	StaticTLSClientCertificate *StaticTLSClientCertificateSourceSpec `json:"staticTLSClientCertificate,omitempty"`
+	StaticUsernamePassword     *StaticUsernamePasswordSourceSpec     `json:"staticUsernamePassword,omitempty"`
 }
 
 // EgressAuthFailurePolicy defines model for EgressAuthFailurePolicy.
@@ -973,6 +978,9 @@ type ProjectionSpec struct {
 	// TlsClientCertificate Client certificate projection used for TLS terminate-reoriginate auth.
 	TlsClientCertificate *TLSClientCertificateProjection `json:"tlsClientCertificate,omitempty"`
 	Type                 CredentialProjectionType        `json:"type"`
+
+	// UsernamePassword Username/password projection used for SOCKS5 and MQTT auth handshakes.
+	UsernamePassword *UsernamePasswordProjection `json:"usernamePassword,omitempty"`
 }
 
 // REPLConfig defines model for REPLConfig.
@@ -1304,6 +1312,12 @@ type StaticTLSClientCertificateSourceSpec struct {
 	CaPem          *string `json:"caPem,omitempty"`
 	CertificatePem string  `json:"certificatePem"`
 	PrivateKeyPem  string  `json:"privateKeyPem"`
+}
+
+// StaticUsernamePasswordSourceSpec defines model for StaticUsernamePasswordSourceSpec.
+type StaticUsernamePasswordSourceSpec struct {
+	Password string `json:"password"`
+	Username string `json:"username"`
 }
 
 // SuccessAPIKeyListResponse defines model for SuccessAPIKeyListResponse.
@@ -1943,6 +1957,9 @@ type User struct {
 	Name          string              `json:"name"`
 	UpdatedAt     time.Time           `json:"updated_at"`
 }
+
+// UsernamePasswordProjection Username/password projection used for SOCKS5 and MQTT auth handshakes.
+type UsernamePasswordProjection = map[string]interface{}
 
 // VolumeAccessMode Access mode for sandbox volumes. Enforcement is scoped to storage-proxy instances. RWO allows read-write mounts on a single instance; ROX allows read-only mounts across instances; RWX allows read-write mounts across instances.
 type VolumeAccessMode string

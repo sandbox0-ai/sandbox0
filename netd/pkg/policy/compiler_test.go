@@ -37,6 +37,20 @@ func TestCompileNetworkPolicy(t *testing.T) {
 						{Port: 5432, Protocol: "tcp"},
 					},
 				},
+				{
+					Name:          "corp-socks",
+					CredentialRef: "proxy-cred",
+					Protocol:      v1alpha1.EgressAuthProtocolSOCKS5,
+					Ports: []v1alpha1.PortSpec{
+						{Port: 1080, Protocol: "tcp"},
+					},
+				},
+				{
+					Name:          "broker-auth",
+					CredentialRef: "mqtt-cred",
+					Protocol:      v1alpha1.EgressAuthProtocolMQTT,
+					Domains:       []string{"broker.example.com"},
+				},
 			},
 		},
 	}
@@ -60,10 +74,13 @@ func TestCompileNetworkPolicy(t *testing.T) {
 	if len(compiled.Egress.AllowedPorts) != 1 {
 		t.Fatalf("expected allowed ports")
 	}
-	if len(compiled.Egress.AuthRules) != 2 {
+	if len(compiled.Egress.AuthRules) != 4 {
 		t.Fatalf("expected auth rules")
 	}
-	if compiled.Egress.AuthRules[1].Protocol != v1alpha1.EgressAuthProtocolTLS {
-		t.Fatalf("unexpected second auth rule protocol: %s", compiled.Egress.AuthRules[1].Protocol)
+	if compiled.Egress.AuthRules[2].Protocol != v1alpha1.EgressAuthProtocolSOCKS5 {
+		t.Fatalf("unexpected third auth rule protocol: %s", compiled.Egress.AuthRules[2].Protocol)
+	}
+	if compiled.Egress.AuthRules[3].Protocol != v1alpha1.EgressAuthProtocolMQTT {
+		t.Fatalf("unexpected fourth auth rule protocol: %s", compiled.Egress.AuthRules[3].Protocol)
 	}
 }

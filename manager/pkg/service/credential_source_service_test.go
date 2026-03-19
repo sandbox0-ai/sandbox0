@@ -101,6 +101,28 @@ func TestCredentialSourceServicePutTLSClientCertificateSource(t *testing.T) {
 	}
 }
 
+func TestCredentialSourceServicePutUsernamePasswordSource(t *testing.T) {
+	store := newMemorySourceStore()
+	svc := NewCredentialSourceService(store, zap.NewNop())
+
+	record, err := svc.PutSource(context.Background(), "team-1", &egressauth.CredentialSourceRecord{
+		Name:         "corp-proxy",
+		ResolverKind: "static_username_password",
+		Spec: egressauth.CredentialSourceSpec{
+			StaticUsernamePassword: &egressauth.StaticUsernamePasswordSourceSpec{
+				Username: "alice",
+				Password: "secret",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("put username/password source: %v", err)
+	}
+	if record.CurrentVersion != 1 {
+		t.Fatalf("current version = %d, want 1", record.CurrentVersion)
+	}
+}
+
 func cloneSourceRecord(in *egressauth.CredentialSourceRecord) *egressauth.CredentialSourceRecord {
 	if in == nil {
 		return nil
@@ -116,6 +138,12 @@ func cloneSourceRecord(in *egressauth.CredentialSourceRecord) *egressauth.Creden
 			CertificatePEM: in.Spec.StaticTLSClientCertificate.CertificatePEM,
 			PrivateKeyPEM:  in.Spec.StaticTLSClientCertificate.PrivateKeyPEM,
 			CAPEM:          in.Spec.StaticTLSClientCertificate.CAPEM,
+		}
+	}
+	if in.Spec.StaticUsernamePassword != nil {
+		cloned.Spec.StaticUsernamePassword = &egressauth.StaticUsernamePasswordSourceSpec{
+			Username: in.Spec.StaticUsernamePassword.Username,
+			Password: in.Spec.StaticUsernamePassword.Password,
 		}
 	}
 	return &cloned

@@ -35,6 +35,7 @@ const (
 	ResolveDirectiveKindHTTPHeaders          ResolveDirectiveKind = "http_headers"
 	ResolveDirectiveKindGRPCMetadata         ResolveDirectiveKind = "grpc_metadata"
 	ResolveDirectiveKindTLSClientCertificate ResolveDirectiveKind = "tls_client_certificate"
+	ResolveDirectiveKindUsernamePassword     ResolveDirectiveKind = "username_password"
 	ResolveDirectiveKindSSHAgentSign         ResolveDirectiveKind = "ssh_agent_sign"
 	ResolveDirectiveKindCustom               ResolveDirectiveKind = "custom"
 )
@@ -44,6 +45,7 @@ type ResolveDirective struct {
 	Kind                 ResolveDirectiveKind           `json:"kind"`
 	HTTPHeaders          *HTTPHeadersDirective          `json:"httpHeaders,omitempty"`
 	TLSClientCertificate *TLSClientCertificateDirective `json:"tlsClientCertificate,omitempty"`
+	UsernamePassword     *UsernamePasswordDirective     `json:"usernamePassword,omitempty"`
 }
 
 // HTTPHeadersDirective injects HTTP headers into a matching request.
@@ -56,6 +58,12 @@ type TLSClientCertificateDirective struct {
 	CertificatePEM string `json:"certificatePem,omitempty"`
 	PrivateKeyPEM  string `json:"privateKeyPem,omitempty"`
 	CAPEM          string `json:"caPem,omitempty"`
+}
+
+// UsernamePasswordDirective injects one username/password pair into a bounded auth exchange.
+type UsernamePasswordDirective struct {
+	Username string `json:"username,omitempty"`
+	Password string `json:"password,omitempty"`
 }
 
 type resolveResponseWire struct {
@@ -99,6 +107,28 @@ func NewTLSClientCertificateResolveResponse(authRef string, directive *TLSClient
 				CertificatePEM: directive.CertificatePEM,
 				PrivateKeyPEM:  directive.PrivateKeyPEM,
 				CAPEM:          directive.CAPEM,
+			},
+		}}
+	}
+	if expiresAt != nil {
+		expiresCopy := *expiresAt
+		resp.ExpiresAt = &expiresCopy
+	}
+	resp.EnsureCompatibilityFields()
+	return resp
+}
+
+// NewUsernamePasswordResolveResponse constructs a typed username/password response.
+func NewUsernamePasswordResolveResponse(authRef string, directive *UsernamePasswordDirective, expiresAt *time.Time) *ResolveResponse {
+	resp := &ResolveResponse{
+		AuthRef: authRef,
+	}
+	if directive != nil {
+		resp.Directives = []ResolveDirective{{
+			Kind: ResolveDirectiveKindUsernamePassword,
+			UsernamePassword: &UsernamePasswordDirective{
+				Username: directive.Username,
+				Password: directive.Password,
 			},
 		}}
 	}
@@ -214,6 +244,12 @@ func cloneDirectives(in []ResolveDirective) []ResolveDirective {
 				CertificatePEM: directive.TLSClientCertificate.CertificatePEM,
 				PrivateKeyPEM:  directive.TLSClientCertificate.PrivateKeyPEM,
 				CAPEM:          directive.TLSClientCertificate.CAPEM,
+			}
+		}
+		if directive.UsernamePassword != nil {
+			cloned.UsernamePassword = &UsernamePasswordDirective{
+				Username: directive.UsernamePassword.Username,
+				Password: directive.UsernamePassword.Password,
 			}
 		}
 		out = append(out, cloned)

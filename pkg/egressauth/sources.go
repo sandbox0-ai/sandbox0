@@ -27,6 +27,7 @@ type CredentialSourceVersion struct {
 type CredentialSourceSpec struct {
 	StaticHeaders              *StaticHeadersSourceSpec              `json:"staticHeaders,omitempty"`
 	StaticTLSClientCertificate *StaticTLSClientCertificateSourceSpec `json:"staticTLSClientCertificate,omitempty"`
+	StaticUsernamePassword     *StaticUsernamePasswordSourceSpec     `json:"staticUsernamePassword,omitempty"`
 }
 
 // StaticHeadersSourceSpec stores named values used by header projections.
@@ -39,6 +40,12 @@ type StaticTLSClientCertificateSourceSpec struct {
 	CertificatePEM string `json:"certificatePem,omitempty"`
 	PrivateKeyPEM  string `json:"privateKeyPem,omitempty"`
 	CAPEM          string `json:"caPem,omitempty"`
+}
+
+// StaticUsernamePasswordSourceSpec stores one username/password pair for early protocol auth.
+type StaticUsernamePasswordSourceSpec struct {
+	Username string `json:"username,omitempty"`
+	Password string `json:"password,omitempty"`
 }
 
 // CredentialSourceRecord is the public control-plane view of one source.

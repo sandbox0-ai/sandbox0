@@ -67,6 +67,16 @@ func validateCredentialSourceRecord(record *egressauth.CredentialSourceRecord) e
 		if record.Spec.StaticHeaders == nil {
 			return fmt.Errorf("static_headers spec is required")
 		}
+	case "static_username_password":
+		if record.Spec.StaticUsernamePassword == nil {
+			return fmt.Errorf("static_username_password spec is required")
+		}
+		if strings.TrimSpace(record.Spec.StaticUsernamePassword.Username) == "" {
+			return fmt.Errorf("static_username_password username is required")
+		}
+		if strings.TrimSpace(record.Spec.StaticUsernamePassword.Password) == "" {
+			return fmt.Errorf("static_username_password password is required")
+		}
 	case "static_tls_client_certificate":
 		if record.Spec.StaticTLSClientCertificate == nil {
 			return fmt.Errorf("static_tls_client_certificate spec is required")

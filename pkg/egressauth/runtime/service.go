@@ -55,6 +55,7 @@ func NewService(cfg Config, bindingStore egressauth.BindingStore, logger *zap.Lo
 	}
 	service.RegisterProvider("static_headers", &staticHeadersProvider{})
 	service.RegisterProvider("static_tls_client_certificate", &staticTLSClientCertificateProvider{})
+	service.RegisterProvider("static_username_password", &staticUsernamePasswordProvider{})
 	return service
 }
 

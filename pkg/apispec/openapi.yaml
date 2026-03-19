@@ -4626,10 +4626,12 @@ components:
           $ref: "#/components/schemas/HTTPHeadersProjection"
         tlsClientCertificate:
           $ref: "#/components/schemas/TLSClientCertificateProjection"
+        usernamePassword:
+          $ref: "#/components/schemas/UsernamePasswordProjection"
       required: [type]
     CredentialProjectionType:
       type: string
-      enum: [http_headers, tls_client_certificate]
+      enum: [http_headers, tls_client_certificate, username_password]
     HTTPHeadersProjection:
       type: object
       properties:
@@ -4640,6 +4642,9 @@ components:
     TLSClientCertificateProjection:
       type: object
       description: Client certificate projection used for TLS terminate-reoriginate auth.
+    UsernamePasswordProjection:
+      type: object
+      description: Username/password projection used for SOCKS5 and MQTT auth handshakes.
     ProjectedHeader:
       type: object
       properties:
@@ -4660,7 +4665,7 @@ components:
           type: string
         resolverKind:
           type: string
-          enum: [static_headers, static_tls_client_certificate]
+          enum: [static_headers, static_tls_client_certificate, static_username_password]
         currentVersion:
           type: integer
           format: int64
@@ -4684,6 +4689,8 @@ components:
           $ref: "#/components/schemas/StaticHeadersSourceSpec"
         staticTLSClientCertificate:
           $ref: "#/components/schemas/StaticTLSClientCertificateSourceSpec"
+        staticUsernamePassword:
+          $ref: "#/components/schemas/StaticUsernamePasswordSourceSpec"
     StaticHeadersSourceSpec:
       type: object
       properties:
@@ -4701,9 +4708,17 @@ components:
         caPem:
           type: string
       required: [certificatePem, privateKeyPem]
+    StaticUsernamePasswordSourceSpec:
+      type: object
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+      required: [username, password]
     EgressAuthProtocol:
       type: string
-      enum: [http, https, grpc, tls]
+      enum: [http, https, grpc, tls, socks5, mqtt]
     EgressAuthRolloutMode:
       type: string
       enum: [enabled, disabled]

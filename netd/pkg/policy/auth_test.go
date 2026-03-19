@@ -136,6 +136,46 @@ func TestMatchEgressAuthRuleMatchesTLSRuleForTLSClassifier(t *testing.T) {
 	}
 }
 
+func TestMatchEgressAuthRuleMatchesSOCKS5Rule(t *testing.T) {
+	p := &CompiledPolicy{
+		Egress: CompiledRuleSet{
+			AuthRules: []CompiledEgressAuthRule{{
+				Name:     "corp-socks",
+				AuthRef:  "proxy-cred",
+				Protocol: v1alpha1.EgressAuthProtocolSOCKS5,
+				Ports: []PortRange{
+					{Protocol: "tcp", Start: 1080, End: 1080},
+				},
+			}},
+		},
+	}
+
+	rule := MatchEgressAuthRule(p, "tcp", "socks5", 1080, "")
+	if rule == nil || rule.AuthRef != "proxy-cred" {
+		t.Fatalf("unexpected socks5 rule match: %+v", rule)
+	}
+}
+
+func TestMatchEgressAuthRuleMatchesMQTTRule(t *testing.T) {
+	p := &CompiledPolicy{
+		Egress: CompiledRuleSet{
+			AuthRules: []CompiledEgressAuthRule{{
+				Name:     "broker-auth",
+				AuthRef:  "mqtt-cred",
+				Protocol: v1alpha1.EgressAuthProtocolMQTT,
+				Domains: []DomainRule{
+					{Pattern: "broker.example.com", Type: DomainMatchExact},
+				},
+			}},
+		},
+	}
+
+	rule := MatchEgressAuthRule(p, "tcp", "mqtt", 1883, "broker.example.com")
+	if rule == nil || rule.AuthRef != "mqtt-cred" {
+		t.Fatalf("unexpected mqtt rule match: %+v", rule)
+	}
+}
+
 func TestCloneRuleSetCopiesAuthRules(t *testing.T) {
 	in := CompiledRuleSet{
 		AuthRules: []CompiledEgressAuthRule{

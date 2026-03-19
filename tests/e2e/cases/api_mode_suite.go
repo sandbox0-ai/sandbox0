@@ -547,10 +547,10 @@ func assertCredentialSourceBindingLifecycle(env *framework.ScenarioEnv, session 
 	domains := []string{"httpbin.org"}
 	headers := map[string]string{"token": "initial-token"}
 
-	created, err := session.CreateCredentialSource(env.TestCtx.Context, GinkgoT(), apispec.CredentialSourceRecord{
+	created, err := session.CreateCredentialSource(env.TestCtx.Context, GinkgoT(), apispec.CredentialSourceWriteRequest{
 		Name:         sourceName,
 		ResolverKind: apispec.StaticHeaders,
-		Spec: apispec.CredentialSourceSpec{
+		Spec: apispec.CredentialSourceWriteSpec{
 			StaticHeaders: &apispec.StaticHeadersSourceSpec{
 				Values: &headers,
 			},
@@ -594,9 +594,9 @@ func assertCredentialSourceBindingLifecycle(env *framework.ScenarioEnv, session 
 	Expect(fetched.Name).To(Equal(sourceName))
 
 	updatedHeaders := map[string]string{"token": "updated-token"}
-	updatedSource, err := session.UpdateCredentialSource(env.TestCtx.Context, GinkgoT(), sourceName, apispec.CredentialSourceRecord{
+	updatedSource, err := session.UpdateCredentialSource(env.TestCtx.Context, GinkgoT(), sourceName, apispec.CredentialSourceWriteRequest{
 		ResolverKind: apispec.StaticHeaders,
-		Spec: apispec.CredentialSourceSpec{
+		Spec: apispec.CredentialSourceWriteSpec{
 			StaticHeaders: &apispec.StaticHeadersSourceSpec{
 				Values: &updatedHeaders,
 			},

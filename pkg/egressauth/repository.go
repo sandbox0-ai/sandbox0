@@ -21,19 +21,19 @@ type DB interface {
 // BindingStore is the shared manager/broker contract for effective sandbox bindings
 // and credential source metadata.
 type BindingStore interface {
-	GetBindings(ctx context.Context, clusterID, sandboxID string) (*BindingRecord, error)
+	GetBindings(ctx context.Context, teamID, sandboxID string) (*BindingRecord, error)
 	UpsertBindings(ctx context.Context, record *BindingRecord) error
-	DeleteBindings(ctx context.Context, clusterID, sandboxID string) error
+	DeleteBindings(ctx context.Context, teamID, sandboxID string) error
 	GetSourceByRef(ctx context.Context, teamID, ref string) (*CredentialSource, error)
 	GetSourceVersion(ctx context.Context, sourceID, version int64) (*CredentialSourceVersion, error)
 }
 
 // SourceStore owns control-plane CRUD for credential sources.
 type SourceStore interface {
-	ListSourceRecords(ctx context.Context, teamID string) ([]CredentialSourceRecord, error)
-	GetSourceRecord(ctx context.Context, teamID, name string) (*CredentialSourceRecord, error)
-	PutSourceRecord(ctx context.Context, teamID string, record *CredentialSourceRecord) (*CredentialSourceRecord, error)
-	DeleteSourceRecord(ctx context.Context, teamID, name string) error
+	ListSourceMetadata(ctx context.Context, teamID string) ([]CredentialSourceMetadata, error)
+	GetSourceMetadata(ctx context.Context, teamID, name string) (*CredentialSourceMetadata, error)
+	PutSource(ctx context.Context, teamID string, record *CredentialSourceWriteRequest) (*CredentialSourceMetadata, error)
+	DeleteSource(ctx context.Context, teamID, name string) error
 }
 
 // Repository persists effective credential bindings in PostgreSQL.
@@ -58,12 +58,12 @@ func (r *Repository) Pool() *pgxpool.Pool {
 	return r.pool
 }
 
-func (r *Repository) GetBindings(ctx context.Context, clusterID, sandboxID string) (*BindingRecord, error) {
+func (r *Repository) GetBindings(ctx context.Context, teamID, sandboxID string) (*BindingRecord, error) {
 	if r == nil || r.db == nil {
 		return nil, fmt.Errorf("binding repository is not configured")
 	}
-	if clusterID == "" {
-		return nil, fmt.Errorf("cluster_id is required")
+	if teamID == "" {
+		return nil, fmt.Errorf("team_id is required")
 	}
 	if sandboxID == "" {
 		return nil, fmt.Errorf("sandbox_id is required")
@@ -75,9 +75,8 @@ func (r *Repository) GetBindings(ctx context.Context, clusterID, sandboxID strin
 	)
 	err := r.db.QueryRow(ctx, `
 		SELECT
-			cluster_id,
 			sandbox_id,
-			MIN(team_id) AS team_id,
+			team_id,
 			COALESCE(
 				jsonb_agg(
 					jsonb_build_object(
@@ -93,10 +92,9 @@ func (r *Repository) GetBindings(ctx context.Context, clusterID, sandboxID strin
 			) AS bindings,
 			MAX(updated_at) AS updated_at
 		FROM sandbox_egress_credential_bindings
-		WHERE cluster_id = $1 AND sandbox_id = $2
-		GROUP BY cluster_id, sandbox_id
-	`, clusterID, sandboxID).Scan(
-		&record.ClusterID,
+		WHERE team_id = $1 AND sandbox_id = $2
+		GROUP BY team_id, sandbox_id
+	`, teamID, sandboxID).Scan(
 		&record.SandboxID,
 		&record.TeamID,
 		&bindingsJSON,
@@ -123,8 +121,8 @@ func (r *Repository) UpsertBindings(ctx context.Context, record *BindingRecord) 
 	if record == nil {
 		return fmt.Errorf("binding record is nil")
 	}
-	if record.ClusterID == "" {
-		return fmt.Errorf("cluster_id is required")
+	if record.TeamID == "" {
+		return fmt.Errorf("team_id is required")
 	}
 	if record.SandboxID == "" {
 		return fmt.Errorf("sandbox_id is required")
@@ -148,8 +146,8 @@ func (r *Repository) UpsertBindings(ctx context.Context, record *BindingRecord) 
 
 	if _, err := tx.Exec(ctx, `
 		DELETE FROM sandbox_egress_credential_bindings
-		WHERE cluster_id = $1 AND sandbox_id = $2
-	`, record.ClusterID, record.SandboxID); err != nil {
+		WHERE team_id = $1 AND sandbox_id = $2
+	`, record.TeamID, record.SandboxID); err != nil {
 		return fmt.Errorf("delete existing bindings: %w", err)
 	}
 
@@ -165,9 +163,9 @@ func (r *Repository) UpsertBindings(ctx context.Context, record *BindingRecord) 
 
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO sandbox_egress_credential_bindings (
-				cluster_id, sandbox_id, team_id, ref, source_ref, source_id, source_version, projection, cache_policy, updated_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		`, record.ClusterID, record.SandboxID, record.TeamID, binding.Ref, binding.SourceRef, binding.SourceID, binding.SourceVersion, projectionJSON, cachePolicyJSON, record.UpdatedAt); err != nil {
+				team_id, sandbox_id, ref, source_ref, source_id, source_version, projection, cache_policy, updated_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		`, record.TeamID, record.SandboxID, binding.Ref, binding.SourceRef, binding.SourceID, binding.SourceVersion, projectionJSON, cachePolicyJSON, record.UpdatedAt); err != nil {
 			return fmt.Errorf("insert binding %q: %w", binding.Ref, err)
 		}
 	}
@@ -178,12 +176,12 @@ func (r *Repository) UpsertBindings(ctx context.Context, record *BindingRecord) 
 	return nil
 }
 
-func (r *Repository) DeleteBindings(ctx context.Context, clusterID, sandboxID string) error {
+func (r *Repository) DeleteBindings(ctx context.Context, teamID, sandboxID string) error {
 	if r == nil || r.db == nil {
 		return fmt.Errorf("binding repository is not configured")
 	}
-	if clusterID == "" {
-		return fmt.Errorf("cluster_id is required")
+	if teamID == "" {
+		return fmt.Errorf("team_id is required")
 	}
 	if sandboxID == "" {
 		return fmt.Errorf("sandbox_id is required")
@@ -191,8 +189,8 @@ func (r *Repository) DeleteBindings(ctx context.Context, clusterID, sandboxID st
 
 	if _, err := r.db.Exec(ctx, `
 		DELETE FROM sandbox_egress_credential_bindings
-		WHERE cluster_id = $1 AND sandbox_id = $2
-	`, clusterID, sandboxID); err != nil {
+		WHERE team_id = $1 AND sandbox_id = $2
+	`, teamID, sandboxID); err != nil {
 		return fmt.Errorf("delete bindings: %w", err)
 	}
 	return nil
@@ -274,7 +272,7 @@ func (r *Repository) GetSourceVersion(ctx context.Context, sourceID, version int
 	return &source, nil
 }
 
-func (r *Repository) ListSourceRecords(ctx context.Context, teamID string) ([]CredentialSourceRecord, error) {
+func (r *Repository) ListSourceMetadata(ctx context.Context, teamID string) ([]CredentialSourceMetadata, error) {
 	if r == nil || r.db == nil {
 		return nil, fmt.Errorf("binding repository is not configured")
 	}
@@ -295,9 +293,9 @@ func (r *Repository) ListSourceRecords(ctx context.Context, teamID string) ([]Cr
 	}
 	defer rows.Close()
 
-	var out []CredentialSourceRecord
+	var out []CredentialSourceMetadata
 	for rows.Next() {
-		record, err := r.scanSourceRecord(rows)
+		record, err := r.scanSourceMetadata(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -309,7 +307,7 @@ func (r *Repository) ListSourceRecords(ctx context.Context, teamID string) ([]Cr
 	return out, nil
 }
 
-func (r *Repository) GetSourceRecord(ctx context.Context, teamID, name string) (*CredentialSourceRecord, error) {
+func (r *Repository) GetSourceMetadata(ctx context.Context, teamID, name string) (*CredentialSourceMetadata, error) {
 	if r == nil || r.db == nil {
 		return nil, fmt.Errorf("binding repository is not configured")
 	}
@@ -321,7 +319,7 @@ func (r *Repository) GetSourceRecord(ctx context.Context, teamID, name string) (
 	}
 
 	var (
-		record   CredentialSourceRecord
+		record   CredentialSourceMetadata
 		specJSON []byte
 	)
 	err := r.db.QueryRow(ctx, `
@@ -345,15 +343,10 @@ func (r *Repository) GetSourceRecord(ctx context.Context, teamID, name string) (
 	if err != nil {
 		return nil, fmt.Errorf("get source record: %w", err)
 	}
-	if len(specJSON) > 0 {
-		if err := json.Unmarshal(specJSON, &record.Spec); err != nil {
-			return nil, fmt.Errorf("unmarshal source record spec: %w", err)
-		}
-	}
 	return &record, nil
 }
 
-func (r *Repository) PutSourceRecord(ctx context.Context, teamID string, record *CredentialSourceRecord) (*CredentialSourceRecord, error) {
+func (r *Repository) PutSource(ctx context.Context, teamID string, record *CredentialSourceWriteRequest) (*CredentialSourceMetadata, error) {
 	if r == nil || r.pool == nil {
 		return nil, fmt.Errorf("binding repository pool is not configured")
 	}
@@ -402,7 +395,7 @@ func (r *Repository) PutSourceRecord(ctx context.Context, teamID string, record 
 			    current_version = $4,
 			    status = $5
 			WHERE team_id = $1 AND name = $2
-		`, teamID, record.Name, record.ResolverKind, currentVersion, normalizeSourceStatus(record.Status)); err != nil {
+			`, teamID, record.Name, record.ResolverKind, currentVersion, normalizeSourceStatus("")); err != nil {
 			return nil, fmt.Errorf("update source record: %w", err)
 		}
 	case pgx.ErrNoRows:
@@ -411,7 +404,7 @@ func (r *Repository) PutSourceRecord(ctx context.Context, teamID string, record 
 			INSERT INTO credential_sources (team_id, name, resolver_kind, current_version, status)
 			VALUES ($1, $2, $3, $4, $5)
 			RETURNING id
-		`, teamID, record.Name, record.ResolverKind, currentVersion, normalizeSourceStatus(record.Status)).Scan(&sourceID)
+		`, teamID, record.Name, record.ResolverKind, currentVersion, normalizeSourceStatus("")).Scan(&sourceID)
 		if err != nil {
 			return nil, fmt.Errorf("insert source record: %w", err)
 		}
@@ -429,10 +422,10 @@ func (r *Repository) PutSourceRecord(ctx context.Context, teamID string, record 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit source upsert: %w", err)
 	}
-	return r.GetSourceRecord(ctx, teamID, record.Name)
+	return r.GetSourceMetadata(ctx, teamID, record.Name)
 }
 
-func (r *Repository) DeleteSourceRecord(ctx context.Context, teamID, name string) error {
+func (r *Repository) DeleteSource(ctx context.Context, teamID, name string) error {
 	if r == nil || r.db == nil {
 		return fmt.Errorf("binding repository is not configured")
 	}
@@ -456,9 +449,9 @@ func (r *Repository) DeleteSourceRecord(ctx context.Context, teamID, name string
 	return nil
 }
 
-func (r *Repository) scanSourceRecord(rows pgx.Rows) (*CredentialSourceRecord, error) {
+func (r *Repository) scanSourceMetadata(rows pgx.Rows) (*CredentialSourceMetadata, error) {
 	var (
-		record   CredentialSourceRecord
+		record   CredentialSourceMetadata
 		specJSON []byte
 	)
 	if err := rows.Scan(
@@ -471,11 +464,6 @@ func (r *Repository) scanSourceRecord(rows pgx.Rows) (*CredentialSourceRecord, e
 		&record.UpdatedAt,
 	); err != nil {
 		return nil, fmt.Errorf("scan source record: %w", err)
-	}
-	if len(specJSON) > 0 {
-		if err := json.Unmarshal(specJSON, &record.Spec); err != nil {
-			return nil, fmt.Errorf("unmarshal source record spec: %w", err)
-		}
 	}
 	return &record, nil
 }

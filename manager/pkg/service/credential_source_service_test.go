@@ -16,39 +16,45 @@ import (
 )
 
 type memorySourceStore struct {
-	records map[string]*egressauth.CredentialSourceRecord
+	records map[string]*egressauth.CredentialSourceMetadata
 }
 
 func newMemorySourceStore() *memorySourceStore {
-	return &memorySourceStore{records: make(map[string]*egressauth.CredentialSourceRecord)}
+	return &memorySourceStore{records: make(map[string]*egressauth.CredentialSourceMetadata)}
 }
 
-func (s *memorySourceStore) ListSourceRecords(_ context.Context, teamID string) ([]egressauth.CredentialSourceRecord, error) {
-	out := make([]egressauth.CredentialSourceRecord, 0)
+func (s *memorySourceStore) ListSourceMetadata(_ context.Context, teamID string) ([]egressauth.CredentialSourceMetadata, error) {
+	out := make([]egressauth.CredentialSourceMetadata, 0)
 	for key, value := range s.records {
 		if len(key) >= len(teamID)+1 && key[:len(teamID)+1] == teamID+"/" {
-			out = append(out, *cloneSourceRecord(value))
+			out = append(out, *cloneSourceMetadata(value))
 		}
 	}
 	return out, nil
 }
 
-func (s *memorySourceStore) GetSourceRecord(_ context.Context, teamID, name string) (*egressauth.CredentialSourceRecord, error) {
-	return cloneSourceRecord(s.records[teamID+"/"+name]), nil
+func (s *memorySourceStore) GetSourceMetadata(_ context.Context, teamID, name string) (*egressauth.CredentialSourceMetadata, error) {
+	return cloneSourceMetadata(s.records[teamID+"/"+name]), nil
 }
 
-func (s *memorySourceStore) PutSourceRecord(_ context.Context, teamID string, record *egressauth.CredentialSourceRecord) (*egressauth.CredentialSourceRecord, error) {
-	cloned := cloneSourceRecord(record)
-	if cloned.CurrentVersion == 0 {
+func (s *memorySourceStore) PutSource(_ context.Context, teamID string, record *egressauth.CredentialSourceWriteRequest) (*egressauth.CredentialSourceMetadata, error) {
+	key := teamID + "/" + record.Name
+	current := s.records[key]
+	cloned := &egressauth.CredentialSourceMetadata{
+		Name:         record.Name,
+		ResolverKind: record.ResolverKind,
+		Status:       "active",
+	}
+	if current == nil || current.CurrentVersion == 0 {
 		cloned.CurrentVersion = 1
 	} else {
-		cloned.CurrentVersion++
+		cloned.CurrentVersion = current.CurrentVersion + 1
 	}
-	s.records[teamID+"/"+record.Name] = cloned
-	return cloneSourceRecord(cloned), nil
+	s.records[key] = cloned
+	return cloneSourceMetadata(cloned), nil
 }
 
-func (s *memorySourceStore) DeleteSourceRecord(_ context.Context, teamID, name string) error {
+func (s *memorySourceStore) DeleteSource(_ context.Context, teamID, name string) error {
 	delete(s.records, teamID+"/"+name)
 	return nil
 }
@@ -57,10 +63,10 @@ func TestCredentialSourceServicePutSource(t *testing.T) {
 	store := newMemorySourceStore()
 	svc := NewCredentialSourceService(store, zap.NewNop())
 
-	record, err := svc.PutSource(context.Background(), "team-1", &egressauth.CredentialSourceRecord{
+	record, err := svc.PutSource(context.Background(), "team-1", &egressauth.CredentialSourceWriteRequest{
 		Name:         "github-api",
 		ResolverKind: "static_headers",
-		Spec: egressauth.CredentialSourceSpec{
+		Spec: egressauth.CredentialSourceSecretSpec{
 			StaticHeaders: &egressauth.StaticHeadersSourceSpec{
 				Values: map[string]string{"token": "abc"},
 			},
@@ -83,10 +89,10 @@ func TestCredentialSourceServicePutTLSClientCertificateSource(t *testing.T) {
 		t.Fatalf("test tls keypair: %v", err)
 	}
 
-	record, err := svc.PutSource(context.Background(), "team-1", &egressauth.CredentialSourceRecord{
+	record, err := svc.PutSource(context.Background(), "team-1", &egressauth.CredentialSourceWriteRequest{
 		Name:         "db-cert",
 		ResolverKind: "static_tls_client_certificate",
-		Spec: egressauth.CredentialSourceSpec{
+		Spec: egressauth.CredentialSourceSecretSpec{
 			StaticTLSClientCertificate: &egressauth.StaticTLSClientCertificateSourceSpec{
 				CertificatePEM: certPEM,
 				PrivateKeyPEM:  keyPEM,
@@ -105,10 +111,10 @@ func TestCredentialSourceServicePutUsernamePasswordSource(t *testing.T) {
 	store := newMemorySourceStore()
 	svc := NewCredentialSourceService(store, zap.NewNop())
 
-	record, err := svc.PutSource(context.Background(), "team-1", &egressauth.CredentialSourceRecord{
+	record, err := svc.PutSource(context.Background(), "team-1", &egressauth.CredentialSourceWriteRequest{
 		Name:         "corp-proxy",
 		ResolverKind: "static_username_password",
-		Spec: egressauth.CredentialSourceSpec{
+		Spec: egressauth.CredentialSourceSecretSpec{
 			StaticUsernamePassword: &egressauth.StaticUsernamePasswordSourceSpec{
 				Username: "alice",
 				Password: "secret",
@@ -123,41 +129,12 @@ func TestCredentialSourceServicePutUsernamePasswordSource(t *testing.T) {
 	}
 }
 
-func cloneSourceRecord(in *egressauth.CredentialSourceRecord) *egressauth.CredentialSourceRecord {
+func cloneSourceMetadata(in *egressauth.CredentialSourceMetadata) *egressauth.CredentialSourceMetadata {
 	if in == nil {
 		return nil
 	}
 	cloned := *in
-	if in.Spec.StaticHeaders != nil {
-		cloned.Spec.StaticHeaders = &egressauth.StaticHeadersSourceSpec{
-			Values: cloneSourceValues(in.Spec.StaticHeaders.Values),
-		}
-	}
-	if in.Spec.StaticTLSClientCertificate != nil {
-		cloned.Spec.StaticTLSClientCertificate = &egressauth.StaticTLSClientCertificateSourceSpec{
-			CertificatePEM: in.Spec.StaticTLSClientCertificate.CertificatePEM,
-			PrivateKeyPEM:  in.Spec.StaticTLSClientCertificate.PrivateKeyPEM,
-			CAPEM:          in.Spec.StaticTLSClientCertificate.CAPEM,
-		}
-	}
-	if in.Spec.StaticUsernamePassword != nil {
-		cloned.Spec.StaticUsernamePassword = &egressauth.StaticUsernamePasswordSourceSpec{
-			Username: in.Spec.StaticUsernamePassword.Username,
-			Password: in.Spec.StaticUsernamePassword.Password,
-		}
-	}
 	return &cloned
-}
-
-func cloneSourceValues(in map[string]string) map[string]string {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
-	return out
 }
 
 func testTLSKeyPair(t *testing.T) (string, string, error) {

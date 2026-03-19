@@ -11,7 +11,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
-	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -38,20 +37,20 @@ func newMemoryBindingStore() *memoryBindingStore {
 	}
 }
 
-func (s *memoryBindingStore) GetBindings(_ context.Context, clusterID, sandboxID string) (*egressauth.BindingRecord, error) {
-	return cloneBindingRecord(s.records[s.bindingKey(clusterID, sandboxID)]), nil
+func (s *memoryBindingStore) GetBindings(_ context.Context, teamID, sandboxID string) (*egressauth.BindingRecord, error) {
+	return cloneBindingRecord(s.records[s.bindingKey(teamID, sandboxID)]), nil
 }
 
 func (s *memoryBindingStore) UpsertBindings(_ context.Context, record *egressauth.BindingRecord) error {
 	if record == nil {
 		return nil
 	}
-	s.records[s.bindingKey(record.ClusterID, record.SandboxID)] = cloneBindingRecord(record)
+	s.records[s.bindingKey(record.TeamID, record.SandboxID)] = cloneBindingRecord(record)
 	return nil
 }
 
-func (s *memoryBindingStore) DeleteBindings(_ context.Context, clusterID, sandboxID string) error {
-	delete(s.records, s.bindingKey(clusterID, sandboxID))
+func (s *memoryBindingStore) DeleteBindings(_ context.Context, teamID, sandboxID string) error {
+	delete(s.records, s.bindingKey(teamID, sandboxID))
 	return nil
 }
 
@@ -63,8 +62,8 @@ func (s *memoryBindingStore) GetSourceVersion(_ context.Context, sourceID, versi
 	return cloneCredentialSourceVersion(s.sourceVersions[s.sourceVersionKey(sourceID, version)]), nil
 }
 
-func (s *memoryBindingStore) bindingKey(clusterID, sandboxID string) string {
-	return clusterID + "/" + sandboxID
+func (s *memoryBindingStore) bindingKey(teamID, sandboxID string) string {
+	return teamID + "/" + sandboxID
 }
 
 func (s *memoryBindingStore) sourceRefKey(teamID, ref string) string {
@@ -88,7 +87,7 @@ func (s *memoryBindingStore) addStaticHeadersSource(teamID, ref string, sourceID
 		SourceID:     sourceID,
 		Version:      version,
 		ResolverKind: "static_headers",
-		Spec: egressauth.CredentialSourceSpec{
+		Spec: egressauth.CredentialSourceSecretSpec{
 			StaticHeaders: &egressauth.StaticHeadersSourceSpec{
 				Values: cloneStringMap(values),
 			},
@@ -203,7 +202,6 @@ func TestUpdateNetworkPolicyRollsBackBindingsWhenPodUpdateFails(t *testing.T) {
 	store := newMemoryBindingStore()
 	store.addStaticHeadersSource("team-1", "new-ref", 2, 1, map[string]string{"token": "new"})
 	require.NoError(t, store.UpsertBindings(ctx, &egressauth.BindingRecord{
-		ClusterID: naming.DefaultClusterID,
 		SandboxID: pod.Name,
 		TeamID:    "team-1",
 		Bindings: []egressauth.CredentialBinding{{
@@ -231,7 +229,7 @@ func TestUpdateNetworkPolicyRollsBackBindingsWhenPodUpdateFails(t *testing.T) {
 	_, err := svc.UpdateNetworkPolicy(ctx, pod.Name, testNetworkPolicy("new-ref", "Bearer new"))
 	require.Error(t, err)
 
-	record, err := store.GetBindings(ctx, naming.DefaultClusterID, pod.Name)
+	record, err := store.GetBindings(ctx, "team-1", pod.Name)
 	require.NoError(t, err)
 	require.NotNil(t, record)
 	require.Len(t, record.Bindings, 1)
@@ -244,7 +242,6 @@ func TestUpdateSandboxRollsBackBindingsWhenPodUpdateFails(t *testing.T) {
 	store := newMemoryBindingStore()
 	store.addStaticHeadersSource("team-1", "new-ref", 2, 1, map[string]string{"token": "new"})
 	require.NoError(t, store.UpsertBindings(ctx, &egressauth.BindingRecord{
-		ClusterID: naming.DefaultClusterID,
 		SandboxID: pod.Name,
 		TeamID:    "team-1",
 		Bindings: []egressauth.CredentialBinding{{
@@ -275,7 +272,7 @@ func TestUpdateSandboxRollsBackBindingsWhenPodUpdateFails(t *testing.T) {
 	})
 	require.Error(t, err)
 
-	record, err := store.GetBindings(ctx, naming.DefaultClusterID, pod.Name)
+	record, err := store.GetBindings(ctx, "team-1", pod.Name)
 	require.NoError(t, err)
 	require.NotNil(t, record)
 	require.Len(t, record.Bindings, 1)
@@ -289,7 +286,7 @@ func TestUpdateNetworkPolicyStoresBindingsOutsidePodConfig(t *testing.T) {
 	store.addStaticHeadersSource("team-1", "example-ref", 3, 1, map[string]string{"token": "stored"})
 	provider := &assertingNetworkProvider{
 		applyFunc: func(input network.SandboxPolicyInput) {
-			record, err := store.GetBindings(ctx, naming.DefaultClusterID, pod.Name)
+			record, err := store.GetBindings(ctx, "team-1", pod.Name)
 			require.NoError(t, err)
 			require.NotNil(t, record)
 			require.Len(t, record.Bindings, 1)

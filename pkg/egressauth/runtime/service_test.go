@@ -91,7 +91,7 @@ func testStaticSourceVersion(token string) *egressauth.CredentialSourceVersion {
 		SourceID:     1,
 		Version:      1,
 		ResolverKind: "static_headers",
-		Spec: egressauth.CredentialSourceSpec{
+		Spec: egressauth.CredentialSourceSecretSpec{
 			StaticHeaders: &egressauth.StaticHeadersSourceSpec{
 				Values: map[string]string{"token": token},
 			},
@@ -104,7 +104,7 @@ func testStaticTLSClientCertificateSourceVersion(certPEM, keyPEM, caPEM string) 
 		SourceID:     1,
 		Version:      1,
 		ResolverKind: "static_tls_client_certificate",
-		Spec: egressauth.CredentialSourceSpec{
+		Spec: egressauth.CredentialSourceSecretSpec{
 			StaticTLSClientCertificate: &egressauth.StaticTLSClientCertificateSourceSpec{
 				CertificatePEM: certPEM,
 				PrivateKeyPEM:  keyPEM,
@@ -119,7 +119,7 @@ func testStaticUsernamePasswordSourceVersion(username, password string) *egressa
 		SourceID:     1,
 		Version:      1,
 		ResolverKind: "static_username_password",
-		Spec: egressauth.CredentialSourceSpec{
+		Spec: egressauth.CredentialSourceSecretSpec{
 			StaticUsernamePassword: &egressauth.StaticUsernamePasswordSourceSpec{
 				Username: username,
 				Password: password,
@@ -130,7 +130,7 @@ func testStaticUsernamePasswordSourceVersion(username, password string) *egressa
 
 func testBindingRecord(updatedAt time.Time) *egressauth.BindingRecord {
 	return &egressauth.BindingRecord{
-		ClusterID: "cluster-a",
+		TeamID:    "team-1",
 		SandboxID: "sbx-1",
 		UpdatedAt: updatedAt,
 		Bindings: []egressauth.CredentialBinding{{
@@ -147,7 +147,7 @@ func testBindingRecord(updatedAt time.Time) *egressauth.BindingRecord {
 
 func testUsernamePasswordBindingRecord(updatedAt time.Time) *egressauth.BindingRecord {
 	return &egressauth.BindingRecord{
-		ClusterID: "cluster-a",
+		TeamID:    "team-1",
 		SandboxID: "sbx-1",
 		UpdatedAt: updatedAt,
 		Bindings: []egressauth.CredentialBinding{{
@@ -175,12 +175,11 @@ func TestResolveUsesBindingProviderAndCache(t *testing.T) {
 	}
 
 	service := NewService(Config{
-		ClusterID:         "cluster-a",
 		DefaultResolveTTL: time.Minute,
 	}, store, zap.NewNop())
 	service.RegisterProvider("static_headers", provider)
 
-	req := &egressauth.ResolveRequest{SandboxID: "sbx-1", AuthRef: "example-api", Destination: "api.example.com", Protocol: "http"}
+	req := &egressauth.ResolveRequest{TeamID: "team-1", SandboxID: "sbx-1", AuthRef: "example-api", Destination: "api.example.com", Protocol: "http"}
 	first, err := service.Resolve(context.Background(), req)
 	if err != nil {
 		t.Fatalf("first resolve: %v", err)
@@ -210,12 +209,11 @@ func TestResolveInvalidatesCacheWhenBindingsRevisionChanges(t *testing.T) {
 	}
 
 	service := NewService(Config{
-		ClusterID:         "cluster-a",
 		DefaultResolveTTL: time.Minute,
 	}, store, zap.NewNop())
 	service.RegisterProvider("static_headers", provider)
 
-	req := &egressauth.ResolveRequest{SandboxID: "sbx-1", AuthRef: "example-api"}
+	req := &egressauth.ResolveRequest{TeamID: "team-1", SandboxID: "sbx-1", AuthRef: "example-api"}
 	if _, err := service.Resolve(context.Background(), req); err != nil {
 		t.Fatalf("first resolve: %v", err)
 	}
@@ -258,12 +256,11 @@ func TestResolveRefreshesAfterCacheTTLExpires(t *testing.T) {
 	}
 
 	service := NewService(Config{
-		ClusterID:         "cluster-a",
 		DefaultResolveTTL: time.Minute,
 	}, store, zap.NewNop())
 	service.RegisterProvider("static_headers", provider)
 
-	req := &egressauth.ResolveRequest{SandboxID: "sbx-1", AuthRef: "example-api", Destination: "api.example.com", Protocol: "http"}
+	req := &egressauth.ResolveRequest{TeamID: "team-1", SandboxID: "sbx-1", AuthRef: "example-api", Destination: "api.example.com", Protocol: "http"}
 	_, err := service.Resolve(context.Background(), req)
 	if err != nil {
 		t.Fatalf("first resolve: %v", err)
@@ -306,11 +303,10 @@ func TestResolveReturnsUsernamePasswordDirective(t *testing.T) {
 	}
 
 	service := NewService(Config{
-		ClusterID:         "cluster-a",
 		DefaultResolveTTL: time.Minute,
 	}, store, zap.NewNop())
 
-	resp, err := service.Resolve(context.Background(), &egressauth.ResolveRequest{SandboxID: "sbx-1", AuthRef: "corp-proxy", Protocol: "socks5"})
+	resp, err := service.Resolve(context.Background(), &egressauth.ResolveRequest{TeamID: "team-1", SandboxID: "sbx-1", AuthRef: "corp-proxy", Protocol: "socks5"})
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -342,11 +338,11 @@ func TestResolveUsesStaticTLSClientCertificateProvider(t *testing.T) {
 	}
 
 	service := NewService(Config{
-		ClusterID:         "cluster-a",
 		DefaultResolveTTL: time.Minute,
 	}, store, zap.NewNop())
 
 	resp, err := service.Resolve(context.Background(), &egressauth.ResolveRequest{
+		TeamID:    "team-1",
 		SandboxID: "sbx-1",
 		AuthRef:   "example-api",
 		Protocol:  "tls",

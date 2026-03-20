@@ -183,14 +183,17 @@ spec:
                       In block-all mode, allowed* fields are enforced and denied* fields are ignored.
                     properties:
                       allowedCidrs:
+                        description: 'Deprecated: use TrafficRules instead.'
                         items:
                           type: string
                         type: array
                       allowedDomains:
+                        description: 'Deprecated: use TrafficRules instead.'
                         items:
                           type: string
                         type: array
                       allowedPorts:
+                        description: 'Deprecated: use TrafficRules instead.'
                         items:
                           description: PortSpec defines a port specification
                           properties:
@@ -209,34 +212,7 @@ spec:
                           - port
                           type: object
                         type: array
-                      deniedCidrs:
-                        items:
-                          type: string
-                        type: array
-                      deniedDomains:
-                        items:
-                          type: string
-                        type: array
-                      deniedPorts:
-                        items:
-                          description: PortSpec defines a port specification
-                          properties:
-                            endPort:
-                              description: EndPort for port ranges (optional)
-                              format: int32
-                              type: integer
-                            port:
-                              description: Port number
-                              format: int32
-                              type: integer
-                            protocol:
-                              description: Protocol (tcp or udp)
-                              type: string
-                          required:
-                          - port
-                          type: object
-                        type: array
-                      rules:
+                      credentialRules:
                         items:
                           description: EgressCredentialRule defines a credential injection
                             rule matched against outbound traffic.
@@ -294,6 +270,93 @@ spec:
                               type: string
                           required:
                           - credentialRef
+                          type: object
+                        type: array
+                      deniedCidrs:
+                        description: 'Deprecated: use TrafficRules instead.'
+                        items:
+                          type: string
+                        type: array
+                      deniedDomains:
+                        description: 'Deprecated: use TrafficRules instead.'
+                        items:
+                          type: string
+                        type: array
+                      deniedPorts:
+                        description: 'Deprecated: use TrafficRules instead.'
+                        items:
+                          description: PortSpec defines a port specification
+                          properties:
+                            endPort:
+                              description: EndPort for port ranges (optional)
+                              format: int32
+                              type: integer
+                            port:
+                              description: Port number
+                              format: int32
+                              type: integer
+                            protocol:
+                              description: Protocol (tcp or udp)
+                              type: string
+                          required:
+                          - port
+                          type: object
+                        type: array
+                      trafficRules:
+                        items:
+                          description: TrafficRule defines one ordered egress allow/deny
+                            matcher.
+                          properties:
+                            action:
+                              description: Action defines whether matching traffic
+                                is allowed or denied.
+                              type: string
+                            appProtocols:
+                              description: AppProtocols constrains the rule to classified
+                                application protocols.
+                              items:
+                                description: TrafficRuleAppProtocol defines the classified
+                                  application protocol matched by one traffic rule.
+                                type: string
+                              type: array
+                            cidrs:
+                              description: CIDRs matches outbound destinations by
+                                IP range.
+                              items:
+                                type: string
+                              type: array
+                            domains:
+                              description: Domains matches outbound destinations by
+                                DNS name or wildcard suffix.
+                              items:
+                                type: string
+                              type: array
+                            name:
+                              description: Name is an optional stable identifier used
+                                for merge and replacement.
+                              type: string
+                            ports:
+                              description: Ports constrains the rule to specific ports/protocols.
+                              items:
+                                description: PortSpec defines a port specification
+                                properties:
+                                  endPort:
+                                    description: EndPort for port ranges (optional)
+                                    format: int32
+                                    type: integer
+                                  port:
+                                    description: Port number
+                                    format: int32
+                                    type: integer
+                                  protocol:
+                                    description: Protocol (tcp or udp)
+                                    type: string
+                                required:
+                                - port
+                                type: object
+                              type: array
+                          required:
+                          - action
                           type: object
                         type: array
                     type: object

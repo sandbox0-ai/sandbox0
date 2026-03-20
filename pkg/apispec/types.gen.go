@@ -48,13 +48,13 @@ const (
 
 // Defines values for EgressAuthProtocol.
 const (
-	Grpc   EgressAuthProtocol = "grpc"
-	Http   EgressAuthProtocol = "http"
-	Https  EgressAuthProtocol = "https"
-	Mqtt   EgressAuthProtocol = "mqtt"
-	Redis  EgressAuthProtocol = "redis"
-	Socks5 EgressAuthProtocol = "socks5"
-	Tls    EgressAuthProtocol = "tls"
+	EgressAuthProtocolGrpc   EgressAuthProtocol = "grpc"
+	EgressAuthProtocolHttp   EgressAuthProtocol = "http"
+	EgressAuthProtocolHttps  EgressAuthProtocol = "https"
+	EgressAuthProtocolMqtt   EgressAuthProtocol = "mqtt"
+	EgressAuthProtocolRedis  EgressAuthProtocol = "redis"
+	EgressAuthProtocolSocks5 EgressAuthProtocol = "socks5"
+	EgressAuthProtocolTls    EgressAuthProtocol = "tls"
 )
 
 // Defines values for EgressAuthRolloutMode.
@@ -371,6 +371,26 @@ const (
 const (
 	TplSandboxNetworkPolicyModeAllowAll TplSandboxNetworkPolicyMode = "allow-all"
 	TplSandboxNetworkPolicyModeBlockAll TplSandboxNetworkPolicyMode = "block-all"
+)
+
+// Defines values for TrafficRuleAction.
+const (
+	Allow TrafficRuleAction = "allow"
+	Deny  TrafficRuleAction = "deny"
+)
+
+// Defines values for TrafficRuleAppProtocol.
+const (
+	TrafficRuleAppProtocolAmqp    TrafficRuleAppProtocol = "amqp"
+	TrafficRuleAppProtocolDns     TrafficRuleAppProtocol = "dns"
+	TrafficRuleAppProtocolHttp    TrafficRuleAppProtocol = "http"
+	TrafficRuleAppProtocolMongodb TrafficRuleAppProtocol = "mongodb"
+	TrafficRuleAppProtocolMqtt    TrafficRuleAppProtocol = "mqtt"
+	TrafficRuleAppProtocolRedis   TrafficRuleAppProtocol = "redis"
+	TrafficRuleAppProtocolSocks5  TrafficRuleAppProtocol = "socks5"
+	TrafficRuleAppProtocolSsh     TrafficRuleAppProtocol = "ssh"
+	TrafficRuleAppProtocolTls     TrafficRuleAppProtocol = "tls"
+	TrafficRuleAppProtocolUdp     TrafficRuleAppProtocol = "udp"
 )
 
 // Defines values for UpdateTeamMemberRequestRole.
@@ -859,29 +879,41 @@ type MoveFileRequest struct {
 // NetworkEgressPolicy Egress rule set interpreted by the selected network mode.
 // In `allow-all`, only `denied*` fields are enforced.
 // In `block-all`, only `allowed*` fields are enforced.
+// `trafficRules` is a rule-based alternative and must not be combined
+// with the legacy `allowed*`/`denied*` fields.
 type NetworkEgressPolicy struct {
-	// AllowedCidrs CIDR allowlist used only when mode is `block-all`.
+	// AllowedCidrs Legacy CIDR allowlist used only when mode is `block-all`. Use `trafficRules` instead.
+	// Deprecated:
 	AllowedCidrs *[]string `json:"allowedCidrs,omitempty"`
 
-	// AllowedDomains Domain allowlist used only when mode is `block-all`.
+	// AllowedDomains Legacy domain allowlist used only when mode is `block-all`. Use `trafficRules` instead.
+	// Deprecated:
 	AllowedDomains *[]string `json:"allowedDomains,omitempty"`
 
-	// AllowedPorts Port/protocol allowlist used only when mode is `block-all`.
+	// AllowedPorts Legacy port/protocol allowlist used only when mode is `block-all`. Use `trafficRules` instead.
+	// Deprecated:
 	AllowedPorts *[]PortSpec `json:"allowedPorts,omitempty"`
 
-	// DeniedCidrs CIDR denylist used only when mode is `allow-all`.
-	DeniedCidrs *[]string `json:"deniedCidrs,omitempty"`
-
-	// DeniedDomains Domain denylist used only when mode is `allow-all`.
-	DeniedDomains *[]string `json:"deniedDomains,omitempty"`
-
-	// DeniedPorts Port/protocol denylist used only when mode is `allow-all`.
-	DeniedPorts *[]PortSpec `json:"deniedPorts,omitempty"`
-
-	// Rules Structured egress auth injection rules resolved by the manager runtime egress auth path.
+	// CredentialRules Structured egress auth injection rules resolved by the manager runtime egress auth path.
 	// These rules are orthogonal to allow/deny matching and are intended for
 	// destination-scoped outbound auth behavior.
-	Rules *[]EgressCredentialRule `json:"rules,omitempty"`
+	CredentialRules *[]EgressCredentialRule `json:"credentialRules,omitempty"`
+
+	// DeniedCidrs Legacy CIDR denylist used only when mode is `allow-all`. Use `trafficRules` instead.
+	// Deprecated:
+	DeniedCidrs *[]string `json:"deniedCidrs,omitempty"`
+
+	// DeniedDomains Legacy domain denylist used only when mode is `allow-all`. Use `trafficRules` instead.
+	// Deprecated:
+	DeniedDomains *[]string `json:"deniedDomains,omitempty"`
+
+	// DeniedPorts Legacy port/protocol denylist used only when mode is `allow-all`. Use `trafficRules` instead.
+	// Deprecated:
+	DeniedPorts *[]PortSpec `json:"deniedPorts,omitempty"`
+
+	// TrafficRules Ordered egress allow/deny rules. The first matching rule wins and
+	// unmatched traffic falls back to `mode`.
+	TrafficRules *[]TrafficRule `json:"trafficRules,omitempty"`
 }
 
 // NodeAffinity defines model for NodeAffinity.
@@ -1144,6 +1176,8 @@ type SandboxNetworkPolicy struct {
 	// Egress Egress rule set interpreted by the selected network mode.
 	// In `allow-all`, only `denied*` fields are enforced.
 	// In `block-all`, only `allowed*` fields are enforced.
+	// `trafficRules` is a rule-based alternative and must not be combined
+	// with the legacy `allowed*`/`denied*` fields.
 	Egress *NetworkEgressPolicy     `json:"egress,omitempty"`
 	Mode   SandboxNetworkPolicyMode `json:"mode"`
 }
@@ -1903,12 +1937,40 @@ type TplSandboxNetworkPolicy struct {
 	// Egress Egress rule set interpreted by the selected network mode.
 	// In `allow-all`, only `denied*` fields are enforced.
 	// In `block-all`, only `allowed*` fields are enforced.
+	// `trafficRules` is a rule-based alternative and must not be combined
+	// with the legacy `allowed*`/`denied*` fields.
 	Egress *NetworkEgressPolicy        `json:"egress,omitempty"`
 	Mode   TplSandboxNetworkPolicyMode `json:"mode"`
 }
 
 // TplSandboxNetworkPolicyMode defines model for TplSandboxNetworkPolicy.Mode.
 type TplSandboxNetworkPolicyMode string
+
+// TrafficRule defines model for TrafficRule.
+type TrafficRule struct {
+	Action TrafficRuleAction `json:"action"`
+
+	// AppProtocols Classified application protocols matched by the rule.
+	AppProtocols *[]TrafficRuleAppProtocol `json:"appProtocols,omitempty"`
+
+	// Cidrs CIDR match list for the rule.
+	Cidrs *[]string `json:"cidrs,omitempty"`
+
+	// Domains Domain match list for the rule.
+	Domains *[]string `json:"domains,omitempty"`
+
+	// Name Optional stable identifier used for merge and replacement.
+	Name *string `json:"name,omitempty"`
+
+	// Ports Port/protocol constraints for the rule.
+	Ports *[]PortSpec `json:"ports,omitempty"`
+}
+
+// TrafficRuleAction defines model for TrafficRuleAction.
+type TrafficRuleAction string
+
+// TrafficRuleAppProtocol defines model for TrafficRuleAppProtocol.
+type TrafficRuleAppProtocol string
 
 // UnmountRequest defines model for UnmountRequest.
 type UnmountRequest struct {

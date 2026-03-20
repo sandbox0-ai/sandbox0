@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -55,11 +56,18 @@ func (s *NetworkPolicyService) BuildNetworkPolicyState(req *BuildNetworkPolicyRe
 		mergedSpec = &v1alpha1.TplSandboxNetworkPolicy{Mode: v1alpha1.NetworkModeAllowAll}
 	}
 	mergedBindings := mergeCredentialBindings(req.TemplateBindings, req.RequestBindings)
+	if err := validateTrafficRuleConfig(mergedSpec); err != nil {
+		s.logger.Warn("Ignoring invalid traffic rules", zap.Error(err))
+		mergedSpec = mergedSpec.DeepCopy()
+		if mergedSpec.Egress != nil {
+			mergedSpec.Egress.TrafficRules = nil
+		}
+	}
 	if err := validateNetworkCredentialConfig(mergedSpec, mergedBindings); err != nil {
 		s.logger.Warn("Ignoring invalid credential bindings and rules", zap.Error(err))
 		mergedSpec = mergedSpec.DeepCopy()
 		if mergedSpec.Egress != nil {
-			mergedSpec.Egress.Rules = nil
+			mergedSpec.Egress.CredentialRules = nil
 		}
 		mergedBindings = nil
 	}
@@ -108,10 +116,43 @@ func (s *NetworkPolicyService) mergeNetworkPolicies(
 			merged.Egress.DeniedDomains = append(merged.Egress.DeniedDomains, request.Egress.DeniedDomains...)
 			merged.Egress.AllowedPorts = append(merged.Egress.AllowedPorts, request.Egress.AllowedPorts...)
 			merged.Egress.DeniedPorts = append(merged.Egress.DeniedPorts, request.Egress.DeniedPorts...)
-			merged.Egress.Rules = mergeEgressCredentialRules(merged.Egress.Rules, request.Egress.Rules)
+			merged.Egress.TrafficRules = mergeTrafficRules(merged.Egress.TrafficRules, request.Egress.TrafficRules)
+			merged.Egress.CredentialRules = mergeEgressCredentialRules(merged.Egress.CredentialRules, request.Egress.CredentialRules)
 		}
 	}
 	return merged
+}
+
+func mergeTrafficRules(base, override []v1alpha1.TrafficRule) []v1alpha1.TrafficRule {
+	if len(base) == 0 && len(override) == 0 {
+		return nil
+	}
+	if len(base) == 0 {
+		return append([]v1alpha1.TrafficRule(nil), override...)
+	}
+	if len(override) == 0 {
+		return append([]v1alpha1.TrafficRule(nil), base...)
+	}
+
+	out := append([]v1alpha1.TrafficRule(nil), base...)
+	indexByName := make(map[string]int, len(base))
+	for i, rule := range out {
+		if rule.Name == "" {
+			continue
+		}
+		indexByName[rule.Name] = i
+	}
+	for _, rule := range override {
+		if rule.Name != "" {
+			if idx, ok := indexByName[rule.Name]; ok {
+				out[idx] = rule
+				continue
+			}
+			indexByName[rule.Name] = len(out)
+		}
+		out = append(out, rule)
+	}
+	return out
 }
 
 func mergeEgressCredentialRules(base, override []v1alpha1.EgressCredentialRule) []v1alpha1.EgressCredentialRule {
@@ -178,11 +219,45 @@ func mergeCredentialBindings(base, override []v1alpha1.CredentialBinding) []v1al
 	return out
 }
 
+func validateTrafficRuleConfig(policy *v1alpha1.TplSandboxNetworkPolicy) error {
+	if policy == nil {
+		return nil
+	}
+	if policy.Egress == nil {
+		return nil
+	}
+	if len(policy.Egress.TrafficRules) > 0 && hasLegacyTrafficLists(policy.Egress) {
+		return fmt.Errorf("egress trafficRules cannot be combined with legacy allowed*/denied* fields")
+	}
+
+	seenTrafficRuleNames := make(map[string]struct{}, len(policy.Egress.TrafficRules))
+	for _, rule := range policy.Egress.TrafficRules {
+		switch rule.Action {
+		case v1alpha1.TrafficRuleActionAllow, v1alpha1.TrafficRuleActionDeny:
+		default:
+			return fmt.Errorf("egress traffic rule %q has unsupported action %q", rule.Name, rule.Action)
+		}
+		if len(rule.CIDRs) == 0 && len(rule.Domains) == 0 && len(rule.Ports) == 0 && len(rule.AppProtocols) == 0 {
+			return fmt.Errorf("egress traffic rule %q must define at least one matcher", rule.Name)
+		}
+		if err := validateTrafficRule(rule); err != nil {
+			return fmt.Errorf("egress traffic rule %q is invalid: %w", rule.Name, err)
+		}
+		if rule.Name == "" {
+			continue
+		}
+		if _, ok := seenTrafficRuleNames[rule.Name]; ok {
+			return fmt.Errorf("duplicate egress traffic rule name %q", rule.Name)
+		}
+		seenTrafficRuleNames[rule.Name] = struct{}{}
+	}
+	return nil
+}
+
 func validateNetworkCredentialConfig(policy *v1alpha1.TplSandboxNetworkPolicy, bindings []v1alpha1.CredentialBinding) error {
 	if policy == nil {
 		return nil
 	}
-
 	bindingRefs := make(map[string]struct{})
 	bindingProjectionTypes := make(map[string]v1alpha1.CredentialProjectionType, len(bindings))
 	for _, binding := range bindings {
@@ -212,8 +287,8 @@ func validateNetworkCredentialConfig(policy *v1alpha1.TplSandboxNetworkPolicy, b
 		return nil
 	}
 
-	seenNames := make(map[string]struct{}, len(policy.Egress.Rules))
-	for _, rule := range policy.Egress.Rules {
+	seenNames := make(map[string]struct{}, len(policy.Egress.CredentialRules))
+	for _, rule := range policy.Egress.CredentialRules {
 		if rule.CredentialRef == "" {
 			return fmt.Errorf("egress rule credentialRef is required")
 		}
@@ -242,6 +317,61 @@ func validateNetworkCredentialConfig(policy *v1alpha1.TplSandboxNetworkPolicy, b
 			return fmt.Errorf("duplicate egress rule name %q", rule.Name)
 		}
 		seenNames[rule.Name] = struct{}{}
+	}
+	return nil
+}
+
+func hasLegacyTrafficLists(egress *v1alpha1.NetworkEgressPolicy) bool {
+	if egress == nil {
+		return false
+	}
+	return len(egress.AllowedCIDRs) > 0 ||
+		len(egress.AllowedDomains) > 0 ||
+		len(egress.DeniedCIDRs) > 0 ||
+		len(egress.DeniedDomains) > 0 ||
+		len(egress.AllowedPorts) > 0 ||
+		len(egress.DeniedPorts) > 0
+}
+
+func validateTrafficRule(rule v1alpha1.TrafficRule) error {
+	for _, cidr := range rule.CIDRs {
+		value := strings.TrimSpace(cidr)
+		if value == "" {
+			continue
+		}
+		if _, _, err := net.ParseCIDR(value); err != nil {
+			return fmt.Errorf("invalid CIDR %q", cidr)
+		}
+	}
+	for _, domain := range rule.Domains {
+		value := strings.ToLower(strings.TrimSpace(domain))
+		if value == "" {
+			continue
+		}
+		if strings.HasPrefix(value, "*.") && strings.TrimPrefix(value, "*.") == "" {
+			return fmt.Errorf("invalid wildcard domain %q", domain)
+		}
+	}
+	for _, port := range rule.Ports {
+		if port.Port <= 0 || port.Port > 65535 {
+			return fmt.Errorf("invalid port %d", port.Port)
+		}
+		if port.EndPort != nil {
+			if *port.EndPort < port.Port || *port.EndPort > 65535 {
+				return fmt.Errorf("invalid end port %d", *port.EndPort)
+			}
+		}
+		proto := strings.ToLower(strings.TrimSpace(port.Protocol))
+		if proto != "" && proto != "tcp" && proto != "udp" {
+			return fmt.Errorf("unsupported protocol %q", port.Protocol)
+		}
+	}
+	for _, appProtocol := range rule.AppProtocols {
+		switch strings.ToLower(strings.TrimSpace(string(appProtocol))) {
+		case "http", "tls", "ssh", "socks5", "mqtt", "redis", "amqp", "dns", "mongodb", "udp":
+		default:
+			return fmt.Errorf("unsupported app protocol %q", appProtocol)
+		}
 	}
 	return nil
 }

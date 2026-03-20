@@ -17,7 +17,7 @@ func TestCompileNetworkPolicy(t *testing.T) {
 			AllowedPorts: []v1alpha1.PortSpec{
 				{Port: 80, Protocol: "tcp"},
 			},
-			Rules: []v1alpha1.EgressCredentialRule{
+			CredentialRules: []v1alpha1.EgressCredentialRule{
 				{
 					Name:          "example-http",
 					CredentialRef: "example-api",
@@ -70,17 +70,20 @@ func TestCompileNetworkPolicy(t *testing.T) {
 	if compiled.Mode != v1alpha1.NetworkModeBlockAll {
 		t.Fatalf("unexpected mode: %v", compiled.Mode)
 	}
-	if len(compiled.Egress.AllowedCIDRs) != 1 {
-		t.Fatalf("expected allowed cidrs")
+	if len(compiled.Egress.TrafficRules) != 1 {
+		t.Fatalf("expected one normalized traffic rule, got %d", len(compiled.Egress.TrafficRules))
 	}
-	if len(compiled.Egress.DeniedCIDRs) != 1 {
-		t.Fatalf("expected denied cidrs")
+	if compiled.Egress.TrafficRules[0].Action != v1alpha1.TrafficRuleActionAllow {
+		t.Fatalf("unexpected traffic rule action: %s", compiled.Egress.TrafficRules[0].Action)
 	}
-	if len(compiled.Egress.AllowedDomains) != 2 {
-		t.Fatalf("expected allowed domains")
+	if len(compiled.Egress.TrafficRules[0].CIDRs) != 1 {
+		t.Fatalf("expected normalized allowed cidrs")
 	}
-	if len(compiled.Egress.AllowedPorts) != 1 {
-		t.Fatalf("expected allowed ports")
+	if len(compiled.Egress.TrafficRules[0].Domains) != 2 {
+		t.Fatalf("expected normalized allowed domains")
+	}
+	if len(compiled.Egress.TrafficRules[0].Ports) != 1 {
+		t.Fatalf("expected normalized allowed ports")
 	}
 	if len(compiled.Egress.AuthRules) != 5 {
 		t.Fatalf("expected auth rules")
@@ -93,5 +96,101 @@ func TestCompileNetworkPolicy(t *testing.T) {
 	}
 	if compiled.Egress.AuthRules[4].Protocol != v1alpha1.EgressAuthProtocolRedis {
 		t.Fatalf("unexpected fifth auth rule protocol: %s", compiled.Egress.AuthRules[4].Protocol)
+	}
+}
+
+func TestCompileNetworkPolicyTrafficRules(t *testing.T) {
+	spec := &v1alpha1.NetworkPolicySpec{
+		Mode: v1alpha1.NetworkModeBlockAll,
+		Egress: &v1alpha1.NetworkEgressPolicy{
+			TrafficRules: []v1alpha1.TrafficRule{
+				{
+					Name:    "allow-github-https",
+					Action:  v1alpha1.TrafficRuleActionAllow,
+					Domains: []string{"github.com"},
+					Ports:   []v1alpha1.PortSpec{{Port: 443, Protocol: "tcp"}},
+				},
+				{
+					Name:         "deny-private",
+					Action:       v1alpha1.TrafficRuleActionDeny,
+					CIDRs:        []string{"10.0.0.0/8"},
+					AppProtocols: []v1alpha1.TrafficRuleAppProtocol{v1alpha1.TrafficRuleAppProtocolSSH},
+				},
+			},
+		},
+	}
+
+	compiled, err := CompileNetworkPolicy(spec)
+	if err != nil {
+		t.Fatalf("compile failed: %v", err)
+	}
+	if len(compiled.Egress.TrafficRules) != 2 {
+		t.Fatalf("traffic rule count = %d, want 2", len(compiled.Egress.TrafficRules))
+	}
+	if compiled.Egress.TrafficRules[0].Action != v1alpha1.TrafficRuleActionAllow {
+		t.Fatalf("unexpected first traffic rule action: %s", compiled.Egress.TrafficRules[0].Action)
+	}
+	if len(compiled.Egress.TrafficRules[0].Domains) != 1 {
+		t.Fatalf("expected compiled traffic rule domains")
+	}
+	if len(compiled.Egress.TrafficRules[1].AppProtocols) != 1 || compiled.Egress.TrafficRules[1].AppProtocols[0] != "ssh" {
+		t.Fatalf("expected compiled traffic rule app protocols, got %#v", compiled.Egress.TrafficRules[1].AppProtocols)
+	}
+}
+
+func TestCompileNetworkPolicyLegacyAllowAllNormalizesToDenyTrafficRules(t *testing.T) {
+	spec := &v1alpha1.NetworkPolicySpec{
+		Mode: v1alpha1.NetworkModeAllowAll,
+		Egress: &v1alpha1.NetworkEgressPolicy{
+			DeniedCIDRs:   []string{"10.0.0.0/8"},
+			DeniedDomains: []string{"blocked.example.com"},
+			DeniedPorts:   []v1alpha1.PortSpec{{Port: 25, Protocol: "tcp"}},
+		},
+	}
+
+	compiled, err := CompileNetworkPolicy(spec)
+	if err != nil {
+		t.Fatalf("compile failed: %v", err)
+	}
+	if len(compiled.Egress.TrafficRules) != 3 {
+		t.Fatalf("traffic rule count = %d, want 3", len(compiled.Egress.TrafficRules))
+	}
+	for _, rule := range compiled.Egress.TrafficRules {
+		if rule.Action != v1alpha1.TrafficRuleActionDeny {
+			t.Fatalf("unexpected traffic rule action: %s", rule.Action)
+		}
+	}
+}
+
+func TestCompileNetworkPolicyRejectsMixedLegacyAndTrafficRules(t *testing.T) {
+	spec := &v1alpha1.NetworkPolicySpec{
+		Mode: v1alpha1.NetworkModeAllowAll,
+		Egress: &v1alpha1.NetworkEgressPolicy{
+			DeniedCIDRs: []string{"10.0.0.0/8"},
+			TrafficRules: []v1alpha1.TrafficRule{{
+				Action: v1alpha1.TrafficRuleActionDeny,
+				CIDRs:  []string{"192.168.0.0/16"},
+			}},
+		},
+	}
+
+	if _, err := CompileNetworkPolicy(spec); err == nil {
+		t.Fatal("expected mixed legacy and traffic rules to fail")
+	}
+}
+
+func TestCompileNetworkPolicyRejectsUnsupportedTrafficRuleAppProtocol(t *testing.T) {
+	spec := &v1alpha1.NetworkPolicySpec{
+		Mode: v1alpha1.NetworkModeBlockAll,
+		Egress: &v1alpha1.NetworkEgressPolicy{
+			TrafficRules: []v1alpha1.TrafficRule{{
+				Action:       v1alpha1.TrafficRuleActionAllow,
+				AppProtocols: []v1alpha1.TrafficRuleAppProtocol{"scp"},
+			}},
+		},
+	}
+
+	if _, err := CompileNetworkPolicy(spec); err == nil {
+		t.Fatal("expected unsupported app protocol to fail")
 	}
 }

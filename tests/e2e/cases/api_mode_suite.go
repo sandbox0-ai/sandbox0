@@ -38,10 +38,12 @@ type apiModeSuiteOptions struct {
 func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiModeSuiteOptions) {
 	Describe(opts.describe, Ordered, func() {
 		var (
-			env       *framework.ScenarioEnv
-			session   *e2eutils.Session
-			cleanup   func()
-			sandboxID string
+			env               *framework.ScenarioEnv
+			session           *e2eutils.Session
+			cleanup           func()
+			sandboxID         string
+			sshFixtureState   *sshFixture
+			sshFixtureCleanup func()
 		)
 
 		BeforeAll(func() {
@@ -60,6 +62,10 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 
 			waitForDefaultTemplateReady(env, session)
 
+			if opts.includeNetworkPolicy {
+				sshFixtureState, sshFixtureCleanup = setupSSHFixture(env)
+			}
+
 			resp := claimSandboxEventually(env, session, "default")
 			sandboxID = resp.SandboxId
 		})
@@ -67,6 +73,9 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 		AfterAll(func() {
 			if session != nil {
 				_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+			}
+			if sshFixtureCleanup != nil {
+				sshFixtureCleanup()
 			}
 			if cleanup != nil {
 				cleanup()
@@ -137,6 +146,10 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 
 				It("manages credential sources and binds them through sandbox network policy", func() {
 					assertCredentialSourceBindingLifecycle(env, session, sandboxID)
+				})
+
+				It("matches SSH app protocols through traffic rules", func() {
+					assertSSHAppProtocolTrafficRules(env, session, sandboxID, sshFixtureState)
 				})
 
 				It("blocks private sandbox traffic while preserving public exposure and cluster service access", func() {
@@ -610,11 +623,11 @@ func assertCredentialSourceBindingLifecycle(env *framework.ScenarioEnv, session 
 	policy, status, apiErr, err := session.UpdateNetworkPolicy(env.TestCtx.Context, GinkgoT(), sandboxID, apispec.SandboxNetworkPolicy{
 		Mode: apispec.SandboxNetworkPolicyModeAllowAll,
 		Egress: &apispec.NetworkEgressPolicy{
-			Rules: &[]apispec.EgressCredentialRule{{
+			CredentialRules: &[]apispec.EgressCredentialRule{{
 				Name:          &ruleName,
 				CredentialRef: refName,
 				Domains:       &domains,
-				Protocol:      ptrTo(apispec.Https),
+				Protocol:      ptrTo(apispec.EgressAuthProtocolHttps),
 				Rollout:       ptrTo(apispec.Enabled),
 			}},
 		},
@@ -641,9 +654,9 @@ func assertCredentialSourceBindingLifecycle(env *framework.ScenarioEnv, session 
 	Expect((*policy.CredentialBindings)[0].Ref).To(Equal(refName))
 	Expect((*policy.CredentialBindings)[0].SourceRef).To(Equal(sourceName))
 	Expect(policy.Egress).NotTo(BeNil())
-	Expect(policy.Egress.Rules).NotTo(BeNil())
-	Expect(*policy.Egress.Rules).To(HaveLen(1))
-	Expect((*policy.Egress.Rules)[0].CredentialRef).To(Equal(refName))
+	Expect(policy.Egress.CredentialRules).NotTo(BeNil())
+	Expect(*policy.Egress.CredentialRules).To(HaveLen(1))
+	Expect((*policy.Egress.CredentialRules)[0].CredentialRef).To(Equal(refName))
 
 	effective, status, apiErr, err := session.GetNetworkPolicy(env.TestCtx.Context, GinkgoT(), sandboxID)
 	Expect(err).NotTo(HaveOccurred())

@@ -4536,38 +4536,53 @@ components:
         Egress rule set interpreted by the selected network mode.
         In `allow-all`, only `denied*` fields are enforced.
         In `block-all`, only `allowed*` fields are enforced.
+        `trafficRules` is a rule-based alternative and must not be combined
+        with the legacy `allowed*`/`denied*` fields.
       properties:
         allowedCidrs:
           type: array
-          description: CIDR allowlist used only when mode is `block-all`.
+          deprecated: true
+          description: Legacy CIDR allowlist used only when mode is `block-all`. Use `trafficRules` instead.
           items:
             type: string
         allowedDomains:
           type: array
-          description: Domain allowlist used only when mode is `block-all`.
+          deprecated: true
+          description: Legacy domain allowlist used only when mode is `block-all`. Use `trafficRules` instead.
           items:
             type: string
         allowedPorts:
           type: array
-          description: Port/protocol allowlist used only when mode is `block-all`.
+          deprecated: true
+          description: Legacy port/protocol allowlist used only when mode is `block-all`. Use `trafficRules` instead.
           items:
             $ref: "#/components/schemas/PortSpec"
         deniedDomains:
           type: array
-          description: Domain denylist used only when mode is `allow-all`.
+          deprecated: true
+          description: Legacy domain denylist used only when mode is `allow-all`. Use `trafficRules` instead.
           items:
             type: string
         deniedCidrs:
           type: array
-          description: CIDR denylist used only when mode is `allow-all`.
+          deprecated: true
+          description: Legacy CIDR denylist used only when mode is `allow-all`. Use `trafficRules` instead.
           items:
             type: string
         deniedPorts:
           type: array
-          description: Port/protocol denylist used only when mode is `allow-all`.
+          deprecated: true
+          description: Legacy port/protocol denylist used only when mode is `allow-all`. Use `trafficRules` instead.
           items:
             $ref: "#/components/schemas/PortSpec"
-        rules:
+        trafficRules:
+          type: array
+          description: |
+            Ordered egress allow/deny rules. The first matching rule wins and
+            unmatched traffic falls back to `mode`.
+          items:
+            $ref: "#/components/schemas/TrafficRule"
+        credentialRules:
           type: array
           description: |
             Structured egress auth injection rules resolved by the manager runtime egress auth path.
@@ -4575,6 +4590,41 @@ components:
             destination-scoped outbound auth behavior.
           items:
             $ref: "#/components/schemas/EgressCredentialRule"
+    TrafficRule:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Optional stable identifier used for merge and replacement.
+        action:
+          $ref: "#/components/schemas/TrafficRuleAction"
+        cidrs:
+          type: array
+          description: CIDR match list for the rule.
+          items:
+            type: string
+        domains:
+          type: array
+          description: Domain match list for the rule.
+          items:
+            type: string
+        ports:
+          type: array
+          description: Port/protocol constraints for the rule.
+          items:
+            $ref: "#/components/schemas/PortSpec"
+        appProtocols:
+          type: array
+          description: Classified application protocols matched by the rule.
+          items:
+            $ref: "#/components/schemas/TrafficRuleAppProtocol"
+      required: [action]
+    TrafficRuleAction:
+      type: string
+      enum: [allow, deny]
+    TrafficRuleAppProtocol:
+      type: string
+      enum: [http, tls, ssh, socks5, mqtt, redis, amqp, dns, mongodb, udp]
     EgressCredentialRule:
       type: object
       properties:

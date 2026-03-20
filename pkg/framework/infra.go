@@ -38,7 +38,7 @@ func EnsureNamespace(ctx context.Context, kubeconfig, namespace string) error {
 	}
 	fmt.Printf("Ensuring namespace %q exists...\n", namespace)
 	manifest := fmt.Sprintf("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: %s\n", namespace)
-	return applyManifestFromString(ctx, kubeconfig, "sandbox0-e2e-namespace-", manifest)
+	return ApplyManifestContent(ctx, kubeconfig, "sandbox0-e2e-namespace-", manifest)
 }
 
 func ApplySecret(ctx context.Context, kubeconfig string, spec SecretSpec) error {
@@ -70,7 +70,7 @@ func ApplySecret(ctx context.Context, kubeconfig string, spec SecretSpec) error 
 		manifest.WriteString(fmt.Sprintf("  %s: %q\n", key, spec.StringData[key]))
 	}
 
-	return applyManifestFromString(ctx, kubeconfig, "sandbox0-e2e-secret-", manifest.String())
+	return ApplyManifestContent(ctx, kubeconfig, "sandbox0-e2e-secret-", manifest.String())
 }
 
 func ApplyInfraControlPlaneSecrets(ctx context.Context, kubeconfig, namespace string) error {
@@ -179,7 +179,7 @@ func AdminPasswordSecret(namespace string) SecretSpec {
 	}
 }
 
-func applyManifestFromString(ctx context.Context, kubeconfig, prefix, content string) error {
+func ApplyManifestContent(ctx context.Context, kubeconfig, prefix, content string) error {
 	file, err := os.CreateTemp("", prefix)
 	if err != nil {
 		return err

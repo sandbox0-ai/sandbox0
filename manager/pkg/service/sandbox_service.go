@@ -1515,13 +1515,14 @@ func networkPolicyFromSpec(spec *v1alpha1.NetworkPolicySpec) *v1alpha1.TplSandbo
 	}
 
 	var (
-		egressAllowedCIDRs   []string
-		egressDeniedCIDRs    []string
-		egressAllowedDomains []string
-		egressDeniedDomains  []string
-		egressAllowedPorts   []v1alpha1.PortSpec
-		egressDeniedPorts    []v1alpha1.PortSpec
-		egressRules          []v1alpha1.EgressCredentialRule
+		egressAllowedCIDRs    []string
+		egressDeniedCIDRs     []string
+		egressAllowedDomains  []string
+		egressDeniedDomains   []string
+		egressAllowedPorts    []v1alpha1.PortSpec
+		egressDeniedPorts     []v1alpha1.PortSpec
+		egressTrafficRules    []v1alpha1.TrafficRule
+		egressCredentialRules []v1alpha1.EgressCredentialRule
 	)
 	if spec.Egress != nil {
 		egressAllowedCIDRs = append(egressAllowedCIDRs, spec.Egress.AllowedCIDRs...)
@@ -1530,7 +1531,8 @@ func networkPolicyFromSpec(spec *v1alpha1.NetworkPolicySpec) *v1alpha1.TplSandbo
 		egressDeniedDomains = append(egressDeniedDomains, spec.Egress.DeniedDomains...)
 		egressAllowedPorts = append(egressAllowedPorts, spec.Egress.AllowedPorts...)
 		egressDeniedPorts = append(egressDeniedPorts, spec.Egress.DeniedPorts...)
-		egressRules = append(egressRules, spec.Egress.Rules...)
+		egressTrafficRules = append(egressTrafficRules, spec.Egress.TrafficRules...)
+		egressCredentialRules = append(egressCredentialRules, spec.Egress.CredentialRules...)
 	}
 
 	mode := v1alpha1.NetworkModeAllowAll
@@ -1541,15 +1543,16 @@ func networkPolicyFromSpec(spec *v1alpha1.NetworkPolicySpec) *v1alpha1.TplSandbo
 	policy := &v1alpha1.TplSandboxNetworkPolicy{
 		Mode: mode,
 	}
-	if len(egressAllowedCIDRs)+len(egressDeniedCIDRs)+len(egressAllowedDomains)+len(egressDeniedDomains)+len(egressAllowedPorts)+len(egressDeniedPorts)+len(egressRules) > 0 {
+	if len(egressAllowedCIDRs)+len(egressDeniedCIDRs)+len(egressAllowedDomains)+len(egressDeniedDomains)+len(egressAllowedPorts)+len(egressDeniedPorts)+len(egressTrafficRules)+len(egressCredentialRules) > 0 {
 		policy.Egress = &v1alpha1.NetworkEgressPolicy{
-			AllowedCIDRs:   egressAllowedCIDRs,
-			DeniedCIDRs:    egressDeniedCIDRs,
-			AllowedDomains: egressAllowedDomains,
-			DeniedDomains:  egressDeniedDomains,
-			AllowedPorts:   egressAllowedPorts,
-			DeniedPorts:    egressDeniedPorts,
-			Rules:          egressRules,
+			AllowedCIDRs:    egressAllowedCIDRs,
+			DeniedCIDRs:     egressDeniedCIDRs,
+			AllowedDomains:  egressAllowedDomains,
+			DeniedDomains:   egressDeniedDomains,
+			AllowedPorts:    egressAllowedPorts,
+			DeniedPorts:     egressDeniedPorts,
+			TrafficRules:    egressTrafficRules,
+			CredentialRules: egressCredentialRules,
 		}
 	}
 

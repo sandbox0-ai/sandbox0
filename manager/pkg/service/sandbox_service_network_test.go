@@ -162,7 +162,7 @@ func testCredentialPolicy(ref string) *v1alpha1.TplSandboxNetworkPolicy {
 	return &v1alpha1.TplSandboxNetworkPolicy{
 		Mode: v1alpha1.NetworkModeBlockAll,
 		Egress: &v1alpha1.NetworkEgressPolicy{
-			Rules: []v1alpha1.EgressCredentialRule{{
+			CredentialRules: []v1alpha1.EgressCredentialRule{{
 				Name:          "example-api",
 				CredentialRef: ref,
 				Protocol:      v1alpha1.EgressAuthProtocolHTTPS,
@@ -293,8 +293,8 @@ func TestUpdateNetworkPolicyStoresBindingsOutsidePodConfig(t *testing.T) {
 			assert.Equal(t, "example-ref", record.Bindings[0].Ref)
 			require.NotNil(t, input.NetworkPolicy)
 			require.NotNil(t, input.NetworkPolicy.Egress)
-			require.Len(t, input.NetworkPolicy.Egress.Rules, 1)
-			assert.Equal(t, "example-ref", input.NetworkPolicy.Egress.Rules[0].CredentialRef)
+			require.Len(t, input.NetworkPolicy.Egress.CredentialRules, 1)
+			assert.Equal(t, "example-ref", input.NetworkPolicy.Egress.CredentialRules[0].CredentialRef)
 		},
 	}
 

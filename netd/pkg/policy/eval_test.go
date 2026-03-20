@@ -57,10 +57,10 @@ func TestAllowEgressDestinationBlockAllDomainOnly(t *testing.T) {
 			AllowedDomains: []DomainRule{{Pattern: "example.com", Type: DomainMatchExact}},
 		},
 	}
-	if !AllowEgressDestination(p, net.ParseIP("8.8.8.8"), 443, "tcp", "example.com") {
+	if !AllowEgressDestination(p, net.ParseIP("8.8.8.8"), 443, "tcp", "example.com", "http") {
 		t.Fatalf("expected classified domain traffic to pass L4 phase")
 	}
-	if AllowEgressDestination(p, net.ParseIP("8.8.8.8"), 443, "tcp", "") {
+	if AllowEgressDestination(p, net.ParseIP("8.8.8.8"), 443, "tcp", "", "") {
 		t.Fatalf("expected hostless traffic to fail closed without L4 allow list")
 	}
 }
@@ -72,10 +72,10 @@ func TestAllowEgressDestinationBlockAllPlatformDomainOnly(t *testing.T) {
 			AllowedDomains: []DomainRule{{Pattern: "platform.example.com", Type: DomainMatchExact}},
 		},
 	}
-	if !AllowEgressDestination(p, net.ParseIP("8.8.8.8"), 443, "tcp", "platform.example.com") {
+	if !AllowEgressDestination(p, net.ParseIP("8.8.8.8"), 443, "tcp", "platform.example.com", "http") {
 		t.Fatalf("expected platform-classified domain traffic to pass L4 phase")
 	}
-	if AllowEgressDestination(p, net.ParseIP("8.8.8.8"), 443, "tcp", "") {
+	if AllowEgressDestination(p, net.ParseIP("8.8.8.8"), 443, "tcp", "", "") {
 		t.Fatalf("expected hostless traffic to fail closed without explicit domain host")
 	}
 }
@@ -117,6 +117,86 @@ func TestAllowEgressDomainAllowAllDeniedList(t *testing.T) {
 	}
 	if AllowEgressDomain(p, "example.com") != true {
 		t.Fatalf("expected allow without deny match")
+	}
+}
+
+func TestTrafficRulesFirstMatchWins(t *testing.T) {
+	p := &CompiledPolicy{
+		Mode: v1alpha1.NetworkModeAllowAll,
+		Egress: CompiledRuleSet{
+			TrafficRules: []CompiledTrafficRule{
+				{
+					Name:   "deny-example",
+					Action: v1alpha1.TrafficRuleActionDeny,
+					Domains: []DomainRule{
+						{Pattern: "example.com", Type: DomainMatchExact},
+					},
+				},
+				{
+					Name:   "allow-example-https",
+					Action: v1alpha1.TrafficRuleActionAllow,
+					Domains: []DomainRule{
+						{Pattern: "example.com", Type: DomainMatchExact},
+					},
+					Ports: []PortRange{{Protocol: "tcp", Start: 443, End: 443}},
+				},
+			},
+		},
+	}
+	if AllowEgressDestination(p, net.ParseIP("8.8.8.8"), 443, "tcp", "example.com", "http") {
+		t.Fatalf("expected first matching deny rule to win")
+	}
+}
+
+func TestTrafficRulesModeFallback(t *testing.T) {
+	allowAll := &CompiledPolicy{
+		Mode: v1alpha1.NetworkModeAllowAll,
+		Egress: CompiledRuleSet{
+			TrafficRules: []CompiledTrafficRule{{
+				Name:   "deny-private",
+				Action: v1alpha1.TrafficRuleActionDeny,
+				CIDRs:  []*net.IPNet{mustCIDR("10.0.0.0/8")},
+			}},
+		},
+	}
+	if !AllowEgressDestination(allowAll, net.ParseIP("8.8.8.8"), 443, "tcp", "", "") {
+		t.Fatalf("expected unmatched allow-all traffic rules to fall back to allow")
+	}
+
+	blockAll := &CompiledPolicy{
+		Mode: v1alpha1.NetworkModeBlockAll,
+		Egress: CompiledRuleSet{
+			TrafficRules: []CompiledTrafficRule{{
+				Name:   "allow-github",
+				Action: v1alpha1.TrafficRuleActionAllow,
+				Domains: []DomainRule{
+					{Pattern: "github.com", Type: DomainMatchExact},
+				},
+			}},
+		},
+	}
+	if AllowEgressDestination(blockAll, net.ParseIP("8.8.8.8"), 443, "tcp", "example.com", "http") {
+		t.Fatalf("expected unmatched block-all traffic rules to fall back to deny")
+	}
+}
+
+func TestTrafficRulesMatchAppProtocol(t *testing.T) {
+	p := &CompiledPolicy{
+		Mode: v1alpha1.NetworkModeBlockAll,
+		Egress: CompiledRuleSet{
+			TrafficRules: []CompiledTrafficRule{{
+				Name:         "allow-ssh",
+				Action:       v1alpha1.TrafficRuleActionAllow,
+				Ports:        []PortRange{{Protocol: "tcp", Start: 22, End: 22}},
+				AppProtocols: []string{"ssh"},
+			}},
+		},
+	}
+	if !AllowEgressDestination(p, net.ParseIP("8.8.8.8"), 22, "tcp", "", "ssh") {
+		t.Fatalf("expected ssh traffic to match app protocol rule")
+	}
+	if AllowEgressDestination(p, net.ParseIP("8.8.8.8"), 22, "tcp", "", "http") {
+		t.Fatalf("expected non-ssh traffic to miss app protocol rule")
 	}
 }
 

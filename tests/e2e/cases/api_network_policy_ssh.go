@@ -202,6 +202,12 @@ func assertSSHAppProtocolTrafficRules(env *framework.ScenarioEnv, session *e2eut
 	serviceCIDR := fixture.ServiceIP + "/32"
 	sshCommand := buildSSHFixtureCommand(fixture)
 
+	_, status, apiErr, err := session.UpdateNetworkPolicy(env.TestCtx.Context, GinkgoT(), sandboxID, clearPolicy)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(apiErr).To(BeNil())
+	Expect(status).To(Equal(200))
+	assertSSHFixtureCommandEventuallySucceeds(env, templateNamespace, sandbox.PodName, sshCommand)
+
 	Expect(updateSandboxTrafficRulesPolicy(
 		env,
 		session,

@@ -919,6 +919,12 @@ spec:
                                 enabled:
                                   description: Enabled toggles the provider
                                   type: boolean
+                                externalAuthPortalUrl:
+                                  description: |-
+                                    ExternalAuthPortalURL, when set, redirects unauthenticated browser users to this URL
+                                    instead of initiating the OIDC flow directly. Use for deployments that host their own
+                                    login portal that handles OIDC initiation externally.
+                                  type: string
                                 id:
                                   description: ID is the unique identifier for the
                                     provider (e.g., "github", "google")
@@ -1180,6 +1186,12 @@ spec:
                                 enabled:
                                   description: Enabled toggles the provider
                                   type: boolean
+                                externalAuthPortalUrl:
+                                  description: |-
+                                    ExternalAuthPortalURL, when set, redirects unauthenticated browser users to this URL
+                                    instead of initiating the OIDC flow directly. Use for deployments that host their own
+                                    login portal that handles OIDC initiation externally.
+                                  type: string
                                 id:
                                   description: ID is the unique identifier for the
                                     provider (e.g., "github", "google")
@@ -1457,6 +1469,12 @@ spec:
                                 enabled:
                                   description: Enabled toggles the provider
                                   type: boolean
+                                externalAuthPortalUrl:
+                                  description: |-
+                                    ExternalAuthPortalURL, when set, redirects unauthenticated browser users to this URL
+                                    instead of initiating the OIDC flow directly. Use for deployments that host their own
+                                    login portal that handles OIDC initiation externally.
+                                  type: string
                                 id:
                                   description: ID is the unique identifier for the
                                     provider (e.g., "github", "google")

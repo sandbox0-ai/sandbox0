@@ -18,6 +18,7 @@ import (
 const (
 	ruleTableID = 100
 	mangleTable = "mangle"
+	natTable    = "nat"
 )
 
 type iptablesManager struct {
@@ -64,6 +65,15 @@ func (m *iptablesManager) Sync(ctx context.Context, sandboxIPs []string, bypassC
 	if err := m.ensureJump(ctx); err != nil {
 		return err
 	}
+	if err := m.ensureNATBypassChain(ctx); err != nil {
+		return err
+	}
+	if err := m.ensureNATBypassJump(ctx); err != nil {
+		return err
+	}
+	if err := m.syncNATBypassChain(ctx); err != nil {
+		return err
+	}
 	if err := m.syncIPSet(ctx, normalizeIPs(sandboxIPs)); err != nil {
 		return err
 	}
@@ -98,6 +108,9 @@ func (m *iptablesManager) Cleanup(ctx context.Context) error {
 	}
 	_ = m.ipt.DeleteIfExists(mangleTable, "PREROUTING", "-j", chainName)
 	_ = m.ipt.DeleteChain(mangleTable, chainName)
+	_ = m.ipt.DeleteIfExists(natTable, "PREROUTING", "-j", natChainName)
+	_ = m.ipt.ClearChain(natTable, natChainName)
+	_ = m.ipt.DeleteChain(natTable, natChainName)
 
 	// Cleanup ipset
 	cmd := exec.CommandContext(ctx, "ipset", "destroy", ipsetName)
@@ -126,6 +139,32 @@ func (m *iptablesManager) ensureJump(ctx context.Context) error {
 		return nil
 	}
 	return m.ipt.Append(mangleTable, "PREROUTING", "-j", chainName)
+}
+
+func (m *iptablesManager) ensureNATBypassChain(ctx context.Context) error {
+	_ = ctx
+	exists, err := m.ipt.ChainExists(natTable, natChainName)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	return m.ipt.NewChain(natTable, natChainName)
+}
+
+func (m *iptablesManager) ensureNATBypassJump(ctx context.Context) error {
+	_ = ctx
+	_ = m.ipt.DeleteIfExists(natTable, "PREROUTING", "-j", natChainName)
+	return m.ipt.Insert(natTable, "PREROUTING", 1, "-j", natChainName)
+}
+
+func (m *iptablesManager) syncNATBypassChain(ctx context.Context) error {
+	_ = ctx
+	if err := m.ipt.ClearChain(natTable, natChainName); err != nil {
+		return err
+	}
+	return m.ipt.Append(natTable, natChainName, natBypassRuleSpec()...)
 }
 
 func (m *iptablesManager) flushCustomChain(ctx context.Context) error {

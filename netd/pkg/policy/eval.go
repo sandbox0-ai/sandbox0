@@ -171,6 +171,22 @@ func HasDomainRules(policy *CompiledPolicy) bool {
 	return len(policy.Egress.AllowedDomains) > 0 || len(policy.Egress.DeniedDomains) > 0
 }
 
+func HasTrafficRuleAppProtocol(policy *CompiledPolicy, protocol string) bool {
+	if policy == nil {
+		return false
+	}
+	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	if protocol == "" {
+		return false
+	}
+	for _, rule := range policy.Egress.TrafficRules {
+		if matchString(protocol, rule.AppProtocols) {
+			return true
+		}
+	}
+	return false
+}
+
 func MatchEgressAuthRule(policy *CompiledPolicy, transport, protocol string, destPort int, host string) *CompiledEgressAuthRule {
 	if policy == nil || len(policy.Egress.AuthRules) == 0 {
 		return nil

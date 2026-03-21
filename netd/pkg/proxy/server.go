@@ -296,7 +296,11 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 	defer conn.Close()
 	origIP, origPort, err := originalDst(conn)
 	if err != nil {
-		s.logger.Warn("Failed to get original dst", zap.Error(err))
+		s.logger.Warn("Failed to get original dst",
+			zap.Error(err),
+			zap.String("local_addr", addrString(conn.LocalAddr())),
+			zap.String("remote_addr", addrString(conn.RemoteAddr())),
+		)
 		return
 	}
 
@@ -328,6 +332,7 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 		result.Apply(req)
 	}
 	result.Classification = verifyClassifiedHost(s.hostVerifier, p, result.Classification)
+	result.Classification = s.probeServerFirstSSH(req, result.Classification, ctx)
 	decision := decideTraffic(p, result.Classification)
 	fields := []zap.Field{}
 	if result.Error != nil {
@@ -406,17 +411,21 @@ func (s *Server) handleUDPDatagram(conn *net.UDPConn, src *net.UDPAddr, payload 
 }
 
 func (s *Server) pipeWithReader(client net.Conn, upstream net.Conn, reader io.Reader, compiled *policy.CompiledPolicy, audit *flowAudit) error {
+	return s.pipeWithReaders(client, upstream, reader, upstream, compiled, audit)
+}
+
+func (s *Server) pipeWithReaders(client net.Conn, upstream net.Conn, upstreamWriter io.Reader, downstreamWriter io.Reader, compiled *policy.CompiledPolicy, audit *flowAudit) error {
 	upstreamCounter := &countingWriter{writer: upstream}
 	clientCounter := &countingWriter{writer: client}
 	errCh := make(chan error, 2)
 	go func() {
-		n, err := io.Copy(upstreamCounter, reader)
+		n, err := io.Copy(upstreamCounter, upstreamWriter)
 		s.recordEgressBytes(compiled, n, audit)
 		closeConnWrite(upstream)
 		errCh <- err
 	}()
 	go func() {
-		n, err := io.Copy(clientCounter, upstream)
+		n, err := io.Copy(clientCounter, downstreamWriter)
 		s.recordIngressBytes(compiled, n, audit)
 		closeConnWrite(client)
 		errCh <- err
@@ -458,12 +467,14 @@ func (s *Server) handleTCPDecision(req *adapterRequest, decision trafficDecision
 	baseFields = append(baseFields, fields...)
 	switch decision.Action {
 	case decisionActionDeny:
+		closeProbedUpstream(req)
 		s.logger.Info("TCP decision denied", baseFields...)
 		s.recordAuditEvent(req, decision, nil, 0, nil)
 		return
 	case decisionActionPassThrough:
 		adapter, resolveErr := s.resolveAdapter(decision)
 		if resolveErr != nil {
+			closeProbedUpstream(req)
 			s.logger.Warn("TCP fallback adapter missing", append(baseFields, zap.Error(resolveErr))...)
 			s.recordAuditEvent(req, decision, nil, 0, resolveErr)
 			return
@@ -494,6 +505,7 @@ func (s *Server) handleTCPDecision(req *adapterRequest, decision trafficDecision
 		}
 		adapter, resolveErr := s.resolveAdapter(decision)
 		if resolveErr != nil {
+			closeProbedUpstream(req)
 			s.logger.Warn("TCP adapter missing", append(baseFields, zap.Error(resolveErr))...)
 			s.recordAuditEvent(req, decision, nil, 0, resolveErr)
 			return
@@ -508,6 +520,7 @@ func (s *Server) handleTCPDecision(req *adapterRequest, decision trafficDecision
 		}
 		return
 	default:
+		closeProbedUpstream(req)
 		s.logger.Warn("TCP decision unknown action", baseFields...)
 		s.recordAuditEvent(req, decision, nil, 0, fmt.Errorf("unknown tcp decision action"))
 		return
@@ -515,12 +528,28 @@ func (s *Server) handleTCPDecision(req *adapterRequest, decision trafficDecision
 }
 
 func (s *Server) relayTCPConn(client net.Conn, prefix io.Reader, destIP net.IP, destPort int, compiled *policy.CompiledPolicy, audit *flowAudit) error {
+	return s.relayTCPConnWithUpstream(client, prefix, nil, nil, destIP, destPort, compiled, audit)
+}
+
+func (s *Server) relayTCPConnWithUpstream(
+	client net.Conn,
+	prefix io.Reader,
+	upstream net.Conn,
+	upstreamPrefix io.Reader,
+	destIP net.IP,
+	destPort int,
+	compiled *policy.CompiledPolicy,
+	audit *flowAudit,
+) error {
 	if destIP == nil || destPort <= 0 {
 		return fmt.Errorf("missing destination")
 	}
-	upstream, err := net.DialTimeout("tcp", net.JoinHostPort(destIP.String(), fmt.Sprintf("%d", destPort)), s.cfg.ProxyUpstreamTimeout.Duration)
-	if err != nil {
-		return err
+	var err error
+	if upstream == nil {
+		upstream, err = s.dialTCPUpstream(destIP, destPort)
+		if err != nil {
+			return err
+		}
 	}
 	upstream = &countingConn{Conn: upstream}
 	defer upstream.Close()
@@ -529,7 +558,142 @@ func (s *Server) relayTCPConn(client net.Conn, prefix io.Reader, destIP net.IP, 
 	if prefix != nil {
 		reader = io.MultiReader(prefix, client)
 	}
-	return s.pipeWithReader(client, upstream, reader, compiled, audit)
+	upstreamReader := io.Reader(upstream)
+	if upstreamPrefix != nil {
+		upstreamReader = io.MultiReader(upstreamPrefix, upstream)
+	}
+	return s.pipeWithReaders(client, upstream, reader, upstreamReader, compiled, audit)
+}
+
+func (s *Server) probeServerFirstSSH(req *adapterRequest, classification trafficClassification, ctx *tcpClassifyContext) trafficClassification {
+	if s == nil || req == nil || ctx == nil {
+		return classification
+	}
+	if classification.Transport != "tcp" || classification.UnknownReason == "" {
+		return classification
+	}
+	if req.UpstreamConn != nil || req.DestIP == nil || req.DestPort <= 0 {
+		return classification
+	}
+	if !policy.HasTrafficRuleAppProtocol(req.Compiled, "ssh") {
+		return classification
+	}
+
+	upstream, upstreamPrefix, err := s.probeTCPUpstream(req.DestIP, req.DestPort, ctx.headerLimit(), ctx.firstByteTimeout(), ctx.classificationTimeout())
+	if err != nil {
+		return classification
+	}
+	if upstream == nil {
+		return classification
+	}
+
+	req.UpstreamConn = upstream
+	if len(upstreamPrefix) > 0 {
+		req.UpstreamPrefix = bytes.NewReader(upstreamPrefix)
+	}
+	if banner, decision := parseSSHBannerClassification(upstreamPrefix, true, ctx.headerLimit()); decision == tcpClassifierMatched && banner != "" {
+		return classifyKnownTraffic("tcp", "ssh", req.DestIP, req.DestPort, "")
+	}
+	return classification
+}
+
+func (s *Server) probeTCPUpstream(destIP net.IP, destPort int, headerLimit int, firstByteTimeout time.Duration, readTimeout time.Duration) (net.Conn, []byte, error) {
+	upstream, err := s.dialTCPUpstream(destIP, destPort)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	prefix, probeErr := readTCPPrefix(upstream, headerLimit, firstByteTimeout, readTimeout, parseSSHBannerClassification)
+	if probeErr != nil {
+		_ = upstream.Close()
+		return nil, nil, probeErr
+	}
+	return upstream, prefix, nil
+}
+
+func (s *Server) dialTCPUpstream(destIP net.IP, destPort int) (net.Conn, error) {
+	if s == nil {
+		return nil, fmt.Errorf("server is nil")
+	}
+	if destIP == nil || destPort <= 0 {
+		return nil, fmt.Errorf("missing destination")
+	}
+	timeout := 30 * time.Second
+	if s.cfg != nil && s.cfg.ProxyUpstreamTimeout.Duration > 0 {
+		timeout = s.cfg.ProxyUpstreamTimeout.Duration
+	}
+	return net.DialTimeout("tcp", net.JoinHostPort(destIP.String(), fmt.Sprintf("%d", destPort)), timeout)
+}
+
+func readTCPPrefix(
+	conn net.Conn,
+	headerLimit int,
+	firstByteTimeout time.Duration,
+	readTimeout time.Duration,
+	parse func([]byte, bool, int) (string, tcpClassifierDecision),
+) ([]byte, error) {
+	if conn == nil {
+		return nil, fmt.Errorf("tcp probe connection is nil")
+	}
+	if headerLimit <= 0 {
+		headerLimit = defaultTCPHeaderLimit
+	}
+	if firstByteTimeout <= 0 {
+		firstByteTimeout = defaultTCPFirstByteTimeout
+	}
+	if readTimeout <= 0 {
+		readTimeout = defaultTCPClassificationWindow
+	}
+	defer func() {
+		_ = conn.SetReadDeadline(time.Time{})
+	}()
+
+	buffer := make([]byte, 0, headerLimit)
+	chunk := make([]byte, headerLimit)
+	for {
+		if _, decision := parse(buffer, false, headerLimit); decision == tcpClassifierMatched {
+			return buffer, nil
+		} else if decision == tcpClassifierNoMatch {
+			return buffer, nil
+		}
+		if len(buffer) >= headerLimit {
+			return buffer, nil
+		}
+
+		timeout := readTimeout
+		if len(buffer) == 0 {
+			timeout = firstByteTimeout
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(timeout))
+		n, err := conn.Read(chunk[:headerLimit-len(buffer)])
+		if n > 0 {
+			buffer = append(buffer, chunk[:n]...)
+			if _, decision := parse(buffer, false, headerLimit); decision == tcpClassifierMatched {
+				return buffer, nil
+			} else if decision == tcpClassifierNoMatch {
+				return buffer, nil
+			}
+		}
+		if err == nil {
+			continue
+		}
+
+		var netErr net.Error
+		complete := true
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			complete = false
+		}
+		if _, decision := parse(buffer, complete, headerLimit); decision == tcpClassifierMatched {
+			return buffer, nil
+		}
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			return buffer, nil
+		}
+		if errors.Is(err, io.EOF) {
+			return buffer, nil
+		}
+		return buffer, err
+	}
 }
 
 func (s *Server) proxyHTTPRequest(req *adapterRequest) error {
@@ -775,7 +939,7 @@ func (s *Server) runPassThrough(adapter proxyAdapter, req *adapterRequest) error
 			return fmt.Errorf("tcp pass-through requires connection")
 		}
 		s.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
-		return s.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+		return s.relayTCPConnWithUpstream(req.Conn, req.Prefix, req.UpstreamConn, req.UpstreamPrefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
 	case "udp":
 		if req.UDPConn == nil || req.UDPSource == nil {
 			return fmt.Errorf("udp pass-through requires source datagram")
@@ -851,6 +1015,13 @@ func remotePort(addr net.Addr) int {
 	return value
 }
 
+func addrString(addr net.Addr) string {
+	if addr == nil {
+		return ""
+	}
+	return addr.String()
+}
+
 func ipString(ip net.IP) string {
 	if ip == nil {
 		return ""
@@ -868,6 +1039,15 @@ func closeConnWrite(conn net.Conn) {
 	if writer, ok := conn.(closeWriter); ok {
 		_ = writer.CloseWrite()
 	}
+}
+
+func closeProbedUpstream(req *adapterRequest) {
+	if req == nil || req.UpstreamConn == nil {
+		return
+	}
+	_ = req.UpstreamConn.Close()
+	req.UpstreamConn = nil
+	req.UpstreamPrefix = nil
 }
 
 func normalizeRelayError(err error) error {

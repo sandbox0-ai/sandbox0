@@ -200,6 +200,25 @@ func TestTrafficRulesMatchAppProtocol(t *testing.T) {
 	}
 }
 
+func TestHasTrafficRuleAppProtocol(t *testing.T) {
+	p := &CompiledPolicy{
+		Mode: v1alpha1.NetworkModeAllowAll,
+		Egress: CompiledRuleSet{
+			TrafficRules: []CompiledTrafficRule{{
+				Name:         "allow-ssh",
+				Action:       v1alpha1.TrafficRuleActionAllow,
+				AppProtocols: []string{"ssh"},
+			}},
+		},
+	}
+	if !HasTrafficRuleAppProtocol(p, "ssh") {
+		t.Fatalf("expected ssh app protocol rule to be detected")
+	}
+	if HasTrafficRuleAppProtocol(p, "tls") {
+		t.Fatalf("expected tls app protocol rule to be absent")
+	}
+}
+
 func TestPlatformAllowOverridesUserDeny(t *testing.T) {
 	p := &CompiledPolicy{
 		Mode: v1alpha1.NetworkModeBlockAll,

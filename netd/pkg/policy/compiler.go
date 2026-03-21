@@ -111,48 +111,6 @@ func CompileNetworkPolicy(spec *v1alpha1.NetworkPolicySpec) (*CompiledPolicy, er
 	return compiled, nil
 }
 
-func compileRuleSet(
-	allowedCIDRs []string,
-	deniedCIDRs []string,
-	allowedPorts []v1alpha1.PortSpec,
-	deniedPorts []v1alpha1.PortSpec,
-	allowedDomains []string,
-	deniedDomains []string,
-) (CompiledRuleSet, error) {
-	result := CompiledRuleSet{}
-
-	var err error
-	result.AllowedCIDRs, err = parseCIDRs(allowedCIDRs)
-	if err != nil {
-		return result, err
-	}
-	deniedCIDRsParsed, err := parseCIDRs(deniedCIDRs)
-	if err != nil {
-		return result, err
-	}
-	result.DeniedCIDRs = append(result.DeniedCIDRs, deniedCIDRsParsed...)
-
-	result.AllowedPorts, err = parsePorts(allowedPorts)
-	if err != nil {
-		return result, err
-	}
-	result.DeniedPorts, err = parsePorts(deniedPorts)
-	if err != nil {
-		return result, err
-	}
-
-	result.AllowedDomains, err = parseDomains(allowedDomains)
-	if err != nil {
-		return result, err
-	}
-	result.DeniedDomains, err = parseDomains(deniedDomains)
-	if err != nil {
-		return result, err
-	}
-
-	return result, nil
-}
-
 func parseCIDRs(values []string) ([]*net.IPNet, error) {
 	if len(values) == 0 {
 		return nil, nil

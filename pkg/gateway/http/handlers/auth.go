@@ -417,11 +417,15 @@ func (h *AuthHandler) GetAuthProviders(c *gin.Context) {
 	// Add OIDC providers when available.
 	if h.oidcManager != nil {
 		for _, info := range h.oidcManager.ListProviderInfo() {
-			providers = append(providers, gin.H{
+			entry := gin.H{
 				"id":   info.ID,
 				"name": info.Name,
 				"type": "oidc",
-			})
+			}
+			if info.ExternalAuthPortalURL != "" {
+				entry["external_auth_portal_url"] = info.ExternalAuthPortalURL
+			}
+			providers = append(providers, entry)
 		}
 	}
 

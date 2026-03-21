@@ -147,6 +147,12 @@ type OIDCProviderConfig struct {
 	// TeamMapping configures automatic team assignment
 	// +optional
 	TeamMapping *TeamMappingConfig `yaml:"team_mapping" json:"teamMapping"`
+
+	// ExternalAuthPortalURL, when set, redirects unauthenticated browser users to this URL
+	// instead of initiating the OIDC flow directly. Use for deployments that host their own
+	// login portal that handles OIDC initiation externally.
+	// +optional
+	ExternalAuthPortalURL string `yaml:"external_auth_portal_url" json:"externalAuthPortalUrl"`
 }
 
 // TeamMappingConfig configures automatic team mapping for OIDC.

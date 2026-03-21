@@ -13,6 +13,12 @@ export interface DashboardAuthProvider {
   id: string;
   name: string;
   type: DashboardAuthProviderType;
+  /**
+   * When set, browser login for this provider should redirect to this external URL
+   * instead of initiating the OIDC flow through the standard /api/auth/oidc/{id}/login route.
+   * Used for deployments that host their own authorization portal.
+   */
+  externalAuthPortalUrl?: string;
 }
 
 export interface DashboardUser {

@@ -41,6 +41,36 @@ test("resolveDashboardAuthProviders parses builtin and oidc providers", async ()
   assert.equal(result.providers[1]?.type, "builtin");
 });
 
+test("resolveDashboardAuthProviders parses externalAuthPortalUrl from oidc providers", async () => {
+  const result = await resolveDashboardAuthProviders(
+    singleClusterConfig,
+    async () =>
+      new Response(
+        JSON.stringify({
+          data: {
+            providers: [
+              {
+                id: "okta",
+                name: "Okta",
+                type: "oidc",
+                external_auth_portal_url: "https://portal.example.com/login",
+              },
+              { id: "builtin", name: "Email & Password", type: "builtin" },
+            ],
+          },
+        }),
+      ),
+  );
+
+  assert.deepEqual(result.errors, []);
+  assert.equal(result.providers.length, 2);
+  assert.equal(
+    result.providers[0]?.externalAuthPortalUrl,
+    "https://portal.example.com/login",
+  );
+  assert.equal(result.providers[1]?.externalAuthPortalUrl, undefined);
+});
+
 test("resolveOIDCLoginLocation relays upstream redirect targets", async () => {
   const result = await resolveOIDCLoginLocation(
     singleClusterConfig,

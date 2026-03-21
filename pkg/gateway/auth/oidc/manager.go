@@ -295,8 +295,9 @@ func (m *Manager) cleanupStates(ctx context.Context) {
 
 // ProviderInfo contains public info about an OIDC provider
 type ProviderInfo struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID                    string `json:"id"`
+	Name                  string `json:"name"`
+	ExternalAuthPortalURL string `json:"external_auth_portal_url,omitempty"`
 }
 
 // ListProviderInfo returns public info about all enabled providers
@@ -308,8 +309,9 @@ func (m *Manager) ListProviderInfo() []ProviderInfo {
 			continue
 		}
 		info = append(info, ProviderInfo{
-			ID:   p.ID(),
-			Name: p.Name(),
+			ID:                    p.ID(),
+			Name:                  p.Name(),
+			ExternalAuthPortalURL: p.Config().ExternalAuthPortalURL,
 		})
 	}
 	return info

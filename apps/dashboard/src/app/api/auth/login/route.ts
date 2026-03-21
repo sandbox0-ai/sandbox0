@@ -8,7 +8,7 @@ import {
 
 function redirectURL(requestURL: string, error?: string): URL {
   const value = error
-    ? `/?login_error=${encodeURIComponent(error)}`
+    ? `/login?login_error=${encodeURIComponent(error)}`
     : "/";
   return new URL(value, requestURL);
 }

@@ -2,7 +2,11 @@ import { NextResponse } from "next/server";
 
 import { resolveDashboardControlPlaneURL } from "./config";
 import { createDashboardControlPlaneSDK, resolveSDKErrorMessage } from "./sdk";
-import type { DashboardAuthProvider, DashboardRuntimeConfig } from "./types";
+import type {
+  DashboardAuthProvider,
+  DashboardAuthProviderType,
+  DashboardRuntimeConfig,
+} from "./types";
 
 interface LoginResponse {
   access_token: string;
@@ -56,22 +60,54 @@ export async function resolveDashboardAuthProviders(
   }
 
   try {
-    const sdk = await createDashboardControlPlaneSDK(baseURL, {
-      fetch: fetchImpl,
+    // Use raw fetch to avoid the typed SDK stripping unknown fields such as
+    // external_auth_portal_url that may be present on OIDC provider entries.
+    const response = await fetchImpl(joinURL(baseURL, "/auth/providers"), {
+      method: "GET",
+      cache: "no-store",
     });
-    const response = await sdk.auth.authProvidersGet();
-    const providers = (response.data?.providers ?? []).flatMap((provider) => {
+    const payload = (await response.json().catch(() => null)) as {
+      data?: {
+        providers?: Array<{
+          id: string;
+          name: string;
+          type: string;
+          external_auth_portal_url?: string;
+        }>;
+      };
+      error?: { message?: string };
+    } | null;
+
+    if (!response.ok) {
+      return {
+        providers: [],
+        errors: [
+          payload?.error?.message ??
+            `/auth/providers returned ${response.status}`,
+        ],
+      };
+    }
+
+    const providers = (payload?.data?.providers ?? []).flatMap((provider) => {
       if (provider.type !== "oidc" && provider.type !== "builtin") {
         return [];
       }
 
-      return [
-        {
-          id: provider.id,
-          name: provider.name,
-          type: provider.type,
-        } satisfies DashboardAuthProvider,
-      ];
+      const entry: DashboardAuthProvider = {
+        id: provider.id,
+        name: provider.name,
+        type: provider.type as DashboardAuthProviderType,
+      };
+
+      if (
+        provider.type === "oidc" &&
+        typeof provider.external_auth_portal_url === "string" &&
+        provider.external_auth_portal_url !== ""
+      ) {
+        entry.externalAuthPortalUrl = provider.external_auth_portal_url;
+      }
+
+      return [entry];
     });
 
     return { providers, errors: [] };
@@ -79,10 +115,9 @@ export async function resolveDashboardAuthProviders(
     return {
       providers: [],
       errors: [
-        await resolveSDKErrorMessage(
-          error,
-          "failed to resolve auth providers",
-        ),
+        error instanceof Error
+          ? error.message
+          : "failed to resolve auth providers",
       ],
     };
   }

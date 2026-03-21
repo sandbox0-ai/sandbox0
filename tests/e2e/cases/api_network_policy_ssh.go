@@ -193,7 +193,7 @@ func assertSSHAppProtocolTrafficRules(env *framework.ScenarioEnv, session *e2eut
 	Expect(installSSHFixturePrivateKey(env, templateNamespace, sandbox.PodName)).To(Succeed())
 
 	clearPolicy := apispec.SandboxNetworkPolicy{
-		Mode: apispec.SandboxNetworkPolicyModeAllowAll,
+		Mode: apispec.AllowAll,
 	}
 	defer func() {
 		_, _, _, _ = session.UpdateNetworkPolicy(env.TestCtx.Context, GinkgoT(), sandboxID, clearPolicy)
@@ -212,7 +212,7 @@ func assertSSHAppProtocolTrafficRules(env *framework.ScenarioEnv, session *e2eut
 		env,
 		session,
 		sandboxID,
-		apispec.SandboxNetworkPolicyModeBlockAll,
+		apispec.BlockAll,
 		buildTrafficRule("allow-tls-only", apispec.Allow, serviceCIDR, apispec.TrafficRuleAppProtocolTls),
 	)).To(Succeed())
 	assertSSHFixtureCommandEventuallyFails(env, templateNamespace, sandbox.PodName, sshCommand)
@@ -221,7 +221,7 @@ func assertSSHAppProtocolTrafficRules(env *framework.ScenarioEnv, session *e2eut
 		env,
 		session,
 		sandboxID,
-		apispec.SandboxNetworkPolicyModeBlockAll,
+		apispec.BlockAll,
 		buildTrafficRule("allow-ssh", apispec.Allow, serviceCIDR, apispec.TrafficRuleAppProtocolSsh),
 	)).To(Succeed())
 	assertSSHFixtureCommandEventuallySucceeds(env, templateNamespace, sandbox.PodName, sshCommand)
@@ -230,7 +230,7 @@ func assertSSHAppProtocolTrafficRules(env *framework.ScenarioEnv, session *e2eut
 		env,
 		session,
 		sandboxID,
-		apispec.SandboxNetworkPolicyModeAllowAll,
+		apispec.AllowAll,
 		buildTrafficRule("deny-ssh", apispec.Deny, serviceCIDR, apispec.TrafficRuleAppProtocolSsh),
 	)).To(Succeed())
 	assertSSHFixtureCommandEventuallyFails(env, templateNamespace, sandbox.PodName, sshCommand)

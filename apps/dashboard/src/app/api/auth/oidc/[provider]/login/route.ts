@@ -1,30 +1,16 @@
-import { NextResponse } from "next/server";
-
 import {
+  handleDashboardOIDCLoginRequest,
   resolveDashboardRuntimeConfig,
-  resolveOIDCLoginLocation,
 } from "@sandbox0/dashboard-core";
-
-function dashboardURL(requestURL: string, error?: string): URL {
-  const value = error
-    ? `/login?login_error=${encodeURIComponent(error)}`
-    : "/";
-  return new URL(value, requestURL);
-}
 
 export async function GET(
   request: Request,
   { params }: { params: Promise<{ provider: string }> },
 ) {
-  const config = resolveDashboardRuntimeConfig();
   const { provider } = await params;
-  const result = await resolveOIDCLoginLocation(config, provider);
-  if (!result.location) {
-    return NextResponse.redirect(
-      dashboardURL(request.url, result.error ?? "oidc login failed"),
-      { status: 303 },
-    );
-  }
-
-  return NextResponse.redirect(result.location, { status: 302 });
+  return handleDashboardOIDCLoginRequest(
+    resolveDashboardRuntimeConfig(),
+    request,
+    provider,
+  );
 }

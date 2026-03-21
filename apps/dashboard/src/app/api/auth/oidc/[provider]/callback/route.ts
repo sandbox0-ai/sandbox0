@@ -1,17 +1,7 @@
-import { NextResponse } from "next/server";
-
 import {
-  exchangeOIDCCallback,
+  handleDashboardOIDCCallbackRequest,
   resolveDashboardRuntimeConfig,
-  setDashboardAuthCookies,
 } from "@sandbox0/dashboard-core";
-
-function dashboardURL(requestURL: string, error?: string): URL {
-  const value = error
-    ? `/login?login_error=${encodeURIComponent(error)}`
-    : "/";
-  return new URL(value, requestURL);
-}
 
 // This callback assumes the control plane OIDC base URL is configured to point
 // at the public dashboard auth surface, for example /api/auth/...
@@ -21,20 +11,10 @@ export async function GET(
   request: Request,
   { params }: { params: Promise<{ provider: string }> },
 ) {
-  const config = resolveDashboardRuntimeConfig();
   const { provider } = await params;
-  const rawQuery = new URL(request.url).search;
-  const result = await exchangeOIDCCallback(config, provider, rawQuery);
-  if (!result.tokens) {
-    return NextResponse.redirect(
-      dashboardURL(request.url, result.error ?? "oidc callback failed"),
-      { status: 303 },
-    );
-  }
-
-  const response = NextResponse.redirect(dashboardURL(request.url), {
-    status: 303,
-  });
-  setDashboardAuthCookies(response, config, result.tokens);
-  return response;
+  return handleDashboardOIDCCallbackRequest(
+    resolveDashboardRuntimeConfig(),
+    request,
+    provider,
+  );
 }

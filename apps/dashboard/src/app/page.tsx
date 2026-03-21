@@ -3,11 +3,8 @@ import { redirect } from "next/navigation";
 import Image from "next/image";
 import { PixelButton, PixelCard, PixelInput, PixelLayout } from "@sandbox0/ui";
 import {
-  dashboardRefreshTokenCookieName,
-  readBearerToken,
-  resolveDashboardAuthProviders,
+  resolveDashboardHomeEntry,
   resolveDashboardRuntimeConfig,
-  resolveDashboardSession,
 } from "@sandbox0/dashboard-core";
 
 interface DashboardHomeProps {
@@ -120,35 +117,14 @@ function DashboardHomeView() {
 
 export default async function DashboardHome({ searchParams }: DashboardHomeProps) {
   const { login_error: loginError } = await searchParams;
-  const config = resolveDashboardRuntimeConfig();
-  const cookieStore = await cookies();
-  const accessToken = readBearerToken(null, cookieStore);
-  const refreshToken = cookieStore.get(dashboardRefreshTokenCookieName)?.value;
-  const session = await resolveDashboardSession(config, { bearerToken: accessToken });
+  const result = await resolveDashboardHomeEntry(
+    resolveDashboardRuntimeConfig(),
+    await cookies(),
+    { loginError },
+  );
 
-  if (!session.authenticated) {
-    if (refreshToken) {
-      redirect("/api/auth/refresh");
-    }
-
-    const { providers } = await resolveDashboardAuthProviders(config);
-    const oidcProviders = providers.filter((provider) => provider.type === "oidc");
-
-    if (loginError || oidcProviders.length !== 1) {
-      const loginURL = new URL("/login", config.siteURL);
-      if (loginError) {
-        loginURL.searchParams.set("login_error", loginError);
-      }
-      redirect(`${loginURL.pathname}${loginURL.search}`);
-    }
-
-    const [provider] = oidcProviders;
-    if (provider?.externalAuthPortalUrl) {
-      redirect(provider.externalAuthPortalUrl);
-    }
-    if (provider) {
-      redirect(`/api/auth/oidc/${encodeURIComponent(provider.id)}/login`);
-    }
+  if (result.kind === "redirect") {
+    redirect(result.location);
   }
 
   return <DashboardHomeView />;

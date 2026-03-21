@@ -11,6 +11,14 @@ import {
   setDashboardAuthCookies,
   updateDefaultTeam,
 } from "./auth";
+import {
+  resolveDashboardHomeEntry,
+  resolveDashboardLoginEntry,
+} from "./browser-auth";
+import {
+  dashboardLoginPath,
+  dashboardProviderLoginPath,
+} from "./browser-auth-links";
 import type { DashboardRuntimeConfig } from "./types";
 
 const singleClusterConfig: DashboardRuntimeConfig = {
@@ -69,6 +77,89 @@ test("resolveDashboardAuthProviders parses externalAuthPortalUrl from oidc provi
     "https://portal.example.com/login",
   );
   assert.equal(result.providers[1]?.externalAuthPortalUrl, undefined);
+});
+
+test("resolveDashboardHomeEntry redirects directly to the only oidc provider", async () => {
+  const result = await resolveDashboardHomeEntry(
+    singleClusterConfig,
+    { get: () => undefined },
+    {
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            data: {
+              providers: [{ id: "auth0", name: "Auth0", type: "oidc" }],
+            },
+          }),
+        ),
+    },
+  );
+
+  assert.deepEqual(result, {
+    kind: "redirect",
+    location: dashboardProviderLoginPath("auth0"),
+  });
+});
+
+test("resolveDashboardHomeEntry falls back to /login when multiple oidc providers exist", async () => {
+  const result = await resolveDashboardHomeEntry(
+    singleClusterConfig,
+    { get: () => undefined },
+    {
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            data: {
+              providers: [
+                { id: "auth0", name: "Auth0", type: "oidc" },
+                { id: "okta", name: "Okta", type: "oidc" },
+              ],
+            },
+          }),
+        ),
+    },
+  );
+
+  assert.deepEqual(result, {
+    kind: "redirect",
+    location: "/login",
+  });
+});
+
+test("resolveDashboardLoginEntry reuses external auth portal url", async () => {
+  const result = await resolveDashboardLoginEntry(
+    singleClusterConfig,
+    { get: () => undefined },
+    {
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            data: {
+              providers: [
+                {
+                  id: "corp",
+                  name: "Corporate SSO",
+                  type: "oidc",
+                  external_auth_portal_url: "https://portal.example.com/login",
+                },
+              ],
+            },
+          }),
+        ),
+    },
+  );
+
+  assert.deepEqual(result, {
+    kind: "redirect",
+    location: "https://portal.example.com/login",
+  });
+});
+
+test("dashboardLoginPath encodes login errors", () => {
+  assert.equal(
+    dashboardLoginPath("session expired, please sign in again"),
+    "/login?login_error=session%20expired%2C%20please%20sign%20in%20again",
+  );
 });
 
 test("resolveOIDCLoginLocation relays upstream redirect targets", async () => {

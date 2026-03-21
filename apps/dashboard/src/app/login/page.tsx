@@ -1,8 +1,12 @@
+import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
 import {
+  dashboardRefreshTokenCookieName,
+  readBearerToken,
   resolveDashboardAuthProviders,
   resolveDashboardRuntimeConfig,
+  resolveDashboardSession,
 } from "@sandbox0/dashboard-core";
 import { LoginView } from "./LoginView";
 
@@ -13,6 +17,18 @@ interface LoginPageProps {
 export default async function LoginPage({ searchParams }: LoginPageProps) {
   const { login_error: loginError } = await searchParams;
   const config = resolveDashboardRuntimeConfig();
+  const cookieStore = await cookies();
+  const accessToken = readBearerToken(null, cookieStore);
+  const refreshToken = cookieStore.get(dashboardRefreshTokenCookieName)?.value;
+  const session = await resolveDashboardSession(config, { bearerToken: accessToken });
+
+  if (session.authenticated) {
+    redirect("/");
+  }
+  if (refreshToken && !loginError) {
+    redirect("/api/auth/refresh");
+  }
+
   const { providers } = await resolveDashboardAuthProviders(config);
 
   const oidcProviders = providers.filter((p) => p.type === "oidc");

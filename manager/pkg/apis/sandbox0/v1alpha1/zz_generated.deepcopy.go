@@ -761,7 +761,7 @@ func (in *SandboxTemplateSpec) DeepCopyInto(out *SandboxTemplateSpec) {
 	}
 	if in.Network != nil {
 		in, out := &in.Network, &out.Network
-		*out = new(TplSandboxNetworkPolicy)
+		*out = new(SandboxNetworkPolicy)
 		(*in).DeepCopyInto(*out)
 	}
 	if in.CredentialBindings != nil {

@@ -3113,9 +3113,11 @@ components:
           type: integer
           format: int32
         network:
-          $ref: "#/components/schemas/TplSandboxNetworkPolicy"
+          $ref: "#/components/schemas/SandboxNetworkPolicy"
         credential_bindings:
           type: array
+          deprecated: true
+          description: Legacy sibling field. Prefer `network.credentialBindings`.
           items:
             $ref: "#/components/schemas/CredentialBinding"
         webhook:
@@ -3274,9 +3276,11 @@ components:
           type: integer
           format: int32
         network:
-          $ref: "#/components/schemas/TplSandboxNetworkPolicy"
+          $ref: "#/components/schemas/SandboxNetworkPolicy"
         credential_bindings:
           type: array
+          deprecated: true
+          description: Legacy sibling field. Prefer `network.credentialBindings`.
           items:
             $ref: "#/components/schemas/CredentialBinding"
         auto_resume:
@@ -4286,9 +4290,11 @@ components:
         pod:
           $ref: "#/components/schemas/PodSpecOverride"
         network:
-          $ref: "#/components/schemas/TplSandboxNetworkPolicy"
+          $ref: "#/components/schemas/SandboxNetworkPolicy"
         credentialBindings:
           type: array
+          deprecated: true
+          description: Legacy sibling field. Prefer `network.credentialBindings`.
           items:
             $ref: "#/components/schemas/CredentialBinding"
         pool:

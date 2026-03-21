@@ -267,8 +267,7 @@ func TestUpdateSandboxRollsBackBindingsWhenPodUpdateFails(t *testing.T) {
 	})
 
 	_, err := svc.UpdateSandbox(ctx, pod.Name, &SandboxUpdateConfig{
-		Network:            testCredentialPolicy("new-ref"),
-		CredentialBindings: testCredentialBindings("new-ref", "Bearer new"),
+		Network: testNetworkPolicy("new-ref", "Bearer new"),
 	})
 	require.Error(t, err)
 
@@ -277,6 +276,31 @@ func TestUpdateSandboxRollsBackBindingsWhenPodUpdateFails(t *testing.T) {
 	require.NotNil(t, record)
 	require.Len(t, record.Bindings, 1)
 	assert.Equal(t, "existing-ref", record.Bindings[0].Ref)
+}
+
+func TestRequestCredentialBindingsUsesNestedNetworkBindings(t *testing.T) {
+	cfg := &SandboxConfig{
+		Network: &v1alpha1.SandboxNetworkPolicy{
+			CredentialBindings: testCredentialBindings("nested-ref", "Bearer nested"),
+		},
+		CredentialBindings: testCredentialBindings("legacy-ref", "Bearer legacy"),
+	}
+
+	bindings := requestCredentialBindings(cfg)
+	require.Len(t, bindings, 1)
+	assert.Equal(t, "nested-ref", bindings[0].Ref)
+}
+
+func TestTemplateCredentialBindingsUsesNestedNetworkBindings(t *testing.T) {
+	bindings := templateCredentialBindings(
+		&v1alpha1.SandboxNetworkPolicy{
+			CredentialBindings: testCredentialBindings("nested-ref", "Bearer nested"),
+		},
+		testCredentialBindings("legacy-ref", "Bearer legacy"),
+	)
+
+	require.Len(t, bindings, 1)
+	assert.Equal(t, "nested-ref", bindings[0].Ref)
 }
 
 func TestUpdateNetworkPolicyStoresBindingsOutsidePodConfig(t *testing.T) {
@@ -312,6 +336,7 @@ func TestUpdateNetworkPolicyStoresBindingsOutsidePodConfig(t *testing.T) {
 	var cfg SandboxConfig
 	require.NoError(t, json.Unmarshal([]byte(storedPod.Annotations[controller.AnnotationConfig]), &cfg))
 	require.NotNil(t, cfg.Network)
+	assert.Nil(t, cfg.Network.CredentialBindings)
 	assert.Nil(t, cfg.CredentialBindings)
 
 	effective, err := svc.GetNetworkPolicy(ctx, pod.Name)

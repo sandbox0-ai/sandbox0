@@ -43,10 +43,11 @@ type SandboxTemplateSpec struct {
 	// Pod-level configuration
 	Pod *PodSpecOverride `json:"pod,omitempty"`
 
-	// Template Sandbox Network policy (template-level default)
-	Network *TplSandboxNetworkPolicy `json:"network,omitempty"`
+	// Template sandbox network policy and optional credential bindings.
+	Network *SandboxNetworkPolicy `json:"network,omitempty"`
 
 	// CredentialBindings defines template-level default sandbox credential bindings.
+	// Deprecated: prefer spec.network.credentialBindings.
 	CredentialBindings []CredentialBinding `json:"credentialBindings,omitempty"`
 
 	// Pool strategy

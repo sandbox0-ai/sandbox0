@@ -249,7 +249,7 @@ chmod 600 /tmp/sandbox0-e2e-ssh-key
 
 func buildSSHFixtureCommand(fixture *sshFixture) string {
 	return fmt.Sprintf(
-		"ssh -F /dev/null -i /tmp/sandbox0-e2e-ssh-key -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 22 %s@%s 'printf ok'",
+		"ssh -F /dev/null -i /tmp/sandbox0-e2e-ssh-key -o BatchMode=yes -o ConnectTimeout=5 -o LogLevel=ERROR -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 22 %s@%s 'printf ok'",
 		fixture.UserName,
 		fixture.ServiceIP,
 	)
@@ -306,7 +306,7 @@ func assertSSHFixtureCommandEventuallySucceeds(env *framework.ScenarioEnv, names
 		if err != nil {
 			return err
 		}
-		if strings.TrimSpace(output) != "ok" {
+		if sshFixtureSuccessOutput(output) != "ok" {
 			return fmt.Errorf("unexpected ssh output: %q", output)
 		}
 		return nil
@@ -321,4 +321,15 @@ func assertSSHFixtureCommandEventuallyFails(env *framework.ScenarioEnv, namespac
 		}
 		return nil
 	}).WithTimeout(45 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
+}
+
+func sshFixtureSuccessOutput(output string) string {
+	lines := strings.Split(strings.ReplaceAll(output, "\r\n", "\n"), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line != "" {
+			return line
+		}
+	}
+	return ""
 }

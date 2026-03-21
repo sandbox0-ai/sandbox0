@@ -132,6 +132,7 @@ jobs:
         with:
           repository: sandbox0-ai/sandbox0-cloud
           ref: main
+          token: ${{ secrets.SANDBOX0_CLOUD_REPO_TOKEN }}
           path: sandbox0-cloud
 
       - name: Set up Node.js

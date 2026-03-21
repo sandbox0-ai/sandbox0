@@ -43,9 +43,8 @@ spec:
                 type: string
               credentialBindings:
                 description: |-
-                  CredentialBindings defines template-level default credential bindings.
-                  Each binding declares a stable ref plus a projection from a manager-owned
-                  credential source. Egress credential rules reference these bindings by ref.
+                  CredentialBindings defines template-level default sandbox credential bindings.
+                  Deprecated: prefer spec.network.credentialBindings.
                 items:
                   description: |-
                     CredentialBinding defines one named credential projection that outbound auth
@@ -185,8 +184,69 @@ spec:
                 - resources
                 type: object
               network:
-                description: Template Sandbox Network policy (template-level default)
+                description: Template sandbox network policy and optional credential
+                  bindings.
                 properties:
+                  credentialBindings:
+                    items:
+                      description: CredentialBinding defines how a credential reference
+                        should be resolved.
+                      properties:
+                        cachePolicy:
+                          description: CachePolicySpec controls broker-side caching
+                            for one binding.
+                          properties:
+                            ttl:
+                              type: string
+                          type: object
+                        projection:
+                          description: ProjectionSpec defines how resolved source
+                            data should be projected into runtime directives.
+                          properties:
+                            httpHeaders:
+                              description: HTTPHeadersProjection injects HTTP headers
+                                derived from source data.
+                              properties:
+                                headers:
+                                  items:
+                                    description: ProjectedHeader defines one projected
+                                      header template.
+                                    properties:
+                                      name:
+                                        type: string
+                                      valueTemplate:
+                                        type: string
+                                    required:
+                                    - name
+                                    - valueTemplate
+                                    type: object
+                                  type: array
+                              type: object
+                            tlsClientCertificate:
+                              description: TLSClientCertificateProjection projects
+                                one client certificate for TLS re-origination.
+                              type: object
+                            type:
+                              description: CredentialProjectionType identifies the
+                                runtime projection shape.
+                              type: string
+                            usernamePassword:
+                              description: UsernamePasswordProjection projects one
+                                username/password pair into an early auth exchange.
+                              type: object
+                          required:
+                          - type
+                          type: object
+                        ref:
+                          type: string
+                        sourceRef:
+                          type: string
+                      required:
+                      - projection
+                      - ref
+                      - sourceRef
+                      type: object
+                    type: array
                   egress:
                     description: |-
                       NetworkEgressPolicy defines egress policy.

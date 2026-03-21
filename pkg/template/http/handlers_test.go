@@ -481,7 +481,7 @@ func TestValidateTemplateSpec_StrictValidation(t *testing.T) {
 		{
 			name: "reject invalid network mode",
 			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
-				s.Network = &v1alpha1.TplSandboxNetworkPolicy{
+				s.Network = &v1alpha1.SandboxNetworkPolicy{
 					Mode: "deny-all",
 				}
 			},
@@ -490,7 +490,7 @@ func TestValidateTemplateSpec_StrictValidation(t *testing.T) {
 		{
 			name: "reject invalid cidr",
 			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
-				s.Network = &v1alpha1.TplSandboxNetworkPolicy{
+				s.Network = &v1alpha1.SandboxNetworkPolicy{
 					Mode: v1alpha1.NetworkModeBlockAll,
 					Egress: &v1alpha1.NetworkEgressPolicy{
 						AllowedCIDRs: []string{"not-a-cidr"},
@@ -502,7 +502,7 @@ func TestValidateTemplateSpec_StrictValidation(t *testing.T) {
 		{
 			name: "reject invalid port range",
 			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
-				s.Network = &v1alpha1.TplSandboxNetworkPolicy{
+				s.Network = &v1alpha1.SandboxNetworkPolicy{
 					Mode: v1alpha1.NetworkModeBlockAll,
 					Egress: &v1alpha1.NetworkEgressPolicy{
 						AllowedPorts: []v1alpha1.PortSpec{

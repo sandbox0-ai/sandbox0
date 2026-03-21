@@ -100,8 +100,8 @@ const (
 
 // Defines values for SandboxNetworkPolicyMode.
 const (
-	SandboxNetworkPolicyModeAllowAll SandboxNetworkPolicyMode = "allow-all"
-	SandboxNetworkPolicyModeBlockAll SandboxNetworkPolicyMode = "block-all"
+	AllowAll SandboxNetworkPolicyMode = "allow-all"
+	BlockAll SandboxNetworkPolicyMode = "block-all"
 )
 
 // Defines values for SandboxSummaryStatus.
@@ -365,12 +365,6 @@ const (
 // Defines values for SuccessWrittenResponseSuccess.
 const (
 	True SuccessWrittenResponseSuccess = true
-)
-
-// Defines values for TplSandboxNetworkPolicyMode.
-const (
-	TplSandboxNetworkPolicyModeAllowAll TplSandboxNetworkPolicyMode = "allow-all"
-	TplSandboxNetworkPolicyModeBlockAll TplSandboxNetworkPolicyMode = "block-all"
 )
 
 // Defines values for TrafficRuleAction.
@@ -1163,19 +1157,15 @@ type SandboxConfig struct {
 	// (API or public exposure) must not auto resume the sandbox.
 	AutoResume *bool `json:"auto_resume,omitempty"`
 
-	// CredentialBindings Sandbox-scoped credential bindings that can be referenced by egress
-	// credential rules through `credentialRef`.
-	CredentialBindings *[]CredentialBinding `json:"credential_bindings,omitempty"`
-	EnvVars            *map[string]string   `json:"env_vars,omitempty"`
-	ExposedPorts       *[]ExposedPortConfig `json:"exposed_ports,omitempty"`
-	HardTtl            *int32               `json:"hard_ttl,omitempty"`
-
-	// Network Template-level outbound network policy.
-	// `allow-all` permits traffic by default and applies `denied*` rules as subtractive filters.
-	// `block-all` denies traffic by default and applies `allowed*` rules as additive exceptions.
-	Network *TplSandboxNetworkPolicy `json:"network,omitempty"`
-	Ttl     *int32                   `json:"ttl,omitempty"`
-	Webhook *WebhookConfig           `json:"webhook,omitempty"`
+	// CredentialBindings Legacy sibling field. Prefer `network.credentialBindings`.
+	// Deprecated:
+	CredentialBindings *[]CredentialBinding  `json:"credential_bindings,omitempty"`
+	EnvVars            *map[string]string    `json:"env_vars,omitempty"`
+	ExposedPorts       *[]ExposedPortConfig  `json:"exposed_ports,omitempty"`
+	HardTtl            *int32                `json:"hard_ttl,omitempty"`
+	Network            *SandboxNetworkPolicy `json:"network,omitempty"`
+	Ttl                *int32                `json:"ttl,omitempty"`
+	Webhook            *WebhookConfig        `json:"webhook,omitempty"`
 }
 
 // SandboxNetworkPolicy defines model for SandboxNetworkPolicy.
@@ -1260,25 +1250,24 @@ type SandboxTemplateCondition struct {
 
 // SandboxTemplateSpec defines model for SandboxTemplateSpec.
 type SandboxTemplateSpec struct {
-	AllowedTeams       *[]string            `json:"allowedTeams,omitempty"`
-	ClusterId          *string              `json:"clusterId,omitempty"`
-	CredentialBindings *[]CredentialBinding `json:"credentialBindings,omitempty"`
-	Description        *string              `json:"description,omitempty"`
-	DisplayName        *string              `json:"displayName,omitempty"`
-	EnvVars            *map[string]string   `json:"envVars,omitempty"`
-	Lifecycle          *LifecyclePolicy     `json:"lifecycle,omitempty"`
-	MainContainer      *ContainerSpec       `json:"mainContainer,omitempty"`
+	AllowedTeams *[]string `json:"allowedTeams,omitempty"`
+	ClusterId    *string   `json:"clusterId,omitempty"`
 
-	// Network Template-level outbound network policy.
-	// `allow-all` permits traffic by default and applies `denied*` rules as subtractive filters.
-	// `block-all` denies traffic by default and applies `allowed*` rules as additive exceptions.
-	Network          *TplSandboxNetworkPolicy `json:"network,omitempty"`
-	Pod              *PodSpecOverride         `json:"pod,omitempty"`
-	Pool             *PoolStrategy            `json:"pool,omitempty"`
-	Public           *bool                    `json:"public,omitempty"`
-	RuntimeClassName *string                  `json:"runtimeClassName,omitempty"`
-	Sidecars         *[]ContainerSpec         `json:"sidecars,omitempty"`
-	Tags             *[]string                `json:"tags,omitempty"`
+	// CredentialBindings Legacy sibling field. Prefer `network.credentialBindings`.
+	// Deprecated:
+	CredentialBindings *[]CredentialBinding  `json:"credentialBindings,omitempty"`
+	Description        *string               `json:"description,omitempty"`
+	DisplayName        *string               `json:"displayName,omitempty"`
+	EnvVars            *map[string]string    `json:"envVars,omitempty"`
+	Lifecycle          *LifecyclePolicy      `json:"lifecycle,omitempty"`
+	MainContainer      *ContainerSpec        `json:"mainContainer,omitempty"`
+	Network            *SandboxNetworkPolicy `json:"network,omitempty"`
+	Pod                *PodSpecOverride      `json:"pod,omitempty"`
+	Pool               *PoolStrategy         `json:"pool,omitempty"`
+	Public             *bool                 `json:"public,omitempty"`
+	RuntimeClassName   *string               `json:"runtimeClassName,omitempty"`
+	Sidecars           *[]ContainerSpec      `json:"sidecars,omitempty"`
+	Tags               *[]string             `json:"tags,omitempty"`
 }
 
 // SandboxTemplateStatus defines model for SandboxTemplateStatus.
@@ -1296,17 +1285,13 @@ type SandboxUpdateConfig struct {
 	// (API or public exposure) must not auto resume the sandbox.
 	AutoResume *bool `json:"auto_resume,omitempty"`
 
-	// CredentialBindings Runtime-updatable credential bindings referenced by egress
-	// credential rules through `credentialRef`.
-	CredentialBindings *[]CredentialBinding `json:"credential_bindings,omitempty"`
-	ExposedPorts       *[]ExposedPortConfig `json:"exposed_ports,omitempty"`
-	HardTtl            *int32               `json:"hard_ttl,omitempty"`
-
-	// Network Template-level outbound network policy.
-	// `allow-all` permits traffic by default and applies `denied*` rules as subtractive filters.
-	// `block-all` denies traffic by default and applies `allowed*` rules as additive exceptions.
-	Network *TplSandboxNetworkPolicy `json:"network,omitempty"`
-	Ttl     *int32                   `json:"ttl,omitempty"`
+	// CredentialBindings Legacy sibling field. Prefer `network.credentialBindings`.
+	// Deprecated:
+	CredentialBindings *[]CredentialBinding  `json:"credential_bindings,omitempty"`
+	ExposedPorts       *[]ExposedPortConfig  `json:"exposed_ports,omitempty"`
+	HardTtl            *int32                `json:"hard_ttl,omitempty"`
+	Network            *SandboxNetworkPolicy `json:"network,omitempty"`
+	Ttl                *int32                `json:"ttl,omitempty"`
 }
 
 // SandboxUpdateRequest defines model for SandboxUpdateRequest.
@@ -1941,22 +1926,6 @@ type Toleration struct {
 	Operator *string `json:"operator,omitempty"`
 	Value    *string `json:"value,omitempty"`
 }
-
-// TplSandboxNetworkPolicy Template-level outbound network policy.
-// `allow-all` permits traffic by default and applies `denied*` rules as subtractive filters.
-// `block-all` denies traffic by default and applies `allowed*` rules as additive exceptions.
-type TplSandboxNetworkPolicy struct {
-	// Egress Egress rule set interpreted by the selected network mode.
-	// In `allow-all`, only `denied*` fields are enforced.
-	// In `block-all`, only `allowed*` fields are enforced.
-	// `trafficRules` is a rule-based alternative and must not be combined
-	// with the legacy `allowed*`/`denied*` fields.
-	Egress *NetworkEgressPolicy        `json:"egress,omitempty"`
-	Mode   TplSandboxNetworkPolicyMode `json:"mode"`
-}
-
-// TplSandboxNetworkPolicyMode defines model for TplSandboxNetworkPolicy.Mode.
-type TplSandboxNetworkPolicyMode string
 
 // TrafficRule defines model for TrafficRule.
 type TrafficRule struct {

@@ -32,12 +32,24 @@ spec:
     network:
         mode: block-all
         egress:
-            allowedDomains:
-                - "*.pypi.org"
-                - "*.anaconda.org"
-            allowedPorts:
-                - port: 443
-                  protocol: TCP
+            trafficRules:
+                - name: allow-python-package-indexes
+                  action: allow
+                  domains:
+                      - "*.pypi.org"
+                      - "*.anaconda.org"
+                  ports:
+                      - port: 443
+                        protocol: tcp
+        credentialBindings:
+            - ref: gh-token
+              sourceRef: github-source
+              projection:
+                  type: http_headers
+                  httpHeaders:
+                      headers:
+                          - name: Authorization
+                            valueTemplate: "Bearer {{token}}"
 ```
 
 ---
@@ -87,19 +99,17 @@ Warm pool configuration. See [Warm Pool](/docs/template/pool) for a detailed gui
 
 ## `network`
 
-Template-level default network policy. If `network` is provided, `mode` is required and must be `allow-all` or `block-all`.
+Template-level default network policy. Templates now use the same public `SandboxNetworkPolicy` shape as claim-time and runtime sandbox network configuration.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `mode` | string | — | Required when `network` is set. Allowed values: `allow-all`, `block-all`. `allow-all` permits by default and evaluates `denied*`. `block-all` denies by default and evaluates `allowed*`. |
-| `egress.allowedDomains` | string[] | — | Wildcard-supported domain allowlist (e.g., `*.github.com`). Used only when `mode` is `block-all`. |
-| `egress.deniedDomains` | string[] | — | Domain blocklist. Used only when `mode` is `allow-all`. |
-| `egress.allowedCidrs` | string[] | — | CIDR allowlist (e.g., `10.0.0.0/8`). Used only when `mode` is `block-all`. |
-| `egress.deniedCidrs` | string[] | — | CIDR blocklist. Used only when `mode` is `allow-all`. |
-| `egress.allowedPorts` | array | — | Port/protocol allowlist. `port` must be `1..65535`. `protocol` is optional but must be `tcp` or `udp` if set. Supports optional `endPort` range. Used only when `mode` is `block-all`. |
-| `egress.deniedPorts` | array | — | Port/protocol blocklist. Used only when `mode` is `allow-all`. |
+| `mode` | string | — | Required when `network` is set. Allowed values: `allow-all`, `block-all`. This is the fallback for unmatched traffic. |
+| `egress.trafficRules` | array | — | Ordered allow/deny rules. First matching rule wins. Recommended for new policies. |
+| `network.credentialBindings` | array | — | Credential bindings scoped under the same `network` object. Use this for outbound auth setup. |
+| `egress.credentialRules` | array | — | Destination-scoped auth injection rules that reference `credentialBindings[*].ref`. |
+| `egress.allowed*` / `egress.denied*` | array | — | Legacy compatibility fields. Prefer `trafficRules` instead. |
 
-See [Network Policy](/docs/sandbox/network) for detailed egress rule semantics and runtime update instructions.
+See [Network](/docs/sandbox/network) for traffic behavior and [Credential](/docs/credential) for bindings and egress auth.
 
 ---
 

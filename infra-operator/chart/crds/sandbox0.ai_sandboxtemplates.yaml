@@ -42,35 +42,44 @@ spec:
               clusterId:
                 type: string
               credentialBindings:
-                description: CredentialBindings defines template-level default sandbox
-                  credential bindings.
+                description: |-
+                  CredentialBindings defines template-level default credential bindings.
+                  Each binding declares a stable ref plus a projection from a manager-owned
+                  credential source. Egress credential rules reference these bindings by ref.
                 items:
-                  description: CredentialBinding defines how a credential reference
-                    should be resolved.
+                  description: |-
+                    CredentialBinding defines one named credential projection that outbound auth
+                    rules can reference. The binding itself does not match traffic.
                   properties:
                     cachePolicy:
-                      description: CachePolicySpec controls broker-side caching for
-                        one binding.
+                      description: CachePolicy controls broker-side caching for resolved
+                        auth material.
                       properties:
                         ttl:
+                          description: TTL overrides the default broker cache TTL
+                            for resolved auth material.
                           type: string
                       type: object
                     projection:
-                      description: ProjectionSpec defines how resolved source data
-                        should be projected into runtime directives.
+                      description: Projection defines how resolved source material
+                        is projected into runtime auth directives.
                       properties:
                         httpHeaders:
-                          description: HTTPHeadersProjection injects HTTP headers
-                            derived from source data.
+                          description: HTTPHeaders projects resolved source data into
+                            outbound HTTP headers.
                           properties:
                             headers:
+                              description: Headers lists the outbound headers to synthesize.
                               items:
                                 description: ProjectedHeader defines one projected
                                   header template.
                                 properties:
                                   name:
+                                    description: Name is the outbound header name.
                                     type: string
                                   valueTemplate:
+                                    description: ValueTemplate is rendered against
+                                      the resolved source payload.
                                     type: string
                                 required:
                                 - name
@@ -79,23 +88,25 @@ spec:
                               type: array
                           type: object
                         tlsClientCertificate:
-                          description: TLSClientCertificateProjection projects one
-                            client certificate for TLS re-origination.
+                          description: TLSClientCertificate projects one client certificate
+                            for TLS re-origination.
                           type: object
                         type:
-                          description: CredentialProjectionType identifies the runtime
-                            projection shape.
+                          description: Type selects the runtime projection shape.
                           type: string
                         usernamePassword:
-                          description: UsernamePasswordProjection projects one username/password
+                          description: UsernamePassword projects one username/password
                             pair into an early auth exchange.
                           type: object
                       required:
                       - type
                       type: object
                     ref:
+                      description: Ref is the stable identifier matched by EgressCredentialRule.CredentialRef.
                       type: string
                     sourceRef:
+                      description: SourceRef identifies the region-scoped credential
+                        source resolved by manager.
                       type: string
                   required:
                   - projection
@@ -218,8 +229,9 @@ spec:
                             rule matched against outbound traffic.
                           properties:
                             credentialRef:
-                              description: CredentialRef identifies the binding resolved
-                                by the runtime egress auth resolver.
+                              description: |-
+                                CredentialRef identifies the binding ref resolved by the runtime egress
+                                auth resolver when this traffic rule matches.
                               type: string
                             domains:
                               description: Domains matches outbound destinations by

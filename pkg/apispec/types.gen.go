@@ -467,6 +467,7 @@ type AuthProvider struct {
 
 // CachePolicySpec defines model for CachePolicySpec.
 type CachePolicySpec struct {
+	// Ttl Override for the broker-side cache TTL of resolved auth material.
 	Ttl *string `json:"ttl,omitempty"`
 }
 
@@ -641,7 +642,7 @@ type CredentialBinding struct {
 	CachePolicy *CachePolicySpec `json:"cachePolicy,omitempty"`
 	Projection  ProjectionSpec   `json:"projection"`
 
-	// Ref Stable credential binding reference matched by `credentialRef`.
+	// Ref Stable binding identifier matched by `credentialRef`.
 	Ref string `json:"ref"`
 
 	// SourceRef Region-scoped credential source reference resolved by `manager`.
@@ -689,7 +690,8 @@ type EgressAuthRolloutMode string
 
 // EgressCredentialRule defines model for EgressCredentialRule.
 type EgressCredentialRule struct {
-	// CredentialRef Broker-managed credential binding reference to resolve for matching traffic.
+	// CredentialRef Stable binding ref to resolve when this traffic rule matches.
+	// The referenced binding must be present in `credential_bindings`.
 	CredentialRef string `json:"credentialRef"`
 
 	// Domains Domain match list for the rule.
@@ -787,6 +789,7 @@ type ForkVolumeRequest struct {
 
 // HTTPHeadersProjection defines model for HTTPHeadersProjection.
 type HTTPHeadersProjection struct {
+	// Headers Outbound headers synthesized from the resolved credential source.
 	Headers *[]ProjectedHeader `json:"headers,omitempty"`
 }
 
@@ -1006,7 +1009,10 @@ type ProcessType string
 
 // ProjectedHeader defines model for ProjectedHeader.
 type ProjectedHeader struct {
-	Name          string `json:"name"`
+	// Name Outbound header name.
+	Name string `json:"name"`
+
+	// ValueTemplate Template rendered against the resolved credential source payload.
 	ValueTemplate string `json:"valueTemplate"`
 }
 
@@ -1155,7 +1161,10 @@ type Sandbox struct {
 type SandboxConfig struct {
 	// AutoResume Sandbox-level resume gate for paused sandboxes. When false, any inbound request
 	// (API or public exposure) must not auto resume the sandbox.
-	AutoResume         *bool                `json:"auto_resume,omitempty"`
+	AutoResume *bool `json:"auto_resume,omitempty"`
+
+	// CredentialBindings Sandbox-scoped credential bindings that can be referenced by egress
+	// credential rules through `credentialRef`.
 	CredentialBindings *[]CredentialBinding `json:"credential_bindings,omitempty"`
 	EnvVars            *map[string]string   `json:"env_vars,omitempty"`
 	ExposedPorts       *[]ExposedPortConfig `json:"exposed_ports,omitempty"`
@@ -1285,7 +1294,10 @@ type SandboxTemplateStatus struct {
 type SandboxUpdateConfig struct {
 	// AutoResume Sandbox-level resume gate for paused sandboxes. When false, any inbound request
 	// (API or public exposure) must not auto resume the sandbox.
-	AutoResume         *bool                `json:"auto_resume,omitempty"`
+	AutoResume *bool `json:"auto_resume,omitempty"`
+
+	// CredentialBindings Runtime-updatable credential bindings referenced by egress
+	// credential rules through `credentialRef`.
 	CredentialBindings *[]CredentialBinding `json:"credential_bindings,omitempty"`
 	ExposedPorts       *[]ExposedPortConfig `json:"exposed_ports,omitempty"`
 	HardTtl            *int32               `json:"hard_ttl,omitempty"`

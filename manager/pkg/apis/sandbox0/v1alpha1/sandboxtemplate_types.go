@@ -46,7 +46,9 @@ type SandboxTemplateSpec struct {
 	// Template Sandbox Network policy (template-level default)
 	Network *TplSandboxNetworkPolicy `json:"network,omitempty"`
 
-	// CredentialBindings defines template-level default sandbox credential bindings.
+	// CredentialBindings defines template-level default credential bindings.
+	// Each binding declares a stable ref plus a projection from a manager-owned
+	// credential source. Egress credential rules reference these bindings by ref.
 	CredentialBindings []CredentialBinding `json:"credentialBindings,omitempty"`
 
 	// Pool strategy
@@ -274,6 +276,8 @@ type TrafficRule struct {
 type SandboxNetworkPolicy struct {
 	Mode               NetworkPolicyMode    `json:"mode"`
 	Egress             *NetworkEgressPolicy `json:"egress,omitempty"`
+	// CredentialBindings defines sandbox-scoped credential bindings that
+	// EgressCredentialRule entries can resolve by CredentialRef.
 	CredentialBindings []CredentialBinding  `json:"credentialBindings,omitempty"`
 }
 
@@ -282,7 +286,8 @@ type EgressCredentialRule struct {
 	// Name is an optional stable identifier used for merge and replacement.
 	Name string `json:"name,omitempty"`
 
-	// CredentialRef identifies the binding resolved by the runtime egress auth resolver.
+	// CredentialRef identifies the binding ref resolved by the runtime egress
+	// auth resolver when this traffic rule matches.
 	CredentialRef string `json:"credentialRef"`
 
 	// Rollout controls whether this rule is active. Empty defaults to enabled.
@@ -304,19 +309,28 @@ type EgressCredentialRule struct {
 	Ports []PortSpec `json:"ports,omitempty"`
 }
 
-// CredentialBinding defines how a credential reference should be resolved.
+// CredentialBinding defines one named credential projection that outbound auth
+// rules can reference. The binding itself does not match traffic.
 type CredentialBinding struct {
-	Ref         string           `json:"ref"`
-	SourceRef   string           `json:"sourceRef"`
-	Projection  ProjectionSpec   `json:"projection"`
+	// Ref is the stable identifier matched by EgressCredentialRule.CredentialRef.
+	Ref string `json:"ref"`
+	// SourceRef identifies the region-scoped credential source resolved by manager.
+	SourceRef string `json:"sourceRef"`
+	// Projection defines how resolved source material is projected into runtime auth directives.
+	Projection ProjectionSpec `json:"projection"`
+	// CachePolicy controls broker-side caching for resolved auth material.
 	CachePolicy *CachePolicySpec `json:"cachePolicy,omitempty"`
 }
 
 // ProjectionSpec defines how resolved source data should be projected into runtime directives.
 type ProjectionSpec struct {
+	// Type selects the runtime projection shape.
 	Type                 CredentialProjectionType        `json:"type"`
+	// HTTPHeaders projects resolved source data into outbound HTTP headers.
 	HTTPHeaders          *HTTPHeadersProjection          `json:"httpHeaders,omitempty"`
+	// TLSClientCertificate projects one client certificate for TLS re-origination.
 	TLSClientCertificate *TLSClientCertificateProjection `json:"tlsClientCertificate,omitempty"`
+	// UsernamePassword projects one username/password pair into an early auth exchange.
 	UsernamePassword     *UsernamePasswordProjection     `json:"usernamePassword,omitempty"`
 }
 
@@ -331,6 +345,7 @@ const (
 
 // HTTPHeadersProjection injects HTTP headers derived from source data.
 type HTTPHeadersProjection struct {
+	// Headers lists the outbound headers to synthesize.
 	Headers []ProjectedHeader `json:"headers,omitempty"`
 }
 
@@ -342,12 +357,15 @@ type UsernamePasswordProjection struct{}
 
 // ProjectedHeader defines one projected header template.
 type ProjectedHeader struct {
+	// Name is the outbound header name.
 	Name          string `json:"name"`
+	// ValueTemplate is rendered against the resolved source payload.
 	ValueTemplate string `json:"valueTemplate"`
 }
 
 // CachePolicySpec controls broker-side caching for one binding.
 type CachePolicySpec struct {
+	// TTL overrides the default broker cache TTL for resolved auth material.
 	TTL string `json:"ttl,omitempty"`
 }
 

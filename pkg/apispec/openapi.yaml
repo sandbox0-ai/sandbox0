@@ -2611,6 +2611,12 @@ components:
           type: string
         type:
           type: string
+        external_auth_portal_url:
+          type: string
+          description: >
+            When set, browser login for this provider should redirect to this external URL
+            instead of initiating the OIDC flow directly. Used for deployments that host
+            their own authorization portal.
       required: [id, name, type]
     SuccessAuthProvidersResponse:
       allOf:

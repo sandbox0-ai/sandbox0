@@ -123,7 +123,22 @@ jobs:
     needs: metadata
     timeout-minutes: 30
     steps:
+      - name: Detect sandbox0-cloud validation token
+        id: token
+        env:
+          GH_TOKEN: ${{ secrets.SANDBOX0_CLOUD_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${GH_TOKEN}" ]]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::SANDBOX0_CLOUD_REPO_TOKEN is not configured; skipping sandbox0-cloud website validation in release-package."
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Resolve sandbox0 validation inputs
+        if: steps.token.outputs.available == 'true'
         id: inputs
         run: |
           set -euo pipefail
@@ -140,16 +155,12 @@ jobs:
           echo "sandbox0_ref=${SANDBOX0_REF}" >> "$GITHUB_OUTPUT"
 
       - name: Dispatch website validation workflow
+        if: steps.token.outputs.available == 'true'
         id: dispatch
         env:
           GH_TOKEN: ${{ secrets.SANDBOX0_CLOUD_REPO_TOKEN }}
         run: |
           set -euo pipefail
-
-          if [[ -z "${GH_TOKEN}" ]]; then
-            echo "SANDBOX0_CLOUD_REPO_TOKEN is required to validate the website docs workflow."
-            exit 1
-          fi
 
           dispatch_time="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
@@ -168,6 +179,7 @@ jobs:
           echo "dispatch_time=${dispatch_time}" >> "$GITHUB_OUTPUT"
 
       - name: Wait for website validation workflow
+        if: steps.token.outputs.available == 'true'
         env:
           GH_TOKEN: ${{ secrets.SANDBOX0_CLOUD_REPO_TOKEN }}
           DISPATCH_TIME: ${{ steps.dispatch.outputs.dispatch_time }}

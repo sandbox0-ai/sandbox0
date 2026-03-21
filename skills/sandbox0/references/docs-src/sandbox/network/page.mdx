@@ -1,36 +1,46 @@
-# Network Policy
+# Network
 
-Control network access for sandboxes. Network policies allow you to restrict outbound traffic, block specific domains, or allow only certain endpoints.
+`SandboxNetworkPolicy` controls outbound traffic for a sandbox.
 
-## Network Modes
+Use `mode` as the default fallback, and use `egress.trafficRules` for explicit ordered allow and deny behavior.
 
-| Mode | Description | Use Case |
-|------|-------------|----------|
-| `allow-all` | Allow all outbound traffic | Default, unrestricted access |
-| `block-all` | Block all outbound traffic | Maximum security, air-gapped environments |
+## Policy Shape
 
-## Egress Policy
+| Field | Description |
+|-------|-------------|
+| `mode` | Default fallback for unmatched traffic: `allow-all` or `block-all` |
+| `egress.trafficRules` | Ordered allow/deny rules. First matching rule wins |
+| `egress.credentialRules` | Destination-scoped outbound auth rules. See [Credential / Egress Auth](/docs/credential/egress-auth) |
+| `network.credentialBindings` | Local bindings used by `credentialRules`. See [Credential / Egress Auth](/docs/credential/egress-auth) |
 
-Egress fields are interpreted by the selected mode:
+The same public `SandboxNetworkPolicy` shape is used in:
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `allowed_domains` | array | Whitelist of allowed domains. Used only in `block-all` mode. |
-| `denied_domains` | array | Blacklist of blocked domains. Used only in `allow-all` mode. |
-| `allowed_cidrs` | array | Whitelist of allowed IP CIDRs. Used only in `block-all` mode. |
-| `denied_cidrs` | array | Blacklist of blocked IP CIDRs. Used only in `allow-all` mode. |
-| `allowed_ports` | array | Whitelist of allowed destination ports. Used only in `block-all` mode. |
-| `denied_ports` | array | Blacklist of blocked destination ports. Used only in `allow-all` mode. |
+- template `spec.network`
+- sandbox claim `config.network`
+- runtime `GET` and `PUT` `/api/v1/sandboxes/{id}/network`
+
+## Mode And Rule Evaluation
+
+1. `trafficRules` are evaluated in order.
+2. The first matching rule wins.
+3. If no rule matches, traffic falls back to `mode`.
 
 <Callout variant="info">
-In <code>allow-all</code> mode, traffic is permitted by default and only <code>denied*</code> fields are enforced. In <code>block-all</code> mode, traffic is denied by default and only <code>allowed*</code> fields are enforced.
+Use `trafficRules` for new policies. Legacy `allowed*` and `denied*` fields still work, but they are deprecated and should not be mixed with `trafficRules`.
 </Callout>
 
----
+## Traffic Rule Fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `action` | Yes | `allow` or `deny` |
+| `name` | No | Stable identifier for replacement and merge |
+| `domains` | No | Domain match list |
+| `cidrs` | No | CIDR match list |
+| `ports` | No | Port/protocol constraints |
+| `appProtocols` | No | Classified application protocols such as `http`, `tls`, `ssh`, `dns`, `redis` |
 
 ## Get Network Policy
-
-Retrieve the current network policy for a sandbox.
 
 <Endpoint method="GET">
 /api/v1/sandboxes/{'{id}'}/network
@@ -41,36 +51,23 @@ Retrieve the current network policy for a sandbox.
     {
       label: "Go",
       language: "go",
-      code: `// Get current network policy
-policy, err := sandbox.GetNetworkPolicy(ctx)
+      code: `policy, err := sandbox.GetNetworkPolicy(ctx)
 if err != nil {
     log.Fatal(err)
 }
-fmt.Printf("Mode: %s\\n", policy.Mode)
-if egress, ok := policy.Egress.Get(); ok {
-    fmt.Printf("Allowed domains: %v\\n", egress.AllowedDomains)
-}`
+fmt.Printf("mode=%s\\n", policy.Mode)`
     },
     {
       label: "Python",
       language: "python",
-      code: `# Get current network policy
-from sandbox0.apispec.types import UNSET
-
-policy = sandbox.get_network_policy()
-print(f"Mode: {policy.mode}")
-if policy.egress is not UNSET:
-    print(f"Allowed domains: {policy.egress.allowed_domains}")`
+      code: `policy = sandbox.get_network_policy()
+print(policy.mode)`
     },
     {
       label: "TypeScript",
       language: "typescript",
-      code: `// Get current network policy
-const policy = await sandbox.getNetworkPolicy();
-console.log('Mode:', policy.mode);
-if (policy.egress) {
-    console.log('Allowed domains:', policy.egress.allowedDomains);
-}`
+      code: `const policy = await sandbox.getNetworkPolicy();
+console.log(policy.mode);`
     },
     {
       label: "CLI",
@@ -80,249 +77,37 @@ if (policy.egress) {
   ]}
 />
 
----
-
 ## Update Network Policy
-
-Update the network policy for a sandbox.
 
 <Endpoint method="PUT">
 /api/v1/sandboxes/{'{id}'}/network
 </Endpoint>
 
-### Request Body
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `mode` | string | Network mode: `allow-all` or `block-all` |
-| `egress` | object | Egress policy rules (optional) |
-| `credentialBindings` | array | Runtime credential bindings for egress auth (optional) |
-
----
-
-### Allow All Traffic
-
-Allow all outbound network access (default behavior).
+### Allow Only GitHub HTTPS
 
 <Tabs
   tabs={[
     {
       label: "Go",
       language: "go",
-      code: `// Allow all traffic
-_, err = sandbox.UpdateNetworkPolicy(ctx, apispec.SandboxNetworkPolicy{
-    Mode: apispec.SandboxNetworkPolicyModeAllowAll,
-})
-if err != nil {
-    log.Fatal(err)
-}
-fmt.Println("Network policy updated: allow-all")`
-    },
-    {
-      label: "Python",
-      language: "python",
-      code: `# Allow all traffic
-from sandbox0.apispec.models.sandbox_network_policy import SandboxNetworkPolicy
-from sandbox0.apispec.models.sandbox_network_policy_mode import SandboxNetworkPolicyMode
-
-sandbox.update_network_policy(SandboxNetworkPolicy(mode=SandboxNetworkPolicyMode.ALLOW_ALL))
-print("Network policy updated: allow-all")`
-    },
-    {
-      label: "TypeScript",
-      language: "typescript",
-      code: `// Allow all traffic
-await sandbox.updateNetworkPolicy({ mode: 'allow-all' });
-console.log('Network policy updated: allow-all');`
-    },
-    {
-      label: "CLI",
-      language: "bash",
-      code: `s0 sandbox network update -s sb_abc123 --mode allow-all`
-    }
-  ]}
-/>
-
----
-
-### Block All Traffic
-
-Block all outbound network access.
-
-<Tabs
-  tabs={[
-    {
-      label: "Go",
-      language: "go",
-      code: `// Block all traffic
-_, err = sandbox.UpdateNetworkPolicy(ctx, apispec.SandboxNetworkPolicy{
-    Mode: apispec.SandboxNetworkPolicyModeBlockAll,
-})
-if err != nil {
-    log.Fatal(err)
-}
-fmt.Println("Network policy updated: block-all")`
-    },
-    {
-      label: "Python",
-      language: "python",
-      code: `# Block all traffic
-sandbox.update_network_policy(SandboxNetworkPolicy(mode=SandboxNetworkPolicyMode.BLOCK_ALL))
-print("Network policy updated: block-all")`
-    },
-    {
-      label: "TypeScript",
-      language: "typescript",
-      code: `// Block all traffic
-await sandbox.updateNetworkPolicy({ mode: 'block-all' });
-console.log('Network policy updated: block-all');`
-    },
-    {
-      label: "CLI",
-      language: "bash",
-      code: `s0 sandbox network update -s sb_abc123 --mode block-all`
-    }
-  ]}
-/>
-
----
-
-### Allow Specific Domains
-
-Block all traffic except for specific allowed domains.
-
-<Tabs
-  tabs={[
-    {
-      label: "Go",
-      language: "go",
-      code: `// Block all except specific domains
-_, err = sandbox.UpdateNetworkPolicy(ctx, apispec.SandboxNetworkPolicy{
+      code: `_, err = sandbox.UpdateNetworkPolicy(ctx, apispec.SandboxNetworkPolicy{
     Mode: apispec.SandboxNetworkPolicyModeBlockAll,
     Egress: apispec.NewOptNetworkEgressPolicy(apispec.NetworkEgressPolicy{
-        AllowedDomains: []string{"github.com", "pypi.org", "api.openai.com"},
+        TrafficRules: []apispec.TrafficRule{
+            {
+                Name: apispec.NewOptString("allow-github"),
+                Action: apispec.TrafficRuleActionAllow,
+                Domains: []string{"github.com", "api.github.com"},
+                Ports: []apispec.PortSpec{
+                    {
+                        Port: 443,
+                        Protocol: apispec.NewOptString("tcp"),
+                    },
+                },
+            },
+        },
     }),
 })
-if err != nil {
-    log.Fatal(err)
-}
-fmt.Println("Network policy updated: only github.com, pypi.org, api.openai.com allowed")`
-    },
-    {
-      label: "Python",
-      language: "python",
-      code: `# Block all except specific domains
-from sandbox0.apispec.models.network_egress_policy import NetworkEgressPolicy
-
-sandbox.update_network_policy(
-    SandboxNetworkPolicy(
-        mode=SandboxNetworkPolicyMode.BLOCK_ALL,
-        egress=NetworkEgressPolicy(
-            allowed_domains=["github.com", "pypi.org", "api.openai.com"],
-        ),
-    )
-)
-print("Network policy updated: only allowed domains")`
-    },
-    {
-      label: "TypeScript",
-      language: "typescript",
-      code: `// Block all except specific domains
-await sandbox.updateNetworkPolicy({
-    mode: 'block-all',
-    egress: {
-        allowedDomains: ['github.com', 'pypi.org', 'api.openai.com'],
-    },
-});
-console.log('Network policy updated: only allowed domains');`
-    },
-    {
-      label: "CLI",
-      language: "bash",
-      code: `s0 sandbox network update -s sb_abc123 --mode block-all \\
-  --allow-domain github.com \\
-  --allow-domain pypi.org \\
-  --allow-domain api.openai.com`
-    }
-  ]}
-/>
-
----
-
-### Block Specific Domains
-
-Allow all traffic except for specific blocked domains.
-
-<Tabs
-  tabs={[
-    {
-      label: "Go",
-      language: "go",
-      code: `// Block specific domains (allow all others)
-_, err = sandbox.UpdateNetworkPolicy(ctx, apispec.SandboxNetworkPolicy{
-    Mode: apispec.SandboxNetworkPolicyModeAllowAll,
-    Egress: apispec.NewOptNetworkEgressPolicy(apispec.NetworkEgressPolicy{
-        DeniedDomains: []string{"facebook.com", "twitter.com"},
-    }),
-})
-if err != nil {
-    log.Fatal(err)
-}
-fmt.Println("Network policy updated: block facebook.com, twitter.com")`
-    },
-    {
-      label: "Python",
-      language: "python",
-      code: `# Block specific domains (allow all others)
-sandbox.update_network_policy(
-    SandboxNetworkPolicy(
-        mode=SandboxNetworkPolicyMode.ALLOW_ALL,
-        egress=NetworkEgressPolicy(
-            denied_domains=["facebook.com", "twitter.com"],
-        ),
-    )
-)
-print("Network policy updated: blocked specific domains")`
-    },
-    {
-      label: "TypeScript",
-      language: "typescript",
-      code: `// Block specific domains (allow all others)
-await sandbox.updateNetworkPolicy({
-    mode: 'allow-all',
-    egress: {
-        deniedDomains: ['facebook.com', 'twitter.com'],
-    },
-});`
-    },
-    {
-      label: "CLI",
-      language: "bash",
-      code: `s0 sandbox network update -s sb_abc123 --mode allow-all \\
-  --deny-domain facebook.com \\
-  --deny-domain twitter.com`
-    }
-  ]}
-/>
-
----
-
-## Set Network Policy at Creation
-
-Configure network policy when claiming a sandbox.
-
-<Tabs
-  tabs={[
-    {
-      label: "Go",
-      language: "go",
-      code: `// Claim sandbox with network policy
-sandbox, err = client.ClaimSandbox(ctx, "default",
-    sandbox0.WithSandboxHardTTL(600),
-    sandbox0.WithSandboxNetworkPolicy(apispec.TplSandboxNetworkPolicy{
-        Mode: apispec.TplSandboxNetworkPolicyModeAllowAll,
-    }),
-)
 if err != nil {
     log.Fatal(err)
 }`
@@ -330,148 +115,61 @@ if err != nil {
     {
       label: "Python",
       language: "python",
-      code: `# Claim sandbox with network policy
-from sandbox0.apispec.models.sandbox_config import SandboxConfig
+      code: `from sandbox0.apispec.models.sandbox_network_policy import SandboxNetworkPolicy
 
-sandbox = client.sandboxes.claim(
-    template="default",
-    config=SandboxConfig(
-        hard_ttl=600,
-        network=TplSandboxNetworkPolicy(mode=TplSandboxNetworkPolicyMode.ALLOW_ALL),
-    ),
+sandbox.update_network_policy(
+    SandboxNetworkPolicy.from_dict({
+        "mode": "block-all",
+        "egress": {
+            "trafficRules": [
+                {
+                    "name": "allow-github",
+                    "action": "allow",
+                    "domains": ["github.com", "api.github.com"],
+                    "ports": [{"port": 443, "protocol": "tcp"}],
+                },
+            ],
+        },
+    })
 )`
     },
     {
       label: "TypeScript",
       language: "typescript",
-      code: `// Claim sandbox with network policy
-const newSandbox = await client.sandboxes.claim('default', {
-    hardTtl: 600,
-    network: { mode: 'allow-all' },
+      code: `await sandbox.updateNetworkPolicy({
+    mode: 'block-all',
+    egress: {
+        trafficRules: [
+            {
+                name: 'allow-github',
+                action: 'allow',
+                domains: ['github.com', 'api.github.com'],
+                ports: [{ port: 443, protocol: 'tcp' }],
+            },
+        ],
+    },
 });`
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 sandbox create --template default --hard-ttl 600`
+      code: `s0 sandbox network update --mode block-all \\
+  --traffic-rule '{"name":"allow-github","action":"allow","domains":["github.com","api.github.com"],"ports":[{"port":443,"protocol":"tcp"}]}' \\
+  -s sb_abc123`
     }
   ]}
 />
 
----
+## Legacy Compatibility
 
-## Test Network Connectivity
+`egress.allowedDomains`, `allowedCidrs`, `allowedPorts`, `deniedDomains`, `deniedCidrs`, and `deniedPorts` are still accepted for compatibility:
 
-Verify network policy by making requests from the sandbox.
+- In `block-all`, only `allowed*` fields are enforced.
+- In `allow-all`, only `denied*` fields are enforced.
 
-<Tabs
-  tabs={[
-    {
-      label: "Go",
-      language: "go",
-      code: `// Test network connectivity
-const shell = \`/bin/curl -s -o /dev/null -w "%{http_code}\\n" --max-time 3 https://github.com\`
-resp, err := sandbox.Cmd(ctx, shell)
-if err != nil {
-    log.Fatal(err)
-}
-fmt.Printf("GitHub response before blocking: %s\\n", resp.OutputRaw)
+Prefer `trafficRules` for all new policies.
 
-// Block all traffic
-_, err = sandbox.UpdateNetworkPolicy(ctx, apispec.SandboxNetworkPolicy{
-    Mode: apispec.SandboxNetworkPolicyModeBlockAll,
-})
-if err != nil {
-    log.Fatal(err)
-}
+## Related Pages
 
-// Test again (should fail)
-resp, err = sandbox.Cmd(ctx, shell)
-if err != nil {
-    fmt.Println("Request blocked as expected")
-}
-fmt.Printf("GitHub response after blocking: %s\\n", resp.OutputRaw)`
-    },
-    {
-      label: "Python",
-      language: "python",
-      code: `# Test network connectivity
-shell = '/bin/curl -s -o /dev/null -w "%{http_code}\\n" --max-time 3 https://github.com'
-resp = sandbox.cmd(shell)
-print(f"GitHub response before blocking: {resp.output_raw.strip()}")
-
-# Block all traffic
-sandbox.update_network_policy(SandboxNetworkPolicy(mode=SandboxNetworkPolicyMode.BLOCK_ALL))
-
-# Test again (should fail)
-try:
-    resp = sandbox.cmd(shell)
-    print(f"GitHub response after blocking: {resp.output_raw.strip()}")
-except Exception as e:
-    print("Request blocked as expected")`
-    },
-    {
-      label: "TypeScript",
-      language: "typescript",
-      code: `// Test network connectivity
-const shell = '/bin/curl -s -o /dev/null -w "%{http_code}\\n" --max-time 3 https://github.com';
-let resp = await newSandbox.cmd(shell);
-console.log('GitHub response before blocking:', resp.outputRaw.trim());
-
-// Block all traffic
-await newSandbox.updateNetworkPolicy({ mode: 'block-all' });
-
-// Test again (should fail)
-try {
-    resp = await newSandbox.cmd(shell);
-    console.log('Github response after blocking:', resp.outputRaw.trim());
-} catch (e) {
-    console.log('Request blocked as expected');
-}`
-    },
-    {
-      label: "CLI",
-      language: "bash",
-      code: `# Test network connectivity
-s0 sandbox exec sb_abc123 -- curl -s -o /dev/null -w "%{http_code}" https://github.com
-# Output: 200
-
-# Block all traffic
-s0 sandbox network update -s sb_abc123 --mode block-all
-
-# Test again (should timeout/fail)
-s0 sandbox exec sb_abc123 -- curl -s -o /dev/null -w "%{http_code}" --max-time 3 https://github.com
-# Output: 000`
-    }
-  ]}
-/>
-
----
-
-## Next Steps
-
-<CardGrid>
-  <LinkCard
-    title="Port Exposure"
-    href="/docs/sandbox/ports"
-    cta="Learn More"
-  >
-    Expose sandbox ports publicly
-  </LinkCard>
-
-  <LinkCard
-    title="Webhooks"
-    href="/docs/sandbox/webhooks"
-    cta="Learn More"
-  >
-    Receive event notifications
-  </LinkCard>
-
-  <LinkCard
-    title="Volumes"
-    href="/docs/volume"
-    cta="Learn More"
-  >
-    Persistent storage for sandboxes
-  </LinkCard>
-</CardGrid>
+- [Credential](/docs/credential)
+- [Credential / Egress Auth](/docs/credential/egress-auth)

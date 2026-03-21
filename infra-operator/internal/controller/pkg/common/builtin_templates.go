@@ -116,7 +116,7 @@ func EnsureBuiltinTemplates(ctx context.Context, infra *infrav1alpha1.Sandbox0In
 				MinIdle: poolCfg.MinIdle,
 				MaxIdle: poolCfg.MaxIdle,
 			},
-			Network: &templatev1alpha1.TplSandboxNetworkPolicy{
+			Network: &templatev1alpha1.SandboxNetworkPolicy{
 				Mode: templatev1alpha1.NetworkModeAllowAll,
 			},
 		}

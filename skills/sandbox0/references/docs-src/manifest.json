@@ -46,6 +46,24 @@
       ]
     },
     {
+      "label": "CREDENTIAL",
+      "slug": "credential",
+      "pages": [
+        {
+          "slug": "",
+          "title": "Overview"
+        },
+        {
+          "slug": "sources",
+          "title": "Sources"
+        },
+        {
+          "slug": "egress-auth",
+          "title": "Egress Auth"
+        }
+      ]
+    },
+    {
       "label": "TEMPLATE",
       "slug": "template",
       "pages": [

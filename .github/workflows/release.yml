@@ -55,6 +55,7 @@ jobs:
     needs:
       - prepare-release
       - package
+      - trigger-cloud-website-release
     steps:
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -114,6 +115,7 @@ jobs:
     needs:
       - prepare-release
       - package
+      - trigger-cloud-website-release
     strategy:
       fail-fast: false
       matrix:
@@ -210,6 +212,7 @@ jobs:
       - prepare-release
       - package
       - publish-image-manifest
+      - trigger-cloud-website-release
     steps:
       - name: Setup Helm
         uses: azure/setup-helm@v4
@@ -310,9 +313,9 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - prepare-release
-      - publish-helm
+      - package
     steps:
-      - name: Create or update GitHub Release with docs bundle
+      - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -347,43 +350,66 @@ jobs:
           fi
 
   trigger-cloud-website-release:
-    name: Trigger sandbox0-cloud website release
+    name: Trigger sandbox0-cloud website deploy
     runs-on: ubuntu-latest
     needs:
       - prepare-release
+      - package
       - publish-release-record
     steps:
-      - name: Dispatch website release to sandbox0-cloud
+      - name: Dispatch website deploy to sandbox0-cloud
+        id: dispatch
         env:
           SANDBOX0_CLOUD_REPO_TOKEN: ${{ secrets.SANDBOX0_CLOUD_REPO_TOKEN }}
         run: |
+          set -euo pipefail
+
           if [[ -z "${SANDBOX0_CLOUD_REPO_TOKEN}" ]]; then
-            echo "SANDBOX0_CLOUD_REPO_TOKEN is required to dispatch the sandbox0-cloud website release workflow."
+            echo "SANDBOX0_CLOUD_REPO_TOKEN is required to dispatch the sandbox0-cloud website workflow."
             exit 1
           fi
 
-          curl \
-            --fail \
-            --show-error \
-            --silent \
-            --retry 5 \
-            --retry-all-errors \
-            --max-time 30 \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${SANDBOX0_CLOUD_REPO_TOKEN}" \
-            -X POST \
-            "https://api.github.com/repos/sandbox0-ai/sandbox0-cloud/dispatches" \
-            -d @- <<EOF
-          {
-            "event_type": "sandbox0-release",
-            "client_payload": {
-              "sandbox0_repository": "${GITHUB_REPOSITORY}",
-              "sandbox0_ref": "${GITHUB_REF_NAME}",
-              "tag": "${GITHUB_REF_NAME}",
-              "version": "${{ needs.prepare-release.outputs.version }}",
-              "is_prerelease": "${{ needs.prepare-release.outputs.is_prerelease }}"
-            }
-          }
-          EOF
+          dispatch_time="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
-          echo "Dispatched sandbox0-cloud website release for ${GITHUB_REF_NAME}."
+          GH_TOKEN="${SANDBOX0_CLOUD_REPO_TOKEN}" gh workflow run website.yml \
+            --repo sandbox0-ai/sandbox0-cloud \
+            --ref main \
+            -f sandbox0_repository="${GITHUB_REPOSITORY}" \
+            -f sandbox0_ref="${GITHUB_REF_NAME}" \
+            -f docs_github_repository="${GITHUB_REPOSITORY}" \
+            -f docs_include_next="true" \
+            -f docs_download_release_bundles="1" \
+            -f upload_release_bundle="true" \
+            -f release_tag="${GITHUB_REF_NAME}" \
+            -f deploy_to_pages="true"
+
+          echo "dispatch_time=${dispatch_time}" >> "$GITHUB_OUTPUT"
+          echo "Dispatched sandbox0-cloud website release workflow for ${GITHUB_REF_NAME}."
+
+      - name: Wait for website deploy workflow
+        env:
+          GH_TOKEN: ${{ secrets.SANDBOX0_CLOUD_REPO_TOKEN }}
+          DISPATCH_TIME: ${{ steps.dispatch.outputs.dispatch_time }}
+        run: |
+          set -euo pipefail
+
+          run_id=""
+          for attempt in $(seq 1 30); do
+            run_id="$(
+              gh api "repos/sandbox0-ai/sandbox0-cloud/actions/workflows/website.yml/runs?event=workflow_dispatch&branch=main&per_page=20" \
+                | python3 -c 'import json, os, sys; from datetime import datetime; dispatch_time = datetime.fromisoformat(os.environ["DISPATCH_TIME"].replace("Z", "+00:00")); data = json.load(sys.stdin); print(next((str(run["id"]) for run in data.get("workflow_runs", []) if datetime.fromisoformat(run["created_at"].replace("Z", "+00:00")) >= dispatch_time), ""))'
+            )"
+
+            if [[ -n "${run_id}" ]]; then
+              break
+            fi
+
+            sleep 10
+          done
+
+          if [[ -z "${run_id}" ]]; then
+            echo "Timed out waiting for sandbox0-cloud website workflow to start."
+            exit 1
+          fi
+
+          gh run watch "${run_id}" --repo sandbox0-ai/sandbox0-cloud --interval 10 --exit-status

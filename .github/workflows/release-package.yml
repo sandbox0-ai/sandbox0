@@ -116,6 +116,97 @@ jobs:
           path: ${{ steps.pack.outputs.pack_file }}
           if-no-files-found: error
 
+  website-docs:
+    name: release-package / website-docs
+    if: ${{ needs.metadata.outputs.upload_artifacts != 'true' }}
+    runs-on: ubuntu-latest
+    needs: metadata
+    timeout-minutes: 30
+    steps:
+      - name: Detect sandbox0-cloud validation token
+        id: token
+        env:
+          GH_TOKEN: ${{ secrets.SANDBOX0_CLOUD_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${GH_TOKEN}" ]]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::SANDBOX0_CLOUD_REPO_TOKEN is not configured; skipping sandbox0-cloud website validation in release-package."
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve sandbox0 validation inputs
+        if: steps.token.outputs.available == 'true'
+        id: inputs
+        run: |
+          set -euo pipefail
+
+          SANDBOX0_REPOSITORY="${GITHUB_REPOSITORY}"
+          SANDBOX0_REF="${GITHUB_SHA}"
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            SANDBOX0_REPOSITORY="${{ github.event.pull_request.head.repo.full_name }}"
+            SANDBOX0_REF="${{ github.event.pull_request.head.sha }}"
+          fi
+
+          echo "sandbox0_repository=${SANDBOX0_REPOSITORY}" >> "$GITHUB_OUTPUT"
+          echo "sandbox0_ref=${SANDBOX0_REF}" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch website validation workflow
+        if: steps.token.outputs.available == 'true'
+        id: dispatch
+        env:
+          GH_TOKEN: ${{ secrets.SANDBOX0_CLOUD_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          dispatch_time="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+          gh workflow run website.yml \
+            --repo sandbox0-ai/sandbox0-cloud \
+            --ref main \
+            -f sandbox0_repository="${{ steps.inputs.outputs.sandbox0_repository }}" \
+            -f sandbox0_ref="${{ steps.inputs.outputs.sandbox0_ref }}" \
+            -f docs_github_repository="${GITHUB_REPOSITORY}" \
+            -f docs_build_versions="${{ needs.metadata.outputs.tag }}" \
+            -f docs_include_next="false" \
+            -f docs_download_release_bundles="0" \
+            -f upload_release_bundle="false" \
+            -f deploy_to_pages="false"
+
+          echo "dispatch_time=${dispatch_time}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for website validation workflow
+        if: steps.token.outputs.available == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.SANDBOX0_CLOUD_REPO_TOKEN }}
+          DISPATCH_TIME: ${{ steps.dispatch.outputs.dispatch_time }}
+        run: |
+          set -euo pipefail
+
+          run_id=""
+          for attempt in $(seq 1 30); do
+            run_id="$(
+              gh api "repos/sandbox0-ai/sandbox0-cloud/actions/workflows/website.yml/runs?event=workflow_dispatch&branch=main&per_page=20" \
+                | python3 -c 'import json, os, sys; from datetime import datetime; dispatch_time = datetime.fromisoformat(os.environ["DISPATCH_TIME"].replace("Z", "+00:00")); data = json.load(sys.stdin); print(next((str(run["id"]) for run in data.get("workflow_runs", []) if datetime.fromisoformat(run["created_at"].replace("Z", "+00:00")) >= dispatch_time), ""))'
+            )"
+
+            if [[ -n "${run_id}" ]]; then
+              break
+            fi
+
+            sleep 10
+          done
+
+          if [[ -z "${run_id}" ]]; then
+            echo "Timed out waiting for sandbox0-cloud website validation workflow to start."
+            exit 1
+          fi
+
+          gh run watch "${run_id}" --repo sandbox0-ai/sandbox0-cloud --interval 10 --exit-status
+
   infra:
     name: release-package / infra
     runs-on: ubuntu-latest

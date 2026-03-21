@@ -116,6 +116,65 @@ jobs:
           path: ${{ steps.pack.outputs.pack_file }}
           if-no-files-found: error
 
+  website-docs:
+    name: release-package / website-docs
+    runs-on: ubuntu-latest
+    needs: metadata
+    timeout-minutes: 30
+    steps:
+      - name: Checkout sandbox0
+        uses: actions/checkout@v4
+        with:
+          path: sandbox0
+
+      - name: Checkout sandbox0-cloud
+        uses: actions/checkout@v4
+        with:
+          repository: sandbox0-ai/sandbox0-cloud
+          ref: main
+          path: sandbox0-cloud
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: sandbox0-cloud/package-lock.json
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: sandbox0-cloud/go.mod
+
+      - name: Install website dependencies
+        working-directory: sandbox0-cloud
+        run: npm ci
+
+      - name: Build website release docs bundle
+        working-directory: sandbox0-cloud
+        env:
+          SANDBOX0_ROOT: ${{ github.workspace }}/sandbox0
+          DOCS_GITHUB_REPOSITORY: ${{ github.repository }}
+          DOCS_BUILD_VERSIONS: ${{ needs.metadata.outputs.tag }}
+          DOCS_INCLUDE_NEXT: "false"
+          DOCS_DOWNLOAD_RELEASE_BUNDLES: "0"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run build:website
+
+      - name: Package website release docs bundle
+        shell: bash
+        run: |
+          TAG="${{ needs.metadata.outputs.tag }}"
+          tar -czf "sandbox0-docs-${TAG}.tar.gz" -C sandbox0-cloud/apps/website/out .
+
+      - name: Upload website docs bundle artifact
+        if: ${{ needs.metadata.outputs.upload_artifacts == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: website-docs-bundle-${{ needs.metadata.outputs.version }}
+          path: sandbox0-docs-${{ needs.metadata.outputs.tag }}.tar.gz
+          if-no-files-found: error
+
   infra:
     name: release-package / infra
     runs-on: ubuntu-latest

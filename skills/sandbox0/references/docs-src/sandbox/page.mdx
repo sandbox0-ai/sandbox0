@@ -13,7 +13,7 @@ A Sandbox is an isolated execution environment where you can run code, manage fi
 | `team_id` | Team that owns this sandbox |
 | `user_id` | User who claimed this sandbox |
 | `pod_name` | Kubernetes pod name (internal) |
-| `cluster_id` | Cluster where sandbox runs (multi-cluster only) |
+| `cluster_id` | Cluster where sandbox runs in multi-cluster deployments. Present on claim and list responses, not on sandbox detail responses. |
 
 ### Lifecycle States
 
@@ -21,9 +21,12 @@ A Sandbox is an isolated execution environment where you can run code, manage fi
 |--------|-------------|
 | `starting` | Sandbox is being initialized |
 | `running` | Sandbox is active and ready to use |
-| `paused` | Sandbox is paused (resources preserved) |
 | `failed` | Sandbox encountered an error |
 | `completed` | Sandbox has finished execution |
+
+<Callout variant="info">
+Pause state is modeled separately from `status`. Use the `paused` boolean when you need to distinguish a paused sandbox from a running one.
+</Callout>
 
 ---
 
@@ -260,9 +263,9 @@ List all sandboxes with optional filters.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `status` | string | Filter by status (starting, running, paused, failed, completed) |
+| `status` | string | Filter by status (`starting`, `running`, `failed`, `completed`) |
 | `template_id` | string | Filter by template ID |
-| `paused` | boolean | Filter by paused state |
+| `paused` | boolean | Filter by paused state independently of `status` |
 | `limit` | integer | Max results per page (default: 50, max: 200) |
 | `offset` | integer | Pagination offset (default: 0) |
 
@@ -359,7 +362,10 @@ if err != nil {
     {
       label: "Python",
       language: "python",
-      code: `client.update_sandbox(
+      code: `from sandbox0.apispec.models.sandbox_update_config import SandboxUpdateConfig
+from sandbox0.apispec.models.sandbox_update_request import SandboxUpdateRequest
+
+client.update_sandbox(
     sandbox.id,
     SandboxUpdateRequest(config=SandboxUpdateConfig.from_dict({
         "ttl": 600,

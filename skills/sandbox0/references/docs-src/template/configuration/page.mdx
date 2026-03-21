@@ -1,6 +1,6 @@
 # Template Configuration
 
-A complete reference for all fields in a template spec. Pass the spec as the `spec` field when creating or updating a template.
+Reference for the most commonly used template spec fields. Pass the spec as the `spec` field when creating or updating a template.
 
 ## Spec Example
 
@@ -56,7 +56,7 @@ spec:
 
 ## `mainContainer`
 
-The main sandbox container. Required.
+The main sandbox container configuration.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -97,6 +97,18 @@ Warm pool configuration. See [Warm Pool](/docs/template/pool) for a detailed gui
 
 ---
 
+## Additional Template Fields
+
+The template spec also includes:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `lifecycle` | object | Template lifecycle defaults such as `defaultTTL`, `maxTTL`, `idleTimeout`, and `preStop`. |
+| `public` | boolean | Template visibility flag. |
+| `allowedTeams` | string[] | Optional team allowlist. |
+
+---
+
 ## `network`
 
 Template-level default network policy. Templates now use the same public `SandboxNetworkPolicy` shape as claim-time and runtime sandbox network configuration.
@@ -106,7 +118,7 @@ Template-level default network policy. Templates now use the same public `Sandbo
 | `mode` | string | — | Required when `network` is set. Allowed values: `allow-all`, `block-all`. This is the fallback for unmatched traffic. |
 | `egress.trafficRules` | array | — | Ordered allow/deny rules. First matching rule wins. Recommended for new policies. |
 | `network.credentialBindings` | array | — | Credential bindings scoped under the same `network` object. Use this for outbound auth setup. |
-| `egress.credentialRules` | array | — | Destination-scoped auth injection rules that reference `credentialBindings[*].ref`. |
+| `egress.credentialRules` | array | — | Destination-scoped auth injection rules that reference `network.credentialBindings[*].ref`. |
 | `egress.allowed*` / `egress.denied*` | array | — | Legacy compatibility fields. Prefer `trafficRules` instead. |
 
 See [Network](/docs/sandbox/network) for traffic behavior and [Credential](/docs/credential) for bindings and egress auth.

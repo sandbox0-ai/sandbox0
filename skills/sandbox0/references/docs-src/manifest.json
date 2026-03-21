@@ -58,10 +58,6 @@
           "title": "Sources"
         },
         {
-          "slug": "bindings",
-          "title": "Bindings"
-        },
-        {
           "slug": "egress-auth",
           "title": "Egress Auth"
         }

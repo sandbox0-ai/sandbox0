@@ -274,11 +274,11 @@ type TrafficRule struct {
 
 // SandboxNetworkPolicy defines the sandbox-scoped network policy API shape.
 type SandboxNetworkPolicy struct {
-	Mode               NetworkPolicyMode    `json:"mode"`
-	Egress             *NetworkEgressPolicy `json:"egress,omitempty"`
+	Mode   NetworkPolicyMode    `json:"mode"`
+	Egress *NetworkEgressPolicy `json:"egress,omitempty"`
 	// CredentialBindings defines sandbox-scoped credential bindings that
 	// EgressCredentialRule entries can resolve by CredentialRef.
-	CredentialBindings []CredentialBinding  `json:"credentialBindings,omitempty"`
+	CredentialBindings []CredentialBinding `json:"credentialBindings,omitempty"`
 }
 
 // EgressCredentialRule defines a credential injection rule matched against outbound traffic.
@@ -325,13 +325,13 @@ type CredentialBinding struct {
 // ProjectionSpec defines how resolved source data should be projected into runtime directives.
 type ProjectionSpec struct {
 	// Type selects the runtime projection shape.
-	Type                 CredentialProjectionType        `json:"type"`
+	Type CredentialProjectionType `json:"type"`
 	// HTTPHeaders projects resolved source data into outbound HTTP headers.
-	HTTPHeaders          *HTTPHeadersProjection          `json:"httpHeaders,omitempty"`
+	HTTPHeaders *HTTPHeadersProjection `json:"httpHeaders,omitempty"`
 	// TLSClientCertificate projects one client certificate for TLS re-origination.
 	TLSClientCertificate *TLSClientCertificateProjection `json:"tlsClientCertificate,omitempty"`
 	// UsernamePassword projects one username/password pair into an early auth exchange.
-	UsernamePassword     *UsernamePasswordProjection     `json:"usernamePassword,omitempty"`
+	UsernamePassword *UsernamePasswordProjection `json:"usernamePassword,omitempty"`
 }
 
 // CredentialProjectionType identifies the runtime projection shape.
@@ -358,7 +358,7 @@ type UsernamePasswordProjection struct{}
 // ProjectedHeader defines one projected header template.
 type ProjectedHeader struct {
 	// Name is the outbound header name.
-	Name          string `json:"name"`
+	Name string `json:"name"`
 	// ValueTemplate is rendered against the resolved source payload.
 	ValueTemplate string `json:"valueTemplate"`
 }

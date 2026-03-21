@@ -7,12 +7,12 @@ import (
 )
 
 const (
-	chainName          = "NETD_PREROUTING"
-	natChainName       = "NETD_NAT_PREROUTING"
-	ipsetName          = "netd-sandbox-ips"
-	tproxyMark         = "0x1/0x1"
-	defaultLoopback    = "127.0.0.0/8"
-	natBypassJumpMark  = tproxyMark
+	chainName         = "NETD_PREROUTING"
+	natChainName      = "NETD_NAT_PREROUTING"
+	ipsetName         = "netd-sandbox-ips"
+	tproxyMark        = "0x1/0x1"
+	defaultLoopback   = "127.0.0.0/8"
+	natBypassJumpMark = tproxyMark
 )
 
 func buildIPTablesRestoreInput(cfg Config, bypassCIDRs []string) string {

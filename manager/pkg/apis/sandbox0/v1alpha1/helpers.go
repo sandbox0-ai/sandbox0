@@ -451,12 +451,13 @@ func BuildEgressSpec(policy *TplSandboxNetworkPolicy) *NetworkEgressPolicy {
 	}
 
 	return &NetworkEgressPolicy{
-		AllowedCIDRs:   policy.Egress.AllowedCIDRs,
-		DeniedCIDRs:    policy.Egress.DeniedCIDRs,
-		AllowedDomains: policy.Egress.AllowedDomains,
-		DeniedDomains:  policy.Egress.DeniedDomains,
-		AllowedPorts:   policy.Egress.AllowedPorts,
-		DeniedPorts:    policy.Egress.DeniedPorts,
-		Rules:          policy.Egress.Rules,
+		AllowedCIDRs:    policy.Egress.AllowedCIDRs,
+		DeniedCIDRs:     policy.Egress.DeniedCIDRs,
+		AllowedDomains:  policy.Egress.AllowedDomains,
+		DeniedDomains:   policy.Egress.DeniedDomains,
+		AllowedPorts:    policy.Egress.AllowedPorts,
+		DeniedPorts:     policy.Egress.DeniedPorts,
+		TrafficRules:    policy.Egress.TrafficRules,
+		CredentialRules: policy.Egress.CredentialRules,
 	}
 }

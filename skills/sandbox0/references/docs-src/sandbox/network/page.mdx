@@ -96,6 +96,7 @@ Update the network policy for a sandbox.
 |-------|------|-------------|
 | `mode` | string | Network mode: `allow-all` or `block-all` |
 | `egress` | object | Egress policy rules (optional) |
+| `credentialBindings` | array | Runtime credential bindings for egress auth (optional) |
 
 ---
 
@@ -109,8 +110,8 @@ Allow all outbound network access (default behavior).
       label: "Go",
       language: "go",
       code: `// Allow all traffic
-_, err = sandbox.UpdateNetworkPolicy(ctx, apispec.TplSandboxNetworkPolicy{
-    Mode: apispec.TplSandboxNetworkPolicyModeAllowAll,
+_, err = sandbox.UpdateNetworkPolicy(ctx, apispec.SandboxNetworkPolicy{
+    Mode: apispec.SandboxNetworkPolicyModeAllowAll,
 })
 if err != nil {
     log.Fatal(err)
@@ -121,10 +122,10 @@ fmt.Println("Network policy updated: allow-all")`
       label: "Python",
       language: "python",
       code: `# Allow all traffic
-from sandbox0.apispec.models.tpl_sandbox_network_policy import TplSandboxNetworkPolicy
-from sandbox0.apispec.models.tpl_sandbox_network_policy_mode import TplSandboxNetworkPolicyMode
+from sandbox0.apispec.models.sandbox_network_policy import SandboxNetworkPolicy
+from sandbox0.apispec.models.sandbox_network_policy_mode import SandboxNetworkPolicyMode
 
-sandbox.update_network_policy(TplSandboxNetworkPolicy(mode=TplSandboxNetworkPolicyMode.ALLOW_ALL))
+sandbox.update_network_policy(SandboxNetworkPolicy(mode=SandboxNetworkPolicyMode.ALLOW_ALL))
 print("Network policy updated: allow-all")`
     },
     {
@@ -154,8 +155,8 @@ Block all outbound network access.
       label: "Go",
       language: "go",
       code: `// Block all traffic
-_, err = sandbox.UpdateNetworkPolicy(ctx, apispec.TplSandboxNetworkPolicy{
-    Mode: apispec.TplSandboxNetworkPolicyModeBlockAll,
+_, err = sandbox.UpdateNetworkPolicy(ctx, apispec.SandboxNetworkPolicy{
+    Mode: apispec.SandboxNetworkPolicyModeBlockAll,
 })
 if err != nil {
     log.Fatal(err)
@@ -166,7 +167,7 @@ fmt.Println("Network policy updated: block-all")`
       label: "Python",
       language: "python",
       code: `# Block all traffic
-sandbox.update_network_policy(TplSandboxNetworkPolicy(mode=TplSandboxNetworkPolicyMode.BLOCK_ALL))
+sandbox.update_network_policy(SandboxNetworkPolicy(mode=SandboxNetworkPolicyMode.BLOCK_ALL))
 print("Network policy updated: block-all")`
     },
     {
@@ -196,8 +197,8 @@ Block all traffic except for specific allowed domains.
       label: "Go",
       language: "go",
       code: `// Block all except specific domains
-_, err = sandbox.UpdateNetworkPolicy(ctx, apispec.TplSandboxNetworkPolicy{
-    Mode: apispec.TplSandboxNetworkPolicyModeBlockAll,
+_, err = sandbox.UpdateNetworkPolicy(ctx, apispec.SandboxNetworkPolicy{
+    Mode: apispec.SandboxNetworkPolicyModeBlockAll,
     Egress: apispec.NewOptNetworkEgressPolicy(apispec.NetworkEgressPolicy{
         AllowedDomains: []string{"github.com", "pypi.org", "api.openai.com"},
     }),
@@ -214,8 +215,8 @@ fmt.Println("Network policy updated: only github.com, pypi.org, api.openai.com a
 from sandbox0.apispec.models.network_egress_policy import NetworkEgressPolicy
 
 sandbox.update_network_policy(
-    TplSandboxNetworkPolicy(
-        mode=TplSandboxNetworkPolicyMode.BLOCK_ALL,
+    SandboxNetworkPolicy(
+        mode=SandboxNetworkPolicyMode.BLOCK_ALL,
         egress=NetworkEgressPolicy(
             allowed_domains=["github.com", "pypi.org", "api.openai.com"],
         ),
@@ -258,8 +259,8 @@ Allow all traffic except for specific blocked domains.
       label: "Go",
       language: "go",
       code: `// Block specific domains (allow all others)
-_, err = sandbox.UpdateNetworkPolicy(ctx, apispec.TplSandboxNetworkPolicy{
-    Mode: apispec.TplSandboxNetworkPolicyModeAllowAll,
+_, err = sandbox.UpdateNetworkPolicy(ctx, apispec.SandboxNetworkPolicy{
+    Mode: apispec.SandboxNetworkPolicyModeAllowAll,
     Egress: apispec.NewOptNetworkEgressPolicy(apispec.NetworkEgressPolicy{
         DeniedDomains: []string{"facebook.com", "twitter.com"},
     }),
@@ -274,8 +275,8 @@ fmt.Println("Network policy updated: block facebook.com, twitter.com")`
       language: "python",
       code: `# Block specific domains (allow all others)
 sandbox.update_network_policy(
-    TplSandboxNetworkPolicy(
-        mode=TplSandboxNetworkPolicyMode.ALLOW_ALL,
+    SandboxNetworkPolicy(
+        mode=SandboxNetworkPolicyMode.ALLOW_ALL,
         egress=NetworkEgressPolicy(
             denied_domains=["facebook.com", "twitter.com"],
         ),
@@ -377,8 +378,8 @@ if err != nil {
 fmt.Printf("GitHub response before blocking: %s\\n", resp.OutputRaw)
 
 // Block all traffic
-_, err = sandbox.UpdateNetworkPolicy(ctx, apispec.TplSandboxNetworkPolicy{
-    Mode: apispec.TplSandboxNetworkPolicyModeBlockAll,
+_, err = sandbox.UpdateNetworkPolicy(ctx, apispec.SandboxNetworkPolicy{
+    Mode: apispec.SandboxNetworkPolicyModeBlockAll,
 })
 if err != nil {
     log.Fatal(err)
@@ -400,7 +401,7 @@ resp = sandbox.cmd(shell)
 print(f"GitHub response before blocking: {resp.output_raw.strip()}")
 
 # Block all traffic
-sandbox.update_network_policy(TplSandboxNetworkPolicy(mode=TplSandboxNetworkPolicyMode.BLOCK_ALL))
+sandbox.update_network_policy(SandboxNetworkPolicy(mode=SandboxNetworkPolicyMode.BLOCK_ALL))
 
 # Test again (should fail)
 try:

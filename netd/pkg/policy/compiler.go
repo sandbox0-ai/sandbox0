@@ -26,6 +26,15 @@ type PortRange struct {
 	End      int32
 }
 
+type CompiledTrafficRule struct {
+	Name         string
+	Action       v1alpha1.TrafficRuleAction
+	CIDRs        []*net.IPNet
+	Ports        []PortRange
+	Domains      []DomainRule
+	AppProtocols []string
+}
+
 type CompiledRuleSet struct {
 	AllowedCIDRs   []*net.IPNet
 	DeniedCIDRs    []*net.IPNet
@@ -33,6 +42,7 @@ type CompiledRuleSet struct {
 	DeniedPorts    []PortRange
 	AllowedDomains []DomainRule
 	DeniedDomains  []DomainRule
+	TrafficRules   []CompiledTrafficRule
 	AuthRules      []CompiledEgressAuthRule
 }
 
@@ -75,61 +85,30 @@ func CompileNetworkPolicy(spec *v1alpha1.NetworkPolicySpec) (*CompiledPolicy, er
 	}
 
 	if spec.Egress != nil {
-		egress, err := compileRuleSet(spec.Egress.AllowedCIDRs, spec.Egress.DeniedCIDRs, spec.Egress.AllowedPorts, spec.Egress.DeniedPorts, spec.Egress.AllowedDomains, spec.Egress.DeniedDomains)
-		if err != nil {
-			return nil, fmt.Errorf("compile egress: %w", err)
+		if len(spec.Egress.TrafficRules) > 0 && hasLegacyTrafficLists(spec.Egress) {
+			return nil, fmt.Errorf("trafficRules cannot be combined with legacy allowed*/denied* fields")
 		}
-		authRules, err := compileEgressAuthRules(spec.Egress.Rules)
+		trafficRules, err := compileTrafficRules(spec.Egress.TrafficRules)
+		if err != nil {
+			return nil, fmt.Errorf("compile egress traffic rules: %w", err)
+		}
+		if len(trafficRules) == 0 {
+			trafficRules, err = compileLegacyTrafficRules(mode, spec.Egress.AllowedCIDRs, spec.Egress.DeniedCIDRs, spec.Egress.AllowedPorts, spec.Egress.DeniedPorts, spec.Egress.AllowedDomains, spec.Egress.DeniedDomains)
+			if err != nil {
+				return nil, fmt.Errorf("compile legacy egress rules: %w", err)
+			}
+		}
+		authRules, err := compileEgressAuthRules(spec.Egress.CredentialRules)
 		if err != nil {
 			return nil, fmt.Errorf("compile egress auth rules: %w", err)
 		}
-		egress.AuthRules = authRules
-		compiled.Egress = egress
+		compiled.Egress = CompiledRuleSet{
+			TrafficRules: trafficRules,
+			AuthRules:    authRules,
+		}
 	}
 
 	return compiled, nil
-}
-
-func compileRuleSet(
-	allowedCIDRs []string,
-	deniedCIDRs []string,
-	allowedPorts []v1alpha1.PortSpec,
-	deniedPorts []v1alpha1.PortSpec,
-	allowedDomains []string,
-	deniedDomains []string,
-) (CompiledRuleSet, error) {
-	result := CompiledRuleSet{}
-
-	var err error
-	result.AllowedCIDRs, err = parseCIDRs(allowedCIDRs)
-	if err != nil {
-		return result, err
-	}
-	deniedCIDRsParsed, err := parseCIDRs(deniedCIDRs)
-	if err != nil {
-		return result, err
-	}
-	result.DeniedCIDRs = append(result.DeniedCIDRs, deniedCIDRsParsed...)
-
-	result.AllowedPorts, err = parsePorts(allowedPorts)
-	if err != nil {
-		return result, err
-	}
-	result.DeniedPorts, err = parsePorts(deniedPorts)
-	if err != nil {
-		return result, err
-	}
-
-	result.AllowedDomains, err = parseDomains(allowedDomains)
-	if err != nil {
-		return result, err
-	}
-	result.DeniedDomains, err = parseDomains(deniedDomains)
-	if err != nil {
-		return result, err
-	}
-
-	return result, nil
 }
 
 func parseCIDRs(values []string) ([]*net.IPNet, error) {
@@ -264,4 +243,169 @@ func compileEgressAuthRules(values []v1alpha1.EgressCredentialRule) ([]CompiledE
 		out = append(out, rule)
 	}
 	return out, nil
+}
+
+func compileTrafficRules(values []v1alpha1.TrafficRule) ([]CompiledTrafficRule, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	out := make([]CompiledTrafficRule, 0, len(values))
+	for _, value := range values {
+		cidrs, err := parseCIDRs(value.CIDRs)
+		if err != nil {
+			return nil, fmt.Errorf("parse traffic rule cidrs for %q: %w", value.Name, err)
+		}
+		ports, err := parsePorts(value.Ports)
+		if err != nil {
+			return nil, fmt.Errorf("parse traffic rule ports for %q: %w", value.Name, err)
+		}
+		domains, err := parseDomains(value.Domains)
+		if err != nil {
+			return nil, fmt.Errorf("parse traffic rule domains for %q: %w", value.Name, err)
+		}
+		rule := CompiledTrafficRule{
+			Name:         strings.TrimSpace(value.Name),
+			Action:       value.Action,
+			CIDRs:        cidrs,
+			Ports:        ports,
+			Domains:      domains,
+			AppProtocols: normalizeTrafficRuleAppProtocols(value.AppProtocols),
+		}
+		switch rule.Action {
+		case v1alpha1.TrafficRuleActionAllow, v1alpha1.TrafficRuleActionDeny:
+		default:
+			return nil, fmt.Errorf("unsupported traffic rule action %q", value.Action)
+		}
+		if len(rule.CIDRs) == 0 && len(rule.Ports) == 0 && len(rule.Domains) == 0 && len(rule.AppProtocols) == 0 {
+			return nil, fmt.Errorf("traffic rule %q must define at least one matcher", value.Name)
+		}
+		if err := validateTrafficRuleAppProtocols(rule.AppProtocols); err != nil {
+			return nil, fmt.Errorf("traffic rule %q app protocols: %w", value.Name, err)
+		}
+		out = append(out, rule)
+	}
+	return out, nil
+}
+
+func compileLegacyTrafficRules(
+	mode v1alpha1.NetworkPolicyMode,
+	allowedCIDRs []string,
+	deniedCIDRs []string,
+	allowedPorts []v1alpha1.PortSpec,
+	deniedPorts []v1alpha1.PortSpec,
+	allowedDomains []string,
+	deniedDomains []string,
+) ([]CompiledTrafficRule, error) {
+	switch mode {
+	case "", v1alpha1.NetworkModeAllowAll:
+		return compileLegacyDenyRules(deniedCIDRs, deniedPorts, deniedDomains)
+	case v1alpha1.NetworkModeBlockAll:
+		return compileLegacyAllowRules(allowedCIDRs, allowedPorts, allowedDomains)
+	default:
+		return nil, fmt.Errorf("unsupported network mode %q", mode)
+	}
+}
+
+func compileLegacyAllowRules(cidrs []string, ports []v1alpha1.PortSpec, domains []string) ([]CompiledTrafficRule, error) {
+	if len(cidrs) == 0 && len(ports) == 0 && len(domains) == 0 {
+		return nil, nil
+	}
+	compiledCIDRs, err := parseCIDRs(cidrs)
+	if err != nil {
+		return nil, err
+	}
+	compiledPorts, err := parsePorts(ports)
+	if err != nil {
+		return nil, err
+	}
+	compiledDomains, err := parseDomains(domains)
+	if err != nil {
+		return nil, err
+	}
+	return []CompiledTrafficRule{{
+		Name:    "legacy-allow",
+		Action:  v1alpha1.TrafficRuleActionAllow,
+		CIDRs:   compiledCIDRs,
+		Ports:   compiledPorts,
+		Domains: compiledDomains,
+	}}, nil
+}
+
+func compileLegacyDenyRules(cidrs []string, ports []v1alpha1.PortSpec, domains []string) ([]CompiledTrafficRule, error) {
+	rules := make([]CompiledTrafficRule, 0, 3)
+	if len(cidrs) > 0 {
+		compiledCIDRs, err := parseCIDRs(cidrs)
+		if err != nil {
+			return nil, err
+		}
+		rules = append(rules, CompiledTrafficRule{
+			Name:   "legacy-deny-cidrs",
+			Action: v1alpha1.TrafficRuleActionDeny,
+			CIDRs:  compiledCIDRs,
+		})
+	}
+	if len(ports) > 0 {
+		compiledPorts, err := parsePorts(ports)
+		if err != nil {
+			return nil, err
+		}
+		rules = append(rules, CompiledTrafficRule{
+			Name:   "legacy-deny-ports",
+			Action: v1alpha1.TrafficRuleActionDeny,
+			Ports:  compiledPorts,
+		})
+	}
+	if len(domains) > 0 {
+		compiledDomains, err := parseDomains(domains)
+		if err != nil {
+			return nil, err
+		}
+		rules = append(rules, CompiledTrafficRule{
+			Name:    "legacy-deny-domains",
+			Action:  v1alpha1.TrafficRuleActionDeny,
+			Domains: compiledDomains,
+		})
+	}
+	if len(rules) == 0 {
+		return nil, nil
+	}
+	return rules, nil
+}
+
+func hasLegacyTrafficLists(egress *v1alpha1.NetworkEgressPolicy) bool {
+	if egress == nil {
+		return false
+	}
+	return len(egress.AllowedCIDRs) > 0 ||
+		len(egress.AllowedDomains) > 0 ||
+		len(egress.DeniedCIDRs) > 0 ||
+		len(egress.DeniedDomains) > 0 ||
+		len(egress.AllowedPorts) > 0 ||
+		len(egress.DeniedPorts) > 0
+}
+
+func normalizeTrafficRuleAppProtocols(values []v1alpha1.TrafficRuleAppProtocol) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		proto := strings.ToLower(strings.TrimSpace(string(value)))
+		if proto == "" {
+			continue
+		}
+		out = append(out, proto)
+	}
+	return out
+}
+
+func validateTrafficRuleAppProtocols(values []string) error {
+	for _, value := range values {
+		switch value {
+		case "http", "tls", "ssh", "socks5", "mqtt", "redis", "amqp", "dns", "mongodb", "udp":
+		default:
+			return fmt.Errorf("unsupported protocol %q", value)
+		}
+	}
+	return nil
 }

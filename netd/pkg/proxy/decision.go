@@ -74,7 +74,7 @@ func decideTraffic(compiled *policy.CompiledPolicy, classification trafficClassi
 	if classification.DestIP != nil && classification.DestPort > 0 {
 		allowL4 := policy.AllowEgressL4(compiled, classification.DestIP, classification.DestPort, protoForPolicy)
 		if classification.UnknownReason == "" {
-			allowL4 = policy.AllowEgressDestination(compiled, classification.DestIP, classification.DestPort, protoForPolicy, classification.Host)
+			allowL4 = policy.AllowEgressDestination(compiled, classification.DestIP, classification.DestPort, protoForPolicy, classification.Host, classification.Protocol)
 		}
 		if !allowL4 {
 			decision.Action = decisionActionDeny

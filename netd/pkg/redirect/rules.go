@@ -7,10 +7,12 @@ import (
 )
 
 const (
-	chainName       = "NETD_PREROUTING"
-	ipsetName       = "netd-sandbox-ips"
-	tproxyMark      = "0x1/0x1"
-	defaultLoopback = "127.0.0.0/8"
+	chainName         = "NETD_PREROUTING"
+	natChainName      = "NETD_NAT_PREROUTING"
+	ipsetName         = "netd-sandbox-ips"
+	tproxyMark        = "0x1/0x1"
+	defaultLoopback   = "127.0.0.0/8"
+	natBypassJumpMark = tproxyMark
 )
 
 func buildIPTablesRestoreInput(cfg Config, bypassCIDRs []string) string {
@@ -42,10 +44,18 @@ func appendTPROXYRules(buf *bytes.Buffer, protocol string, destPort int, proxyPo
 	if destPort > 0 {
 		base += fmt.Sprintf(" --dport %d", destPort)
 	}
+	_, _ = fmt.Fprintf(buf, "%s -m connmark --mark %s -j TPROXY --on-port %d --tproxy-mark %s\n",
+		base, tproxyMark, proxyPort, tproxyMark)
+	_, _ = fmt.Fprintf(buf, "%s -m conntrack --ctstate NEW -j CONNMARK --set-mark %s\n",
+		base, tproxyMark)
 	_, _ = fmt.Fprintf(buf, "%s -m conntrack --ctstate NEW -j TPROXY --on-port %d --tproxy-mark %s\n",
 		base, proxyPort, tproxyMark)
 	_, _ = fmt.Fprintf(buf, "%s -m socket --transparent -j TPROXY --on-port %d --tproxy-mark %s\n",
 		base, proxyPort, tproxyMark)
+}
+
+func natBypassRuleSpec() []string {
+	return []string{"-m", "mark", "--mark", natBypassJumpMark, "-j", "ACCEPT"}
 }
 
 func buildIPSetRestoreInput(ips []string) string {

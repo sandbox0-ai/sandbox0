@@ -209,13 +209,65 @@ const (
 // In allow-all mode, denied* fields are enforced and allowed* fields are ignored.
 // In block-all mode, allowed* fields are enforced and denied* fields are ignored.
 type NetworkEgressPolicy struct {
-	AllowedCIDRs   []string               `json:"allowedCidrs,omitempty"`
-	AllowedDomains []string               `json:"allowedDomains,omitempty"`
-	DeniedCIDRs    []string               `json:"deniedCidrs,omitempty"`
-	DeniedDomains  []string               `json:"deniedDomains,omitempty"`
-	AllowedPorts   []PortSpec             `json:"allowedPorts,omitempty"`
-	DeniedPorts    []PortSpec             `json:"deniedPorts,omitempty"`
-	Rules          []EgressCredentialRule `json:"rules,omitempty"`
+	// Deprecated: use TrafficRules instead.
+	AllowedCIDRs []string `json:"allowedCidrs,omitempty"`
+	// Deprecated: use TrafficRules instead.
+	AllowedDomains []string `json:"allowedDomains,omitempty"`
+	// Deprecated: use TrafficRules instead.
+	DeniedCIDRs []string `json:"deniedCidrs,omitempty"`
+	// Deprecated: use TrafficRules instead.
+	DeniedDomains []string `json:"deniedDomains,omitempty"`
+	// Deprecated: use TrafficRules instead.
+	AllowedPorts []PortSpec `json:"allowedPorts,omitempty"`
+	// Deprecated: use TrafficRules instead.
+	DeniedPorts     []PortSpec             `json:"deniedPorts,omitempty"`
+	TrafficRules    []TrafficRule          `json:"trafficRules,omitempty"`
+	CredentialRules []EgressCredentialRule `json:"credentialRules,omitempty"`
+}
+
+// TrafficRuleAction defines the enforcement action for one traffic rule.
+type TrafficRuleAction string
+
+const (
+	TrafficRuleActionAllow TrafficRuleAction = "allow"
+	TrafficRuleActionDeny  TrafficRuleAction = "deny"
+)
+
+// TrafficRuleAppProtocol defines the classified application protocol matched by one traffic rule.
+type TrafficRuleAppProtocol string
+
+const (
+	TrafficRuleAppProtocolHTTP    TrafficRuleAppProtocol = "http"
+	TrafficRuleAppProtocolTLS     TrafficRuleAppProtocol = "tls"
+	TrafficRuleAppProtocolSSH     TrafficRuleAppProtocol = "ssh"
+	TrafficRuleAppProtocolSOCKS5  TrafficRuleAppProtocol = "socks5"
+	TrafficRuleAppProtocolMQTT    TrafficRuleAppProtocol = "mqtt"
+	TrafficRuleAppProtocolRedis   TrafficRuleAppProtocol = "redis"
+	TrafficRuleAppProtocolAMQP    TrafficRuleAppProtocol = "amqp"
+	TrafficRuleAppProtocolDNS     TrafficRuleAppProtocol = "dns"
+	TrafficRuleAppProtocolMongoDB TrafficRuleAppProtocol = "mongodb"
+	TrafficRuleAppProtocolUDP     TrafficRuleAppProtocol = "udp"
+)
+
+// TrafficRule defines one ordered egress allow/deny matcher.
+type TrafficRule struct {
+	// Name is an optional stable identifier used for merge and replacement.
+	Name string `json:"name,omitempty"`
+
+	// Action defines whether matching traffic is allowed or denied.
+	Action TrafficRuleAction `json:"action"`
+
+	// CIDRs matches outbound destinations by IP range.
+	CIDRs []string `json:"cidrs,omitempty"`
+
+	// Domains matches outbound destinations by DNS name or wildcard suffix.
+	Domains []string `json:"domains,omitempty"`
+
+	// Ports constrains the rule to specific ports/protocols.
+	Ports []PortSpec `json:"ports,omitempty"`
+
+	// AppProtocols constrains the rule to classified application protocols.
+	AppProtocols []TrafficRuleAppProtocol `json:"appProtocols,omitempty"`
 }
 
 // SandboxNetworkPolicy defines the sandbox-scoped network policy API shape.

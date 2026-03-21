@@ -53,7 +53,7 @@ func TestBuildNetworkPolicyStateMergesNamedRulesAndBindings(t *testing.T) {
 		TemplateSpec: &v1alpha1.TplSandboxNetworkPolicy{
 			Mode: v1alpha1.NetworkModeBlockAll,
 			Egress: &v1alpha1.NetworkEgressPolicy{
-				Rules: []v1alpha1.EgressCredentialRule{
+				CredentialRules: []v1alpha1.EgressCredentialRule{
 					{
 						Name:          "github-api",
 						CredentialRef: "template-ref",
@@ -68,7 +68,7 @@ func TestBuildNetworkPolicyStateMergesNamedRulesAndBindings(t *testing.T) {
 		},
 		RequestSpec: &v1alpha1.TplSandboxNetworkPolicy{
 			Egress: &v1alpha1.NetworkEgressPolicy{
-				Rules: []v1alpha1.EgressCredentialRule{
+				CredentialRules: []v1alpha1.EgressCredentialRule{
 					{
 						Name:          "github-api",
 						CredentialRef: "request-ref",
@@ -86,10 +86,10 @@ func TestBuildNetworkPolicyStateMergesNamedRulesAndBindings(t *testing.T) {
 	if result == nil || result.PolicySpec == nil || result.PolicySpec.Egress == nil {
 		t.Fatalf("expected egress policy")
 	}
-	if len(result.PolicySpec.Egress.Rules) != 1 {
-		t.Fatalf("rule count = %d, want 1", len(result.PolicySpec.Egress.Rules))
+	if len(result.PolicySpec.Egress.CredentialRules) != 1 {
+		t.Fatalf("rule count = %d, want 1", len(result.PolicySpec.Egress.CredentialRules))
 	}
-	rule := result.PolicySpec.Egress.Rules[0]
+	rule := result.PolicySpec.Egress.CredentialRules[0]
 	if rule.CredentialRef != "request-ref" {
 		t.Fatalf("credentialRef = %q, want request-ref", rule.CredentialRef)
 	}
@@ -109,7 +109,7 @@ func TestBuildNetworkPolicyStateAppendsUnnamedRules(t *testing.T) {
 		TemplateSpec: &v1alpha1.TplSandboxNetworkPolicy{
 			Mode: v1alpha1.NetworkModeBlockAll,
 			Egress: &v1alpha1.NetworkEgressPolicy{
-				Rules: []v1alpha1.EgressCredentialRule{
+				CredentialRules: []v1alpha1.EgressCredentialRule{
 					{CredentialRef: "template-ref"},
 				},
 			},
@@ -120,7 +120,7 @@ func TestBuildNetworkPolicyStateAppendsUnnamedRules(t *testing.T) {
 		},
 		RequestSpec: &v1alpha1.TplSandboxNetworkPolicy{
 			Egress: &v1alpha1.NetworkEgressPolicy{
-				Rules: []v1alpha1.EgressCredentialRule{
+				CredentialRules: []v1alpha1.EgressCredentialRule{
 					{CredentialRef: "request-ref"},
 				},
 			},
@@ -130,8 +130,91 @@ func TestBuildNetworkPolicyStateAppendsUnnamedRules(t *testing.T) {
 	if result == nil || result.PolicySpec == nil || result.PolicySpec.Egress == nil {
 		t.Fatalf("expected egress policy")
 	}
-	if len(result.PolicySpec.Egress.Rules) != 2 {
-		t.Fatalf("rule count = %d, want 2", len(result.PolicySpec.Egress.Rules))
+	if len(result.PolicySpec.Egress.CredentialRules) != 2 {
+		t.Fatalf("rule count = %d, want 2", len(result.PolicySpec.Egress.CredentialRules))
+	}
+}
+
+func TestBuildNetworkPolicyStateMergesNamedTrafficRules(t *testing.T) {
+	svc := NewNetworkPolicyService(zap.NewNop())
+	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
+		SandboxID: "sb-1",
+		TeamID:    "team-1",
+		TemplateSpec: &v1alpha1.TplSandboxNetworkPolicy{
+			Egress: &v1alpha1.NetworkEgressPolicy{
+				TrafficRules: []v1alpha1.TrafficRule{{
+					Name:    "github",
+					Action:  v1alpha1.TrafficRuleActionAllow,
+					Domains: []string{"github.com"},
+				}},
+			},
+		},
+		RequestSpec: &v1alpha1.TplSandboxNetworkPolicy{
+			Egress: &v1alpha1.NetworkEgressPolicy{
+				TrafficRules: []v1alpha1.TrafficRule{{
+					Name:    "github",
+					Action:  v1alpha1.TrafficRuleActionDeny,
+					Domains: []string{"github.com"},
+				}},
+			},
+		},
+	})
+
+	if result == nil || result.PolicySpec == nil || result.PolicySpec.Egress == nil {
+		t.Fatalf("expected egress policy")
+	}
+	if len(result.PolicySpec.Egress.TrafficRules) != 1 {
+		t.Fatalf("traffic rule count = %d, want 1", len(result.PolicySpec.Egress.TrafficRules))
+	}
+	if result.PolicySpec.Egress.TrafficRules[0].Action != v1alpha1.TrafficRuleActionDeny {
+		t.Fatalf("unexpected merged traffic rule action: %s", result.PolicySpec.Egress.TrafficRules[0].Action)
+	}
+}
+
+func TestBuildNetworkPolicyStateRejectsMixedLegacyAndTrafficRules(t *testing.T) {
+	svc := NewNetworkPolicyService(zap.NewNop())
+	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
+		SandboxID: "sb-1",
+		TeamID:    "team-1",
+		RequestSpec: &v1alpha1.TplSandboxNetworkPolicy{
+			Egress: &v1alpha1.NetworkEgressPolicy{
+				AllowedDomains: []string{"example.com"},
+				TrafficRules: []v1alpha1.TrafficRule{{
+					Action:  v1alpha1.TrafficRuleActionAllow,
+					Domains: []string{"github.com"},
+				}},
+			},
+		},
+	})
+
+	if result == nil || result.PolicySpec == nil || result.PolicySpec.Egress == nil {
+		t.Fatalf("expected egress policy")
+	}
+	if len(result.PolicySpec.Egress.TrafficRules) != 0 {
+		t.Fatalf("expected invalid traffic rules to be dropped, got %#v", result.PolicySpec.Egress.TrafficRules)
+	}
+}
+
+func TestBuildNetworkPolicyStateRejectsUnsupportedTrafficRuleAppProtocol(t *testing.T) {
+	svc := NewNetworkPolicyService(zap.NewNop())
+	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
+		SandboxID: "sb-1",
+		TeamID:    "team-1",
+		RequestSpec: &v1alpha1.TplSandboxNetworkPolicy{
+			Egress: &v1alpha1.NetworkEgressPolicy{
+				TrafficRules: []v1alpha1.TrafficRule{{
+					Action:       v1alpha1.TrafficRuleActionAllow,
+					AppProtocols: []v1alpha1.TrafficRuleAppProtocol{"scp"},
+				}},
+			},
+		},
+	})
+
+	if result == nil || result.PolicySpec == nil || result.PolicySpec.Egress == nil {
+		t.Fatalf("expected egress policy")
+	}
+	if len(result.PolicySpec.Egress.TrafficRules) != 0 {
+		t.Fatalf("expected invalid traffic rules to be dropped, got %#v", result.PolicySpec.Egress.TrafficRules)
 	}
 }
 
@@ -143,7 +226,7 @@ func TestBuildNetworkPolicyStateDropsInvalidBindingReferences(t *testing.T) {
 		RequestSpec: &v1alpha1.TplSandboxNetworkPolicy{
 			Mode: v1alpha1.NetworkModeBlockAll,
 			Egress: &v1alpha1.NetworkEgressPolicy{
-				Rules: []v1alpha1.EgressCredentialRule{
+				CredentialRules: []v1alpha1.EgressCredentialRule{
 					{Name: "missing-binding", CredentialRef: "missing"},
 				},
 			},
@@ -156,8 +239,8 @@ func TestBuildNetworkPolicyStateDropsInvalidBindingReferences(t *testing.T) {
 	if result == nil || result.PolicySpec == nil || result.PolicySpec.Egress == nil {
 		t.Fatalf("expected egress policy")
 	}
-	if len(result.PolicySpec.Egress.Rules) != 0 {
-		t.Fatalf("rules = %#v, want invalid rules dropped", result.PolicySpec.Egress.Rules)
+	if len(result.PolicySpec.Egress.CredentialRules) != 0 {
+		t.Fatalf("rules = %#v, want invalid rules dropped", result.PolicySpec.Egress.CredentialRules)
 	}
 	if len(result.CredentialBindings) != 0 {
 		t.Fatalf("bindings = %#v, want invalid bindings dropped", result.CredentialBindings)
@@ -172,7 +255,7 @@ func TestBuildNetworkPolicyStateDropsTLSRulesWithoutTLSProjection(t *testing.T) 
 		RequestSpec: &v1alpha1.TplSandboxNetworkPolicy{
 			Mode: v1alpha1.NetworkModeBlockAll,
 			Egress: &v1alpha1.NetworkEgressPolicy{
-				Rules: []v1alpha1.EgressCredentialRule{{
+				CredentialRules: []v1alpha1.EgressCredentialRule{{
 					Name:          "db-mtls",
 					CredentialRef: "db-cert",
 					Protocol:      v1alpha1.EgressAuthProtocolTLS,
@@ -189,8 +272,8 @@ func TestBuildNetworkPolicyStateDropsTLSRulesWithoutTLSProjection(t *testing.T) 
 	if result == nil || result.PolicySpec == nil || result.PolicySpec.Egress == nil {
 		t.Fatalf("expected egress policy")
 	}
-	if len(result.PolicySpec.Egress.Rules) != 0 {
-		t.Fatalf("rules = %#v, want invalid tls rules dropped", result.PolicySpec.Egress.Rules)
+	if len(result.PolicySpec.Egress.CredentialRules) != 0 {
+		t.Fatalf("rules = %#v, want invalid tls rules dropped", result.PolicySpec.Egress.CredentialRules)
 	}
 	if len(result.CredentialBindings) != 0 {
 		t.Fatalf("bindings = %#v, want invalid bindings dropped with tls rule", result.CredentialBindings)
@@ -205,7 +288,7 @@ func TestBuildNetworkPolicyStateKeepsValidTLSRules(t *testing.T) {
 		RequestSpec: &v1alpha1.TplSandboxNetworkPolicy{
 			Mode: v1alpha1.NetworkModeBlockAll,
 			Egress: &v1alpha1.NetworkEgressPolicy{
-				Rules: []v1alpha1.EgressCredentialRule{{
+				CredentialRules: []v1alpha1.EgressCredentialRule{{
 					Name:          "db-mtls",
 					CredentialRef: "db-cert",
 					Protocol:      v1alpha1.EgressAuthProtocolTLS,
@@ -222,8 +305,8 @@ func TestBuildNetworkPolicyStateKeepsValidTLSRules(t *testing.T) {
 	if result == nil || result.PolicySpec == nil || result.PolicySpec.Egress == nil {
 		t.Fatalf("expected egress policy")
 	}
-	if len(result.PolicySpec.Egress.Rules) != 1 {
-		t.Fatalf("rule count = %d, want 1", len(result.PolicySpec.Egress.Rules))
+	if len(result.PolicySpec.Egress.CredentialRules) != 1 {
+		t.Fatalf("rule count = %d, want 1", len(result.PolicySpec.Egress.CredentialRules))
 	}
 }
 
@@ -235,7 +318,7 @@ func TestBuildNetworkPolicyStateDropsSOCKS5RulesWithoutUsernamePasswordProjectio
 		RequestSpec: &v1alpha1.TplSandboxNetworkPolicy{
 			Mode: v1alpha1.NetworkModeBlockAll,
 			Egress: &v1alpha1.NetworkEgressPolicy{
-				Rules: []v1alpha1.EgressCredentialRule{{
+				CredentialRules: []v1alpha1.EgressCredentialRule{{
 					Name:          "corp-socks",
 					CredentialRef: "proxy-cred",
 					Protocol:      v1alpha1.EgressAuthProtocolSOCKS5,
@@ -250,8 +333,8 @@ func TestBuildNetworkPolicyStateDropsSOCKS5RulesWithoutUsernamePasswordProjectio
 	if result == nil || result.PolicySpec == nil || result.PolicySpec.Egress == nil {
 		t.Fatalf("expected egress policy")
 	}
-	if len(result.PolicySpec.Egress.Rules) != 0 {
-		t.Fatalf("rules = %#v, want invalid socks5 rules dropped", result.PolicySpec.Egress.Rules)
+	if len(result.PolicySpec.Egress.CredentialRules) != 0 {
+		t.Fatalf("rules = %#v, want invalid socks5 rules dropped", result.PolicySpec.Egress.CredentialRules)
 	}
 	if len(result.CredentialBindings) != 0 {
 		t.Fatalf("bindings = %#v, want invalid bindings dropped with socks5 rule", result.CredentialBindings)
@@ -266,7 +349,7 @@ func TestBuildNetworkPolicyStateKeepsValidMQTTRules(t *testing.T) {
 		RequestSpec: &v1alpha1.TplSandboxNetworkPolicy{
 			Mode: v1alpha1.NetworkModeBlockAll,
 			Egress: &v1alpha1.NetworkEgressPolicy{
-				Rules: []v1alpha1.EgressCredentialRule{{
+				CredentialRules: []v1alpha1.EgressCredentialRule{{
 					Name:          "broker-auth",
 					CredentialRef: "mqtt-cred",
 					Protocol:      v1alpha1.EgressAuthProtocolMQTT,
@@ -282,8 +365,8 @@ func TestBuildNetworkPolicyStateKeepsValidMQTTRules(t *testing.T) {
 	if result == nil || result.PolicySpec == nil || result.PolicySpec.Egress == nil {
 		t.Fatalf("expected egress policy")
 	}
-	if len(result.PolicySpec.Egress.Rules) != 1 {
-		t.Fatalf("rule count = %d, want 1", len(result.PolicySpec.Egress.Rules))
+	if len(result.PolicySpec.Egress.CredentialRules) != 1 {
+		t.Fatalf("rule count = %d, want 1", len(result.PolicySpec.Egress.CredentialRules))
 	}
 }
 
@@ -295,7 +378,7 @@ func TestBuildNetworkPolicyStateKeepsValidRedisRules(t *testing.T) {
 		RequestSpec: &v1alpha1.TplSandboxNetworkPolicy{
 			Mode: v1alpha1.NetworkModeBlockAll,
 			Egress: &v1alpha1.NetworkEgressPolicy{
-				Rules: []v1alpha1.EgressCredentialRule{{
+				CredentialRules: []v1alpha1.EgressCredentialRule{{
 					Name:          "redis-auth",
 					CredentialRef: "redis-cred",
 					Protocol:      v1alpha1.EgressAuthProtocolRedis,
@@ -310,7 +393,7 @@ func TestBuildNetworkPolicyStateKeepsValidRedisRules(t *testing.T) {
 	if result == nil || result.PolicySpec == nil || result.PolicySpec.Egress == nil {
 		t.Fatalf("expected egress policy")
 	}
-	if len(result.PolicySpec.Egress.Rules) != 1 {
-		t.Fatalf("rule count = %d, want 1", len(result.PolicySpec.Egress.Rules))
+	if len(result.PolicySpec.Egress.CredentialRules) != 1 {
+		t.Fatalf("rule count = %d, want 1", len(result.PolicySpec.Egress.CredentialRules))
 	}
 }

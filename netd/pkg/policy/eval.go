@@ -15,23 +15,24 @@ const (
 )
 
 func AllowEgressL4(policy *CompiledPolicy, destIP net.IP, destPort int, protocol string) bool {
-	return allowEgressDestination(policy, destIP, destPort, protocol, "")
+	return allowEgressDestination(policy, destIP, destPort, protocol, "", "")
 }
 
 // AllowEgressDestination evaluates the L4 phase of an egress decision with
 // optional host classification context.
-func AllowEgressDestination(policy *CompiledPolicy, destIP net.IP, destPort int, protocol string, host string) bool {
-	return allowEgressDestination(policy, destIP, destPort, protocol, host)
+func AllowEgressDestination(policy *CompiledPolicy, destIP net.IP, destPort int, transport string, host string, appProtocol string) bool {
+	return allowEgressDestination(policy, destIP, destPort, transport, host, appProtocol)
 }
 
-func allowEgressDestination(policy *CompiledPolicy, destIP net.IP, destPort int, protocol string, host string) bool {
+func allowEgressDestination(policy *CompiledPolicy, destIP net.IP, destPort int, transport string, host string, appProtocol string) bool {
 	if policy == nil {
 		return true
 	}
-	protocol = strings.ToLower(strings.TrimSpace(protocol))
-	if protocol == "" {
-		protocol = "tcp"
+	transport = strings.ToLower(strings.TrimSpace(transport))
+	if transport == "" {
+		transport = "tcp"
 	}
+	appProtocol = strings.ToLower(strings.TrimSpace(appProtocol))
 	if policy.Platform != nil {
 		if isOtherSandboxPod(policy.Platform, destIP) {
 			return false
@@ -43,13 +44,16 @@ func allowEgressDestination(policy *CompiledPolicy, destIP net.IP, destPort int,
 			return true
 		}
 	}
+	if len(policy.Egress.TrafficRules) > 0 {
+		return evaluateTrafficRules(policy.Egress.TrafficRules, policy.Mode, destIP, destPort, transport, host, appProtocol)
+	}
 	switch policy.Mode {
 	case v1alpha1.NetworkModeAllowAll:
 		// allow-all defaults to permit and applies denied* fields as subtractive rules.
 		if matchCIDR(destIP, policy.Egress.DeniedCIDRs) {
 			return false
 		}
-		if matchPort(destPort, protocol, policy.Egress.DeniedPorts) {
+		if matchPort(destPort, transport, policy.Egress.DeniedPorts) {
 			return false
 		}
 		return true
@@ -62,7 +66,7 @@ func allowEgressDestination(policy *CompiledPolicy, destIP net.IP, destPort int,
 		if len(policy.Egress.AllowedCIDRs) > 0 && !matchCIDR(destIP, policy.Egress.AllowedCIDRs) {
 			return false
 		}
-		if len(policy.Egress.AllowedPorts) > 0 && !matchPort(destPort, protocol, policy.Egress.AllowedPorts) {
+		if len(policy.Egress.AllowedPorts) > 0 && !matchPort(destPort, transport, policy.Egress.AllowedPorts) {
 			return false
 		}
 		return true
@@ -128,6 +132,9 @@ func AllowEgressDomain(policy *CompiledPolicy, host string) bool {
 			return true
 		}
 	}
+	if len(policy.Egress.TrafficRules) > 0 {
+		return true
+	}
 	switch policy.Mode {
 	case v1alpha1.NetworkModeAllowAll:
 		// allow-all defaults to permit and applies denied* fields as subtractive rules.
@@ -156,7 +163,28 @@ func HasDomainRules(policy *CompiledPolicy) bool {
 			return true
 		}
 	}
+	for _, rule := range policy.Egress.TrafficRules {
+		if len(rule.Domains) > 0 {
+			return true
+		}
+	}
 	return len(policy.Egress.AllowedDomains) > 0 || len(policy.Egress.DeniedDomains) > 0
+}
+
+func HasTrafficRuleAppProtocol(policy *CompiledPolicy, protocol string) bool {
+	if policy == nil {
+		return false
+	}
+	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	if protocol == "" {
+		return false
+	}
+	for _, rule := range policy.Egress.TrafficRules {
+		if matchString(protocol, rule.AppProtocols) {
+			return true
+		}
+	}
+	return false
 }
 
 func MatchEgressAuthRule(policy *CompiledPolicy, transport, protocol string, destPort int, host string) *CompiledEgressAuthRule {
@@ -214,6 +242,9 @@ func hasExplicitL4AllowList(policy *CompiledPolicy) bool {
 	if policy == nil {
 		return false
 	}
+	if len(policy.Egress.TrafficRules) > 0 {
+		return true
+	}
 	return len(policy.Egress.AllowedCIDRs) > 0 || len(policy.Egress.AllowedPorts) > 0
 }
 
@@ -224,7 +255,45 @@ func hasExplicitDomainAllowList(policy *CompiledPolicy) bool {
 	if policy.Platform != nil && len(policy.Platform.AllowedDomains) > 0 {
 		return true
 	}
+	if len(policy.Egress.TrafficRules) > 0 {
+		for _, rule := range policy.Egress.TrafficRules {
+			if rule.Action == v1alpha1.TrafficRuleActionAllow && len(rule.Domains) > 0 {
+				return true
+			}
+		}
+	}
 	return len(policy.Egress.AllowedDomains) > 0
+}
+
+func evaluateTrafficRules(rules []CompiledTrafficRule, mode v1alpha1.NetworkPolicyMode, destIP net.IP, destPort int, transport string, host string, appProtocol string) bool {
+	for _, rule := range rules {
+		if !matchTrafficRule(rule, destIP, destPort, transport, host, appProtocol) {
+			continue
+		}
+		return rule.Action == v1alpha1.TrafficRuleActionAllow
+	}
+	return mode == v1alpha1.NetworkModeAllowAll
+}
+
+func matchTrafficRule(rule CompiledTrafficRule, destIP net.IP, destPort int, transport string, host string, appProtocol string) bool {
+	if len(rule.CIDRs) > 0 && !matchCIDR(destIP, rule.CIDRs) {
+		return false
+	}
+	if len(rule.Ports) > 0 && !matchPort(destPort, transport, rule.Ports) {
+		return false
+	}
+	if len(rule.Domains) > 0 {
+		host = strings.ToLower(strings.TrimSpace(host))
+		if host == "" || !matchDomain(host, rule.Domains) {
+			return false
+		}
+	}
+	if len(rule.AppProtocols) > 0 {
+		if appProtocol == "" || !matchString(appProtocol, rule.AppProtocols) {
+			return false
+		}
+	}
+	return true
 }
 
 func isOtherSandboxPod(platform *PlatformPolicy, destIP net.IP) bool {
@@ -281,6 +350,15 @@ func matchDomain(host string, rules []DomainRule) bool {
 			if host == rule.Pattern {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func matchString(value string, rules []string) bool {
+	for _, rule := range rules {
+		if value == rule {
+			return true
 		}
 	}
 	return false

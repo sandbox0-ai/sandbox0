@@ -18,13 +18,21 @@ func TestBuildIPTablesRestoreInputRoutesSpecificAndGenericTraffic(t *testing.T) 
 	mustContain(t, restore, "-A "+chainName+" -d 192.168.0.0/16 -j RETURN")
 
 	mustContain(t, restore, "-p tcp --dport 443 -m conntrack --ctstate NEW -j TPROXY --on-port 18443")
+	mustContain(t, restore, "-p tcp --dport 443 -m connmark --mark 0x1/0x1 -j TPROXY --on-port 18443")
+	mustContain(t, restore, "-p tcp --dport 443 -m conntrack --ctstate NEW -j CONNMARK --set-mark 0x1/0x1")
 	mustContain(t, restore, "-p tcp --dport 853 -m socket --transparent -j TPROXY --on-port 18443")
 	mustContain(t, restore, "-p udp --dport 443 -m conntrack --ctstate NEW -j TPROXY --on-port 18443")
+	mustContain(t, restore, "-p udp --dport 443 -m connmark --mark 0x1/0x1 -j TPROXY --on-port 18443")
+	mustContain(t, restore, "-p udp --dport 443 -m conntrack --ctstate NEW -j CONNMARK --set-mark 0x1/0x1")
 	mustContain(t, restore, "-p udp --dport 853 -m socket --transparent -j TPROXY --on-port 18443")
 
 	mustContain(t, restore, "-p tcp -m conntrack --ctstate NEW -j TPROXY --on-port 18080")
+	mustContain(t, restore, "-p tcp -m connmark --mark 0x1/0x1 -j TPROXY --on-port 18080")
+	mustContain(t, restore, "-p tcp -m conntrack --ctstate NEW -j CONNMARK --set-mark 0x1/0x1")
 	mustContain(t, restore, "-p tcp -m socket --transparent -j TPROXY --on-port 18080")
 	mustContain(t, restore, "-p udp -m conntrack --ctstate NEW -j TPROXY --on-port 18080")
+	mustContain(t, restore, "-p udp -m connmark --mark 0x1/0x1 -j TPROXY --on-port 18080")
+	mustContain(t, restore, "-p udp -m conntrack --ctstate NEW -j CONNMARK --set-mark 0x1/0x1")
 	mustContain(t, restore, "-p udp -m socket --transparent -j TPROXY --on-port 18080")
 
 	if strings.Count(restore, "-d 10.0.0.0/8 -j RETURN") != 1 {
@@ -39,6 +47,12 @@ func TestBuildIPSetRestoreInput(t *testing.T) {
 	mustContain(t, restore, "flush "+ipsetName)
 	mustContain(t, restore, "add "+ipsetName+" 10.0.0.2 -exist")
 	mustContain(t, restore, "add "+ipsetName+" 10.0.0.3 -exist")
+}
+
+func TestNatBypassRuleSpecSkipsDNATForMarkedPackets(t *testing.T) {
+	if got, want := natBypassRuleSpec(), []string{"-m", "mark", "--mark", tproxyMark, "-j", "ACCEPT"}; strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("unexpected nat bypass rule spec: %#v", got)
+	}
 }
 
 func TestNormalizeInputsDeduplicateAndTrim(t *testing.T) {

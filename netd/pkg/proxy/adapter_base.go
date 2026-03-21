@@ -31,20 +31,22 @@ const (
 )
 
 type adapterRequest struct {
-	Server     *Server
-	Compiled   *policy.CompiledPolicy
-	Audit      *flowAudit
-	EgressAuth *egressAuthContext
-	UDPSession *udpSession
-	SrcIP      string
-	DestIP     net.IP
-	DestPort   int
-	Host       string
-	Conn       net.Conn
-	Prefix     io.Reader
-	UDPConn    *net.UDPConn
-	UDPSource  *net.UDPAddr
-	UDPPayload []byte
+	Server         *Server
+	Compiled       *policy.CompiledPolicy
+	Audit          *flowAudit
+	EgressAuth     *egressAuthContext
+	UDPSession     *udpSession
+	SrcIP          string
+	DestIP         net.IP
+	DestPort       int
+	Host           string
+	Conn           net.Conn
+	Prefix         io.Reader
+	UpstreamConn   net.Conn
+	UpstreamPrefix io.Reader
+	UDPConn        *net.UDPConn
+	UDPSource      *net.UDPAddr
+	UDPPayload     []byte
 }
 
 type httpAdapter struct{}

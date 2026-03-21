@@ -11,7 +11,7 @@ bin/
 test
 
 # Frontend dependencies and outputs
-node_modules/
+node_modules
 apps/*/node_modules/
 components/*/node_modules/
 apps/*/.next/

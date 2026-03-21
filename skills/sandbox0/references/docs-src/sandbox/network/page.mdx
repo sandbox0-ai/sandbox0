@@ -11,7 +11,7 @@ Use `mode` as the default fallback, and use `egress.trafficRules` for explicit o
 | `mode` | Default fallback for unmatched traffic: `allow-all` or `block-all` |
 | `egress.trafficRules` | Ordered allow/deny rules. First matching rule wins |
 | `egress.credentialRules` | Destination-scoped outbound auth rules. See [Credential / Egress Auth](/docs/credential/egress-auth) |
-| `network.credentialBindings` | Local bindings used by `credentialRules`. See [Credential / Bindings](/docs/credential/bindings) |
+| `network.credentialBindings` | Local bindings used by `credentialRules`. See [Credential / Egress Auth](/docs/credential/egress-auth) |
 
 The same public `SandboxNetworkPolicy` shape is used in:
 
@@ -172,5 +172,4 @@ Prefer `trafficRules` for all new policies.
 ## Related Pages
 
 - [Credential](/docs/credential)
-- [Credential / Bindings](/docs/credential/bindings)
 - [Credential / Egress Auth](/docs/credential/egress-auth)

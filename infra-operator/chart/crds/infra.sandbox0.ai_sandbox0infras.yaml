@@ -813,23 +813,36 @@ spec:
                 default: {}
                 description: Services configures individual services
                 properties:
-                  regionalGateway:
+                  clusterGateway:
                     default: {}
-                    description: RegionalGateway configures the regional-gateway service (control
-                      plane)
+                    description: ClusterGateway configures the cluster-gateway service
+                      (data plane)
                     properties:
                       config:
                         default: {}
-                        description: Config contains regional-gateway specific configuration
+                        description: Config contains cluster-gateway specific configuration
                         properties:
-                          authMode:
-                            default: self_hosted
+                          allowedCallers:
+                            default:
+                            - regional-gateway
+                            - scheduler
                             description: |-
-                              AuthMode controls how human-facing authentication is handled.
-                              Allowed values: "self_hosted", "federated_global".
+                              AllowedCallers is the list of services allowed to call cluster-gateway
+                              Default: ["regional-gateway"], can include "scheduler" for multi-cluster mode
+                            items:
+                              type: string
+                            type: array
+                          authMode:
+                            default: internal
+                            description: |-
+                              Internal authentication (for validating requests from regional-gateway and
+                              generating tokens for downstream services)
+                              AuthMode controls which authentication modes are accepted on /api/v1.
+                              Allowed values: "internal", "public", "both".
                             enum:
-                            - self_hosted
-                            - federated_global
+                            - internal
+                            - public
+                            - both
                             type: string
                           baseUrl:
                             default: http://localhost:8080
@@ -857,10 +870,6 @@ spec:
                                   authentication
                                 type: boolean
                             type: object
-                          clusterCacheTTL:
-                            default: 30s
-                            description: Cache configuration
-                            type: string
                           databaseMaxConns:
                             default: 30
                             type: integer
@@ -871,21 +880,13 @@ spec:
                             default: Personal Team
                             description: Identity and Teams
                             type: string
-                          edition:
-                            default: self-hosted
-                            description: 'Edition: "saas" or "self-hosted"'
+                          healthCheckPeriod:
+                            default: 10s
                             type: string
                           httpPort:
-                            default: 8080
+                            default: 8443
                             description: Server configuration
                             type: integer
-                          internalAuthCaller:
-                            default: regional-gateway
-                            type: string
-                          internalAuthTTL:
-                            default: 30s
-                            description: Internal Authentication
-                            type: string
                           jwtAccessTokenTTL:
                             default: 15m
                             type: string
@@ -965,9 +966,16 @@ spec:
                           oidcStateTTL:
                             default: 10m
                             type: string
+                          procdStoragePermissions:
+                            default:
+                            - sandboxvolume:read
+                            - sandboxvolume:write
+                            items:
+                              type: string
+                            type: array
                           proxyTimeout:
-                            default: 30s
-                            description: Timeouts
+                            default: 10s
+                            description: Proxy configuration
                             type: string
                           rateLimitBurst:
                             default: 200
@@ -984,23 +992,16 @@ spec:
                               RegionID is the canonical region identifier used by tenancy and routing
                               contracts, for example "aws/us-east-1".
                             type: string
-                          schedulerEnabled:
-                            description: Scheduler configuration (optional, for multi-cluster
-                              mode)
-                            type: boolean
-                          schedulerUrl:
-                            type: string
-                          serverIdleTimeout:
-                            default: 120s
-                            type: string
-                          serverReadTimeout:
-                            default: 30s
-                            type: string
-                          serverWriteTimeout:
-                            default: 60s
-                            type: string
+                          schedulerPermissions:
+                            default:
+                            - '*:*'
+                            description: Permissions
+                            items:
+                              type: string
+                            type: array
                           shutdownTimeout:
                             default: 30s
+                            description: Timeouts
                             type: string
                         type: object
                       enabled:
@@ -1261,296 +1262,6 @@ spec:
                             type: string
                           shutdownTimeout:
                             default: 30s
-                            type: string
-                        type: object
-                      enabled:
-                        default: false
-                        description: Enabled enables or disables the service
-                        type: boolean
-                      ingress:
-                        description: Ingress configures ingress settings
-                        properties:
-                          className:
-                            description: ClassName specifies the ingress class name
-                            type: string
-                          enabled:
-                            default: false
-                            description: Enabled enables ingress
-                            type: boolean
-                          host:
-                            description: Host specifies the ingress host
-                            type: string
-                          tlsSecret:
-                            description: TLSSecret specifies the TLS secret name
-                            type: string
-                        type: object
-                      replicas:
-                        default: 1
-                        description: Replicas specifies the number of replicas
-                        format: int32
-                        type: integer
-                      resources:
-                        description: Resources specifies resource requirements
-                        properties:
-                          claims:
-                            description: |-
-                              Claims lists the names of resources, defined in spec.resourceClaims,
-                              that are used by this container.
-
-                              This field depends on the
-                              DynamicResourceAllocation feature gate.
-
-                              This field is immutable. It can only be set for containers.
-                            items:
-                              description: ResourceClaim references one entry in PodSpec.ResourceClaims.
-                              properties:
-                                name:
-                                  description: |-
-                                    Name must match the name of one entry in pod.spec.resourceClaims of
-                                    the Pod where this field is used. It makes that resource available
-                                    inside a container.
-                                  type: string
-                                request:
-                                  description: |-
-                                    Request is the name chosen for a request in the referenced claim.
-                                    If empty, everything from the claim is made available, otherwise
-                                    only the result of this request.
-                                  type: string
-                              required:
-                              - name
-                              type: object
-                            type: array
-                            x-kubernetes-list-map-keys:
-                            - name
-                            x-kubernetes-list-type: map
-                          limits:
-                            additionalProperties:
-                              anyOf:
-                              - type: integer
-                              - type: string
-                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                              x-kubernetes-int-or-string: true
-                            description: |-
-                              Limits describes the maximum amount of compute resources allowed.
-                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
-                            type: object
-                          requests:
-                            additionalProperties:
-                              anyOf:
-                              - type: integer
-                              - type: string
-                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                              x-kubernetes-int-or-string: true
-                            description: |-
-                              Requests describes the minimum amount of compute resources required.
-                              If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
-                              otherwise to an implementation-defined value. Requests cannot exceed Limits.
-                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
-                            type: object
-                        type: object
-                      service:
-                        description: Service configures the Kubernetes service
-                        properties:
-                          port:
-                            default: 80
-                            description: Port specifies the service port
-                            format: int32
-                            type: integer
-                          type:
-                            default: ClusterIP
-                            description: Type specifies the service type
-                            type: string
-                        type: object
-                    type: object
-                  clusterGateway:
-                    default: {}
-                    description: ClusterGateway configures the cluster-gateway service
-                      (data plane)
-                    properties:
-                      config:
-                        default: {}
-                        description: Config contains cluster-gateway specific configuration
-                        properties:
-                          allowedCallers:
-                            default:
-                            - regional-gateway
-                            - scheduler
-                            description: |-
-                              AllowedCallers is the list of services allowed to call cluster-gateway
-                              Default: ["regional-gateway"], can include "scheduler" for multi-cluster mode
-                            items:
-                              type: string
-                            type: array
-                          authMode:
-                            default: internal
-                            description: |-
-                              Internal authentication (for validating requests from regional-gateway and
-                              generating tokens for downstream services)
-                              AuthMode controls which authentication modes are accepted on /api/v1.
-                              Allowed values: "internal", "public", "both".
-                            enum:
-                            - internal
-                            - public
-                            - both
-                            type: string
-                          baseUrl:
-                            default: http://localhost:8080
-                            description: Base URL for OIDC callbacks
-                            type: string
-                          builtInAuth:
-                            default: {}
-                            description: Built-in Authentication
-                            properties:
-                              adminOnly:
-                                description: AdminOnly restricts built-in auth to
-                                  admin accounts only
-                                type: boolean
-                              allowRegistration:
-                                description: AllowRegistration allows new users to
-                                  register
-                                type: boolean
-                              emailVerificationRequired:
-                                description: EmailVerificationRequired requires email
-                                  verification
-                                type: boolean
-                              enabled:
-                                default: true
-                                description: Enabled enables built-in email/password
-                                  authentication
-                                type: boolean
-                            type: object
-                          databaseMaxConns:
-                            default: 30
-                            type: integer
-                          databaseMinConns:
-                            default: 8
-                            type: integer
-                          defaultTeamName:
-                            default: Personal Team
-                            description: Identity and Teams
-                            type: string
-                          healthCheckPeriod:
-                            default: 10s
-                            type: string
-                          httpPort:
-                            default: 8443
-                            description: Server configuration
-                            type: integer
-                          jwtAccessTokenTTL:
-                            default: 15m
-                            type: string
-                          jwtIssuer:
-                            type: string
-                          jwtRefreshTokenTTL:
-                            default: 168h
-                            type: string
-                          logLevel:
-                            default: info
-                            type: string
-                          oidcProviders:
-                            description: OIDC Providers
-                            items:
-                              description: OIDCProviderConfig configures an OIDC provider.
-                              properties:
-                                autoProvision:
-                                  description: AutoProvision automatically creates
-                                    users on first login
-                                  type: boolean
-                                clientId:
-                                  description: ClientID is the OAuth client ID
-                                  type: string
-                                clientSecret:
-                                  description: ClientSecret is the OAuth client secret
-                                  type: string
-                                discoveryUrl:
-                                  description: DiscoveryURL is the OIDC discovery
-                                    URL (.well-known/openid-configuration)
-                                  type: string
-                                enabled:
-                                  description: Enabled toggles the provider
-                                  type: boolean
-                                externalAuthPortalUrl:
-                                  description: |-
-                                    ExternalAuthPortalURL, when set, redirects unauthenticated browser users to this URL
-                                    instead of initiating the OIDC flow directly. Use for deployments that host their own
-                                    login portal that handles OIDC initiation externally.
-                                  type: string
-                                id:
-                                  description: ID is the unique identifier for the
-                                    provider (e.g., "github", "google")
-                                  type: string
-                                name:
-                                  description: Name is the display name
-                                  type: string
-                                scopes:
-                                  default:
-                                  - openid
-                                  - email
-                                  - profile
-                                  description: Scopes are the OAuth scopes to request
-                                  items:
-                                    type: string
-                                  type: array
-                                teamMapping:
-                                  description: TeamMapping configures automatic team
-                                    assignment
-                                  properties:
-                                    defaultRole:
-                                      description: DefaultRole is the role assigned
-                                        to new users
-                                      type: string
-                                    defaultTeamId:
-                                      description: DefaultTeamID is the team to add
-                                        users to
-                                      type: string
-                                    domain:
-                                      description: Domain filters users by email domain
-                                      type: string
-                                  type: object
-                              type: object
-                            type: array
-                          oidcStateCleanupInterval:
-                            default: 5m
-                            type: string
-                          oidcStateTTL:
-                            default: 10m
-                            type: string
-                          procdStoragePermissions:
-                            default:
-                            - sandboxvolume:read
-                            - sandboxvolume:write
-                            items:
-                              type: string
-                            type: array
-                          proxyTimeout:
-                            default: 10s
-                            description: Proxy configuration
-                            type: string
-                          rateLimitBurst:
-                            default: 200
-                            type: integer
-                          rateLimitCleanupInterval:
-                            default: 10m
-                            type: string
-                          rateLimitRPS:
-                            default: 100
-                            description: Rate limiting
-                            type: integer
-                          regionId:
-                            description: |-
-                              RegionID is the canonical region identifier used by tenancy and routing
-                              contracts, for example "aws/us-east-1".
-                            type: string
-                          schedulerPermissions:
-                            default:
-                            - '*:*'
-                            description: Permissions
-                            items:
-                              type: string
-                            type: array
-                          shutdownTimeout:
-                            default: 30s
-                            description: Timeouts
                             type: string
                         type: object
                       enabled:
@@ -2229,6 +1940,295 @@ spec:
                           type: object
                         type: array
                     type: object
+                  regionalGateway:
+                    default: {}
+                    description: RegionalGateway configures the regional-gateway service
+                      (control plane)
+                    properties:
+                      config:
+                        default: {}
+                        description: Config contains regional-gateway specific configuration
+                        properties:
+                          authMode:
+                            default: self_hosted
+                            description: |-
+                              AuthMode controls how human-facing authentication is handled.
+                              Allowed values: "self_hosted", "federated_global".
+                            enum:
+                            - self_hosted
+                            - federated_global
+                            type: string
+                          baseUrl:
+                            default: http://localhost:8080
+                            description: Base URL for OIDC callbacks
+                            type: string
+                          builtInAuth:
+                            default: {}
+                            description: Built-in Authentication
+                            properties:
+                              adminOnly:
+                                description: AdminOnly restricts built-in auth to
+                                  admin accounts only
+                                type: boolean
+                              allowRegistration:
+                                description: AllowRegistration allows new users to
+                                  register
+                                type: boolean
+                              emailVerificationRequired:
+                                description: EmailVerificationRequired requires email
+                                  verification
+                                type: boolean
+                              enabled:
+                                default: true
+                                description: Enabled enables built-in email/password
+                                  authentication
+                                type: boolean
+                            type: object
+                          clusterCacheTTL:
+                            default: 30s
+                            description: Cache configuration
+                            type: string
+                          databaseMaxConns:
+                            default: 30
+                            type: integer
+                          databaseMinConns:
+                            default: 8
+                            type: integer
+                          defaultTeamName:
+                            default: Personal Team
+                            description: Identity and Teams
+                            type: string
+                          edition:
+                            default: self-hosted
+                            description: 'Edition: "saas" or "self-hosted"'
+                            type: string
+                          httpPort:
+                            default: 8080
+                            description: Server configuration
+                            type: integer
+                          internalAuthCaller:
+                            default: regional-gateway
+                            type: string
+                          internalAuthTTL:
+                            default: 30s
+                            description: Internal Authentication
+                            type: string
+                          jwtAccessTokenTTL:
+                            default: 15m
+                            type: string
+                          jwtIssuer:
+                            type: string
+                          jwtRefreshTokenTTL:
+                            default: 168h
+                            type: string
+                          logLevel:
+                            default: info
+                            type: string
+                          oidcProviders:
+                            description: OIDC Providers
+                            items:
+                              description: OIDCProviderConfig configures an OIDC provider.
+                              properties:
+                                autoProvision:
+                                  description: AutoProvision automatically creates
+                                    users on first login
+                                  type: boolean
+                                clientId:
+                                  description: ClientID is the OAuth client ID
+                                  type: string
+                                clientSecret:
+                                  description: ClientSecret is the OAuth client secret
+                                  type: string
+                                discoveryUrl:
+                                  description: DiscoveryURL is the OIDC discovery
+                                    URL (.well-known/openid-configuration)
+                                  type: string
+                                enabled:
+                                  description: Enabled toggles the provider
+                                  type: boolean
+                                externalAuthPortalUrl:
+                                  description: |-
+                                    ExternalAuthPortalURL, when set, redirects unauthenticated browser users to this URL
+                                    instead of initiating the OIDC flow directly. Use for deployments that host their own
+                                    login portal that handles OIDC initiation externally.
+                                  type: string
+                                id:
+                                  description: ID is the unique identifier for the
+                                    provider (e.g., "github", "google")
+                                  type: string
+                                name:
+                                  description: Name is the display name
+                                  type: string
+                                scopes:
+                                  default:
+                                  - openid
+                                  - email
+                                  - profile
+                                  description: Scopes are the OAuth scopes to request
+                                  items:
+                                    type: string
+                                  type: array
+                                teamMapping:
+                                  description: TeamMapping configures automatic team
+                                    assignment
+                                  properties:
+                                    defaultRole:
+                                      description: DefaultRole is the role assigned
+                                        to new users
+                                      type: string
+                                    defaultTeamId:
+                                      description: DefaultTeamID is the team to add
+                                        users to
+                                      type: string
+                                    domain:
+                                      description: Domain filters users by email domain
+                                      type: string
+                                  type: object
+                              type: object
+                            type: array
+                          oidcStateCleanupInterval:
+                            default: 5m
+                            type: string
+                          oidcStateTTL:
+                            default: 10m
+                            type: string
+                          proxyTimeout:
+                            default: 30s
+                            description: Timeouts
+                            type: string
+                          rateLimitBurst:
+                            default: 200
+                            type: integer
+                          rateLimitCleanupInterval:
+                            default: 10m
+                            type: string
+                          rateLimitRPS:
+                            default: 100
+                            description: Rate limiting
+                            type: integer
+                          regionId:
+                            description: |-
+                              RegionID is the canonical region identifier used by tenancy and routing
+                              contracts, for example "aws/us-east-1".
+                            type: string
+                          schedulerEnabled:
+                            description: Scheduler configuration (optional, for multi-cluster
+                              mode)
+                            type: boolean
+                          schedulerUrl:
+                            type: string
+                          serverIdleTimeout:
+                            default: 120s
+                            type: string
+                          serverReadTimeout:
+                            default: 30s
+                            type: string
+                          serverWriteTimeout:
+                            default: 60s
+                            type: string
+                          shutdownTimeout:
+                            default: 30s
+                            type: string
+                        type: object
+                      enabled:
+                        default: false
+                        description: Enabled enables or disables the service
+                        type: boolean
+                      ingress:
+                        description: Ingress configures ingress settings
+                        properties:
+                          className:
+                            description: ClassName specifies the ingress class name
+                            type: string
+                          enabled:
+                            default: false
+                            description: Enabled enables ingress
+                            type: boolean
+                          host:
+                            description: Host specifies the ingress host
+                            type: string
+                          tlsSecret:
+                            description: TLSSecret specifies the TLS secret name
+                            type: string
+                        type: object
+                      replicas:
+                        default: 1
+                        description: Replicas specifies the number of replicas
+                        format: int32
+                        type: integer
+                      resources:
+                        description: Resources specifies resource requirements
+                        properties:
+                          claims:
+                            description: |-
+                              Claims lists the names of resources, defined in spec.resourceClaims,
+                              that are used by this container.
+
+                              This field depends on the
+                              DynamicResourceAllocation feature gate.
+
+                              This field is immutable. It can only be set for containers.
+                            items:
+                              description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                              properties:
+                                name:
+                                  description: |-
+                                    Name must match the name of one entry in pod.spec.resourceClaims of
+                                    the Pod where this field is used. It makes that resource available
+                                    inside a container.
+                                  type: string
+                                request:
+                                  description: |-
+                                    Request is the name chosen for a request in the referenced claim.
+                                    If empty, everything from the claim is made available, otherwise
+                                    only the result of this request.
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                            type: array
+                            x-kubernetes-list-map-keys:
+                            - name
+                            x-kubernetes-list-type: map
+                          limits:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: |-
+                              Limits describes the maximum amount of compute resources allowed.
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                            type: object
+                          requests:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: |-
+                              Requests describes the minimum amount of compute resources required.
+                              If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                              otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                            type: object
+                        type: object
+                      service:
+                        description: Service configures the Kubernetes service
+                        properties:
+                          port:
+                            default: 80
+                            description: Port specifies the service port
+                            format: int32
+                            type: integer
+                          type:
+                            default: ClusterIP
+                            description: Type specifies the service type
+                            type: string
+                        type: object
+                    type: object
                   scheduler:
                     description: Scheduler configures the scheduler service (control
                       plane)
@@ -2413,7 +2413,7 @@ spec:
                             default: 5
                             type: integer
                           databaseSchema:
-                            default: sp
+                            default: storage_proxy
                             type: string
                           defaultCacheSize:
                             default: 1G
@@ -2878,18 +2878,19 @@ spec:
               endpoints:
                 description: Endpoints contains the service endpoints
                 properties:
-                  regionalGateway:
-                    description: RegionalGateway is the external regional-gateway URL
-                    type: string
-                  regionalGatewayInternal:
-                    description: RegionalGatewayInternal is the internal regional-gateway
-                      URL
+                  clusterGateway:
+                    description: ClusterGateway is the cluster-gateway URL
                     type: string
                   globalGateway:
                     description: GlobalGateway is the global-gateway URL
                     type: string
-                  clusterGateway:
-                    description: ClusterGateway is the cluster-gateway URL
+                  regionalGateway:
+                    description: RegionalGateway is the external regional-gateway
+                      URL
+                    type: string
+                  regionalGatewayInternal:
+                    description: RegionalGatewayInternal is the internal regional-gateway
+                      URL
                     type: string
                 type: object
               internalAuth:

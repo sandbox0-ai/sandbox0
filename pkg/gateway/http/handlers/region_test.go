@@ -110,11 +110,11 @@ func TestRegionHandlerUpdateRegionCanClearMeteringExportURL(t *testing.T) {
 
 	repo := &stubRegionRepository{regions: map[string]*tenantdir.Region{
 		"aws-us-east-1": {
-			ID:                "aws-us-east-1",
-			DisplayName:       "US East 1",
-			RegionalGatewayURL:    "https://use1.example.com",
-			MeteringExportURL: "https://metering.use1.example.com",
-			Enabled:           true,
+			ID:                 "aws-us-east-1",
+			DisplayName:        "US East 1",
+			RegionalGatewayURL: "https://use1.example.com",
+			MeteringExportURL:  "https://metering.use1.example.com",
+			Enabled:            true,
 		},
 	}}
 	handler := NewRegionHandler(repo, zap.NewNop())

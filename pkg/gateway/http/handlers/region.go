@@ -29,19 +29,19 @@ type RegionHandler struct {
 
 // CreateRegionRequest creates a new region directory entry.
 type CreateRegionRequest struct {
-	ID                string `json:"id" binding:"required"`
-	DisplayName       string `json:"display_name"`
-	RegionalGatewayURL    string `json:"regional_gateway_url" binding:"required"`
-	MeteringExportURL string `json:"metering_export_url"`
-	Enabled           *bool  `json:"enabled"`
+	ID                 string `json:"id" binding:"required"`
+	DisplayName        string `json:"display_name"`
+	RegionalGatewayURL string `json:"regional_gateway_url" binding:"required"`
+	MeteringExportURL  string `json:"metering_export_url"`
+	Enabled            *bool  `json:"enabled"`
 }
 
 // UpdateRegionRequest updates an existing region directory entry.
 type UpdateRegionRequest struct {
-	DisplayName       string  `json:"display_name"`
-	RegionalGatewayURL    string  `json:"regional_gateway_url"`
-	MeteringExportURL *string `json:"metering_export_url"`
-	Enabled           *bool   `json:"enabled"`
+	DisplayName        string  `json:"display_name"`
+	RegionalGatewayURL string  `json:"regional_gateway_url"`
+	MeteringExportURL  *string `json:"metering_export_url"`
+	Enabled            *bool   `json:"enabled"`
 }
 
 // NewRegionHandler creates a new region handler.
@@ -81,11 +81,11 @@ func (h *RegionHandler) CreateRegion(c *gin.Context) {
 		enabled = *req.Enabled
 	}
 	region := &tenantdir.Region{
-		ID:                strings.TrimSpace(req.ID),
-		DisplayName:       strings.TrimSpace(req.DisplayName),
-		RegionalGatewayURL:    strings.TrimSpace(req.RegionalGatewayURL),
-		MeteringExportURL: strings.TrimSpace(req.MeteringExportURL),
-		Enabled:           enabled,
+		ID:                 strings.TrimSpace(req.ID),
+		DisplayName:        strings.TrimSpace(req.DisplayName),
+		RegionalGatewayURL: strings.TrimSpace(req.RegionalGatewayURL),
+		MeteringExportURL:  strings.TrimSpace(req.MeteringExportURL),
+		Enabled:            enabled,
 	}
 	if region.ID == "" || region.RegionalGatewayURL == "" {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "region id and regional gateway url are required")

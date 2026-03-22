@@ -16,8 +16,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	gatewayhttp "github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/http"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	gatewayapikey "github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
 	gatewayidentity "github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
@@ -144,7 +144,7 @@ func newGatewayTestDB(t *testing.T) (*pgxpool.Pool, *gatewayidentity.Repository,
 
 	ctx := context.Background()
 	dbURL := requireTestDatabaseURL(t)
-	schema := fmt.Sprintf("gateway_test_%s", strings.ReplaceAll(uuid.NewString(), "-", ""))
+	schema := fmt.Sprintf("shared_gateway_test_%s", strings.ReplaceAll(uuid.NewString(), "-", ""))
 
 	pool, err := dbpool.New(ctx, dbpool.Options{
 		DatabaseURL: dbURL,

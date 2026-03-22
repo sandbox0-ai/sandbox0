@@ -127,9 +127,9 @@ func newEdgeCredentialSourceRouteTestServer(t *testing.T) (string, *Server, *edg
 	}
 
 	server := &Server{
-		authMiddleware: gatewaymiddleware.NewAuthMiddleware(nil, "secret", jwtIssuer, logger),
-		logger:         logger,
-		jwtIssuer:      jwtIssuer,
+		authMiddleware:       gatewaymiddleware.NewAuthMiddleware(nil, "secret", jwtIssuer, logger),
+		logger:               logger,
+		jwtIssuer:            jwtIssuer,
 		clusterGatewayRouter: clusterGatewayRouter,
 		internalAuthGen: internalauth.NewGenerator(internalauth.GeneratorConfig{
 			Caller:     "regional-gateway",

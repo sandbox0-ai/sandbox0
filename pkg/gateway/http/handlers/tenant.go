@@ -34,10 +34,10 @@ type IssueRegionTokenRequest struct {
 
 // IssueRegionTokenResponse is returned when a region-scoped token is issued.
 type IssueRegionTokenResponse struct {
-	RegionID       string `json:"region_id"`
+	RegionID           string `json:"region_id"`
 	RegionalGatewayURL string `json:"regional_gateway_url,omitempty"`
-	Token          string `json:"token"`
-	ExpiresAt      int64  `json:"expires_at"`
+	Token              string `json:"token"`
+	ExpiresAt          int64  `json:"expires_at"`
 }
 
 // NewTenantHandler creates a new tenant handler.
@@ -119,10 +119,10 @@ func (h *TenantHandler) IssueRegionToken(c *gin.Context) {
 	}
 
 	spec.JSONSuccess(c, http.StatusOK, IssueRegionTokenResponse{
-		RegionID:       activeTeam.HomeRegionID,
+		RegionID:           activeTeam.HomeRegionID,
 		RegionalGatewayURL: activeTeam.RegionalGatewayURL,
-		Token:          token,
-		ExpiresAt:      expiry.Unix(),
+		Token:              token,
+		ExpiresAt:          expiry.Unix(),
 	})
 }
 

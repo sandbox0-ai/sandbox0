@@ -65,9 +65,9 @@ func TestDirectoryResolveActiveTeamUsesDefaultTeam(t *testing.T) {
 		},
 	}
 	regions := NewStaticRegions([]Region{{
-		ID:             homeRegionID,
+		ID:                 homeRegionID,
 		RegionalGatewayURL: "https://use1.example.com",
-		Enabled:        true,
+		Enabled:            true,
 	}})
 
 	resolver := NewResolver(store, regions)

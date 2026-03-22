@@ -35,7 +35,7 @@ type StorageProxyConfig struct {
 	// +kubebuilder:default=5
 	DatabaseMinConns int `yaml:"database_min_conns" json:"databaseMinConns"`
 	// +optional
-	// +kubebuilder:default="sp"
+	// +kubebuilder:default="storage_proxy"
 	DatabaseSchema string `yaml:"database_schema" json:"databaseSchema"`
 
 	// JuiceFS defaults

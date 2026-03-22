@@ -13,8 +13,8 @@ import (
 
 var platformServiceNames = map[string]struct{}{
 	"cluster-gateway": {},
-	"manager":          {},
-	"storage-proxy":    {},
+	"manager":         {},
+	"storage-proxy":   {},
 }
 
 var clusterDNSServiceNames = map[string]struct{}{

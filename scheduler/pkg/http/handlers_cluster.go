@@ -12,10 +12,10 @@ import (
 
 // ClusterRequest represents the request body for creating/updating a cluster
 type ClusterRequest struct {
-	ClusterName        string `json:"cluster_name"`
+	ClusterName       string `json:"cluster_name"`
 	ClusterGatewayURL string `json:"cluster_gateway_url"`
-	Weight             int    `json:"weight"`
-	Enabled            bool   `json:"enabled"`
+	Weight            int    `json:"weight"`
+	Enabled           bool   `json:"enabled"`
 }
 
 // listClusters lists all clusters
@@ -108,11 +108,11 @@ func (s *Server) createCluster(c *gin.Context) {
 	}
 
 	cluster := &db.Cluster{
-		ClusterID:          clusterID,
-		ClusterName:        req.ClusterName,
+		ClusterID:         clusterID,
+		ClusterName:       req.ClusterName,
 		ClusterGatewayURL: req.ClusterGatewayURL,
-		Weight:             req.Weight,
-		Enabled:            req.Enabled,
+		Weight:            req.Weight,
+		Enabled:           req.Enabled,
 	}
 
 	if err := s.repo.CreateCluster(c.Request.Context(), cluster); err != nil {
@@ -182,11 +182,11 @@ func (s *Server) updateCluster(c *gin.Context) {
 	}
 
 	cluster := &db.Cluster{
-		ClusterID:          clusterID,
-		ClusterName:        req.ClusterName,
+		ClusterID:         clusterID,
+		ClusterName:       req.ClusterName,
 		ClusterGatewayURL: req.ClusterGatewayURL,
-		Weight:             req.Weight,
-		Enabled:            req.Enabled,
+		Weight:            req.Weight,
+		Enabled:           req.Enabled,
 	}
 
 	if err := s.repo.UpdateCluster(c.Request.Context(), cluster); err != nil {

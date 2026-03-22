@@ -42,14 +42,14 @@ import (
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/rbac"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/clustergateway"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/regionalgateway"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/fuseplugin"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/globalgateway"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/clustergateway"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/manager"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/netd"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/regionalgateway"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/registry"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/scheduler"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storage"
@@ -192,12 +192,12 @@ func (r *Sandbox0InfraReconciler) reconcileDelete(ctx context.Context, infra *in
 }
 
 type componentPlan struct {
-	EnableGlobalGateway     bool
+	EnableGlobalGateway       bool
 	HasControlPlane           bool
 	HasDataPlane              bool
-	EnableRegionalGateway         bool
+	EnableRegionalGateway     bool
 	EnableScheduler           bool
-	EnableClusterGateway     bool
+	EnableClusterGateway      bool
 	EnableManager             bool
 	EnableStorageProxy        bool
 	EnableFusePlugin          bool
@@ -223,12 +223,12 @@ func (r *Sandbox0InfraReconciler) buildComponentPlan(infra *infrav1alpha1.Sandbo
 	hasDataPlane := enableClusterGateway || enableManager || enableStorageProxy
 
 	return componentPlan{
-		EnableGlobalGateway:     enableGlobalGateway,
+		EnableGlobalGateway:       enableGlobalGateway,
 		HasControlPlane:           hasControlPlane,
 		HasDataPlane:              hasDataPlane,
-		EnableRegionalGateway:         enableRegionalGateway,
+		EnableRegionalGateway:     enableRegionalGateway,
 		EnableScheduler:           enableScheduler,
-		EnableClusterGateway:     enableClusterGateway,
+		EnableClusterGateway:      enableClusterGateway,
 		EnableManager:             enableManager,
 		EnableStorageProxy:        enableStorageProxy,
 		EnableFusePlugin:          enableManager,

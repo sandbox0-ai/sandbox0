@@ -9,8 +9,8 @@ import (
 	"syscall"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/http"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	gatewaymigrations "github.com/sandbox0-ai/sandbox0/pkg/gateway/migrations"
 	"github.com/sandbox0-ai/sandbox0/pkg/metering"
@@ -147,7 +147,7 @@ func initDatabase(ctx context.Context, cfg *config.ClusterGatewayConfig, logger 
 		DatabaseURL: cfg.DatabaseURL,
 		MaxConns:    int32(cfg.DatabaseMaxConns),
 		MinConns:    int32(cfg.DatabaseMinConns),
-		Schema:      "gateway",
+		Schema:      "shared_gateway",
 	})
 	if err != nil {
 		logger.Fatal("Failed to connect to database", zap.Error(err))
@@ -172,7 +172,7 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) 
 	if err := migrate.Up(ctx, pool, ".",
 		migrate.WithBaseFS(gatewaymigrations.FS),
 		migrate.WithLogger(migrateLogger),
-		migrate.WithSchema("gateway"),
+		migrate.WithSchema("shared_gateway"),
 	); err != nil {
 		return fmt.Errorf("migrate up: %w", err)
 	}

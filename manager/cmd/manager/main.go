@@ -498,7 +498,7 @@ func runTemplateMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.
 	if err := migrate.Up(ctx, pool, ".",
 		migrate.WithBaseFS(templmigrations.FS),
 		migrate.WithLogger(migrateLogger),
-		migrate.WithSchema("sched"),
+		migrate.WithSchema("scheduler"),
 	); err != nil {
 		return fmt.Errorf("migrate up: %w", err)
 	}
@@ -537,7 +537,7 @@ func initDatabase(ctx context.Context, databaseURL string, maxConns, minConns in
 		DatabaseURL: databaseURL,
 		MaxConns:    maxConns,
 		MinConns:    minConns,
-		Schema:      "sched",
+		Schema:      "scheduler",
 	})
 	if err != nil {
 		return nil, err

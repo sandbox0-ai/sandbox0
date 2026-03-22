@@ -85,18 +85,18 @@ func NewServer(
 	router.Use(requestLogger(logger))
 
 	server := &Server{
-		router:                 router,
-		cfg:                    cfg,
-		repo:                   repo,
-		templateStore:          templateStore,
-		allocationStore:        allocationStore,
-		authValidator:          authValidator,
-		internalAuthGen:        internalAuthGen,
-		reconciler:             reconciler,
-		logger:                 logger,
-		obsProvider:            obsProvider,
+		router:                router,
+		cfg:                   cfg,
+		repo:                  repo,
+		templateStore:         templateStore,
+		allocationStore:       allocationStore,
+		authValidator:         authValidator,
+		internalAuthGen:       internalAuthGen,
+		reconciler:            reconciler,
+		logger:                logger,
+		obsProvider:           obsProvider,
 		clusterGatewayProxies: make(map[string]*proxy.Router),
-		clusterCache:           make(map[string]*db.Cluster),
+		clusterCache:          make(map[string]*db.Cluster),
 	}
 	server.templateHandler = &templatehttp.Handler{
 		Store:           templateStore,

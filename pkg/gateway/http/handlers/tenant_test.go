@@ -33,10 +33,10 @@ func TestTenantHandlerIssueRegionToken(t *testing.T) {
 
 	handler := NewTenantHandler(
 		&stubTenantResolver{activeTeam: &tenantdir.ActiveTeam{
-			UserID:         "user-1",
-			TeamID:         "team-1",
-			TeamRole:       "admin",
-			HomeRegionID:   "aws/us-east-1",
+			UserID:             "user-1",
+			TeamID:             "team-1",
+			TeamRole:           "admin",
+			HomeRegionID:       "aws/us-east-1",
 			RegionalGatewayURL: "https://use1.example.com",
 		}},
 		authn.NewIssuer("global-gateway", "test-secret", time.Minute, time.Hour),

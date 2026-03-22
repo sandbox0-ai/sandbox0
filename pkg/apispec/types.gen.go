@@ -429,12 +429,12 @@ type APIKey struct {
 
 // ActiveTeam defines model for ActiveTeam.
 type ActiveTeam struct {
-	DefaultTeam    *bool   `json:"default_team,omitempty"`
+	DefaultTeam        *bool   `json:"default_team,omitempty"`
+	HomeRegionId       string  `json:"home_region_id"`
 	RegionalGatewayUrl *string `json:"regional_gateway_url"`
-	HomeRegionId   string  `json:"home_region_id"`
-	TeamId         string  `json:"team_id"`
-	TeamRole       *string `json:"team_role,omitempty"`
-	UserId         string  `json:"user_id"`
+	TeamId             string  `json:"team_id"`
+	TeamRole           *string `json:"team_role,omitempty"`
+	UserId             string  `json:"user_id"`
 }
 
 // AddTeamMemberRequest defines model for AddTeamMemberRequest.
@@ -603,11 +603,11 @@ type CreateREPLContextRequest struct {
 
 // CreateRegionRequest defines model for CreateRegionRequest.
 type CreateRegionRequest struct {
-	DisplayName       *string `json:"display_name,omitempty"`
-	RegionalGatewayUrl    string  `json:"regional_gateway_url"`
-	Enabled           *bool   `json:"enabled,omitempty"`
-	Id                string  `json:"id"`
-	MeteringExportUrl *string `json:"metering_export_url"`
+	DisplayName        *string `json:"display_name,omitempty"`
+	Enabled            *bool   `json:"enabled,omitempty"`
+	Id                 string  `json:"id"`
+	MeteringExportUrl  *string `json:"metering_export_url"`
+	RegionalGatewayUrl string  `json:"regional_gateway_url"`
 }
 
 // CreateSandboxVolumeRequest defines model for CreateSandboxVolumeRequest.
@@ -803,10 +803,10 @@ type IssueRegionTokenRequest struct {
 
 // IssueRegionTokenResponse defines model for IssueRegionTokenResponse.
 type IssueRegionTokenResponse struct {
+	ExpiresAt          int64   `json:"expires_at"`
+	RegionId           string  `json:"region_id"`
 	RegionalGatewayUrl *string `json:"regional_gateway_url"`
-	ExpiresAt      int64   `json:"expires_at"`
-	RegionId       string  `json:"region_id"`
-	Token          string  `json:"token"`
+	Token              string  `json:"token"`
 }
 
 // LabelSelector defines model for LabelSelector.
@@ -1074,11 +1074,11 @@ type RefreshResponse struct {
 
 // Region defines model for Region.
 type Region struct {
-	DisplayName       *string `json:"display_name,omitempty"`
-	RegionalGatewayUrl    string  `json:"regional_gateway_url"`
-	Enabled           bool    `json:"enabled"`
-	Id                string  `json:"id"`
-	MeteringExportUrl *string `json:"metering_export_url"`
+	DisplayName        *string `json:"display_name,omitempty"`
+	Enabled            bool    `json:"enabled"`
+	Id                 string  `json:"id"`
+	MeteringExportUrl  *string `json:"metering_export_url"`
+	RegionalGatewayUrl string  `json:"regional_gateway_url"`
 }
 
 // RegisterRequest defines model for RegisterRequest.
@@ -1956,10 +1956,10 @@ type UpdateExposedPortsRequest struct {
 
 // UpdateRegionRequest defines model for UpdateRegionRequest.
 type UpdateRegionRequest struct {
-	DisplayName       *string `json:"display_name,omitempty"`
-	RegionalGatewayUrl    *string `json:"regional_gateway_url,omitempty"`
-	Enabled           *bool   `json:"enabled,omitempty"`
-	MeteringExportUrl *string `json:"metering_export_url"`
+	DisplayName        *string `json:"display_name,omitempty"`
+	Enabled            *bool   `json:"enabled,omitempty"`
+	MeteringExportUrl  *string `json:"metering_export_url"`
+	RegionalGatewayUrl *string `json:"regional_gateway_url,omitempty"`
 }
 
 // UpdateTeamMemberRequest defines model for UpdateTeamMemberRequest.

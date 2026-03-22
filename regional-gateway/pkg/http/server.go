@@ -33,20 +33,20 @@ import (
 
 // Server represents the HTTP server for regional-gateway
 type Server struct {
-	router          *gin.Engine
-	cfg             *config.RegionalGatewayConfig
-	pool            *pgxpool.Pool
-	identityRepo    *identity.Repository
-	apiKeyRepo      *apikey.Repository
+	router               *gin.Engine
+	cfg                  *config.RegionalGatewayConfig
+	pool                 *pgxpool.Pool
+	identityRepo         *identity.Repository
+	apiKeyRepo           *apikey.Repository
 	clusterGatewayRouter *proxy.Router
-	schedulerRouter *proxy.Router // Optional: proxy to scheduler for templates
-	authMiddleware  *middleware.AuthMiddleware
-	rateLimiter     *middleware.RateLimiter
-	requestLogger   *middleware.RequestLogger
-	logger          *zap.Logger
-	internalAuthGen *internalauth.Generator
-	meteringHandler *gatewayhandlers.MeteringHandler
-	obsProvider     *observability.Provider
+	schedulerRouter      *proxy.Router // Optional: proxy to scheduler for templates
+	authMiddleware       *middleware.AuthMiddleware
+	rateLimiter          *middleware.RateLimiter
+	requestLogger        *middleware.RequestLogger
+	logger               *zap.Logger
+	internalAuthGen      *internalauth.Generator
+	meteringHandler      *gatewayhandlers.MeteringHandler
+	obsProvider          *observability.Provider
 
 	clusterGatewayProxies   map[string]*proxy.Router
 	clusterGatewayProxiesMu sync.RWMutex
@@ -201,24 +201,24 @@ func NewServer(
 	}
 
 	server := &Server{
-		router:                 router,
-		cfg:                    cfg,
-		pool:                   pool,
-		identityRepo:           identityRepo,
-		apiKeyRepo:             apiKeyRepo,
-		clusterGatewayRouter:   clusterGatewayRouter,
-		schedulerRouter:        schedulerRouter,
-		authMiddleware:         authMiddleware,
-		rateLimiter:            rateLimiter,
-		requestLogger:          requestLogger,
-		logger:                 logger,
-		internalAuthGen:        internalAuthGen,
-		meteringHandler:        gatewayhandlers.NewMeteringHandler(meteringRepo, cfg.RegionID, logger),
-		obsProvider:            obsProvider,
+		router:                router,
+		cfg:                   cfg,
+		pool:                  pool,
+		identityRepo:          identityRepo,
+		apiKeyRepo:            apiKeyRepo,
+		clusterGatewayRouter:  clusterGatewayRouter,
+		schedulerRouter:       schedulerRouter,
+		authMiddleware:        authMiddleware,
+		rateLimiter:           rateLimiter,
+		requestLogger:         requestLogger,
+		logger:                logger,
+		internalAuthGen:       internalAuthGen,
+		meteringHandler:       gatewayhandlers.NewMeteringHandler(meteringRepo, cfg.RegionID, logger),
+		obsProvider:           obsProvider,
 		clusterGatewayProxies: make(map[string]*proxy.Router),
-		clusterCache:           make(map[string]string),
-		entitlements:           publicEntitlements,
-		registry:               registryProvider,
+		clusterCache:          make(map[string]string),
+		entitlements:          publicEntitlements,
+		registry:              registryProvider,
 
 		builtinProvider: builtinProvider,
 		oidcManager:     oidcManager,

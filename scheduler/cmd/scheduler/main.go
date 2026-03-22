@@ -170,7 +170,7 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) 
 	if err := migrate.Up(ctx, pool, ".",
 		migrate.WithBaseFS(templmigrations.FS),
 		migrate.WithLogger(migrateLogger),
-		migrate.WithSchema("sched"),
+		migrate.WithSchema("scheduler"),
 	); err != nil {
 		return fmt.Errorf("migrate up: %w", err)
 	}
@@ -254,7 +254,7 @@ func initDatabase(ctx context.Context, cfg *config.SchedulerConfig, logger *zap.
 		DefaultMinConns: 2,
 		MaxConnLifetime: maxConnLifetime,
 		MaxConnIdleTime: maxConnIdleTime,
-		Schema:          "sched",
+		Schema:          "scheduler",
 	})
 	if err != nil {
 		return nil, err

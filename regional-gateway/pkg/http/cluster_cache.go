@@ -16,9 +16,9 @@ import (
 )
 
 type schedulerCluster struct {
-	ClusterID          string `json:"cluster_id"`
+	ClusterID         string `json:"cluster_id"`
 	ClusterGatewayURL string `json:"cluster_gateway_url"`
-	Enabled            bool   `json:"enabled"`
+	Enabled           bool   `json:"enabled"`
 }
 
 type schedulerClusterListResponse struct {

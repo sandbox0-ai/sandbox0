@@ -49,66 +49,6 @@ jobs:
       version: ${{ needs.prepare-release.outputs.version }}
       upload_artifacts: true
 
-  publish-dashboard-core:
-    name: Publish dashboard-core package
-    runs-on: ubuntu-latest
-    needs:
-      - prepare-release
-      - package
-      - trigger-cloud-website-release
-    steps:
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          registry-url: 'https://registry.npmjs.org'
-
-      - name: Download dashboard-core package artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: dashboard-core-package-${{ needs.prepare-release.outputs.version }}
-          path: .release-npm
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          repository: ${{ github.repository }}
-          run-id: ${{ needs.package.outputs.artifact_run_id }}
-
-      - name: Resolve dashboard-core package path
-        run: |
-          PACKAGE_PATH="$(find .release-npm -maxdepth 1 -type f -name '*.tgz' | head -n 1)"
-          test -n "${PACKAGE_PATH}"
-          test -f "${PACKAGE_PATH}"
-          echo "PACKAGE_PATH=${PACKAGE_PATH}" >> "$GITHUB_ENV"
-
-      - name: Check whether dashboard-core version already exists on npm
-        id: dashboard_core_npm
-        run: |
-          VERSION="${{ needs.prepare-release.outputs.version }}"
-          if npm view "@sandbox0/dashboard-core@${VERSION}" version >/dev/null 2>&1; then
-            echo "published=true" >> "$GITHUB_OUTPUT"
-            echo "@sandbox0/dashboard-core@${VERSION} is already published; skipping npm publish."
-          else
-            echo "published=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Publish dashboard-core package to npm
-        if: steps.dashboard_core_npm.outputs.published != 'true'
-        run: |
-          VERSION="${{ needs.prepare-release.outputs.version }}"
-          NPM_TAG="latest"
-
-          if [[ "${{ needs.prepare-release.outputs.is_prerelease }}" == "true" ]]; then
-            case "${VERSION}" in
-              *-alpha* ) NPM_TAG="alpha" ;;
-              *-beta* ) NPM_TAG="beta" ;;
-              *-rc* ) NPM_TAG="rc" ;;
-              * ) NPM_TAG="next" ;;
-            esac
-          fi
-
-          npm publish "${PACKAGE_PATH}" --tag "${NPM_TAG}"
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
   publish-image:
     name: Publish infra image (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}

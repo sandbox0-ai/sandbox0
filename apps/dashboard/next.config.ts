@@ -1,7 +1,10 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  transpilePackages: ["@sandbox0/ui", "@sandbox0/dashboard-core"],
+  transpilePackages: [
+    "@sandbox0/ui",
+    "@sandbox0/dashboard-core",
+  ],
   // Prevent webpack from trying to bundle Node.js-only dependencies from the
   // sandbox0 SDK (e.g. node:crypto used in webhook_signature.js). These are
   // only accessed server-side and must be resolved by the Node.js runtime.

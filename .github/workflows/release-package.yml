@@ -73,49 +73,6 @@ jobs:
           echo "upload_artifacts=${upload_artifacts}" >> "$GITHUB_OUTPUT"
           echo "artifact_run_id=${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
 
-  dashboard-core:
-    name: release-package / dashboard-core
-    runs-on: ubuntu-latest
-    needs: metadata
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: package-lock.json
-
-      - name: Install frontend dependencies
-        run: npm ci
-
-      - name: Apply release version to dashboard-core
-        run: npm version ${{ needs.metadata.outputs.version }} --workspace @sandbox0/dashboard-core --no-git-tag-version
-
-      - name: Lint dashboard-core package
-        run: npm run lint -w @sandbox0/dashboard-core
-
-      - name: Test dashboard-core package
-        run: npm run test -w @sandbox0/dashboard-core
-
-      - name: Pack dashboard-core package
-        id: pack
-        shell: bash
-        run: |
-          mkdir -p .release-npm
-          pack_file="$(npm pack -w @sandbox0/dashboard-core --pack-destination .release-npm | tail -n 1)"
-          echo "pack_file=.release-npm/${pack_file}" >> "$GITHUB_OUTPUT"
-
-      - name: Upload dashboard-core package artifact
-        if: ${{ needs.metadata.outputs.upload_artifacts == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: dashboard-core-package-${{ needs.metadata.outputs.version }}
-          path: ${{ steps.pack.outputs.pack_file }}
-          if-no-files-found: error
-
   website-docs:
     name: release-package / website-docs
     if: ${{ needs.metadata.outputs.upload_artifacts != 'true' }}

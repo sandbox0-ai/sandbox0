@@ -1,9 +1,7 @@
-import { cookies } from "next/headers";
-import { redirect } from "next/navigation";
 import Image from "next/image";
 import { PixelButton, PixelCard, PixelInput, PixelLayout } from "@sandbox0/ui";
 import {
-  resolveDashboardHomeEntry,
+  requireDashboardHomeRender,
   resolveDashboardRuntimeConfig,
 } from "@sandbox0/dashboard-core";
 
@@ -116,16 +114,10 @@ function DashboardHomeView() {
 }
 
 export default async function DashboardHome({ searchParams }: DashboardHomeProps) {
-  const { login_error: loginError } = await searchParams;
-  const result = await resolveDashboardHomeEntry(
-    resolveDashboardRuntimeConfig(),
-    await cookies(),
-    { loginError },
+  await requireDashboardHomeRender(
+    resolveDashboardRuntimeConfig,
+    searchParams,
   );
-
-  if (result.kind === "redirect") {
-    redirect(result.location);
-  }
 
   return <DashboardHomeView />;
 }

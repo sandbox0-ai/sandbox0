@@ -1,6 +1,7 @@
 {
   "name": "@sandbox0/dashboard-core",
   "version": "0.1.0",
+  "private": true,
   "description": "Shared Sandbox0 dashboard auth and control-plane core",
   "license": "Apache-2.0",
   "type": "module",
@@ -9,6 +10,8 @@
   "types": "./src/index.ts",
   "files": [
     "src/auth.ts",
+    "src/auth-pages.tsx",
+    "src/auth-routes.ts",
     "src/browser-auth.ts",
     "src/browser-auth-links.ts",
     "src/browser-auth-routes.ts",
@@ -37,10 +40,6 @@
     "type": "git",
     "url": "git+https://github.com/sandbox0-ai/sandbox0.git",
     "directory": "components/dashboard-core"
-  },
-  "publishConfig": {
-    "access": "public",
-    "provenance": true
   },
   "peerDependencies": {
     "@sandbox0/ui": "*",

@@ -1,14 +1,6 @@
-import { cookies } from "next/headers";
-
 import {
-  handleDashboardRefreshRequest,
+  createDashboardRefreshRoute,
   resolveDashboardRuntimeConfig,
 } from "@sandbox0/dashboard-core";
 
-export async function GET(request: Request) {
-  return handleDashboardRefreshRequest(
-    resolveDashboardRuntimeConfig(),
-    request,
-    await cookies(),
-  );
-}
+export const GET = createDashboardRefreshRoute(resolveDashboardRuntimeConfig);

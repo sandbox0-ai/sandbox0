@@ -1,3 +1,5 @@
+export * from "./auth-pages";
+export * from "./auth-routes";
 export * from "./auth";
 export * from "./browser-auth";
 export * from "./browser-auth-links";

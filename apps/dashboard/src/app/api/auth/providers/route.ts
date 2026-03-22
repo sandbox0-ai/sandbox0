@@ -1,8 +1,6 @@
 import {
-  handleDashboardAuthProvidersRequest,
+  createDashboardAuthProvidersRoute,
   resolveDashboardRuntimeConfig,
 } from "@sandbox0/dashboard-core";
 
-export async function GET() {
-  return handleDashboardAuthProvidersRequest(resolveDashboardRuntimeConfig());
-}
+export const GET = createDashboardAuthProvidersRoute(resolveDashboardRuntimeConfig);

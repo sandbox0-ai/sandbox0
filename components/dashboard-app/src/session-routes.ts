@@ -5,13 +5,42 @@ import type { DashboardConfigResolver } from "./internal/auth-pages";
 import {
   clearDashboardAuthCookies,
   dashboardAccessTokenCookieName,
+  dashboardRegionalAccessTokenCookieName,
+  dashboardRegionalExpiresAtCookieName,
+  dashboardRegionalGatewayURLCookieName,
+  dashboardRegionalRegionIDCookieName,
   dashboardRefreshTokenCookieName,
+  type DashboardRegionalSession,
   exchangeRefreshToken,
   resolveDashboardAuthProviders,
   setDashboardAuthCookies,
   updateDefaultTeam,
 } from "./internal/auth";
 import { readBearerToken, resolveDashboardSession } from "./internal/session";
+
+function readRegionalSessionFromCookies(
+  cookieStore: Awaited<ReturnType<typeof cookies>>,
+): DashboardRegionalSession | undefined {
+  const token = cookieStore.get(dashboardRegionalAccessTokenCookieName)?.value;
+  const regionID = cookieStore.get(dashboardRegionalRegionIDCookieName)?.value;
+  const expiresAt = Number(
+    cookieStore.get(dashboardRegionalExpiresAtCookieName)?.value ?? "",
+  );
+  const regionalGatewayURL = cookieStore.get(
+    dashboardRegionalGatewayURLCookieName,
+  )?.value;
+
+  if (!token || !regionID || !Number.isFinite(expiresAt) || expiresAt <= 0) {
+    return undefined;
+  }
+
+  return {
+    token,
+    region_id: regionID,
+    expires_at: expiresAt,
+    regional_gateway_url: regionalGatewayURL || undefined,
+  };
+}
 
 export function createDashboardSessionRoute(
   resolveConfig: DashboardConfigResolver,
@@ -22,7 +51,10 @@ export function createDashboardSessionRoute(
     const config = resolveConfig();
 
     const token = readBearerToken(headerStore.get("authorization"), cookieStore);
-    let session = await resolveDashboardSession(config, { bearerToken: token });
+    let session = await resolveDashboardSession(config, {
+      bearerToken: token,
+      regionalSession: readRegionalSessionFromCookies(cookieStore),
+    });
 
     if (!session.authenticated) {
       const refreshToken = cookieStore.get(
@@ -33,6 +65,7 @@ export function createDashboardSessionRoute(
         if (refreshed.tokens) {
           session = await resolveDashboardSession(config, {
             bearerToken: refreshed.tokens.access_token,
+            regionalSession: refreshed.tokens.regional_session,
           });
           const authProviders = await resolveDashboardAuthProviders(config);
           const response = NextResponse.json({

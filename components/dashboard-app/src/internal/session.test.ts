@@ -216,3 +216,74 @@ test("resolveDashboardSession resolves global-gateway metadata and region routin
   assert.equal(session.activeTeam?.homeRegionID, "aws/us-east-1");
   assert.equal(session.configuredRegionalURL, "https://use1.example.com");
 });
+
+test("resolveDashboardSession uses regional session directly when available", async () => {
+  const seenURLs: string[] = [];
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = String(input);
+    seenURLs.push(url);
+
+    if (url === "https://global.example.com/users/me") {
+      return new Response(
+        JSON.stringify({
+          data: {
+            id: "u_123",
+            email: "dev@example.com",
+            name: "Dev User",
+            default_team_id: "team_1",
+            email_verified: true,
+            is_admin: false,
+          },
+        }),
+      );
+    }
+    if (url === "https://global.example.com/teams") {
+      return new Response(
+        JSON.stringify({
+          data: {
+            teams: [
+              {
+                id: "team_1",
+                name: "Cloud Team",
+                slug: "cloud-team",
+                home_region_id: "aws/us-east-1",
+              },
+            ],
+          },
+        }),
+      );
+    }
+    if (url === "https://use1.example.com/api/v1/sandboxes?limit=5") {
+      return new Response(JSON.stringify({ data: { sandboxes: [] } }));
+    }
+    if (url === "https://use1.example.com/api/v1/templates") {
+      return new Response(JSON.stringify({ data: { templates: [] } }));
+    }
+
+    throw new Error(`unexpected url ${url}`);
+  };
+
+  const session = await resolveDashboardSession(
+    globalGatewayConfig,
+    {
+      bearerToken: "global-token",
+      regionalSession: {
+        region_id: "aws/us-east-1",
+        regional_gateway_url: "https://use1.example.com",
+        token: "regional-token",
+        expires_at: 1893456000,
+      },
+    },
+    fetchImpl,
+  );
+
+  assert.equal(session.authenticated, true);
+  assert.equal(session.activeTeam?.teamID, "team_1");
+  assert.equal(session.configuredRegionalURL, "https://use1.example.com");
+  assert.deepEqual(seenURLs, [
+    "https://global.example.com/users/me",
+    "https://global.example.com/teams",
+    "https://use1.example.com/api/v1/sandboxes?limit=5",
+    "https://use1.example.com/api/v1/templates",
+  ]);
+});

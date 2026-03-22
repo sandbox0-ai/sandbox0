@@ -193,6 +193,12 @@ test("exchangeRefreshToken returns new tokens from the control plane", async () 
             access_token: "new-access-token",
             refresh_token: "new-refresh-token",
             expires_at: Math.floor(Date.now() / 1000) + 3600,
+            regional_session: {
+              region_id: "aws/us-east-1",
+              regional_gateway_url: "https://use1.example.com",
+              token: "regional-access-token",
+              expires_at: Math.floor(Date.now() / 1000) + 900,
+            },
           },
         }),
       );
@@ -202,6 +208,7 @@ test("exchangeRefreshToken returns new tokens from the control plane", async () 
   assert.equal(result.error, undefined);
   assert.equal(result.tokens?.access_token, "new-access-token");
   assert.equal(result.tokens?.refresh_token, "new-refresh-token");
+  assert.equal(result.tokens?.regional_session?.token, "regional-access-token");
 });
 
 test("exchangeOIDCCallback exchanges code and state through the sdk auth api", async () => {
@@ -269,12 +276,26 @@ test("setDashboardAuthCookies stores dashboard auth cookies", () => {
     access_token: "access-token",
     refresh_token: "refresh-token",
     expires_at: Math.floor(Date.now() / 1000) + 3600,
+    regional_session: {
+      region_id: "aws/us-east-1",
+      regional_gateway_url: "https://use1.example.com",
+      token: "regional-access-token",
+      expires_at: Math.floor(Date.now() / 1000) + 900,
+    },
   });
 
   const accessCookie = response.cookies.get("sandbox0_access_token");
   const refreshCookie = response.cookies.get("sandbox0_refresh_token");
+  const regionalAccessCookie = response.cookies.get(
+    "sandbox0_regional_access_token",
+  );
+  const regionalGatewayCookie = response.cookies.get(
+    "sandbox0_regional_gateway_url",
+  );
   assert.equal(accessCookie?.value, "access-token");
   assert.equal(refreshCookie?.value, "refresh-token");
+  assert.equal(regionalAccessCookie?.value, "regional-access-token");
+  assert.equal(regionalGatewayCookie?.value, "https://use1.example.com");
   assert.equal(accessCookie?.httpOnly, true);
   assert.equal(accessCookie?.path, "/");
 });
@@ -285,6 +306,10 @@ test("clearDashboardAuthCookies expires dashboard auth cookies", () => {
 
   const accessCookie = response.cookies.get("sandbox0_access_token");
   const refreshCookie = response.cookies.get("sandbox0_refresh_token");
+  const regionalAccessCookie = response.cookies.get(
+    "sandbox0_regional_access_token",
+  );
   assert.equal(accessCookie?.maxAge, 0);
   assert.equal(refreshCookie?.maxAge, 0);
+  assert.equal(regionalAccessCookie?.maxAge, 0);
 });

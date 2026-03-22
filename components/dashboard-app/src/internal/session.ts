@@ -7,11 +7,15 @@ import type {
   DashboardTemplateSummary,
   DashboardUser,
 } from "./types";
-import { dashboardAccessTokenCookieName } from "./auth";
+import {
+  type DashboardRegionalSession,
+  dashboardAccessTokenCookieName,
+} from "./auth";
 import { createDashboardControlPlaneSDK, resolveSDKErrorMessage } from "./sdk";
 
 export interface SessionAuthInput {
   bearerToken?: string;
+  regionalSession?: DashboardRegionalSession;
 }
 
 type FetchLike = typeof fetch;
@@ -126,6 +130,45 @@ function deriveSingleClusterActiveTeam(
   };
 }
 
+function deriveGlobalActiveTeam(
+  user: DashboardUser,
+  teams: DashboardTeam[],
+  regionalSession?: DashboardRegionalSession,
+): DashboardActiveTeam | undefined {
+  const defaultTeam =
+    teams.find((team) => team.id === user.defaultTeamID) ?? teams[0];
+  if (!defaultTeam) {
+    return undefined;
+  }
+
+  const homeRegionID =
+    defaultTeam.homeRegionID ?? regionalSession?.region_id ?? null;
+  if (!homeRegionID) {
+    return undefined;
+  }
+
+  return {
+    userID: user.id,
+    teamID: defaultTeam.id,
+    homeRegionID,
+    defaultTeam: defaultTeam.id === user.defaultTeamID,
+    regionalGatewayURL: regionalSession?.regional_gateway_url ?? null,
+  };
+}
+
+function isRegionalSessionUsable(
+  activeTeam: DashboardActiveTeam | undefined,
+  regionalSession: DashboardRegionalSession | undefined,
+): boolean {
+  if (!activeTeam || !regionalSession) {
+    return false;
+  }
+  if (!regionalSession.token || !regionalSession.regional_gateway_url) {
+    return false;
+  }
+  return activeTeam.homeRegionID === regionalSession.region_id;
+}
+
 export function readBearerToken(
   authorizationHeader: string | null,
   cookies: Pick<{ get(name: string): { value: string } | undefined }, "get">,
@@ -236,37 +279,49 @@ export async function resolveDashboardSession(
       token,
       fetch: fetchImpl,
     });
-    const [userResponse, teamResponse, activeTeamResponse] = await Promise.all([
+    const [userResponse, teamResponse] = await Promise.all([
       globalSDK.users.usersMeGet(),
       globalSDK.teams.teamsGet(),
-      globalSDK.tenant.tenantActiveGet(),
     ]);
 
     const userData = userResponse.data;
-    const activeTeamData = activeTeamResponse.data;
     if (!userData) {
       throw new Error("/users/me returned an empty response");
-    }
-    if (!activeTeamData) {
-      throw new Error("/tenant/active returned an empty response");
     }
 
     const user = toUser(userData);
     const teams = toTeams(teamResponse.data?.teams);
-    const activeTeam: DashboardActiveTeam = {
-      userID: activeTeamData.userId,
-      teamID: activeTeamData.teamId,
-      teamRole: activeTeamData.teamRole,
-      homeRegionID: activeTeamData.homeRegionId,
-      defaultTeam: Boolean(activeTeamData.defaultTeam),
-      regionalGatewayURL: readRegionalGatewayURL(activeTeamData),
-    };
+    let activeTeam = deriveGlobalActiveTeam(user, teams, auth.regionalSession);
+    let regionalURL =
+      isRegionalSessionUsable(activeTeam, auth.regionalSession)
+        ? auth.regionalSession?.regional_gateway_url ?? undefined
+        : undefined;
+    let regionToken =
+      isRegionalSessionUsable(activeTeam, auth.regionalSession)
+        ? auth.regionalSession?.token ?? token
+        : token;
 
-    let regionalURL = activeTeam.regionalGatewayURL ?? undefined;
-    let regionToken = token;
-    if (regionalURL) {
+    if (!regionalURL) {
+      const activeTeamResponse = await globalSDK.tenant.tenantActiveGet();
+      const activeTeamData = activeTeamResponse.data;
+      if (!activeTeamData) {
+        throw new Error("/tenant/active returned an empty response");
+      }
+
+      activeTeam = {
+        userID: activeTeamData.userId,
+        teamID: activeTeamData.teamId,
+        teamRole: activeTeamData.teamRole,
+        homeRegionID: activeTeamData.homeRegionId,
+        defaultTeam: Boolean(activeTeamData.defaultTeam),
+        regionalGatewayURL: readRegionalGatewayURL(activeTeamData),
+      };
+      regionalURL = activeTeam.regionalGatewayURL ?? undefined;
+    }
+
+    if (regionalURL && regionToken === token) {
       const regionTokenResponse = await globalSDK.tenant.authRegionTokenPost({
-        issueRegionTokenRequest: { teamId: activeTeam.teamID },
+        issueRegionTokenRequest: { teamId: activeTeam?.teamID },
       });
       const regionTokenData = regionTokenResponse.data;
       if (!regionTokenData) {

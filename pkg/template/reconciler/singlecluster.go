@@ -27,6 +27,9 @@ type SingleClusterReconciler struct {
 	statusMu         sync.RWMutex
 }
 
+const singleClusterManagedByLabel = "sandbox0.ai/template-managed-by"
+const singleClusterManagedByValue = "template-store"
+
 // NewSingleClusterReconciler creates a new SingleClusterReconciler.
 func NewSingleClusterReconciler(
 	templateStore TemplateStore,
@@ -124,6 +127,7 @@ func (r *SingleClusterReconciler) reconcile(ctx context.Context) {
 				Labels: map[string]string{
 					"sandbox0.ai/template-scope":      tpl.Scope,
 					"sandbox0.ai/template-logical-id": tpl.TemplateID,
+					singleClusterManagedByLabel:       singleClusterManagedByValue,
 				},
 				Annotations: map[string]string{
 					"sandbox0.ai/template-team-id": tpl.TeamID,
@@ -152,7 +156,7 @@ func (r *SingleClusterReconciler) reconcile(ctx context.Context) {
 	}
 	orphansRemoved := 0
 	for _, tpl := range existing {
-		if tpl.Labels == nil || tpl.Labels["sandbox0.ai/template-logical-id"] == "" {
+		if tpl.Labels == nil || tpl.Labels[singleClusterManagedByLabel] != singleClusterManagedByValue {
 			continue
 		}
 		if !expected[tpl.Name] {

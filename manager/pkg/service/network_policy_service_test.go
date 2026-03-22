@@ -50,7 +50,7 @@ func TestBuildNetworkPolicyStateMergesNamedRulesAndBindings(t *testing.T) {
 	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
 		SandboxID: "sb-1",
 		TeamID:    "team-1",
-		TemplateSpec: &v1alpha1.TplSandboxNetworkPolicy{
+		TemplateSpec: &v1alpha1.SandboxNetworkPolicy{
 			Mode: v1alpha1.NetworkModeBlockAll,
 			Egress: &v1alpha1.NetworkEgressPolicy{
 				CredentialRules: []v1alpha1.EgressCredentialRule{
@@ -66,7 +66,7 @@ func TestBuildNetworkPolicyStateMergesNamedRulesAndBindings(t *testing.T) {
 		TemplateBindings: []v1alpha1.CredentialBinding{
 			testCredentialBinding("template-ref"),
 		},
-		RequestSpec: &v1alpha1.TplSandboxNetworkPolicy{
+		RequestSpec: &v1alpha1.SandboxNetworkPolicy{
 			Egress: &v1alpha1.NetworkEgressPolicy{
 				CredentialRules: []v1alpha1.EgressCredentialRule{
 					{
@@ -106,7 +106,7 @@ func TestBuildNetworkPolicyStateAppendsUnnamedRules(t *testing.T) {
 	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
 		SandboxID: "sb-1",
 		TeamID:    "team-1",
-		TemplateSpec: &v1alpha1.TplSandboxNetworkPolicy{
+		TemplateSpec: &v1alpha1.SandboxNetworkPolicy{
 			Mode: v1alpha1.NetworkModeBlockAll,
 			Egress: &v1alpha1.NetworkEgressPolicy{
 				CredentialRules: []v1alpha1.EgressCredentialRule{
@@ -118,7 +118,7 @@ func TestBuildNetworkPolicyStateAppendsUnnamedRules(t *testing.T) {
 			testCredentialBinding("template-ref"),
 			testCredentialBinding("request-ref"),
 		},
-		RequestSpec: &v1alpha1.TplSandboxNetworkPolicy{
+		RequestSpec: &v1alpha1.SandboxNetworkPolicy{
 			Egress: &v1alpha1.NetworkEgressPolicy{
 				CredentialRules: []v1alpha1.EgressCredentialRule{
 					{CredentialRef: "request-ref"},
@@ -140,7 +140,7 @@ func TestBuildNetworkPolicyStateMergesNamedTrafficRules(t *testing.T) {
 	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
 		SandboxID: "sb-1",
 		TeamID:    "team-1",
-		TemplateSpec: &v1alpha1.TplSandboxNetworkPolicy{
+		TemplateSpec: &v1alpha1.SandboxNetworkPolicy{
 			Egress: &v1alpha1.NetworkEgressPolicy{
 				TrafficRules: []v1alpha1.TrafficRule{{
 					Name:    "github",
@@ -149,7 +149,7 @@ func TestBuildNetworkPolicyStateMergesNamedTrafficRules(t *testing.T) {
 				}},
 			},
 		},
-		RequestSpec: &v1alpha1.TplSandboxNetworkPolicy{
+		RequestSpec: &v1alpha1.SandboxNetworkPolicy{
 			Egress: &v1alpha1.NetworkEgressPolicy{
 				TrafficRules: []v1alpha1.TrafficRule{{
 					Name:    "github",
@@ -176,7 +176,7 @@ func TestBuildNetworkPolicyStateRejectsMixedLegacyAndTrafficRules(t *testing.T) 
 	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
 		SandboxID: "sb-1",
 		TeamID:    "team-1",
-		RequestSpec: &v1alpha1.TplSandboxNetworkPolicy{
+		RequestSpec: &v1alpha1.SandboxNetworkPolicy{
 			Egress: &v1alpha1.NetworkEgressPolicy{
 				AllowedDomains: []string{"example.com"},
 				TrafficRules: []v1alpha1.TrafficRule{{
@@ -200,7 +200,7 @@ func TestBuildNetworkPolicyStateRejectsUnsupportedTrafficRuleAppProtocol(t *test
 	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
 		SandboxID: "sb-1",
 		TeamID:    "team-1",
-		RequestSpec: &v1alpha1.TplSandboxNetworkPolicy{
+		RequestSpec: &v1alpha1.SandboxNetworkPolicy{
 			Egress: &v1alpha1.NetworkEgressPolicy{
 				TrafficRules: []v1alpha1.TrafficRule{{
 					Action:       v1alpha1.TrafficRuleActionAllow,
@@ -223,7 +223,7 @@ func TestBuildNetworkPolicyStateDropsInvalidBindingReferences(t *testing.T) {
 	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
 		SandboxID: "sb-1",
 		TeamID:    "team-1",
-		RequestSpec: &v1alpha1.TplSandboxNetworkPolicy{
+		RequestSpec: &v1alpha1.SandboxNetworkPolicy{
 			Mode: v1alpha1.NetworkModeBlockAll,
 			Egress: &v1alpha1.NetworkEgressPolicy{
 				CredentialRules: []v1alpha1.EgressCredentialRule{
@@ -252,7 +252,7 @@ func TestBuildNetworkPolicyStateDropsTLSRulesWithoutTLSProjection(t *testing.T) 
 	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
 		SandboxID: "sb-1",
 		TeamID:    "team-1",
-		RequestSpec: &v1alpha1.TplSandboxNetworkPolicy{
+		RequestSpec: &v1alpha1.SandboxNetworkPolicy{
 			Mode: v1alpha1.NetworkModeBlockAll,
 			Egress: &v1alpha1.NetworkEgressPolicy{
 				CredentialRules: []v1alpha1.EgressCredentialRule{{
@@ -285,7 +285,7 @@ func TestBuildNetworkPolicyStateKeepsValidTLSRules(t *testing.T) {
 	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
 		SandboxID: "sb-1",
 		TeamID:    "team-1",
-		RequestSpec: &v1alpha1.TplSandboxNetworkPolicy{
+		RequestSpec: &v1alpha1.SandboxNetworkPolicy{
 			Mode: v1alpha1.NetworkModeBlockAll,
 			Egress: &v1alpha1.NetworkEgressPolicy{
 				CredentialRules: []v1alpha1.EgressCredentialRule{{
@@ -315,7 +315,7 @@ func TestBuildNetworkPolicyStateDropsSOCKS5RulesWithoutUsernamePasswordProjectio
 	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
 		SandboxID: "sb-1",
 		TeamID:    "team-1",
-		RequestSpec: &v1alpha1.TplSandboxNetworkPolicy{
+		RequestSpec: &v1alpha1.SandboxNetworkPolicy{
 			Mode: v1alpha1.NetworkModeBlockAll,
 			Egress: &v1alpha1.NetworkEgressPolicy{
 				CredentialRules: []v1alpha1.EgressCredentialRule{{
@@ -346,7 +346,7 @@ func TestBuildNetworkPolicyStateKeepsValidMQTTRules(t *testing.T) {
 	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
 		SandboxID: "sb-1",
 		TeamID:    "team-1",
-		RequestSpec: &v1alpha1.TplSandboxNetworkPolicy{
+		RequestSpec: &v1alpha1.SandboxNetworkPolicy{
 			Mode: v1alpha1.NetworkModeBlockAll,
 			Egress: &v1alpha1.NetworkEgressPolicy{
 				CredentialRules: []v1alpha1.EgressCredentialRule{{
@@ -375,7 +375,7 @@ func TestBuildNetworkPolicyStateKeepsValidRedisRules(t *testing.T) {
 	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
 		SandboxID: "sb-1",
 		TeamID:    "team-1",
-		RequestSpec: &v1alpha1.TplSandboxNetworkPolicy{
+		RequestSpec: &v1alpha1.SandboxNetworkPolicy{
 			Mode: v1alpha1.NetworkModeBlockAll,
 			Egress: &v1alpha1.NetworkEgressPolicy{
 				CredentialRules: []v1alpha1.EgressCredentialRule{{

@@ -46,10 +46,6 @@ type SandboxTemplateSpec struct {
 	// Template sandbox network policy and optional credential bindings.
 	Network *SandboxNetworkPolicy `json:"network,omitempty"`
 
-	// CredentialBindings defines template-level default sandbox credential bindings.
-	// Deprecated: prefer spec.network.credentialBindings.
-	CredentialBindings []CredentialBinding `json:"credentialBindings,omitempty"`
-
 	// Pool strategy
 	Pool PoolStrategy `json:"pool"`
 
@@ -190,14 +186,6 @@ type PoolStrategy struct {
 	MaxIdle int32 `json:"maxIdle"` // Maximum idle pods (enforced by CleanupController)
 }
 
-// TplSandboxNetworkPolicy defines network policy (template-level default).
-// allow-all permits traffic by default and applies denied* rules as subtractive filters.
-// block-all denies traffic by default and applies allowed* rules as additive exceptions.
-type TplSandboxNetworkPolicy struct {
-	Mode   NetworkPolicyMode    `json:"mode"`
-	Egress *NetworkEgressPolicy `json:"egress,omitempty"`
-}
-
 // NetworkPolicyMode defines network policy mode
 type NetworkPolicyMode string
 
@@ -271,7 +259,8 @@ type TrafficRule struct {
 	AppProtocols []TrafficRuleAppProtocol `json:"appProtocols,omitempty"`
 }
 
-// SandboxNetworkPolicy defines the sandbox-scoped network policy API shape.
+// SandboxNetworkPolicy defines the public network policy shape used by
+// templates, sandbox claim/update requests, and runtime sandbox APIs.
 type SandboxNetworkPolicy struct {
 	Mode   NetworkPolicyMode    `json:"mode"`
 	Egress *NetworkEgressPolicy `json:"egress,omitempty"`

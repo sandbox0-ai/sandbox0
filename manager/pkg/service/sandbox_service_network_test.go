@@ -158,8 +158,8 @@ func testSandboxNetworkPod() *corev1.Pod {
 	}
 }
 
-func testCredentialPolicy(ref string) *v1alpha1.TplSandboxNetworkPolicy {
-	return &v1alpha1.TplSandboxNetworkPolicy{
+func testCredentialPolicy(ref string) *v1alpha1.SandboxNetworkPolicy {
+	return &v1alpha1.SandboxNetworkPolicy{
 		Mode: v1alpha1.NetworkModeBlockAll,
 		Egress: &v1alpha1.NetworkEgressPolicy{
 			CredentialRules: []v1alpha1.EgressCredentialRule{{
@@ -278,12 +278,11 @@ func TestUpdateSandboxRollsBackBindingsWhenPodUpdateFails(t *testing.T) {
 	assert.Equal(t, "existing-ref", record.Bindings[0].Ref)
 }
 
-func TestRequestCredentialBindingsUsesNestedNetworkBindings(t *testing.T) {
+func TestRequestCredentialBindingsUsesNetworkBindings(t *testing.T) {
 	cfg := &SandboxConfig{
 		Network: &v1alpha1.SandboxNetworkPolicy{
 			CredentialBindings: testCredentialBindings("nested-ref", "Bearer nested"),
 		},
-		CredentialBindings: testCredentialBindings("legacy-ref", "Bearer legacy"),
 	}
 
 	bindings := requestCredentialBindings(cfg)
@@ -292,12 +291,9 @@ func TestRequestCredentialBindingsUsesNestedNetworkBindings(t *testing.T) {
 }
 
 func TestTemplateCredentialBindingsUsesNestedNetworkBindings(t *testing.T) {
-	bindings := templateCredentialBindings(
-		&v1alpha1.SandboxNetworkPolicy{
-			CredentialBindings: testCredentialBindings("nested-ref", "Bearer nested"),
-		},
-		testCredentialBindings("legacy-ref", "Bearer legacy"),
-	)
+	bindings := templateCredentialBindings(&v1alpha1.SandboxNetworkPolicy{
+		CredentialBindings: testCredentialBindings("nested-ref", "Bearer nested"),
+	})
 
 	require.Len(t, bindings, 1)
 	assert.Equal(t, "nested-ref", bindings[0].Ref)
@@ -337,7 +333,6 @@ func TestUpdateNetworkPolicyStoresBindingsOutsidePodConfig(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(storedPod.Annotations[controller.AnnotationConfig]), &cfg))
 	require.NotNil(t, cfg.Network)
 	assert.Nil(t, cfg.Network.CredentialBindings)
-	assert.Nil(t, cfg.CredentialBindings)
 
 	effective, err := svc.GetNetworkPolicy(ctx, pod.Name)
 	require.NoError(t, err)

@@ -3124,12 +3124,6 @@ components:
           format: int32
         network:
           $ref: "#/components/schemas/SandboxNetworkPolicy"
-        credential_bindings:
-          type: array
-          deprecated: true
-          description: Legacy sibling field. Prefer `network.credentialBindings`.
-          items:
-            $ref: "#/components/schemas/CredentialBinding"
         webhook:
           $ref: "#/components/schemas/WebhookConfig"
         auto_resume:
@@ -3287,12 +3281,6 @@ components:
           format: int32
         network:
           $ref: "#/components/schemas/SandboxNetworkPolicy"
-        credential_bindings:
-          type: array
-          deprecated: true
-          description: Legacy sibling field. Prefer `network.credentialBindings`.
-          items:
-            $ref: "#/components/schemas/CredentialBinding"
         auto_resume:
           type: boolean
           default: true
@@ -4301,12 +4289,6 @@ components:
           $ref: "#/components/schemas/PodSpecOverride"
         network:
           $ref: "#/components/schemas/SandboxNetworkPolicy"
-        credentialBindings:
-          type: array
-          deprecated: true
-          description: Legacy sibling field. Prefer `network.credentialBindings`.
-          items:
-            $ref: "#/components/schemas/CredentialBinding"
         pool:
           $ref: "#/components/schemas/PoolStrategy"
         lifecycle:
@@ -4520,19 +4502,6 @@ components:
           type: integer
           format: int32
       required: [minIdle, maxIdle]
-    TplSandboxNetworkPolicy:
-      type: object
-      description: |
-        Template-level outbound network policy.
-        `allow-all` permits traffic by default and applies `denied*` rules as subtractive filters.
-        `block-all` denies traffic by default and applies `allowed*` rules as additive exceptions.
-      properties:
-        mode:
-          type: string
-          enum: [allow-all, block-all]
-        egress:
-          $ref: "#/components/schemas/NetworkEgressPolicy"
-      required: [mode]
     SandboxNetworkPolicy:
       type: object
       properties:
@@ -4651,7 +4620,7 @@ components:
           type: string
           description: |
             Stable binding ref to resolve when this traffic rule matches.
-            The referenced binding must be present in `credential_bindings`.
+            The referenced binding must be present in `network.credentialBindings`.
         rollout:
           $ref: "#/components/schemas/EgressAuthRolloutMode"
         protocol:

@@ -26,10 +26,10 @@ func NewNetworkPolicyService(logger *zap.Logger) *NetworkPolicyService {
 type BuildNetworkPolicyRequest struct {
 	SandboxID        string
 	TeamID           string
-	TemplateSpec     *v1alpha1.TplSandboxNetworkPolicy // From template.
-	RequestSpec      *v1alpha1.TplSandboxNetworkPolicy // From claim/update request.
-	TemplateBindings []v1alpha1.CredentialBinding      // From template.
-	RequestBindings  []v1alpha1.CredentialBinding      // From claim/update request.
+	TemplateSpec     *v1alpha1.SandboxNetworkPolicy // From template.
+	RequestSpec      *v1alpha1.SandboxNetworkPolicy // From claim/update request.
+	TemplateBindings []v1alpha1.CredentialBinding   // From template.
+	RequestBindings  []v1alpha1.CredentialBinding   // From claim/update request.
 }
 
 // BuildNetworkPolicyResult contains the split effective runtime state.
@@ -53,7 +53,7 @@ func (s *NetworkPolicyService) BuildNetworkPolicySpec(req *BuildNetworkPolicyReq
 func (s *NetworkPolicyService) BuildNetworkPolicyState(req *BuildNetworkPolicyRequest) *BuildNetworkPolicyResult {
 	mergedSpec := s.mergeNetworkPolicies(req.TemplateSpec, req.RequestSpec)
 	if mergedSpec == nil {
-		mergedSpec = &v1alpha1.TplSandboxNetworkPolicy{Mode: v1alpha1.NetworkModeAllowAll}
+		mergedSpec = &v1alpha1.SandboxNetworkPolicy{Mode: v1alpha1.NetworkModeAllowAll}
 	}
 	mergedBindings := mergeCredentialBindings(req.TemplateBindings, req.RequestBindings)
 	if err := validateTrafficRuleConfig(mergedSpec); err != nil {
@@ -87,11 +87,11 @@ func (s *NetworkPolicyService) BuildNetworkPolicyState(req *BuildNetworkPolicyRe
 // mergeNetworkPolicies merges template and request network policies.
 // Request values override template values.
 func (s *NetworkPolicyService) mergeNetworkPolicies(
-	template *v1alpha1.TplSandboxNetworkPolicy,
-	request *v1alpha1.TplSandboxNetworkPolicy,
-) *v1alpha1.TplSandboxNetworkPolicy {
+	template *v1alpha1.SandboxNetworkPolicy,
+	request *v1alpha1.SandboxNetworkPolicy,
+) *v1alpha1.SandboxNetworkPolicy {
 	if template == nil && request == nil {
-		return &v1alpha1.TplSandboxNetworkPolicy{
+		return &v1alpha1.SandboxNetworkPolicy{
 			Mode: v1alpha1.NetworkModeAllowAll,
 		}
 	}
@@ -219,7 +219,7 @@ func mergeCredentialBindings(base, override []v1alpha1.CredentialBinding) []v1al
 	return out
 }
 
-func validateTrafficRuleConfig(policy *v1alpha1.TplSandboxNetworkPolicy) error {
+func validateTrafficRuleConfig(policy *v1alpha1.SandboxNetworkPolicy) error {
 	if policy == nil {
 		return nil
 	}
@@ -254,7 +254,7 @@ func validateTrafficRuleConfig(policy *v1alpha1.TplSandboxNetworkPolicy) error {
 	return nil
 }
 
-func validateNetworkCredentialConfig(policy *v1alpha1.TplSandboxNetworkPolicy, bindings []v1alpha1.CredentialBinding) error {
+func validateNetworkCredentialConfig(policy *v1alpha1.SandboxNetworkPolicy, bindings []v1alpha1.CredentialBinding) error {
 	if policy == nil {
 		return nil
 	}

@@ -687,7 +687,7 @@ type EgressAuthRolloutMode string
 // EgressCredentialRule defines model for EgressCredentialRule.
 type EgressCredentialRule struct {
 	// CredentialRef Stable binding ref to resolve when this traffic rule matches.
-	// The referenced binding must be present in `credential_bindings`.
+	// The referenced binding must be present in `network.credentialBindings`.
 	CredentialRef string `json:"credentialRef"`
 
 	// Domains Domain match list for the rule.
@@ -1157,17 +1157,13 @@ type Sandbox struct {
 type SandboxConfig struct {
 	// AutoResume Sandbox-level resume gate for paused sandboxes. When false, any inbound request
 	// (API or public exposure) must not auto resume the sandbox.
-	AutoResume *bool `json:"auto_resume,omitempty"`
-
-	// CredentialBindings Legacy sibling field. Prefer `network.credentialBindings`.
-	// Deprecated:
-	CredentialBindings *[]CredentialBinding  `json:"credential_bindings,omitempty"`
-	EnvVars            *map[string]string    `json:"env_vars,omitempty"`
-	ExposedPorts       *[]ExposedPortConfig  `json:"exposed_ports,omitempty"`
-	HardTtl            *int32                `json:"hard_ttl,omitempty"`
-	Network            *SandboxNetworkPolicy `json:"network,omitempty"`
-	Ttl                *int32                `json:"ttl,omitempty"`
-	Webhook            *WebhookConfig        `json:"webhook,omitempty"`
+	AutoResume   *bool                 `json:"auto_resume,omitempty"`
+	EnvVars      *map[string]string    `json:"env_vars,omitempty"`
+	ExposedPorts *[]ExposedPortConfig  `json:"exposed_ports,omitempty"`
+	HardTtl      *int32                `json:"hard_ttl,omitempty"`
+	Network      *SandboxNetworkPolicy `json:"network,omitempty"`
+	Ttl          *int32                `json:"ttl,omitempty"`
+	Webhook      *WebhookConfig        `json:"webhook,omitempty"`
 }
 
 // SandboxNetworkPolicy defines model for SandboxNetworkPolicy.
@@ -1252,24 +1248,20 @@ type SandboxTemplateCondition struct {
 
 // SandboxTemplateSpec defines model for SandboxTemplateSpec.
 type SandboxTemplateSpec struct {
-	AllowedTeams *[]string `json:"allowedTeams,omitempty"`
-	ClusterId    *string   `json:"clusterId,omitempty"`
-
-	// CredentialBindings Legacy sibling field. Prefer `network.credentialBindings`.
-	// Deprecated:
-	CredentialBindings *[]CredentialBinding  `json:"credentialBindings,omitempty"`
-	Description        *string               `json:"description,omitempty"`
-	DisplayName        *string               `json:"displayName,omitempty"`
-	EnvVars            *map[string]string    `json:"envVars,omitempty"`
-	Lifecycle          *LifecyclePolicy      `json:"lifecycle,omitempty"`
-	MainContainer      *ContainerSpec        `json:"mainContainer,omitempty"`
-	Network            *SandboxNetworkPolicy `json:"network,omitempty"`
-	Pod                *PodSpecOverride      `json:"pod,omitempty"`
-	Pool               *PoolStrategy         `json:"pool,omitempty"`
-	Public             *bool                 `json:"public,omitempty"`
-	RuntimeClassName   *string               `json:"runtimeClassName,omitempty"`
-	Sidecars           *[]ContainerSpec      `json:"sidecars,omitempty"`
-	Tags               *[]string             `json:"tags,omitempty"`
+	AllowedTeams     *[]string             `json:"allowedTeams,omitempty"`
+	ClusterId        *string               `json:"clusterId,omitempty"`
+	Description      *string               `json:"description,omitempty"`
+	DisplayName      *string               `json:"displayName,omitempty"`
+	EnvVars          *map[string]string    `json:"envVars,omitempty"`
+	Lifecycle        *LifecyclePolicy      `json:"lifecycle,omitempty"`
+	MainContainer    *ContainerSpec        `json:"mainContainer,omitempty"`
+	Network          *SandboxNetworkPolicy `json:"network,omitempty"`
+	Pod              *PodSpecOverride      `json:"pod,omitempty"`
+	Pool             *PoolStrategy         `json:"pool,omitempty"`
+	Public           *bool                 `json:"public,omitempty"`
+	RuntimeClassName *string               `json:"runtimeClassName,omitempty"`
+	Sidecars         *[]ContainerSpec      `json:"sidecars,omitempty"`
+	Tags             *[]string             `json:"tags,omitempty"`
 }
 
 // SandboxTemplateStatus defines model for SandboxTemplateStatus.
@@ -1285,15 +1277,11 @@ type SandboxTemplateStatus struct {
 type SandboxUpdateConfig struct {
 	// AutoResume Sandbox-level resume gate for paused sandboxes. When false, any inbound request
 	// (API or public exposure) must not auto resume the sandbox.
-	AutoResume *bool `json:"auto_resume,omitempty"`
-
-	// CredentialBindings Legacy sibling field. Prefer `network.credentialBindings`.
-	// Deprecated:
-	CredentialBindings *[]CredentialBinding  `json:"credential_bindings,omitempty"`
-	ExposedPorts       *[]ExposedPortConfig  `json:"exposed_ports,omitempty"`
-	HardTtl            *int32                `json:"hard_ttl,omitempty"`
-	Network            *SandboxNetworkPolicy `json:"network,omitempty"`
-	Ttl                *int32                `json:"ttl,omitempty"`
+	AutoResume   *bool                 `json:"auto_resume,omitempty"`
+	ExposedPorts *[]ExposedPortConfig  `json:"exposed_ports,omitempty"`
+	HardTtl      *int32                `json:"hard_ttl,omitempty"`
+	Network      *SandboxNetworkPolicy `json:"network,omitempty"`
+	Ttl          *int32                `json:"ttl,omitempty"`
 }
 
 // SandboxUpdateRequest defines model for SandboxUpdateRequest.

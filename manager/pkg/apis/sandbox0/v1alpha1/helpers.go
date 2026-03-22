@@ -444,8 +444,8 @@ func convertCapabilities(caps []string) []corev1.Capability {
 	return result
 }
 
-// BuildEgressSpec builds NetworkEgressPolicy from SandboxNetworkPolicy
-func BuildEgressSpec(policy *TplSandboxNetworkPolicy) *NetworkEgressPolicy {
+// BuildEgressSpec builds a netd-consumed egress spec from SandboxNetworkPolicy.
+func BuildEgressSpec(policy *SandboxNetworkPolicy) *NetworkEgressPolicy {
 	if policy == nil || policy.Egress == nil {
 		return nil
 	}

@@ -732,6 +732,7 @@ paths:
     put:
       tags: [teams]
       summary: Update a team
+      description: Team home region is immutable after creation and cannot be changed through this endpoint.
       security:
         - bearerAuth: []
       parameters:
@@ -763,6 +764,12 @@ paths:
                 $ref: "#/components/schemas/ErrorEnvelope"
         "404":
           description: Team not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "409":
+          description: Team update conflicts with an immutable field or existing slug
           content:
             application/json:
               schema:
@@ -2930,9 +2937,6 @@ components:
           type: string
         slug:
           type: string
-        home_region_id:
-          type: string
-          nullable: true
     AddTeamMemberRequest:
       type: object
       properties:

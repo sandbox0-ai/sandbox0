@@ -1984,9 +1984,8 @@ type UpdateTeamMemberRequestRole string
 
 // UpdateTeamRequest defines model for UpdateTeamRequest.
 type UpdateTeamRequest struct {
-	HomeRegionId *string `json:"home_region_id"`
-	Name         *string `json:"name,omitempty"`
-	Slug         *string `json:"slug,omitempty"`
+	Name *string `json:"name,omitempty"`
+	Slug *string `json:"slug,omitempty"`
 }
 
 // UpdateUserRequest defines model for UpdateUserRequest.

@@ -67,6 +67,17 @@ paths:
             text/plain:
               schema:
                 type: string
+  /metadata:
+    get:
+      tags: [health]
+      summary: Gateway metadata
+      responses:
+        "200":
+          description: Gateway metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessGatewayMetadataResponse"
   /auth/providers:
     get:
       tags: [auth]
@@ -2489,6 +2500,22 @@ components:
                 timestamp:
                   type: integer
                   format: int64
+    GatewayMetadata:
+      type: object
+      properties:
+        gateway_mode:
+          type: string
+          enum: [direct, global]
+        service:
+          type: string
+      required: [gateway_mode, service]
+    SuccessGatewayMetadataResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/GatewayMetadata"
     SuccessMessageResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"

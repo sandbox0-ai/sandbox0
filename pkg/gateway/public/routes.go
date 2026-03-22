@@ -9,20 +9,23 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/http/handlers"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/tenantdir"
 	"github.com/sandbox0-ai/sandbox0/pkg/licensing"
 	licensinghttp "github.com/sandbox0-ai/sandbox0/pkg/licensing/http"
 	"go.uber.org/zap"
 )
 
 type Deps struct {
-	IdentityRepo    *identity.Repository
-	APIKeyRepo      *apikey.Repository
-	AuthMiddleware  *middleware.AuthMiddleware
-	BuiltinProvider *builtin.Provider
-	OIDCManager     *oidc.Manager
-	Entitlements    licensing.Entitlements
-	JWTIssuer       *authn.Issuer
-	Logger          *zap.Logger
+	IdentityRepo            *identity.Repository
+	APIKeyRepo              *apikey.Repository
+	AuthMiddleware          *middleware.AuthMiddleware
+	BuiltinProvider         *builtin.Provider
+	OIDCManager             *oidc.Manager
+	Entitlements            licensing.Entitlements
+	JWTIssuer               *authn.Issuer
+	RegionRepo              *tenantdir.Repository
+	RequireCreateHomeRegion bool
+	Logger                  *zap.Logger
 }
 
 // RegisterRoutes mounts the full self-hosted public surface.
@@ -41,7 +44,11 @@ func RegisterIdentityRoutes(router gin.IRouter, deps Deps) {
 		deps.Logger,
 	)
 	userHandler := handlers.NewUserHandler(deps.IdentityRepo, deps.Logger)
-	teamHandler := handlers.NewTeamHandler(deps.IdentityRepo, deps.Logger)
+	teamOpts := make([]handlers.TeamHandlerOption, 0, 1)
+	if deps.RequireCreateHomeRegion {
+		teamOpts = append(teamOpts, handlers.WithCreateHomeRegionRequired(deps.RegionRepo))
+	}
+	teamHandler := handlers.NewTeamHandler(deps.IdentityRepo, deps.Logger, teamOpts...)
 
 	// ===== Public Auth Routes (no authentication required) =====
 	auth := router.Group("/auth")

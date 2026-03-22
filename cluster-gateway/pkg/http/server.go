@@ -298,6 +298,7 @@ func (s *Server) setupRoutes() {
 	// Health check endpoints (no auth required)
 	s.router.GET("/healthz", s.healthCheck)
 	s.router.GET("/readyz", s.readinessCheck)
+	s.router.GET("/metadata", gatewayhandlers.GatewayMetadata("cluster-gateway", gatewayhandlers.GatewayModeDirect))
 
 	// Metrics endpoint
 	s.router.GET("/metrics", gin.WrapH(promhttp.Handler()))

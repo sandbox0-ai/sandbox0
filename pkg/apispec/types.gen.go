@@ -86,6 +86,12 @@ const (
 	Symlink FileInfoType = "symlink"
 )
 
+// Defines values for GatewayMetadataGatewayMode.
+const (
+	Direct GatewayMetadataGatewayMode = "direct"
+	Global GatewayMetadataGatewayMode = "global"
+)
+
 // Defines values for ProcessType.
 const (
 	Cmd  ProcessType = "cmd"
@@ -195,6 +201,11 @@ const (
 // Defines values for SuccessFileStatResponseSuccess.
 const (
 	SuccessFileStatResponseSuccessTrue SuccessFileStatResponseSuccess = true
+)
+
+// Defines values for SuccessGatewayMetadataResponseSuccess.
+const (
+	SuccessGatewayMetadataResponseSuccessTrue SuccessGatewayMetadataResponseSuccess = true
 )
 
 // Defines values for SuccessHealthResponseSuccess.
@@ -364,7 +375,7 @@ const (
 
 // Defines values for SuccessWrittenResponseSuccess.
 const (
-	True SuccessWrittenResponseSuccess = true
+	SuccessWrittenResponseSuccessTrue SuccessWrittenResponseSuccess = true
 )
 
 // Defines values for TrafficRuleAction.
@@ -782,6 +793,15 @@ type ForkVolumeRequest struct {
 	Prefetch   *int              `json:"prefetch,omitempty"`
 	Writeback  *bool             `json:"writeback,omitempty"`
 }
+
+// GatewayMetadata defines model for GatewayMetadata.
+type GatewayMetadata struct {
+	GatewayMode GatewayMetadataGatewayMode `json:"gateway_mode"`
+	Service     string                     `json:"service"`
+}
+
+// GatewayMetadataGatewayMode defines model for GatewayMetadata.GatewayMode.
+type GatewayMetadataGatewayMode string
 
 // HTTPHeadersProjection defines model for HTTPHeadersProjection.
 type HTTPHeadersProjection struct {
@@ -1519,6 +1539,15 @@ type SuccessFileStatResponse struct {
 
 // SuccessFileStatResponseSuccess defines model for SuccessFileStatResponse.Success.
 type SuccessFileStatResponseSuccess bool
+
+// SuccessGatewayMetadataResponse defines model for SuccessGatewayMetadataResponse.
+type SuccessGatewayMetadataResponse struct {
+	Data    *GatewayMetadata                      `json:"data,omitempty"`
+	Success SuccessGatewayMetadataResponseSuccess `json:"success"`
+}
+
+// SuccessGatewayMetadataResponseSuccess defines model for SuccessGatewayMetadataResponse.Success.
+type SuccessGatewayMetadataResponseSuccess bool
 
 // SuccessHealthResponse defines model for SuccessHealthResponse.
 type SuccessHealthResponse struct {

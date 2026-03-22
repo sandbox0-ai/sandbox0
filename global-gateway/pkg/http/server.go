@@ -128,15 +128,18 @@ func (s *Server) setupRoutes() {
 	s.router.GET("/healthz", s.healthCheck)
 	s.router.GET("/readyz", s.readinessCheck)
 	s.router.GET("/metrics", gin.WrapH(promhttp.Handler()))
+	s.router.GET("/metadata", handlers.GatewayMetadata("global-gateway", handlers.GatewayModeGlobal))
 
 	public.RegisterIdentityRoutes(s.router, public.Deps{
-		IdentityRepo:    s.identityRepo,
-		AuthMiddleware:  s.authMiddleware,
-		BuiltinProvider: s.builtinProvider,
-		OIDCManager:     s.oidcManager,
-		Entitlements:    s.entitlements,
-		JWTIssuer:       s.jwtIssuer,
-		Logger:          s.logger,
+		IdentityRepo:            s.identityRepo,
+		AuthMiddleware:          s.authMiddleware,
+		BuiltinProvider:         s.builtinProvider,
+		OIDCManager:             s.oidcManager,
+		Entitlements:            s.entitlements,
+		JWTIssuer:               s.jwtIssuer,
+		RegionRepo:              s.regionRepo,
+		RequireCreateHomeRegion: true,
+		Logger:                  s.logger,
 	})
 
 	tenantHandler := handlers.NewTenantHandler(s.tenantResolver, s.jwtIssuer, s.cfg.RegionTokenTTL.Duration, s.logger)

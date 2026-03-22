@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -9,21 +10,58 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/tenantdir"
 	"go.uber.org/zap"
 )
 
-// TeamHandler handles team endpoints
-type TeamHandler struct {
-	repo   *identity.Repository
-	logger *zap.Logger
+type teamRepository interface {
+	GetTeamsByUserID(ctx context.Context, userID string) ([]*identity.Team, error)
+	CreateTeam(ctx context.Context, team *identity.Team) error
+	GetTeamMember(ctx context.Context, teamID, userID string) (*identity.TeamMember, error)
+	GetTeamByID(ctx context.Context, id string) (*identity.Team, error)
+	UpdateTeam(ctx context.Context, team *identity.Team) error
+	DeleteTeam(ctx context.Context, id string) error
+	GetTeamMembers(ctx context.Context, teamID string) ([]*identity.TeamMemberWithUser, error)
+	GetUserByEmail(ctx context.Context, email string) (*identity.User, error)
+	AddTeamMember(ctx context.Context, member *identity.TeamMember) error
+	UpdateTeamMemberRole(ctx context.Context, teamID, userID, role string) error
+	RemoveTeamMember(ctx context.Context, teamID, userID string) error
 }
 
-// NewTeamHandler creates a new team handler
-func NewTeamHandler(repo *identity.Repository, logger *zap.Logger) *TeamHandler {
-	return &TeamHandler{
+// TeamRegionLookup resolves region directory entries for team validation.
+type TeamRegionLookup interface {
+	GetRegion(ctx context.Context, regionID string) (*tenantdir.Region, error)
+}
+
+// TeamHandler handles team endpoints
+type TeamHandler struct {
+	repo                      teamRepository
+	logger                    *zap.Logger
+	requireHomeRegionOnCreate bool
+	regionLookup              TeamRegionLookup
+}
+
+// TeamHandlerOption configures TeamHandler behavior.
+type TeamHandlerOption func(*TeamHandler)
+
+// WithCreateHomeRegionRequired requires create requests to include a valid, routable home region.
+func WithCreateHomeRegionRequired(regionLookup TeamRegionLookup) TeamHandlerOption {
+	return func(h *TeamHandler) {
+		h.requireHomeRegionOnCreate = true
+		h.regionLookup = regionLookup
+	}
+}
+
+// NewTeamHandler creates a new team handler.
+func NewTeamHandler(repo teamRepository, logger *zap.Logger, opts ...TeamHandlerOption) *TeamHandler {
+	handler := &TeamHandler{
 		repo:   repo,
 		logger: logger,
 	}
+	for _, opt := range opts {
+		opt(handler)
+	}
+	return handler
 }
 
 // ListTeams returns all teams the current user belongs to
@@ -65,11 +103,39 @@ func (h *TeamHandler) CreateTeam(c *gin.Context) {
 		return
 	}
 
+	homeRegionID := normalizeOptionalString(req.HomeRegionID)
+	if h.requireHomeRegionOnCreate {
+		if homeRegionID == nil {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "home_region_id is required")
+			return
+		}
+		if h.regionLookup == nil {
+			h.logger.Error("Missing home region lookup for required create validation")
+			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to resolve home region")
+			return
+		}
+
+		region, err := h.regionLookup.GetRegion(c.Request.Context(), *homeRegionID)
+		if err != nil {
+			if errors.Is(err, tenantdir.ErrRegionNotFound) {
+				spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "home region not found")
+				return
+			}
+			h.logger.Error("Failed to resolve home region", zap.Error(err))
+			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to resolve home region")
+			return
+		}
+		if !region.Enabled || strings.TrimSpace(region.RegionalGatewayURL) == "" {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "home region is not routable")
+			return
+		}
+	}
+
 	team := &identity.Team{
 		Name:         req.Name,
 		Slug:         req.Slug,
 		OwnerID:      &authCtx.UserID,
-		HomeRegionID: normalizeOptionalString(req.HomeRegionID),
+		HomeRegionID: homeRegionID,
 	}
 
 	if err := h.repo.CreateTeam(c.Request.Context(), team); err != nil {

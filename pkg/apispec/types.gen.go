@@ -454,9 +454,11 @@ type Affinity struct {
 
 // AuthProvider defines model for AuthProvider.
 type AuthProvider struct {
-	Id   string `json:"id"`
-	Name string `json:"name"`
-	Type string `json:"type"`
+	// ExternalAuthPortalUrl When set, browser login for this provider should redirect to this external URL instead of initiating the OIDC flow directly. Used for deployments that host their own authorization portal.
+	ExternalAuthPortalUrl *string `json:"external_auth_portal_url,omitempty"`
+	Id                    string  `json:"id"`
+	Name                  string  `json:"name"`
+	Type                  string  `json:"type"`
 }
 
 // CachePolicySpec defines model for CachePolicySpec.

@@ -14,6 +14,7 @@ Key features of Sandbox0:
 - Hot Sandbox Pool: Pre-creates idle Pods for millisecond-level startup times.
 - Persistent Storage: Persistent Volumes based on JuiceFS, supporting snapshot/restore/fork.
 - Network Control: netd implements node-level L4/L7 policy enforcement.
+- Egress Auth: outbound credentials can be resolved and injected on the egress path, so raw secret material does not need to live inside the sandbox process.
 - Process Management: procd acts as the sandbox's PID=1, supporting REPL processes requiring session persistence (e.g., bash, python, node, redis-cli) and one-time Cmd processes.
 - Self-hosting Friendly: Complete private deployment solution.
 - Modular Installation: From a minimal mode with only 2 services to a single-cluster full mode, and multi-cluster horizontal scaling.
@@ -28,6 +29,7 @@ It can serve as an E2B alternative, suitable for general agents, coding agents, 
 - Persistent volumes decoupled from sandbox lifetime through `storage-proxy`, so agent workspaces, caches, checkpoints, and generated artifacts can outlive any single pod.
 - Snapshot, restore, and fork-oriented volume workflows built on JuiceFS plus object storage and PostgreSQL metadata, which is exactly what long-running agent systems need for recovery and reuse.
 - Node-level network control through `netd`, which watches sandbox policy, transparently redirects traffic, and applies L4/L7 enforcement close to the workload.
+- Egress auth that resolves credential bindings outside the sandbox and injects outbound auth at the network edge, which is a safer fit for untrusted agent code than placing raw API keys or client certificates in the sandbox environment.
 - Runtime-agnostic sandboxing via template `runtimeClassName`, so the same system can run on a standard Kubernetes runtime in development and move to stronger isolation such as gVisor or Kata in production.
 - A deployment model that scales from a simple single-cluster setup to multi-cluster regional routing with `regional-gateway` and `scheduler`.
 - Operator-first lifecycle management, so installation, reconciliation, and upgrades follow a repeatable Kubernetes-native path instead of bespoke scripts.
@@ -65,6 +67,8 @@ flowchart TD
 ```
 
 Most users start with a single-cluster deployment and only move to multi-cluster when they need regional scale-out. For deeper architecture and deployment details, see <https://sandbox0.ai/docs/self-hosted>.
+
+In multi-region deployments backed by `global-gateway`, operators can set `default_home_region_id` in the global-gateway config so newly created teams inherit a routable home region even when the create request omits `home_region_id`.
 
 ## Claim A Sandbox
 

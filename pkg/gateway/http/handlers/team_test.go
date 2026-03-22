@@ -73,11 +73,13 @@ func (s *stubTeamRepository) RemoveTeamMember(context.Context, string, string) e
 }
 
 type stubTeamRegionLookup struct {
-	region *tenantdir.Region
-	err    error
+	region       *tenantdir.Region
+	err          error
+	requestedIDs []string
 }
 
-func (s *stubTeamRegionLookup) GetRegion(context.Context, string) (*tenantdir.Region, error) {
+func (s *stubTeamRegionLookup) GetRegion(_ context.Context, regionID string) (*tenantdir.Region, error) {
+	s.requestedIDs = append(s.requestedIDs, regionID)
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -203,6 +205,43 @@ func TestTeamHandlerCreateTeamAllowsMissingHomeRegionWithoutGlobalRequirement(t 
 	}
 	if repo.addedTeamMember == nil || repo.addedTeamMember.TeamID != "team-1" {
 		t.Fatalf("expected creator to be added as team member, got %#v", repo.addedTeamMember)
+	}
+}
+
+func TestTeamHandlerCreateTeamUsesDefaultHomeRegionInGlobalMode(t *testing.T) {
+	t.Setenv("GIN_MODE", "release")
+	gin.SetMode(gin.ReleaseMode)
+
+	repo := &stubTeamRepository{}
+	lookup := &stubTeamRegionLookup{
+		region: &tenantdir.Region{
+			ID:                 "aws/us-east-1",
+			RegionalGatewayURL: "https://use1.example.com",
+			Enabled:            true,
+		},
+	}
+	handler := NewTeamHandler(
+		repo,
+		zap.NewNop(),
+		WithCreateHomeRegionRequired(lookup),
+		WithDefaultCreateHomeRegion(lookup, " aws/us-east-1 "),
+	)
+
+	rec := performCreateTeamRequest(t, handler, map[string]any{
+		"name": "Example Team",
+	})
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	if repo.createdTeam == nil || repo.createdTeam.HomeRegionID == nil {
+		t.Fatalf("expected created team with default home region, got %#v", repo.createdTeam)
+	}
+	if *repo.createdTeam.HomeRegionID != "aws/us-east-1" {
+		t.Fatalf("home region = %q, want aws/us-east-1", *repo.createdTeam.HomeRegionID)
+	}
+	if len(lookup.requestedIDs) != 1 || lookup.requestedIDs[0] != "aws/us-east-1" {
+		t.Fatalf("lookup requested IDs = %#v, want aws/us-east-1", lookup.requestedIDs)
 	}
 }
 

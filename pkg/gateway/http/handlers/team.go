@@ -39,6 +39,7 @@ type TeamHandler struct {
 	logger                    *zap.Logger
 	requireHomeRegionOnCreate bool
 	regionLookup              TeamRegionLookup
+	defaultHomeRegionID       string
 }
 
 // TeamHandlerOption configures TeamHandler behavior.
@@ -49,6 +50,15 @@ func WithCreateHomeRegionRequired(regionLookup TeamRegionLookup) TeamHandlerOpti
 	return func(h *TeamHandler) {
 		h.requireHomeRegionOnCreate = true
 		h.regionLookup = regionLookup
+	}
+}
+
+// WithDefaultCreateHomeRegion assigns a default home region when create requests omit home_region_id.
+func WithDefaultCreateHomeRegion(regionLookup TeamRegionLookup, defaultHomeRegionID string) TeamHandlerOption {
+	return func(h *TeamHandler) {
+		h.requireHomeRegionOnCreate = true
+		h.regionLookup = regionLookup
+		h.defaultHomeRegionID = strings.TrimSpace(defaultHomeRegionID)
 	}
 }
 
@@ -104,6 +114,10 @@ func (h *TeamHandler) CreateTeam(c *gin.Context) {
 	}
 
 	homeRegionID := normalizeOptionalString(req.HomeRegionID)
+	if homeRegionID == nil && h.defaultHomeRegionID != "" {
+		defaultHomeRegionID := h.defaultHomeRegionID
+		homeRegionID = &defaultHomeRegionID
+	}
 	if h.requireHomeRegionOnCreate {
 		if homeRegionID == nil {
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "home_region_id is required")

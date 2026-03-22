@@ -14,6 +14,7 @@ func TestLoadGlobalGatewayConfigExpandsEnvAndParsesDurations(t *testing.T) {
 	t.Setenv("TEST_DATABASE_URL", "postgres://cloud:test@localhost:5432/cloud")
 	configYAML := `database_url: ${TEST_DATABASE_URL}
 region_token_ttl: 7m
+default_home_region_id: aws/us-east-1
 shutdown_timeout: 31s
 jwt_access_token_ttl: 20m
 oidc_state_cleanup_interval: 2m
@@ -32,6 +33,9 @@ oidc_state_cleanup_interval: 2m
 	}
 	if cfg.RegionTokenTTL.Duration != 7*time.Minute {
 		t.Fatalf("unexpected region token ttl %s", cfg.RegionTokenTTL.Duration)
+	}
+	if cfg.DefaultHomeRegionID != "aws/us-east-1" {
+		t.Fatalf("unexpected default home region id %q", cfg.DefaultHomeRegionID)
 	}
 	if cfg.ShutdownTimeout.Duration != 31*time.Second {
 		t.Fatalf("unexpected shutdown timeout %s", cfg.ShutdownTimeout.Duration)

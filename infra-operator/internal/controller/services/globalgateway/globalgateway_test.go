@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 )
@@ -145,6 +146,88 @@ func TestBuildConfigPopulatesDatabaseAndJWTSecret(t *testing.T) {
 		Namespace: infra.Namespace,
 	}, jwtSecret); err != nil {
 		t.Fatalf("expected jwt secret to be created: %v", err)
+	}
+}
+
+func TestBuildConfigPreservesConfiguredDefaultHomeRegionID(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeBuiltin,
+				Builtin: &infrav1alpha1.BuiltinDatabaseConfig{
+					Enabled:  true,
+					Port:     5432,
+					Username: "sandbox0",
+					Database: "sandbox0",
+					SSLMode:  "disable",
+				},
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				GlobalGateway: &infrav1alpha1.GlobalGatewayServiceConfig{
+					BaseServiceConfig: infrav1alpha1.BaseServiceConfig{
+						Enabled:  true,
+						Replicas: 1,
+					},
+					Config: &apiconfig.GlobalGatewayConfig{
+						DefaultHomeRegionID: "aws/us-east-1",
+					},
+				},
+			},
+			InitUser: &infrav1alpha1.InitUserConfig{
+				Email: "admin@example.com",
+				Name:  "Admin",
+			},
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add corev1 scheme: %v", err)
+	}
+	if err := infrav1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add infra scheme: %v", err)
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(
+			infra.DeepCopy(),
+			&corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "demo-sandbox0-database-credentials",
+					Namespace: infra.Namespace,
+				},
+				Data: map[string][]byte{
+					"username": []byte("sandbox0"),
+					"password": []byte("db-password"),
+					"database": []byte("sandbox0"),
+					"port":     []byte("5432"),
+				},
+			},
+			&corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "admin-password",
+					Namespace: infra.Namespace,
+				},
+				Data: map[string][]byte{
+					"password": []byte("admin-password"),
+				},
+			},
+		).
+		Build()
+
+	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
+	cfg, err := reconciler.buildConfig(context.Background(), infra)
+	if err != nil {
+		t.Fatalf("buildConfig returned error: %v", err)
+	}
+
+	if cfg.DefaultHomeRegionID != "aws/us-east-1" {
+		t.Fatalf("expected configured default home region id, got %q", cfg.DefaultHomeRegionID)
 	}
 }
 

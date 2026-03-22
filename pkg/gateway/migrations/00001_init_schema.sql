@@ -1,5 +1,5 @@
 -- +goose Up
--- Edge Gateway Database Schema
+-- Regional Gateway Database Schema
 -- Authentication, teams, and API keys
 
 -- Users table

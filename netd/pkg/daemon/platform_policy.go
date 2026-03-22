@@ -12,7 +12,7 @@ import (
 )
 
 var platformServiceNames = map[string]struct{}{
-	"internal-gateway": {},
+	"cluster-gateway": {},
 	"manager":          {},
 	"storage-proxy":    {},
 }

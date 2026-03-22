@@ -22,7 +22,7 @@ spec:
         name: db-credentials
         key: password
   services:
-    globalDirectory:
+    globalGateway:
       enabled: true
       replicas: 1
       service:

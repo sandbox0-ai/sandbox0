@@ -17,8 +17,8 @@ Sandbox0 follows a control plane / data plane architecture:
 
 | Layer | Components | Purpose |
 |-------|------------|---------|
-| **Control Plane** | edge-gateway, scheduler | Multi-cluster routing, tenant management, request forwarding |
-| **Data Plane** | internal-gateway, manager, storage-proxy, netd | Sandbox lifecycle, process execution, file operations, storage |
+| **Control Plane** | regional-gateway, scheduler | Multi-cluster routing, tenant management, request forwarding |
+| **Data Plane** | cluster-gateway, manager, storage-proxy, netd | Sandbox lifecycle, process execution, file operations, storage |
 
 Each provider/region (e.g., `aws/us-east-1`) has an independent data plane and control plane deployment with dedicated PostgreSQL and S3 storage.
 

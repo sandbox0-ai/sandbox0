@@ -265,7 +265,7 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		cfg.DatabaseURL = dsn
 	}
 
-	cfg.TemplateStoreEnabled = templateStoreEnabledByInternalGateway(infra)
+	cfg.TemplateStoreEnabled = templateStoreEnabledByClusterGateway(infra)
 	cfg.NetworkPolicyProvider = resolveNetworkPolicyProvider(infra)
 	cfg.SandboxPodPlacement = resolveSandboxPodPlacement(infra)
 
@@ -378,12 +378,12 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	return cfg, nil
 }
 
-// Enable template store if internal-gateway is not in multi-cluster mode.
-func templateStoreEnabledByInternalGateway(infra *infrav1alpha1.Sandbox0Infra) bool {
-	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.InternalGateway == nil {
+// Enable template store if cluster-gateway is not in multi-cluster mode.
+func templateStoreEnabledByClusterGateway(infra *infrav1alpha1.Sandbox0Infra) bool {
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.ClusterGateway == nil {
 		return false
 	}
-	cfg := infra.Spec.Services.InternalGateway.Config
+	cfg := infra.Spec.Services.ClusterGateway.Config
 	mode := ""
 	if cfg != nil {
 		mode = cfg.AuthMode

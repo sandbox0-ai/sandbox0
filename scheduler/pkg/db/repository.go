@@ -32,9 +32,9 @@ func (r *Repository) Ping(ctx context.Context) error {
 // CreateCluster creates a new cluster
 func (r *Repository) CreateCluster(ctx context.Context, cluster *Cluster) error {
 	_, err := r.pool.Exec(ctx, `
-		INSERT INTO scheduler_clusters (cluster_id, cluster_name, internal_gateway_url, weight, enabled)
+		INSERT INTO scheduler_clusters (cluster_id, cluster_name, cluster_gateway_url, weight, enabled)
 		VALUES ($1, $2, $3, $4, $5)
-	`, cluster.ClusterID, cluster.ClusterName, cluster.InternalGatewayURL, cluster.Weight, cluster.Enabled)
+	`, cluster.ClusterID, cluster.ClusterName, cluster.ClusterGatewayURL, cluster.Weight, cluster.Enabled)
 	if err != nil {
 		return fmt.Errorf("create cluster: %w", err)
 	}
@@ -45,13 +45,13 @@ func (r *Repository) CreateCluster(ctx context.Context, cluster *Cluster) error 
 func (r *Repository) GetCluster(ctx context.Context, clusterID string) (*Cluster, error) {
 	var cluster Cluster
 	err := r.pool.QueryRow(ctx, `
-		SELECT cluster_id, cluster_name, internal_gateway_url, weight, enabled, last_seen_at, created_at, updated_at
+		SELECT cluster_id, cluster_name, cluster_gateway_url, weight, enabled, last_seen_at, created_at, updated_at
 		FROM scheduler_clusters
 		WHERE cluster_id = $1
 	`, clusterID).Scan(
 		&cluster.ClusterID,
 		&cluster.ClusterName,
-		&cluster.InternalGatewayURL,
+		&cluster.ClusterGatewayURL,
 		&cluster.Weight,
 		&cluster.Enabled,
 		&cluster.LastSeenAt,
@@ -70,7 +70,7 @@ func (r *Repository) GetCluster(ctx context.Context, clusterID string) (*Cluster
 // ListClusters lists all clusters
 func (r *Repository) ListClusters(ctx context.Context) ([]*Cluster, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT cluster_id, cluster_name, internal_gateway_url, weight, enabled, last_seen_at, created_at, updated_at
+		SELECT cluster_id, cluster_name, cluster_gateway_url, weight, enabled, last_seen_at, created_at, updated_at
 		FROM scheduler_clusters
 		ORDER BY cluster_id
 	`)
@@ -85,7 +85,7 @@ func (r *Repository) ListClusters(ctx context.Context) ([]*Cluster, error) {
 		if err := rows.Scan(
 			&cluster.ClusterID,
 			&cluster.ClusterName,
-			&cluster.InternalGatewayURL,
+			&cluster.ClusterGatewayURL,
 			&cluster.Weight,
 			&cluster.Enabled,
 			&cluster.LastSeenAt,
@@ -102,7 +102,7 @@ func (r *Repository) ListClusters(ctx context.Context) ([]*Cluster, error) {
 // ListEnabledClusters lists only enabled clusters
 func (r *Repository) ListEnabledClusters(ctx context.Context) ([]*Cluster, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT cluster_id, cluster_name, internal_gateway_url, weight, enabled, last_seen_at, created_at, updated_at
+		SELECT cluster_id, cluster_name, cluster_gateway_url, weight, enabled, last_seen_at, created_at, updated_at
 		FROM scheduler_clusters
 		WHERE enabled = true
 		ORDER BY cluster_id
@@ -118,7 +118,7 @@ func (r *Repository) ListEnabledClusters(ctx context.Context) ([]*Cluster, error
 		if err := rows.Scan(
 			&cluster.ClusterID,
 			&cluster.ClusterName,
-			&cluster.InternalGatewayURL,
+			&cluster.ClusterGatewayURL,
 			&cluster.Weight,
 			&cluster.Enabled,
 			&cluster.LastSeenAt,
@@ -136,9 +136,9 @@ func (r *Repository) ListEnabledClusters(ctx context.Context) ([]*Cluster, error
 func (r *Repository) UpdateCluster(ctx context.Context, cluster *Cluster) error {
 	_, err := r.pool.Exec(ctx, `
 		UPDATE scheduler_clusters
-		SET cluster_name = $2, internal_gateway_url = $3, weight = $4, enabled = $5
+		SET cluster_name = $2, cluster_gateway_url = $3, weight = $4, enabled = $5
 		WHERE cluster_id = $1
-	`, cluster.ClusterID, cluster.ClusterName, cluster.InternalGatewayURL, cluster.Weight, cluster.Enabled)
+	`, cluster.ClusterID, cluster.ClusterName, cluster.ClusterGatewayURL, cluster.Weight, cluster.Enabled)
 	if err != nil {
 		return fmt.Errorf("update cluster: %w", err)
 	}

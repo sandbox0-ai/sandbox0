@@ -25,7 +25,7 @@ type SandboxClaimRequest struct {
 	Template string `json:"template"` // template id
 }
 
-// createSandbox routes and proxies sandbox claim to the selected internal-gateway.
+// createSandbox routes and proxies sandbox claim to the selected cluster-gateway.
 func (s *Server) createSandbox(c *gin.Context) {
 	bodyBytes, err := io.ReadAll(c.Request.Body)
 	if err != nil {
@@ -74,7 +74,7 @@ func (s *Server) createSandbox(c *gin.Context) {
 	}
 
 	token, err := s.internalAuthGen.Generate(
-		"internal-gateway",
+		"cluster-gateway",
 		claims.TeamID,
 		claims.UserID,
 		internalauth.GenerateOptions{
@@ -82,7 +82,7 @@ func (s *Server) createSandbox(c *gin.Context) {
 		},
 	)
 	if err != nil {
-		s.logger.Error("Failed to generate internal token for internal-gateway", zap.Error(err))
+		s.logger.Error("Failed to generate internal token for cluster-gateway", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "internal authentication failed")
 		return
 	}
@@ -95,9 +95,9 @@ func (s *Server) createSandbox(c *gin.Context) {
 
 	c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
-	router, err := s.getInternalGatewayProxy(selected.InternalGatewayURL)
+	router, err := s.getClusterGatewayProxy(selected.ClusterGatewayURL)
 	if err != nil {
-		s.logger.Error("Failed to get internal gateway proxy", zap.Error(err))
+		s.logger.Error("Failed to get cluster gateway proxy", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to route sandbox")
 		return
 	}
@@ -110,7 +110,7 @@ func (s *Server) createSandbox(c *gin.Context) {
 	router.ProxyToTarget(c)
 }
 
-// proxySandbox routes sandbox operations to the correct internal-gateway based on sandbox ID.
+// proxySandbox routes sandbox operations to the correct cluster-gateway based on sandbox ID.
 func (s *Server) proxySandbox(c *gin.Context) {
 	sandboxID := c.Param("id")
 	if sandboxID == "" {
@@ -147,7 +147,7 @@ func (s *Server) proxySandbox(c *gin.Context) {
 	}
 
 	token, err := s.internalAuthGen.Generate(
-		"internal-gateway",
+		"cluster-gateway",
 		claims.TeamID,
 		claims.UserID,
 		internalauth.GenerateOptions{
@@ -155,7 +155,7 @@ func (s *Server) proxySandbox(c *gin.Context) {
 		},
 	)
 	if err != nil {
-		s.logger.Error("Failed to generate internal token for internal-gateway", zap.Error(err))
+		s.logger.Error("Failed to generate internal token for cluster-gateway", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "internal authentication failed")
 		return
 	}
@@ -166,9 +166,9 @@ func (s *Server) proxySandbox(c *gin.Context) {
 		c.Request.Header.Set("X-User-ID", claims.UserID)
 	}
 
-	router, err := s.getInternalGatewayProxy(cluster.InternalGatewayURL)
+	router, err := s.getClusterGatewayProxy(cluster.ClusterGatewayURL)
 	if err != nil {
-		s.logger.Error("Failed to get internal gateway proxy", zap.Error(err))
+		s.logger.Error("Failed to get cluster gateway proxy", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to route sandbox")
 		return
 	}
@@ -358,19 +358,19 @@ func (s *Server) listSandboxes(c *gin.Context) {
 	results := make(chan clusterResult, len(clusters))
 	var wg sync.WaitGroup
 
-	igClient := client.NewInternalGatewayClient(s.internalAuthGen, s.logger, s.obsProvider)
+	clusterGatewayClient := client.NewClusterGatewayClient(s.internalAuthGen, s.logger, s.obsProvider)
 
 	for _, cluster := range clusters {
 		wg.Add(1)
-		go func(clusterID, internalGatewayURL string) {
+		go func(clusterID, clusterGatewayURL string) {
 			defer wg.Done()
-			resp, err := igClient.ListSandboxes(c.Request.Context(), internalGatewayURL, claims.TeamID, queryString)
+			resp, err := clusterGatewayClient.ListSandboxes(c.Request.Context(), clusterGatewayURL, claims.TeamID, queryString)
 			results <- clusterResult{
 				clusterID: clusterID,
 				response:  resp,
 				err:       err,
 			}
-		}(cluster.ClusterID, cluster.InternalGatewayURL)
+		}(cluster.ClusterID, cluster.ClusterGatewayURL)
 	}
 
 	go func() {

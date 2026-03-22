@@ -35,10 +35,10 @@
 //	os.WriteFile("/secrets/internal_jwt_private.key", privateKeyPEM, 0600)
 //	os.WriteFile("/config/internal_jwt_public.key", publicKeyPEM, 0644)
 //
-//	// Step 2: Generator (internal-gateway) - load private key and sign
+//	// Step 2: Generator (cluster-gateway) - load private key and sign
 //	privateKey, _ := internalauth.LoadEd25519PrivateKeyFromFile("/secrets/internal_jwt_private.key")
 //	generator := internalauth.NewGenerator(internalauth.GeneratorConfig{
-//	    Caller:     "internal-gateway",
+//	    Caller:     "cluster-gateway",
 //	    PrivateKey: privateKey,
 //	})
 //
@@ -111,13 +111,13 @@
 // The JWT token contains the following claims:
 //
 //	{
-//	  "iss": "internal-gateway",      // Issuer (caller service)
+//	  "iss": "cluster-gateway",      // Issuer (caller service)
 //	  "sub": "team-123",              // Subject (team ID)
 //	  "aud": "storage-proxy",         // Audience (target service)
 //	  "iat": 1706745600,              // Issued at
 //	  "exp": 1706745630,              // Expires at (30s default)
 //	  "jti": "unique-id",             // JWT ID (for replay detection)
-//	  "caller": "internal-gateway",   // Caller service
+//	  "caller": "cluster-gateway",   // Caller service
 //	  "target": "storage-proxy",      // Target service
 //	  "team_id": "team-123",          // Team ID
 //	  "user_id": "user-456",          // User ID (optional)
@@ -128,7 +128,7 @@
 //
 //  1. Key Management:
 //     - Private key must be stored securely (environment variables, K8s secrets, Vault)
-//     - Private key should only be on trusted services (internal-gateway)
+//     - Private key should only be on trusted services (cluster-gateway)
 //     - Public key can be embedded in untrusted service images or mounted as config
 //     - Rotate keys regularly (recommend 90 days)
 //     - Never commit keys to code or expose them in logs
@@ -161,7 +161,7 @@
 //
 // Common service names for use as Caller/Target:
 //
-//   - "internal-gateway"  - API gateway and router
+//   - "cluster-gateway"  - API gateway and router
 //   - "manager"           - Template and sandbox management
 //   - "procd"             - Sandbox process manager (untrusted, uses public key only)
 //   - "storage-proxy"     - Storage and volume management

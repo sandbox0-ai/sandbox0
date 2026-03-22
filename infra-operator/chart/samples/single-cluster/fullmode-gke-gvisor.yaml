@@ -61,7 +61,7 @@ spec:
         value: gvisor
         effect: NoSchedule
   services:
-    internalGateway:
+    clusterGateway:
       enabled: true
       replicas: 1
       service:

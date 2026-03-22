@@ -16,7 +16,7 @@
 //
 //	// Generate a token
 //	generator := internalauth.NewGenerator(internalauth.GeneratorConfig{
-//	    Caller:     "internal-gateway",
+//	    Caller:     "cluster-gateway",
 //	    PrivateKey: privateKey,
 //	})
 //	token, err := generator.Generate("storage-proxy", "team-123", "user-456", internalauth.GenerateOptions{})

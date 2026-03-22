@@ -37,7 +37,7 @@ nodes:
       extraArgs:
         enable-aggregator-routing: "true"
   extraPortMappings:
-  # internal-gateway HTTP port
+  # cluster-gateway HTTP port
   - containerPort: 30080
     hostPort: 30080
   # registry port for template image push
@@ -129,7 +129,7 @@ Manual release archives are available from <DocLink href="https://github.com/san
 
 For the local `kind` setup above, the API endpoint is `http://localhost:30080`.
 
-That is because the `kind` config maps host port `30080`, and the sample `Sandbox0Infra` exposes `internal-gateway` on the same NodePort.
+That is because the `kind` config maps host port `30080`, and the sample `Sandbox0Infra` exposes `cluster-gateway` on the same NodePort.
 
 Export the base URL, log in with the initial admin account, then create an API token:
 
@@ -155,7 +155,7 @@ Recommended path:
 4. Add a GKE Sandbox (`gVisor`) node pool for sandbox workloads.
 5. Install `infra-operator`.
 6. Apply the GCP `gVisor` sample.
-7. Expose `internal-gateway` through a `LoadBalancer`.
+7. Expose `cluster-gateway` through a `LoadBalancer`.
 8. Verify the deployment by logging in with `s0` and claiming a sandbox.
 
 ### 1) Pick a Supported GKE Version
@@ -195,7 +195,7 @@ gcloud container clusters get-credentials sandbox0-gke-gvisor --region us-east1
 kubectl get nodes -o wide
 ```
 
-Keep a regular node pool for core system services. In the current GKE `gVisor` sample, components such as `internal-gateway`, `manager`, `storage-proxy`, PostgreSQL, and the builtin registry run on the regular pool, while sandbox workloads run on the `gVisor` pool.
+Keep a regular node pool for core system services. In the current GKE `gVisor` sample, components such as `cluster-gateway`, `manager`, `storage-proxy`, PostgreSQL, and the builtin registry run on the regular pool, while sandbox workloads run on the `gVisor` pool.
 
 ### 3) Add a `gVisor` Node Pool
 
@@ -242,13 +242,13 @@ kubectl get crd sandbox0infras.infra.sandbox0.ai
 
 ### 5) Apply the GCP `gVisor` Sample
 
-Use the official `gVisor` sample, then switch `internal-gateway` to `LoadBalancer`:
+Use the official `gVisor` sample, then switch `cluster-gateway` to `LoadBalancer`:
 
 <GitHubApplyCommand repo="sandbox0" path="infra-operator/chart/samples/single-cluster/fullmode-gke-gvisor.yaml" />
 
 ```bash
 kubectl patch sandbox0infra fullmode -n sandbox0-system --type merge -p \
-    '{"spec":{"services":{"internalGateway":{"service":{"type":"LoadBalancer","port":80}}}}}'
+    '{"spec":{"services":{"clusterGateway":{"service":{"type":"LoadBalancer","port":80}}}}}'
 ```
 
 Wait for the deployment to finish reconciling:
@@ -261,7 +261,7 @@ kubectl get svc -n sandbox0-system
 Expected result:
 
 1. `Sandbox0Infra` becomes `Ready`
-2. `fullmode-internal-gateway` is exposed as `LoadBalancer` on port `80`
+2. `fullmode-cluster-gateway` is exposed as `LoadBalancer` on port `80`
 3. `fullmode-netd` and `fullmode-k8s-plugin` run on `gvisor-pool`
 4. sandbox pods in `tpl-default` run on `gvisor-pool`
 
@@ -269,18 +269,18 @@ This sample uses the native GKE node label `sandbox.gke.io/runtime=gvisor` for s
 
 ### 6) Expose the API Publicly
 
-After the `LoadBalancer` patch above, GKE allocates a public IP for `internal-gateway`.
+After the `LoadBalancer` patch above, GKE allocates a public IP for `cluster-gateway`.
 
 Check the service:
 
 ```bash
-kubectl get svc fullmode-internal-gateway -n sandbox0-system -o wide
+kubectl get svc fullmode-cluster-gateway -n sandbox0-system -o wide
 ```
 
 Wait until `EXTERNAL-IP` is no longer `<pending>`, then export the public base URL directly from the service:
 
 ```bash
-export SANDBOX0_BASE_URL="http://$(kubectl get svc fullmode-internal-gateway -n sandbox0-system -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
+export SANDBOX0_BASE_URL="http://$(kubectl get svc fullmode-cluster-gateway -n sandbox0-system -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
 printf '%s\n' "$SANDBOX0_BASE_URL"
 ```
 

@@ -31,7 +31,7 @@ type RegionHandler struct {
 type CreateRegionRequest struct {
 	ID                string `json:"id" binding:"required"`
 	DisplayName       string `json:"display_name"`
-	EdgeGatewayURL    string `json:"edge_gateway_url" binding:"required"`
+	RegionalGatewayURL    string `json:"regional_gateway_url" binding:"required"`
 	MeteringExportURL string `json:"metering_export_url"`
 	Enabled           *bool  `json:"enabled"`
 }
@@ -39,7 +39,7 @@ type CreateRegionRequest struct {
 // UpdateRegionRequest updates an existing region directory entry.
 type UpdateRegionRequest struct {
 	DisplayName       string  `json:"display_name"`
-	EdgeGatewayURL    string  `json:"edge_gateway_url"`
+	RegionalGatewayURL    string  `json:"regional_gateway_url"`
 	MeteringExportURL *string `json:"metering_export_url"`
 	Enabled           *bool   `json:"enabled"`
 }
@@ -83,12 +83,12 @@ func (h *RegionHandler) CreateRegion(c *gin.Context) {
 	region := &tenantdir.Region{
 		ID:                strings.TrimSpace(req.ID),
 		DisplayName:       strings.TrimSpace(req.DisplayName),
-		EdgeGatewayURL:    strings.TrimSpace(req.EdgeGatewayURL),
+		RegionalGatewayURL:    strings.TrimSpace(req.RegionalGatewayURL),
 		MeteringExportURL: strings.TrimSpace(req.MeteringExportURL),
 		Enabled:           enabled,
 	}
-	if region.ID == "" || region.EdgeGatewayURL == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "region id and edge gateway url are required")
+	if region.ID == "" || region.RegionalGatewayURL == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "region id and regional gateway url are required")
 		return
 	}
 
@@ -148,8 +148,8 @@ func (h *RegionHandler) UpdateRegion(c *gin.Context) {
 	if req.DisplayName != "" {
 		region.DisplayName = strings.TrimSpace(req.DisplayName)
 	}
-	if req.EdgeGatewayURL != "" {
-		region.EdgeGatewayURL = strings.TrimSpace(req.EdgeGatewayURL)
+	if req.RegionalGatewayURL != "" {
+		region.RegionalGatewayURL = strings.TrimSpace(req.RegionalGatewayURL)
 	}
 	if req.MeteringExportURL != nil {
 		region.MeteringExportURL = strings.TrimSpace(*req.MeteringExportURL)
@@ -157,8 +157,8 @@ func (h *RegionHandler) UpdateRegion(c *gin.Context) {
 	if req.Enabled != nil {
 		region.Enabled = *req.Enabled
 	}
-	if region.EdgeGatewayURL == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "edge gateway url is required")
+	if region.RegionalGatewayURL == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "regional gateway url is required")
 		return
 	}
 

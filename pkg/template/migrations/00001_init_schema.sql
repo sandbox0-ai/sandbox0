@@ -6,7 +6,7 @@
 CREATE TABLE IF NOT EXISTS scheduler_clusters (
     cluster_id VARCHAR(255) PRIMARY KEY,
     cluster_name VARCHAR(255) NOT NULL,
-    internal_gateway_url VARCHAR(1024) NOT NULL,
+    cluster_gateway_url VARCHAR(1024) NOT NULL,
     weight INTEGER NOT NULL DEFAULT 100,
     enabled BOOLEAN NOT NULL DEFAULT true,
     last_seen_at TIMESTAMP WITH TIME ZONE,

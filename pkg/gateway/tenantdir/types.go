@@ -16,7 +16,7 @@ type TeamHomeRegion struct {
 type Region struct {
 	ID                string `json:"id"`
 	DisplayName       string `json:"display_name,omitempty"`
-	EdgeGatewayURL    string `json:"edge_gateway_url,omitempty"`
+	RegionalGatewayURL    string `json:"regional_gateway_url,omitempty"`
 	MeteringExportURL string `json:"metering_export_url,omitempty"`
 	Enabled           bool   `json:"enabled"`
 }
@@ -28,10 +28,10 @@ type ActiveTeam struct {
 	TeamRole       string `json:"team_role,omitempty"`
 	HomeRegionID   string `json:"home_region_id"`
 	DefaultTeam    bool   `json:"default_team,omitempty"`
-	EdgeGatewayURL string `json:"edge_gateway_url,omitempty"`
+	RegionalGatewayURL string `json:"regional_gateway_url,omitempty"`
 }
 
-// RoutingToken represents a short-lived routing grant from a global directory.
+// RoutingToken represents a short-lived routing grant from a global gateway.
 type RoutingToken struct {
 	RegionID string    `json:"region_id"`
 	TeamID   string    `json:"team_id"`

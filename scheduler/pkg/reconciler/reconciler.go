@@ -24,14 +24,14 @@ func NewReconciler(
 	templateStore store.TemplateStore,
 	allocationStore store.AllocationStore,
 	clusterStore *db.Repository,
-	igClient *client.InternalGatewayClient,
+	clusterGatewayClient *client.ClusterGatewayClient,
 	interval time.Duration,
 	clk *clock.Clock,
 	podsPerNode int,
 	logger *zap.Logger,
 	metrics *obsmetrics.SchedulerMetrics,
 ) *Reconciler {
-	adapter := &internalGatewayAdapter{client: igClient}
+	adapter := &clusterGatewayAdapter{client: clusterGatewayClient}
 	return &Reconciler{
 		inner: templreconciler.NewMultiClusterReconciler(
 			templateStore,
@@ -77,11 +77,11 @@ func (r *Reconciler) UpdateTemplateStats(clusterID, templateID string, idleCount
 	r.inner.UpdateTemplateStats(clusterID, templateID, idleCount, activeCount, updatedAt)
 }
 
-type internalGatewayAdapter struct {
-	client *client.InternalGatewayClient
+type clusterGatewayAdapter struct {
+	client *client.ClusterGatewayClient
 }
 
-func (a *internalGatewayAdapter) GetClusterSummary(ctx context.Context, baseURL string) (*templreconciler.ClusterSummary, error) {
+func (a *clusterGatewayAdapter) GetClusterSummary(ctx context.Context, baseURL string) (*templreconciler.ClusterSummary, error) {
 	summary, err := a.client.GetClusterSummary(ctx, baseURL)
 	if err != nil {
 		return nil, err
@@ -95,7 +95,7 @@ func (a *internalGatewayAdapter) GetClusterSummary(ctx context.Context, baseURL 
 	}, nil
 }
 
-func (a *internalGatewayAdapter) GetTemplateStats(ctx context.Context, baseURL string) (*templreconciler.TemplateStats, error) {
+func (a *clusterGatewayAdapter) GetTemplateStats(ctx context.Context, baseURL string) (*templreconciler.TemplateStats, error) {
 	stats, err := a.client.GetTemplateStats(ctx, baseURL)
 	if err != nil {
 		return nil, err
@@ -115,10 +115,10 @@ func (a *internalGatewayAdapter) GetTemplateStats(ctx context.Context, baseURL s
 	return out, nil
 }
 
-func (a *internalGatewayAdapter) CreateOrUpdateTemplate(ctx context.Context, baseURL string, template *v1alpha1.SandboxTemplate) error {
+func (a *clusterGatewayAdapter) CreateOrUpdateTemplate(ctx context.Context, baseURL string, template *v1alpha1.SandboxTemplate) error {
 	return a.client.CreateOrUpdateTemplate(ctx, baseURL, template)
 }
 
-func (a *internalGatewayAdapter) DeleteTemplate(ctx context.Context, baseURL string, templateID string) error {
+func (a *clusterGatewayAdapter) DeleteTemplate(ctx context.Context, baseURL string, templateID string) error {
 	return a.client.DeleteTemplate(ctx, baseURL, templateID)
 }

@@ -1,4 +1,4 @@
-# Example: Single-cluster full mode (internal-gateway + manager + storage + network)
+# Example: Single-cluster full mode (cluster-gateway + manager + storage + network)
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -103,7 +103,7 @@ spec:
   #      value: gvisor
   #      effect: NoSchedule
   services:
-    internalGateway:
+    clusterGateway:
       enabled: true
       replicas: 1
       # service:

@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestBuildScenarioFromManifestIncludesGlobalDirectoryRolloutAndSecrets(t *testing.T) {
+func TestBuildScenarioFromManifestIncludesGlobalGatewayRolloutAndSecrets(t *testing.T) {
 	cfg := Config{
 		OperatorChartPath: filepath.Join("..", "..", "infra-operator", "chart"),
 		InfraNamespace:    "sandbox0-system",
@@ -24,7 +24,7 @@ func TestBuildScenarioFromManifestIncludesGlobalDirectoryRolloutAndSecrets(t *te
 		t.Fatalf("expected 1 rollout target, got %d", len(scenario.Rollouts))
 	}
 	rollout := scenario.Rollouts[0]
-	if rollout.Kind != "deployment" || rollout.Name != "s0global-global-directory" {
+	if rollout.Kind != "deployment" || rollout.Name != "s0global-global-gateway" {
 		t.Fatalf("unexpected rollout target: %#v", rollout)
 	}
 	if rollout.Namespace != "sandbox0-system" {

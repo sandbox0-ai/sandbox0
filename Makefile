@@ -13,7 +13,7 @@ OAPI_CODEGEN_VERSION ?= v2.4.1
 
 PROTOC ?= protoc
 
-SERVICES := edge-gateway global-directory internal-gateway manager scheduler storage-proxy k8s-plugin procd netd infra-operator
+SERVICES := regional-gateway global-gateway cluster-gateway manager scheduler storage-proxy k8s-plugin procd netd infra-operator
 
 # Default version
 VERSION ?= latest
@@ -93,12 +93,12 @@ test:
 		exit 1; \
 	elif echo "$(SERVICES)" | grep -qw "$$service"; then \
 		printf "$(CYAN)Testing $$service...$(RESET)\n"; \
-		if [ "$$service" = "edge-gateway" ]; then \
-			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./edge-gateway/...; \
-		elif [ "$$service" = "global-directory" ]; then \
-			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./global-directory/...; \
-		elif [ "$$service" = "internal-gateway" ]; then \
-			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./internal-gateway/...; \
+		if [ "$$service" = "regional-gateway" ]; then \
+			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./regional-gateway/...; \
+		elif [ "$$service" = "global-gateway" ]; then \
+			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./global-gateway/...; \
+		elif [ "$$service" = "cluster-gateway" ]; then \
+			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./cluster-gateway/...; \
 		elif [ "$$service" = "manager" ]; then \
 			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./manager/...; \
 		elif [ "$$service" = "procd" ]; then \
@@ -166,7 +166,7 @@ test-e2e-specific:
 	unset http_proxy && unset https_proxy && unset all_proxy && go test -v ./tests/e2e/... -focus="$(SPEC)" -timeout=30m
 
 # Prevent make from treating service names as targets
-edge-gateway global-directory internal-gateway manager scheduler storage-proxy k8s-plugin procd netd infra-operator:
+regional-gateway global-gateway cluster-gateway manager scheduler storage-proxy k8s-plugin procd netd infra-operator:
 	@:
 
 lint:

@@ -37,9 +37,9 @@ func TestTenantHandlerIssueRegionToken(t *testing.T) {
 			TeamID:         "team-1",
 			TeamRole:       "admin",
 			HomeRegionID:   "aws/us-east-1",
-			EdgeGatewayURL: "https://use1.example.com",
+			RegionalGatewayURL: "https://use1.example.com",
 		}},
-		authn.NewIssuer("global-directory", "test-secret", time.Minute, time.Hour),
+		authn.NewIssuer("global-gateway", "test-secret", time.Minute, time.Hour),
 		5*time.Minute,
 		zap.NewNop(),
 	)
@@ -75,8 +75,8 @@ func TestTenantHandlerIssueRegionToken(t *testing.T) {
 	if response.Data.RegionID != "aws/us-east-1" {
 		t.Fatalf("expected region id, got %q", response.Data.RegionID)
 	}
-	if response.Data.EdgeGatewayURL != "https://use1.example.com" {
-		t.Fatalf("expected edge url, got %q", response.Data.EdgeGatewayURL)
+	if response.Data.RegionalGatewayURL != "https://use1.example.com" {
+		t.Fatalf("expected regional gateway url, got %q", response.Data.RegionalGatewayURL)
 	}
 	if response.Data.Token == "" {
 		t.Fatal("expected region token to be issued")

@@ -66,7 +66,7 @@ func TestDirectoryResolveActiveTeamUsesDefaultTeam(t *testing.T) {
 	}
 	regions := NewStaticRegions([]Region{{
 		ID:             homeRegionID,
-		EdgeGatewayURL: "https://use1.example.com",
+		RegionalGatewayURL: "https://use1.example.com",
 		Enabled:        true,
 	}})
 
@@ -84,8 +84,8 @@ func TestDirectoryResolveActiveTeamUsesDefaultTeam(t *testing.T) {
 	if active.HomeRegionID != homeRegionID {
 		t.Fatalf("expected region %q, got %q", homeRegionID, active.HomeRegionID)
 	}
-	if active.EdgeGatewayURL != "https://use1.example.com" {
-		t.Fatalf("expected edge URL to be propagated, got %q", active.EdgeGatewayURL)
+	if active.RegionalGatewayURL != "https://use1.example.com" {
+		t.Fatalf("expected regional gateway URL to be propagated, got %q", active.RegionalGatewayURL)
 	}
 }
 

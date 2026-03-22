@@ -1,4 +1,4 @@
-# Example: Multi-cluster data plane (internal-gateway + manager + storage-proxy)
+# Example: Multi-cluster data plane (cluster-gateway + manager + storage-proxy)
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -94,7 +94,7 @@ spec:
   #      value: gvisor
   #      effect: NoSchedule
   services:
-    internalGateway:
+    clusterGateway:
       enabled: true
       replicas: 1
       # service:

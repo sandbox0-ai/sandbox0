@@ -662,7 +662,7 @@ type HarborRegistryCredentialsSecret struct {
 
 // ControlPlaneConfig defines external control plane configuration
 type ControlPlaneConfig struct {
-	// URL is the control plane edge-gateway URL
+	// URL is the control plane regional-gateway URL
 	URL string `json:"url"`
 
 	// InternalAuthPublicKeySecret references the secret containing control plane's public key
@@ -707,24 +707,24 @@ type KeyPairSecretRef struct {
 
 // ServicesConfig defines configuration for all services
 type ServicesConfig struct {
-	// GlobalDirectory configures the global-directory service (global service layer)
+	// GlobalGateway configures the global-gateway service (global service layer)
 	// +optional
 	// +kubebuilder:default={}
-	GlobalDirectory *GlobalDirectoryServiceConfig `json:"globalDirectory,omitempty"`
+	GlobalGateway *GlobalGatewayServiceConfig `json:"globalGateway,omitempty"`
 
-	// EdgeGateway configures the edge-gateway service (control plane)
+	// RegionalGateway configures the regional-gateway service (control plane)
 	// +optional
 	// +kubebuilder:default={}
-	EdgeGateway *EdgeGatewayServiceConfig `json:"edgeGateway,omitempty"`
+	RegionalGateway *RegionalGatewayServiceConfig `json:"regionalGateway,omitempty"`
 
 	// Scheduler configures the scheduler service (control plane)
 	// +optional
 	Scheduler *SchedulerServiceConfig `json:"scheduler,omitempty"`
 
-	// InternalGateway configures the internal-gateway service (data plane)
+	// ClusterGateway configures the cluster-gateway service (data plane)
 	// +optional
 	// +kubebuilder:default={}
-	InternalGateway *InternalGatewayServiceConfig `json:"internalGateway,omitempty"`
+	ClusterGateway *ClusterGatewayServiceConfig `json:"clusterGateway,omitempty"`
 
 	// Manager configures the manager service (data plane)
 	// +optional
@@ -765,22 +765,22 @@ type BaseServiceConfig struct {
 	Ingress *IngressConfig `json:"ingress,omitempty"`
 }
 
-// GlobalDirectoryServiceConfig defines configuration for global-directory service.
-type GlobalDirectoryServiceConfig struct {
+// GlobalGatewayServiceConfig defines configuration for global-gateway service.
+type GlobalGatewayServiceConfig struct {
 	BaseServiceConfig `json:",inline"`
-	// Config contains global-directory specific configuration
+	// Config contains global-gateway specific configuration
 	// +optional
 	// +kubebuilder:default={}
-	Config *config.GlobalDirectoryConfig `json:"config,omitempty"`
+	Config *config.GlobalGatewayConfig `json:"config,omitempty"`
 }
 
-// EdgeGatewayServiceConfig defines configuration for edge-gateway service
-type EdgeGatewayServiceConfig struct {
+// RegionalGatewayServiceConfig defines configuration for regional-gateway service
+type RegionalGatewayServiceConfig struct {
 	BaseServiceConfig `json:",inline"`
-	// Config contains edge-gateway specific configuration
+	// Config contains regional-gateway specific configuration
 	// +optional
 	// +kubebuilder:default={}
-	Config *config.EdgeGatewayConfig `json:"config,omitempty"`
+	Config *config.RegionalGatewayConfig `json:"config,omitempty"`
 }
 
 // SchedulerServiceConfig defines configuration for scheduler service
@@ -792,13 +792,13 @@ type SchedulerServiceConfig struct {
 	Config *config.SchedulerConfig `json:"config,omitempty"`
 }
 
-// InternalGatewayServiceConfig defines configuration for internal-gateway service
-type InternalGatewayServiceConfig struct {
+// ClusterGatewayServiceConfig defines configuration for cluster-gateway service
+type ClusterGatewayServiceConfig struct {
 	BaseServiceConfig `json:",inline"`
-	// Config contains internal-gateway specific configuration
+	// Config contains cluster-gateway specific configuration
 	// +optional
 	// +kubebuilder:default={}
-	Config *config.InternalGatewayConfig `json:"config,omitempty"`
+	Config *config.ClusterGatewayConfig `json:"config,omitempty"`
 }
 
 // ManagerServiceConfig defines configuration for manager service
@@ -846,20 +846,20 @@ type NetdServiceConfig struct {
 	Config *config.NetdConfig `json:"config,omitempty"`
 }
 
-// IsGlobalDirectoryEnabled returns true when global-directory is enabled.
-func IsGlobalDirectoryEnabled(infra *Sandbox0Infra) bool {
-	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.GlobalDirectory == nil {
+// IsGlobalGatewayEnabled returns true when global-gateway is enabled.
+func IsGlobalGatewayEnabled(infra *Sandbox0Infra) bool {
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.GlobalGateway == nil {
 		return false
 	}
-	return infra.Spec.Services.GlobalDirectory.Enabled
+	return infra.Spec.Services.GlobalGateway.Enabled
 }
 
-// IsEdgeGatewayEnabled returns true when edge-gateway is enabled.
-func IsEdgeGatewayEnabled(infra *Sandbox0Infra) bool {
-	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.EdgeGateway == nil {
+// IsRegionalGatewayEnabled returns true when regional-gateway is enabled.
+func IsRegionalGatewayEnabled(infra *Sandbox0Infra) bool {
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.RegionalGateway == nil {
 		return false
 	}
-	return infra.Spec.Services.EdgeGateway.Enabled
+	return infra.Spec.Services.RegionalGateway.Enabled
 }
 
 // IsSchedulerEnabled returns true when scheduler is enabled.
@@ -870,12 +870,12 @@ func IsSchedulerEnabled(infra *Sandbox0Infra) bool {
 	return infra.Spec.Services.Scheduler.Enabled
 }
 
-// IsInternalGatewayEnabled returns true when internal-gateway is enabled.
-func IsInternalGatewayEnabled(infra *Sandbox0Infra) bool {
-	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.InternalGateway == nil {
+// IsClusterGatewayEnabled returns true when cluster-gateway is enabled.
+func IsClusterGatewayEnabled(infra *Sandbox0Infra) bool {
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.ClusterGateway == nil {
 		return false
 	}
-	return infra.Spec.Services.InternalGateway.Enabled
+	return infra.Spec.Services.ClusterGateway.Enabled
 }
 
 // IsManagerEnabled returns true when manager is enabled.
@@ -964,17 +964,17 @@ func IsRegistryEnabled(infra *Sandbox0Infra) bool {
 
 // HasControlPlaneServices returns true when any control-plane service is enabled.
 func HasControlPlaneServices(infra *Sandbox0Infra) bool {
-	return IsEdgeGatewayEnabled(infra) || IsSchedulerEnabled(infra)
+	return IsRegionalGatewayEnabled(infra) || IsSchedulerEnabled(infra)
 }
 
 // HasDataPlaneServices returns true when any data-plane service is enabled.
 func HasDataPlaneServices(infra *Sandbox0Infra) bool {
-	return IsInternalGatewayEnabled(infra) || IsManagerEnabled(infra) || IsStorageProxyEnabled(infra) || IsNetdEnabled(infra)
+	return IsClusterGatewayEnabled(infra) || IsManagerEnabled(infra) || IsStorageProxyEnabled(infra) || IsNetdEnabled(infra)
 }
 
 // HasAnyServiceEnabled returns true when at least one service is enabled.
 func HasAnyServiceEnabled(infra *Sandbox0Infra) bool {
-	return IsGlobalDirectoryEnabled(infra) || HasControlPlaneServices(infra) || HasDataPlaneServices(infra)
+	return IsGlobalGatewayEnabled(infra) || HasControlPlaneServices(infra) || HasDataPlaneServices(infra)
 }
 
 // ServiceNetworkConfig defines service network configuration
@@ -1140,21 +1140,21 @@ type Sandbox0InfraStatus struct {
 
 // EndpointsStatus contains service endpoints
 type EndpointsStatus struct {
-	// GlobalDirectory is the global-directory URL
+	// GlobalGateway is the global-gateway URL
 	// +optional
-	GlobalDirectory string `json:"globalDirectory,omitempty"`
+	GlobalGateway string `json:"globalGateway,omitempty"`
 
-	// EdgeGateway is the external edge-gateway URL
+	// RegionalGateway is the external regional-gateway URL
 	// +optional
-	EdgeGateway string `json:"edgeGateway,omitempty"`
+	RegionalGateway string `json:"regionalGateway,omitempty"`
 
-	// EdgeGatewayInternal is the internal edge-gateway URL
+	// RegionalGatewayInternal is the internal regional-gateway URL
 	// +optional
-	EdgeGatewayInternal string `json:"edgeGatewayInternal,omitempty"`
+	RegionalGatewayInternal string `json:"regionalGatewayInternal,omitempty"`
 
-	// InternalGateway is the internal-gateway URL
+	// ClusterGateway is the cluster-gateway URL
 	// +optional
-	InternalGateway string `json:"internalGateway,omitempty"`
+	ClusterGateway string `json:"clusterGateway,omitempty"`
 }
 
 // ClusterStatus contains cluster registration status
@@ -1221,9 +1221,9 @@ const (
 	ConditionTypeDatabaseReady        = "DatabaseReady"
 	ConditionTypeStorageReady         = "StorageReady"
 	ConditionTypeRegistryReady        = "RegistryReady"
-	ConditionTypeGlobalDirectoryReady = "GlobalDirectoryReady"
-	ConditionTypeEdgeGatewayReady     = "EdgeGatewayReady"
-	ConditionTypeInternalGatewayReady = "InternalGatewayReady"
+	ConditionTypeGlobalGatewayReady = "GlobalGatewayReady"
+	ConditionTypeRegionalGatewayReady     = "RegionalGatewayReady"
+	ConditionTypeClusterGatewayReady = "ClusterGatewayReady"
 	ConditionTypeManagerReady         = "ManagerReady"
 	ConditionTypeStorageProxyReady    = "StorageProxyReady"
 	ConditionTypeFusePluginReady      = "FusePluginReady"

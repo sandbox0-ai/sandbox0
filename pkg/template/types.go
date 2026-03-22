@@ -37,7 +37,7 @@ type TemplateAllocation struct {
 type Cluster struct {
 	ClusterID          string     `json:"cluster_id"`
 	ClusterName        string     `json:"cluster_name"`
-	InternalGatewayURL string     `json:"internal_gateway_url"`
+	ClusterGatewayURL string     `json:"cluster_gateway_url"`
 	Weight             int        `json:"weight"`
 	Enabled            bool       `json:"enabled"`
 	LastSeenAt         *time.Time `json:"last_seen_at,omitempty"`

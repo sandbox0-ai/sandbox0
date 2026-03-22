@@ -28,10 +28,10 @@ A `Sandbox0Infra` spec is easier to reason about when you split it into five lay
 
 | Profile | Typical fields | Use when |
 |---|---|---|
-| Minimal single-cluster | `services.internalGateway`, `services.manager` | Local eval, API validation, fast first install |
+| Minimal single-cluster | `services.clusterGateway`, `services.manager` | Local eval, API validation, fast first install |
 | Full single-cluster | Add `storage`, `registry`, `services.storageProxy`, `services.netd` | You need persistent volumes, snapshots, or network controls |
-| Multi-cluster control plane | `services.edgeGateway`, `services.scheduler` | You coordinate multiple data-plane clusters in one region |
-| Multi-cluster data plane | `controlPlane`, `cluster`, `services.internalGateway`, `services.manager`, optional `storageProxy`/`netd` | You attach a cluster to an external control plane |
+| Multi-cluster control plane | `services.regionalGateway`, `services.scheduler` | You coordinate multiple data-plane clusters in one region |
+| Multi-cluster data plane | `controlPlane`, `cluster`, `services.clusterGateway`, `services.manager`, optional `storageProxy`/`netd` | You attach a cluster to an external control plane |
 
 Official sample manifests:
 
@@ -110,7 +110,7 @@ spec:
         id: cluster-001
         name: production-use1-a
     services:
-        internalGateway:
+        clusterGateway:
             enabled: true
             config:
                 authMode: internal
@@ -124,7 +124,7 @@ spec:
 
 Examples:
 
-- `services.internalGateway.config.authMode` switches between `public`, `internal`, and `both`
+- `services.clusterGateway.config.authMode` switches between `public`, `internal`, and `both`
 - `services.manager.config.autoscaler.*` tunes pool scale behavior
 - `services.storageProxy.config.juicefs*` tunes JuiceFS behavior and cache sizing
 - `services.netd.config.*` controls proxy ports, policy enforcement, and node-level networking behavior

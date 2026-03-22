@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: Sandbox0 API
   version: 0.1.0
-  description: Public HTTP APIs exposed by Sandbox0 regional gateways and the global directory.
+  description: Public HTTP APIs exposed by Sandbox0 regional gateways and the global gateway.
 servers:
   - url: https://api.sandbox0.ai
     description: Production
@@ -523,7 +523,7 @@ paths:
   /regions:
     get:
       tags: [regions]
-      summary: List regions in the global directory
+      summary: List regions in the global gateway
       security:
         - bearerAuth: []
       responses:
@@ -547,7 +547,7 @@ paths:
                 $ref: "#/components/schemas/ErrorEnvelope"
     post:
       tags: [regions]
-      summary: Create a region in the global directory
+      summary: Create a region in the global gateway
       security:
         - bearerAuth: []
       requestBody:
@@ -590,7 +590,7 @@ paths:
   /regions/{id}:
     get:
       tags: [regions]
-      summary: Get a region from the global directory
+      summary: Get a region from the global gateway
       security:
         - bearerAuth: []
       parameters:
@@ -622,7 +622,7 @@ paths:
                 $ref: "#/components/schemas/ErrorEnvelope"
     put:
       tags: [regions]
-      summary: Update a region in the global directory
+      summary: Update a region in the global gateway
       security:
         - bearerAuth: []
       parameters:
@@ -666,7 +666,7 @@ paths:
                 $ref: "#/components/schemas/ErrorEnvelope"
     delete:
       tags: [regions]
-      summary: Delete a region from the global directory
+      summary: Delete a region from the global gateway
       security:
         - bearerAuth: []
       parameters:
@@ -2009,7 +2009,7 @@ paths:
       summary: Get registry credentials for uploads
       security:
         - bearerAuth: []
-      x-upstream-service: edge-gateway
+      x-upstream-service: regional-gateway
       x-upstream-path: /api/v1/registry/credentials
       responses:
         "200":
@@ -2761,7 +2761,7 @@ components:
           type: string
         default_team:
           type: boolean
-        edge_gateway_url:
+        regional_gateway_url:
           type: string
           nullable: true
       required: [user_id, team_id, home_region_id]
@@ -2782,7 +2782,7 @@ components:
       properties:
         region_id:
           type: string
-        edge_gateway_url:
+        regional_gateway_url:
           type: string
           nullable: true
         token:
@@ -2850,14 +2850,14 @@ components:
           type: string
         display_name:
           type: string
-        edge_gateway_url:
+        regional_gateway_url:
           type: string
         metering_export_url:
           type: string
           nullable: true
         enabled:
           type: boolean
-      required: [id, edge_gateway_url, enabled]
+      required: [id, regional_gateway_url, enabled]
     CreateRegionRequest:
       type: object
       properties:
@@ -2865,20 +2865,20 @@ components:
           type: string
         display_name:
           type: string
-        edge_gateway_url:
+        regional_gateway_url:
           type: string
         metering_export_url:
           type: string
           nullable: true
         enabled:
           type: boolean
-      required: [id, edge_gateway_url]
+      required: [id, regional_gateway_url]
     UpdateRegionRequest:
       type: object
       properties:
         display_name:
           type: string
-        edge_gateway_url:
+        regional_gateway_url:
           type: string
         metering_export_url:
           type: string

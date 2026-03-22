@@ -221,7 +221,7 @@ func main() {
 	validator := internalauth.NewValidator(internalauth.ValidatorConfig{
 		Target:                 "storage-proxy",
 		PublicKey:              publicKey,
-		AllowedCallers:         []string{"internal-gateway", "manager", "procd"},
+		AllowedCallers:         []string{"cluster-gateway", "manager", "procd"},
 		ClockSkewTolerance:     5 * time.Second,
 		ReplayDetectionEnabled: false, // Disable for high-throughput scenarios
 	})

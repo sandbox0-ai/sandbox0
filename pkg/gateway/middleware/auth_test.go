@@ -15,7 +15,7 @@ import (
 func TestAuthMiddleware_JWTAccessToken(t *testing.T) {
 	t.Setenv("GIN_MODE", "release")
 
-	issuer := authn.NewIssuer("edge-gateway", "test-secret", time.Minute, time.Hour)
+	issuer := authn.NewIssuer("regional-gateway", "test-secret", time.Minute, time.Hour)
 	tokens, err := issuer.IssueTokenPair("user-1", "team-1", "admin", "user@example.com", "User", false)
 	if err != nil {
 		t.Fatalf("issue token pair: %v", err)
@@ -40,7 +40,7 @@ func TestAuthMiddleware_JWTAccessToken(t *testing.T) {
 func TestAuthMiddleware_JWTRefreshTokenRejected(t *testing.T) {
 	t.Setenv("GIN_MODE", "release")
 
-	issuer := authn.NewIssuer("edge-gateway", "test-secret", time.Minute, time.Hour)
+	issuer := authn.NewIssuer("regional-gateway", "test-secret", time.Minute, time.Hour)
 	tokens, err := issuer.IssueTokenPair("user-1", "team-1", "admin", "user@example.com", "User", false)
 	if err != nil {
 		t.Fatalf("issue token pair: %v", err)
@@ -61,7 +61,7 @@ func TestAuthMiddleware_JWTRefreshTokenRejected(t *testing.T) {
 func TestAuthMiddleware_JWTRegionTokenAcceptedForMatchingRegion(t *testing.T) {
 	t.Setenv("GIN_MODE", "release")
 
-	issuer := authn.NewIssuer("global-directory", "test-secret", time.Minute, time.Hour)
+	issuer := authn.NewIssuer("global-gateway", "test-secret", time.Minute, time.Hour)
 	regionToken, _, err := issuer.IssueRegionToken("user-1", "team-1", "admin", "aws/us-east-1", false, time.Minute)
 	if err != nil {
 		t.Fatalf("issue region token: %v", err)
@@ -93,7 +93,7 @@ func TestAuthMiddleware_JWTRegionTokenAcceptedForMatchingRegion(t *testing.T) {
 func TestAuthMiddleware_JWTRegionTokenRejectedForWrongRegion(t *testing.T) {
 	t.Setenv("GIN_MODE", "release")
 
-	issuer := authn.NewIssuer("global-directory", "test-secret", time.Minute, time.Hour)
+	issuer := authn.NewIssuer("global-gateway", "test-secret", time.Minute, time.Hour)
 	regionToken, _, err := issuer.IssueRegionToken("user-1", "team-1", "admin", "aws/us-west-2", false, time.Minute)
 	if err != nil {
 		t.Fatalf("issue region token: %v", err)

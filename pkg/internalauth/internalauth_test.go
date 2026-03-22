@@ -23,7 +23,7 @@ func init() {
 
 func TestGeneratorGenerate(t *testing.T) {
 	generator := NewGenerator(GeneratorConfig{
-		Caller:     "internal-gateway",
+		Caller:     "cluster-gateway",
 		PrivateKey: testPrivateKey,
 		TTL:        30 * time.Second,
 	})
@@ -48,7 +48,7 @@ func TestGeneratorGenerate(t *testing.T) {
 
 func TestValidatorValidate(t *testing.T) {
 	generator := NewGenerator(GeneratorConfig{
-		Caller:     "internal-gateway",
+		Caller:     "cluster-gateway",
 		PrivateKey: testPrivateKey,
 		TTL:        30 * time.Second,
 	})
@@ -69,8 +69,8 @@ func TestValidatorValidate(t *testing.T) {
 		t.Fatalf("Validate failed: %v", err)
 	}
 
-	if claims.Caller != "internal-gateway" {
-		t.Errorf("Expected caller 'internal-gateway', got '%s'", claims.Caller)
+	if claims.Caller != "cluster-gateway" {
+		t.Errorf("Expected caller 'cluster-gateway', got '%s'", claims.Caller)
 	}
 
 	if claims.TeamID != "team-123" {
@@ -88,7 +88,7 @@ func TestValidatorValidate(t *testing.T) {
 
 func TestValidatorInvalidTarget(t *testing.T) {
 	generator := NewGenerator(GeneratorConfig{
-		Caller:     "internal-gateway",
+		Caller:     "cluster-gateway",
 		PrivateKey: testPrivateKey,
 	})
 
@@ -115,7 +115,7 @@ func TestValidatorInvalidSignature(t *testing.T) {
 	_ = otherPublicKey // Not used, but we need a different private key
 
 	generator := NewGenerator(GeneratorConfig{
-		Caller:     "internal-gateway",
+		Caller:     "cluster-gateway",
 		PrivateKey: otherPrivateKey,
 	})
 
@@ -137,7 +137,7 @@ func TestValidatorTokenExpired(t *testing.T) {
 	now := time.Now()
 
 	generator := NewGenerator(GeneratorConfig{
-		Caller:     "internal-gateway",
+		Caller:     "cluster-gateway",
 		PrivateKey: testPrivateKey,
 		TTL:        1 * time.Second,
 		NowFunc: func() time.Time {
@@ -164,14 +164,14 @@ func TestValidatorTokenExpired(t *testing.T) {
 
 func TestValidatorAllowedCallers(t *testing.T) {
 	generator := NewGenerator(GeneratorConfig{
-		Caller:     "internal-gateway",
+		Caller:     "cluster-gateway",
 		PrivateKey: testPrivateKey,
 	})
 
 	validator := NewValidator(ValidatorConfig{
 		Target:         "storage-proxy",
 		PublicKey:      testPublicKey,
-		AllowedCallers: []string{"manager", "procd"}, // Not internal-gateway
+		AllowedCallers: []string{"manager", "procd"}, // Not cluster-gateway
 	})
 
 	token, _ := generator.Generate("storage-proxy", "team-123", "user-456", GenerateOptions{})
@@ -185,7 +185,7 @@ func TestValidatorAllowedCallers(t *testing.T) {
 
 func TestValidateWithOptions(t *testing.T) {
 	generator := NewGenerator(GeneratorConfig{
-		Caller:     "internal-gateway",
+		Caller:     "cluster-gateway",
 		PrivateKey: testPrivateKey,
 	})
 
@@ -221,7 +221,7 @@ func TestContextHelpers(t *testing.T) {
 	claims := &Claims{
 		TeamID:      "team-123",
 		UserID:      "user-456",
-		Caller:      "internal-gateway",
+		Caller:      "cluster-gateway",
 		Permissions: []string{"read", "write"},
 	}
 
@@ -235,7 +235,7 @@ func TestContextHelpers(t *testing.T) {
 		t.Error("GetUserID failed")
 	}
 
-	if GetCaller(ctx) != "internal-gateway" {
+	if GetCaller(ctx) != "cluster-gateway" {
 		t.Error("GetCaller failed")
 	}
 
@@ -258,7 +258,7 @@ func TestContextHelpers(t *testing.T) {
 
 func TestReplayDetection(t *testing.T) {
 	generator := NewGenerator(GeneratorConfig{
-		Caller:     "internal-gateway",
+		Caller:     "cluster-gateway",
 		PrivateKey: testPrivateKey,
 	})
 
@@ -311,7 +311,7 @@ func TestNewValidatorPanic(t *testing.T) {
 
 func TestGenerateSystem(t *testing.T) {
 	generator := NewGenerator(GeneratorConfig{
-		Caller:     "internal-gateway",
+		Caller:     "cluster-gateway",
 		PrivateKey: testPrivateKey,
 		TTL:        30 * time.Second,
 	})
@@ -349,14 +349,14 @@ func TestGenerateSystem(t *testing.T) {
 		t.Errorf("Expected subject 'system', got '%s'", claims.Subject)
 	}
 
-	if claims.Caller != "internal-gateway" {
-		t.Errorf("Expected caller 'internal-gateway', got '%s'", claims.Caller)
+	if claims.Caller != "cluster-gateway" {
+		t.Errorf("Expected caller 'cluster-gateway', got '%s'", claims.Caller)
 	}
 }
 
 func TestSystemTokenBypassTeamIDRequirement(t *testing.T) {
 	generator := NewGenerator(GeneratorConfig{
-		Caller:     "internal-gateway",
+		Caller:     "cluster-gateway",
 		PrivateKey: testPrivateKey,
 	})
 
@@ -381,7 +381,7 @@ func TestSystemTokenBypassTeamIDRequirement(t *testing.T) {
 
 func TestGenerateSystemEmptyTarget(t *testing.T) {
 	generator := NewGenerator(GeneratorConfig{
-		Caller:     "internal-gateway",
+		Caller:     "cluster-gateway",
 		PrivateKey: testPrivateKey,
 	})
 

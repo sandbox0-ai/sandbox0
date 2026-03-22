@@ -142,7 +142,7 @@ spec:
                         type: string
                     type: object
                   url:
-                    description: URL is the control plane edge-gateway URL
+                    description: URL is the control plane regional-gateway URL
                     type: string
                 required:
                 - internalAuthPublicKeySecret
@@ -813,14 +813,14 @@ spec:
                 default: {}
                 description: Services configures individual services
                 properties:
-                  edgeGateway:
+                  regionalGateway:
                     default: {}
-                    description: EdgeGateway configures the edge-gateway service (control
+                    description: RegionalGateway configures the regional-gateway service (control
                       plane)
                     properties:
                       config:
                         default: {}
-                        description: Config contains edge-gateway specific configuration
+                        description: Config contains regional-gateway specific configuration
                         properties:
                           authMode:
                             default: self_hosted
@@ -880,7 +880,7 @@ spec:
                             description: Server configuration
                             type: integer
                           internalAuthCaller:
-                            default: edge-gateway
+                            default: regional-gateway
                             type: string
                           internalAuthTTL:
                             default: 30s
@@ -1102,14 +1102,14 @@ spec:
                             type: string
                         type: object
                     type: object
-                  globalDirectory:
+                  globalGateway:
                     default: {}
-                    description: GlobalDirectory configures the global-directory service
+                    description: GlobalGateway configures the global-gateway service
                       (global service layer)
                     properties:
                       config:
                         default: {}
-                        description: Config contains global-directory specific configuration
+                        description: Config contains global-gateway specific configuration
                         properties:
                           baseUrl:
                             default: http://localhost:8080
@@ -1144,7 +1144,7 @@ spec:
                             default: 8
                             type: integer
                           databaseSchema:
-                            default: gd
+                            default: global_gateway
                             type: string
                           defaultTeamName:
                             default: Personal Team
@@ -1362,29 +1362,29 @@ spec:
                             type: string
                         type: object
                     type: object
-                  internalGateway:
+                  clusterGateway:
                     default: {}
-                    description: InternalGateway configures the internal-gateway service
+                    description: ClusterGateway configures the cluster-gateway service
                       (data plane)
                     properties:
                       config:
                         default: {}
-                        description: Config contains internal-gateway specific configuration
+                        description: Config contains cluster-gateway specific configuration
                         properties:
                           allowedCallers:
                             default:
-                            - edge-gateway
+                            - regional-gateway
                             - scheduler
                             description: |-
-                              AllowedCallers is the list of services allowed to call internal-gateway
-                              Default: ["edge-gateway"], can include "scheduler" for multi-cluster mode
+                              AllowedCallers is the list of services allowed to call cluster-gateway
+                              Default: ["regional-gateway"], can include "scheduler" for multi-cluster mode
                             items:
                               type: string
                             type: array
                           authMode:
                             default: internal
                             description: |-
-                              Internal authentication (for validating requests from edge-gateway and
+                              Internal authentication (for validating requests from regional-gateway and
                               generating tokens for downstream services)
                               AuthMode controls which authentication modes are accepted on /api/v1.
                               Allowed values: "internal", "public", "both".
@@ -2878,18 +2878,18 @@ spec:
               endpoints:
                 description: Endpoints contains the service endpoints
                 properties:
-                  edgeGateway:
-                    description: EdgeGateway is the external edge-gateway URL
+                  regionalGateway:
+                    description: RegionalGateway is the external regional-gateway URL
                     type: string
-                  edgeGatewayInternal:
-                    description: EdgeGatewayInternal is the internal edge-gateway
+                  regionalGatewayInternal:
+                    description: RegionalGatewayInternal is the internal regional-gateway
                       URL
                     type: string
-                  globalDirectory:
-                    description: GlobalDirectory is the global-directory URL
+                  globalGateway:
+                    description: GlobalGateway is the global-gateway URL
                     type: string
-                  internalGateway:
-                    description: InternalGateway is the internal-gateway URL
+                  clusterGateway:
+                    description: ClusterGateway is the cluster-gateway URL
                     type: string
                 type: object
               internalAuth:

@@ -12,10 +12,10 @@ import (
 
 // ClusterRequest represents the request body for creating/updating a cluster
 type ClusterRequest struct {
-	ClusterName        string `json:"cluster_name"`
-	InternalGatewayURL string `json:"internal_gateway_url"`
-	Weight             int    `json:"weight"`
-	Enabled            bool   `json:"enabled"`
+	ClusterName       string `json:"cluster_name"`
+	ClusterGatewayURL string `json:"cluster_gateway_url"`
+	Weight            int    `json:"weight"`
+	Enabled           bool   `json:"enabled"`
 }
 
 // listClusters lists all clusters
@@ -79,8 +79,8 @@ func (s *Server) createCluster(c *gin.Context) {
 		return
 	}
 
-	if req.InternalGatewayURL == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "internal_gateway_url is required")
+	if req.ClusterGatewayURL == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "cluster_gateway_url is required")
 		return
 	}
 
@@ -108,11 +108,11 @@ func (s *Server) createCluster(c *gin.Context) {
 	}
 
 	cluster := &db.Cluster{
-		ClusterID:          clusterID,
-		ClusterName:        req.ClusterName,
-		InternalGatewayURL: req.InternalGatewayURL,
-		Weight:             req.Weight,
-		Enabled:            req.Enabled,
+		ClusterID:         clusterID,
+		ClusterName:       req.ClusterName,
+		ClusterGatewayURL: req.ClusterGatewayURL,
+		Weight:            req.Weight,
+		Enabled:           req.Enabled,
 	}
 
 	if err := s.repo.CreateCluster(c.Request.Context(), cluster); err != nil {
@@ -124,7 +124,7 @@ func (s *Server) createCluster(c *gin.Context) {
 	s.logger.Info("Cluster created",
 		zap.String("cluster_id", clusterID),
 		zap.String("cluster_name", req.ClusterName),
-		zap.String("internal_gateway_url", req.InternalGatewayURL),
+		zap.String("cluster_gateway_url", req.ClusterGatewayURL),
 		zap.Int("weight", req.Weight),
 		zap.Bool("enabled", req.Enabled),
 	)
@@ -152,8 +152,8 @@ func (s *Server) updateCluster(c *gin.Context) {
 		return
 	}
 
-	if req.InternalGatewayURL == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "internal_gateway_url is required")
+	if req.ClusterGatewayURL == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "cluster_gateway_url is required")
 		return
 	}
 
@@ -182,11 +182,11 @@ func (s *Server) updateCluster(c *gin.Context) {
 	}
 
 	cluster := &db.Cluster{
-		ClusterID:          clusterID,
-		ClusterName:        req.ClusterName,
-		InternalGatewayURL: req.InternalGatewayURL,
-		Weight:             req.Weight,
-		Enabled:            req.Enabled,
+		ClusterID:         clusterID,
+		ClusterName:       req.ClusterName,
+		ClusterGatewayURL: req.ClusterGatewayURL,
+		Weight:            req.Weight,
+		Enabled:           req.Enabled,
 	}
 
 	if err := s.repo.UpdateCluster(c.Request.Context(), cluster); err != nil {
@@ -198,7 +198,7 @@ func (s *Server) updateCluster(c *gin.Context) {
 	s.logger.Info("Cluster updated",
 		zap.String("cluster_id", clusterID),
 		zap.String("cluster_name", req.ClusterName),
-		zap.String("internal_gateway_url", req.InternalGatewayURL),
+		zap.String("cluster_gateway_url", req.ClusterGatewayURL),
 		zap.Int("weight", req.Weight),
 		zap.Bool("enabled", req.Enabled),
 	)

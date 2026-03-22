@@ -2,7 +2,7 @@
 CREATE TABLE IF NOT EXISTS regions (
     id TEXT PRIMARY KEY,
     display_name TEXT,
-    edge_gateway_url TEXT NOT NULL,
+    regional_gateway_url TEXT NOT NULL,
     enabled BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()

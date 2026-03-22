@@ -153,7 +153,7 @@ func main() {
 	}
 
 	validatorConfig := internalauth.DefaultValidatorConfig("procd", publicKey)
-	validatorConfig.AllowedCallers = []string{"internal-gateway", "manager"}
+	validatorConfig.AllowedCallers = []string{"cluster-gateway", "manager"}
 	authValidator := internalauth.NewValidator(validatorConfig)
 
 	logger.Info("Internal authentication enabled",

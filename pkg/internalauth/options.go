@@ -8,7 +8,7 @@ import (
 // GeneratorConfig holds the configuration for a Generator.
 type GeneratorConfig struct {
 	// Caller is the service name that will generate tokens.
-	// Example: "internal-gateway", "manager", "procd"
+	// Example: "cluster-gateway", "manager", "procd"
 	Caller string
 
 	// PrivateKey is the Ed25519 private key used for signing tokens.

@@ -35,12 +35,12 @@ type TemplateAllocation struct {
 
 // Cluster represents a registered data-plane cluster.
 type Cluster struct {
-	ClusterID          string     `json:"cluster_id"`
-	ClusterName        string     `json:"cluster_name"`
-	InternalGatewayURL string     `json:"internal_gateway_url"`
-	Weight             int        `json:"weight"`
-	Enabled            bool       `json:"enabled"`
-	LastSeenAt         *time.Time `json:"last_seen_at,omitempty"`
-	CreatedAt          time.Time  `json:"created_at"`
-	UpdatedAt          time.Time  `json:"updated_at"`
+	ClusterID         string     `json:"cluster_id"`
+	ClusterName       string     `json:"cluster_name"`
+	ClusterGatewayURL string     `json:"cluster_gateway_url"`
+	Weight            int        `json:"weight"`
+	Enabled           bool       `json:"enabled"`
+	LastSeenAt        *time.Time `json:"last_seen_at,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
 }

@@ -221,7 +221,7 @@ func main() {
 	validator := internalauth.NewValidator(internalauth.ValidatorConfig{
 		Target:                 "storage-proxy",
 		PublicKey:              publicKey,
-		AllowedCallers:         []string{"internal-gateway", "manager", "procd"},
+		AllowedCallers:         []string{"cluster-gateway", "manager", "procd"},
 		ClockSkewTolerance:     5 * time.Second,
 		ReplayDetectionEnabled: false, // Disable for high-throughput scenarios
 	})
@@ -357,7 +357,7 @@ func initDatabase(ctx context.Context, databaseURL string, cfg *config.StoragePr
 
 	schema := cfg.DatabaseSchema
 	if schema == "" {
-		schema = "sp"
+		schema = "storage_proxy"
 	}
 
 	pool, err := dbpool.New(ctx, dbpool.Options{
@@ -400,7 +400,7 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, schema string, logge
 	logger.Info("Running database migrations")
 
 	if schema == "" {
-		schema = "sp"
+		schema = "storage_proxy"
 	}
 
 	// Create a migration logger that writes to zap

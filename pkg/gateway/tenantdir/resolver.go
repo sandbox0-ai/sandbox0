@@ -81,7 +81,7 @@ func (d *Directory) ResolveActiveTeam(ctx context.Context, userID, teamID string
 		}
 		return nil, err
 	}
-	active.EdgeGatewayURL = region.EdgeGatewayURL
+	active.RegionalGatewayURL = region.RegionalGatewayURL
 	return active, nil
 }
 

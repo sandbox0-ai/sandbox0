@@ -14,22 +14,22 @@ Sandbox0 self-hosted is **operator-first**.
 
 ### Planes and Core Services
 
-- **Control plane** (optional in single-cluster): `edge-gateway`, `scheduler`
-- **Data plane** (runtime): `internal-gateway`, `manager`, optional `storage-proxy`, optional `netd`
+- **Control plane** (optional in single-cluster): `regional-gateway`, `scheduler`
+- **Data plane** (runtime): `cluster-gateway`, `manager`, optional `storage-proxy`, optional `netd`
 - **In-pod runtime**: `procd` runs inside each sandbox pod and handles process/files/volume mount operations
 
 ### Single-Cluster vs Multi-Cluster
 
 | Mode | Required services | Typical use |
 |---|---|---|
-| Single-cluster | `internal-gateway` + `manager` | Most users, fastest path |
-| Multi-cluster | control plane (`edge-gateway` + `scheduler`) + one or more data planes | Regional scale-out |
+| Single-cluster | `cluster-gateway` + `manager` | Most users, fastest path |
+| Multi-cluster | control plane (`regional-gateway` + `scheduler`) + one or more data planes | Regional scale-out |
 
 ### Full Mode Single-Cluster
 
 ```mermaid
 flowchart TD
-    client[Client / API SDK] --> igw[internal-gateway]
+    client[Client / API SDK] --> igw[cluster-gateway]
 
     subgraph cluster[Kubernetes Cluster - single cluster full mode]
         direction TB
@@ -58,13 +58,13 @@ flowchart TD
     end
 ```
 
-In full mode single-cluster, `internal-gateway`, `manager`, `storage-proxy`, and `netd` are Sandbox0 services. PostgreSQL, S3/OSS, and optional image registry are middleware dependencies.
+In full mode single-cluster, `cluster-gateway`, `manager`, `storage-proxy`, and `netd` are Sandbox0 services. PostgreSQL, S3/OSS, and optional image registry are middleware dependencies.
 
 ### Request Flow
 
-- **Single-cluster (typical)**: client -> `internal-gateway` -> `manager` -> sandbox pod (`procd`)
-- **Single-cluster (direct pod path)**: client -> `internal-gateway` -> sandbox pod (`procd`) (for applicable traffic paths)
-- **Multi-cluster**: client -> `edge-gateway` -> `scheduler` -> target cluster `internal-gateway` -> `manager`
+- **Single-cluster (typical)**: client -> `cluster-gateway` -> `manager` -> sandbox pod (`procd`)
+- **Single-cluster (direct pod path)**: client -> `cluster-gateway` -> sandbox pod (`procd`) (for applicable traffic paths)
+- **Multi-cluster**: client -> `regional-gateway` -> `scheduler` -> target cluster `cluster-gateway` -> `manager`
 
 ### Regional Boundary
 

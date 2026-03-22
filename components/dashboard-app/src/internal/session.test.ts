@@ -10,10 +10,10 @@ const singleClusterConfig: DashboardRuntimeConfig = {
   singleClusterURL: "https://single.example.com",
 };
 
-const globalDirectoryConfig: DashboardRuntimeConfig = {
-  mode: "global-directory",
+const globalGatewayConfig: DashboardRuntimeConfig = {
+  mode: "global-gateway",
   siteURL: "https://sandbox0.ai",
-  globalDirectoryURL: "https://global.example.com",
+  globalGatewayURL: "https://global.example.com",
 };
 
 test("readBearerToken prefers Authorization header", () => {
@@ -124,7 +124,7 @@ test("resolveDashboardSession resolves single-cluster metadata", async () => {
   assert.equal(fetchCalls.length, 4);
 });
 
-test("resolveDashboardSession resolves global-directory metadata and region routing", async () => {
+test("resolveDashboardSession resolves global-gateway metadata and region routing", async () => {
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = String(input);
 
@@ -166,7 +166,7 @@ test("resolveDashboardSession resolves global-directory metadata and region rout
             team_id: "team_1",
             home_region_id: "aws/us-east-1",
             default_team: true,
-            edge_gateway_url: "https://use1.example.com",
+            regional_gateway_url: "https://use1.example.com",
           },
         }),
       );
@@ -177,7 +177,7 @@ test("resolveDashboardSession resolves global-directory metadata and region rout
         JSON.stringify({
           data: {
             region_id: "aws/us-east-1",
-            edge_gateway_url: "https://use1.example.com",
+            regional_gateway_url: "https://use1.example.com",
             token: "region-token",
             expires_at: 123456,
           },
@@ -207,7 +207,7 @@ test("resolveDashboardSession resolves global-directory metadata and region rout
   };
 
   const session = await resolveDashboardSession(
-    globalDirectoryConfig,
+    globalGatewayConfig,
     { bearerToken: "global-token" },
     fetchImpl,
   );

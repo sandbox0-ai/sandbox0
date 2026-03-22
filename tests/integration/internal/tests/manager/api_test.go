@@ -163,12 +163,12 @@ func newManagerTestEnvWithOptions(t *testing.T, opts managerTestEnvOptions) *man
 	privateKey, publicKey, err := createInternalKeys()
 	utils.RequireNoError(t, err, "create internal keys")
 
-	gen := internalauth.NewGenerator(internalauth.DefaultGeneratorConfig("internal-gateway", privateKey))
+	gen := internalauth.NewGenerator(internalauth.DefaultGeneratorConfig("cluster-gateway", privateKey))
 	token, err := gen.Generate("manager", "team-1", "user-1", internalauth.GenerateOptions{})
 	utils.RequireNoError(t, err, "generate internal token")
 
 	cfg := internalauth.DefaultValidatorConfig("manager", publicKey)
-	cfg.AllowedCallers = []string{"internal-gateway"}
+	cfg.AllowedCallers = []string{"cluster-gateway"}
 	validator := internalauth.NewValidator(cfg)
 
 	server := managerhttp.NewServer(

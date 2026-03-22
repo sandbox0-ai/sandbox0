@@ -38,8 +38,8 @@ type Server struct {
 	logger          *zap.Logger
 	obsProvider     *observability.Provider
 
-	internalGatewayProxies   map[string]*proxy.Router
-	internalGatewayProxiesMu sync.RWMutex
+	clusterGatewayProxies   map[string]*proxy.Router
+	clusterGatewayProxiesMu sync.RWMutex
 
 	clusterCache   map[string]*db.Cluster
 	clusterCacheAt time.Time
@@ -85,18 +85,18 @@ func NewServer(
 	router.Use(requestLogger(logger))
 
 	server := &Server{
-		router:                 router,
-		cfg:                    cfg,
-		repo:                   repo,
-		templateStore:          templateStore,
-		allocationStore:        allocationStore,
-		authValidator:          authValidator,
-		internalAuthGen:        internalAuthGen,
-		reconciler:             reconciler,
-		logger:                 logger,
-		obsProvider:            obsProvider,
-		internalGatewayProxies: make(map[string]*proxy.Router),
-		clusterCache:           make(map[string]*db.Cluster),
+		router:                router,
+		cfg:                   cfg,
+		repo:                  repo,
+		templateStore:         templateStore,
+		allocationStore:       allocationStore,
+		authValidator:         authValidator,
+		internalAuthGen:       internalAuthGen,
+		reconciler:            reconciler,
+		logger:                logger,
+		obsProvider:           obsProvider,
+		clusterGatewayProxies: make(map[string]*proxy.Router),
+		clusterCache:          make(map[string]*db.Cluster),
 	}
 	server.templateHandler = &templatehttp.Handler{
 		Store:           templateStore,
@@ -123,7 +123,7 @@ func (s *Server) setupRoutes() {
 	// API v1 routes
 	v1 := s.router.Group("/api/v1")
 	{
-		// Apply internal auth to all v1 routes (requests come from edge-gateway)
+		// Apply internal auth to all v1 routes (requests come from regional-gateway)
 		v1.Use(s.authMiddleware())
 
 		// Template Management (source of truth)
@@ -147,7 +147,7 @@ func (s *Server) setupRoutes() {
 			clusters.DELETE("/:id", s.deleteCluster)
 		}
 
-		// Sandbox routing (edge-gateway)
+		// Sandbox routing (regional-gateway)
 		sandboxes := v1.Group("/sandboxes")
 		{
 			sandboxes.GET("", s.listSandboxes)
@@ -327,17 +327,17 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 	}
 }
 
-func (s *Server) getInternalGatewayProxy(targetURL string) (*proxy.Router, error) {
-	s.internalGatewayProxiesMu.RLock()
-	p := s.internalGatewayProxies[targetURL]
-	s.internalGatewayProxiesMu.RUnlock()
+func (s *Server) getClusterGatewayProxy(targetURL string) (*proxy.Router, error) {
+	s.clusterGatewayProxiesMu.RLock()
+	p := s.clusterGatewayProxies[targetURL]
+	s.clusterGatewayProxiesMu.RUnlock()
 	if p != nil {
 		return p, nil
 	}
 
-	s.internalGatewayProxiesMu.Lock()
-	defer s.internalGatewayProxiesMu.Unlock()
-	p = s.internalGatewayProxies[targetURL]
+	s.clusterGatewayProxiesMu.Lock()
+	defer s.clusterGatewayProxiesMu.Unlock()
+	p = s.clusterGatewayProxies[targetURL]
 	if p != nil {
 		return p, nil
 	}
@@ -351,7 +351,7 @@ func (s *Server) getInternalGatewayProxy(targetURL string) (*proxy.Router, error
 	if err != nil {
 		return nil, err
 	}
-	s.internalGatewayProxies[targetURL] = p
+	s.clusterGatewayProxies[targetURL] = p
 	return p, nil
 }
 

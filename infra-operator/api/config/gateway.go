@@ -5,7 +5,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// GatewayConfig holds shared gateway configuration used by edge/internal gateway.
+// GatewayConfig holds shared gateway configuration used by edge/cluster gateway.
 type GatewayConfig struct {
 	// JWT Configuration
 	// +optional

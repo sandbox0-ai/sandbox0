@@ -514,17 +514,17 @@ func assertSandboxNetworkIsolation(env *framework.ScenarioEnv, session *e2eutils
 		return nil
 	}).WithTimeout(45 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
 
-	internalGatewayPort, err := framework.GetServicePort(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, env.Infra.Name+"-internal-gateway")
+	clusterGatewayPort, err := framework.GetServicePort(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, env.Infra.Name+"-cluster-gateway")
 	Expect(err).NotTo(HaveOccurred())
-	internalGatewayBaseURL := fmt.Sprintf("http://%s-internal-gateway.%s.svc.cluster.local:%d", env.Infra.Name, env.Infra.Namespace, internalGatewayPort)
+	clusterGatewayBaseURL := fmt.Sprintf("http://%s-cluster-gateway.%s.svc.cluster.local:%d", env.Infra.Name, env.Infra.Namespace, clusterGatewayPort)
 
 	Eventually(func() error {
-		body, execErr := execInSandboxPod(env, templateANamespace, sandboxA.PodName, fmt.Sprintf("curl -fsS --max-time 5 %s/healthz", internalGatewayBaseURL))
+		body, execErr := execInSandboxPod(env, templateANamespace, sandboxA.PodName, fmt.Sprintf("curl -fsS --max-time 5 %s/healthz", clusterGatewayBaseURL))
 		if execErr != nil {
 			return execErr
 		}
 		if strings.TrimSpace(body) == "" {
-			return fmt.Errorf("internal-gateway healthz returned empty body")
+			return fmt.Errorf("cluster-gateway healthz returned empty body")
 		}
 		return nil
 	}).WithTimeout(30 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
@@ -540,7 +540,7 @@ func assertSandboxNetworkIsolation(env *framework.ScenarioEnv, session *e2eutils
 	Expect(publicHost).NotTo(BeEmpty())
 
 	Eventually(func() error {
-		body, execErr := execInSandboxPod(env, templateANamespace, sandboxA.PodName, fmt.Sprintf("curl -fsS --max-time 10 -H 'Host: %s' %s/", publicHost, internalGatewayBaseURL))
+		body, execErr := execInSandboxPod(env, templateANamespace, sandboxA.PodName, fmt.Sprintf("curl -fsS --max-time 10 -H 'Host: %s' %s/", publicHost, clusterGatewayBaseURL))
 		if execErr != nil {
 			return execErr
 		}

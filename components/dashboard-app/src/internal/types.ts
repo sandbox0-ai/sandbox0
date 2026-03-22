@@ -1,10 +1,10 @@
-export type DashboardControlPlaneMode = "single-cluster" | "global-directory";
+export type DashboardControlPlaneMode = "single-cluster" | "global-gateway";
 
 export interface DashboardRuntimeConfig {
   mode: DashboardControlPlaneMode;
   siteURL: string;
   singleClusterURL?: string;
-  globalDirectoryURL?: string;
+  globalGatewayURL?: string;
 }
 
 export type DashboardAuthProviderType = "oidc" | "builtin";
@@ -45,7 +45,7 @@ export interface DashboardActiveTeam {
   teamRole?: string;
   homeRegionID: string;
   defaultTeam: boolean;
-  edgeGatewayURL?: string | null;
+  regionalGatewayURL?: string | null;
 }
 
 export interface DashboardSandboxSummary {

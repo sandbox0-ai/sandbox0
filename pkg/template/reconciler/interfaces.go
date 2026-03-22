@@ -49,7 +49,7 @@ type TemplateStats struct {
 	Templates []TemplateStat `json:"templates"`
 }
 
-// ClusterClient provides access to cluster-level APIs via internal-gateway.
+// ClusterClient provides access to cluster-level APIs via cluster-gateway.
 type ClusterClient interface {
 	GetClusterSummary(ctx context.Context, baseURL string) (*ClusterSummary, error)
 	GetTemplateStats(ctx context.Context, baseURL string) (*TemplateStats, error)

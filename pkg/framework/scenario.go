@@ -160,17 +160,17 @@ func scenarioNameFromPath(path string) string {
 
 func buildScenarioRollouts(infra *infrav1alpha1.Sandbox0Infra, infraName, namespace string) []RolloutTarget {
 	var rollouts []RolloutTarget
-	if infrav1alpha1.IsGlobalDirectoryEnabled(infra) {
-		rollouts = append(rollouts, RolloutTarget{Kind: "deployment", Name: infraName + "-global-directory", Namespace: namespace, Timeout: "5m"})
+	if infrav1alpha1.IsGlobalGatewayEnabled(infra) {
+		rollouts = append(rollouts, RolloutTarget{Kind: "deployment", Name: infraName + "-global-gateway", Namespace: namespace, Timeout: "5m"})
 	}
-	if infrav1alpha1.IsEdgeGatewayEnabled(infra) {
-		rollouts = append(rollouts, RolloutTarget{Kind: "deployment", Name: infraName + "-edge-gateway", Namespace: namespace, Timeout: "5m"})
+	if infrav1alpha1.IsRegionalGatewayEnabled(infra) {
+		rollouts = append(rollouts, RolloutTarget{Kind: "deployment", Name: infraName + "-regional-gateway", Namespace: namespace, Timeout: "5m"})
 	}
 	if infrav1alpha1.IsSchedulerEnabled(infra) {
 		rollouts = append(rollouts, RolloutTarget{Kind: "deployment", Name: infraName + "-scheduler", Namespace: namespace, Timeout: "5m"})
 	}
-	if infrav1alpha1.IsInternalGatewayEnabled(infra) {
-		rollouts = append(rollouts, RolloutTarget{Kind: "deployment", Name: infraName + "-internal-gateway", Namespace: namespace, Timeout: "5m"})
+	if infrav1alpha1.IsClusterGatewayEnabled(infra) {
+		rollouts = append(rollouts, RolloutTarget{Kind: "deployment", Name: infraName + "-cluster-gateway", Namespace: namespace, Timeout: "5m"})
 	}
 	if infrav1alpha1.IsManagerEnabled(infra) {
 		rollouts = append(rollouts, RolloutTarget{Kind: "deployment", Name: infraName + "-manager", Namespace: namespace, Timeout: "5m"})

@@ -27,7 +27,7 @@ func init() {
 func ExampleGenerator() {
 	// Create a generator for the caller service
 	generator := internalauth.NewGenerator(internalauth.GeneratorConfig{
-		Caller:     "internal-gateway",
+		Caller:     "cluster-gateway",
 		PrivateKey: examplePrivateKey,
 		TTL:        30 * time.Second,
 	})
@@ -55,7 +55,7 @@ func ExampleGenerator() {
 func ExampleValidator() {
 	// First, generate a token (in real usage, this comes from the caller service)
 	generator := internalauth.NewGenerator(internalauth.GeneratorConfig{
-		Caller:     "internal-gateway",
+		Caller:     "cluster-gateway",
 		PrivateKey: examplePrivateKey,
 	})
 	token, _ := generator.Generate("storage-proxy", "team-123", "user-456",
@@ -77,7 +77,7 @@ func ExampleValidator() {
 
 	fmt.Printf("Caller: %s, Team: %s, Permissions: %v\n",
 		claims.Caller, claims.TeamID, claims.Permissions)
-	// Output: Caller: internal-gateway, Team: team-123, Permissions: [sandboxvolume:read sandboxvolume:write]
+	// Output: Caller: cluster-gateway, Team: team-123, Permissions: [sandboxvolume:read sandboxvolume:write]
 }
 
 func ExampleAuthMiddleware() {
@@ -115,7 +115,7 @@ func ExampleAuthMiddleware() {
 func Example_authenticatedClient() {
 	// Create generator
 	generator := internalauth.NewGenerator(internalauth.GeneratorConfig{
-		Caller:     "internal-gateway",
+		Caller:     "cluster-gateway",
 		PrivateKey: examplePrivateKey,
 	})
 
@@ -138,7 +138,7 @@ func Example_authenticatedClient() {
 
 func ExampleTransport() {
 	generator := internalauth.NewGenerator(internalauth.GeneratorConfig{
-		Caller:     "internal-gateway",
+		Caller:     "cluster-gateway",
 		PrivateKey: examplePrivateKey,
 	})
 

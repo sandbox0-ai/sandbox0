@@ -78,7 +78,7 @@ func TestRegionHandlerCreateRegion(t *testing.T) {
 	})
 	router.POST("/regions", handler.CreateRegion)
 
-	req := httptest.NewRequest(http.MethodPost, "/regions", strings.NewReader(`{"id":"aws/us-east-1","display_name":"US East 1","edge_gateway_url":"https://use1.example.com","metering_export_url":"https://metering.use1.example.com"}`))
+	req := httptest.NewRequest(http.MethodPost, "/regions", strings.NewReader(`{"id":"aws/us-east-1","display_name":"US East 1","regional_gateway_url":"https://use1.example.com","metering_export_url":"https://metering.use1.example.com"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -96,8 +96,8 @@ func TestRegionHandlerCreateRegion(t *testing.T) {
 	if response.Data.ID != "aws/us-east-1" {
 		t.Fatalf("expected region id, got %q", response.Data.ID)
 	}
-	if response.Data.EdgeGatewayURL != "https://use1.example.com" {
-		t.Fatalf("expected edge url, got %q", response.Data.EdgeGatewayURL)
+	if response.Data.RegionalGatewayURL != "https://use1.example.com" {
+		t.Fatalf("expected regional gateway url, got %q", response.Data.RegionalGatewayURL)
 	}
 	if response.Data.MeteringExportURL != "https://metering.use1.example.com" {
 		t.Fatalf("expected metering export url, got %q", response.Data.MeteringExportURL)
@@ -110,11 +110,11 @@ func TestRegionHandlerUpdateRegionCanClearMeteringExportURL(t *testing.T) {
 
 	repo := &stubRegionRepository{regions: map[string]*tenantdir.Region{
 		"aws-us-east-1": {
-			ID:                "aws-us-east-1",
-			DisplayName:       "US East 1",
-			EdgeGatewayURL:    "https://use1.example.com",
-			MeteringExportURL: "https://metering.use1.example.com",
-			Enabled:           true,
+			ID:                 "aws-us-east-1",
+			DisplayName:        "US East 1",
+			RegionalGatewayURL: "https://use1.example.com",
+			MeteringExportURL:  "https://metering.use1.example.com",
+			Enabled:            true,
 		},
 	}}
 	handler := NewRegionHandler(repo, zap.NewNop())

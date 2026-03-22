@@ -27,9 +27,9 @@ func NewAPISession(env *framework.ScenarioEnv, useEdge bool) (*Session, func(), 
 	if env == nil {
 		return nil, nil, fmt.Errorf("scenario env is required")
 	}
-	serviceName := env.Infra.Name + "-internal-gateway"
+	serviceName := env.Infra.Name + "-cluster-gateway"
 	if useEdge {
-		serviceName = env.Infra.Name + "-edge-gateway"
+		serviceName = env.Infra.Name + "-regional-gateway"
 	}
 
 	port, err := framework.GetServicePort(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, serviceName)

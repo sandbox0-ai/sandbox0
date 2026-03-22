@@ -29,14 +29,14 @@ It can serve as an E2B alternative, suitable for general agents, coding agents, 
 - Snapshot, restore, and fork-oriented volume workflows built on JuiceFS plus object storage and PostgreSQL metadata, which is exactly what long-running agent systems need for recovery and reuse.
 - Node-level network control through `netd`, which watches sandbox policy, transparently redirects traffic, and applies L4/L7 enforcement close to the workload.
 - Runtime-agnostic sandboxing via template `runtimeClassName`, so the same system can run on a standard Kubernetes runtime in development and move to stronger isolation such as gVisor or Kata in production.
-- A deployment model that scales from a simple single-cluster setup to multi-cluster regional routing with `edge-gateway` and `scheduler`.
+- A deployment model that scales from a simple single-cluster setup to multi-cluster regional routing with `regional-gateway` and `scheduler`.
 - Operator-first lifecycle management, so installation, reconciliation, and upgrades follow a repeatable Kubernetes-native path instead of bespoke scripts.
 
 ### Architecture
 
 ```mermaid
 flowchart TD
-    client[Client / API SDK] --> igw[internal-gateway]
+    client[Client / API SDK] --> igw[cluster-gateway]
 
     subgraph cluster[Kubernetes Cluster - single cluster full mode]
         direction TB
@@ -134,7 +134,7 @@ nodes:
       extraArgs:
         enable-aggregator-routing: "true"
   extraPortMappings:
-  # internal-gateway HTTP port
+  # cluster-gateway HTTP port
   - containerPort: 30080
     hostPort: 30080
   # registry port for template image push
@@ -171,7 +171,7 @@ printf 'username: %s\npassword: %s\n' 'admin@example.com' "$ADMIN_PASSWORD"
 
 Configure the local API URL and create a token:
 
-The local `kind` setup above exposes `internal-gateway` at `http://localhost:30080`.
+The local `kind` setup above exposes `cluster-gateway` at `http://localhost:30080`.
 
 ```bash
 export SANDBOX0_BASE_URL="http://localhost:30080"

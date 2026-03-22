@@ -42,6 +42,6 @@
     "typescript": "^5.7.2"
   },
   "dependencies": {
-    "sandbox0": "^0.1.9"
+    "sandbox0": "^0.1.10"
   }
 }

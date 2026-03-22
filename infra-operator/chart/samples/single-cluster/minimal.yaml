@@ -1,4 +1,4 @@
-# Example: Single-cluster minimal mode (internal-gateway + manager)
+# Example: Single-cluster minimal mode (cluster-gateway + manager)
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -52,7 +52,7 @@ spec:
         minIdle: 1
         maxIdle: 5
   services:
-    internalGateway:
+    clusterGateway:
       enabled: true
       replicas: 1
       # service:

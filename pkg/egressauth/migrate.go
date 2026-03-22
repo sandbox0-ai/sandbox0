@@ -22,7 +22,7 @@ func RunMigrations(ctx context.Context, pool *pgxpool.Pool, logger Logger) error
 		migrate.WithBaseFS(migrations.FS),
 		migrate.WithLogger(logger),
 		migrate.WithTableName(migrationTableName),
-		migrate.WithSchema("sched"),
+		migrate.WithSchema("scheduler"),
 	); err != nil {
 		return fmt.Errorf("run egress auth migrations: %w", err)
 	}

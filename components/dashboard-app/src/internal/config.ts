@@ -4,7 +4,7 @@ import type {
 } from "./types";
 
 function normalizeMode(value: string | undefined): DashboardControlPlaneMode {
-  if (value === "global-directory") {
+  if (value === "global-gateway") {
     return value;
   }
   return "single-cluster";
@@ -24,12 +24,12 @@ export function resolveDashboardRuntimeConfig(
   const siteURL =
     env.SANDBOX0_DASHBOARD_SITE_URL ?? defaultSiteURL(env.NODE_ENV);
 
-  if (mode === "global-directory") {
+  if (mode === "global-gateway") {
     return {
       mode,
       siteURL,
-      globalDirectoryURL:
-        env.SANDBOX0_DASHBOARD_GLOBAL_DIRECTORY_URL ??
+      globalGatewayURL:
+        env.SANDBOX0_DASHBOARD_GLOBAL_GATEWAY_URL ??
         env.SANDBOX0_BASE_URL ??
         "https://api.sandbox0.ai",
     };
@@ -48,8 +48,8 @@ export function resolveDashboardRuntimeConfig(
 export function resolveDashboardControlPlaneURL(
   config: DashboardRuntimeConfig,
 ): string | undefined {
-  if (config.mode === "global-directory") {
-    return config.globalDirectoryURL;
+  if (config.mode === "global-gateway") {
+    return config.globalGatewayURL;
   }
 
   return config.singleClusterURL;

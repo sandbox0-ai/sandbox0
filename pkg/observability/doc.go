@@ -19,7 +19,7 @@
 // Initialize observability provider once in your main.go:
 //
 //	provider, err := observability.New(observability.Config{
-//	    ServiceName: "internal-gateway",
+//	    ServiceName: "cluster-gateway",
 //	    Logger:      logger,
 //	})
 //	defer provider.Shutdown(context.Background())

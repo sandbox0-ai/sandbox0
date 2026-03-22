@@ -108,7 +108,7 @@ func TestResolveEgressAuthRejectsNonNetdCaller(t *testing.T) {
 	ctx, _ := gin.CreateTestContext(recorder)
 	req := httptest.NewRequest(http.MethodPost, "/internal/v1/egress-auth/resolve", bytes.NewReader([]byte(`{"authRef":"example-api"}`)))
 	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
-		Caller:   "internal-gateway",
+		Caller:   "cluster-gateway",
 		Target:   "manager",
 		Audience: "manager",
 	}))

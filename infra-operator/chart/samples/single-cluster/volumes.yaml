@@ -71,7 +71,7 @@ spec:
         minIdle: 1
         maxIdle: 5
   services:
-    internalGateway:
+    clusterGateway:
       enabled: true
       replicas: 1
       service:

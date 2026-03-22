@@ -42,14 +42,14 @@ import (
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/rbac"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/clustergateway"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/edgegateway"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/fuseplugin"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/globaldirectory"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/globalgateway"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalgateway"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/manager"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/netd"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/regionalgateway"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/registry"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/scheduler"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storage"
@@ -192,12 +192,12 @@ func (r *Sandbox0InfraReconciler) reconcileDelete(ctx context.Context, infra *in
 }
 
 type componentPlan struct {
-	EnableGlobalDirectory     bool
+	EnableGlobalGateway       bool
 	HasControlPlane           bool
 	HasDataPlane              bool
-	EnableEdgeGateway         bool
+	EnableRegionalGateway     bool
 	EnableScheduler           bool
-	EnableInternalGateway     bool
+	EnableClusterGateway      bool
 	EnableManager             bool
 	EnableStorageProxy        bool
 	EnableFusePlugin          bool
@@ -212,23 +212,23 @@ type componentPlan struct {
 }
 
 func (r *Sandbox0InfraReconciler) buildComponentPlan(infra *infrav1alpha1.Sandbox0Infra) componentPlan {
-	enableGlobalDirectory := infrav1alpha1.IsGlobalDirectoryEnabled(infra)
-	enableEdgeGateway := infrav1alpha1.IsEdgeGatewayEnabled(infra)
+	enableGlobalGateway := infrav1alpha1.IsGlobalGatewayEnabled(infra)
+	enableRegionalGateway := infrav1alpha1.IsRegionalGatewayEnabled(infra)
 	enableScheduler := infrav1alpha1.IsSchedulerEnabled(infra)
-	enableInternalGateway := infrav1alpha1.IsInternalGatewayEnabled(infra)
+	enableClusterGateway := infrav1alpha1.IsClusterGatewayEnabled(infra)
 	enableManager := infrav1alpha1.IsManagerEnabled(infra)
 	enableStorageProxy := infrav1alpha1.IsStorageProxyEnabled(infra)
 
-	hasControlPlane := enableEdgeGateway || enableScheduler
-	hasDataPlane := enableInternalGateway || enableManager || enableStorageProxy
+	hasControlPlane := enableRegionalGateway || enableScheduler
+	hasDataPlane := enableClusterGateway || enableManager || enableStorageProxy
 
 	return componentPlan{
-		EnableGlobalDirectory:     enableGlobalDirectory,
+		EnableGlobalGateway:       enableGlobalGateway,
 		HasControlPlane:           hasControlPlane,
 		HasDataPlane:              hasDataPlane,
-		EnableEdgeGateway:         enableEdgeGateway,
+		EnableRegionalGateway:     enableRegionalGateway,
 		EnableScheduler:           enableScheduler,
-		EnableInternalGateway:     enableInternalGateway,
+		EnableClusterGateway:      enableClusterGateway,
 		EnableManager:             enableManager,
 		EnableStorageProxy:        enableStorageProxy,
 		EnableFusePlugin:          enableManager,
@@ -251,8 +251,8 @@ func (r *Sandbox0InfraReconciler) validateComponentPlan(infra *infrav1alpha1.San
 	if infra.Spec.InitUser != nil && !plan.EnableDatabase {
 		return fmt.Errorf("initUser can only be enabled when database is enabled")
 	}
-	if plan.EnableGlobalDirectory && !plan.EnableDatabase {
-		return fmt.Errorf("globalDirectory requires database to be enabled")
+	if plan.EnableGlobalGateway && !plan.EnableDatabase {
+		return fmt.Errorf("globalGateway requires database to be enabled")
 	}
 	if infra.Spec.Cluster != nil && !plan.HasDataPlane {
 		return fmt.Errorf("cluster configuration requires at least one data-plane service")
@@ -283,10 +283,10 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 	dbReconciler := database.NewReconciler(resources)
 	storageReconciler := storage.NewReconciler(resources)
 	registryReconciler := registry.NewReconciler(resources)
-	globalDirectoryReconciler := globaldirectory.NewReconciler(resources)
-	edgeGatewayReconciler := edgegateway.NewReconciler(resources)
+	globalGatewayReconciler := globalgateway.NewReconciler(resources)
+	regionalGatewayReconciler := regionalgateway.NewReconciler(resources)
 	schedulerReconciler := scheduler.NewReconciler(resources)
-	internalGatewayReconciler := internalgateway.NewReconciler(resources)
+	clusterGatewayReconciler := clustergateway.NewReconciler(resources)
 	managerReconciler := manager.NewReconciler(resources)
 	storageProxyReconciler := storageproxy.NewReconciler(resources)
 	fusePluginReconciler := fuseplugin.NewReconciler(resources)
@@ -362,16 +362,16 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 			ErrorReason:    "RegistryFailed",
 		})
 	}
-	if plan.EnableGlobalDirectory {
+	if plan.EnableGlobalGateway {
 		steps = append(steps, reconcileStep{
-			Name: "global-directory",
+			Name: "global-gateway",
 			Run: func(ctx context.Context) error {
-				return globalDirectoryReconciler.Reconcile(ctx, infra, imageRepo, imageTag)
+				return globalGatewayReconciler.Reconcile(ctx, infra, imageRepo, imageTag)
 			},
-			ConditionType:  infrav1alpha1.ConditionTypeGlobalDirectoryReady,
-			SuccessReason:  "GlobalDirectoryReady",
-			SuccessMessage: "Global directory is ready",
-			ErrorReason:    "GlobalDirectoryFailed",
+			ConditionType:  infrav1alpha1.ConditionTypeGlobalGatewayReady,
+			SuccessReason:  "GlobalGatewayReady",
+			SuccessMessage: "Global gateway is ready",
+			ErrorReason:    "GlobalGatewayFailed",
 		})
 	}
 	if plan.EnableInitUser {
@@ -384,16 +384,16 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 			ErrorReason:    "InitUserSecretFailed",
 		})
 	}
-	if plan.EnableEdgeGateway {
+	if plan.EnableRegionalGateway {
 		steps = append(steps, reconcileStep{
-			Name: "edge-gateway",
+			Name: "regional-gateway",
 			Run: func(ctx context.Context) error {
-				return edgeGatewayReconciler.Reconcile(ctx, infra, imageRepo, imageTag)
+				return regionalGatewayReconciler.Reconcile(ctx, infra, imageRepo, imageTag)
 			},
-			ConditionType:  infrav1alpha1.ConditionTypeEdgeGatewayReady,
-			SuccessReason:  "EdgeGatewayReady",
+			ConditionType:  infrav1alpha1.ConditionTypeRegionalGatewayReady,
+			SuccessReason:  "RegionalGatewayReady",
 			SuccessMessage: "Edge gateway is ready",
-			ErrorReason:    "EdgeGatewayFailed",
+			ErrorReason:    "RegionalGatewayFailed",
 		})
 	}
 	if plan.EnableScheduler {
@@ -415,16 +415,16 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 			},
 		)
 	}
-	if plan.EnableInternalGateway {
+	if plan.EnableClusterGateway {
 		steps = append(steps, reconcileStep{
-			Name: "internal-gateway",
+			Name: "cluster-gateway",
 			Run: func(ctx context.Context) error {
-				return internalGatewayReconciler.Reconcile(ctx, infra, imageRepo, imageTag)
+				return clusterGatewayReconciler.Reconcile(ctx, infra, imageRepo, imageTag)
 			},
-			ConditionType:  infrav1alpha1.ConditionTypeInternalGatewayReady,
-			SuccessReason:  "InternalGatewayReady",
+			ConditionType:  infrav1alpha1.ConditionTypeClusterGatewayReady,
+			SuccessReason:  "ClusterGatewayReady",
 			SuccessMessage: "Internal gateway is ready",
-			ErrorReason:    "InternalGatewayFailed",
+			ErrorReason:    "ClusterGatewayFailed",
 		})
 	}
 	if plan.EnableNetd {
@@ -555,24 +555,24 @@ func (r *Sandbox0InfraReconciler) cleanupDisabledServiceResources(ctx context.Co
 		return nil
 	}
 
-	globalDirectoryName := fmt.Sprintf("%s-global-directory", infra.Name)
-	if !plan.EnableGlobalDirectory {
-		if err := deleteNamespaced(globalDirectoryName, &appsv1.Deployment{}); err != nil {
+	globalGatewayName := fmt.Sprintf("%s-global-gateway", infra.Name)
+	if !plan.EnableGlobalGateway {
+		if err := deleteNamespaced(globalGatewayName, &appsv1.Deployment{}); err != nil {
 			return err
 		}
-		if err := deleteNamespaced(globalDirectoryName, &corev1.Service{}); err != nil {
+		if err := deleteNamespaced(globalGatewayName, &corev1.Service{}); err != nil {
 			return err
 		}
-		if err := deleteNamespaced(globalDirectoryName, &corev1.ConfigMap{}); err != nil {
+		if err := deleteNamespaced(globalGatewayName, &corev1.ConfigMap{}); err != nil {
 			return err
 		}
-		if err := deleteNamespaced(globalDirectoryName, &networkingv1.Ingress{}); err != nil {
+		if err := deleteNamespaced(globalGatewayName, &networkingv1.Ingress{}); err != nil {
 			return err
 		}
 	}
 
-	edgeName := fmt.Sprintf("%s-edge-gateway", infra.Name)
-	if !plan.EnableEdgeGateway {
+	edgeName := fmt.Sprintf("%s-regional-gateway", infra.Name)
+	if !plan.EnableRegionalGateway {
 		if err := deleteNamespaced(edgeName, &appsv1.Deployment{}); err != nil {
 			return err
 		}
@@ -603,15 +603,15 @@ func (r *Sandbox0InfraReconciler) cleanupDisabledServiceResources(ctx context.Co
 		}
 	}
 
-	internalGatewayName := fmt.Sprintf("%s-internal-gateway", infra.Name)
-	if !plan.EnableInternalGateway {
-		if err := deleteNamespaced(internalGatewayName, &appsv1.Deployment{}); err != nil {
+	clusterGatewayName := fmt.Sprintf("%s-cluster-gateway", infra.Name)
+	if !plan.EnableClusterGateway {
+		if err := deleteNamespaced(clusterGatewayName, &appsv1.Deployment{}); err != nil {
 			return err
 		}
-		if err := deleteNamespaced(internalGatewayName, &corev1.Service{}); err != nil {
+		if err := deleteNamespaced(clusterGatewayName, &corev1.Service{}); err != nil {
 			return err
 		}
-		if err := deleteNamespaced(internalGatewayName, &corev1.ConfigMap{}); err != nil {
+		if err := deleteNamespaced(clusterGatewayName, &corev1.ConfigMap{}); err != nil {
 			return err
 		}
 	}
@@ -850,17 +850,17 @@ func (r *Sandbox0InfraReconciler) expectedConditionTypes(infra *infrav1alpha1.Sa
 	if plan.EnableRegistry {
 		conditions = append(conditions, infrav1alpha1.ConditionTypeRegistryReady)
 	}
-	if plan.EnableGlobalDirectory {
-		conditions = append(conditions, infrav1alpha1.ConditionTypeGlobalDirectoryReady)
+	if plan.EnableGlobalGateway {
+		conditions = append(conditions, infrav1alpha1.ConditionTypeGlobalGatewayReady)
 	}
-	if plan.EnableEdgeGateway {
-		conditions = append(conditions, infrav1alpha1.ConditionTypeEdgeGatewayReady)
+	if plan.EnableRegionalGateway {
+		conditions = append(conditions, infrav1alpha1.ConditionTypeRegionalGatewayReady)
 	}
 	if plan.EnableScheduler {
 		conditions = append(conditions, infrav1alpha1.ConditionTypeSchedulerReady)
 	}
-	if plan.EnableInternalGateway {
-		conditions = append(conditions, infrav1alpha1.ConditionTypeInternalGatewayReady)
+	if plan.EnableClusterGateway {
+		conditions = append(conditions, infrav1alpha1.ConditionTypeClusterGatewayReady)
 	}
 	if plan.EnableManager {
 		conditions = append(conditions, infrav1alpha1.ConditionTypeManagerReady)
@@ -999,11 +999,11 @@ func isReadyPod(pod *corev1.Pod) bool {
 }
 
 func isManagerTemplateStoreEnabled(infra *infrav1alpha1.Sandbox0Infra) bool {
-	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.InternalGateway == nil {
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.ClusterGateway == nil {
 		return false
 	}
 	authMode := ""
-	if cfg := infra.Spec.Services.InternalGateway.Config; cfg != nil {
+	if cfg := infra.Spec.Services.ClusterGateway.Config; cfg != nil {
 		authMode = cfg.AuthMode
 	}
 	authMode = strings.TrimSpace(strings.ToLower(authMode))

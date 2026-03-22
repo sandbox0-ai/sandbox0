@@ -6,7 +6,7 @@ import (
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 )
 
-func TestExpectedConditionTypesIncludesGlobalDirectory(t *testing.T) {
+func TestExpectedConditionTypesIncludesGlobalGateway(t *testing.T) {
 	reconciler := &Sandbox0InfraReconciler{}
 	infra := &infrav1alpha1.Sandbox0Infra{
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
@@ -19,7 +19,7 @@ func TestExpectedConditionTypesIncludesGlobalDirectory(t *testing.T) {
 				},
 			},
 			Services: &infrav1alpha1.ServicesConfig{
-				GlobalDirectory: &infrav1alpha1.GlobalDirectoryServiceConfig{
+				GlobalGateway: &infrav1alpha1.GlobalGatewayServiceConfig{
 					BaseServiceConfig: infrav1alpha1.BaseServiceConfig{
 						Enabled: true,
 					},
@@ -35,7 +35,7 @@ func TestExpectedConditionTypesIncludesGlobalDirectory(t *testing.T) {
 	if conditions[0] != infrav1alpha1.ConditionTypeDatabaseReady {
 		t.Fatalf("expected database condition first, got %q", conditions[0])
 	}
-	if conditions[1] != infrav1alpha1.ConditionTypeGlobalDirectoryReady {
-		t.Fatalf("expected global-directory condition second, got %q", conditions[1])
+	if conditions[1] != infrav1alpha1.ConditionTypeGlobalGatewayReady {
+		t.Fatalf("expected global-gateway condition second, got %q", conditions[1])
 	}
 }

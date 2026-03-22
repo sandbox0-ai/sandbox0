@@ -1,4 +1,4 @@
-# Example: Regional multi-cluster control plane (edge-gateway + scheduler)
+# Example: Regional multi-cluster control plane (regional-gateway + scheduler)
 # Deploy the global-service layer separately when running self-hosted multi-region.
 apiVersion: v1
 kind: Namespace
@@ -37,7 +37,7 @@ spec:
        # For local kind debug, s0 CLI can push via this endpoint.
        pushEndpoint: 127.0.0.1:30500
     ## Shared regional registry for all data-plane clusters in this region.
-    ## edge-gateway issues upload credentials from this config.
+    ## regional-gateway issues upload credentials from this config.
     #provider: aws
     #imagePullSecretName: sandbox0-registry-pull
     #aws:
@@ -53,7 +53,7 @@ spec:
     #    accessKeyKey: accessKeyId
     #    secretKeyKey: secretAccessKey
   services:
-    edgeGateway:
+    regionalGateway:
       enabled: true
       replicas: 1
       # service:

@@ -90,6 +90,22 @@ function toTemplates(
   }));
 }
 
+function readRegionalGatewayURL(value: unknown): string | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const obj = value as Record<string, unknown>;
+  const candidate =
+    obj.regionalGatewayURL ??
+    obj.regionalGatewayUrl ??
+    obj.RegionalGatewayUrl;
+
+  return typeof candidate === "string" && candidate.length > 0
+    ? candidate
+    : null;
+}
+
 function deriveSingleClusterActiveTeam(
   user: DashboardUser,
   teams: DashboardTeam[],
@@ -106,7 +122,7 @@ function deriveSingleClusterActiveTeam(
     teamID: defaultTeam.id,
     homeRegionID: defaultTeam.homeRegionID ?? "local",
     defaultTeam: defaultTeam.id === user.defaultTeamID,
-    edgeGatewayURL: regionalURL,
+    regionalGatewayURL: regionalURL,
   };
 }
 
@@ -142,7 +158,7 @@ export async function resolveDashboardSession(
     authenticated: false,
     mode: config.mode,
     siteURL: config.siteURL,
-    configuredGlobalURL: config.globalDirectoryURL,
+    configuredGlobalURL: config.globalGatewayURL,
     configuredRegionalURL:
       config.mode === "single-cluster" ? config.singleClusterURL : undefined,
     teams: [],
@@ -207,11 +223,11 @@ export async function resolveDashboardSession(
     }
   }
 
-  const globalURL = config.globalDirectoryURL;
+  const globalURL = config.globalGatewayURL;
   if (!globalURL) {
     return {
       ...baseSession,
-      errors: ["global-directory mode is missing a global base URL"],
+      errors: ["global-gateway mode is missing a global base URL"],
     };
   }
 
@@ -243,10 +259,10 @@ export async function resolveDashboardSession(
       teamRole: activeTeamData.teamRole,
       homeRegionID: activeTeamData.homeRegionId,
       defaultTeam: Boolean(activeTeamData.defaultTeam),
-      edgeGatewayURL: activeTeamData.edgeGatewayUrl ?? null,
+      regionalGatewayURL: readRegionalGatewayURL(activeTeamData),
     };
 
-    let regionalURL = activeTeam.edgeGatewayURL ?? undefined;
+    let regionalURL = activeTeam.regionalGatewayURL ?? undefined;
     let regionToken = token;
     if (regionalURL) {
       const regionTokenResponse = await globalSDK.tenant.authRegionTokenPost({
@@ -257,7 +273,7 @@ export async function resolveDashboardSession(
         throw new Error("/auth/region-token returned an empty response");
       }
 
-      regionalURL = regionTokenData.edgeGatewayUrl ?? regionalURL;
+      regionalURL = readRegionalGatewayURL(regionTokenData) ?? regionalURL;
       regionToken = regionTokenData.token;
     }
 

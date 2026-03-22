@@ -109,16 +109,16 @@ func main() {
 		)
 	}
 
-	// Create internal auth generator (for calling internal-gateway)
+	// Create internal auth generator (for calling cluster-gateway)
 	internalAuthGen := internalauth.NewGenerator(internalauth.GeneratorConfig{
 		Caller:     "scheduler",
 		PrivateKey: privateKey,
 		TTL:        30 * time.Second,
 	})
 
-	// Create internal auth validator (for validating requests from edge-gateway)
+	// Create internal auth validator (for validating requests from regional-gateway)
 	validatorConfig := internalauth.DefaultValidatorConfig("scheduler", publicKey)
-	validatorConfig.AllowedCallers = []string{"edge-gateway"}
+	validatorConfig.AllowedCallers = []string{"regional-gateway"}
 	authValidator := internalauth.NewValidator(validatorConfig)
 
 	logger.Info("Internal authentication enabled",
@@ -126,11 +126,11 @@ func main() {
 		zap.Strings("allowed_callers", validatorConfig.AllowedCallers),
 	)
 
-	// Create internal-gateway client
-	igClient := client.NewInternalGatewayClient(internalAuthGen, logger, obsProvider)
+	// Create cluster-gateway client
+	clusterGatewayClient := client.NewClusterGatewayClient(internalAuthGen, logger, obsProvider)
 
 	// Create reconciler
-	rec := reconciler.NewReconciler(templateStore, templateStore, repo, igClient, cfg.ReconcileInterval.Duration, clk, cfg.PodsPerNode, logger, schedulerMetrics)
+	rec := reconciler.NewReconciler(templateStore, templateStore, repo, clusterGatewayClient, cfg.ReconcileInterval.Duration, clk, cfg.PodsPerNode, logger, schedulerMetrics)
 
 	// Create HTTP server
 	httpServer, err := httpserver.NewServer(cfg, repo, templateStore, templateStore, authValidator, internalAuthGen, rec, logger, obsProvider)
@@ -170,7 +170,7 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) 
 	if err := migrate.Up(ctx, pool, ".",
 		migrate.WithBaseFS(templmigrations.FS),
 		migrate.WithLogger(migrateLogger),
-		migrate.WithSchema("sched"),
+		migrate.WithSchema("scheduler"),
 	); err != nil {
 		return fmt.Errorf("migrate up: %w", err)
 	}
@@ -254,7 +254,7 @@ func initDatabase(ctx context.Context, cfg *config.SchedulerConfig, logger *zap.
 		DefaultMinConns: 2,
 		MaxConnLifetime: maxConnLifetime,
 		MaxConnIdleTime: maxConnIdleTime,
-		Schema:          "sched",
+		Schema:          "scheduler",
 	})
 	if err != nil {
 		return nil, err

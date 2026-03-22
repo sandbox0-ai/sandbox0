@@ -66,7 +66,7 @@ func EnsureBuiltinTemplates(ctx context.Context, infra *infrav1alpha1.Sandbox0In
 		MinConns:        opts.DatabaseMinConns,
 		DefaultMaxConns: 10,
 		DefaultMinConns: 2,
-		Schema:          "sched",
+		Schema:          "scheduler",
 	})
 	if err != nil {
 		return fmt.Errorf("init template store database: %w", err)
@@ -75,7 +75,7 @@ func EnsureBuiltinTemplates(ctx context.Context, infra *infrav1alpha1.Sandbox0In
 
 	if err := migrate.Up(ctx, pool, ".",
 		migrate.WithBaseFS(templmigrations.FS),
-		migrate.WithSchema("sched"),
+		migrate.WithSchema("scheduler"),
 	); err != nil {
 		return fmt.Errorf("migrate template store: %w", err)
 	}

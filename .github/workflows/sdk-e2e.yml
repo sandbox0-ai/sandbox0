@@ -100,7 +100,7 @@ jobs:
 
       - name: Set API base URL (NodePort)
         run: |
-          service_name="${INFRA_NAME}-internal-gateway"
+          service_name="${INFRA_NAME}-cluster-gateway"
           node_port=$(kubectl -n "${INFRA_NAMESPACE}" get svc "${service_name}" -o jsonpath='{.spec.ports[0].nodePort}')
           # For Kind with extraPortMappings, use localhost
           # For real clusters, set S0_E2E_NODE_IP to the node's reachable IP

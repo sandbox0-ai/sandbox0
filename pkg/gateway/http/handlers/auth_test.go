@@ -85,7 +85,7 @@ func TestAuthHandler_RefreshToken_SucceedsWithPersistedToken(t *testing.T) {
 	}
 	repo.users[user.ID] = user
 
-	issuer := authn.NewIssuer("edge-gateway", "test-secret", time.Minute, time.Hour)
+	issuer := authn.NewIssuer("regional-gateway", "test-secret", time.Minute, time.Hour)
 	initialTokens, err := issuer.IssueTokenPair(user.ID, "", "", user.Email, user.Name, user.IsAdmin)
 	if err != nil {
 		t.Fatalf("issue initial token pair: %v", err)
@@ -146,7 +146,7 @@ func TestAuthHandler_LogoutRevocation_BlocksRefresh(t *testing.T) {
 	}
 	repo.users[user.ID] = user
 
-	issuer := authn.NewIssuer("edge-gateway", "test-secret", time.Minute, time.Hour)
+	issuer := authn.NewIssuer("regional-gateway", "test-secret", time.Minute, time.Hour)
 	initialTokens, err := issuer.IssueTokenPair(user.ID, "", "", user.Email, user.Name, user.IsAdmin)
 	if err != nil {
 		t.Fatalf("issue initial token pair: %v", err)
@@ -204,7 +204,7 @@ func TestAuthHandler_RefreshToken_FailsWhenTokenNeverPersisted(t *testing.T) {
 	}
 	repo.users[user.ID] = user
 
-	issuer := authn.NewIssuer("edge-gateway", "test-secret", time.Minute, time.Hour)
+	issuer := authn.NewIssuer("regional-gateway", "test-secret", time.Minute, time.Hour)
 	initialTokens, err := issuer.IssueTokenPair(user.ID, "", "", user.Email, user.Name, user.IsAdmin)
 	if err != nil {
 		t.Fatalf("issue initial token pair: %v", err)

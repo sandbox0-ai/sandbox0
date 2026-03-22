@@ -21,7 +21,7 @@ type MultiClusterReconciler struct {
 	templateStore    TemplateStore
 	allocationStore  AllocationStore
 	clusterStore     ClusterStore
-	igClient         ClusterClient
+	clusterClient    ClusterClient
 	logger           *zap.Logger
 	interval         time.Duration
 	clock            *clock.Clock
@@ -43,7 +43,7 @@ func NewMultiClusterReconciler(
 	templateStore TemplateStore,
 	allocationStore AllocationStore,
 	clusterStore ClusterStore,
-	igClient ClusterClient,
+	clusterClient ClusterClient,
 	interval time.Duration,
 	clk *clock.Clock,
 	podsPerNode int,
@@ -57,7 +57,7 @@ func NewMultiClusterReconciler(
 		templateStore:   templateStore,
 		allocationStore: allocationStore,
 		clusterStore:    clusterStore,
-		igClient:        igClient,
+		clusterClient:   clusterClient,
 		logger:          logger,
 		interval:        interval,
 		clock:           clk,
@@ -279,7 +279,7 @@ func (r *MultiClusterReconciler) fetchClusterSummaries(ctx context.Context, clus
 		go func(c *template.Cluster) {
 			defer wg.Done()
 
-			summary, err := r.igClient.GetClusterSummary(ctx, c.InternalGatewayURL)
+			summary, err := r.clusterClient.GetClusterSummary(ctx, c.ClusterGatewayURL)
 			if err != nil {
 				r.logger.Warn("Failed to get cluster summary",
 					zap.String("cluster_id", c.ClusterID),
@@ -292,7 +292,7 @@ func (r *MultiClusterReconciler) fetchClusterSummaries(ctx context.Context, clus
 			summaries[c.ClusterID] = summary
 			mu.Unlock()
 
-			stats, err := r.igClient.GetTemplateStats(ctx, c.InternalGatewayURL)
+			stats, err := r.clusterClient.GetTemplateStats(ctx, c.ClusterGatewayURL)
 			if err != nil {
 				r.logger.Warn("Failed to get template stats",
 					zap.String("cluster_id", c.ClusterID),
@@ -369,7 +369,7 @@ func (r *MultiClusterReconciler) reconcileTemplate(ctx context.Context, tpl *tem
 			Spec: clusterSpec,
 		}
 
-		if err := r.igClient.CreateOrUpdateTemplate(ctx, cluster.InternalGatewayURL, crd); err != nil {
+		if err := r.clusterClient.CreateOrUpdateTemplate(ctx, cluster.ClusterGatewayURL, crd); err != nil {
 			r.logger.Error("Failed to sync template to cluster",
 				zap.String("template_id", tpl.TemplateID),
 				zap.String("cluster_id", alloc.ClusterID),
@@ -446,7 +446,7 @@ func (r *MultiClusterReconciler) findCluster(clusters []*template.Cluster, clust
 
 // cleanupOrphanTemplates removes templates from a cluster that don't exist in the database.
 func (r *MultiClusterReconciler) cleanupOrphanTemplates(ctx context.Context, cluster *template.Cluster, validTemplates map[string]bool) (int, error) {
-	stats, err := r.igClient.GetTemplateStats(ctx, cluster.InternalGatewayURL)
+	stats, err := r.clusterClient.GetTemplateStats(ctx, cluster.ClusterGatewayURL)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get template stats: %w", err)
 	}
@@ -460,7 +460,7 @@ func (r *MultiClusterReconciler) cleanupOrphanTemplates(ctx context.Context, clu
 				zap.String("template_id", stat.TemplateID),
 			)
 
-			err := r.igClient.DeleteTemplate(ctx, cluster.InternalGatewayURL, stat.TemplateID)
+			err := r.clusterClient.DeleteTemplate(ctx, cluster.ClusterGatewayURL, stat.TemplateID)
 			if err != nil {
 				r.logger.Error("Failed to delete orphan template",
 					zap.String("cluster_id", cluster.ClusterID),

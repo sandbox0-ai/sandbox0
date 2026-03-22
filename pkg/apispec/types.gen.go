@@ -822,12 +822,7 @@ type IssueRegionTokenRequest struct {
 }
 
 // IssueRegionTokenResponse defines model for IssueRegionTokenResponse.
-type IssueRegionTokenResponse struct {
-	ExpiresAt          int64   `json:"expires_at"`
-	RegionId           string  `json:"region_id"`
-	RegionalGatewayUrl *string `json:"regional_gateway_url"`
-	Token              string  `json:"token"`
-}
+type IssueRegionTokenResponse = RegionalSession
 
 // LabelSelector defines model for LabelSelector.
 type LabelSelector struct {
@@ -858,10 +853,11 @@ type LoginRequest struct {
 
 // LoginResponse defines model for LoginResponse.
 type LoginResponse struct {
-	AccessToken  string `json:"access_token"`
-	ExpiresAt    int64  `json:"expires_at"`
-	RefreshToken string `json:"refresh_token"`
-	User         User   `json:"user"`
+	AccessToken     string           `json:"access_token"`
+	ExpiresAt       int64            `json:"expires_at"`
+	RefreshToken    string           `json:"refresh_token"`
+	RegionalSession *RegionalSession `json:"regional_session,omitempty"`
+	User            User             `json:"user"`
 }
 
 // MountRequest defines model for MountRequest.
@@ -1099,6 +1095,14 @@ type Region struct {
 	Id                 string  `json:"id"`
 	MeteringExportUrl  *string `json:"metering_export_url"`
 	RegionalGatewayUrl string  `json:"regional_gateway_url"`
+}
+
+// RegionalSession defines model for RegionalSession.
+type RegionalSession struct {
+	ExpiresAt          int64   `json:"expires_at"`
+	RegionId           string  `json:"region_id"`
+	RegionalGatewayUrl *string `json:"regional_gateway_url"`
+	Token              string  `json:"token"`
 }
 
 // RegisterRequest defines model for RegisterRequest.

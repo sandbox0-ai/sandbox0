@@ -14,12 +14,14 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/tenantdir"
 	"go.uber.org/zap"
 )
 
 type mockAuthRepository struct {
 	users         map[string]*identity.User
 	refreshTokens map[string]*identity.RefreshToken
+	teamMembers   map[string]*identity.TeamMember
 	createCalls   int
 }
 
@@ -27,6 +29,7 @@ func newMockAuthRepository() *mockAuthRepository {
 	return &mockAuthRepository{
 		users:         map[string]*identity.User{},
 		refreshTokens: map[string]*identity.RefreshToken{},
+		teamMembers:   map[string]*identity.TeamMember{},
 	}
 }
 
@@ -68,8 +71,28 @@ func (m *mockAuthRepository) GetUserByID(_ context.Context, id string) (*identit
 	return user, nil
 }
 
-func (m *mockAuthRepository) GetTeamMember(_ context.Context, _, _ string) (*identity.TeamMember, error) {
-	return nil, errors.New("team member not found")
+func (m *mockAuthRepository) GetTeamMember(_ context.Context, teamID, userID string) (*identity.TeamMember, error) {
+	member, ok := m.teamMembers[teamID+":"+userID]
+	if !ok {
+		return nil, errors.New("team member not found")
+	}
+	return member, nil
+}
+
+type mockTenantResolver struct {
+	activeTeam *tenantdir.ActiveTeam
+	err        error
+}
+
+func (m *mockTenantResolver) ResolveActiveTeam(_ context.Context, _, _ string) (*tenantdir.ActiveTeam, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	if m.activeTeam == nil {
+		return nil, tenantdir.ErrNoActiveTeam
+	}
+	copyActiveTeam := *m.activeTeam
+	return &copyActiveTeam, nil
 }
 
 func TestAuthHandler_RefreshToken_SucceedsWithPersistedToken(t *testing.T) {
@@ -130,6 +153,155 @@ func TestAuthHandler_RefreshToken_SucceedsWithPersistedToken(t *testing.T) {
 	}
 	if repo.createCalls != 2 {
 		t.Fatalf("expected 2 create calls (seed + refresh), got %d", repo.createCalls)
+	}
+}
+
+func TestAuthHandler_RefreshToken_ReturnsRegionalSessionWhenRoutable(t *testing.T) {
+	t.Setenv("GIN_MODE", "release")
+	gin.SetMode(gin.ReleaseMode)
+
+	repo := newMockAuthRepository()
+	defaultTeamID := "team-1"
+	user := &identity.User{
+		ID:            "user-1",
+		Email:         "user@example.com",
+		Name:          "User",
+		IsAdmin:       false,
+		DefaultTeamID: &defaultTeamID,
+	}
+	repo.users[user.ID] = user
+	repo.teamMembers["team-1:user-1"] = &identity.TeamMember{
+		ID:     "member-1",
+		TeamID: "team-1",
+		UserID: "user-1",
+		Role:   "admin",
+	}
+
+	issuer := authn.NewIssuer("global-gateway", "test-secret", time.Minute, time.Hour)
+	initialTokens, err := issuer.IssueTokenPair(user.ID, "team-1", "admin", user.Email, user.Name, user.IsAdmin)
+	if err != nil {
+		t.Fatalf("issue initial token pair: %v", err)
+	}
+	if err := repo.CreateRefreshToken(context.Background(), &identity.RefreshToken{
+		UserID:    user.ID,
+		TokenHash: authn.HashRefreshToken(initialTokens.RefreshToken),
+		ExpiresAt: initialTokens.RefreshExpiresAt,
+	}); err != nil {
+		t.Fatalf("persist initial refresh token: %v", err)
+	}
+
+	handler := &AuthHandler{
+		repo: repo,
+		tenantResolver: &mockTenantResolver{activeTeam: &tenantdir.ActiveTeam{
+			UserID:             "user-1",
+			TeamID:             "team-1",
+			TeamRole:           "admin",
+			HomeRegionID:       "aws/us-east-1",
+			RegionalGatewayURL: "https://regional.example.com",
+		}},
+		jwtIssuer: issuer,
+		logger:    zap.NewNop(),
+	}
+
+	router := gin.New()
+	router.POST("/auth/refresh", handler.RefreshToken)
+
+	rec := httptest.NewRecorder()
+	reqBody := map[string]string{"refresh_token": initialTokens.RefreshToken}
+	bodyBytes, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest(http.MethodPost, "/auth/refresh", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	data, apiErr, err := spec.DecodeResponse[LoginResponse](rec.Body)
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if apiErr != nil {
+		t.Fatalf("unexpected api error: %+v", *apiErr)
+	}
+	if data.RegionalSession == nil {
+		t.Fatalf("expected regional session in response")
+	}
+	if data.RegionalSession.RegionID != "aws/us-east-1" {
+		t.Fatalf("region_id = %q, want aws/us-east-1", data.RegionalSession.RegionID)
+	}
+	if data.RegionalSession.RegionalGatewayURL != "https://regional.example.com" {
+		t.Fatalf("regional_gateway_url = %q", data.RegionalSession.RegionalGatewayURL)
+	}
+	if data.RegionalSession.Token == "" {
+		t.Fatalf("expected regional token in response")
+	}
+}
+
+func TestAuthHandler_RefreshToken_OmitsRegionalSessionWhenResolverFails(t *testing.T) {
+	t.Setenv("GIN_MODE", "release")
+	gin.SetMode(gin.ReleaseMode)
+
+	repo := newMockAuthRepository()
+	defaultTeamID := "team-1"
+	user := &identity.User{
+		ID:            "user-1",
+		Email:         "user@example.com",
+		Name:          "User",
+		IsAdmin:       false,
+		DefaultTeamID: &defaultTeamID,
+	}
+	repo.users[user.ID] = user
+	repo.teamMembers["team-1:user-1"] = &identity.TeamMember{
+		ID:     "member-1",
+		TeamID: "team-1",
+		UserID: "user-1",
+		Role:   "admin",
+	}
+
+	issuer := authn.NewIssuer("global-gateway", "test-secret", time.Minute, time.Hour)
+	initialTokens, err := issuer.IssueTokenPair(user.ID, "team-1", "admin", user.Email, user.Name, user.IsAdmin)
+	if err != nil {
+		t.Fatalf("issue initial token pair: %v", err)
+	}
+	if err := repo.CreateRefreshToken(context.Background(), &identity.RefreshToken{
+		UserID:    user.ID,
+		TokenHash: authn.HashRefreshToken(initialTokens.RefreshToken),
+		ExpiresAt: initialTokens.RefreshExpiresAt,
+	}); err != nil {
+		t.Fatalf("persist initial refresh token: %v", err)
+	}
+
+	handler := &AuthHandler{
+		repo:           repo,
+		tenantResolver: &mockTenantResolver{err: errors.New("resolver unavailable")},
+		jwtIssuer:      issuer,
+		logger:         zap.NewNop(),
+	}
+
+	router := gin.New()
+	router.POST("/auth/refresh", handler.RefreshToken)
+
+	rec := httptest.NewRecorder()
+	reqBody := map[string]string{"refresh_token": initialTokens.RefreshToken}
+	bodyBytes, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest(http.MethodPost, "/auth/refresh", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	data, apiErr, err := spec.DecodeResponse[LoginResponse](rec.Body)
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if apiErr != nil {
+		t.Fatalf("unexpected api error: %+v", *apiErr)
+	}
+	if data.RegionalSession != nil {
+		t.Fatalf("expected regional session to be omitted when resolver fails")
 	}
 }
 

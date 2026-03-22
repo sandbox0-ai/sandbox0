@@ -32,13 +32,16 @@ type IssueRegionTokenRequest struct {
 	TeamID string `json:"team_id"`
 }
 
-// IssueRegionTokenResponse is returned when a region-scoped token is issued.
-type IssueRegionTokenResponse struct {
+// RegionalSessionResponse carries region-scoped access session data.
+type RegionalSessionResponse struct {
 	RegionID           string `json:"region_id"`
 	RegionalGatewayURL string `json:"regional_gateway_url,omitempty"`
 	Token              string `json:"token"`
 	ExpiresAt          int64  `json:"expires_at"`
 }
+
+// IssueRegionTokenResponse is returned when a region-scoped token is issued.
+type IssueRegionTokenResponse = RegionalSessionResponse
 
 // NewTenantHandler creates a new tenant handler.
 func NewTenantHandler(resolver tenantResolver, jwtIssuer *authn.Issuer, regionTokenTTL time.Duration, logger *zap.Logger) *TenantHandler {

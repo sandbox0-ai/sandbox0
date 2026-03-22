@@ -15,12 +15,14 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/tenantdir"
 	"go.uber.org/zap"
 )
 
 // AuthHandler handles authentication endpoints
 type AuthHandler struct {
 	repo            authRepository
+	tenantResolver  tenantResolver
 	builtinProvider *builtin.Provider
 	oidcManager     *oidc.Manager
 	jwtIssuer       *authn.Issuer
@@ -41,10 +43,12 @@ func NewAuthHandler(
 	builtinProvider *builtin.Provider,
 	oidcManager *oidc.Manager,
 	jwtIssuer *authn.Issuer,
+	tenantResolver tenantResolver,
 	logger *zap.Logger,
 ) *AuthHandler {
 	return &AuthHandler{
 		repo:            repo,
+		tenantResolver:  tenantResolver,
 		builtinProvider: builtinProvider,
 		oidcManager:     oidcManager,
 		jwtIssuer:       jwtIssuer,
@@ -60,10 +64,11 @@ type LoginRequest struct {
 
 // LoginResponse is the response for login
 type LoginResponse struct {
-	AccessToken  string        `json:"access_token"`
-	RefreshToken string        `json:"refresh_token"`
-	ExpiresAt    int64         `json:"expires_at"`
-	User         *UserResponse `json:"user"`
+	AccessToken     string                   `json:"access_token"`
+	RefreshToken    string                   `json:"refresh_token"`
+	ExpiresAt       int64                    `json:"expires_at"`
+	User            *UserResponse            `json:"user"`
+	RegionalSession *RegionalSessionResponse `json:"regional_session,omitempty"`
 }
 
 // Login handles email/password login
@@ -114,10 +119,11 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	}
 
 	spec.JSONSuccess(c, http.StatusOK, LoginResponse{
-		AccessToken:  tokens.AccessToken,
-		RefreshToken: tokens.RefreshToken,
-		ExpiresAt:    tokens.ExpiresAt.Unix(),
-		User:         NewUserResponse(user),
+		AccessToken:     tokens.AccessToken,
+		RefreshToken:    tokens.RefreshToken,
+		ExpiresAt:       tokens.ExpiresAt.Unix(),
+		User:            NewUserResponse(user),
+		RegionalSession: h.issueRegionalSessionOrNil(c.Request.Context(), user.ID, teamID, user.IsAdmin),
 	})
 }
 
@@ -177,10 +183,11 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	}
 
 	spec.JSONSuccess(c, http.StatusCreated, LoginResponse{
-		AccessToken:  tokens.AccessToken,
-		RefreshToken: tokens.RefreshToken,
-		ExpiresAt:    tokens.ExpiresAt.Unix(),
-		User:         NewUserResponse(user),
+		AccessToken:     tokens.AccessToken,
+		RefreshToken:    tokens.RefreshToken,
+		ExpiresAt:       tokens.ExpiresAt.Unix(),
+		User:            NewUserResponse(user),
+		RegionalSession: h.issueRegionalSessionOrNil(c.Request.Context(), user.ID, teamID, user.IsAdmin),
 	})
 }
 
@@ -239,10 +246,11 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 	}
 
 	spec.JSONSuccess(c, http.StatusOK, LoginResponse{
-		AccessToken:  tokens.AccessToken,
-		RefreshToken: tokens.RefreshToken,
-		ExpiresAt:    tokens.ExpiresAt.Unix(),
-		User:         NewUserResponse(user),
+		AccessToken:     tokens.AccessToken,
+		RefreshToken:    tokens.RefreshToken,
+		ExpiresAt:       tokens.ExpiresAt.Unix(),
+		User:            NewUserResponse(user),
+		RegionalSession: h.issueRegionalSessionOrNil(c.Request.Context(), user.ID, teamID, user.IsAdmin),
 	})
 }
 
@@ -391,7 +399,8 @@ func (h *AuthHandler) OIDCCallback(c *gin.Context) {
 	}
 
 	if isLocalReturnURL(returnURL) {
-		redirectURL, err := buildCLIReturnURL(returnURL, tokens)
+		regionalSession := h.issueRegionalSessionOrNil(c.Request.Context(), user.ID, teamID, user.IsAdmin)
+		redirectURL, err := buildCLIReturnURL(returnURL, tokens, regionalSession)
 		if err != nil {
 			h.logger.Warn("Failed to build OIDC CLI redirect URL", zap.Error(err))
 			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to complete oidc login")
@@ -403,10 +412,11 @@ func (h *AuthHandler) OIDCCallback(c *gin.Context) {
 
 	// Return tokens as JSON (frontend should handle redirect)
 	spec.JSONSuccess(c, http.StatusOK, LoginResponse{
-		AccessToken:  tokens.AccessToken,
-		RefreshToken: tokens.RefreshToken,
-		ExpiresAt:    tokens.ExpiresAt.Unix(),
-		User:         NewUserResponse(user),
+		AccessToken:     tokens.AccessToken,
+		RefreshToken:    tokens.RefreshToken,
+		ExpiresAt:       tokens.ExpiresAt.Unix(),
+		User:            NewUserResponse(user),
+		RegionalSession: h.issueRegionalSessionOrNil(c.Request.Context(), user.ID, teamID, user.IsAdmin),
 	})
 }
 
@@ -468,6 +478,51 @@ func (h *AuthHandler) persistRefreshToken(ctx context.Context, userID string, to
 	})
 }
 
+func (h *AuthHandler) issueRegionalSessionOrNil(ctx context.Context, userID, teamID string, isAdmin bool) *RegionalSessionResponse {
+	session, err := h.issueRegionalSession(ctx, userID, teamID, isAdmin)
+	if err == nil {
+		return session
+	}
+	if errors.Is(err, tenantdir.ErrNoActiveTeam) || errors.Is(err, tenantdir.ErrRegionNotFound) {
+		return nil
+	}
+	h.logger.Warn("Failed to issue regional session", zap.Error(err))
+	return nil
+}
+
+func (h *AuthHandler) issueRegionalSession(ctx context.Context, userID, teamID string, isAdmin bool) (*RegionalSessionResponse, error) {
+	if h.tenantResolver == nil || h.jwtIssuer == nil || strings.TrimSpace(userID) == "" {
+		return nil, nil
+	}
+
+	activeTeam, err := h.tenantResolver.ResolveActiveTeam(ctx, userID, teamID)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(activeTeam.HomeRegionID) == "" || strings.TrimSpace(activeTeam.RegionalGatewayURL) == "" {
+		return nil, nil
+	}
+
+	token, expiry, err := h.jwtIssuer.IssueRegionToken(
+		userID,
+		activeTeam.TeamID,
+		activeTeam.TeamRole,
+		activeTeam.HomeRegionID,
+		isAdmin,
+		0,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &RegionalSessionResponse{
+		RegionID:           activeTeam.HomeRegionID,
+		RegionalGatewayURL: activeTeam.RegionalGatewayURL,
+		Token:              token,
+		ExpiresAt:          expiry.Unix(),
+	}, nil
+}
+
 func isLocalReturnURL(raw string) bool {
 	if raw == "" {
 		return false
@@ -483,7 +538,7 @@ func isLocalReturnURL(raw string) bool {
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
-func buildCLIReturnURL(raw string, tokens *authn.TokenPair) (string, error) {
+func buildCLIReturnURL(raw string, tokens *authn.TokenPair, regionalSession *RegionalSessionResponse) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return "", err
@@ -492,6 +547,14 @@ func buildCLIReturnURL(raw string, tokens *authn.TokenPair) (string, error) {
 	q.Set("access_token", tokens.AccessToken)
 	q.Set("refresh_token", tokens.RefreshToken)
 	q.Set("expires_unix", fmt.Sprintf("%d", tokens.ExpiresAt.Unix()))
+	if regionalSession != nil {
+		q.Set("regional_access_token", regionalSession.Token)
+		q.Set("regional_expires_unix", fmt.Sprintf("%d", regionalSession.ExpiresAt))
+		q.Set("region_id", regionalSession.RegionID)
+		if regionalSession.RegionalGatewayURL != "" {
+			q.Set("regional_gateway_url", regionalSession.RegionalGatewayURL)
+		}
+	}
 	u.RawQuery = q.Encode()
 	return u.String(), nil
 }

@@ -16,22 +16,51 @@ interface LoginResponse {
   access_token: string;
   refresh_token: string;
   expires_at: number;
+  regional_session?: DashboardRegionalSession;
+}
+
+export interface DashboardRegionalSession {
+  region_id: string;
+  regional_gateway_url?: string | null;
+  token: string;
+  expires_at: number;
 }
 
 const dashboardHomePath = "/";
 
 export const dashboardAccessTokenCookieName = "sandbox0_access_token";
 export const dashboardRefreshTokenCookieName = "sandbox0_refresh_token";
+export const dashboardRegionalAccessTokenCookieName =
+  "sandbox0_regional_access_token";
+export const dashboardRegionalGatewayURLCookieName =
+  "sandbox0_regional_gateway_url";
+export const dashboardRegionalRegionIDCookieName = "sandbox0_region_id";
+export const dashboardRegionalExpiresAtCookieName =
+  "sandbox0_regional_expires_at";
 
 function toLoginResponse(data: {
   accessToken: string;
   refreshToken: string;
   expiresAt: number;
+  regionalSession?: {
+    regionId: string;
+    regionalGatewayUrl?: string | null;
+    token: string;
+    expiresAt: number;
+  };
 }): LoginResponse {
   return {
     access_token: data.accessToken,
     refresh_token: data.refreshToken,
     expires_at: data.expiresAt,
+    regional_session: data.regionalSession
+      ? {
+          region_id: data.regionalSession.regionId,
+          regional_gateway_url: data.regionalSession.regionalGatewayUrl,
+          token: data.regionalSession.token,
+          expires_at: data.regionalSession.expiresAt,
+        }
+      : undefined,
   };
 }
 
@@ -83,6 +112,10 @@ export function dashboardCookieNames() {
   return {
     accessToken: dashboardAccessTokenCookieName,
     refreshToken: dashboardRefreshTokenCookieName,
+    regionalAccessToken: dashboardRegionalAccessTokenCookieName,
+    regionalGatewayURL: dashboardRegionalGatewayURLCookieName,
+    regionalRegionID: dashboardRegionalRegionIDCookieName,
+    regionalExpiresAt: dashboardRegionalExpiresAtCookieName,
   };
 }
 
@@ -332,6 +365,92 @@ export function setDashboardAuthCookies(
     secure,
     path: dashboardHomePath,
   });
+
+  if (
+    tokens.regional_session?.token &&
+    tokens.regional_session?.region_id &&
+    tokens.regional_session?.expires_at
+  ) {
+    const regionalMaxAge = Math.max(
+      0,
+      tokens.regional_session.expires_at - Math.floor(Date.now() / 1000),
+    );
+
+    response.cookies.set(
+      dashboardRegionalAccessTokenCookieName,
+      tokens.regional_session.token,
+      {
+        httpOnly: true,
+        sameSite: "lax",
+        secure,
+        path: dashboardHomePath,
+        maxAge: regionalMaxAge,
+      },
+    );
+    response.cookies.set(
+      dashboardRegionalRegionIDCookieName,
+      tokens.regional_session.region_id,
+      {
+        httpOnly: true,
+        sameSite: "lax",
+        secure,
+        path: dashboardHomePath,
+        maxAge: regionalMaxAge,
+      },
+    );
+    response.cookies.set(
+      dashboardRegionalExpiresAtCookieName,
+      String(tokens.regional_session.expires_at),
+      {
+        httpOnly: true,
+        sameSite: "lax",
+        secure,
+        path: dashboardHomePath,
+        maxAge: regionalMaxAge,
+      },
+    );
+    response.cookies.set(
+      dashboardRegionalGatewayURLCookieName,
+      tokens.regional_session.regional_gateway_url ?? "",
+      {
+        httpOnly: true,
+        sameSite: "lax",
+        secure,
+        path: dashboardHomePath,
+        maxAge: regionalMaxAge,
+      },
+    );
+    return;
+  }
+
+  response.cookies.set(dashboardRegionalAccessTokenCookieName, "", {
+    httpOnly: true,
+    sameSite: "lax",
+    secure,
+    path: dashboardHomePath,
+    maxAge: 0,
+  });
+  response.cookies.set(dashboardRegionalGatewayURLCookieName, "", {
+    httpOnly: true,
+    sameSite: "lax",
+    secure,
+    path: dashboardHomePath,
+    maxAge: 0,
+  });
+  response.cookies.set(dashboardRegionalRegionIDCookieName, "", {
+    httpOnly: true,
+    sameSite: "lax",
+    secure,
+    path: dashboardHomePath,
+    maxAge: 0,
+  });
+  response.cookies.set(dashboardRegionalExpiresAtCookieName, "", {
+    httpOnly: true,
+    sameSite: "lax",
+    secure,
+    path: dashboardHomePath,
+    maxAge: 0,
+  });
 }
 
 export function clearDashboardAuthCookies(
@@ -348,6 +467,34 @@ export function clearDashboardAuthCookies(
     maxAge: 0,
   });
   response.cookies.set(dashboardRefreshTokenCookieName, "", {
+    httpOnly: true,
+    sameSite: "lax",
+    secure,
+    path: dashboardHomePath,
+    maxAge: 0,
+  });
+  response.cookies.set(dashboardRegionalAccessTokenCookieName, "", {
+    httpOnly: true,
+    sameSite: "lax",
+    secure,
+    path: dashboardHomePath,
+    maxAge: 0,
+  });
+  response.cookies.set(dashboardRegionalGatewayURLCookieName, "", {
+    httpOnly: true,
+    sameSite: "lax",
+    secure,
+    path: dashboardHomePath,
+    maxAge: 0,
+  });
+  response.cookies.set(dashboardRegionalRegionIDCookieName, "", {
+    httpOnly: true,
+    sameSite: "lax",
+    secure,
+    path: dashboardHomePath,
+    maxAge: 0,
+  });
+  response.cookies.set(dashboardRegionalExpiresAtCookieName, "", {
     httpOnly: true,
     sameSite: "lax",
     secure,

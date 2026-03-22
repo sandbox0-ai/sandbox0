@@ -40,6 +40,18 @@ export async function createDashboardControlPlaneSDK(
   };
 }
 
+export async function readSDKResponseError(
+  error: unknown,
+): Promise<Response | undefined> {
+  const { runtime } = await loadSandbox0();
+
+  if (error instanceof runtime.ResponseError) {
+    return error.response;
+  }
+
+  return undefined;
+}
+
 export async function resolveSDKErrorMessage(
   error: unknown,
   fallback: string,

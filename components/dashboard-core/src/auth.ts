@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
 
 import { resolveDashboardControlPlaneURL } from "./config";
-import { createDashboardControlPlaneSDK, resolveSDKErrorMessage } from "./sdk";
+import {
+  createDashboardControlPlaneSDK,
+  readSDKResponseError,
+  resolveSDKErrorMessage,
+} from "./sdk";
 import type {
   DashboardAuthProvider,
   DashboardAuthProviderType,
@@ -19,15 +23,6 @@ const dashboardHomePath = "/";
 export const dashboardAccessTokenCookieName = "sandbox0_access_token";
 export const dashboardRefreshTokenCookieName = "sandbox0_refresh_token";
 
-function joinURL(baseURL: string, path: string): string {
-  const base = new URL(baseURL);
-  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  return new URL(
-    normalizedPath,
-    `${base.toString().replace(/\/$/, "")}/`,
-  ).toString();
-}
-
 function toLoginResponse(data: {
   accessToken: string;
   refreshToken: string;
@@ -37,6 +32,50 @@ function toLoginResponse(data: {
     access_token: data.accessToken,
     refresh_token: data.refreshToken,
     expires_at: data.expiresAt,
+  };
+}
+
+function toDashboardAuthProviders(
+  providers: Array<{
+    id: string;
+    name: string;
+    type: string;
+    externalAuthPortalUrl?: string;
+  }> = [],
+): DashboardAuthProvider[] {
+  return providers.flatMap((provider) => {
+    if (provider.type !== "oidc" && provider.type !== "builtin") {
+      return [];
+    }
+
+    const entry: DashboardAuthProvider = {
+      id: provider.id,
+      name: provider.name,
+      type: provider.type as DashboardAuthProviderType,
+    };
+
+    if (
+      provider.type === "oidc" &&
+      typeof provider.externalAuthPortalUrl === "string" &&
+      provider.externalAuthPortalUrl !== ""
+    ) {
+      entry.externalAuthPortalUrl = provider.externalAuthPortalUrl;
+    }
+
+    return [entry];
+  });
+}
+
+function parseOIDCCallbackQuery(rawQuery: string): {
+  code?: string;
+  state?: string;
+} {
+  const search = rawQuery.startsWith("?") ? rawQuery.slice(1) : rawQuery;
+  const params = new URLSearchParams(search);
+
+  return {
+    code: params.get("code") ?? undefined,
+    state: params.get("state") ?? undefined,
   };
 }
 
@@ -60,64 +99,18 @@ export async function resolveDashboardAuthProviders(
   }
 
   try {
-    // Use raw fetch to avoid the typed SDK stripping unknown fields such as
-    // external_auth_portal_url that may be present on OIDC provider entries.
-    const response = await fetchImpl(joinURL(baseURL, "/auth/providers"), {
-      method: "GET",
-      cache: "no-store",
+    const sdk = await createDashboardControlPlaneSDK(baseURL, {
+      fetch: fetchImpl,
     });
-    const payload = (await response.json().catch(() => null)) as {
-      data?: {
-        providers?: Array<{
-          id: string;
-          name: string;
-          type: string;
-          external_auth_portal_url?: string;
-        }>;
-      };
-      error?: { message?: string };
-    } | null;
-
-    if (!response.ok) {
-      return {
-        providers: [],
-        errors: [
-          payload?.error?.message ??
-            `/auth/providers returned ${response.status}`,
-        ],
-      };
-    }
-
-    const providers = (payload?.data?.providers ?? []).flatMap((provider) => {
-      if (provider.type !== "oidc" && provider.type !== "builtin") {
-        return [];
-      }
-
-      const entry: DashboardAuthProvider = {
-        id: provider.id,
-        name: provider.name,
-        type: provider.type as DashboardAuthProviderType,
-      };
-
-      if (
-        provider.type === "oidc" &&
-        typeof provider.external_auth_portal_url === "string" &&
-        provider.external_auth_portal_url !== ""
-      ) {
-        entry.externalAuthPortalUrl = provider.external_auth_portal_url;
-      }
-
-      return [entry];
-    });
+    const response = await sdk.auth.authProvidersGet({ cache: "no-store" });
+    const providers = toDashboardAuthProviders(response.data?.providers);
 
     return { providers, errors: [] };
   } catch (error) {
     return {
       providers: [],
       errors: [
-        error instanceof Error
-          ? error.message
-          : "failed to resolve auth providers",
+        await resolveSDKErrorMessage(error, "failed to resolve auth providers"),
       ],
     };
   }
@@ -227,35 +220,27 @@ export async function exchangeOIDCCallback(
     return { error: "dashboard auth is missing a control-plane base URL" };
   }
 
+  const { code, state } = parseOIDCCallbackQuery(rawQuery);
+  if (!code || !state) {
+    return { error: "oidc callback is missing code or state" };
+  }
+
   try {
-    const path = `/auth/oidc/${encodeURIComponent(providerID)}/callback${rawQuery}`;
-    const response = await fetchImpl(joinURL(baseURL, path), {
-      method: "GET",
-      cache: "no-store",
+    const sdk = await createDashboardControlPlaneSDK(baseURL, {
+      fetch: fetchImpl,
     });
-    const payload = (await response.json().catch(() => null)) as
-      | {
-          data?: LoginResponse;
-          error?: {
-            message?: string;
-          };
-        }
-      | null;
-    if (!response.ok || !payload?.data) {
-      return {
-        error:
-          payload?.error?.message ??
-          `/auth/oidc/${providerID}/callback returned ${response.status}`,
-      };
+    const response = await sdk.auth.authOidcProviderCallbackGet(
+      { provider: providerID, code, state },
+      { cache: "no-store" },
+    );
+    if (!response.data) {
+      return { error: `/auth/oidc/${providerID}/callback returned an empty response` };
     }
 
-    return { tokens: payload.data };
+    return { tokens: toLoginResponse(response.data) };
   } catch (error) {
     return {
-      error:
-        error instanceof Error
-          ? error.message
-          : "failed to complete oidc login",
+      error: await resolveSDKErrorMessage(error, "failed to complete oidc login"),
     };
   }
 }
@@ -271,47 +256,38 @@ export async function resolveOIDCLoginLocation(
   }
 
   try {
-    const response = await fetchImpl(
-      joinURL(
-        baseURL,
-        `/auth/oidc/${encodeURIComponent(providerID)}/login?return_url=${encodeURIComponent(dashboardHomePath)}`,
-      ),
+    const sdk = await createDashboardControlPlaneSDK(baseURL, {
+      fetch: fetchImpl,
+    });
+    await sdk.auth.authOidcProviderLoginGetRaw(
       {
-        method: "GET",
+        provider: providerID,
+        returnUrl: dashboardHomePath,
+      },
+      {
         redirect: "manual",
         cache: "no-store",
       },
     );
-
-    if (response.status < 300 || response.status >= 400) {
-      const payload = (await response.json().catch(() => null)) as
-        | {
-            error?: {
-              message?: string;
-            };
-          }
-        | null;
-      return {
-        error:
-          payload?.error?.message ??
-          `/auth/oidc/${providerID}/login returned ${response.status}`,
-      };
-    }
-
-    const location = response.headers.get("location");
-    if (!location) {
-      return { error: "oidc login did not return a redirect location" };
-    }
-
-    return { location };
   } catch (error) {
+    const response = await readSDKResponseError(error);
+    if (response) {
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.get("location");
+        if (!location) {
+          return { error: "oidc login did not return a redirect location" };
+        }
+
+        return { location };
+      }
+    }
+
     return {
-      error:
-        error instanceof Error
-          ? error.message
-          : "failed to initiate oidc login",
+      error: await resolveSDKErrorMessage(error, "failed to initiate oidc login"),
     };
   }
+
+  return { error: "oidc login did not return a redirect location" };
 }
 
 export async function forwardLogout(

@@ -5,6 +5,7 @@ import { NextResponse } from "next/server";
 
 import {
   clearDashboardAuthCookies,
+  exchangeOIDCCallback,
   exchangeRefreshToken,
   resolveDashboardAuthProviders,
   resolveOIDCLoginLocation,
@@ -201,6 +202,45 @@ test("exchangeRefreshToken returns new tokens from the control plane", async () 
   assert.equal(result.error, undefined);
   assert.equal(result.tokens?.access_token, "new-access-token");
   assert.equal(result.tokens?.refresh_token, "new-refresh-token");
+});
+
+test("exchangeOIDCCallback exchanges code and state through the sdk auth api", async () => {
+  const result = await exchangeOIDCCallback(
+    singleClusterConfig,
+    "auth0",
+    "?code=code-123&state=state-456",
+    async (input, init) => {
+      assert.equal(
+        String(input),
+        "https://single.example.com/auth/oidc/auth0/callback?code=code-123&state=state-456",
+      );
+      assert.equal(init?.method, "GET");
+      return new Response(
+        JSON.stringify({
+          data: {
+            access_token: "oidc-access-token",
+            refresh_token: "oidc-refresh-token",
+            expires_at: Math.floor(Date.now() / 1000) + 3600,
+          },
+        }),
+      );
+    },
+  );
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.tokens?.access_token, "oidc-access-token");
+  assert.equal(result.tokens?.refresh_token, "oidc-refresh-token");
+});
+
+test("exchangeOIDCCallback rejects callbacks without code or state", async () => {
+  const result = await exchangeOIDCCallback(
+    singleClusterConfig,
+    "auth0",
+    "?code=code-123",
+  );
+
+  assert.equal(result.tokens, undefined);
+  assert.equal(result.error, "oidc callback is missing code or state");
 });
 
 test("updateDefaultTeam sends the selected team to the control plane", async () => {

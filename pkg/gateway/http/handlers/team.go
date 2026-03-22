@@ -189,7 +189,11 @@ func (h *TeamHandler) UpdateTeam(c *gin.Context) {
 		team.Slug = req.Slug
 	}
 	if req.HomeRegionID != nil {
-		team.HomeRegionID = normalizeOptionalString(req.HomeRegionID)
+		nextHomeRegionID := normalizeOptionalString(req.HomeRegionID)
+		if !sameOptionalString(team.HomeRegionID, nextHomeRegionID) {
+			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "team home region cannot be changed after creation")
+			return
+		}
 	}
 
 	if err := h.repo.UpdateTeam(c.Request.Context(), team); err != nil {
@@ -203,6 +207,17 @@ func (h *TeamHandler) UpdateTeam(c *gin.Context) {
 	}
 
 	spec.JSONSuccess(c, http.StatusOK, team)
+}
+
+func sameOptionalString(a, b *string) bool {
+	switch {
+	case a == nil && b == nil:
+		return true
+	case a == nil || b == nil:
+		return false
+	default:
+		return *a == *b
+	}
 }
 
 // DeleteTeam deletes a team

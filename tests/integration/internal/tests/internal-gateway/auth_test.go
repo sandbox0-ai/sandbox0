@@ -286,19 +286,37 @@ func TestInternalGatewayIntegration_PublicAuthTeamsAcceptHomeRegionID(t *testing
 		"home_region_id": "aws/us-west-2",
 	})
 	defer updateResp.Body.Close()
-	if updateResp.StatusCode != http.StatusOK {
-		t.Fatalf("expected ok, got %d", updateResp.StatusCode)
+	if updateResp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected conflict, got %d", updateResp.StatusCode)
 	}
 
 	var updateBody struct {
-		Data struct {
-			HomeRegionID *string `json:"home_region_id"`
-		} `json:"data"`
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
 	}
 	if err := json.NewDecoder(updateResp.Body).Decode(&updateBody); err != nil {
 		t.Fatalf("decode update response: %v", err)
 	}
-	if updateBody.Data.HomeRegionID == nil || *updateBody.Data.HomeRegionID != "aws/us-west-2" {
-		t.Fatalf("expected updated team home region aws/us-west-2, got %#v", updateBody.Data.HomeRegionID)
+	if updateBody.Error.Message != "team home region cannot be changed after creation" {
+		t.Fatalf("expected immutable home region error, got %#v", updateBody.Error.Message)
+	}
+
+	getResp, _ := doGatewayRequestWithBearer(t, env.server.Client(), http.MethodGet, env.server.URL+"/teams/"+createBody.Data.ID, tokens.AccessToken, nil)
+	defer getResp.Body.Close()
+	if getResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected get team ok, got %d", getResp.StatusCode)
+	}
+
+	var getBody struct {
+		Data struct {
+			HomeRegionID *string `json:"home_region_id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(getResp.Body).Decode(&getBody); err != nil {
+		t.Fatalf("decode get response: %v", err)
+	}
+	if getBody.Data.HomeRegionID == nil || *getBody.Data.HomeRegionID != "aws/us-east-1" {
+		t.Fatalf("expected persisted team home region aws/us-east-1, got %#v", getBody.Data.HomeRegionID)
 	}
 }

@@ -14,19 +14,22 @@ interface LoginResponse {
   expires_at: number;
 }
 
+interface RawAuthProvidersResponse {
+  data?: {
+    providers?: Array<{
+      id: string;
+      name: string;
+      type: string;
+      external_auth_portal_url?: string;
+      externalAuthPortalUrl?: string;
+    }>;
+  };
+}
+
 const dashboardHomePath = "/";
 
 export const dashboardAccessTokenCookieName = "sandbox0_access_token";
 export const dashboardRefreshTokenCookieName = "sandbox0_refresh_token";
-
-function joinURL(baseURL: string, path: string): string {
-  const base = new URL(baseURL);
-  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  return new URL(
-    normalizedPath,
-    `${base.toString().replace(/\/$/, "")}/`,
-  ).toString();
-}
 
 function toLoginResponse(data: {
   accessToken: string;
@@ -60,34 +63,16 @@ export async function resolveDashboardAuthProviders(
   }
 
   try {
-    // Use raw fetch to avoid the typed SDK stripping unknown fields such as
-    // external_auth_portal_url that may be present on OIDC provider entries.
-    const response = await fetchImpl(joinURL(baseURL, "/auth/providers"), {
-      method: "GET",
-      cache: "no-store",
+    const sdk = await createDashboardControlPlaneSDK(baseURL, {
+      fetch: fetchImpl,
     });
-    const payload = (await response.json().catch(() => null)) as {
-      data?: {
-        providers?: Array<{
-          id: string;
-          name: string;
-          type: string;
-          external_auth_portal_url?: string;
-        }>;
-      };
-      error?: { message?: string };
-    } | null;
-
-    if (!response.ok) {
-      return {
-        providers: [],
-        errors: [
-          payload?.error?.message ??
-            `/auth/providers returned ${response.status}`,
-        ],
-      };
-    }
-
+    // Parse the raw envelope so dashboard stays compatible with the published
+    // SDK package while still following the generated SDK request path.
+    const response = await sdk.auth.authProvidersGetRaw();
+    const payload = (await response.raw
+      .clone()
+      .json()
+      .catch(() => null)) as RawAuthProvidersResponse | null;
     const providers = (payload?.data?.providers ?? []).flatMap((provider) => {
       if (provider.type !== "oidc" && provider.type !== "builtin") {
         return [];
@@ -101,10 +86,15 @@ export async function resolveDashboardAuthProviders(
 
       if (
         provider.type === "oidc" &&
-        typeof provider.external_auth_portal_url === "string" &&
-        provider.external_auth_portal_url !== ""
+        typeof (
+          provider.externalAuthPortalUrl ??
+          provider.external_auth_portal_url
+        ) === "string" &&
+        (provider.externalAuthPortalUrl ?? provider.external_auth_portal_url) !==
+          ""
       ) {
-        entry.externalAuthPortalUrl = provider.external_auth_portal_url;
+        entry.externalAuthPortalUrl =
+          provider.externalAuthPortalUrl ?? provider.external_auth_portal_url;
       }
 
       return [entry];
@@ -115,9 +105,7 @@ export async function resolveDashboardAuthProviders(
     return {
       providers: [],
       errors: [
-        error instanceof Error
-          ? error.message
-          : "failed to resolve auth providers",
+        await resolveSDKErrorMessage(error, "failed to resolve auth providers"),
       ],
     };
   }
@@ -228,34 +216,23 @@ export async function exchangeOIDCCallback(
   }
 
   try {
-    const path = `/auth/oidc/${encodeURIComponent(providerID)}/callback${rawQuery}`;
-    const response = await fetchImpl(joinURL(baseURL, path), {
-      method: "GET",
-      cache: "no-store",
+    const searchParams = new URLSearchParams(rawQuery);
+    const sdk = await createDashboardControlPlaneSDK(baseURL, {
+      fetch: fetchImpl,
     });
-    const payload = (await response.json().catch(() => null)) as
-      | {
-          data?: LoginResponse;
-          error?: {
-            message?: string;
-          };
-        }
-      | null;
-    if (!response.ok || !payload?.data) {
-      return {
-        error:
-          payload?.error?.message ??
-          `/auth/oidc/${providerID}/callback returned ${response.status}`,
-      };
+    const response = await sdk.auth.authOidcProviderCallbackGet({
+      provider: providerID,
+      code: searchParams.get("code") ?? "",
+      state: searchParams.get("state") ?? "",
+    });
+    if (!response.data) {
+      return { error: `/auth/oidc/${providerID}/callback returned an empty response` };
     }
 
-    return { tokens: payload.data };
+    return { tokens: toLoginResponse(response.data) };
   } catch (error) {
     return {
-      error:
-        error instanceof Error
-          ? error.message
-          : "failed to complete oidc login",
+      error: await resolveSDKErrorMessage(error, "failed to complete oidc login"),
     };
   }
 }
@@ -271,45 +248,40 @@ export async function resolveOIDCLoginLocation(
   }
 
   try {
-    const response = await fetchImpl(
-      joinURL(
-        baseURL,
-        `/auth/oidc/${encodeURIComponent(providerID)}/login?return_url=${encodeURIComponent(dashboardHomePath)}`,
-      ),
+    const sdk = await createDashboardControlPlaneSDK(baseURL, {
+      fetch: fetchImpl,
+    });
+    await sdk.auth.authOidcProviderLoginGetRaw(
       {
-        method: "GET",
+        provider: providerID,
+        returnUrl: dashboardHomePath,
+      },
+      {
         redirect: "manual",
         cache: "no-store",
       },
     );
 
-    if (response.status < 300 || response.status >= 400) {
-      const payload = (await response.json().catch(() => null)) as
-        | {
-            error?: {
-              message?: string;
-            };
-          }
-        | null;
-      return {
-        error:
-          payload?.error?.message ??
-          `/auth/oidc/${providerID}/login returned ${response.status}`,
-      };
-    }
-
-    const location = response.headers.get("location");
-    if (!location) {
-      return { error: "oidc login did not return a redirect location" };
-    }
-
-    return { location };
+    return { error: "oidc login completed without a redirect response" };
   } catch (error) {
+    const response =
+      typeof error === "object" &&
+      error !== null &&
+      "response" in error &&
+      error.response instanceof Response
+        ? error.response
+        : undefined;
+    if (response && response.status >= 300 && response.status < 400) {
+      const location = response.headers.get("location");
+      if (!location) {
+        return { error: "oidc login did not return a redirect location" };
+      }
+
+      return { location };
+    }
+
     return {
-      error:
-        error instanceof Error
-          ? error.message
-          : "failed to initiate oidc login",
+      error: await resolveSDKErrorMessage(error, "failed to initiate oidc login"),
     };
   }
 }

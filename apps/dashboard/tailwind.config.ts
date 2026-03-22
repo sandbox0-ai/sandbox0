@@ -5,6 +5,7 @@ const config: Config = {
   content: [
     "./src/**/*.{js,ts,jsx,tsx,mdx}",
     "../../components/ui/src/**/*.{js,ts,jsx,tsx}",
+    "../../components/dashboard-core/src/**/*.{js,ts,jsx,tsx}",
   ],
   theme: {
     extend: {

@@ -3,8 +3,8 @@
   "version": "0.0.1",
   "private": true,
   "scripts": {
-    "dev": "next dev --port 4301",
-    "build": "next build",
+    "dev": "npm --prefix ../.. run sdk:use_local_js && next dev --port 4301",
+    "build": "npm --prefix ../.. run sdk:use_local_js && next build",
     "start": "next start --port 4301",
     "lint": "eslint . --max-warnings=0"
   },

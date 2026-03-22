@@ -41,6 +41,7 @@ func RegisterIdentityRoutes(router gin.IRouter, deps Deps) {
 		deps.BuiltinProvider,
 		deps.OIDCManager,
 		deps.JWTIssuer,
+		tenantdir.NewResolver(deps.IdentityRepo, deps.RegionRepo),
 		deps.Logger,
 	)
 	userHandler := handlers.NewUserHandler(deps.IdentityRepo, deps.Logger)

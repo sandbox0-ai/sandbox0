@@ -2712,6 +2712,9 @@ components:
           format: int64
         user:
           $ref: "#/components/schemas/User"
+        regional_session:
+          $ref: "#/components/schemas/RegionalSession"
+          nullable: true
       required: [access_token, refresh_token, expires_at, user]
     SuccessLoginResponse:
       allOf:
@@ -2804,7 +2807,7 @@ components:
       properties:
         team_id:
           type: string
-    IssueRegionTokenResponse:
+    RegionalSession:
       type: object
       properties:
         region_id:
@@ -2818,6 +2821,9 @@ components:
           type: integer
           format: int64
       required: [region_id, token, expires_at]
+    IssueRegionTokenResponse:
+      allOf:
+        - $ref: "#/components/schemas/RegionalSession"
     SuccessIssueRegionTokenResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"

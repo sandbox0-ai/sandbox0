@@ -41,10 +41,14 @@ type Provider struct {
 	verifier     *oidc.IDTokenVerifier
 }
 
+const wellKnownOIDCConfigPath = "/.well-known/openid-configuration"
+
 // NewProvider creates a new OIDC provider
 func NewProvider(ctx context.Context, cfg *config.OIDCProviderConfig, baseURL string) (*Provider, error) {
-	// Create OIDC provider from discovery URL
-	oidcProvider, err := oidc.NewProvider(ctx, cfg.DiscoveryURL)
+	// go-oidc expects an issuer URL here. Accept either the issuer URL itself
+	// or a full discovery document URL and normalize to the issuer form.
+	issuerURL := normalizeOIDCIssuerURL(cfg.DiscoveryURL)
+	oidcProvider, err := oidc.NewProvider(ctx, issuerURL)
 	if err != nil {
 		return nil, fmt.Errorf("create OIDC provider: %w", err)
 	}
@@ -71,6 +75,11 @@ func NewProvider(ctx context.Context, cfg *config.OIDCProviderConfig, baseURL st
 		oauth2Config: oauth2Config,
 		verifier:     verifier,
 	}, nil
+}
+
+func normalizeOIDCIssuerURL(value string) string {
+	trimmed := strings.TrimSpace(value)
+	return strings.TrimSuffix(trimmed, wellKnownOIDCConfigPath)
 }
 
 // ID returns the provider ID

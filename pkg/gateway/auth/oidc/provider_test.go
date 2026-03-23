@@ -47,6 +47,42 @@ func TestProviderAuthURLIncludesPKCEChallenge(t *testing.T) {
 	}
 }
 
+func TestNormalizeOIDCIssuerURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "keeps issuer url",
+			input: "https://example.com/auth/v1",
+			want:  "https://example.com/auth/v1",
+		},
+		{
+			name:  "strips discovery path",
+			input: "https://example.com/auth/v1/.well-known/openid-configuration",
+			want:  "https://example.com/auth/v1",
+		},
+		{
+			name:  "trims surrounding whitespace",
+			input: "  https://example.com/auth/v1/.well-known/openid-configuration  ",
+			want:  "https://example.com/auth/v1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := normalizeOIDCIssuerURL(tt.input); got != tt.want {
+				t.Fatalf("normalizeOIDCIssuerURL(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestProviderExchangeSendsPKCEVerifier(t *testing.T) {
 	var (
 		gotAuthorization string

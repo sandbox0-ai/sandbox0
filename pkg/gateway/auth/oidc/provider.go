@@ -88,14 +88,18 @@ func (p *Provider) Config() *config.OIDCProviderConfig {
 	return p.config
 }
 
-// AuthURL returns the authorization URL with the given state
-func (p *Provider) AuthURL(state string) string {
-	return p.oauth2Config.AuthCodeURL(state, oauth2.AccessTypeOffline)
+// AuthURL returns the authorization URL with the given state and PKCE verifier.
+func (p *Provider) AuthURL(state, verifier string) string {
+	return p.oauth2Config.AuthCodeURL(
+		state,
+		oauth2.AccessTypeOffline,
+		oauth2.S256ChallengeOption(verifier),
+	)
 }
 
 // Exchange exchanges an authorization code for tokens
-func (p *Provider) Exchange(ctx context.Context, code string) (*oauth2.Token, error) {
-	token, err := p.oauth2Config.Exchange(ctx, code)
+func (p *Provider) Exchange(ctx context.Context, code, verifier string) (*oauth2.Token, error) {
+	token, err := p.oauth2Config.Exchange(ctx, code, oauth2.VerifierOption(verifier))
 	if err != nil {
 		return nil, fmt.Errorf("exchange code: %w", err)
 	}

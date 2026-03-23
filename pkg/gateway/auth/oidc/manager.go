@@ -12,14 +12,16 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
 	"go.uber.org/zap"
+	"golang.org/x/oauth2"
 )
 
 // StateData stores OAuth state information
 type StateData struct {
-	Provider  string    `json:"provider"`
-	Nonce     string    `json:"nonce"`
-	ReturnURL string    `json:"return_url"`
-	CreatedAt time.Time `json:"created_at"`
+	Provider     string    `json:"provider"`
+	Nonce        string    `json:"nonce"`
+	CodeVerifier string    `json:"code_verifier"`
+	ReturnURL    string    `json:"return_url"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 // Manager manages multiple OIDC providers
@@ -112,18 +114,20 @@ func (m *Manager) GenerateAuthURL(providerID, returnURL string) (string, error) 
 		return "", fmt.Errorf("generate state: %w", err)
 	}
 	state := base64.URLEncoding.EncodeToString(stateBytes)
+	verifier := oauth2.GenerateVerifier()
 
 	// Store state
 	m.statesMu.Lock()
 	m.states[state] = &StateData{
-		Provider:  providerID,
-		Nonce:     state,
-		ReturnURL: returnURL,
-		CreatedAt: time.Now(),
+		Provider:     providerID,
+		Nonce:        state,
+		CodeVerifier: verifier,
+		ReturnURL:    returnURL,
+		CreatedAt:    time.Now(),
 	}
 	m.statesMu.Unlock()
 
-	return provider.AuthURL(state), nil
+	return provider.AuthURL(state, verifier), nil
 }
 
 // ValidateState validates and consumes a state parameter
@@ -166,7 +170,7 @@ func (m *Manager) HandleCallback(ctx context.Context, providerID, code, state st
 	}
 
 	// Exchange code for token
-	token, err := provider.Exchange(ctx, code)
+	token, err := provider.Exchange(ctx, code, stateData.CodeVerifier)
 	if err != nil {
 		return nil, "", fmt.Errorf("exchange code: %w", err)
 	}

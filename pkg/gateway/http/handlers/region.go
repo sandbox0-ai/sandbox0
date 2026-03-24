@@ -69,10 +69,6 @@ func (h *RegionHandler) ListRegions(c *gin.Context) {
 
 // CreateRegion creates a new region.
 func (h *RegionHandler) CreateRegion(c *gin.Context) {
-	if !requireSystemAdmin(c) {
-		return
-	}
-
 	var req CreateRegionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
@@ -109,10 +105,6 @@ func (h *RegionHandler) CreateRegion(c *gin.Context) {
 
 // GetRegion returns a region directory entry.
 func (h *RegionHandler) GetRegion(c *gin.Context) {
-	if !requireSystemAdmin(c) {
-		return
-	}
-
 	region, err := h.repo.GetRegion(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		if errors.Is(err, tenantdir.ErrRegionNotFound) {
@@ -128,10 +120,6 @@ func (h *RegionHandler) GetRegion(c *gin.Context) {
 
 // UpdateRegion updates a region directory entry.
 func (h *RegionHandler) UpdateRegion(c *gin.Context) {
-	if !requireSystemAdmin(c) {
-		return
-	}
-
 	region, err := h.repo.GetRegion(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		if errors.Is(err, tenantdir.ErrRegionNotFound) {
@@ -179,10 +167,6 @@ func (h *RegionHandler) UpdateRegion(c *gin.Context) {
 
 // DeleteRegion deletes a region directory entry.
 func (h *RegionHandler) DeleteRegion(c *gin.Context) {
-	if !requireSystemAdmin(c) {
-		return
-	}
-
 	if err := h.repo.DeleteRegion(c.Request.Context(), c.Param("id")); err != nil {
 		if errors.Is(err, tenantdir.ErrRegionNotFound) {
 			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "region not found")
@@ -193,17 +177,4 @@ func (h *RegionHandler) DeleteRegion(c *gin.Context) {
 		return
 	}
 	spec.JSONSuccess(c, http.StatusOK, gin.H{"message": "region deleted"})
-}
-
-func requireSystemAdmin(c *gin.Context) bool {
-	authCtx := middleware.GetAuthContext(c)
-	if authCtx == nil || authCtx.UserID == "" {
-		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "not authenticated")
-		return false
-	}
-	if !authCtx.IsSystemAdmin {
-		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "system admin access required")
-		return false
-	}
-	return true
 }

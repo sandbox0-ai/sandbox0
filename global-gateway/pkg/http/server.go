@@ -170,10 +170,14 @@ func (s *Server) setupRoutes() {
 	regions.Use(s.authMiddleware.RequireJWTAuth())
 	{
 		regions.GET("", regionHandler.ListRegions)
-		regions.POST("", regionHandler.CreateRegion)
-		regions.GET("/:id", regionHandler.GetRegion)
-		regions.PUT("/:id", regionHandler.UpdateRegion)
-		regions.DELETE("/:id", regionHandler.DeleteRegion)
+		regionsAdmin := regions.Group("")
+		regionsAdmin.Use(s.authMiddleware.RequireSystemAdmin())
+		{
+			regionsAdmin.POST("", regionHandler.CreateRegion)
+			regionsAdmin.GET("/:id", regionHandler.GetRegion)
+			regionsAdmin.PUT("/:id", regionHandler.UpdateRegion)
+			regionsAdmin.DELETE("/:id", regionHandler.DeleteRegion)
+		}
 	}
 }
 

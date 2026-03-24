@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/tenantdir"
 	"go.uber.org/zap"
 )
@@ -132,14 +133,6 @@ func TestRegionHandlerCreateRegion(t *testing.T) {
 	handler := NewRegionHandler(repo, zap.NewNop())
 
 	router := gin.New()
-	router.Use(func(c *gin.Context) {
-		c.Set("auth_context", &authn.AuthContext{
-			AuthMethod:    authn.AuthMethodJWT,
-			UserID:        "admin-1",
-			IsSystemAdmin: true,
-		})
-		c.Next()
-	})
 	router.POST("/regions", handler.CreateRegion)
 
 	req := httptest.NewRequest(http.MethodPost, "/regions", strings.NewReader(`{"id":"aws/us-east-1","display_name":"US East 1","regional_gateway_url":"https://use1.example.com","metering_export_url":"https://metering.use1.example.com"}`))
@@ -184,14 +177,6 @@ func TestRegionHandlerUpdateRegionCanClearMeteringExportURL(t *testing.T) {
 	handler := NewRegionHandler(repo, zap.NewNop())
 
 	router := gin.New()
-	router.Use(func(c *gin.Context) {
-		c.Set("auth_context", &authn.AuthContext{
-			AuthMethod:    authn.AuthMethodJWT,
-			UserID:        "admin-1",
-			IsSystemAdmin: true,
-		})
-		c.Next()
-	})
 	router.PUT("/regions/:id", handler.UpdateRegion)
 
 	req := httptest.NewRequest(http.MethodPut, "/regions/aws-us-east-1", strings.NewReader(`{"metering_export_url":""}`))
@@ -212,4 +197,72 @@ func TestRegionHandlerUpdateRegionCanClearMeteringExportURL(t *testing.T) {
 	if response.Data.MeteringExportURL != "" {
 		t.Fatalf("expected metering export url to be cleared, got %q", response.Data.MeteringExportURL)
 	}
+}
+
+func TestRegionRoutesRequireSystemAdminForMutations(t *testing.T) {
+	t.Setenv("GIN_MODE", "release")
+	gin.SetMode(gin.ReleaseMode)
+
+	repo := &stubRegionRepository{regions: map[string]*tenantdir.Region{}}
+	handler := NewRegionHandler(repo, zap.NewNop())
+	authMiddleware := middleware.NewAuthMiddleware(nil, "test-secret", nil, zap.NewNop())
+
+	newRouter := func(authCtx *authn.AuthContext) *gin.Engine {
+		router := gin.New()
+		router.Use(func(c *gin.Context) {
+			if authCtx != nil {
+				c.Set("auth_context", authCtx)
+			}
+			c.Next()
+		})
+
+		regions := router.Group("/regions")
+		regions.Use(authMiddleware.RequireJWTAuth())
+		regions.GET("", handler.ListRegions)
+
+		regionsAdmin := regions.Group("")
+		regionsAdmin.Use(authMiddleware.RequireSystemAdmin())
+		regionsAdmin.POST("", handler.CreateRegion)
+
+		return router
+	}
+
+	t.Run("regular user can list but cannot create", func(t *testing.T) {
+		router := newRouter(&authn.AuthContext{
+			AuthMethod: authn.AuthMethodJWT,
+			UserID:     "user-1",
+		})
+
+		listReq := httptest.NewRequest(http.MethodGet, "/regions", nil)
+		listRec := httptest.NewRecorder()
+		router.ServeHTTP(listRec, listReq)
+		if listRec.Code != http.StatusOK {
+			t.Fatalf("expected list status 200, got %d body=%s", listRec.Code, listRec.Body.String())
+		}
+
+		createReq := httptest.NewRequest(http.MethodPost, "/regions", strings.NewReader(`{"id":"aws/us-east-1","regional_gateway_url":"https://use1.example.com"}`))
+		createReq.Header.Set("Content-Type", "application/json")
+		createRec := httptest.NewRecorder()
+		router.ServeHTTP(createRec, createReq)
+		if createRec.Code != http.StatusForbidden {
+			t.Fatalf("expected create status 403, got %d body=%s", createRec.Code, createRec.Body.String())
+		}
+	})
+
+	t.Run("system admin can create through route middleware", func(t *testing.T) {
+		router := newRouter(&authn.AuthContext{
+			AuthMethod:    authn.AuthMethodJWT,
+			UserID:        "admin-1",
+			IsSystemAdmin: true,
+		})
+
+		req := httptest.NewRequest(http.MethodPost, "/regions", strings.NewReader(`{"id":"aws/us-east-1","regional_gateway_url":"https://use1.example.com"}`))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("expected create status 201, got %d body=%s", rec.Code, rec.Body.String())
+		}
+	})
 }

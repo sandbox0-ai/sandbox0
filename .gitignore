@@ -17,6 +17,7 @@ components/*/node_modules/
 apps/*/.next/
 apps/*/out/
 components/*/dist/
+*.tsbuildinfo
 
 # Output of the go coverage tool
 *.out

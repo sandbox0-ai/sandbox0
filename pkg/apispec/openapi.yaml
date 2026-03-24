@@ -205,13 +205,6 @@ paths:
           schema:
             type: string
           required: false
-        - name: home_region_id
-          in: query
-          schema:
-            type: string
-          required: false
-          deprecated: true
-          description: Optional legacy compatibility hint. New users now complete home region selection during onboarding after sign-in, so this parameter is ignored.
       responses:
         "302":
           description: Redirect to OIDC provider

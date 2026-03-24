@@ -2170,9 +2170,6 @@ type GetAuthOidcProviderCallbackParams struct {
 // GetAuthOidcProviderLoginParams defines parameters for GetAuthOidcProviderLogin.
 type GetAuthOidcProviderLoginParams struct {
 	ReturnUrl *string `form:"return_url,omitempty" json:"return_url,omitempty"`
-
-	// HomeRegionId Required for first-time OIDC auto-provisioning in global-gateway mode so the bootstrap team is created with an explicit home region.
-	HomeRegionId *string `form:"home_region_id,omitempty" json:"home_region_id,omitempty"`
 }
 
 // GetTenantActiveParams defines parameters for GetTenantActive.

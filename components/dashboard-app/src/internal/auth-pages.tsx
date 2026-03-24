@@ -98,7 +98,7 @@ export function createDashboardOnboardingPage(
 
     return (
       <DashboardOnboardingView
-        onboardingError={onboardingError}
+        onboardingError={onboardingError ?? result.session.errors[0]}
         userEmail={result.session.user?.email}
         regions={result.regions}
         {...options}

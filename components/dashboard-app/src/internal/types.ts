@@ -89,8 +89,8 @@ export interface DashboardSession {
   authenticated: boolean;
   /**
    * True when the user is authenticated but has not yet completed first-team
-   * onboarding (i.e. the account exists but no default team has been created).
-   * Only set in global-gateway mode.
+   * onboarding, or when the current team cannot be routed because region
+   * setup is incomplete. Only set in global-gateway mode.
    */
   needsOnboarding?: boolean;
   mode: DashboardControlPlaneMode;

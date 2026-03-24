@@ -16,7 +16,11 @@ import {
   dashboardRegionalGatewayURLCookieName,
   dashboardRegionalRegionIDCookieName,
 } from "./auth";
-import { createDashboardControlPlaneSDK, resolveSDKErrorMessage } from "./sdk";
+import {
+  createDashboardControlPlaneSDK,
+  readSDKResponseError,
+  resolveSDKErrorMessage,
+} from "./sdk";
 
 export interface SessionAuthInput {
   bearerToken?: string;
@@ -244,6 +248,27 @@ function isRegionalSessionUsable(
   return activeTeam.homeRegionID === regionalSession.region_id;
 }
 
+function resolveOnboardingRequirement(
+  user: DashboardUser,
+  teams: DashboardTeam[],
+  regionalSession?: DashboardRegionalSession,
+): { required: boolean; error?: string } {
+  if (teams.length === 0) {
+    return { required: true };
+  }
+
+  const activeTeam = deriveGlobalActiveTeam(user, teams, regionalSession);
+  if (activeTeam) {
+    return { required: false };
+  }
+
+  return {
+    required: true,
+    error:
+      "Your workspace does not have a home region yet. Ask a system administrator to add a region, then complete onboarding.",
+  };
+}
+
 export function readBearerToken(
   authorizationHeader: string | null,
   cookies: Pick<{ get(name: string): { value: string } | undefined }, "get">,
@@ -372,13 +397,15 @@ export async function resolveDashboardSession(
     const user = toUser(userData);
     const teams = toTeams(teamResponse.data?.teams);
 
-    if (teams.length === 0) {
+    const onboarding = resolveOnboardingRequirement(user, teams, auth.regionalSession);
+    if (onboarding.required) {
       return {
         ...baseSession,
         authenticated: true,
         needsOnboarding: true,
         user,
         teams,
+        errors: onboarding.error ? [onboarding.error] : [],
       };
     }
 
@@ -393,7 +420,28 @@ export async function resolveDashboardSession(
         : token;
 
     if (!regionalURL) {
-      const activeTeamResponse = await globalSDK.tenant.tenantActiveGet();
+      let activeTeamResponse;
+      try {
+        activeTeamResponse = await globalSDK.tenant.tenantActiveGet();
+      } catch (error) {
+        const response = await readSDKResponseError(error);
+        if (response && (response.status === 400 || response.status === 409)) {
+          return {
+            ...baseSession,
+            authenticated: true,
+            needsOnboarding: true,
+            user,
+            teams,
+            errors: [
+              await resolveSDKErrorMessage(
+                error,
+                "Your workspace is missing a routable region. Ask a system administrator to finish region setup, then complete onboarding.",
+              ),
+            ],
+          };
+        }
+        throw error;
+      }
       const activeTeamData = activeTeamResponse.data;
       if (!activeTeamData) {
         throw new Error("/tenant/active returned an empty response");

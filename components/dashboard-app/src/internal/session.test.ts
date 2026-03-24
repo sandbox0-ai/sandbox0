@@ -273,6 +273,116 @@ test("resolveDashboardSession returns needsOnboarding when user has no teams in 
   assert.equal(session.user?.id, "u_new");
 });
 
+test("resolveDashboardSession returns needsOnboarding when default team has no home region", async () => {
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = String(input);
+
+    if (url === "https://global.example.com/users/me") {
+      return new Response(
+        JSON.stringify({
+          data: {
+            id: "u_123",
+            email: "dev@example.com",
+            name: "Dev User",
+            default_team_id: "team_1",
+            email_verified: true,
+            is_admin: false,
+          },
+        }),
+      );
+    }
+    if (url === "https://global.example.com/teams") {
+      return new Response(
+        JSON.stringify({
+          data: {
+            teams: [
+              {
+                id: "team_1",
+                name: "Cloud Team",
+                slug: "cloud-team",
+                home_region_id: null,
+              },
+            ],
+          },
+        }),
+      );
+    }
+
+    throw new Error(`unexpected url ${url}`);
+  };
+
+  const session = await resolveDashboardSession(
+    globalGatewayConfig,
+    { bearerToken: "global-token" },
+    fetchImpl,
+  );
+
+  assert.equal(session.authenticated, true);
+  assert.equal(session.needsOnboarding, true);
+  assert.equal(session.activeTeam, undefined);
+  assert.match(session.errors[0] ?? "", /home region/i);
+});
+
+test("resolveDashboardSession returns needsOnboarding when active team is not routable", async () => {
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = String(input);
+
+    if (url === "https://global.example.com/users/me") {
+      return new Response(
+        JSON.stringify({
+          data: {
+            id: "u_123",
+            email: "dev@example.com",
+            name: "Dev User",
+            default_team_id: "team_1",
+            email_verified: true,
+            is_admin: false,
+          },
+        }),
+      );
+    }
+    if (url === "https://global.example.com/teams") {
+      return new Response(
+        JSON.stringify({
+          data: {
+            teams: [
+              {
+                id: "team_1",
+                name: "Cloud Team",
+                slug: "cloud-team",
+                home_region_id: "aws/us-east-1",
+              },
+            ],
+          },
+        }),
+      );
+    }
+    if (url === "https://global.example.com/tenant/active") {
+      return new Response(
+        JSON.stringify({
+          error: {
+            message: "active team home region is not routable",
+          },
+        }),
+        { status: 409 },
+      );
+    }
+
+    throw new Error(`unexpected url ${url}`);
+  };
+
+  const session = await resolveDashboardSession(
+    globalGatewayConfig,
+    { bearerToken: "global-token" },
+    fetchImpl,
+  );
+
+  assert.equal(session.authenticated, true);
+  assert.equal(session.needsOnboarding, true);
+  assert.equal(session.configuredRegionalURL, undefined);
+  assert.equal(session.errors[0], "active team home region is not routable");
+});
+
 test("resolveDashboardSession uses regional session directly when available", async () => {
   const seenURLs: string[] = [];
   const fetchImpl: typeof fetch = async (input) => {

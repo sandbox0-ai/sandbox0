@@ -196,9 +196,10 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		}
 
 		cfg.BuiltInAuth.InitUser = &apiconfig.InitUserConfig{
-			Email:    infra.Spec.InitUser.Email,
-			Password: password,
-			Name:     infra.Spec.InitUser.Name,
+			Email:        infra.Spec.InitUser.Email,
+			Password:     password,
+			Name:         infra.Spec.InitUser.Name,
+			HomeRegionID: infra.Spec.InitUser.HomeRegionID,
 		}
 	}
 

@@ -13,12 +13,14 @@ import (
 )
 
 var (
-	ErrProviderNotFound    = errors.New("OIDC provider not found")
-	ErrProviderDisabled    = errors.New("OIDC provider is disabled")
-	ErrInvalidState        = errors.New("invalid OAuth state")
-	ErrInvalidCode         = errors.New("invalid authorization code")
-	ErrMissingEmail        = errors.New("email not provided by IdP")
-	ErrEmailDomainMismatch = errors.New("email domain not allowed")
+	ErrProviderNotFound      = errors.New("OIDC provider not found")
+	ErrProviderDisabled      = errors.New("OIDC provider is disabled")
+	ErrInvalidState          = errors.New("invalid OAuth state")
+	ErrInvalidCode           = errors.New("invalid authorization code")
+	ErrMissingEmail          = errors.New("email not provided by IdP")
+	ErrMissingHomeRegion     = errors.New("home_region_id is required for OIDC auto-provisioning")
+	ErrHomeRegionNotRoutable = errors.New("home region is not routable")
+	ErrEmailDomainMismatch   = errors.New("email domain not allowed")
 )
 
 // UserInfo contains user information from OIDC token

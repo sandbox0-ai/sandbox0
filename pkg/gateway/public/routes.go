@@ -16,17 +16,16 @@ import (
 )
 
 type Deps struct {
-	IdentityRepo              *identity.Repository
-	APIKeyRepo                *apikey.Repository
-	AuthMiddleware            *middleware.AuthMiddleware
-	BuiltinProvider           *builtin.Provider
-	OIDCManager               *oidc.Manager
-	Entitlements              licensing.Entitlements
-	JWTIssuer                 *authn.Issuer
-	RegionRepo                *tenantdir.Repository
-	RequireCreateHomeRegion   bool
-	DefaultCreateHomeRegionID string
-	Logger                    *zap.Logger
+	IdentityRepo            *identity.Repository
+	APIKeyRepo              *apikey.Repository
+	AuthMiddleware          *middleware.AuthMiddleware
+	BuiltinProvider         *builtin.Provider
+	OIDCManager             *oidc.Manager
+	Entitlements            licensing.Entitlements
+	JWTIssuer               *authn.Issuer
+	RegionRepo              *tenantdir.Repository
+	RequireCreateHomeRegion bool
+	Logger                  *zap.Logger
 }
 
 // RegisterRoutes mounts the full self-hosted public surface.
@@ -37,6 +36,10 @@ func RegisterRoutes(router gin.IRouter, deps Deps) {
 
 // RegisterIdentityRoutes mounts global identity and team directory routes.
 func RegisterIdentityRoutes(router gin.IRouter, deps Deps) {
+	authOpts := make([]handlers.AuthHandlerOption, 0, 1)
+	if deps.RequireCreateHomeRegion {
+		authOpts = append(authOpts, handlers.WithCreateHomeRegionRequiredForAuth(deps.RegionRepo))
+	}
 	authHandler := handlers.NewAuthHandler(
 		deps.IdentityRepo,
 		deps.BuiltinProvider,
@@ -44,14 +47,12 @@ func RegisterIdentityRoutes(router gin.IRouter, deps Deps) {
 		deps.JWTIssuer,
 		tenantdir.NewResolver(deps.IdentityRepo, deps.RegionRepo),
 		deps.Logger,
+		authOpts...,
 	)
 	userHandler := handlers.NewUserHandler(deps.IdentityRepo, deps.Logger)
 	teamOpts := make([]handlers.TeamHandlerOption, 0, 1)
 	if deps.RequireCreateHomeRegion {
 		teamOpts = append(teamOpts, handlers.WithCreateHomeRegionRequired(deps.RegionRepo))
-	}
-	if deps.RequireCreateHomeRegion && deps.DefaultCreateHomeRegionID != "" {
-		teamOpts = append(teamOpts, handlers.WithDefaultCreateHomeRegion(deps.RegionRepo, deps.DefaultCreateHomeRegionID))
 	}
 	teamHandler := handlers.NewTeamHandler(deps.IdentityRepo, deps.Logger, teamOpts...)
 

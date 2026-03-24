@@ -1,10 +1,5 @@
 import type { DashboardAuthProvider, DashboardRuntimeConfig, DashboardSession } from "./types";
 import {
-  type DashboardRegionalSession,
-  dashboardRegionalAccessTokenCookieName,
-  dashboardRegionalExpiresAtCookieName,
-  dashboardRegionalGatewayURLCookieName,
-  dashboardRegionalRegionIDCookieName,
   dashboardRefreshTokenCookieName,
   resolveDashboardAuthProviders,
 } from "./auth";
@@ -34,30 +29,6 @@ export interface DashboardLoginRenderResult {
   loginError?: string;
 }
 
-function readRegionalSessionFromCookies(
-  cookieStore: DashboardCookieStore,
-): DashboardRegionalSession | undefined {
-  const token = cookieStore.get(dashboardRegionalAccessTokenCookieName)?.value;
-  const regionID = cookieStore.get(dashboardRegionalRegionIDCookieName)?.value;
-  const expiresAt = Number(
-    cookieStore.get(dashboardRegionalExpiresAtCookieName)?.value ?? "",
-  );
-  const regionalGatewayURL = cookieStore.get(
-    dashboardRegionalGatewayURLCookieName,
-  )?.value;
-
-  if (!token || !regionID || !Number.isFinite(expiresAt) || expiresAt <= 0) {
-    return undefined;
-  }
-
-  return {
-    token,
-    region_id: regionID,
-    expires_at: expiresAt,
-    regional_gateway_url: regionalGatewayURL || undefined,
-  };
-}
-
 export async function resolveDashboardHomeEntry(
   config: DashboardRuntimeConfig,
   cookieStore: DashboardCookieStore,
@@ -71,10 +42,7 @@ export async function resolveDashboardHomeEntry(
   const refreshToken = cookieStore.get(dashboardRefreshTokenCookieName)?.value;
   const session = await resolveDashboardSession(
     config,
-    {
-      bearerToken: accessToken,
-      regionalSession: readRegionalSessionFromCookies(cookieStore),
-    },
+    { bearerToken: accessToken },
     fetchImpl,
   );
 
@@ -120,10 +88,7 @@ export async function resolveDashboardLoginEntry(
   const refreshToken = cookieStore.get(dashboardRefreshTokenCookieName)?.value;
   const session = await resolveDashboardSession(
     config,
-    {
-      bearerToken: accessToken,
-      regionalSession: readRegionalSessionFromCookies(cookieStore),
-    },
+    { bearerToken: accessToken },
     fetchImpl,
   );
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
@@ -67,7 +68,7 @@ func (p *Provider) Authenticate(ctx context.Context, email, password string) (*i
 }
 
 // Register creates a new user with email/password
-func (p *Provider) Register(ctx context.Context, email, password, name string) (*identity.User, error) {
+func (p *Provider) Register(ctx context.Context, email, password, name string, homeRegionID *string) (*identity.User, error) {
 	if !p.config.Enabled {
 		return nil, ErrBuiltInAuthDisabled
 	}
@@ -99,7 +100,7 @@ func (p *Provider) Register(ctx context.Context, email, password, name string) (
 		teamName = fmt.Sprintf("%s Team", user.Name)
 	}
 
-	if _, _, err := p.repo.CreateUserWithDefaultTeam(ctx, user, teamName); err != nil {
+	if _, _, err := p.repo.CreateUserWithDefaultTeam(ctx, user, teamName, homeRegionID); err != nil {
 		if errors.Is(err, identity.ErrUserAlreadyExists) {
 			return nil, ErrEmailAlreadyExists
 		}
@@ -198,6 +199,11 @@ func (p *Provider) EnsureInitUser(ctx context.Context) error {
 		Name:    "Default",
 		Slug:    "default",
 		OwnerID: &user.ID,
+	}
+	if p.config.InitUser != nil {
+		if trimmed := strings.TrimSpace(p.config.InitUser.HomeRegionID); trimmed != "" {
+			team.HomeRegionID = &trimmed
+		}
 	}
 
 	if err := p.repo.CreateTeam(ctx, team); err != nil {

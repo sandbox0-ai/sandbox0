@@ -256,6 +256,10 @@ spec:
                   email:
                     description: Email is the admin user's email
                     type: string
+                  homeRegionId:
+                    description: HomeRegionID is required for global-gateway init
+                      users so the bootstrap team is routable.
+                    type: string
                   name:
                     description: Name is the admin user's display name
                     type: string
@@ -958,6 +962,12 @@ spec:
                                       description: Domain filters users by email domain
                                       type: string
                                   type: object
+                                tokenEndpointAuthMethod:
+                                  description: |-
+                                    TokenEndpointAuthMethod controls how the client authenticates to the token endpoint.
+                                    Supported values are "client_secret_basic" and "client_secret_post".
+                                    When omitted, the oauth2 library auto-detects the method.
+                                  type: string
                               type: object
                             type: array
                           oidcStateCleanupInterval:
@@ -1147,10 +1157,6 @@ spec:
                           databaseSchema:
                             default: global_gateway
                             type: string
-                          defaultHomeRegionId:
-                            description: DefaultHomeRegionID is used for new teams
-                              when create requests omit home_region_id.
-                            type: string
                           defaultTeamName:
                             default: Personal Team
                             description: Identity and Teams
@@ -1229,6 +1235,12 @@ spec:
                                       description: Domain filters users by email domain
                                       type: string
                                   type: object
+                                tokenEndpointAuthMethod:
+                                  description: |-
+                                    TokenEndpointAuthMethod controls how the client authenticates to the token endpoint.
+                                    Supported values are "client_secret_basic" and "client_secret_post".
+                                    When omitted, the oauth2 library auto-detects the method.
+                                  type: string
                               type: object
                             type: array
                           oidcStateCleanupInterval:
@@ -2088,6 +2100,12 @@ spec:
                                       description: Domain filters users by email domain
                                       type: string
                                   type: object
+                                tokenEndpointAuthMethod:
+                                  description: |-
+                                    TokenEndpointAuthMethod controls how the client authenticates to the token endpoint.
+                                    Supported values are "client_secret_basic" and "client_secret_post".
+                                    When omitted, the oauth2 library auto-detects the method.
+                                  type: string
                               type: object
                             type: array
                           oidcStateCleanupInterval:

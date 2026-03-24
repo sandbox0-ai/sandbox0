@@ -114,7 +114,7 @@ func TestClusterGatewayIntegration_PublicAuthJWT(t *testing.T) {
 		IsAdmin:       false,
 	}
 	ctx := context.Background()
-	team, _, err := identityRepo.CreateUserWithDefaultTeam(ctx, user, "JWT Team")
+	team, _, err := identityRepo.CreateUserWithDefaultTeam(ctx, user, "JWT Team", nil)
 	if err != nil {
 		t.Fatalf("create user/team: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestClusterGatewayIntegration_PublicAuthAPIKey(t *testing.T) {
 		IsAdmin:       false,
 	}
 	ctx := context.Background()
-	team, _, err := identityRepo.CreateUserWithDefaultTeam(ctx, user, "API Key Team")
+	team, _, err := identityRepo.CreateUserWithDefaultTeam(ctx, user, "API Key Team", nil)
 	if err != nil {
 		t.Fatalf("create user/team: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestClusterGatewayIntegration_PublicAuthUserResponseIncludesDefaultTeamHome
 		IsAdmin:       false,
 	}
 	ctx := context.Background()
-	team, _, err := identityRepo.CreateUserWithDefaultTeam(ctx, user, "Me Team")
+	team, _, err := identityRepo.CreateUserWithDefaultTeam(ctx, user, "Me Team", nil)
 	if err != nil {
 		t.Fatalf("create user/team: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestClusterGatewayIntegration_PublicAuthTeamsAcceptHomeRegionID(t *testing.
 		IsAdmin:       false,
 	}
 	ctx := context.Background()
-	team, _, err := identityRepo.CreateUserWithDefaultTeam(ctx, user, "Admin Team")
+	team, _, err := identityRepo.CreateUserWithDefaultTeam(ctx, user, "Admin Team", nil)
 	if err != nil {
 		t.Fatalf("create user/team: %v", err)
 	}

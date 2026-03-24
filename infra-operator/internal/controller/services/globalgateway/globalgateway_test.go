@@ -149,7 +149,7 @@ func TestBuildConfigPopulatesDatabaseAndJWTSecret(t *testing.T) {
 	}
 }
 
-func TestBuildConfigPreservesConfiguredDefaultHomeRegionID(t *testing.T) {
+func TestBuildConfigPreservesInitUserHomeRegionID(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "demo",
@@ -172,14 +172,13 @@ func TestBuildConfigPreservesConfiguredDefaultHomeRegionID(t *testing.T) {
 						Enabled:  true,
 						Replicas: 1,
 					},
-					Config: &apiconfig.GlobalGatewayConfig{
-						DefaultHomeRegionID: "aws/us-east-1",
-					},
+					Config: &apiconfig.GlobalGatewayConfig{},
 				},
 			},
 			InitUser: &infrav1alpha1.InitUserConfig{
-				Email: "admin@example.com",
-				Name:  "Admin",
+				Email:        "admin@example.com",
+				Name:         "Admin",
+				HomeRegionID: "aws/us-east-1",
 			},
 		},
 	}
@@ -226,8 +225,8 @@ func TestBuildConfigPreservesConfiguredDefaultHomeRegionID(t *testing.T) {
 		t.Fatalf("buildConfig returned error: %v", err)
 	}
 
-	if cfg.DefaultHomeRegionID != "aws/us-east-1" {
-		t.Fatalf("expected configured default home region id, got %q", cfg.DefaultHomeRegionID)
+	if cfg.BuiltInAuth.InitUser == nil || cfg.BuiltInAuth.InitUser.HomeRegionID != "aws/us-east-1" {
+		t.Fatalf("expected init user home region id to be preserved, got %#v", cfg.BuiltInAuth.InitUser)
 	}
 }
 

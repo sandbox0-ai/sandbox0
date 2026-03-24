@@ -39,7 +39,6 @@ type TeamHandler struct {
 	logger                    *zap.Logger
 	requireHomeRegionOnCreate bool
 	regionLookup              TeamRegionLookup
-	defaultHomeRegionID       string
 }
 
 // TeamHandlerOption configures TeamHandler behavior.
@@ -50,15 +49,6 @@ func WithCreateHomeRegionRequired(regionLookup TeamRegionLookup) TeamHandlerOpti
 	return func(h *TeamHandler) {
 		h.requireHomeRegionOnCreate = true
 		h.regionLookup = regionLookup
-	}
-}
-
-// WithDefaultCreateHomeRegion assigns a default home region when create requests omit home_region_id.
-func WithDefaultCreateHomeRegion(regionLookup TeamRegionLookup, defaultHomeRegionID string) TeamHandlerOption {
-	return func(h *TeamHandler) {
-		h.requireHomeRegionOnCreate = true
-		h.regionLookup = regionLookup
-		h.defaultHomeRegionID = strings.TrimSpace(defaultHomeRegionID)
 	}
 }
 
@@ -114,33 +104,13 @@ func (h *TeamHandler) CreateTeam(c *gin.Context) {
 	}
 
 	homeRegionID := normalizeOptionalString(req.HomeRegionID)
-	if homeRegionID == nil && h.defaultHomeRegionID != "" {
-		defaultHomeRegionID := h.defaultHomeRegionID
-		homeRegionID = &defaultHomeRegionID
-	}
 	if h.requireHomeRegionOnCreate {
-		if homeRegionID == nil {
-			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "home_region_id is required")
-			return
-		}
-		if h.regionLookup == nil {
-			h.logger.Error("Missing home region lookup for required create validation")
-			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to resolve home region")
-			return
-		}
-
-		region, err := h.regionLookup.GetRegion(c.Request.Context(), *homeRegionID)
-		if err != nil {
-			if errors.Is(err, tenantdir.ErrRegionNotFound) {
-				spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "home region not found")
-				return
+		if err := validateRequiredRoutableHomeRegion(c.Request.Context(), h.regionLookup, homeRegionID); err != nil {
+			status, code, message := resolveHomeRegionValidationError(err)
+			if status == http.StatusInternalServerError {
+				h.logger.Error("Failed to resolve home region", zap.Error(err))
 			}
-			h.logger.Error("Failed to resolve home region", zap.Error(err))
-			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to resolve home region")
-			return
-		}
-		if !region.Enabled || strings.TrimSpace(region.RegionalGatewayURL) == "" {
-			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "home region is not routable")
+			spec.JSONError(c, status, code, message)
 			return
 		}
 	}
@@ -500,6 +470,54 @@ func normalizeOptionalString(value *string) *string {
 		return nil
 	}
 	return &trimmed
+}
+
+var errHomeRegionLookupUnavailable = errors.New("home region lookup unavailable")
+var errHomeRegionRequired = errors.New("home_region_id is required")
+var errHomeRegionNotRoutable = errors.New("home region is not routable")
+
+func validateRequiredRoutableHomeRegion(ctx context.Context, regionLookup TeamRegionLookup, homeRegionID *string) error {
+	if homeRegionID == nil {
+		return errHomeRegionRequired
+	}
+	if regionLookup == nil {
+		return errHomeRegionLookupUnavailable
+	}
+
+	region, err := regionLookup.GetRegion(ctx, *homeRegionID)
+	if err != nil {
+		if errors.Is(err, tenantdir.ErrRegionNotFound) {
+			return tenantdir.ErrRegionNotFound
+		}
+		return err
+	}
+	if !region.Enabled || strings.TrimSpace(region.RegionalGatewayURL) == "" {
+		return errHomeRegionNotRoutable
+	}
+	return nil
+}
+
+func resolveHomeRegionValidationError(err error) (int, string, string) {
+	switch {
+	case errors.Is(err, errHomeRegionRequired):
+		return http.StatusBadRequest, spec.CodeBadRequest, "home_region_id is required"
+	case errors.Is(err, tenantdir.ErrRegionNotFound):
+		return http.StatusBadRequest, spec.CodeBadRequest, "home region not found"
+	case errors.Is(err, errHomeRegionNotRoutable):
+		return http.StatusBadRequest, spec.CodeBadRequest, "home region is not routable"
+	case errors.Is(err, errHomeRegionLookupUnavailable):
+		return http.StatusInternalServerError, spec.CodeInternal, "failed to resolve home region"
+	default:
+		return http.StatusInternalServerError, spec.CodeInternal, "failed to resolve home region"
+	}
+}
+
+// ValidateInitUserHomeRegion verifies the configured init user's home region for global-gateway bootstrap.
+func ValidateInitUserHomeRegion(ctx context.Context, regionLookup TeamRegionLookup, homeRegionID string) error {
+	if strings.TrimSpace(homeRegionID) == "" {
+		return errHomeRegionRequired
+	}
+	return validateRequiredRoutableHomeRegion(ctx, regionLookup, &homeRegionID)
 }
 
 // RemoveTeamMember removes a member from a team

@@ -50,8 +50,11 @@ func NewRegionHandler(repo regionRepository, logger *zap.Logger) *RegionHandler 
 }
 
 // ListRegions lists all configured regions.
+// Any authenticated user may call this endpoint; write operations remain admin-only.
 func (h *RegionHandler) ListRegions(c *gin.Context) {
-	if !requireSystemAdmin(c) {
+	authCtx := middleware.GetAuthContext(c)
+	if authCtx == nil || authCtx.UserID == "" {
+		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "not authenticated")
 		return
 	}
 

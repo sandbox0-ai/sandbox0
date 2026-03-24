@@ -231,6 +231,48 @@ test("resolveDashboardSession resolves global-gateway metadata and region routin
   assert.equal(session.configuredRegionalURL, "https://use1.example.com");
 });
 
+test("resolveDashboardSession returns needsOnboarding when user has no teams in global-gateway mode", async () => {
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = String(input);
+
+    if (url === "https://global.example.com/users/me") {
+      return new Response(
+        JSON.stringify({
+          data: {
+            id: "u_new",
+            email: "new@example.com",
+            name: "New User",
+            default_team_id: null,
+            email_verified: true,
+            is_admin: false,
+          },
+        }),
+      );
+    }
+    if (url === "https://global.example.com/teams") {
+      return new Response(
+        JSON.stringify({
+          data: { teams: [] },
+        }),
+      );
+    }
+
+    throw new Error(`unexpected url ${url}`);
+  };
+
+  const session = await resolveDashboardSession(
+    globalGatewayConfig,
+    { bearerToken: "global-token" },
+    fetchImpl,
+  );
+
+  assert.equal(session.authenticated, true);
+  assert.equal(session.needsOnboarding, true);
+  assert.equal(session.activeTeam, undefined);
+  assert.deepEqual(session.teams, []);
+  assert.equal(session.user?.id, "u_new");
+});
+
 test("resolveDashboardSession uses regional session directly when available", async () => {
   const seenURLs: string[] = [];
   const fetchImpl: typeof fetch = async (input) => {

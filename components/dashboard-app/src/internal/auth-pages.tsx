@@ -1,8 +1,13 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
-import { resolveDashboardHomeEntry, resolveDashboardLoginEntry } from "./browser-auth";
+import {
+  resolveDashboardHomeEntry,
+  resolveDashboardLoginEntry,
+  resolveDashboardOnboardingEntry,
+} from "./browser-auth";
 import { DashboardLoginView } from "./login-view";
+import { DashboardOnboardingView } from "./onboarding-view";
 import type { DashboardRuntimeConfig, DashboardSession } from "./types";
 
 export interface DashboardPageSearchParams {
@@ -14,6 +19,12 @@ export interface DashboardLoginViewOptions {
   brandName?: string;
   title?: string;
   builtinLoginPath?: string;
+}
+
+export interface DashboardOnboardingViewOptions {
+  logoSrc?: string;
+  brandName?: string;
+  onboardingPath?: string;
 }
 
 export type DashboardConfigResolver = () => DashboardRuntimeConfig;
@@ -62,6 +73,38 @@ export async function requireDashboardHomeRender(
   }
 
   return result.session;
+}
+
+export interface DashboardOnboardingPageSearchParams {
+  searchParams: Promise<{ onboarding_error?: string }>;
+}
+
+export function createDashboardOnboardingPage(
+  resolveConfig: DashboardConfigResolver,
+  options?: DashboardOnboardingViewOptions,
+) {
+  return async function DashboardOnboardingPage({
+    searchParams,
+  }: DashboardOnboardingPageSearchParams) {
+    const { onboarding_error: onboardingError } = await searchParams;
+    const result = await resolveDashboardOnboardingEntry(
+      resolveConfig(),
+      await cookies(),
+    );
+
+    if (result.kind === "redirect") {
+      redirect(result.location);
+    }
+
+    return (
+      <DashboardOnboardingView
+        onboardingError={onboardingError}
+        userEmail={result.session.user?.email}
+        regions={result.regions}
+        {...options}
+      />
+    );
+  };
 }
 
 export async function requireDashboardAuth(

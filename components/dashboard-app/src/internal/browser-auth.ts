@@ -1,10 +1,12 @@
-import type { DashboardAuthProvider, DashboardRuntimeConfig, DashboardSession } from "./types";
+import type { DashboardAuthProvider, DashboardRegion, DashboardRuntimeConfig, DashboardSession } from "./types";
 import {
   dashboardRefreshTokenCookieName,
+  listRegions,
   resolveDashboardAuthProviders,
 } from "./auth";
 import {
   dashboardLoginPath,
+  dashboardOnboardingPath,
   resolveDashboardProviderLoginTarget,
 } from "./browser-auth-links";
 import { readBearerToken, resolveDashboardSession } from "./session";
@@ -29,6 +31,12 @@ export interface DashboardLoginRenderResult {
   loginError?: string;
 }
 
+export interface DashboardOnboardingRenderResult {
+  kind: "render";
+  session: DashboardSession;
+  regions: DashboardRegion[];
+}
+
 export async function resolveDashboardHomeEntry(
   config: DashboardRuntimeConfig,
   cookieStore: DashboardCookieStore,
@@ -45,6 +53,10 @@ export async function resolveDashboardHomeEntry(
     { bearerToken: accessToken },
     fetchImpl,
   );
+
+  if (session.authenticated && session.needsOnboarding) {
+    return { kind: "redirect", location: dashboardOnboardingPath() };
+  }
 
   if (session.authenticated) {
     return { kind: "render", session };
@@ -75,6 +87,41 @@ export async function resolveDashboardHomeEntry(
   };
 }
 
+export async function resolveDashboardOnboardingEntry(
+  config: DashboardRuntimeConfig,
+  cookieStore: DashboardCookieStore,
+  options?: {
+    fetchImpl?: typeof fetch;
+  },
+): Promise<DashboardOnboardingRenderResult | DashboardRedirectResult> {
+  const fetchImpl = options?.fetchImpl ?? fetch;
+  const accessToken = readBearerToken(null, cookieStore);
+  const refreshToken = cookieStore.get(dashboardRefreshTokenCookieName)?.value;
+  const session = await resolveDashboardSession(
+    config,
+    { bearerToken: accessToken },
+    fetchImpl,
+  );
+
+  if (!session.authenticated) {
+    if (refreshToken) {
+      return { kind: "redirect", location: "/api/auth/refresh" };
+    }
+    return { kind: "redirect", location: dashboardLoginPath() };
+  }
+
+  if (!session.needsOnboarding) {
+    return { kind: "redirect", location: "/" };
+  }
+
+  const token = readBearerToken(null, cookieStore);
+  const { regions } = token
+    ? await listRegions(config, token, fetchImpl)
+    : { regions: [] };
+
+  return { kind: "render", session, regions };
+}
+
 export async function resolveDashboardLoginEntry(
   config: DashboardRuntimeConfig,
   cookieStore: DashboardCookieStore,
@@ -91,6 +138,10 @@ export async function resolveDashboardLoginEntry(
     { bearerToken: accessToken },
     fetchImpl,
   );
+
+  if (session.authenticated && session.needsOnboarding) {
+    return { kind: "redirect", location: dashboardOnboardingPath() };
+  }
 
   if (session.authenticated) {
     return { kind: "redirect", location: "/" };

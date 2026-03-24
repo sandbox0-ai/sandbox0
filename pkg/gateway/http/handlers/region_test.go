@@ -60,6 +60,70 @@ func (s *stubRegionRepository) DeleteRegion(_ context.Context, regionID string) 
 	return nil
 }
 
+func TestRegionHandlerListRegions(t *testing.T) {
+	t.Setenv("GIN_MODE", "release")
+	gin.SetMode(gin.ReleaseMode)
+
+	repo := &stubRegionRepository{regions: map[string]*tenantdir.Region{
+		"aws/us-east-1": {
+			ID:                 "aws/us-east-1",
+			DisplayName:        "US East 1",
+			RegionalGatewayURL: "https://use1.example.com",
+			Enabled:            true,
+		},
+	}}
+	handler := NewRegionHandler(repo, zap.NewNop())
+
+	t.Run("regular user can list regions", func(t *testing.T) {
+		router := gin.New()
+		router.Use(func(c *gin.Context) {
+			c.Set("auth_context", &authn.AuthContext{
+				AuthMethod:    authn.AuthMethodJWT,
+				UserID:        "user-1",
+				IsSystemAdmin: false,
+			})
+			c.Next()
+		})
+		router.GET("/regions", handler.ListRegions)
+
+		req := httptest.NewRequest(http.MethodGet, "/regions", nil)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+		}
+
+		var response struct {
+			Data struct {
+				Regions []tenantdir.Region `json:"regions"`
+			} `json:"data"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if len(response.Data.Regions) != 1 {
+			t.Fatalf("expected 1 region, got %d", len(response.Data.Regions))
+		}
+		if response.Data.Regions[0].ID != "aws/us-east-1" {
+			t.Fatalf("expected region id, got %q", response.Data.Regions[0].ID)
+		}
+	})
+
+	t.Run("unauthenticated request is rejected", func(t *testing.T) {
+		router := gin.New()
+		router.GET("/regions", handler.ListRegions)
+
+		req := httptest.NewRequest(http.MethodGet, "/regions", nil)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401, got %d body=%s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
 func TestRegionHandlerCreateRegion(t *testing.T) {
 	t.Setenv("GIN_MODE", "release")
 	gin.SetMode(gin.ReleaseMode)

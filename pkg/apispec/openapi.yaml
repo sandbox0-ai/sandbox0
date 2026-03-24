@@ -556,12 +556,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-        "403":
-          description: System admin access required
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
     post:
       tags: [regions]
       summary: Create a region in the global gateway

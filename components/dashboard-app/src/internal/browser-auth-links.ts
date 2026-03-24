@@ -8,6 +8,14 @@ export function dashboardLoginPath(loginError?: string): string {
   return `/login?login_error=${encodeURIComponent(loginError)}`;
 }
 
+export function dashboardOnboardingPath(onboardingError?: string): string {
+  if (!onboardingError) {
+    return "/onboarding";
+  }
+
+  return `/onboarding?onboarding_error=${encodeURIComponent(onboardingError)}`;
+}
+
 export function dashboardProviderLoginPath(providerID: string): string {
   return `/api/auth/oidc/${encodeURIComponent(providerID)}/login`;
 }

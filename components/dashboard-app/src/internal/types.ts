@@ -9,6 +9,12 @@ export interface DashboardRuntimeConfig {
 
 export type DashboardAuthProviderType = "oidc" | "builtin";
 
+export interface DashboardRegion {
+  id: string;
+  displayName?: string | null;
+  enabled: boolean;
+}
+
 export interface DashboardAuthProvider {
   id: string;
   name: string;
@@ -81,6 +87,12 @@ export interface DashboardVolumeSummary {
 
 export interface DashboardSession {
   authenticated: boolean;
+  /**
+   * True when the user is authenticated but has not yet completed first-team
+   * onboarding (i.e. the account exists but no default team has been created).
+   * Only set in global-gateway mode.
+   */
+  needsOnboarding?: boolean;
   mode: DashboardControlPlaneMode;
   siteURL: string;
   configuredGlobalURL?: string;

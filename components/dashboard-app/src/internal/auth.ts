@@ -9,6 +9,7 @@ import {
 import type {
   DashboardAuthProvider,
   DashboardAuthProviderType,
+  DashboardRegion,
   DashboardRuntimeConfig,
 } from "./types";
 
@@ -204,6 +205,72 @@ export async function exchangeRefreshToken(
   } catch (error) {
     return {
       error: await resolveSDKErrorMessage(error, "failed to refresh session"),
+    };
+  }
+}
+
+export async function listRegions(
+  config: DashboardRuntimeConfig,
+  accessToken: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ regions: DashboardRegion[]; error?: string }> {
+  const baseURL = resolveDashboardControlPlaneURL(config);
+  if (!baseURL) {
+    return {
+      regions: [],
+      error: "dashboard auth is missing a control-plane base URL",
+    };
+  }
+
+  try {
+    const sdk = await createDashboardControlPlaneSDK(baseURL, {
+      token: accessToken,
+      fetch: fetchImpl,
+    });
+    const response = await sdk.regions.regionsGet({ cache: "no-store" });
+    const regions = (response.data?.regions ?? []).map((r) => ({
+      id: r.id,
+      displayName: r.displayName ?? null,
+      enabled: r.enabled,
+    }));
+    return { regions };
+  } catch (error) {
+    return {
+      regions: [],
+      error: await resolveSDKErrorMessage(error, "failed to list regions"),
+    };
+  }
+}
+
+export async function createFirstTeam(
+  config: DashboardRuntimeConfig,
+  accessToken: string,
+  teamName: string,
+  homeRegionId: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ teamID?: string; error?: string }> {
+  const baseURL = resolveDashboardControlPlaneURL(config);
+  if (!baseURL) {
+    return { error: "dashboard auth is missing a control-plane base URL" };
+  }
+
+  try {
+    const sdk = await createDashboardControlPlaneSDK(baseURL, {
+      token: accessToken,
+      fetch: fetchImpl,
+    });
+    const response = await sdk.teams.teamsPost({
+      createTeamRequest: { name: teamName, homeRegionId },
+    });
+    const teamData = response.data;
+    if (!teamData) {
+      return { error: "/teams returned an empty response" };
+    }
+
+    return { teamID: teamData.id };
+  } catch (error) {
+    return {
+      error: await resolveSDKErrorMessage(error, "failed to create team"),
     };
   }
 }

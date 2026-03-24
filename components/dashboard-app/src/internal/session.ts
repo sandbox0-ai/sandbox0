@@ -371,6 +371,17 @@ export async function resolveDashboardSession(
 
     const user = toUser(userData);
     const teams = toTeams(teamResponse.data?.teams);
+
+    if (teams.length === 0) {
+      return {
+        ...baseSession,
+        authenticated: true,
+        needsOnboarding: true,
+        user,
+        teams,
+      };
+    }
+
     let activeTeam = deriveGlobalActiveTeam(user, teams, auth.regionalSession);
     let regionalURL =
       isRegionalSessionUsable(activeTeam, auth.regionalSession)

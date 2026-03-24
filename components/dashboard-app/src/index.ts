@@ -16,5 +16,6 @@ export * from "./internal/config";
 export * from "./internal/sdk";
 export * from "./internal/session";
 export * from "./internal/login-view";
+export * from "./internal/onboarding-view";
 export * from "./internal/types";
 export * from "./internal/volumes-view";

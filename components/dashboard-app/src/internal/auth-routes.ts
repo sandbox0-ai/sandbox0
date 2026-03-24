@@ -6,6 +6,7 @@ import {
   handleDashboardLogoutRequest,
   handleDashboardOIDCCallbackRequest,
   handleDashboardOIDCLoginRequest,
+  handleDashboardOnboardingRequest,
   handleDashboardRefreshRequest,
 } from "./browser-auth-routes";
 import type { DashboardRuntimeConfig } from "./types";
@@ -73,5 +74,17 @@ export function createDashboardOIDCCallbackRoute(
   ) {
     const { provider } = await params;
     return handleDashboardOIDCCallbackRequest(resolveConfig(), request, provider);
+  };
+}
+
+export function createDashboardOnboardingRoute(
+  resolveConfig: RouteDashboardConfigResolver,
+) {
+  return async function POST(request: Request) {
+    return handleDashboardOnboardingRequest(
+      resolveConfig(),
+      request,
+      await cookies(),
+    );
   };
 }

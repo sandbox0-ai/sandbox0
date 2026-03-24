@@ -205,12 +205,6 @@ paths:
           schema:
             type: string
           required: false
-        - name: home_region_id
-          in: query
-          schema:
-            type: string
-          required: false
-          description: Required for first-time OIDC auto-provisioning in global-gateway mode so the bootstrap team is created with an explicit home region.
       responses:
         "302":
           description: Redirect to OIDC provider

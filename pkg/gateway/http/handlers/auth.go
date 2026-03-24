@@ -362,20 +362,8 @@ func (h *AuthHandler) OIDCLogin(c *gin.Context) {
 	if returnURL == "" {
 		returnURL = "/"
 	}
-	homeRegionID := normalizeOptionalString(queryOptionalString(c, "home_region_id"))
 
-	if homeRegionID != nil {
-		if err := validateRequiredRoutableHomeRegion(c.Request.Context(), h.regionLookup, homeRegionID); err != nil {
-			status, code, message := resolveHomeRegionValidationError(err)
-			if status == http.StatusInternalServerError {
-				h.logger.Error("Failed to resolve home region", zap.Error(err))
-			}
-			spec.JSONError(c, status, code, message)
-			return
-		}
-	}
-
-	authURL, err := h.oidcManager.GenerateAuthURL(providerID, returnURL, homeRegionID)
+	authURL, err := h.oidcManager.GenerateAuthURL(providerID, returnURL)
 	if err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, oidc.ErrProviderNotFound) {
@@ -421,9 +409,6 @@ func (h *AuthHandler) OIDCCallback(c *gin.Context) {
 		status := http.StatusUnauthorized
 		apiCode := spec.CodeUnauthorized
 		switch {
-		case errors.Is(err, oidc.ErrMissingHomeRegion):
-			status = http.StatusBadRequest
-			apiCode = spec.CodeBadRequest
 		case errors.Is(err, tenantdir.ErrRegionNotFound), errors.Is(err, oidc.ErrHomeRegionNotRoutable):
 			status = http.StatusBadRequest
 			apiCode = spec.CodeBadRequest
@@ -610,12 +595,4 @@ func buildCLIReturnURL(raw string, tokens *authn.TokenPair, regionalSession *Reg
 	}
 	u.RawQuery = q.Encode()
 	return u.String(), nil
-}
-
-func queryOptionalString(c *gin.Context, key string) *string {
-	value, ok := c.GetQuery(key)
-	if !ok {
-		return nil
-	}
-	return &value
 }

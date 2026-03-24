@@ -206,8 +206,7 @@ func TestManagerGenerateAuthURLStoresVerifierInState(t *testing.T) {
 		states:   map[string]*StateData{},
 	}
 
-	homeRegionID := "aws/us-east-1"
-	authURL, err := manager.GenerateAuthURL("supabase", "/", &homeRegionID)
+	authURL, err := manager.GenerateAuthURL("supabase", "/")
 	if err != nil {
 		t.Fatalf("generate auth url: %v", err)
 	}
@@ -227,8 +226,5 @@ func TestManagerGenerateAuthURLStoresVerifierInState(t *testing.T) {
 	}
 	if strings.TrimSpace(stateData.CodeVerifier) == "" {
 		t.Fatal("expected code verifier to be stored with state")
-	}
-	if stateData.HomeRegionID != "aws/us-east-1" {
-		t.Fatalf("unexpected home region id %q", stateData.HomeRegionID)
 	}
 }

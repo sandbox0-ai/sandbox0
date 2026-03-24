@@ -28,6 +28,12 @@ const singleClusterConfig: DashboardRuntimeConfig = {
   singleClusterURL: "https://single.example.com",
 };
 
+const globalGatewayConfig: DashboardRuntimeConfig = {
+  mode: "global-gateway",
+  siteURL: "https://cloud.sandbox0.ai",
+  globalGatewayURL: "https://api.sandbox0.ai",
+};
+
 test("resolveDashboardAuthProviders parses builtin and oidc providers", async () => {
   const result = await resolveDashboardAuthProviders(
     singleClusterConfig,
@@ -125,6 +131,93 @@ test("resolveDashboardHomeEntry falls back to /login when multiple oidc provider
     kind: "redirect",
     location: "/login",
   });
+});
+
+test("resolveDashboardHomeEntry reuses regional session cookies for global sessions", async () => {
+  const calls: string[] = [];
+  const result = await resolveDashboardHomeEntry(
+    globalGatewayConfig,
+    {
+      get(name: string) {
+        switch (name) {
+          case "sandbox0_access_token":
+            return { value: "access-token" };
+          case "sandbox0_regional_access_token":
+            return { value: "regional-access-token" };
+          case "sandbox0_regional_gateway_url":
+            return { value: "https://use1.example.com" };
+          case "sandbox0_region_id":
+            return { value: "aws/us-east-1" };
+          case "sandbox0_regional_expires_at":
+            return { value: String(Math.floor(Date.now() / 1000) + 900) };
+          default:
+            return undefined;
+        }
+      },
+    },
+    {
+      fetchImpl: async (input) => {
+        const url = String(input);
+        calls.push(url);
+
+        if (url === "https://api.sandbox0.ai/users/me") {
+          return new Response(
+            JSON.stringify({
+              data: {
+                id: "user-1",
+                email: "user@example.com",
+                name: "User",
+                default_team_id: "team-1",
+                email_verified: true,
+                is_admin: false,
+              },
+            }),
+          );
+        }
+
+        if (url === "https://api.sandbox0.ai/teams") {
+          return new Response(
+            JSON.stringify({
+              data: {
+                teams: [
+                  {
+                    id: "team-1",
+                    name: "Team One",
+                    slug: "team-one",
+                  },
+                ],
+              },
+            }),
+          );
+        }
+
+        if (url === "https://use1.example.com/api/v1/sandboxes?limit=5") {
+          return new Response(JSON.stringify({ data: { sandboxes: [] } }));
+        }
+
+        if (url === "https://use1.example.com/api/v1/templates") {
+          return new Response(JSON.stringify({ data: { templates: [] } }));
+        }
+
+        if (url === "https://use1.example.com/api/v1/sandboxvolumes") {
+          return new Response(JSON.stringify({ data: [] }));
+        }
+
+        throw new Error(`unexpected url ${url}`);
+      },
+    },
+  );
+
+  assert.equal(result.kind, "render");
+  if (result.kind !== "render") {
+    return;
+  }
+  assert.equal(result.session.authenticated, true);
+  assert.equal(result.session.activeTeam?.homeRegionID, "aws/us-east-1");
+  assert.deepEqual(
+    calls.includes("https://api.sandbox0.ai/tenant/active"),
+    false,
+  );
 });
 
 test("resolveDashboardLoginEntry reuses external auth portal url", async () => {

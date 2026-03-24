@@ -208,43 +208,6 @@ func TestTeamHandlerCreateTeamAllowsMissingHomeRegionWithoutGlobalRequirement(t 
 	}
 }
 
-func TestTeamHandlerCreateTeamUsesDefaultHomeRegionInGlobalMode(t *testing.T) {
-	t.Setenv("GIN_MODE", "release")
-	gin.SetMode(gin.ReleaseMode)
-
-	repo := &stubTeamRepository{}
-	lookup := &stubTeamRegionLookup{
-		region: &tenantdir.Region{
-			ID:                 "aws/us-east-1",
-			RegionalGatewayURL: "https://use1.example.com",
-			Enabled:            true,
-		},
-	}
-	handler := NewTeamHandler(
-		repo,
-		zap.NewNop(),
-		WithCreateHomeRegionRequired(lookup),
-		WithDefaultCreateHomeRegion(lookup, " aws/us-east-1 "),
-	)
-
-	rec := performCreateTeamRequest(t, handler, map[string]any{
-		"name": "Example Team",
-	})
-
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
-	}
-	if repo.createdTeam == nil || repo.createdTeam.HomeRegionID == nil {
-		t.Fatalf("expected created team with default home region, got %#v", repo.createdTeam)
-	}
-	if *repo.createdTeam.HomeRegionID != "aws/us-east-1" {
-		t.Fatalf("home region = %q, want aws/us-east-1", *repo.createdTeam.HomeRegionID)
-	}
-	if len(lookup.requestedIDs) != 1 || lookup.requestedIDs[0] != "aws/us-east-1" {
-		t.Fatalf("lookup requested IDs = %#v, want aws/us-east-1", lookup.requestedIDs)
-	}
-}
-
 func performCreateTeamRequest(t *testing.T, handler *TeamHandler, body map[string]any) *httptest.ResponseRecorder {
 	t.Helper()
 

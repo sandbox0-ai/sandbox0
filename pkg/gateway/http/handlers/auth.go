@@ -21,12 +21,25 @@ import (
 
 // AuthHandler handles authentication endpoints
 type AuthHandler struct {
-	repo            authRepository
-	tenantResolver  tenantResolver
-	builtinProvider *builtin.Provider
-	oidcManager     *oidc.Manager
-	jwtIssuer       *authn.Issuer
-	logger          *zap.Logger
+	repo                      authRepository
+	tenantResolver            tenantResolver
+	builtinProvider           *builtin.Provider
+	oidcManager               *oidc.Manager
+	jwtIssuer                 *authn.Issuer
+	regionLookup              TeamRegionLookup
+	requireHomeRegionOnCreate bool
+	logger                    *zap.Logger
+}
+
+// AuthHandlerOption configures AuthHandler behavior.
+type AuthHandlerOption func(*AuthHandler)
+
+// WithCreateHomeRegionRequiredForAuth requires explicit home_region_id for auth-driven team creation flows.
+func WithCreateHomeRegionRequiredForAuth(regionLookup TeamRegionLookup) AuthHandlerOption {
+	return func(h *AuthHandler) {
+		h.requireHomeRegionOnCreate = true
+		h.regionLookup = regionLookup
+	}
 }
 
 type authRepository interface {
@@ -45,8 +58,9 @@ func NewAuthHandler(
 	jwtIssuer *authn.Issuer,
 	tenantResolver tenantResolver,
 	logger *zap.Logger,
+	opts ...AuthHandlerOption,
 ) *AuthHandler {
-	return &AuthHandler{
+	handler := &AuthHandler{
 		repo:            repo,
 		tenantResolver:  tenantResolver,
 		builtinProvider: builtinProvider,
@@ -54,6 +68,10 @@ func NewAuthHandler(
 		jwtIssuer:       jwtIssuer,
 		logger:          logger,
 	}
+	for _, opt := range opts {
+		opt(handler)
+	}
+	return handler
 }
 
 // LoginRequest is the request body for login
@@ -129,9 +147,10 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 // RegisterRequest is the request body for registration
 type RegisterRequest struct {
-	Email    string `json:"email" binding:"required,email"`
-	Password string `json:"password" binding:"required,min=8"`
-	Name     string `json:"name" binding:"required"`
+	Email        string  `json:"email" binding:"required,email"`
+	Password     string  `json:"password" binding:"required,min=8"`
+	Name         string  `json:"name" binding:"required"`
+	HomeRegionID *string `json:"home_region_id"`
 }
 
 // Register handles user registration
@@ -142,7 +161,19 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		return
 	}
 
-	user, err := h.builtinProvider.Register(c.Request.Context(), req.Email, req.Password, req.Name)
+	homeRegionID := normalizeOptionalString(req.HomeRegionID)
+	if h.requireHomeRegionOnCreate {
+		if err := validateRequiredRoutableHomeRegion(c.Request.Context(), h.regionLookup, homeRegionID); err != nil {
+			status, code, message := resolveHomeRegionValidationError(err)
+			if status == http.StatusInternalServerError {
+				h.logger.Error("Failed to resolve home region", zap.Error(err))
+			}
+			spec.JSONError(c, status, code, message)
+			return
+		}
+	}
+
+	user, err := h.builtinProvider.Register(c.Request.Context(), req.Email, req.Password, req.Name, homeRegionID)
 	if err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, builtin.ErrRegistrationDisabled) || errors.Is(err, builtin.ErrBuiltInAuthDisabled) {
@@ -331,8 +362,20 @@ func (h *AuthHandler) OIDCLogin(c *gin.Context) {
 	if returnURL == "" {
 		returnURL = "/"
 	}
+	homeRegionID := normalizeOptionalString(queryOptionalString(c, "home_region_id"))
 
-	authURL, err := h.oidcManager.GenerateAuthURL(providerID, returnURL)
+	if homeRegionID != nil {
+		if err := validateRequiredRoutableHomeRegion(c.Request.Context(), h.regionLookup, homeRegionID); err != nil {
+			status, code, message := resolveHomeRegionValidationError(err)
+			if status == http.StatusInternalServerError {
+				h.logger.Error("Failed to resolve home region", zap.Error(err))
+			}
+			spec.JSONError(c, status, code, message)
+			return
+		}
+	}
+
+	authURL, err := h.oidcManager.GenerateAuthURL(providerID, returnURL, homeRegionID)
 	if err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, oidc.ErrProviderNotFound) {
@@ -375,7 +418,17 @@ func (h *AuthHandler) OIDCCallback(c *gin.Context) {
 			zap.String("provider", providerID),
 			zap.Error(err),
 		)
-		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, err.Error())
+		status := http.StatusUnauthorized
+		apiCode := spec.CodeUnauthorized
+		switch {
+		case errors.Is(err, oidc.ErrMissingHomeRegion):
+			status = http.StatusBadRequest
+			apiCode = spec.CodeBadRequest
+		case errors.Is(err, tenantdir.ErrRegionNotFound), errors.Is(err, oidc.ErrHomeRegionNotRoutable):
+			status = http.StatusBadRequest
+			apiCode = spec.CodeBadRequest
+		}
+		spec.JSONError(c, status, apiCode, err.Error())
 		return
 	}
 
@@ -557,4 +610,12 @@ func buildCLIReturnURL(raw string, tokens *authn.TokenPair, regionalSession *Reg
 	}
 	u.RawQuery = q.Encode()
 	return u.String(), nil
+}
+
+func queryOptionalString(c *gin.Context, key string) *string {
+	value, ok := c.GetQuery(key)
+	if !ok {
+		return nil
+	}
+	return &value
 }

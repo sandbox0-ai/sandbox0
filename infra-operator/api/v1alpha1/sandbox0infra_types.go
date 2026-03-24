@@ -1078,6 +1078,10 @@ type InitUserConfig struct {
 	// Name is the admin user's display name
 	// +optional
 	Name string `json:"name,omitempty"`
+
+	// HomeRegionID is required for global-gateway init users so the bootstrap team is routable.
+	// +optional
+	HomeRegionID string `json:"homeRegionId,omitempty"`
 }
 
 // BuiltinTemplateConfig defines a system builtin template.

@@ -1107,9 +1107,12 @@ type RegionalSession struct {
 
 // RegisterRequest defines model for RegisterRequest.
 type RegisterRequest struct {
-	Email    openapi_types.Email `json:"email"`
-	Name     string              `json:"name"`
-	Password string              `json:"password"`
+	Email openapi_types.Email `json:"email"`
+
+	// HomeRegionId Required in global-gateway mode because registration creates the user's default team.
+	HomeRegionId *string `json:"home_region_id"`
+	Name         string  `json:"name"`
+	Password     string  `json:"password"`
 }
 
 // RegistryCredentials defines model for RegistryCredentials.
@@ -2167,6 +2170,9 @@ type GetAuthOidcProviderCallbackParams struct {
 // GetAuthOidcProviderLoginParams defines parameters for GetAuthOidcProviderLogin.
 type GetAuthOidcProviderLoginParams struct {
 	ReturnUrl *string `form:"return_url,omitempty" json:"return_url,omitempty"`
+
+	// HomeRegionId Required for first-time OIDC auto-provisioning in global-gateway mode so the bootstrap team is created with an explicit home region.
+	HomeRegionId *string `form:"home_region_id,omitempty" json:"home_region_id,omitempty"`
 }
 
 // GetTenantActiveParams defines parameters for GetTenantActive.

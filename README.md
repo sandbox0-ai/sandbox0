@@ -68,7 +68,7 @@ flowchart TD
 
 Most users start with a single-cluster deployment and only move to multi-cluster when they need regional scale-out. For deeper architecture and deployment details, see <https://sandbox0.ai/docs/self-hosted>.
 
-In multi-region deployments backed by `global-gateway`, operators can set `default_home_region_id` in the global-gateway config so newly created teams inherit a routable home region even when the create request omits `home_region_id`.
+In multi-region deployments backed by `global-gateway`, every team creation path must provide an explicit `home_region_id` so the team's routing target is unambiguous from the start.
 
 ## Claim A Sandbox
 

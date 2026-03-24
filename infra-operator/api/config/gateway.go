@@ -107,6 +107,8 @@ type InitUserConfig struct {
 	Password string `yaml:"password" json:"password"`
 	// +optional
 	Name string `yaml:"name" json:"name"`
+	// +optional
+	HomeRegionID string `yaml:"home_region_id" json:"homeRegionId"`
 }
 
 // OIDCProviderConfig configures an OIDC provider.

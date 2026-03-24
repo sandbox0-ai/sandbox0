@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	stdhttp "net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -88,6 +89,12 @@ func NewServer(
 		}
 	}
 	if cfg.BuiltInAuth.Enabled && cfg.BuiltInAuth.InitUser != nil {
+		if userCount, err := identityRepo.CountUsers(context.Background()); err == nil && userCount == 0 {
+			homeRegionID := strings.TrimSpace(cfg.BuiltInAuth.InitUser.HomeRegionID)
+			if err := handlers.ValidateInitUserHomeRegion(context.Background(), regionRepo, homeRegionID); err != nil {
+				return nil, err
+			}
+		}
 		if err := builtinProvider.EnsureInitUser(context.Background()); err != nil {
 			logger.Warn("Failed to ensure init user", zap.Error(err))
 		}
@@ -131,16 +138,15 @@ func (s *Server) setupRoutes() {
 	s.router.GET("/metadata", handlers.GatewayMetadata("global-gateway", handlers.GatewayModeGlobal))
 
 	public.RegisterIdentityRoutes(s.router, public.Deps{
-		IdentityRepo:              s.identityRepo,
-		AuthMiddleware:            s.authMiddleware,
-		BuiltinProvider:           s.builtinProvider,
-		OIDCManager:               s.oidcManager,
-		Entitlements:              s.entitlements,
-		JWTIssuer:                 s.jwtIssuer,
-		RegionRepo:                s.regionRepo,
-		RequireCreateHomeRegion:   true,
-		DefaultCreateHomeRegionID: s.cfg.DefaultHomeRegionID,
-		Logger:                    s.logger,
+		IdentityRepo:            s.identityRepo,
+		AuthMiddleware:          s.authMiddleware,
+		BuiltinProvider:         s.builtinProvider,
+		OIDCManager:             s.oidcManager,
+		Entitlements:            s.entitlements,
+		JWTIssuer:               s.jwtIssuer,
+		RegionRepo:              s.regionRepo,
+		RequireCreateHomeRegion: true,
+		Logger:                  s.logger,
 	})
 
 	tenantHandler := handlers.NewTenantHandler(s.tenantResolver, s.jwtIssuer, s.cfg.RegionTokenTTL.Duration, s.logger)

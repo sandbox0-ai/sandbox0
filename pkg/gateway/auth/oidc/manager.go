@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,6 +22,7 @@ type StateData struct {
 	Nonce        string    `json:"nonce"`
 	CodeVerifier string    `json:"code_verifier"`
 	ReturnURL    string    `json:"return_url"`
+	HomeRegionID string    `json:"home_region_id,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 }
 
@@ -102,7 +104,7 @@ func (m *Manager) ListProviders() []*Provider {
 }
 
 // GenerateAuthURL generates an OAuth authorization URL
-func (m *Manager) GenerateAuthURL(providerID, returnURL string) (string, error) {
+func (m *Manager) GenerateAuthURL(providerID, returnURL string, homeRegionID *string) (string, error) {
 	provider, err := m.GetProvider(providerID)
 	if err != nil {
 		return "", err
@@ -123,6 +125,7 @@ func (m *Manager) GenerateAuthURL(providerID, returnURL string) (string, error) 
 		Nonce:        state,
 		CodeVerifier: verifier,
 		ReturnURL:    returnURL,
+		HomeRegionID: strings.TrimSpace(derefString(homeRegionID)),
 		CreatedAt:    time.Now(),
 	}
 	m.statesMu.Unlock()
@@ -191,7 +194,7 @@ func (m *Manager) HandleCallback(ctx context.Context, providerID, code, state st
 	}
 
 	// Find or create user
-	user, err := m.findOrCreateUser(ctx, provider, userInfo)
+	user, err := m.findOrCreateUser(ctx, provider, userInfo, strings.TrimSpace(stateData.HomeRegionID))
 	if err != nil {
 		return nil, "", err
 	}
@@ -199,7 +202,7 @@ func (m *Manager) HandleCallback(ctx context.Context, providerID, code, state st
 }
 
 // findOrCreateUser finds an existing user or creates a new one
-func (m *Manager) findOrCreateUser(ctx context.Context, provider *Provider, userInfo *UserInfo) (*identity.User, error) {
+func (m *Manager) findOrCreateUser(ctx context.Context, provider *Provider, userInfo *UserInfo, homeRegionID string) (*identity.User, error) {
 	// Check if identity already exists
 	identityRecord, err := m.repo.GetUserIdentityByProviderSubject(ctx, provider.ID(), userInfo.Subject)
 	if err == nil {
@@ -257,7 +260,10 @@ func (m *Manager) findOrCreateUser(ctx context.Context, provider *Provider, user
 	if user.Name != "" {
 		teamName = fmt.Sprintf("%s Team", user.Name)
 	}
-	if _, _, err := m.repo.CreateUserWithDefaultTeam(ctx, user, teamName); err != nil {
+	if strings.TrimSpace(homeRegionID) == "" {
+		return nil, ErrMissingHomeRegion
+	}
+	if _, _, err := m.repo.CreateUserWithDefaultTeam(ctx, user, teamName, ptrString(homeRegionID)); err != nil {
 		return nil, fmt.Errorf("create user with team: %w", err)
 	}
 
@@ -273,6 +279,20 @@ func (m *Manager) findOrCreateUser(ctx context.Context, provider *Provider, user
 	}
 
 	return user, nil
+}
+
+func derefString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func ptrString(value string) *string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return &value
 }
 
 // cleanupStates periodically cleans up expired states

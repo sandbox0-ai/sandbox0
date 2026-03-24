@@ -29,7 +29,7 @@ func (r *Repository) CreateUser(ctx context.Context, user *User) error {
 }
 
 // CreateUserWithDefaultTeam creates a user and a default team in one transaction.
-func (r *Repository) CreateUserWithDefaultTeam(ctx context.Context, user *User, teamName string) (*Team, *TeamMember, error) {
+func (r *Repository) CreateUserWithDefaultTeam(ctx context.Context, user *User, teamName string, homeRegionID *string) (*Team, *TeamMember, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return nil, nil, fmt.Errorf("begin tx: %w", err)
@@ -54,9 +54,10 @@ func (r *Repository) CreateUserWithDefaultTeam(ctx context.Context, user *User, 
 	}
 
 	team := &Team{
-		Name:    teamName,
-		Slug:    fmt.Sprintf("user-%s", user.ID),
-		OwnerID: &user.ID,
+		Name:         teamName,
+		Slug:         fmt.Sprintf("user-%s", user.ID),
+		OwnerID:      &user.ID,
+		HomeRegionID: homeRegionID,
 	}
 	err = tx.QueryRow(ctx, `
 		INSERT INTO teams (name, slug, owner_id, home_region_id)

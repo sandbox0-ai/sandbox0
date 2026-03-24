@@ -34,10 +34,6 @@ type GlobalGatewayConfig struct {
 	// +kubebuilder:default="5m"
 	RegionTokenTTL metav1.Duration `yaml:"region_token_ttl" json:"regionTokenTTL"`
 
-	// DefaultHomeRegionID is used for new teams when create requests omit home_region_id.
-	// +optional
-	DefaultHomeRegionID string `yaml:"default_home_region_id" json:"defaultHomeRegionId"`
-
 	// License file path used to unlock enterprise SSO features.
 	// +optional
 	LicenseFile string `yaml:"license_file" json:"-"`
@@ -60,19 +56,18 @@ type GlobalGatewayConfig struct {
 }
 
 type globalGatewayConfigYAML struct {
-	HTTPPort            int    `yaml:"http_port"`
-	LogLevel            string `yaml:"log_level"`
-	DatabaseURL         string `yaml:"database_url"`
-	DatabaseMaxConns    int    `yaml:"database_max_conns"`
-	DatabaseMinConns    int    `yaml:"database_min_conns"`
-	DatabaseSchema      string `yaml:"database_schema"`
-	RegionTokenTTL      string `yaml:"region_token_ttl"`
-	DefaultHomeRegionID string `yaml:"default_home_region_id"`
-	LicenseFile         string `yaml:"license_file"`
-	ShutdownTimeout     string `yaml:"shutdown_timeout"`
-	ServerReadTimeout   string `yaml:"server_read_timeout"`
-	ServerWriteTimeout  string `yaml:"server_write_timeout"`
-	ServerIdleTimeout   string `yaml:"server_idle_timeout"`
+	HTTPPort           int    `yaml:"http_port"`
+	LogLevel           string `yaml:"log_level"`
+	DatabaseURL        string `yaml:"database_url"`
+	DatabaseMaxConns   int    `yaml:"database_max_conns"`
+	DatabaseMinConns   int    `yaml:"database_min_conns"`
+	DatabaseSchema     string `yaml:"database_schema"`
+	RegionTokenTTL     string `yaml:"region_token_ttl"`
+	LicenseFile        string `yaml:"license_file"`
+	ShutdownTimeout    string `yaml:"shutdown_timeout"`
+	ServerReadTimeout  string `yaml:"server_read_timeout"`
+	ServerWriteTimeout string `yaml:"server_write_timeout"`
+	ServerIdleTimeout  string `yaml:"server_idle_timeout"`
 
 	JWTSecret                string               `yaml:"jwt_secret"`
 	JWTIssuer                string               `yaml:"jwt_issuer"`
@@ -142,7 +137,6 @@ func applyGlobalGatewayYAML(cfg *GlobalGatewayConfig, raw globalGatewayConfigYAM
 	cfg.DatabaseMinConns = raw.DatabaseMinConns
 	cfg.DatabaseSchema = raw.DatabaseSchema
 	cfg.LicenseFile = raw.LicenseFile
-	cfg.DefaultHomeRegionID = raw.DefaultHomeRegionID
 	cfg.JWTSecret = raw.JWTSecret
 	cfg.JWTIssuer = raw.JWTIssuer
 	cfg.RateLimitRPS = raw.RateLimitRPS

@@ -12,6 +12,12 @@ export const defaultDashboardNavigation: DashboardNavItem[] = [
     scope: "shared",
     description: "Workspace entrypoint provided by the shared dashboard app.",
   },
+  {
+    href: "/volumes",
+    label: "Volumes",
+    scope: "shared",
+    description: "Manage persistent sandbox volumes, snapshots, and forks.",
+  },
 ];
 
 export function extendDashboardNavigation(

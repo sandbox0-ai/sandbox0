@@ -1,4 +1,4 @@
-import type { DashboardAuthProvider, DashboardRuntimeConfig } from "./types";
+import type { DashboardAuthProvider, DashboardRuntimeConfig, DashboardSession } from "./types";
 import {
   dashboardRefreshTokenCookieName,
   resolveDashboardAuthProviders,
@@ -20,6 +20,7 @@ export interface DashboardRedirectResult {
 
 export interface DashboardRenderResult {
   kind: "render";
+  session: DashboardSession;
 }
 
 export interface DashboardLoginRenderResult {
@@ -46,7 +47,7 @@ export async function resolveDashboardHomeEntry(
   );
 
   if (session.authenticated) {
-    return { kind: "render" };
+    return { kind: "render", session };
   }
 
   if (refreshToken) {

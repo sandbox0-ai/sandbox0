@@ -64,16 +64,33 @@ export interface DashboardTemplateSummary {
   createdAt: string;
 }
 
+export type DashboardVolumeAccessMode = "RWO" | "ROX" | "RWX";
+
+export interface DashboardVolumeSummary {
+  id: string;
+  teamID: string;
+  userID: string;
+  sourceVolumeID?: string | null;
+  cacheSize: string;
+  bufferSize: string;
+  accessMode?: DashboardVolumeAccessMode;
+  writeback?: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface DashboardSession {
   authenticated: boolean;
   mode: DashboardControlPlaneMode;
   siteURL: string;
   configuredGlobalURL?: string;
   configuredRegionalURL?: string;
+  regionalToken?: string;
   user?: DashboardUser;
   teams: DashboardTeam[];
   activeTeam?: DashboardActiveTeam;
   sandboxes: DashboardSandboxSummary[];
   templates: DashboardTemplateSummary[];
+  volumes: DashboardVolumeSummary[];
   errors: string[];
 }

@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 
 import { resolveDashboardHomeEntry, resolveDashboardLoginEntry } from "./browser-auth";
 import { DashboardLoginView } from "./login-view";
-import type { DashboardRuntimeConfig } from "./types";
+import type { DashboardRuntimeConfig, DashboardSession } from "./types";
 
 export interface DashboardPageSearchParams {
   searchParams: Promise<{ login_error?: string }>;
@@ -49,7 +49,7 @@ export function createDashboardLoginPage(
 export async function requireDashboardHomeRender(
   resolveConfig: DashboardConfigResolver,
   searchParams: Promise<{ login_error?: string }>,
-): Promise<void> {
+): Promise<DashboardSession> {
   const { login_error: loginError } = await searchParams;
   const result = await resolveDashboardHomeEntry(
     resolveConfig(),
@@ -60,11 +60,13 @@ export async function requireDashboardHomeRender(
   if (result.kind === "redirect") {
     redirect(result.location);
   }
+
+  return result.session;
 }
 
 export async function requireDashboardAuth(
   resolveConfig: DashboardConfigResolver,
-): Promise<void> {
+): Promise<DashboardSession> {
   const result = await resolveDashboardHomeEntry(
     resolveConfig(),
     await cookies(),
@@ -73,4 +75,6 @@ export async function requireDashboardAuth(
   if (result.kind === "redirect") {
     redirect(result.location);
   }
+
+  return result.session;
 }

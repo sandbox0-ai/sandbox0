@@ -9,6 +9,7 @@ export interface DashboardControlPlaneSDK {
   regions: InstanceType<Sandbox0Module["apis"]["RegionsApi"]>;
   sandboxes: InstanceType<Sandbox0Module["apis"]["SandboxesApi"]>;
   templates: InstanceType<Sandbox0Module["apis"]["TemplatesApi"]>;
+  volumes: InstanceType<Sandbox0Module["apis"]["SandboxVolumesApi"]>;
 }
 
 async function loadSandbox0(): Promise<Sandbox0Module> {
@@ -37,6 +38,7 @@ export async function createDashboardControlPlaneSDK(
     regions: new apis.RegionsApi(configuration),
     sandboxes: new apis.SandboxesApi(configuration),
     templates: new apis.TemplatesApi(configuration),
+    volumes: new apis.SandboxVolumesApi(configuration),
   };
 }
 

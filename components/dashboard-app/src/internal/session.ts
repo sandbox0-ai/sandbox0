@@ -6,10 +6,15 @@ import type {
   DashboardTeam,
   DashboardTemplateSummary,
   DashboardUser,
+  DashboardVolumeSummary,
 } from "./types";
 import {
   type DashboardRegionalSession,
   dashboardAccessTokenCookieName,
+  dashboardRegionalAccessTokenCookieName,
+  dashboardRegionalExpiresAtCookieName,
+  dashboardRegionalGatewayURLCookieName,
+  dashboardRegionalRegionIDCookieName,
 } from "./auth";
 import { createDashboardControlPlaneSDK, resolveSDKErrorMessage } from "./sdk";
 
@@ -92,6 +97,76 @@ function toTemplates(
     scope: template.scope,
     createdAt: template.createdAt.toISOString(),
   }));
+}
+
+function toVolumes(
+  volumes: Array<{
+    id: string;
+    teamId: string;
+    userId: string;
+    sourceVolumeId?: string | null;
+    cacheSize: string;
+    bufferSize: string;
+    accessMode?: string;
+    writeback?: boolean;
+    createdAt: Date;
+    updatedAt: Date;
+  }> = [],
+): DashboardVolumeSummary[] {
+  return volumes.map((volume) => ({
+    id: volume.id,
+    teamID: volume.teamId,
+    userID: volume.userId,
+    sourceVolumeID: volume.sourceVolumeId ?? null,
+    cacheSize: volume.cacheSize,
+    bufferSize: volume.bufferSize,
+    accessMode: volume.accessMode as DashboardVolumeSummary["accessMode"],
+    writeback: volume.writeback,
+    createdAt: volume.createdAt.toISOString(),
+    updatedAt: volume.updatedAt.toISOString(),
+  }));
+}
+
+export interface DashboardRegionalAuthInfo {
+  regionalURL: string;
+  token: string;
+}
+
+export function resolveRegionalAuthFromCookies(
+  config: DashboardRuntimeConfig,
+  cookieStore: Pick<{ get(name: string): { value: string } | undefined }, "get">,
+): DashboardRegionalAuthInfo | null {
+  const token = readBearerToken(null, cookieStore);
+  if (!token) {
+    return null;
+  }
+
+  if (config.mode === "single-cluster") {
+    const url = config.singleClusterURL;
+    if (!url) {
+      return null;
+    }
+    return { regionalURL: url, token };
+  }
+
+  const regionalToken = cookieStore.get(dashboardRegionalAccessTokenCookieName)?.value;
+  const regionalURL = cookieStore.get(dashboardRegionalGatewayURLCookieName)?.value;
+  const regionID = cookieStore.get(dashboardRegionalRegionIDCookieName)?.value;
+  const expiresAt = Number(
+    cookieStore.get(dashboardRegionalExpiresAtCookieName)?.value ?? "",
+  );
+
+  if (
+    regionalToken &&
+    regionalURL &&
+    regionID &&
+    Number.isFinite(expiresAt) &&
+    expiresAt > Math.floor(Date.now() / 1000)
+  ) {
+    return { regionalURL, token: regionalToken };
+  }
+
+  return null;
 }
 
 function readRegionalGatewayURL(value: unknown): string | null {
@@ -207,6 +282,7 @@ export async function resolveDashboardSession(
     teams: [],
     sandboxes: [],
     templates: [],
+    volumes: [],
     errors: [],
   };
 
@@ -229,12 +305,13 @@ export async function resolveDashboardSession(
         token,
         fetch: fetchImpl,
       });
-      const [userResponse, teamResponse, sandboxResponse, templateResponse] =
+      const [userResponse, teamResponse, sandboxResponse, templateResponse, volumeResponse] =
         await Promise.all([
           sdk.users.usersMeGet(),
           sdk.teams.teamsGet(),
           sdk.sandboxes.apiV1SandboxesGet({ limit: 5 }),
           sdk.templates.apiV1TemplatesGet(),
+          sdk.volumes.apiV1SandboxvolumesGet(),
         ]);
 
       const userData = userResponse.data;
@@ -247,16 +324,19 @@ export async function resolveDashboardSession(
       const activeTeam = deriveSingleClusterActiveTeam(user, teams, baseURL);
       const sandboxes = toSandboxes(sandboxResponse.data?.sandboxes);
       const templates = toTemplates(templateResponse.data?.templates);
+      const volumes = toVolumes(volumeResponse.data ?? []);
 
       return {
         ...baseSession,
         authenticated: true,
         configuredRegionalURL: baseURL,
+        regionalToken: token,
         user,
         teams,
         activeTeam,
         sandboxes,
         templates,
+        volumes,
       };
     } catch (error) {
       return {
@@ -332,32 +412,31 @@ export async function resolveDashboardSession(
       regionToken = regionTokenData.token;
     }
 
-    const sandboxes = regionalURL
-      ? await (
-          await createDashboardControlPlaneSDK(regionalURL, {
+    const [sandboxResponse, templateResponse, volumeResponse] = await (regionalURL
+      ? (async () => {
+          const regionalSDK = await createDashboardControlPlaneSDK(regionalURL, {
             token: regionToken,
             fetch: fetchImpl,
-          })
-        ).sandboxes.apiV1SandboxesGet({ limit: 5 })
-      : undefined;
-    const templates = regionalURL
-      ? await (
-          await createDashboardControlPlaneSDK(regionalURL, {
-            token: regionToken,
-            fetch: fetchImpl,
-          })
-        ).templates.apiV1TemplatesGet()
-      : undefined;
+          });
+          return Promise.all([
+            regionalSDK.sandboxes.apiV1SandboxesGet({ limit: 5 }),
+            regionalSDK.templates.apiV1TemplatesGet(),
+            regionalSDK.volumes.apiV1SandboxvolumesGet(),
+          ]);
+        })()
+      : Promise.resolve([undefined, undefined, undefined] as const));
 
     return {
       ...baseSession,
       authenticated: true,
       configuredRegionalURL: regionalURL,
+      regionalToken: regionToken !== token ? regionToken : undefined,
       user,
       teams,
       activeTeam,
-      sandboxes: toSandboxes(sandboxes?.data?.sandboxes),
-      templates: toTemplates(templates?.data?.templates),
+      sandboxes: toSandboxes(sandboxResponse?.data?.sandboxes),
+      templates: toTemplates(templateResponse?.data?.templates),
+      volumes: toVolumes(volumeResponse?.data ?? []),
     };
   } catch (error) {
     return {

@@ -16,10 +16,12 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/licensing"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
+	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	templatehttp "github.com/sandbox0-ai/sandbox0/pkg/template/http"
+	templreconciler "github.com/sandbox0-ai/sandbox0/pkg/template/reconciler"
 	"github.com/sandbox0-ai/sandbox0/pkg/template/store"
-	"github.com/sandbox0-ai/sandbox0/scheduler/pkg/db"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 )
@@ -28,7 +30,7 @@ import (
 type Server struct {
 	router          *gin.Engine
 	cfg             *config.SchedulerConfig
-	repo            *db.Repository
+	repo            ClusterRepository
 	templateStore   store.TemplateStore
 	allocationStore store.AllocationStore
 	templateHandler *templatehttp.Handler
@@ -37,11 +39,12 @@ type Server struct {
 	reconciler      Reconciler
 	logger          *zap.Logger
 	obsProvider     *observability.Provider
+	metrics         *obsmetrics.SchedulerMetrics
 
 	clusterGatewayProxies   map[string]*proxy.Router
 	clusterGatewayProxiesMu sync.RWMutex
 
-	clusterCache   map[string]*db.Cluster
+	clusterCache   map[string]*template.Cluster
 	clusterCacheAt time.Time
 	clusterCacheMu sync.RWMutex
 }
@@ -51,12 +54,26 @@ type Reconciler interface {
 	TriggerReconcile(ctx context.Context)
 	GetTemplateIdleCount(clusterID, templateID string) (int32, bool)
 	GetTemplateStatsAge(clusterID string) (time.Duration, bool)
+	GetClusterSummary(clusterID string) (*templreconciler.ClusterSummary, bool)
+	GetClusterSummaryAge(clusterID string) (time.Duration, bool)
+}
+
+// ClusterRepository provides cluster CRUD and lookup operations.
+type ClusterRepository interface {
+	Ping(ctx context.Context) error
+	CreateCluster(ctx context.Context, cluster *template.Cluster) error
+	GetCluster(ctx context.Context, clusterID string) (*template.Cluster, error)
+	ListClusters(ctx context.Context) ([]*template.Cluster, error)
+	ListEnabledClusters(ctx context.Context) ([]*template.Cluster, error)
+	UpdateCluster(ctx context.Context, cluster *template.Cluster) error
+	UpdateClusterLastSeen(ctx context.Context, clusterID string) error
+	DeleteCluster(ctx context.Context, clusterID string) error
 }
 
 // NewServer creates a new HTTP server
 func NewServer(
 	cfg *config.SchedulerConfig,
-	repo *db.Repository,
+	repo ClusterRepository,
 	templateStore store.TemplateStore,
 	allocationStore store.AllocationStore,
 	authValidator *internalauth.Validator,
@@ -64,6 +81,7 @@ func NewServer(
 	reconciler Reconciler,
 	logger *zap.Logger,
 	obsProvider *observability.Provider,
+	metrics *obsmetrics.SchedulerMetrics,
 ) (*Server, error) {
 	if err := licensing.RequireLicenseFile(cfg.LicenseFile); err != nil {
 		return nil, fmt.Errorf("license_file is required for scheduler: %w", err)
@@ -95,8 +113,9 @@ func NewServer(
 		reconciler:            reconciler,
 		logger:                logger,
 		obsProvider:           obsProvider,
+		metrics:               metrics,
 		clusterGatewayProxies: make(map[string]*proxy.Router),
-		clusterCache:          make(map[string]*db.Cluster),
+		clusterCache:          make(map[string]*template.Cluster),
 	}
 	server.templateHandler = &templatehttp.Handler{
 		Store:           templateStore,
@@ -355,7 +374,7 @@ func (s *Server) getClusterGatewayProxy(targetURL string) (*proxy.Router, error)
 	return p, nil
 }
 
-func (s *Server) getClusterByID(ctx context.Context, clusterID string) (*db.Cluster, error) {
+func (s *Server) getClusterByID(ctx context.Context, clusterID string) (*template.Cluster, error) {
 	if clusterID == "" {
 		return nil, fmt.Errorf("cluster_id is required")
 	}
@@ -368,7 +387,7 @@ func (s *Server) getClusterByID(ctx context.Context, clusterID string) (*db.Clus
 	return s.getClusterFromCache(clusterID), nil
 }
 
-func (s *Server) getClusterFromCache(clusterID string) *db.Cluster {
+func (s *Server) getClusterFromCache(clusterID string) *template.Cluster {
 	s.clusterCacheMu.RLock()
 	defer s.clusterCacheMu.RUnlock()
 	return s.clusterCache[clusterID]
@@ -392,7 +411,7 @@ func (s *Server) refreshClusterCache(ctx context.Context) error {
 		return fmt.Errorf("list enabled clusters: %w", err)
 	}
 
-	cache := make(map[string]*db.Cluster, len(clusters))
+	cache := make(map[string]*template.Cluster, len(clusters))
 	for _, cluster := range clusters {
 		cache[cluster.ClusterID] = cluster
 	}

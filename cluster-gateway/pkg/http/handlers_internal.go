@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/middleware"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
@@ -15,15 +16,14 @@ import (
 // getClusterSummary proxies cluster summary request to manager
 func (s *Server) getClusterSummary(c *gin.Context) {
 	authCtx := middleware.GetAuthContext(c)
+	claims := internalauth.ClaimsFromContext(c.Request.Context())
 
 	// Generate internal token for manager
 	perms := s.cfg.SchedulerPermissions
 	if len(perms) == 0 {
 		perms = []string{"*:*"}
 	}
-	internalToken, err := s.internalAuthGen.Generate("manager", authCtx.TeamID, authCtx.UserID, internalauth.GenerateOptions{
-		Permissions: perms,
-	})
+	internalToken, err := s.generateManagerToken(authCtx, claims, perms)
 	if err != nil {
 		s.logger.Error("Failed to generate internal token for manager",
 			zap.String("team_id", authCtx.TeamID),
@@ -47,15 +47,14 @@ func (s *Server) getClusterSummary(c *gin.Context) {
 // getTemplateStats proxies template stats request to manager
 func (s *Server) getTemplateStats(c *gin.Context) {
 	authCtx := middleware.GetAuthContext(c)
+	claims := internalauth.ClaimsFromContext(c.Request.Context())
 
 	// Generate internal token for manager
 	perms := s.cfg.SchedulerPermissions
 	if len(perms) == 0 {
 		perms = []string{"*:*"}
 	}
-	internalToken, err := s.internalAuthGen.Generate("manager", authCtx.TeamID, authCtx.UserID, internalauth.GenerateOptions{
-		Permissions: perms,
-	})
+	internalToken, err := s.generateManagerToken(authCtx, claims, perms)
 	if err != nil {
 		s.logger.Error("Failed to generate internal token for manager",
 			zap.String("team_id", authCtx.TeamID),
@@ -74,4 +73,21 @@ func (s *Server) getTemplateStats(c *gin.Context) {
 
 	// Forward to manager
 	s.proxy2Mgr.ProxyToTarget(c)
+}
+
+func (s *Server) generateManagerToken(authCtx *authn.AuthContext, claims *internalauth.Claims, permissions []string) (string, error) {
+	opts := internalauth.GenerateOptions{
+		Permissions: permissions,
+	}
+	if claims != nil && claims.IsSystem {
+		return s.internalAuthGen.GenerateSystem("manager", opts)
+	}
+
+	teamID := ""
+	userID := ""
+	if authCtx != nil {
+		teamID = authCtx.TeamID
+		userID = authCtx.UserID
+	}
+	return s.internalAuthGen.Generate("manager", teamID, userID, opts)
 }

@@ -396,6 +396,57 @@ func TestAppendReplicaChangesDetectsConflictAfterBaseSeq(t *testing.T) {
 	}
 }
 
+func TestAppendReplicaChangesRejectsResurrectionAfterRemoteDelete(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
+	repo.replicas[replicaKey("vol-1", "replica-1")] = &db.SyncReplica{
+		ID:             "replica-1",
+		VolumeID:       "vol-1",
+		TeamID:         "team-1",
+		CaseSensitive:  false,
+		LastAppliedSeq: 1,
+	}
+	repo.journal = []*db.SyncJournalEntry{
+		{Seq: 1, VolumeID: "vol-1", TeamID: "team-1", Source: db.SyncSourceReplica, EventType: db.SyncEventWrite, NormalizedPath: "/app/main.go", Path: "/app/main.go", ReplicaID: stringPtr("replica-1")},
+		{Seq: 2, VolumeID: "vol-1", TeamID: "team-1", Source: db.SyncSourceSandbox, EventType: db.SyncEventRemove, NormalizedPath: "/app/main.go", Path: "/app/main.go", Tombstone: true},
+	}
+	repo.nextSeq = 2
+
+	content := "aGVsbG8K"
+	svc := NewService(repo, logrus.New())
+	resp, err := svc.AppendReplicaChanges(context.Background(), &AppendChangesRequest{
+		VolumeID:  "vol-1",
+		TeamID:    "team-1",
+		ReplicaID: "replica-1",
+		RequestID: "req-resurrect",
+		BaseSeq:   1,
+		Changes: []ChangeRequest{{
+			EventType:     db.SyncEventWrite,
+			Path:          "/app/main.go",
+			ContentBase64: &content,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("AppendReplicaChanges error = %v", err)
+	}
+	if len(resp.Accepted) != 0 {
+		t.Fatalf("accepted changes = %d, want 0", len(resp.Accepted))
+	}
+	if len(resp.Conflicts) != 1 {
+		t.Fatalf("conflicts = %d, want 1", len(resp.Conflicts))
+	}
+	if resp.Conflicts[0].Metadata == nil {
+		t.Fatal("expected conflict metadata")
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(*resp.Conflicts[0].Metadata, &metadata); err != nil {
+		t.Fatalf("Unmarshal conflict metadata: %v", err)
+	}
+	if metadata["latest_event"] != db.SyncEventRemove {
+		t.Fatalf("latest_event = %#v, want %q", metadata["latest_event"], db.SyncEventRemove)
+	}
+}
+
 func TestAppendReplicaChangesMaterializesConflictArtifact(t *testing.T) {
 	repo := newFakeRepo()
 	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
@@ -458,6 +509,56 @@ func TestAppendReplicaChangesMaterializesConflictArtifact(t *testing.T) {
 	}
 }
 
+func TestAppendReplicaChangesAllowsRecreateAfterObservedDelete(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
+	repo.replicas[replicaKey("vol-1", "replica-1")] = &db.SyncReplica{
+		ID:             "replica-1",
+		VolumeID:       "vol-1",
+		TeamID:         "team-1",
+		CaseSensitive:  false,
+		LastAppliedSeq: 2,
+	}
+	repo.journal = []*db.SyncJournalEntry{
+		{Seq: 1, VolumeID: "vol-1", TeamID: "team-1", Source: db.SyncSourceReplica, EventType: db.SyncEventWrite, NormalizedPath: "/app/main.go", Path: "/app/main.go", ReplicaID: stringPtr("replica-1")},
+		{Seq: 2, VolumeID: "vol-1", TeamID: "team-1", Source: db.SyncSourceSandbox, EventType: db.SyncEventRemove, NormalizedPath: "/app/main.go", Path: "/app/main.go", Tombstone: true},
+	}
+	repo.nextSeq = 2
+
+	content := "aGVsbG8K"
+	applier := &fakeChangeApplier{}
+	svc := NewService(repo, logrus.New())
+	svc.SetReplicaChangeApplier(applier)
+
+	resp, err := svc.AppendReplicaChanges(context.Background(), &AppendChangesRequest{
+		VolumeID:  "vol-1",
+		TeamID:    "team-1",
+		ReplicaID: "replica-1",
+		RequestID: "req-recreate",
+		BaseSeq:   2,
+		Changes: []ChangeRequest{{
+			EventType:     db.SyncEventWrite,
+			Path:          "/app/main.go",
+			ContentBase64: &content,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("AppendReplicaChanges error = %v", err)
+	}
+	if len(resp.Conflicts) != 0 {
+		t.Fatalf("conflicts = %d, want 0", len(resp.Conflicts))
+	}
+	if len(resp.Accepted) != 1 {
+		t.Fatalf("accepted changes = %d, want 1", len(resp.Accepted))
+	}
+	if len(applier.calls) != 1 {
+		t.Fatalf("applier calls = %d, want 1", len(applier.calls))
+	}
+	if len(repo.journal) != 3 || repo.journal[2].EventType != db.SyncEventWrite {
+		t.Fatalf("journal = %+v, want recreated write appended", repo.journal)
+	}
+}
+
 func TestUpdateReplicaCursorRejectsAheadOfHead(t *testing.T) {
 	repo := newFakeRepo()
 	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
@@ -484,6 +585,34 @@ func TestUpdateReplicaCursorRejectsAheadOfHead(t *testing.T) {
 	}
 	if !errors.Is(err, ErrCursorAhead) {
 		t.Fatalf("error = %v, want ErrCursorAhead", err)
+	}
+}
+
+func TestUpdateReplicaCursorRejectsRegression(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
+	repo.replicas[replicaKey("vol-1", "replica-1")] = &db.SyncReplica{
+		ID:             "replica-1",
+		VolumeID:       "vol-1",
+		TeamID:         "team-1",
+		CaseSensitive:  false,
+		LastAppliedSeq: 5,
+		LastSeenAt:     time.Now().UTC(),
+	}
+	repo.journal = []*db.SyncJournalEntry{
+		{Seq: 5, VolumeID: "vol-1", TeamID: "team-1"},
+	}
+	repo.nextSeq = 5
+
+	svc := NewService(repo, logrus.New())
+	_, err := svc.UpdateReplicaCursor(context.Background(), &UpdateCursorRequest{
+		VolumeID:       "vol-1",
+		TeamID:         "team-1",
+		ReplicaID:      "replica-1",
+		LastAppliedSeq: 4,
+	})
+	if !errors.Is(err, ErrCursorRegression) {
+		t.Fatalf("error = %v, want ErrCursorRegression", err)
 	}
 }
 
@@ -515,6 +644,38 @@ func TestListChangesRejectsCompactedCursorWithReseedRequired(t *testing.T) {
 	}
 	if reseedErr.RetainedAfterSeq != 5 || reseedErr.HeadSeq != 6 {
 		t.Fatalf("reseed error = %+v, want retained_after_seq=5 head_seq=6", reseedErr)
+	}
+}
+
+func TestListChangesReturnsOrderedDeltaSet(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
+	repo.retention["vol-1"] = &db.SyncRetentionState{
+		VolumeID:            "vol-1",
+		TeamID:              "team-1",
+		CompactedThroughSeq: 2,
+	}
+	repo.journal = []*db.SyncJournalEntry{
+		{Seq: 3, VolumeID: "vol-1", TeamID: "team-1", EventType: db.SyncEventWrite, Path: "/app/a.go", NormalizedPath: "/app/a.go"},
+		{Seq: 4, VolumeID: "vol-1", TeamID: "team-1", EventType: db.SyncEventWrite, Path: "/app/b.go", NormalizedPath: "/app/b.go"},
+	}
+	repo.nextSeq = 4
+
+	svc := NewService(repo, logrus.New())
+	resp, err := svc.ListChanges(context.Background(), &ListChangesRequest{
+		VolumeID: "vol-1",
+		TeamID:   "team-1",
+		AfterSeq: 2,
+		Limit:    10,
+	})
+	if err != nil {
+		t.Fatalf("ListChanges error = %v", err)
+	}
+	if resp.HeadSeq != 4 || resp.RetainedAfterSeq != 2 {
+		t.Fatalf("response = %+v, want head_seq=4 retained_after_seq=2", resp)
+	}
+	if len(resp.Changes) != 2 || resp.Changes[0].Seq != 3 || resp.Changes[1].Seq != 4 {
+		t.Fatalf("changes = %+v, want seqs [3 4]", resp.Changes)
 	}
 }
 
@@ -712,6 +873,43 @@ func TestUpdateReplicaCursorAllowsBootstrapRecoveryPastCompactionFloor(t *testin
 	}
 }
 
+func TestUpdateReplicaCursorAdvancesReplicaState(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
+	repo.replicas[replicaKey("vol-1", "replica-1")] = &db.SyncReplica{
+		ID:             "replica-1",
+		VolumeID:       "vol-1",
+		TeamID:         "team-1",
+		CaseSensitive:  false,
+		LastAppliedSeq: 2,
+		LastSeenAt:     time.Now().UTC().Add(-time.Minute),
+	}
+	repo.retention["vol-1"] = &db.SyncRetentionState{
+		VolumeID:            "vol-1",
+		TeamID:              "team-1",
+		CompactedThroughSeq: 1,
+	}
+	repo.journal = []*db.SyncJournalEntry{
+		{Seq: 3, VolumeID: "vol-1", TeamID: "team-1"},
+		{Seq: 4, VolumeID: "vol-1", TeamID: "team-1"},
+	}
+	repo.nextSeq = 4
+
+	svc := NewService(repo, logrus.New())
+	resp, err := svc.UpdateReplicaCursor(context.Background(), &UpdateCursorRequest{
+		VolumeID:       "vol-1",
+		TeamID:         "team-1",
+		ReplicaID:      "replica-1",
+		LastAppliedSeq: 4,
+	})
+	if err != nil {
+		t.Fatalf("UpdateReplicaCursor error = %v", err)
+	}
+	if resp.HeadSeq != 4 || resp.Replica == nil || resp.Replica.LastAppliedSeq != 4 {
+		t.Fatalf("response = %+v, want head_seq=4 last_applied_seq=4", resp)
+	}
+}
+
 func TestCompactJournalDeletesCompactedHistoryAndAdvancesRetentionFloor(t *testing.T) {
 	repo := newFakeRepo()
 	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
@@ -797,6 +995,48 @@ func TestAppendReplicaChangesAppliesAcceptedChange(t *testing.T) {
 	}
 }
 
+func TestAppendReplicaChangesApplyFailureDoesNotPersistState(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
+	repo.replicas[replicaKey("vol-1", "replica-1")] = &db.SyncReplica{
+		ID:             "replica-1",
+		VolumeID:       "vol-1",
+		TeamID:         "team-1",
+		CaseSensitive:  false,
+		LastAppliedSeq: 0,
+	}
+
+	content := "aGVsbG8K"
+	applier := &fakeChangeApplier{err: errors.New("apply failed")}
+	svc := NewService(repo, logrus.New())
+	svc.SetReplicaChangeApplier(applier)
+
+	_, err := svc.AppendReplicaChanges(context.Background(), &AppendChangesRequest{
+		VolumeID:  "vol-1",
+		TeamID:    "team-1",
+		ReplicaID: "replica-1",
+		RequestID: "req-apply-fail",
+		BaseSeq:   0,
+		Changes: []ChangeRequest{{
+			EventType:     db.SyncEventWrite,
+			Path:          "/app/main.go",
+			ContentBase64: &content,
+		}},
+	})
+	if err == nil || err.Error() != "apply failed" {
+		t.Fatalf("error = %v, want apply failed", err)
+	}
+	if len(repo.journal) != 0 {
+		t.Fatalf("journal entries = %d, want 0", len(repo.journal))
+	}
+	if len(repo.requests) != 0 {
+		t.Fatalf("stored requests = %d, want 0", len(repo.requests))
+	}
+	if repo.replicas[replicaKey("vol-1", "replica-1")].LastAppliedSeq != 0 {
+		t.Fatalf("last_applied_seq = %d, want 0", repo.replicas[replicaKey("vol-1", "replica-1")].LastAppliedSeq)
+	}
+}
+
 func TestAppendReplicaChangesReplaysStoredResponseForDuplicateRequestID(t *testing.T) {
 	repo := newFakeRepo()
 	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
@@ -857,6 +1097,69 @@ func TestAppendReplicaChangesReplaysStoredResponseForDuplicateRequestID(t *testi
 	}
 }
 
+func TestAppendReplicaChangesReplaysStoredResponseAfterServiceRestart(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
+	repo.replicas[replicaKey("vol-1", "replica-1")] = &db.SyncReplica{
+		ID:             "replica-1",
+		VolumeID:       "vol-1",
+		TeamID:         "team-1",
+		CaseSensitive:  false,
+		LastAppliedSeq: 0,
+	}
+
+	content := "aGVsbG8K"
+	firstApplier := &fakeChangeApplier{}
+	firstSvc := NewService(repo, logrus.New())
+	firstSvc.SetReplicaChangeApplier(firstApplier)
+
+	req := &AppendChangesRequest{
+		VolumeID:  "vol-1",
+		TeamID:    "team-1",
+		ReplicaID: "replica-1",
+		RequestID: "req-restart",
+		BaseSeq:   0,
+		Changes: []ChangeRequest{{
+			EventType:     db.SyncEventWrite,
+			Path:          "/app/main.go",
+			ContentBase64: &content,
+		}},
+	}
+
+	first, err := firstSvc.AppendReplicaChanges(context.Background(), req)
+	if err != nil {
+		t.Fatalf("first AppendReplicaChanges error = %v", err)
+	}
+
+	secondApplier := &fakeChangeApplier{}
+	secondSvc := NewService(repo, logrus.New())
+	secondSvc.SetReplicaChangeApplier(secondApplier)
+
+	replayed, err := secondSvc.AppendReplicaChanges(context.Background(), req)
+	if err != nil {
+		t.Fatalf("replayed AppendReplicaChanges error = %v", err)
+	}
+
+	if len(firstApplier.calls) != 1 {
+		t.Fatalf("first applier calls = %d, want 1", len(firstApplier.calls))
+	}
+	if len(secondApplier.calls) != 0 {
+		t.Fatalf("second applier calls = %d, want 0 after replay", len(secondApplier.calls))
+	}
+
+	firstJSON, err := json.Marshal(first)
+	if err != nil {
+		t.Fatalf("Marshal first response: %v", err)
+	}
+	replayedJSON, err := json.Marshal(replayed)
+	if err != nil {
+		t.Fatalf("Marshal replayed response: %v", err)
+	}
+	if string(firstJSON) != string(replayedJSON) {
+		t.Fatalf("responses differ after restart: first=%s replayed=%s", firstJSON, replayedJSON)
+	}
+}
+
 func TestAppendReplicaChangesRejectsRequestIDReuseWithDifferentPayload(t *testing.T) {
 	repo := newFakeRepo()
 	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
@@ -901,6 +1204,51 @@ func TestAppendReplicaChangesRejectsRequestIDReuseWithDifferentPayload(t *testin
 	})
 	if !errors.Is(err, ErrRequestIDConflict) {
 		t.Fatalf("error = %v, want ErrRequestIDConflict", err)
+	}
+}
+
+func TestAppendReplicaChangesConflictArtifactFailureDoesNotPersistConflict(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
+	repo.replicas[replicaKey("vol-1", "replica-1")] = &db.SyncReplica{
+		ID:             "replica-1",
+		VolumeID:       "vol-1",
+		TeamID:         "team-1",
+		CaseSensitive:  false,
+		LastAppliedSeq: 1,
+	}
+	repo.journal = []*db.SyncJournalEntry{
+		{Seq: 1, VolumeID: "vol-1", TeamID: "team-1", Source: db.SyncSourceReplica, NormalizedPath: "/app/readme.md", Path: "/app/README.md", ReplicaID: stringPtr("replica-1")},
+		{Seq: 2, VolumeID: "vol-1", TeamID: "team-1", Source: db.SyncSourceSandbox, EventType: db.SyncEventWrite, NormalizedPath: "/app/readme.md", Path: "/app/README.md"},
+	}
+	repo.nextSeq = 2
+
+	artifactWriter := &fakeArtifactWriter{err: errors.New("artifact failed")}
+	svc := NewService(repo, logrus.New())
+	svc.SetConflictArtifactWriter(artifactWriter)
+
+	_, err := svc.AppendReplicaChanges(context.Background(), &AppendChangesRequest{
+		VolumeID:  "vol-1",
+		TeamID:    "team-1",
+		ReplicaID: "replica-1",
+		RequestID: "req-conflict-artifact-fail",
+		BaseSeq:   1,
+		Changes: []ChangeRequest{{
+			EventType: db.SyncEventWrite,
+			Path:      "/app/README.md",
+		}},
+	})
+	if err == nil || err.Error() != "artifact failed" {
+		t.Fatalf("error = %v, want artifact failed", err)
+	}
+	if len(repo.conflicts) != 0 {
+		t.Fatalf("conflicts = %d, want 0", len(repo.conflicts))
+	}
+	if len(repo.journal) != 2 {
+		t.Fatalf("journal entries = %d, want original 2 only", len(repo.journal))
+	}
+	if len(repo.requests) != 0 {
+		t.Fatalf("stored requests = %d, want 0", len(repo.requests))
 	}
 }
 
@@ -1116,6 +1464,171 @@ func TestAppendReplicaChangesRejectsWindowsIncompatiblePathForPortableReplica(t 
 	}
 }
 
+func TestAppendReplicaChangesRejectsWindowsTrailingDotPathForPortableReplica(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
+	repo.replicas[replicaKey("vol-1", "replica-1")] = &db.SyncReplica{
+		ID:       "replica-1",
+		VolumeID: "vol-1",
+		TeamID:   "team-1",
+		Capabilities: pathnorm.FilesystemCapabilities{
+			CaseSensitive:                   false,
+			UnicodeNormalizationInsensitive: true,
+			WindowsCompatiblePaths:          true,
+		},
+		LastAppliedSeq: 0,
+	}
+
+	svc := NewService(repo, logrus.New())
+	resp, err := svc.AppendReplicaChanges(context.Background(), &AppendChangesRequest{
+		VolumeID:  "vol-1",
+		TeamID:    "team-1",
+		ReplicaID: "replica-1",
+		RequestID: "req-win-trailing",
+		BaseSeq:   0,
+		Changes: []ChangeRequest{{
+			EventType: db.SyncEventWrite,
+			Path:      "/app/report. ",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("AppendReplicaChanges error = %v", err)
+	}
+	if len(resp.Accepted) != 0 {
+		t.Fatalf("accepted changes = %d, want 0", len(resp.Accepted))
+	}
+	if len(resp.Conflicts) != 1 {
+		t.Fatalf("conflicts = %d, want 1", len(resp.Conflicts))
+	}
+	if resp.Conflicts[0].Reason != pathnorm.IssueCodeWindowsTrailingDotSpace {
+		t.Fatalf("conflict reason = %q, want %q", resp.Conflicts[0].Reason, pathnorm.IssueCodeWindowsTrailingDotSpace)
+	}
+	if len(repo.journal) != 0 {
+		t.Fatalf("journal entries = %d, want 0", len(repo.journal))
+	}
+}
+
+func TestUpsertReplicaMergesStricterCapabilitiesAcrossReplicas(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
+
+	svc := NewService(repo, logrus.New())
+	if _, err := svc.UpsertReplica(context.Background(), &UpsertReplicaRequest{
+		VolumeID:      "vol-1",
+		TeamID:        "team-1",
+		ReplicaID:     "replica-linux",
+		DisplayName:   "Linux",
+		Platform:      "linux",
+		RootPath:      "/workspace",
+		CaseSensitive: true,
+	}); err != nil {
+		t.Fatalf("UpsertReplica(linux) error = %v", err)
+	}
+	if _, err := svc.UpsertReplica(context.Background(), &UpsertReplicaRequest{
+		VolumeID:      "vol-1",
+		TeamID:        "team-1",
+		ReplicaID:     "replica-win",
+		DisplayName:   "Windows",
+		Platform:      "windows",
+		RootPath:      "C:/workspace",
+		CaseSensitive: false,
+		Capabilities: &pathnorm.FilesystemCapabilities{
+			CaseSensitive:                   false,
+			UnicodeNormalizationInsensitive: true,
+			WindowsCompatiblePaths:          true,
+		},
+	}); err != nil {
+		t.Fatalf("UpsertReplica(windows) error = %v", err)
+	}
+
+	policy := repo.policies["vol-1"]
+	if policy == nil {
+		t.Fatal("expected namespace policy")
+	}
+	if !policy.Capabilities.WindowsCompatiblePaths || policy.Capabilities.CaseSensitive {
+		t.Fatalf("policy capabilities = %+v, want learned portable windows-safe policy", policy.Capabilities)
+	}
+}
+
+func TestReplicaReregistrationLearnsStricterPolicyAndConstrainsFuturePushes(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
+
+	svc := NewService(repo, logrus.New())
+	linuxResp, err := svc.UpsertReplica(context.Background(), &UpsertReplicaRequest{
+		VolumeID:      "vol-1",
+		TeamID:        "team-1",
+		ReplicaID:     "replica-linux",
+		DisplayName:   "Linux",
+		Platform:      "linux",
+		RootPath:      "/workspace",
+		CaseSensitive: true,
+	})
+	if err != nil {
+		t.Fatalf("UpsertReplica(linux initial) error = %v", err)
+	}
+	if linuxResp.Replica.Capabilities.WindowsCompatiblePaths {
+		t.Fatalf("initial linux capabilities = %+v, want no windows constraints", linuxResp.Replica.Capabilities)
+	}
+
+	if _, err := svc.UpsertReplica(context.Background(), &UpsertReplicaRequest{
+		VolumeID:      "vol-1",
+		TeamID:        "team-1",
+		ReplicaID:     "replica-win",
+		DisplayName:   "Windows",
+		Platform:      "windows",
+		RootPath:      "C:/workspace",
+		CaseSensitive: false,
+		Capabilities: &pathnorm.FilesystemCapabilities{
+			CaseSensitive:                   false,
+			UnicodeNormalizationInsensitive: true,
+			WindowsCompatiblePaths:          true,
+		},
+	}); err != nil {
+		t.Fatalf("UpsertReplica(windows) error = %v", err)
+	}
+
+	linuxResp, err = svc.UpsertReplica(context.Background(), &UpsertReplicaRequest{
+		VolumeID:      "vol-1",
+		TeamID:        "team-1",
+		ReplicaID:     "replica-linux",
+		DisplayName:   "Linux",
+		Platform:      "linux",
+		RootPath:      "/workspace",
+		CaseSensitive: true,
+	})
+	if err != nil {
+		t.Fatalf("UpsertReplica(linux re-register) error = %v", err)
+	}
+	if !linuxResp.Replica.Capabilities.WindowsCompatiblePaths || linuxResp.Replica.Capabilities.CaseSensitive {
+		t.Fatalf("reregistered linux capabilities = %+v, want learned windows-safe policy", linuxResp.Replica.Capabilities)
+	}
+
+	appendResp, err := svc.AppendReplicaChanges(context.Background(), &AppendChangesRequest{
+		VolumeID:  "vol-1",
+		TeamID:    "team-1",
+		ReplicaID: "replica-linux",
+		RequestID: "req-linux-after-win",
+		BaseSeq:   0,
+		Changes: []ChangeRequest{{
+			EventType: db.SyncEventWrite,
+			Path:      "/app/CON.txt",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("AppendReplicaChanges error = %v", err)
+	}
+	if len(appendResp.Accepted) != 0 {
+		t.Fatalf("accepted changes = %d, want 0", len(appendResp.Accepted))
+	}
+	if len(appendResp.Conflicts) != 1 {
+		t.Fatalf("conflicts = %d, want 1", len(appendResp.Conflicts))
+	}
+	if appendResp.Conflicts[0].Reason != pathnorm.IssueCodeWindowsReservedName {
+		t.Fatalf("conflict reason = %q, want %q", appendResp.Conflicts[0].Reason, pathnorm.IssueCodeWindowsReservedName)
+	}
+}
+
 func TestUpsertReplicaPersistsMergedNamespacePolicy(t *testing.T) {
 	repo := newFakeRepo()
 	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
@@ -1152,6 +1665,49 @@ func TestUpsertReplicaPersistsMergedNamespacePolicy(t *testing.T) {
 	}
 	if repo.policies["vol-1"] == nil || !repo.policies["vol-1"].Capabilities.WindowsCompatiblePaths {
 		t.Fatalf("policy = %+v, want persisted windows-compatible policy", repo.policies["vol-1"])
+	}
+}
+
+func TestNamespacePolicySurvivesServiceRestartForRemoteValidation(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
+
+	svc := NewService(repo, logrus.New())
+	_, err := svc.UpsertReplica(context.Background(), &UpsertReplicaRequest{
+		VolumeID:      "vol-1",
+		TeamID:        "team-1",
+		ReplicaID:     "replica-1",
+		DisplayName:   "Windows Laptop",
+		Platform:      "windows",
+		RootPath:      "C:/work",
+		CaseSensitive: false,
+		Capabilities: &pathnorm.FilesystemCapabilities{
+			CaseSensitive:                   false,
+			UnicodeNormalizationInsensitive: true,
+			WindowsCompatiblePaths:          true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("UpsertReplica error = %v", err)
+	}
+
+	restarted := NewService(repo, logrus.New())
+	err = restarted.ValidateNamespaceMutation(context.Background(), &NamespaceMutationRequest{
+		VolumeID:  "vol-1",
+		TeamID:    "team-1",
+		EventType: db.SyncEventRename,
+		Path:      "/app/CON.txt",
+		OldPath:   "/app/main.txt",
+	})
+	if !errors.Is(err, ErrNamespaceIncompatible) {
+		t.Fatalf("error = %v, want ErrNamespaceIncompatible", err)
+	}
+	var compatErr *NamespaceCompatibilityError
+	if !errors.As(err, &compatErr) || len(compatErr.Issues) != 1 {
+		t.Fatalf("compatErr = %+v, want one issue", compatErr)
+	}
+	if compatErr.Issues[0].Code != pathnorm.IssueCodeWindowsReservedName {
+		t.Fatalf("issue code = %q, want %q", compatErr.Issues[0].Code, pathnorm.IssueCodeWindowsReservedName)
 	}
 }
 
@@ -1196,6 +1752,105 @@ func TestValidateNamespaceMutationRejectsCasefoldCollisionUnderPolicy(t *testing
 	}
 }
 
+func TestValidateNamespaceMutationAllowsCaseOnlyRenameUnderPolicy(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
+	repo.policies["vol-1"] = &db.SyncNamespacePolicy{
+		VolumeID: "vol-1",
+		TeamID:   "team-1",
+		Capabilities: pathnorm.FilesystemCapabilities{
+			CaseSensitive:                   false,
+			UnicodeNormalizationInsensitive: true,
+		},
+	}
+	repo.journal = []*db.SyncJournalEntry{{
+		Seq:            1,
+		VolumeID:       "vol-1",
+		TeamID:         "team-1",
+		Source:         db.SyncSourceSandbox,
+		EventType:      db.SyncEventWrite,
+		Path:           "/app/main.go",
+		NormalizedPath: "/app/main.go",
+	}}
+	repo.nextSeq = 1
+
+	svc := NewService(repo, logrus.New())
+	err := svc.ValidateNamespaceMutation(context.Background(), &NamespaceMutationRequest{
+		VolumeID:  "vol-1",
+		TeamID:    "team-1",
+		EventType: db.SyncEventRename,
+		Path:      "/app/Main.go",
+		OldPath:   "/app/main.go",
+	})
+	if err != nil {
+		t.Fatalf("ValidateNamespaceMutation() error = %v, want nil", err)
+	}
+}
+
+func TestValidateNamespaceMutationRejectsWindowsReservedNameUnderPolicy(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
+	repo.policies["vol-1"] = &db.SyncNamespacePolicy{
+		VolumeID: "vol-1",
+		TeamID:   "team-1",
+		Capabilities: pathnorm.FilesystemCapabilities{
+			CaseSensitive:                   false,
+			UnicodeNormalizationInsensitive: true,
+			WindowsCompatiblePaths:          true,
+		},
+	}
+
+	svc := NewService(repo, logrus.New())
+	err := svc.ValidateNamespaceMutation(context.Background(), &NamespaceMutationRequest{
+		VolumeID:  "vol-1",
+		TeamID:    "team-1",
+		EventType: db.SyncEventCreate,
+		Path:      "/app/CON.txt",
+	})
+	if !errors.Is(err, ErrNamespaceIncompatible) {
+		t.Fatalf("error = %v, want ErrNamespaceIncompatible", err)
+	}
+	var compatErr *NamespaceCompatibilityError
+	if !errors.As(err, &compatErr) || len(compatErr.Issues) != 1 {
+		t.Fatalf("compatErr = %+v, want one issue", compatErr)
+	}
+	if compatErr.Issues[0].Code != pathnorm.IssueCodeWindowsReservedName {
+		t.Fatalf("issue code = %q, want %q", compatErr.Issues[0].Code, pathnorm.IssueCodeWindowsReservedName)
+	}
+}
+
+func TestValidateNamespaceMutationRejectsWindowsTrailingDotUnderPolicy(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
+	repo.policies["vol-1"] = &db.SyncNamespacePolicy{
+		VolumeID: "vol-1",
+		TeamID:   "team-1",
+		Capabilities: pathnorm.FilesystemCapabilities{
+			CaseSensitive:                   false,
+			UnicodeNormalizationInsensitive: true,
+			WindowsCompatiblePaths:          true,
+		},
+	}
+
+	svc := NewService(repo, logrus.New())
+	err := svc.ValidateNamespaceMutation(context.Background(), &NamespaceMutationRequest{
+		VolumeID:  "vol-1",
+		TeamID:    "team-1",
+		EventType: db.SyncEventCreate,
+		Path:      "/app/report. ",
+	})
+	if !errors.Is(err, ErrNamespaceIncompatible) {
+		t.Fatalf("error = %v, want ErrNamespaceIncompatible", err)
+	}
+	var compatErr *NamespaceCompatibilityError
+	if !errors.As(err, &compatErr) || len(compatErr.Issues) != 1 {
+		t.Fatalf("compatErr = %+v, want one issue", compatErr)
+	}
+	if compatErr.Issues[0].Code != pathnorm.IssueCodeWindowsTrailingDotSpace {
+		t.Fatalf("issue code = %q, want %q", compatErr.Issues[0].Code, pathnorm.IssueCodeWindowsTrailingDotSpace)
+	}
+}
+
 func TestRecordRemoteChangeCoalescesHotWrites(t *testing.T) {
 	repo := newFakeRepo()
 	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
@@ -1226,6 +1881,106 @@ func TestRecordRemoteChangeCoalescesHotWrites(t *testing.T) {
 	}
 	if len(repo.journal) != 1 {
 		t.Fatalf("journal entries = %d, want 1", len(repo.journal))
+	}
+}
+
+func TestRecordRemoteChangeJournalsRenameMetadata(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
+
+	svc := NewService(repo, logrus.New())
+	occurredAt := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	if err := svc.RecordRemoteChange(context.Background(), &RemoteChange{
+		VolumeID:   "vol-1",
+		TeamID:     "team-1",
+		SandboxID:  "sandbox-1",
+		EventType:  db.SyncEventRename,
+		Path:       "/src/new.go",
+		OldPath:    "/src/old.go",
+		OccurredAt: occurredAt,
+	}); err != nil {
+		t.Fatalf("RecordRemoteChange() error = %v", err)
+	}
+	if len(repo.journal) != 1 {
+		t.Fatalf("journal entries = %d, want 1", len(repo.journal))
+	}
+	entry := repo.journal[0]
+	if entry.EventType != db.SyncEventRename || entry.Path != "/src/new.go" {
+		t.Fatalf("entry = %+v, want rename /src/new.go", entry)
+	}
+	if entry.OldPath == nil || *entry.OldPath != "/src/old.go" {
+		t.Fatalf("old_path = %v, want /src/old.go", entry.OldPath)
+	}
+	if entry.NormalizedOldPath == nil || *entry.NormalizedOldPath != "/src/old.go" {
+		t.Fatalf("normalized_old_path = %v, want /src/old.go", entry.NormalizedOldPath)
+	}
+	if entry.Tombstone {
+		t.Fatalf("tombstone = %v, want false", entry.Tombstone)
+	}
+	if !entry.CreatedAt.Equal(occurredAt) {
+		t.Fatalf("created_at = %v, want %v", entry.CreatedAt, occurredAt)
+	}
+	var metadata map[string]any
+	if entry.Metadata == nil {
+		t.Fatal("expected metadata")
+	}
+	if err := json.Unmarshal(*entry.Metadata, &metadata); err != nil {
+		t.Fatalf("Unmarshal metadata: %v", err)
+	}
+	if metadata["sandbox_id"] != "sandbox-1" {
+		t.Fatalf("metadata sandbox_id = %#v, want sandbox-1", metadata["sandbox_id"])
+	}
+}
+
+func TestRecordRemoteChangeJournalsRemoveAsTombstone(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
+
+	svc := NewService(repo, logrus.New())
+	if err := svc.RecordRemoteChange(context.Background(), &RemoteChange{
+		VolumeID:   "vol-1",
+		TeamID:     "team-1",
+		EventType:  db.SyncEventRemove,
+		Path:       "/src/main.go",
+		OccurredAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("RecordRemoteChange() error = %v", err)
+	}
+	if len(repo.journal) != 1 {
+		t.Fatalf("journal entries = %d, want 1", len(repo.journal))
+	}
+	entry := repo.journal[0]
+	if entry.EventType != db.SyncEventRemove || entry.Path != "/src/main.go" {
+		t.Fatalf("entry = %+v, want remove /src/main.go", entry)
+	}
+	if !entry.Tombstone {
+		t.Fatalf("tombstone = %v, want true", entry.Tombstone)
+	}
+}
+
+func TestRecordRemoteChangeJournalsChmodEvent(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
+
+	svc := NewService(repo, logrus.New())
+	if err := svc.RecordRemoteChange(context.Background(), &RemoteChange{
+		VolumeID:   "vol-1",
+		TeamID:     "team-1",
+		EventType:  db.SyncEventChmod,
+		Path:       "/src/main.go",
+		OccurredAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("RecordRemoteChange() error = %v", err)
+	}
+	if len(repo.journal) != 1 {
+		t.Fatalf("journal entries = %d, want 1", len(repo.journal))
+	}
+	entry := repo.journal[0]
+	if entry.EventType != db.SyncEventChmod || entry.Path != "/src/main.go" {
+		t.Fatalf("entry = %+v, want chmod /src/main.go", entry)
+	}
+	if entry.Tombstone {
+		t.Fatalf("tombstone = %v, want false", entry.Tombstone)
 	}
 }
 
@@ -1320,5 +2075,78 @@ func TestResolveConflictRejectsInvalidStatus(t *testing.T) {
 	})
 	if !errors.Is(err, ErrInvalidConflictStatus) {
 		t.Fatalf("error = %v, want ErrInvalidConflictStatus", err)
+	}
+}
+
+func TestResolveConflictHidesCrossTeamConflict(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
+	repo.conflicts = []*db.SyncConflict{
+		{ID: "conflict-1", VolumeID: "vol-1", TeamID: "team-2", Status: db.SyncConflictStatusOpen},
+	}
+
+	svc := NewService(repo, logrus.New())
+	_, err := svc.ResolveConflict(context.Background(), &ResolveConflictRequest{
+		VolumeID:   "vol-1",
+		TeamID:     "team-1",
+		ConflictID: "conflict-1",
+		Status:     db.SyncConflictStatusResolved,
+	})
+	if !errors.Is(err, ErrConflictNotFound) {
+		t.Fatalf("error = %v, want ErrConflictNotFound", err)
+	}
+}
+
+func TestBuildConflictArtifactPathSanitizesReplicaIDAndPreservesExtension(t *testing.T) {
+	replicaID := "MacBook Pro#1"
+	got := buildConflictArtifactPath("/src/main.test.go", &replicaID, 42)
+	want := "/src/main.test.sandbox0-conflict-macbook-pro-1-seq-42.go"
+	if got != want {
+		t.Fatalf("buildConflictArtifactPath() = %q, want %q", got, want)
+	}
+}
+
+func TestDecodeAppendChangesResponseNormalizesEmptySlices(t *testing.T) {
+	raw := json.RawMessage(`{"head_seq":7}`)
+	resp, err := decodeAppendChangesResponse(&raw)
+	if err != nil {
+		t.Fatalf("decodeAppendChangesResponse() error = %v", err)
+	}
+	if resp.HeadSeq != 7 {
+		t.Fatalf("head_seq = %d, want 7", resp.HeadSeq)
+	}
+	if resp.Accepted == nil {
+		t.Fatal("Accepted = nil, want empty slice")
+	}
+	if resp.Conflicts == nil {
+		t.Fatal("Conflicts = nil, want empty slice")
+	}
+	if len(resp.Accepted) != 0 || len(resp.Conflicts) != 0 {
+		t.Fatalf("accepted/conflicts lengths = %d/%d, want 0/0", len(resp.Accepted), len(resp.Conflicts))
+	}
+}
+
+func TestValidateNamespaceMutationAllowsRemoveUnderPortablePolicy(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
+	repo.policies["vol-1"] = &db.SyncNamespacePolicy{
+		VolumeID: "vol-1",
+		TeamID:   "team-1",
+		Capabilities: pathnorm.FilesystemCapabilities{
+			CaseSensitive:                   false,
+			UnicodeNormalizationInsensitive: true,
+			WindowsCompatiblePaths:          true,
+		},
+	}
+
+	svc := NewService(repo, logrus.New())
+	err := svc.ValidateNamespaceMutation(context.Background(), &NamespaceMutationRequest{
+		VolumeID:  "vol-1",
+		TeamID:    "team-1",
+		EventType: db.SyncEventRemove,
+		Path:      "/app/CON.txt",
+	})
+	if err != nil {
+		t.Fatalf("ValidateNamespaceMutation() error = %v, want nil", err)
 	}
 }

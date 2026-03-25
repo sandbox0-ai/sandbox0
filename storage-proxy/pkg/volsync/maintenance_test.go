@@ -150,3 +150,33 @@ func TestMaintenanceRunOnceRecordsMetrics(t *testing.T) {
 		t.Fatalf("request_cleanup maintenance metric = %v, want 1", got)
 	}
 }
+
+func TestMaintenanceRunOnceRecordsRequestCleanupFailureMetrics(t *testing.T) {
+	repo := &fakeMaintenanceRepo{
+		heads: []*db.SyncVolumeHead{
+			{VolumeID: "vol-1", TeamID: "team-1", HeadSeq: 120},
+		},
+		deleteExpiredErr: errors.New("boom"),
+	}
+	service := &fakeMaintenanceService{}
+	registry := prometheus.NewRegistry()
+	metrics := obsmetrics.NewStorageProxy(registry)
+	maintenance := NewMaintenance(repo, service, logrus.New(), MaintenanceConfig{
+		CompactionInterval:   time.Minute,
+		JournalRetainEntries: 50,
+		RequestRetention:     time.Hour,
+	})
+	maintenance.SetMetrics(metrics)
+
+	maintenance.RunOnce(context.Background())
+
+	if len(service.requests) != 1 {
+		t.Fatalf("compact requests = %d, want 1", len(service.requests))
+	}
+	if got := testutil.ToFloat64(metrics.VolumeSyncMaintenanceRuns.WithLabelValues("compaction", "success")); got != 1 {
+		t.Fatalf("compaction maintenance metric = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(metrics.VolumeSyncMaintenanceRuns.WithLabelValues("request_cleanup", "failure")); got != 1 {
+		t.Fatalf("request_cleanup failure metric = %v, want 1", got)
+	}
+}

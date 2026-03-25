@@ -102,13 +102,16 @@ func (f *fakeHTTPMeteringWriter) UpsertProducerWatermarkTx(ctx context.Context, 
 
 type fakeHTTPSnapshotManager struct {
 	exportBody          []byte
+	lastCreate          *snapshot.CreateSnapshotRequest
 	lastExport          *snapshot.ExportSnapshotRequest
+	lastCompatibility   *snapshot.ListSnapshotCompatibilityIssuesRequest
 	casefoldEntries     []snapshot.SnapshotCasefoldCollision
 	compatibilityIssues []pathnorm.CompatibilityIssue
 	deletedSnapshot     []string
 }
 
 func (f *fakeHTTPSnapshotManager) CreateSnapshotSimple(ctx context.Context, req *snapshot.CreateSnapshotRequest) (*db.Snapshot, error) {
+	f.lastCreate = req
 	return &db.Snapshot{
 		ID:          "snap-1",
 		VolumeID:    req.VolumeID,
@@ -139,6 +142,7 @@ func (f *fakeHTTPSnapshotManager) ListSnapshotCasefoldCollisions(ctx context.Con
 }
 
 func (f *fakeHTTPSnapshotManager) ListSnapshotCompatibilityIssues(ctx context.Context, req *snapshot.ListSnapshotCompatibilityIssuesRequest) ([]pathnorm.CompatibilityIssue, error) {
+	f.lastCompatibility = req
 	return f.compatibilityIssues, nil
 }
 

@@ -21,6 +21,7 @@ type fakeHTTPSyncManager struct {
 	lastUpsert        *volsync.UpsertReplicaRequest
 	lastListChanges   *volsync.ListChangesRequest
 	lastAppend        *volsync.AppendChangesRequest
+	lastUpdateCursor  *volsync.UpdateCursorRequest
 	lastListConflicts *volsync.ListConflictsRequest
 	lastResolve       *volsync.ResolveConflictRequest
 	head              int64
@@ -49,7 +50,21 @@ func (f *fakeHTTPSyncManager) UpsertReplica(ctx context.Context, req *volsync.Up
 }
 
 func (f *fakeHTTPSyncManager) GetReplica(ctx context.Context, volumeID, teamID, replicaID string) (*volsync.ReplicaEnvelope, error) {
-	return nil, nil
+	return &volsync.ReplicaEnvelope{
+		Replica: &db.SyncReplica{
+			ID:             replicaID,
+			VolumeID:       volumeID,
+			TeamID:         teamID,
+			DisplayName:    "MacBook",
+			Platform:       "darwin",
+			RootPath:       "/tmp/work",
+			CaseSensitive:  false,
+			Capabilities:   pathnorm.DefaultFilesystemCapabilities("darwin", false),
+			LastSeenAt:     time.Now().UTC(),
+			LastAppliedSeq: 6,
+		},
+		HeadSeq: 9,
+	}, nil
 }
 
 func (f *fakeHTTPSyncManager) GetHead(ctx context.Context, volumeID, teamID string) (int64, error) {
@@ -125,10 +140,20 @@ func (f *fakeHTTPSyncManager) AppendReplicaChanges(ctx context.Context, req *vol
 }
 
 func (f *fakeHTTPSyncManager) UpdateReplicaCursor(ctx context.Context, req *volsync.UpdateCursorRequest) (*volsync.ReplicaEnvelope, error) {
+	f.lastUpdateCursor = req
 	if f.updateCursorErr != nil {
 		return nil, f.updateCursorErr
 	}
-	return nil, nil
+	return &volsync.ReplicaEnvelope{
+		Replica: &db.SyncReplica{
+			ID:             req.ReplicaID,
+			VolumeID:       req.VolumeID,
+			TeamID:         req.TeamID,
+			LastAppliedSeq: req.LastAppliedSeq,
+			LastSeenAt:     time.Now().UTC(),
+		},
+		HeadSeq: 9,
+	}, nil
 }
 
 type fakeHTTPVolumeMutationBarrier struct {
@@ -182,6 +207,66 @@ func TestUpsertSyncReplicaHandler(t *testing.T) {
 	}
 	if resp.HeadSeq != 7 {
 		t.Fatalf("head seq = %d, want 7", resp.HeadSeq)
+	}
+}
+
+func TestUpsertSyncReplicaHandlerRejectsMalformedCapabilities(t *testing.T) {
+	syncMgr := &fakeHTTPSyncManager{}
+	server := &Server{
+		logger:  logrus.New(),
+		syncMgr: syncMgr,
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/sandboxvolumes/vol-1/sync/replicas/replica-1", bytes.NewBufferString(`{"display_name":"MacBook","capabilities":"invalid"}`))
+	req.SetPathValue("id", "vol-1")
+	req.SetPathValue("replica_id", "replica-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	recorder := httptest.NewRecorder()
+
+	server.upsertSyncReplica(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+	if syncMgr.lastUpsert != nil {
+		t.Fatalf("expected handler to reject before hitting sync manager: %+v", syncMgr.lastUpsert)
+	}
+}
+
+func TestGetSyncReplicaHandler(t *testing.T) {
+	syncMgr := &fakeHTTPSyncManager{}
+	server := &Server{
+		logger:  logrus.New(),
+		syncMgr: syncMgr,
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/sandboxvolumes/vol-1/sync/replicas/replica-1", nil)
+	req.SetPathValue("id", "vol-1")
+	req.SetPathValue("replica_id", "replica-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	recorder := httptest.NewRecorder()
+
+	server.getSyncReplica(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+
+	resp, apiErr, err := spec.DecodeResponse[volsync.ReplicaEnvelope](recorder.Body)
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if apiErr != nil {
+		t.Fatalf("unexpected api error: %+v", apiErr)
+	}
+	if resp.HeadSeq != 9 || resp.Replica == nil || resp.Replica.ID != "replica-1" || resp.Replica.LastAppliedSeq != 6 {
+		t.Fatalf("response = %+v, want head_seq=9 replica_id=replica-1 last_applied_seq=6", resp)
 	}
 }
 
@@ -305,6 +390,148 @@ func TestAppendSyncChangesHandlerRejectsMissingRequestID(t *testing.T) {
 	}
 }
 
+func TestAppendSyncChangesHandlerRejectsInvalidRequestID(t *testing.T) {
+	syncMgr := &fakeHTTPSyncManager{appendErr: volsync.ErrInvalidRequestID}
+	server := &Server{
+		logger:  logrus.New(),
+		syncMgr: syncMgr,
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"request_id": "bad request id",
+		"base_seq":   3,
+		"changes": []map[string]any{{
+			"event_type": "write",
+			"path":       "/app/main.go",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Marshal request: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/sync/replicas/replica-1/changes", bytes.NewReader(body))
+	req.SetPathValue("id", "vol-1")
+	req.SetPathValue("replica_id", "replica-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	recorder := httptest.NewRecorder()
+
+	server.appendSyncChanges(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+	_, apiErr, err := spec.DecodeResponse[volsync.AppendChangesResponse](recorder.Body)
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if apiErr == nil || apiErr.Code != spec.CodeBadRequest || apiErr.Message != volsync.ErrInvalidRequestID.Error() {
+		t.Fatalf("api error = %+v, want invalid request id bad request", apiErr)
+	}
+}
+
+func TestUpdateSyncReplicaCursorHandler(t *testing.T) {
+	syncMgr := &fakeHTTPSyncManager{}
+	server := &Server{
+		logger:  logrus.New(),
+		syncMgr: syncMgr,
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/sandboxvolumes/vol-1/sync/replicas/replica-1/cursor", bytes.NewBufferString(`{"last_applied_seq":8}`))
+	req.SetPathValue("id", "vol-1")
+	req.SetPathValue("replica_id", "replica-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	recorder := httptest.NewRecorder()
+
+	server.updateSyncReplicaCursor(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	if syncMgr.lastUpdateCursor == nil {
+		t.Fatal("expected sync manager to be called")
+	}
+	if syncMgr.lastUpdateCursor.VolumeID != "vol-1" || syncMgr.lastUpdateCursor.ReplicaID != "replica-1" || syncMgr.lastUpdateCursor.LastAppliedSeq != 8 {
+		t.Fatalf("unexpected cursor update request: %+v", syncMgr.lastUpdateCursor)
+	}
+
+	resp, apiErr, err := spec.DecodeResponse[volsync.ReplicaEnvelope](recorder.Body)
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if apiErr != nil {
+		t.Fatalf("unexpected api error: %+v", apiErr)
+	}
+	if resp.HeadSeq != 9 || resp.Replica == nil || resp.Replica.LastAppliedSeq != 8 {
+		t.Fatalf("response = %+v, want head_seq=9 and last_applied_seq=8", resp)
+	}
+}
+
+func TestUpdateSyncReplicaCursorHandlerRejectsRegression(t *testing.T) {
+	syncMgr := &fakeHTTPSyncManager{updateCursorErr: volsync.ErrCursorRegression}
+	server := &Server{
+		logger:  logrus.New(),
+		syncMgr: syncMgr,
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/sandboxvolumes/vol-1/sync/replicas/replica-1/cursor", bytes.NewBufferString(`{"last_applied_seq":2}`))
+	req.SetPathValue("id", "vol-1")
+	req.SetPathValue("replica_id", "replica-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	recorder := httptest.NewRecorder()
+
+	server.updateSyncReplicaCursor(recorder, req)
+
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusConflict)
+	}
+	_, apiErr, err := spec.DecodeResponse[volsync.ReplicaEnvelope](recorder.Body)
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if apiErr == nil || apiErr.Code != spec.CodeConflict || apiErr.Message != volsync.ErrCursorRegression.Error() {
+		t.Fatalf("api error = %+v, want cursor regression conflict", apiErr)
+	}
+}
+
+func TestUpdateSyncReplicaCursorHandlerRejectsExpiredReplicaLease(t *testing.T) {
+	syncMgr := &fakeHTTPSyncManager{updateCursorErr: volsync.ErrReplicaLeaseExpired}
+	server := &Server{
+		logger:  logrus.New(),
+		syncMgr: syncMgr,
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/sandboxvolumes/vol-1/sync/replicas/replica-1/cursor", bytes.NewBufferString(`{"last_applied_seq":8}`))
+	req.SetPathValue("id", "vol-1")
+	req.SetPathValue("replica_id", "replica-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	recorder := httptest.NewRecorder()
+
+	server.updateSyncReplicaCursor(recorder, req)
+
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusConflict)
+	}
+	_, apiErr, err := spec.DecodeResponse[volsync.ReplicaEnvelope](recorder.Body)
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if apiErr == nil || apiErr.Code != spec.CodeConflict || apiErr.Message != volsync.ErrReplicaLeaseExpired.Error() {
+		t.Fatalf("api error = %+v, want expired replica conflict", apiErr)
+	}
+}
+
 func TestListSyncConflictsHandler(t *testing.T) {
 	syncMgr := &fakeHTTPSyncManager{}
 	server := &Server{
@@ -330,6 +557,45 @@ func TestListSyncConflictsHandler(t *testing.T) {
 	}
 	if syncMgr.lastListConflicts.Status != "open" || syncMgr.lastListConflicts.Limit != 10 {
 		t.Fatalf("unexpected list conflicts request: %+v", syncMgr.lastListConflicts)
+	}
+}
+
+func TestListSyncChangesHandler(t *testing.T) {
+	syncMgr := &fakeHTTPSyncManager{}
+	server := &Server{
+		logger:  logrus.New(),
+		syncMgr: syncMgr,
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/sandboxvolumes/vol-1/sync/changes?after=4&limit=10", nil)
+	req.SetPathValue("id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	recorder := httptest.NewRecorder()
+
+	server.listSyncChanges(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	if syncMgr.lastListChanges == nil {
+		t.Fatal("expected sync manager to be called")
+	}
+	if syncMgr.lastListChanges.AfterSeq != 4 || syncMgr.lastListChanges.Limit != 10 {
+		t.Fatalf("unexpected list changes request: %+v", syncMgr.lastListChanges)
+	}
+
+	resp, apiErr, err := spec.DecodeResponse[volsync.ListChangesResponse](recorder.Body)
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if apiErr != nil {
+		t.Fatalf("unexpected api error: %+v", apiErr)
+	}
+	if resp.HeadSeq != 9 || resp.RetainedAfterSeq != 4 || len(resp.Changes) != 1 || resp.Changes[0].Path != "/app/main.go" {
+		t.Fatalf("response = %+v, want head=9 retained_after=4 one /app/main.go change", resp)
 	}
 }
 
@@ -417,6 +683,66 @@ func TestCreateSyncBootstrapHandler(t *testing.T) {
 	}
 	if barrier.calls != 1 || barrier.lastVolumeID != "vol-1" {
 		t.Fatalf("barrier = %+v, want one exclusive call for vol-1", barrier)
+	}
+}
+
+func TestCreateSyncBootstrapHandlerAuditsPortableCapabilities(t *testing.T) {
+	syncMgr := &fakeHTTPSyncManager{head: 12}
+	snapshotMgr := &fakeHTTPSnapshotManager{}
+	server := &Server{
+		logger:      logrus.New(),
+		syncMgr:     syncMgr,
+		snapshotMgr: snapshotMgr,
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/sync/bootstrap", bytes.NewBufferString(`{"snapshot_name":"bootstrap-a","snapshot_description":"seed local replica","capabilities":{"case_sensitive":false,"unicode_normalization_insensitive":true,"windows_compatible_paths":true}}`))
+	req.SetPathValue("id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	recorder := httptest.NewRecorder()
+
+	server.createSyncBootstrap(recorder, req)
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusCreated)
+	}
+	if snapshotMgr.lastCompatibility == nil {
+		t.Fatal("expected snapshot compatibility audit to run")
+	}
+	if snapshotMgr.lastCompatibility.VolumeID != "vol-1" || snapshotMgr.lastCompatibility.SnapshotID != "snap-1" {
+		t.Fatalf("unexpected compatibility request: %+v", snapshotMgr.lastCompatibility)
+	}
+	if !snapshotMgr.lastCompatibility.Capabilities.WindowsCompatiblePaths || snapshotMgr.lastCompatibility.Capabilities.CaseSensitive {
+		t.Fatalf("capabilities = %+v, want portable case-insensitive capabilities", snapshotMgr.lastCompatibility.Capabilities)
+	}
+}
+
+func TestCreateSyncBootstrapHandlerRejectsMalformedCapabilities(t *testing.T) {
+	syncMgr := &fakeHTTPSyncManager{}
+	snapshotMgr := &fakeHTTPSnapshotManager{}
+	server := &Server{
+		logger:      logrus.New(),
+		syncMgr:     syncMgr,
+		snapshotMgr: snapshotMgr,
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/sync/bootstrap", bytes.NewBufferString(`{"snapshot_name":"bootstrap-a","capabilities":"invalid"}`))
+	req.SetPathValue("id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	recorder := httptest.NewRecorder()
+
+	server.createSyncBootstrap(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+	if snapshotMgr.lastCreate != nil {
+		t.Fatalf("expected handler to reject before hitting snapshot manager: %+v", snapshotMgr.lastCreate)
 	}
 }
 

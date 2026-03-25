@@ -2,9 +2,16 @@ package grpc
 
 import (
 	"context"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/juicedata/juicefs/pkg/chunk"
+	"github.com/juicedata/juicefs/pkg/meta"
+	"github.com/juicedata/juicefs/pkg/object"
+	"github.com/juicedata/juicefs/pkg/vfs"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
@@ -235,11 +242,16 @@ func TestWithAuthorizedVolumeMutationUsesBarrier(t *testing.T) {
 }
 
 type fakeSyncRecorder struct {
-	lastValidate *volsync.NamespaceMutationRequest
-	validateErr  error
+	lastValidate  *volsync.NamespaceMutationRequest
+	remoteChanges []*volsync.RemoteChange
+	validateErr   error
 }
 
 func (f *fakeSyncRecorder) RecordRemoteChange(ctx context.Context, change *volsync.RemoteChange) error {
+	if change != nil {
+		clone := *change
+		f.remoteChanges = append(f.remoteChanges, &clone)
+	}
 	return nil
 }
 
@@ -271,6 +283,211 @@ func TestValidateNamespaceMutationMapsCompatibilityErrorsToFailedPrecondition(t 
 	}
 	if recorder.lastValidate == nil || recorder.lastValidate.Path != "/app/CON.txt" {
 		t.Fatalf("lastValidate = %+v, want path /app/CON.txt", recorder.lastValidate)
+	}
+}
+
+func TestCreatePropagatesNamespaceValidationAndRecordsRemoteChange(t *testing.T) {
+	t.Parallel()
+
+	volCtx := newMountedTestVolumeContext(t, "vol-1", "team-a")
+	recorder := &fakeSyncRecorder{}
+	server := &FileSystemServer{
+		volMgr: &fakeVolumeManager{
+			volumes: map[string]*volume.VolumeContext{
+				"vol-1": volCtx,
+			},
+		},
+		syncRecorder: recorder,
+		logger:       logrus.New(),
+	}
+
+	resp, err := server.Create(authContext("team-a", "sandbox-1"), &pb.CreateRequest{
+		VolumeId: "vol-1",
+		Parent:   uint64(meta.RootInode),
+		Name:     "hello.txt",
+		Mode:     0o644,
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected response")
+	}
+	if recorder.lastValidate == nil {
+		t.Fatal("expected namespace validation request")
+	}
+	if recorder.lastValidate.EventType != db.SyncEventCreate || recorder.lastValidate.Path != "/hello.txt" {
+		t.Fatalf("lastValidate = %+v, want create /hello.txt", recorder.lastValidate)
+	}
+	if len(recorder.remoteChanges) != 1 {
+		t.Fatalf("remoteChanges = %d, want 1", len(recorder.remoteChanges))
+	}
+	if got := recorder.remoteChanges[0]; got.EventType != db.SyncEventCreate || got.Path != "/hello.txt" || got.SandboxID != "sandbox-1" {
+		t.Fatalf("remoteChanges[0] = %+v, want create event for /hello.txt", got)
+	}
+
+	var inode meta.Ino
+	var attr meta.Attr
+	if st := volCtx.Meta.Lookup(meta.Background(), meta.RootInode, "hello.txt", &inode, &attr, false); st != 0 {
+		t.Fatalf("Lookup(hello.txt) errno = %v, want 0", st)
+	}
+}
+
+func TestCreateRejectsNamespaceIncompatiblePathBeforeMutation(t *testing.T) {
+	t.Parallel()
+
+	volCtx := newMountedTestVolumeContext(t, "vol-1", "team-a")
+	recorder := &fakeSyncRecorder{
+		validateErr: &volsync.NamespaceCompatibilityError{
+			Capabilities: pathnorm.FilesystemCapabilities{WindowsCompatiblePaths: true},
+			Issues: []pathnorm.CompatibilityIssue{{
+				Code: pathnorm.IssueCodeWindowsReservedName,
+				Path: "/CON",
+			}},
+		},
+	}
+	server := &FileSystemServer{
+		volMgr: &fakeVolumeManager{
+			volumes: map[string]*volume.VolumeContext{
+				"vol-1": volCtx,
+			},
+		},
+		syncRecorder: recorder,
+		logger:       logrus.New(),
+	}
+
+	_, err := server.Create(authContext("team-a", "sandbox-1"), &pb.CreateRequest{
+		VolumeId: "vol-1",
+		Parent:   uint64(meta.RootInode),
+		Name:     "CON",
+		Mode:     0o644,
+	})
+	if got := status.Code(err); got != codes.FailedPrecondition {
+		t.Fatalf("Create() code = %v, want %v (err=%v)", got, codes.FailedPrecondition, err)
+	}
+	if recorder.lastValidate == nil || recorder.lastValidate.Path != "/CON" {
+		t.Fatalf("lastValidate = %+v, want path /CON", recorder.lastValidate)
+	}
+	if len(recorder.remoteChanges) != 0 {
+		t.Fatalf("remoteChanges = %d, want 0", len(recorder.remoteChanges))
+	}
+
+	var inode meta.Ino
+	var attr meta.Attr
+	if st := volCtx.Meta.Lookup(meta.Background(), meta.RootInode, "CON", &inode, &attr, false); st != syscall.ENOENT {
+		t.Fatalf("Lookup(CON) errno = %v, want %v", st, syscall.ENOENT)
+	}
+}
+
+func TestRenamePropagatesNamespaceValidationAndRecordsRemoteChange(t *testing.T) {
+	t.Parallel()
+
+	volCtx := newMountedTestVolumeContext(t, "vol-1", "team-a")
+	vfsCtx := vfs.NewLogContext(meta.Background())
+	entry, handleID, errno := volCtx.VFS.Create(vfsCtx, meta.RootInode, "hello.txt", 0o644, 0, 0)
+	if errno != 0 {
+		t.Fatalf("setup create errno = %v", errno)
+	}
+	volCtx.VFS.Release(vfsCtx, entry.Inode, handleID)
+
+	recorder := &fakeSyncRecorder{}
+	server := &FileSystemServer{
+		volMgr: &fakeVolumeManager{
+			volumes: map[string]*volume.VolumeContext{
+				"vol-1": volCtx,
+			},
+		},
+		syncRecorder: recorder,
+		logger:       logrus.New(),
+	}
+
+	_, err := server.Rename(authContext("team-a", "sandbox-1"), &pb.RenameRequest{
+		VolumeId:  "vol-1",
+		OldParent: uint64(meta.RootInode),
+		OldName:   "hello.txt",
+		NewParent: uint64(meta.RootInode),
+		NewName:   "renamed.txt",
+	})
+	if err != nil {
+		t.Fatalf("Rename() error = %v", err)
+	}
+	if recorder.lastValidate == nil {
+		t.Fatal("expected namespace validation request")
+	}
+	if recorder.lastValidate.EventType != db.SyncEventRename || recorder.lastValidate.OldPath != "/hello.txt" || recorder.lastValidate.Path != "/renamed.txt" {
+		t.Fatalf("lastValidate = %+v, want rename /hello.txt -> /renamed.txt", recorder.lastValidate)
+	}
+	if len(recorder.remoteChanges) != 1 {
+		t.Fatalf("remoteChanges = %d, want 1", len(recorder.remoteChanges))
+	}
+	if got := recorder.remoteChanges[0]; got.EventType != db.SyncEventRename || got.OldPath != "/hello.txt" || got.Path != "/renamed.txt" {
+		t.Fatalf("remoteChanges[0] = %+v, want rename event /hello.txt -> /renamed.txt", got)
+	}
+
+	var inode meta.Ino
+	var attr meta.Attr
+	if st := volCtx.Meta.Lookup(meta.Background(), meta.RootInode, "hello.txt", &inode, &attr, false); st != syscall.ENOENT {
+		t.Fatalf("Lookup(old) errno = %v, want %v", st, syscall.ENOENT)
+	}
+	if st := volCtx.Meta.Lookup(meta.Background(), meta.RootInode, "renamed.txt", &inode, &attr, false); st != 0 {
+		t.Fatalf("Lookup(new) errno = %v, want 0", st)
+	}
+}
+
+func TestRenameRejectsNamespaceIncompatibleTargetBeforeMutation(t *testing.T) {
+	t.Parallel()
+
+	volCtx := newMountedTestVolumeContext(t, "vol-1", "team-a")
+	vfsCtx := vfs.NewLogContext(meta.Background())
+	entry, handleID, errno := volCtx.VFS.Create(vfsCtx, meta.RootInode, "hello.txt", 0o644, 0, 0)
+	if errno != 0 {
+		t.Fatalf("setup create errno = %v", errno)
+	}
+	volCtx.VFS.Release(vfsCtx, entry.Inode, handleID)
+
+	recorder := &fakeSyncRecorder{
+		validateErr: &volsync.NamespaceCompatibilityError{
+			Capabilities: pathnorm.FilesystemCapabilities{WindowsCompatiblePaths: true},
+			Issues: []pathnorm.CompatibilityIssue{{
+				Code: pathnorm.IssueCodeWindowsReservedName,
+				Path: "/CON.txt",
+			}},
+		},
+	}
+	server := &FileSystemServer{
+		volMgr: &fakeVolumeManager{
+			volumes: map[string]*volume.VolumeContext{
+				"vol-1": volCtx,
+			},
+		},
+		syncRecorder: recorder,
+		logger:       logrus.New(),
+	}
+
+	_, err := server.Rename(authContext("team-a", "sandbox-1"), &pb.RenameRequest{
+		VolumeId:  "vol-1",
+		OldParent: uint64(meta.RootInode),
+		OldName:   "hello.txt",
+		NewParent: uint64(meta.RootInode),
+		NewName:   "CON.txt",
+	})
+	if got := status.Code(err); got != codes.FailedPrecondition {
+		t.Fatalf("Rename() code = %v, want %v (err=%v)", got, codes.FailedPrecondition, err)
+	}
+	if recorder.lastValidate == nil || recorder.lastValidate.Path != "/CON.txt" || recorder.lastValidate.OldPath != "/hello.txt" {
+		t.Fatalf("lastValidate = %+v, want rename /hello.txt -> /CON.txt", recorder.lastValidate)
+	}
+	if len(recorder.remoteChanges) != 0 {
+		t.Fatalf("remoteChanges = %d, want 0", len(recorder.remoteChanges))
+	}
+
+	var inode meta.Ino
+	var attr meta.Attr
+	if st := volCtx.Meta.Lookup(meta.Background(), meta.RootInode, "hello.txt", &inode, &attr, false); st != 0 {
+		t.Fatalf("Lookup(old) errno = %v, want 0", st)
+	}
+	if st := volCtx.Meta.Lookup(meta.Background(), meta.RootInode, "CON.txt", &inode, &attr, false); st != syscall.ENOENT {
+		t.Fatalf("Lookup(new) errno = %v, want %v", st, syscall.ENOENT)
 	}
 }
 
@@ -345,6 +562,70 @@ func (m *fakeVolumeManager) GetVolume(volumeID string) (*volume.VolumeContext, e
 func (m *fakeVolumeManager) TrackVolume(sandboxID, volumeID string) {
 	m.trackedSandboxID = sandboxID
 	m.trackedVolumeID = volumeID
+}
+
+func newMountedTestVolumeContext(t *testing.T, volumeID, teamID string) *volume.VolumeContext {
+	t.Helper()
+
+	metaConf := meta.DefaultConf()
+	metaConf.MountPoint = "/test"
+
+	metaClient := meta.NewClient("memkv://"+uuid.NewString(), metaConf)
+	format := &meta.Format{
+		Name:        "test",
+		UUID:        uuid.NewString(),
+		Storage:     "mem",
+		BlockSize:   4096,
+		Compression: "none",
+		DirStats:    true,
+	}
+	if err := metaClient.Init(format, true); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	if err := metaClient.NewSession(true); err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+
+	chunkConf := chunk.Config{
+		BlockSize:  format.BlockSize * 1024,
+		Compress:   format.Compression,
+		MaxUpload:  2,
+		BufferSize: 8 << 20,
+		CacheSize:  8 << 20,
+		CacheDir:   "memory",
+	}
+	blob, err := object.CreateStorage("mem", "", "", "", "")
+	if err != nil {
+		t.Fatalf("CreateStorage() error = %v", err)
+	}
+	registry := prometheus.NewRegistry()
+	store := chunk.NewCachedStore(blob, chunkConf, registry)
+	vfsConf := &vfs.Config{
+		Meta:            metaConf,
+		Format:          *format,
+		Version:         "test",
+		Chunk:           &chunkConf,
+		FuseOpts:        &vfs.FuseOptions{},
+		AttrTimeout:     time.Second,
+		EntryTimeout:    time.Second,
+		DirEntryTimeout: time.Second,
+	}
+
+	t.Cleanup(func() {
+		_ = metaClient.CloseSession()
+		_ = metaClient.Shutdown()
+	})
+
+	return &volume.VolumeContext{
+		VolumeID:  volumeID,
+		TeamID:    teamID,
+		Meta:      metaClient,
+		Store:     store,
+		VFS:       vfs.NewVFS(vfsConf, metaClient, store, registry, registry),
+		MountedAt: time.Now(),
+		RootInode: meta.RootInode,
+		RootPath:  "/",
+	}
 }
 
 type fakeWatchVolumeEventsServer struct {

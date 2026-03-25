@@ -4423,6 +4423,7 @@ components:
         updated_at:
           type: string
           format: date-time
+      required: [id, team_id, user_id, cache_size, buffer_size, created_at, updated_at]
     UpsertSyncReplicaRequest:
       type: object
       properties:

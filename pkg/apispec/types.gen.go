@@ -20,6 +20,12 @@ const (
 	AddTeamMemberRequestRoleViewer    AddTeamMemberRequestRole = "viewer"
 )
 
+// Defines values for ChangeRequestEntryKind.
+const (
+	ChangeRequestEntryKindDirectory ChangeRequestEntryKind = "directory"
+	ChangeRequestEntryKindFile      ChangeRequestEntryKind = "file"
+)
+
 // Defines values for CreateAPIKeyRequestType.
 const (
 	CreateAPIKeyRequestTypeService CreateAPIKeyRequestType = "service"
@@ -71,7 +77,7 @@ const (
 
 // Defines values for ErrorEnvelopeSuccess.
 const (
-	False ErrorEnvelopeSuccess = false
+	ErrorEnvelopeSuccessFalse ErrorEnvelopeSuccess = false
 )
 
 // Defines values for FileContentResponseEncoding.
@@ -81,9 +87,9 @@ const (
 
 // Defines values for FileInfoType.
 const (
-	Dir     FileInfoType = "dir"
-	File    FileInfoType = "file"
-	Symlink FileInfoType = "symlink"
+	FileInfoTypeDir     FileInfoType = "dir"
+	FileInfoTypeFile    FileInfoType = "file"
+	FileInfoTypeSymlink FileInfoType = "symlink"
 )
 
 // Defines values for GatewayMetadataGatewayMode.
@@ -102,6 +108,12 @@ const (
 const (
 	PromptToken  REPLReadyMode = "prompt_token"
 	StartupDelay REPLReadyMode = "startup_delay"
+)
+
+// Defines values for ResolveVolumeSyncConflictRequestStatus.
+const (
+	Ignored  ResolveVolumeSyncConflictRequestStatus = "ignored"
+	Resolved ResolveVolumeSyncConflictRequestStatus = "resolved"
 )
 
 // Defines values for SandboxNetworkPolicyMode.
@@ -373,9 +385,55 @@ const (
 	SuccessUserResponseSuccessTrue SuccessUserResponseSuccess = true
 )
 
+// Defines values for SuccessVolumeSyncAppendResponseSuccess.
+const (
+	SuccessVolumeSyncAppendResponseSuccessTrue SuccessVolumeSyncAppendResponseSuccess = true
+)
+
+// Defines values for SuccessVolumeSyncBootstrapResponseSuccess.
+const (
+	SuccessVolumeSyncBootstrapResponseSuccessTrue SuccessVolumeSyncBootstrapResponseSuccess = true
+)
+
+// Defines values for SuccessVolumeSyncChangeListResponseSuccess.
+const (
+	SuccessVolumeSyncChangeListResponseSuccessTrue SuccessVolumeSyncChangeListResponseSuccess = true
+)
+
+// Defines values for SuccessVolumeSyncConflictListResponseSuccess.
+const (
+	SuccessVolumeSyncConflictListResponseSuccessTrue SuccessVolumeSyncConflictListResponseSuccess = true
+)
+
+// Defines values for SuccessVolumeSyncConflictResponseSuccess.
+const (
+	SuccessVolumeSyncConflictResponseSuccessTrue SuccessVolumeSyncConflictResponseSuccess = true
+)
+
+// Defines values for SuccessVolumeSyncReplicaResponseSuccess.
+const (
+	SuccessVolumeSyncReplicaResponseSuccessTrue SuccessVolumeSyncReplicaResponseSuccess = true
+)
+
 // Defines values for SuccessWrittenResponseSuccess.
 const (
 	SuccessWrittenResponseSuccessTrue SuccessWrittenResponseSuccess = true
+)
+
+// Defines values for SyncEventType.
+const (
+	Chmod      SyncEventType = "chmod"
+	Create     SyncEventType = "create"
+	Invalidate SyncEventType = "invalidate"
+	Remove     SyncEventType = "remove"
+	Rename     SyncEventType = "rename"
+	Write      SyncEventType = "write"
+)
+
+// Defines values for SyncJournalEntrySource.
+const (
+	SyncJournalEntrySourceReplica SyncJournalEntrySource = "replica"
+	SyncJournalEntrySourceSandbox SyncJournalEntrySource = "sandbox"
 )
 
 // Defines values for TrafficRuleAction.
@@ -410,6 +468,26 @@ const (
 	ROX VolumeAccessMode = "ROX"
 	RWO VolumeAccessMode = "RWO"
 	RWX VolumeAccessMode = "RWX"
+)
+
+// Defines values for VolumeSyncBootstrapCompatibilityConflictDetailsReason.
+const (
+	NamespaceIncompatible VolumeSyncBootstrapCompatibilityConflictDetailsReason = "namespace_incompatible"
+)
+
+// Defines values for VolumeSyncBootstrapConflictErrorEnvelopeSuccess.
+const (
+	VolumeSyncBootstrapConflictErrorEnvelopeSuccessFalse VolumeSyncBootstrapConflictErrorEnvelopeSuccess = false
+)
+
+// Defines values for VolumeSyncReseedRequiredDetailsReason.
+const (
+	ReseedRequired VolumeSyncReseedRequiredDetailsReason = "reseed_required"
+)
+
+// Defines values for VolumeSyncReseedRequiredErrorEnvelopeSuccess.
+const (
+	False VolumeSyncReseedRequiredErrorEnvelopeSuccess = false
 )
 
 // Defines values for GetApiV1SandboxesParamsStatus.
@@ -463,6 +541,20 @@ type Affinity struct {
 	PodAffinity  *PodAffinity  `json:"podAffinity,omitempty"`
 }
 
+// AppendReplicaChangesRequest defines model for AppendReplicaChangesRequest.
+type AppendReplicaChangesRequest struct {
+	BaseSeq   int64           `json:"base_seq"`
+	Changes   []ChangeRequest `json:"changes"`
+	RequestId string          `json:"request_id"`
+}
+
+// AppendReplicaChangesResponse defines model for AppendReplicaChangesResponse.
+type AppendReplicaChangesResponse struct {
+	Accepted  []SyncJournalEntry `json:"accepted"`
+	Conflicts []SyncConflict     `json:"conflicts"`
+	HeadSeq   int64              `json:"head_seq"`
+}
+
 // AuthProvider defines model for AuthProvider.
 type AuthProvider struct {
 	// ExternalAuthPortalUrl When set, browser login for this provider should redirect to this external URL instead of initiating the OIDC flow directly. Used for deployments that host their own authorization portal.
@@ -488,6 +580,22 @@ type ChangePasswordRequest struct {
 	NewPassword string `json:"new_password"`
 	OldPassword string `json:"old_password"`
 }
+
+// ChangeRequest defines model for ChangeRequest.
+type ChangeRequest struct {
+	ContentBase64 *string                 `json:"content_base64"`
+	ContentSha256 *string                 `json:"content_sha256,omitempty"`
+	EntryKind     *ChangeRequestEntryKind `json:"entry_kind,omitempty"`
+	EventType     SyncEventType           `json:"event_type"`
+	Metadata      *map[string]interface{} `json:"metadata,omitempty"`
+	Mode          *int64                  `json:"mode"`
+	OldPath       *string                 `json:"old_path,omitempty"`
+	Path          *string                 `json:"path,omitempty"`
+	SizeBytes     *int64                  `json:"size_bytes,omitempty"`
+}
+
+// ChangeRequestEntryKind defines model for ChangeRequest.EntryKind.
+type ChangeRequestEntryKind string
 
 // ClaimRequest defines model for ClaimRequest.
 type ClaimRequest struct {
@@ -642,6 +750,14 @@ type CreateTeamRequest struct {
 	HomeRegionId *string `json:"home_region_id"`
 	Name         string  `json:"name"`
 	Slug         *string `json:"slug,omitempty"`
+}
+
+// CreateVolumeSyncBootstrapRequest defines model for CreateVolumeSyncBootstrapRequest.
+type CreateVolumeSyncBootstrapRequest struct {
+	Capabilities        *VolumeSyncFilesystemCapabilities `json:"capabilities,omitempty"`
+	CaseSensitive       *bool                             `json:"case_sensitive"`
+	SnapshotDescription *string                           `json:"snapshot_description,omitempty"`
+	SnapshotName        *string                           `json:"snapshot_name,omitempty"`
 }
 
 // CredentialBinding defines model for CredentialBinding.
@@ -843,6 +959,18 @@ type LifecyclePolicy struct {
 	IdleTimeout *int32       `json:"idleTimeout,omitempty"`
 	MaxTTL      *int32       `json:"maxTTL,omitempty"`
 	PreStop     *PreStopHook `json:"preStop,omitempty"`
+}
+
+// ListVolumeSyncChangesResponse defines model for ListVolumeSyncChangesResponse.
+type ListVolumeSyncChangesResponse struct {
+	Changes          []SyncJournalEntry `json:"changes"`
+	HeadSeq          int64              `json:"head_seq"`
+	RetainedAfterSeq int64              `json:"retained_after_seq"`
+}
+
+// ListVolumeSyncConflictsResponse defines model for ListVolumeSyncConflictsResponse.
+type ListVolumeSyncConflictsResponse struct {
+	Conflicts []SyncConflict `json:"conflicts"`
 }
 
 // LoginRequest defines model for LoginRequest.
@@ -1131,6 +1259,16 @@ type ResizeContextRequest struct {
 	Rows int32 `json:"rows"`
 }
 
+// ResolveVolumeSyncConflictRequest defines model for ResolveVolumeSyncConflictRequest.
+type ResolveVolumeSyncConflictRequest struct {
+	Note       *string                                `json:"note,omitempty"`
+	Resolution *string                                `json:"resolution,omitempty"`
+	Status     ResolveVolumeSyncConflictRequestStatus `json:"status"`
+}
+
+// ResolveVolumeSyncConflictRequestStatus defines model for ResolveVolumeSyncConflictRequest.Status.
+type ResolveVolumeSyncConflictRequestStatus string
+
 // ResourceQuota defines model for ResourceQuota.
 type ResourceQuota struct {
 	Cpu    *string `json:"cpu,omitempty"`
@@ -1322,15 +1460,15 @@ type SandboxUpdateRequest struct {
 type SandboxVolume struct {
 	// AccessMode Access mode for sandbox volumes. Enforcement is scoped to storage-proxy instances. RWO allows read-write mounts on a single instance; ROX allows read-only mounts across instances; RWX allows read-write mounts across instances.
 	AccessMode     *VolumeAccessMode `json:"access_mode,omitempty"`
-	BufferSize     string            `json:"buffer_size"`
-	CacheSize      string            `json:"cache_size"`
-	CreatedAt      time.Time         `json:"created_at"`
-	Id             string            `json:"id"`
+	BufferSize     *string           `json:"buffer_size,omitempty"`
+	CacheSize      *string           `json:"cache_size,omitempty"`
+	CreatedAt      *time.Time        `json:"created_at,omitempty"`
+	Id             *string           `json:"id,omitempty"`
 	Prefetch       *int              `json:"prefetch,omitempty"`
 	SourceVolumeId *string           `json:"source_volume_id"`
-	TeamId         string            `json:"team_id"`
-	UpdatedAt      time.Time         `json:"updated_at"`
-	UserId         string            `json:"user_id"`
+	TeamId         *string           `json:"team_id,omitempty"`
+	UpdatedAt      *time.Time        `json:"updated_at,omitempty"`
+	UserId         *string           `json:"user_id,omitempty"`
 	Writeback      *bool             `json:"writeback,omitempty"`
 }
 
@@ -1888,6 +2026,60 @@ type SuccessUserResponse struct {
 // SuccessUserResponseSuccess defines model for SuccessUserResponse.Success.
 type SuccessUserResponseSuccess bool
 
+// SuccessVolumeSyncAppendResponse defines model for SuccessVolumeSyncAppendResponse.
+type SuccessVolumeSyncAppendResponse struct {
+	Data    *AppendReplicaChangesResponse          `json:"data,omitempty"`
+	Success SuccessVolumeSyncAppendResponseSuccess `json:"success"`
+}
+
+// SuccessVolumeSyncAppendResponseSuccess defines model for SuccessVolumeSyncAppendResponse.Success.
+type SuccessVolumeSyncAppendResponseSuccess bool
+
+// SuccessVolumeSyncBootstrapResponse defines model for SuccessVolumeSyncBootstrapResponse.
+type SuccessVolumeSyncBootstrapResponse struct {
+	Data    *VolumeSyncBootstrap                      `json:"data,omitempty"`
+	Success SuccessVolumeSyncBootstrapResponseSuccess `json:"success"`
+}
+
+// SuccessVolumeSyncBootstrapResponseSuccess defines model for SuccessVolumeSyncBootstrapResponse.Success.
+type SuccessVolumeSyncBootstrapResponseSuccess bool
+
+// SuccessVolumeSyncChangeListResponse defines model for SuccessVolumeSyncChangeListResponse.
+type SuccessVolumeSyncChangeListResponse struct {
+	Data    *ListVolumeSyncChangesResponse             `json:"data,omitempty"`
+	Success SuccessVolumeSyncChangeListResponseSuccess `json:"success"`
+}
+
+// SuccessVolumeSyncChangeListResponseSuccess defines model for SuccessVolumeSyncChangeListResponse.Success.
+type SuccessVolumeSyncChangeListResponseSuccess bool
+
+// SuccessVolumeSyncConflictListResponse defines model for SuccessVolumeSyncConflictListResponse.
+type SuccessVolumeSyncConflictListResponse struct {
+	Data    *ListVolumeSyncConflictsResponse             `json:"data,omitempty"`
+	Success SuccessVolumeSyncConflictListResponseSuccess `json:"success"`
+}
+
+// SuccessVolumeSyncConflictListResponseSuccess defines model for SuccessVolumeSyncConflictListResponse.Success.
+type SuccessVolumeSyncConflictListResponseSuccess bool
+
+// SuccessVolumeSyncConflictResponse defines model for SuccessVolumeSyncConflictResponse.
+type SuccessVolumeSyncConflictResponse struct {
+	Data    *SyncConflict                            `json:"data,omitempty"`
+	Success SuccessVolumeSyncConflictResponseSuccess `json:"success"`
+}
+
+// SuccessVolumeSyncConflictResponseSuccess defines model for SuccessVolumeSyncConflictResponse.Success.
+type SuccessVolumeSyncConflictResponseSuccess bool
+
+// SuccessVolumeSyncReplicaResponse defines model for SuccessVolumeSyncReplicaResponse.
+type SuccessVolumeSyncReplicaResponse struct {
+	Data    *VolumeSyncReplicaEnvelope              `json:"data,omitempty"`
+	Success SuccessVolumeSyncReplicaResponseSuccess `json:"success"`
+}
+
+// SuccessVolumeSyncReplicaResponseSuccess defines model for SuccessVolumeSyncReplicaResponse.Success.
+type SuccessVolumeSyncReplicaResponseSuccess bool
+
 // SuccessWrittenResponse defines model for SuccessWrittenResponse.
 type SuccessWrittenResponse struct {
 	Data *struct {
@@ -1898,6 +2090,66 @@ type SuccessWrittenResponse struct {
 
 // SuccessWrittenResponseSuccess defines model for SuccessWrittenResponse.Success.
 type SuccessWrittenResponseSuccess bool
+
+// SyncConflict defines model for SyncConflict.
+type SyncConflict struct {
+	ArtifactPath    *string                 `json:"artifact_path,omitempty"`
+	CreatedAt       *time.Time              `json:"created_at,omitempty"`
+	ExistingSeq     *int64                  `json:"existing_seq"`
+	Id              *string                 `json:"id,omitempty"`
+	IncomingOldPath *string                 `json:"incoming_old_path"`
+	IncomingPath    *string                 `json:"incoming_path"`
+	Metadata        *map[string]interface{} `json:"metadata"`
+	NormalizedPath  *string                 `json:"normalized_path,omitempty"`
+	Path            *string                 `json:"path,omitempty"`
+	Reason          *string                 `json:"reason,omitempty"`
+	ReplicaId       *string                 `json:"replica_id"`
+	Status          *string                 `json:"status,omitempty"`
+	TeamId          *string                 `json:"team_id,omitempty"`
+	UpdatedAt       *time.Time              `json:"updated_at,omitempty"`
+	VolumeId        *string                 `json:"volume_id,omitempty"`
+}
+
+// SyncEventType defines model for SyncEventType.
+type SyncEventType string
+
+// SyncJournalEntry defines model for SyncJournalEntry.
+type SyncJournalEntry struct {
+	ContentSha256     *string                 `json:"content_sha256"`
+	CreatedAt         *time.Time              `json:"created_at,omitempty"`
+	EventType         *SyncEventType          `json:"event_type,omitempty"`
+	Metadata          *map[string]interface{} `json:"metadata"`
+	NormalizedOldPath *string                 `json:"normalized_old_path"`
+	NormalizedPath    *string                 `json:"normalized_path,omitempty"`
+	OldPath           *string                 `json:"old_path"`
+	Path              *string                 `json:"path,omitempty"`
+	ReplicaId         *string                 `json:"replica_id"`
+	Seq               *int64                  `json:"seq,omitempty"`
+	SizeBytes         *int64                  `json:"size_bytes"`
+	Source            *SyncJournalEntrySource `json:"source,omitempty"`
+	TeamId            *string                 `json:"team_id,omitempty"`
+	Tombstone         *bool                   `json:"tombstone,omitempty"`
+	VolumeId          *string                 `json:"volume_id,omitempty"`
+}
+
+// SyncJournalEntrySource defines model for SyncJournalEntry.Source.
+type SyncJournalEntrySource string
+
+// SyncReplica defines model for SyncReplica.
+type SyncReplica struct {
+	Capabilities   *VolumeSyncFilesystemCapabilities `json:"capabilities,omitempty"`
+	CaseSensitive  *bool                             `json:"case_sensitive,omitempty"`
+	CreatedAt      *time.Time                        `json:"created_at,omitempty"`
+	DisplayName    *string                           `json:"display_name,omitempty"`
+	Id             *string                           `json:"id,omitempty"`
+	LastAppliedSeq *int64                            `json:"last_applied_seq,omitempty"`
+	LastSeenAt     *time.Time                        `json:"last_seen_at,omitempty"`
+	Platform       *string                           `json:"platform,omitempty"`
+	RootPath       *string                           `json:"root_path,omitempty"`
+	TeamId         *string                           `json:"team_id,omitempty"`
+	UpdatedAt      *time.Time                        `json:"updated_at,omitempty"`
+	VolumeId       *string                           `json:"volume_id,omitempty"`
+}
 
 // TLSClientCertificateProjection Client certificate projection used for TLS terminate-reoriginate auth.
 type TLSClientCertificateProjection = map[string]interface{}
@@ -1998,6 +2250,11 @@ type UpdateRegionRequest struct {
 	RegionalGatewayUrl *string `json:"regional_gateway_url,omitempty"`
 }
 
+// UpdateSyncReplicaCursorRequest defines model for UpdateSyncReplicaCursorRequest.
+type UpdateSyncReplicaCursorRequest struct {
+	LastAppliedSeq int64 `json:"last_applied_seq"`
+}
+
 // UpdateTeamMemberRequest defines model for UpdateTeamMemberRequest.
 type UpdateTeamMemberRequest struct {
 	Role UpdateTeamMemberRequestRole `json:"role"`
@@ -2017,6 +2274,15 @@ type UpdateUserRequest struct {
 	AvatarUrl     *string `json:"avatar_url,omitempty"`
 	DefaultTeamId *string `json:"default_team_id"`
 	Name          *string `json:"name,omitempty"`
+}
+
+// UpsertSyncReplicaRequest defines model for UpsertSyncReplicaRequest.
+type UpsertSyncReplicaRequest struct {
+	Capabilities  *VolumeSyncFilesystemCapabilities `json:"capabilities,omitempty"`
+	CaseSensitive *bool                             `json:"case_sensitive,omitempty"`
+	DisplayName   *string                           `json:"display_name,omitempty"`
+	Platform      *string                           `json:"platform,omitempty"`
+	RootPath      *string                           `json:"root_path,omitempty"`
 }
 
 // User defines model for User.
@@ -2047,6 +2313,83 @@ type VolumeConfig struct {
 	Writeback  *bool   `json:"writeback,omitempty"`
 }
 
+// VolumeSyncBootstrap defines model for VolumeSyncBootstrap.
+type VolumeSyncBootstrap struct {
+	ArchiveDownloadPath string   `json:"archive_download_path"`
+	ReplayAfterSeq      int64    `json:"replay_after_seq"`
+	Snapshot            Snapshot `json:"snapshot"`
+}
+
+// VolumeSyncBootstrapCompatibilityConflictDetails defines model for VolumeSyncBootstrapCompatibilityConflictDetails.
+type VolumeSyncBootstrapCompatibilityConflictDetails struct {
+	Capabilities VolumeSyncFilesystemCapabilities                      `json:"capabilities"`
+	Issues       []VolumeSyncCompatibilityIssue                        `json:"issues"`
+	Reason       VolumeSyncBootstrapCompatibilityConflictDetailsReason `json:"reason"`
+	SnapshotId   string                                                `json:"snapshot_id"`
+}
+
+// VolumeSyncBootstrapCompatibilityConflictDetailsReason defines model for VolumeSyncBootstrapCompatibilityConflictDetails.Reason.
+type VolumeSyncBootstrapCompatibilityConflictDetailsReason string
+
+// VolumeSyncBootstrapConflictErrorEnvelope defines model for VolumeSyncBootstrapConflictErrorEnvelope.
+type VolumeSyncBootstrapConflictErrorEnvelope struct {
+	Error struct {
+		Code    string                                           `json:"code"`
+		Details *VolumeSyncBootstrapCompatibilityConflictDetails `json:"details,omitempty"`
+		Message string                                           `json:"message"`
+	} `json:"error"`
+	Success VolumeSyncBootstrapConflictErrorEnvelopeSuccess `json:"success"`
+}
+
+// VolumeSyncBootstrapConflictErrorEnvelopeSuccess defines model for VolumeSyncBootstrapConflictErrorEnvelope.Success.
+type VolumeSyncBootstrapConflictErrorEnvelopeSuccess bool
+
+// VolumeSyncCompatibilityIssue defines model for VolumeSyncCompatibilityIssue.
+type VolumeSyncCompatibilityIssue struct {
+	Code           string    `json:"code"`
+	Message        *string   `json:"message,omitempty"`
+	NormalizedPath *string   `json:"normalized_path,omitempty"`
+	Path           *string   `json:"path,omitempty"`
+	Paths          *[]string `json:"paths,omitempty"`
+	Segment        *string   `json:"segment,omitempty"`
+}
+
+// VolumeSyncFilesystemCapabilities defines model for VolumeSyncFilesystemCapabilities.
+type VolumeSyncFilesystemCapabilities struct {
+	CaseSensitive                   bool `json:"case_sensitive"`
+	UnicodeNormalizationInsensitive bool `json:"unicode_normalization_insensitive"`
+	WindowsCompatiblePaths          bool `json:"windows_compatible_paths"`
+}
+
+// VolumeSyncReplicaEnvelope defines model for VolumeSyncReplicaEnvelope.
+type VolumeSyncReplicaEnvelope struct {
+	HeadSeq int64       `json:"head_seq"`
+	Replica SyncReplica `json:"replica"`
+}
+
+// VolumeSyncReseedRequiredDetails defines model for VolumeSyncReseedRequiredDetails.
+type VolumeSyncReseedRequiredDetails struct {
+	HeadSeq          int64                                 `json:"head_seq"`
+	Reason           VolumeSyncReseedRequiredDetailsReason `json:"reason"`
+	RetainedAfterSeq int64                                 `json:"retained_after_seq"`
+}
+
+// VolumeSyncReseedRequiredDetailsReason defines model for VolumeSyncReseedRequiredDetails.Reason.
+type VolumeSyncReseedRequiredDetailsReason string
+
+// VolumeSyncReseedRequiredErrorEnvelope defines model for VolumeSyncReseedRequiredErrorEnvelope.
+type VolumeSyncReseedRequiredErrorEnvelope struct {
+	Error struct {
+		Code    string                           `json:"code"`
+		Details *VolumeSyncReseedRequiredDetails `json:"details,omitempty"`
+		Message string                           `json:"message"`
+	} `json:"error"`
+	Success VolumeSyncReseedRequiredErrorEnvelopeSuccess `json:"success"`
+}
+
+// VolumeSyncReseedRequiredErrorEnvelopeSuccess defines model for VolumeSyncReseedRequiredErrorEnvelope.Success.
+type VolumeSyncReseedRequiredErrorEnvelopeSuccess bool
+
 // WebhookConfig defines model for WebhookConfig.
 type WebhookConfig struct {
 	// Secret Optional. Shared secret used to sign webhook payloads.
@@ -2068,6 +2411,9 @@ type WeightedPodAffinityTerm struct {
 // APIKeyID defines model for APIKeyID.
 type APIKeyID = string
 
+// ConflictID defines model for ConflictID.
+type ConflictID = string
+
 // ContextID defines model for ContextID.
 type ContextID = string
 
@@ -2088,6 +2434,9 @@ type QueryRecursive = bool
 
 // RegionId defines model for RegionId.
 type RegionId = string
+
+// ReplicaID defines model for ReplicaID.
+type ReplicaID = string
 
 // SandboxID defines model for SandboxID.
 type SandboxID = string
@@ -2159,6 +2508,23 @@ type GetApiV1SandboxesIdFilesStatParams struct {
 type DeleteApiV1SandboxvolumesIdParams struct {
 	// Force Force delete even if volume has active mounts
 	Force *bool `form:"force,omitempty" json:"force,omitempty"`
+}
+
+// GetApiV1SandboxvolumesIdSyncBootstrapArchiveParams defines parameters for GetApiV1SandboxvolumesIdSyncBootstrapArchive.
+type GetApiV1SandboxvolumesIdSyncBootstrapArchiveParams struct {
+	SnapshotId string `form:"snapshot_id" json:"snapshot_id"`
+}
+
+// GetApiV1SandboxvolumesIdSyncChangesParams defines parameters for GetApiV1SandboxvolumesIdSyncChanges.
+type GetApiV1SandboxvolumesIdSyncChangesParams struct {
+	After *int64 `form:"after,omitempty" json:"after,omitempty"`
+	Limit *int32 `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// GetApiV1SandboxvolumesIdSyncConflictsParams defines parameters for GetApiV1SandboxvolumesIdSyncConflicts.
+type GetApiV1SandboxvolumesIdSyncConflictsParams struct {
+	Status *string `form:"status,omitempty" json:"status,omitempty"`
+	Limit  *int32  `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
 // GetAuthOidcProviderCallbackParams defines parameters for GetAuthOidcProviderCallback.
@@ -2233,6 +2599,21 @@ type PostApiV1SandboxvolumesIdForkJSONRequestBody = ForkVolumeRequest
 
 // PostApiV1SandboxvolumesIdSnapshotsJSONRequestBody defines body for PostApiV1SandboxvolumesIdSnapshots for application/json ContentType.
 type PostApiV1SandboxvolumesIdSnapshotsJSONRequestBody = CreateSnapshotRequest
+
+// PostApiV1SandboxvolumesIdSyncBootstrapJSONRequestBody defines body for PostApiV1SandboxvolumesIdSyncBootstrap for application/json ContentType.
+type PostApiV1SandboxvolumesIdSyncBootstrapJSONRequestBody = CreateVolumeSyncBootstrapRequest
+
+// PutApiV1SandboxvolumesIdSyncConflictsConflictIdJSONRequestBody defines body for PutApiV1SandboxvolumesIdSyncConflictsConflictId for application/json ContentType.
+type PutApiV1SandboxvolumesIdSyncConflictsConflictIdJSONRequestBody = ResolveVolumeSyncConflictRequest
+
+// PutApiV1SandboxvolumesIdSyncReplicasReplicaIdJSONRequestBody defines body for PutApiV1SandboxvolumesIdSyncReplicasReplicaId for application/json ContentType.
+type PutApiV1SandboxvolumesIdSyncReplicasReplicaIdJSONRequestBody = UpsertSyncReplicaRequest
+
+// PostApiV1SandboxvolumesIdSyncReplicasReplicaIdChangesJSONRequestBody defines body for PostApiV1SandboxvolumesIdSyncReplicasReplicaIdChanges for application/json ContentType.
+type PostApiV1SandboxvolumesIdSyncReplicasReplicaIdChangesJSONRequestBody = AppendReplicaChangesRequest
+
+// PutApiV1SandboxvolumesIdSyncReplicasReplicaIdCursorJSONRequestBody defines body for PutApiV1SandboxvolumesIdSyncReplicasReplicaIdCursor for application/json ContentType.
+type PutApiV1SandboxvolumesIdSyncReplicasReplicaIdCursorJSONRequestBody = UpdateSyncReplicaCursorRequest
 
 // PostApiV1TemplatesJSONRequestBody defines body for PostApiV1Templates for application/json ContentType.
 type PostApiV1TemplatesJSONRequestBody = TemplateCreateRequest

@@ -208,9 +208,9 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					Expect(err).NotTo(HaveOccurred())
 					Expect(status).To(Equal(http.StatusCreated))
 					Expect(volume).NotTo(BeNil())
-					Expect(volume.Id).NotTo(BeEmpty())
+					volumeID := expectStringPtr(volume.Id, "volume id")
 
-					snapshot, status, err := session.CreateSnapshot(env.TestCtx.Context, GinkgoT(), volume.Id, apispec.CreateSnapshotRequest{
+					snapshot, status, err := session.CreateSnapshot(env.TestCtx.Context, GinkgoT(), volumeID, apispec.CreateSnapshotRequest{
 						Name: "e2e-metering-snap",
 					})
 					Expect(err).NotTo(HaveOccurred())
@@ -218,15 +218,15 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					Expect(snapshot).NotTo(BeNil())
 					Expect(snapshot.Id).NotTo(BeEmpty())
 
-					status, err = session.RestoreSnapshot(env.TestCtx.Context, GinkgoT(), volume.Id, snapshot.Id)
+					status, err = session.RestoreSnapshot(env.TestCtx.Context, GinkgoT(), volumeID, snapshot.Id)
 					Expect(err).NotTo(HaveOccurred())
 					Expect(status).To(Equal(http.StatusOK))
 
-					status, err = session.DeleteSnapshot(env.TestCtx.Context, GinkgoT(), volume.Id, snapshot.Id)
+					status, err = session.DeleteSnapshot(env.TestCtx.Context, GinkgoT(), volumeID, snapshot.Id)
 					Expect(err).NotTo(HaveOccurred())
 					Expect(status).To(Equal(http.StatusOK))
 
-					status, err = session.DeleteSandboxVolume(env.TestCtx.Context, GinkgoT(), volume.Id)
+					status, err = session.DeleteSandboxVolume(env.TestCtx.Context, GinkgoT(), volumeID)
 					Expect(err).NotTo(HaveOccurred())
 					Expect(status).To(Equal(http.StatusOK))
 
@@ -264,10 +264,10 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 						if !hasMeteringEvent(events, metering.EventTypeSandboxTerminated, "sandbox", pausedResp.SandboxId) {
 							return fmt.Errorf("missing sandbox.terminated event")
 						}
-						if !hasMeteringEvent(events, metering.EventTypeVolumeCreated, "volume", volume.Id) {
+						if !hasMeteringEvent(events, metering.EventTypeVolumeCreated, "volume", volumeID) {
 							return fmt.Errorf("missing volume.created event")
 						}
-						if !hasMeteringEvent(events, metering.EventTypeVolumeDeleted, "volume", volume.Id) {
+						if !hasMeteringEvent(events, metering.EventTypeVolumeDeleted, "volume", volumeID) {
 							return fmt.Errorf("missing volume.deleted event")
 						}
 						if !hasMeteringEvent(events, metering.EventTypeSnapshotCreated, "snapshot", snapshot.Id) {
@@ -877,30 +877,30 @@ func assertVolumeLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusCreated))
 	Expect(volume).NotTo(BeNil())
-	Expect(volume.Id).NotTo(BeEmpty())
+	volumeID := expectStringPtr(volume.Id, "volume id")
 
 	snapReq := apispec.CreateSnapshotRequest{
 		Name: "e2e-snap",
 	}
-	snapshot, status, err := session.CreateSnapshot(env.TestCtx.Context, GinkgoT(), volume.Id, snapReq)
+	snapshot, status, err := session.CreateSnapshot(env.TestCtx.Context, GinkgoT(), volumeID, snapReq)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusCreated))
 	Expect(snapshot).NotTo(BeNil())
 	Expect(snapshot.Id).NotTo(BeEmpty())
 
-	_, status, err = session.ListSnapshots(env.TestCtx.Context, GinkgoT(), volume.Id)
+	_, status, err = session.ListSnapshots(env.TestCtx.Context, GinkgoT(), volumeID)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
 
-	status, err = session.RestoreSnapshot(env.TestCtx.Context, GinkgoT(), volume.Id, snapshot.Id)
+	status, err = session.RestoreSnapshot(env.TestCtx.Context, GinkgoT(), volumeID, snapshot.Id)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
 
-	status, err = session.DeleteSnapshot(env.TestCtx.Context, GinkgoT(), volume.Id, snapshot.Id)
+	status, err = session.DeleteSnapshot(env.TestCtx.Context, GinkgoT(), volumeID, snapshot.Id)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
 
-	status, err = session.DeleteSandboxVolume(env.TestCtx.Context, GinkgoT(), volume.Id)
+	status, err = session.DeleteSandboxVolume(env.TestCtx.Context, GinkgoT(), volumeID)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
 }
@@ -915,6 +915,12 @@ func hasMeteringEvent(events []*metering.Event, eventType, subjectType, subjectI
 		}
 	}
 	return false
+}
+
+func expectStringPtr(value *string, label string) string {
+	Expect(value).NotTo(BeNil(), "%s should not be nil", label)
+	Expect(strings.TrimSpace(*value)).NotTo(BeEmpty(), "%s should not be empty", label)
+	return *value
 }
 
 func hasMeteringWindow(windows []*metering.Window, windowType, sandboxID string) bool {

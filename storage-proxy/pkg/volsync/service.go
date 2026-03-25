@@ -1207,7 +1207,7 @@ func (s *Service) observeOperation(operation string, started time.Time, err erro
 	if s == nil || s.metrics == nil {
 		return
 	}
-	status := "success"
+	var status string
 	switch {
 	case err == nil:
 		status = "success"
@@ -1570,5 +1570,5 @@ func mergeMetadata(existing *json.RawMessage, additional map[string]any) *json.R
 }
 
 func (s *Service) String() string {
-	return fmt.Sprintf("volsync.Service")
+	return "volsync.Service"
 }

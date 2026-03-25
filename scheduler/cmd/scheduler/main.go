@@ -133,7 +133,7 @@ func main() {
 	rec := reconciler.NewReconciler(templateStore, templateStore, repo, clusterGatewayClient, cfg.ReconcileInterval.Duration, clk, cfg.PodsPerNode, logger, schedulerMetrics)
 
 	// Create HTTP server
-	httpServer, err := httpserver.NewServer(cfg, repo, templateStore, templateStore, authValidator, internalAuthGen, rec, logger, obsProvider)
+	httpServer, err := httpserver.NewServer(cfg, repo, templateStore, templateStore, authValidator, internalAuthGen, rec, logger, obsProvider, schedulerMetrics)
 	if err != nil {
 		logger.Fatal("Failed to create scheduler HTTP server", zap.Error(err))
 	}

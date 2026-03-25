@@ -17,6 +17,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
+	templreconciler "github.com/sandbox0-ai/sandbox0/pkg/template/reconciler"
 	"github.com/sandbox0-ai/sandbox0/scheduler/pkg/client"
 	"go.uber.org/zap"
 )
@@ -214,8 +215,49 @@ func (s *Server) selectClusterForTemplate(c *gin.Context, templateID, teamID str
 	clusterTemplateID := naming.TemplateNameForCluster(tpl.Scope, tpl.TeamID, tpl.TemplateID)
 	maxAge := s.cfg.ReconcileInterval.Duration * 2
 
+	selected, selectedBy := s.selectClusterByIdleWithAllocations(allocations, clusterMap, clusterTemplateID, maxAge)
+	if selected == nil {
+		selected = s.selectClusterByHeadroomWithAllocations(allocations, clusterMap, maxAge)
+		if selected != nil {
+			selectedBy = "headroom"
+		}
+	}
+	if selected == nil {
+		selected, err = s.selectClusterByWeightWithAllocations(allocations, clusterMap)
+		if err != nil {
+			return nil, tpl, "", err
+		}
+		if selected != nil {
+			selectedBy = "weight"
+		}
+	}
+	if selected == nil {
+		selected = s.selectClusterByFallbackWithAllocations(allocations, clusterMap)
+		if selected != nil {
+			selectedBy = "fallback"
+		}
+	}
+
+	if selected == nil {
+		s.recordRoutingDecision("", "unavailable")
+		return nil, tpl, "", nil
+	}
+
+	s.recordRoutingDecision(selected.ClusterID, selectedBy)
+
+	s.logger.Info("Sandbox route selected",
+		zap.String("template_id", tpl.TemplateID),
+		zap.String("scope", tpl.Scope),
+		zap.String("team_id", tpl.TeamID),
+		zap.String("cluster_id", selected.ClusterID),
+		zap.String("selected_by", selectedBy),
+	)
+
+	return selected, tpl, selectedBy, nil
+}
+
+func (s *Server) selectClusterByIdleWithAllocations(allocations []*template.TemplateAllocation, clusterMap map[string]*template.Cluster, clusterTemplateID string, maxAge time.Duration) (*template.Cluster, string) {
 	var selected *template.Cluster
-	selectedBy := "weight"
 	var selectedAlloc *template.TemplateAllocation
 	var bestIdle int32 = -1
 
@@ -226,6 +268,7 @@ func (s *Server) selectClusterForTemplate(c *gin.Context, templateID, teamID str
 		}
 
 		age, ok := s.reconciler.GetTemplateStatsAge(cluster.ClusterID)
+		s.recordClusterSummaryAge(cluster.ClusterID)
 		if !ok || age > maxAge {
 			continue
 		}
@@ -238,35 +281,55 @@ func (s *Server) selectClusterForTemplate(c *gin.Context, templateID, teamID str
 		if selected == nil ||
 			idleCount > bestIdle ||
 			(idleCount == bestIdle && alloc.MaxIdle > selectedAlloc.MaxIdle) ||
-			(idleCount == bestIdle && alloc.MaxIdle == selectedAlloc.MaxIdle && cluster.Weight > selected.Weight) {
+			(idleCount == bestIdle && alloc.MaxIdle == selectedAlloc.MaxIdle && cluster.Weight > selected.Weight) ||
+			(idleCount == bestIdle && alloc.MaxIdle == selectedAlloc.MaxIdle && cluster.Weight == selected.Weight && cluster.ClusterID < selected.ClusterID) {
 			selected = cluster
 			selectedAlloc = alloc
 			bestIdle = idleCount
-			selectedBy = "idle"
 		}
 	}
 
 	if selected == nil {
-		selected, err = s.selectClusterByWeightWithAllocations(allocations, clusterMap)
-		if err != nil {
-			return nil, tpl, "", err
+		return nil, ""
+	}
+	return selected, "idle"
+}
+
+func (s *Server) selectClusterByHeadroomWithAllocations(allocations []*template.TemplateAllocation, clusterMap map[string]*template.Cluster, maxAge time.Duration) *template.Cluster {
+	var selected *template.Cluster
+	var selectedAlloc *template.TemplateAllocation
+	var bestHeadroom int32 = -1
+
+	for _, alloc := range allocations {
+		cluster := clusterMap[alloc.ClusterID]
+		if cluster == nil || !cluster.Enabled {
+			continue
 		}
-		selectedBy = "weight"
+
+		age, ok := s.reconciler.GetClusterSummaryAge(cluster.ClusterID)
+		s.recordClusterSummaryAge(cluster.ClusterID)
+		if !ok || age > maxAge {
+			continue
+		}
+
+		summary, ok := s.reconciler.GetClusterSummary(cluster.ClusterID)
+		if !ok || summary == nil {
+			continue
+		}
+
+		headroom := clusterAvailableHeadroom(summary, s.cfg.PodsPerNode)
+		if selected == nil ||
+			headroom > bestHeadroom ||
+			(headroom == bestHeadroom && alloc.MaxIdle > selectedAlloc.MaxIdle) ||
+			(headroom == bestHeadroom && alloc.MaxIdle == selectedAlloc.MaxIdle && cluster.Weight > selected.Weight) ||
+			(headroom == bestHeadroom && alloc.MaxIdle == selectedAlloc.MaxIdle && cluster.Weight == selected.Weight && cluster.ClusterID < selected.ClusterID) {
+			selected = cluster
+			selectedAlloc = alloc
+			bestHeadroom = headroom
+		}
 	}
 
-	if selected == nil {
-		return nil, tpl, "", nil
-	}
-
-	s.logger.Info("Sandbox route selected",
-		zap.String("template_id", tpl.TemplateID),
-		zap.String("scope", tpl.Scope),
-		zap.String("team_id", tpl.TeamID),
-		zap.String("cluster_id", selected.ClusterID),
-		zap.String("selected_by", selectedBy),
-	)
-
-	return selected, tpl, selectedBy, nil
+	return selected
 }
 
 func (s *Server) selectClusterByWeightWithAllocations(allocations []*template.TemplateAllocation, clusterMap map[string]*template.Cluster) (*template.Cluster, error) {
@@ -304,6 +367,70 @@ func (s *Server) selectClusterByWeightWithAllocations(allocations []*template.Te
 	}
 
 	return nil, nil
+}
+
+func (s *Server) selectClusterByFallbackWithAllocations(allocations []*template.TemplateAllocation, clusterMap map[string]*template.Cluster) *template.Cluster {
+	var selected *template.Cluster
+	var selectedAlloc *template.TemplateAllocation
+
+	for _, alloc := range allocations {
+		cluster := clusterMap[alloc.ClusterID]
+		if cluster == nil || !cluster.Enabled {
+			continue
+		}
+		if selected == nil ||
+			cluster.Weight > selected.Weight ||
+			(cluster.Weight == selected.Weight && alloc.MaxIdle > selectedAlloc.MaxIdle) ||
+			(cluster.Weight == selected.Weight && alloc.MaxIdle == selectedAlloc.MaxIdle && cluster.ClusterID < selected.ClusterID) {
+			selected = cluster
+			selectedAlloc = alloc
+		}
+	}
+
+	return selected
+}
+
+func clusterAvailableHeadroom(summary *templreconciler.ClusterSummary, podsPerNode int) int32 {
+	if summary == nil {
+		return 0
+	}
+	if podsPerNode <= 0 {
+		podsPerNode = 10
+	}
+	sandboxNodeCount := summary.SandboxNodeCount
+	if summary.TotalNodeCount == 0 && summary.SandboxNodeCount == 0 {
+		sandboxNodeCount = summary.NodeCount
+	}
+	estimatedCapacity := int32(sandboxNodeCount * podsPerNode)
+	availableCapacity := estimatedCapacity - summary.TotalPodCount
+	if availableCapacity < 0 {
+		return 0
+	}
+	return availableCapacity
+}
+
+func (s *Server) recordRoutingDecision(clusterID, reason string) {
+	if s == nil || s.metrics == nil || s.metrics.RoutingDecisions == nil {
+		return
+	}
+	if clusterID == "" {
+		clusterID = "none"
+	}
+	if reason == "" {
+		reason = "unknown"
+	}
+	s.metrics.RoutingDecisions.WithLabelValues(clusterID, reason).Inc()
+}
+
+func (s *Server) recordClusterSummaryAge(clusterID string) {
+	if s == nil || s.metrics == nil || s.metrics.ClusterSummaryAge == nil || clusterID == "" {
+		return
+	}
+	age, ok := s.reconciler.GetClusterSummaryAge(clusterID)
+	if !ok {
+		return
+	}
+	s.metrics.ClusterSummaryAge.WithLabelValues(clusterID).Set(age.Seconds())
 }
 
 // listSandboxes lists all sandboxes across all enabled clusters

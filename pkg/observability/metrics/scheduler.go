@@ -11,10 +11,12 @@ type SchedulerMetrics struct {
 	ReconcileDuration      prometheus.Histogram
 	TemplateAllocations    *prometheus.GaugeVec
 	ClusterCapacity        *prometheus.GaugeVec
+	ClusterSummaryAge      *prometheus.GaugeVec
 	TemplateSyncStatus     *prometheus.GaugeVec
 	OrphansRemoved         *prometheus.CounterVec
 	LastReconcileTimestamp prometheus.Gauge
 	CapacityClamps         *prometheus.CounterVec
+	RoutingDecisions       *prometheus.CounterVec
 }
 
 // NewScheduler registers and returns scheduler metrics.
@@ -53,7 +55,14 @@ func NewScheduler(registry prometheus.Registerer) *SchedulerMetrics {
 				Name: "scheduler_cluster_capacity",
 				Help: "Cluster capacity metrics",
 			},
-			[]string{"cluster_id", "metric"}, // metric: nodes, idle_pods, active_pods, total_pods
+			[]string{"cluster_id", "metric"}, // metric: nodes, total_nodes, sandbox_nodes, idle_pods, active_pods, pending_active_pods, total_pods, available_headroom
+		),
+		ClusterSummaryAge: factory.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "scheduler_cluster_summary_age_seconds",
+				Help: "Age of the cached cluster summary in seconds",
+			},
+			[]string{"cluster_id"},
 		),
 		TemplateSyncStatus: factory.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -81,6 +90,13 @@ func NewScheduler(registry prometheus.Registerer) *SchedulerMetrics {
 				Help: "Total number of times allocations were clamped by cluster capacity",
 			},
 			[]string{"cluster_id", "template_id"},
+		),
+		RoutingDecisions: factory.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "scheduler_routing_decisions_total",
+				Help: "Total number of scheduler shard routing decisions by reason",
+			},
+			[]string{"cluster_id", "reason"},
 		),
 	}
 }

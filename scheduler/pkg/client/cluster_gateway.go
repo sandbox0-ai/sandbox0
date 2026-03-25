@@ -39,20 +39,24 @@ func NewClusterGatewayClient(internalAuthGen *internalauth.Generator, logger *za
 
 // ClusterSummary represents the cluster capacity and status
 type ClusterSummary struct {
-	ClusterID      string `json:"cluster_id"`
-	NodeCount      int    `json:"node_count"`
-	IdlePodCount   int32  `json:"idle_pod_count"`
-	ActivePodCount int32  `json:"active_pod_count"`
-	TotalPodCount  int32  `json:"total_pod_count"`
+	ClusterID             string `json:"cluster_id"`
+	NodeCount             int    `json:"node_count"`
+	TotalNodeCount        int    `json:"total_node_count"`
+	SandboxNodeCount      int    `json:"sandbox_node_count"`
+	IdlePodCount          int32  `json:"idle_pod_count"`
+	ActivePodCount        int32  `json:"active_pod_count"`
+	PendingActivePodCount int32  `json:"pending_active_pod_count"`
+	TotalPodCount         int32  `json:"total_pod_count"`
 }
 
 // TemplateStat represents statistics for a single template
 type TemplateStat struct {
-	TemplateID  string `json:"template_id"`
-	IdleCount   int32  `json:"idle_count"`
-	ActiveCount int32  `json:"active_count"`
-	MinIdle     int32  `json:"min_idle"`
-	MaxIdle     int32  `json:"max_idle"`
+	TemplateID         string `json:"template_id"`
+	IdleCount          int32  `json:"idle_count"`
+	ActiveCount        int32  `json:"active_count"`
+	PendingActiveCount int32  `json:"pending_active_count"`
+	MinIdle            int32  `json:"min_idle"`
+	MaxIdle            int32  `json:"max_idle"`
 }
 
 // TemplateStats represents statistics for all templates in a cluster

@@ -72,6 +72,16 @@ func (r *Reconciler) GetTemplateStatsAge(clusterID string) (time.Duration, bool)
 	return r.inner.GetTemplateStatsAge(clusterID)
 }
 
+// GetClusterSummary returns the cached cluster summary for a shard.
+func (r *Reconciler) GetClusterSummary(clusterID string) (*templreconciler.ClusterSummary, bool) {
+	return r.inner.GetClusterSummary(clusterID)
+}
+
+// GetClusterSummaryAge returns age since the cluster summary cache was updated.
+func (r *Reconciler) GetClusterSummaryAge(clusterID string) (time.Duration, bool) {
+	return r.inner.GetClusterSummaryAge(clusterID)
+}
+
 // UpdateTemplateStats updates stats cache for a template in a cluster.
 func (r *Reconciler) UpdateTemplateStats(clusterID, templateID string, idleCount, activeCount int32, updatedAt time.Time) {
 	r.inner.UpdateTemplateStats(clusterID, templateID, idleCount, activeCount, updatedAt)
@@ -87,11 +97,14 @@ func (a *clusterGatewayAdapter) GetClusterSummary(ctx context.Context, baseURL s
 		return nil, err
 	}
 	return &templreconciler.ClusterSummary{
-		ClusterID:      summary.ClusterID,
-		NodeCount:      summary.NodeCount,
-		IdlePodCount:   summary.IdlePodCount,
-		ActivePodCount: summary.ActivePodCount,
-		TotalPodCount:  summary.TotalPodCount,
+		ClusterID:             summary.ClusterID,
+		NodeCount:             summary.NodeCount,
+		TotalNodeCount:        summary.TotalNodeCount,
+		SandboxNodeCount:      summary.SandboxNodeCount,
+		IdlePodCount:          summary.IdlePodCount,
+		ActivePodCount:        summary.ActivePodCount,
+		PendingActivePodCount: summary.PendingActivePodCount,
+		TotalPodCount:         summary.TotalPodCount,
 	}, nil
 }
 
@@ -105,11 +118,12 @@ func (a *clusterGatewayAdapter) GetTemplateStats(ctx context.Context, baseURL st
 	}
 	for _, stat := range stats.Templates {
 		out.Templates = append(out.Templates, templreconciler.TemplateStat{
-			TemplateID:  stat.TemplateID,
-			IdleCount:   stat.IdleCount,
-			ActiveCount: stat.ActiveCount,
-			MinIdle:     stat.MinIdle,
-			MaxIdle:     stat.MaxIdle,
+			TemplateID:         stat.TemplateID,
+			IdleCount:          stat.IdleCount,
+			ActiveCount:        stat.ActiveCount,
+			PendingActiveCount: stat.PendingActiveCount,
+			MinIdle:            stat.MinIdle,
+			MaxIdle:            stat.MaxIdle,
 		})
 	}
 	return out, nil

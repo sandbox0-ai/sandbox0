@@ -944,8 +944,9 @@ func assertVolumeSyncBackendLifecycle(env *framework.ScenarioEnv, session *e2eut
 		RequestId: "req-e2e-sync-1",
 		BaseSeq:   0,
 		Changes: []apispec.ChangeRequest{{
-			EventType: apispec.SyncEventType("write"),
-			Path:      ptr("volume-sync-e2e/main.go"),
+			EventType:     apispec.SyncEventType("write"),
+			Path:          ptr("volume-sync-e2e/main.go"),
+			ContentBase64: ptr("cGFja2FnZSBtYWluCg=="),
 		}},
 	})
 	Expect(err).NotTo(HaveOccurred())
@@ -1023,8 +1024,9 @@ func assertVolumeSyncBackendLifecycle(env *framework.ScenarioEnv, session *e2eut
 		RequestId: "req-e2e-sync-win-1",
 		BaseSeq:   1,
 		Changes: []apispec.ChangeRequest{{
-			EventType: apispec.SyncEventType("write"),
-			Path:      ptr("volume-sync-e2e/CON.txt"),
+			EventType:     apispec.SyncEventType("write"),
+			Path:          ptr("volume-sync-e2e/CON.txt"),
+			ContentBase64: ptr("d2luZG93cyBjb25mbGljdAo="),
 		}},
 	})
 	Expect(err).NotTo(HaveOccurred())

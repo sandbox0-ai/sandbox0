@@ -8,6 +8,8 @@
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-1f8f5f?style=for-the-badge" alt="License" /></a>
 </p>
 
+> Note: Sandbox0 is under rapid iteration. Before the SaaS offering launches, backward compatibility is not guaranteed.
+
 Sandbox0 is a general-purpose sandbox for building AI Agents. You can set any Docker image as a custom template image.
 
 Key features of Sandbox0:

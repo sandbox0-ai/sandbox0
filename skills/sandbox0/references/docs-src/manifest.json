@@ -104,6 +104,10 @@
         {
           "slug": "fork",
           "title": "Fork"
+        },
+        {
+          "slug": "sync",
+          "title": "Sync"
         }
       ]
     },

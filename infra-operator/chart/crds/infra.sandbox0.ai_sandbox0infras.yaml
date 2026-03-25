@@ -2537,6 +2537,17 @@ spec:
                             default: 30s
                             description: Snapshot restore
                             type: string
+                          syncCompactionInterval:
+                            default: 10m
+                            description: Volume sync maintenance
+                            type: string
+                          syncJournalRetainEntries:
+                            default: 10000
+                            format: int64
+                            type: integer
+                          syncRequestRetention:
+                            default: 24h
+                            type: string
                           watchEventQueueSize:
                             default: 256
                             type: integer

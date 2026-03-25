@@ -29,7 +29,9 @@ import (
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/juicefs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/notify"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/snapshot"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volsync"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volumelock"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/watcher"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"github.com/sirupsen/logrus"
@@ -129,6 +131,34 @@ func main() {
 
 	// Create volume manager
 	volMgr := volume.NewManager(logrusLogger, cfg)
+	var syncSvc *volsync.Service
+	var syncMaintenance *volsync.Maintenance
+	var volumeBarrier *volumelock.Locker
+	syncMaintenanceCfg := buildSyncMaintenanceConfig(cfg)
+	if pool != nil {
+		volumeBarrier = volumelock.New(pool)
+	}
+	if repo != nil {
+		syncSvc = volsync.NewService(repo, logrusLogger)
+		syncSvc.SetMetrics(storageProxyMetrics)
+		syncSvc.SetConflictArtifactWriter(volsync.NewConflictArtifactWriter(volMgr, logrusLogger))
+		syncSvc.SetReplicaChangeApplier(volsync.NewVolumeChangeApplier(volMgr, logrusLogger))
+		syncSvc.SetVolumeMutationBarrier(volumeBarrier)
+		syncMaintenance = volsync.NewMaintenance(repo, syncSvc, logrusLogger, syncMaintenanceCfg)
+		syncMaintenance.SetMetrics(storageProxyMetrics)
+	}
+
+	var syncMaintenanceCancel context.CancelFunc
+	if syncMaintenance != nil && syncMaintenance.Enabled() {
+		var maintenanceCtx context.Context
+		maintenanceCtx, syncMaintenanceCancel = context.WithCancel(context.Background())
+		go syncMaintenance.Run(maintenanceCtx)
+		zapLogger.Info("Volume sync maintenance started",
+			zap.Duration("compaction_interval", syncMaintenanceCfg.CompactionInterval),
+			zap.Int64("journal_retain_entries", syncMaintenanceCfg.JournalRetainEntries),
+			zap.Duration("request_retention", syncMaintenanceCfg.RequestRetention),
+		)
+	}
 
 	// Create watch event hub
 	var eventHub *notify.Hub
@@ -239,7 +269,7 @@ func main() {
 	)
 
 	// Register FileSystem service
-	fsServer := grpcserver.NewFileSystemServer(volMgr, repo, eventHub, eventBroadcaster, logrusLogger)
+	fsServer := grpcserver.NewFileSystemServer(volMgr, repo, eventHub, eventBroadcaster, logrusLogger, syncSvc, volumeBarrier)
 	pb.RegisterFileSystemServer(grpcServer, fsServer)
 
 	// Register health service
@@ -280,7 +310,7 @@ func main() {
 	}
 
 	// Create HTTP server
-	httpSrv := httpserver.NewServer(logrusLogger, repo, meteringRepo, cfg.RegionID, httpAuthenticator, snapshotMgr)
+	httpSrv := httpserver.NewServer(logrusLogger, repo, meteringRepo, cfg.RegionID, httpAuthenticator, snapshotMgr, syncSvc, volumeBarrier)
 	httpAddr := fmt.Sprintf("%s:%d", cfg.HTTPAddr, cfg.HTTPPort)
 
 	readTimeout, _ := time.ParseDuration(cfg.HTTPReadTimeout)
@@ -321,6 +351,10 @@ func main() {
 	<-sigChan
 
 	zapLogger.Info("Shutting down gracefully...")
+
+	if syncMaintenanceCancel != nil {
+		syncMaintenanceCancel()
+	}
 
 	// Shutdown HTTP server
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -495,4 +529,27 @@ func initializeJuiceFS(cfg *config.StorageProxyConfig, logger *zap.Logger) error
 	}
 
 	return nil
+}
+
+func buildSyncMaintenanceConfig(cfg *config.StorageProxyConfig) volsync.MaintenanceConfig {
+	compactionInterval, _ := time.ParseDuration(cfg.SyncCompactionInterval)
+	if compactionInterval == 0 {
+		compactionInterval = 10 * time.Minute
+	}
+
+	journalRetainEntries := cfg.SyncJournalRetainEntries
+	if journalRetainEntries == 0 {
+		journalRetainEntries = 10000
+	}
+
+	requestRetention, _ := time.ParseDuration(cfg.SyncRequestRetention)
+	if requestRetention == 0 {
+		requestRetention = 24 * time.Hour
+	}
+
+	return volsync.MaintenanceConfig{
+		CompactionInterval:   compactionInterval,
+		JournalRetainEntries: journalRetainEntries,
+		RequestRetention:     requestRetention,
+	}
 }

@@ -1,8 +1,12 @@
 package snapshot
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
+	"io"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -16,6 +20,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/pathnorm"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"github.com/sirupsen/logrus"
 )
@@ -186,6 +191,75 @@ type fakeMeta struct {
 	inoToPath    map[meta.Ino]string
 	nextIno      meta.Ino
 	removedPaths []string
+}
+
+type fakeArchiveMeta struct {
+	attrs   map[meta.Ino]*meta.Attr
+	entries map[meta.Ino][]*meta.Entry
+	links   map[meta.Ino]string
+	getErr  syscall.Errno
+	readErr syscall.Errno
+	linkErr syscall.Errno
+}
+
+func (f *fakeArchiveMeta) GetAttr(ctx meta.Context, inode meta.Ino, attr *meta.Attr) syscall.Errno {
+	if f.getErr != 0 {
+		return f.getErr
+	}
+	stored, ok := f.attrs[inode]
+	if !ok {
+		return syscall.ENOENT
+	}
+	if attr != nil {
+		*attr = *stored
+	}
+	return 0
+}
+
+func (f *fakeArchiveMeta) Readdir(ctx meta.Context, inode meta.Ino, wantattr uint8, entries *[]*meta.Entry) syscall.Errno {
+	if f.readErr != 0 {
+		return f.readErr
+	}
+	list, ok := f.entries[inode]
+	if !ok {
+		return syscall.ENOENT
+	}
+	cloned := make([]*meta.Entry, 0, len(list))
+	for _, entry := range list {
+		copyEntry := *entry
+		if entry.Attr != nil {
+			copyAttr := *entry.Attr
+			copyEntry.Attr = &copyAttr
+		}
+		cloned = append(cloned, &copyEntry)
+	}
+	*entries = cloned
+	return 0
+}
+
+func (f *fakeArchiveMeta) ReadLink(ctx meta.Context, inode meta.Ino, path *[]byte) syscall.Errno {
+	if f.linkErr != 0 {
+		return f.linkErr
+	}
+	target, ok := f.links[inode]
+	if !ok {
+		return syscall.ENOENT
+	}
+	*path = []byte(target)
+	return 0
+}
+
+type fakeArchiveReader struct {
+	contents map[meta.Ino][]byte
+}
+
+func (f *fakeArchiveReader) ReadFile(ctx context.Context, inode meta.Ino, size uint64, w io.Writer) error {
+	data := f.contents[inode]
+	if len(data) != int(size) {
+		return errors.New("unexpected file size")
+	}
+	_, err := w.Write(data)
+	return err
 }
 
 func newFakeMeta() *fakeMeta {
@@ -681,5 +755,344 @@ func TestVolumeLock(t *testing.T) {
 	mgr.releaseVolumeLock("vol1")
 	if !mgr.acquireVolumeLock("vol1", time.Second) {
 		t.Fatalf("expected lock after release")
+	}
+}
+
+func TestExportSnapshotArchive(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol1"] = &db.SandboxVolume{
+		ID:         "vol1",
+		TeamID:     "team1",
+		CacheSize:  "1G",
+		Prefetch:   1,
+		BufferSize: "32M",
+	}
+	repo.snapshots["snap1"] = &db.Snapshot{
+		ID:        "snap1",
+		VolumeID:  "vol1",
+		TeamID:    "team1",
+		RootInode: 100,
+	}
+
+	rootAttr := &meta.Attr{Typ: meta.TypeDirectory, Mode: 0o755, Mtime: 1710000000}
+	appDirAttr := &meta.Attr{Typ: meta.TypeDirectory, Mode: 0o755, Mtime: 1710000001}
+	fileAttr := &meta.Attr{Typ: meta.TypeFile, Mode: 0o644, Length: 13, Mtime: 1710000002}
+	linkAttr := &meta.Attr{Typ: meta.TypeSymlink, Mode: 0o777, Mtime: 1710000003}
+
+	archiveMeta := &fakeArchiveMeta{
+		attrs: map[meta.Ino]*meta.Attr{
+			100: rootAttr,
+			101: appDirAttr,
+			102: fileAttr,
+			103: linkAttr,
+		},
+		entries: map[meta.Ino][]*meta.Entry{
+			100: {
+				{Inode: 103, Name: []byte("latest"), Attr: linkAttr},
+				{Inode: 101, Name: []byte("app"), Attr: appDirAttr},
+			},
+			101: {
+				{Inode: 102, Name: []byte("main.go"), Attr: fileAttr},
+			},
+		},
+		links: map[meta.Ino]string{
+			103: "app/main.go",
+		},
+	}
+	archiveReader := &fakeArchiveReader{
+		contents: map[meta.Ino][]byte{
+			102: []byte("package main\n"),
+		},
+	}
+
+	mgr := newTestManager(repo, nil)
+	mgr.newArchiveSession = func(ctx context.Context, volume *db.SandboxVolume) (*snapshotArchiveSession, error) {
+		return &snapshotArchiveSession{
+			meta:   archiveMeta,
+			reader: archiveReader,
+			close:  func() error { return nil },
+		}, nil
+	}
+
+	var buf bytes.Buffer
+	err := mgr.ExportSnapshotArchive(context.Background(), &ExportSnapshotRequest{
+		VolumeID:   "vol1",
+		SnapshotID: "snap1",
+		TeamID:     "team1",
+	}, &buf)
+	if err != nil {
+		t.Fatalf("ExportSnapshotArchive() error = %v", err)
+	}
+
+	gzr, err := gzip.NewReader(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("gzip.NewReader() error = %v", err)
+	}
+	defer gzr.Close()
+
+	tr := tar.NewReader(gzr)
+	var names []string
+	fileContents := map[string]string{}
+	linkTargets := map[string]string{}
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar.Next() error = %v", err)
+		}
+		names = append(names, hdr.Name)
+		switch hdr.Typeflag {
+		case tar.TypeReg:
+			data, err := io.ReadAll(tr)
+			if err != nil {
+				t.Fatalf("ReadAll(%q) error = %v", hdr.Name, err)
+			}
+			fileContents[hdr.Name] = string(data)
+		case tar.TypeSymlink:
+			linkTargets[hdr.Name] = hdr.Linkname
+		}
+	}
+
+	wantNames := []string{"app/", "app/main.go", "latest"}
+	if strings.Join(names, ",") != strings.Join(wantNames, ",") {
+		t.Fatalf("archive entries = %v, want %v", names, wantNames)
+	}
+	if fileContents["app/main.go"] != "package main\n" {
+		t.Fatalf("file content = %q, want %q", fileContents["app/main.go"], "package main\n")
+	}
+	if linkTargets["latest"] != "app/main.go" {
+		t.Fatalf("symlink target = %q, want %q", linkTargets["latest"], "app/main.go")
+	}
+}
+
+func TestListSnapshotCasefoldCollisions(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol1"] = &db.SandboxVolume{
+		ID:     "vol1",
+		TeamID: "team1",
+	}
+	repo.snapshots["snap1"] = &db.Snapshot{
+		ID:        "snap1",
+		VolumeID:  "vol1",
+		TeamID:    "team1",
+		RootInode: 100,
+	}
+
+	rootAttr := &meta.Attr{Typ: meta.TypeDirectory, Mode: 0o755}
+	appDirAttr := &meta.Attr{Typ: meta.TypeDirectory, Mode: 0o755}
+	fileAttr := &meta.Attr{Typ: meta.TypeFile, Mode: 0o644, Length: 1}
+
+	archiveMeta := &fakeArchiveMeta{
+		attrs: map[meta.Ino]*meta.Attr{
+			100: rootAttr,
+			101: appDirAttr,
+			102: fileAttr,
+			103: fileAttr,
+		},
+		entries: map[meta.Ino][]*meta.Entry{
+			100: {
+				{Inode: 101, Name: []byte("app"), Attr: appDirAttr},
+			},
+			101: {
+				{Inode: 102, Name: []byte("Main.go"), Attr: fileAttr},
+				{Inode: 103, Name: []byte("main.go"), Attr: fileAttr},
+			},
+		},
+	}
+
+	mgr := newTestManager(repo, nil)
+	mgr.newArchiveSession = func(ctx context.Context, volume *db.SandboxVolume) (*snapshotArchiveSession, error) {
+		return &snapshotArchiveSession{
+			meta:   archiveMeta,
+			reader: &fakeArchiveReader{},
+			close:  func() error { return nil },
+		}, nil
+	}
+
+	collisions, err := mgr.ListSnapshotCasefoldCollisions(context.Background(), &ListSnapshotCasefoldCollisionsRequest{
+		VolumeID:   "vol1",
+		SnapshotID: "snap1",
+		TeamID:     "team1",
+	})
+	if err != nil {
+		t.Fatalf("ListSnapshotCasefoldCollisions() error = %v", err)
+	}
+	if len(collisions) != 1 {
+		t.Fatalf("collisions = %d, want 1", len(collisions))
+	}
+	if collisions[0].NormalizedPath != "/app/main.go" {
+		t.Fatalf("normalized path = %q, want %q", collisions[0].NormalizedPath, "/app/main.go")
+	}
+	if strings.Join(collisions[0].Paths, ",") != "/app/Main.go,/app/main.go" {
+		t.Fatalf("paths = %v, want [/app/Main.go /app/main.go]", collisions[0].Paths)
+	}
+}
+
+func TestListSnapshotCasefoldCollisionsReturnsEmptyWhenNamespaceIsSafe(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol1"] = &db.SandboxVolume{
+		ID:     "vol1",
+		TeamID: "team1",
+	}
+	repo.snapshots["snap1"] = &db.Snapshot{
+		ID:        "snap1",
+		VolumeID:  "vol1",
+		TeamID:    "team1",
+		RootInode: 100,
+	}
+
+	rootAttr := &meta.Attr{Typ: meta.TypeDirectory, Mode: 0o755}
+	fileAttr := &meta.Attr{Typ: meta.TypeFile, Mode: 0o644, Length: 1}
+
+	archiveMeta := &fakeArchiveMeta{
+		attrs: map[meta.Ino]*meta.Attr{
+			100: rootAttr,
+			101: fileAttr,
+		},
+		entries: map[meta.Ino][]*meta.Entry{
+			100: {
+				{Inode: 101, Name: []byte("main.go"), Attr: fileAttr},
+			},
+		},
+	}
+
+	mgr := newTestManager(repo, nil)
+	mgr.newArchiveSession = func(ctx context.Context, volume *db.SandboxVolume) (*snapshotArchiveSession, error) {
+		return &snapshotArchiveSession{
+			meta:   archiveMeta,
+			reader: &fakeArchiveReader{},
+			close:  func() error { return nil },
+		}, nil
+	}
+
+	collisions, err := mgr.ListSnapshotCasefoldCollisions(context.Background(), &ListSnapshotCasefoldCollisionsRequest{
+		VolumeID:   "vol1",
+		SnapshotID: "snap1",
+		TeamID:     "team1",
+	})
+	if err != nil {
+		t.Fatalf("ListSnapshotCasefoldCollisions() error = %v", err)
+	}
+	if len(collisions) != 0 {
+		t.Fatalf("collisions = %v, want none", collisions)
+	}
+}
+
+func TestListSnapshotCasefoldCollisionsDetectsUnicodeNormalizationCollisions(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol1"] = &db.SandboxVolume{
+		ID:     "vol1",
+		TeamID: "team1",
+	}
+	repo.snapshots["snap1"] = &db.Snapshot{
+		ID:        "snap1",
+		VolumeID:  "vol1",
+		TeamID:    "team1",
+		RootInode: 100,
+	}
+
+	rootAttr := &meta.Attr{Typ: meta.TypeDirectory, Mode: 0o755}
+	fileAttr := &meta.Attr{Typ: meta.TypeFile, Mode: 0o644, Length: 1}
+
+	archiveMeta := &fakeArchiveMeta{
+		attrs: map[meta.Ino]*meta.Attr{
+			100: rootAttr,
+			101: fileAttr,
+			102: fileAttr,
+		},
+		entries: map[meta.Ino][]*meta.Entry{
+			100: {
+				{Inode: 101, Name: []byte("Caf\u00e9.txt"), Attr: fileAttr},
+				{Inode: 102, Name: []byte("Cafe\u0301.txt"), Attr: fileAttr},
+			},
+		},
+	}
+
+	mgr := newTestManager(repo, nil)
+	mgr.newArchiveSession = func(ctx context.Context, volume *db.SandboxVolume) (*snapshotArchiveSession, error) {
+		return &snapshotArchiveSession{
+			meta:   archiveMeta,
+			reader: &fakeArchiveReader{},
+			close:  func() error { return nil },
+		}, nil
+	}
+
+	collisions, err := mgr.ListSnapshotCasefoldCollisions(context.Background(), &ListSnapshotCasefoldCollisionsRequest{
+		VolumeID:   "vol1",
+		SnapshotID: "snap1",
+		TeamID:     "team1",
+	})
+	if err != nil {
+		t.Fatalf("ListSnapshotCasefoldCollisions() error = %v", err)
+	}
+	if len(collisions) != 1 {
+		t.Fatalf("collisions = %d, want 1", len(collisions))
+	}
+	if collisions[0].NormalizedPath != "/cafe\u0301.txt" {
+		t.Fatalf("normalized path = %q, want %q", collisions[0].NormalizedPath, "/cafe\u0301.txt")
+	}
+	if strings.Join(collisions[0].Paths, ",") != "/Cafe\u0301.txt,/Caf\u00e9.txt" {
+		t.Fatalf("paths = %v, want unicode-normalization collision pair", collisions[0].Paths)
+	}
+}
+
+func TestListSnapshotCompatibilityIssuesDetectsWindowsReservedNames(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol1"] = &db.SandboxVolume{
+		ID:     "vol1",
+		TeamID: "team1",
+	}
+	repo.snapshots["snap1"] = &db.Snapshot{
+		ID:        "snap1",
+		VolumeID:  "vol1",
+		TeamID:    "team1",
+		RootInode: 100,
+	}
+
+	rootAttr := &meta.Attr{Typ: meta.TypeDirectory, Mode: 0o755}
+	fileAttr := &meta.Attr{Typ: meta.TypeFile, Mode: 0o644, Length: 1}
+
+	archiveMeta := &fakeArchiveMeta{
+		attrs: map[meta.Ino]*meta.Attr{
+			100: rootAttr,
+			101: fileAttr,
+		},
+		entries: map[meta.Ino][]*meta.Entry{
+			100: {
+				{Inode: 101, Name: []byte("CON.txt"), Attr: fileAttr},
+			},
+		},
+	}
+
+	mgr := newTestManager(repo, nil)
+	mgr.newArchiveSession = func(ctx context.Context, volume *db.SandboxVolume) (*snapshotArchiveSession, error) {
+		return &snapshotArchiveSession{
+			meta:   archiveMeta,
+			reader: &fakeArchiveReader{},
+			close:  func() error { return nil },
+		}, nil
+	}
+
+	issues, err := mgr.ListSnapshotCompatibilityIssues(context.Background(), &ListSnapshotCompatibilityIssuesRequest{
+		VolumeID:   "vol1",
+		SnapshotID: "snap1",
+		TeamID:     "team1",
+		Capabilities: pathnorm.FilesystemCapabilities{
+			WindowsCompatiblePaths: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ListSnapshotCompatibilityIssues() error = %v", err)
+	}
+	if len(issues) != 1 {
+		t.Fatalf("issues = %d, want 1", len(issues))
+	}
+	if issues[0].Code != pathnorm.IssueCodeWindowsReservedName {
+		t.Fatalf("issue code = %q, want %q", issues[0].Code, pathnorm.IssueCodeWindowsReservedName)
+	}
+	if issues[0].Path != "/CON.txt" {
+		t.Fatalf("issue path = %q, want /CON.txt", issues[0].Path)
 	}
 }

@@ -1,0 +1,169 @@
+# Volume Sync
+
+Volume Sync is the storage-proxy side of Sandbox0's local-first workspace sync model.
+
+The first server-side iteration adds durable metadata and journal APIs so a local replica can:
+
+- register itself as a replica for a Volume
+- pull journal entries after a known sequence
+- push replica-originated changes through storage-proxy
+- advance a durable replica cursor
+- inspect deterministic conflict records
+
+<Callout variant="warning">
+This is an infrastructure preview. The server-side journal and conflict APIs are available, but the end-user `s0 syncd` workflow is still under active development.
+</Callout>
+
+## Replica Registration
+
+Register or refresh a local replica identity for a Volume.
+
+<Endpoint method="PUT">
+/api/v1/sandboxvolumes/{'{id}'}/sync/replicas/{'{replica_id}'}
+</Endpoint>
+
+The replica record stores platform metadata, root path information, filesystem capabilities, last-seen time, and the durable cursor.
+
+`storage-proxy` now accepts a `capabilities` object in replica registration. This is the contract future `s0 syncd` clients should target directly:
+
+- `case_sensitive`
+- `unicode_normalization_insensitive`
+- `windows_compatible_paths`
+
+The legacy top-level `case_sensitive` field remains available for backward compatibility, but the server normalizes it into `capabilities` before it makes sync decisions.
+
+When a replica registers stricter capabilities, `storage-proxy` now persists a merged per-Volume namespace policy. That policy is then enforced for both future replica-originated changes and remote sandbox mutations flowing through the gRPC mounted-volume path.
+
+## Bootstrap Anchor
+
+Create a bootstrap snapshot together with a journal replay anchor.
+
+<Endpoint method="POST">
+/api/v1/sandboxvolumes/{'{id}'}/sync/bootstrap
+</Endpoint>
+
+The response returns:
+
+- `snapshot`: a point-in-time snapshot to seed the local replica
+- `replay_after_seq`: the journal sequence the client should resume from after importing the snapshot
+- `archive_download_path`: the `tar.gz` download path for the bootstrap snapshot contents
+
+Clients can send a `capabilities` object when bootstrapping a local replica. `storage-proxy` audits the snapshot tree against those requested filesystem semantics before returning success. If the authoritative namespace is incompatible, bootstrap returns `409 conflict` with a structured `issues` array.
+
+Current blocking issue types include:
+
+- casefold collisions such as `Foo` and `foo`
+- Unicode-normalization collisions such as `Caf{'\\u00e9'}.txt` and `Cafe{'\\u0301'}.txt`
+- Windows-incompatible path segments such as reserved names like `CON.txt` or names with trailing dots/spaces
+
+The error payload also echoes the normalized `capabilities` that were used for the audit, so clients can distinguish namespace repair problems from request-shaping bugs.
+
+During bootstrap, `storage-proxy` now acquires a distributed volume mutation barrier before it captures `replay_after_seq` and creates the snapshot. That gives bootstrap a stable `snapshot + replay_after_seq` handoff even on an actively mutating Volume, without forcing clients to retry because of concurrent journal movement.
+
+This gives local-first clients a deterministic bootstrap contract: seed from the snapshot, then replay journal entries with `seq > replay_after_seq`.
+
+## Bootstrap Archive Download
+
+Download the bootstrap snapshot archive returned by the bootstrap anchor.
+
+<Endpoint method="GET">
+/api/v1/sandboxvolumes/{'{id}'}/sync/bootstrap/archive?snapshot_id=snap_123
+</Endpoint>
+
+The response is an `application/gzip` stream containing a `tar.gz` archive of the snapshot root. Clients can unpack the archive into the local replica root, then replay journal entries with `seq > replay_after_seq`.
+
+## Pull Journal Entries
+
+List journal entries after a known sequence number.
+
+<Endpoint method="GET">
+/api/v1/sandboxvolumes/{'{id}'}/sync/changes?after=42&limit=256
+</Endpoint>
+
+Journal entries are ordered by ascending `seq` and are authoritative for:
+
+- remote sandbox writes flowing through `storage-proxy`
+- replica-originated mutations accepted by `storage-proxy`
+- tombstones for deletes
+- case-fold aware rename and path conflict detection
+
+Each successful response also includes `retained_after_seq`, the durable journal floor still retained on the server for that Volume. If a client asks for `after` lower than that retained floor, `storage-proxy` now returns `409 conflict` with `reason: reseed_required` plus structured `retained_after_seq` and `head_seq` details so the client can bootstrap again instead of pretending incremental replay is still possible.
+
+`storage-proxy` also runs background sync maintenance: it compacts old journal entries behind a configurable retained window and deletes stale idempotency request records after their retention TTL. That keeps the durable sync metadata bounded without weakening the reseed contract.
+
+Operationally, the storage-proxy `/metrics` endpoint now emits sync-specific Prometheus series for operation outcomes and latency, conflict reasons, reseed-required responses, request-id replays, replica lag observations, compaction results, and maintenance task runs. The metric names are prefixed with `storage_proxy_volume_sync_`.
+
+## Push Replica Changes
+
+Submit local replica changes back to `storage-proxy`.
+
+<Endpoint method="POST">
+/api/v1/sandboxvolumes/{'{id}'}/sync/replicas/{'{replica_id}'}/changes
+</Endpoint>
+
+The request includes:
+
+- `request_id`: a client-generated idempotency key for this mutation batch
+- `base_seq`: the last sequence the replica reconciled against before producing these changes
+- `changes`: file-level change records such as `create`, `write`, `remove`, `rename`, `chmod`, or `invalidate`
+- `content_base64`: inline file content for `write` and file `create` operations
+- `entry_kind`: `file` or `directory` for `create`
+- `mode`: optional POSIX mode for `create` and `chmod`
+
+`storage-proxy` validates the cursor, applies accepted changes into the Volume namespace, journals those accepted changes, and records conflicts instead of silently overwriting concurrent updates.
+
+Replica append is now retry-safe: `storage-proxy` stores the committed response for each `{replica_id, request_id}` pair and replays that exact response on retried requests instead of applying the same batch twice. Reusing the same `request_id` with a different payload is rejected as a conflict.
+
+For replicas that register portable filesystem capabilities, `storage-proxy` also rejects non-canonical path operations that would otherwise produce a namespace the client cannot represent locally. That includes:
+
+- casefold collisions such as `foo` versus `Foo`
+- equivalent Unicode-normalized names
+- Windows-incompatible names such as reserved device names or path segments ending in dots/spaces
+
+Explicit case-only renames remain allowed when the source path matches the current canonical namespace entry.
+
+The same compatibility policy is also enforced for remote sandbox create and rename operations once a Volume has learned stricter requirements from any registered replica. This keeps the authoritative namespace from drifting back into a Linux-only shape after a portable client has attached.
+
+Replica-specific mutation APIs also enforce a lease based on the replica `last_seen_at` heartbeat. If a replica stays offline beyond the lease window, it must re-register before it can push more changes or advance its durable cursor again.
+
+Replica mutation batches are also validated against the retained journal floor. If a client submits `base_seq` older than the compacted journal history, `storage-proxy` rejects the batch with `reseed_required` so stale local state cannot silently skip deleted or conflicting history.
+
+## Advance Replica Cursor
+
+Persist the highest journal sequence fully applied to the local replica.
+
+<Endpoint method="PUT">
+/api/v1/sandboxvolumes/{'{id}'}/sync/replicas/{'{replica_id}'}/cursor
+</Endpoint>
+
+This keeps recovery deterministic after process restarts or offline periods.
+
+After a client reseeds from bootstrap, it can advance the durable cursor directly to the returned `replay_after_seq` even if its previous cursor had fallen behind the compacted journal floor. Attempting to persist a cursor lower than the retained floor is rejected with `reseed_required`.
+
+## Conflict Inspection
+
+List recorded sync conflicts for a Volume.
+
+<Endpoint method="GET">
+/api/v1/sandboxvolumes/{'{id}'}/sync/conflicts?status=open
+</Endpoint>
+
+Each conflict record includes:
+
+- the conflicting logical path
+- the normalized path used for case-fold safety
+- a deterministic `artifact_path` when the conflict is materialized as a sidecar file
+- the existing journal sequence that won the race
+- conflict metadata for debugging and resolution tooling
+
+For concurrent content conflicts, the server materializes the artifact path into the Volume namespace, for example `main.sandbox0-conflict-replica-1-seq-42.go`, and records that artifact write back into the sync journal so remote sandboxes and replicas can observe it deterministically. Compatibility conflicts such as Windows-invalid names are still recorded as first-class conflicts, but they do not create artifact files because there is no safe artifact path to materialize.
+
+## Conflict Resolution State
+
+Mark a conflict as resolved or ignored after a client or operator has handled it.
+
+<Endpoint method="PUT">
+/api/v1/sandboxvolumes/{'{id}'}/sync/conflicts/{'{conflict_id}'}
+</Endpoint>
+
+This updates the authoritative conflict status inside `storage-proxy` without creating a parallel side channel for resolution state.

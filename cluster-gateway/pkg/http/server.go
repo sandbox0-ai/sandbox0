@@ -436,6 +436,27 @@ func (s *Server) setupRoutes() {
 				snapshots.POST("/:snapshot_id/restore", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeWrite), s.restoreSandboxVolumeSnapshot)
 				snapshots.DELETE("/:snapshot_id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeDelete), s.deleteSandboxVolumeSnapshot)
 			}
+
+			sync := sandboxvolumes.Group("/:id/sync")
+			{
+				replicas := sync.Group("/replicas")
+				{
+					replicas.PUT("/:replica_id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeWrite), s.upsertSyncReplica)
+					replicas.GET("/:replica_id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeRead), s.getSyncReplica)
+					replicas.POST("/:replica_id/changes", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeWrite), s.appendSyncReplicaChanges)
+					replicas.PUT("/:replica_id/cursor", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeWrite), s.updateSyncReplicaCursor)
+				}
+
+				sync.POST("/bootstrap", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeWrite), s.createSyncBootstrap)
+				sync.GET("/bootstrap/archive", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeRead), s.downloadSyncBootstrapArchive)
+				sync.GET("/changes", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeRead), s.listSyncChanges)
+
+				conflicts := sync.Group("/conflicts")
+				{
+					conflicts.GET("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeRead), s.listSyncConflicts)
+					conflicts.PUT("/:conflict_id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeWrite), s.resolveSyncConflict)
+				}
+			}
 		}
 	}
 

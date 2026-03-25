@@ -163,6 +163,10 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 				It("creates volumes and snapshots", func() {
 					assertVolumeLifecycle(env, session)
 				})
+
+				It("serves volume sync backend APIs", func() {
+					assertVolumeSyncBackendLifecycle(env, session)
+				})
 			})
 		}
 
@@ -905,6 +909,152 @@ func assertVolumeLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session
 	Expect(status).To(Equal(http.StatusOK))
 }
 
+func assertVolumeSyncBackendLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session) {
+	cacheSize := "512M"
+	volume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), apispec.CreateSandboxVolumeRequest{
+		CacheSize: &cacheSize,
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusCreated))
+	Expect(volume).NotTo(BeNil())
+	volumeID := expectStringPtr(volume.Id, "volume id")
+
+	defer func() {
+		status, err := session.DeleteSandboxVolume(env.TestCtx.Context, GinkgoT(), volumeID)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(status).To(Equal(http.StatusOK))
+	}()
+
+	displayName := "Linux Laptop"
+	platform := "linux"
+	rootPath := "/workspace"
+	caseSensitive := true
+	replica, status, err := session.UpsertSyncReplica(env.TestCtx.Context, GinkgoT(), volumeID, "replica-linux", apispec.UpsertSyncReplicaRequest{
+		DisplayName:   &displayName,
+		Platform:      &platform,
+		RootPath:      &rootPath,
+		CaseSensitive: &caseSensitive,
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(replica).NotTo(BeNil())
+	Expect(replica.HeadSeq).To(Equal(int64(0)))
+
+	appendResp, status, err := session.AppendSyncReplicaChanges(env.TestCtx.Context, GinkgoT(), volumeID, "replica-linux", apispec.AppendReplicaChangesRequest{
+		RequestId: "req-e2e-sync-1",
+		BaseSeq:   0,
+		Changes: []apispec.ChangeRequest{{
+			EventType: apispec.SyncEventType("write"),
+			Path:      ptr("volume-sync-e2e/main.go"),
+		}},
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(appendResp).NotTo(BeNil())
+	Expect(appendResp.HeadSeq).To(Equal(int64(1)))
+	Expect(appendResp.Accepted).To(HaveLen(1))
+	Expect(appendResp.Conflicts).To(BeEmpty())
+	Expect(appendResp.Accepted[0].Path).NotTo(BeNil())
+	Expect(*appendResp.Accepted[0].Path).To(Equal("volume-sync-e2e/main.go"))
+
+	changesResp, status, err := session.ListSyncChanges(env.TestCtx.Context, GinkgoT(), volumeID, 0, nil)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(changesResp).NotTo(BeNil())
+	Expect(changesResp.HeadSeq).To(Equal(int64(1)))
+	Expect(changesResp.Changes).To(HaveLen(1))
+	Expect(changesResp.Changes[0].Path).NotTo(BeNil())
+	Expect(*changesResp.Changes[0].Path).To(Equal("volume-sync-e2e/main.go"))
+
+	replica, status, err = session.UpdateSyncReplicaCursor(env.TestCtx.Context, GinkgoT(), volumeID, "replica-linux", apispec.UpdateSyncReplicaCursorRequest{
+		LastAppliedSeq: 1,
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(replica.Replica.LastAppliedSeq).NotTo(BeNil())
+	Expect(*replica.Replica.LastAppliedSeq).To(Equal(int64(1)))
+
+	replica, status, err = session.GetSyncReplica(env.TestCtx.Context, GinkgoT(), volumeID, "replica-linux")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(replica.Replica.LastAppliedSeq).NotTo(BeNil())
+	Expect(*replica.Replica.LastAppliedSeq).To(Equal(int64(1)))
+
+	bootstrapName := "e2e-sync-bootstrap"
+	bootstrapResp, status, bootstrapConflict, err := session.CreateSyncBootstrap(env.TestCtx.Context, GinkgoT(), volumeID, &apispec.CreateVolumeSyncBootstrapRequest{
+		SnapshotName: &bootstrapName,
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusCreated))
+	Expect(bootstrapConflict).To(BeNil())
+	Expect(bootstrapResp).NotTo(BeNil())
+	Expect(bootstrapResp.Snapshot.Id).NotTo(BeEmpty())
+	Expect(strings.TrimSpace(bootstrapResp.ArchiveDownloadPath)).NotTo(BeEmpty())
+
+	archiveBody, status, err := session.DownloadSyncBootstrapArchive(env.TestCtx.Context, GinkgoT(), volumeID, bootstrapResp.Snapshot.Id)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(len(archiveBody)).To(BeNumerically(">", 0))
+
+	status, err = session.DeleteSnapshot(env.TestCtx.Context, GinkgoT(), volumeID, bootstrapResp.Snapshot.Id)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+
+	windowsDisplayName := "Windows Laptop"
+	windowsPlatform := "windows"
+	windowsRootPath := "C:/workspace"
+	windowsCaseSensitive := false
+	windowsReplica, status, err := session.UpsertSyncReplica(env.TestCtx.Context, GinkgoT(), volumeID, "replica-windows", apispec.UpsertSyncReplicaRequest{
+		DisplayName:   &windowsDisplayName,
+		Platform:      &windowsPlatform,
+		RootPath:      &windowsRootPath,
+		CaseSensitive: &windowsCaseSensitive,
+		Capabilities: &apispec.VolumeSyncFilesystemCapabilities{
+			CaseSensitive:                   false,
+			UnicodeNormalizationInsensitive: true,
+			WindowsCompatiblePaths:          true,
+		},
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(windowsReplica).NotTo(BeNil())
+
+	windowsAppendResp, status, err := session.AppendSyncReplicaChanges(env.TestCtx.Context, GinkgoT(), volumeID, "replica-windows", apispec.AppendReplicaChangesRequest{
+		RequestId: "req-e2e-sync-win-1",
+		BaseSeq:   1,
+		Changes: []apispec.ChangeRequest{{
+			EventType: apispec.SyncEventType("write"),
+			Path:      ptr("volume-sync-e2e/CON.txt"),
+		}},
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(windowsAppendResp.Accepted).To(BeEmpty())
+	Expect(windowsAppendResp.Conflicts).To(HaveLen(1))
+	Expect(windowsAppendResp.Conflicts[0].Reason).NotTo(BeNil())
+	Expect(*windowsAppendResp.Conflicts[0].Reason).To(Equal("windows_reserved_name"))
+
+	conflictsResp, status, err := session.ListSyncConflicts(env.TestCtx.Context, GinkgoT(), volumeID, "open", nil)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(conflictsResp).NotTo(BeNil())
+	Expect(conflictsResp.Conflicts).NotTo(BeEmpty())
+	conflictID := expectStringPtr(conflictsResp.Conflicts[0].Id, "conflict id")
+
+	resolution := "keep_remote"
+	note := "resolved by e2e"
+	resolvedConflict, status, err := session.ResolveSyncConflict(env.TestCtx.Context, GinkgoT(), volumeID, conflictID, apispec.ResolveVolumeSyncConflictRequest{
+		Status:     apispec.ResolveVolumeSyncConflictRequestStatus("resolved"),
+		Resolution: &resolution,
+		Note:       &note,
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(resolvedConflict).NotTo(BeNil())
+	Expect(resolvedConflict.Status).NotTo(BeNil())
+	Expect(*resolvedConflict.Status).To(Equal("resolved"))
+}
+
 func hasMeteringEvent(events []*metering.Event, eventType, subjectType, subjectID string) bool {
 	for _, event := range events {
 		if event == nil {
@@ -921,6 +1071,10 @@ func expectStringPtr(value *string, label string) string {
 	Expect(value).NotTo(BeNil(), "%s should not be nil", label)
 	Expect(strings.TrimSpace(*value)).NotTo(BeEmpty(), "%s should not be empty", label)
 	return *value
+}
+
+func ptr[T any](value T) *T {
+	return &value
 }
 
 func hasMeteringWindow(windows []*metering.Window, windowType, sandboxID string) bool {

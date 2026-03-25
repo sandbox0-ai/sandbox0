@@ -1069,10 +1069,19 @@ func hasMeteringEvent(events []*metering.Event, eventType, subjectType, subjectI
 	return false
 }
 
-func expectStringPtr(value *string, label string) string {
-	Expect(value).NotTo(BeNil(), "%s should not be nil", label)
-	Expect(strings.TrimSpace(*value)).NotTo(BeEmpty(), "%s should not be empty", label)
-	return *value
+func expectStringPtr(value any, label string) string {
+	switch v := value.(type) {
+	case string:
+		Expect(strings.TrimSpace(v)).NotTo(BeEmpty(), "%s should not be empty", label)
+		return v
+	case *string:
+		Expect(v).NotTo(BeNil(), "%s should not be nil", label)
+		Expect(strings.TrimSpace(*v)).NotTo(BeEmpty(), "%s should not be empty", label)
+		return *v
+	default:
+		Fail(fmt.Sprintf("%s should be a string or *string, got %T", label, value))
+		return ""
+	}
 }
 
 func ptr[T any](value T) *T {

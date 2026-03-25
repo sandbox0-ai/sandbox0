@@ -1460,15 +1460,15 @@ type SandboxUpdateRequest struct {
 type SandboxVolume struct {
 	// AccessMode Access mode for sandbox volumes. Enforcement is scoped to storage-proxy instances. RWO allows read-write mounts on a single instance; ROX allows read-only mounts across instances; RWX allows read-write mounts across instances.
 	AccessMode     *VolumeAccessMode `json:"access_mode,omitempty"`
-	BufferSize     *string           `json:"buffer_size,omitempty"`
-	CacheSize      *string           `json:"cache_size,omitempty"`
-	CreatedAt      *time.Time        `json:"created_at,omitempty"`
-	Id             *string           `json:"id,omitempty"`
+	BufferSize     string            `json:"buffer_size"`
+	CacheSize      string            `json:"cache_size"`
+	CreatedAt      time.Time         `json:"created_at"`
+	Id             string            `json:"id"`
 	Prefetch       *int              `json:"prefetch,omitempty"`
 	SourceVolumeId *string           `json:"source_volume_id"`
-	TeamId         *string           `json:"team_id,omitempty"`
-	UpdatedAt      *time.Time        `json:"updated_at,omitempty"`
-	UserId         *string           `json:"user_id,omitempty"`
+	TeamId         string            `json:"team_id"`
+	UpdatedAt      time.Time         `json:"updated_at"`
+	UserId         string            `json:"user_id"`
 	Writeback      *bool             `json:"writeback,omitempty"`
 }
 

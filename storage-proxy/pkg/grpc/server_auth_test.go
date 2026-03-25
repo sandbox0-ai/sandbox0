@@ -287,8 +287,6 @@ func TestValidateNamespaceMutationMapsCompatibilityErrorsToFailedPrecondition(t 
 }
 
 func TestCreatePropagatesNamespaceValidationAndRecordsRemoteChange(t *testing.T) {
-	t.Parallel()
-
 	volCtx := newMountedTestVolumeContext(t, "vol-1", "team-a")
 	recorder := &fakeSyncRecorder{}
 	server := &FileSystemServer{
@@ -334,8 +332,6 @@ func TestCreatePropagatesNamespaceValidationAndRecordsRemoteChange(t *testing.T)
 }
 
 func TestCreateRejectsNamespaceIncompatiblePathBeforeMutation(t *testing.T) {
-	t.Parallel()
-
 	volCtx := newMountedTestVolumeContext(t, "vol-1", "team-a")
 	recorder := &fakeSyncRecorder{
 		validateErr: &volsync.NamespaceCompatibilityError{
@@ -380,8 +376,6 @@ func TestCreateRejectsNamespaceIncompatiblePathBeforeMutation(t *testing.T) {
 }
 
 func TestRenamePropagatesNamespaceValidationAndRecordsRemoteChange(t *testing.T) {
-	t.Parallel()
-
 	volCtx := newMountedTestVolumeContext(t, "vol-1", "team-a")
 	vfsCtx := vfs.NewLogContext(meta.Background())
 	entry, handleID, errno := volCtx.VFS.Create(vfsCtx, meta.RootInode, "hello.txt", 0o644, 0, 0)
@@ -435,8 +429,6 @@ func TestRenamePropagatesNamespaceValidationAndRecordsRemoteChange(t *testing.T)
 }
 
 func TestRenameRejectsNamespaceIncompatibleTargetBeforeMutation(t *testing.T) {
-	t.Parallel()
-
 	volCtx := newMountedTestVolumeContext(t, "vol-1", "team-a")
 	vfsCtx := vfs.NewLogContext(meta.Background())
 	entry, handleID, errno := volCtx.VFS.Create(vfsCtx, meta.RootInode, "hello.txt", 0o644, 0, 0)

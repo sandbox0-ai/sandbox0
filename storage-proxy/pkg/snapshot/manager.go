@@ -80,19 +80,20 @@ var (
 
 // Manager handles snapshot operations for SandboxVolumes
 type Manager struct {
-	mu             sync.RWMutex
-	locks          map[string]time.Time // volumeID -> lock acquired time
-	repo           repository
-	volMgr         volumeProvider
-	coordinator    FlushCoordinator // Optional: for distributed coordination
-	config         *config.StorageProxyConfig
-	logger         *logrus.Logger
-	clusterID      string
-	podID          string
-	metaClient     metaClient // Independent meta client for snapshot operations (no mount required)
-	eventPublisher eventPublisher
-	meteringRepo   meteringRecorder
-	metrics        *obsmetrics.StorageProxyMetrics
+	mu                sync.RWMutex
+	locks             map[string]time.Time // volumeID -> lock acquired time
+	repo              repository
+	volMgr            volumeProvider
+	newArchiveSession archiveSessionFactory
+	coordinator       FlushCoordinator // Optional: for distributed coordination
+	config            *config.StorageProxyConfig
+	logger            *logrus.Logger
+	clusterID         string
+	podID             string
+	metaClient        metaClient // Independent meta client for snapshot operations (no mount required)
+	eventPublisher    eventPublisher
+	meteringRepo      meteringRecorder
+	metrics           *obsmetrics.StorageProxyMetrics
 }
 
 // NewManager creates a new snapshot manager

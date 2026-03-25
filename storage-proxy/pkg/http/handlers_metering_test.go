@@ -3,6 +3,7 @@ package http
 import (
 	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/pathnorm"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/snapshot"
 	"github.com/sirupsen/logrus"
 )
@@ -98,10 +100,24 @@ func (f *fakeHTTPMeteringWriter) UpsertProducerWatermarkTx(ctx context.Context, 
 	return nil
 }
 
-type fakeHTTPSnapshotManager struct{}
+type fakeHTTPSnapshotManager struct {
+	exportBody          []byte
+	lastExport          *snapshot.ExportSnapshotRequest
+	casefoldEntries     []snapshot.SnapshotCasefoldCollision
+	compatibilityIssues []pathnorm.CompatibilityIssue
+	deletedSnapshot     []string
+}
 
 func (f *fakeHTTPSnapshotManager) CreateSnapshotSimple(ctx context.Context, req *snapshot.CreateSnapshotRequest) (*db.Snapshot, error) {
-	return nil, nil
+	return &db.Snapshot{
+		ID:          "snap-1",
+		VolumeID:    req.VolumeID,
+		TeamID:      req.TeamID,
+		UserID:      req.UserID,
+		Name:        req.Name,
+		Description: req.Description,
+		CreatedAt:   time.Date(2026, 3, 25, 3, 30, 0, 0, time.UTC),
+	}, nil
 }
 
 func (f *fakeHTTPSnapshotManager) ListSnapshots(ctx context.Context, volumeID, teamID string) ([]*db.Snapshot, error) {
@@ -109,7 +125,30 @@ func (f *fakeHTTPSnapshotManager) ListSnapshots(ctx context.Context, volumeID, t
 }
 
 func (f *fakeHTTPSnapshotManager) GetSnapshot(ctx context.Context, volumeID, snapshotID, teamID string) (*db.Snapshot, error) {
-	return nil, nil
+	return &db.Snapshot{
+		ID:        snapshotID,
+		VolumeID:  volumeID,
+		TeamID:    teamID,
+		Name:      "bootstrap-a",
+		CreatedAt: time.Date(2026, 3, 25, 3, 30, 0, 0, time.UTC),
+	}, nil
+}
+
+func (f *fakeHTTPSnapshotManager) ListSnapshotCasefoldCollisions(ctx context.Context, req *snapshot.ListSnapshotCasefoldCollisionsRequest) ([]snapshot.SnapshotCasefoldCollision, error) {
+	return f.casefoldEntries, nil
+}
+
+func (f *fakeHTTPSnapshotManager) ListSnapshotCompatibilityIssues(ctx context.Context, req *snapshot.ListSnapshotCompatibilityIssuesRequest) ([]pathnorm.CompatibilityIssue, error) {
+	return f.compatibilityIssues, nil
+}
+
+func (f *fakeHTTPSnapshotManager) ExportSnapshotArchive(ctx context.Context, req *snapshot.ExportSnapshotRequest, w io.Writer) error {
+	f.lastExport = req
+	if len(f.exportBody) == 0 {
+		f.exportBody = []byte("fake-archive")
+	}
+	_, err := w.Write(f.exportBody)
+	return err
 }
 
 func (f *fakeHTTPSnapshotManager) RestoreSnapshot(ctx context.Context, req *snapshot.RestoreSnapshotRequest) error {
@@ -117,6 +156,7 @@ func (f *fakeHTTPSnapshotManager) RestoreSnapshot(ctx context.Context, req *snap
 }
 
 func (f *fakeHTTPSnapshotManager) DeleteSnapshot(ctx context.Context, volumeID, snapshotID, teamID string) error {
+	f.deletedSnapshot = append(f.deletedSnapshot, snapshotID)
 	return nil
 }
 

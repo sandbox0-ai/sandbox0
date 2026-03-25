@@ -9,6 +9,8 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/notify"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/pathnorm"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volsync"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"github.com/sirupsen/logrus"
@@ -187,7 +189,89 @@ func authContext(teamID, sandboxID string) context.Context {
 }
 
 func newTestFileSystemServer(volMgr volumeManager, repo VolumeRepository, hub *notify.Hub) *FileSystemServer {
-	return NewFileSystemServer(volMgr, repo, hub, nil, logrus.New())
+	return NewFileSystemServer(volMgr, repo, hub, nil, logrus.New(), nil, nil)
+}
+
+type fakeMutationBarrier struct {
+	calls        int
+	lastVolumeID string
+}
+
+func (f *fakeMutationBarrier) WithShared(ctx context.Context, volumeID string, fn func(context.Context) error) error {
+	f.calls++
+	f.lastVolumeID = volumeID
+	return fn(ctx)
+}
+
+func TestWithAuthorizedVolumeMutationUsesBarrier(t *testing.T) {
+	t.Parallel()
+
+	barrier := &fakeMutationBarrier{}
+	server := &FileSystemServer{
+		volMgr: &fakeVolumeManager{
+			volumes: map[string]*volume.VolumeContext{
+				"vol-1": {VolumeID: "vol-1", TeamID: "team-a"},
+			},
+		},
+		mutationBarrier: barrier,
+		logger:          logrus.New(),
+	}
+
+	resp, err := withAuthorizedVolumeMutation(server, authContext("team-a", ""), "vol-1", func(ctx context.Context, volCtx *volume.VolumeContext) (*pb.Empty, error) {
+		if volCtx.VolumeID != "vol-1" {
+			t.Fatalf("volume id = %q, want vol-1", volCtx.VolumeID)
+		}
+		return &pb.Empty{}, nil
+	})
+	if err != nil {
+		t.Fatalf("withAuthorizedVolumeMutation() error = %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected response")
+	}
+	if barrier.calls != 1 || barrier.lastVolumeID != "vol-1" {
+		t.Fatalf("barrier = %+v, want one shared call for vol-1", barrier)
+	}
+}
+
+type fakeSyncRecorder struct {
+	lastValidate *volsync.NamespaceMutationRequest
+	validateErr  error
+}
+
+func (f *fakeSyncRecorder) RecordRemoteChange(ctx context.Context, change *volsync.RemoteChange) error {
+	return nil
+}
+
+func (f *fakeSyncRecorder) ValidateNamespaceMutation(ctx context.Context, req *volsync.NamespaceMutationRequest) error {
+	f.lastValidate = req
+	return f.validateErr
+}
+
+func TestValidateNamespaceMutationMapsCompatibilityErrorsToFailedPrecondition(t *testing.T) {
+	t.Parallel()
+
+	recorder := &fakeSyncRecorder{
+		validateErr: &volsync.NamespaceCompatibilityError{
+			Capabilities: pathnorm.FilesystemCapabilities{WindowsCompatiblePaths: true},
+			Issues: []pathnorm.CompatibilityIssue{{
+				Code: pathnorm.IssueCodeWindowsReservedName,
+				Path: "/app/CON.txt",
+			}},
+		},
+	}
+	server := &FileSystemServer{
+		syncRecorder: recorder,
+		logger:       logrus.New(),
+	}
+
+	err := server.validateNamespaceMutation(authContext("team-a", "sandbox-1"), buildNamespaceMutationRequest(authContext("team-a", "sandbox-1"), "vol-1", db.SyncEventCreate, "/app/CON.txt", ""))
+	if got := status.Code(err); got != codes.FailedPrecondition {
+		t.Fatalf("validateNamespaceMutation() code = %v, want %v (err=%v)", got, codes.FailedPrecondition, err)
+	}
+	if recorder.lastValidate == nil || recorder.lastValidate.Path != "/app/CON.txt" {
+		t.Fatalf("lastValidate = %+v, want path /app/CON.txt", recorder.lastValidate)
+	}
 }
 
 type fakeVolumeRepo struct {

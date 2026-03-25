@@ -55,6 +55,16 @@ type StorageProxyMetrics struct {
 	HTTPRequestDuration *prometheus.HistogramVec
 	HTTPRequestSize     *prometheus.HistogramVec
 	HTTPResponseSize    *prometheus.HistogramVec
+
+	VolumeSyncOperationsTotal    *prometheus.CounterVec
+	VolumeSyncOperationDuration  *prometheus.HistogramVec
+	VolumeSyncConflictsTotal     *prometheus.CounterVec
+	VolumeSyncReseedTotal        *prometheus.CounterVec
+	VolumeSyncRequestReplayTotal *prometheus.CounterVec
+	VolumeSyncReplicaLag         *prometheus.HistogramVec
+	VolumeSyncCompactionsTotal   *prometheus.CounterVec
+	VolumeSyncCompactedEntries   *prometheus.HistogramVec
+	VolumeSyncMaintenanceRuns    *prometheus.CounterVec
 }
 
 // NewStorageProxy registers and returns storage-proxy metrics.
@@ -244,5 +254,44 @@ func NewStorageProxy(registry prometheus.Registerer) *StorageProxyMetrics {
 			Help:    "Size of HTTP responses in bytes",
 			Buckets: prometheus.ExponentialBuckets(100, 10, 8),
 		}, []string{"method", "path"}),
+		VolumeSyncOperationsTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: "storage_proxy_volume_sync_operations_total",
+			Help: "Total number of volume sync operations",
+		}, []string{"operation", "status"}),
+		VolumeSyncOperationDuration: factory.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "storage_proxy_volume_sync_operation_duration_seconds",
+			Help:    "Duration of volume sync operations in seconds",
+			Buckets: prometheus.DefBuckets,
+		}, []string{"operation"}),
+		VolumeSyncConflictsTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: "storage_proxy_volume_sync_conflicts_total",
+			Help: "Total number of durable volume sync conflicts recorded",
+		}, []string{"source", "reason"}),
+		VolumeSyncReseedTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: "storage_proxy_volume_sync_reseed_required_total",
+			Help: "Total number of volume sync requests rejected because reseed is required",
+		}, []string{"operation"}),
+		VolumeSyncRequestReplayTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: "storage_proxy_volume_sync_request_replay_total",
+			Help: "Total number of idempotent replica mutation request replays or collisions",
+		}, []string{"result"}),
+		VolumeSyncReplicaLag: factory.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "storage_proxy_volume_sync_replica_lag",
+			Help:    "Observed journal sequence lag between the authoritative head and a replica position",
+			Buckets: []float64{0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 5000, 10000},
+		}, []string{"operation"}),
+		VolumeSyncCompactionsTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: "storage_proxy_volume_sync_compactions_total",
+			Help: "Total number of volume sync journal compaction attempts",
+		}, []string{"status"}),
+		VolumeSyncCompactedEntries: factory.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "storage_proxy_volume_sync_compacted_entries",
+			Help:    "Number of journal entries deleted by one compaction operation",
+			Buckets: []float64{0, 1, 10, 50, 100, 250, 500, 1000, 5000, 10000, 50000},
+		}, []string{"status"}),
+		VolumeSyncMaintenanceRuns: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: "storage_proxy_volume_sync_maintenance_runs_total",
+			Help: "Total number of background volume sync maintenance task runs",
+		}, []string{"task", "status"}),
 	}
 }

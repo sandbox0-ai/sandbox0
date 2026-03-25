@@ -4806,7 +4806,6 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/SyncConflict"
-      required: [id, team_id, user_id, cache_size, buffer_size, created_at, updated_at]
     SuccessSandboxVolumeResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"

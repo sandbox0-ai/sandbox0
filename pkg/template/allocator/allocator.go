@@ -9,8 +9,10 @@ import (
 
 // ClusterSummary provides capacity inputs for allocation.
 type ClusterSummary struct {
-	NodeCount     int
-	TotalPodCount int32
+	NodeCount        int
+	TotalNodeCount   int
+	SandboxNodeCount int
+	TotalPodCount    int32
 }
 
 // Allocator distributes pool sizes across clusters.
@@ -88,7 +90,8 @@ func (a *Allocator) ComputeAllocations(tpl *template.Template, clusters []*templ
 		clampReason := ""
 
 		if hasSummary {
-			estimatedCapacity := int32(summary.NodeCount * a.podsPerNode)
+			sandboxNodeCount := summary.sandboxCapableNodeCount()
+			estimatedCapacity := int32(sandboxNodeCount * a.podsPerNode)
 			availableCapacity := estimatedCapacity - summary.TotalPodCount
 
 			if availableCapacity < 0 {
@@ -126,7 +129,8 @@ func (a *Allocator) ComputeAllocations(tpl *template.Template, clusters []*templ
 					zap.Int32("available_capacity", availableCapacity),
 					zap.Int32("estimated_capacity", estimatedCapacity),
 					zap.Int32("current_pods", summary.TotalPodCount),
-					zap.Int("nodes", summary.NodeCount),
+					zap.Int("sandbox_nodes", sandboxNodeCount),
+					zap.Int("total_nodes", summary.totalNodeCount()),
 					zap.String("reason", clampReason),
 				)
 			} else {
@@ -136,6 +140,8 @@ func (a *Allocator) ComputeAllocations(tpl *template.Template, clusters []*templ
 					zap.Int32("min_idle", minIdle),
 					zap.Int32("max_idle", maxIdle),
 					zap.Int32("available_capacity", availableCapacity),
+					zap.Int("sandbox_nodes", sandboxNodeCount),
+					zap.Int("total_nodes", summary.totalNodeCount()),
 					zap.Float64("weight_ratio", weightRatio),
 				)
 			}
@@ -175,4 +181,24 @@ func (a *Allocator) ComputeAllocations(tpl *template.Template, clusters []*templ
 	)
 
 	return allocations
+}
+
+func (s *ClusterSummary) sandboxCapableNodeCount() int {
+	if s == nil {
+		return 0
+	}
+	if s.TotalNodeCount > 0 || s.SandboxNodeCount > 0 {
+		return s.SandboxNodeCount
+	}
+	return s.NodeCount
+}
+
+func (s *ClusterSummary) totalNodeCount() int {
+	if s == nil {
+		return 0
+	}
+	if s.TotalNodeCount > 0 {
+		return s.TotalNodeCount
+	}
+	return s.NodeCount
 }

@@ -28,6 +28,7 @@ type MultiClusterReconciler struct {
 	podsPerNode      int
 	allocator        *allocator.Allocator
 	clusterCache     map[string]*ClusterSummary
+	clusterCacheAt   map[string]time.Time
 	cacheMu          sync.RWMutex
 	templateStats    map[string]map[string]TemplateStat
 	templateStatsAt  map[string]time.Time
@@ -64,6 +65,7 @@ func NewMultiClusterReconciler(
 		podsPerNode:     podsPerNode,
 		allocator:       allocator.NewAllocator(podsPerNode, logger, metrics),
 		clusterCache:    make(map[string]*ClusterSummary),
+		clusterCacheAt:  make(map[string]time.Time),
 		templateStats:   make(map[string]map[string]TemplateStat),
 		templateStatsAt: make(map[string]time.Time),
 		metrics:         metrics,
@@ -138,6 +140,33 @@ func (r *MultiClusterReconciler) GetTemplateStatsAge(clusterID string) (time.Dur
 	defer r.statsMu.RUnlock()
 
 	updatedAt, ok := r.templateStatsAt[clusterID]
+	if !ok || updatedAt.IsZero() {
+		return 0, false
+	}
+
+	return r.since(updatedAt), true
+}
+
+// GetClusterSummary returns the cached cluster summary for a shard.
+func (r *MultiClusterReconciler) GetClusterSummary(clusterID string) (*ClusterSummary, bool) {
+	r.cacheMu.RLock()
+	defer r.cacheMu.RUnlock()
+
+	summary, ok := r.clusterCache[clusterID]
+	if !ok || summary == nil {
+		return nil, false
+	}
+
+	copy := *summary
+	return &copy, true
+}
+
+// GetClusterSummaryAge returns age since the last summary update for a cluster.
+func (r *MultiClusterReconciler) GetClusterSummaryAge(clusterID string) (time.Duration, bool) {
+	r.cacheMu.RLock()
+	defer r.cacheMu.RUnlock()
+
+	updatedAt, ok := r.clusterCacheAt[clusterID]
 	if !ok || updatedAt.IsZero() {
 		return 0, false
 	}
@@ -272,6 +301,7 @@ func (r *MultiClusterReconciler) fetchClusterSummaries(ctx context.Context, clus
 	metrics := r.metrics
 	var wg sync.WaitGroup
 	summaries := make(map[string]*ClusterSummary)
+	summaryTimes := make(map[string]time.Time)
 	var mu sync.Mutex
 
 	for _, cluster := range clusters {
@@ -290,6 +320,7 @@ func (r *MultiClusterReconciler) fetchClusterSummaries(ctx context.Context, clus
 
 			mu.Lock()
 			summaries[c.ClusterID] = summary
+			summaryTimes[c.ClusterID] = r.now()
 			mu.Unlock()
 
 			stats, err := r.clusterClient.GetTemplateStats(ctx, c.ClusterGatewayURL)
@@ -310,10 +341,25 @@ func (r *MultiClusterReconciler) fetchClusterSummaries(ctx context.Context, clus
 			}
 
 			if metrics != nil {
+				headroom := int64(0)
+				sandboxNodeCount := summary.SandboxNodeCount
+				if summary.TotalNodeCount == 0 && summary.SandboxNodeCount == 0 {
+					sandboxNodeCount = summary.NodeCount
+				}
+				headroom = int64(int32(sandboxNodeCount*r.podsPerNode) - summary.TotalPodCount)
+				if headroom < 0 {
+					headroom = 0
+				}
+
 				metrics.ClusterCapacity.WithLabelValues(c.ClusterID, "nodes").Set(float64(summary.NodeCount))
+				metrics.ClusterCapacity.WithLabelValues(c.ClusterID, "total_nodes").Set(float64(summary.TotalNodeCount))
+				metrics.ClusterCapacity.WithLabelValues(c.ClusterID, "sandbox_nodes").Set(float64(summary.SandboxNodeCount))
 				metrics.ClusterCapacity.WithLabelValues(c.ClusterID, "idle_pods").Set(float64(summary.IdlePodCount))
 				metrics.ClusterCapacity.WithLabelValues(c.ClusterID, "active_pods").Set(float64(summary.ActivePodCount))
+				metrics.ClusterCapacity.WithLabelValues(c.ClusterID, "pending_active_pods").Set(float64(summary.PendingActivePodCount))
 				metrics.ClusterCapacity.WithLabelValues(c.ClusterID, "total_pods").Set(float64(summary.TotalPodCount))
+				metrics.ClusterCapacity.WithLabelValues(c.ClusterID, "available_headroom").Set(float64(headroom))
+				metrics.ClusterSummaryAge.WithLabelValues(c.ClusterID).Set(0)
 			}
 
 			if err := r.clusterStore.UpdateClusterLastSeen(ctx, c.ClusterID); err != nil {
@@ -329,6 +375,7 @@ func (r *MultiClusterReconciler) fetchClusterSummaries(ctx context.Context, clus
 
 	r.cacheMu.Lock()
 	r.clusterCache = summaries
+	r.clusterCacheAt = summaryTimes
 	r.cacheMu.Unlock()
 }
 
@@ -412,8 +459,10 @@ func (r *MultiClusterReconciler) computeAllocations(tpl *template.Template, clus
 	summaries := make(map[string]*allocator.ClusterSummary, len(r.clusterCache))
 	for clusterID, summary := range r.clusterCache {
 		summaries[clusterID] = &allocator.ClusterSummary{
-			NodeCount:     summary.NodeCount,
-			TotalPodCount: summary.TotalPodCount,
+			NodeCount:        summary.NodeCount,
+			TotalNodeCount:   summary.TotalNodeCount,
+			SandboxNodeCount: summary.SandboxNodeCount,
+			TotalPodCount:    summary.TotalPodCount,
 		}
 	}
 	r.cacheMu.RUnlock()

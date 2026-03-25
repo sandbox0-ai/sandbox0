@@ -12,23 +12,27 @@ import (
 	corelisters "k8s.io/client-go/listers/core/v1"
 )
 
-// ClusterSummary represents the cluster capacity and status
+// ClusterSummary represents cluster-level sandbox capacity and demand signals.
 type ClusterSummary struct {
-	ClusterID      string `json:"cluster_id"`
-	NodeCount      int    `json:"node_count"`
-	IdlePodCount   int32  `json:"idle_pod_count"`
-	ActivePodCount int32  `json:"active_pod_count"`
-	TotalPodCount  int32  `json:"total_pod_count"`
+	ClusterID             string `json:"cluster_id"`
+	NodeCount             int    `json:"node_count"`
+	TotalNodeCount        int    `json:"total_node_count"`
+	SandboxNodeCount      int    `json:"sandbox_node_count"`
+	IdlePodCount          int32  `json:"idle_pod_count"`
+	ActivePodCount        int32  `json:"active_pod_count"`
+	PendingActivePodCount int32  `json:"pending_active_pod_count"`
+	TotalPodCount         int32  `json:"total_pod_count"`
 }
 
-// TemplateStat represents statistics for a single template
+// TemplateStat represents per-template sandbox demand signals.
 type TemplateStat struct {
-	TemplateID  string `json:"template_id"`
-	Namespace   string `json:"namespace"`
-	IdleCount   int32  `json:"idle_count"`
-	ActiveCount int32  `json:"active_count"`
-	MinIdle     int32  `json:"min_idle"`
-	MaxIdle     int32  `json:"max_idle"`
+	TemplateID         string `json:"template_id"`
+	Namespace          string `json:"namespace"`
+	IdleCount          int32  `json:"idle_count"`
+	ActiveCount        int32  `json:"active_count"`
+	PendingActiveCount int32  `json:"pending_active_count"`
+	MinIdle            int32  `json:"min_idle"`
+	MaxIdle            int32  `json:"max_idle"`
 }
 
 // TemplateStats represents statistics for all templates
@@ -73,6 +77,7 @@ func (s *ClusterService) GetClusterSummary(ctx context.Context) (*ClusterSummary
 		return nil, err
 	}
 	nodeCount := len(nodes)
+	sandboxNodeCount := countSandboxEligibleNodes(nodes, cfg.SandboxPodPlacement.NodeSelector)
 
 	// Get all sandbox-related pods
 	idlePods, err := s.podLister.List(labels.SelectorFromSet(map[string]string{
@@ -100,18 +105,25 @@ func (s *ClusterService) GetClusterSummary(ctx context.Context) (*ClusterSummary
 	}
 
 	activeCount := int32(0)
+	pendingActiveCount := int32(0)
 	for _, pod := range activePods {
-		if pod.Status.Phase == corev1.PodRunning {
+		if pod.Status.Phase == corev1.PodRunning || pod.Status.Phase == corev1.PodPending {
 			activeCount++
+			if pod.Status.Phase == corev1.PodPending {
+				pendingActiveCount++
+			}
 		}
 	}
 
 	return &ClusterSummary{
-		ClusterID:      cfg.DefaultClusterId,
-		NodeCount:      nodeCount,
-		IdlePodCount:   idleCount,
-		ActivePodCount: activeCount,
-		TotalPodCount:  idleCount + activeCount,
+		ClusterID:             cfg.DefaultClusterId,
+		NodeCount:             nodeCount,
+		TotalNodeCount:        nodeCount,
+		SandboxNodeCount:      sandboxNodeCount,
+		IdlePodCount:          idleCount,
+		ActivePodCount:        activeCount,
+		PendingActivePodCount: pendingActiveCount,
+		TotalPodCount:         idleCount + activeCount,
 	}, nil
 }
 
@@ -164,21 +176,52 @@ func (s *ClusterService) GetTemplateStats(ctx context.Context) (*TemplateStats, 
 		}
 
 		activeCount := int32(0)
+		pendingActiveCount := int32(0)
 		for _, pod := range activePods {
-			if pod.Status.Phase == corev1.PodRunning {
+			if pod.Status.Phase == corev1.PodRunning || pod.Status.Phase == corev1.PodPending {
 				activeCount++
+				if pod.Status.Phase == corev1.PodPending {
+					pendingActiveCount++
+				}
 			}
 		}
 
 		stats.Templates = append(stats.Templates, TemplateStat{
-			TemplateID:  template.Name,
-			Namespace:   template.Namespace,
-			IdleCount:   idleCount,
-			ActiveCount: activeCount,
-			MinIdle:     template.Spec.Pool.MinIdle,
-			MaxIdle:     template.Spec.Pool.MaxIdle,
+			TemplateID:         template.Name,
+			Namespace:          template.Namespace,
+			IdleCount:          idleCount,
+			ActiveCount:        activeCount,
+			PendingActiveCount: pendingActiveCount,
+			MinIdle:            template.Spec.Pool.MinIdle,
+			MaxIdle:            template.Spec.Pool.MaxIdle,
 		})
 	}
 
 	return stats, nil
+}
+
+func countSandboxEligibleNodes(nodes []*corev1.Node, selector map[string]string) int {
+	if len(selector) == 0 {
+		return len(nodes)
+	}
+
+	count := 0
+	for _, node := range nodes {
+		if nodeMatchesSelector(node, selector) {
+			count++
+		}
+	}
+	return count
+}
+
+func nodeMatchesSelector(node *corev1.Node, selector map[string]string) bool {
+	if node == nil {
+		return false
+	}
+	for key, value := range selector {
+		if node.Labels[key] != value {
+			return false
+		}
+	}
+	return true
 }

@@ -54,6 +54,3 @@ tmp/
 .env
 .env.local
 secrets/
-
-# tools
-fswatch-sh.sh

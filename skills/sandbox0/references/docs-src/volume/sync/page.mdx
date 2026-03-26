@@ -1,87 +1,193 @@
 # Volume Sync
 
-Volume Sync is the storage-proxy side of Sandbox0's local-first workspace sync model.
+Volume Sync keeps one Volume usable from your local workspace and from sandboxes at the same time.
 
-Volume Sync lets the same SandboxVolume back:
+Use it when you want to:
+
+- keep the same workspace in sync across macOS, Linux, and Windows
+- switch between local development and sandbox execution without copying files around
+- let AI agents work inside a sandbox while you continue editing locally
+
+In practice, the same Volume can back:
 
 - a local workspace managed by `s0 sync`
 - one or more running sandboxes that mount that Volume
-- replicas running on different filesystems such as macOS, Linux, and Windows
-
-The storage-proxy contract adds durable metadata and journal APIs so a local replica can:
-
-- register itself as a replica for a Volume
-- pull journal entries after a known sequence
-- push replica-originated changes through storage-proxy
-- advance a durable replica cursor
-- inspect deterministic conflict records
+- different machines and filesystems over time
 
 <Callout variant="info">
-The recommended operator workflow is `s0 sync`. The HTTP endpoints on this page are the underlying storage-proxy contract that `s0` uses for bootstrap, replay, upload, and conflict state.
+For most users, `s0 sync` is the only interface you need. The HTTP endpoints at the end of this page are for advanced integrations and custom clients.
 </Callout>
 
-## s0 Sync Workflow
+## What Volume Sync Solves
 
-The normal user flow is:
+Without Volume Sync, moving a workspace between devices or between local and remote environments usually means pushing to Git, copying files manually, or rebuilding the same state in multiple places.
 
-1. create or choose a SandboxVolume
-2. attach a local workspace to that Volume with `s0 sync attach`
-3. mount the same Volume into a sandbox when you want remote execution against the same workspace state
-4. let `s0 sync` keep the local workspace and the authoritative Volume namespace reconciled
+With Volume Sync, Sandbox0 gives you one shared workspace state:
 
-Example:
+- your laptop can edit the files locally
+- a sandbox can mount the same files at `/workspace`
+- an AI agent running in that sandbox can read and modify the same project
+- when you switch to another machine, you can attach the same Volume again and continue working
+
+## Quickstart
+
+The normal workflow is:
+
+1. create or choose a Volume
+2. attach a local directory to that Volume
+3. mount the same Volume into a sandbox
+4. work locally, in the sandbox, or both
+
+## Attach a Local Workspace
+
+If you already have a local project and want to start syncing it to a Volume:
 
 ```bash
 s0 sync attach vol_abc123xyz ~/work/my-project
-
-s0 sandbox volume mount sb_abc123xyz vol_abc123xyz /workspace
 ```
 
-By default `s0 sync attach` starts the sync worker in the background. Use `--foreground` to keep it attached to the current terminal and stream worker logs:
+If you are on a new machine and want to pull the existing Volume contents into a local directory first:
+
+```bash
+mkdir -p ~/work/my-project
+s0 sync attach vol_abc123xyz ~/work/my-project --init-from volume
+```
+
+`s0 sync attach` starts a background sync worker by default. If you want to keep it attached to the terminal and watch the sync logs directly:
 
 ```bash
 s0 sync attach vol_abc123xyz ~/work/my-project --foreground
 ```
 
-Once a workspace has been attached, `s0 sync` behaves like Git for workspace discovery: when the current directory is inside an attached workspace, commands such as `s0 sync status`, `s0 sync logs`, `s0 sync detach`, and `s0 sync conflicts list` can infer the workspace root without requiring an explicit path.
+<Callout variant="info">
+`--init-from volume` is the safest choice when you are attaching a fresh directory on another machine and want the remote workspace state first.
+</Callout>
 
-## Sync Semantics
+## Mount the Same Volume into a Sandbox
 
-Sandbox0 treats the Volume namespace inside `storage-proxy` as authoritative. In practice that means:
+Once the Volume is attached locally, mount the same Volume into a sandbox:
 
-- `s0 sync attach --init-from volume` can seed a fresh local workspace from the current Volume contents
-- local file changes can be uploaded back into the same Volume
-- sandbox writes against a mounted Volume can replay back into the local workspace
-- the same Volume can stay mounted in sandbox while a local workspace remains attached
+```bash
+s0 sandbox volume mount --volume-id vol_abc123xyz --path /workspace -s sb_abc123xyz
+```
 
-For local scanning, `s0 sync` respects `.gitignore` patterns plus `.git/info/exclude`. Those ignore rules only affect local discovery and upload. They do not hide authoritative remote changes replayed from the Volume into the workspace.
+Now the same workspace is available in two places:
 
-This matters when a Volume is shared by different environments. A path that is ignored locally can still appear through remote replay if it already exists in the authoritative Volume namespace.
+- locally at `~/work/my-project`
+- inside the sandbox at `/workspace`
 
-## Cross-Platform Compatibility
+This is the key workflow for remote execution and agent collaboration. You can edit locally, while the sandbox runs builds, tests, long-running jobs, or AI agent tasks against the same project tree.
 
-One Volume can be shared by macOS, Linux, Windows-capable replicas, and sandbox mounts at the same time. Replica registration and bootstrap therefore carry filesystem capability metadata so `storage-proxy` can keep the authoritative namespace portable when required.
+## Work Across Devices and Platforms
 
-Current compatibility checks include:
+Volume Sync is designed for moving the same workspace across machines and operating systems.
 
-- casefold collisions such as `Foo` and `foo`
-- Unicode-normalization collisions such as `Caf{'\\u00e9'}.txt` and `Cafe{'\\u0301'}.txt`
-- Windows-incompatible path segments such as reserved names like `CON.txt` or names with trailing dots or spaces
+Typical examples:
 
-When the authoritative namespace cannot be represented safely for the requesting replica, bootstrap or mutation APIs return a structured conflict instead of silently producing a broken local checkout.
+- start work on macOS, then continue on a Linux workstation
+- attach the same Volume on a Windows machine for review or edits
+- keep a sandbox mounted so remote jobs and agents always see the current workspace state
 
-## Conflict Handling
+The practical flow is simple:
 
-`s0 sync` presents conflicts as path-centric operator workflows, similar to Git:
+1. on machine A, attach the workspace and work normally
+2. on machine B, attach the same Volume with `--init-from volume`
+3. mount that Volume into a sandbox whenever you need remote execution or agent help
 
-- `s0 sync status` summarizes unmerged sync paths
-- `s0 sync conflicts list` lists open conflicts
-- `s0 sync conflicts show <path>` shows the reason, latest remote actor metadata, artifact path, and suggested next step
-- `s0 sync conflicts mark <path>` marks the conflict as resolved or ignored after the operator fixes the workspace state
+## Work with Sandboxes and AI Agents
 
-Content conflicts can materialize a deterministic sidecar artifact such as `main.sandbox0-conflict-sandbox-seq-42.go`. Compatibility conflicts such as Windows-invalid names remain first-class conflicts, but do not always create an artifact file.
+Volume Sync is especially useful when you want sandbox execution without losing your local development loop.
 
-## Replica Registration
+A common pattern is:
+
+1. attach your repo locally
+2. mount the same Volume into a sandbox at `/workspace`
+3. run an AI agent or command inside the sandbox against `/workspace`
+4. review the resulting file changes locally
+
+That gives you a smooth loop:
+
+- local edits upload to the shared Volume
+- sandbox writes replay back into the local workspace
+- agents can modify the same files you are working on
+
+You do not need to manually export, download, or re-copy the workspace between environments.
+
+## Daily Commands
+
+After a workspace has been attached, `s0 sync` can usually infer the workspace root from your current directory.
+
+Useful commands:
+
+```bash
+# Show current sync status
+s0 sync status
+
+# Read sync worker logs
+s0 sync logs -f
+
+# List all local sync attachments on this machine
+s0 sync list
+
+# List unresolved conflicts
+s0 sync conflicts list
+
+# Stop syncing this local workspace
+s0 sync detach
+```
+
+## Cross-Platform Rules to Keep in Mind
+
+Volume Sync helps you move between filesystems safely, but some path patterns are not portable.
+
+Avoid:
+
+- two paths that differ only by case, such as `Foo` and `foo`
+- Unicode-equivalent names that look the same on some systems
+- Windows-incompatible names such as reserved device names or paths ending in dots or spaces
+
+When Sandbox0 detects a namespace that is unsafe for one of your attached platforms, it reports a sync conflict instead of silently creating a broken checkout on another machine.
+
+## Conflicts and Recovery
+
+Most of the time, Volume Sync should feel automatic. When there is a problem, the operator flow is:
+
+```bash
+s0 sync status
+s0 sync conflicts list
+s0 sync conflicts show <path>
+```
+
+After you repair the workspace locally, mark the conflict:
+
+```bash
+s0 sync conflicts mark <path>
+```
+
+If you want to leave a conflict recorded but stop blocking on it, you can mark it as ignored:
+
+```bash
+s0 sync conflicts mark <path> --ignore
+```
+
+A few practical notes:
+
+- while unresolved sync conflicts remain open, local uploads pause until you resolve or ignore them
+- `s0 sync logs -f` is the fastest way to see why a worker is blocked
+- if a local machine falls too far behind retained sync history, the worker can bootstrap from the Volume again automatically
+
+## Advanced: How It Works
+
+This section is for custom clients and operators who need to understand the underlying sync contract.
+
+Volume Sync is built around four backend responsibilities:
+
+- register a replica and its filesystem capabilities
+- bootstrap a local workspace from the current Volume state
+- replay remote changes and upload local changes
+- persist conflicts and durable progress
+
+### Replica Registration
 
 Register or refresh a local replica identity for a Volume.
 
@@ -89,148 +195,88 @@ Register or refresh a local replica identity for a Volume.
 /api/v1/sandboxvolumes/{'{id}'}/sync/replicas/{'{replica_id}'}
 </Endpoint>
 
-The replica record stores platform metadata, root path information, filesystem capabilities, last-seen time, and the durable cursor.
+Custom clients should register filesystem capabilities so Sandbox0 can reject path mutations that are not portable to that replica.
 
-`storage-proxy` now accepts a `capabilities` object in replica registration. This is the contract `s0 sync` clients target directly:
+### Bootstrap
 
-- `case_sensitive`
-- `unicode_normalization_insensitive`
-- `windows_compatible_paths`
-
-The legacy top-level `case_sensitive` field remains available for backward compatibility, but the server normalizes it into `capabilities` before it makes sync decisions.
-
-When a replica registers stricter capabilities, `storage-proxy` now persists a merged per-Volume namespace policy. That policy is then enforced for both future replica-originated changes and remote sandbox mutations flowing through the gRPC mounted-volume path.
-
-## Bootstrap Anchor
-
-Create a bootstrap snapshot together with a journal replay anchor.
+Create a bootstrap snapshot and replay anchor:
 
 <Endpoint method="POST">
 /api/v1/sandboxvolumes/{'{id}'}/sync/bootstrap
 </Endpoint>
 
-The response returns:
-
-- `snapshot`: a point-in-time snapshot to seed the local replica
-- `replay_after_seq`: the journal sequence the client should resume from after importing the snapshot
-- `archive_download_path`: the `tar.gz` download path for the bootstrap snapshot contents
-
-Clients can send a `capabilities` object when bootstrapping a local replica. `storage-proxy` audits the snapshot tree against those requested filesystem semantics before returning success. If the authoritative namespace is incompatible, bootstrap returns `409 conflict` with a structured `issues` array.
-
-Current blocking issue types include:
-
-- casefold collisions such as `Foo` and `foo`
-- Unicode-normalization collisions such as `Caf{'\\u00e9'}.txt` and `Cafe{'\\u0301'}.txt`
-- Windows-incompatible path segments such as reserved names like `CON.txt` or names with trailing dots/spaces
-
-The error payload also echoes the normalized `capabilities` that were used for the audit, so clients can distinguish namespace repair problems from request-shaping bugs.
-
-During bootstrap, `storage-proxy` now acquires a distributed volume mutation barrier before it captures `replay_after_seq` and creates the snapshot. That gives bootstrap a stable `snapshot + replay_after_seq` handoff even on an actively mutating Volume, without forcing clients to retry because of concurrent journal movement.
-
-This gives local-first clients a deterministic bootstrap contract: seed from the snapshot, then replay journal entries with `seq > replay_after_seq`.
-
-## Bootstrap Archive Download
-
-Download the bootstrap snapshot archive returned by the bootstrap anchor.
+Download the bootstrap archive:
 
 <Endpoint method="GET">
 /api/v1/sandboxvolumes/{'{id}'}/sync/bootstrap/archive?snapshot_id=snap_123
 </Endpoint>
 
-The response is an `application/gzip` stream containing a `tar.gz` archive of the snapshot root. Clients can unpack the archive into the local replica root, then replay journal entries with `seq > replay_after_seq`.
+This is the mechanism behind `s0 sync attach --init-from volume`.
 
-## Pull Journal Entries
+### Replay and Upload
 
-List journal entries after a known sequence number.
+List journal entries after a known sequence:
 
 <Endpoint method="GET">
 /api/v1/sandboxvolumes/{'{id}'}/sync/changes?after=42&limit=256
 </Endpoint>
 
-Journal entries are ordered by ascending `seq` and are authoritative for:
-
-- remote sandbox writes flowing through `storage-proxy`
-- replica-originated mutations accepted by `storage-proxy`
-- tombstones for deletes
-- case-fold aware rename and path conflict detection
-
-Each successful response also includes `retained_after_seq`, the durable journal floor still retained on the server for that Volume. If a client asks for `after` lower than that retained floor, `storage-proxy` now returns `409 conflict` with `reason: reseed_required` plus structured `retained_after_seq` and `head_seq` details so the client can bootstrap again instead of pretending incremental replay is still possible.
-
-`storage-proxy` also runs background sync maintenance: it compacts old journal entries behind a configurable retained window and deletes stale idempotency request records after their retention TTL. That keeps the durable sync metadata bounded without weakening the reseed contract.
-
-Operationally, the storage-proxy `/metrics` endpoint now emits sync-specific Prometheus series for operation outcomes and latency, conflict reasons, reseed-required responses, request-id replays, replica lag observations, compaction results, and maintenance task runs. The metric names are prefixed with `storage_proxy_volume_sync_`.
-
-## Push Replica Changes
-
-Submit local replica changes back to `storage-proxy`.
+Submit local replica changes:
 
 <Endpoint method="POST">
 /api/v1/sandboxvolumes/{'{id}'}/sync/replicas/{'{replica_id}'}/changes
 </Endpoint>
 
-The request includes:
-
-- `request_id`: a client-generated idempotency key for this mutation batch
-- `base_seq`: the last sequence the replica reconciled against before producing these changes
-- `changes`: file-level change records such as `create`, `write`, `remove`, `rename`, `chmod`, or `invalidate`
-- `content_base64`: inline file content for `write` and file `create` operations
-- `entry_kind`: `file` or `directory` for `create`
-- `mode`: optional POSIX mode for `create` and `chmod`
-
-`storage-proxy` validates the cursor, applies accepted changes into the Volume namespace, journals those accepted changes, and records conflicts instead of silently overwriting concurrent updates.
-
-Replica append is now retry-safe: `storage-proxy` stores the committed response for each `{replica_id, request_id}` pair and replays that exact response on retried requests instead of applying the same batch twice. Reusing the same `request_id` with a different payload is rejected as a conflict.
-
-For replicas that register portable filesystem capabilities, `storage-proxy` also rejects non-canonical path operations that would otherwise produce a namespace the client cannot represent locally. That includes:
-
-- casefold collisions such as `foo` versus `Foo`
-- equivalent Unicode-normalized names
-- Windows-incompatible names such as reserved device names or path segments ending in dots/spaces
-
-Explicit case-only renames remain allowed when the source path matches the current canonical namespace entry.
-
-The same compatibility policy is also enforced for remote sandbox create and rename operations once a Volume has learned stricter requirements from any registered replica. This keeps the authoritative namespace from drifting back into a Linux-only shape after a portable client has attached.
-
-Replica-specific mutation APIs also enforce a lease based on the replica `last_seen_at` heartbeat. If a replica stays offline beyond the lease window, it must re-register before it can push more changes or advance its durable cursor again.
-
-Replica mutation batches are also validated against the retained journal floor. If a client submits `base_seq` older than the compacted journal history, `storage-proxy` rejects the batch with `reseed_required` so stale local state cannot silently skip deleted or conflicting history.
-
-## Advance Replica Cursor
-
-Persist the highest journal sequence fully applied to the local replica.
+Persist the highest applied cursor:
 
 <Endpoint method="PUT">
 /api/v1/sandboxvolumes/{'{id}'}/sync/replicas/{'{replica_id}'}/cursor
 </Endpoint>
 
-This keeps recovery deterministic after process restarts or offline periods.
+The server retains sync history for a bounded window. If a replica falls behind that retained journal floor, it must bootstrap again from the current Volume state.
 
-After a client reseeds from bootstrap, it can advance the durable cursor directly to the returned `replay_after_seq` even if its previous cursor had fallen behind the compacted journal floor. Attempting to persist a cursor lower than the retained floor is rejected with `reseed_required`.
+### Conflict State
 
-## Conflict Inspection
-
-List recorded sync conflicts for a Volume.
+List open conflicts:
 
 <Endpoint method="GET">
 /api/v1/sandboxvolumes/{'{id}'}/sync/conflicts?status=open
 </Endpoint>
 
-Each conflict record includes:
-
-- the conflicting logical path
-- the normalized path used for case-fold safety
-- a deterministic `artifact_path` when the conflict is materialized as a sidecar file
-- the existing journal sequence that won the race
-- conflict metadata for debugging and resolution tooling
-
-For concurrent content conflicts, the server materializes the artifact path into the Volume namespace, for example `main.sandbox0-conflict-replica-1-seq-42.go`, and records that artifact write back into the sync journal so remote sandboxes and replicas can observe it deterministically. Compatibility conflicts such as Windows-invalid names are still recorded as first-class conflicts, but they do not create artifact files because there is no safe artifact path to materialize.
-
-## Conflict Resolution State
-
-Mark a conflict as resolved or ignored after a client or operator has handled it.
+Mark a conflict as resolved or ignored:
 
 <Endpoint method="PUT">
 /api/v1/sandboxvolumes/{'{id}'}/sync/conflicts/{'{conflict_id}'}
 </Endpoint>
 
-This updates the authoritative conflict status inside `storage-proxy` without creating a parallel side channel for resolution state.
+Conflict records are durable, so custom tooling can inspect and resolve them consistently across local clients and sandboxes.
+
+---
+
+## Next Steps
+
+<CardGrid>
+  <LinkCard
+    title="Sandbox Files"
+    href="/docs/sandbox/files"
+    cta="Learn More"
+  >
+    Read and write synced workspace files inside sandboxes
+  </LinkCard>
+
+  <LinkCard
+    title="Ports Exposure"
+    href="/docs/sandbox/ports"
+    cta="Learn More"
+  >
+    Expose services running from your synced workspace
+  </LinkCard>
+
+  <LinkCard
+    title="Sandbox Webhooks"
+    href="/docs/sandbox/webhooks"
+    cta="Learn More"
+  >
+    Automate workflows with sandbox lifecycle events
+  </LinkCard>
+</CardGrid>

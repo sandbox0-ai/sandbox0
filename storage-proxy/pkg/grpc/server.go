@@ -32,6 +32,7 @@ type FileSystemServer struct {
 	syncRecorder     syncRecorder
 	mutationBarrier  volumeMutationBarrier
 	logger           *logrus.Logger
+	now              func() time.Time
 }
 
 type volumeManager interface {
@@ -69,7 +70,22 @@ func NewFileSystemServer(volMgr volumeManager, volumeRepo VolumeRepository, even
 		syncRecorder:     syncRecorder,
 		mutationBarrier:  mutationBarrier,
 		logger:           logger,
+		now:              func() time.Time { return time.Now().UTC() },
 	}
+}
+
+func (s *FileSystemServer) SetNowFunc(now func() time.Time) {
+	if now == nil {
+		return
+	}
+	s.now = func() time.Time { return now().UTC() }
+}
+
+func (s *FileSystemServer) currentTime() time.Time {
+	if s != nil && s.now != nil {
+		return s.now()
+	}
+	return time.Now().UTC()
 }
 
 // MountVolume mounts a volume
@@ -199,11 +215,17 @@ func (s *FileSystemServer) publishEvent(ctx context.Context, event *pb.WatchEven
 	if s.eventBroadcaster == nil || event == nil {
 		goto recordSync
 	}
+	if event.TimestampUnix == 0 {
+		event.TimestampUnix = s.currentTime().Unix()
+	}
 	s.eventBroadcaster.Publish(ctx, event)
 
 recordSync:
 	if s.syncRecorder == nil || event == nil {
 		return
+	}
+	if event.TimestampUnix == 0 {
+		event.TimestampUnix = s.currentTime().Unix()
 	}
 	claims := internalauth.ClaimsFromContext(ctx)
 	if claims == nil || claims.TeamID == "" {

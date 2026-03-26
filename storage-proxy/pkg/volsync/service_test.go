@@ -348,6 +348,18 @@ func (f *fakeVolumeMutationBarrier) WithExclusive(ctx context.Context, volumeID 
 	return fn(ctx)
 }
 
+func parseConflictMetadata(t *testing.T, conflict *db.SyncConflict) map[string]any {
+	t.Helper()
+	if conflict == nil || conflict.Metadata == nil {
+		t.Fatal("expected conflict metadata")
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(*conflict.Metadata, &metadata); err != nil {
+		t.Fatalf("Unmarshal conflict metadata: %v", err)
+	}
+	return metadata
+}
+
 func TestAppendReplicaChangesDetectsConflictAfterBaseSeq(t *testing.T) {
 	repo := newFakeRepo()
 	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
@@ -360,7 +372,16 @@ func TestAppendReplicaChangesDetectsConflictAfterBaseSeq(t *testing.T) {
 	}
 	repo.journal = []*db.SyncJournalEntry{
 		{Seq: 1, VolumeID: "vol-1", TeamID: "team-1", Source: db.SyncSourceReplica, NormalizedPath: "/app/readme.md", Path: "/app/README.md", ReplicaID: stringPtr("replica-1")},
-		{Seq: 2, VolumeID: "vol-1", TeamID: "team-1", Source: db.SyncSourceSandbox, EventType: db.SyncEventWrite, NormalizedPath: "/app/readme.md", Path: "/app/README.md"},
+		{
+			Seq:            2,
+			VolumeID:       "vol-1",
+			TeamID:         "team-1",
+			Source:         db.SyncSourceSandbox,
+			EventType:      db.SyncEventWrite,
+			NormalizedPath: "/app/readme.md",
+			Path:           "/app/README.md",
+			Metadata:       mustMarshalMetadata(map[string]any{"sandbox_id": "sandbox-1"}),
+		},
 	}
 	repo.nextSeq = 2
 
@@ -393,6 +414,71 @@ func TestAppendReplicaChangesDetectsConflictAfterBaseSeq(t *testing.T) {
 	}
 	if resp.HeadSeq != 2 {
 		t.Fatalf("head seq = %d, want 2", resp.HeadSeq)
+	}
+	metadata := parseConflictMetadata(t, resp.Conflicts[0])
+	if metadata["latest_source"] != db.SyncSourceSandbox {
+		t.Fatalf("latest_source = %#v, want %q", metadata["latest_source"], db.SyncSourceSandbox)
+	}
+	if metadata["latest_sandbox_id"] != "sandbox-1" {
+		t.Fatalf("latest_sandbox_id = %#v, want %q", metadata["latest_sandbox_id"], "sandbox-1")
+	}
+	if _, ok := metadata["latest_platform"]; ok {
+		t.Fatalf("latest_platform = %#v, want omitted for sandbox conflicts", metadata["latest_platform"])
+	}
+}
+
+func TestAppendReplicaChangesIncludesLatestReplicaPlatformInConflictMetadata(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
+	repo.replicas[replicaKey("vol-1", "replica-1")] = &db.SyncReplica{
+		ID:             "replica-1",
+		VolumeID:       "vol-1",
+		TeamID:         "team-1",
+		Platform:       "darwin",
+		CaseSensitive:  false,
+		LastAppliedSeq: 1,
+	}
+	repo.replicas[replicaKey("vol-1", "replica-2")] = &db.SyncReplica{
+		ID:             "replica-2",
+		VolumeID:       "vol-1",
+		TeamID:         "team-1",
+		Platform:       "windows",
+		CaseSensitive:  false,
+		LastAppliedSeq: 2,
+	}
+	repo.journal = []*db.SyncJournalEntry{
+		{Seq: 1, VolumeID: "vol-1", TeamID: "team-1", Source: db.SyncSourceReplica, EventType: db.SyncEventWrite, NormalizedPath: "/app/readme.md", Path: "/app/README.md", ReplicaID: stringPtr("replica-1")},
+		{Seq: 2, VolumeID: "vol-1", TeamID: "team-1", Source: db.SyncSourceReplica, EventType: db.SyncEventWrite, NormalizedPath: "/app/readme.md", Path: "/app/README.md", ReplicaID: stringPtr("replica-2")},
+	}
+	repo.nextSeq = 2
+
+	svc := NewService(repo, logrus.New())
+	resp, err := svc.AppendReplicaChanges(context.Background(), &AppendChangesRequest{
+		VolumeID:  "vol-1",
+		TeamID:    "team-1",
+		ReplicaID: "replica-1",
+		RequestID: "req-conflict-replica-platform",
+		BaseSeq:   1,
+		Changes: []ChangeRequest{{
+			EventType: db.SyncEventWrite,
+			Path:      "/app/README.md",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("AppendReplicaChanges error = %v", err)
+	}
+	if len(resp.Conflicts) != 1 {
+		t.Fatalf("conflicts = %d, want 1", len(resp.Conflicts))
+	}
+	metadata := parseConflictMetadata(t, resp.Conflicts[0])
+	if metadata["latest_source"] != db.SyncSourceReplica {
+		t.Fatalf("latest_source = %#v, want %q", metadata["latest_source"], db.SyncSourceReplica)
+	}
+	if metadata["latest_replica_id"] != "replica-2" {
+		t.Fatalf("latest_replica_id = %#v, want %q", metadata["latest_replica_id"], "replica-2")
+	}
+	if metadata["latest_platform"] != "windows" {
+		t.Fatalf("latest_platform = %#v, want %q", metadata["latest_platform"], "windows")
 	}
 }
 
@@ -435,13 +521,7 @@ func TestAppendReplicaChangesRejectsResurrectionAfterRemoteDelete(t *testing.T) 
 	if len(resp.Conflicts) != 1 {
 		t.Fatalf("conflicts = %d, want 1", len(resp.Conflicts))
 	}
-	if resp.Conflicts[0].Metadata == nil {
-		t.Fatal("expected conflict metadata")
-	}
-	var metadata map[string]any
-	if err := json.Unmarshal(*resp.Conflicts[0].Metadata, &metadata); err != nil {
-		t.Fatalf("Unmarshal conflict metadata: %v", err)
-	}
+	metadata := parseConflictMetadata(t, resp.Conflicts[0])
 	if metadata["latest_event"] != db.SyncEventRemove {
 		t.Fatalf("latest_event = %#v, want %q", metadata["latest_event"], db.SyncEventRemove)
 	}
@@ -1884,6 +1964,43 @@ func TestRecordRemoteChangeCoalescesHotWrites(t *testing.T) {
 	}
 }
 
+func TestRecordRemoteChangeDoesNotCreateConflictForSequentialSandboxCreateAndWrite(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
+
+	svc := NewService(repo, logrus.New())
+	createdAt := time.Now().UTC()
+	if err := svc.RecordRemoteChange(context.Background(), &RemoteChange{
+		VolumeID:   "vol-1",
+		TeamID:     "team-1",
+		SandboxID:  "sandbox-1",
+		EventType:  db.SyncEventCreate,
+		Path:       "/seed.txt",
+		OccurredAt: createdAt,
+	}); err != nil {
+		t.Fatalf("RecordRemoteChange(create) error = %v", err)
+	}
+	if err := svc.RecordRemoteChange(context.Background(), &RemoteChange{
+		VolumeID:   "vol-1",
+		TeamID:     "team-1",
+		SandboxID:  "sandbox-1",
+		EventType:  db.SyncEventWrite,
+		Path:       "/seed.txt",
+		OccurredAt: createdAt.Add(10 * time.Millisecond),
+	}); err != nil {
+		t.Fatalf("RecordRemoteChange(write) error = %v", err)
+	}
+	if len(repo.conflicts) != 0 {
+		t.Fatalf("conflicts = %d, want 0", len(repo.conflicts))
+	}
+	if len(repo.journal) != 2 {
+		t.Fatalf("journal entries = %d, want 2", len(repo.journal))
+	}
+	if repo.journal[0].Path != "/seed.txt" || repo.journal[1].Path != "/seed.txt" {
+		t.Fatalf("journal paths = %+v, want both /seed.txt", []string{repo.journal[0].Path, repo.journal[1].Path})
+	}
+}
+
 func TestRecordRemoteChangeJournalsRenameMetadata(t *testing.T) {
 	repo := newFakeRepo()
 	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
@@ -2123,6 +2240,62 @@ func TestDecodeAppendChangesResponseNormalizesEmptySlices(t *testing.T) {
 	}
 	if len(resp.Accepted) != 0 || len(resp.Conflicts) != 0 {
 		t.Fatalf("accepted/conflicts lengths = %d/%d, want 0/0", len(resp.Accepted), len(resp.Conflicts))
+	}
+}
+
+func TestListChangesNormalizesEmptySlice(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{
+		ID:     "vol-1",
+		TeamID: "team-1",
+	}
+	svc := NewService(repo, logrus.New())
+
+	resp, err := svc.ListChanges(context.Background(), &ListChangesRequest{
+		VolumeID: "vol-1",
+		TeamID:   "team-1",
+		AfterSeq: 0,
+		Limit:    10,
+	})
+	if err != nil {
+		t.Fatalf("ListChanges() error = %v", err)
+	}
+	if resp == nil {
+		t.Fatal("ListChanges() response is nil")
+	}
+	if resp.Changes == nil {
+		t.Fatal("Changes = nil, want empty slice")
+	}
+	if len(resp.Changes) != 0 {
+		t.Fatalf("len(Changes) = %d, want 0", len(resp.Changes))
+	}
+}
+
+func TestListConflictsNormalizesEmptySlice(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{
+		ID:     "vol-1",
+		TeamID: "team-1",
+	}
+	svc := NewService(repo, logrus.New())
+
+	resp, err := svc.ListConflicts(context.Background(), &ListConflictsRequest{
+		VolumeID: "vol-1",
+		TeamID:   "team-1",
+		Status:   "open",
+		Limit:    10,
+	})
+	if err != nil {
+		t.Fatalf("ListConflicts() error = %v", err)
+	}
+	if resp == nil {
+		t.Fatal("ListConflicts() response is nil")
+	}
+	if resp.Conflicts == nil {
+		t.Fatal("Conflicts = nil, want empty slice")
+	}
+	if len(resp.Conflicts) != 0 {
+		t.Fatalf("len(Conflicts) = %d, want 0", len(resp.Conflicts))
 	}
 }
 

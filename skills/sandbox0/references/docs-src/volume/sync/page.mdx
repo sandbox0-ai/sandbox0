@@ -2,7 +2,13 @@
 
 Volume Sync is the storage-proxy side of Sandbox0's local-first workspace sync model.
 
-The first server-side iteration adds durable metadata and journal APIs so a local replica can:
+Volume Sync lets the same SandboxVolume back:
+
+- a local workspace managed by `s0 sync`
+- one or more running sandboxes that mount that Volume
+- replicas running on different filesystems such as macOS, Linux, and Windows
+
+The storage-proxy contract adds durable metadata and journal APIs so a local replica can:
 
 - register itself as a replica for a Volume
 - pull journal entries after a known sequence
@@ -10,9 +16,70 @@ The first server-side iteration adds durable metadata and journal APIs so a loca
 - advance a durable replica cursor
 - inspect deterministic conflict records
 
-<Callout variant="warning">
-This is an infrastructure preview. The server-side journal and conflict APIs are available, but the end-user `s0 syncd` workflow is still under active development.
+<Callout variant="info">
+The recommended operator workflow is `s0 sync`. The HTTP endpoints on this page are the underlying storage-proxy contract that `s0` uses for bootstrap, replay, upload, and conflict state.
 </Callout>
+
+## s0 Sync Workflow
+
+The normal user flow is:
+
+1. create or choose a SandboxVolume
+2. attach a local workspace to that Volume with `s0 sync attach`
+3. mount the same Volume into a sandbox when you want remote execution against the same workspace state
+4. let `s0 sync` keep the local workspace and the authoritative Volume namespace reconciled
+
+Example:
+
+```bash
+s0 sync attach vol_abc123xyz ~/work/my-project
+
+s0 sandbox volume mount sb_abc123xyz vol_abc123xyz /workspace
+```
+
+By default `s0 sync attach` starts the sync worker in the background. Use `--foreground` to keep it attached to the current terminal and stream worker logs:
+
+```bash
+s0 sync attach vol_abc123xyz ~/work/my-project --foreground
+```
+
+Once a workspace has been attached, `s0 sync` behaves like Git for workspace discovery: when the current directory is inside an attached workspace, commands such as `s0 sync status`, `s0 sync logs`, `s0 sync detach`, and `s0 sync conflicts list` can infer the workspace root without requiring an explicit path.
+
+## Sync Semantics
+
+Sandbox0 treats the Volume namespace inside `storage-proxy` as authoritative. In practice that means:
+
+- `s0 sync attach --init-from volume` can seed a fresh local workspace from the current Volume contents
+- local file changes can be uploaded back into the same Volume
+- sandbox writes against a mounted Volume can replay back into the local workspace
+- the same Volume can stay mounted in sandbox while a local workspace remains attached
+
+For local scanning, `s0 sync` respects `.gitignore` patterns plus `.git/info/exclude`. Those ignore rules only affect local discovery and upload. They do not hide authoritative remote changes replayed from the Volume into the workspace.
+
+This matters when a Volume is shared by different environments. A path that is ignored locally can still appear through remote replay if it already exists in the authoritative Volume namespace.
+
+## Cross-Platform Compatibility
+
+One Volume can be shared by macOS, Linux, Windows-capable replicas, and sandbox mounts at the same time. Replica registration and bootstrap therefore carry filesystem capability metadata so `storage-proxy` can keep the authoritative namespace portable when required.
+
+Current compatibility checks include:
+
+- casefold collisions such as `Foo` and `foo`
+- Unicode-normalization collisions such as `Caf{'\\u00e9'}.txt` and `Cafe{'\\u0301'}.txt`
+- Windows-incompatible path segments such as reserved names like `CON.txt` or names with trailing dots or spaces
+
+When the authoritative namespace cannot be represented safely for the requesting replica, bootstrap or mutation APIs return a structured conflict instead of silently producing a broken local checkout.
+
+## Conflict Handling
+
+`s0 sync` presents conflicts as path-centric operator workflows, similar to Git:
+
+- `s0 sync status` summarizes unmerged sync paths
+- `s0 sync conflicts list` lists open conflicts
+- `s0 sync conflicts show <path>` shows the reason, latest remote actor metadata, artifact path, and suggested next step
+- `s0 sync conflicts mark <path>` marks the conflict as resolved or ignored after the operator fixes the workspace state
+
+Content conflicts can materialize a deterministic sidecar artifact such as `main.sandbox0-conflict-sandbox-seq-42.go`. Compatibility conflicts such as Windows-invalid names remain first-class conflicts, but do not always create an artifact file.
 
 ## Replica Registration
 
@@ -24,7 +91,7 @@ Register or refresh a local replica identity for a Volume.
 
 The replica record stores platform metadata, root path information, filesystem capabilities, last-seen time, and the durable cursor.
 
-`storage-proxy` now accepts a `capabilities` object in replica registration. This is the contract future `s0 syncd` clients should target directly:
+`storage-proxy` now accepts a `capabilities` object in replica registration. This is the contract `s0 sync` clients target directly:
 
 - `case_sensitive`
 - `unicode_normalization_insensitive`

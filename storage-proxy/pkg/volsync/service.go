@@ -80,6 +80,7 @@ type Service struct {
 	artifactWriter conflictArtifactWriter
 	changeApplier  replicaChangeApplier
 	barrier        volumeMutationBarrier
+	now            func() time.Time
 }
 
 type conflictArtifactWriter interface {
@@ -229,7 +230,11 @@ type RemoteChange struct {
 }
 
 func NewService(repo repository, logger *logrus.Logger) *Service {
-	return &Service{repo: repo, logger: logger}
+	return &Service{
+		repo:   repo,
+		logger: logger,
+		now:    func() time.Time { return time.Now().UTC() },
+	}
 }
 
 func (s *Service) SetConflictArtifactWriter(writer conflictArtifactWriter) {
@@ -248,6 +253,20 @@ func (s *Service) SetVolumeMutationBarrier(barrier volumeMutationBarrier) {
 	s.barrier = barrier
 }
 
+func (s *Service) SetNowFunc(now func() time.Time) {
+	if now == nil {
+		return
+	}
+	s.now = func() time.Time { return now().UTC() }
+}
+
+func (s *Service) currentTime() time.Time {
+	if s != nil && s.now != nil {
+		return s.now()
+	}
+	return time.Now().UTC()
+}
+
 func (s *Service) UpsertReplica(ctx context.Context, req *UpsertReplicaRequest) (resp *ReplicaEnvelope, err error) {
 	start := time.Now()
 	defer func() {
@@ -263,7 +282,7 @@ func (s *Service) UpsertReplica(ctx context.Context, req *UpsertReplicaRequest) 
 		return nil, ErrReplicaNotFound
 	}
 
-	now := time.Now().UTC()
+	now := s.currentTime()
 	requestedCapabilities := pathnorm.NormalizeFilesystemCapabilities(req.Platform, req.CaseSensitive, req.Capabilities)
 	if err := s.repo.WithTx(ctx, func(tx pgx.Tx) error {
 		policy, err := s.getNamespacePolicyTx(ctx, tx, req.VolumeID)
@@ -402,6 +421,9 @@ func (s *Service) ListChanges(ctx context.Context, req *ListChangesRequest) (res
 	if err != nil {
 		return nil, err
 	}
+	if changes == nil {
+		changes = []*db.SyncJournalEntry{}
+	}
 	return &ListChangesResponse{
 		HeadSeq:          head,
 		RetainedAfterSeq: retention.CompactedThroughSeq,
@@ -457,7 +479,7 @@ func (s *Service) AppendReplicaChanges(ctx context.Context, req *AppendChangesRe
 				return err
 			}
 
-			if err := validateReplicaLease(replica, time.Now().UTC()); err != nil {
+			if err := validateReplicaLease(replica, s.currentTime()); err != nil {
 				return err
 			}
 
@@ -480,7 +502,7 @@ func (s *Service) AppendReplicaChanges(ctx context.Context, req *AppendChangesRe
 				return ErrCursorRegression
 			}
 
-			now := time.Now().UTC()
+			now := s.currentTime()
 			response := &AppendChangesResponse{
 				HeadSeq:   head,
 				Accepted:  []*db.SyncJournalEntry{},
@@ -582,7 +604,7 @@ func (s *Service) UpdateReplicaCursor(ctx context.Context, req *UpdateCursorRequ
 		if err != nil {
 			return translateReplicaErr(err)
 		}
-		if err := validateReplicaLease(replica, time.Now().UTC()); err != nil {
+		if err := validateReplicaLease(replica, s.currentTime()); err != nil {
 			return err
 		}
 		head, err := s.repo.GetSyncHead(ctx, req.VolumeID)
@@ -603,7 +625,7 @@ func (s *Service) UpdateReplicaCursor(ctx context.Context, req *UpdateCursorRequ
 		if req.LastAppliedSeq < replica.LastAppliedSeq {
 			return ErrCursorRegression
 		}
-		return s.repo.UpdateSyncReplicaCursorTx(ctx, tx, req.VolumeID, req.ReplicaID, req.LastAppliedSeq, time.Now().UTC())
+		return s.repo.UpdateSyncReplicaCursorTx(ctx, tx, req.VolumeID, req.ReplicaID, req.LastAppliedSeq, s.currentTime())
 	})
 	if err != nil {
 		return nil, err
@@ -660,7 +682,7 @@ func (s *Service) CompactJournal(ctx context.Context, req *CompactJournalRequest
 					VolumeID:            req.VolumeID,
 					TeamID:              req.TeamID,
 					CompactedThroughSeq: target,
-					UpdatedAt:           time.Now().UTC(),
+					UpdatedAt:           s.currentTime(),
 				}); err != nil {
 					return err
 				}
@@ -707,6 +729,9 @@ func (s *Service) ListConflicts(ctx context.Context, req *ListConflictsRequest) 
 	if err != nil {
 		return nil, err
 	}
+	if conflicts == nil {
+		conflicts = []*db.SyncConflict{}
+	}
 	return &ListConflictsResponse{Conflicts: conflicts}, nil
 }
 
@@ -725,7 +750,7 @@ func (s *Service) ResolveConflict(ctx context.Context, req *ResolveConflictReque
 	metadata := mustMarshalMetadata(map[string]any{
 		"resolution":  req.Resolution,
 		"note":        req.Note,
-		"resolved_at": time.Now().UTC().Format(time.RFC3339),
+		"resolved_at": s.currentTime().Format(time.RFC3339),
 	})
 
 	if err := s.repo.WithTx(ctx, func(tx pgx.Tx) error {
@@ -775,14 +800,13 @@ func (s *Service) RecordRemoteChange(ctx context.Context, change *RemoteChange) 
 		return nil
 	}
 
-	volume, err := s.getAccessibleVolume(ctx, change.VolumeID, change.TeamID)
-	if err != nil {
+	if _, err := s.getAccessibleVolume(ctx, change.VolumeID, change.TeamID); err != nil {
 		return err
 	}
 
 	now := change.OccurredAt.UTC()
 	if now.IsZero() {
-		now = time.Now().UTC()
+		now = s.currentTime()
 	}
 
 	normalizedPath := NormalizePath(change.Path)
@@ -815,33 +839,6 @@ func (s *Service) RecordRemoteChange(ctx context.Context, change *RemoteChange) 
 			})
 		}
 
-		conflict, err := s.detectLatestConflict(ctx, tx, change.VolumeID, change.TeamID, nil, 0, entry.Path, entry.OldPath, entry.NormalizedPath, entry.NormalizedOldPath)
-		if err != nil {
-			return err
-		}
-		if conflict != nil {
-			artifactEntry, err := s.materializeConflict(ctx, volume, conflict, now)
-			if err != nil {
-				return err
-			}
-			if err := s.repo.CreateSyncConflictTx(ctx, tx, conflict); err != nil {
-				return err
-			}
-			s.observeConflict("sandbox", conflict.Reason)
-			s.logger.WithFields(logrus.Fields{
-				"volume_id":     change.VolumeID,
-				"sandbox_id":    change.SandboxID,
-				"conflict_id":   conflict.ID,
-				"reason":        conflict.Reason,
-				"artifact_path": conflict.ArtifactPath,
-			}).Info("Recorded volume sync conflict for sandbox change")
-			if artifactEntry != nil {
-				if err := s.repo.CreateSyncJournalEntryTx(ctx, tx, artifactEntry); err != nil {
-					return err
-				}
-			}
-		}
-
 		return s.repo.CreateSyncJournalEntryTx(ctx, tx, entry)
 	})
 }
@@ -861,7 +858,7 @@ func (s *Service) prepareReplicaEntry(ctx context.Context, tx pgx.Tx, req *Appen
 	}
 
 	if pathnorm.RequiresPortableNameAudit(replica.Capabilities) {
-		compatibilityConflict, err := buildCompatibilityConflictForChange(req, replica, change)
+		compatibilityConflict, err := buildCompatibilityConflictForChange(req, replica, change, now)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -969,6 +966,10 @@ func (s *Service) detectReplicaCasefoldConflict(
 			latest.Path == derefString(oldPathValue) {
 			continue
 		}
+		metadata, err := s.buildLatestConflictMetadata(ctx, tx, volumeID, latest, baseSeq)
+		if err != nil {
+			return nil, err
+		}
 
 		reason := "casefold_collision"
 		if eventType == db.SyncEventRename && normalizedOldPath != nil && *normalizedOldPath == normalizedPath {
@@ -982,6 +983,8 @@ func (s *Service) detectReplicaCasefoldConflict(
 			oldPathValue,
 			latest,
 			reason,
+			metadata,
+			s.currentTime(),
 		), nil
 	}
 
@@ -1020,6 +1023,10 @@ func (s *Service) detectLatestConflict(
 		if latest.Source == db.SyncSourceReplica && latest.ReplicaID != nil && replicaID != nil && *latest.ReplicaID == *replicaID {
 			continue
 		}
+		metadata, err := s.buildLatestConflictMetadata(ctx, tx, volumeID, latest, baseSeq)
+		if err != nil {
+			return nil, err
+		}
 
 		return buildSyncConflict(
 			volumeID, teamID, replicaID, baseSeq,
@@ -1029,9 +1036,45 @@ func (s *Service) detectLatestConflict(
 			oldPathValue,
 			latest,
 			conflictReason(latest, normalizedPath, pathValue),
+			metadata,
+			s.currentTime(),
 		), nil
 	}
 	return nil, nil
+}
+
+func (s *Service) buildLatestConflictMetadata(ctx context.Context, tx pgx.Tx, volumeID string, latest *db.SyncJournalEntry, baseSeq int64) (map[string]any, error) {
+	metadata := map[string]any{
+		"latest_seq":   latest.Seq,
+		"latest_path":  latest.Path,
+		"latest_event": latest.EventType,
+		"base_seq":     baseSeq,
+	}
+	if latest.Source != "" {
+		metadata["latest_source"] = latest.Source
+	}
+	if latest.Source == db.SyncSourceSandbox {
+		if sandboxID := metadataString(latest.Metadata, "sandbox_id"); sandboxID != "" {
+			metadata["latest_sandbox_id"] = sandboxID
+		}
+	}
+	if latest.ReplicaID == nil || strings.TrimSpace(*latest.ReplicaID) == "" {
+		return metadata, nil
+	}
+
+	replicaID := strings.TrimSpace(*latest.ReplicaID)
+	metadata["latest_replica_id"] = replicaID
+	replica, err := s.repo.GetSyncReplicaForUpdate(ctx, tx, volumeID, replicaID)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			return metadata, nil
+		}
+		return nil, err
+	}
+	if platform := strings.TrimSpace(replica.Platform); platform != "" {
+		metadata["latest_platform"] = platform
+	}
+	return metadata, nil
 }
 
 func buildSyncConflict(
@@ -1042,8 +1085,18 @@ func buildSyncConflict(
 	incomingPath, incomingOldPath *string,
 	latest *db.SyncJournalEntry,
 	reason string,
+	metadata map[string]any,
+	now time.Time,
 ) *db.SyncConflict {
 	existingSeq := latest.Seq
+	if len(metadata) == 0 {
+		metadata = map[string]any{
+			"latest_seq":   latest.Seq,
+			"latest_path":  latest.Path,
+			"latest_event": latest.EventType,
+			"base_seq":     baseSeq,
+		}
+	}
 	return &db.SyncConflict{
 		ID:              uuid.NewString(),
 		VolumeID:        volumeID,
@@ -1057,18 +1110,13 @@ func buildSyncConflict(
 		ExistingSeq:     &existingSeq,
 		Reason:          reason,
 		Status:          db.SyncConflictStatusOpen,
-		Metadata: mustMarshalMetadata(map[string]any{
-			"latest_seq":   latest.Seq,
-			"latest_path":  latest.Path,
-			"latest_event": latest.EventType,
-			"base_seq":     baseSeq,
-		}),
-		CreatedAt: time.Now().UTC(),
-		UpdatedAt: time.Now().UTC(),
+		Metadata:        mustMarshalMetadata(metadata),
+		CreatedAt:       now,
+		UpdatedAt:       now,
 	}
 }
 
-func buildCompatibilityConflictForChange(req *AppendChangesRequest, replica *db.SyncReplica, change ChangeRequest) (*db.SyncConflict, error) {
+func buildCompatibilityConflictForChange(req *AppendChangesRequest, replica *db.SyncReplica, change ChangeRequest, now time.Time) (*db.SyncConflict, error) {
 	issues := make([]pathnorm.CompatibilityIssue, 0, 2)
 	for _, candidate := range []string{change.Path, change.OldPath} {
 		if strings.TrimSpace(candidate) == "" {
@@ -1102,8 +1150,8 @@ func buildCompatibilityConflictForChange(req *AppendChangesRequest, replica *db.
 			"issues":       issues,
 			"capabilities": replica.Capabilities,
 		}),
-		CreatedAt: time.Now().UTC(),
-		UpdatedAt: time.Now().UTC(),
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 	return conflict, nil
 }
@@ -1567,6 +1615,25 @@ func mergeMetadata(existing *json.RawMessage, additional map[string]any) *json.R
 		merged[k] = v
 	}
 	return mustMarshalMetadata(merged)
+}
+
+func metadataString(raw *json.RawMessage, key string) string {
+	if raw == nil || len(*raw) == 0 || strings.TrimSpace(key) == "" {
+		return ""
+	}
+	decoded := make(map[string]any)
+	if err := json.Unmarshal(*raw, &decoded); err != nil {
+		return ""
+	}
+	value, ok := decoded[key]
+	if !ok {
+		return ""
+	}
+	text, ok := value.(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(text)
 }
 
 func (s *Service) String() string {

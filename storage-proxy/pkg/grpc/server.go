@@ -3,7 +3,10 @@ package grpc
 import (
 	"context"
 	"errors"
+	"io"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -25,14 +28,21 @@ import (
 type FileSystemServer struct {
 	pb.UnimplementedFileSystemServer
 
-	volMgr           volumeManager
-	volumeRepo       VolumeRepository
-	eventHub         *notify.Hub
-	eventBroadcaster notify.Broadcaster
-	syncRecorder     syncRecorder
-	mutationBarrier  volumeMutationBarrier
-	logger           *logrus.Logger
-	now              func() time.Time
+	volMgr            volumeManager
+	volumeRepo        VolumeRepository
+	eventHub          *notify.Hub
+	eventBroadcaster  notify.Broadcaster
+	syncRecorder      syncRecorder
+	mutationBarrier   volumeMutationBarrier
+	logger            *logrus.Logger
+	now               func() time.Time
+	dirtyWriteMu      sync.Mutex
+	dirtyWriteHandles map[string]dirtyWriteHandle
+}
+
+type dirtyWriteHandle struct {
+	volumeID string
+	inode    uint64
 }
 
 type volumeManager interface {
@@ -63,14 +73,15 @@ func NewFileSystemServer(volMgr volumeManager, volumeRepo VolumeRepository, even
 		eventBroadcaster = notify.NewLocalBroadcaster(eventHub)
 	}
 	return &FileSystemServer{
-		volMgr:           volMgr,
-		volumeRepo:       volumeRepo,
-		eventHub:         eventHub,
-		eventBroadcaster: eventBroadcaster,
-		syncRecorder:     syncRecorder,
-		mutationBarrier:  mutationBarrier,
-		logger:           logger,
-		now:              func() time.Time { return time.Now().UTC() },
+		volMgr:            volMgr,
+		volumeRepo:        volumeRepo,
+		eventHub:          eventHub,
+		eventBroadcaster:  eventBroadcaster,
+		syncRecorder:      syncRecorder,
+		mutationBarrier:   mutationBarrier,
+		logger:            logger,
+		now:               func() time.Time { return time.Now().UTC() },
+		dirtyWriteHandles: make(map[string]dirtyWriteHandle),
 	}
 }
 
@@ -86,6 +97,116 @@ func (s *FileSystemServer) currentTime() time.Time {
 		return s.now()
 	}
 	return time.Now().UTC()
+}
+
+type syncRecordSuppressedKey struct{}
+
+func suppressSyncRecord(ctx context.Context) context.Context {
+	return context.WithValue(ctx, syncRecordSuppressedKey{}, true)
+}
+
+func shouldSkipSyncRecord(ctx context.Context) bool {
+	skip, _ := ctx.Value(syncRecordSuppressedKey{}).(bool)
+	return skip
+}
+
+func dirtyWriteKey(volumeID string, handleID uint64) string {
+	return volumeID + "|" + strconv.FormatUint(handleID, 10)
+}
+
+func (s *FileSystemServer) markDirtyWrite(volumeID string, inode, handleID uint64) {
+	if s == nil {
+		return
+	}
+	s.dirtyWriteMu.Lock()
+	defer s.dirtyWriteMu.Unlock()
+	s.dirtyWriteHandles[dirtyWriteKey(volumeID, handleID)] = dirtyWriteHandle{
+		volumeID: volumeID,
+		inode:    inode,
+	}
+}
+
+func (s *FileSystemServer) takeDirtyWrite(volumeID string, handleID uint64) (dirtyWriteHandle, bool) {
+	if s == nil {
+		return dirtyWriteHandle{}, false
+	}
+	key := dirtyWriteKey(volumeID, handleID)
+	s.dirtyWriteMu.Lock()
+	defer s.dirtyWriteMu.Unlock()
+	dirty, ok := s.dirtyWriteHandles[key]
+	if ok {
+		delete(s.dirtyWriteHandles, key)
+	}
+	return dirty, ok
+}
+
+func (s *FileSystemServer) recordRemoteSyncChange(ctx context.Context, change *volsync.RemoteChange) context.Context {
+	if s.syncRecorder == nil || change == nil {
+		return ctx
+	}
+	claims := internalauth.ClaimsFromContext(ctx)
+	if claims == nil || claims.TeamID == "" {
+		return ctx
+	}
+
+	clone := *change
+	if clone.TeamID == "" {
+		clone.TeamID = claims.TeamID
+	}
+	if clone.SandboxID == "" {
+		clone.SandboxID = claims.SandboxID
+	}
+	if clone.OccurredAt.IsZero() {
+		clone.OccurredAt = s.currentTime()
+	}
+
+	if err := s.syncRecorder.RecordRemoteChange(ctx, &clone); err != nil {
+		s.logger.WithError(err).WithField("volume_id", clone.VolumeID).Warn("Failed to record remote sync journal entry")
+		return ctx
+	}
+	return suppressSyncRecord(ctx)
+}
+
+func captureInodeReplayState(volCtx *volume.VolumeContext, inode uint64) ([]byte, uint32, error) {
+	if volCtx == nil {
+		return nil, 0, errors.New("volume context is nil")
+	}
+
+	var attr meta.Attr
+	if errno := volCtx.Meta.GetAttr(meta.Background(), mapInode(volCtx, inode), &attr); errno != 0 {
+		return nil, 0, syscall.Errno(errno)
+	}
+
+	vfsCtx := vfs.NewLogContext(meta.Background())
+	_, handleID, errno := volCtx.VFS.Open(vfsCtx, mapInode(volCtx, inode), 0)
+	if errno != 0 {
+		return nil, 0, syscall.Errno(errno)
+	}
+	defer volCtx.VFS.Release(vfsCtx, mapInode(volCtx, inode), handleID)
+
+	payload := make([]byte, 0)
+	buf := make([]byte, 128*1024)
+	var offset uint64
+	for offset < attr.Length {
+		readSize := len(buf)
+		if remaining := attr.Length - offset; remaining < uint64(readSize) {
+			readSize = int(remaining)
+		}
+		n, errno := volCtx.VFS.Read(vfsCtx, mapInode(volCtx, inode), buf[:readSize], offset, handleID)
+		if errno != 0 {
+			return nil, 0, syscall.Errno(errno)
+		}
+		if n == 0 {
+			return nil, 0, io.ErrUnexpectedEOF
+		}
+		payload = append(payload, buf[:n]...)
+		offset += uint64(n)
+	}
+	return payload, uint32(attr.Mode), nil
+}
+
+func uint32Ptr(value uint32) *uint32 {
+	return &value
 }
 
 // MountVolume mounts a volume
@@ -222,6 +343,9 @@ func (s *FileSystemServer) publishEvent(ctx context.Context, event *pb.WatchEven
 
 recordSync:
 	if s.syncRecorder == nil || event == nil {
+		return
+	}
+	if shouldSkipSyncRecord(ctx) {
 		return
 	}
 	if event.TimestampUnix == 0 {
@@ -524,12 +648,13 @@ func (s *FileSystemServer) Write(ctx context.Context, req *pb.WriteRequest) (*pb
 			return nil, status.Error(codes.Internal, syscall.Errno(errno).Error())
 		}
 
+		s.markDirtyWrite(req.VolumeId, req.Inode, req.HandleId)
 		path := resolveInodePath(volCtx, uint64(mapInode(volCtx, req.Inode)))
 		eventType := pb.WatchEventType_WATCH_EVENT_TYPE_WRITE
 		if path == "" {
 			eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
 		}
-		s.publishEvent(runCtx, &pb.WatchEvent{
+		s.publishEvent(suppressSyncRecord(runCtx), &pb.WatchEvent{
 			VolumeId:  req.VolumeId,
 			EventType: eventType,
 			Path:      path,
@@ -567,7 +692,17 @@ func (s *FileSystemServer) Create(ctx context.Context, req *pb.CreateRequest) (*
 		if path == "" {
 			eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
 		}
-		s.publishEvent(runCtx, &pb.WatchEvent{
+		recordCtx := runCtx
+		if path != "" {
+			recordCtx = s.recordRemoteSyncChange(runCtx, &volsync.RemoteChange{
+				VolumeID:  req.VolumeId,
+				EventType: db.SyncEventCreate,
+				Path:      path,
+				EntryKind: "file",
+				Mode:      uint32Ptr(uint32(entry.Attr.Mode)),
+			})
+		}
+		s.publishEvent(recordCtx, &pb.WatchEvent{
 			VolumeId:  req.VolumeId,
 			EventType: eventType,
 			Path:      path,
@@ -601,7 +736,17 @@ func (s *FileSystemServer) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb
 		if path == "" {
 			eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
 		}
-		s.publishEvent(runCtx, &pb.WatchEvent{
+		recordCtx := runCtx
+		if path != "" {
+			recordCtx = s.recordRemoteSyncChange(runCtx, &volsync.RemoteChange{
+				VolumeID:  req.VolumeId,
+				EventType: db.SyncEventCreate,
+				Path:      path,
+				EntryKind: "directory",
+				Mode:      uint32Ptr(uint32(entry.Attr.Mode)),
+			})
+		}
+		s.publishEvent(recordCtx, &pb.WatchEvent{
 			VolumeId:  req.VolumeId,
 			EventType: eventType,
 			Path:      path,
@@ -681,7 +826,15 @@ func (s *FileSystemServer) Unlink(ctx context.Context, req *pb.UnlinkRequest) (*
 		if path == "" {
 			eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
 		}
-		s.publishEvent(runCtx, &pb.WatchEvent{
+		recordCtx := runCtx
+		if path != "" {
+			recordCtx = s.recordRemoteSyncChange(runCtx, &volsync.RemoteChange{
+				VolumeID:  req.VolumeId,
+				EventType: db.SyncEventRemove,
+				Path:      path,
+			})
+		}
+		s.publishEvent(recordCtx, &pb.WatchEvent{
 			VolumeId:  req.VolumeId,
 			EventType: eventType,
 			Path:      path,
@@ -784,7 +937,16 @@ func (s *FileSystemServer) Rename(ctx context.Context, req *pb.RenameRequest) (*
 		if oldPath == "" && newPath == "" {
 			eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
 		}
-		s.publishEvent(runCtx, &pb.WatchEvent{
+		recordCtx := runCtx
+		if oldPath != "" || newPath != "" {
+			recordCtx = s.recordRemoteSyncChange(runCtx, &volsync.RemoteChange{
+				VolumeID:  req.VolumeId,
+				EventType: db.SyncEventRename,
+				Path:      newPath,
+				OldPath:   oldPath,
+			})
+		}
+		s.publishEvent(recordCtx, &pb.WatchEvent{
 			VolumeId:  req.VolumeId,
 			EventType: eventType,
 			Path:      newPath,
@@ -833,7 +995,32 @@ func (s *FileSystemServer) SetAttr(ctx context.Context, req *pb.SetAttrRequest) 
 		if path == "" {
 			eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
 		}
-		s.publishEvent(runCtx, &pb.WatchEvent{
+		recordCtx := runCtx
+		switch {
+		case path != "" && req.Valid&uint32(meta.SetAttrMode) != 0:
+			recordCtx = s.recordRemoteSyncChange(runCtx, &volsync.RemoteChange{
+				VolumeID:  req.VolumeId,
+				EventType: db.SyncEventChmod,
+				Path:      path,
+				Mode:      uint32Ptr(uint32(entry.Attr.Mode)),
+			})
+		case path != "":
+			payload, mode, err := captureInodeReplayState(volCtx, req.Inode)
+			if err != nil {
+				s.logger.WithError(err).WithField("volume_id", req.VolumeId).Warn("Failed to capture replay payload for setattr")
+			} else {
+				recordCtx = s.recordRemoteSyncChange(runCtx, &volsync.RemoteChange{
+					VolumeID:         req.VolumeId,
+					EventType:        db.SyncEventWrite,
+					Path:             path,
+					EntryKind:        "file",
+					Mode:             uint32Ptr(mode),
+					ContentAvailable: true,
+					ContentBytes:     payload,
+				})
+			}
+		}
+		s.publishEvent(recordCtx, &pb.WatchEvent{
 			VolumeId:  req.VolumeId,
 			EventType: eventType,
 			Path:      path,
@@ -848,13 +1035,51 @@ func (s *FileSystemServer) SetAttr(ctx context.Context, req *pb.SetAttrRequest) 
 
 // Flush implements FUSE flush
 func (s *FileSystemServer) Flush(ctx context.Context, req *pb.FlushRequest) (*pb.Empty, error) {
-	// Flush is mostly a no-op in JuiceFS (writes are buffered)
+	if volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId); err == nil {
+		if dirty, ok := s.takeDirtyWrite(req.VolumeId, req.HandleId); ok {
+			path := resolveInodePath(volCtx, uint64(mapInode(volCtx, dirty.inode)))
+			if path != "" {
+				if payload, mode, captureErr := captureInodeReplayState(volCtx, dirty.inode); captureErr != nil {
+					s.logger.WithError(captureErr).WithField("volume_id", req.VolumeId).Warn("Failed to capture replay payload for flush")
+				} else {
+					_ = s.recordRemoteSyncChange(ctx, &volsync.RemoteChange{
+						VolumeID:         req.VolumeId,
+						EventType:        db.SyncEventWrite,
+						Path:             path,
+						EntryKind:        "file",
+						Mode:             uint32Ptr(mode),
+						ContentAvailable: true,
+						ContentBytes:     payload,
+					})
+				}
+			}
+		}
+	}
 	return &pb.Empty{}, nil
 }
 
 // Fsync implements FUSE fsync
 func (s *FileSystemServer) Fsync(ctx context.Context, req *pb.FsyncRequest) (*pb.Empty, error) {
-	// Fsync - data is synced by chunk store's writeback cache
+	if volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId); err == nil {
+		if dirty, ok := s.takeDirtyWrite(req.VolumeId, req.HandleId); ok {
+			path := resolveInodePath(volCtx, uint64(mapInode(volCtx, dirty.inode)))
+			if path != "" {
+				if payload, mode, captureErr := captureInodeReplayState(volCtx, dirty.inode); captureErr != nil {
+					s.logger.WithError(captureErr).WithField("volume_id", req.VolumeId).Warn("Failed to capture replay payload for fsync")
+				} else {
+					_ = s.recordRemoteSyncChange(ctx, &volsync.RemoteChange{
+						VolumeID:         req.VolumeId,
+						EventType:        db.SyncEventWrite,
+						Path:             path,
+						EntryKind:        "file",
+						Mode:             uint32Ptr(mode),
+						ContentAvailable: true,
+						ContentBytes:     payload,
+					})
+				}
+			}
+		}
+	}
 	return &pb.Empty{}, nil
 }
 
@@ -868,6 +1093,26 @@ func (s *FileSystemServer) Release(ctx context.Context, req *pb.ReleaseRequest) 
 	// Release the file handle in VFS
 	vfsCtx := vfs.NewLogContext(meta.Background())
 	volCtx.VFS.Release(vfsCtx, mapInode(volCtx, req.Inode), req.HandleId)
+
+	if _, dirty := s.takeDirtyWrite(req.VolumeId, req.HandleId); dirty {
+		path := resolveInodePath(volCtx, uint64(mapInode(volCtx, req.Inode)))
+		if path != "" {
+			payload, mode, err := captureInodeReplayState(volCtx, req.Inode)
+			if err != nil {
+				s.logger.WithError(err).WithField("volume_id", req.VolumeId).Warn("Failed to capture replay payload for release")
+			} else {
+				_ = s.recordRemoteSyncChange(ctx, &volsync.RemoteChange{
+					VolumeID:         req.VolumeId,
+					EventType:        db.SyncEventWrite,
+					Path:             path,
+					EntryKind:        "file",
+					Mode:             uint32Ptr(mode),
+					ContentAvailable: true,
+					ContentBytes:     payload,
+				})
+			}
+		}
+	}
 
 	s.logger.WithFields(logrus.Fields{
 		"volume_id": req.VolumeId,
@@ -896,7 +1141,15 @@ func (s *FileSystemServer) Rmdir(ctx context.Context, req *pb.RmdirRequest) (*pb
 		if path == "" {
 			eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
 		}
-		s.publishEvent(runCtx, &pb.WatchEvent{
+		recordCtx := runCtx
+		if path != "" {
+			recordCtx = s.recordRemoteSyncChange(runCtx, &volsync.RemoteChange{
+				VolumeID:  req.VolumeId,
+				EventType: db.SyncEventRemove,
+				Path:      path,
+			})
+		}
+		s.publishEvent(recordCtx, &pb.WatchEvent{
 			VolumeId:  req.VolumeId,
 			EventType: eventType,
 			Path:      path,
@@ -1097,7 +1350,24 @@ func (s *FileSystemServer) Fallocate(ctx context.Context, req *pb.FallocateReque
 		if path == "" {
 			eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
 		}
-		s.publishEvent(runCtx, &pb.WatchEvent{
+		recordCtx := runCtx
+		if path != "" {
+			payload, mode, err := captureInodeReplayState(volCtx, req.Inode)
+			if err != nil {
+				s.logger.WithError(err).WithField("volume_id", req.VolumeId).Warn("Failed to capture replay payload for fallocate")
+			} else {
+				recordCtx = s.recordRemoteSyncChange(runCtx, &volsync.RemoteChange{
+					VolumeID:         req.VolumeId,
+					EventType:        db.SyncEventWrite,
+					Path:             path,
+					EntryKind:        "file",
+					Mode:             uint32Ptr(mode),
+					ContentAvailable: true,
+					ContentBytes:     payload,
+				})
+			}
+		}
+		s.publishEvent(recordCtx, &pb.WatchEvent{
 			VolumeId:  req.VolumeId,
 			EventType: eventType,
 			Path:      path,
@@ -1132,7 +1402,24 @@ func (s *FileSystemServer) CopyFileRange(ctx context.Context, req *pb.CopyFileRa
 		if path == "" {
 			eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
 		}
-		s.publishEvent(runCtx, &pb.WatchEvent{
+		recordCtx := runCtx
+		if path != "" {
+			payload, mode, err := captureInodeReplayState(volCtx, req.InodeOut)
+			if err != nil {
+				s.logger.WithError(err).WithField("volume_id", req.VolumeId).Warn("Failed to capture replay payload for copy_file_range")
+			} else {
+				recordCtx = s.recordRemoteSyncChange(runCtx, &volsync.RemoteChange{
+					VolumeID:         req.VolumeId,
+					EventType:        db.SyncEventWrite,
+					Path:             path,
+					EntryKind:        "file",
+					Mode:             uint32Ptr(mode),
+					ContentAvailable: true,
+					ContentBytes:     payload,
+				})
+			}
+		}
+		s.publishEvent(recordCtx, &pb.WatchEvent{
 			VolumeId:  req.VolumeId,
 			EventType: eventType,
 			Path:      path,

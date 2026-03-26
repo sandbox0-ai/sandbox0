@@ -110,6 +110,13 @@ func TestVolumeSyncRoutesProxyThroughDefaultClusterGateway(t *testing.T) {
 			wantQ:    "after=1&limit=5",
 		},
 		{
+			name:     "replay payload with query",
+			method:   http.MethodGet,
+			path:     "/api/v1/sandboxvolumes/vol-1/sync/replay-payload?content_ref=sha256:abc",
+			wantPath: "/api/v1/sandboxvolumes/vol-1/sync/replay-payload",
+			wantQ:    "content_ref=sha256:abc",
+		},
+		{
 			name:     "bootstrap archive with query",
 			method:   http.MethodGet,
 			path:     "/api/v1/sandboxvolumes/vol-1/sync/bootstrap/archive?snapshot_id=snap-1",

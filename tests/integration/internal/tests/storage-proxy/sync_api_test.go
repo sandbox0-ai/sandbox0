@@ -1,15 +1,22 @@
 package storageproxy
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"testing"
 	"time"
 
+	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
+	storagegrpc "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/grpc"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/pathnorm"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volsync"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
+	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"github.com/sirupsen/logrus"
 )
 
@@ -291,6 +298,137 @@ func TestSyncAPIRemoteChangeAppearsInListChanges(t *testing.T) {
 	}
 	if change.Metadata == nil || string(*change.Metadata) == "" {
 		t.Fatalf("change metadata = %v, want sandbox_id metadata", change.Metadata)
+	}
+}
+
+func TestSyncAPISandboxOriginatedReplayableWritesExposeReplayMetadataAndPayload(t *testing.T) {
+	env := newStorageProxySyncTestEnv(t)
+	env.createVolume(t, "vol-1")
+
+	volCtx := newMountedIntegrationVolumeContext(t, "vol-1", "team-1")
+	fsServer := storagegrpc.NewFileSystemServer(&integrationMountedVolumeManager{
+		volumes: map[string]*volume.VolumeContext{
+			"vol-1": volCtx,
+		},
+	}, env.repo, nil, nil, logrus.New(), env.sync, nil)
+
+	ctx := internalauth.WithClaims(context.Background(), &internalauth.Claims{
+		TeamID:    "team-1",
+		UserID:    "user-1",
+		SandboxID: "sandbox-1",
+	})
+
+	createResp, err := fsServer.Create(ctx, &pb.CreateRequest{
+		VolumeId: "vol-1",
+		Parent:   uint64(meta.RootInode),
+		Name:     "hello.txt",
+		Mode:     0o644,
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	payload := []byte("hello from sandbox")
+	writeResp, err := fsServer.Write(ctx, &pb.WriteRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		HandleId: createResp.HandleId,
+		Data:     payload,
+		Offset:   0,
+	})
+	if err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if writeResp.BytesWritten != int64(len(payload)) {
+		t.Fatalf("BytesWritten = %d, want %d", writeResp.BytesWritten, len(payload))
+	}
+
+	if _, err := fsServer.Release(ctx, &pb.ReleaseRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		HandleId: createResp.HandleId,
+	}); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+
+	if _, err := fsServer.SetAttr(ctx, &pb.SetAttrRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		Valid:    uint32(meta.SetAttrMode),
+		Attr: &pb.GetAttrResponse{
+			Mode: 0o600,
+		},
+	}); err != nil {
+		t.Fatalf("SetAttr(mode) error = %v", err)
+	}
+
+	listRecorder := env.newAuthedRequest(t, "GET", "/sandboxvolumes/vol-1/sync/changes?after=0", nil)
+	if listRecorder.Code != 200 {
+		t.Fatalf("list changes status = %d, want 200", listRecorder.Code)
+	}
+	listResp, apiErr, err := spec.DecodeResponse[volsync.ListChangesResponse](listRecorder.Body)
+	if err != nil {
+		t.Fatalf("decode list changes response: %v", err)
+	}
+	if apiErr != nil {
+		t.Fatalf("unexpected list changes api error: %+v", apiErr)
+	}
+	if len(listResp.Changes) != 3 {
+		t.Fatalf("changes = %+v, want create + write + chmod", listResp.Changes)
+	}
+
+	createEntry := listResp.Changes[0]
+	if createEntry.Source != db.SyncSourceSandbox || createEntry.EventType != db.SyncEventCreate {
+		t.Fatalf("create entry source/event = %q/%q, want sandbox/create", createEntry.Source, createEntry.EventType)
+	}
+	if createEntry.EntryKind == nil || *createEntry.EntryKind != "file" {
+		t.Fatalf("create entry_kind = %#v, want file", createEntry.EntryKind)
+	}
+	if createEntry.Mode == nil || *createEntry.Mode != int64(0o644) {
+		t.Fatalf("create mode = %#v, want 0644", createEntry.Mode)
+	}
+	if createEntry.ContentRef != nil {
+		t.Fatalf("create content_ref = %#v, want nil", createEntry.ContentRef)
+	}
+
+	writeEntry := listResp.Changes[1]
+	if writeEntry.Source != db.SyncSourceSandbox || writeEntry.EventType != db.SyncEventWrite {
+		t.Fatalf("write entry source/event = %q/%q, want sandbox/write", writeEntry.Source, writeEntry.EventType)
+	}
+	if writeEntry.EntryKind == nil || *writeEntry.EntryKind != "file" {
+		t.Fatalf("write entry_kind = %#v, want file", writeEntry.EntryKind)
+	}
+	if writeEntry.Mode == nil || *writeEntry.Mode != int64(0o644) {
+		t.Fatalf("write mode = %#v, want 0644", writeEntry.Mode)
+	}
+	if writeEntry.ContentRef == nil || *writeEntry.ContentRef == "" {
+		t.Fatalf("write content_ref = %#v, want non-empty", writeEntry.ContentRef)
+	}
+	if writeEntry.SizeBytes == nil || *writeEntry.SizeBytes != int64(len(payload)) {
+		t.Fatalf("write size_bytes = %#v, want %d", writeEntry.SizeBytes, len(payload))
+	}
+	wantSHA256 := sha256.Sum256(payload)
+	if writeEntry.ContentSHA256 == nil || *writeEntry.ContentSHA256 != hex.EncodeToString(wantSHA256[:]) {
+		t.Fatalf("write content_sha256 = %#v, want %q", writeEntry.ContentSHA256, hex.EncodeToString(wantSHA256[:]))
+	}
+
+	replayRecorder := env.newAuthedRequest(t, "GET", "/sandboxvolumes/vol-1/sync/replay-payload?content_ref="+*writeEntry.ContentRef, nil)
+	if replayRecorder.Code != 200 {
+		t.Fatalf("replay payload status = %d, want 200", replayRecorder.Code)
+	}
+	if got := replayRecorder.Body.Bytes(); string(got) != string(payload) {
+		t.Fatalf("replay payload = %q, want %q", string(got), string(payload))
+	}
+
+	chmodEntry := listResp.Changes[2]
+	if chmodEntry.Source != db.SyncSourceSandbox || chmodEntry.EventType != db.SyncEventChmod {
+		t.Fatalf("chmod entry source/event = %q/%q, want sandbox/chmod", chmodEntry.Source, chmodEntry.EventType)
+	}
+	if chmodEntry.Mode == nil || *chmodEntry.Mode != int64(0o600) {
+		t.Fatalf("chmod mode = %#v, want 0600", chmodEntry.Mode)
+	}
+	if chmodEntry.ContentRef != nil {
+		t.Fatalf("chmod content_ref = %#v, want nil", chmodEntry.ContentRef)
 	}
 }
 

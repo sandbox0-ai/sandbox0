@@ -102,6 +102,7 @@ func newStorageProxySyncRouteTestServer(t *testing.T) (string, *internalauth.Gen
 			sync.POST("/bootstrap", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeWrite), server.createSyncBootstrap)
 			sync.GET("/bootstrap/archive", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeRead), server.downloadSyncBootstrapArchive)
 			sync.GET("/changes", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeRead), server.listSyncChanges)
+			sync.GET("/replay-payload", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeRead), server.downloadSyncReplayPayload)
 			conflicts := sync.Group("/conflicts")
 			{
 				conflicts.GET("", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeRead), server.listSyncConflicts)
@@ -169,6 +170,14 @@ func TestVolumeSyncRoutesProxyToStorageProxy(t *testing.T) {
 			permission: gatewayauthn.PermSandboxVolumeRead,
 			wantPath:   "/sandboxvolumes/vol-1/sync/changes",
 			wantQuery:  "after=1&limit=10",
+		},
+		{
+			name:       "download replay payload preserves query",
+			method:     http.MethodGet,
+			path:       "/api/v1/sandboxvolumes/vol-1/sync/replay-payload?content_ref=sha256:abc",
+			permission: gatewayauthn.PermSandboxVolumeRead,
+			wantPath:   "/sandboxvolumes/vol-1/sync/replay-payload",
+			wantQuery:  "content_ref=sha256:abc",
 		},
 		{
 			name:       "download bootstrap archive preserves query",

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	pathpkg "path"
 	"slices"
 	"strconv"
@@ -29,18 +30,20 @@ const (
 )
 
 var (
-	ErrReplicaNotFound        = errors.New("sync replica not found")
-	ErrReplicaLeaseExpired    = errors.New("sync replica lease expired")
-	ErrCursorRegression       = errors.New("sync cursor regression")
-	ErrCursorAhead            = errors.New("sync cursor ahead of head")
-	ErrReseedRequired         = errors.New("sync reseed required")
-	ErrInvalidRetentionTarget = errors.New("invalid sync retention target")
-	ErrInvalidChange          = errors.New("invalid sync change")
-	ErrInvalidRequestID       = errors.New("invalid sync request id")
-	ErrRequestIDConflict      = errors.New("sync request id reused with different payload")
-	ErrConflictNotFound       = errors.New("sync conflict not found")
-	ErrInvalidConflictStatus  = errors.New("invalid sync conflict status")
-	ErrNamespaceIncompatible  = errors.New("sync namespace incompatible")
+	ErrReplicaNotFound         = errors.New("sync replica not found")
+	ErrReplicaLeaseExpired     = errors.New("sync replica lease expired")
+	ErrCursorRegression        = errors.New("sync cursor regression")
+	ErrCursorAhead             = errors.New("sync cursor ahead of head")
+	ErrReseedRequired          = errors.New("sync reseed required")
+	ErrInvalidRetentionTarget  = errors.New("invalid sync retention target")
+	ErrInvalidChange           = errors.New("invalid sync change")
+	ErrInvalidRequestID        = errors.New("invalid sync request id")
+	ErrRequestIDConflict       = errors.New("sync request id reused with different payload")
+	ErrConflictNotFound        = errors.New("sync conflict not found")
+	ErrInvalidConflictStatus   = errors.New("invalid sync conflict status")
+	ErrNamespaceIncompatible   = errors.New("sync namespace incompatible")
+	ErrReplayPayloadNotFound   = errors.New("sync replay payload not found")
+	ErrInvalidReplayPayloadRef = errors.New("invalid sync replay payload reference")
 )
 
 type repository interface {
@@ -79,6 +82,7 @@ type Service struct {
 	metrics        *obsmetrics.StorageProxyMetrics
 	artifactWriter conflictArtifactWriter
 	changeApplier  replicaChangeApplier
+	replayPayloads replayPayloadStore
 	barrier        volumeMutationBarrier
 	now            func() time.Time
 }
@@ -123,6 +127,12 @@ type ListChangesResponse struct {
 	HeadSeq          int64                  `json:"head_seq"`
 	RetainedAfterSeq int64                  `json:"retained_after_seq"`
 	Changes          []*db.SyncJournalEntry `json:"changes"`
+}
+
+type OpenReplayPayloadRequest struct {
+	VolumeID   string
+	TeamID     string
+	ContentRef string
 }
 
 type ChangeRequest struct {
@@ -220,13 +230,17 @@ func (s *Service) GetHead(ctx context.Context, volumeID, teamID string) (int64, 
 }
 
 type RemoteChange struct {
-	VolumeID   string
-	TeamID     string
-	SandboxID  string
-	EventType  string
-	Path       string
-	OldPath    string
-	OccurredAt time.Time
+	VolumeID         string
+	TeamID           string
+	SandboxID        string
+	EventType        string
+	Path             string
+	OldPath          string
+	EntryKind        string
+	Mode             *uint32
+	ContentAvailable bool
+	ContentBytes     []byte
+	OccurredAt       time.Time
 }
 
 func NewService(repo repository, logger *logrus.Logger) *Service {
@@ -247,6 +261,10 @@ func (s *Service) SetMetrics(metrics *obsmetrics.StorageProxyMetrics) {
 
 func (s *Service) SetReplicaChangeApplier(applier replicaChangeApplier) {
 	s.changeApplier = applier
+}
+
+func (s *Service) SetReplayPayloadStore(store replayPayloadStore) {
+	s.replayPayloads = store
 }
 
 func (s *Service) SetVolumeMutationBarrier(barrier volumeMutationBarrier) {
@@ -429,6 +447,24 @@ func (s *Service) ListChanges(ctx context.Context, req *ListChangesRequest) (res
 		RetainedAfterSeq: retention.CompactedThroughSeq,
 		Changes:          changes,
 	}, nil
+}
+
+func (s *Service) OpenReplayPayload(ctx context.Context, req *OpenReplayPayloadRequest) (_ io.ReadCloser, err error) {
+	start := time.Now()
+	defer func() {
+		s.observeOperation("open_replay_payload", start, err)
+	}()
+	if req == nil || strings.TrimSpace(req.ContentRef) == "" {
+		return nil, ErrInvalidReplayPayloadRef
+	}
+	if s.replayPayloads == nil {
+		return nil, ErrReplayPayloadNotFound
+	}
+	volume, err := s.getAccessibleVolume(ctx, req.VolumeID, req.TeamID)
+	if err != nil {
+		return nil, err
+	}
+	return s.replayPayloads.GetPayload(ctx, volume, req.ContentRef)
 }
 
 func (s *Service) AppendReplicaChanges(ctx context.Context, req *AppendChangesRequest) (resp *AppendChangesResponse, err error) {
@@ -800,19 +836,51 @@ func (s *Service) RecordRemoteChange(ctx context.Context, change *RemoteChange) 
 		return nil
 	}
 
-	if _, err := s.getAccessibleVolume(ctx, change.VolumeID, change.TeamID); err != nil {
+	volume, err := s.getAccessibleVolume(ctx, change.VolumeID, change.TeamID)
+	if err != nil {
 		return err
 	}
 
+	eventType := NormalizeEventType(change.EventType)
 	now := change.OccurredAt.UTC()
 	if now.IsZero() {
 		now = s.currentTime()
 	}
 
 	normalizedPath := NormalizePath(change.Path)
-	if change.EventType == db.SyncEventWrite && normalizedPath != "" {
+	entryKind := normalizeEntryKind(change.EntryKind)
+	mode := int64PtrFromUint32(change.Mode)
+
+	var (
+		contentRef    *string
+		contentSHA256 *string
+		sizeBytes     *int64
+	)
+	if change.ContentAvailable {
+		if s.replayPayloads == nil {
+			return fmt.Errorf("replay payload storage unavailable")
+		}
+		sum := sha256.Sum256(change.ContentBytes)
+		sumHex := hex.EncodeToString(sum[:])
+		ref, err := s.replayPayloads.PutPayload(ctx, volume, sumHex, change.ContentBytes)
+		if err != nil {
+			return err
+		}
+		contentRef = &ref
+		contentSHA256 = &sumHex
+		size := int64(len(change.ContentBytes))
+		sizeBytes = &size
+	}
+
+	if eventType == db.SyncEventWrite && normalizedPath != "" {
 		latest, err := s.repo.GetLatestSyncJournalEntryByNormalizedPath(ctx, change.VolumeID, normalizedPath)
-		if err == nil && latest != nil && latest.Source == db.SyncSourceSandbox && latest.EventType == db.SyncEventWrite && latest.Path == change.Path && now.Sub(latest.CreatedAt) <= writeCoalesceWindow {
+		if err == nil &&
+			latest != nil &&
+			latest.Source == db.SyncSourceSandbox &&
+			latest.EventType == db.SyncEventWrite &&
+			latest.Path == change.Path &&
+			now.Sub(latest.CreatedAt) <= writeCoalesceWindow &&
+			remoteWriteEntriesEquivalent(latest, contentSHA256, sizeBytes, mode) {
 			return nil
 		}
 		if err != nil && !errors.Is(err, db.ErrNotFound) {
@@ -825,10 +893,15 @@ func (s *Service) RecordRemoteChange(ctx context.Context, change *RemoteChange) 
 			VolumeID:          change.VolumeID,
 			TeamID:            change.TeamID,
 			Source:            db.SyncSourceSandbox,
-			EventType:         NormalizeEventType(change.EventType),
+			EventType:         eventType,
 			Path:              change.Path,
 			NormalizedPath:    normalizedPath,
 			Tombstone:         change.EventType == db.SyncEventRemove,
+			EntryKind:         nonEmptyStringPtr(entryKind),
+			Mode:              mode,
+			ContentRef:        contentRef,
+			ContentSHA256:     contentSHA256,
+			SizeBytes:         sizeBytes,
 			CreatedAt:         now,
 			NormalizedOldPath: stringPtr(NormalizePath(change.OldPath)),
 			OldPath:           nonEmptyStringPtr(change.OldPath),
@@ -901,6 +974,8 @@ func (s *Service) prepareReplicaEntry(ctx context.Context, tx pgx.Tx, req *Appen
 		NormalizedPath: normalizedPath,
 		OldPath:        nonEmptyStringPtr(oldPathValue),
 		Tombstone:      eventType == db.SyncEventRemove,
+		EntryKind:      nonEmptyStringPtr(normalizeEntryKind(change.EntryKind)),
+		Mode:           int64PtrFromUint32(change.Mode),
 		ContentSHA256:  change.ContentSHA256,
 		SizeBytes:      change.SizeBytes,
 		CreatedAt:      now,
@@ -1634,6 +1709,48 @@ func metadataString(raw *json.RawMessage, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(text)
+}
+
+func int64PtrFromUint32(value *uint32) *int64 {
+	if value == nil {
+		return nil
+	}
+	converted := int64(*value)
+	return &converted
+}
+
+func remoteWriteEntriesEquivalent(latest *db.SyncJournalEntry, contentSHA256 *string, sizeBytes *int64, mode *int64) bool {
+	if latest == nil {
+		return false
+	}
+	if contentSHA256 == nil && sizeBytes == nil && mode == nil {
+		return true
+	}
+	return equalStringPtr(latest.ContentSHA256, contentSHA256) &&
+		equalInt64Ptr(latest.SizeBytes, sizeBytes) &&
+		equalInt64Ptr(latest.Mode, mode)
+}
+
+func equalStringPtr(left, right *string) bool {
+	switch {
+	case left == nil && right == nil:
+		return true
+	case left == nil || right == nil:
+		return false
+	default:
+		return *left == *right
+	}
+}
+
+func equalInt64Ptr(left, right *int64) bool {
+	switch {
+	case left == nil && right == nil:
+		return true
+	case left == nil || right == nil:
+		return false
+	default:
+		return *left == *right
+	}
 }
 
 func (s *Service) String() string {

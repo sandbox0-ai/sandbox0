@@ -1,9 +1,11 @@
 package volsync
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"testing"
 	"time"
 
@@ -25,6 +27,29 @@ type fakeRepo struct {
 	retention map[string]*db.SyncRetentionState
 	policies  map[string]*db.SyncNamespacePolicy
 	nextSeq   int64
+}
+
+type fakeReplayPayloadStore struct {
+	payloads map[string][]byte
+}
+
+func newFakeReplayPayloadStore() *fakeReplayPayloadStore {
+	return &fakeReplayPayloadStore{payloads: make(map[string][]byte)}
+}
+
+func (f *fakeReplayPayloadStore) PutPayload(ctx context.Context, volume *db.SandboxVolume, contentSHA256 string, payload []byte) (string, error) {
+	key := volume.ID + ":" + buildReplayPayloadRef(contentSHA256)
+	f.payloads[key] = append([]byte(nil), payload...)
+	return buildReplayPayloadRef(contentSHA256), nil
+}
+
+func (f *fakeReplayPayloadStore) GetPayload(ctx context.Context, volume *db.SandboxVolume, ref string) (io.ReadCloser, error) {
+	key := volume.ID + ":" + ref
+	payload, ok := f.payloads[key]
+	if !ok {
+		return nil, ErrReplayPayloadNotFound
+	}
+	return io.NopCloser(bytes.NewReader(payload)), nil
 }
 
 func newFakeRepo() *fakeRepo {
@@ -2098,6 +2123,100 @@ func TestRecordRemoteChangeJournalsChmodEvent(t *testing.T) {
 	}
 	if entry.Tombstone {
 		t.Fatalf("tombstone = %v, want false", entry.Tombstone)
+	}
+}
+
+func TestRecordRemoteChangeStoresReplayPayloadMetadataForWrite(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
+	store := newFakeReplayPayloadStore()
+
+	svc := NewService(repo, logrus.New())
+	svc.SetReplayPayloadStore(store)
+
+	mode := uint32(0o600)
+	if err := svc.RecordRemoteChange(context.Background(), &RemoteChange{
+		VolumeID:         "vol-1",
+		TeamID:           "team-1",
+		SandboxID:        "sandbox-1",
+		EventType:        db.SyncEventWrite,
+		Path:             "/src/main.go",
+		EntryKind:        "file",
+		Mode:             &mode,
+		ContentAvailable: true,
+		ContentBytes:     []byte("hello"),
+		OccurredAt:       time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("RecordRemoteChange() error = %v", err)
+	}
+	if len(repo.journal) != 1 {
+		t.Fatalf("journal entries = %d, want 1", len(repo.journal))
+	}
+	entry := repo.journal[0]
+	if entry.EntryKind == nil || *entry.EntryKind != "file" {
+		t.Fatalf("entry kind = %#v, want file", entry.EntryKind)
+	}
+	if entry.Mode == nil || *entry.Mode != int64(0o600) {
+		t.Fatalf("mode = %#v, want 0600", entry.Mode)
+	}
+	if entry.ContentRef == nil || *entry.ContentRef == "" {
+		t.Fatalf("content_ref = %#v, want non-empty", entry.ContentRef)
+	}
+	if entry.ContentSHA256 == nil || *entry.ContentSHA256 == "" {
+		t.Fatalf("content_sha256 = %#v, want non-empty", entry.ContentSHA256)
+	}
+	if entry.SizeBytes == nil || *entry.SizeBytes != 5 {
+		t.Fatalf("size_bytes = %#v, want 5", entry.SizeBytes)
+	}
+	if _, ok := store.payloads["vol-1:"+*entry.ContentRef]; !ok {
+		t.Fatalf("payload store missing key for %q", *entry.ContentRef)
+	}
+}
+
+func TestOpenReplayPayloadReturnsStoredPayload(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
+	store := newFakeReplayPayloadStore()
+
+	svc := NewService(repo, logrus.New())
+	svc.SetReplayPayloadStore(store)
+
+	mode := uint32(0o644)
+	if err := svc.RecordRemoteChange(context.Background(), &RemoteChange{
+		VolumeID:         "vol-1",
+		TeamID:           "team-1",
+		EventType:        db.SyncEventWrite,
+		Path:             "/src/main.go",
+		EntryKind:        "file",
+		Mode:             &mode,
+		ContentAvailable: true,
+		ContentBytes:     []byte("payload"),
+		OccurredAt:       time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("RecordRemoteChange() error = %v", err)
+	}
+
+	ref := repo.journal[0].ContentRef
+	if ref == nil {
+		t.Fatal("expected content_ref")
+	}
+
+	reader, err := svc.OpenReplayPayload(context.Background(), &OpenReplayPayloadRequest{
+		VolumeID:   "vol-1",
+		TeamID:     "team-1",
+		ContentRef: *ref,
+	})
+	if err != nil {
+		t.Fatalf("OpenReplayPayload() error = %v", err)
+	}
+	defer reader.Close()
+
+	body, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if got := string(body); got != "payload" {
+		t.Fatalf("payload = %q, want %q", got, "payload")
 	}
 }
 

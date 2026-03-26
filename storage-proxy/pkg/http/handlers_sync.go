@@ -330,6 +330,37 @@ func (s *Server) listSyncChanges(w http.ResponseWriter, r *http.Request) {
 	_ = spec.WriteSuccess(w, http.StatusOK, resp)
 }
 
+func (s *Server) downloadSyncReplayPayload(w http.ResponseWriter, r *http.Request) {
+	claims := internalauth.ClaimsFromContext(r.Context())
+	if claims == nil {
+		_ = spec.WriteError(w, http.StatusUnauthorized, spec.CodeUnauthorized, "unauthorized")
+		return
+	}
+	if s.syncMgr == nil {
+		_ = spec.WriteError(w, http.StatusServiceUnavailable, spec.CodeInternal, "volume sync unavailable")
+		return
+	}
+
+	contentRef := r.URL.Query().Get("content_ref")
+	reader, err := s.syncMgr.OpenReplayPayload(r.Context(), &volsync.OpenReplayPayloadRequest{
+		VolumeID:   r.PathValue("id"),
+		TeamID:     claims.TeamID,
+		ContentRef: contentRef,
+	})
+	if err != nil {
+		s.writeSyncError(w, err)
+		return
+	}
+	defer reader.Close()
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	if _, err := io.Copy(w, reader); err != nil {
+		s.logger.WithError(err).WithField("volume_id", r.PathValue("id")).Error("Download sync replay payload failed")
+	}
+}
+
 func (s *Server) listSyncConflicts(w http.ResponseWriter, r *http.Request) {
 	claims := internalauth.ClaimsFromContext(r.Context())
 	if claims == nil {
@@ -461,7 +492,7 @@ func (s *Server) updateSyncReplicaCursor(w http.ResponseWriter, r *http.Request)
 func (s *Server) writeSyncError(w http.ResponseWriter, err error) {
 	var reseedErr *volsync.ReseedRequiredError
 	switch {
-	case errors.Is(err, volsync.ErrReplicaNotFound), errors.Is(err, volsync.ErrConflictNotFound):
+	case errors.Is(err, volsync.ErrReplicaNotFound), errors.Is(err, volsync.ErrConflictNotFound), errors.Is(err, volsync.ErrReplayPayloadNotFound):
 		_ = spec.WriteError(w, http.StatusNotFound, spec.CodeNotFound, "not found")
 	case errors.As(err, &reseedErr):
 		_ = spec.WriteError(w, http.StatusConflict, spec.CodeConflict, volsync.ErrReseedRequired.Error(), syncReseedRequiredDetails{
@@ -471,7 +502,7 @@ func (s *Server) writeSyncError(w http.ResponseWriter, err error) {
 		})
 	case errors.Is(err, volsync.ErrCursorAhead), errors.Is(err, volsync.ErrCursorRegression), errors.Is(err, volsync.ErrReplicaLeaseExpired), errors.Is(err, volsync.ErrRequestIDConflict):
 		_ = spec.WriteError(w, http.StatusConflict, spec.CodeConflict, err.Error())
-	case errors.Is(err, volsync.ErrInvalidChange), errors.Is(err, volsync.ErrInvalidConflictStatus), errors.Is(err, volsync.ErrInvalidRequestID), errors.Is(err, volsync.ErrInvalidRetentionTarget):
+	case errors.Is(err, volsync.ErrInvalidChange), errors.Is(err, volsync.ErrInvalidConflictStatus), errors.Is(err, volsync.ErrInvalidRequestID), errors.Is(err, volsync.ErrInvalidRetentionTarget), errors.Is(err, volsync.ErrInvalidReplayPayloadRef):
 		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 	default:
 		s.logger.WithError(err).Error("Volume sync request failed")

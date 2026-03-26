@@ -343,6 +343,13 @@ func TestSyncAPISandboxOriginatedReplayableWritesExposeReplayMetadataAndPayload(
 		t.Fatalf("BytesWritten = %d, want %d", writeResp.BytesWritten, len(payload))
 	}
 
+	if _, err := fsServer.Flush(ctx, &pb.FlushRequest{
+		VolumeId: "vol-1",
+		HandleId: createResp.HandleId,
+	}); err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+
 	if _, err := fsServer.Release(ctx, &pb.ReleaseRequest{
 		VolumeId: "vol-1",
 		Inode:    createResp.Inode,

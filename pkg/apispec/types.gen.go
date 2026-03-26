@@ -430,6 +430,12 @@ const (
 	Write      SyncEventType = "write"
 )
 
+// Defines values for SyncJournalEntryEntryKind.
+const (
+	Directory SyncJournalEntryEntryKind = "directory"
+	File      SyncJournalEntryEntryKind = "file"
+)
+
 // Defines values for SyncJournalEntrySource.
 const (
 	SyncJournalEntrySourceReplica SyncJournalEntrySource = "replica"
@@ -2115,22 +2121,28 @@ type SyncEventType string
 
 // SyncJournalEntry defines model for SyncJournalEntry.
 type SyncJournalEntry struct {
-	ContentSha256     *string                 `json:"content_sha256"`
-	CreatedAt         *time.Time              `json:"created_at,omitempty"`
-	EventType         *SyncEventType          `json:"event_type,omitempty"`
-	Metadata          *map[string]interface{} `json:"metadata"`
-	NormalizedOldPath *string                 `json:"normalized_old_path"`
-	NormalizedPath    *string                 `json:"normalized_path,omitempty"`
-	OldPath           *string                 `json:"old_path"`
-	Path              *string                 `json:"path,omitempty"`
-	ReplicaId         *string                 `json:"replica_id"`
-	Seq               *int64                  `json:"seq,omitempty"`
-	SizeBytes         *int64                  `json:"size_bytes"`
-	Source            *SyncJournalEntrySource `json:"source,omitempty"`
-	TeamId            *string                 `json:"team_id,omitempty"`
-	Tombstone         *bool                   `json:"tombstone,omitempty"`
-	VolumeId          *string                 `json:"volume_id,omitempty"`
+	ContentRef        *string                    `json:"content_ref"`
+	ContentSha256     *string                    `json:"content_sha256"`
+	CreatedAt         *time.Time                 `json:"created_at,omitempty"`
+	EntryKind         *SyncJournalEntryEntryKind `json:"entry_kind"`
+	EventType         *SyncEventType             `json:"event_type,omitempty"`
+	Metadata          *map[string]interface{}    `json:"metadata"`
+	Mode              *int64                     `json:"mode"`
+	NormalizedOldPath *string                    `json:"normalized_old_path"`
+	NormalizedPath    *string                    `json:"normalized_path,omitempty"`
+	OldPath           *string                    `json:"old_path"`
+	Path              *string                    `json:"path,omitempty"`
+	ReplicaId         *string                    `json:"replica_id"`
+	Seq               *int64                     `json:"seq,omitempty"`
+	SizeBytes         *int64                     `json:"size_bytes"`
+	Source            *SyncJournalEntrySource    `json:"source,omitempty"`
+	TeamId            *string                    `json:"team_id,omitempty"`
+	Tombstone         *bool                      `json:"tombstone,omitempty"`
+	VolumeId          *string                    `json:"volume_id,omitempty"`
 }
+
+// SyncJournalEntryEntryKind defines model for SyncJournalEntry.EntryKind.
+type SyncJournalEntryEntryKind string
 
 // SyncJournalEntrySource defines model for SyncJournalEntry.Source.
 type SyncJournalEntrySource string
@@ -2525,6 +2537,11 @@ type GetApiV1SandboxvolumesIdSyncChangesParams struct {
 type GetApiV1SandboxvolumesIdSyncConflictsParams struct {
 	Status *string `form:"status,omitempty" json:"status,omitempty"`
 	Limit  *int32  `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// GetApiV1SandboxvolumesIdSyncReplayPayloadParams defines parameters for GetApiV1SandboxvolumesIdSyncReplayPayload.
+type GetApiV1SandboxvolumesIdSyncReplayPayloadParams struct {
+	ContentRef string `form:"content_ref" json:"content_ref"`
 }
 
 // GetAuthOidcProviderCallbackParams defines parameters for GetAuthOidcProviderCallback.

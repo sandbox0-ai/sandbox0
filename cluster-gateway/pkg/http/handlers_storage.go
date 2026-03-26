@@ -251,6 +251,15 @@ func (s *Server) listSyncChanges(c *gin.Context) {
 	s.proxyToStorageProxy(c)
 }
 
+func (s *Server) downloadSyncReplayPayload(c *gin.Context) {
+	id, ok := requireVolumeID(c)
+	if !ok {
+		return
+	}
+	c.Request.URL.Path = "/sandboxvolumes/" + id + "/sync/replay-payload"
+	s.proxyToStorageProxy(c)
+}
+
 func (s *Server) listSyncConflicts(c *gin.Context) {
 	id, ok := requireVolumeID(c)
 	if !ok {

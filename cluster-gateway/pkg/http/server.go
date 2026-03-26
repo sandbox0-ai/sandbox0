@@ -450,6 +450,7 @@ func (s *Server) setupRoutes() {
 				sync.POST("/bootstrap", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeWrite), s.createSyncBootstrap)
 				sync.GET("/bootstrap/archive", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeRead), s.downloadSyncBootstrapArchive)
 				sync.GET("/changes", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeRead), s.listSyncChanges)
+				sync.GET("/replay-payload", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeRead), s.downloadSyncReplayPayload)
 
 				conflicts := sync.Group("/conflicts")
 				{

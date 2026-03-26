@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -24,10 +25,13 @@ type fakeHTTPSyncManager struct {
 	lastUpdateCursor  *volsync.UpdateCursorRequest
 	lastListConflicts *volsync.ListConflictsRequest
 	lastResolve       *volsync.ResolveConflictRequest
+	lastOpenReplay    *volsync.OpenReplayPayloadRequest
 	head              int64
 	listChangesErr    error
 	appendErr         error
 	updateCursorErr   error
+	openReplayErr     error
+	replayPayload     []byte
 }
 
 func (f *fakeHTTPSyncManager) UpsertReplica(ctx context.Context, req *volsync.UpsertReplicaRequest) (*volsync.ReplicaEnvelope, error) {
@@ -83,14 +87,27 @@ func (f *fakeHTTPSyncManager) ListChanges(ctx context.Context, req *volsync.List
 		HeadSeq:          9,
 		RetainedAfterSeq: 4,
 		Changes: []*db.SyncJournalEntry{{
-			Seq:       9,
-			VolumeID:  req.VolumeID,
-			TeamID:    req.TeamID,
-			Source:    db.SyncSourceSandbox,
-			EventType: db.SyncEventWrite,
-			Path:      "/app/main.go",
+			Seq:           9,
+			VolumeID:      req.VolumeID,
+			TeamID:        req.TeamID,
+			Source:        db.SyncSourceSandbox,
+			EventType:     db.SyncEventWrite,
+			Path:          "/app/main.go",
+			EntryKind:     stringPtr("file"),
+			Mode:          int64Ptr(0o644),
+			ContentRef:    stringPtr("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+			ContentSHA256: stringPtr("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+			SizeBytes:     int64Ptr(12),
 		}},
 	}, nil
+}
+
+func (f *fakeHTTPSyncManager) OpenReplayPayload(ctx context.Context, req *volsync.OpenReplayPayloadRequest) (io.ReadCloser, error) {
+	f.lastOpenReplay = req
+	if f.openReplayErr != nil {
+		return nil, f.openReplayErr
+	}
+	return io.NopCloser(bytes.NewReader(f.replayPayload)), nil
 }
 
 func (f *fakeHTTPSyncManager) ListConflicts(ctx context.Context, req *volsync.ListConflictsRequest) (*volsync.ListConflictsResponse, error) {
@@ -182,6 +199,14 @@ func tMustMarshalJSON(v any) []byte {
 func mustRawJSON(payload []byte) *json.RawMessage {
 	raw := json.RawMessage(payload)
 	return &raw
+}
+
+func stringPtr(value string) *string {
+	return &value
+}
+
+func int64Ptr(value int64) *int64 {
+	return &value
 }
 
 func TestUpsertSyncReplicaHandler(t *testing.T) {
@@ -631,6 +656,12 @@ func TestListSyncChangesHandler(t *testing.T) {
 	if resp.HeadSeq != 9 || resp.RetainedAfterSeq != 4 || len(resp.Changes) != 1 || resp.Changes[0].Path != "/app/main.go" {
 		t.Fatalf("response = %+v, want head=9 retained_after=4 one /app/main.go change", resp)
 	}
+	if resp.Changes[0].EntryKind == nil || *resp.Changes[0].EntryKind != "file" {
+		t.Fatalf("entry kind = %#v, want file", resp.Changes[0].EntryKind)
+	}
+	if resp.Changes[0].ContentRef == nil || *resp.Changes[0].ContentRef == "" {
+		t.Fatalf("content ref = %#v, want non-empty", resp.Changes[0].ContentRef)
+	}
 }
 
 func TestListSyncChangesHandlerRejectsReseedRequired(t *testing.T) {
@@ -674,6 +705,56 @@ func TestListSyncChangesHandlerRejectsReseedRequired(t *testing.T) {
 	}
 	if details["retained_after_seq"] != float64(5) || details["head_seq"] != float64(12) {
 		t.Fatalf("details = %#v, want retained_after_seq=5 head_seq=12", details)
+	}
+}
+
+func TestDownloadSyncReplayPayloadHandler(t *testing.T) {
+	syncMgr := &fakeHTTPSyncManager{replayPayload: []byte("sandbox-body\n")}
+	server := &Server{
+		logger:  logrus.New(),
+		syncMgr: syncMgr,
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/sandboxvolumes/vol-1/sync/replay-payload?content_ref=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", nil)
+	req.SetPathValue("id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	recorder := httptest.NewRecorder()
+
+	server.downloadSyncReplayPayload(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	if got := recorder.Body.String(); got != "sandbox-body\n" {
+		t.Fatalf("body = %q, want %q", got, "sandbox-body\n")
+	}
+	if syncMgr.lastOpenReplay == nil || syncMgr.lastOpenReplay.ContentRef == "" {
+		t.Fatalf("open replay request = %+v, want content_ref", syncMgr.lastOpenReplay)
+	}
+}
+
+func TestDownloadSyncReplayPayloadHandlerRejectsInvalidRef(t *testing.T) {
+	syncMgr := &fakeHTTPSyncManager{openReplayErr: volsync.ErrInvalidReplayPayloadRef}
+	server := &Server{
+		logger:  logrus.New(),
+		syncMgr: syncMgr,
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/sandboxvolumes/vol-1/sync/replay-payload?content_ref=bad-ref", nil)
+	req.SetPathValue("id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	recorder := httptest.NewRecorder()
+
+	server.downloadSyncReplayPayload(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
 	}
 }
 

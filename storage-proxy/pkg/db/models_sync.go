@@ -54,6 +54,9 @@ type SyncJournalEntry struct {
 	OldPath           *string          `json:"old_path,omitempty"`
 	NormalizedOldPath *string          `json:"normalized_old_path,omitempty"`
 	Tombstone         bool             `json:"tombstone"`
+	EntryKind         *string          `json:"entry_kind,omitempty"`
+	Mode              *int64           `json:"mode,omitempty"`
+	ContentRef        *string          `json:"content_ref,omitempty"`
 	ContentSHA256     *string          `json:"content_sha256,omitempty"`
 	SizeBytes         *int64           `json:"size_bytes,omitempty"`
 	Metadata          *json.RawMessage `json:"metadata,omitempty"`

@@ -65,6 +65,11 @@ func newStorageProxySyncTestEnv(t *testing.T) *storageProxySyncTestEnv {
 
 	repo := db.NewRepository(pool)
 	syncSvc := volsync.NewService(repo, logrus.New())
+	replayStore, err := object.CreateStorage("mem", "", "", "", "")
+	if err != nil {
+		t.Fatalf("create replay payload storage: %v", err)
+	}
+	syncSvc.SetReplayPayloadStore(volsync.NewObjectReplayPayloadStore(replayStore))
 	snapshotMgr := newIntegrationSnapshotManager()
 	server := storagehttp.NewServer(logrus.New(), repo, nil, "test-region", nil, snapshotMgr, syncSvc, nil)
 
@@ -238,6 +243,10 @@ func (m *integrationMountedVolumeManager) UnmountVolume(_ context.Context, _, _ 
 	return nil
 }
 
+func (m *integrationMountedVolumeManager) AckInvalidate(_, _, _ string, _ bool, _ string) error {
+	return nil
+}
+
 func (m *integrationMountedVolumeManager) GetVolume(volumeID string) (*volume.VolumeContext, error) {
 	vol, ok := m.volumes[volumeID]
 	if !ok {
@@ -245,6 +254,8 @@ func (m *integrationMountedVolumeManager) GetVolume(volumeID string) (*volume.Vo
 	}
 	return vol, nil
 }
+
+func (m *integrationMountedVolumeManager) TrackVolume(_, _ string) {}
 
 func newMountedIntegrationVolumeContext(t *testing.T, volumeID, teamID string) *volume.VolumeContext {
 	t.Helper()

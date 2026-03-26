@@ -156,6 +156,11 @@ func main() {
 		syncSvc.SetMetrics(storageProxyMetrics)
 		syncSvc.SetConflictArtifactWriter(volsync.NewConflictArtifactWriter(volMgr, logrusLogger))
 		syncSvc.SetReplicaChangeApplier(volsync.NewVolumeChangeApplier(volMgr, logrusLogger))
+		replayPayloadStore, err := volsync.NewS3ReplayPayloadStore(cfg)
+		if err != nil {
+			zapLogger.Fatal("Failed to initialize replay payload store", zap.Error(err))
+		}
+		syncSvc.SetReplayPayloadStore(replayPayloadStore)
 		syncSvc.SetVolumeMutationBarrier(volumeBarrier)
 		syncMaintenance = volsync.NewMaintenance(repo, syncSvc, logrusLogger, syncMaintenanceCfg)
 		if sharedClock != nil {

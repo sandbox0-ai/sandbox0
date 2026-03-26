@@ -291,7 +291,7 @@ func (r *Repository) ListSyncJournalEntries(ctx context.Context, volumeID string
 			seq, volume_id, team_id, source, replica_id,
 			event_type, path, normalized_path,
 			old_path, normalized_old_path,
-			tombstone, content_sha256, size_bytes, metadata, created_at
+			tombstone, entry_kind, mode, content_ref, content_sha256, size_bytes, metadata, created_at
 		FROM sandbox_volume_sync_journal
 		WHERE volume_id = $1 AND seq > $2
 		ORDER BY seq ASC
@@ -354,19 +354,19 @@ func (r *Repository) CreateSyncJournalEntryTx(ctx context.Context, tx pgx.Tx, en
 			volume_id, team_id, source, replica_id,
 			event_type, path, normalized_path,
 			old_path, normalized_old_path,
-			tombstone, content_sha256, size_bytes, metadata, created_at
+			tombstone, entry_kind, mode, content_ref, content_sha256, size_bytes, metadata, created_at
 		) VALUES (
 			$1, $2, $3, $4,
 			$5, $6, $7,
 			$8, $9,
-			$10, $11, $12, $13, $14
+			$10, $11, $12, $13, $14, $15, $16, $17
 		)
 		RETURNING seq, created_at
 	`,
 		entry.VolumeID, entry.TeamID, entry.Source, entry.ReplicaID,
 		entry.EventType, entry.Path, entry.NormalizedPath,
 		entry.OldPath, entry.NormalizedOldPath,
-		entry.Tombstone, entry.ContentSHA256, entry.SizeBytes, entry.Metadata, entry.CreatedAt,
+		entry.Tombstone, entry.EntryKind, entry.Mode, entry.ContentRef, entry.ContentSHA256, entry.SizeBytes, entry.Metadata, entry.CreatedAt,
 	).Scan(&entry.Seq, &entry.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("create sync journal entry: %w", err)
@@ -561,7 +561,7 @@ func (r *Repository) getLatestSyncJournalEntryByNormalizedPath(ctx context.Conte
 				seq, volume_id, team_id, source, replica_id,
 				event_type, path, normalized_path,
 				old_path, normalized_old_path,
-				tombstone, content_sha256, size_bytes, metadata, created_at
+				tombstone, entry_kind, mode, content_ref, content_sha256, size_bytes, metadata, created_at
 			FROM sandbox_volume_sync_journal
 			WHERE volume_id = $1 AND (normalized_path = '' OR normalized_old_path = '')
 			ORDER BY seq DESC
@@ -573,7 +573,7 @@ func (r *Repository) getLatestSyncJournalEntryByNormalizedPath(ctx context.Conte
 				seq, volume_id, team_id, source, replica_id,
 				event_type, path, normalized_path,
 				old_path, normalized_old_path,
-				tombstone, content_sha256, size_bytes, metadata, created_at
+				tombstone, entry_kind, mode, content_ref, content_sha256, size_bytes, metadata, created_at
 			FROM sandbox_volume_sync_journal
 			WHERE volume_id = $1
 			  AND (normalized_path = $2 OR normalized_old_path = $2)
@@ -602,7 +602,7 @@ func scanSyncJournalEntry(scanner syncJournalScanner) (*SyncJournalEntry, error)
 		&entry.Seq, &entry.VolumeID, &entry.TeamID, &entry.Source, &entry.ReplicaID,
 		&entry.EventType, &entry.Path, &entry.NormalizedPath,
 		&entry.OldPath, &entry.NormalizedOldPath,
-		&entry.Tombstone, &entry.ContentSHA256, &entry.SizeBytes, &entry.Metadata, &entry.CreatedAt,
+		&entry.Tombstone, &entry.EntryKind, &entry.Mode, &entry.ContentRef, &entry.ContentSHA256, &entry.SizeBytes, &entry.Metadata, &entry.CreatedAt,
 	)
 	if err != nil {
 		return nil, err

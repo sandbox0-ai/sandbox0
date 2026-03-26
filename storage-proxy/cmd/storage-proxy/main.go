@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/sandbox0-ai/sandbox0/pkg/clock"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -103,12 +104,21 @@ func main() {
 	var repo *db.Repository
 	var meteringRepo *metering.Repository
 	var pool *pgxpool.Pool
+	var sharedClock *clock.Clock
 	if cfg.DatabaseURL != "" {
 		pool, err = initDatabase(context.Background(), cfg.DatabaseURL, cfg, zapLogger, obsProvider)
 		if err != nil {
 			zapLogger.Fatal("Failed to connect to database", zap.Error(err))
 		}
 		defer pool.Close()
+
+		sharedClock, err = clock.New(context.Background(), &pgxPoolClockAdapter{pool: pool},
+			clock.WithLogger(&zapClockLogger{logger: zapLogger}),
+		)
+		if err != nil {
+			zapLogger.Fatal("Failed to initialize shared clock", zap.Error(err))
+		}
+		defer sharedClock.Close()
 
 		// Run database migrations
 		if err := runMigrations(context.Background(), pool, cfg.DatabaseSchema, zapLogger); err != nil {
@@ -140,11 +150,17 @@ func main() {
 	}
 	if repo != nil {
 		syncSvc = volsync.NewService(repo, logrusLogger)
+		if sharedClock != nil {
+			syncSvc.SetNowFunc(sharedClock.Now)
+		}
 		syncSvc.SetMetrics(storageProxyMetrics)
 		syncSvc.SetConflictArtifactWriter(volsync.NewConflictArtifactWriter(volMgr, logrusLogger))
 		syncSvc.SetReplicaChangeApplier(volsync.NewVolumeChangeApplier(volMgr, logrusLogger))
 		syncSvc.SetVolumeMutationBarrier(volumeBarrier)
 		syncMaintenance = volsync.NewMaintenance(repo, syncSvc, logrusLogger, syncMaintenanceCfg)
+		if sharedClock != nil {
+			syncMaintenance.SetNowFunc(sharedClock.Now)
+		}
 		syncMaintenance.SetMetrics(storageProxyMetrics)
 	}
 
@@ -270,6 +286,9 @@ func main() {
 
 	// Register FileSystem service
 	fsServer := grpcserver.NewFileSystemServer(volMgr, repo, eventHub, eventBroadcaster, logrusLogger, syncSvc, volumeBarrier)
+	if sharedClock != nil {
+		fsServer.SetNowFunc(sharedClock.Now)
+	}
 	pb.RegisterFileSystemServer(grpcServer, fsServer)
 
 	// Register health service
@@ -463,6 +482,56 @@ func (z *zapLogger) Printf(format string, args ...any) {
 
 func (z *zapLogger) Fatalf(format string, args ...any) {
 	z.logger.Fatal(fmt.Sprintf(format, args...))
+}
+
+type pgxPoolClockAdapter struct {
+	pool *pgxpool.Pool
+}
+
+type pgxClockRowAdapter struct {
+	row interface {
+		Scan(dest ...any) error
+	}
+}
+
+func (r *pgxClockRowAdapter) Scan(dest ...any) error {
+	return r.row.Scan(dest...)
+}
+
+func (a *pgxPoolClockAdapter) QueryRow(ctx context.Context, sql string, args ...any) clock.Row {
+	return &pgxClockRowAdapter{row: a.pool.QueryRow(ctx, sql, args...)}
+}
+
+type zapClockLogger struct {
+	logger *zap.Logger
+}
+
+func (z *zapClockLogger) Info(msg string, keysAndValues ...any) {
+	z.logger.Info(msg, toZapFields(keysAndValues)...)
+}
+
+func (z *zapClockLogger) Warn(msg string, keysAndValues ...any) {
+	z.logger.Warn(msg, toZapFields(keysAndValues)...)
+}
+
+func (z *zapClockLogger) Error(msg string, keysAndValues ...any) {
+	z.logger.Error(msg, toZapFields(keysAndValues)...)
+}
+
+func toZapFields(keysAndValues []any) []zap.Field {
+	if len(keysAndValues)%2 != 0 {
+		return []zap.Field{zap.Any("args", keysAndValues)}
+	}
+
+	fields := make([]zap.Field, 0, len(keysAndValues)/2)
+	for i := 0; i < len(keysAndValues); i += 2 {
+		key, ok := keysAndValues[i].(string)
+		if !ok {
+			continue
+		}
+		fields = append(fields, zap.Any(key, keysAndValues[i+1]))
+	}
+	return fields
 }
 
 // volumeProviderAdapter adapts volume.Manager to coordinator.VolumeProvider interface

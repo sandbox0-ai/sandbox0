@@ -80,6 +80,7 @@ type Service struct {
 	artifactWriter conflictArtifactWriter
 	changeApplier  replicaChangeApplier
 	barrier        volumeMutationBarrier
+	now            func() time.Time
 }
 
 type conflictArtifactWriter interface {
@@ -229,7 +230,11 @@ type RemoteChange struct {
 }
 
 func NewService(repo repository, logger *logrus.Logger) *Service {
-	return &Service{repo: repo, logger: logger}
+	return &Service{
+		repo:    repo,
+		logger:  logger,
+		now:     func() time.Time { return time.Now().UTC() },
+	}
 }
 
 func (s *Service) SetConflictArtifactWriter(writer conflictArtifactWriter) {
@@ -248,6 +253,20 @@ func (s *Service) SetVolumeMutationBarrier(barrier volumeMutationBarrier) {
 	s.barrier = barrier
 }
 
+func (s *Service) SetNowFunc(now func() time.Time) {
+	if now == nil {
+		return
+	}
+	s.now = func() time.Time { return now().UTC() }
+}
+
+func (s *Service) currentTime() time.Time {
+	if s != nil && s.now != nil {
+		return s.now()
+	}
+	return time.Now().UTC()
+}
+
 func (s *Service) UpsertReplica(ctx context.Context, req *UpsertReplicaRequest) (resp *ReplicaEnvelope, err error) {
 	start := time.Now()
 	defer func() {
@@ -263,7 +282,7 @@ func (s *Service) UpsertReplica(ctx context.Context, req *UpsertReplicaRequest) 
 		return nil, ErrReplicaNotFound
 	}
 
-	now := time.Now().UTC()
+	now := s.currentTime()
 	requestedCapabilities := pathnorm.NormalizeFilesystemCapabilities(req.Platform, req.CaseSensitive, req.Capabilities)
 	if err := s.repo.WithTx(ctx, func(tx pgx.Tx) error {
 		policy, err := s.getNamespacePolicyTx(ctx, tx, req.VolumeID)
@@ -460,7 +479,7 @@ func (s *Service) AppendReplicaChanges(ctx context.Context, req *AppendChangesRe
 				return err
 			}
 
-			if err := validateReplicaLease(replica, time.Now().UTC()); err != nil {
+			if err := validateReplicaLease(replica, s.currentTime()); err != nil {
 				return err
 			}
 
@@ -483,7 +502,7 @@ func (s *Service) AppendReplicaChanges(ctx context.Context, req *AppendChangesRe
 				return ErrCursorRegression
 			}
 
-			now := time.Now().UTC()
+			now := s.currentTime()
 			response := &AppendChangesResponse{
 				HeadSeq:   head,
 				Accepted:  []*db.SyncJournalEntry{},
@@ -585,7 +604,7 @@ func (s *Service) UpdateReplicaCursor(ctx context.Context, req *UpdateCursorRequ
 		if err != nil {
 			return translateReplicaErr(err)
 		}
-		if err := validateReplicaLease(replica, time.Now().UTC()); err != nil {
+		if err := validateReplicaLease(replica, s.currentTime()); err != nil {
 			return err
 		}
 		head, err := s.repo.GetSyncHead(ctx, req.VolumeID)
@@ -606,7 +625,7 @@ func (s *Service) UpdateReplicaCursor(ctx context.Context, req *UpdateCursorRequ
 		if req.LastAppliedSeq < replica.LastAppliedSeq {
 			return ErrCursorRegression
 		}
-		return s.repo.UpdateSyncReplicaCursorTx(ctx, tx, req.VolumeID, req.ReplicaID, req.LastAppliedSeq, time.Now().UTC())
+		return s.repo.UpdateSyncReplicaCursorTx(ctx, tx, req.VolumeID, req.ReplicaID, req.LastAppliedSeq, s.currentTime())
 	})
 	if err != nil {
 		return nil, err
@@ -663,7 +682,7 @@ func (s *Service) CompactJournal(ctx context.Context, req *CompactJournalRequest
 					VolumeID:            req.VolumeID,
 					TeamID:              req.TeamID,
 					CompactedThroughSeq: target,
-					UpdatedAt:           time.Now().UTC(),
+					UpdatedAt:           s.currentTime(),
 				}); err != nil {
 					return err
 				}
@@ -731,7 +750,7 @@ func (s *Service) ResolveConflict(ctx context.Context, req *ResolveConflictReque
 	metadata := mustMarshalMetadata(map[string]any{
 		"resolution":  req.Resolution,
 		"note":        req.Note,
-		"resolved_at": time.Now().UTC().Format(time.RFC3339),
+		"resolved_at": s.currentTime().Format(time.RFC3339),
 	})
 
 	if err := s.repo.WithTx(ctx, func(tx pgx.Tx) error {
@@ -787,7 +806,7 @@ func (s *Service) RecordRemoteChange(ctx context.Context, change *RemoteChange) 
 
 	now := change.OccurredAt.UTC()
 	if now.IsZero() {
-		now = time.Now().UTC()
+		now = s.currentTime()
 	}
 
 	normalizedPath := NormalizePath(change.Path)
@@ -839,7 +858,7 @@ func (s *Service) prepareReplicaEntry(ctx context.Context, tx pgx.Tx, req *Appen
 	}
 
 	if pathnorm.RequiresPortableNameAudit(replica.Capabilities) {
-		compatibilityConflict, err := buildCompatibilityConflictForChange(req, replica, change)
+		compatibilityConflict, err := buildCompatibilityConflictForChange(req, replica, change, now)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -965,6 +984,7 @@ func (s *Service) detectReplicaCasefoldConflict(
 			latest,
 			reason,
 			metadata,
+			s.currentTime(),
 		), nil
 	}
 
@@ -1017,6 +1037,7 @@ func (s *Service) detectLatestConflict(
 			latest,
 			conflictReason(latest, normalizedPath, pathValue),
 			metadata,
+			s.currentTime(),
 		), nil
 	}
 	return nil, nil
@@ -1065,6 +1086,7 @@ func buildSyncConflict(
 	latest *db.SyncJournalEntry,
 	reason string,
 	metadata map[string]any,
+	now time.Time,
 ) *db.SyncConflict {
 	existingSeq := latest.Seq
 	if len(metadata) == 0 {
@@ -1089,12 +1111,12 @@ func buildSyncConflict(
 		Reason:          reason,
 		Status:          db.SyncConflictStatusOpen,
 		Metadata:        mustMarshalMetadata(metadata),
-		CreatedAt:       time.Now().UTC(),
-		UpdatedAt:       time.Now().UTC(),
+		CreatedAt:       now,
+		UpdatedAt:       now,
 	}
 }
 
-func buildCompatibilityConflictForChange(req *AppendChangesRequest, replica *db.SyncReplica, change ChangeRequest) (*db.SyncConflict, error) {
+func buildCompatibilityConflictForChange(req *AppendChangesRequest, replica *db.SyncReplica, change ChangeRequest, now time.Time) (*db.SyncConflict, error) {
 	issues := make([]pathnorm.CompatibilityIssue, 0, 2)
 	for _, candidate := range []string{change.Path, change.OldPath} {
 		if strings.TrimSpace(candidate) == "" {
@@ -1123,14 +1145,14 @@ func buildCompatibilityConflictForChange(req *AppendChangesRequest, replica *db.
 		IncomingOldPath: nonEmptyStringPtr(change.OldPath),
 		Reason:          primary.Code,
 		Status:          db.SyncConflictStatusOpen,
-		Metadata: mustMarshalMetadata(map[string]any{
-			"base_seq":     req.BaseSeq,
-			"issues":       issues,
-			"capabilities": replica.Capabilities,
-		}),
-		CreatedAt: time.Now().UTC(),
-		UpdatedAt: time.Now().UTC(),
-	}
+			Metadata: mustMarshalMetadata(map[string]any{
+				"base_seq":     req.BaseSeq,
+				"issues":       issues,
+				"capabilities": replica.Capabilities,
+			}),
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
 	return conflict, nil
 }
 

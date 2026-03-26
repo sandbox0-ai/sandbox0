@@ -264,12 +264,12 @@ func TestPublishEventDefaultsTimestampBeforeRecordingRemoteChange(t *testing.T) 
 	t.Parallel()
 
 	recorder := &fakeSyncRecorder{}
+	fixedNow := time.Date(2026, 3, 26, 12, 34, 56, 0, time.UTC)
 	server := &FileSystemServer{
 		syncRecorder: recorder,
 		logger:       logrus.New(),
+		now:          func() time.Time { return fixedNow },
 	}
-
-	before := time.Now().Add(-time.Second)
 	server.publishEvent(authContext("team-a", "sandbox-1"), &pb.WatchEvent{
 		VolumeId:  "vol-1",
 		EventType: pb.WatchEventType_WATCH_EVENT_TYPE_WRITE,
@@ -283,8 +283,8 @@ func TestPublishEventDefaultsTimestampBeforeRecordingRemoteChange(t *testing.T) 
 	if got.OccurredAt.Unix() <= 0 {
 		t.Fatalf("OccurredAt = %v, want unix timestamp > 0", got.OccurredAt)
 	}
-	if got.OccurredAt.Before(before) {
-		t.Fatalf("OccurredAt = %v, want recent timestamp after %v", got.OccurredAt, before)
+	if !got.OccurredAt.Equal(fixedNow) {
+		t.Fatalf("OccurredAt = %v, want %v from injected clock", got.OccurredAt, fixedNow)
 	}
 }
 

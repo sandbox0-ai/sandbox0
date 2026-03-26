@@ -37,6 +37,7 @@ type Maintenance struct {
 	logger  *logrus.Logger
 	metrics *obsmetrics.StorageProxyMetrics
 	config  MaintenanceConfig
+	now     func() time.Time
 }
 
 func NewMaintenance(repo maintenanceRepository, service maintenanceService, logger *logrus.Logger, cfg MaintenanceConfig) *Maintenance {
@@ -57,11 +58,26 @@ func NewMaintenance(repo maintenanceRepository, service maintenanceService, logg
 		service: service,
 		logger:  logger,
 		config:  cfg,
+		now:     func() time.Time { return time.Now().UTC() },
 	}
 }
 
 func (m *Maintenance) SetMetrics(metrics *obsmetrics.StorageProxyMetrics) {
 	m.metrics = metrics
+}
+
+func (m *Maintenance) SetNowFunc(now func() time.Time) {
+	if now == nil {
+		return
+	}
+	m.now = func() time.Time { return now().UTC() }
+}
+
+func (m *Maintenance) currentTime() time.Time {
+	if m != nil && m.now != nil {
+		return m.now()
+	}
+	return time.Now().UTC()
 }
 
 func (m *Maintenance) Enabled() bool {
@@ -155,7 +171,7 @@ func (m *Maintenance) cleanupRequests(ctx context.Context) error {
 	if m.config.RequestRetention <= 0 {
 		return nil
 	}
-	deleted, err := m.repo.DeleteExpiredSyncRequests(ctx, time.Now().UTC().Add(-m.config.RequestRetention))
+	deleted, err := m.repo.DeleteExpiredSyncRequests(ctx, m.currentTime().Add(-m.config.RequestRetention))
 	if err != nil {
 		return err
 	}

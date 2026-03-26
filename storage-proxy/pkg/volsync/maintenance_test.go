@@ -81,6 +81,25 @@ func TestMaintenanceRunOnceCompactsVolumesPastRetentionWindow(t *testing.T) {
 	}
 }
 
+func TestMaintenanceRunOnceUsesInjectedClockForRequestCleanup(t *testing.T) {
+	repo := &fakeMaintenanceRepo{}
+	service := &fakeMaintenanceService{}
+	maintenance := NewMaintenance(repo, service, logrus.New(), MaintenanceConfig{
+		CompactionInterval:   time.Minute,
+		JournalRetainEntries: -1,
+		RequestRetention:     time.Hour,
+	})
+	fixedNow := time.Date(2026, 3, 26, 15, 0, 0, 0, time.UTC)
+	maintenance.SetNowFunc(func() time.Time { return fixedNow })
+
+	maintenance.RunOnce(context.Background())
+
+	want := fixedNow.Add(-time.Hour)
+	if !repo.lastDeleteBefore.Equal(want) {
+		t.Fatalf("lastDeleteBefore = %v, want %v", repo.lastDeleteBefore, want)
+	}
+}
+
 func TestMaintenanceRunOnceSkipsDisabledRetentionSettings(t *testing.T) {
 	repo := &fakeMaintenanceRepo{}
 	service := &fakeMaintenanceService{}

@@ -140,6 +140,27 @@ func (s *FileSystemServer) takeDirtyWrite(volumeID string, handleID uint64) (dir
 	return dirty, ok
 }
 
+func (s *FileSystemServer) peekDirtyWrite(volumeID string, handleID uint64) (dirtyWriteHandle, bool) {
+	if s == nil {
+		return dirtyWriteHandle{}, false
+	}
+	key := dirtyWriteKey(volumeID, handleID)
+	s.dirtyWriteMu.Lock()
+	defer s.dirtyWriteMu.Unlock()
+	dirty, ok := s.dirtyWriteHandles[key]
+	return dirty, ok
+}
+
+func (s *FileSystemServer) clearDirtyWrite(volumeID string, handleID uint64) {
+	if s == nil {
+		return
+	}
+	key := dirtyWriteKey(volumeID, handleID)
+	s.dirtyWriteMu.Lock()
+	defer s.dirtyWriteMu.Unlock()
+	delete(s.dirtyWriteHandles, key)
+}
+
 func (s *FileSystemServer) recordRemoteSyncChange(ctx context.Context, change *volsync.RemoteChange) context.Context {
 	if s.syncRecorder == nil || change == nil {
 		return ctx
@@ -207,6 +228,31 @@ func captureInodeReplayState(volCtx *volume.VolumeContext, inode uint64) ([]byte
 
 func uint32Ptr(value uint32) *uint32 {
 	return &value
+}
+
+func (s *FileSystemServer) recordDirtyWriteReplayPayload(ctx context.Context, volCtx *volume.VolumeContext, volumeID string, dirty dirtyWriteHandle, warnContext string) bool {
+	if volCtx == nil {
+		return false
+	}
+	path := resolveInodePath(volCtx, uint64(mapInode(volCtx, dirty.inode)))
+	if path == "" {
+		return false
+	}
+	payload, mode, err := captureInodeReplayState(volCtx, dirty.inode)
+	if err != nil {
+		s.logger.WithError(err).WithField("volume_id", volumeID).Warn("Failed to capture replay payload for " + warnContext)
+		return false
+	}
+	s.recordRemoteSyncChange(ctx, &volsync.RemoteChange{
+		VolumeID:         volumeID,
+		EventType:        db.SyncEventWrite,
+		Path:             path,
+		EntryKind:        "file",
+		Mode:             uint32Ptr(mode),
+		ContentAvailable: true,
+		ContentBytes:     payload,
+	})
+	return true
 }
 
 // MountVolume mounts a volume
@@ -1035,50 +1081,63 @@ func (s *FileSystemServer) SetAttr(ctx context.Context, req *pb.SetAttrRequest) 
 
 // Flush implements FUSE flush
 func (s *FileSystemServer) Flush(ctx context.Context, req *pb.FlushRequest) (*pb.Empty, error) {
-	if volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId); err == nil {
-		if dirty, ok := s.takeDirtyWrite(req.VolumeId, req.HandleId); ok {
-			path := resolveInodePath(volCtx, uint64(mapInode(volCtx, dirty.inode)))
-			if path != "" {
-				if payload, mode, captureErr := captureInodeReplayState(volCtx, dirty.inode); captureErr != nil {
-					s.logger.WithError(captureErr).WithField("volume_id", req.VolumeId).Warn("Failed to capture replay payload for flush")
-				} else {
-					_ = s.recordRemoteSyncChange(ctx, &volsync.RemoteChange{
-						VolumeID:         req.VolumeId,
-						EventType:        db.SyncEventWrite,
-						Path:             path,
-						EntryKind:        "file",
-						Mode:             uint32Ptr(mode),
-						ContentAvailable: true,
-						ContentBytes:     payload,
-					})
-				}
-			}
-		}
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
+	if err != nil {
+		return nil, err
+	}
+
+	dirty, ok := s.peekDirtyWrite(req.VolumeId, req.HandleId)
+	if !ok {
+		return &pb.Empty{}, nil
+	}
+
+	vfsCtx := vfs.NewLogContext(meta.Background())
+	if errno := volCtx.VFS.Flush(vfsCtx, mapInode(volCtx, dirty.inode), req.HandleId, 0); errno != 0 {
+		s.logger.WithFields(logrus.Fields{
+			"volume_id": req.VolumeId,
+			"inode":     dirty.inode,
+			"handle_id": req.HandleId,
+			"error":     errno,
+		}).Error("Flush failed")
+		return nil, status.Error(mapErrnoToCode(syscall.Errno(errno)), syscall.Errno(errno).Error())
+	}
+
+	if s.recordDirtyWriteReplayPayload(ctx, volCtx, req.VolumeId, dirty, "flush") {
+		s.clearDirtyWrite(req.VolumeId, req.HandleId)
 	}
 	return &pb.Empty{}, nil
 }
 
 // Fsync implements FUSE fsync
 func (s *FileSystemServer) Fsync(ctx context.Context, req *pb.FsyncRequest) (*pb.Empty, error) {
-	if volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId); err == nil {
-		if dirty, ok := s.takeDirtyWrite(req.VolumeId, req.HandleId); ok {
-			path := resolveInodePath(volCtx, uint64(mapInode(volCtx, dirty.inode)))
-			if path != "" {
-				if payload, mode, captureErr := captureInodeReplayState(volCtx, dirty.inode); captureErr != nil {
-					s.logger.WithError(captureErr).WithField("volume_id", req.VolumeId).Warn("Failed to capture replay payload for fsync")
-				} else {
-					_ = s.recordRemoteSyncChange(ctx, &volsync.RemoteChange{
-						VolumeID:         req.VolumeId,
-						EventType:        db.SyncEventWrite,
-						Path:             path,
-						EntryKind:        "file",
-						Mode:             uint32Ptr(mode),
-						ContentAvailable: true,
-						ContentBytes:     payload,
-					})
-				}
-			}
-		}
+	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
+	if err != nil {
+		return nil, err
+	}
+
+	dirty, ok := s.peekDirtyWrite(req.VolumeId, req.HandleId)
+	if !ok {
+		return &pb.Empty{}, nil
+	}
+
+	datasync := 0
+	if req.Datasync {
+		datasync = 1
+	}
+	vfsCtx := vfs.NewLogContext(meta.Background())
+	if errno := volCtx.VFS.Fsync(vfsCtx, mapInode(volCtx, dirty.inode), datasync, req.HandleId); errno != 0 {
+		s.logger.WithFields(logrus.Fields{
+			"volume_id": req.VolumeId,
+			"inode":     dirty.inode,
+			"handle_id": req.HandleId,
+			"datasync":  req.Datasync,
+			"error":     errno,
+		}).Error("Fsync failed")
+		return nil, status.Error(mapErrnoToCode(syscall.Errno(errno)), syscall.Errno(errno).Error())
+	}
+
+	if s.recordDirtyWriteReplayPayload(ctx, volCtx, req.VolumeId, dirty, "fsync") {
+		s.clearDirtyWrite(req.VolumeId, req.HandleId)
 	}
 	return &pb.Empty{}, nil
 }
@@ -1094,24 +1153,8 @@ func (s *FileSystemServer) Release(ctx context.Context, req *pb.ReleaseRequest) 
 	vfsCtx := vfs.NewLogContext(meta.Background())
 	volCtx.VFS.Release(vfsCtx, mapInode(volCtx, req.Inode), req.HandleId)
 
-	if _, dirty := s.takeDirtyWrite(req.VolumeId, req.HandleId); dirty {
-		path := resolveInodePath(volCtx, uint64(mapInode(volCtx, req.Inode)))
-		if path != "" {
-			payload, mode, err := captureInodeReplayState(volCtx, req.Inode)
-			if err != nil {
-				s.logger.WithError(err).WithField("volume_id", req.VolumeId).Warn("Failed to capture replay payload for release")
-			} else {
-				_ = s.recordRemoteSyncChange(ctx, &volsync.RemoteChange{
-					VolumeID:         req.VolumeId,
-					EventType:        db.SyncEventWrite,
-					Path:             path,
-					EntryKind:        "file",
-					Mode:             uint32Ptr(mode),
-					ContentAvailable: true,
-					ContentBytes:     payload,
-				})
-			}
-		}
+	if dirty, ok := s.takeDirtyWrite(req.VolumeId, req.HandleId); ok {
+		s.recordDirtyWriteReplayPayload(ctx, volCtx, req.VolumeId, dirty, "release")
 	}
 
 	s.logger.WithFields(logrus.Fields{

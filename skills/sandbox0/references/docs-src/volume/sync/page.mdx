@@ -148,6 +148,20 @@ Avoid:
 
 When Sandbox0 detects a namespace that is unsafe for one of your attached platforms, it reports a sync conflict instead of silently creating a broken checkout on another machine.
 
+## Supported Workspace Types
+
+Today, `s0 sync` supports only regular files and directories.
+
+That means the synced workspace should not rely on:
+
+- symlinks
+- named pipes
+- sockets
+- device nodes
+- hard links coming from bootstrap archives
+
+If the local workspace, a bootstrap archive, or a remote replay contains one of those entry types, `s0 sync` reports an explicit unsupported-type error instead of silently producing a partial checkout.
+
 ## Conflicts and Recovery
 
 Most of the time, Volume Sync should feel automatic. When there is a problem, the operator flow is:
@@ -221,6 +235,12 @@ List journal entries after a known sequence:
 /api/v1/sandboxvolumes/{'{id}'}/sync/changes?after=42&limit=256
 </Endpoint>
 
+For regular-file writes that include `content_ref`, download the replay payload bytes separately:
+
+<Endpoint method="GET">
+/api/v1/sandboxvolumes/{'{id}'}/sync/replay-payload?content_ref=sha256:...
+</Endpoint>
+
 Submit local replica changes:
 
 <Endpoint method="POST">
@@ -232,6 +252,12 @@ Persist the highest applied cursor:
 <Endpoint method="PUT">
 /api/v1/sandboxvolumes/{'{id}'}/sync/replicas/{'{replica_id}'}/cursor
 </Endpoint>
+
+In steady-state replay:
+
+- `sync/changes` provides journal metadata such as `event_type`, `entry_kind`, `mode`, and `content_ref`
+- `sync/replay-payload` provides the immutable bytes for a regular-file write when `content_ref` is present
+- replicas persist their applied cursor separately through the replica cursor endpoint
 
 The server retains sync history for a bounded window. If a replica falls behind that retained journal floor, it must bootstrap again from the current Volume state.
 

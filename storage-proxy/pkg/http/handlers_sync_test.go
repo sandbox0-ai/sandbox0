@@ -104,6 +104,10 @@ func (f *fakeHTTPSyncManager) ListConflicts(ctx context.Context, req *volsync.Li
 			ArtifactPath: "/app/main.sandbox0-conflict-replica-1-seq-7.go",
 			Reason:       "concurrent_update",
 			Status:       db.SyncConflictStatusOpen,
+			Metadata: mustRawJSON(tMustMarshalJSON(map[string]any{
+				"latest_source":     db.SyncSourceSandbox,
+				"latest_sandbox_id": "sandbox-1",
+			})),
 		}},
 	}, nil
 }
@@ -165,6 +169,19 @@ func (f *fakeHTTPVolumeMutationBarrier) WithExclusive(ctx context.Context, volum
 	f.calls++
 	f.lastVolumeID = volumeID
 	return fn(ctx)
+}
+
+func tMustMarshalJSON(v any) []byte {
+	payload, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return payload
+}
+
+func mustRawJSON(payload []byte) *json.RawMessage {
+	raw := json.RawMessage(payload)
+	return &raw
 }
 
 func TestUpsertSyncReplicaHandler(t *testing.T) {
@@ -557,6 +574,23 @@ func TestListSyncConflictsHandler(t *testing.T) {
 	}
 	if syncMgr.lastListConflicts.Status != "open" || syncMgr.lastListConflicts.Limit != 10 {
 		t.Fatalf("unexpected list conflicts request: %+v", syncMgr.lastListConflicts)
+	}
+	resp, apiErr, err := spec.DecodeResponse[volsync.ListConflictsResponse](recorder.Body)
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if apiErr != nil {
+		t.Fatalf("unexpected api error: %+v", apiErr)
+	}
+	if len(resp.Conflicts) != 1 || resp.Conflicts[0].Metadata == nil {
+		t.Fatalf("response conflicts = %+v, want one conflict with metadata", resp.Conflicts)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(*resp.Conflicts[0].Metadata, &metadata); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	if metadata["latest_source"] != db.SyncSourceSandbox || metadata["latest_sandbox_id"] != "sandbox-1" {
+		t.Fatalf("metadata = %#v, want sandbox actor metadata", metadata)
 	}
 }
 

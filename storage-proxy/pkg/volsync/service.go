@@ -969,6 +969,10 @@ func (s *Service) detectReplicaCasefoldConflict(
 			latest.Path == derefString(oldPathValue) {
 			continue
 		}
+		metadata, err := s.buildLatestConflictMetadata(ctx, tx, volumeID, latest, baseSeq)
+		if err != nil {
+			return nil, err
+		}
 
 		reason := "casefold_collision"
 		if eventType == db.SyncEventRename && normalizedOldPath != nil && *normalizedOldPath == normalizedPath {
@@ -982,6 +986,7 @@ func (s *Service) detectReplicaCasefoldConflict(
 			oldPathValue,
 			latest,
 			reason,
+			metadata,
 		), nil
 	}
 
@@ -1020,6 +1025,10 @@ func (s *Service) detectLatestConflict(
 		if latest.Source == db.SyncSourceReplica && latest.ReplicaID != nil && replicaID != nil && *latest.ReplicaID == *replicaID {
 			continue
 		}
+		metadata, err := s.buildLatestConflictMetadata(ctx, tx, volumeID, latest, baseSeq)
+		if err != nil {
+			return nil, err
+		}
 
 		return buildSyncConflict(
 			volumeID, teamID, replicaID, baseSeq,
@@ -1029,9 +1038,44 @@ func (s *Service) detectLatestConflict(
 			oldPathValue,
 			latest,
 			conflictReason(latest, normalizedPath, pathValue),
+			metadata,
 		), nil
 	}
 	return nil, nil
+}
+
+func (s *Service) buildLatestConflictMetadata(ctx context.Context, tx pgx.Tx, volumeID string, latest *db.SyncJournalEntry, baseSeq int64) (map[string]any, error) {
+	metadata := map[string]any{
+		"latest_seq":   latest.Seq,
+		"latest_path":  latest.Path,
+		"latest_event": latest.EventType,
+		"base_seq":     baseSeq,
+	}
+	if latest.Source != "" {
+		metadata["latest_source"] = latest.Source
+	}
+	if latest.Source == db.SyncSourceSandbox {
+		if sandboxID := metadataString(latest.Metadata, "sandbox_id"); sandboxID != "" {
+			metadata["latest_sandbox_id"] = sandboxID
+		}
+	}
+	if latest.ReplicaID == nil || strings.TrimSpace(*latest.ReplicaID) == "" {
+		return metadata, nil
+	}
+
+	replicaID := strings.TrimSpace(*latest.ReplicaID)
+	metadata["latest_replica_id"] = replicaID
+	replica, err := s.repo.GetSyncReplicaForUpdate(ctx, tx, volumeID, replicaID)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			return metadata, nil
+		}
+		return nil, err
+	}
+	if platform := strings.TrimSpace(replica.Platform); platform != "" {
+		metadata["latest_platform"] = platform
+	}
+	return metadata, nil
 }
 
 func buildSyncConflict(
@@ -1042,8 +1086,17 @@ func buildSyncConflict(
 	incomingPath, incomingOldPath *string,
 	latest *db.SyncJournalEntry,
 	reason string,
+	metadata map[string]any,
 ) *db.SyncConflict {
 	existingSeq := latest.Seq
+	if len(metadata) == 0 {
+		metadata = map[string]any{
+			"latest_seq":   latest.Seq,
+			"latest_path":  latest.Path,
+			"latest_event": latest.EventType,
+			"base_seq":     baseSeq,
+		}
+	}
 	return &db.SyncConflict{
 		ID:              uuid.NewString(),
 		VolumeID:        volumeID,
@@ -1057,14 +1110,9 @@ func buildSyncConflict(
 		ExistingSeq:     &existingSeq,
 		Reason:          reason,
 		Status:          db.SyncConflictStatusOpen,
-		Metadata: mustMarshalMetadata(map[string]any{
-			"latest_seq":   latest.Seq,
-			"latest_path":  latest.Path,
-			"latest_event": latest.EventType,
-			"base_seq":     baseSeq,
-		}),
-		CreatedAt: time.Now().UTC(),
-		UpdatedAt: time.Now().UTC(),
+		Metadata:        mustMarshalMetadata(metadata),
+		CreatedAt:       time.Now().UTC(),
+		UpdatedAt:       time.Now().UTC(),
 	}
 }
 
@@ -1567,6 +1615,25 @@ func mergeMetadata(existing *json.RawMessage, additional map[string]any) *json.R
 		merged[k] = v
 	}
 	return mustMarshalMetadata(merged)
+}
+
+func metadataString(raw *json.RawMessage, key string) string {
+	if raw == nil || len(*raw) == 0 || strings.TrimSpace(key) == "" {
+		return ""
+	}
+	decoded := make(map[string]any)
+	if err := json.Unmarshal(*raw, &decoded); err != nil {
+		return ""
+	}
+	value, ok := decoded[key]
+	if !ok {
+		return ""
+	}
+	text, ok := value.(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(text)
 }
 
 func (s *Service) String() string {

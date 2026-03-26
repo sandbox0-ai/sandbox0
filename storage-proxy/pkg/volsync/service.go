@@ -231,9 +231,9 @@ type RemoteChange struct {
 
 func NewService(repo repository, logger *logrus.Logger) *Service {
 	return &Service{
-		repo:    repo,
-		logger:  logger,
-		now:     func() time.Time { return time.Now().UTC() },
+		repo:   repo,
+		logger: logger,
+		now:    func() time.Time { return time.Now().UTC() },
 	}
 }
 
@@ -1145,14 +1145,14 @@ func buildCompatibilityConflictForChange(req *AppendChangesRequest, replica *db.
 		IncomingOldPath: nonEmptyStringPtr(change.OldPath),
 		Reason:          primary.Code,
 		Status:          db.SyncConflictStatusOpen,
-			Metadata: mustMarshalMetadata(map[string]any{
-				"base_seq":     req.BaseSeq,
-				"issues":       issues,
-				"capabilities": replica.Capabilities,
-			}),
-			CreatedAt: now,
-			UpdatedAt: now,
-		}
+		Metadata: mustMarshalMetadata(map[string]any{
+			"base_seq":     req.BaseSeq,
+			"issues":       issues,
+			"capabilities": replica.Capabilities,
+		}),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
 	return conflict, nil
 }
 

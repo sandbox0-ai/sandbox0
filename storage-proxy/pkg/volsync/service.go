@@ -402,6 +402,9 @@ func (s *Service) ListChanges(ctx context.Context, req *ListChangesRequest) (res
 	if err != nil {
 		return nil, err
 	}
+	if changes == nil {
+		changes = []*db.SyncJournalEntry{}
+	}
 	return &ListChangesResponse{
 		HeadSeq:          head,
 		RetainedAfterSeq: retention.CompactedThroughSeq,
@@ -707,6 +710,9 @@ func (s *Service) ListConflicts(ctx context.Context, req *ListConflictsRequest) 
 	if err != nil {
 		return nil, err
 	}
+	if conflicts == nil {
+		conflicts = []*db.SyncConflict{}
+	}
 	return &ListConflictsResponse{Conflicts: conflicts}, nil
 }
 
@@ -775,8 +781,7 @@ func (s *Service) RecordRemoteChange(ctx context.Context, change *RemoteChange) 
 		return nil
 	}
 
-	volume, err := s.getAccessibleVolume(ctx, change.VolumeID, change.TeamID)
-	if err != nil {
+	if _, err := s.getAccessibleVolume(ctx, change.VolumeID, change.TeamID); err != nil {
 		return err
 	}
 
@@ -813,33 +818,6 @@ func (s *Service) RecordRemoteChange(ctx context.Context, change *RemoteChange) 
 			entry.Metadata = mustMarshalMetadata(map[string]any{
 				"sandbox_id": change.SandboxID,
 			})
-		}
-
-		conflict, err := s.detectLatestConflict(ctx, tx, change.VolumeID, change.TeamID, nil, 0, entry.Path, entry.OldPath, entry.NormalizedPath, entry.NormalizedOldPath)
-		if err != nil {
-			return err
-		}
-		if conflict != nil {
-			artifactEntry, err := s.materializeConflict(ctx, volume, conflict, now)
-			if err != nil {
-				return err
-			}
-			if err := s.repo.CreateSyncConflictTx(ctx, tx, conflict); err != nil {
-				return err
-			}
-			s.observeConflict("sandbox", conflict.Reason)
-			s.logger.WithFields(logrus.Fields{
-				"volume_id":     change.VolumeID,
-				"sandbox_id":    change.SandboxID,
-				"conflict_id":   conflict.ID,
-				"reason":        conflict.Reason,
-				"artifact_path": conflict.ArtifactPath,
-			}).Info("Recorded volume sync conflict for sandbox change")
-			if artifactEntry != nil {
-				if err := s.repo.CreateSyncJournalEntryTx(ctx, tx, artifactEntry); err != nil {
-					return err
-				}
-			}
 		}
 
 		return s.repo.CreateSyncJournalEntryTx(ctx, tx, entry)

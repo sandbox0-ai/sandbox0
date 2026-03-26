@@ -199,11 +199,17 @@ func (s *FileSystemServer) publishEvent(ctx context.Context, event *pb.WatchEven
 	if s.eventBroadcaster == nil || event == nil {
 		goto recordSync
 	}
+	if event.TimestampUnix == 0 {
+		event.TimestampUnix = time.Now().Unix()
+	}
 	s.eventBroadcaster.Publish(ctx, event)
 
 recordSync:
 	if s.syncRecorder == nil || event == nil {
 		return
+	}
+	if event.TimestampUnix == 0 {
+		event.TimestampUnix = time.Now().Unix()
 	}
 	claims := internalauth.ClaimsFromContext(ctx)
 	if claims == nil || claims.TeamID == "" {

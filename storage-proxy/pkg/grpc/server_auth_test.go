@@ -260,6 +260,34 @@ func (f *fakeSyncRecorder) ValidateNamespaceMutation(ctx context.Context, req *v
 	return f.validateErr
 }
 
+func TestPublishEventDefaultsTimestampBeforeRecordingRemoteChange(t *testing.T) {
+	t.Parallel()
+
+	recorder := &fakeSyncRecorder{}
+	server := &FileSystemServer{
+		syncRecorder: recorder,
+		logger:       logrus.New(),
+	}
+
+	before := time.Now().Add(-time.Second)
+	server.publishEvent(authContext("team-a", "sandbox-1"), &pb.WatchEvent{
+		VolumeId:  "vol-1",
+		EventType: pb.WatchEventType_WATCH_EVENT_TYPE_WRITE,
+		Path:      "/hello.txt",
+	})
+
+	if len(recorder.remoteChanges) != 1 {
+		t.Fatalf("remoteChanges = %d, want 1", len(recorder.remoteChanges))
+	}
+	got := recorder.remoteChanges[0]
+	if got.OccurredAt.Unix() <= 0 {
+		t.Fatalf("OccurredAt = %v, want unix timestamp > 0", got.OccurredAt)
+	}
+	if got.OccurredAt.Before(before) {
+		t.Fatalf("OccurredAt = %v, want recent timestamp after %v", got.OccurredAt, before)
+	}
+}
+
 func TestValidateNamespaceMutationMapsCompatibilityErrorsToFailedPrecondition(t *testing.T) {
 	t.Parallel()
 

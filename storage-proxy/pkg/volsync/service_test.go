@@ -1964,6 +1964,43 @@ func TestRecordRemoteChangeCoalescesHotWrites(t *testing.T) {
 	}
 }
 
+func TestRecordRemoteChangeDoesNotCreateConflictForSequentialSandboxCreateAndWrite(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
+
+	svc := NewService(repo, logrus.New())
+	createdAt := time.Now().UTC()
+	if err := svc.RecordRemoteChange(context.Background(), &RemoteChange{
+		VolumeID:   "vol-1",
+		TeamID:     "team-1",
+		SandboxID:  "sandbox-1",
+		EventType:  db.SyncEventCreate,
+		Path:       "/seed.txt",
+		OccurredAt: createdAt,
+	}); err != nil {
+		t.Fatalf("RecordRemoteChange(create) error = %v", err)
+	}
+	if err := svc.RecordRemoteChange(context.Background(), &RemoteChange{
+		VolumeID:   "vol-1",
+		TeamID:     "team-1",
+		SandboxID:  "sandbox-1",
+		EventType:  db.SyncEventWrite,
+		Path:       "/seed.txt",
+		OccurredAt: createdAt.Add(10 * time.Millisecond),
+	}); err != nil {
+		t.Fatalf("RecordRemoteChange(write) error = %v", err)
+	}
+	if len(repo.conflicts) != 0 {
+		t.Fatalf("conflicts = %d, want 0", len(repo.conflicts))
+	}
+	if len(repo.journal) != 2 {
+		t.Fatalf("journal entries = %d, want 2", len(repo.journal))
+	}
+	if repo.journal[0].Path != "/seed.txt" || repo.journal[1].Path != "/seed.txt" {
+		t.Fatalf("journal paths = %+v, want both /seed.txt", []string{repo.journal[0].Path, repo.journal[1].Path})
+	}
+}
+
 func TestRecordRemoteChangeJournalsRenameMetadata(t *testing.T) {
 	repo := newFakeRepo()
 	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
@@ -2203,6 +2240,62 @@ func TestDecodeAppendChangesResponseNormalizesEmptySlices(t *testing.T) {
 	}
 	if len(resp.Accepted) != 0 || len(resp.Conflicts) != 0 {
 		t.Fatalf("accepted/conflicts lengths = %d/%d, want 0/0", len(resp.Accepted), len(resp.Conflicts))
+	}
+}
+
+func TestListChangesNormalizesEmptySlice(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{
+		ID:     "vol-1",
+		TeamID: "team-1",
+	}
+	svc := NewService(repo, logrus.New())
+
+	resp, err := svc.ListChanges(context.Background(), &ListChangesRequest{
+		VolumeID: "vol-1",
+		TeamID:   "team-1",
+		AfterSeq: 0,
+		Limit:    10,
+	})
+	if err != nil {
+		t.Fatalf("ListChanges() error = %v", err)
+	}
+	if resp == nil {
+		t.Fatal("ListChanges() response is nil")
+	}
+	if resp.Changes == nil {
+		t.Fatal("Changes = nil, want empty slice")
+	}
+	if len(resp.Changes) != 0 {
+		t.Fatalf("len(Changes) = %d, want 0", len(resp.Changes))
+	}
+}
+
+func TestListConflictsNormalizesEmptySlice(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{
+		ID:     "vol-1",
+		TeamID: "team-1",
+	}
+	svc := NewService(repo, logrus.New())
+
+	resp, err := svc.ListConflicts(context.Background(), &ListConflictsRequest{
+		VolumeID: "vol-1",
+		TeamID:   "team-1",
+		Status:   "open",
+		Limit:    10,
+	})
+	if err != nil {
+		t.Fatalf("ListConflicts() error = %v", err)
+	}
+	if resp == nil {
+		t.Fatal("ListConflicts() response is nil")
+	}
+	if resp.Conflicts == nil {
+		t.Fatal("Conflicts = nil, want empty slice")
+	}
+	if len(resp.Conflicts) != 0 {
+		t.Fatalf("len(Conflicts) = %d, want 0", len(resp.Conflicts))
 	}
 }
 

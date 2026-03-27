@@ -1,11 +1,17 @@
 package regionalgateway
 
 import (
+	"context"
 	"testing"
 
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
+	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestApplyRegistryConfigBuiltin(t *testing.T) {
@@ -125,5 +131,65 @@ func TestApplyRegistryConfigSkipsWhenRegistryIsNotDeclared(t *testing.T) {
 	}
 	if cfg.Registry.Provider != "" || cfg.Registry.PushRegistry != "" || cfg.Registry.PullRegistry != "" {
 		t.Fatalf("expected empty registry config, got %#v", cfg.Registry)
+	}
+}
+
+func TestBuildConfigUsesCompiledPlanForDefaultClusterGatewayURL(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to add corev1 scheme: %v", err)
+	}
+	if err := infrav1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to add infra scheme: %v", err)
+	}
+
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "s0cp",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeExternal,
+				External: &infrav1alpha1.ExternalDatabaseConfig{
+					Host:     "postgres.example.internal",
+					Port:     5432,
+					Database: "sandbox0",
+					Username: "sandbox0",
+					PasswordSecret: infrav1alpha1.SecretKeyRef{
+						Name: "regional-db",
+						Key:  "password",
+					},
+				},
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				RegionalGateway: &infrav1alpha1.RegionalGatewayServiceConfig{
+					BaseServiceConfig: infrav1alpha1.BaseServiceConfig{
+						Enabled: true,
+					},
+				},
+			},
+		},
+	}
+	dbSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "regional-db",
+			Namespace: "sandbox0-system",
+		},
+		Data: map[string][]byte{
+			"password": []byte("secret"),
+		},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dbSecret).Build()
+	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
+	compiled := infraplan.Compile(infra)
+	compiled.RegionalGateway.DefaultClusterGatewayURL = "http://planned-cluster-gateway:9443"
+
+	cfg, _, err := reconciler.buildConfig(context.Background(), infra, compiled)
+	if err != nil {
+		t.Fatalf("buildConfig returned error: %v", err)
+	}
+	if got := cfg.DefaultClusterGatewayURL; got != compiled.RegionalGateway.DefaultClusterGatewayURL {
+		t.Fatalf("expected cluster gateway URL %q, got %q", compiled.RegionalGateway.DefaultClusterGatewayURL, got)
 	}
 }

@@ -19,7 +19,6 @@ package manager
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -31,6 +30,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/registry"
+	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
 
@@ -45,8 +45,11 @@ func NewReconciler(resources *common.ResourceManager) *Reconciler {
 }
 
 // Reconcile reconciles the manager deployment.
-func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, imageRepo, imageTag string) error {
+func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, imageRepo, imageTag string, compiledPlan *infraplan.InfraPlan) error {
 	logger := log.FromContext(ctx)
+	if compiledPlan == nil {
+		compiledPlan = infraplan.Compile(infra)
+	}
 
 	// Skip if not enabled
 	if infra.Spec.Services != nil && infra.Spec.Services.Manager != nil && !infra.Spec.Services.Manager.Enabled {
@@ -64,7 +67,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	labels := common.GetServiceLabels(infra.Name, "manager")
 	keySecretName, privateKeyKey, publicKeyKey := internalauth.GetDataPlaneKeyRefs(infra)
 
-	config, err := r.buildConfig(ctx, infra, imageRepo, imageTag)
+	config, err := r.buildConfig(ctx, infra, imageRepo, imageTag, compiledPlan)
 	if err != nil {
 		return err
 	}
@@ -255,26 +258,24 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	return nil
 }
 
-func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, imageRepo, imageTag string) (*apiconfig.ManagerConfig, error) {
+func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, imageRepo, imageTag string, compiledPlan *infraplan.InfraPlan) (*apiconfig.ManagerConfig, error) {
 	cfg := &apiconfig.ManagerConfig{}
 	if infra.Spec.Services != nil && infra.Spec.Services.Manager != nil && infra.Spec.Services.Manager.Config != nil {
 		cfg = infra.Spec.Services.Manager.Config
+	}
+	if compiledPlan == nil {
+		compiledPlan = infraplan.Compile(infra)
 	}
 
 	if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {
 		cfg.DatabaseURL = dsn
 	}
 
-	cfg.TemplateStoreEnabled = templateStoreEnabledByClusterGateway(infra)
-	cfg.NetworkPolicyProvider = resolveNetworkPolicyProvider(infra)
-	cfg.SandboxPodPlacement = resolveSandboxPodPlacement(infra)
-
-	if infra.Spec.Cluster != nil && infra.Spec.Cluster.ID != "" {
-		cfg.DefaultClusterId = infra.Spec.Cluster.ID
-	}
-	if infra.Spec.Region != "" {
-		cfg.RegionID = infra.Spec.Region
-	}
+	cfg.TemplateStoreEnabled = compiledPlan.Manager.TemplateStoreEnabled
+	cfg.NetworkPolicyProvider = compiledPlan.Manager.NetworkPolicyProvider
+	cfg.SandboxPodPlacement = compiledPlan.Manager.SandboxPodPlacement
+	cfg.DefaultClusterId = compiledPlan.Manager.DefaultClusterID
+	cfg.RegionID = compiledPlan.Manager.RegionID
 
 	cfg.ManagerImage = fmt.Sprintf("%s:%s", imageRepo, imageTag)
 
@@ -376,34 +377,4 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	}
 
 	return cfg, nil
-}
-
-// Enable template store if cluster-gateway is not in multi-cluster mode.
-func templateStoreEnabledByClusterGateway(infra *infrav1alpha1.Sandbox0Infra) bool {
-	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.ClusterGateway == nil {
-		return false
-	}
-	cfg := infra.Spec.Services.ClusterGateway.Config
-	mode := ""
-	if cfg != nil {
-		mode = cfg.AuthMode
-	}
-	mode = strings.TrimSpace(strings.ToLower(mode))
-	if mode == "" {
-		mode = "internal"
-	}
-	return mode != "internal"
-}
-
-func resolveNetworkPolicyProvider(infra *infrav1alpha1.Sandbox0Infra) string {
-	if infrav1alpha1.IsNetdEnabled(infra) {
-		return "netd"
-	}
-	return "noop"
-}
-
-func resolveSandboxPodPlacement(infra *infrav1alpha1.Sandbox0Infra) apiconfig.SandboxPodPlacementConfig {
-	placement := apiconfig.SandboxPodPlacementConfig{}
-	placement.NodeSelector, placement.Tolerations = common.ResolveSandboxNodePlacement(infra)
-	return placement
 }

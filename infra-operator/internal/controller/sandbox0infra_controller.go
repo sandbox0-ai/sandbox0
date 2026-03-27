@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"reflect"
-	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -54,6 +53,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/scheduler"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storage"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storageproxy"
+	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 )
@@ -124,9 +124,9 @@ func (r *Sandbox0InfraReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Set default values
 	r.setDefaults(infra)
 
-	// Main reconciliation logic based on configured components
-	plan := r.buildComponentPlan(infra)
-	result, err := r.reconcileComponentPlan(ctx, infra, plan)
+	// Main reconciliation logic based on compiled desired state.
+	compiledPlan := infraplan.Compile(infra)
+	result, err := r.reconcileComponentPlan(ctx, infra, compiledPlan)
 
 	// Update overall status
 	if updateErr := r.updateOverallStatus(ctx, infra); updateErr != nil {
@@ -191,59 +191,7 @@ func (r *Sandbox0InfraReconciler) reconcileDelete(ctx context.Context, infra *in
 	return ctrl.Result{}, nil
 }
 
-type componentPlan struct {
-	EnableGlobalGateway       bool
-	HasControlPlane           bool
-	HasDataPlane              bool
-	EnableRegionalGateway     bool
-	EnableScheduler           bool
-	EnableClusterGateway      bool
-	EnableManager             bool
-	EnableStorageProxy        bool
-	EnableFusePlugin          bool
-	EnableNetd                bool
-	EnableInternalAuth        bool
-	EnableDatabase            bool
-	EnableStorage             bool
-	EnableRegistry            bool
-	EnableInitUser            bool
-	EnableClusterRegistration bool
-	RequireControlPlaneConfig bool
-}
-
-func (r *Sandbox0InfraReconciler) buildComponentPlan(infra *infrav1alpha1.Sandbox0Infra) componentPlan {
-	enableGlobalGateway := infrav1alpha1.IsGlobalGatewayEnabled(infra)
-	enableRegionalGateway := infrav1alpha1.IsRegionalGatewayEnabled(infra)
-	enableScheduler := infrav1alpha1.IsSchedulerEnabled(infra)
-	enableClusterGateway := infrav1alpha1.IsClusterGatewayEnabled(infra)
-	enableManager := infrav1alpha1.IsManagerEnabled(infra)
-	enableStorageProxy := infrav1alpha1.IsStorageProxyEnabled(infra)
-
-	hasControlPlane := enableRegionalGateway || enableScheduler
-	hasDataPlane := enableClusterGateway || enableManager || enableStorageProxy
-
-	return componentPlan{
-		EnableGlobalGateway:       enableGlobalGateway,
-		HasControlPlane:           hasControlPlane,
-		HasDataPlane:              hasDataPlane,
-		EnableRegionalGateway:     enableRegionalGateway,
-		EnableScheduler:           enableScheduler,
-		EnableClusterGateway:      enableClusterGateway,
-		EnableManager:             enableManager,
-		EnableStorageProxy:        enableStorageProxy,
-		EnableFusePlugin:          enableManager,
-		EnableNetd:                infrav1alpha1.IsNetdEnabled(infra),
-		EnableInternalAuth:        hasControlPlane || hasDataPlane,
-		EnableDatabase:            infrav1alpha1.IsDatabaseEnabled(infra),
-		EnableStorage:             infrav1alpha1.IsStorageEnabled(infra),
-		EnableRegistry:            infrav1alpha1.IsRegistryEnabled(infra),
-		EnableInitUser:            infra.Spec.InitUser != nil,
-		EnableClusterRegistration: hasDataPlane && infra.Spec.Cluster != nil,
-		RequireControlPlaneConfig: hasDataPlane && infra.Spec.ControlPlane != nil,
-	}
-}
-
-func (r *Sandbox0InfraReconciler) validateComponentPlan(infra *infrav1alpha1.Sandbox0Infra, plan componentPlan) error {
+func (r *Sandbox0InfraReconciler) validateComponentPlan(infra *infrav1alpha1.Sandbox0Infra, plan infraplan.ComponentPlan) error {
 	if plan.RequireControlPlaneConfig && infra.Spec.ControlPlane != nil &&
 		infra.Spec.ControlPlane.InternalAuthPublicKeySecret.Name == "" {
 		return fmt.Errorf("controlPlane.internalAuthPublicKeySecret.name is required when controlPlane are enabled")
@@ -265,7 +213,11 @@ func (r *Sandbox0InfraReconciler) validateComponentPlan(infra *infrav1alpha1.San
 }
 
 // reconcileComponentPlan reconciles components based on spec configuration.
-func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, plan componentPlan) (ctrl.Result, error) {
+func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, compiledPlan *infraplan.InfraPlan) (ctrl.Result, error) {
+	if compiledPlan == nil {
+		compiledPlan = infraplan.Compile(infra)
+	}
+	plan := compiledPlan.Components
 	logger := log.FromContext(ctx)
 	logger.Info("Reconciling components", "controlPlane", plan.HasControlPlane, "dataPlane", plan.HasDataPlane)
 
@@ -388,7 +340,7 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 		steps = append(steps, reconcileStep{
 			Name: "regional-gateway",
 			Run: func(ctx context.Context) error {
-				return regionalGatewayReconciler.Reconcile(ctx, infra, imageRepo, imageTag)
+				return regionalGatewayReconciler.Reconcile(ctx, infra, imageRepo, imageTag, compiledPlan)
 			},
 			ConditionType:  infrav1alpha1.ConditionTypeRegionalGatewayReady,
 			SuccessReason:  "RegionalGatewayReady",
@@ -436,8 +388,10 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 			SkipSuccessCondition: true,
 		})
 		steps = append(steps, reconcileStep{
-			Name:           "netd",
-			Run:            func(ctx context.Context) error { return netdReconciler.Reconcile(ctx, infra, imageRepo, imageTag) },
+			Name: "netd",
+			Run: func(ctx context.Context) error {
+				return netdReconciler.Reconcile(ctx, infra, imageRepo, imageTag, compiledPlan)
+			},
 			ConditionType:  infrav1alpha1.ConditionTypeNetdReady,
 			SuccessReason:  "NetdReady",
 			SuccessMessage: "netd is ready",
@@ -466,8 +420,10 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 				SkipSuccessCondition: true,
 			},
 			reconcileStep{
-				Name:           "manager",
-				Run:            func(ctx context.Context) error { return managerReconciler.Reconcile(ctx, infra, imageRepo, imageTag) },
+				Name: "manager",
+				Run: func(ctx context.Context) error {
+					return managerReconciler.Reconcile(ctx, infra, imageRepo, imageTag, compiledPlan)
+				},
 				ConditionType:  infrav1alpha1.ConditionTypeManagerReady,
 				SuccessReason:  "ManagerReady",
 				SuccessMessage: "Manager is ready",
@@ -476,7 +432,7 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 		)
 		steps = append(steps, reconcileStep{
 			Name:                 "builtin-template-pods",
-			Run:                  func(ctx context.Context) error { return r.waitBuiltinTemplatePodsReady(ctx, infra) },
+			Run:                  func(ctx context.Context) error { return r.waitBuiltinTemplatePodsReady(ctx, infra, compiledPlan) },
 			ConditionType:        infrav1alpha1.ConditionTypeManagerReady,
 			ErrorReason:          "BuiltinTemplatePodsNotReady",
 			SkipSuccessCondition: true,
@@ -527,7 +483,7 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 	return r.runSteps(ctx, infra, steps)
 }
 
-func (r *Sandbox0InfraReconciler) cleanupDisabledServiceResources(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, plan componentPlan) error {
+func (r *Sandbox0InfraReconciler) cleanupDisabledServiceResources(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, plan infraplan.ComponentPlan) error {
 	deleteNamespaced := func(name string, obj client.Object) error {
 		key := types.NamespacedName{Name: name, Namespace: infra.Namespace}
 		if err := r.Get(ctx, key, obj); err != nil {
@@ -836,7 +792,7 @@ func (r *Sandbox0InfraReconciler) updateOverallStatus(ctx context.Context, infra
 }
 
 func (r *Sandbox0InfraReconciler) expectedConditionTypes(infra *infrav1alpha1.Sandbox0Infra) []string {
-	plan := r.buildComponentPlan(infra)
+	plan := infraplan.Compile(infra).Components
 	conditions := []string{}
 	if plan.EnableInternalAuth {
 		conditions = append(conditions, infrav1alpha1.ConditionTypeInternalAuthReady)
@@ -941,11 +897,14 @@ func (r *Sandbox0InfraReconciler) registerCluster(ctx context.Context, infra *in
 	return nil
 }
 
-func (r *Sandbox0InfraReconciler) waitBuiltinTemplatePodsReady(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
+func (r *Sandbox0InfraReconciler) waitBuiltinTemplatePodsReady(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, compiledPlan *infraplan.InfraPlan) error {
 	if infra == nil || len(infra.Spec.BuiltinTemplates) == 0 {
 		return nil
 	}
-	if !infrav1alpha1.IsManagerEnabled(infra) || !isManagerTemplateStoreEnabled(infra) {
+	if compiledPlan == nil {
+		compiledPlan = infraplan.Compile(infra)
+	}
+	if !compiledPlan.Components.EnableManager || !compiledPlan.Manager.TemplateStoreEnabled {
 		return nil
 	}
 
@@ -996,21 +955,6 @@ func isReadyPod(pod *corev1.Pod) bool {
 		}
 	}
 	return false
-}
-
-func isManagerTemplateStoreEnabled(infra *infrav1alpha1.Sandbox0Infra) bool {
-	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.ClusterGateway == nil {
-		return false
-	}
-	authMode := ""
-	if cfg := infra.Spec.Services.ClusterGateway.Config; cfg != nil {
-		authMode = cfg.AuthMode
-	}
-	authMode = strings.TrimSpace(strings.ToLower(authMode))
-	if authMode == "" {
-		authMode = "internal"
-	}
-	return authMode != "internal"
 }
 
 // SetupWithManager sets up the controller with the Manager.

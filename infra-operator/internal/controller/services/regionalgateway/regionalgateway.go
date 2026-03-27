@@ -34,6 +34,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/registry"
+	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
 
@@ -46,8 +47,11 @@ func NewReconciler(resources *common.ResourceManager) *Reconciler {
 }
 
 // Reconcile reconciles the regional-gateway deployment.
-func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, imageRepo, imageTag string) error {
+func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, imageRepo, imageTag string, compiledPlan *infraplan.InfraPlan) error {
 	logger := log.FromContext(ctx)
+	if compiledPlan == nil {
+		compiledPlan = infraplan.Compile(infra)
+	}
 
 	// Skip if not enabled
 	if infra.Spec.Services != nil && infra.Spec.Services.RegionalGateway != nil && !infra.Spec.Services.RegionalGateway.Enabled {
@@ -66,7 +70,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	labels := common.GetServiceLabels(infra.Name, "regional-gateway")
 	keySecretName, privateKeyKey, _ := internalauth.GetControlPlaneKeyRefs(infra)
 
-	config, registryEnvVars, err := r.buildConfig(ctx, infra)
+	config, registryEnvVars, err := r.buildConfig(ctx, infra, compiledPlan)
 	if err != nil {
 		return err
 	}
@@ -211,27 +215,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	return nil
 }
 
-func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (*apiconfig.RegionalGatewayConfig, []corev1.EnvVar, error) {
+func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, compiledPlan *infraplan.InfraPlan) (*apiconfig.RegionalGatewayConfig, []corev1.EnvVar, error) {
 	cfg := &apiconfig.RegionalGatewayConfig{}
 	if infra.Spec.Services != nil && infra.Spec.Services.RegionalGateway != nil && infra.Spec.Services.RegionalGateway.Config != nil {
 		cfg = infra.Spec.Services.RegionalGateway.Config
+	}
+	if compiledPlan == nil {
+		compiledPlan = infraplan.Compile(infra)
 	}
 
 	if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {
 		cfg.DatabaseURL = dsn
 	}
-
-	clusterGatewayConfig := &apiconfig.ClusterGatewayConfig{}
-	if infra.Spec.Services != nil && infra.Spec.Services.ClusterGateway != nil && infra.Spec.Services.ClusterGateway.Config != nil {
-		clusterGatewayConfig = infra.Spec.Services.ClusterGateway.Config
-	}
-	clusterGatewayServiceConfig := (*infrav1alpha1.ServiceNetworkConfig)(nil)
-	if infra.Spec.Services != nil && infra.Spec.Services.ClusterGateway != nil {
-		clusterGatewayServiceConfig = infra.Spec.Services.ClusterGateway.Service
-	}
-	clusterGatewayPort := common.ResolveServicePort(clusterGatewayServiceConfig, int32(clusterGatewayConfig.HTTPPort))
-	clusterGatewayURL := fmt.Sprintf("http://%s-cluster-gateway:%d", infra.Name, clusterGatewayPort)
-	cfg.DefaultClusterGatewayURL = clusterGatewayURL
+	cfg.DefaultClusterGatewayURL = compiledPlan.RegionalGateway.DefaultClusterGatewayURL
 
 	if infra.Spec.InitUser != nil {
 		secretRef := common.ResolveSecretKeyRef(infra.Spec.InitUser.PasswordSecret, "admin-password", "password")

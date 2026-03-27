@@ -27,6 +27,7 @@ type InfraPlan struct {
 	Validation      ValidationPlan
 	Cleanup         CleanupPlan
 	Status          StatusPlan
+	Workflow        WorkflowPlan
 	infra           *infrav1alpha1.Sandbox0Infra
 }
 
@@ -125,6 +126,22 @@ type ClusterStatusPlan struct {
 	ID      string
 }
 
+type WorkflowPlan struct {
+	RequireControlPlanePublicKey     bool
+	RequireGlobalGatewayEnterprise   bool
+	RequireRegionalGatewayEnterprise bool
+	RequireSchedulerEnterprise       bool
+	RequireClusterGatewayEnterprise  bool
+	RequireInitUserPasswordSecret    bool
+	RequireSchedulerRBAC             bool
+	RequireManagerRBAC               bool
+	RequireNetdRBAC                  bool
+	RequireStorageProxyRBAC          bool
+	WaitForBuiltinTemplatePods       bool
+	ReconcileInitUser                bool
+	ReconcileClusterRegistration     bool
+}
+
 func Compile(infra *infrav1alpha1.Sandbox0Infra) *InfraPlan {
 	compiled := &InfraPlan{infra: infra}
 	compiled.Components = compileComponents(infra)
@@ -136,6 +153,7 @@ func Compile(infra *infrav1alpha1.Sandbox0Infra) *InfraPlan {
 	compiled.Validation = compileValidationPlan(infra, compiled)
 	compiled.Cleanup = compileCleanupPlan(infra, compiled)
 	compiled.Status = compileStatusPlan(compiled)
+	compiled.Workflow = compileWorkflowPlan(compiled)
 	return compiled
 }
 
@@ -475,6 +493,28 @@ func compileStatusPlan(compiled *InfraPlan) StatusPlan {
 		Endpoints:          compileEndpointStatusPlan(compiled),
 		Cluster:            compileClusterStatusPlan(compiled),
 		RetainedResources:  compileRetainedResourceStatusPlan(compiled),
+	}
+}
+
+func compileWorkflowPlan(compiled *InfraPlan) WorkflowPlan {
+	if compiled == nil {
+		return WorkflowPlan{}
+	}
+
+	return WorkflowPlan{
+		RequireControlPlanePublicKey:     compiled.Validation.RequireControlPlanePublicKey,
+		RequireGlobalGatewayEnterprise:   compiled.Components.EnableGlobalGateway && compiled.Enterprise.GlobalGateway,
+		RequireRegionalGatewayEnterprise: compiled.Components.EnableRegionalGateway && compiled.Enterprise.RegionalGateway,
+		RequireSchedulerEnterprise:       compiled.Components.EnableScheduler && compiled.Enterprise.Scheduler,
+		RequireClusterGatewayEnterprise:  compiled.Components.EnableClusterGateway && compiled.Enterprise.ClusterGateway,
+		RequireInitUserPasswordSecret:    compiled.Components.EnableInitUser,
+		RequireSchedulerRBAC:             compiled.Components.EnableScheduler,
+		RequireManagerRBAC:               compiled.Components.EnableManager,
+		RequireNetdRBAC:                  compiled.Components.EnableNetd,
+		RequireStorageProxyRBAC:          compiled.Components.EnableStorageProxy,
+		WaitForBuiltinTemplatePods:       compiled.Components.EnableManager,
+		ReconcileInitUser:                compiled.Components.EnableInitUser,
+		ReconcileClusterRegistration:     compiled.Components.EnableClusterRegistration,
 	}
 }
 

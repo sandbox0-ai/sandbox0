@@ -453,6 +453,121 @@ func TestCompileTracksValidationRequirements(t *testing.T) {
 	})
 }
 
+func TestCompileTracksWorkflowRequirements(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			ControlPlane: &infrav1alpha1.ControlPlaneConfig{
+				InternalAuthPublicKeySecret: infrav1alpha1.SecretKeyRef{
+					Name: "control-plane-public-key",
+				},
+			},
+			Cluster: &infrav1alpha1.ClusterConfig{
+				ID: "cluster-a",
+			},
+			InitUser: &infrav1alpha1.InitUserConfig{
+				Email: "admin@example.com",
+			},
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeExternal,
+				External: &infrav1alpha1.ExternalDatabaseConfig{
+					Host:     "db.example.com",
+					Database: "sandbox0",
+					Username: "sandbox0",
+				},
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				GlobalGateway: &infrav1alpha1.GlobalGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					Config: &infrav1alpha1.GlobalGatewayConfig{
+						GatewayConfig: infrav1alpha1.GatewayConfig{
+							OIDCProviders: []infrav1alpha1.OIDCProviderConfig{
+								{Enabled: true},
+							},
+						},
+					},
+				},
+				RegionalGateway: &infrav1alpha1.RegionalGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					Config: &infrav1alpha1.RegionalGatewayConfig{
+						SchedulerEnabled: true,
+						SchedulerURL:     "http://scheduler:8080",
+					},
+				},
+				Scheduler: &infrav1alpha1.SchedulerServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+				ClusterGateway: &infrav1alpha1.ClusterGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					Config: &infrav1alpha1.ClusterGatewayConfig{
+						GatewayConfig: infrav1alpha1.GatewayConfig{
+							OIDCProviders: []infrav1alpha1.OIDCProviderConfig{
+								{Enabled: true},
+							},
+						},
+						AuthMode: "public",
+					},
+				},
+				Manager: &infrav1alpha1.ManagerServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+				Netd: &infrav1alpha1.NetdServiceConfig{
+					EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+				},
+				StorageProxy: &infrav1alpha1.StorageProxyServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+			},
+		},
+	}
+
+	compiled := Compile(infra)
+
+	if !compiled.Workflow.RequireControlPlanePublicKey {
+		t.Fatal("expected control-plane public key preflight")
+	}
+	if !compiled.Workflow.RequireGlobalGatewayEnterprise {
+		t.Fatal("expected global-gateway enterprise preflight")
+	}
+	if !compiled.Workflow.RequireRegionalGatewayEnterprise {
+		t.Fatal("expected regional-gateway enterprise preflight")
+	}
+	if !compiled.Workflow.RequireSchedulerEnterprise {
+		t.Fatal("expected scheduler enterprise preflight")
+	}
+	if !compiled.Workflow.RequireClusterGatewayEnterprise {
+		t.Fatal("expected cluster-gateway enterprise preflight")
+	}
+	if !compiled.Workflow.RequireInitUserPasswordSecret || !compiled.Workflow.ReconcileInitUser {
+		t.Fatalf("expected init-user workflow, got %#v", compiled.Workflow)
+	}
+	if !compiled.Workflow.RequireSchedulerRBAC || !compiled.Workflow.RequireManagerRBAC ||
+		!compiled.Workflow.RequireNetdRBAC || !compiled.Workflow.RequireStorageProxyRBAC {
+		t.Fatalf("expected RBAC workflow intents, got %#v", compiled.Workflow)
+	}
+	if !compiled.Workflow.WaitForBuiltinTemplatePods {
+		t.Fatal("expected manager template pod wait step")
+	}
+	if !compiled.Workflow.ReconcileClusterRegistration {
+		t.Fatal("expected cluster registration workflow")
+	}
+}
+
 func TestCompileTracksCleanupPlan(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{

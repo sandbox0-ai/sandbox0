@@ -53,39 +53,83 @@ type GlobalGatewayConfig struct {
 
 	// +optional
 	GatewayConfig `yaml:",inline" json:",inline"`
+
+	// BootstrapRegion seeds the initial global region directory entry for
+	// operator-managed deployments.
+	// +optional
+	BootstrapRegion *BootstrapRegionConfig `yaml:"bootstrap_region,omitempty" json:"-"`
+}
+
+type BootstrapRegionConfig struct {
+	ID                 string `yaml:"id" json:"-"`
+	DisplayName        string `yaml:"display_name,omitempty" json:"-"`
+	RegionalGatewayURL string `yaml:"regional_gateway_url,omitempty" json:"-"`
+	MeteringExportURL  string `yaml:"metering_export_url,omitempty" json:"-"`
+	Enabled            bool   `yaml:"enabled" json:"-"`
 }
 
 type globalGatewayConfigYAML struct {
-	HTTPPort           int    `yaml:"http_port"`
-	LogLevel           string `yaml:"log_level"`
-	DatabaseURL        string `yaml:"database_url"`
-	DatabaseMaxConns   int    `yaml:"database_max_conns"`
-	DatabaseMinConns   int    `yaml:"database_min_conns"`
-	DatabaseSchema     string `yaml:"database_schema"`
-	RegionTokenTTL     string `yaml:"region_token_ttl"`
-	LicenseFile        string `yaml:"license_file"`
-	ShutdownTimeout    string `yaml:"shutdown_timeout"`
-	ServerReadTimeout  string `yaml:"server_read_timeout"`
-	ServerWriteTimeout string `yaml:"server_write_timeout"`
-	ServerIdleTimeout  string `yaml:"server_idle_timeout"`
+	HTTPPort           int               `yaml:"http_port"`
+	LogLevel           string            `yaml:"log_level"`
+	DatabaseURL        string            `yaml:"database_url"`
+	DatabaseMaxConns   int               `yaml:"database_max_conns"`
+	DatabaseMinConns   int               `yaml:"database_min_conns"`
+	DatabaseSchema     string            `yaml:"database_schema"`
+	RegionTokenTTL     durationYAMLValue `yaml:"region_token_ttl"`
+	LicenseFile        string            `yaml:"license_file"`
+	ShutdownTimeout    durationYAMLValue `yaml:"shutdown_timeout"`
+	ServerReadTimeout  durationYAMLValue `yaml:"server_read_timeout"`
+	ServerWriteTimeout durationYAMLValue `yaml:"server_write_timeout"`
+	ServerIdleTimeout  durationYAMLValue `yaml:"server_idle_timeout"`
 
-	JWTSecret                string               `yaml:"jwt_secret"`
-	JWTIssuer                string               `yaml:"jwt_issuer"`
-	JWTAccessTokenTTL        string               `yaml:"jwt_access_token_ttl"`
-	JWTRefreshTokenTTL       string               `yaml:"jwt_refresh_token_ttl"`
-	RateLimitRPS             int                  `yaml:"rate_limit_rps"`
-	RateLimitBurst           int                  `yaml:"rate_limit_burst"`
-	RateLimitCleanupInterval string               `yaml:"rate_limit_cleanup_interval"`
-	DefaultTeamName          string               `yaml:"default_team_name"`
-	BuiltInAuth              BuiltInAuthConfig    `yaml:"built_in_auth"`
-	OIDCProviders            []OIDCProviderConfig `yaml:"oidc_providers"`
-	OIDCStateTTL             string               `yaml:"oidc_state_ttl"`
-	OIDCStateCleanupInterval string               `yaml:"oidc_state_cleanup_interval"`
-	BaseURL                  string               `yaml:"base_url"`
-	RegionID                 string               `yaml:"region_id"`
-	PublicExposureEnabled    bool                 `yaml:"public_exposure_enabled"`
-	PublicRootDomain         string               `yaml:"public_root_domain"`
-	PublicRegionID           string               `yaml:"public_region_id"`
+	JWTSecret                string                 `yaml:"jwt_secret"`
+	JWTIssuer                string                 `yaml:"jwt_issuer"`
+	JWTAccessTokenTTL        durationYAMLValue      `yaml:"jwt_access_token_ttl"`
+	JWTRefreshTokenTTL       durationYAMLValue      `yaml:"jwt_refresh_token_ttl"`
+	RateLimitRPS             int                    `yaml:"rate_limit_rps"`
+	RateLimitBurst           int                    `yaml:"rate_limit_burst"`
+	RateLimitCleanupInterval durationYAMLValue      `yaml:"rate_limit_cleanup_interval"`
+	DefaultTeamName          string                 `yaml:"default_team_name"`
+	BuiltInAuth              BuiltInAuthConfig      `yaml:"built_in_auth"`
+	OIDCProviders            []OIDCProviderConfig   `yaml:"oidc_providers"`
+	OIDCStateTTL             durationYAMLValue      `yaml:"oidc_state_ttl"`
+	OIDCStateCleanupInterval durationYAMLValue      `yaml:"oidc_state_cleanup_interval"`
+	BaseURL                  string                 `yaml:"base_url"`
+	RegionID                 string                 `yaml:"region_id"`
+	PublicExposureEnabled    bool                   `yaml:"public_exposure_enabled"`
+	PublicRootDomain         string                 `yaml:"public_root_domain"`
+	PublicRegionID           string                 `yaml:"public_region_id"`
+	BootstrapRegion          *BootstrapRegionConfig `yaml:"bootstrap_region"`
+}
+
+type durationYAMLValue string
+
+func (d *durationYAMLValue) UnmarshalYAML(node *yaml.Node) error {
+	if node == nil {
+		*d = ""
+		return nil
+	}
+
+	switch node.Kind {
+	case yaml.ScalarNode:
+		var raw string
+		if err := node.Decode(&raw); err != nil {
+			return err
+		}
+		*d = durationYAMLValue(raw)
+		return nil
+	case yaml.MappingNode:
+		var wrapped struct {
+			Duration string `yaml:"duration"`
+		}
+		if err := node.Decode(&wrapped); err != nil {
+			return err
+		}
+		*d = durationYAMLValue(wrapped.Duration)
+		return nil
+	default:
+		return fmt.Errorf("expected duration string or object with duration field")
+	}
 }
 
 // LoadGlobalGatewayConfig returns the global-gateway configuration.
@@ -149,6 +193,10 @@ func applyGlobalGatewayYAML(cfg *GlobalGatewayConfig, raw globalGatewayConfigYAM
 	cfg.PublicExposureEnabled = raw.PublicExposureEnabled
 	cfg.PublicRootDomain = raw.PublicRootDomain
 	cfg.PublicRegionID = raw.PublicRegionID
+	if raw.BootstrapRegion != nil {
+		bootstrapRegion := *raw.BootstrapRegion
+		cfg.BootstrapRegion = &bootstrapRegion
+	}
 
 	if err := applyOptionalDuration(&cfg.RegionTokenTTL, raw.RegionTokenTTL, "region_token_ttl"); err != nil {
 		return err
@@ -184,12 +232,12 @@ func applyGlobalGatewayYAML(cfg *GlobalGatewayConfig, raw globalGatewayConfigYAM
 	return nil
 }
 
-func applyOptionalDuration(dst *metav1.Duration, raw string, field string) error {
+func applyOptionalDuration(dst *metav1.Duration, raw durationYAMLValue, field string) error {
 	if dst == nil || raw == "" {
 		return nil
 	}
 
-	parsed, err := time.ParseDuration(raw)
+	parsed, err := time.ParseDuration(string(raw))
 	if err != nil {
 		return fmt.Errorf("parse %s: %w", field, err)
 	}

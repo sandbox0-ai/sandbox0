@@ -128,8 +128,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 				Value: "/config/config.yaml",
 			},
 		},
-		VolumeMounts: volumeMounts,
-		Volumes:      volumes,
+		VolumeMounts:   volumeMounts,
+		Volumes:        volumes,
 		PodAnnotations: podAnnotations,
 		LivenessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
@@ -187,6 +187,17 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		cfg = runtimeconfig.ToGlobalGateway(infra.Spec.Services.GlobalGateway.Config)
 	}
 	applyConfigDefaults(cfg)
+	cfg.RegionID = resolveGlobalRegionID(infra, cfg.RegionID)
+	if infra.Spec.PublicExposure != nil {
+		cfg.PublicExposureEnabled = infra.Spec.PublicExposure.Enabled
+		if strings.TrimSpace(infra.Spec.PublicExposure.RootDomain) != "" {
+			cfg.PublicRootDomain = infra.Spec.PublicExposure.RootDomain
+		}
+		if strings.TrimSpace(infra.Spec.PublicExposure.RegionID) != "" {
+			cfg.PublicRegionID = infra.Spec.PublicExposure.RegionID
+		}
+	}
+	cfg.BootstrapRegion = buildBootstrapRegion(infra, cfg.RegionID)
 
 	dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra)
 	if err != nil {
@@ -200,12 +211,16 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		if err != nil {
 			return nil, err
 		}
+		homeRegionID := strings.TrimSpace(infra.Spec.InitUser.HomeRegionID)
+		if homeRegionID == "" {
+			homeRegionID = cfg.RegionID
+		}
 
 		cfg.BuiltInAuth.InitUser = &apiconfig.InitUserConfig{
 			Email:        infra.Spec.InitUser.Email,
 			Password:     password,
 			Name:         infra.Spec.InitUser.Name,
-			HomeRegionID: infra.Spec.InitUser.HomeRegionID,
+			HomeRegionID: homeRegionID,
 		}
 	}
 
@@ -230,6 +245,48 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	}
 
 	return cfg, nil
+}
+
+func resolveGlobalRegionID(infra *infrav1alpha1.Sandbox0Infra, current string) string {
+	if trimmed := strings.TrimSpace(current); trimmed != "" {
+		return trimmed
+	}
+	if trimmed := strings.TrimSpace(infra.Spec.Region); trimmed != "" {
+		return trimmed
+	}
+	if infra.Spec.PublicExposure == nil {
+		return ""
+	}
+	return inferCanonicalRegionID(infra.Spec.PublicExposure.RegionID)
+}
+
+func inferCanonicalRegionID(publicRegionID string) string {
+	trimmed := strings.TrimSpace(publicRegionID)
+	parts := strings.SplitN(trimmed, "-", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return ""
+	}
+	return parts[0] + "/" + parts[1]
+}
+
+func buildBootstrapRegion(infra *infrav1alpha1.Sandbox0Infra, regionID string) *apiconfig.BootstrapRegionConfig {
+	if strings.TrimSpace(regionID) == "" || infra.Spec.Services == nil || infra.Spec.Services.RegionalGateway == nil || !infra.Spec.Services.RegionalGateway.Enabled {
+		return nil
+	}
+
+	regionalHTTPPort := int32(8080)
+	if infra.Spec.Services.RegionalGateway.Config != nil && infra.Spec.Services.RegionalGateway.Config.HTTPPort != 0 {
+		regionalHTTPPort = int32(infra.Spec.Services.RegionalGateway.Config.HTTPPort)
+	}
+
+	servicePort := common.ResolveServicePort(infra.Spec.Services.RegionalGateway.Service, regionalHTTPPort)
+	serviceName := fmt.Sprintf("%s-regional-gateway", infra.Name)
+	return &apiconfig.BootstrapRegionConfig{
+		ID:                 regionID,
+		DisplayName:        regionID,
+		RegionalGatewayURL: fmt.Sprintf("http://%s:%d", serviceName, servicePort),
+		Enabled:            true,
+	}
 }
 
 func applyConfigDefaults(cfg *apiconfig.GlobalGatewayConfig) {

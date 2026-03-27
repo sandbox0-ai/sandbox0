@@ -295,13 +295,11 @@ func (s *Server) setupRoutes() {
 			credentialSources.DELETE("/:name", s.authMiddleware.RequirePermission(authn.PermCredentialSourceDelete), s.injectInternalToken(), s.clusterGatewayRouter.ProxyToTarget)
 		}
 
-		// All other API routes go to default cluster-gateway
-		api.Use(s.injectInternalToken())
-		api.Any("/*path", s.clusterGatewayRouter.ProxyToTarget)
 	}
 
-	// Host-based public exposure fallback (non-/api paths).
-	s.router.NoRoute(s.proxyPublicExposureNoRoute)
+	// Unmatched API routes fall back to the default cluster-gateway. Everything
+	// else goes through the public exposure fallback.
+	s.router.NoRoute(s.handleNoRoute)
 }
 
 func (s *Server) setupMeteringRoutes() {
@@ -341,6 +339,58 @@ func (s *Server) setupPublicRoutes() {
 	}
 
 	public.RegisterAPIKeyRoutes(s.router, deps)
+}
+
+func (s *Server) handleNoRoute(c *gin.Context) {
+	if s.handleAPINoRoute(c) {
+		return
+	}
+	s.proxyPublicExposureNoRoute(c)
+}
+
+func (s *Server) handleAPINoRoute(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	if c.Request == nil {
+		return false
+	}
+	if c.Request.URL == nil {
+		return false
+	}
+	path := c.Request.URL.Path
+	if path != "/api" && !strings.HasPrefix(path, "/api/") {
+		return false
+	}
+
+	authCtx, err := s.authMiddleware.AuthenticateRequest(c)
+	if err != nil {
+		s.logger.Warn("Authentication failed",
+			zap.String("error", err.Error()),
+			zap.String("client_ip", c.ClientIP()),
+		)
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+			"error": err.Error(),
+		})
+		return true
+	}
+	c.Set("auth_context", authCtx)
+	ctx := authn.WithAuthContext(c.Request.Context(), authCtx)
+	c.Request = c.Request.WithContext(ctx)
+
+	s.rateLimiter.RateLimit()(c)
+	if c.IsAborted() {
+		return true
+	}
+	token, err := s.generateInternalToken(c, authCtx, "cluster-gateway")
+	if err != nil {
+		s.logger.Error("Failed to generate internal token for cluster-gateway fallback", zap.Error(err))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "internal server error")
+		return true
+	}
+	s.applyInternalHeaders(c, token, authCtx)
+	s.clusterGatewayRouter.ProxyToTarget(c)
+	return true
 }
 
 // injectInternalToken adds internal auth token to forwarded requests (default: cluster-gateway)

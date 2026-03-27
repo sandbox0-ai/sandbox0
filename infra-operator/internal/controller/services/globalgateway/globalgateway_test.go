@@ -361,7 +361,7 @@ func TestDesiredBootstrapRegionUsesRegionalGatewayServiceAddress(t *testing.T) {
 	}
 }
 
-func TestReconcileCreatesGlobalGatewayResourcesAndEndpoint(t *testing.T) {
+func TestReconcileCreatesGlobalGatewayResources(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := appsv1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add appsv1 scheme: %v", err)
@@ -486,10 +486,4 @@ func TestReconcileCreatesGlobalGatewayResourcesAndEndpoint(t *testing.T) {
 		t.Fatalf("expected container port 8080, got %#v", container.Ports)
 	}
 
-	if infra.Status.Endpoints == nil || infra.Status.Endpoints.GlobalGateway == "" {
-		t.Fatal("expected global-gateway endpoint to be recorded")
-	}
-	if infra.Status.Endpoints.GlobalGateway != "http://demo-global-gateway:8080" {
-		t.Fatalf("unexpected global-gateway endpoint %q", infra.Status.Endpoints.GlobalGateway)
-	}
 }

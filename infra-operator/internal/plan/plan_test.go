@@ -215,9 +215,17 @@ func TestCompileTracksBuiltinAndExternalBackendEnablement(t *testing.T) {
 
 func TestCompileIncludesStatusProjectionForEnabledComponents(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: "sandbox0-system",
+		},
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Cluster: &infrav1alpha1.ClusterConfig{ID: "cluster-a"},
 			Database: &infrav1alpha1.DatabaseConfig{
 				Type: infrav1alpha1.DatabaseTypeExternal,
+				Builtin: &infrav1alpha1.BuiltinDatabaseConfig{
+					StatefulResourcePolicy: infrav1alpha1.BuiltinStatefulResourcePolicyRetain,
+				},
 				External: &infrav1alpha1.ExternalDatabaseConfig{
 					Host:     "db.example.com",
 					Port:     5432,
@@ -229,6 +237,24 @@ func TestCompileIncludesStatusProjectionForEnabledComponents(t *testing.T) {
 				GlobalGateway: &infrav1alpha1.GlobalGatewayServiceConfig{
 					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
 						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					ServiceExposureConfig: infrav1alpha1.ServiceExposureConfig{
+						Service: &infrav1alpha1.ServiceNetworkConfig{Port: 18080},
+					},
+				},
+				RegionalGateway: &infrav1alpha1.RegionalGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					ServiceExposureConfig: infrav1alpha1.ServiceExposureConfig{
+						Service: &infrav1alpha1.ServiceNetworkConfig{Port: 18081},
+					},
+					IngressExposureConfig: infrav1alpha1.IngressExposureConfig{
+						Ingress: &infrav1alpha1.IngressConfig{
+							Enabled:   true,
+							Host:      "edge.example.com",
+							TLSSecret: "edge-tls",
+						},
 					},
 				},
 				ClusterGateway: &infrav1alpha1.ClusterGatewayServiceConfig{
@@ -242,17 +268,26 @@ func TestCompileIncludesStatusProjectionForEnabledComponents(t *testing.T) {
 
 	compiled := Compile(infra)
 
-	if len(compiled.Status.ExpectedConditions) != 4 {
-		t.Fatalf("expected internal-auth/database/global/cluster conditions, got %#v", compiled.Status.ExpectedConditions)
+	if len(compiled.Status.ExpectedConditions) != 6 {
+		t.Fatalf("expected internal-auth/database/global/regional/cluster/registration conditions, got %#v", compiled.Status.ExpectedConditions)
 	}
-	if !compiled.Status.Endpoints.IncludeGlobalGateway {
-		t.Fatal("expected global-gateway endpoint to be included")
+	if got := compiled.Status.Endpoints.GlobalGateway; got != "http://demo-global-gateway:18080" {
+		t.Fatalf("unexpected global-gateway endpoint %q", got)
 	}
-	if !compiled.Status.Endpoints.IncludeClusterGateway {
-		t.Fatal("expected cluster-gateway endpoint to be included")
+	if got := compiled.Status.Endpoints.RegionalGatewayInternal; got != "http://demo-regional-gateway:18081" {
+		t.Fatalf("unexpected regional-gateway internal endpoint %q", got)
 	}
-	if compiled.Status.Endpoints.IncludeRegionalGateway || compiled.Status.Endpoints.IncludeRegionalGatewayInt {
-		t.Fatalf("expected regional-gateway endpoints to be excluded, got %#v", compiled.Status.Endpoints)
+	if got := compiled.Status.Endpoints.RegionalGateway; got != "https://edge.example.com" {
+		t.Fatalf("unexpected regional-gateway external endpoint %q", got)
+	}
+	if got := compiled.Status.Endpoints.ClusterGateway; got != "http://demo-cluster-gateway:8443" {
+		t.Fatalf("unexpected cluster-gateway endpoint %q", got)
+	}
+	if !compiled.Status.Cluster.Present || compiled.Status.Cluster.ID != "cluster-a" {
+		t.Fatalf("unexpected cluster status projection %#v", compiled.Status.Cluster)
+	}
+	if len(compiled.Status.RetainedResources) != 2 {
+		t.Fatalf("expected retained resource candidates, got %#v", compiled.Status.RetainedResources)
 	}
 }
 

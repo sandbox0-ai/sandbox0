@@ -211,9 +211,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		return err
 	}
 
-	// Update endpoints in status
-	updateEndpoints(infra, serviceName, servicePort)
-
 	logger.Info("Edge gateway reconciled successfully")
 	return nil
 }
@@ -411,25 +408,6 @@ func secretEnvVar(name, secretName, key string) corev1.EnvVar {
 				Key:                  key,
 			},
 		},
-	}
-}
-
-func updateEndpoints(infra *infrav1alpha1.Sandbox0Infra, serviceName string, servicePort int32) {
-	if infra.Status.Endpoints == nil {
-		infra.Status.Endpoints = &infrav1alpha1.EndpointsStatus{}
-	}
-
-	internalURL := fmt.Sprintf("http://%s:%d", serviceName, servicePort)
-	infra.Status.Endpoints.RegionalGatewayInternal = internalURL
-
-	if infra.Spec.Services != nil && infra.Spec.Services.RegionalGateway != nil &&
-		infra.Spec.Services.RegionalGateway.Ingress != nil && infra.Spec.Services.RegionalGateway.Ingress.Enabled {
-		ingress := infra.Spec.Services.RegionalGateway.Ingress
-		scheme := "http"
-		if ingress.TLSSecret != "" {
-			scheme = "https"
-		}
-		infra.Status.Endpoints.RegionalGateway = fmt.Sprintf("%s://%s", scheme, ingress.Host)
 	}
 }
 

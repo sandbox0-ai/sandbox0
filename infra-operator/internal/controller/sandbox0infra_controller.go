@@ -626,18 +626,7 @@ func (r *Sandbox0InfraReconciler) updateOverallStatus(ctx context.Context, infra
 	compiledPlan := infraplan.Compile(infra)
 	r.projectStatusForPlan(infra, compiledPlan)
 
-	if compiledPlan.Components.EnableClusterRegistration {
-		if infra.Status.Cluster == nil {
-			infra.Status.Cluster = &infrav1alpha1.ClusterStatus{}
-		}
-		if infra.Spec.Cluster != nil {
-			infra.Status.Cluster.ID = infra.Spec.Cluster.ID
-		}
-	} else {
-		infra.Status.Cluster = nil
-	}
-
-	retainedResources, err := collectRetainedResources(ctx, r.Client, infra)
+	retainedResources, err := collectRetainedResources(ctx, r.Client, infra.Namespace, compiledPlan.Status.RetainedResources)
 	if err != nil {
 		return err
 	}
@@ -763,6 +752,7 @@ func (r *Sandbox0InfraReconciler) projectStatusForPlan(infra *infrav1alpha1.Sand
 	}
 	r.pruneManagedConditions(infra, compiledPlan.Status.ExpectedConditions)
 	r.projectEndpointsForPlan(infra, compiledPlan.Status.Endpoints)
+	r.projectClusterForPlan(infra, compiledPlan.Status.Cluster)
 }
 
 func (r *Sandbox0InfraReconciler) pruneManagedConditions(infra *infrav1alpha1.Sandbox0Infra, expected []string) {
@@ -790,27 +780,40 @@ func (r *Sandbox0InfraReconciler) pruneManagedConditions(infra *infrav1alpha1.Sa
 }
 
 func (r *Sandbox0InfraReconciler) projectEndpointsForPlan(infra *infrav1alpha1.Sandbox0Infra, endpointsPlan infraplan.EndpointStatusPlan) {
-	if infra == nil || infra.Status.Endpoints == nil {
+	if infra == nil {
 		return
 	}
-	if !endpointsPlan.IncludeGlobalGateway {
-		infra.Status.Endpoints.GlobalGateway = ""
-	}
-	if !endpointsPlan.IncludeRegionalGateway {
-		infra.Status.Endpoints.RegionalGateway = ""
-	}
-	if !endpointsPlan.IncludeRegionalGatewayInt {
-		infra.Status.Endpoints.RegionalGatewayInternal = ""
-	}
-	if !endpointsPlan.IncludeClusterGateway {
-		infra.Status.Endpoints.ClusterGateway = ""
-	}
-	if infra.Status.Endpoints.GlobalGateway == "" &&
-		infra.Status.Endpoints.RegionalGateway == "" &&
-		infra.Status.Endpoints.RegionalGatewayInternal == "" &&
-		infra.Status.Endpoints.ClusterGateway == "" {
+
+	if endpointsPlan.GlobalGateway == "" &&
+		endpointsPlan.RegionalGateway == "" &&
+		endpointsPlan.RegionalGatewayInternal == "" &&
+		endpointsPlan.ClusterGateway == "" {
 		infra.Status.Endpoints = nil
+		return
 	}
+
+	if infra.Status.Endpoints == nil {
+		infra.Status.Endpoints = &infrav1alpha1.EndpointsStatus{}
+	}
+	infra.Status.Endpoints.GlobalGateway = endpointsPlan.GlobalGateway
+	infra.Status.Endpoints.RegionalGateway = endpointsPlan.RegionalGateway
+	infra.Status.Endpoints.RegionalGatewayInternal = endpointsPlan.RegionalGatewayInternal
+	infra.Status.Endpoints.ClusterGateway = endpointsPlan.ClusterGateway
+}
+
+func (r *Sandbox0InfraReconciler) projectClusterForPlan(infra *infrav1alpha1.Sandbox0Infra, clusterPlan infraplan.ClusterStatusPlan) {
+	if infra == nil {
+		return
+	}
+
+	if !clusterPlan.Present {
+		infra.Status.Cluster = nil
+		return
+	}
+	if infra.Status.Cluster == nil {
+		infra.Status.Cluster = &infrav1alpha1.ClusterStatus{}
+	}
+	infra.Status.Cluster.ID = clusterPlan.ID
 }
 
 func managedConditionTypeSet() map[string]struct{} {

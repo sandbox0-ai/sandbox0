@@ -12,19 +12,15 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 )
 
 const (
-	builtinDatabaseSecretSuffix = "sandbox0-database-credentials"
-	builtinDatabasePVCSuffix    = "postgres-data"
-	builtinStorageSecretSuffix  = "sandbox0-rustfs-credentials"
-	builtinStoragePVCSuffix     = "rustfs-data"
-	builtinRegistryPVCSuffix    = "registry-data"
-	defaultDatabasePVCSize      = "20Gi"
-	defaultStoragePVCSize       = "50Gi"
-	defaultRegistryPVCSize      = "20Gi"
-	nodePortMin                 = 30000
-	nodePortMax                 = 32767
+	defaultDatabasePVCSize = "20Gi"
+	defaultStoragePVCSize  = "50Gi"
+	defaultRegistryPVCSize = "20Gi"
+	nodePortMin            = 30000
+	nodePortMax            = 32767
 )
 
 func (r *Sandbox0InfraReconciler) validateSpecSemantics(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
@@ -101,7 +97,7 @@ func validateBuiltinDatabaseSemantics(ctx context.Context, kubeClient ctrlclient
 	builtin := infra.Spec.Database.Builtin
 
 	secret := &corev1.Secret{}
-	secretName := fmt.Sprintf("%s-%s", infra.Name, builtinDatabaseSecretSuffix)
+	secretName := common.BuiltinDatabaseSecretName(infra.Name)
 	if err := kubeClient.Get(ctx, ctrlclient.ObjectKey{Namespace: infra.Namespace, Name: secretName}, secret); err == nil {
 		if builtin.Username != "" && string(secret.Data["username"]) != "" && string(secret.Data["username"]) != builtin.Username {
 			errs = append(errs, fmt.Errorf("spec.database.builtin.username cannot be changed after the builtin database credentials secret has been created"))
@@ -123,7 +119,7 @@ func validateBuiltinDatabaseSemantics(ctx context.Context, kubeClient ctrlclient
 		ctx,
 		kubeClient,
 		infra.Namespace,
-		fmt.Sprintf("%s-%s", infra.Name, builtinDatabasePVCSuffix),
+		common.BuiltinDatabasePVCName(infra.Name),
 		builtin.Persistence,
 		defaultDatabasePVCSize,
 		"spec.database.builtin.persistence",
@@ -141,7 +137,7 @@ func validateBuiltinStorageSemantics(ctx context.Context, kubeClient ctrlclient.
 	builtin := infra.Spec.Storage.Builtin
 
 	secret := &corev1.Secret{}
-	secretName := fmt.Sprintf("%s-%s", infra.Name, builtinStorageSecretSuffix)
+	secretName := common.BuiltinStorageSecretName(infra.Name)
 	if err := kubeClient.Get(ctx, ctrlclient.ObjectKey{Namespace: infra.Namespace, Name: secretName}, secret); err == nil {
 		if builtin.Credentials != nil {
 			if builtin.Credentials.AccessKey != "" && string(secret.Data["RUSTFS_ACCESS_KEY"]) != "" &&
@@ -161,7 +157,7 @@ func validateBuiltinStorageSemantics(ctx context.Context, kubeClient ctrlclient.
 		ctx,
 		kubeClient,
 		infra.Namespace,
-		fmt.Sprintf("%s-%s", infra.Name, builtinStoragePVCSuffix),
+		common.BuiltinStoragePVCName(infra.Name),
 		builtin.Persistence,
 		defaultStoragePVCSize,
 		"spec.storage.builtin.persistence",
@@ -179,7 +175,7 @@ func validateBuiltinRegistrySemantics(ctx context.Context, kubeClient ctrlclient
 		ctx,
 		kubeClient,
 		infra.Namespace,
-		fmt.Sprintf("%s-%s", infra.Name, builtinRegistryPVCSuffix),
+		common.BuiltinRegistryPVCName(infra.Name),
 		infra.Spec.Registry.Builtin.Persistence,
 		defaultRegistryPVCSize,
 		"spec.registry.builtin.persistence",

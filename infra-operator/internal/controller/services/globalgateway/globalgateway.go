@@ -186,7 +186,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		return err
 	}
 
-	updateEndpoints(infra, serviceName, servicePort)
 	logger.Info("Global gateway reconciled successfully")
 	return nil
 }
@@ -428,11 +427,4 @@ func (r *Reconciler) deleteIngressIfExists(ctx context.Context, infra *infrav1al
 		return err
 	}
 	return r.Resources.Client.Delete(ctx, ingress)
-}
-
-func updateEndpoints(infra *infrav1alpha1.Sandbox0Infra, serviceName string, servicePort int32) {
-	if infra.Status.Endpoints == nil {
-		infra.Status.Endpoints = &infrav1alpha1.EndpointsStatus{}
-	}
-	infra.Status.Endpoints.GlobalGateway = fmt.Sprintf("http://%s:%d", serviceName, servicePort)
 }

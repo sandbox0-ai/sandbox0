@@ -23,8 +23,12 @@ func TestUpdateOverallStatusMarksReadyAndCompletesOperation(t *testing.T) {
 			Generation: 3,
 		},
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Cluster: &infrav1alpha1.ClusterConfig{ID: "cluster-a"},
 			Database: &infrav1alpha1.DatabaseConfig{
 				Type: infrav1alpha1.DatabaseTypeExternal,
+				Builtin: &infrav1alpha1.BuiltinDatabaseConfig{
+					StatefulResourcePolicy: infrav1alpha1.BuiltinStatefulResourcePolicyRetain,
+				},
 				External: &infrav1alpha1.ExternalDatabaseConfig{
 					Host:     "db.example.com",
 					Port:     5432,
@@ -170,6 +174,7 @@ func TestUpdateOverallStatusPrunesDisabledServiceStatusProjection(t *testing.T) 
 			Generation: 7,
 		},
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Cluster: &infrav1alpha1.ClusterConfig{ID: "cluster-a"},
 			Database: &infrav1alpha1.DatabaseConfig{
 				Type: infrav1alpha1.DatabaseTypeExternal,
 				External: &infrav1alpha1.ExternalDatabaseConfig{
@@ -268,6 +273,108 @@ func TestUpdateOverallStatusPrunesDisabledServiceStatusProjection(t *testing.T) 
 	readyCondition := findCondition(stored.Status.Conditions, infrav1alpha1.ConditionTypeReady)
 	if readyCondition == nil || readyCondition.Status != metav1.ConditionTrue {
 		t.Fatalf("expected Ready=true after pruning disabled services, got %#v", readyCondition)
+	}
+}
+
+func TestUpdateOverallStatusProjectsPlannedEndpoints(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "demo",
+			Namespace:  "sandbox0-system",
+			Generation: 9,
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Cluster: &infrav1alpha1.ClusterConfig{ID: "cluster-a"},
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeExternal,
+				External: &infrav1alpha1.ExternalDatabaseConfig{
+					Host:     "db.example.com",
+					Port:     5432,
+					Database: "sandbox0",
+					Username: "sandbox0",
+				},
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				GlobalGateway: &infrav1alpha1.GlobalGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					ServiceExposureConfig: infrav1alpha1.ServiceExposureConfig{
+						Service: &infrav1alpha1.ServiceNetworkConfig{Port: 18080},
+					},
+				},
+				RegionalGateway: &infrav1alpha1.RegionalGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					IngressExposureConfig: infrav1alpha1.IngressExposureConfig{
+						Ingress: &infrav1alpha1.IngressConfig{
+							Enabled:   true,
+							Host:      "edge.example.com",
+							TLSSecret: "edge-tls",
+						},
+					},
+				},
+				ClusterGateway: &infrav1alpha1.ClusterGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+			},
+		},
+		Status: infrav1alpha1.Sandbox0InfraStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:               infrav1alpha1.ConditionTypeDatabaseReady,
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: 9,
+				},
+				{
+					Type:               infrav1alpha1.ConditionTypeGlobalGatewayReady,
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: 9,
+				},
+				{
+					Type:               infrav1alpha1.ConditionTypeRegionalGatewayReady,
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: 9,
+				},
+				{
+					Type:               infrav1alpha1.ConditionTypeClusterGatewayReady,
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: 9,
+				},
+			},
+		},
+	}
+
+	reconciler, client := newStatusTestReconciler(t, infra)
+	if err := reconciler.updateOverallStatus(context.Background(), infra); err != nil {
+		t.Fatalf("update overall status: %v", err)
+	}
+
+	stored := &infrav1alpha1.Sandbox0Infra{}
+	if err := client.Get(context.Background(), ctrlclient.ObjectKeyFromObject(infra), stored); err != nil {
+		t.Fatalf("get updated infra: %v", err)
+	}
+
+	if stored.Status.Endpoints == nil {
+		t.Fatal("expected projected endpoints")
+	}
+	if got := stored.Status.Endpoints.GlobalGateway; got != "http://demo-global-gateway:18080" {
+		t.Fatalf("unexpected global-gateway endpoint %q", got)
+	}
+	if got := stored.Status.Endpoints.RegionalGatewayInternal; got != "http://demo-regional-gateway:8080" {
+		t.Fatalf("unexpected regional-gateway internal endpoint %q", got)
+	}
+	if got := stored.Status.Endpoints.RegionalGateway; got != "https://edge.example.com" {
+		t.Fatalf("unexpected regional-gateway external endpoint %q", got)
+	}
+	if got := stored.Status.Endpoints.ClusterGateway; got != "http://demo-cluster-gateway:8443" {
+		t.Fatalf("unexpected cluster-gateway endpoint %q", got)
+	}
+	if stored.Status.Cluster == nil || stored.Status.Cluster.ID != "cluster-a" {
+		t.Fatalf("expected projected cluster status, got %#v", stored.Status.Cluster)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
+	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 )
 
 func TestCollectRetainedResources(t *testing.T) {
@@ -73,7 +74,7 @@ func TestCollectRetainedResources(t *testing.T) {
 		).
 		Build()
 
-	retained, err := collectRetainedResources(context.Background(), client, infra)
+	retained, err := collectRetainedResources(context.Background(), client, infra.Namespace, infraplan.Compile(infra).Status.RetainedResources)
 	if err != nil {
 		t.Fatalf("collect retained resources: %v", err)
 	}
@@ -105,7 +106,7 @@ func TestCollectRetainedResourcesSkipsDeletePolicy(t *testing.T) {
 		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "demo-postgres-data", Namespace: "sandbox0-system"}},
 	)
 
-	retained, err := collectRetainedResources(context.Background(), client, infra)
+	retained, err := collectRetainedResources(context.Background(), client, infra.Namespace, infraplan.Compile(infra).Status.RetainedResources)
 	if err != nil {
 		t.Fatalf("collect retained resources: %v", err)
 	}

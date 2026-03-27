@@ -226,12 +226,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		return err
 	}
 
-	// Update endpoints in status
-	if infra.Status.Endpoints == nil {
-		infra.Status.Endpoints = &infrav1alpha1.EndpointsStatus{}
-	}
-	infra.Status.Endpoints.ClusterGateway = fmt.Sprintf("http://%s:%d", serviceName, servicePort)
-
 	logger.Info("Internal gateway reconciled successfully")
 	return nil
 }

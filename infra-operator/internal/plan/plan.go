@@ -27,6 +27,7 @@ type InfraPlan struct {
 	Validation      ValidationPlan
 	Cleanup         CleanupPlan
 	Status          StatusPlan
+	infra           *infrav1alpha1.Sandbox0Infra
 }
 
 type ComponentPlan struct {
@@ -108,17 +109,24 @@ type EnterpriseLicensePlan struct {
 type StatusPlan struct {
 	ExpectedConditions []string
 	Endpoints          EndpointStatusPlan
+	Cluster            ClusterStatusPlan
+	RetainedResources  []infrav1alpha1.RetainedResourceStatus
 }
 
 type EndpointStatusPlan struct {
-	IncludeGlobalGateway      bool
-	IncludeRegionalGateway    bool
-	IncludeRegionalGatewayInt bool
-	IncludeClusterGateway     bool
+	GlobalGateway           string
+	RegionalGateway         string
+	RegionalGatewayInternal string
+	ClusterGateway          string
+}
+
+type ClusterStatusPlan struct {
+	Present bool
+	ID      string
 }
 
 func Compile(infra *infrav1alpha1.Sandbox0Infra) *InfraPlan {
-	compiled := &InfraPlan{}
+	compiled := &InfraPlan{infra: infra}
 	compiled.Components = compileComponents(infra)
 	compiled.Services = compileServices(infra)
 	compiled.Manager = compileManagerPlan(infra, compiled)
@@ -464,13 +472,68 @@ func compileStatusPlan(compiled *InfraPlan) StatusPlan {
 
 	return StatusPlan{
 		ExpectedConditions: expected,
-		Endpoints: EndpointStatusPlan{
-			IncludeGlobalGateway:      components.EnableGlobalGateway,
-			IncludeRegionalGateway:    components.EnableRegionalGateway,
-			IncludeRegionalGatewayInt: components.EnableRegionalGateway,
-			IncludeClusterGateway:     components.EnableClusterGateway,
-		},
+		Endpoints:          compileEndpointStatusPlan(compiled),
+		Cluster:            compileClusterStatusPlan(compiled),
+		RetainedResources:  compileRetainedResourceStatusPlan(compiled),
 	}
+}
+
+func compileEndpointStatusPlan(compiled *InfraPlan) EndpointStatusPlan {
+	if compiled == nil {
+		return EndpointStatusPlan{}
+	}
+
+	endpoints := EndpointStatusPlan{}
+	if compiled.Components.EnableGlobalGateway {
+		endpoints.GlobalGateway = globalGatewayStatusURL(compiled)
+	}
+	if compiled.Components.EnableRegionalGateway {
+		endpoints.RegionalGatewayInternal = regionalGatewayInternalStatusURL(compiled)
+		endpoints.RegionalGateway = regionalGatewayExternalStatusURL(compiled)
+	}
+	if compiled.Components.EnableClusterGateway {
+		endpoints.ClusterGateway = compiled.Services.ClusterGateway.URL
+	}
+	return endpoints
+}
+
+func compileClusterStatusPlan(compiled *InfraPlan) ClusterStatusPlan {
+	infra := compiledInfra(compiled)
+	if compiled == nil || infra == nil || !compiled.Components.EnableClusterRegistration || infra.Spec.Cluster == nil {
+		return ClusterStatusPlan{}
+	}
+	return ClusterStatusPlan{
+		Present: true,
+		ID:      infra.Spec.Cluster.ID,
+	}
+}
+
+func compileRetainedResourceStatusPlan(compiled *InfraPlan) []infrav1alpha1.RetainedResourceStatus {
+	infra := compiledInfra(compiled)
+	if compiled == nil || infra == nil || infra.Name == "" {
+		return nil
+	}
+
+	var retained []infrav1alpha1.RetainedResourceStatus
+	if infra.Spec.Database != nil && !builtinDatabaseActive(infra) && databaseStatefulResourcePolicy(infra) == infrav1alpha1.BuiltinStatefulResourcePolicyRetain {
+		retained = append(retained,
+			common.NewRetainedResourceStatus("database", "Secret", common.BuiltinDatabaseSecretName(infra.Name)),
+			common.NewRetainedResourceStatus("database", "PersistentVolumeClaim", common.BuiltinDatabasePVCName(infra.Name)),
+		)
+	}
+	if infra.Spec.Storage != nil && !builtinStorageActive(infra) && storageStatefulResourcePolicy(infra) == infrav1alpha1.BuiltinStatefulResourcePolicyRetain {
+		retained = append(retained,
+			common.NewRetainedResourceStatus("storage", "Secret", common.BuiltinStorageSecretName(infra.Name)),
+			common.NewRetainedResourceStatus("storage", "PersistentVolumeClaim", common.BuiltinStoragePVCName(infra.Name)),
+		)
+	}
+	if infra.Spec.Registry != nil && !builtinRegistryActive(infra) && registryStatefulResourcePolicy(infra) == infrav1alpha1.BuiltinStatefulResourcePolicyRetain {
+		retained = append(retained,
+			common.NewRetainedResourceStatus("registry", "PersistentVolumeClaim", common.BuiltinRegistryPVCName(infra.Name)),
+		)
+	}
+
+	return retained
 }
 
 func managerHTTPPort(infra *infrav1alpha1.Sandbox0Infra) int {
@@ -501,6 +564,86 @@ func clusterGatewayServiceConfig(infra *infrav1alpha1.Sandbox0Infra) *infrav1alp
 		return infra.Spec.Services.ClusterGateway.Service
 	}
 	return nil
+}
+
+func globalGatewayServiceConfig(infra *infrav1alpha1.Sandbox0Infra) *infrav1alpha1.ServiceNetworkConfig {
+	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.GlobalGateway != nil {
+		return infra.Spec.Services.GlobalGateway.Service
+	}
+	return nil
+}
+
+func globalGatewayHTTPPort(infra *infrav1alpha1.Sandbox0Infra) int32 {
+	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.GlobalGateway != nil &&
+		infra.Spec.Services.GlobalGateway.Config != nil && infra.Spec.Services.GlobalGateway.Config.HTTPPort > 0 {
+		return int32(infra.Spec.Services.GlobalGateway.Config.HTTPPort)
+	}
+	return 8080
+}
+
+func regionalGatewayServiceConfig(infra *infrav1alpha1.Sandbox0Infra) *infrav1alpha1.ServiceNetworkConfig {
+	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.RegionalGateway != nil {
+		return infra.Spec.Services.RegionalGateway.Service
+	}
+	return nil
+}
+
+func regionalGatewayHTTPPort(infra *infrav1alpha1.Sandbox0Infra) int32 {
+	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.RegionalGateway != nil &&
+		infra.Spec.Services.RegionalGateway.Config != nil && infra.Spec.Services.RegionalGateway.Config.HTTPPort > 0 {
+		return int32(infra.Spec.Services.RegionalGateway.Config.HTTPPort)
+	}
+	return 8080
+}
+
+func regionalGatewayIngressConfig(infra *infrav1alpha1.Sandbox0Infra) *infrav1alpha1.IngressConfig {
+	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.RegionalGateway != nil {
+		return infra.Spec.Services.RegionalGateway.Ingress
+	}
+	return nil
+}
+
+func globalGatewayStatusURL(compiled *InfraPlan) string {
+	infra := compiledInfra(compiled)
+	if infra == nil || infra.Name == "" {
+		return ""
+	}
+	serviceName := fmt.Sprintf("%s-global-gateway", infra.Name)
+	servicePort := common.ResolveServicePort(globalGatewayServiceConfig(infra), globalGatewayHTTPPort(infra))
+	return fmt.Sprintf("http://%s:%d", serviceName, servicePort)
+}
+
+func regionalGatewayInternalStatusURL(compiled *InfraPlan) string {
+	infra := compiledInfra(compiled)
+	if infra == nil || infra.Name == "" {
+		return ""
+	}
+	serviceName := fmt.Sprintf("%s-regional-gateway", infra.Name)
+	servicePort := common.ResolveServicePort(regionalGatewayServiceConfig(infra), regionalGatewayHTTPPort(infra))
+	return fmt.Sprintf("http://%s:%d", serviceName, servicePort)
+}
+
+func regionalGatewayExternalStatusURL(compiled *InfraPlan) string {
+	infra := compiledInfra(compiled)
+	if infra == nil {
+		return ""
+	}
+	ingress := regionalGatewayIngressConfig(infra)
+	if ingress == nil || !ingress.Enabled || strings.TrimSpace(ingress.Host) == "" {
+		return ""
+	}
+	scheme := "http"
+	if ingress.TLSSecret != "" {
+		scheme = "https"
+	}
+	return fmt.Sprintf("%s://%s", scheme, ingress.Host)
+}
+
+func compiledInfra(compiled *InfraPlan) *infrav1alpha1.Sandbox0Infra {
+	if compiled == nil {
+		return nil
+	}
+	return compiled.infra
 }
 
 func clusterGatewayAuthMode(infra *infrav1alpha1.Sandbox0Infra) string {
@@ -614,4 +757,25 @@ func builtinRegistryActive(infra *infrav1alpha1.Sandbox0Infra) bool {
 		return true
 	}
 	return infra.Spec.Registry.Builtin.Enabled
+}
+
+func databaseStatefulResourcePolicy(infra *infrav1alpha1.Sandbox0Infra) infrav1alpha1.BuiltinStatefulResourcePolicy {
+	if infra == nil || infra.Spec.Database == nil || infra.Spec.Database.Builtin == nil || infra.Spec.Database.Builtin.StatefulResourcePolicy == "" {
+		return infrav1alpha1.BuiltinStatefulResourcePolicyRetain
+	}
+	return infra.Spec.Database.Builtin.StatefulResourcePolicy
+}
+
+func storageStatefulResourcePolicy(infra *infrav1alpha1.Sandbox0Infra) infrav1alpha1.BuiltinStatefulResourcePolicy {
+	if infra == nil || infra.Spec.Storage == nil || infra.Spec.Storage.Builtin == nil || infra.Spec.Storage.Builtin.StatefulResourcePolicy == "" {
+		return infrav1alpha1.BuiltinStatefulResourcePolicyRetain
+	}
+	return infra.Spec.Storage.Builtin.StatefulResourcePolicy
+}
+
+func registryStatefulResourcePolicy(infra *infrav1alpha1.Sandbox0Infra) infrav1alpha1.BuiltinStatefulResourcePolicy {
+	if infra == nil || infra.Spec.Registry == nil || infra.Spec.Registry.Builtin == nil || infra.Spec.Registry.Builtin.StatefulResourcePolicy == "" {
+		return infrav1alpha1.BuiltinStatefulResourcePolicyRetain
+	}
+	return infra.Spec.Registry.Builtin.StatefulResourcePolicy
 }

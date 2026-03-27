@@ -220,6 +220,9 @@ spec:
                         - message: username is immutable after creation
                           rule: self == oldSelf
                     type: object
+                    x-kubernetes-validations:
+                    - message: persistence presence is immutable after creation
+                      rule: has(self.persistence) == has(oldSelf.persistence)
                   external:
                     description: External configures connection to external database
                     properties:
@@ -681,6 +684,9 @@ spec:
                         - Delete
                         type: string
                     type: object
+                    x-kubernetes-validations:
+                    - message: persistence presence is immutable after creation
+                      rule: has(self.persistence) == has(oldSelf.persistence)
                   gcp:
                     description: GCP configures GCP registry integration.
                     properties:
@@ -2500,6 +2506,11 @@ spec:
                         description: Volumes specifies the RustFS data path
                         type: string
                     type: object
+                    x-kubernetes-validations:
+                    - message: persistence presence is immutable after creation
+                      rule: has(self.persistence) == has(oldSelf.persistence)
+                    - message: credentials presence is immutable after creation
+                      rule: has(self.credentials) == has(oldSelf.credentials)
                   oss:
                     description: OSS configures Aliyun OSS storage
                     properties:

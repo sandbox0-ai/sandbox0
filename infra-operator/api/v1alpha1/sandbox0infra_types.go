@@ -166,6 +166,7 @@ type DatabaseConfig struct {
 }
 
 // BuiltinDatabaseConfig defines built-in database configuration
+// +kubebuilder:validation:XValidation:rule="has(self.persistence) == has(oldSelf.persistence)",message="persistence presence is immutable after creation"
 type BuiltinDatabaseConfig struct {
 	// Enabled enables the built-in database
 	// +kubebuilder:default=true
@@ -290,6 +291,8 @@ type StorageConfig struct {
 }
 
 // BuiltinStorageConfig defines built-in storage configuration
+// +kubebuilder:validation:XValidation:rule="has(self.persistence) == has(oldSelf.persistence)",message="persistence presence is immutable after creation"
+// +kubebuilder:validation:XValidation:rule="has(self.credentials) == has(oldSelf.credentials)",message="credentials presence is immutable after creation"
 type BuiltinStorageConfig struct {
 	// Enabled enables the built-in storage
 	// +kubebuilder:default=true
@@ -475,6 +478,7 @@ type RegistryConfig struct {
 }
 
 // BuiltinRegistryConfig defines built-in registry configuration.
+// +kubebuilder:validation:XValidation:rule="has(self.persistence) == has(oldSelf.persistence)",message="persistence presence is immutable after creation"
 type BuiltinRegistryConfig struct {
 	// Enabled enables the built-in registry.
 	// +kubebuilder:default=true

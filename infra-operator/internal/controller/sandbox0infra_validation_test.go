@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -69,6 +71,24 @@ func TestServiceConfigCapabilitiesExposeOnlySupportedFields(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestGeneratedCRDIncludesCreateOncePresenceValidations(t *testing.T) {
+	crdPath := filepath.Join("..", "..", "chart", "crds", "infra.sandbox0.ai_sandbox0infras.yaml")
+	content, err := os.ReadFile(crdPath)
+	if err != nil {
+		t.Fatalf("read generated CRD: %v", err)
+	}
+
+	text := string(content)
+	for _, want := range []string{
+		"credentials presence is immutable after creation",
+		"persistence presence is immutable after creation",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected generated CRD to contain %q", want)
+		}
+	}
 }
 
 func TestValidateSpecSemanticsRejectsBuiltinDatabaseCreateOnceChanges(t *testing.T) {

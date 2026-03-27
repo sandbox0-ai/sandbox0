@@ -159,6 +159,9 @@ spec:
                         default: sandbox0
                         description: Database specifies the database name
                         type: string
+                        x-kubernetes-validations:
+                        - message: database is immutable after creation
+                          rule: self == oldSelf
                       enabled:
                         default: true
                         description: Enabled enables the built-in database
@@ -171,10 +174,6 @@ spec:
                       persistence:
                         description: Persistence configures database storage
                         properties:
-                          enabled:
-                            default: true
-                            description: Enabled enables persistence
-                            type: boolean
                           size:
                             anyOf:
                             - type: integer
@@ -188,11 +187,17 @@ spec:
                               (empty for default)
                             type: string
                         type: object
+                        x-kubernetes-validations:
+                        - message: persistence is immutable after creation
+                          rule: self == oldSelf
                       port:
                         default: 5432
                         description: Port specifies the database port
                         format: int32
                         type: integer
+                        x-kubernetes-validations:
+                        - message: port is immutable after creation
+                          rule: self == oldSelf
                       sslMode:
                         default: disable
                         description: SSLMode specifies the SSL mode for builtin DSN
@@ -201,6 +206,9 @@ spec:
                         default: sandbox0
                         description: Username specifies the database username
                         type: string
+                        x-kubernetes-validations:
+                        - message: username is immutable after creation
+                          rule: self == oldSelf
                     type: object
                   external:
                     description: External configures connection to external database
@@ -609,10 +617,6 @@ spec:
                       persistence:
                         description: Persistence configures registry persistence.
                         properties:
-                          enabled:
-                            default: true
-                            description: Enabled enables persistence
-                            type: boolean
                           size:
                             anyOf:
                             - type: integer
@@ -626,6 +630,9 @@ spec:
                               (empty for default)
                             type: string
                         type: object
+                        x-kubernetes-validations:
+                        - message: persistence is immutable after creation
+                          rule: self == oldSelf
                       port:
                         default: 5000
                         description: Port specifies the registry port.
@@ -2376,6 +2383,9 @@ spec:
                             description: SecretKey is the secret key
                             type: string
                         type: object
+                        x-kubernetes-validations:
+                        - message: credentials are immutable after creation
+                          rule: self == oldSelf
                       enabled:
                         default: true
                         description: Enabled enables the built-in storage
@@ -2401,10 +2411,6 @@ spec:
                       persistence:
                         description: Persistence configures storage persistence
                         properties:
-                          enabled:
-                            default: true
-                            description: Enabled enables persistence
-                            type: boolean
                           size:
                             anyOf:
                             - type: integer
@@ -2418,6 +2424,9 @@ spec:
                               (empty for default)
                             type: string
                         type: object
+                        x-kubernetes-validations:
+                        - message: persistence is immutable after creation
+                          rule: self == oldSelf
                       port:
                         default: 9000
                         description: Port specifies the RustFS API port

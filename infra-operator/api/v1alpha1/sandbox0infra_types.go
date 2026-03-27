@@ -167,16 +167,19 @@ type BuiltinDatabaseConfig struct {
 
 	// Port specifies the database port
 	// +kubebuilder:default=5432
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="port is immutable after creation"
 	// +optional
 	Port int32 `json:"port,omitempty"`
 
 	// Username specifies the database username
 	// +kubebuilder:default="sandbox0"
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="username is immutable after creation"
 	// +optional
 	Username string `json:"username,omitempty"`
 
 	// Database specifies the database name
 	// +kubebuilder:default="sandbox0"
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="database is immutable after creation"
 	// +optional
 	Database string `json:"database,omitempty"`
 
@@ -186,16 +189,13 @@ type BuiltinDatabaseConfig struct {
 	SSLMode string `json:"sslMode,omitempty"`
 
 	// Persistence configures database storage
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="persistence is immutable after creation"
 	// +optional
 	Persistence *PersistenceConfig `json:"persistence,omitempty"`
 }
 
 // PersistenceConfig defines persistence configuration
 type PersistenceConfig struct {
-	// Enabled enables persistence
-	// +kubebuilder:default=true
-	Enabled bool `json:"enabled,omitempty"`
-
 	// Size specifies the storage size
 	// +kubebuilder:default="20Gi"
 	Size resource.Quantity `json:"size,omitempty"`
@@ -328,10 +328,12 @@ type BuiltinStorageConfig struct {
 	ObsEnvironment string `json:"obsEnvironment,omitempty"`
 
 	// Persistence configures storage persistence
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="persistence is immutable after creation"
 	// +optional
 	Persistence *PersistenceConfig `json:"persistence,omitempty"`
 
 	// Credentials configures access credentials (auto-generated if not specified)
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="credentials are immutable after creation"
 	// +optional
 	Credentials *StorageCredentials `json:"credentials,omitempty"`
 }
@@ -464,6 +466,7 @@ type BuiltinRegistryConfig struct {
 	Port int32 `json:"port,omitempty"`
 
 	// Persistence configures registry persistence.
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="persistence is immutable after creation"
 	// +optional
 	Persistence *PersistenceConfig `json:"persistence,omitempty"`
 

@@ -57,48 +57,18 @@ func TestServiceConfigCapabilitiesExposeOnlySupportedFields(t *testing.T) {
 			}
 		}
 	})
-}
 
-func TestValidateSpecSemanticsRejectsDisabledBuiltinPersistence(t *testing.T) {
-	infra := &infrav1alpha1.Sandbox0Infra{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
-		Spec: infrav1alpha1.Sandbox0InfraSpec{
-			Database: &infrav1alpha1.DatabaseConfig{
-				Type: infrav1alpha1.DatabaseTypeBuiltin,
-				Builtin: &infrav1alpha1.BuiltinDatabaseConfig{
-					Persistence: &infrav1alpha1.PersistenceConfig{Enabled: false},
-				},
-			},
-			Storage: &infrav1alpha1.StorageConfig{
-				Type: infrav1alpha1.StorageTypeBuiltin,
-				Builtin: &infrav1alpha1.BuiltinStorageConfig{
-					Persistence: &infrav1alpha1.PersistenceConfig{Enabled: false},
-				},
-			},
-			Registry: &infrav1alpha1.RegistryConfig{
-				Provider: infrav1alpha1.RegistryProviderBuiltin,
-				Builtin: &infrav1alpha1.BuiltinRegistryConfig{
-					Persistence: &infrav1alpha1.PersistenceConfig{Enabled: false},
-				},
-			},
-		},
-	}
-
-	err := validateSpecSemantics(context.Background(), newValidationTestClient(t), infra)
-	if err == nil {
-		t.Fatal("expected validation error")
-	}
-
-	message := err.Error()
-	for _, want := range []string{
-		"spec.database.builtin.persistence.enabled=false is not supported",
-		"spec.storage.builtin.persistence.enabled=false is not supported",
-		"spec.registry.builtin.persistence.enabled=false is not supported",
-	} {
-		if !strings.Contains(message, want) {
-			t.Fatalf("expected validation message %q in %q", want, message)
+	t.Run("persistence schema omits enabled flag", func(t *testing.T) {
+		typ := reflect.TypeOf(infrav1alpha1.PersistenceConfig{})
+		if _, ok := typ.FieldByName("Enabled"); ok {
+			t.Fatal("expected PersistenceConfig to omit Enabled")
 		}
-	}
+		for _, supported := range []string{"Size", "StorageClass"} {
+			if _, ok := typ.FieldByName(supported); !ok {
+				t.Fatalf("expected PersistenceConfig to expose %s", supported)
+			}
+		}
+	})
 }
 
 func TestValidateSpecSemanticsRejectsBuiltinDatabaseCreateOnceChanges(t *testing.T) {
@@ -112,7 +82,6 @@ func TestValidateSpecSemanticsRejectsBuiltinDatabaseCreateOnceChanges(t *testing
 					Database: "new-db",
 					Port:     5433,
 					Persistence: &infrav1alpha1.PersistenceConfig{
-						Enabled:      true,
 						Size:         resource.MustParse("20Gi"),
 						StorageClass: "slow",
 					},
@@ -176,7 +145,6 @@ func TestValidateSpecSemanticsRejectsBuiltinStorageCreateOnceChanges(t *testing.
 				Type: infrav1alpha1.StorageTypeBuiltin,
 				Builtin: &infrav1alpha1.BuiltinStorageConfig{
 					Persistence: &infrav1alpha1.PersistenceConfig{
-						Enabled:      true,
 						Size:         resource.MustParse("100Gi"),
 						StorageClass: "slow",
 					},
@@ -242,7 +210,6 @@ func TestValidateSpecSemanticsRejectsBuiltinRegistryPVCChanges(t *testing.T) {
 				Provider: infrav1alpha1.RegistryProviderBuiltin,
 				Builtin: &infrav1alpha1.BuiltinRegistryConfig{
 					Persistence: &infrav1alpha1.PersistenceConfig{
-						Enabled:      true,
 						Size:         resource.MustParse("40Gi"),
 						StorageClass: "slow",
 					},

@@ -583,7 +583,13 @@ func resolveBuiltinRegistryConfig(infra *infrav1alpha1.Sandbox0Infra) infrav1alp
 		Image:   defaultRegistryImage,
 		Port:    defaultRegistryPort,
 	}
-	if infra.Spec.Registry == nil || infra.Spec.Registry.Builtin == nil {
+	if infra == nil || infra.Spec.Registry == nil {
+		return cfg
+	}
+	if infra.Spec.Registry.Builtin == nil {
+		if infra.Spec.Registry.Provider == "" || infra.Spec.Registry.Provider == infrav1alpha1.RegistryProviderBuiltin {
+			cfg.Enabled = true
+		}
 		return cfg
 	}
 	builtin := infra.Spec.Registry.Builtin

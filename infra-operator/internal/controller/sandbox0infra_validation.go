@@ -35,7 +35,6 @@ func validateSpecSemantics(ctx context.Context, kubeClient ctrlclient.Client, in
 	}
 
 	var errs []error
-	errs = append(errs, validatePersistenceFlags(infra)...)
 
 	if kubeClient != nil {
 		errs = append(errs, validateBuiltinDatabaseSemantics(ctx, kubeClient, infra)...)
@@ -44,30 +43,6 @@ func validateSpecSemantics(ctx context.Context, kubeClient ctrlclient.Client, in
 	}
 
 	return utilerrors.NewAggregate(errs)
-}
-
-func validatePersistenceFlags(infra *infrav1alpha1.Sandbox0Infra) []error {
-	var errs []error
-
-	if infra.Spec.Database != nil && infra.Spec.Database.Type == infrav1alpha1.DatabaseTypeBuiltin &&
-		infra.Spec.Database.Builtin != nil && infra.Spec.Database.Builtin.Persistence != nil &&
-		!infra.Spec.Database.Builtin.Persistence.Enabled {
-		errs = append(errs, fmt.Errorf("spec.database.builtin.persistence.enabled=false is not supported: builtin database persistence cannot be disabled"))
-	}
-
-	if infra.Spec.Storage != nil && infra.Spec.Storage.Type == infrav1alpha1.StorageTypeBuiltin &&
-		infra.Spec.Storage.Builtin != nil && infra.Spec.Storage.Builtin.Persistence != nil &&
-		!infra.Spec.Storage.Builtin.Persistence.Enabled {
-		errs = append(errs, fmt.Errorf("spec.storage.builtin.persistence.enabled=false is not supported: builtin storage persistence cannot be disabled"))
-	}
-
-	if infra.Spec.Registry != nil && infra.Spec.Registry.Provider == infrav1alpha1.RegistryProviderBuiltin &&
-		infra.Spec.Registry.Builtin != nil && infra.Spec.Registry.Builtin.Persistence != nil &&
-		!infra.Spec.Registry.Builtin.Persistence.Enabled {
-		errs = append(errs, fmt.Errorf("spec.registry.builtin.persistence.enabled=false is not supported: builtin registry persistence cannot be disabled"))
-	}
-
-	return errs
 }
 
 func validateBuiltinDatabaseSemantics(ctx context.Context, kubeClient ctrlclient.Client, infra *infrav1alpha1.Sandbox0Infra) []error {

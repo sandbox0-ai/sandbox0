@@ -123,6 +123,10 @@ func (r *Sandbox0InfraReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Set default values
 	r.setDefaults(infra)
+	if err := r.validateSpecSemantics(ctx, infra); err != nil {
+		logger.Error(err, "Sandbox0Infra validation failed")
+		return ctrl.Result{}, err
+	}
 
 	// Main reconciliation logic based on compiled desired state.
 	compiledPlan := infraplan.Compile(infra)

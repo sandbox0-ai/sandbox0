@@ -82,9 +82,9 @@ func TestReconcileUsesServicePortForHTTPServiceExposure(t *testing.T) {
 				Namespace: infra.Namespace,
 			},
 			Data: map[string][]byte{
-				"endpoint":           []byte("http://demo-rustfs.sandbox0-system.svc:9000"),
-				"RUSTFS_ACCESS_KEY":  []byte("access-key"),
-				"RUSTFS_SECRET_KEY":  []byte("secret-key"),
+				"endpoint":          []byte("http://demo-rustfs.sandbox0-system.svc:9000"),
+				"RUSTFS_ACCESS_KEY": []byte("access-key"),
+				"RUSTFS_SECRET_KEY": []byte("secret-key"),
 			},
 		},
 	)

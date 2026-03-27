@@ -207,8 +207,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 				Value: "/config/config.yaml",
 			},
 		},
-		VolumeMounts: volumeMounts,
-		Volumes:      volumes,
+		VolumeMounts:   volumeMounts,
+		Volumes:        volumes,
 		PodAnnotations: podAnnotations,
 		LivenessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{

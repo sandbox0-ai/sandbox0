@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -9,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 )
@@ -160,7 +162,234 @@ func TestUpdateOverallStatusMarksDegradedAndTracksRetainedResources(t *testing.T
 	}
 }
 
+func TestUpdateOverallStatusUsesLatestObjectWhenInputIsStale(t *testing.T) {
+	ctx := context.Background()
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "demo",
+			Namespace:  "sandbox0-system",
+			Generation: 3,
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeExternal,
+				External: &infrav1alpha1.ExternalDatabaseConfig{
+					Host:     "db.example.com",
+					Port:     5432,
+					Database: "sandbox0",
+					Username: "sandbox0",
+				},
+			},
+		},
+		Status: infrav1alpha1.Sandbox0InfraStatus{
+			Phase: infrav1alpha1.PhaseInstalling,
+			LastOperation: &infrav1alpha1.LastOperation{
+				Type:      "Install",
+				Status:    "InProgress",
+				StartedAt: &metav1.Time{Time: metav1.Now().Time},
+			},
+			Conditions: []metav1.Condition{
+				{
+					Type:    infrav1alpha1.ConditionTypeDatabaseReady,
+					Status:  metav1.ConditionTrue,
+					Reason:  "DatabaseReady",
+					Message: "Database is ready",
+				},
+			},
+		},
+	}
+
+	reconciler, client := newStatusTestReconciler(t, infra)
+	stale := infra.DeepCopy()
+
+	live := &infrav1alpha1.Sandbox0Infra{}
+	if err := client.Get(ctx, ctrlclient.ObjectKeyFromObject(infra), live); err != nil {
+		t.Fatalf("get live infra: %v", err)
+	}
+	live.Generation = 4
+	live.Spec.InitUser = &infrav1alpha1.InitUserConfig{Email: "admin@example.com"}
+	if err := client.Update(ctx, live); err != nil {
+		t.Fatalf("update live infra: %v", err)
+	}
+
+	stale.Generation = 4
+	stale.ResourceVersion = live.ResourceVersion
+	if err := reconciler.updateOverallStatus(ctx, stale); err != nil {
+		t.Fatalf("update overall status with stale object: %v", err)
+	}
+
+	stored := &infrav1alpha1.Sandbox0Infra{}
+	if err := client.Get(ctx, ctrlclient.ObjectKeyFromObject(live), stored); err != nil {
+		t.Fatalf("get updated infra: %v", err)
+	}
+
+	if stored.Status.Phase != infrav1alpha1.PhaseReady {
+		t.Fatalf("expected phase %q, got %q", infrav1alpha1.PhaseReady, stored.Status.Phase)
+	}
+	readyCondition := findCondition(stored.Status.Conditions, infrav1alpha1.ConditionTypeReady)
+	if readyCondition == nil {
+		t.Fatal("expected Ready condition to be present")
+	}
+	if readyCondition.ObservedGeneration != 4 {
+		t.Fatalf("expected Ready observedGeneration 4, got %d", readyCondition.ObservedGeneration)
+	}
+}
+
+func TestUpdateOverallStatusDoesNotOverwriteNewerGenerationStatus(t *testing.T) {
+	ctx := context.Background()
+	live := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "demo",
+			Namespace:  "sandbox0-system",
+			Generation: 4,
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeExternal,
+				External: &infrav1alpha1.ExternalDatabaseConfig{
+					Host:     "db.example.com",
+					Port:     5432,
+					Database: "sandbox0",
+					Username: "sandbox0",
+				},
+			},
+		},
+		Status: infrav1alpha1.Sandbox0InfraStatus{
+			Phase:       infrav1alpha1.PhaseDegraded,
+			LastMessage: "newer generation wins",
+			Conditions: []metav1.Condition{
+				{
+					Type:               infrav1alpha1.ConditionTypeDatabaseReady,
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: 4,
+					Reason:             "DatabaseFailed",
+					Message:            "new generation status",
+				},
+			},
+		},
+	}
+
+	stale := live.DeepCopy()
+	stale.Generation = 3
+	stale.Status.Phase = infrav1alpha1.PhaseReady
+	stale.Status.LastMessage = "old generation"
+	stale.Status.Conditions = []metav1.Condition{
+		{
+			Type:               infrav1alpha1.ConditionTypeDatabaseReady,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: 3,
+			Reason:             "DatabaseReady",
+			Message:            "Database is ready",
+		},
+	}
+
+	reconciler, client := newStatusTestReconcilerWithInterceptors(t, live, interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, client ctrlclient.Client, subResourceName string, obj ctrlclient.Object, patch ctrlclient.Patch, opts ...ctrlclient.SubResourcePatchOption) error {
+			if subResourceName == "status" {
+				return fmt.Errorf("unexpected status patch for stale generation")
+			}
+			return client.Status().Patch(ctx, obj, patch, opts...)
+		},
+	})
+
+	if err := reconciler.updateOverallStatus(ctx, stale); err != nil {
+		t.Fatalf("update overall status with stale generation: %v", err)
+	}
+
+	stored := &infrav1alpha1.Sandbox0Infra{}
+	if err := client.Get(ctx, ctrlclient.ObjectKeyFromObject(live), stored); err != nil {
+		t.Fatalf("get stored infra: %v", err)
+	}
+
+	if stored.Status.LastMessage != "newer generation wins" {
+		t.Fatalf("expected newer generation status to be preserved, got %q", stored.Status.LastMessage)
+	}
+	condition := findCondition(stored.Status.Conditions, infrav1alpha1.ConditionTypeDatabaseReady)
+	if condition == nil {
+		t.Fatal("expected database condition to be present")
+	}
+	if condition.ObservedGeneration != 4 {
+		t.Fatalf("expected observedGeneration 4 to be preserved, got %d", condition.ObservedGeneration)
+	}
+}
+
+func TestUpdateOverallStatusDoesNotOverwriteNewerStatusFromSameGeneration(t *testing.T) {
+	ctx := context.Background()
+	live := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "demo",
+			Namespace:       "sandbox0-system",
+			Generation:      4,
+			ResourceVersion: "2",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeExternal,
+				External: &infrav1alpha1.ExternalDatabaseConfig{
+					Host:     "db.example.com",
+					Port:     5432,
+					Database: "sandbox0",
+					Username: "sandbox0",
+				},
+			},
+		},
+		Status: infrav1alpha1.Sandbox0InfraStatus{
+			Phase:       infrav1alpha1.PhaseReady,
+			LastMessage: "newer resource version wins",
+			Conditions: []metav1.Condition{
+				{
+					Type:               infrav1alpha1.ConditionTypeDatabaseReady,
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: 4,
+					Reason:             "DatabaseReady",
+					Message:            "newer status",
+				},
+			},
+		},
+	}
+
+	stale := live.DeepCopy()
+	stale.ResourceVersion = "1"
+	stale.Status.Phase = infrav1alpha1.PhaseDegraded
+	stale.Status.LastMessage = "older status"
+	stale.Status.Conditions = []metav1.Condition{
+		{
+			Type:               infrav1alpha1.ConditionTypeDatabaseReady,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: 4,
+			Reason:             "DatabaseFailed",
+			Message:            "older status",
+		},
+	}
+
+	reconciler, client := newStatusTestReconcilerWithInterceptors(t, live, interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, client ctrlclient.Client, subResourceName string, obj ctrlclient.Object, patch ctrlclient.Patch, opts ...ctrlclient.SubResourcePatchOption) error {
+			if subResourceName == "status" {
+				return fmt.Errorf("unexpected status patch for stale resource version")
+			}
+			return client.Status().Patch(ctx, obj, patch, opts...)
+		},
+	})
+
+	if err := reconciler.updateOverallStatus(ctx, stale); err != nil {
+		t.Fatalf("update overall status with stale resource version: %v", err)
+	}
+
+	stored := &infrav1alpha1.Sandbox0Infra{}
+	if err := client.Get(ctx, ctrlclient.ObjectKeyFromObject(live), stored); err != nil {
+		t.Fatalf("get stored infra: %v", err)
+	}
+	if stored.Status.LastMessage != "newer resource version wins" {
+		t.Fatalf("expected newer same-generation status to be preserved, got %q", stored.Status.LastMessage)
+	}
+}
+
 func newStatusTestReconciler(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, objects ...ctrlclient.Object) (*Sandbox0InfraReconciler, ctrlclient.Client) {
+	t.Helper()
+	return newStatusTestReconcilerWithInterceptors(t, infra, interceptor.Funcs{}, objects...)
+}
+
+func newStatusTestReconcilerWithInterceptors(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, interceptors interceptor.Funcs, objects ...ctrlclient.Object) (*Sandbox0InfraReconciler, ctrlclient.Client) {
 	t.Helper()
 
 	scheme := runtime.NewScheme()
@@ -175,6 +404,7 @@ func newStatusTestReconciler(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, o
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(allObjects...).
+		WithInterceptorFuncs(interceptors).
 		WithStatusSubresource(infra).
 		Build()
 

@@ -73,16 +73,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		return err
 	}
 
-	if err := common.EnsureBuiltinTemplates(ctx, infra, common.BuiltinTemplateOptions{
-		DatabaseURL:          config.DatabaseURL,
-		DatabaseMaxConns:     config.DatabaseMaxConns,
-		DatabaseMinConns:     config.DatabaseMinConns,
-		TemplateStoreEnabled: config.TemplateStoreEnabled,
-		Owner:                "manager",
-	}); err != nil {
-		return err
-	}
-
 	if err := r.Resources.ReconcileServiceConfigMap(ctx, infra, deploymentName, labels, config); err != nil {
 		return err
 	}
@@ -252,6 +242,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	}
 
 	if err := r.Resources.EnsureDeploymentReady(ctx, infra, deploymentName, replicas); err != nil {
+		return err
+	}
+
+	// Reconcile runtime resources first so dependent services do not observe a
+	// new manager port before the manager service/config have converged.
+	if err := common.EnsureBuiltinTemplates(ctx, infra, common.BuiltinTemplateOptions{
+		DatabaseURL:          config.DatabaseURL,
+		DatabaseMaxConns:     config.DatabaseMaxConns,
+		DatabaseMinConns:     config.DatabaseMinConns,
+		TemplateStoreEnabled: config.TemplateStoreEnabled,
+		Owner:                "manager",
+	}); err != nil {
 		return err
 	}
 

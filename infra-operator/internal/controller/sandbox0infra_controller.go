@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -384,25 +385,6 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 			ErrorReason:    "ClusterGatewayFailed",
 		})
 	}
-	if plan.EnableNetd {
-		steps = append(steps, reconcileStep{
-			Name:                 "netd-rbac",
-			Run:                  func(ctx context.Context) error { return rbacReconciler.ReconcileNetdRBAC(ctx, infra) },
-			ConditionType:        infrav1alpha1.ConditionTypeNetdReady,
-			ErrorReason:          "NetdRBACFailed",
-			SkipSuccessCondition: true,
-		})
-		steps = append(steps, reconcileStep{
-			Name: "netd",
-			Run: func(ctx context.Context) error {
-				return netdReconciler.Reconcile(ctx, infra, imageRepo, imageTag, compiledPlan)
-			},
-			ConditionType:  infrav1alpha1.ConditionTypeNetdReady,
-			SuccessReason:  "NetdReady",
-			SuccessMessage: "netd is ready",
-			ErrorReason:    "NetdFailed",
-		})
-	}
 	if plan.EnableFusePlugin {
 		steps = append(steps, reconcileStep{
 			Name: "fuse-device-plugin",
@@ -441,6 +423,25 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 			ConditionType:        infrav1alpha1.ConditionTypeManagerReady,
 			ErrorReason:          "BuiltinTemplatePodsNotReady",
 			SkipSuccessCondition: true,
+		})
+	}
+	if plan.EnableNetd {
+		steps = append(steps, reconcileStep{
+			Name:                 "netd-rbac",
+			Run:                  func(ctx context.Context) error { return rbacReconciler.ReconcileNetdRBAC(ctx, infra) },
+			ConditionType:        infrav1alpha1.ConditionTypeNetdReady,
+			ErrorReason:          "NetdRBACFailed",
+			SkipSuccessCondition: true,
+		})
+		steps = append(steps, reconcileStep{
+			Name: "netd",
+			Run: func(ctx context.Context) error {
+				return netdReconciler.Reconcile(ctx, infra, imageRepo, imageTag, compiledPlan)
+			},
+			ConditionType:  infrav1alpha1.ConditionTypeNetdReady,
+			SuccessReason:  "NetdReady",
+			SuccessMessage: "netd is ready",
+			ErrorReason:    "NetdFailed",
 		})
 	}
 	if plan.EnableStorageProxy {
@@ -720,7 +721,6 @@ func (r *Sandbox0InfraReconciler) cleanupDisabledServiceResources(
 // updateOverallStatus updates the overall status based on conditions
 func (r *Sandbox0InfraReconciler) updateOverallStatus(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
 	logger := log.FromContext(ctx)
-	original := infra.Status.DeepCopy()
 	compiledPlan := infraplan.Compile(infra)
 
 	if compiledPlan.Components.EnableClusterRegistration {
@@ -825,16 +825,38 @@ func (r *Sandbox0InfraReconciler) updateOverallStatus(ctx context.Context, infra
 		r.setCondition(ctx, infra, infrav1alpha1.ConditionTypeReady, metav1.ConditionFalse, "ServicesNotReady", "Some services are not ready")
 	}
 
-	// Update status
-	if reflect.DeepEqual(original, &infra.Status) {
-		return nil
-	}
-	if err := r.Status().Update(ctx, infra); err != nil {
-		logger.Error(err, "Failed to update status")
-		return err
-	}
+	desiredStatus := infra.Status.DeepCopy()
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &infrav1alpha1.Sandbox0Infra{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(infra), latest); err != nil {
+			return err
+		}
+		if latest.Generation != infra.Generation {
+			logger.Info("Skipping stale status update", "reconciledGeneration", infra.Generation, "latestGeneration", latest.Generation)
+			return nil
+		}
+		if latest.ResourceVersion != "" && infra.ResourceVersion != "" && latest.ResourceVersion != infra.ResourceVersion {
+			logger.Info(
+				"Skipping stale status update from older resource version",
+				"generation", infra.Generation,
+				"reconciledResourceVersion", infra.ResourceVersion,
+				"latestResourceVersion", latest.ResourceVersion,
+			)
+			return nil
+		}
 
-	return nil
+		if reflect.DeepEqual(&latest.Status, desiredStatus) {
+			return nil
+		}
+
+		base := latest.DeepCopy()
+		latest.Status = *desiredStatus
+		if err := r.Status().Patch(ctx, latest, client.MergeFrom(base)); err != nil {
+			logger.Error(err, "Failed to patch status")
+			return err
+		}
+		return nil
+	})
 }
 
 func (r *Sandbox0InfraReconciler) expectedConditionTypes(infra *infrav1alpha1.Sandbox0Infra) []string {

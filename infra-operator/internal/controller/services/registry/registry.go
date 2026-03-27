@@ -279,7 +279,7 @@ func (r *Reconciler) reconcileBuiltinRegistry(ctx context.Context, infra *infrav
 		}
 	}
 
-	return nil
+	return r.Resources.EnsureDeploymentReady(ctx, infra, fmt.Sprintf("%s-registry", infra.Name), 1)
 }
 
 func (r *Reconciler) cleanupBuiltinRegistryResources(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
@@ -598,7 +598,7 @@ func (r *Reconciler) reconcileRegistryDeployment(ctx context.Context, infra *inf
 		return err
 	}
 
-	return r.Resources.EnsureDeploymentReady(ctx, infra, deploymentName, 1)
+	return nil
 }
 
 func (r *Reconciler) reconcileRegistryService(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, builtin infrav1alpha1.BuiltinRegistryConfig) error {

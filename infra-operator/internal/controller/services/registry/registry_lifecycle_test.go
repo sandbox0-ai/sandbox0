@@ -98,10 +98,39 @@ func TestCleanupBuiltinResourcesRespectsStatefulResourcePolicy(t *testing.T) {
 	})
 }
 
+func TestReconcileCreatesRuntimeResourcesBeforeDeploymentReady(t *testing.T) {
+	reconciler, client := newRegistryLifecycleTestReconciler(t)
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Registry: &infrav1alpha1.RegistryConfig{
+				Provider: infrav1alpha1.RegistryProviderBuiltin,
+				Builtin: &infrav1alpha1.BuiltinRegistryConfig{
+					Enabled: true,
+				},
+			},
+		},
+	}
+
+	err := reconciler.Reconcile(context.Background(), infra)
+	if err == nil {
+		t.Fatal("expected reconcile to wait for deployment readiness")
+	}
+
+	assertRegistryPresentObject(t, client, &appsv1.Deployment{}, "sandbox0-system", "demo-registry")
+	assertRegistryPresentObject(t, client, &corev1.Service{}, "sandbox0-system", "demo-registry")
+	assertRegistryPresentObject(t, client, &corev1.Secret{}, "sandbox0-system", "demo-registry-auth")
+	assertRegistryPresentObject(t, client, &corev1.Secret{}, "sandbox0-system", "demo-registry-pull")
+	assertRegistryPresentObject(t, client, &corev1.PersistentVolumeClaim{}, "sandbox0-system", "demo-registry-data")
+}
+
 func newRegistryLifecycleTestReconciler(t *testing.T, objects ...runtime.Object) (*Reconciler, ctrlclient.Client) {
 	t.Helper()
 
 	scheme := runtime.NewScheme()
+	if err := infrav1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add infra scheme: %v", err)
+	}
 	if err := appsv1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add apps scheme: %v", err)
 	}
@@ -118,6 +147,18 @@ func newRegistryLifecycleTestReconciler(t *testing.T, objects ...runtime.Object)
 func assertRegistryPresentObject(t *testing.T, client ctrlclient.Client, obj runtime.Object, namespace, name string) {
 	t.Helper()
 	switch typed := obj.(type) {
+	case *appsv1.Deployment:
+		if err := client.Get(context.Background(), types.NamespacedName{Namespace: namespace, Name: name}, typed); err != nil {
+			t.Fatalf("expected %T %s/%s to exist: %v", typed, namespace, name, err)
+		}
+	case *corev1.Service:
+		if err := client.Get(context.Background(), types.NamespacedName{Namespace: namespace, Name: name}, typed); err != nil {
+			t.Fatalf("expected %T %s/%s to exist: %v", typed, namespace, name, err)
+		}
+	case *corev1.Secret:
+		if err := client.Get(context.Background(), types.NamespacedName{Namespace: namespace, Name: name}, typed); err != nil {
+			t.Fatalf("expected %T %s/%s to exist: %v", typed, namespace, name, err)
+		}
 	case *corev1.PersistentVolumeClaim:
 		if err := client.Get(context.Background(), types.NamespacedName{Namespace: namespace, Name: name}, typed); err != nil {
 			t.Fatalf("expected %T %s/%s to exist: %v", typed, namespace, name, err)

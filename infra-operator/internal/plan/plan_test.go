@@ -418,9 +418,92 @@ func TestCompileTracksValidationRequirements(t *testing.T) {
 	})
 }
 
+func TestCompileTracksCleanupPlan(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeBuiltin,
+				Builtin: &infrav1alpha1.BuiltinDatabaseConfig{
+					Enabled: false,
+				},
+			},
+			Storage: &infrav1alpha1.StorageConfig{
+				Type: infrav1alpha1.StorageTypeBuiltin,
+				Builtin: &infrav1alpha1.BuiltinStorageConfig{
+					Enabled: false,
+				},
+			},
+			Registry: &infrav1alpha1.RegistryConfig{
+				Provider: infrav1alpha1.RegistryProviderBuiltin,
+				Builtin: &infrav1alpha1.BuiltinRegistryConfig{
+					Enabled: false,
+				},
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				GlobalGateway: &infrav1alpha1.GlobalGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: false},
+					},
+				},
+				Manager: &infrav1alpha1.ManagerServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: false},
+					},
+				},
+				Netd: &infrav1alpha1.NetdServiceConfig{
+					EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: false},
+				},
+			},
+		},
+	}
+
+	compiled := Compile(infra)
+
+	if !compiled.Cleanup.CleanupBuiltinDatabase {
+		t.Fatal("expected builtin database cleanup to be enabled")
+	}
+	if !compiled.Cleanup.CleanupBuiltinStorage {
+		t.Fatal("expected builtin storage cleanup to be enabled")
+	}
+	if !compiled.Cleanup.CleanupBuiltinRegistry {
+		t.Fatal("expected builtin registry cleanup to be enabled")
+	}
+
+	for _, want := range []ResourceRef{
+		{Kind: "Deployment", Namespace: "sandbox0-system", Name: "demo-global-gateway"},
+		{Kind: "Deployment", Namespace: "sandbox0-system", Name: "demo-manager"},
+		{Kind: "DaemonSet", Namespace: "sandbox0-system", Name: "demo-netd"},
+		{Kind: "StatefulSet", Namespace: "sandbox0-system", Name: "demo-postgres"},
+		{Kind: "Deployment", Namespace: "sandbox0-system", Name: "demo-egress-broker"},
+		{Kind: "ClusterRole", Name: "demo-manager"},
+		{Kind: "ClusterRoleBinding", Name: "demo-netd"},
+	} {
+		if !containsResourceRef(compiled.Cleanup.DeleteNamespaced, compiled.Cleanup.DeleteClusterScoped, want) {
+			t.Fatalf("expected cleanup target %#v, got namespaced=%#v cluster=%#v", want, compiled.Cleanup.DeleteNamespaced, compiled.Cleanup.DeleteClusterScoped)
+		}
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsResourceRef(namespaced, cluster []ResourceRef, want ResourceRef) bool {
+	candidates := namespaced
+	if want.Namespace == "" {
+		candidates = cluster
+	}
+	for _, candidate := range candidates {
+		if candidate == want {
 			return true
 		}
 	}

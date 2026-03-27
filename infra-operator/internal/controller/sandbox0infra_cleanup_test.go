@@ -94,7 +94,7 @@ func TestCleanupDisabledServiceResourcesCleansBuiltinDependencies(t *testing.T) 
 	err := reconciler.cleanupDisabledServiceResources(
 		context.Background(),
 		infra,
-		infraplan.ComponentPlan{},
+		infraplan.Compile(infra).Cleanup,
 		database.NewReconciler(resources),
 		storage.NewReconciler(resources),
 		registry.NewReconciler(resources),

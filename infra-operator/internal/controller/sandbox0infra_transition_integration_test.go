@@ -195,7 +195,7 @@ var _ = Describe("Sandbox0Infra transition semantics", func() {
 		Expect(createOwnedObject(ctx, infra, newOwnedPVC("storage-retain-rustfs-data", infra.Namespace))).To(Succeed())
 
 		storageReconciler := storage.NewReconciler(common.NewResourceManager(k8sClient, scheme.Scheme, nil, common.LocalDevConfig{}))
-		Expect(reconciler.cleanupDisabledServiceResources(ctx, infra, infraplan.Compile(infra).Components, nil, storageReconciler, nil)).To(Succeed())
+		Expect(reconciler.cleanupDisabledServiceResources(ctx, infra, infraplan.Compile(infra).Cleanup, nil, storageReconciler, nil)).To(Succeed())
 		Expect(reconciler.updateOverallStatus(ctx, infra)).To(Succeed())
 
 		Expect(objectExists(ctx, &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "storage-retain-rustfs", Namespace: infra.Namespace}})).To(BeFalse())
@@ -237,7 +237,7 @@ var _ = Describe("Sandbox0Infra transition semantics", func() {
 		Expect(createOwnedObject(ctx, infra, newOwnedPVC("storage-delete-rustfs-data", infra.Namespace))).To(Succeed())
 
 		storageReconciler := storage.NewReconciler(common.NewResourceManager(k8sClient, scheme.Scheme, nil, common.LocalDevConfig{}))
-		Expect(reconciler.cleanupDisabledServiceResources(ctx, infra, infraplan.Compile(infra).Components, nil, storageReconciler, nil)).To(Succeed())
+		Expect(reconciler.cleanupDisabledServiceResources(ctx, infra, infraplan.Compile(infra).Cleanup, nil, storageReconciler, nil)).To(Succeed())
 		Expect(reconciler.updateOverallStatus(ctx, infra)).To(Succeed())
 
 		Expect(objectExists(ctx, &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "storage-delete-rustfs", Namespace: infra.Namespace}})).To(BeFalse())

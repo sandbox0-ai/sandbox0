@@ -25,6 +25,7 @@ type InfraPlan struct {
 	RegionalGateway RegionalGatewayPlan
 	Enterprise      EnterpriseLicensePlan
 	Validation      ValidationPlan
+	Cleanup         CleanupPlan
 	Status          StatusPlan
 }
 
@@ -50,6 +51,20 @@ type ComponentPlan struct {
 type ValidationPlan struct {
 	FatalErrors                  []string
 	RequireControlPlanePublicKey bool
+}
+
+type CleanupPlan struct {
+	CleanupBuiltinDatabase bool
+	CleanupBuiltinStorage  bool
+	CleanupBuiltinRegistry bool
+	DeleteNamespaced       []ResourceRef
+	DeleteClusterScoped    []ResourceRef
+}
+
+type ResourceRef struct {
+	Kind      string
+	Name      string
+	Namespace string
 }
 
 type ServicePlan struct {
@@ -111,6 +126,7 @@ func Compile(infra *infrav1alpha1.Sandbox0Infra) *InfraPlan {
 	compiled.RegionalGateway = compileRegionalGatewayPlan(compiled)
 	compiled.Enterprise = compileEnterpriseLicensePlan(infra)
 	compiled.Validation = compileValidationPlan(infra, compiled)
+	compiled.Cleanup = compileCleanupPlan(infra, compiled)
 	compiled.Status = compileStatusPlan(compiled)
 	return compiled
 }
@@ -275,6 +291,125 @@ func compileValidationPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPl
 	}
 
 	return plan
+}
+
+func compileCleanupPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) CleanupPlan {
+	cleanup := CleanupPlan{}
+	if infra == nil || compiled == nil {
+		return cleanup
+	}
+
+	cleanup.CleanupBuiltinDatabase = !builtinDatabaseActive(infra)
+	cleanup.CleanupBuiltinStorage = !builtinStorageActive(infra)
+	cleanup.CleanupBuiltinRegistry = !builtinRegistryActive(infra)
+
+	if !compiled.Components.EnableGlobalGateway {
+		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
+			namespacedRef("Deployment", infra.Namespace, fmt.Sprintf("%s-global-gateway", infra.Name)),
+			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-global-gateway", infra.Name)),
+			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-global-gateway", infra.Name)),
+			namespacedRef("Ingress", infra.Namespace, fmt.Sprintf("%s-global-gateway", infra.Name)),
+		)
+	}
+	if !compiled.Components.EnableRegionalGateway {
+		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
+			namespacedRef("Deployment", infra.Namespace, fmt.Sprintf("%s-regional-gateway", infra.Name)),
+			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-regional-gateway", infra.Name)),
+			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-regional-gateway", infra.Name)),
+			namespacedRef("Ingress", infra.Namespace, fmt.Sprintf("%s-regional-gateway", infra.Name)),
+		)
+	}
+	if !compiled.Components.EnableScheduler {
+		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
+			namespacedRef("Deployment", infra.Namespace, fmt.Sprintf("%s-scheduler", infra.Name)),
+			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-scheduler", infra.Name)),
+			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-scheduler", infra.Name)),
+			namespacedRef("ServiceAccount", infra.Namespace, fmt.Sprintf("%s-scheduler", infra.Name)),
+		)
+	}
+	if !compiled.Components.EnableClusterGateway {
+		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
+			namespacedRef("Deployment", infra.Namespace, fmt.Sprintf("%s-cluster-gateway", infra.Name)),
+			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-cluster-gateway", infra.Name)),
+			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-cluster-gateway", infra.Name)),
+		)
+	}
+	if !compiled.Components.EnableManager {
+		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
+			namespacedRef("Deployment", infra.Namespace, fmt.Sprintf("%s-manager", infra.Name)),
+			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-manager", infra.Name)),
+			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-manager", infra.Name)),
+			namespacedRef("ServiceAccount", infra.Namespace, fmt.Sprintf("%s-manager", infra.Name)),
+		)
+		cleanup.DeleteClusterScoped = append(cleanup.DeleteClusterScoped,
+			clusterScopedRef("ClusterRole", fmt.Sprintf("%s-manager", infra.Name)),
+			clusterScopedRef("ClusterRoleBinding", fmt.Sprintf("%s-manager", infra.Name)),
+		)
+	}
+	if !compiled.Components.EnableStorageProxy {
+		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
+			namespacedRef("Deployment", infra.Namespace, fmt.Sprintf("%s-storage-proxy", infra.Name)),
+			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-storage-proxy", infra.Name)),
+			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-storage-proxy", infra.Name)),
+			namespacedRef("ServiceAccount", infra.Namespace, fmt.Sprintf("%s-storage-proxy", infra.Name)),
+		)
+		cleanup.DeleteClusterScoped = append(cleanup.DeleteClusterScoped,
+			clusterScopedRef("ClusterRole", fmt.Sprintf("%s-storage-proxy", infra.Name)),
+			clusterScopedRef("ClusterRoleBinding", fmt.Sprintf("%s-storage-proxy", infra.Name)),
+		)
+	}
+
+	cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
+		namespacedRef("Deployment", infra.Namespace, fmt.Sprintf("%s-egress-broker", infra.Name)),
+		namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-egress-broker", infra.Name)),
+		namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-egress-broker", infra.Name)),
+	)
+
+	if !compiled.Components.EnableNetd {
+		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
+			namespacedRef("DaemonSet", infra.Namespace, fmt.Sprintf("%s-netd", infra.Name)),
+			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-netd", infra.Name)),
+			namespacedRef("ServiceAccount", infra.Namespace, fmt.Sprintf("%s-netd", infra.Name)),
+		)
+		cleanup.DeleteClusterScoped = append(cleanup.DeleteClusterScoped,
+			clusterScopedRef("ClusterRole", fmt.Sprintf("%s-netd", infra.Name)),
+			clusterScopedRef("ClusterRoleBinding", fmt.Sprintf("%s-netd", infra.Name)),
+		)
+	}
+	if !compiled.Components.EnableFusePlugin {
+		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
+			namespacedRef("DaemonSet", infra.Namespace, fmt.Sprintf("%s-k8s-plugin", infra.Name)),
+		)
+	}
+	if cleanup.CleanupBuiltinDatabase {
+		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
+			namespacedRef("StatefulSet", infra.Namespace, fmt.Sprintf("%s-postgres", infra.Name)),
+			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-postgres", infra.Name)),
+		)
+	}
+	if cleanup.CleanupBuiltinStorage {
+		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
+			namespacedRef("StatefulSet", infra.Namespace, fmt.Sprintf("%s-rustfs", infra.Name)),
+			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-rustfs", infra.Name)),
+		)
+	}
+	if cleanup.CleanupBuiltinRegistry {
+		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
+			namespacedRef("Deployment", infra.Namespace, fmt.Sprintf("%s-registry", infra.Name)),
+			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-registry", infra.Name)),
+			namespacedRef("Ingress", infra.Namespace, fmt.Sprintf("%s-registry", infra.Name)),
+		)
+	}
+
+	return cleanup
+}
+
+func namespacedRef(kind, namespace, name string) ResourceRef {
+	return ResourceRef{Kind: kind, Namespace: namespace, Name: name}
+}
+
+func clusterScopedRef(kind, name string) ResourceRef {
+	return ResourceRef{Kind: kind, Name: name}
 }
 
 func compileStatusPlan(compiled *InfraPlan) StatusPlan {
@@ -449,4 +584,34 @@ func netdEgressAuthEnabled(infra *infrav1alpha1.Sandbox0Infra) bool {
 		return false
 	}
 	return infra.Spec.Services.Netd.Config.EgressAuthEnabled
+}
+
+func builtinDatabaseActive(infra *infrav1alpha1.Sandbox0Infra) bool {
+	if infra == nil || infra.Spec.Database == nil || infra.Spec.Database.Type != infrav1alpha1.DatabaseTypeBuiltin {
+		return false
+	}
+	if infra.Spec.Database.Builtin == nil {
+		return true
+	}
+	return infra.Spec.Database.Builtin.Enabled
+}
+
+func builtinStorageActive(infra *infrav1alpha1.Sandbox0Infra) bool {
+	if infra == nil || infra.Spec.Storage == nil || infra.Spec.Storage.Type != infrav1alpha1.StorageTypeBuiltin {
+		return false
+	}
+	if infra.Spec.Storage.Builtin == nil {
+		return true
+	}
+	return infra.Spec.Storage.Builtin.Enabled
+}
+
+func builtinRegistryActive(infra *infrav1alpha1.Sandbox0Infra) bool {
+	if infra == nil || infra.Spec.Registry == nil || infra.Spec.Registry.Provider != infrav1alpha1.RegistryProviderBuiltin {
+		return false
+	}
+	if infra.Spec.Registry.Builtin == nil {
+		return true
+	}
+	return infra.Spec.Registry.Builtin.Enabled
 }

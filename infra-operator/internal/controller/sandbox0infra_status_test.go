@@ -598,6 +598,61 @@ func TestUpdateOverallStatusAllowsSameGenerationStatusToConverge(t *testing.T) {
 	}
 }
 
+func TestUpdateValidationFailureStatusMarksReadyFalse(t *testing.T) {
+	ctx := context.Background()
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "demo",
+			Namespace:  "sandbox0-system",
+			Generation: 5,
+		},
+		Status: infrav1alpha1.Sandbox0InfraStatus{
+			Phase:       infrav1alpha1.PhaseReady,
+			LastMessage: "All services are healthy",
+			Conditions: []metav1.Condition{
+				{
+					Type:               infrav1alpha1.ConditionTypeReady,
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: 4,
+					Reason:             "AllServicesHealthy",
+					Message:            "All services are healthy",
+				},
+			},
+		},
+	}
+
+	reconciler, client := newStatusTestReconciler(t, infra)
+	validationErr := fmt.Errorf("spec.services.clusterGateway.service.port must be within 30000-32767 when service.type is NodePort")
+	if err := reconciler.updateValidationFailureStatus(ctx, infra, validationErr); err != nil {
+		t.Fatalf("update validation failure status: %v", err)
+	}
+
+	stored := &infrav1alpha1.Sandbox0Infra{}
+	if err := client.Get(ctx, ctrlclient.ObjectKeyFromObject(infra), stored); err != nil {
+		t.Fatalf("get stored infra: %v", err)
+	}
+
+	if stored.Status.Phase != infrav1alpha1.PhaseDegraded {
+		t.Fatalf("expected phase %q, got %q", infrav1alpha1.PhaseDegraded, stored.Status.Phase)
+	}
+	if stored.Status.LastMessage != validationErr.Error() {
+		t.Fatalf("expected validation error message %q, got %q", validationErr.Error(), stored.Status.LastMessage)
+	}
+	readyCondition := findCondition(stored.Status.Conditions, infrav1alpha1.ConditionTypeReady)
+	if readyCondition == nil {
+		t.Fatal("expected Ready condition to be present")
+	}
+	if readyCondition.Status != metav1.ConditionFalse {
+		t.Fatalf("expected Ready condition false, got %s", readyCondition.Status)
+	}
+	if readyCondition.Reason != "SpecValidationFailed" {
+		t.Fatalf("expected Ready reason SpecValidationFailed, got %q", readyCondition.Reason)
+	}
+	if readyCondition.ObservedGeneration != 5 {
+		t.Fatalf("expected Ready observedGeneration 5, got %d", readyCondition.ObservedGeneration)
+	}
+}
+
 func newStatusTestReconciler(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, objects ...ctrlclient.Object) (*Sandbox0InfraReconciler, ctrlclient.Client) {
 	t.Helper()
 	return newStatusTestReconcilerWithInterceptors(t, infra, interceptor.Funcs{}, objects...)

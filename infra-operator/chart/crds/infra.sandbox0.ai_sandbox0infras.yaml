@@ -666,6 +666,10 @@ spec:
                             description: Type specifies the service type
                             type: string
                         type: object
+                        x-kubernetes-validations:
+                        - message: port must be within 30000-32767 when type is NodePort
+                          rule: self.type != 'NodePort' || self.port == 0 || (self.port
+                            >= 30000 && self.port <= 32767)
                       statefulResourcePolicy:
                         default: Retain
                         description: |-
@@ -1087,6 +1091,10 @@ spec:
                             description: Type specifies the service type
                             type: string
                         type: object
+                        x-kubernetes-validations:
+                        - message: port must be within 30000-32767 when type is NodePort
+                          rule: self.type != 'NodePort' || self.port == 0 || (self.port
+                            >= 30000 && self.port <= 32767)
                     type: object
                   globalGateway:
                     default: {}
@@ -1330,6 +1338,10 @@ spec:
                             description: Type specifies the service type
                             type: string
                         type: object
+                        x-kubernetes-validations:
+                        - message: port must be within 30000-32767 when type is NodePort
+                          rule: self.type != 'NodePort' || self.port == 0 || (self.port
+                            >= 30000 && self.port <= 32767)
                     type: object
                   manager:
                     default: {}
@@ -1575,6 +1587,10 @@ spec:
                             description: Type specifies the service type
                             type: string
                         type: object
+                        x-kubernetes-validations:
+                        - message: port must be within 30000-32767 when type is NodePort
+                          rule: self.type != 'NodePort' || self.port == 0 || (self.port
+                            >= 30000 && self.port <= 32767)
                     type: object
                   netd:
                     default: {}
@@ -2014,6 +2030,10 @@ spec:
                             description: Type specifies the service type
                             type: string
                         type: object
+                        x-kubernetes-validations:
+                        - message: port must be within 30000-32767 when type is NodePort
+                          rule: self.type != 'NodePort' || self.port == 0 || (self.port
+                            >= 30000 && self.port <= 32767)
                     type: object
                   scheduler:
                     description: Scheduler configures the scheduler service (control
@@ -2151,6 +2171,10 @@ spec:
                             description: Type specifies the service type
                             type: string
                         type: object
+                        x-kubernetes-validations:
+                        - message: port must be within 30000-32767 when type is NodePort
+                          rule: self.type != 'NodePort' || self.port == 0 || (self.port
+                            >= 30000 && self.port <= 32767)
                     type: object
                   storageProxy:
                     default: {}
@@ -2369,6 +2393,10 @@ spec:
                             description: Type specifies the service type
                             type: string
                         type: object
+                        x-kubernetes-validations:
+                        - message: port must be within 30000-32767 when type is NodePort
+                          rule: self.type != 'NodePort' || self.port == 0 || (self.port
+                            >= 30000 && self.port <= 32767)
                     type: object
                 type: object
               storage:

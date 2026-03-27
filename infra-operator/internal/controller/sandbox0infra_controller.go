@@ -128,6 +128,9 @@ func (r *Sandbox0InfraReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	r.setDefaults(infra)
 	if err := r.validateSpecSemantics(ctx, infra); err != nil {
 		logger.Error(err, "Sandbox0Infra validation failed")
+		if updateErr := r.updateValidationFailureStatus(ctx, infra, err); updateErr != nil {
+			logger.Error(updateErr, "Failed to project validation failure status")
+		}
 		return ctrl.Result{}, err
 	}
 
@@ -618,6 +621,40 @@ func (r *Sandbox0InfraReconciler) updateOverallStatus(ctx context.Context, infra
 			return err
 		}
 		return nil
+	})
+}
+
+func (r *Sandbox0InfraReconciler) updateValidationFailureStatus(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, validationErr error) error {
+	if infra == nil || validationErr == nil {
+		return nil
+	}
+
+	desired := infra.DeepCopy()
+	desired.Status.Phase = infrav1alpha1.PhaseDegraded
+	desired.Status.LastMessage = validationErr.Error()
+	r.setCondition(ctx, desired, infrav1alpha1.ConditionTypeReady, metav1.ConditionFalse, "SpecValidationFailed", validationErr.Error())
+
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &infrav1alpha1.Sandbox0Infra{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(infra), latest); err != nil {
+			return err
+		}
+		if latest.Generation != infra.Generation {
+			return nil
+		}
+
+		base := latest.DeepCopy()
+		latest.Status.Phase = desired.Status.Phase
+		latest.Status.LastMessage = desired.Status.LastMessage
+		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+			Type:               infrav1alpha1.ConditionTypeReady,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: infra.Generation,
+			LastTransitionTime: metav1.Now(),
+			Reason:             "SpecValidationFailed",
+			Message:            validationErr.Error(),
+		})
+		return r.Status().Patch(ctx, latest, client.MergeFrom(base))
 	})
 }
 

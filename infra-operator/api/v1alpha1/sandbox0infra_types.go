@@ -1029,6 +1029,7 @@ func HasAnyServiceEnabled(infra *Sandbox0Infra) bool {
 }
 
 // ServiceNetworkConfig defines service network configuration
+// +kubebuilder:validation:XValidation:rule="self.type != 'NodePort' || self.port == 0 || (self.port >= 30000 && self.port <= 32767)",message="port must be within 30000-32767 when type is NodePort"
 type ServiceNetworkConfig struct {
 	// Type specifies the service type
 	// +kubebuilder:default="ClusterIP"

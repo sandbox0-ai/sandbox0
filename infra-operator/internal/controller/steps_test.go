@@ -89,11 +89,11 @@ func TestRunStepsErrorStopsAndSetsCondition(t *testing.T) {
 	}
 
 	result, err := reconciler.runSteps(ctx, infra, steps)
-	if !errors.Is(err, stepErr) {
-		t.Fatalf("expected error %v, got %v", stepErr, err)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
 	}
 	if result.RequeueAfter != 0 {
-		t.Fatalf("expected empty requeue result, got %v", result.RequeueAfter)
+		t.Fatalf("expected explicit zero requeue result, got %v", result.RequeueAfter)
 	}
 
 	condition := meta.FindStatusCondition(infra.Status.Conditions, infrav1alpha1.ConditionTypeInternalAuthReady)

@@ -57,11 +57,12 @@ func (r *Sandbox0InfraReconciler) runSteps(ctx context.Context, infra *infrav1al
 				r.setCondition(ctx, infra, step.ConditionType, metav1.ConditionFalse, step.ErrorReason, err.Error())
 			}
 			r.setLastMessage(infra, err.Error())
+			log.FromContext(ctx).Info("Reconcile step failed; scheduling retry", "step", step.Name, "error", err.Error())
 			result := ctrl.Result{RequeueAfter: requeueInterval}
 			if step.ErrorResult != nil {
 				result = *step.ErrorResult
 			}
-			return result, err
+			return result, nil
 		}
 
 		if step.ConditionType != "" && !step.SkipSuccessCondition {

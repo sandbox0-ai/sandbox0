@@ -424,13 +424,14 @@ var _ = Describe("Sandbox0Infra transition semantics", func() {
 		})
 		Expect(k8sClient.Create(ctx, infra)).To(Succeed())
 
-		_, err := reconciler.runSteps(ctx, infra, []reconcileStep{{
+		result, err := reconciler.runSteps(ctx, infra, []reconcileStep{{
 			Name:          "register-cluster",
 			Run:           func(ctx context.Context) error { return reconciler.registerCluster(ctx, infra) },
 			ConditionType: infrav1alpha1.ConditionTypeClusterRegistered,
 			ErrorReason:   "ClusterRegistrationFailed",
 		}})
-		Expect(err).To(HaveOccurred())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.RequeueAfter).To(Equal(requeueInterval))
 		Expect(reconciler.updateOverallStatus(ctx, infra)).To(Succeed())
 
 		stored := &infrav1alpha1.Sandbox0Infra{}

@@ -56,7 +56,7 @@ func Registry() []Entry {
 		prefix("spec.registry.aliyun", "registry", []string{"registry"}, nil, UpdateSemanticsDeclarative, "Aliyun registry credentials and pull-secret integration."),
 		prefix("spec.registry.harbor", "registry", []string{"registry"}, nil, UpdateSemanticsDeclarative, "Harbor registry credentials and pull-secret integration."),
 
-		prefix("spec.controlPlane", "plan", []string{"cluster-gateway", "manager", "storage-proxy", "netd", "status"}, []string{"InfraPlan.Components.RequireControlPlaneConfig"}, UpdateSemanticsDeclarative, "External control-plane connection required by data-plane-only deployments."),
+		prefix("spec.controlPlane", "plan", []string{"cluster-gateway", "manager", "storage-proxy", "netd", "status"}, []string{"InfraPlan.Validation.RequireControlPlanePublicKey"}, UpdateSemanticsDeclarative, "External control-plane connection required by data-plane services that integrate with a control plane."),
 		prefix("spec.internalAuth", "internal-auth", []string{"internal-auth", "regional-gateway", "scheduler", "cluster-gateway"}, nil, UpdateSemanticsDeclarative, "Controls generated or imported internal JWT keys."),
 
 		prefix("spec.services.globalGateway", "global-gateway", []string{"global-gateway", "status"}, nil, UpdateSemanticsDeclarative, "Direct runtime configuration for global-gateway."),

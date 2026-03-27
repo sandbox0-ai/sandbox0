@@ -18,15 +18,17 @@ package controller
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -95,7 +97,7 @@ func (r *Sandbox0InfraReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Fetch the Sandbox0Infra instance
 	infra := &infrav1alpha1.Sandbox0Infra{}
 	if err := r.Get(ctx, req.NamespacedName, infra); err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			logger.Info("Sandbox0Infra resource not found. Ignoring since object must be deleted")
 			return ctrl.Result{}, nil
 		}
@@ -196,24 +198,6 @@ func (r *Sandbox0InfraReconciler) reconcileDelete(ctx context.Context, infra *in
 	return ctrl.Result{}, nil
 }
 
-func (r *Sandbox0InfraReconciler) validateComponentPlan(infra *infrav1alpha1.Sandbox0Infra, plan infraplan.ComponentPlan) error {
-	if plan.RequireControlPlaneConfig && infra.Spec.ControlPlane != nil &&
-		infra.Spec.ControlPlane.InternalAuthPublicKeySecret.Name == "" {
-		return fmt.Errorf("controlPlane.internalAuthPublicKeySecret.name is required when controlPlane are enabled")
-	}
-	if plan.EnableGlobalGateway && !plan.EnableDatabase {
-		return fmt.Errorf("globalGateway requires database to be enabled")
-	}
-	if infra.Spec.Cluster != nil && !plan.HasDataPlane {
-		return fmt.Errorf("cluster configuration requires at least one data-plane service")
-	}
-	if plan.EnableNetd && infra.Spec.Services != nil && infra.Spec.Services.Netd != nil && infra.Spec.Services.Netd.Config != nil &&
-		infra.Spec.Services.Netd.Config.EgressAuthEnabled && !plan.EnableManager {
-		return fmt.Errorf("netd egress auth requires manager to be enabled")
-	}
-	return nil
-}
-
 // reconcileComponentPlan reconciles components based on spec configuration.
 func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, compiledPlan *infraplan.InfraPlan) (ctrl.Result, error) {
 	if compiledPlan == nil {
@@ -223,8 +207,8 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 	logger := log.FromContext(ctx)
 	logger.Info("Reconciling components", "controlPlane", plan.HasControlPlane, "dataPlane", plan.HasDataPlane)
 
-	if err := r.validateComponentPlan(infra, plan); err != nil {
-		return ctrl.Result{}, err
+	if len(compiledPlan.Validation.FatalErrors) > 0 {
+		return ctrl.Result{}, stderrors.New(strings.Join(compiledPlan.Validation.FatalErrors, "; "))
 	}
 	fresh, err := r.isLatestReconcileTarget(ctx, infra)
 	if err != nil {
@@ -257,20 +241,7 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 	}
 
 	steps := []reconcileStep{}
-	if plan.RequireControlPlaneConfig {
-		steps = append(steps, reconcileStep{
-			Name: "control-plane-config",
-			Run: func(ctx context.Context) error {
-				if infra.Spec.ControlPlane == nil {
-					return fmt.Errorf("controlPlane configuration is required when data-plane services are enabled")
-				}
-				return nil
-			},
-			ConditionType:        infrav1alpha1.ConditionTypeInternalAuthReady,
-			ErrorReason:          "MissingControlPlane",
-			SkipSuccessCondition: true,
-			ErrorResult:          &ctrl.Result{},
-		})
+	if compiledPlan.Validation.RequireControlPlanePublicKey {
 		steps = append(steps, reconcileStep{
 			Name: "control-plane-public-key",
 			Run: func(ctx context.Context) error {
@@ -555,12 +526,12 @@ func (r *Sandbox0InfraReconciler) cleanupDisabledServiceResources(
 	deleteNamespaced := func(name string, obj client.Object) error {
 		key := types.NamespacedName{Name: name, Namespace: infra.Namespace}
 		if err := r.Get(ctx, key, obj); err != nil {
-			if errors.IsNotFound(err) {
+			if apierrors.IsNotFound(err) {
 				return nil
 			}
 			return err
 		}
-		if err := r.Delete(ctx, obj); err != nil && !errors.IsNotFound(err) {
+		if err := r.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
 			return err
 		}
 		return nil
@@ -568,12 +539,12 @@ func (r *Sandbox0InfraReconciler) cleanupDisabledServiceResources(
 	deleteClusterScoped := func(name string, obj client.Object) error {
 		key := types.NamespacedName{Name: name}
 		if err := r.Get(ctx, key, obj); err != nil {
-			if errors.IsNotFound(err) {
+			if apierrors.IsNotFound(err) {
 				return nil
 			}
 			return err
 		}
-		if err := r.Delete(ctx, obj); err != nil && !errors.IsNotFound(err) {
+		if err := r.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
 			return err
 		}
 		return nil

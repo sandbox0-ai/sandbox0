@@ -339,3 +339,90 @@ func TestCompileDisablesInitUserWhenDatabaseIsDisabled(t *testing.T) {
 		t.Fatal("expected init user to be disabled when database is disabled")
 	}
 }
+
+func TestCompileTracksValidationRequirements(t *testing.T) {
+	t.Run("control-plane public key is required when data-plane uses control-plane config", func(t *testing.T) {
+		infra := &infrav1alpha1.Sandbox0Infra{
+			Spec: infrav1alpha1.Sandbox0InfraSpec{
+				ControlPlane: &infrav1alpha1.ControlPlaneConfig{},
+				Services: &infrav1alpha1.ServicesConfig{
+					ClusterGateway: &infrav1alpha1.ClusterGatewayServiceConfig{
+						WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+							EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						},
+					},
+				},
+			},
+		}
+
+		compiled := Compile(infra)
+
+		if !compiled.Validation.RequireControlPlanePublicKey {
+			t.Fatal("expected control-plane public key requirement to be tracked")
+		}
+		if !containsString(compiled.Validation.FatalErrors, "controlPlane.internalAuthPublicKeySecret.name is required when controlPlane are enabled") {
+			t.Fatalf("expected control-plane validation error, got %#v", compiled.Validation.FatalErrors)
+		}
+	})
+
+	t.Run("global gateway without database is invalid", func(t *testing.T) {
+		infra := &infrav1alpha1.Sandbox0Infra{
+			Spec: infrav1alpha1.Sandbox0InfraSpec{
+				Services: &infrav1alpha1.ServicesConfig{
+					GlobalGateway: &infrav1alpha1.GlobalGatewayServiceConfig{
+						WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+							EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						},
+					},
+				},
+			},
+		}
+
+		compiled := Compile(infra)
+		if !containsString(compiled.Validation.FatalErrors, "globalGateway requires database to be enabled") {
+			t.Fatalf("expected global-gateway/database validation error, got %#v", compiled.Validation.FatalErrors)
+		}
+	})
+
+	t.Run("cluster metadata without data-plane is invalid", func(t *testing.T) {
+		infra := &infrav1alpha1.Sandbox0Infra{
+			Spec: infrav1alpha1.Sandbox0InfraSpec{
+				Cluster: &infrav1alpha1.ClusterConfig{ID: "cluster-a"},
+			},
+		}
+
+		compiled := Compile(infra)
+		if !containsString(compiled.Validation.FatalErrors, "cluster configuration requires at least one data-plane service") {
+			t.Fatalf("expected cluster validation error, got %#v", compiled.Validation.FatalErrors)
+		}
+	})
+
+	t.Run("netd egress auth without manager is invalid", func(t *testing.T) {
+		infra := &infrav1alpha1.Sandbox0Infra{
+			Spec: infrav1alpha1.Sandbox0InfraSpec{
+				Services: &infrav1alpha1.ServicesConfig{
+					Netd: &infrav1alpha1.NetdServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						Config: &infrav1alpha1.NetdConfig{
+							EgressAuthEnabled: true,
+						},
+					},
+				},
+			},
+		}
+
+		compiled := Compile(infra)
+		if !containsString(compiled.Validation.FatalErrors, "netd egress auth requires manager to be enabled") {
+			t.Fatalf("expected netd/manager validation error, got %#v", compiled.Validation.FatalErrors)
+		}
+	})
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}

@@ -24,6 +24,7 @@ type InfraPlan struct {
 	Netd            NetdPlan
 	RegionalGateway RegionalGatewayPlan
 	Enterprise      EnterpriseLicensePlan
+	Validation      ValidationPlan
 	Status          StatusPlan
 }
 
@@ -44,7 +45,11 @@ type ComponentPlan struct {
 	EnableRegistry            bool
 	EnableInitUser            bool
 	EnableClusterRegistration bool
-	RequireControlPlaneConfig bool
+}
+
+type ValidationPlan struct {
+	FatalErrors                  []string
+	RequireControlPlanePublicKey bool
 }
 
 type ServicePlan struct {
@@ -105,6 +110,7 @@ func Compile(infra *infrav1alpha1.Sandbox0Infra) *InfraPlan {
 	compiled.Netd = compileNetdPlan(infra, compiled)
 	compiled.RegionalGateway = compileRegionalGatewayPlan(compiled)
 	compiled.Enterprise = compileEnterpriseLicensePlan(infra)
+	compiled.Validation = compileValidationPlan(infra, compiled)
 	compiled.Status = compileStatusPlan(compiled)
 	return compiled
 }
@@ -138,7 +144,6 @@ func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 		EnableRegistry:            infrav1alpha1.IsRegistryEnabled(infra),
 		EnableInitUser:            enableDatabase && infra != nil && infra.Spec.InitUser != nil,
 		EnableClusterRegistration: hasDataPlane && infra != nil && infra.Spec.Cluster != nil,
-		RequireControlPlaneConfig: hasDataPlane && infra != nil && infra.Spec.ControlPlane != nil,
 	}
 }
 
@@ -245,6 +250,31 @@ func compileEnterpriseLicensePlan(infra *infrav1alpha1.Sandbox0Infra) Enterprise
 		GlobalGateway:   globalGatewayEnterpriseLicenseRequired(infra),
 		ClusterGateway:  clusterGatewayEnterpriseLicenseRequired(infra),
 	}
+}
+
+func compileValidationPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) ValidationPlan {
+	plan := ValidationPlan{}
+	if infra == nil {
+		return plan
+	}
+
+	if compiled != nil && compiled.Components.HasDataPlane && infra.Spec.ControlPlane != nil {
+		plan.RequireControlPlanePublicKey = true
+		if strings.TrimSpace(infra.Spec.ControlPlane.InternalAuthPublicKeySecret.Name) == "" {
+			plan.FatalErrors = append(plan.FatalErrors, "controlPlane.internalAuthPublicKeySecret.name is required when controlPlane are enabled")
+		}
+	}
+	if compiled != nil && compiled.Components.EnableGlobalGateway && !compiled.Components.EnableDatabase {
+		plan.FatalErrors = append(plan.FatalErrors, "globalGateway requires database to be enabled")
+	}
+	if infra.Spec.Cluster != nil && (compiled == nil || !compiled.Components.HasDataPlane) {
+		plan.FatalErrors = append(plan.FatalErrors, "cluster configuration requires at least one data-plane service")
+	}
+	if compiled != nil && compiled.Components.EnableNetd && netdEgressAuthEnabled(infra) && !compiled.Components.EnableManager {
+		plan.FatalErrors = append(plan.FatalErrors, "netd egress auth requires manager to be enabled")
+	}
+
+	return plan
 }
 
 func compileStatusPlan(compiled *InfraPlan) StatusPlan {
@@ -412,4 +442,11 @@ func netdEgressAuthResolverURL(infra *infrav1alpha1.Sandbox0Infra) string {
 		return ""
 	}
 	return infra.Spec.Services.Netd.Config.EgressAuthResolverURL
+}
+
+func netdEgressAuthEnabled(infra *infrav1alpha1.Sandbox0Infra) bool {
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.Netd == nil || infra.Spec.Services.Netd.Config == nil {
+		return false
+	}
+	return infra.Spec.Services.Netd.Config.EgressAuthEnabled
 }

@@ -213,6 +213,108 @@ func TestCompileTracksBuiltinAndExternalBackendEnablement(t *testing.T) {
 	})
 }
 
+func TestCompileIncludesStatusProjectionForEnabledComponents(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeExternal,
+				External: &infrav1alpha1.ExternalDatabaseConfig{
+					Host:     "db.example.com",
+					Port:     5432,
+					Database: "sandbox0",
+					Username: "sandbox0",
+				},
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				GlobalGateway: &infrav1alpha1.GlobalGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+				ClusterGateway: &infrav1alpha1.ClusterGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+			},
+		},
+	}
+
+	compiled := Compile(infra)
+
+	if len(compiled.Status.ExpectedConditions) != 4 {
+		t.Fatalf("expected internal-auth/database/global/cluster conditions, got %#v", compiled.Status.ExpectedConditions)
+	}
+	if !compiled.Status.Endpoints.IncludeGlobalGateway {
+		t.Fatal("expected global-gateway endpoint to be included")
+	}
+	if !compiled.Status.Endpoints.IncludeClusterGateway {
+		t.Fatal("expected cluster-gateway endpoint to be included")
+	}
+	if compiled.Status.Endpoints.IncludeRegionalGateway || compiled.Status.Endpoints.IncludeRegionalGatewayInt {
+		t.Fatalf("expected regional-gateway endpoints to be excluded, got %#v", compiled.Status.Endpoints)
+	}
+}
+
+func TestCompileTracksEnterpriseLicenseRequirements(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Services: &infrav1alpha1.ServicesConfig{
+				Scheduler: &infrav1alpha1.SchedulerServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+				RegionalGateway: &infrav1alpha1.RegionalGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					Config: &infrav1alpha1.RegionalGatewayConfig{
+						SchedulerEnabled: true,
+						SchedulerURL:     "http://scheduler:8080",
+					},
+				},
+				GlobalGateway: &infrav1alpha1.GlobalGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					Config: &infrav1alpha1.GlobalGatewayConfig{
+						GatewayConfig: infrav1alpha1.GatewayConfig{
+							OIDCProviders: []infrav1alpha1.OIDCProviderConfig{{Enabled: true}},
+						},
+					},
+				},
+				ClusterGateway: &infrav1alpha1.ClusterGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					Config: &infrav1alpha1.ClusterGatewayConfig{
+						AuthMode: "public",
+						GatewayConfig: infrav1alpha1.GatewayConfig{
+							OIDCProviders: []infrav1alpha1.OIDCProviderConfig{{Enabled: true}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	compiled := Compile(infra)
+
+	if !compiled.Enterprise.Scheduler {
+		t.Fatal("expected scheduler enterprise license to be required")
+	}
+	if !compiled.Enterprise.RegionalGateway {
+		t.Fatal("expected regional-gateway enterprise license to be required")
+	}
+	if !compiled.Enterprise.GlobalGateway {
+		t.Fatal("expected global-gateway enterprise license to be required")
+	}
+	if !compiled.Enterprise.ClusterGateway {
+		t.Fatal("expected cluster-gateway enterprise license to be required")
+	}
+}
+
 func TestCompileDisablesInitUserWhenDatabaseIsDisabled(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
 		Spec: infrav1alpha1.Sandbox0InfraSpec{

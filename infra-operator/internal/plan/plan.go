@@ -23,6 +23,8 @@ type InfraPlan struct {
 	Manager         ManagerPlan
 	Netd            NetdPlan
 	RegionalGateway RegionalGatewayPlan
+	Enterprise      EnterpriseLicensePlan
+	Status          StatusPlan
 }
 
 type ComponentPlan struct {
@@ -76,6 +78,25 @@ type RegionalGatewayPlan struct {
 	DefaultClusterGatewayURL string
 }
 
+type EnterpriseLicensePlan struct {
+	Scheduler       bool
+	RegionalGateway bool
+	GlobalGateway   bool
+	ClusterGateway  bool
+}
+
+type StatusPlan struct {
+	ExpectedConditions []string
+	Endpoints          EndpointStatusPlan
+}
+
+type EndpointStatusPlan struct {
+	IncludeGlobalGateway      bool
+	IncludeRegionalGateway    bool
+	IncludeRegionalGatewayInt bool
+	IncludeClusterGateway     bool
+}
+
 func Compile(infra *infrav1alpha1.Sandbox0Infra) *InfraPlan {
 	compiled := &InfraPlan{}
 	compiled.Components = compileComponents(infra)
@@ -83,6 +104,8 @@ func Compile(infra *infrav1alpha1.Sandbox0Infra) *InfraPlan {
 	compiled.Manager = compileManagerPlan(infra, compiled)
 	compiled.Netd = compileNetdPlan(infra, compiled)
 	compiled.RegionalGateway = compileRegionalGatewayPlan(compiled)
+	compiled.Enterprise = compileEnterpriseLicensePlan(infra)
+	compiled.Status = compileStatusPlan(compiled)
 	return compiled
 }
 
@@ -215,6 +238,76 @@ func compileRegionalGatewayPlan(compiled *InfraPlan) RegionalGatewayPlan {
 	}
 }
 
+func compileEnterpriseLicensePlan(infra *infrav1alpha1.Sandbox0Infra) EnterpriseLicensePlan {
+	return EnterpriseLicensePlan{
+		Scheduler:       infrav1alpha1.IsSchedulerEnabled(infra),
+		RegionalGateway: regionalGatewayEnterpriseLicenseRequired(infra),
+		GlobalGateway:   globalGatewayEnterpriseLicenseRequired(infra),
+		ClusterGateway:  clusterGatewayEnterpriseLicenseRequired(infra),
+	}
+}
+
+func compileStatusPlan(compiled *InfraPlan) StatusPlan {
+	if compiled == nil {
+		return StatusPlan{}
+	}
+
+	components := compiled.Components
+	expected := make([]string, 0, 13)
+	if components.EnableInternalAuth {
+		expected = append(expected, infrav1alpha1.ConditionTypeInternalAuthReady)
+	}
+	if components.EnableDatabase {
+		expected = append(expected, infrav1alpha1.ConditionTypeDatabaseReady)
+	}
+	if components.EnableStorage {
+		expected = append(expected, infrav1alpha1.ConditionTypeStorageReady)
+	}
+	if components.EnableRegistry {
+		expected = append(expected, infrav1alpha1.ConditionTypeRegistryReady)
+	}
+	if components.EnableGlobalGateway {
+		expected = append(expected, infrav1alpha1.ConditionTypeGlobalGatewayReady)
+	}
+	if components.EnableRegionalGateway {
+		expected = append(expected, infrav1alpha1.ConditionTypeRegionalGatewayReady)
+	}
+	if components.EnableScheduler {
+		expected = append(expected, infrav1alpha1.ConditionTypeSchedulerReady)
+	}
+	if components.EnableClusterGateway {
+		expected = append(expected, infrav1alpha1.ConditionTypeClusterGatewayReady)
+	}
+	if components.EnableManager {
+		expected = append(expected, infrav1alpha1.ConditionTypeManagerReady)
+	}
+	if components.EnableStorageProxy {
+		expected = append(expected, infrav1alpha1.ConditionTypeStorageProxyReady)
+	}
+	if components.EnableNetd {
+		expected = append(expected, infrav1alpha1.ConditionTypeNetdReady)
+	}
+	if components.EnableFusePlugin {
+		expected = append(expected, infrav1alpha1.ConditionTypeFusePluginReady)
+	}
+	if components.EnableInitUser {
+		expected = append(expected, infrav1alpha1.ConditionTypeInitUserReady)
+	}
+	if components.EnableClusterRegistration {
+		expected = append(expected, infrav1alpha1.ConditionTypeClusterRegistered)
+	}
+
+	return StatusPlan{
+		ExpectedConditions: expected,
+		Endpoints: EndpointStatusPlan{
+			IncludeGlobalGateway:      components.EnableGlobalGateway,
+			IncludeRegionalGateway:    components.EnableRegionalGateway,
+			IncludeRegionalGatewayInt: components.EnableRegionalGateway,
+			IncludeClusterGateway:     components.EnableClusterGateway,
+		},
+	}
+}
+
 func managerHTTPPort(infra *infrav1alpha1.Sandbox0Infra) int {
 	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.Manager != nil &&
 		infra.Spec.Services.Manager.Config != nil && infra.Spec.Services.Manager.Config.HTTPPort > 0 {
@@ -259,6 +352,59 @@ func clusterGatewayAuthMode(infra *infrav1alpha1.Sandbox0Infra) string {
 		return defaultClusterGatewayAuthMode
 	}
 	return mode
+}
+
+func regionalGatewayEnterpriseLicenseRequired(infra *infrav1alpha1.Sandbox0Infra) bool {
+	if !infrav1alpha1.IsRegionalGatewayEnabled(infra) || infra == nil || infra.Spec.Services == nil || infra.Spec.Services.RegionalGateway == nil {
+		return false
+	}
+
+	cfg := infra.Spec.Services.RegionalGateway.Config
+	if cfg == nil {
+		return false
+	}
+
+	return (cfg.SchedulerEnabled && strings.TrimSpace(cfg.SchedulerURL) != "") || hasEnabledOIDCProviders(cfg.OIDCProviders)
+}
+
+func globalGatewayEnterpriseLicenseRequired(infra *infrav1alpha1.Sandbox0Infra) bool {
+	if !infrav1alpha1.IsGlobalGatewayEnabled(infra) || infra == nil || infra.Spec.Services == nil || infra.Spec.Services.GlobalGateway == nil {
+		return false
+	}
+
+	cfg := infra.Spec.Services.GlobalGateway.Config
+	if cfg == nil {
+		return false
+	}
+
+	return hasEnabledOIDCProviders(cfg.OIDCProviders)
+}
+
+func clusterGatewayEnterpriseLicenseRequired(infra *infrav1alpha1.Sandbox0Infra) bool {
+	if !infrav1alpha1.IsClusterGatewayEnabled(infra) || infra == nil || infra.Spec.Services == nil || infra.Spec.Services.ClusterGateway == nil {
+		return false
+	}
+
+	cfg := infra.Spec.Services.ClusterGateway.Config
+	if cfg == nil {
+		return false
+	}
+
+	return clusterGatewayPublicAuthEnabled(cfg.AuthMode) && hasEnabledOIDCProviders(cfg.OIDCProviders)
+}
+
+func clusterGatewayPublicAuthEnabled(mode string) bool {
+	mode = strings.TrimSpace(strings.ToLower(mode))
+	return mode == "public" || mode == "both"
+}
+
+func hasEnabledOIDCProviders(providers []infrav1alpha1.OIDCProviderConfig) bool {
+	for _, provider := range providers {
+		if provider.Enabled {
+			return true
+		}
+	}
+	return false
 }
 
 func netdEgressAuthResolverURL(infra *infrav1alpha1.Sandbox0Infra) string {

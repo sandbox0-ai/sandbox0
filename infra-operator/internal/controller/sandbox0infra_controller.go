@@ -326,10 +326,22 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 		})
 	}
 	if plan.EnableGlobalGateway {
+		if compiledPlan.Enterprise.GlobalGateway {
+			steps = append(steps, reconcileStep{
+				Name: "global-gateway-enterprise-license",
+				Run: func(ctx context.Context) error {
+					licenseFile := ""
+					return common.EnsureEnterpriseLicense(ctx, resources, infra, &licenseFile, true, "global-gateway enterprise SSO")
+				},
+				ConditionType:        infrav1alpha1.ConditionTypeGlobalGatewayReady,
+				ErrorReason:          "EnterpriseLicenseMissing",
+				SkipSuccessCondition: true,
+			})
+		}
 		steps = append(steps, reconcileStep{
 			Name: "global-gateway",
 			Run: func(ctx context.Context) error {
-				return globalGatewayReconciler.Reconcile(ctx, infra, imageRepo, imageTag)
+				return globalGatewayReconciler.Reconcile(ctx, infra, imageRepo, imageTag, compiledPlan)
 			},
 			ConditionType:  infrav1alpha1.ConditionTypeGlobalGatewayReady,
 			SuccessReason:  "GlobalGatewayReady",
@@ -348,6 +360,18 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 		})
 	}
 	if plan.EnableRegionalGateway {
+		if compiledPlan.Enterprise.RegionalGateway {
+			steps = append(steps, reconcileStep{
+				Name: "regional-gateway-enterprise-license",
+				Run: func(ctx context.Context) error {
+					licenseFile := ""
+					return common.EnsureEnterpriseLicense(ctx, resources, infra, &licenseFile, true, "enterprise features")
+				},
+				ConditionType:        infrav1alpha1.ConditionTypeRegionalGatewayReady,
+				ErrorReason:          "EnterpriseLicenseMissing",
+				SkipSuccessCondition: true,
+			})
+		}
 		steps = append(steps, reconcileStep{
 			Name: "regional-gateway",
 			Run: func(ctx context.Context) error {
@@ -360,6 +384,18 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 		})
 	}
 	if plan.EnableScheduler {
+		if compiledPlan.Enterprise.Scheduler {
+			steps = append(steps, reconcileStep{
+				Name: "scheduler-enterprise-license",
+				Run: func(ctx context.Context) error {
+					licenseFile := ""
+					return common.EnsureEnterpriseLicense(ctx, resources, infra, &licenseFile, true, "scheduler")
+				},
+				ConditionType:        infrav1alpha1.ConditionTypeSchedulerReady,
+				ErrorReason:          "EnterpriseLicenseMissing",
+				SkipSuccessCondition: true,
+			})
+		}
 		steps = append(steps,
 			reconcileStep{
 				Name:                 "scheduler-rbac",
@@ -369,8 +405,10 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 				SkipSuccessCondition: true,
 			},
 			reconcileStep{
-				Name:           "scheduler",
-				Run:            func(ctx context.Context) error { return schedulerReconciler.Reconcile(ctx, infra, imageRepo, imageTag) },
+				Name: "scheduler",
+				Run: func(ctx context.Context) error {
+					return schedulerReconciler.Reconcile(ctx, infra, imageRepo, imageTag, compiledPlan)
+				},
 				ConditionType:  infrav1alpha1.ConditionTypeSchedulerReady,
 				SuccessReason:  "SchedulerReady",
 				SuccessMessage: "Scheduler is ready",
@@ -379,10 +417,22 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 		)
 	}
 	if plan.EnableClusterGateway {
+		if compiledPlan.Enterprise.ClusterGateway {
+			steps = append(steps, reconcileStep{
+				Name: "cluster-gateway-enterprise-license",
+				Run: func(ctx context.Context) error {
+					licenseFile := ""
+					return common.EnsureEnterpriseLicense(ctx, resources, infra, &licenseFile, true, "OIDC SSO")
+				},
+				ConditionType:        infrav1alpha1.ConditionTypeClusterGatewayReady,
+				ErrorReason:          "EnterpriseLicenseMissing",
+				SkipSuccessCondition: true,
+			})
+		}
 		steps = append(steps, reconcileStep{
 			Name: "cluster-gateway",
 			Run: func(ctx context.Context) error {
-				return clusterGatewayReconciler.Reconcile(ctx, infra, imageRepo, imageTag)
+				return clusterGatewayReconciler.Reconcile(ctx, infra, imageRepo, imageTag, compiledPlan)
 			},
 			ConditionType:  infrav1alpha1.ConditionTypeClusterGatewayReady,
 			SuccessReason:  "ClusterGatewayReady",
@@ -745,6 +795,7 @@ func (r *Sandbox0InfraReconciler) isLatestReconcileTarget(ctx context.Context, i
 func (r *Sandbox0InfraReconciler) updateOverallStatus(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
 	logger := log.FromContext(ctx)
 	compiledPlan := infraplan.Compile(infra)
+	r.projectStatusForPlan(infra, compiledPlan)
 
 	if compiledPlan.Components.EnableClusterRegistration {
 		if infra.Status.Cluster == nil {
@@ -763,7 +814,7 @@ func (r *Sandbox0InfraReconciler) updateOverallStatus(ctx context.Context, infra
 	}
 	infra.Status.RetainedResources = retainedResources
 
-	expectedConditions := r.expectedConditionTypes(infra)
+	expectedConditions := compiledPlan.Status.ExpectedConditions
 	totalCount := len(expectedConditions)
 	readyCount := 0
 	allReady := totalCount > 0
@@ -874,51 +925,84 @@ func (r *Sandbox0InfraReconciler) updateOverallStatus(ctx context.Context, infra
 }
 
 func (r *Sandbox0InfraReconciler) expectedConditionTypes(infra *infrav1alpha1.Sandbox0Infra) []string {
-	plan := infraplan.Compile(infra).Components
-	conditions := []string{}
-	if plan.EnableInternalAuth {
-		conditions = append(conditions, infrav1alpha1.ConditionTypeInternalAuthReady)
+	return infraplan.Compile(infra).Status.ExpectedConditions
+}
+
+func (r *Sandbox0InfraReconciler) projectStatusForPlan(infra *infrav1alpha1.Sandbox0Infra, compiledPlan *infraplan.InfraPlan) {
+	if compiledPlan == nil {
+		compiledPlan = infraplan.Compile(infra)
 	}
-	if plan.EnableDatabase {
-		conditions = append(conditions, infrav1alpha1.ConditionTypeDatabaseReady)
+	r.pruneManagedConditions(infra, compiledPlan.Status.ExpectedConditions)
+	r.projectEndpointsForPlan(infra, compiledPlan.Status.Endpoints)
+}
+
+func (r *Sandbox0InfraReconciler) pruneManagedConditions(infra *infrav1alpha1.Sandbox0Infra, expected []string) {
+	if infra == nil || len(infra.Status.Conditions) == 0 {
+		return
 	}
-	if plan.EnableStorage {
-		conditions = append(conditions, infrav1alpha1.ConditionTypeStorageReady)
+
+	expectedSet := make(map[string]struct{}, len(expected)+1)
+	expectedSet[infrav1alpha1.ConditionTypeReady] = struct{}{}
+	for _, conditionType := range expected {
+		expectedSet[conditionType] = struct{}{}
 	}
-	if plan.EnableRegistry {
-		conditions = append(conditions, infrav1alpha1.ConditionTypeRegistryReady)
+
+	managed := managedConditionTypeSet()
+	filtered := make([]metav1.Condition, 0, len(infra.Status.Conditions))
+	for _, condition := range infra.Status.Conditions {
+		if _, ok := managed[condition.Type]; ok {
+			if _, keep := expectedSet[condition.Type]; !keep {
+				continue
+			}
+		}
+		filtered = append(filtered, condition)
 	}
-	if plan.EnableGlobalGateway {
-		conditions = append(conditions, infrav1alpha1.ConditionTypeGlobalGatewayReady)
+	infra.Status.Conditions = filtered
+}
+
+func (r *Sandbox0InfraReconciler) projectEndpointsForPlan(infra *infrav1alpha1.Sandbox0Infra, endpointsPlan infraplan.EndpointStatusPlan) {
+	if infra == nil || infra.Status.Endpoints == nil {
+		return
 	}
-	if plan.EnableRegionalGateway {
-		conditions = append(conditions, infrav1alpha1.ConditionTypeRegionalGatewayReady)
+	if !endpointsPlan.IncludeGlobalGateway {
+		infra.Status.Endpoints.GlobalGateway = ""
 	}
-	if plan.EnableScheduler {
-		conditions = append(conditions, infrav1alpha1.ConditionTypeSchedulerReady)
+	if !endpointsPlan.IncludeRegionalGateway {
+		infra.Status.Endpoints.RegionalGateway = ""
 	}
-	if plan.EnableClusterGateway {
-		conditions = append(conditions, infrav1alpha1.ConditionTypeClusterGatewayReady)
+	if !endpointsPlan.IncludeRegionalGatewayInt {
+		infra.Status.Endpoints.RegionalGatewayInternal = ""
 	}
-	if plan.EnableManager {
-		conditions = append(conditions, infrav1alpha1.ConditionTypeManagerReady)
+	if !endpointsPlan.IncludeClusterGateway {
+		infra.Status.Endpoints.ClusterGateway = ""
 	}
-	if plan.EnableStorageProxy {
-		conditions = append(conditions, infrav1alpha1.ConditionTypeStorageProxyReady)
+	if infra.Status.Endpoints.GlobalGateway == "" &&
+		infra.Status.Endpoints.RegionalGateway == "" &&
+		infra.Status.Endpoints.RegionalGatewayInternal == "" &&
+		infra.Status.Endpoints.ClusterGateway == "" {
+		infra.Status.Endpoints = nil
 	}
-	if plan.EnableNetd {
-		conditions = append(conditions, infrav1alpha1.ConditionTypeNetdReady)
+}
+
+func managedConditionTypeSet() map[string]struct{} {
+	return map[string]struct{}{
+		infrav1alpha1.ConditionTypeReady:                {},
+		infrav1alpha1.ConditionTypeInternalAuthReady:    {},
+		infrav1alpha1.ConditionTypeDatabaseReady:        {},
+		infrav1alpha1.ConditionTypeStorageReady:         {},
+		infrav1alpha1.ConditionTypeRegistryReady:        {},
+		infrav1alpha1.ConditionTypeGlobalGatewayReady:   {},
+		infrav1alpha1.ConditionTypeRegionalGatewayReady: {},
+		infrav1alpha1.ConditionTypeSchedulerReady:       {},
+		infrav1alpha1.ConditionTypeClusterGatewayReady:  {},
+		infrav1alpha1.ConditionTypeManagerReady:         {},
+		infrav1alpha1.ConditionTypeStorageProxyReady:    {},
+		infrav1alpha1.ConditionTypeNetdReady:            {},
+		infrav1alpha1.ConditionTypeFusePluginReady:      {},
+		infrav1alpha1.ConditionTypeInitUserReady:        {},
+		infrav1alpha1.ConditionTypeClusterRegistered:    {},
+		infrav1alpha1.ConditionTypeSecretsGenerated:     {},
 	}
-	if plan.EnableFusePlugin {
-		conditions = append(conditions, infrav1alpha1.ConditionTypeFusePluginReady)
-	}
-	if plan.EnableInitUser {
-		conditions = append(conditions, infrav1alpha1.ConditionTypeInitUserReady)
-	}
-	if plan.EnableClusterRegistration {
-		conditions = append(conditions, infrav1alpha1.ConditionTypeClusterRegistered)
-	}
-	return conditions
 }
 
 // setCondition sets or updates a condition

@@ -48,6 +48,15 @@ func EnsureEnterpriseLicense(
 	return nil
 }
 
+func NormalizeEnterpriseLicenseFile(licenseFile *string, required bool) {
+	if !required || licenseFile == nil {
+		return
+	}
+	if strings.TrimSpace(*licenseFile) == "" {
+		*licenseFile = EnterpriseLicenseDefaultPath
+	}
+}
+
 func AppendEnterpriseLicenseVolume(
 	infraName string,
 	licenseFile string,

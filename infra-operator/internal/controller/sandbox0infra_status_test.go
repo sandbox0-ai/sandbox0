@@ -162,6 +162,115 @@ func TestUpdateOverallStatusMarksDegradedAndTracksRetainedResources(t *testing.T
 	}
 }
 
+func TestUpdateOverallStatusPrunesDisabledServiceStatusProjection(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "demo",
+			Namespace:  "sandbox0-system",
+			Generation: 7,
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeExternal,
+				External: &infrav1alpha1.ExternalDatabaseConfig{
+					Host:     "db.example.com",
+					Port:     5432,
+					Database: "sandbox0",
+					Username: "sandbox0",
+				},
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				GlobalGateway: &infrav1alpha1.GlobalGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: false},
+					},
+				},
+				RegionalGateway: &infrav1alpha1.RegionalGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: false},
+					},
+				},
+				Scheduler: &infrav1alpha1.SchedulerServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: false},
+					},
+				},
+			},
+		},
+		Status: infrav1alpha1.Sandbox0InfraStatus{
+			Phase: infrav1alpha1.PhaseDegraded,
+			Endpoints: &infrav1alpha1.EndpointsStatus{
+				GlobalGateway:           "http://demo-global-gateway:19083",
+				RegionalGateway:         "https://edge.example.com",
+				RegionalGatewayInternal: "http://demo-regional-gateway:8080",
+			},
+			Conditions: []metav1.Condition{
+				{
+					Type:               infrav1alpha1.ConditionTypeDatabaseReady,
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: 7,
+					Reason:             "DatabaseReady",
+					Message:            "Database is ready",
+				},
+				{
+					Type:               infrav1alpha1.ConditionTypeGlobalGatewayReady,
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: 6,
+					Reason:             "GlobalGatewayReady",
+					Message:            "Global gateway is ready",
+				},
+				{
+					Type:               infrav1alpha1.ConditionTypeRegionalGatewayReady,
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: 6,
+					Reason:             "RegionalGatewayReady",
+					Message:            "Regional gateway is ready",
+				},
+				{
+					Type:               infrav1alpha1.ConditionTypeSchedulerReady,
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: 6,
+					Reason:             "SchedulerFailed",
+					Message:            "license secret missing",
+				},
+			},
+		},
+	}
+
+	reconciler, client := newStatusTestReconciler(t, infra)
+	if err := reconciler.updateOverallStatus(context.Background(), infra); err != nil {
+		t.Fatalf("update overall status: %v", err)
+	}
+
+	stored := &infrav1alpha1.Sandbox0Infra{}
+	if err := client.Get(context.Background(), ctrlclient.ObjectKeyFromObject(infra), stored); err != nil {
+		t.Fatalf("get updated infra: %v", err)
+	}
+
+	if stored.Status.Phase != infrav1alpha1.PhaseReady {
+		t.Fatalf("expected phase %q, got %q", infrav1alpha1.PhaseReady, stored.Status.Phase)
+	}
+	if stored.Status.Progress != "1/1" {
+		t.Fatalf("expected progress 1/1 after pruning disabled services, got %q", stored.Status.Progress)
+	}
+	if stored.Status.Endpoints != nil {
+		t.Fatalf("expected disabled service endpoints to be cleared, got %#v", stored.Status.Endpoints)
+	}
+	if condition := findCondition(stored.Status.Conditions, infrav1alpha1.ConditionTypeGlobalGatewayReady); condition != nil {
+		t.Fatalf("expected GlobalGatewayReady to be pruned, got %#v", condition)
+	}
+	if condition := findCondition(stored.Status.Conditions, infrav1alpha1.ConditionTypeRegionalGatewayReady); condition != nil {
+		t.Fatalf("expected RegionalGatewayReady to be pruned, got %#v", condition)
+	}
+	if condition := findCondition(stored.Status.Conditions, infrav1alpha1.ConditionTypeSchedulerReady); condition != nil {
+		t.Fatalf("expected SchedulerReady to be pruned, got %#v", condition)
+	}
+	readyCondition := findCondition(stored.Status.Conditions, infrav1alpha1.ConditionTypeReady)
+	if readyCondition == nil || readyCondition.Status != metav1.ConditionTrue {
+		t.Fatalf("expected Ready=true after pruning disabled services, got %#v", readyCondition)
+	}
+}
+
 func TestUpdateOverallStatusUsesLatestObjectWhenInputIsStale(t *testing.T) {
 	ctx := context.Background()
 	infra := &infrav1alpha1.Sandbox0Infra{

@@ -439,7 +439,7 @@ func TestReconcileCreatesGlobalGatewayResourcesAndEndpoint(t *testing.T) {
 		Build()
 
 	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
-	if err := reconciler.Reconcile(context.Background(), infra, "ghcr.io/sandbox0-ai/sandbox0", "latest"); err != nil {
+	if err := reconciler.Reconcile(context.Background(), infra, "ghcr.io/sandbox0-ai/sandbox0", "latest", nil); err != nil {
 		t.Fatalf("reconcile returned error: %v", err)
 	}
 

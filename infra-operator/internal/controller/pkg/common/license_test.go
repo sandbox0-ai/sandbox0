@@ -34,3 +34,29 @@ func TestEnsureEnterpriseLicense_NoOpWhenNotRequired(t *testing.T) {
 		t.Fatalf("license file should stay unchanged, got: %q", licenseFile)
 	}
 }
+
+func TestNormalizeEnterpriseLicenseFile(t *testing.T) {
+	t.Run("sets default path when required", func(t *testing.T) {
+		licenseFile := ""
+		NormalizeEnterpriseLicenseFile(&licenseFile, true)
+		if licenseFile != EnterpriseLicenseDefaultPath {
+			t.Fatalf("expected default path %q, got %q", EnterpriseLicenseDefaultPath, licenseFile)
+		}
+	})
+
+	t.Run("keeps explicit path when required", func(t *testing.T) {
+		licenseFile := "/custom/license.lic"
+		NormalizeEnterpriseLicenseFile(&licenseFile, true)
+		if licenseFile != "/custom/license.lic" {
+			t.Fatalf("expected explicit path to be preserved, got %q", licenseFile)
+		}
+	})
+
+	t.Run("does nothing when not required", func(t *testing.T) {
+		licenseFile := ""
+		NormalizeEnterpriseLicenseFile(&licenseFile, false)
+		if licenseFile != "" {
+			t.Fatalf("expected license path to remain empty, got %q", licenseFile)
+		}
+	})
+}

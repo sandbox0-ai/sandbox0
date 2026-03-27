@@ -29,6 +29,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
+	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
@@ -42,8 +43,11 @@ func NewReconciler(resources *common.ResourceManager) *Reconciler {
 }
 
 // Reconcile reconciles the scheduler deployment.
-func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, imageRepo, imageTag string) error {
+func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, imageRepo, imageTag string, compiledPlan *infraplan.InfraPlan) error {
 	logger := log.FromContext(ctx)
+	if compiledPlan == nil {
+		compiledPlan = infraplan.Compile(infra)
+	}
 
 	// Skip if not enabled (scheduler is optional by default)
 	if infra.Spec.Services == nil || infra.Spec.Services.Scheduler == nil || !infra.Spec.Services.Scheduler.Enabled {
@@ -60,9 +64,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	if err != nil {
 		return err
 	}
-	if err := common.EnsureEnterpriseLicense(ctx, r.Resources, infra, &config.LicenseFile, true, "scheduler"); err != nil {
-		return err
-	}
+	common.NormalizeEnterpriseLicenseFile(&config.LicenseFile, compiledPlan.Enterprise.Scheduler)
 	if err := common.EnsureBuiltinTemplates(ctx, infra, common.BuiltinTemplateOptions{
 		DatabaseURL:          config.DatabaseURL,
 		DatabaseMaxConns:     config.DatabasePool.MaxConns,
@@ -145,7 +147,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			},
 		},
 	}
-	volumeMounts, volumes = common.AppendEnterpriseLicenseVolume(infra.Name, config.LicenseFile, volumeMounts, volumes)
+	if compiledPlan.Enterprise.Scheduler {
+		volumeMounts, volumes = common.AppendEnterpriseLicenseVolume(infra.Name, config.LicenseFile, volumeMounts, volumes)
+	}
 
 	// Create deployment
 	httpPort := int32(config.HTTPPort)
@@ -171,8 +175,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 				Value: "/config/config.yaml",
 			},
 		},
-		VolumeMounts: volumeMounts,
-		Volumes:      volumes,
+		VolumeMounts:   volumeMounts,
+		Volumes:        volumes,
 		PodAnnotations: podAnnotations,
 		LivenessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{

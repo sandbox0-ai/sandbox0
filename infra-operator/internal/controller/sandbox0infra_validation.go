@@ -23,6 +23,8 @@ const (
 	defaultDatabasePVCSize      = "20Gi"
 	defaultStoragePVCSize       = "50Gi"
 	defaultRegistryPVCSize      = "20Gi"
+	nodePortMin                 = 30000
+	nodePortMax                 = 32767
 )
 
 func (r *Sandbox0InfraReconciler) validateSpecSemantics(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
@@ -41,8 +43,53 @@ func validateSpecSemantics(ctx context.Context, kubeClient ctrlclient.Client, in
 		errs = append(errs, validateBuiltinStorageSemantics(ctx, kubeClient, infra)...)
 		errs = append(errs, validateBuiltinRegistrySemantics(ctx, kubeClient, infra)...)
 	}
+	errs = append(errs, validateServiceSemantics(infra)...)
 
 	return utilerrors.NewAggregate(errs)
+}
+
+func validateServiceSemantics(infra *infrav1alpha1.Sandbox0Infra) []error {
+	if infra == nil || infra.Spec.Services == nil {
+		return nil
+	}
+
+	var errs []error
+	services := infra.Spec.Services
+	if services.GlobalGateway != nil {
+		errs = append(errs, validateServiceNetworkConfig("spec.services.globalGateway.service", services.GlobalGateway.Service)...)
+	}
+	if services.RegionalGateway != nil {
+		errs = append(errs, validateServiceNetworkConfig("spec.services.regionalGateway.service", services.RegionalGateway.Service)...)
+	}
+	if services.Scheduler != nil {
+		errs = append(errs, validateServiceNetworkConfig("spec.services.scheduler.service", services.Scheduler.Service)...)
+	}
+	if services.ClusterGateway != nil {
+		errs = append(errs, validateServiceNetworkConfig("spec.services.clusterGateway.service", services.ClusterGateway.Service)...)
+	}
+	if services.Manager != nil {
+		errs = append(errs, validateServiceNetworkConfig("spec.services.manager.service", services.Manager.Service)...)
+	}
+	if services.StorageProxy != nil {
+		errs = append(errs, validateServiceNetworkConfig("spec.services.storageProxy.service", services.StorageProxy.Service)...)
+	}
+
+	return errs
+}
+
+func validateServiceNetworkConfig(fieldPath string, service *infrav1alpha1.ServiceNetworkConfig) []error {
+	if service == nil {
+		return nil
+	}
+
+	var errs []error
+	if service.Type == corev1.ServiceTypeNodePort && service.Port != 0 {
+		if service.Port < nodePortMin || service.Port > nodePortMax {
+			errs = append(errs, fmt.Errorf("%s.port must be within %d-%d when service.type is NodePort", fieldPath, nodePortMin, nodePortMax))
+		}
+	}
+
+	return errs
 }
 
 func validateBuiltinDatabaseSemantics(ctx context.Context, kubeClient ctrlclient.Client, infra *infrav1alpha1.Sandbox0Infra) []error {

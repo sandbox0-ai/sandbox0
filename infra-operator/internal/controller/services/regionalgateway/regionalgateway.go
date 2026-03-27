@@ -75,11 +75,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	if err != nil {
 		return err
 	}
-	needEnterpriseLicense := (config.SchedulerEnabled && strings.TrimSpace(config.SchedulerURL) != "") ||
-		apiconfig.HasEnabledOIDCProviders(config.OIDCProviders)
-	if err := common.EnsureEnterpriseLicense(ctx, r.Resources, infra, &config.LicenseFile, needEnterpriseLicense, "enterprise features"); err != nil {
-		return err
-	}
+	needEnterpriseLicense := compiledPlan.Enterprise.RegionalGateway
+	common.NormalizeEnterpriseLicenseFile(&config.LicenseFile, needEnterpriseLicense)
 	podAnnotations, err := common.ConfigHashAnnotation(config)
 	if err != nil {
 		return err
@@ -161,10 +158,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 				ContainerPort: httpPort,
 			},
 		},
-		Image:        fmt.Sprintf("%s:%s", imageRepo, imageTag),
-		EnvVars:      envVars,
-		VolumeMounts: volumeMounts,
-		Volumes:      volumes,
+		Image:          fmt.Sprintf("%s:%s", imageRepo, imageTag),
+		EnvVars:        envVars,
+		VolumeMounts:   volumeMounts,
+		Volumes:        volumes,
 		PodAnnotations: podAnnotations,
 		LivenessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{

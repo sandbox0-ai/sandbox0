@@ -251,6 +251,54 @@ func TestValidateSpecSemanticsRejectsBuiltinRegistryPVCChanges(t *testing.T) {
 	}
 }
 
+func TestValidateSpecSemanticsRejectsInvalidNodePortServicePort(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Services: &infrav1alpha1.ServicesConfig{
+				ClusterGateway: &infrav1alpha1.ClusterGatewayServiceConfig{
+					ServiceExposureConfig: infrav1alpha1.ServiceExposureConfig{
+						Service: &infrav1alpha1.ServiceNetworkConfig{
+							Type: corev1.ServiceTypeNodePort,
+							Port: 19443,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	err := validateSpecSemantics(context.Background(), newValidationTestClient(t), infra)
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "spec.services.clusterGateway.service.port must be within 30000-32767 when service.type is NodePort") {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+}
+
+func TestValidateSpecSemanticsAcceptsValidNodePortServicePort(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Services: &infrav1alpha1.ServicesConfig{
+				ClusterGateway: &infrav1alpha1.ClusterGatewayServiceConfig{
+					ServiceExposureConfig: infrav1alpha1.ServiceExposureConfig{
+						Service: &infrav1alpha1.ServiceNetworkConfig{
+							Type: corev1.ServiceTypeNodePort,
+							Port: 30443,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if err := validateSpecSemantics(context.Background(), newValidationTestClient(t), infra); err != nil {
+		t.Fatalf("expected valid nodePort configuration, got: %v", err)
+	}
+}
+
 func newValidationTestClient(t *testing.T, objects ...ctrlclient.Object) ctrlclient.Client {
 	t.Helper()
 

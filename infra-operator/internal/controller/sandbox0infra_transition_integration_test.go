@@ -43,6 +43,9 @@ var _ = Describe("Sandbox0Infra transition semantics", func() {
 
 	It("cleans up disabled builtin database runtime while retaining stateful resources in status", func() {
 		infra := newTransitionInfra("database-retain", &infrav1alpha1.Sandbox0InfraSpec{
+			InitUser: &infrav1alpha1.InitUserConfig{
+				Email: "admin@example.com",
+			},
 			Database: &infrav1alpha1.DatabaseConfig{
 				Type: infrav1alpha1.DatabaseTypeBuiltin,
 				Builtin: &infrav1alpha1.BuiltinDatabaseConfig{
@@ -58,8 +61,8 @@ var _ = Describe("Sandbox0Infra transition semantics", func() {
 		Expect(createOwnedObject(ctx, infra, newOwnedOpaqueSecret("database-retain-sandbox0-database-credentials", infra.Namespace))).To(Succeed())
 		Expect(createOwnedObject(ctx, infra, newOwnedPVC("database-retain-postgres-data", infra.Namespace))).To(Succeed())
 
-		databaseReconciler := database.NewReconciler(common.NewResourceManager(k8sClient, scheme.Scheme, nil, common.LocalDevConfig{}))
-		Expect(reconciler.cleanupDisabledServiceResources(ctx, infra, infraplan.Compile(infra).Components, databaseReconciler, nil, nil)).To(Succeed())
+		_, err := reconciler.reconcileComponentPlan(ctx, infra, infraplan.Compile(infra))
+		Expect(err).NotTo(HaveOccurred())
 		Expect(reconciler.updateOverallStatus(ctx, infra)).To(Succeed())
 
 		Expect(objectExists(ctx, &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "database-retain-postgres", Namespace: infra.Namespace}})).To(BeFalse())
@@ -85,6 +88,9 @@ var _ = Describe("Sandbox0Infra transition semantics", func() {
 
 	It("deletes builtin database stateful resources when disabled with delete policy", func() {
 		infra := newTransitionInfra("database-delete", &infrav1alpha1.Sandbox0InfraSpec{
+			InitUser: &infrav1alpha1.InitUserConfig{
+				Email: "admin@example.com",
+			},
 			Database: &infrav1alpha1.DatabaseConfig{
 				Type: infrav1alpha1.DatabaseTypeBuiltin,
 				Builtin: &infrav1alpha1.BuiltinDatabaseConfig{
@@ -100,8 +106,8 @@ var _ = Describe("Sandbox0Infra transition semantics", func() {
 		Expect(createOwnedObject(ctx, infra, newOwnedOpaqueSecret("database-delete-sandbox0-database-credentials", infra.Namespace))).To(Succeed())
 		Expect(createOwnedObject(ctx, infra, newOwnedPVC("database-delete-postgres-data", infra.Namespace))).To(Succeed())
 
-		databaseReconciler := database.NewReconciler(common.NewResourceManager(k8sClient, scheme.Scheme, nil, common.LocalDevConfig{}))
-		Expect(reconciler.cleanupDisabledServiceResources(ctx, infra, infraplan.Compile(infra).Components, databaseReconciler, nil, nil)).To(Succeed())
+		_, err := reconciler.reconcileComponentPlan(ctx, infra, infraplan.Compile(infra))
+		Expect(err).NotTo(HaveOccurred())
 		Expect(reconciler.updateOverallStatus(ctx, infra)).To(Succeed())
 
 		Expect(objectExists(ctx, &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "database-delete-postgres", Namespace: infra.Namespace}})).To(BeFalse())

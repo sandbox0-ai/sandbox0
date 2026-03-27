@@ -201,9 +201,6 @@ func (r *Sandbox0InfraReconciler) validateComponentPlan(infra *infrav1alpha1.San
 		infra.Spec.ControlPlane.InternalAuthPublicKeySecret.Name == "" {
 		return fmt.Errorf("controlPlane.internalAuthPublicKeySecret.name is required when controlPlane are enabled")
 	}
-	if infra.Spec.InitUser != nil && !plan.EnableDatabase {
-		return fmt.Errorf("initUser can only be enabled when database is enabled")
-	}
 	if plan.EnableGlobalGateway && !plan.EnableDatabase {
 		return fmt.Errorf("globalGateway requires database to be enabled")
 	}
@@ -228,6 +225,14 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 
 	if err := r.validateComponentPlan(infra, plan); err != nil {
 		return ctrl.Result{}, err
+	}
+	fresh, err := r.isLatestReconcileTarget(ctx, infra)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !fresh {
+		logger.Info("Stopping stale reconcile before component cleanup")
+		return ctrl.Result{}, nil
 	}
 
 	resources := common.NewResourceManager(r.Client, r.Scheme, r.getImagePullPolicy(ctx), r.getLocalDevConfig(ctx))
@@ -716,6 +721,27 @@ func (r *Sandbox0InfraReconciler) cleanupDisabledServiceResources(
 	}
 
 	return nil
+}
+
+func (r *Sandbox0InfraReconciler) isLatestReconcileTarget(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (bool, error) {
+	if infra == nil {
+		return false, nil
+	}
+	if r == nil || r.Client == nil || infra.Name == "" || infra.Namespace == "" {
+		return true, nil
+	}
+
+	latest := &infrav1alpha1.Sandbox0Infra{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(infra), latest); err != nil {
+		return false, err
+	}
+	if latest.Generation != infra.Generation {
+		return false, nil
+	}
+	if latest.ResourceVersion != "" && infra.ResourceVersion != "" && latest.ResourceVersion != infra.ResourceVersion {
+		return false, nil
+	}
+	return true, nil
 }
 
 // updateOverallStatus updates the overall status based on conditions

@@ -212,3 +212,28 @@ func TestCompileTracksBuiltinAndExternalBackendEnablement(t *testing.T) {
 		}
 	})
 }
+
+func TestCompileDisablesInitUserWhenDatabaseIsDisabled(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			InitUser: &infrav1alpha1.InitUserConfig{
+				Email: "admin@example.com",
+			},
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeBuiltin,
+				Builtin: &infrav1alpha1.BuiltinDatabaseConfig{
+					Enabled: false,
+				},
+			},
+		},
+	}
+
+	compiled := Compile(infra)
+
+	if compiled.Components.EnableDatabase {
+		t.Fatal("expected database to be disabled")
+	}
+	if compiled.Components.EnableInitUser {
+		t.Fatal("expected init user to be disabled when database is disabled")
+	}
+}

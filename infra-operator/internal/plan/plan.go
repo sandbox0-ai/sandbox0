@@ -93,6 +93,7 @@ func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 	enableClusterGateway := infrav1alpha1.IsClusterGatewayEnabled(infra)
 	enableManager := infrav1alpha1.IsManagerEnabled(infra)
 	enableStorageProxy := infrav1alpha1.IsStorageProxyEnabled(infra)
+	enableDatabase := infrav1alpha1.IsDatabaseEnabled(infra)
 
 	hasControlPlane := enableRegionalGateway || enableScheduler
 	hasDataPlane := enableClusterGateway || enableManager || enableStorageProxy
@@ -109,10 +110,10 @@ func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 		EnableFusePlugin:          enableManager,
 		EnableNetd:                infrav1alpha1.IsNetdEnabled(infra),
 		EnableInternalAuth:        hasControlPlane || hasDataPlane,
-		EnableDatabase:            infrav1alpha1.IsDatabaseEnabled(infra),
+		EnableDatabase:            enableDatabase,
 		EnableStorage:             infrav1alpha1.IsStorageEnabled(infra),
 		EnableRegistry:            infrav1alpha1.IsRegistryEnabled(infra),
-		EnableInitUser:            infra != nil && infra.Spec.InitUser != nil,
+		EnableInitUser:            enableDatabase && infra != nil && infra.Spec.InitUser != nil,
 		EnableClusterRegistration: hasDataPlane && infra != nil && infra.Spec.Cluster != nil,
 		RequireControlPlaneConfig: hasDataPlane && infra != nil && infra.Spec.ControlPlane != nil,
 	}

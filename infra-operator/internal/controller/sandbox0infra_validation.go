@@ -35,7 +35,6 @@ func validateSpecSemantics(ctx context.Context, kubeClient ctrlclient.Client, in
 	}
 
 	var errs []error
-	errs = append(errs, validateUnsupportedServiceCapabilities(infra)...)
 	errs = append(errs, validatePersistenceFlags(infra)...)
 
 	if kubeClient != nil {
@@ -45,42 +44,6 @@ func validateSpecSemantics(ctx context.Context, kubeClient ctrlclient.Client, in
 	}
 
 	return utilerrors.NewAggregate(errs)
-}
-
-func validateUnsupportedServiceCapabilities(infra *infrav1alpha1.Sandbox0Infra) []error {
-	if infra.Spec.Services == nil {
-		return nil
-	}
-
-	var errs []error
-	if netd := infra.Spec.Services.Netd; netd != nil {
-		if netd.Service != nil {
-			errs = append(errs, fmt.Errorf("spec.services.netd.service is not supported: netd runs as a hostNetwork DaemonSet and does not create a Service"))
-		}
-		if netd.Ingress != nil {
-			errs = append(errs, fmt.Errorf("spec.services.netd.ingress is not supported"))
-		}
-		if netd.Resources != nil {
-			errs = append(errs, fmt.Errorf("spec.services.netd.resources is not supported"))
-		}
-		if netd.Replicas > 1 {
-			errs = append(errs, fmt.Errorf("spec.services.netd.replicas is not supported: netd runs as a DaemonSet"))
-		}
-	}
-	if scheduler := infra.Spec.Services.Scheduler; scheduler != nil && scheduler.Ingress != nil {
-		errs = append(errs, fmt.Errorf("spec.services.scheduler.ingress is not supported"))
-	}
-	if clusterGateway := infra.Spec.Services.ClusterGateway; clusterGateway != nil && clusterGateway.Ingress != nil {
-		errs = append(errs, fmt.Errorf("spec.services.clusterGateway.ingress is not supported"))
-	}
-	if manager := infra.Spec.Services.Manager; manager != nil && manager.Ingress != nil {
-		errs = append(errs, fmt.Errorf("spec.services.manager.ingress is not supported"))
-	}
-	if storageProxy := infra.Spec.Services.StorageProxy; storageProxy != nil && storageProxy.Ingress != nil {
-		errs = append(errs, fmt.Errorf("spec.services.storageProxy.ingress is not supported"))
-	}
-
-	return errs
 }
 
 func validatePersistenceFlags(infra *infrav1alpha1.Sandbox0Infra) []error {

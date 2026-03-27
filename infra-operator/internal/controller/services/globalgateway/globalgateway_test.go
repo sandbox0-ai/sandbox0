@@ -48,9 +48,9 @@ func TestBuildConfigPopulatesDatabaseAndJWTSecret(t *testing.T) {
 			},
 			Services: &infrav1alpha1.ServicesConfig{
 				GlobalGateway: &infrav1alpha1.GlobalGatewayServiceConfig{
-					BaseServiceConfig: infrav1alpha1.BaseServiceConfig{
-						Enabled:  true,
-						Replicas: 1,
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						Replicas:             1,
 					},
 				},
 			},
@@ -167,9 +167,9 @@ func TestBuildConfigPreservesInitUserHomeRegionID(t *testing.T) {
 			},
 			Services: &infrav1alpha1.ServicesConfig{
 				GlobalGateway: &infrav1alpha1.GlobalGatewayServiceConfig{
-					BaseServiceConfig: infrav1alpha1.BaseServiceConfig{
-						Enabled:  true,
-						Replicas: 1,
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						Replicas:             1,
 					},
 					Config: &infrav1alpha1.GlobalGatewayConfig{},
 				},
@@ -263,9 +263,9 @@ func TestReconcileCreatesGlobalGatewayResourcesAndEndpoint(t *testing.T) {
 			},
 			Services: &infrav1alpha1.ServicesConfig{
 				GlobalGateway: &infrav1alpha1.GlobalGatewayServiceConfig{
-					BaseServiceConfig: infrav1alpha1.BaseServiceConfig{
-						Enabled:  true,
-						Replicas: replicas,
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						Replicas:             replicas,
 					},
 				},
 			},

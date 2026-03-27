@@ -110,8 +110,8 @@ func newFusePluginTestInfra() *infrav1alpha1.Sandbox0Infra {
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
 			Services: &infrav1alpha1.ServicesConfig{
 				Manager: &infrav1alpha1.ManagerServiceConfig{
-					BaseServiceConfig: infrav1alpha1.BaseServiceConfig{
-						Enabled: true,
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
 					},
 				},
 				Netd: &infrav1alpha1.NetdServiceConfig{},

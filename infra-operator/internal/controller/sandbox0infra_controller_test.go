@@ -20,8 +20,8 @@ func TestExpectedConditionTypesIncludesGlobalGateway(t *testing.T) {
 			},
 			Services: &infrav1alpha1.ServicesConfig{
 				GlobalGateway: &infrav1alpha1.GlobalGatewayServiceConfig{
-					BaseServiceConfig: infrav1alpha1.BaseServiceConfig{
-						Enabled: true,
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
 					},
 				},
 			},

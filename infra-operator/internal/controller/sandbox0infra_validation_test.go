@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -15,56 +16,47 @@ import (
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 )
 
-func TestValidateSpecSemanticsRejectsUnsupportedServiceCapabilities(t *testing.T) {
-	infra := &infrav1alpha1.Sandbox0Infra{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
-		Spec: infrav1alpha1.Sandbox0InfraSpec{
-			Services: &infrav1alpha1.ServicesConfig{
-				Netd: &infrav1alpha1.NetdServiceConfig{
-					BaseServiceConfig: infrav1alpha1.BaseServiceConfig{
-						Enabled:   true,
-						Replicas:  2,
-						Service:   &infrav1alpha1.ServiceNetworkConfig{},
-						Ingress:   &infrav1alpha1.IngressConfig{},
-						Resources: &corev1.ResourceRequirements{},
-					},
-				},
-				Scheduler: &infrav1alpha1.SchedulerServiceConfig{
-					BaseServiceConfig: infrav1alpha1.BaseServiceConfig{Ingress: &infrav1alpha1.IngressConfig{}},
-				},
-				ClusterGateway: &infrav1alpha1.ClusterGatewayServiceConfig{
-					BaseServiceConfig: infrav1alpha1.BaseServiceConfig{Ingress: &infrav1alpha1.IngressConfig{}},
-				},
-				Manager: &infrav1alpha1.ManagerServiceConfig{
-					BaseServiceConfig: infrav1alpha1.BaseServiceConfig{Ingress: &infrav1alpha1.IngressConfig{}},
-				},
-				StorageProxy: &infrav1alpha1.StorageProxyServiceConfig{
-					BaseServiceConfig: infrav1alpha1.BaseServiceConfig{Ingress: &infrav1alpha1.IngressConfig{}},
-				},
-			},
-		},
-	}
-
-	err := validateSpecSemantics(context.Background(), newValidationTestClient(t), infra)
-	if err == nil {
-		t.Fatal("expected validation error")
-	}
-
-	message := err.Error()
-	for _, want := range []string{
-		"spec.services.netd.service is not supported",
-		"spec.services.netd.ingress is not supported",
-		"spec.services.netd.resources is not supported",
-		"spec.services.netd.replicas is not supported",
-		"spec.services.scheduler.ingress is not supported",
-		"spec.services.clusterGateway.ingress is not supported",
-		"spec.services.manager.ingress is not supported",
-		"spec.services.storageProxy.ingress is not supported",
-	} {
-		if !strings.Contains(message, want) {
-			t.Fatalf("expected validation message %q in %q", want, message)
+func TestServiceConfigCapabilitiesExposeOnlySupportedFields(t *testing.T) {
+	t.Run("netd schema omits unsupported workload fields", func(t *testing.T) {
+		typ := reflect.TypeOf(infrav1alpha1.NetdServiceConfig{})
+		for _, fieldName := range []string{"Replicas", "Resources", "Service", "Ingress"} {
+			if _, ok := typ.FieldByName(fieldName); ok {
+				t.Fatalf("expected NetdServiceConfig to omit field %q", fieldName)
+			}
 		}
-	}
+		if _, ok := typ.FieldByName("Enabled"); !ok {
+			t.Fatal("expected NetdServiceConfig to expose Enabled")
+		}
+	})
+
+	t.Run("scheduler and dataplane services omit ingress", func(t *testing.T) {
+		for name, typ := range map[string]reflect.Type{
+			"scheduler":      reflect.TypeOf(infrav1alpha1.SchedulerServiceConfig{}),
+			"clusterGateway": reflect.TypeOf(infrav1alpha1.ClusterGatewayServiceConfig{}),
+			"manager":        reflect.TypeOf(infrav1alpha1.ManagerServiceConfig{}),
+			"storageProxy":   reflect.TypeOf(infrav1alpha1.StorageProxyServiceConfig{}),
+		} {
+			if _, ok := typ.FieldByName("Ingress"); ok {
+				t.Fatalf("expected %s service config to omit Ingress", name)
+			}
+			for _, supported := range []string{"Enabled", "Replicas", "Resources", "Service"} {
+				if _, ok := typ.FieldByName(supported); !ok {
+					t.Fatalf("expected %s service config to expose %s", name, supported)
+				}
+			}
+		}
+	})
+
+	t.Run("gateway services retain ingress", func(t *testing.T) {
+		for name, typ := range map[string]reflect.Type{
+			"globalGateway":   reflect.TypeOf(infrav1alpha1.GlobalGatewayServiceConfig{}),
+			"regionalGateway": reflect.TypeOf(infrav1alpha1.RegionalGatewayServiceConfig{}),
+		} {
+			if _, ok := typ.FieldByName("Ingress"); !ok {
+				t.Fatalf("expected %s service config to expose Ingress", name)
+			}
+		}
+	})
 }
 
 func TestValidateSpecSemanticsRejectsDisabledBuiltinPersistence(t *testing.T) {

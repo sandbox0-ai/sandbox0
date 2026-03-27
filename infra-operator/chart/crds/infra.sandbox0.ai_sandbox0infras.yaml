@@ -983,23 +983,6 @@ spec:
                         default: false
                         description: Enabled enables or disables the service
                         type: boolean
-                      ingress:
-                        description: Ingress configures ingress settings
-                        properties:
-                          className:
-                            description: ClassName specifies the ingress class name
-                            type: string
-                          enabled:
-                            default: false
-                            description: Enabled enables ingress
-                            type: boolean
-                          host:
-                            description: Host specifies the ingress host
-                            type: string
-                          tlsSecret:
-                            description: TLSSecret specifies the TLS secret name
-                            type: string
-                        type: object
                       replicas:
                         default: 1
                         description: Replicas specifies the number of replicas
@@ -1488,23 +1471,6 @@ spec:
                         default: false
                         description: Enabled enables or disables the service
                         type: boolean
-                      ingress:
-                        description: Ingress configures ingress settings
-                        properties:
-                          className:
-                            description: ClassName specifies the ingress class name
-                            type: string
-                          enabled:
-                            default: false
-                            description: Enabled enables ingress
-                            type: boolean
-                          host:
-                            description: Host specifies the ingress host
-                            type: string
-                          tlsSecret:
-                            description: TLSSecret specifies the TLS secret name
-                            type: string
-                        type: object
                       replicas:
                         default: 1
                         description: Replicas specifies the number of replicas
@@ -1698,23 +1664,6 @@ spec:
                         default: false
                         description: Enabled enables or disables the service
                         type: boolean
-                      ingress:
-                        description: Ingress configures ingress settings
-                        properties:
-                          className:
-                            description: ClassName specifies the ingress class name
-                            type: string
-                          enabled:
-                            default: false
-                            description: Enabled enables ingress
-                            type: boolean
-                          host:
-                            description: Host specifies the ingress host
-                            type: string
-                          tlsSecret:
-                            description: TLSSecret specifies the TLS secret name
-                            type: string
-                        type: object
                       mitmCaSecretName:
                         description: |-
                           MITMCASecretName overrides the operator-managed cluster-local MITM CA secret for HTTPS interception.
@@ -1728,88 +1677,11 @@ spec:
                           Deprecated: use spec.sandboxNodePlacement.nodeSelector instead. This field
                           remains as a backward-compatible alias when the shared placement is unset.
                         type: object
-                      replicas:
-                        default: 1
-                        description: Replicas specifies the number of replicas
-                        format: int32
-                        type: integer
-                      resources:
-                        description: Resources specifies resource requirements
-                        properties:
-                          claims:
-                            description: |-
-                              Claims lists the names of resources, defined in spec.resourceClaims,
-                              that are used by this container.
-
-                              This field depends on the
-                              DynamicResourceAllocation feature gate.
-
-                              This field is immutable. It can only be set for containers.
-                            items:
-                              description: ResourceClaim references one entry in PodSpec.ResourceClaims.
-                              properties:
-                                name:
-                                  description: |-
-                                    Name must match the name of one entry in pod.spec.resourceClaims of
-                                    the Pod where this field is used. It makes that resource available
-                                    inside a container.
-                                  type: string
-                                request:
-                                  description: |-
-                                    Request is the name chosen for a request in the referenced claim.
-                                    If empty, everything from the claim is made available, otherwise
-                                    only the result of this request.
-                                  type: string
-                              required:
-                              - name
-                              type: object
-                            type: array
-                            x-kubernetes-list-map-keys:
-                            - name
-                            x-kubernetes-list-type: map
-                          limits:
-                            additionalProperties:
-                              anyOf:
-                              - type: integer
-                              - type: string
-                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                              x-kubernetes-int-or-string: true
-                            description: |-
-                              Limits describes the maximum amount of compute resources allowed.
-                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
-                            type: object
-                          requests:
-                            additionalProperties:
-                              anyOf:
-                              - type: integer
-                              - type: string
-                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                              x-kubernetes-int-or-string: true
-                            description: |-
-                              Requests describes the minimum amount of compute resources required.
-                              If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
-                              otherwise to an implementation-defined value. Requests cannot exceed Limits.
-                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
-                            type: object
-                        type: object
                       runtimeClassName:
                         description: |-
                           RuntimeClassName specifies the Kubernetes runtime class for the netd daemonset.
                           Use a host-compatible runtime such as runc. Do not run netd on gVisor or Kata.
                         type: string
-                      service:
-                        description: Service configures the Kubernetes service
-                        properties:
-                          port:
-                            default: 80
-                            description: Port specifies the service port
-                            format: int32
-                            type: integer
-                          type:
-                            default: ClusterIP
-                            description: Type specifies the service type
-                            type: string
-                        type: object
                       tolerations:
                         description: |-
                           Tolerations allow netd to run on tainted sandbox nodes.
@@ -2175,23 +2047,6 @@ spec:
                         default: false
                         description: Enabled enables or disables the service
                         type: boolean
-                      ingress:
-                        description: Ingress configures ingress settings
-                        properties:
-                          className:
-                            description: ClassName specifies the ingress class name
-                            type: string
-                          enabled:
-                            default: false
-                            description: Enabled enables ingress
-                            type: boolean
-                          host:
-                            description: Host specifies the ingress host
-                            type: string
-                          tlsSecret:
-                            description: TLSSecret specifies the TLS secret name
-                            type: string
-                        type: object
                       replicas:
                         default: 1
                         description: Replicas specifies the number of replicas
@@ -2410,23 +2265,6 @@ spec:
                         default: false
                         description: Enabled enables or disables the service
                         type: boolean
-                      ingress:
-                        description: Ingress configures ingress settings
-                        properties:
-                          className:
-                            description: ClassName specifies the ingress class name
-                            type: string
-                          enabled:
-                            default: false
-                            description: Enabled enables ingress
-                            type: boolean
-                          host:
-                            description: Host specifies the ingress host
-                            type: string
-                          tlsSecret:
-                            description: TLSSecret specifies the TLS secret name
-                            type: string
-                        type: object
                       replicas:
                         default: 1
                         description: Replicas specifies the number of replicas

@@ -22,7 +22,7 @@ func TestCompilePlanDefaultsToNoopNetworkPolicyProviderWhenNetdIsDisabled(t *tes
 			Spec: infrav1alpha1.Sandbox0InfraSpec{
 				Services: &infrav1alpha1.ServicesConfig{
 					Netd: &infrav1alpha1.NetdServiceConfig{
-						BaseServiceConfig: infrav1alpha1.BaseServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{
 							Enabled: true,
 						},
 					},

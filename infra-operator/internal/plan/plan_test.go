@@ -36,8 +36,10 @@ func TestCompileDerivesCrossServiceReferences(t *testing.T) {
 			},
 			Services: &infrav1alpha1.ServicesConfig{
 				ClusterGateway: &infrav1alpha1.ClusterGatewayServiceConfig{
-					BaseServiceConfig: infrav1alpha1.BaseServiceConfig{
-						Enabled: true,
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					ServiceExposureConfig: infrav1alpha1.ServiceExposureConfig{
 						Service: &infrav1alpha1.ServiceNetworkConfig{
 							Port: 9443,
 						},
@@ -47,15 +49,15 @@ func TestCompileDerivesCrossServiceReferences(t *testing.T) {
 					},
 				},
 				Manager: &infrav1alpha1.ManagerServiceConfig{
-					BaseServiceConfig: infrav1alpha1.BaseServiceConfig{
-						Enabled: true,
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
 					},
 					Config: &infrav1alpha1.ManagerConfig{
 						HTTPPort: 18080,
 					},
 				},
 				Netd: &infrav1alpha1.NetdServiceConfig{
-					BaseServiceConfig: infrav1alpha1.BaseServiceConfig{
+					EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{
 						Enabled: true,
 					},
 					RuntimeClassName: &sharedRuntime,
@@ -107,12 +109,12 @@ func TestCompilePreservesExplicitNetdResolverURL(t *testing.T) {
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
 			Services: &infrav1alpha1.ServicesConfig{
 				Manager: &infrav1alpha1.ManagerServiceConfig{
-					BaseServiceConfig: infrav1alpha1.BaseServiceConfig{
-						Enabled: true,
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
 					},
 				},
 				Netd: &infrav1alpha1.NetdServiceConfig{
-					BaseServiceConfig: infrav1alpha1.BaseServiceConfig{
+					EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{
 						Enabled: true,
 					},
 					Config: &infrav1alpha1.NetdConfig{

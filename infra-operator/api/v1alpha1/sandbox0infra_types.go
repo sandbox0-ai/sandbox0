@@ -740,12 +740,16 @@ type ServicesConfig struct {
 	Netd *NetdServiceConfig `json:"netd,omitempty"`
 }
 
-// BaseServiceConfig defines common service configuration
-type BaseServiceConfig struct {
+// EnabledServiceConfig defines the enabled state shared by all services.
+type EnabledServiceConfig struct {
 	// Enabled enables or disables the service
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`
+}
 
+// WorkloadServiceConfig defines shared deployment-style service settings.
+type WorkloadServiceConfig struct {
+	EnabledServiceConfig `json:",inline"`
 	// Replicas specifies the number of replicas
 	// +kubebuilder:default=1
 	Replicas int32 `json:"replicas,omitempty"`
@@ -753,11 +757,17 @@ type BaseServiceConfig struct {
 	// Resources specifies resource requirements
 	// +optional
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+}
 
+// ServiceExposureConfig defines Kubernetes Service exposure settings.
+type ServiceExposureConfig struct {
 	// Service configures the Kubernetes service
 	// +optional
 	Service *ServiceNetworkConfig `json:"service,omitempty"`
+}
 
+// IngressExposureConfig defines ingress exposure settings.
+type IngressExposureConfig struct {
 	// Ingress configures ingress settings
 	// +optional
 	Ingress *IngressConfig `json:"ingress,omitempty"`
@@ -765,7 +775,9 @@ type BaseServiceConfig struct {
 
 // GlobalGatewayServiceConfig defines configuration for global-gateway service.
 type GlobalGatewayServiceConfig struct {
-	BaseServiceConfig `json:",inline"`
+	WorkloadServiceConfig `json:",inline"`
+	ServiceExposureConfig `json:",inline"`
+	IngressExposureConfig `json:",inline"`
 	// Config contains global-gateway specific configuration
 	// +optional
 	// +kubebuilder:default={}
@@ -774,7 +786,9 @@ type GlobalGatewayServiceConfig struct {
 
 // RegionalGatewayServiceConfig defines configuration for regional-gateway service
 type RegionalGatewayServiceConfig struct {
-	BaseServiceConfig `json:",inline"`
+	WorkloadServiceConfig `json:",inline"`
+	ServiceExposureConfig `json:",inline"`
+	IngressExposureConfig `json:",inline"`
 	// Config contains regional-gateway specific configuration
 	// +optional
 	// +kubebuilder:default={}
@@ -783,7 +797,8 @@ type RegionalGatewayServiceConfig struct {
 
 // SchedulerServiceConfig defines configuration for scheduler service
 type SchedulerServiceConfig struct {
-	BaseServiceConfig `json:",inline"`
+	WorkloadServiceConfig `json:",inline"`
+	ServiceExposureConfig `json:",inline"`
 	// Config contains scheduler specific configuration
 	// +optional
 	// +kubebuilder:default={}
@@ -792,7 +807,8 @@ type SchedulerServiceConfig struct {
 
 // ClusterGatewayServiceConfig defines configuration for cluster-gateway service
 type ClusterGatewayServiceConfig struct {
-	BaseServiceConfig `json:",inline"`
+	WorkloadServiceConfig `json:",inline"`
+	ServiceExposureConfig `json:",inline"`
 	// Config contains cluster-gateway specific configuration
 	// +optional
 	// +kubebuilder:default={}
@@ -801,7 +817,8 @@ type ClusterGatewayServiceConfig struct {
 
 // ManagerServiceConfig defines configuration for manager service
 type ManagerServiceConfig struct {
-	BaseServiceConfig `json:",inline"`
+	WorkloadServiceConfig `json:",inline"`
+	ServiceExposureConfig `json:",inline"`
 	// Config contains manager specific configuration
 	// +optional
 	// +kubebuilder:default={}
@@ -810,7 +827,8 @@ type ManagerServiceConfig struct {
 
 // StorageProxyServiceConfig defines configuration for storage-proxy service
 type StorageProxyServiceConfig struct {
-	BaseServiceConfig `json:",inline"`
+	WorkloadServiceConfig `json:",inline"`
+	ServiceExposureConfig `json:",inline"`
 	// Config contains storage-proxy specific configuration
 	// +optional
 	// +kubebuilder:default={}
@@ -819,7 +837,7 @@ type StorageProxyServiceConfig struct {
 
 // NetdServiceConfig defines configuration for netd service
 type NetdServiceConfig struct {
-	BaseServiceConfig `json:",inline"`
+	EnabledServiceConfig `json:",inline"`
 	// MITMCASecretName overrides the operator-managed cluster-local MITM CA secret for HTTPS interception.
 	// Expected keys are ca.crt and ca.key. When unset, infra-operator generates and reuses a managed secret.
 	// +optional

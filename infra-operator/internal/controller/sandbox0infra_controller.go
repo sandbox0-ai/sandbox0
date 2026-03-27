@@ -240,156 +240,158 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 		return ctrl.Result{RequeueAfter: requeueInterval}, err
 	}
 
-	workflow := compiledPlan.Workflow
-	steps := []reconcileStep{}
-	appendCheckStep := func(name, conditionType, errorReason string, run func(context.Context) error) {
+	steps, err := r.bindWorkflowSteps(infra, compiledPlan, resources, imageRepo, imageTag, authReconciler, dbReconciler, storageReconciler, registryReconciler, globalGatewayReconciler, regionalGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, fusePluginReconciler, netdReconciler, rbacReconciler)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	return r.runSteps(ctx, infra, steps)
+}
+
+func (r *Sandbox0InfraReconciler) bindWorkflowSteps(
+	infra *infrav1alpha1.Sandbox0Infra,
+	compiledPlan *infraplan.InfraPlan,
+	resources *common.ResourceManager,
+	imageRepo, imageTag string,
+	authReconciler *internalauth.Reconciler,
+	dbReconciler *database.Reconciler,
+	storageReconciler *storage.Reconciler,
+	registryReconciler *registry.Reconciler,
+	globalGatewayReconciler *globalgateway.Reconciler,
+	regionalGatewayReconciler *regionalgateway.Reconciler,
+	schedulerReconciler *scheduler.Reconciler,
+	clusterGatewayReconciler *clustergateway.Reconciler,
+	managerReconciler *manager.Reconciler,
+	storageProxyReconciler *storageproxy.Reconciler,
+	fusePluginReconciler *fuseplugin.Reconciler,
+	netdReconciler *netd.Reconciler,
+	rbacReconciler *rbac.Reconciler,
+) ([]reconcileStep, error) {
+	steps := make([]reconcileStep, 0, len(compiledPlan.Workflow.Steps))
+	for _, planned := range compiledPlan.Workflow.Steps {
+		run, err := r.workflowStepRunner(infra, compiledPlan, resources, imageRepo, imageTag, planned.Name, authReconciler, dbReconciler, storageReconciler, registryReconciler, globalGatewayReconciler, regionalGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, fusePluginReconciler, netdReconciler, rbacReconciler)
+		if err != nil {
+			return nil, err
+		}
 		steps = append(steps, reconcileStep{
-			Name:                 name,
+			Name:                 planned.Name,
 			Run:                  run,
-			ConditionType:        conditionType,
-			ErrorReason:          errorReason,
-			SkipSuccessCondition: true,
+			ConditionType:        planned.ConditionType,
+			SuccessReason:        planned.SuccessReason,
+			SuccessMessage:       planned.SuccessMessage,
+			ErrorReason:          planned.ErrorReason,
+			SkipSuccessCondition: planned.SkipSuccessCondition,
 		})
 	}
-	appendSuccessStep := func(name, conditionType, successReason, successMessage, errorReason string, run func(context.Context) error) {
-		steps = append(steps, reconcileStep{
-			Name:           name,
-			Run:            run,
-			ConditionType:  conditionType,
-			SuccessReason:  successReason,
-			SuccessMessage: successMessage,
-			ErrorReason:    errorReason,
-		})
-	}
-	appendEnterpriseLicenseStep := func(name, conditionType, capability string) {
-		appendCheckStep(name, conditionType, "EnterpriseLicenseMissing", func(ctx context.Context) error {
-			licenseFile := ""
-			return common.EnsureEnterpriseLicense(ctx, resources, infra, &licenseFile, true, capability)
-		})
-	}
-	if workflow.RequireControlPlanePublicKey {
-		appendCheckStep("control-plane-public-key", infrav1alpha1.ConditionTypeInternalAuthReady, "PublicKeySecretNotFound", func(ctx context.Context) error {
+	return steps, nil
+}
+
+func (r *Sandbox0InfraReconciler) workflowStepRunner(
+	infra *infrav1alpha1.Sandbox0Infra,
+	compiledPlan *infraplan.InfraPlan,
+	resources *common.ResourceManager,
+	imageRepo, imageTag, name string,
+	authReconciler *internalauth.Reconciler,
+	dbReconciler *database.Reconciler,
+	storageReconciler *storage.Reconciler,
+	registryReconciler *registry.Reconciler,
+	globalGatewayReconciler *globalgateway.Reconciler,
+	regionalGatewayReconciler *regionalgateway.Reconciler,
+	schedulerReconciler *scheduler.Reconciler,
+	clusterGatewayReconciler *clustergateway.Reconciler,
+	managerReconciler *manager.Reconciler,
+	storageProxyReconciler *storageproxy.Reconciler,
+	fusePluginReconciler *fuseplugin.Reconciler,
+	netdReconciler *netd.Reconciler,
+	rbacReconciler *rbac.Reconciler,
+) (func(context.Context) error, error) {
+	switch name {
+	case "control-plane-public-key":
+		return func(ctx context.Context) error {
 			publicKeySecret := &corev1.Secret{}
 			return r.Get(ctx, types.NamespacedName{
 				Name:      infra.Spec.ControlPlane.InternalAuthPublicKeySecret.Name,
 				Namespace: infra.Namespace,
 			}, publicKeySecret)
-		})
-	}
-	if plan.EnableInternalAuth {
-		appendSuccessStep("internal-auth", infrav1alpha1.ConditionTypeInternalAuthReady, "KeysReady", "Internal auth keys are ready", "KeyGenerationFailed", func(ctx context.Context) error {
-			return authReconciler.Reconcile(ctx, infra)
-		})
-	}
-	if plan.EnableDatabase {
-		appendSuccessStep("database", infrav1alpha1.ConditionTypeDatabaseReady, "DatabaseReady", "Database is ready", "DatabaseFailed", func(ctx context.Context) error {
-			return dbReconciler.Reconcile(ctx, infra)
-		})
-	}
-	if plan.EnableStorage {
-		appendSuccessStep("storage", infrav1alpha1.ConditionTypeStorageReady, "StorageReady", "Storage is ready", "StorageFailed", func(ctx context.Context) error {
-			return storageReconciler.Reconcile(ctx, infra)
-		})
-	}
-	if plan.EnableRegistry {
-		appendSuccessStep("registry", infrav1alpha1.ConditionTypeRegistryReady, "RegistryReady", "Registry is ready", "RegistryFailed", func(ctx context.Context) error {
-			return registryReconciler.Reconcile(ctx, infra)
-		})
-	}
-	if plan.EnableGlobalGateway {
-		if workflow.RequireGlobalGatewayEnterprise {
-			appendEnterpriseLicenseStep("global-gateway-enterprise-license", infrav1alpha1.ConditionTypeGlobalGatewayReady, "global-gateway enterprise SSO")
-		}
-		appendSuccessStep("global-gateway", infrav1alpha1.ConditionTypeGlobalGatewayReady, "GlobalGatewayReady", "Global gateway is ready", "GlobalGatewayFailed", func(ctx context.Context) error {
+		}, nil
+	case "internal-auth":
+		return func(ctx context.Context) error { return authReconciler.Reconcile(ctx, infra) }, nil
+	case "database":
+		return func(ctx context.Context) error { return dbReconciler.Reconcile(ctx, infra) }, nil
+	case "storage":
+		return func(ctx context.Context) error { return storageReconciler.Reconcile(ctx, infra) }, nil
+	case "registry":
+		return func(ctx context.Context) error { return registryReconciler.Reconcile(ctx, infra) }, nil
+	case "global-gateway-enterprise-license":
+		return func(ctx context.Context) error {
+			licenseFile := ""
+			return common.EnsureEnterpriseLicense(ctx, resources, infra, &licenseFile, true, "global-gateway enterprise SSO")
+		}, nil
+	case "global-gateway":
+		return func(ctx context.Context) error {
 			return globalGatewayReconciler.Reconcile(ctx, infra, imageRepo, imageTag, compiledPlan)
-		})
-	}
-	if workflow.RequireInitUserPasswordSecret {
-		appendSuccessStep("init-user-secret", infrav1alpha1.ConditionTypeSecretsGenerated, "InitUserSecretReady", "Init user password secret is ready", "InitUserSecretFailed", func(ctx context.Context) error {
-			return r.ensureInitUserPasswordSecret(ctx, infra)
-		})
-	}
-	if plan.EnableRegionalGateway {
-		if workflow.RequireRegionalGatewayEnterprise {
-			appendEnterpriseLicenseStep("regional-gateway-enterprise-license", infrav1alpha1.ConditionTypeRegionalGatewayReady, "enterprise features")
-		}
-		appendSuccessStep("regional-gateway", infrav1alpha1.ConditionTypeRegionalGatewayReady, "RegionalGatewayReady", "Edge gateway is ready", "RegionalGatewayFailed", func(ctx context.Context) error {
+		}, nil
+	case "init-user-secret":
+		return func(ctx context.Context) error { return r.ensureInitUserPasswordSecret(ctx, infra) }, nil
+	case "regional-gateway-enterprise-license":
+		return func(ctx context.Context) error {
+			licenseFile := ""
+			return common.EnsureEnterpriseLicense(ctx, resources, infra, &licenseFile, true, "enterprise features")
+		}, nil
+	case "regional-gateway":
+		return func(ctx context.Context) error {
 			return regionalGatewayReconciler.Reconcile(ctx, infra, imageRepo, imageTag, compiledPlan)
-		})
-	}
-	if plan.EnableScheduler {
-		if workflow.RequireSchedulerEnterprise {
-			appendEnterpriseLicenseStep("scheduler-enterprise-license", infrav1alpha1.ConditionTypeSchedulerReady, "scheduler")
-		}
-		if workflow.RequireSchedulerRBAC {
-			appendCheckStep("scheduler-rbac", infrav1alpha1.ConditionTypeSchedulerReady, "SchedulerRBACFailed", func(ctx context.Context) error {
-				return rbacReconciler.ReconcileSchedulerRBAC(ctx, infra)
-			})
-		}
-		appendSuccessStep("scheduler", infrav1alpha1.ConditionTypeSchedulerReady, "SchedulerReady", "Scheduler is ready", "SchedulerFailed", func(ctx context.Context) error {
+		}, nil
+	case "scheduler-enterprise-license":
+		return func(ctx context.Context) error {
+			licenseFile := ""
+			return common.EnsureEnterpriseLicense(ctx, resources, infra, &licenseFile, true, "scheduler")
+		}, nil
+	case "scheduler-rbac":
+		return func(ctx context.Context) error { return rbacReconciler.ReconcileSchedulerRBAC(ctx, infra) }, nil
+	case "scheduler":
+		return func(ctx context.Context) error {
 			return schedulerReconciler.Reconcile(ctx, infra, imageRepo, imageTag, compiledPlan)
-		})
-	}
-	if plan.EnableClusterGateway {
-		if workflow.RequireClusterGatewayEnterprise {
-			appendEnterpriseLicenseStep("cluster-gateway-enterprise-license", infrav1alpha1.ConditionTypeClusterGatewayReady, "OIDC SSO")
-		}
-		appendSuccessStep("cluster-gateway", infrav1alpha1.ConditionTypeClusterGatewayReady, "ClusterGatewayReady", "Internal gateway is ready", "ClusterGatewayFailed", func(ctx context.Context) error {
+		}, nil
+	case "cluster-gateway-enterprise-license":
+		return func(ctx context.Context) error {
+			licenseFile := ""
+			return common.EnsureEnterpriseLicense(ctx, resources, infra, &licenseFile, true, "OIDC SSO")
+		}, nil
+	case "cluster-gateway":
+		return func(ctx context.Context) error {
 			return clusterGatewayReconciler.Reconcile(ctx, infra, imageRepo, imageTag, compiledPlan)
-		})
-	}
-	if plan.EnableFusePlugin {
-		appendSuccessStep("fuse-device-plugin", infrav1alpha1.ConditionTypeFusePluginReady, "FusePluginReady", "FUSE device plugin is ready", "FusePluginFailed", func(ctx context.Context) error {
+		}, nil
+	case "fuse-device-plugin":
+		return func(ctx context.Context) error {
 			return fusePluginReconciler.Reconcile(ctx, infra, imageRepo, imageTag)
-		})
-	}
-	if plan.EnableManager {
-		if workflow.RequireManagerRBAC {
-			appendCheckStep("manager-rbac", infrav1alpha1.ConditionTypeManagerReady, "ManagerRBACFailed", func(ctx context.Context) error {
-				return rbacReconciler.ReconcileManagerRBAC(ctx, infra)
-			})
-		}
-		appendSuccessStep("manager", infrav1alpha1.ConditionTypeManagerReady, "ManagerReady", "Manager is ready", "ManagerFailed", func(ctx context.Context) error {
+		}, nil
+	case "manager-rbac":
+		return func(ctx context.Context) error { return rbacReconciler.ReconcileManagerRBAC(ctx, infra) }, nil
+	case "manager":
+		return func(ctx context.Context) error {
 			return managerReconciler.Reconcile(ctx, infra, imageRepo, imageTag, compiledPlan)
-		})
-		if workflow.WaitForBuiltinTemplatePods {
-			appendCheckStep("builtin-template-pods", infrav1alpha1.ConditionTypeManagerReady, "BuiltinTemplatePodsNotReady", func(ctx context.Context) error {
-				return r.waitBuiltinTemplatePodsReady(ctx, infra, compiledPlan)
-			})
-		}
-	}
-	if plan.EnableNetd {
-		if workflow.RequireNetdRBAC {
-			appendCheckStep("netd-rbac", infrav1alpha1.ConditionTypeNetdReady, "NetdRBACFailed", func(ctx context.Context) error {
-				return rbacReconciler.ReconcileNetdRBAC(ctx, infra)
-			})
-		}
-		appendSuccessStep("netd", infrav1alpha1.ConditionTypeNetdReady, "NetdReady", "netd is ready", "NetdFailed", func(ctx context.Context) error {
+		}, nil
+	case "builtin-template-pods":
+		return func(ctx context.Context) error { return r.waitBuiltinTemplatePodsReady(ctx, infra, compiledPlan) }, nil
+	case "netd-rbac":
+		return func(ctx context.Context) error { return rbacReconciler.ReconcileNetdRBAC(ctx, infra) }, nil
+	case "netd":
+		return func(ctx context.Context) error {
 			return netdReconciler.Reconcile(ctx, infra, imageRepo, imageTag, compiledPlan)
-		})
-	}
-	if plan.EnableStorageProxy {
-		if workflow.RequireStorageProxyRBAC {
-			appendCheckStep("storage-proxy-rbac", infrav1alpha1.ConditionTypeStorageProxyReady, "StorageProxyRBACFailed", func(ctx context.Context) error {
-				return rbacReconciler.ReconcileStorageProxyRBAC(ctx, infra)
-			})
-		}
-		appendSuccessStep("storage-proxy", infrav1alpha1.ConditionTypeStorageProxyReady, "StorageProxyReady", "Storage proxy is ready", "StorageProxyFailed", func(ctx context.Context) error {
+		}, nil
+	case "storage-proxy-rbac":
+		return func(ctx context.Context) error { return rbacReconciler.ReconcileStorageProxyRBAC(ctx, infra) }, nil
+	case "storage-proxy":
+		return func(ctx context.Context) error {
 			return storageProxyReconciler.Reconcile(ctx, infra, imageRepo, imageTag)
-		})
+		}, nil
+	case "init-user":
+		return func(ctx context.Context) error { return r.reconcileInitUser(ctx, infra) }, nil
+	case "register-cluster":
+		return func(ctx context.Context) error { return r.registerCluster(ctx, infra) }, nil
+	default:
+		return nil, fmt.Errorf("unsupported workflow step %q", name)
 	}
-	if workflow.ReconcileInitUser {
-		appendSuccessStep("init-user", infrav1alpha1.ConditionTypeInitUserReady, "InitUserReady", "Initial admin user created", "InitUserFailed", func(ctx context.Context) error {
-			return r.reconcileInitUser(ctx, infra)
-		})
-	}
-	if workflow.ReconcileClusterRegistration {
-		appendSuccessStep("register-cluster", infrav1alpha1.ConditionTypeClusterRegistered, "ClusterRegistered", "Cluster registration completed", "ClusterRegistrationFailed", func(ctx context.Context) error {
-			return r.registerCluster(ctx, infra)
-		})
-	}
-
-	return r.runSteps(ctx, infra, steps)
 }
 
 func (r *Sandbox0InfraReconciler) cleanupDisabledServiceResources(

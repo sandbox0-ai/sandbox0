@@ -538,33 +538,39 @@ func TestCompileTracksWorkflowRequirements(t *testing.T) {
 
 	compiled := Compile(infra)
 
-	if !compiled.Workflow.RequireControlPlanePublicKey {
-		t.Fatal("expected control-plane public key preflight")
+	got := workflowStepNames(compiled.Workflow.Steps)
+	want := []string{
+		"control-plane-public-key",
+		"internal-auth",
+		"database",
+		"global-gateway-enterprise-license",
+		"global-gateway",
+		"init-user-secret",
+		"regional-gateway-enterprise-license",
+		"regional-gateway",
+		"scheduler-enterprise-license",
+		"scheduler-rbac",
+		"scheduler",
+		"cluster-gateway-enterprise-license",
+		"cluster-gateway",
+		"fuse-device-plugin",
+		"manager-rbac",
+		"manager",
+		"builtin-template-pods",
+		"netd-rbac",
+		"netd",
+		"storage-proxy-rbac",
+		"storage-proxy",
+		"init-user",
+		"register-cluster",
 	}
-	if !compiled.Workflow.RequireGlobalGatewayEnterprise {
-		t.Fatal("expected global-gateway enterprise preflight")
+	if len(got) != len(want) {
+		t.Fatalf("expected workflow steps %#v, got %#v", want, got)
 	}
-	if !compiled.Workflow.RequireRegionalGatewayEnterprise {
-		t.Fatal("expected regional-gateway enterprise preflight")
-	}
-	if !compiled.Workflow.RequireSchedulerEnterprise {
-		t.Fatal("expected scheduler enterprise preflight")
-	}
-	if !compiled.Workflow.RequireClusterGatewayEnterprise {
-		t.Fatal("expected cluster-gateway enterprise preflight")
-	}
-	if !compiled.Workflow.RequireInitUserPasswordSecret || !compiled.Workflow.ReconcileInitUser {
-		t.Fatalf("expected init-user workflow, got %#v", compiled.Workflow)
-	}
-	if !compiled.Workflow.RequireSchedulerRBAC || !compiled.Workflow.RequireManagerRBAC ||
-		!compiled.Workflow.RequireNetdRBAC || !compiled.Workflow.RequireStorageProxyRBAC {
-		t.Fatalf("expected RBAC workflow intents, got %#v", compiled.Workflow)
-	}
-	if !compiled.Workflow.WaitForBuiltinTemplatePods {
-		t.Fatal("expected manager template pod wait step")
-	}
-	if !compiled.Workflow.ReconcileClusterRegistration {
-		t.Fatal("expected cluster registration workflow")
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("expected workflow step[%d]=%q, got %#v", i, want[i], got)
+		}
 	}
 }
 
@@ -658,4 +664,12 @@ func containsResourceRef(namespaced, cluster []ResourceRef, want ResourceRef) bo
 		}
 	}
 	return false
+}
+
+func workflowStepNames(steps []WorkflowStepPlan) []string {
+	names := make([]string, 0, len(steps))
+	for _, step := range steps {
+		names = append(names, step.Name)
+	}
+	return names
 }

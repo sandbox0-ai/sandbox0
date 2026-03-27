@@ -127,19 +127,16 @@ type ClusterStatusPlan struct {
 }
 
 type WorkflowPlan struct {
-	RequireControlPlanePublicKey     bool
-	RequireGlobalGatewayEnterprise   bool
-	RequireRegionalGatewayEnterprise bool
-	RequireSchedulerEnterprise       bool
-	RequireClusterGatewayEnterprise  bool
-	RequireInitUserPasswordSecret    bool
-	RequireSchedulerRBAC             bool
-	RequireManagerRBAC               bool
-	RequireNetdRBAC                  bool
-	RequireStorageProxyRBAC          bool
-	WaitForBuiltinTemplatePods       bool
-	ReconcileInitUser                bool
-	ReconcileClusterRegistration     bool
+	Steps []WorkflowStepPlan
+}
+
+type WorkflowStepPlan struct {
+	Name                 string
+	ConditionType        string
+	SuccessReason        string
+	SuccessMessage       string
+	ErrorReason          string
+	SkipSuccessCondition bool
 }
 
 func Compile(infra *infrav1alpha1.Sandbox0Infra) *InfraPlan {
@@ -501,21 +498,92 @@ func compileWorkflowPlan(compiled *InfraPlan) WorkflowPlan {
 		return WorkflowPlan{}
 	}
 
-	return WorkflowPlan{
-		RequireControlPlanePublicKey:     compiled.Validation.RequireControlPlanePublicKey,
-		RequireGlobalGatewayEnterprise:   compiled.Components.EnableGlobalGateway && compiled.Enterprise.GlobalGateway,
-		RequireRegionalGatewayEnterprise: compiled.Components.EnableRegionalGateway && compiled.Enterprise.RegionalGateway,
-		RequireSchedulerEnterprise:       compiled.Components.EnableScheduler && compiled.Enterprise.Scheduler,
-		RequireClusterGatewayEnterprise:  compiled.Components.EnableClusterGateway && compiled.Enterprise.ClusterGateway,
-		RequireInitUserPasswordSecret:    compiled.Components.EnableInitUser,
-		RequireSchedulerRBAC:             compiled.Components.EnableScheduler,
-		RequireManagerRBAC:               compiled.Components.EnableManager,
-		RequireNetdRBAC:                  compiled.Components.EnableNetd,
-		RequireStorageProxyRBAC:          compiled.Components.EnableStorageProxy,
-		WaitForBuiltinTemplatePods:       compiled.Components.EnableManager,
-		ReconcileInitUser:                compiled.Components.EnableInitUser,
-		ReconcileClusterRegistration:     compiled.Components.EnableClusterRegistration,
+	steps := make([]WorkflowStepPlan, 0, 20)
+	appendCheckStep := func(name, conditionType, errorReason string) {
+		steps = append(steps, WorkflowStepPlan{
+			Name:                 name,
+			ConditionType:        conditionType,
+			ErrorReason:          errorReason,
+			SkipSuccessCondition: true,
+		})
 	}
+	appendSuccessStep := func(name, conditionType, successReason, successMessage, errorReason string) {
+		steps = append(steps, WorkflowStepPlan{
+			Name:           name,
+			ConditionType:  conditionType,
+			SuccessReason:  successReason,
+			SuccessMessage: successMessage,
+			ErrorReason:    errorReason,
+		})
+	}
+
+	if compiled.Validation.RequireControlPlanePublicKey {
+		appendCheckStep("control-plane-public-key", infrav1alpha1.ConditionTypeInternalAuthReady, "PublicKeySecretNotFound")
+	}
+	if compiled.Components.EnableInternalAuth {
+		appendSuccessStep("internal-auth", infrav1alpha1.ConditionTypeInternalAuthReady, "KeysReady", "Internal auth keys are ready", "KeyGenerationFailed")
+	}
+	if compiled.Components.EnableDatabase {
+		appendSuccessStep("database", infrav1alpha1.ConditionTypeDatabaseReady, "DatabaseReady", "Database is ready", "DatabaseFailed")
+	}
+	if compiled.Components.EnableStorage {
+		appendSuccessStep("storage", infrav1alpha1.ConditionTypeStorageReady, "StorageReady", "Storage is ready", "StorageFailed")
+	}
+	if compiled.Components.EnableRegistry {
+		appendSuccessStep("registry", infrav1alpha1.ConditionTypeRegistryReady, "RegistryReady", "Registry is ready", "RegistryFailed")
+	}
+	if compiled.Components.EnableGlobalGateway && compiled.Enterprise.GlobalGateway {
+		appendCheckStep("global-gateway-enterprise-license", infrav1alpha1.ConditionTypeGlobalGatewayReady, "EnterpriseLicenseMissing")
+	}
+	if compiled.Components.EnableGlobalGateway {
+		appendSuccessStep("global-gateway", infrav1alpha1.ConditionTypeGlobalGatewayReady, "GlobalGatewayReady", "Global gateway is ready", "GlobalGatewayFailed")
+	}
+	if compiled.Components.EnableInitUser {
+		appendSuccessStep("init-user-secret", infrav1alpha1.ConditionTypeSecretsGenerated, "InitUserSecretReady", "Init user password secret is ready", "InitUserSecretFailed")
+	}
+	if compiled.Components.EnableRegionalGateway && compiled.Enterprise.RegionalGateway {
+		appendCheckStep("regional-gateway-enterprise-license", infrav1alpha1.ConditionTypeRegionalGatewayReady, "EnterpriseLicenseMissing")
+	}
+	if compiled.Components.EnableRegionalGateway {
+		appendSuccessStep("regional-gateway", infrav1alpha1.ConditionTypeRegionalGatewayReady, "RegionalGatewayReady", "Edge gateway is ready", "RegionalGatewayFailed")
+	}
+	if compiled.Components.EnableScheduler && compiled.Enterprise.Scheduler {
+		appendCheckStep("scheduler-enterprise-license", infrav1alpha1.ConditionTypeSchedulerReady, "EnterpriseLicenseMissing")
+	}
+	if compiled.Components.EnableScheduler {
+		appendCheckStep("scheduler-rbac", infrav1alpha1.ConditionTypeSchedulerReady, "SchedulerRBACFailed")
+		appendSuccessStep("scheduler", infrav1alpha1.ConditionTypeSchedulerReady, "SchedulerReady", "Scheduler is ready", "SchedulerFailed")
+	}
+	if compiled.Components.EnableClusterGateway && compiled.Enterprise.ClusterGateway {
+		appendCheckStep("cluster-gateway-enterprise-license", infrav1alpha1.ConditionTypeClusterGatewayReady, "EnterpriseLicenseMissing")
+	}
+	if compiled.Components.EnableClusterGateway {
+		appendSuccessStep("cluster-gateway", infrav1alpha1.ConditionTypeClusterGatewayReady, "ClusterGatewayReady", "Internal gateway is ready", "ClusterGatewayFailed")
+	}
+	if compiled.Components.EnableFusePlugin {
+		appendSuccessStep("fuse-device-plugin", infrav1alpha1.ConditionTypeFusePluginReady, "FusePluginReady", "FUSE device plugin is ready", "FusePluginFailed")
+	}
+	if compiled.Components.EnableManager {
+		appendCheckStep("manager-rbac", infrav1alpha1.ConditionTypeManagerReady, "ManagerRBACFailed")
+		appendSuccessStep("manager", infrav1alpha1.ConditionTypeManagerReady, "ManagerReady", "Manager is ready", "ManagerFailed")
+		appendCheckStep("builtin-template-pods", infrav1alpha1.ConditionTypeManagerReady, "BuiltinTemplatePodsNotReady")
+	}
+	if compiled.Components.EnableNetd {
+		appendCheckStep("netd-rbac", infrav1alpha1.ConditionTypeNetdReady, "NetdRBACFailed")
+		appendSuccessStep("netd", infrav1alpha1.ConditionTypeNetdReady, "NetdReady", "netd is ready", "NetdFailed")
+	}
+	if compiled.Components.EnableStorageProxy {
+		appendCheckStep("storage-proxy-rbac", infrav1alpha1.ConditionTypeStorageProxyReady, "StorageProxyRBACFailed")
+		appendSuccessStep("storage-proxy", infrav1alpha1.ConditionTypeStorageProxyReady, "StorageProxyReady", "Storage proxy is ready", "StorageProxyFailed")
+	}
+	if compiled.Components.EnableInitUser {
+		appendSuccessStep("init-user", infrav1alpha1.ConditionTypeInitUserReady, "InitUserReady", "Initial admin user created", "InitUserFailed")
+	}
+	if compiled.Components.EnableClusterRegistration {
+		appendSuccessStep("register-cluster", infrav1alpha1.ConditionTypeClusterRegistered, "ClusterRegistered", "Cluster registration completed", "ClusterRegistrationFailed")
+	}
+
+	return WorkflowPlan{Steps: steps}
 }
 
 func compileEndpointStatusPlan(compiled *InfraPlan) EndpointStatusPlan {

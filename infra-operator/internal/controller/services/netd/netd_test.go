@@ -100,13 +100,6 @@ func TestReconcileMountsExplicitMITMCASecret(t *testing.T) {
 	}
 
 	assertNetdMITMSecretMounted(t, client, infra, "netd-mitm-ca")
-
-	if got := infra.Spec.Services.Netd.Config.MITMCACertPath; got != "" {
-		t.Fatalf("expected input config to remain unchanged, got cert path %q", got)
-	}
-	if got := infra.Spec.Services.Netd.Config.MITMCAKeyPath; got != "" {
-		t.Fatalf("expected input config to remain unchanged, got key path %q", got)
-	}
 }
 
 func TestReconcileAutoGeneratesManagedMITMCASecret(t *testing.T) {
@@ -282,6 +275,16 @@ func newNetdTestClient(t *testing.T, objects ...ctrlclient.Object) (ctrlclient.C
 		t.Fatalf("add infra scheme: %v", err)
 	}
 
+	objects = append(objects, &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "kube-dns",
+			Namespace: "kube-system",
+		},
+		Spec: corev1.ServiceSpec{
+			ClusterIP: "10.96.0.10",
+		},
+	})
+
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(objects...).
@@ -369,9 +372,7 @@ func newNetdTestInfra() *infrav1alpha1.Sandbox0Infra {
 						Enabled: true,
 					},
 					RuntimeClassName: &runtimeClass,
-					Config: &apiconfig.NetdConfig{
-						ClusterDNSCIDR: "10.96.0.10/32",
-					},
+					Config:           &infrav1alpha1.NetdConfig{},
 				},
 				Manager: &infrav1alpha1.ManagerServiceConfig{
 					BaseServiceConfig: infrav1alpha1.BaseServiceConfig{

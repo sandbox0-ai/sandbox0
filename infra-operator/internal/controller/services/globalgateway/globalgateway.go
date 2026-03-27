@@ -34,6 +34,7 @@ import (
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
 )
 
 type Reconciler struct {
@@ -177,8 +178,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 
 func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (*apiconfig.GlobalGatewayConfig, error) {
 	cfg := &apiconfig.GlobalGatewayConfig{}
-	if infra.Spec.Services != nil && infra.Spec.Services.GlobalGateway != nil && infra.Spec.Services.GlobalGateway.Config != nil {
-		cfg = infra.Spec.Services.GlobalGateway.Config
+	if infra.Spec.Services != nil && infra.Spec.Services.GlobalGateway != nil {
+		cfg = runtimeconfig.ToGlobalGateway(infra.Spec.Services.GlobalGateway.Config)
 	}
 	applyConfigDefaults(cfg)
 

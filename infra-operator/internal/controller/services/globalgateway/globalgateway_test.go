@@ -14,7 +14,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 )
@@ -172,7 +171,7 @@ func TestBuildConfigPreservesInitUserHomeRegionID(t *testing.T) {
 						Enabled:  true,
 						Replicas: 1,
 					},
-					Config: &apiconfig.GlobalGatewayConfig{},
+					Config: &infrav1alpha1.GlobalGatewayConfig{},
 				},
 			},
 			InitUser: &infrav1alpha1.InitUserConfig{

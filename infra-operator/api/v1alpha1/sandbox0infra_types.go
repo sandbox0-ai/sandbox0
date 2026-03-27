@@ -20,8 +20,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	config "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 )
 
 // DatabaseType defines the type of database
@@ -771,7 +769,7 @@ type GlobalGatewayServiceConfig struct {
 	// Config contains global-gateway specific configuration
 	// +optional
 	// +kubebuilder:default={}
-	Config *config.GlobalGatewayConfig `json:"config,omitempty"`
+	Config *GlobalGatewayConfig `json:"config,omitempty"`
 }
 
 // RegionalGatewayServiceConfig defines configuration for regional-gateway service
@@ -780,7 +778,7 @@ type RegionalGatewayServiceConfig struct {
 	// Config contains regional-gateway specific configuration
 	// +optional
 	// +kubebuilder:default={}
-	Config *config.RegionalGatewayConfig `json:"config,omitempty"`
+	Config *RegionalGatewayConfig `json:"config,omitempty"`
 }
 
 // SchedulerServiceConfig defines configuration for scheduler service
@@ -789,7 +787,7 @@ type SchedulerServiceConfig struct {
 	// Config contains scheduler specific configuration
 	// +optional
 	// +kubebuilder:default={}
-	Config *config.SchedulerConfig `json:"config,omitempty"`
+	Config *SchedulerConfig `json:"config,omitempty"`
 }
 
 // ClusterGatewayServiceConfig defines configuration for cluster-gateway service
@@ -798,7 +796,7 @@ type ClusterGatewayServiceConfig struct {
 	// Config contains cluster-gateway specific configuration
 	// +optional
 	// +kubebuilder:default={}
-	Config *config.ClusterGatewayConfig `json:"config,omitempty"`
+	Config *ClusterGatewayConfig `json:"config,omitempty"`
 }
 
 // ManagerServiceConfig defines configuration for manager service
@@ -807,7 +805,7 @@ type ManagerServiceConfig struct {
 	// Config contains manager specific configuration
 	// +optional
 	// +kubebuilder:default={}
-	Config *config.ManagerConfig `json:"config,omitempty"`
+	Config *ManagerConfig `json:"config,omitempty"`
 }
 
 // StorageProxyServiceConfig defines configuration for storage-proxy service
@@ -816,7 +814,7 @@ type StorageProxyServiceConfig struct {
 	// Config contains storage-proxy specific configuration
 	// +optional
 	// +kubebuilder:default={}
-	Config *config.StorageProxyConfig `json:"config,omitempty"`
+	Config *StorageProxyConfig `json:"config,omitempty"`
 }
 
 // NetdServiceConfig defines configuration for netd service
@@ -843,7 +841,7 @@ type NetdServiceConfig struct {
 	// Config contains netd specific configuration
 	// +optional
 	// +kubebuilder:default={}
-	Config *config.NetdConfig `json:"config,omitempty"`
+	Config *NetdConfig `json:"config,omitempty"`
 }
 
 // IsGlobalGatewayEnabled returns true when global-gateway is enabled.

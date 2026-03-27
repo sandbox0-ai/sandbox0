@@ -30,6 +30,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
 
@@ -231,8 +232,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 
 func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (*apiconfig.ClusterGatewayConfig, error) {
 	cfg := &apiconfig.ClusterGatewayConfig{}
-	if infra.Spec.Services != nil && infra.Spec.Services.ClusterGateway != nil && infra.Spec.Services.ClusterGateway.Config != nil {
-		cfg = infra.Spec.Services.ClusterGateway.Config
+	if infra.Spec.Services != nil && infra.Spec.Services.ClusterGateway != nil {
+		cfg = runtimeconfig.ToClusterGateway(infra.Spec.Services.ClusterGateway.Config)
 	}
 
 	if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {
@@ -240,8 +241,8 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	}
 
 	managerConfig := &apiconfig.ManagerConfig{}
-	if infra.Spec.Services != nil && infra.Spec.Services.Manager != nil && infra.Spec.Services.Manager.Config != nil {
-		managerConfig = infra.Spec.Services.Manager.Config
+	if infra.Spec.Services != nil && infra.Spec.Services.Manager != nil {
+		managerConfig = runtimeconfig.ToManager(infra.Spec.Services.Manager.Config)
 	}
 	managerServiceConfig := (*infrav1alpha1.ServiceNetworkConfig)(nil)
 	if infra.Spec.Services != nil && infra.Spec.Services.Manager != nil {
@@ -256,8 +257,8 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	}
 
 	storageProxyConfig := &apiconfig.StorageProxyConfig{}
-	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil && infra.Spec.Services.StorageProxy.Config != nil {
-		storageProxyConfig = infra.Spec.Services.StorageProxy.Config
+	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil {
+		storageProxyConfig = runtimeconfig.ToStorageProxy(infra.Spec.Services.StorageProxy.Config)
 	}
 	if infrav1alpha1.IsStorageProxyEnabled(infra) {
 		storageProxyHTTPPort := int32(storageProxyConfig.HTTPPort)

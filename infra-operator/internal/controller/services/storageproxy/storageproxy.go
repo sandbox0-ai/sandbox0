@@ -38,6 +38,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storage"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
 
@@ -304,8 +305,8 @@ func (r *Reconciler) ensureEncryptionKeySecret(ctx context.Context, infra *infra
 
 func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (*apiconfig.StorageProxyConfig, error) {
 	cfg := &apiconfig.StorageProxyConfig{}
-	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil && infra.Spec.Services.StorageProxy.Config != nil {
-		cfg = infra.Spec.Services.StorageProxy.Config
+	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil {
+		cfg = runtimeconfig.ToStorageProxy(infra.Spec.Services.StorageProxy.Config)
 	}
 
 	if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {

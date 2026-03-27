@@ -35,6 +35,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/registry"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
 
@@ -217,8 +218,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 
 func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, compiledPlan *infraplan.InfraPlan) (*apiconfig.RegionalGatewayConfig, []corev1.EnvVar, error) {
 	cfg := &apiconfig.RegionalGatewayConfig{}
-	if infra.Spec.Services != nil && infra.Spec.Services.RegionalGateway != nil && infra.Spec.Services.RegionalGateway.Config != nil {
-		cfg = infra.Spec.Services.RegionalGateway.Config
+	if infra.Spec.Services != nil && infra.Spec.Services.RegionalGateway != nil {
+		cfg = runtimeconfig.ToRegionalGateway(infra.Spec.Services.RegionalGateway.Config)
 	}
 	if compiledPlan == nil {
 		compiledPlan = infraplan.Compile(infra)

@@ -31,6 +31,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/registry"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
 
@@ -260,8 +261,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 
 func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, imageRepo, imageTag string, compiledPlan *infraplan.InfraPlan) (*apiconfig.ManagerConfig, error) {
 	cfg := &apiconfig.ManagerConfig{}
-	if infra.Spec.Services != nil && infra.Spec.Services.Manager != nil && infra.Spec.Services.Manager.Config != nil {
-		cfg = infra.Spec.Services.Manager.Config
+	if infra.Spec.Services != nil && infra.Spec.Services.Manager != nil {
+		cfg = runtimeconfig.ToManager(infra.Spec.Services.Manager.Config)
 	}
 	if compiledPlan == nil {
 		compiledPlan = infraplan.Compile(infra)
@@ -355,8 +356,8 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 
 	storageProxyConfig := &apiconfig.StorageProxyConfig{}
 	storageProxyServiceConfig := (*infrav1alpha1.ServiceNetworkConfig)(nil)
-	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil && infra.Spec.Services.StorageProxy.Config != nil {
-		storageProxyConfig = infra.Spec.Services.StorageProxy.Config
+	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil {
+		storageProxyConfig = runtimeconfig.ToStorageProxy(infra.Spec.Services.StorageProxy.Config)
 	}
 	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil {
 		storageProxyServiceConfig = infra.Spec.Services.StorageProxy.Service

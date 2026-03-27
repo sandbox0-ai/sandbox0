@@ -6,7 +6,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 )
 
@@ -43,7 +42,7 @@ func TestCompileDerivesCrossServiceReferences(t *testing.T) {
 							Port: 9443,
 						},
 					},
-					Config: &apiconfig.ClusterGatewayConfig{
+					Config: &infrav1alpha1.ClusterGatewayConfig{
 						AuthMode: "public",
 					},
 				},
@@ -51,7 +50,7 @@ func TestCompileDerivesCrossServiceReferences(t *testing.T) {
 					BaseServiceConfig: infrav1alpha1.BaseServiceConfig{
 						Enabled: true,
 					},
-					Config: &apiconfig.ManagerConfig{
+					Config: &infrav1alpha1.ManagerConfig{
 						HTTPPort: 18080,
 					},
 				},
@@ -116,7 +115,7 @@ func TestCompilePreservesExplicitNetdResolverURL(t *testing.T) {
 					BaseServiceConfig: infrav1alpha1.BaseServiceConfig{
 						Enabled: true,
 					},
-					Config: &apiconfig.NetdConfig{
+					Config: &infrav1alpha1.NetdConfig{
 						EgressAuthResolverURL: "http://explicit-resolver:9000",
 					},
 				},

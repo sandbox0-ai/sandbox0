@@ -23,6 +23,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
 
@@ -60,8 +61,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	runtimeClassName := (*string)(nil)
 	nodeSelector := map[string]string(nil)
 	tolerations := []corev1.Toleration(nil)
-	if infra.Spec.Services != nil && infra.Spec.Services.Netd != nil && infra.Spec.Services.Netd.Config != nil {
-		config = infra.Spec.Services.Netd.Config.DeepCopy()
+	if infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
+		config = runtimeconfig.ToNetd(infra.Spec.Services.Netd.Config)
 	}
 	if infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
 		runtimeClassName = infra.Spec.Services.Netd.RuntimeClassName

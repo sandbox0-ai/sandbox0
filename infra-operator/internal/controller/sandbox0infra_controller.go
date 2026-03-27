@@ -228,9 +228,6 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 	if err := r.validateComponentPlan(infra, plan); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.cleanupDisabledServiceResources(ctx, infra, plan); err != nil {
-		return ctrl.Result{RequeueAfter: requeueInterval}, err
-	}
 
 	resources := common.NewResourceManager(r.Client, r.Scheme, r.getImagePullPolicy(ctx), r.getLocalDevConfig(ctx))
 	imageRepo := r.getImageRepo(ctx)
@@ -248,6 +245,10 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 	fusePluginReconciler := fuseplugin.NewReconciler(resources)
 	netdReconciler := netd.NewReconciler(resources)
 	rbacReconciler := rbac.NewReconciler(resources)
+
+	if err := r.cleanupDisabledServiceResources(ctx, infra, plan, dbReconciler, storageReconciler, registryReconciler); err != nil {
+		return ctrl.Result{RequeueAfter: requeueInterval}, err
+	}
 
 	steps := []reconcileStep{}
 	if plan.RequireControlPlaneConfig {
@@ -487,7 +488,14 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 	return r.runSteps(ctx, infra, steps)
 }
 
-func (r *Sandbox0InfraReconciler) cleanupDisabledServiceResources(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, plan infraplan.ComponentPlan) error {
+func (r *Sandbox0InfraReconciler) cleanupDisabledServiceResources(
+	ctx context.Context,
+	infra *infrav1alpha1.Sandbox0Infra,
+	plan infraplan.ComponentPlan,
+	dbReconciler *database.Reconciler,
+	storageReconciler *storage.Reconciler,
+	registryReconciler *registry.Reconciler,
+) error {
 	deleteNamespaced := func(name string, obj client.Object) error {
 		key := types.NamespacedName{Name: name, Namespace: infra.Namespace}
 		if err := r.Get(ctx, key, obj); err != nil {
@@ -513,6 +521,22 @@ func (r *Sandbox0InfraReconciler) cleanupDisabledServiceResources(ctx context.Co
 			return err
 		}
 		return nil
+	}
+
+	if !plan.EnableDatabase && dbReconciler != nil {
+		if err := dbReconciler.CleanupBuiltinResources(ctx, infra); err != nil {
+			return err
+		}
+	}
+	if !plan.EnableStorage && storageReconciler != nil {
+		if err := storageReconciler.CleanupBuiltinResources(ctx, infra); err != nil {
+			return err
+		}
+	}
+	if !plan.EnableRegistry && registryReconciler != nil {
+		if err := registryReconciler.CleanupBuiltinResources(ctx, infra); err != nil {
+			return err
+		}
 	}
 
 	globalGatewayName := fmt.Sprintf("%s-global-gateway", infra.Name)
@@ -697,6 +721,24 @@ func (r *Sandbox0InfraReconciler) cleanupDisabledServiceResources(ctx context.Co
 func (r *Sandbox0InfraReconciler) updateOverallStatus(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
 	logger := log.FromContext(ctx)
 	original := infra.Status.DeepCopy()
+	compiledPlan := infraplan.Compile(infra)
+
+	if compiledPlan.Components.EnableClusterRegistration {
+		if infra.Status.Cluster == nil {
+			infra.Status.Cluster = &infrav1alpha1.ClusterStatus{}
+		}
+		if infra.Spec.Cluster != nil {
+			infra.Status.Cluster.ID = infra.Spec.Cluster.ID
+		}
+	} else {
+		infra.Status.Cluster = nil
+	}
+
+	retainedResources, err := collectRetainedResources(ctx, r.Client, infra)
+	if err != nil {
+		return err
+	}
+	infra.Status.RetainedResources = retainedResources
 
 	expectedConditions := r.expectedConditionTypes(infra)
 	totalCount := len(expectedConditions)
@@ -878,27 +920,20 @@ func (r *Sandbox0InfraReconciler) ensureInitUserPasswordSecret(ctx context.Conte
 
 // registerCluster registers the cluster with the control plane
 func (r *Sandbox0InfraReconciler) registerCluster(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
-	logger := log.FromContext(ctx)
-
 	if infra.Status.Cluster == nil {
 		infra.Status.Cluster = &infrav1alpha1.ClusterStatus{}
 	}
+	if infra.Spec.Cluster != nil {
+		infra.Status.Cluster.ID = infra.Spec.Cluster.ID
+	}
+	infra.Status.Cluster.Registered = false
+	infra.Status.Cluster.RegisteredAt = nil
 
-	if infra.Status.Cluster.Registered {
-		return nil
+	if infra.Spec.ControlPlane == nil || infra.Spec.ControlPlane.URL == "" {
+		return fmt.Errorf("controlPlane.url is required for cluster registration")
 	}
 
-	// TODO: Implement actual registration with control plane
-	logger.Info("Would register cluster with control plane",
-		"clusterId", infra.Spec.Cluster.ID,
-		"controlPlaneUrl", infra.Spec.ControlPlane.URL)
-
-	now := metav1.Now()
-	infra.Status.Cluster.ID = infra.Spec.Cluster.ID
-	infra.Status.Cluster.Registered = true
-	infra.Status.Cluster.RegisteredAt = &now
-
-	return nil
+	return fmt.Errorf("cluster registration is not implemented yet; refusing to report success without a real control-plane side effect")
 }
 
 func (r *Sandbox0InfraReconciler) waitBuiltinTemplatePodsReady(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, compiledPlan *infraplan.InfraPlan) error {

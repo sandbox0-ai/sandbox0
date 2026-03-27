@@ -202,6 +202,16 @@ spec:
                         default: disable
                         description: SSLMode specifies the SSL mode for builtin DSN
                         type: string
+                      statefulResourcePolicy:
+                        default: Retain
+                        description: |-
+                          StatefulResourcePolicy controls what happens to the builtin PVC and
+                          generated credentials secret when the builtin database is disabled or
+                          replaced by an external database.
+                        enum:
+                        - Retain
+                        - Delete
+                        type: string
                       username:
                         default: sandbox0
                         description: Username specifies the database username
@@ -656,6 +666,16 @@ spec:
                             description: Type specifies the service type
                             type: string
                         type: object
+                      statefulResourcePolicy:
+                        default: Retain
+                        description: |-
+                          StatefulResourcePolicy controls what happens to the builtin registry PVC
+                          when the builtin registry is disabled or replaced by an external
+                          registry provider.
+                        enum:
+                        - Retain
+                        - Delete
+                        type: string
                     type: object
                   gcp:
                     description: GCP configures GCP registry integration.
@@ -2437,6 +2457,16 @@ spec:
                         description: Region specifies the default region for builtin
                           storage
                         type: string
+                      statefulResourcePolicy:
+                        default: Retain
+                        description: |-
+                          StatefulResourcePolicy controls what happens to the builtin PVC and
+                          generated credentials secret when the builtin storage is disabled or
+                          replaced by an external storage backend.
+                        enum:
+                        - Retain
+                        - Delete
+                        type: string
                       volumes:
                         default: /data
                         description: Volumes specifies the RustFS data path
@@ -2695,6 +2725,41 @@ spec:
               progress:
                 description: Progress shows readiness progress in "ready/total" format
                 type: string
+              retainedResources:
+                description: |-
+                  RetainedResources lists builtin stateful resources intentionally retained
+                  after builtin-to-external or enabled-to-disabled transitions.
+                items:
+                  description: |-
+                    RetainedResourceStatus describes a builtin stateful resource retained by
+                    policy after a lifecycle transition.
+                  properties:
+                    component:
+                      description: Component is the logical component name, for example
+                        database or storage.
+                      type: string
+                    kind:
+                      description: Kind is the Kubernetes resource kind.
+                      type: string
+                    name:
+                      description: Name is the Kubernetes resource name.
+                      type: string
+                    policy:
+                      description: Policy is the stateful resource policy that caused
+                        the resource to be retained.
+                      enum:
+                      - Retain
+                      - Delete
+                      type: string
+                    reason:
+                      description: Reason explains why the resource is retained.
+                      type: string
+                  required:
+                  - component
+                  - kind
+                  - name
+                  type: object
+                type: array
             type: object
         type: object
     served: true

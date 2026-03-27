@@ -54,21 +54,30 @@ func NewReconciler(resources *common.ResourceManager) *Reconciler {
 	return &Reconciler{Resources: resources}
 }
 
+// CleanupBuiltinResources removes builtin database resources according to the
+// configured stateful resource policy.
+func (r *Reconciler) CleanupBuiltinResources(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
+	return r.cleanupBuiltinDatabaseResources(ctx, infra)
+}
+
 // Reconcile reconciles the database component.
 func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
 	logger := log.FromContext(ctx)
 
 	if infra.Spec.Database == nil {
-		return r.cleanupBuiltinDatabaseRuntime(ctx, infra)
+		return r.cleanupBuiltinDatabaseResources(ctx, infra)
 	}
 
 	switch infra.Spec.Database.Type {
 	case infrav1alpha1.DatabaseTypeBuiltin:
 		logger.Info("Reconciling builtin database")
+		if !resolveBuiltinDatabaseConfig(infra).Enabled {
+			return r.cleanupBuiltinDatabaseResources(ctx, infra)
+		}
 		return r.reconcileBuiltinDatabase(ctx, infra)
 	case infrav1alpha1.DatabaseTypeExternal:
 		logger.Info("Using external database")
-		if err := r.cleanupBuiltinDatabaseRuntime(ctx, infra); err != nil {
+		if err := r.cleanupBuiltinDatabaseResources(ctx, infra); err != nil {
 			return err
 		}
 		return ValidateExternalDatabase(ctx, r.Resources.Client, infra)
@@ -504,7 +513,7 @@ func parsePortForwardURL(raw string) (string, int32, error) {
 	return host, int32(portInt), nil
 }
 
-func (r *Reconciler) cleanupBuiltinDatabaseRuntime(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
+func (r *Reconciler) cleanupBuiltinDatabaseResources(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
 	stsName := fmt.Sprintf("%s-postgres", infra.Name)
 	sts := &appsv1.StatefulSet{}
 	if err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: stsName, Namespace: infra.Namespace}, sts); err == nil {
@@ -518,6 +527,28 @@ func (r *Reconciler) cleanupBuiltinDatabaseRuntime(ctx context.Context, infra *i
 	svc := &corev1.Service{}
 	if err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: stsName, Namespace: infra.Namespace}, svc); err == nil {
 		if err := r.Resources.Client.Delete(ctx, svc); err != nil && !errors.IsNotFound(err) {
+			return err
+		}
+	} else if !errors.IsNotFound(err) {
+		return err
+	}
+
+	if resolveBuiltinDatabaseConfig(infra).StatefulResourcePolicy != infrav1alpha1.BuiltinStatefulResourcePolicyDelete {
+		return nil
+	}
+
+	pvc := &corev1.PersistentVolumeClaim{}
+	if err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: fmt.Sprintf("%s-postgres-data", infra.Name), Namespace: infra.Namespace}, pvc); err == nil {
+		if err := r.Resources.Client.Delete(ctx, pvc); err != nil && !errors.IsNotFound(err) {
+			return err
+		}
+	} else if !errors.IsNotFound(err) {
+		return err
+	}
+
+	secret := &corev1.Secret{}
+	if err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: fmt.Sprintf("%s-%s", infra.Name, databaseSecretName), Namespace: infra.Namespace}, secret); err == nil {
+		if err := r.Resources.Client.Delete(ctx, secret); err != nil && !errors.IsNotFound(err) {
 			return err
 		}
 	} else if !errors.IsNotFound(err) {
@@ -635,11 +666,13 @@ func GetJuicefsMetaURL(ctx context.Context, client client.Client, infra *infrav1
 
 func resolveBuiltinDatabaseConfig(infra *infrav1alpha1.Sandbox0Infra) infrav1alpha1.BuiltinDatabaseConfig {
 	cfg := infrav1alpha1.BuiltinDatabaseConfig{
-		Image:    "postgres:16-alpine",
-		Port:     databasePort,
-		Username: "sandbox0",
-		Database: "sandbox0",
-		SSLMode:  "disable",
+		Enabled:                true,
+		Image:                  "postgres:16-alpine",
+		Port:                   databasePort,
+		Username:               "sandbox0",
+		Database:               "sandbox0",
+		SSLMode:                "disable",
+		StatefulResourcePolicy: infrav1alpha1.BuiltinStatefulResourcePolicyRetain,
 	}
 	if infra.Spec.Database.Builtin == nil {
 		return cfg
@@ -662,6 +695,9 @@ func resolveBuiltinDatabaseConfig(infra *infrav1alpha1.Sandbox0Infra) infrav1alp
 	}
 	if builtin.SSLMode != "" {
 		cfg.SSLMode = builtin.SSLMode
+	}
+	if builtin.StatefulResourcePolicy != "" {
+		cfg.StatefulResourcePolicy = builtin.StatefulResourcePolicy
 	}
 
 	return cfg

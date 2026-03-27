@@ -56,24 +56,33 @@ func NewReconciler(resources *common.ResourceManager) *Reconciler {
 	return &Reconciler{Resources: resources}
 }
 
+// CleanupBuiltinResources removes builtin storage resources according to the
+// configured stateful resource policy.
+func (r *Reconciler) CleanupBuiltinResources(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
+	return r.cleanupBuiltinStorageResources(ctx, infra)
+}
+
 // Reconcile reconciles the storage component.
 func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
 	logger := log.FromContext(ctx)
 
 	if infra.Spec.Storage == nil {
-		return r.cleanupBuiltinStorageRuntime(ctx, infra)
+		return r.cleanupBuiltinStorageResources(ctx, infra)
 	}
 
 	switch infra.Spec.Storage.Type {
 	case infrav1alpha1.StorageTypeBuiltin:
 		logger.Info("Reconciling builtin storage (RustFS)")
+		if !resolveBuiltinStorageConfig(infra).Enabled {
+			return r.cleanupBuiltinStorageResources(ctx, infra)
+		}
 		if err := r.reconcileBuiltinStorage(ctx, infra); err != nil {
 			return err
 		}
 		return r.ensureStorageBucket(ctx, infra)
 	case infrav1alpha1.StorageTypeS3, infrav1alpha1.StorageTypeOSS:
 		logger.Info("Using external storage")
-		if err := r.cleanupBuiltinStorageRuntime(ctx, infra); err != nil {
+		if err := r.cleanupBuiltinStorageResources(ctx, infra); err != nil {
 			return err
 		}
 		if err := ValidateExternalStorage(ctx, r.Resources.Client, infra); err != nil {
@@ -677,7 +686,7 @@ func parseEndpointHostPort(endpoint string, fallbackPort int32) (string, int32, 
 	return host, int32(portInt), nil
 }
 
-func (r *Reconciler) cleanupBuiltinStorageRuntime(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
+func (r *Reconciler) cleanupBuiltinStorageResources(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
 	stsName := fmt.Sprintf("%s-rustfs", infra.Name)
 	sts := &appsv1.StatefulSet{}
 	if err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: stsName, Namespace: infra.Namespace}, sts); err == nil {
@@ -691,6 +700,28 @@ func (r *Reconciler) cleanupBuiltinStorageRuntime(ctx context.Context, infra *in
 	svc := &corev1.Service{}
 	if err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: stsName, Namespace: infra.Namespace}, svc); err == nil {
 		if err := r.Resources.Client.Delete(ctx, svc); err != nil && !errors.IsNotFound(err) {
+			return err
+		}
+	} else if !errors.IsNotFound(err) {
+		return err
+	}
+
+	if resolveBuiltinStorageConfig(infra).StatefulResourcePolicy != infrav1alpha1.BuiltinStatefulResourcePolicyDelete {
+		return nil
+	}
+
+	pvc := &corev1.PersistentVolumeClaim{}
+	if err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: fmt.Sprintf("%s-rustfs-data", infra.Name), Namespace: infra.Namespace}, pvc); err == nil {
+		if err := r.Resources.Client.Delete(ctx, pvc); err != nil && !errors.IsNotFound(err) {
+			return err
+		}
+	} else if !errors.IsNotFound(err) {
+		return err
+	}
+
+	secret := &corev1.Secret{}
+	if err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: fmt.Sprintf("%s-%s", infra.Name, rustfsSecretName), Namespace: infra.Namespace}, secret); err == nil {
+		if err := r.Resources.Client.Delete(ctx, secret); err != nil && !errors.IsNotFound(err) {
 			return err
 		}
 	} else if !errors.IsNotFound(err) {
@@ -853,16 +884,18 @@ func GetStorageConfig(ctx context.Context, client client.Client, infra *infrav1a
 
 func resolveBuiltinStorageConfig(infra *infrav1alpha1.Sandbox0Infra) infrav1alpha1.BuiltinStorageConfig {
 	cfg := infrav1alpha1.BuiltinStorageConfig{
-		Image:           "rustfs/rustfs:1.0.0-alpha.79",
-		Port:            rustfsPort,
-		ConsolePort:     rustfsConsole,
-		Bucket:          "sandbox0",
-		Region:          "us-east-1",
-		ConsoleEnabled:  true,
-		Volumes:         "/data",
-		ObsLogDirectory: "/data/logs",
-		ObsLoggerLevel:  "debug",
-		ObsEnvironment:  "develop",
+		Enabled:                true,
+		Image:                  "rustfs/rustfs:1.0.0-alpha.79",
+		Port:                   rustfsPort,
+		ConsolePort:            rustfsConsole,
+		Bucket:                 "sandbox0",
+		Region:                 "us-east-1",
+		ConsoleEnabled:         true,
+		Volumes:                "/data",
+		ObsLogDirectory:        "/data/logs",
+		ObsLoggerLevel:         "debug",
+		ObsEnvironment:         "develop",
+		StatefulResourcePolicy: infrav1alpha1.BuiltinStatefulResourcePolicyRetain,
 	}
 
 	if infra.Spec.Storage.Builtin == nil {
@@ -901,6 +934,9 @@ func resolveBuiltinStorageConfig(infra *infrav1alpha1.Sandbox0Infra) infrav1alph
 		cfg.ObsEnvironment = builtin.ObsEnvironment
 	}
 	cfg.ConsoleEnabled = builtin.ConsoleEnabled
+	if builtin.StatefulResourcePolicy != "" {
+		cfg.StatefulResourcePolicy = builtin.StatefulResourcePolicy
+	}
 
 	return cfg
 }

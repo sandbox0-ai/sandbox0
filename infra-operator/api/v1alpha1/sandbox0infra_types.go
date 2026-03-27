@@ -45,6 +45,12 @@ const (
 // +kubebuilder:validation:Enum=builtin;aws;gcp;azure;aliyun;harbor
 type RegistryProvider string
 
+// BuiltinStatefulResourcePolicy controls how builtin stateful resources are
+// handled when a builtin component is disabled or switched to an external
+// provider.
+// +kubebuilder:validation:Enum=Retain;Delete
+type BuiltinStatefulResourcePolicy string
+
 const (
 	RegistryProviderBuiltin RegistryProvider = "builtin"
 	RegistryProviderAWS     RegistryProvider = "aws"
@@ -52,6 +58,11 @@ const (
 	RegistryProviderAzure   RegistryProvider = "azure"
 	RegistryProviderAliyun  RegistryProvider = "aliyun"
 	RegistryProviderHarbor  RegistryProvider = "harbor"
+)
+
+const (
+	BuiltinStatefulResourcePolicyRetain BuiltinStatefulResourcePolicy = "Retain"
+	BuiltinStatefulResourcePolicyDelete BuiltinStatefulResourcePolicy = "Delete"
 )
 
 // Phase represents the current phase of the Sandbox0Infra
@@ -192,6 +203,13 @@ type BuiltinDatabaseConfig struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="persistence is immutable after creation"
 	// +optional
 	Persistence *PersistenceConfig `json:"persistence,omitempty"`
+
+	// StatefulResourcePolicy controls what happens to the builtin PVC and
+	// generated credentials secret when the builtin database is disabled or
+	// replaced by an external database.
+	// +kubebuilder:default=Retain
+	// +optional
+	StatefulResourcePolicy BuiltinStatefulResourcePolicy `json:"statefulResourcePolicy,omitempty"`
 }
 
 // PersistenceConfig defines persistence configuration
@@ -336,6 +354,13 @@ type BuiltinStorageConfig struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="credentials are immutable after creation"
 	// +optional
 	Credentials *StorageCredentials `json:"credentials,omitempty"`
+
+	// StatefulResourcePolicy controls what happens to the builtin PVC and
+	// generated credentials secret when the builtin storage is disabled or
+	// replaced by an external storage backend.
+	// +kubebuilder:default=Retain
+	// +optional
+	StatefulResourcePolicy BuiltinStatefulResourcePolicy `json:"statefulResourcePolicy,omitempty"`
 }
 
 // StorageCredentials defines storage access credentials
@@ -487,6 +512,13 @@ type BuiltinRegistryConfig struct {
 	// If omitted, the operator will generate a secret named "<infra-name>-registry-credentials".
 	// +optional
 	CredentialsSecret *RegistryCredentialsSecret `json:"credentialsSecret,omitempty"`
+
+	// StatefulResourcePolicy controls what happens to the builtin registry PVC
+	// when the builtin registry is disabled or replaced by an external
+	// registry provider.
+	// +kubebuilder:default=Retain
+	// +optional
+	StatefulResourcePolicy BuiltinStatefulResourcePolicy `json:"statefulResourcePolicy,omitempty"`
 }
 
 // RegistryCredentialsSecret references registry credentials in a secret.
@@ -1159,6 +1191,11 @@ type Sandbox0InfraStatus struct {
 	// Progress shows readiness progress in "ready/total" format
 	// +optional
 	Progress string `json:"progress,omitempty"`
+
+	// RetainedResources lists builtin stateful resources intentionally retained
+	// after builtin-to-external or enabled-to-disabled transitions.
+	// +optional
+	RetainedResources []RetainedResourceStatus `json:"retainedResources,omitempty"`
 }
 
 // EndpointsStatus contains service endpoints
@@ -1193,6 +1230,26 @@ type ClusterStatus struct {
 	// RegisteredAt is the registration timestamp
 	// +optional
 	RegisteredAt *metav1.Time `json:"registeredAt,omitempty"`
+}
+
+// RetainedResourceStatus describes a builtin stateful resource retained by
+// policy after a lifecycle transition.
+type RetainedResourceStatus struct {
+	// Component is the logical component name, for example database or storage.
+	Component string `json:"component"`
+
+	// Kind is the Kubernetes resource kind.
+	Kind string `json:"kind"`
+
+	// Name is the Kubernetes resource name.
+	Name string `json:"name"`
+
+	// Policy is the stateful resource policy that caused the resource to be retained.
+	Policy BuiltinStatefulResourcePolicy `json:"policy,omitempty"`
+
+	// Reason explains why the resource is retained.
+	// +optional
+	Reason string `json:"reason,omitempty"`
 }
 
 // InternalAuthStatus contains internal authentication status

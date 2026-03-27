@@ -56,6 +56,12 @@ func NewReconciler(resources *common.ResourceManager) *Reconciler {
 	return &Reconciler{Resources: resources}
 }
 
+// CleanupBuiltinResources removes builtin registry resources according to the
+// configured stateful resource policy.
+func (r *Reconciler) CleanupBuiltinResources(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
+	return r.cleanupBuiltinRegistryResources(ctx, infra)
+}
+
 // ResolvedRegistryConfig defines resolved registry settings for services.
 type ResolvedRegistryConfig struct {
 	Provider         infrav1alpha1.RegistryProvider
@@ -135,7 +141,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 
 	if infra.Spec.Registry == nil {
 		logger.Info("Registry is not configured, cleaning up runtime state")
-		return r.cleanupBuiltinRegistryRuntime(ctx, infra)
+		return r.cleanupBuiltinRegistryResources(ctx, infra)
 	}
 
 	provider := infrav1alpha1.RegistryProviderBuiltin
@@ -148,7 +154,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		logger.Info("Reconciling builtin registry")
 		builtin := resolveBuiltinRegistryConfig(infra)
 		if !builtin.Enabled {
-			return r.cleanupBuiltinRegistryRuntime(ctx, infra)
+			return r.cleanupBuiltinRegistryResources(ctx, infra)
 		}
 		return r.reconcileBuiltinRegistry(ctx, infra)
 	case infrav1alpha1.RegistryProviderAWS,
@@ -156,13 +162,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		infrav1alpha1.RegistryProviderAzure,
 		infrav1alpha1.RegistryProviderAliyun,
 		infrav1alpha1.RegistryProviderHarbor:
-		if err := r.cleanupBuiltinRegistryRuntime(ctx, infra); err != nil {
+		if err := r.cleanupBuiltinRegistryResources(ctx, infra); err != nil {
 			return err
 		}
 		logger.Info("Validating external registry configuration")
 		return r.validateExternalRegistry(ctx, infra)
 	default:
-		if err := r.cleanupBuiltinRegistryRuntime(ctx, infra); err != nil {
+		if err := r.cleanupBuiltinRegistryResources(ctx, infra); err != nil {
 			return err
 		}
 		return r.validateExternalRegistry(ctx, infra)
@@ -232,7 +238,7 @@ func (r *Reconciler) validateExternalRegistry(ctx context.Context, infra *infrav
 func (r *Reconciler) reconcileBuiltinRegistry(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
 	builtin := resolveBuiltinRegistryConfig(infra)
 	if !builtin.Enabled {
-		return r.cleanupBuiltinRegistryRuntime(ctx, infra)
+		return r.cleanupBuiltinRegistryResources(ctx, infra)
 	}
 
 	if err := r.reconcileRegistryPVC(ctx, infra, builtin); err != nil {
@@ -276,7 +282,7 @@ func (r *Reconciler) reconcileBuiltinRegistry(ctx context.Context, infra *infrav
 	return nil
 }
 
-func (r *Reconciler) cleanupBuiltinRegistryRuntime(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
+func (r *Reconciler) cleanupBuiltinRegistryResources(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
 	name := fmt.Sprintf("%s-registry", infra.Name)
 
 	deploy := &appsv1.Deployment{}
@@ -300,6 +306,33 @@ func (r *Reconciler) cleanupBuiltinRegistryRuntime(ctx context.Context, infra *i
 	ingress := &networkingv1.Ingress{}
 	if err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, ingress); err == nil {
 		if err := r.Resources.Client.Delete(ctx, ingress); err != nil && !errors.IsNotFound(err) {
+			return err
+		}
+	} else if !errors.IsNotFound(err) {
+		return err
+	}
+
+	for _, secretName := range []string{
+		fmt.Sprintf("%s-%s", infra.Name, registryAuthSecretSuffix),
+		fmt.Sprintf("%s-%s", infra.Name, registryPullSecretSuffix),
+	} {
+		secret := &corev1.Secret{}
+		if err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: secretName, Namespace: infra.Namespace}, secret); err == nil {
+			if err := r.Resources.Client.Delete(ctx, secret); err != nil && !errors.IsNotFound(err) {
+				return err
+			}
+		} else if !errors.IsNotFound(err) {
+			return err
+		}
+	}
+
+	if resolveBuiltinRegistryConfig(infra).StatefulResourcePolicy != infrav1alpha1.BuiltinStatefulResourcePolicyDelete {
+		return nil
+	}
+
+	pvc := &corev1.PersistentVolumeClaim{}
+	if err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: fmt.Sprintf("%s-%s", infra.Name, registryPVCNameSuffix), Namespace: infra.Namespace}, pvc); err == nil {
+		if err := r.Resources.Client.Delete(ctx, pvc); err != nil && !errors.IsNotFound(err) {
 			return err
 		}
 	} else if !errors.IsNotFound(err) {
@@ -579,9 +612,10 @@ func (r *Reconciler) reconcileRegistryService(ctx context.Context, infra *infrav
 
 func resolveBuiltinRegistryConfig(infra *infrav1alpha1.Sandbox0Infra) infrav1alpha1.BuiltinRegistryConfig {
 	cfg := infrav1alpha1.BuiltinRegistryConfig{
-		Enabled: false,
-		Image:   defaultRegistryImage,
-		Port:    defaultRegistryPort,
+		Enabled:                false,
+		Image:                  defaultRegistryImage,
+		Port:                   defaultRegistryPort,
+		StatefulResourcePolicy: infrav1alpha1.BuiltinStatefulResourcePolicyRetain,
 	}
 	if infra == nil || infra.Spec.Registry == nil {
 		return cfg
@@ -599,6 +633,9 @@ func resolveBuiltinRegistryConfig(infra *infrav1alpha1.Sandbox0Infra) infrav1alp
 	cfg.PushEndpoint = builtin.PushEndpoint
 	cfg.Ingress = builtin.Ingress
 	cfg.CredentialsSecret = builtin.CredentialsSecret
+	if builtin.StatefulResourcePolicy != "" {
+		cfg.StatefulResourcePolicy = builtin.StatefulResourcePolicy
+	}
 	if builtin.Image != "" {
 		cfg.Image = builtin.Image
 	}

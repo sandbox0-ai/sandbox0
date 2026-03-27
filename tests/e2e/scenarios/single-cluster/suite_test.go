@@ -53,6 +53,7 @@ func init() {
 
 			cases.RegisterOperatorSuite(func() *framework.ScenarioEnv { return env })
 			cases.RegisterApiSuite(func() *framework.ScenarioEnv { return env })
+			cases.RegisterInfraOperatorLifecycleSuite(func() *framework.ScenarioEnv { return env })
 		})
 	}
 }

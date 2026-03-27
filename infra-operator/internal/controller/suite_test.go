@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -51,7 +52,18 @@ var _ = BeforeSuite(func() {
 	logf.SetLogger(zap.New(zap.WriteTo(GinkgoWriter), zap.UseDevMode(true)))
 
 	By("bootstrapping test environment")
+	binaryAssetsDir := os.Getenv("KUBEBUILDER_ASSETS")
+	if binaryAssetsDir == "" {
+		defaultAssetsDir, err := envtest.SetupEnvtestDefaultBinaryAssetsDirectory()
+		Expect(err).NotTo(HaveOccurred())
+		binaryAssetsDir = defaultAssetsDir
+	}
+	if !envtestAssetsAvailable(binaryAssetsDir) {
+		Skip("envtest assets are not installed; skipping controller integration suite")
+	}
+
 	testEnv = &envtest.Environment{
+		BinaryAssetsDirectory: binaryAssetsDir,
 		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
 		ErrorIfCRDPathMissing: true,
 	}
@@ -74,7 +86,22 @@ var _ = BeforeSuite(func() {
 })
 
 var _ = AfterSuite(func() {
+	if testEnv == nil {
+		return
+	}
 	By("tearing down the test environment")
 	err := testEnv.Stop()
 	Expect(err).NotTo(HaveOccurred())
 })
+
+func envtestAssetsAvailable(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	for _, binary := range []string{"etcd", "kube-apiserver", "kubectl"} {
+		if _, err := os.Stat(filepath.Join(dir, binary)); err != nil {
+			return false
+		}
+	}
+	return true
+}

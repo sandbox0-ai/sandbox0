@@ -131,3 +131,84 @@ func TestCompilePreservesExplicitNetdResolverURL(t *testing.T) {
 		t.Fatalf("expected explicit resolver URL to win, got %q", got)
 	}
 }
+
+func TestCompileTracksBuiltinAndExternalBackendEnablement(t *testing.T) {
+	t.Run("builtin backends can be disabled explicitly", func(t *testing.T) {
+		infra := &infrav1alpha1.Sandbox0Infra{
+			Spec: infrav1alpha1.Sandbox0InfraSpec{
+				Database: &infrav1alpha1.DatabaseConfig{
+					Type: infrav1alpha1.DatabaseTypeBuiltin,
+					Builtin: &infrav1alpha1.BuiltinDatabaseConfig{
+						Enabled: false,
+					},
+				},
+				Storage: &infrav1alpha1.StorageConfig{
+					Type: infrav1alpha1.StorageTypeBuiltin,
+					Builtin: &infrav1alpha1.BuiltinStorageConfig{
+						Enabled: false,
+					},
+				},
+				Registry: &infrav1alpha1.RegistryConfig{
+					Provider: infrav1alpha1.RegistryProviderBuiltin,
+					Builtin: &infrav1alpha1.BuiltinRegistryConfig{
+						Enabled: false,
+					},
+				},
+			},
+		}
+
+		compiled := Compile(infra)
+
+		if compiled.Components.EnableDatabase {
+			t.Fatal("expected builtin database to be disabled")
+		}
+		if compiled.Components.EnableStorage {
+			t.Fatal("expected builtin storage to be disabled")
+		}
+		if compiled.Components.EnableRegistry {
+			t.Fatal("expected builtin registry to be disabled")
+		}
+	})
+
+	t.Run("external backends still participate in reconciliation", func(t *testing.T) {
+		infra := &infrav1alpha1.Sandbox0Infra{
+			Spec: infrav1alpha1.Sandbox0InfraSpec{
+				Database: &infrav1alpha1.DatabaseConfig{
+					Type: infrav1alpha1.DatabaseTypeExternal,
+					External: &infrav1alpha1.ExternalDatabaseConfig{
+						Host:     "db.example.com",
+						Port:     5432,
+						Database: "sandbox0",
+						Username: "sandbox0",
+					},
+				},
+				Storage: &infrav1alpha1.StorageConfig{
+					Type: infrav1alpha1.StorageTypeS3,
+					S3: &infrav1alpha1.S3StorageConfig{
+						Endpoint: "https://s3.example.com",
+						Bucket:   "sandbox0",
+						Region:   "us-east-1",
+					},
+				},
+				Registry: &infrav1alpha1.RegistryConfig{
+					Provider: infrav1alpha1.RegistryProviderHarbor,
+					Harbor: &infrav1alpha1.HarborRegistryConfig{
+						Registry: "harbor.example.com",
+					},
+				},
+			},
+		}
+
+		compiled := Compile(infra)
+
+		if !compiled.Components.EnableDatabase {
+			t.Fatal("expected external database to remain enabled")
+		}
+		if !compiled.Components.EnableStorage {
+			t.Fatal("expected external storage to remain enabled")
+		}
+		if !compiled.Components.EnableRegistry {
+			t.Fatal("expected external registry to remain enabled")
+		}
+	})
+}

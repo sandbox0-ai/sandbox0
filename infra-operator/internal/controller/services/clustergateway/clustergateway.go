@@ -257,11 +257,13 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	}
 
 	storageProxyConfig := &apiconfig.StorageProxyConfig{}
+	storageProxyServiceConfig := (*infrav1alpha1.ServiceNetworkConfig)(nil)
 	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil {
 		storageProxyConfig = runtimeconfig.ToStorageProxy(infra.Spec.Services.StorageProxy.Config)
+		storageProxyServiceConfig = infra.Spec.Services.StorageProxy.Service
 	}
 	if infrav1alpha1.IsStorageProxyEnabled(infra) {
-		storageProxyHTTPPort := int32(storageProxyConfig.HTTPPort)
+		storageProxyHTTPPort := common.ResolveServicePort(storageProxyServiceConfig, int32(storageProxyConfig.HTTPPort))
 		storageProxyURL := fmt.Sprintf("http://%s-storage-proxy:%d", infra.Name, storageProxyHTTPPort)
 		cfg.StorageProxyURL = storageProxyURL
 	} else {

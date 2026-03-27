@@ -67,6 +67,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	if err := common.EnsureEnterpriseLicense(ctx, r.Resources, infra, &config.LicenseFile, needEnterpriseLicense, "global-gateway enterprise SSO"); err != nil {
 		return err
 	}
+	podAnnotations, err := common.ConfigHashAnnotation(config)
+	if err != nil {
+		return err
+	}
 	if err := r.Resources.ReconcileServiceConfigMap(ctx, infra, deploymentName, labels, config); err != nil {
 		return err
 	}
@@ -126,6 +130,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		},
 		VolumeMounts: volumeMounts,
 		Volumes:      volumes,
+		PodAnnotations: podAnnotations,
 		LivenessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{

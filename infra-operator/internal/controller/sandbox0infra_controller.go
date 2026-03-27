@@ -738,9 +738,6 @@ func (r *Sandbox0InfraReconciler) isLatestReconcileTarget(ctx context.Context, i
 	if latest.Generation != infra.Generation {
 		return false, nil
 	}
-	if latest.ResourceVersion != "" && infra.ResourceVersion != "" && latest.ResourceVersion != infra.ResourceVersion {
-		return false, nil
-	}
 	return true, nil
 }
 
@@ -859,15 +856,6 @@ func (r *Sandbox0InfraReconciler) updateOverallStatus(ctx context.Context, infra
 		}
 		if latest.Generation != infra.Generation {
 			logger.Info("Skipping stale status update", "reconciledGeneration", infra.Generation, "latestGeneration", latest.Generation)
-			return nil
-		}
-		if latest.ResourceVersion != "" && infra.ResourceVersion != "" && latest.ResourceVersion != infra.ResourceVersion {
-			logger.Info(
-				"Skipping stale status update from older resource version",
-				"generation", infra.Generation,
-				"reconciledResourceVersion", infra.ResourceVersion,
-				"latestResourceVersion", latest.ResourceVersion,
-			)
 			return nil
 		}
 

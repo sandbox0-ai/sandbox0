@@ -1,6 +1,7 @@
 package common
 
 import (
+	"reflect"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -123,5 +124,53 @@ func TestResolveSandboxNodePlacementFallsBackPerField(t *testing.T) {
 	}
 	if len(tolerations) != 1 || tolerations[0].Key != "sandbox.gke.io/runtime" {
 		t.Fatalf("expected legacy tolerations fallback, got %#v", tolerations)
+	}
+}
+
+func TestConfigHashAnnotationChangesWithConfig(t *testing.T) {
+	sameA, err := ConfigHashAnnotation(map[string]any{
+		"http_port": 8080,
+		"metrics":   true,
+	})
+	if err != nil {
+		t.Fatalf("hash annotation for config A: %v", err)
+	}
+	sameB, err := ConfigHashAnnotation(map[string]any{
+		"http_port": 8080,
+		"metrics":   true,
+	})
+	if err != nil {
+		t.Fatalf("hash annotation for config B: %v", err)
+	}
+	changed, err := ConfigHashAnnotation(map[string]any{
+		"http_port": 18080,
+		"metrics":   true,
+	})
+	if err != nil {
+		t.Fatalf("hash annotation for changed config: %v", err)
+	}
+
+	if !reflect.DeepEqual(sameA, sameB) {
+		t.Fatalf("expected identical config to have identical hash annotation, got %#v vs %#v", sameA, sameB)
+	}
+	if sameA[PodTemplateConfigHashAnnotation] == changed[PodTemplateConfigHashAnnotation] {
+		t.Fatalf("expected changed config to produce a different hash, got %q", changed[PodTemplateConfigHashAnnotation])
+	}
+}
+
+func TestEnsurePodTemplateAnnotationsClonesInput(t *testing.T) {
+	annotations := map[string]string{
+		PodTemplateConfigHashAnnotation: "abc123",
+		"custom":                        "value",
+	}
+
+	got := EnsurePodTemplateAnnotations(annotations)
+	if !reflect.DeepEqual(got, annotations) {
+		t.Fatalf("expected cloned annotations to match input, got %#v", got)
+	}
+
+	annotations["custom"] = "changed"
+	if got["custom"] != "value" {
+		t.Fatalf("expected cloned annotations to be isolated from caller mutation, got %#v", got)
 	}
 }

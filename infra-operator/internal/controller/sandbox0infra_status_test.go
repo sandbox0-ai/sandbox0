@@ -313,7 +313,7 @@ func TestUpdateOverallStatusDoesNotOverwriteNewerGenerationStatus(t *testing.T) 
 	}
 }
 
-func TestUpdateOverallStatusDoesNotOverwriteNewerStatusFromSameGeneration(t *testing.T) {
+func TestUpdateOverallStatusAllowsSameGenerationStatusToConverge(t *testing.T) {
 	ctx := context.Background()
 	live := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{
@@ -334,15 +334,15 @@ func TestUpdateOverallStatusDoesNotOverwriteNewerStatusFromSameGeneration(t *tes
 			},
 		},
 		Status: infrav1alpha1.Sandbox0InfraStatus{
-			Phase:       infrav1alpha1.PhaseReady,
-			LastMessage: "newer resource version wins",
+			Phase:       infrav1alpha1.PhaseInstalling,
+			LastMessage: "installing",
 			Conditions: []metav1.Condition{
 				{
 					Type:               infrav1alpha1.ConditionTypeDatabaseReady,
 					Status:             metav1.ConditionTrue,
 					ObservedGeneration: 4,
 					Reason:             "DatabaseReady",
-					Message:            "newer status",
+					Message:            "Database is ready",
 				},
 			},
 		},
@@ -350,37 +350,35 @@ func TestUpdateOverallStatusDoesNotOverwriteNewerStatusFromSameGeneration(t *tes
 
 	stale := live.DeepCopy()
 	stale.ResourceVersion = "1"
-	stale.Status.Phase = infrav1alpha1.PhaseDegraded
-	stale.Status.LastMessage = "older status"
-	stale.Status.Conditions = []metav1.Condition{
-		{
-			Type:               infrav1alpha1.ConditionTypeDatabaseReady,
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: 4,
-			Reason:             "DatabaseFailed",
-			Message:            "older status",
-		},
+	stale.Status.LastOperation = &infrav1alpha1.LastOperation{
+		Type:      "Install",
+		Status:    "InProgress",
+		StartedAt: &metav1.Time{Time: metav1.Now().Time},
 	}
 
-	reconciler, client := newStatusTestReconcilerWithInterceptors(t, live, interceptor.Funcs{
-		SubResourcePatch: func(ctx context.Context, client ctrlclient.Client, subResourceName string, obj ctrlclient.Object, patch ctrlclient.Patch, opts ...ctrlclient.SubResourcePatchOption) error {
-			if subResourceName == "status" {
-				return fmt.Errorf("unexpected status patch for stale resource version")
-			}
-			return client.Status().Patch(ctx, obj, patch, opts...)
-		},
-	})
+	reconciler, client := newStatusTestReconcilerWithInterceptors(t, live, interceptor.Funcs{})
 
 	if err := reconciler.updateOverallStatus(ctx, stale); err != nil {
-		t.Fatalf("update overall status with stale resource version: %v", err)
+		t.Fatalf("update overall status with same-generation stale resource version: %v", err)
 	}
 
 	stored := &infrav1alpha1.Sandbox0Infra{}
 	if err := client.Get(ctx, ctrlclient.ObjectKeyFromObject(live), stored); err != nil {
 		t.Fatalf("get stored infra: %v", err)
 	}
-	if stored.Status.LastMessage != "newer resource version wins" {
-		t.Fatalf("expected newer same-generation status to be preserved, got %q", stored.Status.LastMessage)
+
+	if stored.Status.Phase != infrav1alpha1.PhaseReady {
+		t.Fatalf("expected phase %q, got %q", infrav1alpha1.PhaseReady, stored.Status.Phase)
+	}
+	if stored.Status.LastMessage != "All services are healthy" {
+		t.Fatalf("expected converged healthy status, got %q", stored.Status.LastMessage)
+	}
+	readyCondition := findCondition(stored.Status.Conditions, infrav1alpha1.ConditionTypeReady)
+	if readyCondition == nil {
+		t.Fatal("expected Ready condition to be present")
+	}
+	if readyCondition.ObservedGeneration != 4 {
+		t.Fatalf("expected Ready observedGeneration 4, got %d", readyCondition.ObservedGeneration)
 	}
 }
 

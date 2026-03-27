@@ -18,10 +18,11 @@ package common
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
-	"strconv"
 
 	yamlv3 "gopkg.in/yaml.v3"
 	appsv1 "k8s.io/api/apps/v1"
@@ -54,7 +55,7 @@ type LocalDevConfig struct {
 	KubeconfigPath string
 }
 
-const PodTemplateSpecGenerationAnnotation = "infra.sandbox0.ai/spec-generation"
+const PodTemplateConfigHashAnnotation = "infra.sandbox0.ai/config-hash"
 
 func NewResourceManager(client client.Client, scheme *runtime.Scheme, imagePullPolicy *corev1.PullPolicy, localDev LocalDevConfig) *ResourceManager {
 	return &ResourceManager{
@@ -78,6 +79,7 @@ type ServiceDefinition struct {
 	EnvVars            []corev1.EnvVar
 	VolumeMounts       []corev1.VolumeMount
 	Volumes            []corev1.Volume
+	PodAnnotations     map[string]string
 	LivenessProbe      *corev1.Probe
 	ReadinessProbe     *corev1.Probe
 	ServiceAccountName string
@@ -121,7 +123,7 @@ func (r *ResourceManager) ReconcileDeployment(ctx context.Context, infra *infrav
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels:      desiredLabels,
-					Annotations: EnsurePodTemplateAnnotations(infra, nil),
+					Annotations: EnsurePodTemplateAnnotations(def.PodAnnotations),
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: def.ServiceAccountName,
@@ -219,7 +221,7 @@ func (r *ResourceManager) ReconcileDaemonSet(ctx context.Context, infra *infrav1
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels:      desiredLabels,
-					Annotations: EnsurePodTemplateAnnotations(infra, nil),
+					Annotations: EnsurePodTemplateAnnotations(def.PodAnnotations),
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: def.ServiceAccountName,
@@ -696,14 +698,34 @@ func cloneTolerations(src []corev1.Toleration) []corev1.Toleration {
 	return cloned
 }
 
-// EnsurePodTemplateAnnotations returns annotations with the current CR generation marker.
-func EnsurePodTemplateAnnotations(infra *infrav1alpha1.Sandbox0Infra, annotations map[string]string) map[string]string {
+func ConfigHash(config any) (string, error) {
+	if config == nil {
+		config = map[string]any{}
+	}
+
+	payload, err := yamlv3.Marshal(config)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func ConfigHashAnnotation(config any) (map[string]string, error) {
+	hash, err := ConfigHash(config)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]string{
+		PodTemplateConfigHashAnnotation: hash,
+	}, nil
+}
+
+// EnsurePodTemplateAnnotations returns a cloned annotations map for pod templates.
+func EnsurePodTemplateAnnotations(annotations map[string]string) map[string]string {
 	out := map[string]string{}
 	for key, value := range annotations {
 		out[key] = value
-	}
-	if infra != nil {
-		out[PodTemplateSpecGenerationAnnotation] = strconv.FormatInt(infra.Generation, 10)
 	}
 	return out
 }

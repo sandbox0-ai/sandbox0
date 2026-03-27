@@ -270,7 +270,7 @@ func (r *Reconciler) reconcileDatabaseStatefulSet(ctx context.Context, infra *in
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels:      labels,
-					Annotations: common.EnsurePodTemplateAnnotations(infra, nil),
+					Annotations: common.EnsurePodTemplateAnnotations(nil),
 				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{

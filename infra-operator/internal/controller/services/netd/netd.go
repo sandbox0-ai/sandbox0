@@ -107,6 +107,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			config.MITMCAKeyPath = "/tls/ca.key"
 		}
 	}
+	podAnnotations, err := common.ConfigHashAnnotation(config)
+	if err != nil {
+		return err
+	}
 
 	if err := r.Resources.ReconcileServiceConfigMap(ctx, infra, name, labels, config); err != nil {
 		return err
@@ -222,7 +226,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels:      labels,
-					Annotations: common.EnsurePodTemplateAnnotations(infra, nil),
+					Annotations: common.EnsurePodTemplateAnnotations(podAnnotations),
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: name,

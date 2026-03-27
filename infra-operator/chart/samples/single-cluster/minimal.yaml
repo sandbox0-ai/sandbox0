@@ -16,7 +16,6 @@ spec:
     builtin:
       enabled: true
       persistence:
-        enabled: true
         size: "20Gi"
   # Example external database:
   # database:

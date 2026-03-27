@@ -15,7 +15,6 @@ spec:
     builtin:
       enabled: true
       persistence:
-        enabled: true
         size: "20Gi"
   publicExposure:
     enabled: true
@@ -26,7 +25,6 @@ spec:
     builtin:
       enabled: true
       persistence:
-        enabled: true
         size: "20Gi"
   registry:
     provider: builtin

@@ -53,19 +53,6 @@ type GlobalGatewayConfig struct {
 
 	// +optional
 	GatewayConfig `yaml:",inline" json:",inline"`
-
-	// BootstrapRegion seeds the initial global region directory entry for
-	// operator-managed deployments.
-	// +optional
-	BootstrapRegion *BootstrapRegionConfig `yaml:"bootstrap_region,omitempty" json:"-"`
-}
-
-type BootstrapRegionConfig struct {
-	ID                 string `yaml:"id" json:"-"`
-	DisplayName        string `yaml:"display_name,omitempty" json:"-"`
-	RegionalGatewayURL string `yaml:"regional_gateway_url,omitempty" json:"-"`
-	MeteringExportURL  string `yaml:"metering_export_url,omitempty" json:"-"`
-	Enabled            bool   `yaml:"enabled" json:"-"`
 }
 
 type globalGatewayConfigYAML struct {
@@ -82,24 +69,23 @@ type globalGatewayConfigYAML struct {
 	ServerWriteTimeout durationYAMLValue `yaml:"server_write_timeout"`
 	ServerIdleTimeout  durationYAMLValue `yaml:"server_idle_timeout"`
 
-	JWTSecret                string                 `yaml:"jwt_secret"`
-	JWTIssuer                string                 `yaml:"jwt_issuer"`
-	JWTAccessTokenTTL        durationYAMLValue      `yaml:"jwt_access_token_ttl"`
-	JWTRefreshTokenTTL       durationYAMLValue      `yaml:"jwt_refresh_token_ttl"`
-	RateLimitRPS             int                    `yaml:"rate_limit_rps"`
-	RateLimitBurst           int                    `yaml:"rate_limit_burst"`
-	RateLimitCleanupInterval durationYAMLValue      `yaml:"rate_limit_cleanup_interval"`
-	DefaultTeamName          string                 `yaml:"default_team_name"`
-	BuiltInAuth              BuiltInAuthConfig      `yaml:"built_in_auth"`
-	OIDCProviders            []OIDCProviderConfig   `yaml:"oidc_providers"`
-	OIDCStateTTL             durationYAMLValue      `yaml:"oidc_state_ttl"`
-	OIDCStateCleanupInterval durationYAMLValue      `yaml:"oidc_state_cleanup_interval"`
-	BaseURL                  string                 `yaml:"base_url"`
-	RegionID                 string                 `yaml:"region_id"`
-	PublicExposureEnabled    bool                   `yaml:"public_exposure_enabled"`
-	PublicRootDomain         string                 `yaml:"public_root_domain"`
-	PublicRegionID           string                 `yaml:"public_region_id"`
-	BootstrapRegion          *BootstrapRegionConfig `yaml:"bootstrap_region"`
+	JWTSecret                string               `yaml:"jwt_secret"`
+	JWTIssuer                string               `yaml:"jwt_issuer"`
+	JWTAccessTokenTTL        durationYAMLValue    `yaml:"jwt_access_token_ttl"`
+	JWTRefreshTokenTTL       durationYAMLValue    `yaml:"jwt_refresh_token_ttl"`
+	RateLimitRPS             int                  `yaml:"rate_limit_rps"`
+	RateLimitBurst           int                  `yaml:"rate_limit_burst"`
+	RateLimitCleanupInterval durationYAMLValue    `yaml:"rate_limit_cleanup_interval"`
+	DefaultTeamName          string               `yaml:"default_team_name"`
+	BuiltInAuth              BuiltInAuthConfig    `yaml:"built_in_auth"`
+	OIDCProviders            []OIDCProviderConfig `yaml:"oidc_providers"`
+	OIDCStateTTL             durationYAMLValue    `yaml:"oidc_state_ttl"`
+	OIDCStateCleanupInterval durationYAMLValue    `yaml:"oidc_state_cleanup_interval"`
+	BaseURL                  string               `yaml:"base_url"`
+	RegionID                 string               `yaml:"region_id"`
+	PublicExposureEnabled    bool                 `yaml:"public_exposure_enabled"`
+	PublicRootDomain         string               `yaml:"public_root_domain"`
+	PublicRegionID           string               `yaml:"public_region_id"`
 }
 
 type durationYAMLValue string
@@ -193,10 +179,6 @@ func applyGlobalGatewayYAML(cfg *GlobalGatewayConfig, raw globalGatewayConfigYAM
 	cfg.PublicExposureEnabled = raw.PublicExposureEnabled
 	cfg.PublicRootDomain = raw.PublicRootDomain
 	cfg.PublicRegionID = raw.PublicRegionID
-	if raw.BootstrapRegion != nil {
-		bootstrapRegion := *raw.BootstrapRegion
-		cfg.BootstrapRegion = &bootstrapRegion
-	}
 
 	if err := applyOptionalDuration(&cfg.RegionTokenTTL, raw.RegionTokenTTL, "region_token_ttl"); err != nil {
 		return err

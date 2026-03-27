@@ -2,7 +2,6 @@ package http
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	stdhttp "net/http"
 	"strings"
@@ -25,12 +24,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 )
-
-type bootstrapRegionRepository interface {
-	GetRegion(ctx context.Context, regionID string) (*tenantdir.Region, error)
-	CreateRegion(ctx context.Context, region *tenantdir.Region) error
-	UpdateRegion(ctx context.Context, region *tenantdir.Region) error
-}
 
 // Server provides the global gateway HTTP API.
 type Server struct {
@@ -96,9 +89,6 @@ func NewServer(
 		}
 	}
 	if cfg.BuiltInAuth.Enabled && cfg.BuiltInAuth.InitUser != nil {
-		if err := ensureBootstrapRegion(context.Background(), regionRepo, cfg.BootstrapRegion); err != nil {
-			return nil, err
-		}
 		if userCount, err := identityRepo.CountUsers(context.Background()); err == nil && userCount == 0 {
 			homeRegionID := strings.TrimSpace(cfg.BuiltInAuth.InitUser.HomeRegionID)
 			if err := handlers.ValidateInitUserHomeRegion(context.Background(), regionRepo, homeRegionID); err != nil {
@@ -128,41 +118,6 @@ func NewServer(
 	}
 	server.setupRoutes()
 	return server, nil
-}
-
-func ensureBootstrapRegion(ctx context.Context, repo bootstrapRegionRepository, region *config.BootstrapRegionConfig) error {
-	if repo == nil || region == nil {
-		return nil
-	}
-
-	id := strings.TrimSpace(region.ID)
-	regionalGatewayURL := strings.TrimSpace(region.RegionalGatewayURL)
-	if id == "" || regionalGatewayURL == "" {
-		return nil
-	}
-
-	desired := &tenantdir.Region{
-		ID:                 id,
-		DisplayName:        strings.TrimSpace(region.DisplayName),
-		RegionalGatewayURL: regionalGatewayURL,
-		MeteringExportURL:  strings.TrimSpace(region.MeteringExportURL),
-		Enabled:            region.Enabled,
-	}
-
-	existing, err := repo.GetRegion(ctx, desired.ID)
-	if err != nil {
-		if errors.Is(err, tenantdir.ErrRegionNotFound) {
-			return repo.CreateRegion(ctx, desired)
-		}
-		return err
-	}
-	if existing.DisplayName == desired.DisplayName &&
-		existing.RegionalGatewayURL == desired.RegionalGatewayURL &&
-		existing.MeteringExportURL == desired.MeteringExportURL &&
-		existing.Enabled == desired.Enabled {
-		return nil
-	}
-	return repo.UpdateRegion(ctx, desired)
 }
 
 // Handler returns the HTTP handler for tests.

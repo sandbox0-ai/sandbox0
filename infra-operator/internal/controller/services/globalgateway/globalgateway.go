@@ -18,6 +18,7 @@ package globalgateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -35,6 +36,10 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
+	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
+	gatewaymigrations "github.com/sandbox0-ai/sandbox0/pkg/gateway/migrations"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/tenantdir"
+	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 )
 
 type Reconciler struct {
@@ -65,6 +70,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	}
 	needEnterpriseLicense := apiconfig.HasEnabledOIDCProviders(config.OIDCProviders)
 	if err := common.EnsureEnterpriseLicense(ctx, r.Resources, infra, &config.LicenseFile, needEnterpriseLicense, "global-gateway enterprise SSO"); err != nil {
+		return err
+	}
+	if err := ensureGlobalGatewayBootstrapState(ctx, infra, config); err != nil {
 		return err
 	}
 	podAnnotations, err := common.ConfigHashAnnotation(config)
@@ -197,7 +205,6 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 			cfg.PublicRegionID = infra.Spec.PublicExposure.RegionID
 		}
 	}
-	cfg.BootstrapRegion = buildBootstrapRegion(infra, cfg.RegionID)
 
 	dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra)
 	if err != nil {
@@ -269,7 +276,7 @@ func inferCanonicalRegionID(publicRegionID string) string {
 	return parts[0] + "/" + parts[1]
 }
 
-func buildBootstrapRegion(infra *infrav1alpha1.Sandbox0Infra, regionID string) *apiconfig.BootstrapRegionConfig {
+func desiredBootstrapRegion(infra *infrav1alpha1.Sandbox0Infra, regionID string) *tenantdir.Region {
 	if strings.TrimSpace(regionID) == "" || infra.Spec.Services == nil || infra.Spec.Services.RegionalGateway == nil || !infra.Spec.Services.RegionalGateway.Enabled {
 		return nil
 	}
@@ -281,12 +288,65 @@ func buildBootstrapRegion(infra *infrav1alpha1.Sandbox0Infra, regionID string) *
 
 	servicePort := common.ResolveServicePort(infra.Spec.Services.RegionalGateway.Service, regionalHTTPPort)
 	serviceName := fmt.Sprintf("%s-regional-gateway", infra.Name)
-	return &apiconfig.BootstrapRegionConfig{
+	return &tenantdir.Region{
 		ID:                 regionID,
 		DisplayName:        regionID,
 		RegionalGatewayURL: fmt.Sprintf("http://%s:%d", serviceName, servicePort),
 		Enabled:            true,
 	}
+}
+
+func ensureGlobalGatewayBootstrapState(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, cfg *apiconfig.GlobalGatewayConfig) error {
+	if cfg == nil || strings.TrimSpace(cfg.DatabaseURL) == "" {
+		return nil
+	}
+
+	bootstrapRegion := desiredBootstrapRegion(infra, cfg.RegionID)
+	if bootstrapRegion == nil {
+		return nil
+	}
+
+	pool, err := dbpool.New(ctx, dbpool.Options{
+		DatabaseURL: cfg.DatabaseURL,
+		MaxConns:    int32(cfg.DatabaseMaxConns),
+		MinConns:    int32(cfg.DatabaseMinConns),
+		Schema:      cfg.DatabaseSchema,
+	})
+	if err != nil {
+		return fmt.Errorf("connect global-gateway database: %w", err)
+	}
+	defer pool.Close()
+
+	if err := migrate.Up(ctx, pool, ".",
+		migrate.WithBaseFS(gatewaymigrations.FS),
+		migrate.WithSchema(cfg.DatabaseSchema),
+	); err != nil {
+		return fmt.Errorf("run global-gateway migrations: %w", err)
+	}
+
+	repo := tenantdir.NewRepository(pool)
+	existing, err := repo.GetRegion(ctx, bootstrapRegion.ID)
+	if err != nil {
+		if errors.Is(err, tenantdir.ErrRegionNotFound) {
+			if err := repo.CreateRegion(ctx, bootstrapRegion); err != nil {
+				return fmt.Errorf("create bootstrap region: %w", err)
+			}
+			return nil
+		}
+		return fmt.Errorf("get bootstrap region: %w", err)
+	}
+
+	if existing.DisplayName == bootstrapRegion.DisplayName &&
+		existing.RegionalGatewayURL == bootstrapRegion.RegionalGatewayURL &&
+		existing.MeteringExportURL == bootstrapRegion.MeteringExportURL &&
+		existing.Enabled == bootstrapRegion.Enabled {
+		return nil
+	}
+
+	if err := repo.UpdateRegion(ctx, bootstrapRegion); err != nil {
+		return fmt.Errorf("update bootstrap region: %w", err)
+	}
+	return nil
 }
 
 func applyConfigDefaults(cfg *apiconfig.GlobalGatewayConfig) {

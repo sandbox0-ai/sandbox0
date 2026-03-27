@@ -229,7 +229,7 @@ func TestBuildConfigPreservesInitUserHomeRegionID(t *testing.T) {
 	}
 }
 
-func TestBuildConfigBootstrapsRegionFromPublicExposure(t *testing.T) {
+func TestBuildConfigDerivesRegionFromPublicExposure(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add corev1 scheme: %v", err)
@@ -325,14 +325,39 @@ func TestBuildConfigBootstrapsRegionFromPublicExposure(t *testing.T) {
 	if cfg.BuiltInAuth.InitUser == nil || cfg.BuiltInAuth.InitUser.HomeRegionID != "aws/us-east-1" {
 		t.Fatalf("expected init user home region to default from canonical region, got %#v", cfg.BuiltInAuth.InitUser)
 	}
-	if cfg.BootstrapRegion == nil {
-		t.Fatal("expected bootstrap region config")
+}
+
+func TestDesiredBootstrapRegionUsesRegionalGatewayServiceAddress(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Services: &infrav1alpha1.ServicesConfig{
+				RegionalGateway: &infrav1alpha1.RegionalGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					ServiceExposureConfig: infrav1alpha1.ServiceExposureConfig{
+						Service: &infrav1alpha1.ServiceNetworkConfig{
+							Port: 18080,
+						},
+					},
+				},
+			},
+		},
 	}
-	if cfg.BootstrapRegion.ID != "aws/us-east-1" {
-		t.Fatalf("unexpected bootstrap region id: %q", cfg.BootstrapRegion.ID)
+
+	region := desiredBootstrapRegion(infra, "aws/us-east-1")
+	if region == nil {
+		t.Fatal("expected bootstrap region")
 	}
-	if cfg.BootstrapRegion.RegionalGatewayURL != "http://demo-regional-gateway:8080" {
-		t.Fatalf("unexpected bootstrap regional gateway url: %q", cfg.BootstrapRegion.RegionalGatewayURL)
+	if region.ID != "aws/us-east-1" {
+		t.Fatalf("unexpected region id: %q", region.ID)
+	}
+	if region.RegionalGatewayURL != "http://demo-regional-gateway:18080" {
+		t.Fatalf("unexpected regional gateway url: %q", region.RegionalGatewayURL)
 	}
 }
 

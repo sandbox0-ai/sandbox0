@@ -898,7 +898,7 @@ func resolveBuiltinStorageConfig(infra *infrav1alpha1.Sandbox0Infra) infrav1alph
 		StatefulResourcePolicy: infrav1alpha1.BuiltinStatefulResourcePolicyRetain,
 	}
 
-	if infra.Spec.Storage.Builtin == nil {
+	if infra == nil || infra.Spec.Storage == nil || infra.Spec.Storage.Builtin == nil {
 		return cfg
 	}
 

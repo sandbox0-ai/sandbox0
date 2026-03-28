@@ -64,7 +64,7 @@ func RegisterInfraOperatorLifecycleSuite(envProvider func() *framework.ScenarioE
 		})
 
 		It("disables builtin storage and retains builtin storage stateful resources", func() {
-			env := shouldRunApiScenario(envProvider, "volumes")
+			env := shouldRunApiScenario(envProvider, "fullmode")
 
 			ctx := env.TestCtx.Context
 			kubeconfig := env.Config.Kubeconfig
@@ -91,7 +91,7 @@ func RegisterInfraOperatorLifecycleSuite(envProvider func() *framework.ScenarioE
 		})
 
 		It("deletes retained builtin storage stateful resources when policy changes to Delete", func() {
-			env := shouldRunApiScenario(envProvider, "volumes")
+			env := shouldRunApiScenario(envProvider, "fullmode")
 
 			ctx := env.TestCtx.Context
 			kubeconfig := env.Config.Kubeconfig
@@ -110,7 +110,7 @@ func RegisterInfraOperatorLifecycleSuite(envProvider func() *framework.ScenarioE
 		})
 
 		It("disables builtin database and retains builtin database stateful resources", func() {
-			env := shouldRunApiScenario(envProvider, "minimal")
+			env := shouldRunApiScenario(envProvider, "fullmode")
 
 			ctx := env.TestCtx.Context
 			kubeconfig := env.Config.Kubeconfig
@@ -137,7 +137,7 @@ func RegisterInfraOperatorLifecycleSuite(envProvider func() *framework.ScenarioE
 		})
 
 		It("disables builtin database and deletes builtin database stateful resources", func() {
-			env := shouldRunApiScenario(envProvider, "network-policy")
+			env := shouldRunApiScenario(envProvider, "fullmode")
 
 			ctx := env.TestCtx.Context
 			kubeconfig := env.Config.Kubeconfig

@@ -8,7 +8,9 @@ import (
 )
 
 func TestAppendEnterpriseLicenseVolume_DefaultPath(t *testing.T) {
-	mounts, volumes := AppendEnterpriseLicenseVolume("demo", "", nil, nil)
+	infra := &infrav1alpha1.Sandbox0Infra{}
+	infra.Name = "demo"
+	mounts, volumes := AppendEnterpriseLicenseVolume(infra, "", nil, nil)
 	if len(mounts) != 1 {
 		t.Fatalf("expected 1 volume mount, got %d", len(mounts))
 	}
@@ -20,6 +22,12 @@ func TestAppendEnterpriseLicenseVolume_DefaultPath(t *testing.T) {
 	}
 	if volumes[0].Name != "enterprise-license" {
 		t.Fatalf("unexpected volume name: %q", volumes[0].Name)
+	}
+	if volumes[0].Secret == nil || volumes[0].Secret.SecretName != "demo-enterprise-license" {
+		t.Fatalf("unexpected secret name: %#v", volumes[0].Secret)
+	}
+	if mounts[0].SubPath != EnterpriseLicenseSecretKey {
+		t.Fatalf("unexpected subPath: %q", mounts[0].SubPath)
 	}
 }
 
@@ -57,6 +65,41 @@ func TestNormalizeEnterpriseLicenseFile(t *testing.T) {
 		NormalizeEnterpriseLicenseFile(&licenseFile, false)
 		if licenseFile != "" {
 			t.Fatalf("expected license path to remain empty, got %q", licenseFile)
+		}
+	})
+}
+
+func TestResolveEnterpriseLicenseSecretRef(t *testing.T) {
+	t.Run("uses backward compatible default", func(t *testing.T) {
+		infra := &infrav1alpha1.Sandbox0Infra{}
+		infra.Name = "demo"
+		ref := ResolveEnterpriseLicenseSecretRef(infra)
+		if ref.Name != "demo-enterprise-license" {
+			t.Fatalf("expected default secret name, got %q", ref.Name)
+		}
+		if ref.Key != EnterpriseLicenseSecretKey {
+			t.Fatalf("expected default secret key, got %q", ref.Key)
+		}
+	})
+
+	t.Run("uses configured secret ref", func(t *testing.T) {
+		infra := &infrav1alpha1.Sandbox0Infra{
+			Spec: infrav1alpha1.Sandbox0InfraSpec{
+				EnterpriseLicense: &infrav1alpha1.EnterpriseLicenseConfig{
+					SecretRef: infrav1alpha1.SecretKeyRef{
+						Name: "custom-license",
+						Key:  "signed.lic",
+					},
+				},
+			},
+		}
+		infra.Name = "demo"
+		ref := ResolveEnterpriseLicenseSecretRef(infra)
+		if ref.Name != "custom-license" {
+			t.Fatalf("expected configured secret name, got %q", ref.Name)
+		}
+		if ref.Key != "signed.lic" {
+			t.Fatalf("expected configured secret key, got %q", ref.Key)
 		}
 	})
 }

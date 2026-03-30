@@ -182,7 +182,7 @@ func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 		EnableStorage:             infrav1alpha1.IsStorageEnabled(infra),
 		EnableRegistry:            infrav1alpha1.IsRegistryEnabled(infra),
 		EnableInitUser:            enableDatabase && infra != nil && infra.Spec.InitUser != nil,
-		EnableClusterRegistration: hasDataPlane && infra != nil && infra.Spec.Cluster != nil,
+		EnableClusterRegistration: hasDataPlane && infra != nil && infra.Spec.Cluster != nil && infra.Spec.ControlPlane != nil,
 	}
 }
 

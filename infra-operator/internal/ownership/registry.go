@@ -58,6 +58,7 @@ func Registry() []Entry {
 
 		prefix("spec.controlPlane", "plan", []string{"cluster-gateway", "manager", "storage-proxy", "netd", "status"}, []string{"InfraPlan.Validation.RequireControlPlanePublicKey"}, UpdateSemanticsDeclarative, "External control-plane connection required by data-plane services that integrate with a control plane."),
 		prefix("spec.internalAuth", "internal-auth", []string{"internal-auth", "regional-gateway", "scheduler", "cluster-gateway"}, nil, UpdateSemanticsDeclarative, "Controls generated or imported internal JWT keys."),
+		prefix("spec.enterpriseLicense", "plan", []string{"regional-gateway", "scheduler", "cluster-gateway", "global-gateway", "status"}, []string{"InfraPlan.Enterprise"}, UpdateSemanticsDeclarative, "Shared enterprise license secret reference for licensed services."),
 
 		prefix("spec.services.globalGateway", "global-gateway", []string{"global-gateway", "status"}, nil, UpdateSemanticsDeclarative, "Direct runtime configuration for global-gateway."),
 		prefix("spec.services.regionalGateway", "regional-gateway", []string{"regional-gateway", "status"}, nil, UpdateSemanticsDeclarative, "Direct runtime configuration for regional-gateway."),

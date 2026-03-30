@@ -271,6 +271,26 @@ spec:
                     - external
                     type: string
                 type: object
+              enterpriseLicense:
+                description: |-
+                  EnterpriseLicense configures the signed enterprise license used by
+                  licensed services such as scheduler and regional-gateway.
+                properties:
+                  secretRef:
+                    description: |-
+                      SecretRef references the secret containing the signed enterprise license.
+                      When omitted, infra-operator falls back to <infra-name>-enterprise-license
+                      with key license.lic for backward compatibility.
+                    properties:
+                      key:
+                        default: password
+                        description: Key is the key in the secret
+                        type: string
+                      name:
+                        description: Name is the name of the secret
+                        type: string
+                    type: object
+                type: object
               initUser:
                 description: InitUser configures the initial admin user
                 properties:

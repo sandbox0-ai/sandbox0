@@ -268,8 +268,8 @@ func TestCompileIncludesStatusProjectionForEnabledComponents(t *testing.T) {
 
 	compiled := Compile(infra)
 
-	if len(compiled.Status.ExpectedConditions) != 6 {
-		t.Fatalf("expected internal-auth/database/global/regional/cluster/registration conditions, got %#v", compiled.Status.ExpectedConditions)
+	if len(compiled.Status.ExpectedConditions) != 5 {
+		t.Fatalf("expected internal-auth/database/global/regional/cluster conditions for a home cluster, got %#v", compiled.Status.ExpectedConditions)
 	}
 	if got := compiled.Status.Endpoints.GlobalGateway; got != "http://demo-global-gateway:18080" {
 		t.Fatalf("unexpected global-gateway endpoint %q", got)
@@ -283,11 +283,102 @@ func TestCompileIncludesStatusProjectionForEnabledComponents(t *testing.T) {
 	if got := compiled.Status.Endpoints.ClusterGateway; got != "http://demo-cluster-gateway:8443" {
 		t.Fatalf("unexpected cluster-gateway endpoint %q", got)
 	}
-	if !compiled.Status.Cluster.Present || compiled.Status.Cluster.ID != "cluster-a" {
-		t.Fatalf("unexpected cluster status projection %#v", compiled.Status.Cluster)
+	if compiled.Status.Cluster.Present {
+		t.Fatalf("did not expect home-cluster status projection to report external registration %#v", compiled.Status.Cluster)
 	}
 	if len(compiled.Status.RetainedResources) != 2 {
 		t.Fatalf("expected retained resource candidates, got %#v", compiled.Status.RetainedResources)
+	}
+}
+
+func TestCompileSkipsClusterRegistrationForCoLocatedHomeCluster(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Cluster: &infrav1alpha1.ClusterConfig{ID: "cluster-a"},
+			Services: &infrav1alpha1.ServicesConfig{
+				RegionalGateway: &infrav1alpha1.RegionalGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+				Scheduler: &infrav1alpha1.SchedulerServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+				ClusterGateway: &infrav1alpha1.ClusterGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+				Manager: &infrav1alpha1.ManagerServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+			},
+		},
+	}
+
+	compiled := Compile(infra)
+
+	if compiled.Components.EnableClusterRegistration {
+		t.Fatal("did not expect co-located home cluster to enable external cluster registration")
+	}
+	if compiled.Status.Cluster.Present {
+		t.Fatalf("did not expect cluster registration status projection, got %#v", compiled.Status.Cluster)
+	}
+	if containsString(compiled.Status.ExpectedConditions, infrav1alpha1.ConditionTypeClusterRegistered) {
+		t.Fatalf("did not expect cluster registration condition for a co-located home cluster, got %#v", compiled.Status.ExpectedConditions)
+	}
+	if containsString(workflowStepNames(compiled.Workflow.Steps), "register-cluster") {
+		t.Fatalf("did not expect register-cluster workflow step for a co-located home cluster, got %#v", workflowStepNames(compiled.Workflow.Steps))
+	}
+}
+
+func TestCompileEnablesClusterRegistrationForExternalDataPlaneCluster(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			ControlPlane: &infrav1alpha1.ControlPlaneConfig{
+				URL: "https://control-plane.example.com",
+			},
+			Cluster: &infrav1alpha1.ClusterConfig{ID: "cluster-a"},
+			Services: &infrav1alpha1.ServicesConfig{
+				ClusterGateway: &infrav1alpha1.ClusterGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+				Manager: &infrav1alpha1.ManagerServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+			},
+		},
+	}
+
+	compiled := Compile(infra)
+
+	if !compiled.Components.EnableClusterRegistration {
+		t.Fatal("expected external data-plane cluster to enable cluster registration")
+	}
+	if !compiled.Status.Cluster.Present || compiled.Status.Cluster.ID != "cluster-a" {
+		t.Fatalf("expected cluster status projection for external data-plane cluster, got %#v", compiled.Status.Cluster)
+	}
+	if !containsString(compiled.Status.ExpectedConditions, infrav1alpha1.ConditionTypeClusterRegistered) {
+		t.Fatalf("expected cluster registration condition, got %#v", compiled.Status.ExpectedConditions)
+	}
+	if !containsString(workflowStepNames(compiled.Workflow.Steps), "register-cluster") {
+		t.Fatalf("expected register-cluster workflow step, got %#v", workflowStepNames(compiled.Workflow.Steps))
 	}
 }
 

@@ -148,7 +148,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		},
 	}
 	if compiledPlan.Enterprise.Scheduler {
-		volumeMounts, volumes = common.AppendEnterpriseLicenseVolume(infra.Name, config.LicenseFile, volumeMounts, volumes)
+		volumeMounts, volumes = common.AppendEnterpriseLicenseVolume(infra, config.LicenseFile, volumeMounts, volumes)
 	}
 
 	// Create deployment

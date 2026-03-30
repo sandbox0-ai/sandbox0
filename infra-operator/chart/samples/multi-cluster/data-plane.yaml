@@ -10,6 +10,12 @@ metadata:
   name: s0dp
   namespace: sandbox0-system
 spec:
+  # Optional explicit enterprise license reference. When omitted, infra-operator
+  # falls back to s0dp-enterprise-license / license.lic.
+  # enterpriseLicense:
+  #   secretRef:
+  #     name: s0dp-enterprise-license
+  #     key: license.lic
   database:
     # Must match the control plane database.
     type: external

@@ -103,6 +103,11 @@ type Sandbox0InfraSpec struct {
 	// +optional
 	InternalAuth *InternalAuthConfig `json:"internalAuth,omitempty"`
 
+	// EnterpriseLicense configures the signed enterprise license used by
+	// licensed services such as scheduler and regional-gateway.
+	// +optional
+	EnterpriseLicense *EnterpriseLicenseConfig `json:"enterpriseLicense,omitempty"`
+
 	// Services configures individual services
 	// +optional
 	// +kubebuilder:default={}
@@ -740,6 +745,15 @@ type KeyPairSecretRef struct {
 	// PublicKeyKey is the key for public key
 	// +kubebuilder:default="public.key"
 	PublicKeyKey string `json:"publicKeyKey,omitempty"`
+}
+
+// EnterpriseLicenseConfig defines the signed enterprise license source.
+type EnterpriseLicenseConfig struct {
+	// SecretRef references the secret containing the signed enterprise license.
+	// When omitted, infra-operator falls back to <infra-name>-enterprise-license
+	// with key license.lic for backward compatibility.
+	// +optional
+	SecretRef SecretKeyRef `json:"secretRef,omitempty"`
 }
 
 // ServicesConfig defines configuration for all services

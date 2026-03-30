@@ -22,6 +22,20 @@ func EnterpriseLicenseSecretName(infraName string) string {
 	return fmt.Sprintf("%s-enterprise-license", infraName)
 }
 
+// ResolveEnterpriseLicenseSecretRef returns the configured enterprise license
+// secret reference with backward-compatible defaults applied.
+func ResolveEnterpriseLicenseSecretRef(infra *infrav1alpha1.Sandbox0Infra) infrav1alpha1.SecretKeyRef {
+	ref := infrav1alpha1.SecretKeyRef{}
+	defaultName := ""
+	if infra != nil {
+		defaultName = EnterpriseLicenseSecretName(infra.Name)
+		if infra.Spec.EnterpriseLicense != nil {
+			ref = infra.Spec.EnterpriseLicense.SecretRef
+		}
+	}
+	return ResolveSecretKeyRef(ref, defaultName, EnterpriseLicenseSecretKey)
+}
+
 func EnsureEnterpriseLicense(
 	ctx context.Context,
 	resources *ResourceManager,
@@ -38,10 +52,7 @@ func EnsureEnterpriseLicense(
 		*licenseFile = EnterpriseLicenseDefaultPath
 	}
 
-	_, err := GetSecretValue(ctx, resources.Client, infra.Namespace, infrav1alpha1.SecretKeyRef{
-		Name: EnterpriseLicenseSecretName(infra.Name),
-		Key:  EnterpriseLicenseSecretKey,
-	})
+	_, err := GetSecretValue(ctx, resources.Client, infra.Namespace, ResolveEnterpriseLicenseSecretRef(infra))
 	if err != nil {
 		return fmt.Errorf("enterprise license secret is required for %s: %w", reason, err)
 	}
@@ -58,7 +69,7 @@ func NormalizeEnterpriseLicenseFile(licenseFile *string, required bool) {
 }
 
 func AppendEnterpriseLicenseVolume(
-	infraName string,
+	infra *infrav1alpha1.Sandbox0Infra,
 	licenseFile string,
 	volumeMounts []corev1.VolumeMount,
 	volumes []corev1.Volume,
@@ -68,21 +79,22 @@ func AppendEnterpriseLicenseVolume(
 		mountPath = EnterpriseLicenseDefaultPath
 	}
 
+	secretRef := ResolveEnterpriseLicenseSecretRef(infra)
 	volumeMounts = append(volumeMounts, corev1.VolumeMount{
 		Name:      "enterprise-license",
 		MountPath: mountPath,
-		SubPath:   EnterpriseLicenseSecretKey,
+		SubPath:   secretRef.Key,
 		ReadOnly:  true,
 	})
 	volumes = append(volumes, corev1.Volume{
 		Name: "enterprise-license",
 		VolumeSource: corev1.VolumeSource{
 			Secret: &corev1.SecretVolumeSource{
-				SecretName: EnterpriseLicenseSecretName(infraName),
+				SecretName: secretRef.Name,
 				Items: []corev1.KeyToPath{
 					{
-						Key:  EnterpriseLicenseSecretKey,
-						Path: EnterpriseLicenseSecretKey,
+						Key:  secretRef.Key,
+						Path: secretRef.Key,
 					},
 				},
 			},

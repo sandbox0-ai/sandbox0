@@ -283,8 +283,8 @@ func TestCompileIncludesStatusProjectionForEnabledComponents(t *testing.T) {
 	if got := compiled.Status.Endpoints.ClusterGateway; got != "http://demo-cluster-gateway:8443" {
 		t.Fatalf("unexpected cluster-gateway endpoint %q", got)
 	}
-	if compiled.Status.Cluster.Present {
-		t.Fatalf("did not expect home-cluster status projection to report external registration %#v", compiled.Status.Cluster)
+	if !compiled.Status.Cluster.Present || compiled.Status.Cluster.ID != "cluster-a" {
+		t.Fatalf("expected projected home-cluster metadata, got %#v", compiled.Status.Cluster)
 	}
 	if len(compiled.Status.RetainedResources) != 2 {
 		t.Fatalf("expected retained resource candidates, got %#v", compiled.Status.RetainedResources)
@@ -329,8 +329,8 @@ func TestCompileSkipsClusterRegistrationForCoLocatedHomeCluster(t *testing.T) {
 	if compiled.Components.EnableClusterRegistration {
 		t.Fatal("did not expect co-located home cluster to enable external cluster registration")
 	}
-	if compiled.Status.Cluster.Present {
-		t.Fatalf("did not expect cluster registration status projection, got %#v", compiled.Status.Cluster)
+	if !compiled.Status.Cluster.Present || compiled.Status.Cluster.ID != "cluster-a" {
+		t.Fatalf("expected co-located home cluster metadata projection, got %#v", compiled.Status.Cluster)
 	}
 	if containsString(compiled.Status.ExpectedConditions, infrav1alpha1.ConditionTypeClusterRegistered) {
 		t.Fatalf("did not expect cluster registration condition for a co-located home cluster, got %#v", compiled.Status.ExpectedConditions)

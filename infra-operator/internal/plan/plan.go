@@ -607,7 +607,7 @@ func compileEndpointStatusPlan(compiled *InfraPlan) EndpointStatusPlan {
 
 func compileClusterStatusPlan(compiled *InfraPlan) ClusterStatusPlan {
 	infra := compiledInfra(compiled)
-	if compiled == nil || infra == nil || !compiled.Components.EnableClusterRegistration || infra.Spec.Cluster == nil {
+	if compiled == nil || infra == nil || infra.Spec.Cluster == nil {
 		return ClusterStatusPlan{}
 	}
 	return ClusterStatusPlan{

@@ -45,7 +45,7 @@ type RegionalGatewayConfig struct {
 
 	// Scheduler configuration (optional, for multi-cluster mode)
 	// +optional
-	SchedulerEnabled bool `yaml:"scheduler_enabled" json:"schedulerEnabled"`
+	SchedulerEnabled bool `yaml:"scheduler_enabled" json:"-"`
 	// +optional
 	SchedulerURL string `yaml:"scheduler_url" json:"schedulerUrl"`
 	// License file path used to unlock enterprise features.

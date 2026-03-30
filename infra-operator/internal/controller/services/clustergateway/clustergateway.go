@@ -270,7 +270,7 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		cfg.StorageProxyURL = ""
 	}
 
-	if infra.Spec.InitUser != nil {
+	if infra.Spec.InitUser != nil && clusterGatewayPublicAuthEnabled(cfg.AuthMode) {
 		secretRef := common.ResolveSecretKeyRef(infra.Spec.InitUser.PasswordSecret, "admin-password", "password")
 		password, err := common.GetSecretValue(ctx, r.Resources.Client, infra.Namespace, secretRef)
 		if err != nil {

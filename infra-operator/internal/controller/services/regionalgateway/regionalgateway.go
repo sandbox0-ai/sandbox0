@@ -229,7 +229,11 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	}
 	cfg.DefaultClusterGatewayURL = compiledPlan.RegionalGateway.DefaultClusterGatewayURL
 
-	if infra.Spec.InitUser != nil {
+	authMode := strings.TrimSpace(strings.ToLower(cfg.AuthMode))
+	if authMode == "" {
+		authMode = "self_hosted"
+	}
+	if infra.Spec.InitUser != nil && authMode != "federated_global" {
 		secretRef := common.ResolveSecretKeyRef(infra.Spec.InitUser.PasswordSecret, "admin-password", "password")
 		password, err := common.GetSecretValue(ctx, r.Resources.Client, infra.Namespace, secretRef)
 		if err != nil {

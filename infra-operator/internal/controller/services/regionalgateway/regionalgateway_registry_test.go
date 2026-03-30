@@ -193,3 +193,68 @@ func TestBuildConfigUsesCompiledPlanForDefaultClusterGatewayURL(t *testing.T) {
 		t.Fatalf("expected cluster gateway URL %q, got %q", compiled.RegionalGateway.DefaultClusterGatewayURL, got)
 	}
 }
+
+func TestBuildConfigSkipsInitUserForFederatedGlobalAuth(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to add corev1 scheme: %v", err)
+	}
+	if err := infrav1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to add infra scheme: %v", err)
+	}
+
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "s0cp",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			InitUser: &infrav1alpha1.InitUserConfig{
+				Email: "admin@example.com",
+			},
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeExternal,
+				External: &infrav1alpha1.ExternalDatabaseConfig{
+					Host:     "postgres.example.internal",
+					Port:     5432,
+					Database: "sandbox0",
+					Username: "sandbox0",
+					PasswordSecret: infrav1alpha1.SecretKeyRef{
+						Name: "regional-db",
+						Key:  "password",
+					},
+				},
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				RegionalGateway: &infrav1alpha1.RegionalGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					Config: &infrav1alpha1.RegionalGatewayConfig{
+						AuthMode: "federated_global",
+					},
+				},
+			},
+		},
+	}
+	dbSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "regional-db",
+			Namespace: "sandbox0-system",
+		},
+		Data: map[string][]byte{
+			"password": []byte("secret"),
+		},
+	}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dbSecret).Build()
+	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
+
+	cfg, _, err := reconciler.buildConfig(context.Background(), infra, infraplan.Compile(infra))
+	if err != nil {
+		t.Fatalf("buildConfig returned error: %v", err)
+	}
+	if cfg.BuiltInAuth.InitUser != nil {
+		t.Fatalf("expected init user to be omitted for federated_global mode, got %#v", cfg.BuiltInAuth.InitUser)
+	}
+}

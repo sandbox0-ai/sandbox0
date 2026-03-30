@@ -542,6 +542,37 @@ func TestCompileTracksValidationRequirements(t *testing.T) {
 			t.Fatalf("expected netd/manager validation error, got %#v", compiled.Validation.FatalErrors)
 		}
 	})
+
+	t.Run("init user is invalid for federated regional gateways", func(t *testing.T) {
+		infra := &infrav1alpha1.Sandbox0Infra{
+			Spec: infrav1alpha1.Sandbox0InfraSpec{
+				InitUser: &infrav1alpha1.InitUserConfig{
+					Email: "admin@example.com",
+				},
+				Database: &infrav1alpha1.DatabaseConfig{
+					Type: infrav1alpha1.DatabaseTypeBuiltin,
+				},
+				Services: &infrav1alpha1.ServicesConfig{
+					RegionalGateway: &infrav1alpha1.RegionalGatewayServiceConfig{
+						WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+							EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						},
+						Config: &infrav1alpha1.RegionalGatewayConfig{
+							AuthMode: "federated_global",
+						},
+					},
+				},
+			},
+		}
+
+		compiled := Compile(infra)
+		if compiled.Components.EnableInitUser {
+			t.Fatal("expected init user to be disabled for federated regional gateways")
+		}
+		if !containsString(compiled.Validation.FatalErrors, "initUser requires globalGateway, regionalGateway.authMode=self_hosted, or clusterGateway authMode public/both") {
+			t.Fatalf("expected init-user topology validation error, got %#v", compiled.Validation.FatalErrors)
+		}
+	})
 }
 
 func TestCompileTracksWorkflowRequirements(t *testing.T) {

@@ -12,9 +12,10 @@ import (
 )
 
 const (
-	defaultManagerHTTPPort        = 8080
-	defaultClusterGatewayHTTPPort = 8443
-	defaultClusterGatewayAuthMode = "internal"
+	defaultManagerHTTPPort         = 8080
+	defaultClusterGatewayHTTPPort  = 8443
+	defaultClusterGatewayAuthMode  = "internal"
+	defaultRegionalGatewayAuthMode = "self_hosted"
 )
 
 type InfraPlan struct {
@@ -181,7 +182,7 @@ func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 		EnableDatabase:            enableDatabase,
 		EnableStorage:             infrav1alpha1.IsStorageEnabled(infra),
 		EnableRegistry:            infrav1alpha1.IsRegistryEnabled(infra),
-		EnableInitUser:            enableDatabase && infra != nil && infra.Spec.InitUser != nil,
+		EnableInitUser:            enableDatabase && initUserConsumerEnabled(infra),
 		EnableClusterRegistration: hasDataPlane && infra != nil && infra.Spec.Cluster != nil && infra.Spec.ControlPlane != nil,
 	}
 }
@@ -311,6 +312,9 @@ func compileValidationPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPl
 	}
 	if compiled != nil && compiled.Components.EnableNetd && netdEgressAuthEnabled(infra) && !compiled.Components.EnableManager {
 		plan.FatalErrors = append(plan.FatalErrors, "netd egress auth requires manager to be enabled")
+	}
+	if infra.Spec.InitUser != nil && (compiled == nil || compiled.Components.EnableDatabase) && !initUserConsumerEnabled(infra) {
+		plan.FatalErrors = append(plan.FatalErrors, "initUser requires globalGateway, regionalGateway.authMode=self_hosted, or clusterGateway authMode public/both")
 	}
 
 	return plan
@@ -768,6 +772,38 @@ func clusterGatewayAuthMode(infra *infrav1alpha1.Sandbox0Infra) string {
 		return defaultClusterGatewayAuthMode
 	}
 	return mode
+}
+
+func regionalGatewayAuthMode(infra *infrav1alpha1.Sandbox0Infra) string {
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.RegionalGateway == nil {
+		return defaultRegionalGatewayAuthMode
+	}
+
+	mode := ""
+	if infra.Spec.Services.RegionalGateway.Config != nil {
+		mode = infra.Spec.Services.RegionalGateway.Config.AuthMode
+	}
+	mode = strings.TrimSpace(strings.ToLower(mode))
+	if mode == "" {
+		return defaultRegionalGatewayAuthMode
+	}
+	return mode
+}
+
+func initUserConsumerEnabled(infra *infrav1alpha1.Sandbox0Infra) bool {
+	if infra == nil || infra.Spec.InitUser == nil {
+		return false
+	}
+	if infrav1alpha1.IsGlobalGatewayEnabled(infra) {
+		return true
+	}
+	if infrav1alpha1.IsRegionalGatewayEnabled(infra) && regionalGatewayAuthMode(infra) != "federated_global" {
+		return true
+	}
+	if infrav1alpha1.IsClusterGatewayEnabled(infra) && clusterGatewayPublicAuthEnabled(clusterGatewayAuthMode(infra)) {
+		return true
+	}
+	return false
 }
 
 func regionalGatewayEnterpriseLicenseRequired(infra *infrav1alpha1.Sandbox0Infra) bool {

@@ -28,6 +28,12 @@ const singleClusterConfig: DashboardRuntimeConfig = {
   singleClusterURL: "https://single.example.com",
 };
 
+const globalGatewayConfig: DashboardRuntimeConfig = {
+  mode: "global-gateway",
+  siteURL: "https://sandbox0.ai",
+  globalGatewayURL: "https://global.example.com",
+};
+
 test("resolveDashboardAuthProviders parses builtin and oidc providers", async () => {
   const result = await resolveDashboardAuthProviders(
     singleClusterConfig,
@@ -127,6 +133,51 @@ test("resolveDashboardHomeEntry falls back to /login when multiple oidc provider
   });
 });
 
+test("resolveDashboardHomeEntry allows system admins through when onboarding is blocked on missing regions", async () => {
+  const result = await resolveDashboardHomeEntry(
+    globalGatewayConfig,
+    {
+      get(name: string) {
+        if (name === "sandbox0_access_token") {
+          return { value: "access-token" };
+        }
+        return undefined;
+      },
+    },
+    {
+      fetchImpl: async (input) => {
+        const url = String(input);
+        if (url === "https://global.example.com/users/me") {
+          return new Response(
+            JSON.stringify({
+              data: {
+                id: "u_admin",
+                email: "admin@example.com",
+                name: "Admin",
+                default_team_id: null,
+                email_verified: true,
+                is_admin: true,
+              },
+            }),
+          );
+        }
+        if (url === "https://global.example.com/teams") {
+          return new Response(JSON.stringify({ data: { teams: [] } }));
+        }
+        throw new Error(`unexpected url ${url}`);
+      },
+    },
+  );
+
+  assert.equal(result.kind, "render");
+  if (result.kind !== "render") {
+    return;
+  }
+  assert.equal(result.session.authenticated, true);
+  assert.equal(result.session.needsOnboarding, true);
+  assert.equal(result.session.user?.isAdmin, true);
+});
+
 test("resolveDashboardLoginEntry reuses external auth portal url", async () => {
   const result = await resolveDashboardLoginEntry(
     singleClusterConfig,
@@ -153,6 +204,48 @@ test("resolveDashboardLoginEntry reuses external auth portal url", async () => {
   assert.deepEqual(result, {
     kind: "redirect",
     location: "https://portal.example.com/login",
+  });
+});
+
+test("resolveDashboardLoginEntry sends authenticated system admins to home even when onboarding is pending", async () => {
+  const result = await resolveDashboardLoginEntry(
+    globalGatewayConfig,
+    {
+      get(name: string) {
+        if (name === "sandbox0_access_token") {
+          return { value: "access-token" };
+        }
+        return undefined;
+      },
+    },
+    {
+      fetchImpl: async (input) => {
+        const url = String(input);
+        if (url === "https://global.example.com/users/me") {
+          return new Response(
+            JSON.stringify({
+              data: {
+                id: "u_admin",
+                email: "admin@example.com",
+                name: "Admin",
+                default_team_id: null,
+                email_verified: true,
+                is_admin: true,
+              },
+            }),
+          );
+        }
+        if (url === "https://global.example.com/teams") {
+          return new Response(JSON.stringify({ data: { teams: [] } }));
+        }
+        throw new Error(`unexpected url ${url}`);
+      },
+    },
+  );
+
+  assert.deepEqual(result, {
+    kind: "redirect",
+    location: "/",
   });
 });
 

@@ -12,23 +12,36 @@ import (
 )
 
 var (
-	ErrInvalidCredentials   = errors.New("invalid email or password")
-	ErrRegistrationDisabled = errors.New("registration is disabled")
-	ErrEmailAlreadyExists   = errors.New("email already exists")
-	ErrBuiltInAuthDisabled  = errors.New("built-in authentication is disabled")
-	ErrAdminOnlyAuth        = errors.New("only admin accounts can use built-in auth")
-	ErrPasswordTooWeak      = errors.New("password must be at least 8 characters")
+	ErrInvalidCredentials      = errors.New("invalid email or password")
+	ErrRegistrationDisabled    = errors.New("registration is disabled")
+	ErrEmailAlreadyExists      = errors.New("email already exists")
+	ErrBuiltInAuthDisabled     = errors.New("built-in authentication is disabled")
+	ErrAdminOnlyAuth           = errors.New("only admin accounts can use built-in auth")
+	ErrPasswordTooWeak         = errors.New("password must be at least 8 characters")
+	ErrInitUserPasswordMissing = errors.New("init user password is required when built-in authentication is enabled")
 )
+
+type identityStore interface {
+	GetUserByEmail(ctx context.Context, email string) (*identity.User, error)
+	CreateUserWithDefaultTeam(ctx context.Context, user *identity.User, teamName string, homeRegionID *string) (*identity.Team, *identity.TeamMember, error)
+	GetUserByID(ctx context.Context, id string) (*identity.User, error)
+	UpdateUserPassword(ctx context.Context, userID, passwordHash string) error
+	CountUsers(ctx context.Context) (int64, error)
+	CreateUser(ctx context.Context, user *identity.User) error
+	CreateTeam(ctx context.Context, team *identity.Team) error
+	AddTeamMember(ctx context.Context, member *identity.TeamMember) error
+	UpdateUser(ctx context.Context, user *identity.User) error
+}
 
 // Provider handles built-in email/password authentication
 type Provider struct {
-	repo            *identity.Repository
+	repo            identityStore
 	config          *config.BuiltInAuthConfig
 	defaultTeamName string
 }
 
 // NewProvider creates a new built-in auth provider
-func NewProvider(repo *identity.Repository, cfg *config.BuiltInAuthConfig, defaultTeamName string) *Provider {
+func NewProvider(repo identityStore, cfg *config.BuiltInAuthConfig, defaultTeamName string) *Provider {
 	return &Provider{
 		repo:            repo,
 		config:          cfg,
@@ -172,16 +185,22 @@ func (p *Provider) EnsureInitUser(ctx context.Context) error {
 		return nil
 	}
 
-	// Create initial user
-	passwordHash, err := bcrypt.GenerateFromPassword([]byte(p.config.InitUser.Password), bcrypt.DefaultCost)
-	if err != nil {
-		return fmt.Errorf("hash password: %w", err)
+	passwordHash := ""
+	if p.config.Enabled {
+		if strings.TrimSpace(p.config.InitUser.Password) == "" {
+			return ErrInitUserPasswordMissing
+		}
+		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(p.config.InitUser.Password), bcrypt.DefaultCost)
+		if err != nil {
+			return fmt.Errorf("hash password: %w", err)
+		}
+		passwordHash = string(hashedPassword)
 	}
 
 	user := &identity.User{
 		Email:         p.config.InitUser.Email,
 		Name:          p.config.InitUser.Name,
-		PasswordHash:  string(passwordHash),
+		PasswordHash:  passwordHash,
 		EmailVerified: true,
 		IsAdmin:       true,
 	}

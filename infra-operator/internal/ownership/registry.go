@@ -91,7 +91,7 @@ func Registry() []Entry {
 		exact("spec.publicExposure.regionId", "plan", []string{"global-gateway", "cluster-gateway", "manager"}, nil, UpdateSemanticsDeclarative, "Public DNS-safe region label feeds generated external URLs and callbacks."),
 
 		prefix("spec.cluster", "plan", []string{"manager", "netd", "status"}, []string{"InfraPlan.Manager.DefaultClusterID", "InfraPlan.Netd.ClusterID", "cluster registration"}, UpdateSemanticsDeclarative, "Cluster identity and capacity metadata propagated into manager, netd, and registration status."),
-		prefix("spec.initUser", "plan", []string{"global-gateway", "regional-gateway", "cluster-gateway", "database", "status"}, []string{"InfraPlan.Components.EnableInitUser"}, UpdateSemanticsDeclarative, "Initial admin bootstrap for self-hosted installs. Ignored for federated regional gateways and internal-only cluster gateways."),
+		prefix("spec.initUser", "plan", []string{"global-gateway", "regional-gateway", "cluster-gateway", "database"}, []string{"InfraPlan.Components.EnableInitUser"}, UpdateSemanticsDeclarative, "Initial admin bootstrap for self-hosted installs. Ignored for federated regional gateways and internal-only cluster gateways."),
 		prefix("spec.builtinTemplates", "manager", []string{"manager", "scheduler"}, nil, UpdateSemanticsDeclarative, "Builtin template seeds consumed by manager and scheduler template stores."),
 	}
 }

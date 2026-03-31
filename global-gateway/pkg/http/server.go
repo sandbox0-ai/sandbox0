@@ -88,7 +88,7 @@ func NewServer(
 			logger.Warn("Failed to initialize OIDC manager", zap.Error(err))
 		}
 	}
-	if cfg.BuiltInAuth.Enabled && cfg.BuiltInAuth.InitUser != nil {
+	if cfg.BuiltInAuth.InitUser != nil && (cfg.BuiltInAuth.Enabled || oidcConfigured) {
 		if userCount, err := identityRepo.CountUsers(context.Background()); err == nil && userCount == 0 {
 			homeRegionID := strings.TrimSpace(cfg.BuiltInAuth.InitUser.HomeRegionID)
 			if err := handlers.ValidateInitUserHomeRegion(context.Background(), regionRepo, homeRegionID); err != nil {

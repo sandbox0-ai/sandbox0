@@ -234,10 +234,14 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		authMode = "self_hosted"
 	}
 	if infra.Spec.InitUser != nil && authMode != "federated_global" {
-		secretRef := common.ResolveSecretKeyRef(infra.Spec.InitUser.PasswordSecret, "admin-password", "password")
-		password, err := common.GetSecretValue(ctx, r.Resources.Client, infra.Namespace, secretRef)
-		if err != nil {
-			return nil, nil, err
+		password := ""
+		if cfg.BuiltInAuth.Enabled || !apiconfig.HasEnabledOIDCProviders(cfg.OIDCProviders) {
+			secretRef := common.ResolveSecretKeyRef(infra.Spec.InitUser.PasswordSecret, "admin-password", "password")
+			var err error
+			password, err = common.GetSecretValue(ctx, r.Resources.Client, infra.Namespace, secretRef)
+			if err != nil {
+				return nil, nil, err
+			}
 		}
 
 		cfg.BuiltInAuth.InitUser = &apiconfig.InitUserConfig{

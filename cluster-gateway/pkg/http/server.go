@@ -227,7 +227,7 @@ func NewServer(
 				logger.Warn("Failed to initialize OIDC manager", zap.Error(err))
 			}
 		}
-		if cfg.BuiltInAuth.Enabled && cfg.BuiltInAuth.InitUser != nil {
+		if cfg.BuiltInAuth.InitUser != nil && (cfg.BuiltInAuth.Enabled || oidcConfigured) {
 			if err := builtinProvider.EnsureInitUser(context.Background()); err != nil {
 				logger.Warn("Failed to ensure init user", zap.Error(err))
 			}

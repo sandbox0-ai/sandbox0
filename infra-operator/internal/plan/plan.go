@@ -482,9 +482,6 @@ func compileStatusPlan(compiled *InfraPlan) StatusPlan {
 	if components.EnableFusePlugin {
 		expected = append(expected, infrav1alpha1.ConditionTypeFusePluginReady)
 	}
-	if components.EnableInitUser {
-		expected = append(expected, infrav1alpha1.ConditionTypeInitUserReady)
-	}
 	if components.EnableClusterRegistration {
 		expected = append(expected, infrav1alpha1.ConditionTypeClusterRegistered)
 	}
@@ -542,7 +539,7 @@ func compileWorkflowPlan(compiled *InfraPlan) WorkflowPlan {
 	if compiled.Components.EnableGlobalGateway {
 		appendSuccessStep("global-gateway", infrav1alpha1.ConditionTypeGlobalGatewayReady, "GlobalGatewayReady", "Global gateway is ready", "GlobalGatewayFailed")
 	}
-	if compiled.Components.EnableInitUser {
+	if compiled.Components.EnableInitUser && InitUserPasswordSecretRequired(compiled.infra) {
 		appendSuccessStep("init-user-secret", infrav1alpha1.ConditionTypeSecretsGenerated, "InitUserSecretReady", "Init user password secret is ready", "InitUserSecretFailed")
 	}
 	if compiled.Components.EnableRegionalGateway && compiled.Enterprise.RegionalGateway {
@@ -579,9 +576,6 @@ func compileWorkflowPlan(compiled *InfraPlan) WorkflowPlan {
 	if compiled.Components.EnableStorageProxy {
 		appendCheckStep("storage-proxy-rbac", infrav1alpha1.ConditionTypeStorageProxyReady, "StorageProxyRBACFailed")
 		appendSuccessStep("storage-proxy", infrav1alpha1.ConditionTypeStorageProxyReady, "StorageProxyReady", "Storage proxy is ready", "StorageProxyFailed")
-	}
-	if compiled.Components.EnableInitUser {
-		appendSuccessStep("init-user", infrav1alpha1.ConditionTypeInitUserReady, "InitUserReady", "Initial admin user created", "InitUserFailed")
 	}
 	if compiled.Components.EnableClusterRegistration {
 		appendSuccessStep("register-cluster", infrav1alpha1.ConditionTypeClusterRegistered, "ClusterRegistered", "Cluster registration completed", "ClusterRegistrationFailed")
@@ -804,6 +798,46 @@ func initUserConsumerEnabled(infra *infrav1alpha1.Sandbox0Infra) bool {
 		return true
 	}
 	return false
+}
+
+func InitUserPasswordSecretRequired(infra *infrav1alpha1.Sandbox0Infra) bool {
+	if infra == nil || infra.Spec.InitUser == nil {
+		return false
+	}
+	if infrav1alpha1.IsGlobalGatewayEnabled(infra) && globalGatewayInitUserPasswordRequired(infra) {
+		return true
+	}
+	if infrav1alpha1.IsRegionalGatewayEnabled(infra) && regionalGatewayAuthMode(infra) != "federated_global" && regionalGatewayInitUserPasswordRequired(infra) {
+		return true
+	}
+	if infrav1alpha1.IsClusterGatewayEnabled(infra) && clusterGatewayPublicAuthEnabled(clusterGatewayAuthMode(infra)) && clusterGatewayInitUserPasswordRequired(infra) {
+		return true
+	}
+	return false
+}
+
+func globalGatewayInitUserPasswordRequired(infra *infrav1alpha1.Sandbox0Infra) bool {
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.GlobalGateway == nil || infra.Spec.Services.GlobalGateway.Config == nil {
+		return true
+	}
+	cfg := infra.Spec.Services.GlobalGateway.Config
+	return cfg.BuiltInAuth.Enabled || !hasEnabledOIDCProviders(cfg.OIDCProviders)
+}
+
+func regionalGatewayInitUserPasswordRequired(infra *infrav1alpha1.Sandbox0Infra) bool {
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.RegionalGateway == nil || infra.Spec.Services.RegionalGateway.Config == nil {
+		return true
+	}
+	cfg := infra.Spec.Services.RegionalGateway.Config
+	return cfg.BuiltInAuth.Enabled || !hasEnabledOIDCProviders(cfg.OIDCProviders)
+}
+
+func clusterGatewayInitUserPasswordRequired(infra *infrav1alpha1.Sandbox0Infra) bool {
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.ClusterGateway == nil || infra.Spec.Services.ClusterGateway.Config == nil {
+		return true
+	}
+	cfg := infra.Spec.Services.ClusterGateway.Config
+	return cfg.BuiltInAuth.Enabled || !hasEnabledOIDCProviders(cfg.OIDCProviders)
 }
 
 func regionalGatewayEnterpriseLicenseRequired(infra *infrav1alpha1.Sandbox0Infra) bool {

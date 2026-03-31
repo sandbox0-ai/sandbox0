@@ -155,3 +155,84 @@ func TestBuildConfigSkipsInitUserForInternalOnlyClusterGateway(t *testing.T) {
 		t.Fatalf("expected init user to be omitted for internal-only cluster gateway, got %#v", cfg.BuiltInAuth.InitUser)
 	}
 }
+
+func TestBuildConfigLeavesInitUserPasswordEmptyForOIDCOnlyBootstrap(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	if err := infrav1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add infra scheme: %v", err)
+	}
+
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			InitUser: &infrav1alpha1.InitUserConfig{
+				Email: "admin@example.com",
+			},
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeBuiltin,
+				Builtin: &infrav1alpha1.BuiltinDatabaseConfig{
+					Enabled:  true,
+					Port:     5432,
+					Username: "sandbox0",
+					Database: "sandbox0",
+					SSLMode:  "disable",
+				},
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				ClusterGateway: &infrav1alpha1.ClusterGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					Config: &infrav1alpha1.ClusterGatewayConfig{
+						AuthMode: "public",
+						GatewayConfig: infrav1alpha1.GatewayConfig{
+							BuiltInAuth: infrav1alpha1.BuiltInAuthConfig{
+								Enabled: false,
+							},
+							OIDCProviders: []infrav1alpha1.OIDCProviderConfig{
+								{Enabled: true},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(
+			infra.DeepCopy(),
+			&corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "demo-sandbox0-database-credentials",
+					Namespace: infra.Namespace,
+				},
+				Data: map[string][]byte{
+					"username": []byte("sandbox0"),
+					"password": []byte("db-password"),
+					"database": []byte("sandbox0"),
+					"port":     []byte("5432"),
+				},
+			},
+		).
+		Build()
+
+	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
+	cfg, err := reconciler.buildConfig(context.Background(), infra)
+	if err != nil {
+		t.Fatalf("buildConfig returned error: %v", err)
+	}
+	if cfg.BuiltInAuth.InitUser == nil {
+		t.Fatal("expected init user config")
+	}
+	if cfg.BuiltInAuth.InitUser.Password != "" {
+		t.Fatalf("expected oidc-only init user password to be empty, got %q", cfg.BuiltInAuth.InitUser.Password)
+	}
+}

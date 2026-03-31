@@ -388,8 +388,6 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 		return func(ctx context.Context) error {
 			return storageProxyReconciler.Reconcile(ctx, infra, imageRepo, imageTag)
 		}, nil
-	case "init-user":
-		return func(ctx context.Context) error { return r.reconcileInitUser(ctx, infra) }, nil
 	case "register-cluster":
 		return func(ctx context.Context) error { return r.registerCluster(ctx, infra) }, nil
 	default:
@@ -743,7 +741,6 @@ func managedConditionTypeSet() map[string]struct{} {
 		infrav1alpha1.ConditionTypeStorageProxyReady:    {},
 		infrav1alpha1.ConditionTypeNetdReady:            {},
 		infrav1alpha1.ConditionTypeFusePluginReady:      {},
-		infrav1alpha1.ConditionTypeInitUserReady:        {},
 		infrav1alpha1.ConditionTypeClusterRegistered:    {},
 		infrav1alpha1.ConditionTypeSecretsGenerated:     {},
 	}
@@ -763,17 +760,8 @@ func (r *Sandbox0InfraReconciler) setCondition(ctx context.Context, infra *infra
 
 // validateExternalDatabase validates connection to external database
 
-// reconcileInitUser creates the initial admin user
-func (r *Sandbox0InfraReconciler) reconcileInitUser(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
-	// This would typically call an API to create the user
-	// For now, we just log that we would create the user
-	logger := log.FromContext(ctx)
-	logger.Info("Would create init user", "email", infra.Spec.InitUser.Email)
-	return nil
-}
-
 func (r *Sandbox0InfraReconciler) ensureInitUserPasswordSecret(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
-	if infra == nil || infra.Spec.InitUser == nil {
+	if infra == nil || infra.Spec.InitUser == nil || !infraplan.InitUserPasswordSecretRequired(infra) {
 		return nil
 	}
 

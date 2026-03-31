@@ -683,7 +683,6 @@ func TestCompileTracksWorkflowRequirements(t *testing.T) {
 		"netd",
 		"storage-proxy-rbac",
 		"storage-proxy",
-		"init-user",
 		"register-cluster",
 	}
 	if len(got) != len(want) {
@@ -693,6 +692,45 @@ func TestCompileTracksWorkflowRequirements(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("expected workflow step[%d]=%q, got %#v", i, want[i], got)
 		}
+	}
+}
+
+func TestCompileSkipsInitUserSecretStepForOIDCOnlyBootstrap(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			InitUser: &infrav1alpha1.InitUserConfig{
+				Email: "admin@example.com",
+			},
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeBuiltin,
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				GlobalGateway: &infrav1alpha1.GlobalGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					Config: &infrav1alpha1.GlobalGatewayConfig{
+						GatewayConfig: infrav1alpha1.GatewayConfig{
+							BuiltInAuth: infrav1alpha1.BuiltInAuthConfig{
+								Enabled: false,
+							},
+							OIDCProviders: []infrav1alpha1.OIDCProviderConfig{
+								{Enabled: true},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	compiled := Compile(infra)
+	got := workflowStepNames(compiled.Workflow.Steps)
+	if containsString(got, "init-user-secret") {
+		t.Fatalf("expected oidc-only bootstrap to skip init-user-secret, got %#v", got)
+	}
+	if !compiled.Components.EnableInitUser {
+		t.Fatal("expected init user bootstrap to remain enabled")
 	}
 }
 

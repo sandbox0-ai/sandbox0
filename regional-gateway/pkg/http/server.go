@@ -193,8 +193,8 @@ func NewServer(
 		}
 	}
 
-	// Ensure initial user exists (for self-hosted deployments)
-	if selfHostedAuthEnabled && cfg.BuiltInAuth.Enabled && cfg.BuiltInAuth.InitUser != nil {
+	// Ensure the bootstrap admin exists for self-hosted identity, including OIDC-only deployments.
+	if selfHostedAuthEnabled && cfg.BuiltInAuth.InitUser != nil && (cfg.BuiltInAuth.Enabled || oidcConfigured) {
 		if err := builtinProvider.EnsureInitUser(ctx); err != nil {
 			logger.Warn("Failed to ensure init user", zap.Error(err))
 		}

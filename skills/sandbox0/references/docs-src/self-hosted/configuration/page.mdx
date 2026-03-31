@@ -24,6 +24,9 @@ A `Sandbox0Infra` spec is easier to reason about when you split it into five lay
 4. Seed templates and initial admin user.
 5. Only then tune per-service `config` blocks.
 
+`spec.initUser` is consumed by the gateway runtime, not created by the operator itself.
+In local-password mode it bootstraps the first admin credentials; in OIDC-only mode it pre-creates the admin user and default team so the first OIDC login with the same email lands on the intended admin account.
+
 ## Deployment Profiles
 
 | Profile | Typical fields | Use when |

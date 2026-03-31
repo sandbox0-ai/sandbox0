@@ -606,8 +606,9 @@ func (r *Reconciler) reconcileRegistryService(ctx context.Context, infra *infrav
 	labels := common.GetServiceLabels(infra.Name, "registry")
 	serviceType := common.ResolveServiceType(builtin.Service)
 	servicePort := common.ResolveServicePort(builtin.Service, builtin.Port)
+	serviceAnnotations := common.ResolveServiceAnnotations(builtin.Service)
 
-	return r.Resources.ReconcileService(ctx, infra, serviceName, labels, serviceType, servicePort, builtin.Port)
+	return r.Resources.ReconcileService(ctx, infra, serviceName, labels, serviceType, serviceAnnotations, servicePort, builtin.Port)
 }
 
 func resolveBuiltinRegistryConfig(infra *infrav1alpha1.Sandbox0Infra) infrav1alpha1.BuiltinRegistryConfig {

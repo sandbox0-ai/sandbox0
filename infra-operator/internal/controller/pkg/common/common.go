@@ -321,16 +321,23 @@ func ResolveServicePort(config *infrav1alpha1.ServiceNetworkConfig, fallback int
 	return fallback
 }
 
+func ResolveServiceAnnotations(config *infrav1alpha1.ServiceNetworkConfig) map[string]string {
+	if config == nil || len(config.Annotations) == 0 {
+		return nil
+	}
+	return CloneStringMap(config.Annotations)
+}
+
 // ReconcileService creates or updates a service.
 // For NodePort type, the port is also used as NodePort.
-func (r *ResourceManager) ReconcileService(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, labels map[string]string, serviceType corev1.ServiceType, port, targetPort int32) error {
-	return r.ReconcileServicePorts(ctx, infra, name, labels, serviceType, []corev1.ServicePort{
+func (r *ResourceManager) ReconcileService(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, labels map[string]string, serviceType corev1.ServiceType, annotations map[string]string, port, targetPort int32) error {
+	return r.ReconcileServicePorts(ctx, infra, name, labels, serviceType, annotations, []corev1.ServicePort{
 		BuildServicePort("http", port, targetPort, serviceType),
 	})
 }
 
 // ReconcileServicePorts creates or updates a service with multiple ports.
-func (r *ResourceManager) ReconcileServicePorts(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, labels map[string]string, serviceType corev1.ServiceType, ports []corev1.ServicePort) error {
+func (r *ResourceManager) ReconcileServicePorts(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, labels map[string]string, serviceType corev1.ServiceType, annotations map[string]string, ports []corev1.ServicePort) error {
 	if len(ports) == 0 {
 		return fmt.Errorf("service %q requires at least one port", name)
 	}
@@ -344,9 +351,10 @@ func (r *ResourceManager) ReconcileServicePorts(ctx context.Context, infra *infr
 	desiredLabels := EnsureManagedLabels(labels, name)
 	desiredSvc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: infra.Namespace,
-			Labels:    desiredLabels,
+			Name:        name,
+			Namespace:   infra.Namespace,
+			Labels:      desiredLabels,
+			Annotations: CloneStringMap(annotations),
 		},
 		Spec: corev1.ServiceSpec{
 			Type:     serviceType,
@@ -365,6 +373,7 @@ func (r *ResourceManager) ReconcileServicePorts(ctx context.Context, infra *infr
 
 	svc.Spec = desiredSvc.Spec
 	svc.Labels = desiredLabels
+	svc.Annotations = CloneStringMap(annotations)
 	return r.Client.Update(ctx, svc)
 }
 
@@ -400,6 +409,17 @@ func MergeLabels(base map[string]string, overrides map[string]string) map[string
 		out[key] = value
 	}
 	for key, value := range overrides {
+		out[key] = value
+	}
+	return out
+}
+
+func CloneStringMap(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(src))
+	for key, value := range src {
 		out[key] = value
 	}
 	return out

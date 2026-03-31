@@ -2,15 +2,20 @@ package regionalgateway
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -331,4 +336,120 @@ func TestBuildConfigLeavesInitUserPasswordEmptyForOIDCOnlyBootstrap(t *testing.T
 	if cfg.BuiltInAuth.InitUser.Password != "" {
 		t.Fatalf("expected oidc-only init user password to be empty, got %q", cfg.BuiltInAuth.InitUser.Password)
 	}
+}
+
+func TestReconcileAppliesServiceAnnotations(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "s0cp",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeExternal,
+				External: &infrav1alpha1.ExternalDatabaseConfig{
+					Host:     "postgres.example.internal",
+					Port:     5432,
+					Database: "sandbox0",
+					Username: "sandbox0",
+					PasswordSecret: infrav1alpha1.SecretKeyRef{
+						Name: "regional-db",
+						Key:  "password",
+					},
+				},
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				RegionalGateway: &infrav1alpha1.RegionalGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						Replicas:             1,
+					},
+					ServiceExposureConfig: infrav1alpha1.ServiceExposureConfig{
+						Service: &infrav1alpha1.ServiceNetworkConfig{
+							Type: corev1.ServiceTypeLoadBalancer,
+							Port: 443,
+							Annotations: map[string]string{
+								"service.beta.kubernetes.io/aws-load-balancer-ssl-cert":  "arn:aws:acm:us-east-1:123456789012:certificate/example",
+								"service.beta.kubernetes.io/aws-load-balancer-ssl-ports": "443",
+							},
+						},
+					},
+					Config: &infrav1alpha1.RegionalGatewayConfig{},
+				},
+			},
+		},
+	}
+
+	reconciler, client := newRegionalGatewayTestReconciler(t,
+		infra.DeepCopy(),
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "regional-db",
+				Namespace: infra.Namespace,
+			},
+			Data: map[string][]byte{
+				"password": []byte("secret"),
+			},
+		},
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "s0cp-sandbox0-internal-jwt-control-plane",
+				Namespace: infra.Namespace,
+			},
+			Data: map[string][]byte{
+				"private.key": []byte("private-key"),
+				"public.key":  []byte("public-key"),
+			},
+		},
+	)
+
+	if err := reconciler.Reconcile(context.Background(), infra, "sandbox0ai/infra", "latest", nil); err != nil && !strings.Contains(err.Error(), "not ready") {
+		t.Fatalf("reconcile returned unexpected error: %v", err)
+	}
+
+	service := &corev1.Service{}
+	if err := client.Get(context.Background(), types.NamespacedName{
+		Name:      "s0cp-regional-gateway",
+		Namespace: infra.Namespace,
+	}, service); err != nil {
+		t.Fatalf("get service: %v", err)
+	}
+
+	if service.Spec.Type != corev1.ServiceTypeLoadBalancer {
+		t.Fatalf("expected load balancer service, got %s", service.Spec.Type)
+	}
+	if got := service.Annotations["service.beta.kubernetes.io/aws-load-balancer-ssl-cert"]; got != "arn:aws:acm:us-east-1:123456789012:certificate/example" {
+		t.Fatalf("unexpected ssl-cert annotation %q", got)
+	}
+	if got := service.Annotations["service.beta.kubernetes.io/aws-load-balancer-ssl-ports"]; got != "443" {
+		t.Fatalf("unexpected ssl-ports annotation %q", got)
+	}
+	if len(service.Spec.Ports) != 1 || service.Spec.Ports[0].Port != 443 {
+		t.Fatalf("unexpected service ports: %#v", service.Spec.Ports)
+	}
+}
+
+func newRegionalGatewayTestReconciler(t *testing.T, objects ...runtime.Object) (*Reconciler, ctrlclient.Client) {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+	if err := infrav1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add infra scheme: %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add apps scheme: %v", err)
+	}
+	if err := networkingv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add networking scheme: %v", err)
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(objects...).
+		Build()
+
+	return NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{})), client
 }

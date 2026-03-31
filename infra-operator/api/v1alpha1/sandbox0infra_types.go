@@ -1056,6 +1056,12 @@ type ServiceNetworkConfig struct {
 	// Port specifies the service port
 	// +kubebuilder:default=80
 	Port int32 `json:"port,omitempty"`
+
+	// Annotations declares Service metadata annotations.
+	// Use this for cloud-provider specific load balancer configuration such as
+	// ACM certificate attachment on AWS.
+	// +optional
+	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 // IngressConfig defines ingress configuration

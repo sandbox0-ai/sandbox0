@@ -709,10 +709,29 @@ func regionalGatewayIngressConfig(infra *infrav1alpha1.Sandbox0Infra) *infrav1al
 	return nil
 }
 
+func globalGatewayConfiguredBaseURL(infra *infrav1alpha1.Sandbox0Infra) string {
+	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.GlobalGateway != nil &&
+		infra.Spec.Services.GlobalGateway.Config != nil {
+		return strings.TrimSpace(infra.Spec.Services.GlobalGateway.Config.BaseURL)
+	}
+	return ""
+}
+
+func regionalGatewayConfiguredBaseURL(infra *infrav1alpha1.Sandbox0Infra) string {
+	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.RegionalGateway != nil &&
+		infra.Spec.Services.RegionalGateway.Config != nil {
+		return strings.TrimSpace(infra.Spec.Services.RegionalGateway.Config.BaseURL)
+	}
+	return ""
+}
+
 func globalGatewayStatusURL(compiled *InfraPlan) string {
 	infra := compiledInfra(compiled)
 	if infra == nil || infra.Name == "" {
 		return ""
+	}
+	if baseURL := globalGatewayConfiguredBaseURL(infra); baseURL != "" {
+		return baseURL
 	}
 	serviceName := fmt.Sprintf("%s-global-gateway", infra.Name)
 	servicePort := common.ResolveServicePort(globalGatewayServiceConfig(infra), globalGatewayHTTPPort(infra))
@@ -733,6 +752,9 @@ func regionalGatewayExternalStatusURL(compiled *InfraPlan) string {
 	infra := compiledInfra(compiled)
 	if infra == nil {
 		return ""
+	}
+	if baseURL := regionalGatewayConfiguredBaseURL(infra); baseURL != "" {
+		return baseURL
 	}
 	ingress := regionalGatewayIngressConfig(infra)
 	if ingress == nil || !ingress.Enabled || strings.TrimSpace(ingress.Host) == "" {

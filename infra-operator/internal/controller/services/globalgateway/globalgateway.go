@@ -168,7 +168,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 
 	serviceType := common.ResolveServiceType(serviceConfig)
 	servicePort := common.ResolveServicePort(serviceConfig, httpPort)
-	if err := r.Resources.ReconcileService(ctx, infra, serviceName, labels, serviceType, servicePort, httpPort); err != nil {
+	serviceAnnotations := common.ResolveServiceAnnotations(serviceConfig)
+	if err := r.Resources.ReconcileService(ctx, infra, serviceName, labels, serviceType, serviceAnnotations, servicePort, httpPort); err != nil {
 		return err
 	}
 

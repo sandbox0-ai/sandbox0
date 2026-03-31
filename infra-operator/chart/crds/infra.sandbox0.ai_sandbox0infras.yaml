@@ -679,6 +679,14 @@ spec:
                       service:
                         description: Service configures the registry service exposure.
                         properties:
+                          annotations:
+                            additionalProperties:
+                              type: string
+                            description: |-
+                              Annotations declares Service metadata annotations.
+                              Use this for cloud-provider specific load balancer configuration such as
+                              ACM certificate attachment on AWS.
+                            type: object
                           port:
                             default: 80
                             description: Port specifies the service port
@@ -1107,6 +1115,14 @@ spec:
                       service:
                         description: Service configures the Kubernetes service
                         properties:
+                          annotations:
+                            additionalProperties:
+                              type: string
+                            description: |-
+                              Annotations declares Service metadata annotations.
+                              Use this for cloud-provider specific load balancer configuration such as
+                              ACM certificate attachment on AWS.
+                            type: object
                           port:
                             default: 80
                             description: Port specifies the service port
@@ -1354,6 +1370,14 @@ spec:
                       service:
                         description: Service configures the Kubernetes service
                         properties:
+                          annotations:
+                            additionalProperties:
+                              type: string
+                            description: |-
+                              Annotations declares Service metadata annotations.
+                              Use this for cloud-provider specific load balancer configuration such as
+                              ACM certificate attachment on AWS.
+                            type: object
                           port:
                             default: 80
                             description: Port specifies the service port
@@ -1603,6 +1627,14 @@ spec:
                       service:
                         description: Service configures the Kubernetes service
                         properties:
+                          annotations:
+                            additionalProperties:
+                              type: string
+                            description: |-
+                              Annotations declares Service metadata annotations.
+                              Use this for cloud-provider specific load balancer configuration such as
+                              ACM certificate attachment on AWS.
+                            type: object
                           port:
                             default: 80
                             description: Port specifies the service port
@@ -2046,6 +2078,14 @@ spec:
                       service:
                         description: Service configures the Kubernetes service
                         properties:
+                          annotations:
+                            additionalProperties:
+                              type: string
+                            description: |-
+                              Annotations declares Service metadata annotations.
+                              Use this for cloud-provider specific load balancer configuration such as
+                              ACM certificate attachment on AWS.
+                            type: object
                           port:
                             default: 80
                             description: Port specifies the service port
@@ -2187,6 +2227,14 @@ spec:
                       service:
                         description: Service configures the Kubernetes service
                         properties:
+                          annotations:
+                            additionalProperties:
+                              type: string
+                            description: |-
+                              Annotations declares Service metadata annotations.
+                              Use this for cloud-provider specific load balancer configuration such as
+                              ACM certificate attachment on AWS.
+                            type: object
                           port:
                             default: 80
                             description: Port specifies the service port
@@ -2409,6 +2457,14 @@ spec:
                       service:
                         description: Service configures the Kubernetes service
                         properties:
+                          annotations:
+                            additionalProperties:
+                              type: string
+                            description: |-
+                              Annotations declares Service metadata annotations.
+                              Use this for cloud-provider specific load balancer configuration such as
+                              ACM certificate attachment on AWS.
+                            type: object
                           port:
                             default: 80
                             description: Port specifies the service port

@@ -340,6 +340,48 @@ func TestCompileSkipsClusterRegistrationForCoLocatedHomeCluster(t *testing.T) {
 	}
 }
 
+func TestCompileUsesConfiguredBaseURLsForGatewayStatusEndpoints(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Services: &infrav1alpha1.ServicesConfig{
+				GlobalGateway: &infrav1alpha1.GlobalGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					Config: &infrav1alpha1.GlobalGatewayConfig{
+						GatewayConfig: infrav1alpha1.GatewayConfig{
+							BaseURL: "https://global.example.com",
+						},
+					},
+				},
+				RegionalGateway: &infrav1alpha1.RegionalGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					Config: &infrav1alpha1.RegionalGatewayConfig{
+						GatewayConfig: infrav1alpha1.GatewayConfig{
+							BaseURL: "https://api.example.com",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	compiled := Compile(infra)
+
+	if got := compiled.Status.Endpoints.GlobalGateway; got != "https://global.example.com" {
+		t.Fatalf("unexpected global-gateway endpoint %q", got)
+	}
+	if got := compiled.Status.Endpoints.RegionalGateway; got != "https://api.example.com" {
+		t.Fatalf("unexpected regional-gateway endpoint %q", got)
+	}
+}
+
 func TestCompileEnablesClusterRegistrationForExternalDataPlaneCluster(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{

@@ -6,10 +6,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
@@ -37,12 +34,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	pullPolicy := corev1.PullIfNotPresent
 	if r.Resources.ImagePullPolicy != nil {
 		pullPolicy = *r.Resources.ImagePullPolicy
-	}
-
-	ds := &appsv1.DaemonSet{}
-	err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, ds)
-	if err != nil && !apierrors.IsNotFound(err) {
-		return err
 	}
 
 	nodeSelector, tolerations := common.ResolveSandboxNodePlacement(infra)
@@ -107,14 +98,5 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		},
 	}
 
-	if err := ctrl.SetControllerReference(infra, desired, r.Resources.Scheme); err != nil {
-		return err
-	}
-
-	if apierrors.IsNotFound(err) {
-		return r.Resources.Client.Create(ctx, desired)
-	}
-
-	ds.Spec = desired.Spec
-	return r.Resources.Client.Update(ctx, ds)
+	return r.Resources.ApplyDaemonSet(ctx, infra, desired)
 }

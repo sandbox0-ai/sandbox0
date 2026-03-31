@@ -1,10 +1,16 @@
 package common
 
 import (
+	"context"
 	"reflect"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 )
@@ -172,5 +178,103 @@ func TestEnsurePodTemplateAnnotationsClonesInput(t *testing.T) {
 	annotations["custom"] = "changed"
 	if got["custom"] != "value" {
 		t.Fatalf("expected cloned annotations to be isolated from caller mutation, got %#v", got)
+	}
+}
+
+func TestApplyDaemonSetUpdatesExistingObject(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add appsv1 scheme: %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add corev1 scheme: %v", err)
+	}
+	if err := infrav1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add infra scheme: %v", err)
+	}
+
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: "sandbox0-system",
+		},
+	}
+	existing := &appsv1.DaemonSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo-netd",
+			Namespace: infra.Namespace,
+			Labels: map[string]string{
+				"old": "label",
+			},
+		},
+		Spec: appsv1.DaemonSetSpec{
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"app": "old"},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{"app": "old"},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  "old",
+						Image: "old:tag",
+					}},
+				},
+			},
+		},
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(infra.DeepCopy(), existing).
+		Build()
+	manager := NewResourceManager(client, scheme, nil, LocalDevConfig{})
+
+	desired := &appsv1.DaemonSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      existing.Name,
+			Namespace: existing.Namespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/name": "demo-netd",
+			},
+		},
+		Spec: appsv1.DaemonSetSpec{
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"app": "new"},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{"app": "new"},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  "netd",
+						Image: "sandbox0ai/infra:0.2.0-rc.7",
+					}},
+				},
+			},
+		},
+	}
+
+	if err := manager.ApplyDaemonSet(context.Background(), infra, desired); err != nil {
+		t.Fatalf("apply daemonset: %v", err)
+	}
+
+	got := &appsv1.DaemonSet{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: existing.Name, Namespace: existing.Namespace}, got); err != nil {
+		t.Fatalf("get daemonset: %v", err)
+	}
+	if got.Spec.Template.Spec.Containers[0].Image != "sandbox0ai/infra:0.2.0-rc.7" {
+		t.Fatalf("expected updated image, got %q", got.Spec.Template.Spec.Containers[0].Image)
+	}
+	if got.Spec.Template.Spec.Containers[0].Name != "netd" {
+		t.Fatalf("expected updated container, got %q", got.Spec.Template.Spec.Containers[0].Name)
+	}
+	if got.Labels["app.kubernetes.io/name"] != "demo-netd" {
+		t.Fatalf("expected updated labels, got %#v", got.Labels)
+	}
+	if len(got.OwnerReferences) != 1 || got.OwnerReferences[0].Name != infra.Name {
+		t.Fatalf("expected daemonset owner reference, got %#v", got.OwnerReferences)
 	}
 }

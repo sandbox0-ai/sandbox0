@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -187,12 +188,6 @@ func (r *ResourceManager) EnsureDeploymentReady(ctx context.Context, infra *infr
 
 // ReconcileDaemonSet creates or updates a daemonset.
 func (r *ResourceManager) ReconcileDaemonSet(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, labels map[string]string, def ServiceDefinition) error {
-	ds := &appsv1.DaemonSet{}
-	err := r.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, ds)
-	if err != nil && !errors.IsNotFound(err) {
-		return err
-	}
-
 	defaultResources := corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
 			corev1.ResourceCPU:    resource.MustParse("100m"),
@@ -257,13 +252,34 @@ func (r *ResourceManager) ReconcileDaemonSet(ctx context.Context, infra *infrav1
 		return err
 	}
 
-	if errors.IsNotFound(err) {
-		return r.Client.Create(ctx, desiredDs)
+	return r.ApplyDaemonSet(ctx, infra, desiredDs)
+}
+
+// ApplyDaemonSet creates or updates a daemonset using fresh reads on each retry
+// so controller-driven status/resourceVersion updates do not cause reconcile
+// loops to fail on optimistic concurrency conflicts.
+func (r *ResourceManager) ApplyDaemonSet(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, desired *appsv1.DaemonSet) error {
+	if err := ctrl.SetControllerReference(infra, desired, r.Scheme); err != nil {
+		return err
 	}
 
-	ds.Spec = desiredDs.Spec
-	ds.Labels = desiredLabels
-	return r.Client.Update(ctx, ds)
+	key := types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &appsv1.DaemonSet{}
+		err := r.Client.Get(ctx, key, current)
+		if errors.IsNotFound(err) {
+			return r.Client.Create(ctx, desired.DeepCopy())
+		}
+		if err != nil {
+			return err
+		}
+
+		current.Labels = desired.Labels
+		current.Annotations = desired.Annotations
+		current.Spec = desired.Spec
+		current.OwnerReferences = desired.OwnerReferences
+		return r.Client.Update(ctx, current)
+	})
 }
 
 func ResolveContainerPorts(def ServiceDefinition) []corev1.ContainerPort {

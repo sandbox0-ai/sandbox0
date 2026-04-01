@@ -18,20 +18,21 @@ import (
 )
 
 type stubTeamRepository struct {
-	createdTeam     *identity.Team
-	addedTeamMember *identity.TeamMember
+	createdTeam      *identity.Team
+	createTeamUserID string
 }
 
 func (s *stubTeamRepository) GetTeamsByUserID(context.Context, string) ([]*identity.Team, error) {
 	return nil, nil
 }
 
-func (s *stubTeamRepository) CreateTeam(_ context.Context, team *identity.Team) error {
+func (s *stubTeamRepository) CreateTeamForUser(_ context.Context, userID string, team *identity.Team) (bool, error) {
 	copyTeam := *team
 	copyTeam.ID = "team-1"
 	s.createdTeam = &copyTeam
+	s.createTeamUserID = userID
 	team.ID = copyTeam.ID
-	return nil
+	return true, nil
 }
 
 func (s *stubTeamRepository) GetTeamMember(context.Context, string, string) (*identity.TeamMember, error) {
@@ -59,8 +60,6 @@ func (s *stubTeamRepository) GetUserByEmail(context.Context, string) (*identity.
 }
 
 func (s *stubTeamRepository) AddTeamMember(_ context.Context, member *identity.TeamMember) error {
-	copyMember := *member
-	s.addedTeamMember = &copyMember
 	return nil
 }
 
@@ -203,8 +202,8 @@ func TestTeamHandlerCreateTeamAllowsMissingHomeRegionWithoutGlobalRequirement(t 
 	if repo.createdTeam.HomeRegionID != nil {
 		t.Fatalf("expected nil home region, got %#v", repo.createdTeam.HomeRegionID)
 	}
-	if repo.addedTeamMember == nil || repo.addedTeamMember.TeamID != "team-1" {
-		t.Fatalf("expected creator to be added as team member, got %#v", repo.addedTeamMember)
+	if repo.createTeamUserID != "user-1" {
+		t.Fatalf("expected CreateTeamForUser to receive user-1, got %q", repo.createTeamUserID)
 	}
 }
 

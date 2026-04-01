@@ -16,7 +16,7 @@ import (
 
 type teamRepository interface {
 	GetTeamsByUserID(ctx context.Context, userID string) ([]*identity.Team, error)
-	CreateTeam(ctx context.Context, team *identity.Team) error
+	CreateTeamForUser(ctx context.Context, userID string, team *identity.Team) (bool, error)
 	GetTeamMember(ctx context.Context, teamID, userID string) (*identity.TeamMember, error)
 	GetTeamByID(ctx context.Context, id string) (*identity.Team, error)
 	UpdateTeam(ctx context.Context, team *identity.Team) error
@@ -122,7 +122,7 @@ func (h *TeamHandler) CreateTeam(c *gin.Context) {
 		HomeRegionID: homeRegionID,
 	}
 
-	if err := h.repo.CreateTeam(c.Request.Context(), team); err != nil {
+	if _, err := h.repo.CreateTeamForUser(c.Request.Context(), authCtx.UserID, team); err != nil {
 		if errors.Is(err, identity.ErrTeamAlreadyExists) {
 			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "team with this slug already exists")
 			return
@@ -130,16 +130,6 @@ func (h *TeamHandler) CreateTeam(c *gin.Context) {
 		h.logger.Error("Failed to create team", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to create team")
 		return
-	}
-
-	// Add creator as admin member
-	member := &identity.TeamMember{
-		TeamID: team.ID,
-		UserID: authCtx.UserID,
-		Role:   "admin",
-	}
-	if err := h.repo.AddTeamMember(c.Request.Context(), member); err != nil {
-		h.logger.Warn("Failed to add creator as member", zap.Error(err))
 	}
 
 	spec.JSONSuccess(c, http.StatusCreated, team)

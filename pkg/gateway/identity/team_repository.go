@@ -30,6 +30,91 @@ func (r *Repository) CreateTeam(ctx context.Context, team *Team) error {
 	return nil
 }
 
+// CreateTeamForUser creates a team, adds the creator as an admin member, and
+// sets it as the user's default team only when it is their first team.
+func (r *Repository) CreateTeamForUser(ctx context.Context, userID string, team *Team) (setAsDefault bool, err error) {
+	if team.Slug == "" {
+		team.Slug = generateSlug(team.Name)
+	}
+
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return false, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+
+	var lockedUserID string
+	if err = tx.QueryRow(ctx, `
+		SELECT id
+		FROM users
+		WHERE id = $1
+		FOR UPDATE
+	`, userID).Scan(&lockedUserID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, ErrUserNotFound
+		}
+		return false, fmt.Errorf("lock user: %w", err)
+	}
+
+	var hasExistingTeam bool
+	if err = tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM team_members
+			WHERE user_id = $1
+		)
+	`, userID).Scan(&hasExistingTeam); err != nil {
+		return false, fmt.Errorf("check existing teams: %w", err)
+	}
+
+	if err = tx.QueryRow(ctx, `
+		INSERT INTO teams (name, slug, owner_id, home_region_id)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id, created_at, updated_at
+	`, team.Name, team.Slug, team.OwnerID, team.HomeRegionID).Scan(&team.ID, &team.CreatedAt, &team.UpdatedAt); err != nil {
+		if isDuplicateKeyError(err) {
+			return false, ErrTeamAlreadyExists
+		}
+		return false, fmt.Errorf("insert team: %w", err)
+	}
+
+	member := &TeamMember{
+		TeamID: team.ID,
+		UserID: userID,
+		Role:   "admin",
+	}
+	if err = tx.QueryRow(ctx, `
+		INSERT INTO team_members (team_id, user_id, role)
+		VALUES ($1, $2, $3)
+		RETURNING id, joined_at
+	`, member.TeamID, member.UserID, member.Role).Scan(&member.ID, &member.JoinedAt); err != nil {
+		if isDuplicateKeyError(err) {
+			return false, ErrAlreadyMember
+		}
+		return false, fmt.Errorf("insert team member: %w", err)
+	}
+
+	if !hasExistingTeam {
+		if _, err = tx.Exec(ctx, `
+			UPDATE users
+			SET default_team_id = $2
+			WHERE id = $1
+		`, userID, team.ID); err != nil {
+			return false, fmt.Errorf("update user default team: %w", err)
+		}
+		setAsDefault = true
+	}
+
+	if err = tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit tx: %w", err)
+	}
+	return setAsDefault, nil
+}
+
 // GetTeamByID retrieves a team by ID.
 func (r *Repository) GetTeamByID(ctx context.Context, id string) (*Team, error) {
 	var team Team

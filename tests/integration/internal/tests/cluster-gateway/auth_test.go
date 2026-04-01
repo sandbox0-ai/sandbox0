@@ -282,6 +282,24 @@ func TestClusterGatewayIntegration_PublicAuthTeamsAcceptHomeRegionID(t *testing.
 		t.Fatalf("expected created team home region aws/us-east-1, got %#v", createBody.Data.HomeRegionID)
 	}
 
+	userResp, _ := doGatewayRequestWithBearer(t, env.server.Client(), http.MethodGet, env.server.URL+"/users/me", tokens.AccessToken, nil)
+	defer userResp.Body.Close()
+	if userResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected user profile ok, got %d", userResp.StatusCode)
+	}
+
+	var userBody struct {
+		Data struct {
+			DefaultTeamID *string `json:"default_team_id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(userResp.Body).Decode(&userBody); err != nil {
+		t.Fatalf("decode user response: %v", err)
+	}
+	if userBody.Data.DefaultTeamID == nil || *userBody.Data.DefaultTeamID != team.ID {
+		t.Fatalf("expected existing default team %q to be preserved, got %#v", team.ID, userBody.Data.DefaultTeamID)
+	}
+
 	updateResp, _ := doGatewayRequestWithBearer(t, env.server.Client(), http.MethodPut, env.server.URL+"/teams/"+createBody.Data.ID, tokens.AccessToken, map[string]any{
 		"home_region_id": "aws/us-west-2",
 	})
@@ -318,5 +336,73 @@ func TestClusterGatewayIntegration_PublicAuthTeamsAcceptHomeRegionID(t *testing.
 	}
 	if getBody.Data.HomeRegionID == nil || *getBody.Data.HomeRegionID != "aws/us-east-1" {
 		t.Fatalf("expected persisted team home region aws/us-east-1, got %#v", getBody.Data.HomeRegionID)
+	}
+}
+
+func TestClusterGatewayIntegration_CreateFirstTeamSetsDefaultTeam(t *testing.T) {
+	dbPool, identityRepo, _, _ := newGatewayTestDB(t)
+
+	keys := gatewayKeyPair{}
+	keys.privateKey, keys.publicKey = writeClusterGatewayKeys(t)
+
+	managerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(managerServer.Close)
+
+	env := newGatewayPublicTestEnv(t, managerServer.URL, "", dbPool, "test-jwt-secret", "cluster-gateway", keys)
+
+	user := &gatewayidentity.User{
+		Email:         "first-team@example.com",
+		Name:          "First Team User",
+		PasswordHash:  "x",
+		EmailVerified: true,
+		IsAdmin:       false,
+	}
+	ctx := context.Background()
+	if err := identityRepo.CreateUser(ctx, user); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	issuer := authn.NewIssuer("cluster-gateway", "test-jwt-secret", time.Minute, time.Hour)
+	tokens, err := issuer.IssueTokenPair(user.ID, "", "", user.Email, user.Name, user.IsAdmin)
+	if err != nil {
+		t.Fatalf("issue token pair: %v", err)
+	}
+
+	resp, _ := doGatewayRequestWithBearer(t, env.server.Client(), http.MethodPost, env.server.URL+"/teams", tokens.AccessToken, map[string]any{
+		"name":           "First Regional Team",
+		"home_region_id": "aws/us-east-1",
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected created, got %d", resp.StatusCode)
+	}
+
+	var createBody struct {
+		Data struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&createBody); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+
+	userResp, _ := doGatewayRequestWithBearer(t, env.server.Client(), http.MethodGet, env.server.URL+"/users/me", tokens.AccessToken, nil)
+	defer userResp.Body.Close()
+	if userResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected user profile ok, got %d", userResp.StatusCode)
+	}
+
+	var userBody struct {
+		Data struct {
+			DefaultTeamID *string `json:"default_team_id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(userResp.Body).Decode(&userBody); err != nil {
+		t.Fatalf("decode user response: %v", err)
+	}
+	if userBody.Data.DefaultTeamID == nil || *userBody.Data.DefaultTeamID != createBody.Data.ID {
+		t.Fatalf("expected first created team %q to become default, got %#v", createBody.Data.ID, userBody.Data.DefaultTeamID)
 	}
 }

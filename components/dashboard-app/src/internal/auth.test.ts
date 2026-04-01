@@ -133,7 +133,7 @@ test("resolveDashboardHomeEntry falls back to /login when multiple oidc provider
   });
 });
 
-test("resolveDashboardHomeEntry allows system admins through when onboarding is blocked on missing regions", async () => {
+test("resolveDashboardHomeEntry redirects system admins to onboarding when onboarding is pending", async () => {
   const result = await resolveDashboardHomeEntry(
     globalGatewayConfig,
     {
@@ -169,13 +169,10 @@ test("resolveDashboardHomeEntry allows system admins through when onboarding is 
     },
   );
 
-  assert.equal(result.kind, "render");
-  if (result.kind !== "render") {
-    return;
-  }
-  assert.equal(result.session.authenticated, true);
-  assert.equal(result.session.needsOnboarding, true);
-  assert.equal(result.session.user?.isAdmin, true);
+  assert.deepEqual(result, {
+    kind: "redirect",
+    location: "/onboarding",
+  });
 });
 
 test("resolveDashboardLoginEntry reuses external auth portal url", async () => {
@@ -207,7 +204,7 @@ test("resolveDashboardLoginEntry reuses external auth portal url", async () => {
   });
 });
 
-test("resolveDashboardLoginEntry sends authenticated system admins to home even when onboarding is pending", async () => {
+test("resolveDashboardLoginEntry sends authenticated system admins to onboarding when onboarding is pending", async () => {
   const result = await resolveDashboardLoginEntry(
     globalGatewayConfig,
     {
@@ -245,7 +242,7 @@ test("resolveDashboardLoginEntry sends authenticated system admins to home even 
 
   assert.deepEqual(result, {
     kind: "redirect",
-    location: "/",
+    location: "/onboarding",
   });
 });
 

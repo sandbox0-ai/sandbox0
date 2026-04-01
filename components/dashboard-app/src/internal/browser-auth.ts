@@ -54,10 +54,7 @@ export async function resolveDashboardHomeEntry(
     fetchImpl,
   );
 
-  const adminBypassesOnboarding =
-    session.authenticated && session.needsOnboarding && session.user?.isAdmin;
-
-  if (session.authenticated && session.needsOnboarding && !adminBypassesOnboarding) {
+  if (session.authenticated && session.needsOnboarding) {
     return { kind: "redirect", location: dashboardOnboardingPath() };
   }
 
@@ -142,10 +139,7 @@ export async function resolveDashboardLoginEntry(
     fetchImpl,
   );
 
-  const adminBypassesOnboarding =
-    session.authenticated && session.needsOnboarding && session.user?.isAdmin;
-
-  if (session.authenticated && session.needsOnboarding && !adminBypassesOnboarding) {
+  if (session.authenticated && session.needsOnboarding) {
     return { kind: "redirect", location: dashboardOnboardingPath() };
   }
 

@@ -92,13 +92,13 @@ func newVolumeFileRouteTestServer(t *testing.T) (string, *internalauth.Generator
 	{
 		files := sandboxvolumes.Group("/:id/files")
 		{
-			files.GET("", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeRead), server.handleVolumeFileOperation)
-			files.POST("", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeWrite), server.handleVolumeFileOperation)
-			files.DELETE("", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeWrite), server.handleVolumeFileOperation)
-			files.GET("/watch", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeRead), server.handleVolumeFileWatch)
-			files.POST("/move", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeWrite), server.handleVolumeFileMove)
-			files.GET("/stat", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeRead), server.handleVolumeFileStat)
-			files.GET("/list", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeRead), server.handleVolumeFileList)
+			files.GET("", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileRead), server.handleVolumeFileOperation)
+			files.POST("", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileWrite), server.handleVolumeFileOperation)
+			files.DELETE("", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileWrite), server.handleVolumeFileOperation)
+			files.GET("/watch", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileRead), server.handleVolumeFileWatch)
+			files.POST("/move", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileWrite), server.handleVolumeFileMove)
+			files.GET("/stat", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileRead), server.handleVolumeFileStat)
+			files.GET("/list", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileRead), server.handleVolumeFileList)
 		}
 	}
 
@@ -128,7 +128,7 @@ func TestVolumeFileRoutesProxyToStorageProxy(t *testing.T) {
 			name:       "read file preserves query",
 			method:     http.MethodGet,
 			path:       "/api/v1/sandboxvolumes/vol-1/files?path=/docs/readme.txt",
-			permission: gatewayauthn.PermSandboxVolumeRead,
+			permission: gatewayauthn.PermSandboxVolumeFileRead,
 			wantPath:   "/sandboxvolumes/vol-1/files",
 			wantQuery:  "path=/docs/readme.txt",
 		},
@@ -137,7 +137,7 @@ func TestVolumeFileRoutesProxyToStorageProxy(t *testing.T) {
 			method:       http.MethodPost,
 			path:         "/api/v1/sandboxvolumes/vol-1/files?path=/docs/readme.txt",
 			body:         "hello",
-			permission:   gatewayauthn.PermSandboxVolumeWrite,
+			permission:   gatewayauthn.PermSandboxVolumeFileWrite,
 			wantPath:     "/sandboxvolumes/vol-1/files",
 			wantQuery:    "path=/docs/readme.txt",
 			wantBodyPart: "hello",
@@ -146,7 +146,7 @@ func TestVolumeFileRoutesProxyToStorageProxy(t *testing.T) {
 			name:       "delete file preserves query",
 			method:     http.MethodDelete,
 			path:       "/api/v1/sandboxvolumes/vol-1/files?path=/docs/readme.txt",
-			permission: gatewayauthn.PermSandboxVolumeWrite,
+			permission: gatewayauthn.PermSandboxVolumeFileWrite,
 			wantPath:   "/sandboxvolumes/vol-1/files",
 			wantQuery:  "path=/docs/readme.txt",
 		},
@@ -155,7 +155,7 @@ func TestVolumeFileRoutesProxyToStorageProxy(t *testing.T) {
 			method:       http.MethodPost,
 			path:         "/api/v1/sandboxvolumes/vol-1/files/move",
 			body:         `{"source":"/a.txt","destination":"/b.txt"}`,
-			permission:   gatewayauthn.PermSandboxVolumeWrite,
+			permission:   gatewayauthn.PermSandboxVolumeFileWrite,
 			wantPath:     "/sandboxvolumes/vol-1/files/move",
 			wantBodyPart: "/b.txt",
 		},
@@ -163,7 +163,7 @@ func TestVolumeFileRoutesProxyToStorageProxy(t *testing.T) {
 			name:       "stat preserves query",
 			method:     http.MethodGet,
 			path:       "/api/v1/sandboxvolumes/vol-1/files/stat?path=/docs/readme.txt",
-			permission: gatewayauthn.PermSandboxVolumeRead,
+			permission: gatewayauthn.PermSandboxVolumeFileRead,
 			wantPath:   "/sandboxvolumes/vol-1/files/stat",
 			wantQuery:  "path=/docs/readme.txt",
 		},
@@ -171,7 +171,7 @@ func TestVolumeFileRoutesProxyToStorageProxy(t *testing.T) {
 			name:       "list preserves query",
 			method:     http.MethodGet,
 			path:       "/api/v1/sandboxvolumes/vol-1/files/list?path=/docs",
-			permission: gatewayauthn.PermSandboxVolumeRead,
+			permission: gatewayauthn.PermSandboxVolumeFileRead,
 			wantPath:   "/sandboxvolumes/vol-1/files/list",
 			wantQuery:  "path=/docs",
 		},
@@ -179,7 +179,7 @@ func TestVolumeFileRoutesProxyToStorageProxy(t *testing.T) {
 			name:       "watch rewrites path",
 			method:     http.MethodGet,
 			path:       "/api/v1/sandboxvolumes/vol-1/files/watch",
-			permission: gatewayauthn.PermSandboxVolumeRead,
+			permission: gatewayauthn.PermSandboxVolumeFileRead,
 			wantPath:   "/sandboxvolumes/vol-1/files/watch",
 		},
 	}

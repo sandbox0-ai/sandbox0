@@ -206,12 +206,6 @@ func newVolumeFileTestServer(fileRPC *fakeHTTPVolumeFileRPC) (*Server, *fakeHTTP
 	return server, volMgr
 }
 
-func newAuthorizedVolumeRequest(method, target string, body *bytes.Reader) *http.Request {
-	req := httptest.NewRequest(method, target, body)
-	req.SetPathValue("id", "vol-1")
-	return req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-a"}))
-}
-
 func volumeDirAttr() *pb.GetAttrResponse {
 	return &pb.GetAttrResponse{Mode: syscall.S_IFDIR | 0o755}
 }

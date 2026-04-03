@@ -78,6 +78,9 @@ const (
 	PermSandboxVolumeRead   = "sandboxvolume:read"
 	PermSandboxVolumeWrite  = "sandboxvolume:write"
 	PermSandboxVolumeDelete = "sandboxvolume:delete"
+
+	PermSandboxVolumeFileRead  = "sandboxvolumefile:read"
+	PermSandboxVolumeFileWrite = "sandboxvolumefile:write"
 )
 
 // RolePermissions maps team roles to their permissions.
@@ -98,6 +101,8 @@ var RolePermissions = map[string][]string{
 		PermSandboxVolumeRead,
 		PermSandboxVolumeWrite,
 		PermSandboxVolumeDelete,
+		PermSandboxVolumeFileRead,
+		PermSandboxVolumeFileWrite,
 	},
 	"developer": {
 		PermSandboxCreate,
@@ -112,12 +117,15 @@ var RolePermissions = map[string][]string{
 		PermSandboxVolumeRead,
 		PermSandboxVolumeWrite,
 		PermSandboxVolumeDelete,
+		PermSandboxVolumeFileRead,
+		PermSandboxVolumeFileWrite,
 	},
 	"viewer": {
 		PermSandboxRead,
 		PermTemplateRead,
 		PermCredentialSourceRead,
 		PermSandboxVolumeRead,
+		PermSandboxVolumeFileRead,
 	},
 }
 

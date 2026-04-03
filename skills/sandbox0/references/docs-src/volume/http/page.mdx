@@ -2,7 +2,7 @@
 
 Use the Volume HTTP API to operate on files in a Volume directly by volume ID, without mounting the Volume into a Sandbox first.
 
-This page focuses on raw HTTP and WebSocket usage only. SDK and CLI examples can be added later.
+This page documents the raw HTTP and WebSocket endpoints first, then shows the equivalent helpers in the Go, Python, TypeScript SDKs, and the `s0` CLI.
 
 <Callout variant="info">
 Requests still go through the normal gateway chain and team-scoped auth. Internally, `storage-proxy` lazily attaches the Volume and reclaims idle direct mounts later.
@@ -14,6 +14,129 @@ Requests still go through the normal gateway chain and team-scoped auth. Interna
 - Use absolute logical paths such as `/docs/readme.txt`.
 - Read operations use `sandboxvolumefile:read`.
 - Write, move, mkdir, and delete operations use `sandboxvolumefile:write`.
+
+<Callout variant="info">
+The client helpers below call the same `SandboxVolume file` HTTP endpoints documented on this page. They do not require mounting the Volume into a Sandbox first.
+</Callout>
+
+## Client Helpers
+
+Use these helpers when you want the direct Volume file API without constructing raw HTTP requests yourself.
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `ctx := context.Background()
+volumeID := "vol_abc123"
+
+_, err := client.MkdirVolumeFile(ctx, volumeID, "/docs", true)
+if err != nil {
+    log.Fatal(err)
+}
+
+_, err = client.WriteVolumeFile(ctx, volumeID, "/docs/readme.txt", []byte("Hello from Volume HTTP"))
+if err != nil {
+    log.Fatal(err)
+}
+
+data, err := client.ReadVolumeFile(ctx, volumeID, "/docs/readme.txt")
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(string(data))
+
+info, err := client.StatVolumeFile(ctx, volumeID, "/docs/readme.txt")
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("size=%d mode=%s\\n", info.Size, info.Mode)
+
+entries, err := client.ListVolumeFiles(ctx, volumeID, "/docs")
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("entries=%d\\n", len(entries))
+
+_, err = client.MoveVolumeFile(ctx, volumeID, "/docs/readme.txt", "/docs/readme-old.txt")
+if err != nil {
+    log.Fatal(err)
+}
+
+_, err = client.DeleteVolumeFile(ctx, volumeID, "/docs/readme-old.txt")
+if err != nil {
+    log.Fatal(err)
+}`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `volume_id = "vol_abc123"
+
+client.volumes.mkdir(volume_id, "/docs", recursive=True)
+client.volumes.write_file(volume_id, "/docs/readme.txt", b"Hello from Volume HTTP")
+
+data = client.volumes.read_file(volume_id, "/docs/readme.txt")
+print(data.decode())
+
+info = client.volumes.stat_file(volume_id, "/docs/readme.txt")
+print(f"size={info.size} mode={info.mode}")
+
+entries = client.volumes.list_files(volume_id, "/docs")
+print(f"entries={len(entries)}")
+
+client.volumes.move_file(volume_id, "/docs/readme.txt", "/docs/readme-old.txt")
+client.volumes.delete_file(volume_id, "/docs/readme-old.txt")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const volumeId = "vol_abc123";
+
+await client.volumes.mkdir(volumeId, "/docs", true);
+await client.volumes.writeFile(volumeId, "/docs/readme.txt", "Hello from Volume HTTP");
+
+const data = await client.volumes.readFile(volumeId, "/docs/readme.txt");
+console.log(Buffer.from(data).toString("utf8"));
+
+const info = await client.volumes.statFile(volumeId, "/docs/readme.txt");
+console.log("size=", info.size, "mode=", info.mode);
+
+const entries = await client.volumes.listFiles(volumeId, "/docs");
+console.log("entries=", entries.length);
+
+await client.volumes.moveFile(volumeId, "/docs/readme.txt", "/docs/readme-old.txt");
+await client.volumes.deleteFile(volumeId, "/docs/readme-old.txt");`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 volume files mkdir vol_abc123 /docs --parents
+s0 volume files write vol_abc123 /docs/readme.txt --data "Hello from Volume HTTP"
+s0 volume files cat vol_abc123 /docs/readme.txt
+s0 volume files stat vol_abc123 /docs/readme.txt
+s0 volume files ls vol_abc123 /docs
+s0 volume files mv vol_abc123 /docs/readme.txt /docs/readme-old.txt
+s0 volume files rm vol_abc123 /docs/readme-old.txt`
+    }
+  ]}
+/>
+
+### Client Method Mapping
+
+| Operation | Go | Python | TypeScript | CLI |
+|-----------|----|--------|------------|-----|
+| Read file | `ReadVolumeFile` | `client.volumes.read_file` | `client.volumes.readFile` | `s0 volume files cat` |
+| Stat path | `StatVolumeFile` | `client.volumes.stat_file` | `client.volumes.statFile` | `s0 volume files stat` |
+| List directory | `ListVolumeFiles` | `client.volumes.list_files` | `client.volumes.listFiles` | `s0 volume files ls` |
+| Write file | `WriteVolumeFile` | `client.volumes.write_file` | `client.volumes.writeFile` | `s0 volume files write` |
+| Create directory | `MkdirVolumeFile` | `client.volumes.mkdir` | `client.volumes.mkdir` | `s0 volume files mkdir` |
+| Move or rename | `MoveVolumeFile` | `client.volumes.move_file` | `client.volumes.moveFile` | `s0 volume files mv` |
+| Delete path | `DeleteVolumeFile` | `client.volumes.delete_file` | `client.volumes.deleteFile` | `s0 volume files rm` |
+| Upload local file | manual local read + `WriteVolumeFile` | `client.volumes.write_file` | `client.volumes.writeFile` | `s0 volume files upload` |
+| Download to local file | manual local write + `ReadVolumeFile` | `client.volumes.read_file` | `client.volumes.readFile` | `s0 volume files download` |
+| Watch path | `WatchVolumeFiles` | `client.volumes.watch_files` | `client.volumes.watchFiles` | `s0 volume files watch` |
 
 ### FileInfo
 
@@ -264,6 +387,76 @@ Event names currently include:
 - `rename`
 - `chmod`
 - `invalidate`
+
+### Client Watch Examples
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `watchCtx, cancel := context.WithCancel(context.Background())
+defer cancel()
+
+events, errs, unsubscribe, err := client.WatchVolumeFiles(watchCtx, volumeID, "/docs", true)
+if err != nil {
+    log.Fatal(err)
+}
+defer func() { _ = unsubscribe() }()
+
+for {
+    select {
+    case ev, ok := <-events:
+        if !ok {
+            return
+        }
+        if ev.Type == "event" {
+            fmt.Printf("%s %s\\n", ev.Event, ev.Path)
+        }
+    case err, ok := <-errs:
+        if ok && err != nil {
+            log.Fatal(err)
+        }
+        return
+    }
+}`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `stream = client.volumes.watch_files(volume_id, "/docs", recursive=True)
+
+try:
+    for event in stream.iter_events():
+        print(f"{event.event} {event.path}")
+finally:
+    stream.unsubscribe()`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const watcher = await client.volumes.watchFiles(volumeId, "/docs", true);
+
+try {
+    for await (const message of watcher.events()) {
+        if (message.type === "event") {
+            console.log(message.event, message.path);
+        }
+        if (message.type === "error") {
+            throw new Error(message.error ?? "watch failed");
+        }
+    }
+} finally {
+    watcher.close();
+}`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 volume files watch vol_abc123 /docs --recursive`
+    }
+  ]}
+/>
 
 ---
 

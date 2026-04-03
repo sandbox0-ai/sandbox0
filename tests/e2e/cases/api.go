@@ -44,10 +44,12 @@ func shouldRunApiScenario(envProvider func() *framework.ScenarioEnv, expected st
 	env := envProvider()
 	if env == nil {
 		Skip("scenario env is nil")
+		return nil
 	}
 	actual := normalizeScenarioName(env.Infra.Name)
 	if actual != expected {
 		Skip(fmt.Sprintf("skip API suite %q for scenario %q", expected, env.Infra.Name))
+		return nil
 	}
 	return env
 }
@@ -58,9 +60,11 @@ func registerApiUnknownSuite(envProvider func() *framework.ScenarioEnv) {
 			env := envProvider()
 			if env == nil {
 				Skip("scenario env is nil")
+				return
 			}
 			if isKnownApiScenario(env.Infra.Name) {
 				Skip("scenario-specific API suite exists: " + env.Infra.Name)
+				return
 			}
 			Skip("no API suite registered for Sandbox0Infra name: " + env.Infra.Name)
 		})

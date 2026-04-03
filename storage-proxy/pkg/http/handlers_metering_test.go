@@ -22,6 +22,7 @@ import (
 type fakeHTTPRepo struct {
 	volumes        map[string]*db.SandboxVolume
 	activeMounts   map[string][]*db.VolumeMount
+	getActiveFunc  func(context.Context, string, int) ([]*db.VolumeMount, error)
 	deletedMounts  []db.VolumeMount
 	createdVolumes []*db.SandboxVolume
 	deletedVolume  []string
@@ -63,6 +64,9 @@ func (r *fakeHTTPRepo) GetSandboxVolume(ctx context.Context, id string) (*db.San
 }
 
 func (r *fakeHTTPRepo) GetActiveMounts(ctx context.Context, volumeID string, heartbeatTimeout int) ([]*db.VolumeMount, error) {
+	if r.getActiveFunc != nil {
+		return r.getActiveFunc(ctx, volumeID, heartbeatTimeout)
+	}
 	return r.activeMounts[volumeID], nil
 }
 

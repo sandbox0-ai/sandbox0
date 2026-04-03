@@ -359,7 +359,7 @@ func main() {
 	}
 
 	// Create HTTP server
-	httpSrv := httpserver.NewServer(logrusLogger, repo, meteringRepo, cfg.RegionID, httpAuthenticator, snapshotMgr, syncSvc, volumeBarrier, volMgr, fsServer, eventHub)
+	httpSrv := httpserver.NewServer(logrusLogger, cfg, k8sClient, repo, meteringRepo, cfg.RegionID, httpAuthenticator, snapshotMgr, syncSvc, volumeBarrier, volMgr, fsServer, eventHub)
 	httpAddr := fmt.Sprintf("%s:%d", cfg.HTTPAddr, cfg.HTTPPort)
 
 	readTimeout, _ := time.ParseDuration(cfg.HTTPReadTimeout)

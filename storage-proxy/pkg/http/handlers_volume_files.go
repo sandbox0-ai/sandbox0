@@ -100,9 +100,8 @@ func (s *Server) handleVolumeFileStat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, _, cleanup, err := s.prepareVolumeFileRequest(r.Context(), volumeID)
-	if err != nil {
-		s.writeVolumeFileError(w, err)
+	ctx, _, cleanup, handled := s.prepareOrProxyVolumeFileRequest(w, r, volumeID)
+	if handled {
 		return
 	}
 	defer cleanup()
@@ -136,9 +135,8 @@ func (s *Server) handleVolumeFileList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, _, cleanup, err := s.prepareVolumeFileRequest(r.Context(), volumeID)
-	if err != nil {
-		s.writeVolumeFileError(w, err)
+	ctx, _, cleanup, handled := s.prepareOrProxyVolumeFileRequest(w, r, volumeID)
+	if handled {
 		return
 	}
 	defer cleanup()
@@ -205,9 +203,8 @@ func (s *Server) handleVolumeFileMove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, _, cleanup, err := s.prepareVolumeFileRequest(r.Context(), volumeID)
-	if err != nil {
-		s.writeVolumeFileError(w, err)
+	ctx, _, cleanup, handled := s.prepareOrProxyVolumeFileRequest(w, r, volumeID)
+	if handled {
 		return
 	}
 	defer cleanup()
@@ -229,6 +226,14 @@ func (s *Server) handleVolumeFileWatch(w http.ResponseWriter, r *http.Request) {
 
 	if _, err := s.loadAuthorizedVolume(r.Context(), volumeID); err != nil {
 		s.writeVolumeFileError(w, err)
+		return
+	}
+	proxied, err := s.proxyVolumeRequestToOwnerIfNeeded(w, r, volumeID)
+	if err != nil {
+		s.writeVolumeFileError(w, err)
+		return
+	}
+	if proxied {
 		return
 	}
 	if s.eventHub == nil {
@@ -344,9 +349,8 @@ func (s *Server) handleVolumeFileWatch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) readVolumeFile(w http.ResponseWriter, r *http.Request, volumeID, logicalPath string) {
-	ctx, _, cleanup, err := s.prepareVolumeFileRequest(r.Context(), volumeID)
-	if err != nil {
-		s.writeVolumeFileError(w, err)
+	ctx, _, cleanup, handled := s.prepareOrProxyVolumeFileRequest(w, r, volumeID)
+	if handled {
 		return
 	}
 	defer cleanup()
@@ -397,9 +401,8 @@ func (s *Server) readVolumeFile(w http.ResponseWriter, r *http.Request, volumeID
 }
 
 func (s *Server) writeVolumeFile(w http.ResponseWriter, r *http.Request, volumeID, logicalPath string) {
-	ctx, _, cleanup, err := s.prepareVolumeFileRequest(r.Context(), volumeID)
-	if err != nil {
-		s.writeVolumeFileError(w, err)
+	ctx, _, cleanup, handled := s.prepareOrProxyVolumeFileRequest(w, r, volumeID)
+	if handled {
 		return
 	}
 	defer cleanup()
@@ -432,9 +435,8 @@ func (s *Server) writeVolumeFile(w http.ResponseWriter, r *http.Request, volumeI
 }
 
 func (s *Server) deleteVolumeFile(w http.ResponseWriter, r *http.Request, volumeID, logicalPath string) {
-	ctx, _, cleanup, err := s.prepareVolumeFileRequest(r.Context(), volumeID)
-	if err != nil {
-		s.writeVolumeFileError(w, err)
+	ctx, _, cleanup, handled := s.prepareOrProxyVolumeFileRequest(w, r, volumeID)
+	if handled {
 		return
 	}
 	defer cleanup()
@@ -459,23 +461,7 @@ func (s *Server) prepareVolumeFileRequest(ctx context.Context, volumeID string) 
 	if err != nil {
 		return ctx, nil, func() {}, err
 	}
-	if s.volMgr == nil || s.fileRPC == nil {
-		return ctx, nil, func() {}, errVolumeFileUnavailable
-	}
-
-	cleanup, err := s.volMgr.AcquireDirectVolumeFileMount(ctx, volumeID, func(mountCtx context.Context) (string, error) {
-		resp, err := s.fileRPC.MountVolume(mountCtx, &pb.MountVolumeRequest{
-			VolumeId: volumeID,
-			Config:   &pb.VolumeConfig{},
-		})
-		if err != nil {
-			return "", translateVolumeRPCError(err)
-		}
-		if resp == nil || resp.MountSessionId == "" {
-			return "", nil
-		}
-		return resp.MountSessionId, nil
-	})
+	cleanup, err := s.prepareVolumeFileMount(ctx, volumeID)
 	if err != nil {
 		return ctx, nil, func() {}, err
 	}

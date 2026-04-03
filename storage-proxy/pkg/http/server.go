@@ -4,10 +4,12 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/auth"
@@ -20,6 +22,7 @@ import (
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"github.com/sirupsen/logrus"
 	"go.opentelemetry.io/otel/trace"
+	"k8s.io/client-go/kubernetes"
 )
 
 type volumeRepository interface {
@@ -97,6 +100,7 @@ type volumeEventHub interface {
 type Server struct {
 	logger        *logrus.Logger
 	mux           *http.ServeMux
+	cfg           *config.StorageProxyConfig
 	repo          volumeRepository
 	meteringRepo  meteringWriter
 	regionID      string
@@ -107,13 +111,22 @@ type Server struct {
 	volMgr        volumeMountManager
 	fileRPC       volumeFileRPC
 	eventHub      volumeEventHub
+	podResolver   volumeFilePodResolver
+	selfPodID     string
+	selfClusterID string
 }
 
 // NewServer creates a new HTTP server
-func NewServer(logger *logrus.Logger, repo volumeRepository, meteringRepo meteringWriter, regionID string, authenticator *auth.HTTPAuthenticator, snapshotMgr snapshotManager, syncMgr syncManager, barrier volumeMutationBarrier, volMgr volumeMountManager, fileRPC volumeFileRPC, eventHub *notify.Hub) *Server {
+func NewServer(logger *logrus.Logger, cfg *config.StorageProxyConfig, k8sClient kubernetes.Interface, repo volumeRepository, meteringRepo meteringWriter, regionID string, authenticator *auth.HTTPAuthenticator, snapshotMgr snapshotManager, syncMgr syncManager, barrier volumeMutationBarrier, volMgr volumeMountManager, fileRPC volumeFileRPC, eventHub *notify.Hub) *Server {
+	selfPodID, err := os.Hostname()
+	if err != nil {
+		selfPodID = ""
+	}
+
 	s := &Server{
 		logger:        logger,
 		mux:           http.NewServeMux(),
+		cfg:           cfg,
 		repo:          repo,
 		meteringRepo:  meteringRepo,
 		regionID:      regionID,
@@ -124,6 +137,11 @@ func NewServer(logger *logrus.Logger, repo volumeRepository, meteringRepo meteri
 		volMgr:        volMgr,
 		fileRPC:       fileRPC,
 		eventHub:      eventHub,
+		podResolver:   newKubernetesVolumeFilePodResolver(logger, k8sClient, cfg),
+		selfPodID:     selfPodID,
+	}
+	if cfg != nil {
+		s.selfClusterID = cfg.DefaultClusterId
 	}
 
 	// Register handlers

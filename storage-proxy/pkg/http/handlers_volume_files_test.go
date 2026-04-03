@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
@@ -28,6 +31,21 @@ type fakeHTTPVolumeMountManager struct {
 	unmountCalls      int
 	lastUnmountVol    string
 	lastUnmountSes    string
+}
+
+type fakeVolumeFilePodResolver struct {
+	urls map[string]string
+}
+
+func (f *fakeVolumeFilePodResolver) ResolvePodURL(_ context.Context, podID string) (*url.URL, error) {
+	if f == nil || f.urls == nil {
+		return nil, errors.New("resolver unavailable")
+	}
+	rawURL, ok := f.urls[podID]
+	if !ok {
+		return nil, errors.New("pod not found")
+	}
+	return url.Parse(rawURL)
 }
 
 func (f *fakeHTTPVolumeMountManager) GetVolume(volumeID string) (*volume.VolumeContext, error) {
@@ -58,6 +76,7 @@ type fakeHTTPVolumeFileRPC struct {
 	mountCalls  int
 	lastMountID string
 	sessionID   string
+	mountFunc   func(context.Context, *pb.MountVolumeRequest) (*pb.MountVolumeResponse, error)
 
 	getAttrFunc    func(context.Context, *pb.GetAttrRequest) (*pb.GetAttrResponse, error)
 	lookupFunc     func(context.Context, *pb.LookupRequest) (*pb.NodeResponse, error)
@@ -75,7 +94,10 @@ type fakeHTTPVolumeFileRPC struct {
 	releaseFunc    func(context.Context, *pb.ReleaseRequest) (*pb.Empty, error)
 }
 
-func (f *fakeHTTPVolumeFileRPC) MountVolume(_ context.Context, req *pb.MountVolumeRequest) (*pb.MountVolumeResponse, error) {
+func (f *fakeHTTPVolumeFileRPC) MountVolume(ctx context.Context, req *pb.MountVolumeRequest) (*pb.MountVolumeResponse, error) {
+	if f.mountFunc != nil {
+		return f.mountFunc(ctx, req)
+	}
 	f.mountCalls++
 	if req != nil {
 		f.lastMountID = req.VolumeId
@@ -198,10 +220,13 @@ func newVolumeFileTestServer(fileRPC *fakeHTTPVolumeFileRPC) (*Server, *fakeHTTP
 	}
 	volMgr := &fakeHTTPVolumeMountManager{}
 	server := &Server{
-		logger:  logrus.New(),
-		repo:    repo,
-		volMgr:  volMgr,
-		fileRPC: fileRPC,
+		logger:        logrus.New(),
+		repo:          repo,
+		volMgr:        volMgr,
+		fileRPC:       fileRPC,
+		cfg:           &config.StorageProxyConfig{HeartbeatTimeout: 15},
+		selfPodID:     "local-pod",
+		selfClusterID: "cluster-a",
 	}
 	return server, volMgr
 }
@@ -483,5 +508,156 @@ func TestHandleVolumeFileMoveRenamesPath(t *testing.T) {
 	}
 	if renamed == nil || renamed.OldParent != 2 || renamed.OldName != "report.txt" || renamed.NewParent != 4 || renamed.NewName != "report-old.txt" {
 		t.Fatalf("unexpected rename request: %+v", renamed)
+	}
+}
+
+func TestHandleVolumeFileStatProxiesToRemoteOwnerPod(t *testing.T) {
+	remoteSeen := make(chan *http.Request, 1)
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case remoteSeen <- r.Clone(r.Context()):
+		default:
+		}
+		_, _ = io.WriteString(w, `{"success":true,"data":{"name":"proxied.txt","path":"/proxied.txt","type":"file","size":7}}`)
+	}))
+	defer remote.Close()
+
+	fileRPC := &fakeHTTPVolumeFileRPC{}
+	server, volMgr := newVolumeFileTestServer(fileRPC)
+	repo := server.repo.(*fakeHTTPRepo)
+	repo.activeMounts["vol-1"] = []*db.VolumeMount{
+		{
+			VolumeID:  "vol-1",
+			ClusterID: "cluster-a",
+			PodID:     "remote-pod",
+			MountedAt: time.Unix(10, 0),
+		},
+	}
+	server.podResolver = &fakeVolumeFilePodResolver{
+		urls: map[string]string{"remote-pod": remote.URL},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/sandboxvolumes/vol-1/files/stat?path=/docs/report.txt", nil)
+	req.SetPathValue("id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-a"}))
+	recorder := httptest.NewRecorder()
+
+	server.handleVolumeFileStat(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	if volMgr.acquireCalls != 0 {
+		t.Fatalf("AcquireDirectVolumeFileMount() calls = %d, want 0", volMgr.acquireCalls)
+	}
+	select {
+	case seen := <-remoteSeen:
+		if seen.Header.Get(volumeFileAffinityRoutedPodHeader) != "remote-pod" {
+			t.Fatalf("routed pod header = %q, want %q", seen.Header.Get(volumeFileAffinityRoutedPodHeader), "remote-pod")
+		}
+	default:
+		t.Fatal("expected request to be proxied to remote owner")
+	}
+}
+
+func TestHandleVolumeFileStatPrefersLocalOwnerPod(t *testing.T) {
+	fileRPC := &fakeHTTPVolumeFileRPC{
+		lookupFunc: func(_ context.Context, req *pb.LookupRequest) (*pb.NodeResponse, error) {
+			switch {
+			case req.Parent == 1 && req.Name == "docs":
+				return &pb.NodeResponse{Inode: 2, Attr: volumeDirAttr()}, nil
+			case req.Parent == 2 && req.Name == "report.txt":
+				return &pb.NodeResponse{Inode: 3, Attr: volumeFileAttr(12)}, nil
+			default:
+				return nil, status.Error(codes.NotFound, "missing")
+			}
+		},
+	}
+	server, volMgr := newVolumeFileTestServer(fileRPC)
+	repo := server.repo.(*fakeHTTPRepo)
+	repo.activeMounts["vol-1"] = []*db.VolumeMount{
+		{
+			VolumeID:  "vol-1",
+			ClusterID: "cluster-a",
+			PodID:     "remote-pod",
+			MountedAt: time.Unix(10, 0),
+		},
+		{
+			VolumeID:  "vol-1",
+			ClusterID: "cluster-a",
+			PodID:     "local-pod",
+			MountedAt: time.Unix(20, 0),
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/sandboxvolumes/vol-1/files/stat?path=/docs/report.txt", nil)
+	req.SetPathValue("id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-a"}))
+	recorder := httptest.NewRecorder()
+
+	server.handleVolumeFileStat(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	if volMgr.acquireCalls != 1 {
+		t.Fatalf("AcquireDirectVolumeFileMount() calls = %d, want 1", volMgr.acquireCalls)
+	}
+}
+
+func TestPrepareOrProxyVolumeFileRequestReroutesAfterMountConflict(t *testing.T) {
+	remoteSeen := make(chan struct{}, 1)
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case remoteSeen <- struct{}{}:
+		default:
+		}
+		_, _ = io.WriteString(w, `{"success":true,"data":{"name":"proxied.txt","path":"/proxied.txt","type":"file","size":7}}`)
+	}))
+	defer remote.Close()
+
+	fileRPC := &fakeHTTPVolumeFileRPC{
+		mountFunc: func(_ context.Context, req *pb.MountVolumeRequest) (*pb.MountVolumeResponse, error) {
+			return nil, errors.New("volume vol-1 already mounted on another instance")
+		},
+	}
+	server, volMgr := newVolumeFileTestServer(fileRPC)
+	repo := server.repo.(*fakeHTTPRepo)
+	callCount := 0
+	repo.getActiveFunc = func(ctx context.Context, volumeID string, heartbeatTimeout int) ([]*db.VolumeMount, error) {
+		callCount++
+		if callCount == 1 {
+			return nil, nil
+		}
+		return []*db.VolumeMount{
+			{
+				VolumeID:  "vol-1",
+				ClusterID: "cluster-a",
+				PodID:     "remote-pod",
+				MountedAt: time.Unix(10, 0),
+			},
+		}, nil
+	}
+	server.podResolver = &fakeVolumeFilePodResolver{
+		urls: map[string]string{"remote-pod": remote.URL},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/sandboxvolumes/vol-1/files/stat?path=/docs/report.txt", nil)
+	req.SetPathValue("id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-a"}))
+	recorder := httptest.NewRecorder()
+
+	server.handleVolumeFileStat(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	if volMgr.acquireCalls != 1 {
+		t.Fatalf("AcquireDirectVolumeFileMount() calls = %d, want 1", volMgr.acquireCalls)
+	}
+	select {
+	case <-remoteSeen:
+	default:
+		t.Fatal("expected mount conflict to reroute to remote owner")
 	}
 }

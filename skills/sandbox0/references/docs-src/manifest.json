@@ -98,6 +98,10 @@
           "title": "Mounts"
         },
         {
+          "slug": "http",
+          "title": "HTTP"
+        },
+        {
           "slug": "snapshots",
           "title": "Snapshots"
         },

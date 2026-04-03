@@ -1,0 +1,275 @@
+# Volume HTTP
+
+Use the Volume HTTP API to operate on files in a Volume directly by volume ID, without mounting the Volume into a Sandbox first.
+
+This page focuses on raw HTTP and WebSocket usage only. SDK and CLI examples can be added later.
+
+<Callout variant="info">
+Requests still go through the normal gateway chain and team-scoped auth. Internally, `storage-proxy` lazily attaches the Volume and reclaims idle direct mounts later.
+</Callout>
+
+## Base Model
+
+- Every path is resolved relative to the Volume root.
+- Use absolute logical paths such as `/docs/readme.txt`.
+- Read operations use `sandboxvolumefile:read`.
+- Write, move, mkdir, and delete operations use `sandboxvolumefile:write`.
+
+### FileInfo
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | File or directory name |
+| `path` | string | Logical path inside the Volume |
+| `type` | string | `file`, `dir`, or `symlink` |
+| `size` | integer | Size in bytes |
+| `mode` | string | Unix mode bits such as `0644` |
+| `mod_time` | string | Last modification time |
+| `is_link` | boolean | Whether the entry is a symlink |
+| `link_target` | string | Symlink target when available |
+
+---
+
+## Write File
+
+Write binary content to a file. Creates parent directories automatically when needed.
+
+<Endpoint method="POST">
+/api/v1/sandboxvolumes/{'{id}'}/files?path=/docs/readme.txt
+</Endpoint>
+
+### Request Body
+
+Raw bytes.
+
+```bash
+curl -X POST \
+    "$SANDBOX0_BASE_URL/api/v1/sandboxvolumes/vol_abc123/files?path=/docs/readme.txt" \
+    -H "Authorization: Bearer $SANDBOX0_API_KEY" \
+    -H "Content-Type: application/octet-stream" \
+    --data-binary @./README.txt
+```
+
+---
+
+## Read File
+
+Read a file from a Volume.
+
+<Endpoint method="GET">
+/api/v1/sandboxvolumes/{'{id}'}/files?path=/docs/readme.txt
+</Endpoint>
+
+By default the response body is raw bytes:
+
+```bash
+curl \
+    "$SANDBOX0_BASE_URL/api/v1/sandboxvolumes/vol_abc123/files?path=/docs/readme.txt" \
+    -H "Authorization: Bearer $SANDBOX0_API_KEY" \
+    -o ./readme.txt
+```
+
+If you set `Accept: application/json`, the API returns a base64 JSON payload instead:
+
+```bash
+curl \
+    "$SANDBOX0_BASE_URL/api/v1/sandboxvolumes/vol_abc123/files?path=/docs/readme.txt" \
+    -H "Authorization: Bearer $SANDBOX0_API_KEY" \
+    -H "Accept: application/json"
+```
+
+Example response:
+
+```json
+{
+    "success": true,
+    "data": {
+        "content": "SGVsbG8sIFZvbHVtZSEK",
+        "encoding": "base64"
+    }
+}
+```
+
+---
+
+## Create Directory
+
+Create a directory with the same endpoint used for file writes.
+
+<Endpoint method="POST">
+/api/v1/sandboxvolumes/{'{id}'}/files?path=/project/src&mkdir=true&recursive=true
+</Endpoint>
+
+```bash
+curl -X POST \
+    "$SANDBOX0_BASE_URL/api/v1/sandboxvolumes/vol_abc123/files?path=/project/src&mkdir=true&recursive=true" \
+    -H "Authorization: Bearer $SANDBOX0_API_KEY"
+```
+
+---
+
+## Stat Path
+
+Return metadata for a file or directory.
+
+<Endpoint method="GET">
+/api/v1/sandboxvolumes/{'{id}'}/files/stat?path=/docs/readme.txt
+</Endpoint>
+
+```bash
+curl \
+    "$SANDBOX0_BASE_URL/api/v1/sandboxvolumes/vol_abc123/files/stat?path=/docs/readme.txt" \
+    -H "Authorization: Bearer $SANDBOX0_API_KEY"
+```
+
+Example response:
+
+```json
+{
+    "success": true,
+    "data": {
+        "name": "readme.txt",
+        "path": "/docs/readme.txt",
+        "type": "file",
+        "size": 15,
+        "mode": "0644",
+        "mod_time": "2026-04-03T10:00:00Z",
+        "is_link": false
+    }
+}
+```
+
+---
+
+## List Directory
+
+List the direct children of a directory.
+
+<Endpoint method="GET">
+/api/v1/sandboxvolumes/{'{id}'}/files/list?path=/docs
+</Endpoint>
+
+```bash
+curl \
+    "$SANDBOX0_BASE_URL/api/v1/sandboxvolumes/vol_abc123/files/list?path=/docs" \
+    -H "Authorization: Bearer $SANDBOX0_API_KEY"
+```
+
+Example response:
+
+```json
+{
+    "success": true,
+    "data": {
+        "entries": [
+            {
+                "name": "readme.txt",
+                "path": "/docs/readme.txt",
+                "type": "file",
+                "size": 15,
+                "mode": "0644",
+                "mod_time": "2026-04-03T10:00:00Z",
+                "is_link": false
+            },
+            {
+                "name": "images",
+                "path": "/docs/images",
+                "type": "dir",
+                "size": 0,
+                "mode": "0755",
+                "mod_time": "2026-04-03T10:00:00Z",
+                "is_link": false
+            }
+        ]
+    }
+}
+```
+
+---
+
+## Move or Rename
+
+Move or rename a file or directory.
+
+<Endpoint method="POST">
+/api/v1/sandboxvolumes/{'{id}'}/files/move
+</Endpoint>
+
+### Request Body
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `source` | string | Source logical path |
+| `destination` | string | Destination logical path |
+
+```bash
+curl -X POST \
+    "$SANDBOX0_BASE_URL/api/v1/sandboxvolumes/vol_abc123/files/move" \
+    -H "Authorization: Bearer $SANDBOX0_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{"source":"/docs/readme.txt","destination":"/archive/readme-old.txt"}'
+```
+
+---
+
+## Delete File or Directory
+
+Delete a file or recursively delete a directory.
+
+<Endpoint method="DELETE">
+/api/v1/sandboxvolumes/{'{id}'}/files?path=/docs/readme.txt
+</Endpoint>
+
+```bash
+curl -X DELETE \
+    "$SANDBOX0_BASE_URL/api/v1/sandboxvolumes/vol_abc123/files?path=/docs/readme.txt" \
+    -H "Authorization: Bearer $SANDBOX0_API_KEY"
+```
+
+---
+
+## Watch for Changes
+
+Watch a path for file events over WebSocket.
+
+<Endpoint method="GET">
+/api/v1/sandboxvolumes/{'{id}'}/files/watch
+</Endpoint>
+
+### WebSocket Protocol
+
+After connecting, send JSON messages to subscribe and unsubscribe.
+
+Client messages:
+
+| Action | Description | Example |
+|--------|-------------|---------|
+| `subscribe` | Start watching a path prefix | `{"action":"subscribe","path":"/docs","recursive":true}` |
+| `unsubscribe` | Stop a previous watch | `{"action":"unsubscribe","watch_id":"watch-123"}` |
+
+Server messages:
+
+| Type | Description | Example |
+|------|-------------|---------|
+| `subscribed` | Subscription accepted | `{"type":"subscribed","watch_id":"watch-123","path":"/docs"}` |
+| `event` | File change event | `{"type":"event","watch_id":"watch-123","event":"write","path":"/docs/readme.txt"}` |
+| `unsubscribed` | Watch removed | `{"type":"unsubscribed","watch_id":"watch-123"}` |
+| `error` | Request rejected | `{"type":"error","error":"invalid path"}` |
+
+Event names currently include:
+
+- `create`
+- `write`
+- `remove`
+- `rename`
+- `chmod`
+- `invalidate`
+
+---
+
+## Notes
+
+- `GET /files`, `GET /stat`, and `GET /list` require a `path` query parameter.
+- `POST /files` with `mkdir=true` creates directories instead of writing file content.
+- `DELETE /files` is recursive for directories.
+- File size is currently capped by the direct HTTP handler. Large transfer workflows should prefer snapshots or sync when appropriate.

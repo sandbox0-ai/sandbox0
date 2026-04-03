@@ -1012,9 +1012,11 @@ func assertVolumeSyncBackendLifecycle(env *framework.ScenarioEnv, session *e2eut
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
 	Expect(appendResp).NotTo(BeNil())
-	Expect(appendResp.HeadSeq).To(Equal(int64(1)))
 	Expect(appendResp.Accepted).To(HaveLen(1))
 	Expect(appendResp.Conflicts).To(BeEmpty())
+	Expect(appendResp.Accepted[0].Seq).NotTo(BeNil())
+	firstSeq := *appendResp.Accepted[0].Seq
+	Expect(appendResp.HeadSeq).To(Equal(firstSeq))
 	Expect(appendResp.Accepted[0].Path).NotTo(BeNil())
 	Expect(*appendResp.Accepted[0].Path).To(Equal("volume-sync-e2e/main.go"))
 
@@ -1022,24 +1024,24 @@ func assertVolumeSyncBackendLifecycle(env *framework.ScenarioEnv, session *e2eut
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
 	Expect(changesResp).NotTo(BeNil())
-	Expect(changesResp.HeadSeq).To(Equal(int64(1)))
+	Expect(changesResp.HeadSeq).To(Equal(firstSeq))
 	Expect(changesResp.Changes).To(HaveLen(1))
 	Expect(changesResp.Changes[0].Path).NotTo(BeNil())
 	Expect(*changesResp.Changes[0].Path).To(Equal("volume-sync-e2e/main.go"))
 
 	replica, status, err = session.UpdateSyncReplicaCursor(env.TestCtx.Context, GinkgoT(), volumeID, "replica-linux", apispec.UpdateSyncReplicaCursorRequest{
-		LastAppliedSeq: 1,
+		LastAppliedSeq: firstSeq,
 	})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
 	Expect(replica.Replica.LastAppliedSeq).NotTo(BeNil())
-	Expect(*replica.Replica.LastAppliedSeq).To(Equal(int64(1)))
+	Expect(*replica.Replica.LastAppliedSeq).To(Equal(firstSeq))
 
 	replica, status, err = session.GetSyncReplica(env.TestCtx.Context, GinkgoT(), volumeID, "replica-linux")
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
 	Expect(replica.Replica.LastAppliedSeq).NotTo(BeNil())
-	Expect(*replica.Replica.LastAppliedSeq).To(Equal(int64(1)))
+	Expect(*replica.Replica.LastAppliedSeq).To(Equal(firstSeq))
 
 	bootstrapName := "e2e-sync-bootstrap"
 	bootstrapResp, status, bootstrapConflict, err := session.CreateSyncBootstrap(env.TestCtx.Context, GinkgoT(), volumeID, &apispec.CreateVolumeSyncBootstrapRequest{
@@ -1082,7 +1084,7 @@ func assertVolumeSyncBackendLifecycle(env *framework.ScenarioEnv, session *e2eut
 
 	windowsAppendResp, status, err := session.AppendSyncReplicaChanges(env.TestCtx.Context, GinkgoT(), volumeID, "replica-windows", apispec.AppendReplicaChangesRequest{
 		RequestId: "req-e2e-sync-win-1",
-		BaseSeq:   1,
+		BaseSeq:   firstSeq,
 		Changes: []apispec.ChangeRequest{{
 			EventType:     apispec.SyncEventType("write"),
 			Path:          ptr("volume-sync-e2e/CON.txt"),

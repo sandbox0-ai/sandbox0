@@ -458,6 +458,35 @@ test("setDashboardAuthCookies stores dashboard auth cookies", () => {
   assert.equal(accessCookie?.path, "/");
 });
 
+test("setDashboardAuthCookies writes canonical parent-domain cookies when configured", () => {
+  const response = NextResponse.json({ ok: true });
+  setDashboardAuthCookies(response, {
+    ...singleClusterConfig,
+    siteURL: "https://cloud.sandbox0.ai",
+    cookieDomains: ["sandbox0.ai"],
+  }, {
+    access_token: "access-token",
+    refresh_token: "refresh-token",
+    expires_at: Math.floor(Date.now() / 1000) + 3600,
+    regional_session: {
+      region_id: "aws/us-east-1",
+      regional_gateway_url: "https://use1.example.com",
+      token: "regional-access-token",
+      expires_at: Math.floor(Date.now() / 1000) + 900,
+    },
+  });
+
+  const setCookieHeader = response.headers.get("set-cookie") ?? "";
+  assert.match(
+    setCookieHeader,
+    /sandbox0_refresh_token=refresh-token; Path=\/; Domain=sandbox0\.ai/i,
+  );
+  assert.match(
+    setCookieHeader,
+    /sandbox0_access_token=access-token; Path=\/; .*Domain=sandbox0\.ai/i,
+  );
+});
+
 test("clearDashboardAuthCookies expires dashboard auth cookies", () => {
   const response = NextResponse.json({ ok: true });
   clearDashboardAuthCookies(response, singleClusterConfig);

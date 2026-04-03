@@ -49,6 +49,25 @@ function configuredCookieDomains(
   return [...new Set(domains)];
 }
 
+function preferredCookieDomain(
+  config: DashboardRuntimeConfig,
+): string | undefined {
+  const domains = configuredCookieDomains(config);
+  if (domains.length === 0) {
+    return undefined;
+  }
+
+  try {
+    const hostname = new URL(config.siteURL).hostname.toLowerCase();
+    return (
+      domains.find((domain) => hostname === domain || hostname.endsWith(`.${domain}`)) ??
+      domains[0]
+    );
+  } catch {
+    return domains[0];
+  }
+}
+
 function expireDashboardCookie(
   response: NextResponse,
   config: DashboardRuntimeConfig,
@@ -70,6 +89,39 @@ function expireDashboardCookie(
       domain,
     });
   }
+}
+
+function setDashboardCookie(
+  response: NextResponse,
+  config: DashboardRuntimeConfig,
+  name: string,
+  value: string,
+  options?: {
+    maxAge?: number;
+  },
+): void {
+  const secure = config.siteURL.startsWith("https://");
+  const domain = preferredCookieDomain(config);
+  const baseOptions = {
+    httpOnly: true,
+    sameSite: "lax" as const,
+    secure,
+    path: dashboardHomePath,
+    maxAge: options?.maxAge,
+  };
+
+  if (!domain) {
+    response.cookies.set(name, value, baseOptions);
+    return;
+  }
+
+  // Clear old host-only or differently-scoped cookies before writing the
+  // canonical parent-domain cookie to avoid duplicate-name ambiguity.
+  expireDashboardCookie(response, config, name);
+  response.cookies.set(name, value, {
+    ...baseOptions,
+    domain,
+  });
 }
 
 function toLoginResponse(data: {
@@ -461,22 +513,21 @@ export function setDashboardAuthCookies(
   config: DashboardRuntimeConfig,
   tokens: LoginResponse,
 ): void {
-  const secure = config.siteURL.startsWith("https://");
   const maxAge = Math.max(0, tokens.expires_at - Math.floor(Date.now() / 1000));
 
-  response.cookies.set(dashboardAccessTokenCookieName, tokens.access_token, {
-    httpOnly: true,
-    sameSite: "lax",
-    secure,
-    path: dashboardHomePath,
-    maxAge,
-  });
-  response.cookies.set(dashboardRefreshTokenCookieName, tokens.refresh_token, {
-    httpOnly: true,
-    sameSite: "lax",
-    secure,
-    path: dashboardHomePath,
-  });
+  setDashboardCookie(
+    response,
+    config,
+    dashboardAccessTokenCookieName,
+    tokens.access_token,
+    { maxAge },
+  );
+  setDashboardCookie(
+    response,
+    config,
+    dashboardRefreshTokenCookieName,
+    tokens.refresh_token,
+  );
 
   if (
     tokens.regional_session?.token &&
@@ -488,49 +539,33 @@ export function setDashboardAuthCookies(
       tokens.regional_session.expires_at - Math.floor(Date.now() / 1000),
     );
 
-    response.cookies.set(
+    setDashboardCookie(
+      response,
+      config,
       dashboardRegionalAccessTokenCookieName,
       tokens.regional_session.token,
-      {
-        httpOnly: true,
-        sameSite: "lax",
-        secure,
-        path: dashboardHomePath,
-        maxAge: regionalMaxAge,
-      },
+      { maxAge: regionalMaxAge },
     );
-    response.cookies.set(
+    setDashboardCookie(
+      response,
+      config,
       dashboardRegionalRegionIDCookieName,
       tokens.regional_session.region_id,
-      {
-        httpOnly: true,
-        sameSite: "lax",
-        secure,
-        path: dashboardHomePath,
-        maxAge: regionalMaxAge,
-      },
+      { maxAge: regionalMaxAge },
     );
-    response.cookies.set(
+    setDashboardCookie(
+      response,
+      config,
       dashboardRegionalExpiresAtCookieName,
       String(tokens.regional_session.expires_at),
-      {
-        httpOnly: true,
-        sameSite: "lax",
-        secure,
-        path: dashboardHomePath,
-        maxAge: regionalMaxAge,
-      },
+      { maxAge: regionalMaxAge },
     );
-    response.cookies.set(
+    setDashboardCookie(
+      response,
+      config,
       dashboardRegionalGatewayURLCookieName,
       tokens.regional_session.regional_gateway_url ?? "",
-      {
-        httpOnly: true,
-        sameSite: "lax",
-        secure,
-        path: dashboardHomePath,
-        maxAge: regionalMaxAge,
-      },
+      { maxAge: regionalMaxAge },
     );
     return;
   }

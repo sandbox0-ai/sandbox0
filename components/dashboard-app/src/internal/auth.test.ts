@@ -34,6 +34,17 @@ const globalGatewayConfig: DashboardRuntimeConfig = {
   globalGatewayURL: "https://global.example.com",
 };
 
+function createUnsignedJWT(payload: Record<string, unknown>): string {
+  const encode = (value: object) =>
+    Buffer.from(JSON.stringify(value))
+      .toString("base64")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/g, "");
+
+  return `${encode({ alg: "none", typ: "JWT" })}.${encode(payload)}.`;
+}
+
 test("resolveDashboardAuthProviders parses builtin and oidc providers", async () => {
   const result = await resolveDashboardAuthProviders(
     singleClusterConfig,
@@ -429,16 +440,18 @@ test("updateDefaultTeam sends the selected team to the control plane", async () 
 });
 
 test("setDashboardAuthCookies stores dashboard auth cookies", () => {
+  const expiresAt = Math.floor(Date.now() / 1000) + 3600;
+  const regionalExpiresAt = Math.floor(Date.now() / 1000) + 900;
   const response = NextResponse.json({ ok: true });
   setDashboardAuthCookies(response, singleClusterConfig, {
-    access_token: "access-token",
+    access_token: createUnsignedJWT({ exp: expiresAt }),
     refresh_token: "refresh-token",
-    expires_at: Math.floor(Date.now() / 1000) + 3600,
+    expires_at: expiresAt,
     regional_session: {
       region_id: "aws/us-east-1",
       regional_gateway_url: "https://use1.example.com",
-      token: "regional-access-token",
-      expires_at: Math.floor(Date.now() / 1000) + 900,
+      token: createUnsignedJWT({ exp: regionalExpiresAt }),
+      expires_at: regionalExpiresAt,
     },
   });
 
@@ -450,28 +463,35 @@ test("setDashboardAuthCookies stores dashboard auth cookies", () => {
   const regionalGatewayCookie = response.cookies.get(
     "sandbox0_regional_gateway_url",
   );
-  assert.equal(accessCookie?.value, "access-token");
+  assert.equal(accessCookie?.value, createUnsignedJWT({ exp: expiresAt }));
   assert.equal(refreshCookie?.value, "refresh-token");
-  assert.equal(regionalAccessCookie?.value, "regional-access-token");
+  assert.equal(
+    regionalAccessCookie?.value,
+    createUnsignedJWT({ exp: regionalExpiresAt }),
+  );
   assert.equal(regionalGatewayCookie?.value, "https://use1.example.com");
   assert.equal(accessCookie?.httpOnly, true);
   assert.equal(accessCookie?.path, "/");
+  assert.equal(accessCookie?.maxAge, 3600);
+  assert.equal(regionalAccessCookie?.maxAge, 900);
 });
 
 test("setDashboardAuthCookies writes canonical parent-domain cookies when configured", () => {
+  const expiresAt = Math.floor(Date.now() / 1000) + 3600;
+  const accessToken = createUnsignedJWT({ exp: expiresAt });
   const response = NextResponse.json({ ok: true });
   setDashboardAuthCookies(response, {
     ...singleClusterConfig,
     siteURL: "https://cloud.sandbox0.ai",
     cookieDomains: ["sandbox0.ai"],
   }, {
-    access_token: "access-token",
+    access_token: accessToken,
     refresh_token: "refresh-token",
-    expires_at: Math.floor(Date.now() / 1000) + 3600,
+    expires_at: expiresAt,
     regional_session: {
       region_id: "aws/us-east-1",
       regional_gateway_url: "https://use1.example.com",
-      token: "regional-access-token",
+      token: createUnsignedJWT({ exp: Math.floor(Date.now() / 1000) + 900 }),
       expires_at: Math.floor(Date.now() / 1000) + 900,
     },
   });
@@ -483,8 +503,24 @@ test("setDashboardAuthCookies writes canonical parent-domain cookies when config
   );
   assert.match(
     setCookieHeader,
-    /sandbox0_access_token=access-token; Path=\/; .*Domain=sandbox0\.ai/i,
+    /sandbox0_access_token=.*; Path=\/; .*Domain=sandbox0\.ai/i,
   );
+});
+
+test("setDashboardAuthCookies falls back to session cookies when expires_at is unusable", () => {
+  const accessToken = createUnsignedJWT({
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  });
+  const response = NextResponse.json({ ok: true });
+  setDashboardAuthCookies(response, singleClusterConfig, {
+    access_token: accessToken,
+    refresh_token: "refresh-token",
+    expires_at: 1,
+  });
+
+  const accessCookie = response.cookies.get("sandbox0_access_token");
+  assert.equal(accessCookie?.value, accessToken);
+  assert.equal(accessCookie?.maxAge, 3600);
 });
 
 test("clearDashboardAuthCookies expires dashboard auth cookies", () => {

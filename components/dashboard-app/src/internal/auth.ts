@@ -98,6 +98,7 @@ function setDashboardCookie(
   value: string,
   options?: {
     maxAge?: number;
+    expires?: Date;
   },
 ): void {
   const secure = config.siteURL.startsWith("https://");
@@ -108,6 +109,7 @@ function setDashboardCookie(
     secure,
     path: dashboardHomePath,
     maxAge: options?.maxAge,
+    expires: options?.expires,
   };
 
   if (!domain) {
@@ -122,6 +124,50 @@ function setDashboardCookie(
     ...baseOptions,
     domain,
   });
+}
+
+function decodeJWTPayload(token: string): Record<string, unknown> | null {
+  const parts = token.split(".");
+  if (parts.length < 2) {
+    return null;
+  }
+
+  try {
+    const encodedPayload = parts[1];
+    if (!encodedPayload) {
+      return null;
+    }
+
+    const normalized = encodedPayload.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+    const json = Buffer.from(padded, "base64").toString("utf8");
+    const payload = JSON.parse(json);
+    return payload && typeof payload === "object" ? payload as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveCookieExpiry(
+  token: string | undefined,
+  fallbackExpiresAt: number | undefined,
+): { maxAge?: number; expires?: Date } {
+  const nowUnix = Math.floor(Date.now() / 1000);
+  const payloadExp = token
+    ? Number(decodeJWTPayload(token)?.exp ?? "")
+    : Number.NaN;
+  const resolvedExpiresAt = Number.isFinite(payloadExp) && payloadExp > 0
+    ? payloadExp
+    : Number(fallbackExpiresAt ?? "");
+
+  if (!Number.isFinite(resolvedExpiresAt) || resolvedExpiresAt <= nowUnix) {
+    return {};
+  }
+
+  return {
+    maxAge: Math.max(1, resolvedExpiresAt - nowUnix),
+    expires: new Date(resolvedExpiresAt * 1000),
+  };
 }
 
 function toLoginResponse(data: {
@@ -513,14 +559,17 @@ export function setDashboardAuthCookies(
   config: DashboardRuntimeConfig,
   tokens: LoginResponse,
 ): void {
-  const maxAge = Math.max(0, tokens.expires_at - Math.floor(Date.now() / 1000));
+  const accessCookieExpiry = resolveCookieExpiry(
+    tokens.access_token,
+    tokens.expires_at,
+  );
 
   setDashboardCookie(
     response,
     config,
     dashboardAccessTokenCookieName,
     tokens.access_token,
-    { maxAge },
+    accessCookieExpiry,
   );
   setDashboardCookie(
     response,
@@ -534,9 +583,9 @@ export function setDashboardAuthCookies(
     tokens.regional_session?.region_id &&
     tokens.regional_session?.expires_at
   ) {
-    const regionalMaxAge = Math.max(
-      0,
-      tokens.regional_session.expires_at - Math.floor(Date.now() / 1000),
+    const regionalCookieExpiry = resolveCookieExpiry(
+      tokens.regional_session.token,
+      tokens.regional_session.expires_at,
     );
 
     setDashboardCookie(
@@ -544,28 +593,28 @@ export function setDashboardAuthCookies(
       config,
       dashboardRegionalAccessTokenCookieName,
       tokens.regional_session.token,
-      { maxAge: regionalMaxAge },
+      regionalCookieExpiry,
     );
     setDashboardCookie(
       response,
       config,
       dashboardRegionalRegionIDCookieName,
       tokens.regional_session.region_id,
-      { maxAge: regionalMaxAge },
+      regionalCookieExpiry,
     );
     setDashboardCookie(
       response,
       config,
       dashboardRegionalExpiresAtCookieName,
       String(tokens.regional_session.expires_at),
-      { maxAge: regionalMaxAge },
+      regionalCookieExpiry,
     );
     setDashboardCookie(
       response,
       config,
       dashboardRegionalGatewayURLCookieName,
       tokens.regional_session.regional_gateway_url ?? "",
-      { maxAge: regionalMaxAge },
+      regionalCookieExpiry,
     );
     return;
   }

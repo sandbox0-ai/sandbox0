@@ -19,6 +19,7 @@ import (
 	"github.com/juicedata/juicefs/pkg/object"
 	"github.com/juicedata/juicefs/pkg/vfs"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
@@ -71,7 +72,7 @@ func newStorageProxySyncTestEnv(t *testing.T) *storageProxySyncTestEnv {
 	}
 	syncSvc.SetReplayPayloadStore(volsync.NewObjectReplayPayloadStore(replayStore))
 	snapshotMgr := newIntegrationSnapshotManager()
-	server := storagehttp.NewServer(logrus.New(), repo, nil, "test-region", nil, snapshotMgr, syncSvc, nil, nil, nil, nil)
+	server := storagehttp.NewServer(logrus.New(), &config.StorageProxyConfig{}, nil, repo, nil, "test-region", nil, snapshotMgr, syncSvc, nil, nil, nil, nil)
 
 	return &storageProxySyncTestEnv{
 		ctx:         ctx,
@@ -83,7 +84,7 @@ func newStorageProxySyncTestEnv(t *testing.T) *storageProxySyncTestEnv {
 }
 
 func newStorageProxyTestServer(env *storageProxySyncTestEnv) *storagehttp.Server {
-	return storagehttp.NewServer(logrus.New(), env.repo, nil, "test-region", nil, env.snapshotMgr, env.sync, nil, nil, nil, nil)
+	return storagehttp.NewServer(logrus.New(), &config.StorageProxyConfig{}, nil, env.repo, nil, "test-region", nil, env.snapshotMgr, env.sync, nil, nil, nil, nil)
 }
 
 func requireIntegrationDatabaseURL(t *testing.T) string {

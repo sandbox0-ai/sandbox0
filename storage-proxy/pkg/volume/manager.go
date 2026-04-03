@@ -434,7 +434,10 @@ func (m *Manager) BeginInvalidate(volumeID, invalidateID string) (int, error) {
 		return 0, fmt.Errorf("invalidate %s already registered", invalidateID)
 	}
 	pending := make(map[string]struct{}, len(sessions))
-	for sessionID := range sessions {
+	for sessionID, session := range sessions {
+		if session != nil && session.Scope == MountSessionScopeDirect {
+			continue
+		}
 		pending[sessionID] = struct{}{}
 	}
 	m.invalidates[volumeID][invalidateID] = &invalidateTracker{

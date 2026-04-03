@@ -242,3 +242,35 @@ func TestCleanupIdleDirectVolumeFileMounts_SkipsInflightRequests(t *testing.T) {
 		t.Fatalf("direct session %s should remain mounted", sessionID)
 	}
 }
+
+func TestBeginInvalidate_IgnoresDirectSessions(t *testing.T) {
+	mgr := NewManager(logrus.New(), &config.StorageProxyConfig{})
+	volumeID := "vol-invalidate"
+	mgr.mountSessions[volumeID] = map[string]*MountSession{
+		"sandbox-session": {ID: "sandbox-session", Scope: MountSessionScopeSandbox, CreatedAt: time.Now()},
+		"direct-session":  {ID: "direct-session", Scope: MountSessionScopeDirect, CreatedAt: time.Now()},
+		"legacy-session":  {ID: "legacy-session", CreatedAt: time.Now()},
+	}
+
+	pending, err := mgr.BeginInvalidate(volumeID, "invalidate-1")
+	if err != nil {
+		t.Fatalf("BeginInvalidate() error = %v", err)
+	}
+	if pending != 2 {
+		t.Fatalf("pending = %d, want 2", pending)
+	}
+
+	tracker := mgr.invalidates[volumeID]["invalidate-1"]
+	if tracker == nil {
+		t.Fatal("expected invalidate tracker")
+	}
+	if _, ok := tracker.pending["direct-session"]; ok {
+		t.Fatal("direct session should not require invalidate ack")
+	}
+	if _, ok := tracker.pending["sandbox-session"]; !ok {
+		t.Fatal("sandbox session should require invalidate ack")
+	}
+	if _, ok := tracker.pending["legacy-session"]; !ok {
+		t.Fatal("legacy unscoped session should still require invalidate ack")
+	}
+}

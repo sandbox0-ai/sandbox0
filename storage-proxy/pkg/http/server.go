@@ -1,8 +1,10 @@
 package http
 
 import (
+	"bufio"
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -232,6 +234,27 @@ type responseWriter struct {
 func (rw *responseWriter) WriteHeader(code int) {
 	rw.statusCode = code
 	rw.ResponseWriter.WriteHeader(code)
+}
+
+func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := rw.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, http.ErrNotSupported
+	}
+	return hijacker.Hijack()
+}
+
+func (rw *responseWriter) Flush() {
+	if flusher, ok := rw.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (rw *responseWriter) Push(target string, opts *http.PushOptions) error {
+	if pusher, ok := rw.ResponseWriter.(http.Pusher); ok {
+		return pusher.Push(target, opts)
+	}
+	return http.ErrNotSupported
 }
 
 // handleHealth handles health check requests

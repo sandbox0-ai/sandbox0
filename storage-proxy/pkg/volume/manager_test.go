@@ -126,6 +126,50 @@ func TestUnmountSandboxVolumes_OnlyRemovesOwnedSessions(t *testing.T) {
 	}
 }
 
+func TestUnmountSandboxVolumes_PreservesDirectSession(t *testing.T) {
+	mgr := NewManager(logrus.New(), &config.StorageProxyConfig{})
+	registrar := &mockMountRegistrar{}
+	mgr.SetMountRegistrar(registrar)
+
+	volumeID := "vol-shared-direct"
+	sandboxID := "sandbox-a"
+	sandboxSessionID := "sandbox-session"
+	directSessionID := "direct-session"
+
+	mgr.volumes[volumeID] = &VolumeContext{VolumeID: volumeID}
+	mgr.mountSessions[volumeID] = map[string]*MountSession{
+		sandboxSessionID: {ID: sandboxSessionID, SandboxID: sandboxID, Scope: MountSessionScopeSandbox},
+		directSessionID:  {ID: directSessionID, Scope: MountSessionScopeDirect},
+	}
+	mgr.directMounts[volumeID] = &directMountLease{
+		SessionID: directSessionID,
+		InFlight:  0,
+		LastUsed:  time.Now(),
+	}
+	mgr.TrackVolumeSession(sandboxID, volumeID, sandboxSessionID)
+
+	errs := mgr.UnmountSandboxVolumes(context.Background(), sandboxID)
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors, got %d", len(errs))
+	}
+
+	if _, ok := mgr.mountSessions[volumeID][sandboxSessionID]; ok {
+		t.Fatalf("sandbox session %s should be removed", sandboxSessionID)
+	}
+	if _, ok := mgr.mountSessions[volumeID][directSessionID]; !ok {
+		t.Fatalf("direct session %s should remain", directSessionID)
+	}
+	if _, ok := mgr.directMounts[volumeID]; !ok {
+		t.Fatalf("direct lease for %s should remain", volumeID)
+	}
+	if _, ok := mgr.volumes[volumeID]; !ok {
+		t.Fatalf("volume %s should remain mounted while direct session exists", volumeID)
+	}
+	if len(registrar.unregistered) != 0 {
+		t.Fatalf("unregister should not be called while direct session remains, got %+v", registrar.unregistered)
+	}
+}
+
 func TestUnmountSandboxVolumes_SkipsLegacyUnscopedSessions(t *testing.T) {
 	mgr := NewManager(logrus.New(), &config.StorageProxyConfig{})
 
@@ -240,6 +284,122 @@ func TestCleanupIdleDirectVolumeFileMounts_SkipsInflightRequests(t *testing.T) {
 	}
 	if _, ok := mgr.mountSessions[volumeID][sessionID]; !ok {
 		t.Fatalf("direct session %s should remain mounted", sessionID)
+	}
+}
+
+func TestCleanupIdleDirectVolumeFileMount_RemovesOnlyDirectSessionWhenSandboxSessionExists(t *testing.T) {
+	mgr := NewManager(logrus.New(), &config.StorageProxyConfig{})
+	registrar := &mockMountRegistrar{}
+	mgr.SetMountRegistrar(registrar)
+
+	volumeID := "vol-mixed"
+	directSessionID := "direct-session-1"
+	sandboxSessionID := "sandbox-session-1"
+
+	mgr.volumes[volumeID] = &VolumeContext{VolumeID: volumeID}
+	mgr.mountSessions[volumeID] = map[string]*MountSession{
+		directSessionID:  {ID: directSessionID, Scope: MountSessionScopeDirect, CreatedAt: time.Now()},
+		sandboxSessionID: {ID: sandboxSessionID, Scope: MountSessionScopeSandbox, SandboxID: "sandbox-1", CreatedAt: time.Now()},
+	}
+	mgr.directMounts[volumeID] = &directMountLease{
+		SessionID: directSessionID,
+		InFlight:  0,
+		LastUsed:  time.Now(),
+	}
+
+	cleaned, err := mgr.CleanupIdleDirectVolumeFileMount(context.Background(), volumeID)
+	if err != nil {
+		t.Fatalf("CleanupIdleDirectVolumeFileMount() error = %v", err)
+	}
+	if !cleaned {
+		t.Fatal("expected idle direct mount to be cleaned")
+	}
+	if _, ok := mgr.directMounts[volumeID]; ok {
+		t.Fatalf("direct lease for %s should be removed", volumeID)
+	}
+	if _, ok := mgr.mountSessions[volumeID][directSessionID]; ok {
+		t.Fatalf("direct session %s should be removed", directSessionID)
+	}
+	if _, ok := mgr.mountSessions[volumeID][sandboxSessionID]; !ok {
+		t.Fatalf("sandbox session %s should remain", sandboxSessionID)
+	}
+	if _, ok := mgr.volumes[volumeID]; !ok {
+		t.Fatalf("volume %s should remain mounted because sandbox session still exists", volumeID)
+	}
+	if len(registrar.unregistered) != 0 {
+		t.Fatalf("unregister should not be called while sandbox session remains, got %+v", registrar.unregistered)
+	}
+}
+
+func TestCleanupIdleDirectVolumeFileMount_SkipsInflightLease(t *testing.T) {
+	mgr := NewManager(logrus.New(), &config.StorageProxyConfig{})
+	volumeID := "vol-busy-single"
+	sessionID := "direct-session-1"
+
+	mgr.volumes[volumeID] = &VolumeContext{VolumeID: volumeID}
+	mgr.mountSessions[volumeID] = map[string]*MountSession{
+		sessionID: {ID: sessionID, Scope: MountSessionScopeDirect, CreatedAt: time.Now()},
+	}
+	mgr.directMounts[volumeID] = &directMountLease{
+		SessionID: sessionID,
+		InFlight:  1,
+		LastUsed:  time.Now(),
+	}
+
+	cleaned, err := mgr.CleanupIdleDirectVolumeFileMount(context.Background(), volumeID)
+	if err != nil {
+		t.Fatalf("CleanupIdleDirectVolumeFileMount() error = %v", err)
+	}
+	if cleaned {
+		t.Fatal("expected inflight direct mount to remain")
+	}
+	if _, ok := mgr.directMounts[volumeID]; !ok {
+		t.Fatalf("direct lease for %s should remain", volumeID)
+	}
+}
+
+func TestCleanupIdleDirectVolumeFileMount_AfterSandboxUnmountRemovesFinalSession(t *testing.T) {
+	mgr := NewManager(logrus.New(), &config.StorageProxyConfig{})
+	registrar := &mockMountRegistrar{}
+	mgr.SetMountRegistrar(registrar)
+
+	volumeID := "vol-final-direct"
+	sandboxID := "sandbox-final"
+	sandboxSessionID := "sandbox-session"
+	directSessionID := "direct-session"
+
+	mgr.volumes[volumeID] = &VolumeContext{VolumeID: volumeID}
+	mgr.mountSessions[volumeID] = map[string]*MountSession{
+		sandboxSessionID: {ID: sandboxSessionID, SandboxID: sandboxID, Scope: MountSessionScopeSandbox},
+		directSessionID:  {ID: directSessionID, Scope: MountSessionScopeDirect},
+	}
+	mgr.directMounts[volumeID] = &directMountLease{
+		SessionID: directSessionID,
+		InFlight:  0,
+		LastUsed:  time.Now(),
+	}
+	mgr.TrackVolumeSession(sandboxID, volumeID, sandboxSessionID)
+
+	errs := mgr.UnmountSandboxVolumes(context.Background(), sandboxID)
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors during sandbox unmount, got %d", len(errs))
+	}
+
+	cleaned, err := mgr.CleanupIdleDirectVolumeFileMount(context.Background(), volumeID)
+	if err != nil {
+		t.Fatalf("CleanupIdleDirectVolumeFileMount() error = %v", err)
+	}
+	if !cleaned {
+		t.Fatal("expected final direct session to be cleaned")
+	}
+	if _, ok := mgr.volumes[volumeID]; ok {
+		t.Fatalf("volume %s should be fully unmounted", volumeID)
+	}
+	if _, ok := mgr.mountSessions[volumeID]; ok {
+		t.Fatalf("mount sessions for %s should be removed", volumeID)
+	}
+	if len(registrar.unregistered) != 1 || registrar.unregistered[0] != volumeID {
+		t.Fatalf("expected unregister called once with %s, got %+v", volumeID, registrar.unregistered)
 	}
 }
 

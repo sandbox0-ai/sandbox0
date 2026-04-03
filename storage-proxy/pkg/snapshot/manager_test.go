@@ -625,6 +625,43 @@ func TestRestoreSnapshot_WaitsForInvalidateAck(t *testing.T) {
 	}
 }
 
+func TestRestoreSnapshot_SkipsInvalidateWaitWhenNoParticipantsRemain(t *testing.T) {
+	repo := newFakeRepo()
+	repo.snapshots["snap1"] = &db.Snapshot{ID: "snap1", VolumeID: "vol1", TeamID: "team1"}
+	volMgr := &fakeVolumeProvider{
+		err:          errors.New("not mounted"),
+		beginPending: 0,
+	}
+	mgr := newTestManager(repo, volMgr)
+
+	metaClient := mgr.metaClient.(*fakeMeta)
+	volumePath, err := naming.JuiceFSVolumePath("vol1")
+	if err != nil {
+		t.Fatalf("volume path generation failed: %v", err)
+	}
+	snapshotPath, err := naming.JuiceFSSnapshotPath("vol1", "snap1")
+	if err != nil {
+		t.Fatalf("snapshot path generation failed: %v", err)
+	}
+	metaClient.ensurePath(volumePath)
+	metaClient.ensurePath(snapshotPath)
+
+	err = mgr.RestoreSnapshot(context.Background(), &RestoreSnapshotRequest{
+		VolumeID:   "vol1",
+		SnapshotID: "snap1",
+		TeamID:     "team1",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !volMgr.beginCalled {
+		t.Fatalf("expected BeginInvalidate to be called")
+	}
+	if volMgr.waitCalled {
+		t.Fatalf("expected WaitForInvalidate not to be called when no remount participants remain")
+	}
+}
+
 func TestRestoreSnapshot_RemountTimeout(t *testing.T) {
 	repo := newFakeRepo()
 	repo.snapshots["snap1"] = &db.Snapshot{ID: "snap1", VolumeID: "vol1", TeamID: "team1"}

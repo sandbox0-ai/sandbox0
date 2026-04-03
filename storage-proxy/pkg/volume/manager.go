@@ -700,6 +700,32 @@ func (m *Manager) releaseDirectVolumeFileMount(volumeID, sessionID string) func(
 	}
 }
 
+// CleanupIdleDirectVolumeFileMount releases the shared direct session for a volume when no requests are in flight.
+func (m *Manager) CleanupIdleDirectVolumeFileMount(ctx context.Context, volumeID string) (bool, error) {
+	if volumeID == "" {
+		return false, fmt.Errorf("missing volume id")
+	}
+
+	m.mu.Lock()
+	lease := m.directMounts[volumeID]
+	if lease == nil {
+		m.mu.Unlock()
+		return false, nil
+	}
+	if lease.InFlight > 0 {
+		m.mu.Unlock()
+		return false, nil
+	}
+	sessionID := lease.SessionID
+	delete(m.directMounts, volumeID)
+	m.mu.Unlock()
+
+	if err := m.UnmountVolume(ctx, volumeID, sessionID); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // CleanupIdleDirectVolumeFileMounts unmounts idle shared direct sessions after the idle TTL elapses.
 func (m *Manager) CleanupIdleDirectVolumeFileMounts(ctx context.Context, idleTTL time.Duration) []error {
 	if idleTTL <= 0 {

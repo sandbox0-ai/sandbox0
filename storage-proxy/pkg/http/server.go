@@ -72,6 +72,7 @@ type volumeMountManager interface {
 	GetVolume(volumeID string) (*volume.VolumeContext, error)
 	UnmountVolume(ctx context.Context, volumeID, sessionID string) error
 	AcquireDirectVolumeFileMount(ctx context.Context, volumeID string, mountFn func(context.Context) (string, error)) (func(), error)
+	CleanupIdleDirectVolumeFileMount(ctx context.Context, volumeID string) (bool, error)
 }
 
 type volumeFileRPC interface {

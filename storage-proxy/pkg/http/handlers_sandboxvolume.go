@@ -199,6 +199,11 @@ func (s *Server) deleteSandboxVolume(w http.ResponseWriter, r *http.Request) {
 	// Using 15 seconds as heartbeat timeout (same as coordinator.HeartbeatTimeout)
 	const heartbeatTimeout = 15
 	force := r.URL.Query().Get("force") == "true"
+	if !force && s.volMgr != nil {
+		if _, err := s.volMgr.CleanupIdleDirectVolumeFileMount(r.Context(), id); err != nil {
+			s.logger.WithError(err).WithField("volume_id", id).Warn("Failed to cleanup idle direct volume mount before delete")
+		}
+	}
 	mounts, err := s.repo.GetActiveMounts(r.Context(), id, heartbeatTimeout)
 	if err != nil {
 		s.logger.WithError(err).Error("Failed to check active mounts")

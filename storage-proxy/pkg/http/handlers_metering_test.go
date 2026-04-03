@@ -282,3 +282,106 @@ func TestDeleteSandboxVolumeForceRecordsMetering(t *testing.T) {
 		t.Fatalf("watermark count = %d, want 1", len(meteringWriter.watermarks))
 	}
 }
+
+func TestDeleteSandboxVolumeCleansIdleDirectMountBeforeDelete(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{
+		ID:        "vol-1",
+		TeamID:    "team-1",
+		UserID:    "user-1",
+		CreatedAt: time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC),
+	}
+	repo.getActiveFunc = func(ctx context.Context, volumeID string, heartbeatTimeout int) ([]*db.VolumeMount, error) {
+		if len(repo.deletedMounts) == 0 {
+			return []*db.VolumeMount{{
+				VolumeID:  "vol-1",
+				ClusterID: "cluster-a",
+				PodID:     "pod-a",
+			}}, nil
+		}
+		return nil, nil
+	}
+	volMgr := &fakeHTTPVolumeMountManager{
+		cleanupDirectFunc: func(ctx context.Context, volumeID string) (bool, error) {
+			repo.deletedMounts = append(repo.deletedMounts, db.VolumeMount{
+				VolumeID:  volumeID,
+				ClusterID: "cluster-a",
+				PodID:     "pod-a",
+			})
+			return true, nil
+		},
+	}
+	meteringWriter := &fakeHTTPMeteringWriter{}
+	server := &Server{
+		logger:       logrus.New(),
+		repo:         repo,
+		meteringRepo: meteringWriter,
+		regionID:     "aws/us-east-1",
+		snapshotMgr:  &fakeHTTPSnapshotManager{},
+		volMgr:       volMgr,
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/sandboxvolumes/vol-1", nil)
+	req.SetPathValue("id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	recorder := httptest.NewRecorder()
+
+	server.deleteSandboxVolume(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	if volMgr.cleanupCalls != 1 || volMgr.lastCleanupVolume != "vol-1" {
+		t.Fatalf("cleanup calls = %d volume = %q, want 1 and vol-1", volMgr.cleanupCalls, volMgr.lastCleanupVolume)
+	}
+	if len(repo.deletedVolume) != 1 || repo.deletedVolume[0] != "vol-1" {
+		t.Fatalf("deleted volume = %v, want [vol-1]", repo.deletedVolume)
+	}
+}
+
+func TestDeleteSandboxVolumeReturnsConflictWhenDirectMountStillInflight(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{
+		ID:        "vol-1",
+		TeamID:    "team-1",
+		UserID:    "user-1",
+		CreatedAt: time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC),
+	}
+	repo.activeMounts["vol-1"] = []*db.VolumeMount{{
+		VolumeID:  "vol-1",
+		ClusterID: "cluster-a",
+		PodID:     "pod-a",
+	}}
+	volMgr := &fakeHTTPVolumeMountManager{
+		cleanupDirectFunc: func(ctx context.Context, volumeID string) (bool, error) {
+			return false, nil
+		},
+	}
+	server := &Server{
+		logger:      logrus.New(),
+		repo:        repo,
+		regionID:    "aws/us-east-1",
+		snapshotMgr: &fakeHTTPSnapshotManager{},
+		volMgr:      volMgr,
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/sandboxvolumes/vol-1", nil)
+	req.SetPathValue("id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	recorder := httptest.NewRecorder()
+
+	server.deleteSandboxVolume(recorder, req)
+
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusConflict)
+	}
+	if len(repo.deletedVolume) != 0 {
+		t.Fatalf("delete should not proceed, got deleted volume %v", repo.deletedVolume)
+	}
+}

@@ -31,6 +31,9 @@ type fakeHTTPVolumeMountManager struct {
 	unmountCalls      int
 	lastUnmountVol    string
 	lastUnmountSes    string
+	cleanupCalls      int
+	lastCleanupVolume string
+	cleanupDirectFunc func(context.Context, string) (bool, error)
 }
 
 type fakeVolumeFilePodResolver struct {
@@ -70,6 +73,15 @@ func (f *fakeHTTPVolumeMountManager) AcquireDirectVolumeFileMount(ctx context.Co
 	return func() {
 		f.releaseCalls++
 	}, nil
+}
+
+func (f *fakeHTTPVolumeMountManager) CleanupIdleDirectVolumeFileMount(ctx context.Context, volumeID string) (bool, error) {
+	f.cleanupCalls++
+	f.lastCleanupVolume = volumeID
+	if f.cleanupDirectFunc != nil {
+		return f.cleanupDirectFunc(ctx, volumeID)
+	}
+	return false, nil
 }
 
 type fakeHTTPVolumeFileRPC struct {

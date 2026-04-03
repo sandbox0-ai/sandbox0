@@ -2266,6 +2266,180 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/sandboxvolumes/{id}/files/move:
+    post:
+      tags: [files]
+      summary: Move a volume file or directory
+      security:
+        - bearerAuth: []
+      x-upstream-service: storage-proxy
+      x-upstream-path: /sandboxvolumes/{id}/files/move
+      parameters:
+        - $ref: "#/components/parameters/SandboxVolumeID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MoveFileRequest"
+      responses:
+        "200":
+          description: Moved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessMovedResponse"
+  /api/v1/sandboxvolumes/{id}/files/watch:
+    get:
+      tags: [files]
+      summary: Volume file watch WebSocket
+      description: |
+        Upgrades to WebSocket for volume file watch events.
+        Client messages:
+        - { "action": "subscribe", "path": "/tmp", "recursive": false }
+        - { "action": "unsubscribe", "watch_id": "watch-id" }
+        Server messages:
+        - { "type": "subscribed", "watch_id": "watch-id", "path": "/tmp" }
+        - { "type": "event", "watch_id": "watch-id", "event": "write", "path": "/tmp/a.txt" }
+        - { "type": "unsubscribed", "watch_id": "watch-id" }
+        - { "type": "error", "error": "message" }
+      security:
+        - bearerAuth: []
+      x-upstream-service: storage-proxy
+      x-upstream-path: /sandboxvolumes/{id}/files/watch
+      x-websocket:
+        inbound:
+          $ref: "#/components/schemas/FileWatchRequest"
+        outbound:
+          $ref: "#/components/schemas/FileWatchResponse"
+      parameters:
+        - $ref: "#/components/parameters/SandboxVolumeID"
+      responses:
+        "101":
+          description: Switching Protocols
+  /api/v1/sandboxvolumes/{id}/files:
+    get:
+      tags: [files]
+      summary: Read volume file content
+      description: |
+        Use query params:
+        - path=/tmp/a.txt: target file path relative to the volume root
+        When `Accept` or `Content-Type` is `application/json`, returns a base64 JSON payload.
+      security:
+        - bearerAuth: []
+      x-upstream-service: storage-proxy
+      x-upstream-path: /sandboxvolumes/{id}/files
+      parameters:
+        - $ref: "#/components/parameters/SandboxVolumeID"
+        - $ref: "#/components/parameters/FilePath"
+      responses:
+        "200":
+          description: File content
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/FileContentResponse"
+    post:
+      tags: [files]
+      summary: Write volume file or create directory
+      description: Use `path` query param and `mkdir=true` to create directories, otherwise writes file content.
+      security:
+        - bearerAuth: []
+      x-upstream-service: storage-proxy
+      x-upstream-path: /sandboxvolumes/{id}/files
+      parameters:
+        - $ref: "#/components/parameters/SandboxVolumeID"
+        - $ref: "#/components/parameters/FilePath"
+        - $ref: "#/components/parameters/QueryMkdir"
+        - $ref: "#/components/parameters/QueryRecursive"
+      requestBody:
+        required: false
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: File written
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessWrittenResponse"
+        "201":
+          description: Directory created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessCreatedResponse"
+    delete:
+      tags: [files]
+      summary: Delete volume file or directory
+      security:
+        - bearerAuth: []
+      x-upstream-service: storage-proxy
+      x-upstream-path: /sandboxvolumes/{id}/files
+      parameters:
+        - $ref: "#/components/parameters/SandboxVolumeID"
+        - $ref: "#/components/parameters/FilePath"
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessDeletedResponse"
+  /api/v1/sandboxvolumes/{id}/files/stat:
+    get:
+      tags: [files]
+      summary: Stat a volume file
+      description: |
+        Use query params:
+        - path=/tmp/a.txt: target file path relative to the volume root
+      security:
+        - bearerAuth: []
+      x-upstream-service: storage-proxy
+      x-upstream-path: /sandboxvolumes/{id}/files/stat
+      parameters:
+        - $ref: "#/components/parameters/SandboxVolumeID"
+        - $ref: "#/components/parameters/FilePath"
+      responses:
+        "200":
+          description: File metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessFileStatResponse"
+  /api/v1/sandboxvolumes/{id}/files/list:
+    get:
+      tags: [files]
+      summary: List volume directory entries
+      description: |
+        Use query params:
+        - path=/tmp: target directory path relative to the volume root
+      security:
+        - bearerAuth: []
+      x-upstream-service: storage-proxy
+      x-upstream-path: /sandboxvolumes/{id}/files/list
+      parameters:
+        - $ref: "#/components/parameters/SandboxVolumeID"
+        - $ref: "#/components/parameters/FilePath"
+      responses:
+        "200":
+          description: Directory entries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessFileListResponse"
   /api/v1/sandboxvolumes/{id}/snapshots:
     post:
       tags: [snapshots]

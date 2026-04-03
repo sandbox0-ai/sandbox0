@@ -71,7 +71,7 @@ func newStorageProxySyncTestEnv(t *testing.T) *storageProxySyncTestEnv {
 	}
 	syncSvc.SetReplayPayloadStore(volsync.NewObjectReplayPayloadStore(replayStore))
 	snapshotMgr := newIntegrationSnapshotManager()
-	server := storagehttp.NewServer(logrus.New(), repo, nil, "test-region", nil, snapshotMgr, syncSvc, nil)
+	server := storagehttp.NewServer(logrus.New(), repo, nil, "test-region", nil, snapshotMgr, syncSvc, nil, nil, nil, nil)
 
 	return &storageProxySyncTestEnv{
 		ctx:         ctx,
@@ -83,7 +83,7 @@ func newStorageProxySyncTestEnv(t *testing.T) *storageProxySyncTestEnv {
 }
 
 func newStorageProxyTestServer(env *storageProxySyncTestEnv) *storagehttp.Server {
-	return storagehttp.NewServer(logrus.New(), env.repo, nil, "test-region", nil, env.snapshotMgr, env.sync, nil)
+	return storagehttp.NewServer(logrus.New(), env.repo, nil, "test-region", nil, env.snapshotMgr, env.sync, nil, nil, nil, nil)
 }
 
 func requireIntegrationDatabaseURL(t *testing.T) string {
@@ -255,7 +255,7 @@ func (m *integrationMountedVolumeManager) GetVolume(volumeID string) (*volume.Vo
 	return vol, nil
 }
 
-func (m *integrationMountedVolumeManager) TrackVolume(_, _ string) {}
+func (m *integrationMountedVolumeManager) TrackVolumeSession(_, _, _ string) {}
 
 func newMountedIntegrationVolumeContext(t *testing.T, volumeID, teamID string) *volume.VolumeContext {
 	t.Helper()

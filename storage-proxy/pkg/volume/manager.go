@@ -55,12 +55,27 @@ type MountSession struct {
 	ID        string
 	SandboxID string
 	CreatedAt time.Time
+	Scope     MountSessionScope
 }
+
+type MountSessionScope string
+
+const (
+	MountSessionScopeUnknown MountSessionScope = ""
+	MountSessionScopeSandbox MountSessionScope = "sandbox"
+	MountSessionScopeDirect  MountSessionScope = "direct"
+)
 
 type invalidateTracker struct {
 	pending map[string]struct{}
 	done    chan struct{}
 	err     error
+}
+
+type directMountLease struct {
+	SessionID string
+	InFlight  int
+	LastUsed  time.Time
 }
 
 // Manager manages JuiceFS volumes
@@ -69,6 +84,7 @@ type Manager struct {
 	volumes          map[string]*VolumeContext
 	sandboxToVolumes map[string]map[string]struct{} // sandboxID -> set of volumeIDs
 	mountSessions    map[string]map[string]*MountSession
+	directMounts     map[string]*directMountLease
 	invalidates      map[string]map[string]*invalidateTracker
 	logger           *logrus.Logger
 	config           *config.StorageProxyConfig
@@ -81,6 +97,7 @@ func NewManager(logger *logrus.Logger, cfg *config.StorageProxyConfig) *Manager 
 		volumes:          make(map[string]*VolumeContext),
 		sandboxToVolumes: make(map[string]map[string]struct{}),
 		mountSessions:    make(map[string]map[string]*MountSession),
+		directMounts:     make(map[string]*directMountLease),
 		invalidates:      make(map[string]map[string]*invalidateTracker),
 		logger:           logger,
 		config:           cfg,
@@ -324,6 +341,9 @@ func (m *Manager) UnmountVolume(ctx context.Context, volumeID, sessionID string)
 		return fmt.Errorf("mount session %s not found for volume %s", sessionID, volumeID)
 	}
 	delete(sessions, sessionID)
+	if lease := m.directMounts[volumeID]; lease != nil && lease.SessionID == sessionID {
+		delete(m.directMounts, volumeID)
+	}
 	m.clearSessionFromInvalidatesLocked(volumeID, sessionID)
 	if len(sessions) > 0 {
 		return nil
@@ -374,6 +394,7 @@ func (m *Manager) UnmountVolume(ctx context.Context, volumeID, sessionID string)
 	// until all staging chunks are uploaded, as long as the process is running.
 	// For absolute safety, one could wait for the staging directory to be empty.
 
+	delete(m.directMounts, volumeID)
 	delete(m.volumes, volumeID)
 
 	m.logger.WithField("volume_id", volumeID).Info("Volume unmounted successfully")
@@ -559,6 +580,185 @@ func (m *Manager) TrackVolume(sandboxID, volumeID string) {
 	}).Debug("Tracking volume for sandbox")
 }
 
+// TrackVolumeSession associates a specific mount session with a sandbox for precise cleanup.
+func (m *Manager) TrackVolumeSession(sandboxID, volumeID, sessionID string) {
+	if sandboxID == "" || volumeID == "" {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.sandboxToVolumes[sandboxID] == nil {
+		m.sandboxToVolumes[sandboxID] = make(map[string]struct{})
+	}
+	m.sandboxToVolumes[sandboxID][volumeID] = struct{}{}
+
+	if sessionID == "" {
+		return
+	}
+	if sessions := m.mountSessions[volumeID]; sessions != nil {
+		if session := sessions[sessionID]; session != nil {
+			session.SandboxID = sandboxID
+			session.Scope = MountSessionScopeSandbox
+			return
+		}
+	}
+
+	m.logger.WithFields(logrus.Fields{
+		"sandbox_id": sandboxID,
+		"volume_id":  volumeID,
+		"session_id": sessionID,
+	}).Warn("TrackVolumeSession called for unknown mount session")
+}
+
+// AcquireDirectVolumeFileMount acquires a shared direct session for HTTP volume file APIs.
+func (m *Manager) AcquireDirectVolumeFileMount(ctx context.Context, volumeID string, mountFn func(context.Context) (string, error)) (func(), error) {
+	if volumeID == "" {
+		return func() {}, fmt.Errorf("missing volume id")
+	}
+	if mountFn == nil {
+		return func() {}, fmt.Errorf("missing direct mount function")
+	}
+
+	now := time.Now()
+
+	m.mu.Lock()
+	if lease := m.directMounts[volumeID]; lease != nil {
+		if sessions := m.mountSessions[volumeID]; sessions != nil {
+			if session := sessions[lease.SessionID]; session != nil {
+				session.Scope = MountSessionScopeDirect
+				lease.InFlight++
+				lease.LastUsed = now
+				m.mu.Unlock()
+				return m.releaseDirectVolumeFileMount(volumeID, lease.SessionID), nil
+			}
+		}
+		delete(m.directMounts, volumeID)
+	}
+	m.mu.Unlock()
+
+	sessionID, err := mountFn(ctx)
+	if err != nil {
+		return func() {}, err
+	}
+
+	redundantSessionID := ""
+
+	m.mu.Lock()
+	if lease := m.directMounts[volumeID]; lease != nil {
+		if sessions := m.mountSessions[volumeID]; sessions != nil {
+			if session := sessions[lease.SessionID]; session != nil {
+				session.Scope = MountSessionScopeDirect
+				lease.InFlight++
+				lease.LastUsed = now
+				redundantSessionID = sessionID
+				m.mu.Unlock()
+				if err := m.UnmountVolume(context.Background(), volumeID, redundantSessionID); err != nil {
+					m.logger.WithError(err).WithFields(logrus.Fields{
+						"volume_id":  volumeID,
+						"session_id": redundantSessionID,
+					}).Warn("Failed to cleanup redundant direct volume session")
+				}
+				return m.releaseDirectVolumeFileMount(volumeID, lease.SessionID), nil
+			}
+		}
+		delete(m.directMounts, volumeID)
+	}
+
+	if sessions := m.mountSessions[volumeID]; sessions != nil {
+		if session := sessions[sessionID]; session != nil {
+			session.Scope = MountSessionScopeDirect
+		}
+	}
+	m.directMounts[volumeID] = &directMountLease{
+		SessionID: sessionID,
+		InFlight:  1,
+		LastUsed:  now,
+	}
+	m.mu.Unlock()
+
+	return m.releaseDirectVolumeFileMount(volumeID, sessionID), nil
+}
+
+func (m *Manager) releaseDirectVolumeFileMount(volumeID, sessionID string) func() {
+	return func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+
+		lease := m.directMounts[volumeID]
+		if lease == nil || lease.SessionID != sessionID {
+			return
+		}
+		if lease.InFlight > 0 {
+			lease.InFlight--
+		}
+		lease.LastUsed = time.Now()
+	}
+}
+
+// CleanupIdleDirectVolumeFileMounts unmounts idle shared direct sessions after the idle TTL elapses.
+func (m *Manager) CleanupIdleDirectVolumeFileMounts(ctx context.Context, idleTTL time.Duration) []error {
+	if idleTTL <= 0 {
+		return nil
+	}
+
+	type pendingUnmount struct {
+		volumeID  string
+		sessionID string
+	}
+	candidates := make([]pendingUnmount, 0)
+	cutoff := time.Now().Add(-idleTTL)
+
+	m.mu.Lock()
+	for volumeID, lease := range m.directMounts {
+		if lease == nil || lease.InFlight > 0 || lease.LastUsed.After(cutoff) {
+			continue
+		}
+		candidates = append(candidates, pendingUnmount{
+			volumeID:  volumeID,
+			sessionID: lease.SessionID,
+		})
+		delete(m.directMounts, volumeID)
+	}
+	m.mu.Unlock()
+
+	var errs []error
+	for _, candidate := range candidates {
+		if err := m.UnmountVolume(ctx, candidate.volumeID, candidate.sessionID); err != nil {
+			errs = append(errs, err)
+			m.logger.WithError(err).WithFields(logrus.Fields{
+				"volume_id":  candidate.volumeID,
+				"session_id": candidate.sessionID,
+			}).Warn("Failed to cleanup idle direct volume file mount")
+		}
+	}
+	return errs
+}
+
+func (m *Manager) listSandboxMountSessions(volumeID, sandboxID string) ([]string, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	sessions := m.mountSessions[volumeID]
+	if len(sessions) == 0 {
+		return nil, false
+	}
+
+	ids := make([]string, 0, len(sessions))
+	hasLegacyUnscoped := false
+	for sessionID, session := range sessions {
+		if session == nil || session.SandboxID == "" {
+			hasLegacyUnscoped = true
+			continue
+		}
+		if session.SandboxID == sandboxID {
+			ids = append(ids, sessionID)
+		}
+	}
+	return ids, hasLegacyUnscoped
+}
+
 // UnmountSandboxVolumes unmounts all volumes associated with a sandbox
 // This is called automatically when a sandbox pod is deleted
 func (m *Manager) UnmountSandboxVolumes(ctx context.Context, sandboxID string) []error {
@@ -581,14 +781,24 @@ func (m *Manager) UnmountSandboxVolumes(ctx context.Context, sandboxID string) [
 			"volume_id":  volumeID,
 		}).Info("Auto-unmounting volume for deleted sandbox")
 
-		sessionIDs := m.ListMountSessions(volumeID)
+		sessionIDs, hasLegacyUnscoped := m.listSandboxMountSessions(volumeID, sandboxID)
 		if len(sessionIDs) == 0 {
+			if hasLegacyUnscoped {
+				m.logger.WithFields(logrus.Fields{
+					"sandbox_id": sandboxID,
+					"volume_id":  volumeID,
+				}).Warn("Skipping unscoped legacy mount sessions during sandbox cleanup")
+				continue
+			}
+
 			// Best-effort cleanup for legacy/no-session state.
 			m.mu.Lock()
 			delete(m.volumes, volumeID)
 			delete(m.mountSessions, volumeID)
+			delete(m.directMounts, volumeID)
 			delete(m.invalidates, volumeID)
 			m.mu.Unlock()
+			continue
 		}
 		for _, sessionID := range sessionIDs {
 			if err := m.UnmountVolume(ctx, volumeID, sessionID); err != nil {

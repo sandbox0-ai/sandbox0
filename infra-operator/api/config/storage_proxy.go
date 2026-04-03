@@ -99,6 +99,9 @@ type StorageProxyConfig struct {
 	// +optional
 	// +kubebuilder:default="60s"
 	CleanupInterval string `yaml:"cleanup_interval" json:"cleanupInterval"`
+	// +optional
+	// +kubebuilder:default="30s"
+	DirectVolumeFileIdleTTL string `yaml:"direct_volume_file_idle_ttl" json:"directVolumeFileIdleTTL"`
 
 	// +optional
 	// +kubebuilder:default="1G"

@@ -2283,6 +2283,9 @@ spec:
                           defaultCacheSize:
                             default: 1G
                             type: string
+                          directVolumeFileIdleTTL:
+                            default: 30s
+                            type: string
                           flushTimeout:
                             default: 30s
                             type: string

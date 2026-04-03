@@ -50,7 +50,7 @@ type volumeManager interface {
 	UnmountVolume(ctx context.Context, volumeID, sessionID string) error
 	AckInvalidate(volumeID, sessionID, invalidateID string, success bool, errorMessage string) error
 	GetVolume(volumeID string) (*volume.VolumeContext, error)
-	TrackVolume(sandboxID, volumeID string)
+	TrackVolumeSession(sandboxID, volumeID, sessionID string)
 }
 
 // VolumeRepository provides volume metadata lookup for access mode enforcement.
@@ -303,7 +303,7 @@ func (s *FileSystemServer) MountVolume(ctx context.Context, req *pb.MountVolumeR
 	}).Info("Volume mounted with team prefix")
 
 	if claims.SandboxID != "" {
-		s.volMgr.TrackVolume(claims.SandboxID, req.VolumeId)
+		s.volMgr.TrackVolumeSession(claims.SandboxID, req.VolumeId, sessionID)
 	}
 
 	return &pb.MountVolumeResponse{

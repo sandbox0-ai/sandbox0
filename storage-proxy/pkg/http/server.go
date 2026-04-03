@@ -12,9 +12,12 @@ import (
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/auth"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/notify"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/pathnorm"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/snapshot"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volsync"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
+	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"github.com/sirupsen/logrus"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -62,6 +65,34 @@ type volumeMutationBarrier interface {
 	WithExclusive(ctx context.Context, volumeID string, fn func(context.Context) error) error
 }
 
+type volumeMountManager interface {
+	GetVolume(volumeID string) (*volume.VolumeContext, error)
+	UnmountVolume(ctx context.Context, volumeID, sessionID string) error
+	AcquireDirectVolumeFileMount(ctx context.Context, volumeID string, mountFn func(context.Context) (string, error)) (func(), error)
+}
+
+type volumeFileRPC interface {
+	MountVolume(ctx context.Context, req *pb.MountVolumeRequest) (*pb.MountVolumeResponse, error)
+	GetAttr(ctx context.Context, req *pb.GetAttrRequest) (*pb.GetAttrResponse, error)
+	Lookup(ctx context.Context, req *pb.LookupRequest) (*pb.NodeResponse, error)
+	Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenResponse, error)
+	Read(ctx context.Context, req *pb.ReadRequest) (*pb.ReadResponse, error)
+	Write(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResponse, error)
+	Create(ctx context.Context, req *pb.CreateRequest) (*pb.NodeResponse, error)
+	Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb.NodeResponse, error)
+	Unlink(ctx context.Context, req *pb.UnlinkRequest) (*pb.Empty, error)
+	Rmdir(ctx context.Context, req *pb.RmdirRequest) (*pb.Empty, error)
+	ReadDir(ctx context.Context, req *pb.ReadDirRequest) (*pb.ReadDirResponse, error)
+	OpenDir(ctx context.Context, req *pb.OpenDirRequest) (*pb.OpenDirResponse, error)
+	ReleaseDir(ctx context.Context, req *pb.ReleaseDirRequest) (*pb.Empty, error)
+	Rename(ctx context.Context, req *pb.RenameRequest) (*pb.Empty, error)
+	Release(ctx context.Context, req *pb.ReleaseRequest) (*pb.Empty, error)
+}
+
+type volumeEventHub interface {
+	Subscribe(req *pb.WatchRequest) (string, <-chan *pb.WatchEvent, func())
+}
+
 // Server provides HTTP management API for health checks and metrics
 type Server struct {
 	logger        *logrus.Logger
@@ -73,10 +104,13 @@ type Server struct {
 	snapshotMgr   snapshotManager
 	syncMgr       syncManager
 	barrier       volumeMutationBarrier
+	volMgr        volumeMountManager
+	fileRPC       volumeFileRPC
+	eventHub      volumeEventHub
 }
 
 // NewServer creates a new HTTP server
-func NewServer(logger *logrus.Logger, repo volumeRepository, meteringRepo meteringWriter, regionID string, authenticator *auth.HTTPAuthenticator, snapshotMgr snapshotManager, syncMgr syncManager, barrier volumeMutationBarrier) *Server {
+func NewServer(logger *logrus.Logger, repo volumeRepository, meteringRepo meteringWriter, regionID string, authenticator *auth.HTTPAuthenticator, snapshotMgr snapshotManager, syncMgr syncManager, barrier volumeMutationBarrier, volMgr volumeMountManager, fileRPC volumeFileRPC, eventHub *notify.Hub) *Server {
 	s := &Server{
 		logger:        logger,
 		mux:           http.NewServeMux(),
@@ -87,6 +121,9 @@ func NewServer(logger *logrus.Logger, repo volumeRepository, meteringRepo meteri
 		snapshotMgr:   snapshotMgr,
 		syncMgr:       syncMgr,
 		barrier:       barrier,
+		volMgr:        volMgr,
+		fileRPC:       fileRPC,
+		eventHub:      eventHub,
 	}
 
 	// Register handlers
@@ -100,6 +137,13 @@ func NewServer(logger *logrus.Logger, repo volumeRepository, meteringRepo meteri
 	s.mux.HandleFunc("GET /sandboxvolumes/{id}", s.getSandboxVolume)
 	s.mux.HandleFunc("DELETE /sandboxvolumes/{id}", s.deleteSandboxVolume)
 	s.mux.HandleFunc("POST /sandboxvolumes/{id}/fork", s.forkVolume)
+	s.mux.HandleFunc("GET /sandboxvolumes/{id}/files", s.handleVolumeFileOperation)
+	s.mux.HandleFunc("POST /sandboxvolumes/{id}/files", s.handleVolumeFileOperation)
+	s.mux.HandleFunc("DELETE /sandboxvolumes/{id}/files", s.handleVolumeFileOperation)
+	s.mux.HandleFunc("GET /sandboxvolumes/{id}/files/stat", s.handleVolumeFileStat)
+	s.mux.HandleFunc("GET /sandboxvolumes/{id}/files/list", s.handleVolumeFileList)
+	s.mux.HandleFunc("POST /sandboxvolumes/{id}/files/move", s.handleVolumeFileMove)
+	s.mux.HandleFunc("GET /sandboxvolumes/{id}/files/watch", s.handleVolumeFileWatch)
 
 	// Snapshot handlers
 	s.mux.HandleFunc("POST /sandboxvolumes/{volume_id}/snapshots", s.createSnapshot)

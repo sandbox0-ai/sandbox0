@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
 )
@@ -130,4 +131,86 @@ func (s *Session) DeleteSnapshot(ctx context.Context, t ContractT, volumeID, sna
 		return status, fmt.Errorf("delete snapshot failed with status %d: %s", status, formatAPIError(body))
 	}
 	return status, nil
+}
+
+func (s *Session) MountSandboxVolume(ctx context.Context, t ContractT, sandboxID string, req apispec.MountRequest) (*apispec.MountResponse, int, error) {
+	specPath := "/api/v1/sandboxes/{id}/sandboxvolumes/mount"
+	requestPath := "/api/v1/sandboxes/" + sandboxID + "/sandboxvolumes/mount"
+	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodPost, specPath, requestPath, req, true)
+	if err != nil {
+		return nil, status, err
+	}
+	if status != http.StatusOK {
+		return nil, status, fmt.Errorf("mount sandbox volume failed with status %d: %s", status, formatAPIError(body))
+	}
+	var resp apispec.SuccessMountResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, status, err
+	}
+	if !resp.Success || resp.Data == nil {
+		return nil, status, fmt.Errorf("mount sandbox volume response missing data")
+	}
+	return resp.Data, status, nil
+}
+
+func (s *Session) UnmountSandboxVolume(ctx context.Context, t ContractT, sandboxID string, req apispec.UnmountRequest) (int, error) {
+	specPath := "/api/v1/sandboxes/{id}/sandboxvolumes/unmount"
+	requestPath := "/api/v1/sandboxes/" + sandboxID + "/sandboxvolumes/unmount"
+	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodPost, specPath, requestPath, req, true)
+	if err != nil {
+		return status, err
+	}
+	if status != http.StatusOK {
+		return status, fmt.Errorf("unmount sandbox volume failed with status %d: %s", status, formatAPIError(body))
+	}
+	return status, nil
+}
+
+func (s *Session) GetSandboxVolumeStatus(ctx context.Context, t ContractT, sandboxID string) (*apispec.SuccessMountStatusResponse, int, error) {
+	specPath := "/api/v1/sandboxes/{id}/sandboxvolumes/status"
+	requestPath := "/api/v1/sandboxes/" + sandboxID + "/sandboxvolumes/status"
+	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodGet, specPath, requestPath, nil, true)
+	if err != nil {
+		return nil, status, err
+	}
+	if status != http.StatusOK {
+		return nil, status, fmt.Errorf("get sandbox volume status failed with status %d: %s", status, formatAPIError(body))
+	}
+	var resp apispec.SuccessMountStatusResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, status, err
+	}
+	if !resp.Success {
+		return nil, status, fmt.Errorf("get sandbox volume status response indicates failure")
+	}
+	return &resp, status, nil
+}
+
+func (s *Session) WriteVolumeFile(ctx context.Context, t ContractT, volumeID, filePath string, content []byte, contentType string) (int, error) {
+	if contentType == "" {
+		contentType = contentTypeBinary
+	}
+	specPath := "/api/v1/sandboxvolumes/{id}/files"
+	requestPath := "/api/v1/sandboxvolumes/" + volumeID + "/files?path=" + url.QueryEscape(filePath)
+	status, body, err := s.doRawSpecRequest(t, ctx, http.MethodPost, specPath, requestPath, content, contentType, defaultContentType, true)
+	if err != nil {
+		return status, err
+	}
+	if status != http.StatusOK {
+		return status, fmt.Errorf("write volume file failed with status %d: %s", status, formatAPIError(body))
+	}
+	return status, nil
+}
+
+func (s *Session) ReadVolumeFile(ctx context.Context, t ContractT, volumeID, filePath string) ([]byte, int, error) {
+	specPath := "/api/v1/sandboxvolumes/{id}/files"
+	requestPath := "/api/v1/sandboxvolumes/" + volumeID + "/files?path=" + url.QueryEscape(filePath)
+	status, body, err := s.doRawSpecRequest(t, ctx, http.MethodGet, specPath, requestPath, nil, "", contentTypeBinary, true)
+	if err != nil {
+		return nil, status, err
+	}
+	if status != http.StatusOK {
+		return nil, status, fmt.Errorf("read volume file failed with status %d: %s", status, formatAPIError(body))
+	}
+	return body, status, nil
 }

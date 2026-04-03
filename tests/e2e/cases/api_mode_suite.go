@@ -161,7 +161,7 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 		if opts.includeVolumeLifecycle {
 			Context("sandbox volumes", func() {
 				It("creates volumes and snapshots", func() {
-					assertVolumeLifecycle(env, session)
+					assertVolumeLifecycle(env, session, sandboxID)
 				})
 
 				It("serves volume sync backend APIs", func() {
@@ -872,7 +872,7 @@ func publicExposureHostForPort(ports []apispec.ExposedPortConfig, port int32) st
 	return ""
 }
 
-func assertVolumeLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session) {
+func assertVolumeLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string) {
 	cacheSize := "512M"
 	createReq := apispec.CreateSandboxVolumeRequest{
 		CacheSize: &cacheSize,
@@ -882,6 +882,66 @@ func assertVolumeLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session
 	Expect(status).To(Equal(http.StatusCreated))
 	Expect(volume).NotTo(BeNil())
 	volumeID := expectStringPtr(volume.Id, "volume id")
+
+	mountPoint := fmt.Sprintf("/workspace/volume-e2e-%d", time.Now().UnixNano())
+	mountResp, status, err := session.MountSandboxVolume(env.TestCtx.Context, GinkgoT(), sandboxID, apispec.MountRequest{
+		SandboxvolumeId: volumeID,
+		MountPoint:      mountPoint,
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(mountResp).NotTo(BeNil())
+	Expect(mountResp.MountSessionId).NotTo(BeEmpty())
+
+	statusResp, status, err := session.GetSandboxVolumeStatus(env.TestCtx.Context, GinkgoT(), sandboxID)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(statusResp).NotTo(BeNil())
+	Expect(statusResp.Data).NotTo(BeNil())
+	Expect(statusResp.Data.Mounts).NotTo(BeNil())
+	Expect(*statusResp.Data.Mounts).NotTo(BeEmpty())
+
+	directFilePath := "/direct-e2e/hello.txt"
+	directContent := []byte("hello direct volume api")
+	status, err = session.WriteVolumeFile(env.TestCtx.Context, GinkgoT(), volumeID, directFilePath, directContent, "")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+
+	directBody, status, err := session.ReadVolumeFile(env.TestCtx.Context, GinkgoT(), volumeID, directFilePath)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(directBody).To(Equal(directContent))
+
+	Eventually(func() ([]byte, error) {
+		body, _, readErr := session.ReadFile(env.TestCtx.Context, GinkgoT(), sandboxID, mountPoint+"/direct-e2e/hello.txt")
+		return body, readErr
+	}).WithTimeout(20 * time.Second).WithPolling(1 * time.Second).Should(Equal(directContent))
+
+	statusResp, status, err = session.GetSandboxVolumeStatus(env.TestCtx.Context, GinkgoT(), sandboxID)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(statusResp).NotTo(BeNil())
+	Expect(statusResp.Data).NotTo(BeNil())
+	Expect(statusResp.Data.Mounts).NotTo(BeNil())
+
+	var foundMountedVolume bool
+	for _, mount := range *statusResp.Data.Mounts {
+		if mount.SandboxvolumeId != nil && *mount.SandboxvolumeId == volumeID {
+			foundMountedVolume = true
+			if mount.MountSessionId != nil {
+				Expect(*mount.MountSessionId).To(Equal(mountResp.MountSessionId))
+			}
+			break
+		}
+	}
+	Expect(foundMountedVolume).To(BeTrue())
+
+	status, err = session.UnmountSandboxVolume(env.TestCtx.Context, GinkgoT(), sandboxID, apispec.UnmountRequest{
+		SandboxvolumeId: volumeID,
+		MountSessionId:  mountResp.MountSessionId,
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
 
 	snapReq := apispec.CreateSnapshotRequest{
 		Name: "e2e-snap",

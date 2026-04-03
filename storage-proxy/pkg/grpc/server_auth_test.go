@@ -186,6 +186,9 @@ func TestMountVolumeTracksAuthorizedTeam(t *testing.T) {
 	if volMgr.trackedSandboxID != "sandbox-1" || volMgr.trackedVolumeID != "vol-1" {
 		t.Fatalf("TrackVolume() got (%q, %q), want (%q, %q)", volMgr.trackedSandboxID, volMgr.trackedVolumeID, "sandbox-1", "vol-1")
 	}
+	if volMgr.trackedSessionID != "session-1" {
+		t.Fatalf("TrackVolumeSession() session = %q, want %q", volMgr.trackedSessionID, "session-1")
+	}
 }
 
 func authContext(teamID, sandboxID string) context.Context {
@@ -542,6 +545,7 @@ type fakeVolumeManager struct {
 	}
 	trackedSandboxID string
 	trackedVolumeID  string
+	trackedSessionID string
 }
 
 func (m *fakeVolumeManager) MountVolume(_ context.Context, s3Prefix, volumeID, teamID string, config *volume.VolumeConfig, accessMode volume.AccessMode) (string, time.Time, error) {
@@ -579,9 +583,10 @@ func (m *fakeVolumeManager) GetVolume(volumeID string) (*volume.VolumeContext, e
 	return nil, status.Error(codes.NotFound, "volume not mounted")
 }
 
-func (m *fakeVolumeManager) TrackVolume(sandboxID, volumeID string) {
+func (m *fakeVolumeManager) TrackVolumeSession(sandboxID, volumeID, sessionID string) {
 	m.trackedSandboxID = sandboxID
 	m.trackedVolumeID = volumeID
+	m.trackedSessionID = sessionID
 }
 
 func newMountedTestVolumeContext(t *testing.T, volumeID, teamID string) *volume.VolumeContext {

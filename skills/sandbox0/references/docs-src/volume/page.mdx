@@ -55,6 +55,28 @@ Volumes support the following performance tuning parameters:
 Enabling `writeback` improves write performance but may lose unwritten data in exceptional cases. Disable it for scenarios requiring strong data consistency.
 </Callout>
 
+## Direct File Operations
+
+You can operate on files in a Volume directly by volume ID, without mounting the Volume into a Sandbox first.
+
+This is useful for SDK workflows, developer tooling, and small control-plane style file tasks where starting or reusing a Sandbox would only add latency.
+
+<Callout variant="info">
+Direct volume file APIs still go through the normal gateway chain and team-scoped auth. Internally, `storage-proxy` lazily attaches the Volume on demand and reclaims idle direct mounts later. Sandbox mounts continue to work unchanged.
+</Callout>
+
+The direct file API surface mirrors the Sandbox file API:
+
+| Operation | Endpoint |
+|-----------|----------|
+| Read / Write / Delete | `GET`, `POST`, `DELETE /api/v1/sandboxvolumes/{'{id}'}/files?path=...` |
+| Stat | `GET /api/v1/sandboxvolumes/{'{id}'}/files/stat?path=...` |
+| List directory | `GET /api/v1/sandboxvolumes/{'{id}'}/files/list?path=...` |
+| Move / Rename | `POST /api/v1/sandboxvolumes/{'{id}'}/files/move` |
+| Watch | `GET /api/v1/sandboxvolumes/{'{id}'}/files/watch` |
+
+Paths are always resolved relative to the root of the Volume namespace.
+
 ---
 
 ## Create Volume

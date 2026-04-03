@@ -141,6 +141,8 @@ func main() {
 
 	// Create volume manager
 	volMgr := volume.NewManager(logrusLogger, cfg)
+	directVolumeFileIdleTTL := buildDirectVolumeFileIdleTTL(cfg)
+	directVolumeFileCleanupInterval := buildDirectVolumeFileCleanupInterval(cfg, directVolumeFileIdleTTL)
 	var syncSvc *volsync.Service
 	var syncMaintenance *volsync.Maintenance
 	var volumeBarrier *volumelock.Locker
@@ -222,6 +224,29 @@ func main() {
 			eventBroadcaster = coord
 		}
 	}
+
+	directMountCleanupCtx, directMountCleanupCancel := context.WithCancel(context.Background())
+	go func() {
+		ticker := time.NewTicker(directVolumeFileCleanupInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-directMountCleanupCtx.Done():
+				return
+			case <-ticker.C:
+				if errs := volMgr.CleanupIdleDirectVolumeFileMounts(context.Background(), directVolumeFileIdleTTL); len(errs) > 0 {
+					zapLogger.Warn("Idle direct volume file cleanup reported errors",
+						zap.Int("error_count", len(errs)),
+					)
+				}
+			}
+		}
+	}()
+	zapLogger.Info("Direct volume file idle cleanup started",
+		zap.Duration("idle_ttl", directVolumeFileIdleTTL),
+		zap.Duration("cleanup_interval", directVolumeFileCleanupInterval),
+	)
 
 	// Create and start pod watcher
 	if k8sClient != nil {
@@ -334,7 +359,7 @@ func main() {
 	}
 
 	// Create HTTP server
-	httpSrv := httpserver.NewServer(logrusLogger, repo, meteringRepo, cfg.RegionID, httpAuthenticator, snapshotMgr, syncSvc, volumeBarrier)
+	httpSrv := httpserver.NewServer(logrusLogger, repo, meteringRepo, cfg.RegionID, httpAuthenticator, snapshotMgr, syncSvc, volumeBarrier, volMgr, fsServer, eventHub)
 	httpAddr := fmt.Sprintf("%s:%d", cfg.HTTPAddr, cfg.HTTPPort)
 
 	readTimeout, _ := time.ParseDuration(cfg.HTTPReadTimeout)
@@ -379,6 +404,7 @@ func main() {
 	if syncMaintenanceCancel != nil {
 		syncMaintenanceCancel()
 	}
+	directMountCleanupCancel()
 
 	// Shutdown HTTP server
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -626,4 +652,26 @@ func buildSyncMaintenanceConfig(cfg *config.StorageProxyConfig) volsync.Maintena
 		JournalRetainEntries: journalRetainEntries,
 		RequestRetention:     requestRetention,
 	}
+}
+
+func buildDirectVolumeFileIdleTTL(cfg *config.StorageProxyConfig) time.Duration {
+	idleTTL, _ := time.ParseDuration(cfg.DirectVolumeFileIdleTTL)
+	if idleTTL <= 0 {
+		idleTTL = 30 * time.Second
+	}
+	return idleTTL
+}
+
+func buildDirectVolumeFileCleanupInterval(cfg *config.StorageProxyConfig, idleTTL time.Duration) time.Duration {
+	cleanupInterval, _ := time.ParseDuration(cfg.CleanupInterval)
+	if cleanupInterval <= 0 {
+		cleanupInterval = 15 * time.Second
+	}
+	if idleTTL > 0 && cleanupInterval > idleTTL {
+		cleanupInterval = idleTTL
+	}
+	if cleanupInterval < time.Second {
+		cleanupInterval = time.Second
+	}
+	return cleanupInterval
 }

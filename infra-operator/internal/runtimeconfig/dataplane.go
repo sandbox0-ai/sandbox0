@@ -93,6 +93,7 @@ func ToStorageProxy(spec *infrav1alpha1.StorageProxyConfig) *apiconfig.StoragePr
 	cfg.HeartbeatTimeout = spec.HeartbeatTimeout
 	cfg.FlushTimeout = spec.FlushTimeout
 	cfg.CleanupInterval = spec.CleanupInterval
+	cfg.DirectVolumeFileIdleTTL = spec.DirectVolumeFileIdleTTL
 	cfg.DefaultCacheSize = spec.DefaultCacheSize
 	cfg.CacheDir = spec.CacheDir
 	cfg.MetricsEnabled = spec.MetricsEnabled

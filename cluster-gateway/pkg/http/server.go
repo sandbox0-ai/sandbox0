@@ -427,6 +427,16 @@ func (s *Server) setupRoutes() {
 			sandboxvolumes.GET("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeRead), s.getSandboxVolume)
 			sandboxvolumes.DELETE("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeDelete), s.deleteSandboxVolume)
 			sandboxvolumes.POST("/:id/fork", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeWrite), s.forkSandboxVolume)
+			files := sandboxvolumes.Group("/:id/files")
+			{
+				files.GET("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeRead), s.handleVolumeFileOperation)
+				files.POST("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeWrite), s.handleVolumeFileOperation)
+				files.DELETE("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeWrite), s.handleVolumeFileOperation)
+				files.GET("/watch", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeRead), s.handleVolumeFileWatch)
+				files.POST("/move", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeWrite), s.handleVolumeFileMove)
+				files.GET("/stat", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeRead), s.handleVolumeFileStat)
+				files.GET("/list", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeRead), s.handleVolumeFileList)
+			}
 			// Snapshot/Restore (→ Storage Proxy)
 			snapshots := sandboxvolumes.Group("/:id/snapshots")
 			{

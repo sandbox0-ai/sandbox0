@@ -513,6 +513,9 @@ type StorageProxyConfig struct {
 	// +kubebuilder:default="60s"
 	CleanupInterval string `json:"cleanupInterval,omitempty"`
 	// +optional
+	// +kubebuilder:default="30s"
+	DirectVolumeFileIdleTTL string `json:"directVolumeFileIdleTTL,omitempty"`
+	// +optional
 	// +kubebuilder:default="1G"
 	DefaultCacheSize string `json:"defaultCacheSize,omitempty"`
 	// +optional

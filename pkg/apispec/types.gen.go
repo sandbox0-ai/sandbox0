@@ -2522,6 +2522,33 @@ type DeleteApiV1SandboxvolumesIdParams struct {
 	Force *bool `form:"force,omitempty" json:"force,omitempty"`
 }
 
+// DeleteApiV1SandboxvolumesIdFilesParams defines parameters for DeleteApiV1SandboxvolumesIdFiles.
+type DeleteApiV1SandboxvolumesIdFilesParams struct {
+	Path FilePath `form:"path" json:"path"`
+}
+
+// GetApiV1SandboxvolumesIdFilesParams defines parameters for GetApiV1SandboxvolumesIdFiles.
+type GetApiV1SandboxvolumesIdFilesParams struct {
+	Path FilePath `form:"path" json:"path"`
+}
+
+// PostApiV1SandboxvolumesIdFilesParams defines parameters for PostApiV1SandboxvolumesIdFiles.
+type PostApiV1SandboxvolumesIdFilesParams struct {
+	Path      FilePath        `form:"path" json:"path"`
+	Mkdir     *QueryMkdir     `form:"mkdir,omitempty" json:"mkdir,omitempty"`
+	Recursive *QueryRecursive `form:"recursive,omitempty" json:"recursive,omitempty"`
+}
+
+// GetApiV1SandboxvolumesIdFilesListParams defines parameters for GetApiV1SandboxvolumesIdFilesList.
+type GetApiV1SandboxvolumesIdFilesListParams struct {
+	Path FilePath `form:"path" json:"path"`
+}
+
+// GetApiV1SandboxvolumesIdFilesStatParams defines parameters for GetApiV1SandboxvolumesIdFilesStat.
+type GetApiV1SandboxvolumesIdFilesStatParams struct {
+	Path FilePath `form:"path" json:"path"`
+}
+
 // GetApiV1SandboxvolumesIdSyncBootstrapArchiveParams defines parameters for GetApiV1SandboxvolumesIdSyncBootstrapArchive.
 type GetApiV1SandboxvolumesIdSyncBootstrapArchiveParams struct {
 	SnapshotId string `form:"snapshot_id" json:"snapshot_id"`
@@ -2610,6 +2637,9 @@ type PostApiV1SandboxesIdSandboxvolumesUnmountJSONRequestBody = UnmountRequest
 
 // PostApiV1SandboxvolumesJSONRequestBody defines body for PostApiV1Sandboxvolumes for application/json ContentType.
 type PostApiV1SandboxvolumesJSONRequestBody = CreateSandboxVolumeRequest
+
+// PostApiV1SandboxvolumesIdFilesMoveJSONRequestBody defines body for PostApiV1SandboxvolumesIdFilesMove for application/json ContentType.
+type PostApiV1SandboxvolumesIdFilesMoveJSONRequestBody = MoveFileRequest
 
 // PostApiV1SandboxvolumesIdForkJSONRequestBody defines body for PostApiV1SandboxvolumesIdFork for application/json ContentType.
 type PostApiV1SandboxvolumesIdForkJSONRequestBody = ForkVolumeRequest

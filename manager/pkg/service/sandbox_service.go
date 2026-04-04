@@ -449,21 +449,21 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			return listErr
 		}
 
-		// Filter running pods
-		var runningPods []*corev1.Pod
+		// Filter hot-claimable pods to Kubernetes-ready instances only.
+		var readyPods []*corev1.Pod
 		for _, pod := range pods {
-			if pod.Status.Phase == corev1.PodRunning {
-				runningPods = append(runningPods, pod)
+			if controller.IsPodReady(pod) {
+				readyPods = append(readyPods, pod)
 			}
 		}
 
-		if len(runningPods) == 0 {
+		if len(readyPods) == 0 {
 			// No idle pod available, not an error - use a special error to stop retry
 			return errNoIdlePod
 		}
 
 		// Claim an available pod
-		pod := runningPods[rand.Intn(len(runningPods))]
+		pod := readyPods[rand.Intn(len(readyPods))]
 
 		s.logger.Info("Claiming idle pod",
 			zap.String("pod", pod.Name),

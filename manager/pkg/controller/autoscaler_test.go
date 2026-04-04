@@ -473,18 +473,28 @@ func TestAutoScaler_GetPoolStats(t *testing.T) {
 					LabelPoolType:   PoolTypeIdle,
 				},
 			},
-			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				},
+			},
 		},
 		{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      "idle-pending",
+				Name:      "idle-not-ready",
 				Namespace: "default",
 				Labels: map[string]string{
 					LabelTemplateID: "stats-template",
 					LabelPoolType:   PoolTypeIdle,
 				},
 			},
-			Status: corev1.PodStatus{Phase: corev1.PodPending},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionFalse},
+				},
+			},
 		},
 		{
 			ObjectMeta: metav1.ObjectMeta{
@@ -537,7 +547,7 @@ func TestAutoScaler_GetPoolStats(t *testing.T) {
 	idle, active, err := scaler.getPoolStats(template)
 
 	require.NoError(t, err)
-	assert.Equal(t, int32(2), idle, "Idle count mismatch")
+	assert.Equal(t, int32(1), idle, "Idle count mismatch")
 	assert.Equal(t, int32(1), active, "Active count mismatch")
 }
 

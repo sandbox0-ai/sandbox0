@@ -5198,7 +5198,7 @@ components:
         sidecars:
           type: array
           items:
-            $ref: "#/components/schemas/ContainerSpec"
+            $ref: "#/components/schemas/SidecarContainerSpec"
         pod:
           $ref: "#/components/schemas/PodSpecOverride"
         network:
@@ -5237,6 +5237,36 @@ components:
         securityContext:
           $ref: "#/components/schemas/SecurityContext"
       required: [image, resources]
+    SidecarContainerSpec:
+      type: object
+      properties:
+        name:
+          type: string
+        image:
+          type: string
+        command:
+          type: array
+          items:
+            type: string
+        args:
+          type: array
+          items:
+            type: string
+        env:
+          type: array
+          items:
+            $ref: "#/components/schemas/EnvVar"
+        resources:
+          $ref: "#/components/schemas/ResourceQuota"
+        securityContext:
+          $ref: "#/components/schemas/SecurityContext"
+        readinessProbe:
+          $ref: "#/components/schemas/Probe"
+        livenessProbe:
+          $ref: "#/components/schemas/Probe"
+        startupProbe:
+          $ref: "#/components/schemas/Probe"
+      required: [name, image]
     EnvVar:
       type: object
       properties:
@@ -5270,6 +5300,88 @@ components:
           type: array
           items:
             type: string
+    Probe:
+      type: object
+      properties:
+        exec:
+          $ref: "#/components/schemas/ExecAction"
+        httpGet:
+          $ref: "#/components/schemas/HTTPGetAction"
+        tcpSocket:
+          $ref: "#/components/schemas/TCPSocketAction"
+        grpc:
+          $ref: "#/components/schemas/GRPCAction"
+        initialDelaySeconds:
+          type: integer
+          format: int32
+        timeoutSeconds:
+          type: integer
+          format: int32
+        periodSeconds:
+          type: integer
+          format: int32
+        successThreshold:
+          type: integer
+          format: int32
+        failureThreshold:
+          type: integer
+          format: int32
+        terminationGracePeriodSeconds:
+          type: integer
+          format: int64
+    ExecAction:
+      type: object
+      properties:
+        command:
+          type: array
+          items:
+            type: string
+    HTTPGetAction:
+      type: object
+      properties:
+        path:
+          type: string
+        port:
+          $ref: "#/components/schemas/ProbePort"
+        host:
+          type: string
+        scheme:
+          type: string
+        httpHeaders:
+          type: array
+          items:
+            $ref: "#/components/schemas/HTTPHeader"
+      required: [port]
+    TCPSocketAction:
+      type: object
+      properties:
+        port:
+          $ref: "#/components/schemas/ProbePort"
+        host:
+          type: string
+      required: [port]
+    GRPCAction:
+      type: object
+      properties:
+        port:
+          type: integer
+          format: int32
+        service:
+          type: string
+      required: [port]
+    HTTPHeader:
+      type: object
+      properties:
+        name:
+          type: string
+        value:
+          type: string
+      required: [name, value]
+    ProbePort:
+      oneOf:
+        - type: integer
+          format: int32
+        - type: string
     PodSpecOverride:
       type: object
       properties:

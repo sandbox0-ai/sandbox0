@@ -95,6 +95,46 @@ Warm pool configuration. See [Warm Pool](/docs/template/pool) for a detailed gui
 | `minIdle` | integer | — | Minimum idle pods to pre-warm. Required (`>= 0`). |
 | `maxIdle` | integer | — | Maximum idle pods allowed. Required (`>= minIdle`). |
 
+Only Kubernetes-ready idle pods count toward pool capacity. This matters when your template uses sidecars to host a warm process.
+
+---
+
+## `sidecars`
+
+Additional containers that run alongside the main sandbox container in the same pod.
+
+This is the recommended way to model a template-owned warm process, such as a long-running Codex agent, language server, or helper daemon that should start before the pod is claimed.
+
+```yaml
+spec:
+    sidecars:
+        - name: codex
+          image: ghcr.io/example/codex:latest
+          command: ["sh", "-lc", "/app/start-codex.sh"]
+          readinessProbe:
+              exec:
+                  command: ["test", "-S", "/tmp/codex.sock"]
+              initialDelaySeconds: 1
+              periodSeconds: 2
+              failureThreshold: 1
+```
+
+Commonly used sidecar fields:
+
+| Field | Description |
+|-------|-------------|
+| `name` | Container name. Required. |
+| `image` | Container image reference. Required. |
+| `command` / `args` | Process startup command for the sidecar. |
+| `env` | Sidecar-specific environment variables. |
+| `readinessProbe` | Gates whether the sidecar is considered ready. Use this to express warm-process readiness. |
+| `livenessProbe` | Optional probe for restarting an unhealthy sidecar. |
+| `startupProbe` | Optional probe for slow-starting sidecars. |
+
+<Callout variant="info">
+If a sidecar hosts your warm process, define readiness on the sidecar itself. A pod that is `Running` but not `Ready` does not count as available warm-pool capacity and will not be hot-claimed.
+</Callout>
+
 ---
 
 ## Additional Template Fields
@@ -143,7 +183,8 @@ The following fields require a system-level token. They are not available to reg
 
 | Field | Description |
 |-------|-------------|
-| `sidecars` | Additional containers running alongside the main container in the sandbox pod. Uses the standard Kubernetes container spec. |
+| `sidecars.imagePullPolicy` | Pull policy override for sidecars. Requires system identity. |
+| `sidecars.securityContext.privileged` and related privileged settings | Privileged sidecar security settings. Require system identity. |
 | `pod.nodeSelector` | Pin sandbox pods to nodes matching specific labels. |
 | `pod.affinity` | Node and pod affinity/anti-affinity rules. |
 | `pod.tolerations` | Allow pods to be scheduled on tainted nodes. |
@@ -156,6 +197,8 @@ The following fields require a system-level token. They are not available to reg
 <Callout variant="warning">
 Attempting to set privileged fields without a system identity returns `403 Forbidden`. Contact your platform administrator if you need access to these fields.
 </Callout>
+
+Regular team-owned templates can still use non-privileged sidecars, including `command`, `args`, `env`, and Kubernetes probes such as `readinessProbe`.
 
 ---
 

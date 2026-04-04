@@ -148,6 +148,24 @@ type OIDCProviderConfig struct {
 	// +kubebuilder:default={"openid","email","profile"}
 	Scopes []string `yaml:"scopes" json:"scopes"`
 
+	// DeviceAuthorizationEnabled enables device authorization flow for CLI login.
+	// +optional
+	DeviceAuthorizationEnabled bool `yaml:"device_authorization_enabled" json:"deviceAuthorizationEnabled"`
+
+	// DeviceAuthorizationEndpoint overrides the discovery metadata endpoint when set.
+	// +optional
+	DeviceAuthorizationEndpoint string `yaml:"device_authorization_endpoint" json:"deviceAuthorizationEndpoint"`
+
+	// DeviceClientID overrides the OAuth client ID used for device authorization.
+	// Falls back to ClientID when omitted.
+	// +optional
+	DeviceClientID string `yaml:"device_client_id" json:"deviceClientId"`
+
+	// DeviceClientSecret overrides the OAuth client secret used for device authorization.
+	// Falls back to ClientSecret when omitted.
+	// +optional
+	DeviceClientSecret string `yaml:"device_client_secret" json:"-"`
+
 	// AutoProvision automatically creates users on first login
 	// +optional
 	AutoProvision bool `yaml:"auto_provision" json:"autoProvision"`

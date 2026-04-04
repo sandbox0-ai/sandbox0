@@ -22,6 +22,10 @@ var (
 	ErrTokenNotFound = errors.New("refresh token not found")
 	ErrTokenRevoked  = errors.New("refresh token revoked")
 	ErrTokenExpired  = errors.New("refresh token expired")
+
+	ErrDeviceAuthSessionNotFound = errors.New("device auth session not found")
+	ErrDeviceAuthSessionExpired  = errors.New("device auth session expired")
+	ErrDeviceAuthSessionConsumed = errors.New("device auth session already consumed")
 )
 
 // Repository provides database access for identity and tenancy data.

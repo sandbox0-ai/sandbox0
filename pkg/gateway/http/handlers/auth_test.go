@@ -19,17 +19,19 @@ import (
 )
 
 type mockAuthRepository struct {
-	users         map[string]*identity.User
-	refreshTokens map[string]*identity.RefreshToken
-	teamMembers   map[string]*identity.TeamMember
-	createCalls   int
+	users              map[string]*identity.User
+	refreshTokens      map[string]*identity.RefreshToken
+	deviceAuthSessions map[string]*identity.DeviceAuthSession
+	teamMembers        map[string]*identity.TeamMember
+	createCalls        int
 }
 
 func newMockAuthRepository() *mockAuthRepository {
 	return &mockAuthRepository{
-		users:         map[string]*identity.User{},
-		refreshTokens: map[string]*identity.RefreshToken{},
-		teamMembers:   map[string]*identity.TeamMember{},
+		users:              map[string]*identity.User{},
+		refreshTokens:      map[string]*identity.RefreshToken{},
+		deviceAuthSessions: map[string]*identity.DeviceAuthSession{},
+		teamMembers:        map[string]*identity.TeamMember{},
 	}
 }
 
@@ -80,6 +82,41 @@ func (m *mockAuthRepository) GetTeamMember(_ context.Context, teamID, userID str
 		return nil, errors.New("team member not found")
 	}
 	return member, nil
+}
+
+func (m *mockAuthRepository) CreateDeviceAuthSession(_ context.Context, session *identity.DeviceAuthSession) error {
+	copySession := *session
+	if copySession.ID == "" {
+		copySession.ID = "device-session-1"
+	}
+	m.deviceAuthSessions[copySession.ID] = &copySession
+	session.ID = copySession.ID
+	return nil
+}
+
+func (m *mockAuthRepository) GetDeviceAuthSessionByID(_ context.Context, id string) (*identity.DeviceAuthSession, error) {
+	session, ok := m.deviceAuthSessions[id]
+	if !ok {
+		return nil, identity.ErrDeviceAuthSessionNotFound
+	}
+	if session.ConsumedAt != nil {
+		return nil, identity.ErrDeviceAuthSessionConsumed
+	}
+	if time.Now().After(session.ExpiresAt) {
+		return nil, identity.ErrDeviceAuthSessionExpired
+	}
+	copySession := *session
+	return &copySession, nil
+}
+
+func (m *mockAuthRepository) MarkDeviceAuthSessionConsumed(_ context.Context, id string) error {
+	session, ok := m.deviceAuthSessions[id]
+	if !ok {
+		return identity.ErrDeviceAuthSessionNotFound
+	}
+	now := time.Now()
+	session.ConsumedAt = &now
+	return nil
 }
 
 type mockTenantResolver struct {

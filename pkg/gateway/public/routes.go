@@ -78,6 +78,16 @@ func RegisterIdentityRoutes(router gin.IRouter, deps Deps) {
 			licensinghttp.RequireFeature(deps.Entitlements, licensing.FeatureSSO, deps.Logger),
 			authHandler.OIDCCallback,
 		)
+		auth.POST(
+			"/oidc/:provider/device/start",
+			licensinghttp.RequireFeature(deps.Entitlements, licensing.FeatureSSO, deps.Logger),
+			authHandler.OIDCDeviceStart,
+		)
+		auth.POST(
+			"/oidc/:provider/device/poll",
+			licensinghttp.RequireFeature(deps.Entitlements, licensing.FeatureSSO, deps.Logger),
+			authHandler.OIDCDevicePoll,
+		)
 	}
 
 	// ===== Protected Auth Routes =====

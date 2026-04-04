@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/builtin"
@@ -48,6 +49,9 @@ type authRepository interface {
 	RevokeAllUserRefreshTokens(ctx context.Context, userID string) error
 	GetUserByID(ctx context.Context, id string) (*identity.User, error)
 	GetTeamMember(ctx context.Context, teamID, userID string) (*identity.TeamMember, error)
+	CreateDeviceAuthSession(ctx context.Context, session *identity.DeviceAuthSession) error
+	GetDeviceAuthSessionByID(ctx context.Context, id string) (*identity.DeviceAuthSession, error)
+	MarkDeviceAuthSessionConsumed(ctx context.Context, id string) error
 }
 
 // NewAuthHandler creates a new auth handler
@@ -87,6 +91,29 @@ type LoginResponse struct {
 	ExpiresAt       int64                    `json:"expires_at"`
 	User            *UserResponse            `json:"user"`
 	RegionalSession *RegionalSessionResponse `json:"regional_session,omitempty"`
+}
+
+// DeviceLoginStartResponse is returned when a device flow is initiated.
+type DeviceLoginStartResponse struct {
+	DeviceLoginID           string `json:"device_login_id"`
+	UserCode                string `json:"user_code"`
+	VerificationURI         string `json:"verification_uri"`
+	VerificationURIComplete string `json:"verification_uri_complete,omitempty"`
+	ExpiresAt               int64  `json:"expires_at"`
+	IntervalSeconds         int    `json:"interval_seconds"`
+}
+
+// DeviceLoginPollRequest identifies the pending device login.
+type DeviceLoginPollRequest struct {
+	DeviceLoginID string `json:"device_login_id" binding:"required"`
+}
+
+// DeviceLoginPollResponse returns pending or completed device login state.
+type DeviceLoginPollResponse struct {
+	Status          string         `json:"status"`
+	IntervalSeconds int            `json:"interval_seconds,omitempty"`
+	ExpiresAt       int64          `json:"expires_at,omitempty"`
+	Login           *LoginResponse `json:"login,omitempty"`
 }
 
 // Login handles email/password login
@@ -417,28 +444,21 @@ func (h *AuthHandler) OIDCCallback(c *gin.Context) {
 		return
 	}
 
-	// Get default team ID
-	teamID := ""
-	if user.DefaultTeamID != nil {
-		teamID = *user.DefaultTeamID
-	}
-	teamRole, err := h.resolveTeamRole(c.Request.Context(), teamID, user.ID)
+	loginResponse, tokens, err := h.buildLoginResponse(c.Request.Context(), user)
 	if err != nil {
-		h.logger.Warn("Failed to resolve team role for OIDC login", zap.Error(err))
-		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "user is not a member of the selected team")
-		return
-	}
-
-	tokens, err := h.issueAndPersistTokenPair(c.Request.Context(), user, teamID, teamRole)
-	if err != nil {
-		h.logger.Error("Failed to issue tokens", zap.Error(err))
-		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to issue tokens")
+		h.logger.Warn("Failed to complete OIDC login", zap.Error(err))
+		status := http.StatusInternalServerError
+		code := spec.CodeInternal
+		if errors.Is(err, errUserNotMemberOfSelectedTeam) {
+			status = http.StatusForbidden
+			code = spec.CodeForbidden
+		}
+		spec.JSONError(c, status, code, err.Error())
 		return
 	}
 
 	if isLocalReturnURL(returnURL) {
-		regionalSession := h.issueRegionalSessionOrNil(c.Request.Context(), user.ID, teamID, user.IsAdmin)
-		redirectURL, err := buildCLIReturnURL(returnURL, tokens, regionalSession)
+		redirectURL, err := buildCLIReturnURL(returnURL, tokens, loginResponse.RegionalSession)
 		if err != nil {
 			h.logger.Warn("Failed to build OIDC CLI redirect URL", zap.Error(err))
 			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to complete oidc login")
@@ -449,13 +469,7 @@ func (h *AuthHandler) OIDCCallback(c *gin.Context) {
 	}
 
 	// Return tokens as JSON (frontend should handle redirect)
-	spec.JSONSuccess(c, http.StatusOK, LoginResponse{
-		AccessToken:     tokens.AccessToken,
-		RefreshToken:    tokens.RefreshToken,
-		ExpiresAt:       tokens.ExpiresAt.Unix(),
-		User:            NewUserResponse(user),
-		RegionalSession: h.issueRegionalSessionOrNil(c.Request.Context(), user.ID, teamID, user.IsAdmin),
-	})
+	spec.JSONSuccess(c, http.StatusOK, loginResponse)
 }
 
 // GetAuthProviders returns available auth providers
@@ -466,9 +480,11 @@ func (h *AuthHandler) GetAuthProviders(c *gin.Context) {
 	if h.oidcManager != nil {
 		for _, info := range h.oidcManager.ListProviderInfo() {
 			entry := gin.H{
-				"id":   info.ID,
-				"name": info.Name,
-				"type": "oidc",
+				"id":                    info.ID,
+				"name":                  info.Name,
+				"type":                  "oidc",
+				"browser_login_enabled": info.BrowserLoginEnabled,
+				"device_login_enabled":  info.DeviceLoginEnabled,
 			}
 			if info.ExternalAuthPortalURL != "" {
 				entry["external_auth_portal_url"] = info.ExternalAuthPortalURL
@@ -481,13 +497,174 @@ func (h *AuthHandler) GetAuthProviders(c *gin.Context) {
 	// Keep it after OIDC providers so server-side OIDC config can be the default login path for CLI.
 	if h.builtinProvider != nil && h.builtinProvider.IsEnabled() {
 		providers = append(providers, gin.H{
-			"id":   "builtin",
-			"name": "Email & Password",
-			"type": "builtin",
+			"id":                    "builtin",
+			"name":                  "Email & Password",
+			"type":                  "builtin",
+			"browser_login_enabled": false,
+			"device_login_enabled":  false,
 		})
 	}
 
 	spec.JSONSuccess(c, http.StatusOK, gin.H{"providers": providers})
+}
+
+// OIDCDeviceStart initiates a hosted device login flow for the selected OIDC provider.
+func (h *AuthHandler) OIDCDeviceStart(c *gin.Context) {
+	if h.oidcManager == nil {
+		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, oidc.ErrProviderNotFound.Error())
+		return
+	}
+
+	providerID := c.Param("provider")
+	deviceAuth, err := h.oidcManager.StartDeviceAuthorization(c.Request.Context(), providerID)
+	if err != nil {
+		status := http.StatusBadRequest
+		code := spec.CodeBadRequest
+		switch {
+		case errors.Is(err, oidc.ErrProviderNotFound):
+			status = http.StatusNotFound
+			code = spec.CodeNotFound
+		case errors.Is(err, oidc.ErrDeviceFlowNotSupported):
+			status = http.StatusNotFound
+			code = spec.CodeNotFound
+		}
+		spec.JSONError(c, status, code, err.Error())
+		return
+	}
+
+	session := &identity.DeviceAuthSession{
+		Provider:                providerID,
+		DeviceCode:              deviceAuth.DeviceCode,
+		UserCode:                deviceAuth.UserCode,
+		VerificationURI:         deviceAuth.VerificationURI,
+		VerificationURIComplete: deviceAuth.VerificationURIComplete,
+		IntervalSeconds:         deviceAuth.Interval,
+		ExpiresAt:               time.Now().Add(time.Duration(deviceAuth.ExpiresIn) * time.Second),
+	}
+	if err := h.repo.CreateDeviceAuthSession(c.Request.Context(), session); err != nil {
+		h.logger.Error("Failed to persist device auth session", zap.Error(err))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to start device login")
+		return
+	}
+
+	spec.JSONSuccess(c, http.StatusOK, DeviceLoginStartResponse{
+		DeviceLoginID:           session.ID,
+		UserCode:                session.UserCode,
+		VerificationURI:         session.VerificationURI,
+		VerificationURIComplete: session.VerificationURIComplete,
+		ExpiresAt:               session.ExpiresAt.Unix(),
+		IntervalSeconds:         session.IntervalSeconds,
+	})
+}
+
+// OIDCDevicePoll polls a pending device login session until it completes.
+func (h *AuthHandler) OIDCDevicePoll(c *gin.Context) {
+	if h.oidcManager == nil {
+		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, oidc.ErrProviderNotFound.Error())
+		return
+	}
+
+	var req DeviceLoginPollRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
+		return
+	}
+
+	session, err := h.repo.GetDeviceAuthSessionByID(c.Request.Context(), req.DeviceLoginID)
+	if err != nil {
+		status := http.StatusUnauthorized
+		code := spec.CodeUnauthorized
+		switch {
+		case errors.Is(err, identity.ErrDeviceAuthSessionNotFound):
+			status = http.StatusNotFound
+			code = spec.CodeNotFound
+		case errors.Is(err, identity.ErrDeviceAuthSessionExpired), errors.Is(err, identity.ErrDeviceAuthSessionConsumed):
+			status = http.StatusUnauthorized
+			code = spec.CodeUnauthorized
+		}
+		spec.JSONError(c, status, code, err.Error())
+		return
+	}
+	if session.Provider != c.Param("provider") {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "device login does not match provider")
+		return
+	}
+
+	user, err := h.oidcManager.PollDeviceAuthorization(c.Request.Context(), session.Provider, session.DeviceCode)
+	if err != nil {
+		switch {
+		case errors.Is(err, oidc.ErrDeviceAuthorizationPending):
+			spec.JSONSuccess(c, http.StatusOK, DeviceLoginPollResponse{
+				Status:          "pending",
+				IntervalSeconds: session.IntervalSeconds,
+				ExpiresAt:       session.ExpiresAt.Unix(),
+			})
+			return
+		case errors.Is(err, oidc.ErrDeviceAuthorizationSlowDown):
+			spec.JSONSuccess(c, http.StatusOK, DeviceLoginPollResponse{
+				Status:          "slow_down",
+				IntervalSeconds: session.IntervalSeconds + 5,
+				ExpiresAt:       session.ExpiresAt.Unix(),
+			})
+			return
+		case errors.Is(err, oidc.ErrDeviceAuthorizationDeclined), errors.Is(err, oidc.ErrDeviceAuthorizationExpired):
+			spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, err.Error())
+			return
+		default:
+			h.logger.Warn("Device auth poll failed", zap.Error(err))
+			spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, err.Error())
+			return
+		}
+	}
+
+	if err := h.repo.MarkDeviceAuthSessionConsumed(c.Request.Context(), session.ID); err != nil {
+		h.logger.Warn("Failed to consume device auth session", zap.Error(err))
+		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, err.Error())
+		return
+	}
+
+	loginResponse, _, err := h.buildLoginResponse(c.Request.Context(), user)
+	if err != nil {
+		h.logger.Warn("Failed to issue device login tokens", zap.Error(err))
+		status := http.StatusInternalServerError
+		code := spec.CodeInternal
+		if errors.Is(err, errUserNotMemberOfSelectedTeam) {
+			status = http.StatusForbidden
+			code = spec.CodeForbidden
+		}
+		spec.JSONError(c, status, code, err.Error())
+		return
+	}
+
+	spec.JSONSuccess(c, http.StatusOK, DeviceLoginPollResponse{
+		Status: "completed",
+		Login:  loginResponse,
+	})
+}
+
+var errUserNotMemberOfSelectedTeam = errors.New("user is not a member of the selected team")
+
+func (h *AuthHandler) buildLoginResponse(ctx context.Context, user *identity.User) (*LoginResponse, *authn.TokenPair, error) {
+	teamID := ""
+	if user.DefaultTeamID != nil {
+		teamID = *user.DefaultTeamID
+	}
+	teamRole, err := h.resolveTeamRole(ctx, teamID, user.ID)
+	if err != nil {
+		return nil, nil, errUserNotMemberOfSelectedTeam
+	}
+
+	tokens, err := h.issueAndPersistTokenPair(ctx, user, teamID, teamRole)
+	if err != nil {
+		return nil, nil, fmt.Errorf("issue tokens: %w", err)
+	}
+	return &LoginResponse{
+		AccessToken:     tokens.AccessToken,
+		RefreshToken:    tokens.RefreshToken,
+		ExpiresAt:       tokens.ExpiresAt.Unix(),
+		User:            NewUserResponse(user),
+		RegionalSession: h.issueRegionalSessionOrNil(ctx, user.ID, teamID, user.IsAdmin),
+	}, tokens, nil
 }
 
 func (h *AuthHandler) issueAndPersistTokenPair(ctx context.Context, user *identity.User, teamID, teamRole string) (*authn.TokenPair, error) {

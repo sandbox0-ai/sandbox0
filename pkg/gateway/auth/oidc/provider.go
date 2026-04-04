@@ -5,7 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"strings"
+	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
@@ -13,13 +17,18 @@ import (
 )
 
 var (
-	ErrProviderNotFound      = errors.New("OIDC provider not found")
-	ErrProviderDisabled      = errors.New("OIDC provider is disabled")
-	ErrInvalidState          = errors.New("invalid OAuth state")
-	ErrInvalidCode           = errors.New("invalid authorization code")
-	ErrMissingEmail          = errors.New("email not provided by IdP")
-	ErrHomeRegionNotRoutable = errors.New("home region is not routable")
-	ErrEmailDomainMismatch   = errors.New("email domain not allowed")
+	ErrProviderNotFound            = errors.New("OIDC provider not found")
+	ErrProviderDisabled            = errors.New("OIDC provider is disabled")
+	ErrInvalidState                = errors.New("invalid OAuth state")
+	ErrInvalidCode                 = errors.New("invalid authorization code")
+	ErrMissingEmail                = errors.New("email not provided by IdP")
+	ErrHomeRegionNotRoutable       = errors.New("home region is not routable")
+	ErrEmailDomainMismatch         = errors.New("email domain not allowed")
+	ErrDeviceFlowNotSupported      = errors.New("device authorization is not supported by this provider")
+	ErrDeviceAuthorizationPending  = errors.New("device authorization pending")
+	ErrDeviceAuthorizationSlowDown = errors.New("device authorization slow down")
+	ErrDeviceAuthorizationDeclined = errors.New("device authorization declined")
+	ErrDeviceAuthorizationExpired  = errors.New("device authorization expired")
 )
 
 // UserInfo contains user information from OIDC token
@@ -34,12 +43,13 @@ type UserInfo struct {
 
 // Provider represents a configured OIDC provider
 type Provider struct {
-	id           string
-	name         string
-	config       *config.OIDCProviderConfig
-	oidcProvider *oidc.Provider
-	oauth2Config *oauth2.Config
-	verifier     *oidc.IDTokenVerifier
+	id                          string
+	name                        string
+	config                      *config.OIDCProviderConfig
+	oidcProvider                *oidc.Provider
+	oauth2Config                *oauth2.Config
+	verifier                    *oidc.IDTokenVerifier
+	deviceAuthorizationEndpoint string
 }
 
 const wellKnownOIDCConfigPath = "/.well-known/openid-configuration"
@@ -77,13 +87,24 @@ func NewProvider(ctx context.Context, cfg *config.OIDCProviderConfig, baseURL st
 		ClientID: cfg.ClientID,
 	})
 
+	var metadata struct {
+		DeviceAuthorizationEndpoint string `json:"device_authorization_endpoint"`
+	}
+	if err := oidcProvider.Claims(&metadata); err != nil {
+		metadata.DeviceAuthorizationEndpoint = ""
+	}
+	if strings.TrimSpace(cfg.DeviceAuthorizationEndpoint) != "" {
+		metadata.DeviceAuthorizationEndpoint = strings.TrimSpace(cfg.DeviceAuthorizationEndpoint)
+	}
+
 	return &Provider{
-		id:           cfg.ID,
-		name:         cfg.Name,
-		config:       cfg,
-		oidcProvider: oidcProvider,
-		oauth2Config: oauth2Config,
-		verifier:     verifier,
+		id:                          cfg.ID,
+		name:                        cfg.Name,
+		config:                      cfg,
+		oidcProvider:                oidcProvider,
+		oauth2Config:                oauth2Config,
+		verifier:                    verifier,
+		deviceAuthorizationEndpoint: strings.TrimSpace(metadata.DeviceAuthorizationEndpoint),
 	}, nil
 }
 
@@ -141,8 +162,8 @@ func (p *Provider) Exchange(ctx context.Context, code, verifier string) (*oauth2
 // VerifyToken verifies an ID token and returns user info
 func (p *Provider) VerifyToken(ctx context.Context, token *oauth2.Token) (*UserInfo, error) {
 	rawIDToken, ok := token.Extra("id_token").(string)
-	if !ok {
-		return nil, errors.New("no id_token in response")
+	if !ok || strings.TrimSpace(rawIDToken) == "" {
+		return p.fetchUserInfo(ctx, token)
 	}
 
 	idToken, err := p.verifier.Verify(ctx, rawIDToken)
@@ -178,6 +199,236 @@ func (p *Provider) VerifyToken(ctx context.Context, token *oauth2.Token) (*UserI
 	}
 
 	return userInfo, nil
+}
+
+func (p *Provider) fetchUserInfo(ctx context.Context, token *oauth2.Token) (*UserInfo, error) {
+	if strings.TrimSpace(token.AccessToken) == "" {
+		return nil, errors.New("no access_token in response")
+	}
+	userInfo, err := p.oidcProvider.UserInfo(ctx, oauth2.StaticTokenSource(token))
+	if err != nil {
+		return nil, fmt.Errorf("fetch userinfo: %w", err)
+	}
+
+	var claims map[string]any
+	if err := userInfo.Claims(&claims); err != nil {
+		return nil, fmt.Errorf("parse userinfo claims: %w", err)
+	}
+	rawClaims, _ := json.Marshal(claims)
+
+	result := &UserInfo{
+		Subject:       userInfo.Subject,
+		Email:         userInfo.Email,
+		EmailVerified: userInfo.EmailVerified,
+		RawClaims:     rawClaims,
+	}
+	if name, ok := claims["name"].(string); ok {
+		result.Name = name
+	}
+	if picture, ok := claims["picture"].(string); ok {
+		result.Picture = picture
+	}
+	return result, nil
+}
+
+// DeviceAuthorization contains the user-facing data needed to complete device login.
+type DeviceAuthorization struct {
+	DeviceCode              string
+	UserCode                string
+	VerificationURI         string
+	VerificationURIComplete string
+	ExpiresIn               int
+	Interval                int
+}
+
+// SupportsDeviceAuthorization reports whether device flow is configured and available.
+func (p *Provider) SupportsDeviceAuthorization() bool {
+	return p.config.DeviceAuthorizationEnabled &&
+		strings.TrimSpace(p.deviceAuthorizationEndpoint) != "" &&
+		strings.TrimSpace(p.deviceClientID()) != ""
+}
+
+func (p *Provider) deviceClientID() string {
+	if value := strings.TrimSpace(p.config.DeviceClientID); value != "" {
+		return value
+	}
+	return strings.TrimSpace(p.config.ClientID)
+}
+
+func (p *Provider) deviceClientSecret() string {
+	if value := strings.TrimSpace(p.config.DeviceClientSecret); value != "" {
+		return value
+	}
+	return strings.TrimSpace(p.config.ClientSecret)
+}
+
+// StartDeviceAuthorization starts the upstream device authorization flow.
+func (p *Provider) StartDeviceAuthorization(ctx context.Context) (*DeviceAuthorization, error) {
+	if !p.SupportsDeviceAuthorization() {
+		return nil, ErrDeviceFlowNotSupported
+	}
+
+	form := url.Values{}
+	form.Set("client_id", p.deviceClientID())
+	if secret := p.deviceClientSecret(); secret != "" {
+		form.Set("client_secret", secret)
+	}
+	if scopes := strings.Join(p.config.Scopes, " "); scopes != "" {
+		form.Set("scope", scopes)
+	}
+
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		p.deviceAuthorizationEndpoint,
+		strings.NewReader(form.Encode()),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create device authorization request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("start device authorization: %w", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read device authorization response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("device authorization failed: %s", strings.TrimSpace(string(body)))
+	}
+
+	var data struct {
+		DeviceCode              string `json:"device_code"`
+		UserCode                string `json:"user_code"`
+		VerificationURI         string `json:"verification_uri"`
+		VerificationURIComplete string `json:"verification_uri_complete"`
+		ExpiresIn               int    `json:"expires_in"`
+		Interval                int    `json:"interval"`
+	}
+	if err := json.Unmarshal(body, &data); err != nil {
+		return nil, fmt.Errorf("decode device authorization response: %w", err)
+	}
+	if data.Interval <= 0 {
+		data.Interval = 5
+	}
+	return &DeviceAuthorization{
+		DeviceCode:              data.DeviceCode,
+		UserCode:                data.UserCode,
+		VerificationURI:         data.VerificationURI,
+		VerificationURIComplete: data.VerificationURIComplete,
+		ExpiresIn:               data.ExpiresIn,
+		Interval:                data.Interval,
+	}, nil
+}
+
+// ExchangeDeviceCode polls the token endpoint for a completed device authorization flow.
+func (p *Provider) ExchangeDeviceCode(ctx context.Context, deviceCode string) (*oauth2.Token, error) {
+	if !p.SupportsDeviceAuthorization() {
+		return nil, ErrDeviceFlowNotSupported
+	}
+
+	form := url.Values{}
+	form.Set("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
+	form.Set("device_code", deviceCode)
+	form.Set("client_id", p.deviceClientID())
+
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		p.oauth2Config.Endpoint.TokenURL,
+		strings.NewReader(form.Encode()),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create device token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	switch p.oauth2Config.Endpoint.AuthStyle {
+	case oauth2.AuthStyleInHeader:
+		if secret := p.deviceClientSecret(); secret != "" {
+			req.SetBasicAuth(p.deviceClientID(), secret)
+		}
+	case oauth2.AuthStyleInParams, oauth2.AuthStyleAutoDetect:
+		if secret := p.deviceClientSecret(); secret != "" {
+			form.Set("client_secret", secret)
+			req.Body = io.NopCloser(strings.NewReader(form.Encode()))
+			req.ContentLength = int64(len(form.Encode()))
+		}
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("exchange device code: %w", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read device token response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var apiErr struct {
+			Error            string `json:"error"`
+			ErrorDescription string `json:"error_description"`
+		}
+		_ = json.Unmarshal(body, &apiErr)
+		switch apiErr.Error {
+		case "authorization_pending":
+			return nil, ErrDeviceAuthorizationPending
+		case "slow_down":
+			return nil, ErrDeviceAuthorizationSlowDown
+		case "access_denied":
+			return nil, ErrDeviceAuthorizationDeclined
+		case "expired_token":
+			return nil, ErrDeviceAuthorizationExpired
+		default:
+			msg := strings.TrimSpace(apiErr.ErrorDescription)
+			if msg == "" {
+				msg = strings.TrimSpace(string(body))
+			}
+			return nil, fmt.Errorf("device token exchange failed: %s", msg)
+		}
+	}
+
+	var data struct {
+		AccessToken  string `json:"access_token"`
+		TokenType    string `json:"token_type"`
+		RefreshToken string `json:"refresh_token"`
+		IDToken      string `json:"id_token"`
+		ExpiresIn    int64  `json:"expires_in"`
+		Scope        string `json:"scope"`
+	}
+	if err := json.Unmarshal(body, &data); err != nil {
+		return nil, fmt.Errorf("decode device token response: %w", err)
+	}
+
+	token := &oauth2.Token{
+		AccessToken:  data.AccessToken,
+		TokenType:    data.TokenType,
+		RefreshToken: data.RefreshToken,
+	}
+	if data.ExpiresIn > 0 {
+		token.Expiry = time.Now().Add(time.Duration(data.ExpiresIn) * time.Second)
+	}
+	extra := map[string]any{}
+	if data.IDToken != "" {
+		extra["id_token"] = data.IDToken
+	}
+	if data.Scope != "" {
+		extra["scope"] = data.Scope
+	}
+	if len(extra) > 0 {
+		token = token.WithExtra(extra)
+	}
+	return token, nil
 }
 
 // ValidateEmailDomain checks if the email domain matches the configured domain

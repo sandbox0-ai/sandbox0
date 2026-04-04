@@ -190,21 +190,65 @@ func (m *Manager) HandleCallback(ctx context.Context, providerID, code, state st
 		return nil, "", fmt.Errorf("verify token: %w", err)
 	}
 
+	user, err := m.completeUserInfo(ctx, provider, userInfo)
+	if err != nil {
+		return nil, "", err
+	}
+	return user, stateData.ReturnURL, nil
+}
+
+// StartDeviceAuthorization begins a device authorization flow for the provider.
+func (m *Manager) StartDeviceAuthorization(ctx context.Context, providerID string) (*DeviceAuthorization, error) {
+	provider, err := m.GetProvider(providerID)
+	if err != nil {
+		return nil, err
+	}
+	return provider.StartDeviceAuthorization(ctx)
+}
+
+// CompleteToken verifies an upstream token response and maps it to a Sandbox0 user.
+func (m *Manager) CompleteToken(ctx context.Context, providerID string, token *oauth2.Token) (*identity.User, error) {
+	provider, err := m.GetProvider(providerID)
+	if err != nil {
+		return nil, err
+	}
+	userInfo, err := provider.VerifyToken(ctx, token)
+	if err != nil {
+		return nil, fmt.Errorf("verify token: %w", err)
+	}
+	return m.completeUserInfo(ctx, provider, userInfo)
+}
+
+// PollDeviceAuthorization exchanges a device code and returns the resolved user when complete.
+func (m *Manager) PollDeviceAuthorization(ctx context.Context, providerID, deviceCode string) (*identity.User, error) {
+	provider, err := m.GetProvider(providerID)
+	if err != nil {
+		return nil, err
+	}
+	token, err := provider.ExchangeDeviceCode(ctx, deviceCode)
+	if err != nil {
+		return nil, err
+	}
+	return m.CompleteToken(ctx, providerID, token)
+}
+
+func (m *Manager) completeUserInfo(ctx context.Context, provider *Provider, userInfo *UserInfo) (*identity.User, error) {
+
 	if userInfo.Email == "" {
-		return nil, "", ErrMissingEmail
+		return nil, ErrMissingEmail
 	}
 
 	// Validate email domain if configured
 	if err := provider.ValidateEmailDomain(userInfo.Email); err != nil {
-		return nil, "", err
+		return nil, err
 	}
 
 	// Find or create user
 	user, err := m.findOrCreateUser(ctx, provider, userInfo)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
-	return user, stateData.ReturnURL, nil
+	return user, nil
 }
 
 // findOrCreateUser finds an existing user or creates a new one
@@ -307,6 +351,8 @@ type ProviderInfo struct {
 	ID                    string `json:"id"`
 	Name                  string `json:"name"`
 	ExternalAuthPortalURL string `json:"external_auth_portal_url,omitempty"`
+	BrowserLoginEnabled   bool   `json:"browser_login_enabled"`
+	DeviceLoginEnabled    bool   `json:"device_login_enabled"`
 }
 
 // ListProviderInfo returns public info about all enabled providers
@@ -321,6 +367,8 @@ func (m *Manager) ListProviderInfo() []ProviderInfo {
 			ID:                    p.ID(),
 			Name:                  p.Name(),
 			ExternalAuthPortalURL: p.Config().ExternalAuthPortalURL,
+			BrowserLoginEnabled:   true,
+			DeviceLoginEnabled:    p.SupportsDeviceAuthorization(),
 		})
 	}
 	return info

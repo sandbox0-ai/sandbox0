@@ -77,3 +77,18 @@ type RefreshToken struct {
 	Revoked   bool      `json:"revoked"`
 	CreatedAt time.Time `json:"created_at"`
 }
+
+// DeviceAuthSession stores a pending device authorization login.
+type DeviceAuthSession struct {
+	ID                      string     `json:"id"`
+	Provider                string     `json:"provider"`
+	DeviceCode              string     `json:"-"`
+	UserCode                string     `json:"user_code"`
+	VerificationURI         string     `json:"verification_uri"`
+	VerificationURIComplete string     `json:"verification_uri_complete,omitempty"`
+	IntervalSeconds         int        `json:"interval_seconds"`
+	ExpiresAt               time.Time  `json:"expires_at"`
+	ConsumedAt              *time.Time `json:"consumed_at,omitempty"`
+	CreatedAt               time.Time  `json:"created_at"`
+	UpdatedAt               time.Time  `json:"updated_at"`
+}

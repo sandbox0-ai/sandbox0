@@ -258,6 +258,62 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+  /auth/oidc/{provider}/device/start:
+    post:
+      tags: [auth]
+      summary: Start OIDC device login
+      parameters:
+        - $ref: "#/components/parameters/OIDCProvider"
+      responses:
+        "200":
+          description: Device login started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessDeviceLoginStartResponse"
+        "404":
+          description: Provider not found or device login unsupported
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+  /auth/oidc/{provider}/device/poll:
+    post:
+      tags: [auth]
+      summary: Poll OIDC device login
+      parameters:
+        - $ref: "#/components/parameters/OIDCProvider"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeviceLoginPollRequest"
+      responses:
+        "200":
+          description: Device login is pending or completed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessDeviceLoginPollResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "401":
+          description: Device login expired, declined, or invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          description: Provider or device login session not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
   /auth/logout:
     post:
       tags: [auth]
@@ -3134,7 +3190,11 @@ components:
             When set, browser login for this provider should redirect to this external URL
             instead of initiating the OIDC flow directly. Used for deployments that host
             their own authorization portal.
-      required: [id, name, type]
+        browser_login_enabled:
+          type: boolean
+        device_login_enabled:
+          type: boolean
+      required: [id, name, type, browser_login_enabled, device_login_enabled]
     SuccessAuthProvidersResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
@@ -3210,6 +3270,57 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/LoginResponse"
+    DeviceLoginStartResponse:
+      type: object
+      properties:
+        device_login_id:
+          type: string
+        user_code:
+          type: string
+        verification_uri:
+          type: string
+        verification_uri_complete:
+          type: string
+        expires_at:
+          type: integer
+          format: int64
+        interval_seconds:
+          type: integer
+      required: [device_login_id, user_code, verification_uri, expires_at, interval_seconds]
+    SuccessDeviceLoginStartResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/DeviceLoginStartResponse"
+    DeviceLoginPollRequest:
+      type: object
+      properties:
+        device_login_id:
+          type: string
+      required: [device_login_id]
+    DeviceLoginPollResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [pending, slow_down, completed]
+        interval_seconds:
+          type: integer
+        expires_at:
+          type: integer
+          format: int64
+        login:
+          $ref: "#/components/schemas/LoginResponse"
+      required: [status]
+    SuccessDeviceLoginPollResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/DeviceLoginPollResponse"
     User:
       type: object
       properties:

@@ -48,6 +48,13 @@ const (
 	StaticUsernamePassword     CredentialSourceResolverKind = "static_username_password"
 )
 
+// Defines values for DeviceLoginPollResponseStatus.
+const (
+	DeviceLoginPollResponseStatusCompleted DeviceLoginPollResponseStatus = "completed"
+	DeviceLoginPollResponseStatusPending   DeviceLoginPollResponseStatus = "pending"
+	DeviceLoginPollResponseStatusSlowDown  DeviceLoginPollResponseStatus = "slow_down"
+)
+
 // Defines values for EgressAuthFailurePolicy.
 const (
 	FailClosed EgressAuthFailurePolicy = "fail-closed"
@@ -195,6 +202,16 @@ const (
 // Defines values for SuccessDeletedResponseSuccess.
 const (
 	SuccessDeletedResponseSuccessTrue SuccessDeletedResponseSuccess = true
+)
+
+// Defines values for SuccessDeviceLoginPollResponseSuccess.
+const (
+	SuccessDeviceLoginPollResponseSuccessTrue SuccessDeviceLoginPollResponseSuccess = true
+)
+
+// Defines values for SuccessDeviceLoginStartResponseSuccess.
+const (
+	SuccessDeviceLoginStartResponseSuccessTrue SuccessDeviceLoginStartResponseSuccess = true
 )
 
 // Defines values for SuccessEnvelopeSuccess.
@@ -500,10 +517,10 @@ const (
 
 // Defines values for GetApiV1SandboxesParamsStatus.
 const (
-	GetApiV1SandboxesParamsStatusCompleted GetApiV1SandboxesParamsStatus = "completed"
-	GetApiV1SandboxesParamsStatusFailed    GetApiV1SandboxesParamsStatus = "failed"
-	GetApiV1SandboxesParamsStatusRunning   GetApiV1SandboxesParamsStatus = "running"
-	GetApiV1SandboxesParamsStatusStarting  GetApiV1SandboxesParamsStatus = "starting"
+	Completed GetApiV1SandboxesParamsStatus = "completed"
+	Failed    GetApiV1SandboxesParamsStatus = "failed"
+	Running   GetApiV1SandboxesParamsStatus = "running"
+	Starting  GetApiV1SandboxesParamsStatus = "starting"
 )
 
 // APIKey defines model for APIKey.
@@ -565,6 +582,9 @@ type AppendReplicaChangesResponse struct {
 
 // AuthProvider defines model for AuthProvider.
 type AuthProvider struct {
+	BrowserLoginEnabled bool `json:"browser_login_enabled"`
+	DeviceLoginEnabled  bool `json:"device_login_enabled"`
+
 	// ExternalAuthPortalUrl When set, browser login for this provider should redirect to this external URL instead of initiating the OIDC flow directly. Used for deployments that host their own authorization portal.
 	ExternalAuthPortalUrl *string `json:"external_auth_portal_url,omitempty"`
 	Id                    string  `json:"id"`
@@ -808,6 +828,32 @@ type CredentialSourceWriteSpec struct {
 	StaticHeaders              *StaticHeadersSourceSpec              `json:"staticHeaders,omitempty"`
 	StaticTLSClientCertificate *StaticTLSClientCertificateSourceSpec `json:"staticTLSClientCertificate,omitempty"`
 	StaticUsernamePassword     *StaticUsernamePasswordSourceSpec     `json:"staticUsernamePassword,omitempty"`
+}
+
+// DeviceLoginPollRequest defines model for DeviceLoginPollRequest.
+type DeviceLoginPollRequest struct {
+	DeviceLoginId string `json:"device_login_id"`
+}
+
+// DeviceLoginPollResponse defines model for DeviceLoginPollResponse.
+type DeviceLoginPollResponse struct {
+	ExpiresAt       *int64                        `json:"expires_at,omitempty"`
+	IntervalSeconds *int                          `json:"interval_seconds,omitempty"`
+	Login           *LoginResponse                `json:"login,omitempty"`
+	Status          DeviceLoginPollResponseStatus `json:"status"`
+}
+
+// DeviceLoginPollResponseStatus defines model for DeviceLoginPollResponse.Status.
+type DeviceLoginPollResponseStatus string
+
+// DeviceLoginStartResponse defines model for DeviceLoginStartResponse.
+type DeviceLoginStartResponse struct {
+	DeviceLoginId           string  `json:"device_login_id"`
+	ExpiresAt               int64   `json:"expires_at"`
+	IntervalSeconds         int     `json:"interval_seconds"`
+	UserCode                string  `json:"user_code"`
+	VerificationUri         string  `json:"verification_uri"`
+	VerificationUriComplete *string `json:"verification_uri_complete,omitempty"`
 }
 
 // EgressAuthFailurePolicy defines model for EgressAuthFailurePolicy.
@@ -1712,6 +1758,24 @@ type SuccessDeletedResponse struct {
 
 // SuccessDeletedResponseSuccess defines model for SuccessDeletedResponse.Success.
 type SuccessDeletedResponseSuccess bool
+
+// SuccessDeviceLoginPollResponse defines model for SuccessDeviceLoginPollResponse.
+type SuccessDeviceLoginPollResponse struct {
+	Data    *DeviceLoginPollResponse              `json:"data,omitempty"`
+	Success SuccessDeviceLoginPollResponseSuccess `json:"success"`
+}
+
+// SuccessDeviceLoginPollResponseSuccess defines model for SuccessDeviceLoginPollResponse.Success.
+type SuccessDeviceLoginPollResponseSuccess bool
+
+// SuccessDeviceLoginStartResponse defines model for SuccessDeviceLoginStartResponse.
+type SuccessDeviceLoginStartResponse struct {
+	Data    *DeviceLoginStartResponse              `json:"data,omitempty"`
+	Success SuccessDeviceLoginStartResponseSuccess `json:"success"`
+}
+
+// SuccessDeviceLoginStartResponseSuccess defines model for SuccessDeviceLoginStartResponse.Success.
+type SuccessDeviceLoginStartResponseSuccess bool
 
 // SuccessEnvelope defines model for SuccessEnvelope.
 type SuccessEnvelope struct {
@@ -2746,6 +2810,9 @@ type PostAuthChangePasswordJSONRequestBody = ChangePasswordRequest
 
 // PostAuthLoginJSONRequestBody defines body for PostAuthLogin for application/json ContentType.
 type PostAuthLoginJSONRequestBody = LoginRequest
+
+// PostAuthOidcProviderDevicePollJSONRequestBody defines body for PostAuthOidcProviderDevicePoll for application/json ContentType.
+type PostAuthOidcProviderDevicePollJSONRequestBody = DeviceLoginPollRequest
 
 // PostAuthRefreshJSONRequestBody defines body for PostAuthRefresh for application/json ContentType.
 type PostAuthRefreshJSONRequestBody = RefreshRequest

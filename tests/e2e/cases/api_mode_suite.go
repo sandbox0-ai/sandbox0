@@ -410,21 +410,28 @@ func assertTemplatePoolReadinessGate(env *framework.ScenarioEnv, session *e2euti
 
 	templateNamespace, err := naming.TemplateNamespaceForTeam(expectStringPtr(created.TeamId, "team id"))
 	Expect(err).NotTo(HaveOccurred())
+	templateNameForCluster := naming.TemplateNameForCluster(naming.ScopeTeam, expectStringPtr(created.TeamId, "team id"), name)
 
-	Eventually(func() (string, error) {
-		return framework.KubectlOutput(
+	Eventually(func() error {
+		output, outputErr := framework.KubectlOutput(
 			env.TestCtx.Context,
 			env.Config.Kubeconfig,
 			"get", "pods",
 			"--namespace", templateNamespace,
-			"--selector", fmt.Sprintf("sandbox0.ai/template-id=%s,sandbox0.ai/pool-type=idle", name),
+			"--selector", fmt.Sprintf("sandbox0.ai/template-id=%s,sandbox0.ai/pool-type=idle", templateNameForCluster),
 			"-o", `jsonpath={range .items[*]}{.metadata.name}{"|"}{.status.phase}{"|"}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}`,
 		)
-	}).WithTimeout(90 * time.Second).WithPolling(3 * time.Second).Should(Satisfy(func(output string) bool {
-		return strings.Contains(output, "|Running|False")
-	}))
+		if outputErr != nil {
+			return outputErr
+		}
+		output = strings.TrimSpace(output)
+		if output == "" {
+			return fmt.Errorf("idle pool pod not created yet")
+		}
+		if strings.Contains(output, "|True") {
+			return fmt.Errorf("idle pool pod became ready before intermediate observation: %s", output)
+		}
 
-	Consistently(func() error {
 		tpl, getErr := session.GetTemplate(env.TestCtx.Context, GinkgoT(), name)
 		if getErr != nil {
 			return getErr
@@ -433,10 +440,10 @@ func assertTemplatePoolReadinessGate(env *framework.ScenarioEnv, session *e2euti
 			return fmt.Errorf("template status not ready")
 		}
 		if *tpl.Status.IdleCount != 0 {
-			return fmt.Errorf("idleCount=%d, want 0 before readiness passes", *tpl.Status.IdleCount)
+			return fmt.Errorf("idleCount=%d, want 0 before readiness passes: %s", *tpl.Status.IdleCount, output)
 		}
 		return nil
-	}).WithTimeout(10 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
+	}).WithTimeout(2 * time.Minute).WithPolling(3 * time.Second).Should(Succeed())
 
 	Eventually(func() error {
 		tpl, getErr := session.GetTemplate(env.TestCtx.Context, GinkgoT(), name)

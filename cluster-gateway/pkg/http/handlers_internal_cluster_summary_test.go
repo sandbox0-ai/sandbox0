@@ -50,9 +50,9 @@ sandbox_pod_placement:
 	clusterService := service.NewClusterService(
 		nil,
 		newClusterSummaryTestPodLister(t,
-			newClusterSummaryTestPod("ns-a", "idle-running", "template-a", "idle", corev1.PodRunning),
-			newClusterSummaryTestPod("ns-a", "active-running", "template-a", "active", corev1.PodRunning),
-			newClusterSummaryTestPod("ns-a", "active-pending", "template-a", "active", corev1.PodPending),
+			newClusterSummaryTestPod("ns-a", "idle-running", "template-a", "idle", corev1.PodRunning, true),
+			newClusterSummaryTestPod("ns-a", "active-running", "template-a", "active", corev1.PodRunning, true),
+			newClusterSummaryTestPod("ns-a", "active-pending", "template-a", "active", corev1.PodPending, false),
 		),
 		newClusterSummaryTestNodeLister(t,
 			newClusterSummaryTestNode("node-sandbox", map[string]string{"sandbox0.ai/node-role": "sandbox"}),
@@ -214,7 +214,19 @@ func newClusterSummaryTestNodeLister(t *testing.T, nodes ...*corev1.Node) coreli
 	return corelisters.NewNodeLister(indexer)
 }
 
-func newClusterSummaryTestPod(namespace, name, templateID, poolType string, phase corev1.PodPhase) *corev1.Pod {
+func newClusterSummaryTestPod(namespace, name, templateID, poolType string, phase corev1.PodPhase, ready bool) *corev1.Pod {
+	conditions := []corev1.PodCondition{}
+	if phase == corev1.PodRunning || ready {
+		status := corev1.ConditionFalse
+		if ready {
+			status = corev1.ConditionTrue
+		}
+		conditions = append(conditions, corev1.PodCondition{
+			Type:   corev1.PodReady,
+			Status: status,
+		})
+	}
+
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: namespace,
@@ -224,7 +236,10 @@ func newClusterSummaryTestPod(namespace, name, templateID, poolType string, phas
 				"sandbox0.ai/pool-type":   poolType,
 			},
 		},
-		Status: corev1.PodStatus{Phase: phase},
+		Status: corev1.PodStatus{
+			Phase:      phase,
+			Conditions: conditions,
+		},
 	}
 }
 

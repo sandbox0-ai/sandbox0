@@ -226,6 +226,77 @@ manager_image: sandbox0/manager:test
 	}
 }
 
+func TestBuildPodSpecInjectsNetdMITMCATrustMaterialIntoAllContainers(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+netd_mitm_ca_secret_name: fullmode-netd-mitm-ca
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	template := newTestTemplate()
+	template.Spec.Sidecars = []corev1.Container{
+		{
+			Name:  "sidecar",
+			Image: "busybox:latest",
+			Env: []corev1.EnvVar{
+				{Name: netdMITMCAEnvVar, Value: "/tmp/ignored.crt"},
+			},
+		},
+	}
+
+	spec := BuildPodSpec(template, false)
+
+	volume := findVolume(spec.Volumes, netdMITMCAVolume)
+	if volume == nil || volume.Secret == nil {
+		t.Fatalf("expected %s secret volume to be injected", netdMITMCAVolume)
+	}
+	if volume.Secret.SecretName != "fullmode-netd-mitm-ca" {
+		t.Fatalf("mitm ca secret = %q, want fullmode-netd-mitm-ca", volume.Secret.SecretName)
+	}
+	if len(volume.Secret.Items) != 1 || volume.Secret.Items[0].Key != netdMITMCACertKey || volume.Secret.Items[0].Path != "mitm-ca.crt" {
+		t.Fatalf("unexpected secret items: %#v", volume.Secret.Items)
+	}
+
+	for _, name := range []string{"procd", "sidecar"} {
+		container := findContainer(spec.Containers, name)
+		if container == nil {
+			t.Fatalf("expected container %q", name)
+		}
+
+		env := findEnvVar(container.Env, netdMITMCAEnvVar)
+		if env == nil || env.Value != netdMITMCACertPath {
+			t.Fatalf("%s env %s = %#v, want %q", name, netdMITMCAEnvVar, env, netdMITMCACertPath)
+		}
+
+		mount := findVolumeMount(container.VolumeMounts, netdMITMCAVolume)
+		if mount == nil {
+			t.Fatalf("expected %s mount on %s", netdMITMCAVolume, name)
+		}
+		if mount.MountPath != netdMITMCADir || !mount.ReadOnly {
+			t.Fatalf("%s mount = %#v, want path %q readOnly", name, mount, netdMITMCADir)
+		}
+	}
+}
+
+func TestBuildPodSpecSkipsNetdMITMCATrustMaterialWhenManagerConfigOmitsSecret(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	spec := BuildPodSpec(newTestTemplate(), false)
+
+	if volume := findVolume(spec.Volumes, netdMITMCAVolume); volume != nil {
+		t.Fatalf("expected %s volume to be absent, got %#v", netdMITMCAVolume, volume)
+	}
+	if env := findEnvVar(spec.Containers[0].Env, netdMITMCAEnvVar); env != nil {
+		t.Fatalf("expected %s env to be absent, got %#v", netdMITMCAEnvVar, env)
+	}
+	if mount := findVolumeMount(spec.Containers[0].VolumeMounts, netdMITMCAVolume); mount != nil {
+		t.Fatalf("expected %s mount to be absent, got %#v", netdMITMCAVolume, mount)
+	}
+}
+
 func newTestTemplate() *SandboxTemplate {
 	return &SandboxTemplate{
 		ObjectMeta: metav1ObjectMeta("default"),
@@ -257,6 +328,42 @@ func writeManagerConfig(t *testing.T, contents string) string {
 		t.Fatalf("write manager config: %v", err)
 	}
 	return path
+}
+
+func findVolume(volumes []corev1.Volume, name string) *corev1.Volume {
+	for i := range volumes {
+		if volumes[i].Name == name {
+			return &volumes[i]
+		}
+	}
+	return nil
+}
+
+func findContainer(containers []corev1.Container, name string) *corev1.Container {
+	for i := range containers {
+		if containers[i].Name == name {
+			return &containers[i]
+		}
+	}
+	return nil
+}
+
+func findEnvVar(envVars []corev1.EnvVar, name string) *corev1.EnvVar {
+	for i := range envVars {
+		if envVars[i].Name == name {
+			return &envVars[i]
+		}
+	}
+	return nil
+}
+
+func findVolumeMount(mounts []corev1.VolumeMount, name string) *corev1.VolumeMount {
+	for i := range mounts {
+		if mounts[i].Name == name {
+			return &mounts[i]
+		}
+	}
+	return nil
 }
 
 func TestBuildPodSpecOverridesTenantStorageProxyEnvVars(t *testing.T) {

@@ -92,7 +92,7 @@ func TestReconcileFallsBackToLegacyNetdPlacement(t *testing.T) {
 func TestReconcileMountsExplicitMITMCASecret(t *testing.T) {
 	infra := newNetdTestInfra()
 	infra.Spec.Services.Netd.MITMCASecretName = "netd-mitm-ca"
-	client, scheme := newNetdTestClient(t, infra.DeepCopy())
+	client, scheme := newNetdTestClient(t, infra.DeepCopy(), newExplicitMITMCASecret(t, infra, "netd-mitm-ca"))
 
 	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
 	if err := reconciler.Reconcile(context.Background(), infra, "ghcr.io/sandbox0-ai/sandbox0", "latest", nil); err != nil {
@@ -194,7 +194,7 @@ func TestReconcileRepairsInvalidManagedMITMCASecret(t *testing.T) {
 func TestReconcileExplicitMITMCASecretSkipsManagedSecret(t *testing.T) {
 	infra := newNetdTestInfra()
 	infra.Spec.Services.Netd.MITMCASecretName = "custom-mitm-ca"
-	client, scheme := newNetdTestClient(t, infra.DeepCopy())
+	client, scheme := newNetdTestClient(t, infra.DeepCopy(), newExplicitMITMCASecret(t, infra, "custom-mitm-ca"))
 	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
 
 	if err := reconciler.Reconcile(context.Background(), infra, "ghcr.io/sandbox0-ai/sandbox0", "latest", nil); err != nil {
@@ -350,6 +350,27 @@ func assertValidManagedMITMCASecret(t *testing.T, secret *corev1.Secret) {
 	}
 	if !cert.IsCA {
 		t.Fatalf("expected managed certificate to be a CA")
+	}
+}
+
+func newExplicitMITMCASecret(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, name string) *corev1.Secret {
+	t.Helper()
+
+	certPEM, keyPEM, err := generateManagedMITMCA(infra)
+	if err != nil {
+		t.Fatalf("generate explicit mitm ca secret: %v", err)
+	}
+
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: infra.Namespace,
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			mitmCACertKey: certPEM,
+			mitmCAKeyKey:  keyPEM,
+		},
 	}
 }
 

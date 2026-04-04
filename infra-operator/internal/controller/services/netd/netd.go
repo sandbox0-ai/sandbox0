@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"strings"
 
 	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
@@ -292,19 +291,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 }
 
 func (r *Reconciler) resolveMITMCASecretName(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, labels map[string]string) (string, error) {
-	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.Netd == nil {
-		return "", nil
-	}
-
-	if secretName := strings.TrimSpace(infra.Spec.Services.Netd.MITMCASecretName); secretName != "" {
-		return secretName, nil
-	}
-
-	secretName := managedMITMCASecretName(infra)
-	if err := r.reconcileManagedMITMCASecret(ctx, infra, secretName, labels); err != nil {
-		return "", err
-	}
-	return secretName, nil
+	return EnsureMITMCASecret(ctx, r.Resources, infra, labels)
 }
 
 func resolveClusterDNSCIDR(ctx context.Context, client ctrlclient.Client, logger logr.Logger) (string, error) {

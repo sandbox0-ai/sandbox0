@@ -354,7 +354,7 @@ func (s *AutoScaler) getPoolStats(template *v1alpha1.SandboxTemplate) (idle, act
 	}
 
 	for _, pod := range idlePods {
-		if pod.Status.Phase == corev1.PodRunning || pod.Status.Phase == corev1.PodPending {
+		if IsPodReady(pod) {
 			idle++
 		}
 	}

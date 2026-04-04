@@ -277,10 +277,10 @@ func (op *Operator) updateTemplateStatus(ctx context.Context, template *v1alpha1
 		return err
 	}
 
-	// Count running pods only
+	// Count only ready idle pods as available pooled capacity.
 	idleCount := int32(0)
 	for _, pod := range idlePods {
-		if pod.Status.Phase == corev1.PodRunning || pod.Status.Phase == corev1.PodPending {
+		if IsPodReady(pod) {
 			idleCount++
 		}
 	}

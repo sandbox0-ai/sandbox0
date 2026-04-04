@@ -4,8 +4,10 @@
 package apispec
 
 import (
+	"encoding/json"
 	"time"
 
+	"github.com/oapi-codegen/runtime"
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
@@ -862,6 +864,11 @@ type ErrorEnvelope struct {
 // ErrorEnvelopeSuccess defines model for ErrorEnvelope.Success.
 type ErrorEnvelopeSuccess bool
 
+// ExecAction defines model for ExecAction.
+type ExecAction struct {
+	Command *[]string `json:"command,omitempty"`
+}
+
 // ExecCandidate defines model for ExecCandidate.
 type ExecCandidate struct {
 	Args *[]string `json:"args,omitempty"`
@@ -916,6 +923,12 @@ type ForkVolumeRequest struct {
 	Writeback  *bool             `json:"writeback,omitempty"`
 }
 
+// GRPCAction defines model for GRPCAction.
+type GRPCAction struct {
+	Port    int32   `json:"port"`
+	Service *string `json:"service,omitempty"`
+}
+
 // GatewayMetadata defines model for GatewayMetadata.
 type GatewayMetadata struct {
 	GatewayMode GatewayMetadataGatewayMode `json:"gateway_mode"`
@@ -924,6 +937,21 @@ type GatewayMetadata struct {
 
 // GatewayMetadataGatewayMode defines model for GatewayMetadata.GatewayMode.
 type GatewayMetadataGatewayMode string
+
+// HTTPGetAction defines model for HTTPGetAction.
+type HTTPGetAction struct {
+	Host        *string       `json:"host,omitempty"`
+	HttpHeaders *[]HTTPHeader `json:"httpHeaders,omitempty"`
+	Path        *string       `json:"path,omitempty"`
+	Port        ProbePort     `json:"port"`
+	Scheme      *string       `json:"scheme,omitempty"`
+}
+
+// HTTPHeader defines model for HTTPHeader.
+type HTTPHeader struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
 
 // HTTPHeadersProjection defines model for HTTPHeadersProjection.
 type HTTPHeadersProjection struct {
@@ -1149,6 +1177,31 @@ type PreferredSchedulingTerm struct {
 	Preference NodeSelectorTerm `json:"preference"`
 	Weight     int32            `json:"weight"`
 }
+
+// Probe defines model for Probe.
+type Probe struct {
+	Exec                          *ExecAction      `json:"exec,omitempty"`
+	FailureThreshold              *int32           `json:"failureThreshold,omitempty"`
+	Grpc                          *GRPCAction      `json:"grpc,omitempty"`
+	HttpGet                       *HTTPGetAction   `json:"httpGet,omitempty"`
+	InitialDelaySeconds           *int32           `json:"initialDelaySeconds,omitempty"`
+	PeriodSeconds                 *int32           `json:"periodSeconds,omitempty"`
+	SuccessThreshold              *int32           `json:"successThreshold,omitempty"`
+	TcpSocket                     *TCPSocketAction `json:"tcpSocket,omitempty"`
+	TerminationGracePeriodSeconds *int64           `json:"terminationGracePeriodSeconds,omitempty"`
+	TimeoutSeconds                *int32           `json:"timeoutSeconds,omitempty"`
+}
+
+// ProbePort defines model for ProbePort.
+type ProbePort struct {
+	union json.RawMessage
+}
+
+// ProbePort0 defines model for .
+type ProbePort0 = int32
+
+// ProbePort1 defines model for .
+type ProbePort1 = string
 
 // ProcessType defines model for ProcessType.
 type ProcessType string
@@ -1419,20 +1472,20 @@ type SandboxTemplateCondition struct {
 
 // SandboxTemplateSpec defines model for SandboxTemplateSpec.
 type SandboxTemplateSpec struct {
-	AllowedTeams     *[]string             `json:"allowedTeams,omitempty"`
-	ClusterId        *string               `json:"clusterId,omitempty"`
-	Description      *string               `json:"description,omitempty"`
-	DisplayName      *string               `json:"displayName,omitempty"`
-	EnvVars          *map[string]string    `json:"envVars,omitempty"`
-	Lifecycle        *LifecyclePolicy      `json:"lifecycle,omitempty"`
-	MainContainer    *ContainerSpec        `json:"mainContainer,omitempty"`
-	Network          *SandboxNetworkPolicy `json:"network,omitempty"`
-	Pod              *PodSpecOverride      `json:"pod,omitempty"`
-	Pool             *PoolStrategy         `json:"pool,omitempty"`
-	Public           *bool                 `json:"public,omitempty"`
-	RuntimeClassName *string               `json:"runtimeClassName,omitempty"`
-	Sidecars         *[]ContainerSpec      `json:"sidecars,omitempty"`
-	Tags             *[]string             `json:"tags,omitempty"`
+	AllowedTeams     *[]string               `json:"allowedTeams,omitempty"`
+	ClusterId        *string                 `json:"clusterId,omitempty"`
+	Description      *string                 `json:"description,omitempty"`
+	DisplayName      *string                 `json:"displayName,omitempty"`
+	EnvVars          *map[string]string      `json:"envVars,omitempty"`
+	Lifecycle        *LifecyclePolicy        `json:"lifecycle,omitempty"`
+	MainContainer    *ContainerSpec          `json:"mainContainer,omitempty"`
+	Network          *SandboxNetworkPolicy   `json:"network,omitempty"`
+	Pod              *PodSpecOverride        `json:"pod,omitempty"`
+	Pool             *PoolStrategy           `json:"pool,omitempty"`
+	Public           *bool                   `json:"public,omitempty"`
+	RuntimeClassName *string                 `json:"runtimeClassName,omitempty"`
+	Sidecars         *[]SidecarContainerSpec `json:"sidecars,omitempty"`
+	Tags             *[]string               `json:"tags,omitempty"`
 }
 
 // SandboxTemplateStatus defines model for SandboxTemplateStatus.
@@ -1483,6 +1536,20 @@ type SecurityContext struct {
 	Capabilities *Capabilities `json:"capabilities,omitempty"`
 	RunAsGroup   *int64        `json:"runAsGroup,omitempty"`
 	RunAsUser    *int64        `json:"runAsUser,omitempty"`
+}
+
+// SidecarContainerSpec defines model for SidecarContainerSpec.
+type SidecarContainerSpec struct {
+	Args            *[]string        `json:"args,omitempty"`
+	Command         *[]string        `json:"command,omitempty"`
+	Env             *[]EnvVar        `json:"env,omitempty"`
+	Image           string           `json:"image"`
+	LivenessProbe   *Probe           `json:"livenessProbe,omitempty"`
+	Name            string           `json:"name"`
+	ReadinessProbe  *Probe           `json:"readinessProbe,omitempty"`
+	Resources       *ResourceQuota   `json:"resources,omitempty"`
+	SecurityContext *SecurityContext `json:"securityContext,omitempty"`
+	StartupProbe    *Probe           `json:"startupProbe,omitempty"`
 }
 
 // SignalContextRequest defines model for SignalContextRequest.
@@ -2163,6 +2230,12 @@ type SyncReplica struct {
 	VolumeId       *string                           `json:"volume_id,omitempty"`
 }
 
+// TCPSocketAction defines model for TCPSocketAction.
+type TCPSocketAction struct {
+	Host *string   `json:"host,omitempty"`
+	Port ProbePort `json:"port"`
+}
+
 // TLSClientCertificateProjection Client certificate projection used for TLS terminate-reoriginate auth.
 type TLSClientCertificateProjection = map[string]interface{}
 
@@ -2703,3 +2776,65 @@ type PutTeamsIdMembersUserIdJSONRequestBody = UpdateTeamMemberRequest
 
 // PutUsersMeJSONRequestBody defines body for PutUsersMe for application/json ContentType.
 type PutUsersMeJSONRequestBody = UpdateUserRequest
+
+// AsProbePort0 returns the union data inside the ProbePort as a ProbePort0
+func (t ProbePort) AsProbePort0() (ProbePort0, error) {
+	var body ProbePort0
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromProbePort0 overwrites any union data inside the ProbePort as the provided ProbePort0
+func (t *ProbePort) FromProbePort0(v ProbePort0) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeProbePort0 performs a merge with any union data inside the ProbePort, using the provided ProbePort0
+func (t *ProbePort) MergeProbePort0(v ProbePort0) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsProbePort1 returns the union data inside the ProbePort as a ProbePort1
+func (t ProbePort) AsProbePort1() (ProbePort1, error) {
+	var body ProbePort1
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromProbePort1 overwrites any union data inside the ProbePort as the provided ProbePort1
+func (t *ProbePort) FromProbePort1(v ProbePort1) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeProbePort1 performs a merge with any union data inside the ProbePort, using the provided ProbePort1
+func (t *ProbePort) MergeProbePort1(v ProbePort1) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t ProbePort) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *ProbePort) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}

@@ -13,6 +13,8 @@ Sandbox0 has two categories of templates:
 
 Builtin templates use curated public images and are ready to use immediately. Custom templates let you bring your own image, and fine-tune resources.
 
+Custom templates can also define sidecar containers. This is useful for template-owned warm processes, for example a long-running Codex agent or helper daemon. Pool capacity only counts pods that become Kubernetes-ready, so a sidecar readiness probe can gate whether a warm pod is claimable.
+
 ---
 
 ## Create Template
@@ -47,6 +49,29 @@ spec:
         minIdle: 2
         maxIdle: 10
 ```
+
+**Example with a sidecar-hosted warm process:**
+
+```yaml
+spec:
+    mainContainer:
+        image: ubuntu:24.04
+        resources:
+            cpu: "1"
+            memory: 2Gi
+    sidecars:
+        - name: codex
+          image: ghcr.io/example/codex:latest
+          command: ["sh", "-lc", "/app/start-codex.sh"]
+          readinessProbe:
+            exec:
+              command: ["test", "-S", "/tmp/codex.sock"]
+    pool:
+        minIdle: 2
+        maxIdle: 10
+```
+
+Use the sidecar readiness probe to express when the warm process is truly ready. A pod that is merely `Running` but not `Ready` is not counted as available pool capacity.
 
 <Tabs
   tabs={[

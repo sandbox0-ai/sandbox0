@@ -28,6 +28,7 @@ type apiModeSuiteOptions struct {
 	fileContent               string
 	includeSandboxListTests   bool
 	includeTemplateStatus     bool
+	includePoolReadinessGate  bool
 	includeNetworkPolicy      bool
 	includeVolumeLifecycle    bool
 	includeMeteringAssertions bool
@@ -90,6 +91,12 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 			if opts.includeTemplateStatus {
 				It("returns template status with pool counters", func() {
 					assertTemplateStatusCountersEventually(env, session)
+				})
+			}
+
+			if opts.includePoolReadinessGate {
+				It("gates pooled capacity on Kubernetes pod readiness", func() {
+					assertTemplatePoolReadinessGate(env, session, opts.templateNamePrefix)
 				})
 			}
 		})
@@ -368,6 +375,82 @@ func assertTemplateStatusCountersEventually(env *framework.ScenarioEnv, session 
 		}
 		return nil
 	}).WithTimeout(90 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
+}
+
+func assertTemplatePoolReadinessGate(env *framework.ScenarioEnv, session *e2eutils.Session, templateNamePrefix string) {
+	templates, err := session.ListTemplates(env.TestCtx.Context, GinkgoT())
+	Expect(err).NotTo(HaveOccurred())
+	Expect(templates).NotTo(BeEmpty())
+
+	name := fmt.Sprintf("%s-ready-gate-%d", templateNamePrefix, time.Now().UnixNano())
+	templateReq := e2eutils.CloneTemplateForCreate(templates[0], name)
+	Expect(templateReq.Spec.Pool).NotTo(BeNil())
+	templateReq.Spec.Pool.MinIdle = 1
+	templateReq.Spec.Pool.MaxIdle = 1
+	templateReq.Spec.Sidecars = &[]apispec.SidecarContainerSpec{
+		{
+			Name:    "codex",
+			Image:   "busybox:latest",
+			Command: ptr([]string{"sh", "-lc", "sleep 30; touch /tmp/ready; tail -f /dev/null"}),
+			ReadinessProbe: &apispec.Probe{
+				Exec:                &apispec.ExecAction{Command: ptr([]string{"test", "-f", "/tmp/ready"})},
+				PeriodSeconds:       ptr(int32(2)),
+				FailureThreshold:    ptr(int32(1)),
+				InitialDelaySeconds: ptr(int32(1)),
+			},
+		},
+	}
+
+	created, err := session.CreateTemplate(env.TestCtx.Context, GinkgoT(), templateReq)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(created).NotTo(BeNil())
+	defer func() {
+		Expect(session.DeleteTemplate(env.TestCtx.Context, GinkgoT(), name)).To(Succeed())
+	}()
+
+	templateNamespace, err := naming.TemplateNamespaceForTeam(expectStringPtr(created.TeamId, "team id"))
+	Expect(err).NotTo(HaveOccurred())
+
+	Eventually(func() (string, error) {
+		return framework.KubectlOutput(
+			env.TestCtx.Context,
+			env.Config.Kubeconfig,
+			"get", "pods",
+			"--namespace", templateNamespace,
+			"--selector", fmt.Sprintf("sandbox0.ai/template-id=%s,sandbox0.ai/pool-type=idle", name),
+			"-o", `jsonpath={range .items[*]}{.metadata.name}{"|"}{.status.phase}{"|"}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}`,
+		)
+	}).WithTimeout(90 * time.Second).WithPolling(3 * time.Second).Should(Satisfy(func(output string) bool {
+		return strings.Contains(output, "|Running|False")
+	}))
+
+	Consistently(func() error {
+		tpl, getErr := session.GetTemplate(env.TestCtx.Context, GinkgoT(), name)
+		if getErr != nil {
+			return getErr
+		}
+		if tpl.Status == nil || tpl.Status.IdleCount == nil {
+			return fmt.Errorf("template status not ready")
+		}
+		if *tpl.Status.IdleCount != 0 {
+			return fmt.Errorf("idleCount=%d, want 0 before readiness passes", *tpl.Status.IdleCount)
+		}
+		return nil
+	}).WithTimeout(10 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
+
+	Eventually(func() error {
+		tpl, getErr := session.GetTemplate(env.TestCtx.Context, GinkgoT(), name)
+		if getErr != nil {
+			return getErr
+		}
+		if tpl.Status == nil || tpl.Status.IdleCount == nil {
+			return fmt.Errorf("template status not ready")
+		}
+		if *tpl.Status.IdleCount != 1 {
+			return fmt.Errorf("idleCount=%d, want 1 after readiness passes", *tpl.Status.IdleCount)
+		}
+		return nil
+	}).WithTimeout(2 * time.Minute).WithPolling(3 * time.Second).Should(Succeed())
 }
 
 func assertSandboxListContainsClaimedSandbox(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string) {

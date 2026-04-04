@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -319,7 +320,7 @@ func TestUpdateTemplate_RejectsInvalidPoolRange(t *testing.T) {
 	}
 }
 
-func TestUpdateTemplate_RejectsPrivilegedFieldsForRegularTeam(t *testing.T) {
+func TestUpdateTemplate_AllowsSidecarsForRegularTeam(t *testing.T) {
 	t.Parallel()
 
 	store := &testTemplateStore{
@@ -362,11 +363,50 @@ func TestUpdateTemplate_RejectsPrivilegedFieldsForRegularTeam(t *testing.T) {
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected status %d, got %d", http.StatusForbidden, rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
 	}
-	if store.updateCalled {
-		t.Fatalf("expected update not called for forbidden request")
+	if !store.updateCalled {
+		t.Fatalf("expected update called for sidecar request")
+	}
+}
+
+func TestCreateTemplate_AllowsSidecarsForRegularTeam(t *testing.T) {
+	t.Parallel()
+
+	store := &testTemplateStore{}
+	h := &Handler{Store: store, Logger: zap.NewNop()}
+
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	router.POST("/api/v1/templates", h.CreateTemplate)
+
+	body := []byte(`{
+		"template_id":"demo",
+		"spec":{
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"1Gi"}},
+			"pool":{"minIdle":0,"maxIdle":1},
+			"sidecars":[{
+				"name":"codex",
+				"image":"busybox",
+				"command":["sh","-lc","sleep 3600"],
+				"readinessProbe":{"exec":{"command":["test","-f","/tmp/ready"]}}
+			}]
+		}
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d", http.StatusCreated, rec.Code)
+	}
+	if !store.createCalled {
+		t.Fatalf("expected create called for sidecar request")
 	}
 }
 
@@ -513,6 +553,46 @@ func TestValidateTemplateSpec_StrictValidation(t *testing.T) {
 			},
 			wantErr: "spec.network.egress.allowedPorts[0].endPort must be between port and 65535",
 		},
+		{
+			name: "reject sidecar without name",
+			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
+				s.Sidecars = []corev1.Container{
+					{Image: "busybox"},
+				}
+			},
+			wantErr: "spec.sidecars[0].name is required",
+		},
+		{
+			name: "reject sidecar probe without handler",
+			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
+				s.Sidecars = []corev1.Container{
+					{
+						Name:           "helper",
+						Image:          "busybox",
+						ReadinessProbe: &corev1.Probe{},
+					},
+				}
+			},
+			wantErr: "spec.sidecars[0].readinessProbe must define exactly one handler",
+		},
+		{
+			name: "reject sidecar probe with multiple handlers",
+			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
+				s.Sidecars = []corev1.Container{
+					{
+						Name:  "helper",
+						Image: "busybox",
+						ReadinessProbe: &corev1.Probe{
+							ProbeHandler: corev1.ProbeHandler{
+								Exec:    &corev1.ExecAction{Command: []string{"true"}},
+								HTTPGet: &corev1.HTTPGetAction{Path: "/ready", Port: intstr.FromInt32(8080)},
+							},
+						},
+					},
+				}
+			},
+			wantErr: "spec.sidecars[0].readinessProbe must define exactly one handler",
+		},
 	}
 
 	for _, tc := range cases {
@@ -530,6 +610,102 @@ func TestValidateTemplateSpec_StrictValidation(t *testing.T) {
 				t.Fatalf("expected error containing %q, got %q", tc.wantErr, got)
 			}
 		})
+	}
+}
+
+func TestValidateTemplateSpecForClaims_AllowsClaimableSidecars(t *testing.T) {
+	t.Parallel()
+
+	spec := v1alpha1.SandboxTemplateSpec{
+		MainContainer: v1alpha1.ContainerSpec{
+			Image: "ubuntu:22.04",
+			Resources: v1alpha1.ResourceQuota{
+				CPU:    resource.MustParse("1"),
+				Memory: resource.MustParse("1Gi"),
+			},
+		},
+		Sidecars: []corev1.Container{
+			{
+				Name:    "codex",
+				Image:   "busybox",
+				Command: []string{"sh", "-lc", "sleep 3600"},
+				ReadinessProbe: &corev1.Probe{
+					ProbeHandler: corev1.ProbeHandler{
+						Exec: &corev1.ExecAction{Command: []string{"test", "-f", "/tmp/ready"}},
+					},
+				},
+			},
+		},
+		Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
+	}
+
+	if err := validateTemplateSpecForClaims(spec, &internalauth.Claims{TeamID: "team-1"}); err != nil {
+		t.Fatalf("expected sidecars to be allowed, got %v", err)
+	}
+}
+
+func TestValidateTemplateSpecForClaims_RejectsPrivilegedSidecarFields(t *testing.T) {
+	t.Parallel()
+
+	privileged := true
+	spec := v1alpha1.SandboxTemplateSpec{
+		MainContainer: v1alpha1.ContainerSpec{
+			Image: "ubuntu:22.04",
+			Resources: v1alpha1.ResourceQuota{
+				CPU:    resource.MustParse("1"),
+				Memory: resource.MustParse("1Gi"),
+			},
+		},
+		Sidecars: []corev1.Container{
+			{
+				Name:  "codex",
+				Image: "busybox",
+				SecurityContext: &corev1.SecurityContext{
+					Privileged: &privileged,
+				},
+			},
+		},
+		Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
+	}
+
+	err := validateTemplateSpecForClaims(spec, &internalauth.Claims{TeamID: "team-1"})
+	if err == nil {
+		t.Fatal("expected privileged sidecar field to be rejected")
+	}
+	if got := err.Error(); got != "spec.sidecars[0].securityContext.privileged requires system identity" {
+		t.Fatalf("unexpected error %q", got)
+	}
+}
+
+func TestValidateTemplateSpecForClaims_AllowsSystemOwnedSidecarFields(t *testing.T) {
+	t.Parallel()
+
+	privileged := true
+	policy := "Always"
+	spec := v1alpha1.SandboxTemplateSpec{
+		MainContainer: v1alpha1.ContainerSpec{
+			Image: "ubuntu:22.04",
+			Resources: v1alpha1.ResourceQuota{
+				CPU:    resource.MustParse("1"),
+				Memory: resource.MustParse("1Gi"),
+			},
+		},
+		Sidecars: []corev1.Container{
+			{
+				Name:            "codex",
+				Image:           "busybox",
+				ImagePullPolicy: corev1.PullPolicy(policy),
+				SecurityContext: &corev1.SecurityContext{
+					Privileged: &privileged,
+				},
+			},
+		},
+		Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
+	}
+
+	claims := &internalauth.Claims{IsSystem: true}
+	if err := validateTemplateSpecForClaims(spec, claims); err != nil {
+		t.Fatalf("expected system token to allow sidecar fields, got %v", err)
 	}
 }
 

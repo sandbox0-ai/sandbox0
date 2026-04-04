@@ -26,12 +26,13 @@ sandbox_pod_placement:
 
 	svc := &ClusterService{
 		podLister: newClusterServicePodLister(t,
-			newClusterServicePod("ns-a", "idle-running", "template-a", controller.PoolTypeIdle, corev1.PodRunning),
-			newClusterServicePod("ns-a", "idle-pending", "template-a", controller.PoolTypeIdle, corev1.PodPending),
-			newClusterServicePod("ns-a", "active-running", "template-a", controller.PoolTypeActive, corev1.PodRunning),
-			newClusterServicePod("ns-a", "active-pending-1", "template-a", controller.PoolTypeActive, corev1.PodPending),
-			newClusterServicePod("ns-a", "active-pending-2", "template-a", controller.PoolTypeActive, corev1.PodPending),
-			newClusterServicePod("ns-a", "active-failed", "template-a", controller.PoolTypeActive, corev1.PodFailed),
+			newClusterServicePod("ns-a", "idle-ready", "template-a", controller.PoolTypeIdle, corev1.PodRunning, true),
+			newClusterServicePod("ns-a", "idle-not-ready", "template-a", controller.PoolTypeIdle, corev1.PodRunning, false),
+			newClusterServicePod("ns-a", "idle-pending", "template-a", controller.PoolTypeIdle, corev1.PodPending, false),
+			newClusterServicePod("ns-a", "active-running", "template-a", controller.PoolTypeActive, corev1.PodRunning, true),
+			newClusterServicePod("ns-a", "active-pending-1", "template-a", controller.PoolTypeActive, corev1.PodPending, false),
+			newClusterServicePod("ns-a", "active-pending-2", "template-a", controller.PoolTypeActive, corev1.PodPending, false),
+			newClusterServicePod("ns-a", "active-failed", "template-a", controller.PoolTypeActive, corev1.PodFailed, false),
 		),
 		nodeLister: newClusterServiceNodeLister(t,
 			newClusterServiceNode("node-sandbox-a", map[string]string{"sandbox0.ai/node-role": "sandbox"}),
@@ -58,8 +59,8 @@ sandbox_pod_placement:
 	if summary.SandboxNodeCount != 2 {
 		t.Fatalf("SandboxNodeCount = %d, want 2", summary.SandboxNodeCount)
 	}
-	if summary.IdlePodCount != 2 {
-		t.Fatalf("IdlePodCount = %d, want 2", summary.IdlePodCount)
+	if summary.IdlePodCount != 1 {
+		t.Fatalf("IdlePodCount = %d, want 1", summary.IdlePodCount)
 	}
 	if summary.ActivePodCount != 3 {
 		t.Fatalf("ActivePodCount = %d, want 3", summary.ActivePodCount)
@@ -67,8 +68,8 @@ sandbox_pod_placement:
 	if summary.PendingActivePodCount != 2 {
 		t.Fatalf("PendingActivePodCount = %d, want 2", summary.PendingActivePodCount)
 	}
-	if summary.TotalPodCount != 5 {
-		t.Fatalf("TotalPodCount = %d, want 5", summary.TotalPodCount)
+	if summary.TotalPodCount != 4 {
+		t.Fatalf("TotalPodCount = %d, want 4", summary.TotalPodCount)
 	}
 }
 
@@ -100,12 +101,13 @@ default_cluster_id: cluster-a
 func TestGetTemplateStatsCountsPendingActivePods(t *testing.T) {
 	svc := &ClusterService{
 		podLister: newClusterServicePodLister(t,
-			newClusterServicePod("ns-a", "idle-running", "template-a", controller.PoolTypeIdle, corev1.PodRunning),
-			newClusterServicePod("ns-a", "idle-pending", "template-a", controller.PoolTypeIdle, corev1.PodPending),
-			newClusterServicePod("ns-a", "active-running", "template-a", controller.PoolTypeActive, corev1.PodRunning),
-			newClusterServicePod("ns-a", "active-pending", "template-a", controller.PoolTypeActive, corev1.PodPending),
-			newClusterServicePod("ns-a", "active-other-template", "template-b", controller.PoolTypeActive, corev1.PodPending),
-			newClusterServicePod("ns-a", "active-failed", "template-a", controller.PoolTypeActive, corev1.PodFailed),
+			newClusterServicePod("ns-a", "idle-ready", "template-a", controller.PoolTypeIdle, corev1.PodRunning, true),
+			newClusterServicePod("ns-a", "idle-not-ready", "template-a", controller.PoolTypeIdle, corev1.PodRunning, false),
+			newClusterServicePod("ns-a", "idle-pending", "template-a", controller.PoolTypeIdle, corev1.PodPending, false),
+			newClusterServicePod("ns-a", "active-running", "template-a", controller.PoolTypeActive, corev1.PodRunning, true),
+			newClusterServicePod("ns-a", "active-pending", "template-a", controller.PoolTypeActive, corev1.PodPending, false),
+			newClusterServicePod("ns-a", "active-other-template", "template-b", controller.PoolTypeActive, corev1.PodPending, false),
+			newClusterServicePod("ns-a", "active-failed", "template-a", controller.PoolTypeActive, corev1.PodFailed, false),
 		),
 		templateLister: staticTemplateLister{
 			templates: []*v1alpha1.SandboxTemplate{
@@ -138,8 +140,8 @@ func TestGetTemplateStatsCountsPendingActivePods(t *testing.T) {
 	if stat.TemplateID != "template-a" {
 		t.Fatalf("TemplateID = %q, want %q", stat.TemplateID, "template-a")
 	}
-	if stat.IdleCount != 2 {
-		t.Fatalf("IdleCount = %d, want 2", stat.IdleCount)
+	if stat.IdleCount != 1 {
+		t.Fatalf("IdleCount = %d, want 1", stat.IdleCount)
 	}
 	if stat.ActiveCount != 2 {
 		t.Fatalf("ActiveCount = %d, want 2", stat.ActiveCount)
@@ -209,8 +211,8 @@ func newClusterServiceNodeLister(t *testing.T, nodes ...*corev1.Node) corelister
 	return corelisters.NewNodeLister(indexer)
 }
 
-func newClusterServicePod(namespace, name, templateID, poolType string, phase corev1.PodPhase) *corev1.Pod {
-	return &corev1.Pod{
+func newClusterServicePod(namespace, name, templateID, poolType string, phase corev1.PodPhase, ready bool) *corev1.Pod {
+	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: namespace,
 			Name:      name,
@@ -221,6 +223,19 @@ func newClusterServicePod(namespace, name, templateID, poolType string, phase co
 		},
 		Status: corev1.PodStatus{Phase: phase},
 	}
+	if phase == corev1.PodRunning {
+		status := corev1.ConditionFalse
+		if ready {
+			status = corev1.ConditionTrue
+		}
+		pod.Status.Conditions = []corev1.PodCondition{
+			{
+				Type:   corev1.PodReady,
+				Status: status,
+			},
+		}
+	}
+	return pod
 }
 
 func newClusterServiceNode(name string, labels map[string]string) *corev1.Node {

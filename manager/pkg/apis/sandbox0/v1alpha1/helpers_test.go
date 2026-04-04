@@ -152,6 +152,80 @@ manager_image: sandbox0/manager:test
 	}
 }
 
+func TestBuildPodSpecPreservesSidecarCommandAndProbes(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	template := newTestTemplate()
+	template.Spec.Sidecars = []corev1.Container{
+		{
+			Name:    "codex",
+			Image:   "busybox:latest",
+			Command: []string{"sh", "-lc", "sleep 30; touch /tmp/ready; tail -f /dev/null"},
+			Args:    []string{"--verbose"},
+			ReadinessProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					Exec: &corev1.ExecAction{Command: []string{"test", "-f", "/tmp/ready"}},
+				},
+				PeriodSeconds: 2,
+			},
+			LivenessProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					Exec: &corev1.ExecAction{Command: []string{"test", "-f", "/tmp/healthy"}},
+				},
+				PeriodSeconds: 5,
+			},
+			StartupProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					Exec: &corev1.ExecAction{Command: []string{"test", "-f", "/tmp/started"}},
+				},
+				FailureThreshold: 30,
+			},
+		},
+	}
+
+	spec := BuildPodSpec(template, false)
+	if len(spec.Containers) != 2 {
+		t.Fatalf("expected 2 containers, got %d", len(spec.Containers))
+	}
+
+	main := spec.Containers[0]
+	if main.Name != "procd" {
+		t.Fatalf("expected main container to remain procd, got %q", main.Name)
+	}
+
+	sidecar := spec.Containers[1]
+	if sidecar.Name != "codex" {
+		t.Fatalf("expected sidecar name codex, got %q", sidecar.Name)
+	}
+	if len(sidecar.Command) != 3 || sidecar.Command[0] != "sh" || sidecar.Command[1] != "-lc" {
+		t.Fatalf("unexpected sidecar command: %v", sidecar.Command)
+	}
+	if len(sidecar.Args) != 1 || sidecar.Args[0] != "--verbose" {
+		t.Fatalf("unexpected sidecar args: %v", sidecar.Args)
+	}
+	if sidecar.ReadinessProbe == nil || sidecar.ReadinessProbe.Exec == nil {
+		t.Fatal("expected readiness probe to be preserved")
+	}
+	if sidecar.LivenessProbe == nil || sidecar.LivenessProbe.Exec == nil {
+		t.Fatal("expected liveness probe to be preserved")
+	}
+	if sidecar.StartupProbe == nil || sidecar.StartupProbe.Exec == nil {
+		t.Fatal("expected startup probe to be preserved")
+	}
+	if sidecar.ReadinessProbe.PeriodSeconds != 2 {
+		t.Fatalf("readiness period = %d, want 2", sidecar.ReadinessProbe.PeriodSeconds)
+	}
+	if sidecar.LivenessProbe.PeriodSeconds != 5 {
+		t.Fatalf("liveness period = %d, want 5", sidecar.LivenessProbe.PeriodSeconds)
+	}
+	if sidecar.StartupProbe.FailureThreshold != 30 {
+		t.Fatalf("startup failureThreshold = %d, want 30", sidecar.StartupProbe.FailureThreshold)
+	}
+}
+
 func newTestTemplate() *SandboxTemplate {
 	return &SandboxTemplate{
 		ObjectMeta: metav1ObjectMeta("default"),

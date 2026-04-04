@@ -96,10 +96,10 @@ func (s *ClusterService) GetClusterSummary(ctx context.Context) (*ClusterSummary
 		return nil, err
 	}
 
-	// Count running pods only
+	// Count only ready idle pods as available pooled capacity.
 	idleCount := int32(0)
 	for _, pod := range idlePods {
-		if pod.Status.Phase == corev1.PodRunning || pod.Status.Phase == corev1.PodPending {
+		if controller.IsPodReady(pod) {
 			idleCount++
 		}
 	}
@@ -167,10 +167,10 @@ func (s *ClusterService) GetTemplateStats(ctx context.Context) (*TemplateStats, 
 			continue
 		}
 
-		// Count running pods only
+		// Count only ready idle pods as available pooled capacity.
 		idleCount := int32(0)
 		for _, pod := range idlePods {
-			if pod.Status.Phase == corev1.PodRunning || pod.Status.Phase == corev1.PodPending {
+			if controller.IsPodReady(pod) {
 				idleCount++
 			}
 		}

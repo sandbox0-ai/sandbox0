@@ -466,3 +466,41 @@ try {
 - `POST /files` with `mkdir=true` creates directories instead of writing file content.
 - `DELETE /files` is recursive for directories.
 - File size is currently capped by the direct HTTP handler. Large transfer workflows should prefer snapshots or sync when appropriate.
+
+---
+
+## Next Steps
+
+<CardGrid>
+  <LinkCard
+    title="Volume Mounts"
+    href="/docs/volume/mounts"
+    cta="Learn More"
+  >
+    Mount a volume into a sandbox when processes need a normal filesystem path
+  </LinkCard>
+
+  <LinkCard
+    title="Volume Sync"
+    href="/docs/volume/sync"
+    cta="Learn More"
+  >
+    Keep one workspace in sync across local machines and sandboxes
+  </LinkCard>
+
+  <LinkCard
+    title="Snapshots"
+    href="/docs/volume/snapshots"
+    cta="Learn More"
+  >
+    Capture and restore point-in-time volume state
+  </LinkCard>
+
+  <LinkCard
+    title="Volume Overview"
+    href="/docs/volume"
+    cta="Learn More"
+  >
+    Review volume lifecycle, access modes, and configuration
+  </LinkCard>
+</CardGrid>

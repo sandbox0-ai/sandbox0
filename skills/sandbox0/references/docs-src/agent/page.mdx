@@ -25,12 +25,13 @@ The validated pattern is:
 4. Sandbox0 `credentialBindings` and `egress.credentialRules` inject outbound auth at the network layer.
 5. The sidecar opts in to netd MITM trust material when HTTPS `terminate-reoriginate` is required.
 
-```text
-main container --> localhost sidecar --> netd --> provider API
-                                  ^        |
-                                  |        +-- inject outbound auth
-                                  |
-                                  +-- trusts netd MITM CA when needed
+```mermaid
+flowchart LR
+    main[Main container] --> local[Localhost sidecar]
+    local --> netd[netd]
+    netd --> provider[Provider API]
+    netd -. inject outbound auth .-> provider
+    trust[Trusts netd MITM CA when needed] -.-> local
 ```
 
 ## Auth model

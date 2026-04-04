@@ -90,6 +90,10 @@ type ManagerConfig struct {
 	// +optional
 	// +kubebuilder:default="500ms"
 	NetdPolicyApplyPollInterval metav1.Duration `yaml:"netd_policy_apply_poll_interval" json:"netdPolicyApplyPollInterval"`
+	// +optional
+	NetdMITMCASecretName string `yaml:"netd_mitm_ca_secret_name" json:"-"`
+	// +optional
+	NetdMITMCASecretNamespace string `yaml:"netd_mitm_ca_secret_namespace" json:"-"`
 
 	// Pause/Resume
 	// +optional

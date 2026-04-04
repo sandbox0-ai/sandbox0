@@ -1,0 +1,259 @@
+# Claude
+
+This page shows the validated Sandbox0 pattern for running Claude Code as a sidecar.
+
+The pattern is provider-agnostic. Claude Code can target multiple providers. The original validation used z.ai as one concrete provider, but the important parts are the Sandbox0 network and trust-chain behavior, not that specific host.
+
+## What was validated
+
+The following flow was validated end to end on a remote `kind` cluster:
+
+1. create a team-scoped credential source with `s0 credential create`
+2. bind it through `network.credentialBindings`
+3. match the provider domain through `network.egress.credentialRules`
+4. use `protocol: https` with `tlsMode: terminate-reoriginate`
+5. run Claude Code inside a sidecar
+6. call the sidecar from the main container through localhost
+7. let Sandbox0 inject outbound auth at the network layer
+
+We also validated an SDK-driven loop where:
+
+- SDK-go called a Claude sidecar inside a sandbox
+- the sidecar generated Python code
+- SDK-go wrote the file into the sandbox
+- SDK-go executed the file successfully
+
+## Key requirements
+
+For this pattern to work reliably, all of the following mattered:
+
+| Requirement | Why it matters |
+|-------------|----------------|
+| `tlsMode: terminate-reoriginate` on the HTTPS credential rule | netd cannot inject HTTP headers into intercepted HTTPS traffic without TLS termination |
+| runtime trust of the netd MITM CA | Claude Code validates TLS and rejects the re-signed certificate chain by default |
+| placeholder provider token such as `ANTHROPIC_AUTH_TOKEN=dummy` when required by the client | some clients only enter the authenticated code path if a token-shaped value is present |
+| real auth delivered through `credentialBindings + credentialRules` | keeps the real provider secret out of the sandbox container |
+
+## Template pattern
+
+Use a sidecar for Claude Code and expose a small localhost interface that your main container can call.
+
+At the template level, the important pieces are:
+
+- a sidecar container that runs Claude Code or a thin wrapper around it
+- `NODE_EXTRA_CA_CERTS=/var/run/sandbox0/netd/mitm-ca.crt`
+- a non-sensitive placeholder token if the client requires API-key mode selection
+- template or claim-time network policy that defines `credentialBindings` and `egress.credentialRules`
+
+<Callout variant="warning">
+`sidecars` is currently a privileged template field. In practice, this means Claude sidecar templates are usually created as operator-managed system templates in self-hosted deployments, or provided by the platform team. Regular team-scoped template creation is not enough unless your deployment explicitly grants access to privileged template fields.
+</Callout>
+
+**Illustrative template fragment:**
+
+```yaml
+spec:
+    mainContainer:
+        image: python:3.12-slim
+        resources:
+            cpu: "1"
+            memory: 1Gi
+    sidecars:
+        - name: claude
+          image: ghcr.io/your-org/claude-sidecar:latest
+          env:
+              - name: ANTHROPIC_AUTH_TOKEN
+                value: dummy
+              - name: NODE_EXTRA_CA_CERTS
+                value: /var/run/sandbox0/netd/mitm-ca.crt
+              - name: ANTHROPIC_BASE_URL
+                value: https://your-provider.example.com
+    network:
+        mode: block-all
+        egress:
+            trafficRules:
+                - name: allow-provider-api
+                  action: allow
+                  domains:
+                      - your-provider.example.com
+                  ports:
+                      - port: 443
+                        protocol: tcp
+            credentialRules:
+                - name: claude-auth
+                  credentialRef: llm-auth
+                  protocol: https
+                  tlsMode: terminate-reoriginate
+                  domains:
+                      - your-provider.example.com
+                  ports:
+                      - port: 443
+                        protocol: tcp
+        credentialBindings:
+            - ref: llm-auth
+              sourceRef: provider-token
+              projection:
+                  type: http_headers
+                  httpHeaders:
+                      headers:
+                          - name: Authorization
+                            valueTemplate: "Bearer {{token}}"
+```
+
+<Callout variant="info">
+The exact upstream env names depend on how your Claude sidecar is packaged. The important part is that the runtime trusts `/var/run/sandbox0/netd/mitm-ca.crt` and the real provider credential is injected by Sandbox0 rather than hard-coded into the container.
+</Callout>
+
+## Create the credential source
+
+Create a team-scoped credential source from a file:
+
+```bash
+cat <<'EOF' > provider-token.yaml
+name: provider-token
+resolverKind: static_headers
+spec:
+    staticHeaders:
+        values:
+            token: <provider-token>
+EOF
+
+s0 credential create -f provider-token.yaml
+```
+
+Then create the template or apply the same network policy at sandbox claim time.
+
+## Claim-time variant
+
+If you do not want the network policy baked into the template, you can attach it when claiming the sandbox.
+
+```bash
+cat <<'EOF' > sandbox-config.yaml
+network:
+    mode: block-all
+    egress:
+        trafficRules:
+            - name: allow-provider-api
+              action: allow
+              domains: [your-provider.example.com]
+              ports:
+                  - port: 443
+                    protocol: tcp
+        credentialRules:
+            - name: claude-auth
+              credentialRef: llm-auth
+              protocol: https
+              tlsMode: terminate-reoriginate
+              domains: [your-provider.example.com]
+              ports:
+                  - port: 443
+                    protocol: tcp
+    credentialBindings:
+        - ref: llm-auth
+          sourceRef: provider-token
+          projection:
+              type: http_headers
+              httpHeaders:
+                  headers:
+                      - name: Authorization
+                        valueTemplate: "Bearer {{token}}"
+EOF
+
+s0 sandbox create -t claude-sidecar -f sandbox-config.yaml
+```
+
+## How the main container talks to Claude
+
+Keep the control path pod-local.
+
+Common pattern:
+
+- the sidecar listens on `127.0.0.1:8081`
+- the main container sends a prompt to the sidecar
+- the sidecar calls the upstream provider
+- Sandbox0 injects provider auth at egress time
+
+This keeps your app-to-sidecar interface stable even if the upstream provider changes later.
+
+## Why `dummy` can still be necessary
+
+Some provider clients or CLIs select their authenticated path only when a token-shaped env var exists. In that case:
+
+- set a non-sensitive placeholder such as `ANTHROPIC_AUTH_TOKEN=dummy`
+- let Sandbox0 inject the real `Authorization` header through netd
+
+This is a client-behavior workaround, not a Sandbox0 auth requirement.
+
+## Troubleshooting
+
+### `handshake downstream tls: EOF`
+
+This usually means the sidecar does not trust the netd MITM CA during HTTPS `terminate-reoriginate`.
+
+Check:
+
+- `NODE_EXTRA_CA_CERTS=/var/run/sandbox0/netd/mitm-ca.crt`
+- the sidecar can read `/var/run/sandbox0/netd/mitm-ca.crt`
+- the credential rule uses `tlsMode: terminate-reoriginate`
+
+### Auth resolves but requests still fail
+
+Check these separately:
+
+- `trafficRules` allow the provider domain and port
+- `credentialRules` match the same domain and protocol
+- `credentialRef` matches `credentialBindings[*].ref`
+- the provider-specific header format matches your source contents
+
+### The sidecar starts but provider requests are unauthenticated
+
+Typical causes:
+
+- missing `credentialBindings`
+- `valueTemplate` references the wrong source key
+- `protocol` or `domains` on the credential rule do not match the actual request
+
+## Improvement direction
+
+The current first cut is intentionally conservative:
+
+- Sandbox0 provides the CA file and env automatically
+- Sandbox0 does not rewrite system trust stores
+- the sidecar still opts in explicitly
+
+This is enough to support real Claude sidecars today while keeping trust behavior predictable.
+
+Likely future improvements:
+
+- official Claude sidecar templates that already wire `NODE_EXTRA_CA_CERTS`
+- provider-specific examples for common Anthropic-compatible hosts
+- more polished local sidecar contracts for prompt/response APIs
+- additional provider pages in this `Agent` section, such as Codex
+
+## Next Steps
+
+<CardGrid>
+  <LinkCard
+    title="Agent Overview"
+    href="/docs/agent"
+    cta="Learn More"
+  >
+    Understand the common sidecar pattern across providers
+  </LinkCard>
+
+  <LinkCard
+    title="Egress Auth"
+    href="/docs/credential/egress-auth"
+    cta="Learn More"
+  >
+    Configure auth bindings and HTTPS interception rules
+  </LinkCard>
+
+  <LinkCard
+    title="Sandbox Network"
+    href="/docs/sandbox/network"
+    cta="Learn More"
+  >
+    Combine traffic rules, credential rules, and trust material
+  </LinkCard>
+</CardGrid>

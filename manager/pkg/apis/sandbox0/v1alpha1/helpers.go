@@ -13,6 +13,11 @@ import (
 const (
 	procdBinVolumeName = "procd-bin"
 	procdConfigVolume  = "procd-config"
+	netdMITMCAVolume   = "netd-mitm-ca"
+	netdMITMCACertKey  = "ca.crt"
+	netdMITMCAEnvVar   = "SANDBOX0_NETD_MITM_CA_FILE"
+	netdMITMCADir      = "/var/run/sandbox0/netd"
+	netdMITMCACertPath = netdMITMCADir + "/mitm-ca.crt"
 )
 
 // buildPodSpec builds a pod spec from a template
@@ -26,6 +31,7 @@ func BuildPodSpec(template *SandboxTemplate, restart bool) corev1.PodSpec {
 	}
 
 	applyProcdSecretVolume(&spec, template)
+	applyNetdMITMCATrustMaterial(&spec)
 	applyProcdInit(&spec)
 	applyFuseResource(&spec)
 	applyDefaultSandboxPlacement(&spec)
@@ -346,6 +352,85 @@ func applyProcdInit(spec *corev1.PodSpec) {
 			},
 		},
 	})
+}
+
+func applyNetdMITMCATrustMaterial(spec *corev1.PodSpec) {
+	if spec == nil {
+		return
+	}
+
+	cfg := config.LoadManagerConfig()
+	if cfg == nil || cfg.NetdMITMCASecretName == "" {
+		return
+	}
+
+	volumeFound := false
+	for i := range spec.Volumes {
+		if spec.Volumes[i].Name != netdMITMCAVolume {
+			continue
+		}
+		volumeFound = true
+		spec.Volumes[i].Secret = &corev1.SecretVolumeSource{
+			SecretName: cfg.NetdMITMCASecretName,
+			Items: []corev1.KeyToPath{
+				{
+					Key:  netdMITMCACertKey,
+					Path: "mitm-ca.crt",
+				},
+			},
+		}
+		break
+	}
+	if !volumeFound {
+		spec.Volumes = append(spec.Volumes, corev1.Volume{
+			Name: netdMITMCAVolume,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: cfg.NetdMITMCASecretName,
+					Items: []corev1.KeyToPath{
+						{
+							Key:  netdMITMCACertKey,
+							Path: "mitm-ca.crt",
+						},
+					},
+				},
+			},
+		})
+	}
+
+	for i := range spec.Containers {
+		ensureContainerEnvVar(&spec.Containers[i], corev1.EnvVar{
+			Name:  netdMITMCAEnvVar,
+			Value: netdMITMCACertPath,
+		})
+		ensureContainerVolumeMount(&spec.Containers[i], corev1.VolumeMount{
+			Name:      netdMITMCAVolume,
+			MountPath: netdMITMCADir,
+			ReadOnly:  true,
+		})
+	}
+}
+
+func ensureContainerEnvVar(container *corev1.Container, envVar corev1.EnvVar) {
+	for i := range container.Env {
+		if container.Env[i].Name != envVar.Name {
+			continue
+		}
+		container.Env[i] = envVar
+		return
+	}
+	container.Env = append(container.Env, envVar)
+}
+
+func ensureContainerVolumeMount(container *corev1.Container, mount corev1.VolumeMount) {
+	for i := range container.VolumeMounts {
+		if container.VolumeMounts[i].Name != mount.Name {
+			continue
+		}
+		container.VolumeMounts[i] = mount
+		return
+	}
+	container.VolumeMounts = append(container.VolumeMounts, mount)
 }
 
 // applyProcdSecretVolume mounts the procd config Secret into the pod spec.

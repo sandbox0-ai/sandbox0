@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"strings"
 
+	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
@@ -18,6 +20,8 @@ import (
 
 const (
 	procdInternalJWTPublicKey = "internal_jwt_public.key"
+	netdMITMCACertKey         = "ca.crt"
+	serviceAccountNamespace   = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 )
 
 // EnsureProcdConfigSecret creates or updates the procd config Secret for a template.
@@ -99,4 +103,98 @@ func IsPodReady(pod *corev1.Pod) bool {
 		}
 	}
 	return false
+}
+
+// EnsureNetdMITMCASecret copies the manager-local netd MITM CA cert into the template namespace.
+func EnsureNetdMITMCASecret(
+	ctx context.Context,
+	client kubernetes.Interface,
+	templateNamespace string,
+) error {
+	cfg := config.LoadManagerConfig()
+	if cfg == nil || cfg.NetdMITMCASecretName == "" {
+		return nil
+	}
+	if templateNamespace == "" {
+		return fmt.Errorf("template namespace is required to ensure netd MITM CA secret")
+	}
+
+	sourceNamespace, err := resolveNetdMITMCASecretNamespace(cfg)
+	if err != nil {
+		return err
+	}
+
+	source, err := client.CoreV1().Secrets(sourceNamespace).Get(ctx, cfg.NetdMITMCASecretName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("get netd MITM CA secret %s/%s: %w", sourceNamespace, cfg.NetdMITMCASecretName, err)
+	}
+
+	certPEM := source.Data[netdMITMCACertKey]
+	if len(certPEM) == 0 {
+		return fmt.Errorf("netd MITM CA secret %s/%s missing %q", sourceNamespace, cfg.NetdMITMCASecretName, netdMITMCACertKey)
+	}
+
+	desired := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      cfg.NetdMITMCASecretName,
+			Namespace: templateNamespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/managed-by": "sandbox0-manager",
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			netdMITMCACertKey: append([]byte(nil), certPEM...),
+		},
+	}
+
+	existing, err := client.CoreV1().Secrets(templateNamespace).Get(ctx, cfg.NetdMITMCASecretName, metav1.GetOptions{})
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("get target netd MITM CA secret: %w", err)
+		}
+		if _, err := client.CoreV1().Secrets(templateNamespace).Create(ctx, desired, metav1.CreateOptions{}); err != nil {
+			return fmt.Errorf("create target netd MITM CA secret: %w", err)
+		}
+		return nil
+	}
+
+	updated := existing.DeepCopy()
+	updated.Type = desired.Type
+	updated.Data = desired.Data
+	updated.Labels = desired.Labels
+	if reflect.DeepEqual(existing.Type, updated.Type) &&
+		reflect.DeepEqual(existing.Data, updated.Data) &&
+		reflect.DeepEqual(existing.Labels, updated.Labels) {
+		return nil
+	}
+
+	if _, err := client.CoreV1().Secrets(templateNamespace).Update(ctx, updated, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("update target netd MITM CA secret: %w", err)
+	}
+	return nil
+}
+
+func resolveNetdMITMCASecretNamespace(cfg *config.ManagerConfig) (string, error) {
+	if cfg != nil {
+		if namespace := strings.TrimSpace(cfg.NetdMITMCASecretNamespace); namespace != "" {
+			return namespace, nil
+		}
+	}
+
+	if namespace := strings.TrimSpace(os.Getenv("POD_NAMESPACE")); namespace != "" {
+		return namespace, nil
+	}
+
+	data, err := os.ReadFile(serviceAccountNamespace)
+	if err == nil {
+		if namespace := strings.TrimSpace(string(data)); namespace != "" {
+			return namespace, nil
+		}
+	}
+
+	if err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("read service account namespace: %w", err)
+	}
+	return "", fmt.Errorf("resolve netd MITM CA source namespace")
 }

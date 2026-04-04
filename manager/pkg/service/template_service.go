@@ -195,7 +195,10 @@ func (s *TemplateService) ensureNamespace(ctx context.Context, namespace string)
 	}
 
 	if _, err := s.namespaceLister.Get(namespace); err == nil {
-		return s.ensureRegistryPullSecret(ctx, namespace)
+		if err := s.ensureRegistryPullSecret(ctx, namespace); err != nil {
+			return err
+		}
+		return controller.EnsureNetdMITMCASecret(ctx, s.k8sClient, namespace)
 	} else if !errors.IsNotFound(err) {
 		return fmt.Errorf("get namespace %s from cache: %w", namespace, err)
 	}
@@ -214,7 +217,7 @@ func (s *TemplateService) ensureNamespace(ctx context.Context, namespace string)
 	if err := s.ensureRegistryPullSecret(ctx, namespace); err != nil {
 		return err
 	}
-	return nil
+	return controller.EnsureNetdMITMCASecret(ctx, s.k8sClient, namespace)
 }
 
 func (s *TemplateService) ensureRegistryPullSecret(ctx context.Context, namespace string) error {

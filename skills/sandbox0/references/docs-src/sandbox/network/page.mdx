@@ -29,6 +29,10 @@ The same public `SandboxNetworkPolicy` shape is used in:
 Use `trafficRules` for new policies. Legacy `allowed*` and `denied*` fields still work, but they are deprecated and should not be mixed with `trafficRules`.
 </Callout>
 
+<Callout variant="info">
+If a credential rule uses `tlsMode: terminate-reoriginate`, Sandbox0 exposes the netd MITM CA as `SANDBOX0_NETD_MITM_CA_FILE`, but it does not automatically update the container trust store. Sidecars and app runtimes must opt in, for example with `NODE_EXTRA_CA_CERTS` or `REQUESTS_CA_BUNDLE`.
+</Callout>
+
 ## Traffic Rule Fields
 
 | Field | Required | Description |

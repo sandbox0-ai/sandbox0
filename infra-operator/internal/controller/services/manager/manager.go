@@ -29,6 +29,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
+	netdservice "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/netd"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/registry"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
@@ -285,6 +286,14 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	cfg.SandboxPodPlacement = compiledPlan.Manager.SandboxPodPlacement
 	cfg.DefaultClusterId = compiledPlan.Manager.DefaultClusterID
 	cfg.RegionID = compiledPlan.Manager.RegionID
+	if cfg.NetworkPolicyProvider == "netd" {
+		secretName, err := netdservice.EnsureMITMCASecret(ctx, r.Resources, infra, common.GetServiceLabels(infra.Name, "netd"))
+		if err != nil {
+			return nil, fmt.Errorf("ensure netd MITM CA secret: %w", err)
+		}
+		cfg.NetdMITMCASecretName = secretName
+		cfg.NetdMITMCASecretNamespace = infra.Namespace
+	}
 
 	cfg.ManagerImage = fmt.Sprintf("%s:%s", imageRepo, imageTag)
 

@@ -10,15 +10,19 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 )
 
 const (
@@ -30,9 +34,49 @@ func managedMITMCASecretName(infra *infrav1alpha1.Sandbox0Infra) string {
 	return fmt.Sprintf("%s-netd-mitm-ca", infra.Name)
 }
 
-func (r *Reconciler) reconcileManagedMITMCASecret(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, labels map[string]string) error {
+func ResolveMITMCASecretName(infra *infrav1alpha1.Sandbox0Infra) string {
+	if infra == nil {
+		return ""
+	}
+	if infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
+		if secretName := strings.TrimSpace(infra.Spec.Services.Netd.MITMCASecretName); secretName != "" {
+			return secretName
+		}
+	}
+	if infra.Name == "" {
+		return ""
+	}
+	return managedMITMCASecretName(infra)
+}
+
+func EnsureMITMCASecret(ctx context.Context, resources *common.ResourceManager, infra *infrav1alpha1.Sandbox0Infra, labels map[string]string) (string, error) {
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.Netd == nil {
+		return "", nil
+	}
+	if resources == nil || resources.Client == nil || resources.Scheme == nil {
+		return "", fmt.Errorf("resource manager with client and scheme is required")
+	}
+
+	if secretName := strings.TrimSpace(infra.Spec.Services.Netd.MITMCASecretName); secretName != "" {
+		if err := validateExistingMITMCASecret(ctx, resources.Client, infra.Namespace, secretName); err != nil {
+			return "", err
+		}
+		return secretName, nil
+	}
+
+	if infra.Name == "" {
+		return "", nil
+	}
+	secretName := managedMITMCASecretName(infra)
+	if err := reconcileManagedMITMCASecret(ctx, resources.Client, resources.Scheme, infra, secretName, labels); err != nil {
+		return "", err
+	}
+	return secretName, nil
+}
+
+func reconcileManagedMITMCASecret(ctx context.Context, client ctrlclient.Client, scheme *runtime.Scheme, infra *infrav1alpha1.Sandbox0Infra, name string, labels map[string]string) error {
 	secret := &corev1.Secret{}
-	getErr := r.Resources.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, secret)
+	getErr := client.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, secret)
 	if getErr != nil && !apierrors.IsNotFound(getErr) {
 		return getErr
 	}
@@ -58,19 +102,30 @@ func (r *Reconciler) reconcileManagedMITMCASecret(ctx context.Context, infra *in
 			mitmCAKeyKey:  keyPEM,
 		},
 	}
-	if err := ctrl.SetControllerReference(infra, desired, r.Resources.Scheme); err != nil {
+	if err := ctrl.SetControllerReference(infra, desired, scheme); err != nil {
 		return err
 	}
 
 	if apierrors.IsNotFound(getErr) {
-		return r.Resources.Client.Create(ctx, desired)
+		return client.Create(ctx, desired)
 	}
 
 	secret.Type = desired.Type
 	secret.Data = desired.Data
 	secret.Labels = desired.Labels
 	secret.OwnerReferences = desired.OwnerReferences
-	return r.Resources.Client.Update(ctx, secret)
+	return client.Update(ctx, secret)
+}
+
+func validateExistingMITMCASecret(ctx context.Context, client ctrlclient.Client, namespace, name string) error {
+	secret := &corev1.Secret{}
+	if err := client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, secret); err != nil {
+		return fmt.Errorf("get MITM CA secret %s/%s: %w", namespace, name, err)
+	}
+	if err := validateMITMCASecret(secret); err != nil {
+		return fmt.Errorf("validate MITM CA secret %s/%s: %w", namespace, name, err)
+	}
+	return nil
 }
 
 func validateMITMCASecret(secret *corev1.Secret) error {

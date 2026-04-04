@@ -46,6 +46,20 @@
       ]
     },
     {
+      "label": "AGENT",
+      "slug": "agent",
+      "pages": [
+        {
+          "slug": "",
+          "title": "Overview"
+        },
+        {
+          "slug": "claude",
+          "title": "Claude"
+        }
+      ]
+    },
+    {
       "label": "CREDENTIAL",
       "slug": "credential",
       "pages": [

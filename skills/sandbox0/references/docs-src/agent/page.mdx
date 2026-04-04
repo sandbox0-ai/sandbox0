@@ -1,0 +1,126 @@
+# Agent
+
+Sandbox0 can host agent runtimes directly in the main container, or run them as sidecars next to your application container.
+
+This section covers the second pattern: provider-facing agent components such as Claude Code today, and additional providers such as Codex later.
+
+## Why use an Agent sidecar
+
+An Agent sidecar is useful when you want to keep provider-specific tooling separate from your application process.
+
+Typical reasons:
+
+- run a provider CLI or SDK daemon in its own container
+- expose a small localhost API such as `127.0.0.1:8081`
+- keep your application container focused on business logic
+- avoid placing raw provider credentials directly in the sandbox filesystem or app environment
+
+## Recommended architecture
+
+The validated pattern is:
+
+1. Your template defines a main container and one or more sidecars.
+2. The sidecar talks to its upstream LLM provider over HTTPS.
+3. Your main container talks to the sidecar over localhost inside the same pod.
+4. Sandbox0 `credentialBindings` and `egress.credentialRules` inject outbound auth at the network layer.
+5. The sidecar opts in to netd MITM trust material when HTTPS `terminate-reoriginate` is required.
+
+```text
+main container --> localhost sidecar --> netd --> provider API
+                                  ^        |
+                                  |        +-- inject outbound auth
+                                  |
+                                  +-- trusts netd MITM CA when needed
+```
+
+## Auth model
+
+For provider-facing sidecars, separate these concerns:
+
+- **application wiring**: your main container calls the sidecar over localhost
+- **provider auth resolution**: Sandbox0 resolves auth material through `credentialBindings`
+- **destination matching**: `egress.credentialRules` decide where injection applies
+- **traffic control**: `trafficRules` still decide what egress is allowed
+
+This lets you keep the real provider secret outside the sandbox container in many flows.
+
+See [Credential](/docs/credential) and [Egress Auth](/docs/credential/egress-auth) for the underlying objects.
+
+## HTTPS trust material
+
+When a sidecar needs HTTPS auth injection with TLS interception, the client process must trust netd's MITM CA.
+
+Sandbox0 exposes stable trust material inside sandbox pods:
+
+- file: `/var/run/sandbox0/netd/mitm-ca.crt`
+- env: `SANDBOX0_NETD_MITM_CA_FILE=/var/run/sandbox0/netd/mitm-ca.crt`
+
+Sandbox0 does **not** automatically rewrite the container trust store. The sidecar runtime must opt in explicitly.
+
+Common examples:
+
+- Node.js or Claude Code: `NODE_EXTRA_CA_CERTS=/var/run/sandbox0/netd/mitm-ca.crt`
+- Python `requests`: `REQUESTS_CA_BUNDLE=/var/run/sandbox0/netd/mitm-ca.crt`
+- `curl`: `CURL_CA_BUNDLE=/var/run/sandbox0/netd/mitm-ca.crt`
+
+## Provider-agnostic guidance
+
+The pattern in this section is intentionally provider-agnostic:
+
+- Claude Code is one validated example
+- z.ai was only one provider used during validation
+- future sidecars such as Codex can follow the same pod-local control pattern
+
+What usually changes per provider is:
+
+- sidecar image and startup command
+- upstream base URL
+- whether the client insists on a placeholder API key to enter an authenticated code path
+- runtime-specific trust-store opt-in
+
+What stays the same is the Sandbox0 control surface:
+
+- template sidecars
+- `credentialBindings`
+- `egress.credentialRules`
+- `trafficRules`
+- pod-local communication between the app and sidecar
+
+## Current first cut
+
+The current platform behavior is:
+
+- Sandbox0 injects the netd MITM CA into sandbox containers as read-only trust material
+- the contract is stable at `/var/run/sandbox0/netd/mitm-ca.crt`
+- `SANDBOX0_NETD_MITM_CA_FILE` is set automatically
+- runtimes still choose whether to trust that CA
+
+This is the low-risk first cut because it avoids silently mutating every container trust store.
+
+## Next Steps
+
+<CardGrid>
+  <LinkCard
+    title="Claude"
+    href="/docs/agent/claude"
+    cta="Learn More"
+  >
+    Run Claude Code as a sidecar with provider-facing HTTPS auth
+  </LinkCard>
+
+  <LinkCard
+    title="Egress Auth"
+    href="/docs/credential/egress-auth"
+    cta="Learn More"
+  >
+    Bind provider credentials and inject outbound auth
+  </LinkCard>
+
+  <LinkCard
+    title="Template Configuration"
+    href="/docs/template/configuration"
+    cta="Learn More"
+  >
+    Configure sidecars, network policy, and pod-level settings
+  </LinkCard>
+</CardGrid>

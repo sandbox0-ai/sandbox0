@@ -9,4 +9,6 @@ tests/
 Makefile
 Dockerfile
 Dockerfile.local
-infra-operator/chart
+infra-operator/chart/*
+!infra-operator/chart/crds/
+!infra-operator/chart/crds/**

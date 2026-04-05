@@ -483,6 +483,39 @@ func TestCompileTracksEnterpriseLicenseRequirements(t *testing.T) {
 	}
 }
 
+func TestCompileInfersRegionalGatewayEnterpriseLicenseFromCompiledSchedulerRouting(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "s0home",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Services: &infrav1alpha1.ServicesConfig{
+				Scheduler: &infrav1alpha1.SchedulerServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+				RegionalGateway: &infrav1alpha1.RegionalGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					Config: &infrav1alpha1.RegionalGatewayConfig{},
+				},
+			},
+		},
+	}
+
+	compiled := Compile(infra)
+
+	if compiled.Services.Scheduler.URL == "" {
+		t.Fatal("expected compiled scheduler service URL")
+	}
+	if !compiled.Enterprise.RegionalGateway {
+		t.Fatal("expected regional-gateway enterprise license to be required when scheduler routing is compiled")
+	}
+}
+
 func TestCompileDisablesInitUserWhenDatabaseIsDisabled(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
 		Spec: infrav1alpha1.Sandbox0InfraSpec{

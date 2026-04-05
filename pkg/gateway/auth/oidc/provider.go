@@ -309,6 +309,9 @@ func (p *Provider) deviceClientSecret() string {
 	if value := strings.TrimSpace(p.config.DeviceClientSecret); value != "" {
 		return value
 	}
+	if strings.TrimSpace(p.config.DeviceClientID) != "" {
+		return ""
+	}
 	return strings.TrimSpace(p.config.ClientSecret)
 }
 

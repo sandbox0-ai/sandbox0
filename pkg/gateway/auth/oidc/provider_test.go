@@ -199,6 +199,93 @@ func TestNewProviderAcceptsIssuerWithTrailingSlashFromDiscovery(t *testing.T) {
 	}
 }
 
+func TestStartDeviceAuthorizationUsesDeviceClientWithoutBrowserSecretFallback(t *testing.T) {
+	t.Parallel()
+
+	var (
+		gotClientID     string
+		gotClientSecret string
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/oauth/device/code" {
+			http.NotFound(w, r)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+		gotClientID = r.Form.Get("client_id")
+		gotClientSecret = r.Form.Get("client_secret")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"device_code":"device-code","user_code":"ABCD-EFGH","verification_uri":"https://example.com/activate","verification_uri_complete":"https://example.com/activate?user_code=ABCD-EFGH","expires_in":900,"interval":5}`)
+	}))
+	defer server.Close()
+
+	provider := &Provider{
+		config: &config.OIDCProviderConfig{
+			ClientID:                   "browser-client",
+			ClientSecret:               "browser-secret",
+			DeviceAuthorizationEnabled: true,
+			DeviceClientID:             "device-client",
+			Scopes:                     []string{"openid", "email", "profile"},
+		},
+		deviceAuthorizationEndpoint: server.URL + "/oauth/device/code",
+	}
+
+	if _, err := provider.StartDeviceAuthorization(context.Background()); err != nil {
+		t.Fatalf("StartDeviceAuthorization: %v", err)
+	}
+	if gotClientID != "device-client" {
+		t.Fatalf("unexpected client_id %q", gotClientID)
+	}
+	if gotClientSecret != "" {
+		t.Fatalf("expected no client_secret fallback, got %q", gotClientSecret)
+	}
+}
+
+func TestStartDeviceAuthorizationFallsBackToPrimaryClientSecretWhenSharingClient(t *testing.T) {
+	t.Parallel()
+
+	var (
+		gotClientID     string
+		gotClientSecret string
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/oauth/device/code" {
+			http.NotFound(w, r)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+		gotClientID = r.Form.Get("client_id")
+		gotClientSecret = r.Form.Get("client_secret")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"device_code":"device-code","user_code":"ABCD-EFGH","verification_uri":"https://example.com/activate","verification_uri_complete":"https://example.com/activate?user_code=ABCD-EFGH","expires_in":900,"interval":5}`)
+	}))
+	defer server.Close()
+
+	provider := &Provider{
+		config: &config.OIDCProviderConfig{
+			ClientID:                   "browser-client",
+			ClientSecret:               "browser-secret",
+			DeviceAuthorizationEnabled: true,
+			Scopes:                     []string{"openid", "email", "profile"},
+		},
+		deviceAuthorizationEndpoint: server.URL + "/oauth/device/code",
+	}
+
+	if _, err := provider.StartDeviceAuthorization(context.Background()); err != nil {
+		t.Fatalf("StartDeviceAuthorization: %v", err)
+	}
+	if gotClientID != "browser-client" {
+		t.Fatalf("unexpected client_id %q", gotClientID)
+	}
+	if gotClientSecret != "browser-secret" {
+		t.Fatalf("unexpected client_secret %q", gotClientSecret)
+	}
+}
+
 func TestResolveTokenEndpointAuthStyle(t *testing.T) {
 	t.Parallel()
 

@@ -183,6 +183,39 @@ func TestTeamHandlerCreateTeamRejectsUnroutableHomeRegionInGlobalMode(t *testing
 	}
 }
 
+func TestTeamHandlerCreateTeamCanonicalizesPublicHomeRegionID(t *testing.T) {
+	t.Setenv("GIN_MODE", "release")
+	gin.SetMode(gin.ReleaseMode)
+
+	repo := &stubTeamRepository{}
+	lookup := &stubTeamRegionLookup{
+		region: &tenantdir.Region{
+			ID:                 "aws/us-east-1",
+			RegionalGatewayURL: "https://use1.example.com",
+			Enabled:            true,
+		},
+	}
+	handler := NewTeamHandler(repo, zap.NewNop(), WithCreateHomeRegionRequired(lookup))
+
+	rec := performCreateTeamRequest(t, handler, map[string]any{
+		"name":           "Example Team",
+		"home_region_id": "aws-us-east-1",
+	})
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	if repo.createdTeam == nil || repo.createdTeam.HomeRegionID == nil {
+		t.Fatalf("expected created team home region, got %#v", repo.createdTeam)
+	}
+	if *repo.createdTeam.HomeRegionID != "aws/us-east-1" {
+		t.Fatalf("home region = %q, want canonical", *repo.createdTeam.HomeRegionID)
+	}
+	if len(lookup.requestedIDs) != 1 || lookup.requestedIDs[0] != "aws/us-east-1" {
+		t.Fatalf("lookup ids = %v", lookup.requestedIDs)
+	}
+}
+
 func TestTeamHandlerCreateTeamAllowsMissingHomeRegionWithoutGlobalRequirement(t *testing.T) {
 	t.Setenv("GIN_MODE", "release")
 	gin.SetMode(gin.ReleaseMode)

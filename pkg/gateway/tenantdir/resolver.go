@@ -94,7 +94,7 @@ func (d *Directory) GetTeamHomeRegion(ctx context.Context, teamID string) (*Team
 
 	homeRegionID := ""
 	if team.HomeRegionID != nil {
-		homeRegionID = strings.TrimSpace(*team.HomeRegionID)
+		homeRegionID = CanonicalRegionID(*team.HomeRegionID)
 	}
 
 	return &TeamHomeRegion{
@@ -106,11 +106,16 @@ func (d *Directory) GetTeamHomeRegion(ctx context.Context, teamID string) (*Team
 
 // GetRegion returns a region entry from the optional directory.
 func (d *Directory) GetRegion(ctx context.Context, regionID string) (*Region, error) {
-	resolvedRegionID := strings.TrimSpace(regionID)
+	resolvedRegionID := CanonicalRegionID(regionID)
 	if resolvedRegionID == "" || d.regions == nil {
 		return nil, ErrRegionNotFound
 	}
-	return d.regions.GetRegion(ctx, resolvedRegionID)
+	region, err := d.regions.GetRegion(ctx, resolvedRegionID)
+	if err != nil {
+		return nil, err
+	}
+	region.ID = CanonicalRegionID(region.ID)
+	return region, nil
 }
 
 // StaticRegions is an in-memory region directory useful for tests and bootstrap flows.
@@ -122,6 +127,7 @@ type StaticRegions struct {
 func NewStaticRegions(regions []Region) *StaticRegions {
 	entries := make(map[string]Region, len(regions))
 	for _, region := range regions {
+		region.ID = CanonicalRegionID(region.ID)
 		entries[region.ID] = region
 	}
 	return &StaticRegions{entries: entries}

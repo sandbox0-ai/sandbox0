@@ -104,6 +104,10 @@ func (h *TeamHandler) CreateTeam(c *gin.Context) {
 	}
 
 	homeRegionID := normalizeOptionalString(req.HomeRegionID)
+	if homeRegionID != nil {
+		canonical := tenantdir.CanonicalRegionID(*homeRegionID)
+		homeRegionID = &canonical
+	}
 	if h.requireHomeRegionOnCreate {
 		if err := validateRequiredRoutableHomeRegion(c.Request.Context(), h.regionLookup, homeRegionID); err != nil {
 			status, code, message := resolveHomeRegionValidationError(err)
@@ -240,7 +244,16 @@ func (h *TeamHandler) UpdateTeam(c *gin.Context) {
 	}
 	if req.HomeRegionID != nil {
 		nextHomeRegionID := normalizeOptionalString(req.HomeRegionID)
-		if !sameOptionalString(team.HomeRegionID, nextHomeRegionID) {
+		if nextHomeRegionID != nil {
+			canonical := tenantdir.CanonicalRegionID(*nextHomeRegionID)
+			nextHomeRegionID = &canonical
+		}
+		currentHomeRegionID := normalizeOptionalString(team.HomeRegionID)
+		if currentHomeRegionID != nil {
+			canonical := tenantdir.CanonicalRegionID(*currentHomeRegionID)
+			currentHomeRegionID = &canonical
+		}
+		if !sameOptionalString(currentHomeRegionID, nextHomeRegionID) {
 			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "team home region cannot be changed after creation")
 			return
 		}
@@ -477,14 +490,18 @@ var errHomeRegionRequired = errors.New("home_region_id is required")
 var errHomeRegionNotRoutable = errors.New("home region is not routable")
 
 func validateRequiredRoutableHomeRegion(ctx context.Context, regionLookup TeamRegionLookup, homeRegionID *string) error {
-	if homeRegionID == nil {
+	if homeRegionID == nil || strings.TrimSpace(*homeRegionID) == "" {
 		return errHomeRegionRequired
+	}
+	canonicalRegionID := tenantdir.CanonicalRegionID(*homeRegionID)
+	if canonicalRegionID == "" {
+		return tenantdir.ErrRegionNotFound
 	}
 	if regionLookup == nil {
 		return errHomeRegionLookupUnavailable
 	}
 
-	region, err := regionLookup.GetRegion(ctx, *homeRegionID)
+	region, err := regionLookup.GetRegion(ctx, canonicalRegionID)
 	if err != nil {
 		if errors.Is(err, tenantdir.ErrRegionNotFound) {
 			return tenantdir.ErrRegionNotFound

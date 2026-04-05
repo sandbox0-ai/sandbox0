@@ -261,24 +261,15 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 
 func resolveGlobalRegionID(infra *infrav1alpha1.Sandbox0Infra, current string) string {
 	if trimmed := strings.TrimSpace(current); trimmed != "" {
-		return trimmed
+		return tenantdir.CanonicalRegionID(trimmed)
 	}
 	if trimmed := strings.TrimSpace(infra.Spec.Region); trimmed != "" {
-		return trimmed
+		return tenantdir.CanonicalRegionID(trimmed)
 	}
 	if infra.Spec.PublicExposure == nil {
 		return ""
 	}
-	return inferCanonicalRegionID(infra.Spec.PublicExposure.RegionID)
-}
-
-func inferCanonicalRegionID(publicRegionID string) string {
-	trimmed := strings.TrimSpace(publicRegionID)
-	parts := strings.SplitN(trimmed, "-", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return ""
-	}
-	return parts[0] + "/" + parts[1]
+	return tenantdir.CanonicalRegionID(infra.Spec.PublicExposure.RegionID)
 }
 
 func desiredBootstrapRegion(infra *infrav1alpha1.Sandbox0Infra, regionID string) *tenantdir.Region {

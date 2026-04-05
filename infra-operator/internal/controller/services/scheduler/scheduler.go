@@ -31,7 +31,12 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
+	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
+	"github.com/sandbox0-ai/sandbox0/pkg/template"
+	templmigrations "github.com/sandbox0-ai/sandbox0/pkg/template/migrations"
+	schedulerdb "github.com/sandbox0-ai/sandbox0/scheduler/pkg/db"
 )
 
 type Reconciler struct {
@@ -72,6 +77,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		TemplateStoreEnabled: true,
 		Owner:                "scheduler",
 	}); err != nil {
+		return err
+	}
+	if err := r.ensureHomeCluster(ctx, infra, compiledPlan, config); err != nil {
 		return err
 	}
 	podAnnotations, err := common.ConfigHashAnnotation(config)
@@ -230,4 +238,85 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	}
 
 	return cfg, nil
+}
+
+func desiredHomeCluster(infra *infrav1alpha1.Sandbox0Infra, compiledPlan *infraplan.InfraPlan) *template.Cluster {
+	if infra == nil || infra.Spec.Cluster == nil {
+		return nil
+	}
+	if compiledPlan == nil {
+		compiledPlan = infraplan.Compile(infra)
+	}
+	if compiledPlan == nil || !compiledPlan.Components.EnableScheduler || !compiledPlan.Components.EnableClusterGateway || compiledPlan.Components.EnableClusterRegistration {
+		return nil
+	}
+	if compiledPlan.Services.ClusterGateway.URL == "" {
+		return nil
+	}
+
+	name := infra.Spec.Cluster.Name
+	if name == "" {
+		name = infra.Spec.Cluster.ID
+	}
+
+	return &template.Cluster{
+		ClusterID:         infra.Spec.Cluster.ID,
+		ClusterName:       name,
+		ClusterGatewayURL: compiledPlan.Services.ClusterGateway.URL,
+		Weight:            100,
+		Enabled:           true,
+	}
+}
+
+func (r *Reconciler) ensureHomeCluster(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, compiledPlan *infraplan.InfraPlan, cfg *apiconfig.SchedulerConfig) error {
+	desired := desiredHomeCluster(infra, compiledPlan)
+	if desired == nil {
+		return nil
+	}
+	if cfg == nil || cfg.DatabaseURL == "" {
+		return fmt.Errorf("database_url is required to sync scheduler home cluster")
+	}
+
+	pool, err := dbpool.New(ctx, dbpool.Options{
+		DatabaseURL:     cfg.DatabaseURL,
+		MaxConns:        cfg.DatabasePool.MaxConns,
+		MinConns:        cfg.DatabasePool.MinConns,
+		DefaultMaxConns: 10,
+		DefaultMinConns: 2,
+		Schema:          "scheduler",
+	})
+	if err != nil {
+		return fmt.Errorf("init scheduler cluster database: %w", err)
+	}
+	defer pool.Close()
+
+	if err := migrate.Up(ctx, pool, ".",
+		migrate.WithBaseFS(templmigrations.FS),
+		migrate.WithSchema("scheduler"),
+	); err != nil {
+		return fmt.Errorf("migrate scheduler cluster store: %w", err)
+	}
+
+	repo := schedulerdb.NewRepository(pool)
+	existing, err := repo.GetCluster(ctx, desired.ClusterID)
+	if err != nil {
+		return fmt.Errorf("get scheduler home cluster: %w", err)
+	}
+	if existing == nil {
+		if err := repo.CreateCluster(ctx, desired); err != nil {
+			return fmt.Errorf("create scheduler home cluster: %w", err)
+		}
+	} else {
+		existing.ClusterName = desired.ClusterName
+		existing.ClusterGatewayURL = desired.ClusterGatewayURL
+		existing.Weight = desired.Weight
+		existing.Enabled = desired.Enabled
+		if err := repo.UpdateCluster(ctx, existing); err != nil {
+			return fmt.Errorf("update scheduler home cluster: %w", err)
+		}
+	}
+	if err := repo.UpdateClusterLastSeen(ctx, desired.ClusterID); err != nil {
+		return fmt.Errorf("update scheduler home cluster heartbeat: %w", err)
+	}
+	return nil
 }

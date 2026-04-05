@@ -17,7 +17,7 @@ func TestCompileDerivesCrossServiceReferences(t *testing.T) {
 			Namespace: "sandbox0-system",
 		},
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
-			Region: "aws/us-east-1",
+			Region: "aws-us-east-1",
 			Cluster: &infrav1alpha1.ClusterConfig{
 				ID: "cluster-a",
 			},
@@ -89,7 +89,7 @@ func TestCompileDerivesCrossServiceReferences(t *testing.T) {
 	if got := compiled.Manager.DefaultClusterID; got != "cluster-a" {
 		t.Fatalf("unexpected default cluster ID: %q", got)
 	}
-	if got := compiled.Manager.RegionID; got != "aws/us-east-1" {
+	if got := compiled.Manager.RegionID; got != "aws-us-east-1" {
 		t.Fatalf("unexpected region ID: %q", got)
 	}
 	if got := compiled.Manager.SandboxPodPlacement.NodeSelector["sandbox0.ai/node-role"]; got != "shared" {

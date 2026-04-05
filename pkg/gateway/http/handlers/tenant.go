@@ -107,11 +107,12 @@ func (h *TenantHandler) IssueRegionToken(c *gin.Context) {
 		return
 	}
 
+	normalizedRegionID := strings.TrimSpace(activeTeam.HomeRegionID)
 	token, expiry, err := h.jwtIssuer.IssueRegionToken(
 		authCtx.UserID,
 		activeTeam.TeamID,
 		activeTeam.TeamRole,
-		activeTeam.HomeRegionID,
+		normalizedRegionID,
 		authCtx.IsSystemAdmin,
 		h.regionTokenTTL,
 	)
@@ -122,7 +123,7 @@ func (h *TenantHandler) IssueRegionToken(c *gin.Context) {
 	}
 
 	spec.JSONSuccess(c, http.StatusOK, IssueRegionTokenResponse{
-		RegionID:           activeTeam.HomeRegionID,
+		RegionID:           normalizedRegionID,
 		RegionalGatewayURL: activeTeam.RegionalGatewayURL,
 		Token:              token,
 		ExpiresAt:          expiry.Unix(),

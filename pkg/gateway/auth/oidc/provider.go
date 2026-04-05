@@ -49,6 +49,7 @@ type Provider struct {
 	oidcProvider                *oidc.Provider
 	oauth2Config                *oauth2.Config
 	verifier                    *oidc.IDTokenVerifier
+	deviceVerifier              *oidc.IDTokenVerifier
 	deviceAuthorizationEndpoint string
 }
 
@@ -98,6 +99,12 @@ func NewProvider(ctx context.Context, cfg *config.OIDCProviderConfig, baseURL st
 	verifier := oidcProvider.Verifier(&oidc.Config{
 		ClientID: cfg.ClientID,
 	})
+	var deviceVerifier *oidc.IDTokenVerifier
+	if deviceClientID := strings.TrimSpace(cfg.DeviceClientID); deviceClientID != "" && deviceClientID != strings.TrimSpace(cfg.ClientID) {
+		deviceVerifier = oidcProvider.Verifier(&oidc.Config{
+			ClientID: deviceClientID,
+		})
+	}
 
 	if strings.TrimSpace(metadata.DeviceAuthorizationEndpoint) == "" {
 		if err := oidcProvider.Claims(&metadata); err != nil {
@@ -115,6 +122,7 @@ func NewProvider(ctx context.Context, cfg *config.OIDCProviderConfig, baseURL st
 		oidcProvider:                oidcProvider,
 		oauth2Config:                oauth2Config,
 		verifier:                    verifier,
+		deviceVerifier:              deviceVerifier,
 		deviceAuthorizationEndpoint: strings.TrimSpace(metadata.DeviceAuthorizationEndpoint),
 	}, nil
 }
@@ -216,7 +224,7 @@ func (p *Provider) VerifyToken(ctx context.Context, token *oauth2.Token) (*UserI
 		return p.fetchUserInfo(ctx, token)
 	}
 
-	idToken, err := p.verifier.Verify(ctx, rawIDToken)
+	idToken, err := p.verifyIDToken(ctx, rawIDToken)
 	if err != nil {
 		return nil, fmt.Errorf("verify id_token: %w", err)
 	}
@@ -249,6 +257,20 @@ func (p *Provider) VerifyToken(ctx context.Context, token *oauth2.Token) (*UserI
 	}
 
 	return userInfo, nil
+}
+
+func (p *Provider) verifyIDToken(ctx context.Context, rawIDToken string) (*oidc.IDToken, error) {
+	idToken, err := p.verifier.Verify(ctx, rawIDToken)
+	if err == nil {
+		return idToken, nil
+	}
+	if p.deviceVerifier != nil {
+		deviceToken, deviceErr := p.deviceVerifier.Verify(ctx, rawIDToken)
+		if deviceErr == nil {
+			return deviceToken, nil
+		}
+	}
+	return nil, err
 }
 
 func (p *Provider) fetchUserInfo(ctx context.Context, token *oauth2.Token) (*UserInfo, error) {
@@ -308,6 +330,9 @@ func (p *Provider) deviceClientID() string {
 func (p *Provider) deviceClientSecret() string {
 	if value := strings.TrimSpace(p.config.DeviceClientSecret); value != "" {
 		return value
+	}
+	if strings.TrimSpace(p.config.DeviceClientID) != "" {
+		return ""
 	}
 	return strings.TrimSpace(p.config.ClientSecret)
 }

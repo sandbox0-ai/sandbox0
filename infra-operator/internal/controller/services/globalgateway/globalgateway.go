@@ -269,16 +269,7 @@ func resolveGlobalRegionID(infra *infrav1alpha1.Sandbox0Infra, current string) s
 	if infra.Spec.PublicExposure == nil {
 		return ""
 	}
-	return inferCanonicalRegionID(infra.Spec.PublicExposure.RegionID)
-}
-
-func inferCanonicalRegionID(publicRegionID string) string {
-	trimmed := strings.TrimSpace(publicRegionID)
-	parts := strings.SplitN(trimmed, "-", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return ""
-	}
-	return parts[0] + "/" + parts[1]
+	return strings.TrimSpace(infra.Spec.PublicExposure.RegionID)
 }
 
 func desiredBootstrapRegion(infra *infrav1alpha1.Sandbox0Infra, regionID string) *tenantdir.Region {

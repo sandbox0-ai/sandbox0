@@ -57,7 +57,7 @@ func (f *fakeRecorder) RunInTx(ctx context.Context, fn func(tx txRecorder) error
 
 func TestAggregatorFlushesIngressAndEgressWindows(t *testing.T) {
 	recorder := &fakeRecorder{tx: &fakeTxRecorder{}}
-	agg := NewAggregator(recorder, "aws/us-east-1", "cluster-a", "node-1", nil)
+	agg := NewAggregator(recorder, "aws-us-east-1", "cluster-a", "node-1", nil)
 	start := time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC)
 	end := start.Add(10 * time.Second)
 	agg.now = func() time.Time { return end }
@@ -98,7 +98,7 @@ func TestAggregatorFlushesIngressAndEgressWindows(t *testing.T) {
 
 func TestAggregatorFlushWithoutUsageStillAdvancesWatermark(t *testing.T) {
 	recorder := &fakeRecorder{tx: &fakeTxRecorder{}}
-	agg := NewAggregator(recorder, "aws/us-east-1", "cluster-a", "node-2", nil)
+	agg := NewAggregator(recorder, "aws-us-east-1", "cluster-a", "node-2", nil)
 	start := time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC)
 	end := start.Add(10 * time.Second)
 	agg.now = func() time.Time { return end }
@@ -117,7 +117,7 @@ func TestAggregatorFlushWithoutUsageStillAdvancesWatermark(t *testing.T) {
 
 func TestAggregatorFlushFailureRetainsUsage(t *testing.T) {
 	recorder := &fakeRecorder{tx: &fakeTxRecorder{appendErr: errors.New("boom")}}
-	agg := NewAggregator(recorder, "aws/us-east-1", "cluster-a", "node-3", nil)
+	agg := NewAggregator(recorder, "aws-us-east-1", "cluster-a", "node-3", nil)
 	start := time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC)
 	end := start.Add(10 * time.Second)
 	agg.now = func() time.Time { return end }

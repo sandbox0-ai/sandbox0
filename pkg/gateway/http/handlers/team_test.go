@@ -93,7 +93,7 @@ func TestTeamHandlerCreateTeamRequiresHomeRegionInGlobalMode(t *testing.T) {
 	repo := &stubTeamRepository{}
 	handler := NewTeamHandler(repo, zap.NewNop(), WithCreateHomeRegionRequired(&stubTeamRegionLookup{
 		region: &tenantdir.Region{
-			ID:                 "aws/us-east-1",
+			ID:                 "aws-us-east-1",
 			RegionalGatewayURL: "https://use1.example.com",
 			Enabled:            true,
 		},
@@ -130,7 +130,7 @@ func TestTeamHandlerCreateTeamRejectsUnknownHomeRegionInGlobalMode(t *testing.T)
 
 	rec := performCreateTeamRequest(t, handler, map[string]any{
 		"name":           "Example Team",
-		"home_region_id": "aws/us-east-1",
+		"home_region_id": "aws-us-east-1",
 	})
 
 	if rec.Code != http.StatusBadRequest {
@@ -156,7 +156,7 @@ func TestTeamHandlerCreateTeamRejectsUnroutableHomeRegionInGlobalMode(t *testing
 	repo := &stubTeamRepository{}
 	handler := NewTeamHandler(repo, zap.NewNop(), WithCreateHomeRegionRequired(&stubTeamRegionLookup{
 		region: &tenantdir.Region{
-			ID:                 "aws/us-east-1",
+			ID:                 "aws-us-east-1",
 			RegionalGatewayURL: "",
 			Enabled:            true,
 		},
@@ -164,7 +164,7 @@ func TestTeamHandlerCreateTeamRejectsUnroutableHomeRegionInGlobalMode(t *testing
 
 	rec := performCreateTeamRequest(t, handler, map[string]any{
 		"name":           "Example Team",
-		"home_region_id": "aws/us-east-1",
+		"home_region_id": "aws-us-east-1",
 	})
 
 	if rec.Code != http.StatusBadRequest {
@@ -180,6 +180,43 @@ func TestTeamHandlerCreateTeamRejectsUnroutableHomeRegionInGlobalMode(t *testing
 	}
 	if repo.createdTeam != nil {
 		t.Fatal("team should not be created")
+	}
+}
+
+func TestTeamHandlerCreateTeamRejectsInvalidHomeRegionIDFormat(t *testing.T) {
+	t.Setenv("GIN_MODE", "release")
+	gin.SetMode(gin.ReleaseMode)
+
+	repo := &stubTeamRepository{}
+	lookup := &stubTeamRegionLookup{
+		region: &tenantdir.Region{
+			ID:                 "aws-us-east-1",
+			RegionalGatewayURL: "https://use1.example.com",
+			Enabled:            true,
+		},
+	}
+	handler := NewTeamHandler(repo, zap.NewNop(), WithCreateHomeRegionRequired(lookup))
+
+	rec := performCreateTeamRequest(t, handler, map[string]any{
+		"name":           "Example Team",
+		"home_region_id": "aws_us_east_1",
+	})
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	_, apiErr, err := spec.DecodeResponse[map[string]any](rec.Body)
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if apiErr == nil || apiErr.Message != "home_region_id must use provider-region format" {
+		t.Fatalf("unexpected api error: %#v", apiErr)
+	}
+	if repo.createdTeam != nil {
+		t.Fatalf("team should not be created: %#v", repo.createdTeam)
+	}
+	if len(lookup.requestedIDs) != 0 {
+		t.Fatalf("lookup ids = %v", lookup.requestedIDs)
 	}
 }
 
@@ -245,7 +282,7 @@ func TestTeamHandlerCreateTeamReturnsInternalErrorWhenRegionLookupFails(t *testi
 
 	rec := performCreateTeamRequest(t, handler, map[string]any{
 		"name":           "Example Team",
-		"home_region_id": "aws/us-east-1",
+		"home_region_id": "aws-us-east-1",
 	})
 
 	if rec.Code != http.StatusInternalServerError {

@@ -66,8 +66,8 @@ func TestRegionHandlerListRegions(t *testing.T) {
 	gin.SetMode(gin.ReleaseMode)
 
 	repo := &stubRegionRepository{regions: map[string]*tenantdir.Region{
-		"aws/us-east-1": {
-			ID:                 "aws/us-east-1",
+		"aws-us-east-1": {
+			ID:                 "aws-us-east-1",
 			DisplayName:        "US East 1",
 			RegionalGatewayURL: "https://use1.example.com",
 			Enabled:            true,
@@ -106,7 +106,7 @@ func TestRegionHandlerListRegions(t *testing.T) {
 		if len(response.Data.Regions) != 1 {
 			t.Fatalf("expected 1 region, got %d", len(response.Data.Regions))
 		}
-		if response.Data.Regions[0].ID != "aws/us-east-1" {
+		if response.Data.Regions[0].ID != "aws-us-east-1" {
 			t.Fatalf("expected region id, got %q", response.Data.Regions[0].ID)
 		}
 	})
@@ -135,7 +135,7 @@ func TestRegionHandlerCreateRegion(t *testing.T) {
 	router := gin.New()
 	router.POST("/regions", handler.CreateRegion)
 
-	req := httptest.NewRequest(http.MethodPost, "/regions", strings.NewReader(`{"id":"aws/us-east-1","display_name":"US East 1","regional_gateway_url":"https://use1.example.com","metering_export_url":"https://metering.use1.example.com"}`))
+	req := httptest.NewRequest(http.MethodPost, "/regions", strings.NewReader(`{"id":"aws-us-east-1","display_name":"US East 1","regional_gateway_url":"https://use1.example.com","metering_export_url":"https://metering.use1.example.com"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -150,7 +150,7 @@ func TestRegionHandlerCreateRegion(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if response.Data.ID != "aws/us-east-1" {
+	if response.Data.ID != "aws-us-east-1" {
 		t.Fatalf("expected region id, got %q", response.Data.ID)
 	}
 	if response.Data.RegionalGatewayURL != "https://use1.example.com" {
@@ -240,7 +240,7 @@ func TestRegionRoutesRequireSystemAdminForMutations(t *testing.T) {
 			t.Fatalf("expected list status 200, got %d body=%s", listRec.Code, listRec.Body.String())
 		}
 
-		createReq := httptest.NewRequest(http.MethodPost, "/regions", strings.NewReader(`{"id":"aws/us-east-1","regional_gateway_url":"https://use1.example.com"}`))
+		createReq := httptest.NewRequest(http.MethodPost, "/regions", strings.NewReader(`{"id":"aws-us-east-1","regional_gateway_url":"https://use1.example.com"}`))
 		createReq.Header.Set("Content-Type", "application/json")
 		createRec := httptest.NewRecorder()
 		router.ServeHTTP(createRec, createReq)
@@ -256,7 +256,7 @@ func TestRegionRoutesRequireSystemAdminForMutations(t *testing.T) {
 			IsSystemAdmin: true,
 		})
 
-		req := httptest.NewRequest(http.MethodPost, "/regions", strings.NewReader(`{"id":"aws/us-east-1","regional_gateway_url":"https://use1.example.com"}`))
+		req := httptest.NewRequest(http.MethodPost, "/regions", strings.NewReader(`{"id":"aws-us-east-1","regional_gateway_url":"https://use1.example.com"}`))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 		router.ServeHTTP(rec, req)

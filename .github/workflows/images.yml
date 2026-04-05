@@ -1,0 +1,51 @@
+name: Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Optional image tag. Defaults to <branch>-<shortsha>.
+        required: false
+        type: string
+      publish_latest:
+        description: Also update sandbox0ai/infra:latest.
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  metadata:
+    name: images / metadata
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Derive image metadata
+        id: meta
+        shell: bash
+        run: |
+          requested_version="${{ inputs.version }}"
+
+          if [[ -n "${requested_version}" ]]; then
+            version="${requested_version}"
+          else
+            ref_name="${GITHUB_REF_NAME}"
+            sanitized_ref="$(printf '%s' "${ref_name}" | tr '[:upper:]' '[:lower:]' | tr '/_' '-' | tr -cd 'a-z0-9.-')"
+            short_sha="$(printf '%s' "${GITHUB_SHA}" | cut -c1-7)"
+            version="${sanitized_ref}-${short_sha}"
+          fi
+
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+  publish-images:
+    name: images / publish
+    needs:
+      - metadata
+    uses: ./.github/workflows/publish-infra-images.yml
+    with:
+      version: ${{ needs.metadata.outputs.version }}
+      publish_latest: ${{ inputs.publish_latest }}
+    secrets: inherit

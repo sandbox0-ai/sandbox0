@@ -24,10 +24,11 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 
 // CreateRegion creates a region directory entry.
 func (r *Repository) CreateRegion(ctx context.Context, region *Region) error {
+	regionID := strings.TrimSpace(region.ID)
 	_, err := r.pool.Exec(ctx, `
 		INSERT INTO regions (id, display_name, regional_gateway_url, metering_export_url, enabled)
 		VALUES ($1, $2, $3, $4, $5)
-	`, region.ID, region.DisplayName, region.RegionalGatewayURL, nullableString(region.MeteringExportURL), region.Enabled)
+	`, regionID, region.DisplayName, region.RegionalGatewayURL, nullableString(region.MeteringExportURL), region.Enabled)
 	if err != nil {
 		if isDuplicateKeyError(err) {
 			return ErrRegionAlreadyExists
@@ -39,6 +40,10 @@ func (r *Repository) CreateRegion(ctx context.Context, region *Region) error {
 
 // GetRegion retrieves a region by ID.
 func (r *Repository) GetRegion(ctx context.Context, regionID string) (*Region, error) {
+	return r.getRegionExact(ctx, strings.TrimSpace(regionID))
+}
+
+func (r *Repository) getRegionExact(ctx context.Context, regionID string) (*Region, error) {
 	var region Region
 	err := r.pool.QueryRow(ctx, `
 		SELECT id, display_name, regional_gateway_url, COALESCE(metering_export_url, ''), enabled
@@ -79,11 +84,15 @@ func (r *Repository) ListRegions(ctx context.Context) ([]*Region, error) {
 
 // UpdateRegion updates a region directory entry.
 func (r *Repository) UpdateRegion(ctx context.Context, region *Region) error {
+	storedID, err := r.resolveStoredRegionID(ctx, region.ID)
+	if err != nil {
+		return err
+	}
 	result, err := r.pool.Exec(ctx, `
 		UPDATE regions
 		SET display_name = $2, regional_gateway_url = $3, metering_export_url = $4, enabled = $5
 		WHERE id = $1
-	`, region.ID, region.DisplayName, region.RegionalGatewayURL, nullableString(region.MeteringExportURL), region.Enabled)
+	`, storedID, region.DisplayName, region.RegionalGatewayURL, nullableString(region.MeteringExportURL), region.Enabled)
 	if err != nil {
 		return fmt.Errorf("update region: %w", err)
 	}
@@ -95,7 +104,11 @@ func (r *Repository) UpdateRegion(ctx context.Context, region *Region) error {
 
 // DeleteRegion deletes a region directory entry.
 func (r *Repository) DeleteRegion(ctx context.Context, regionID string) error {
-	result, err := r.pool.Exec(ctx, `DELETE FROM regions WHERE id = $1`, regionID)
+	storedID, err := r.resolveStoredRegionID(ctx, regionID)
+	if err != nil {
+		return err
+	}
+	result, err := r.pool.Exec(ctx, `DELETE FROM regions WHERE id = $1`, storedID)
 	if err != nil {
 		return fmt.Errorf("delete region: %w", err)
 	}
@@ -103,6 +116,14 @@ func (r *Repository) DeleteRegion(ctx context.Context, regionID string) error {
 		return ErrRegionNotFound
 	}
 	return nil
+}
+
+func (r *Repository) resolveStoredRegionID(ctx context.Context, regionID string) (string, error) {
+	region, err := r.getRegionExact(ctx, strings.TrimSpace(regionID))
+	if err != nil {
+		return "", err
+	}
+	return region.ID, nil
 }
 
 func isDuplicateKeyError(err error) bool {

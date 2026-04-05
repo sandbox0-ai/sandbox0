@@ -162,7 +162,7 @@ func testMeteringRouteServer(t *testing.T, authMode string) (*Server, *internala
 		compositeAuth:   middleware.NewCompositeAuthMiddleware(internalAuth, publicAuth, zap.NewNop()),
 		publicJWT:       issuer,
 		logger:          zap.NewNop(),
-		meteringHandler: gatewayhandlers.NewMeteringHandler(nil, "aws/us-east-1", zap.NewNop()),
+		meteringHandler: gatewayhandlers.NewMeteringHandler(nil, "aws-us-east-1", zap.NewNop()),
 	}
 
 	return server, generator, issuer

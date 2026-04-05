@@ -110,7 +110,11 @@ func (d *Directory) GetRegion(ctx context.Context, regionID string) (*Region, er
 	if resolvedRegionID == "" || d.regions == nil {
 		return nil, ErrRegionNotFound
 	}
-	return d.regions.GetRegion(ctx, resolvedRegionID)
+	region, err := d.regions.GetRegion(ctx, resolvedRegionID)
+	if err != nil {
+		return nil, err
+	}
+	return region, nil
 }
 
 // StaticRegions is an in-memory region directory useful for tests and bootstrap flows.
@@ -122,6 +126,7 @@ type StaticRegions struct {
 func NewStaticRegions(regions []Region) *StaticRegions {
 	entries := make(map[string]Region, len(regions))
 	for _, region := range regions {
+		region.ID = strings.TrimSpace(region.ID)
 		entries[region.ID] = region
 	}
 	return &StaticRegions{entries: entries}

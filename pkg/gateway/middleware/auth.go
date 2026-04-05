@@ -66,7 +66,7 @@ func WithJWTValidationMode(mode JWTValidationMode) AuthMiddlewareOption {
 	}
 }
 
-// WithRequiredRegionID binds accepted region tokens to a canonical region id.
+// WithRequiredRegionID binds accepted region tokens to a single region id.
 func WithRequiredRegionID(regionID string) AuthMiddlewareOption {
 	return func(m *AuthMiddleware) {
 		m.requiredRegionID = strings.TrimSpace(regionID)

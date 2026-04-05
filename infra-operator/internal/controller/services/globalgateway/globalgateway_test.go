@@ -177,7 +177,7 @@ func TestBuildConfigPreservesInitUserHomeRegionID(t *testing.T) {
 			InitUser: &infrav1alpha1.InitUserConfig{
 				Email:        "admin@example.com",
 				Name:         "Admin",
-				HomeRegionID: "aws/us-east-1",
+				HomeRegionID: "aws-us-east-1",
 			},
 		},
 	}
@@ -224,7 +224,7 @@ func TestBuildConfigPreservesInitUserHomeRegionID(t *testing.T) {
 		t.Fatalf("buildConfig returned error: %v", err)
 	}
 
-	if cfg.BuiltInAuth.InitUser == nil || cfg.BuiltInAuth.InitUser.HomeRegionID != "aws/us-east-1" {
+	if cfg.BuiltInAuth.InitUser == nil || cfg.BuiltInAuth.InitUser.HomeRegionID != "aws-us-east-1" {
 		t.Fatalf("expected init user home region id to be preserved, got %#v", cfg.BuiltInAuth.InitUser)
 	}
 }
@@ -395,8 +395,8 @@ func TestBuildConfigDerivesRegionFromPublicExposure(t *testing.T) {
 		t.Fatalf("buildConfig returned error: %v", err)
 	}
 
-	if cfg.RegionID != "aws/us-east-1" {
-		t.Fatalf("expected canonical region id, got %q", cfg.RegionID)
+	if cfg.RegionID != "aws-us-east-1" {
+		t.Fatalf("expected region id, got %q", cfg.RegionID)
 	}
 	if !cfg.PublicExposureEnabled {
 		t.Fatal("expected public exposure to be enabled")
@@ -404,8 +404,8 @@ func TestBuildConfigDerivesRegionFromPublicExposure(t *testing.T) {
 	if cfg.PublicRootDomain != "sandbox0.app" {
 		t.Fatalf("expected public root domain to be preserved, got %q", cfg.PublicRootDomain)
 	}
-	if cfg.BuiltInAuth.InitUser == nil || cfg.BuiltInAuth.InitUser.HomeRegionID != "aws/us-east-1" {
-		t.Fatalf("expected init user home region to default from canonical region, got %#v", cfg.BuiltInAuth.InitUser)
+	if cfg.BuiltInAuth.InitUser == nil || cfg.BuiltInAuth.InitUser.HomeRegionID != "aws-us-east-1" {
+		t.Fatalf("expected init user home region to default from region id, got %#v", cfg.BuiltInAuth.InitUser)
 	}
 }
 
@@ -431,11 +431,11 @@ func TestDesiredBootstrapRegionUsesRegionalGatewayServiceAddress(t *testing.T) {
 		},
 	}
 
-	region := desiredBootstrapRegion(infra, "aws/us-east-1")
+	region := desiredBootstrapRegion(infra, "aws-us-east-1")
 	if region == nil {
 		t.Fatal("expected bootstrap region")
 	}
-	if region.ID != "aws/us-east-1" {
+	if region.ID != "aws-us-east-1" {
 		t.Fatalf("unexpected region id: %q", region.ID)
 	}
 	if region.RegionalGatewayURL != "http://demo-regional-gateway:18080" {

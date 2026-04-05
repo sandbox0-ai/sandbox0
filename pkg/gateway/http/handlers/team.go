@@ -104,6 +104,11 @@ func (h *TeamHandler) CreateTeam(c *gin.Context) {
 	}
 
 	homeRegionID := normalizeOptionalString(req.HomeRegionID)
+	if err := validateNormalizedHomeRegionID(homeRegionID); err != nil {
+		status, code, message := resolveHomeRegionValidationError(err)
+		spec.JSONError(c, status, code, message)
+		return
+	}
 	if h.requireHomeRegionOnCreate {
 		if err := validateRequiredRoutableHomeRegion(c.Request.Context(), h.regionLookup, homeRegionID); err != nil {
 			status, code, message := resolveHomeRegionValidationError(err)
@@ -240,7 +245,13 @@ func (h *TeamHandler) UpdateTeam(c *gin.Context) {
 	}
 	if req.HomeRegionID != nil {
 		nextHomeRegionID := normalizeOptionalString(req.HomeRegionID)
-		if !sameOptionalString(team.HomeRegionID, nextHomeRegionID) {
+		if err := validateNormalizedHomeRegionID(nextHomeRegionID); err != nil {
+			status, code, message := resolveHomeRegionValidationError(err)
+			spec.JSONError(c, status, code, message)
+			return
+		}
+		currentHomeRegionID := normalizeOptionalString(team.HomeRegionID)
+		if !sameOptionalString(currentHomeRegionID, nextHomeRegionID) {
 			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "team home region cannot be changed after creation")
 			return
 		}
@@ -474,11 +485,25 @@ func normalizeOptionalString(value *string) *string {
 
 var errHomeRegionLookupUnavailable = errors.New("home region lookup unavailable")
 var errHomeRegionRequired = errors.New("home_region_id is required")
+var errHomeRegionInvalidFormat = errors.New("home region id must use provider-region format")
 var errHomeRegionNotRoutable = errors.New("home region is not routable")
 
-func validateRequiredRoutableHomeRegion(ctx context.Context, regionLookup TeamRegionLookup, homeRegionID *string) error {
+func validateNormalizedHomeRegionID(homeRegionID *string) error {
 	if homeRegionID == nil {
+		return nil
+	}
+	if !isNormalizedRegionID(*homeRegionID) {
+		return errHomeRegionInvalidFormat
+	}
+	return nil
+}
+
+func validateRequiredRoutableHomeRegion(ctx context.Context, regionLookup TeamRegionLookup, homeRegionID *string) error {
+	if homeRegionID == nil || strings.TrimSpace(*homeRegionID) == "" {
 		return errHomeRegionRequired
+	}
+	if err := validateNormalizedHomeRegionID(homeRegionID); err != nil {
+		return err
 	}
 	if regionLookup == nil {
 		return errHomeRegionLookupUnavailable
@@ -501,6 +526,8 @@ func resolveHomeRegionValidationError(err error) (int, string, string) {
 	switch {
 	case errors.Is(err, errHomeRegionRequired):
 		return http.StatusBadRequest, spec.CodeBadRequest, "home_region_id is required"
+	case errors.Is(err, errHomeRegionInvalidFormat):
+		return http.StatusBadRequest, spec.CodeBadRequest, "home_region_id must use provider-region format"
 	case errors.Is(err, tenantdir.ErrRegionNotFound):
 		return http.StatusBadRequest, spec.CodeBadRequest, "home region not found"
 	case errors.Is(err, errHomeRegionNotRoutable):

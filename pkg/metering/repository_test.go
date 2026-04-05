@@ -219,7 +219,7 @@ func TestGetStatusUsesMinProducerWatermark(t *testing.T) {
 				case 3:
 					return fakeRow{values: []any{&earliest, 2}}
 				case 4:
-					return fakeRow{values: []any{"aws/us-east-1"}}
+					return fakeRow{values: []any{"aws-us-east-1"}}
 				default:
 					return fakeRow{err: errors.New("unexpected query")}
 				}
@@ -240,8 +240,8 @@ func TestGetStatusUsesMinProducerWatermark(t *testing.T) {
 	if status.ProducerCount != 2 {
 		t.Fatalf("producer_count = %d, want 2", status.ProducerCount)
 	}
-	if status.RegionID != "aws/us-east-1" {
-		t.Fatalf("region_id = %q, want aws/us-east-1", status.RegionID)
+	if status.RegionID != "aws-us-east-1" {
+		t.Fatalf("region_id = %q, want aws-us-east-1", status.RegionID)
 	}
 	if status.CompleteBefore == nil || !status.CompleteBefore.Equal(earliest) {
 		t.Fatalf("complete_before = %v, want %v", status.CompleteBefore, earliest)
@@ -260,7 +260,7 @@ func TestListEventsAfterReturnsOrderedEvents(t *testing.T) {
 							int64(10),
 							"evt-10",
 							"storage-proxy.volume",
-							"aws/us-east-1",
+							"aws-us-east-1",
 							EventTypeVolumeCreated,
 							SubjectTypeVolume,
 							"vol-1",
@@ -306,7 +306,7 @@ func TestListWindowsAfterReturnsOrderedWindows(t *testing.T) {
 							int64(7),
 							"window-7",
 							"manager.sandbox_lifecycle",
-							"aws/us-east-1",
+							"aws-us-east-1",
 							WindowTypeSandboxActiveSeconds,
 							SubjectTypeSandbox,
 							"sb-1",

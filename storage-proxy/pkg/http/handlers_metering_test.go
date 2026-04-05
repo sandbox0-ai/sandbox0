@@ -179,7 +179,7 @@ func TestCreateSandboxVolumeRecordsMetering(t *testing.T) {
 		logger:       logrus.New(),
 		repo:         repo,
 		meteringRepo: meteringWriter,
-		regionID:     "aws/us-east-1",
+		regionID:     "aws-us-east-1",
 		snapshotMgr:  &fakeHTTPSnapshotManager{},
 	}
 
@@ -205,8 +205,8 @@ func TestCreateSandboxVolumeRecordsMetering(t *testing.T) {
 	if event.EventType != metering.EventTypeVolumeCreated {
 		t.Fatalf("event type = %q, want %q", event.EventType, metering.EventTypeVolumeCreated)
 	}
-	if event.RegionID != "aws/us-east-1" {
-		t.Fatalf("region_id = %q, want %q", event.RegionID, "aws/us-east-1")
+	if event.RegionID != "aws-us-east-1" {
+		t.Fatalf("region_id = %q, want %q", event.RegionID, "aws-us-east-1")
 	}
 	if len(meteringWriter.watermarks) != 1 {
 		t.Fatalf("watermark count = %d, want 1", len(meteringWriter.watermarks))
@@ -245,7 +245,7 @@ func TestDeleteSandboxVolumeForceRecordsMetering(t *testing.T) {
 		logger:       logrus.New(),
 		repo:         repo,
 		meteringRepo: meteringWriter,
-		regionID:     "aws/us-east-1",
+		regionID:     "aws-us-east-1",
 		snapshotMgr:  &fakeHTTPSnapshotManager{},
 	}
 
@@ -275,8 +275,8 @@ func TestDeleteSandboxVolumeForceRecordsMetering(t *testing.T) {
 	if event.EventType != metering.EventTypeVolumeDeleted {
 		t.Fatalf("event type = %q, want %q", event.EventType, metering.EventTypeVolumeDeleted)
 	}
-	if event.RegionID != "aws/us-east-1" {
-		t.Fatalf("region_id = %q, want %q", event.RegionID, "aws/us-east-1")
+	if event.RegionID != "aws-us-east-1" {
+		t.Fatalf("region_id = %q, want %q", event.RegionID, "aws-us-east-1")
 	}
 	if len(meteringWriter.watermarks) != 1 {
 		t.Fatalf("watermark count = %d, want 1", len(meteringWriter.watermarks))
@@ -316,7 +316,7 @@ func TestDeleteSandboxVolumeCleansIdleDirectMountBeforeDelete(t *testing.T) {
 		logger:       logrus.New(),
 		repo:         repo,
 		meteringRepo: meteringWriter,
-		regionID:     "aws/us-east-1",
+		regionID:     "aws-us-east-1",
 		snapshotMgr:  &fakeHTTPSnapshotManager{},
 		volMgr:       volMgr,
 	}
@@ -363,7 +363,7 @@ func TestDeleteSandboxVolumeReturnsConflictWhenDirectMountStillInflight(t *testi
 	server := &Server{
 		logger:      logrus.New(),
 		repo:        repo,
-		regionID:    "aws/us-east-1",
+		regionID:    "aws-us-east-1",
 		snapshotMgr: &fakeHTTPSnapshotManager{},
 		volMgr:      volMgr,
 	}

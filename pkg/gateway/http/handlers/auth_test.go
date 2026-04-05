@@ -236,7 +236,7 @@ func TestAuthHandler_RefreshToken_ReturnsRegionalSessionWhenRoutable(t *testing.
 			UserID:             "user-1",
 			TeamID:             "team-1",
 			TeamRole:           "admin",
-			HomeRegionID:       "aws/us-east-1",
+			HomeRegionID:       "aws-us-east-1",
 			RegionalGatewayURL: "https://regional.example.com",
 		}},
 		jwtIssuer: issuer,
@@ -267,8 +267,8 @@ func TestAuthHandler_RefreshToken_ReturnsRegionalSessionWhenRoutable(t *testing.
 	if data.RegionalSession == nil {
 		t.Fatalf("expected regional session in response")
 	}
-	if data.RegionalSession.RegionID != "aws/us-east-1" {
-		t.Fatalf("region_id = %q, want aws/us-east-1", data.RegionalSession.RegionID)
+	if data.RegionalSession.RegionID != "aws-us-east-1" {
+		t.Fatalf("region_id = %q, want aws-us-east-1", data.RegionalSession.RegionID)
 	}
 	if data.RegionalSession.RegionalGatewayURL != "https://regional.example.com" {
 		t.Fatalf("regional_gateway_url = %q", data.RegionalSession.RegionalGatewayURL)

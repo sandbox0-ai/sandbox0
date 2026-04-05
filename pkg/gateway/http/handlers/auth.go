@@ -189,6 +189,11 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	}
 
 	homeRegionID := normalizeOptionalString(req.HomeRegionID)
+	if err := validateNormalizedHomeRegionID(homeRegionID); err != nil {
+		status, code, message := resolveHomeRegionValidationError(err)
+		spec.JSONError(c, status, code, message)
+		return
+	}
 	if h.requireHomeRegionOnCreate {
 		if err := validateRequiredRoutableHomeRegion(c.Request.Context(), h.regionLookup, homeRegionID); err != nil {
 			status, code, message := resolveHomeRegionValidationError(err)
@@ -718,11 +723,12 @@ func (h *AuthHandler) issueRegionalSession(ctx context.Context, userID, teamID s
 		return nil, nil
 	}
 
+	normalizedRegionID := strings.TrimSpace(activeTeam.HomeRegionID)
 	token, expiry, err := h.jwtIssuer.IssueRegionToken(
 		userID,
 		activeTeam.TeamID,
 		activeTeam.TeamRole,
-		activeTeam.HomeRegionID,
+		normalizedRegionID,
 		isAdmin,
 		0,
 	)
@@ -731,7 +737,7 @@ func (h *AuthHandler) issueRegionalSession(ctx context.Context, userID, teamID s
 	}
 
 	return &RegionalSessionResponse{
-		RegionID:           activeTeam.HomeRegionID,
+		RegionID:           normalizedRegionID,
 		RegionalGatewayURL: activeTeam.RegionalGatewayURL,
 		Token:              token,
 		ExpiresAt:          expiry.Unix(),

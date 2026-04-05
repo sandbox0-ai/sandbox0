@@ -84,7 +84,7 @@ func Registry() []Entry {
 		exact("spec.services.netd.tolerations", "netd", []string{"netd"}, nil, UpdateSemanticsDeprecatedAlias, "Deprecated alias for spec.sandboxNodePlacement.tolerations."),
 
 		prefix("spec.sandboxNodePlacement", "plan", []string{"manager", "netd"}, []string{"InfraPlan.Manager.SandboxPodPlacement", "InfraPlan.Netd.NodeSelector", "InfraPlan.Netd.Tolerations"}, UpdateSemanticsDeclarative, "Shared node placement for sandbox workloads and node-local services."),
-		exact("spec.region", "plan", []string{"global-gateway", "regional-gateway", "manager", "netd"}, []string{"InfraPlan.Manager.RegionID", "InfraPlan.Netd.RegionID"}, UpdateSemanticsDeclarative, "Canonical region identifier propagated into control-plane and data-plane services."),
+		exact("spec.region", "plan", []string{"global-gateway", "regional-gateway", "manager", "netd"}, []string{"InfraPlan.Manager.RegionID", "InfraPlan.Netd.RegionID"}, UpdateSemanticsDeclarative, "Region identifier propagated into control-plane and data-plane services."),
 
 		prefix("spec.publicExposure", "plan", []string{"global-gateway", "cluster-gateway", "manager"}, nil, UpdateSemanticsDeclarative, "Shared public-exposure settings consumed by gateway and manager runtime config."),
 		exact("spec.publicExposure.rootDomain", "plan", []string{"global-gateway", "cluster-gateway", "manager"}, nil, UpdateSemanticsDeclarative, "Public root domain feeds generated external URLs and callbacks."),

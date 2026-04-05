@@ -82,6 +82,6 @@ func testMeteringRouteServer() *Server {
 		authMiddleware:  gatewaymiddleware.NewAuthMiddleware(nil, "secret", jwtIssuer, logger),
 		logger:          logger,
 		jwtIssuer:       jwtIssuer,
-		meteringHandler: gatewayhandlers.NewMeteringHandler(nil, "aws/us-east-1", logger),
+		meteringHandler: gatewayhandlers.NewMeteringHandler(nil, "aws-us-east-1", logger),
 	}
 }

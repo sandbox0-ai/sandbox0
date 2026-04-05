@@ -110,7 +110,7 @@ func (f *fakeRecorder) RunInTx(_ context.Context, fn func(tx txStore) error) err
 
 func TestLifecycleProjectorRecordsClaimPauseResumeTerminate(t *testing.T) {
 	recorder := &fakeRecorder{states: map[string]*meteringpkg.SandboxProjectionState{}}
-	projector := NewLifecycleProjector(recorder, "aws/us-east-1", "cluster-a")
+	projector := NewLifecycleProjector(recorder, "aws-us-east-1", "cluster-a")
 
 	now := time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC)
 	projector.now = func() time.Time { return now }
@@ -157,7 +157,7 @@ func TestLifecycleProjectorRecordsErrorsInMetrics(t *testing.T) {
 		states: map[string]*meteringpkg.SandboxProjectionState{},
 		getErr: errors.New("boom"),
 	}
-	projector := NewLifecycleProjector(recorder, "aws/us-east-1", "cluster-a")
+	projector := NewLifecycleProjector(recorder, "aws-us-east-1", "cluster-a")
 	registry := prometheus.NewRegistry()
 	projector.SetMetrics(obsmetrics.NewManager(registry))
 
@@ -190,7 +190,7 @@ func TestLifecycleProjectorRecordsErrorsInMetrics(t *testing.T) {
 
 func TestLifecycleProjectorTerminatesPausedSandboxWithPausedWindow(t *testing.T) {
 	recorder := &fakeRecorder{states: map[string]*meteringpkg.SandboxProjectionState{}}
-	projector := NewLifecycleProjector(recorder, "aws/us-east-1", "cluster-a")
+	projector := NewLifecycleProjector(recorder, "aws-us-east-1", "cluster-a")
 
 	claimedAt := time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC)
 	pausedAt := time.Date(2026, 3, 12, 10, 3, 0, 0, time.UTC)
@@ -224,7 +224,7 @@ func TestLifecycleProjectorRetriesCommitWithoutDuplicatingWindows(t *testing.T) 
 		states:         map[string]*meteringpkg.SandboxProjectionState{},
 		stateUpsertErr: errors.New("boom"),
 	}
-	projector := NewLifecycleProjector(recorder, "aws/us-east-1", "cluster-a")
+	projector := NewLifecycleProjector(recorder, "aws-us-east-1", "cluster-a")
 
 	now := time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC)
 	projector.now = func() time.Time { return now }

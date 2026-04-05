@@ -542,7 +542,7 @@ func TestCreateSnapshot_CreatesVolumePathWhenMissing(t *testing.T) {
 	repo.volumes["vol1"] = &db.SandboxVolume{ID: "vol1", TeamID: "team1", UserID: "user1"}
 
 	mgr := newTestManager(repo, &fakeVolumeProvider{err: errors.New("not mounted")})
-	mgr.config.RegionID = "aws/us-east-1"
+	mgr.config.RegionID = "aws-us-east-1"
 	meteringRecorder := &fakeMeteringRecorder{}
 	mgr.SetMeteringRepository(meteringRecorder)
 	snapshot, err := mgr.CreateSnapshot(context.Background(), &CreateSnapshotRequest{
@@ -576,8 +576,8 @@ func TestCreateSnapshot_CreatesVolumePathWhenMissing(t *testing.T) {
 	if meteringRecorder.events[0].EventType != metering.EventTypeSnapshotCreated {
 		t.Fatalf("event type = %q, want %q", meteringRecorder.events[0].EventType, metering.EventTypeSnapshotCreated)
 	}
-	if meteringRecorder.events[0].RegionID != "aws/us-east-1" {
-		t.Fatalf("region_id = %q, want %q", meteringRecorder.events[0].RegionID, "aws/us-east-1")
+	if meteringRecorder.events[0].RegionID != "aws-us-east-1" {
+		t.Fatalf("region_id = %q, want %q", meteringRecorder.events[0].RegionID, "aws-us-east-1")
 	}
 	if len(meteringRecorder.watermarks) != 1 {
 		t.Fatalf("expected one watermark, got %d", len(meteringRecorder.watermarks))
@@ -723,7 +723,7 @@ func TestDeleteSnapshotRecordsMetering(t *testing.T) {
 		CreatedAt: time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC),
 	}
 	mgr := newTestManager(repo, &fakeVolumeProvider{err: errors.New("not mounted")})
-	mgr.config.RegionID = "aws/us-east-1"
+	mgr.config.RegionID = "aws-us-east-1"
 	meteringRecorder := &fakeMeteringRecorder{}
 	mgr.SetMeteringRepository(meteringRecorder)
 

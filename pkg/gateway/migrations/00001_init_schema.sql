@@ -9,7 +9,6 @@ CREATE TABLE IF NOT EXISTS users (
     name VARCHAR(255),
     avatar_url TEXT,
     password_hash VARCHAR(255),
-    default_team_id UUID,
     email_verified BOOLEAN DEFAULT false,
     is_admin BOOLEAN DEFAULT false,
     created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -30,11 +29,6 @@ CREATE TABLE IF NOT EXISTS teams (
 
 CREATE INDEX IF NOT EXISTS idx_teams_owner_id ON teams(owner_id);
 CREATE INDEX IF NOT EXISTS idx_teams_slug ON teams(slug);
-
--- Add foreign key from users to teams after teams table exists
-ALTER TABLE users 
-    ADD CONSTRAINT fk_users_default_team 
-    FOREIGN KEY (default_team_id) REFERENCES teams(id) ON DELETE SET NULL;
 
 -- Team members table
 CREATE TABLE IF NOT EXISTS team_members (

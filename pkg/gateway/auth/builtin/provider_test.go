@@ -40,7 +40,7 @@ func (f *fakeIdentityStore) GetUserByEmail(_ context.Context, email string) (*id
 	return &copy, nil
 }
 
-func (f *fakeIdentityStore) CreateUserWithDefaultTeam(_ context.Context, user *identity.User, teamName string, homeRegionID *string) (*identity.Team, *identity.TeamMember, error) {
+func (f *fakeIdentityStore) CreateUserWithInitialTeam(_ context.Context, user *identity.User, teamName string, homeRegionID *string) (*identity.Team, *identity.TeamMember, error) {
 	if _, exists := f.usersByEmail[user.Email]; exists {
 		return nil, nil, identity.ErrUserAlreadyExists
 	}
@@ -59,8 +59,6 @@ func (f *fakeIdentityStore) CreateUserWithDefaultTeam(_ context.Context, user *i
 		UserID: createdUser.ID,
 		Role:   "admin",
 	}
-	createdUser.DefaultTeamID = &team.ID
-	createdUser.DefaultTeam = team
 	f.usersByID[createdUser.ID] = &createdUser
 	f.usersByEmail[createdUser.Email] = &createdUser
 	f.teamsByID[team.ID] = team
@@ -151,8 +149,8 @@ func TestEnsureInitUserCreatesAdminWithPasswordWhenBuiltInEnabled(t *testing.T) 
 	if !user.IsAdmin {
 		t.Fatal("expected init user to be admin")
 	}
-	if user.DefaultTeamID == nil || *user.DefaultTeamID == "" {
-		t.Fatal("expected init user to have a default team")
+	if len(store.members) != 1 {
+		t.Fatalf("expected init user to have exactly one team membership, got %d", len(store.members))
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte("super-secret")); err != nil {
 		t.Fatalf("expected stored password hash to match: %v", err)
@@ -183,8 +181,8 @@ func TestEnsureInitUserCreatesPasswordlessAdminWhenBuiltInAuthDisabled(t *testin
 	if user.PasswordHash != "" {
 		t.Fatalf("expected no password hash for OIDC bootstrap user, got %q", user.PasswordHash)
 	}
-	if user.DefaultTeamID == nil || *user.DefaultTeamID == "" {
-		t.Fatal("expected init user to have a default team")
+	if len(store.members) != 1 {
+		t.Fatalf("expected init user to have exactly one team membership, got %d", len(store.members))
 	}
 }
 

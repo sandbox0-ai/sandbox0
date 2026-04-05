@@ -13,16 +13,14 @@ import (
 
 // UserResponse is the API response for a user (without sensitive fields)
 type UserResponse struct {
-	ID            string         `json:"id"`
-	Email         string         `json:"email"`
-	Name          string         `json:"name"`
-	AvatarURL     string         `json:"avatar_url,omitempty"`
-	DefaultTeamID *string        `json:"default_team_id,omitempty"`
-	DefaultTeam   *identity.Team `json:"default_team,omitempty"`
-	EmailVerified bool           `json:"email_verified"`
-	IsAdmin       bool           `json:"is_admin"`
-	CreatedAt     time.Time      `json:"created_at"`
-	UpdatedAt     time.Time      `json:"updated_at"`
+	ID            string    `json:"id"`
+	Email         string    `json:"email"`
+	Name          string    `json:"name"`
+	AvatarURL     string    `json:"avatar_url,omitempty"`
+	EmailVerified bool      `json:"email_verified"`
+	IsAdmin       bool      `json:"is_admin"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // NewUserResponse creates a UserResponse from an identity.User.
@@ -35,8 +33,6 @@ func NewUserResponse(u *identity.User) *UserResponse {
 		Email:         u.Email,
 		Name:          u.Name,
 		AvatarURL:     u.AvatarURL,
-		DefaultTeamID: u.DefaultTeamID,
-		DefaultTeam:   u.DefaultTeam,
 		EmailVerified: u.EmailVerified,
 		IsAdmin:       u.IsAdmin,
 		CreatedAt:     u.CreatedAt,
@@ -78,9 +74,8 @@ func (h *UserHandler) GetCurrentUser(c *gin.Context) {
 
 // UpdateUserRequest is the request body for updating user
 type UpdateUserRequest struct {
-	Name          string  `json:"name"`
-	AvatarURL     string  `json:"avatar_url"`
-	DefaultTeamID *string `json:"default_team_id"`
+	Name      string `json:"name"`
+	AvatarURL string `json:"avatar_url"`
 }
 
 // UpdateCurrentUser updates the current authenticated user
@@ -110,15 +105,6 @@ func (h *UserHandler) UpdateCurrentUser(c *gin.Context) {
 	}
 	if req.AvatarURL != "" {
 		user.AvatarURL = req.AvatarURL
-	}
-	if req.DefaultTeamID != nil {
-		// Verify user is member of the team
-		_, err := h.repo.GetTeamMember(c.Request.Context(), *req.DefaultTeamID, user.ID)
-		if err != nil {
-			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "you are not a member of this team")
-			return
-		}
-		user.DefaultTeamID = req.DefaultTeamID
 	}
 
 	if err := h.repo.UpdateUser(c.Request.Context(), user); err != nil {

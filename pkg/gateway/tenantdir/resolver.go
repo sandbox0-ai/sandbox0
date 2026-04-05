@@ -9,12 +9,11 @@ import (
 )
 
 var (
-	ErrNoActiveTeam   = errors.New("no active team selected")
+	ErrTeamRequired   = errors.New("team_id is required")
 	ErrRegionNotFound = errors.New("region not found")
 )
 
 type identityStore interface {
-	GetUserByID(ctx context.Context, id string) (*identity.User, error)
 	GetTeamByID(ctx context.Context, id string) (*identity.Team, error)
 	GetTeamMember(ctx context.Context, teamID, userID string) (*identity.TeamMember, error)
 }
@@ -37,20 +36,11 @@ func NewResolver(identities identityStore, regions regionLookup) *Directory {
 	}
 }
 
-// ResolveActiveTeam resolves either an explicit team or the user's default team.
-func (d *Directory) ResolveActiveTeam(ctx context.Context, userID, teamID string) (*ActiveTeam, error) {
+// ResolveTeamAccess resolves explicit team access and routing information.
+func (d *Directory) ResolveTeamAccess(ctx context.Context, userID, teamID string) (*TeamAccess, error) {
 	resolvedTeamID := strings.TrimSpace(teamID)
-	defaultTeam := false
 	if resolvedTeamID == "" {
-		user, err := d.identities.GetUserByID(ctx, userID)
-		if err != nil {
-			return nil, err
-		}
-		if user.DefaultTeamID == nil || strings.TrimSpace(*user.DefaultTeamID) == "" {
-			return nil, ErrNoActiveTeam
-		}
-		resolvedTeamID = strings.TrimSpace(*user.DefaultTeamID)
-		defaultTeam = true
+		return nil, ErrTeamRequired
 	}
 
 	member, err := d.identities.GetTeamMember(ctx, resolvedTeamID, userID)
@@ -63,26 +53,25 @@ func (d *Directory) ResolveActiveTeam(ctx context.Context, userID, teamID string
 		return nil, err
 	}
 
-	active := &ActiveTeam{
+	access := &TeamAccess{
 		UserID:       userID,
 		TeamID:       resolvedTeamID,
 		TeamRole:     member.Role,
 		HomeRegionID: teamHomeRegion.HomeRegionID,
-		DefaultTeam:  defaultTeam,
 	}
-	if active.HomeRegionID == "" {
-		return active, nil
+	if access.HomeRegionID == "" {
+		return access, nil
 	}
 
-	region, err := d.GetRegion(ctx, active.HomeRegionID)
+	region, err := d.GetRegion(ctx, access.HomeRegionID)
 	if err != nil {
 		if errors.Is(err, ErrRegionNotFound) {
-			return active, nil
+			return access, nil
 		}
 		return nil, err
 	}
-	active.RegionalGatewayURL = region.RegionalGatewayURL
-	return active, nil
+	access.RegionalGatewayURL = region.RegionalGatewayURL
+	return access, nil
 }
 
 // GetTeamHomeRegion returns the canonical team-to-region binding.

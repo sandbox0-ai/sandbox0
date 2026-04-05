@@ -16,15 +16,15 @@ import (
 )
 
 type stubTenantResolver struct {
-	activeTeam *tenantdir.ActiveTeam
+	teamAccess *tenantdir.TeamAccess
 	err        error
 }
 
-func (s *stubTenantResolver) ResolveActiveTeam(_ context.Context, _, _ string) (*tenantdir.ActiveTeam, error) {
+func (s *stubTenantResolver) ResolveTeamAccess(_ context.Context, _, _ string) (*tenantdir.TeamAccess, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
-	return s.activeTeam, nil
+	return s.teamAccess, nil
 }
 
 func TestTenantHandlerIssueRegionToken(t *testing.T) {
@@ -32,7 +32,7 @@ func TestTenantHandlerIssueRegionToken(t *testing.T) {
 	gin.SetMode(gin.ReleaseMode)
 
 	handler := NewTenantHandler(
-		&stubTenantResolver{activeTeam: &tenantdir.ActiveTeam{
+		&stubTenantResolver{teamAccess: &tenantdir.TeamAccess{
 			UserID:             "user-1",
 			TeamID:             "team-1",
 			TeamRole:           "admin",
@@ -57,7 +57,7 @@ func TestTenantHandlerIssueRegionToken(t *testing.T) {
 	})
 	router.POST("/auth/region-token", handler.IssueRegionToken)
 
-	req := httptest.NewRequest(http.MethodPost, "/auth/region-token", strings.NewReader(`{}`))
+	req := httptest.NewRequest(http.MethodPost, "/auth/region-token", strings.NewReader(`{"team_id":"team-1"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -88,7 +88,7 @@ func TestTenantHandlerIssueRegionTokenPreservesRegionID(t *testing.T) {
 	gin.SetMode(gin.ReleaseMode)
 
 	handler := NewTenantHandler(
-		&stubTenantResolver{activeTeam: &tenantdir.ActiveTeam{
+		&stubTenantResolver{teamAccess: &tenantdir.TeamAccess{
 			UserID:             "user-1",
 			TeamID:             "team-1",
 			TeamRole:           "admin",
@@ -113,7 +113,7 @@ func TestTenantHandlerIssueRegionTokenPreservesRegionID(t *testing.T) {
 	})
 	router.POST("/auth/region-token", handler.IssueRegionToken)
 
-	req := httptest.NewRequest(http.MethodPost, "/auth/region-token", strings.NewReader(`{}`))
+	req := httptest.NewRequest(http.MethodPost, "/auth/region-token", strings.NewReader(`{"team_id":"team-1"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)

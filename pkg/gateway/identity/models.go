@@ -12,8 +12,6 @@ type User struct {
 	Name          string    `json:"name"`
 	AvatarURL     string    `json:"avatar_url,omitempty"`
 	PasswordHash  string    `json:"-"`
-	DefaultTeamID *string   `json:"default_team_id,omitempty"`
-	DefaultTeam   *Team     `json:"default_team,omitempty"`
 	EmailVerified bool      `json:"email_verified"`
 	IsAdmin       bool      `json:"is_admin"`
 	CreatedAt     time.Time `json:"created_at"`

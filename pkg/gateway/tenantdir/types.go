@@ -21,13 +21,12 @@ type Region struct {
 	Enabled            bool   `json:"enabled"`
 }
 
-// ActiveTeam captures the resolved team and its regional ownership.
-type ActiveTeam struct {
+// TeamAccess captures explicit team access and routing information.
+type TeamAccess struct {
 	UserID             string `json:"user_id"`
 	TeamID             string `json:"team_id"`
 	TeamRole           string `json:"team_role,omitempty"`
 	HomeRegionID       string `json:"home_region_id"`
-	DefaultTeam        bool   `json:"default_team,omitempty"`
 	RegionalGatewayURL string `json:"regional_gateway_url,omitempty"`
 }
 
@@ -39,9 +38,9 @@ type RoutingToken struct {
 	Expiry   time.Time `json:"expiry"`
 }
 
-// Resolver resolves active team and region ownership.
+// Resolver resolves explicit team access and region ownership.
 type Resolver interface {
-	ResolveActiveTeam(ctx context.Context, userID, teamID string) (*ActiveTeam, error)
+	ResolveTeamAccess(ctx context.Context, userID, teamID string) (*TeamAccess, error)
 	GetTeamHomeRegion(ctx context.Context, teamID string) (*TeamHomeRegion, error)
 	GetRegion(ctx context.Context, regionID string) (*Region, error)
 }

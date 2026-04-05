@@ -16,10 +16,10 @@ import (
 )
 
 type tenantResolver interface {
-	ResolveActiveTeam(ctx context.Context, userID, teamID string) (*tenantdir.ActiveTeam, error)
+	ResolveTeamAccess(ctx context.Context, userID, teamID string) (*tenantdir.TeamAccess, error)
 }
 
-// TenantHandler handles active-team and regional token exchange endpoints.
+// TenantHandler handles explicit team-to-region token exchange.
 type TenantHandler struct {
 	resolver       tenantResolver
 	jwtIssuer      *authn.Issuer
@@ -53,31 +53,7 @@ func NewTenantHandler(resolver tenantResolver, jwtIssuer *authn.Issuer, regionTo
 	}
 }
 
-// GetActiveTeam resolves the user's active team and routing information.
-func (h *TenantHandler) GetActiveTeam(c *gin.Context) {
-	authCtx := middleware.GetAuthContext(c)
-	if authCtx == nil || authCtx.UserID == "" {
-		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "not authenticated")
-		return
-	}
-
-	activeTeam, err := h.resolver.ResolveActiveTeam(c.Request.Context(), authCtx.UserID, c.Query("team_id"))
-	if err != nil {
-		h.writeResolveError(c, err)
-		return
-	}
-	if strings.TrimSpace(activeTeam.HomeRegionID) == "" {
-		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "active team has no home region")
-		return
-	}
-	if strings.TrimSpace(activeTeam.RegionalGatewayURL) == "" {
-		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "active team home region is not routable")
-		return
-	}
-	spec.JSONSuccess(c, http.StatusOK, activeTeam)
-}
-
-// IssueRegionToken exchanges a global user token for a short-lived region token.
+// IssueRegionToken exchanges a user token for a short-lived region token scoped to an explicit team.
 func (h *TenantHandler) IssueRegionToken(c *gin.Context) {
 	authCtx := middleware.GetAuthContext(c)
 	if authCtx == nil || authCtx.UserID == "" {
@@ -86,32 +62,30 @@ func (h *TenantHandler) IssueRegionToken(c *gin.Context) {
 	}
 
 	var req IssueRegionTokenRequest
-	if c.Request.ContentLength > 0 {
-		if err := c.ShouldBindJSON(&req); err != nil {
-			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
-			return
-		}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
+		return
 	}
 
-	activeTeam, err := h.resolver.ResolveActiveTeam(c.Request.Context(), authCtx.UserID, req.TeamID)
+	teamAccess, err := h.resolver.ResolveTeamAccess(c.Request.Context(), authCtx.UserID, req.TeamID)
 	if err != nil {
 		h.writeResolveError(c, err)
 		return
 	}
-	if strings.TrimSpace(activeTeam.HomeRegionID) == "" {
-		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "active team has no home region")
+	if strings.TrimSpace(teamAccess.HomeRegionID) == "" {
+		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "team has no home region")
 		return
 	}
-	if strings.TrimSpace(activeTeam.RegionalGatewayURL) == "" {
-		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "active team home region is not routable")
+	if strings.TrimSpace(teamAccess.RegionalGatewayURL) == "" {
+		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "team home region is not routable")
 		return
 	}
 
-	normalizedRegionID := strings.TrimSpace(activeTeam.HomeRegionID)
+	normalizedRegionID := strings.TrimSpace(teamAccess.HomeRegionID)
 	token, expiry, err := h.jwtIssuer.IssueRegionToken(
 		authCtx.UserID,
-		activeTeam.TeamID,
-		activeTeam.TeamRole,
+		teamAccess.TeamID,
+		teamAccess.TeamRole,
 		normalizedRegionID,
 		authCtx.IsSystemAdmin,
 		h.regionTokenTTL,
@@ -124,7 +98,7 @@ func (h *TenantHandler) IssueRegionToken(c *gin.Context) {
 
 	spec.JSONSuccess(c, http.StatusOK, IssueRegionTokenResponse{
 		RegionID:           normalizedRegionID,
-		RegionalGatewayURL: activeTeam.RegionalGatewayURL,
+		RegionalGatewayURL: teamAccess.RegionalGatewayURL,
 		Token:              token,
 		ExpiresAt:          expiry.Unix(),
 	})
@@ -132,12 +106,12 @@ func (h *TenantHandler) IssueRegionToken(c *gin.Context) {
 
 func (h *TenantHandler) writeResolveError(c *gin.Context, err error) {
 	switch {
-	case errors.Is(err, tenantdir.ErrNoActiveTeam):
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "no active team selected")
+	case errors.Is(err, tenantdir.ErrTeamRequired):
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "team_id is required")
 	case errors.Is(err, tenantdir.ErrRegionNotFound):
-		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "active team home region is not routable")
+		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "team home region is not routable")
 	default:
-		h.logger.Warn("Failed to resolve active team", zap.Error(err))
-		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "failed to resolve active team")
+		h.logger.Warn("Failed to resolve team access", zap.Error(err))
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "team not accessible")
 	}
 }

@@ -2,10 +2,8 @@ package identity
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -13,11 +11,10 @@ import (
 // CreateUser creates a new user.
 func (r *Repository) CreateUser(ctx context.Context, user *User) error {
 	err := r.pool.QueryRow(ctx, `
-		INSERT INTO users (email, name, avatar_url, password_hash, default_team_id, email_verified, is_admin)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO users (email, name, avatar_url, password_hash, email_verified, is_admin)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING id, created_at, updated_at
-	`, user.Email, user.Name, user.AvatarURL, user.PasswordHash, user.DefaultTeamID,
-		user.EmailVerified, user.IsAdmin,
+	`, user.Email, user.Name, user.AvatarURL, user.PasswordHash, user.EmailVerified, user.IsAdmin,
 	).Scan(&user.ID, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
 		if isDuplicateKeyError(err) {
@@ -28,8 +25,8 @@ func (r *Repository) CreateUser(ctx context.Context, user *User) error {
 	return nil
 }
 
-// CreateUserWithDefaultTeam creates a user and a default team in one transaction.
-func (r *Repository) CreateUserWithDefaultTeam(ctx context.Context, user *User, teamName string, homeRegionID *string) (*Team, *TeamMember, error) {
+// CreateUserWithInitialTeam creates a user and an initial team in one transaction.
+func (r *Repository) CreateUserWithInitialTeam(ctx context.Context, user *User, teamName string, homeRegionID *string) (*Team, *TeamMember, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return nil, nil, fmt.Errorf("begin tx: %w", err)
@@ -41,8 +38,8 @@ func (r *Repository) CreateUserWithDefaultTeam(ctx context.Context, user *User, 
 	}()
 
 	err = tx.QueryRow(ctx, `
-		INSERT INTO users (email, name, avatar_url, password_hash, default_team_id, email_verified, is_admin)
-		VALUES ($1, $2, $3, $4, NULL, $5, $6)
+		INSERT INTO users (email, name, avatar_url, password_hash, email_verified, is_admin)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING id, created_at, updated_at
 	`, user.Email, user.Name, user.AvatarURL, user.PasswordHash, user.EmailVerified, user.IsAdmin,
 	).Scan(&user.ID, &user.CreatedAt, &user.UpdatedAt)
@@ -82,15 +79,6 @@ func (r *Repository) CreateUserWithDefaultTeam(ctx context.Context, user *User, 
 		return nil, nil, fmt.Errorf("insert team member: %w", err)
 	}
 
-	_, err = tx.Exec(ctx, `
-		UPDATE users SET default_team_id = $2 WHERE id = $1
-	`, user.ID, team.ID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("update user default team: %w", err)
-	}
-	user.DefaultTeamID = &team.ID
-	user.DefaultTeam = team
-
 	if err = tx.Commit(ctx); err != nil {
 		return nil, nil, fmt.Errorf("commit tx: %w", err)
 	}
@@ -100,11 +88,9 @@ func (r *Repository) CreateUserWithDefaultTeam(ctx context.Context, user *User, 
 // GetUserByID retrieves a user by ID.
 func (r *Repository) GetUserByID(ctx context.Context, id string) (*User, error) {
 	return r.scanUser(ctx, `
-		SELECT u.id, u.email, u.name, u.avatar_url, u.password_hash, u.default_team_id,
-		       u.email_verified, u.is_admin, u.created_at, u.updated_at,
-		       dt.id, dt.name, dt.slug, dt.owner_id, dt.home_region_id, dt.created_at, dt.updated_at
+		SELECT u.id, u.email, u.name, u.avatar_url, u.password_hash,
+		       u.email_verified, u.is_admin, u.created_at, u.updated_at
 		FROM users u
-		LEFT JOIN teams dt ON dt.id = u.default_team_id
 		WHERE u.id = $1
 	`, id)
 }
@@ -112,11 +98,9 @@ func (r *Repository) GetUserByID(ctx context.Context, id string) (*User, error) 
 // GetUserByEmail retrieves a user by email.
 func (r *Repository) GetUserByEmail(ctx context.Context, email string) (*User, error) {
 	return r.scanUser(ctx, `
-		SELECT u.id, u.email, u.name, u.avatar_url, u.password_hash, u.default_team_id,
-		       u.email_verified, u.is_admin, u.created_at, u.updated_at,
-		       dt.id, dt.name, dt.slug, dt.owner_id, dt.home_region_id, dt.created_at, dt.updated_at
+		SELECT u.id, u.email, u.name, u.avatar_url, u.password_hash,
+		       u.email_verified, u.is_admin, u.created_at, u.updated_at
 		FROM users u
-		LEFT JOIN teams dt ON dt.id = u.default_team_id
 		WHERE u.email = $1
 	`, email)
 }
@@ -125,11 +109,10 @@ func (r *Repository) GetUserByEmail(ctx context.Context, email string) (*User, e
 func (r *Repository) UpdateUser(ctx context.Context, user *User) error {
 	result, err := r.pool.Exec(ctx, `
 		UPDATE users
-		SET name = $2, avatar_url = $3, default_team_id = $4,
-		    email_verified = $5, is_admin = $6
+		SET name = $2, avatar_url = $3,
+		    email_verified = $4, is_admin = $5
 		WHERE id = $1
-	`, user.ID, user.Name, user.AvatarURL, user.DefaultTeamID,
-		user.EmailVerified, user.IsAdmin)
+	`, user.ID, user.Name, user.AvatarURL, user.EmailVerified, user.IsAdmin)
 	if err != nil {
 		return fmt.Errorf("update user: %w", err)
 	}
@@ -176,13 +159,6 @@ func (r *Repository) CountUsers(ctx context.Context) (int64, error) {
 
 func (r *Repository) scanUser(ctx context.Context, query string, arg any) (*User, error) {
 	var user User
-	var defaultTeamID sql.NullString
-	var defaultTeamName sql.NullString
-	var defaultTeamSlug sql.NullString
-	var defaultTeamOwnerID sql.NullString
-	var defaultTeamHomeRegionID sql.NullString
-	var defaultTeamCreatedAt sql.NullTime
-	var defaultTeamUpdatedAt sql.NullTime
 
 	err := r.pool.QueryRow(ctx, query, arg).Scan(
 		&user.ID,
@@ -190,18 +166,10 @@ func (r *Repository) scanUser(ctx context.Context, query string, arg any) (*User
 		&user.Name,
 		&user.AvatarURL,
 		&user.PasswordHash,
-		&user.DefaultTeamID,
 		&user.EmailVerified,
 		&user.IsAdmin,
 		&user.CreatedAt,
 		&user.UpdatedAt,
-		&defaultTeamID,
-		&defaultTeamName,
-		&defaultTeamSlug,
-		&defaultTeamOwnerID,
-		&defaultTeamHomeRegionID,
-		&defaultTeamCreatedAt,
-		&defaultTeamUpdatedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -209,31 +177,5 @@ func (r *Repository) scanUser(ctx context.Context, query string, arg any) (*User
 		}
 		return nil, fmt.Errorf("query user: %w", err)
 	}
-	if defaultTeamID.Valid {
-		user.DefaultTeam = &Team{
-			ID:           defaultTeamID.String,
-			Name:         defaultTeamName.String,
-			Slug:         defaultTeamSlug.String,
-			OwnerID:      nullStringPtr(defaultTeamOwnerID),
-			HomeRegionID: nullStringPtr(defaultTeamHomeRegionID),
-			CreatedAt:    nullTime(defaultTeamCreatedAt),
-			UpdatedAt:    nullTime(defaultTeamUpdatedAt),
-		}
-	}
 	return &user, nil
-}
-
-func nullStringPtr(value sql.NullString) *string {
-	if !value.Valid {
-		return nil
-	}
-	v := value.String
-	return &v
-}
-
-func nullTime(value sql.NullTime) time.Time {
-	if !value.Valid {
-		return time.Time{}
-	}
-	return value.Time
 }

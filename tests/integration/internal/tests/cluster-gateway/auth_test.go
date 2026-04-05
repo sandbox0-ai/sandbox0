@@ -114,7 +114,7 @@ func TestClusterGatewayIntegration_PublicAuthJWT(t *testing.T) {
 		IsAdmin:       false,
 	}
 	ctx := context.Background()
-	team, _, err := identityRepo.CreateUserWithDefaultTeam(ctx, user, "JWT Team", nil)
+	team, _, err := identityRepo.CreateUserWithInitialTeam(ctx, user, "JWT Team", nil)
 	if err != nil {
 		t.Fatalf("create user/team: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestClusterGatewayIntegration_PublicAuthAPIKey(t *testing.T) {
 		IsAdmin:       false,
 	}
 	ctx := context.Background()
-	team, _, err := identityRepo.CreateUserWithDefaultTeam(ctx, user, "API Key Team", nil)
+	team, _, err := identityRepo.CreateUserWithInitialTeam(ctx, user, "API Key Team", nil)
 	if err != nil {
 		t.Fatalf("create user/team: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestClusterGatewayIntegration_PublicAuthUserResponseIncludesDefaultTeamHome
 		IsAdmin:       false,
 	}
 	ctx := context.Background()
-	team, _, err := identityRepo.CreateUserWithDefaultTeam(ctx, user, "Me Team", nil)
+	team, _, err := identityRepo.CreateUserWithInitialTeam(ctx, user, "Me Team", nil)
 	if err != nil {
 		t.Fatalf("create user/team: %v", err)
 	}
@@ -211,20 +211,18 @@ func TestClusterGatewayIntegration_PublicAuthUserResponseIncludesDefaultTeamHome
 
 	var body struct {
 		Data struct {
-			DefaultTeam struct {
-				ID           string  `json:"id"`
-				HomeRegionID *string `json:"home_region_id"`
-			} `json:"default_team"`
+			ID    string `json:"id"`
+			Email string `json:"email"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if body.Data.DefaultTeam.ID != team.ID {
-		t.Fatalf("expected default team %q, got %q", team.ID, body.Data.DefaultTeam.ID)
+	if body.Data.ID != user.ID {
+		t.Fatalf("expected user id %q, got %q", user.ID, body.Data.ID)
 	}
-	if body.Data.DefaultTeam.HomeRegionID == nil || *body.Data.DefaultTeam.HomeRegionID != "aws-us-east-1" {
-		t.Fatalf("expected home region aws-us-east-1, got %#v", body.Data.DefaultTeam.HomeRegionID)
+	if body.Data.Email != user.Email {
+		t.Fatalf("expected email %q, got %q", user.Email, body.Data.Email)
 	}
 }
 
@@ -249,7 +247,7 @@ func TestClusterGatewayIntegration_PublicAuthTeamsAcceptHomeRegionID(t *testing.
 		IsAdmin:       false,
 	}
 	ctx := context.Background()
-	team, _, err := identityRepo.CreateUserWithDefaultTeam(ctx, user, "Admin Team", nil)
+	team, _, err := identityRepo.CreateUserWithInitialTeam(ctx, user, "Admin Team", nil)
 	if err != nil {
 		t.Fatalf("create user/team: %v", err)
 	}

@@ -10,17 +10,8 @@ import (
 )
 
 type mockIdentityStore struct {
-	users   map[string]*identity.User
 	teams   map[string]*identity.Team
 	members map[string]*identity.TeamMember
-}
-
-func (m *mockIdentityStore) GetUserByID(_ context.Context, id string) (*identity.User, error) {
-	user, ok := m.users[id]
-	if !ok {
-		return nil, identity.ErrUserNotFound
-	}
-	return user, nil
 }
 
 func (m *mockIdentityStore) GetTeamByID(_ context.Context, id string) (*identity.Team, error) {
@@ -39,26 +30,20 @@ func (m *mockIdentityStore) GetTeamMember(_ context.Context, teamID, userID stri
 	return member, nil
 }
 
-func TestDirectoryResolveActiveTeamUsesDefaultTeam(t *testing.T) {
-	defaultTeamID := "team-1"
+func TestDirectoryResolveTeamAccessUsesExplicitTeam(t *testing.T) {
+	teamID := "team-1"
 	homeRegionID := "aws-us-east-1"
 	store := &mockIdentityStore{
-		users: map[string]*identity.User{
-			"user-1": {
-				ID:            "user-1",
-				DefaultTeamID: &defaultTeamID,
-			},
-		},
 		teams: map[string]*identity.Team{
-			defaultTeamID: {
-				ID:           defaultTeamID,
+			teamID: {
+				ID:           teamID,
 				HomeRegionID: &homeRegionID,
 				UpdatedAt:    time.Unix(100, 0),
 			},
 		},
 		members: map[string]*identity.TeamMember{
-			defaultTeamID + ":user-1": {
-				TeamID: defaultTeamID,
+			teamID + ":user-1": {
+				TeamID: teamID,
 				UserID: "user-1",
 				Role:   "admin",
 			},
@@ -71,15 +56,12 @@ func TestDirectoryResolveActiveTeamUsesDefaultTeam(t *testing.T) {
 	}})
 
 	resolver := NewResolver(store, regions)
-	active, err := resolver.ResolveActiveTeam(context.Background(), "user-1", "")
+	active, err := resolver.ResolveTeamAccess(context.Background(), "user-1", teamID)
 	if err != nil {
-		t.Fatalf("resolve active team: %v", err)
+		t.Fatalf("resolve team access: %v", err)
 	}
-	if !active.DefaultTeam {
-		t.Fatal("expected default team resolution")
-	}
-	if active.TeamID != defaultTeamID {
-		t.Fatalf("expected team %q, got %q", defaultTeamID, active.TeamID)
+	if active.TeamID != teamID {
+		t.Fatalf("expected team %q, got %q", teamID, active.TeamID)
 	}
 	if active.HomeRegionID != homeRegionID {
 		t.Fatalf("expected region %q, got %q", homeRegionID, active.HomeRegionID)
@@ -89,16 +71,12 @@ func TestDirectoryResolveActiveTeamUsesDefaultTeam(t *testing.T) {
 	}
 }
 
-func TestDirectoryResolveActiveTeamRequiresSelectedOrDefaultTeam(t *testing.T) {
-	resolver := NewResolver(&mockIdentityStore{
-		users: map[string]*identity.User{
-			"user-1": {ID: "user-1"},
-		},
-	}, nil)
+func TestDirectoryResolveTeamAccessRequiresTeamID(t *testing.T) {
+	resolver := NewResolver(&mockIdentityStore{}, nil)
 
-	_, err := resolver.ResolveActiveTeam(context.Background(), "user-1", "")
-	if !errors.Is(err, ErrNoActiveTeam) {
-		t.Fatalf("expected ErrNoActiveTeam, got %v", err)
+	_, err := resolver.ResolveTeamAccess(context.Background(), "user-1", "")
+	if !errors.Is(err, ErrTeamRequired) {
+		t.Fatalf("expected ErrTeamRequired, got %v", err)
 	}
 }
 

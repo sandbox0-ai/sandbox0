@@ -23,7 +23,6 @@ import (
 // AuthHandler handles authentication endpoints
 type AuthHandler struct {
 	repo                      authRepository
-	tenantResolver            tenantResolver
 	builtinProvider           *builtin.Provider
 	oidcManager               *oidc.Manager
 	jwtIssuer                 *authn.Issuer
@@ -48,6 +47,7 @@ type authRepository interface {
 	ValidateRefreshToken(ctx context.Context, tokenHash string) (*identity.RefreshToken, error)
 	RevokeAllUserRefreshTokens(ctx context.Context, userID string) error
 	GetUserByID(ctx context.Context, id string) (*identity.User, error)
+	GetTeamsByUserID(ctx context.Context, userID string) ([]*identity.Team, error)
 	GetTeamMember(ctx context.Context, teamID, userID string) (*identity.TeamMember, error)
 	CreateDeviceAuthSession(ctx context.Context, session *identity.DeviceAuthSession) error
 	GetDeviceAuthSessionByID(ctx context.Context, id string) (*identity.DeviceAuthSession, error)
@@ -60,13 +60,11 @@ func NewAuthHandler(
 	builtinProvider *builtin.Provider,
 	oidcManager *oidc.Manager,
 	jwtIssuer *authn.Issuer,
-	tenantResolver tenantResolver,
 	logger *zap.Logger,
 	opts ...AuthHandlerOption,
 ) *AuthHandler {
 	handler := &AuthHandler{
 		repo:            repo,
-		tenantResolver:  tenantResolver,
 		builtinProvider: builtinProvider,
 		oidcManager:     oidcManager,
 		jwtIssuer:       jwtIssuer,
@@ -86,11 +84,10 @@ type LoginRequest struct {
 
 // LoginResponse is the response for login
 type LoginResponse struct {
-	AccessToken     string                   `json:"access_token"`
-	RefreshToken    string                   `json:"refresh_token"`
-	ExpiresAt       int64                    `json:"expires_at"`
-	User            *UserResponse            `json:"user"`
-	RegionalSession *RegionalSessionResponse `json:"regional_session,omitempty"`
+	AccessToken  string        `json:"access_token"`
+	RefreshToken string        `json:"refresh_token"`
+	ExpiresAt    int64         `json:"expires_at"`
+	User         *UserResponse `json:"user"`
 }
 
 // DeviceLoginStartResponse is returned when a device flow is initiated.
@@ -144,14 +141,9 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
-	// Get default team ID for token
-	teamID := ""
-	if user.DefaultTeamID != nil {
-		teamID = *user.DefaultTeamID
-	}
-	teamRole, err := h.resolveTeamRole(c.Request.Context(), teamID, user.ID)
+	teamID, teamRole, err := h.resolveImplicitTeam(c.Request.Context(), user.ID)
 	if err != nil {
-		h.logger.Warn("Failed to resolve team role for login", zap.Error(err))
+		h.logger.Warn("Failed to resolve login team context", zap.Error(err))
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "user is not a member of the selected team")
 		return
 	}
@@ -164,11 +156,10 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	}
 
 	spec.JSONSuccess(c, http.StatusOK, LoginResponse{
-		AccessToken:     tokens.AccessToken,
-		RefreshToken:    tokens.RefreshToken,
-		ExpiresAt:       tokens.ExpiresAt.Unix(),
-		User:            NewUserResponse(user),
-		RegionalSession: h.issueRegionalSessionOrNil(c.Request.Context(), user.ID, teamID, user.IsAdmin),
+		AccessToken:  tokens.AccessToken,
+		RefreshToken: tokens.RefreshToken,
+		ExpiresAt:    tokens.ExpiresAt.Unix(),
+		User:         NewUserResponse(user),
 	})
 }
 
@@ -226,14 +217,9 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		return
 	}
 
-	// Get default team ID
-	teamID := ""
-	if user.DefaultTeamID != nil {
-		teamID = *user.DefaultTeamID
-	}
-	teamRole, err := h.resolveTeamRole(c.Request.Context(), teamID, user.ID)
+	teamID, teamRole, err := h.resolveImplicitTeam(c.Request.Context(), user.ID)
 	if err != nil {
-		h.logger.Warn("Failed to resolve team role for register", zap.Error(err))
+		h.logger.Warn("Failed to resolve register team context", zap.Error(err))
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "user is not a member of the selected team")
 		return
 	}
@@ -246,11 +232,10 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	}
 
 	spec.JSONSuccess(c, http.StatusCreated, LoginResponse{
-		AccessToken:     tokens.AccessToken,
-		RefreshToken:    tokens.RefreshToken,
-		ExpiresAt:       tokens.ExpiresAt.Unix(),
-		User:            NewUserResponse(user),
-		RegionalSession: h.issueRegionalSessionOrNil(c.Request.Context(), user.ID, teamID, user.IsAdmin),
+		AccessToken:  tokens.AccessToken,
+		RefreshToken: tokens.RefreshToken,
+		ExpiresAt:    tokens.ExpiresAt.Unix(),
+		User:         NewUserResponse(user),
 	})
 }
 
@@ -288,14 +273,9 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 		return
 	}
 
-	// Get default team ID
-	teamID := ""
-	if user.DefaultTeamID != nil {
-		teamID = *user.DefaultTeamID
-	}
-	teamRole, err := h.resolveTeamRole(c.Request.Context(), teamID, user.ID)
+	teamID, teamRole, err := h.resolveImplicitTeam(c.Request.Context(), user.ID)
 	if err != nil {
-		h.logger.Warn("Failed to resolve team role for refresh", zap.Error(err))
+		h.logger.Warn("Failed to resolve refresh team context", zap.Error(err))
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "user is not a member of the selected team")
 		return
 	}
@@ -309,11 +289,10 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 	}
 
 	spec.JSONSuccess(c, http.StatusOK, LoginResponse{
-		AccessToken:     tokens.AccessToken,
-		RefreshToken:    tokens.RefreshToken,
-		ExpiresAt:       tokens.ExpiresAt.Unix(),
-		User:            NewUserResponse(user),
-		RegionalSession: h.issueRegionalSessionOrNil(c.Request.Context(), user.ID, teamID, user.IsAdmin),
+		AccessToken:  tokens.AccessToken,
+		RefreshToken: tokens.RefreshToken,
+		ExpiresAt:    tokens.ExpiresAt.Unix(),
+		User:         NewUserResponse(user),
 	})
 }
 
@@ -380,6 +359,22 @@ func (h *AuthHandler) resolveTeamRole(ctx context.Context, teamID, userID string
 		return "", err
 	}
 	return member.Role, nil
+}
+
+func (h *AuthHandler) resolveImplicitTeam(ctx context.Context, userID string) (string, string, error) {
+	teams, err := h.repo.GetTeamsByUserID(ctx, userID)
+	if err != nil {
+		return "", "", err
+	}
+	if len(teams) != 1 {
+		return "", "", nil
+	}
+	teamID := teams[0].ID
+	role, err := h.resolveTeamRole(ctx, teamID, userID)
+	if err != nil {
+		return "", "", err
+	}
+	return teamID, role, nil
 }
 
 // OIDCLogin initiates OIDC login
@@ -463,7 +458,7 @@ func (h *AuthHandler) OIDCCallback(c *gin.Context) {
 	}
 
 	if isLocalReturnURL(returnURL) {
-		redirectURL, err := buildCLIReturnURL(returnURL, tokens, loginResponse.RegionalSession)
+		redirectURL, err := buildCLIReturnURL(returnURL, tokens)
 		if err != nil {
 			h.logger.Warn("Failed to build OIDC CLI redirect URL", zap.Error(err))
 			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to complete oidc login")
@@ -650,11 +645,7 @@ func (h *AuthHandler) OIDCDevicePoll(c *gin.Context) {
 var errUserNotMemberOfSelectedTeam = errors.New("user is not a member of the selected team")
 
 func (h *AuthHandler) buildLoginResponse(ctx context.Context, user *identity.User) (*LoginResponse, *authn.TokenPair, error) {
-	teamID := ""
-	if user.DefaultTeamID != nil {
-		teamID = *user.DefaultTeamID
-	}
-	teamRole, err := h.resolveTeamRole(ctx, teamID, user.ID)
+	teamID, teamRole, err := h.resolveImplicitTeam(ctx, user.ID)
 	if err != nil {
 		return nil, nil, errUserNotMemberOfSelectedTeam
 	}
@@ -664,11 +655,10 @@ func (h *AuthHandler) buildLoginResponse(ctx context.Context, user *identity.Use
 		return nil, nil, fmt.Errorf("issue tokens: %w", err)
 	}
 	return &LoginResponse{
-		AccessToken:     tokens.AccessToken,
-		RefreshToken:    tokens.RefreshToken,
-		ExpiresAt:       tokens.ExpiresAt.Unix(),
-		User:            NewUserResponse(user),
-		RegionalSession: h.issueRegionalSessionOrNil(ctx, user.ID, teamID, user.IsAdmin),
+		AccessToken:  tokens.AccessToken,
+		RefreshToken: tokens.RefreshToken,
+		ExpiresAt:    tokens.ExpiresAt.Unix(),
+		User:         NewUserResponse(user),
 	}, tokens, nil
 }
 
@@ -698,52 +688,6 @@ func (h *AuthHandler) persistRefreshToken(ctx context.Context, userID string, to
 	})
 }
 
-func (h *AuthHandler) issueRegionalSessionOrNil(ctx context.Context, userID, teamID string, isAdmin bool) *RegionalSessionResponse {
-	session, err := h.issueRegionalSession(ctx, userID, teamID, isAdmin)
-	if err == nil {
-		return session
-	}
-	if errors.Is(err, tenantdir.ErrNoActiveTeam) || errors.Is(err, tenantdir.ErrRegionNotFound) {
-		return nil
-	}
-	h.logger.Warn("Failed to issue regional session", zap.Error(err))
-	return nil
-}
-
-func (h *AuthHandler) issueRegionalSession(ctx context.Context, userID, teamID string, isAdmin bool) (*RegionalSessionResponse, error) {
-	if h.tenantResolver == nil || h.jwtIssuer == nil || strings.TrimSpace(userID) == "" {
-		return nil, nil
-	}
-
-	activeTeam, err := h.tenantResolver.ResolveActiveTeam(ctx, userID, teamID)
-	if err != nil {
-		return nil, err
-	}
-	if strings.TrimSpace(activeTeam.HomeRegionID) == "" || strings.TrimSpace(activeTeam.RegionalGatewayURL) == "" {
-		return nil, nil
-	}
-
-	normalizedRegionID := strings.TrimSpace(activeTeam.HomeRegionID)
-	token, expiry, err := h.jwtIssuer.IssueRegionToken(
-		userID,
-		activeTeam.TeamID,
-		activeTeam.TeamRole,
-		normalizedRegionID,
-		isAdmin,
-		0,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	return &RegionalSessionResponse{
-		RegionID:           normalizedRegionID,
-		RegionalGatewayURL: activeTeam.RegionalGatewayURL,
-		Token:              token,
-		ExpiresAt:          expiry.Unix(),
-	}, nil
-}
-
 func isLocalReturnURL(raw string) bool {
 	if raw == "" {
 		return false
@@ -759,7 +703,7 @@ func isLocalReturnURL(raw string) bool {
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
-func buildCLIReturnURL(raw string, tokens *authn.TokenPair, regionalSession *RegionalSessionResponse) (string, error) {
+func buildCLIReturnURL(raw string, tokens *authn.TokenPair) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return "", err
@@ -768,14 +712,6 @@ func buildCLIReturnURL(raw string, tokens *authn.TokenPair, regionalSession *Reg
 	q.Set("access_token", tokens.AccessToken)
 	q.Set("refresh_token", tokens.RefreshToken)
 	q.Set("expires_unix", fmt.Sprintf("%d", tokens.ExpiresAt.Unix()))
-	if regionalSession != nil {
-		q.Set("regional_access_token", regionalSession.Token)
-		q.Set("regional_expires_unix", fmt.Sprintf("%d", regionalSession.ExpiresAt))
-		q.Set("region_id", regionalSession.RegionID)
-		if regionalSession.RegionalGatewayURL != "" {
-			q.Set("regional_gateway_url", regionalSession.RegionalGatewayURL)
-		}
-	}
 	u.RawQuery = q.Encode()
 	return u.String(), nil
 }

@@ -150,13 +150,6 @@ func (s *Server) setupRoutes() {
 	})
 
 	tenantHandler := handlers.NewTenantHandler(s.tenantResolver, s.jwtIssuer, s.cfg.RegionTokenTTL.Duration, s.logger)
-	tenant := s.router.Group("/tenant")
-	tenant.Use(s.authMiddleware.Authenticate())
-	tenant.Use(s.authMiddleware.RequireJWTAuth())
-	{
-		tenant.GET("/active", tenantHandler.GetActiveTeam)
-	}
-
 	authProtected := s.router.Group("/auth")
 	authProtected.Use(s.authMiddleware.Authenticate())
 	authProtected.Use(s.authMiddleware.RequireJWTAuth())

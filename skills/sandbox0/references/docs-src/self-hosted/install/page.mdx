@@ -99,7 +99,7 @@ Expected `status.phase` lifecycle:
 When local password bootstrap is enabled, if `spec.initUser.passwordSecret` is not provided, operator generates `admin-password`.
 
 When built-in auth is enabled, the gateway bootstraps the initial admin with that password on first start.
-When built-in auth is disabled but OIDC is enabled, the operator skips generating the password secret and the gateway still bootstraps the admin user and default team,
+When built-in auth is disabled but OIDC is enabled, the operator skips generating the password secret and the gateway still bootstraps the admin user and initial team,
 but leaves the account passwordless so the first OIDC login for the same email can bind to that admin account.
 
 ```bash

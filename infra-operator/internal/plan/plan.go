@@ -72,6 +72,7 @@ type ResourceRef struct {
 
 type ServicePlan struct {
 	Manager        ServiceReference
+	Scheduler      ServiceReference
 	ClusterGateway ServiceReference
 }
 
@@ -190,7 +191,23 @@ func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 func compileServices(infra *infrav1alpha1.Sandbox0Infra) ServicePlan {
 	return ServicePlan{
 		Manager:        compileManagerServiceReference(infra),
+		Scheduler:      compileSchedulerServiceReference(infra),
 		ClusterGateway: compileClusterGatewayServiceReference(infra),
+	}
+}
+
+func compileSchedulerServiceReference(infra *infrav1alpha1.Sandbox0Infra) ServiceReference {
+	if infra == nil || infra.Name == "" || infra.Namespace == "" || !infrav1alpha1.IsSchedulerEnabled(infra) {
+		return ServiceReference{}
+	}
+
+	port := common.ResolveServicePort(schedulerServiceConfig(infra), int32(schedulerHTTPPort(infra)))
+	name := fmt.Sprintf("%s-scheduler", infra.Name)
+
+	return ServiceReference{
+		Name: name,
+		Port: port,
+		URL:  fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", name, infra.Namespace, port),
 	}
 }
 
@@ -668,6 +685,21 @@ func clusterGatewayHTTPPort(infra *infrav1alpha1.Sandbox0Infra) int {
 func clusterGatewayServiceConfig(infra *infrav1alpha1.Sandbox0Infra) *infrav1alpha1.ServiceNetworkConfig {
 	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.ClusterGateway != nil {
 		return infra.Spec.Services.ClusterGateway.Service
+	}
+	return nil
+}
+
+func schedulerHTTPPort(infra *infrav1alpha1.Sandbox0Infra) int {
+	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.Scheduler != nil &&
+		infra.Spec.Services.Scheduler.Config != nil && infra.Spec.Services.Scheduler.Config.HTTPPort > 0 {
+		return infra.Spec.Services.Scheduler.Config.HTTPPort
+	}
+	return 8080
+}
+
+func schedulerServiceConfig(infra *infrav1alpha1.Sandbox0Infra) *infrav1alpha1.ServiceNetworkConfig {
+	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.Scheduler != nil {
+		return infra.Spec.Services.Scheduler.Service
 	}
 	return nil
 }

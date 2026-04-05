@@ -229,6 +229,10 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		cfg.DatabaseURL = dsn
 	}
 	cfg.DefaultClusterGatewayURL = compiledPlan.RegionalGateway.DefaultClusterGatewayURL
+	cfg.SchedulerEnabled = compiledPlan.Components.EnableScheduler
+	if compiledPlan.Services.Scheduler.URL != "" {
+		cfg.SchedulerURL = compiledPlan.Services.Scheduler.URL
+	}
 
 	authMode := strings.TrimSpace(strings.ToLower(cfg.AuthMode))
 	if authMode == "" {

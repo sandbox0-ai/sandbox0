@@ -75,6 +75,32 @@ func (s *Server) getTemplateStats(c *gin.Context) {
 	s.proxy2Mgr.ProxyToTarget(c)
 }
 
+// proxyInternalTemplateRequest forwards scheduler template sync requests to manager.
+func (s *Server) proxyInternalTemplateRequest(c *gin.Context) {
+	authCtx := middleware.GetAuthContext(c)
+	claims := internalauth.ClaimsFromContext(c.Request.Context())
+
+	perms := s.cfg.SchedulerPermissions
+	if len(perms) == 0 {
+		perms = []string{"*:*"}
+	}
+	internalToken, err := s.generateManagerToken(authCtx, claims, perms)
+	if err != nil {
+		s.logger.Error("Failed to generate internal token for manager",
+			zap.String("team_id", authCtx.TeamID),
+			zap.Error(err),
+		)
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "internal authentication failed")
+		return
+	}
+
+	c.Request.Header.Set(internalauth.TeamIDHeader, authCtx.TeamID)
+	c.Request.Header.Set(internalauth.DefaultTokenHeader, internalToken)
+
+	// Preserve the incoming internal template path and body.
+	s.proxy2Mgr.ProxyToTarget(c)
+}
+
 func (s *Server) generateManagerToken(authCtx *authn.AuthContext, claims *internalauth.Claims, permissions []string) (string, error) {
 	opts := internalauth.GenerateOptions{
 		Permissions: permissions,

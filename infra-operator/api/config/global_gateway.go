@@ -30,10 +30,6 @@ type GlobalGatewayConfig struct {
 	// +kubebuilder:default="global_gateway"
 	DatabaseSchema string `yaml:"database_schema" json:"databaseSchema"`
 
-	// +optional
-	// +kubebuilder:default="5m"
-	RegionTokenTTL metav1.Duration `yaml:"region_token_ttl" json:"regionTokenTTL"`
-
 	// License file path used to unlock enterprise SSO features.
 	// +optional
 	LicenseFile string `yaml:"license_file" json:"-"`
@@ -62,7 +58,6 @@ type globalGatewayConfigYAML struct {
 	DatabaseMaxConns   int               `yaml:"database_max_conns"`
 	DatabaseMinConns   int               `yaml:"database_min_conns"`
 	DatabaseSchema     string            `yaml:"database_schema"`
-	RegionTokenTTL     durationYAMLValue `yaml:"region_token_ttl"`
 	LicenseFile        string            `yaml:"license_file"`
 	ShutdownTimeout    durationYAMLValue `yaml:"shutdown_timeout"`
 	ServerReadTimeout  durationYAMLValue `yaml:"server_read_timeout"`
@@ -180,9 +175,6 @@ func applyGlobalGatewayYAML(cfg *GlobalGatewayConfig, raw globalGatewayConfigYAM
 	cfg.PublicRootDomain = raw.PublicRootDomain
 	cfg.PublicRegionID = raw.PublicRegionID
 
-	if err := applyOptionalDuration(&cfg.RegionTokenTTL, raw.RegionTokenTTL, "region_token_ttl"); err != nil {
-		return err
-	}
 	if err := applyOptionalDuration(&cfg.ShutdownTimeout, raw.ShutdownTimeout, "shutdown_timeout"); err != nil {
 		return err
 	}

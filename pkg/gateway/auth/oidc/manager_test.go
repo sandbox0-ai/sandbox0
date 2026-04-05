@@ -120,9 +120,6 @@ func TestManagerFindOrCreateUserAutoProvisionCreatesUserWithoutDefaultTeam(t *te
 	if user.ID == "" {
 		t.Fatalf("expected created user id")
 	}
-	if user.DefaultTeamID != nil {
-		t.Fatalf("expected no default team, got %q", *user.DefaultTeamID)
-	}
 	if store.createUserCalls != 1 {
 		t.Fatalf("expected 1 create user call, got %d", store.createUserCalls)
 	}

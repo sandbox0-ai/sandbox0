@@ -32,7 +32,7 @@ func TestSetupPublicRoutesSelfHostedMountsIdentityAndAPIKeys(t *testing.T) {
 	}
 }
 
-func TestSetupPublicRoutesFederatedMountsOnlyRegionalAPIKeys(t *testing.T) {
+func TestSetupPublicRoutesFederatedMountsRegionalAPIKeysOnly(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	server := testPublicRouteServer(edgeAuthModeFederatedGlobal)
@@ -47,7 +47,7 @@ func TestSetupPublicRoutesFederatedMountsOnlyRegionalAPIKeys(t *testing.T) {
 	if hasRoute(server.router, "GET", "/users/me") {
 		t.Fatal("expected federated mode to omit /users/me")
 	}
-	if hasRoute(server.router, "GET", "/teams") {
+	if hasRoute(server.router, "POST", "/teams") {
 		t.Fatal("expected federated mode to omit /teams")
 	}
 }

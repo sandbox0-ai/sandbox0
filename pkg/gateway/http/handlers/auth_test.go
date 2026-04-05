@@ -14,12 +14,12 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
-	"github.com/sandbox0-ai/sandbox0/pkg/gateway/tenantdir"
 	"go.uber.org/zap"
 )
 
 type mockAuthRepository struct {
 	users              map[string]*identity.User
+	teams              map[string]*identity.Team
 	refreshTokens      map[string]*identity.RefreshToken
 	deviceAuthSessions map[string]*identity.DeviceAuthSession
 	teamMembers        map[string]*identity.TeamMember
@@ -29,6 +29,7 @@ type mockAuthRepository struct {
 func newMockAuthRepository() *mockAuthRepository {
 	return &mockAuthRepository{
 		users:              map[string]*identity.User{},
+		teams:              map[string]*identity.Team{},
 		refreshTokens:      map[string]*identity.RefreshToken{},
 		deviceAuthSessions: map[string]*identity.DeviceAuthSession{},
 		teamMembers:        map[string]*identity.TeamMember{},
@@ -84,6 +85,27 @@ func (m *mockAuthRepository) GetTeamMember(_ context.Context, teamID, userID str
 	return member, nil
 }
 
+func (m *mockAuthRepository) GetTeamsByUserID(_ context.Context, userID string) ([]*identity.Team, error) {
+	teams := make([]*identity.Team, 0)
+	seen := make(map[string]struct{})
+	for key, member := range m.teamMembers {
+		if member.UserID != userID {
+			continue
+		}
+		if _, ok := seen[member.TeamID]; ok {
+			continue
+		}
+		seen[member.TeamID] = struct{}{}
+		if team, ok := m.teams[member.TeamID]; ok {
+			teams = append(teams, team)
+			continue
+		}
+		teams = append(teams, &identity.Team{ID: member.TeamID})
+		_ = key
+	}
+	return teams, nil
+}
+
 func (m *mockAuthRepository) CreateDeviceAuthSession(_ context.Context, session *identity.DeviceAuthSession) error {
 	copySession := *session
 	if copySession.ID == "" {
@@ -119,22 +141,6 @@ func (m *mockAuthRepository) MarkDeviceAuthSessionConsumed(_ context.Context, id
 	return nil
 }
 
-type mockTenantResolver struct {
-	activeTeam *tenantdir.ActiveTeam
-	err        error
-}
-
-func (m *mockTenantResolver) ResolveActiveTeam(_ context.Context, _, _ string) (*tenantdir.ActiveTeam, error) {
-	if m.err != nil {
-		return nil, m.err
-	}
-	if m.activeTeam == nil {
-		return nil, tenantdir.ErrNoActiveTeam
-	}
-	copyActiveTeam := *m.activeTeam
-	return &copyActiveTeam, nil
-}
-
 func TestAuthHandler_RefreshToken_SucceedsWithPersistedToken(t *testing.T) {
 	t.Setenv("GIN_MODE", "release")
 	gin.SetMode(gin.ReleaseMode)
@@ -149,7 +155,7 @@ func TestAuthHandler_RefreshToken_SucceedsWithPersistedToken(t *testing.T) {
 	repo.users[user.ID] = user
 
 	issuer := authn.NewIssuer("regional-gateway", "test-secret", time.Minute, time.Hour)
-	initialTokens, err := issuer.IssueTokenPair(user.ID, "", "", user.Email, user.Name, user.IsAdmin)
+	initialTokens, err := issuer.IssueTokenPair(user.ID, user.Email, user.Name, user.IsAdmin, nil)
 	if err != nil {
 		t.Fatalf("issue initial token pair: %v", err)
 	}
@@ -196,18 +202,16 @@ func TestAuthHandler_RefreshToken_SucceedsWithPersistedToken(t *testing.T) {
 	}
 }
 
-func TestAuthHandler_RefreshToken_ReturnsRegionalSessionWhenRoutable(t *testing.T) {
+func TestAuthHandler_RefreshToken_IncludesImplicitSingleTeamContext(t *testing.T) {
 	t.Setenv("GIN_MODE", "release")
 	gin.SetMode(gin.ReleaseMode)
 
 	repo := newMockAuthRepository()
-	defaultTeamID := "team-1"
 	user := &identity.User{
-		ID:            "user-1",
-		Email:         "user@example.com",
-		Name:          "User",
-		IsAdmin:       false,
-		DefaultTeamID: &defaultTeamID,
+		ID:      "user-1",
+		Email:   "user@example.com",
+		Name:    "User",
+		IsAdmin: false,
 	}
 	repo.users[user.ID] = user
 	repo.teamMembers["team-1:user-1"] = &identity.TeamMember{
@@ -216,9 +220,11 @@ func TestAuthHandler_RefreshToken_ReturnsRegionalSessionWhenRoutable(t *testing.
 		UserID: "user-1",
 		Role:   "admin",
 	}
+	homeRegionID := "aws-us-east-1"
+	repo.teams["team-1"] = &identity.Team{ID: "team-1", HomeRegionID: &homeRegionID}
 
 	issuer := authn.NewIssuer("global-gateway", "test-secret", time.Minute, time.Hour)
-	initialTokens, err := issuer.IssueTokenPair(user.ID, "team-1", "admin", user.Email, user.Name, user.IsAdmin)
+	initialTokens, err := issuer.IssueTokenPair(user.ID, user.Email, user.Name, user.IsAdmin, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "admin", HomeRegionID: homeRegionID}})
 	if err != nil {
 		t.Fatalf("issue initial token pair: %v", err)
 	}
@@ -231,14 +237,7 @@ func TestAuthHandler_RefreshToken_ReturnsRegionalSessionWhenRoutable(t *testing.
 	}
 
 	handler := &AuthHandler{
-		repo: repo,
-		tenantResolver: &mockTenantResolver{activeTeam: &tenantdir.ActiveTeam{
-			UserID:             "user-1",
-			TeamID:             "team-1",
-			TeamRole:           "admin",
-			HomeRegionID:       "aws-us-east-1",
-			RegionalGatewayURL: "https://regional.example.com",
-		}},
+		repo:      repo,
 		jwtIssuer: issuer,
 		logger:    zap.NewNop(),
 	}
@@ -264,32 +263,25 @@ func TestAuthHandler_RefreshToken_ReturnsRegionalSessionWhenRoutable(t *testing.
 	if apiErr != nil {
 		t.Fatalf("unexpected api error: %+v", *apiErr)
 	}
-	if data.RegionalSession == nil {
-		t.Fatalf("expected regional session in response")
+	claims, err := issuer.ValidateAccessToken(data.AccessToken)
+	if err != nil {
+		t.Fatalf("validate access token: %v", err)
 	}
-	if data.RegionalSession.RegionID != "aws-us-east-1" {
-		t.Fatalf("region_id = %q, want aws-us-east-1", data.RegionalSession.RegionID)
-	}
-	if data.RegionalSession.RegionalGatewayURL != "https://regional.example.com" {
-		t.Fatalf("regional_gateway_url = %q", data.RegionalSession.RegionalGatewayURL)
-	}
-	if data.RegionalSession.Token == "" {
-		t.Fatalf("expected regional token in response")
+	if len(claims.TeamGrants) != 1 || claims.TeamGrants[0].HomeRegionID != homeRegionID {
+		t.Fatalf("expected single team grant with home region, got %+v", claims.TeamGrants)
 	}
 }
 
-func TestAuthHandler_RefreshToken_OmitsRegionalSessionWhenResolverFails(t *testing.T) {
+func TestAuthHandler_RefreshToken_OmitsTeamContextWhenUserHasMultipleTeams(t *testing.T) {
 	t.Setenv("GIN_MODE", "release")
 	gin.SetMode(gin.ReleaseMode)
 
 	repo := newMockAuthRepository()
-	defaultTeamID := "team-1"
 	user := &identity.User{
-		ID:            "user-1",
-		Email:         "user@example.com",
-		Name:          "User",
-		IsAdmin:       false,
-		DefaultTeamID: &defaultTeamID,
+		ID:      "user-1",
+		Email:   "user@example.com",
+		Name:    "User",
+		IsAdmin: false,
 	}
 	repo.users[user.ID] = user
 	repo.teamMembers["team-1:user-1"] = &identity.TeamMember{
@@ -298,9 +290,19 @@ func TestAuthHandler_RefreshToken_OmitsRegionalSessionWhenResolverFails(t *testi
 		UserID: "user-1",
 		Role:   "admin",
 	}
+	repo.teamMembers["team-2:user-1"] = &identity.TeamMember{
+		ID:     "member-2",
+		TeamID: "team-2",
+		UserID: "user-1",
+		Role:   "viewer",
+	}
+	homeRegionA := "aws-us-east-1"
+	homeRegionB := "aws-eu-west-1"
+	repo.teams["team-1"] = &identity.Team{ID: "team-1", HomeRegionID: &homeRegionA}
+	repo.teams["team-2"] = &identity.Team{ID: "team-2", HomeRegionID: &homeRegionB}
 
 	issuer := authn.NewIssuer("global-gateway", "test-secret", time.Minute, time.Hour)
-	initialTokens, err := issuer.IssueTokenPair(user.ID, "team-1", "admin", user.Email, user.Name, user.IsAdmin)
+	initialTokens, err := issuer.IssueTokenPair(user.ID, user.Email, user.Name, user.IsAdmin, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "admin", HomeRegionID: homeRegionA}, {TeamID: "team-2", TeamRole: "viewer", HomeRegionID: homeRegionB}})
 	if err != nil {
 		t.Fatalf("issue initial token pair: %v", err)
 	}
@@ -313,10 +315,9 @@ func TestAuthHandler_RefreshToken_OmitsRegionalSessionWhenResolverFails(t *testi
 	}
 
 	handler := &AuthHandler{
-		repo:           repo,
-		tenantResolver: &mockTenantResolver{err: errors.New("resolver unavailable")},
-		jwtIssuer:      issuer,
-		logger:         zap.NewNop(),
+		repo:      repo,
+		jwtIssuer: issuer,
+		logger:    zap.NewNop(),
 	}
 
 	router := gin.New()
@@ -340,8 +341,12 @@ func TestAuthHandler_RefreshToken_OmitsRegionalSessionWhenResolverFails(t *testi
 	if apiErr != nil {
 		t.Fatalf("unexpected api error: %+v", *apiErr)
 	}
-	if data.RegionalSession != nil {
-		t.Fatalf("expected regional session to be omitted when resolver fails")
+	claims, err := issuer.ValidateAccessToken(data.AccessToken)
+	if err != nil {
+		t.Fatalf("validate access token: %v", err)
+	}
+	if len(claims.TeamGrants) != 2 {
+		t.Fatalf("expected multi-team refresh token to include team grants, got %+v", claims.TeamGrants)
 	}
 }
 
@@ -359,7 +364,7 @@ func TestAuthHandler_LogoutRevocation_BlocksRefresh(t *testing.T) {
 	repo.users[user.ID] = user
 
 	issuer := authn.NewIssuer("regional-gateway", "test-secret", time.Minute, time.Hour)
-	initialTokens, err := issuer.IssueTokenPair(user.ID, "", "", user.Email, user.Name, user.IsAdmin)
+	initialTokens, err := issuer.IssueTokenPair(user.ID, user.Email, user.Name, user.IsAdmin, nil)
 	if err != nil {
 		t.Fatalf("issue initial token pair: %v", err)
 	}
@@ -417,7 +422,7 @@ func TestAuthHandler_RefreshToken_FailsWhenTokenNeverPersisted(t *testing.T) {
 	repo.users[user.ID] = user
 
 	issuer := authn.NewIssuer("regional-gateway", "test-secret", time.Minute, time.Hour)
-	initialTokens, err := issuer.IssueTokenPair(user.ID, "", "", user.Email, user.Name, user.IsAdmin)
+	initialTokens, err := issuer.IssueTokenPair(user.ID, user.Email, user.Name, user.IsAdmin, nil)
 	if err != nil {
 		t.Fatalf("issue initial token pair: %v", err)
 	}

@@ -114,9 +114,6 @@ func TestBuildConfigPopulatesDatabaseAndJWTSecret(t *testing.T) {
 	if cfg.DatabaseSchema != "global_gateway" {
 		t.Fatalf("expected default database schema global_gateway, got %q", cfg.DatabaseSchema)
 	}
-	if cfg.RegionTokenTTL.Duration != 5*time.Minute {
-		t.Fatalf("expected default region token ttl 5m, got %s", cfg.RegionTokenTTL.Duration)
-	}
 	if cfg.JWTAccessTokenTTL.Duration != 15*time.Minute {
 		t.Fatalf("expected default access token ttl 15m, got %s", cfg.JWTAccessTokenTTL.Duration)
 	}

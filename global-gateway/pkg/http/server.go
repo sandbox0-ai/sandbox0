@@ -32,7 +32,6 @@ type Server struct {
 	pool            *pgxpool.Pool
 	identityRepo    *identity.Repository
 	regionRepo      *tenantdir.Repository
-	tenantResolver  *tenantdir.Directory
 	authMiddleware  *gatewaymiddleware.AuthMiddleware
 	requestLogger   *gatewaymiddleware.RequestLogger
 	builtinProvider *gatewaybuiltin.Provider
@@ -62,7 +61,6 @@ func NewServer(
 
 	identityRepo := identity.NewRepository(pool)
 	regionRepo := tenantdir.NewRepository(pool)
-	tenantResolver := tenantdir.NewResolver(identityRepo, regionRepo)
 	jwtIssuer := authn.NewIssuer(cfg.JWTIssuer, cfg.JWTSecret, cfg.JWTAccessTokenTTL.Duration, cfg.JWTRefreshTokenTTL.Duration)
 	authMiddleware := gatewaymiddleware.NewAuthMiddleware(nil, cfg.JWTSecret, jwtIssuer, logger)
 	requestLogger := gatewaymiddleware.NewRequestLogger(logger)
@@ -106,7 +104,6 @@ func NewServer(
 		pool:            pool,
 		identityRepo:    identityRepo,
 		regionRepo:      regionRepo,
-		tenantResolver:  tenantResolver,
 		authMiddleware:  authMiddleware,
 		requestLogger:   requestLogger,
 		builtinProvider: builtinProvider,
@@ -148,21 +145,6 @@ func (s *Server) setupRoutes() {
 		RequireCreateHomeRegion: true,
 		Logger:                  s.logger,
 	})
-
-	tenantHandler := handlers.NewTenantHandler(s.tenantResolver, s.jwtIssuer, s.cfg.RegionTokenTTL.Duration, s.logger)
-	tenant := s.router.Group("/tenant")
-	tenant.Use(s.authMiddleware.Authenticate())
-	tenant.Use(s.authMiddleware.RequireJWTAuth())
-	{
-		tenant.GET("/active", tenantHandler.GetActiveTeam)
-	}
-
-	authProtected := s.router.Group("/auth")
-	authProtected.Use(s.authMiddleware.Authenticate())
-	authProtected.Use(s.authMiddleware.RequireJWTAuth())
-	{
-		authProtected.POST("/region-token", tenantHandler.IssueRegionToken)
-	}
 
 	regionHandler := handlers.NewRegionHandler(s.regionRepo, s.logger)
 	regions := s.router.Group("/regions")

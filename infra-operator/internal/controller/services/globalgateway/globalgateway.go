@@ -361,9 +361,6 @@ func applyConfigDefaults(cfg *apiconfig.GlobalGatewayConfig) {
 	if strings.TrimSpace(cfg.DatabaseSchema) == "" {
 		cfg.DatabaseSchema = "global_gateway"
 	}
-	if cfg.RegionTokenTTL.Duration == 0 {
-		cfg.RegionTokenTTL = metav1.Duration{Duration: 5 * time.Minute}
-	}
 	if cfg.ShutdownTimeout.Duration == 0 {
 		cfg.ShutdownTimeout = metav1.Duration{Duration: 30 * time.Second}
 	}

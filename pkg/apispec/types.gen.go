@@ -144,11 +144,6 @@ const (
 	SuccessAPIKeyListResponseSuccessTrue SuccessAPIKeyListResponseSuccess = true
 )
 
-// Defines values for SuccessActiveTeamResponseSuccess.
-const (
-	SuccessActiveTeamResponseSuccessTrue SuccessActiveTeamResponseSuccess = true
-)
-
 // Defines values for SuccessAuthProvidersResponseSuccess.
 const (
 	SuccessAuthProvidersResponseSuccessTrue SuccessAuthProvidersResponseSuccess = true
@@ -247,11 +242,6 @@ const (
 // Defines values for SuccessIdentityListResponseSuccess.
 const (
 	SuccessIdentityListResponseSuccessTrue SuccessIdentityListResponseSuccess = true
-)
-
-// Defines values for SuccessIssueRegionTokenResponseSuccess.
-const (
-	SuccessIssueRegionTokenResponseSuccessTrue SuccessIssueRegionTokenResponseSuccess = true
 )
 
 // Defines values for SuccessLoginResponseSuccess.
@@ -539,16 +529,6 @@ type APIKey struct {
 	UpdatedAt  time.Time  `json:"updated_at"`
 	UsageCount *int64     `json:"usage_count,omitempty"`
 	UserId     *string    `json:"user_id"`
-}
-
-// ActiveTeam defines model for ActiveTeam.
-type ActiveTeam struct {
-	DefaultTeam        *bool   `json:"default_team,omitempty"`
-	HomeRegionId       string  `json:"home_region_id"`
-	RegionalGatewayUrl *string `json:"regional_gateway_url"`
-	TeamId             string  `json:"team_id"`
-	TeamRole           *string `json:"team_role,omitempty"`
-	UserId             string  `json:"user_id"`
 }
 
 // AddTeamMemberRequest defines model for AddTeamMemberRequest.
@@ -1012,14 +992,6 @@ type Identity struct {
 	Provider  string `json:"provider"`
 }
 
-// IssueRegionTokenRequest defines model for IssueRegionTokenRequest.
-type IssueRegionTokenRequest struct {
-	TeamId *string `json:"team_id,omitempty"`
-}
-
-// IssueRegionTokenResponse defines model for IssueRegionTokenResponse.
-type IssueRegionTokenResponse = RegionalSession
-
 // LabelSelector defines model for LabelSelector.
 type LabelSelector struct {
 	MatchExpressions *[]LabelSelectorRequirement `json:"matchExpressions,omitempty"`
@@ -1061,11 +1033,10 @@ type LoginRequest struct {
 
 // LoginResponse defines model for LoginResponse.
 type LoginResponse struct {
-	AccessToken     string           `json:"access_token"`
-	ExpiresAt       int64            `json:"expires_at"`
-	RefreshToken    string           `json:"refresh_token"`
-	RegionalSession *RegionalSession `json:"regional_session,omitempty"`
-	User            User             `json:"user"`
+	AccessToken  string `json:"access_token"`
+	ExpiresAt    int64  `json:"expires_at"`
+	RefreshToken string `json:"refresh_token"`
+	User         User   `json:"user"`
 }
 
 // MountRequest defines model for MountRequest.
@@ -1330,19 +1301,11 @@ type Region struct {
 	RegionalGatewayUrl string  `json:"regional_gateway_url"`
 }
 
-// RegionalSession defines model for RegionalSession.
-type RegionalSession struct {
-	ExpiresAt          int64   `json:"expires_at"`
-	RegionId           string  `json:"region_id"`
-	RegionalGatewayUrl *string `json:"regional_gateway_url"`
-	Token              string  `json:"token"`
-}
-
 // RegisterRequest defines model for RegisterRequest.
 type RegisterRequest struct {
 	Email openapi_types.Email `json:"email"`
 
-	// HomeRegionId Required in global-gateway mode because registration creates the user's default team.
+	// HomeRegionId Required in global-gateway mode because registration creates the user's initial team.
 	HomeRegionId *string `json:"home_region_id"`
 	Name         string  `json:"name"`
 	Password     string  `json:"password"`
@@ -1643,15 +1606,6 @@ type SuccessAPIKeyListResponse struct {
 // SuccessAPIKeyListResponseSuccess defines model for SuccessAPIKeyListResponse.Success.
 type SuccessAPIKeyListResponseSuccess bool
 
-// SuccessActiveTeamResponse defines model for SuccessActiveTeamResponse.
-type SuccessActiveTeamResponse struct {
-	Data    *ActiveTeam                      `json:"data,omitempty"`
-	Success SuccessActiveTeamResponseSuccess `json:"success"`
-}
-
-// SuccessActiveTeamResponseSuccess defines model for SuccessActiveTeamResponse.Success.
-type SuccessActiveTeamResponseSuccess bool
-
 // SuccessAuthProvidersResponse defines model for SuccessAuthProvidersResponse.
 type SuccessAuthProvidersResponse struct {
 	Data *struct {
@@ -1853,15 +1807,6 @@ type SuccessIdentityListResponse struct {
 
 // SuccessIdentityListResponseSuccess defines model for SuccessIdentityListResponse.Success.
 type SuccessIdentityListResponseSuccess bool
-
-// SuccessIssueRegionTokenResponse defines model for SuccessIssueRegionTokenResponse.
-type SuccessIssueRegionTokenResponse struct {
-	Data    *IssueRegionTokenResponse              `json:"data,omitempty"`
-	Success SuccessIssueRegionTokenResponseSuccess `json:"success"`
-}
-
-// SuccessIssueRegionTokenResponseSuccess defines model for SuccessIssueRegionTokenResponse.Success.
-type SuccessIssueRegionTokenResponseSuccess bool
 
 // SuccessLoginResponse defines model for SuccessLoginResponse.
 type SuccessLoginResponse struct {
@@ -2420,9 +2365,8 @@ type UpdateTeamRequest struct {
 
 // UpdateUserRequest defines model for UpdateUserRequest.
 type UpdateUserRequest struct {
-	AvatarUrl     *string `json:"avatar_url,omitempty"`
-	DefaultTeamId *string `json:"default_team_id"`
-	Name          *string `json:"name,omitempty"`
+	AvatarUrl *string `json:"avatar_url,omitempty"`
+	Name      *string `json:"name,omitempty"`
 }
 
 // UpsertSyncReplicaRequest defines model for UpsertSyncReplicaRequest.
@@ -2438,8 +2382,6 @@ type UpsertSyncReplicaRequest struct {
 type User struct {
 	AvatarUrl     *string             `json:"avatar_url"`
 	CreatedAt     time.Time           `json:"created_at"`
-	DefaultTeam   *Team               `json:"default_team"`
-	DefaultTeamId *string             `json:"default_team_id"`
 	Email         openapi_types.Email `json:"email"`
 	EmailVerified bool                `json:"email_verified"`
 	Id            string              `json:"id"`
@@ -2719,11 +2661,6 @@ type GetAuthOidcProviderLoginParams struct {
 	ReturnUrl *string `form:"return_url,omitempty" json:"return_url,omitempty"`
 }
 
-// GetTenantActiveParams defines parameters for GetTenantActive.
-type GetTenantActiveParams struct {
-	TeamId *string `form:"team_id,omitempty" json:"team_id,omitempty"`
-}
-
 // PostApiKeysJSONRequestBody defines body for PostApiKeys for application/json ContentType.
 type PostApiKeysJSONRequestBody = CreateAPIKeyRequest
 
@@ -2816,9 +2753,6 @@ type PostAuthOidcProviderDevicePollJSONRequestBody = DeviceLoginPollRequest
 
 // PostAuthRefreshJSONRequestBody defines body for PostAuthRefresh for application/json ContentType.
 type PostAuthRefreshJSONRequestBody = RefreshRequest
-
-// PostAuthRegionTokenJSONRequestBody defines body for PostAuthRegionToken for application/json ContentType.
-type PostAuthRegionTokenJSONRequestBody = IssueRegionTokenRequest
 
 // PostAuthRegisterJSONRequestBody defines body for PostAuthRegister for application/json ContentType.
 type PostAuthRegisterJSONRequestBody = RegisterRequest

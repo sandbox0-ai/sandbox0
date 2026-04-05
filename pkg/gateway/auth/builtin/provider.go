@@ -23,7 +23,7 @@ var (
 
 type identityStore interface {
 	GetUserByEmail(ctx context.Context, email string) (*identity.User, error)
-	CreateUserWithDefaultTeam(ctx context.Context, user *identity.User, teamName string, homeRegionID *string) (*identity.Team, *identity.TeamMember, error)
+	CreateUserWithInitialTeam(ctx context.Context, user *identity.User, teamName string, homeRegionID *string) (*identity.Team, *identity.TeamMember, error)
 	GetUserByID(ctx context.Context, id string) (*identity.User, error)
 	UpdateUserPassword(ctx context.Context, userID, passwordHash string) error
 	CountUsers(ctx context.Context) (int64, error)
@@ -113,7 +113,7 @@ func (p *Provider) Register(ctx context.Context, email, password, name string, h
 		teamName = fmt.Sprintf("%s Team", user.Name)
 	}
 
-	if _, _, err := p.repo.CreateUserWithDefaultTeam(ctx, user, teamName, homeRegionID); err != nil {
+	if _, _, err := p.repo.CreateUserWithInitialTeam(ctx, user, teamName, homeRegionID); err != nil {
 		if errors.Is(err, identity.ErrUserAlreadyExists) {
 			return nil, ErrEmailAlreadyExists
 		}
@@ -213,7 +213,7 @@ func (p *Provider) EnsureInitUser(ctx context.Context) error {
 		return fmt.Errorf("create init user: %w", err)
 	}
 
-	// Create a default team for the initial user
+	// Create an initial team for the bootstrap user.
 	team := &identity.Team{
 		Name:    "Default",
 		Slug:    "default",
@@ -226,7 +226,7 @@ func (p *Provider) EnsureInitUser(ctx context.Context) error {
 	}
 
 	if err := p.repo.CreateTeam(ctx, team); err != nil {
-		return fmt.Errorf("create default team: %w", err)
+		return fmt.Errorf("create initial team: %w", err)
 	}
 
 	// Add user to team
@@ -238,12 +238,6 @@ func (p *Provider) EnsureInitUser(ctx context.Context) error {
 
 	if err := p.repo.AddTeamMember(ctx, member); err != nil {
 		return fmt.Errorf("add team member: %w", err)
-	}
-
-	// Set default team
-	user.DefaultTeamID = &team.ID
-	if err := p.repo.UpdateUser(ctx, user); err != nil {
-		return fmt.Errorf("update user default team: %w", err)
 	}
 
 	return nil

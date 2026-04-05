@@ -25,7 +25,7 @@ func TestCredentialSourcesRequireDedicatedPermissionsAtEdge(t *testing.T) {
 	defer cleanup()
 
 	t.Run("viewer can read", func(t *testing.T) {
-		tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "team-1", "viewer", "user@example.com", "User", false)
+		tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "viewer"}})
 		if err != nil {
 			t.Fatalf("issue token pair: %v", err)
 		}
@@ -35,6 +35,7 @@ func TestCredentialSourcesRequireDedicatedPermissionsAtEdge(t *testing.T) {
 			t.Fatalf("create request: %v", err)
 		}
 		req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+		req.Header.Set(internalauth.TeamIDHeader, "team-1")
 
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -55,7 +56,7 @@ func TestCredentialSourcesRequireDedicatedPermissionsAtEdge(t *testing.T) {
 	})
 
 	t.Run("viewer cannot delete", func(t *testing.T) {
-		tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "team-1", "viewer", "user@example.com", "User", false)
+		tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "viewer"}})
 		if err != nil {
 			t.Fatalf("issue token pair: %v", err)
 		}
@@ -65,6 +66,7 @@ func TestCredentialSourcesRequireDedicatedPermissionsAtEdge(t *testing.T) {
 			t.Fatalf("create request: %v", err)
 		}
 		req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+		req.Header.Set(internalauth.TeamIDHeader, "team-1")
 
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {

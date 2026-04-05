@@ -34,6 +34,14 @@ func RegisterRoutes(router gin.IRouter, deps Deps) {
 	RegisterAPIKeyRoutes(router, deps)
 }
 
+func newTeamHandler(deps Deps) *handlers.TeamHandler {
+	teamOpts := make([]handlers.TeamHandlerOption, 0, 1)
+	if deps.RequireCreateHomeRegion {
+		teamOpts = append(teamOpts, handlers.WithCreateHomeRegionRequired(deps.RegionRepo))
+	}
+	return handlers.NewTeamHandler(deps.IdentityRepo, deps.Logger, teamOpts...)
+}
+
 // RegisterIdentityRoutes mounts global identity and team directory routes.
 func RegisterIdentityRoutes(router gin.IRouter, deps Deps) {
 	authOpts := make([]handlers.AuthHandlerOption, 0, 1)
@@ -45,16 +53,11 @@ func RegisterIdentityRoutes(router gin.IRouter, deps Deps) {
 		deps.BuiltinProvider,
 		deps.OIDCManager,
 		deps.JWTIssuer,
-		tenantdir.NewResolver(deps.IdentityRepo, deps.RegionRepo),
 		deps.Logger,
 		authOpts...,
 	)
 	userHandler := handlers.NewUserHandler(deps.IdentityRepo, deps.Logger)
-	teamOpts := make([]handlers.TeamHandlerOption, 0, 1)
-	if deps.RequireCreateHomeRegion {
-		teamOpts = append(teamOpts, handlers.WithCreateHomeRegionRequired(deps.RegionRepo))
-	}
-	teamHandler := handlers.NewTeamHandler(deps.IdentityRepo, deps.Logger, teamOpts...)
+	teamHandler := newTeamHandler(deps)
 
 	// ===== Public Auth Routes (no authentication required) =====
 	auth := router.Group("/auth")

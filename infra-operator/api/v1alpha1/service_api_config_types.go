@@ -127,9 +127,6 @@ type GlobalGatewayConfig struct {
 	// +kubebuilder:default="global_gateway"
 	DatabaseSchema string `json:"databaseSchema,omitempty"`
 	// +optional
-	// +kubebuilder:default="5m"
-	RegionTokenTTL metav1.Duration `json:"regionTokenTtl,omitempty"`
-	// +optional
 	// +kubebuilder:default="30s"
 	ShutdownTimeout metav1.Duration `json:"shutdownTimeout,omitempty"`
 	// +optional

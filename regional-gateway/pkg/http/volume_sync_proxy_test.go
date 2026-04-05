@@ -127,7 +127,7 @@ func TestVolumeSyncRoutesProxyThroughDefaultClusterGateway(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "team-1", "admin", "user@example.com", "User", false)
+			tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "admin"}})
 			if err != nil {
 				t.Fatalf("issue token pair: %v", err)
 			}
@@ -137,6 +137,7 @@ func TestVolumeSyncRoutesProxyThroughDefaultClusterGateway(t *testing.T) {
 				t.Fatalf("create request: %v", err)
 			}
 			req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+			req.Header.Set(internalauth.TeamIDHeader, "team-1")
 
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {

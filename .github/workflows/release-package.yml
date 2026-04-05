@@ -19,12 +19,28 @@ on:
         required: false
         type: boolean
         default: false
+      publish_images:
+        required: false
+        type: boolean
+        default: false
+      publish_latest:
+        required: false
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       version:
         required: false
         type: string
       upload_artifacts:
+        required: false
+        type: boolean
+        default: false
+      publish_images:
+        required: false
+        type: boolean
+        default: false
+      publish_latest:
         required: false
         type: boolean
         default: false
@@ -47,6 +63,8 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
       tag: ${{ steps.meta.outputs.tag }}
       upload_artifacts: ${{ steps.meta.outputs.upload_artifacts }}
+      publish_images: ${{ steps.meta.outputs.publish_images }}
+      publish_latest: ${{ steps.meta.outputs.publish_latest }}
       artifact_run_id: ${{ steps.meta.outputs.artifact_run_id }}
     steps:
       - name: Derive release metadata
@@ -55,9 +73,17 @@ jobs:
         run: |
           requested_version="${{ inputs.version }}"
           upload_artifacts="false"
+          publish_images="false"
+          publish_latest="false"
 
           if [[ "${{ inputs.upload_artifacts }}" == "true" ]]; then
             upload_artifacts="true"
+          fi
+          if [[ "${{ inputs.publish_images }}" == "true" ]]; then
+            publish_images="true"
+          fi
+          if [[ "${{ inputs.publish_latest }}" == "true" ]]; then
+            publish_latest="true"
           fi
 
           if [[ -n "${requested_version}" ]]; then
@@ -71,6 +97,8 @@ jobs:
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "tag=v${version}" >> "$GITHUB_OUTPUT"
           echo "upload_artifacts=${upload_artifacts}" >> "$GITHUB_OUTPUT"
+          echo "publish_images=${publish_images}" >> "$GITHUB_OUTPUT"
+          echo "publish_latest=${publish_latest}" >> "$GITHUB_OUTPUT"
           echo "artifact_run_id=${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
 
   infra:
@@ -119,3 +147,15 @@ jobs:
           name: infra-operator-chart-${{ needs.metadata.outputs.version }}
           path: .cr-release-packages/infra-operator-${{ needs.metadata.outputs.version }}.tgz
           if-no-files-found: error
+
+  publish-images:
+    name: release-package / publish images
+    if: ${{ needs.metadata.outputs.publish_images == 'true' }}
+    needs:
+      - metadata
+      - infra
+    uses: ./.github/workflows/publish-infra-images.yml
+    with:
+      version: ${{ needs.metadata.outputs.version }}
+      publish_latest: ${{ needs.metadata.outputs.publish_latest == 'true' }}
+    secrets: inherit

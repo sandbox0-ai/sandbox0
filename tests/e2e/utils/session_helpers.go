@@ -12,6 +12,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
 	"github.com/sandbox0-ai/sandbox0/pkg/framework"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
 
 type Session struct {
@@ -120,9 +121,7 @@ func (s *Session) doJSONRequest(ctx context.Context, method, path string, body a
 	if body != nil {
 		req.Header.Set("Content-Type", defaultContentType)
 	}
-	if withAuth && s.token != "" {
-		req.Header.Set("Authorization", "Bearer "+s.token)
-	}
+	s.setAuthHeaders(req, withAuth)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -155,9 +154,7 @@ func (s *Session) doRawRequest(ctx context.Context, method, path string, body []
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
-	if withAuth && s.token != "" {
-		req.Header.Set("Authorization", "Bearer "+s.token)
-	}
+	s.setAuthHeaders(req, withAuth)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -170,6 +167,16 @@ func (s *Session) doRawRequest(ctx context.Context, method, path string, body []
 		return resp.StatusCode, nil, err
 	}
 	return resp.StatusCode, respBody, nil
+}
+
+func (s *Session) setAuthHeaders(req *http.Request, withAuth bool) {
+	if !withAuth || s.token == "" {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+s.token)
+	if s.teamID != "" {
+		req.Header.Set(internalauth.TeamIDHeader, s.teamID)
+	}
 }
 
 func ensureLeadingSlash(path string) string {

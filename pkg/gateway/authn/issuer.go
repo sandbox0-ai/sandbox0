@@ -11,6 +11,13 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+// TeamGrant represents one team membership grant embedded into an access token.
+type TeamGrant struct {
+	TeamID       string `json:"team_id"`
+	TeamRole     string `json:"team_role"`
+	HomeRegionID string `json:"home_region_id,omitempty"`
+}
+
 var (
 	ErrInvalidToken         = errors.New("invalid token")
 	ErrTokenExpired         = errors.New("token expired")
@@ -21,14 +28,27 @@ var (
 // Claims represents JWT claims for human session tokens.
 type Claims struct {
 	jwt.RegisteredClaims
-	UserID    string `json:"user_id"`
-	TeamID    string `json:"team_id"`
-	Email     string `json:"email"`
-	Name      string `json:"name"`
-	TeamRole  string `json:"team_role"`
-	IsAdmin   bool   `json:"is_admin"`
-	RegionID  string `json:"region_id,omitempty"`
-	TokenType string `json:"token_type"`
+	UserID     string      `json:"user_id"`
+	TeamID     string      `json:"team_id"`
+	Email      string      `json:"email"`
+	Name       string      `json:"name"`
+	TeamRole   string      `json:"team_role"`
+	TeamGrants []TeamGrant `json:"team_grants,omitempty"`
+	IsAdmin    bool        `json:"is_admin"`
+	TokenType  string      `json:"token_type"`
+}
+
+// FindTeamGrant returns the embedded grant for the requested team ID.
+func (c *Claims) FindTeamGrant(teamID string) (TeamGrant, bool) {
+	if c == nil {
+		return TeamGrant{}, false
+	}
+	for _, grant := range c.TeamGrants {
+		if grant.TeamID == teamID {
+			return grant, true
+		}
+	}
+	return TeamGrant{}, false
 }
 
 // Issuer handles JWT token creation and validation.
@@ -79,7 +99,7 @@ func (i *Issuer) IssuerName() string {
 }
 
 // IssueTokenPair issues both access and refresh tokens.
-func (i *Issuer) IssueTokenPair(userID, teamID, teamRole, email, name string, isAdmin bool) (*TokenPair, error) {
+func (i *Issuer) IssueTokenPair(userID, teamID, teamRole, email, name string, isAdmin bool, teamGrants []TeamGrant) (*TokenPair, error) {
 	if len(i.secret) == 0 {
 		return nil, ErrJWTNotConfigured
 	}
@@ -111,13 +131,14 @@ func (i *Issuer) IssueTokenPair(userID, teamID, teamRole, email, name string, is
 			IssuedAt:  jwt.NewNumericDate(currentTime),
 			NotBefore: jwt.NewNumericDate(currentTime),
 		},
-		UserID:    userID,
-		TeamID:    teamID,
-		Email:     email,
-		Name:      name,
-		TeamRole:  teamRole,
-		IsAdmin:   isAdmin,
-		TokenType: "access",
+		UserID:     userID,
+		TeamID:     teamID,
+		Email:      email,
+		Name:       name,
+		TeamRole:   teamRole,
+		TeamGrants: teamGrants,
+		IsAdmin:    isAdmin,
+		TokenType:  "access",
 	}
 
 	accessToken := jwt.NewWithClaims(jwt.SigningMethodHS256, accessClaims)
@@ -180,53 +201,6 @@ func (i *Issuer) ValidateRefreshToken(tokenString string) (*Claims, error) {
 		return nil, err
 	}
 	if claims.TokenType != "refresh" {
-		return nil, ErrInvalidToken
-	}
-	return claims, nil
-}
-
-// IssueRegionToken issues a short-lived token scoped to a specific region.
-func (i *Issuer) IssueRegionToken(userID, teamID, teamRole, regionID string, isAdmin bool, ttl time.Duration) (string, time.Time, error) {
-	if len(i.secret) == 0 {
-		return "", time.Time{}, ErrJWTNotConfigured
-	}
-	if ttl <= 0 {
-		ttl = i.accessTokenTTL
-	}
-
-	now := time.Now()
-	expiry := now.Add(ttl)
-	claims := &Claims{
-		RegisteredClaims: jwt.RegisteredClaims{
-			Issuer:    i.issuer,
-			Subject:   userID,
-			ExpiresAt: jwt.NewNumericDate(expiry),
-			IssuedAt:  jwt.NewNumericDate(now),
-			NotBefore: jwt.NewNumericDate(now),
-		},
-		UserID:    userID,
-		TeamID:    teamID,
-		TeamRole:  teamRole,
-		IsAdmin:   isAdmin,
-		RegionID:  regionID,
-		TokenType: "region",
-	}
-
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	tokenString, err := token.SignedString(i.secret)
-	if err != nil {
-		return "", time.Time{}, err
-	}
-	return tokenString, expiry, nil
-}
-
-// ValidateRegionToken validates a region-scoped token.
-func (i *Issuer) ValidateRegionToken(tokenString string) (*Claims, error) {
-	claims, err := i.validateToken(tokenString)
-	if err != nil {
-		return nil, err
-	}
-	if claims.TokenType != "region" {
 		return nil, ErrInvalidToken
 	}
 	return claims, nil

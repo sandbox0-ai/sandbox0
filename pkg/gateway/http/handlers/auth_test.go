@@ -19,6 +19,7 @@ import (
 
 type mockAuthRepository struct {
 	users              map[string]*identity.User
+	teams              map[string]*identity.Team
 	refreshTokens      map[string]*identity.RefreshToken
 	deviceAuthSessions map[string]*identity.DeviceAuthSession
 	teamMembers        map[string]*identity.TeamMember
@@ -28,6 +29,7 @@ type mockAuthRepository struct {
 func newMockAuthRepository() *mockAuthRepository {
 	return &mockAuthRepository{
 		users:              map[string]*identity.User{},
+		teams:              map[string]*identity.Team{},
 		refreshTokens:      map[string]*identity.RefreshToken{},
 		deviceAuthSessions: map[string]*identity.DeviceAuthSession{},
 		teamMembers:        map[string]*identity.TeamMember{},
@@ -94,6 +96,10 @@ func (m *mockAuthRepository) GetTeamsByUserID(_ context.Context, userID string) 
 			continue
 		}
 		seen[member.TeamID] = struct{}{}
+		if team, ok := m.teams[member.TeamID]; ok {
+			teams = append(teams, team)
+			continue
+		}
 		teams = append(teams, &identity.Team{ID: member.TeamID})
 		_ = key
 	}
@@ -149,7 +155,7 @@ func TestAuthHandler_RefreshToken_SucceedsWithPersistedToken(t *testing.T) {
 	repo.users[user.ID] = user
 
 	issuer := authn.NewIssuer("regional-gateway", "test-secret", time.Minute, time.Hour)
-	initialTokens, err := issuer.IssueTokenPair(user.ID, "", "", user.Email, user.Name, user.IsAdmin)
+	initialTokens, err := issuer.IssueTokenPair(user.ID, "", "", user.Email, user.Name, user.IsAdmin, nil)
 	if err != nil {
 		t.Fatalf("issue initial token pair: %v", err)
 	}
@@ -214,9 +220,11 @@ func TestAuthHandler_RefreshToken_IncludesImplicitSingleTeamContext(t *testing.T
 		UserID: "user-1",
 		Role:   "admin",
 	}
+	homeRegionID := "aws-us-east-1"
+	repo.teams["team-1"] = &identity.Team{ID: "team-1", HomeRegionID: &homeRegionID}
 
 	issuer := authn.NewIssuer("global-gateway", "test-secret", time.Minute, time.Hour)
-	initialTokens, err := issuer.IssueTokenPair(user.ID, "team-1", "admin", user.Email, user.Name, user.IsAdmin)
+	initialTokens, err := issuer.IssueTokenPair(user.ID, "team-1", "admin", user.Email, user.Name, user.IsAdmin, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "admin", HomeRegionID: homeRegionID}})
 	if err != nil {
 		t.Fatalf("issue initial token pair: %v", err)
 	}
@@ -265,6 +273,9 @@ func TestAuthHandler_RefreshToken_IncludesImplicitSingleTeamContext(t *testing.T
 	if claims.TeamRole != "admin" {
 		t.Fatalf("expected implicit team role admin, got %q", claims.TeamRole)
 	}
+	if len(claims.TeamGrants) != 1 || claims.TeamGrants[0].HomeRegionID != homeRegionID {
+		t.Fatalf("expected single team grant with home region, got %+v", claims.TeamGrants)
+	}
 }
 
 func TestAuthHandler_RefreshToken_OmitsTeamContextWhenUserHasMultipleTeams(t *testing.T) {
@@ -291,9 +302,13 @@ func TestAuthHandler_RefreshToken_OmitsTeamContextWhenUserHasMultipleTeams(t *te
 		UserID: "user-1",
 		Role:   "viewer",
 	}
+	homeRegionA := "aws-us-east-1"
+	homeRegionB := "aws-eu-west-1"
+	repo.teams["team-1"] = &identity.Team{ID: "team-1", HomeRegionID: &homeRegionA}
+	repo.teams["team-2"] = &identity.Team{ID: "team-2", HomeRegionID: &homeRegionB}
 
 	issuer := authn.NewIssuer("global-gateway", "test-secret", time.Minute, time.Hour)
-	initialTokens, err := issuer.IssueTokenPair(user.ID, "team-1", "admin", user.Email, user.Name, user.IsAdmin)
+	initialTokens, err := issuer.IssueTokenPair(user.ID, "team-1", "admin", user.Email, user.Name, user.IsAdmin, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "admin", HomeRegionID: homeRegionA}, {TeamID: "team-2", TeamRole: "viewer", HomeRegionID: homeRegionB}})
 	if err != nil {
 		t.Fatalf("issue initial token pair: %v", err)
 	}
@@ -339,6 +354,9 @@ func TestAuthHandler_RefreshToken_OmitsTeamContextWhenUserHasMultipleTeams(t *te
 	if claims.TeamID != "" {
 		t.Fatalf("expected multi-team refresh token to be teamless, got team_id=%q", claims.TeamID)
 	}
+	if len(claims.TeamGrants) != 2 {
+		t.Fatalf("expected multi-team refresh token to include team grants, got %+v", claims.TeamGrants)
+	}
 }
 
 func TestAuthHandler_LogoutRevocation_BlocksRefresh(t *testing.T) {
@@ -355,7 +373,7 @@ func TestAuthHandler_LogoutRevocation_BlocksRefresh(t *testing.T) {
 	repo.users[user.ID] = user
 
 	issuer := authn.NewIssuer("regional-gateway", "test-secret", time.Minute, time.Hour)
-	initialTokens, err := issuer.IssueTokenPair(user.ID, "", "", user.Email, user.Name, user.IsAdmin)
+	initialTokens, err := issuer.IssueTokenPair(user.ID, "", "", user.Email, user.Name, user.IsAdmin, nil)
 	if err != nil {
 		t.Fatalf("issue initial token pair: %v", err)
 	}
@@ -413,7 +431,7 @@ func TestAuthHandler_RefreshToken_FailsWhenTokenNeverPersisted(t *testing.T) {
 	repo.users[user.ID] = user
 
 	issuer := authn.NewIssuer("regional-gateway", "test-secret", time.Minute, time.Hour)
-	initialTokens, err := issuer.IssueTokenPair(user.ID, "", "", user.Email, user.Name, user.IsAdmin)
+	initialTokens, err := issuer.IssueTokenPair(user.ID, "", "", user.Email, user.Name, user.IsAdmin, nil)
 	if err != nil {
 		t.Fatalf("issue initial token pair: %v", err)
 	}

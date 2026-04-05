@@ -40,11 +40,6 @@ func (s *Session) Login(ctx context.Context, t ContractT, email, password string
 	s.token = resp.Data.AccessToken
 	s.userID = resp.Data.User.Id
 
-	if resp.Data.User.DefaultTeamId != nil && *resp.Data.User.DefaultTeamId != "" {
-		s.teamID = *resp.Data.User.DefaultTeamId
-		return nil
-	}
-
 	teams, err := s.listTeams(ctx, t)
 	if err != nil {
 		return err

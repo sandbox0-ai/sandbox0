@@ -25,7 +25,7 @@ func TestCredentialSourcesRequireDedicatedPermissionsAtEdge(t *testing.T) {
 	defer cleanup()
 
 	t.Run("viewer can read", func(t *testing.T) {
-		tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "team-1", "viewer", "user@example.com", "User", false)
+		tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "team-1", "viewer", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "viewer"}})
 		if err != nil {
 			t.Fatalf("issue token pair: %v", err)
 		}
@@ -55,7 +55,7 @@ func TestCredentialSourcesRequireDedicatedPermissionsAtEdge(t *testing.T) {
 	})
 
 	t.Run("viewer cannot delete", func(t *testing.T) {
-		tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "team-1", "viewer", "user@example.com", "User", false)
+		tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "team-1", "viewer", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "viewer"}})
 		if err != nil {
 			t.Fatalf("issue token pair: %v", err)
 		}

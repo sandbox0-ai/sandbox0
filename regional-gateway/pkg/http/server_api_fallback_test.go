@@ -95,7 +95,7 @@ func TestSetupRoutesFallsBackToClusterGatewayForUnmatchedAPIPaths(t *testing.T) 
 	gateway := httptest.NewServer(server.router)
 	defer gateway.Close()
 
-	tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "team-1", "admin", "user@example.com", "User", false)
+	tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "team-1", "admin", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "admin"}})
 	if err != nil {
 		t.Fatalf("issue token pair: %v", err)
 	}

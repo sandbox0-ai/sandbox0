@@ -358,49 +358,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-  /auth/region-token:
-    post:
-      tags: [tenant]
-      summary: Exchange a user session and explicit team selection for a region-scoped token
-      security:
-        - bearerAuth: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/IssueRegionTokenRequest"
-      responses:
-        "200":
-          description: Region token issued
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SuccessIssueRegionTokenResponse"
-        "400":
-          description: team_id missing or invalid request
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
-        "401":
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
-        "403":
-          description: Team not accessible
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
-        "409":
-          description: Team is not routable
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
   /users/me:
     get:
       tags: [users]
@@ -3320,36 +3277,6 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/User"
-    IssueRegionTokenRequest:
-      type: object
-      properties:
-        team_id:
-          type: string
-      required: [team_id]
-    RegionalSession:
-      type: object
-      properties:
-        region_id:
-          type: string
-        regional_gateway_url:
-          type: string
-          nullable: true
-        token:
-          type: string
-        expires_at:
-          type: integer
-          format: int64
-      required: [region_id, token, expires_at]
-    IssueRegionTokenResponse:
-      allOf:
-        - $ref: "#/components/schemas/RegionalSession"
-    SuccessIssueRegionTokenResponse:
-      allOf:
-        - $ref: "#/components/schemas/SuccessEnvelope"
-        - type: object
-          properties:
-            data:
-              $ref: "#/components/schemas/IssueRegionTokenResponse"
     Identity:
       type: object
       properties:

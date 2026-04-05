@@ -1266,9 +1266,6 @@ spec:
                             default: 100
                             description: Rate limiting
                             type: integer
-                          regionTokenTtl:
-                            default: 5m
-                            type: string
                           serverIdleTimeout:
                             default: 120s
                             type: string

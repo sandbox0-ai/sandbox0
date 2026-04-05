@@ -95,7 +95,7 @@ func TestSetupMeteringRoutesAllowsSystemAdminInPublicMode(t *testing.T) {
 	server, _, issuer := testMeteringRouteServer(t, "public")
 	server.setupMeteringRoutes()
 
-	tokens, err := issuer.IssueTokenPair("user-1", "team-1", "admin", "user@example.com", "User", true)
+	tokens, err := issuer.IssueTokenPair("user-1", "team-1", "admin", "user@example.com", "User", true, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "admin"}})
 	if err != nil {
 		t.Fatalf("issue token pair: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestSetupMeteringRoutesRejectsNonAdminInBothMode(t *testing.T) {
 	server, _, issuer := testMeteringRouteServer(t, "both")
 	server.setupMeteringRoutes()
 
-	tokens, err := issuer.IssueTokenPair("user-1", "team-1", "admin", "user@example.com", "User", false)
+	tokens, err := issuer.IssueTokenPair("user-1", "team-1", "admin", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "admin"}})
 	if err != nil {
 		t.Fatalf("issue token pair: %v", err)
 	}

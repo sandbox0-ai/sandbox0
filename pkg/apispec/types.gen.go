@@ -244,11 +244,6 @@ const (
 	SuccessIdentityListResponseSuccessTrue SuccessIdentityListResponseSuccess = true
 )
 
-// Defines values for SuccessIssueRegionTokenResponseSuccess.
-const (
-	SuccessIssueRegionTokenResponseSuccessTrue SuccessIssueRegionTokenResponseSuccess = true
-)
-
 // Defines values for SuccessLoginResponseSuccess.
 const (
 	SuccessLoginResponseSuccessTrue SuccessLoginResponseSuccess = true
@@ -431,7 +426,7 @@ const (
 
 // Defines values for SuccessWrittenResponseSuccess.
 const (
-	True SuccessWrittenResponseSuccess = true
+	SuccessWrittenResponseSuccessTrue SuccessWrittenResponseSuccess = true
 )
 
 // Defines values for SyncEventType.
@@ -997,14 +992,6 @@ type Identity struct {
 	Provider  string `json:"provider"`
 }
 
-// IssueRegionTokenRequest defines model for IssueRegionTokenRequest.
-type IssueRegionTokenRequest struct {
-	TeamId string `json:"team_id"`
-}
-
-// IssueRegionTokenResponse defines model for IssueRegionTokenResponse.
-type IssueRegionTokenResponse = RegionalSession
-
 // LabelSelector defines model for LabelSelector.
 type LabelSelector struct {
 	MatchExpressions *[]LabelSelectorRequirement `json:"matchExpressions,omitempty"`
@@ -1312,14 +1299,6 @@ type Region struct {
 	Id                 string  `json:"id"`
 	MeteringExportUrl  *string `json:"metering_export_url"`
 	RegionalGatewayUrl string  `json:"regional_gateway_url"`
-}
-
-// RegionalSession defines model for RegionalSession.
-type RegionalSession struct {
-	ExpiresAt          int64   `json:"expires_at"`
-	RegionId           string  `json:"region_id"`
-	RegionalGatewayUrl *string `json:"regional_gateway_url"`
-	Token              string  `json:"token"`
 }
 
 // RegisterRequest defines model for RegisterRequest.
@@ -1828,15 +1807,6 @@ type SuccessIdentityListResponse struct {
 
 // SuccessIdentityListResponseSuccess defines model for SuccessIdentityListResponse.Success.
 type SuccessIdentityListResponseSuccess bool
-
-// SuccessIssueRegionTokenResponse defines model for SuccessIssueRegionTokenResponse.
-type SuccessIssueRegionTokenResponse struct {
-	Data    *IssueRegionTokenResponse              `json:"data,omitempty"`
-	Success SuccessIssueRegionTokenResponseSuccess `json:"success"`
-}
-
-// SuccessIssueRegionTokenResponseSuccess defines model for SuccessIssueRegionTokenResponse.Success.
-type SuccessIssueRegionTokenResponseSuccess bool
 
 // SuccessLoginResponse defines model for SuccessLoginResponse.
 type SuccessLoginResponse struct {
@@ -2783,9 +2753,6 @@ type PostAuthOidcProviderDevicePollJSONRequestBody = DeviceLoginPollRequest
 
 // PostAuthRefreshJSONRequestBody defines body for PostAuthRefresh for application/json ContentType.
 type PostAuthRefreshJSONRequestBody = RefreshRequest
-
-// PostAuthRegionTokenJSONRequestBody defines body for PostAuthRegionToken for application/json ContentType.
-type PostAuthRegionTokenJSONRequestBody = IssueRegionTokenRequest
 
 // PostAuthRegisterJSONRequestBody defines body for PostAuthRegister for application/json ContentType.
 type PostAuthRegisterJSONRequestBody = RegisterRequest

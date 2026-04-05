@@ -37,7 +37,7 @@ func TestSetupMeteringRoutesRequiresSystemAdmin(t *testing.T) {
 	server := testMeteringRouteServer()
 	server.setupMeteringRoutes()
 
-	nonAdminTokens, err := server.jwtIssuer.IssueTokenPair("user-1", "team-1", "admin", "user@example.com", "User", false)
+	nonAdminTokens, err := server.jwtIssuer.IssueTokenPair("user-1", "team-1", "admin", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "admin"}})
 	if err != nil {
 		t.Fatalf("issue token pair: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestSetupMeteringRoutesAllowsSystemAdmin(t *testing.T) {
 	server := testMeteringRouteServer()
 	server.setupMeteringRoutes()
 
-	adminTokens, err := server.jwtIssuer.IssueTokenPair("user-1", "team-1", "admin", "user@example.com", "User", true)
+	adminTokens, err := server.jwtIssuer.IssueTokenPair("user-1", "team-1", "admin", "user@example.com", "User", true, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "admin"}})
 	if err != nil {
 		t.Fatalf("issue token pair: %v", err)
 	}

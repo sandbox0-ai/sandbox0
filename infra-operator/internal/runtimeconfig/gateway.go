@@ -16,7 +16,6 @@ func ToGlobalGateway(spec *infrav1alpha1.GlobalGatewayConfig) *apiconfig.GlobalG
 	cfg.DatabaseMaxConns = spec.DatabaseMaxConns
 	cfg.DatabaseMinConns = spec.DatabaseMinConns
 	cfg.DatabaseSchema = spec.DatabaseSchema
-	cfg.RegionTokenTTL = spec.RegionTokenTTL
 	cfg.ShutdownTimeout = spec.ShutdownTimeout
 	cfg.ServerReadTimeout = spec.ServerReadTimeout
 	cfg.ServerWriteTimeout = spec.ServerWriteTimeout

@@ -22,7 +22,7 @@ func TestRegistryCredentialsRequireTemplateWritePermission(t *testing.T) {
 	defer cleanup()
 
 	t.Run("forbidden without template write", func(t *testing.T) {
-		tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "team-1", "developer", "user@example.com", "User", false)
+		tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "team-1", "developer", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "developer"}})
 		if err != nil {
 			t.Fatalf("issue token pair: %v", err)
 		}
@@ -42,7 +42,7 @@ func TestRegistryCredentialsRequireTemplateWritePermission(t *testing.T) {
 	})
 
 	t.Run("allowed with template write", func(t *testing.T) {
-		tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "team-1", "admin", "user@example.com", "User", false)
+		tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "team-1", "admin", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "admin"}})
 		if err != nil {
 			t.Fatalf("issue token pair: %v", err)
 		}

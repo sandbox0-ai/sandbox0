@@ -10,6 +10,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
 )
 
@@ -17,34 +18,24 @@ type apiKeyValidator interface {
 	ValidateAPIKey(ctx context.Context, keyValue string) (*apikey.APIKey, error)
 }
 
-// JWTValidationMode controls which JWT token type the middleware accepts.
-type JWTValidationMode string
-
-const (
-	JWTValidationModeAccess JWTValidationMode = "access"
-	JWTValidationModeRegion JWTValidationMode = "region"
-)
-
 type AuthMiddlewareOption func(*AuthMiddleware)
 
 // AuthMiddleware provides authentication middleware
 type AuthMiddleware struct {
-	apiKeys           apiKeyValidator
-	jwtIssuer         *authn.Issuer
-	jwtSecret         []byte
-	logger            *zap.Logger
-	jwtValidationMode JWTValidationMode
-	requiredRegionID  string
+	apiKeys              apiKeyValidator
+	jwtIssuer            *authn.Issuer
+	jwtSecret            []byte
+	logger               *zap.Logger
+	requiredTeamRegionID string
 }
 
 // NewAuthMiddleware creates a new auth middleware
 func NewAuthMiddleware(apiKeys apiKeyValidator, jwtSecret string, jwtIssuer *authn.Issuer, logger *zap.Logger, opts ...AuthMiddlewareOption) *AuthMiddleware {
 	m := &AuthMiddleware{
-		apiKeys:           apiKeys,
-		jwtIssuer:         jwtIssuer,
-		jwtSecret:         []byte(jwtSecret),
-		logger:            logger,
-		jwtValidationMode: JWTValidationModeAccess,
+		apiKeys:   apiKeys,
+		jwtIssuer: jwtIssuer,
+		jwtSecret: []byte(jwtSecret),
+		logger:    logger,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -54,22 +45,10 @@ func NewAuthMiddleware(apiKeys apiKeyValidator, jwtSecret string, jwtIssuer *aut
 	return m
 }
 
-// WithJWTValidationMode changes the accepted JWT token type.
-func WithJWTValidationMode(mode JWTValidationMode) AuthMiddlewareOption {
+// WithRequiredTeamRegionID restricts selected teams to a single home region.
+func WithRequiredTeamRegionID(regionID string) AuthMiddlewareOption {
 	return func(m *AuthMiddleware) {
-		switch mode {
-		case JWTValidationModeRegion:
-			m.jwtValidationMode = JWTValidationModeRegion
-		default:
-			m.jwtValidationMode = JWTValidationModeAccess
-		}
-	}
-}
-
-// WithRequiredRegionID binds accepted region tokens to a single region id.
-func WithRequiredRegionID(regionID string) AuthMiddlewareOption {
-	return func(m *AuthMiddleware) {
-		m.requiredRegionID = strings.TrimSpace(regionID)
+		m.requiredTeamRegionID = strings.TrimSpace(regionID)
 	}
 }
 
@@ -161,15 +140,26 @@ func (m *AuthMiddleware) authenticateJWT(c *gin.Context, tokenString string) (*a
 		}
 
 		permissions := authn.ExpandRolePermissions(claims.TeamRole)
+		teamID := strings.TrimSpace(claims.TeamID)
+		teamRole := strings.TrimSpace(claims.TeamRole)
+		if claims.TokenType == "access" && strings.TrimSpace(claims.UserID) != "" {
+			selectedTeamID, selectedTeamRole, err := m.resolveSelectedTeam(c.Request.Context(), c.GetHeader(internalauth.TeamIDHeader), claims)
+			if err != nil {
+				return nil, err
+			}
+			teamID = selectedTeamID
+			teamRole = selectedTeamRole
+			permissions = authn.ExpandRolePermissions(teamRole)
+		}
 		if claims.IsAdmin {
 			permissions = append(permissions, "*")
 		}
 
 		return &authn.AuthContext{
 			AuthMethod:    authn.AuthMethodJWT,
-			TeamID:        claims.TeamID,
+			TeamID:        teamID,
 			UserID:        claims.UserID,
-			TeamRole:      claims.TeamRole,
+			TeamRole:      teamRole,
 			IsSystemAdmin: claims.IsAdmin,
 			Permissions:   permissions,
 		}, nil
@@ -217,33 +207,15 @@ func (m *AuthMiddleware) authenticateJWT(c *gin.Context, tokenString string) (*a
 }
 
 func (m *AuthMiddleware) validateJWT(tokenString string) (*authn.Claims, error) {
-	switch m.jwtValidationMode {
-	case JWTValidationModeRegion:
-		if m.jwtIssuer == nil {
-			return nil, authn.ErrJWTNotConfigured
-		}
-		claims, err := m.jwtIssuer.ValidateRegionToken(tokenString)
+	if m.jwtIssuer != nil {
+		claims, err := m.jwtIssuer.ValidateAccessToken(tokenString)
 		if err != nil {
 			return nil, err
 		}
 		if expectedIssuer := strings.TrimSpace(m.jwtIssuer.IssuerName()); expectedIssuer != "" && claims.Issuer != expectedIssuer {
 			return nil, authn.ErrInvalidToken
 		}
-		if m.requiredRegionID != "" && strings.TrimSpace(claims.RegionID) != m.requiredRegionID {
-			return nil, authn.ErrInvalidToken
-		}
 		return claims, nil
-	default:
-		if m.jwtIssuer != nil {
-			claims, err := m.jwtIssuer.ValidateAccessToken(tokenString)
-			if err != nil {
-				return nil, err
-			}
-			if expectedIssuer := strings.TrimSpace(m.jwtIssuer.IssuerName()); expectedIssuer != "" && claims.Issuer != expectedIssuer {
-				return nil, authn.ErrInvalidToken
-			}
-			return claims, nil
-		}
 	}
 
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (any, error) {
@@ -279,10 +251,63 @@ func (m *AuthMiddleware) validateJWT(tokenString string) (*authn.Claims, error) 
 	claims.TeamID, _ = mapClaims["team_id"].(string)
 	claims.UserID, _ = mapClaims["user_id"].(string)
 	claims.TeamRole, _ = mapClaims["team_role"].(string)
-	claims.RegionID, _ = mapClaims["region_id"].(string)
+	claims.TeamGrants = parseTeamGrants(mapClaims["team_grants"])
 	claims.TokenType, _ = mapClaims["token_type"].(string)
 	claims.IsAdmin, _ = mapClaims["is_admin"].(bool)
 	return claims, nil
+}
+
+func (m *AuthMiddleware) resolveSelectedTeam(ctx context.Context, headerTeamID string, claims *authn.Claims) (string, string, error) {
+	selectedTeamID := strings.TrimSpace(headerTeamID)
+	if selectedTeamID == "" {
+		selectedTeamID = strings.TrimSpace(claims.TeamID)
+	}
+	if selectedTeamID == "" {
+		return "", "", nil
+	}
+	if grant, ok := claims.FindTeamGrant(selectedTeamID); ok {
+		if err := m.validateTeamGrantRegion(grant); err != nil {
+			return "", "", err
+		}
+		return selectedTeamID, strings.TrimSpace(grant.TeamRole), nil
+	}
+	return "", "", ErrSelectedTeamForbidden
+}
+
+func (m *AuthMiddleware) validateTeamGrantRegion(grant authn.TeamGrant) error {
+	if m.requiredTeamRegionID == "" {
+		return nil
+	}
+	if strings.TrimSpace(grant.HomeRegionID) != m.requiredTeamRegionID {
+		return ErrSelectedTeamWrongRegion
+	}
+	return nil
+}
+
+func parseTeamGrants(raw any) []authn.TeamGrant {
+	rawGrants, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	grants := make([]authn.TeamGrant, 0, len(rawGrants))
+	for _, entry := range rawGrants {
+		grantMap, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		teamID, _ := grantMap["team_id"].(string)
+		teamRole, _ := grantMap["team_role"].(string)
+		homeRegionID, _ := grantMap["home_region_id"].(string)
+		if strings.TrimSpace(teamID) == "" {
+			continue
+		}
+		grants = append(grants, authn.TeamGrant{
+			TeamID:       teamID,
+			TeamRole:     teamRole,
+			HomeRegionID: homeRegionID,
+		})
+	}
+	return grants
 }
 
 // RequirePermission returns middleware that checks for a specific permission

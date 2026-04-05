@@ -162,9 +162,8 @@ func NewServer(
 	// Create middleware
 	authMiddlewareOptions := []middleware.AuthMiddlewareOption(nil)
 	if !selfHostedAuthEnabled {
-		authMiddlewareOptions = append(authMiddlewareOptions, middleware.WithJWTValidationMode(middleware.JWTValidationModeRegion))
 		if strings.TrimSpace(cfg.RegionID) != "" {
-			authMiddlewareOptions = append(authMiddlewareOptions, middleware.WithRequiredRegionID(cfg.RegionID))
+			authMiddlewareOptions = append(authMiddlewareOptions, middleware.WithRequiredTeamRegionID(cfg.RegionID))
 		}
 	}
 	authMiddleware := middleware.NewAuthMiddleware(apiKeyRepo, cfg.JWTSecret, jwtIssuer, logger, authMiddlewareOptions...)

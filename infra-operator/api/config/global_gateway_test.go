@@ -13,7 +13,6 @@ func TestLoadGlobalGatewayConfigExpandsEnvAndParsesDurations(t *testing.T) {
 
 	t.Setenv("TEST_DATABASE_URL", "postgres://cloud:test@localhost:5432/cloud")
 	configYAML := `database_url: ${TEST_DATABASE_URL}
-region_token_ttl: 7m
 shutdown_timeout: 31s
 jwt_access_token_ttl: 20m
 oidc_state_cleanup_interval: 2m
@@ -29,9 +28,6 @@ oidc_state_cleanup_interval: 2m
 
 	if cfg.DatabaseURL != "postgres://cloud:test@localhost:5432/cloud" {
 		t.Fatalf("unexpected database url %q", cfg.DatabaseURL)
-	}
-	if cfg.RegionTokenTTL.Duration != 7*time.Minute {
-		t.Fatalf("unexpected region token ttl %s", cfg.RegionTokenTTL.Duration)
 	}
 	if cfg.ShutdownTimeout.Duration != 31*time.Second {
 		t.Fatalf("unexpected shutdown timeout %s", cfg.ShutdownTimeout.Duration)
@@ -49,8 +45,6 @@ func TestLoadGlobalGatewayConfigParsesStructuredDurations(t *testing.T) {
 	configPath := filepath.Join(tempDir, "config.yaml")
 
 	configYAML := `database_url: postgres://cloud:test@localhost:5432/cloud
-region_token_ttl:
-  duration: 7m
 shutdown_timeout:
   duration: 31s
 jwt_access_token_ttl:
@@ -67,9 +61,6 @@ oidc_state_cleanup_interval:
 		t.Fatalf("load config: %v", err)
 	}
 
-	if cfg.RegionTokenTTL.Duration != 7*time.Minute {
-		t.Fatalf("unexpected region token ttl %s", cfg.RegionTokenTTL.Duration)
-	}
 	if cfg.ShutdownTimeout.Duration != 31*time.Second {
 		t.Fatalf("unexpected shutdown timeout %s", cfg.ShutdownTimeout.Duration)
 	}
@@ -85,7 +76,7 @@ func TestLoadGlobalGatewayConfigRejectsInvalidDuration(t *testing.T) {
 	tempDir := t.TempDir()
 	configPath := filepath.Join(tempDir, "config.yaml")
 
-	if err := os.WriteFile(configPath, []byte("region_token_ttl: nope\n"), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte("shutdown_timeout: nope\n"), 0o600); err != nil {
 		t.Fatalf("write config file: %v", err)
 	}
 

@@ -8,6 +8,22 @@ type GatewayConfig struct {
 	// JWTIssuer sets the JWT issuer for gateway-issued tokens.
 	// +optional
 	JWTIssuer string `json:"jwtIssuer,omitempty"`
+	// JWTPrivateKeyPEM sets the PEM-encoded Ed25519 private key used to sign
+	// user-facing JWTs.
+	// +optional
+	JWTPrivateKeyPEM string `json:"jwtPrivateKeyPEM,omitempty"`
+	// JWTPublicKeyPEM sets the PEM-encoded Ed25519 public key used to verify
+	// user-facing JWTs.
+	// +optional
+	JWTPublicKeyPEM string `json:"jwtPublicKeyPEM,omitempty"`
+	// JWTPrivateKeyFile points at a PEM-encoded Ed25519 private key file used to
+	// sign user-facing JWTs.
+	// +optional
+	JWTPrivateKeyFile string `json:"jwtPrivateKeyFile,omitempty"`
+	// JWTPublicKeyFile points at a PEM-encoded Ed25519 public key file used to
+	// verify user-facing JWTs.
+	// +optional
+	JWTPublicKeyFile string `json:"jwtPublicKeyFile,omitempty"`
 	// +optional
 	// +kubebuilder:default="15m"
 	JWTAccessTokenTTL metav1.Duration `json:"jwtAccessTokenTTL,omitempty"`

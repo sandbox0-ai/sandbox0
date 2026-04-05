@@ -142,14 +142,14 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
-	teamGrants, teamID, teamRole, err := h.buildTeamGrants(c.Request.Context(), user.ID)
+	teamGrants, err := h.buildTeamGrants(c.Request.Context(), user.ID)
 	if err != nil {
 		h.logger.Warn("Failed to resolve login team context", zap.Error(err))
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "user is not a member of the selected team")
 		return
 	}
 
-	tokens, err := h.issueAndPersistTokenPair(c.Request.Context(), user, teamID, teamRole, teamGrants)
+	tokens, err := h.issueAndPersistTokenPair(c.Request.Context(), user, teamGrants)
 	if err != nil {
 		h.logger.Error("Failed to issue tokens", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to issue tokens")
@@ -218,14 +218,14 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		return
 	}
 
-	teamGrants, teamID, teamRole, err := h.buildTeamGrants(c.Request.Context(), user.ID)
+	teamGrants, err := h.buildTeamGrants(c.Request.Context(), user.ID)
 	if err != nil {
 		h.logger.Warn("Failed to resolve register team context", zap.Error(err))
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "user is not a member of the selected team")
 		return
 	}
 
-	tokens, err := h.issueAndPersistTokenPair(c.Request.Context(), user, teamID, teamRole, teamGrants)
+	tokens, err := h.issueAndPersistTokenPair(c.Request.Context(), user, teamGrants)
 	if err != nil {
 		h.logger.Error("Failed to issue tokens", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to issue tokens")
@@ -274,7 +274,7 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 		return
 	}
 
-	teamGrants, teamID, teamRole, err := h.buildTeamGrants(c.Request.Context(), user.ID)
+	teamGrants, err := h.buildTeamGrants(c.Request.Context(), user.ID)
 	if err != nil {
 		h.logger.Warn("Failed to resolve refresh team context", zap.Error(err))
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "user is not a member of the selected team")
@@ -282,7 +282,7 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 	}
 
 	// Issue new tokens
-	tokens, err := h.issueAndPersistTokenPair(c.Request.Context(), user, teamID, teamRole, teamGrants)
+	tokens, err := h.issueAndPersistTokenPair(c.Request.Context(), user, teamGrants)
 	if err != nil {
 		h.logger.Error("Failed to issue tokens", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to issue tokens")
@@ -362,16 +362,16 @@ func (h *AuthHandler) resolveTeamRole(ctx context.Context, teamID, userID string
 	return member.Role, nil
 }
 
-func (h *AuthHandler) buildTeamGrants(ctx context.Context, userID string) ([]authn.TeamGrant, string, string, error) {
+func (h *AuthHandler) buildTeamGrants(ctx context.Context, userID string) ([]authn.TeamGrant, error) {
 	teams, err := h.repo.GetTeamsByUserID(ctx, userID)
 	if err != nil {
-		return nil, "", "", err
+		return nil, err
 	}
 	grants := make([]authn.TeamGrant, 0, len(teams))
 	for _, team := range teams {
 		role, err := h.resolveTeamRole(ctx, team.ID, userID)
 		if err != nil {
-			return nil, "", "", err
+			return nil, err
 		}
 		grant := authn.TeamGrant{
 			TeamID:   team.ID,
@@ -385,10 +385,7 @@ func (h *AuthHandler) buildTeamGrants(ctx context.Context, userID string) ([]aut
 	sort.Slice(grants, func(i, j int) bool {
 		return grants[i].TeamID < grants[j].TeamID
 	})
-	if len(grants) != 1 {
-		return grants, "", "", nil
-	}
-	return grants, grants[0].TeamID, grants[0].TeamRole, nil
+	return grants, nil
 }
 
 // OIDCLogin initiates OIDC login
@@ -659,12 +656,12 @@ func (h *AuthHandler) OIDCDevicePoll(c *gin.Context) {
 var errUserNotMemberOfSelectedTeam = errors.New("user is not a member of the selected team")
 
 func (h *AuthHandler) buildLoginResponse(ctx context.Context, user *identity.User) (*LoginResponse, *authn.TokenPair, error) {
-	teamGrants, teamID, teamRole, err := h.buildTeamGrants(ctx, user.ID)
+	teamGrants, err := h.buildTeamGrants(ctx, user.ID)
 	if err != nil {
 		return nil, nil, errUserNotMemberOfSelectedTeam
 	}
 
-	tokens, err := h.issueAndPersistTokenPair(ctx, user, teamID, teamRole, teamGrants)
+	tokens, err := h.issueAndPersistTokenPair(ctx, user, teamGrants)
 	if err != nil {
 		return nil, nil, fmt.Errorf("issue tokens: %w", err)
 	}
@@ -676,11 +673,9 @@ func (h *AuthHandler) buildLoginResponse(ctx context.Context, user *identity.Use
 	}, tokens, nil
 }
 
-func (h *AuthHandler) issueAndPersistTokenPair(ctx context.Context, user *identity.User, teamID, teamRole string, teamGrants []authn.TeamGrant) (*authn.TokenPair, error) {
+func (h *AuthHandler) issueAndPersistTokenPair(ctx context.Context, user *identity.User, teamGrants []authn.TeamGrant) (*authn.TokenPair, error) {
 	tokens, err := h.jwtIssuer.IssueTokenPair(
 		user.ID,
-		teamID,
-		teamRole,
 		user.Email,
 		user.Name,
 		user.IsAdmin,

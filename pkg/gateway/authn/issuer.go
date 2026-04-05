@@ -29,10 +29,8 @@ var (
 type Claims struct {
 	jwt.RegisteredClaims
 	UserID     string      `json:"user_id"`
-	TeamID     string      `json:"team_id"`
 	Email      string      `json:"email"`
 	Name       string      `json:"name"`
-	TeamRole   string      `json:"team_role"`
 	TeamGrants []TeamGrant `json:"team_grants,omitempty"`
 	IsAdmin    bool        `json:"is_admin"`
 	TokenType  string      `json:"token_type"`
@@ -99,7 +97,7 @@ func (i *Issuer) IssuerName() string {
 }
 
 // IssueTokenPair issues both access and refresh tokens.
-func (i *Issuer) IssueTokenPair(userID, teamID, teamRole, email, name string, isAdmin bool, teamGrants []TeamGrant) (*TokenPair, error) {
+func (i *Issuer) IssueTokenPair(userID, email, name string, isAdmin bool, teamGrants []TeamGrant) (*TokenPair, error) {
 	if len(i.secret) == 0 {
 		return nil, ErrJWTNotConfigured
 	}
@@ -132,10 +130,8 @@ func (i *Issuer) IssueTokenPair(userID, teamID, teamRole, email, name string, is
 			NotBefore: jwt.NewNumericDate(currentTime),
 		},
 		UserID:     userID,
-		TeamID:     teamID,
 		Email:      email,
 		Name:       name,
-		TeamRole:   teamRole,
 		TeamGrants: teamGrants,
 		IsAdmin:    isAdmin,
 		TokenType:  "access",

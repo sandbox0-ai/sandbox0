@@ -123,85 +123,42 @@ func (m *AuthMiddleware) authenticateJWT(c *gin.Context, tokenString string) (*a
 	if len(m.jwtSecret) == 0 {
 		return nil, ErrJWTNotConfigured
 	}
-
-	if m.jwtIssuer != nil {
-		claims, err := m.validateJWT(tokenString)
-		if err != nil {
-			switch {
-			case errors.Is(err, authn.ErrJWTNotConfigured):
-				return nil, ErrJWTNotConfigured
-			case errors.Is(err, authn.ErrTokenExpired):
-				return nil, ErrExpiredToken
-			case errors.Is(err, authn.ErrInvalidSigningMethod):
-				return nil, ErrInvalidSigningMethod
-			default:
-				return nil, ErrInvalidToken
-			}
-		}
-
-		permissions := authn.ExpandRolePermissions(claims.TeamRole)
-		teamID := strings.TrimSpace(claims.TeamID)
-		teamRole := strings.TrimSpace(claims.TeamRole)
-		if claims.TokenType == "access" && strings.TrimSpace(claims.UserID) != "" {
-			selectedTeamID, selectedTeamRole, err := m.resolveSelectedTeam(c.Request.Context(), c.GetHeader(internalauth.TeamIDHeader), claims)
-			if err != nil {
-				return nil, err
-			}
-			teamID = selectedTeamID
-			teamRole = selectedTeamRole
-			permissions = authn.ExpandRolePermissions(teamRole)
-		}
-		if claims.IsAdmin {
-			permissions = append(permissions, "*")
-		}
-
-		return &authn.AuthContext{
-			AuthMethod:    authn.AuthMethodJWT,
-			TeamID:        teamID,
-			UserID:        claims.UserID,
-			TeamRole:      teamRole,
-			IsSystemAdmin: claims.IsAdmin,
-			Permissions:   permissions,
-		}, nil
-	}
-
-	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (any, error) {
-		// Validate signing method
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, ErrInvalidSigningMethod
-		}
-		return m.jwtSecret, nil
-	})
+	claims, err := m.validateJWT(tokenString)
 	if err != nil {
-		return nil, ErrInvalidToken
+		switch {
+		case errors.Is(err, authn.ErrJWTNotConfigured):
+			return nil, ErrJWTNotConfigured
+		case errors.Is(err, authn.ErrTokenExpired):
+			return nil, ErrExpiredToken
+		case errors.Is(err, authn.ErrInvalidSigningMethod):
+			return nil, ErrInvalidSigningMethod
+		default:
+			return nil, ErrInvalidToken
+		}
 	}
 
-	if !token.Valid {
-		return nil, ErrInvalidToken
+	permissions := make([]string, 0)
+	teamID := ""
+	teamRole := ""
+	if claims.TokenType == "access" && strings.TrimSpace(claims.UserID) != "" {
+		selectedTeamID, selectedTeamRole, err := m.resolveSelectedTeam(c.Request.Context(), c.GetHeader(internalauth.TeamIDHeader), claims)
+		if err != nil {
+			return nil, err
+		}
+		teamID = selectedTeamID
+		teamRole = selectedTeamRole
+		permissions = authn.ExpandRolePermissions(teamRole)
 	}
-
-	claims, ok := token.Claims.(jwt.MapClaims)
-	if !ok {
-		return nil, ErrInvalidToken
-	}
-
-	// Extract claims
-	teamID, _ := claims["team_id"].(string)
-	userID, _ := claims["user_id"].(string)
-	teamRole, _ := claims["team_role"].(string)
-	isAdmin, _ := claims["is_admin"].(bool)
-
-	permissions := authn.ExpandRolePermissions(teamRole)
-	if isAdmin {
+	if claims.IsAdmin {
 		permissions = append(permissions, "*")
 	}
 
 	return &authn.AuthContext{
 		AuthMethod:    authn.AuthMethodJWT,
 		TeamID:        teamID,
-		UserID:        userID,
+		UserID:        claims.UserID,
 		TeamRole:      teamRole,
-		IsSystemAdmin: isAdmin,
+		IsSystemAdmin: claims.IsAdmin,
 		Permissions:   permissions,
 	}, nil
 }
@@ -248,9 +205,9 @@ func (m *AuthMiddleware) validateJWT(tokenString string) (*authn.Claims, error) 
 	if subject, _ := mapClaims["sub"].(string); subject != "" {
 		claims.Subject = subject
 	}
-	claims.TeamID, _ = mapClaims["team_id"].(string)
 	claims.UserID, _ = mapClaims["user_id"].(string)
-	claims.TeamRole, _ = mapClaims["team_role"].(string)
+	claims.Email, _ = mapClaims["email"].(string)
+	claims.Name, _ = mapClaims["name"].(string)
 	claims.TeamGrants = parseTeamGrants(mapClaims["team_grants"])
 	claims.TokenType, _ = mapClaims["token_type"].(string)
 	claims.IsAdmin, _ = mapClaims["is_admin"].(bool)
@@ -259,9 +216,6 @@ func (m *AuthMiddleware) validateJWT(tokenString string) (*authn.Claims, error) 
 
 func (m *AuthMiddleware) resolveSelectedTeam(ctx context.Context, headerTeamID string, claims *authn.Claims) (string, string, error) {
 	selectedTeamID := strings.TrimSpace(headerTeamID)
-	if selectedTeamID == "" {
-		selectedTeamID = strings.TrimSpace(claims.TeamID)
-	}
 	if selectedTeamID == "" {
 		return "", "", nil
 	}

@@ -12,6 +12,7 @@ import (
 	registryprovider "github.com/sandbox0-ai/sandbox0/manager/pkg/registry"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	gatewaymiddleware "github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
 )
 
@@ -22,13 +23,14 @@ func TestRegistryCredentialsRequireTemplateWritePermission(t *testing.T) {
 	defer cleanup()
 
 	t.Run("forbidden without template write", func(t *testing.T) {
-		tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "team-1", "developer", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "developer"}})
+		tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "developer"}})
 		if err != nil {
 			t.Fatalf("issue token pair: %v", err)
 		}
 
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/registry/credentials", nil)
 		req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+		req.Header.Set(internalauth.TeamIDHeader, "team-1")
 
 		rec := httptest.NewRecorder()
 		server.router.ServeHTTP(rec, req)
@@ -42,13 +44,14 @@ func TestRegistryCredentialsRequireTemplateWritePermission(t *testing.T) {
 	})
 
 	t.Run("allowed with template write", func(t *testing.T) {
-		tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "team-1", "admin", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "admin"}})
+		tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "admin"}})
 		if err != nil {
 			t.Fatalf("issue token pair: %v", err)
 		}
 
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/registry/credentials", nil)
 		req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+		req.Header.Set(internalauth.TeamIDHeader, "team-1")
 
 		rec := httptest.NewRecorder()
 		server.router.ServeHTTP(rec, req)

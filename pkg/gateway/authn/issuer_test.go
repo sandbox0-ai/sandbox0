@@ -26,11 +26,11 @@ func TestIssueTokenPair_UsesUniqueSessionIDs(t *testing.T) {
 		},
 	)
 
-	first, err := issuer.IssueTokenPair("user-1", "team-1", "admin", "user@example.com", "User", false, []TeamGrant{{TeamID: "team-1", TeamRole: "admin", HomeRegionID: "aws-us-east-1"}})
+	first, err := issuer.IssueTokenPair("user-1", "user@example.com", "User", false, []TeamGrant{{TeamID: "team-1", TeamRole: "admin", HomeRegionID: "aws-us-east-1"}})
 	if err != nil {
 		t.Fatalf("issue first token pair: %v", err)
 	}
-	second, err := issuer.IssueTokenPair("user-1", "team-1", "admin", "user@example.com", "User", false, []TeamGrant{{TeamID: "team-1", TeamRole: "admin", HomeRegionID: "aws-us-east-1"}})
+	second, err := issuer.IssueTokenPair("user-1", "user@example.com", "User", false, []TeamGrant{{TeamID: "team-1", TeamRole: "admin", HomeRegionID: "aws-us-east-1"}})
 	if err != nil {
 		t.Fatalf("issue second token pair: %v", err)
 	}

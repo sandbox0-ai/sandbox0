@@ -120,7 +120,7 @@ func TestClusterGatewayIntegration_PublicAuthJWT(t *testing.T) {
 	}
 
 	issuer := authn.NewIssuer("cluster-gateway", "test-jwt-secret", time.Minute, time.Hour)
-	tokens, err := issuer.IssueTokenPair(user.ID, team.ID, "admin", user.Email, user.Name, user.IsAdmin, nil)
+	tokens, err := issuer.IssueTokenPair(user.ID, user.Email, user.Name, user.IsAdmin, []authn.TeamGrant{{TeamID: team.ID, TeamRole: "admin"}})
 	if err != nil {
 		t.Fatalf("issue token pair: %v", err)
 	}
@@ -198,7 +198,7 @@ func TestClusterGatewayIntegration_PublicAuthUserResponseIncludesDefaultTeamHome
 	}
 
 	issuer := authn.NewIssuer("cluster-gateway", "test-jwt-secret", time.Minute, time.Hour)
-	tokens, err := issuer.IssueTokenPair(user.ID, team.ID, "admin", user.Email, user.Name, user.IsAdmin, nil)
+	tokens, err := issuer.IssueTokenPair(user.ID, user.Email, user.Name, user.IsAdmin, []authn.TeamGrant{{TeamID: team.ID, TeamRole: "admin"}})
 	if err != nil {
 		t.Fatalf("issue token pair: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestClusterGatewayIntegration_PublicAuthTeamsAcceptHomeRegionID(t *testing.
 	}
 
 	issuer := authn.NewIssuer("cluster-gateway", "test-jwt-secret", time.Minute, time.Hour)
-	tokens, err := issuer.IssueTokenPair(user.ID, team.ID, "admin", user.Email, user.Name, user.IsAdmin, nil)
+	tokens, err := issuer.IssueTokenPair(user.ID, user.Email, user.Name, user.IsAdmin, []authn.TeamGrant{{TeamID: team.ID, TeamRole: "admin"}})
 	if err != nil {
 		t.Fatalf("issue token pair: %v", err)
 	}

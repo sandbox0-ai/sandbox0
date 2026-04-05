@@ -17,7 +17,7 @@ func TestAuthMiddleware_JWTAccessToken(t *testing.T) {
 	t.Setenv("GIN_MODE", "release")
 
 	issuer := authn.NewIssuer("regional-gateway", "test-secret", time.Minute, time.Hour)
-	tokens, err := issuer.IssueTokenPair("user-1", "team-1", "admin", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "admin", HomeRegionID: "aws-us-east-1"}})
+	tokens, err := issuer.IssueTokenPair("user-1", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "admin", HomeRegionID: "aws-us-east-1"}})
 	if err != nil {
 		t.Fatalf("issue token pair: %v", err)
 	}
@@ -33,7 +33,7 @@ func TestAuthMiddleware_JWTAccessToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("authenticate request: %v", err)
 	}
-	if authCtx.UserID != "user-1" || authCtx.TeamID != "team-1" {
+	if authCtx.UserID != "user-1" || authCtx.TeamID != "" {
 		t.Fatalf("unexpected auth context: user=%s team=%s", authCtx.UserID, authCtx.TeamID)
 	}
 }
@@ -42,7 +42,7 @@ func TestAuthMiddleware_JWTRefreshTokenRejected(t *testing.T) {
 	t.Setenv("GIN_MODE", "release")
 
 	issuer := authn.NewIssuer("regional-gateway", "test-secret", time.Minute, time.Hour)
-	tokens, err := issuer.IssueTokenPair("user-1", "team-1", "admin", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "admin", HomeRegionID: "aws-us-east-1"}})
+	tokens, err := issuer.IssueTokenPair("user-1", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "admin", HomeRegionID: "aws-us-east-1"}})
 	if err != nil {
 		t.Fatalf("issue token pair: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestAuthMiddleware_JWTAccessTokenExplicitTeamHeader(t *testing.T) {
 
 	homeRegionID := "aws-us-east-1"
 	issuer := authn.NewIssuer("regional-gateway", "test-secret", time.Minute, time.Hour)
-	tokens, err := issuer.IssueTokenPair("user-1", "", "", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-2", TeamRole: "developer", HomeRegionID: homeRegionID}})
+	tokens, err := issuer.IssueTokenPair("user-1", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-2", TeamRole: "developer", HomeRegionID: homeRegionID}})
 	if err != nil {
 		t.Fatalf("issue token pair: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestAuthMiddleware_JWTAccessTokenExplicitTeamHeaderRequiredForTeamlessToken
 	t.Setenv("GIN_MODE", "release")
 
 	issuer := authn.NewIssuer("regional-gateway", "test-secret", time.Minute, time.Hour)
-	tokens, err := issuer.IssueTokenPair("user-1", "", "", "user@example.com", "User", false, nil)
+	tokens, err := issuer.IssueTokenPair("user-1", "user@example.com", "User", false, nil)
 	if err != nil {
 		t.Fatalf("issue token pair: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestAuthMiddleware_JWTAccessTokenExplicitTeamHeaderRejectsWrongRegion(t *te
 	t.Setenv("GIN_MODE", "release")
 
 	issuer := authn.NewIssuer("regional-gateway", "test-secret", time.Minute, time.Hour)
-	tokens, err := issuer.IssueTokenPair("user-1", "", "", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-2", TeamRole: "developer", HomeRegionID: "aws-us-west-2"}})
+	tokens, err := issuer.IssueTokenPair("user-1", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-2", TeamRole: "developer", HomeRegionID: "aws-us-west-2"}})
 	if err != nil {
 		t.Fatalf("issue token pair: %v", err)
 	}

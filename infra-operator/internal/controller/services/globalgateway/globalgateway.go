@@ -261,15 +261,15 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 
 func resolveGlobalRegionID(infra *infrav1alpha1.Sandbox0Infra, current string) string {
 	if trimmed := strings.TrimSpace(current); trimmed != "" {
-		return tenantdir.CanonicalRegionID(trimmed)
+		return trimmed
 	}
 	if trimmed := strings.TrimSpace(infra.Spec.Region); trimmed != "" {
-		return tenantdir.CanonicalRegionID(trimmed)
+		return trimmed
 	}
 	if infra.Spec.PublicExposure == nil {
 		return ""
 	}
-	return tenantdir.CanonicalRegionID(infra.Spec.PublicExposure.RegionID)
+	return strings.TrimSpace(infra.Spec.PublicExposure.RegionID)
 }
 
 func desiredBootstrapRegion(infra *infrav1alpha1.Sandbox0Infra, regionID string) *tenantdir.Region {

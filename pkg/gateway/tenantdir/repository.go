@@ -24,10 +24,7 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 
 // CreateRegion creates a region directory entry.
 func (r *Repository) CreateRegion(ctx context.Context, region *Region) error {
-	regionID := CanonicalRegionID(region.ID)
-	if regionID == "" {
-		regionID = strings.TrimSpace(region.ID)
-	}
+	regionID := strings.TrimSpace(region.ID)
 	_, err := r.pool.Exec(ctx, `
 		INSERT INTO regions (id, display_name, regional_gateway_url, metering_export_url, enabled)
 		VALUES ($1, $2, $3, $4, $5)
@@ -43,12 +40,7 @@ func (r *Repository) CreateRegion(ctx context.Context, region *Region) error {
 
 // GetRegion retrieves a region by ID.
 func (r *Repository) GetRegion(ctx context.Context, regionID string) (*Region, error) {
-	region, err := r.getRegionExact(ctx, CanonicalRegionID(regionID))
-	if err != nil {
-		return nil, err
-	}
-	region.ID = CanonicalRegionID(region.ID)
-	return region, nil
+	return r.getRegionExact(ctx, strings.TrimSpace(regionID))
 }
 
 func (r *Repository) getRegionExact(ctx context.Context, regionID string) (*Region, error) {
@@ -85,7 +77,6 @@ func (r *Repository) ListRegions(ctx context.Context) ([]*Region, error) {
 		if err := rows.Scan(&region.ID, &region.DisplayName, &region.RegionalGatewayURL, &region.MeteringExportURL, &region.Enabled); err != nil {
 			return nil, fmt.Errorf("scan region: %w", err)
 		}
-		region.ID = CanonicalRegionID(region.ID)
 		regions = append(regions, &region)
 	}
 	return regions, nil
@@ -128,7 +119,7 @@ func (r *Repository) DeleteRegion(ctx context.Context, regionID string) error {
 }
 
 func (r *Repository) resolveStoredRegionID(ctx context.Context, regionID string) (string, error) {
-	region, err := r.getRegionExact(ctx, CanonicalRegionID(regionID))
+	region, err := r.getRegionExact(ctx, strings.TrimSpace(regionID))
 	if err != nil {
 		return "", err
 	}

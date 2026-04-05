@@ -10,7 +10,6 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
-	"github.com/sandbox0-ai/sandbox0/pkg/gateway/tenantdir"
 	"go.uber.org/zap"
 )
 
@@ -67,7 +66,7 @@ func WithJWTValidationMode(mode JWTValidationMode) AuthMiddlewareOption {
 	}
 }
 
-// WithRequiredRegionID binds accepted region tokens to a canonical region id.
+// WithRequiredRegionID binds accepted region tokens to a single region id.
 func WithRequiredRegionID(regionID string) AuthMiddlewareOption {
 	return func(m *AuthMiddleware) {
 		m.requiredRegionID = strings.TrimSpace(regionID)
@@ -230,7 +229,7 @@ func (m *AuthMiddleware) validateJWT(tokenString string) (*authn.Claims, error) 
 		if expectedIssuer := strings.TrimSpace(m.jwtIssuer.IssuerName()); expectedIssuer != "" && claims.Issuer != expectedIssuer {
 			return nil, authn.ErrInvalidToken
 		}
-		if m.requiredRegionID != "" && !tenantdir.SameRegionID(claims.RegionID, m.requiredRegionID) {
+		if m.requiredRegionID != "" && strings.TrimSpace(claims.RegionID) != m.requiredRegionID {
 			return nil, authn.ErrInvalidToken
 		}
 		return claims, nil

@@ -30,7 +30,7 @@ func TestClusterGatewayIntegration_MeteringExportContract(t *testing.T) {
 	if err := repo.AppendEvent(ctx, &metering.Event{
 		EventID:     "sandbox/sb-1/claimed/1",
 		Producer:    "manager.sandbox_lifecycle",
-		RegionID:    "aws/us-east-1",
+		RegionID:    "aws-us-east-1",
 		EventType:   metering.EventTypeSandboxClaimed,
 		SubjectType: metering.SubjectTypeSandbox,
 		SubjectID:   "sb-1",
@@ -46,7 +46,7 @@ func TestClusterGatewayIntegration_MeteringExportContract(t *testing.T) {
 	if err := repo.AppendEvent(ctx, &metering.Event{
 		EventID:     "sandbox/sb-1/paused/2",
 		Producer:    "manager.sandbox_lifecycle",
-		RegionID:    "aws/us-east-1",
+		RegionID:    "aws-us-east-1",
 		EventType:   metering.EventTypeSandboxPaused,
 		SubjectType: metering.SubjectTypeSandbox,
 		SubjectID:   "sb-1",
@@ -62,7 +62,7 @@ func TestClusterGatewayIntegration_MeteringExportContract(t *testing.T) {
 	if err := repo.AppendWindow(ctx, &metering.Window{
 		WindowID:    "sandbox/sb-1/active/1",
 		Producer:    "manager.sandbox_lifecycle",
-		RegionID:    "aws/us-east-1",
+		RegionID:    "aws-us-east-1",
 		WindowType:  metering.WindowTypeSandboxActiveSeconds,
 		SubjectType: metering.SubjectTypeSandbox,
 		SubjectID:   "sb-1",
@@ -81,7 +81,7 @@ func TestClusterGatewayIntegration_MeteringExportContract(t *testing.T) {
 	if err := repo.AppendWindow(ctx, &metering.Window{
 		WindowID:    "sandbox/sb-1/paused/2",
 		Producer:    "manager.sandbox_lifecycle",
-		RegionID:    "aws/us-east-1",
+		RegionID:    "aws-us-east-1",
 		WindowType:  metering.WindowTypeSandboxPausedSeconds,
 		SubjectType: metering.SubjectTypeSandbox,
 		SubjectID:   "sb-1",
@@ -97,7 +97,7 @@ func TestClusterGatewayIntegration_MeteringExportContract(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("append second window: %v", err)
 	}
-	if err := repo.UpsertProducerWatermark(ctx, "manager.sandbox_lifecycle", "aws/us-east-1", completeBefore); err != nil {
+	if err := repo.UpsertProducerWatermark(ctx, "manager.sandbox_lifecycle", "aws-us-east-1", completeBefore); err != nil {
 		t.Fatalf("upsert watermark: %v", err)
 	}
 
@@ -113,7 +113,7 @@ func TestClusterGatewayIntegration_MeteringExportContract(t *testing.T) {
 		ManagerURL:     managerServer.URL,
 		AllowedCallers: []string{"regional-gateway"},
 		GatewayConfig: config.GatewayConfig{
-			RegionID: "aws/us-east-1",
+			RegionID: "aws-us-east-1",
 		},
 	}
 	obsProvider := newTestObservability(t, "cluster-gateway-metering-test")

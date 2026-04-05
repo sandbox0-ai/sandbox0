@@ -89,14 +89,14 @@ func TestMeteringHandlerGetStatus(t *testing.T) {
 		completeBefore := time.Date(2026, 3, 12, 8, 0, 0, 0, time.UTC)
 		repo := &fakeMeteringReader{
 			status: &metering.Status{
-				RegionID:             "aws/us-east-1",
+				RegionID:             "aws-us-east-1",
 				LatestEventSequence:  42,
 				LatestWindowSequence: 18,
 				CompleteBefore:       &completeBefore,
 				ProducerCount:        2,
 			},
 		}
-		handler := NewMeteringHandler(repo, "aws/us-east-1", zap.NewNop())
+		handler := NewMeteringHandler(repo, "aws-us-east-1", zap.NewNop())
 
 		recorder := httptest.NewRecorder()
 		ctx, _ := gin.CreateTestContext(recorder)
@@ -107,8 +107,8 @@ func TestMeteringHandlerGetStatus(t *testing.T) {
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
 		}
-		if repo.gotFallback != "aws/us-east-1" {
-			t.Fatalf("fallback region = %q, want %q", repo.gotFallback, "aws/us-east-1")
+		if repo.gotFallback != "aws-us-east-1" {
+			t.Fatalf("fallback region = %q, want %q", repo.gotFallback, "aws-us-east-1")
 		}
 
 		resp, apiErr, err := spec.DecodeResponse[metering.Status](recorder.Body)
@@ -133,7 +133,7 @@ func TestMeteringHandlerGetStatus(t *testing.T) {
 	})
 
 	t.Run("returns internal error when repository fails", func(t *testing.T) {
-		handler := NewMeteringHandler(&fakeMeteringReader{statusErr: errors.New("boom")}, "aws/us-east-1", zap.NewNop())
+		handler := NewMeteringHandler(&fakeMeteringReader{statusErr: errors.New("boom")}, "aws-us-east-1", zap.NewNop())
 
 		recorder := httptest.NewRecorder()
 		ctx, _ := gin.CreateTestContext(recorder)
@@ -176,7 +176,7 @@ func TestMeteringHandlerListEvents(t *testing.T) {
 					Sequence:    11,
 					EventID:     "volume/vol-1/created/1",
 					Producer:    "storage-proxy.volume",
-					RegionID:    "aws/us-east-1",
+					RegionID:    "aws-us-east-1",
 					EventType:   metering.EventTypeVolumeCreated,
 					SubjectType: metering.SubjectTypeVolume,
 					SubjectID:   "vol-1",
@@ -266,7 +266,7 @@ func TestMeteringHandlerListWindows(t *testing.T) {
 					Sequence:    3,
 					WindowID:    "sandbox/sb-1/active/2026-03-12T10:00:00Z/2026-03-12T10:05:00Z",
 					Producer:    "manager.lifecycle",
-					RegionID:    "aws/us-east-1",
+					RegionID:    "aws-us-east-1",
 					WindowType:  metering.WindowTypeSandboxActiveSeconds,
 					SubjectType: metering.SubjectTypeSandbox,
 					SubjectID:   "sb-1",

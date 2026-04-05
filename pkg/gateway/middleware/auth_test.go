@@ -62,7 +62,7 @@ func TestAuthMiddleware_JWTRegionTokenAcceptedForMatchingRegion(t *testing.T) {
 	t.Setenv("GIN_MODE", "release")
 
 	issuer := authn.NewIssuer("global-gateway", "test-secret", time.Minute, time.Hour)
-	regionToken, _, err := issuer.IssueRegionToken("user-1", "team-1", "admin", "aws/us-east-1", false, time.Minute)
+	regionToken, _, err := issuer.IssueRegionToken("user-1", "team-1", "admin", "aws-us-east-1", false, time.Minute)
 	if err != nil {
 		t.Fatalf("issue region token: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestAuthMiddleware_JWTRegionTokenAcceptedForMatchingRegion(t *testing.T) {
 		issuer,
 		zap.NewNop(),
 		WithJWTValidationMode(JWTValidationModeRegion),
-		WithRequiredRegionID("aws/us-east-1"),
+		WithRequiredRegionID("aws-us-east-1"),
 	)
 	authCtx, err := middleware.AuthenticateRequest(ctx)
 	if err != nil {
@@ -94,7 +94,7 @@ func TestAuthMiddleware_JWTRegionTokenRejectedForWrongRegion(t *testing.T) {
 	t.Setenv("GIN_MODE", "release")
 
 	issuer := authn.NewIssuer("global-gateway", "test-secret", time.Minute, time.Hour)
-	regionToken, _, err := issuer.IssueRegionToken("user-1", "team-1", "admin", "aws/us-west-2", false, time.Minute)
+	regionToken, _, err := issuer.IssueRegionToken("user-1", "team-1", "admin", "aws-us-west-2", false, time.Minute)
 	if err != nil {
 		t.Fatalf("issue region token: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestAuthMiddleware_JWTRegionTokenRejectedForWrongRegion(t *testing.T) {
 		issuer,
 		zap.NewNop(),
 		WithJWTValidationMode(JWTValidationModeRegion),
-		WithRequiredRegionID("aws/us-east-1"),
+		WithRequiredRegionID("aws-us-east-1"),
 	)
 	if _, err := middleware.AuthenticateRequest(ctx); err == nil {
 		t.Fatal("expected region mismatch to be rejected")

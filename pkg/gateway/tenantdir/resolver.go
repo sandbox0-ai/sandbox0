@@ -94,7 +94,7 @@ func (d *Directory) GetTeamHomeRegion(ctx context.Context, teamID string) (*Team
 
 	homeRegionID := ""
 	if team.HomeRegionID != nil {
-		homeRegionID = CanonicalRegionID(*team.HomeRegionID)
+		homeRegionID = strings.TrimSpace(*team.HomeRegionID)
 	}
 
 	return &TeamHomeRegion{
@@ -106,7 +106,7 @@ func (d *Directory) GetTeamHomeRegion(ctx context.Context, teamID string) (*Team
 
 // GetRegion returns a region entry from the optional directory.
 func (d *Directory) GetRegion(ctx context.Context, regionID string) (*Region, error) {
-	resolvedRegionID := CanonicalRegionID(regionID)
+	resolvedRegionID := strings.TrimSpace(regionID)
 	if resolvedRegionID == "" || d.regions == nil {
 		return nil, ErrRegionNotFound
 	}
@@ -114,7 +114,6 @@ func (d *Directory) GetRegion(ctx context.Context, regionID string) (*Region, er
 	if err != nil {
 		return nil, err
 	}
-	region.ID = CanonicalRegionID(region.ID)
 	return region, nil
 }
 
@@ -127,7 +126,7 @@ type StaticRegions struct {
 func NewStaticRegions(regions []Region) *StaticRegions {
 	entries := make(map[string]Region, len(regions))
 	for _, region := range regions {
-		region.ID = CanonicalRegionID(region.ID)
+		region.ID = strings.TrimSpace(region.ID)
 		entries[region.ID] = region
 	}
 	return &StaticRegions{entries: entries}

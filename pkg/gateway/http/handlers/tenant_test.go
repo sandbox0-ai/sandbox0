@@ -36,7 +36,7 @@ func TestTenantHandlerIssueRegionToken(t *testing.T) {
 			UserID:             "user-1",
 			TeamID:             "team-1",
 			TeamRole:           "admin",
-			HomeRegionID:       "aws/us-east-1",
+			HomeRegionID:       "aws-us-east-1",
 			RegionalGatewayURL: "https://use1.example.com",
 		}},
 		authn.NewIssuer("global-gateway", "test-secret", time.Minute, time.Hour),
@@ -72,7 +72,7 @@ func TestTenantHandlerIssueRegionToken(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if response.Data.RegionID != "aws/us-east-1" {
+	if response.Data.RegionID != "aws-us-east-1" {
 		t.Fatalf("expected region id, got %q", response.Data.RegionID)
 	}
 	if response.Data.RegionalGatewayURL != "https://use1.example.com" {
@@ -83,7 +83,7 @@ func TestTenantHandlerIssueRegionToken(t *testing.T) {
 	}
 }
 
-func TestTenantHandlerIssueRegionTokenCanonicalizesRegionID(t *testing.T) {
+func TestTenantHandlerIssueRegionTokenPreservesRegionID(t *testing.T) {
 	t.Setenv("GIN_MODE", "release")
 	gin.SetMode(gin.ReleaseMode)
 
@@ -128,7 +128,7 @@ func TestTenantHandlerIssueRegionTokenCanonicalizesRegionID(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if response.Data.RegionID != "aws/us-east-1" {
-		t.Fatalf("expected canonical region id, got %q", response.Data.RegionID)
+	if response.Data.RegionID != "aws-us-east-1" {
+		t.Fatalf("expected region id, got %q", response.Data.RegionID)
 	}
 }

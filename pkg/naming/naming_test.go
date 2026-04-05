@@ -3,7 +3,7 @@ package naming
 import "testing"
 
 func TestReplicasetAndSandboxNames(t *testing.T) {
-	clusterID := "aws/us-east-1"
+	clusterID := "aws-us-east-1"
 	templateName := "basic-template"
 
 	rsName, err := ReplicasetName(clusterID, templateName)

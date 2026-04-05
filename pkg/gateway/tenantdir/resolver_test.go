@@ -41,7 +41,7 @@ func (m *mockIdentityStore) GetTeamMember(_ context.Context, teamID, userID stri
 
 func TestDirectoryResolveActiveTeamUsesDefaultTeam(t *testing.T) {
 	defaultTeamID := "team-1"
-	homeRegionID := "aws/us-east-1"
+	homeRegionID := "aws-us-east-1"
 	store := &mockIdentityStore{
 		users: map[string]*identity.User{
 			"user-1": {
@@ -105,7 +105,7 @@ func TestDirectoryResolveActiveTeamRequiresSelectedOrDefaultTeam(t *testing.T) {
 func TestDirectoryGetRegionReturnsNotFoundWithoutDirectory(t *testing.T) {
 	resolver := NewResolver(&mockIdentityStore{}, nil)
 
-	_, err := resolver.GetRegion(context.Background(), "aws/us-east-1")
+	_, err := resolver.GetRegion(context.Background(), "aws-us-east-1")
 	if !errors.Is(err, ErrRegionNotFound) {
 		t.Fatalf("expected ErrRegionNotFound, got %v", err)
 	}

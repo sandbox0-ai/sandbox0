@@ -193,7 +193,7 @@ func TestClusterGatewayIntegration_PublicAuthUserResponseIncludesDefaultTeamHome
 	if err != nil {
 		t.Fatalf("create user/team: %v", err)
 	}
-	if _, err := dbPool.Exec(ctx, `UPDATE teams SET home_region_id = $2 WHERE id = $1`, team.ID, "aws/us-east-1"); err != nil {
+	if _, err := dbPool.Exec(ctx, `UPDATE teams SET home_region_id = $2 WHERE id = $1`, team.ID, "aws-us-east-1"); err != nil {
 		t.Fatalf("set team home region: %v", err)
 	}
 
@@ -223,8 +223,8 @@ func TestClusterGatewayIntegration_PublicAuthUserResponseIncludesDefaultTeamHome
 	if body.Data.DefaultTeam.ID != team.ID {
 		t.Fatalf("expected default team %q, got %q", team.ID, body.Data.DefaultTeam.ID)
 	}
-	if body.Data.DefaultTeam.HomeRegionID == nil || *body.Data.DefaultTeam.HomeRegionID != "aws/us-east-1" {
-		t.Fatalf("expected home region aws/us-east-1, got %#v", body.Data.DefaultTeam.HomeRegionID)
+	if body.Data.DefaultTeam.HomeRegionID == nil || *body.Data.DefaultTeam.HomeRegionID != "aws-us-east-1" {
+		t.Fatalf("expected home region aws-us-east-1, got %#v", body.Data.DefaultTeam.HomeRegionID)
 	}
 }
 
@@ -262,7 +262,7 @@ func TestClusterGatewayIntegration_PublicAuthTeamsAcceptHomeRegionID(t *testing.
 
 	resp, _ := doGatewayRequestWithBearer(t, env.server.Client(), http.MethodPost, env.server.URL+"/teams", tokens.AccessToken, map[string]any{
 		"name":           "Regional Team",
-		"home_region_id": "aws/us-east-1",
+		"home_region_id": "aws-us-east-1",
 	})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
@@ -278,12 +278,12 @@ func TestClusterGatewayIntegration_PublicAuthTeamsAcceptHomeRegionID(t *testing.
 	if err := json.NewDecoder(resp.Body).Decode(&createBody); err != nil {
 		t.Fatalf("decode create response: %v", err)
 	}
-	if createBody.Data.HomeRegionID == nil || *createBody.Data.HomeRegionID != "aws/us-east-1" {
-		t.Fatalf("expected created team home region aws/us-east-1, got %#v", createBody.Data.HomeRegionID)
+	if createBody.Data.HomeRegionID == nil || *createBody.Data.HomeRegionID != "aws-us-east-1" {
+		t.Fatalf("expected created team home region aws-us-east-1, got %#v", createBody.Data.HomeRegionID)
 	}
 
 	updateResp, _ := doGatewayRequestWithBearer(t, env.server.Client(), http.MethodPut, env.server.URL+"/teams/"+createBody.Data.ID, tokens.AccessToken, map[string]any{
-		"home_region_id": "aws/us-west-2",
+		"home_region_id": "aws-us-west-2",
 	})
 	defer updateResp.Body.Close()
 	if updateResp.StatusCode != http.StatusConflict {
@@ -316,7 +316,7 @@ func TestClusterGatewayIntegration_PublicAuthTeamsAcceptHomeRegionID(t *testing.
 	if err := json.NewDecoder(getResp.Body).Decode(&getBody); err != nil {
 		t.Fatalf("decode get response: %v", err)
 	}
-	if getBody.Data.HomeRegionID == nil || *getBody.Data.HomeRegionID != "aws/us-east-1" {
-		t.Fatalf("expected persisted team home region aws/us-east-1, got %#v", getBody.Data.HomeRegionID)
+	if getBody.Data.HomeRegionID == nil || *getBody.Data.HomeRegionID != "aws-us-east-1" {
+		t.Fatalf("expected persisted team home region aws-us-east-1, got %#v", getBody.Data.HomeRegionID)
 	}
 }

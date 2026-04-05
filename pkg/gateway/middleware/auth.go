@@ -120,7 +120,7 @@ func (m *AuthMiddleware) authenticateAPIKey(c *gin.Context, keyValue string) (*a
 
 // authenticateJWT validates a JWT token
 func (m *AuthMiddleware) authenticateJWT(c *gin.Context, tokenString string) (*authn.AuthContext, error) {
-	if len(m.jwtSecret) == 0 {
+	if m.jwtIssuer == nil && len(m.jwtSecret) == 0 {
 		return nil, ErrJWTNotConfigured
 	}
 	claims, err := m.validateJWT(tokenString)

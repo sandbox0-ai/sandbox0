@@ -11,6 +11,14 @@ type GatewayConfig struct {
 	// +optional
 	JWTSecret string `yaml:"jwt_secret" json:"-"`
 	// +optional
+	JWTPrivateKeyPEM string `yaml:"jwt_private_key_pem" json:"-"`
+	// +optional
+	JWTPublicKeyPEM string `yaml:"jwt_public_key_pem" json:"-"`
+	// +optional
+	JWTPrivateKeyFile string `yaml:"jwt_private_key_file" json:"-"`
+	// +optional
+	JWTPublicKeyFile string `yaml:"jwt_public_key_file" json:"-"`
+	// +optional
 	JWTIssuer string `yaml:"jwt_issuer" json:"jwtIssuer"`
 	// +optional
 	// +kubebuilder:default="15m"

@@ -157,7 +157,10 @@ func NewServer(
 	})
 
 	// Initialize JWT issuer
-	jwtIssuer := authn.NewIssuer(cfg.JWTIssuer, cfg.JWTSecret, cfg.JWTAccessTokenTTL.Duration, cfg.JWTRefreshTokenTTL.Duration)
+	jwtIssuer, err := authn.NewIssuerFromConfig(cfg.JWTIssuer, cfg.JWTSecret, cfg.JWTPrivateKeyPEM, cfg.JWTPublicKeyPEM, cfg.JWTPrivateKeyFile, cfg.JWTPublicKeyFile, cfg.JWTAccessTokenTTL.Duration, cfg.JWTRefreshTokenTTL.Duration)
+	if err != nil {
+		return nil, fmt.Errorf("create jwt issuer: %w", err)
+	}
 
 	// Create middleware
 	authMiddlewareOptions := []middleware.AuthMiddlewareOption(nil)

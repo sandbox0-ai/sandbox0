@@ -80,6 +80,11 @@ spec:
         port: 30080
       config:
         authMode: federated_global
+        # jwtIssuer: https://api.sandbox0.ai
+        # jwtPublicKeyPEM: |
+        #   -----BEGIN PUBLIC KEY-----
+        #   ...
+        #   -----END PUBLIC KEY-----
         # baseUrl: https://your-gateway.example.com
     scheduler:
       enabled: true

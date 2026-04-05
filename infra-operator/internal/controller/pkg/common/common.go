@@ -40,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
 
 type ResourceManager struct {
@@ -634,6 +635,68 @@ func EnsureSecretValue(ctx context.Context, client client.Client, scheme *runtim
 		return "", err
 	}
 	return value, nil
+}
+
+// EnsureEd25519KeyPair ensures a named secret contains an Ed25519 keypair.
+func EnsureEd25519KeyPair(ctx context.Context, client client.Client, scheme *runtime.Scheme, infra *infrav1alpha1.Sandbox0Infra, name, privateKeyKey, publicKeyKey string) (string, string, error) {
+	secret := &corev1.Secret{}
+	err := client.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, secret)
+	if err != nil && !errors.IsNotFound(err) {
+		return "", "", err
+	}
+
+	generatePair := func() (string, string, error) {
+		privateKeyPEM, publicKeyPEM, err := internalauth.GenerateEd25519KeyPair()
+		if err != nil {
+			return "", "", err
+		}
+		return string(privateKeyPEM), string(publicKeyPEM), nil
+	}
+
+	if errors.IsNotFound(err) {
+		privateKeyPEM, publicKeyPEM, err := generatePair()
+		if err != nil {
+			return "", "", err
+		}
+		secret = &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: infra.Namespace,
+			},
+			Type: corev1.SecretTypeOpaque,
+			StringData: map[string]string{
+				privateKeyKey: privateKeyPEM,
+				publicKeyKey:  publicKeyPEM,
+			},
+		}
+		if err := ctrl.SetControllerReference(infra, secret, scheme); err != nil {
+			return "", "", err
+		}
+		if err := client.Create(ctx, secret); err != nil {
+			return "", "", err
+		}
+		return privateKeyPEM, publicKeyPEM, nil
+	}
+
+	privateKeyPEM, privateKeyOK := secret.Data[privateKeyKey]
+	publicKeyPEM, publicKeyOK := secret.Data[publicKeyKey]
+	if privateKeyOK && len(privateKeyPEM) > 0 && publicKeyOK && len(publicKeyPEM) > 0 {
+		return string(privateKeyPEM), string(publicKeyPEM), nil
+	}
+
+	regeneratedPrivate, regeneratedPublic, err := generatePair()
+	if err != nil {
+		return "", "", err
+	}
+	if secret.Data == nil {
+		secret.Data = map[string][]byte{}
+	}
+	secret.Data[privateKeyKey] = []byte(regeneratedPrivate)
+	secret.Data[publicKeyKey] = []byte(regeneratedPublic)
+	if err := client.Update(ctx, secret); err != nil {
+		return "", "", err
+	}
+	return regeneratedPrivate, regeneratedPublic, nil
 }
 
 // GetSecretValue returns the value from a secret key reference.

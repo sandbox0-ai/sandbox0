@@ -262,6 +262,15 @@ func TestBuildConfigSkipsInitUserForFederatedGlobalAuth(t *testing.T) {
 	if cfg.BuiltInAuth.InitUser != nil {
 		t.Fatalf("expected init user to be omitted for federated_global mode, got %#v", cfg.BuiltInAuth.InitUser)
 	}
+	if cfg.JWTSecret != "" {
+		t.Fatalf("expected jwt secret to be empty for federated_global mode, got %q", cfg.JWTSecret)
+	}
+	if cfg.JWTPublicKeyPEM == "" {
+		t.Fatal("expected federated_global mode to populate jwt public key")
+	}
+	if cfg.JWTIssuer != "global-gateway" {
+		t.Fatalf("expected default federated issuer global-gateway, got %q", cfg.JWTIssuer)
+	}
 }
 
 func TestBuildConfigLeavesInitUserPasswordEmptyForOIDCOnlyBootstrap(t *testing.T) {

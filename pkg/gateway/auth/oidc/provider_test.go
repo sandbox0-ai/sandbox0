@@ -3,6 +3,7 @@ package oidc
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"golang.org/x/oauth2"
 )
 
@@ -80,6 +82,120 @@ func TestNormalizeOIDCIssuerURL(t *testing.T) {
 				t.Fatalf("normalizeOIDCIssuerURL(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestResolveOIDCDiscoveryURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "keeps discovery document url",
+			input: "https://example.com/auth/v1/.well-known/openid-configuration",
+			want:  "https://example.com/auth/v1/.well-known/openid-configuration",
+		},
+		{
+			name:  "builds discovery url from issuer",
+			input: "https://example.com/auth/v1",
+			want:  "https://example.com/auth/v1/.well-known/openid-configuration",
+		},
+		{
+			name:  "trims trailing slash before appending discovery path",
+			input: "https://example.com/",
+			want:  "https://example.com/.well-known/openid-configuration",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := resolveOIDCDiscoveryURL(tt.input); got != tt.want {
+				t.Fatalf("resolveOIDCDiscoveryURL(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFetchDiscoveryMetadata(t *testing.T) {
+	t.Parallel()
+
+	var serverURL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != wellKnownOIDCConfigPath {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"issuer":                        serverURL + "/",
+			"authorization_endpoint":        serverURL + "/authorize",
+			"token_endpoint":                serverURL + "/oauth/token",
+			"jwks_uri":                      serverURL + "/jwks",
+			"device_authorization_endpoint": serverURL + "/oauth/device/code",
+		})
+	}))
+	serverURL = server.URL
+	defer server.Close()
+
+	metadata, err := fetchDiscoveryMetadata(context.Background(), server.URL)
+	if err != nil {
+		t.Fatalf("fetchDiscoveryMetadata: %v", err)
+	}
+	if metadata.Issuer != serverURL+"/" {
+		t.Fatalf("unexpected issuer %q", metadata.Issuer)
+	}
+	if metadata.DeviceAuthorizationEndpoint != serverURL+"/oauth/device/code" {
+		t.Fatalf("unexpected device_authorization_endpoint %q", metadata.DeviceAuthorizationEndpoint)
+	}
+}
+
+func TestNewProviderAcceptsIssuerWithTrailingSlashFromDiscovery(t *testing.T) {
+	t.Parallel()
+
+	var serverURL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case wellKnownOIDCConfigPath:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"issuer":                        serverURL + "/",
+				"authorization_endpoint":        serverURL + "/authorize",
+				"token_endpoint":                serverURL + "/oauth/token",
+				"jwks_uri":                      serverURL + "/jwks",
+				"device_authorization_endpoint": serverURL + "/oauth/device/code",
+			})
+		case "/jwks":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"keys":[]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	serverURL = server.URL
+	defer server.Close()
+
+	provider, err := NewProvider(context.Background(), &config.OIDCProviderConfig{
+		ID:                         "auth0",
+		Name:                       "Auth0",
+		Enabled:                    true,
+		ClientID:                   "client-id",
+		ClientSecret:               "client-secret",
+		DiscoveryURL:               serverURL + wellKnownOIDCConfigPath,
+		TokenEndpointAuthMethod:    "client_secret_basic",
+		Scopes:                     []string{"openid", "email", "profile"},
+		DeviceAuthorizationEnabled: true,
+	}, "https://api.sandbox0.ai")
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+
+	if provider.deviceAuthorizationEndpoint != serverURL+"/oauth/device/code" {
+		t.Fatalf("unexpected device authorization endpoint %q", provider.deviceAuthorizationEndpoint)
 	}
 }
 

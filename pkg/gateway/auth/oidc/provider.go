@@ -54,11 +54,23 @@ type Provider struct {
 
 const wellKnownOIDCConfigPath = "/.well-known/openid-configuration"
 
+type discoveryMetadata struct {
+	Issuer                      string `json:"issuer"`
+	DeviceAuthorizationEndpoint string `json:"device_authorization_endpoint"`
+}
+
 // NewProvider creates a new OIDC provider
 func NewProvider(ctx context.Context, cfg *config.OIDCProviderConfig, baseURL string) (*Provider, error) {
 	// go-oidc expects an issuer URL here. Accept either the issuer URL itself
 	// or a full discovery document URL and normalize to the issuer form.
+	// When a provider publishes an issuer that differs only by a trailing slash,
+	// prefer the discovery document's issuer exactly so initialization remains
+	// compatible across OIDC providers and custom domains.
 	issuerURL := normalizeOIDCIssuerURL(cfg.DiscoveryURL)
+	metadata, err := fetchDiscoveryMetadata(ctx, cfg.DiscoveryURL)
+	if err == nil && strings.TrimSpace(metadata.Issuer) != "" {
+		issuerURL = strings.TrimSpace(metadata.Issuer)
+	}
 	oidcProvider, err := oidc.NewProvider(ctx, issuerURL)
 	if err != nil {
 		return nil, fmt.Errorf("create OIDC provider: %w", err)
@@ -87,11 +99,10 @@ func NewProvider(ctx context.Context, cfg *config.OIDCProviderConfig, baseURL st
 		ClientID: cfg.ClientID,
 	})
 
-	var metadata struct {
-		DeviceAuthorizationEndpoint string `json:"device_authorization_endpoint"`
-	}
-	if err := oidcProvider.Claims(&metadata); err != nil {
-		metadata.DeviceAuthorizationEndpoint = ""
+	if strings.TrimSpace(metadata.DeviceAuthorizationEndpoint) == "" {
+		if err := oidcProvider.Claims(&metadata); err != nil {
+			metadata.DeviceAuthorizationEndpoint = ""
+		}
 	}
 	if strings.TrimSpace(cfg.DeviceAuthorizationEndpoint) != "" {
 		metadata.DeviceAuthorizationEndpoint = strings.TrimSpace(cfg.DeviceAuthorizationEndpoint)
@@ -111,6 +122,45 @@ func NewProvider(ctx context.Context, cfg *config.OIDCProviderConfig, baseURL st
 func normalizeOIDCIssuerURL(value string) string {
 	trimmed := strings.TrimSpace(value)
 	return strings.TrimSuffix(trimmed, wellKnownOIDCConfigPath)
+}
+
+func resolveOIDCDiscoveryURL(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	if strings.HasSuffix(trimmed, wellKnownOIDCConfigPath) {
+		return trimmed
+	}
+	return strings.TrimRight(trimmed, "/") + wellKnownOIDCConfigPath
+}
+
+func fetchDiscoveryMetadata(ctx context.Context, value string) (discoveryMetadata, error) {
+	discoveryURL := resolveOIDCDiscoveryURL(value)
+	if discoveryURL == "" {
+		return discoveryMetadata{}, errors.New("missing discovery URL")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, discoveryURL, nil)
+	if err != nil {
+		return discoveryMetadata{}, fmt.Errorf("build discovery request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return discoveryMetadata{}, fmt.Errorf("fetch discovery document: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return discoveryMetadata{}, fmt.Errorf("fetch discovery document: unexpected status %s", resp.Status)
+	}
+
+	var metadata discoveryMetadata
+	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
+		return discoveryMetadata{}, fmt.Errorf("decode discovery document: %w", err)
+	}
+	return metadata, nil
 }
 
 func resolveTokenEndpointAuthStyle(method string) (oauth2.AuthStyle, error) {

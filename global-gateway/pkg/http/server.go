@@ -61,7 +61,10 @@ func NewServer(
 
 	identityRepo := identity.NewRepository(pool)
 	regionRepo := tenantdir.NewRepository(pool)
-	jwtIssuer := authn.NewIssuer(cfg.JWTIssuer, cfg.JWTSecret, cfg.JWTAccessTokenTTL.Duration, cfg.JWTRefreshTokenTTL.Duration)
+	jwtIssuer, err := authn.NewIssuerFromConfig(cfg.JWTIssuer, cfg.JWTSecret, cfg.JWTPrivateKeyPEM, cfg.JWTPublicKeyPEM, cfg.JWTPrivateKeyFile, cfg.JWTPublicKeyFile, cfg.JWTAccessTokenTTL.Duration, cfg.JWTRefreshTokenTTL.Duration)
+	if err != nil {
+		return nil, fmt.Errorf("create jwt issuer: %w", err)
+	}
 	authMiddleware := gatewaymiddleware.NewAuthMiddleware(nil, cfg.JWTSecret, jwtIssuer, logger)
 	requestLogger := gatewaymiddleware.NewRequestLogger(logger)
 	builtinProvider := gatewaybuiltin.NewProvider(identityRepo, &cfg.BuiltInAuth, cfg.DefaultTeamName)
@@ -79,7 +82,6 @@ func NewServer(
 	}
 
 	var oidcManager *gatewayoidc.Manager
-	var err error
 	if oidcConfigured {
 		oidcManager, err = gatewayoidc.NewManager(context.Background(), &cfg.GatewayConfig, identityRepo, logger)
 		if err != nil {

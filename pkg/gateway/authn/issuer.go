@@ -1,14 +1,17 @@
 package authn
 
 import (
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
 
 // TeamGrant represents one team membership grant embedded into an access token.
@@ -23,6 +26,7 @@ var (
 	ErrTokenExpired         = errors.New("token expired")
 	ErrInvalidSigningMethod = errors.New("invalid signing method")
 	ErrJWTNotConfigured     = errors.New("JWT authentication not configured")
+	ErrJWTSigningDisabled   = errors.New("JWT signing is not configured")
 )
 
 // Claims represents JWT claims for human session tokens.
@@ -51,7 +55,9 @@ func (c *Claims) FindTeamGrant(teamID string) (TeamGrant, bool) {
 
 // Issuer handles JWT token creation and validation.
 type Issuer struct {
-	secret          []byte
+	signingMethod   jwt.SigningMethod
+	signingKey      any
+	verificationKey any
 	accessTokenTTL  time.Duration
 	refreshTokenTTL time.Duration
 	issuer          string
@@ -69,17 +75,85 @@ type TokenPair struct {
 
 // NewIssuer creates a new JWT issuer.
 func NewIssuer(issuerName, secret string, accessTTL, refreshTTL time.Duration) *Issuer {
-	return newIssuerWithDeps(issuerName, secret, accessTTL, refreshTTL, time.Now, generateSessionID)
+	secretBytes := []byte(secret)
+	return newIssuerWithDeps(issuerName, jwt.SigningMethodHS256, secretBytes, secretBytes, accessTTL, refreshTTL, time.Now, generateSessionID)
+}
+
+// NewIssuerWithEd25519 creates a JWT issuer backed by an Ed25519 keypair.
+func NewIssuerWithEd25519(issuerName string, privateKey ed25519.PrivateKey, accessTTL, refreshTTL time.Duration) *Issuer {
+	var publicKey ed25519.PublicKey
+	if privateKey != nil {
+		if derived, ok := privateKey.Public().(ed25519.PublicKey); ok {
+			publicKey = derived
+		}
+	}
+	return newIssuerWithDeps(issuerName, jwt.SigningMethodEdDSA, privateKey, publicKey, accessTTL, refreshTTL, time.Now, generateSessionID)
+}
+
+// NewVerifierWithEd25519 creates a verifier-only JWT issuer backed by an Ed25519 public key.
+func NewVerifierWithEd25519(issuerName string, publicKey ed25519.PublicKey) *Issuer {
+	return newIssuerWithDeps(issuerName, jwt.SigningMethodEdDSA, nil, publicKey, 0, 0, time.Now, generateSessionID)
+}
+
+// NewIssuerFromConfig builds an issuer or verifier from gateway config values.
+func NewIssuerFromConfig(issuerName, secret, privateKeyPEM, publicKeyPEM, privateKeyFile, publicKeyFile string, accessTTL, refreshTTL time.Duration) (*Issuer, error) {
+	loadedPrivateKey, err := loadEd25519PrivateKey(privateKeyPEM, privateKeyFile)
+	if err != nil {
+		return nil, err
+	}
+	loadedPublicKey, err := loadEd25519PublicKey(publicKeyPEM, publicKeyFile)
+	if err != nil {
+		return nil, err
+	}
+	if loadedPrivateKey != nil {
+		issuer := NewIssuerWithEd25519(issuerName, loadedPrivateKey, accessTTL, refreshTTL)
+		if loadedPublicKey != nil {
+			issuer.verificationKey = loadedPublicKey
+		}
+		return issuer, nil
+	}
+	if loadedPublicKey != nil {
+		return NewVerifierWithEd25519(issuerName, loadedPublicKey), nil
+	}
+	if strings.TrimSpace(secret) != "" {
+		return NewIssuer(issuerName, secret, accessTTL, refreshTTL), nil
+	}
+	return newIssuerWithDeps(issuerName, nil, nil, nil, accessTTL, refreshTTL, time.Now, generateSessionID), nil
+}
+
+func loadEd25519PrivateKey(privateKeyPEM, privateKeyFile string) (ed25519.PrivateKey, error) {
+	if trimmed := strings.TrimSpace(privateKeyPEM); trimmed != "" {
+		return internalauth.LoadEd25519PrivateKey([]byte(trimmed))
+	}
+	if trimmed := strings.TrimSpace(privateKeyFile); trimmed != "" {
+		return internalauth.LoadEd25519PrivateKeyFromFile(trimmed)
+	}
+	return nil, nil
+}
+
+func loadEd25519PublicKey(publicKeyPEM, publicKeyFile string) (ed25519.PublicKey, error) {
+	if trimmed := strings.TrimSpace(publicKeyPEM); trimmed != "" {
+		return internalauth.LoadEd25519PublicKey([]byte(trimmed))
+	}
+	if trimmed := strings.TrimSpace(publicKeyFile); trimmed != "" {
+		return internalauth.LoadEd25519PublicKeyFromFile(trimmed)
+	}
+	return nil, nil
 }
 
 func newIssuerWithDeps(
-	issuerName, secret string,
+	issuerName string,
+	signingMethod jwt.SigningMethod,
+	signingKey any,
+	verificationKey any,
 	accessTTL, refreshTTL time.Duration,
 	now func() time.Time,
 	newSessionID func() (string, error),
 ) *Issuer {
 	return &Issuer{
-		secret:          []byte(secret),
+		signingMethod:   signingMethod,
+		signingKey:      signingKey,
+		verificationKey: verificationKey,
 		accessTokenTTL:  accessTTL,
 		refreshTokenTTL: refreshTTL,
 		issuer:          issuerName,
@@ -98,8 +172,8 @@ func (i *Issuer) IssuerName() string {
 
 // IssueTokenPair issues both access and refresh tokens.
 func (i *Issuer) IssueTokenPair(userID, email, name string, isAdmin bool, teamGrants []TeamGrant) (*TokenPair, error) {
-	if len(i.secret) == 0 {
-		return nil, ErrJWTNotConfigured
+	if i == nil || i.signingMethod == nil || i.signingKey == nil {
+		return nil, ErrJWTSigningDisabled
 	}
 
 	now := time.Now
@@ -137,8 +211,8 @@ func (i *Issuer) IssueTokenPair(userID, email, name string, isAdmin bool, teamGr
 		TokenType:  "access",
 	}
 
-	accessToken := jwt.NewWithClaims(jwt.SigningMethodHS256, accessClaims)
-	accessTokenString, err := accessToken.SignedString(i.secret)
+	accessToken := jwt.NewWithClaims(i.signingMethod, accessClaims)
+	accessTokenString, err := accessToken.SignedString(i.signingKey)
 	if err != nil {
 		return nil, err
 	}
@@ -156,8 +230,8 @@ func (i *Issuer) IssueTokenPair(userID, email, name string, isAdmin bool, teamGr
 		TokenType: "refresh",
 	}
 
-	refreshToken := jwt.NewWithClaims(jwt.SigningMethodHS256, refreshClaims)
-	refreshTokenString, err := refreshToken.SignedString(i.secret)
+	refreshToken := jwt.NewWithClaims(i.signingMethod, refreshClaims)
+	refreshTokenString, err := refreshToken.SignedString(i.signingKey)
 	if err != nil {
 		return nil, err
 	}
@@ -203,15 +277,15 @@ func (i *Issuer) ValidateRefreshToken(tokenString string) (*Claims, error) {
 }
 
 func (i *Issuer) validateToken(tokenString string) (*Claims, error) {
-	if len(i.secret) == 0 {
+	if i == nil || i.verificationKey == nil || i.signingMethod == nil {
 		return nil, ErrJWTNotConfigured
 	}
 
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (any, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+		if token.Method.Alg() != i.signingMethod.Alg() {
 			return nil, ErrInvalidSigningMethod
 		}
-		return i.secret, nil
+		return i.verificationKey, nil
 	})
 	if err != nil {
 		if errors.Is(err, jwt.ErrTokenExpired) {

@@ -240,6 +240,25 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		cfg.JWTIssuer = "global-gateway"
 	}
 
+	if usesFederatedGlobalUserAuth(infra) {
+		privateKeyPEM, publicKeyPEM, err := common.EnsureEd25519KeyPair(
+			ctx,
+			r.Resources.Client,
+			r.Resources.Scheme,
+			infra,
+			sharedUserJWTSecretName(infra),
+			"jwt_private_key_pem",
+			"jwt_public_key_pem",
+		)
+		if err != nil {
+			return nil, err
+		}
+		cfg.JWTSecret = ""
+		cfg.JWTPrivateKeyPEM = privateKeyPEM
+		cfg.JWTPublicKeyPEM = publicKeyPEM
+		return cfg, nil
+	}
+
 	if strings.TrimSpace(cfg.JWTSecret) == "" {
 		jwtSecret, err := common.EnsureSecretValue(
 			ctx,
@@ -257,6 +276,21 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	}
 
 	return cfg, nil
+}
+
+func usesFederatedGlobalUserAuth(infra *infrav1alpha1.Sandbox0Infra) bool {
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.RegionalGateway == nil {
+		return false
+	}
+	mode := ""
+	if infra.Spec.Services.RegionalGateway.Config != nil {
+		mode = infra.Spec.Services.RegionalGateway.Config.AuthMode
+	}
+	return strings.EqualFold(strings.TrimSpace(mode), "federated_global")
+}
+
+func sharedUserJWTSecretName(infra *infrav1alpha1.Sandbox0Infra) string {
+	return fmt.Sprintf("%s-user-jwt", infra.Name)
 }
 
 func resolveGlobalRegionID(infra *infrav1alpha1.Sandbox0Infra, current string) string {

@@ -494,6 +494,13 @@ func (s *Server) setupInternalControlPlaneRoutes() {
 		// Cluster information (→ Manager)
 		internal.GET("/cluster/summary", s.getClusterSummary)
 
+		// Template management (→ Manager)
+		internal.GET("/templates", s.proxyInternalTemplateRequest)
+		internal.GET("/templates/:id", s.proxyInternalTemplateRequest)
+		internal.POST("/templates", s.proxyInternalTemplateRequest)
+		internal.PUT("/templates/:id", s.proxyInternalTemplateRequest)
+		internal.DELETE("/templates/:id", s.proxyInternalTemplateRequest)
+
 		// Template statistics (→ Manager)
 		internal.GET("/templates/stats", s.getTemplateStats)
 	}

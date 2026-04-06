@@ -148,6 +148,46 @@ func TestAuthMiddleware_JWTAccessTokenExplicitTeamHeaderRejectsWrongRegion(t *te
 	}
 }
 
+func TestAuthMiddleware_JWTAccessTokenWithVerifierOnlyIssuer(t *testing.T) {
+	t.Setenv("GIN_MODE", "release")
+
+	privateKeyPEM, publicKeyPEM, err := internalauth.GenerateEd25519KeyPair()
+	if err != nil {
+		t.Fatalf("generate key pair: %v", err)
+	}
+	privateKey, err := internalauth.LoadEd25519PrivateKey(privateKeyPEM)
+	if err != nil {
+		t.Fatalf("load private key: %v", err)
+	}
+	publicKey, err := internalauth.LoadEd25519PublicKey(publicKeyPEM)
+	if err != nil {
+		t.Fatalf("load public key: %v", err)
+	}
+
+	issuer := authn.NewIssuerWithEd25519("global-gateway", privateKey, time.Minute, time.Hour)
+	tokens, err := issuer.IssueTokenPair("user-1", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-2", TeamRole: "developer", HomeRegionID: "aws-us-east-1"}})
+	if err != nil {
+		t.Fatalf("issue token pair: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/templates", nil)
+	req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+	req.Header.Set(internalauth.TeamIDHeader, "team-2")
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = req
+
+	verifier := authn.NewVerifierWithEd25519("global-gateway", publicKey)
+	middleware := NewAuthMiddleware(nil, "", verifier, zap.NewNop(), WithRequiredTeamRegionID("aws-us-east-1"))
+	authCtx, err := middleware.AuthenticateRequest(ctx)
+	if err != nil {
+		t.Fatalf("authenticate request: %v", err)
+	}
+	if authCtx.UserID != "user-1" || authCtx.TeamID != "team-2" || authCtx.TeamRole != "developer" {
+		t.Fatalf("unexpected auth context: %+v", authCtx)
+	}
+}
+
 func TestAuthMiddleware_RequireJWTAuth(t *testing.T) {
 	t.Setenv("GIN_MODE", "release")
 

@@ -199,6 +199,79 @@ func TestBuildConfigUsesCompiledPlanForDefaultClusterGatewayURL(t *testing.T) {
 	}
 }
 
+func TestBuildConfigUsesCompiledPlanForSchedulerRouting(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to add corev1 scheme: %v", err)
+	}
+	if err := infrav1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to add infra scheme: %v", err)
+	}
+
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "s0cp",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeExternal,
+				External: &infrav1alpha1.ExternalDatabaseConfig{
+					Host:     "postgres.example.internal",
+					Port:     5432,
+					Database: "sandbox0",
+					Username: "sandbox0",
+					PasswordSecret: infrav1alpha1.SecretKeyRef{
+						Name: "regional-db",
+						Key:  "password",
+					},
+				},
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				RegionalGateway: &infrav1alpha1.RegionalGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+				Scheduler: &infrav1alpha1.SchedulerServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					ServiceExposureConfig: infrav1alpha1.ServiceExposureConfig{
+						Service: &infrav1alpha1.ServiceNetworkConfig{Port: 8080},
+					},
+					Config: &infrav1alpha1.SchedulerConfig{HTTPPort: 8080},
+				},
+			},
+		},
+	}
+	dbSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "regional-db",
+			Namespace: "sandbox0-system",
+		},
+		Data: map[string][]byte{
+			"password": []byte("secret"),
+		},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dbSecret).Build()
+	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
+	ctx := context.Background()
+	compiled := infraplan.Compile(infra)
+	compiled.Services.Scheduler = infraplan.ServiceReference{URL: "http://planned-scheduler:8080"}
+
+	cfg, _, err := reconciler.buildConfig(ctx, infra, compiled)
+	if err != nil {
+		t.Fatalf("buildConfig returned error: %v", err)
+	}
+	if !cfg.SchedulerEnabled {
+		t.Fatalf("expected scheduler to be enabled in regional gateway config")
+	}
+	if cfg.SchedulerURL != compiled.Services.Scheduler.URL {
+		t.Fatalf("expected scheduler URL %q, got %q", compiled.Services.Scheduler.URL, cfg.SchedulerURL)
+	}
+}
+
 func TestBuildConfigSkipsInitUserForFederatedGlobalAuth(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
@@ -261,6 +334,15 @@ func TestBuildConfigSkipsInitUserForFederatedGlobalAuth(t *testing.T) {
 	}
 	if cfg.BuiltInAuth.InitUser != nil {
 		t.Fatalf("expected init user to be omitted for federated_global mode, got %#v", cfg.BuiltInAuth.InitUser)
+	}
+	if cfg.JWTSecret != "" {
+		t.Fatalf("expected jwt secret to be empty for federated_global mode, got %q", cfg.JWTSecret)
+	}
+	if cfg.JWTPublicKeyPEM == "" {
+		t.Fatal("expected federated_global mode to populate jwt public key")
+	}
+	if cfg.JWTIssuer != "global-gateway" {
+		t.Fatalf("expected default federated issuer global-gateway, got %q", cfg.JWTIssuer)
 	}
 }
 

@@ -241,7 +241,7 @@ func (s *Store) ListAllocationsByTemplate(ctx context.Context, scope, teamID, te
 func (s *Store) UpdateAllocationSyncStatus(ctx context.Context, scope, teamID, templateID, clusterID, status string, syncError *string) error {
 	_, err := s.pool.Exec(ctx, `
 		UPDATE scheduler_template_allocations
-		SET sync_status = $5, sync_error = $6, last_synced_at = CASE WHEN $5 = 'synced' THEN NOW() ELSE last_synced_at END
+		SET sync_status = $5::text, sync_error = $6, last_synced_at = CASE WHEN $5::text = 'synced' THEN NOW() ELSE last_synced_at END
 		WHERE scope = $1 AND team_id = $2 AND template_id = $3 AND cluster_id = $4
 	`, scope, teamID, templateID, clusterID, status, syncError)
 	if err != nil {

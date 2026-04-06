@@ -101,6 +101,10 @@ func applyGatewayConfig(dst *apiconfig.GatewayConfig, src infrav1alpha1.GatewayC
 	}
 
 	dst.JWTIssuer = src.JWTIssuer
+	dst.JWTPrivateKeyPEM = src.JWTPrivateKeyPEM
+	dst.JWTPublicKeyPEM = src.JWTPublicKeyPEM
+	dst.JWTPrivateKeyFile = src.JWTPrivateKeyFile
+	dst.JWTPublicKeyFile = src.JWTPublicKeyFile
 	dst.JWTAccessTokenTTL = src.JWTAccessTokenTTL
 	dst.JWTRefreshTokenTTL = src.JWTRefreshTokenTTL
 	dst.RateLimitRPS = src.RateLimitRPS

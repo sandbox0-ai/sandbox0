@@ -229,6 +229,10 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		cfg.DatabaseURL = dsn
 	}
 	cfg.DefaultClusterGatewayURL = compiledPlan.RegionalGateway.DefaultClusterGatewayURL
+	cfg.SchedulerEnabled = compiledPlan.Components.EnableScheduler
+	if compiledPlan.Services.Scheduler.URL != "" {
+		cfg.SchedulerURL = compiledPlan.Services.Scheduler.URL
+	}
 
 	authMode := strings.TrimSpace(strings.ToLower(cfg.AuthMode))
 	if authMode == "" {
@@ -252,24 +256,47 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		}
 	}
 
-	if strings.TrimSpace(cfg.JWTIssuer) == "" {
-		cfg.JWTIssuer = "regional-gateway"
-	}
-
-	if strings.TrimSpace(cfg.JWTSecret) == "" {
-		jwtSecret, err := common.EnsureSecretValue(
-			ctx,
-			r.Resources.Client,
-			r.Resources.Scheme,
-			infra,
-			fmt.Sprintf("%s-regional-gateway-jwt", infra.Name),
-			"jwt_secret",
-			32,
-		)
-		if err != nil {
-			return nil, nil, err
+	if authMode == "federated_global" {
+		if strings.TrimSpace(cfg.JWTIssuer) == "" {
+			cfg.JWTIssuer = defaultFederatedGlobalJWTIssuer(infra)
 		}
-		cfg.JWTSecret = jwtSecret
+		if strings.TrimSpace(cfg.JWTPublicKeyPEM) == "" {
+			_, publicKeyPEM, err := common.EnsureEd25519KeyPair(
+				ctx,
+				r.Resources.Client,
+				r.Resources.Scheme,
+				infra,
+				sharedUserJWTSecretName(infra),
+				"jwt_private_key_pem",
+				"jwt_public_key_pem",
+			)
+			if err != nil {
+				return nil, nil, err
+			}
+			cfg.JWTPublicKeyPEM = publicKeyPEM
+		}
+		cfg.JWTSecret = ""
+		cfg.JWTPrivateKeyPEM = ""
+	} else {
+		if strings.TrimSpace(cfg.JWTIssuer) == "" {
+			cfg.JWTIssuer = "regional-gateway"
+		}
+
+		if strings.TrimSpace(cfg.JWTSecret) == "" {
+			jwtSecret, err := common.EnsureSecretValue(
+				ctx,
+				r.Resources.Client,
+				r.Resources.Scheme,
+				infra,
+				fmt.Sprintf("%s-regional-gateway-jwt", infra.Name),
+				"jwt_secret",
+				32,
+			)
+			if err != nil {
+				return nil, nil, err
+			}
+			cfg.JWTSecret = jwtSecret
+		}
 	}
 
 	if strings.TrimSpace(infra.Spec.Region) != "" {
@@ -289,6 +316,19 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	}
 
 	return cfg, registryEnvVars, nil
+}
+
+func defaultFederatedGlobalJWTIssuer(infra *infrav1alpha1.Sandbox0Infra) string {
+	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.GlobalGateway != nil && infra.Spec.Services.GlobalGateway.Config != nil {
+		if issuer := strings.TrimSpace(infra.Spec.Services.GlobalGateway.Config.JWTIssuer); issuer != "" {
+			return issuer
+		}
+	}
+	return "global-gateway"
+}
+
+func sharedUserJWTSecretName(infra *infrav1alpha1.Sandbox0Infra) string {
+	return fmt.Sprintf("%s-user-jwt", infra.Name)
 }
 
 func (r *Reconciler) applyRegistryConfig(infra *infrav1alpha1.Sandbox0Infra, cfg *apiconfig.RegionalGatewayConfig) ([]corev1.EnvVar, error) {

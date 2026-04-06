@@ -956,6 +956,26 @@ spec:
                             description: JWTIssuer sets the JWT issuer for gateway-issued
                               tokens.
                             type: string
+                          jwtPrivateKeyFile:
+                            description: |-
+                              JWTPrivateKeyFile points at a PEM-encoded Ed25519 private key file used to
+                              sign user-facing JWTs.
+                            type: string
+                          jwtPrivateKeyPEM:
+                            description: |-
+                              JWTPrivateKeyPEM sets the PEM-encoded Ed25519 private key used to sign
+                              user-facing JWTs.
+                            type: string
+                          jwtPublicKeyFile:
+                            description: |-
+                              JWTPublicKeyFile points at a PEM-encoded Ed25519 public key file used to
+                              verify user-facing JWTs.
+                            type: string
+                          jwtPublicKeyPEM:
+                            description: |-
+                              JWTPublicKeyPEM sets the PEM-encoded Ed25519 public key used to verify
+                              user-facing JWTs.
+                            type: string
                           jwtRefreshTokenTTL:
                             default: 168h
                             type: string
@@ -1197,6 +1217,26 @@ spec:
                           jwtIssuer:
                             description: JWTIssuer sets the JWT issuer for gateway-issued
                               tokens.
+                            type: string
+                          jwtPrivateKeyFile:
+                            description: |-
+                              JWTPrivateKeyFile points at a PEM-encoded Ed25519 private key file used to
+                              sign user-facing JWTs.
+                            type: string
+                          jwtPrivateKeyPEM:
+                            description: |-
+                              JWTPrivateKeyPEM sets the PEM-encoded Ed25519 private key used to sign
+                              user-facing JWTs.
+                            type: string
+                          jwtPublicKeyFile:
+                            description: |-
+                              JWTPublicKeyFile points at a PEM-encoded Ed25519 public key file used to
+                              verify user-facing JWTs.
+                            type: string
+                          jwtPublicKeyPEM:
+                            description: |-
+                              JWTPublicKeyPEM sets the PEM-encoded Ed25519 public key used to verify
+                              user-facing JWTs.
                             type: string
                           jwtRefreshTokenTTL:
                             default: 168h
@@ -1898,6 +1938,26 @@ spec:
                           jwtIssuer:
                             description: JWTIssuer sets the JWT issuer for gateway-issued
                               tokens.
+                            type: string
+                          jwtPrivateKeyFile:
+                            description: |-
+                              JWTPrivateKeyFile points at a PEM-encoded Ed25519 private key file used to
+                              sign user-facing JWTs.
+                            type: string
+                          jwtPrivateKeyPEM:
+                            description: |-
+                              JWTPrivateKeyPEM sets the PEM-encoded Ed25519 private key used to sign
+                              user-facing JWTs.
+                            type: string
+                          jwtPublicKeyFile:
+                            description: |-
+                              JWTPublicKeyFile points at a PEM-encoded Ed25519 public key file used to
+                              verify user-facing JWTs.
+                            type: string
+                          jwtPublicKeyPEM:
+                            description: |-
+                              JWTPublicKeyPEM sets the PEM-encoded Ed25519 public key used to verify
+                              user-facing JWTs.
                             type: string
                           jwtRefreshTokenTTL:
                             default: 168h

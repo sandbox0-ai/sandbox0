@@ -72,6 +72,7 @@ type ResourceRef struct {
 
 type ServicePlan struct {
 	Manager        ServiceReference
+	Scheduler      ServiceReference
 	ClusterGateway ServiceReference
 }
 
@@ -147,7 +148,7 @@ func Compile(infra *infrav1alpha1.Sandbox0Infra) *InfraPlan {
 	compiled.Manager = compileManagerPlan(infra, compiled)
 	compiled.Netd = compileNetdPlan(infra, compiled)
 	compiled.RegionalGateway = compileRegionalGatewayPlan(compiled)
-	compiled.Enterprise = compileEnterpriseLicensePlan(infra)
+	compiled.Enterprise = compileEnterpriseLicensePlan(infra, compiled)
 	compiled.Validation = compileValidationPlan(infra, compiled)
 	compiled.Cleanup = compileCleanupPlan(infra, compiled)
 	compiled.Status = compileStatusPlan(compiled)
@@ -190,7 +191,23 @@ func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 func compileServices(infra *infrav1alpha1.Sandbox0Infra) ServicePlan {
 	return ServicePlan{
 		Manager:        compileManagerServiceReference(infra),
+		Scheduler:      compileSchedulerServiceReference(infra),
 		ClusterGateway: compileClusterGatewayServiceReference(infra),
+	}
+}
+
+func compileSchedulerServiceReference(infra *infrav1alpha1.Sandbox0Infra) ServiceReference {
+	if infra == nil || infra.Name == "" || infra.Namespace == "" || !infrav1alpha1.IsSchedulerEnabled(infra) {
+		return ServiceReference{}
+	}
+
+	port := common.ResolveServicePort(schedulerServiceConfig(infra), int32(schedulerHTTPPort(infra)))
+	name := fmt.Sprintf("%s-scheduler", infra.Name)
+
+	return ServiceReference{
+		Name: name,
+		Port: port,
+		URL:  fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", name, infra.Namespace, port),
 	}
 }
 
@@ -283,10 +300,10 @@ func compileRegionalGatewayPlan(compiled *InfraPlan) RegionalGatewayPlan {
 	}
 }
 
-func compileEnterpriseLicensePlan(infra *infrav1alpha1.Sandbox0Infra) EnterpriseLicensePlan {
+func compileEnterpriseLicensePlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) EnterpriseLicensePlan {
 	return EnterpriseLicensePlan{
 		Scheduler:       infrav1alpha1.IsSchedulerEnabled(infra),
-		RegionalGateway: regionalGatewayEnterpriseLicenseRequired(infra),
+		RegionalGateway: regionalGatewayEnterpriseLicenseRequired(infra, compiled),
 		GlobalGateway:   globalGatewayEnterpriseLicenseRequired(infra),
 		ClusterGateway:  clusterGatewayEnterpriseLicenseRequired(infra),
 	}
@@ -672,6 +689,21 @@ func clusterGatewayServiceConfig(infra *infrav1alpha1.Sandbox0Infra) *infrav1alp
 	return nil
 }
 
+func schedulerHTTPPort(infra *infrav1alpha1.Sandbox0Infra) int {
+	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.Scheduler != nil &&
+		infra.Spec.Services.Scheduler.Config != nil && infra.Spec.Services.Scheduler.Config.HTTPPort > 0 {
+		return infra.Spec.Services.Scheduler.Config.HTTPPort
+	}
+	return 8080
+}
+
+func schedulerServiceConfig(infra *infrav1alpha1.Sandbox0Infra) *infrav1alpha1.ServiceNetworkConfig {
+	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.Scheduler != nil {
+		return infra.Spec.Services.Scheduler.Service
+	}
+	return nil
+}
+
 func globalGatewayServiceConfig(infra *infrav1alpha1.Sandbox0Infra) *infrav1alpha1.ServiceNetworkConfig {
 	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.GlobalGateway != nil {
 		return infra.Spec.Services.GlobalGateway.Service
@@ -862,17 +894,22 @@ func clusterGatewayInitUserPasswordRequired(infra *infrav1alpha1.Sandbox0Infra) 
 	return cfg.BuiltInAuth.Enabled || !hasEnabledOIDCProviders(cfg.OIDCProviders)
 }
 
-func regionalGatewayEnterpriseLicenseRequired(infra *infrav1alpha1.Sandbox0Infra) bool {
+func regionalGatewayEnterpriseLicenseRequired(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) bool {
 	if !infrav1alpha1.IsRegionalGatewayEnabled(infra) || infra == nil || infra.Spec.Services == nil || infra.Spec.Services.RegionalGateway == nil {
 		return false
 	}
 
 	cfg := infra.Spec.Services.RegionalGateway.Config
 	if cfg == nil {
-		return false
+		cfg = &infrav1alpha1.RegionalGatewayConfig{}
 	}
 
-	return (cfg.SchedulerEnabled && strings.TrimSpace(cfg.SchedulerURL) != "") || hasEnabledOIDCProviders(cfg.OIDCProviders)
+	schedulerConfigured := cfg.SchedulerEnabled && strings.TrimSpace(cfg.SchedulerURL) != ""
+	if !schedulerConfigured && compiled != nil {
+		schedulerConfigured = compiled.Components.EnableScheduler && strings.TrimSpace(compiled.Services.Scheduler.URL) != ""
+	}
+
+	return schedulerConfigured || hasEnabledOIDCProviders(cfg.OIDCProviders)
 }
 
 func globalGatewayEnterpriseLicenseRequired(infra *infrav1alpha1.Sandbox0Infra) bool {

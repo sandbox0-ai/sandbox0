@@ -65,6 +65,10 @@ type globalGatewayConfigYAML struct {
 	ServerIdleTimeout  durationYAMLValue `yaml:"server_idle_timeout"`
 
 	JWTSecret                string               `yaml:"jwt_secret"`
+	JWTPrivateKeyPEM         string               `yaml:"jwt_private_key_pem"`
+	JWTPublicKeyPEM          string               `yaml:"jwt_public_key_pem"`
+	JWTPrivateKeyFile        string               `yaml:"jwt_private_key_file"`
+	JWTPublicKeyFile         string               `yaml:"jwt_public_key_file"`
 	JWTIssuer                string               `yaml:"jwt_issuer"`
 	JWTAccessTokenTTL        durationYAMLValue    `yaml:"jwt_access_token_ttl"`
 	JWTRefreshTokenTTL       durationYAMLValue    `yaml:"jwt_refresh_token_ttl"`
@@ -163,6 +167,10 @@ func applyGlobalGatewayYAML(cfg *GlobalGatewayConfig, raw globalGatewayConfigYAM
 	cfg.DatabaseSchema = raw.DatabaseSchema
 	cfg.LicenseFile = raw.LicenseFile
 	cfg.JWTSecret = raw.JWTSecret
+	cfg.JWTPrivateKeyPEM = raw.JWTPrivateKeyPEM
+	cfg.JWTPublicKeyPEM = raw.JWTPublicKeyPEM
+	cfg.JWTPrivateKeyFile = raw.JWTPrivateKeyFile
+	cfg.JWTPublicKeyFile = raw.JWTPublicKeyFile
 	cfg.JWTIssuer = raw.JWTIssuer
 	cfg.RateLimitRPS = raw.RateLimitRPS
 	cfg.RateLimitBurst = raw.RateLimitBurst

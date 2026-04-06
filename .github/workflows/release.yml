@@ -186,7 +186,7 @@ jobs:
           - Docker image: docker.io/${IMAGE_REPO}:${{ needs.prepare-release.outputs.version }}
           - Helm OCI: oci://ghcr.io/${OWNER_LOWER}/charts/infra-operator
           - Helm repo: https://sandbox0-ai.github.io/sandbox0
-          - Website/docs build and Pages deploy are handled by sandbox0-cloud
+          - Website/docs release bundle upload and cluster deploy are handled by sandbox0-cloud
           EOF
           )
 
@@ -213,14 +213,14 @@ jobs:
           fi
 
   trigger-cloud-website-release:
-    name: Trigger sandbox0-cloud website deploy
+    name: Trigger sandbox0-cloud docs bundle build
     runs-on: ubuntu-latest
     needs:
       - prepare-release
       - package
       - create-draft-release
     steps:
-      - name: Dispatch website deploy to sandbox0-cloud
+      - name: Dispatch docs bundle build to sandbox0-cloud
         id: dispatch
         env:
           SANDBOX0_CLOUD_REPO_TOKEN: ${{ secrets.SANDBOX0_CLOUD_REPO_TOKEN }}
@@ -243,13 +243,12 @@ jobs:
             -f docs_include_next="true" \
             -f docs_download_release_bundles="1" \
             -f upload_release_bundle="true" \
-            -f release_tag="${GITHUB_REF_NAME}" \
-            -f deploy_to_pages="true"
+            -f release_tag="${GITHUB_REF_NAME}"
 
           echo "dispatch_time=${dispatch_time}" >> "$GITHUB_OUTPUT"
-          echo "Dispatched sandbox0-cloud website release workflow for ${GITHUB_REF_NAME}."
+          echo "Dispatched sandbox0-cloud docs bundle workflow for ${GITHUB_REF_NAME}."
 
-      - name: Wait for website deploy workflow
+      - name: Wait for docs bundle workflow
         env:
           GH_TOKEN: ${{ secrets.SANDBOX0_CLOUD_REPO_TOKEN }}
           DISPATCH_TIME: ${{ steps.dispatch.outputs.dispatch_time }}
@@ -313,3 +312,138 @@ jobs:
           fi
 
           gh release edit "${TAG}" --draft=false
+
+  deploy-cloud-website:
+    name: Deploy sandbox0-cloud website to cluster
+    runs-on: ubuntu-latest
+    needs:
+      - prepare-release
+      - publish-release-record
+    steps:
+      - name: Validate sandbox0-cloud dispatch token
+        env:
+          SANDBOX0_CLOUD_REPO_TOKEN: ${{ secrets.SANDBOX0_CLOUD_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${SANDBOX0_CLOUD_REPO_TOKEN}" ]]; then
+            echo "SANDBOX0_CLOUD_REPO_TOKEN is required to dispatch sandbox0-cloud image and deploy workflows."
+            exit 1
+          fi
+
+      - name: Dispatch sandbox0-cloud images build
+        id: images_dispatch
+        env:
+          SANDBOX0_CLOUD_REPO_TOKEN: ${{ secrets.SANDBOX0_CLOUD_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          dispatch_time="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+          GH_TOKEN="${SANDBOX0_CLOUD_REPO_TOKEN}" gh workflow run images.yml \
+            --repo sandbox0-ai/sandbox0-cloud \
+            --ref main \
+            -f sandbox0_ref="${GITHUB_REF_NAME}"
+
+          echo "dispatch_time=${dispatch_time}" >> "$GITHUB_OUTPUT"
+          echo "Dispatched sandbox0-cloud images workflow for ${GITHUB_REF_NAME}."
+
+      - name: Wait for sandbox0-cloud images build
+        id: images_wait
+        env:
+          GH_TOKEN: ${{ secrets.SANDBOX0_CLOUD_REPO_TOKEN }}
+          DISPATCH_TIME: ${{ steps.images_dispatch.outputs.dispatch_time }}
+        run: |
+          set -euo pipefail
+
+          run_id=""
+          for attempt in $(seq 1 30); do
+            run_id="$(
+              gh api "repos/sandbox0-ai/sandbox0-cloud/actions/workflows/images.yml/runs?event=workflow_dispatch&branch=main&per_page=20" \
+                | python3 -c 'import json, os, sys; from datetime import datetime; dispatch_time = datetime.fromisoformat(os.environ["DISPATCH_TIME"].replace("Z", "+00:00")); data = json.load(sys.stdin); print(next((str(run["id"]) for run in data.get("workflow_runs", []) if datetime.fromisoformat(run["created_at"].replace("Z", "+00:00")) >= dispatch_time), ""))'
+            )"
+
+            if [[ -n "${run_id}" ]]; then
+              break
+            fi
+
+            sleep 60
+          done
+
+          if [[ -z "${run_id}" ]]; then
+            echo "Timed out waiting for sandbox0-cloud images workflow to start."
+            exit 1
+          fi
+
+          echo "run_id=${run_id}" >> "$GITHUB_OUTPUT"
+          gh run watch "${run_id}" --repo sandbox0-ai/sandbox0-cloud --interval 60 --exit-status
+
+      - name: Read sandbox0-cloud image tag metadata
+        id: image_tags
+        env:
+          GH_TOKEN: ${{ secrets.SANDBOX0_CLOUD_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          metadata_dir="$(mktemp -d)"
+          trap 'rm -rf "${metadata_dir}"' EXIT
+
+          gh run download "${{ steps.images_wait.outputs.run_id }}" \
+            --repo sandbox0-ai/sandbox0-cloud \
+            --name image-tag-metadata \
+            --dir "${metadata_dir}"
+
+          tag_suffix="$(cat "${metadata_dir}/tag_suffix")"
+          if [[ -z "${tag_suffix}" ]]; then
+            echo "sandbox0-cloud image tag metadata is missing tag_suffix."
+            exit 1
+          fi
+
+          echo "tag_suffix=${tag_suffix}" >> "$GITHUB_OUTPUT"
+          echo "Resolved sandbox0-cloud image tag suffix ${tag_suffix}."
+
+      - name: Dispatch sandbox0-cloud cluster deploy
+        id: deploy_dispatch
+        env:
+          SANDBOX0_CLOUD_REPO_TOKEN: ${{ secrets.SANDBOX0_CLOUD_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          dispatch_time="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+          GH_TOKEN="${SANDBOX0_CLOUD_REPO_TOKEN}" gh workflow run deploy.yml \
+            --repo sandbox0-ai/sandbox0-cloud \
+            --ref main \
+            -f image_tag_suffix="${{ steps.image_tags.outputs.tag_suffix }}" \
+            -f sandbox0_ref="${GITHUB_REF_NAME}"
+
+          echo "dispatch_time=${dispatch_time}" >> "$GITHUB_OUTPUT"
+          echo "Dispatched sandbox0-cloud deploy workflow for ${GITHUB_REF_NAME}."
+
+      - name: Wait for sandbox0-cloud cluster deploy
+        env:
+          GH_TOKEN: ${{ secrets.SANDBOX0_CLOUD_REPO_TOKEN }}
+          DISPATCH_TIME: ${{ steps.deploy_dispatch.outputs.dispatch_time }}
+        run: |
+          set -euo pipefail
+
+          run_id=""
+          for attempt in $(seq 1 30); do
+            run_id="$(
+              gh api "repos/sandbox0-ai/sandbox0-cloud/actions/workflows/deploy.yml/runs?event=workflow_dispatch&branch=main&per_page=20" \
+                | python3 -c 'import json, os, sys; from datetime import datetime; dispatch_time = datetime.fromisoformat(os.environ["DISPATCH_TIME"].replace("Z", "+00:00")); data = json.load(sys.stdin); print(next((str(run["id"]) for run in data.get("workflow_runs", []) if datetime.fromisoformat(run["created_at"].replace("Z", "+00:00")) >= dispatch_time), ""))'
+            )"
+
+            if [[ -n "${run_id}" ]]; then
+              break
+            fi
+
+            sleep 60
+          done
+
+          if [[ -z "${run_id}" ]]; then
+            echo "Timed out waiting for sandbox0-cloud deploy workflow to start."
+            exit 1
+          fi
+
+          gh run watch "${run_id}" --repo sandbox0-ai/sandbox0-cloud --interval 60 --exit-status

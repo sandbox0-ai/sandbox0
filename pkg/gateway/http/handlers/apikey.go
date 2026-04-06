@@ -3,6 +3,7 @@ package handlers
 import (
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -116,10 +117,22 @@ func (h *APIKeyHandler) CreateAPIKey(c *gin.Context) {
 		roles = []string{"developer"}
 	}
 
+	team, err := h.identity.GetTeamByID(c.Request.Context(), authCtx.TeamID)
+	if err != nil {
+		h.logger.Error("Failed to get team for API key creation", zap.Error(err), zap.String("team_id", authCtx.TeamID))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to resolve team home region")
+		return
+	}
+	if team.HomeRegionID == nil || strings.TrimSpace(*team.HomeRegionID) == "" {
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "team home region is not configured")
+		return
+	}
+
 	// Create API key
 	key, keyValue, err := h.keys.CreateAPIKey(
 		c.Request.Context(),
 		authCtx.TeamID,
+		strings.TrimSpace(*team.HomeRegionID),
 		authCtx.UserID,
 		req.Name,
 		req.Type,

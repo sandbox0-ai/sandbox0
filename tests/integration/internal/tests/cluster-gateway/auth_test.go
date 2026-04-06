@@ -156,8 +156,11 @@ func TestClusterGatewayIntegration_PublicAuthAPIKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create user/team: %v", err)
 	}
+	if _, err := dbPool.Exec(ctx, `UPDATE teams SET home_region_id = $2 WHERE id = $1`, team.ID, "aws-us-east-1"); err != nil {
+		t.Fatalf("set team home region: %v", err)
+	}
 
-	_, keyValue, err := apiKeyRepo.CreateAPIKey(ctx, team.ID, user.ID, "test-key", "user", []string{"admin"}, time.Now().Add(time.Hour))
+	_, keyValue, err := apiKeyRepo.CreateAPIKey(ctx, team.ID, "aws-us-east-1", user.ID, "test-key", "user", []string{"admin"}, time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("create api key: %v", err)
 	}

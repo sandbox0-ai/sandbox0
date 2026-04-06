@@ -5,9 +5,12 @@ import (
 	"fmt"
 	stdhttp "net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
 	gatewaybuiltin "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/builtin"
 	gatewayoidc "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/oidc"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
@@ -18,6 +21,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/tenantdir"
 	"github.com/sandbox0-ai/sandbox0/pkg/licensing"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
+	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"go.uber.org/zap"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -32,6 +36,7 @@ type Server struct {
 	pool            *pgxpool.Pool
 	identityRepo    *identity.Repository
 	regionRepo      *tenantdir.Repository
+	regionLookup    regionDirectory
 	authMiddleware  *gatewaymiddleware.AuthMiddleware
 	requestLogger   *gatewaymiddleware.RequestLogger
 	builtinProvider *gatewaybuiltin.Provider
@@ -40,6 +45,13 @@ type Server struct {
 	entitlements    licensing.Entitlements
 	obsProvider     *observability.Provider
 	logger          *zap.Logger
+	proxyTimeout    time.Duration
+	regionProxies   map[string]*proxy.Router
+	regionProxiesMu sync.RWMutex
+}
+
+type regionDirectory interface {
+	GetRegion(ctx context.Context, regionID string) (*tenantdir.Region, error)
 }
 
 // NewServer creates a new global-gateway server.
@@ -106,6 +118,7 @@ func NewServer(
 		pool:            pool,
 		identityRepo:    identityRepo,
 		regionRepo:      regionRepo,
+		regionLookup:    regionRepo,
 		authMiddleware:  authMiddleware,
 		requestLogger:   requestLogger,
 		builtinProvider: builtinProvider,
@@ -114,6 +127,8 @@ func NewServer(
 		entitlements:    entitlements,
 		obsProvider:     obsProvider,
 		logger:          logger,
+		proxyTimeout:    effectiveProxyTimeout(cfg.ServerWriteTimeout.Duration),
+		regionProxies:   make(map[string]*proxy.Router),
 	}
 	server.setupRoutes()
 	return server, nil
@@ -163,6 +178,103 @@ func (s *Server) setupRoutes() {
 			regionsAdmin.DELETE("/:id", regionHandler.DeleteRegion)
 		}
 	}
+
+	s.router.NoRoute(s.handleNoRoute)
+}
+
+func effectiveProxyTimeout(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		return 30 * time.Second
+	}
+	return timeout
+}
+
+func (s *Server) handleNoRoute(c *gin.Context) {
+	if s.handleAPIKeyRegionProxy(c) {
+		return
+	}
+	c.AbortWithStatus(stdhttp.StatusNotFound)
+}
+
+func (s *Server) handleAPIKeyRegionProxy(c *gin.Context) bool {
+	if c == nil || c.Request == nil || c.Request.URL == nil {
+		return false
+	}
+	path := c.Request.URL.Path
+	if path != "/api" && !strings.HasPrefix(path, "/api/") {
+		return false
+	}
+
+	token, ok := extractBearerToken(c.GetHeader("Authorization"))
+	if !ok || !strings.HasPrefix(token, "s0_") {
+		return false
+	}
+
+	regionID, err := apikey.ParseRegionIDFromKey(token)
+	if err != nil {
+		c.AbortWithStatusJSON(stdhttp.StatusUnauthorized, gin.H{"error": "invalid api key"})
+		return true
+	}
+	if s.regionLookup == nil {
+		c.AbortWithStatusJSON(stdhttp.StatusInternalServerError, gin.H{"error": "region directory unavailable"})
+		return true
+	}
+
+	region, err := s.regionLookup.GetRegion(c.Request.Context(), regionID)
+	if err != nil {
+		if err == tenantdir.ErrRegionNotFound {
+			c.AbortWithStatusJSON(stdhttp.StatusNotFound, gin.H{"error": "region not found"})
+			return true
+		}
+		s.logger.Error("Failed to resolve API key region", zap.Error(err), zap.String("region_id", regionID))
+		c.AbortWithStatusJSON(stdhttp.StatusInternalServerError, gin.H{"error": "failed to resolve region"})
+		return true
+	}
+	if !region.Enabled || strings.TrimSpace(region.RegionalGatewayURL) == "" {
+		c.AbortWithStatusJSON(stdhttp.StatusServiceUnavailable, gin.H{"error": "region gateway unavailable"})
+		return true
+	}
+
+	router, err := s.getRegionProxy(region.RegionalGatewayURL)
+	if err != nil {
+		s.logger.Error("Failed to initialize region proxy", zap.Error(err), zap.String("region_id", region.ID), zap.String("url", region.RegionalGatewayURL))
+		c.AbortWithStatusJSON(stdhttp.StatusInternalServerError, gin.H{"error": "proxy initialization failed"})
+		return true
+	}
+
+	router.ProxyToTarget(c)
+	return true
+}
+
+func extractBearerToken(authHeader string) (string, bool) {
+	parts := strings.SplitN(strings.TrimSpace(authHeader), " ", 2)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || strings.TrimSpace(parts[1]) == "" {
+		return "", false
+	}
+	return strings.TrimSpace(parts[1]), true
+}
+
+func (s *Server) getRegionProxy(targetURL string) (*proxy.Router, error) {
+	normalizedTargetURL := strings.TrimSpace(targetURL)
+	s.regionProxiesMu.RLock()
+	existing := s.regionProxies[normalizedTargetURL]
+	s.regionProxiesMu.RUnlock()
+	if existing != nil {
+		return existing, nil
+	}
+
+	router, err := proxy.NewRouter(normalizedTargetURL, s.logger, s.proxyTimeout)
+	if err != nil {
+		return nil, err
+	}
+
+	s.regionProxiesMu.Lock()
+	defer s.regionProxiesMu.Unlock()
+	if existing = s.regionProxies[normalizedTargetURL]; existing != nil {
+		return existing, nil
+	}
+	s.regionProxies[normalizedTargetURL] = router
+	return router, nil
 }
 
 func (s *Server) healthCheck(c *gin.Context) {

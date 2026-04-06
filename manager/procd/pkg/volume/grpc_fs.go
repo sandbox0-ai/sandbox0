@@ -51,6 +51,21 @@ func (fs *grpcFS) withToken(ctx context.Context) (context.Context, error) {
 	return metadata.AppendToOutgoingContext(ctx, "x-internal-token", token), nil
 }
 
+func actorFromCaller(caller fuse.Caller) *pb.PosixActor {
+	return &pb.PosixActor{
+		Pid:  caller.Pid,
+		Uid:  caller.Uid,
+		Gids: []uint32{caller.Gid},
+	}
+}
+
+func actorFromHeader(header *fuse.InHeader) *pb.PosixActor {
+	if header == nil {
+		return nil
+	}
+	return actorFromCaller(header.Caller)
+}
+
 func (fs *grpcFS) Lookup(cancel <-chan struct{}, header *fuse.InHeader, name string, out *fuse.EntryOut) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
@@ -63,6 +78,7 @@ func (fs *grpcFS) Lookup(cancel <-chan struct{}, header *fuse.InHeader, name str
 		VolumeId: fs.volumeID,
 		Parent:   header.NodeId,
 		Name:     name,
+		Actor:    actorFromHeader(header),
 	})
 	if err != nil {
 		return grpcToFuse(err)
@@ -83,6 +99,7 @@ func (fs *grpcFS) GetAttr(cancel <-chan struct{}, input *fuse.GetAttrIn, out *fu
 	resp, err := fs.client.GetAttr(ctx, &pb.GetAttrRequest{
 		VolumeId: fs.volumeID,
 		Inode:    input.NodeId,
+		Actor:    actorFromCaller(input.Caller),
 	})
 	if err != nil {
 		return grpcToFuse(err)
@@ -124,6 +141,7 @@ func (fs *grpcFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fu
 		Valid:    input.Valid,
 		Attr:     attr,
 		HandleId: handleID,
+		Actor:    actorFromCaller(input.Caller),
 	})
 	if err != nil {
 		return grpcToFuse(err)
@@ -146,6 +164,7 @@ func (fs *grpcFS) Mkdir(cancel <-chan struct{}, input *fuse.MkdirIn, name string
 		Name:     name,
 		Mode:     input.Mode,
 		Umask:    input.Umask,
+		Actor:    actorFromCaller(input.Caller),
 	})
 	if err != nil {
 		return grpcToFuse(err)
@@ -166,6 +185,7 @@ func (fs *grpcFS) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name str
 		VolumeId: fs.volumeID,
 		Parent:   header.NodeId,
 		Name:     name,
+		Actor:    actorFromHeader(header),
 	})
 	if err != nil {
 		return grpcToFuse(err)
@@ -185,6 +205,7 @@ func (fs *grpcFS) Rmdir(cancel <-chan struct{}, header *fuse.InHeader, name stri
 		VolumeId: fs.volumeID,
 		Parent:   header.NodeId,
 		Name:     name,
+		Actor:    actorFromHeader(header),
 	})
 	if err != nil {
 		return grpcToFuse(err)
@@ -207,6 +228,7 @@ func (fs *grpcFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, 
 		NewParent: input.Newdir,
 		NewName:   newName,
 		Flags:     input.Flags,
+		Actor:     actorFromCaller(input.Caller),
 	})
 	if err != nil {
 		return grpcToFuse(err)
@@ -227,6 +249,7 @@ func (fs *grpcFS) Link(cancel <-chan struct{}, input *fuse.LinkIn, filename stri
 		Inode:     input.Oldnodeid,
 		NewParent: input.NodeId,
 		NewName:   filename,
+		Actor:     actorFromCaller(input.Caller),
 	})
 	if err != nil {
 		return grpcToFuse(err)
@@ -248,6 +271,7 @@ func (fs *grpcFS) Symlink(cancel <-chan struct{}, header *fuse.InHeader, pointed
 		Parent:   header.NodeId,
 		Name:     linkName,
 		Target:   pointedTo,
+		Actor:    actorFromHeader(header),
 	})
 	if err != nil {
 		return grpcToFuse(err)
@@ -267,6 +291,7 @@ func (fs *grpcFS) Readlink(cancel <-chan struct{}, header *fuse.InHeader) ([]byt
 	resp, err := fs.client.Readlink(ctx, &pb.ReadlinkRequest{
 		VolumeId: fs.volumeID,
 		Inode:    header.NodeId,
+		Actor:    actorFromHeader(header),
 	})
 	if err != nil {
 		return nil, grpcToFuse(err)
@@ -288,6 +313,7 @@ func (fs *grpcFS) Access(cancel <-chan struct{}, input *fuse.AccessIn) fuse.Stat
 		Mask:     input.Mask,
 		Uid:      input.Uid,
 		Gids:     []uint32{input.Gid},
+		Actor:    actorFromCaller(input.Caller),
 	})
 	if err != nil {
 		return grpcToFuse(err)
@@ -310,6 +336,7 @@ func (fs *grpcFS) Create(cancel <-chan struct{}, input *fuse.CreateIn, name stri
 		Mode:     input.Mode,
 		Flags:    input.Flags,
 		Umask:    input.Umask,
+		Actor:    actorFromCaller(input.Caller),
 	})
 	if err != nil {
 		return grpcToFuse(err)
@@ -331,6 +358,7 @@ func (fs *grpcFS) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.Ope
 		VolumeId: fs.volumeID,
 		Inode:    input.NodeId,
 		Flags:    input.Flags,
+		Actor:    actorFromCaller(input.Caller),
 	})
 	if err != nil {
 		return grpcToFuse(err)
@@ -353,6 +381,7 @@ func (fs *grpcFS) Read(cancel <-chan struct{}, input *fuse.ReadIn, buf []byte) (
 		Offset:   int64(input.Offset),
 		Size:     int64(input.Size),
 		HandleId: input.Fh,
+		Actor:    actorFromCaller(input.Caller),
 	})
 	if err != nil {
 		return nil, grpcToFuse(err)
@@ -374,6 +403,7 @@ func (fs *grpcFS) Write(cancel <-chan struct{}, input *fuse.WriteIn, data []byte
 		Offset:   int64(input.Offset),
 		Data:     data,
 		HandleId: input.Fh,
+		Actor:    actorFromCaller(input.Caller),
 	})
 	if err != nil {
 		return 0, grpcToFuse(err)
@@ -390,6 +420,7 @@ func (fs *grpcFS) Release(cancel <-chan struct{}, input *fuse.ReleaseIn) {
 		VolumeId: fs.volumeID,
 		Inode:    input.NodeId,
 		HandleId: input.Fh,
+		Actor:    actorFromCaller(input.Caller),
 	})
 }
 
@@ -404,6 +435,7 @@ func (fs *grpcFS) Flush(cancel <-chan struct{}, input *fuse.FlushIn) fuse.Status
 	_, err = fs.client.Flush(ctx, &pb.FlushRequest{
 		VolumeId: fs.volumeID,
 		HandleId: input.Fh,
+		Actor:    actorFromCaller(input.Caller),
 	})
 	if err != nil {
 		return grpcToFuse(err)
@@ -423,6 +455,7 @@ func (fs *grpcFS) Fsync(cancel <-chan struct{}, input *fuse.FsyncIn) fuse.Status
 		VolumeId: fs.volumeID,
 		HandleId: input.Fh,
 		Datasync: input.FsyncFlags != 0,
+		Actor:    actorFromCaller(input.Caller),
 	})
 	if err != nil {
 		return grpcToFuse(err)
@@ -445,6 +478,7 @@ func (fs *grpcFS) Fallocate(cancel <-chan struct{}, input *fuse.FallocateIn) fus
 		Offset:   int64(input.Offset),
 		Length:   int64(input.Length),
 		HandleId: input.Fh,
+		Actor:    actorFromCaller(input.Caller),
 	})
 	if err != nil {
 		return grpcToFuse(err)
@@ -464,6 +498,7 @@ func (fs *grpcFS) OpenDir(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.
 		VolumeId: fs.volumeID,
 		Inode:    input.NodeId,
 		Flags:    input.Flags,
+		Actor:    actorFromCaller(input.Caller),
 	})
 	if err != nil {
 		return grpcToFuse(err)
@@ -487,6 +522,7 @@ func (fs *grpcFS) ReadDir(cancel <-chan struct{}, input *fuse.ReadIn, out *fuse.
 		Offset:   int64(input.Offset),
 		Size:     input.Size,
 		Plus:     false,
+		Actor:    actorFromCaller(input.Caller),
 	})
 	if err != nil {
 		return grpcToFuse(err)
@@ -522,6 +558,7 @@ func (fs *grpcFS) ReadDirPlus(cancel <-chan struct{}, input *fuse.ReadIn, out *f
 		Offset:   int64(input.Offset),
 		Size:     input.Size,
 		Plus:     true,
+		Actor:    actorFromCaller(input.Caller),
 	})
 	if err != nil {
 		return grpcToFuse(err)
@@ -553,6 +590,7 @@ func (fs *grpcFS) ReleaseDir(input *fuse.ReleaseIn) {
 		VolumeId: fs.volumeID,
 		Inode:    input.NodeId,
 		HandleId: input.Fh,
+		Actor:    actorFromCaller(input.Caller),
 	})
 }
 
@@ -566,6 +604,7 @@ func (fs *grpcFS) StatFs(cancel <-chan struct{}, input *fuse.InHeader, out *fuse
 	}
 	resp, err := fs.client.StatFs(ctx, &pb.StatFsRequest{
 		VolumeId: fs.volumeID,
+		Actor:    actorFromHeader(input),
 	})
 	if err != nil {
 		return grpcToFuse(err)
@@ -594,6 +633,7 @@ func (fs *grpcFS) GetXAttr(cancel <-chan struct{}, header *fuse.InHeader, attr s
 		Inode:    header.NodeId,
 		Name:     attr,
 		Size:     uint32(len(dest)),
+		Actor:    actorFromHeader(header),
 	})
 	if err != nil {
 		return 0, grpcToFuse(err)
@@ -620,6 +660,7 @@ func (fs *grpcFS) ListXAttr(cancel <-chan struct{}, header *fuse.InHeader, dest 
 		VolumeId: fs.volumeID,
 		Inode:    header.NodeId,
 		Size:     int32(len(dest)),
+		Actor:    actorFromHeader(header),
 	})
 	if err != nil {
 		return 0, grpcToFuse(err)
@@ -648,6 +689,7 @@ func (fs *grpcFS) SetXAttr(cancel <-chan struct{}, input *fuse.SetXAttrIn, attr 
 		Name:     attr,
 		Value:    data,
 		Flags:    input.Flags,
+		Actor:    actorFromCaller(input.Caller),
 	})
 	if err != nil {
 		return grpcToFuse(err)
@@ -667,6 +709,7 @@ func (fs *grpcFS) RemoveXAttr(cancel <-chan struct{}, header *fuse.InHeader, att
 		VolumeId: fs.volumeID,
 		Inode:    header.NodeId,
 		Name:     attr,
+		Actor:    actorFromHeader(header),
 	})
 	if err != nil {
 		return grpcToFuse(err)
@@ -689,6 +732,7 @@ func (fs *grpcFS) Mknod(cancel <-chan struct{}, input *fuse.MknodIn, name string
 		Mode:     input.Mode,
 		Rdev:     input.Rdev,
 		Umask:    input.Umask,
+		Actor:    actorFromCaller(input.Caller),
 	})
 	if err != nil {
 		return grpcToFuse(err)
@@ -716,6 +760,7 @@ func (fs *grpcFS) GetLk(cancel <-chan struct{}, input *fuse.LkIn, out *fuse.LkOu
 		HandleId: input.Fh,
 		Owner:    input.Owner,
 		Lock:     toPBLock(input.Lk),
+		Actor:    actorFromCaller(input.Caller),
 	})
 	if err != nil {
 		return grpcToFuse(err)
@@ -752,6 +797,7 @@ func (fs *grpcFS) CopyFileRange(cancel <-chan struct{}, input *fuse.CopyFileRang
 		OffsetOut: input.OffOut,
 		Length:    input.Len,
 		Flags:     uint32(input.Flags),
+		Actor:     actorFromCaller(input.Caller),
 	})
 	if err != nil {
 		return 0, grpcToFuse(err)
@@ -781,6 +827,7 @@ func (fs *grpcFS) Ioctl(cancel <-chan struct{}, in *fuse.IoctlIn, out *fuse.Ioct
 		Arg:         in.Arg,
 		DataIn:      bufIn,
 		DataOutSize: uint32(len(bufOut)),
+		Actor:       actorFromCaller(in.Caller),
 	})
 	if err != nil {
 		return grpcToFuse(err)
@@ -813,6 +860,7 @@ func (fs *grpcFS) setLk(cancel <-chan struct{}, input *fuse.LkIn, block bool) fu
 			Owner:    input.Owner,
 			Typ:      input.Lk.Typ,
 			Block:    block,
+			Actor:    actorFromCaller(input.Caller),
 		})
 		if err != nil {
 			return grpcToFuse(err)
@@ -827,6 +875,7 @@ func (fs *grpcFS) setLk(cancel <-chan struct{}, input *fuse.LkIn, block bool) fu
 		Owner:    input.Owner,
 		Lock:     toPBLock(input.Lk),
 		Block:    block,
+		Actor:    actorFromCaller(input.Caller),
 	})
 	if err != nil {
 		return grpcToFuse(err)

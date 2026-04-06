@@ -3,6 +3,7 @@ package volsync
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"strings"
 	"syscall"
@@ -18,6 +19,10 @@ const (
 	entryKindFile      = "file"
 	entryKindDirectory = "directory"
 )
+
+var errDefaultPosixIdentity = errors.New("volume default_posix_uid/default_posix_gid is required for sync apply")
+
+const maxPOSIXID = int64(^uint32(0))
 
 type replicaChangeApplier interface {
 	ApplyChange(context.Context, *db.SandboxVolume, ChangeRequest) error
@@ -39,6 +44,10 @@ func (a *VolumeChangeApplier) ApplyChange(ctx context.Context, volumeRecord *db.
 	if a == nil || a.volMgr == nil || volumeRecord == nil {
 		return nil
 	}
+	metaCtx, err := defaultSyncMetaContext(volumeRecord)
+	if err != nil {
+		return err
+	}
 	volCtx, sessionID, err := ensureMountedVolume(ctx, a.volMgr, a.logger, volumeRecord)
 	if err != nil {
 		return err
@@ -49,15 +58,15 @@ func (a *VolumeChangeApplier) ApplyChange(ctx context.Context, volumeRecord *db.
 
 	switch NormalizeEventType(change.EventType) {
 	case db.SyncEventCreate:
-		return a.applyCreate(volCtx, change)
+		return a.applyCreate(volCtx, metaCtx, change)
 	case db.SyncEventWrite:
-		return a.applyWrite(volCtx, change)
+		return a.applyWrite(volCtx, metaCtx, change)
 	case db.SyncEventRemove:
-		return a.applyRemove(volCtx, change)
+		return a.applyRemove(volCtx, metaCtx, change)
 	case db.SyncEventRename:
-		return a.applyRename(volCtx, change)
+		return a.applyRename(volCtx, metaCtx, change)
 	case db.SyncEventChmod:
-		return a.applyChmod(volCtx, change)
+		return a.applyChmod(volCtx, metaCtx, change)
 	case db.SyncEventInvalidate:
 		return nil
 	default:
@@ -65,16 +74,29 @@ func (a *VolumeChangeApplier) ApplyChange(ctx context.Context, volumeRecord *db.
 	}
 }
 
-func (a *VolumeChangeApplier) applyCreate(volCtx *volume.VolumeContext, change ChangeRequest) error {
+func defaultSyncMetaContext(volumeRecord *db.SandboxVolume) (meta.Context, error) {
+	if volumeRecord == nil || volumeRecord.DefaultPosixUID == nil || volumeRecord.DefaultPosixGID == nil {
+		return nil, errDefaultPosixIdentity
+	}
+	if *volumeRecord.DefaultPosixUID < 0 || *volumeRecord.DefaultPosixUID > maxPOSIXID {
+		return nil, fmt.Errorf("default_posix_uid out of range: %d", *volumeRecord.DefaultPosixUID)
+	}
+	if *volumeRecord.DefaultPosixGID < 0 || *volumeRecord.DefaultPosixGID > maxPOSIXID {
+		return nil, fmt.Errorf("default_posix_gid out of range: %d", *volumeRecord.DefaultPosixGID)
+	}
+	return meta.NewContext(0, uint32(*volumeRecord.DefaultPosixUID), []uint32{uint32(*volumeRecord.DefaultPosixGID)}), nil
+}
+
+func (a *VolumeChangeApplier) applyCreate(volCtx *volume.VolumeContext, metaCtx meta.Context, change ChangeRequest) error {
 	switch normalizeEntryKind(change.EntryKind) {
 	case entryKindDirectory:
-		parentIno, baseName, err := ensureLogicalParent(volCtx, change.Path)
+		parentIno, baseName, err := ensureLogicalParent(volCtx, metaCtx, change.Path)
 		if err != nil {
 			return err
 		}
 		var inode meta.Ino
 		var attr meta.Attr
-		errno := volCtx.Meta.Mkdir(meta.Background(), parentIno, baseName, uint16(defaultMode(change.Mode, 0o755)), 0, 0, &inode, &attr)
+		errno := volCtx.Meta.Mkdir(metaCtx, parentIno, baseName, uint16(defaultMode(change.Mode, 0o755)), 0, 0, &inode, &attr)
 		if errno == syscall.EEXIST {
 			return nil
 		}
@@ -83,21 +105,21 @@ func (a *VolumeChangeApplier) applyCreate(volCtx *volume.VolumeContext, change C
 		}
 		return nil
 	case entryKindFile:
-		return a.writeFile(volCtx, change.Path, change.ContentBase64, defaultMode(change.Mode, 0o644), true)
+		return a.writeFile(volCtx, metaCtx, change.Path, change.ContentBase64, defaultMode(change.Mode, 0o644), true)
 	default:
 		return ErrInvalidChange
 	}
 }
 
-func (a *VolumeChangeApplier) applyWrite(volCtx *volume.VolumeContext, change ChangeRequest) error {
+func (a *VolumeChangeApplier) applyWrite(volCtx *volume.VolumeContext, metaCtx meta.Context, change ChangeRequest) error {
 	if change.ContentBase64 == nil {
 		return ErrInvalidChange
 	}
-	return a.writeFile(volCtx, change.Path, change.ContentBase64, defaultMode(change.Mode, 0o644), false)
+	return a.writeFile(volCtx, metaCtx, change.Path, change.ContentBase64, defaultMode(change.Mode, 0o644), false)
 }
 
-func (a *VolumeChangeApplier) applyRemove(volCtx *volume.VolumeContext, change ChangeRequest) error {
-	parentIno, _, baseName, targetAttr, err := lookupLogicalPath(volCtx, change.Path)
+func (a *VolumeChangeApplier) applyRemove(volCtx *volume.VolumeContext, metaCtx meta.Context, change ChangeRequest) error {
+	parentIno, _, baseName, targetAttr, err := lookupLogicalPath(volCtx, metaCtx, change.Path)
 	if err != nil {
 		if err == errLogicalPathNotFound {
 			return nil
@@ -108,7 +130,7 @@ func (a *VolumeChangeApplier) applyRemove(volCtx *volume.VolumeContext, change C
 		return nil
 	}
 	var removeCount uint64
-	errno := volCtx.Meta.Remove(meta.Background(), parentIno, baseName, true, 4, &removeCount)
+	errno := volCtx.Meta.Remove(metaCtx, parentIno, baseName, true, 4, &removeCount)
 	if errno == syscall.ENOENT {
 		return nil
 	}
@@ -118,19 +140,19 @@ func (a *VolumeChangeApplier) applyRemove(volCtx *volume.VolumeContext, change C
 	return nil
 }
 
-func (a *VolumeChangeApplier) applyRename(volCtx *volume.VolumeContext, change ChangeRequest) error {
+func (a *VolumeChangeApplier) applyRename(volCtx *volume.VolumeContext, metaCtx meta.Context, change ChangeRequest) error {
 	if strings.TrimSpace(change.OldPath) == "" || strings.TrimSpace(change.Path) == "" {
 		return ErrInvalidChange
 	}
-	oldParentIno, _, oldBaseName, _, err := lookupLogicalPath(volCtx, change.OldPath)
+	oldParentIno, _, oldBaseName, _, err := lookupLogicalPath(volCtx, metaCtx, change.OldPath)
 	if err != nil {
 		return err
 	}
-	newParentIno, newBaseName, err := ensureLogicalParent(volCtx, change.Path)
+	newParentIno, newBaseName, err := ensureLogicalParent(volCtx, metaCtx, change.Path)
 	if err != nil {
 		return err
 	}
-	vfsCtx := vfs.NewLogContext(meta.Background())
+	vfsCtx := vfs.NewLogContext(metaCtx)
 	errno := volCtx.VFS.Rename(vfsCtx, oldParentIno, oldBaseName, newParentIno, newBaseName, 0)
 	if errno != 0 {
 		return fmt.Errorf("rename %q -> %q: %w", change.OldPath, change.Path, syscall.Errno(errno))
@@ -138,11 +160,11 @@ func (a *VolumeChangeApplier) applyRename(volCtx *volume.VolumeContext, change C
 	return nil
 }
 
-func (a *VolumeChangeApplier) applyChmod(volCtx *volume.VolumeContext, change ChangeRequest) error {
+func (a *VolumeChangeApplier) applyChmod(volCtx *volume.VolumeContext, metaCtx meta.Context, change ChangeRequest) error {
 	if change.Mode == nil {
 		return ErrInvalidChange
 	}
-	_, targetIno, _, targetAttr, err := lookupLogicalPath(volCtx, change.Path)
+	_, targetIno, _, targetAttr, err := lookupLogicalPath(volCtx, metaCtx, change.Path)
 	if err != nil {
 		return err
 	}
@@ -151,29 +173,29 @@ func (a *VolumeChangeApplier) applyChmod(volCtx *volume.VolumeContext, change Ch
 	}
 	clonedAttr := *targetAttr
 	clonedAttr.Mode = uint16(*change.Mode)
-	errno := volCtx.Meta.SetAttr(meta.Background(), targetIno, meta.SetAttrMode, 0, &clonedAttr)
+	errno := volCtx.Meta.SetAttr(metaCtx, targetIno, meta.SetAttrMode, 0, &clonedAttr)
 	if errno != 0 {
 		return fmt.Errorf("chmod %q: %w", change.Path, syscall.Errno(errno))
 	}
 	return nil
 }
 
-func (a *VolumeChangeApplier) writeFile(volCtx *volume.VolumeContext, logicalPath string, contentBase64 *string, mode uint32, createOnly bool) error {
+func (a *VolumeChangeApplier) writeFile(volCtx *volume.VolumeContext, metaCtx meta.Context, logicalPath string, contentBase64 *string, mode uint32, createOnly bool) error {
 	content, err := decodeContent(contentBase64)
 	if err != nil {
 		return err
 	}
-	parentIno, baseName, err := ensureLogicalParent(volCtx, logicalPath)
+	parentIno, baseName, err := ensureLogicalParent(volCtx, metaCtx, logicalPath)
 	if err != nil {
 		return err
 	}
 
-	vfsCtx := vfs.NewLogContext(meta.Background())
+	vfsCtx := vfs.NewLogContext(metaCtx)
 
 	if createOnly {
 		var existingIno meta.Ino
 		var existingAttr meta.Attr
-		errno := volCtx.Meta.Lookup(meta.Background(), parentIno, baseName, &existingIno, &existingAttr, false)
+		errno := volCtx.Meta.Lookup(metaCtx, parentIno, baseName, &existingIno, &existingAttr, false)
 		if errno == 0 {
 			return nil
 		}
@@ -185,7 +207,7 @@ func (a *VolumeChangeApplier) writeFile(volCtx *volume.VolumeContext, logicalPat
 	entry, handleID, errno := volCtx.VFS.Create(vfsCtx, parentIno, baseName, uint16(mode), 0, syscall.O_WRONLY)
 	if errno != 0 {
 		if errno == syscall.EEXIST && !createOnly {
-			_, targetIno, _, targetAttr, lookupErr := lookupLogicalPath(volCtx, logicalPath)
+			_, targetIno, _, targetAttr, lookupErr := lookupLogicalPath(volCtx, metaCtx, logicalPath)
 			if lookupErr != nil {
 				return lookupErr
 			}
@@ -203,7 +225,7 @@ func (a *VolumeChangeApplier) writeFile(volCtx *volume.VolumeContext, logicalPat
 	}
 	defer volCtx.VFS.Release(vfsCtx, entry.Inode, handleID)
 
-	if errno := volCtx.Meta.SetAttr(meta.Background(), entry.Inode, meta.SetAttrSize, 0, &meta.Attr{Length: uint64(len(content))}); errno != 0 {
+	if errno := volCtx.Meta.SetAttr(metaCtx, entry.Inode, meta.SetAttrSize, 0, &meta.Attr{Length: uint64(len(content))}); errno != 0 {
 		return fmt.Errorf("truncate file %q: %w", logicalPath, syscall.Errno(errno))
 	}
 	if len(content) == 0 {

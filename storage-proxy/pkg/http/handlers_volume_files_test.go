@@ -225,10 +225,14 @@ func (f *fakeHTTPVolumeFileRPC) Release(ctx context.Context, req *pb.ReleaseRequ
 
 func newVolumeFileTestServer(fileRPC *fakeHTTPVolumeFileRPC) (*Server, *fakeHTTPVolumeMountManager) {
 	repo := newFakeHTTPRepo()
+	defaultUID := int64(1000)
+	defaultGID := int64(1000)
 	repo.volumes["vol-1"] = &db.SandboxVolume{
-		ID:         "vol-1",
-		TeamID:     "team-a",
-		AccessMode: string(volume.AccessModeRWX),
+		ID:              "vol-1",
+		TeamID:          "team-a",
+		DefaultPosixUID: &defaultUID,
+		DefaultPosixGID: &defaultGID,
+		AccessMode:      string(volume.AccessModeRWX),
 	}
 	volMgr := &fakeHTTPVolumeMountManager{}
 	server := &Server{
@@ -285,9 +289,40 @@ func TestPrepareVolumeFileRequestUsesSharedDirectMountLease(t *testing.T) {
 	}
 }
 
+func TestPrepareVolumeFileRequestRequiresDefaultPosixIdentity(t *testing.T) {
+	fileRPC := &fakeHTTPVolumeFileRPC{}
+	server, _ := newVolumeFileTestServer(fileRPC)
+	repo := server.repo.(*fakeHTTPRepo)
+	repo.volumes["vol-1"] = &db.SandboxVolume{
+		ID:         "vol-1",
+		TeamID:     "team-a",
+		AccessMode: string(volume.AccessModeRWX),
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/sandboxvolumes/vol-1/files/stat?path=/docs/report.txt", nil)
+	req.SetPathValue("id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-a"}))
+	recorder := httptest.NewRecorder()
+
+	server.handleVolumeFileStat(recorder, req)
+
+	if recorder.Code != http.StatusPreconditionFailed {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusPreconditionFailed)
+	}
+}
+
 func TestHandleVolumeFileStatReturnsResolvedEntry(t *testing.T) {
 	fileRPC := &fakeHTTPVolumeFileRPC{
 		lookupFunc: func(_ context.Context, req *pb.LookupRequest) (*pb.NodeResponse, error) {
+			if req.Actor == nil {
+				t.Fatalf("Lookup actor = nil, want default volume actor")
+			}
+			if req.Actor.Pid != 0 || req.Actor.Uid != 1000 {
+				t.Fatalf("Lookup actor = %+v, want pid=0 uid=1000", req.Actor)
+			}
+			if len(req.Actor.Gids) != 1 || req.Actor.Gids[0] != 1000 {
+				t.Fatalf("Lookup gids = %v, want [1000]", req.Actor.Gids)
+			}
 			switch {
 			case req.Parent == 1 && req.Name == "docs":
 				return &pb.NodeResponse{Inode: 2, Attr: volumeDirAttr()}, nil

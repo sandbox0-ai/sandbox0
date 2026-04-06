@@ -117,7 +117,7 @@ func writeArtifactFile(volCtx *volume.VolumeContext, artifactPath string, payloa
 }
 
 func ensureArtifactParent(volCtx *volume.VolumeContext, artifactPath string) (meta.Ino, string, meta.Ino, *meta.Attr, error) {
-	parentIno, baseName, err := ensureLogicalParent(volCtx, artifactPath)
+	parentIno, baseName, err := ensureLogicalParent(volCtx, meta.Background(), artifactPath)
 	if err != nil {
 		return 0, "", 0, nil, err
 	}

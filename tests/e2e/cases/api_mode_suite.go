@@ -213,8 +213,12 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					Expect(resumeResp.Resumed).To(BeTrue())
 
 					cacheSize := "512M"
+					defaultUID := int64(1000)
+					defaultGID := int64(1000)
 					volume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), apispec.CreateSandboxVolumeRequest{
-						CacheSize: &cacheSize,
+						CacheSize:       &cacheSize,
+						DefaultPosixUid: &defaultUID,
+						DefaultPosixGid: &defaultGID,
 					})
 					Expect(err).NotTo(HaveOccurred())
 					Expect(status).To(Equal(http.StatusCreated))
@@ -964,8 +968,12 @@ func publicExposureHostForPort(ports []apispec.ExposedPortConfig, port int32) st
 
 func assertVolumeLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string) {
 	cacheSize := "512M"
+	defaultUID := int64(1000)
+	defaultGID := int64(1000)
 	createReq := apispec.CreateSandboxVolumeRequest{
-		CacheSize: &cacheSize,
+		CacheSize:       &cacheSize,
+		DefaultPosixUid: &defaultUID,
+		DefaultPosixGid: &defaultGID,
 	}
 	volume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), createReq)
 	Expect(err).NotTo(HaveOccurred())
@@ -1061,8 +1069,12 @@ func assertVolumeLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session
 
 func assertVolumeSyncBackendLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session) {
 	cacheSize := "512M"
+	defaultUID := int64(1000)
+	defaultGID := int64(1000)
 	volume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), apispec.CreateSandboxVolumeRequest{
-		CacheSize: &cacheSize,
+		CacheSize:       &cacheSize,
+		DefaultPosixUid: &defaultUID,
+		DefaultPosixGid: &defaultGID,
 	})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusCreated))

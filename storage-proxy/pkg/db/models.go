@@ -12,6 +12,9 @@ type SandboxVolume struct {
 	UserID string `json:"user_id"`
 	// SourceVolumeID references the volume this one was forked from.
 	SourceVolumeID *string `json:"source_volume_id,omitempty"`
+	// Default external POSIX identity used for HTTP/sync paths that do not carry actor identity.
+	DefaultPosixUID *int64 `json:"default_posix_uid,omitempty"`
+	DefaultPosixGID *int64 `json:"default_posix_gid,omitempty"`
 
 	// Volume Configuration
 	CacheSize  string `json:"cache_size"`

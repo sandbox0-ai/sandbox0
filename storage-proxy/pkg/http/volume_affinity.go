@@ -127,6 +127,12 @@ func (s *Server) prepareOrProxyVolumeFileRequest(w http.ResponseWriter, r *http.
 		return r.Context(), volumeRecord, func() {}, true
 	}
 
+	actor, err := defaultVolumeFileActor(volumeRecord)
+	if err != nil {
+		s.writeVolumeFileError(w, err)
+		return r.Context(), nil, func() {}, true
+	}
+
 	cleanup, err := s.prepareVolumeFileMount(r.Context(), volumeID)
 	if err != nil {
 		var redirectErr *volumeOwnerRedirectError
@@ -138,7 +144,7 @@ func (s *Server) prepareOrProxyVolumeFileRequest(w http.ResponseWriter, r *http.
 		return r.Context(), nil, func() {}, true
 	}
 
-	return r.Context(), volumeRecord, cleanup, false
+	return withVolumeFileActor(r.Context(), actor), volumeRecord, cleanup, false
 }
 
 func (s *Server) prepareVolumeFileMount(ctx context.Context, volumeID string) (func(), error) {

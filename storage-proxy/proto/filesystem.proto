@@ -61,6 +61,12 @@ service FileSystem {
   rpc WatchVolumeEvents(WatchRequest) returns (stream WatchEvent);
 }
 
+message PosixActor {
+  uint32 pid = 1;           // Process ID making the request
+  uint32 uid = 2;           // Effective user ID making the request
+  repeated uint32 gids = 3; // Effective group IDs making the request
+}
+
 // Read request
 message ReadRequest {
   string volume_id = 1;  // Volume identifier
@@ -68,6 +74,7 @@ message ReadRequest {
   int64 offset = 3;      // Read offset
   int64 size = 4;        // Number of bytes to read
   uint64 handle_id = 5;  // File handle from Open
+  PosixActor actor = 6;  // Caller POSIX identity
 }
 
 message ReadResponse {
@@ -82,6 +89,7 @@ message WriteRequest {
   int64 offset = 3;      // Write offset
   bytes data = 4;        // Data to write
   uint64 handle_id = 5;  // File handle from Open
+  PosixActor actor = 6;  // Caller POSIX identity
 }
 
 message WriteResponse {
@@ -93,6 +101,7 @@ message OpenRequest {
   string volume_id = 1;  // Volume identifier
   uint64 inode = 2;      // Inode to open
   uint32 flags = 3;      // Open flags
+  PosixActor actor = 4;  // Caller POSIX identity
 }
 
 message OpenResponse {
@@ -104,6 +113,7 @@ message ReleaseRequest {
   string volume_id = 1;  // Volume identifier
   uint64 inode = 2;      // Inode identifier
   uint64 handle_id = 3;  // File handle to release
+  PosixActor actor = 4;  // Caller POSIX identity
 }
 
 // Create file
@@ -114,6 +124,7 @@ message CreateRequest {
   uint32 mode = 4;       // File mode (permissions)
   uint32 flags = 5;      // Open flags
   uint32 umask = 6;      // Umask
+  PosixActor actor = 7;  // Caller POSIX identity
 }
 
 // Create directory
@@ -123,6 +134,7 @@ message MkdirRequest {
   string name = 3;       // Directory name
   uint32 mode = 4;       // Directory mode
   uint32 umask = 5;      // Umask
+  PosixActor actor = 6;  // Caller POSIX identity
 }
 
 // Create node (file/device)
@@ -133,6 +145,7 @@ message MknodRequest {
   uint32 mode = 4;       // Node mode (permissions + type)
   uint32 rdev = 5;       // Device ID for special files
   uint32 umask = 6;      // Umask
+  PosixActor actor = 7;  // Caller POSIX identity
 }
 
 // Node response (for Create, Mkdir, Lookup)
@@ -147,6 +160,7 @@ message NodeResponse {
 message GetAttrRequest {
   string volume_id = 1;  // Volume identifier
   uint64 inode = 2;      // Inode to query
+  PosixActor actor = 3;  // Caller POSIX identity
 }
 
 message GetAttrResponse {
@@ -173,6 +187,7 @@ message SetAttrRequest {
   uint32 valid = 3;          // Mask of fields to set
   GetAttrResponse attr = 4;  // Attributes to set
   uint64 handle_id = 5;      // File handle when available
+  PosixActor actor = 6;      // Caller POSIX identity
 }
 
 message SetAttrResponse {
@@ -184,6 +199,7 @@ message LookupRequest {
   string volume_id = 1;  // Volume identifier
   uint64 parent = 2;     // Parent directory inode
   string name = 3;       // Entry name to lookup
+  PosixActor actor = 4;  // Caller POSIX identity
 }
 
 // Read directory
@@ -194,6 +210,7 @@ message ReadDirRequest {
   int64 offset = 4;      // Read offset
   uint32 size = 5;       // Max entries to read (approximate)
   bool plus = 6;         // Include attributes if true
+  PosixActor actor = 7;  // Caller POSIX identity
 }
 
 message ReadDirResponse {
@@ -206,6 +223,7 @@ message OpenDirRequest {
   string volume_id = 1;  // Volume identifier
   uint64 inode = 2;      // Directory inode
   uint32 flags = 3;      // Open flags
+  PosixActor actor = 4;  // Caller POSIX identity
 }
 
 message OpenDirResponse {
@@ -217,6 +235,7 @@ message ReleaseDirRequest {
   string volume_id = 1;  // Volume identifier
   uint64 inode = 2;      // Directory inode
   uint64 handle_id = 3;  // Directory handle
+  PosixActor actor = 4;  // Caller POSIX identity
 }
 
 message DirEntry {
@@ -232,6 +251,7 @@ message UnlinkRequest {
   string volume_id = 1;  // Volume identifier
   uint64 parent = 2;     // Parent directory inode
   string name = 3;       // File name to delete
+  PosixActor actor = 4;  // Caller POSIX identity
 }
 
 // Remove directory (delete empty directory)
@@ -239,6 +259,7 @@ message RmdirRequest {
   string volume_id = 1;  // Volume identifier
   uint64 parent = 2;     // Parent directory inode
   string name = 3;       // Directory name to delete
+  PosixActor actor = 4;  // Caller POSIX identity
 }
 
 // Rename entry
@@ -249,12 +270,14 @@ message RenameRequest {
   uint64 new_parent = 4; // New parent directory inode
   string new_name = 5;   // New name
   uint32 flags = 6;      // Rename flags
+  PosixActor actor = 7;  // Caller POSIX identity
 }
 
 // Flush file
 message FlushRequest {
   string volume_id = 1;  // Volume identifier
   uint64 handle_id = 2;  // File handle to flush
+  PosixActor actor = 3;  // Caller POSIX identity
 }
 
 // Synchronize file
@@ -262,6 +285,7 @@ message FsyncRequest {
   string volume_id = 1;  // Volume identifier
   uint64 handle_id = 2;  // File handle to sync
   bool datasync = 3;     // Sync only data
+  PosixActor actor = 4;  // Caller POSIX identity
 }
 
 // Mount volume
@@ -332,6 +356,7 @@ message WatchEvent {
 // Filesystem statistics
 message StatFsRequest {
   string volume_id = 1;  // Volume identifier
+  PosixActor actor = 2;  // Caller POSIX identity
 }
 
 message StatFsResponse {
@@ -351,11 +376,13 @@ message SymlinkRequest {
   uint64 parent = 2;     // Parent directory inode
   string name = 3;       // Link name
   string target = 4;     // Target path
+  PosixActor actor = 5;  // Caller POSIX identity
 }
 
 message ReadlinkRequest {
   string volume_id = 1;  // Volume identifier
   uint64 inode = 2;      // Symlink inode
+  PosixActor actor = 3;  // Caller POSIX identity
 }
 
 message ReadlinkResponse {
@@ -368,6 +395,7 @@ message LinkRequest {
   uint64 inode = 2;      // Existing file inode
   uint64 new_parent = 3; // New parent directory inode
   string new_name = 4;   // New link name
+  PosixActor actor = 5;  // Caller POSIX identity
 }
 
 // Access check
@@ -377,6 +405,7 @@ message AccessRequest {
   uint32 mask = 3;       // Access mode mask (R_OK=4, W_OK=2, X_OK=1, F_OK=0)
   uint32 uid = 4;        // User ID making the request
   repeated uint32 gids = 5;  // Group IDs of the user
+  PosixActor actor = 6;  // Caller POSIX identity
 }
 
 // Fallocate - preallocate or deallocate space
@@ -387,6 +416,7 @@ message FallocateRequest {
   int64 offset = 4;      // Offset to start allocation
   int64 length = 5;      // Length to allocate
   uint64 handle_id = 6;  // File handle from Open
+  PosixActor actor = 7;  // Caller POSIX identity
 }
 
 // Copy file range
@@ -400,6 +430,7 @@ message CopyFileRangeRequest {
   uint64 offset_out = 7; // Destination offset
   uint64 length = 8;     // Length to copy
   uint32 flags = 9;      // Copy flags
+  PosixActor actor = 10; // Caller POSIX identity
 }
 
 message CopyFileRangeResponse {
@@ -420,6 +451,7 @@ message GetLkRequest {
   uint64 handle_id = 3;  // File handle
   uint64 owner = 4;      // Lock owner
   FileLock lock = 5;     // Requested lock
+  PosixActor actor = 6;  // Caller POSIX identity
 }
 
 message GetLkResponse {
@@ -433,6 +465,7 @@ message SetLkRequest {
   uint64 owner = 4;      // Lock owner
   FileLock lock = 5;     // Lock to set
   bool block = 6;        // Blocking lock
+  PosixActor actor = 7;  // Caller POSIX identity
 }
 
 message FlockRequest {
@@ -442,6 +475,7 @@ message FlockRequest {
   uint64 owner = 4;      // Lock owner
   uint32 typ = 5;        // Lock type
   bool block = 6;        // Blocking lock
+  PosixActor actor = 7;  // Caller POSIX identity
 }
 
 // Ioctl
@@ -452,6 +486,7 @@ message IoctlRequest {
   uint64 arg = 4;        // Ioctl argument
   bytes data_in = 5;     // Input buffer
   uint32 data_out_size = 6; // Expected output size
+  PosixActor actor = 7;  // Caller POSIX identity
 }
 
 message IoctlResponse {
@@ -464,6 +499,7 @@ message GetXattrRequest {
   uint64 inode = 2;      // Inode identifier
   string name = 3;       // Attribute name
   uint32 size = 4;       // Buffer size (0 to query size)
+  PosixActor actor = 5;  // Caller POSIX identity
 }
 
 message GetXattrResponse {
@@ -476,12 +512,14 @@ message SetXattrRequest {
   string name = 3;       // Attribute name
   bytes value = 4;       // Attribute value
   uint32 flags = 5;      // XATTR_CREATE=1, XATTR_REPLACE=2
+  PosixActor actor = 6;  // Caller POSIX identity
 }
 
 message ListXattrRequest {
   string volume_id = 1;  // Volume identifier
   uint64 inode = 2;      // Inode identifier
   int32 size = 3;        // Buffer size (0 to query size)
+  PosixActor actor = 4;  // Caller POSIX identity
 }
 
 message ListXattrResponse {
@@ -492,7 +530,7 @@ message RemoveXattrRequest {
   string volume_id = 1;  // Volume identifier
   uint64 inode = 2;      // Inode identifier
   string name = 3;       // Attribute name to remove
+  PosixActor actor = 4;  // Caller POSIX identity
 }
 
 message Empty {}
-

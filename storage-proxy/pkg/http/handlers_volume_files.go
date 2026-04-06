@@ -25,6 +25,8 @@ import (
 
 const maxVolumeFileSize = 100 * 1024 * 1024
 
+const maxPOSIXID = int64(^uint32(0))
+
 var (
 	errVolumeFileUnavailable = errors.New("volume file operations unavailable")
 	errUnauthorized          = errors.New("unauthorized")
@@ -33,6 +35,7 @@ var (
 	errDirNotFound           = errors.New("directory not found")
 	errFileTooLarge          = errors.New("file too large")
 	errPermissionDenied      = errors.New("permission denied")
+	errDefaultPosixIdentity  = errors.New("volume default_posix_uid/default_posix_gid is required for external file access")
 	errPathAlreadyExists     = errors.New("path already exists")
 	errPathNotDir            = errors.New("path is not a directory")
 	errDirectoryNotEmpty     = errors.New("directory not empty")
@@ -62,6 +65,36 @@ type volumeResolvedPath struct {
 	Base   string
 	Attr   *pb.GetAttrResponse
 	Exists bool
+}
+
+type volumeFileActorKey struct{}
+
+func defaultVolumeFileActor(volumeRecord *db.SandboxVolume) (*pb.PosixActor, error) {
+	if volumeRecord == nil || volumeRecord.DefaultPosixUID == nil || volumeRecord.DefaultPosixGID == nil {
+		return nil, errDefaultPosixIdentity
+	}
+	if *volumeRecord.DefaultPosixUID < 0 || *volumeRecord.DefaultPosixUID > maxPOSIXID {
+		return nil, fmt.Errorf("default_posix_uid out of range: %d", *volumeRecord.DefaultPosixUID)
+	}
+	if *volumeRecord.DefaultPosixGID < 0 || *volumeRecord.DefaultPosixGID > maxPOSIXID {
+		return nil, fmt.Errorf("default_posix_gid out of range: %d", *volumeRecord.DefaultPosixGID)
+	}
+	return &pb.PosixActor{
+		Uid:  uint32(*volumeRecord.DefaultPosixUID),
+		Gids: []uint32{uint32(*volumeRecord.DefaultPosixGID)},
+	}, nil
+}
+
+func withVolumeFileActor(ctx context.Context, actor *pb.PosixActor) context.Context {
+	if actor == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, volumeFileActorKey{}, actor)
+}
+
+func volumeFileActor(ctx context.Context) *pb.PosixActor {
+	actor, _ := ctx.Value(volumeFileActorKey{}).(*pb.PosixActor)
+	return actor
 }
 
 func (s *Server) handleVolumeFileOperation(w http.ResponseWriter, r *http.Request) {
@@ -168,6 +201,7 @@ func (s *Server) handleVolumeFileList(w http.ResponseWriter, r *http.Request) {
 		HandleId: handleID,
 		Size:     16384,
 		Plus:     true,
+		Actor:    volumeFileActor(ctx),
 	})
 	if err != nil {
 		s.writeVolumeFileError(w, translateVolumeRPCError(err))
@@ -382,6 +416,7 @@ func (s *Server) readVolumeFile(w http.ResponseWriter, r *http.Request, volumeID
 		Offset:   0,
 		Size:     int64(resolved.Attr.Size),
 		HandleId: handleID,
+		Actor:    volumeFileActor(ctx),
 	})
 	if err != nil {
 		s.writeVolumeFileError(w, translateVolumeRPCError(err))
@@ -461,11 +496,15 @@ func (s *Server) prepareVolumeFileRequest(ctx context.Context, volumeID string) 
 	if err != nil {
 		return ctx, nil, func() {}, err
 	}
+	actor, err := defaultVolumeFileActor(volumeRecord)
+	if err != nil {
+		return ctx, nil, func() {}, err
+	}
 	cleanup, err := s.prepareVolumeFileMount(ctx, volumeID)
 	if err != nil {
 		return ctx, nil, func() {}, err
 	}
-	return ctx, volumeRecord, cleanup, nil
+	return withVolumeFileActor(ctx, actor), volumeRecord, cleanup, nil
 }
 
 func (s *Server) loadAuthorizedVolume(ctx context.Context, volumeID string) (*db.SandboxVolume, error) {
@@ -499,6 +538,7 @@ func (s *Server) lookupVolumePath(ctx context.Context, volumeID, raw string, all
 		attr, err := s.fileRPC.GetAttr(ctx, &pb.GetAttrRequest{
 			VolumeId: volumeID,
 			Inode:    1,
+			Actor:    volumeFileActor(ctx),
 		})
 		if err != nil {
 			return nil, translateVolumeRPCError(err)
@@ -520,6 +560,7 @@ func (s *Server) lookupVolumePath(ctx context.Context, volumeID, raw string, all
 			VolumeId: volumeID,
 			Parent:   current,
 			Name:     part,
+			Actor:    volumeFileActor(ctx),
 		})
 		if err != nil {
 			if status.Code(err) == codes.NotFound {
@@ -565,6 +606,7 @@ func (s *Server) ensureVolumeParent(ctx context.Context, volumeID, raw string, r
 			VolumeId: volumeID,
 			Parent:   current,
 			Name:     part,
+			Actor:    volumeFileActor(ctx),
 		})
 		if err != nil {
 			if status.Code(err) == codes.NotFound {
@@ -577,6 +619,7 @@ func (s *Server) ensureVolumeParent(ctx context.Context, volumeID, raw string, r
 					Name:     part,
 					Mode:     0o755,
 					Umask:    0,
+					Actor:    volumeFileActor(ctx),
 				})
 				if err != nil {
 					if status.Code(err) == codes.AlreadyExists {
@@ -584,6 +627,7 @@ func (s *Server) ensureVolumeParent(ctx context.Context, volumeID, raw string, r
 							VolumeId: volumeID,
 							Parent:   current,
 							Name:     part,
+							Actor:    volumeFileActor(ctx),
 						})
 					}
 					if err != nil {
@@ -628,6 +672,7 @@ func (s *Server) mkdirVolumePath(ctx context.Context, volumeID, raw string, recu
 		Name:     base,
 		Mode:     0o755,
 		Umask:    0,
+		Actor:    volumeFileActor(ctx),
 	})
 	if err != nil {
 		if status.Code(err) == codes.AlreadyExists && recursive {
@@ -657,6 +702,7 @@ func (s *Server) writeVolumePath(ctx context.Context, volumeID, raw string, data
 			VolumeId: volumeID,
 			Inode:    resolved.Inode,
 			Flags:    uint32(syscall.O_WRONLY | syscall.O_TRUNC),
+			Actor:    volumeFileActor(ctx),
 		})
 		if err != nil {
 			return translateVolumeRPCError(err)
@@ -675,6 +721,7 @@ func (s *Server) writeVolumePath(ctx context.Context, volumeID, raw string, data
 			Mode:     0o644,
 			Flags:    uint32(syscall.O_WRONLY),
 			Umask:    0,
+			Actor:    volumeFileActor(ctx),
 		})
 		if err != nil {
 			return translateVolumeRPCError(err)
@@ -691,6 +738,7 @@ func (s *Server) writeVolumePath(ctx context.Context, volumeID, raw string, data
 			VolumeId: volumeID,
 			Inode:    inode,
 			HandleId: handleID,
+			Actor:    volumeFileActor(ctx),
 		})
 	}()
 
@@ -703,6 +751,7 @@ func (s *Server) writeVolumePath(ctx context.Context, volumeID, raw string, data
 		Offset:   0,
 		Data:     data,
 		HandleId: handleID,
+		Actor:    volumeFileActor(ctx),
 	})
 	if err != nil {
 		return translateVolumeRPCError(err)
@@ -728,6 +777,7 @@ func (s *Server) moveVolumePath(ctx context.Context, volumeID, src, dst string) 
 		OldName:   source.Base,
 		NewParent: dstParent,
 		NewName:   dstBase,
+		Actor:     volumeFileActor(ctx),
 	})
 	if err != nil {
 		return translateVolumeRPCError(err)
@@ -747,6 +797,7 @@ func (s *Server) removeVolumePath(ctx context.Context, volumeID string, resolved
 			VolumeId: volumeID,
 			Parent:   resolved.Parent,
 			Name:     resolved.Base,
+			Actor:    volumeFileActor(ctx),
 		})
 		return translateVolumeRPCError(err)
 	}
@@ -763,6 +814,7 @@ func (s *Server) removeVolumePath(ctx context.Context, volumeID string, resolved
 		HandleId: handleID,
 		Size:     16384,
 		Plus:     true,
+		Actor:    volumeFileActor(ctx),
 	})
 	if err != nil {
 		return translateVolumeRPCError(err)
@@ -789,6 +841,7 @@ func (s *Server) removeVolumePath(ctx context.Context, volumeID string, resolved
 		VolumeId: volumeID,
 		Parent:   resolved.Parent,
 		Name:     resolved.Base,
+		Actor:    volumeFileActor(ctx),
 	})
 	return translateVolumeRPCError(err)
 }
@@ -798,6 +851,7 @@ func (s *Server) openVolumeFile(ctx context.Context, volumeID string, inode uint
 		VolumeId: volumeID,
 		Inode:    inode,
 		Flags:    flags,
+		Actor:    volumeFileActor(ctx),
 	})
 	if err != nil {
 		return 0, func() {}, translateVolumeRPCError(err)
@@ -807,6 +861,7 @@ func (s *Server) openVolumeFile(ctx context.Context, volumeID string, inode uint
 			VolumeId: volumeID,
 			Inode:    inode,
 			HandleId: openResp.HandleId,
+			Actor:    volumeFileActor(ctx),
 		})
 	}
 	return openResp.HandleId, release, nil
@@ -817,6 +872,7 @@ func (s *Server) openVolumeDir(ctx context.Context, volumeID string, inode uint6
 		VolumeId: volumeID,
 		Inode:    inode,
 		Flags:    uint32(syscall.O_RDONLY),
+		Actor:    volumeFileActor(ctx),
 	})
 	if err != nil {
 		return 0, func() {}, translateVolumeRPCError(err)
@@ -826,6 +882,7 @@ func (s *Server) openVolumeDir(ctx context.Context, volumeID string, inode uint6
 			VolumeId: volumeID,
 			Inode:    inode,
 			HandleId: openResp.HandleId,
+			Actor:    volumeFileActor(ctx),
 		})
 	}
 	return openResp.HandleId, release, nil
@@ -948,6 +1005,8 @@ func (s *Server) writeVolumeFileError(w http.ResponseWriter, err error) {
 		_ = spec.WriteError(w, http.StatusNotFound, spec.CodeNotFound, err.Error())
 	case errors.Is(err, errFileTooLarge):
 		_ = spec.WriteError(w, http.StatusRequestEntityTooLarge, spec.CodeBadRequest, err.Error())
+	case errors.Is(err, errDefaultPosixIdentity):
+		_ = spec.WriteError(w, http.StatusPreconditionFailed, spec.CodeBadRequest, err.Error())
 	case errors.Is(err, errPermissionDenied):
 		_ = spec.WriteError(w, http.StatusForbidden, spec.CodeForbidden, err.Error())
 	case errors.Is(err, errPathAlreadyExists), errors.Is(err, errPathNotDir), errors.Is(err, errDirectoryNotEmpty):

@@ -4537,6 +4537,16 @@ components:
     CreateSandboxVolumeRequest:
       type: object
       properties:
+        default_posix_uid:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Default POSIX UID used by external volume access paths that do not carry caller identity.
+        default_posix_gid:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Default POSIX GID used by external volume access paths that do not carry caller identity.
         cache_size:
           type: string
         prefetch:
@@ -4551,6 +4561,16 @@ components:
     ForkVolumeRequest:
       type: object
       properties:
+        default_posix_uid:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Override the default POSIX UID for external volume access paths. Inherits from the source volume when omitted.
+        default_posix_gid:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Override the default POSIX GID for external volume access paths. Inherits from the source volume when omitted.
         cache_size:
           type: string
         prefetch:
@@ -4573,6 +4593,16 @@ components:
           type: string
         source_volume_id:
           type: string
+          nullable: true
+        default_posix_uid:
+          type: integer
+          format: int64
+          minimum: 0
+          nullable: true
+        default_posix_gid:
+          type: integer
+          format: int64
+          minimum: 0
           nullable: true
         cache_size:
           type: string

@@ -109,17 +109,20 @@ func (r *Repository) createSandboxVolume(ctx context.Context, db DB, volume *San
 		INSERT INTO sandbox_volumes (
 			id, team_id, user_id,
 			source_volume_id,
+			default_posix_uid, default_posix_gid,
 			cache_size, prefetch, buffer_size, writeback, access_mode,
 			created_at, updated_at
 		) VALUES (
 			$1, $2, $3,
 			$4,
-			$5, $6, $7, $8, $9,
-			$10, $11
+			$5, $6,
+			$7, $8, $9, $10, $11,
+			$12, $13
 		)
 	`,
 		volume.ID, volume.TeamID, volume.UserID,
 		volume.SourceVolumeID,
+		volume.DefaultPosixUID, volume.DefaultPosixGID,
 		volume.CacheSize, volume.Prefetch, volume.BufferSize, volume.Writeback, volume.AccessMode,
 		volume.CreatedAt, volume.UpdatedAt,
 	)
@@ -151,6 +154,7 @@ func (r *Repository) getSandboxVolume(ctx context.Context, db DB, id string, for
 		SELECT
 			id, team_id, user_id,
 			source_volume_id,
+			default_posix_uid, default_posix_gid,
 			cache_size, prefetch, buffer_size, writeback, access_mode,
 			created_at, updated_at
 		FROM sandbox_volumes
@@ -165,6 +169,7 @@ func (r *Repository) getSandboxVolume(ctx context.Context, db DB, id string, for
 	err := db.QueryRow(ctx, query, id).Scan(
 		&v.ID, &v.TeamID, &v.UserID,
 		&v.SourceVolumeID,
+		&v.DefaultPosixUID, &v.DefaultPosixGID,
 		&v.CacheSize, &v.Prefetch, &v.BufferSize, &v.Writeback, &v.AccessMode,
 		&v.CreatedAt, &v.UpdatedAt,
 	)
@@ -183,15 +188,18 @@ func (r *Repository) getSandboxVolume(ctx context.Context, db DB, id string, for
 func (r *Repository) UpdateSandboxVolume(ctx context.Context, volume *SandboxVolume) error {
 	cmdTag, err := r.pool.Exec(ctx, `
 		UPDATE sandbox_volumes SET
-			cache_size = $2,
-			prefetch = $3,
-			buffer_size = $4,
-			writeback = $5,
-			access_mode = $6,
+			default_posix_uid = $2,
+			default_posix_gid = $3,
+			cache_size = $4,
+			prefetch = $5,
+			buffer_size = $6,
+			writeback = $7,
+			access_mode = $8,
 			updated_at = NOW()
 		WHERE id = $1
 	`,
 		volume.ID,
+		volume.DefaultPosixUID, volume.DefaultPosixGID,
 		volume.CacheSize, volume.Prefetch, volume.BufferSize, volume.Writeback, volume.AccessMode,
 	)
 
@@ -212,6 +220,7 @@ func (r *Repository) ListSandboxVolumesByTeam(ctx context.Context, teamID string
 		SELECT
 			id, team_id, user_id,
 			source_volume_id,
+			default_posix_uid, default_posix_gid,
 			cache_size, prefetch, buffer_size, writeback, access_mode,
 			created_at, updated_at
 		FROM sandbox_volumes
@@ -229,6 +238,7 @@ func (r *Repository) ListSandboxVolumesByTeam(ctx context.Context, teamID string
 		err := rows.Scan(
 			&v.ID, &v.TeamID, &v.UserID,
 			&v.SourceVolumeID,
+			&v.DefaultPosixUID, &v.DefaultPosixGID,
 			&v.CacheSize, &v.Prefetch, &v.BufferSize, &v.Writeback, &v.AccessMode,
 			&v.CreatedAt, &v.UpdatedAt,
 		)

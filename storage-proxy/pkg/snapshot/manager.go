@@ -193,14 +193,16 @@ type CreateSnapshotRequest struct {
 
 // ForkVolumeRequest contains parameters for forking a volume.
 type ForkVolumeRequest struct {
-	SourceVolumeID string
-	TeamID         string
-	UserID         string
-	CacheSize      *string
-	Prefetch       *int
-	BufferSize     *string
-	Writeback      *bool
-	AccessMode     *string
+	SourceVolumeID  string
+	TeamID          string
+	UserID          string
+	CacheSize       *string
+	Prefetch        *int
+	BufferSize      *string
+	Writeback       *bool
+	AccessMode      *string
+	DefaultPosixUID *int64
+	DefaultPosixGID *int64
 }
 
 // CreateSnapshot creates a new snapshot of a volume using JuiceFS COW clone.
@@ -511,6 +513,13 @@ func (m *Manager) ForkVolume(ctx context.Context, req *ForkVolumeRequest) (*db.S
 		writeback = *req.Writeback
 	}
 
+	defaultPosixUID := sourceVol.DefaultPosixUID
+	defaultPosixGID := sourceVol.DefaultPosixGID
+	if req.DefaultPosixUID != nil || req.DefaultPosixGID != nil {
+		defaultPosixUID = req.DefaultPosixUID
+		defaultPosixGID = req.DefaultPosixGID
+	}
+
 	accessMode := volume.AccessModeRWO
 	if req.AccessMode != nil && strings.TrimSpace(*req.AccessMode) != "" {
 		parsedMode, ok := volume.ParseAccessMode(*req.AccessMode)
@@ -523,17 +532,19 @@ func (m *Manager) ForkVolume(ctx context.Context, req *ForkVolumeRequest) (*db.S
 	now := time.Now()
 	sourceID := sourceVol.ID
 	newVol := &db.SandboxVolume{
-		ID:             newVolumeID,
-		TeamID:         req.TeamID,
-		UserID:         req.UserID,
-		SourceVolumeID: &sourceID,
-		CacheSize:      cacheSize,
-		Prefetch:       prefetch,
-		BufferSize:     bufferSize,
-		Writeback:      writeback,
-		AccessMode:     string(accessMode),
-		CreatedAt:      now,
-		UpdatedAt:      now,
+		ID:              newVolumeID,
+		TeamID:          req.TeamID,
+		UserID:          req.UserID,
+		SourceVolumeID:  &sourceID,
+		DefaultPosixUID: defaultPosixUID,
+		DefaultPosixGID: defaultPosixGID,
+		CacheSize:       cacheSize,
+		Prefetch:        prefetch,
+		BufferSize:      bufferSize,
+		Writeback:       writeback,
+		AccessMode:      string(accessMode),
+		CreatedAt:       now,
+		UpdatedAt:       now,
 	}
 
 	if err := m.repo.WithTx(ctx, func(tx pgx.Tx) error {

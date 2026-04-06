@@ -94,9 +94,12 @@ func splitLogicalPath(raw string) ([]string, error) {
 	return parts, nil
 }
 
-func lookupLogicalPath(volCtx *volume.VolumeContext, raw string) (meta.Ino, meta.Ino, string, *meta.Attr, error) {
+func lookupLogicalPath(volCtx *volume.VolumeContext, metaCtx meta.Context, raw string) (meta.Ino, meta.Ino, string, *meta.Attr, error) {
 	if volCtx == nil {
 		return 0, 0, "", nil, fmt.Errorf("volume context is nil")
+	}
+	if metaCtx == nil {
+		metaCtx = meta.Background()
 	}
 	parts, err := splitLogicalPath(raw)
 	if err != nil {
@@ -107,7 +110,7 @@ func lookupLogicalPath(volCtx *volume.VolumeContext, raw string) (meta.Ino, meta
 	var attr meta.Attr
 	for i, part := range parts {
 		var next meta.Ino
-		errno := volCtx.Meta.Lookup(meta.Background(), current, part, &next, &attr, false)
+		errno := volCtx.Meta.Lookup(metaCtx, current, part, &next, &attr, false)
 		if errno == syscall.ENOENT {
 			return current, 0, part, nil, errLogicalPathNotFound
 		}
@@ -124,9 +127,12 @@ func lookupLogicalPath(volCtx *volume.VolumeContext, raw string) (meta.Ino, meta
 	return 0, 0, "", nil, fmt.Errorf("logical path %q resolution failed", raw)
 }
 
-func ensureLogicalParent(volCtx *volume.VolumeContext, raw string) (meta.Ino, string, error) {
+func ensureLogicalParent(volCtx *volume.VolumeContext, metaCtx meta.Context, raw string) (meta.Ino, string, error) {
 	if volCtx == nil {
 		return 0, "", fmt.Errorf("volume context is nil")
+	}
+	if metaCtx == nil {
+		metaCtx = meta.Background()
 	}
 	parts, err := splitLogicalPath(raw)
 	if err != nil {
@@ -137,9 +143,9 @@ func ensureLogicalParent(volCtx *volume.VolumeContext, raw string) (meta.Ino, st
 	var attr meta.Attr
 	for _, part := range parts[:len(parts)-1] {
 		var next meta.Ino
-		errno := volCtx.Meta.Lookup(meta.Background(), current, part, &next, &attr, false)
+		errno := volCtx.Meta.Lookup(metaCtx, current, part, &next, &attr, false)
 		if errno == syscall.ENOENT {
-			errno = volCtx.Meta.Mkdir(meta.Background(), current, part, 0o755, 0, 0, &next, &attr)
+			errno = volCtx.Meta.Mkdir(metaCtx, current, part, 0o755, 0, 0, &next, &attr)
 		}
 		if errno != 0 {
 			return 0, "", fmt.Errorf("ensure parent %q: %w", part, syscall.Errno(errno))

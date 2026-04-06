@@ -743,8 +743,14 @@ type CreateSandboxVolumeRequest struct {
 	AccessMode *VolumeAccessMode `json:"access_mode,omitempty"`
 	BufferSize *string           `json:"buffer_size,omitempty"`
 	CacheSize  *string           `json:"cache_size,omitempty"`
-	Prefetch   *int              `json:"prefetch,omitempty"`
-	Writeback  *bool             `json:"writeback,omitempty"`
+
+	// DefaultPosixGid Default POSIX GID used by external volume access paths that do not carry caller identity.
+	DefaultPosixGid *int64 `json:"default_posix_gid,omitempty"`
+
+	// DefaultPosixUid Default POSIX UID used by external volume access paths that do not carry caller identity.
+	DefaultPosixUid *int64 `json:"default_posix_uid,omitempty"`
+	Prefetch        *int   `json:"prefetch,omitempty"`
+	Writeback       *bool  `json:"writeback,omitempty"`
 }
 
 // CreateSnapshotRequest defines model for CreateSnapshotRequest.
@@ -945,8 +951,14 @@ type ForkVolumeRequest struct {
 	AccessMode *VolumeAccessMode `json:"access_mode,omitempty"`
 	BufferSize *string           `json:"buffer_size,omitempty"`
 	CacheSize  *string           `json:"cache_size,omitempty"`
-	Prefetch   *int              `json:"prefetch,omitempty"`
-	Writeback  *bool             `json:"writeback,omitempty"`
+
+	// DefaultPosixGid Override the default POSIX GID for external volume access paths. Inherits from the source volume when omitted.
+	DefaultPosixGid *int64 `json:"default_posix_gid,omitempty"`
+
+	// DefaultPosixUid Override the default POSIX UID for external volume access paths. Inherits from the source volume when omitted.
+	DefaultPosixUid *int64 `json:"default_posix_uid,omitempty"`
+	Prefetch        *int   `json:"prefetch,omitempty"`
+	Writeback       *bool  `json:"writeback,omitempty"`
 }
 
 // GRPCAction defines model for GRPCAction.
@@ -1527,17 +1539,19 @@ type SandboxUpdateRequest struct {
 // SandboxVolume defines model for SandboxVolume.
 type SandboxVolume struct {
 	// AccessMode Access mode for sandbox volumes. Enforcement is scoped to storage-proxy instances. RWO allows read-write mounts on a single instance; ROX allows read-only mounts across instances; RWX allows read-write mounts across instances.
-	AccessMode     *VolumeAccessMode `json:"access_mode,omitempty"`
-	BufferSize     string            `json:"buffer_size"`
-	CacheSize      string            `json:"cache_size"`
-	CreatedAt      time.Time         `json:"created_at"`
-	Id             string            `json:"id"`
-	Prefetch       *int              `json:"prefetch,omitempty"`
-	SourceVolumeId *string           `json:"source_volume_id"`
-	TeamId         string            `json:"team_id"`
-	UpdatedAt      time.Time         `json:"updated_at"`
-	UserId         string            `json:"user_id"`
-	Writeback      *bool             `json:"writeback,omitempty"`
+	AccessMode      *VolumeAccessMode `json:"access_mode,omitempty"`
+	BufferSize      string            `json:"buffer_size"`
+	CacheSize       string            `json:"cache_size"`
+	CreatedAt       time.Time         `json:"created_at"`
+	DefaultPosixGid *int64            `json:"default_posix_gid"`
+	DefaultPosixUid *int64            `json:"default_posix_uid"`
+	Id              string            `json:"id"`
+	Prefetch        *int              `json:"prefetch,omitempty"`
+	SourceVolumeId  *string           `json:"source_volume_id"`
+	TeamId          string            `json:"team_id"`
+	UpdatedAt       time.Time         `json:"updated_at"`
+	UserId          string            `json:"user_id"`
+	Writeback       *bool             `json:"writeback,omitempty"`
 }
 
 // SecurityContext defines model for SecurityContext.

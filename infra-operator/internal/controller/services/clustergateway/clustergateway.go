@@ -236,6 +236,7 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	if infra.Spec.Services != nil && infra.Spec.Services.ClusterGateway != nil {
 		cfg = runtimeconfig.ToClusterGateway(infra.Spec.Services.ClusterGateway.Config)
 	}
+	resolvedRegionID := strings.TrimSpace(cfg.RegionID)
 
 	if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {
 		cfg.DatabaseURL = dsn
@@ -282,10 +283,16 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 			}
 		}
 
+		homeRegionID := strings.TrimSpace(infra.Spec.InitUser.HomeRegionID)
+		if homeRegionID == "" {
+			homeRegionID = resolvedRegionID
+		}
+
 		cfg.BuiltInAuth.InitUser = &apiconfig.InitUserConfig{
-			Email:    infra.Spec.InitUser.Email,
-			Password: password,
-			Name:     infra.Spec.InitUser.Name,
+			Email:        infra.Spec.InitUser.Email,
+			Password:     password,
+			Name:         infra.Spec.InitUser.Name,
+			HomeRegionID: homeRegionID,
 		}
 	}
 
@@ -310,7 +317,7 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	}
 
 	if strings.TrimSpace(infra.Spec.Region) != "" {
-		cfg.RegionID = infra.Spec.Region
+		resolvedRegionID = strings.TrimSpace(infra.Spec.Region)
 	}
 
 	// Copy public exposure config from CRD top-level spec
@@ -318,6 +325,14 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		cfg.PublicExposureEnabled = infra.Spec.PublicExposure.Enabled
 		cfg.PublicRootDomain = infra.Spec.PublicExposure.RootDomain
 		cfg.PublicRegionID = infra.Spec.PublicExposure.RegionID
+		if resolvedRegionID == "" {
+			resolvedRegionID = strings.TrimSpace(infra.Spec.PublicExposure.RegionID)
+		}
+	}
+
+	cfg.RegionID = resolvedRegionID
+	if cfg.BuiltInAuth.InitUser != nil && strings.TrimSpace(cfg.BuiltInAuth.InitUser.HomeRegionID) == "" {
+		cfg.BuiltInAuth.InitUser.HomeRegionID = resolvedRegionID
 	}
 
 	return cfg, nil

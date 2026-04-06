@@ -236,3 +236,100 @@ func TestBuildConfigLeavesInitUserPasswordEmptyForOIDCOnlyBootstrap(t *testing.T
 		t.Fatalf("expected oidc-only init user password to be empty, got %q", cfg.BuiltInAuth.InitUser.Password)
 	}
 }
+
+func TestBuildConfigDefaultsRegionIDAndInitUserHomeRegionFromPublicExposure(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	if err := infrav1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add infra scheme: %v", err)
+	}
+
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			InitUser: &infrav1alpha1.InitUserConfig{
+				Email: "admin@example.com",
+				Name:  "Admin",
+				PasswordSecret: infrav1alpha1.SecretKeyRef{
+					Name: "demo-init-user-password",
+					Key:  "password",
+				},
+			},
+			PublicExposure: &infrav1alpha1.PublicExposureConfig{
+				Enabled:  true,
+				RegionID: "aws-us-east-1",
+			},
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeBuiltin,
+				Builtin: &infrav1alpha1.BuiltinDatabaseConfig{
+					Enabled:  true,
+					Port:     5432,
+					Username: "sandbox0",
+					Database: "sandbox0",
+					SSLMode:  "disable",
+				},
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				ClusterGateway: &infrav1alpha1.ClusterGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					Config: &infrav1alpha1.ClusterGatewayConfig{
+						AuthMode: "public",
+					},
+				},
+			},
+		},
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(
+			infra.DeepCopy(),
+			&corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "demo-sandbox0-database-credentials",
+					Namespace: infra.Namespace,
+				},
+				Data: map[string][]byte{
+					"username": []byte("sandbox0"),
+					"password": []byte("db-password"),
+					"database": []byte("sandbox0"),
+					"port":     []byte("5432"),
+				},
+			},
+			&corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "demo-init-user-password",
+					Namespace: infra.Namespace,
+				},
+				Data: map[string][]byte{
+					"password": []byte("admin-password"),
+				},
+			},
+		).
+		Build()
+
+	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
+	cfg, err := reconciler.buildConfig(context.Background(), infra)
+	if err != nil {
+		t.Fatalf("buildConfig returned error: %v", err)
+	}
+	if cfg.RegionID != "aws-us-east-1" {
+		t.Fatalf("expected region id to default from public exposure, got %q", cfg.RegionID)
+	}
+	if cfg.BuiltInAuth.InitUser == nil {
+		t.Fatal("expected init user config")
+	}
+	if cfg.BuiltInAuth.InitUser.HomeRegionID != "aws-us-east-1" {
+		t.Fatalf("expected init user home region to default from resolved region, got %#v", cfg.BuiltInAuth.InitUser)
+	}
+	if cfg.BuiltInAuth.InitUser.Password != "admin-password" {
+		t.Fatalf("unexpected init user password: %q", cfg.BuiltInAuth.InitUser.Password)
+	}
+}

@@ -15,7 +15,7 @@ Sandbox0 is a general-purpose sandbox for building AI Agents. You can set any Do
 Key features of Sandbox0:
 - Hot Sandbox Pool: Pre-creates idle Pods for millisecond-level startup times.
 - Persistent Storage: Persistent Volumes based on JuiceFS, supporting snapshot/restore/fork.
-- Network Control: netd implements node-level L4/L7 policy enforcement.
+- Network Control: manager applies template-namespace ingress baseline isolation, and netd implements node-level L4/L7 runtime policy enforcement.
 - Egress Auth: outbound credentials can be resolved and injected on the egress path, so raw secret material does not need to live inside the sandbox process.
 - Process Management: procd acts as the sandbox's PID=1, supporting REPL processes requiring session persistence (e.g., bash, python, node, redis-cli) and one-time Cmd processes.
 - Self-hosting Friendly: Complete private deployment solution.
@@ -30,6 +30,7 @@ It can serve as an E2B alternative, suitable for general agents, coding agents, 
 - Sandbox0 REPL contexts are a unified abstraction for interactive runtimes, so the same interface can back shells, language interpreters, database consoles, and custom REPLs, for example `bash`, `python`, `sqlite`, or `redis-cli`.
 - Persistent volumes decoupled from sandbox lifetime through `storage-proxy`, so agent workspaces, caches, checkpoints, and generated artifacts can outlive any single pod.
 - Snapshot, restore, and fork-oriented volume workflows built on JuiceFS plus object storage and PostgreSQL metadata, which is exactly what long-running agent systems need for recovery and reuse.
+- Manager-owned template namespace ingress baselines, so sandbox pods in the same template namespace do not accept peer traffic by default even before runtime egress policy is considered.
 - Node-level network control through `netd`, which watches sandbox policy, transparently redirects traffic, and applies L4/L7 enforcement close to the workload.
 - Egress auth that resolves credential bindings outside the sandbox and injects outbound auth at the network edge, which is a safer fit for untrusted agent code than placing raw API keys or client certificates in the sandbox environment.
 - Runtime-agnostic sandboxing via template `runtimeClassName`, so the same system can run on a standard Kubernetes runtime in development and move to stronger isolation such as gVisor or Kata in production.
@@ -161,7 +162,7 @@ helm install infra-operator sandbox0/infra-operator \
 
 Apply the minimal single-cluster sample:
 
-It does not include `netd` or `storage-proxy`, so it does not provide network policy enforcement or volume capabilities.
+It does not include `netd` or `storage-proxy`, so it does not provide netd-backed egress enforcement or volume capabilities. Template-namespace ingress baselines still depend on Kubernetes `NetworkPolicy` support in your CNI.
 
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/sandbox0-ai/sandbox0/main/infra-operator/chart/samples/single-cluster/minimal.yaml

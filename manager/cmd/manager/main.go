@@ -20,6 +20,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/generated/informers/externalversions"
 	httpserver "github.com/sandbox0-ai/sandbox0/manager/pkg/http"
 	managermetering "github.com/sandbox0-ai/sandbox0/manager/pkg/metering"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/namespacepolicy"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
 	registryprovider "github.com/sandbox0-ai/sandbox0/manager/pkg/registry"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
@@ -203,6 +204,20 @@ func main() {
 
 	// Create network policy service for building policy annotations
 	networkPolicyService := service.NewNetworkPolicyService(logger)
+	var templateNamespacePolicy namespacepolicy.TemplateNamespaceReconciler
+	baselineReconciler, err := namespacepolicy.NewReconciler(k8sClient, namespacepolicy.Config{
+		SystemNamespace: cfg.NetdMITMCASecretNamespace,
+		ProcdPort:       cfg.ProcdConfig.HTTPPort,
+	}, logger)
+	if err != nil {
+		logger.Warn("Template namespace ingress baseline disabled", zap.Error(err))
+	} else {
+		templateNamespacePolicy = baselineReconciler
+		logger.Info("Template namespace ingress baseline enabled",
+			zap.String("systemNamespace", cfg.NetdMITMCASecretNamespace),
+			zap.Int("procdPort", cfg.ProcdConfig.HTTPPort),
+		)
+	}
 
 	networkProviderName := strings.TrimSpace(strings.ToLower(cfg.NetworkPolicyProvider))
 	networkProvider := network.NewNoopProvider()
@@ -302,6 +317,8 @@ func main() {
 		cfg.Registry,
 		logger,
 	)
+	templateService.SetNamespacePolicyReconciler(templateNamespacePolicy)
+	operator.SetNamespacePolicyReconciler(templateNamespacePolicy)
 
 	registryProvider, err := registryprovider.NewProvider(cfg.Registry, secretLister, logger)
 	if err != nil {

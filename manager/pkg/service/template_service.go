@@ -9,6 +9,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	clientset "github.com/sandbox0-ai/sandbox0/manager/pkg/generated/clientset/versioned"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/namespacepolicy"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"go.uber.org/zap"
@@ -28,6 +29,7 @@ type TemplateService struct {
 	logger          *zap.Logger
 	network         network.Provider
 	registry        config.RegistryConfig
+	namespacePolicy namespacepolicy.TemplateNamespaceReconciler
 }
 
 // NewTemplateService creates a new TemplateService
@@ -54,6 +56,11 @@ func NewTemplateService(
 	}
 }
 
+// SetNamespacePolicyReconciler installs the manager-owned template namespace baseline reconciler.
+func (s *TemplateService) SetNamespacePolicyReconciler(reconciler namespacepolicy.TemplateNamespaceReconciler) {
+	s.namespacePolicy = reconciler
+}
+
 // CreateTemplate creates a new template
 func (s *TemplateService) CreateTemplate(ctx context.Context, template *v1alpha1.SandboxTemplate) (*v1alpha1.SandboxTemplate, error) {
 	s.logger.Info("Creating template", zap.String("name", template.Name))
@@ -66,6 +73,11 @@ func (s *TemplateService) CreateTemplate(ctx context.Context, template *v1alpha1
 
 	if err := s.ensureNamespace(ctx, namespace); err != nil {
 		return nil, err
+	}
+	if s.namespacePolicy != nil {
+		if err := s.namespacePolicy.EnsureBaseline(ctx, namespace); err != nil {
+			return nil, fmt.Errorf("ensure template namespace baseline: %w", err)
+		}
 	}
 
 	if s.network != nil {

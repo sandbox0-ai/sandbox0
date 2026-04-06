@@ -8,6 +8,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/namespacepolicy"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -44,12 +45,19 @@ type Operator struct {
 
 	metrics *obsmetrics.ManagerMetrics
 
+	namespacePolicy namespacepolicy.TemplateNamespaceReconciler
+
 	// Template informer and lister (to be injected)
 	templateInformer cache.SharedIndexInformer
 	templateLister   TemplateListerImpl
 
 	statsMu   sync.Mutex
 	lastStats map[string]TemplateCounts
+}
+
+// SetNamespacePolicyReconciler installs the manager-owned template namespace baseline reconciler.
+func (op *Operator) SetNamespacePolicyReconciler(reconciler namespacepolicy.TemplateNamespaceReconciler) {
+	op.namespacePolicy = reconciler
 }
 
 // TemplateListerImpl implements TemplateLister
@@ -230,6 +238,11 @@ func (op *Operator) syncHandler(ctx context.Context, key string) error {
 	}
 
 	op.logger.Debug("Reconciling template", zap.String("name", name))
+	if op.namespacePolicy != nil {
+		if err := op.namespacePolicy.EnsureBaseline(ctx, template.Namespace); err != nil {
+			return fmt.Errorf("reconcile template namespace baseline: %w", err)
+		}
+	}
 
 	// Reconcile the pool (ReplicaSet)
 	if err := op.poolManager.ReconcilePool(ctx, template); err != nil {

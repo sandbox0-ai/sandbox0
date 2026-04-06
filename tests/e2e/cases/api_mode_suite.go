@@ -36,6 +36,11 @@ type apiModeSuiteOptions struct {
 	expectNetworkUnavailable  bool
 }
 
+const (
+	templateNamespaceBaselineDenyPolicyName  = "sandbox0-baseline-deny-sandbox-ingress"
+	templateNamespaceBaselineAllowPolicyName = "sandbox0-baseline-allow-system-to-sandbox"
+)
+
 func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiModeSuiteOptions) {
 	Describe(opts.describe, Ordered, func() {
 		var (
@@ -157,6 +162,10 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 
 				It("matches SSH app protocols through traffic rules", func() {
 					assertSSHAppProtocolTrafficRules(env, session, sandboxID, sshFixtureState)
+				})
+
+				It("creates and repairs template namespace ingress baseline policies", func() {
+					assertTemplateNamespaceIngressBaselineLifecycle(env, session, opts.templateNamePrefix)
 				})
 
 				It("blocks private sandbox traffic while preserving public exposure and cluster service access", func() {
@@ -458,6 +467,102 @@ func assertTemplatePoolReadinessGate(env *framework.ScenarioEnv, session *e2euti
 		}
 		return nil
 	}).WithTimeout(2 * time.Minute).WithPolling(3 * time.Second).Should(Succeed())
+}
+
+func assertTemplateNamespaceIngressBaselineLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session, templateNamePrefix string) {
+	templates, err := session.ListTemplates(env.TestCtx.Context, GinkgoT())
+	Expect(err).NotTo(HaveOccurred())
+	Expect(templates).NotTo(BeEmpty())
+
+	name := fmt.Sprintf("%s-baseline-%d", templateNamePrefix, time.Now().UnixNano())
+	templateReq := e2eutils.CloneTemplateForCreate(templates[0], name)
+
+	created, err := session.CreateTemplate(env.TestCtx.Context, GinkgoT(), templateReq)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(created).NotTo(BeNil())
+	defer func() {
+		Expect(session.DeleteTemplate(env.TestCtx.Context, GinkgoT(), name)).To(Succeed())
+	}()
+
+	templateNamespace, err := naming.TemplateNamespaceForTeam(expectStringPtr(created.TeamId, "team id"))
+	Expect(err).NotTo(HaveOccurred())
+
+	assertTemplateNamespaceBaselinePoliciesEventually(env, templateNamespace)
+
+	for _, policyName := range []string{
+		templateNamespaceBaselineDenyPolicyName,
+		templateNamespaceBaselineAllowPolicyName,
+	} {
+		Expect(framework.Kubectl(
+			env.TestCtx.Context,
+			env.Config.Kubeconfig,
+			"delete",
+			"networkpolicy",
+			policyName,
+			"--namespace",
+			templateNamespace,
+			"--ignore-not-found=false",
+		)).To(Succeed())
+		Expect(framework.KubectlWaitForDelete(
+			env.TestCtx.Context,
+			env.Config.Kubeconfig,
+			templateNamespace,
+			"networkpolicy",
+			policyName,
+			"30s",
+		)).To(Succeed())
+	}
+
+	updated := *created
+	desc := fmt.Sprintf("baseline repaired %d", time.Now().UnixNano())
+	updated.Spec.Description = &desc
+	updatedResp, err := session.UpdateTemplate(env.TestCtx.Context, GinkgoT(), name, apispec.TemplateUpdateRequest{
+		Spec: updated.Spec,
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(updatedResp).NotTo(BeNil())
+	Expect(updatedResp.Spec.Description).NotTo(BeNil())
+	Expect(*updatedResp.Spec.Description).To(Equal(desc))
+
+	assertTemplateNamespaceBaselinePoliciesEventually(env, templateNamespace)
+}
+
+func assertTemplateNamespaceBaselinePoliciesEventually(env *framework.ScenarioEnv, namespace string) {
+	expectedNames := []string{
+		templateNamespaceBaselineDenyPolicyName,
+		templateNamespaceBaselineAllowPolicyName,
+	}
+
+	Eventually(func() error {
+		output, err := framework.KubectlOutput(
+			env.TestCtx.Context,
+			env.Config.Kubeconfig,
+			"get",
+			"networkpolicy",
+			"--namespace",
+			namespace,
+			"-o",
+			`jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}`,
+		)
+		if err != nil {
+			return err
+		}
+
+		existing := map[string]struct{}{}
+		for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+			name := strings.TrimSpace(line)
+			if name == "" {
+				continue
+			}
+			existing[name] = struct{}{}
+		}
+		for _, expectedName := range expectedNames {
+			if _, ok := existing[expectedName]; !ok {
+				return fmt.Errorf("networkpolicy %s missing in namespace %s", expectedName, namespace)
+			}
+		}
+		return nil
+	}).WithTimeout(90 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
 }
 
 func assertSandboxListContainsClaimedSandbox(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string) {

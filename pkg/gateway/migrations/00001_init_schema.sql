@@ -76,7 +76,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
     id UUID PRIMARY KEY,
     key_value TEXT NOT NULL UNIQUE,
     team_id UUID NOT NULL,
-    created_by UUID NOT NULL REFERENCES users(id) ON DELETE SET NULL,
+    created_by UUID NOT NULL,
     name TEXT NOT NULL,
     type TEXT NOT NULL CHECK (type IN ('user', 'service', 'internal')),
     roles JSONB NOT NULL DEFAULT '[]',
@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
     expires_at TIMESTAMPTZ NOT NULL,
     last_used_at TIMESTAMPTZ,
     usage_count BIGINT DEFAULT 0,
-    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    user_id UUID,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

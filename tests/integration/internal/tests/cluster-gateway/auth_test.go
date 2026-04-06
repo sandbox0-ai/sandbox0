@@ -172,7 +172,7 @@ func TestClusterGatewayIntegration_PublicAuthAPIKey(t *testing.T) {
 	}
 }
 
-func TestClusterGatewayIntegration_APIKeyCanBeCreatedWithoutLocalTeamRow(t *testing.T) {
+func TestClusterGatewayIntegration_APIKeyCanBeCreatedWithoutLocalTeamOrUserRow(t *testing.T) {
 	dbPool, identityRepo, apiKeyRepo, _ := newGatewayTestDB(t)
 
 	user := &gatewayidentity.User{
@@ -191,10 +191,13 @@ func TestClusterGatewayIntegration_APIKeyCanBeCreatedWithoutLocalTeamRow(t *test
 	if _, err := dbPool.Exec(ctx, `DELETE FROM teams WHERE id = $1`, team.ID); err != nil {
 		t.Fatalf("delete local team row: %v", err)
 	}
+	if _, err := dbPool.Exec(ctx, `DELETE FROM users WHERE id = $1`, user.ID); err != nil {
+		t.Fatalf("delete local user row: %v", err)
+	}
 
 	key, keyValue, err := apiKeyRepo.CreateAPIKey(ctx, team.ID, "aws-us-east-1", user.ID, "test-key", "service", []string{"developer"}, time.Now().Add(time.Hour))
 	if err != nil {
-		t.Fatalf("create api key without local team row: %v", err)
+		t.Fatalf("create api key without local team or user row: %v", err)
 	}
 	if key.TeamID != team.ID {
 		t.Fatalf("expected team id %s, got %s", team.ID, key.TeamID)

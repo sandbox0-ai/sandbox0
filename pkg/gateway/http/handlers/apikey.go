@@ -19,13 +19,15 @@ type APIKeyHandler struct {
 	keys     *apikey.Repository
 	identity *identity.Repository
 	logger   *zap.Logger
+	regionID string
 }
 
 // NewAPIKeyHandler creates a new API key handler
-func NewAPIKeyHandler(keys *apikey.Repository, identityRepo *identity.Repository, logger *zap.Logger) *APIKeyHandler {
+func NewAPIKeyHandler(keys *apikey.Repository, identityRepo *identity.Repository, regionID string, logger *zap.Logger) *APIKeyHandler {
 	return &APIKeyHandler{
 		keys:     keys,
 		identity: identityRepo,
+		regionID: strings.TrimSpace(regionID),
 		logger:   logger,
 	}
 }
@@ -117,22 +119,26 @@ func (h *APIKeyHandler) CreateAPIKey(c *gin.Context) {
 		roles = []string{"developer"}
 	}
 
-	team, err := h.identity.GetTeamByID(c.Request.Context(), authCtx.TeamID)
-	if err != nil {
-		h.logger.Error("Failed to get team for API key creation", zap.Error(err), zap.String("team_id", authCtx.TeamID))
-		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to resolve team home region")
-		return
-	}
-	if team.HomeRegionID == nil || strings.TrimSpace(*team.HomeRegionID) == "" {
-		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "team home region is not configured")
-		return
+	regionID := h.regionID
+	if regionID == "" {
+		team, err := h.identity.GetTeamByID(c.Request.Context(), authCtx.TeamID)
+		if err != nil {
+			h.logger.Error("Failed to get team for API key creation", zap.Error(err), zap.String("team_id", authCtx.TeamID))
+			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to resolve team home region")
+			return
+		}
+		if team.HomeRegionID == nil || strings.TrimSpace(*team.HomeRegionID) == "" {
+			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "team home region is not configured")
+			return
+		}
+		regionID = strings.TrimSpace(*team.HomeRegionID)
 	}
 
 	// Create API key
 	key, keyValue, err := h.keys.CreateAPIKey(
 		c.Request.Context(),
 		authCtx.TeamID,
-		strings.TrimSpace(*team.HomeRegionID),
+		regionID,
 		authCtx.UserID,
 		req.Name,
 		req.Type,

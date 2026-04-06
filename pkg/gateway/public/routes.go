@@ -24,6 +24,7 @@ type Deps struct {
 	Entitlements            licensing.Entitlements
 	JWTIssuer               *authn.Issuer
 	RegionRepo              *tenantdir.Repository
+	RegionID                string
 	RequireCreateHomeRegion bool
 	Logger                  *zap.Logger
 }
@@ -135,7 +136,7 @@ func RegisterIdentityRoutes(router gin.IRouter, deps Deps) {
 // RegisterAPIKeyRoutes mounts home-region API key management routes.
 func RegisterAPIKeyRoutes(router gin.IRouter, deps Deps) {
 	if deps.APIKeyRepo != nil {
-		apiKeyHandler := handlers.NewAPIKeyHandler(deps.APIKeyRepo, deps.IdentityRepo, deps.Logger)
+		apiKeyHandler := handlers.NewAPIKeyHandler(deps.APIKeyRepo, deps.IdentityRepo, deps.RegionID, deps.Logger)
 
 		// ===== API Key Management Routes =====
 		apiKeys := router.Group("/api-keys")

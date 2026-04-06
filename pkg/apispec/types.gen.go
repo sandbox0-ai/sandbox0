@@ -744,10 +744,10 @@ type CreateSandboxVolumeRequest struct {
 	BufferSize *string           `json:"buffer_size,omitempty"`
 	CacheSize  *string           `json:"cache_size,omitempty"`
 
-	// DefaultPosixGid Default POSIX GID used by external volume access paths that do not carry caller identity.
+	// DefaultPosixGid Default POSIX GID used by external volume access paths that do not carry caller identity. Defaults to 0 when omitted on create.
 	DefaultPosixGid *int64 `json:"default_posix_gid,omitempty"`
 
-	// DefaultPosixUid Default POSIX UID used by external volume access paths that do not carry caller identity.
+	// DefaultPosixUid Default POSIX UID used by external volume access paths that do not carry caller identity. Defaults to 0 when omitted on create.
 	DefaultPosixUid *int64 `json:"default_posix_uid,omitempty"`
 	Prefetch        *int   `json:"prefetch,omitempty"`
 	Writeback       *bool  `json:"writeback,omitempty"`

@@ -39,6 +39,7 @@ type apiModeSuiteOptions struct {
 const (
 	templateNamespaceBaselineDenyPolicyName  = "sandbox0-baseline-deny-sandbox-ingress"
 	templateNamespaceBaselineAllowPolicyName = "sandbox0-baseline-allow-system-to-sandbox"
+	templateNamespaceBaselineProcdPort       = 49983
 )
 
 func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiModeSuiteOptions) {
@@ -166,6 +167,10 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 
 				It("creates and repairs template namespace ingress baseline policies", func() {
 					assertTemplateNamespaceIngressBaselineLifecycle(env, session, opts.templateNamePrefix)
+				})
+
+				It("enforces template namespace ingress baseline traffic rules", func() {
+					assertTemplateNamespaceIngressBaselineTrafficRules(env)
 				})
 
 				It("blocks private sandbox traffic while preserving public exposure and cluster service access", func() {
@@ -563,6 +568,206 @@ func assertTemplateNamespaceBaselinePoliciesEventually(env *framework.ScenarioEn
 		}
 		return nil
 	}).WithTimeout(90 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
+}
+
+func assertTemplateNamespaceIngressBaselineTrafficRules(env *framework.ScenarioEnv) {
+	testNamespace := fmt.Sprintf("e2e-baseline-np-%d", time.Now().UnixNano())
+	manifestFile, err := os.CreateTemp("", "sandbox0-e2e-baseline-networkpolicy-*.yaml")
+	Expect(err).NotTo(HaveOccurred())
+	defer func() {
+		_ = framework.KubectlDeleteManifest(env.TestCtx.Context, env.Config.Kubeconfig, manifestFile.Name())
+		_ = os.Remove(manifestFile.Name())
+	}()
+
+	manifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: %s
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: baseline-server
+  namespace: %s
+  labels:
+    sandbox0.ai/sandbox-id: baseline-server
+spec:
+  restartPolicy: Never
+  containers:
+    - name: server
+      image: busybox:1.36
+      command:
+        - sh
+        - -lc
+        - |
+          set -eu
+          mkdir -p /srv/http-80 /srv/http-49983
+          printf 'baseline-server-80\n' >/srv/http-80/index.html
+          printf 'baseline-server-procd\n' >/srv/http-49983/index.html
+          httpd -f -p 80 -h /srv/http-80 &
+          exec httpd -f -p %d -h /srv/http-49983
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: same-namespace-client
+  namespace: %s
+  labels:
+    sandbox0.ai/sandbox-id: same-namespace-client
+spec:
+  restartPolicy: Never
+  containers:
+    - name: client
+      image: busybox:1.36
+      command: ["sh", "-lc", "sleep 3600"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: baseline-cluster-gateway
+  namespace: %s
+  labels:
+    app.kubernetes.io/name: cluster-gateway
+spec:
+  restartPolicy: Never
+  containers:
+    - name: client
+      image: busybox:1.36
+      command: ["sh", "-lc", "sleep 3600"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: baseline-manager
+  namespace: %s
+  labels:
+    app.kubernetes.io/name: manager
+spec:
+  restartPolicy: Never
+  containers:
+    - name: client
+      image: busybox:1.36
+      command: ["sh", "-lc", "sleep 3600"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  podSelector:
+    matchExpressions:
+      - key: sandbox0.ai/sandbox-id
+        operator: Exists
+  policyTypes:
+    - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  podSelector:
+    matchExpressions:
+      - key: sandbox0.ai/sandbox-id
+        operator: Exists
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: %s
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: manager
+      ports:
+        - protocol: TCP
+          port: %d
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: %s
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cluster-gateway
+`, testNamespace, testNamespace, templateNamespaceBaselineProcdPort, testNamespace, env.Infra.Namespace, env.Infra.Namespace, templateNamespaceBaselineDenyPolicyName, testNamespace, templateNamespaceBaselineAllowPolicyName, testNamespace, env.Infra.Namespace, templateNamespaceBaselineProcdPort, env.Infra.Namespace)
+	Expect(os.WriteFile(manifestFile.Name(), []byte(strings.TrimSpace(manifest)), 0o600)).To(Succeed())
+	Expect(framework.ApplyManifest(env.TestCtx.Context, env.Config.Kubeconfig, manifestFile.Name())).To(Succeed())
+
+	Expect(framework.KubectlWaitForCondition(env.TestCtx.Context, env.Config.Kubeconfig, testNamespace, "pod", "baseline-server", "Ready", "3m")).To(Succeed())
+	Expect(framework.KubectlWaitForCondition(env.TestCtx.Context, env.Config.Kubeconfig, testNamespace, "pod", "same-namespace-client", "Ready", "3m")).To(Succeed())
+	Expect(framework.KubectlWaitForCondition(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, "pod", "baseline-cluster-gateway", "Ready", "3m")).To(Succeed())
+	Expect(framework.KubectlWaitForCondition(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, "pod", "baseline-manager", "Ready", "3m")).To(Succeed())
+
+	serverIP, err := framework.KubectlGetJSONPath(env.TestCtx.Context, env.Config.Kubeconfig, testNamespace, "pod", "baseline-server", "{.status.podIP}")
+	Expect(err).NotTo(HaveOccurred())
+	serverIP = strings.TrimSpace(serverIP)
+	Expect(serverIP).NotTo(BeEmpty())
+
+	Eventually(func() error {
+		body, execErr := framework.KubectlExecOutput(
+			env.TestCtx.Context,
+			env.Config.Kubeconfig,
+			env.Infra.Namespace,
+			"baseline-cluster-gateway",
+			"sh", "-lc", fmt.Sprintf("wget -qO- --timeout=5 http://%s:80/", serverIP),
+		)
+		if execErr != nil {
+			return execErr
+		}
+		if strings.TrimSpace(body) != "baseline-server-80" {
+			return fmt.Errorf("unexpected cluster-gateway body: %q", body)
+		}
+		return nil
+	}).WithTimeout(45 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
+
+	Eventually(func() error {
+		body, execErr := framework.KubectlExecOutput(
+			env.TestCtx.Context,
+			env.Config.Kubeconfig,
+			env.Infra.Namespace,
+			"baseline-manager",
+			"sh", "-lc", fmt.Sprintf("wget -qO- --timeout=5 http://%s:%d/", serverIP, templateNamespaceBaselineProcdPort),
+		)
+		if execErr != nil {
+			return execErr
+		}
+		if strings.TrimSpace(body) != "baseline-server-procd" {
+			return fmt.Errorf("unexpected manager procd body: %q", body)
+		}
+		return nil
+	}).WithTimeout(45 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
+
+	Eventually(func() error {
+		_, execErr := framework.KubectlExecOutput(
+			env.TestCtx.Context,
+			env.Config.Kubeconfig,
+			testNamespace,
+			"same-namespace-client",
+			"sh", "-lc", fmt.Sprintf("wget -qO- --timeout=2 http://%s:80/", serverIP),
+		)
+		if execErr == nil {
+			return fmt.Errorf("expected same-namespace sandbox traffic to be denied")
+		}
+		return nil
+	}).WithTimeout(45 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
+
+	Eventually(func() error {
+		_, execErr := framework.KubectlExecOutput(
+			env.TestCtx.Context,
+			env.Config.Kubeconfig,
+			env.Infra.Namespace,
+			"baseline-manager",
+			"sh", "-lc", fmt.Sprintf("wget -qO- --timeout=2 http://%s:80/", serverIP),
+		)
+		if execErr == nil {
+			return fmt.Errorf("expected manager access to non-procd port to be denied")
+		}
+		return nil
+	}).WithTimeout(45 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
 }
 
 func assertSandboxListContainsClaimedSandbox(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string) {

@@ -491,7 +491,14 @@ func (s *Server) listSandboxes(c *gin.Context) {
 		wg.Add(1)
 		go func(clusterID, clusterGatewayURL string) {
 			defer wg.Done()
-			resp, err := clusterGatewayClient.ListSandboxes(c.Request.Context(), clusterGatewayURL, claims.TeamID, queryString)
+			resp, err := clusterGatewayClient.ListSandboxes(
+				c.Request.Context(),
+				clusterGatewayURL,
+				claims.TeamID,
+				claims.UserID,
+				queryString,
+				claims.Permissions,
+			)
 			results <- clusterResult{
 				clusterID: clusterID,
 				response:  resp,

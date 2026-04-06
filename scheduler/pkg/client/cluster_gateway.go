@@ -317,13 +317,14 @@ type ListSandboxesResponse struct {
 }
 
 // ListSandboxes lists sandboxes from cluster-gateway with the given query parameters
-func (c *ClusterGatewayClient) ListSandboxes(ctx context.Context, baseURL, teamID, query string) (*ListSandboxesResponse, error) {
-	// Generate system token for cluster-gateway
-	token, err := c.internalAuthGen.GenerateSystem("cluster-gateway", internalauth.GenerateOptions{
-		Permissions: []string{"*:*"},
+func (c *ClusterGatewayClient) ListSandboxes(ctx context.Context, baseURL, teamID, userID, query string, permissions []string) (*ListSandboxesResponse, error) {
+	// Preserve the caller team/user context so cluster-gateway and manager
+	// can apply the same team-scoped authorization as other sandbox routes.
+	token, err := c.internalAuthGen.Generate("cluster-gateway", teamID, userID, internalauth.GenerateOptions{
+		Permissions: permissions,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("generate system token: %w", err)
+		return nil, fmt.Errorf("generate internal token: %w", err)
 	}
 
 	// Build request URL with query parameters

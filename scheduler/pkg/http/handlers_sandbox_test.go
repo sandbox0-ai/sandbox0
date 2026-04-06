@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 
@@ -16,8 +17,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	gatewayauthn "github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
@@ -352,7 +355,6 @@ func TestCreateSandboxRoutesRequestByHeadroom(t *testing.T) {
 		PrivateKey: privateKey,
 		TTL:        time.Minute,
 	})
-
 	router := gin.New()
 	v1 := router.Group("/api/v1")
 	v1.Use(server.authMiddleware())
@@ -438,7 +440,6 @@ func TestCreateSandboxFallsBackWhenNoFreshSignalsExist(t *testing.T) {
 		PrivateKey: privateKey,
 		TTL:        time.Minute,
 	})
-
 	router := gin.New()
 	v1 := router.Group("/api/v1")
 	v1.Use(server.authMiddleware())
@@ -470,6 +471,119 @@ func TestCreateSandboxFallsBackWhenNoFreshSignalsExist(t *testing.T) {
 	}
 	if receivedB != 1 {
 		t.Fatalf("cluster-b requests = %d, want 1", receivedB)
+	}
+}
+
+func TestListSandboxesRoutesTeamScopedToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ed25519 keypair: %v", err)
+	}
+
+	clusterValidator := internalauth.NewValidator(internalauth.ValidatorConfig{
+		Target:             "cluster-gateway",
+		PublicKey:          publicKey,
+		AllowedCallers:     []string{"scheduler"},
+		ClockSkewTolerance: 5 * time.Second,
+	})
+
+	cluster := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Team-ID"); got != "team-a" {
+			t.Fatalf("cluster X-Team-ID = %q, want team-a", got)
+		}
+		claims, err := clusterValidator.Validate(r.Header.Get("X-Internal-Token"))
+		if err != nil {
+			t.Fatalf("validate forwarded token: %v", err)
+		}
+		if claims.TeamID != "team-a" {
+			t.Fatalf("claims.TeamID = %q, want team-a", claims.TeamID)
+		}
+		if claims.UserID != "user-a" {
+			t.Fatalf("claims.UserID = %q, want user-a", claims.UserID)
+		}
+		wantPerms := []string{gatewayauthn.PermSandboxRead}
+		if !reflect.DeepEqual(claims.Permissions, wantPerms) {
+			t.Fatalf("claims.Permissions = %v, want %v", claims.Permissions, wantPerms)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"data":{"sandboxes":[{"id":"rs-home-team-a-demo-abcde","template_id":"tmpl-a","status":"running","paused":false,"created_at":"2026-04-07T00:00:00Z","expires_at":"2026-04-07T01:00:00Z"}],"count":1,"has_more":false}}`))
+	}))
+	defer cluster.Close()
+
+	server := newRoutingTestServer(
+		newRoutingTemplate("tmpl-a"),
+		nil,
+		[]*template.Cluster{{ClusterID: "home", ClusterGatewayURL: cluster.URL, Enabled: true, Weight: 1}},
+		&fakeRoutingReconciler{},
+	)
+	server.authValidator = internalauth.NewValidator(internalauth.ValidatorConfig{
+		Target:             "scheduler",
+		PublicKey:          publicKey,
+		AllowedCallers:     []string{"regional-gateway"},
+		ClockSkewTolerance: 5 * time.Second,
+	})
+	server.internalAuthGen = internalauth.NewGenerator(internalauth.GeneratorConfig{
+		Caller:     "scheduler",
+		PrivateKey: privateKey,
+		TTL:        time.Minute,
+	})
+
+	server.obsProvider = newTestSchedulerObservability(t)
+
+	router := gin.New()
+	v1 := router.Group("/api/v1")
+	v1.Use(server.authMiddleware())
+	v1.GET("/sandboxes", server.listSandboxes)
+	httpServer := httptest.NewServer(router)
+	defer httpServer.Close()
+
+	regionalGen := internalauth.NewGenerator(internalauth.GeneratorConfig{
+		Caller:     "regional-gateway",
+		PrivateKey: privateKey,
+		TTL:        time.Minute,
+	})
+	regionalToken, err := regionalGen.Generate("scheduler", "team-a", "user-a", internalauth.GenerateOptions{
+		Permissions: []string{gatewayauthn.PermSandboxRead},
+	})
+	if err != nil {
+		t.Fatalf("generate regional token: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, httpServer.URL+"/api/v1/sandboxes", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("X-Internal-Token", regionalToken)
+
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	var body struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Sandboxes []struct {
+				ID string `json:"id"`
+			} `json:"sandboxes"`
+			Count int `json:"count"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !body.Success {
+		t.Fatal("expected success response")
+	}
+	if body.Data.Count != 1 || len(body.Data.Sandboxes) != 1 {
+		t.Fatalf("sandboxes = %d/%d, want 1/1", len(body.Data.Sandboxes), body.Data.Count)
 	}
 }
 
@@ -671,4 +785,20 @@ func mustGenerateSchedulerTestToken(t *testing.T, privateKey ed25519.PrivateKey,
 		t.Fatalf("generate token: %v", err)
 	}
 	return token
+}
+
+func newTestSchedulerObservability(t *testing.T) *observability.Provider {
+	t.Helper()
+	provider, err := observability.New(observability.Config{
+		ServiceName:    "scheduler-routing-test",
+		Logger:         zap.NewNop(),
+		DisableTracing: true,
+		DisableMetrics: true,
+		DisableLogging: true,
+		TraceExporter:  observability.TraceExporterConfig{Type: "noop"},
+	})
+	if err != nil {
+		t.Fatalf("create observability provider: %v", err)
+	}
+	return provider
 }

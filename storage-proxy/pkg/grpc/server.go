@@ -106,6 +106,20 @@ func vfsContextForActor(actor *pb.PosixActor) vfs.LogContext {
 	return vfs.NewLogContext(meta.NewContext(actor.Pid, actor.Uid, actor.Gids))
 }
 
+func ensureLazyRootPosixIdentity(volCtx *volume.VolumeContext, actor *pb.PosixActor, inodes ...meta.Ino) error {
+	if volCtx == nil || actor == nil || len(actor.Gids) == 0 {
+		return nil
+	}
+	rootInode := volumeRootInode(volCtx)
+	for _, inode := range inodes {
+		if inode != rootInode {
+			continue
+		}
+		return volume.EnsureLazyRootPosixIdentity(volCtx, actor.Uid, actor.Gids[0])
+	}
+	return nil
+}
+
 func accessActor(req *pb.AccessRequest) *pb.PosixActor {
 	if req != nil && req.Actor != nil {
 		return req.Actor
@@ -741,6 +755,9 @@ func (s *FileSystemServer) Create(ctx context.Context, req *pb.CreateRequest) (*
 		if err := s.validateNamespaceMutation(runCtx, buildNamespaceMutationRequest(runCtx, req.VolumeId, db.SyncEventCreate, path, "")); err != nil {
 			return nil, err
 		}
+		if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, parent); err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
 		vfsCtx := vfsContextForActor(req.Actor)
 		entry, handleID, errno := volCtx.VFS.Create(vfsCtx, parent, req.Name, uint16(req.Mode), uint16(req.Umask), req.Flags)
 		if errno != 0 {
@@ -792,6 +809,9 @@ func (s *FileSystemServer) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb
 		if err := s.validateNamespaceMutation(runCtx, buildNamespaceMutationRequest(runCtx, req.VolumeId, db.SyncEventCreate, path, "")); err != nil {
 			return nil, err
 		}
+		if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, parent); err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
 		vfsCtx := vfsContextForActor(req.Actor)
 		entry, st := volCtx.VFS.Mkdir(vfsCtx, parent, req.Name, uint16(req.Mode), uint16(req.Umask))
 		if st != 0 {
@@ -834,6 +854,9 @@ func (s *FileSystemServer) Mknod(ctx context.Context, req *pb.MknodRequest) (*pb
 		path := resolveChildPath(volCtx, uint64(parent), req.Name)
 		if err := s.validateNamespaceMutation(runCtx, buildNamespaceMutationRequest(runCtx, req.VolumeId, db.SyncEventCreate, path, "")); err != nil {
 			return nil, err
+		}
+		if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, parent); err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
 		}
 		vfsCtx := vfsContextForActor(req.Actor)
 		entry, st := volCtx.VFS.Mknod(vfsCtx, parent, req.Name, uint16(req.Mode), uint16(req.Umask), uint32(req.Rdev))
@@ -881,6 +904,9 @@ func mapErrnoToCode(errno syscall.Errno) codes.Code {
 func (s *FileSystemServer) Unlink(ctx context.Context, req *pb.UnlinkRequest) (*pb.Empty, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.Empty, error) {
 		parent := mapInode(volCtx, req.Parent)
+		if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, parent); err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
 		vfsCtx := vfsContextForActor(req.Actor)
 		st := volCtx.VFS.Unlink(vfsCtx, parent, req.Name)
 		if st != 0 {
@@ -991,6 +1017,9 @@ func (s *FileSystemServer) Rename(ctx context.Context, req *pb.RenameRequest) (*
 		newPath := resolveChildPath(volCtx, uint64(newParent), req.NewName)
 		if err := s.validateNamespaceMutation(runCtx, buildNamespaceMutationRequest(runCtx, req.VolumeId, db.SyncEventRename, newPath, oldPath)); err != nil {
 			return nil, err
+		}
+		if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, oldParent, newParent); err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
 		}
 
 		vfsCtx := vfsContextForActor(req.Actor)
@@ -1190,6 +1219,9 @@ func (s *FileSystemServer) Release(ctx context.Context, req *pb.ReleaseRequest) 
 func (s *FileSystemServer) Rmdir(ctx context.Context, req *pb.RmdirRequest) (*pb.Empty, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.Empty, error) {
 		parent := mapInode(volCtx, req.Parent)
+		if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, parent); err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
 		vfsCtx := vfsContextForActor(req.Actor)
 		st := volCtx.VFS.Rmdir(vfsCtx, parent, req.Name)
 		if st != 0 {
@@ -1265,6 +1297,9 @@ func (s *FileSystemServer) Symlink(ctx context.Context, req *pb.SymlinkRequest) 
 		if err := s.validateNamespaceMutation(runCtx, buildNamespaceMutationRequest(runCtx, req.VolumeId, db.SyncEventCreate, path, "")); err != nil {
 			return nil, err
 		}
+		if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, parent); err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
 		vfsCtx := vfsContextForActor(req.Actor)
 		entry, st := volCtx.VFS.Symlink(vfsCtx, req.Target, parent, req.Name)
 		if st != 0 {
@@ -1318,6 +1353,9 @@ func (s *FileSystemServer) Link(ctx context.Context, req *pb.LinkRequest) (*pb.N
 		path := resolveChildPath(volCtx, uint64(newParent), req.NewName)
 		if err := s.validateNamespaceMutation(runCtx, buildNamespaceMutationRequest(runCtx, req.VolumeId, db.SyncEventCreate, path, "")); err != nil {
 			return nil, err
+		}
+		if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, newParent); err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
 		}
 
 		vfsCtx := vfsContextForActor(req.Actor)

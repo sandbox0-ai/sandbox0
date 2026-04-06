@@ -52,6 +52,9 @@ func (a *VolumeChangeApplier) ApplyChange(ctx context.Context, volumeRecord *db.
 	if err != nil {
 		return err
 	}
+	if err := volume.EnsureLazyRootPosixIdentity(volCtx, metaCtx.Uid(), metaCtx.Gid()); err != nil {
+		return err
+	}
 	if sessionID != "" {
 		defer cleanupMountedVolume(a.volMgr, a.logger, volumeRecord.ID, sessionID)
 	}

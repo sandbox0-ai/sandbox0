@@ -7,26 +7,19 @@ import (
 	"testing"
 
 	"github.com/juicedata/juicefs/pkg/meta"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
+	storagegrpc "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/grpc"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volsync"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
+	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"github.com/sirupsen/logrus"
 )
-
-func setRootGroupWritable(t *testing.T, volCtx *volume.VolumeContext, gid int64) {
-	t.Helper()
-
-	rootAttr := &meta.Attr{Gid: uint32(gid), Mode: 0o775}
-	if errno := volCtx.Meta.SetAttr(meta.Background(), meta.RootInode, meta.SetAttrGID|meta.SetAttrMode, 0, rootAttr); errno != 0 {
-		t.Fatalf("SetAttr(root) errno = %v, want 0", syscall.Errno(errno))
-	}
-}
 
 func TestVolumeSyncApplyUsesDefaultPosixIdentity(t *testing.T) {
 	volCtx := newMountedIntegrationVolumeContext(t, "vol-1", "team-1")
 	uid := int64(1234)
 	gid := int64(2345)
-	setRootGroupWritable(t, volCtx, gid)
 	applier := volsync.NewVolumeChangeApplier(&integrationMountedVolumeManager{
 		volumes: map[string]*volume.VolumeContext{"vol-1": volCtx},
 	}, logrus.New())
@@ -68,6 +61,14 @@ func TestVolumeSyncApplyUsesDefaultPosixIdentity(t *testing.T) {
 	if got := string(readMountedFile(t, volCtx, "/sync/main.go")); got != "package main\n" {
 		t.Fatalf("file content = %q, want %q", got, "package main\n")
 	}
+
+	rootAttr := &meta.Attr{}
+	if errno := volCtx.Meta.GetAttr(meta.Background(), meta.RootInode, rootAttr); errno != 0 {
+		t.Fatalf("GetAttr(root) errno = %v, want 0", syscall.Errno(errno))
+	}
+	if rootAttr.Uid != uint32(uid) || rootAttr.Gid != uint32(gid) {
+		t.Fatalf("root owner = %d:%d, want %d:%d", rootAttr.Uid, rootAttr.Gid, uid, gid)
+	}
 }
 
 func TestVolumeSyncApplyRequiresDefaultPosixIdentity(t *testing.T) {
@@ -90,5 +91,41 @@ func TestVolumeSyncApplyRequiresDefaultPosixIdentity(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("ApplyChange() error = nil, want default posix identity error")
+	}
+}
+
+func TestFileSystemCreateUsesActorToLazilyInitializeRoot(t *testing.T) {
+	volCtx := newMountedIntegrationVolumeContext(t, "vol-1", "team-1")
+	fsServer := storagegrpc.NewFileSystemServer(&integrationMountedVolumeManager{
+		volumes: map[string]*volume.VolumeContext{"vol-1": volCtx},
+	}, nil, nil, nil, logrus.New(), nil, nil)
+	actor := &pb.PosixActor{Pid: 4321, Uid: 1234, Gids: []uint32{2345}}
+	ctx := internalauth.WithClaims(context.Background(), &internalauth.Claims{TeamID: "team-1", SandboxID: "sb-1"})
+
+	if _, err := fsServer.Create(ctx, &pb.CreateRequest{
+		VolumeId: "vol-1",
+		Parent:   uint64(meta.RootInode),
+		Name:     "hello.txt",
+		Mode:     0o644,
+		Actor:    actor,
+	}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	rootAttr := &meta.Attr{}
+	if errno := volCtx.Meta.GetAttr(meta.Background(), meta.RootInode, rootAttr); errno != 0 {
+		t.Fatalf("GetAttr(root) errno = %v, want 0", syscall.Errno(errno))
+	}
+	if rootAttr.Uid != actor.Uid || rootAttr.Gid != actor.Gids[0] {
+		t.Fatalf("root owner = %d:%d, want %d:%d", rootAttr.Uid, rootAttr.Gid, actor.Uid, actor.Gids[0])
+	}
+
+	var inode meta.Ino
+	var attr meta.Attr
+	if errno := volCtx.Meta.Lookup(meta.Background(), meta.RootInode, "hello.txt", &inode, &attr, false); errno != 0 {
+		t.Fatalf("Lookup(hello.txt) errno = %v, want 0", syscall.Errno(errno))
+	}
+	if attr.Uid != actor.Uid || attr.Gid != actor.Gids[0] {
+		t.Fatalf("file owner = %d:%d, want %d:%d", attr.Uid, attr.Gid, actor.Uid, actor.Gids[0])
 	}
 }

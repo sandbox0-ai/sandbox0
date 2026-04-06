@@ -4541,12 +4541,14 @@ components:
           type: integer
           format: int64
           minimum: 0
-          description: Default POSIX UID used by external volume access paths that do not carry caller identity.
+          default: 0
+          description: Default POSIX UID used by external volume access paths that do not carry caller identity. Defaults to 0 when omitted on create.
         default_posix_gid:
           type: integer
           format: int64
           minimum: 0
-          description: Default POSIX GID used by external volume access paths that do not carry caller identity.
+          default: 0
+          description: Default POSIX GID used by external volume access paths that do not carry caller identity. Defaults to 0 when omitted on create.
         cache_size:
           type: string
         prefetch:

@@ -74,6 +74,36 @@ func TestCreateSandboxVolumeStoresDefaultPosixIdentity(t *testing.T) {
 	}
 }
 
+func TestCreateSandboxVolumeDefaultsPosixIdentityToRoot(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	server := &Server{
+		logger:       logrus.New(),
+		repo:         repo,
+		meteringRepo: &fakeHTTPMeteringWriter{},
+		snapshotMgr:  &fakeHTTPSnapshotManager{},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes", bytes.NewReader([]byte(`{"cache_size":"2G"}`)))
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-1", UserID: "user-1"}))
+	recorder := httptest.NewRecorder()
+
+	server.createSandboxVolume(recorder, req)
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusCreated)
+	}
+	if len(repo.createdVolumes) != 1 {
+		t.Fatalf("created volumes = %d, want 1", len(repo.createdVolumes))
+	}
+	created := repo.createdVolumes[0]
+	if created.DefaultPosixUID == nil || *created.DefaultPosixUID != 0 {
+		t.Fatalf("DefaultPosixUID = %v, want 0", created.DefaultPosixUID)
+	}
+	if created.DefaultPosixGID == nil || *created.DefaultPosixGID != 0 {
+		t.Fatalf("DefaultPosixGID = %v, want 0", created.DefaultPosixGID)
+	}
+}
+
 func TestCreateSandboxVolumeRejectsPartialDefaultPosixIdentity(t *testing.T) {
 	server := &Server{
 		logger:       logrus.New(),

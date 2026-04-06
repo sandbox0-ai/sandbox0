@@ -38,6 +38,18 @@ type forkSandboxVolumeRequest struct {
 	DefaultPosixGID *int64  `json:"default_posix_gid,omitempty"`
 }
 
+func defaultZeroPosixIdentity(uid, gid **int64) {
+	if uid == nil || gid == nil {
+		return
+	}
+	if *uid != nil || *gid != nil {
+		return
+	}
+	defaultPosixID := int64(0)
+	*uid = &defaultPosixID
+	*gid = &defaultPosixID
+}
+
 func validateDefaultPosixIdentity(uid, gid *int64) error {
 	if (uid == nil) != (gid == nil) {
 		return errors.New("default_posix_uid and default_posix_gid must be set together")
@@ -78,6 +90,7 @@ func (s *Server) createSandboxVolume(w http.ResponseWriter, r *http.Request) {
 	if req.BufferSize == "" {
 		req.BufferSize = "32M"
 	}
+	defaultZeroPosixIdentity(&req.DefaultPosixUID, &req.DefaultPosixGID)
 
 	accessMode, ok := volume.ParseAccessMode(req.AccessMode)
 	if req.AccessMode == "" {

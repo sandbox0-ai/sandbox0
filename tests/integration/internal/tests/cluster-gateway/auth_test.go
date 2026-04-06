@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	gatewayapikey "github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	gatewayidentity "github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
 )
@@ -156,8 +157,11 @@ func TestClusterGatewayIntegration_PublicAuthAPIKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create user/team: %v", err)
 	}
+	if _, err := dbPool.Exec(ctx, `UPDATE teams SET home_region_id = $2 WHERE id = $1`, team.ID, "aws-us-east-1"); err != nil {
+		t.Fatalf("set team home region: %v", err)
+	}
 
-	_, keyValue, err := apiKeyRepo.CreateAPIKey(ctx, team.ID, user.ID, "test-key", "user", []string{"admin"}, time.Now().Add(time.Hour))
+	_, keyValue, err := apiKeyRepo.CreateAPIKey(ctx, team.ID, "aws-us-east-1", user.ID, "test-key", "user", []string{"admin"}, time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("create api key: %v", err)
 	}
@@ -165,6 +169,51 @@ func TestClusterGatewayIntegration_PublicAuthAPIKey(t *testing.T) {
 	resp, _ := doGatewayRequestWithBearer(t, env.server.Client(), http.MethodGet, env.server.URL+"/api/v1/templates", keyValue, nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected ok, got %d", resp.StatusCode)
+	}
+}
+
+func TestClusterGatewayIntegration_APIKeyCanBeCreatedWithoutLocalTeamOrUserRow(t *testing.T) {
+	dbPool, identityRepo, apiKeyRepo, _ := newGatewayTestDB(t)
+
+	user := &gatewayidentity.User{
+		Email:         "apikey-region-route@example.com",
+		Name:          "API Key Region Route User",
+		PasswordHash:  "x",
+		EmailVerified: true,
+		IsAdmin:       false,
+	}
+	ctx := context.Background()
+	team, _, err := identityRepo.CreateUserWithInitialTeam(ctx, user, "Region Route Team", nil)
+	if err != nil {
+		t.Fatalf("create user/team: %v", err)
+	}
+
+	if _, err := dbPool.Exec(ctx, `DELETE FROM teams WHERE id = $1`, team.ID); err != nil {
+		t.Fatalf("delete local team row: %v", err)
+	}
+	if _, err := dbPool.Exec(ctx, `DELETE FROM users WHERE id = $1`, user.ID); err != nil {
+		t.Fatalf("delete local user row: %v", err)
+	}
+
+	key, keyValue, err := apiKeyRepo.CreateAPIKey(ctx, team.ID, "aws-us-east-1", user.ID, "test-key", "service", []string{"developer"}, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("create api key without local team or user row: %v", err)
+	}
+	if key.TeamID != team.ID {
+		t.Fatalf("expected team id %s, got %s", team.ID, key.TeamID)
+	}
+	if got, err := gatewayapikey.ParseRegionIDFromKey(keyValue); err != nil {
+		t.Fatalf("parse region from api key: %v", err)
+	} else if got != "aws-us-east-1" {
+		t.Fatalf("expected region id aws-us-east-1, got %s", got)
+	}
+
+	validated, err := apiKeyRepo.ValidateAPIKey(ctx, keyValue)
+	if err != nil {
+		t.Fatalf("validate api key: %v", err)
+	}
+	if validated.TeamID != team.ID {
+		t.Fatalf("expected validated team id %s, got %s", team.ID, validated.TeamID)
 	}
 }
 

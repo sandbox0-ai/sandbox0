@@ -492,7 +492,7 @@ func validateNormalizedHomeRegionID(homeRegionID *string) error {
 	if homeRegionID == nil {
 		return nil
 	}
-	if !isNormalizedRegionID(*homeRegionID) {
+	if !tenantdir.IsNormalizedRegionID(*homeRegionID) {
 		return errHomeRegionInvalidFormat
 	}
 	return nil

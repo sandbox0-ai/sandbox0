@@ -312,6 +312,7 @@ func (s *Server) setupRoutes() {
 			OIDCManager:     s.publicOIDC,
 			Entitlements:    s.entitlements,
 			JWTIssuer:       s.publicJWT,
+			RegionID:        s.cfg.RegionID,
 			Logger:          s.logger,
 		})
 	}

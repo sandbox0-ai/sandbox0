@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"regexp"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -91,7 +90,7 @@ func (h *RegionHandler) CreateRegion(c *gin.Context) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "region id and regional gateway url are required")
 		return
 	}
-	if !isNormalizedRegionID(region.ID) {
+	if !tenantdir.IsNormalizedRegionID(region.ID) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "region id must use provider-region format")
 		return
 	}
@@ -182,10 +181,4 @@ func (h *RegionHandler) DeleteRegion(c *gin.Context) {
 		return
 	}
 	spec.JSONSuccess(c, http.StatusOK, gin.H{"message": "region deleted"})
-}
-
-var normalizedRegionIDPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)+$`)
-
-func isNormalizedRegionID(value string) bool {
-	return normalizedRegionIDPattern.MatchString(value)
 }

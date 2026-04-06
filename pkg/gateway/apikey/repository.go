@@ -2,8 +2,6 @@ package apikey
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -56,17 +54,11 @@ func (r *Repository) Pool() *pgxpool.Pool {
 }
 
 // CreateAPIKey creates a new API key.
-func (r *Repository) CreateAPIKey(ctx context.Context, teamID, userID, name, keyType string, roles []string, expiresAt time.Time) (*APIKey, string, error) {
-	teamPrefix := teamID
-	if len(teamPrefix) > 8 {
-		teamPrefix = teamPrefix[:8]
+func (r *Repository) CreateAPIKey(ctx context.Context, teamID, regionID, userID, name, keyType string, roles []string, expiresAt time.Time) (*APIKey, string, error) {
+	keyValue, err := NewKeyValue(regionID)
+	if err != nil {
+		return nil, "", err
 	}
-
-	randomBytes := make([]byte, 24)
-	if _, err := rand.Read(randomBytes); err != nil {
-		return nil, "", fmt.Errorf("generate random: %w", err)
-	}
-	keyValue := fmt.Sprintf("s0_%s_%s", teamPrefix, hex.EncodeToString(randomBytes))
 
 	id := uuid.New().String()
 	rolesJSON, err := json.Marshal(roles)

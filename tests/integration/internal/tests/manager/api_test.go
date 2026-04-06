@@ -19,8 +19,10 @@ import (
 	clientset "github.com/sandbox0-ai/sandbox0/manager/pkg/generated/clientset/versioned"
 	clientsetfake "github.com/sandbox0-ai/sandbox0/manager/pkg/generated/clientset/versioned/fake"
 	managerhttp "github.com/sandbox0-ai/sandbox0/manager/pkg/http"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/namespacepolicy"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/tests/integration/internal/utils"
@@ -151,6 +153,12 @@ func newManagerTestEnvWithOptions(t *testing.T, opts managerTestEnvOptions) *man
 		managerCfg.Registry,
 		logger,
 	)
+	baselineReconciler, err := namespacepolicy.NewReconciler(k8sClient, namespacepolicy.Config{
+		SystemNamespace: "sandbox0-system",
+		ProcdPort:       49983,
+	}, logger)
+	utils.RequireNoError(t, err, "create template namespace baseline reconciler")
+	templateService.SetNamespacePolicyReconciler(baselineReconciler)
 	registryService := service.NewRegistryService(nil, logger)
 	clusterService := service.NewClusterService(
 		k8sClient,
@@ -214,6 +222,27 @@ func createInternalKeys() (internalauth.PrivateKeyType, internalauth.PublicKeyTy
 		return nil, nil, err
 	}
 	return privateKey, publicKey, nil
+}
+
+func TestCreateTemplateLegacyEnsuresNamespaceIngressBaseline(t *testing.T) {
+	env := newManagerTestEnv(t)
+
+	resp, body := doRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/internal/v1/templates", env.token, map[string]any{
+		"metadata": map[string]any{"name": "demo"},
+		"spec":     map[string]any{},
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, string(body))
+	}
+
+	namespace, err := naming.TemplateNamespaceForBuiltin("demo")
+	utils.RequireNoError(t, err, "resolve template namespace")
+
+	policies, err := env.k8sClient.NetworkingV1().NetworkPolicies(namespace).List(context.Background(), metav1.ListOptions{})
+	utils.RequireNoError(t, err, "list namespace baseline policies")
+	if len(policies.Items) != 2 {
+		t.Fatalf("networkpolicy count = %d, want 2", len(policies.Items))
+	}
 }
 
 type testTemplateLister struct {

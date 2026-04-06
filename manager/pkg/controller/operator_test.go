@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
@@ -65,6 +66,36 @@ func TestOperatorUpdateTemplateStatusUsesReadyIdlePods(t *testing.T) {
 	assert.Equal(t, int32(1), publisher.activeCount)
 	assert.Equal(t, "default/template-a", publisher.statsKey)
 	assert.Equal(t, TemplateCounts{IdleCount: 1, ActiveCount: 1}, op.lastStats["default/template-a"])
+}
+
+type recordingNamespacePolicyReconciler struct {
+	calls []string
+	err   error
+}
+
+func (r *recordingNamespacePolicyReconciler) EnsureBaseline(_ context.Context, namespace string) error {
+	r.calls = append(r.calls, namespace)
+	return r.err
+}
+
+func TestOperatorSyncHandlerPropagatesNamespaceBaselineError(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "template-a", Namespace: "default"},
+	}
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	require.NoError(t, indexer.Add(template))
+
+	reconciler := &recordingNamespacePolicyReconciler{err: errors.New("boom")}
+	op := &Operator{
+		templateLister:  TemplateListerImpl{indexer: indexer},
+		namespacePolicy: reconciler,
+		logger:          zap.NewNop(),
+	}
+
+	err := op.syncHandler(context.Background(), "default/template-a")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "reconcile template namespace baseline")
+	assert.Equal(t, []string{"default"}, reconciler.calls)
 }
 
 type recordingTemplateStatsPublisher struct {

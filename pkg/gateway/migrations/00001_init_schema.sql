@@ -75,7 +75,7 @@ CREATE INDEX IF NOT EXISTS idx_refresh_tokens_token_hash ON refresh_tokens(token
 CREATE TABLE IF NOT EXISTS api_keys (
     id UUID PRIMARY KEY,
     key_value TEXT NOT NULL UNIQUE,
-    team_id UUID NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    team_id UUID NOT NULL,
     created_by UUID NOT NULL REFERENCES users(id) ON DELETE SET NULL,
     name TEXT NOT NULL,
     type TEXT NOT NULL CHECK (type IN ('user', 'service', 'internal')),

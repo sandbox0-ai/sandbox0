@@ -15,7 +15,8 @@ type aliyunProvider struct {
 	secrets secretReader
 }
 
-func (p *aliyunProvider) GetPushCredentials(ctx context.Context, teamID string) (*Credential, error) {
+func (p *aliyunProvider) GetPushCredentials(ctx context.Context, req PushCredentialsRequest) (*Credential, error) {
+	// TODO: add team-scoped ephemeral credentials similar to AWS AssumeRole + session policy.
 	registry := normalizeRegistryHost(p.cfg.Registry)
 	if registry == "" {
 		return nil, fmt.Errorf("aliyun registry is required")

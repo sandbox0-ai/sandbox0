@@ -365,6 +365,8 @@ func (r *Reconciler) applyRegistryConfig(infra *infrav1alpha1.Sandbox0Infra, cfg
 		cfg.Registry.AWS = &apiconfig.RegistryAWSConfig{
 			Region:           infra.Spec.Registry.AWS.Region,
 			RegistryID:       infra.Spec.Registry.AWS.RegistryID,
+			AssumeRoleARN:    infra.Spec.Registry.AWS.AssumeRoleARN,
+			ExternalID:       infra.Spec.Registry.AWS.ExternalID,
 			RegistryOverride: infra.Spec.Registry.AWS.Registry,
 			AccessKeyID:      "${S0_REGISTRY_AWS_ACCESS_KEY_ID}",
 			SecretAccessKey:  "${S0_REGISTRY_AWS_SECRET_ACCESS_KEY}",

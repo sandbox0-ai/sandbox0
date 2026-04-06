@@ -57,6 +57,14 @@ type SchedulerConfig struct {
 	// Database Pool configuration
 	// +optional
 	DatabasePool DatabasePoolConfig `yaml:"database_pool" json:"databasePool"`
+
+	// RegistryPushRegistry is the registry hostname used for image pushes.
+	// +optional
+	RegistryPushRegistry string `yaml:"registry_push_registry" json:"-"`
+
+	// RegistryPullRegistry is the in-cluster registry hostname used for image pulls.
+	// +optional
+	RegistryPullRegistry string `yaml:"registry_pull_registry" json:"-"`
 }
 
 type DatabasePoolConfig struct {

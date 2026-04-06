@@ -1987,6 +1987,12 @@ paths:
         - bearerAuth: []
       x-upstream-service: regional-gateway
       x-upstream-path: /api/v1/registry/credentials
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegistryCredentialsRequest"
       responses:
         "200":
           description: Registry credentials
@@ -1994,6 +2000,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessRegistryCredentialsResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
         "401":
           description: Unauthorized
           content:
@@ -3019,6 +3031,12 @@ components:
           type: string
           format: date-time
       required: [provider, pushRegistry, pullRegistry, username, password]
+    RegistryCredentialsRequest:
+      type: object
+      properties:
+        targetImage:
+          type: string
+          description: Target image name and tag requested for push, without credentials.
     SuccessDeletedResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"

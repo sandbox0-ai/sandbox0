@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"go.uber.org/zap"
 	corelisters "k8s.io/client-go/listers/core/v1"
 )
@@ -22,9 +23,15 @@ type Credential struct {
 	ExpiresAt    *time.Time `json:"expiresAt,omitempty"`
 }
 
+// PushCredentialsRequest describes the image push the caller is preparing.
+type PushCredentialsRequest struct {
+	TeamID      string
+	TargetImage string
+}
+
 // Provider returns short-lived registry credentials.
 type Provider interface {
-	GetPushCredentials(ctx context.Context, teamID string) (*Credential, error)
+	GetPushCredentials(ctx context.Context, req PushCredentialsRequest) (*Credential, error)
 }
 
 // NewProvider creates a registry provider based on config.
@@ -94,8 +101,8 @@ type providerWithPullRegistry struct {
 	pullRegistry string
 }
 
-func (p *providerWithPullRegistry) GetPushCredentials(ctx context.Context, teamID string) (*Credential, error) {
-	creds, err := p.base.GetPushCredentials(ctx, teamID)
+func (p *providerWithPullRegistry) GetPushCredentials(ctx context.Context, req PushCredentialsRequest) (*Credential, error) {
+	creds, err := p.base.GetPushCredentials(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -108,6 +115,10 @@ func (p *providerWithPullRegistry) GetPushCredentials(ctx context.Context, teamI
 	} else if creds.PullRegistry == "" {
 		// Default to push endpoint when no dedicated pull endpoint is configured.
 		creds.PullRegistry = creds.PushRegistry
+	}
+	if strings.TrimSpace(req.TeamID) != "" {
+		creds.PushRegistry = naming.TeamScopedImageRegistry(creds.PushRegistry, req.TeamID)
+		creds.PullRegistry = naming.TeamScopedImageRegistry(creds.PullRegistry, req.TeamID)
 	}
 	return creds, nil
 }
@@ -175,7 +186,7 @@ type builtinProvider struct {
 	secrets  secretReader
 }
 
-func (p *builtinProvider) GetPushCredentials(ctx context.Context, teamID string) (*Credential, error) {
+func (p *builtinProvider) GetPushCredentials(ctx context.Context, req PushCredentialsRequest) (*Credential, error) {
 	if strings.TrimSpace(p.registry) == "" {
 		return nil, fmt.Errorf("builtin push registry is required")
 	}

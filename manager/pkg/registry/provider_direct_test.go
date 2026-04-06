@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 )
 
 func TestNewProvider_BuiltinWithDirectCredentials(t *testing.T) {
@@ -24,17 +25,19 @@ func TestNewProvider_BuiltinWithDirectCredentials(t *testing.T) {
 		t.Fatal("NewProvider returned nil provider")
 	}
 
-	cred, err := p.GetPushCredentials(context.Background(), "team-1")
+	cred, err := p.GetPushCredentials(context.Background(), PushCredentialsRequest{TeamID: "team-1"})
 	if err != nil {
 		t.Fatalf("GetPushCredentials returned error: %v", err)
 	}
 	if cred.Provider != "builtin" {
 		t.Fatalf("unexpected provider: %s", cred.Provider)
 	}
-	if cred.PushRegistry != "registry.example.com" {
+	wantPush := naming.TeamScopedImageRegistry("registry.example.com", "team-1")
+	if cred.PushRegistry != wantPush {
 		t.Fatalf("unexpected push registry: %s", cred.PushRegistry)
 	}
-	if cred.PullRegistry != "registry.internal.svc:5000" {
+	wantPull := naming.TeamScopedImageRegistry("registry.internal.svc:5000", "team-1")
+	if cred.PullRegistry != wantPull {
 		t.Fatalf("unexpected pull registry: %s", cred.PullRegistry)
 	}
 	if cred.Username != "u" || cred.Password != "p" {
@@ -58,17 +61,19 @@ func TestNewProvider_HarborWithDirectCredentials(t *testing.T) {
 		t.Fatal("NewProvider returned nil provider")
 	}
 
-	cred, err := p.GetPushCredentials(context.Background(), "team-1")
+	cred, err := p.GetPushCredentials(context.Background(), PushCredentialsRequest{TeamID: "team-1"})
 	if err != nil {
 		t.Fatalf("GetPushCredentials returned error: %v", err)
 	}
 	if cred.Provider != "harbor" {
 		t.Fatalf("unexpected provider: %s", cred.Provider)
 	}
-	if cred.PushRegistry != "harbor.example.com" {
+	wantPush := naming.TeamScopedImageRegistry("harbor.example.com", "team-1")
+	if cred.PushRegistry != wantPush {
 		t.Fatalf("unexpected push registry: %s", cred.PushRegistry)
 	}
-	if cred.PullRegistry != "harbor.example.com" {
+	wantPull := naming.TeamScopedImageRegistry("harbor.example.com", "team-1")
+	if cred.PullRegistry != wantPull {
 		t.Fatalf("unexpected pull registry: %s", cred.PullRegistry)
 	}
 	if cred.Username != "robot$ci" || cred.Password != "secret-token" {

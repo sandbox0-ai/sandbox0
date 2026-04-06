@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -49,7 +50,8 @@ func TestRegistryCredentialsRequireTemplateWritePermission(t *testing.T) {
 			t.Fatalf("issue token pair: %v", err)
 		}
 
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/registry/credentials", nil)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/registry/credentials", strings.NewReader(`{"targetImage":"my-app:v1"}`))
+		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
 		req.Header.Set(internalauth.TeamIDHeader, "team-1")
 
@@ -65,18 +67,40 @@ func TestRegistryCredentialsRequireTemplateWritePermission(t *testing.T) {
 		if got := registrySpy.teamID(); got != "team-1" {
 			t.Fatalf("registry team id = %q, want %q", got, "team-1")
 		}
+		if got := registrySpy.targetImage(); got != "my-app:v1" {
+			t.Fatalf("registry target image = %q, want %q", got, "my-app:v1")
+		}
+	})
+
+	t.Run("invalid json is rejected", func(t *testing.T) {
+		tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "admin"}})
+		if err != nil {
+			t.Fatalf("issue token pair: %v", err)
+		}
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/registry/credentials", strings.NewReader("{"))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+		req.Header.Set(internalauth.TeamIDHeader, "team-1")
+
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
 	})
 }
 
 type registryProviderSpy struct {
-	mu      sync.Mutex
-	teamIDs []string
+	mu       sync.Mutex
+	requests []registryprovider.PushCredentialsRequest
 }
 
-func (s *registryProviderSpy) GetPushCredentials(_ context.Context, teamID string) (*registryprovider.Credential, error) {
+func (s *registryProviderSpy) GetPushCredentials(_ context.Context, req registryprovider.PushCredentialsRequest) (*registryprovider.Credential, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.teamIDs = append(s.teamIDs, teamID)
+	s.requests = append(s.requests, req)
 	return &registryprovider.Credential{
 		Provider:     "builtin",
 		PushRegistry: "registry.example.com",
@@ -88,16 +112,25 @@ func (s *registryProviderSpy) GetPushCredentials(_ context.Context, teamID strin
 func (s *registryProviderSpy) callCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.teamIDs)
+	return len(s.requests)
 }
 
 func (s *registryProviderSpy) teamID() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.teamIDs) == 0 {
+	if len(s.requests) == 0 {
 		return ""
 	}
-	return s.teamIDs[len(s.teamIDs)-1]
+	return s.requests[len(s.requests)-1].TeamID
+}
+
+func (s *registryProviderSpy) targetImage() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.requests) == 0 {
+		return ""
+	}
+	return s.requests[len(s.requests)-1].TargetImage
 }
 
 func newEdgeRegistryRouteTestServer(t *testing.T) (*Server, *registryProviderSpy, func()) {

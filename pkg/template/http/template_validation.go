@@ -7,6 +7,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -32,6 +33,29 @@ func validateTemplateSpecForClaims(spec v1alpha1.SandboxTemplateSpec, claims *in
 	}
 	if spec.ClusterId != nil {
 		return fmt.Errorf("spec.clusterId requires system identity")
+	}
+	return nil
+}
+
+func validateTemplateImagesForClaims(spec v1alpha1.SandboxTemplateSpec, claims *internalauth.Claims, privateRegistryHosts []string) error {
+	if claims == nil || claims.IsSystemToken() || strings.TrimSpace(claims.TeamID) == "" {
+		return nil
+	}
+	if err := validateImageOwnershipForTeam(spec.MainContainer.Image, "spec.mainContainer.image", claims.TeamID, privateRegistryHosts); err != nil {
+		return err
+	}
+	for i, sidecar := range spec.Sidecars {
+		field := fmt.Sprintf("spec.sidecars[%d].image", i)
+		if err := validateImageOwnershipForTeam(sidecar.Image, field, claims.TeamID, privateRegistryHosts); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateImageOwnershipForTeam(imageRef, field, teamID string, privateRegistryHosts []string) error {
+	if err := naming.ValidateTeamScopedImageReference(imageRef, teamID, privateRegistryHosts); err != nil {
+		return fmt.Errorf("%s %w", field, err)
 	}
 	return nil
 }

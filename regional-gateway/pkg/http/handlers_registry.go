@@ -1,9 +1,12 @@
 package http
 
 import (
+	"errors"
+	"io"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	registryprovider "github.com/sandbox0-ai/sandbox0/manager/pkg/registry"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"go.uber.org/zap"
@@ -22,7 +25,18 @@ func (s *Server) getRegistryCredentials(c *gin.Context) {
 		return
 	}
 
-	creds, err := s.registry.GetPushCredentials(c.Request.Context(), authCtx.TeamID)
+	var reqBody struct {
+		TargetImage string `json:"targetImage"`
+	}
+	if err := c.ShouldBindJSON(&reqBody); err != nil && !errors.Is(err, io.EOF) {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid registry credentials request")
+		return
+	}
+
+	creds, err := s.registry.GetPushCredentials(c.Request.Context(), registryprovider.PushCredentialsRequest{
+		TeamID:      authCtx.TeamID,
+		TargetImage: reqBody.TargetImage,
+	})
 	if err != nil {
 		s.logger.Error("Failed to get registry credentials", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to get registry credentials")

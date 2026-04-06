@@ -1333,6 +1333,12 @@ type RegistryCredentials struct {
 	Username     string     `json:"username"`
 }
 
+// RegistryCredentialsRequest defines model for RegistryCredentialsRequest.
+type RegistryCredentialsRequest struct {
+	// TargetImage Target image name and tag requested for push, without credentials.
+	TargetImage *string `json:"targetImage,omitempty"`
+}
+
 // ResizeContextRequest defines model for ResizeContextRequest.
 type ResizeContextRequest struct {
 	Cols int32 `json:"cols"`
@@ -2683,6 +2689,9 @@ type PostApiV1CredentialSourcesJSONRequestBody = CredentialSourceWriteRequest
 
 // PutApiV1CredentialSourcesNameJSONRequestBody defines body for PutApiV1CredentialSourcesName for application/json ContentType.
 type PutApiV1CredentialSourcesNameJSONRequestBody = CredentialSourceWriteRequest
+
+// PostApiV1RegistryCredentialsJSONRequestBody defines body for PostApiV1RegistryCredentials for application/json ContentType.
+type PostApiV1RegistryCredentialsJSONRequestBody = RegistryCredentialsRequest
 
 // PostApiV1SandboxesJSONRequestBody defines body for PostApiV1Sandboxes for application/json ContentType.
 type PostApiV1SandboxesJSONRequestBody = ClaimRequest

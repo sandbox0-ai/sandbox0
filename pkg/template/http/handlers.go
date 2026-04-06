@@ -44,12 +44,13 @@ type TemplateStatsProvider interface {
 
 // Handler provides template HTTP handlers backed by a template store.
 type Handler struct {
-	Store           store.TemplateStore
-	AllocationStore store.AllocationStore
-	ClusterStore    ClusterStore
-	Reconciler      Reconciler
-	StatsProvider   TemplateStatsProvider
-	Logger          *zap.Logger
+	Store                store.TemplateStore
+	AllocationStore      store.AllocationStore
+	ClusterStore         ClusterStore
+	Reconciler           Reconciler
+	StatsProvider        TemplateStatsProvider
+	PrivateRegistryHosts []string
+	Logger               *zap.Logger
 }
 
 // TemplateRequest represents the request body for updating a template.
@@ -212,6 +213,10 @@ func (h *Handler) CreateTemplate(c *gin.Context) {
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, err.Error())
 		return
 	}
+	if err := validateTemplateImagesForClaims(req.Spec, claims, h.PrivateRegistryHosts); err != nil {
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, err.Error())
+		return
+	}
 
 	scope := "team"
 	teamID := claims.TeamID
@@ -292,6 +297,10 @@ func (h *Handler) UpdateTemplate(c *gin.Context) {
 		return
 	}
 	if err := validateTemplateSpecForClaims(req.Spec, claims); err != nil {
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, err.Error())
+		return
+	}
+	if err := validateTemplateImagesForClaims(req.Spec, claims, h.PrivateRegistryHosts); err != nil {
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, err.Error())
 		return
 	}

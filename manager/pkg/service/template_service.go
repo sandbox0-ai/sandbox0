@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
@@ -59,6 +60,24 @@ func NewTemplateService(
 // SetNamespacePolicyReconciler installs the manager-owned template namespace baseline reconciler.
 func (s *TemplateService) SetNamespacePolicyReconciler(reconciler namespacepolicy.TemplateNamespaceReconciler) {
 	s.namespacePolicy = reconciler
+}
+
+// RegistryHosts returns registry hosts reserved for platform-scoped private images.
+func (s *TemplateService) RegistryHosts() []string {
+	hosts := make([]string, 0, 2)
+	seen := make(map[string]struct{}, 2)
+	for _, value := range []string{s.registry.PushRegistry, s.registry.PullRegistry} {
+		host := strings.TrimSpace(value)
+		if host == "" {
+			continue
+		}
+		if _, ok := seen[host]; ok {
+			continue
+		}
+		seen[host] = struct{}{}
+		hosts = append(hosts, host)
+	}
+	return hosts
 }
 
 // CreateTemplate creates a new template

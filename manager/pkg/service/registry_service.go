@@ -24,9 +24,9 @@ func NewRegistryService(provider registry.Provider, logger *zap.Logger) *Registr
 	}
 }
 
-func (s *RegistryService) GetPushCredentials(ctx context.Context, teamID string) (*registry.Credential, error) {
+func (s *RegistryService) GetPushCredentials(ctx context.Context, req registry.PushCredentialsRequest) (*registry.Credential, error) {
 	if s.provider == nil {
 		return nil, ErrRegistryProviderNotConfigured
 	}
-	return s.provider.GetPushCredentials(ctx, teamID)
+	return s.provider.GetPushCredentials(ctx, req)
 }

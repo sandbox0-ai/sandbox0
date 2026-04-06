@@ -153,6 +153,126 @@ func TestCreateTemplate_RejectsImagePullPolicyForRegularTeam(t *testing.T) {
 	}
 }
 
+func TestCreateTemplate_RejectsPrivateImageFromDifferentTeam(t *testing.T) {
+	t.Parallel()
+
+	store := &testTemplateStore{}
+	h := &Handler{
+		Store:                store,
+		PrivateRegistryHosts: []string{"registry.internal.svc:5000"},
+		Logger:               zap.NewNop(),
+	}
+
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	router.POST("/api/v1/templates", h.CreateTemplate)
+
+	body := []byte(`{
+		"template_id":"demo",
+		"spec":{
+			"mainContainer":{"image":"registry.internal.svc:5000/t-other/my-app:v1","resources":{"cpu":"1","memory":"1Gi"}},
+			"pool":{"minIdle":0,"maxIdle":1}
+		}
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected status %d, got %d", http.StatusForbidden, rec.Code)
+	}
+	if store.createCalled {
+		t.Fatalf("expected create not called for forbidden request")
+	}
+}
+
+func TestCreateTemplate_AllowsTeamScopedPrivateImage(t *testing.T) {
+	t.Parallel()
+
+	store := &testTemplateStore{
+		getTemplateFn: func(context.Context, string, string, string) (*template.Template, error) {
+			return nil, nil
+		},
+	}
+	h := &Handler{
+		Store:                store,
+		PrivateRegistryHosts: []string{"registry.internal.svc:5000"},
+		Logger:               zap.NewNop(),
+	}
+
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	router.POST("/api/v1/templates", h.CreateTemplate)
+
+	prefix := naming.TeamImageRepositoryPrefix("team-1")
+	body := []byte(`{
+		"template_id":"demo",
+		"spec":{
+			"mainContainer":{"image":"registry.internal.svc:5000/` + prefix + `/my-app:v1","resources":{"cpu":"1","memory":"1Gi"}},
+			"pool":{"minIdle":0,"maxIdle":1}
+		}
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d", http.StatusCreated, rec.Code)
+	}
+	if !store.createCalled {
+		t.Fatalf("expected create to be called")
+	}
+}
+
+func TestUpdateTemplate_RejectsPrivateSidecarImageFromDifferentTeam(t *testing.T) {
+	t.Parallel()
+
+	store := &testTemplateStore{
+		getTemplateFn: func(context.Context, string, string, string) (*template.Template, error) {
+			return &template.Template{TemplateID: "demo", Scope: naming.ScopeTeam, TeamID: "team-1"}, nil
+		},
+	}
+	h := &Handler{
+		Store:                store,
+		PrivateRegistryHosts: []string{"registry.internal.svc:5000"},
+		Logger:               zap.NewNop(),
+	}
+
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	router.PUT("/api/v1/templates/:id", h.UpdateTemplate)
+
+	body := []byte(`{
+		"spec":{
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"1Gi"}},
+			"pool":{"minIdle":0,"maxIdle":1},
+			"sidecars":[{"name":"helper","image":"registry.internal.svc:5000/t-other/helper:v1"}]
+		}
+	}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/templates/demo", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected status %d, got %d", http.StatusForbidden, rec.Code)
+	}
+	if store.updateCalled {
+		t.Fatalf("expected update not called for forbidden request")
+	}
+}
+
 func TestCreateTemplate_AllowsNetworkForRegularTeam(t *testing.T) {
 	t.Parallel()
 

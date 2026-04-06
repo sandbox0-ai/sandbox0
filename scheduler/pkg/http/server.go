@@ -118,16 +118,34 @@ func NewServer(
 		clusterCache:          make(map[string]*template.Cluster),
 	}
 	server.templateHandler = &templatehttp.Handler{
-		Store:           templateStore,
-		AllocationStore: allocationStore,
-		ClusterStore:    repo,
-		Reconciler:      reconciler,
-		Logger:          logger,
+		Store:                templateStore,
+		AllocationStore:      allocationStore,
+		ClusterStore:         repo,
+		Reconciler:           reconciler,
+		PrivateRegistryHosts: privateRegistryHosts(cfg.RegistryPushRegistry, cfg.RegistryPullRegistry),
+		Logger:               logger,
 	}
 
 	server.setupRoutes()
 
 	return server, nil
+}
+
+func privateRegistryHosts(values ...string) []string {
+	hosts := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		host := strings.TrimSpace(value)
+		if host == "" {
+			continue
+		}
+		if _, ok := seen[host]; ok {
+			continue
+		}
+		seen[host] = struct{}{}
+		hosts = append(hosts, host)
+	}
+	return hosts
 }
 
 // setupRoutes configures all HTTP routes

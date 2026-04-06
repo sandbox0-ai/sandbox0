@@ -5,7 +5,7 @@ Every Template references a container image. Sandbox0 supports two types of imag
 | Type | Description | Example |
 |------|-------------|---------|
 | **Public image** | Any image from a public registry | `python:3.12-slim`, `node:20-alpine` |
-| **Private image** | Your own image pushed to the Sandbox0 registry | `my-app:v1.2.3` |
+| **Private image** | Your own image pushed to the Sandbox0 registry | `registry.sandbox0-system.svc.cluster.local:5000/t-<team-key>/my-app:v1.2.3` |
 
 For private images, Sandbox0 provides a built-in registry and a CLI workflow to build and push images securely. Authentication is handled automatically — your images are protected and only accessible to your team.
 
@@ -74,7 +74,7 @@ Both methods use your local Docker daemon to build the image. Make sure Docker i
 
 ### Step 2 — Push to the Sandbox0 Registry
 
-Push the locally built image to the Sandbox0 registry. The CLI automatically retrieves short-lived credentials from the API:
+Push the locally built image to the Sandbox0 registry. The CLI automatically retrieves short-lived credentials from the API and scopes the push to your team prefix:
 
 ```bash
 s0 template image push my-app:v1.2.3 -t my-app:v1.2.3
@@ -101,8 +101,8 @@ This reference is the in-cluster pull address and may differ from the external p
 ```bash
 $ s0 template image push my-app:v1.2.3 -t my-app:v1.2.3
 ...
-Image pushed successfully: 127.0.0.1:30500/my-app:v1.2.3
-Template image reference: registry.sandbox0-system.svc.cluster.local:5000/my-app:v1.2.3
+Image pushed successfully: 127.0.0.1:30500/t-<team-key>/my-app:v1.2.3
+Template image reference: registry.sandbox0-system.svc.cluster.local:5000/t-<team-key>/my-app:v1.2.3
 ```
 
 Use that `Template image reference` value:
@@ -110,7 +110,7 @@ Use that `Template image reference` value:
 ```yaml
 spec:
     mainContainer:
-        image: registry.sandbox0-system.svc.cluster.local:5000/my-app:v1.2.3
+        image: registry.sandbox0-system.svc.cluster.local:5000/t-<team-key>/my-app:v1.2.3
         resources:
             cpu: "2"
             memory: 4Gi
@@ -143,7 +143,7 @@ s0 template image push my-app:v1.2.3 -t my-app:v1.2.3
 cat > template.yaml << 'EOF'
 spec:
     mainContainer:
-        image: registry.sandbox0-system.svc.cluster.local:5000/my-app:v1.2.3
+        image: registry.sandbox0-system.svc.cluster.local:5000/t-<team-key>/my-app:v1.2.3
         resources:
             cpu: "2"
             memory: 4Gi
@@ -167,7 +167,7 @@ Sandbox0 supports multiple container registry backends. The registry provider is
 | Provider | Backend | Notes |
 |----------|---------|-------|
 | `builtin` | Self-hosted Docker Registry v2 | Default. Deployed and managed within the cluster. |
-| `aws` | Amazon ECR | Short-lived tokens (12h). Requires region configuration. |
+| `aws` | Amazon ECR | Short-lived tokens (12h). Can optionally use `AssumeRole` + session policy for team-scoped pushes. |
 | `gcp` | Google Artifact Registry / GCR | Uses service account credentials. |
 | `azure` | Azure Container Registry | Uses ACR credentials. |
 | `aliyun` | Alibaba Cloud Container Registry | Uses Aliyun ACR credentials. |

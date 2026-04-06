@@ -501,6 +501,10 @@ spec:
                   aws:
                     description: AWS configures AWS registry integration.
                     properties:
+                      assumeRoleArn:
+                        description: AssumeRoleARN optionally scopes registry pushes
+                          through an assumed IAM role.
+                        type: string
                       credentialsSecret:
                         description: CredentialsSecret references AWS credentials
                           for short-lived tokens.
@@ -524,6 +528,10 @@ spec:
                         required:
                         - name
                         type: object
+                      externalId:
+                        description: ExternalID is passed to STS AssumeRole when assumeRoleArn
+                          is configured.
+                        type: string
                       pullSecret:
                         description: PullSecret references the dockerconfigjson secret
                           to use for image pulls.

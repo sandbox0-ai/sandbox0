@@ -29,6 +29,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/registry"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
@@ -235,6 +236,10 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 
 	if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {
 		cfg.DatabaseURL = dsn
+	}
+	if registryConfig := registry.ResolveRegistryConfig(infra); registryConfig != nil {
+		cfg.RegistryPushRegistry = registryConfig.PushRegistry
+		cfg.RegistryPullRegistry = registryConfig.PullRegistry
 	}
 
 	return cfg, nil

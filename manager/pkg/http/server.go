@@ -110,11 +110,16 @@ func NewServer(
 		publicRegionID:          publicRegionID,
 	}
 	if templateStoreEnabled {
+		registryHosts := []string(nil)
+		if templateService != nil {
+			registryHosts = templateService.RegistryHosts()
+		}
 		server.templateHandler = &templatehttp.Handler{
-			Store:         templateStore,
-			Reconciler:    templateReconciler,
-			StatsProvider: &clusterTemplateStatsProvider{clusterService: clusterService},
-			Logger:        logger,
+			Store:                templateStore,
+			Reconciler:           templateReconciler,
+			StatsProvider:        &clusterTemplateStatsProvider{clusterService: clusterService},
+			PrivateRegistryHosts: registryHosts,
+			Logger:               logger,
 		}
 	}
 

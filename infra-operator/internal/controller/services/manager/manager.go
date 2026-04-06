@@ -323,6 +323,8 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 				cfg.Registry.AWS = &apiconfig.RegistryAWSConfig{
 					Region:           infra.Spec.Registry.AWS.Region,
 					RegistryID:       infra.Spec.Registry.AWS.RegistryID,
+					AssumeRoleARN:    infra.Spec.Registry.AWS.AssumeRoleARN,
+					ExternalID:       infra.Spec.Registry.AWS.ExternalID,
 					AccessKeySecret:  infra.Spec.Registry.AWS.CredentialsSecret.Name,
 					AccessKeyKey:     infra.Spec.Registry.AWS.CredentialsSecret.AccessKeyKey,
 					SecretKeyKey:     infra.Spec.Registry.AWS.CredentialsSecret.SecretKeyKey,

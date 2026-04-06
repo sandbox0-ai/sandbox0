@@ -15,7 +15,8 @@ type azureProvider struct {
 	secrets secretReader
 }
 
-func (p *azureProvider) GetPushCredentials(ctx context.Context, teamID string) (*Credential, error) {
+func (p *azureProvider) GetPushCredentials(ctx context.Context, req PushCredentialsRequest) (*Credential, error) {
+	// TODO: add team-scoped ephemeral credentials similar to AWS AssumeRole + session policy.
 	registry := normalizeRegistryHost(p.cfg.Registry)
 	if registry == "" {
 		return nil, fmt.Errorf("azure registry is required")

@@ -1,11 +1,13 @@
 package http
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -27,7 +29,7 @@ func TestRegistryCredentialsRequireTemplateWritePermission(t *testing.T) {
 	defer cleanup()
 
 	t.Run("forbidden without template write", func(t *testing.T) {
-		status := doInternalRegistryRequest(t, baseURL, newInternalRegistryToken(t, incomingGen, gatewayauthn.PermTemplateRead))
+		status := doInternalRegistryRequest(t, baseURL, newInternalRegistryToken(t, incomingGen, gatewayauthn.PermTemplateRead), "")
 		if status != http.StatusForbidden {
 			t.Fatalf("status = %d, want %d", status, http.StatusForbidden)
 		}
@@ -37,7 +39,7 @@ func TestRegistryCredentialsRequireTemplateWritePermission(t *testing.T) {
 	})
 
 	t.Run("allowed with template write", func(t *testing.T) {
-		status := doInternalRegistryRequest(t, baseURL, newInternalRegistryToken(t, incomingGen, gatewayauthn.PermTemplateWrite))
+		status := doInternalRegistryRequest(t, baseURL, newInternalRegistryToken(t, incomingGen, gatewayauthn.PermTemplateWrite), `{"targetImage":"my-app:v1"}`)
 		if status != http.StatusOK {
 			t.Fatalf("status = %d, want %d", status, http.StatusOK)
 		}
@@ -53,15 +55,25 @@ func TestRegistryCredentialsRequireTemplateWritePermission(t *testing.T) {
 		if got := managerSpy.internalToken(); got == "" {
 			t.Fatal("expected forwarded internal token for manager")
 		}
+		if got := managerSpy.body(); got != `{"targetImage":"my-app:v1"}` {
+			t.Fatalf("manager body = %q, want %q", got, `{"targetImage":"my-app:v1"}`)
+		}
 	})
 }
 
-func doInternalRegistryRequest(t *testing.T, baseURL, token string) int {
+func doInternalRegistryRequest(t *testing.T, baseURL, token, body string) int {
 	t.Helper()
 
-	req, err := http.NewRequest(http.MethodPost, baseURL+"/api/v1/registry/credentials", nil)
+	var bodyReader io.Reader
+	if strings.TrimSpace(body) != "" {
+		bodyReader = strings.NewReader(body)
+	}
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/api/v1/registry/credentials", bodyReader)
 	if err != nil {
 		t.Fatalf("create request: %v", err)
+	}
+	if bodyReader != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set(internalauth.DefaultTokenHeader, token)
 
@@ -80,15 +92,20 @@ type registryManagerRequestSpy struct {
 	pathV string
 	teamV string
 	token string
+	bodyV string
 }
 
 func (s *registryManagerRequestSpy) record(r *http.Request) {
+	data, _ := io.ReadAll(r.Body)
+	r.Body = io.NopCloser(bytes.NewReader(data))
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
 	s.pathV = r.URL.Path
 	s.teamV = r.Header.Get(internalauth.TeamIDHeader)
 	s.token = r.Header.Get(internalauth.DefaultTokenHeader)
+	s.bodyV = string(data)
 }
 
 func (s *registryManagerRequestSpy) callCount() int {
@@ -113,6 +130,12 @@ func (s *registryManagerRequestSpy) internalToken() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.token
+}
+
+func (s *registryManagerRequestSpy) body() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.bodyV
 }
 
 func newRegistryRouteTestServer(t *testing.T) (string, *internalauth.Generator, *registryManagerRequestSpy, func()) {

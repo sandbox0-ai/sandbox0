@@ -291,6 +291,8 @@ type RegistryConfig struct {
 type RegistryAWSConfig struct {
 	Region           string `yaml:"region" json:"-"`
 	RegistryID       string `yaml:"registry_id" json:"-"`
+	AssumeRoleARN    string `yaml:"assume_role_arn" json:"-"`
+	ExternalID       string `yaml:"external_id" json:"-"`
 	AccessKeySecret  string `yaml:"access_key_secret" json:"-"`
 	AccessKeyKey     string `yaml:"access_key_key" json:"-"`
 	SecretKeyKey     string `yaml:"secret_key_key" json:"-"`

@@ -77,10 +77,12 @@ func TestApplyRegistryConfigAWS(t *testing.T) {
 			Registry: &infrav1alpha1.RegistryConfig{
 				Provider: infrav1alpha1.RegistryProviderAWS,
 				AWS: &infrav1alpha1.AWSRegistryConfig{
-					Registry:   "123456789012.dkr.ecr.us-east-1.amazonaws.com",
-					Region:     "us-east-1",
-					RegistryID: "123456789012",
-					PullSecret: infrav1alpha1.DockerConfigSecretRef{Name: "ecr-pull"},
+					Registry:      "123456789012.dkr.ecr.us-east-1.amazonaws.com",
+					Region:        "us-east-1",
+					RegistryID:    "123456789012",
+					AssumeRoleARN: "arn:aws:iam::123456789012:role/sandbox0-ecr-broker",
+					ExternalID:    "sandbox0-test",
+					PullSecret:    infrav1alpha1.DockerConfigSecretRef{Name: "ecr-pull"},
 					CredentialsSecret: infrav1alpha1.AWSRegistryCredentialsSecret{
 						Name:         "aws-credentials",
 						AccessKeyKey: "accessKeyId",
@@ -105,6 +107,12 @@ func TestApplyRegistryConfigAWS(t *testing.T) {
 	}
 	if cfg.Registry.AWS.AccessKeyID != "${S0_REGISTRY_AWS_ACCESS_KEY_ID}" {
 		t.Fatalf("unexpected access key placeholder: %s", cfg.Registry.AWS.AccessKeyID)
+	}
+	if cfg.Registry.AWS.AssumeRoleARN != "arn:aws:iam::123456789012:role/sandbox0-ecr-broker" {
+		t.Fatalf("unexpected assume role arn: %s", cfg.Registry.AWS.AssumeRoleARN)
+	}
+	if cfg.Registry.AWS.ExternalID != "sandbox0-test" {
+		t.Fatalf("unexpected external id: %s", cfg.Registry.AWS.ExternalID)
 	}
 	if len(envVars) != 2 {
 		t.Fatalf("unexpected env vars count: %d", len(envVars))

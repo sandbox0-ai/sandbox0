@@ -560,6 +560,14 @@ type AWSRegistryConfig struct {
 	// +optional
 	Registry string `json:"registry,omitempty"`
 
+	// AssumeRoleARN optionally scopes registry pushes through an assumed IAM role.
+	// +optional
+	AssumeRoleARN string `json:"assumeRoleArn,omitempty"`
+
+	// ExternalID is passed to STS AssumeRole when assumeRoleArn is configured.
+	// +optional
+	ExternalID string `json:"externalId,omitempty"`
+
 	// Region specifies the AWS region.
 	Region string `json:"region"`
 

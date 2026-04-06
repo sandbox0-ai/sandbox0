@@ -4,16 +4,15 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"regexp"
 	"strings"
-)
 
-var normalizedRegionIDPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)+$`)
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/tenantdir"
+)
 
 // NewKeyValue creates a new region-routable API key value.
 func NewKeyValue(regionID string) (string, error) {
 	normalizedRegionID := strings.TrimSpace(regionID)
-	if !normalizedRegionIDPattern.MatchString(normalizedRegionID) {
+	if !tenantdir.IsNormalizedRegionID(normalizedRegionID) {
 		return "", ErrInvalidKey
 	}
 
@@ -31,7 +30,7 @@ func ParseRegionIDFromKey(keyValue string) (string, error) {
 	if len(parts) != 3 || parts[0] != "s0" || parts[1] == "" || parts[2] == "" {
 		return "", ErrInvalidKey
 	}
-	if !normalizedRegionIDPattern.MatchString(parts[1]) {
+	if !tenantdir.IsNormalizedRegionID(parts[1]) {
 		return "", ErrInvalidKey
 	}
 	return parts[1], nil

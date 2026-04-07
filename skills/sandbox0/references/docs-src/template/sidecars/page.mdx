@@ -9,7 +9,7 @@ This is the right model for template-owned helper processes such as:
 - a local proxy or daemon
 - a cache warmer or bootstrap helper
 
-All containers in one template pod share the same network namespace and can coordinate over localhost and shared volumes.
+All containers in one template pod share the same network namespace. When a sidecar also needs access to pod-shared storage, declare `spec.sharedVolumes` on the template and reference them from `sidecars[*].mounts`.
 
 ## Public API Shape
 
@@ -22,15 +22,65 @@ The public HTTP API and all three SDKs expose the same sidecar schema under `spe
 | `command` | no | Entrypoint override. |
 | `args` | no | Additional process arguments. |
 | `env` | no | Sidecar-specific environment variables. |
-| `resources` | no | CPU and memory request/limit pair used by Sandbox0's template schema. |
-| `securityContext` | no | Public subset: `runAsUser`, `runAsGroup`, `capabilities.drop`. |
+| `resources` | yes | CPU and memory request/limit pair used by Sandbox0's template schema. |
+| `mounts` | no | Shared-volume mount references for this sidecar. |
 | `readinessProbe` | no | Readiness gate. Exactly one handler is required when set. |
 | `livenessProbe` | no | Liveness probe. Exactly one handler is required when set. |
 | `startupProbe` | no | Startup probe. Exactly one handler is required when set. |
 
+If a sidecar needs pod-shared storage, define it once under `spec.sharedVolumes`:
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | yes | Logical shared-volume name used by `sidecars[*].mounts[*].name`. |
+| `sandboxVolumeId` | yes | Existing SandboxVolume ID to attach. |
+| `mountPath` | yes | Mount path used by the main container. |
+| `cacheSize` | no | Optional cache size override. |
+| `prefetch` | no | Optional prefetch override. |
+| `bufferSize` | no | Optional buffer-size override. |
+| `writeback` | no | Optional writeback flag. |
+
 <Callout variant="info">
-The public OpenAPI contract does not expose raw Kubernetes-only sidecar fields such as `imagePullPolicy` or privileged security settings. Document and depend on the public schema above when using the HTTP API or SDKs.
+`sharedVolumes` only matters when more than one container in the template needs the same mounted volume. If the main container is the only consumer, regular claim-time mounts are usually enough.
 </Callout>
+
+---
+
+## Shared Volumes For Sidecars
+
+`spec.sharedVolumes` is template-level. Each entry defines one pod-shared SandboxVolume attachment.
+
+- The main container sees the shared volume at `sharedVolumes[*].mountPath`.
+- A sidecar sees the same volume only when it adds a matching `mounts[*].name` entry.
+- Each sidecar can choose a different `mounts[*].mountPath` for the same shared volume.
+
+Example:
+
+```yaml
+spec:
+    mainContainer:
+        image: ubuntu:24.04
+        resources:
+            cpu: "1"
+            memory: 4Gi
+    sharedVolumes:
+        - name: workspace
+          sandboxVolumeId: vol_123
+          mountPath: /workspace/shared
+          writeback: true
+    sidecars:
+        - name: codex
+          image: ghcr.io/example/codex:latest
+          resources:
+              cpu: "250m"
+              memory: 1Gi
+          command: ["sh", "-lc", "/app/start-codex.sh"]
+          mounts:
+              - name: workspace
+                mountPath: /shared
+```
+
+In this example, the main container uses `/workspace/shared` while the sidecar uses `/shared`, but both paths point at the same SandboxVolume.
 
 ---
 
@@ -50,14 +100,24 @@ spec:
         image: ubuntu:24.04
         resources:
             cpu: "1"
-            memory: 2Gi
+            memory: 4Gi
+    sharedVolumes:
+        - name: workspace
+          sandboxVolumeId: vol_123
+          mountPath: /workspace/shared
     sidecars:
         - name: codex
           image: ghcr.io/example/codex:latest
+          resources:
+              cpu: "250m"
+              memory: 1Gi
           command: ["sh", "-lc", "/app/start-codex.sh"]
+          mounts:
+              - name: workspace
+                mountPath: /shared
           readinessProbe:
               exec:
-                  command: ["test", "-S", "/tmp/codex.sock"]
+                  command: ["test", "-S", "/shared/codex.sock"]
               initialDelaySeconds: 1
               periodSeconds: 2
               failureThreshold: 1
@@ -66,7 +126,7 @@ spec:
         maxIdle: 10
 ```
 
-In this example, the pod is not counted as ready warm capacity until the sidecar creates `/tmp/codex.sock` and the readiness probe passes.
+In this example, the pod is not counted as ready warm capacity until the sidecar creates `/shared/codex.sock` and the readiness probe passes.
 
 ---
 
@@ -77,39 +137,35 @@ In this example, the pod is not counted as ready warm capacity until the sidecar
     {
       label: "Go",
       language: "go",
-      code: `tpl, err := client.CreateTemplate(ctx, apispec.TemplateCreateRequest{
-    TemplateID: "my-codex-env",
-    Spec: apispec.SandboxTemplateSpec{
-        MainContainer: apispec.NewOptContainerSpec(apispec.ContainerSpec{
-            Image: "ubuntu:24.04",
-            Resources: apispec.ResourceQuota{
-                CPU:    apispec.NewOptString("1"),
-                Memory: apispec.NewOptString("4Gi"),
-            },
-        }),
-        Sidecars: []apispec.SidecarContainerSpec{
-            {
-                Name:    "codex",
-                Image:   "ghcr.io/example/codex:latest",
-                Command: []string{"sh", "-lc", "/app/start-codex.sh"},
-                Resources: apispec.ResourceQuota{
-                    CPU:    apispec.NewOptString("500m"),
-                    Memory: apispec.NewOptString("2Gi"),
-                },
-                ReadinessProbe: apispec.NewOptProbe(apispec.Probe{
-                    Exec:                apispec.NewOptExecAction(apispec.ExecAction{Command: []string{"test", "-S", "/tmp/codex.sock"}}),
-                    InitialDelaySeconds: apispec.NewOptInt32(1),
-                    PeriodSeconds:       apispec.NewOptInt32(2),
-                    FailureThreshold:    apispec.NewOptInt32(1),
-                }),
-            },
-        },
-        Pool: apispec.NewOptPoolStrategy(apispec.PoolStrategy{
-            MinIdle: 2,
-            MaxIdle: 10,
-        }),
-    },
-})
+      code: `tpl, err := client.CreateTemplate(ctx, sandbox0.NewTemplateCreateRequest(
+    "my-codex-env",
+    sandbox0.TemplateMainContainer("ubuntu:24.04", "1", "4Gi"),
+    sandbox0.WithTemplateSharedVolume(
+        sandbox0.TemplateSharedVolume(
+            "workspace",
+            "vol_123",
+            "/workspace/shared",
+            sandbox0.WithTemplateSharedVolumeWriteback(true),
+        ),
+    ),
+    sandbox0.WithTemplateSidecar(
+        sandbox0.TemplateSidecar(
+            "codex",
+            "ghcr.io/example/codex:latest",
+            "250m",
+            "1Gi",
+            sandbox0.WithTemplateSidecarCommand("sh", "-lc", "/app/start-codex.sh"),
+            sandbox0.WithTemplateSidecarMount(sandbox0.TemplateMount("workspace", "/shared")),
+            sandbox0.WithTemplateSidecarReadinessProbe(apispec.Probe{
+                Exec:                apispec.NewOptExecAction(apispec.ExecAction{Command: []string{"test", "-S", "/shared/codex.sock"}}),
+                InitialDelaySeconds: apispec.NewOptInt32(1),
+                PeriodSeconds:       apispec.NewOptInt32(2),
+                FailureThreshold:    apispec.NewOptInt32(1),
+            }),
+        ),
+    ),
+    sandbox0.WithTemplatePool(apispec.PoolStrategy{MinIdle: 2, MaxIdle: 10}),
+))
 if err != nil {
     log.Fatal(err)
 }
@@ -119,63 +175,73 @@ fmt.Printf("Template created: %s\\n", tpl.TemplateID)`
       label: "Python",
       language: "python",
       code: `from sandbox0.apispec.models.exec_action import ExecAction
+from sandbox0.apispec.models.pool_strategy import PoolStrategy
 from sandbox0.apispec.models.probe import Probe
-from sandbox0.apispec.models.sandbox_template_spec import SandboxTemplateSpec
-from sandbox0.apispec.models.sidecar_container_spec import SidecarContainerSpec
-from sandbox0.apispec.models.template_create_request import TemplateCreateRequest
+from sandbox0.template_helpers import (
+    container,
+    mount,
+    resources,
+    shared_volume,
+    sidecar,
+    template_create_request,
+    template_spec,
+)
 
-tpl = client.create_template(TemplateCreateRequest(
-    template_id="my-codex-env",
-    spec=SandboxTemplateSpec.from_dict({
-        "mainContainer": {
-            "image": "ubuntu:24.04",
-            "resources": {"cpu": "1", "memory": "4Gi"},
-        },
-        "sidecars": [
-            SidecarContainerSpec(
-                name="codex",
-                image="ghcr.io/example/codex:latest",
-                command=["sh", "-lc", "/app/start-codex.sh"],
-                resources={"cpu": "500m", "memory": "2Gi"},
-                readiness_probe=Probe(
-                    exec_=ExecAction(command=["test", "-S", "/tmp/codex.sock"]),
-                    initial_delay_seconds=1,
-                    period_seconds=2,
-                    failure_threshold=1,
-                ),
-            ).to_dict()
-        ],
-        "pool": {"minIdle": 2, "maxIdle": 10},
-    }),
-))
+tpl = client.create_template(
+    template_create_request(
+        "my-codex-env",
+        template_spec(
+            container("ubuntu:24.04", resources("1", "4Gi")),
+            shared_volumes=[
+                shared_volume("workspace", "vol_123", "/workspace/shared", writeback=True)
+            ],
+            sidecars=[
+                sidecar(
+                    "codex",
+                    "ghcr.io/example/codex:latest",
+                    resources("250m", "1Gi"),
+                    command=["sh", "-lc", "/app/start-codex.sh"],
+                    mounts=[mount("workspace", "/shared")],
+                    readiness_probe=Probe(
+                        exec_=ExecAction(command=["test", "-S", "/shared/codex.sock"]),
+                        initial_delay_seconds=1,
+                        period_seconds=2,
+                        failure_threshold=1,
+                    ),
+                )
+            ],
+            pool=PoolStrategy(min_idle=2, max_idle=10),
+        ),
+    )
+)
 print(f"Template created: {tpl.template_id}")`
     },
     {
       label: "TypeScript",
       language: "typescript",
-      code: `const tpl = await client.templates.create({
-    templateId: "my-codex-env",
-    spec: {
-        mainContainer: {
-            image: "ubuntu:24.04",
-            resources: { cpu: "1", memory: "2Gi" },
-        },
-        sidecars: [
-            {
-                name: "codex",
-                image: "ghcr.io/example/codex:latest",
-                command: ["sh", "-lc", "/app/start-codex.sh"],
-                readinessProbe: {
-                    exec: { command: ["test", "-S", "/tmp/codex.sock"] },
-                    initialDelaySeconds: 1,
-                    periodSeconds: 2,
-                    failureThreshold: 1,
-                },
-            },
-        ],
-        pool: { minIdle: 2, maxIdle: 10 },
-    },
-});
+      code: `const tpl = await client.templates.create(
+    templateCreateRequest(
+        "my-codex-env",
+        templateSpec(container("ubuntu:24.04", resources("1", "4Gi")), {
+            sharedVolumes: [
+                sharedVolume("workspace", "vol_123", "/workspace/shared", { writeback: true }),
+            ],
+            sidecars: [
+                sidecar("codex", "ghcr.io/example/codex:latest", resources("250m", "1Gi"), {
+                    command: ["sh", "-lc", "/app/start-codex.sh"],
+                    mounts: [mount("workspace", "/shared")],
+                    readinessProbe: {
+                        exec: { command: ["test", "-S", "/shared/codex.sock"] },
+                        initialDelaySeconds: 1,
+                        periodSeconds: 2,
+                        failureThreshold: 1,
+                    },
+                }),
+            ],
+            pool: { minIdle: 2, maxIdle: 10 },
+        }),
+    ),
+);
 console.log("Template created:", tpl.templateId);`
     },
     {
@@ -187,14 +253,25 @@ spec:
         image: ubuntu:24.04
         resources:
             cpu: "1"
-            memory: 2Gi
+            memory: 4Gi
+    sharedVolumes:
+        - name: workspace
+          sandboxVolumeId: vol_123
+          mountPath: /workspace/shared
+          writeback: true
     sidecars:
         - name: codex
           image: ghcr.io/example/codex:latest
+          resources:
+              cpu: "250m"
+              memory: 1Gi
           command: ["sh", "-lc", "/app/start-codex.sh"]
+          mounts:
+              - name: workspace
+                mountPath: /shared
           readinessProbe:
               exec:
-                  command: ["test", "-S", "/tmp/codex.sock"]
+                  command: ["test", "-S", "/shared/codex.sock"]
               initialDelaySeconds: 1
               periodSeconds: 2
               failureThreshold: 1
@@ -212,9 +289,9 @@ s0 template create --id my-codex-env --spec-file template.yaml`
 
 ## Validation Notes
 
-- `name` and `image` are required for every sidecar.
+- `name`, `image`, and `resources` are required for every sidecar.
+- `mounts[*].name` must refer to a declared `sharedVolumes[*].name`.
 - `readinessProbe`, `livenessProbe`, and `startupProbe` must define exactly one handler when present.
-- Regular team-owned templates can use standard sidecar fields such as `command`, `args`, `env`, `resources`, and probes.
 - Private image references are still checked against team ownership rules, just like `spec.mainContainer.image`.
 
 ## Next Steps

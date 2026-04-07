@@ -508,7 +508,7 @@ func TestListSandboxesRoutesTeamScopedToken(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"success":true,"data":{"sandboxes":[{"id":"rs-home-team-a-demo-abcde","template_id":"tmpl-a","status":"running","paused":false,"created_at":"2026-04-07T00:00:00Z","expires_at":"2026-04-07T01:00:00Z"}],"count":1,"has_more":false}}`))
+		_, _ = w.Write([]byte(`{"success":true,"data":{"sandboxes":[{"id":"rs-home-team-a-demo-abcde","template_id":"tmpl-a","status":"running","paused":false,"created_at":"2026-04-07T00:00:00Z","expires_at":"2026-04-07T01:00:00Z","hard_expires_at":"2026-04-07T02:00:00Z"}],"count":1,"has_more":false}}`))
 	}))
 	defer cluster.Close()
 
@@ -571,7 +571,8 @@ func TestListSandboxesRoutesTeamScopedToken(t *testing.T) {
 		Success bool `json:"success"`
 		Data    struct {
 			Sandboxes []struct {
-				ID string `json:"id"`
+				ID            string `json:"id"`
+				HardExpiresAt string `json:"hard_expires_at"`
 			} `json:"sandboxes"`
 			Count int `json:"count"`
 		} `json:"data"`
@@ -584,6 +585,9 @@ func TestListSandboxesRoutesTeamScopedToken(t *testing.T) {
 	}
 	if body.Data.Count != 1 || len(body.Data.Sandboxes) != 1 {
 		t.Fatalf("sandboxes = %d/%d, want 1/1", len(body.Data.Sandboxes), body.Data.Count)
+	}
+	if body.Data.Sandboxes[0].HardExpiresAt != "2026-04-07T02:00:00Z" {
+		t.Fatalf("hard_expires_at = %q, want 2026-04-07T02:00:00Z", body.Data.Sandboxes[0].HardExpiresAt)
 	}
 }
 

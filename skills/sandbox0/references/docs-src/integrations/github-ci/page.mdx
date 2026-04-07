@@ -1,0 +1,134 @@
+# GitHub CI
+
+GitHub Actions can run `s0` non-interactively for common Sandbox0 automation flows such as image build/push, template updates, and sandbox orchestration.
+
+This page covers the recommended integration shape:
+
+- use the official `setup-s0` GitHub Action or the official reusable workflow
+- authenticate with a Sandbox0 API key through GitHub Secrets
+- build images with Docker on the runner
+- push team-scoped images with short-lived registry credentials issued by Sandbox0
+
+## Required secrets
+
+Store the following in GitHub repository, organization, or environment secrets:
+
+| Secret | Purpose |
+|------|-------------|
+| `SANDBOX0_BASE_URL` | Sandbox0 API entrypoint, for example `https://api.sandbox0.ai` |
+| `SANDBOX0_TOKEN` | Sandbox0 service API key used by the workflow |
+
+For image build and push workflows, create a dedicated service API key with the smallest role that satisfies the workflow.
+
+For registry push only, prefer the `builder` role. It is intended for CI automation that needs Sandbox0 registry access without broader sandbox or volume write permissions.
+
+## Runner requirements
+
+Sandbox0 does not build container images remotely.
+
+`s0 template image build` uses the local Docker daemon on the GitHub Actions runner, and `s0 template image push` uses Docker again after fetching short-lived registry credentials from Sandbox0.
+
+That means your workflow should run on a runner with Docker available. GitHub-hosted Ubuntu runners are the easiest default.
+
+## Official reusable workflow
+
+For the common image build and push path, use the official reusable workflow:
+
+```yaml
+name: sandbox0-image
+
+on:
+    workflow_dispatch:
+    push:
+        branches: [main]
+
+jobs:
+    build-and-push:
+        uses: sandbox0-ai/s0/.github/workflows/template-image.yml@main
+        with:
+            api-url: ${{ vars.SANDBOX0_BASE_URL }}
+            image-tag: my-app:${{ github.sha }}
+            context: .
+            dockerfile: Dockerfile
+        secrets:
+            sandbox0_token: ${{ secrets.SANDBOX0_TOKEN }}
+```
+
+The reusable workflow installs `s0`, verifies Docker, builds the image locally on the runner, pushes it with short-lived Sandbox0 registry credentials, and exposes the final template image reference as a workflow output.
+
+## Official setup action
+
+Use the setup action when you need custom GitHub Actions logic beyond the bundled reusable workflow:
+
+```yaml
+name: sandbox0-image
+
+on:
+    workflow_dispatch:
+    push:
+        branches: [main]
+
+jobs:
+    build-and-push:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v6
+
+            - uses: sandbox0-ai/s0/.github/actions/setup-s0@main
+              with:
+                  api-url: ${{ vars.SANDBOX0_BASE_URL }}
+                  token: ${{ secrets.SANDBOX0_TOKEN }}
+
+            - name: Build image
+              run: s0 template image build . -t my-app:${GITHUB_SHA}
+
+            - name: Push image to Sandbox0 registry
+              run: s0 template image push my-app:${GITHUB_SHA} -t my-app:${GITHUB_SHA}
+```
+
+Pin `@main` to a release tag after the first `s0` release that includes these GitHub Actions assets.
+
+The push step obtains temporary registry credentials from Sandbox0 automatically. You do not need to manage a long-lived `docker login` secret for the Sandbox0 registry.
+
+## How image push works
+
+`s0 template image push` performs these steps:
+
+1. Authenticates to Sandbox0 with `SANDBOX0_TOKEN`
+2. Calls the registry credentials endpoint for a short-lived push credential
+3. Tags the local image with the team-scoped push registry prefix
+4. Pushes the image with Docker
+5. Prints the template image reference that Sandbox0 should use at runtime
+
+This keeps registry credentials short-lived while leaving the build itself on the CI runner.
+
+## Using the pushed image in a template
+
+After a successful push, use the printed `Template image reference` value in your template spec.
+
+```yaml
+spec:
+    mainContainer:
+        image: registry.sandbox0-system.svc.cluster.local:5000/t-<team-key>/my-app:${GITHUB_SHA}
+        resources:
+            cpu: "2"
+            memory: 4Gi
+    pool:
+        minIdle: 1
+        maxIdle: 4
+```
+
+If your workflow also updates templates, it will need a role with template write permission in addition to registry push permission.
+
+## Security guidance
+
+- Prefer a dedicated service API key for GitHub Actions rather than a human access token.
+- Prefer GitHub environment secrets when deployments should require approvals or branch restrictions.
+- Use the narrowest Sandbox0 role that can complete the workflow.
+- Rotate service API keys on a schedule that matches your organization policy.
+
+## Related pages
+
+- [Custom Images](/docs/template/images)
+- [Template Configuration](/docs/template/configuration)
+- [Self-Hosted Install](/docs/self-hosted/install)

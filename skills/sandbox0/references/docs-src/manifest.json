@@ -90,6 +90,20 @@
       ]
     },
     {
+      "label": "INTEGRATIONS",
+      "slug": "integrations",
+      "pages": [
+        {
+          "slug": "",
+          "title": "Overview"
+        },
+        {
+          "slug": "github-ci",
+          "title": "GitHub CI"
+        }
+      ]
+    },
+    {
       "label": "VOLUME",
       "slug": "volume",
       "pages": [

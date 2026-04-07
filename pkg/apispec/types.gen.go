@@ -18,6 +18,7 @@ const (
 // Defines values for AddTeamMemberRequestRole.
 const (
 	AddTeamMemberRequestRoleAdmin     AddTeamMemberRequestRole = "admin"
+	AddTeamMemberRequestRoleBuilder   AddTeamMemberRequestRole = "builder"
 	AddTeamMemberRequestRoleDeveloper AddTeamMemberRequestRole = "developer"
 	AddTeamMemberRequestRoleViewer    AddTeamMemberRequestRole = "viewer"
 )
@@ -482,6 +483,7 @@ const (
 // Defines values for UpdateTeamMemberRequestRole.
 const (
 	UpdateTeamMemberRequestRoleAdmin     UpdateTeamMemberRequestRole = "admin"
+	UpdateTeamMemberRequestRoleBuilder   UpdateTeamMemberRequestRole = "builder"
 	UpdateTeamMemberRequestRoleDeveloper UpdateTeamMemberRequestRole = "developer"
 	UpdateTeamMemberRequestRoleViewer    UpdateTeamMemberRequestRole = "viewer"
 )

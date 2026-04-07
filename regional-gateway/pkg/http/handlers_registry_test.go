@@ -17,14 +17,15 @@ import (
 	"go.uber.org/zap"
 )
 
-func TestRegistryCredentialsRequireTemplateWritePermission(t *testing.T) {
+func TestRegistryCredentialsRequireRegistryWritePermission(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	server, registrySpy, cleanup := newEdgeRegistryRouteTestServer(t)
 	defer cleanup()
 
-	t.Run("forbidden without template write", func(t *testing.T) {
-		tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "developer"}})
+	t.Run("forbidden without registry write", func(t *testing.T) {
+		registrySpy.reset()
+		tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "viewer"}})
 		if err != nil {
 			t.Fatalf("issue token pair: %v", err)
 		}
@@ -44,8 +45,32 @@ func TestRegistryCredentialsRequireTemplateWritePermission(t *testing.T) {
 		}
 	})
 
-	t.Run("allowed with template write", func(t *testing.T) {
-		tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "admin"}})
+	t.Run("allowed with builder role", func(t *testing.T) {
+		registrySpy.reset()
+		tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "builder"}})
+		if err != nil {
+			t.Fatalf("issue token pair: %v", err)
+		}
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/registry/credentials", strings.NewReader(`{"targetImage":"my-app:v1"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+		req.Header.Set(internalauth.TeamIDHeader, "team-1")
+
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+		}
+		if got := registrySpy.callCount(); got != 1 {
+			t.Fatalf("registry call count = %d, want 1", got)
+		}
+	})
+
+	t.Run("allowed with developer role", func(t *testing.T) {
+		registrySpy.reset()
+		tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "developer"}})
 		if err != nil {
 			t.Fatalf("issue token pair: %v", err)
 		}
@@ -73,7 +98,8 @@ func TestRegistryCredentialsRequireTemplateWritePermission(t *testing.T) {
 	})
 
 	t.Run("invalid json is rejected", func(t *testing.T) {
-		tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "admin"}})
+		registrySpy.reset()
+		tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "builder"}})
 		if err != nil {
 			t.Fatalf("issue token pair: %v", err)
 		}
@@ -115,6 +141,12 @@ func (s *registryProviderSpy) callCount() int {
 	return len(s.requests)
 }
 
+func (s *registryProviderSpy) reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.requests = nil
+}
+
 func (s *registryProviderSpy) teamID() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -149,7 +181,7 @@ func newEdgeRegistryRouteTestServer(t *testing.T) (*Server, *registryProviderSpy
 	api := server.router.Group("/api")
 	api.Use(server.authMiddleware.Authenticate())
 	registry := api.Group("/v1/registry")
-	registry.POST("/credentials", server.authMiddleware.RequirePermission(authn.PermTemplateWrite), server.getRegistryCredentials)
+	registry.POST("/credentials", server.authMiddleware.RequirePermission(authn.PermRegistryWrite), server.getRegistryCredentials)
 
 	cleanup := func() {}
 	return server, registrySpy, cleanup

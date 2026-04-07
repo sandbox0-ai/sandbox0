@@ -22,13 +22,13 @@ import (
 	"go.uber.org/zap"
 )
 
-func TestRegistryCredentialsRequireTemplateWritePermission(t *testing.T) {
+func TestRegistryCredentialsRequireRegistryWritePermission(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	baseURL, incomingGen, managerSpy, cleanup := newRegistryRouteTestServer(t)
 	defer cleanup()
 
-	t.Run("forbidden without template write", func(t *testing.T) {
+	t.Run("forbidden without registry write", func(t *testing.T) {
 		status := doInternalRegistryRequest(t, baseURL, newInternalRegistryToken(t, incomingGen, gatewayauthn.PermTemplateRead), "")
 		if status != http.StatusForbidden {
 			t.Fatalf("status = %d, want %d", status, http.StatusForbidden)
@@ -38,8 +38,8 @@ func TestRegistryCredentialsRequireTemplateWritePermission(t *testing.T) {
 		}
 	})
 
-	t.Run("allowed with template write", func(t *testing.T) {
-		status := doInternalRegistryRequest(t, baseURL, newInternalRegistryToken(t, incomingGen, gatewayauthn.PermTemplateWrite), `{"targetImage":"my-app:v1"}`)
+	t.Run("allowed with registry write", func(t *testing.T) {
+		status := doInternalRegistryRequest(t, baseURL, newInternalRegistryToken(t, incomingGen, gatewayauthn.PermRegistryWrite), `{"targetImage":"my-app:v1"}`)
 		if status != http.StatusOK {
 			t.Fatalf("status = %d, want %d", status, http.StatusOK)
 		}
@@ -183,7 +183,7 @@ func newRegistryRouteTestServer(t *testing.T) (string, *internalauth.Generator, 
 	v1.Use(server.authMiddleware.Authenticate())
 	registry := v1.Group("/registry")
 	registry.Use(server.managerUpstreamMiddleware())
-	registry.POST("/credentials", server.authMiddleware.RequirePermission(gatewayauthn.PermTemplateWrite), server.getRegistryCredentials)
+	registry.POST("/credentials", server.authMiddleware.RequirePermission(gatewayauthn.PermRegistryWrite), server.getRegistryCredentials)
 	gateway := httptest.NewServer(server.router)
 
 	cleanup := func() {

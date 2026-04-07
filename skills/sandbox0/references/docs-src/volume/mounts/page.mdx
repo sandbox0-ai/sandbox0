@@ -162,6 +162,86 @@ Example request:
 The claim response now includes `bootstrap_mounts`, so callers can tell whether requested
 mounts are still pending, already mounted, or failed with an error.
 
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `volume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{})
+if err != nil {
+    log.Fatal(err)
+}
+
+sandbox, err := client.ClaimSandbox(
+    ctx,
+    "default",
+    sandbox0.WithSandboxBootstrapMount(volume.ID, "/workspace/data", nil),
+    sandbox0.WithSandboxBootstrapMountWait(30*time.Second),
+)
+if err != nil {
+    log.Fatal(err)
+}
+
+for _, mount := range sandbox.BootstrapMounts {
+    fmt.Printf("Volume: %s, Path: %s, State: %s\\n", mount.SandboxvolumeID, mount.MountPoint, mount.State)
+}`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0.apispec.models.claim_mount_request import ClaimMountRequest
+from sandbox0.apispec.models.create_sandbox_volume_request import CreateSandboxVolumeRequest
+
+volume = client.volumes.create(CreateSandboxVolumeRequest())
+
+sandbox = client.sandboxes.claim(
+    "default",
+    mounts=[
+        ClaimMountRequest(
+            sandboxvolume_id=volume.id,
+            mount_point="/workspace/data",
+        )
+    ],
+    wait_for_mounts=True,
+    mount_wait_timeout_ms=30000,
+)
+
+for mount in sandbox.bootstrap_mounts:
+    print(f"Volume: {mount.sandboxvolume_id}, Path: {mount.mount_point}, State: {mount.state}")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const volume = await client.volumes.create({});
+
+const sandbox = await client.sandboxes.claim('default', {
+    mounts: [
+        {
+            sandboxvolumeId: volume.id,
+            mountPoint: '/workspace/data',
+        },
+    ],
+    waitForMounts: true,
+    mountWaitTimeoutMs: 30000,
+});
+
+for (const mount of sandbox.bootstrapMounts) {
+    console.log('Volume:', mount.sandboxvolumeId, 'Path:', mount.mountPoint, 'State:', mount.state);
+}`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `# Create a sandbox that bootstraps an existing Volume mount
+s0 sandbox create \
+    --template default \
+    --mount vol_123:/workspace/data \
+    --wait-for-mounts \
+    --mount-wait-timeout-ms 30000`
+    }
+  ]}
+/>
+
 ## Override Performance Config at Mount Time
 
 You can specify different performance parameters than the Volume's default:
@@ -235,10 +315,7 @@ if err != nil {
     panic(err)
 }
 for _, mount := range mounts {
-    volumeID, _ := mount.SandboxvolumeID.Get()
-    mountPoint, _ := mount.MountPoint.Get()
-    sessionID, _ := mount.MountSessionID.Get()
-    fmt.Printf("Volume: %s, Path: %s, Session: %s\\n", volumeID, mountPoint, sessionID)
+    fmt.Printf("Volume: %s, Path: %s, Session: %s, State: %s\\n", mount.SandboxvolumeID, mount.MountPoint, mount.MountSessionID, mount.State)
 }`
     },
     {
@@ -263,7 +340,7 @@ for (const mount of mounts) {
       code: `# Query mount status for a sandbox
 s0 sandbox volume status --sandbox-id <sandbox-id>
 
-# Output shows volume_id, mount_point, and mount_session_id for each mount`
+# Output shows volume_id, mount_point, state, mount_session_id, and any mount error`
     }
   ]}
 />

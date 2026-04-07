@@ -186,7 +186,7 @@ jobs:
           - Docker image: docker.io/${IMAGE_REPO}:${{ needs.prepare-release.outputs.version }}
           - Helm OCI: oci://ghcr.io/${OWNER_LOWER}/charts/infra-operator
           - Helm repo: https://sandbox0-ai.github.io/sandbox0
-          - Website/docs release bundle upload and cluster deploy are handled by sandbox0-cloud
+          - sandbox0-cloud handles website image build and cluster deploy
           EOF
           )
 
@@ -199,7 +199,7 @@ jobs:
             fi
 
             if [[ "${IS_DRAFT}" != "true" ]]; then
-              echo "Release ${TAG} already exists and is published. This workflow requires a draft release so sandbox0-cloud can upload docs before publication."
+              echo "Release ${TAG} already exists and is published. This workflow requires a draft release."
               exit 1
             fi
 
@@ -212,70 +212,6 @@ jobs:
             gh release create "${TAG}" "${args[@]}"
           fi
 
-  trigger-cloud-website-release:
-    name: Trigger sandbox0-cloud docs bundle build
-    runs-on: ubuntu-latest
-    needs:
-      - prepare-release
-      - package
-      - create-draft-release
-    steps:
-      - name: Dispatch docs bundle build to sandbox0-cloud
-        id: dispatch
-        env:
-          SANDBOX0_CLOUD_REPO_TOKEN: ${{ secrets.SANDBOX0_CLOUD_REPO_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          if [[ -z "${SANDBOX0_CLOUD_REPO_TOKEN}" ]]; then
-            echo "SANDBOX0_CLOUD_REPO_TOKEN is required to dispatch the sandbox0-cloud website workflow."
-            exit 1
-          fi
-
-          dispatch_time="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-
-          GH_TOKEN="${SANDBOX0_CLOUD_REPO_TOKEN}" gh workflow run website.yml \
-            --repo sandbox0-ai/sandbox0-cloud \
-            --ref main \
-            -f sandbox0_repository="${GITHUB_REPOSITORY}" \
-            -f sandbox0_ref="${GITHUB_REF_NAME}" \
-            -f docs_github_repository="${GITHUB_REPOSITORY}" \
-            -f docs_include_next="true" \
-            -f docs_download_release_bundles="1" \
-            -f upload_release_bundle="true" \
-            -f release_tag="${GITHUB_REF_NAME}"
-
-          echo "dispatch_time=${dispatch_time}" >> "$GITHUB_OUTPUT"
-          echo "Dispatched sandbox0-cloud docs bundle workflow for ${GITHUB_REF_NAME}."
-
-      - name: Wait for docs bundle workflow
-        env:
-          GH_TOKEN: ${{ secrets.SANDBOX0_CLOUD_REPO_TOKEN }}
-          DISPATCH_TIME: ${{ steps.dispatch.outputs.dispatch_time }}
-        run: |
-          set -euo pipefail
-
-          run_id=""
-          for attempt in $(seq 1 30); do
-            run_id="$(
-              gh api "repos/sandbox0-ai/sandbox0-cloud/actions/workflows/website.yml/runs?event=workflow_dispatch&branch=main&per_page=20" \
-                | python3 -c 'import json, os, sys; from datetime import datetime; dispatch_time = datetime.fromisoformat(os.environ["DISPATCH_TIME"].replace("Z", "+00:00")); data = json.load(sys.stdin); print(next((str(run["id"]) for run in data.get("workflow_runs", []) if datetime.fromisoformat(run["created_at"].replace("Z", "+00:00")) >= dispatch_time), ""))'
-            )"
-
-            if [[ -n "${run_id}" ]]; then
-              break
-            fi
-
-            sleep 60
-          done
-
-          if [[ -z "${run_id}" ]]; then
-            echo "Timed out waiting for sandbox0-cloud website workflow to start."
-            exit 1
-          fi
-
-          gh run watch "${run_id}" --repo sandbox0-ai/sandbox0-cloud --interval 60 --exit-status
-
   publish-release-record:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
@@ -284,7 +220,6 @@ jobs:
       - package
       - publish-images
       - publish-helm
-      - trigger-cloud-website-release
     steps:
       - name: Publish draft GitHub Release
         env:

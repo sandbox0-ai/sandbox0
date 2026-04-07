@@ -84,7 +84,7 @@ In this example, the pod is not counted as ready warm capacity until the sidecar
             Image: "ubuntu:24.04",
             Resources: apispec.ResourceQuota{
                 CPU:    apispec.NewOptString("1"),
-                Memory: apispec.NewOptString("2Gi"),
+                Memory: apispec.NewOptString("4Gi"),
             },
         }),
         Sidecars: []apispec.SidecarContainerSpec{
@@ -92,6 +92,10 @@ In this example, the pod is not counted as ready warm capacity until the sidecar
                 Name:    "codex",
                 Image:   "ghcr.io/example/codex:latest",
                 Command: []string{"sh", "-lc", "/app/start-codex.sh"},
+                Resources: apispec.ResourceQuota{
+                    CPU:    apispec.NewOptString("500m"),
+                    Memory: apispec.NewOptString("2Gi"),
+                },
                 ReadinessProbe: apispec.NewOptProbe(apispec.Probe{
                     Exec:                apispec.NewOptExecAction(apispec.ExecAction{Command: []string{"test", "-S", "/tmp/codex.sock"}}),
                     InitialDelaySeconds: apispec.NewOptInt32(1),
@@ -125,13 +129,14 @@ tpl = client.create_template(TemplateCreateRequest(
     spec=SandboxTemplateSpec.from_dict({
         "mainContainer": {
             "image": "ubuntu:24.04",
-            "resources": {"cpu": "1", "memory": "2Gi"},
+            "resources": {"cpu": "1", "memory": "4Gi"},
         },
         "sidecars": [
             SidecarContainerSpec(
                 name="codex",
                 image="ghcr.io/example/codex:latest",
                 command=["sh", "-lc", "/app/start-codex.sh"],
+                resources={"cpu": "500m", "memory": "2Gi"},
                 readiness_probe=Probe(
                     exec_=ExecAction(command=["test", "-S", "/tmp/codex.sock"]),
                     initial_delay_seconds=1,

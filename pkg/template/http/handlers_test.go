@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -98,7 +99,7 @@ func TestCreateTemplate_RejectsPrivilegedFieldsForRegularTeam(t *testing.T) {
 	body := []byte(`{
 		"template_id":"demo",
 		"spec":{
-			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"1Gi"}},
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
 			"pool":{"minIdle":0,"maxIdle":1},
 			"pod":{"serviceAccountName":"custom-sa"}
 		}
@@ -135,7 +136,7 @@ func TestCreateTemplate_RejectsImagePullPolicyForRegularTeam(t *testing.T) {
 			"mainContainer":{
 				"image":"ubuntu:22.04",
 				"imagePullPolicy":"Always",
-				"resources":{"cpu":"1","memory":"1Gi"}
+				"resources":{"cpu":"1","memory":"4Gi"}
 			},
 			"pool":{"minIdle":0,"maxIdle":1}
 		}
@@ -150,6 +151,110 @@ func TestCreateTemplate_RejectsImagePullPolicyForRegularTeam(t *testing.T) {
 	}
 	if store.createCalled {
 		t.Fatalf("expected create not called for forbidden request")
+	}
+}
+
+func TestCreateTemplate_RejectsRuntimeClassForRegularTeamWithoutSharedVolumes(t *testing.T) {
+	t.Parallel()
+
+	store := &testTemplateStore{}
+	h := &Handler{Store: store, Logger: zap.NewNop()}
+
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	router.POST("/api/v1/templates", h.CreateTemplate)
+
+	body := []byte(`{
+		"template_id":"demo",
+		"spec":{
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
+			"runtimeClassName":"kata-dev",
+			"pool":{"minIdle":0,"maxIdle":1}
+		}
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected status %d, got %d", http.StatusForbidden, rec.Code)
+	}
+	if store.createCalled {
+		t.Fatalf("expected create not called for forbidden request")
+	}
+}
+
+func TestCreateTemplate_RejectsSharedVolumesWithoutKataRuntime(t *testing.T) {
+	t.Parallel()
+
+	store := &testTemplateStore{}
+	h := &Handler{Store: store, Logger: zap.NewNop()}
+
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	router.POST("/api/v1/templates", h.CreateTemplate)
+
+	body := []byte(`{
+		"template_id":"demo",
+		"spec":{
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
+			"sharedVolumes":[{"name":"workspace","sandboxVolumeId":"vol-1","mountPath":"/workspace"}],
+			"pool":{"minIdle":0,"maxIdle":1}
+		}
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, rec.Code)
+	}
+	if store.createCalled {
+		t.Fatalf("expected create not called for invalid request")
+	}
+}
+
+func TestCreateTemplate_AllowsSharedVolumesForRegularTeamWithKataRuntime(t *testing.T) {
+	t.Parallel()
+
+	store := &testTemplateStore{}
+	h := &Handler{Store: store, Logger: zap.NewNop()}
+
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	router.POST("/api/v1/templates", h.CreateTemplate)
+
+	body := []byte(`{
+		"template_id":"demo",
+		"spec":{
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
+			"runtimeClassName":"kata-dev",
+			"sharedVolumes":[{"name":"workspace","sandboxVolumeId":"vol-1","mountPath":"/workspace"}],
+			"sidecars":[{"name":"helper","image":"busybox","resources":{"cpu":"500m","memory":"2Gi"},"mounts":[{"name":"workspace","mountPath":"/shared"}]}],
+			"pool":{"minIdle":0,"maxIdle":1}
+		}
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d", http.StatusCreated, rec.Code)
+	}
+	if !store.createCalled {
+		t.Fatalf("expected create to be called")
 	}
 }
 
@@ -173,7 +278,7 @@ func TestCreateTemplate_RejectsPrivateImageFromDifferentTeam(t *testing.T) {
 	body := []byte(`{
 		"template_id":"demo",
 		"spec":{
-			"mainContainer":{"image":"registry.internal.svc:5000/t-other/my-app:v1","resources":{"cpu":"1","memory":"1Gi"}},
+			"mainContainer":{"image":"registry.internal.svc:5000/t-other/my-app:v1","resources":{"cpu":"1","memory":"4Gi"}},
 			"pool":{"minIdle":0,"maxIdle":1}
 		}
 	}`)
@@ -215,7 +320,7 @@ func TestCreateTemplate_AllowsTeamScopedPrivateImage(t *testing.T) {
 	body := []byte(`{
 		"template_id":"demo",
 		"spec":{
-			"mainContainer":{"image":"registry.internal.svc:5000/` + prefix + `/my-app:v1","resources":{"cpu":"1","memory":"1Gi"}},
+			"mainContainer":{"image":"registry.internal.svc:5000/` + prefix + `/my-app:v1","resources":{"cpu":"1","memory":"4Gi"}},
 			"pool":{"minIdle":0,"maxIdle":1}
 		}
 	}`)
@@ -255,9 +360,9 @@ func TestUpdateTemplate_RejectsPrivateSidecarImageFromDifferentTeam(t *testing.T
 
 	body := []byte(`{
 		"spec":{
-			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"1Gi"}},
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
 			"pool":{"minIdle":0,"maxIdle":1},
-			"sidecars":[{"name":"helper","image":"registry.internal.svc:5000/t-other/helper:v1"}]
+			"sidecars":[{"name":"helper","image":"registry.internal.svc:5000/t-other/helper:v1","resources":{"cpu":"500m","memory":"2Gi"}}]
 		}
 	}`)
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/templates/demo", bytes.NewReader(body))
@@ -293,7 +398,7 @@ func TestCreateTemplate_AllowsNetworkForRegularTeam(t *testing.T) {
 	body := []byte(`{
 		"template_id":"demo",
 		"spec":{
-			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"1Gi"}},
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
 			"pool":{"minIdle":0,"maxIdle":1},
 			"network":{"mode":"block-all"}
 		}
@@ -334,7 +439,7 @@ func TestCreateTemplate_AllowsPrivilegedFieldForSystemToken(t *testing.T) {
 		"spec":{
 			"mainContainer":{
 				"image":"ubuntu:22.04",
-				"resources":{"cpu":"1","memory":"1Gi"},
+				"resources":{"cpu":"1","memory":"4Gi"},
 				"securityContext":{"runAsUser":1000}
 			},
 			"pool":{"minIdle":0,"maxIdle":1}
@@ -373,7 +478,7 @@ func TestCreateTemplate_RejectsMissingMainContainerImage(t *testing.T) {
 	body := []byte(`{
 		"template_id":"demo",
 		"spec":{
-			"mainContainer":{"resources":{"cpu":"1","memory":"1Gi"}},
+			"mainContainer":{"resources":{"cpu":"1","memory":"4Gi"}},
 			"pool":{"minIdle":0,"maxIdle":1}
 		}
 	}`)
@@ -404,7 +509,7 @@ func TestUpdateTemplate_RejectsInvalidPoolRange(t *testing.T) {
 						Image: "ubuntu:22.04",
 						Resources: v1alpha1.ResourceQuota{
 							CPU:    resource.MustParse("1"),
-							Memory: resource.MustParse("1Gi"),
+							Memory: resource.MustParse("4Gi"),
 						},
 					},
 					Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
@@ -423,7 +528,7 @@ func TestUpdateTemplate_RejectsInvalidPoolRange(t *testing.T) {
 
 	body := []byte(`{
 		"spec":{
-			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"1Gi"}},
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
 			"pool":{"minIdle":2,"maxIdle":1}
 		}
 	}`)
@@ -454,7 +559,7 @@ func TestUpdateTemplate_AllowsSidecarsForRegularTeam(t *testing.T) {
 						Image: "ubuntu:22.04",
 						Resources: v1alpha1.ResourceQuota{
 							CPU:    resource.MustParse("1"),
-							Memory: resource.MustParse("1Gi"),
+							Memory: resource.MustParse("4Gi"),
 						},
 					},
 					Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
@@ -473,9 +578,9 @@ func TestUpdateTemplate_AllowsSidecarsForRegularTeam(t *testing.T) {
 
 	body := []byte(`{
 		"spec":{
-			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"1Gi"}},
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
 			"pool":{"minIdle":0,"maxIdle":1},
-			"sidecars":[{"name":"helper","image":"busybox","command":["sleep","3600"]}]
+			"sidecars":[{"name":"helper","image":"busybox","command":["sleep","3600"],"resources":{"cpu":"500m","memory":"2Gi"}}]
 		}
 	}`)
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/templates/demo", bytes.NewReader(body))
@@ -507,12 +612,13 @@ func TestCreateTemplate_AllowsSidecarsForRegularTeam(t *testing.T) {
 	body := []byte(`{
 		"template_id":"demo",
 		"spec":{
-			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"1Gi"}},
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
 			"pool":{"minIdle":0,"maxIdle":1},
 			"sidecars":[{
 				"name":"codex",
 				"image":"busybox",
 				"command":["sh","-lc","sleep 3600"],
+				"resources":{"cpu":"500m","memory":"2Gi"},
 				"readinessProbe":{"exec":{"command":["test","-f","/tmp/ready"]}}
 			}]
 		}
@@ -544,7 +650,7 @@ func TestUpdateTemplate_RejectsImagePullPolicyForRegularTeam(t *testing.T) {
 						Image: "ubuntu:22.04",
 						Resources: v1alpha1.ResourceQuota{
 							CPU:    resource.MustParse("1"),
-							Memory: resource.MustParse("1Gi"),
+							Memory: resource.MustParse("4Gi"),
 						},
 					},
 					Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
@@ -566,7 +672,7 @@ func TestUpdateTemplate_RejectsImagePullPolicyForRegularTeam(t *testing.T) {
 			"mainContainer":{
 				"image":"ubuntu:22.04",
 				"imagePullPolicy":"Always",
-				"resources":{"cpu":"1","memory":"1Gi"}
+				"resources":{"cpu":"1","memory":"4Gi"}
 			},
 			"pool":{"minIdle":0,"maxIdle":1}
 		}
@@ -592,14 +698,18 @@ func TestValidateTemplateSpecForClaims_WildcardPermissionRejected(t *testing.T) 
 			Image: "ubuntu:22.04",
 			Resources: v1alpha1.ResourceQuota{
 				CPU:    resource.MustParse("1"),
-				Memory: resource.MustParse("1Gi"),
+				Memory: resource.MustParse("4Gi"),
 			},
 			SecurityContext: &v1alpha1.SecurityContext{
 				RunAsUser: ptrInt64(1000),
 			},
 		},
-		Sidecars: []corev1.Container{{Name: "helper", Image: "busybox"}},
-		Pool:     v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
+		Sidecars: []v1alpha1.SidecarContainerSpec{{
+			Name:      "helper",
+			Image:     "busybox",
+			Resources: v1alpha1.ResourceQuota{CPU: resource.MustParse("500m"), Memory: resource.MustParse("2Gi")},
+		}},
+		Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
 	}
 
 	err := validateTemplateSpecForClaims(spec, &internalauth.Claims{
@@ -619,7 +729,7 @@ func TestValidateTemplateSpec_StrictValidation(t *testing.T) {
 				Image: "ubuntu:22.04",
 				Resources: v1alpha1.ResourceQuota{
 					CPU:    resource.MustParse("1"),
-					Memory: resource.MustParse("1Gi"),
+					Memory: resource.MustParse("4Gi"),
 				},
 			},
 			Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
@@ -676,7 +786,7 @@ func TestValidateTemplateSpec_StrictValidation(t *testing.T) {
 		{
 			name: "reject sidecar without name",
 			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
-				s.Sidecars = []corev1.Container{
+				s.Sidecars = []v1alpha1.SidecarContainerSpec{
 					{Image: "busybox"},
 				}
 			},
@@ -685,10 +795,11 @@ func TestValidateTemplateSpec_StrictValidation(t *testing.T) {
 		{
 			name: "reject sidecar probe without handler",
 			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
-				s.Sidecars = []corev1.Container{
+				s.Sidecars = []v1alpha1.SidecarContainerSpec{
 					{
 						Name:           "helper",
 						Image:          "busybox",
+						Resources:      v1alpha1.ResourceQuota{CPU: resource.MustParse("500m"), Memory: resource.MustParse("2Gi")},
 						ReadinessProbe: &corev1.Probe{},
 					},
 				}
@@ -698,10 +809,11 @@ func TestValidateTemplateSpec_StrictValidation(t *testing.T) {
 		{
 			name: "reject sidecar probe with multiple handlers",
 			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
-				s.Sidecars = []corev1.Container{
+				s.Sidecars = []v1alpha1.SidecarContainerSpec{
 					{
-						Name:  "helper",
-						Image: "busybox",
+						Name:      "helper",
+						Image:     "busybox",
+						Resources: v1alpha1.ResourceQuota{CPU: resource.MustParse("500m"), Memory: resource.MustParse("2Gi")},
 						ReadinessProbe: &corev1.Probe{
 							ProbeHandler: corev1.ProbeHandler{
 								Exec:    &corev1.ExecAction{Command: []string{"true"}},
@@ -712,6 +824,30 @@ func TestValidateTemplateSpec_StrictValidation(t *testing.T) {
 				}
 			},
 			wantErr: "spec.sidecars[0].readinessProbe must define exactly one handler",
+		},
+		{
+			name: "reject shared volumes without runtime class",
+			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
+				s.SharedVolumes = []v1alpha1.SharedVolumeSpec{{
+					Name:            "workspace",
+					SandboxVolumeID: "vol-1",
+					MountPath:       "/workspace",
+				}}
+			},
+			wantErr: "spec.sharedVolumes requires spec.runtimeClassName to reference a Kata runtime",
+		},
+		{
+			name: "reject shared volumes without kata runtime class",
+			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
+				runtimeClassName := "runc"
+				s.RuntimeClassName = &runtimeClassName
+				s.SharedVolumes = []v1alpha1.SharedVolumeSpec{{
+					Name:            "workspace",
+					SandboxVolumeID: "vol-1",
+					MountPath:       "/workspace",
+				}}
+			},
+			wantErr: "spec.runtimeClassName must reference a Kata runtime when spec.sharedVolumes is set",
 		},
 	}
 
@@ -741,14 +877,15 @@ func TestValidateTemplateSpecForClaims_AllowsClaimableSidecars(t *testing.T) {
 			Image: "ubuntu:22.04",
 			Resources: v1alpha1.ResourceQuota{
 				CPU:    resource.MustParse("1"),
-				Memory: resource.MustParse("1Gi"),
+				Memory: resource.MustParse("4Gi"),
 			},
 		},
-		Sidecars: []corev1.Container{
+		Sidecars: []v1alpha1.SidecarContainerSpec{
 			{
-				Name:    "codex",
-				Image:   "busybox",
-				Command: []string{"sh", "-lc", "sleep 3600"},
+				Name:      "codex",
+				Image:     "busybox",
+				Command:   []string{"sh", "-lc", "sleep 3600"},
+				Resources: v1alpha1.ResourceQuota{CPU: resource.MustParse("500m"), Memory: resource.MustParse("2Gi")},
 				ReadinessProbe: &corev1.Probe{
 					ProbeHandler: corev1.ProbeHandler{
 						Exec: &corev1.ExecAction{Command: []string{"test", "-f", "/tmp/ready"}},
@@ -764,25 +901,22 @@ func TestValidateTemplateSpecForClaims_AllowsClaimableSidecars(t *testing.T) {
 	}
 }
 
-func TestValidateTemplateSpecForClaims_RejectsPrivilegedSidecarFields(t *testing.T) {
+func TestValidateTemplateSpecForClaims_RejectsMismatchedAggregateResources(t *testing.T) {
 	t.Parallel()
 
-	privileged := true
 	spec := v1alpha1.SandboxTemplateSpec{
 		MainContainer: v1alpha1.ContainerSpec{
 			Image: "ubuntu:22.04",
 			Resources: v1alpha1.ResourceQuota{
 				CPU:    resource.MustParse("1"),
-				Memory: resource.MustParse("1Gi"),
+				Memory: resource.MustParse("4Gi"),
 			},
 		},
-		Sidecars: []corev1.Container{
+		Sidecars: []v1alpha1.SidecarContainerSpec{
 			{
-				Name:  "codex",
-				Image: "busybox",
-				SecurityContext: &corev1.SecurityContext{
-					Privileged: &privileged,
-				},
+				Name:      "codex",
+				Image:     "busybox",
+				Resources: v1alpha1.ResourceQuota{CPU: resource.MustParse("500m"), Memory: resource.MustParse("1Gi")},
 			},
 		},
 		Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
@@ -790,18 +924,16 @@ func TestValidateTemplateSpecForClaims_RejectsPrivilegedSidecarFields(t *testing
 
 	err := validateTemplateSpecForClaims(spec, &internalauth.Claims{TeamID: "team-1"})
 	if err == nil {
-		t.Fatal("expected privileged sidecar field to be rejected")
+		t.Fatal("expected aggregate resource ratio to be rejected")
 	}
-	if got := err.Error(); got != "spec.sidecars[0].securityContext.privileged requires system identity" {
+	if got := err.Error(); !strings.Contains(got, "team-owned template total memory must equal total cpu") {
 		t.Fatalf("unexpected error %q", got)
 	}
 }
 
-func TestValidateTemplateSpecForClaims_AllowsSystemOwnedSidecarFields(t *testing.T) {
+func TestValidateTemplateSpecForClaims_AllowsSystemOwnedRatioOverride(t *testing.T) {
 	t.Parallel()
 
-	privileged := true
-	policy := "Always"
 	spec := v1alpha1.SandboxTemplateSpec{
 		MainContainer: v1alpha1.ContainerSpec{
 			Image: "ubuntu:22.04",
@@ -810,14 +942,11 @@ func TestValidateTemplateSpecForClaims_AllowsSystemOwnedSidecarFields(t *testing
 				Memory: resource.MustParse("1Gi"),
 			},
 		},
-		Sidecars: []corev1.Container{
+		Sidecars: []v1alpha1.SidecarContainerSpec{
 			{
-				Name:            "codex",
-				Image:           "busybox",
-				ImagePullPolicy: corev1.PullPolicy(policy),
-				SecurityContext: &corev1.SecurityContext{
-					Privileged: &privileged,
-				},
+				Name:      "codex",
+				Image:     "busybox",
+				Resources: v1alpha1.ResourceQuota{CPU: resource.MustParse("500m"), Memory: resource.MustParse("1Gi")},
 			},
 		},
 		Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},

@@ -189,6 +189,10 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					assertClaimBootstrapMountLifecycle(env, session)
 				})
 
+				It("shares template-declared volumes between procd and sidecars", func() {
+					assertTemplateSharedVolumeSidecarLifecycle(env, session, opts.templateNamePrefix)
+				})
+
 				It("rejects invalid bootstrap mount requests at claim time", func() {
 					assertClaimBootstrapMountValidation(env, session)
 				})
@@ -411,6 +415,11 @@ func assertTemplatePoolReadinessGate(env *framework.ScenarioEnv, session *e2euti
 	name := fmt.Sprintf("%s-ready-gate-%d", templateNamePrefix, time.Now().UnixNano())
 	templateReq := e2eutils.CloneTemplateForCreate(templates[0], name)
 	Expect(templateReq.Spec.Pool).NotTo(BeNil())
+	Expect(templateReq.Spec.MainContainer).NotTo(BeNil())
+	templateReq.Spec.MainContainer.Resources = apispec.ResourceQuota{
+		Cpu:    ptr("500m"),
+		Memory: ptr("2Gi"),
+	}
 	templateReq.Spec.Pool.MinIdle = 1
 	templateReq.Spec.Pool.MaxIdle = 1
 	templateReq.Spec.Sidecars = &[]apispec.SidecarContainerSpec{
@@ -418,6 +427,10 @@ func assertTemplatePoolReadinessGate(env *framework.ScenarioEnv, session *e2euti
 			Name:    "codex",
 			Image:   "busybox:latest",
 			Command: ptr([]string{"sh", "-lc", "sleep 30; touch /tmp/ready; tail -f /dev/null"}),
+			Resources: apispec.ResourceQuota{
+				Cpu:    ptr("250m"),
+				Memory: ptr("1Gi"),
+			},
 			ReadinessProbe: &apispec.Probe{
 				Exec:                &apispec.ExecAction{Command: ptr([]string{"test", "-f", "/tmp/ready"})},
 				PeriodSeconds:       ptr(int32(2)),
@@ -1444,6 +1457,136 @@ func assertClaimBootstrapMountLifecycle(env *framework.ScenarioEnv, session *e2e
 		body, _, readErr := session.ReadFile(env.TestCtx.Context, GinkgoT(), sandboxID, mountPoint+seedPath)
 		return body, readErr
 	}).WithTimeout(20 * time.Second).WithPolling(1 * time.Second).Should(Equal(seedContent))
+}
+
+func assertTemplateSharedVolumeSidecarLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session, templateNamePrefix string) {
+	base, err := session.GetTemplate(env.TestCtx.Context, GinkgoT(), "default")
+	Expect(err).NotTo(HaveOccurred())
+
+	cacheSize := "512M"
+	volume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), apispec.CreateSandboxVolumeRequest{CacheSize: &cacheSize})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusCreated))
+	Expect(volume).NotTo(BeNil())
+	volumeID := expectStringPtr(volume.Id, "volume id")
+	DeferCleanup(func() {
+		deleteStatus, deleteErr := session.DeleteSandboxVolume(env.TestCtx.Context, GinkgoT(), volumeID)
+		Expect(deleteErr).NotTo(HaveOccurred())
+		Expect(deleteStatus).To(Equal(http.StatusOK))
+	})
+
+	seedPath := "/seed.txt"
+	seedContent := []byte("hello from seeded shared volume")
+	status, err = session.WriteVolumeFile(env.TestCtx.Context, GinkgoT(), volumeID, seedPath, seedContent, "")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+
+	runtimeClassName := fmt.Sprintf("kata-e2e-%06d", time.Now().UnixNano()%1_000_000)
+	ensureSharedVolumeRuntimeClass(env, runtimeClassName)
+
+	name := fmt.Sprintf("%s-sv-%06d", templateNamePrefix, time.Now().UnixNano()%1_000_000)
+	templateReq := e2eutils.CloneTemplateForCreate(*base, name)
+	Expect(templateReq.Spec.MainContainer).NotTo(BeNil())
+	Expect(templateReq.Spec.Pool).NotTo(BeNil())
+	templateReq.Spec.MainContainer.Resources = apispec.ResourceQuota{
+		Cpu:    ptr("500m"),
+		Memory: ptr("2Gi"),
+	}
+	templateReq.Spec.RuntimeClassName = &runtimeClassName
+	templateReq.Spec.Pool.MinIdle = 0
+	templateReq.Spec.Pool.MaxIdle = 0
+	templateReq.Spec.SharedVolumes = &[]apispec.SharedVolumeSpec{{
+		Name:            "workspace-data",
+		SandboxVolumeId: volumeID,
+		MountPath:       "/workspace/shared-template",
+	}}
+	templateReq.Spec.Sidecars = &[]apispec.SidecarContainerSpec{{
+		Name:    "helper",
+		Image:   "busybox:latest",
+		Command: ptr([]string{"sh", "-lc", "tail -f /dev/null"}),
+		Resources: apispec.ResourceQuota{
+			Cpu:    ptr("250m"),
+			Memory: ptr("1Gi"),
+		},
+		Mounts: &[]apispec.ContainerMountSpec{{
+			Name:      "workspace-data",
+			MountPath: "/shared",
+		}},
+	}}
+
+	created, err := session.CreateTemplate(env.TestCtx.Context, GinkgoT(), templateReq)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(created).NotTo(BeNil())
+	DeferCleanup(func() {
+		Expect(session.DeleteTemplate(env.TestCtx.Context, GinkgoT(), name)).To(Succeed())
+	})
+	teamID := expectStringPtr(created.TeamId, "team id")
+	waitForTeamTemplateProjectionEventually(env, teamID, name)
+
+	templateNamespace, err := naming.TemplateNamespaceForTeam(teamID)
+	Expect(err).NotTo(HaveOccurred())
+
+	claimResp := claimSandboxEventually(env, session, name)
+	sandboxID := claimResp.SandboxId
+	DeferCleanup(func() {
+		_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+	})
+
+	sandbox := waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
+
+	Eventually(func() ([]byte, error) {
+		body, _, readErr := session.ReadFile(env.TestCtx.Context, GinkgoT(), sandboxID, "/workspace/shared-template/seed.txt")
+		return body, readErr
+	}).WithTimeout(30 * time.Second).WithPolling(2 * time.Second).Should(Equal(seedContent))
+
+	Eventually(func() (string, error) {
+		output, execErr := framework.KubectlExecContainerOutput(
+			env.TestCtx.Context,
+			env.Config.Kubeconfig,
+			templateNamespace,
+			sandbox.PodName,
+			"helper",
+			"/bin/sh", "-lc", "cat /shared/seed.txt",
+		)
+		return strings.TrimSpace(output), execErr
+	}).WithTimeout(30 * time.Second).WithPolling(2 * time.Second).Should(Equal(string(seedContent)))
+
+	mainWritten := []byte("main wrote this into the shared volume")
+	status, err = session.WriteFile(env.TestCtx.Context, GinkgoT(), sandboxID, "/workspace/shared-template/main.txt", mainWritten, "")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+
+	Eventually(func() (string, error) {
+		output, execErr := framework.KubectlExecContainerOutput(
+			env.TestCtx.Context,
+			env.Config.Kubeconfig,
+			templateNamespace,
+			sandbox.PodName,
+			"helper",
+			"/bin/sh", "-lc", "cat /shared/main.txt",
+		)
+		return strings.TrimSpace(output), execErr
+	}).WithTimeout(30 * time.Second).WithPolling(2 * time.Second).Should(Equal(string(mainWritten)))
+
+	_, err = framework.KubectlExecContainerOutput(
+		env.TestCtx.Context,
+		env.Config.Kubeconfig,
+		templateNamespace,
+		sandbox.PodName,
+		"helper",
+		"/bin/sh", "-lc", "printf 'sidecar wrote this into the shared volume' >/shared/sidecar.txt",
+	)
+	Expect(err).NotTo(HaveOccurred())
+
+	Eventually(func() ([]byte, error) {
+		body, _, readErr := session.ReadFile(env.TestCtx.Context, GinkgoT(), sandboxID, "/workspace/shared-template/sidecar.txt")
+		return body, readErr
+	}).WithTimeout(30 * time.Second).WithPolling(2 * time.Second).Should(Equal([]byte("sidecar wrote this into the shared volume")))
+
+	Eventually(func() ([]byte, error) {
+		body, _, readErr := session.ReadVolumeFile(env.TestCtx.Context, GinkgoT(), volumeID, "/sidecar.txt")
+		return body, readErr
+	}).WithTimeout(30 * time.Second).WithPolling(2 * time.Second).Should(Equal([]byte("sidecar wrote this into the shared volume")))
 }
 
 func assertClaimBootstrapMountValidation(env *framework.ScenarioEnv, session *e2eutils.Session) {

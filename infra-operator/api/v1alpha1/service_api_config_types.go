@@ -421,6 +421,9 @@ type ManagerConfig struct {
 	// +kubebuilder:default="0s"
 	DefaultSandboxTTL metav1.Duration `json:"defaultSandboxTtl,omitempty"`
 	// +optional
+	// +kubebuilder:default="4Gi"
+	TeamTemplateMemoryPerCPU string `json:"teamTemplateMemoryPerCpu,omitempty"`
+	// +optional
 	// +kubebuilder:default="30s"
 	NetdPolicyApplyTimeout metav1.Duration `json:"netdPolicyApplyTimeout,omitempty"`
 	// +optional

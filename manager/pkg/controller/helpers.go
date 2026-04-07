@@ -67,9 +67,16 @@ func EnsureProcdConfigSecret(
 			return fmt.Errorf("get procd config secret: %w", err)
 		}
 		if _, err := client.CoreV1().Secrets(template.Namespace).Create(ctx, desired, metav1.CreateOptions{}); err != nil {
-			return fmt.Errorf("create procd config secret: %w", err)
+			if !apierrors.IsAlreadyExists(err) {
+				return fmt.Errorf("create procd config secret: %w", err)
+			}
+			existing, err = client.CoreV1().Secrets(template.Namespace).Get(ctx, name, metav1.GetOptions{})
+			if err != nil {
+				return fmt.Errorf("get procd config secret after already exists: %w", err)
+			}
+		} else {
+			return nil
 		}
-		return nil
 	}
 
 	updated := existing.DeepCopy()

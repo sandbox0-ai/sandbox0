@@ -77,6 +77,9 @@ type ManagerConfig struct {
 	// +optional
 	// +kubebuilder:default="0s"
 	DefaultSandboxTTL metav1.Duration `yaml:"default_sandbox_ttl" json:"defaultSandboxTTL"`
+	// +optional
+	// +kubebuilder:default="4Gi"
+	TeamTemplateMemoryPerCPU string `yaml:"team_template_memory_per_cpu" json:"teamTemplateMemoryPerCpu"`
 
 	// NetworkPolicyProvider selects the dataplane integration used to enforce sandbox network policy.
 	// +optional

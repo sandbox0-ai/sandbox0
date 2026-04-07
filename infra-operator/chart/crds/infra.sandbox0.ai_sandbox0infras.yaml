@@ -1591,6 +1591,9 @@ spec:
                           shutdownTimeout:
                             default: 30s
                             type: string
+                          teamTemplateMemoryPerCpu:
+                            default: 4Gi
+                            type: string
                           webhookCertPath:
                             default: /tmp/k8s-webhook-server/serving-certs/tls.crt
                             type: string

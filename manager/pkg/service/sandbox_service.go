@@ -64,6 +64,8 @@ const (
 var errNoIdlePod = errors.New("no idle pod available")
 var ErrInvalidClaimRequest = errors.New("invalid claim request")
 
+const defaultPodReadyTimeout = 30 * time.Second
+
 // claimIdlePodBackoff is the retry backoff for claiming idle pods.
 // Designed to balance between:
 // - Quick retries to grab an idle pod before other clients
@@ -323,29 +325,82 @@ func validateClaimMounts(req *ClaimRequest) error {
 	if req.MountWaitTimeoutMs != nil && *req.MountWaitTimeoutMs <= 0 {
 		return fmt.Errorf("%w: mount_wait_timeout_ms must be greater than zero", ErrInvalidClaimRequest)
 	}
-	seenVolumes := make(map[string]struct{}, len(req.Mounts))
-	seenMountPoints := make(map[string]string, len(req.Mounts))
-	for i := range req.Mounts {
-		mount := &req.Mounts[i]
-		if strings.TrimSpace(mount.SandboxVolumeID) == "" {
-			return fmt.Errorf("%w: mounts[%d].sandboxvolume_id is required", ErrInvalidClaimRequest, i)
+	normalized, err := normalizeClaimMounts(req.Mounts)
+	if err != nil {
+		return err
+	}
+	req.Mounts = normalized
+	return nil
+}
+
+func normalizeClaimMounts(mounts []ClaimMount) ([]ClaimMount, error) {
+	if len(mounts) == 0 {
+		return nil, nil
+	}
+	normalized := append([]ClaimMount(nil), mounts...)
+	seenVolumes := make(map[string]struct{}, len(normalized))
+	seenMountPoints := make(map[string]string, len(normalized))
+	for i := range normalized {
+		mount := &normalized[i]
+		mount.SandboxVolumeID = strings.TrimSpace(mount.SandboxVolumeID)
+		if mount.SandboxVolumeID == "" {
+			return nil, fmt.Errorf("%w: mounts[%d].sandboxvolume_id is required", ErrInvalidClaimRequest, i)
 		}
 		cleanMountPoint := filepath.Clean(strings.TrimSpace(mount.MountPoint))
 		if !filepath.IsAbs(cleanMountPoint) || cleanMountPoint == string(filepath.Separator) || strings.Contains(cleanMountPoint, "..") {
-			return fmt.Errorf("%w: mounts[%d].mount_point is invalid", ErrInvalidClaimRequest, i)
+			return nil, fmt.Errorf("%w: mounts[%d].mount_point is invalid", ErrInvalidClaimRequest, i)
 		}
 		if _, exists := seenVolumes[mount.SandboxVolumeID]; exists {
-			return fmt.Errorf("%w: duplicate sandboxvolume_id %q in claim mounts", ErrInvalidClaimRequest, mount.SandboxVolumeID)
+			return nil, fmt.Errorf("%w: duplicate sandboxvolume_id %q in claim mounts", ErrInvalidClaimRequest, mount.SandboxVolumeID)
 		}
 		if existing, exists := seenMountPoints[cleanMountPoint]; exists && existing != mount.SandboxVolumeID {
-			return fmt.Errorf("%w: duplicate mount_point %q in claim mounts", ErrInvalidClaimRequest, cleanMountPoint)
+			return nil, fmt.Errorf("%w: duplicate mount_point %q in claim mounts", ErrInvalidClaimRequest, cleanMountPoint)
 		}
-		mount.SandboxVolumeID = strings.TrimSpace(mount.SandboxVolumeID)
 		mount.MountPoint = cleanMountPoint
 		seenVolumes[mount.SandboxVolumeID] = struct{}{}
 		seenMountPoints[cleanMountPoint] = mount.SandboxVolumeID
 	}
-	return nil
+	return normalized, nil
+}
+
+func mergeTemplateSharedVolumeMounts(claimMounts []ClaimMount, sharedVolumes []v1alpha1.SharedVolumeSpec) ([]ClaimMount, error) {
+	merged := append([]ClaimMount(nil), claimMounts...)
+	for _, volume := range sharedVolumes {
+		merged = append(merged, ClaimMount{
+			SandboxVolumeID: volume.SandboxVolumeID,
+			MountPoint:      volume.MountPath,
+			VolumeConfig:    sharedVolumeConfigToClaimMountConfig(volume),
+		})
+	}
+	return normalizeClaimMounts(merged)
+}
+
+func sharedVolumeConfigToClaimMountConfig(volume v1alpha1.SharedVolumeSpec) *MountVolumeConfig {
+	if strings.TrimSpace(volume.CacheSize) == "" && volume.Prefetch == nil && strings.TrimSpace(volume.BufferSize) == "" && volume.Writeback == nil {
+		return nil
+	}
+	return &MountVolumeConfig{
+		CacheSize:  volume.CacheSize,
+		Prefetch:   cloneInt32Pointer(volume.Prefetch),
+		BufferSize: volume.BufferSize,
+		Writeback:  cloneBoolPointer(volume.Writeback),
+	}
+}
+
+func cloneInt32Pointer(src *int32) *int32 {
+	if src == nil {
+		return nil
+	}
+	value := *src
+	return &value
+}
+
+func cloneBoolPointer(src *bool) *bool {
+	if src == nil {
+		return nil
+	}
+	value := *src
+	return &value
 }
 
 func claimMountWaitTimeout(req *ClaimRequest) time.Duration {
@@ -458,6 +513,12 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 
 	_ = resolvedName // reserved for audit/debugging (name used is template.ObjectMeta.Name)
 
+	effectiveMounts, err := mergeTemplateSharedVolumeMounts(req.Mounts, template.Spec.SharedVolumes)
+	if err != nil {
+		return nil, err
+	}
+	req.Mounts = effectiveMounts
+
 	// Try to claim an idle pod first
 	pod, err := s.claimIdlePod(ctx, template, req)
 	if err != nil {
@@ -512,6 +573,11 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 
 	// Note: Network policies are stored in pod annotations
 	// They are set in claimIdlePod() and createNewPod() methods
+
+	pod, err = s.waitForPodReady(ctx, pod.Namespace, pod.Name)
+	if err != nil {
+		return nil, fmt.Errorf("wait for pod ready: %w", err)
+	}
 
 	procdAddress, err := s.prodAddress(ctx, pod)
 	if err != nil {
@@ -1787,6 +1853,35 @@ func (s *SandboxService) waitForPodIP(ctx context.Context, namespace, name strin
 		select {
 		case <-ctx.Done():
 			return "", fmt.Errorf("pod ip not assigned")
+		case <-ticker.C:
+		}
+	}
+}
+
+func (s *SandboxService) waitForPodReady(ctx context.Context, namespace, name string) (*corev1.Pod, error) {
+	timeout := s.config.ProcdInitTimeout
+	if timeout < defaultPodReadyTimeout {
+		timeout = defaultPodReadyTimeout
+	}
+
+	readyCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		pod, err := s.podLister.Pods(namespace).Get(name)
+		if err != nil {
+			return nil, fmt.Errorf("get pod for readiness: %w", err)
+		}
+		if controller.IsPodReady(pod) {
+			return pod, nil
+		}
+
+		select {
+		case <-readyCtx.Done():
+			return nil, fmt.Errorf("pod %s/%s not ready after %s", namespace, name, timeout)
 		case <-ticker.C:
 		}
 	}

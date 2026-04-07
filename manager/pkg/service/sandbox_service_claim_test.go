@@ -80,6 +80,50 @@ func TestClaimIdlePodClaimsReadyPod(t *testing.T) {
 	}
 }
 
+func TestWaitForPodReadyWaitsUntilReady(t *testing.T) {
+	pod := newClaimTestPod("ns-a", "cold-pod", "template-a", false)
+	indexer := newClaimTestPodIndexer(t, pod)
+	svc := &SandboxService{
+		podLister: corelisters.NewPodLister(indexer),
+		config: SandboxServiceConfig{
+			ProcdInitTimeout: 100 * time.Millisecond,
+		},
+	}
+
+	go func() {
+		time.Sleep(80 * time.Millisecond)
+		updated := pod.DeepCopy()
+		updated.Status.Conditions[0].Status = corev1.ConditionTrue
+		updated.Status.Conditions[0].LastTransitionTime = metav1.NewTime(time.Now().UTC())
+		if err := indexer.Update(updated); err != nil {
+			t.Errorf("update pod: %v", err)
+		}
+	}()
+
+	readyPod, err := svc.waitForPodReady(context.Background(), pod.Namespace, pod.Name)
+	if err != nil {
+		t.Fatalf("waitForPodReady() error = %v", err)
+	}
+	if !controller.IsPodReady(readyPod) {
+		t.Fatalf("waitForPodReady() returned pod that is not ready")
+	}
+}
+
+func TestWaitForPodReadyTimesOut(t *testing.T) {
+	pod := newClaimTestPod("ns-a", "cold-pod", "template-a", false)
+	svc := &SandboxService{
+		podLister: newClaimTestPodLister(t, pod),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := svc.waitForPodReady(ctx, pod.Namespace, pod.Name)
+	if err == nil {
+		t.Fatal("waitForPodReady() error = nil, want timeout")
+	}
+}
+
 func TestValidateClaimMountsRejectsDuplicateVolume(t *testing.T) {
 	req := &ClaimRequest{
 		Mounts: []ClaimMount{
@@ -141,6 +185,11 @@ func TestClaimMountWaitTimeoutDefaultsWhenEnabled(t *testing.T) {
 
 func newClaimTestPodLister(t *testing.T, pods ...*corev1.Pod) corelisters.PodLister {
 	t.Helper()
+	return corelisters.NewPodLister(newClaimTestPodIndexer(t, pods...))
+}
+
+func newClaimTestPodIndexer(t *testing.T, pods ...*corev1.Pod) cache.Indexer {
+	t.Helper()
 	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{
 		cache.NamespaceIndex: cache.MetaNamespaceIndexFunc,
 	})
@@ -149,7 +198,7 @@ func newClaimTestPodLister(t *testing.T, pods ...*corev1.Pod) corelisters.PodLis
 			t.Fatalf("add pod: %v", err)
 		}
 	}
-	return corelisters.NewPodLister(indexer)
+	return indexer
 }
 
 func newClaimTestPod(namespace, name, templateID string, ready bool) *corev1.Pod {

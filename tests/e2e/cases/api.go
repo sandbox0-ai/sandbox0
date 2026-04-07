@@ -7,6 +7,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
 	"github.com/sandbox0-ai/sandbox0/pkg/framework"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	e2eutils "github.com/sandbox0-ai/sandbox0/tests/e2e/utils"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -93,6 +94,45 @@ func waitForDefaultTemplateReady(env *framework.ScenarioEnv, session *e2eutils.S
 		}
 		return nil
 	}).WithTimeout(3 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
+}
+
+func ensureSharedVolumeRuntimeClass(env *framework.ScenarioEnv, name string) {
+	manifest := fmt.Sprintf(`apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: %s
+handler: runc
+`, name)
+	Expect(framework.ApplyManifestContent(env.TestCtx.Context, env.Config.Kubeconfig, "sandbox0-e2e-runtimeclass-", manifest)).To(Succeed())
+	DeferCleanup(func() {
+		_ = framework.Kubectl(env.TestCtx.Context, env.Config.Kubeconfig, "delete", "runtimeclass", name, "--ignore-not-found=true")
+	})
+
+	Eventually(func() error {
+		_, err := framework.KubectlOutput(env.TestCtx.Context, env.Config.Kubeconfig, "get", "runtimeclass", name, "-o", "name")
+		return err
+	}).WithTimeout(30 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
+}
+
+func waitForTeamTemplateProjectionEventually(env *framework.ScenarioEnv, teamID, templateID string) {
+	templateNamespace, err := naming.TemplateNamespaceForTeam(teamID)
+	Expect(err).NotTo(HaveOccurred())
+	clusterTemplateID := naming.TemplateNameForCluster(naming.ScopeTeam, teamID, templateID)
+
+	Eventually(func() error {
+		_, getErr := framework.KubectlOutput(
+			env.TestCtx.Context,
+			env.Config.Kubeconfig,
+			"get",
+			"sandboxtemplates.sandbox0.ai",
+			clusterTemplateID,
+			"--namespace",
+			templateNamespace,
+			"-o",
+			"name",
+		)
+		return getErr
+	}).WithTimeout(2 * time.Minute).WithPolling(2 * time.Second).Should(Succeed())
 }
 
 func claimSandboxEventually(env *framework.ScenarioEnv, session *e2eutils.Session, templateID string) *apispec.ClaimResponse {

@@ -646,6 +646,13 @@ type ClaimResponse struct {
 	Template        string         `json:"template"`
 }
 
+// ContainerMountSpec defines model for ContainerMountSpec.
+type ContainerMountSpec struct {
+	MountPath string `json:"mountPath"`
+	Name      string `json:"name"`
+	ReadOnly  *bool  `json:"readOnly,omitempty"`
+}
+
 // ContainerSpec defines model for ContainerSpec.
 type ContainerSpec struct {
 	Env             *[]EnvVar        `json:"env,omitempty"`
@@ -1543,6 +1550,7 @@ type SandboxTemplateSpec struct {
 	Pool             *PoolStrategy           `json:"pool,omitempty"`
 	Public           *bool                   `json:"public,omitempty"`
 	RuntimeClassName *string                 `json:"runtimeClassName,omitempty"`
+	SharedVolumes    *[]SharedVolumeSpec     `json:"sharedVolumes,omitempty"`
 	Sidecars         *[]SidecarContainerSpec `json:"sidecars,omitempty"`
 	Tags             *[]string               `json:"tags,omitempty"`
 }
@@ -1599,18 +1607,29 @@ type SecurityContext struct {
 	RunAsUser    *int64        `json:"runAsUser,omitempty"`
 }
 
+// SharedVolumeSpec defines model for SharedVolumeSpec.
+type SharedVolumeSpec struct {
+	BufferSize      *string `json:"bufferSize,omitempty"`
+	CacheSize       *string `json:"cacheSize,omitempty"`
+	MountPath       string  `json:"mountPath"`
+	Name            string  `json:"name"`
+	Prefetch        *int32  `json:"prefetch,omitempty"`
+	SandboxVolumeId string  `json:"sandboxVolumeId"`
+	Writeback       *bool   `json:"writeback,omitempty"`
+}
+
 // SidecarContainerSpec defines model for SidecarContainerSpec.
 type SidecarContainerSpec struct {
-	Args            *[]string        `json:"args,omitempty"`
-	Command         *[]string        `json:"command,omitempty"`
-	Env             *[]EnvVar        `json:"env,omitempty"`
-	Image           string           `json:"image"`
-	LivenessProbe   *Probe           `json:"livenessProbe,omitempty"`
-	Name            string           `json:"name"`
-	ReadinessProbe  *Probe           `json:"readinessProbe,omitempty"`
-	Resources       *ResourceQuota   `json:"resources,omitempty"`
-	SecurityContext *SecurityContext `json:"securityContext,omitempty"`
-	StartupProbe    *Probe           `json:"startupProbe,omitempty"`
+	Args           *[]string             `json:"args,omitempty"`
+	Command        *[]string             `json:"command,omitempty"`
+	Env            *[]EnvVar             `json:"env,omitempty"`
+	Image          string                `json:"image"`
+	LivenessProbe  *Probe                `json:"livenessProbe,omitempty"`
+	Mounts         *[]ContainerMountSpec `json:"mounts,omitempty"`
+	Name           string                `json:"name"`
+	ReadinessProbe *Probe                `json:"readinessProbe,omitempty"`
+	Resources      ResourceQuota         `json:"resources"`
+	StartupProbe   *Probe                `json:"startupProbe,omitempty"`
 }
 
 // SignalContextRequest defines model for SignalContextRequest.

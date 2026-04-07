@@ -91,32 +91,29 @@ sandbox_pod_placement:
 	}
 }
 
-func TestBuildPodSpecSanitizesSidecarSecurityContext(t *testing.T) {
+func TestBuildPodSpecMountsSharedTemplateVolumes(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test
 `)
 	t.Setenv("CONFIG_PATH", configPath)
 
-	runAsUser := int64(1000)
-	runAsGroup := int64(1001)
-	allowPrivilegeEscalation := true
-	privileged := true
-
 	template := newTestTemplate()
-	template.Spec.Sidecars = []corev1.Container{
+	template.Spec.SharedVolumes = []SharedVolumeSpec{
 		{
-			Name:  "sidecar",
-			Image: "busybox:latest",
-			SecurityContext: &corev1.SecurityContext{
-				RunAsUser:                &runAsUser,
-				RunAsGroup:               &runAsGroup,
-				AllowPrivilegeEscalation: &allowPrivilegeEscalation,
-				Privileged:               &privileged,
-				Capabilities: &corev1.Capabilities{
-					Add:  []corev1.Capability{"NET_ADMIN"},
-					Drop: []corev1.Capability{"NET_RAW"},
-				},
-			},
+			Name:            "workspace",
+			SandboxVolumeID: "vol-1",
+			MountPath:       "/workspace",
+		},
+	}
+	template.Spec.Sidecars = []SidecarContainerSpec{
+		{
+			Name:      "sidecar",
+			Image:     "busybox:latest",
+			Resources: ResourceQuota{CPU: resource.MustParse("500m"), Memory: resource.MustParse("2Gi")},
+			Mounts: []ContainerMountSpec{{
+				Name:      "workspace",
+				MountPath: "/mnt/workspace",
+			}},
 		},
 	}
 
@@ -125,30 +122,53 @@ manager_image: sandbox0/manager:test
 		t.Fatalf("expected 2 containers, got %d", len(spec.Containers))
 	}
 
+	volume := findVolume(spec.Volumes, sharedTemplateVolumeName(0))
+	if volume == nil || volume.EmptyDir == nil {
+		t.Fatalf("expected shared template emptyDir volume, got %#v", volume)
+	}
+
+	main := spec.Containers[0]
+	mainMount := findVolumeMount(main.VolumeMounts, sharedTemplateVolumeName(0))
+	if mainMount == nil || mainMount.MountPath != "/workspace" {
+		t.Fatalf("expected main shared mount at /workspace, got %#v", mainMount)
+	}
+	if main.SecurityContext == nil || main.SecurityContext.Privileged == nil || !*main.SecurityContext.Privileged {
+		t.Fatalf("expected shared-volume main container to be privileged, got %#v", main.SecurityContext)
+	}
+	if mainMount.MountPropagation == nil || *mainMount.MountPropagation != corev1.MountPropagationBidirectional {
+		t.Fatalf("expected main mount propagation bidirectional, got %#v", mainMount.MountPropagation)
+	}
+
 	sidecar := spec.Containers[1]
-	if sidecar.SecurityContext == nil {
-		t.Fatal("expected sidecar security context")
+	sidecarMount := findVolumeMount(sidecar.VolumeMounts, sharedTemplateVolumeName(0))
+	if sidecarMount == nil || sidecarMount.MountPath != "/mnt/workspace" {
+		t.Fatalf("expected sidecar shared mount at /mnt/workspace, got %#v", sidecarMount)
 	}
-	if sidecar.SecurityContext.RunAsUser == nil || *sidecar.SecurityContext.RunAsUser != runAsUser {
-		t.Fatalf("expected runAsUser %d, got %v", runAsUser, sidecar.SecurityContext.RunAsUser)
+	if sidecarMount.MountPropagation == nil || *sidecarMount.MountPropagation != corev1.MountPropagationHostToContainer {
+		t.Fatalf("expected sidecar mount propagation host-to-container, got %#v", sidecarMount.MountPropagation)
 	}
-	if sidecar.SecurityContext.RunAsGroup == nil || *sidecar.SecurityContext.RunAsGroup != runAsGroup {
-		t.Fatalf("expected runAsGroup %d, got %v", runAsGroup, sidecar.SecurityContext.RunAsGroup)
+}
+
+func TestBuildPodSpecLeavesOrdinarySandboxNonPrivileged(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	spec := BuildPodSpec(newTestTemplate(), false)
+	if len(spec.Containers) == 0 {
+		t.Fatal("expected at least one container")
 	}
-	if sidecar.SecurityContext.AllowPrivilegeEscalation != nil {
-		t.Fatalf("expected allowPrivilegeEscalation to be stripped, got %v", *sidecar.SecurityContext.AllowPrivilegeEscalation)
+
+	main := spec.Containers[0]
+	if main.Name != "procd" {
+		t.Fatalf("expected main container procd, got %q", main.Name)
 	}
-	if sidecar.SecurityContext.Privileged != nil {
-		t.Fatalf("expected privileged to be stripped, got %v", *sidecar.SecurityContext.Privileged)
+	if main.SecurityContext == nil {
+		t.Fatal("expected security context to be initialized")
 	}
-	if sidecar.SecurityContext.Capabilities == nil {
-		t.Fatal("expected capabilities to exist")
-	}
-	if len(sidecar.SecurityContext.Capabilities.Add) != 0 {
-		t.Fatalf("expected capabilities.add to be stripped, got %v", sidecar.SecurityContext.Capabilities.Add)
-	}
-	if len(sidecar.SecurityContext.Capabilities.Drop) != 1 || sidecar.SecurityContext.Capabilities.Drop[0] != "NET_RAW" {
-		t.Fatalf("expected capabilities.drop to be preserved, got %v", sidecar.SecurityContext.Capabilities.Drop)
+	if main.SecurityContext.Privileged != nil && *main.SecurityContext.Privileged {
+		t.Fatalf("expected ordinary sandbox to remain non-privileged, got %#v", main.SecurityContext)
 	}
 }
 
@@ -159,12 +179,13 @@ manager_image: sandbox0/manager:test
 	t.Setenv("CONFIG_PATH", configPath)
 
 	template := newTestTemplate()
-	template.Spec.Sidecars = []corev1.Container{
+	template.Spec.Sidecars = []SidecarContainerSpec{
 		{
-			Name:    "codex",
-			Image:   "busybox:latest",
-			Command: []string{"sh", "-lc", "sleep 30; touch /tmp/ready; tail -f /dev/null"},
-			Args:    []string{"--verbose"},
+			Name:      "codex",
+			Image:     "busybox:latest",
+			Command:   []string{"sh", "-lc", "sleep 30; touch /tmp/ready; tail -f /dev/null"},
+			Args:      []string{"--verbose"},
+			Resources: ResourceQuota{CPU: resource.MustParse("500m"), Memory: resource.MustParse("2Gi")},
 			ReadinessProbe: &corev1.Probe{
 				ProbeHandler: corev1.ProbeHandler{
 					Exec: &corev1.ExecAction{Command: []string{"test", "-f", "/tmp/ready"}},
@@ -234,11 +255,12 @@ netd_mitm_ca_secret_name: fullmode-netd-mitm-ca
 	t.Setenv("CONFIG_PATH", configPath)
 
 	template := newTestTemplate()
-	template.Spec.Sidecars = []corev1.Container{
+	template.Spec.Sidecars = []SidecarContainerSpec{
 		{
-			Name:  "sidecar",
-			Image: "busybox:latest",
-			Env: []corev1.EnvVar{
+			Name:      "sidecar",
+			Image:     "busybox:latest",
+			Resources: ResourceQuota{CPU: resource.MustParse("500m"), Memory: resource.MustParse("2Gi")},
+			Env: []EnvVar{
 				{Name: netdMITMCAEnvVar, Value: "/tmp/ignored.crt"},
 			},
 		},

@@ -38,7 +38,11 @@ type SandboxTemplateSpec struct {
 	MainContainer ContainerSpec `json:"mainContainer"`
 
 	// Sidecar containers (optional)
-	Sidecars []corev1.Container `json:"sidecars,omitempty"`
+	Sidecars []SidecarContainerSpec `json:"sidecars,omitempty"`
+
+	// SharedVolumes declares sandbox volumes that procd mounts into the main
+	// container and sidecars can reference by name.
+	SharedVolumes []SharedVolumeSpec `json:"sharedVolumes,omitempty"`
 
 	// Pod-level configuration
 	Pod *PodSpecOverride `json:"pod,omitempty"`
@@ -57,12 +61,47 @@ type SandboxTemplateSpec struct {
 	ClusterId        *string `json:"clusterId,omitempty"`
 }
 
+// UsesSharedVolumes reports whether the template opts into the dedicated
+// shared-volume path that requires mount propagation support.
+func (s SandboxTemplateSpec) UsesSharedVolumes() bool {
+	return len(s.SharedVolumes) > 0
+}
+
 type ContainerSpec struct {
 	Image           string           `json:"image"`
 	ImagePullPolicy string           `json:"imagePullPolicy,omitempty"`
 	Env             []EnvVar         `json:"env,omitempty"`
 	Resources       ResourceQuota    `json:"resources"`
 	SecurityContext *SecurityContext `json:"securityContext,omitempty"`
+}
+
+type SidecarContainerSpec struct {
+	Name           string               `json:"name"`
+	Image          string               `json:"image"`
+	Command        []string             `json:"command,omitempty"`
+	Args           []string             `json:"args,omitempty"`
+	Env            []EnvVar             `json:"env,omitempty"`
+	Resources      ResourceQuota        `json:"resources"`
+	Mounts         []ContainerMountSpec `json:"mounts,omitempty"`
+	ReadinessProbe *corev1.Probe        `json:"readinessProbe,omitempty"`
+	LivenessProbe  *corev1.Probe        `json:"livenessProbe,omitempty"`
+	StartupProbe   *corev1.Probe        `json:"startupProbe,omitempty"`
+}
+
+type ContainerMountSpec struct {
+	Name      string `json:"name"`
+	MountPath string `json:"mountPath"`
+	ReadOnly  bool   `json:"readOnly,omitempty"`
+}
+
+type SharedVolumeSpec struct {
+	Name            string `json:"name"`
+	SandboxVolumeID string `json:"sandboxVolumeId"`
+	MountPath       string `json:"mountPath"`
+	CacheSize       string `json:"cacheSize,omitempty"`
+	Prefetch        *int32 `json:"prefetch,omitempty"`
+	BufferSize      string `json:"bufferSize,omitempty"`
+	Writeback       *bool  `json:"writeback,omitempty"`
 }
 
 // EnvVar represents an environment variable

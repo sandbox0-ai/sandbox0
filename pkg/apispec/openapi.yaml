@@ -5247,6 +5247,10 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/SidecarContainerSpec"
+        sharedVolumes:
+          type: array
+          items:
+            $ref: "#/components/schemas/SharedVolumeSpec"
         pod:
           $ref: "#/components/schemas/PodSpecOverride"
         network:
@@ -5306,15 +5310,46 @@ components:
             $ref: "#/components/schemas/EnvVar"
         resources:
           $ref: "#/components/schemas/ResourceQuota"
-        securityContext:
-          $ref: "#/components/schemas/SecurityContext"
+        mounts:
+          type: array
+          items:
+            $ref: "#/components/schemas/ContainerMountSpec"
         readinessProbe:
           $ref: "#/components/schemas/Probe"
         livenessProbe:
           $ref: "#/components/schemas/Probe"
         startupProbe:
           $ref: "#/components/schemas/Probe"
-      required: [name, image]
+      required: [name, image, resources]
+    ContainerMountSpec:
+      type: object
+      properties:
+        name:
+          type: string
+        mountPath:
+          type: string
+        readOnly:
+          type: boolean
+      required: [name, mountPath]
+    SharedVolumeSpec:
+      type: object
+      properties:
+        name:
+          type: string
+        sandboxVolumeId:
+          type: string
+        mountPath:
+          type: string
+        cacheSize:
+          type: string
+        prefetch:
+          type: integer
+          format: int32
+        bufferSize:
+          type: string
+        writeback:
+          type: boolean
+      required: [name, sandboxVolumeId, mountPath]
     EnvVar:
       type: object
       properties:

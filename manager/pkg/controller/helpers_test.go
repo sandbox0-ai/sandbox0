@@ -6,10 +6,14 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+	corelisters "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/tools/cache"
 )
 
 func TestIsPodReady(t *testing.T) {
@@ -147,6 +151,50 @@ func TestEnsureNetdMITMCASecretNoopsWithoutConfiguredSecret(t *testing.T) {
 	secrets, err := client.CoreV1().Secrets("tpl-default").List(context.Background(), metav1.ListOptions{})
 	require.NoError(t, err)
 	require.Empty(t, secrets.Items)
+}
+
+func TestEnsureProcdConfigSecretHandlesAlreadyExistsWhenListerIsStale(t *testing.T) {
+	keyPath := filepath.Join(t.TempDir(), "internal_jwt_public.key")
+	require.NoError(t, os.WriteFile(keyPath, []byte("test-public-key"), 0o600))
+	previousPath := internalauth.DefaultInternalJWTPublicKeyPath
+	internalauth.DefaultInternalJWTPublicKeyPath = keyPath
+	t.Cleanup(func() {
+		internalauth.DefaultInternalJWTPublicKeyPath = previousPath
+	})
+
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "tpl-a",
+		},
+	}
+
+	existing := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "procd-secret-mrswmylvnr2a-template-a",
+			Namespace: "tpl-a",
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			procdInternalJWTPublicKey: []byte("stale"),
+		},
+	}
+
+	client := fake.NewSimpleClientset(existing.DeepCopy())
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{
+		cache.NamespaceIndex: cache.MetaNamespaceIndexFunc,
+	})
+
+	err := EnsureProcdConfigSecret(context.Background(), client, corelisters.NewSecretLister(indexer), template)
+	require.NoError(t, err)
+
+	updated, err := client.CoreV1().Secrets("tpl-a").Get(context.Background(), existing.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, []byte("test-public-key"), updated.Data[procdInternalJWTPublicKey])
+	require.Equal(t, "template-a", updated.Labels[LabelTemplateID])
+	require.Len(t, updated.OwnerReferences, 1)
+	require.Equal(t, "SandboxTemplate", updated.OwnerReferences[0].Kind)
+	require.Equal(t, "template-a", updated.OwnerReferences[0].Name)
 }
 
 func writeHelpersManagerConfig(t *testing.T, contents string) string {

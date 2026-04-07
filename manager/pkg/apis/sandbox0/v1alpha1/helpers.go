@@ -30,6 +30,7 @@ func BuildPodSpec(template *SandboxTemplate, restart bool) corev1.PodSpec {
 		spec.RestartPolicy = corev1.RestartPolicyAlways
 	}
 
+	applySharedTemplateVolumes(&spec, template)
 	applyProcdSecretVolume(&spec, template)
 	applyNetdMITMCATrustMaterial(&spec)
 	applyProcdInit(&spec)
@@ -175,31 +176,9 @@ func buildContainers(template *SandboxTemplate) []corev1.Container {
 	}
 
 	for _, sidecar := range template.Spec.Sidecars {
-		containers = append(containers, sanitizeSidecarContainer(sidecar))
+		containers = append(containers, buildSidecarContainer(&sidecar, template))
 	}
 	return containers
-}
-
-func sanitizeSidecarContainer(container corev1.Container) corev1.Container {
-	if container.SecurityContext == nil {
-		return container
-	}
-
-	sanitized := &corev1.SecurityContext{}
-	if container.SecurityContext.RunAsUser != nil {
-		sanitized.RunAsUser = container.SecurityContext.RunAsUser
-	}
-	if container.SecurityContext.RunAsGroup != nil {
-		sanitized.RunAsGroup = container.SecurityContext.RunAsGroup
-	}
-	if container.SecurityContext.Capabilities != nil {
-		sanitized.Capabilities = &corev1.Capabilities{
-			Drop: append([]corev1.Capability(nil), container.SecurityContext.Capabilities.Drop...),
-		}
-	}
-
-	container.SecurityContext = sanitized
-	return container
 }
 
 // buildContainer builds a single container
@@ -210,6 +189,7 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Conta
 		Name:            name,
 		Image:           spec.Image,
 		ImagePullPolicy: corev1.PullIfNotPresent,
+		Resources:       buildResourceRequirements(spec.Resources),
 	}
 
 	if spec.ImagePullPolicy != "" {
@@ -260,8 +240,123 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Conta
 		container.SecurityContext.Capabilities = &corev1.Capabilities{}
 	}
 	container.SecurityContext.Capabilities.Add = append(container.SecurityContext.Capabilities.Add, corev1.Capability("SYS_ADMIN"))
+	if template.Spec.UsesSharedVolumes() {
+		privileged := true
+		container.SecurityContext.Privileged = &privileged
+	}
 
 	return container
+}
+
+func buildSidecarContainer(spec *SidecarContainerSpec, template *SandboxTemplate) corev1.Container {
+	container := corev1.Container{
+		Name:            spec.Name,
+		Image:           spec.Image,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		Command:         append([]string(nil), spec.Command...),
+		Args:            append([]string(nil), spec.Args...),
+		Resources:       buildResourceRequirements(spec.Resources),
+	}
+
+	var envVars []corev1.EnvVar
+	for k, v := range template.Spec.EnvVars {
+		envVars = append(envVars, corev1.EnvVar{Name: k, Value: v})
+	}
+	sort.Slice(envVars, func(i, j int) bool {
+		if envVars[i].Name != envVars[j].Name {
+			return envVars[i].Name < envVars[j].Name
+		}
+		return envVars[i].Value < envVars[j].Value
+	})
+	for _, ev := range spec.Env {
+		envVars = append(envVars, corev1.EnvVar{Name: ev.Name, Value: ev.Value})
+	}
+	container.Env = envVars
+	if spec.ReadinessProbe != nil {
+		container.ReadinessProbe = spec.ReadinessProbe.DeepCopy()
+	}
+	if spec.LivenessProbe != nil {
+		container.LivenessProbe = spec.LivenessProbe.DeepCopy()
+	}
+	if spec.StartupProbe != nil {
+		container.StartupProbe = spec.StartupProbe.DeepCopy()
+	}
+
+	return container
+}
+
+func buildResourceRequirements(quota ResourceQuota) corev1.ResourceRequirements {
+	requests := corev1.ResourceList{}
+	limits := corev1.ResourceList{}
+	if quota.CPU.Sign() > 0 {
+		requests[corev1.ResourceCPU] = quota.CPU.DeepCopy()
+		limits[corev1.ResourceCPU] = quota.CPU.DeepCopy()
+	}
+	if quota.Memory.Sign() > 0 {
+		requests[corev1.ResourceMemory] = quota.Memory.DeepCopy()
+		limits[corev1.ResourceMemory] = quota.Memory.DeepCopy()
+	}
+	if len(requests) == 0 {
+		requests = nil
+	}
+	if len(limits) == 0 {
+		limits = nil
+	}
+	return corev1.ResourceRequirements{Requests: requests, Limits: limits}
+}
+
+func applySharedTemplateVolumes(spec *corev1.PodSpec, template *SandboxTemplate) {
+	if spec == nil || template == nil || len(template.Spec.SharedVolumes) == 0 {
+		return
+	}
+
+	bidirectional := corev1.MountPropagationBidirectional
+	hostToContainer := corev1.MountPropagationHostToContainer
+	volumeNames := make(map[string]string, len(template.Spec.SharedVolumes))
+	for i, volume := range template.Spec.SharedVolumes {
+		volumeName := sharedTemplateVolumeName(i)
+		volumeNames[volume.Name] = volumeName
+		spec.Volumes = append(spec.Volumes, corev1.Volume{
+			Name: volumeName,
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		})
+		ensureNamedContainerVolumeMount(spec, "procd", corev1.VolumeMount{
+			Name:             volumeName,
+			MountPath:        volume.MountPath,
+			MountPropagation: &bidirectional,
+		})
+	}
+
+	for _, sidecar := range template.Spec.Sidecars {
+		for _, mount := range sidecar.Mounts {
+			volumeName := volumeNames[mount.Name]
+			ensureNamedContainerVolumeMount(spec, sidecar.Name, corev1.VolumeMount{
+				Name:             volumeName,
+				MountPath:        mount.MountPath,
+				ReadOnly:         mount.ReadOnly,
+				MountPropagation: &hostToContainer,
+			})
+		}
+	}
+}
+
+func ensureNamedContainerVolumeMount(spec *corev1.PodSpec, containerName string, mount corev1.VolumeMount) {
+	if spec == nil {
+		return
+	}
+	for i := range spec.Containers {
+		if spec.Containers[i].Name != containerName {
+			continue
+		}
+		ensureContainerVolumeMount(&spec.Containers[i], mount)
+		return
+	}
+}
+
+func sharedTemplateVolumeName(index int) string {
+	return "shared-volume-" + strconv.Itoa(index)
 }
 
 func appendProcdConfigEnvVars(envVars []corev1.EnvVar) []corev1.EnvVar {

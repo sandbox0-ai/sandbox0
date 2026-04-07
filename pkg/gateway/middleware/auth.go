@@ -217,6 +217,10 @@ func (m *AuthMiddleware) validateJWT(tokenString string) (*authn.Claims, error) 
 func (m *AuthMiddleware) resolveSelectedTeam(ctx context.Context, headerTeamID string, claims *authn.Claims) (string, string, error) {
 	selectedTeamID := strings.TrimSpace(headerTeamID)
 	if selectedTeamID == "" {
+		if m.requiredTeamRegionID == "" && len(claims.TeamGrants) == 1 {
+			grant := claims.TeamGrants[0]
+			return strings.TrimSpace(grant.TeamID), strings.TrimSpace(grant.TeamRole), nil
+		}
 		return "", "", nil
 	}
 	if grant, ok := claims.FindTeamGrant(selectedTeamID); ok {

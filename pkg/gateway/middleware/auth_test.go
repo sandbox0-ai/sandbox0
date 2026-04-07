@@ -17,7 +17,10 @@ func TestAuthMiddleware_JWTAccessToken(t *testing.T) {
 	t.Setenv("GIN_MODE", "release")
 
 	issuer := authn.NewIssuer("regional-gateway", "test-secret", time.Minute, time.Hour)
-	tokens, err := issuer.IssueTokenPair("user-1", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "admin", HomeRegionID: "aws-us-east-1"}})
+	tokens, err := issuer.IssueTokenPair("user-1", "user@example.com", "User", false, []authn.TeamGrant{
+		{TeamID: "team-1", TeamRole: "admin", HomeRegionID: "aws-us-east-1"},
+		{TeamID: "team-2", TeamRole: "developer", HomeRegionID: "aws-us-east-1"},
+	})
 	if err != nil {
 		t.Fatalf("issue token pair: %v", err)
 	}
@@ -35,6 +38,31 @@ func TestAuthMiddleware_JWTAccessToken(t *testing.T) {
 	}
 	if authCtx.UserID != "user-1" || authCtx.TeamID != "" {
 		t.Fatalf("unexpected auth context: user=%s team=%s", authCtx.UserID, authCtx.TeamID)
+	}
+}
+
+func TestAuthMiddleware_JWTAccessTokenImplicitSingleTeamInDirectClusterMode(t *testing.T) {
+	t.Setenv("GIN_MODE", "release")
+
+	issuer := authn.NewIssuer("cluster-gateway", "test-secret", time.Minute, time.Hour)
+	tokens, err := issuer.IssueTokenPair("user-1", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "admin", HomeRegionID: "aws-us-east-1"}})
+	if err != nil {
+		t.Fatalf("issue token pair: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/templates", nil)
+	req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = req
+
+	middleware := NewAuthMiddleware(nil, "test-secret", issuer, zap.NewNop())
+	authCtx, err := middleware.AuthenticateRequest(ctx)
+	if err != nil {
+		t.Fatalf("authenticate request: %v", err)
+	}
+	if authCtx.UserID != "user-1" || authCtx.TeamID != "team-1" || authCtx.TeamRole != "admin" {
+		t.Fatalf("unexpected auth context: %+v", authCtx)
 	}
 }
 

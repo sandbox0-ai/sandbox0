@@ -1597,7 +1597,7 @@ func buildSharedVolumeTemplateRequest(base apispec.Template, name, volumeID stri
 	templateReq.Spec.Pool.MaxIdle = maxIdle
 	templateReq.Spec.SharedVolumes = &[]apispec.SharedVolumeSpec{{
 		Name:            "workspace-data",
-		SandboxVolumeId: volumeID,
+		SandboxVolumeId: ptr(volumeID),
 		MountPath:       "/workspace/shared-template",
 	}}
 	templateReq.Spec.Sidecars = &[]apispec.SidecarContainerSpec{{

@@ -1,0 +1,241 @@
+# Template Sidecars
+
+Use `spec.sidecars` when a template needs extra containers in the same pod as the main sandbox container.
+
+This is the right model for template-owned helper processes such as:
+
+- a long-running Codex agent
+- a language server
+- a local proxy or daemon
+- a cache warmer or bootstrap helper
+
+All containers in one template pod share the same network namespace and can coordinate over localhost and shared volumes.
+
+## Public API Shape
+
+The public HTTP API and all three SDKs expose the same sidecar schema under `spec.sidecars`:
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | yes | Sidecar container name. |
+| `image` | yes | Container image reference. |
+| `command` | no | Entrypoint override. |
+| `args` | no | Additional process arguments. |
+| `env` | no | Sidecar-specific environment variables. |
+| `resources` | no | CPU and memory request/limit pair used by Sandbox0's template schema. |
+| `securityContext` | no | Public subset: `runAsUser`, `runAsGroup`, `capabilities.drop`. |
+| `readinessProbe` | no | Readiness gate. Exactly one handler is required when set. |
+| `livenessProbe` | no | Liveness probe. Exactly one handler is required when set. |
+| `startupProbe` | no | Startup probe. Exactly one handler is required when set. |
+
+<Callout variant="info">
+The public OpenAPI contract does not expose raw Kubernetes-only sidecar fields such as `imagePullPolicy` or privileged security settings. Document and depend on the public schema above when using the HTTP API or SDKs.
+</Callout>
+
+---
+
+## Readiness Controls Claimability
+
+Warm-pool capacity only counts pods that are Kubernetes-ready.
+
+- A pod in `Running` phase with `Ready=False` does not count as available idle capacity.
+- A hot claim only selects idle pods that are already ready.
+- If your sidecar hosts the warm process, its readiness probe should represent actual warm readiness.
+
+Example:
+
+```yaml
+spec:
+    mainContainer:
+        image: ubuntu:24.04
+        resources:
+            cpu: "1"
+            memory: 2Gi
+    sidecars:
+        - name: codex
+          image: ghcr.io/example/codex:latest
+          command: ["sh", "-lc", "/app/start-codex.sh"]
+          readinessProbe:
+              exec:
+                  command: ["test", "-S", "/tmp/codex.sock"]
+              initialDelaySeconds: 1
+              periodSeconds: 2
+              failureThreshold: 1
+    pool:
+        minIdle: 2
+        maxIdle: 10
+```
+
+In this example, the pod is not counted as ready warm capacity until the sidecar creates `/tmp/codex.sock` and the readiness probe passes.
+
+---
+
+## Examples
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `tpl, err := client.CreateTemplate(ctx, apispec.TemplateCreateRequest{
+    TemplateID: "my-codex-env",
+    Spec: apispec.SandboxTemplateSpec{
+        MainContainer: apispec.NewOptContainerSpec(apispec.ContainerSpec{
+            Image: "ubuntu:24.04",
+            Resources: apispec.ResourceQuota{
+                CPU:    apispec.NewOptString("1"),
+                Memory: apispec.NewOptString("2Gi"),
+            },
+        }),
+        Sidecars: []apispec.SidecarContainerSpec{
+            {
+                Name:    "codex",
+                Image:   "ghcr.io/example/codex:latest",
+                Command: []string{"sh", "-lc", "/app/start-codex.sh"},
+                ReadinessProbe: apispec.NewOptProbe(apispec.Probe{
+                    Exec:                apispec.NewOptExecAction(apispec.ExecAction{Command: []string{"test", "-S", "/tmp/codex.sock"}}),
+                    InitialDelaySeconds: apispec.NewOptInt32(1),
+                    PeriodSeconds:       apispec.NewOptInt32(2),
+                    FailureThreshold:    apispec.NewOptInt32(1),
+                }),
+            },
+        },
+        Pool: apispec.NewOptPoolStrategy(apispec.PoolStrategy{
+            MinIdle: 2,
+            MaxIdle: 10,
+        }),
+    },
+})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("Template created: %s\\n", tpl.TemplateID)`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0.apispec.models.exec_action import ExecAction
+from sandbox0.apispec.models.probe import Probe
+from sandbox0.apispec.models.sandbox_template_spec import SandboxTemplateSpec
+from sandbox0.apispec.models.sidecar_container_spec import SidecarContainerSpec
+from sandbox0.apispec.models.template_create_request import TemplateCreateRequest
+
+tpl = client.create_template(TemplateCreateRequest(
+    template_id="my-codex-env",
+    spec=SandboxTemplateSpec.from_dict({
+        "mainContainer": {
+            "image": "ubuntu:24.04",
+            "resources": {"cpu": "1", "memory": "2Gi"},
+        },
+        "sidecars": [
+            SidecarContainerSpec(
+                name="codex",
+                image="ghcr.io/example/codex:latest",
+                command=["sh", "-lc", "/app/start-codex.sh"],
+                readiness_probe=Probe(
+                    exec_=ExecAction(command=["test", "-S", "/tmp/codex.sock"]),
+                    initial_delay_seconds=1,
+                    period_seconds=2,
+                    failure_threshold=1,
+                ),
+            ).to_dict()
+        ],
+        "pool": {"minIdle": 2, "maxIdle": 10},
+    }),
+))
+print(f"Template created: {tpl.template_id}")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const tpl = await client.templates.create({
+    templateId: "my-codex-env",
+    spec: {
+        mainContainer: {
+            image: "ubuntu:24.04",
+            resources: { cpu: "1", memory: "2Gi" },
+        },
+        sidecars: [
+            {
+                name: "codex",
+                image: "ghcr.io/example/codex:latest",
+                command: ["sh", "-lc", "/app/start-codex.sh"],
+                readinessProbe: {
+                    exec: { command: ["test", "-S", "/tmp/codex.sock"] },
+                    initialDelaySeconds: 1,
+                    periodSeconds: 2,
+                    failureThreshold: 1,
+                },
+            },
+        ],
+        pool: { minIdle: 2, maxIdle: 10 },
+    },
+});
+console.log("Template created:", tpl.templateId);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `cat >template.yaml <<'EOF'
+spec:
+    mainContainer:
+        image: ubuntu:24.04
+        resources:
+            cpu: "1"
+            memory: 2Gi
+    sidecars:
+        - name: codex
+          image: ghcr.io/example/codex:latest
+          command: ["sh", "-lc", "/app/start-codex.sh"]
+          readinessProbe:
+              exec:
+                  command: ["test", "-S", "/tmp/codex.sock"]
+              initialDelaySeconds: 1
+              periodSeconds: 2
+              failureThreshold: 1
+    pool:
+        minIdle: 2
+        maxIdle: 10
+EOF
+
+s0 template create --id my-codex-env --spec-file template.yaml`
+    }
+  ]}
+/>
+
+---
+
+## Validation Notes
+
+- `name` and `image` are required for every sidecar.
+- `readinessProbe`, `livenessProbe`, and `startupProbe` must define exactly one handler when present.
+- Regular team-owned templates can use standard sidecar fields such as `command`, `args`, `env`, `resources`, and probes.
+- Private image references are still checked against team ownership rules, just like `spec.mainContainer.image`.
+
+## Next Steps
+
+<CardGrid>
+  <LinkCard
+    title="Sandbox"
+    href="/docs/sandbox"
+    cta="Learn More"
+  >
+    Create sandboxes that use your template sidecars
+  </LinkCard>
+
+  <LinkCard
+    title="Configuration"
+    href="/docs/template/configuration"
+    cta="Learn More"
+  >
+    Full reference for template spec fields
+  </LinkCard>
+
+  <LinkCard
+    title="Warm Pool"
+    href="/docs/template/pool"
+    cta="Learn More"
+  >
+    Understand how readiness affects hot claims
+  </LinkCard>
+</CardGrid>

@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	cachepkg "github.com/sandbox0-ai/sandbox0/pkg/cache"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
 	gatewaybuiltin "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/builtin"
 	gatewayoidc "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/oidc"
@@ -48,21 +49,15 @@ type Server struct {
 	proxyTimeout    time.Duration
 	regionProxies   map[string]*proxy.Router
 	regionProxiesMu sync.RWMutex
-	regionRoutes    map[string]cachedRegionRoute
-	regionRoutesMu  sync.RWMutex
-	now             func() time.Time
+	regionRoutes    *cachepkg.Cache[string, tenantdir.Region]
 }
 
 type regionDirectory interface {
 	GetRegion(ctx context.Context, regionID string) (*tenantdir.Region, error)
 }
 
-type cachedRegionRoute struct {
-	region    tenantdir.Region
-	expiresAt time.Time
-}
-
 const regionRouteCacheTTL = 8 * time.Hour
+const regionRouteCacheMaxEntries = 256
 
 // NewServer creates a new global-gateway server.
 func NewServer(
@@ -139,8 +134,10 @@ func NewServer(
 		logger:          logger,
 		proxyTimeout:    effectiveProxyTimeout(cfg.ServerWriteTimeout.Duration),
 		regionProxies:   make(map[string]*proxy.Router),
-		regionRoutes:    make(map[string]cachedRegionRoute),
-		now:             time.Now,
+		regionRoutes: cachepkg.New[string, tenantdir.Region](cachepkg.Config{
+			MaxSize: regionRouteCacheMaxEntries,
+			TTL:     regionRouteCacheTTL,
+		}),
 	}
 	server.setupRoutes()
 	return server, nil
@@ -274,45 +271,27 @@ func (s *Server) resolveRoutableRegion(ctx context.Context, regionID string) (*t
 }
 
 func (s *Server) getCachedRoutableRegion(regionID string) (*tenantdir.Region, bool) {
-	now := time.Now
-	if s.now != nil {
-		now = s.now
-	}
-
-	s.regionRoutesMu.RLock()
-	entry, ok := s.regionRoutes[regionID]
-	s.regionRoutesMu.RUnlock()
-	if !ok || !entry.expiresAt.After(now()) {
+	if s.regionRoutes == nil {
 		return nil, false
 	}
-	region := entry.region
+	region, ok := s.regionRoutes.Get(regionID)
+	if !ok {
+		return nil, false
+	}
 	return &region, true
 }
 
 func (s *Server) putCachedRoutableRegion(regionID string, region *tenantdir.Region) {
-	if region == nil {
+	if region == nil || s.regionRoutes == nil {
 		return
 	}
-	now := time.Now
-	if s.now != nil {
-		now = s.now
-	}
-
-	s.regionRoutesMu.Lock()
-	if s.regionRoutes == nil {
-		s.regionRoutes = make(map[string]cachedRegionRoute)
-	}
-	s.regionRoutes[regionID] = cachedRegionRoute{
-		region:    *region,
-		expiresAt: now().Add(regionRouteCacheTTL),
-	}
-	s.regionRoutesMu.Unlock()
+	s.regionRoutes.Set(regionID, *region)
 }
 
 func (s *Server) invalidateRegionRouteCache() {
-	s.regionRoutesMu.Lock()
-	clear(s.regionRoutes)
-	s.regionRoutesMu.Unlock()
+	if s.regionRoutes != nil {
+		s.regionRoutes.Clear()
+	}
 }
 
 func (s *Server) invalidateRegionRouteCacheOnWrite(next gin.HandlerFunc) gin.HandlerFunc {

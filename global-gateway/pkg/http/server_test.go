@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	cachepkg "github.com/sandbox0-ai/sandbox0/pkg/cache"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/tenantdir"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"go.uber.org/zap"
@@ -30,13 +31,13 @@ func (s *stubRegionDirectory) GetRegion(_ context.Context, _ string) (*tenantdir
 }
 
 func TestGlobalGatewayResolveRoutableRegionCachesLookups(t *testing.T) {
-	now := time.Now()
 	dir := &stubRegionDirectory{region: &tenantdir.Region{ID: "aws-us-east-1", Enabled: true, RegionalGatewayURL: "https://regional.example"}}
+	cache := cachepkg.New[string, tenantdir.Region](cachepkg.Config{MaxSize: 16, TTL: time.Hour})
+	defer cache.Close()
 	server := &Server{
 		logger:       zap.NewNop(),
 		regionLookup: dir,
-		regionRoutes: make(map[string]cachedRegionRoute),
-		now:          func() time.Time { return now },
+		regionRoutes: cache,
 	}
 
 	for i := 0; i < 2; i++ {
@@ -55,19 +56,19 @@ func TestGlobalGatewayResolveRoutableRegionCachesLookups(t *testing.T) {
 }
 
 func TestGlobalGatewayResolveRoutableRegionExpiresCache(t *testing.T) {
-	now := time.Now()
 	dir := &stubRegionDirectory{region: &tenantdir.Region{ID: "aws-us-east-1", Enabled: true, RegionalGatewayURL: "https://regional.example"}}
+	cache := cachepkg.New[string, tenantdir.Region](cachepkg.Config{MaxSize: 16, TTL: 10 * time.Millisecond, CleanupInterval: 5 * time.Millisecond})
+	defer cache.Close()
 	server := &Server{
 		logger:       zap.NewNop(),
 		regionLookup: dir,
-		regionRoutes: make(map[string]cachedRegionRoute),
-		now:          func() time.Time { return now },
+		regionRoutes: cache,
 	}
 
 	if _, err := server.resolveRoutableRegion(context.Background(), "aws-us-east-1"); err != nil {
 		t.Fatalf("resolve region: %v", err)
 	}
-	now = now.Add(regionRouteCacheTTL + time.Millisecond)
+	time.Sleep(20 * time.Millisecond)
 	if _, err := server.resolveRoutableRegion(context.Background(), "aws-us-east-1"); err != nil {
 		t.Fatalf("resolve region after expiry: %v", err)
 	}
@@ -78,13 +79,13 @@ func TestGlobalGatewayResolveRoutableRegionExpiresCache(t *testing.T) {
 }
 
 func TestGlobalGatewayResolveRoutableRegionInvalidationClearsCache(t *testing.T) {
-	now := time.Now()
 	dir := &stubRegionDirectory{region: &tenantdir.Region{ID: "aws-us-east-1", Enabled: true, RegionalGatewayURL: "https://regional.example"}}
+	cache := cachepkg.New[string, tenantdir.Region](cachepkg.Config{MaxSize: 16, TTL: time.Hour})
+	defer cache.Close()
 	server := &Server{
 		logger:       zap.NewNop(),
 		regionLookup: dir,
-		regionRoutes: make(map[string]cachedRegionRoute),
-		now:          func() time.Time { return now },
+		regionRoutes: cache,
 	}
 
 	if _, err := server.resolveRoutableRegion(context.Background(), "aws-us-east-1"); err != nil {

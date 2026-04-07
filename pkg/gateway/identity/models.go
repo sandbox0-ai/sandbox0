@@ -55,6 +55,13 @@ type TeamMemberWithUser struct {
 	UpdatedAt     time.Time `json:"updated_at"`
 }
 
+// TeamGrantRecord stores the data needed to issue JWT team grants.
+type TeamGrantRecord struct {
+	TeamID       string  `json:"team_id"`
+	TeamRole     string  `json:"team_role"`
+	HomeRegionID *string `json:"home_region_id,omitempty"`
+}
+
 // UserIdentity represents an OIDC identity mapping.
 type UserIdentity struct {
 	ID        string          `json:"id"`

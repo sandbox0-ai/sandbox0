@@ -90,20 +90,6 @@
       ]
     },
     {
-      "label": "INTEGRATIONS",
-      "slug": "integrations",
-      "pages": [
-        {
-          "slug": "",
-          "title": "Overview"
-        },
-        {
-          "slug": "github-ci",
-          "title": "GitHub CI"
-        }
-      ]
-    },
-    {
       "label": "VOLUME",
       "slug": "volume",
       "pages": [
@@ -130,6 +116,20 @@
         {
           "slug": "sync",
           "title": "Sync"
+        }
+      ]
+    },
+    {
+      "label": "INTEGRATIONS",
+      "slug": "integrations",
+      "pages": [
+        {
+          "slug": "",
+          "title": "Overview"
+        },
+        {
+          "slug": "github-ci",
+          "title": "GitHub CI"
         }
       ]
     },

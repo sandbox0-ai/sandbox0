@@ -15,8 +15,10 @@ Store the following in GitHub repository, organization, or environment secrets:
 
 | Secret | Purpose |
 |------|-------------|
-| `SANDBOX0_BASE_URL` | Sandbox0 API entrypoint, for example `https://api.sandbox0.ai` |
+| `SANDBOX0_BASE_URL` | Optional Sandbox0 API entrypoint override. SaaS users can omit it. Set it for self-hosted or private deployments. |
 | `SANDBOX0_TOKEN` | Sandbox0 service API key used by the workflow |
+
+For Sandbox0 SaaS, `s0` defaults to `https://api.sandbox0.ai`, so most workflows only need `SANDBOX0_TOKEN`.
 
 For image build and push workflows, create a dedicated service API key with the smallest role that satisfies the workflow.
 
@@ -46,13 +48,14 @@ jobs:
     build-and-push:
         uses: sandbox0-ai/s0/.github/workflows/template-image.yml@main
         with:
-            api-url: ${{ vars.SANDBOX0_BASE_URL }}
             image-tag: my-app:${{ github.sha }}
             context: .
             dockerfile: Dockerfile
         secrets:
             sandbox0_token: ${{ secrets.SANDBOX0_TOKEN }}
 ```
+
+If you use a self-hosted or private Sandbox0 deployment, also pass `api-url: ${{ vars.SANDBOX0_BASE_URL }}`.
 
 The reusable workflow installs `s0`, verifies Docker, builds the image locally on the runner, pushes it with short-lived Sandbox0 registry credentials, and exposes the final template image reference as a workflow output.
 
@@ -76,7 +79,6 @@ jobs:
 
             - uses: sandbox0-ai/s0/.github/actions/setup-s0@main
               with:
-                  api-url: ${{ vars.SANDBOX0_BASE_URL }}
                   token: ${{ secrets.SANDBOX0_TOKEN }}
 
             - name: Build image
@@ -86,17 +88,18 @@ jobs:
               run: s0 template image push my-app:${GITHUB_SHA} -t my-app:${GITHUB_SHA}
 ```
 
-Pin `@main` to a release tag after the first `s0` release that includes these GitHub Actions assets.
+For production workflows, pin `@main` to a published `s0` release tag such as `@v0.2.4` or `@v0`.
 
 The push step obtains temporary registry credentials from Sandbox0 automatically. You do not need to manage a long-lived `docker login` secret for the Sandbox0 registry.
 
-## Next steps
+## Recommended setup
 
-1. Create a dedicated Sandbox0 API key for GitHub Actions.
-2. Grant the key the `builder` role if the workflow only needs image push.
-3. Add `SANDBOX0_BASE_URL` and `SANDBOX0_TOKEN` to GitHub repository or environment secrets.
-4. After the next `s0` release, replace `@main` with the published release tag in your workflow.
-5. Use the pushed `Template image reference` output in your Sandbox0 template definition.
+1. Create a dedicated Sandbox0 service API key for GitHub Actions.
+2. Grant the key the narrowest role the workflow needs. For registry push only, prefer `builder`.
+3. Add `SANDBOX0_TOKEN` to GitHub repository or environment secrets.
+4. Add `SANDBOX0_BASE_URL` only if you use a self-hosted or private Sandbox0 deployment.
+5. Pin the action or reusable workflow to a published `s0` release tag.
+6. Use the pushed `Template image reference` output in your Sandbox0 template definition.
 
 ## How image push works
 
@@ -135,8 +138,24 @@ If your workflow also updates templates, it will need a role with template write
 - Use the narrowest Sandbox0 role that can complete the workflow.
 - Rotate service API keys on a schedule that matches your organization policy.
 
-## Related pages
+---
 
-- [Custom Images](/docs/template/images)
-- [Template Configuration](/docs/template/configuration)
-- [Self-Hosted Install](/docs/self-hosted/install)
+## Next Steps
+
+<CardGrid>
+  <LinkCard
+    title="Custom Images"
+    href="/docs/template/images"
+    cta="Learn More"
+  >
+    Choose the image reference and registry flow your template should use
+  </LinkCard>
+
+  <LinkCard
+    title="Template Configuration"
+    href="/docs/template/configuration"
+    cta="Configure"
+  >
+    Wire the pushed image into a complete Sandbox0 template definition
+  </LinkCard>
+</CardGrid>

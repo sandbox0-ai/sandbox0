@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 func (s *Session) ListTemplates(ctx context.Context, t ContractT) ([]apispec.Template, error) {
@@ -121,5 +122,77 @@ func CloneTemplateForCreate(base apispec.Template, name string) apispec.Template
 
 func cloneSandboxTemplateSpec(base apispec.SandboxTemplateSpec) apispec.SandboxTemplateSpec {
 	spec := base
+	normalizeTeamTemplateResourceRatioForCreate(&spec)
 	return spec
+}
+
+func normalizeTeamTemplateResourceRatioForCreate(spec *apispec.SandboxTemplateSpec) {
+	if spec == nil || spec.MainContainer == nil {
+		return
+	}
+
+	mainCPU, ok := parseQuotaQuantity(spec.MainContainer.Resources.Cpu)
+	if !ok {
+		return
+	}
+	mainMemory, ok := parseQuotaQuantity(spec.MainContainer.Resources.Memory)
+	if !ok {
+		return
+	}
+
+	totalCPU := mainCPU.DeepCopy()
+	sidecarMemory := resource.Quantity{}
+	if spec.Sidecars != nil {
+		for _, sidecar := range *spec.Sidecars {
+			cpu, ok := parseQuotaQuantity(sidecar.Resources.Cpu)
+			if !ok {
+				return
+			}
+			memory, ok := parseQuotaQuantity(sidecar.Resources.Memory)
+			if !ok {
+				return
+			}
+			totalCPU.Add(cpu)
+			sidecarMemory.Add(memory)
+		}
+	}
+
+	requiredMemory := memoryForCPU(totalCPU, resource.MustParse("4Gi"))
+	totalMemory := mainMemory.DeepCopy()
+	totalMemory.Add(sidecarMemory)
+	if totalMemory.Cmp(requiredMemory) == 0 {
+		return
+	}
+
+	normalizedMainMemory := requiredMemory.DeepCopy()
+	normalizedMainMemory.Sub(sidecarMemory)
+	if normalizedMainMemory.Sign() <= 0 {
+		return
+	}
+	spec.MainContainer.Resources.Memory = ptr(normalizedMainMemory.String())
+}
+
+func parseQuotaQuantity(value *string) (resource.Quantity, bool) {
+	if value == nil || *value == "" {
+		return resource.Quantity{}, false
+	}
+	parsed, err := resource.ParseQuantity(*value)
+	if err != nil {
+		return resource.Quantity{}, false
+	}
+	return parsed, true
+}
+
+func memoryForCPU(cpu, memoryPerCPU resource.Quantity) resource.Quantity {
+	if cpu.Sign() <= 0 || memoryPerCPU.Sign() <= 0 {
+		return resource.Quantity{}
+	}
+	requiredBytes := memoryPerCPU.Value() * cpu.MilliValue() / 1000
+	result := memoryPerCPU.DeepCopy()
+	result.Set(requiredBytes)
+	return result
+}
+
+func ptr[T any](value T) *T {
+	return &value
 }

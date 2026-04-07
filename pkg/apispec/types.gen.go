@@ -1540,21 +1540,20 @@ type SandboxTemplateCondition struct {
 
 // SandboxTemplateSpec defines model for SandboxTemplateSpec.
 type SandboxTemplateSpec struct {
-	AllowedTeams     *[]string               `json:"allowedTeams,omitempty"`
-	ClusterId        *string                 `json:"clusterId,omitempty"`
-	Description      *string                 `json:"description,omitempty"`
-	DisplayName      *string                 `json:"displayName,omitempty"`
-	EnvVars          *map[string]string      `json:"envVars,omitempty"`
-	Lifecycle        *LifecyclePolicy        `json:"lifecycle,omitempty"`
-	MainContainer    *ContainerSpec          `json:"mainContainer,omitempty"`
-	Network          *SandboxNetworkPolicy   `json:"network,omitempty"`
-	Pod              *PodSpecOverride        `json:"pod,omitempty"`
-	Pool             *PoolStrategy           `json:"pool,omitempty"`
-	Public           *bool                   `json:"public,omitempty"`
-	RuntimeClassName *string                 `json:"runtimeClassName,omitempty"`
-	SharedVolumes    *[]SharedVolumeSpec     `json:"sharedVolumes,omitempty"`
-	Sidecars         *[]SidecarContainerSpec `json:"sidecars,omitempty"`
-	Tags             *[]string               `json:"tags,omitempty"`
+	AllowedTeams  *[]string               `json:"allowedTeams,omitempty"`
+	ClusterId     *string                 `json:"clusterId,omitempty"`
+	Description   *string                 `json:"description,omitempty"`
+	DisplayName   *string                 `json:"displayName,omitempty"`
+	EnvVars       *map[string]string      `json:"envVars,omitempty"`
+	Lifecycle     *LifecyclePolicy        `json:"lifecycle,omitempty"`
+	MainContainer *ContainerSpec          `json:"mainContainer,omitempty"`
+	Network       *SandboxNetworkPolicy   `json:"network,omitempty"`
+	Pod           *PodSpecOverride        `json:"pod,omitempty"`
+	Pool          *PoolStrategy           `json:"pool,omitempty"`
+	Public        *bool                   `json:"public,omitempty"`
+	SharedVolumes *[]SharedVolumeSpec     `json:"sharedVolumes,omitempty"`
+	Sidecars      *[]SidecarContainerSpec `json:"sidecars,omitempty"`
+	Tags          *[]string               `json:"tags,omitempty"`
 }
 
 // SandboxTemplateStatus defines model for SandboxTemplateStatus.

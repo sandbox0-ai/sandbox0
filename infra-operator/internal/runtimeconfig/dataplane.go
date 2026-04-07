@@ -25,6 +25,7 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 	cfg.WebhookKeyPath = spec.WebhookKeyPath
 	cfg.DefaultSandboxTTL = spec.DefaultSandboxTTL
 	cfg.TeamTemplateMemoryPerCPU = spec.TeamTemplateMemoryPerCPU
+	cfg.SharedVolumeRuntimeClassName = spec.SharedVolumeRuntimeClassName
 	cfg.NetdPolicyApplyTimeout = spec.NetdPolicyApplyTimeout
 	cfg.NetdPolicyApplyPollInterval = spec.NetdPolicyApplyPollInterval
 	cfg.PauseMinMemoryRequest = spec.PauseMinMemoryRequest

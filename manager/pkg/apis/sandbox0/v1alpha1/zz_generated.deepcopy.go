@@ -794,11 +794,6 @@ func (in *SandboxTemplateSpec) DeepCopyInto(out *SandboxTemplateSpec) {
 			(*out)[key] = val
 		}
 	}
-	if in.RuntimeClassName != nil {
-		in, out := &in.RuntimeClassName, &out.RuntimeClassName
-		*out = new(string)
-		**out = **in
-	}
 	if in.ClusterId != nil {
 		in, out := &in.ClusterId, &out.ClusterId
 		*out = new(string)

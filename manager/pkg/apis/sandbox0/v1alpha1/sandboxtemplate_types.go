@@ -57,8 +57,7 @@ type SandboxTemplateSpec struct {
 	EnvVars map[string]string `json:"envVars,omitempty"`
 
 	// Environment configuration
-	RuntimeClassName *string `json:"runtimeClassName,omitempty"`
-	ClusterId        *string `json:"clusterId,omitempty"`
+	ClusterId *string `json:"clusterId,omitempty"`
 }
 
 // UsesSharedVolumes reports whether the template opts into the dedicated

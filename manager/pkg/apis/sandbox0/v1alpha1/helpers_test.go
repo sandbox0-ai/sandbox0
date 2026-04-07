@@ -149,6 +149,26 @@ manager_image: sandbox0/manager:test
 	}
 }
 
+func TestBuildPodSpecAppliesConfiguredSharedVolumeRuntimeClass(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+shared_volume_runtime_class_name: kata-shared
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	template := newTestTemplate()
+	template.Spec.SharedVolumes = []SharedVolumeSpec{{
+		Name:            "workspace",
+		SandboxVolumeID: "vol-1",
+		MountPath:       "/workspace",
+	}}
+
+	spec := BuildPodSpec(template, false)
+	if spec.RuntimeClassName == nil || *spec.RuntimeClassName != "kata-shared" {
+		t.Fatalf("expected shared-volume runtime class kata-shared, got %#v", spec.RuntimeClassName)
+	}
+}
+
 func TestBuildPodSpecLeavesOrdinarySandboxNonPrivileged(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test

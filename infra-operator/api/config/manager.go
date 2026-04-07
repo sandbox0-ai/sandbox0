@@ -80,6 +80,8 @@ type ManagerConfig struct {
 	// +optional
 	// +kubebuilder:default="4Gi"
 	TeamTemplateMemoryPerCPU string `yaml:"team_template_memory_per_cpu" json:"teamTemplateMemoryPerCpu"`
+	// +optional
+	SharedVolumeRuntimeClassName string `yaml:"shared_volume_runtime_class_name" json:"sharedVolumeRuntimeClassName"`
 
 	// NetworkPolicyProvider selects the dataplane integration used to enforce sandbox network policy.
 	// +optional

@@ -193,10 +193,6 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					assertTemplateSharedVolumeSidecarLifecycle(env, session, opts.templateNamePrefix)
 				})
 
-				It("rejects shared-volume templates without a kata runtime class", func() {
-					assertTemplateSharedVolumeRequiresKataRuntime(env, session, opts.templateNamePrefix)
-				})
-
 				It("claims pooled shared-volume templates from the idle pool", func() {
 					assertTemplateSharedVolumePooledClaimLifecycle(env, session, opts.templateNamePrefix)
 				})
@@ -1473,11 +1469,8 @@ func assertTemplateSharedVolumeSidecarLifecycle(env *framework.ScenarioEnv, sess
 
 	volumeID, seedContent := createSeededSharedVolume(env, session)
 
-	runtimeClassName := fmt.Sprintf("kata-e2e-%06d", time.Now().UnixNano()%1_000_000)
-	ensureSharedVolumeRuntimeClass(env, runtimeClassName)
-
 	name := fmt.Sprintf("%s-sv-%06d", templateNamePrefix, time.Now().UnixNano()%1_000_000)
-	templateReq := buildSharedVolumeTemplateRequest(*base, name, volumeID, &runtimeClassName, 0, 0)
+	templateReq := buildSharedVolumeTemplateRequest(*base, name, volumeID, 0, 0)
 
 	created, err := session.CreateTemplate(env.TestCtx.Context, GinkgoT(), templateReq)
 	Expect(err).NotTo(HaveOccurred())
@@ -1501,29 +1494,14 @@ func assertTemplateSharedVolumeSidecarLifecycle(env *framework.ScenarioEnv, sess
 	assertSharedVolumeVisibleFromMainAndSidecar(env, session, templateNamespace, sandbox, sandboxID, volumeID, seedContent)
 }
 
-func assertTemplateSharedVolumeRequiresKataRuntime(env *framework.ScenarioEnv, session *e2eutils.Session, templateNamePrefix string) {
-	base, err := session.GetTemplate(env.TestCtx.Context, GinkgoT(), "default")
-	Expect(err).NotTo(HaveOccurred())
-
-	volumeID, _ := createSeededSharedVolume(env, session)
-	name := fmt.Sprintf("%s-sv-no-kata-%06d", templateNamePrefix, time.Now().UnixNano()%1_000_000)
-	templateReq := buildSharedVolumeTemplateRequest(*base, name, volumeID, nil, 0, 0)
-
-	_, status, err := session.CreateTemplateDetailed(env.TestCtx.Context, GinkgoT(), templateReq)
-	Expect(err).To(HaveOccurred())
-	Expect(status).To(Equal(http.StatusBadRequest))
-}
-
 func assertTemplateSharedVolumePooledClaimLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session, templateNamePrefix string) {
 	base, err := session.GetTemplate(env.TestCtx.Context, GinkgoT(), "default")
 	Expect(err).NotTo(HaveOccurred())
 
 	volumeID, seedContent := createSeededSharedVolume(env, session)
-	runtimeClassName := fmt.Sprintf("kata-e2e-%06d", time.Now().UnixNano()%1_000_000)
-	ensureSharedVolumeRuntimeClass(env, runtimeClassName)
 
 	name := fmt.Sprintf("%s-sv-pool-%06d", templateNamePrefix, time.Now().UnixNano()%1_000_000)
-	templateReq := buildSharedVolumeTemplateRequest(*base, name, volumeID, &runtimeClassName, 1, 1)
+	templateReq := buildSharedVolumeTemplateRequest(*base, name, volumeID, 1, 1)
 
 	created, err := session.CreateTemplate(env.TestCtx.Context, GinkgoT(), templateReq)
 	Expect(err).NotTo(HaveOccurred())
@@ -1582,7 +1560,7 @@ func createSeededSharedVolume(env *framework.ScenarioEnv, session *e2eutils.Sess
 	return volumeID, seedContent
 }
 
-func buildSharedVolumeTemplateRequest(base apispec.Template, name, volumeID string, runtimeClassName *string, minIdle, maxIdle int32) apispec.TemplateCreateRequest {
+func buildSharedVolumeTemplateRequest(base apispec.Template, name, volumeID string, minIdle, maxIdle int32) apispec.TemplateCreateRequest {
 	templateReq := e2eutils.CloneTemplateForCreate(base, name)
 	Expect(templateReq.Spec.MainContainer).NotTo(BeNil())
 	Expect(templateReq.Spec.Pool).NotTo(BeNil())
@@ -1590,7 +1568,6 @@ func buildSharedVolumeTemplateRequest(base apispec.Template, name, volumeID stri
 		Cpu:    ptr("500m"),
 		Memory: ptr("2Gi"),
 	}
-	templateReq.Spec.RuntimeClassName = runtimeClassName
 	templateReq.Spec.Pool.MinIdle = minIdle
 	templateReq.Spec.Pool.MaxIdle = maxIdle
 	templateReq.Spec.SharedVolumes = &[]apispec.SharedVolumeSpec{{

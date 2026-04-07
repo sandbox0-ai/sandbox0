@@ -154,41 +154,7 @@ func TestCreateTemplate_RejectsImagePullPolicyForRegularTeam(t *testing.T) {
 	}
 }
 
-func TestCreateTemplate_RejectsRuntimeClassForRegularTeamWithoutSharedVolumes(t *testing.T) {
-	t.Parallel()
-
-	store := &testTemplateStore{}
-	h := &Handler{Store: store, Logger: zap.NewNop()}
-
-	router := gin.New()
-	router.Use(withClaims(&internalauth.Claims{
-		TeamID: "team-1",
-		UserID: "user-1",
-	}))
-	router.POST("/api/v1/templates", h.CreateTemplate)
-
-	body := []byte(`{
-		"template_id":"demo",
-		"spec":{
-			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
-			"runtimeClassName":"kata-dev",
-			"pool":{"minIdle":0,"maxIdle":1}
-		}
-	}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected status %d, got %d", http.StatusForbidden, rec.Code)
-	}
-	if store.createCalled {
-		t.Fatalf("expected create not called for forbidden request")
-	}
-}
-
-func TestCreateTemplate_RejectsSharedVolumesWithoutKataRuntime(t *testing.T) {
+func TestCreateTemplate_AllowsSharedVolumesForRegularTeam(t *testing.T) {
 	t.Parallel()
 
 	store := &testTemplateStore{}
@@ -206,42 +172,6 @@ func TestCreateTemplate_RejectsSharedVolumesWithoutKataRuntime(t *testing.T) {
 		"spec":{
 			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
 			"sharedVolumes":[{"name":"workspace","sandboxVolumeId":"vol-1","mountPath":"/workspace"}],
-			"pool":{"minIdle":0,"maxIdle":1}
-		}
-	}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, rec.Code)
-	}
-	if store.createCalled {
-		t.Fatalf("expected create not called for invalid request")
-	}
-}
-
-func TestCreateTemplate_AllowsSharedVolumesForRegularTeamWithKataRuntime(t *testing.T) {
-	t.Parallel()
-
-	store := &testTemplateStore{}
-	h := &Handler{Store: store, Logger: zap.NewNop()}
-
-	router := gin.New()
-	router.Use(withClaims(&internalauth.Claims{
-		TeamID: "team-1",
-		UserID: "user-1",
-	}))
-	router.POST("/api/v1/templates", h.CreateTemplate)
-
-	body := []byte(`{
-		"template_id":"demo",
-		"spec":{
-			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
-			"runtimeClassName":"kata-dev",
-			"sharedVolumes":[{"name":"workspace","mountPath":"/workspace"}],
-			"sidecars":[{"name":"helper","image":"busybox","resources":{"cpu":"500m","memory":"2Gi"},"mounts":[{"name":"workspace","mountPath":"/shared"}]}],
 			"pool":{"minIdle":0,"maxIdle":1}
 		}
 	}`)
@@ -275,7 +205,6 @@ func TestCreateTemplate_RejectsSharedVolumeMountedUnderConfig(t *testing.T) {
 		"template_id":"demo",
 		"spec":{
 			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
-			"runtimeClassName":"kata-dev",
 			"sharedVolumes":[{"name":"workspace","sandboxVolumeId":"vol-1","mountPath":"/config/shared"}],
 			"pool":{"minIdle":0,"maxIdle":1}
 		}
@@ -313,7 +242,6 @@ func TestCreateTemplate_RejectsSidecarMountUnderConfig(t *testing.T) {
 		"template_id":"demo",
 		"spec":{
 			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
-			"runtimeClassName":"kata-dev",
 			"sharedVolumes":[{"name":"workspace","sandboxVolumeId":"vol-1","mountPath":"/workspace/shared"}],
 			"sidecars":[{"name":"helper","image":"busybox","resources":{"cpu":"500m","memory":"2Gi"},"mounts":[{"name":"workspace","mountPath":"/config/shared"}]}],
 			"pool":{"minIdle":0,"maxIdle":1}
@@ -901,30 +829,6 @@ func TestValidateTemplateSpec_StrictValidation(t *testing.T) {
 				}
 			},
 			wantErr: "spec.sidecars[0].readinessProbe must define exactly one handler",
-		},
-		{
-			name: "reject shared volumes without runtime class",
-			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
-				s.SharedVolumes = []v1alpha1.SharedVolumeSpec{{
-					Name:            "workspace",
-					SandboxVolumeID: "vol-1",
-					MountPath:       "/workspace",
-				}}
-			},
-			wantErr: "spec.sharedVolumes requires spec.runtimeClassName to reference a Kata runtime",
-		},
-		{
-			name: "reject shared volumes without kata runtime class",
-			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
-				runtimeClassName := "runc"
-				s.RuntimeClassName = &runtimeClassName
-				s.SharedVolumes = []v1alpha1.SharedVolumeSpec{{
-					Name:            "workspace",
-					SandboxVolumeID: "vol-1",
-					MountPath:       "/workspace",
-				}}
-			},
-			wantErr: "spec.runtimeClassName must reference a Kata runtime when spec.sharedVolumes is set",
 		},
 	}
 

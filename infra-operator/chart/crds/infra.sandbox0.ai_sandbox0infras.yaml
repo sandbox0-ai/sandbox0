@@ -1588,6 +1588,8 @@ spec:
                           resyncPeriod:
                             default: 30s
                             type: string
+                          sharedVolumeRuntimeClassName:
+                            type: string
                           shutdownTimeout:
                             default: 30s
                             type: string

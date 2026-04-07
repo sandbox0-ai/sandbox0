@@ -40,6 +40,7 @@ spec:
             description: SandboxTemplateSpec defines the desired state of SandboxTemplate
             properties:
               clusterId:
+                description: Environment configuration
                 type: string
               description:
                 description: Description of the template
@@ -623,9 +624,6 @@ spec:
                 - maxIdle
                 - minIdle
                 type: object
-              runtimeClassName:
-                description: Environment configuration
-                type: string
               sharedVolumes:
                 description: |-
                   SharedVolumes declares sandbox volumes that procd mounts into the main

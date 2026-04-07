@@ -5269,8 +5269,6 @@ components:
           type: array
           items:
             type: string
-        runtimeClassName:
-          type: string
         clusterId:
           type: string
     ContainerSpec:

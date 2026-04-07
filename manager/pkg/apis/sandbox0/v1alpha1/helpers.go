@@ -3,6 +3,7 @@ package v1alpha1
 import (
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
@@ -37,9 +38,10 @@ func BuildPodSpec(template *SandboxTemplate, restart bool) corev1.PodSpec {
 	applyFuseResource(&spec)
 	applyDefaultSandboxPlacement(&spec)
 
-	// Apply runtime class if specified
-	if template.Spec.RuntimeClassName != nil {
-		spec.RuntimeClassName = template.Spec.RuntimeClassName
+	if template.Spec.UsesSharedVolumes() {
+		if runtimeClassName := configuredSharedVolumeRuntimeClassName(); runtimeClassName != nil {
+			spec.RuntimeClassName = runtimeClassName
+		}
 	}
 
 	// Apply pod-level overrides
@@ -68,6 +70,18 @@ func applyDefaultSandboxPlacement(spec *corev1.PodSpec) {
 
 	spec.NodeSelector = mergeNodeSelectors(spec.NodeSelector, cfg.SandboxPodPlacement.NodeSelector)
 	spec.Tolerations = mergeTolerations(spec.Tolerations, cfg.SandboxPodPlacement.Tolerations)
+}
+
+func configuredSharedVolumeRuntimeClassName() *string {
+	cfg := config.LoadManagerConfig()
+	if cfg == nil {
+		return nil
+	}
+	runtimeClassName := strings.TrimSpace(cfg.SharedVolumeRuntimeClassName)
+	if runtimeClassName == "" {
+		return nil
+	}
+	return &runtimeClassName
 }
 
 func mergeNodeSelectors(base, override map[string]string) map[string]string {

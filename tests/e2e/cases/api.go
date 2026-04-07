@@ -96,24 +96,6 @@ func waitForDefaultTemplateReady(env *framework.ScenarioEnv, session *e2eutils.S
 	}).WithTimeout(3 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
 }
 
-func ensureSharedVolumeRuntimeClass(env *framework.ScenarioEnv, name string) {
-	manifest := fmt.Sprintf(`apiVersion: node.k8s.io/v1
-kind: RuntimeClass
-metadata:
-  name: %s
-handler: runc
-`, name)
-	Expect(framework.ApplyManifestContent(env.TestCtx.Context, env.Config.Kubeconfig, "sandbox0-e2e-runtimeclass-", manifest)).To(Succeed())
-	DeferCleanup(func() {
-		_ = framework.Kubectl(env.TestCtx.Context, env.Config.Kubeconfig, "delete", "runtimeclass", name, "--ignore-not-found=true")
-	})
-
-	Eventually(func() error {
-		_, err := framework.KubectlOutput(env.TestCtx.Context, env.Config.Kubeconfig, "get", "runtimeclass", name, "-o", "name")
-		return err
-	}).WithTimeout(30 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
-}
-
 func waitForTeamTemplateProjectionEventually(env *framework.ScenarioEnv, teamID, templateID string) {
 	templateNamespace, err := naming.TemplateNamespaceForTeam(teamID)
 	Expect(err).NotTo(HaveOccurred())

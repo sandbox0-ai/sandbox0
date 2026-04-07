@@ -18,7 +18,6 @@ func validateTemplateSpecForClaims(spec v1alpha1.SandboxTemplateSpec, claims *in
 	if claims != nil && claims.IsSystemToken() {
 		return nil
 	}
-	usesSharedVolumes := spec.UsesSharedVolumes()
 
 	if spec.Pod != nil {
 		return fmt.Errorf("spec.pod requires system identity")
@@ -28,9 +27,6 @@ func validateTemplateSpecForClaims(spec v1alpha1.SandboxTemplateSpec, claims *in
 	}
 	if strings.TrimSpace(spec.MainContainer.ImagePullPolicy) != "" {
 		return fmt.Errorf("spec.mainContainer.imagePullPolicy requires system identity")
-	}
-	if spec.RuntimeClassName != nil && !usesSharedVolumes {
-		return fmt.Errorf("spec.runtimeClassName requires system identity")
 	}
 	if spec.ClusterId != nil {
 		return fmt.Errorf("spec.clusterId requires system identity")
@@ -82,18 +78,6 @@ func validateTemplateSpec(spec v1alpha1.SandboxTemplateSpec) error {
 	}
 	if err := validateContainerMounts(spec.Sidecars, spec.SharedVolumes); err != nil {
 		return err
-	}
-	if spec.UsesSharedVolumes() {
-		runtimeClassName := ""
-		if spec.RuntimeClassName != nil {
-			runtimeClassName = strings.TrimSpace(*spec.RuntimeClassName)
-		}
-		if runtimeClassName == "" {
-			return fmt.Errorf("spec.sharedVolumes requires spec.runtimeClassName to reference a Kata runtime")
-		}
-		if !isKataRuntimeClassName(runtimeClassName) {
-			return fmt.Errorf("spec.runtimeClassName must reference a Kata runtime when spec.sharedVolumes is set")
-		}
 	}
 
 	if spec.Pool.MinIdle < 0 {
@@ -297,11 +281,6 @@ func configuredTeamTemplateMemoryPerCPU() resource.Quantity {
 func memoryForCPU(cpu, memoryPerCPU resource.Quantity) resource.Quantity {
 	requiredBytes := cpu.MilliValue() * memoryPerCPU.Value() / 1000
 	return *resource.NewQuantity(requiredBytes, resource.BinarySI)
-}
-
-func isKataRuntimeClassName(runtimeClassName string) bool {
-	trimmed := strings.ToLower(strings.TrimSpace(runtimeClassName))
-	return trimmed != "" && strings.Contains(trimmed, "kata")
 }
 
 func validateProbe(probe *corev1.Probe, field string) error {

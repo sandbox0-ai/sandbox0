@@ -1,6 +1,7 @@
 package http
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -40,6 +41,10 @@ func (s *Server) claimSandbox(c *gin.Context) {
 
 	resp, err := s.sandboxService.ClaimSandbox(c.Request.Context(), &req)
 	if err != nil {
+		if errors.Is(err, service.ErrInvalidClaimRequest) {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+			return
+		}
 		s.logger.Error("Failed to claim sandbox",
 			zap.String("template", req.Template),
 			zap.String("teamID", req.TeamID),

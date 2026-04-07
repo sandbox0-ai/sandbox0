@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"net"
 	"net/url"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -61,6 +62,7 @@ const (
 
 // errNoIdlePod is returned when no idle pod is available for claiming.
 var errNoIdlePod = errors.New("no idle pod available")
+var ErrInvalidClaimRequest = errors.New("invalid claim request")
 
 // claimIdlePodBackoff is the retry backoff for claiming idle pods.
 // Designed to balance between:
@@ -201,10 +203,37 @@ func (s *SandboxService) SetCredentialStore(store egressauth.BindingStore) {
 
 // ClaimRequest represents a sandbox claim request
 type ClaimRequest struct {
-	TeamID   string
-	UserID   string
-	Template string         `json:"template"`
-	Config   *SandboxConfig `json:"config,omitempty"`
+	TeamID             string
+	UserID             string
+	Template           string         `json:"template"`
+	Config             *SandboxConfig `json:"config,omitempty"`
+	Mounts             []ClaimMount   `json:"mounts,omitempty"`
+	WaitForMounts      bool           `json:"wait_for_mounts,omitempty"`
+	MountWaitTimeoutMs *int32         `json:"mount_wait_timeout_ms,omitempty"`
+}
+
+type ClaimMount struct {
+	SandboxVolumeID string             `json:"sandboxvolume_id"`
+	MountPoint      string             `json:"mount_point"`
+	VolumeConfig    *MountVolumeConfig `json:"volume_config,omitempty"`
+}
+
+type MountVolumeConfig struct {
+	CacheSize  string `json:"cache_size,omitempty"`
+	Prefetch   *int32 `json:"prefetch,omitempty"`
+	BufferSize string `json:"buffer_size,omitempty"`
+	Writeback  *bool  `json:"writeback,omitempty"`
+}
+
+type BootstrapMountStatus struct {
+	SandboxVolumeID     string `json:"sandboxvolume_id"`
+	MountPoint          string `json:"mount_point"`
+	State               string `json:"state"`
+	MountedAt           string `json:"mounted_at,omitempty"`
+	MountedDurationSecs int64  `json:"mounted_duration_sec,omitempty"`
+	MountSessionID      string `json:"mount_session_id,omitempty"`
+	ErrorCode           string `json:"error_code,omitempty"`
+	ErrorMessage        string `json:"error_message,omitempty"`
 }
 
 // SandboxConfig represents sandbox configuration
@@ -287,6 +316,68 @@ func setHardExpirationAnnotation(annotations map[string]string, now time.Time, h
 	annotations[controller.AnnotationHardExpiresAt] = hardExpiresAt.Format(time.RFC3339)
 }
 
+func validateClaimMounts(req *ClaimRequest) error {
+	if req == nil {
+		return nil
+	}
+	if req.MountWaitTimeoutMs != nil && *req.MountWaitTimeoutMs <= 0 {
+		return fmt.Errorf("%w: mount_wait_timeout_ms must be greater than zero", ErrInvalidClaimRequest)
+	}
+	seenVolumes := make(map[string]struct{}, len(req.Mounts))
+	seenMountPoints := make(map[string]string, len(req.Mounts))
+	for i := range req.Mounts {
+		mount := &req.Mounts[i]
+		if strings.TrimSpace(mount.SandboxVolumeID) == "" {
+			return fmt.Errorf("%w: mounts[%d].sandboxvolume_id is required", ErrInvalidClaimRequest, i)
+		}
+		cleanMountPoint := filepath.Clean(strings.TrimSpace(mount.MountPoint))
+		if !filepath.IsAbs(cleanMountPoint) || cleanMountPoint == string(filepath.Separator) || strings.Contains(cleanMountPoint, "..") {
+			return fmt.Errorf("%w: mounts[%d].mount_point is invalid", ErrInvalidClaimRequest, i)
+		}
+		if _, exists := seenVolumes[mount.SandboxVolumeID]; exists {
+			return fmt.Errorf("%w: duplicate sandboxvolume_id %q in claim mounts", ErrInvalidClaimRequest, mount.SandboxVolumeID)
+		}
+		if existing, exists := seenMountPoints[cleanMountPoint]; exists && existing != mount.SandboxVolumeID {
+			return fmt.Errorf("%w: duplicate mount_point %q in claim mounts", ErrInvalidClaimRequest, cleanMountPoint)
+		}
+		mount.SandboxVolumeID = strings.TrimSpace(mount.SandboxVolumeID)
+		mount.MountPoint = cleanMountPoint
+		seenVolumes[mount.SandboxVolumeID] = struct{}{}
+		seenMountPoints[cleanMountPoint] = mount.SandboxVolumeID
+	}
+	return nil
+}
+
+func claimMountWaitTimeout(req *ClaimRequest) time.Duration {
+	if req == nil || !req.WaitForMounts {
+		return 0
+	}
+	if req.MountWaitTimeoutMs != nil && *req.MountWaitTimeoutMs > 0 {
+		return time.Duration(*req.MountWaitTimeoutMs) * time.Millisecond
+	}
+	return 30 * time.Second
+}
+
+func toInitializeMountRequests(in []ClaimMount) []InitializeMountRequest {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]InitializeMountRequest, len(in))
+	for i := range in {
+		out[i] = InitializeMountRequest(in[i])
+	}
+	return out
+}
+
+func toBootstrapMountStatuses(in []BootstrapMountStatus) []BootstrapMountStatus {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]BootstrapMountStatus, 0, len(in))
+	out = append(out, in...)
+	return out
+}
+
 // WebhookConfig represents outbound webhook configuration.
 type WebhookConfig struct {
 	URL      string `json:"url"`
@@ -296,12 +387,13 @@ type WebhookConfig struct {
 
 // ClaimResponse represents a sandbox claim response
 type ClaimResponse struct {
-	SandboxID    string  `json:"sandbox_id"`
-	Status       string  `json:"status"`
-	ProcdAddress string  `json:"procd_address"`
-	PodName      string  `json:"pod_name"`
-	Template     string  `json:"template"`
-	ClusterId    *string `json:"cluster_id,omitempty"`
+	SandboxID       string                 `json:"sandbox_id"`
+	Status          string                 `json:"status"`
+	ProcdAddress    string                 `json:"procd_address"`
+	PodName         string                 `json:"pod_name"`
+	Template        string                 `json:"template"`
+	ClusterId       *string                `json:"cluster_id,omitempty"`
+	BootstrapMounts []BootstrapMountStatus `json:"bootstrap_mounts,omitempty"`
 }
 
 // ClaimSandbox claims a sandbox from the idle pool or creates a new one
@@ -313,6 +405,9 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		return nil, err
 	}
 	req.Template = canonicalTemplateID
+	if err := validateClaimMounts(req); err != nil {
+		return nil, err
+	}
 	s.logger.Info("Claiming sandbox",
 		zap.String("template", req.Template),
 		zap.String("teamID", req.TeamID),
@@ -422,17 +517,19 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	if err != nil {
 		return nil, fmt.Errorf("get procd address: %w", err)
 	}
-	if err := s.initializeProcd(ctx, pod, req, procdAddress); err != nil {
+	initResp, err := s.initializeProcd(ctx, pod, req, procdAddress)
+	if err != nil {
 		return nil, fmt.Errorf("initialize procd: %w", err)
 	}
 
 	return &ClaimResponse{
-		SandboxID:    pod.Name,
-		Status:       "starting",
-		ProcdAddress: procdAddress,
-		PodName:      pod.Name,
-		Template:     req.Template,
-		ClusterId:    template.Spec.ClusterId,
+		SandboxID:       pod.Name,
+		Status:          "starting",
+		ProcdAddress:    procdAddress,
+		PodName:         pod.Name,
+		Template:        req.Template,
+		ClusterId:       template.Spec.ClusterId,
+		BootstrapMounts: toBootstrapMountStatuses(initResp.BootstrapMounts),
 	}, nil
 }
 
@@ -1065,12 +1162,12 @@ func (s *SandboxService) initializeProcd(
 	pod *corev1.Pod,
 	req *ClaimRequest,
 	procdAddress string,
-) error {
+) (*InitializeResponse, error) {
 	if s.internalTokenGenerator == nil || s.procdTokenGenerator == nil {
-		return fmt.Errorf("token generators not configured, cannot authenticate with procd")
+		return nil, fmt.Errorf("token generators not configured, cannot authenticate with procd")
 	}
 	if pod == nil || req == nil {
-		return fmt.Errorf("missing sandbox context")
+		return nil, fmt.Errorf("missing sandbox context")
 	}
 
 	teamID := req.TeamID
@@ -1079,12 +1176,12 @@ func (s *SandboxService) initializeProcd(
 
 	internalToken, err := s.internalTokenGenerator.GenerateToken(teamID, userID, sandboxID)
 	if err != nil {
-		return fmt.Errorf("generate internal token: %w", err)
+		return nil, fmt.Errorf("generate internal token: %w", err)
 	}
 
 	procdToken, err := s.procdTokenGenerator.GenerateToken(teamID, userID, sandboxID)
 	if err != nil {
-		return fmt.Errorf("generate procd token: %w", err)
+		return nil, fmt.Errorf("generate procd token: %w", err)
 	}
 
 	webhookInfo := s.getWebhookInfo(req)
@@ -1098,15 +1195,22 @@ func (s *SandboxService) initializeProcd(
 	}
 
 	initReq := InitializeRequest{
-		SandboxID: sandboxID,
-		TeamID:    teamID,
-		Webhook:   webhookConfig,
+		SandboxID:          sandboxID,
+		TeamID:             teamID,
+		Webhook:            webhookConfig,
+		Mounts:             toInitializeMountRequests(req.Mounts),
+		WaitForMounts:      req.WaitForMounts,
+		MountWaitTimeoutMs: int32(claimMountWaitTimeout(req) / time.Millisecond),
 	}
 
 	var initErr error
+	var initResp *InitializeResponse
 	timeout := s.config.ProcdInitTimeout
 	if timeout == 0 {
 		timeout = 6 * time.Second
+	}
+	if waitTimeout := claimMountWaitTimeout(req); waitTimeout > timeout {
+		timeout = waitTimeout + time.Second
 	}
 
 	initCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -1116,14 +1220,14 @@ func (s *SandboxService) initializeProcd(
 	defer ticker.Stop()
 
 	for {
-		_, initErr = s.procdClient.Initialize(initCtx, procdAddress, initReq, internalToken, procdToken)
+		initResp, initErr = s.procdClient.Initialize(initCtx, procdAddress, initReq, internalToken, procdToken)
 		if initErr == nil {
-			return nil
+			return initResp, nil
 		}
 
 		select {
 		case <-initCtx.Done():
-			return fmt.Errorf("initialize procd timed out after %s: %w", timeout, initErr)
+			return nil, fmt.Errorf("initialize procd timed out after %s: %w", timeout, initErr)
 		case <-ticker.C:
 			continue
 		}

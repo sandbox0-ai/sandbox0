@@ -3605,7 +3605,34 @@ components:
           type: string
         config:
           $ref: "#/components/schemas/SandboxConfig"
+        mounts:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClaimMountRequest"
+        wait_for_mounts:
+          type: boolean
+          default: false
+          description: |
+            When true, claim waits best-effort for requested bootstrap mounts to
+            reach a terminal state before returning. The wait is bounded by
+            `mount_wait_timeout_ms`.
+        mount_wait_timeout_ms:
+          type: integer
+          format: int32
+          description: |
+            Optional best-effort wait budget in milliseconds for bootstrap
+            mounts when `wait_for_mounts` is true.
       required: []
+    ClaimMountRequest:
+      type: object
+      properties:
+        sandboxvolume_id:
+          type: string
+        mount_point:
+          type: string
+        volume_config:
+          $ref: "#/components/schemas/VolumeConfig"
+      required: [sandboxvolume_id, mount_point]
     SandboxConfig:
       type: object
       properties:
@@ -3707,6 +3734,10 @@ components:
         cluster_id:
           type: string
           nullable: true
+        bootstrap_mounts:
+          type: array
+          items:
+            $ref: "#/components/schemas/MountStatus"
       required: [sandbox_id, status, pod_name, template]
     SuccessClaimResponse:
       allOf:
@@ -4526,6 +4557,9 @@ components:
           type: string
         mount_point:
           type: string
+        state:
+          type: string
+          enum: [pending, mounting, mounted, failed]
         mounted_at:
           type: string
         mounted_duration_sec:
@@ -4533,6 +4567,11 @@ components:
           format: int64
         mount_session_id:
           type: string
+        error_code:
+          type: string
+        error_message:
+          type: string
+      required: [sandboxvolume_id, mount_point, state]
     SuccessMountResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"

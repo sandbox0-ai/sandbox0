@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -76,6 +77,65 @@ func TestClaimIdlePodClaimsReadyPod(t *testing.T) {
 	}
 	if got := pod.Labels[controller.LabelPoolType]; got != controller.PoolTypeActive {
 		t.Fatalf("pool-type = %q, want %q", got, controller.PoolTypeActive)
+	}
+}
+
+func TestValidateClaimMountsRejectsDuplicateVolume(t *testing.T) {
+	req := &ClaimRequest{
+		Mounts: []ClaimMount{
+			{SandboxVolumeID: "vol-1", MountPoint: "/workspace/a"},
+			{SandboxVolumeID: "vol-1", MountPoint: "/workspace/b"},
+		},
+	}
+
+	err := validateClaimMounts(req)
+	if err == nil {
+		t.Fatal("expected duplicate volume validation error")
+	}
+	if !errors.Is(err, ErrInvalidClaimRequest) {
+		t.Fatalf("expected ErrInvalidClaimRequest, got %v", err)
+	}
+}
+
+func TestValidateClaimMountsRejectsDuplicateMountPoint(t *testing.T) {
+	req := &ClaimRequest{
+		Mounts: []ClaimMount{
+			{SandboxVolumeID: "vol-1", MountPoint: "/workspace/data"},
+			{SandboxVolumeID: "vol-2", MountPoint: "/workspace/data"},
+		},
+	}
+
+	err := validateClaimMounts(req)
+	if err == nil {
+		t.Fatal("expected duplicate mount point validation error")
+	}
+	if !errors.Is(err, ErrInvalidClaimRequest) {
+		t.Fatalf("expected ErrInvalidClaimRequest, got %v", err)
+	}
+}
+
+func TestValidateClaimMountsNormalizesMountPoint(t *testing.T) {
+	req := &ClaimRequest{
+		Mounts: []ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: "/workspace/project/../data"}},
+	}
+
+	if err := validateClaimMounts(req); err != nil {
+		t.Fatalf("validateClaimMounts() error = %v", err)
+	}
+	if got := req.Mounts[0].MountPoint; got != "/workspace/data" {
+		t.Fatalf("mount point = %q, want %q", got, "/workspace/data")
+	}
+}
+
+func TestClaimMountWaitTimeoutDefaultsWhenEnabled(t *testing.T) {
+	got := claimMountWaitTimeout(&ClaimRequest{WaitForMounts: true})
+	if got != 30*time.Second {
+		t.Fatalf("claimMountWaitTimeout() = %s, want 30s", got)
+	}
+	custom := int32(2500)
+	got = claimMountWaitTimeout(&ClaimRequest{WaitForMounts: true, MountWaitTimeoutMs: &custom})
+	if got != 2500*time.Millisecond {
+		t.Fatalf("claimMountWaitTimeout() with override = %s, want 2500ms", got)
 	}
 }
 

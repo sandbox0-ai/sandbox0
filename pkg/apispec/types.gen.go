@@ -107,6 +107,14 @@ const (
 	Global GatewayMetadataGatewayMode = "global"
 )
 
+// Defines values for MountStatusState.
+const (
+	MountStatusStateFailed   MountStatusState = "failed"
+	MountStatusStateMounted  MountStatusState = "mounted"
+	MountStatusStateMounting MountStatusState = "mounting"
+	MountStatusStatePending  MountStatusState = "pending"
+)
+
 // Defines values for ProcessType.
 const (
 	Cmd  ProcessType = "cmd"
@@ -507,10 +515,10 @@ const (
 
 // Defines values for GetApiV1SandboxesParamsStatus.
 const (
-	Completed GetApiV1SandboxesParamsStatus = "completed"
-	Failed    GetApiV1SandboxesParamsStatus = "failed"
-	Running   GetApiV1SandboxesParamsStatus = "running"
-	Starting  GetApiV1SandboxesParamsStatus = "starting"
+	GetApiV1SandboxesParamsStatusCompleted GetApiV1SandboxesParamsStatus = "completed"
+	GetApiV1SandboxesParamsStatusFailed    GetApiV1SandboxesParamsStatus = "failed"
+	GetApiV1SandboxesParamsStatusRunning   GetApiV1SandboxesParamsStatus = "running"
+	GetApiV1SandboxesParamsStatusStarting  GetApiV1SandboxesParamsStatus = "starting"
 )
 
 // APIKey defines model for APIKey.
@@ -605,19 +613,37 @@ type ChangeRequest struct {
 // ChangeRequestEntryKind defines model for ChangeRequest.EntryKind.
 type ChangeRequestEntryKind string
 
+// ClaimMountRequest defines model for ClaimMountRequest.
+type ClaimMountRequest struct {
+	MountPoint      string        `json:"mount_point"`
+	SandboxvolumeId string        `json:"sandboxvolume_id"`
+	VolumeConfig    *VolumeConfig `json:"volume_config,omitempty"`
+}
+
 // ClaimRequest defines model for ClaimRequest.
 type ClaimRequest struct {
-	Config   *SandboxConfig `json:"config,omitempty"`
-	Template *string        `json:"template,omitempty"`
+	Config *SandboxConfig `json:"config,omitempty"`
+
+	// MountWaitTimeoutMs Optional best-effort wait budget in milliseconds for bootstrap
+	// mounts when `wait_for_mounts` is true.
+	MountWaitTimeoutMs *int32               `json:"mount_wait_timeout_ms,omitempty"`
+	Mounts             *[]ClaimMountRequest `json:"mounts,omitempty"`
+	Template           *string              `json:"template,omitempty"`
+
+	// WaitForMounts When true, claim waits best-effort for requested bootstrap mounts to
+	// reach a terminal state before returning. The wait is bounded by
+	// `mount_wait_timeout_ms`.
+	WaitForMounts *bool `json:"wait_for_mounts,omitempty"`
 }
 
 // ClaimResponse defines model for ClaimResponse.
 type ClaimResponse struct {
-	ClusterId *string `json:"cluster_id"`
-	PodName   string  `json:"pod_name"`
-	SandboxId string  `json:"sandbox_id"`
-	Status    string  `json:"status"`
-	Template  string  `json:"template"`
+	BootstrapMounts *[]MountStatus `json:"bootstrap_mounts,omitempty"`
+	ClusterId       *string        `json:"cluster_id"`
+	PodName         string         `json:"pod_name"`
+	SandboxId       string         `json:"sandbox_id"`
+	Status          string         `json:"status"`
+	Template        string         `json:"template"`
 }
 
 // ContainerSpec defines model for ContainerSpec.
@@ -1069,12 +1095,18 @@ type MountResponse struct {
 
 // MountStatus defines model for MountStatus.
 type MountStatus struct {
-	MountPoint         *string `json:"mount_point,omitempty"`
-	MountSessionId     *string `json:"mount_session_id,omitempty"`
-	MountedAt          *string `json:"mounted_at,omitempty"`
-	MountedDurationSec *int64  `json:"mounted_duration_sec,omitempty"`
-	SandboxvolumeId    *string `json:"sandboxvolume_id,omitempty"`
+	ErrorCode          *string          `json:"error_code,omitempty"`
+	ErrorMessage       *string          `json:"error_message,omitempty"`
+	MountPoint         string           `json:"mount_point"`
+	MountSessionId     *string          `json:"mount_session_id,omitempty"`
+	MountedAt          *string          `json:"mounted_at,omitempty"`
+	MountedDurationSec *int64           `json:"mounted_duration_sec,omitempty"`
+	SandboxvolumeId    string           `json:"sandboxvolume_id"`
+	State              MountStatusState `json:"state"`
 }
+
+// MountStatusState defines model for MountStatus.State.
+type MountStatusState string
 
 // MoveFileRequest defines model for MoveFileRequest.
 type MoveFileRequest struct {

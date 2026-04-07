@@ -55,10 +55,20 @@ type UnmountRequest struct {
 type MountStatus struct {
 	SandboxVolumeID     string `json:"sandboxvolume_id"`
 	MountPoint          string `json:"mount_point"`
+	State               string `json:"state"`
 	MountedAt           string `json:"mounted_at"`
 	MountedDurationSecs int64  `json:"mounted_duration_sec"`
 	MountSessionID      string `json:"mount_session_id"`
+	ErrorCode           string `json:"error_code,omitempty"`
+	ErrorMessage        string `json:"error_message,omitempty"`
 }
+
+const (
+	MountStatePending  = "pending"
+	MountStateMounting = "mounting"
+	MountStateMounted  = "mounted"
+	MountStateFailed   = "failed"
+)
 
 // TokenProvider supplies the internal token for storage-proxy gRPC calls.
 type TokenProvider interface {

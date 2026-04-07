@@ -122,6 +122,46 @@ s0 sandbox volume mount \\
   ]}
 />
 
+## Bootstrap Mounts During Claim
+
+If you already know which existing Volumes a sandbox should start with, you can include
+bootstrap mounts directly in the sandbox claim request.
+
+This is useful when a claimed sandbox should immediately open a pre-existing project
+workspace or dataset.
+
+The claim request accepts:
+
+- `mounts[]`: existing volumes to mount into the sandbox
+- `wait_for_mounts`: optional best-effort wait for the requested mounts to reach a terminal state
+- `mount_wait_timeout_ms`: optional wait budget for `wait_for_mounts`
+
+Cold-start note:
+
+- By default, claim-time mounts are asynchronous bootstrap work.
+- When `wait_for_mounts` is omitted or false, the claim API can return before mounts finish.
+- Use `/api/v1/sandboxes/{'{'}id{'}'}/sandboxvolumes/status` or the SDK claim response to inspect
+  mount state (`pending`, `mounting`, `mounted`, `failed`).
+
+Example request:
+
+```json
+{
+    "template": "default",
+    "mounts": [
+        {
+            "sandboxvolume_id": "vol_123",
+            "mount_point": "/workspace/data"
+        }
+    ],
+    "wait_for_mounts": true,
+    "mount_wait_timeout_ms": 30000
+}
+```
+
+The claim response now includes `bootstrap_mounts`, so callers can tell whether requested
+mounts are still pending, already mounted, or failed with an error.
+
 ## Override Performance Config at Mount Time
 
 You can specify different performance parameters than the Volume's default:

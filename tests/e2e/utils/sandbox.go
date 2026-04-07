@@ -79,27 +79,34 @@ func (s *Session) ListSandboxes(ctx context.Context, t ContractT, opts *ListSand
 }
 
 func (s *Session) ClaimSandbox(ctx context.Context, t ContractT, template string) (*apispec.ClaimResponse, error) {
+	req := apispec.ClaimRequest{Template: &template}
+	return s.ClaimSandboxWithRequest(ctx, t, req)
+}
+
+func (s *Session) ClaimSandboxWithRequest(ctx context.Context, t ContractT, req apispec.ClaimRequest) (*apispec.ClaimResponse, error) {
+	resp, _, err := s.ClaimSandboxDetailed(ctx, t, req)
+	return resp, err
+}
+
+func (s *Session) ClaimSandboxDetailed(ctx context.Context, t ContractT, req apispec.ClaimRequest) (*apispec.ClaimResponse, int, error) {
 	if s.teamID == "" || s.userID == "" {
-		return nil, fmt.Errorf("team or user id missing")
-	}
-	req := apispec.ClaimRequest{
-		Template: &template,
+		return nil, 0, fmt.Errorf("team or user id missing")
 	}
 	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodPost, "/api/v1/sandboxes", "/api/v1/sandboxes", req, true)
 	if err != nil {
-		return nil, err
+		return nil, status, err
 	}
 	if status != http.StatusCreated {
-		return nil, fmt.Errorf("claim sandbox failed with status %d: %s", status, formatAPIError(body))
+		return nil, status, fmt.Errorf("claim sandbox failed with status %d: %s", status, formatAPIError(body))
 	}
 	var resp apispec.SuccessClaimResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, err
+		return nil, status, err
 	}
 	if !resp.Success || resp.Data == nil || resp.Data.SandboxId == "" {
-		return nil, fmt.Errorf("claim sandbox response missing id")
+		return nil, status, fmt.Errorf("claim sandbox response missing id")
 	}
-	return resp.Data, nil
+	return resp.Data, status, nil
 }
 
 func (s *Session) DeleteSandbox(ctx context.Context, t ContractT, sandboxID string) error {

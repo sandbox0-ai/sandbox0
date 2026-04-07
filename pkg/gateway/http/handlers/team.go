@@ -352,7 +352,7 @@ func (h *TeamHandler) ListTeamMembers(c *gin.Context) {
 // AddTeamMemberRequest is the request body for adding a team member
 type AddTeamMemberRequest struct {
 	Email string `json:"email" binding:"required,email"`
-	Role  string `json:"role" binding:"required,oneof=admin developer viewer"`
+	Role  string `json:"role" binding:"required,oneof=admin developer builder viewer"`
 }
 
 // AddTeamMember adds a member to a team
@@ -422,7 +422,7 @@ func (h *TeamHandler) AddTeamMember(c *gin.Context) {
 
 // UpdateTeamMemberRequest is the request body for updating a team member
 type UpdateTeamMemberRequest struct {
-	Role string `json:"role" binding:"required,oneof=admin developer viewer"`
+	Role string `json:"role" binding:"required,oneof=admin developer builder viewer"`
 }
 
 // UpdateTeamMember updates a team member's role

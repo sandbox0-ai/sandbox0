@@ -70,6 +70,8 @@ const (
 	PermTemplateWrite  = "template:write"
 	PermTemplateDelete = "template:delete"
 
+	PermRegistryWrite = "registry:write"
+
 	PermCredentialSourceRead   = "credentialsource:read"
 	PermCredentialSourceWrite  = "credentialsource:write"
 	PermCredentialSourceDelete = "credentialsource:delete"
@@ -94,6 +96,7 @@ var RolePermissions = map[string][]string{
 		PermTemplateRead,
 		PermTemplateWrite,
 		PermTemplateDelete,
+		PermRegistryWrite,
 		PermCredentialSourceRead,
 		PermCredentialSourceWrite,
 		PermCredentialSourceDelete,
@@ -110,6 +113,7 @@ var RolePermissions = map[string][]string{
 		PermSandboxWrite,
 		PermSandboxDelete,
 		PermTemplateRead,
+		PermRegistryWrite,
 		PermCredentialSourceRead,
 		PermCredentialSourceWrite,
 		PermCredentialSourceDelete,
@@ -119,6 +123,10 @@ var RolePermissions = map[string][]string{
 		PermSandboxVolumeDelete,
 		PermSandboxVolumeFileRead,
 		PermSandboxVolumeFileWrite,
+	},
+	"builder": {
+		PermTemplateRead,
+		PermRegistryWrite,
 	},
 	"viewer": {
 		PermSandboxRead,

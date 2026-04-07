@@ -285,7 +285,7 @@ func (s *Server) setupRoutes() {
 		// Registry credentials are served by regional-gateway in control plane.
 		registry := api.Group("/v1/registry")
 		{
-			registry.POST("/credentials", s.authMiddleware.RequirePermission(authn.PermTemplateWrite), s.getRegistryCredentials)
+			registry.POST("/credentials", s.authMiddleware.RequirePermission(authn.PermRegistryWrite), s.getRegistryCredentials)
 		}
 
 		credentialSources := api.Group("/v1/credential-sources")

@@ -3442,14 +3442,14 @@ components:
           format: email
         role:
           type: string
-          enum: [admin, developer, viewer]
+          enum: [admin, developer, builder, viewer]
       required: [email, role]
     UpdateTeamMemberRequest:
       type: object
       properties:
         role:
           type: string
-          enum: [admin, developer, viewer]
+          enum: [admin, developer, builder, viewer]
       required: [role]
     SuccessTeamResponse:
       allOf:

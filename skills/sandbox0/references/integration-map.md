@@ -26,6 +26,9 @@ references/docs-src/
 │   ├── configuration/page.mdx
 │   ├── images/page.mdx
 │   └── pool/page.mdx
+├── integrations/
+│   ├── page.mdx
+│   └── github-ci/page.mdx
 ├── volume/
 │   ├── page.mdx
 │   ├── mounts/page.mdx

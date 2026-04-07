@@ -44,6 +44,10 @@ If a sidecar needs pod-shared storage, define it once under `spec.sharedVolumes`
 `sharedVolumes` only matters when more than one container in the template needs the same mounted volume. If the main container is the only consumer, regular claim-time mounts are usually enough.
 </Callout>
 
+<Callout variant="info">
+If your template logic lives entirely in a sidecar and the main container does not need to run interactive commands or REPL sessions, you can keep `mainContainer.image` minimal, for example `busybox:1.36`. Avoid floating tags such as `busybox:latest`, otherwise each refresh can trigger unexpected image pulls.
+</Callout>
+
 ---
 
 ## Shared Volumes For Sidecars
@@ -70,7 +74,7 @@ spec:
           writeback: true
     sidecars:
         - name: codex
-          image: ghcr.io/example/codex:latest
+          image: ghcr.io/example/codex:v1
           resources:
               cpu: "250m"
               memory: 1Gi
@@ -107,7 +111,7 @@ spec:
           mountPath: /workspace/shared
     sidecars:
         - name: codex
-          image: ghcr.io/example/codex:latest
+          image: ghcr.io/example/codex:v1
           resources:
               cpu: "250m"
               memory: 1Gi
@@ -151,7 +155,7 @@ In this example, the pod is not counted as ready warm capacity until the sidecar
     sandbox0.WithTemplateSidecar(
         sandbox0.TemplateSidecar(
             "codex",
-            "ghcr.io/example/codex:latest",
+            "ghcr.io/example/codex:v1",
             "250m",
             "1Gi",
             sandbox0.WithTemplateSidecarCommand("sh", "-lc", "/app/start-codex.sh"),
@@ -198,7 +202,7 @@ tpl = client.create_template(
             sidecars=[
                 sidecar(
                     "codex",
-                    "ghcr.io/example/codex:latest",
+                    "ghcr.io/example/codex:v1",
                     resources("250m", "1Gi"),
                     command=["sh", "-lc", "/app/start-codex.sh"],
                     mounts=[mount("workspace", "/shared")],
@@ -227,7 +231,7 @@ print(f"Template created: {tpl.template_id}")`
                 sharedVolume("workspace", "vol_123", "/workspace/shared", { writeback: true }),
             ],
             sidecars: [
-                sidecar("codex", "ghcr.io/example/codex:latest", resources("250m", "1Gi"), {
+                sidecar("codex", "ghcr.io/example/codex:v1", resources("250m", "1Gi"), {
                     command: ["sh", "-lc", "/app/start-codex.sh"],
                     mounts: [mount("workspace", "/shared")],
                     readinessProbe: {
@@ -261,7 +265,7 @@ spec:
           writeback: true
     sidecars:
         - name: codex
-          image: ghcr.io/example/codex:latest
+          image: ghcr.io/example/codex:v1
           resources:
               cpu: "250m"
               memory: 1Gi

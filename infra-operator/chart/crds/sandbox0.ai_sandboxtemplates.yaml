@@ -644,13 +644,16 @@ spec:
                       format: int32
                       type: integer
                     sandboxVolumeId:
+                      description: |-
+                        SandboxVolumeID optionally pins the shared volume to a fixed volume at
+                        template creation time. When omitted, claim-time mounts bind the shared
+                        volume by matching sharedVolumes[*].mountPath to mounts[*].mount_point.
                       type: string
                     writeback:
                       type: boolean
                   required:
                   - mountPath
                   - name
-                  - sandboxVolumeId
                   type: object
                 type: array
               sidecars:

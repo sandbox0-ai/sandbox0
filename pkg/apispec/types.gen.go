@@ -1614,7 +1614,7 @@ type SharedVolumeSpec struct {
 	MountPath       string  `json:"mountPath"`
 	Name            string  `json:"name"`
 	Prefetch        *int32  `json:"prefetch,omitempty"`
-	SandboxVolumeId string  `json:"sandboxVolumeId"`
+	SandboxVolumeId *string `json:"sandboxVolumeId,omitempty"`
 	Writeback       *bool   `json:"writeback,omitempty"`
 }
 

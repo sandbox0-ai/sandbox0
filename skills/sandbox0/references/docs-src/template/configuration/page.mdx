@@ -135,6 +135,8 @@ Commonly used sidecar fields:
 If a sidecar hosts your warm process, define readiness on the sidecar itself. A pod that is `Running` but not `Ready` does not count as available warm-pool capacity and will not be hot-claimed.
 </Callout>
 
+For end-to-end examples in Go, Python, TypeScript, and CLI, see [Template Sidecars](/docs/template/sidecars).
+
 ---
 
 ## Additional Template Fields
@@ -183,8 +185,6 @@ The following fields require a system-level token. They are not available to reg
 
 | Field | Description |
 |-------|-------------|
-| `sidecars.imagePullPolicy` | Pull policy override for sidecars. Requires system identity. |
-| `sidecars.securityContext.privileged` and related privileged settings | Privileged sidecar security settings. Require system identity. |
 | `pod.nodeSelector` | Pin sandbox pods to nodes matching specific labels. |
 | `pod.affinity` | Node and pod affinity/anti-affinity rules. |
 | `pod.tolerations` | Allow pods to be scheduled on tainted nodes. |
@@ -198,7 +198,9 @@ The following fields require a system-level token. They are not available to reg
 Attempting to set privileged fields without a system identity returns `403 Forbidden`. Contact your platform administrator if you need access to these fields.
 </Callout>
 
-Regular team-owned templates can still use non-privileged sidecars, including `command`, `args`, `env`, and Kubernetes probes such as `readinessProbe`.
+Regular team-owned templates can still use public sidecar fields such as `command`, `args`, `env`, `resources`, `securityContext.runAsUser`, `securityContext.runAsGroup`, `securityContext.capabilities.drop`, and Kubernetes probes such as `readinessProbe`.
+
+Operator-only Kubernetes-native sidecar fields that are not part of the public OpenAPI schema should not be relied on from the public SDKs.
 
 ---
 
@@ -219,6 +221,14 @@ Regular team-owned templates can still use non-privileged sidecars, including `c
     cta="Learn More"
   >
     Template API workflows and end-to-end examples
+  </LinkCard>
+
+  <LinkCard
+    title="Sidecars"
+    href="/docs/template/sidecars"
+    cta="Learn More"
+  >
+    Model warm helper processes with template-owned sidecars
   </LinkCard>
 
   <LinkCard

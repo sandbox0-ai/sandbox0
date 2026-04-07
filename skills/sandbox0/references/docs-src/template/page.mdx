@@ -13,7 +13,7 @@ Sandbox0 has two categories of templates:
 
 Builtin templates use curated public images and are ready to use immediately. Custom templates let you bring your own image, and fine-tune resources.
 
-Custom templates can also define sidecar containers. This is useful for template-owned warm processes, for example a long-running Codex agent or helper daemon. Pool capacity only counts pods that become Kubernetes-ready, so a sidecar readiness probe can gate whether a warm pod is claimable.
+Custom templates can also define sidecar containers. This is useful for template-owned warm processes, for example a long-running Codex agent or helper daemon. Pool capacity only counts pods that become Kubernetes-ready, so a sidecar readiness probe can gate whether a warm pod is claimable. See [Template Sidecars](/docs/template/sidecars) for the dedicated guide.
 
 ---
 
@@ -88,7 +88,7 @@ Use the sidecar readiness probe to express when the warm process is truly ready.
                 Memory: apispec.NewOptString("2Gi"),
             },
         }),
-        Sidecars: &[]apispec.SidecarContainerSpec{
+        Sidecars: []apispec.SidecarContainerSpec{
             {
                 Name:    "codex",
                 Image:   "ghcr.io/example/codex:latest",
@@ -498,6 +498,14 @@ console.log("Template deleted");`
     cta="Learn More"
   >
     Build and push private container images for your templates
+  </LinkCard>
+
+  <LinkCard
+    title="Sidecars"
+    href="/docs/template/sidecars"
+    cta="Learn More"
+  >
+    Model warm helper processes with template-owned sidecars
   </LinkCard>
 
   <LinkCard

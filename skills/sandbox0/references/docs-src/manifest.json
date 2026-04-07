@@ -80,6 +80,10 @@
           "title": "Warm Pool"
         },
         {
+          "slug": "sidecars",
+          "title": "Sidecars"
+        },
+        {
           "slug": "configuration",
           "title": "Configuration"
         }

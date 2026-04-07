@@ -21,6 +21,7 @@ import (
 	managerhttp "github.com/sandbox0-ai/sandbox0/manager/pkg/http"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/namespacepolicy"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
@@ -245,6 +246,95 @@ func TestCreateTemplateLegacyEnsuresNamespaceIngressBaseline(t *testing.T) {
 	}
 }
 
+func TestClaimSandboxPassesBootstrapMountsToProcd(t *testing.T) {
+	recorder := &initializeRequestRecorder{}
+	procdServer := newInitializeRecordingProcdServer(t, recorder, service.InitializeResponse{
+		SandboxID: "initialized",
+		BootstrapMounts: []service.BootstrapMountStatus{{
+			SandboxVolumeID: "vol-1",
+			MountPoint:      "/workspace/data",
+			State:           "mounted",
+			MountSessionID:  "session-1",
+		}},
+	})
+	t.Cleanup(procdServer.Close)
+
+	procdClient := newProcdClientForURL(t, procdServer.URL)
+	privateKey, _, err := createInternalKeys()
+	utils.RequireNoError(t, err, "create procd keys")
+	procdGen := internalauth.NewGenerator(internalauth.DefaultGeneratorConfig("manager", privateKey))
+
+	env := newManagerTestEnvWithOptions(t, managerTestEnvOptions{
+		sandboxConfig: service.SandboxServiceConfig{
+			DefaultTTL:             time.Hour,
+			PauseMinMemoryRequest:  "10Mi",
+			PauseMinMemoryLimit:    "32Mi",
+			PauseMemoryBufferRatio: 1.1,
+			PauseMinCPU:            "10m",
+			ProcdPort:              49983,
+			ProcdClientTimeout:     5 * time.Second,
+			ProcdInitTimeout:       5 * time.Second,
+		},
+		internalTokenGenerator: service.NewInternalTokenGenerator(procdGen),
+		procdTokenGenerator:    service.NewProcdTokenGenerator(procdGen),
+		procdClient:            procdClient,
+	})
+
+	templateName := "claim-bootstrap"
+	resp, body := doRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/internal/v1/templates", env.token, map[string]any{
+		"metadata": map[string]any{"name": templateName},
+		"spec":     map[string]any{},
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create template status = %d, body = %s", resp.StatusCode, string(body))
+	}
+
+	namespace, err := naming.TemplateNamespaceForBuiltin(templateName)
+	utils.RequireNoError(t, err, "resolve template namespace")
+	addIdleReadyPod(t, env, namespace, "idle-bootstrap", templateName, "10.0.0.10")
+
+	resp, body = doRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/api/v1/sandboxes", env.token, map[string]any{
+		"template": templateName,
+		"mounts": []map[string]any{{
+			"sandboxvolume_id": "vol-1",
+			"mount_point":      "/workspace/data",
+		}},
+		"wait_for_mounts":       true,
+		"mount_wait_timeout_ms": 1500,
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("claim status = %d, body = %s", resp.StatusCode, string(body))
+	}
+
+	claimResp, errInfo, err := spec.DecodeResponse[service.ClaimResponse](bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("decode claim response: %v", err)
+	}
+	if errInfo != nil {
+		t.Fatalf("unexpected claim error: %+v", errInfo)
+	}
+	if claimResp == nil || len(claimResp.BootstrapMounts) != 1 {
+		t.Fatalf("bootstrap mounts = %+v, want 1 entry", claimResp)
+	}
+	if claimResp.BootstrapMounts[0].State != "mounted" {
+		t.Fatalf("claim bootstrap state = %q, want mounted", claimResp.BootstrapMounts[0].State)
+	}
+
+	initReq := recorder.Get()
+	if !initReq.WaitForMounts {
+		t.Fatal("expected wait_for_mounts to be forwarded")
+	}
+	if initReq.MountWaitTimeoutMs != 1500 {
+		t.Fatalf("mount_wait_timeout_ms = %d, want 1500", initReq.MountWaitTimeoutMs)
+	}
+	if len(initReq.Mounts) != 1 {
+		t.Fatalf("initialize mounts = %d, want 1", len(initReq.Mounts))
+	}
+	if initReq.Mounts[0].SandboxVolumeID != "vol-1" || initReq.Mounts[0].MountPoint != "/workspace/data" {
+		t.Fatalf("unexpected initialize mount payload: %+v", initReq.Mounts[0])
+	}
+}
+
 type testTemplateLister struct {
 	client clientset.Interface
 }
@@ -318,6 +408,60 @@ func addSandboxPod(t *testing.T, env *managerTestEnv, name, teamID, userID strin
 	_, err := env.k8sClient.CoreV1().Pods(pod.Namespace).Create(context.Background(), pod, metav1.CreateOptions{})
 	utils.RequireNoError(t, err, "create pod in fake client")
 	utils.RequireNoError(t, env.podIndexer.Add(pod), "add pod to indexer")
+}
+
+func addIdleReadyPod(t *testing.T, env *managerTestEnv, namespace, name, templateID, podIP string) {
+	t.Helper()
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels: map[string]string{
+				controller.LabelTemplateID: templateID,
+				controller.LabelPoolType:   controller.PoolTypeIdle,
+			},
+			ResourceVersion: "1",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: podIP,
+			Conditions: []corev1.PodCondition{{
+				Type:   corev1.PodReady,
+				Status: corev1.ConditionTrue,
+			}},
+		},
+	}
+	_, err := env.k8sClient.CoreV1().Pods(namespace).Create(context.Background(), pod, metav1.CreateOptions{})
+	utils.RequireNoError(t, err, "create ready idle pod in fake client")
+	utils.RequireNoError(t, env.podIndexer.Add(pod), "add ready idle pod to indexer")
+}
+
+type initializeRequestRecorder struct {
+	request service.InitializeRequest
+}
+
+func (r *initializeRequestRecorder) Set(req service.InitializeRequest) {
+	r.request = req
+}
+
+func (r *initializeRequestRecorder) Get() service.InitializeRequest {
+	return r.request
+}
+
+func newInitializeRecordingProcdServer(t *testing.T, recorder *initializeRequestRecorder, response service.InitializeResponse) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/initialize", func(w http.ResponseWriter, r *http.Request) {
+		var req service.InitializeRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode initialize request: %v", err)
+		}
+		if recorder != nil {
+			recorder.Set(req)
+		}
+		_ = spec.WriteSuccess(w, http.StatusOK, response)
+	})
+	return httptest.NewServer(mux)
 }
 
 type rewriteTransport struct {

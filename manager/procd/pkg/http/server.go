@@ -151,7 +151,7 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/contexts/{id}/ws", contextHandler.WebSocket).Methods("GET")
 
 	// Initialize handler
-	initializeHandler := handlers.NewInitializeHandler(s.webhookDispatcher, s.fileManager, s.cfg.HTTPPort, s.logger)
+	initializeHandler := handlers.NewInitializeHandler(s.webhookDispatcher, s.fileManager, s.volumeManager, s.cfg.HTTPPort, s.logger)
 	api.HandleFunc("/initialize", initializeHandler.Initialize).Methods("POST")
 
 	// SandboxVolume handlers

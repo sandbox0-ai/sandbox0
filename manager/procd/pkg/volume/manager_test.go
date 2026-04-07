@@ -1,6 +1,7 @@
 package volume
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -100,5 +101,41 @@ func TestStatusDuration(t *testing.T) {
 	}
 	if status[0].MountedDurationSecs < 1 {
 		t.Fatalf("expected mounted duration")
+	}
+}
+
+func TestBootstrapMountsRejectsDuplicateMountPoint(t *testing.T) {
+	manager := NewManager(&Config{}, nil, nil)
+	_, err := manager.BootstrapMounts(context.Background(), []MountRequest{
+		{SandboxVolumeID: "vol-1", MountPoint: "/tmp/one"},
+		{SandboxVolumeID: "vol-2", MountPoint: "/tmp/one"},
+	}, false, 0)
+	if err != ErrMountPointInUse {
+		t.Fatalf("BootstrapMounts() error = %v, want %v", err, ErrMountPointInUse)
+	}
+}
+
+func TestBootstrapMountsWaitReturnsFailedStatus(t *testing.T) {
+	manager := NewManager(&Config{}, staticTokenProvider{}, nil)
+	status, err := manager.BootstrapMounts(context.Background(), []MountRequest{{
+		SandboxVolumeID: "vol-1",
+		SandboxID:       "sandbox-1",
+		MountPoint:      t.TempDir(),
+	}}, true, 2*time.Second)
+	if err != nil {
+		t.Fatalf("BootstrapMounts() error = %v", err)
+	}
+	if len(status) != 1 {
+		t.Fatalf("BootstrapMounts() returned %d statuses, want 1", len(status))
+	}
+	if status[0].State != MountStateFailed {
+		t.Fatalf("status state = %q, want %q", status[0].State, MountStateFailed)
+	}
+	if status[0].ErrorCode != "mount_failed" {
+		t.Fatalf("error code = %q, want %q", status[0].ErrorCode, "mount_failed")
+	}
+	all := manager.GetStatus()
+	if len(all) != 1 || all[0].State != MountStateFailed {
+		t.Fatalf("GetStatus() = %+v, want failed bootstrap mount", all)
 	}
 }

@@ -153,7 +153,9 @@ type wsOutputMessage struct {
 
 type wsDoneMessage struct {
 	Type      string `json:"type"`
-	RequestID string `json:"request_id"`
+	RequestID string `json:"request_id,omitempty"`
+	ExitCode  *int   `json:"exit_code,omitempty"`
+	State     string `json:"state,omitempty"`
 }
 
 type execError struct {
@@ -176,11 +178,38 @@ func newWSOutputMessage(source process.OutputSource, data string) wsOutputMessag
 	}
 }
 
-func newWSDoneMessage(requestID string) wsDoneMessage {
+func newWSRequestDoneMessage(requestID string) wsDoneMessage {
 	return wsDoneMessage{
 		Type:      "done",
 		RequestID: requestID,
 	}
+}
+
+func newWSProcessDoneMessage(exitCode int, state process.ProcessState) wsDoneMessage {
+	code := exitCode
+	return wsDoneMessage{
+		Type:     "done",
+		ExitCode: &code,
+		State:    string(state),
+	}
+}
+
+func processDoneMessageForProcess(proc process.Process) (wsDoneMessage, bool) {
+	if proc == nil || !proc.IsFinished() {
+		return wsDoneMessage{}, false
+	}
+	exitCode, err := proc.ExitCode()
+	if err != nil {
+		return wsDoneMessage{}, false
+	}
+	return newWSProcessDoneMessage(exitCode, proc.State()), true
+}
+
+func processDoneMessage(exitEvent *process.ExitEvent, proc process.Process) (wsDoneMessage, bool) {
+	if exitEvent != nil {
+		return newWSProcessDoneMessage(exitEvent.ExitCode, exitEvent.State), true
+	}
+	return processDoneMessageForProcess(proc)
 }
 
 // List lists all contexts.
@@ -731,13 +760,30 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 				_ = conn.WriteJSON(newWSOutputMessage(process.OutputSourceStderr, stderr))
 			}
 		}
+		if doneMsg, ok := processDoneMessageForProcess(ctx.MainProcess); ok {
+			_ = conn.WriteJSON(doneMsg)
+		}
 		closeConn("context finished")
 		return
 	}
 
+	var exitMu sync.Mutex
+	var exitEvent *process.ExitEvent
 	ctx.AddExitHandler(func(event process.ExitEvent) {
-		go closeConn("context exited")
+		copied := event
+		exitMu.Lock()
+		exitEvent = &copied
+		exitMu.Unlock()
 	})
+	currentExitEvent := func() *process.ExitEvent {
+		exitMu.Lock()
+		defer exitMu.Unlock()
+		if exitEvent == nil {
+			return nil
+		}
+		copied := *exitEvent
+		return &copied
+	}
 
 	var pendingMu sync.Mutex
 	pendingRequestID := ""
@@ -768,6 +814,12 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 				return
 			case output, ok := <-outputCh:
 				if !ok {
+					if doneMsg, ok := processDoneMessage(currentExitEvent(), ctx.MainProcess); ok {
+						if err := conn.WriteJSON(doneMsg); err != nil {
+							closeConn("websocket write failed")
+							return
+						}
+					}
 					closeConn("context output closed")
 					return
 				}
@@ -776,7 +828,7 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 					if requestID == "" {
 						continue
 					}
-					if err := conn.WriteJSON(newWSDoneMessage(requestID)); err != nil {
+					if err := conn.WriteJSON(newWSRequestDoneMessage(requestID)); err != nil {
 						closeConn("websocket write failed")
 						return
 					}

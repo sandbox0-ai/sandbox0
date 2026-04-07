@@ -5,38 +5,57 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 	"unsafe"
 
 	"github.com/gorilla/mux"
+	"github.com/gorilla/websocket"
 	ctxpkg "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/context"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process"
 	"go.uber.org/zap"
 )
 
 type fakeProcess struct {
-	outputCh chan process.ProcessOutput
-	onWrite  func([]byte)
-	finished bool
+	outputCh     chan process.ProcessOutput
+	onWrite      func([]byte)
+	finished     bool
+	exitCode     int
+	state        process.ProcessState
+	processType  process.ProcessType
+	exitHandlers []process.ExitHandler
 }
 
-func (f *fakeProcess) ID() string                           { return "proc-test" }
-func (f *fakeProcess) Type() process.ProcessType            { return process.ProcessTypeREPL }
-func (f *fakeProcess) PID() int                             { return 1 }
-func (f *fakeProcess) Start() error                         { return nil }
-func (f *fakeProcess) Stop() error                          { return nil }
-func (f *fakeProcess) Restart() error                       { return nil }
-func (f *fakeProcess) IsRunning() bool                      { return true }
-func (f *fakeProcess) IsFinished() bool                     { return f.finished }
-func (f *fakeProcess) State() process.ProcessState          { return process.ProcessStateRunning }
+func (f *fakeProcess) ID() string { return "proc-test" }
+func (f *fakeProcess) Type() process.ProcessType {
+	if f.processType == "" {
+		return process.ProcessTypeREPL
+	}
+	return f.processType
+}
+func (f *fakeProcess) PID() int         { return 1 }
+func (f *fakeProcess) Start() error     { return nil }
+func (f *fakeProcess) Stop() error      { return nil }
+func (f *fakeProcess) Restart() error   { return nil }
+func (f *fakeProcess) IsRunning() bool  { return true }
+func (f *fakeProcess) IsFinished() bool { return f.finished }
+func (f *fakeProcess) State() process.ProcessState {
+	if f.state == "" {
+		return process.ProcessStateRunning
+	}
+	return f.state
+}
 func (f *fakeProcess) AddStartHandler(process.StartHandler) {}
-func (f *fakeProcess) AddExitHandler(process.ExitHandler)   {}
-func (f *fakeProcess) Pause() error                         { return nil }
-func (f *fakeProcess) Resume() error                        { return nil }
-func (f *fakeProcess) IsPaused() bool                       { return false }
+func (f *fakeProcess) AddExitHandler(handler process.ExitHandler) {
+	f.exitHandlers = append(f.exitHandlers, handler)
+}
+func (f *fakeProcess) Pause() error   { return nil }
+func (f *fakeProcess) Resume() error  { return nil }
+func (f *fakeProcess) IsPaused() bool { return false }
 func (f *fakeProcess) WriteInput(data []byte) error {
 	if f.onWrite != nil {
 		f.onWrite(data)
@@ -46,8 +65,19 @@ func (f *fakeProcess) WriteInput(data []byte) error {
 func (f *fakeProcess) ReadOutput() <-chan process.ProcessOutput { return f.outputCh }
 func (f *fakeProcess) ResizePTY(process.PTYSize) error          { return nil }
 func (f *fakeProcess) SendSignal(syscall.Signal) error          { return nil }
-func (f *fakeProcess) ExitCode() (int, error)                   { return 0, nil }
+func (f *fakeProcess) ExitCode() (int, error)                   { return f.exitCode, nil }
 func (f *fakeProcess) ResourceUsage() process.ResourceUsage     { return process.ResourceUsage{} }
+
+func (f *fakeProcess) triggerExit(event process.ExitEvent) {
+	f.finished = true
+	f.exitCode = event.ExitCode
+	f.state = event.State
+	for _, handler := range f.exitHandlers {
+		if handler != nil {
+			handler(event)
+		}
+	}
+}
 
 func attachContext(manager *ctxpkg.Manager, ctx *ctxpkg.Context) {
 	managerValue := reflect.ValueOf(manager).Elem()
@@ -291,11 +321,93 @@ func TestNewWSOutputMessage(t *testing.T) {
 }
 
 func TestNewWSDoneMessage(t *testing.T) {
-	msg := newWSDoneMessage("req-1")
+	msg := newWSRequestDoneMessage("req-1")
 	if msg.Type != "done" {
 		t.Fatalf("type = %q, want %q", msg.Type, "done")
 	}
 	if msg.RequestID != "req-1" {
 		t.Fatalf("request_id = %q, want %q", msg.RequestID, "req-1")
+	}
+	if msg.ExitCode != nil {
+		t.Fatal("exit_code should be nil for request done")
+	}
+	if msg.State != "" {
+		t.Fatal("state should be empty for request done")
+	}
+}
+
+func TestNewWSProcessDoneMessage(t *testing.T) {
+	msg := newWSProcessDoneMessage(0, process.ProcessStateStopped)
+	if msg.Type != "done" {
+		t.Fatalf("type = %q, want %q", msg.Type, "done")
+	}
+	if msg.RequestID != "" {
+		t.Fatalf("request_id = %q, want empty", msg.RequestID)
+	}
+	if msg.ExitCode == nil || *msg.ExitCode != 0 {
+		t.Fatalf("exit_code = %#v, want 0", msg.ExitCode)
+	}
+	if msg.State != string(process.ProcessStateStopped) {
+		t.Fatalf("state = %q, want %q", msg.State, process.ProcessStateStopped)
+	}
+}
+
+func TestWebSocketSendsProcessDoneMessage(t *testing.T) {
+	outputCh := make(chan process.ProcessOutput, 2)
+	proc := &fakeProcess{
+		outputCh:    outputCh,
+		processType: process.ProcessTypeCMD,
+	}
+	handler, ctx := newHandlerWithContext(proc, process.ProcessTypeCMD)
+
+	router := mux.NewRouter()
+	router.HandleFunc("/contexts/{id}/ws", handler.WebSocket)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("url.Parse() error = %v", err)
+	}
+	wsURL.Scheme = "ws"
+	wsURL.Path = "/contexts/" + ctx.ID + "/ws"
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL.String(), nil)
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer conn.Close()
+
+	outputCh <- process.ProcessOutput{Source: process.OutputSourceStdout, Data: []byte("done\n")}
+	proc.triggerExit(process.ExitEvent{ExitCode: 7, State: process.ProcessStateCrashed})
+	close(outputCh)
+
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var messages []map[string]any
+	for {
+		var msg map[string]any
+		if err := conn.ReadJSON(&msg); err != nil {
+			if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
+				break
+			}
+			t.Fatalf("ReadJSON() error = %v", err)
+		}
+		messages = append(messages, msg)
+	}
+
+	if len(messages) != 2 {
+		t.Fatalf("messages length = %d, want 2", len(messages))
+	}
+	if got := messages[0]["type"]; got != "output" {
+		t.Fatalf("first message type = %v, want output", got)
+	}
+	if got := messages[1]["type"]; got != "done" {
+		t.Fatalf("second message type = %v, want done", got)
+	}
+	if got := messages[1]["exit_code"]; got != float64(7) {
+		t.Fatalf("exit_code = %v, want 7", got)
+	}
+	if got := messages[1]["state"]; got != string(process.ProcessStateCrashed) {
+		t.Fatalf("state = %v, want %q", got, process.ProcessStateCrashed)
 	}
 }

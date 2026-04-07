@@ -1632,6 +1632,7 @@ paths:
         Server messages (JSON):
         - { "type": "output", "source": "stdout", "data": "hello\n" }
         - { "type": "done", "request_id": "req-1" }
+        - { "type": "done", "exit_code": 0, "state": "stopped" }
       security:
         - bearerAuth: []
       x-upstream-service: procd
@@ -4498,7 +4499,15 @@ components:
           enum: [done]
         request_id:
           type: string
-      required: [type, request_id]
+          description: Present for request-scoped REPL completion events.
+        exit_code:
+          type: integer
+          format: int32
+          description: Present when the underlying process has exited.
+        state:
+          type: string
+          description: Final process state when the underlying process has exited.
+      required: [type]
     MountRequest:
       type: object
       properties:

@@ -90,6 +90,14 @@ Pin `@main` to a release tag after the first `s0` release that includes these Gi
 
 The push step obtains temporary registry credentials from Sandbox0 automatically. You do not need to manage a long-lived `docker login` secret for the Sandbox0 registry.
 
+## Next steps
+
+1. Create a dedicated Sandbox0 API key for GitHub Actions.
+2. Grant the key the `builder` role if the workflow only needs image push.
+3. Add `SANDBOX0_BASE_URL` and `SANDBOX0_TOKEN` to GitHub repository or environment secrets.
+4. After the next `s0` release, replace `@main` with the published release tag in your workflow.
+5. Use the pushed `Template image reference` output in your Sandbox0 template definition.
+
 ## How image push works
 
 `s0 template image push` performs these steps:

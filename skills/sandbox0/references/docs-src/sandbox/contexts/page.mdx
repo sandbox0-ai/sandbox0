@@ -290,6 +290,65 @@ process.stdout.write(cmdResult.outputRaw);`
   ]}
 />
 
+### Streaming Cmd Output
+
+Use the streaming helpers when you want command output as it is produced instead of waiting for a final `output_raw` response.
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `stream, err := sandbox.CmdStream(
+    ctx,
+    "sh -c 'echo hello && echo warn >&2'",
+    sandbox0.WithCommand([]string{"sh", "-c", "echo hello && echo warn >&2"}),
+)
+if err != nil {
+    log.Fatal(err)
+}
+defer stream.Close()
+
+for {
+    output, err := stream.Recv()
+    if err != nil {
+        break
+    }
+    fmt.Print(output.Data)
+}`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0 import CmdOptions
+
+stream = sandbox.cmd_stream(
+    "sh -c 'echo hello && echo warn >&2'",
+    CmdOptions(command=["sh", "-c", "echo hello && echo warn >&2"]),
+)
+
+for output in stream.iter_outputs():
+    print(output.data, end="")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const stream = await sandbox.cmdStream("sh -c 'echo hello && echo warn >&2'", {
+    command: ['sh', '-c', 'echo hello && echo warn >&2'],
+});
+
+for await (const output of stream.outputs()) {
+    process.stdout.write(output.data);
+}`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 sandbox exec sb_abc123 --stream -- sh -c 'echo hello && echo warn >&2'`
+    }
+  ]}
+/>
+
 ---
 
 ## Create Context
@@ -782,7 +841,8 @@ For real-time I/O, connect to a context via WebSocket.
 
 | Type | Description | Example |
 |------|-------------|---------|
-| `output` | Process output (`stdout` / `stderr` / `pty`) | `{"source": "stdout", "data": "hello\n"}` |
+| `output` | Process output (`stdout` / `stderr` / `pty`) | `{"type": "output", "source": "stdout", "data": "hello\n"}` |
+| `done` | Completion marker for a request identified by `request_id` | `{"type": "done", "request_id": "req-1"}` |
 
 <Tabs
   tabs={[
@@ -823,10 +883,14 @@ for {
         break
     }
     var msg struct {
+        Type   string \`json:"type"\`
         Source string \`json:"source"\`
         Data   string \`json:"data"\`
     }
     json.Unmarshal(message, &msg)
+    if msg.Type != "output" {
+        continue
+    }
     fmt.Print(msg.Data)
 }`
     },

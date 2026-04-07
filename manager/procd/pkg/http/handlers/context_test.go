@@ -276,3 +276,26 @@ func TestGetContext_EncodesNilEnvVarsAsEmptyObject(t *testing.T) {
 		t.Fatalf("response body does not contain empty object env_vars: %s", rec.Body.String())
 	}
 }
+
+func TestNewWSOutputMessage(t *testing.T) {
+	msg := newWSOutputMessage(process.OutputSourcePTY, "hello")
+	if msg.Type != "output" {
+		t.Fatalf("type = %q, want %q", msg.Type, "output")
+	}
+	if msg.Source != "pty" {
+		t.Fatalf("source = %q, want %q", msg.Source, "pty")
+	}
+	if msg.Data != "hello" {
+		t.Fatalf("data = %q, want %q", msg.Data, "hello")
+	}
+}
+
+func TestNewWSDoneMessage(t *testing.T) {
+	msg := newWSDoneMessage("req-1")
+	if msg.Type != "done" {
+		t.Fatalf("type = %q, want %q", msg.Type, "done")
+	}
+	if msg.RequestID != "req-1" {
+		t.Fatalf("request_id = %q, want %q", msg.RequestID, "req-1")
+	}
+}

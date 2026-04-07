@@ -145,6 +145,17 @@ type wsControlMessage struct {
 	RequestID string `json:"request_id"`
 }
 
+type wsOutputMessage struct {
+	Type   string `json:"type"`
+	Source string `json:"source"`
+	Data   string `json:"data"`
+}
+
+type wsDoneMessage struct {
+	Type      string `json:"type"`
+	RequestID string `json:"request_id"`
+}
+
 type execError struct {
 	status  int
 	code    string
@@ -156,6 +167,21 @@ func (e *execError) Error() string {
 }
 
 const execTimeout = 30 * time.Second
+
+func newWSOutputMessage(source process.OutputSource, data string) wsOutputMessage {
+	return wsOutputMessage{
+		Type:   "output",
+		Source: string(source),
+		Data:   data,
+	}
+}
+
+func newWSDoneMessage(requestID string) wsDoneMessage {
+	return wsDoneMessage{
+		Type:      "done",
+		RequestID: requestID,
+	}
+}
 
 // List lists all contexts.
 func (h *ContextHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -699,16 +725,10 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 		if outputProvider, ok := ctx.MainProcess.(process.OutputProvider); ok {
 			stdout, stderr := outputProvider.GetOutput()
 			if stdout != "" {
-				_ = conn.WriteJSON(map[string]any{
-					"source": string(process.OutputSourceStdout),
-					"data":   stdout,
-				})
+				_ = conn.WriteJSON(newWSOutputMessage(process.OutputSourceStdout, stdout))
 			}
 			if stderr != "" {
-				_ = conn.WriteJSON(map[string]any{
-					"source": string(process.OutputSourceStderr),
-					"data":   stderr,
-				})
+				_ = conn.WriteJSON(newWSOutputMessage(process.OutputSourceStderr, stderr))
 			}
 		}
 		closeConn("context finished")
@@ -756,14 +776,15 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 					if requestID == "" {
 						continue
 					}
+					if err := conn.WriteJSON(newWSDoneMessage(requestID)); err != nil {
+						closeConn("websocket write failed")
+						return
+					}
 					ctx.Touch()
 					continue
 				}
 
-				msg := map[string]any{
-					"source": string(output.Source),
-					"data":   string(output.Data),
-				}
+				msg := newWSOutputMessage(output.Source, string(output.Data))
 
 				if err := conn.WriteJSON(msg); err != nil {
 					closeConn("websocket write failed")

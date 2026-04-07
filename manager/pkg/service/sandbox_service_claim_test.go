@@ -125,6 +125,32 @@ func TestWaitForPodReadyTimesOut(t *testing.T) {
 	}
 }
 
+func TestWaitForPodReadyWaitsForPodToAppear(t *testing.T) {
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	svc := &SandboxService{
+		podLister: corelisters.NewPodLister(indexer),
+		config: SandboxServiceConfig{
+			ProcdInitTimeout: 100 * time.Millisecond,
+		},
+	}
+
+	pod := newClaimTestPod("ns-a", "cold-pod", "template-a", true)
+	go func() {
+		time.Sleep(80 * time.Millisecond)
+		if err := indexer.Add(pod); err != nil {
+			t.Errorf("add pod: %v", err)
+		}
+	}()
+
+	readyPod, err := svc.waitForPodReady(context.Background(), pod.Namespace, pod.Name)
+	if err != nil {
+		t.Fatalf("waitForPodReady() error = %v", err)
+	}
+	if readyPod.Name != pod.Name {
+		t.Fatalf("waitForPodReady() returned %q, want %q", readyPod.Name, pod.Name)
+	}
+}
+
 func TestValidateClaimMountsRejectsDuplicateVolume(t *testing.T) {
 	req := &ClaimRequest{
 		Mounts: []ClaimMount{

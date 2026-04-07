@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
 )
@@ -65,6 +66,23 @@ func (s *Session) DeleteSandboxVolume(ctx context.Context, t ContractT, volumeID
 		return status, fmt.Errorf("delete sandbox volume failed with status %d: %s", status, formatAPIError(body))
 	}
 	return status, nil
+}
+
+func (s *Session) DeleteSandboxVolumeEventually(ctx context.Context, t ContractT, volumeID string, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		status, err := s.DeleteSandboxVolume(ctx, t, volumeID)
+		if err == nil || status == http.StatusNotFound {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 func (s *Session) CreateSnapshot(ctx context.Context, t ContractT, volumeID string, req apispec.CreateSnapshotRequest) (*apispec.Snapshot, int, error) {

@@ -1931,6 +1931,14 @@ func (s *SandboxService) waitForPodReady(ctx context.Context, namespace, name st
 	for {
 		pod, err := s.podLister.Pods(namespace).Get(name)
 		if err != nil {
+			if k8serrors.IsNotFound(err) {
+				select {
+				case <-readyCtx.Done():
+					return nil, fmt.Errorf("pod %s/%s not visible after %s", namespace, name, timeout)
+				case <-ticker.C:
+					continue
+				}
+			}
 			return nil, fmt.Errorf("get pod for readiness: %w", err)
 		}
 		if controller.IsPodReady(pod) {

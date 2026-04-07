@@ -1415,7 +1415,7 @@ func assertClaimBootstrapMountLifecycle(env *framework.ScenarioEnv, session *e2e
 	Expect(volume).NotTo(BeNil())
 	volumeID := expectStringPtr(volume.Id, "volume id")
 	DeferCleanup(func() {
-		_, _ = session.DeleteSandboxVolume(env.TestCtx.Context, GinkgoT(), volumeID)
+		Expect(session.DeleteSandboxVolumeEventually(env.TestCtx.Context, GinkgoT(), volumeID, 30*time.Second)).To(Succeed())
 	})
 
 	seedPath := "/claim-bootstrap/hello.txt"
@@ -1572,9 +1572,7 @@ func createSeededSharedVolume(env *framework.ScenarioEnv, session *e2eutils.Sess
 	Expect(volume).NotTo(BeNil())
 	volumeID := expectStringPtr(volume.Id, "volume id")
 	DeferCleanup(func() {
-		deleteStatus, deleteErr := session.DeleteSandboxVolume(env.TestCtx.Context, GinkgoT(), volumeID)
-		Expect(deleteErr).NotTo(HaveOccurred())
-		Expect(deleteStatus).To(Equal(http.StatusOK))
+		Expect(session.DeleteSandboxVolumeEventually(env.TestCtx.Context, GinkgoT(), volumeID, 30*time.Second)).To(Succeed())
 	})
 
 	seedContent := []byte("hello from seeded shared volume")

@@ -193,6 +193,14 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					assertTemplateSharedVolumeSidecarLifecycle(env, session, opts.templateNamePrefix)
 				})
 
+				It("rejects shared-volume templates without a kata runtime class", func() {
+					assertTemplateSharedVolumeRequiresKataRuntime(env, session, opts.templateNamePrefix)
+				})
+
+				It("claims pooled shared-volume templates from the idle pool", func() {
+					assertTemplateSharedVolumePooledClaimLifecycle(env, session, opts.templateNamePrefix)
+				})
+
 				It("rejects invalid bootstrap mount requests at claim time", func() {
 					assertClaimBootstrapMountValidation(env, session)
 				})
@@ -1463,56 +1471,13 @@ func assertTemplateSharedVolumeSidecarLifecycle(env *framework.ScenarioEnv, sess
 	base, err := session.GetTemplate(env.TestCtx.Context, GinkgoT(), "default")
 	Expect(err).NotTo(HaveOccurred())
 
-	cacheSize := "512M"
-	volume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), apispec.CreateSandboxVolumeRequest{CacheSize: &cacheSize})
-	Expect(err).NotTo(HaveOccurred())
-	Expect(status).To(Equal(http.StatusCreated))
-	Expect(volume).NotTo(BeNil())
-	volumeID := expectStringPtr(volume.Id, "volume id")
-	DeferCleanup(func() {
-		deleteStatus, deleteErr := session.DeleteSandboxVolume(env.TestCtx.Context, GinkgoT(), volumeID)
-		Expect(deleteErr).NotTo(HaveOccurred())
-		Expect(deleteStatus).To(Equal(http.StatusOK))
-	})
-
-	seedPath := "/seed.txt"
-	seedContent := []byte("hello from seeded shared volume")
-	status, err = session.WriteVolumeFile(env.TestCtx.Context, GinkgoT(), volumeID, seedPath, seedContent, "")
-	Expect(err).NotTo(HaveOccurred())
-	Expect(status).To(Equal(http.StatusOK))
+	volumeID, seedContent := createSeededSharedVolume(env, session)
 
 	runtimeClassName := fmt.Sprintf("kata-e2e-%06d", time.Now().UnixNano()%1_000_000)
 	ensureSharedVolumeRuntimeClass(env, runtimeClassName)
 
 	name := fmt.Sprintf("%s-sv-%06d", templateNamePrefix, time.Now().UnixNano()%1_000_000)
-	templateReq := e2eutils.CloneTemplateForCreate(*base, name)
-	Expect(templateReq.Spec.MainContainer).NotTo(BeNil())
-	Expect(templateReq.Spec.Pool).NotTo(BeNil())
-	templateReq.Spec.MainContainer.Resources = apispec.ResourceQuota{
-		Cpu:    ptr("500m"),
-		Memory: ptr("2Gi"),
-	}
-	templateReq.Spec.RuntimeClassName = &runtimeClassName
-	templateReq.Spec.Pool.MinIdle = 0
-	templateReq.Spec.Pool.MaxIdle = 0
-	templateReq.Spec.SharedVolumes = &[]apispec.SharedVolumeSpec{{
-		Name:            "workspace-data",
-		SandboxVolumeId: volumeID,
-		MountPath:       "/workspace/shared-template",
-	}}
-	templateReq.Spec.Sidecars = &[]apispec.SidecarContainerSpec{{
-		Name:    "helper",
-		Image:   "busybox:latest",
-		Command: ptr([]string{"sh", "-lc", "tail -f /dev/null"}),
-		Resources: apispec.ResourceQuota{
-			Cpu:    ptr("250m"),
-			Memory: ptr("1Gi"),
-		},
-		Mounts: &[]apispec.ContainerMountSpec{{
-			Name:      "workspace-data",
-			MountPath: "/shared",
-		}},
-	}}
+	templateReq := buildSharedVolumeTemplateRequest(*base, name, volumeID, &runtimeClassName, 0, 0)
 
 	created, err := session.CreateTemplate(env.TestCtx.Context, GinkgoT(), templateReq)
 	Expect(err).NotTo(HaveOccurred())
@@ -1533,7 +1498,165 @@ func assertTemplateSharedVolumeSidecarLifecycle(env *framework.ScenarioEnv, sess
 	})
 
 	sandbox := waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
+	assertSharedVolumeVisibleFromMainAndSidecar(env, session, templateNamespace, sandbox, sandboxID, volumeID, seedContent)
+}
 
+func assertTemplateSharedVolumeRequiresKataRuntime(env *framework.ScenarioEnv, session *e2eutils.Session, templateNamePrefix string) {
+	base, err := session.GetTemplate(env.TestCtx.Context, GinkgoT(), "default")
+	Expect(err).NotTo(HaveOccurred())
+
+	volumeID, _ := createSeededSharedVolume(env, session)
+	name := fmt.Sprintf("%s-sv-no-kata-%06d", templateNamePrefix, time.Now().UnixNano()%1_000_000)
+	templateReq := buildSharedVolumeTemplateRequest(*base, name, volumeID, nil, 0, 0)
+
+	_, status, err := session.CreateTemplateDetailed(env.TestCtx.Context, GinkgoT(), templateReq)
+	Expect(err).To(HaveOccurred())
+	Expect(status).To(Equal(http.StatusBadRequest))
+}
+
+func assertTemplateSharedVolumePooledClaimLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session, templateNamePrefix string) {
+	base, err := session.GetTemplate(env.TestCtx.Context, GinkgoT(), "default")
+	Expect(err).NotTo(HaveOccurred())
+
+	volumeID, seedContent := createSeededSharedVolume(env, session)
+	runtimeClassName := fmt.Sprintf("kata-e2e-%06d", time.Now().UnixNano()%1_000_000)
+	ensureSharedVolumeRuntimeClass(env, runtimeClassName)
+
+	name := fmt.Sprintf("%s-sv-pool-%06d", templateNamePrefix, time.Now().UnixNano()%1_000_000)
+	templateReq := buildSharedVolumeTemplateRequest(*base, name, volumeID, &runtimeClassName, 1, 1)
+
+	created, err := session.CreateTemplate(env.TestCtx.Context, GinkgoT(), templateReq)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(created).NotTo(BeNil())
+	DeferCleanup(func() {
+		Expect(session.DeleteTemplate(env.TestCtx.Context, GinkgoT(), name)).To(Succeed())
+	})
+
+	teamID := expectStringPtr(created.TeamId, "team id")
+	waitForTeamTemplateProjectionEventually(env, teamID, name)
+	templateNamespace, err := naming.TemplateNamespaceForTeam(teamID)
+	Expect(err).NotTo(HaveOccurred())
+	templateNameForCluster := naming.TemplateNameForCluster(naming.ScopeTeam, teamID, name)
+
+	Eventually(func() error {
+		tpl, getErr := session.GetTemplate(env.TestCtx.Context, GinkgoT(), name)
+		if getErr != nil {
+			return getErr
+		}
+		if tpl.Status == nil || tpl.Status.IdleCount == nil {
+			return fmt.Errorf("template status not ready")
+		}
+		if *tpl.Status.IdleCount != 1 {
+			return fmt.Errorf("idleCount=%d, want 1", *tpl.Status.IdleCount)
+		}
+		return nil
+	}).WithTimeout(2 * time.Minute).WithPolling(3 * time.Second).Should(Succeed())
+
+	idlePodName := waitForIdlePoolPodReadyEventually(env, templateNamespace, templateNameForCluster)
+	claimResp := claimSandboxEventually(env, session, name)
+	Expect(claimResp.SandboxId).To(Equal(idlePodName))
+	sandboxID := claimResp.SandboxId
+	DeferCleanup(func() {
+		_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+	})
+
+	sandbox := waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
+	assertSharedVolumeVisibleFromMainAndSidecar(env, session, templateNamespace, sandbox, sandboxID, volumeID, seedContent)
+}
+
+func createSeededSharedVolume(env *framework.ScenarioEnv, session *e2eutils.Session) (string, []byte) {
+	cacheSize := "512M"
+	volume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), apispec.CreateSandboxVolumeRequest{CacheSize: &cacheSize})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusCreated))
+	Expect(volume).NotTo(BeNil())
+	volumeID := expectStringPtr(volume.Id, "volume id")
+	DeferCleanup(func() {
+		deleteStatus, deleteErr := session.DeleteSandboxVolume(env.TestCtx.Context, GinkgoT(), volumeID)
+		Expect(deleteErr).NotTo(HaveOccurred())
+		Expect(deleteStatus).To(Equal(http.StatusOK))
+	})
+
+	seedContent := []byte("hello from seeded shared volume")
+	status, err = session.WriteVolumeFile(env.TestCtx.Context, GinkgoT(), volumeID, "/seed.txt", seedContent, "")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	return volumeID, seedContent
+}
+
+func buildSharedVolumeTemplateRequest(base apispec.Template, name, volumeID string, runtimeClassName *string, minIdle, maxIdle int32) apispec.TemplateCreateRequest {
+	templateReq := e2eutils.CloneTemplateForCreate(base, name)
+	Expect(templateReq.Spec.MainContainer).NotTo(BeNil())
+	Expect(templateReq.Spec.Pool).NotTo(BeNil())
+	templateReq.Spec.MainContainer.Resources = apispec.ResourceQuota{
+		Cpu:    ptr("500m"),
+		Memory: ptr("2Gi"),
+	}
+	templateReq.Spec.RuntimeClassName = runtimeClassName
+	templateReq.Spec.Pool.MinIdle = minIdle
+	templateReq.Spec.Pool.MaxIdle = maxIdle
+	templateReq.Spec.SharedVolumes = &[]apispec.SharedVolumeSpec{{
+		Name:            "workspace-data",
+		SandboxVolumeId: volumeID,
+		MountPath:       "/workspace/shared-template",
+	}}
+	templateReq.Spec.Sidecars = &[]apispec.SidecarContainerSpec{{
+		Name:    "helper",
+		Image:   "busybox:latest",
+		Command: ptr([]string{"sh", "-lc", "tail -f /dev/null"}),
+		Resources: apispec.ResourceQuota{
+			Cpu:    ptr("250m"),
+			Memory: ptr("1Gi"),
+		},
+		Mounts: &[]apispec.ContainerMountSpec{{
+			Name:      "workspace-data",
+			MountPath: "/shared",
+		}},
+	}}
+	return templateReq
+}
+
+func waitForIdlePoolPodReadyEventually(env *framework.ScenarioEnv, namespace, templateNameForCluster string) string {
+	var podName string
+	Eventually(func() error {
+		output, err := framework.KubectlOutput(
+			env.TestCtx.Context,
+			env.Config.Kubeconfig,
+			"get", "pods",
+			"--namespace", namespace,
+			"--selector", fmt.Sprintf("sandbox0.ai/template-id=%s,sandbox0.ai/pool-type=idle", templateNameForCluster),
+			"-o", `jsonpath={range .items[*]}{.metadata.name}{"|"}{.status.phase}{"|"}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}`,
+		)
+		if err != nil {
+			return err
+		}
+		for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+			fields := strings.Split(line, "|")
+			if len(fields) != 3 {
+				continue
+			}
+			if fields[1] != "Running" || fields[2] != "True" {
+				continue
+			}
+			podName = strings.TrimSpace(fields[0])
+			if podName != "" {
+				return nil
+			}
+		}
+		return fmt.Errorf("idle pool pod not ready yet")
+	}).WithTimeout(3 * time.Minute).WithPolling(3 * time.Second).Should(Succeed())
+	return podName
+}
+
+func assertSharedVolumeVisibleFromMainAndSidecar(
+	env *framework.ScenarioEnv,
+	session *e2eutils.Session,
+	templateNamespace string,
+	sandbox *apispec.Sandbox,
+	sandboxID string,
+	volumeID string,
+	seedContent []byte,
+) {
 	Eventually(func() ([]byte, error) {
 		body, _, readErr := session.ReadFile(env.TestCtx.Context, GinkgoT(), sandboxID, "/workspace/shared-template/seed.txt")
 		return body, readErr
@@ -1552,7 +1675,7 @@ func assertTemplateSharedVolumeSidecarLifecycle(env *framework.ScenarioEnv, sess
 	}).WithTimeout(30 * time.Second).WithPolling(2 * time.Second).Should(Equal(string(seedContent)))
 
 	mainWritten := []byte("main wrote this into the shared volume")
-	status, err = session.WriteFile(env.TestCtx.Context, GinkgoT(), sandboxID, "/workspace/shared-template/main.txt", mainWritten, "")
+	status, err := session.WriteFile(env.TestCtx.Context, GinkgoT(), sandboxID, "/workspace/shared-template/main.txt", mainWritten, "")
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
 

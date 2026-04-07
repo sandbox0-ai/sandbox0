@@ -28,21 +28,26 @@ func (s *Session) ListTemplates(ctx context.Context, t ContractT) ([]apispec.Tem
 }
 
 func (s *Session) CreateTemplate(ctx context.Context, t ContractT, template apispec.TemplateCreateRequest) (*apispec.Template, error) {
+	resp, _, err := s.CreateTemplateDetailed(ctx, t, template)
+	return resp, err
+}
+
+func (s *Session) CreateTemplateDetailed(ctx context.Context, t ContractT, template apispec.TemplateCreateRequest) (*apispec.Template, int, error) {
 	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodPost, "/api/v1/templates", "/api/v1/templates", template, true)
 	if err != nil {
-		return nil, err
+		return nil, status, err
 	}
 	if status != http.StatusCreated {
-		return nil, fmt.Errorf("create template failed with status %d: %s", status, formatAPIError(body))
+		return nil, status, fmt.Errorf("create template failed with status %d: %s", status, formatAPIError(body))
 	}
 	var resp apispec.SuccessTemplateResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, err
+		return nil, status, err
 	}
 	if !resp.Success || resp.Data == nil {
-		return nil, fmt.Errorf("create template response missing data")
+		return nil, status, fmt.Errorf("create template response missing data")
 	}
-	return resp.Data, nil
+	return resp.Data, status, nil
 }
 
 func (s *Session) GetTemplate(ctx context.Context, t ContractT, templateID string) (*apispec.Template, error) {

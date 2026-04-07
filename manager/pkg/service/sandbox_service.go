@@ -365,14 +365,72 @@ func normalizeClaimMounts(mounts []ClaimMount) ([]ClaimMount, error) {
 
 func mergeTemplateSharedVolumeMounts(claimMounts []ClaimMount, sharedVolumes []v1alpha1.SharedVolumeSpec) ([]ClaimMount, error) {
 	merged := append([]ClaimMount(nil), claimMounts...)
+	claimMountIndexByPoint := make(map[string]int, len(merged))
+	for i, mount := range merged {
+		claimMountIndexByPoint[mount.MountPoint] = i
+	}
 	for _, volume := range sharedVolumes {
-		merged = append(merged, ClaimMount{
-			SandboxVolumeID: volume.SandboxVolumeID,
-			MountPoint:      volume.MountPath,
-			VolumeConfig:    sharedVolumeConfigToClaimMountConfig(volume),
-		})
+		mountPath := filepath.Clean(strings.TrimSpace(volume.MountPath))
+		defaultConfig := sharedVolumeConfigToClaimMountConfig(volume)
+		if templateVolumeID := strings.TrimSpace(volume.SandboxVolumeID); templateVolumeID != "" {
+			if _, exists := claimMountIndexByPoint[mountPath]; exists {
+				return nil, fmt.Errorf("%w: claim mount %q conflicts with template shared volume %q", ErrInvalidClaimRequest, mountPath, volume.Name)
+			}
+			merged = append(merged, ClaimMount{
+				SandboxVolumeID: templateVolumeID,
+				MountPoint:      mountPath,
+				VolumeConfig:    defaultConfig,
+			})
+			claimMountIndexByPoint[mountPath] = len(merged) - 1
+			continue
+		}
+
+		idx, exists := claimMountIndexByPoint[mountPath]
+		if !exists {
+			return nil, fmt.Errorf("%w: shared volume %q requires a claim mount for %q", ErrInvalidClaimRequest, volume.Name, mountPath)
+		}
+		merged[idx].VolumeConfig = mergeMountVolumeConfig(defaultConfig, merged[idx].VolumeConfig)
 	}
 	return normalizeClaimMounts(merged)
+}
+
+func mergeMountVolumeConfig(defaults, claim *MountVolumeConfig) *MountVolumeConfig {
+	if defaults == nil && claim == nil {
+		return nil
+	}
+	if defaults == nil {
+		return cloneMountVolumeConfig(claim)
+	}
+	if claim == nil {
+		return cloneMountVolumeConfig(defaults)
+	}
+
+	merged := cloneMountVolumeConfig(defaults)
+	if strings.TrimSpace(claim.CacheSize) != "" {
+		merged.CacheSize = claim.CacheSize
+	}
+	if claim.Prefetch != nil {
+		merged.Prefetch = cloneInt32Pointer(claim.Prefetch)
+	}
+	if strings.TrimSpace(claim.BufferSize) != "" {
+		merged.BufferSize = claim.BufferSize
+	}
+	if claim.Writeback != nil {
+		merged.Writeback = cloneBoolPointer(claim.Writeback)
+	}
+	return merged
+}
+
+func cloneMountVolumeConfig(src *MountVolumeConfig) *MountVolumeConfig {
+	if src == nil {
+		return nil
+	}
+	return &MountVolumeConfig{
+		CacheSize:  src.CacheSize,
+		Prefetch:   cloneInt32Pointer(src.Prefetch),
+		BufferSize: src.BufferSize,
+		Writeback:  cloneBoolPointer(src.Writeback),
+	}
 }
 
 func sharedVolumeConfigToClaimMountConfig(volume v1alpha1.SharedVolumeSpec) *MountVolumeConfig {

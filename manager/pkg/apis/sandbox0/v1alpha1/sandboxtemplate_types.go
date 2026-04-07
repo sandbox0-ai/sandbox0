@@ -95,8 +95,11 @@ type ContainerMountSpec struct {
 }
 
 type SharedVolumeSpec struct {
-	Name            string `json:"name"`
-	SandboxVolumeID string `json:"sandboxVolumeId"`
+	Name string `json:"name"`
+	// SandboxVolumeID optionally pins the shared volume to a fixed volume at
+	// template creation time. When omitted, claim-time mounts bind the shared
+	// volume by matching sharedVolumes[*].mountPath to mounts[*].mount_point.
+	SandboxVolumeID string `json:"sandboxVolumeId,omitempty"`
 	MountPath       string `json:"mountPath"`
 	CacheSize       string `json:"cacheSize,omitempty"`
 	Prefetch        *int32 `json:"prefetch,omitempty"`

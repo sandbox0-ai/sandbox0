@@ -33,7 +33,7 @@ If a sidecar needs pod-shared storage, define it once under `spec.sharedVolumes`
 | Field | Required | Description |
 |-------|----------|-------------|
 | `name` | yes | Logical shared-volume name used by `sidecars[*].mounts[*].name`. |
-| `sandboxVolumeId` | yes | Existing SandboxVolume ID to attach. |
+| `sandboxVolumeId` | no | Optional fixed SandboxVolume ID. Omit it when the volume should be bound at claim time. |
 | `mountPath` | yes | Mount path used by the main container. |
 | `cacheSize` | no | Optional cache size override. |
 | `prefetch` | no | Optional prefetch override. |
@@ -41,7 +41,7 @@ If a sidecar needs pod-shared storage, define it once under `spec.sharedVolumes`
 | `writeback` | no | Optional writeback flag. |
 
 <Callout variant="info">
-`sharedVolumes` only matters when more than one container in the template needs the same mounted volume. If the main container is the only consumer, regular claim-time mounts are usually enough.
+`sharedVolumes` only matters when more than one container in the template needs the same mounted volume. If `sandboxVolumeId` is omitted, claim-time mounts bind the shared volume by matching `sharedVolumes[*].mountPath` to `mounts[*].mount_point` in the sandbox claim request.
 </Callout>
 
 <Callout variant="info">
@@ -120,8 +120,9 @@ spec:
               - name: workspace
                 mountPath: /shared
           readinessProbe:
-              exec:
-                  command: ["test", "-S", "/shared/codex.sock"]
+              httpGet:
+                  path: /healthz
+                  port: 8081
               initialDelaySeconds: 1
               periodSeconds: 2
               failureThreshold: 1
@@ -130,7 +131,7 @@ spec:
         maxIdle: 10
 ```
 
-In this example, the pod is not counted as ready warm capacity until the sidecar creates `/shared/codex.sock` and the readiness probe passes.
+In this example, the pod is not counted as ready warm capacity until the sidecar starts serving `GET /healthz` on port `8081` and the readiness probe passes.
 
 ---
 
@@ -161,7 +162,7 @@ In this example, the pod is not counted as ready warm capacity until the sidecar
             sandbox0.WithTemplateSidecarCommand("sh", "-lc", "/app/start-codex.sh"),
             sandbox0.WithTemplateSidecarMount(sandbox0.TemplateMount("workspace", "/shared")),
             sandbox0.WithTemplateSidecarReadinessProbe(apispec.Probe{
-                Exec:                apispec.NewOptExecAction(apispec.ExecAction{Command: []string{"test", "-S", "/shared/codex.sock"}}),
+                HTTPGet:             apispec.NewOptHTTPGetAction(apispec.HTTPGetAction{Path: apispec.NewOptString("/healthz"), Port: intstr.FromInt32(8081)}),
                 InitialDelaySeconds: apispec.NewOptInt32(1),
                 PeriodSeconds:       apispec.NewOptInt32(2),
                 FailureThreshold:    apispec.NewOptInt32(1),
@@ -178,7 +179,7 @@ fmt.Printf("Template created: %s\\n", tpl.TemplateID)`
     {
       label: "Python",
       language: "python",
-      code: `from sandbox0.apispec.models.exec_action import ExecAction
+      code: `from sandbox0.apispec.models.http_get_action import HTTPGetAction
 from sandbox0.apispec.models.pool_strategy import PoolStrategy
 from sandbox0.apispec.models.probe import Probe
 from sandbox0.template_helpers import (
@@ -207,7 +208,7 @@ tpl = client.create_template(
                     command=["sh", "-lc", "/app/start-codex.sh"],
                     mounts=[mount("workspace", "/shared")],
                     readiness_probe=Probe(
-                        exec_=ExecAction(command=["test", "-S", "/shared/codex.sock"]),
+                        http_get=HTTPGetAction(path="/healthz", port=8081),
                         initial_delay_seconds=1,
                         period_seconds=2,
                         failure_threshold=1,
@@ -235,7 +236,7 @@ print(f"Template created: {tpl.template_id}")`
                     command: ["sh", "-lc", "/app/start-codex.sh"],
                     mounts: [mount("workspace", "/shared")],
                     readinessProbe: {
-                        exec: { command: ["test", "-S", "/shared/codex.sock"] },
+                        httpGet: { path: "/healthz", port: 8081 },
                         initialDelaySeconds: 1,
                         periodSeconds: 2,
                         failureThreshold: 1,
@@ -274,8 +275,9 @@ spec:
               - name: workspace
                 mountPath: /shared
           readinessProbe:
-              exec:
-                  command: ["test", "-S", "/shared/codex.sock"]
+              httpGet:
+                  path: /healthz
+                  port: 8081
               initialDelaySeconds: 1
               periodSeconds: 2
               failureThreshold: 1

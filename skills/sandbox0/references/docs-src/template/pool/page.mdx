@@ -85,14 +85,15 @@ spec:
           image: ghcr.io/example/codex:latest
           command: ["sh", "-lc", "/app/start-codex.sh"]
           readinessProbe:
-              exec:
-                  command: ["test", "-S", "/tmp/codex.sock"]
+              httpGet:
+                  path: /healthz
+                  port: 8081
     pool:
         minIdle: 2
         maxIdle: 10
 ```
 
-In this example, the pod is only counted as warm-pool capacity after the sidecar creates `/tmp/codex.sock` and the readiness probe passes.
+In this example, the pod is only counted as warm-pool capacity after the sidecar starts serving `GET /healthz` on port `8081` and the readiness probe passes.
 
 **Choosing `minIdle`:**
 

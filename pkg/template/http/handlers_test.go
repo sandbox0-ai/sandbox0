@@ -240,7 +240,7 @@ func TestCreateTemplate_AllowsSharedVolumesForRegularTeamWithKataRuntime(t *test
 		"spec":{
 			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
 			"runtimeClassName":"kata-dev",
-			"sharedVolumes":[{"name":"workspace","sandboxVolumeId":"vol-1","mountPath":"/workspace"}],
+			"sharedVolumes":[{"name":"workspace","mountPath":"/workspace"}],
 			"sidecars":[{"name":"helper","image":"busybox","resources":{"cpu":"500m","memory":"2Gi"},"mounts":[{"name":"workspace","mountPath":"/shared"}]}],
 			"pool":{"minIdle":0,"maxIdle":1}
 		}
@@ -255,6 +255,83 @@ func TestCreateTemplate_AllowsSharedVolumesForRegularTeamWithKataRuntime(t *test
 	}
 	if !store.createCalled {
 		t.Fatalf("expected create to be called")
+	}
+}
+
+func TestCreateTemplate_RejectsSharedVolumeMountedUnderConfig(t *testing.T) {
+	t.Parallel()
+
+	store := &testTemplateStore{}
+	h := &Handler{Store: store, Logger: zap.NewNop()}
+
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	router.POST("/api/v1/templates", h.CreateTemplate)
+
+	body := []byte(`{
+		"template_id":"demo",
+		"spec":{
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
+			"runtimeClassName":"kata-dev",
+			"sharedVolumes":[{"name":"workspace","sandboxVolumeId":"vol-1","mountPath":"/config/shared"}],
+			"pool":{"minIdle":0,"maxIdle":1}
+		}
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, rec.Code)
+	}
+	if store.createCalled {
+		t.Fatalf("expected create not called for invalid request")
+	}
+	if !strings.Contains(rec.Body.String(), "reserved path") || !strings.Contains(rec.Body.String(), "/config") {
+		t.Fatalf("expected reserved /config path error, got %s", rec.Body.String())
+	}
+}
+
+func TestCreateTemplate_RejectsSidecarMountUnderConfig(t *testing.T) {
+	t.Parallel()
+
+	store := &testTemplateStore{}
+	h := &Handler{Store: store, Logger: zap.NewNop()}
+
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	router.POST("/api/v1/templates", h.CreateTemplate)
+
+	body := []byte(`{
+		"template_id":"demo",
+		"spec":{
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
+			"runtimeClassName":"kata-dev",
+			"sharedVolumes":[{"name":"workspace","sandboxVolumeId":"vol-1","mountPath":"/workspace/shared"}],
+			"sidecars":[{"name":"helper","image":"busybox","resources":{"cpu":"500m","memory":"2Gi"},"mounts":[{"name":"workspace","mountPath":"/config/shared"}]}],
+			"pool":{"minIdle":0,"maxIdle":1}
+		}
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, rec.Code)
+	}
+	if store.createCalled {
+		t.Fatalf("expected create not called for invalid request")
+	}
+	if !strings.Contains(rec.Body.String(), "reserved path") || !strings.Contains(rec.Body.String(), "/config") {
+		t.Fatalf("expected reserved /config path error, got %s", rec.Body.String())
 	}
 }
 

@@ -64,8 +64,9 @@ spec:
           image: ghcr.io/example/codex:latest
           command: ["sh", "-lc", "/app/start-codex.sh"]
           readinessProbe:
-            exec:
-              command: ["test", "-S", "/tmp/codex.sock"]
+            httpGet:
+              path: /healthz
+              port: 8081
     pool:
         minIdle: 2
         maxIdle: 10
@@ -98,7 +99,7 @@ Use the sidecar readiness probe to express when the warm process is truly ready.
                     Memory: apispec.NewOptString("2Gi"),
                 },
                 ReadinessProbe: apispec.NewOptProbe(apispec.Probe{
-                    Exec:                apispec.NewOptExecAction(apispec.ExecAction{Command: []string{"test", "-S", "/tmp/codex.sock"}}),
+                    HTTPGet:             apispec.NewOptHTTPGetAction(apispec.HTTPGetAction{Path: apispec.NewOptString("/healthz"), Port: intstr.FromInt32(8081)}),
                     InitialDelaySeconds: apispec.NewOptInt32(1),
                     PeriodSeconds:       apispec.NewOptInt32(2),
                     FailureThreshold:    apispec.NewOptInt32(1),
@@ -119,7 +120,7 @@ fmt.Printf("Template created: %s\\n", tpl.TemplateID)`
     {
       label: "Python",
       language: "python",
-      code: `from sandbox0.apispec.models.exec_action import ExecAction
+      code: `from sandbox0.apispec.models.http_get_action import HTTPGetAction
 from sandbox0.apispec.models.probe import Probe
 from sandbox0.apispec.models.sidecar_container_spec import SidecarContainerSpec
 from sandbox0.apispec.models.template_create_request import TemplateCreateRequest
@@ -139,7 +140,7 @@ tpl = client.create_template(TemplateCreateRequest(
                 command=["sh", "-lc", "/app/start-codex.sh"],
                 resources={"cpu": "500m", "memory": "2Gi"},
                 readiness_probe=Probe(
-                    exec_=ExecAction(command=["test", "-S", "/tmp/codex.sock"]),
+                    http_get=HTTPGetAction(path="/healthz", port=8081),
                     initial_delay_seconds=1,
                     period_seconds=2,
                     failure_threshold=1,
@@ -167,7 +168,7 @@ print(f"Template created: {tpl.template_id}")`
                 image: "ghcr.io/example/codex:latest",
                 command: ["sh", "-lc", "/app/start-codex.sh"],
                 readinessProbe: {
-                    exec: { command: ["test", "-S", "/tmp/codex.sock"] },
+                    httpGet: { path: "/healthz", port: 8081 },
                     initialDelaySeconds: 1,
                     periodSeconds: 2,
                     failureThreshold: 1,
@@ -194,8 +195,9 @@ spec:
           image: ghcr.io/example/codex:latest
           command: ["sh", "-lc", "/app/start-codex.sh"]
           readinessProbe:
-              exec:
-                  command: ["test", "-S", "/tmp/codex.sock"]
+              httpGet:
+                  path: /healthz
+                  port: 8081
               initialDelaySeconds: 1
               periodSeconds: 2
               failureThreshold: 1

@@ -5349,7 +5349,7 @@ components:
           type: string
         writeback:
           type: boolean
-      required: [name, sandboxVolumeId, mountPath]
+      required: [name, mountPath]
     EnvVar:
       type: object
       properties:

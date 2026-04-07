@@ -112,8 +112,9 @@ spec:
           image: ghcr.io/example/codex:latest
           command: ["sh", "-lc", "/app/start-codex.sh"]
           readinessProbe:
-              exec:
-                  command: ["test", "-S", "/tmp/codex.sock"]
+              httpGet:
+                  path: /healthz
+                  port: 8081
               initialDelaySeconds: 1
               periodSeconds: 2
               failureThreshold: 1

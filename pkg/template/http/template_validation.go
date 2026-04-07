@@ -178,13 +178,12 @@ func validateSharedVolumes(volumes []v1alpha1.SharedVolumeSpec) error {
 			return fmt.Errorf("duplicate shared volume name %q", volume.Name)
 		}
 		seenNames[volume.Name] = struct{}{}
-		if strings.TrimSpace(volume.SandboxVolumeID) == "" {
-			return fmt.Errorf("%s.sandboxVolumeId is required", field)
+		if volumeID := strings.TrimSpace(volume.SandboxVolumeID); volumeID != "" {
+			if _, exists := seenVolumeIDs[volumeID]; exists {
+				return fmt.Errorf("duplicate shared volume sandboxVolumeId %q", volumeID)
+			}
+			seenVolumeIDs[volumeID] = struct{}{}
 		}
-		if _, exists := seenVolumeIDs[volume.SandboxVolumeID]; exists {
-			return fmt.Errorf("duplicate shared volume sandboxVolumeId %q", volume.SandboxVolumeID)
-		}
-		seenVolumeIDs[volume.SandboxVolumeID] = struct{}{}
 
 		cleanMountPath, err := validateAbsoluteMountPath(volume.MountPath, field+".mountPath")
 		if err != nil {
@@ -250,7 +249,7 @@ func validateAbsoluteMountPath(value, field string) (string, error) {
 func validateReservedMountPath(path, field string) error {
 	reserved := []string{
 		"/procd/bin",
-		"/config/internal_jwt_public.key",
+		"/config",
 		"/var/run/sandbox0/netd",
 	}
 	for _, prefix := range reserved {

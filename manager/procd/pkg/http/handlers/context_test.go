@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"reflect"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -21,6 +22,7 @@ import (
 )
 
 type fakeProcess struct {
+	mu           sync.RWMutex
 	outputCh     chan process.ProcessOutput
 	onWrite      func([]byte)
 	finished     bool
@@ -28,6 +30,7 @@ type fakeProcess struct {
 	state        process.ProcessState
 	processType  process.ProcessType
 	exitHandlers []process.ExitHandler
+	handlerAdded chan struct{}
 }
 
 func (f *fakeProcess) ID() string { return "proc-test" }
@@ -41,9 +44,15 @@ func (f *fakeProcess) PID() int         { return 1 }
 func (f *fakeProcess) Start() error     { return nil }
 func (f *fakeProcess) Stop() error      { return nil }
 func (f *fakeProcess) Restart() error   { return nil }
-func (f *fakeProcess) IsRunning() bool  { return true }
-func (f *fakeProcess) IsFinished() bool { return f.finished }
+func (f *fakeProcess) IsRunning() bool { return true }
+func (f *fakeProcess) IsFinished() bool {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.finished
+}
 func (f *fakeProcess) State() process.ProcessState {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 	if f.state == "" {
 		return process.ProcessStateRunning
 	}
@@ -51,7 +60,17 @@ func (f *fakeProcess) State() process.ProcessState {
 }
 func (f *fakeProcess) AddStartHandler(process.StartHandler) {}
 func (f *fakeProcess) AddExitHandler(handler process.ExitHandler) {
+	f.mu.Lock()
 	f.exitHandlers = append(f.exitHandlers, handler)
+	added := f.handlerAdded
+	f.mu.Unlock()
+	if added != nil {
+		select {
+		case <-added:
+		default:
+			close(added)
+		}
+	}
 }
 func (f *fakeProcess) Pause() error   { return nil }
 func (f *fakeProcess) Resume() error  { return nil }
@@ -65,14 +84,21 @@ func (f *fakeProcess) WriteInput(data []byte) error {
 func (f *fakeProcess) ReadOutput() <-chan process.ProcessOutput { return f.outputCh }
 func (f *fakeProcess) ResizePTY(process.PTYSize) error          { return nil }
 func (f *fakeProcess) SendSignal(syscall.Signal) error          { return nil }
-func (f *fakeProcess) ExitCode() (int, error)                   { return f.exitCode, nil }
-func (f *fakeProcess) ResourceUsage() process.ResourceUsage     { return process.ResourceUsage{} }
+func (f *fakeProcess) ExitCode() (int, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.exitCode, nil
+}
+func (f *fakeProcess) ResourceUsage() process.ResourceUsage { return process.ResourceUsage{} }
 
 func (f *fakeProcess) triggerExit(event process.ExitEvent) {
+	f.mu.Lock()
 	f.finished = true
 	f.exitCode = event.ExitCode
 	f.state = event.State
-	for _, handler := range f.exitHandlers {
+	handlers := append([]process.ExitHandler(nil), f.exitHandlers...)
+	f.mu.Unlock()
+	for _, handler := range handlers {
 		if handler != nil {
 			handler(event)
 		}
@@ -355,8 +381,9 @@ func TestNewWSProcessDoneMessage(t *testing.T) {
 func TestWebSocketSendsProcessDoneMessage(t *testing.T) {
 	outputCh := make(chan process.ProcessOutput, 2)
 	proc := &fakeProcess{
-		outputCh:    outputCh,
-		processType: process.ProcessTypeCMD,
+		outputCh:     outputCh,
+		processType:  process.ProcessTypeCMD,
+		handlerAdded: make(chan struct{}),
 	}
 	handler, ctx := newHandlerWithContext(proc, process.ProcessTypeCMD)
 
@@ -377,6 +404,12 @@ func TestWebSocketSendsProcessDoneMessage(t *testing.T) {
 		t.Fatalf("Dial() error = %v", err)
 	}
 	defer conn.Close()
+
+	select {
+	case <-proc.handlerAdded:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for exit handler registration")
+	}
 
 	outputCh <- process.ProcessOutput{Source: process.OutputSourceStdout, Data: []byte("done\n")}
 	proc.triggerExit(process.ExitEvent{ExitCode: 7, State: process.ProcessStateCrashed})

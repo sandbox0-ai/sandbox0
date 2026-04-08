@@ -125,7 +125,9 @@ type SandboxService struct {
 	metrics                *obsmetrics.ManagerMetrics
 	autoScaler             AutoScalerInterface
 	credentialStore        egressauth.BindingStore
+	powerExecutor          SandboxPowerExecutor
 	powerStateLocks        sync.Map
+	powerStateReconcilers  sync.Map
 }
 
 // AutoScalerInterface defines the interface for auto scaling.
@@ -180,7 +182,7 @@ func NewSandboxService(
 	if networkProvider == nil {
 		networkProvider = network.NewNoopProvider()
 	}
-	return &SandboxService{
+	service := &SandboxService{
 		k8sClient:              k8sClient,
 		podLister:              podLister,
 		sandboxIndex:           sandboxIndex,
@@ -196,6 +198,8 @@ func NewSandboxService(
 		logger:                 logger,
 		metrics:                metrics,
 	}
+	service.powerExecutor = newLocalSandboxPowerExecutor(service)
+	return service
 }
 
 // SupportsNetworkPolicy reports whether this deployment has an active network policy provider.
@@ -219,6 +223,21 @@ func (s *SandboxService) SetAutoScaler(scaler AutoScalerInterface) {
 // SetCredentialStore injects the sandbox credential binding store.
 func (s *SandboxService) SetCredentialStore(store egressauth.BindingStore) {
 	s.credentialStore = store
+}
+
+// SetPowerExecutor overrides sandbox power execution (used by tests and future node executors).
+func (s *SandboxService) SetPowerExecutor(executor SandboxPowerExecutor) {
+	if executor == nil {
+		return
+	}
+	s.powerExecutor = executor
+}
+
+func (s *SandboxService) sandboxPowerExecutor() SandboxPowerExecutor {
+	if s.powerExecutor != nil {
+		return s.powerExecutor
+	}
+	return newLocalSandboxPowerExecutor(s)
 }
 
 // ClaimRequest represents a sandbox claim request
@@ -2064,78 +2083,143 @@ func (s *SandboxService) requestSandboxPowerState(ctx context.Context, sandboxID
 	lock.Lock()
 	defer lock.Unlock()
 
-	pod, err := s.getSandboxPod(ctx, sandboxID)
-	if err != nil {
-		return SandboxPowerState{}, fmt.Errorf("get pod: %w", err)
-	}
-
-	state := requestedSandboxPowerState(pod.Annotations, target)
-	current := sandboxPowerStateFromAnnotations(pod.Annotations)
-	if !hasExplicitSandboxPowerStateAnnotations(pod.Annotations) || !sandboxPowerStateEqual(current, state) {
-		if _, err := s.updateSandboxPowerStateAnnotations(ctx, pod, state); err != nil {
-			return SandboxPowerState{}, fmt.Errorf("update power state annotations: %w", err)
+	var state SandboxPowerState
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		pod, err := s.getSandboxPodForPowerState(ctx, sandboxID)
+		if err != nil {
+			return err
 		}
+
+		state = requestedSandboxPowerState(pod.Annotations, target)
+		current := sandboxPowerStateFromAnnotations(pod.Annotations)
+		if hasExplicitSandboxPowerStateAnnotations(pod.Annotations) && sandboxPowerStateEqual(current, state) {
+			return nil
+		}
+		_, err = s.updateSandboxPowerStateAnnotations(ctx, pod, state)
+		return err
+	})
+	if err != nil {
+		return SandboxPowerState{}, fmt.Errorf("update power state annotations: %w", err)
 	}
 
 	if state.Phase != SandboxPowerPhaseStable {
-		go s.reconcileSandboxPowerState(sandboxID)
+		s.triggerSandboxPowerStateReconcile(sandboxID)
 	}
 
 	return state, nil
 }
 
-func (s *SandboxService) reconcileSandboxPowerState(sandboxID string) {
-	lock := s.sandboxPowerStateLock(sandboxID)
-	lock.Lock()
-	defer lock.Unlock()
+func (s *SandboxService) triggerSandboxPowerStateReconcile(sandboxID string) {
+	if _, loaded := s.powerStateReconcilers.LoadOrStore(sandboxID, struct{}{}); loaded {
+		return
+	}
+	go func() {
+		defer s.finishSandboxPowerStateReconcile(sandboxID)
+		s.reconcileSandboxPowerState(sandboxID)
+	}()
+}
 
+func (s *SandboxService) finishSandboxPowerStateReconcile(sandboxID string) {
+	s.powerStateReconcilers.Delete(sandboxID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	pod, err := s.getSandboxPodForPowerState(ctx, sandboxID)
+	if err != nil {
+		return
+	}
+	state := sandboxPowerStateFromAnnotations(pod.Annotations)
+	if state.Phase != SandboxPowerPhaseStable || state.Desired != state.Observed {
+		s.triggerSandboxPowerStateReconcile(sandboxID)
+	}
+}
+
+func (s *SandboxService) reconcileSandboxPowerState(sandboxID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	pod, err := s.getSandboxPod(ctx, sandboxID)
-	if err != nil {
-		s.logger.Warn("Power state reconcile failed to load sandbox",
-			zap.String("sandboxID", sandboxID),
-			zap.Error(err),
-		)
-		return
-	}
-
-	state := sandboxPowerStateFromAnnotations(pod.Annotations)
-	if state.Phase == SandboxPowerPhaseStable && state.Desired == state.Observed {
-		return
-	}
-
-	s.logger.Info("Reconciling sandbox power state",
-		zap.String("sandboxID", sandboxID),
-		zap.String("desired", state.Desired),
-		zap.Int64("desiredGeneration", state.DesiredGeneration),
-		zap.String("observed", state.Observed),
-		zap.Int64("observedGeneration", state.ObservedGeneration),
-		zap.String("phase", state.Phase),
-	)
-
-	switch state.Desired {
-	case SandboxPowerStatePaused:
-		if _, err := s.PauseSandbox(ctx, sandboxID); err != nil {
-			s.logger.Error("Pause reconcile failed",
+	for {
+		pod, err := s.getSandboxPodForPowerState(ctx, sandboxID)
+		if err != nil {
+			s.logger.Warn("Power state reconcile failed to load sandbox",
 				zap.String("sandboxID", sandboxID),
 				zap.Error(err),
 			)
+			return
 		}
-	case SandboxPowerStateActive:
-		if _, err := s.ResumeSandbox(ctx, sandboxID); err != nil {
-			s.logger.Error("Resume reconcile failed",
-				zap.String("sandboxID", sandboxID),
-				zap.Error(err),
-			)
+
+		state := sandboxPowerStateFromAnnotations(pod.Annotations)
+		if state.Phase == SandboxPowerPhaseStable && state.Desired == state.Observed {
+			return
 		}
-	default:
-		s.logger.Warn("Skipping power state reconcile with unsupported desired state",
+
+		s.logger.Info("Reconciling sandbox power state",
 			zap.String("sandboxID", sandboxID),
 			zap.String("desired", state.Desired),
+			zap.Int64("desiredGeneration", state.DesiredGeneration),
+			zap.String("observed", state.Observed),
+			zap.Int64("observedGeneration", state.ObservedGeneration),
+			zap.String("phase", state.Phase),
 		)
+
+		switch state.Desired {
+		case SandboxPowerStatePaused:
+			if _, err := s.PauseSandbox(ctx, sandboxID); err != nil {
+				s.logger.Error("Pause reconcile failed",
+					zap.String("sandboxID", sandboxID),
+					zap.Error(err),
+				)
+				return
+			}
+		case SandboxPowerStateActive:
+			if _, err := s.ResumeSandbox(ctx, sandboxID); err != nil {
+				s.logger.Error("Resume reconcile failed",
+					zap.String("sandboxID", sandboxID),
+					zap.Error(err),
+				)
+				return
+			}
+		default:
+			s.logger.Warn("Skipping power state reconcile with unsupported desired state",
+				zap.String("sandboxID", sandboxID),
+				zap.String("desired", state.Desired),
+			)
+			return
+		}
+
+		nextPod, err := s.getSandboxPodForPowerState(ctx, sandboxID)
+		if err != nil {
+			return
+		}
+		nextState := sandboxPowerStateFromAnnotations(nextPod.Annotations)
+		if nextState.Phase == SandboxPowerPhaseStable && nextState.Desired == nextState.Observed {
+			return
+		}
+		if nextState.Desired == state.Desired && nextState.DesiredGeneration == state.DesiredGeneration {
+			return
+		}
 	}
+}
+
+func (s *SandboxService) getSandboxPodForPowerState(ctx context.Context, sandboxID string) (*corev1.Pod, error) {
+	if s.k8sClient == nil {
+		return s.getSandboxPod(ctx, sandboxID)
+	}
+	if s.sandboxIndex != nil {
+		if namespace, ok := s.sandboxIndex.GetNamespace(sandboxID); ok {
+			return s.k8sClient.CoreV1().Pods(namespace).Get(ctx, sandboxID, metav1.GetOptions{})
+		}
+	}
+	selector := labels.SelectorFromSet(map[string]string{controller.LabelSandboxID: sandboxID}).String()
+	pods, err := s.k8sClient.CoreV1().Pods(corev1.NamespaceAll).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		return nil, err
+	}
+	if len(pods.Items) == 0 {
+		return nil, k8serrors.NewNotFound(schema.GroupResource{Resource: "pod"}, sandboxID)
+	}
+	return pods.Items[0].DeepCopy(), nil
 }
 
 func (s *SandboxService) prodAddress(ctx context.Context, pod *corev1.Pod) (string, error) {
@@ -2284,9 +2368,14 @@ type ContainerResources struct {
 	Limits   corev1.ResourceList `json:"limits,omitempty"`
 }
 
-// PauseSandbox pauses a sandbox and reduces pod resources based on actual usage.
-// This uses Kubernetes 1.35+ in-place pod update feature.
+// PauseSandbox delegates sandbox pause execution to the configured power executor.
 func (s *SandboxService) PauseSandbox(ctx context.Context, sandboxID string) (*PauseSandboxResponse, error) {
+	return s.sandboxPowerExecutor().Pause(ctx, sandboxID)
+}
+
+// pauseSandboxLocal pauses a sandbox and reduces pod resources based on actual usage.
+// This uses Kubernetes 1.35+ in-place pod update feature.
+func (s *SandboxService) pauseSandboxLocal(ctx context.Context, sandboxID string) (*PauseSandboxResponse, error) {
 	s.logger.Info("Pausing sandbox", zap.String("sandboxID", sandboxID))
 
 	// Find the pod by sandbox ID
@@ -2484,8 +2573,13 @@ func (s *SandboxService) RequestPauseSandbox(ctx context.Context, sandboxID stri
 	}, nil
 }
 
-// ResumeSandbox resumes a paused sandbox and restores original pod resources.
+// ResumeSandbox delegates sandbox resume execution to the configured power executor.
 func (s *SandboxService) ResumeSandbox(ctx context.Context, sandboxID string) (*ResumeSandboxResponse, error) {
+	return s.sandboxPowerExecutor().Resume(ctx, sandboxID)
+}
+
+// resumeSandboxLocal resumes a paused sandbox and restores original pod resources.
+func (s *SandboxService) resumeSandboxLocal(ctx context.Context, sandboxID string) (*ResumeSandboxResponse, error) {
 	s.logger.Info("Resuming sandbox", zap.String("sandboxID", sandboxID))
 
 	// Find the pod by sandbox ID

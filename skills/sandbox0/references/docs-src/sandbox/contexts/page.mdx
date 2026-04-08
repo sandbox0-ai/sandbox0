@@ -292,7 +292,7 @@ process.stdout.write(cmdResult.outputRaw);`
 
 ### Streaming Cmd Output
 
-Use the streaming helpers when you want command output as it is produced instead of waiting for a final `output_raw` response.
+Use the streaming helpers when you want command output as it is produced instead of waiting for a final `output_raw` response. The output stream ends automatically when the command emits its terminal process-level `done` event.
 
 <Tabs
   tabs={[
@@ -311,11 +311,20 @@ defer stream.Close()
 
 for {
     output, err := stream.Recv()
-    if err != nil {
+    if err == io.EOF {
         break
     }
+    if err != nil {
+        log.Fatal(err)
+    }
     fmt.Print(output.Data)
-}`
+}
+
+done, err := stream.Wait()
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("exit=%d state=%s\n", *done.ExitCode, done.State)`
     },
     {
       label: "Python",
@@ -328,7 +337,10 @@ stream = sandbox.cmd_stream(
 )
 
 for output in stream.iter_outputs():
-    print(output.data, end="")`
+    print(output.data, end="")
+
+done = stream.wait()
+print(f"exit={done.exit_code} state={done.state}")`
     },
     {
       label: "TypeScript",
@@ -339,12 +351,16 @@ for output in stream.iter_outputs():
 
 for await (const output of stream.outputs()) {
     process.stdout.write(output.data);
-}`
+}
+
+const done = await stream.wait();
+console.log(`exit=${done.exitCode} state=${done.state}`);`
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 sandbox exec sb_abc123 --stream -- sh -c 'echo hello && echo warn >&2'`
+      code: `s0 sandbox exec sb_abc123 --stream -- sh -c 'echo hello && echo warn >&2; exit 7'
+# exits locally with status 7`
     }
   ]}
 />
@@ -842,7 +858,8 @@ For real-time I/O, connect to a context via WebSocket.
 | Type | Description | Example |
 |------|-------------|---------|
 | `output` | Process output (`stdout` / `stderr` / `pty`) | `{"type": "output", "source": "stdout", "data": "hello\n"}` |
-| `done` | Completion marker for a request identified by `request_id` | `{"type": "done", "request_id": "req-1"}` |
+| `done` | Completion marker for a specific request identified by `request_id` | `{"type": "done", "request_id": "req-1"}` |
+| `done` | Terminal process completion event with exit metadata | `{"type": "done", "exit_code": 0, "state": "stopped"}` |
 
 <Tabs
   tabs={[

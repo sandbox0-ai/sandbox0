@@ -354,7 +354,7 @@ for await (const output of stream.outputs()) {
 }
 
 const done = await stream.wait();
-console.log(`exit=${done.exitCode} state=${done.state}`);`
+console.log("exit=" + done.exitCode + " state=" + done.state);`
     },
     {
       label: "CLI",

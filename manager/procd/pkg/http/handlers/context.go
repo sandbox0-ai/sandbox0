@@ -145,6 +145,19 @@ type wsControlMessage struct {
 	RequestID string `json:"request_id"`
 }
 
+type wsOutputMessage struct {
+	Type   string `json:"type"`
+	Source string `json:"source"`
+	Data   string `json:"data"`
+}
+
+type wsDoneMessage struct {
+	Type      string `json:"type"`
+	RequestID string `json:"request_id,omitempty"`
+	ExitCode  *int   `json:"exit_code,omitempty"`
+	State     string `json:"state,omitempty"`
+}
+
 type execError struct {
 	status  int
 	code    string
@@ -156,6 +169,48 @@ func (e *execError) Error() string {
 }
 
 const execTimeout = 30 * time.Second
+
+func newWSOutputMessage(source process.OutputSource, data string) wsOutputMessage {
+	return wsOutputMessage{
+		Type:   "output",
+		Source: string(source),
+		Data:   data,
+	}
+}
+
+func newWSRequestDoneMessage(requestID string) wsDoneMessage {
+	return wsDoneMessage{
+		Type:      "done",
+		RequestID: requestID,
+	}
+}
+
+func newWSProcessDoneMessage(exitCode int, state process.ProcessState) wsDoneMessage {
+	code := exitCode
+	return wsDoneMessage{
+		Type:     "done",
+		ExitCode: &code,
+		State:    string(state),
+	}
+}
+
+func processDoneMessageForProcess(proc process.Process) (wsDoneMessage, bool) {
+	if proc == nil || !proc.IsFinished() {
+		return wsDoneMessage{}, false
+	}
+	exitCode, err := proc.ExitCode()
+	if err != nil {
+		return wsDoneMessage{}, false
+	}
+	return newWSProcessDoneMessage(exitCode, proc.State()), true
+}
+
+func processDoneMessage(exitEvent *process.ExitEvent, proc process.Process) (wsDoneMessage, bool) {
+	if exitEvent != nil {
+		return newWSProcessDoneMessage(exitEvent.ExitCode, exitEvent.State), true
+	}
+	return processDoneMessageForProcess(proc)
+}
 
 // List lists all contexts.
 func (h *ContextHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -699,25 +754,36 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 		if outputProvider, ok := ctx.MainProcess.(process.OutputProvider); ok {
 			stdout, stderr := outputProvider.GetOutput()
 			if stdout != "" {
-				_ = conn.WriteJSON(map[string]any{
-					"source": string(process.OutputSourceStdout),
-					"data":   stdout,
-				})
+				_ = conn.WriteJSON(newWSOutputMessage(process.OutputSourceStdout, stdout))
 			}
 			if stderr != "" {
-				_ = conn.WriteJSON(map[string]any{
-					"source": string(process.OutputSourceStderr),
-					"data":   stderr,
-				})
+				_ = conn.WriteJSON(newWSOutputMessage(process.OutputSourceStderr, stderr))
 			}
+		}
+		if doneMsg, ok := processDoneMessageForProcess(ctx.MainProcess); ok {
+			_ = conn.WriteJSON(doneMsg)
 		}
 		closeConn("context finished")
 		return
 	}
 
+	var exitMu sync.Mutex
+	var exitEvent *process.ExitEvent
 	ctx.AddExitHandler(func(event process.ExitEvent) {
-		go closeConn("context exited")
+		copied := event
+		exitMu.Lock()
+		exitEvent = &copied
+		exitMu.Unlock()
 	})
+	currentExitEvent := func() *process.ExitEvent {
+		exitMu.Lock()
+		defer exitMu.Unlock()
+		if exitEvent == nil {
+			return nil
+		}
+		copied := *exitEvent
+		return &copied
+	}
 
 	var pendingMu sync.Mutex
 	pendingRequestID := ""
@@ -748,6 +814,12 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 				return
 			case output, ok := <-outputCh:
 				if !ok {
+					if doneMsg, ok := processDoneMessage(currentExitEvent(), ctx.MainProcess); ok {
+						if err := conn.WriteJSON(doneMsg); err != nil {
+							closeConn("websocket write failed")
+							return
+						}
+					}
 					closeConn("context output closed")
 					return
 				}
@@ -756,14 +828,15 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 					if requestID == "" {
 						continue
 					}
+					if err := conn.WriteJSON(newWSRequestDoneMessage(requestID)); err != nil {
+						closeConn("websocket write failed")
+						return
+					}
 					ctx.Touch()
 					continue
 				}
 
-				msg := map[string]any{
-					"source": string(output.Source),
-					"data":   string(output.Data),
-				}
+				msg := newWSOutputMessage(output.Source, string(output.Data))
 
 				if err := conn.WriteJSON(msg); err != nil {
 					closeConn("websocket write failed")

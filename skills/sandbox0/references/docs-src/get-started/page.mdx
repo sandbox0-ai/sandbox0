@@ -302,6 +302,13 @@ s0 sandbox exec sb_abc123 -- echo "Hello, Sandbox0!"
   ]}
 />
 
+Need live command output instead of a final buffered result?
+
+- Go: `sandbox.CmdStream(...)`
+- Python: `sandbox.cmd_stream(...)`
+- TypeScript: `sandbox.cmdStream(...)`
+- CLI: `s0 sandbox exec --stream -- ...`
+
 ### Basic File Operations
 
 Read and write files in your sandbox:

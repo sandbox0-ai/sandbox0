@@ -24,6 +24,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"time"
 
@@ -51,8 +52,9 @@ func (r *Reconciler) ReconcileCertSecret(ctx context.Context, infra *infrav1alph
 	if err != nil && !errors.IsNotFound(err) {
 		return err
 	}
+	secretExists := err == nil
 
-	if err == nil {
+	if secretExists {
 		if validateTLSSecret(secret) == nil {
 			return nil
 		}
@@ -79,15 +81,21 @@ func (r *Reconciler) ReconcileCertSecret(ctx context.Context, infra *infrav1alph
 		return err
 	}
 
-	if errors.IsNotFound(err) {
-		return r.Resources.Client.Create(ctx, desired)
+	if !secretExists {
+		if err := r.Resources.Client.Create(ctx, desired); err != nil {
+			return fmt.Errorf("create tls secret %q: %w", desired.Name, err)
+		}
+		return nil
 	}
 
 	secret.Type = desired.Type
 	secret.Data = desired.Data
 	secret.Labels = desired.Labels
 	secret.OwnerReferences = desired.OwnerReferences
-	return r.Resources.Client.Update(ctx, secret)
+	if err := r.Resources.Client.Update(ctx, secret); err != nil {
+		return fmt.Errorf("update tls secret %q: %w", secret.Name, err)
+	}
+	return nil
 }
 
 func validateTLSSecret(secret *corev1.Secret) error {

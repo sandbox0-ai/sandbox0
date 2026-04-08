@@ -2,16 +2,151 @@ package clustergateway
 
 import (
 	"context"
+	"strings"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 )
+
+func TestReconcileEnablesTLSForHTTPSBaseURL(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Region: "gcp-ue4",
+			PublicExposure: &infrav1alpha1.PublicExposureConfig{
+				Enabled:    true,
+				RootDomain: "sandbox0.app",
+				RegionID:   "gcp-ue4",
+			},
+			InitUser: &infrav1alpha1.InitUserConfig{
+				Email: "admin@example.com",
+			},
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeBuiltin,
+				Builtin: &infrav1alpha1.BuiltinDatabaseConfig{
+					Enabled:  true,
+					Port:     5432,
+					Username: "sandbox0",
+					Database: "sandbox0",
+					SSLMode:  "disable",
+				},
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				ClusterGateway: &infrav1alpha1.ClusterGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						Replicas:             1,
+					},
+					Config: &infrav1alpha1.ClusterGatewayConfig{
+						AuthMode: "public",
+						GatewayConfig: infrav1alpha1.GatewayConfig{
+							BaseURL: "https://gcp-ue4.sandbox0.ai",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	reconciler, client := newClusterGatewayTestReconciler(t,
+		infra.DeepCopy(),
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "demo-sandbox0-database-credentials",
+				Namespace: infra.Namespace,
+			},
+			Data: map[string][]byte{
+				"username": []byte("sandbox0"),
+				"password": []byte("db-password"),
+				"database": []byte("sandbox0"),
+				"port":     []byte("5432"),
+			},
+		},
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "admin-password",
+				Namespace: infra.Namespace,
+			},
+			Data: map[string][]byte{
+				"password": []byte("admin-password"),
+			},
+		},
+	)
+
+	if err := reconciler.Reconcile(context.Background(), infra, "sandbox0ai/infra", "latest", nil); err != nil && !strings.Contains(err.Error(), "not ready") {
+		t.Fatalf("reconcile returned unexpected error: %v", err)
+	}
+
+	secret := &corev1.Secret{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: "demo-cluster-gateway-tls", Namespace: infra.Namespace}, secret); err != nil {
+		t.Fatalf("get tls secret: %v", err)
+	}
+	if secret.Type != corev1.SecretTypeTLS {
+		t.Fatalf("expected tls secret type, got %q", secret.Type)
+	}
+
+	service := &corev1.Service{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: "demo-cluster-gateway", Namespace: infra.Namespace}, service); err != nil {
+		t.Fatalf("get cluster gateway service: %v", err)
+	}
+	if service.Spec.Ports[0].Port != 443 {
+		t.Fatalf("expected external service port 443, got %d", service.Spec.Ports[0].Port)
+	}
+
+	deployment := &appsv1.Deployment{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: "demo-cluster-gateway", Namespace: infra.Namespace}, deployment); err != nil {
+		t.Fatalf("get cluster gateway deployment: %v", err)
+	}
+	if deployment.Spec.Template.Spec.Containers[0].ReadinessProbe.HTTPGet.Scheme != corev1.URISchemeHTTPS {
+		t.Fatalf("expected https readiness probe, got %s", deployment.Spec.Template.Spec.Containers[0].ReadinessProbe.HTTPGet.Scheme)
+	}
+	if !hasVolume(deployment.Spec.Template.Spec.Volumes, "gateway-tls") {
+		t.Fatal("expected gateway-tls volume to be mounted")
+	}
+}
+
+func newClusterGatewayTestReconciler(t *testing.T, objects ...runtime.Object) (*Reconciler, ctrlclient.Client) {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+	if err := infrav1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add infra scheme: %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add apps scheme: %v", err)
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(objects...).
+		Build()
+
+	return NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{})), client
+}
+
+func hasVolume(volumes []corev1.Volume, name string) bool {
+	for _, volume := range volumes {
+		if volume.Name == name {
+			return true
+		}
+	}
+	return false
+}
 
 func TestBuildConfigUsesStorageProxyServicePortForDerivedURL(t *testing.T) {
 	scheme := runtime.NewScheme()

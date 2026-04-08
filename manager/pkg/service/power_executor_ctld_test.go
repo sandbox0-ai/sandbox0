@@ -15,7 +15,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	ktesting "k8s.io/client-go/testing"
 )
 
 type rewriteTransport struct {
@@ -155,4 +157,92 @@ func TestCtldPowerExecutorCallsCtldResumeAfterRestoringState(t *testing.T) {
 	assert.Empty(t, updated.Annotations[controller.AnnotationPaused])
 	assert.Empty(t, updated.Annotations[controller.AnnotationPausedState])
 	assert.Equal(t, SandboxPowerStateActive, updated.Annotations[controller.AnnotationPowerStateObserved])
+}
+
+func TestCtldPowerExecutorDistributesPauseResizeAcrossContainers(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "/api/v1/sandboxes/sandbox-1/pause", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"paused":true,"resource_usage":{"container_memory_working_set":524288000}}`))
+	}))
+	defer server.Close()
+	target, err := url.Parse(server.URL)
+	require.NoError(t, err)
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-1", Namespace: "default", Labels: map[string]string{"sandbox0.ai/sandbox-id": "sandbox-1"}},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Containers: []corev1.Container{
+				{
+					Name: "procd",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("900m"), corev1.ResourceMemory: resource.MustParse("900Mi")},
+						Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("900m"), corev1.ResourceMemory: resource.MustParse("900Mi")},
+					},
+				},
+				{
+					Name: "sidecar",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m"), corev1.ResourceMemory: resource.MustParse("100Mi")},
+						Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m"), corev1.ResourceMemory: resource.MustParse("100Mi")},
+					},
+				},
+			},
+		},
+	}
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
+		Status:     corev1.NodeStatus{Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.12"}}},
+	}
+	client := fake.NewSimpleClientset(pod, node)
+	var resizePod *corev1.Pod
+	client.PrependReactor("update", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
+		if action.GetSubresource() != "resize" {
+			return false, nil, nil
+		}
+		resizePod = action.(ktesting.UpdateAction).GetObject().(*corev1.Pod).DeepCopy()
+		return false, nil, nil
+	})
+	transport := &rewriteTransport{base: server.Client().Transport, target: target}
+
+	svc := &SandboxService{
+		k8sClient:  client,
+		ctldClient: NewCtldClientWithHTTPClient(&http.Client{Transport: transport}),
+		config:     SandboxServiceConfig{CtldEnabled: true, CtldPort: 8095, PauseMinCPU: "10m", PauseMemoryBufferRatio: 1.1},
+		logger:     zap.NewNop(),
+		clock:      systemTime{},
+	}
+	svc.SetPowerExecutor(&ctldSandboxPowerExecutor{service: svc})
+
+	_, err = svc.PauseSandbox(context.Background(), "sandbox-1")
+	require.NoError(t, err)
+	require.NotNil(t, resizePod)
+	require.Len(t, resizePod.Spec.Containers, 2)
+
+	assert.Equal(t, mustValue("450Mi"), quantityValue(resizePod.Spec.Containers[0].Resources.Requests[corev1.ResourceMemory]))
+	assert.Equal(t, mustValue("495Mi"), quantityValue(resizePod.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory]))
+	assert.Equal(t, mustMilliValue("9m"), quantityMilliValue(resizePod.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU]))
+	assert.Equal(t, mustValue("50Mi"), quantityValue(resizePod.Spec.Containers[1].Resources.Requests[corev1.ResourceMemory]))
+	assert.Equal(t, mustValue("55Mi"), quantityValue(resizePod.Spec.Containers[1].Resources.Limits[corev1.ResourceMemory]))
+	assert.Equal(t, mustMilliValue("1m"), quantityMilliValue(resizePod.Spec.Containers[1].Resources.Limits[corev1.ResourceCPU]))
+}
+
+func mustValue(raw string) int64 {
+	quantity := resource.MustParse(raw)
+	return quantity.Value()
+}
+
+func mustMilliValue(raw string) int64 {
+	quantity := resource.MustParse(raw)
+	return quantity.MilliValue()
+}
+
+func quantityValue(quantity resource.Quantity) int64 {
+	return quantity.Value()
+}
+
+func quantityMilliValue(quantity resource.Quantity) int64 {
+	return quantity.MilliValue()
 }

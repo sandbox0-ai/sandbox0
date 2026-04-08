@@ -59,7 +59,7 @@ func (e *ctldSandboxPowerExecutor) Pause(ctx context.Context, sandboxID string) 
 	if !resp.Paused {
 		return nil, fmt.Errorf("ctld pause failed: %s", resp.Error)
 	}
-	return e.service.completePausedSandbox(ctx, pod, sandboxID, sandboxUsageFromCtld(resp.ResourceUsage))
+	return e.service.completePausedSandbox(ctx, pod, sandboxID, sandboxUsageFromCtld(resp.ResourceUsage), true)
 }
 
 func (e *ctldSandboxPowerExecutor) Resume(ctx context.Context, sandboxID string) (*ResumeSandboxResponse, error) {

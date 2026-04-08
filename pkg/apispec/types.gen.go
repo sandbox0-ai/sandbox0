@@ -1625,7 +1625,6 @@ type SidecarContainerSpec struct {
 	Command        *[]string             `json:"command,omitempty"`
 	Env            *[]EnvVar             `json:"env,omitempty"`
 	Image          string                `json:"image"`
-	LivenessProbe  *Probe                `json:"livenessProbe,omitempty"`
 	Mounts         *[]ContainerMountSpec `json:"mounts,omitempty"`
 	Name           string                `json:"name"`
 	ReadinessProbe *Probe                `json:"readinessProbe,omitempty"`

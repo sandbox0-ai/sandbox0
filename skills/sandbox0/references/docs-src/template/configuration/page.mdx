@@ -131,11 +131,14 @@ Commonly used sidecar fields:
 | `env` | Sidecar-specific environment variables. |
 | `mounts` | References to template `sharedVolumes` when the sidecar needs pod-shared storage. |
 | `readinessProbe` | Gates whether the sidecar is considered ready. Use this to express warm-process readiness. |
-| `livenessProbe` | Optional probe for restarting an unhealthy sidecar. |
 | `startupProbe` | Optional probe for slow-starting sidecars. |
 
 <Callout variant="info">
 If a sidecar hosts your warm process, define readiness on the sidecar itself. A pod that is `Running` but not `Ready` does not count as available warm-pool capacity and will not be hot-claimed.
+</Callout>
+
+<Callout variant="warning">
+`livenessProbe` is not part of the public template surface. Whole-sandbox soft pause freezes the sandbox, so kubelet liveness semantics would conflict with pause/resume.
 </Callout>
 
 If a sidecar also needs shared storage, declare `spec.sharedVolumes` on the template and mount them from `sidecars[*].mounts`. For end-to-end examples in Go, Python, TypeScript, and CLI, see [Template Sidecars](/docs/template/sidecars).

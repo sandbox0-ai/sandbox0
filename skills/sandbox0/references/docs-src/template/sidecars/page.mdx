@@ -25,8 +25,11 @@ The public HTTP API and all three SDKs expose the same sidecar schema under `spe
 | `resources` | yes | CPU and memory request/limit pair used by Sandbox0's template schema. |
 | `mounts` | no | Shared-volume mount references for this sidecar. |
 | `readinessProbe` | no | Readiness gate. Exactly one handler is required when set. |
-| `livenessProbe` | no | Liveness probe. Exactly one handler is required when set. |
 | `startupProbe` | no | Startup probe. Exactly one handler is required when set. |
+
+<Callout variant="warning">
+`livenessProbe` is intentionally unsupported for template sidecars. Sandbox0 soft pause can freeze the whole sandbox, which is incompatible with kubelet liveness restarts.
+</Callout>
 
 If a sidecar needs pod-shared storage, define it once under `spec.sharedVolumes`:
 
@@ -297,7 +300,7 @@ s0 template create --id my-codex-env --spec-file template.yaml`
 
 - `name`, `image`, and `resources` are required for every sidecar.
 - `mounts[*].name` must refer to a declared `sharedVolumes[*].name`.
-- `readinessProbe`, `livenessProbe`, and `startupProbe` must define exactly one handler when present.
+- `readinessProbe` and `startupProbe` must define exactly one handler when present.
 - Private image references are still checked against team ownership rules, just like `spec.mainContainer.image`.
 
 ## Next Steps

@@ -33,13 +33,13 @@ flowchart TB
 ```
 
 When a sandbox is claimed:
-1. The manager first tries to claim a Sandbox0-ready idle pod (`claimIdlePod`)
+1. The manager first tries to claim a ready idle pod (`claimIdlePod`)
 2. If successful (hot claim), the pod is relabeled to `active` and returned immediately; pool replenishment happens asynchronously via ReplicaSet reconcile
 3. If no idle pod exists (cold claim), the manager directly creates a new active pod (`createNewPod`) and asynchronously triggers scale-up (`OnColdClaim`) to rebuild idle capacity
 
 As long as `minIdle` idle pods are available, every claim is a **zero-cold-start** operation.
 
-In practice, “available” means the sandbox readiness gate is true, not merely `Pod Running`.
+In practice, “available” means the pod is ready for claiming, not merely `Pod Running`.
 
 ---
 
@@ -70,13 +70,13 @@ spec:
 
 ## Readiness Gates Pool Capacity
 
-Warm-pool capacity is counted from idle pods that reach Sandbox0-managed readiness.
+Warm-pool capacity is counted from idle pods that are ready for claiming.
 
 - An idle pod in `Running` phase but with `Ready=False` does not count toward `idleCount`
 - A hot claim only selects idle pods that are already `Ready`
-- Sandbox0 owns the final readiness gate for sandbox pods. Sidecar `readinessProbe` is allowed, but Sandbox0 uses it as one input to the sandbox-managed readiness decision.
+- Sidecar `readinessProbe` is allowed and can delay when a pod becomes claimable.
 
-If a template uses a sidecar to host a warm process, use `readinessProbe` on the sidecar and let Sandbox0 drive the final pod readiness gate:
+If a template uses a sidecar to host a warm process, use `readinessProbe` on the sidecar so the pod only becomes claimable after that sidecar is ready:
 
 ```yaml
 spec:
@@ -92,7 +92,7 @@ spec:
         maxIdle: 10
 ```
 
-In this model, the pod only counts as warm-pool capacity after Sandbox0 sees the sidecar readiness signal and marks its readiness gate ready.
+In this model, the pod only counts as warm-pool capacity after the sidecar becomes ready.
 
 **Choosing `minIdle`:**
 

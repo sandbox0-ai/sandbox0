@@ -24,7 +24,7 @@ The public HTTP API and all three SDKs expose the same sidecar schema under `spe
 | `env` | no | Sidecar-specific environment variables. |
 | `resources` | yes | CPU and memory request/limit pair used by Sandbox0's template schema. |
 | `mounts` | no | Shared-volume mount references for this sidecar. |
-| `readinessProbe` | no | Readiness probe. Exactly one handler is required when set. Sandbox0 uses it as part of the sandbox-managed readiness gate. |
+| `readinessProbe` | no | Readiness probe. Exactly one handler is required when set. It controls when the sidecar is considered ready for warm-pool capacity and hot claims. |
 | `startupProbe` | no | Startup probe. Exactly one handler is required when set. |
 
 <Callout variant="warning">
@@ -93,11 +93,11 @@ In this example, the main container uses `/workspace/shared` while the sidecar u
 
 ## Sandbox0 Readiness Controls Claimability
 
-Warm-pool capacity only counts pods that Sandbox0 marks ready through the sandbox readiness gate.
+Warm-pool capacity only counts pods that are ready for claiming.
 
 - A pod in `Running` phase with `Ready=False` does not count as available idle capacity.
 - A hot claim only selects idle pods that are already ready.
-- Sandbox0 owns the readiness gate for sandbox pods and executes sidecar `readinessProbe` checks itself.
+- Sidecar `readinessProbe` can delay when a pod becomes claimable.
 
 Example:
 
@@ -130,7 +130,7 @@ spec:
         maxIdle: 10
 ```
 
-In this example, the sidecar can model slow startup with `startupProbe`, but the pod is not counted as ready warm capacity until Sandbox0 marks its readiness gate ready after its own readiness checks succeed.
+In this example, the sidecar can model slow startup with `startupProbe`, but the pod is not counted as ready warm capacity until it becomes claimable.
 
 ---
 

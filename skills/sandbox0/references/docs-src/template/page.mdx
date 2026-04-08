@@ -13,7 +13,7 @@ Sandbox0 has two categories of templates:
 
 Builtin templates use curated public images and are ready to use immediately. Custom templates let you bring your own image, and fine-tune resources.
 
-Custom templates can also define sidecar containers. This is useful for template-owned warm processes, for example a long-running Codex agent or helper daemon. Pool capacity only counts pods that become Kubernetes-ready, so a sidecar readiness probe can gate whether a warm pod is claimable. See [Template Sidecars](/docs/template/sidecars) for the dedicated guide.
+Custom templates can also define sidecar containers. This is useful for template-owned warm processes, for example a long-running Codex agent or helper daemon. Pool capacity only counts pods that are ready for claiming, so a sidecar readiness probe can gate whether a warm pod is claimable. See [Template Sidecars](/docs/template/sidecars) for the dedicated guide.
 
 ---
 

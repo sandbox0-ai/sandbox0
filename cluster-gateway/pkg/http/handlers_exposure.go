@@ -59,7 +59,7 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "port is not exposed")
 		return
 	}
-	if sandbox.Paused {
+	if sandboxWantsPaused(sandbox) {
 		// Resume precedence:
 		// sandbox.auto_resume must be true, then per-port exposed_ports[].resume must be true.
 		if !sandbox.AutoResume {

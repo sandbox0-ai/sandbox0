@@ -60,3 +60,23 @@ func TestMemoryCurrentFallsBackToCgroupV1(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(456), value)
 }
+
+func TestSettledMemoryCurrentReturnsPeakDuringSettleWindow(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, memoryV2File), []byte("100\n"), 0o644))
+	fs := &FS{SettleTimeout: 200 * time.Millisecond, PollInterval: 10 * time.Millisecond}
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		time.Sleep(30 * time.Millisecond)
+		_ = os.WriteFile(filepath.Join(dir, memoryV2File), []byte("140\n"), 0o644)
+		time.Sleep(30 * time.Millisecond)
+		_ = os.WriteFile(filepath.Join(dir, memoryV2File), []byte("140\n"), 0o644)
+	}()
+
+	value, err := fs.SettledMemoryCurrent(dir)
+	<-done
+	require.NoError(t, err)
+	assert.Equal(t, int64(140), value)
+}

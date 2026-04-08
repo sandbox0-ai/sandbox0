@@ -1,6 +1,7 @@
 package power
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -13,17 +14,25 @@ var ErrNotImplemented = errors.New("ctld power resolver not implemented")
 var ErrSandboxNotFound = errors.New("sandbox not found")
 
 type Target struct {
-	SandboxID string
-	CgroupDir string
+	SandboxID    string
+	CgroupDir    string
+	PodNamespace string
+	PodName      string
+	PodUID       string
 }
 
 type Resolver interface {
 	Resolve(r *http.Request, sandboxID string) (Target, error)
 }
 
+type SandboxStatsProvider interface {
+	SandboxResourceUsage(ctx context.Context, target Target) (*ctldapi.SandboxResourceUsage, error)
+}
+
 type Controller struct {
-	Resolver Resolver
-	FS       *cgroup.FS
+	Resolver      Resolver
+	FS            *cgroup.FS
+	StatsProvider SandboxStatsProvider
 }
 
 func NewController(resolver Resolver, fs *cgroup.FS) *Controller {
@@ -41,18 +50,13 @@ func (c *Controller) Pause(r *http.Request, sandboxID string) (ctldapi.PauseResp
 	if err := c.FS.Freeze(target.CgroupDir); err != nil {
 		return ctldapi.PauseResponse{Paused: false, Error: fmt.Sprintf("freeze cgroup: %v", err)}, http.StatusInternalServerError
 	}
-	memoryCurrent, err := c.FS.MemoryCurrent(target.CgroupDir)
+	usage, err := c.pauseUsage(r.Context(), target)
 	if err != nil {
-		return ctldapi.PauseResponse{Paused: false, Error: fmt.Sprintf("read memory.current: %v", err)}, http.StatusInternalServerError
+		return ctldapi.PauseResponse{Paused: false, Error: err.Error()}, http.StatusInternalServerError
 	}
 	return ctldapi.PauseResponse{
-		Paused: true,
-		ResourceUsage: &ctldapi.SandboxResourceUsage{
-			ContainerMemoryUsage:      memoryCurrent,
-			ContainerMemoryLimit:      memoryCurrent,
-			ContainerMemoryWorkingSet: memoryCurrent,
-			TotalMemoryRSS:            memoryCurrent,
-		},
+		Paused:        true,
+		ResourceUsage: usage,
 	}, http.StatusOK
 }
 
@@ -82,4 +86,96 @@ func (c *Controller) resolveTarget(r *http.Request, sandboxID string) (Target, i
 		return Target{}, http.StatusNotFound, ctldapi.PauseResponse{Paused: false, Error: err.Error()}
 	}
 	return Target{}, http.StatusInternalServerError, ctldapi.PauseResponse{Paused: false, Error: err.Error()}
+}
+
+func (c *Controller) pauseUsage(ctx context.Context, target Target) (*ctldapi.SandboxResourceUsage, error) {
+	fallback, fallbackErr := c.cgroupPauseUsage(target.CgroupDir)
+	if c == nil || c.StatsProvider == nil {
+		if fallbackErr != nil {
+			return nil, fmt.Errorf("read settled memory.current: %w", fallbackErr)
+		}
+		return fallback, nil
+	}
+
+	statsUsage, statsErr := c.StatsProvider.SandboxResourceUsage(ctx, target)
+	usage := mergeSandboxResourceUsage(fallback, statsUsage)
+	if usage != nil {
+		return usage, nil
+	}
+	if statsErr == nil && fallbackErr == nil {
+		return nil, fmt.Errorf("sandbox usage unavailable")
+	}
+	if statsErr != nil && fallbackErr != nil {
+		return nil, fmt.Errorf("collect sandbox usage: cri stats: %v; cgroup fallback: %v", statsErr, fallbackErr)
+	}
+	if statsErr != nil {
+		return nil, fmt.Errorf("collect sandbox usage from cri stats: %w", statsErr)
+	}
+	return nil, fmt.Errorf("read settled memory.current: %w", fallbackErr)
+}
+
+func (c *Controller) cgroupPauseUsage(dir string) (*ctldapi.SandboxResourceUsage, error) {
+	if c == nil || c.FS == nil {
+		return nil, fmt.Errorf("cgroup fs is not configured")
+	}
+	memoryCurrent, err := c.FS.SettledMemoryCurrent(dir)
+	if err != nil {
+		return nil, err
+	}
+	return &ctldapi.SandboxResourceUsage{
+		ContainerMemoryUsage:      memoryCurrent,
+		ContainerMemoryLimit:      memoryCurrent,
+		ContainerMemoryWorkingSet: memoryCurrent,
+		TotalMemoryRSS:            memoryCurrent,
+	}, nil
+}
+
+func mergeSandboxResourceUsage(base, override *ctldapi.SandboxResourceUsage) *ctldapi.SandboxResourceUsage {
+	if base == nil && override == nil {
+		return nil
+	}
+	out := &ctldapi.SandboxResourceUsage{}
+	if base != nil {
+		*out = *base
+	}
+	if override == nil {
+		return out
+	}
+	if override.ContainerMemoryUsage > 0 {
+		out.ContainerMemoryUsage = override.ContainerMemoryUsage
+	}
+	if override.ContainerMemoryLimit > 0 {
+		out.ContainerMemoryLimit = override.ContainerMemoryLimit
+	}
+	if override.ContainerMemoryWorkingSet > 0 {
+		out.ContainerMemoryWorkingSet = override.ContainerMemoryWorkingSet
+	}
+	if override.TotalMemoryRSS > 0 {
+		out.TotalMemoryRSS = override.TotalMemoryRSS
+	}
+	if override.TotalMemoryVMS > 0 {
+		out.TotalMemoryVMS = override.TotalMemoryVMS
+	}
+	if override.TotalOpenFiles > 0 {
+		out.TotalOpenFiles = override.TotalOpenFiles
+	}
+	if override.TotalThreadCount > 0 {
+		out.TotalThreadCount = override.TotalThreadCount
+	}
+	if override.TotalIOReadBytes > 0 {
+		out.TotalIOReadBytes = override.TotalIOReadBytes
+	}
+	if override.TotalIOWriteBytes > 0 {
+		out.TotalIOWriteBytes = override.TotalIOWriteBytes
+	}
+	if override.ContextCount > 0 {
+		out.ContextCount = override.ContextCount
+	}
+	if override.RunningContextCount > 0 {
+		out.RunningContextCount = override.RunningContextCount
+	}
+	if override.PausedContextCount > 0 {
+		out.PausedContextCount = override.PausedContextCount
+	}
+	return out
 }

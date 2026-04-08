@@ -107,14 +107,14 @@ func reconcileFusePluginDaemonSet(t *testing.T, infra *infrav1alpha1.Sandbox0Inf
 	if ds.Spec.Template.Spec.ServiceAccountName != "demo-ctld" {
 		t.Fatalf("expected service account demo-ctld, got %q", ds.Spec.Template.Spec.ServiceAccountName)
 	}
-	if len(ds.Spec.Template.Spec.Containers[0].Args) < 2 || ds.Spec.Template.Spec.Containers[0].Args[1] != "-cgroup-root=/host-sys/fs/cgroup" {
+	if len(ds.Spec.Template.Spec.Containers[0].Args) < 3 || ds.Spec.Template.Spec.Containers[0].Args[1] != "-cgroup-root=/host-sys/fs/cgroup" || ds.Spec.Template.Spec.Containers[0].Args[2] != "-cri-endpoint=/host-run/containerd/containerd.sock" {
 		t.Fatalf("expected cgroup root arg, got %#v", ds.Spec.Template.Spec.Containers[0].Args)
 	}
 	if ds.Spec.Template.Spec.Containers[0].SecurityContext == nil || ds.Spec.Template.Spec.Containers[0].SecurityContext.Privileged == nil || !*ds.Spec.Template.Spec.Containers[0].SecurityContext.Privileged {
 		t.Fatal("expected ctld container to run privileged")
 	}
-	if len(ds.Spec.Template.Spec.Containers[0].VolumeMounts) != 2 {
-		t.Fatalf("expected device-plugin and host-cgroup mounts, got %#v", ds.Spec.Template.Spec.Containers[0].VolumeMounts)
+	if len(ds.Spec.Template.Spec.Containers[0].VolumeMounts) != 3 {
+		t.Fatalf("expected device-plugin, host-cgroup, and containerd mounts, got %#v", ds.Spec.Template.Spec.Containers[0].VolumeMounts)
 	}
 
 	return ds

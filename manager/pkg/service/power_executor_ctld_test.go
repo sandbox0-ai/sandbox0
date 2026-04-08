@@ -159,6 +159,67 @@ func TestCtldPowerExecutorCallsCtldResumeAfterRestoringState(t *testing.T) {
 	assert.Equal(t, SandboxPowerStateActive, updated.Annotations[controller.AnnotationPowerStateObserved])
 }
 
+func TestCtldPowerExecutorResumeFailureKeepsPausedStateAuthoritative(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "/api/v1/sandboxes/sandbox-1/resume", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"resumed":false,"error":"thaw failed"}`))
+	}))
+	defer server.Close()
+	target, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sandbox-1",
+			Namespace: "default",
+			Labels:    map[string]string{"sandbox0.ai/sandbox-id": "sandbox-1"},
+			Annotations: map[string]string{
+				controller.AnnotationPaused:                      "true",
+				controller.AnnotationPausedAt:                    time.Now().UTC().Format(time.RFC3339),
+				controller.AnnotationPausedState:                 `{"resources":{"procd":{"requests":{"cpu":"100m","memory":"128Mi"},"limits":{"cpu":"200m","memory":"256Mi"}}}}`,
+				controller.AnnotationPowerStateDesired:           SandboxPowerStateActive,
+				controller.AnnotationPowerStateDesiredGeneration: "4",
+				controller.AnnotationPowerStateObserved:          SandboxPowerStatePaused,
+			},
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Containers: []corev1.Container{{
+				Name: "procd",
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("10m"), corev1.ResourceMemory: resource.MustParse("64Mi")},
+					Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("10m"), corev1.ResourceMemory: resource.MustParse("96Mi")},
+				},
+			}},
+		},
+	}
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
+		Status:     corev1.NodeStatus{Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.12"}}},
+	}
+	transport := &rewriteTransport{base: server.Client().Transport, target: target}
+
+	svc := &SandboxService{
+		k8sClient:  fake.NewSimpleClientset(pod, node),
+		ctldClient: NewCtldClientWithHTTPClient(&http.Client{Transport: transport}),
+		config:     SandboxServiceConfig{CtldEnabled: true, CtldPort: 8095, PauseMinCPU: "10m", PauseMemoryBufferRatio: 1.1},
+		logger:     zap.NewNop(),
+		clock:      systemTime{},
+	}
+	svc.SetPowerExecutor(&ctldSandboxPowerExecutor{service: svc})
+
+	_, err = svc.ResumeSandbox(context.Background(), "sandbox-1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ctld resume failed")
+
+	updated, err := svc.k8sClient.CoreV1().Pods("default").Get(context.Background(), "sandbox-1", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "true", updated.Annotations[controller.AnnotationPaused])
+	assert.NotEmpty(t, updated.Annotations[controller.AnnotationPausedState])
+	assert.Equal(t, SandboxPowerStatePaused, updated.Annotations[controller.AnnotationPowerStateObserved])
+}
+
 func TestCtldPowerExecutorDistributesPauseResizeAcrossContainers(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodPost, r.Method)

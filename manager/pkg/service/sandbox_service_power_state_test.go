@@ -241,6 +241,44 @@ func TestRequestResumeSandboxDoesNotBlockOnInFlightReconcile(t *testing.T) {
 	<-executor.pauseFinished
 }
 
+func TestCompletePausedSandboxRejectsStaleGeneration(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sandbox-1",
+			Namespace: "default",
+			Labels: map[string]string{
+				controller.LabelSandboxID: "sandbox-1",
+			},
+			Annotations: map[string]string{
+				controller.AnnotationPowerStateDesired:           SandboxPowerStateActive,
+				controller.AnnotationPowerStateDesiredGeneration: "2",
+				controller.AnnotationPowerStateObserved:          SandboxPowerStateActive,
+			},
+		},
+		Spec:   corev1.PodSpec{Containers: []corev1.Container{{Name: "procd"}}},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	svc := &SandboxService{
+		k8sClient: fake.NewSimpleClientset(pod),
+		podLister: newTestPodLister(t, pod),
+		config: SandboxServiceConfig{
+			PauseMinCPU:            "10m",
+			PauseMemoryBufferRatio: 1.1,
+		},
+		clock:  systemTime{},
+		logger: zap.NewNop(),
+	}
+
+	resp, err := svc.completePausedSandbox(context.Background(), pod, "sandbox-1", &SandboxResourceUsage{ContainerMemoryWorkingSet: 128}, false, expectedSandboxPowerState{Desired: SandboxPowerStatePaused, Generation: 1})
+	require.ErrorIs(t, err, errSandboxPowerStateStale)
+	assert.False(t, resp.Paused)
+	assert.Equal(t, SandboxPowerStateActive, resp.PowerState.Desired)
+
+	updated, getErr := svc.k8sClient.CoreV1().Pods("default").Get(context.Background(), "sandbox-1", metav1.GetOptions{})
+	require.NoError(t, getErr)
+	assert.Empty(t, updated.Annotations[controller.AnnotationPaused])
+}
+
 type recordingPowerExecutor struct {
 	pauseCalls  []string
 	resumeCalls []string

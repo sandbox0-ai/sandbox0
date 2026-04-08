@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
@@ -48,6 +49,7 @@ func (e *ctldSandboxPowerExecutor) Pause(ctx context.Context, sandboxID string) 
 	if err != nil {
 		return nil, fmt.Errorf("get pod: %w", err)
 	}
+	expected := currentSandboxPowerExpectation(pod.Annotations, SandboxPowerStatePaused)
 	ctldAddress, err := e.service.ctldAddressForSandbox(ctx, sandboxID)
 	if err != nil {
 		return nil, err
@@ -59,7 +61,18 @@ func (e *ctldSandboxPowerExecutor) Pause(ctx context.Context, sandboxID string) 
 	if !resp.Paused {
 		return nil, fmt.Errorf("ctld pause failed: %s", resp.Error)
 	}
-	return e.service.completePausedSandbox(ctx, pod, sandboxID, sandboxUsageFromCtld(resp.ResourceUsage), true)
+	pauseResp, err := e.service.completePausedSandbox(ctx, pod, sandboxID, sandboxUsageFromCtld(resp.ResourceUsage), true, expected)
+	if err != nil && errors.Is(err, errSandboxPowerStateStale) {
+		freshPod, getErr := e.service.getSandboxPodForPowerState(ctx, sandboxID)
+		if getErr == nil {
+			current := sandboxPowerStateFromAnnotations(freshPod.Annotations)
+			if current.Desired == SandboxPowerStateActive {
+				_, _ = e.service.ctldClient.Resume(ctx, ctldAddress, sandboxID)
+				return &PauseSandboxResponse{SandboxID: sandboxID, Paused: false, PowerState: current}, nil
+			}
+		}
+	}
+	return pauseResp, err
 }
 
 func (e *ctldSandboxPowerExecutor) Resume(ctx context.Context, sandboxID string) (*ResumeSandboxResponse, error) {
@@ -67,7 +80,8 @@ func (e *ctldSandboxPowerExecutor) Resume(ctx context.Context, sandboxID string)
 	if err != nil {
 		return nil, fmt.Errorf("get pod: %w", err)
 	}
-	prep, resp, err := e.service.prepareSandboxResume(ctx, pod, sandboxID)
+	expected := currentSandboxPowerExpectation(pod.Annotations, SandboxPowerStateActive)
+	prep, resp, err := e.service.prepareSandboxResume(ctx, pod, sandboxID, expected)
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +99,11 @@ func (e *ctldSandboxPowerExecutor) Resume(ctx context.Context, sandboxID string)
 	if !ctldResp.Resumed {
 		return nil, fmt.Errorf("ctld resume failed: %s", ctldResp.Error)
 	}
-	return &ResumeSandboxResponse{SandboxID: sandboxID, Resumed: true, PowerState: prep.PowerState, RestoredMemory: prep.RestoredMemory}, nil
+	powerState, err := e.service.completeSandboxResume(ctx, sandboxID, expected)
+	if err != nil {
+		return nil, err
+	}
+	return &ResumeSandboxResponse{SandboxID: sandboxID, Resumed: true, PowerState: powerState, RestoredMemory: prep.RestoredMemory}, nil
 }
 
 func sandboxUsageFromCtld(in *ctldapi.SandboxResourceUsage) *SandboxResourceUsage {

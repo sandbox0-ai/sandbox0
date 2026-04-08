@@ -16,6 +16,7 @@ const (
 	memoryV1File   = "memory.usage_in_bytes"
 	defaultTimeout = 2 * time.Second
 	defaultPoll    = 20 * time.Millisecond
+	minSettleWait  = 50 * time.Millisecond
 )
 
 type FS struct {
@@ -46,6 +47,49 @@ func (fs *FS) MemoryCurrent(dir string) (int64, error) {
 		}
 	}
 	return 0, fmt.Errorf("no memory usage file found in %s", dir)
+}
+
+func (fs *FS) SettledMemoryCurrent(dir string) (int64, error) {
+	deadline := time.Now().Add(timeoutOrDefault(fs.SettleTimeout, defaultTimeout))
+	poll := timeoutOrDefault(fs.PollInterval, defaultPoll)
+	minObservation := maxDuration(poll*3, minSettleWait)
+
+	var maxValue int64
+	var lastValue int64
+	haveValue := false
+	stableReads := 0
+	var firstReadAt time.Time
+	for {
+		value, err := fs.MemoryCurrent(dir)
+		if err == nil {
+			if !haveValue {
+				firstReadAt = time.Now()
+			}
+			if !haveValue || value > maxValue {
+				maxValue = value
+			}
+			if haveValue && value == lastValue {
+				stableReads++
+			} else {
+				lastValue = value
+				stableReads = 0
+			}
+			haveValue = true
+			if stableReads >= 2 && time.Since(firstReadAt) >= minObservation {
+				return maxValue, nil
+			}
+		} else if time.Now().After(deadline) || !haveValue {
+			return 0, err
+		}
+
+		if time.Now().After(deadline) {
+			if haveValue {
+				return maxValue, nil
+			}
+			return 0, fmt.Errorf("memory usage did not stabilize in %s", dir)
+		}
+		time.Sleep(poll)
+	}
 }
 
 func (fs *FS) setFrozen(dir string, frozen bool) error {
@@ -131,4 +175,11 @@ func timeoutOrDefault(value, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return value
+}
+
+func maxDuration(a, b time.Duration) time.Duration {
+	if a > b {
+		return a
+	}
+	return b
 }

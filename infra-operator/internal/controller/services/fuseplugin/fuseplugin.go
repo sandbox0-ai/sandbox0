@@ -56,6 +56,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 					Annotations: common.EnsurePodTemplateAnnotations(nil),
 				},
 				Spec: corev1.PodSpec{
+					HostPID:            true,
 					ServiceAccountName: name,
 					NodeSelector:       nodeSelector,
 					Tolerations:        tolerations,
@@ -66,7 +67,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 							Name:            "ctld",
 							Image:           image,
 							ImagePullPolicy: pullPolicy,
-							Args:            []string{"-http-addr=:8095", "-cgroup-root=/host-sys/fs/cgroup"},
+							Args:            []string{"-http-addr=:8095", "-cgroup-root=/host-sys/fs/cgroup", "-cri-endpoint=/host-run/containerd/containerd.sock"},
 							Env: []corev1.EnvVar{
 								{
 									Name:  "SERVICE",
@@ -109,6 +110,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 									Name:      "host-cgroup",
 									MountPath: "/host-sys/fs/cgroup",
 								},
+								{
+									Name:      "containerd-sock",
+									MountPath: "/host-run/containerd",
+								},
 							},
 						},
 					},
@@ -126,6 +131,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 							VolumeSource: corev1.VolumeSource{
 								HostPath: &corev1.HostPathVolumeSource{
 									Path: "/sys/fs/cgroup",
+								},
+							},
+						},
+						{
+							Name: "containerd-sock",
+							VolumeSource: corev1.VolumeSource{
+								HostPath: &corev1.HostPathVolumeSource{
+									Path: "/run/containerd",
 								},
 							},
 						},

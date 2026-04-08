@@ -310,11 +310,11 @@ func (s *Server) getProcdURL(c *gin.Context, sandboxID string) (*url.URL, error)
 			spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "sandbox belongs to a different team")
 			return nil, errors.New("sandbox belongs to a different team")
 		}
-		if sandbox.Paused && !sandbox.AutoResume {
+		if sandboxWantsPaused(sandbox) && !sandbox.AutoResume {
 			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is paused and auto_resume is disabled")
 			return nil, errors.New("sandbox auto_resume is disabled")
 		}
-		if sandbox.Paused {
+		if sandboxWantsPaused(sandbox) {
 			if sandbox.PowerState.Desired != mgr.SandboxPowerStateActive {
 				resumeCtx, cancel := context.WithTimeout(c.Request.Context(), 45*time.Second)
 				defer cancel()
@@ -352,6 +352,16 @@ func (s *Server) getProcdURL(c *gin.Context, sandboxID string) (*url.URL, error)
 	}
 
 	return addr, nil
+}
+
+func sandboxWantsPaused(sandbox *mgr.Sandbox) bool {
+	if sandbox == nil {
+		return false
+	}
+	if sandbox.PowerState.Desired == mgr.SandboxPowerStatePaused {
+		return true
+	}
+	return sandbox.Paused
 }
 
 func (s *Server) buildProcdRequestModifier(c *gin.Context) (proxy.RequestModifier, error) {

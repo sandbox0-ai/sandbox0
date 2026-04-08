@@ -90,7 +90,7 @@ func TestGetProcdURLPausedSandboxReturnsWakingUp(t *testing.T) {
 				UserID:       "user-a",
 				InternalAddr: "http://127.0.0.1:7777",
 				Status:       mgr.SandboxStatusRunning,
-				Paused:       true,
+				Paused:       false,
 				AutoResume:   true,
 				PowerState: mgr.SandboxPowerState{
 					Desired:            mgr.SandboxPowerStatePaused,

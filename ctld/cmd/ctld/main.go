@@ -23,6 +23,8 @@ var (
 	httpAddr      = ":8095"
 	kubeconfig    = ""
 	cgroupRoot    = "/host-sys/fs/cgroup"
+	criEndpoint   = "/host-run/containerd/containerd.sock"
+	procRoot      = "/proc"
 	nodeName      = os.Getenv("NODE_NAME")
 )
 
@@ -31,6 +33,8 @@ func main() {
 	flag.StringVar(&httpAddr, "http-addr", ":8095", "HTTP listen address for ctld health and control endpoints")
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "optional kubeconfig path used by ctld")
 	flag.StringVar(&cgroupRoot, "cgroup-root", "/host-sys/fs/cgroup", "host cgroup root mounted into ctld")
+	flag.StringVar(&criEndpoint, "cri-endpoint", "/host-run/containerd/containerd.sock", "host CRI socket used to read pod sandbox stats")
+	flag.StringVar(&procRoot, "proc-root", "/proc", "host proc root used to inspect sandbox processes")
 	flag.StringVar(&nodeName, "node-name", os.Getenv("NODE_NAME"), "current node name used to validate local sandbox ownership")
 	flag.Parse()
 
@@ -112,5 +116,9 @@ func buildPowerController() ctldserver.Controller {
 		log.Printf("ctld power control disabled: build kubernetes client: %v", err)
 		return ctldserver.NotImplementedController{}
 	}
-	return ctldpower.NewController(ctldpower.NewPodResolver(k8sClient, nodeName, cgroupRoot), nil)
+	resolver := ctldpower.NewPodResolver(k8sClient, nodeName, cgroupRoot)
+	resolver.ProcRoot = procRoot
+	controller := ctldpower.NewController(resolver, nil)
+	controller.StatsProvider = ctldpower.NewCRIStatsProvider(criEndpoint)
+	return controller
 }

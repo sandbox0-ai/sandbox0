@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
@@ -18,18 +19,20 @@ import (
 )
 
 const defaultCgroupRoot = "/sys/fs/cgroup"
+const defaultProcRoot = "/proc"
 
 type PodResolver struct {
 	K8sClient  kubernetes.Interface
 	NodeName   string
 	CgroupRoot string
+	ProcRoot   string
 }
 
 func NewPodResolver(k8sClient kubernetes.Interface, nodeName, cgroupRoot string) *PodResolver {
 	if strings.TrimSpace(cgroupRoot) == "" {
 		cgroupRoot = defaultCgroupRoot
 	}
-	return &PodResolver{K8sClient: k8sClient, NodeName: strings.TrimSpace(nodeName), CgroupRoot: filepath.Clean(cgroupRoot)}
+	return &PodResolver{K8sClient: k8sClient, NodeName: strings.TrimSpace(nodeName), CgroupRoot: filepath.Clean(cgroupRoot), ProcRoot: defaultProcRoot}
 }
 
 func (r *PodResolver) Resolve(req *http.Request, sandboxID string) (Target, error) {
@@ -47,11 +50,115 @@ func (r *PodResolver) Resolve(req *http.Request, sandboxID string) (Target, erro
 	if r.NodeName != "" && pod.Spec.NodeName != r.NodeName {
 		return Target{}, fmt.Errorf("sandbox %s is scheduled on node %s, not %s", sandboxID, pod.Spec.NodeName, r.NodeName)
 	}
-	cgroupDir, err := r.resolvePodCgroupDir(pod)
+	if !isKataRuntimeClassName(pod.Spec.RuntimeClassName) {
+		return Target{}, ErrNotImplemented
+	}
+	podCgroupDir, err := r.resolvePodCgroupDir(pod)
 	if err != nil {
 		return Target{}, err
 	}
-	return Target{SandboxID: sandboxID, CgroupDir: cgroupDir}, nil
+	cgroupDir, err := r.resolveKataSandboxCgroupDir(pod, podCgroupDir)
+	if err != nil {
+		return Target{}, err
+	}
+	return Target{
+		SandboxID:    sandboxID,
+		CgroupDir:    cgroupDir,
+		PodNamespace: pod.Namespace,
+		PodName:      pod.Name,
+		PodUID:       string(pod.UID),
+	}, nil
+}
+
+func isKataRuntimeClassName(runtimeClassName *string) bool {
+	if runtimeClassName == nil {
+		return false
+	}
+	raw := strings.ToLower(strings.TrimSpace(*runtimeClassName))
+	return strings.Contains(raw, "kata")
+}
+
+func (r *PodResolver) resolveKataSandboxCgroupDir(pod *corev1.Pod, podCgroupDir string) (string, error) {
+	path, err := r.findKataSandboxCgroupDir(podCgroupDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve kata sandbox cgroup for sandbox pod %s/%s: %w", pod.Namespace, pod.Name, err)
+	}
+	return path, nil
+}
+
+func (r *PodResolver) findKataSandboxCgroupDir(root string) (string, error) {
+	procRoot := strings.TrimSpace(r.ProcRoot)
+	if procRoot == "" {
+		procRoot = defaultProcRoot
+	}
+	root = filepath.Clean(root)
+	rootDepth := pathDepth(root)
+	maxDepth := 6
+	var found string
+	stopWalk := errors.New("stop walk")
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		if path == root {
+			return nil
+		}
+		if pathDepth(path)-rootDepth > maxDepth {
+			return filepath.SkipDir
+		}
+		if !hasCgroupControls(path) || !fileExists(filepath.Join(path, "cgroup.procs")) {
+			return nil
+		}
+		if !hasKataSandboxProcesses(procRoot, path) {
+			return nil
+		}
+		found = path
+		return stopWalk
+	})
+	if err != nil && err != stopWalk {
+		return "", err
+	}
+	if found == "" {
+		return "", fmt.Errorf("kata sandbox cgroup not found under %s; ensure sandbox_cgroup_only=true", root)
+	}
+	return found, nil
+}
+
+func hasKataSandboxProcesses(procRoot, cgroupPath string) bool {
+	data, err := os.ReadFile(filepath.Join(cgroupPath, "cgroup.procs"))
+	if err != nil {
+		return false
+	}
+	for _, field := range strings.Fields(string(data)) {
+		pid, err := strconv.Atoi(strings.TrimSpace(field))
+		if err != nil || pid <= 0 {
+			continue
+		}
+		if isKataProcess(procRoot, pid) {
+			return true
+		}
+	}
+	return false
+}
+
+func isKataProcess(procRoot string, pid int) bool {
+	markers := []string{"containerd-shim-kata-v2", "kata", "qemu-system", "cloud-hypervisor", "firecracker", "dragonball"}
+	for _, candidate := range []string{filepath.Join(procRoot, strconv.Itoa(pid), "cmdline"), filepath.Join(procRoot, strconv.Itoa(pid), "comm")} {
+		data, err := os.ReadFile(candidate)
+		if err != nil {
+			continue
+		}
+		raw := strings.ToLower(strings.ReplaceAll(string(data), "\x00", " "))
+		for _, marker := range markers {
+			if strings.Contains(raw, marker) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (r *PodResolver) lookupSandboxPod(ctx context.Context, sandboxID string) (*corev1.Pod, error) {

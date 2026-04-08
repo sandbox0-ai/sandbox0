@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
@@ -124,6 +125,7 @@ type SandboxService struct {
 	metrics                *obsmetrics.ManagerMetrics
 	autoScaler             AutoScalerInterface
 	credentialStore        egressauth.BindingStore
+	powerStateLocks        sync.Map
 }
 
 // AutoScalerInterface defines the interface for auto scaling.
@@ -1977,23 +1979,33 @@ func nextSandboxPowerStateGeneration(current SandboxPowerState) int64 {
 	return base + 1
 }
 
+func requestedSandboxPowerState(annotations map[string]string, target string) SandboxPowerState {
+	current := sandboxPowerStateFromAnnotations(annotations)
+	generation := current.DesiredGeneration
+	if generation == 0 || current.Desired != target {
+		generation = nextSandboxPowerStateGeneration(current)
+	}
+	state := SandboxPowerState{
+		Desired:            target,
+		DesiredGeneration:  generation,
+		Observed:           current.Observed,
+		ObservedGeneration: current.ObservedGeneration,
+	}
+	if state.Observed == target {
+		state.ObservedGeneration = generation
+		state.Phase = SandboxPowerPhaseStable
+		return state
+	}
+	state.Phase = normalizeSandboxPowerPhase("", target, state.Observed)
+	return state
+}
+
 func completedSandboxPowerState(annotations map[string]string, target string) SandboxPowerState {
 	current := sandboxPowerStateFromAnnotations(annotations)
-	if hasExplicitSandboxPowerStateAnnotations(annotations) && current.Desired == target && current.Observed == target && current.Phase == SandboxPowerPhaseStable {
-		generation := current.DesiredGeneration
-		if current.ObservedGeneration > generation {
-			generation = current.ObservedGeneration
-		}
-		return SandboxPowerState{
-			Desired:            target,
-			DesiredGeneration:  generation,
-			Observed:           target,
-			ObservedGeneration: generation,
-			Phase:              SandboxPowerPhaseStable,
-		}
+	generation := current.DesiredGeneration
+	if generation == 0 || current.Desired != target {
+		generation = nextSandboxPowerStateGeneration(current)
 	}
-
-	generation := nextSandboxPowerStateGeneration(current)
 	return SandboxPowerState{
 		Desired:            target,
 		DesiredGeneration:  generation,
@@ -2012,6 +2024,118 @@ func applySandboxPowerStateAnnotations(annotations map[string]string, state Sand
 	annotations[controller.AnnotationPowerStateObserved] = state.Observed
 	annotations[controller.AnnotationPowerStateObservedGeneration] = strconv.FormatInt(state.ObservedGeneration, 10)
 	annotations[controller.AnnotationPowerStatePhase] = state.Phase
+}
+
+func sandboxPowerStateEqual(a, b SandboxPowerState) bool {
+	return a.Desired == b.Desired &&
+		a.DesiredGeneration == b.DesiredGeneration &&
+		a.Observed == b.Observed &&
+		a.ObservedGeneration == b.ObservedGeneration &&
+		a.Phase == b.Phase
+}
+
+func (s *SandboxService) sandboxPowerStateLock(sandboxID string) *sync.Mutex {
+	if existing, ok := s.powerStateLocks.Load(sandboxID); ok {
+		return existing.(*sync.Mutex)
+	}
+	mu := &sync.Mutex{}
+	actual, _ := s.powerStateLocks.LoadOrStore(sandboxID, mu)
+	return actual.(*sync.Mutex)
+}
+
+func (s *SandboxService) updateSandboxPowerStateAnnotations(ctx context.Context, pod *corev1.Pod, state SandboxPowerState) (*corev1.Pod, error) {
+	if pod == nil {
+		return nil, fmt.Errorf("pod is nil")
+	}
+	updated := pod.DeepCopy()
+	if updated.Annotations == nil {
+		updated.Annotations = make(map[string]string)
+	}
+	applySandboxPowerStateAnnotations(updated.Annotations, state)
+	result, err := s.k8sClient.CoreV1().Pods(updated.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (s *SandboxService) requestSandboxPowerState(ctx context.Context, sandboxID, target string) (SandboxPowerState, error) {
+	lock := s.sandboxPowerStateLock(sandboxID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	pod, err := s.getSandboxPod(ctx, sandboxID)
+	if err != nil {
+		return SandboxPowerState{}, fmt.Errorf("get pod: %w", err)
+	}
+
+	state := requestedSandboxPowerState(pod.Annotations, target)
+	current := sandboxPowerStateFromAnnotations(pod.Annotations)
+	if !hasExplicitSandboxPowerStateAnnotations(pod.Annotations) || !sandboxPowerStateEqual(current, state) {
+		if _, err := s.updateSandboxPowerStateAnnotations(ctx, pod, state); err != nil {
+			return SandboxPowerState{}, fmt.Errorf("update power state annotations: %w", err)
+		}
+	}
+
+	if state.Phase != SandboxPowerPhaseStable {
+		go s.reconcileSandboxPowerState(sandboxID)
+	}
+
+	return state, nil
+}
+
+func (s *SandboxService) reconcileSandboxPowerState(sandboxID string) {
+	lock := s.sandboxPowerStateLock(sandboxID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	pod, err := s.getSandboxPod(ctx, sandboxID)
+	if err != nil {
+		s.logger.Warn("Power state reconcile failed to load sandbox",
+			zap.String("sandboxID", sandboxID),
+			zap.Error(err),
+		)
+		return
+	}
+
+	state := sandboxPowerStateFromAnnotations(pod.Annotations)
+	if state.Phase == SandboxPowerPhaseStable && state.Desired == state.Observed {
+		return
+	}
+
+	s.logger.Info("Reconciling sandbox power state",
+		zap.String("sandboxID", sandboxID),
+		zap.String("desired", state.Desired),
+		zap.Int64("desiredGeneration", state.DesiredGeneration),
+		zap.String("observed", state.Observed),
+		zap.Int64("observedGeneration", state.ObservedGeneration),
+		zap.String("phase", state.Phase),
+	)
+
+	switch state.Desired {
+	case SandboxPowerStatePaused:
+		if _, err := s.PauseSandbox(ctx, sandboxID); err != nil {
+			s.logger.Error("Pause reconcile failed",
+				zap.String("sandboxID", sandboxID),
+				zap.Error(err),
+			)
+		}
+	case SandboxPowerStateActive:
+		if _, err := s.ResumeSandbox(ctx, sandboxID); err != nil {
+			s.logger.Error("Resume reconcile failed",
+				zap.String("sandboxID", sandboxID),
+				zap.Error(err),
+			)
+		}
+	default:
+		s.logger.Warn("Skipping power state reconcile with unsupported desired state",
+			zap.String("sandboxID", sandboxID),
+			zap.String("desired", state.Desired),
+		)
+	}
 }
 
 func (s *SandboxService) prodAddress(ctx context.Context, pod *corev1.Pod) (string, error) {
@@ -2347,6 +2471,19 @@ func (s *SandboxService) PauseSandbox(ctx context.Context, sandboxID string) (*P
 	}, nil
 }
 
+// RequestPauseSandbox records a desired paused state and reconciles it asynchronously.
+func (s *SandboxService) RequestPauseSandbox(ctx context.Context, sandboxID string) (*PauseSandboxResponse, error) {
+	state, err := s.requestSandboxPowerState(ctx, sandboxID, SandboxPowerStatePaused)
+	if err != nil {
+		return nil, err
+	}
+	return &PauseSandboxResponse{
+		SandboxID:  sandboxID,
+		Paused:     true,
+		PowerState: state,
+	}, nil
+}
+
 // ResumeSandbox resumes a paused sandbox and restores original pod resources.
 func (s *SandboxService) ResumeSandbox(ctx context.Context, sandboxID string) (*ResumeSandboxResponse, error) {
 	s.logger.Info("Resuming sandbox", zap.String("sandboxID", sandboxID))
@@ -2464,6 +2601,19 @@ func (s *SandboxService) ResumeSandbox(ctx context.Context, sandboxID string) (*
 		Resumed:        true,
 		PowerState:     powerState,
 		RestoredMemory: restoredMemory,
+	}, nil
+}
+
+// RequestResumeSandbox records a desired active state and reconciles it asynchronously.
+func (s *SandboxService) RequestResumeSandbox(ctx context.Context, sandboxID string) (*ResumeSandboxResponse, error) {
+	state, err := s.requestSandboxPowerState(ctx, sandboxID, SandboxPowerStateActive)
+	if err != nil {
+		return nil, err
+	}
+	return &ResumeSandboxResponse{
+		SandboxID:  sandboxID,
+		Resumed:    true,
+		PowerState: state,
 	}, nil
 }
 

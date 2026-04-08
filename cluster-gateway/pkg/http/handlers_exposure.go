@@ -70,27 +70,17 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is paused and resume is disabled")
 			return
 		}
-		resumeCtx, cancel := context.WithTimeout(c.Request.Context(), 45*time.Second)
-		defer cancel()
-		if err := s.managerClient.ResumeSandbox(resumeCtx, sandboxID, "", sandbox.TeamID); err != nil {
-			s.logger.Warn("Auto resume failed", zap.String("sandbox_id", sandboxID), zap.Error(err))
-			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
-			return
-		}
-		s.sandboxAddrCache.Delete(sandboxCacheKey(sandbox.TeamID, sandboxID))
-		sandbox, err = s.managerClient.GetSandboxInternal(c.Request.Context(), sandboxID)
-		if err != nil {
-			s.logger.Warn("Failed to get sandbox after resume for public exposure",
-				zap.String("sandbox_id", sandboxID),
-				zap.Error(err),
-			)
-			if errors.Is(err, client.ErrSandboxNotFound) {
-				spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "sandbox not found")
-			} else {
-				spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "manager service unavailable")
+		if sandbox.PowerState.Desired != mgr.SandboxPowerStateActive {
+			resumeCtx, cancel := context.WithTimeout(c.Request.Context(), 45*time.Second)
+			defer cancel()
+			if err := s.managerClient.ResumeSandbox(resumeCtx, sandboxID, "", sandbox.TeamID); err != nil {
+				s.logger.Warn("Auto resume failed", zap.String("sandbox_id", sandboxID), zap.Error(err))
+				spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
+				return
 			}
-			return
 		}
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
+		return
 	}
 
 	if basePort, parseErr := portFromURL(sandbox.InternalAddr); parseErr == nil && basePort == port {

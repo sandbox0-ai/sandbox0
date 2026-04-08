@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/client"
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/middleware"
+	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
@@ -309,34 +310,25 @@ func (s *Server) getProcdURL(c *gin.Context, sandboxID string) (*url.URL, error)
 			spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "sandbox belongs to a different team")
 			return nil, errors.New("sandbox belongs to a different team")
 		}
-		if sandbox.Paused && sandbox.AutoResume {
-			resumeCtx, cancel := context.WithTimeout(c.Request.Context(), 45*time.Second)
-			defer cancel()
-			if err := s.managerClient.ResumeSandbox(resumeCtx, sandboxID, authCtx.UserID, authCtx.TeamID); err != nil {
-				s.logger.Warn("Resume sandbox failed",
-					zap.String("sandbox_id", sandboxID),
-					zap.Error(err),
-				)
-				spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
-				return nil, err
-			}
-			sandbox, err = s.managerClient.GetSandbox(c.Request.Context(), sandboxID, authCtx.UserID, authCtx.TeamID)
-			if err != nil {
-				s.logger.Error("Failed to get sandbox after resume",
-					zap.String("sandbox_id", sandboxID),
-					zap.Error(err),
-				)
-				if errors.Is(err, client.ErrSandboxNotFound) {
-					spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "sandbox not found")
-				} else {
-					spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "manager service unavailable")
-				}
-				return nil, err
-			}
-		}
 		if sandbox.Paused && !sandbox.AutoResume {
 			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is paused and auto_resume is disabled")
 			return nil, errors.New("sandbox auto_resume is disabled")
+		}
+		if sandbox.Paused {
+			if sandbox.PowerState.Desired != mgr.SandboxPowerStateActive {
+				resumeCtx, cancel := context.WithTimeout(c.Request.Context(), 45*time.Second)
+				defer cancel()
+				if err := s.managerClient.ResumeSandbox(resumeCtx, sandboxID, authCtx.UserID, authCtx.TeamID); err != nil {
+					s.logger.Warn("Resume sandbox failed",
+						zap.String("sandbox_id", sandboxID),
+						zap.Error(err),
+					)
+					spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
+					return nil, err
+				}
+			}
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
+			return nil, errors.New("sandbox is waking up")
 		}
 
 		// Parse procd address

@@ -543,6 +543,11 @@ func (r *Reconciler) ensureStorageBucket(ctx context.Context, infra *infrav1alph
 	}
 
 	if err := store.Create(); err != nil {
+		if isBucketAlreadyOwnedError(err) {
+			if _, headErr := store.Head(""); headErr == nil {
+				return nil
+			}
+		}
 		return fmt.Errorf("%s: %w", bucketCreateHint(config, err), err)
 	}
 
@@ -648,6 +653,17 @@ func isNoSuchBucketError(err error) bool {
 	return strings.Contains(msg, "nosuchbucket") ||
 		strings.Contains(msg, "bucket does not exist") ||
 		strings.Contains(msg, "404")
+}
+
+func isBucketAlreadyOwnedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "already own it") ||
+		strings.Contains(msg, "already exists") ||
+		strings.Contains(msg, "bucketalreadyownedbyyou") ||
+		strings.Contains(msg, "bucketalreadyexists")
 }
 
 func (r *Reconciler) createObjectStorage(config *StorageConfig) (object.ObjectStorage, error) {

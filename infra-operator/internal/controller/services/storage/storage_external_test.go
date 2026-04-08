@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
@@ -30,6 +31,38 @@ func TestValidateExternalStorageAllowsGCSWithoutSecret(t *testing.T) {
 
 	if err := ValidateExternalStorage(context.Background(), client, infra); err != nil {
 		t.Fatalf("ValidateExternalStorage returned error: %v", err)
+	}
+}
+
+func TestIsBucketAlreadyOwnedError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "gcs already own",
+			err:  errors.New("googleapi: Error 409: Your previous request to create the named bucket succeeded and you already own it., conflict"),
+			want: true,
+		},
+		{
+			name: "s3 already owned",
+			err:  errors.New("BucketAlreadyOwnedByYou: The bucket you tried to create already exists, and you own it"),
+			want: true,
+		},
+		{
+			name: "permission denied",
+			err:  errors.New("googleapi: Error 403: forbidden"),
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isBucketAlreadyOwnedError(tt.err); got != tt.want {
+				t.Fatalf("isBucketAlreadyOwnedError() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

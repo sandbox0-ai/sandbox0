@@ -26,13 +26,30 @@ type PodResolver struct {
 	NodeName   string
 	CgroupRoot string
 	ProcRoot   string
+	Adapters   []RuntimeAdapter
+}
+
+type RuntimeAdapter interface {
+	Name() string
+	Matches(pod *corev1.Pod) bool
+	ResolveTarget(resolver *PodResolver, pod *corev1.Pod, podCgroupDir string, base Target) (Target, error)
 }
 
 func NewPodResolver(k8sClient kubernetes.Interface, nodeName, cgroupRoot string) *PodResolver {
 	if strings.TrimSpace(cgroupRoot) == "" {
 		cgroupRoot = defaultCgroupRoot
 	}
-	return &PodResolver{K8sClient: k8sClient, NodeName: strings.TrimSpace(nodeName), CgroupRoot: filepath.Clean(cgroupRoot), ProcRoot: defaultProcRoot}
+	return &PodResolver{
+		K8sClient:  k8sClient,
+		NodeName:   strings.TrimSpace(nodeName),
+		CgroupRoot: filepath.Clean(cgroupRoot),
+		ProcRoot:   defaultProcRoot,
+		Adapters: []RuntimeAdapter{
+			KataRuntimeAdapter{},
+			GVisorRuntimeAdapter{},
+			RuncRuntimeAdapter{},
+		},
+	}
 }
 
 func (r *PodResolver) Resolve(req *http.Request, sandboxID string) (Target, error) {
@@ -50,24 +67,28 @@ func (r *PodResolver) Resolve(req *http.Request, sandboxID string) (Target, erro
 	if r.NodeName != "" && pod.Spec.NodeName != r.NodeName {
 		return Target{}, fmt.Errorf("sandbox %s is scheduled on node %s, not %s", sandboxID, pod.Spec.NodeName, r.NodeName)
 	}
-	if !isKataRuntimeClassName(pod.Spec.RuntimeClassName) {
+	base := Target{
+		SandboxID:    sandboxID,
+		PodNamespace: pod.Namespace,
+		PodName:      pod.Name,
+		PodUID:       string(pod.UID),
+	}
+	var adapter RuntimeAdapter
+	for _, candidate := range r.runtimeAdapters() {
+		if !candidate.Matches(pod) {
+			continue
+		}
+		adapter = candidate
+		break
+	}
+	if adapter == nil {
 		return Target{}, ErrNotImplemented
 	}
 	podCgroupDir, err := r.resolvePodCgroupDir(pod)
 	if err != nil {
 		return Target{}, err
 	}
-	cgroupDir, err := r.resolveKataSandboxCgroupDir(pod, podCgroupDir)
-	if err != nil {
-		return Target{}, err
-	}
-	return Target{
-		SandboxID:    sandboxID,
-		CgroupDir:    cgroupDir,
-		PodNamespace: pod.Namespace,
-		PodName:      pod.Name,
-		PodUID:       string(pod.UID),
-	}, nil
+	return adapter.ResolveTarget(r, pod, podCgroupDir, base)
 }
 
 func isKataRuntimeClassName(runtimeClassName *string) bool {
@@ -76,6 +97,87 @@ func isKataRuntimeClassName(runtimeClassName *string) bool {
 	}
 	raw := strings.ToLower(strings.TrimSpace(*runtimeClassName))
 	return strings.Contains(raw, "kata")
+}
+
+func isGVisorRuntimeClassName(runtimeClassName *string) bool {
+	if runtimeClassName == nil {
+		return false
+	}
+	raw := strings.ToLower(strings.TrimSpace(*runtimeClassName))
+	return strings.Contains(raw, "gvisor") || strings.Contains(raw, "runsc")
+}
+
+func isRuncRuntimeClassName(runtimeClassName *string) bool {
+	if runtimeClassName == nil {
+		return true
+	}
+	raw := strings.ToLower(strings.TrimSpace(*runtimeClassName))
+	if raw == "" {
+		return true
+	}
+	return strings.Contains(raw, "runc")
+}
+
+func (r *PodResolver) runtimeAdapters() []RuntimeAdapter {
+	if r == nil || len(r.Adapters) == 0 {
+		return nil
+	}
+	return r.Adapters
+}
+
+type KataRuntimeAdapter struct{}
+
+func (KataRuntimeAdapter) Name() string { return "kata" }
+
+func (KataRuntimeAdapter) Matches(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	return isKataRuntimeClassName(pod.Spec.RuntimeClassName)
+}
+
+func (KataRuntimeAdapter) ResolveTarget(resolver *PodResolver, pod *corev1.Pod, podCgroupDir string, base Target) (Target, error) {
+	cgroupDir, err := resolver.resolveKataSandboxCgroupDir(pod, podCgroupDir)
+	if err != nil {
+		return Target{}, err
+	}
+	base.Runtime = "kata"
+	base.CgroupDir = cgroupDir
+	return base, nil
+}
+
+type GVisorRuntimeAdapter struct{}
+
+func (GVisorRuntimeAdapter) Name() string { return "gvisor" }
+
+func (GVisorRuntimeAdapter) Matches(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	return isGVisorRuntimeClassName(pod.Spec.RuntimeClassName)
+}
+
+func (GVisorRuntimeAdapter) ResolveTarget(_ *PodResolver, _ *corev1.Pod, podCgroupDir string, base Target) (Target, error) {
+	base.Runtime = "gvisor"
+	base.CgroupDir = podCgroupDir
+	return base, nil
+}
+
+type RuncRuntimeAdapter struct{}
+
+func (RuncRuntimeAdapter) Name() string { return "runc" }
+
+func (RuncRuntimeAdapter) Matches(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	return isRuncRuntimeClassName(pod.Spec.RuntimeClassName)
+}
+
+func (RuncRuntimeAdapter) ResolveTarget(_ *PodResolver, _ *corev1.Pod, podCgroupDir string, base Target) (Target, error) {
+	base.Runtime = "runc"
+	base.CgroupDir = podCgroupDir
+	return base, nil
 }
 
 func (r *PodResolver) resolveKataSandboxCgroupDir(pod *corev1.Pod, podCgroupDir string) (string, error) {

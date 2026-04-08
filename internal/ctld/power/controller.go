@@ -15,6 +15,7 @@ var ErrSandboxNotFound = errors.New("sandbox not found")
 
 type Target struct {
 	SandboxID    string
+	Runtime      string
 	CgroupDir    string
 	PodNamespace string
 	PodName      string

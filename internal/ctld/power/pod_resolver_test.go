@@ -57,6 +57,7 @@ func TestPodResolverResolveUsesQoSCandidate(t *testing.T) {
 	target, err := resolver.Resolve(&http.Request{}, "sandbox-1")
 	require.NoError(t, err)
 	assert.Equal(t, "sandbox-1", target.SandboxID)
+	assert.Equal(t, "kata", target.Runtime)
 	assert.Equal(t, dir, target.CgroupDir)
 	assert.Equal(t, "default", target.PodNamespace)
 	assert.Equal(t, "sandbox-1", target.PodName)
@@ -89,6 +90,7 @@ func TestPodResolverResolveFallsBackToWalk(t *testing.T) {
 	resolver.ProcRoot = procRoot
 	target, err := resolver.Resolve(&http.Request{}, "sandbox-2")
 	require.NoError(t, err)
+	assert.Equal(t, "kata", target.Runtime)
 	assert.Equal(t, dir, target.CgroupDir)
 }
 
@@ -110,19 +112,71 @@ func TestPodResolverResolveRejectsWrongNode(t *testing.T) {
 	assert.Contains(t, err.Error(), "scheduled on node node-b")
 }
 
-func TestPodResolverResolveRejectsNonKataRuntime(t *testing.T) {
+func TestPodResolverResolveUsesPodCgroupForDefaultRunc(t *testing.T) {
+	root := t.TempDir()
+	uid := types.UID("bbbbbbbb-cccc-dddd-eeee-ffffffffffff")
+	podDir := filepath.Join(root, "kubepods", "podbbbbbbbb-cccc-dddd-eeee-ffffffffffff")
+	require.NoError(t, os.MkdirAll(podDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(podDir, "cgroup.freeze"), []byte("0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(podDir, "memory.current"), []byte("64\n"), 0o644))
+
 	client := fake.NewSimpleClientset(&corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "sandbox-4",
 			Namespace: "default",
-			UID:       types.UID("bbbbbbbb-cccc-dddd-eeee-ffffffffffff"),
+			UID:       uid,
 			Labels:    map[string]string{controller.LabelSandboxID: "sandbox-4"},
 		},
-		Spec: corev1.PodSpec{NodeName: "node-a"},
+		Spec:   corev1.PodSpec{NodeName: "node-a"},
+		Status: corev1.PodStatus{QOSClass: corev1.PodQOSGuaranteed},
+	})
+
+	resolver := NewPodResolver(client, "node-a", root)
+	target, err := resolver.Resolve(&http.Request{}, "sandbox-4")
+	require.NoError(t, err)
+	assert.Equal(t, "runc", target.Runtime)
+	assert.Equal(t, podDir, target.CgroupDir)
+}
+
+func TestPodResolverResolveUsesPodCgroupForGVisor(t *testing.T) {
+	root := t.TempDir()
+	uid := types.UID("dddddddd-eeee-ffff-1111-222222222222")
+	podDir := filepath.Join(root, "kubepods", "burstable", "poddddddddd-eeee-ffff-1111-222222222222")
+	require.NoError(t, os.MkdirAll(podDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(podDir, "cgroup.freeze"), []byte("0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(podDir, "memory.current"), []byte("64\n"), 0o644))
+
+	client := fake.NewSimpleClientset(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sandbox-6",
+			Namespace: "default",
+			UID:       uid,
+			Labels:    map[string]string{controller.LabelSandboxID: "sandbox-6"},
+		},
+		Spec:   corev1.PodSpec{NodeName: "node-a", RuntimeClassName: strPtr("gvisor")},
+		Status: corev1.PodStatus{QOSClass: corev1.PodQOSBurstable},
+	})
+
+	resolver := NewPodResolver(client, "node-a", root)
+	target, err := resolver.Resolve(&http.Request{}, "sandbox-6")
+	require.NoError(t, err)
+	assert.Equal(t, "gvisor", target.Runtime)
+	assert.Equal(t, podDir, target.CgroupDir)
+}
+
+func TestPodResolverResolveRejectsUnknownRuntime(t *testing.T) {
+	client := fake.NewSimpleClientset(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sandbox-7",
+			Namespace: "default",
+			UID:       types.UID("eeeeeeee-ffff-1111-2222-333333333333"),
+			Labels:    map[string]string{controller.LabelSandboxID: "sandbox-7"},
+		},
+		Spec: corev1.PodSpec{NodeName: "node-a", RuntimeClassName: strPtr("wasmtime")},
 	})
 
 	resolver := NewPodResolver(client, "node-a", t.TempDir())
-	_, err := resolver.Resolve(&http.Request{}, "sandbox-4")
+	_, err := resolver.Resolve(&http.Request{}, "sandbox-7")
 	require.ErrorIs(t, err, ErrNotImplemented)
 }
 

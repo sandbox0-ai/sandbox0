@@ -140,6 +140,25 @@ const (
 	BlockAll SandboxNetworkPolicyMode = "block-all"
 )
 
+// Defines values for SandboxPowerStateDesired.
+const (
+	SandboxPowerStateDesiredActive SandboxPowerStateDesired = "active"
+	SandboxPowerStateDesiredPaused SandboxPowerStateDesired = "paused"
+)
+
+// Defines values for SandboxPowerStateObserved.
+const (
+	SandboxPowerStateObservedActive SandboxPowerStateObserved = "active"
+	SandboxPowerStateObservedPaused SandboxPowerStateObserved = "paused"
+)
+
+// Defines values for SandboxPowerStatePhase.
+const (
+	Pausing  SandboxPowerStatePhase = "pausing"
+	Resuming SandboxPowerStatePhase = "resuming"
+	Stable   SandboxPowerStatePhase = "stable"
+)
+
 // Defines values for SandboxSummaryStatus.
 const (
 	SandboxSummaryStatusCompleted SandboxSummaryStatus = "completed"
@@ -1196,6 +1215,7 @@ type PTYSize struct {
 // PauseSandboxResponse defines model for PauseSandboxResponse.
 type PauseSandboxResponse struct {
 	Paused        bool                  `json:"paused"`
+	PowerState    SandboxPowerState     `json:"power_state"`
 	ResourceUsage *SandboxResourceUsage `json:"resource_usage,omitempty"`
 	SandboxId     string                `json:"sandbox_id"`
 	UpdatedCpu    *string               `json:"updated_cpu,omitempty"`
@@ -1419,9 +1439,10 @@ type ResourceUsage struct {
 
 // ResumeSandboxResponse defines model for ResumeSandboxResponse.
 type ResumeSandboxResponse struct {
-	RestoredMemory *string `json:"restored_memory,omitempty"`
-	Resumed        bool    `json:"resumed"`
-	SandboxId      string  `json:"sandbox_id"`
+	PowerState     SandboxPowerState `json:"power_state"`
+	RestoredMemory *string           `json:"restored_memory,omitempty"`
+	Resumed        bool              `json:"resumed"`
+	SandboxId      string            `json:"sandbox_id"`
 }
 
 // Sandbox defines model for Sandbox.
@@ -1435,14 +1456,15 @@ type Sandbox struct {
 	ExposedPorts *[]ExposedPortConfig `json:"exposed_ports,omitempty"`
 
 	// HardExpiresAt Hard expiration timestamp. Zero value means not set.
-	HardExpiresAt time.Time `json:"hard_expires_at"`
-	Id            string    `json:"id"`
-	Paused        bool      `json:"paused"`
-	PodName       string    `json:"pod_name"`
-	Status        string    `json:"status"`
-	TeamId        string    `json:"team_id"`
-	TemplateId    string    `json:"template_id"`
-	UserId        *string   `json:"user_id,omitempty"`
+	HardExpiresAt time.Time         `json:"hard_expires_at"`
+	Id            string            `json:"id"`
+	Paused        bool              `json:"paused"`
+	PodName       string            `json:"pod_name"`
+	PowerState    SandboxPowerState `json:"power_state"`
+	Status        string            `json:"status"`
+	TeamId        string            `json:"team_id"`
+	TemplateId    string            `json:"template_id"`
+	UserId        *string           `json:"user_id,omitempty"`
 }
 
 // SandboxConfig defines model for SandboxConfig.
@@ -1473,6 +1495,24 @@ type SandboxNetworkPolicy struct {
 
 // SandboxNetworkPolicyMode defines model for SandboxNetworkPolicy.Mode.
 type SandboxNetworkPolicyMode string
+
+// SandboxPowerState defines model for SandboxPowerState.
+type SandboxPowerState struct {
+	Desired            SandboxPowerStateDesired  `json:"desired"`
+	DesiredGeneration  int64                     `json:"desired_generation"`
+	Observed           SandboxPowerStateObserved `json:"observed"`
+	ObservedGeneration int64                     `json:"observed_generation"`
+	Phase              SandboxPowerStatePhase    `json:"phase"`
+}
+
+// SandboxPowerStateDesired defines model for SandboxPowerState.Desired.
+type SandboxPowerStateDesired string
+
+// SandboxPowerStateObserved defines model for SandboxPowerState.Observed.
+type SandboxPowerStateObserved string
+
+// SandboxPowerStatePhase defines model for SandboxPowerState.Phase.
+type SandboxPowerStatePhase string
 
 // SandboxRefreshRequest defines model for SandboxRefreshRequest.
 type SandboxRefreshRequest struct {
@@ -1522,6 +1562,7 @@ type SandboxSummary struct {
 	HardExpiresAt time.Time            `json:"hard_expires_at"`
 	Id            string               `json:"id"`
 	Paused        bool                 `json:"paused"`
+	PowerState    SandboxPowerState    `json:"power_state"`
 	Status        SandboxSummaryStatus `json:"status"`
 	TemplateId    string               `json:"template_id"`
 }

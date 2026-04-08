@@ -25,7 +25,7 @@ A Sandbox is an isolated execution environment where you can run code, manage fi
 | `completed` | Sandbox has finished execution |
 
 <Callout variant="info">
-Pause state is modeled separately from `status`. Use the `paused` boolean when you need to distinguish a paused sandbox from a running one.
+Pause state is modeled separately from `status`. Use the `paused` boolean when you need to distinguish a paused sandbox from a running one. For async pause/resume flows, use `power_state` to inspect desired vs observed state plus generation counters.
 </Callout>
 
 ---

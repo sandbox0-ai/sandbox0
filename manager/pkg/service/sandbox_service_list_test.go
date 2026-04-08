@@ -262,6 +262,39 @@ func TestListSandboxes_HardExpiresAt(t *testing.T) {
 	assert.True(t, gotWithoutHard.HardExpiresAt.IsZero())
 }
 
+func TestListSandboxes_IncludesPowerState(t *testing.T) {
+	logger := zap.NewNop()
+	now := time.Now()
+	pod := createTestPod("sandbox-power-state", "team-a", "template-1", controller.PoolTypeActive, now, now, false)
+	pod.Annotations[controller.AnnotationPowerStateDesired] = SandboxPowerStatePaused
+	pod.Annotations[controller.AnnotationPowerStateDesiredGeneration] = "7"
+	pod.Annotations[controller.AnnotationPowerStateObserved] = SandboxPowerStateActive
+	pod.Annotations[controller.AnnotationPowerStateObservedGeneration] = "6"
+	pod.Annotations[controller.AnnotationPowerStatePhase] = SandboxPowerPhasePausing
+
+	k8sClient := fake.NewSimpleClientset(pod)
+	svc := &SandboxService{
+		k8sClient: k8sClient,
+		podLister: newTestPodLister(t, pod),
+		clock:     systemTime{},
+		logger:    logger,
+	}
+
+	resp, err := svc.ListSandboxes(context.Background(), &ListSandboxesRequest{
+		TeamID: "team-a",
+		Limit:  50,
+		Offset: 0,
+	})
+	require.NoError(t, err)
+	require.Len(t, resp.Sandboxes, 1)
+	assert.Equal(t, SandboxPowerStatePaused, resp.Sandboxes[0].PowerState.Desired)
+	assert.Equal(t, int64(7), resp.Sandboxes[0].PowerState.DesiredGeneration)
+	assert.Equal(t, SandboxPowerStateActive, resp.Sandboxes[0].PowerState.Observed)
+	assert.Equal(t, int64(6), resp.Sandboxes[0].PowerState.ObservedGeneration)
+	assert.Equal(t, SandboxPowerPhasePausing, resp.Sandboxes[0].PowerState.Phase)
+	assert.False(t, resp.Sandboxes[0].Paused)
+}
+
 func createTestPod(name, teamID, templateID, poolType string, createdAt, expiresAt time.Time, paused bool) *corev1.Pod {
 	return createTestPodWithPhase(name, teamID, templateID, poolType, createdAt, expiresAt, paused, corev1.PodRunning)
 }

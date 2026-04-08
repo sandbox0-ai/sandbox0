@@ -3748,6 +3748,30 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/ClaimResponse"
+    SandboxPowerState:
+      type: object
+      properties:
+        desired:
+          type: string
+          enum: [active, paused]
+        desired_generation:
+          type: integer
+          format: int64
+        observed:
+          type: string
+          enum: [active, paused]
+        observed_generation:
+          type: integer
+          format: int64
+        phase:
+          type: string
+          enum: [stable, pausing, resuming]
+      required:
+        - desired
+        - desired_generation
+        - observed
+        - observed_generation
+        - phase
     Sandbox:
       type: object
       properties:
@@ -3763,6 +3787,8 @@ components:
           type: string
         paused:
           type: boolean
+        power_state:
+          $ref: "#/components/schemas/SandboxPowerState"
         auto_resume:
           type: boolean
         exposed_ports:
@@ -3791,6 +3817,7 @@ components:
         - team_id
         - status
         - paused
+        - power_state
         - auto_resume
         - pod_name
         - expires_at
@@ -3875,6 +3902,8 @@ components:
           enum: [starting, running, failed, completed]
         paused:
           type: boolean
+        power_state:
+          $ref: "#/components/schemas/SandboxPowerState"
         cluster_id:
           type: string
           description: Cluster where sandbox runs (multi-cluster only)
@@ -3894,6 +3923,7 @@ components:
         - template_id
         - status
         - paused
+        - power_state
         - created_at
         - expires_at
         - hard_expires_at
@@ -4014,13 +4044,15 @@ components:
           type: string
         paused:
           type: boolean
+        power_state:
+          $ref: "#/components/schemas/SandboxPowerState"
         resource_usage:
           $ref: "#/components/schemas/SandboxResourceUsage"
         updated_memory:
           type: string
         updated_cpu:
           type: string
-      required: [sandbox_id, paused]
+      required: [sandbox_id, paused, power_state]
     ResumeSandboxResponse:
       type: object
       properties:
@@ -4028,9 +4060,11 @@ components:
           type: string
         resumed:
           type: boolean
+        power_state:
+          $ref: "#/components/schemas/SandboxPowerState"
         restored_memory:
           type: string
-      required: [sandbox_id, resumed]
+      required: [sandbox_id, resumed, power_state]
     SuccessPauseSandboxResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"

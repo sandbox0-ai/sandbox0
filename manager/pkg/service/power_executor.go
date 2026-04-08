@@ -44,6 +44,10 @@ func (e *localSandboxPowerExecutor) Resume(ctx context.Context, sandboxID string
 }
 
 func (e *ctldSandboxPowerExecutor) Pause(ctx context.Context, sandboxID string) (*PauseSandboxResponse, error) {
+	pod, err := e.service.getSandboxPodForPowerState(ctx, sandboxID)
+	if err != nil {
+		return nil, fmt.Errorf("get pod: %w", err)
+	}
 	ctldAddress, err := e.service.ctldAddressForSandbox(ctx, sandboxID)
 	if err != nil {
 		return nil, err
@@ -55,26 +59,33 @@ func (e *ctldSandboxPowerExecutor) Pause(ctx context.Context, sandboxID string) 
 	if !resp.Paused {
 		return nil, fmt.Errorf("ctld pause failed: %s", resp.Error)
 	}
-	return &PauseSandboxResponse{
-		SandboxID:     sandboxID,
-		Paused:        true,
-		ResourceUsage: sandboxUsageFromCtld(resp.ResourceUsage),
-	}, nil
+	return e.service.completePausedSandbox(ctx, pod, sandboxID, sandboxUsageFromCtld(resp.ResourceUsage))
 }
 
 func (e *ctldSandboxPowerExecutor) Resume(ctx context.Context, sandboxID string) (*ResumeSandboxResponse, error) {
-	ctldAddress, err := e.service.ctldAddressForSandbox(ctx, sandboxID)
+	pod, err := e.service.getSandboxPodForPowerState(ctx, sandboxID)
+	if err != nil {
+		return nil, fmt.Errorf("get pod: %w", err)
+	}
+	prep, resp, err := e.service.prepareSandboxResume(ctx, pod, sandboxID)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := e.service.ctldClient.Resume(ctx, ctldAddress, sandboxID)
+	if resp != nil {
+		return resp, nil
+	}
+	ctldAddress, err := e.service.ctldAddressForPod(ctx, prep.Pod)
 	if err != nil {
 		return nil, err
 	}
-	if !resp.Resumed {
-		return nil, fmt.Errorf("ctld resume failed: %s", resp.Error)
+	ctldResp, err := e.service.ctldClient.Resume(ctx, ctldAddress, sandboxID)
+	if err != nil {
+		return nil, err
 	}
-	return &ResumeSandboxResponse{SandboxID: sandboxID, Resumed: true}, nil
+	if !ctldResp.Resumed {
+		return nil, fmt.Errorf("ctld resume failed: %s", ctldResp.Error)
+	}
+	return &ResumeSandboxResponse{SandboxID: sandboxID, Resumed: true, PowerState: prep.PowerState, RestoredMemory: prep.RestoredMemory}, nil
 }
 
 func sandboxUsageFromCtld(in *ctldapi.SandboxResourceUsage) *SandboxResourceUsage {

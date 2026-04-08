@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/internal/ctld/cgroup"
+	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/cgroup"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

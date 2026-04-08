@@ -7,7 +7,7 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/sandbox0-ai/sandbox0/internal/ctld/cgroup"
+	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/cgroup"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 )
 

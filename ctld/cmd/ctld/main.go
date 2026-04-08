@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	ctldfuseplugin "github.com/sandbox0-ai/sandbox0/internal/ctld/fuseplugin"
-	ctldpower "github.com/sandbox0-ai/sandbox0/internal/ctld/power"
-	ctldserver "github.com/sandbox0-ai/sandbox0/internal/ctld/server"
+	ctldfuseplugin "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/fuseplugin"
+	ctldpower "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/power"
+	ctldserver "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/server"
 	"github.com/sandbox0-ai/sandbox0/pkg/k8s"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 )

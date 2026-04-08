@@ -112,7 +112,7 @@ func (s *Server) listSandboxes(c *gin.Context) {
 		return
 	}
 
-	spec.JSONSuccess(c, http.StatusOK, resp)
+	spec.JSONSuccess(c, http.StatusAccepted, resp)
 }
 
 // getSandbox gets a sandbox
@@ -355,7 +355,7 @@ func (s *Server) pauseSandbox(c *gin.Context) {
 		return
 	}
 
-	spec.JSONSuccess(c, http.StatusOK, resp)
+	spec.JSONSuccess(c, http.StatusAccepted, resp)
 }
 
 // resumeSandbox resumes a sandbox
@@ -395,7 +395,7 @@ func (s *Server) resumeSandbox(c *gin.Context) {
 		return
 	}
 
-	spec.JSONSuccess(c, http.StatusOK, resp)
+	spec.JSONSuccess(c, http.StatusAccepted, resp)
 }
 
 // refreshSandbox refreshes sandbox TTL

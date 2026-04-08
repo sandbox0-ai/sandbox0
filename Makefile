@@ -13,7 +13,7 @@ OAPI_CODEGEN_VERSION ?= v2.4.1
 
 PROTOC ?= protoc
 
-SERVICES := regional-gateway global-gateway cluster-gateway manager scheduler storage-proxy k8s-plugin ctld procd netd infra-operator
+SERVICES := regional-gateway global-gateway cluster-gateway manager scheduler storage-proxy ctld procd netd infra-operator
 
 # Default version
 VERSION ?= latest
@@ -43,8 +43,6 @@ build: manifests proto apispec
 			dir="manager"; bin="procd"; src="./manager/cmd/procd"; \
 		elif [ "$$s" = "infra-operator" ]; then \
 			dir="infra-operator"; bin="infra-operator"; src="./infra-operator/cmd/infra-operator"; \
-		elif [ "$$s" = "k8s-plugin" ]; then \
-			dir="k8s-plugin"; bin="k8s-plugin"; src="./k8s-plugin"; \
 		elif [ "$$s" = "ctld" ]; then \
 			dir="ctld"; bin="ctld"; src="./ctld/cmd/ctld"; \
 		else \
@@ -111,10 +109,8 @@ test:
 			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./scheduler/...; \
 		elif [ "$$service" = "storage-proxy" ]; then \
 			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./storage-proxy/...; \
-		elif [ "$$service" = "k8s-plugin" ]; then \
-			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./k8s-plugin/...; \
 		elif [ "$$service" = "ctld" ]; then \
-			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./ctld/... ./internal/ctld/...; \
+			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./ctld/...; \
 		elif [ "$$service" = "infra-operator" ]; then \
 			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./infra-operator/...; \
 		fi; \
@@ -170,7 +166,7 @@ test-e2e-specific:
 	unset http_proxy && unset https_proxy && unset all_proxy && go test -v ./tests/e2e/... -focus="$(SPEC)" -timeout=30m
 
 # Prevent make from treating service names as targets
-regional-gateway global-gateway cluster-gateway manager scheduler storage-proxy k8s-plugin ctld procd netd infra-operator:
+regional-gateway global-gateway cluster-gateway manager scheduler storage-proxy ctld procd netd infra-operator:
 	@:
 
 lint:

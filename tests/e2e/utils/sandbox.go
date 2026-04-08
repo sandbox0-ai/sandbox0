@@ -192,7 +192,7 @@ func (s *Session) PauseSandbox(ctx context.Context, t ContractT, sandboxID strin
 	if err != nil {
 		return nil, status, err
 	}
-	if status != http.StatusOK {
+	if status != http.StatusAccepted {
 		return nil, status, fmt.Errorf("pause sandbox failed with status %d: %s", status, formatAPIError(body))
 	}
 	var resp apispec.SuccessPauseSandboxResponse
@@ -212,7 +212,7 @@ func (s *Session) ResumeSandbox(ctx context.Context, t ContractT, sandboxID stri
 	if err != nil {
 		return nil, status, err
 	}
-	if status != http.StatusOK {
+	if status != http.StatusAccepted {
 		return nil, status, fmt.Errorf("resume sandbox failed with status %d: %s", status, formatAPIError(body))
 	}
 	var resp apispec.SuccessResumeSandboxResponse

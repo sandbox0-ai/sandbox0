@@ -1198,8 +1198,8 @@ paths:
       parameters:
         - $ref: "#/components/parameters/SandboxID"
       responses:
-        "200":
-          description: Sandbox paused
+        "202":
+          description: Pause request accepted; sandbox power state will converge asynchronously
           content:
             application/json:
               schema:
@@ -1221,8 +1221,8 @@ paths:
       parameters:
         - $ref: "#/components/parameters/SandboxID"
       responses:
-        "200":
-          description: Sandbox resumed
+        "202":
+          description: Resume request accepted; sandbox power state will converge asynchronously
           content:
             application/json:
               schema:

@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	ctldserver "github.com/sandbox0-ai/sandbox0/internal/ctld/server"
+	ctldserver "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/server"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

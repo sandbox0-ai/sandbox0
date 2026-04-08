@@ -170,7 +170,7 @@ func (c *ManagerClient) ResumeSandbox(ctx context.Context, sandboxID, userID, te
 	if resp.StatusCode == http.StatusNotFound {
 		return fmt.Errorf("%w: %s", ErrSandboxNotFound, sandboxID)
 	}
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		body, _ := io.ReadAll(resp.Body)
 		var payload map[string]any
 		_ = json.Unmarshal(body, &payload)

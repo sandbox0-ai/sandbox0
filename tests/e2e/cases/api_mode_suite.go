@@ -232,15 +232,17 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 
 					pausedResp, status, err := session.PauseSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
 					Expect(err).NotTo(HaveOccurred())
-					Expect(status).To(Equal(http.StatusOK))
+					Expect(status).To(Equal(http.StatusAccepted))
 					Expect(pausedResp).NotTo(BeNil())
 					Expect(pausedResp.Paused).To(BeTrue())
+					waitForSandboxPowerStateEventually(env, session, sandboxID, apispec.SandboxPowerStateObserved("paused"))
 
 					resumeResp, status, err := session.ResumeSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
 					Expect(err).NotTo(HaveOccurred())
-					Expect(status).To(Equal(http.StatusOK))
+					Expect(status).To(Equal(http.StatusAccepted))
 					Expect(resumeResp).NotTo(BeNil())
 					Expect(resumeResp.Resumed).To(BeTrue())
+					waitForSandboxPowerStateEventually(env, session, sandboxID, apispec.SandboxPowerStateObserved("active"))
 
 					cacheSize := "512M"
 					defaultUID := int64(1000)
@@ -1246,6 +1248,28 @@ func waitForSandboxPodReadyEventually(env *framework.ScenarioEnv, session *e2eut
 		sandbox = current
 		return nil
 	}).WithTimeout(3 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
+	return sandbox
+}
+
+func waitForSandboxPowerStateEventually(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string, observed apispec.SandboxPowerStateObserved) *apispec.Sandbox {
+	var sandbox *apispec.Sandbox
+	Eventually(func() error {
+		resp, status, err := session.GetSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+		if err != nil {
+			return err
+		}
+		if status != http.StatusOK {
+			return fmt.Errorf("get sandbox status %d", status)
+		}
+		if resp == nil {
+			return fmt.Errorf("sandbox response missing")
+		}
+		if resp.PowerState.Observed != observed || resp.PowerState.Phase != apispec.SandboxPowerStatePhase("stable") {
+			return fmt.Errorf("sandbox power state not stable at %s yet: observed=%s phase=%s", observed, resp.PowerState.Observed, resp.PowerState.Phase)
+		}
+		sandbox = resp
+		return nil
+	}).WithTimeout(90 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
 	return sandbox
 }
 

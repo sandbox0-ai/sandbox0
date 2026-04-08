@@ -30,6 +30,16 @@ func createKataSandboxCgroup(t *testing.T, procRoot, dir, pid, process string) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "cgroup.procs"), []byte(pid+"\n"), 0o644))
 }
 
+func createRuntimeProcessCgroup(t *testing.T, procRoot, dir, pid, process string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Join(procRoot, pid), 0o755))
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(procRoot, pid, "cmdline"), []byte(process+"\x00--sandbox"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "cgroup.freeze"), []byte("0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "memory.current"), []byte("64\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "cgroup.procs"), []byte(pid+"\n"), 0o644))
+}
+
 func TestPodResolverResolveUsesQoSCandidate(t *testing.T) {
 	root := t.TempDir()
 	procRoot := t.TempDir()
@@ -140,11 +150,13 @@ func TestPodResolverResolveUsesPodCgroupForDefaultRunc(t *testing.T) {
 
 func TestPodResolverResolveUsesPodCgroupForGVisor(t *testing.T) {
 	root := t.TempDir()
+	procRoot := t.TempDir()
 	uid := types.UID("dddddddd-eeee-ffff-1111-222222222222")
 	podDir := filepath.Join(root, "kubepods", "burstable", "poddddddddd-eeee-ffff-1111-222222222222")
 	require.NoError(t, os.MkdirAll(podDir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(podDir, "cgroup.freeze"), []byte("0\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(podDir, "memory.current"), []byte("64\n"), 0o644))
+	createRuntimeProcessCgroup(t, procRoot, filepath.Join(podDir, "sandbox"), "3456", "containerd-shim-runsc-v1")
 
 	client := fake.NewSimpleClientset(&corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -158,10 +170,36 @@ func TestPodResolverResolveUsesPodCgroupForGVisor(t *testing.T) {
 	})
 
 	resolver := NewPodResolver(client, "node-a", root)
+	resolver.ProcRoot = procRoot
 	target, err := resolver.Resolve(&http.Request{}, "sandbox-6")
 	require.NoError(t, err)
 	assert.Equal(t, "gvisor", target.Runtime)
 	assert.Equal(t, podDir, target.CgroupDir)
+}
+
+func TestPodResolverResolveRequiresGVisorSandboxProcesses(t *testing.T) {
+	root := t.TempDir()
+	uid := types.UID("99999999-eeee-ffff-1111-222222222222")
+	podDir := filepath.Join(root, "kubepods", "pod99999999-eeee-ffff-1111-222222222222")
+	require.NoError(t, os.MkdirAll(podDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(podDir, "cgroup.freeze"), []byte("0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(podDir, "memory.current"), []byte("64\n"), 0o644))
+
+	client := fake.NewSimpleClientset(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sandbox-8",
+			Namespace: "default",
+			UID:       uid,
+			Labels:    map[string]string{controller.LabelSandboxID: "sandbox-8"},
+		},
+		Spec:   corev1.PodSpec{NodeName: "node-a", RuntimeClassName: strPtr("gvisor")},
+		Status: corev1.PodStatus{QOSClass: corev1.PodQOSGuaranteed},
+	})
+
+	resolver := NewPodResolver(client, "node-a", root)
+	_, err := resolver.Resolve(&http.Request{}, "sandbox-8")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "gvisor sandbox processes not found")
 }
 
 func TestPodResolverResolveRejectsUnknownRuntime(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 
 	"github.com/sandbox0-ai/sandbox0/internal/ctld/cgroup"
@@ -48,6 +49,7 @@ func (c *Controller) Pause(r *http.Request, sandboxID string) (ctldapi.PauseResp
 	if status != http.StatusOK {
 		return errResp, status
 	}
+	log.Printf("ctld pause start sandbox=%s runtime=%s cgroup=%s", sandboxID, target.Runtime, target.CgroupDir)
 	if err := c.FS.Freeze(target.CgroupDir); err != nil {
 		return ctldapi.PauseResponse{Paused: false, Error: fmt.Sprintf("freeze cgroup: %v", err)}, http.StatusInternalServerError
 	}
@@ -55,6 +57,7 @@ func (c *Controller) Pause(r *http.Request, sandboxID string) (ctldapi.PauseResp
 	if err != nil {
 		return ctldapi.PauseResponse{Paused: false, Error: err.Error()}, http.StatusInternalServerError
 	}
+	log.Printf("ctld pause complete sandbox=%s runtime=%s working_set=%d usage=%d", sandboxID, target.Runtime, usage.ContainerMemoryWorkingSet, usage.ContainerMemoryUsage)
 	return ctldapi.PauseResponse{
 		Paused:        true,
 		ResourceUsage: usage,
@@ -66,9 +69,11 @@ func (c *Controller) Resume(r *http.Request, sandboxID string) (ctldapi.ResumeRe
 	if status != http.StatusOK {
 		return ctldapi.ResumeResponse{Resumed: false, Error: pauseErr.Error}, status
 	}
+	log.Printf("ctld resume start sandbox=%s runtime=%s cgroup=%s", sandboxID, target.Runtime, target.CgroupDir)
 	if err := c.FS.Thaw(target.CgroupDir); err != nil {
 		return ctldapi.ResumeResponse{Resumed: false, Error: fmt.Sprintf("thaw cgroup: %v", err)}, http.StatusInternalServerError
 	}
+	log.Printf("ctld resume complete sandbox=%s runtime=%s", sandboxID, target.Runtime)
 	return ctldapi.ResumeResponse{Resumed: true}, http.StatusOK
 }
 

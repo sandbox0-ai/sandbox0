@@ -157,7 +157,10 @@ func (GVisorRuntimeAdapter) Matches(pod *corev1.Pod) bool {
 	return isGVisorRuntimeClassName(pod.Spec.RuntimeClassName)
 }
 
-func (GVisorRuntimeAdapter) ResolveTarget(_ *PodResolver, _ *corev1.Pod, podCgroupDir string, base Target) (Target, error) {
+func (GVisorRuntimeAdapter) ResolveTarget(resolver *PodResolver, pod *corev1.Pod, podCgroupDir string, base Target) (Target, error) {
+	if err := resolver.validateGVisorSandboxCgroup(pod, podCgroupDir); err != nil {
+		return Target{}, err
+	}
 	base.Runtime = "gvisor"
 	base.CgroupDir = podCgroupDir
 	return base, nil
@@ -248,6 +251,15 @@ func hasKataSandboxProcesses(procRoot, cgroupPath string) bool {
 
 func isKataProcess(procRoot string, pid int) bool {
 	markers := []string{"containerd-shim-kata-v2", "kata", "qemu-system", "cloud-hypervisor", "firecracker", "dragonball"}
+	return processMatchesMarkers(procRoot, pid, markers)
+}
+
+func isGVisorProcess(procRoot string, pid int) bool {
+	markers := []string{"containerd-shim-runsc-v1", "runsc", "gvisor"}
+	return processMatchesMarkers(procRoot, pid, markers)
+}
+
+func processMatchesMarkers(procRoot string, pid int, markers []string) bool {
 	for _, candidate := range []string{filepath.Join(procRoot, strconv.Itoa(pid), "cmdline"), filepath.Join(procRoot, strconv.Itoa(pid), "comm")} {
 		data, err := os.ReadFile(candidate)
 		if err != nil {
@@ -258,6 +270,62 @@ func isKataProcess(procRoot string, pid int) bool {
 			if strings.Contains(raw, marker) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func (r *PodResolver) validateGVisorSandboxCgroup(pod *corev1.Pod, podCgroupDir string) error {
+	procRoot := strings.TrimSpace(r.ProcRoot)
+	if procRoot == "" {
+		procRoot = defaultProcRoot
+	}
+	if hasRuntimeProcessesInCgroupTree(procRoot, podCgroupDir, isGVisorProcess) {
+		return nil
+	}
+	return fmt.Errorf("resolve gvisor sandbox cgroup for sandbox pod %s/%s: gvisor sandbox processes not found under %s", pod.Namespace, pod.Name, podCgroupDir)
+}
+
+func hasRuntimeProcessesInCgroupTree(procRoot, root string, match func(string, int) bool) bool {
+	root = filepath.Clean(root)
+	rootDepth := pathDepth(root)
+	maxDepth := 6
+	matched := false
+	stopWalk := errors.New("stop walk")
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		if pathDepth(path)-rootDepth > maxDepth {
+			return filepath.SkipDir
+		}
+		if !fileExists(filepath.Join(path, "cgroup.procs")) {
+			return nil
+		}
+		if hasMatchingProcesses(procRoot, path, match) {
+			matched = true
+			return stopWalk
+		}
+		return nil
+	})
+	return err == nil && matched || err == stopWalk
+}
+
+func hasMatchingProcesses(procRoot, cgroupPath string, match func(string, int) bool) bool {
+	data, err := os.ReadFile(filepath.Join(cgroupPath, "cgroup.procs"))
+	if err != nil {
+		return false
+	}
+	for _, field := range strings.Fields(string(data)) {
+		pid, err := strconv.Atoi(strings.TrimSpace(field))
+		if err != nil || pid <= 0 {
+			continue
+		}
+		if match(procRoot, pid) {
+			return true
 		}
 	}
 	return false

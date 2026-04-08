@@ -601,7 +601,7 @@ func TestUpdateTemplate_AllowsSidecarsForRegularTeam(t *testing.T) {
 	}
 }
 
-func TestCreateTemplate_AllowsSidecarsForRegularTeam(t *testing.T) {
+func TestCreateTemplate_AllowsSidecarsWithStartupProbeForRegularTeam(t *testing.T) {
 	t.Parallel()
 
 	store := &testTemplateStore{}
@@ -624,7 +624,7 @@ func TestCreateTemplate_AllowsSidecarsForRegularTeam(t *testing.T) {
 				"image":"busybox",
 				"command":["sh","-lc","sleep 3600"],
 				"resources":{"cpu":"500m","memory":"2Gi"},
-				"readinessProbe":{"exec":{"command":["test","-f","/tmp/ready"]}}
+				"startupProbe":{"exec":{"command":["test","-f","/tmp/started"]}}
 			}]
 		}
 	}`)
@@ -638,6 +638,48 @@ func TestCreateTemplate_AllowsSidecarsForRegularTeam(t *testing.T) {
 	}
 	if !store.createCalled {
 		t.Fatalf("expected create called for sidecar request")
+	}
+}
+
+func TestCreateTemplate_RejectsSidecarReadinessProbe(t *testing.T) {
+	t.Parallel()
+
+	store := &testTemplateStore{}
+	h := &Handler{Store: store, Logger: zap.NewNop()}
+
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	router.POST("/api/v1/templates", h.CreateTemplate)
+
+	body := []byte(`{
+		"template_id":"demo",
+		"spec":{
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
+			"pool":{"minIdle":0,"maxIdle":1},
+			"sidecars":[{
+				"name":"codex",
+				"image":"busybox",
+				"resources":{"cpu":"500m","memory":"2Gi"},
+				"readinessProbe":{"exec":{"command":["test","-f","/tmp/ready"]}}
+			}]
+		}
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, rec.Code)
+	}
+	if store.createCalled {
+		t.Fatalf("expected create not called for invalid request")
+	}
+	if got := rec.Body.String(); !strings.Contains(got, "spec.sidecars[0].readinessProbe is not supported") {
+		t.Fatalf("expected readiness rejection, got %q", got)
 	}
 }
 
@@ -840,28 +882,28 @@ func TestValidateTemplateSpec_StrictValidation(t *testing.T) {
 			wantErr: "spec.sidecars[0].name is required",
 		},
 		{
-			name: "reject sidecar probe without handler",
+			name: "reject sidecar startup probe without handler",
 			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
 				s.Sidecars = []v1alpha1.SidecarContainerSpec{
 					{
-						Name:           "helper",
-						Image:          "busybox",
-						Resources:      v1alpha1.ResourceQuota{CPU: resource.MustParse("500m"), Memory: resource.MustParse("2Gi")},
-						ReadinessProbe: &corev1.Probe{},
+						Name:         "helper",
+						Image:        "busybox",
+						Resources:    v1alpha1.ResourceQuota{CPU: resource.MustParse("500m"), Memory: resource.MustParse("2Gi")},
+						StartupProbe: &corev1.Probe{},
 					},
 				}
 			},
-			wantErr: "spec.sidecars[0].readinessProbe must define exactly one handler",
+			wantErr: "spec.sidecars[0].startupProbe must define exactly one handler",
 		},
 		{
-			name: "reject sidecar probe with multiple handlers",
+			name: "reject sidecar startup probe with multiple handlers",
 			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
 				s.Sidecars = []v1alpha1.SidecarContainerSpec{
 					{
 						Name:      "helper",
 						Image:     "busybox",
 						Resources: v1alpha1.ResourceQuota{CPU: resource.MustParse("500m"), Memory: resource.MustParse("2Gi")},
-						ReadinessProbe: &corev1.Probe{
+						StartupProbe: &corev1.Probe{
 							ProbeHandler: corev1.ProbeHandler{
 								Exec:    &corev1.ExecAction{Command: []string{"true"}},
 								HTTPGet: &corev1.HTTPGetAction{Path: "/ready", Port: intstr.FromInt32(8080)},
@@ -870,25 +912,7 @@ func TestValidateTemplateSpec_StrictValidation(t *testing.T) {
 					},
 				}
 			},
-			wantErr: "spec.sidecars[0].readinessProbe must define exactly one handler",
-		},
-		{
-			name: "reject sidecar liveness probe",
-			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
-				s.Sidecars = []v1alpha1.SidecarContainerSpec{
-					{
-						Name:      "helper",
-						Image:     "busybox",
-						Resources: v1alpha1.ResourceQuota{CPU: resource.MustParse("500m"), Memory: resource.MustParse("2Gi")},
-						LivenessProbe: &corev1.Probe{
-							ProbeHandler: corev1.ProbeHandler{
-								Exec: &corev1.ExecAction{Command: []string{"true"}},
-							},
-						},
-					},
-				}
-			},
-			wantErr: "spec.sidecars[0].livenessProbe is not supported",
+			wantErr: "spec.sidecars[0].startupProbe must define exactly one handler",
 		},
 	}
 
@@ -927,9 +951,9 @@ func TestValidateTemplateSpecForClaims_AllowsClaimableSidecars(t *testing.T) {
 				Image:     "busybox",
 				Command:   []string{"sh", "-lc", "sleep 3600"},
 				Resources: v1alpha1.ResourceQuota{CPU: resource.MustParse("500m"), Memory: resource.MustParse("2Gi")},
-				ReadinessProbe: &corev1.Probe{
+				StartupProbe: &corev1.Probe{
 					ProbeHandler: corev1.ProbeHandler{
-						Exec: &corev1.ExecAction{Command: []string{"test", "-f", "/tmp/ready"}},
+						Exec: &corev1.ExecAction{Command: []string{"test", "-f", "/tmp/started"}},
 					},
 				},
 			},

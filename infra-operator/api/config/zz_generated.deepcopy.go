@@ -183,6 +183,7 @@ func (in *ManagerConfig) DeepCopyInto(out *ManagerConfig) {
 	out.NetdPolicyApplyTimeout = in.NetdPolicyApplyTimeout
 	out.NetdPolicyApplyPollInterval = in.NetdPolicyApplyPollInterval
 	out.ProcdClientTimeout = in.ProcdClientTimeout
+	out.CtldClientTimeout = in.CtldClientTimeout
 	out.ProcdInitTimeout = in.ProcdInitTimeout
 	out.ShutdownTimeout = in.ShutdownTimeout
 	in.ProcdConfig.DeepCopyInto(&out.ProcdConfig)

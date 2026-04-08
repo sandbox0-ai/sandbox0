@@ -24,11 +24,10 @@ The public HTTP API and all three SDKs expose the same sidecar schema under `spe
 | `env` | no | Sidecar-specific environment variables. |
 | `resources` | yes | CPU and memory request/limit pair used by Sandbox0's template schema. |
 | `mounts` | no | Shared-volume mount references for this sidecar. |
-| `readinessProbe` | no | Readiness gate. Exactly one handler is required when set. |
 | `startupProbe` | no | Startup probe. Exactly one handler is required when set. |
 
 <Callout variant="warning">
-`livenessProbe` is intentionally unsupported for template sidecars. Sandbox0 soft pause can freeze the whole sandbox, which is incompatible with kubelet liveness restarts.
+`readinessProbe` and `livenessProbe` are intentionally unsupported for template sidecars. Sandbox0 soft pause can freeze the whole sandbox, so Sandbox0 owns pod readiness and kubelet liveness restarts would conflict with pause/resume.
 </Callout>
 
 If a sidecar needs pod-shared storage, define it once under `spec.sharedVolumes`:
@@ -91,13 +90,13 @@ In this example, the main container uses `/workspace/shared` while the sidecar u
 
 ---
 
-## Readiness Controls Claimability
+## Sandbox0 Readiness Controls Claimability
 
 Warm-pool capacity only counts pods that are Kubernetes-ready.
 
 - A pod in `Running` phase with `Ready=False` does not count as available idle capacity.
 - A hot claim only selects idle pods that are already ready.
-- If your sidecar hosts the warm process, its readiness probe should represent actual warm readiness.
+- Sandbox0 owns the readiness gate for sandbox pods.
 
 Example:
 
@@ -122,19 +121,15 @@ spec:
           mounts:
               - name: workspace
                 mountPath: /shared
-          readinessProbe:
-              httpGet:
-                  path: /healthz
-                  port: 8081
-              initialDelaySeconds: 1
-              periodSeconds: 2
-              failureThreshold: 1
+          startupProbe:
+              exec:
+                  command: ["test", "-f", "/tmp/codex-started"]
     pool:
         minIdle: 2
         maxIdle: 10
 ```
 
-In this example, the pod is not counted as ready warm capacity until the sidecar starts serving `GET /healthz` on port `8081` and the readiness probe passes.
+In this example, the sidecar can model slow startup with `startupProbe`, but the pod is not counted as ready warm capacity until Sandbox0 marks its readiness gate ready.
 
 ---
 
@@ -164,11 +159,10 @@ In this example, the pod is not counted as ready warm capacity until the sidecar
             "1Gi",
             sandbox0.WithTemplateSidecarCommand("sh", "-lc", "/app/start-codex.sh"),
             sandbox0.WithTemplateSidecarMount(sandbox0.TemplateMount("workspace", "/shared")),
-            sandbox0.WithTemplateSidecarReadinessProbe(apispec.Probe{
-                HTTPGet:             apispec.NewOptHTTPGetAction(apispec.HTTPGetAction{Path: apispec.NewOptString("/healthz"), Port: intstr.FromInt32(8081)}),
-                InitialDelaySeconds: apispec.NewOptInt32(1),
-                PeriodSeconds:       apispec.NewOptInt32(2),
-                FailureThreshold:    apispec.NewOptInt32(1),
+            sandbox0.WithTemplateSidecarStartupProbe(apispec.Probe{
+                Exec:             apispec.NewOptExecAction(apispec.ExecAction{Command: []string{"test", "-f", "/tmp/codex-started"}}),
+                PeriodSeconds:    apispec.NewOptInt32(2),
+                FailureThreshold: apispec.NewOptInt32(5),
             }),
         ),
     ),
@@ -182,8 +176,7 @@ fmt.Printf("Template created: %s\\n", tpl.TemplateID)`
     {
       label: "Python",
       language: "python",
-      code: `from sandbox0.apispec.models.http_get_action import HTTPGetAction
-from sandbox0.apispec.models.pool_strategy import PoolStrategy
+      code: `from sandbox0.apispec.models.pool_strategy import PoolStrategy
 from sandbox0.apispec.models.probe import Probe
 from sandbox0.template_helpers import (
     container,
@@ -210,11 +203,10 @@ tpl = client.create_template(
                     resources("250m", "1Gi"),
                     command=["sh", "-lc", "/app/start-codex.sh"],
                     mounts=[mount("workspace", "/shared")],
-                    readiness_probe=Probe(
-                        http_get=HTTPGetAction(path="/healthz", port=8081),
-                        initial_delay_seconds=1,
+                    startup_probe=Probe(
+                        exec={"command": ["test", "-f", "/tmp/codex-started"]},
                         period_seconds=2,
-                        failure_threshold=1,
+                        failure_threshold=5,
                     ),
                 )
             ],
@@ -238,11 +230,10 @@ print(f"Template created: {tpl.template_id}")`
                 sidecar("codex", "ghcr.io/example/codex:v1", resources("250m", "1Gi"), {
                     command: ["sh", "-lc", "/app/start-codex.sh"],
                     mounts: [mount("workspace", "/shared")],
-                    readinessProbe: {
-                        httpGet: { path: "/healthz", port: 8081 },
-                        initialDelaySeconds: 1,
+                    startupProbe: {
+                        exec: { command: ["test", "-f", "/tmp/codex-started"] },
                         periodSeconds: 2,
-                        failureThreshold: 1,
+                        failureThreshold: 5,
                     },
                 }),
             ],
@@ -277,13 +268,11 @@ spec:
           mounts:
               - name: workspace
                 mountPath: /shared
-          readinessProbe:
-              httpGet:
-                  path: /healthz
-                  port: 8081
-              initialDelaySeconds: 1
+          startupProbe:
+              exec:
+                  command: ["test", "-f", "/tmp/codex-started"]
               periodSeconds: 2
-              failureThreshold: 1
+              failureThreshold: 5
     pool:
         minIdle: 2
         maxIdle: 10
@@ -300,7 +289,7 @@ s0 template create --id my-codex-env --spec-file template.yaml`
 
 - `name`, `image`, and `resources` are required for every sidecar.
 - `mounts[*].name` must refer to a declared `sharedVolumes[*].name`.
-- `readinessProbe` and `startupProbe` must define exactly one handler when present.
+- `startupProbe` must define exactly one handler when present.
 - Private image references are still checked against team ownership rules, just like `spec.mainContainer.image`.
 
 ## Next Steps

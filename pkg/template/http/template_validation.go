@@ -136,12 +136,6 @@ func validateSidecars(sidecars []v1alpha1.SidecarContainerSpec) error {
 		if sidecar.Resources.Memory.Sign() <= 0 {
 			return fmt.Errorf("%s.resources.memory must be > 0", field)
 		}
-		if err := validateProbe(sidecar.ReadinessProbe, field+".readinessProbe"); err != nil {
-			return err
-		}
-		if sidecar.LivenessProbe != nil {
-			return fmt.Errorf("%s.livenessProbe is not supported", field)
-		}
 		if err := validateProbe(sidecar.StartupProbe, field+".startupProbe"); err != nil {
 			return err
 		}

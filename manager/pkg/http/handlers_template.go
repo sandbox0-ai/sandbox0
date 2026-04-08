@@ -1,7 +1,11 @@
 package http
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -71,6 +75,11 @@ func (s *Server) getTemplateLegacy(c *gin.Context) {
 }
 
 func (s *Server) createTemplateLegacy(c *gin.Context) {
+	if err := rejectUnsupportedLegacyTemplateProbeFields(c); err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
+
 	var template v1alpha1.SandboxTemplate
 	if err := c.ShouldBindJSON(&template); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request: "+err.Error())
@@ -91,6 +100,10 @@ func (s *Server) updateTemplateLegacy(c *gin.Context) {
 	templateID := c.Param("id")
 	if templateID == "" {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "template_id is required")
+		return
+	}
+	if err := rejectUnsupportedLegacyTemplateProbeFields(c); err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
 
@@ -114,6 +127,44 @@ func (s *Server) updateTemplateLegacy(c *gin.Context) {
 	}
 
 	spec.JSONSuccess(c, http.StatusOK, updated)
+}
+
+func rejectUnsupportedLegacyTemplateProbeFields(c *gin.Context) error {
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		return err
+	}
+	c.Request.Body = io.NopCloser(bytes.NewReader(body))
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil
+	}
+
+	var request map[string]any
+	if err := json.Unmarshal(body, &request); err != nil {
+		return nil
+	}
+
+	specValue, ok := request["spec"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	sidecarsValue, ok := specValue["sidecars"].([]any)
+	if !ok {
+		return nil
+	}
+	for i, rawSidecar := range sidecarsValue {
+		sidecar, ok := rawSidecar.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, exists := sidecar["readinessProbe"]; exists {
+			return fmt.Errorf("spec.sidecars[%d].readinessProbe is not supported", i)
+		}
+		if _, exists := sidecar["livenessProbe"]; exists {
+			return fmt.Errorf("spec.sidecars[%d].livenessProbe is not supported", i)
+		}
+	}
+	return nil
 }
 
 func (s *Server) deleteTemplateLegacy(c *gin.Context) {

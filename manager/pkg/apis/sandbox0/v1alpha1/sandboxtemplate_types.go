@@ -75,17 +75,17 @@ type ContainerSpec struct {
 }
 
 type SidecarContainerSpec struct {
-	Name           string               `json:"name"`
-	Image          string               `json:"image"`
-	Command        []string             `json:"command,omitempty"`
-	Args           []string             `json:"args,omitempty"`
-	Env            []EnvVar             `json:"env,omitempty"`
-	Resources      ResourceQuota        `json:"resources"`
-	Mounts         []ContainerMountSpec `json:"mounts,omitempty"`
-	ReadinessProbe *corev1.Probe        `json:"readinessProbe,omitempty"`
-	LivenessProbe  *corev1.Probe        `json:"livenessProbe,omitempty"`
-	StartupProbe   *corev1.Probe        `json:"startupProbe,omitempty"`
+	Name         string               `json:"name"`
+	Image        string               `json:"image"`
+	Command      []string             `json:"command,omitempty"`
+	Args         []string             `json:"args,omitempty"`
+	Env          []EnvVar             `json:"env,omitempty"`
+	Resources    ResourceQuota        `json:"resources"`
+	Mounts       []ContainerMountSpec `json:"mounts,omitempty"`
+	StartupProbe *corev1.Probe        `json:"startupProbe,omitempty"`
 }
+
+const SandboxPodReadinessConditionType corev1.PodConditionType = "sandbox0.ai/ready"
 
 type ContainerMountSpec struct {
 	Name      string `json:"name"`

@@ -26,6 +26,9 @@ func BuildPodSpec(template *SandboxTemplate, restart bool) corev1.PodSpec {
 	spec := corev1.PodSpec{
 		RestartPolicy: corev1.RestartPolicyNever,
 		Containers:    buildContainers(template),
+		ReadinessGates: []corev1.PodReadinessGate{{
+			ConditionType: SandboxPodReadinessConditionType,
+		}},
 	}
 	if restart {
 		spec.RestartPolicy = corev1.RestartPolicyAlways
@@ -284,12 +287,6 @@ func buildSidecarContainer(spec *SidecarContainerSpec, template *SandboxTemplate
 		envVars = append(envVars, corev1.EnvVar{Name: ev.Name, Value: ev.Value})
 	}
 	container.Env = envVars
-	if spec.ReadinessProbe != nil {
-		container.ReadinessProbe = spec.ReadinessProbe.DeepCopy()
-	}
-	if spec.LivenessProbe != nil {
-		container.LivenessProbe = spec.LivenessProbe.DeepCopy()
-	}
 	if spec.StartupProbe != nil {
 		container.StartupProbe = spec.StartupProbe.DeepCopy()
 	}

@@ -1662,15 +1662,14 @@ type SharedVolumeSpec struct {
 
 // SidecarContainerSpec defines model for SidecarContainerSpec.
 type SidecarContainerSpec struct {
-	Args           *[]string             `json:"args,omitempty"`
-	Command        *[]string             `json:"command,omitempty"`
-	Env            *[]EnvVar             `json:"env,omitempty"`
-	Image          string                `json:"image"`
-	Mounts         *[]ContainerMountSpec `json:"mounts,omitempty"`
-	Name           string                `json:"name"`
-	ReadinessProbe *Probe                `json:"readinessProbe,omitempty"`
-	Resources      ResourceQuota         `json:"resources"`
-	StartupProbe   *Probe                `json:"startupProbe,omitempty"`
+	Args         *[]string             `json:"args,omitempty"`
+	Command      *[]string             `json:"command,omitempty"`
+	Env          *[]EnvVar             `json:"env,omitempty"`
+	Image        string                `json:"image"`
+	Mounts       *[]ContainerMountSpec `json:"mounts,omitempty"`
+	Name         string                `json:"name"`
+	Resources    ResourceQuota         `json:"resources"`
+	StartupProbe *Probe                `json:"startupProbe,omitempty"`
 }
 
 // SignalContextRequest defines model for SignalContextRequest.

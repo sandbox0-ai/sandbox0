@@ -63,16 +63,15 @@ spec:
         - name: codex
           image: ghcr.io/example/codex:latest
           command: ["sh", "-lc", "/app/start-codex.sh"]
-          readinessProbe:
-            httpGet:
-              path: /healthz
-              port: 8081
+          startupProbe:
+            exec:
+              command: ["test", "-f", "/tmp/codex-started"]
     pool:
         minIdle: 2
         maxIdle: 10
 ```
 
-Use the sidecar readiness probe to express when the warm process is truly ready. A pod that is merely `Running` but not `Ready` is not counted as available pool capacity.
+Use `startupProbe` for slow-starting sidecars. Sandbox0 owns sandbox pod readiness, and a pod that is merely `Running` but not `Ready` is not counted as available pool capacity.
 
 <Tabs
   tabs={[
@@ -98,11 +97,10 @@ Use the sidecar readiness probe to express when the warm process is truly ready.
                     CPU:    apispec.NewOptString("500m"),
                     Memory: apispec.NewOptString("2Gi"),
                 },
-                ReadinessProbe: apispec.NewOptProbe(apispec.Probe{
-                    HTTPGet:             apispec.NewOptHTTPGetAction(apispec.HTTPGetAction{Path: apispec.NewOptString("/healthz"), Port: intstr.FromInt32(8081)}),
-                    InitialDelaySeconds: apispec.NewOptInt32(1),
+                StartupProbe: apispec.NewOptProbe(apispec.Probe{
+                    Exec:                apispec.NewOptExecAction(apispec.ExecAction{Command: []string{"test", "-f", "/tmp/codex-started"}}),
                     PeriodSeconds:       apispec.NewOptInt32(2),
-                    FailureThreshold:    apispec.NewOptInt32(1),
+                    FailureThreshold:    apispec.NewOptInt32(5),
                 }),
             },
         },
@@ -167,11 +165,10 @@ print(f"Template created: {tpl.template_id}")`
                 name: "codex",
                 image: "ghcr.io/example/codex:latest",
                 command: ["sh", "-lc", "/app/start-codex.sh"],
-                readinessProbe: {
-                    httpGet: { path: "/healthz", port: 8081 },
-                    initialDelaySeconds: 1,
+                startupProbe: {
+                    exec: { command: ["test", "-f", "/tmp/codex-started"] },
                     periodSeconds: 2,
-                    failureThreshold: 1,
+                    failureThreshold: 5,
                 },
             },
         ],
@@ -194,13 +191,9 @@ spec:
         - name: codex
           image: ghcr.io/example/codex:latest
           command: ["sh", "-lc", "/app/start-codex.sh"]
-          readinessProbe:
-              httpGet:
-                  path: /healthz
-                  port: 8081
-              initialDelaySeconds: 1
-              periodSeconds: 2
-              failureThreshold: 1
+          startupProbe:
+              exec:
+                  command: ["test", "-f", "/tmp/codex-started"]
     pool:
         minIdle: 2
         maxIdle: 10

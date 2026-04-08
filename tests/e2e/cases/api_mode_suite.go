@@ -430,16 +430,15 @@ func assertTemplatePoolReadinessGate(env *framework.ScenarioEnv, session *e2euti
 		{
 			Name:    "codex",
 			Image:   "busybox:latest",
-			Command: ptr([]string{"sh", "-lc", "sleep 30; touch /tmp/ready; tail -f /dev/null"}),
+			Command: ptr([]string{"sh", "-lc", "touch /tmp/started; tail -f /dev/null"}),
 			Resources: apispec.ResourceQuota{
 				Cpu:    ptr("250m"),
 				Memory: ptr("1Gi"),
 			},
-			ReadinessProbe: &apispec.Probe{
-				Exec:                &apispec.ExecAction{Command: ptr([]string{"test", "-f", "/tmp/ready"})},
-				PeriodSeconds:       ptr(int32(2)),
-				FailureThreshold:    ptr(int32(1)),
-				InitialDelaySeconds: ptr(int32(1)),
+			StartupProbe: &apispec.Probe{
+				Exec:             &apispec.ExecAction{Command: ptr([]string{"test", "-f", "/tmp/started"})},
+				PeriodSeconds:    ptr(int32(2)),
+				FailureThreshold: ptr(int32(5)),
 			},
 		},
 	}
@@ -462,7 +461,7 @@ func assertTemplatePoolReadinessGate(env *framework.ScenarioEnv, session *e2euti
 			"get", "pods",
 			"--namespace", templateNamespace,
 			"--selector", fmt.Sprintf("sandbox0.ai/template-id=%s,sandbox0.ai/pool-type=idle", templateNameForCluster),
-			"-o", `jsonpath={range .items[*]}{.metadata.name}{"|"}{.status.phase}{"|"}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}`,
+			"-o", `jsonpath={range .items[*]}{.metadata.name}{"|"}{range .spec.readinessGates[*]}{.conditionType}{","}{end}{"|"}{range .status.conditions[?(@.type=="sandbox0.ai/ready")]}{.status}{end}{"\n"}{end}`,
 		)
 		if outputErr != nil {
 			return outputErr
@@ -471,19 +470,8 @@ func assertTemplatePoolReadinessGate(env *framework.ScenarioEnv, session *e2euti
 		if output == "" {
 			return fmt.Errorf("idle pool pod not created yet")
 		}
-		if strings.Contains(output, "|True") {
-			return fmt.Errorf("idle pool pod became ready before intermediate observation: %s", output)
-		}
-
-		tpl, getErr := session.GetTemplate(env.TestCtx.Context, GinkgoT(), name)
-		if getErr != nil {
-			return getErr
-		}
-		if tpl.Status == nil || tpl.Status.IdleCount == nil {
-			return fmt.Errorf("template status not ready")
-		}
-		if *tpl.Status.IdleCount != 0 {
-			return fmt.Errorf("idleCount=%d, want 0 before readiness passes: %s", *tpl.Status.IdleCount, output)
+		if !strings.Contains(output, "sandbox0.ai/ready") {
+			return fmt.Errorf("idle pool pod missing sandbox readiness gate: %s", output)
 		}
 		return nil
 	}).WithTimeout(2 * time.Minute).WithPolling(3 * time.Second).Should(Succeed())
@@ -498,6 +486,20 @@ func assertTemplatePoolReadinessGate(env *framework.ScenarioEnv, session *e2euti
 		}
 		if *tpl.Status.IdleCount != 1 {
 			return fmt.Errorf("idleCount=%d, want 1 after readiness passes", *tpl.Status.IdleCount)
+		}
+		output, outputErr := framework.KubectlOutput(
+			env.TestCtx.Context,
+			env.Config.Kubeconfig,
+			"get", "pods",
+			"--namespace", templateNamespace,
+			"--selector", fmt.Sprintf("sandbox0.ai/template-id=%s,sandbox0.ai/pool-type=idle", templateNameForCluster),
+			"-o", `jsonpath={range .items[*]}{range .status.conditions[?(@.type=="sandbox0.ai/ready")]}{.status}{end}{"\n"}{end}`,
+		)
+		if outputErr != nil {
+			return outputErr
+		}
+		if !strings.Contains(strings.TrimSpace(output), "True") {
+			return fmt.Errorf("sandbox readiness condition not true yet: %s", output)
 		}
 		return nil
 	}).WithTimeout(2 * time.Minute).WithPolling(3 * time.Second).Should(Succeed())

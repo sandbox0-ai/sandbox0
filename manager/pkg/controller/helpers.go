@@ -16,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/util/retry"
 )
 
 const (
@@ -104,12 +105,153 @@ func IsPodReady(pod *corev1.Pod) bool {
 	if pod == nil || pod.Status.Phase != corev1.PodRunning {
 		return false
 	}
-	for _, condition := range pod.Status.Conditions {
-		if condition.Type == corev1.PodReady {
+	if !podConditionTrue(pod.Status.Conditions, corev1.PodReady) {
+		return false
+	}
+	if HasSandboxPodReadinessGate(pod) {
+		return podConditionTrue(pod.Status.Conditions, v1alpha1.SandboxPodReadinessConditionType)
+	}
+	return true
+}
+
+func HasSandboxPodReadinessGate(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	for _, gate := range pod.Spec.ReadinessGates {
+		if gate.ConditionType == v1alpha1.SandboxPodReadinessConditionType {
+			return true
+		}
+	}
+	return false
+}
+
+func DesiredSandboxPodReadiness(pod *corev1.Pod) (corev1.ConditionStatus, string, string) {
+	if pod == nil {
+		return corev1.ConditionFalse, "PodMissing", "pod is missing"
+	}
+	if pod.Status.Phase != corev1.PodRunning {
+		return corev1.ConditionFalse, "PodNotRunning", fmt.Sprintf("pod phase is %s", pod.Status.Phase)
+	}
+
+	desired, observed, phase := sandboxPowerStateFromAnnotations(pod.Annotations)
+	if desired != "active" {
+		return corev1.ConditionFalse, "PowerStatePaused", "sandbox desired power state is paused"
+	}
+	if observed != "active" || phase != "stable" {
+		return corev1.ConditionFalse, "PowerStateTransitioning", "sandbox power state is not yet active and stable"
+	}
+	return corev1.ConditionTrue, "SandboxActive", "sandbox is active and ready"
+}
+
+func EnsureSandboxPodReadinessCondition(ctx context.Context, client kubernetes.Interface, pod *corev1.Pod) (*corev1.Pod, error) {
+	if client == nil || pod == nil || !HasSandboxPodReadinessGate(pod) {
+		return pod, nil
+	}
+
+	var updated *corev1.Pod
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current, err := client.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if !HasSandboxPodReadinessGate(current) {
+			updated = current
+			return nil
+		}
+
+		status, reason, message := DesiredSandboxPodReadiness(current)
+		existing := findPodCondition(current.Status.Conditions, v1alpha1.SandboxPodReadinessConditionType)
+		if existing != nil && existing.Status == status && existing.Reason == reason && existing.Message == message {
+			updated = current
+			return nil
+		}
+
+		current = current.DeepCopy()
+		setPodCondition(&current.Status.Conditions, corev1.PodCondition{
+			Type:               v1alpha1.SandboxPodReadinessConditionType,
+			Status:             status,
+			LastTransitionTime: metav1.Now(),
+			Reason:             reason,
+			Message:            message,
+		})
+
+		updated, err = client.CoreV1().Pods(current.Namespace).UpdateStatus(ctx, current, metav1.UpdateOptions{})
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+func sandboxPowerStateFromAnnotations(annotations map[string]string) (desired, observed, phase string) {
+	if annotations == nil {
+		return "active", "active", "stable"
+	}
+	legacyPaused := annotations[AnnotationPaused] == "true"
+	desired = strings.TrimSpace(annotations[AnnotationPowerStateDesired])
+	if desired == "" {
+		if legacyPaused {
+			desired = "paused"
+		} else {
+			desired = "active"
+		}
+	}
+	observed = strings.TrimSpace(annotations[AnnotationPowerStateObserved])
+	if observed == "" {
+		if legacyPaused {
+			observed = "paused"
+		} else {
+			observed = "active"
+		}
+	}
+	phase = strings.TrimSpace(annotations[AnnotationPowerStatePhase])
+	if phase == "" {
+		if desired == observed {
+			phase = "stable"
+		} else if desired == "paused" {
+			phase = "pausing"
+		} else {
+			phase = "resuming"
+		}
+	}
+	return desired, observed, phase
+}
+
+func podConditionTrue(conditions []corev1.PodCondition, conditionType corev1.PodConditionType) bool {
+	for _, condition := range conditions {
+		if condition.Type == conditionType {
 			return condition.Status == corev1.ConditionTrue
 		}
 	}
 	return false
+}
+
+func findPodCondition(conditions []corev1.PodCondition, conditionType corev1.PodConditionType) *corev1.PodCondition {
+	for i := range conditions {
+		if conditions[i].Type == conditionType {
+			return &conditions[i]
+		}
+	}
+	return nil
+}
+
+func setPodCondition(conditions *[]corev1.PodCondition, condition corev1.PodCondition) {
+	if conditions == nil {
+		return
+	}
+	for i := range *conditions {
+		if (*conditions)[i].Type != condition.Type {
+			continue
+		}
+		if (*conditions)[i].Status == condition.Status {
+			condition.LastTransitionTime = (*conditions)[i].LastTransitionTime
+		}
+		(*conditions)[i] = condition
+		return
+	}
+	*conditions = append(*conditions, condition)
 }
 
 // EnsureNetdMITMCASecret copies the manager-local netd MITM CA cert into the template namespace.

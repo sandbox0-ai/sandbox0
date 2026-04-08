@@ -2324,6 +2324,10 @@ func (s *SandboxService) waitForPodReady(ctx context.Context, namespace, name st
 			}
 			return nil, fmt.Errorf("get pod for readiness: %w", err)
 		}
+		pod, err = controller.EnsureSandboxPodReadinessCondition(readyCtx, s.k8sClient, pod)
+		if err != nil {
+			return nil, fmt.Errorf("ensure pod readiness condition: %w", err)
+		}
 		if controller.IsPodReady(pod) {
 			return pod, nil
 		}

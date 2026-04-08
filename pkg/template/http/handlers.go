@@ -1,7 +1,11 @@
 package http
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -179,6 +183,11 @@ func templateStatKey(namespace, templateID string) string {
 
 // CreateTemplate creates a new template.
 func (h *Handler) CreateTemplate(c *gin.Context) {
+	if err := rejectUnsupportedSidecarProbeFields(c); err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
+
 	var req struct {
 		TemplateID string                       `json:"template_id"`
 		Spec       v1alpha1.SandboxTemplateSpec `json:"spec"`
@@ -286,6 +295,10 @@ func (h *Handler) UpdateTemplate(c *gin.Context) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "team_id is required for custom templates")
 		return
 	}
+	if err := rejectUnsupportedSidecarProbeFields(c); err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
 
 	var req TemplateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -347,6 +360,44 @@ func (h *Handler) UpdateTemplate(c *gin.Context) {
 	} else {
 		spec.JSONSuccess(c, http.StatusOK, tpl)
 	}
+}
+
+func rejectUnsupportedSidecarProbeFields(c *gin.Context) error {
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		return err
+	}
+	c.Request.Body = io.NopCloser(bytes.NewReader(body))
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil
+	}
+
+	var request map[string]any
+	if err := json.Unmarshal(body, &request); err != nil {
+		return nil
+	}
+
+	specValue, ok := request["spec"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	sidecarsValue, ok := specValue["sidecars"].([]any)
+	if !ok {
+		return nil
+	}
+	for i, rawSidecar := range sidecarsValue {
+		sidecar, ok := rawSidecar.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, exists := sidecar["readinessProbe"]; exists {
+			return fmt.Errorf("spec.sidecars[%d].readinessProbe is not supported", i)
+		}
+		if _, exists := sidecar["livenessProbe"]; exists {
+			return fmt.Errorf("spec.sidecars[%d].livenessProbe is not supported", i)
+		}
+	}
+	return nil
 }
 
 // DeleteTemplate deletes a template.

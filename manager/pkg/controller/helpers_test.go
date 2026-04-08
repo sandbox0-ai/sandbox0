@@ -40,6 +40,30 @@ func TestIsPodReady(t *testing.T) {
 		}
 	})
 
+	t.Run("requires sandbox readiness gate to be true when present", func(t *testing.T) {
+		pod := &corev1.Pod{
+			Spec: corev1.PodSpec{
+				ReadinessGates: []corev1.PodReadinessGate{{
+					ConditionType: v1alpha1.SandboxPodReadinessConditionType,
+				}},
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+					{Type: v1alpha1.SandboxPodReadinessConditionType, Status: corev1.ConditionFalse},
+				},
+			},
+		}
+		if IsPodReady(pod) {
+			t.Fatal("IsPodReady() = true, want false when sandbox readiness gate is false")
+		}
+		pod.Status.Conditions[1].Status = corev1.ConditionTrue
+		if !IsPodReady(pod) {
+			t.Fatal("IsPodReady() = false, want true when sandbox readiness gate is true")
+		}
+	})
+
 	t.Run("returns false for running but not-ready pods", func(t *testing.T) {
 		pod := &corev1.Pod{
 			Status: corev1.PodStatus{
@@ -107,6 +131,78 @@ func TestIsPodReady(t *testing.T) {
 			t.Fatal("IsPodReady() = true, want false")
 		}
 	})
+}
+
+func TestDesiredSandboxPodReadiness(t *testing.T) {
+	t.Run("running active sandbox is ready", func(t *testing.T) {
+		status, reason, _ := DesiredSandboxPodReadiness(&corev1.Pod{
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		})
+		require.Equal(t, corev1.ConditionTrue, status)
+		require.Equal(t, "SandboxActive", reason)
+	})
+
+	t.Run("paused sandbox is not ready", func(t *testing.T) {
+		status, reason, _ := DesiredSandboxPodReadiness(&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{AnnotationPaused: "true"},
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		})
+		require.Equal(t, corev1.ConditionFalse, status)
+		require.Equal(t, "PowerStatePaused", reason)
+	})
+
+	t.Run("resuming sandbox is not ready", func(t *testing.T) {
+		status, reason, _ := DesiredSandboxPodReadiness(&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					AnnotationPowerStateDesired:  "active",
+					AnnotationPowerStateObserved: "paused",
+					AnnotationPowerStatePhase:    "resuming",
+				},
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		})
+		require.Equal(t, corev1.ConditionFalse, status)
+		require.Equal(t, "PowerStateTransitioning", reason)
+	})
+}
+
+func TestEnsureSandboxPodReadinessConditionUpdatesGateStatus(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sandbox-a",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			ReadinessGates: []corev1.PodReadinessGate{{
+				ConditionType: v1alpha1.SandboxPodReadinessConditionType,
+			}},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionFalse},
+			},
+		},
+	}
+
+	client := fake.NewSimpleClientset(pod.DeepCopy())
+	updated, err := EnsureSandboxPodReadinessCondition(context.Background(), client, pod)
+	require.NoError(t, err)
+	require.NotNil(t, updated)
+
+	var condition *corev1.PodCondition
+	for i := range updated.Status.Conditions {
+		if updated.Status.Conditions[i].Type == v1alpha1.SandboxPodReadinessConditionType {
+			condition = &updated.Status.Conditions[i]
+			break
+		}
+	}
+	require.NotNil(t, condition)
+	require.Equal(t, corev1.ConditionTrue, condition.Status)
+	require.Equal(t, "SandboxActive", condition.Reason)
 }
 
 func TestEnsureNetdMITMCASecretCopiesCertIntoTemplateNamespace(t *testing.T) {

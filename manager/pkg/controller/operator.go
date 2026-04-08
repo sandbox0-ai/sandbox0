@@ -290,9 +290,21 @@ func (op *Operator) updateTemplateStatus(ctx context.Context, template *v1alpha1
 		return err
 	}
 
+	reconciledPods := make(map[string]*corev1.Pod, len(idlePods)+len(activePods))
+	for _, pod := range append(append([]*corev1.Pod(nil), idlePods...), activePods...) {
+		updatedPod, err := EnsureSandboxPodReadinessCondition(ctx, op.k8sClient, pod)
+		if err != nil {
+			return fmt.Errorf("ensure sandbox pod readiness condition for %s/%s: %w", pod.Namespace, pod.Name, err)
+		}
+		reconciledPods[pod.Namespace+"/"+pod.Name] = updatedPod
+	}
+
 	// Count only ready idle pods as available pooled capacity.
 	idleCount := int32(0)
 	for _, pod := range idlePods {
+		if updatedPod := reconciledPods[pod.Namespace+"/"+pod.Name]; updatedPod != nil {
+			pod = updatedPod
+		}
 		if IsPodReady(pod) {
 			idleCount++
 		}

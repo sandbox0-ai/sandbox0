@@ -74,9 +74,9 @@ Warm-pool capacity is counted from idle pods that reach Kubernetes readiness.
 
 - An idle pod in `Running` phase but with `Ready=False` does not count toward `idleCount`
 - A hot claim only selects idle pods that are already `Ready`
-- This lets you use standard Kubernetes probes to model “warm process is ready”
+- Sandbox0 now owns the readiness gate for sandbox pods, so sidecar `readinessProbe` is not part of the public template surface
 
-This is especially useful when a template uses a sidecar to host a warm process:
+If a template uses a sidecar to host a warm process, keep startup checks on the sidecar and let Sandbox0 drive pod readiness:
 
 ```yaml
 spec:
@@ -84,16 +84,15 @@ spec:
         - name: codex
           image: ghcr.io/example/codex:latest
           command: ["sh", "-lc", "/app/start-codex.sh"]
-          readinessProbe:
-              httpGet:
-                  path: /healthz
-                  port: 8081
+          startupProbe:
+              exec:
+                  command: ["test", "-f", "/tmp/codex-started"]
     pool:
         minIdle: 2
         maxIdle: 10
 ```
 
-In this example, the pod is only counted as warm-pool capacity after the sidecar starts serving `GET /healthz` on port `8081` and the readiness probe passes.
+In this model, the sidecar can still express slow-start behavior with `startupProbe`, but the pod only counts as warm-pool capacity after Sandbox0 marks its readiness gate ready.
 
 **Choosing `minIdle`:**
 

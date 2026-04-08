@@ -187,7 +187,7 @@ manager_image: sandbox0/manager:test
 	}
 }
 
-func TestBuildPodSpecPreservesSidecarCommandAndProbes(t *testing.T) {
+func TestBuildPodSpecPreservesSidecarCommandAndStartupProbe(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test
 `)
@@ -201,18 +201,6 @@ manager_image: sandbox0/manager:test
 			Command:   []string{"sh", "-lc", "sleep 30; touch /tmp/ready; tail -f /dev/null"},
 			Args:      []string{"--verbose"},
 			Resources: ResourceQuota{CPU: resource.MustParse("500m"), Memory: resource.MustParse("2Gi")},
-			ReadinessProbe: &corev1.Probe{
-				ProbeHandler: corev1.ProbeHandler{
-					Exec: &corev1.ExecAction{Command: []string{"test", "-f", "/tmp/ready"}},
-				},
-				PeriodSeconds: 2,
-			},
-			LivenessProbe: &corev1.Probe{
-				ProbeHandler: corev1.ProbeHandler{
-					Exec: &corev1.ExecAction{Command: []string{"test", "-f", "/tmp/healthy"}},
-				},
-				PeriodSeconds: 5,
-			},
 			StartupProbe: &corev1.Probe{
 				ProbeHandler: corev1.ProbeHandler{
 					Exec: &corev1.ExecAction{Command: []string{"test", "-f", "/tmp/started"}},
@@ -242,23 +230,26 @@ manager_image: sandbox0/manager:test
 	if len(sidecar.Args) != 1 || sidecar.Args[0] != "--verbose" {
 		t.Fatalf("unexpected sidecar args: %v", sidecar.Args)
 	}
-	if sidecar.ReadinessProbe == nil || sidecar.ReadinessProbe.Exec == nil {
-		t.Fatal("expected readiness probe to be preserved")
-	}
-	if sidecar.LivenessProbe == nil || sidecar.LivenessProbe.Exec == nil {
-		t.Fatal("expected liveness probe to be preserved")
-	}
 	if sidecar.StartupProbe == nil || sidecar.StartupProbe.Exec == nil {
 		t.Fatal("expected startup probe to be preserved")
 	}
-	if sidecar.ReadinessProbe.PeriodSeconds != 2 {
-		t.Fatalf("readiness period = %d, want 2", sidecar.ReadinessProbe.PeriodSeconds)
-	}
-	if sidecar.LivenessProbe.PeriodSeconds != 5 {
-		t.Fatalf("liveness period = %d, want 5", sidecar.LivenessProbe.PeriodSeconds)
-	}
 	if sidecar.StartupProbe.FailureThreshold != 30 {
 		t.Fatalf("startup failureThreshold = %d, want 30", sidecar.StartupProbe.FailureThreshold)
+	}
+}
+
+func TestBuildPodSpecAddsSandboxReadinessGate(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	spec := BuildPodSpec(newTestTemplate(), false)
+	if len(spec.ReadinessGates) != 1 {
+		t.Fatalf("readiness gate count = %d, want 1", len(spec.ReadinessGates))
+	}
+	if spec.ReadinessGates[0].ConditionType != SandboxPodReadinessConditionType {
+		t.Fatalf("readiness gate = %q, want %q", spec.ReadinessGates[0].ConditionType, SandboxPodReadinessConditionType)
 	}
 }
 

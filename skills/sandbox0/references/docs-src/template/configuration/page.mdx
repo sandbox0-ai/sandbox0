@@ -111,6 +111,10 @@ spec:
         - name: codex
           image: ghcr.io/example/codex:latest
           command: ["sh", "-lc", "/app/start-codex.sh"]
+          readinessProbe:
+              httpGet:
+                  path: /healthz
+                  port: 8081
           startupProbe:
               exec:
                   command: ["test", "-f", "/tmp/codex-started"]
@@ -199,7 +203,7 @@ The following fields require a system-level token. They are not available to reg
 Attempting to set privileged fields without a system identity returns `403 Forbidden`. Contact your platform administrator if you need access to these fields.
 </Callout>
 
-Regular team-owned templates can still use public sidecar fields such as `command`, `args`, `env`, `resources`, `mounts`, and `startupProbe`.
+Regular team-owned templates can still use public sidecar fields such as `command`, `args`, `env`, `resources`, `mounts`, `readinessProbe`, and `startupProbe`.
 
 Operator-only Kubernetes-native sidecar fields that are not part of the public OpenAPI schema should not be relied on from the public SDKs.
 

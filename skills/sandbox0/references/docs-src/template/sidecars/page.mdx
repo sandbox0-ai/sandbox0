@@ -122,6 +122,10 @@ spec:
           mounts:
               - name: workspace
                 mountPath: /shared
+          readinessProbe:
+              httpGet:
+                  path: /healthz
+                  port: 8081
           startupProbe:
               exec:
                   command: ["test", "-f", "/tmp/codex-started"]
@@ -130,7 +134,7 @@ spec:
         maxIdle: 10
 ```
 
-In this example, the sidecar can model slow startup with `startupProbe`, but the pod is not counted as ready warm capacity until it becomes claimable.
+In this example, `readinessProbe` gates when the warm pod becomes claimable, while `startupProbe` gives a slow-starting sidecar extra time before readiness should matter.
 
 ---
 
@@ -160,6 +164,11 @@ In this example, the sidecar can model slow startup with `startupProbe`, but the
             "1Gi",
             sandbox0.WithTemplateSidecarCommand("sh", "-lc", "/app/start-codex.sh"),
             sandbox0.WithTemplateSidecarMount(sandbox0.TemplateMount("workspace", "/shared")),
+            sandbox0.WithTemplateSidecarReadinessProbe(apispec.Probe{
+                HTTPGet:          apispec.NewOptHTTPGetAction(apispec.HTTPGetAction{Path: "/healthz", Port: 8081}),
+                PeriodSeconds:    apispec.NewOptInt32(2),
+                FailureThreshold: apispec.NewOptInt32(1),
+            }),
             sandbox0.WithTemplateSidecarStartupProbe(apispec.Probe{
                 Exec:             apispec.NewOptExecAction(apispec.ExecAction{Command: []string{"test", "-f", "/tmp/codex-started"}}),
                 PeriodSeconds:    apispec.NewOptInt32(2),
@@ -204,6 +213,11 @@ tpl = client.create_template(
                     resources("250m", "1Gi"),
                     command=["sh", "-lc", "/app/start-codex.sh"],
                     mounts=[mount("workspace", "/shared")],
+                    readiness_probe=Probe(
+                        http_get={"path": "/healthz", "port": 8081},
+                        period_seconds=2,
+                        failure_threshold=1,
+                    ),
                     startup_probe=Probe(
                         exec={"command": ["test", "-f", "/tmp/codex-started"]},
                         period_seconds=2,
@@ -231,6 +245,11 @@ print(f"Template created: {tpl.template_id}")`
                 sidecar("codex", "ghcr.io/example/codex:v1", resources("250m", "1Gi"), {
                     command: ["sh", "-lc", "/app/start-codex.sh"],
                     mounts: [mount("workspace", "/shared")],
+                    readinessProbe: {
+                        httpGet: { path: "/healthz", port: 8081 },
+                        periodSeconds: 2,
+                        failureThreshold: 1,
+                    },
                     startupProbe: {
                         exec: { command: ["test", "-f", "/tmp/codex-started"] },
                         periodSeconds: 2,
@@ -269,6 +288,10 @@ spec:
           mounts:
               - name: workspace
                 mountPath: /shared
+          readinessProbe:
+              httpGet:
+                  path: /healthz
+                  port: 8081
           startupProbe:
               exec:
                   command: ["test", "-f", "/tmp/codex-started"]
@@ -290,6 +313,7 @@ s0 template create --id my-codex-env --spec-file template.yaml`
 
 - `name`, `image`, and `resources` are required for every sidecar.
 - `mounts[*].name` must refer to a declared `sharedVolumes[*].name`.
+- `readinessProbe` must define exactly one handler when present.
 - `startupProbe` must define exactly one handler when present.
 - Private image references are still checked against team ownership rules, just like `spec.mainContainer.image`.
 

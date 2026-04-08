@@ -422,7 +422,13 @@ func compileCleanupPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 	}
 	if !compiled.Components.EnableFusePlugin {
 		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
+			namespacedRef("DaemonSet", infra.Namespace, fmt.Sprintf("%s-ctld", infra.Name)),
 			namespacedRef("DaemonSet", infra.Namespace, fmt.Sprintf("%s-k8s-plugin", infra.Name)),
+			namespacedRef("ServiceAccount", infra.Namespace, fmt.Sprintf("%s-ctld", infra.Name)),
+		)
+		cleanup.DeleteClusterScoped = append(cleanup.DeleteClusterScoped,
+			clusterScopedRef("ClusterRole", fmt.Sprintf("%s-ctld", infra.Name)),
+			clusterScopedRef("ClusterRoleBinding", fmt.Sprintf("%s-ctld", infra.Name)),
 		)
 	}
 	if cleanup.CleanupBuiltinDatabase {

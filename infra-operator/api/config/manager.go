@@ -113,11 +113,20 @@ type ManagerConfig struct {
 	// +optional
 	// +kubebuilder:default="10m"
 	PauseMinCPU string `yaml:"pause_min_cpu" json:"pauseMinCPU"`
+	// +optional
+	// +kubebuilder:default=false
+	CtldEnabled bool `yaml:"ctld_enabled" json:"-"`
+	// +optional
+	// +kubebuilder:default=8095
+	CtldPort int `yaml:"ctld_port" json:"-"`
 
 	// Timeouts
 	// +optional
 	// +kubebuilder:default="30s"
 	ProcdClientTimeout metav1.Duration `yaml:"procd_client_timeout" json:"procdClientTimeout"`
+	// +optional
+	// +kubebuilder:default="5s"
+	CtldClientTimeout metav1.Duration `yaml:"ctld_client_timeout" json:"-"`
 	// +optional
 	// +kubebuilder:default="6s"
 	ProcdInitTimeout metav1.Duration `yaml:"procd_init_timeout" json:"procdInitTimeout"`

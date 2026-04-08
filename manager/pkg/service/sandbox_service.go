@@ -102,6 +102,9 @@ type SandboxServiceConfig struct {
 	PauseMinMemoryLimit    string
 	PauseMemoryBufferRatio float64
 	PauseMinCPU            string
+	CtldEnabled            bool
+	CtldPort               int
+	CtldClientTimeout      time.Duration
 	ProcdPort              int
 	ProcdClientTimeout     time.Duration
 	ProcdInitTimeout       time.Duration
@@ -117,6 +120,7 @@ type SandboxService struct {
 	NetworkPolicyService   *NetworkPolicyService
 	networkProvider        network.Provider
 	procdClient            *ProcdClient
+	ctldClient             *CtldClient
 	internalTokenGenerator TokenGenerator
 	procdTokenGenerator    TokenGenerator
 	clock                  TimeProvider
@@ -179,6 +183,12 @@ func NewSandboxService(
 	if clock == nil {
 		clock = systemTime{}
 	}
+	if config.CtldPort == 0 {
+		config.CtldPort = 8095
+	}
+	if config.CtldClientTimeout == 0 {
+		config.CtldClientTimeout = 5 * time.Second
+	}
 	if networkProvider == nil {
 		networkProvider = network.NewNoopProvider()
 	}
@@ -190,6 +200,7 @@ func NewSandboxService(
 		templateLister:         templateLister,
 		NetworkPolicyService:   networkPolicyService,
 		networkProvider:        networkProvider,
+		ctldClient:             NewCtldClient(CtldClientConfig{Timeout: config.CtldClientTimeout}),
 		procdClient:            NewProcdClient(ProcdClientConfig{Timeout: config.ProcdClientTimeout}),
 		internalTokenGenerator: internalTokenGenerator,
 		procdTokenGenerator:    procdTokenGenerator,
@@ -198,7 +209,7 @@ func NewSandboxService(
 		logger:                 logger,
 		metrics:                metrics,
 	}
-	service.powerExecutor = newLocalSandboxPowerExecutor(service)
+	service.powerExecutor = newSandboxPowerExecutor(service)
 	return service
 }
 
@@ -213,6 +224,14 @@ func (s *SandboxService) SetProcdClient(client *ProcdClient) {
 		return
 	}
 	s.procdClient = client
+}
+
+// SetCtldClient overrides the ctld client (used by tests and future node runtimes).
+func (s *SandboxService) SetCtldClient(client *CtldClient) {
+	if client == nil {
+		return
+	}
+	s.ctldClient = client
 }
 
 // SetAutoScaler injects the auto scaler for automatic pool scaling.
@@ -237,7 +256,7 @@ func (s *SandboxService) sandboxPowerExecutor() SandboxPowerExecutor {
 	if s.powerExecutor != nil {
 		return s.powerExecutor
 	}
-	return newLocalSandboxPowerExecutor(s)
+	return newSandboxPowerExecutor(s)
 }
 
 // ClaimRequest represents a sandbox claim request

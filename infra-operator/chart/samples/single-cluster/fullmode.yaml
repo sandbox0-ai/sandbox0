@@ -87,7 +87,7 @@ spec:
         minIdle: 1
         maxIdle: 5
   # Shared placement for sandbox template Pods plus node-local helpers such as
-  # netd and k8s-plugin.
+  # netd and ctld.
   #sandboxNodePlacement:
   #  nodeSelector:
   #    sandbox0.ai/node-role: sandbox

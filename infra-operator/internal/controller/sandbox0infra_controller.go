@@ -366,6 +366,9 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 		}, nil
 	case "fuse-device-plugin":
 		return func(ctx context.Context) error {
+			if err := rbacReconciler.ReconcileCtldRBAC(ctx, infra); err != nil {
+				return err
+			}
 			return fusePluginReconciler.Reconcile(ctx, infra, imageRepo, imageTag)
 		}, nil
 	case "manager-rbac":

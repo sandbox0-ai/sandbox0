@@ -266,7 +266,7 @@ Expected result:
 
 1. `Sandbox0Infra` becomes `Ready`
 2. `fullmode-cluster-gateway` is exposed as `LoadBalancer` on port `80`
-3. `fullmode-netd` and `fullmode-k8s-plugin` run on `gvisor-pool`
+3. `fullmode-netd` and `fullmode-ctld` run on `gvisor-pool`
 4. sandbox pods in `tpl-default` run on `gvisor-pool`
 
 This sample uses the native GKE node label `sandbox.gke.io/runtime=gvisor` for sandbox placement. You do not need to add a separate custom node label just to target `gVisor` nodes.
@@ -327,15 +327,15 @@ If `s0 sandbox create` returns a sandbox ID and the sandbox reaches `running`, t
 
 - Sandbox0 requires different runtime behavior for different components. On GKE, keep a regular node pool for system services and a `gVisor` node pool for sandbox workloads.
 - Sandbox workload runtime selection should be handled by cluster defaults or administrator-managed service configuration, and the GCP `gVisor` sample places sandbox workloads onto nodes labeled `sandbox.gke.io/runtime=gvisor`.
-- Use `sandboxNodePlacement` to place sandbox workloads, `netd`, and `k8s-plugin` onto the same sandbox node pool.
+- Use `sandboxNodePlacement` to place sandbox workloads, `netd`, and `ctld` onto the same sandbox node pool.
 - Do not set `services.netd.runtimeClassName: gvisor`.
-- `netd` and `k8s-plugin` depend on host features such as `hostNetwork` and `hostPath`. This is why GKE Autopilot is not a good fit for full Sandbox0 deployments.
-- Even when `netd` and `k8s-plugin` are scheduled onto `gVisor` nodes, they still run on the node's default host runtime because `services.netd.runtimeClassName` remains unset.
+- `netd` and `ctld` depend on host features such as `hostNetwork` and `hostPath`. This is why GKE Autopilot is not a good fit for full Sandbox0 deployments.
+- Even when `netd` and `ctld` are scheduled onto `gVisor` nodes, they still run on the node's default host runtime because `services.netd.runtimeClassName` remains unset.
 - If you hit GCP `SSD_TOTAL_GB` quota limits while creating node pools, reduce `--disk-size` explicitly instead of relying on the larger default boot disk size.
 
 ### Why Not Autopilot
 
-Autopilot is not suitable for the full `fullmode` deployment because Sandbox0 host-level components need capabilities that Autopilot restricts. In practice, `netd` and `k8s-plugin` need node-level access, while template sandbox pods run on the `gVisor` pool.
+Autopilot is not suitable for the full `fullmode` deployment because Sandbox0 host-level components need capabilities that Autopilot restricts. In practice, `netd` and `ctld` need node-level access, while template sandbox pods run on the `gVisor` pool.
 
 ## Next Steps
 

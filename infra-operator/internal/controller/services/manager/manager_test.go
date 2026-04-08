@@ -210,6 +210,46 @@ func TestBuildConfigPreservesSandboxRuntimeClassName(t *testing.T) {
 	}
 }
 
+func TestBuildConfigEnablesCtldWhenManagerIsEnabled(t *testing.T) {
+	reconciler := newManagerTestReconciler(t)
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeBuiltin,
+				Builtin: &infrav1alpha1.BuiltinDatabaseConfig{
+					Enabled:  true,
+					Port:     5432,
+					Username: "sandbox0",
+					Database: "sandbox0",
+					SSLMode:  "disable",
+				},
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				Manager: &infrav1alpha1.ManagerServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+			},
+		},
+	}
+
+	cfg, err := reconciler.buildConfig(context.Background(), infra, "sandbox0/manager", "test", infraplan.Compile(infra))
+	if err != nil {
+		t.Fatalf("buildConfig returned error: %v", err)
+	}
+	if !cfg.CtldEnabled {
+		t.Fatal("expected ctld to be enabled when manager data-plane services are enabled")
+	}
+	if cfg.CtldPort != 8095 {
+		t.Fatalf("ctld port = %d, want 8095", cfg.CtldPort)
+	}
+}
+
 func newManagerTestReconciler(t *testing.T) *Reconciler {
 	t.Helper()
 

@@ -286,6 +286,10 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	cfg.SandboxPodPlacement = compiledPlan.Manager.SandboxPodPlacement
 	cfg.DefaultClusterId = compiledPlan.Manager.DefaultClusterID
 	cfg.RegionID = compiledPlan.Manager.RegionID
+	cfg.CtldEnabled = compiledPlan.Components.EnableFusePlugin
+	if cfg.CtldEnabled && cfg.CtldPort == 0 {
+		cfg.CtldPort = 8095
+	}
 	if cfg.NetworkPolicyProvider == "netd" {
 		secretName, err := netdservice.EnsureMITMCASecret(ctx, r.Resources, infra, common.GetServiceLabels(infra.Name, "netd"))
 		if err != nil {

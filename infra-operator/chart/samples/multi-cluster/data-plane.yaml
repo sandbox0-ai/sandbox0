@@ -86,7 +86,7 @@ spec:
         minIdle: 1
         maxIdle: 5
   # Shared placement for sandbox template Pods plus node-local helpers such as
-  # netd and k8s-plugin. In production, point this at your dedicated sandbox
+  # netd and ctld. In production, point this at your dedicated sandbox
   # node pool and pair it with services.manager.config.sandboxRuntimeClassName.
   # The example below targets a Kata node pool; adjust labels and tolerations
   # for your cluster.

@@ -7,6 +7,7 @@ import (
 	"syscall"
 
 	"github.com/fsnotify/fsnotify"
+	ctldfuseplugin "github.com/sandbox0-ai/sandbox0/internal/ctld/fuseplugin"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 )
 
@@ -22,7 +23,7 @@ func main() {
 	defer func() { log.Println("Stopped:") }()
 
 	log.Println("Starting FS watcher.")
-	watcher, err := newFSWatcher(pluginapi.DevicePluginPath)
+	watcher, err := ctldfuseplugin.NewFSWatcher(pluginapi.DevicePluginPath)
 	if err != nil {
 		log.Println("Failed to created FS watcher.")
 		os.Exit(1)
@@ -30,10 +31,10 @@ func main() {
 	defer watcher.Close()
 
 	log.Println("Starting OS watcher.")
-	sigs := newOSWatcher(syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+	sigs := ctldfuseplugin.NewOSWatcher(syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 
 	restart := true
-	var devicePlugin *FuseDevicePlugin
+	var devicePlugin *ctldfuseplugin.DevicePlugin
 
 L:
 	for {
@@ -42,7 +43,7 @@ L:
 				devicePlugin.Stop()
 			}
 
-			devicePlugin = NewFuseDevicePlugin(mountsAllowed)
+			devicePlugin = ctldfuseplugin.NewDevicePlugin(mountsAllowed)
 			if err := devicePlugin.Serve(); err != nil {
 				log.Println("Could not contact Kubelet, retrying. Did you enable the device plugin feature gate?")
 			} else {

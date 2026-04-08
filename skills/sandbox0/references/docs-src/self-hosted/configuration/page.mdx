@@ -155,7 +155,7 @@ Examples:
 - `services.storageProxy.config.juicefs*` tunes JuiceFS behavior and cache sizing
 - `services.netd.config.*` controls proxy ports, policy enforcement, and node-level networking behavior
 
-Use `spec.sandboxNodePlacement` for the shared node placement consumed by sandbox template Pods, `netd`, and `k8s-plugin`. The older `services.netd.nodeSelector` and `services.netd.tolerations` fields remain as compatibility aliases when the shared placement is unset.
+Use `spec.sandboxNodePlacement` for the shared node placement consumed by sandbox template Pods, `netd`, and `ctld`. The older `services.netd.nodeSelector` and `services.netd.tolerations` fields remain as compatibility aliases when the shared placement is unset.
 
 <Callout variant="info">
 Use the generated reference below for exact field names, defaults, enums, and required flags. Use the sample manifests for operator-friendly starting points.

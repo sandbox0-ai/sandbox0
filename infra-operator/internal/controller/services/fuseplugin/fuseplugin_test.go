@@ -92,10 +92,29 @@ func reconcileFusePluginDaemonSet(t *testing.T, infra *infrav1alpha1.Sandbox0Inf
 
 	ds := &appsv1.DaemonSet{}
 	if err := client.Get(context.Background(), types.NamespacedName{
-		Name:      infra.Name + "-k8s-plugin",
+		Name:      infra.Name + "-ctld",
 		Namespace: infra.Namespace,
 	}, ds); err != nil {
 		t.Fatalf("expected daemonset to be created: %v", err)
+	}
+
+	if got := ds.Spec.Template.Spec.Containers[0].Env[0].Value; got != "ctld" {
+		t.Fatalf("expected SERVICE=ctld, got %q", got)
+	}
+	if ds.Spec.Template.Spec.Containers[0].ReadinessProbe == nil || ds.Spec.Template.Spec.Containers[0].LivenessProbe == nil {
+		t.Fatal("expected ctld probes to be configured")
+	}
+	if ds.Spec.Template.Spec.ServiceAccountName != "demo-ctld" {
+		t.Fatalf("expected service account demo-ctld, got %q", ds.Spec.Template.Spec.ServiceAccountName)
+	}
+	if len(ds.Spec.Template.Spec.Containers[0].Args) < 2 || ds.Spec.Template.Spec.Containers[0].Args[1] != "-cgroup-root=/host-sys/fs/cgroup" {
+		t.Fatalf("expected cgroup root arg, got %#v", ds.Spec.Template.Spec.Containers[0].Args)
+	}
+	if ds.Spec.Template.Spec.Containers[0].SecurityContext == nil || ds.Spec.Template.Spec.Containers[0].SecurityContext.Privileged == nil || !*ds.Spec.Template.Spec.Containers[0].SecurityContext.Privileged {
+		t.Fatal("expected ctld container to run privileged")
+	}
+	if len(ds.Spec.Template.Spec.Containers[0].VolumeMounts) != 2 {
+		t.Fatalf("expected device-plugin and host-cgroup mounts, got %#v", ds.Spec.Template.Spec.Containers[0].VolumeMounts)
 	}
 
 	return ds

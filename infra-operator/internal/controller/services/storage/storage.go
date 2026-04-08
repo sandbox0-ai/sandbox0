@@ -544,9 +544,7 @@ func (r *Reconciler) ensureStorageBucket(ctx context.Context, infra *infrav1alph
 
 	if err := store.Create(); err != nil {
 		if isBucketAlreadyOwnedError(err) {
-			if _, headErr := store.Head(""); headErr == nil {
-				return nil
-			}
+			return nil
 		}
 		return fmt.Errorf("%s: %w", bucketCreateHint(config, err), err)
 	}

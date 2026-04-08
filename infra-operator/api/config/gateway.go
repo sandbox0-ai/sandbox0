@@ -82,6 +82,13 @@ type GatewayConfig struct {
 	// +optional
 	// +kubebuilder:default="aws-us-east-1"
 	PublicRegionID string `yaml:"public_region_id" json:"-"`
+
+	// TLSCertPath points at the PEM certificate file served by the gateway.
+	// +optional
+	TLSCertPath string `yaml:"tls_cert_path" json:"-"`
+	// TLSKeyPath points at the PEM private key file served by the gateway.
+	// +optional
+	TLSKeyPath string `yaml:"tls_key_path" json:"-"`
 }
 
 // BuiltInAuthConfig configures the built-in authentication.

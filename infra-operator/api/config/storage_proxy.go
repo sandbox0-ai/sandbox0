@@ -39,13 +39,14 @@ type StorageProxyConfig struct {
 	DatabaseSchema string `yaml:"database_schema" json:"databaseSchema"`
 
 	// JuiceFS defaults
-	MetaURL        string `yaml:"meta_url" json:"-"`
-	S3Bucket       string `yaml:"s3_bucket" json:"-"`
-	S3Region       string `yaml:"s3_region" json:"-"`
-	S3Endpoint     string `yaml:"s3_endpoint" json:"-"`
-	S3AccessKey    string `yaml:"s3_access_key" json:"-"`
-	S3SecretKey    string `yaml:"s3_secret_key" json:"-"`
-	S3SessionToken string `yaml:"s3_session_token" json:"-"`
+	ObjectStorageType string `yaml:"object_storage_type" json:"-"`
+	MetaURL           string `yaml:"meta_url" json:"-"`
+	S3Bucket          string `yaml:"s3_bucket" json:"-"`
+	S3Region          string `yaml:"s3_region" json:"-"`
+	S3Endpoint        string `yaml:"s3_endpoint" json:"-"`
+	S3AccessKey       string `yaml:"s3_access_key" json:"-"`
+	S3SecretKey       string `yaml:"s3_secret_key" json:"-"`
+	S3SessionToken    string `yaml:"s3_session_token" json:"-"`
 
 	// +optional
 	// +kubebuilder:default="sandbox0"

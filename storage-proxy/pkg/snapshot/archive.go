@@ -324,16 +324,17 @@ func (m *Manager) openArchiveSession(_ context.Context, volume *db.SandboxVolume
 }
 
 func createSnapshotArchiveStorage(cfg *config.StorageProxyConfig, prefix string) (object.ObjectStorage, error) {
-	endpoint := cfg.S3Endpoint
-	if endpoint == "" {
-		endpoint = fmt.Sprintf("https://s3.%s.amazonaws.com", cfg.S3Region)
-	}
-	endpoint = strings.TrimRight(endpoint, "/")
-	s3Endpoint := fmt.Sprintf("%s/%s", endpoint, cfg.S3Bucket)
-
-	obj, err := object.CreateStorage("s3", s3Endpoint, cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3SessionToken)
+	obj, err := juicefs.CreateObjectStorage(juicefs.ObjectStorageConfig{
+		Type:         cfg.ObjectStorageType,
+		Bucket:       cfg.S3Bucket,
+		Region:       cfg.S3Region,
+		Endpoint:     cfg.S3Endpoint,
+		AccessKey:    cfg.S3AccessKey,
+		SecretKey:    cfg.S3SecretKey,
+		SessionToken: cfg.S3SessionToken,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create S3 storage: %w", err)
+		return nil, fmt.Errorf("failed to create snapshot storage: %w", err)
 	}
 	if prefix != "" {
 		p := strings.Trim(prefix, "/")

@@ -32,13 +32,14 @@ const (
 )
 
 // StorageType defines the type of storage backend
-// +kubebuilder:validation:Enum=builtin;s3;oss
+// +kubebuilder:validation:Enum=builtin;s3;oss;gcs
 type StorageType string
 
 const (
 	StorageTypeBuiltin StorageType = "builtin"
 	StorageTypeS3      StorageType = "s3"
 	StorageTypeOSS     StorageType = "oss"
+	StorageTypeGCS     StorageType = "gcs"
 )
 
 // RegistryProvider defines the registry provider type.
@@ -275,9 +276,9 @@ type JuicefsDatabaseConfig struct {
 	External *ExternalDatabaseConfig `json:"external,omitempty"`
 }
 
-// StorageConfig defines storage backend configuration
+// StorageConfig defines storage backend configuration.
 type StorageConfig struct {
-	// Type specifies the storage type: builtin, s3, or oss
+	// Type specifies the storage type: builtin, s3, oss, or gcs.
 	// +kubebuilder:default=builtin
 	Type StorageType `json:"type,omitempty"`
 
@@ -293,6 +294,10 @@ type StorageConfig struct {
 	// OSS configures Aliyun OSS storage
 	// +optional
 	OSS *OSSStorageConfig `json:"oss,omitempty"`
+
+	// GCS configures Google Cloud Storage using native GCS credentials.
+	// +optional
+	GCS *GCSStorageConfig `json:"gcs,omitempty"`
 }
 
 // BuiltinStorageConfig defines built-in storage configuration
@@ -443,6 +448,12 @@ type OSSCredentialsSecret struct {
 	// SecretKeyKey is the key for access key secret
 	// +kubebuilder:default="accessKeySecret"
 	SecretKeyKey string `json:"secretKeyKey,omitempty"`
+}
+
+// GCSStorageConfig defines Google Cloud Storage configuration.
+type GCSStorageConfig struct {
+	// Bucket specifies the GCS bucket name.
+	Bucket string `json:"bucket"`
 }
 
 // RegistryConfig defines container registry configuration.
@@ -606,10 +617,15 @@ type GCPRegistryConfig struct {
 	Registry string `json:"registry"`
 
 	// PullSecret references the dockerconfigjson secret to use for image pulls.
-	PullSecret DockerConfigSecretRef `json:"pullSecret"`
+	// Omit this on GKE when nodes or workload identity can already pull from
+	// Artifact Registry without a namespace-local imagePullSecret.
+	// +optional
+	PullSecret *DockerConfigSecretRef `json:"pullSecret,omitempty"`
 
 	// ServiceAccountSecret references the service account JSON key.
-	ServiceAccountSecret GCPRegistryServiceAccountSecret `json:"serviceAccountSecret"`
+	// Omit this to use application default credentials inside manager.
+	// +optional
+	ServiceAccountSecret *GCPRegistryServiceAccountSecret `json:"serviceAccountSecret,omitempty"`
 }
 
 // GCPRegistryServiceAccountSecret references a service account key in a secret.
@@ -1014,7 +1030,7 @@ func IsStorageEnabled(infra *Sandbox0Infra) bool {
 			return infra.Spec.Storage.Builtin.Enabled
 		}
 		return true
-	case StorageTypeS3, StorageTypeOSS:
+	case StorageTypeS3, StorageTypeOSS, StorageTypeGCS:
 		return true
 	default:
 		return true

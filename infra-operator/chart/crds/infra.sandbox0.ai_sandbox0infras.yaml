@@ -727,8 +727,10 @@ spec:
                     description: GCP configures GCP registry integration.
                     properties:
                       pullSecret:
-                        description: PullSecret references the dockerconfigjson secret
-                          to use for image pulls.
+                        description: |-
+                          PullSecret references the dockerconfigjson secret to use for image pulls.
+                          Omit this on GKE when nodes or workload identity can already pull from
+                          Artifact Registry without a namespace-local imagePullSecret.
                         properties:
                           key:
                             default: .dockerconfigjson
@@ -744,8 +746,9 @@ spec:
                         description: Registry specifies the registry hostname.
                         type: string
                       serviceAccountSecret:
-                        description: ServiceAccountSecret references the service account
-                          JSON key.
+                        description: |-
+                          ServiceAccountSecret references the service account JSON key.
+                          Omit this to use application default credentials inside manager.
                         properties:
                           key:
                             default: serviceAccount.json
@@ -758,9 +761,7 @@ spec:
                         - name
                         type: object
                     required:
-                    - pullSecret
                     - registry
-                    - serviceAccountSecret
                     type: object
                   harbor:
                     description: Harbor configures Harbor registry integration.
@@ -2660,6 +2661,16 @@ spec:
                       rule: has(self.persistence) == has(oldSelf.persistence)
                     - message: credentials presence is immutable after creation
                       rule: has(self.credentials) == has(oldSelf.credentials)
+                  gcs:
+                    description: GCS configures Google Cloud Storage using native
+                      GCS credentials.
+                    properties:
+                      bucket:
+                        description: Bucket specifies the GCS bucket name.
+                        type: string
+                    required:
+                    - bucket
+                    type: object
                   oss:
                     description: OSS configures Aliyun OSS storage
                     properties:
@@ -2739,12 +2750,13 @@ spec:
                     type: object
                   type:
                     default: builtin
-                    description: 'Type specifies the storage type: builtin, s3, or
-                      oss'
+                    description: 'Type specifies the storage type: builtin, s3, oss,
+                      or gcs.'
                     enum:
                     - builtin
                     - s3
                     - oss
+                    - gcs
                     type: string
                 type: object
             type: object

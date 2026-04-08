@@ -34,18 +34,20 @@ func NewObjectReplayPayloadStore(store object.ObjectStorage) replayPayloadStore 
 	return &objectReplayPayloadStore{store: store}
 }
 
-func NewS3ReplayPayloadStore(cfg *config.StorageProxyConfig) (replayPayloadStore, error) {
+func NewReplayPayloadStore(cfg *config.StorageProxyConfig) (replayPayloadStore, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("storage proxy config is nil")
 	}
 
-	endpoint := strings.TrimRight(cfg.S3Endpoint, "/")
-	if endpoint == "" {
-		endpoint = fmt.Sprintf("https://s3.%s.amazonaws.com", cfg.S3Region)
-	}
-	s3Endpoint := fmt.Sprintf("%s/%s", endpoint, cfg.S3Bucket)
-
-	store, err := object.CreateStorage("s3", s3Endpoint, cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3SessionToken)
+	store, err := juicefs.CreateObjectStorage(juicefs.ObjectStorageConfig{
+		Type:         cfg.ObjectStorageType,
+		Bucket:       cfg.S3Bucket,
+		Region:       cfg.S3Region,
+		Endpoint:     cfg.S3Endpoint,
+		AccessKey:    cfg.S3AccessKey,
+		SecretKey:    cfg.S3SecretKey,
+		SessionToken: cfg.S3SessionToken,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("create replay payload storage: %w", err)
 	}

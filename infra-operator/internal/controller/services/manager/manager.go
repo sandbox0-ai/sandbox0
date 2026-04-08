@@ -339,9 +339,11 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		case infrav1alpha1.RegistryProviderGCP:
 			if infra.Spec.Registry.GCP != nil {
 				cfg.Registry.GCP = &apiconfig.RegistryGCPConfig{
-					Registry:             infra.Spec.Registry.GCP.Registry,
-					ServiceAccountSecret: infra.Spec.Registry.GCP.ServiceAccountSecret.Name,
-					ServiceAccountKey:    infra.Spec.Registry.GCP.ServiceAccountSecret.Key,
+					Registry: infra.Spec.Registry.GCP.Registry,
+				}
+				if infra.Spec.Registry.GCP.ServiceAccountSecret != nil {
+					cfg.Registry.GCP.ServiceAccountSecret = infra.Spec.Registry.GCP.ServiceAccountSecret.Name
+					cfg.Registry.GCP.ServiceAccountKey = infra.Spec.Registry.GCP.ServiceAccountSecret.Key
 				}
 			}
 		case infrav1alpha1.RegistryProviderAzure:

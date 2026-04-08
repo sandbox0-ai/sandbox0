@@ -6,7 +6,21 @@ import (
 	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
+)
+
+var (
+	gcpJWTConfigFromJSON = func(data []byte, scopes ...string) (oauth2.TokenSource, error) {
+		jwtConfig, err := google.JWTConfigFromJSON(data, scopes...)
+		if err != nil {
+			return nil, err
+		}
+		return jwtConfig.TokenSource(context.Background()), nil
+	}
+	gcpDefaultTokenSource = func(ctx context.Context, scopes ...string) (oauth2.TokenSource, error) {
+		return google.DefaultTokenSource(ctx, scopes...)
+	}
 )
 
 type gcpProvider struct {
@@ -23,7 +37,21 @@ func (p *gcpProvider) GetPushCredentials(ctx context.Context, req PushCredential
 	serviceAccountJSON := strings.TrimSpace(p.cfg.ServiceAccountJSON)
 	if serviceAccountJSON == "" {
 		if strings.TrimSpace(p.cfg.ServiceAccountSecret) == "" {
-			return nil, fmt.Errorf("gcp service account secret is required")
+			tokenSource, err := gcpDefaultTokenSource(ctx, "https://www.googleapis.com/auth/cloud-platform")
+			if err != nil {
+				return nil, fmt.Errorf("resolve gcp application default credentials: %w", err)
+			}
+			token, err := tokenSource.Token()
+			if err != nil {
+				return nil, fmt.Errorf("fetch gcp access token: %w", err)
+			}
+			return &Credential{
+				Provider:     "gcp",
+				PushRegistry: registry,
+				Username:     "oauth2accesstoken",
+				Password:     token.AccessToken,
+				ExpiresAt:    timePtr(token.Expiry),
+			}, nil
 		}
 		secretKey := strings.TrimSpace(p.cfg.ServiceAccountKey)
 		if secretKey == "" {
@@ -35,11 +63,11 @@ func (p *gcpProvider) GetPushCredentials(ctx context.Context, req PushCredential
 			return nil, fmt.Errorf("read gcp service account: %w", err)
 		}
 	}
-	jwtConfig, err := google.JWTConfigFromJSON([]byte(serviceAccountJSON), "https://www.googleapis.com/auth/cloud-platform")
+	tokenSource, err := gcpJWTConfigFromJSON([]byte(serviceAccountJSON), "https://www.googleapis.com/auth/cloud-platform")
 	if err != nil {
 		return nil, fmt.Errorf("parse gcp service account json: %w", err)
 	}
-	token, err := jwtConfig.TokenSource(ctx).Token()
+	token, err := tokenSource.Token()
 	if err != nil {
 		return nil, fmt.Errorf("fetch gcp access token: %w", err)
 	}

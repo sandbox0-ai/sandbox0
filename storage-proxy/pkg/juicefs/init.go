@@ -15,6 +15,7 @@ import (
 type InitConfig struct {
 	Name                 string
 	MetaURL              string
+	ObjectStorageType    string
 	S3Bucket             string
 	S3Region             string
 	S3Endpoint           string
@@ -47,12 +48,12 @@ func NewInitializer(config *InitConfig, logger *zap.Logger) *Initializer {
 
 // Initialize initializes the JuiceFS filesystem if not already initialized
 // It will:
-// 1. Create S3 bucket if it doesn't exist
+// 1. Create the object storage bucket if it doesn't exist
 // 2. Format JuiceFS metadata if not already formatted
 func (i *Initializer) Initialize() error {
 	i.logger.Info("Initializing JuiceFS filesystem")
 
-	// Step 1: Ensure S3 bucket exists
+	// Step 1: Ensure object storage bucket exists
 	if err := i.ensureBucketExists(); err != nil {
 		return fmt.Errorf("ensure bucket exists: %w", err)
 	}
@@ -77,11 +78,13 @@ func (i *Initializer) Initialize() error {
 	return nil
 }
 
-// ensureBucketExists creates the S3 bucket if it doesn't exist
+// ensureBucketExists creates the object storage bucket if it doesn't exist.
 func (i *Initializer) ensureBucketExists() error {
-	i.logger.Info("Checking if S3 bucket exists", zap.String("bucket", i.config.S3Bucket))
+	i.logger.Info("Checking if object storage bucket exists",
+		zap.String("bucket", i.config.S3Bucket),
+		zap.String("storage_type", NormalizeObjectStorageType(i.config.ObjectStorageType)))
 
-	// Create S3 storage client
+	// Create object storage client.
 	store, err := i.createStorage()
 	if err != nil {
 		return fmt.Errorf("create storage: %w", err)
@@ -91,14 +94,13 @@ func (i *Initializer) ensureBucketExists() error {
 	// If the bucket doesn't exist, this will fail
 	_, err = store.Head("")
 	if err == nil {
-		i.logger.Info("S3 bucket already exists", zap.String("bucket", i.config.S3Bucket))
+		i.logger.Info("Object storage bucket already exists", zap.String("bucket", i.config.S3Bucket))
 		return nil
 	}
 
-	// Try to create the bucket
-	// Note: Not all S3-compatible storage requires explicit bucket creation
-	// MinIO/RustFS may auto-create buckets on first write
-	i.logger.Info("S3 bucket may not exist, attempting to create marker file",
+	// Try to create the bucket. Some backends need explicit Create(), while
+	// S3-compatible implementations may auto-create on first write.
+	i.logger.Info("Object storage bucket may not exist, attempting to create marker file",
 		zap.String("bucket", i.config.S3Bucket))
 
 	// Create a marker file to trigger bucket creation in auto-create scenarios
@@ -108,9 +110,9 @@ func (i *Initializer) ensureBucketExists() error {
 		i.logger.Warn("Failed to create marker file, bucket may need manual creation",
 			zap.String("bucket", i.config.S3Bucket),
 			zap.Error(err))
-		// Don't fail here - some S3 implementations will create bucket on first PUT
+		// Don't fail here. Some implementations will create the bucket on first PUT.
 	} else {
-		i.logger.Info("S3 bucket initialized successfully", zap.String("bucket", i.config.S3Bucket))
+		i.logger.Info("Object storage bucket initialized successfully", zap.String("bucket", i.config.S3Bucket))
 	}
 
 	return nil
@@ -167,7 +169,7 @@ func (i *Initializer) format() error {
 	format := &meta.Format{
 		Name:         i.config.Name,
 		UUID:         "", // Will be auto-generated
-		Storage:      "s3",
+		Storage:      NormalizeObjectStorageType(i.config.ObjectStorageType),
 		Bucket:       i.buildBucketURL(),
 		AccessKey:    i.config.S3AccessKey,
 		SecretKey:    i.config.S3SecretKey,
@@ -231,24 +233,17 @@ func (i *Initializer) format() error {
 	return nil
 }
 
-// createStorage creates an S3 object storage client
+// createStorage creates an object storage client.
 func (i *Initializer) createStorage() (object.ObjectStorage, error) {
-	endpoint := i.config.S3Endpoint
-	if endpoint == "" {
-		endpoint = fmt.Sprintf("https://s3.%s.amazonaws.com", i.config.S3Region)
-	}
-	endpoint = strings.TrimRight(endpoint, "/")
-
-	// Build S3 endpoint for JuiceFS
-	bucketURL := fmt.Sprintf("%s/%s", endpoint, i.config.S3Bucket)
-
-	store, err := object.CreateStorage(
-		"s3",
-		bucketURL,
-		i.config.S3AccessKey,
-		i.config.S3SecretKey,
-		i.config.S3SessionToken,
-	)
+	store, err := CreateObjectStorage(ObjectStorageConfig{
+		Type:         i.config.ObjectStorageType,
+		Bucket:       i.config.S3Bucket,
+		Region:       i.config.S3Region,
+		Endpoint:     i.config.S3Endpoint,
+		AccessKey:    i.config.S3AccessKey,
+		SecretKey:    i.config.S3SecretKey,
+		SessionToken: i.config.S3SessionToken,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("create storage client: %w", err)
 	}
@@ -256,12 +251,16 @@ func (i *Initializer) createStorage() (object.ObjectStorage, error) {
 	return store, nil
 }
 
-// buildBucketURL builds the bucket URL for JuiceFS format
+// buildBucketURL builds the bucket URL for JuiceFS format.
 func (i *Initializer) buildBucketURL() string {
-	endpoint := i.config.S3Endpoint
-	if endpoint == "" {
-		endpoint = fmt.Sprintf("https://s3.%s.amazonaws.com", i.config.S3Region)
+	_, endpoint, err := BuildObjectStorageEndpoint(ObjectStorageConfig{
+		Type:     i.config.ObjectStorageType,
+		Bucket:   i.config.S3Bucket,
+		Region:   i.config.S3Region,
+		Endpoint: i.config.S3Endpoint,
+	})
+	if err != nil {
+		return ""
 	}
-	endpoint = strings.TrimRight(endpoint, "/")
-	return fmt.Sprintf("%s/%s", endpoint, i.config.S3Bucket)
+	return endpoint
 }

@@ -80,7 +80,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			return err
 		}
 		return r.ensureStorageBucket(ctx, infra)
-	case infrav1alpha1.StorageTypeS3, infrav1alpha1.StorageTypeOSS:
+	case infrav1alpha1.StorageTypeS3, infrav1alpha1.StorageTypeOSS, infrav1alpha1.StorageTypeGCS:
 		logger.Info("Using external storage")
 		if err := r.cleanupBuiltinStorageResources(ctx, infra); err != nil {
 			return err
@@ -122,6 +122,11 @@ func ValidateExternalStorage(ctx context.Context, client client.Client, infra *i
 			Namespace: infra.Namespace,
 		}, secret); err != nil {
 			return fmt.Errorf("OSS credentials secret not found: %w", err)
+		}
+
+	case infrav1alpha1.StorageTypeGCS:
+		if infra.Spec.Storage.GCS == nil {
+			return fmt.Errorf("GCS configuration is required")
 		}
 	}
 
@@ -601,6 +606,14 @@ func bucketCreateHint(config *StorageConfig, err error) string {
 	if config.Type == infrav1alpha1.StorageTypeBuiltin {
 		return fmt.Sprintf("failed to auto-create builtin bucket %q", config.Bucket)
 	}
+	if config.Type == infrav1alpha1.StorageTypeGCS {
+		if isAccessDeniedError(err) {
+			return fmt.Sprintf("bucket %q not accessible; pre-create it or grant storage.buckets.create/storage.objects.list", config.Bucket)
+		}
+		if isNoSuchBucketError(err) {
+			return fmt.Sprintf("bucket %q does not exist; pre-create it or grant storage.buckets.create", config.Bucket)
+		}
+	}
 	if isAccessDeniedError(err) {
 		return fmt.Sprintf(
 			"bucket %q not accessible; pre-create it or grant CreateBucket/ListBucket permissions",
@@ -638,18 +651,31 @@ func isNoSuchBucketError(err error) bool {
 }
 
 func (r *Reconciler) createObjectStorage(config *StorageConfig) (object.ObjectStorage, error) {
-	endpoint := strings.TrimRight(strings.TrimSpace(config.Endpoint), "/")
-	if endpoint == "" && config.Type == infrav1alpha1.StorageTypeS3 {
-		endpoint = fmt.Sprintf("https://s3.%s.amazonaws.com", config.Region)
-	}
-	if endpoint == "" {
-		return nil, fmt.Errorf("storage endpoint is required to verify bucket")
-	}
-
-	bucketURL := fmt.Sprintf("%s/%s", endpoint, config.Bucket)
 	storageType := "s3"
-	if config.Type == infrav1alpha1.StorageTypeOSS {
+	bucketURL := ""
+
+	switch config.Type {
+	case infrav1alpha1.StorageTypeS3, infrav1alpha1.StorageTypeBuiltin:
+		endpoint := strings.TrimRight(strings.TrimSpace(config.Endpoint), "/")
+		if endpoint == "" {
+			endpoint = fmt.Sprintf("https://s3.%s.amazonaws.com", config.Region)
+		}
+		if endpoint == "https://s3..amazonaws.com" {
+			return nil, fmt.Errorf("storage region or endpoint is required to verify bucket")
+		}
+		bucketURL = fmt.Sprintf("%s/%s", endpoint, config.Bucket)
+	case infrav1alpha1.StorageTypeOSS:
 		storageType = "oss"
+		endpoint := strings.TrimRight(strings.TrimSpace(config.Endpoint), "/")
+		if endpoint == "" {
+			return nil, fmt.Errorf("storage endpoint is required to verify bucket")
+		}
+		bucketURL = fmt.Sprintf("%s/%s", endpoint, config.Bucket)
+	case infrav1alpha1.StorageTypeGCS:
+		storageType = "gs"
+		bucketURL = fmt.Sprintf("gs://%s", strings.TrimSpace(config.Bucket))
+	default:
+		return nil, fmt.Errorf("unsupported storage type: %s", config.Type)
 	}
 
 	store, err := object.CreateStorage(
@@ -874,6 +900,12 @@ func GetStorageConfig(ctx context.Context, client client.Client, infra *infrav1a
 		}
 		config.AccessKey = string(secret.Data[accessKeyKey])
 		config.SecretKey = string(secret.Data[secretKeyKey])
+
+	case infrav1alpha1.StorageTypeGCS:
+		if infra.Spec.Storage.GCS == nil {
+			return nil, fmt.Errorf("GCS configuration is required")
+		}
+		config.Bucket = infra.Spec.Storage.GCS.Bucket
 
 	default:
 		return nil, fmt.Errorf("unsupported storage type: %s", infra.Spec.Storage.Type)

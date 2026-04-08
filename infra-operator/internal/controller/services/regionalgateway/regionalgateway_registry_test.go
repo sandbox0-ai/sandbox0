@@ -125,6 +125,39 @@ func TestApplyRegistryConfigAWS(t *testing.T) {
 	}
 }
 
+func TestApplyRegistryConfigGCPWithoutServiceAccountSecret(t *testing.T) {
+	r := &Reconciler{}
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "s0cp",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Registry: &infrav1alpha1.RegistryConfig{
+				Provider: infrav1alpha1.RegistryProviderGCP,
+				GCP: &infrav1alpha1.GCPRegistryConfig{
+					Registry: "us-east4-docker.pkg.dev",
+				},
+			},
+		},
+	}
+	cfg := &apiconfig.RegionalGatewayConfig{}
+
+	envVars, err := r.applyRegistryConfig(infra, cfg)
+	if err != nil {
+		t.Fatalf("applyRegistryConfig returned error: %v", err)
+	}
+	if len(envVars) != 0 {
+		t.Fatalf("expected no env vars, got %d", len(envVars))
+	}
+	if cfg.Registry.GCP == nil {
+		t.Fatal("expected gcp registry config")
+	}
+	if cfg.Registry.GCP.ServiceAccountJSON != "" {
+		t.Fatalf("expected empty service account json placeholder, got %q", cfg.Registry.GCP.ServiceAccountJSON)
+	}
+}
+
 func TestApplyRegistryConfigSkipsWhenRegistryIsNotDeclared(t *testing.T) {
 	r := &Reconciler{}
 	infra := &infrav1alpha1.Sandbox0Infra{

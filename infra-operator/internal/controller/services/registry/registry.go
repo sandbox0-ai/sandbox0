@@ -216,6 +216,9 @@ func (r *Reconciler) validateExternalRegistry(ctx context.Context, infra *infrav
 		return fmt.Errorf("registry pull endpoint is required")
 	}
 	if resolved.SourceSecretName == "" {
+		if infra.Spec.Registry.Provider == infrav1alpha1.RegistryProviderGCP {
+			return nil
+		}
 		return fmt.Errorf("registry pull secret name is required")
 	}
 	secret := &corev1.Secret{}
@@ -719,7 +722,7 @@ func builtinPullRegistry(infra *infrav1alpha1.Sandbox0Infra, port int32) string 
 
 type registryProviderConfig struct {
 	Registry   string
-	PullSecret infrav1alpha1.DockerConfigSecretRef
+	PullSecret *infrav1alpha1.DockerConfigSecretRef
 	Region     string
 	RegistryID string
 }
@@ -734,7 +737,7 @@ func resolveExternalRegistry(provider infrav1alpha1.RegistryProvider, cfg interf
 		resolved.Registry = typed.Registry
 		resolved.Region = typed.Region
 		resolved.RegistryID = typed.RegistryID
-		resolved.PullSecret = typed.PullSecret
+		resolved.PullSecret = &typed.PullSecret
 	case *infrav1alpha1.GCPRegistryConfig:
 		if typed == nil {
 			return nil
@@ -746,26 +749,31 @@ func resolveExternalRegistry(provider infrav1alpha1.RegistryProvider, cfg interf
 			return nil
 		}
 		resolved.Registry = typed.Registry
-		resolved.PullSecret = typed.PullSecret
+		resolved.PullSecret = &typed.PullSecret
 	case *infrav1alpha1.AliyunRegistryConfig:
 		if typed == nil {
 			return nil
 		}
 		resolved.Registry = typed.Registry
-		resolved.PullSecret = typed.PullSecret
+		resolved.PullSecret = &typed.PullSecret
 	case *infrav1alpha1.HarborRegistryConfig:
 		if typed == nil {
 			return nil
 		}
 		resolved.Registry = typed.Registry
-		resolved.PullSecret = typed.PullSecret
+		resolved.PullSecret = &typed.PullSecret
 	default:
 		return nil
 	}
 
-	secretKey := resolved.PullSecret.Key
-	if secretKey == "" {
-		secretKey = corev1.DockerConfigJsonKey
+	secretName := ""
+	secretKey := ""
+	if resolved.PullSecret != nil {
+		secretName = resolved.PullSecret.Name
+		secretKey = resolved.PullSecret.Key
+		if secretKey == "" {
+			secretKey = corev1.DockerConfigJsonKey
+		}
 	}
 	if resolved.Registry == "" && resolved.Region != "" && resolved.RegistryID != "" {
 		resolved.Registry = fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com", resolved.RegistryID, resolved.Region)
@@ -774,7 +782,7 @@ func resolveExternalRegistry(provider infrav1alpha1.RegistryProvider, cfg interf
 		Provider:         provider,
 		PushRegistry:     resolved.Registry,
 		PullRegistry:     resolved.Registry,
-		SourceSecretName: resolved.PullSecret.Name,
+		SourceSecretName: secretName,
 		SourceSecretKey:  secretKey,
 		TargetSecretName: targetSecretName,
 	}

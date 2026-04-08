@@ -158,7 +158,7 @@ func main() {
 		syncSvc.SetMetrics(storageProxyMetrics)
 		syncSvc.SetConflictArtifactWriter(volsync.NewConflictArtifactWriter(volMgr, logrusLogger))
 		syncSvc.SetReplicaChangeApplier(volsync.NewVolumeChangeApplier(volMgr, logrusLogger))
-		replayPayloadStore, err := volsync.NewS3ReplayPayloadStore(cfg)
+		replayPayloadStore, err := volsync.NewReplayPayloadStore(cfg)
 		if err != nil {
 			zapLogger.Fatal("Failed to initialize replay payload store", zap.Error(err))
 		}
@@ -606,6 +606,7 @@ func initializeJuiceFS(cfg *config.StorageProxyConfig, logger *zap.Logger) error
 	initConfig := &juicefs.InitConfig{
 		Name:                 cfg.JuiceFSName,
 		MetaURL:              cfg.MetaURL,
+		ObjectStorageType:    cfg.ObjectStorageType,
 		S3Bucket:             cfg.S3Bucket,
 		S3Region:             cfg.S3Region,
 		S3Endpoint:           cfg.S3Endpoint,

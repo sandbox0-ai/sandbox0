@@ -170,10 +170,10 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID st
 		return "", time.Time{}, fmt.Errorf("failed to load juicefs format: %w", err)
 	}
 
-	// 2. Initialize S3 object storage
-	blob, err := m.createS3Storage(config, s3Prefix, format)
+	// 2. Initialize object storage
+	blob, err := m.createObjectStorage(config, s3Prefix, format)
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("failed to create S3 storage: %w", err)
+		return "", time.Time{}, fmt.Errorf("failed to create object storage: %w", err)
 	}
 
 	// 3. Initialize chunk store with local cache
@@ -850,26 +850,19 @@ func (m *Manager) UnmountSandboxVolumes(ctx context.Context, sandboxID string) [
 	return errs
 }
 
-// createS3Storage creates S3 object storage for JuiceFS
-func (m *Manager) createS3Storage(config *VolumeConfig, prefix string, format *meta.Format) (object.ObjectStorage, error) {
-	// Determine endpoint
-	endpoint := m.config.S3Endpoint
-	if endpoint == "" {
-		endpoint = fmt.Sprintf("https://s3.%s.amazonaws.com", m.config.S3Region)
-	}
-	endpoint = strings.TrimRight(endpoint, "/")
-
-	// Build S3 endpoint for JuiceFS object store.
-	// JuiceFS expects either:
-	// - [ENDPOINT]/[BUCKET] (recommended for S3-compatible backends), or
-	// - [BUCKET].[ENDPOINT]
-	bucket := m.config.S3Bucket
-	s3Endpoint := fmt.Sprintf("%s/%s", endpoint, bucket)
-
-	// Create object storage using JuiceFS object package
-	obj, err := object.CreateStorage("s3", s3Endpoint, m.config.S3AccessKey, m.config.S3SecretKey, m.config.S3SessionToken)
+// createObjectStorage creates the configured object storage for JuiceFS.
+func (m *Manager) createObjectStorage(_ *VolumeConfig, prefix string, _ *meta.Format) (object.ObjectStorage, error) {
+	obj, err := juicefs.CreateObjectStorage(juicefs.ObjectStorageConfig{
+		Type:         m.config.ObjectStorageType,
+		Bucket:       m.config.S3Bucket,
+		Region:       m.config.S3Region,
+		Endpoint:     m.config.S3Endpoint,
+		AccessKey:    m.config.S3AccessKey,
+		SecretKey:    m.config.S3SecretKey,
+		SessionToken: m.config.S3SessionToken,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create S3 storage: %w", err)
+		return nil, fmt.Errorf("failed to create object storage: %w", err)
 	}
 
 	// Apply an object key prefix for namespace isolation (e.g. per-team).

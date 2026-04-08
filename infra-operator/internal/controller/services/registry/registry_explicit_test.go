@@ -52,3 +52,27 @@ func TestResolveBuiltinRegistryConfigDefaultsToEnabledWhenProviderIsOmitted(t *t
 		t.Fatal("expected builtin registry to default to enabled when provider is omitted")
 	}
 }
+
+func TestResolveRegistryConfigAllowsGCPWithoutPullSecret(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Registry: &infrav1alpha1.RegistryConfig{
+				Provider: infrav1alpha1.RegistryProviderGCP,
+				GCP: &infrav1alpha1.GCPRegistryConfig{
+					Registry: "us-east4-docker.pkg.dev",
+				},
+			},
+		},
+	}
+
+	cfg := ResolveRegistryConfig(infra)
+	if cfg == nil {
+		t.Fatal("expected resolved registry config")
+	}
+	if cfg.PushRegistry != "us-east4-docker.pkg.dev" {
+		t.Fatalf("unexpected push registry: %q", cfg.PushRegistry)
+	}
+	if cfg.SourceSecretName != "" || cfg.SourceSecretKey != "" {
+		t.Fatalf("expected no source pull secret, got %#v", cfg)
+	}
+}

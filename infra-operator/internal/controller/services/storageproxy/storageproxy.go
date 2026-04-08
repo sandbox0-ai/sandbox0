@@ -333,6 +333,7 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		return nil, err
 	}
 
+	cfg.ObjectStorageType = string(storageConfig.Type)
 	cfg.S3Bucket = storageConfig.Bucket
 	cfg.S3Region = storageConfig.Region
 	cfg.S3Endpoint = storageConfig.Endpoint

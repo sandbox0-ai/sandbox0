@@ -206,7 +206,7 @@ Keep a regular node pool for core system services. In the current GKE `gVisor` s
 Add one `gVisor` node per zone:
 
 ```bash
-gcloud container node-pools create gvisor-pool \
+gcloud container node-pools create gvisor-lite \
     --cluster sandbox0-gke-gvisor \
     --region us-east1 \
     --machine-type e2-standard-2 \
@@ -224,7 +224,7 @@ kubectl get nodes -L cloud.google.com/gke-nodepool,sandbox.gke.io/runtime
 Expected result:
 
 1. `default-pool` nodes have no `sandbox.gke.io/runtime` label
-2. `gvisor-pool` nodes show `sandbox.gke.io/runtime=gvisor`
+2. `gvisor-lite` nodes show `sandbox.gke.io/runtime=gvisor`
 
 ### 4) Install `infra-operator`
 
@@ -266,8 +266,8 @@ Expected result:
 
 1. `Sandbox0Infra` becomes `Ready`
 2. `fullmode-cluster-gateway` is exposed as `LoadBalancer` on port `80`
-3. `fullmode-netd` and `fullmode-ctld` run on `gvisor-pool`
-4. sandbox pods in `tpl-default` run on `gvisor-pool`
+3. `fullmode-netd` and `fullmode-ctld` run on `gvisor-lite`
+4. sandbox pods in `tpl-default` run on `gvisor-lite`
 
 This sample uses the native GKE node label `sandbox.gke.io/runtime=gvisor` for sandbox placement. You do not need to add a separate custom node label just to target `gVisor` nodes.
 

@@ -384,11 +384,14 @@ func (r *Reconciler) applyRegistryConfig(infra *infrav1alpha1.Sandbox0Infra, cfg
 		if infra.Spec.Registry == nil || infra.Spec.Registry.GCP == nil {
 			return nil, fmt.Errorf("registry.gcp configuration is required")
 		}
-		sa := infra.Spec.Registry.GCP.ServiceAccountSecret
 		cfg.Registry.GCP = &apiconfig.RegistryGCPConfig{
-			Registry:           infra.Spec.Registry.GCP.Registry,
-			ServiceAccountJSON: "${S0_REGISTRY_GCP_SERVICE_ACCOUNT_JSON}",
+			Registry: infra.Spec.Registry.GCP.Registry,
 		}
+		if infra.Spec.Registry.GCP.ServiceAccountSecret == nil {
+			return nil, nil
+		}
+		sa := infra.Spec.Registry.GCP.ServiceAccountSecret
+		cfg.Registry.GCP.ServiceAccountJSON = "${S0_REGISTRY_GCP_SERVICE_ACCOUNT_JSON}"
 		return []corev1.EnvVar{
 			secretEnvVar("S0_REGISTRY_GCP_SERVICE_ACCOUNT_JSON", sa.Name, defaultString(sa.Key, "serviceAccount.json")),
 		}, nil

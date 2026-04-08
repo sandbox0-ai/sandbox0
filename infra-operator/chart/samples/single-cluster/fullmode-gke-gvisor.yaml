@@ -73,6 +73,8 @@ spec:
     manager:
       enabled: true
       replicas: 1
+      config:
+        sandboxRuntimeClassName: gvisor
     storageProxy:
       enabled: true
       replicas: 1

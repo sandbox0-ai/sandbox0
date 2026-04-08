@@ -424,7 +424,7 @@ type ManagerConfig struct {
 	// +kubebuilder:default="4Gi"
 	TeamTemplateMemoryPerCPU string `json:"teamTemplateMemoryPerCpu,omitempty"`
 	// +optional
-	SharedVolumeRuntimeClassName string `json:"sharedVolumeRuntimeClassName,omitempty"`
+	SandboxRuntimeClassName string `json:"sandboxRuntimeClassName,omitempty"`
 	// +optional
 	// +kubebuilder:default="30s"
 	NetdPolicyApplyTimeout metav1.Duration `json:"netdPolicyApplyTimeout,omitempty"`

@@ -1588,7 +1588,7 @@ spec:
                           resyncPeriod:
                             default: 30s
                             type: string
-                          sharedVolumeRuntimeClassName:
+                          sandboxRuntimeClassName:
                             type: string
                           shutdownTimeout:
                             default: 30s

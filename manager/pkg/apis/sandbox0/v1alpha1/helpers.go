@@ -38,10 +38,8 @@ func BuildPodSpec(template *SandboxTemplate, restart bool) corev1.PodSpec {
 	applyFuseResource(&spec)
 	applyDefaultSandboxPlacement(&spec)
 
-	if template.Spec.UsesSharedVolumes() {
-		if runtimeClassName := configuredSharedVolumeRuntimeClassName(); runtimeClassName != nil {
-			spec.RuntimeClassName = runtimeClassName
-		}
+	if runtimeClassName := configuredSandboxRuntimeClassName(); runtimeClassName != nil {
+		spec.RuntimeClassName = runtimeClassName
 	}
 
 	// Apply pod-level overrides
@@ -72,12 +70,12 @@ func applyDefaultSandboxPlacement(spec *corev1.PodSpec) {
 	spec.Tolerations = mergeTolerations(spec.Tolerations, cfg.SandboxPodPlacement.Tolerations)
 }
 
-func configuredSharedVolumeRuntimeClassName() *string {
+func configuredSandboxRuntimeClassName() *string {
 	cfg := config.LoadManagerConfig()
 	if cfg == nil {
 		return nil
 	}
-	runtimeClassName := strings.TrimSpace(cfg.SharedVolumeRuntimeClassName)
+	runtimeClassName := strings.TrimSpace(cfg.SandboxRuntimeClassName)
 	if runtimeClassName == "" {
 		return nil
 	}

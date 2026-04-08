@@ -173,7 +173,7 @@ func TestBuildConfigPropagatesNetdMITMCASecretName(t *testing.T) {
 	})
 }
 
-func TestBuildConfigPreservesSharedVolumeRuntimeClassName(t *testing.T) {
+func TestBuildConfigPreservesSandboxRuntimeClassName(t *testing.T) {
 	reconciler := newManagerTestReconciler(t)
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{
@@ -194,7 +194,7 @@ func TestBuildConfigPreservesSharedVolumeRuntimeClassName(t *testing.T) {
 			Services: &infrav1alpha1.ServicesConfig{
 				Manager: &infrav1alpha1.ManagerServiceConfig{
 					Config: &infrav1alpha1.ManagerConfig{
-						SharedVolumeRuntimeClassName: "kata-shared",
+						SandboxRuntimeClassName: "kata-shared",
 					},
 				},
 			},
@@ -205,8 +205,8 @@ func TestBuildConfigPreservesSharedVolumeRuntimeClassName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildConfig returned error: %v", err)
 	}
-	if cfg.SharedVolumeRuntimeClassName != "kata-shared" {
-		t.Fatalf("shared volume runtime class = %q, want kata-shared", cfg.SharedVolumeRuntimeClassName)
+	if cfg.SandboxRuntimeClassName != "kata-shared" {
+		t.Fatalf("sandbox runtime class = %q, want kata-shared", cfg.SandboxRuntimeClassName)
 	}
 }
 

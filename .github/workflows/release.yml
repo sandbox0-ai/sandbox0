@@ -54,7 +54,6 @@ jobs:
     needs:
       - prepare-release
       - package
-      - trigger-cloud-website-release
     uses: ./.github/workflows/publish-infra-images.yml
     with:
       version: ${{ needs.prepare-release.outputs.version }}
@@ -68,7 +67,6 @@ jobs:
       - prepare-release
       - package
       - publish-images
-      - trigger-cloud-website-release
     steps:
       - name: Setup Helm
         uses: azure/setup-helm@v4
@@ -218,6 +216,7 @@ jobs:
     needs:
       - prepare-release
       - package
+      - create-draft-release
       - publish-images
       - publish-helm
     steps:

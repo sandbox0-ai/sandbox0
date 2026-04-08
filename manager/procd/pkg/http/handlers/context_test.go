@@ -40,10 +40,10 @@ func (f *fakeProcess) Type() process.ProcessType {
 	}
 	return f.processType
 }
-func (f *fakeProcess) PID() int         { return 1 }
-func (f *fakeProcess) Start() error     { return nil }
-func (f *fakeProcess) Stop() error      { return nil }
-func (f *fakeProcess) Restart() error   { return nil }
+func (f *fakeProcess) PID() int        { return 1 }
+func (f *fakeProcess) Start() error    { return nil }
+func (f *fakeProcess) Stop() error     { return nil }
+func (f *fakeProcess) Restart() error  { return nil }
 func (f *fakeProcess) IsRunning() bool { return true }
 func (f *fakeProcess) IsFinished() bool {
 	f.mu.RLock()

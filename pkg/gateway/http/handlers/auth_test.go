@@ -23,6 +23,7 @@ type mockAuthRepository struct {
 	refreshTokens      map[string]*identity.RefreshToken
 	deviceAuthSessions map[string]*identity.DeviceAuthSession
 	teamMembers        map[string]*identity.TeamMember
+	teamGrantCalls     int
 	createCalls        int
 }
 
@@ -77,33 +78,23 @@ func (m *mockAuthRepository) GetUserByID(_ context.Context, id string) (*identit
 	return user, nil
 }
 
-func (m *mockAuthRepository) GetTeamMember(_ context.Context, teamID, userID string) (*identity.TeamMember, error) {
-	member, ok := m.teamMembers[teamID+":"+userID]
-	if !ok {
-		return nil, errors.New("team member not found")
-	}
-	return member, nil
-}
-
-func (m *mockAuthRepository) GetTeamsByUserID(_ context.Context, userID string) ([]*identity.Team, error) {
-	teams := make([]*identity.Team, 0)
-	seen := make(map[string]struct{})
-	for key, member := range m.teamMembers {
+func (m *mockAuthRepository) ListTeamGrantsByUserID(_ context.Context, userID string) ([]identity.TeamGrantRecord, error) {
+	m.teamGrantCalls++
+	grants := make([]identity.TeamGrantRecord, 0)
+	for _, member := range m.teamMembers {
 		if member.UserID != userID {
 			continue
 		}
-		if _, ok := seen[member.TeamID]; ok {
-			continue
+		grant := identity.TeamGrantRecord{
+			TeamID:   member.TeamID,
+			TeamRole: member.Role,
 		}
-		seen[member.TeamID] = struct{}{}
 		if team, ok := m.teams[member.TeamID]; ok {
-			teams = append(teams, team)
-			continue
+			grant.HomeRegionID = team.HomeRegionID
 		}
-		teams = append(teams, &identity.Team{ID: member.TeamID})
-		_ = key
+		grants = append(grants, grant)
 	}
-	return teams, nil
+	return grants, nil
 }
 
 func (m *mockAuthRepository) CreateDeviceAuthSession(_ context.Context, session *identity.DeviceAuthSession) error {
@@ -199,6 +190,34 @@ func TestAuthHandler_RefreshToken_SucceedsWithPersistedToken(t *testing.T) {
 	}
 	if repo.createCalls != 2 {
 		t.Fatalf("expected 2 create calls (seed + refresh), got %d", repo.createCalls)
+	}
+}
+
+func TestAuthHandler_BuildTeamGrantsUsesSingleRepositoryCall(t *testing.T) {
+	repo := newMockAuthRepository()
+	homeRegionA := "aws-us-east-1"
+	homeRegionB := "aws-eu-west-1"
+	repo.teams["team-b"] = &identity.Team{ID: "team-b", HomeRegionID: &homeRegionB}
+	repo.teams["team-a"] = &identity.Team{ID: "team-a", HomeRegionID: &homeRegionA}
+	repo.teamMembers["team-b:user-1"] = &identity.TeamMember{TeamID: "team-b", UserID: "user-1", Role: "viewer"}
+	repo.teamMembers["team-a:user-1"] = &identity.TeamMember{TeamID: "team-a", UserID: "user-1", Role: "admin"}
+
+	handler := &AuthHandler{repo: repo, logger: zap.NewNop()}
+	grants, err := handler.buildTeamGrants(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("build team grants: %v", err)
+	}
+	if repo.teamGrantCalls != 1 {
+		t.Fatalf("expected exactly one team grant query, got %d", repo.teamGrantCalls)
+	}
+	if len(grants) != 2 {
+		t.Fatalf("expected 2 grants, got %d", len(grants))
+	}
+	if grants[0].TeamID != "team-a" || grants[0].TeamRole != "admin" || grants[0].HomeRegionID != homeRegionA {
+		t.Fatalf("unexpected first grant: %+v", grants[0])
+	}
+	if grants[1].TeamID != "team-b" || grants[1].TeamRole != "viewer" || grants[1].HomeRegionID != homeRegionB {
+		t.Fatalf("unexpected second grant: %+v", grants[1])
 	}
 }
 

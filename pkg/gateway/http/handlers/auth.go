@@ -48,8 +48,7 @@ type authRepository interface {
 	ValidateRefreshToken(ctx context.Context, tokenHash string) (*identity.RefreshToken, error)
 	RevokeAllUserRefreshTokens(ctx context.Context, userID string) error
 	GetUserByID(ctx context.Context, id string) (*identity.User, error)
-	GetTeamsByUserID(ctx context.Context, userID string) ([]*identity.Team, error)
-	GetTeamMember(ctx context.Context, teamID, userID string) (*identity.TeamMember, error)
+	ListTeamGrantsByUserID(ctx context.Context, userID string) ([]identity.TeamGrantRecord, error)
 	CreateDeviceAuthSession(ctx context.Context, session *identity.DeviceAuthSession) error
 	GetDeviceAuthSessionByID(ctx context.Context, id string) (*identity.DeviceAuthSession, error)
 	MarkDeviceAuthSessionConsumed(ctx context.Context, id string) error
@@ -351,34 +350,19 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 	spec.JSONSuccess(c, http.StatusOK, gin.H{"message": "logged out"})
 }
 
-func (h *AuthHandler) resolveTeamRole(ctx context.Context, teamID, userID string) (string, error) {
-	if teamID == "" {
-		return "", nil
-	}
-	member, err := h.repo.GetTeamMember(ctx, teamID, userID)
-	if err != nil {
-		return "", err
-	}
-	return member.Role, nil
-}
-
 func (h *AuthHandler) buildTeamGrants(ctx context.Context, userID string) ([]authn.TeamGrant, error) {
-	teams, err := h.repo.GetTeamsByUserID(ctx, userID)
+	records, err := h.repo.ListTeamGrantsByUserID(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
-	grants := make([]authn.TeamGrant, 0, len(teams))
-	for _, team := range teams {
-		role, err := h.resolveTeamRole(ctx, team.ID, userID)
-		if err != nil {
-			return nil, err
-		}
+	grants := make([]authn.TeamGrant, 0, len(records))
+	for _, record := range records {
 		grant := authn.TeamGrant{
-			TeamID:   team.ID,
-			TeamRole: role,
+			TeamID:   record.TeamID,
+			TeamRole: record.TeamRole,
 		}
-		if team.HomeRegionID != nil {
-			grant.HomeRegionID = strings.TrimSpace(*team.HomeRegionID)
+		if record.HomeRegionID != nil {
+			grant.HomeRegionID = strings.TrimSpace(*record.HomeRegionID)
 		}
 		grants = append(grants, grant)
 	}

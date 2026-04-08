@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	cachepkg "github.com/sandbox0-ai/sandbox0/pkg/cache"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
 	gatewaybuiltin "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/builtin"
 	gatewayoidc "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/oidc"
@@ -48,11 +49,15 @@ type Server struct {
 	proxyTimeout    time.Duration
 	regionProxies   map[string]*proxy.Router
 	regionProxiesMu sync.RWMutex
+	regionRoutes    *cachepkg.Cache[string, tenantdir.Region]
 }
 
 type regionDirectory interface {
 	GetRegion(ctx context.Context, regionID string) (*tenantdir.Region, error)
 }
+
+const regionRouteCacheTTL = 8 * time.Hour
+const regionRouteCacheMaxEntries = 256
 
 // NewServer creates a new global-gateway server.
 func NewServer(
@@ -129,6 +134,10 @@ func NewServer(
 		logger:          logger,
 		proxyTimeout:    effectiveProxyTimeout(cfg.ServerWriteTimeout.Duration),
 		regionProxies:   make(map[string]*proxy.Router),
+		regionRoutes: cachepkg.New[string, tenantdir.Region](cachepkg.Config{
+			MaxSize: regionRouteCacheMaxEntries,
+			TTL:     regionRouteCacheTTL,
+		}),
 	}
 	server.setupRoutes()
 	return server, nil
@@ -172,10 +181,10 @@ func (s *Server) setupRoutes() {
 		regionsAdmin := regions.Group("")
 		regionsAdmin.Use(s.authMiddleware.RequireSystemAdmin())
 		{
-			regionsAdmin.POST("", regionHandler.CreateRegion)
+			regionsAdmin.POST("", s.invalidateRegionRouteCacheOnWrite(regionHandler.CreateRegion))
 			regionsAdmin.GET("/:id", regionHandler.GetRegion)
-			regionsAdmin.PUT("/:id", regionHandler.UpdateRegion)
-			regionsAdmin.DELETE("/:id", regionHandler.DeleteRegion)
+			regionsAdmin.PUT("/:id", s.invalidateRegionRouteCacheOnWrite(regionHandler.UpdateRegion))
+			regionsAdmin.DELETE("/:id", s.invalidateRegionRouteCacheOnWrite(regionHandler.DeleteRegion))
 		}
 	}
 
@@ -220,7 +229,7 @@ func (s *Server) handleAPIKeyRegionProxy(c *gin.Context) bool {
 		return true
 	}
 
-	region, err := s.regionLookup.GetRegion(c.Request.Context(), regionID)
+	region, err := s.resolveRoutableRegion(c.Request.Context(), regionID)
 	if err != nil {
 		if err == tenantdir.ErrRegionNotFound {
 			c.AbortWithStatusJSON(stdhttp.StatusNotFound, gin.H{"error": "region not found"})
@@ -244,6 +253,55 @@ func (s *Server) handleAPIKeyRegionProxy(c *gin.Context) bool {
 
 	router.ProxyToTarget(c)
 	return true
+}
+
+func (s *Server) resolveRoutableRegion(ctx context.Context, regionID string) (*tenantdir.Region, error) {
+	if cached, ok := s.getCachedRoutableRegion(regionID); ok {
+		return cached, nil
+	}
+
+	region, err := s.regionLookup.GetRegion(ctx, regionID)
+	if err != nil {
+		return nil, err
+	}
+	if region.Enabled && strings.TrimSpace(region.RegionalGatewayURL) != "" {
+		s.putCachedRoutableRegion(regionID, region)
+	}
+	return region, nil
+}
+
+func (s *Server) getCachedRoutableRegion(regionID string) (*tenantdir.Region, bool) {
+	if s.regionRoutes == nil {
+		return nil, false
+	}
+	region, ok := s.regionRoutes.Get(regionID)
+	if !ok {
+		return nil, false
+	}
+	return &region, true
+}
+
+func (s *Server) putCachedRoutableRegion(regionID string, region *tenantdir.Region) {
+	if region == nil || s.regionRoutes == nil {
+		return
+	}
+	s.regionRoutes.Set(regionID, *region)
+}
+
+func (s *Server) invalidateRegionRouteCache() {
+	if s.regionRoutes != nil {
+		s.regionRoutes.Clear()
+	}
+}
+
+func (s *Server) invalidateRegionRouteCacheOnWrite(next gin.HandlerFunc) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		next(c)
+		status := c.Writer.Status()
+		if status >= stdhttp.StatusOK && status < stdhttp.StatusBadRequest {
+			s.invalidateRegionRouteCache()
+		}
+	}
 }
 
 func extractBearerToken(authHeader string) (string, bool) {

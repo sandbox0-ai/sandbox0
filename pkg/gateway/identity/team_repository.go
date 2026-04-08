@@ -129,6 +129,31 @@ func (r *Repository) GetTeamsByUserID(ctx context.Context, userID string) ([]*Te
 	return teams, nil
 }
 
+// ListTeamGrantsByUserID retrieves all team grants for a user in one query.
+func (r *Repository) ListTeamGrantsByUserID(ctx context.Context, userID string) ([]TeamGrantRecord, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT t.id, tm.role, t.home_region_id
+		FROM team_members tm
+		INNER JOIN teams t ON t.id = tm.team_id
+		WHERE tm.user_id = $1
+		ORDER BY t.id
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("query team grants: %w", err)
+	}
+	defer rows.Close()
+
+	grants := make([]TeamGrantRecord, 0)
+	for rows.Next() {
+		var grant TeamGrantRecord
+		if err := rows.Scan(&grant.TeamID, &grant.TeamRole, &grant.HomeRegionID); err != nil {
+			return nil, fmt.Errorf("scan team grant: %w", err)
+		}
+		grants = append(grants, grant)
+	}
+	return grants, nil
+}
+
 // AddTeamMember adds a user to a team.
 func (r *Repository) AddTeamMember(ctx context.Context, member *TeamMember) error {
 	err := r.pool.QueryRow(ctx, `

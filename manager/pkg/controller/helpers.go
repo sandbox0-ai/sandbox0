@@ -208,11 +208,12 @@ func sandboxPowerStateFromAnnotations(annotations map[string]string) (desired, o
 	}
 	phase = strings.TrimSpace(annotations[AnnotationPowerStatePhase])
 	if phase == "" {
-		if desired == observed {
+		switch desired {
+		case observed:
 			phase = "stable"
-		} else if desired == "paused" {
+		case "paused":
 			phase = "pausing"
-		} else {
+		default:
 			phase = "resuming"
 		}
 	}

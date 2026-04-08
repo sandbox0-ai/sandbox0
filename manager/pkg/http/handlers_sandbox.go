@@ -112,7 +112,7 @@ func (s *Server) listSandboxes(c *gin.Context) {
 		return
 	}
 
-	spec.JSONSuccess(c, http.StatusAccepted, resp)
+	spec.JSONSuccess(c, http.StatusOK, resp)
 }
 
 // getSandbox gets a sandbox

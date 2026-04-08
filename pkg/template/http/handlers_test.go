@@ -641,7 +641,7 @@ func TestCreateTemplate_AllowsSidecarsWithStartupProbeForRegularTeam(t *testing.
 	}
 }
 
-func TestCreateTemplate_RejectsSidecarReadinessProbe(t *testing.T) {
+func TestCreateTemplate_AllowsSidecarReadinessProbe(t *testing.T) {
 	t.Parallel()
 
 	store := &testTemplateStore{}
@@ -672,14 +672,11 @@ func TestCreateTemplate_RejectsSidecarReadinessProbe(t *testing.T) {
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, rec.Code)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d", http.StatusCreated, rec.Code)
 	}
-	if store.createCalled {
-		t.Fatalf("expected create not called for invalid request")
-	}
-	if got := rec.Body.String(); !strings.Contains(got, "spec.sidecars[0].readinessProbe is not supported") {
-		t.Fatalf("expected readiness rejection, got %q", got)
+	if !store.createCalled {
+		t.Fatalf("expected create called for readiness probe request")
 	}
 }
 

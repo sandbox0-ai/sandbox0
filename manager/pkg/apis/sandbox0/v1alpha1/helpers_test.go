@@ -187,7 +187,7 @@ manager_image: sandbox0/manager:test
 	}
 }
 
-func TestBuildPodSpecPreservesSidecarCommandAndStartupProbe(t *testing.T) {
+func TestBuildPodSpecPreservesSidecarCommandAndProbes(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test
 `)
@@ -201,6 +201,12 @@ manager_image: sandbox0/manager:test
 			Command:   []string{"sh", "-lc", "sleep 30; touch /tmp/ready; tail -f /dev/null"},
 			Args:      []string{"--verbose"},
 			Resources: ResourceQuota{CPU: resource.MustParse("500m"), Memory: resource.MustParse("2Gi")},
+			ReadinessProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					Exec: &corev1.ExecAction{Command: []string{"test", "-f", "/tmp/ready"}},
+				},
+				PeriodSeconds: 5,
+			},
 			StartupProbe: &corev1.Probe{
 				ProbeHandler: corev1.ProbeHandler{
 					Exec: &corev1.ExecAction{Command: []string{"test", "-f", "/tmp/started"}},
@@ -233,8 +239,26 @@ manager_image: sandbox0/manager:test
 	if sidecar.StartupProbe == nil || sidecar.StartupProbe.Exec == nil {
 		t.Fatal("expected startup probe to be preserved")
 	}
+	if sidecar.ReadinessProbe != nil {
+		t.Fatal("expected kubelet readiness probe to be omitted from rendered sidecar")
+	}
 	if sidecar.StartupProbe.FailureThreshold != 30 {
 		t.Fatalf("startup failureThreshold = %d, want 30", sidecar.StartupProbe.FailureThreshold)
+	}
+
+	annotation, err := BuildManagedReadinessProbesAnnotation(template)
+	if err != nil {
+		t.Fatalf("BuildManagedReadinessProbesAnnotation() error = %v", err)
+	}
+	if annotation == "" {
+		t.Fatal("expected managed readiness annotation to be emitted")
+	}
+	probes := BuildManagedReadinessProbes(template)
+	if len(probes) != 1 || probes[0].Probe == nil || probes[0].Probe.Exec == nil {
+		t.Fatalf("expected one managed readiness probe, got %#v", probes)
+	}
+	if probes[0].Probe.PeriodSeconds != 5 {
+		t.Fatalf("managed readiness periodSeconds = %d, want 5", probes[0].Probe.PeriodSeconds)
 	}
 }
 

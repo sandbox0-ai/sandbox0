@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	"encoding/json"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +21,8 @@ const (
 	netdMITMCADir      = "/var/run/sandbox0/netd"
 	netdMITMCACertPath = netdMITMCADir + "/mitm-ca.crt"
 )
+
+const ManagedReadinessProbesAnnotation = "sandbox0.ai/managed-readiness-probes"
 
 // buildPodSpec builds a pod spec from a template
 func BuildPodSpec(template *SandboxTemplate, restart bool) corev1.PodSpec {
@@ -292,6 +295,39 @@ func buildSidecarContainer(spec *SidecarContainerSpec, template *SandboxTemplate
 	}
 
 	return container
+}
+
+func BuildManagedReadinessProbes(template *SandboxTemplate) []ManagedSidecarReadinessProbe {
+	if template == nil || len(template.Spec.Sidecars) == 0 {
+		return nil
+	}
+
+	probes := make([]ManagedSidecarReadinessProbe, 0, len(template.Spec.Sidecars))
+	for _, sidecar := range template.Spec.Sidecars {
+		if sidecar.ReadinessProbe == nil {
+			continue
+		}
+		probes = append(probes, ManagedSidecarReadinessProbe{
+			Name:  sidecar.Name,
+			Probe: sidecar.ReadinessProbe.DeepCopy(),
+		})
+	}
+	if len(probes) == 0 {
+		return nil
+	}
+	return probes
+}
+
+func BuildManagedReadinessProbesAnnotation(template *SandboxTemplate) (string, error) {
+	probes := BuildManagedReadinessProbes(template)
+	if len(probes) == 0 {
+		return "", nil
+	}
+	data, err := json.Marshal(probes)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
 
 func buildResourceRequirements(quota ResourceQuota) corev1.ResourceRequirements {

@@ -101,7 +101,7 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 			}
 
 			if opts.includePoolReadinessGate {
-				It("gates pooled capacity on Kubernetes pod readiness", func() {
+				It("gates pooled capacity on sandbox0-managed pod readiness", func() {
 					assertTemplatePoolReadinessGate(env, session, opts.templateNamePrefix)
 				})
 			}

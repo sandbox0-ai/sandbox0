@@ -390,9 +390,6 @@ func rejectUnsupportedSidecarProbeFields(c *gin.Context) error {
 		if !ok {
 			continue
 		}
-		if _, exists := sidecar["readinessProbe"]; exists {
-			return fmt.Errorf("spec.sidecars[%d].readinessProbe is not supported", i)
-		}
 		if _, exists := sidecar["livenessProbe"]; exists {
 			return fmt.Errorf("spec.sidecars[%d].livenessProbe is not supported", i)
 		}

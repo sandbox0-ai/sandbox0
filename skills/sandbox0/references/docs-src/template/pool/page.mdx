@@ -33,13 +33,13 @@ flowchart TB
 ```
 
 When a sandbox is claimed:
-1. The manager first tries to claim a Kubernetes-ready idle pod (`claimIdlePod`)
+1. The manager first tries to claim a Sandbox0-ready idle pod (`claimIdlePod`)
 2. If successful (hot claim), the pod is relabeled to `active` and returned immediately; pool replenishment happens asynchronously via ReplicaSet reconcile
 3. If no idle pod exists (cold claim), the manager directly creates a new active pod (`createNewPod`) and asynchronously triggers scale-up (`OnColdClaim`) to rebuild idle capacity
 
 As long as `minIdle` idle pods are available, every claim is a **zero-cold-start** operation.
 
-In practice, “available” means `Pod Ready`, not merely `Pod Running`.
+In practice, “available” means the sandbox readiness gate is true, not merely `Pod Running`.
 
 ---
 
@@ -70,13 +70,13 @@ spec:
 
 ## Readiness Gates Pool Capacity
 
-Warm-pool capacity is counted from idle pods that reach Kubernetes readiness.
+Warm-pool capacity is counted from idle pods that reach Sandbox0-managed readiness.
 
 - An idle pod in `Running` phase but with `Ready=False` does not count toward `idleCount`
 - A hot claim only selects idle pods that are already `Ready`
-- Sandbox0 now owns the readiness gate for sandbox pods, so sidecar `readinessProbe` is not part of the public template surface
+- Sandbox0 owns the final readiness gate for sandbox pods. Sidecar `readinessProbe` is allowed, but Sandbox0 uses it as one input to the sandbox-managed readiness decision.
 
-If a template uses a sidecar to host a warm process, keep startup checks on the sidecar and let Sandbox0 drive pod readiness:
+If a template uses a sidecar to host a warm process, use `readinessProbe` on the sidecar and let Sandbox0 drive the final pod readiness gate:
 
 ```yaml
 spec:
@@ -84,15 +84,15 @@ spec:
         - name: codex
           image: ghcr.io/example/codex:latest
           command: ["sh", "-lc", "/app/start-codex.sh"]
-          startupProbe:
+          readinessProbe:
               exec:
-                  command: ["test", "-f", "/tmp/codex-started"]
+                  command: ["test", "-f", "/tmp/codex-ready"]
     pool:
         minIdle: 2
         maxIdle: 10
 ```
 
-In this model, the sidecar can still express slow-start behavior with `startupProbe`, but the pod only counts as warm-pool capacity after Sandbox0 marks its readiness gate ready.
+In this model, the pod only counts as warm-pool capacity after Sandbox0 sees the sidecar readiness signal and marks its readiness gate ready.
 
 **Choosing `minIdle`:**
 

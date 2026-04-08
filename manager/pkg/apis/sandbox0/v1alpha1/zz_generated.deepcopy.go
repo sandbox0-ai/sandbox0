@@ -913,6 +913,11 @@ func (in *SidecarContainerSpec) DeepCopyInto(out *SidecarContainerSpec) {
 		*out = make([]ContainerMountSpec, len(*in))
 		copy(*out, *in)
 	}
+	if in.ReadinessProbe != nil {
+		in, out := &in.ReadinessProbe, &out.ReadinessProbe
+		*out = new(v1.Probe)
+		(*in).DeepCopyInto(*out)
+	}
 	if in.StartupProbe != nil {
 		in, out := &in.StartupProbe, &out.StartupProbe
 		*out = new(v1.Probe)

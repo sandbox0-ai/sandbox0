@@ -75,17 +75,25 @@ type ContainerSpec struct {
 }
 
 type SidecarContainerSpec struct {
-	Name         string               `json:"name"`
-	Image        string               `json:"image"`
-	Command      []string             `json:"command,omitempty"`
-	Args         []string             `json:"args,omitempty"`
-	Env          []EnvVar             `json:"env,omitempty"`
-	Resources    ResourceQuota        `json:"resources"`
-	Mounts       []ContainerMountSpec `json:"mounts,omitempty"`
-	StartupProbe *corev1.Probe        `json:"startupProbe,omitempty"`
+	Name           string               `json:"name"`
+	Image          string               `json:"image"`
+	Command        []string             `json:"command,omitempty"`
+	Args           []string             `json:"args,omitempty"`
+	Env            []EnvVar             `json:"env,omitempty"`
+	Resources      ResourceQuota        `json:"resources"`
+	Mounts         []ContainerMountSpec `json:"mounts,omitempty"`
+	ReadinessProbe *corev1.Probe        `json:"readinessProbe,omitempty"`
+	StartupProbe   *corev1.Probe        `json:"startupProbe,omitempty"`
 }
 
 const SandboxPodReadinessConditionType corev1.PodConditionType = "sandbox0.ai/ready"
+
+// ManagedSidecarReadinessProbe keeps K8s-compatible readinessProbe syntax in the
+// template while letting sandbox0 execute and aggregate the checks itself.
+type ManagedSidecarReadinessProbe struct {
+	Name  string        `json:"name"`
+	Probe *corev1.Probe `json:"probe"`
+}
 
 type ContainerMountSpec struct {
 	Name      string `json:"name"`

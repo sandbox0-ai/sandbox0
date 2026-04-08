@@ -95,7 +95,7 @@ Warm pool configuration. See [Warm Pool](/docs/template/pool) for a detailed gui
 | `minIdle` | integer | — | Minimum idle pods to pre-warm. Required (`>= 0`). |
 | `maxIdle` | integer | — | Maximum idle pods allowed. Required (`>= minIdle`). |
 
-Only Kubernetes-ready idle pods count toward pool capacity. This matters when your template uses sidecars to host a warm process.
+Only Sandbox0-ready idle pods count toward pool capacity. This matters when your template uses sidecars to host a warm process.
 
 ---
 
@@ -126,7 +126,8 @@ Commonly used sidecar fields:
 | `command` / `args` | Process startup command for the sidecar. |
 | `env` | Sidecar-specific environment variables. |
 | `mounts` | References to template `sharedVolumes` when the sidecar needs pod-shared storage. |
-| `startupProbe` | Optional probe for slow-starting sidecars. |
+| `readinessProbe` | Optional probe syntax for sidecars. Sandbox0 executes it and uses the result for the sandbox-managed readiness gate. |
+| `startupProbe` | Optional startup probe for slow-starting sidecars. |
 
 <Callout variant="info">
 Sandbox0 owns sandbox pod readiness. A pod that is `Running` but not `Ready` does not count as available warm-pool capacity and will not be hot-claimed.

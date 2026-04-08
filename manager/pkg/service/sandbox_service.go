@@ -131,6 +131,7 @@ type SandboxService struct {
 	autoScaler             AutoScalerInterface
 	credentialStore        egressauth.BindingStore
 	powerExecutor          SandboxPowerExecutor
+	readinessEvaluator     controller.SandboxReadinessEvaluator
 	powerStateLocks        sync.Map
 	powerStateReconcilers  sync.Map
 }
@@ -238,6 +239,11 @@ func (s *SandboxService) SetCtldClient(client *CtldClient) {
 // SetAutoScaler injects the auto scaler for automatic pool scaling.
 func (s *SandboxService) SetAutoScaler(scaler AutoScalerInterface) {
 	s.autoScaler = scaler
+}
+
+// SetSandboxReadinessEvaluator overrides sandbox0-managed readiness evaluation.
+func (s *SandboxService) SetSandboxReadinessEvaluator(evaluator controller.SandboxReadinessEvaluator) {
+	s.readinessEvaluator = evaluator
 }
 
 // SetCredentialStore injects the sandbox credential binding store.
@@ -845,6 +851,20 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 
 	// Build pod spec from template
 	spec := v1alpha1.BuildPodSpec(template, false)
+	managedReadiness, err := v1alpha1.BuildManagedReadinessProbesAnnotation(template)
+	if err != nil {
+		return nil, fmt.Errorf("build managed readiness probes annotation: %w", err)
+	}
+	annotations := map[string]string{
+		controller.AnnotationSandboxID: podName,
+		controller.AnnotationTeamID:    req.TeamID,
+		controller.AnnotationUserID:    req.UserID,
+		controller.AnnotationClaimedAt: s.clock.Now().Format(time.RFC3339),
+		controller.AnnotationClaimType: "cold",
+	}
+	if managedReadiness != "" {
+		annotations[v1alpha1.ManagedReadinessProbesAnnotation] = managedReadiness
+	}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      podName,
@@ -854,13 +874,7 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 				controller.LabelPoolType:   controller.PoolTypeActive,
 				controller.LabelSandboxID:  podName,
 			},
-			Annotations: map[string]string{
-				controller.AnnotationSandboxID: podName,
-				controller.AnnotationTeamID:    req.TeamID,
-				controller.AnnotationUserID:    req.UserID,
-				controller.AnnotationClaimedAt: s.clock.Now().Format(time.RFC3339),
-				controller.AnnotationClaimType: "cold",
-			},
+			Annotations: annotations,
 		},
 		Spec: spec,
 	}
@@ -2324,7 +2338,7 @@ func (s *SandboxService) waitForPodReady(ctx context.Context, namespace, name st
 			}
 			return nil, fmt.Errorf("get pod for readiness: %w", err)
 		}
-		pod, err = controller.EnsureSandboxPodReadinessCondition(readyCtx, s.k8sClient, pod)
+		pod, err = controller.EnsureSandboxPodReadinessCondition(readyCtx, s.k8sClient, pod, s.readinessEvaluator)
 		if err != nil {
 			return nil, fmt.Errorf("ensure pod readiness condition: %w", err)
 		}

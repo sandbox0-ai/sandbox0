@@ -24,10 +24,11 @@ The public HTTP API and all three SDKs expose the same sidecar schema under `spe
 | `env` | no | Sidecar-specific environment variables. |
 | `resources` | yes | CPU and memory request/limit pair used by Sandbox0's template schema. |
 | `mounts` | no | Shared-volume mount references for this sidecar. |
+| `readinessProbe` | no | Readiness probe. Exactly one handler is required when set. Sandbox0 uses it as part of the sandbox-managed readiness gate. |
 | `startupProbe` | no | Startup probe. Exactly one handler is required when set. |
 
 <Callout variant="warning">
-`readinessProbe` and `livenessProbe` are intentionally unsupported for template sidecars. Sandbox0 soft pause can freeze the whole sandbox, so Sandbox0 owns pod readiness and kubelet liveness restarts would conflict with pause/resume.
+`livenessProbe` is intentionally unsupported for template sidecars. Sandbox0 soft pause can freeze the whole sandbox, so kubelet liveness restarts would conflict with pause/resume.
 </Callout>
 
 If a sidecar needs pod-shared storage, define it once under `spec.sharedVolumes`:
@@ -92,11 +93,11 @@ In this example, the main container uses `/workspace/shared` while the sidecar u
 
 ## Sandbox0 Readiness Controls Claimability
 
-Warm-pool capacity only counts pods that are Kubernetes-ready.
+Warm-pool capacity only counts pods that Sandbox0 marks ready through the sandbox readiness gate.
 
 - A pod in `Running` phase with `Ready=False` does not count as available idle capacity.
 - A hot claim only selects idle pods that are already ready.
-- Sandbox0 owns the readiness gate for sandbox pods.
+- Sandbox0 owns the readiness gate for sandbox pods and executes sidecar `readinessProbe` checks itself.
 
 Example:
 
@@ -129,7 +130,7 @@ spec:
         maxIdle: 10
 ```
 
-In this example, the sidecar can model slow startup with `startupProbe`, but the pod is not counted as ready warm capacity until Sandbox0 marks its readiness gate ready.
+In this example, the sidecar can model slow startup with `startupProbe`, but the pod is not counted as ready warm capacity until Sandbox0 marks its readiness gate ready after its own readiness checks succeed.
 
 ---
 

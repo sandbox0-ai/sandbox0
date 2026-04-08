@@ -5356,6 +5356,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ContainerMountSpec"
+        readinessProbe:
+          $ref: "#/components/schemas/Probe"
         startupProbe:
           $ref: "#/components/schemas/Probe"
       required: [name, image, resources]

@@ -127,6 +127,9 @@ func TestReconcileEnablesTLSForHTTPSBaseURL(t *testing.T) {
 	if service.Spec.Ports[0].AppProtocol == nil || *service.Spec.Ports[0].AppProtocol != "HTTPS" {
 		t.Fatalf("expected HTTPS appProtocol, got %#v", service.Spec.Ports[0].AppProtocol)
 	}
+	if service.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyLocal {
+		t.Fatalf("expected externalTrafficPolicy Local, got %q", service.Spec.ExternalTrafficPolicy)
+	}
 
 	deployment := &appsv1.Deployment{}
 	if err := client.Get(context.Background(), types.NamespacedName{Name: "demo-regional-gateway", Namespace: infra.Namespace}, deployment); err != nil {

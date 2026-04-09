@@ -259,6 +259,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	}); err != nil {
 		return err
 	}
+	if serviceType == corev1.ServiceTypeLoadBalancer {
+		service := &corev1.Service{}
+		if err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: serviceName, Namespace: infra.Namespace}, service); err != nil {
+			return err
+		}
+		if service.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyLocal {
+			service.Spec.ExternalTrafficPolicy = corev1.ServiceExternalTrafficPolicyLocal
+			if err := r.Resources.Client.Update(ctx, service); err != nil {
+				return err
+			}
+		}
+	}
 
 	// Create ingress if enabled
 	if infra.Spec.Services != nil && infra.Spec.Services.RegionalGateway != nil &&

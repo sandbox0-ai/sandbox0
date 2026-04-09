@@ -29,6 +29,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -171,6 +172,10 @@ func (r *ResourceManager) ApplyDeployment(ctx context.Context, infra *infrav1alp
 			return err
 		}
 
+		if deploymentMatchesDesired(current, desired) {
+			return nil
+		}
+
 		current.Labels = desired.Labels
 		current.Annotations = desired.Annotations
 		current.Spec = desired.Spec
@@ -289,6 +294,10 @@ func (r *ResourceManager) ApplyDaemonSet(ctx context.Context, infra *infrav1alph
 		}
 		if err != nil {
 			return err
+		}
+
+		if daemonSetMatchesDesired(current, desired) {
+			return nil
 		}
 
 		current.Labels = desired.Labels
@@ -463,6 +472,20 @@ func MergeLabels(base map[string]string, overrides map[string]string) map[string
 		out[key] = value
 	}
 	return out
+}
+
+func deploymentMatchesDesired(current, desired *appsv1.Deployment) bool {
+	return apiequality.Semantic.DeepEqual(current.Labels, desired.Labels) &&
+		apiequality.Semantic.DeepEqual(current.Annotations, desired.Annotations) &&
+		apiequality.Semantic.DeepEqual(current.Spec, desired.Spec) &&
+		apiequality.Semantic.DeepEqual(current.OwnerReferences, desired.OwnerReferences)
+}
+
+func daemonSetMatchesDesired(current, desired *appsv1.DaemonSet) bool {
+	return apiequality.Semantic.DeepEqual(current.Labels, desired.Labels) &&
+		apiequality.Semantic.DeepEqual(current.Annotations, desired.Annotations) &&
+		apiequality.Semantic.DeepEqual(current.Spec, desired.Spec) &&
+		apiequality.Semantic.DeepEqual(current.OwnerReferences, desired.OwnerReferences)
 }
 
 func CloneStringMap(src map[string]string) map[string]string {

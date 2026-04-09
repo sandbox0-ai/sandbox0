@@ -383,3 +383,71 @@ func TestApplyDeploymentUpdatesExistingObject(t *testing.T) {
 		t.Fatalf("expected deployment owner reference, got %#v", got.OwnerReferences)
 	}
 }
+
+func TestDeploymentMatchesDesired(t *testing.T) {
+	replicas := int32(1)
+	desired := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "demo",
+			Namespace:   "sandbox0-system",
+			Labels:      map[string]string{"app": "demo"},
+			Annotations: map[string]string{"config": "abc"},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "infra.sandbox0.ai/v1alpha1",
+				Kind:       "Sandbox0Infra",
+				Name:       "demo",
+			}},
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "demo"}},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "demo"}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "demo", Image: "demo:latest"}}},
+			},
+		},
+	}
+
+	current := desired.DeepCopy()
+	if !deploymentMatchesDesired(current, desired) {
+		t.Fatal("expected identical deployment to match desired state")
+	}
+
+	current.Spec.Template.Spec.Containers[0].Image = "demo:new"
+	if deploymentMatchesDesired(current, desired) {
+		t.Fatal("expected deployment with changed pod template to require update")
+	}
+}
+
+func TestDaemonSetMatchesDesired(t *testing.T) {
+	desired := &appsv1.DaemonSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "demo",
+			Namespace:   "sandbox0-system",
+			Labels:      map[string]string{"app": "demo"},
+			Annotations: map[string]string{"config": "abc"},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "infra.sandbox0.ai/v1alpha1",
+				Kind:       "Sandbox0Infra",
+				Name:       "demo",
+			}},
+		},
+		Spec: appsv1.DaemonSetSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "demo"}},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "demo"}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "demo", Image: "demo:latest"}}},
+			},
+		},
+	}
+
+	current := desired.DeepCopy()
+	if !daemonSetMatchesDesired(current, desired) {
+		t.Fatal("expected identical daemonset to match desired state")
+	}
+
+	current.Labels["config"] = "new"
+	if daemonSetMatchesDesired(current, desired) {
+		t.Fatal("expected daemonset with changed labels to require update")
+	}
+}

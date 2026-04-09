@@ -19,6 +19,117 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
+func TestReconcileEnablesTLSForHTTPSBaseURL(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to add core scheme: %v", err)
+	}
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to add apps scheme: %v", err)
+	}
+	if err := infrav1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to add infra scheme: %v", err)
+	}
+
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Region: "gcp-ue4",
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeExternal,
+				External: &infrav1alpha1.ExternalDatabaseConfig{
+					Host:     "postgres.example.internal",
+					Port:     5432,
+					Database: "sandbox0",
+					Username: "sandbox0",
+					PasswordSecret: infrav1alpha1.SecretKeyRef{
+						Name: "regional-db",
+						Key:  "password",
+					},
+				},
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				RegionalGateway: &infrav1alpha1.RegionalGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						Replicas:             1,
+					},
+					ServiceExposureConfig: infrav1alpha1.ServiceExposureConfig{
+						Service: &infrav1alpha1.ServiceNetworkConfig{
+							Type: "LoadBalancer",
+							Port: 443,
+						},
+					},
+					Config: &infrav1alpha1.RegionalGatewayConfig{
+						AuthMode: "federated_global",
+						GatewayConfig: infrav1alpha1.GatewayConfig{
+							BaseURL:         "https://gcp-ue4.sandbox0.ai",
+							JWTIssuer:       "https://api.sandbox0.ai",
+							JWTPublicKeyPEM: "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA2LS/8P8G8l6hFGxqfQ4WdSx7sY9qsK0kGugHgdGX6lY=\n-----END PUBLIC KEY-----",
+						},
+					},
+				},
+				ClusterGateway: &infrav1alpha1.ClusterGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+			},
+			PublicExposure: &infrav1alpha1.PublicExposureConfig{
+				Enabled:    true,
+				RootDomain: "sandbox0.app",
+				RegionID:   "gcp-ue4",
+			},
+		},
+	}
+
+	dbSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "regional-db",
+			Namespace: infra.Namespace,
+		},
+		Data: map[string][]byte{
+			"password": []byte("db-password"),
+		},
+	}
+
+	reconciler, client := newRegionalGatewayTestReconciler(t, infra.DeepCopy(), dbSecret)
+
+	if err := reconciler.Reconcile(context.Background(), infra, "sandbox0ai/infra", "latest", nil); err != nil && !strings.Contains(err.Error(), "not ready") {
+		t.Fatalf("reconcile returned unexpected error: %v", err)
+	}
+
+	secret := &corev1.Secret{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: "demo-regional-gateway-tls", Namespace: infra.Namespace}, secret); err != nil {
+		t.Fatalf("get tls secret: %v", err)
+	}
+	if secret.Type != corev1.SecretTypeTLS {
+		t.Fatalf("expected tls secret type, got %q", secret.Type)
+	}
+
+	service := &corev1.Service{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: "demo-regional-gateway", Namespace: infra.Namespace}, service); err != nil {
+		t.Fatalf("get regional gateway service: %v", err)
+	}
+	if service.Spec.Ports[0].Port != 443 {
+		t.Fatalf("expected external service port 443, got %d", service.Spec.Ports[0].Port)
+	}
+
+	deployment := &appsv1.Deployment{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: "demo-regional-gateway", Namespace: infra.Namespace}, deployment); err != nil {
+		t.Fatalf("get regional gateway deployment: %v", err)
+	}
+	if deployment.Spec.Template.Spec.Containers[0].ReadinessProbe.HTTPGet.Scheme != corev1.URISchemeHTTPS {
+		t.Fatalf("expected https readiness probe, got %s", deployment.Spec.Template.Spec.Containers[0].ReadinessProbe.HTTPGet.Scheme)
+	}
+	if !hasVolume(deployment.Spec.Template.Spec.Volumes, "gateway-tls") {
+		t.Fatal("expected gateway-tls volume to be mounted")
+	}
+}
+
 func TestApplyRegistryConfigBuiltin(t *testing.T) {
 	r := &Reconciler{}
 	infra := &infrav1alpha1.Sandbox0Infra{
@@ -575,4 +686,13 @@ func newRegionalGatewayTestReconciler(t *testing.T, objects ...runtime.Object) (
 		Build()
 
 	return NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{})), client
+}
+
+func hasVolume(volumes []corev1.Volume, name string) bool {
+	for _, volume := range volumes {
+		if volume.Name == name {
+			return true
+		}
+	}
+	return false
 }

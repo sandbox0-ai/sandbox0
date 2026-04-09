@@ -6,6 +6,9 @@ func TestNormalizeObjectStorageTypeMapsGCS(t *testing.T) {
 	if got := NormalizeObjectStorageType("gcs"); got != ObjectStorageTypeGCS {
 		t.Fatalf("expected gs, got %q", got)
 	}
+	if got := NormalizeObjectStorageType("builtin"); got != ObjectStorageTypeS3 {
+		t.Fatalf("expected builtin to map to s3, got %q", got)
+	}
 	if got := NormalizeObjectStorageType(""); got != ObjectStorageTypeS3 {
 		t.Fatalf("expected default s3, got %q", got)
 	}

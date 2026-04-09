@@ -26,7 +26,7 @@ type ObjectStorageConfig struct {
 func NormalizeObjectStorageType(raw string) string {
 	value := strings.TrimSpace(strings.ToLower(raw))
 	switch value {
-	case "", ObjectStorageTypeS3:
+	case "", "builtin", ObjectStorageTypeS3:
 		return ObjectStorageTypeS3
 	case ObjectStorageTypeOSS:
 		return ObjectStorageTypeOSS

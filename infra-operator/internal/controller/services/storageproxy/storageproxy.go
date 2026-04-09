@@ -47,6 +47,7 @@ const (
 	juicefsEncryptionKeyFilename  = "juicefs_rsa_private.pem"
 	juicefsEncryptionMountDir     = "/etc/storage-proxy/juicefs"
 	juicefsEncryptionKeyPath      = "/etc/storage-proxy/juicefs/juicefs_rsa_private.pem"
+	objectStorageTypeS3Compatible = "s3"
 )
 
 type Reconciler struct {
@@ -333,7 +334,7 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		return nil, err
 	}
 
-	cfg.ObjectStorageType = string(storageConfig.Type)
+	cfg.ObjectStorageType = normalizeObjectStorageType(storageConfig.Type)
 	cfg.S3Bucket = storageConfig.Bucket
 	cfg.S3Region = storageConfig.Region
 	cfg.S3Endpoint = storageConfig.Endpoint
@@ -346,4 +347,11 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	}
 
 	return cfg, nil
+}
+
+func normalizeObjectStorageType(storageType infrav1alpha1.StorageType) string {
+	if storageType == infrav1alpha1.StorageTypeBuiltin {
+		return objectStorageTypeS3Compatible
+	}
+	return string(storageType)
 }

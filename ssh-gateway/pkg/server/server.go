@@ -49,7 +49,7 @@ type Server struct {
 	cfg                     *config.SSHGatewayConfig
 	logger                  *zap.Logger
 	authorizer              SessionAuthorizer
-	internalAuthGen         *internalauth.Generator
+	dataPlaneAuthGen        *internalauth.Generator
 	procdStoragePermissions []string
 	hostSigner              ssh.Signer
 	httpClient              *http.Client
@@ -57,7 +57,7 @@ type Server struct {
 }
 
 // NewServer creates a new ssh-gateway server.
-func NewServer(cfg *config.SSHGatewayConfig, authorizer SessionAuthorizer, internalAuthGen *internalauth.Generator, logger *zap.Logger) (*Server, error) {
+func NewServer(cfg *config.SSHGatewayConfig, authorizer SessionAuthorizer, dataPlaneAuthGen *internalauth.Generator, logger *zap.Logger) (*Server, error) {
 	if cfg == nil {
 		cfg = &config.SSHGatewayConfig{}
 	}
@@ -77,11 +77,11 @@ func NewServer(cfg *config.SSHGatewayConfig, authorizer SessionAuthorizer, inter
 	}
 
 	server := &Server{
-		cfg:             cfg,
-		logger:          logger,
-		authorizer:      authorizer,
-		internalAuthGen: internalAuthGen,
-		hostSigner:      hostSigner,
+		cfg:              cfg,
+		logger:           logger,
+		authorizer:       authorizer,
+		dataPlaneAuthGen: dataPlaneAuthGen,
+		hostSigner:       hostSigner,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},

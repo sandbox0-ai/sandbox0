@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -54,7 +53,7 @@ func (s *Server) getClusterGatewayURLForCluster(ctx context.Context, clusterID s
 		return "", fmt.Errorf("cluster_id is required")
 	}
 	if authCtx == nil {
-		return "", fmt.Errorf("missing auth context")
+		authCtx = &authn.AuthContext{AuthMethod: authn.AuthMethodInternal}
 	}
 	if url := s.getClusterFromCache(clusterID); url != "" {
 		return url, nil
@@ -93,22 +92,17 @@ func (s *Server) refreshClusterCache(ctx context.Context, authCtx *authn.AuthCon
 		return fmt.Errorf("create scheduler request: %w", err)
 	}
 
-	token, err := s.internalAuthGen.Generate(
-		"scheduler",
-		authCtx.TeamID,
-		authCtx.UserID,
-		internalauth.GenerateOptions{
-			Permissions: authCtx.Permissions,
-		},
-	)
+	token, err := s.generateInternalToken(authCtx, "scheduler")
 	if err != nil {
 		return fmt.Errorf("generate scheduler token: %w", err)
 	}
 
 	req.Header.Set(internalauth.DefaultTokenHeader, token)
-	req.Header.Set("X-Team-ID", authCtx.TeamID)
+	if authCtx.TeamID != "" {
+		req.Header.Set(internalauth.TeamIDHeader, authCtx.TeamID)
+	}
 	if authCtx.UserID != "" {
-		req.Header.Set("X-User-ID", authCtx.UserID)
+		req.Header.Set(internalauth.UserIDHeader, authCtx.UserID)
 	}
 	req.Header.Set("X-Auth-Method", string(authCtx.AuthMethod))
 
@@ -158,12 +152,20 @@ func (s *Server) buildSchedulerClustersURL() (string, error) {
 	return base.String(), nil
 }
 
-func (s *Server) generateInternalToken(c *gin.Context, authCtx *authn.AuthContext, target string) (string, error) {
+func (s *Server) generateInternalToken(authCtx *authn.AuthContext, target string) (string, error) {
 	if s.internalAuthGen == nil {
 		return "", fmt.Errorf("internal auth generator not configured")
 	}
 	if authCtx == nil {
-		return "", fmt.Errorf("missing auth context")
+		return s.internalAuthGen.GenerateSystem(target, internalauth.GenerateOptions{})
+	}
+	if authCtx.TeamID == "" {
+		return s.internalAuthGen.GenerateSystem(
+			target,
+			internalauth.GenerateOptions{
+				Permissions: authCtx.Permissions,
+			},
+		)
 	}
 	return s.internalAuthGen.Generate(
 		target,

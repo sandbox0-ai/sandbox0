@@ -3938,6 +3938,8 @@ components:
             $ref: "#/components/schemas/ExposedPortConfig"
         pod_name:
           type: string
+        ssh:
+          $ref: "#/components/schemas/SandboxSSHConnection"
         expires_at:
           type: string
           format: date-time
@@ -3965,6 +3967,19 @@ components:
         - hard_expires_at
         - claimed_at
         - created_at
+    SandboxSSHConnection:
+      type: object
+      properties:
+        host:
+          type: string
+        port:
+          type: integer
+        username:
+          type: string
+      required:
+        - host
+        - port
+        - username
     SandboxUpdateConfig:
       type: object
       description: |

@@ -8,7 +8,6 @@ import (
 	"syscall"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	managerclient "github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/client"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
@@ -57,20 +56,38 @@ func main() {
 		logger.Fatal("Failed to run database migrations", zap.Error(err))
 	}
 
-	privateKey, err := internalauth.LoadEd25519PrivateKeyFromFile(internalauth.DefaultInternalJWTPrivateKeyPath)
-	if err != nil {
-		logger.Fatal("Failed to load internal auth private key", zap.Error(err))
+	controlPlaneKeyPath := cfg.ControlPlanePrivateKeyPath
+	if controlPlaneKeyPath == "" {
+		controlPlaneKeyPath = internalauth.DefaultInternalJWTPrivateKeyPath
 	}
-	internalAuthGen := internalauth.NewGenerator(internalauth.GeneratorConfig{
+	controlPlanePrivateKey, err := internalauth.LoadEd25519PrivateKeyFromFile(controlPlaneKeyPath)
+	if err != nil {
+		logger.Fatal("Failed to load control-plane internal auth private key", zap.Error(err))
+	}
+	controlPlaneAuthGen := internalauth.NewGenerator(internalauth.GeneratorConfig{
 		Caller:     cfg.InternalAuthCaller,
-		PrivateKey: privateKey,
+		PrivateKey: controlPlanePrivateKey,
+		TTL:        cfg.InternalAuthTTL.Duration,
+	})
+
+	dataPlaneKeyPath := cfg.DataPlanePrivateKeyPath
+	if dataPlaneKeyPath == "" {
+		dataPlaneKeyPath = internalauth.DefaultInternalJWTPrivateKeyPath
+	}
+	dataPlanePrivateKey, err := internalauth.LoadEd25519PrivateKeyFromFile(dataPlaneKeyPath)
+	if err != nil {
+		logger.Fatal("Failed to load data-plane internal auth private key", zap.Error(err))
+	}
+	dataPlaneAuthGen := internalauth.NewGenerator(internalauth.GeneratorConfig{
+		Caller:     cfg.InternalAuthCaller,
+		PrivateKey: dataPlanePrivateKey,
 		TTL:        cfg.InternalAuthTTL.Duration,
 	})
 
 	repo := identity.NewRepository(pool)
-	manager := managerclient.NewManagerClient(cfg.ManagerURL, internalAuthGen, logger, cfg.ResumeTimeout.Duration)
-	authorizer := sshserver.NewAuthenticator(repo, manager, cfg.ResumeTimeout.Duration, cfg.ResumePollInterval.Duration, logger)
-	server, err := sshserver.NewServer(cfg, authorizer, internalAuthGen, logger)
+	resolver := sshserver.NewRegionalSandboxResolver(cfg.RegionalGatewayURL, controlPlaneAuthGen, logger, cfg.ResumeTimeout.Duration)
+	authorizer := sshserver.NewAuthenticator(repo, resolver, cfg.ResumeTimeout.Duration, cfg.ResumePollInterval.Duration, logger)
+	server, err := sshserver.NewServer(cfg, authorizer, dataPlaneAuthGen, logger)
 	if err != nil {
 		logger.Fatal("Failed to create ssh-gateway server", zap.Error(err))
 	}

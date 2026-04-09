@@ -34,7 +34,7 @@ func newSSHSession(server *Server, ctx context.Context, channel ssh.Channel, req
 		channel:  channel,
 		requests: requests,
 		target:   target,
-		pty:      ptySpec{Rows: 24, Cols: 80},
+		pty:      ptySpec{},
 	}
 }
 

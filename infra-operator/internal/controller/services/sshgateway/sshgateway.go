@@ -25,6 +25,8 @@ const (
 	sshHostPrivateKeyKey       = "ssh_host_ed25519_key"
 	sshHostPublicKeyKey        = "ssh_host_ed25519_key.pub"
 	defaultSSHHostKeyMountPath = "/secrets/ssh_host_ed25519_key"
+	controlPlaneKeyMountPath   = "/secrets/control_plane_internal_jwt_private.key"
+	dataPlaneKeyMountPath      = "/secrets/data_plane_internal_jwt_private.key"
 )
 
 type Reconciler struct {
@@ -49,7 +51,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	deploymentName := fmt.Sprintf("%s-ssh-gateway", infra.Name)
 	labels := common.GetServiceLabels(infra.Name, "ssh-gateway")
 	replicas := infra.Spec.Services.SSHGateway.Replicas
-	keySecretName, privateKeyKey, _ := internalauth.GetDataPlaneKeyRefs(infra)
+	controlPlaneKeySecretName, controlPlanePrivateKeyKey, _ := internalauth.GetControlPlaneKeyRefs(infra)
+	dataPlaneKeySecretName, dataPlanePrivateKeyKey, _ := internalauth.GetDataPlaneKeyRefs(infra)
 	hostKeySecretName := fmt.Sprintf("%s-ssh-gateway-host-key", infra.Name)
 
 	config, err := r.buildConfig(ctx, infra, compiledPlan)
@@ -82,9 +85,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			ReadOnly:  true,
 		},
 		{
-			Name:      "internal-jwt-private-key",
-			MountPath: pkginternalauth.DefaultInternalJWTPrivateKeyPath,
-			SubPath:   "internal_jwt_private.key",
+			Name:      "control-plane-internal-jwt-private-key",
+			MountPath: config.ControlPlanePrivateKeyPath,
+			SubPath:   controlPlanePrivateKeyKey,
+			ReadOnly:  true,
+		},
+		{
+			Name:      "data-plane-internal-jwt-private-key",
+			MountPath: config.DataPlanePrivateKeyPath,
+			SubPath:   dataPlanePrivateKeyKey,
 			ReadOnly:  true,
 		},
 		{
@@ -102,11 +111,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			},
 		},
 		{
-			Name: "internal-jwt-private-key",
+			Name: "control-plane-internal-jwt-private-key",
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName: keySecretName,
-					Items:      []corev1.KeyToPath{{Key: privateKeyKey, Path: "internal_jwt_private.key"}},
+					SecretName: controlPlaneKeySecretName,
+					Items:      []corev1.KeyToPath{{Key: controlPlanePrivateKeyKey, Path: controlPlanePrivateKeyKey}},
+				},
+			},
+		},
+		{
+			Name: "data-plane-internal-jwt-private-key",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: dataPlaneKeySecretName,
+					Items:      []corev1.KeyToPath{{Key: dataPlanePrivateKeyKey, Path: dataPlanePrivateKeyKey}},
 				},
 			},
 		},
@@ -179,6 +197,12 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	if cfg.InternalAuthCaller == "" {
 		cfg.InternalAuthCaller = pkginternalauth.ServiceSSHGateway
 	}
+	if cfg.ControlPlanePrivateKeyPath == "" {
+		cfg.ControlPlanePrivateKeyPath = controlPlaneKeyMountPath
+	}
+	if cfg.DataPlanePrivateKeyPath == "" {
+		cfg.DataPlanePrivateKeyPath = dataPlaneKeyMountPath
+	}
 	if cfg.SSHHostKeyPath == "" {
 		cfg.SSHHostKeyPath = defaultSSHHostKeyMountPath
 	}
@@ -190,10 +214,10 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		cfg.DatabaseURL = dsn
 	}
 	if compiledPlan != nil {
-		cfg.ManagerURL = compiledPlan.Services.Manager.URL
+		cfg.RegionalGatewayURL = compiledPlan.Status.Endpoints.RegionalGatewayInternal
 	}
-	if cfg.ManagerURL == "" {
-		return nil, fmt.Errorf("manager service URL is required for ssh-gateway")
+	if cfg.RegionalGatewayURL == "" {
+		return nil, fmt.Errorf("regional gateway URL is required for ssh-gateway")
 	}
 	if cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("database URL is required for ssh-gateway")

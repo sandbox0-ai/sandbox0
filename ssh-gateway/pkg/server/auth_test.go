@@ -6,9 +6,8 @@ import (
 	"testing"
 	"time"
 
-	managerclient "github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/client"
-	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
+	sharedssh "github.com/sandbox0-ai/sandbox0/pkg/sshgateway"
 	"go.uber.org/zap/zaptest"
 	"golang.org/x/crypto/ssh"
 )
@@ -18,9 +17,6 @@ const authTestPublicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ4dLZLZOA/asaP+5
 type fakeIdentityStore struct {
 	key    *identity.UserSSHPublicKey
 	keyErr error
-
-	member    *identity.TeamMember
-	memberErr error
 }
 
 func (f *fakeIdentityStore) GetUserSSHPublicKeyByFingerprint(context.Context, string) (*identity.UserSSHPublicKey, error) {
@@ -30,40 +26,31 @@ func (f *fakeIdentityStore) GetUserSSHPublicKeyByFingerprint(context.Context, st
 	return f.key, nil
 }
 
-func (f *fakeIdentityStore) GetTeamMember(context.Context, string, string) (*identity.TeamMember, error) {
-	if f.memberErr != nil {
-		return nil, f.memberErr
-	}
-	return f.member, nil
+type fakeSandboxResolver struct {
+	targets []*sharedssh.ResolvedTarget
+	errs    []error
+	calls   int
 }
 
-type fakeSandboxStore struct {
-	sandbox   *mgr.Sandbox
-	getErr    error
-	resumed   bool
-	resumeErr error
-	getCalls  int
-}
-
-func (f *fakeSandboxStore) GetSandboxInternal(context.Context, string) (*mgr.Sandbox, error) {
-	f.getCalls++
-	if f.getErr != nil {
-		return nil, f.getErr
+func (f *fakeSandboxResolver) ResolveSandbox(context.Context, string, string) (*sharedssh.ResolvedTarget, error) {
+	f.calls++
+	if len(f.errs) > 0 {
+		err := f.errs[0]
+		if len(f.errs) > 1 {
+			f.errs = f.errs[1:]
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
-	return f.sandbox, nil
-}
-
-func (f *fakeSandboxStore) ResumeSandbox(context.Context, string, string, string) error {
-	f.resumed = true
-	if f.resumeErr != nil {
-		return f.resumeErr
+	if len(f.targets) == 0 {
+		return nil, ErrSandboxUnavailable
 	}
-	if f.sandbox != nil {
-		f.sandbox.Paused = false
-		f.sandbox.PowerState.Desired = mgr.SandboxPowerStateActive
-		f.sandbox.InternalAddr = "http://10.0.0.8:8091"
+	target := f.targets[0]
+	if len(f.targets) > 1 {
+		f.targets = f.targets[1:]
 	}
-	return nil
+	return target, nil
 }
 
 func TestParseSSHUsername(t *testing.T) {
@@ -106,13 +93,20 @@ func TestAuthenticatorAuthenticate(t *testing.T) {
 	}
 
 	repo := &fakeIdentityStore{
-		key:    &identity.UserSSHPublicKey{UserID: "user-1", FingerprintSHA256: ssh.FingerprintSHA256(parsedKey)},
-		member: &identity.TeamMember{UserID: "user-1", TeamID: "team-1", Role: "owner"},
+		key: &identity.UserSSHPublicKey{
+			UserID:            "user-1",
+			FingerprintSHA256: ssh.FingerprintSHA256(parsedKey),
+		},
 	}
-	manager := &fakeSandboxStore{
-		sandbox: &mgr.Sandbox{ID: "sb_123", TeamID: "team-1", InternalAddr: "http://10.0.0.8:8091", PowerState: mgr.SandboxPowerState{Desired: mgr.SandboxPowerStateActive}},
+	resolver := &fakeSandboxResolver{
+		targets: []*sharedssh.ResolvedTarget{{
+			SandboxID: "sb_123",
+			TeamID:    "team-1",
+			UserID:    "user-1",
+			ProcdURL:  "http://10.0.0.8:8091",
+		}},
 	}
-	authenticator := NewAuthenticator(repo, manager, 2*time.Second, 10*time.Millisecond, zaptest.NewLogger(t))
+	authenticator := NewAuthenticator(repo, resolver, 2*time.Second, 10*time.Millisecond, zaptest.NewLogger(t))
 
 	target, err := authenticator.Authenticate(context.Background(), "sb_123", parsedKey)
 	if err != nil {
@@ -133,7 +127,7 @@ func TestAuthenticatorAuthenticateRejectsUnknownKey(t *testing.T) {
 	}
 
 	repo := &fakeIdentityStore{keyErr: identity.ErrSSHPublicKeyNotFound}
-	authenticator := NewAuthenticator(repo, &fakeSandboxStore{}, time.Second, 10*time.Millisecond, zaptest.NewLogger(t))
+	authenticator := NewAuthenticator(repo, &fakeSandboxResolver{}, time.Second, 10*time.Millisecond, zaptest.NewLogger(t))
 
 	_, err = authenticator.Authenticate(context.Background(), "sb_123", parsedKey)
 	if !errors.Is(err, ErrUnauthorizedSSHPublicKey) {
@@ -141,20 +135,19 @@ func TestAuthenticatorAuthenticateRejectsUnknownKey(t *testing.T) {
 	}
 }
 
-func TestAuthenticatorAuthenticateRejectsNonMember(t *testing.T) {
+func TestAuthenticatorAuthenticateRejectsAccessDenied(t *testing.T) {
 	parsedKey, _, _, _, err := ssh.ParseAuthorizedKey([]byte(authTestPublicKey))
 	if err != nil {
 		t.Fatalf("ParseAuthorizedKey() error = %v", err)
 	}
 
 	repo := &fakeIdentityStore{
-		key:       &identity.UserSSHPublicKey{UserID: "user-1", FingerprintSHA256: ssh.FingerprintSHA256(parsedKey)},
-		memberErr: identity.ErrMemberNotFound,
+		key: &identity.UserSSHPublicKey{
+			UserID:            "user-1",
+			FingerprintSHA256: ssh.FingerprintSHA256(parsedKey),
+		},
 	}
-	manager := &fakeSandboxStore{
-		sandbox: &mgr.Sandbox{ID: "sb_123", TeamID: "team-1", InternalAddr: "http://10.0.0.8:8091", PowerState: mgr.SandboxPowerState{Desired: mgr.SandboxPowerStateActive}},
-	}
-	authenticator := NewAuthenticator(repo, manager, time.Second, 10*time.Millisecond, zaptest.NewLogger(t))
+	authenticator := NewAuthenticator(repo, &fakeSandboxResolver{errs: []error{ErrSandboxAccessDenied}}, time.Second, 10*time.Millisecond, zaptest.NewLogger(t))
 
 	_, err = authenticator.Authenticate(context.Background(), "sb_123", parsedKey)
 	if !errors.Is(err, ErrSandboxAccessDenied) {
@@ -162,30 +155,38 @@ func TestAuthenticatorAuthenticateRejectsNonMember(t *testing.T) {
 	}
 }
 
-func TestAuthenticatorAuthenticateResumesPausedSandbox(t *testing.T) {
+func TestAuthenticatorAuthenticatePollsWhileSandboxWakesUp(t *testing.T) {
 	parsedKey, _, _, _, err := ssh.ParseAuthorizedKey([]byte(authTestPublicKey))
 	if err != nil {
 		t.Fatalf("ParseAuthorizedKey() error = %v", err)
 	}
 
 	repo := &fakeIdentityStore{
-		key:    &identity.UserSSHPublicKey{UserID: "user-1", FingerprintSHA256: ssh.FingerprintSHA256(parsedKey)},
-		member: &identity.TeamMember{UserID: "user-1", TeamID: "team-1", Role: "owner"},
+		key: &identity.UserSSHPublicKey{
+			UserID:            "user-1",
+			FingerprintSHA256: ssh.FingerprintSHA256(parsedKey),
+		},
 	}
-	manager := &fakeSandboxStore{
-		sandbox: &mgr.Sandbox{ID: "sb_123", TeamID: "team-1", Paused: true, PowerState: mgr.SandboxPowerState{Desired: mgr.SandboxPowerStatePaused}},
+	resolver := &fakeSandboxResolver{
+		errs: []error{ErrSandboxWakingUp, nil},
+		targets: []*sharedssh.ResolvedTarget{{
+			SandboxID: "sb_123",
+			TeamID:    "team-1",
+			UserID:    "user-1",
+			ProcdURL:  "http://10.0.0.8:8091",
+		}},
 	}
-	authenticator := NewAuthenticator(repo, manager, time.Second, 10*time.Millisecond, zaptest.NewLogger(t))
+	authenticator := NewAuthenticator(repo, resolver, time.Second, 10*time.Millisecond, zaptest.NewLogger(t))
 
 	target, err := authenticator.Authenticate(context.Background(), "sb_123", parsedKey)
 	if err != nil {
 		t.Fatalf("Authenticate() error = %v", err)
 	}
-	if !manager.resumed {
-		t.Fatal("expected paused sandbox to be resumed")
-	}
 	if target.ProcdURL == "" {
-		t.Fatal("expected non-empty ProcdURL after resume")
+		t.Fatal("expected non-empty ProcdURL after wake-up")
+	}
+	if resolver.calls < 2 {
+		t.Fatalf("resolver.calls = %d, want >= 2", resolver.calls)
 	}
 }
 
@@ -196,8 +197,7 @@ func TestAuthenticatorAuthenticateHandlesMissingSandbox(t *testing.T) {
 	}
 
 	repo := &fakeIdentityStore{key: &identity.UserSSHPublicKey{UserID: "user-1"}}
-	manager := &fakeSandboxStore{getErr: managerclient.ErrSandboxNotFound}
-	authenticator := NewAuthenticator(repo, manager, time.Second, 10*time.Millisecond, zaptest.NewLogger(t))
+	authenticator := NewAuthenticator(repo, &fakeSandboxResolver{errs: []error{ErrSandboxUnavailable}}, time.Second, 10*time.Millisecond, zaptest.NewLogger(t))
 
 	_, err = authenticator.Authenticate(context.Background(), "sb_123", parsedKey)
 	if !errors.Is(err, ErrSandboxUnavailable) {

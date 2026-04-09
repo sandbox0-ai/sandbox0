@@ -302,6 +302,16 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {
 		cfg.DatabaseURL = dsn
 	}
+	if sshPort := int32(2222); infra.Spec.Services != nil && infra.Spec.Services.SSHGateway != nil && infra.Spec.Services.SSHGateway.Config != nil && infra.Spec.Services.SSHGateway.Config.SSHPort != 0 {
+		sshPort = int32(infra.Spec.Services.SSHGateway.Config.SSHPort)
+		if sshHost, advertisedPort, ok := common.ResolveSSHEndpoint(infra, sshPort); ok {
+			cfg.SSHEndpointHost = sshHost
+			cfg.SSHEndpointPort = int(advertisedPort)
+		}
+	} else if sshHost, advertisedPort, ok := common.ResolveSSHEndpoint(infra, 2222); ok {
+		cfg.SSHEndpointHost = sshHost
+		cfg.SSHEndpointPort = int(advertisedPort)
+	}
 
 	managerConfig := &apiconfig.ManagerConfig{}
 	if infra.Spec.Services != nil && infra.Spec.Services.Manager != nil {
@@ -411,12 +421,5 @@ func clusterGatewayPublicAuthEnabled(mode string) bool {
 }
 
 func internalAuthRequiresControlPlaneKey(cfg *apiconfig.ClusterGatewayConfig) bool {
-	if cfg == nil {
-		return true
-	}
-	mode := strings.TrimSpace(strings.ToLower(cfg.AuthMode))
-	if mode == "" {
-		mode = "internal"
-	}
-	return mode == "internal" || mode == "both"
+	return true
 }

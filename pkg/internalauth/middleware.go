@@ -15,6 +15,9 @@ const (
 	// TeamIDHeader is the header name for passing the team ID to internal services.
 	TeamIDHeader = "X-Team-ID"
 
+	// UserIDHeader is the header name for passing the user ID to internal services.
+	UserIDHeader = "X-User-ID"
+
 	// TokenForProcdHeader is the header name used to pass a storage token to procd.
 	TokenForProcdHeader = "X-Token-For-Procd"
 )

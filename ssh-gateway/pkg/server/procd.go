@@ -648,11 +648,11 @@ func (s *Server) dialContextWS(ctx context.Context, procdURL, contextID string, 
 }
 
 func (s *Server) procdHeaders(target *SessionTarget) (http.Header, error) {
-	internalToken, err := s.internalAuthGen.Generate("procd", target.TeamID, target.UserID, internalauth.GenerateOptions{})
+	internalToken, err := s.dataPlaneAuthGen.Generate("procd", target.TeamID, target.UserID, internalauth.GenerateOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("generate procd token: %w", err)
 	}
-	procdStorageToken, err := s.internalAuthGen.Generate("storage-proxy", target.TeamID, target.UserID, internalauth.GenerateOptions{
+	procdStorageToken, err := s.dataPlaneAuthGen.Generate("storage-proxy", target.TeamID, target.UserID, internalauth.GenerateOptions{
 		Permissions: s.procdStoragePermissions,
 		SandboxID:   target.SandboxID,
 	})

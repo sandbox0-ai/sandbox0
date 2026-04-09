@@ -28,16 +28,23 @@ type SSHGatewayConfig struct {
 	// +kubebuilder:default=8
 	DatabaseMinConns int `yaml:"database_min_conns" json:"databaseMinConns"`
 
-	// Upstream services
-	ManagerURL string `yaml:"manager_url" json:"-"`
+	// Upstream regional control-plane endpoint.
+	RegionalGatewayURL string `yaml:"regional_gateway_url" json:"-"`
 
-	// Internal authentication for calls to manager/procd/storage-proxy.
+	// Internal authentication caller identity shared across control-plane and
+	// data-plane internal requests.
 	// +optional
 	// +kubebuilder:default="30s"
 	InternalAuthTTL metav1.Duration `yaml:"internal_auth_ttl" json:"internalAuthTTL"`
 	// +optional
 	// +kubebuilder:default="ssh-gateway"
 	InternalAuthCaller string `yaml:"internal_auth_caller" json:"internalAuthCaller"`
+	// +optional
+	// +kubebuilder:default="/secrets/control_plane_internal_jwt_private.key"
+	ControlPlanePrivateKeyPath string `yaml:"control_plane_private_key_path" json:"-"`
+	// +optional
+	// +kubebuilder:default="/secrets/data_plane_internal_jwt_private.key"
+	DataPlanePrivateKeyPath string `yaml:"data_plane_private_key_path" json:"-"`
 
 	// SSH host key used by clients to verify the gateway identity.
 	// +optional

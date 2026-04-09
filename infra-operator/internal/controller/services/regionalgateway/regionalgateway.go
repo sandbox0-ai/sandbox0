@@ -71,7 +71,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	}
 
 	labels := common.GetServiceLabels(infra.Name, "regional-gateway")
-	keySecretName, privateKeyKey, _ := internalauth.GetControlPlaneKeyRefs(infra)
+	keySecretName, privateKeyKey, publicKeyKey := internalauth.GetControlPlaneKeyRefs(infra)
 
 	config, registryEnvVars, err := r.buildConfig(ctx, infra, compiledPlan)
 	if err != nil {
@@ -112,6 +112,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			SubPath:   "internal_jwt_private.key",
 			ReadOnly:  true,
 		},
+		{
+			Name:      "internal-jwt-public-key",
+			MountPath: pkginternalauth.DefaultInternalJWTPublicKeyPath,
+			SubPath:   "internal_jwt_public.key",
+			ReadOnly:  true,
+		},
 	}
 	volumes := []corev1.Volume{
 		{
@@ -131,6 +137,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 						{
 							Key:  privateKeyKey,
 							Path: "internal_jwt_private.key",
+						},
+					},
+				},
+			},
+		},
+		{
+			Name: "internal-jwt-public-key",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: keySecretName,
+					Items: []corev1.KeyToPath{
+						{
+							Key:  publicKeyKey,
+							Path: "internal_jwt_public.key",
 						},
 					},
 				},
@@ -300,6 +320,16 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	cfg.SchedulerEnabled = compiledPlan.Components.EnableScheduler
 	if compiledPlan.Services.Scheduler.URL != "" {
 		cfg.SchedulerURL = compiledPlan.Services.Scheduler.URL
+	}
+	if sshPort := int32(2222); infra.Spec.Services != nil && infra.Spec.Services.SSHGateway != nil && infra.Spec.Services.SSHGateway.Config != nil && infra.Spec.Services.SSHGateway.Config.SSHPort != 0 {
+		sshPort = int32(infra.Spec.Services.SSHGateway.Config.SSHPort)
+		if sshHost, advertisedPort, ok := common.ResolveSSHEndpoint(infra, sshPort); ok {
+			cfg.SSHEndpointHost = sshHost
+			cfg.SSHEndpointPort = int(advertisedPort)
+		}
+	} else if sshHost, advertisedPort, ok := common.ResolveSSHEndpoint(infra, 2222); ok {
+		cfg.SSHEndpointHost = sshHost
+		cfg.SSHEndpointPort = int(advertisedPort)
 	}
 
 	authMode := strings.TrimSpace(strings.ToLower(cfg.AuthMode))

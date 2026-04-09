@@ -1484,15 +1484,16 @@ type Sandbox struct {
 	ExposedPorts *[]ExposedPortConfig `json:"exposed_ports,omitempty"`
 
 	// HardExpiresAt Hard expiration timestamp. Zero value means not set.
-	HardExpiresAt time.Time         `json:"hard_expires_at"`
-	Id            string            `json:"id"`
-	Paused        bool              `json:"paused"`
-	PodName       string            `json:"pod_name"`
-	PowerState    SandboxPowerState `json:"power_state"`
-	Status        string            `json:"status"`
-	TeamId        string            `json:"team_id"`
-	TemplateId    string            `json:"template_id"`
-	UserId        *string           `json:"user_id,omitempty"`
+	HardExpiresAt time.Time             `json:"hard_expires_at"`
+	Id            string                `json:"id"`
+	Paused        bool                  `json:"paused"`
+	PodName       string                `json:"pod_name"`
+	PowerState    SandboxPowerState     `json:"power_state"`
+	Ssh           *SandboxSSHConnection `json:"ssh,omitempty"`
+	Status        string                `json:"status"`
+	TeamId        string                `json:"team_id"`
+	TemplateId    string                `json:"template_id"`
+	UserId        *string               `json:"user_id,omitempty"`
 }
 
 // SandboxConfig defines model for SandboxConfig.
@@ -1563,6 +1564,13 @@ type SandboxResourceUsage struct {
 	TotalMemoryVms            *int64                  `json:"total_memory_vms,omitempty"`
 	TotalOpenFiles            *int                    `json:"total_open_files,omitempty"`
 	TotalThreadCount          *int                    `json:"total_thread_count,omitempty"`
+}
+
+// SandboxSSHConnection defines model for SandboxSSHConnection.
+type SandboxSSHConnection struct {
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	Username string `json:"username"`
 }
 
 // SandboxStatus defines model for SandboxStatus.

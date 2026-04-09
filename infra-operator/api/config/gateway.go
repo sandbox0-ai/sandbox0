@@ -89,6 +89,12 @@ type GatewayConfig struct {
 	// TLSKeyPath points at the PEM private key file served by the gateway.
 	// +optional
 	TLSKeyPath string `yaml:"tls_key_path" json:"-"`
+
+	// SSH endpoint advertised to users for sandbox detail responses.
+	// +optional
+	SSHEndpointHost string `yaml:"ssh_endpoint_host" json:"-"`
+	// +optional
+	SSHEndpointPort int `yaml:"ssh_endpoint_port" json:"-"`
 }
 
 // BuiltInAuthConfig configures the built-in authentication.

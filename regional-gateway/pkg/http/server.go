@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	internalmiddleware "github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/middleware"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	registryprovider "github.com/sandbox0-ai/sandbox0/manager/pkg/registry"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
@@ -41,6 +42,7 @@ type Server struct {
 	clusterGatewayRouter *proxy.Router
 	schedulerRouter      *proxy.Router // Optional: proxy to scheduler for templates
 	authMiddleware       *middleware.AuthMiddleware
+	internalAuth         *internalmiddleware.InternalAuthMiddleware
 	rateLimiter          *middleware.RateLimiter
 	requestLogger        *middleware.RequestLogger
 	logger               *zap.Logger
@@ -56,11 +58,16 @@ type Server struct {
 	clusterCacheMu sync.RWMutex
 	entitlements   licensing.Entitlements
 	registry       registryprovider.Provider
+	teamMembership teamMembershipLookup
 
 	// Auth components
 	builtinProvider *builtin.Provider
 	oidcManager     *oidc.Manager
 	jwtIssuer       *authn.Issuer
+}
+
+type teamMembershipLookup interface {
+	GetTeamMember(ctx context.Context, teamID, userID string) (*identity.TeamMember, error)
 }
 
 // NewServer creates a new HTTP server
@@ -156,6 +163,18 @@ func NewServer(
 		TTL:        cfg.InternalAuthTTL.Duration,
 	})
 
+	publicKey, err := internalauth.LoadEd25519PublicKeyFromFile(internalauth.DefaultInternalJWTPublicKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("load internal JWT public key: %w", err)
+	}
+	internalValidator := internalauth.NewValidator(internalauth.ValidatorConfig{
+		Target:             internalauth.ServiceRegionalGateway,
+		PublicKey:          publicKey,
+		AllowedCallers:     []string{internalauth.ServiceSSHGateway},
+		ClockSkewTolerance: 10 * time.Second,
+	})
+	internalAuth := internalmiddleware.NewInternalAuthMiddleware(internalValidator, logger)
+
 	// Initialize JWT issuer
 	jwtIssuer, err := authn.NewIssuerFromConfig(cfg.JWTIssuer, cfg.JWTSecret, cfg.JWTPrivateKeyPEM, cfg.JWTPublicKeyPEM, cfg.JWTPrivateKeyFile, cfg.JWTPublicKeyFile, cfg.JWTAccessTokenTTL.Duration, cfg.JWTRefreshTokenTTL.Duration)
 	if err != nil {
@@ -211,6 +230,7 @@ func NewServer(
 		clusterGatewayRouter:  clusterGatewayRouter,
 		schedulerRouter:       schedulerRouter,
 		authMiddleware:        authMiddleware,
+		internalAuth:          internalAuth,
 		rateLimiter:           rateLimiter,
 		requestLogger:         requestLogger,
 		logger:                logger,
@@ -221,6 +241,7 @@ func NewServer(
 		clusterCache:          make(map[string]string),
 		entitlements:          publicEntitlements,
 		registry:              registryProvider,
+		teamMembership:        identityRepo,
 
 		builtinProvider: builtinProvider,
 		oidcManager:     oidcManager,
@@ -251,6 +272,7 @@ func (s *Server) setupRoutes() {
 
 	s.setupPublicRoutes()
 	s.setupMeteringRoutes()
+	s.setupInternalSSHRoutes()
 
 	// ===== API Proxy Routes =====
 	// These routes proxy to cluster-gateway (or scheduler for templates) after authentication
@@ -278,6 +300,7 @@ func (s *Server) setupRoutes() {
 			sandboxes := api.Group("/v1/sandboxes")
 			sandboxes.GET("", s.injectInternalTokenForTarget("scheduler"), s.schedulerRouter.ProxyToTarget)
 			sandboxes.POST("", s.injectInternalTokenForTarget("scheduler"), s.schedulerRouter.ProxyToTarget)
+			sandboxes.GET("/:id", s.getSandboxDetail)
 			sandboxes.Any("/:id", s.proxySandbox)
 			sandboxes.Any("/:id/*path", s.proxySandbox)
 		}
@@ -302,6 +325,18 @@ func (s *Server) setupRoutes() {
 	// Unmatched API routes fall back to the default cluster-gateway. Everything
 	// else goes through the public exposure fallback.
 	s.router.NoRoute(s.handleNoRoute)
+}
+
+func (s *Server) setupInternalSSHRoutes() {
+	if s.internalAuth == nil {
+		return
+	}
+
+	internal := s.router.Group("/internal/v1")
+	internal.Use(s.internalAuth.Authenticate())
+	{
+		internal.GET("/sandboxes/:id/ssh-target", s.resolveInternalSSHTarget)
+	}
 }
 
 func (s *Server) setupMeteringRoutes() {
@@ -385,7 +420,7 @@ func (s *Server) handleAPINoRoute(c *gin.Context) bool {
 	if c.IsAborted() {
 		return true
 	}
-	token, err := s.generateInternalToken(c, authCtx, "cluster-gateway")
+	token, err := s.generateInternalToken(authCtx, "cluster-gateway")
 	if err != nil {
 		s.logger.Error("Failed to generate internal token for cluster-gateway fallback", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "internal server error")
@@ -411,14 +446,7 @@ func (s *Server) injectInternalTokenForTarget(target string) gin.HandlerFunc {
 		}
 
 		// Generate internal token for the target service
-		token, err := s.internalAuthGen.Generate(
-			target,
-			authCtx.TeamID,
-			authCtx.UserID,
-			internalauth.GenerateOptions{
-				Permissions: authCtx.Permissions,
-			},
-		)
+		token, err := s.generateInternalToken(authCtx, target)
 		if err != nil {
 			s.logger.Error("Failed to generate internal token",
 				zap.String("target", target),

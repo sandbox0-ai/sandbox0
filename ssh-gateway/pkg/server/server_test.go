@@ -177,6 +177,9 @@ func TestServerExecBridge(t *testing.T) {
 			if got, want := req.Cmd.Command, []string{"/bin/sh", "-lc", "printf hello"}; strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 				t.Fatalf("cmd command = %#v, want %#v", got, want)
 			}
+			if req.PTYSize != nil {
+				t.Fatalf("exec context should not allocate a PTY by default: %+v", req.PTYSize)
+			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
 			_, _ = io.WriteString(w, `{"success":true,"data":{"id":"ctx-exec"}}`)

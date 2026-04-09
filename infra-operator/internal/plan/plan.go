@@ -335,8 +335,8 @@ func compileValidationPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPl
 	if compiled != nil && compiled.Components.EnableSSHGateway && !compiled.Components.EnableDatabase {
 		plan.FatalErrors = append(plan.FatalErrors, "sshGateway requires database to be enabled")
 	}
-	if compiled != nil && compiled.Components.EnableSSHGateway && !compiled.Components.EnableManager {
-		plan.FatalErrors = append(plan.FatalErrors, "sshGateway requires manager to be enabled")
+	if compiled != nil && compiled.Components.EnableSSHGateway && !compiled.Components.EnableRegionalGateway {
+		plan.FatalErrors = append(plan.FatalErrors, "sshGateway requires regionalGateway to be enabled")
 	}
 	if infra.Spec.Cluster != nil && (compiled == nil || !compiled.Components.HasDataPlane) {
 		plan.FatalErrors = append(plan.FatalErrors, "cluster configuration requires at least one data-plane service")

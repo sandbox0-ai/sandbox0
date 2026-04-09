@@ -18,10 +18,10 @@ import (
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 )
 
-func TestBuildConfigUsesManagerServiceURL(t *testing.T) {
+func TestBuildConfigUsesRegionalGatewayURL(t *testing.T) {
 	scheme := newTestScheme(t)
 	infra := newTestSSHGatewayInfra()
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(newExternalDatabasePasswordSecret(), newDataPlaneKeySecret(infra)).Build()
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(newExternalDatabasePasswordSecret(), newControlPlaneKeySecret(infra), newDataPlaneKeySecret(infra)).Build()
 	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
 	compiled := infraplan.Compile(infra)
 
@@ -29,8 +29,8 @@ func TestBuildConfigUsesManagerServiceURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildConfig() error = %v", err)
 	}
-	if got, want := cfg.ManagerURL, compiled.Services.Manager.URL; got != want {
-		t.Fatalf("ManagerURL = %q, want %q", got, want)
+	if got, want := cfg.RegionalGatewayURL, compiled.Status.Endpoints.RegionalGatewayInternal; got != want {
+		t.Fatalf("RegionalGatewayURL = %q, want %q", got, want)
 	}
 	if got := cfg.DatabaseURL; !strings.Contains(got, "sandbox0:secret@tcp") && !strings.Contains(got, "sandbox0:secret@db.example.com") && !strings.Contains(got, "secret") {
 		t.Fatalf("DatabaseURL = %q, want secret-backed DSN", got)
@@ -47,7 +47,7 @@ func TestReconcileCreatesSSHGatewayResources(t *testing.T) {
 	scheme := newTestScheme(t)
 	infra := newTestSSHGatewayInfra()
 	infra.Spec.Services.SSHGateway.Replicas = 0
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(newExternalDatabasePasswordSecret(), newDataPlaneKeySecret(infra)).Build()
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(newExternalDatabasePasswordSecret(), newControlPlaneKeySecret(infra), newDataPlaneKeySecret(infra)).Build()
 	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
 
 	if err := reconciler.Reconcile(context.Background(), infra, "ghcr.io/sandbox0/test", "dev", infraplan.Compile(infra)); err != nil {
@@ -61,9 +61,19 @@ func TestReconcileCreatesSSHGatewayResources(t *testing.T) {
 	if got := deployment.Spec.Template.Spec.Containers[0].Env[0].Value; got != "ssh-gateway" {
 		t.Fatalf("SERVICE env = %q, want ssh-gateway", got)
 	}
-	secretName, _, _ := internalauth.GetDataPlaneKeyRefs(infra)
-	if got := deployment.Spec.Template.Spec.Volumes[1].Secret.SecretName; got != secretName {
-		t.Fatalf("internal auth secret = %q, want %q", got, secretName)
+	controlPlaneSecretName, _, _ := internalauth.GetControlPlaneKeyRefs(infra)
+	dataPlaneSecretName, _, _ := internalauth.GetDataPlaneKeyRefs(infra)
+	volumeSecrets := make(map[string]string)
+	for _, volume := range deployment.Spec.Template.Spec.Volumes {
+		if volume.Secret != nil {
+			volumeSecrets[volume.Name] = volume.Secret.SecretName
+		}
+	}
+	if got := volumeSecrets["control-plane-internal-jwt-private-key"]; got != controlPlaneSecretName {
+		t.Fatalf("control-plane internal auth secret = %q, want %q", got, controlPlaneSecretName)
+	}
+	if got := volumeSecrets["data-plane-internal-jwt-private-key"]; got != dataPlaneSecretName {
+		t.Fatalf("data-plane internal auth secret = %q, want %q", got, dataPlaneSecretName)
 	}
 	if deployment.Spec.Template.Spec.Containers[0].Ports[0].ContainerPort != 2222 {
 		t.Fatalf("container port = %d, want 2222", deployment.Spec.Template.Spec.Containers[0].Ports[0].ContainerPort)
@@ -82,8 +92,8 @@ func TestReconcileCreatesSSHGatewayResources(t *testing.T) {
 		t.Fatalf("get configmap: %v", err)
 	}
 	configYAML := configMap.Data["config.yaml"]
-	if !strings.Contains(configYAML, "manager_url: http://demo-manager.sandbox0-system.svc.cluster.local:18080") {
-		t.Fatalf("config.yaml missing manager_url: %s", configYAML)
+	if !strings.Contains(configYAML, "regional_gateway_url: http://demo-regional-gateway:18080") {
+		t.Fatalf("config.yaml missing regional_gateway_url: %s", configYAML)
 	}
 	if !strings.Contains(configYAML, "ssh_port: 2222") {
 		t.Fatalf("config.yaml missing ssh_port: %s", configYAML)
@@ -128,6 +138,10 @@ func newTestSSHGatewayInfra() *infrav1alpha1.Sandbox0Infra {
 				},
 			},
 			Services: &infrav1alpha1.ServicesConfig{
+				RegionalGateway: &infrav1alpha1.RegionalGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true}, Replicas: 1},
+					Config:                &infrav1alpha1.RegionalGatewayConfig{HTTPPort: 18080},
+				},
 				Manager: &infrav1alpha1.ManagerServiceConfig{
 					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true}, Replicas: 1},
 					Config:                &infrav1alpha1.ManagerConfig{HTTPPort: 18080},
@@ -155,6 +169,17 @@ func newDataPlaneKeySecret(infra *infrav1alpha1.Sandbox0Infra) *corev1.Secret {
 		Data: map[string][]byte{
 			privateKeyKey: []byte("test-private-key"),
 			publicKeyKey:  []byte("test-public-key"),
+		},
+	}
+}
+
+func newControlPlaneKeySecret(infra *infrav1alpha1.Sandbox0Infra) *corev1.Secret {
+	name, privateKeyKey, publicKeyKey := internalauth.GetControlPlaneKeyRefs(infra)
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: infra.Namespace},
+		Data: map[string][]byte{
+			privateKeyKey: []byte("test-control-private-key"),
+			publicKeyKey:  []byte("test-control-public-key"),
 		},
 	}
 }

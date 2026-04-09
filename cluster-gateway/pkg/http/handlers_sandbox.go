@@ -1,12 +1,15 @@
 package http
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/client"
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	sharedssh "github.com/sandbox0-ai/sandbox0/pkg/sshgateway"
 	"go.uber.org/zap"
 )
 
@@ -56,8 +59,26 @@ func (s *Server) getSandbox(c *gin.Context) {
 		return
 	}
 
-	// Proxy to manager - manager will handle team ownership verification
-	s.proxyToManager(c)
+	authCtx := middleware.GetAuthContext(c)
+	sandbox, err := s.managerClient.GetSandbox(c.Request.Context(), sandboxID, authCtx.UserID, authCtx.TeamID)
+	if err != nil {
+		s.logger.Warn("Failed to get sandbox from manager",
+			zap.String("sandbox_id", sandboxID),
+			zap.String("team_id", authCtx.TeamID),
+			zap.String("user_id", authCtx.UserID),
+			zap.Error(err),
+		)
+		switch {
+		case errors.Is(err, client.ErrSandboxNotFound):
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "sandbox not found")
+		default:
+			spec.JSONError(c, http.StatusBadGateway, spec.CodeUnavailable, "sandbox unavailable")
+		}
+		return
+	}
+
+	payload := sharedssh.SandboxToAPI(sandbox, sharedssh.BuildConnectionInfo(s.cfg.SSHEndpointHost, s.cfg.SSHEndpointPort, sandbox.ID))
+	spec.JSONSuccess(c, http.StatusOK, payload)
 }
 
 // getSandboxStatus gets sandbox status

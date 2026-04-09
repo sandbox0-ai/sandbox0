@@ -23,6 +23,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"strings"
 
 	yamlv3 "gopkg.in/yaml.v3"
 	appsv1 "k8s.io/api/apps/v1"
@@ -320,6 +321,27 @@ func ResolveServicePort(config *infrav1alpha1.ServiceNetworkConfig, fallback int
 		return config.Port
 	}
 	return fallback
+}
+
+// ResolveSSHEndpoint returns the advertised SSH endpoint for a region when the
+// SSH gateway is enabled and public routing is configured.
+func ResolveSSHEndpoint(infra *infrav1alpha1.Sandbox0Infra, fallbackPort int32) (string, int32, bool) {
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.SSHGateway == nil || !infra.Spec.Services.SSHGateway.Enabled {
+		return "", 0, false
+	}
+
+	rootDomain := strings.TrimSpace(infra.Spec.PublicExposure.RootDomain)
+	regionLabel := strings.TrimSpace(infra.Spec.PublicExposure.RegionID)
+	if rootDomain == "" || regionLabel == "" {
+		return "", 0, false
+	}
+
+	port := ResolveServicePort(infra.Spec.Services.SSHGateway.Service, fallbackPort)
+	if port <= 0 {
+		return "", 0, false
+	}
+
+	return fmt.Sprintf("ssh.%s.%s", regionLabel, rootDomain), port, true
 }
 
 func ResolveServiceAnnotations(config *infrav1alpha1.ServiceNetworkConfig) map[string]string {

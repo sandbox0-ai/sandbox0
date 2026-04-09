@@ -367,6 +367,85 @@ func TestBuildConfigUsesCompiledPlanForDefaultClusterGatewayURL(t *testing.T) {
 	}
 }
 
+func TestBuildConfigPublishesSSHEndpoint(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to add corev1 scheme: %v", err)
+	}
+	if err := infrav1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to add infra scheme: %v", err)
+	}
+
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "s0cp",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			PublicExposure: &infrav1alpha1.PublicExposureConfig{
+				RootDomain: "sandbox0.app",
+				RegionID:   "aws-us-east-1",
+			},
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeExternal,
+				External: &infrav1alpha1.ExternalDatabaseConfig{
+					Host:     "postgres.example.internal",
+					Port:     5432,
+					Database: "sandbox0",
+					Username: "sandbox0",
+					PasswordSecret: infrav1alpha1.SecretKeyRef{
+						Name: "regional-db",
+						Key:  "password",
+					},
+				},
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				RegionalGateway: &infrav1alpha1.RegionalGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+				SSHGateway: &infrav1alpha1.SSHGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					ServiceExposureConfig: infrav1alpha1.ServiceExposureConfig{
+						Service: &infrav1alpha1.ServiceNetworkConfig{
+							Type: corev1.ServiceTypeNodePort,
+							Port: 30222,
+						},
+					},
+					Config: &infrav1alpha1.SSHGatewayConfig{
+						SSHPort: 2222,
+					},
+				},
+			},
+		},
+	}
+	dbSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "regional-db",
+			Namespace: "sandbox0-system",
+		},
+		Data: map[string][]byte{
+			"password": []byte("secret"),
+		},
+	}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dbSecret).Build()
+	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
+	cfg, _, err := reconciler.buildConfig(context.Background(), infra, infraplan.Compile(infra))
+	if err != nil {
+		t.Fatalf("buildConfig returned error: %v", err)
+	}
+	if cfg.SSHEndpointHost != "ssh.aws-us-east-1.sandbox0.app" {
+		t.Fatalf("ssh endpoint host = %q, want %q", cfg.SSHEndpointHost, "ssh.aws-us-east-1.sandbox0.app")
+	}
+	if cfg.SSHEndpointPort != 30222 {
+		t.Fatalf("ssh endpoint port = %d, want %d", cfg.SSHEndpointPort, 30222)
+	}
+}
+
 func TestBuildConfigUsesCompiledPlanForSchedulerRouting(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {

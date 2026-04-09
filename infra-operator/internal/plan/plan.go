@@ -243,9 +243,13 @@ func compileClusterGatewayServiceReference(infra *infrav1alpha1.Sandbox0Infra) S
 
 func compileManagerPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) ManagerPlan {
 	nodeSelector, tolerations := common.ResolveSandboxNodePlacement(infra)
+	templateStoreEnabled := clusterGatewayAuthMode(infra) != defaultClusterGatewayAuthMode
+	if infrav1alpha1.IsRegionalGatewayEnabled(infra) && !infrav1alpha1.IsSchedulerEnabled(infra) {
+		templateStoreEnabled = true
+	}
 
 	managerPlan := ManagerPlan{
-		TemplateStoreEnabled:  clusterGatewayAuthMode(infra) != defaultClusterGatewayAuthMode,
+		TemplateStoreEnabled:  templateStoreEnabled,
 		NetworkPolicyProvider: "noop",
 		SandboxPodPlacement: apiconfig.SandboxPodPlacementConfig{
 			NodeSelector: nodeSelector,

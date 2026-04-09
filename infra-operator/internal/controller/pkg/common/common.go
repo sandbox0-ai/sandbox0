@@ -339,11 +339,27 @@ func (r *ResourceManager) ReconcileService(ctx context.Context, infra *infrav1al
 
 // ReconcileServicePorts creates or updates a service with multiple ports.
 func (r *ResourceManager) ReconcileServicePorts(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, labels map[string]string, serviceType corev1.ServiceType, annotations map[string]string, ports []corev1.ServicePort) error {
+	return r.reconcileServicePorts(ctx, infra, name, labels, serviceType, annotations, ports, nil)
+}
+
+func (r *ResourceManager) ReconcileServicePortsWithSpecMutator(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, labels map[string]string, serviceType corev1.ServiceType, annotations map[string]string, ports []corev1.ServicePort, mutate func(*corev1.ServiceSpec)) error {
+	return r.reconcileServicePorts(ctx, infra, name, labels, serviceType, annotations, ports, mutate)
+}
+
+func (r *ResourceManager) reconcileServicePorts(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, labels map[string]string, serviceType corev1.ServiceType, annotations map[string]string, ports []corev1.ServicePort, mutate func(*corev1.ServiceSpec)) error {
 	if len(ports) == 0 {
 		return fmt.Errorf("service %q requires at least one port", name)
 	}
 
 	desiredLabels := EnsureManagedLabels(labels, name)
+	desiredSpec := corev1.ServiceSpec{
+		Type:     serviceType,
+		Selector: labels,
+		Ports:    ports,
+	}
+	if mutate != nil {
+		mutate(&desiredSpec)
+	}
 	desiredSvc := corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        name,
@@ -351,11 +367,7 @@ func (r *ResourceManager) ReconcileServicePorts(ctx context.Context, infra *infr
 			Labels:      desiredLabels,
 			Annotations: CloneStringMap(annotations),
 		},
-		Spec: corev1.ServiceSpec{
-			Type:     serviceType,
-			Selector: labels,
-			Ports:    ports,
-		},
+		Spec: desiredSpec,
 	}
 
 	if err := ctrl.SetControllerReference(infra, &desiredSvc, r.Scheme); err != nil {

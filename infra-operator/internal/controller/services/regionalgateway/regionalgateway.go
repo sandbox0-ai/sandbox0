@@ -27,7 +27,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
@@ -243,7 +242,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		appProtocol := "HTTPS"
 		serviceAppProtocol = &appProtocol
 	}
-	if err := r.Resources.ReconcileServicePorts(ctx, infra, serviceName, labels, serviceType, serviceAnnotations, []corev1.ServicePort{
+	if err := r.Resources.ReconcileServicePortsWithSpecMutator(ctx, infra, serviceName, labels, serviceType, serviceAnnotations, []corev1.ServicePort{
 		{
 			Name:        servicePortName,
 			Port:        servicePort,
@@ -257,23 +256,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 				return 0
 			}(),
 		},
+	}, func(spec *corev1.ServiceSpec) {
+		if serviceType == corev1.ServiceTypeLoadBalancer {
+			spec.ExternalTrafficPolicy = corev1.ServiceExternalTrafficPolicyLocal
+		}
 	}); err != nil {
 		return err
-	}
-	if serviceType == corev1.ServiceTypeLoadBalancer {
-		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			service := &corev1.Service{}
-			if err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: serviceName, Namespace: infra.Namespace}, service); err != nil {
-				return err
-			}
-			if service.Spec.ExternalTrafficPolicy == corev1.ServiceExternalTrafficPolicyLocal {
-				return nil
-			}
-			service.Spec.ExternalTrafficPolicy = corev1.ServiceExternalTrafficPolicyLocal
-			return r.Resources.Client.Update(ctx, service)
-		}); err != nil {
-			return err
-		}
 	}
 
 	// Create ingress if enabled

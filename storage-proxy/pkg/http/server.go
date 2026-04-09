@@ -124,7 +124,19 @@ type Server struct {
 }
 
 // NewServer creates a new HTTP server
-func NewServer(logger *logrus.Logger, cfg *config.StorageProxyConfig, k8sClient kubernetes.Interface, repo volumeRepository, meteringRepo meteringWriter, regionID string, authenticator *auth.HTTPAuthenticator, snapshotMgr snapshotManager, syncMgr syncManager, barrier volumeMutationBarrier, volMgr volumeMountManager, fileRPC volumeFileRPC, eventHub *notify.Hub, obsProvider *observability.Provider, metrics *obsmetrics.StorageProxyMetrics) *Server {
+func NewServer(logger *logrus.Logger, cfg *config.StorageProxyConfig, k8sClient kubernetes.Interface, repo volumeRepository, meteringRepo meteringWriter, regionID string, authenticator *auth.HTTPAuthenticator, snapshotMgr snapshotManager, syncMgr syncManager, barrier volumeMutationBarrier, volMgr volumeMountManager, fileRPC volumeFileRPC, eventHub *notify.Hub, opts ...any) *Server {
+	var obsProvider *observability.Provider
+	var metrics *obsmetrics.StorageProxyMetrics
+	if len(opts) > 0 {
+		if provider, ok := opts[0].(*observability.Provider); ok {
+			obsProvider = provider
+		}
+	}
+	if len(opts) > 1 {
+		if storageMetrics, ok := opts[1].(*obsmetrics.StorageProxyMetrics); ok {
+			metrics = storageMetrics
+		}
+	}
 	selfPodID, err := os.Hostname()
 	if err != nil {
 		selfPodID = ""

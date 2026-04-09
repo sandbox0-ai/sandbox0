@@ -32,6 +32,10 @@
           "title": "Files"
         },
         {
+          "slug": "ssh",
+          "title": "SSH"
+        },
+        {
           "slug": "network",
           "title": "Network"
         },

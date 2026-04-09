@@ -98,6 +98,49 @@ spec:
             regionId: aws-us-east-1
 ```
 
+### SSH Gateway
+
+Enable `spec.services.sshGateway` when you want a region-scoped SSH entrypoint that bridges standard `ssh` and `scp` clients into sandbox `procd` sessions.
+
+The routing model is intentionally simple:
+
+- One `ssh-gateway` per region
+- One fixed host or load balancer address per region
+- SSH username is the target sandbox ID
+- User authentication uses SSH public keys uploaded to the gateway API
+
+In Kubernetes terms, `spec.services.sshGateway.service.port` is the externally exposed Service port and `spec.services.sshGateway.config.sshPort` is the container listen port. You usually keep the internal port at `2222` and expose `22` or a NodePort externally.
+
+The operator also manages a persistent Ed25519 host key Secret for the service. As long as that Secret is retained, clients continue to see the same SSH host identity across pod restarts.
+
+```yaml
+spec:
+    services:
+        sshGateway:
+            enabled: true
+            replicas: 1
+            service:
+                type: LoadBalancer
+                port: 22
+            config:
+                sshPort: 2222
+```
+
+For local labs or kind-style environments, a `NodePort` is often simpler:
+
+```yaml
+spec:
+    services:
+        sshGateway:
+            enabled: true
+            replicas: 1
+            service:
+                type: NodePort
+                port: 30222
+```
+
+After exposing the service through DNS or a load balancer, users can upload SSH public keys with `POST /api/v1/users/me/ssh-keys` and connect with standard clients. See [SSH](/docs/sandbox/ssh) for the user-facing flow.
+
 ### AWS LoadBalancer TLS
 
 When you expose `regionalGateway` or `globalGateway` through a cloud load balancer instead of Kubernetes `Ingress`, declare provider-specific Service annotations under `spec.services.<service>.service.annotations`. On AWS, this is the supported place to attach ACM certificates and choose the load balancer mode.

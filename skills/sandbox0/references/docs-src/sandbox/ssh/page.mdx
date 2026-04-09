@@ -1,0 +1,167 @@
+# SSH
+
+Use standard SSH clients to open a shell inside a sandbox or copy files with `scp`. Sandbox0 terminates SSH at a region-scoped `ssh-gateway`, authenticates the user from uploaded SSH public keys, and bridges the session into the sandbox runtime.
+
+<Callout variant="info">
+SSH access currently targets the main sandbox container. Sidecars are not exposed as separate SSH targets.
+</Callout>
+
+## Connection Model
+
+| Part | Value | Example |
+|------|-------|---------|
+| Gateway host | One fixed SSH endpoint for the region | `ssh.us-east-1.sandbox0.example.com` |
+| SSH username | Target sandbox ID | `rs-abc123-default-x7k9m` |
+| Authentication | SSH public key uploaded to the current user | `ssh-ed25519 AAAA...` |
+| Session target | Interactive shell or remote command in the sandbox main container | `ssh <sandbox-id>@<host>` |
+
+The gateway uses the SSH username to decide which sandbox to connect to. Your uploaded public key identifies the user, and the platform still enforces normal sandbox authorization before opening the session.
+
+<Callout variant="warning">
+Legacy `scp -O` is not supported. Use the default OpenSSH `scp` behavior, which runs over the SFTP subsystem.
+</Callout>
+
+---
+
+## Manage SSH Public Keys
+
+Upload your SSH public key once, then reuse standard `ssh`, `scp`, and `sftp` clients.
+
+<Endpoint method="GET">
+/api/v1/users/me/ssh-keys
+</Endpoint>
+
+<Endpoint method="POST">
+/api/v1/users/me/ssh-keys
+</Endpoint>
+
+### Create Request Body
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | User-defined label for the key |
+| `public_key` | string | Authorized-key format public key |
+
+### SSH Public Key Object
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | Stable key ID |
+| `name` | string | User-defined label |
+| `public_key` | string | Normalized authorized-key line |
+| `key_type` | string | Parsed key type, such as `ssh-ed25519` |
+| `fingerprint_sha256` | string | SHA-256 fingerprint |
+| `comment` | string | Optional key comment from the authorized-key line |
+| `created_at` | string | Creation time |
+| `updated_at` | string | Last update time |
+
+```bash
+curl -X POST "$SANDBOX0_BASE_URL/api/v1/users/me/ssh-keys" \
+  -H "Authorization: Bearer $SANDBOX0_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "laptop",
+    "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample user@host"
+  }'
+```
+
+List the keys currently attached to your user:
+
+```bash
+curl "$SANDBOX0_BASE_URL/api/v1/users/me/ssh-keys" \
+  -H "Authorization: Bearer $SANDBOX0_TOKEN"
+```
+
+Delete a key you no longer want to trust:
+
+<Endpoint method="DELETE">
+/api/v1/users/me/ssh-keys/{'{id}'}
+</Endpoint>
+
+```bash
+curl -X DELETE "$SANDBOX0_BASE_URL/api/v1/users/me/ssh-keys/$KEY_ID" \
+  -H "Authorization: Bearer $SANDBOX0_TOKEN"
+```
+
+---
+
+## Connect to a Sandbox
+
+Use the sandbox ID as the SSH username.
+
+```bash
+ssh rs-abc123-default-x7k9m@ssh.us-east-1.sandbox0.example.com
+```
+
+Run a one-shot remote command instead of opening an interactive shell:
+
+```bash
+ssh rs-abc123-default-x7k9m@ssh.us-east-1.sandbox0.example.com 'uname -a'
+```
+
+If the sandbox is paused, `ssh-gateway` asks the control plane to resume it before attaching the session.
+
+For self-hosted deployments, the hostname can be any address you expose for `spec.services.sshGateway.service`. The connection rule stays the same: host selects the region gateway, username selects the sandbox.
+
+---
+
+## Copy Files with scp
+
+Use standard `scp` to upload or download files. The default OpenSSH mode is supported.
+
+Upload a local file:
+
+```bash
+scp ./build.log rs-abc123-default-x7k9m@ssh.us-east-1.sandbox0.example.com:/workspace/build.log
+```
+
+Download a file from the sandbox:
+
+```bash
+scp rs-abc123-default-x7k9m@ssh.us-east-1.sandbox0.example.com:/workspace/output.txt ./output.txt
+```
+
+Because `scp` runs over the SFTP subsystem here, `sftp` clients work too:
+
+```bash
+sftp rs-abc123-default-x7k9m@ssh.us-east-1.sandbox0.example.com
+```
+
+---
+
+## Operational Notes
+
+- SSH authorization stays at the platform layer. You do not manage `authorized_keys` inside each sandbox.
+- Uploaded SSH public keys belong to the user account, not to one sandbox.
+- A key can access any sandbox that the user is authorized to access in that region.
+- SSH is best for human shell access and standard file transfer. For programmatic process control, use [Contexts](/docs/sandbox/contexts).
+
+---
+
+## Next Steps
+
+<CardGrid>
+  <LinkCard
+    title="Files"
+    href="/docs/sandbox/files"
+    cta="Learn More"
+  >
+    Read, write, and manage files directly through the API
+  </LinkCard>
+
+  <LinkCard
+    title="Contexts"
+    href="/docs/sandbox/contexts"
+    cta="Learn More"
+  >
+    Use REPL and command contexts for programmatic execution
+  </LinkCard>
+
+  <LinkCard
+    title="Self-Hosted Configuration"
+    href="/docs/self-hosted/configuration"
+    cta="Configure"
+  >
+    Expose and operate `ssh-gateway` in your own region deployment
+  </LinkCard>
+</CardGrid>

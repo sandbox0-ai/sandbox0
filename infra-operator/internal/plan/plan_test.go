@@ -132,6 +132,45 @@ func TestCompilePreservesExplicitNetdResolverURL(t *testing.T) {
 	}
 }
 
+func TestCompileEnablesManagerTemplateStoreForRegionalGatewayWithoutScheduler(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Services: &infrav1alpha1.ServicesConfig{
+				RegionalGateway: &infrav1alpha1.RegionalGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{
+							Enabled: true,
+						},
+					},
+				},
+				ClusterGateway: &infrav1alpha1.ClusterGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					Config: &infrav1alpha1.ClusterGatewayConfig{
+						AuthMode: "internal",
+					},
+				},
+				Manager: &infrav1alpha1.ManagerServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+			},
+		},
+	}
+
+	compiled := Compile(infra)
+
+	if !compiled.Manager.TemplateStoreEnabled {
+		t.Fatal("expected regional single-cluster mode to enable manager template store")
+	}
+}
+
 func TestCompileTracksBuiltinAndExternalBackendEnablement(t *testing.T) {
 	t.Run("builtin backends can be disabled explicitly", func(t *testing.T) {
 		infra := &infrav1alpha1.Sandbox0Infra{

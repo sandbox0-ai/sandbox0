@@ -339,43 +339,56 @@ func (r *ResourceManager) ReconcileService(ctx context.Context, infra *infrav1al
 
 // ReconcileServicePorts creates or updates a service with multiple ports.
 func (r *ResourceManager) ReconcileServicePorts(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, labels map[string]string, serviceType corev1.ServiceType, annotations map[string]string, ports []corev1.ServicePort) error {
+	return r.reconcileServicePorts(ctx, infra, name, labels, serviceType, annotations, ports, nil)
+}
+
+func (r *ResourceManager) ReconcileServicePortsWithSpecMutator(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, labels map[string]string, serviceType corev1.ServiceType, annotations map[string]string, ports []corev1.ServicePort, mutate func(*corev1.ServiceSpec)) error {
+	return r.reconcileServicePorts(ctx, infra, name, labels, serviceType, annotations, ports, mutate)
+}
+
+func (r *ResourceManager) reconcileServicePorts(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, labels map[string]string, serviceType corev1.ServiceType, annotations map[string]string, ports []corev1.ServicePort, mutate func(*corev1.ServiceSpec)) error {
 	if len(ports) == 0 {
 		return fmt.Errorf("service %q requires at least one port", name)
 	}
 
-	svc := &corev1.Service{}
-	err := r.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, svc)
-	if err != nil && !errors.IsNotFound(err) {
-		return err
-	}
-
 	desiredLabels := EnsureManagedLabels(labels, name)
-	desiredSvc := &corev1.Service{
+	desiredSpec := corev1.ServiceSpec{
+		Type:     serviceType,
+		Selector: labels,
+		Ports:    ports,
+	}
+	if mutate != nil {
+		mutate(&desiredSpec)
+	}
+	desiredSvc := corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        name,
 			Namespace:   infra.Namespace,
 			Labels:      desiredLabels,
 			Annotations: CloneStringMap(annotations),
 		},
-		Spec: corev1.ServiceSpec{
-			Type:     serviceType,
-			Selector: labels,
-			Ports:    ports,
-		},
+		Spec: desiredSpec,
 	}
 
-	if err := ctrl.SetControllerReference(infra, desiredSvc, r.Scheme); err != nil {
+	if err := ctrl.SetControllerReference(infra, &desiredSvc, r.Scheme); err != nil {
 		return err
 	}
 
-	if errors.IsNotFound(err) {
-		return r.Client.Create(ctx, desiredSvc)
-	}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		svc := &corev1.Service{}
+		err := r.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, svc)
+		if errors.IsNotFound(err) {
+			return r.Client.Create(ctx, desiredSvc.DeepCopy())
+		}
+		if err != nil {
+			return err
+		}
 
-	svc.Spec = desiredSvc.Spec
-	svc.Labels = desiredLabels
-	svc.Annotations = CloneStringMap(annotations)
-	return r.Client.Update(ctx, svc)
+		svc.Spec = desiredSvc.Spec
+		svc.Labels = desiredLabels
+		svc.Annotations = CloneStringMap(annotations)
+		return r.Client.Update(ctx, svc)
+	})
 }
 
 // BuildServicePort returns a ServicePort with a target port.

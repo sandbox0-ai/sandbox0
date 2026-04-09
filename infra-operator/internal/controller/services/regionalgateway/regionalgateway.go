@@ -19,6 +19,7 @@ package regionalgateway
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -31,6 +32,7 @@ import (
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
+	webhookcerts "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/webhook"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/registry"
@@ -91,6 +93,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		resources = infra.Spec.Services.RegionalGateway.Resources
 		serviceConfig = infra.Spec.Services.RegionalGateway.Service
 	}
+	tlsEnabled := strings.TrimSpace(config.TLSCertPath) != "" && strings.TrimSpace(config.TLSKeyPath) != ""
+	containerPortName := "http"
+	if tlsEnabled {
+		containerPortName = "https"
+	}
 
 	volumeMounts := []corev1.VolumeMount{
 		{
@@ -133,6 +140,38 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	if needEnterpriseLicense {
 		volumeMounts, volumes = common.AppendEnterpriseLicenseVolume(infra, config.LicenseFile, volumeMounts, volumes)
 	}
+	if tlsEnabled {
+		tlsSecretName := fmt.Sprintf("%s-regional-gateway-tls", infra.Name)
+		dnsNames := regionalGatewayTLSDNSNames(config)
+		if len(dnsNames) == 0 {
+			return fmt.Errorf("regional-gateway TLS enabled but no DNS names were derived")
+		}
+		if err := webhookcerts.NewReconciler(r.Resources).ReconcileCertSecret(ctx, infra, tlsSecretName, labels, dnsNames); err != nil {
+			return err
+		}
+		volumeMounts = append(volumeMounts,
+			corev1.VolumeMount{
+				Name:      "gateway-tls",
+				MountPath: "/tls/tls.crt",
+				SubPath:   corev1.TLSCertKey,
+				ReadOnly:  true,
+			},
+			corev1.VolumeMount{
+				Name:      "gateway-tls",
+				MountPath: "/tls/tls.key",
+				SubPath:   corev1.TLSPrivateKeyKey,
+				ReadOnly:  true,
+			},
+		)
+		volumes = append(volumes, corev1.Volume{
+			Name: "gateway-tls",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: tlsSecretName,
+				},
+			},
+		})
+	}
 
 	envVars := []corev1.EnvVar{
 		{
@@ -154,7 +193,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		TargetPort: httpPort,
 		Ports: []corev1.ContainerPort{
 			{
-				Name:          "http",
+				Name:          containerPortName,
 				ContainerPort: httpPort,
 			},
 		},
@@ -166,8 +205,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		LivenessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{
-					Path: "/healthz",
-					Port: intstr.FromString("http"),
+					Path:   "/healthz",
+					Port:   intstr.FromString(containerPortName),
+					Scheme: probeSchemeForTLS(tlsEnabled),
 				},
 			},
 			InitialDelaySeconds: 10,
@@ -176,8 +216,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		ReadinessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{
-					Path: "/readyz",
-					Port: intstr.FromString("http"),
+					Path:   "/readyz",
+					Port:   intstr.FromString(containerPortName),
+					Scheme: probeSchemeForTLS(tlsEnabled),
 				},
 			},
 			InitialDelaySeconds: 5,
@@ -192,7 +233,34 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	serviceType := common.ResolveServiceType(serviceConfig)
 	servicePort := common.ResolveServicePort(serviceConfig, httpPort)
 	serviceAnnotations := common.ResolveServiceAnnotations(serviceConfig)
-	if err := r.Resources.ReconcileService(ctx, infra, serviceName, labels, serviceType, serviceAnnotations, servicePort, httpPort); err != nil {
+	servicePortName := "http"
+	serviceTargetPort := intstr.FromInt(int(httpPort))
+	var serviceAppProtocol *string
+	if tlsEnabled {
+		servicePortName = "https"
+		serviceTargetPort = intstr.FromString(containerPortName)
+		appProtocol := "HTTPS"
+		serviceAppProtocol = &appProtocol
+	}
+	if err := r.Resources.ReconcileServicePortsWithSpecMutator(ctx, infra, serviceName, labels, serviceType, serviceAnnotations, []corev1.ServicePort{
+		{
+			Name:        servicePortName,
+			Port:        servicePort,
+			TargetPort:  serviceTargetPort,
+			Protocol:    corev1.ProtocolTCP,
+			AppProtocol: serviceAppProtocol,
+			NodePort: func() int32 {
+				if serviceType == corev1.ServiceTypeNodePort {
+					return servicePort
+				}
+				return 0
+			}(),
+		},
+	}, func(spec *corev1.ServiceSpec) {
+		if serviceType == corev1.ServiceTypeLoadBalancer {
+			spec.ExternalTrafficPolicy = corev1.ServiceExternalTrafficPolicyLocal
+		}
+	}); err != nil {
 		return err
 	}
 
@@ -309,6 +377,12 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		cfg.PublicRootDomain = infra.Spec.PublicExposure.RootDomain
 		cfg.PublicRegionID = infra.Spec.PublicExposure.RegionID
 	}
+	if base := strings.TrimSpace(cfg.BaseURL); base != "" {
+		if parsed, err := url.Parse(base); err == nil && strings.EqualFold(parsed.Scheme, "https") {
+			cfg.TLSCertPath = "/tls/tls.crt"
+			cfg.TLSKeyPath = "/tls/tls.key"
+		}
+	}
 
 	registryEnvVars, err := r.applyRegistryConfig(infra, cfg)
 	if err != nil {
@@ -329,6 +403,28 @@ func defaultFederatedGlobalJWTIssuer(infra *infrav1alpha1.Sandbox0Infra) string 
 
 func sharedUserJWTSecretName(infra *infrav1alpha1.Sandbox0Infra) string {
 	return fmt.Sprintf("%s-user-jwt", infra.Name)
+}
+
+func regionalGatewayTLSDNSNames(cfg *apiconfig.RegionalGatewayConfig) []string {
+	if cfg == nil {
+		return nil
+	}
+	base := strings.TrimSpace(cfg.BaseURL)
+	if base == "" {
+		return nil
+	}
+	parsed, err := url.Parse(base)
+	if err != nil || parsed.Hostname() == "" {
+		return nil
+	}
+	return []string{parsed.Hostname()}
+}
+
+func probeSchemeForTLS(enabled bool) corev1.URIScheme {
+	if enabled {
+		return corev1.URISchemeHTTPS
+	}
+	return corev1.URISchemeHTTP
 }
 
 func (r *Reconciler) applyRegistryConfig(infra *infrav1alpha1.Sandbox0Infra, cfg *apiconfig.RegionalGatewayConfig) ([]corev1.EnvVar, error) {

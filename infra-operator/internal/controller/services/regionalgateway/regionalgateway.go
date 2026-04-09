@@ -94,6 +94,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		serviceConfig = infra.Spec.Services.RegionalGateway.Service
 	}
 	tlsEnabled := strings.TrimSpace(config.TLSCertPath) != "" && strings.TrimSpace(config.TLSKeyPath) != ""
+	containerPortName := "http"
+	if tlsEnabled {
+		containerPortName = "https"
+	}
 
 	volumeMounts := []corev1.VolumeMount{
 		{
@@ -189,7 +193,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		TargetPort: httpPort,
 		Ports: []corev1.ContainerPort{
 			{
-				Name:          "http",
+				Name:          containerPortName,
 				ContainerPort: httpPort,
 			},
 		},
@@ -202,7 +206,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{
 					Path:   "/healthz",
-					Port:   intstr.FromString("http"),
+					Port:   intstr.FromString(containerPortName),
 					Scheme: probeSchemeForTLS(tlsEnabled),
 				},
 			},
@@ -213,7 +217,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{
 					Path:   "/readyz",
-					Port:   intstr.FromString("http"),
+					Port:   intstr.FromString(containerPortName),
 					Scheme: probeSchemeForTLS(tlsEnabled),
 				},
 			},
@@ -230,11 +234,28 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	servicePort := common.ResolveServicePort(serviceConfig, httpPort)
 	serviceAnnotations := common.ResolveServiceAnnotations(serviceConfig)
 	servicePortName := "http"
+	serviceTargetPort := intstr.FromInt(int(httpPort))
+	var serviceAppProtocol *string
 	if tlsEnabled {
 		servicePortName = "https"
+		serviceTargetPort = intstr.FromString(containerPortName)
+		appProtocol := "HTTPS"
+		serviceAppProtocol = &appProtocol
 	}
 	if err := r.Resources.ReconcileServicePorts(ctx, infra, serviceName, labels, serviceType, serviceAnnotations, []corev1.ServicePort{
-		common.BuildServicePort(servicePortName, servicePort, httpPort, serviceType),
+		{
+			Name:        servicePortName,
+			Port:        servicePort,
+			TargetPort:  serviceTargetPort,
+			Protocol:    corev1.ProtocolTCP,
+			AppProtocol: serviceAppProtocol,
+			NodePort: func() int32 {
+				if serviceType == corev1.ServiceTypeNodePort {
+					return servicePort
+				}
+				return 0
+			}(),
+		},
 	}); err != nil {
 		return err
 	}

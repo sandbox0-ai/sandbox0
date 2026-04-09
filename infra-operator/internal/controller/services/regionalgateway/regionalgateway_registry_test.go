@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -117,10 +118,22 @@ func TestReconcileEnablesTLSForHTTPSBaseURL(t *testing.T) {
 	if service.Spec.Ports[0].Port != 443 {
 		t.Fatalf("expected external service port 443, got %d", service.Spec.Ports[0].Port)
 	}
+	if service.Spec.Ports[0].Name != "https" {
+		t.Fatalf("expected https service port name, got %q", service.Spec.Ports[0].Name)
+	}
+	if service.Spec.Ports[0].TargetPort.Type != intstr.String || service.Spec.Ports[0].TargetPort.StrVal != "https" {
+		t.Fatalf("expected https target port, got %#v", service.Spec.Ports[0].TargetPort)
+	}
+	if service.Spec.Ports[0].AppProtocol == nil || *service.Spec.Ports[0].AppProtocol != "HTTPS" {
+		t.Fatalf("expected HTTPS appProtocol, got %#v", service.Spec.Ports[0].AppProtocol)
+	}
 
 	deployment := &appsv1.Deployment{}
 	if err := client.Get(context.Background(), types.NamespacedName{Name: "demo-regional-gateway", Namespace: infra.Namespace}, deployment); err != nil {
 		t.Fatalf("get regional gateway deployment: %v", err)
+	}
+	if deployment.Spec.Template.Spec.Containers[0].Ports[0].Name != "https" {
+		t.Fatalf("expected https container port name, got %q", deployment.Spec.Template.Spec.Containers[0].Ports[0].Name)
 	}
 	if deployment.Spec.Template.Spec.Containers[0].ReadinessProbe.HTTPGet.Scheme != corev1.URISchemeHTTPS {
 		t.Fatalf("expected https readiness probe, got %s", deployment.Spec.Template.Spec.Containers[0].ReadinessProbe.HTTPGet.Scheme)

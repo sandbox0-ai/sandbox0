@@ -321,13 +321,11 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	if compiledPlan.Services.Scheduler.URL != "" {
 		cfg.SchedulerURL = compiledPlan.Services.Scheduler.URL
 	}
-	if sshPort := int32(2222); infra.Spec.Services != nil && infra.Spec.Services.SSHGateway != nil && infra.Spec.Services.SSHGateway.Config != nil && infra.Spec.Services.SSHGateway.Config.SSHPort != 0 {
+	sshPort := int32(2222)
+	if infra.Spec.Services != nil && infra.Spec.Services.SSHGateway != nil && infra.Spec.Services.SSHGateway.Config != nil && infra.Spec.Services.SSHGateway.Config.SSHPort != 0 {
 		sshPort = int32(infra.Spec.Services.SSHGateway.Config.SSHPort)
-		if sshHost, advertisedPort, ok := common.ResolveSSHEndpoint(infra, sshPort); ok {
-			cfg.SSHEndpointHost = sshHost
-			cfg.SSHEndpointPort = int(advertisedPort)
-		}
-	} else if sshHost, advertisedPort, ok := common.ResolveSSHEndpoint(infra, 2222); ok {
+	}
+	if sshHost, advertisedPort, ok := common.ResolveSSHEndpoint(infra, sshPort); ok {
 		cfg.SSHEndpointHost = sshHost
 		cfg.SSHEndpointPort = int(advertisedPort)
 	}

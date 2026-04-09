@@ -792,6 +792,11 @@ type ServicesConfig struct {
 	// +kubebuilder:default={}
 	RegionalGateway *RegionalGatewayServiceConfig `json:"regionalGateway,omitempty"`
 
+	// SSHGateway configures the ssh-gateway service (control plane)
+	// +optional
+	// +kubebuilder:default={}
+	SSHGateway *SSHGatewayServiceConfig `json:"sshGateway,omitempty"`
+
 	// Scheduler configures the scheduler service (control plane)
 	// +optional
 	Scheduler *SchedulerServiceConfig `json:"scheduler,omitempty"`
@@ -870,6 +875,16 @@ type RegionalGatewayServiceConfig struct {
 	// +optional
 	// +kubebuilder:default={}
 	Config *RegionalGatewayConfig `json:"config,omitempty"`
+}
+
+// SSHGatewayServiceConfig defines configuration for ssh-gateway service.
+type SSHGatewayServiceConfig struct {
+	WorkloadServiceConfig `json:",inline"`
+	ServiceExposureConfig `json:",inline"`
+	// Config contains ssh-gateway specific configuration.
+	// +optional
+	// +kubebuilder:default={}
+	Config *SSHGatewayConfig `json:"config,omitempty"`
 }
 
 // SchedulerServiceConfig defines configuration for scheduler service
@@ -953,6 +968,14 @@ func IsRegionalGatewayEnabled(infra *Sandbox0Infra) bool {
 		return false
 	}
 	return infra.Spec.Services.RegionalGateway.Enabled
+}
+
+// IsSSHGatewayEnabled returns true when ssh-gateway is enabled.
+func IsSSHGatewayEnabled(infra *Sandbox0Infra) bool {
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.SSHGateway == nil {
+		return false
+	}
+	return infra.Spec.Services.SSHGateway.Enabled
 }
 
 // IsSchedulerEnabled returns true when scheduler is enabled.
@@ -1057,7 +1080,7 @@ func IsRegistryEnabled(infra *Sandbox0Infra) bool {
 
 // HasControlPlaneServices returns true when any control-plane service is enabled.
 func HasControlPlaneServices(infra *Sandbox0Infra) bool {
-	return IsRegionalGatewayEnabled(infra) || IsSchedulerEnabled(infra)
+	return IsRegionalGatewayEnabled(infra) || IsSSHGatewayEnabled(infra) || IsSchedulerEnabled(infra)
 }
 
 // HasDataPlaneServices returns true when any data-plane service is enabled.
@@ -1352,6 +1375,7 @@ const (
 	ConditionTypeRegistryReady        = "RegistryReady"
 	ConditionTypeGlobalGatewayReady   = "GlobalGatewayReady"
 	ConditionTypeRegionalGatewayReady = "RegionalGatewayReady"
+	ConditionTypeSSHGatewayReady      = "SSHGatewayReady"
 	ConditionTypeClusterGatewayReady  = "ClusterGatewayReady"
 	ConditionTypeManagerReady         = "ManagerReady"
 	ConditionTypeStorageProxyReady    = "StorageProxyReady"

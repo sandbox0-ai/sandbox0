@@ -1,7 +1,10 @@
 package handlers
 
 import (
+	"context"
+	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -40,14 +43,24 @@ func NewUserResponse(u *identity.User) *UserResponse {
 	}
 }
 
+type userRepository interface {
+	GetUserByID(ctx context.Context, id string) (*identity.User, error)
+	UpdateUser(ctx context.Context, user *identity.User) error
+	GetUserIdentitiesByUserID(ctx context.Context, userID string) ([]*identity.UserIdentity, error)
+	DeleteUserIdentity(ctx context.Context, id string) error
+	CreateUserSSHPublicKey(ctx context.Context, key *identity.UserSSHPublicKey) error
+	ListUserSSHPublicKeysByUserID(ctx context.Context, userID string) ([]*identity.UserSSHPublicKey, error)
+	DeleteUserSSHPublicKey(ctx context.Context, userID, keyID string) error
+}
+
 // UserHandler handles user endpoints
 type UserHandler struct {
-	repo   *identity.Repository
+	repo   userRepository
 	logger *zap.Logger
 }
 
 // NewUserHandler creates a new user handler
-func NewUserHandler(repo *identity.Repository, logger *zap.Logger) *UserHandler {
+func NewUserHandler(repo userRepository, logger *zap.Logger) *UserHandler {
 	return &UserHandler{
 		repo:   repo,
 		logger: logger,
@@ -200,4 +213,134 @@ func (h *UserHandler) DeleteUserIdentity(c *gin.Context) {
 	}
 
 	spec.JSONSuccess(c, http.StatusOK, gin.H{"message": "identity removed"})
+}
+
+// SSHPublicKeyResponse is the API response for one user-managed SSH key.
+type SSHPublicKeyResponse struct {
+	ID                string    `json:"id"`
+	Name              string    `json:"name"`
+	PublicKey         string    `json:"public_key"`
+	KeyType           string    `json:"key_type"`
+	FingerprintSHA256 string    `json:"fingerprint_sha256"`
+	Comment           string    `json:"comment,omitempty"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+// CreateSSHPublicKeyRequest is the request body for uploading one SSH public key.
+type CreateSSHPublicKeyRequest struct {
+	Name      string `json:"name" binding:"required"`
+	PublicKey string `json:"public_key" binding:"required"`
+}
+
+func newSSHPublicKeyResponse(key *identity.UserSSHPublicKey) *SSHPublicKeyResponse {
+	if key == nil {
+		return nil
+	}
+	return &SSHPublicKeyResponse{
+		ID:                key.ID,
+		Name:              key.Name,
+		PublicKey:         key.PublicKey,
+		KeyType:           key.KeyType,
+		FingerprintSHA256: key.FingerprintSHA256,
+		Comment:           key.Comment,
+		CreatedAt:         key.CreatedAt,
+		UpdatedAt:         key.UpdatedAt,
+	}
+}
+
+// ListUserSSHPublicKeys returns the current user's uploaded SSH public keys.
+func (h *UserHandler) ListUserSSHPublicKeys(c *gin.Context) {
+	authCtx := middleware.GetAuthContext(c)
+	if authCtx == nil || authCtx.UserID == "" {
+		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "not authenticated")
+		return
+	}
+
+	keys, err := h.repo.ListUserSSHPublicKeysByUserID(c.Request.Context(), authCtx.UserID)
+	if err != nil {
+		h.logger.Error("Failed to list ssh public keys", zap.Error(err))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to list ssh public keys")
+		return
+	}
+
+	response := make([]SSHPublicKeyResponse, 0, len(keys))
+	for _, key := range keys {
+		response = append(response, *newSSHPublicKeyResponse(key))
+	}
+	spec.JSONSuccess(c, http.StatusOK, gin.H{"ssh_keys": response})
+}
+
+// CreateUserSSHPublicKey stores one SSH public key for the current user.
+func (h *UserHandler) CreateUserSSHPublicKey(c *gin.Context) {
+	authCtx := middleware.GetAuthContext(c)
+	if authCtx == nil || authCtx.UserID == "" {
+		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "not authenticated")
+		return
+	}
+
+	var req CreateSSHPublicKeyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "ssh public key name is required")
+		return
+	}
+
+	publicKey, keyType, fingerprint, comment, err := identity.NormalizeAuthorizedSSHPublicKey(req.PublicKey)
+	if err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid ssh public key")
+		return
+	}
+
+	key := &identity.UserSSHPublicKey{
+		UserID:            authCtx.UserID,
+		Name:              name,
+		PublicKey:         publicKey,
+		KeyType:           keyType,
+		FingerprintSHA256: fingerprint,
+		Comment:           comment,
+	}
+	if err := h.repo.CreateUserSSHPublicKey(c.Request.Context(), key); err != nil {
+		if errors.Is(err, identity.ErrSSHPublicKeyAlreadyExists) {
+			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "ssh public key already exists")
+			return
+		}
+		h.logger.Error("Failed to create ssh public key", zap.Error(err))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to create ssh public key")
+		return
+	}
+
+	spec.JSONSuccess(c, http.StatusCreated, newSSHPublicKeyResponse(key))
+}
+
+// DeleteUserSSHPublicKey deletes one SSH public key from the current user.
+func (h *UserHandler) DeleteUserSSHPublicKey(c *gin.Context) {
+	authCtx := middleware.GetAuthContext(c)
+	if authCtx == nil || authCtx.UserID == "" {
+		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "not authenticated")
+		return
+	}
+
+	keyID := strings.TrimSpace(c.Param("id"))
+	if keyID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "ssh public key id is required")
+		return
+	}
+
+	if err := h.repo.DeleteUserSSHPublicKey(c.Request.Context(), authCtx.UserID, keyID); err != nil {
+		if errors.Is(err, identity.ErrSSHPublicKeyNotFound) {
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "ssh public key not found")
+			return
+		}
+		h.logger.Error("Failed to delete ssh public key", zap.Error(err))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to delete ssh public key")
+		return
+	}
+
+	spec.JSONSuccess(c, http.StatusOK, gin.H{"message": "ssh public key removed"})
 }

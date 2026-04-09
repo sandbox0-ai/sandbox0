@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -47,6 +48,11 @@ type Reconciler struct {
 	logger          *zap.Logger
 	systemNamespace string
 	procdPort       int
+}
+
+type systemIngressRule struct {
+	component string
+	procdOnly bool
 }
 
 // NewReconciler creates a manager-owned template namespace baseline reconciler.
@@ -118,8 +124,6 @@ func (r *Reconciler) ensurePolicy(ctx context.Context, desired *networkingv1.Net
 
 func (r *Reconciler) desiredPolicies(namespace string) []*networkingv1.NetworkPolicy {
 	policyTypeIngress := networkingv1.PolicyTypeIngress
-	tcp := corev1.ProtocolTCP
-	procdPort := intstr.FromInt(r.procdPort)
 
 	baseLabels := map[string]string{
 		managedByLabelKey: managedByLabelValue,
@@ -147,21 +151,36 @@ func (r *Reconciler) desiredPolicies(namespace string) []*networkingv1.NetworkPo
 			Spec: networkingv1.NetworkPolicySpec{
 				PodSelector: sandboxPodSelector(),
 				PolicyTypes: []networkingv1.PolicyType{policyTypeIngress},
-				Ingress: []networkingv1.NetworkPolicyIngressRule{
-					{
-						From: []networkingv1.NetworkPolicyPeer{r.systemPeer("manager")},
-						Ports: []networkingv1.NetworkPolicyPort{{
-							Protocol: &tcp,
-							Port:     &procdPort,
-						}},
-					},
-					{
-						From: []networkingv1.NetworkPolicyPeer{r.systemPeer("cluster-gateway")},
-					},
-				},
+				Ingress:     r.desiredSystemIngressRules(),
 			},
 		},
 	}
+}
+
+func (r *Reconciler) desiredSystemIngressRules() []networkingv1.NetworkPolicyIngressRule {
+	tcp := corev1.ProtocolTCP
+	procdPort := intstr.FromInt(r.procdPort)
+	specs := []systemIngressRule{
+		{component: internalauth.ServiceManager, procdOnly: true},
+		{component: internalauth.ServiceSSHGateway, procdOnly: true},
+		{component: internalauth.ServiceClusterGateway},
+	}
+
+	rules := make([]networkingv1.NetworkPolicyIngressRule, 0, len(specs))
+	for _, spec := range specs {
+		rule := networkingv1.NetworkPolicyIngressRule{
+			From: []networkingv1.NetworkPolicyPeer{r.systemPeer(spec.component)},
+		}
+		if spec.procdOnly {
+			rule.Ports = []networkingv1.NetworkPolicyPort{{
+				Protocol: &tcp,
+				Port:     &procdPort,
+			}}
+		}
+		rules = append(rules, rule)
+	}
+
+	return rules
 }
 
 func (r *Reconciler) systemPeer(component string) networkingv1.NetworkPolicyPeer {

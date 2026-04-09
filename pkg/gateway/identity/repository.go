@@ -19,6 +19,9 @@ var (
 	ErrIdentityNotFound      = errors.New("identity not found")
 	ErrIdentityAlreadyExists = errors.New("identity already exists")
 
+	ErrSSHPublicKeyNotFound      = errors.New("ssh public key not found")
+	ErrSSHPublicKeyAlreadyExists = errors.New("ssh public key already exists")
+
 	ErrTokenNotFound = errors.New("refresh token not found")
 	ErrTokenRevoked  = errors.New("refresh token revoked")
 	ErrTokenExpired  = errors.New("refresh token expired")

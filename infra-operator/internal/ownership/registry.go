@@ -58,11 +58,12 @@ func Registry() []Entry {
 		prefix("spec.registry.harbor", "registry", []string{"registry"}, nil, UpdateSemanticsDeclarative, "Harbor registry credentials and pull-secret integration."),
 
 		prefix("spec.controlPlane", "plan", []string{"cluster-gateway", "manager", "storage-proxy", "netd", "status"}, []string{"InfraPlan.Validation.RequireControlPlanePublicKey"}, UpdateSemanticsDeclarative, "External control-plane connection required by data-plane services that integrate with a control plane."),
-		prefix("spec.internalAuth", "internal-auth", []string{"internal-auth", "regional-gateway", "scheduler", "cluster-gateway"}, nil, UpdateSemanticsDeclarative, "Controls generated or imported internal JWT keys."),
+		prefix("spec.internalAuth", "internal-auth", []string{"internal-auth", "regional-gateway", "scheduler", "cluster-gateway", "manager", "storage-proxy", "netd", "ssh-gateway"}, nil, UpdateSemanticsDeclarative, "Controls generated or imported internal JWT keys consumed by control-plane and data-plane services."),
 		prefix("spec.enterpriseLicense", "plan", []string{"regional-gateway", "scheduler", "cluster-gateway", "global-gateway", "status"}, []string{"InfraPlan.Enterprise"}, UpdateSemanticsDeclarative, "Shared enterprise license secret reference for licensed services."),
 
 		prefix("spec.services.globalGateway", "global-gateway", []string{"global-gateway", "status"}, nil, UpdateSemanticsDeclarative, "Direct runtime configuration for global-gateway."),
 		prefix("spec.services.regionalGateway", "regional-gateway", []string{"regional-gateway", "status"}, nil, UpdateSemanticsDeclarative, "Direct runtime configuration for regional-gateway."),
+		prefix("spec.services.sshGateway", "ssh-gateway", []string{"ssh-gateway", "status"}, nil, UpdateSemanticsDeclarative, "Direct runtime configuration for ssh-gateway."),
 		prefix("spec.services.scheduler", "scheduler", []string{"scheduler", "status"}, nil, UpdateSemanticsDeclarative, "Direct runtime configuration for scheduler."),
 		prefix("spec.services.clusterGateway", "cluster-gateway", []string{"cluster-gateway", "status"}, nil, UpdateSemanticsDeclarative, "Direct runtime configuration for cluster-gateway."),
 		prefix("spec.services.manager", "manager", []string{"manager", "status"}, nil, UpdateSemanticsDeclarative, "Direct runtime configuration for manager."),

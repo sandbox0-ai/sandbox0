@@ -211,6 +211,40 @@ type RegionalGatewayConfig struct {
 	GatewayConfig `json:",inline"`
 }
 
+// SSHGatewayConfig defines user-facing configuration for ssh-gateway.
+type SSHGatewayConfig struct {
+	// +optional
+	// +kubebuilder:default=2222
+	SSHPort int `json:"sshPort,omitempty"`
+	// +optional
+	// +kubebuilder:default="info"
+	LogLevel string `json:"logLevel,omitempty"`
+	// +optional
+	// +kubebuilder:default=30
+	DatabaseMaxConns int `json:"databaseMaxConns,omitempty"`
+	// +optional
+	// +kubebuilder:default=8
+	DatabaseMinConns int `json:"databaseMinConns,omitempty"`
+	// +optional
+	// +kubebuilder:default="30s"
+	InternalAuthTTL metav1.Duration `json:"internalAuthTtl,omitempty"`
+	// +optional
+	// +kubebuilder:default="ssh-gateway"
+	InternalAuthCaller string `json:"internalAuthCaller,omitempty"`
+	// +optional
+	// +kubebuilder:default="30s"
+	ResumeTimeout metav1.Duration `json:"resumeTimeout,omitempty"`
+	// +optional
+	// +kubebuilder:default="500ms"
+	ResumePollInterval metav1.Duration `json:"resumePollInterval,omitempty"`
+	// +optional
+	// +kubebuilder:default="30s"
+	ShutdownTimeout metav1.Duration `json:"shutdownTimeout,omitempty"`
+	// +optional
+	// +kubebuilder:default={"sandboxvolume:read","sandboxvolume:write"}
+	ProcdStoragePermissions []string `json:"procdStoragePermissions,omitempty"`
+}
+
 // DatabasePoolConfig defines scheduler database pool settings.
 type DatabasePoolConfig struct {
 	// +optional

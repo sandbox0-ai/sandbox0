@@ -384,12 +384,12 @@ func main() {
 		)
 	}
 
-	validatorConfig := internalauth.DefaultValidatorConfig("manager", publicKey)
-	validatorConfig.AllowedCallers = []string{"cluster-gateway", "netd"}
+	validatorConfig := internalauth.DefaultValidatorConfig(internalauth.ServiceManager, publicKey)
+	validatorConfig.AllowedCallers = internalauth.ManagerAllowedCallers()
 	authValidator := internalauth.NewValidator(validatorConfig)
 
 	logger.Info("Internal authentication enabled",
-		zap.String("target", "manager"),
+		zap.String("target", internalauth.ServiceManager),
 		zap.Strings("allowed_callers", validatorConfig.AllowedCallers),
 	)
 

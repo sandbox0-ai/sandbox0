@@ -337,6 +337,16 @@ const (
 	SuccessResumeSandboxResponseSuccessTrue SuccessResumeSandboxResponseSuccess = true
 )
 
+// Defines values for SuccessSSHPublicKeyListResponseSuccess.
+const (
+	SuccessSSHPublicKeyListResponseSuccessTrue SuccessSSHPublicKeyListResponseSuccess = true
+)
+
+// Defines values for SuccessSSHPublicKeyResponseSuccess.
+const (
+	SuccessSSHPublicKeyResponseSuccessTrue SuccessSSHPublicKeyResponseSuccess = true
+)
+
 // Defines values for SuccessSandboxListResponseSuccess.
 const (
 	SuccessSandboxListResponseSuccessTrue SuccessSandboxListResponseSuccess = true
@@ -789,6 +799,12 @@ type CreateRegionRequest struct {
 	Id                 string  `json:"id"`
 	MeteringExportUrl  *string `json:"metering_export_url"`
 	RegionalGatewayUrl string  `json:"regional_gateway_url"`
+}
+
+// CreateSSHPublicKeyRequest defines model for CreateSSHPublicKeyRequest.
+type CreateSSHPublicKeyRequest struct {
+	Name      string `json:"name"`
+	PublicKey string `json:"public_key"`
 }
 
 // CreateSandboxVolumeRequest defines model for CreateSandboxVolumeRequest.
@@ -1445,6 +1461,18 @@ type ResumeSandboxResponse struct {
 	SandboxId      string            `json:"sandbox_id"`
 }
 
+// SSHPublicKey defines model for SSHPublicKey.
+type SSHPublicKey struct {
+	Comment           *string   `json:"comment,omitempty"`
+	CreatedAt         time.Time `json:"created_at"`
+	FingerprintSha256 string    `json:"fingerprint_sha256"`
+	Id                string    `json:"id"`
+	KeyType           string    `json:"key_type"`
+	Name              string    `json:"name"`
+	PublicKey         string    `json:"public_key"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
 // Sandbox defines model for Sandbox.
 type Sandbox struct {
 	AutoResume bool      `json:"auto_resume"`
@@ -2048,6 +2076,26 @@ type SuccessResumeSandboxResponse struct {
 
 // SuccessResumeSandboxResponseSuccess defines model for SuccessResumeSandboxResponse.Success.
 type SuccessResumeSandboxResponseSuccess bool
+
+// SuccessSSHPublicKeyListResponse defines model for SuccessSSHPublicKeyListResponse.
+type SuccessSSHPublicKeyListResponse struct {
+	Data *struct {
+		SshKeys *[]SSHPublicKey `json:"ssh_keys,omitempty"`
+	} `json:"data,omitempty"`
+	Success SuccessSSHPublicKeyListResponseSuccess `json:"success"`
+}
+
+// SuccessSSHPublicKeyListResponseSuccess defines model for SuccessSSHPublicKeyListResponse.Success.
+type SuccessSSHPublicKeyListResponseSuccess bool
+
+// SuccessSSHPublicKeyResponse defines model for SuccessSSHPublicKeyResponse.
+type SuccessSSHPublicKeyResponse struct {
+	Data    *SSHPublicKey                      `json:"data,omitempty"`
+	Success SuccessSSHPublicKeyResponseSuccess `json:"success"`
+}
+
+// SuccessSSHPublicKeyResponseSuccess defines model for SuccessSSHPublicKeyResponse.Success.
+type SuccessSSHPublicKeyResponseSuccess bool
 
 // SuccessSandboxListResponse defines model for SuccessSandboxListResponse.
 type SuccessSandboxListResponse struct {
@@ -2892,6 +2940,9 @@ type PutTeamsIdMembersUserIdJSONRequestBody = UpdateTeamMemberRequest
 
 // PutUsersMeJSONRequestBody defines body for PutUsersMe for application/json ContentType.
 type PutUsersMeJSONRequestBody = UpdateUserRequest
+
+// PostUsersMeSshKeysJSONRequestBody defines body for PostUsersMeSshKeys for application/json ContentType.
+type PostUsersMeSshKeysJSONRequestBody = CreateSSHPublicKeyRequest
 
 // AsProbePort0 returns the union data inside the ProbePort as a ProbePort0
 func (t ProbePort) AsProbePort0() (ProbePort0, error) {

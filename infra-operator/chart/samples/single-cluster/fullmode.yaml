@@ -101,6 +101,12 @@ spec:
   #      value: gvisor
   #      effect: NoSchedule
   services:
+    sshGateway:
+      enabled: true
+      replicas: 1
+      service:
+        type: NodePort
+        port: 30222
     clusterGateway:
       enabled: true
       replicas: 1

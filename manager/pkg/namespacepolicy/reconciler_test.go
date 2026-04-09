@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -28,14 +29,18 @@ func TestEnsureBaselineCreatesPolicies(t *testing.T) {
 
 	allow, err := client.NetworkingV1().NetworkPolicies("tpl-demo").Get(context.Background(), policyAllowSystemName, metav1.GetOptions{})
 	require.NoError(t, err)
-	require.Len(t, allow.Spec.Ingress, 2)
+	require.Len(t, allow.Spec.Ingress, 3)
 	assert.Equal(t, "sandbox0-system", allow.Spec.Ingress[0].From[0].NamespaceSelector.MatchLabels[metadataNamespaceLabel])
-	assert.Equal(t, "manager", allow.Spec.Ingress[0].From[0].PodSelector.MatchLabels[appNameLabelKey])
+	assert.Equal(t, internalauth.ServiceManager, allow.Spec.Ingress[0].From[0].PodSelector.MatchLabels[appNameLabelKey])
 	require.Len(t, allow.Spec.Ingress[0].Ports, 1)
 	assert.Equal(t, corev1.ProtocolTCP, *allow.Spec.Ingress[0].Ports[0].Protocol)
 	assert.Equal(t, int32(49983), allow.Spec.Ingress[0].Ports[0].Port.IntVal)
-	assert.Equal(t, "cluster-gateway", allow.Spec.Ingress[1].From[0].PodSelector.MatchLabels[appNameLabelKey])
-	assert.Empty(t, allow.Spec.Ingress[1].Ports)
+	assert.Equal(t, internalauth.ServiceSSHGateway, allow.Spec.Ingress[1].From[0].PodSelector.MatchLabels[appNameLabelKey])
+	require.Len(t, allow.Spec.Ingress[1].Ports, 1)
+	assert.Equal(t, corev1.ProtocolTCP, *allow.Spec.Ingress[1].Ports[0].Protocol)
+	assert.Equal(t, int32(49983), allow.Spec.Ingress[1].Ports[0].Port.IntVal)
+	assert.Equal(t, internalauth.ServiceClusterGateway, allow.Spec.Ingress[2].From[0].PodSelector.MatchLabels[appNameLabelKey])
+	assert.Empty(t, allow.Spec.Ingress[2].Ports)
 }
 
 func TestEnsureBaselineRepairsDrift(t *testing.T) {

@@ -54,6 +54,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/regionalgateway"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/registry"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/scheduler"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/sshgateway"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storage"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storageproxy"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
@@ -231,6 +232,7 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 	registryReconciler := registry.NewReconciler(resources)
 	globalGatewayReconciler := globalgateway.NewReconciler(resources)
 	regionalGatewayReconciler := regionalgateway.NewReconciler(resources)
+	sshGatewayReconciler := sshgateway.NewReconciler(resources)
 	schedulerReconciler := scheduler.NewReconciler(resources)
 	clusterGatewayReconciler := clustergateway.NewReconciler(resources)
 	managerReconciler := manager.NewReconciler(resources)
@@ -243,7 +245,7 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 		return ctrl.Result{RequeueAfter: requeueInterval}, err
 	}
 
-	steps, err := r.bindWorkflowSteps(infra, compiledPlan, resources, imageRepo, imageTag, authReconciler, dbReconciler, storageReconciler, registryReconciler, globalGatewayReconciler, regionalGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, fusePluginReconciler, netdReconciler, rbacReconciler)
+	steps, err := r.bindWorkflowSteps(infra, compiledPlan, resources, imageRepo, imageTag, authReconciler, dbReconciler, storageReconciler, registryReconciler, globalGatewayReconciler, regionalGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, fusePluginReconciler, netdReconciler, rbacReconciler)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -261,6 +263,7 @@ func (r *Sandbox0InfraReconciler) bindWorkflowSteps(
 	registryReconciler *registry.Reconciler,
 	globalGatewayReconciler *globalgateway.Reconciler,
 	regionalGatewayReconciler *regionalgateway.Reconciler,
+	sshGatewayReconciler *sshgateway.Reconciler,
 	schedulerReconciler *scheduler.Reconciler,
 	clusterGatewayReconciler *clustergateway.Reconciler,
 	managerReconciler *manager.Reconciler,
@@ -271,7 +274,7 @@ func (r *Sandbox0InfraReconciler) bindWorkflowSteps(
 ) ([]reconcileStep, error) {
 	steps := make([]reconcileStep, 0, len(compiledPlan.Workflow.Steps))
 	for _, planned := range compiledPlan.Workflow.Steps {
-		run, err := r.workflowStepRunner(infra, compiledPlan, resources, imageRepo, imageTag, planned.Name, authReconciler, dbReconciler, storageReconciler, registryReconciler, globalGatewayReconciler, regionalGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, fusePluginReconciler, netdReconciler, rbacReconciler)
+		run, err := r.workflowStepRunner(infra, compiledPlan, resources, imageRepo, imageTag, planned.Name, authReconciler, dbReconciler, storageReconciler, registryReconciler, globalGatewayReconciler, regionalGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, fusePluginReconciler, netdReconciler, rbacReconciler)
 		if err != nil {
 			return nil, err
 		}
@@ -299,6 +302,7 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 	registryReconciler *registry.Reconciler,
 	globalGatewayReconciler *globalgateway.Reconciler,
 	regionalGatewayReconciler *regionalgateway.Reconciler,
+	sshGatewayReconciler *sshgateway.Reconciler,
 	schedulerReconciler *scheduler.Reconciler,
 	clusterGatewayReconciler *clustergateway.Reconciler,
 	managerReconciler *manager.Reconciler,
@@ -343,6 +347,10 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 	case "regional-gateway":
 		return func(ctx context.Context) error {
 			return regionalGatewayReconciler.Reconcile(ctx, infra, imageRepo, imageTag, compiledPlan)
+		}, nil
+	case "ssh-gateway":
+		return func(ctx context.Context) error {
+			return sshGatewayReconciler.Reconcile(ctx, infra, imageRepo, imageTag, compiledPlan)
 		}, nil
 	case "scheduler-enterprise-license":
 		return func(ctx context.Context) error {
@@ -472,6 +480,8 @@ func objectForCleanupKind(kind string) (client.Object, error) {
 		return &corev1.Service{}, nil
 	case "ConfigMap":
 		return &corev1.ConfigMap{}, nil
+	case "Secret":
+		return &corev1.Secret{}, nil
 	case "Ingress":
 		return &networkingv1.Ingress{}, nil
 	case "ServiceAccount":
@@ -738,6 +748,7 @@ func managedConditionTypeSet() map[string]struct{} {
 		infrav1alpha1.ConditionTypeRegistryReady:        {},
 		infrav1alpha1.ConditionTypeGlobalGatewayReady:   {},
 		infrav1alpha1.ConditionTypeRegionalGatewayReady: {},
+		infrav1alpha1.ConditionTypeSSHGatewayReady:      {},
 		infrav1alpha1.ConditionTypeSchedulerReady:       {},
 		infrav1alpha1.ConditionTypeClusterGatewayReady:  {},
 		infrav1alpha1.ConditionTypeManagerReady:         {},

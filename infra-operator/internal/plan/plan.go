@@ -16,6 +16,7 @@ const (
 	defaultClusterGatewayHTTPPort  = 8443
 	defaultClusterGatewayAuthMode  = "internal"
 	defaultRegionalGatewayAuthMode = "self_hosted"
+	defaultSSHGatewayPort          = 2222
 )
 
 type InfraPlan struct {
@@ -37,6 +38,7 @@ type ComponentPlan struct {
 	HasControlPlane           bool
 	HasDataPlane              bool
 	EnableRegionalGateway     bool
+	EnableSSHGateway          bool
 	EnableScheduler           bool
 	EnableClusterGateway      bool
 	EnableManager             bool
@@ -159,13 +161,14 @@ func Compile(infra *infrav1alpha1.Sandbox0Infra) *InfraPlan {
 func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 	enableGlobalGateway := infrav1alpha1.IsGlobalGatewayEnabled(infra)
 	enableRegionalGateway := infrav1alpha1.IsRegionalGatewayEnabled(infra)
+	enableSSHGateway := infrav1alpha1.IsSSHGatewayEnabled(infra)
 	enableScheduler := infrav1alpha1.IsSchedulerEnabled(infra)
 	enableClusterGateway := infrav1alpha1.IsClusterGatewayEnabled(infra)
 	enableManager := infrav1alpha1.IsManagerEnabled(infra)
 	enableStorageProxy := infrav1alpha1.IsStorageProxyEnabled(infra)
 	enableDatabase := infrav1alpha1.IsDatabaseEnabled(infra)
 
-	hasControlPlane := enableRegionalGateway || enableScheduler
+	hasControlPlane := enableRegionalGateway || enableSSHGateway || enableScheduler
 	hasDataPlane := enableClusterGateway || enableManager || enableStorageProxy
 
 	return ComponentPlan{
@@ -173,6 +176,7 @@ func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 		HasControlPlane:           hasControlPlane,
 		HasDataPlane:              hasDataPlane,
 		EnableRegionalGateway:     enableRegionalGateway,
+		EnableSSHGateway:          enableSSHGateway,
 		EnableScheduler:           enableScheduler,
 		EnableClusterGateway:      enableClusterGateway,
 		EnableManager:             enableManager,
@@ -328,6 +332,12 @@ func compileValidationPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPl
 	if compiled != nil && compiled.Components.EnableGlobalGateway && !compiled.Components.EnableDatabase {
 		plan.FatalErrors = append(plan.FatalErrors, "globalGateway requires database to be enabled")
 	}
+	if compiled != nil && compiled.Components.EnableSSHGateway && !compiled.Components.EnableDatabase {
+		plan.FatalErrors = append(plan.FatalErrors, "sshGateway requires database to be enabled")
+	}
+	if compiled != nil && compiled.Components.EnableSSHGateway && !compiled.Components.EnableManager {
+		plan.FatalErrors = append(plan.FatalErrors, "sshGateway requires manager to be enabled")
+	}
 	if infra.Spec.Cluster != nil && (compiled == nil || !compiled.Components.HasDataPlane) {
 		plan.FatalErrors = append(plan.FatalErrors, "cluster configuration requires at least one data-plane service")
 	}
@@ -365,6 +375,14 @@ func compileCleanupPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-regional-gateway", infra.Name)),
 			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-regional-gateway", infra.Name)),
 			namespacedRef("Ingress", infra.Namespace, fmt.Sprintf("%s-regional-gateway", infra.Name)),
+		)
+	}
+	if !compiled.Components.EnableSSHGateway {
+		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
+			namespacedRef("Deployment", infra.Namespace, fmt.Sprintf("%s-ssh-gateway", infra.Name)),
+			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-ssh-gateway", infra.Name)),
+			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-ssh-gateway", infra.Name)),
+			namespacedRef("Secret", infra.Namespace, fmt.Sprintf("%s-ssh-gateway-host-key", infra.Name)),
 		)
 	}
 	if !compiled.Components.EnableScheduler {
@@ -491,6 +509,9 @@ func compileStatusPlan(compiled *InfraPlan) StatusPlan {
 	if components.EnableRegionalGateway {
 		expected = append(expected, infrav1alpha1.ConditionTypeRegionalGatewayReady)
 	}
+	if components.EnableSSHGateway {
+		expected = append(expected, infrav1alpha1.ConditionTypeSSHGatewayReady)
+	}
 	if components.EnableScheduler {
 		expected = append(expected, infrav1alpha1.ConditionTypeSchedulerReady)
 	}
@@ -574,6 +595,9 @@ func compileWorkflowPlan(compiled *InfraPlan) WorkflowPlan {
 	}
 	if compiled.Components.EnableRegionalGateway {
 		appendSuccessStep("regional-gateway", infrav1alpha1.ConditionTypeRegionalGatewayReady, "RegionalGatewayReady", "Edge gateway is ready", "RegionalGatewayFailed")
+	}
+	if compiled.Components.EnableSSHGateway {
+		appendSuccessStep("ssh-gateway", infrav1alpha1.ConditionTypeSSHGatewayReady, "SSHGatewayReady", "SSH gateway is ready", "SSHGatewayFailed")
 	}
 	if compiled.Components.EnableScheduler && compiled.Enterprise.Scheduler {
 		appendCheckStep("scheduler-enterprise-license", infrav1alpha1.ConditionTypeSchedulerReady, "EnterpriseLicenseMissing")

@@ -12,8 +12,9 @@ OAPI_CODEGEN ?= $(LOCALBIN)/oapi-codegen
 OAPI_CODEGEN_VERSION ?= v2.4.1
 
 PROTOC ?= protoc
+GO ?= env GOWORK=off go
 
-SERVICES := regional-gateway global-gateway cluster-gateway manager scheduler storage-proxy ctld procd netd infra-operator
+SERVICES := regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler storage-proxy ctld procd netd infra-operator
 
 # Default version
 VERSION ?= latest
@@ -61,9 +62,9 @@ build: manifests proto apispec
 				printf "$(YELLOW)Skipping $$s: requires Linux host and GOOS=linux$(RESET)\n"; \
 				continue; \
 			fi; \
-			CGO_ENABLED=1 GOOS=$(GOOS) go build -v -o $$out $$src; \
+			CGO_ENABLED=1 GOOS=$(GOOS) $(GO) build -v -o $$out $$src; \
 		else \
-			CGO_ENABLED=0 GOOS=$(GOOS) go build -v -o $$out $$src; \
+			CGO_ENABLED=0 GOOS=$(GOOS) $(GO) build -v -o $$out $$src; \
 		fi || exit 1; \
 	done
 
@@ -94,25 +95,27 @@ test:
 	elif echo "$(SERVICES)" | grep -qw "$$service"; then \
 		printf "$(CYAN)Testing $$service...$(RESET)\n"; \
 		if [ "$$service" = "regional-gateway" ]; then \
-			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./regional-gateway/...; \
+			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./regional-gateway/...; \
+		elif [ "$$service" = "ssh-gateway" ]; then \
+			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./ssh-gateway/...; \
 		elif [ "$$service" = "global-gateway" ]; then \
-			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./global-gateway/...; \
+			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./global-gateway/...; \
 		elif [ "$$service" = "cluster-gateway" ]; then \
-			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./cluster-gateway/...; \
+			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./cluster-gateway/...; \
 		elif [ "$$service" = "manager" ]; then \
-			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./manager/...; \
+			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./manager/...; \
 		elif [ "$$service" = "procd" ]; then \
-			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./manager/procd/...; \
+			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./manager/procd/...; \
 		elif [ "$$service" = "netd" ]; then \
-			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./netd/...; \
+			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./netd/...; \
 		elif [ "$$service" = "scheduler" ]; then \
-			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./scheduler/...; \
+			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./scheduler/...; \
 		elif [ "$$service" = "storage-proxy" ]; then \
-			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./storage-proxy/...; \
+			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./storage-proxy/...; \
 		elif [ "$$service" = "ctld" ]; then \
-			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./ctld/...; \
+			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./ctld/...; \
 		elif [ "$$service" = "infra-operator" ]; then \
-			GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./infra-operator/...; \
+			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./infra-operator/...; \
 		fi; \
 	else \
 		echo "Error: Unknown service '$$service'"; \
@@ -124,29 +127,29 @@ test-all:
 	@for service in $(SERVICES); do \
 		printf "$(CYAN)Testing $$service...$(RESET)\n"; \
 		$(MAKE) test $$service || exit 1; \
-		GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./pkg/...; \
+		GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./pkg/...; \
 	done
 
 # Integration tests
 test-integration:
 	@printf "$(CYAN)Running integration tests...$(RESET)\n"
-	GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./tests/integration/... -timeout=10m
+	GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./tests/integration/... -timeout=10m
 
 test-integration-verbose:
 	@printf "$(CYAN)Running integration tests (verbose)...$(RESET)\n"
-	GOTOOLCHAIN=go1.25.0+auto go test -v -race -cover ./tests/integration/... -timeout=10m -v
+	GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./tests/integration/... -timeout=10m -v
 
 # E2E tests
 test-e2e:
 	@printf "$(CYAN)Running E2E tests...$(RESET)\n"
-	go test -v -count=1 ./tests/e2e/... -timeout=30m
+	$(GO) test -v -count=1 ./tests/e2e/... -timeout=30m
 
 # Clean kind image
 # docker exec -it $(docker ps | grep sandbox0-e2e | cut -f1 -d" ") bash -c 'ctr -n=k8s.io images rm docker.io/sandbox0ai/infra:latest'
 
 test-e2e-local:
 	@printf "$(CYAN)Running E2E tests locally...$(RESET)\n"
-	unset http_proxy && unset https_proxy && unset all_proxy && E2E_USE_EXISTING_CLUSTER=true go test -v -count=1 ./tests/e2e/... -timeout=30m
+	unset http_proxy && unset https_proxy && unset all_proxy && E2E_USE_EXISTING_CLUSTER=true $(GO) test -v -count=1 ./tests/e2e/... -timeout=30m
 
 test-e2e-kind:
 	@printf "$(CYAN)Creating Kind cluster...$(RESET)\n"
@@ -163,20 +166,20 @@ test-e2e-specific:
 		exit 1; \
 	fi
 	@printf "$(CYAN)Running E2E test: $(SPEC)...$(RESET)\n"
-	unset http_proxy && unset https_proxy && unset all_proxy && go test -v ./tests/e2e/... -focus="$(SPEC)" -timeout=30m
+	unset http_proxy && unset https_proxy && unset all_proxy && $(GO) test -v ./tests/e2e/... -focus="$(SPEC)" -timeout=30m
 
 # Prevent make from treating service names as targets
-regional-gateway global-gateway cluster-gateway manager scheduler storage-proxy ctld procd netd infra-operator:
+regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler storage-proxy ctld procd netd infra-operator:
 	@:
 
 lint:
 	golangci-lint run ./...
 
 tidy:
-	go mod tidy
+	$(GO) mod tidy
 
 vendor:
-	go mod vendor
+	$(GO) mod vendor
 
 clean:
 	@for service in $(SERVICES); do \
@@ -193,7 +196,7 @@ clean:
 
 app-configs:
 	@printf "$(CYAN)Generating default Helm configs...$(RESET)\n"
-	@CONFIG_PATH=/dev/null go run ./tools/configdump
+	@CONFIG_PATH=/dev/null $(GO) run ./tools/configdump
 
 proto: protoc
 	@printf "$(CYAN)Generating storage-proxy protobufs...$(RESET)\n"
@@ -206,27 +209,27 @@ proto: protoc
 .PHONY: apispec oapi-codegen
 apispec: oapi-codegen
 	@printf "$(CYAN)Generating API spec code...$(RESET)\n"
-	@PATH="$(LOCALBIN):$(PATH)" go generate ./pkg/apispec/...
+	@PATH="$(LOCALBIN):$(PATH)" $(GO) generate ./pkg/apispec/...
 
 oapi-codegen: $(OAPI_CODEGEN)
 $(OAPI_CODEGEN): $(LOCALBIN)
 	@test -s $(LOCALBIN)/oapi-codegen && $(LOCALBIN)/oapi-codegen --version | grep -q $(OAPI_CODEGEN_VERSION) || \
-	GOBIN=$(LOCALBIN) go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@$(OAPI_CODEGEN_VERSION)
+	GOBIN=$(LOCALBIN) $(GO) install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@$(OAPI_CODEGEN_VERSION)
 
 .PHONY: controller-gen
 controller-gen: $(CONTROLLER_GEN)
 $(CONTROLLER_GEN): $(LOCALBIN)
 	@test -s $(LOCALBIN)/controller-gen && $(LOCALBIN)/controller-gen --version | grep -q $(CONTROLLER_TOOLS_VERSION) || \
-	GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_TOOLS_VERSION)
+	GOBIN=$(LOCALBIN) $(GO) install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_TOOLS_VERSION)
 
 .PHONY: protoc install-protoc
 protoc:
 	@command -v $(PROTOC) >/dev/null 2>&1 || $(MAKE) install-protoc
 	@if ! PATH="$(LOCALBIN):$(PATH)" command -v protoc-gen-go >/dev/null 2>&1; then \
-		GOBIN=$(LOCALBIN) go install google.golang.org/protobuf/cmd/protoc-gen-go@latest; \
+		GOBIN=$(LOCALBIN) $(GO) install google.golang.org/protobuf/cmd/protoc-gen-go@latest; \
 	fi
 	@if ! PATH="$(LOCALBIN):$(PATH)" command -v protoc-gen-go-grpc >/dev/null 2>&1; then \
-		GOBIN=$(LOCALBIN) go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest; \
+		GOBIN=$(LOCALBIN) $(GO) install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest; \
 	fi
 
 install-protoc: $(LOCALBIN)
@@ -250,11 +253,11 @@ install-protoc: $(LOCALBIN)
 
 manifests: controller-gen
 	@printf "$(CYAN)Generating manager deepcopy code...$(RESET)\n"
-	@$(CONTROLLER_GEN) object paths="./manager/pkg/apis/..."
+	@GOWORK=off $(CONTROLLER_GEN) object paths="./manager/pkg/apis/..."
 	@printf "$(CYAN)Generating manager CRDs...$(RESET)\n"
-	@$(CONTROLLER_GEN) crd paths="./manager/pkg/apis/..." output:crd:artifacts:config=infra-operator/chart/crds/
+	@GOWORK=off $(CONTROLLER_GEN) crd paths="./manager/pkg/apis/..." output:crd:artifacts:config=infra-operator/chart/crds/
 	@printf "$(CYAN)Generating infra-operator manifests...$(RESET)\n"
-	@$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook object paths="./infra-operator/..." output:crd:artifacts:config=infra-operator/chart/crds output:rbac:artifacts:config=infra-operator/chart/crds output:webhook:artifacts:config=infra-operator/chart/crds
+	@GOWORK=off $(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook object paths="./infra-operator/..." output:crd:artifacts:config=infra-operator/chart/crds output:rbac:artifacts:config=infra-operator/chart/crds output:webhook:artifacts:config=infra-operator/chart/crds
 	@test ! -f infra-operator/chart/crds/role.yaml || mv infra-operator/chart/crds/role.yaml infra-operator/chart/files/clusterrole.yaml
 
 .PHONY: operator-install
@@ -263,4 +266,4 @@ operator-install: manifests
 
 .PHONY: operator-run
 operator-run: operator-install
-	S0_DEV=true go run ./infra-operator/cmd/infra-operator
+	S0_DEV=true $(GO) run ./infra-operator/cmd/infra-operator

@@ -112,6 +112,9 @@ func RegisterIdentityRoutes(router gin.IRouter, deps Deps) {
 		users.PUT("/me", userHandler.UpdateCurrentUser)
 		users.GET("/me/identities", userHandler.GetUserIdentities)
 		users.DELETE("/me/identities/:id", userHandler.DeleteUserIdentity)
+		users.GET("/me/ssh-keys", userHandler.ListUserSSHPublicKeys)
+		users.POST("/me/ssh-keys", userHandler.CreateUserSSHPublicKey)
+		users.DELETE("/me/ssh-keys/:id", userHandler.DeleteUserSSHPublicKey)
 	}
 
 	// ===== Team Management Routes =====

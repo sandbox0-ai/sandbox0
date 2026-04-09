@@ -459,6 +459,98 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+  /users/me/ssh-keys:
+    get:
+      tags: [users]
+      summary: List current user SSH public keys
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: SSH public key list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessSSHPublicKeyListResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+    post:
+      tags: [users]
+      summary: Create a current user SSH public key
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSSHPublicKeyRequest"
+      responses:
+        "201":
+          description: Created SSH public key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessSSHPublicKeyResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "409":
+          description: SSH public key already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+  /users/me/ssh-keys/{id}:
+    delete:
+      tags: [users]
+      summary: Delete a current user SSH public key
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: SSH public key removed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessMessageResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          description: SSH public key not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
   /teams:
     get:
       tags: [teams]
@@ -3290,6 +3382,14 @@ components:
           type: string
         avatar_url:
           type: string
+    CreateSSHPublicKeyRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        public_key:
+          type: string
+      required: [name, public_key]
     SuccessUserResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
@@ -3297,6 +3397,47 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/User"
+    SSHPublicKey:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        public_key:
+          type: string
+        key_type:
+          type: string
+        fingerprint_sha256:
+          type: string
+        comment:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required: [id, name, public_key, key_type, fingerprint_sha256, created_at, updated_at]
+    SuccessSSHPublicKeyResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/SSHPublicKey"
+    SuccessSSHPublicKeyListResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                ssh_keys:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/SSHPublicKey"
     Identity:
       type: object
       properties:

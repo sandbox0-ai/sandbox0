@@ -50,6 +50,25 @@ func ToRegionalGateway(spec *infrav1alpha1.RegionalGatewayConfig) *apiconfig.Reg
 	return cfg
 }
 
+func ToSSHGateway(spec *infrav1alpha1.SSHGatewayConfig) *apiconfig.SSHGatewayConfig {
+	cfg := &apiconfig.SSHGatewayConfig{}
+	if spec == nil {
+		return cfg
+	}
+
+	cfg.SSHPort = spec.SSHPort
+	cfg.LogLevel = spec.LogLevel
+	cfg.DatabaseMaxConns = spec.DatabaseMaxConns
+	cfg.DatabaseMinConns = spec.DatabaseMinConns
+	cfg.InternalAuthTTL = spec.InternalAuthTTL
+	cfg.InternalAuthCaller = spec.InternalAuthCaller
+	cfg.ResumeTimeout = spec.ResumeTimeout
+	cfg.ResumePollInterval = spec.ResumePollInterval
+	cfg.ShutdownTimeout = spec.ShutdownTimeout
+	cfg.ProcdStoragePermissions = cloneStrings(spec.ProcdStoragePermissions)
+	return cfg
+}
+
 func ToScheduler(spec *infrav1alpha1.SchedulerConfig) *apiconfig.SchedulerConfig {
 	cfg := &apiconfig.SchedulerConfig{}
 	if spec == nil {

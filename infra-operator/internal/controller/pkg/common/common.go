@@ -343,14 +343,8 @@ func (r *ResourceManager) ReconcileServicePorts(ctx context.Context, infra *infr
 		return fmt.Errorf("service %q requires at least one port", name)
 	}
 
-	svc := &corev1.Service{}
-	err := r.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, svc)
-	if err != nil && !errors.IsNotFound(err) {
-		return err
-	}
-
 	desiredLabels := EnsureManagedLabels(labels, name)
-	desiredSvc := &corev1.Service{
+	desiredSvc := corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        name,
 			Namespace:   infra.Namespace,
@@ -364,18 +358,25 @@ func (r *ResourceManager) ReconcileServicePorts(ctx context.Context, infra *infr
 		},
 	}
 
-	if err := ctrl.SetControllerReference(infra, desiredSvc, r.Scheme); err != nil {
+	if err := ctrl.SetControllerReference(infra, &desiredSvc, r.Scheme); err != nil {
 		return err
 	}
 
-	if errors.IsNotFound(err) {
-		return r.Client.Create(ctx, desiredSvc)
-	}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		svc := &corev1.Service{}
+		err := r.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, svc)
+		if errors.IsNotFound(err) {
+			return r.Client.Create(ctx, desiredSvc.DeepCopy())
+		}
+		if err != nil {
+			return err
+		}
 
-	svc.Spec = desiredSvc.Spec
-	svc.Labels = desiredLabels
-	svc.Annotations = CloneStringMap(annotations)
-	return r.Client.Update(ctx, svc)
+		svc.Spec = desiredSvc.Spec
+		svc.Labels = desiredLabels
+		svc.Annotations = CloneStringMap(annotations)
+		return r.Client.Update(ctx, svc)
+	})
 }
 
 // BuildServicePort returns a ServicePort with a target port.

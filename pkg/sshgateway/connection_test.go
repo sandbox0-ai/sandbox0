@@ -26,18 +26,18 @@ func TestBuildConnectionInfo(t *testing.T) {
 func TestSandboxToAPIIncludesSSHInfo(t *testing.T) {
 	now := time.Now().UTC()
 	sandbox := &mgr.Sandbox{
-		ID:         "sb_123",
-		TemplateID: "default",
-		TeamID:     "team-1",
-		UserID:     "user-1",
-		Status:     "running",
-		PodName:    "pod-1",
-		PowerState: mgr.SandboxPowerState{Desired: "active", Observed: "active", Phase: "stable"},
-		AutoResume: true,
-		Paused:     false,
-		ClaimedAt:  now,
-		CreatedAt:  now,
-		ExpiresAt:  now,
+		ID:            "sb_123",
+		TemplateID:    "default",
+		TeamID:        "team-1",
+		UserID:        "user-1",
+		Status:        "running",
+		PodName:       "pod-1",
+		PowerState:    mgr.SandboxPowerState{Desired: "active", Observed: "active", Phase: "stable"},
+		AutoResume:    true,
+		Paused:        false,
+		ClaimedAt:     now,
+		CreatedAt:     now,
+		ExpiresAt:     now,
 		HardExpiresAt: now,
 	}
 

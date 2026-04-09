@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"crypto/ed25519"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -114,12 +115,15 @@ func NewServer(
 
 	publicAuthEnabled := authModeEnabled(cfg.AuthMode, authModePublic)
 
-	// Initialize internal auth keys used for trusted control-plane callers such
-	// as regional-gateway and scheduler. These routes remain available even when
-	// cluster-gateway also serves the public API directly.
-	publicKey, err := internalauth.LoadEd25519PublicKeyFromFile(internalauth.DefaultInternalJWTPublicKeyPath)
-	if err != nil {
-		return nil, fmt.Errorf("load internal JWT public key: %w", err)
+	// Initialize internal auth keys when control-plane callers are enabled for
+	// this deployment mode.
+	var publicKey ed25519.PublicKey
+	if authModeEnabled(cfg.AuthMode, authModeInternal) {
+		var err error
+		publicKey, err = internalauth.LoadEd25519PublicKeyFromFile(internalauth.DefaultInternalJWTPublicKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("load internal JWT public key: %w", err)
+		}
 	}
 
 	privateKey, err := internalauth.LoadEd25519PrivateKeyFromFile(internalauth.DefaultInternalJWTPrivateKeyPath)
@@ -132,12 +136,15 @@ func NewServer(
 	if len(allowedCallers) == 0 {
 		allowedCallers = []string{"regional-gateway", "scheduler"}
 	}
-	validator := internalauth.NewValidator(internalauth.ValidatorConfig{
-		Target:             "cluster-gateway",
-		PublicKey:          publicKey,
-		AllowedCallers:     allowedCallers,
-		ClockSkewTolerance: 10 * time.Second,
-	})
+	var validator *internalauth.Validator
+	if authModeEnabled(cfg.AuthMode, authModeInternal) {
+		validator = internalauth.NewValidator(internalauth.ValidatorConfig{
+			Target:             "cluster-gateway",
+			PublicKey:          publicKey,
+			AllowedCallers:     allowedCallers,
+			ClockSkewTolerance: 10 * time.Second,
+		})
+	}
 
 	// Create middleware
 	authMiddleware := middleware.NewInternalAuthMiddleware(validator, logger)
@@ -466,10 +473,11 @@ func (s *Server) setupRoutes() {
 		}
 	}
 
-	// Internal API routes are always available for trusted control-plane
-	// callers, regardless of whether cluster-gateway is also serving public
-	// traffic directly.
-	s.setupInternalControlPlaneRoutes()
+	// Internal API routes are only mounted when control-plane callers are
+	// enabled for this deployment mode.
+	if authModeEnabled(s.cfg.AuthMode, authModeInternal) {
+		s.setupInternalControlPlaneRoutes()
+	}
 
 	// Metering export is region-scoped and must remain available when
 	// cluster-gateway serves as the single-cluster public API entrypoint.

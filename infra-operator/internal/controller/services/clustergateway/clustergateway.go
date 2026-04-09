@@ -419,5 +419,12 @@ func clusterGatewayPublicAuthEnabled(mode string) bool {
 }
 
 func internalAuthRequiresControlPlaneKey(cfg *apiconfig.ClusterGatewayConfig) bool {
-	return true
+	if cfg == nil {
+		return true
+	}
+	mode := strings.TrimSpace(strings.ToLower(cfg.AuthMode))
+	if mode == "" {
+		mode = "internal"
+	}
+	return mode == "internal" || mode == "both"
 }

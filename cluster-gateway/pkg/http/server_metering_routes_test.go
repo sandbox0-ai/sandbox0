@@ -55,6 +55,38 @@ func TestSetupRoutesMountsMeteringEndpointsInPublicMode(t *testing.T) {
 	}
 }
 
+func TestSetupRoutesSkipsControlPlaneEndpointsInPublicMode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server, _, _ := testMeteringRouteServer(t, "public")
+	server.requestLogger = middleware.NewRequestLogger(zap.NewNop())
+	server.obsProvider = newTestMeteringObservability(t)
+	server.setupRoutes()
+
+	if hasRoute(server.router, "GET", "/internal/v1/sandboxes/:id") {
+		t.Fatal("expected public mode to skip internal sandbox metadata route")
+	}
+	if hasRoute(server.router, "POST", "/internal/v1/sandboxes/:id/resume") {
+		t.Fatal("expected public mode to skip internal sandbox resume route")
+	}
+}
+
+func TestSetupRoutesMountsControlPlaneEndpointsInInternalMode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server, _, _ := testMeteringRouteServer(t, authModeInternal)
+	server.requestLogger = middleware.NewRequestLogger(zap.NewNop())
+	server.obsProvider = newTestMeteringObservability(t)
+	server.setupRoutes()
+
+	if !hasRoute(server.router, "GET", "/internal/v1/sandboxes/:id") {
+		t.Fatal("expected internal mode to mount internal sandbox metadata route")
+	}
+	if !hasRoute(server.router, "POST", "/internal/v1/sandboxes/:id/resume") {
+		t.Fatal("expected internal mode to mount internal sandbox resume route")
+	}
+}
+
 func TestSetupRoutesMountsMetadataEndpoint(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

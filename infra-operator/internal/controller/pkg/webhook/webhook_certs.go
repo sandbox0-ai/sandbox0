@@ -32,7 +32,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	ctrl "sigs.k8s.io/controller-runtime"
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
@@ -47,8 +46,12 @@ func NewReconciler(resources *common.ResourceManager) *Reconciler {
 }
 
 func (r *Reconciler) ReconcileCertSecret(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, labels map[string]string, dnsNames []string) error {
+	return r.ReconcileCertSecretWithScope(ctx, common.NewObjectScope(infra), name, labels, dnsNames)
+}
+
+func (r *Reconciler) ReconcileCertSecretWithScope(ctx context.Context, scope common.ObjectScope, name string, labels map[string]string, dnsNames []string) error {
 	secret := &corev1.Secret{}
-	err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, secret)
+	err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: scope.Namespace}, secret)
 	if err != nil && !errors.IsNotFound(err) {
 		return err
 	}
@@ -68,7 +71,7 @@ func (r *Reconciler) ReconcileCertSecret(ctx context.Context, infra *infrav1alph
 	desired := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
-			Namespace: infra.Namespace,
+			Namespace: scope.Namespace,
 			Labels:    labels,
 		},
 		Type: corev1.SecretTypeTLS,
@@ -77,7 +80,7 @@ func (r *Reconciler) ReconcileCertSecret(ctx context.Context, infra *infrav1alph
 			corev1.TLSPrivateKeyKey: keyPEM,
 		},
 	}
-	if err := ctrl.SetControllerReference(infra, desired, r.Resources.Scheme); err != nil {
+	if err := scope.SetControllerReference(desired, r.Resources.Scheme); err != nil {
 		return err
 	}
 

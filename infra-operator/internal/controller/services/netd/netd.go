@@ -15,10 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
@@ -31,10 +28,10 @@ func NewReconciler(resources *common.ResourceManager) *Reconciler {
 	return &Reconciler{Resources: resources}
 }
 
-func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, imageRepo, imageTag string, compiledPlan *infraplan.InfraPlan) error {
+func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, compiledPlan *infraplan.InfraPlan) error {
 	logger := log.FromContext(ctx)
 	if compiledPlan == nil {
-		compiledPlan = infraplan.Compile(infra)
+		return fmt.Errorf("compiled plan is required")
 	}
 	if !compiledPlan.Netd.Enabled {
 		logger.Info("netd is disabled, skipping")
@@ -45,8 +42,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		return nil
 	}
 
-	name := fmt.Sprintf("%s-netd", infra.Name)
-	labels := common.GetServiceLabels(infra.Name, "netd")
+	scope := compiledPlan.Scope
+	name := fmt.Sprintf("%s-netd", scope.Name)
+	labels := common.GetServiceLabels(scope.Name, "netd")
 	image := fmt.Sprintf("%s:%s", imageRepo, imageTag)
 	pullPolicy := corev1.PullIfNotPresent
 	if r.Resources.ImagePullPolicy != nil {
@@ -76,21 +74,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		}
 		config.ClusterDNSCIDR = cidr
 	}
-	if infra.Spec.Database != nil {
-		if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {
-			config.DatabaseURL = dsn
-		}
+	if dsn, err := compiledPlan.DatabaseDSN(ctx, r.Resources.Client); err == nil {
+		config.DatabaseURL = dsn
 	}
 	config.RegionID = compiledPlan.Netd.RegionID
 	config.ClusterID = compiledPlan.Netd.ClusterID
 	if config.EgressAuthResolverURL == "" {
 		config.EgressAuthResolverURL = compiledPlan.Netd.EgressAuthResolverURL
 	}
-	mitmCASecretName, err := r.resolveMITMCASecretName(ctx, infra, labels)
+	mitmCASecretName, err := r.resolveMITMCASecretName(ctx, compiledPlan, labels)
 	if err != nil {
 		return err
 	}
-	keySecretName, privateKeyKey, _ := internalauth.GetDataPlaneKeyRefs(infra)
+	keySecretName, privateKeyKey, _ := compiledPlan.DataPlaneKeyRefs()
 	if mitmCASecretName != "" {
 		if config.MITMCACertPath == "" {
 			config.MITMCACertPath = "/tls/ca.crt"
@@ -104,7 +100,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		return err
 	}
 
-	if err := r.Resources.ReconcileServiceConfigMap(ctx, infra, name, labels, config); err != nil {
+	if err := r.Resources.ReconcileServiceConfigMapWithScope(ctx, scope, name, labels, config); err != nil {
 		return err
 	}
 
@@ -203,7 +199,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	desired := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
-			Namespace: infra.Namespace,
+			Namespace: scope.Namespace,
 		},
 		Spec: appsv1.DaemonSetSpec{
 			Selector: &metav1.LabelSelector{
@@ -282,11 +278,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		},
 	}
 
-	return r.Resources.ApplyDaemonSet(ctx, infra, desired)
+	return r.Resources.ApplyDaemonSetWithScope(ctx, scope, desired)
 }
 
-func (r *Reconciler) resolveMITMCASecretName(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, labels map[string]string) (string, error) {
-	return EnsureMITMCASecret(ctx, r.Resources, infra, labels)
+func (r *Reconciler) resolveMITMCASecretName(ctx context.Context, compiledPlan *infraplan.InfraPlan, labels map[string]string) (string, error) {
+	return EnsureMITMCASecretWithScope(ctx, r.Resources, compiledPlan.Scope, compiledPlan, labels)
 }
 
 func resolveClusterDNSCIDR(ctx context.Context, client ctrlclient.Client, logger logr.Logger) (string, error) {

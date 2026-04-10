@@ -114,7 +114,7 @@ func TestBuildConfigPropagatesNetdMITMCASecretName(t *testing.T) {
 			},
 		}
 
-		cfg, err := reconciler.buildConfig(context.Background(), infra, "sandbox0/manager", "test", infraplan.Compile(infra))
+		cfg, err := reconciler.buildConfig(context.Background(), "sandbox0/manager", "test", infraplan.Compile(infra))
 		if err != nil {
 			t.Fatalf("buildConfig returned error: %v", err)
 		}
@@ -152,7 +152,7 @@ func TestBuildConfigPropagatesNetdMITMCASecretName(t *testing.T) {
 			},
 		}
 
-		cfg, err := reconciler.buildConfig(context.Background(), infra, "sandbox0/manager", "test", infraplan.Compile(infra))
+		cfg, err := reconciler.buildConfig(context.Background(), "sandbox0/manager", "test", infraplan.Compile(infra))
 		if err != nil {
 			t.Fatalf("buildConfig returned error: %v", err)
 		}
@@ -201,7 +201,7 @@ func TestBuildConfigPreservesSandboxRuntimeClassName(t *testing.T) {
 		},
 	}
 
-	cfg, err := reconciler.buildConfig(context.Background(), infra, "sandbox0/manager", "test", infraplan.Compile(infra))
+	cfg, err := reconciler.buildConfig(context.Background(), "sandbox0/manager", "test", infraplan.Compile(infra))
 	if err != nil {
 		t.Fatalf("buildConfig returned error: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestBuildConfigEnablesCtldWhenManagerIsEnabled(t *testing.T) {
 		},
 	}
 
-	cfg, err := reconciler.buildConfig(context.Background(), infra, "sandbox0/manager", "test", infraplan.Compile(infra))
+	cfg, err := reconciler.buildConfig(context.Background(), "sandbox0/manager", "test", infraplan.Compile(infra))
 	if err != nil {
 		t.Fatalf("buildConfig returned error: %v", err)
 	}

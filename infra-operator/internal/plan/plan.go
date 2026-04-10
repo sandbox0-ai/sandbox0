@@ -26,6 +26,7 @@ const (
 )
 
 type InfraPlan struct {
+	Scope           common.ObjectScope
 	Components      ComponentPlan
 	Services        ServicePlan
 	Scheduler       SchedulerPlan
@@ -175,7 +176,7 @@ type WorkflowStepPlan struct {
 }
 
 func Compile(infra *infrav1alpha1.Sandbox0Infra) *InfraPlan {
-	compiled := &InfraPlan{infra: infra}
+	compiled := &InfraPlan{infra: infra, Scope: common.NewObjectScope(infra)}
 	compiled.Components = compileComponents(infra)
 	compiled.Services = compileServices(infra)
 	compiled.Scheduler = compileSchedulerPlan(infra, compiled)

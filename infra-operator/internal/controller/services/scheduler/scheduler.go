@@ -25,10 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -46,10 +43,10 @@ func NewReconciler(resources *common.ResourceManager) *Reconciler {
 }
 
 // Reconcile reconciles the scheduler deployment.
-func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, imageRepo, imageTag string, compiledPlan *infraplan.InfraPlan) error {
+func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, compiledPlan *infraplan.InfraPlan) error {
 	logger := log.FromContext(ctx)
 	if compiledPlan == nil {
-		compiledPlan = infraplan.Compile(infra)
+		return fmt.Errorf("compiled plan is required")
 	}
 
 	// Skip if not enabled (scheduler is optional by default)
@@ -58,17 +55,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		return nil
 	}
 
-	deploymentName := fmt.Sprintf("%s-scheduler", infra.Name)
+	scope := compiledPlan.Scope
+	deploymentName := fmt.Sprintf("%s-scheduler", scope.Name)
 	replicas := compiledPlan.Scheduler.Replicas
-	labels := common.GetServiceLabels(infra.Name, "scheduler")
-	keySecretName, privateKeyKey, publicKeyKey := internalauth.GetControlPlaneKeyRefs(infra)
+	labels := common.GetServiceLabels(scope.Name, "scheduler")
+	keySecretName, privateKeyKey, publicKeyKey := compiledPlan.ControlPlaneKeyRefs()
 
-	config, err := r.buildConfig(ctx, infra, compiledPlan)
+	config, err := r.buildConfig(ctx, compiledPlan)
 	if err != nil {
 		return err
 	}
 	common.NormalizeEnterpriseLicenseFile(&config.LicenseFile, compiledPlan.Enterprise.Scheduler)
-	if err := common.EnsureBuiltinTemplates(ctx, infra, common.BuiltinTemplateOptions{
+	if err := common.EnsureBuiltinTemplates(ctx, compiledPlan.BuiltinTemplates(), common.BuiltinTemplateOptions{
 		DatabaseURL:          config.DatabaseURL,
 		DatabaseMaxConns:     config.DatabasePool.MaxConns,
 		DatabaseMinConns:     config.DatabasePool.MinConns,
@@ -77,14 +75,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	}); err != nil {
 		return err
 	}
-	if err := r.ensureHomeCluster(ctx, infra, compiledPlan, config); err != nil {
+	if err := r.ensureHomeCluster(ctx, compiledPlan, config); err != nil {
 		return err
 	}
 	podAnnotations, err := common.ConfigHashAnnotation(config)
 	if err != nil {
 		return err
 	}
-	if err := r.Resources.ReconcileServiceConfigMap(ctx, infra, deploymentName, labels, config); err != nil {
+	if err := r.Resources.ReconcileServiceConfigMapWithScope(ctx, scope, deploymentName, labels, config); err != nil {
 		return err
 	}
 
@@ -150,16 +148,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		},
 	}
 	if compiledPlan.Enterprise.Scheduler {
-		volumeMounts, volumes = common.AppendEnterpriseLicenseVolume(infra, config.LicenseFile, volumeMounts, volumes)
+		volumeMounts, volumes = common.AppendEnterpriseLicenseVolumeWithSecretRef(compiledPlan.EnterpriseLicenseSecretRef(), config.LicenseFile, volumeMounts, volumes)
 	}
 
 	// Create deployment
 	httpPort := int32(config.HTTPPort)
-	if err := r.Resources.ReconcileDeployment(ctx, infra, deploymentName, labels, replicas, common.ServiceDefinition{
+	if err := r.Resources.ReconcileDeploymentWithScope(ctx, scope, deploymentName, labels, replicas, common.ServiceDefinition{
 		Name:               "scheduler",
 		Port:               httpPort,
 		TargetPort:         httpPort,
-		ServiceAccountName: fmt.Sprintf("%s-scheduler", infra.Name),
+		ServiceAccountName: fmt.Sprintf("%s-scheduler", scope.Name),
 		Ports: []corev1.ContainerPort{
 			{
 				Name:          "http",
@@ -209,11 +207,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	serviceType := common.ResolveServiceType(serviceConfig)
 	servicePort := common.ResolveServicePort(serviceConfig, httpPort)
 	serviceAnnotations := common.ResolveServiceAnnotations(serviceConfig)
-	if err := r.Resources.ReconcileService(ctx, infra, deploymentName, labels, serviceType, serviceAnnotations, servicePort, httpPort); err != nil {
+	if err := r.Resources.ReconcileServiceWithScope(ctx, scope, deploymentName, labels, serviceType, serviceAnnotations, servicePort, httpPort); err != nil {
 		return err
 	}
 
-	if err := r.Resources.EnsureDeploymentReady(ctx, infra, deploymentName, replicas); err != nil {
+	if err := r.Resources.EnsureDeploymentReadyWithScope(ctx, scope, deploymentName, replicas); err != nil {
 		return err
 	}
 
@@ -221,21 +219,21 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	return nil
 }
 
-func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, compiledPlan *infraplan.InfraPlan) (*apiconfig.SchedulerConfig, error) {
+func (r *Reconciler) buildConfig(ctx context.Context, compiledPlan *infraplan.InfraPlan) (*apiconfig.SchedulerConfig, error) {
 	cfg := &apiconfig.SchedulerConfig{}
 	if compiledPlan != nil && compiledPlan.Scheduler.Config != nil {
 		cfg = compiledPlan.Scheduler.Config.DeepCopy()
 	}
-	if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {
+	if dsn, err := compiledPlan.DatabaseDSN(ctx, r.Resources.Client); err == nil {
 		cfg.DatabaseURL = dsn
 	}
 
 	return cfg, nil
 }
 
-func (r *Reconciler) ensureHomeCluster(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, compiledPlan *infraplan.InfraPlan, cfg *apiconfig.SchedulerConfig) error {
+func (r *Reconciler) ensureHomeCluster(ctx context.Context, compiledPlan *infraplan.InfraPlan, cfg *apiconfig.SchedulerConfig) error {
 	if compiledPlan == nil {
-		compiledPlan = infraplan.Compile(infra)
+		return fmt.Errorf("compiled plan is required")
 	}
 	desired := compiledPlan.Scheduler.HomeCluster
 	if desired == nil {

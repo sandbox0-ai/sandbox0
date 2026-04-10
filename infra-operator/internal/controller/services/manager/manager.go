@@ -25,12 +25,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
 	netdservice "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/netd"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/registry"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
@@ -46,10 +42,10 @@ func NewReconciler(resources *common.ResourceManager) *Reconciler {
 }
 
 // Reconcile reconciles the manager deployment.
-func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, imageRepo, imageTag string, compiledPlan *infraplan.InfraPlan) error {
+func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, compiledPlan *infraplan.InfraPlan) error {
 	logger := log.FromContext(ctx)
 	if compiledPlan == nil {
-		compiledPlan = infraplan.Compile(infra)
+		return fmt.Errorf("compiled plan is required")
 	}
 
 	// Skip if not enabled
@@ -58,13 +54,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		return nil
 	}
 
-	deploymentName := fmt.Sprintf("%s-manager", infra.Name)
+	scope := compiledPlan.Scope
+	deploymentName := fmt.Sprintf("%s-manager", scope.Name)
 	replicas := compiledPlan.Manager.Replicas
 
-	labels := common.GetServiceLabels(infra.Name, "manager")
-	keySecretName, privateKeyKey, publicKeyKey := internalauth.GetDataPlaneKeyRefs(infra)
+	labels := common.GetServiceLabels(scope.Name, "manager")
+	keySecretName, privateKeyKey, publicKeyKey := compiledPlan.DataPlaneKeyRefs()
 
-	config, err := r.buildConfig(ctx, infra, imageRepo, imageTag, compiledPlan)
+	config, err := r.buildConfig(ctx, imageRepo, imageTag, compiledPlan)
 	if err != nil {
 		return err
 	}
@@ -73,7 +70,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		return err
 	}
 
-	if err := r.Resources.ReconcileServiceConfigMap(ctx, infra, deploymentName, labels, config); err != nil {
+	if err := r.Resources.ReconcileServiceConfigMapWithScope(ctx, scope, deploymentName, labels, config); err != nil {
 		return err
 	}
 
@@ -144,23 +141,23 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		},
 	}
 
-	registryConfig := registry.ResolveRegistryConfig(infra)
-	if registryConfig != nil && registryConfig.SourceSecretName != "" && registryConfig.SourceSecretKey != "" {
+	registrySecretName, registrySecretKey := compiledPlan.ManagerRegistryCredentialsSource()
+	if registrySecretName != "" && registrySecretKey != "" {
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{
 			Name:      "registry-credentials",
 			MountPath: registryCredentialsPath,
-			SubPath:   registryConfig.SourceSecretKey,
+			SubPath:   registrySecretKey,
 			ReadOnly:  true,
 		})
 		volumes = append(volumes, corev1.Volume{
 			Name: "registry-credentials",
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName: registryConfig.SourceSecretName,
+					SecretName: registrySecretName,
 					Items: []corev1.KeyToPath{
 						{
-							Key:  registryConfig.SourceSecretKey,
-							Path: registryConfig.SourceSecretKey,
+							Key:  registrySecretKey,
+							Path: registrySecretKey,
 						},
 					},
 				},
@@ -169,11 +166,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	}
 
 	// Create deployment
-	if err := r.Resources.ReconcileDeployment(ctx, infra, deploymentName, labels, replicas, common.ServiceDefinition{
+	if err := r.Resources.ReconcileDeploymentWithScope(ctx, scope, deploymentName, labels, replicas, common.ServiceDefinition{
 		Name:               "manager",
 		Port:               httpPort,
 		TargetPort:         httpPort,
-		ServiceAccountName: fmt.Sprintf("%s-manager", infra.Name),
+		ServiceAccountName: fmt.Sprintf("%s-manager", scope.Name),
 		Ports: []corev1.ContainerPort{
 			{
 				Name:          "http",
@@ -231,7 +228,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	serviceType := common.ResolveServiceType(serviceConfig)
 	servicePort := common.ResolveServicePort(serviceConfig, httpPort)
 	serviceAnnotations := common.ResolveServiceAnnotations(serviceConfig)
-	if err := r.Resources.ReconcileServicePorts(ctx, infra, deploymentName, labels, serviceType, serviceAnnotations, []corev1.ServicePort{
+	if err := r.Resources.ReconcileServicePortsWithScope(ctx, scope, deploymentName, labels, serviceType, serviceAnnotations, []corev1.ServicePort{
 		common.BuildServicePort("http", servicePort, httpPort, serviceType),
 		common.BuildServicePort("metrics", metricsPort, metricsPort, serviceType),
 		common.BuildServicePort("webhook", webhookPort, webhookPort, serviceType),
@@ -239,13 +236,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		return err
 	}
 
-	if err := r.Resources.EnsureDeploymentReady(ctx, infra, deploymentName, replicas); err != nil {
+	if err := r.Resources.EnsureDeploymentReadyWithScope(ctx, scope, deploymentName, replicas); err != nil {
 		return err
 	}
 
 	// Reconcile runtime resources first so dependent services do not observe a
 	// new manager port before the manager service/config have converged.
-	if err := common.EnsureBuiltinTemplates(ctx, infra, common.BuiltinTemplateOptions{
+	if err := common.EnsureBuiltinTemplates(ctx, compiledPlan.BuiltinTemplates(), common.BuiltinTemplateOptions{
 		DatabaseURL:          config.DatabaseURL,
 		DatabaseMaxConns:     config.DatabaseMaxConns,
 		DatabaseMinConns:     config.DatabaseMinConns,
@@ -259,26 +256,26 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	return nil
 }
 
-func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, imageRepo, imageTag string, compiledPlan *infraplan.InfraPlan) (*apiconfig.ManagerConfig, error) {
+func (r *Reconciler) buildConfig(ctx context.Context, imageRepo, imageTag string, compiledPlan *infraplan.InfraPlan) (*apiconfig.ManagerConfig, error) {
 	cfg := &apiconfig.ManagerConfig{}
 	if compiledPlan == nil {
-		compiledPlan = infraplan.Compile(infra)
+		return nil, fmt.Errorf("compiled plan is required")
 	}
 	if compiledPlan.Manager.Config != nil {
 		cfg = compiledPlan.Manager.Config.DeepCopy()
 	}
 
-	if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {
+	if dsn, err := compiledPlan.DatabaseDSN(ctx, r.Resources.Client); err == nil {
 		cfg.DatabaseURL = dsn
 	}
 
 	if cfg.NetworkPolicyProvider == "netd" {
-		secretName, err := netdservice.EnsureMITMCASecret(ctx, r.Resources, infra, common.GetServiceLabels(infra.Name, "netd"))
+		secretName, err := netdservice.EnsureMITMCASecretWithScope(ctx, r.Resources, compiledPlan.Scope, compiledPlan, common.GetServiceLabels(compiledPlan.Scope.Name, "netd"))
 		if err != nil {
 			return nil, fmt.Errorf("ensure netd MITM CA secret: %w", err)
 		}
 		cfg.NetdMITMCASecretName = secretName
-		cfg.NetdMITMCASecretNamespace = infra.Namespace
+		cfg.NetdMITMCASecretNamespace = compiledPlan.Scope.Namespace
 	}
 
 	cfg.ManagerImage = fmt.Sprintf("%s:%s", imageRepo, imageTag)

@@ -15,6 +15,7 @@ import (
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
+	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 )
 
 func TestReconcileEnablesTLSForHTTPSBaseURL(t *testing.T) {
@@ -85,7 +86,7 @@ func TestReconcileEnablesTLSForHTTPSBaseURL(t *testing.T) {
 		},
 	)
 
-	if err := reconciler.Reconcile(context.Background(), infra, "sandbox0ai/infra", "latest", nil); err != nil && !strings.Contains(err.Error(), "not ready") {
+	if err := reconciler.Reconcile(context.Background(), "sandbox0ai/infra", "latest", infraplan.Compile(infra)); err != nil && !strings.Contains(err.Error(), "not ready") {
 		t.Fatalf("reconcile returned unexpected error: %v", err)
 	}
 
@@ -163,7 +164,7 @@ func TestReconcilePublicModeSkipsControlPlanePublicKeyMount(t *testing.T) {
 		},
 	)
 
-	if err := reconciler.Reconcile(context.Background(), infra, "sandbox0ai/infra", "latest", nil); err != nil && !strings.Contains(err.Error(), "not ready") {
+	if err := reconciler.Reconcile(context.Background(), "sandbox0ai/infra", "latest", infraplan.Compile(infra)); err != nil && !strings.Contains(err.Error(), "not ready") {
 		t.Fatalf("reconcile returned unexpected error: %v", err)
 	}
 
@@ -222,7 +223,7 @@ func TestReconcileInternalModeMountsControlPlanePublicKey(t *testing.T) {
 		},
 	)
 
-	if err := reconciler.Reconcile(context.Background(), infra, "sandbox0ai/infra", "latest", nil); err != nil && !strings.Contains(err.Error(), "not ready") {
+	if err := reconciler.Reconcile(context.Background(), "sandbox0ai/infra", "latest", infraplan.Compile(infra)); err != nil && !strings.Contains(err.Error(), "not ready") {
 		t.Fatalf("reconcile returned unexpected error: %v", err)
 	}
 
@@ -286,7 +287,7 @@ func TestReconcileRegionalGatewayPublicModeUpgradesToBoth(t *testing.T) {
 		},
 	)
 
-	if err := reconciler.Reconcile(context.Background(), infra, "sandbox0ai/infra", "latest", nil); err != nil && !strings.Contains(err.Error(), "not ready") {
+	if err := reconciler.Reconcile(context.Background(), "sandbox0ai/infra", "latest", infraplan.Compile(infra)); err != nil && !strings.Contains(err.Error(), "not ready") {
 		t.Fatalf("reconcile returned unexpected error: %v", err)
 	}
 
@@ -401,7 +402,7 @@ func TestBuildConfigUsesStorageProxyServicePortForDerivedURL(t *testing.T) {
 		Build()
 
 	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
-	cfg, err := reconciler.buildConfig(context.Background(), infra, nil)
+	cfg, err := reconciler.buildConfig(context.Background(), infraplan.Compile(infra))
 	if err != nil {
 		t.Fatalf("buildConfig returned error: %v", err)
 	}
@@ -479,7 +480,7 @@ func TestBuildConfigPublishesSSHEndpoint(t *testing.T) {
 		Build()
 
 	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
-	cfg, err := reconciler.buildConfig(context.Background(), infra, nil)
+	cfg, err := reconciler.buildConfig(context.Background(), infraplan.Compile(infra))
 	if err != nil {
 		t.Fatalf("buildConfig returned error: %v", err)
 	}
@@ -552,7 +553,7 @@ func TestBuildConfigSkipsInitUserForInternalOnlyClusterGateway(t *testing.T) {
 		Build()
 
 	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
-	cfg, err := reconciler.buildConfig(context.Background(), infra, nil)
+	cfg, err := reconciler.buildConfig(context.Background(), infraplan.Compile(infra))
 	if err != nil {
 		t.Fatalf("buildConfig returned error: %v", err)
 	}
@@ -630,7 +631,7 @@ func TestBuildConfigLeavesInitUserPasswordEmptyForOIDCOnlyBootstrap(t *testing.T
 		Build()
 
 	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
-	cfg, err := reconciler.buildConfig(context.Background(), infra, nil)
+	cfg, err := reconciler.buildConfig(context.Background(), infraplan.Compile(infra))
 	if err != nil {
 		t.Fatalf("buildConfig returned error: %v", err)
 	}
@@ -721,7 +722,7 @@ func TestBuildConfigDefaultsRegionIDAndInitUserHomeRegionFromPublicExposure(t *t
 		Build()
 
 	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
-	cfg, err := reconciler.buildConfig(context.Background(), infra, nil)
+	cfg, err := reconciler.buildConfig(context.Background(), infraplan.Compile(infra))
 	if err != nil {
 		t.Fatalf("buildConfig returned error: %v", err)
 	}

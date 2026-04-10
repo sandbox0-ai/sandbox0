@@ -161,7 +161,7 @@ func TestBuildConfigPropagatesRegistryHosts(t *testing.T) {
 		},
 	}
 
-	cfg, err := reconciler.buildConfig(context.Background(), infra, infraplan.Compile(infra))
+	cfg, err := reconciler.buildConfig(context.Background(), infraplan.Compile(infra))
 	if err != nil {
 		t.Fatalf("buildConfig returned error: %v", err)
 	}

@@ -56,6 +56,31 @@ func TestCompileDerivesCrossServiceReferences(t *testing.T) {
 						HTTPPort: 18080,
 					},
 				},
+				Scheduler: &infrav1alpha1.SchedulerServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+				RegionalGateway: &infrav1alpha1.RegionalGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						Replicas:             2,
+					},
+					ServiceExposureConfig: infrav1alpha1.ServiceExposureConfig{
+						Service: &infrav1alpha1.ServiceNetworkConfig{Port: 443},
+					},
+					IngressExposureConfig: infrav1alpha1.IngressExposureConfig{
+						Ingress: &infrav1alpha1.IngressConfig{
+							Enabled: true,
+							Host:    "edge.example.com",
+						},
+					},
+					Config: &infrav1alpha1.RegionalGatewayConfig{
+						GatewayConfig: infrav1alpha1.GatewayConfig{
+							BaseURL: "https://edge.example.com",
+						},
+					},
+				},
 				Netd: &infrav1alpha1.NetdServiceConfig{
 					EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{
 						Enabled: true,
@@ -97,6 +122,30 @@ func TestCompileDerivesCrossServiceReferences(t *testing.T) {
 	}
 	if len(compiled.Netd.Tolerations) != 1 || compiled.Netd.Tolerations[0].Key != "sandbox0.ai/sandbox" {
 		t.Fatalf("expected shared netd tolerations, got %#v", compiled.Netd.Tolerations)
+	}
+	if !compiled.Scheduler.Enabled {
+		t.Fatal("expected scheduler plan to be enabled")
+	}
+	if compiled.Scheduler.Config == nil || compiled.Netd.Config == nil {
+		t.Fatal("expected scheduler and netd configs to be compiled")
+	}
+	if compiled.Scheduler.HomeCluster == nil || compiled.Scheduler.HomeCluster.ClusterID != "cluster-a" {
+		t.Fatalf("expected scheduler home cluster to be compiled, got %#v", compiled.Scheduler.HomeCluster)
+	}
+	if compiled.Netd.RuntimeClassName == nil || *compiled.Netd.RuntimeClassName != sharedRuntime {
+		t.Fatalf("expected netd runtime class name %q, got %#v", sharedRuntime, compiled.Netd.RuntimeClassName)
+	}
+	if !compiled.RegionalGateway.Enabled || compiled.RegionalGateway.Replicas != 2 {
+		t.Fatalf("expected regional gateway plan to carry enablement and replicas, got %#v", compiled.RegionalGateway)
+	}
+	if compiled.RegionalGateway.Config == nil || compiled.RegionalGateway.Config.SSHEndpointHost != "" {
+		t.Fatalf("expected regional gateway config without ssh endpoint, got %#v", compiled.RegionalGateway.Config)
+	}
+	if compiled.RegionalGateway.Config == nil || compiled.RegionalGateway.Config.TLSCertPath == "" {
+		t.Fatalf("expected regional gateway TLS paths to be compiled, got %#v", compiled.RegionalGateway.Config)
+	}
+	if compiled.RegionalGateway.IngressConfig == nil || !compiled.RegionalGateway.IngressConfig.Enabled {
+		t.Fatalf("expected regional gateway ingress config to be compiled, got %#v", compiled.RegionalGateway.IngressConfig)
 	}
 }
 

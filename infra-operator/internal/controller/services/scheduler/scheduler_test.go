@@ -53,7 +53,7 @@ func TestDesiredHomeClusterForCoLocatedHomeCluster(t *testing.T) {
 	}
 
 	compiled := infraplan.Compile(infra)
-	cluster := desiredHomeCluster(infra, compiled)
+	cluster := compiled.Scheduler.HomeCluster
 	if cluster == nil {
 		t.Fatal("expected desired home cluster")
 	}
@@ -107,7 +107,7 @@ func TestDesiredHomeClusterSkipsExternalRegistrationClusters(t *testing.T) {
 	if !compiled.Components.EnableClusterRegistration {
 		t.Fatal("expected external data-plane cluster registration to be enabled")
 	}
-	if cluster := desiredHomeCluster(infra, compiled); cluster != nil {
+	if cluster := compiled.Scheduler.HomeCluster; cluster != nil {
 		t.Fatalf("expected no desired home cluster, got %#v", cluster)
 	}
 }
@@ -151,10 +151,17 @@ func TestBuildConfigPropagatesRegistryHosts(t *testing.T) {
 					Port:    5000,
 				},
 			},
+			Services: &infrav1alpha1.ServicesConfig{
+				Scheduler: &infrav1alpha1.SchedulerServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+			},
 		},
 	}
 
-	cfg, err := reconciler.buildConfig(context.Background(), infra)
+	cfg, err := reconciler.buildConfig(context.Background(), infra, infraplan.Compile(infra))
 	if err != nil {
 		t.Fatalf("buildConfig returned error: %v", err)
 	}

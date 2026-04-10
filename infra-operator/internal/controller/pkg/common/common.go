@@ -329,6 +329,9 @@ func ResolveSSHEndpoint(infra *infrav1alpha1.Sandbox0Infra, fallbackPort int32) 
 	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.SSHGateway == nil || !infra.Spec.Services.SSHGateway.Enabled {
 		return "", 0, false
 	}
+	if infra.Spec.PublicExposure == nil {
+		return "", 0, false
+	}
 
 	rootDomain := strings.TrimSpace(infra.Spec.PublicExposure.RootDomain)
 	regionLabel := strings.TrimSpace(infra.Spec.PublicExposure.RegionID)

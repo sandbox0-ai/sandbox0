@@ -2,6 +2,7 @@ package plan
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -9,6 +10,9 @@ import (
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/registry"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
+	"github.com/sandbox0-ai/sandbox0/pkg/template"
 )
 
 const (
@@ -17,11 +21,14 @@ const (
 	defaultClusterGatewayAuthMode  = "internal"
 	defaultRegionalGatewayAuthMode = "self_hosted"
 	defaultSSHGatewayPort          = 2222
+	defaultStorageProxyHTTPPort    = 8081
+	registryCredentialsPath        = "/etc/sandbox0/registry/.dockerconfigjson"
 )
 
 type InfraPlan struct {
 	Components      ComponentPlan
 	Services        ServicePlan
+	Scheduler       SchedulerPlan
 	Manager         ManagerPlan
 	Netd            NetdPlan
 	RegionalGateway RegionalGatewayPlan
@@ -76,6 +83,7 @@ type ServicePlan struct {
 	Manager        ServiceReference
 	Scheduler      ServiceReference
 	ClusterGateway ServiceReference
+	StorageProxy   ServiceReference
 }
 
 type ServiceReference struct {
@@ -84,7 +92,21 @@ type ServiceReference struct {
 	URL  string
 }
 
+type SchedulerPlan struct {
+	Enabled       bool
+	Replicas      int32
+	Resources     *corev1.ResourceRequirements
+	ServiceConfig *infrav1alpha1.ServiceNetworkConfig
+	Config        *apiconfig.SchedulerConfig
+	HomeCluster   *template.Cluster
+}
+
 type ManagerPlan struct {
+	Enabled               bool
+	Replicas              int32
+	Resources             *corev1.ResourceRequirements
+	ServiceConfig         *infrav1alpha1.ServiceNetworkConfig
+	Config                *apiconfig.ManagerConfig
 	TemplateStoreEnabled  bool
 	NetworkPolicyProvider string
 	SandboxPodPlacement   apiconfig.SandboxPodPlacementConfig
@@ -93,6 +115,9 @@ type ManagerPlan struct {
 }
 
 type NetdPlan struct {
+	Enabled               bool
+	RuntimeClassName      *string
+	Config                *apiconfig.NetdConfig
 	EgressAuthResolverURL string
 	RegionID              string
 	ClusterID             string
@@ -101,6 +126,12 @@ type NetdPlan struct {
 }
 
 type RegionalGatewayPlan struct {
+	Enabled                  bool
+	Replicas                 int32
+	Resources                *corev1.ResourceRequirements
+	ServiceConfig            *infrav1alpha1.ServiceNetworkConfig
+	IngressConfig            *infrav1alpha1.IngressConfig
+	Config                   *apiconfig.RegionalGatewayConfig
 	DefaultClusterGatewayURL string
 }
 
@@ -147,9 +178,10 @@ func Compile(infra *infrav1alpha1.Sandbox0Infra) *InfraPlan {
 	compiled := &InfraPlan{infra: infra}
 	compiled.Components = compileComponents(infra)
 	compiled.Services = compileServices(infra)
+	compiled.Scheduler = compileSchedulerPlan(infra, compiled)
 	compiled.Manager = compileManagerPlan(infra, compiled)
 	compiled.Netd = compileNetdPlan(infra, compiled)
-	compiled.RegionalGateway = compileRegionalGatewayPlan(compiled)
+	compiled.RegionalGateway = compileRegionalGatewayPlan(infra, compiled)
 	compiled.Enterprise = compileEnterpriseLicensePlan(infra, compiled)
 	compiled.Validation = compileValidationPlan(infra, compiled)
 	compiled.Cleanup = compileCleanupPlan(infra, compiled)
@@ -197,6 +229,7 @@ func compileServices(infra *infrav1alpha1.Sandbox0Infra) ServicePlan {
 		Manager:        compileManagerServiceReference(infra),
 		Scheduler:      compileSchedulerServiceReference(infra),
 		ClusterGateway: compileClusterGatewayServiceReference(infra),
+		StorageProxy:   compileStorageProxyServiceReference(infra),
 	}
 }
 
@@ -245,6 +278,74 @@ func compileClusterGatewayServiceReference(infra *infrav1alpha1.Sandbox0Infra) S
 	}
 }
 
+func compileStorageProxyServiceReference(infra *infrav1alpha1.Sandbox0Infra) ServiceReference {
+	if infra == nil || infra.Name == "" || !infrav1alpha1.IsStorageProxyEnabled(infra) {
+		return ServiceReference{}
+	}
+
+	port := common.ResolveServicePort(storageProxyServiceConfig(infra), int32(storageProxyHTTPPort(infra)))
+	name := fmt.Sprintf("%s-storage-proxy", infra.Name)
+
+	return ServiceReference{
+		Name: name,
+		Port: port,
+		URL:  fmt.Sprintf("http://%s:%d", name, port),
+	}
+}
+
+func compileSchedulerPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) SchedulerPlan {
+	schedulerPlan := SchedulerPlan{
+		Enabled: infrav1alpha1.IsSchedulerEnabled(infra),
+		Config:  &apiconfig.SchedulerConfig{},
+	}
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.Scheduler == nil {
+		return schedulerPlan
+	}
+
+	svc := infra.Spec.Services.Scheduler
+	schedulerPlan.Replicas = svc.Replicas
+	if svc.Resources != nil {
+		schedulerPlan.Resources = svc.Resources.DeepCopy()
+	}
+	if svc.Service != nil {
+		schedulerPlan.ServiceConfig = svc.Service.DeepCopy()
+	}
+	if svc.Config != nil {
+		schedulerPlan.Config = runtimeconfig.ToScheduler(svc.Config)
+	}
+	if resolvedRegistry := registry.ResolveRegistryConfig(infra); resolvedRegistry != nil {
+		schedulerPlan.Config.RegistryPushRegistry = resolvedRegistry.PushRegistry
+		schedulerPlan.Config.RegistryPullRegistry = resolvedRegistry.PullRegistry
+	}
+	schedulerPlan.HomeCluster = compileSchedulerHomeCluster(infra, compiled)
+	return schedulerPlan
+}
+
+func compileSchedulerHomeCluster(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) *template.Cluster {
+	if infra == nil || infra.Spec.Cluster == nil || compiled == nil {
+		return nil
+	}
+	if !compiled.Components.EnableScheduler || !compiled.Components.EnableClusterGateway || compiled.Components.EnableClusterRegistration {
+		return nil
+	}
+	if compiled.Services.ClusterGateway.URL == "" {
+		return nil
+	}
+
+	name := infra.Spec.Cluster.Name
+	if name == "" {
+		name = infra.Spec.Cluster.ID
+	}
+
+	return &template.Cluster{
+		ClusterID:         infra.Spec.Cluster.ID,
+		ClusterName:       name,
+		ClusterGatewayURL: compiled.Services.ClusterGateway.URL,
+		Weight:            100,
+		Enabled:           true,
+	}
+}
+
 func compileManagerPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) ManagerPlan {
 	nodeSelector, tolerations := common.ResolveSandboxNodePlacement(infra)
 	templateStoreEnabled := clusterGatewayAuthMode(infra) != defaultClusterGatewayAuthMode
@@ -253,6 +354,8 @@ func compileManagerPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 	}
 
 	managerPlan := ManagerPlan{
+		Enabled:               infrav1alpha1.IsManagerEnabled(infra),
+		Config:                &apiconfig.ManagerConfig{},
 		TemplateStoreEnabled:  templateStoreEnabled,
 		NetworkPolicyProvider: "noop",
 		SandboxPodPlacement: apiconfig.SandboxPodPlacementConfig{
@@ -269,22 +372,161 @@ func compileManagerPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 		if infra.Spec.Cluster != nil {
 			managerPlan.DefaultClusterID = infra.Spec.Cluster.ID
 		}
+		if infra.Spec.Services != nil && infra.Spec.Services.Manager != nil {
+			svc := infra.Spec.Services.Manager
+			managerPlan.Replicas = svc.Replicas
+			if svc.Resources != nil {
+				managerPlan.Resources = svc.Resources.DeepCopy()
+			}
+			if svc.Service != nil {
+				managerPlan.ServiceConfig = svc.Service.DeepCopy()
+			}
+			if svc.Config != nil {
+				managerPlan.Config = runtimeconfig.ToManager(svc.Config)
+			}
+		}
+		compileManagerRuntimeConfig(&managerPlan, infra)
 	}
 
 	return managerPlan
 }
 
+func compileManagerRuntimeConfig(managerPlan *ManagerPlan, infra *infrav1alpha1.Sandbox0Infra) {
+	if managerPlan == nil || infra == nil {
+		return
+	}
+	cfg := managerPlan.Config
+	if cfg == nil {
+		cfg = &apiconfig.ManagerConfig{}
+		managerPlan.Config = cfg
+	}
+
+	cfg.TemplateStoreEnabled = managerPlan.TemplateStoreEnabled
+	cfg.NetworkPolicyProvider = managerPlan.NetworkPolicyProvider
+	cfg.SandboxPodPlacement = managerPlan.SandboxPodPlacement
+	cfg.DefaultClusterId = managerPlan.DefaultClusterID
+	cfg.RegionID = managerPlan.RegionID
+	cfg.CtldEnabled = managerPlan.Enabled
+	if cfg.CtldEnabled && cfg.CtldPort == 0 {
+		cfg.CtldPort = 8095
+	}
+
+	if resolvedRegistry := registry.ResolveRegistryConfig(infra); resolvedRegistry != nil {
+		cfg.Registry.Provider = string(resolvedRegistry.Provider)
+		cfg.Registry.PushRegistry = resolvedRegistry.PushRegistry
+		cfg.Registry.PullRegistry = resolvedRegistry.PullRegistry
+		cfg.Registry.PullSecretName = resolvedRegistry.TargetSecretName
+		cfg.Registry.Namespace = infra.Namespace
+		if resolvedRegistry.SourceSecretName != "" {
+			cfg.Registry.PullCredentialsFile = registryCredentialsPath
+		}
+		if resolvedRegistry.Provider == infrav1alpha1.RegistryProviderBuiltin {
+			cfg.Registry.Builtin = &apiconfig.RegistryBuiltinConfig{
+				AuthSecretName: fmt.Sprintf("%s-registry-auth", infra.Name),
+				UsernameKey:    "username",
+				PasswordKey:    "password",
+			}
+		}
+	}
+	if infra.Spec.Registry != nil {
+		switch infra.Spec.Registry.Provider {
+		case infrav1alpha1.RegistryProviderAWS:
+			if infra.Spec.Registry.AWS != nil {
+				cfg.Registry.AWS = &apiconfig.RegistryAWSConfig{
+					Region:           infra.Spec.Registry.AWS.Region,
+					RegistryID:       infra.Spec.Registry.AWS.RegistryID,
+					AssumeRoleARN:    infra.Spec.Registry.AWS.AssumeRoleARN,
+					ExternalID:       infra.Spec.Registry.AWS.ExternalID,
+					AccessKeySecret:  infra.Spec.Registry.AWS.CredentialsSecret.Name,
+					AccessKeyKey:     infra.Spec.Registry.AWS.CredentialsSecret.AccessKeyKey,
+					SecretKeyKey:     infra.Spec.Registry.AWS.CredentialsSecret.SecretKeyKey,
+					SessionTokenKey:  infra.Spec.Registry.AWS.CredentialsSecret.SessionTokenKey,
+					RegistryOverride: infra.Spec.Registry.AWS.Registry,
+				}
+			}
+		case infrav1alpha1.RegistryProviderGCP:
+			if infra.Spec.Registry.GCP != nil {
+				cfg.Registry.GCP = &apiconfig.RegistryGCPConfig{
+					Registry: infra.Spec.Registry.GCP.Registry,
+				}
+				if infra.Spec.Registry.GCP.ServiceAccountSecret != nil {
+					cfg.Registry.GCP.ServiceAccountSecret = infra.Spec.Registry.GCP.ServiceAccountSecret.Name
+					cfg.Registry.GCP.ServiceAccountKey = infra.Spec.Registry.GCP.ServiceAccountSecret.Key
+				}
+			}
+		case infrav1alpha1.RegistryProviderAzure:
+			if infra.Spec.Registry.Azure != nil {
+				cfg.Registry.Azure = &apiconfig.RegistryAzureConfig{
+					Registry:          infra.Spec.Registry.Azure.Registry,
+					CredentialsSecret: infra.Spec.Registry.Azure.CredentialsSecret.Name,
+					TenantIDKey:       infra.Spec.Registry.Azure.CredentialsSecret.TenantIDKey,
+					ClientIDKey:       infra.Spec.Registry.Azure.CredentialsSecret.ClientIDKey,
+					ClientSecretKey:   infra.Spec.Registry.Azure.CredentialsSecret.ClientSecretKey,
+				}
+			}
+		case infrav1alpha1.RegistryProviderAliyun:
+			if infra.Spec.Registry.Aliyun != nil {
+				cfg.Registry.Aliyun = &apiconfig.RegistryAliyunConfig{
+					Registry:          infra.Spec.Registry.Aliyun.Registry,
+					Region:            infra.Spec.Registry.Aliyun.Region,
+					InstanceID:        infra.Spec.Registry.Aliyun.InstanceID,
+					CredentialsSecret: infra.Spec.Registry.Aliyun.CredentialsSecret.Name,
+					AccessKeyKey:      infra.Spec.Registry.Aliyun.CredentialsSecret.AccessKeyKey,
+					SecretKeyKey:      infra.Spec.Registry.Aliyun.CredentialsSecret.SecretKeyKey,
+				}
+			}
+		case infrav1alpha1.RegistryProviderHarbor:
+			if infra.Spec.Registry.Harbor != nil {
+				cfg.Registry.Harbor = &apiconfig.RegistryHarborConfig{
+					Registry:          infra.Spec.Registry.Harbor.Registry,
+					CredentialsSecret: infra.Spec.Registry.Harbor.CredentialsSecret.Name,
+					UsernameKey:       infra.Spec.Registry.Harbor.CredentialsSecret.UsernameKey,
+					PasswordKey:       infra.Spec.Registry.Harbor.CredentialsSecret.PasswordKey,
+				}
+			}
+		}
+	}
+
+	storageProxyConfig := &apiconfig.StorageProxyConfig{}
+	storageProxyServiceConfig := (*infrav1alpha1.ServiceNetworkConfig)(nil)
+	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil {
+		if infra.Spec.Services.StorageProxy.Config != nil {
+			storageProxyConfig = runtimeconfig.ToStorageProxy(infra.Spec.Services.StorageProxy.Config)
+		}
+		storageProxyServiceConfig = infra.Spec.Services.StorageProxy.Service
+	}
+	if infrav1alpha1.IsStorageProxyEnabled(infra) {
+		cfg.ProcdConfig.StorageProxyBaseURL = fmt.Sprintf("%s-storage-proxy.%s.svc.cluster.local", infra.Name, infra.Namespace)
+		cfg.ProcdConfig.StorageProxyPort = int(common.ResolveServicePort(storageProxyServiceConfig, int32(storageProxyConfig.GRPCPort)))
+	} else {
+		cfg.ProcdConfig.StorageProxyBaseURL = ""
+		cfg.ProcdConfig.StorageProxyPort = 0
+	}
+	if infra.Spec.PublicExposure != nil {
+		cfg.PublicRootDomain = infra.Spec.PublicExposure.RootDomain
+		cfg.PublicRegionID = infra.Spec.PublicExposure.RegionID
+	}
+}
+
 func compileNetdPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) NetdPlan {
 	nodeSelector, tolerations := common.ResolveSandboxNodePlacement(infra)
 	netdPlan := NetdPlan{
+		Enabled:      infrav1alpha1.IsNetdEnabled(infra),
 		NodeSelector: nodeSelector,
 		Tolerations:  tolerations,
+		Config:       &apiconfig.NetdConfig{},
 	}
 
 	if infra != nil {
 		netdPlan.RegionID = infra.Spec.Region
 		if infra.Spec.Cluster != nil {
 			netdPlan.ClusterID = infra.Spec.Cluster.ID
+		}
+		if infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
+			if infra.Spec.Services.Netd.Config != nil {
+				netdPlan.Config = runtimeconfig.ToNetd(infra.Spec.Services.Netd.Config)
+			}
+			netdPlan.RuntimeClassName = infra.Spec.Services.Netd.RuntimeClassName
 		}
 	}
 
@@ -299,12 +541,73 @@ func compileNetdPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) Ne
 	return netdPlan
 }
 
-func compileRegionalGatewayPlan(compiled *InfraPlan) RegionalGatewayPlan {
-	if compiled == nil {
-		return RegionalGatewayPlan{}
+func compileRegionalGatewayPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) RegionalGatewayPlan {
+	plan := RegionalGatewayPlan{
+		Enabled: infrav1alpha1.IsRegionalGatewayEnabled(infra),
+		Config:  &apiconfig.RegionalGatewayConfig{},
 	}
-	return RegionalGatewayPlan{
-		DefaultClusterGatewayURL: compiled.Services.ClusterGateway.URL,
+	if compiled != nil {
+		plan.DefaultClusterGatewayURL = compiled.Services.ClusterGateway.URL
+	}
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.RegionalGateway == nil {
+		return plan
+	}
+
+	svc := infra.Spec.Services.RegionalGateway
+	plan.Replicas = svc.Replicas
+	if svc.Resources != nil {
+		plan.Resources = svc.Resources.DeepCopy()
+	}
+	if svc.Service != nil {
+		plan.ServiceConfig = svc.Service.DeepCopy()
+	}
+	if svc.Ingress != nil {
+		plan.IngressConfig = svc.Ingress.DeepCopy()
+	}
+	if svc.Config != nil {
+		plan.Config = runtimeconfig.ToRegionalGateway(svc.Config)
+	}
+	compileRegionalGatewayRuntimeConfig(&plan, infra, compiled)
+	return plan
+}
+
+func compileRegionalGatewayRuntimeConfig(plan *RegionalGatewayPlan, infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) {
+	if plan == nil || infra == nil {
+		return
+	}
+	cfg := plan.Config
+	if cfg == nil {
+		cfg = &apiconfig.RegionalGatewayConfig{}
+		plan.Config = cfg
+	}
+
+	cfg.DefaultClusterGatewayURL = plan.DefaultClusterGatewayURL
+	if compiled != nil {
+		cfg.SchedulerEnabled = compiled.Components.EnableScheduler
+		cfg.SchedulerURL = compiled.Services.Scheduler.URL
+	}
+
+	sshPort := int32(defaultSSHGatewayPort)
+	if infra.Spec.Services != nil && infra.Spec.Services.SSHGateway != nil && infra.Spec.Services.SSHGateway.Config != nil && infra.Spec.Services.SSHGateway.Config.SSHPort != 0 {
+		sshPort = int32(infra.Spec.Services.SSHGateway.Config.SSHPort)
+	}
+	if sshHost, advertisedPort, ok := common.ResolveSSHEndpoint(infra, sshPort); ok {
+		cfg.SSHEndpointHost = sshHost
+		cfg.SSHEndpointPort = int(advertisedPort)
+	}
+	if strings.TrimSpace(infra.Spec.Region) != "" {
+		cfg.RegionID = infra.Spec.Region
+	}
+	if infra.Spec.PublicExposure != nil {
+		cfg.PublicExposureEnabled = infra.Spec.PublicExposure.Enabled
+		cfg.PublicRootDomain = infra.Spec.PublicExposure.RootDomain
+		cfg.PublicRegionID = infra.Spec.PublicExposure.RegionID
+	}
+	if base := strings.TrimSpace(cfg.BaseURL); base != "" {
+		if parsed, err := url.Parse(base); err == nil && strings.EqualFold(parsed.Scheme, "https") {
+			cfg.TLSCertPath = "/tls/tls.crt"
+			cfg.TLSKeyPath = "/tls/tls.key"
+		}
 	}
 }
 
@@ -734,6 +1037,21 @@ func schedulerHTTPPort(infra *infrav1alpha1.Sandbox0Infra) int {
 func schedulerServiceConfig(infra *infrav1alpha1.Sandbox0Infra) *infrav1alpha1.ServiceNetworkConfig {
 	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.Scheduler != nil {
 		return infra.Spec.Services.Scheduler.Service
+	}
+	return nil
+}
+
+func storageProxyHTTPPort(infra *infrav1alpha1.Sandbox0Infra) int {
+	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil &&
+		infra.Spec.Services.StorageProxy.Config != nil && infra.Spec.Services.StorageProxy.Config.HTTPPort > 0 {
+		return infra.Spec.Services.StorageProxy.Config.HTTPPort
+	}
+	return defaultStorageProxyHTTPPort
+}
+
+func storageProxyServiceConfig(infra *infrav1alpha1.Sandbox0Infra) *infrav1alpha1.ServiceNetworkConfig {
+	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil {
+		return infra.Spec.Services.StorageProxy.Service
 	}
 	return nil
 }

@@ -32,7 +32,6 @@ import (
 	netdservice "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/netd"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/registry"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
 
@@ -54,17 +53,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	}
 
 	// Skip if not enabled
-	if infra.Spec.Services != nil && infra.Spec.Services.Manager != nil && !infra.Spec.Services.Manager.Enabled {
+	if !compiledPlan.Manager.Enabled {
 		logger.Info("Manager is disabled, skipping")
 		return nil
 	}
 
 	deploymentName := fmt.Sprintf("%s-manager", infra.Name)
-
-	replicas := int32(1)
-	if infra.Spec.Services != nil && infra.Spec.Services.Manager != nil {
-		replicas = infra.Spec.Services.Manager.Replicas
-	}
+	replicas := compiledPlan.Manager.Replicas
 
 	labels := common.GetServiceLabels(infra.Name, "manager")
 	keySecretName, privateKeyKey, publicKeyKey := internalauth.GetDataPlaneKeyRefs(infra)
@@ -86,12 +81,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	metricsPort := int32(config.MetricsPort)
 	webhookPort := int32(config.WebhookPort)
 
-	var resources *corev1.ResourceRequirements
-	serviceConfig := (*infrav1alpha1.ServiceNetworkConfig)(nil)
-	if infra.Spec.Services != nil && infra.Spec.Services.Manager != nil {
-		resources = infra.Spec.Services.Manager.Resources
-		serviceConfig = infra.Spec.Services.Manager.Service
-	}
+	resources := compiledPlan.Manager.Resources
+	serviceConfig := compiledPlan.Manager.ServiceConfig
 
 	volumeMounts := []corev1.VolumeMount{
 		{
@@ -270,26 +261,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 
 func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, imageRepo, imageTag string, compiledPlan *infraplan.InfraPlan) (*apiconfig.ManagerConfig, error) {
 	cfg := &apiconfig.ManagerConfig{}
-	if infra.Spec.Services != nil && infra.Spec.Services.Manager != nil {
-		cfg = runtimeconfig.ToManager(infra.Spec.Services.Manager.Config)
-	}
 	if compiledPlan == nil {
 		compiledPlan = infraplan.Compile(infra)
+	}
+	if compiledPlan.Manager.Config != nil {
+		cfg = compiledPlan.Manager.Config.DeepCopy()
 	}
 
 	if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {
 		cfg.DatabaseURL = dsn
 	}
 
-	cfg.TemplateStoreEnabled = compiledPlan.Manager.TemplateStoreEnabled
-	cfg.NetworkPolicyProvider = compiledPlan.Manager.NetworkPolicyProvider
-	cfg.SandboxPodPlacement = compiledPlan.Manager.SandboxPodPlacement
-	cfg.DefaultClusterId = compiledPlan.Manager.DefaultClusterID
-	cfg.RegionID = compiledPlan.Manager.RegionID
-	cfg.CtldEnabled = compiledPlan.Components.EnableFusePlugin
-	if cfg.CtldEnabled && cfg.CtldPort == 0 {
-		cfg.CtldPort = 8095
-	}
 	if cfg.NetworkPolicyProvider == "netd" {
 		secretName, err := netdservice.EnsureMITMCASecret(ctx, r.Resources, infra, common.GetServiceLabels(infra.Name, "netd"))
 		if err != nil {
@@ -300,107 +282,6 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	}
 
 	cfg.ManagerImage = fmt.Sprintf("%s:%s", imageRepo, imageTag)
-
-	registryConfig := registry.ResolveRegistryConfig(infra)
-	if registryConfig != nil {
-		cfg.Registry.Provider = string(registryConfig.Provider)
-		cfg.Registry.PushRegistry = registryConfig.PushRegistry
-		cfg.Registry.PullRegistry = registryConfig.PullRegistry
-		cfg.Registry.PullSecretName = registryConfig.TargetSecretName
-		cfg.Registry.Namespace = infra.Namespace
-		if registryConfig.SourceSecretName != "" {
-			cfg.Registry.PullCredentialsFile = registryCredentialsPath
-		}
-		// For builtin provider, configure auth secret for push credentials
-		if registryConfig.Provider == infrav1alpha1.RegistryProviderBuiltin {
-			cfg.Registry.Builtin = &apiconfig.RegistryBuiltinConfig{
-				AuthSecretName: fmt.Sprintf("%s-registry-auth", infra.Name),
-				UsernameKey:    "username",
-				PasswordKey:    "password",
-			}
-		}
-	}
-	if infra.Spec.Registry != nil {
-		switch infra.Spec.Registry.Provider {
-		case infrav1alpha1.RegistryProviderAWS:
-			if infra.Spec.Registry.AWS != nil {
-				cfg.Registry.AWS = &apiconfig.RegistryAWSConfig{
-					Region:           infra.Spec.Registry.AWS.Region,
-					RegistryID:       infra.Spec.Registry.AWS.RegistryID,
-					AssumeRoleARN:    infra.Spec.Registry.AWS.AssumeRoleARN,
-					ExternalID:       infra.Spec.Registry.AWS.ExternalID,
-					AccessKeySecret:  infra.Spec.Registry.AWS.CredentialsSecret.Name,
-					AccessKeyKey:     infra.Spec.Registry.AWS.CredentialsSecret.AccessKeyKey,
-					SecretKeyKey:     infra.Spec.Registry.AWS.CredentialsSecret.SecretKeyKey,
-					SessionTokenKey:  infra.Spec.Registry.AWS.CredentialsSecret.SessionTokenKey,
-					RegistryOverride: infra.Spec.Registry.AWS.Registry,
-				}
-			}
-		case infrav1alpha1.RegistryProviderGCP:
-			if infra.Spec.Registry.GCP != nil {
-				cfg.Registry.GCP = &apiconfig.RegistryGCPConfig{
-					Registry: infra.Spec.Registry.GCP.Registry,
-				}
-				if infra.Spec.Registry.GCP.ServiceAccountSecret != nil {
-					cfg.Registry.GCP.ServiceAccountSecret = infra.Spec.Registry.GCP.ServiceAccountSecret.Name
-					cfg.Registry.GCP.ServiceAccountKey = infra.Spec.Registry.GCP.ServiceAccountSecret.Key
-				}
-			}
-		case infrav1alpha1.RegistryProviderAzure:
-			if infra.Spec.Registry.Azure != nil {
-				cfg.Registry.Azure = &apiconfig.RegistryAzureConfig{
-					Registry:          infra.Spec.Registry.Azure.Registry,
-					CredentialsSecret: infra.Spec.Registry.Azure.CredentialsSecret.Name,
-					TenantIDKey:       infra.Spec.Registry.Azure.CredentialsSecret.TenantIDKey,
-					ClientIDKey:       infra.Spec.Registry.Azure.CredentialsSecret.ClientIDKey,
-					ClientSecretKey:   infra.Spec.Registry.Azure.CredentialsSecret.ClientSecretKey,
-				}
-			}
-		case infrav1alpha1.RegistryProviderAliyun:
-			if infra.Spec.Registry.Aliyun != nil {
-				cfg.Registry.Aliyun = &apiconfig.RegistryAliyunConfig{
-					Registry:          infra.Spec.Registry.Aliyun.Registry,
-					Region:            infra.Spec.Registry.Aliyun.Region,
-					InstanceID:        infra.Spec.Registry.Aliyun.InstanceID,
-					CredentialsSecret: infra.Spec.Registry.Aliyun.CredentialsSecret.Name,
-					AccessKeyKey:      infra.Spec.Registry.Aliyun.CredentialsSecret.AccessKeyKey,
-					SecretKeyKey:      infra.Spec.Registry.Aliyun.CredentialsSecret.SecretKeyKey,
-				}
-			}
-		case infrav1alpha1.RegistryProviderHarbor:
-			if infra.Spec.Registry.Harbor != nil {
-				cfg.Registry.Harbor = &apiconfig.RegistryHarborConfig{
-					Registry:          infra.Spec.Registry.Harbor.Registry,
-					CredentialsSecret: infra.Spec.Registry.Harbor.CredentialsSecret.Name,
-					UsernameKey:       infra.Spec.Registry.Harbor.CredentialsSecret.UsernameKey,
-					PasswordKey:       infra.Spec.Registry.Harbor.CredentialsSecret.PasswordKey,
-				}
-			}
-		}
-	}
-
-	storageProxyConfig := &apiconfig.StorageProxyConfig{}
-	storageProxyServiceConfig := (*infrav1alpha1.ServiceNetworkConfig)(nil)
-	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil {
-		storageProxyConfig = runtimeconfig.ToStorageProxy(infra.Spec.Services.StorageProxy.Config)
-	}
-	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil {
-		storageProxyServiceConfig = infra.Spec.Services.StorageProxy.Service
-	}
-
-	if infrav1alpha1.IsStorageProxyEnabled(infra) {
-		cfg.ProcdConfig.StorageProxyBaseURL = fmt.Sprintf("%s-storage-proxy.%s.svc.cluster.local", infra.Name, infra.Namespace)
-		cfg.ProcdConfig.StorageProxyPort = int(common.ResolveServicePort(storageProxyServiceConfig, int32(storageProxyConfig.GRPCPort)))
-	} else {
-		cfg.ProcdConfig.StorageProxyBaseURL = ""
-		cfg.ProcdConfig.StorageProxyPort = 0
-	}
-
-	// Copy public exposure config from CRD top-level spec for generating public URLs
-	if infra.Spec.PublicExposure != nil {
-		cfg.PublicRootDomain = infra.Spec.PublicExposure.RootDomain
-		cfg.PublicRegionID = infra.Spec.PublicExposure.RegionID
-	}
 
 	return cfg, nil
 }

@@ -37,7 +37,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/registry"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
 
@@ -57,7 +56,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	}
 
 	// Skip if not enabled
-	if infra.Spec.Services != nil && infra.Spec.Services.RegionalGateway != nil && !infra.Spec.Services.RegionalGateway.Enabled {
+	if !compiledPlan.RegionalGateway.Enabled {
 		logger.Info("Edge gateway is disabled, skipping")
 		return nil
 	}
@@ -65,10 +64,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	deploymentName := fmt.Sprintf("%s-regional-gateway", infra.Name)
 	serviceName := deploymentName
 
-	replicas := int32(1)
-	if infra.Spec.Services != nil && infra.Spec.Services.RegionalGateway != nil {
-		replicas = infra.Spec.Services.RegionalGateway.Replicas
-	}
+	replicas := compiledPlan.RegionalGateway.Replicas
 
 	labels := common.GetServiceLabels(infra.Name, "regional-gateway")
 	keySecretName, privateKeyKey, publicKeyKey := internalauth.GetControlPlaneKeyRefs(infra)
@@ -87,12 +83,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		return err
 	}
 
-	var resources *corev1.ResourceRequirements
-	serviceConfig := (*infrav1alpha1.ServiceNetworkConfig)(nil)
-	if infra.Spec.Services != nil && infra.Spec.Services.RegionalGateway != nil {
-		resources = infra.Spec.Services.RegionalGateway.Resources
-		serviceConfig = infra.Spec.Services.RegionalGateway.Service
-	}
+	resources := compiledPlan.RegionalGateway.Resources
+	serviceConfig := compiledPlan.RegionalGateway.ServiceConfig
 	tlsEnabled := strings.TrimSpace(config.TLSCertPath) != "" && strings.TrimSpace(config.TLSKeyPath) != ""
 	containerPortName := "http"
 	if tlsEnabled {
@@ -285,9 +277,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	}
 
 	// Create ingress if enabled
-	if infra.Spec.Services != nil && infra.Spec.Services.RegionalGateway != nil &&
-		infra.Spec.Services.RegionalGateway.Ingress != nil && infra.Spec.Services.RegionalGateway.Ingress.Enabled {
-		if err := r.Resources.ReconcileIngress(ctx, infra, serviceName, servicePort, infra.Spec.Services.RegionalGateway.Ingress); err != nil {
+	if compiledPlan.RegionalGateway.IngressConfig != nil && compiledPlan.RegionalGateway.IngressConfig.Enabled {
+		if err := r.Resources.ReconcileIngress(ctx, infra, serviceName, servicePort, compiledPlan.RegionalGateway.IngressConfig); err != nil {
 			return err
 		}
 	} else {
@@ -306,11 +297,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 
 func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, compiledPlan *infraplan.InfraPlan) (*apiconfig.RegionalGatewayConfig, []corev1.EnvVar, error) {
 	cfg := &apiconfig.RegionalGatewayConfig{}
-	if infra.Spec.Services != nil && infra.Spec.Services.RegionalGateway != nil {
-		cfg = runtimeconfig.ToRegionalGateway(infra.Spec.Services.RegionalGateway.Config)
-	}
 	if compiledPlan == nil {
 		compiledPlan = infraplan.Compile(infra)
+	}
+	if compiledPlan.RegionalGateway.Config != nil {
+		cfg = compiledPlan.RegionalGateway.Config.DeepCopy()
 	}
 
 	if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {
@@ -318,17 +309,7 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	}
 	cfg.DefaultClusterGatewayURL = compiledPlan.RegionalGateway.DefaultClusterGatewayURL
 	cfg.SchedulerEnabled = compiledPlan.Components.EnableScheduler
-	if compiledPlan.Services.Scheduler.URL != "" {
-		cfg.SchedulerURL = compiledPlan.Services.Scheduler.URL
-	}
-	sshPort := int32(2222)
-	if infra.Spec.Services != nil && infra.Spec.Services.SSHGateway != nil && infra.Spec.Services.SSHGateway.Config != nil && infra.Spec.Services.SSHGateway.Config.SSHPort != 0 {
-		sshPort = int32(infra.Spec.Services.SSHGateway.Config.SSHPort)
-	}
-	if sshHost, advertisedPort, ok := common.ResolveSSHEndpoint(infra, sshPort); ok {
-		cfg.SSHEndpointHost = sshHost
-		cfg.SSHEndpointPort = int(advertisedPort)
-	}
+	cfg.SchedulerURL = compiledPlan.Services.Scheduler.URL
 
 	authMode := strings.TrimSpace(strings.ToLower(cfg.AuthMode))
 	if authMode == "" {
@@ -394,24 +375,6 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 			cfg.JWTSecret = jwtSecret
 		}
 	}
-
-	if strings.TrimSpace(infra.Spec.Region) != "" {
-		cfg.RegionID = infra.Spec.Region
-	}
-
-	// Copy public exposure config from CRD top-level spec
-	if infra.Spec.PublicExposure != nil {
-		cfg.PublicExposureEnabled = infra.Spec.PublicExposure.Enabled
-		cfg.PublicRootDomain = infra.Spec.PublicExposure.RootDomain
-		cfg.PublicRegionID = infra.Spec.PublicExposure.RegionID
-	}
-	if base := strings.TrimSpace(cfg.BaseURL); base != "" {
-		if parsed, err := url.Parse(base); err == nil && strings.EqualFold(parsed.Scheme, "https") {
-			cfg.TLSCertPath = "/tls/tls.crt"
-			cfg.TLSKeyPath = "/tls/tls.key"
-		}
-	}
-
 	registryEnvVars, err := r.applyRegistryConfig(infra, cfg)
 	if err != nil {
 		return nil, nil, err

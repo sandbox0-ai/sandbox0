@@ -69,7 +69,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	labels := common.GetServiceLabels(infra.Name, "cluster-gateway")
 	dataPlaneSecretName, dataPlanePrivateKey, _ := internalauth.GetDataPlaneKeyRefs(infra)
 
-	config, err := r.buildConfig(ctx, infra)
+	config, err := r.buildConfig(ctx, infra, compiledPlan)
 	if err != nil {
 		return err
 	}
@@ -292,11 +292,15 @@ func probeScheme(tlsEnabled bool) corev1.URIScheme {
 	return corev1.URISchemeHTTP
 }
 
-func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (*apiconfig.ClusterGatewayConfig, error) {
+func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, compiledPlan *infraplan.InfraPlan) (*apiconfig.ClusterGatewayConfig, error) {
 	cfg := &apiconfig.ClusterGatewayConfig{}
 	if infra.Spec.Services != nil && infra.Spec.Services.ClusterGateway != nil {
 		cfg = runtimeconfig.ToClusterGateway(infra.Spec.Services.ClusterGateway.Config)
 	}
+	if compiledPlan == nil {
+		compiledPlan = infraplan.Compile(infra)
+	}
+	cfg.AuthMode = deriveClusterGatewayAuthMode(cfg.AuthMode, compiledPlan)
 	resolvedRegionID := strings.TrimSpace(cfg.RegionID)
 
 	if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {
@@ -311,32 +315,14 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		cfg.SSHEndpointPort = int(advertisedPort)
 	}
 
-	managerConfig := &apiconfig.ManagerConfig{}
-	if infra.Spec.Services != nil && infra.Spec.Services.Manager != nil {
-		managerConfig = runtimeconfig.ToManager(infra.Spec.Services.Manager.Config)
-	}
-	managerServiceConfig := (*infrav1alpha1.ServiceNetworkConfig)(nil)
-	if infra.Spec.Services != nil && infra.Spec.Services.Manager != nil {
-		managerServiceConfig = infra.Spec.Services.Manager.Service
-	}
-	if infrav1alpha1.IsManagerEnabled(infra) {
-		managerServicePort := common.ResolveServicePort(managerServiceConfig, int32(managerConfig.HTTPPort))
-		managerURL := fmt.Sprintf("http://%s-manager:%d", infra.Name, managerServicePort)
-		cfg.ManagerURL = managerURL
+	if compiledPlan.Components.EnableManager {
+		cfg.ManagerURL = compiledPlan.Services.Manager.URL
 	} else {
 		cfg.ManagerURL = ""
 	}
 
-	storageProxyConfig := &apiconfig.StorageProxyConfig{}
-	storageProxyServiceConfig := (*infrav1alpha1.ServiceNetworkConfig)(nil)
-	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil {
-		storageProxyConfig = runtimeconfig.ToStorageProxy(infra.Spec.Services.StorageProxy.Config)
-		storageProxyServiceConfig = infra.Spec.Services.StorageProxy.Service
-	}
-	if infrav1alpha1.IsStorageProxyEnabled(infra) {
-		storageProxyHTTPPort := common.ResolveServicePort(storageProxyServiceConfig, int32(storageProxyConfig.HTTPPort))
-		storageProxyURL := fmt.Sprintf("http://%s-storage-proxy:%d", infra.Name, storageProxyHTTPPort)
-		cfg.StorageProxyURL = storageProxyURL
+	if compiledPlan.Components.EnableStorageProxy {
+		cfg.StorageProxyURL = compiledPlan.Services.StorageProxy.URL
 	} else {
 		cfg.StorageProxyURL = ""
 	}
@@ -416,6 +402,17 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 func clusterGatewayPublicAuthEnabled(mode string) bool {
 	mode = strings.TrimSpace(strings.ToLower(mode))
 	return mode == "public" || mode == "both"
+}
+
+func deriveClusterGatewayAuthMode(mode string, compiledPlan *infraplan.InfraPlan) string {
+	normalized := strings.TrimSpace(strings.ToLower(mode))
+	if normalized == "" {
+		normalized = "internal"
+	}
+	if normalized == "public" && compiledPlan != nil && compiledPlan.RegionalGateway.Enabled {
+		return "both"
+	}
+	return normalized
 }
 
 func internalAuthRequiresControlPlaneKey(cfg *apiconfig.ClusterGatewayConfig) bool {

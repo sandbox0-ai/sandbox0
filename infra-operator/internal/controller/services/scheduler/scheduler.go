@@ -29,13 +29,10 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/registry"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
-	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	templmigrations "github.com/sandbox0-ai/sandbox0/pkg/template/migrations"
 	schedulerdb "github.com/sandbox0-ai/sandbox0/scheduler/pkg/db"
 )
@@ -56,17 +53,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	}
 
 	// Skip if not enabled (scheduler is optional by default)
-	if infra.Spec.Services == nil || infra.Spec.Services.Scheduler == nil || !infra.Spec.Services.Scheduler.Enabled {
+	if !compiledPlan.Scheduler.Enabled {
 		logger.Info("Scheduler is disabled, skipping")
 		return nil
 	}
 
 	deploymentName := fmt.Sprintf("%s-scheduler", infra.Name)
-	replicas := infra.Spec.Services.Scheduler.Replicas
+	replicas := compiledPlan.Scheduler.Replicas
 	labels := common.GetServiceLabels(infra.Name, "scheduler")
 	keySecretName, privateKeyKey, publicKeyKey := internalauth.GetControlPlaneKeyRefs(infra)
 
-	config, err := r.buildConfig(ctx, infra)
+	config, err := r.buildConfig(ctx, infra, compiledPlan)
 	if err != nil {
 		return err
 	}
@@ -91,12 +88,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		return err
 	}
 
-	var resources *corev1.ResourceRequirements
-	serviceConfig := (*infrav1alpha1.ServiceNetworkConfig)(nil)
-	if infra.Spec.Services != nil && infra.Spec.Services.Scheduler != nil {
-		resources = infra.Spec.Services.Scheduler.Resources
-		serviceConfig = infra.Spec.Services.Scheduler.Service
-	}
+	resources := compiledPlan.Scheduler.Resources
+	serviceConfig := compiledPlan.Scheduler.ServiceConfig
 
 	volumeMounts := []corev1.VolumeMount{
 		{
@@ -228,53 +221,23 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	return nil
 }
 
-func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (*apiconfig.SchedulerConfig, error) {
+func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, compiledPlan *infraplan.InfraPlan) (*apiconfig.SchedulerConfig, error) {
 	cfg := &apiconfig.SchedulerConfig{}
-	if infra.Spec.Services != nil && infra.Spec.Services.Scheduler != nil {
-		cfg = runtimeconfig.ToScheduler(infra.Spec.Services.Scheduler.Config)
+	if compiledPlan != nil && compiledPlan.Scheduler.Config != nil {
+		cfg = compiledPlan.Scheduler.Config.DeepCopy()
 	}
-
 	if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {
 		cfg.DatabaseURL = dsn
-	}
-	if registryConfig := registry.ResolveRegistryConfig(infra); registryConfig != nil {
-		cfg.RegistryPushRegistry = registryConfig.PushRegistry
-		cfg.RegistryPullRegistry = registryConfig.PullRegistry
 	}
 
 	return cfg, nil
 }
 
-func desiredHomeCluster(infra *infrav1alpha1.Sandbox0Infra, compiledPlan *infraplan.InfraPlan) *template.Cluster {
-	if infra == nil || infra.Spec.Cluster == nil {
-		return nil
-	}
+func (r *Reconciler) ensureHomeCluster(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, compiledPlan *infraplan.InfraPlan, cfg *apiconfig.SchedulerConfig) error {
 	if compiledPlan == nil {
 		compiledPlan = infraplan.Compile(infra)
 	}
-	if compiledPlan == nil || !compiledPlan.Components.EnableScheduler || !compiledPlan.Components.EnableClusterGateway || compiledPlan.Components.EnableClusterRegistration {
-		return nil
-	}
-	if compiledPlan.Services.ClusterGateway.URL == "" {
-		return nil
-	}
-
-	name := infra.Spec.Cluster.Name
-	if name == "" {
-		name = infra.Spec.Cluster.ID
-	}
-
-	return &template.Cluster{
-		ClusterID:         infra.Spec.Cluster.ID,
-		ClusterName:       name,
-		ClusterGatewayURL: compiledPlan.Services.ClusterGateway.URL,
-		Weight:            100,
-		Enabled:           true,
-	}
-}
-
-func (r *Reconciler) ensureHomeCluster(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, compiledPlan *infraplan.InfraPlan, cfg *apiconfig.SchedulerConfig) error {
-	desired := desiredHomeCluster(infra, compiledPlan)
+	desired := compiledPlan.Scheduler.HomeCluster
 	if desired == nil {
 		return nil
 	}

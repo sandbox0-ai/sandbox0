@@ -20,7 +20,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
 
@@ -37,11 +36,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	if compiledPlan == nil {
 		compiledPlan = infraplan.Compile(infra)
 	}
-	if infra.Spec.Services != nil && infra.Spec.Services.Netd != nil && !infra.Spec.Services.Netd.Enabled {
+	if !compiledPlan.Netd.Enabled {
 		logger.Info("netd is disabled, skipping")
 		return nil
 	}
-	if !infrav1alpha1.HasDataPlaneServices(infra) {
+	if !compiledPlan.Components.HasDataPlane {
 		logger.Info("Data-plane services are disabled, skipping netd")
 		return nil
 	}
@@ -55,16 +54,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	}
 
 	config := &apiconfig.NetdConfig{}
-	runtimeClassName := (*string)(nil)
-	nodeSelector := map[string]string(nil)
-	tolerations := []corev1.Toleration(nil)
-	if infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
-		config = runtimeconfig.ToNetd(infra.Spec.Services.Netd.Config)
+	if compiledPlan.Netd.Config != nil {
+		config = compiledPlan.Netd.Config.DeepCopy()
 	}
-	if infra.Spec.Services != nil && infra.Spec.Services.Netd != nil {
-		runtimeClassName = infra.Spec.Services.Netd.RuntimeClassName
-	}
-	nodeSelector, tolerations = compiledPlan.Netd.NodeSelector, compiledPlan.Netd.Tolerations
+	runtimeClassName := compiledPlan.Netd.RuntimeClassName
+	nodeSelector := compiledPlan.Netd.NodeSelector
+	tolerations := compiledPlan.Netd.Tolerations
 	if config.NodeName == "" {
 		config.NodeName = "${NODE_NAME}"
 	}

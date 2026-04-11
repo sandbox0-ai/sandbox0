@@ -27,7 +27,7 @@ func NewCompositeAuthMiddleware(internal *InternalAuthMiddleware, public *gatewa
 
 func (m *CompositeAuthMiddleware) Authenticate() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if m.internal != nil {
+		if m.internal != nil && m.internal.validator != nil {
 			authCtx, claims, err := m.internal.AuthenticateRequest(c)
 			if err == nil {
 				m.internal.setAuthContext(c, authCtx, claims)

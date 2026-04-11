@@ -642,6 +642,10 @@ func compileValidationPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPl
 	if compiled != nil && compiled.Components.EnableSSHGateway && !compiled.Components.EnableRegionalGateway {
 		plan.FatalErrors = append(plan.FatalErrors, "sshGateway requires regionalGateway to be enabled")
 	}
+	if compiled != nil && compiled.Components.EnableRegionalGateway && compiled.Components.EnableClusterGateway &&
+		!clusterGatewayInternalAuthEnabled(clusterGatewayAuthMode(infra)) {
+		plan.FatalErrors = append(plan.FatalErrors, "regionalGateway requires clusterGateway authMode internal/both when clusterGateway is enabled")
+	}
 	if infra.Spec.Cluster != nil && (compiled == nil || !compiled.Components.HasDataPlane) {
 		plan.FatalErrors = append(plan.FatalErrors, "cluster configuration requires at least one data-plane service")
 	}
@@ -1294,6 +1298,11 @@ func clusterGatewayEnterpriseLicenseRequired(infra *infrav1alpha1.Sandbox0Infra)
 func clusterGatewayPublicAuthEnabled(mode string) bool {
 	mode = strings.TrimSpace(strings.ToLower(mode))
 	return mode == "public" || mode == "both"
+}
+
+func clusterGatewayInternalAuthEnabled(mode string) bool {
+	mode = strings.TrimSpace(strings.ToLower(mode))
+	return mode == "internal" || mode == "both"
 }
 
 func hasEnabledOIDCProviders(providers []infrav1alpha1.OIDCProviderConfig) bool {

@@ -736,6 +736,33 @@ func TestCompileTracksValidationRequirements(t *testing.T) {
 			t.Fatalf("expected init-user topology validation error, got %#v", compiled.Validation.FatalErrors)
 		}
 	})
+
+	t.Run("regional gateway requires cluster gateway internal auth", func(t *testing.T) {
+		infra := &infrav1alpha1.Sandbox0Infra{
+			Spec: infrav1alpha1.Sandbox0InfraSpec{
+				Services: &infrav1alpha1.ServicesConfig{
+					RegionalGateway: &infrav1alpha1.RegionalGatewayServiceConfig{
+						WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+							EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						},
+					},
+					ClusterGateway: &infrav1alpha1.ClusterGatewayServiceConfig{
+						WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+							EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						},
+						Config: &infrav1alpha1.ClusterGatewayConfig{
+							AuthMode: "public",
+						},
+					},
+				},
+			},
+		}
+
+		compiled := Compile(infra)
+		if !containsString(compiled.Validation.FatalErrors, "regionalGateway requires clusterGateway authMode internal/both when clusterGateway is enabled") {
+			t.Fatalf("expected regional/cluster auth mode validation error, got %#v", compiled.Validation.FatalErrors)
+		}
+	})
 }
 
 func TestCompileTracksWorkflowRequirements(t *testing.T) {

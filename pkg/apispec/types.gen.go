@@ -222,6 +222,11 @@ const (
 	SuccessCredentialSourceResponseSuccessTrue SuccessCredentialSourceResponseSuccess = true
 )
 
+// Defines values for SuccessCurrentAPIKeyResponseSuccess.
+const (
+	SuccessCurrentAPIKeyResponseSuccessTrue SuccessCurrentAPIKeyResponseSuccess = true
+)
+
 // Defines values for SuccessDeletedResponseSuccess.
 const (
 	SuccessDeletedResponseSuccessTrue SuccessDeletedResponseSuccess = true
@@ -464,7 +469,7 @@ const (
 
 // Defines values for SuccessWrittenResponseSuccess.
 const (
-	SuccessWrittenResponseSuccessTrue SuccessWrittenResponseSuccess = true
+	True SuccessWrittenResponseSuccess = true
 )
 
 // Defines values for SyncEventType.
@@ -884,6 +889,18 @@ type CredentialSourceWriteSpec struct {
 	StaticHeaders              *StaticHeadersSourceSpec              `json:"staticHeaders,omitempty"`
 	StaticTLSClientCertificate *StaticTLSClientCertificateSourceSpec `json:"staticTLSClientCertificate,omitempty"`
 	StaticUsernamePassword     *StaticUsernamePasswordSourceSpec     `json:"staticUsernamePassword,omitempty"`
+}
+
+// CurrentAPIKeyResponse defines model for CurrentAPIKeyResponse.
+type CurrentAPIKeyResponse struct {
+	CreatedBy   string    `json:"created_by"`
+	ExpiresAt   time.Time `json:"expires_at"`
+	Id          string    `json:"id"`
+	IsActive    bool      `json:"is_active"`
+	Permissions []string  `json:"permissions"`
+	Roles       []string  `json:"roles"`
+	TeamId      string    `json:"team_id"`
+	Type        string    `json:"type"`
 }
 
 // DeviceLoginPollRequest defines model for DeviceLoginPollRequest.
@@ -1849,6 +1866,17 @@ type SuccessCredentialSourceResponse struct {
 
 // SuccessCredentialSourceResponseSuccess defines model for SuccessCredentialSourceResponse.Success.
 type SuccessCredentialSourceResponseSuccess bool
+
+// SuccessCurrentAPIKeyResponse defines model for SuccessCurrentAPIKeyResponse.
+type SuccessCurrentAPIKeyResponse struct {
+	Data *struct {
+		ApiKey *CurrentAPIKeyResponse `json:"api_key,omitempty"`
+	} `json:"data,omitempty"`
+	Success SuccessCurrentAPIKeyResponseSuccess `json:"success"`
+}
+
+// SuccessCurrentAPIKeyResponseSuccess defines model for SuccessCurrentAPIKeyResponse.Success.
+type SuccessCurrentAPIKeyResponseSuccess bool
 
 // SuccessDeletedResponse defines model for SuccessDeletedResponse.
 type SuccessDeletedResponse struct {

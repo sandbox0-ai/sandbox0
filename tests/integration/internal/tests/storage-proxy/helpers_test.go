@@ -233,11 +233,11 @@ type integrationMountedVolumeManager struct {
 	volumes map[string]*volume.VolumeContext
 }
 
-func (m *integrationMountedVolumeManager) MountVolume(_ context.Context, _, volumeID, _ string, _ *volume.VolumeConfig, _ volume.AccessMode) (string, time.Time, error) {
+func (m *integrationMountedVolumeManager) MountVolume(_ context.Context, _, volumeID, _ string, _ *volume.VolumeConfig, _ volume.AccessMode) (string, string, time.Time, error) {
 	if _, ok := m.volumes[volumeID]; !ok {
-		return "", time.Time{}, fmt.Errorf("volume %s not found", volumeID)
+		return "", "", time.Time{}, fmt.Errorf("volume %s not found", volumeID)
 	}
-	return "session-test", time.Now().UTC(), nil
+	return "session-test", "secret-test", time.Now().UTC(), nil
 }
 
 func (m *integrationMountedVolumeManager) UnmountVolume(_ context.Context, _, _ string) error {

@@ -79,6 +79,51 @@ type CreateAPIKeyResponse struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// CurrentAPIKeyResponse is returned when an API key introspects itself.
+type CurrentAPIKeyResponse struct {
+	ID          string    `json:"id"`
+	TeamID      string    `json:"team_id"`
+	CreatedBy   string    `json:"created_by"`
+	Type        string    `json:"type"`
+	Roles       []string  `json:"roles"`
+	Permissions []string  `json:"permissions"`
+	IsActive    bool      `json:"is_active"`
+	ExpiresAt   time.Time `json:"expires_at"`
+}
+
+// GetCurrentAPIKey introspects the currently authenticated API key.
+func (h *APIKeyHandler) GetCurrentAPIKey(c *gin.Context) {
+	authCtx := middleware.GetAuthContext(c)
+	if authCtx == nil || authCtx.APIKeyID == "" {
+		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "api key authentication required")
+		return
+	}
+
+	key, err := h.keys.GetAPIKeyByID(c.Request.Context(), authCtx.APIKeyID)
+	if err != nil {
+		if errors.Is(err, apikey.ErrNotFound) {
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "API key not found")
+			return
+		}
+		h.logger.Error("Failed to introspect current API key", zap.Error(err), zap.String("api_key_id", authCtx.APIKeyID))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to introspect API key")
+		return
+	}
+
+	spec.JSONSuccess(c, http.StatusOK, gin.H{
+		"api_key": &CurrentAPIKeyResponse{
+			ID:          key.ID,
+			TeamID:      key.TeamID,
+			CreatedBy:   key.CreatedBy,
+			Type:        key.Type,
+			Roles:       key.Roles,
+			Permissions: append([]string(nil), authCtx.Permissions...),
+			IsActive:    key.IsActive,
+			ExpiresAt:   key.ExpiresAt,
+		},
+	})
+}
+
 // CreateAPIKey creates a new API key
 func (h *APIKeyHandler) CreateAPIKey(c *gin.Context) {
 	authCtx := middleware.GetAuthContext(c)

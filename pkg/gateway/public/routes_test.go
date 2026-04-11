@@ -37,6 +37,9 @@ func TestRegisterAPIKeyRoutesOnlyMountsRegionalAPIKeySurface(t *testing.T) {
 	if !hasRoute(router, "GET", "/api-keys") {
 		t.Fatal("expected regional routes to include /api-keys")
 	}
+	if !hasRoute(router, "GET", "/api-keys/current") {
+		t.Fatal("expected regional routes to include /api-keys/current")
+	}
 	if hasRoute(router, "GET", "/users/me") {
 		t.Fatal("expected regional API key routes to omit /users/me")
 	}

@@ -1031,6 +1031,26 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+  /api-keys/current:
+    get:
+      tags: [api-keys]
+      summary: Introspect current API key
+      description: Returns the identity and permissions of the currently authenticated API key.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Current API key details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessCurrentAPIKeyResponse"
+        "401":
+          description: API key authentication required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
   /api-keys/{id}:
     delete:
       tags: [api-keys]
@@ -3722,6 +3742,31 @@ components:
           type: string
           format: date-time
       required: [id, name, type, roles, team_id, expires_at, created_at]
+    CurrentAPIKeyResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        team_id:
+          type: string
+        created_by:
+          type: string
+        type:
+          type: string
+        roles:
+          type: array
+          items:
+            type: string
+        permissions:
+          type: array
+          items:
+            type: string
+        is_active:
+          type: boolean
+        expires_at:
+          type: string
+          format: date-time
+      required: [id, team_id, created_by, type, roles, permissions, is_active, expires_at]
     SuccessCreateAPIKeyResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
@@ -3729,6 +3774,16 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/CreateAPIKeyResponse"
+    SuccessCurrentAPIKeyResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                api_key:
+                  $ref: "#/components/schemas/CurrentAPIKeyResponse"
     SuccessAPIKeyListResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"

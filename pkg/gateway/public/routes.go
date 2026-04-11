@@ -141,6 +141,12 @@ func RegisterAPIKeyRoutes(router gin.IRouter, deps Deps) {
 	if deps.APIKeyRepo != nil {
 		apiKeyHandler := handlers.NewAPIKeyHandler(deps.APIKeyRepo, deps.IdentityRepo, deps.RegionID, deps.Logger)
 
+		apiKeySelf := router.Group("/api-keys")
+		apiKeySelf.Use(deps.AuthMiddleware.Authenticate())
+		{
+			apiKeySelf.GET("/current", apiKeyHandler.GetCurrentAPIKey)
+		}
+
 		// ===== API Key Management Routes =====
 		apiKeys := router.Group("/api-keys")
 		apiKeys.Use(deps.AuthMiddleware.Authenticate())

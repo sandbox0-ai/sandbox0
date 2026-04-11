@@ -189,6 +189,10 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					assertClaimBootstrapMountLifecycle(env, session)
 				})
 
+				It("keeps bootstrap mounts writable after procd token expiry", func() {
+					assertBootstrapMountWritableAfterProcdTokenExpiry(env, session)
+				})
+
 				It("shares template-declared volumes between procd and sidecars", func() {
 					assertTemplateSharedVolumeSidecarLifecycle(env, session, opts.templateNamePrefix)
 				})
@@ -1487,6 +1491,72 @@ func assertClaimBootstrapMountLifecycle(env *framework.ScenarioEnv, session *e2e
 		body, _, readErr := session.ReadFile(env.TestCtx.Context, GinkgoT(), sandboxID, mountPoint+seedPath)
 		return body, readErr
 	}).WithTimeout(20 * time.Second).WithPolling(1 * time.Second).Should(Equal(seedContent))
+}
+
+func assertBootstrapMountWritableAfterProcdTokenExpiry(env *framework.ScenarioEnv, session *e2eutils.Session) {
+	cacheSize := "512M"
+	volume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), apispec.CreateSandboxVolumeRequest{CacheSize: &cacheSize})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusCreated))
+	Expect(volume).NotTo(BeNil())
+	volumeID := expectStringPtr(volume.Id, "volume id")
+	DeferCleanup(func() {
+		Expect(session.DeleteSandboxVolumeEventually(env.TestCtx.Context, GinkgoT(), volumeID, 30*time.Second)).To(Succeed())
+	})
+
+	mountWaitTimeout := int32(45000)
+	waitForMounts := true
+	templateID := "default"
+	mountPoint := "/workspace/bootstrap-token-expiry"
+	claimReq := apispec.ClaimRequest{
+		Template: &templateID,
+		Mounts: &[]apispec.ClaimMountRequest{{
+			SandboxvolumeId: volumeID,
+			MountPoint:      mountPoint,
+		}},
+		WaitForMounts:      &waitForMounts,
+		MountWaitTimeoutMs: &mountWaitTimeout,
+	}
+	claimResp, err := session.ClaimSandboxWithRequest(env.TestCtx.Context, GinkgoT(), claimReq)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(claimResp).NotTo(BeNil())
+	sandboxID := claimResp.SandboxId
+	DeferCleanup(func() {
+		_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+	})
+	Expect(claimResp.BootstrapMounts).NotTo(BeNil())
+	Expect(*claimResp.BootstrapMounts).NotTo(BeEmpty())
+	Expect((*claimResp.BootstrapMounts)[0].State).To(Equal(apispec.MountStatusStateMounted))
+
+	latePath := "/late-after-procd-token-expiry.txt"
+	lateContent := fmt.Sprintf("late write after procd token expiry %d", time.Now().UnixNano())
+	processType := apispec.Cmd
+	ttlSec := int32(120)
+	envVars := map[string]string{"S0_LATE_CONTENT": lateContent}
+	ctxReq := apispec.CreateContextRequest{
+		Type: &processType,
+		Cmd: &apispec.CreateCMDContextRequest{
+			Command: []string{
+				"/bin/sh",
+				"-lc",
+				"sleep 45; printf '%s' \"$S0_LATE_CONTENT\" > /workspace/bootstrap-token-expiry/late-after-procd-token-expiry.txt; sync",
+			},
+		},
+		EnvVars: &envVars,
+		TtlSec:  &ttlSec,
+	}
+	ctxResp, status, err := session.CreateContext(env.TestCtx.Context, GinkgoT(), sandboxID, ctxReq)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusCreated))
+	Expect(ctxResp).NotTo(BeNil())
+	DeferCleanup(func() {
+		_, _ = session.DeleteContext(env.TestCtx.Context, GinkgoT(), sandboxID, ctxResp.Id)
+	})
+
+	Eventually(func() ([]byte, error) {
+		body, _, readErr := session.ReadVolumeFile(env.TestCtx.Context, GinkgoT(), volumeID, latePath)
+		return body, readErr
+	}).WithTimeout(90 * time.Second).WithPolling(2 * time.Second).Should(Equal([]byte(lateContent)))
 }
 
 func assertTemplateSharedVolumeSidecarLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session, templateNamePrefix string) {

@@ -10,6 +10,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 const (
@@ -231,6 +232,21 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Conta
 	envVars = appendProcdConfigEnvVars(envVars)
 	container.Env = envVars
 	container.Command = []string{"/procd/bin/procd"}
+	container.Ports = append(container.Ports, corev1.ContainerPort{
+		Name:          "http",
+		ContainerPort: int32(procdHTTPPort()),
+	})
+	container.ReadinessProbe = &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{
+				Path: "/readyz",
+				Port: intstr.FromString("http"),
+			},
+		},
+		PeriodSeconds:    1,
+		TimeoutSeconds:   1,
+		FailureThreshold: 3,
+	}
 	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
 		Name:      procdBinVolumeName,
 		MountPath: "/procd/bin",
@@ -453,6 +469,14 @@ func appendProcdConfigEnvVars(envVars []corev1.EnvVar) []corev1.EnvVar {
 	})
 
 	return envVars
+}
+
+func procdHTTPPort() int {
+	cfg := config.LoadManagerConfig()
+	if cfg != nil && cfg.ProcdConfig.HTTPPort > 0 {
+		return cfg.ProcdConfig.HTTPPort
+	}
+	return 49983
 }
 
 func upsertProcdEnvVar(envIndex map[string]int, envVars *[]corev1.EnvVar, envVar corev1.EnvVar) {

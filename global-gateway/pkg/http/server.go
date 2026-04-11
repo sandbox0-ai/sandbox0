@@ -154,6 +154,7 @@ func (s *Server) setupRoutes() {
 	}))
 	s.router.Use(gatewaymiddleware.Recovery(s.logger))
 	s.router.Use(s.requestLogger.Logger())
+	s.router.Use(gatewaymiddleware.UpstreamTimeoutWhitelist())
 
 	s.router.GET("/healthz", s.healthCheck)
 	s.router.GET("/readyz", s.readinessCheck)

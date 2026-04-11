@@ -187,6 +187,35 @@ manager_image: sandbox0/manager:test
 	}
 }
 
+func TestBuildPodSpecAddsProcdReadinessProbe(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+procd_config:
+  http_port: 41000
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	spec := BuildPodSpec(newTestTemplate(), false)
+	if len(spec.Containers) == 0 {
+		t.Fatal("expected at least one container")
+	}
+
+	main := spec.Containers[0]
+	if main.ReadinessProbe == nil || main.ReadinessProbe.HTTPGet == nil {
+		t.Fatalf("expected procd readiness probe, got %#v", main.ReadinessProbe)
+	}
+	if main.ReadinessProbe.HTTPGet.Path != "/readyz" {
+		t.Fatalf("readiness path = %q, want /readyz", main.ReadinessProbe.HTTPGet.Path)
+	}
+	if main.ReadinessProbe.HTTPGet.Port.StrVal != "http" {
+		t.Fatalf("readiness port = %#v, want named http port", main.ReadinessProbe.HTTPGet.Port)
+	}
+	port := findContainerPort(main.Ports, "http")
+	if port == nil || port.ContainerPort != 41000 {
+		t.Fatalf("expected named http port 41000, got %#v", port)
+	}
+}
+
 func TestBuildPodSpecPreservesSidecarCommandAndProbes(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test
@@ -413,6 +442,15 @@ func findVolumeMount(mounts []corev1.VolumeMount, name string) *corev1.VolumeMou
 	for i := range mounts {
 		if mounts[i].Name == name {
 			return &mounts[i]
+		}
+	}
+	return nil
+}
+
+func findContainerPort(ports []corev1.ContainerPort, name string) *corev1.ContainerPort {
+	for i := range ports {
+		if ports[i].Name == name {
+			return &ports[i]
 		}
 	}
 	return nil

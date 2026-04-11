@@ -16,6 +16,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	sharedssh "github.com/sandbox0-ai/sandbox0/pkg/sshgateway"
 	"go.uber.org/zap"
 )
@@ -160,8 +161,10 @@ func (s *Server) getSandboxFromClusterGateway(ctx context.Context, clusterGatewa
 		return nil, http.StatusInternalServerError, fmt.Errorf("generate cluster-gateway token: %w", err)
 	}
 	req.Header.Set(internalauth.DefaultTokenHeader, token)
+	req, cancel := proxy.ApplyRequestTimeout(req, s.cfg.ProxyTimeout.Duration)
+	defer cancel()
 
-	resp, err := (&http.Client{Timeout: s.cfg.ProxyTimeout.Duration}).Do(req)
+	resp, err := (&http.Client{}).Do(req)
 	if err != nil {
 		return nil, http.StatusServiceUnavailable, fmt.Errorf("call cluster-gateway sandbox endpoint: %w", err)
 	}
@@ -208,7 +211,10 @@ func (s *Server) resumeSandboxViaClusterGateway(ctx context.Context, clusterGate
 	req.Header.Set(internalauth.UserIDHeader, userID)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := (&http.Client{Timeout: s.cfg.ProxyTimeout.Duration}).Do(req)
+	req, cancel := proxy.ApplyRequestTimeout(req, s.cfg.ProxyTimeout.Duration)
+	defer cancel()
+
+	resp, err := (&http.Client{}).Do(req)
 	if err != nil {
 		return fmt.Errorf("call cluster-gateway resume endpoint: %w", err)
 	}

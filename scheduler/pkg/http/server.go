@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	gatewaymiddleware "github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/licensing"
@@ -101,6 +102,7 @@ func NewServer(
 	}))
 	router.Use(gin.Recovery())
 	router.Use(requestLogger(logger))
+	router.Use(gatewaymiddleware.UpstreamTimeoutWhitelist())
 
 	server := &Server{
 		router:                router,

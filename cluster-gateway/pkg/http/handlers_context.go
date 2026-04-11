@@ -44,9 +44,9 @@ func (s *Server) createContext(c *gin.Context) {
 	if err != nil {
 		return
 	}
-	client := &http.Client{Timeout: s.cfg.ProxyTimeout.Duration}
-	if client.Timeout == 0 {
-		client.Timeout = 10 * time.Second
+	proxyTimeout := s.cfg.ProxyTimeout.Duration
+	if proxyTimeout == 0 {
+		proxyTimeout = 10 * time.Second
 	}
 	reqURL := *procdURL
 	reqURL.Path = "/api/v1/contexts"
@@ -55,11 +55,18 @@ func (s *Server) createContext(c *gin.Context) {
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "proxy initialization failed")
 		return
 	}
+	upReq, cancel := proxy.ApplyRequestTimeout(upReq, proxyTimeout)
+	defer cancel()
 	upReq.Header = c.Request.Header.Clone()
 	requestModifier(upReq)
 
+	client := &http.Client{}
 	resp, err := client.Do(upReq)
 	if err != nil {
+		if proxy.IsTimeoutError(err) {
+			spec.JSONError(c, http.StatusGatewayTimeout, spec.CodeUnavailable, "sandbox process request timed out")
+			return
+		}
 		spec.JSONError(c, http.StatusBadGateway, spec.CodeUnavailable, "failed to connect to sandbox process")
 		return
 	}

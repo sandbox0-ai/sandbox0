@@ -93,6 +93,7 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "invalid sandbox address")
 		return
 	}
+	c.Request = proxy.WithUpstreamTimeoutDisabledRequest(c.Request)
 	proxyTimeout := s.cfg.ProxyTimeout.Duration
 	if proxyTimeout == 0 {
 		proxyTimeout = 10 * time.Second

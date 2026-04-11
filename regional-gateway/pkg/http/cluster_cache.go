@@ -91,6 +91,8 @@ func (s *Server) refreshClusterCache(ctx context.Context, authCtx *authn.AuthCon
 	if err != nil {
 		return fmt.Errorf("create scheduler request: %w", err)
 	}
+	req, cancel := proxy.ApplyRequestTimeout(req, s.cfg.ProxyTimeout.Duration)
+	defer cancel()
 
 	token, err := s.generateInternalToken(authCtx, "scheduler")
 	if err != nil {
@@ -106,7 +108,7 @@ func (s *Server) refreshClusterCache(ctx context.Context, authCtx *authn.AuthCon
 	}
 	req.Header.Set("X-Auth-Method", string(authCtx.AuthMethod))
 
-	client := &http.Client{Timeout: s.cfg.ProxyTimeout.Duration}
+	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("list clusters: %w", err)

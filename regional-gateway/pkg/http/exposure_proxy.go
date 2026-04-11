@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 )
 
 func (s *Server) proxyPublicExposureNoRoute(c *gin.Context) {
@@ -30,6 +31,7 @@ func (s *Server) proxyPublicExposureNoRoute(c *gin.Context) {
 
 	c.Request.Header.Set("X-Sandbox-ID", sandboxID)
 	c.Request.Header.Set("X-Exposure-Port", strconv.Itoa(port))
+	c.Request = proxy.WithUpstreamTimeoutDisabledRequest(c.Request)
 
 	if s.schedulerRouter == nil {
 		s.clusterGatewayRouter.ProxyToTarget(c)

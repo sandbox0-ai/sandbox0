@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httputil"
@@ -50,8 +51,16 @@ func (r *Router) ProxyToTarget(c *gin.Context) {
 		return
 	}
 
+	req := c.Request
+	cancel := context.CancelFunc(func() {})
+	if r.timeout > 0 {
+		req, cancel = ApplyRequestTimeout(c.Request, r.timeout)
+		c.Request = req
+	}
+	defer cancel()
+
 	proxy := r.createReverseProxyDirector(r.targetUrl)
-	proxy.ServeHTTP(c.Writer, c.Request)
+	proxy.ServeHTTP(c.Writer, req)
 }
 
 // createReverseProxyDirector creates an httputil.ReverseProxy with proper configuration
@@ -95,13 +104,20 @@ func (r *Router) createReverseProxyDirector(target *url.URL) *httputil.ReversePr
 		Director:  director,
 		Transport: transport,
 		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
+			status := http.StatusBadGateway
+			body := `{"error": "upstream service unavailable"}`
+			if IsTimeoutError(err) {
+				status = http.StatusGatewayTimeout
+				body = `{"error": "upstream request timed out"}`
+			}
 			r.logger.Error("Proxy error",
 				zap.String("target", req.URL.String()),
+				zap.Int("status", status),
 				zap.Error(err),
 			)
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadGateway)
-			w.Write([]byte(`{"error": "upstream service unavailable"}`))
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(body))
 		},
 	}
 

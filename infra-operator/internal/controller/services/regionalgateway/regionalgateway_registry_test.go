@@ -99,7 +99,7 @@ func TestReconcileEnablesTLSForHTTPSBaseURL(t *testing.T) {
 
 	reconciler, client := newRegionalGatewayTestReconciler(t, infra.DeepCopy(), dbSecret)
 
-	if err := reconciler.Reconcile(context.Background(), infra, "sandbox0ai/infra", "latest", nil); err != nil && !strings.Contains(err.Error(), "not ready") {
+	if err := reconciler.Reconcile(context.Background(), "sandbox0ai/infra", "latest", infraplan.Compile(infra)); err != nil && !strings.Contains(err.Error(), "not ready") {
 		t.Fatalf("reconcile returned unexpected error: %v", err)
 	}
 
@@ -358,7 +358,7 @@ func TestBuildConfigUsesCompiledPlanForDefaultClusterGatewayURL(t *testing.T) {
 	compiled := infraplan.Compile(infra)
 	compiled.RegionalGateway.DefaultClusterGatewayURL = "http://planned-cluster-gateway:9443"
 
-	cfg, _, err := reconciler.buildConfig(context.Background(), infra, compiled)
+	cfg, _, err := reconciler.buildConfig(context.Background(), compiled)
 	if err != nil {
 		t.Fatalf("buildConfig returned error: %v", err)
 	}
@@ -434,7 +434,7 @@ func TestBuildConfigPublishesSSHEndpoint(t *testing.T) {
 
 	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dbSecret).Build()
 	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
-	cfg, _, err := reconciler.buildConfig(context.Background(), infra, infraplan.Compile(infra))
+	cfg, _, err := reconciler.buildConfig(context.Background(), infraplan.Compile(infra))
 	if err != nil {
 		t.Fatalf("buildConfig returned error: %v", err)
 	}
@@ -507,7 +507,7 @@ func TestBuildConfigUsesCompiledPlanForSchedulerRouting(t *testing.T) {
 	compiled := infraplan.Compile(infra)
 	compiled.Services.Scheduler = infraplan.ServiceReference{URL: "http://planned-scheduler:8080"}
 
-	cfg, _, err := reconciler.buildConfig(ctx, infra, compiled)
+	cfg, _, err := reconciler.buildConfig(ctx, compiled)
 	if err != nil {
 		t.Fatalf("buildConfig returned error: %v", err)
 	}
@@ -575,7 +575,7 @@ func TestBuildConfigSkipsInitUserForFederatedGlobalAuth(t *testing.T) {
 	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dbSecret).Build()
 	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
 
-	cfg, _, err := reconciler.buildConfig(context.Background(), infra, infraplan.Compile(infra))
+	cfg, _, err := reconciler.buildConfig(context.Background(), infraplan.Compile(infra))
 	if err != nil {
 		t.Fatalf("buildConfig returned error: %v", err)
 	}
@@ -655,7 +655,7 @@ func TestBuildConfigLeavesInitUserPasswordEmptyForOIDCOnlyBootstrap(t *testing.T
 	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dbSecret).Build()
 	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
 
-	cfg, _, err := reconciler.buildConfig(context.Background(), infra, infraplan.Compile(infra))
+	cfg, _, err := reconciler.buildConfig(context.Background(), infraplan.Compile(infra))
 	if err != nil {
 		t.Fatalf("buildConfig returned error: %v", err)
 	}
@@ -732,7 +732,7 @@ func TestReconcileAppliesServiceAnnotations(t *testing.T) {
 		},
 	)
 
-	if err := reconciler.Reconcile(context.Background(), infra, "sandbox0ai/infra", "latest", nil); err != nil && !strings.Contains(err.Error(), "not ready") {
+	if err := reconciler.Reconcile(context.Background(), "sandbox0ai/infra", "latest", infraplan.Compile(infra)); err != nil && !strings.Contains(err.Error(), "not ready") {
 		t.Fatalf("reconcile returned unexpected error: %v", err)
 	}
 

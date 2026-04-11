@@ -30,8 +30,6 @@ import (
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	webhookcerts "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/webhook"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -46,30 +44,34 @@ func NewReconciler(resources *common.ResourceManager) *Reconciler {
 }
 
 // Reconcile reconciles the cluster-gateway deployment.
-func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, imageRepo, imageTag string, compiledPlan *infraplan.InfraPlan) error {
+func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, compiledPlan *infraplan.InfraPlan) error {
 	logger := log.FromContext(ctx)
 	if compiledPlan == nil {
-		compiledPlan = infraplan.Compile(infra)
+		return fmt.Errorf("compiled plan is required")
 	}
 
 	// Skip if not enabled
-	if infra.Spec.Services != nil && infra.Spec.Services.ClusterGateway != nil && !infra.Spec.Services.ClusterGateway.Enabled {
+	if !compiledPlan.Components.EnableClusterGateway {
 		logger.Info("Internal gateway is disabled, skipping")
 		return nil
 	}
 
-	deploymentName := fmt.Sprintf("%s-cluster-gateway", infra.Name)
+	scope := compiledPlan.Scope
+	deploymentName := fmt.Sprintf("%s-cluster-gateway", scope.Name)
 	serviceName := deploymentName
-
 	replicas := int32(1)
-	if infra.Spec.Services != nil && infra.Spec.Services.ClusterGateway != nil {
-		replicas = infra.Spec.Services.ClusterGateway.Replicas
+	var resources *corev1.ResourceRequirements
+	serviceConfig := (*infrav1alpha1.ServiceNetworkConfig)(nil)
+	if owner := scope.Owner(); owner != nil && owner.Spec.Services != nil && owner.Spec.Services.ClusterGateway != nil {
+		replicas = owner.Spec.Services.ClusterGateway.Replicas
+		resources = owner.Spec.Services.ClusterGateway.Resources
+		serviceConfig = owner.Spec.Services.ClusterGateway.Service
 	}
 
-	labels := common.GetServiceLabels(infra.Name, "cluster-gateway")
-	dataPlaneSecretName, dataPlanePrivateKey, _ := internalauth.GetDataPlaneKeyRefs(infra)
+	labels := common.GetServiceLabels(scope.Name, "cluster-gateway")
+	dataPlaneSecretName, dataPlanePrivateKey, _ := compiledPlan.DataPlaneKeyRefs()
 
-	config, err := r.buildConfig(ctx, infra)
+	config, err := r.buildConfig(ctx, compiledPlan)
 	if err != nil {
 		return err
 	}
@@ -79,7 +81,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	if err != nil {
 		return err
 	}
-	if err := r.Resources.ReconcileServiceConfigMap(ctx, infra, deploymentName, labels, config); err != nil {
+	if err := r.Resources.ReconcileServiceConfigMapWithScope(ctx, scope, deploymentName, labels, config); err != nil {
 		return err
 	}
 
@@ -87,20 +89,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	controlPlanePublicSecretName := ""
 	controlPlanePublicKeyKey := ""
 	if needsControlPlanePublicKey {
-		controlPlaneSecretName, _, controlPlanePublicKey := internalauth.GetControlPlaneKeyRefs(infra)
-		controlPlanePublicSecretName, controlPlanePublicKeyKey = internalauth.GetControlPlanePublicKeyRef(infra)
+		controlPlaneSecretName, _, controlPlanePublicKey := compiledPlan.ControlPlaneKeyRefs()
+		controlPlanePublicSecretName, controlPlanePublicKeyKey = compiledPlan.ControlPlanePublicKeyRef()
 		if controlPlanePublicSecretName == "" {
 			controlPlanePublicSecretName = controlPlaneSecretName
 			controlPlanePublicKeyKey = controlPlanePublicKey
 		}
 	}
-	var resources *corev1.ResourceRequirements
-	serviceConfig := (*infrav1alpha1.ServiceNetworkConfig)(nil)
-	if infra.Spec.Services != nil && infra.Spec.Services.ClusterGateway != nil {
-		resources = infra.Spec.Services.ClusterGateway.Resources
-		serviceConfig = infra.Spec.Services.ClusterGateway.Service
-	}
-
 	httpPort := int32(config.HTTPPort)
 	tlsEnabled := strings.TrimSpace(config.TLSCertPath) != "" && strings.TrimSpace(config.TLSKeyPath) != ""
 
@@ -166,15 +161,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		})
 	}
 	if needEnterpriseLicense {
-		volumeMounts, volumes = common.AppendEnterpriseLicenseVolume(infra, config.LicenseFile, volumeMounts, volumes)
+		volumeMounts, volumes = common.AppendEnterpriseLicenseVolumeWithSecretRef(compiledPlan.EnterpriseLicenseSecretRef(), config.LicenseFile, volumeMounts, volumes)
 	}
 	if tlsEnabled {
-		tlsSecretName := fmt.Sprintf("%s-cluster-gateway-tls", infra.Name)
+		tlsSecretName := fmt.Sprintf("%s-cluster-gateway-tls", scope.Name)
 		dnsNames := clusterGatewayTLSDNSNames(config)
 		if len(dnsNames) == 0 {
 			return fmt.Errorf("cluster-gateway TLS enabled but no DNS names were derived")
 		}
-		if err := webhookcerts.NewReconciler(r.Resources).ReconcileCertSecret(ctx, infra, tlsSecretName, labels, dnsNames); err != nil {
+		if err := webhookcerts.NewReconciler(r.Resources).ReconcileCertSecretWithScope(ctx, scope, tlsSecretName, labels, dnsNames); err != nil {
 			return err
 		}
 		volumeMounts = append(volumeMounts,
@@ -201,7 +196,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		})
 	}
 
-	if err := r.Resources.ReconcileDeployment(ctx, infra, deploymentName, labels, replicas, common.ServiceDefinition{
+	if err := r.Resources.ReconcileDeploymentWithScope(ctx, scope, deploymentName, labels, replicas, common.ServiceDefinition{
 		Name:       "cluster-gateway",
 		Port:       httpPort,
 		TargetPort: httpPort,
@@ -260,11 +255,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	}
 	servicePort := common.ResolveServicePort(serviceConfig, defaultServicePort)
 	serviceAnnotations := common.ResolveServiceAnnotations(serviceConfig)
-	if err := r.Resources.ReconcileService(ctx, infra, serviceName, labels, serviceType, serviceAnnotations, servicePort, httpPort); err != nil {
+	if err := r.Resources.ReconcileServiceWithScope(ctx, scope, serviceName, labels, serviceType, serviceAnnotations, servicePort, httpPort); err != nil {
 		return err
 	}
 
-	if err := r.Resources.EnsureDeploymentReady(ctx, infra, deploymentName, replicas); err != nil {
+	if err := r.Resources.EnsureDeploymentReadyWithScope(ctx, scope, deploymentName, replicas); err != nil {
 		return err
 	}
 
@@ -292,75 +287,65 @@ func probeScheme(tlsEnabled bool) corev1.URIScheme {
 	return corev1.URISchemeHTTP
 }
 
-func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (*apiconfig.ClusterGatewayConfig, error) {
+func (r *Reconciler) buildConfig(ctx context.Context, compiledPlan *infraplan.InfraPlan) (*apiconfig.ClusterGatewayConfig, error) {
 	cfg := &apiconfig.ClusterGatewayConfig{}
-	if infra.Spec.Services != nil && infra.Spec.Services.ClusterGateway != nil {
-		cfg = runtimeconfig.ToClusterGateway(infra.Spec.Services.ClusterGateway.Config)
+	if compiledPlan != nil && compiledPlan.Components.EnableClusterGateway && compiledPlan.Services.ClusterGateway.Name != "" {
+		if compiledPlan.Scope.Owner() != nil && compiledPlan.Scope.Owner().Spec.Services != nil && compiledPlan.Scope.Owner().Spec.Services.ClusterGateway != nil {
+			cfg = runtimeconfig.ToClusterGateway(compiledPlan.Scope.Owner().Spec.Services.ClusterGateway.Config)
+		}
 	}
+	if compiledPlan == nil {
+		return nil, fmt.Errorf("compiled plan is required")
+	}
+	cfg.AuthMode = deriveClusterGatewayAuthMode(cfg.AuthMode, compiledPlan)
 	resolvedRegionID := strings.TrimSpace(cfg.RegionID)
 
-	if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {
+	if dsn, err := compiledPlan.DatabaseDSN(ctx, r.Resources.Client); err == nil {
 		cfg.DatabaseURL = dsn
 	}
-	sshPort := int32(2222)
-	if infra.Spec.Services != nil && infra.Spec.Services.SSHGateway != nil && infra.Spec.Services.SSHGateway.Config != nil && infra.Spec.Services.SSHGateway.Config.SSHPort != 0 {
-		sshPort = int32(infra.Spec.Services.SSHGateway.Config.SSHPort)
-	}
-	if sshHost, advertisedPort, ok := common.ResolveSSHEndpoint(infra, sshPort); ok {
-		cfg.SSHEndpointHost = sshHost
-		cfg.SSHEndpointPort = int(advertisedPort)
+	if owner := compiledPlan.Scope.Owner(); owner != nil {
+		sshPort := int32(2222)
+		if owner.Spec.Services != nil && owner.Spec.Services.SSHGateway != nil && owner.Spec.Services.SSHGateway.Config != nil && owner.Spec.Services.SSHGateway.Config.SSHPort != 0 {
+			sshPort = int32(owner.Spec.Services.SSHGateway.Config.SSHPort)
+		}
+		if sshHost, advertisedPort, ok := common.ResolveSSHEndpoint(owner, sshPort); ok {
+			cfg.SSHEndpointHost = sshHost
+			cfg.SSHEndpointPort = int(advertisedPort)
+		}
 	}
 
-	managerConfig := &apiconfig.ManagerConfig{}
-	if infra.Spec.Services != nil && infra.Spec.Services.Manager != nil {
-		managerConfig = runtimeconfig.ToManager(infra.Spec.Services.Manager.Config)
-	}
-	managerServiceConfig := (*infrav1alpha1.ServiceNetworkConfig)(nil)
-	if infra.Spec.Services != nil && infra.Spec.Services.Manager != nil {
-		managerServiceConfig = infra.Spec.Services.Manager.Service
-	}
-	if infrav1alpha1.IsManagerEnabled(infra) {
-		managerServicePort := common.ResolveServicePort(managerServiceConfig, int32(managerConfig.HTTPPort))
-		managerURL := fmt.Sprintf("http://%s-manager:%d", infra.Name, managerServicePort)
-		cfg.ManagerURL = managerURL
+	if compiledPlan.Components.EnableManager {
+		cfg.ManagerURL = compiledPlan.Services.Manager.URL
 	} else {
 		cfg.ManagerURL = ""
 	}
 
-	storageProxyConfig := &apiconfig.StorageProxyConfig{}
-	storageProxyServiceConfig := (*infrav1alpha1.ServiceNetworkConfig)(nil)
-	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil {
-		storageProxyConfig = runtimeconfig.ToStorageProxy(infra.Spec.Services.StorageProxy.Config)
-		storageProxyServiceConfig = infra.Spec.Services.StorageProxy.Service
-	}
-	if infrav1alpha1.IsStorageProxyEnabled(infra) {
-		storageProxyHTTPPort := common.ResolveServicePort(storageProxyServiceConfig, int32(storageProxyConfig.HTTPPort))
-		storageProxyURL := fmt.Sprintf("http://%s-storage-proxy:%d", infra.Name, storageProxyHTTPPort)
-		cfg.StorageProxyURL = storageProxyURL
+	if compiledPlan.Components.EnableStorageProxy {
+		cfg.StorageProxyURL = compiledPlan.Services.StorageProxy.URL
 	} else {
 		cfg.StorageProxyURL = ""
 	}
 
-	if infra.Spec.InitUser != nil && clusterGatewayPublicAuthEnabled(cfg.AuthMode) {
+	if initUser := compiledPlan.InitUser(); initUser != nil && clusterGatewayPublicAuthEnabled(cfg.AuthMode) {
 		password := ""
 		if cfg.BuiltInAuth.Enabled || !apiconfig.HasEnabledOIDCProviders(cfg.OIDCProviders) {
-			secretRef := common.ResolveSecretKeyRef(infra.Spec.InitUser.PasswordSecret, "admin-password", "password")
+			secretRef := common.ResolveSecretKeyRef(initUser.PasswordSecret, "admin-password", "password")
 			var err error
-			password, err = common.GetSecretValue(ctx, r.Resources.Client, infra.Namespace, secretRef)
+			password, err = common.GetSecretValue(ctx, r.Resources.Client, compiledPlan.Scope.Namespace, secretRef)
 			if err != nil {
 				return nil, err
 			}
 		}
 
-		homeRegionID := strings.TrimSpace(infra.Spec.InitUser.HomeRegionID)
+		homeRegionID := strings.TrimSpace(initUser.HomeRegionID)
 		if homeRegionID == "" {
 			homeRegionID = resolvedRegionID
 		}
 
 		cfg.BuiltInAuth.InitUser = &apiconfig.InitUserConfig{
-			Email:        infra.Spec.InitUser.Email,
+			Email:        initUser.Email,
 			Password:     password,
-			Name:         infra.Spec.InitUser.Name,
+			Name:         initUser.Name,
 			HomeRegionID: homeRegionID,
 		}
 	}
@@ -374,8 +359,8 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 			ctx,
 			r.Resources.Client,
 			r.Resources.Scheme,
-			infra,
-			fmt.Sprintf("%s-cluster-gateway-jwt", infra.Name),
+			compiledPlan.Scope.Owner(),
+			compiledPlan.ClusterGatewayJWTSecretName(),
 			"jwt_secret",
 			32,
 		)
@@ -384,18 +369,17 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		}
 		cfg.JWTSecret = jwtSecret
 	}
-
-	if strings.TrimSpace(infra.Spec.Region) != "" {
-		resolvedRegionID = strings.TrimSpace(infra.Spec.Region)
-	}
-
-	// Copy public exposure config from CRD top-level spec
-	if infra.Spec.PublicExposure != nil {
-		cfg.PublicExposureEnabled = infra.Spec.PublicExposure.Enabled
-		cfg.PublicRootDomain = infra.Spec.PublicExposure.RootDomain
-		cfg.PublicRegionID = infra.Spec.PublicExposure.RegionID
-		if resolvedRegionID == "" {
-			resolvedRegionID = strings.TrimSpace(infra.Spec.PublicExposure.RegionID)
+	if owner := compiledPlan.Scope.Owner(); owner != nil {
+		if strings.TrimSpace(owner.Spec.Region) != "" {
+			resolvedRegionID = strings.TrimSpace(owner.Spec.Region)
+		}
+		if owner.Spec.PublicExposure != nil {
+			cfg.PublicExposureEnabled = owner.Spec.PublicExposure.Enabled
+			cfg.PublicRootDomain = owner.Spec.PublicExposure.RootDomain
+			cfg.PublicRegionID = owner.Spec.PublicExposure.RegionID
+			if resolvedRegionID == "" {
+				resolvedRegionID = strings.TrimSpace(owner.Spec.PublicExposure.RegionID)
+			}
 		}
 	}
 
@@ -416,6 +400,17 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 func clusterGatewayPublicAuthEnabled(mode string) bool {
 	mode = strings.TrimSpace(strings.ToLower(mode))
 	return mode == "public" || mode == "both"
+}
+
+func deriveClusterGatewayAuthMode(mode string, compiledPlan *infraplan.InfraPlan) string {
+	normalized := strings.TrimSpace(strings.ToLower(mode))
+	if normalized == "" {
+		normalized = "internal"
+	}
+	if normalized == "public" && compiledPlan != nil && compiledPlan.RegionalGateway.Enabled {
+		return "both"
+	}
+	return normalized
 }
 
 func internalAuthRequiresControlPlaneKey(cfg *apiconfig.ClusterGatewayConfig) bool {

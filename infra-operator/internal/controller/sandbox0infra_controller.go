@@ -346,7 +346,7 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 		}, nil
 	case "regional-gateway":
 		return func(ctx context.Context) error {
-			return regionalGatewayReconciler.Reconcile(ctx, infra, imageRepo, imageTag, compiledPlan)
+			return regionalGatewayReconciler.Reconcile(ctx, imageRepo, imageTag, compiledPlan)
 		}, nil
 	case "ssh-gateway":
 		return func(ctx context.Context) error {
@@ -361,7 +361,7 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 		return func(ctx context.Context) error { return rbacReconciler.ReconcileSchedulerRBAC(ctx, infra) }, nil
 	case "scheduler":
 		return func(ctx context.Context) error {
-			return schedulerReconciler.Reconcile(ctx, infra, imageRepo, imageTag, compiledPlan)
+			return schedulerReconciler.Reconcile(ctx, imageRepo, imageTag, compiledPlan)
 		}, nil
 	case "cluster-gateway-enterprise-license":
 		return func(ctx context.Context) error {
@@ -370,7 +370,7 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 		}, nil
 	case "cluster-gateway":
 		return func(ctx context.Context) error {
-			return clusterGatewayReconciler.Reconcile(ctx, infra, imageRepo, imageTag, compiledPlan)
+			return clusterGatewayReconciler.Reconcile(ctx, imageRepo, imageTag, compiledPlan)
 		}, nil
 	case "fuse-device-plugin":
 		return func(ctx context.Context) error {
@@ -383,7 +383,7 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 		return func(ctx context.Context) error { return rbacReconciler.ReconcileManagerRBAC(ctx, infra) }, nil
 	case "manager":
 		return func(ctx context.Context) error {
-			return managerReconciler.Reconcile(ctx, infra, imageRepo, imageTag, compiledPlan)
+			return managerReconciler.Reconcile(ctx, imageRepo, imageTag, compiledPlan)
 		}, nil
 	case "builtin-template-pods":
 		return func(ctx context.Context) error { return r.waitBuiltinTemplatePodsReady(ctx, infra, compiledPlan) }, nil
@@ -391,7 +391,7 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 		return func(ctx context.Context) error { return rbacReconciler.ReconcileNetdRBAC(ctx, infra) }, nil
 	case "netd":
 		return func(ctx context.Context) error {
-			return netdReconciler.Reconcile(ctx, infra, imageRepo, imageTag, compiledPlan)
+			return netdReconciler.Reconcile(ctx, imageRepo, imageTag, compiledPlan)
 		}, nil
 	case "storage-proxy-rbac":
 		return func(ctx context.Context) error { return rbacReconciler.ReconcileStorageProxyRBAC(ctx, infra) }, nil

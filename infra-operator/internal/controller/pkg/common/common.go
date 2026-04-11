@@ -36,7 +36,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/util/retry"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -91,8 +90,12 @@ type ServiceDefinition struct {
 
 // ReconcileDeployment creates or updates a deployment.
 func (r *ResourceManager) ReconcileDeployment(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, labels map[string]string, replicas int32, def ServiceDefinition) error {
+	return r.ReconcileDeploymentWithScope(ctx, NewObjectScope(infra), name, labels, replicas, def)
+}
+
+func (r *ResourceManager) ReconcileDeploymentWithScope(ctx context.Context, scope ObjectScope, name string, labels map[string]string, replicas int32, def ServiceDefinition) error {
 	deploy := &appsv1.Deployment{}
-	err := r.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, deploy)
+	err := r.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: scope.Namespace}, deploy)
 	if err != nil && !errors.IsNotFound(err) {
 		return err
 	}
@@ -115,7 +118,7 @@ func (r *ResourceManager) ReconcileDeployment(ctx context.Context, infra *infrav
 	desiredDeploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
-			Namespace: infra.Namespace,
+			Namespace: scope.Namespace,
 			Labels:    desiredLabels,
 		},
 		Spec: appsv1.DeploymentSpec{
@@ -151,7 +154,7 @@ func (r *ResourceManager) ReconcileDeployment(ctx context.Context, infra *infrav
 		},
 	}
 
-	if err := ctrl.SetControllerReference(infra, desiredDeploy, r.Scheme); err != nil {
+	if err := scope.SetControllerReference(desiredDeploy, r.Scheme); err != nil {
 		return err
 	}
 
@@ -166,12 +169,16 @@ func (r *ResourceManager) ReconcileDeployment(ctx context.Context, infra *infrav
 
 // EnsureDeploymentReady validates deployment readiness before reporting success.
 func (r *ResourceManager) EnsureDeploymentReady(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, replicas int32) error {
+	return r.EnsureDeploymentReadyWithScope(ctx, NewObjectScope(infra), name, replicas)
+}
+
+func (r *ResourceManager) EnsureDeploymentReadyWithScope(ctx context.Context, scope ObjectScope, name string, replicas int32) error {
 	if replicas == 0 {
 		return nil
 	}
 
 	deploy := &appsv1.Deployment{}
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, deploy); err != nil {
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: scope.Namespace}, deploy); err != nil {
 		return err
 	}
 
@@ -190,6 +197,10 @@ func (r *ResourceManager) EnsureDeploymentReady(ctx context.Context, infra *infr
 
 // ReconcileDaemonSet creates or updates a daemonset.
 func (r *ResourceManager) ReconcileDaemonSet(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, labels map[string]string, def ServiceDefinition) error {
+	return r.ReconcileDaemonSetWithScope(ctx, NewObjectScope(infra), name, labels, def)
+}
+
+func (r *ResourceManager) ReconcileDaemonSetWithScope(ctx context.Context, scope ObjectScope, name string, labels map[string]string, def ServiceDefinition) error {
 	defaultResources := corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
 			corev1.ResourceCPU:    resource.MustParse("100m"),
@@ -208,7 +219,7 @@ func (r *ResourceManager) ReconcileDaemonSet(ctx context.Context, infra *infrav1
 	desiredDs := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
-			Namespace: infra.Namespace,
+			Namespace: scope.Namespace,
 			Labels:    desiredLabels,
 		},
 		Spec: appsv1.DaemonSetSpec{
@@ -250,18 +261,22 @@ func (r *ResourceManager) ReconcileDaemonSet(ctx context.Context, infra *infrav1
 		},
 	}
 
-	if err := ctrl.SetControllerReference(infra, desiredDs, r.Scheme); err != nil {
+	if err := scope.SetControllerReference(desiredDs, r.Scheme); err != nil {
 		return err
 	}
 
-	return r.ApplyDaemonSet(ctx, infra, desiredDs)
+	return r.ApplyDaemonSetWithScope(ctx, scope, desiredDs)
 }
 
 // ApplyDaemonSet creates or updates a daemonset using fresh reads on each retry
 // so controller-driven status/resourceVersion updates do not cause reconcile
 // loops to fail on optimistic concurrency conflicts.
 func (r *ResourceManager) ApplyDaemonSet(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, desired *appsv1.DaemonSet) error {
-	if err := ctrl.SetControllerReference(infra, desired, r.Scheme); err != nil {
+	return r.ApplyDaemonSetWithScope(ctx, NewObjectScope(infra), desired)
+}
+
+func (r *ResourceManager) ApplyDaemonSetWithScope(ctx context.Context, scope ObjectScope, desired *appsv1.DaemonSet) error {
+	if err := scope.SetControllerReference(desired, r.Scheme); err != nil {
 		return err
 	}
 
@@ -329,6 +344,9 @@ func ResolveSSHEndpoint(infra *infrav1alpha1.Sandbox0Infra, fallbackPort int32) 
 	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.SSHGateway == nil || !infra.Spec.Services.SSHGateway.Enabled {
 		return "", 0, false
 	}
+	if infra.Spec.PublicExposure == nil {
+		return "", 0, false
+	}
 
 	rootDomain := strings.TrimSpace(infra.Spec.PublicExposure.RootDomain)
 	regionLabel := strings.TrimSpace(infra.Spec.PublicExposure.RegionID)
@@ -354,21 +372,33 @@ func ResolveServiceAnnotations(config *infrav1alpha1.ServiceNetworkConfig) map[s
 // ReconcileService creates or updates a service.
 // For NodePort type, the port is also used as NodePort.
 func (r *ResourceManager) ReconcileService(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, labels map[string]string, serviceType corev1.ServiceType, annotations map[string]string, port, targetPort int32) error {
-	return r.ReconcileServicePorts(ctx, infra, name, labels, serviceType, annotations, []corev1.ServicePort{
+	return r.ReconcileServiceWithScope(ctx, NewObjectScope(infra), name, labels, serviceType, annotations, port, targetPort)
+}
+
+func (r *ResourceManager) ReconcileServiceWithScope(ctx context.Context, scope ObjectScope, name string, labels map[string]string, serviceType corev1.ServiceType, annotations map[string]string, port, targetPort int32) error {
+	return r.ReconcileServicePortsWithScope(ctx, scope, name, labels, serviceType, annotations, []corev1.ServicePort{
 		BuildServicePort("http", port, targetPort, serviceType),
 	})
 }
 
 // ReconcileServicePorts creates or updates a service with multiple ports.
 func (r *ResourceManager) ReconcileServicePorts(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, labels map[string]string, serviceType corev1.ServiceType, annotations map[string]string, ports []corev1.ServicePort) error {
-	return r.reconcileServicePorts(ctx, infra, name, labels, serviceType, annotations, ports, nil)
+	return r.ReconcileServicePortsWithScope(ctx, NewObjectScope(infra), name, labels, serviceType, annotations, ports)
+}
+
+func (r *ResourceManager) ReconcileServicePortsWithScope(ctx context.Context, scope ObjectScope, name string, labels map[string]string, serviceType corev1.ServiceType, annotations map[string]string, ports []corev1.ServicePort) error {
+	return r.reconcileServicePorts(ctx, scope, name, labels, serviceType, annotations, ports, nil)
 }
 
 func (r *ResourceManager) ReconcileServicePortsWithSpecMutator(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, labels map[string]string, serviceType corev1.ServiceType, annotations map[string]string, ports []corev1.ServicePort, mutate func(*corev1.ServiceSpec)) error {
-	return r.reconcileServicePorts(ctx, infra, name, labels, serviceType, annotations, ports, mutate)
+	return r.ReconcileServicePortsWithScopeAndSpecMutator(ctx, NewObjectScope(infra), name, labels, serviceType, annotations, ports, mutate)
 }
 
-func (r *ResourceManager) reconcileServicePorts(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, labels map[string]string, serviceType corev1.ServiceType, annotations map[string]string, ports []corev1.ServicePort, mutate func(*corev1.ServiceSpec)) error {
+func (r *ResourceManager) ReconcileServicePortsWithScopeAndSpecMutator(ctx context.Context, scope ObjectScope, name string, labels map[string]string, serviceType corev1.ServiceType, annotations map[string]string, ports []corev1.ServicePort, mutate func(*corev1.ServiceSpec)) error {
+	return r.reconcileServicePorts(ctx, scope, name, labels, serviceType, annotations, ports, mutate)
+}
+
+func (r *ResourceManager) reconcileServicePorts(ctx context.Context, scope ObjectScope, name string, labels map[string]string, serviceType corev1.ServiceType, annotations map[string]string, ports []corev1.ServicePort, mutate func(*corev1.ServiceSpec)) error {
 	if len(ports) == 0 {
 		return fmt.Errorf("service %q requires at least one port", name)
 	}
@@ -385,20 +415,20 @@ func (r *ResourceManager) reconcileServicePorts(ctx context.Context, infra *infr
 	desiredSvc := corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        name,
-			Namespace:   infra.Namespace,
+			Namespace:   scope.Namespace,
 			Labels:      desiredLabels,
 			Annotations: CloneStringMap(annotations),
 		},
 		Spec: desiredSpec,
 	}
 
-	if err := ctrl.SetControllerReference(infra, &desiredSvc, r.Scheme); err != nil {
+	if err := scope.SetControllerReference(&desiredSvc, r.Scheme); err != nil {
 		return err
 	}
 
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		svc := &corev1.Service{}
-		err := r.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, svc)
+		err := r.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: scope.Namespace}, svc)
 		if errors.IsNotFound(err) {
 			return r.Client.Create(ctx, desiredSvc.DeepCopy())
 		}
@@ -463,10 +493,14 @@ func CloneStringMap(src map[string]string) map[string]string {
 
 // ReconcileIngress creates or updates an ingress.
 func (r *ResourceManager) ReconcileIngress(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, serviceName string, servicePort int32, config *infrav1alpha1.IngressConfig) error {
+	return r.ReconcileIngressWithScope(ctx, NewObjectScope(infra), serviceName, servicePort, config)
+}
+
+func (r *ResourceManager) ReconcileIngressWithScope(ctx context.Context, scope ObjectScope, serviceName string, servicePort int32, config *infrav1alpha1.IngressConfig) error {
 	ingressName := serviceName
 
 	ingress := &networkingv1.Ingress{}
-	err := r.Client.Get(ctx, types.NamespacedName{Name: ingressName, Namespace: infra.Namespace}, ingress)
+	err := r.Client.Get(ctx, types.NamespacedName{Name: ingressName, Namespace: scope.Namespace}, ingress)
 	if err != nil && !errors.IsNotFound(err) {
 		return err
 	}
@@ -476,7 +510,7 @@ func (r *ResourceManager) ReconcileIngress(ctx context.Context, infra *infrav1al
 	desiredIngress := &networkingv1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      ingressName,
-			Namespace: infra.Namespace,
+			Namespace: scope.Namespace,
 			Labels:    desiredLabels,
 		},
 		Spec: networkingv1.IngressSpec{
@@ -516,7 +550,7 @@ func (r *ResourceManager) ReconcileIngress(ctx context.Context, infra *infrav1al
 		}
 	}
 
-	if err := ctrl.SetControllerReference(infra, desiredIngress, r.Scheme); err != nil {
+	if err := scope.SetControllerReference(desiredIngress, r.Scheme); err != nil {
 		return err
 	}
 
@@ -531,6 +565,10 @@ func (r *ResourceManager) ReconcileIngress(ctx context.Context, infra *infrav1al
 
 // ReconcileServiceConfigMap creates or updates a configmap for a service.
 func (r *ResourceManager) ReconcileServiceConfigMap(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, labels map[string]string, config any) error {
+	return r.ReconcileServiceConfigMapWithScope(ctx, NewObjectScope(infra), name, labels, config)
+}
+
+func (r *ResourceManager) ReconcileServiceConfigMapWithScope(ctx context.Context, scope ObjectScope, name string, labels map[string]string, config any) error {
 	if config == nil {
 		config = map[string]any{}
 	}
@@ -544,7 +582,7 @@ func (r *ResourceManager) ReconcileServiceConfigMap(ctx context.Context, infra *
 	desired := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
-			Namespace: infra.Namespace,
+			Namespace: scope.Namespace,
 			Labels:    desiredLabels,
 		},
 		Data: map[string]string{
@@ -552,12 +590,12 @@ func (r *ResourceManager) ReconcileServiceConfigMap(ctx context.Context, infra *
 		},
 	}
 
-	if err := ctrl.SetControllerReference(infra, desired, r.Scheme); err != nil {
+	if err := scope.SetControllerReference(desired, r.Scheme); err != nil {
 		return err
 	}
 
 	existing := &corev1.ConfigMap{}
-	err = r.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, existing)
+	err = r.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: scope.Namespace}, existing)
 	if err != nil && !errors.IsNotFound(err) {
 		return err
 	}
@@ -630,8 +668,12 @@ func GenerateRandomString(length int) string {
 
 // EnsureSecretValue ensures a named secret contains a key, generating if needed.
 func EnsureSecretValue(ctx context.Context, client client.Client, scheme *runtime.Scheme, infra *infrav1alpha1.Sandbox0Infra, name, key string, length int) (string, error) {
+	return EnsureSecretValueWithScope(ctx, client, scheme, NewObjectScope(infra), name, key, length)
+}
+
+func EnsureSecretValueWithScope(ctx context.Context, client client.Client, scheme *runtime.Scheme, scope ObjectScope, name, key string, length int) (string, error) {
 	secret := &corev1.Secret{}
-	err := client.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, secret)
+	err := client.Get(ctx, types.NamespacedName{Name: name, Namespace: scope.Namespace}, secret)
 	if err != nil && !errors.IsNotFound(err) {
 		return "", err
 	}
@@ -641,14 +683,14 @@ func EnsureSecretValue(ctx context.Context, client client.Client, scheme *runtim
 		secret = &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      name,
-				Namespace: infra.Namespace,
+				Namespace: scope.Namespace,
 			},
 			Type: corev1.SecretTypeOpaque,
 			StringData: map[string]string{
 				key: value,
 			},
 		}
-		if err := ctrl.SetControllerReference(infra, secret, scheme); err != nil {
+		if err := scope.SetControllerReference(secret, scheme); err != nil {
 			return "", err
 		}
 		if err := client.Create(ctx, secret); err != nil {
@@ -674,8 +716,12 @@ func EnsureSecretValue(ctx context.Context, client client.Client, scheme *runtim
 
 // EnsureEd25519KeyPair ensures a named secret contains an Ed25519 keypair.
 func EnsureEd25519KeyPair(ctx context.Context, client client.Client, scheme *runtime.Scheme, infra *infrav1alpha1.Sandbox0Infra, name, privateKeyKey, publicKeyKey string) (string, string, error) {
+	return EnsureEd25519KeyPairWithScope(ctx, client, scheme, NewObjectScope(infra), name, privateKeyKey, publicKeyKey)
+}
+
+func EnsureEd25519KeyPairWithScope(ctx context.Context, client client.Client, scheme *runtime.Scheme, scope ObjectScope, name, privateKeyKey, publicKeyKey string) (string, string, error) {
 	secret := &corev1.Secret{}
-	err := client.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, secret)
+	err := client.Get(ctx, types.NamespacedName{Name: name, Namespace: scope.Namespace}, secret)
 	if err != nil && !errors.IsNotFound(err) {
 		return "", "", err
 	}
@@ -696,7 +742,7 @@ func EnsureEd25519KeyPair(ctx context.Context, client client.Client, scheme *run
 		secret = &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      name,
-				Namespace: infra.Namespace,
+				Namespace: scope.Namespace,
 			},
 			Type: corev1.SecretTypeOpaque,
 			StringData: map[string]string{
@@ -704,7 +750,7 @@ func EnsureEd25519KeyPair(ctx context.Context, client client.Client, scheme *run
 				publicKeyKey:  publicKeyPEM,
 			},
 		}
-		if err := ctrl.SetControllerReference(infra, secret, scheme); err != nil {
+		if err := scope.SetControllerReference(secret, scheme); err != nil {
 			return "", "", err
 		}
 		if err := client.Create(ctx, secret); err != nil {

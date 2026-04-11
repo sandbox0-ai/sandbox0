@@ -74,12 +74,20 @@ func AppendEnterpriseLicenseVolume(
 	volumeMounts []corev1.VolumeMount,
 	volumes []corev1.Volume,
 ) ([]corev1.VolumeMount, []corev1.Volume) {
+	return AppendEnterpriseLicenseVolumeWithSecretRef(ResolveEnterpriseLicenseSecretRef(infra), licenseFile, volumeMounts, volumes)
+}
+
+func AppendEnterpriseLicenseVolumeWithSecretRef(
+	secretRef infrav1alpha1.SecretKeyRef,
+	licenseFile string,
+	volumeMounts []corev1.VolumeMount,
+	volumes []corev1.Volume,
+) ([]corev1.VolumeMount, []corev1.Volume) {
 	mountPath := strings.TrimSpace(licenseFile)
 	if mountPath == "" {
 		mountPath = EnterpriseLicenseDefaultPath
 	}
 
-	secretRef := ResolveEnterpriseLicenseSecretRef(infra)
 	volumeMounts = append(volumeMounts, corev1.VolumeMount{
 		Name:      "enterprise-license",
 		MountPath: mountPath,

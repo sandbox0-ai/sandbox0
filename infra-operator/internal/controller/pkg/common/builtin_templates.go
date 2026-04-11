@@ -44,9 +44,9 @@ type BuiltinTemplateOptions struct {
 }
 
 // EnsureBuiltinTemplates creates or updates builtin templates in the template store.
-func EnsureBuiltinTemplates(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, opts BuiltinTemplateOptions) error {
+func EnsureBuiltinTemplates(ctx context.Context, builtins []infrav1alpha1.BuiltinTemplateConfig, opts BuiltinTemplateOptions) error {
 	logger := log.FromContext(ctx)
-	if infra == nil || len(infra.Spec.BuiltinTemplates) == 0 {
+	if len(builtins) == 0 {
 		return nil
 	}
 	if !opts.TemplateStoreEnabled {
@@ -82,7 +82,7 @@ func EnsureBuiltinTemplates(ctx context.Context, infra *infrav1alpha1.Sandbox0In
 
 	store := templstorepg.NewStore(pool)
 
-	for _, builtin := range infra.Spec.BuiltinTemplates {
+	for _, builtin := range builtins {
 		templateID, err := naming.CanonicalTemplateID(builtin.TemplateID)
 		if err != nil {
 			return fmt.Errorf("builtin template_id is invalid: %w", err)

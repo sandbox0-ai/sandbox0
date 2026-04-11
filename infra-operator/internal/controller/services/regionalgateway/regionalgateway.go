@@ -33,11 +33,7 @@ import (
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	webhookcerts "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/webhook"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/registry"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
 
@@ -50,30 +46,28 @@ func NewReconciler(resources *common.ResourceManager) *Reconciler {
 }
 
 // Reconcile reconciles the regional-gateway deployment.
-func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, imageRepo, imageTag string, compiledPlan *infraplan.InfraPlan) error {
+func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, compiledPlan *infraplan.InfraPlan) error {
 	logger := log.FromContext(ctx)
 	if compiledPlan == nil {
-		compiledPlan = infraplan.Compile(infra)
+		return fmt.Errorf("compiled plan is required")
 	}
 
 	// Skip if not enabled
-	if infra.Spec.Services != nil && infra.Spec.Services.RegionalGateway != nil && !infra.Spec.Services.RegionalGateway.Enabled {
+	if !compiledPlan.RegionalGateway.Enabled {
 		logger.Info("Edge gateway is disabled, skipping")
 		return nil
 	}
 
-	deploymentName := fmt.Sprintf("%s-regional-gateway", infra.Name)
+	scope := compiledPlan.Scope
+	deploymentName := fmt.Sprintf("%s-regional-gateway", scope.Name)
 	serviceName := deploymentName
 
-	replicas := int32(1)
-	if infra.Spec.Services != nil && infra.Spec.Services.RegionalGateway != nil {
-		replicas = infra.Spec.Services.RegionalGateway.Replicas
-	}
+	replicas := compiledPlan.RegionalGateway.Replicas
 
-	labels := common.GetServiceLabels(infra.Name, "regional-gateway")
-	keySecretName, privateKeyKey, publicKeyKey := internalauth.GetControlPlaneKeyRefs(infra)
+	labels := common.GetServiceLabels(scope.Name, "regional-gateway")
+	keySecretName, privateKeyKey, publicKeyKey := compiledPlan.ControlPlaneKeyRefs()
 
-	config, registryEnvVars, err := r.buildConfig(ctx, infra, compiledPlan)
+	config, registryEnvVars, err := r.buildConfig(ctx, compiledPlan)
 	if err != nil {
 		return err
 	}
@@ -83,16 +77,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	if err != nil {
 		return err
 	}
-	if err := r.Resources.ReconcileServiceConfigMap(ctx, infra, deploymentName, labels, config); err != nil {
+	if err := r.Resources.ReconcileServiceConfigMapWithScope(ctx, scope, deploymentName, labels, config); err != nil {
 		return err
 	}
 
-	var resources *corev1.ResourceRequirements
-	serviceConfig := (*infrav1alpha1.ServiceNetworkConfig)(nil)
-	if infra.Spec.Services != nil && infra.Spec.Services.RegionalGateway != nil {
-		resources = infra.Spec.Services.RegionalGateway.Resources
-		serviceConfig = infra.Spec.Services.RegionalGateway.Service
-	}
+	resources := compiledPlan.RegionalGateway.Resources
+	serviceConfig := compiledPlan.RegionalGateway.ServiceConfig
 	tlsEnabled := strings.TrimSpace(config.TLSCertPath) != "" && strings.TrimSpace(config.TLSKeyPath) != ""
 	containerPortName := "http"
 	if tlsEnabled {
@@ -158,15 +148,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		},
 	}
 	if needEnterpriseLicense {
-		volumeMounts, volumes = common.AppendEnterpriseLicenseVolume(infra, config.LicenseFile, volumeMounts, volumes)
+		volumeMounts, volumes = common.AppendEnterpriseLicenseVolumeWithSecretRef(compiledPlan.EnterpriseLicenseSecretRef(), config.LicenseFile, volumeMounts, volumes)
 	}
 	if tlsEnabled {
-		tlsSecretName := fmt.Sprintf("%s-regional-gateway-tls", infra.Name)
+		tlsSecretName := fmt.Sprintf("%s-regional-gateway-tls", scope.Name)
 		dnsNames := regionalGatewayTLSDNSNames(config)
 		if len(dnsNames) == 0 {
 			return fmt.Errorf("regional-gateway TLS enabled but no DNS names were derived")
 		}
-		if err := webhookcerts.NewReconciler(r.Resources).ReconcileCertSecret(ctx, infra, tlsSecretName, labels, dnsNames); err != nil {
+		if err := webhookcerts.NewReconciler(r.Resources).ReconcileCertSecretWithScope(ctx, scope, tlsSecretName, labels, dnsNames); err != nil {
 			return err
 		}
 		volumeMounts = append(volumeMounts,
@@ -207,7 +197,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 
 	// Create deployment
 	httpPort := int32(config.HTTPPort)
-	if err := r.Resources.ReconcileDeployment(ctx, infra, deploymentName, labels, replicas, common.ServiceDefinition{
+	if err := r.Resources.ReconcileDeploymentWithScope(ctx, scope, deploymentName, labels, replicas, common.ServiceDefinition{
 		Name:       "regional-gateway",
 		Port:       httpPort,
 		TargetPort: httpPort,
@@ -262,7 +252,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		appProtocol := "HTTPS"
 		serviceAppProtocol = &appProtocol
 	}
-	if err := r.Resources.ReconcileServicePortsWithSpecMutator(ctx, infra, serviceName, labels, serviceType, serviceAnnotations, []corev1.ServicePort{
+	if err := r.Resources.ReconcileServicePortsWithScopeAndSpecMutator(ctx, scope, serviceName, labels, serviceType, serviceAnnotations, []corev1.ServicePort{
 		{
 			Name:        servicePortName,
 			Port:        servicePort,
@@ -285,18 +275,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	}
 
 	// Create ingress if enabled
-	if infra.Spec.Services != nil && infra.Spec.Services.RegionalGateway != nil &&
-		infra.Spec.Services.RegionalGateway.Ingress != nil && infra.Spec.Services.RegionalGateway.Ingress.Enabled {
-		if err := r.Resources.ReconcileIngress(ctx, infra, serviceName, servicePort, infra.Spec.Services.RegionalGateway.Ingress); err != nil {
+	if compiledPlan.RegionalGateway.IngressConfig != nil && compiledPlan.RegionalGateway.IngressConfig.Enabled {
+		if err := r.Resources.ReconcileIngressWithScope(ctx, scope, serviceName, servicePort, compiledPlan.RegionalGateway.IngressConfig); err != nil {
 			return err
 		}
 	} else {
-		if err := r.deleteIngressIfExists(ctx, infra, serviceName); err != nil {
+		if err := r.deleteIngressIfExists(ctx, scope, serviceName); err != nil {
 			return err
 		}
 	}
 
-	if err := r.Resources.EnsureDeploymentReady(ctx, infra, deploymentName, replicas); err != nil {
+	if err := r.Resources.EnsureDeploymentReadyWithScope(ctx, scope, deploymentName, replicas); err != nil {
 		return err
 	}
 
@@ -304,65 +293,55 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	return nil
 }
 
-func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, compiledPlan *infraplan.InfraPlan) (*apiconfig.RegionalGatewayConfig, []corev1.EnvVar, error) {
+func (r *Reconciler) buildConfig(ctx context.Context, compiledPlan *infraplan.InfraPlan) (*apiconfig.RegionalGatewayConfig, []corev1.EnvVar, error) {
 	cfg := &apiconfig.RegionalGatewayConfig{}
-	if infra.Spec.Services != nil && infra.Spec.Services.RegionalGateway != nil {
-		cfg = runtimeconfig.ToRegionalGateway(infra.Spec.Services.RegionalGateway.Config)
-	}
 	if compiledPlan == nil {
-		compiledPlan = infraplan.Compile(infra)
+		return nil, nil, fmt.Errorf("compiled plan is required")
+	}
+	if compiledPlan.RegionalGateway.Config != nil {
+		cfg = compiledPlan.RegionalGateway.Config.DeepCopy()
 	}
 
-	if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {
+	if dsn, err := compiledPlan.DatabaseDSN(ctx, r.Resources.Client); err == nil {
 		cfg.DatabaseURL = dsn
 	}
 	cfg.DefaultClusterGatewayURL = compiledPlan.RegionalGateway.DefaultClusterGatewayURL
 	cfg.SchedulerEnabled = compiledPlan.Components.EnableScheduler
-	if compiledPlan.Services.Scheduler.URL != "" {
-		cfg.SchedulerURL = compiledPlan.Services.Scheduler.URL
-	}
-	sshPort := int32(2222)
-	if infra.Spec.Services != nil && infra.Spec.Services.SSHGateway != nil && infra.Spec.Services.SSHGateway.Config != nil && infra.Spec.Services.SSHGateway.Config.SSHPort != 0 {
-		sshPort = int32(infra.Spec.Services.SSHGateway.Config.SSHPort)
-	}
-	if sshHost, advertisedPort, ok := common.ResolveSSHEndpoint(infra, sshPort); ok {
-		cfg.SSHEndpointHost = sshHost
-		cfg.SSHEndpointPort = int(advertisedPort)
-	}
+	cfg.SchedulerURL = compiledPlan.Services.Scheduler.URL
 
 	authMode := strings.TrimSpace(strings.ToLower(cfg.AuthMode))
 	if authMode == "" {
 		authMode = "self_hosted"
 	}
-	if infra.Spec.InitUser != nil && authMode != "federated_global" {
+	if initUser := compiledPlan.InitUser(); initUser != nil && authMode != "federated_global" {
 		password := ""
 		if cfg.BuiltInAuth.Enabled || !apiconfig.HasEnabledOIDCProviders(cfg.OIDCProviders) {
-			secretRef := common.ResolveSecretKeyRef(infra.Spec.InitUser.PasswordSecret, "admin-password", "password")
+			secretRef := common.ResolveSecretKeyRef(initUser.PasswordSecret, "admin-password", "password")
 			var err error
-			password, err = common.GetSecretValue(ctx, r.Resources.Client, infra.Namespace, secretRef)
+			password, err = common.GetSecretValue(ctx, r.Resources.Client, compiledPlan.Scope.Namespace, secretRef)
 			if err != nil {
 				return nil, nil, err
 			}
 		}
 
 		cfg.BuiltInAuth.InitUser = &apiconfig.InitUserConfig{
-			Email:    infra.Spec.InitUser.Email,
+			Email:    initUser.Email,
 			Password: password,
-			Name:     infra.Spec.InitUser.Name,
+			Name:     initUser.Name,
 		}
 	}
 
 	if authMode == "federated_global" {
 		if strings.TrimSpace(cfg.JWTIssuer) == "" {
-			cfg.JWTIssuer = defaultFederatedGlobalJWTIssuer(infra)
+			cfg.JWTIssuer = compiledPlan.DefaultFederatedGlobalJWTIssuer()
 		}
 		if strings.TrimSpace(cfg.JWTPublicKeyPEM) == "" {
 			_, publicKeyPEM, err := common.EnsureEd25519KeyPair(
 				ctx,
 				r.Resources.Client,
 				r.Resources.Scheme,
-				infra,
-				sharedUserJWTSecretName(infra),
+				compiledPlan.Scope.Owner(),
+				compiledPlan.SharedUserJWTSecretName(),
 				"jwt_private_key_pem",
 				"jwt_public_key_pem",
 			)
@@ -383,8 +362,8 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 				ctx,
 				r.Resources.Client,
 				r.Resources.Scheme,
-				infra,
-				fmt.Sprintf("%s-regional-gateway-jwt", infra.Name),
+				compiledPlan.Scope.Owner(),
+				compiledPlan.RegionalGatewayJWTSecretName(),
 				"jwt_secret",
 				32,
 			)
@@ -394,43 +373,12 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 			cfg.JWTSecret = jwtSecret
 		}
 	}
-
-	if strings.TrimSpace(infra.Spec.Region) != "" {
-		cfg.RegionID = infra.Spec.Region
-	}
-
-	// Copy public exposure config from CRD top-level spec
-	if infra.Spec.PublicExposure != nil {
-		cfg.PublicExposureEnabled = infra.Spec.PublicExposure.Enabled
-		cfg.PublicRootDomain = infra.Spec.PublicExposure.RootDomain
-		cfg.PublicRegionID = infra.Spec.PublicExposure.RegionID
-	}
-	if base := strings.TrimSpace(cfg.BaseURL); base != "" {
-		if parsed, err := url.Parse(base); err == nil && strings.EqualFold(parsed.Scheme, "https") {
-			cfg.TLSCertPath = "/tls/tls.crt"
-			cfg.TLSKeyPath = "/tls/tls.key"
-		}
-	}
-
-	registryEnvVars, err := r.applyRegistryConfig(infra, cfg)
+	registryEnvVars, err := compiledPlan.ConfigureRegionalGatewayRegistry(cfg)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	return cfg, registryEnvVars, nil
-}
-
-func defaultFederatedGlobalJWTIssuer(infra *infrav1alpha1.Sandbox0Infra) string {
-	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.GlobalGateway != nil && infra.Spec.Services.GlobalGateway.Config != nil {
-		if issuer := strings.TrimSpace(infra.Spec.Services.GlobalGateway.Config.JWTIssuer); issuer != "" {
-			return issuer
-		}
-	}
-	return "global-gateway"
-}
-
-func sharedUserJWTSecretName(infra *infrav1alpha1.Sandbox0Infra) string {
-	return fmt.Sprintf("%s-user-jwt", infra.Name)
 }
 
 func regionalGatewayTLSDNSNames(cfg *apiconfig.RegionalGatewayConfig) []string {
@@ -456,142 +404,12 @@ func probeSchemeForTLS(enabled bool) corev1.URIScheme {
 }
 
 func (r *Reconciler) applyRegistryConfig(infra *infrav1alpha1.Sandbox0Infra, cfg *apiconfig.RegionalGatewayConfig) ([]corev1.EnvVar, error) {
-	if !infrav1alpha1.IsRegistryEnabled(infra) {
-		return nil, nil
-	}
-
-	resolved := registry.ResolveRegistryConfig(infra)
-	if resolved == nil {
-		return nil, nil
-	}
-
-	cfg.Registry.Provider = string(resolved.Provider)
-	cfg.Registry.PushRegistry = resolved.PushRegistry
-	cfg.Registry.PullRegistry = resolved.PullRegistry
-	cfg.Registry.Namespace = infra.Namespace
-
-	switch resolved.Provider {
-	case infrav1alpha1.RegistryProviderBuiltin:
-		cfg.Registry.Builtin = &apiconfig.RegistryBuiltinConfig{
-			Username: "${S0_REGISTRY_BUILTIN_USERNAME}",
-			Password: "${S0_REGISTRY_BUILTIN_PASSWORD}",
-		}
-		secretName := fmt.Sprintf("%s-registry-auth", infra.Name)
-		return []corev1.EnvVar{
-			secretEnvVar("S0_REGISTRY_BUILTIN_USERNAME", secretName, "username"),
-			secretEnvVar("S0_REGISTRY_BUILTIN_PASSWORD", secretName, "password"),
-		}, nil
-	case infrav1alpha1.RegistryProviderAWS:
-		if infra.Spec.Registry == nil || infra.Spec.Registry.AWS == nil {
-			return nil, fmt.Errorf("registry.aws configuration is required")
-		}
-		cred := infra.Spec.Registry.AWS.CredentialsSecret
-		cfg.Registry.AWS = &apiconfig.RegistryAWSConfig{
-			Region:           infra.Spec.Registry.AWS.Region,
-			RegistryID:       infra.Spec.Registry.AWS.RegistryID,
-			AssumeRoleARN:    infra.Spec.Registry.AWS.AssumeRoleARN,
-			ExternalID:       infra.Spec.Registry.AWS.ExternalID,
-			RegistryOverride: infra.Spec.Registry.AWS.Registry,
-			AccessKeyID:      "${S0_REGISTRY_AWS_ACCESS_KEY_ID}",
-			SecretAccessKey:  "${S0_REGISTRY_AWS_SECRET_ACCESS_KEY}",
-		}
-		envVars := []corev1.EnvVar{
-			secretEnvVar("S0_REGISTRY_AWS_ACCESS_KEY_ID", cred.Name, defaultString(cred.AccessKeyKey, "accessKeyId")),
-			secretEnvVar("S0_REGISTRY_AWS_SECRET_ACCESS_KEY", cred.Name, defaultString(cred.SecretKeyKey, "secretAccessKey")),
-		}
-		if strings.TrimSpace(cred.SessionTokenKey) != "" {
-			cfg.Registry.AWS.SessionToken = "${S0_REGISTRY_AWS_SESSION_TOKEN}"
-			envVars = append(envVars, secretEnvVar("S0_REGISTRY_AWS_SESSION_TOKEN", cred.Name, cred.SessionTokenKey))
-		}
-		return envVars, nil
-	case infrav1alpha1.RegistryProviderGCP:
-		if infra.Spec.Registry == nil || infra.Spec.Registry.GCP == nil {
-			return nil, fmt.Errorf("registry.gcp configuration is required")
-		}
-		cfg.Registry.GCP = &apiconfig.RegistryGCPConfig{
-			Registry: infra.Spec.Registry.GCP.Registry,
-		}
-		if infra.Spec.Registry.GCP.ServiceAccountSecret == nil {
-			return nil, nil
-		}
-		sa := infra.Spec.Registry.GCP.ServiceAccountSecret
-		cfg.Registry.GCP.ServiceAccountJSON = "${S0_REGISTRY_GCP_SERVICE_ACCOUNT_JSON}"
-		return []corev1.EnvVar{
-			secretEnvVar("S0_REGISTRY_GCP_SERVICE_ACCOUNT_JSON", sa.Name, defaultString(sa.Key, "serviceAccount.json")),
-		}, nil
-	case infrav1alpha1.RegistryProviderAzure:
-		if infra.Spec.Registry == nil || infra.Spec.Registry.Azure == nil {
-			return nil, fmt.Errorf("registry.azure configuration is required")
-		}
-		cred := infra.Spec.Registry.Azure.CredentialsSecret
-		cfg.Registry.Azure = &apiconfig.RegistryAzureConfig{
-			Registry:     infra.Spec.Registry.Azure.Registry,
-			TenantID:     "${S0_REGISTRY_AZURE_TENANT_ID}",
-			ClientID:     "${S0_REGISTRY_AZURE_CLIENT_ID}",
-			ClientSecret: "${S0_REGISTRY_AZURE_CLIENT_SECRET}",
-		}
-		return []corev1.EnvVar{
-			secretEnvVar("S0_REGISTRY_AZURE_TENANT_ID", cred.Name, defaultString(cred.TenantIDKey, "tenantId")),
-			secretEnvVar("S0_REGISTRY_AZURE_CLIENT_ID", cred.Name, defaultString(cred.ClientIDKey, "clientId")),
-			secretEnvVar("S0_REGISTRY_AZURE_CLIENT_SECRET", cred.Name, defaultString(cred.ClientSecretKey, "clientSecret")),
-		}, nil
-	case infrav1alpha1.RegistryProviderAliyun:
-		if infra.Spec.Registry == nil || infra.Spec.Registry.Aliyun == nil {
-			return nil, fmt.Errorf("registry.aliyun configuration is required")
-		}
-		cred := infra.Spec.Registry.Aliyun.CredentialsSecret
-		cfg.Registry.Aliyun = &apiconfig.RegistryAliyunConfig{
-			Registry:        infra.Spec.Registry.Aliyun.Registry,
-			Region:          infra.Spec.Registry.Aliyun.Region,
-			InstanceID:      infra.Spec.Registry.Aliyun.InstanceID,
-			AccessKeyID:     "${S0_REGISTRY_ALIYUN_ACCESS_KEY_ID}",
-			AccessKeySecret: "${S0_REGISTRY_ALIYUN_ACCESS_KEY_SECRET}",
-		}
-		return []corev1.EnvVar{
-			secretEnvVar("S0_REGISTRY_ALIYUN_ACCESS_KEY_ID", cred.Name, defaultString(cred.AccessKeyKey, "accessKeyId")),
-			secretEnvVar("S0_REGISTRY_ALIYUN_ACCESS_KEY_SECRET", cred.Name, defaultString(cred.SecretKeyKey, "accessKeySecret")),
-		}, nil
-	case infrav1alpha1.RegistryProviderHarbor:
-		if infra.Spec.Registry == nil || infra.Spec.Registry.Harbor == nil {
-			return nil, fmt.Errorf("registry.harbor configuration is required")
-		}
-		cred := infra.Spec.Registry.Harbor.CredentialsSecret
-		cfg.Registry.Harbor = &apiconfig.RegistryHarborConfig{
-			Registry: infra.Spec.Registry.Harbor.Registry,
-			Username: "${S0_REGISTRY_HARBOR_USERNAME}",
-			Password: "${S0_REGISTRY_HARBOR_PASSWORD}",
-		}
-		return []corev1.EnvVar{
-			secretEnvVar("S0_REGISTRY_HARBOR_USERNAME", cred.Name, defaultString(cred.UsernameKey, "username")),
-			secretEnvVar("S0_REGISTRY_HARBOR_PASSWORD", cred.Name, defaultString(cred.PasswordKey, "password")),
-		}, nil
-	default:
-		return nil, fmt.Errorf("unsupported registry provider for regional-gateway: %s", resolved.Provider)
-	}
+	return infraplan.Compile(infra).ConfigureRegionalGatewayRegistry(cfg)
 }
 
-func defaultString(value, fallback string) string {
-	if strings.TrimSpace(value) == "" {
-		return fallback
-	}
-	return value
-}
-
-func secretEnvVar(name, secretName, key string) corev1.EnvVar {
-	return corev1.EnvVar{
-		Name: name,
-		ValueFrom: &corev1.EnvVarSource{
-			SecretKeyRef: &corev1.SecretKeySelector{
-				LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
-				Key:                  key,
-			},
-		},
-	}
-}
-
-func (r *Reconciler) deleteIngressIfExists(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string) error {
+func (r *Reconciler) deleteIngressIfExists(ctx context.Context, scope common.ObjectScope, name string) error {
 	obj := &networkingv1.Ingress{}
-	err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, obj)
+	err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: scope.Namespace}, obj)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil

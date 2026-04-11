@@ -109,10 +109,15 @@ func (m *AuthMiddleware) authenticateAPIKey(c *gin.Context, keyValue string) (*a
 	if err != nil {
 		return nil, err
 	}
+	userID := strings.TrimSpace(apiKey.CreatedBy)
+	if apiKey.UserID != nil && strings.TrimSpace(*apiKey.UserID) != "" {
+		userID = strings.TrimSpace(*apiKey.UserID)
+	}
 
 	return &authn.AuthContext{
 		AuthMethod:  authn.AuthMethodAPIKey,
 		TeamID:      apiKey.TeamID,
+		UserID:      userID,
 		APIKeyID:    apiKey.ID,
 		Permissions: authn.ExpandRolesPermissions(apiKey.Roles),
 	}, nil

@@ -219,14 +219,14 @@ func (r *Repository) ValidateAPIKey(ctx context.Context, keyValue string) (*APIK
 	var rolesJSON []byte
 	err := r.pool.QueryRow(ctx, `
 		SELECT id, key_value, team_id, created_by, name, type, roles,
-		       is_active, expires_at, last_used_at, usage_count, created_at, updated_at
+		       is_active, expires_at, last_used_at, usage_count, created_at, updated_at, user_id
 		FROM api_keys
 		WHERE key_value = $1
 	`, keyValue).Scan(
 		&key.ID, &key.KeyValue, &key.TeamID, &key.CreatedBy,
 		&key.Name, &key.Type, &rolesJSON, &key.IsActive,
 		&key.ExpiresAt, &key.LastUsed, &key.UsageCount,
-		&key.CreatedAt, &key.UpdatedAt,
+		&key.CreatedAt, &key.UpdatedAt, &key.UserID,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

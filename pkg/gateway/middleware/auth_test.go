@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,10 +9,19 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
 )
+
+type staticAPIKeyValidator struct {
+	key *apikey.APIKey
+}
+
+func (v staticAPIKeyValidator) ValidateAPIKey(context.Context, string) (*apikey.APIKey, error) {
+	return v.key, nil
+}
 
 func TestAuthMiddleware_JWTAccessToken(t *testing.T) {
 	t.Setenv("GIN_MODE", "release")
@@ -84,6 +94,59 @@ func TestAuthMiddleware_JWTRefreshTokenRejected(t *testing.T) {
 	middleware := NewAuthMiddleware(nil, "test-secret", issuer, zap.NewNop())
 	if _, err := middleware.AuthenticateRequest(ctx); err == nil {
 		t.Fatalf("expected refresh token to be rejected")
+	}
+}
+
+func TestAuthMiddleware_APIKeyCarriesOwnerUserID(t *testing.T) {
+	t.Setenv("GIN_MODE", "release")
+
+	ownerID := "user-1"
+	req := httptest.NewRequest("GET", "/api/v1/templates", nil)
+	req.Header.Set("Authorization", "Bearer s0_test")
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = req
+
+	middleware := NewAuthMiddleware(staticAPIKeyValidator{key: &apikey.APIKey{
+		ID:        "key-1",
+		TeamID:    "team-1",
+		UserID:    &ownerID,
+		CreatedBy: "creator-1",
+		Roles:     []string{"developer"},
+	}}, "test-secret", nil, zap.NewNop())
+	authCtx, err := middleware.AuthenticateRequest(ctx)
+	if err != nil {
+		t.Fatalf("authenticate request: %v", err)
+	}
+	if authCtx.UserID != ownerID {
+		t.Fatalf("user id = %q, want %q", authCtx.UserID, ownerID)
+	}
+	if authCtx.TeamID != "team-1" || authCtx.APIKeyID != "key-1" {
+		t.Fatalf("unexpected auth context: %+v", authCtx)
+	}
+}
+
+func TestAuthMiddleware_APIKeyFallsBackToCreatorUserID(t *testing.T) {
+	t.Setenv("GIN_MODE", "release")
+
+	req := httptest.NewRequest("GET", "/api/v1/templates", nil)
+	req.Header.Set("Authorization", "Bearer s0_test")
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = req
+
+	middleware := NewAuthMiddleware(staticAPIKeyValidator{key: &apikey.APIKey{
+		ID:        "key-1",
+		TeamID:    "team-1",
+		CreatedBy: "creator-1",
+		Roles:     []string{"developer"},
+	}}, "test-secret", nil, zap.NewNop())
+	authCtx, err := middleware.AuthenticateRequest(ctx)
+	if err != nil {
+		t.Fatalf("authenticate request: %v", err)
+	}
+	if authCtx.UserID != "creator-1" {
+		t.Fatalf("user id = %q, want creator-1", authCtx.UserID)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 )
 
 type staticTokenProvider struct{}
@@ -19,9 +20,13 @@ type captureFileSystemClient struct {
 	pb.FileSystemClient
 	lookupReq *pb.LookupRequest
 	writeReq  *pb.WriteRequest
+	lookupMD  metadata.MD
 }
 
-func (c *captureFileSystemClient) Lookup(_ context.Context, req *pb.LookupRequest, _ ...grpc.CallOption) (*pb.NodeResponse, error) {
+func (c *captureFileSystemClient) Lookup(ctx context.Context, req *pb.LookupRequest, _ ...grpc.CallOption) (*pb.NodeResponse, error) {
+	if md, ok := metadata.FromOutgoingContext(ctx); ok {
+		c.lookupMD = md
+	}
 	c.lookupReq = req
 	return &pb.NodeResponse{Inode: 2, Attr: &pb.GetAttrResponse{Mode: syscall.S_IFREG | 0o644}}, nil
 }
@@ -33,7 +38,7 @@ func (c *captureFileSystemClient) Write(_ context.Context, req *pb.WriteRequest,
 
 func TestGrpcFSLookupForwardsCallerActor(t *testing.T) {
 	client := &captureFileSystemClient{}
-	fs := newGrpcFS("vol-1", client, staticTokenProvider{}, 0, zap.NewNop())
+	fs := newGrpcFS("vol-1", "", "", client, staticTokenProvider{}, 0, zap.NewNop())
 	out := &fuse.EntryOut{}
 	header := &fuse.InHeader{NodeId: 1, Caller: fuse.Caller{Owner: fuse.Owner{Uid: 123, Gid: 456}, Pid: 789}}
 
@@ -53,7 +58,7 @@ func TestGrpcFSLookupForwardsCallerActor(t *testing.T) {
 
 func TestGrpcFSWriteForwardsCallerActor(t *testing.T) {
 	client := &captureFileSystemClient{}
-	fs := newGrpcFS("vol-1", client, staticTokenProvider{}, 0, zap.NewNop())
+	fs := newGrpcFS("vol-1", "", "", client, staticTokenProvider{}, 0, zap.NewNop())
 	input := &fuse.WriteIn{InHeader: fuse.InHeader{NodeId: 5, Caller: fuse.Caller{Owner: fuse.Owner{Uid: 1001, Gid: 1002}, Pid: 1003}}, Offset: 7, Fh: 11}
 
 	written, st := fs.Write(nil, input, []byte("hello"))
@@ -71,5 +76,25 @@ func TestGrpcFSWriteForwardsCallerActor(t *testing.T) {
 	}
 	if len(client.writeReq.Actor.Gids) != 1 || client.writeReq.Actor.Gids[0] != 1002 {
 		t.Fatalf("Write() gids = %v, want [1002]", client.writeReq.Actor.Gids)
+	}
+}
+
+func TestGrpcFSLookupUsesSessionCredentialWhenPresent(t *testing.T) {
+	client := &captureFileSystemClient{}
+	fs := newGrpcFS("vol-1", "session-1", "secret-1", client, staticTokenProvider{}, 0, zap.NewNop())
+	out := &fuse.EntryOut{}
+	header := &fuse.InHeader{NodeId: 1, Caller: fuse.Caller{Owner: fuse.Owner{Uid: 123, Gid: 456}, Pid: 789}}
+
+	if st := fs.Lookup(nil, header, "hello.txt", out); st != fuse.OK {
+		t.Fatalf("Lookup() status = %v, want OK", st)
+	}
+	if client.lookupMD == nil {
+		t.Fatal("Lookup() should carry outgoing metadata")
+	}
+	if got := client.lookupMD["x-volume-session-id"]; len(got) != 1 || got[0] != "session-1" {
+		t.Fatalf("x-volume-session-id = %v, want [session-1]", got)
+	}
+	if got := client.lookupMD["x-volume-session-secret"]; len(got) != 1 || got[0] != "secret-1" {
+		t.Fatalf("x-volume-session-secret = %v, want [secret-1]", got)
 	}
 }

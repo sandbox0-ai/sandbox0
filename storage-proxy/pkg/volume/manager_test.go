@@ -434,3 +434,49 @@ func TestBeginInvalidate_IgnoresDirectSessions(t *testing.T) {
 		t.Fatal("legacy unscoped session should still require invalidate ack")
 	}
 }
+
+func TestAuthenticateMountSession(t *testing.T) {
+	mgr := NewManager(logrus.New(), &config.StorageProxyConfig{})
+	volumeID := "vol-auth"
+	sessionID := "session-auth"
+
+	mgr.volumes[volumeID] = &VolumeContext{VolumeID: volumeID, TeamID: "team-auth"}
+	mgr.mountSessions[volumeID] = map[string]*MountSession{
+		sessionID: {
+			ID:        sessionID,
+			Secret:    "secret-auth",
+			TeamID:    "team-auth",
+			SandboxID: "sandbox-auth",
+		},
+	}
+
+	principal, err := mgr.AuthenticateMountSession(volumeID, sessionID, "secret-auth")
+	if err != nil {
+		t.Fatalf("AuthenticateMountSession() error = %v", err)
+	}
+	if principal.TeamID != "team-auth" {
+		t.Fatalf("team id = %q, want team-auth", principal.TeamID)
+	}
+	if principal.SandboxID != "sandbox-auth" {
+		t.Fatalf("sandbox id = %q, want sandbox-auth", principal.SandboxID)
+	}
+}
+
+func TestAuthenticateMountSessionRejectsInvalidSecret(t *testing.T) {
+	mgr := NewManager(logrus.New(), &config.StorageProxyConfig{})
+	volumeID := "vol-auth"
+	sessionID := "session-auth"
+
+	mgr.volumes[volumeID] = &VolumeContext{VolumeID: volumeID, TeamID: "team-auth"}
+	mgr.mountSessions[volumeID] = map[string]*MountSession{
+		sessionID: {
+			ID:     sessionID,
+			Secret: "secret-auth",
+			TeamID: "team-auth",
+		},
+	}
+
+	if _, err := mgr.AuthenticateMountSession(volumeID, sessionID, "wrong-secret"); err == nil {
+		t.Fatal("AuthenticateMountSession() should reject wrong secret")
+	}
+}

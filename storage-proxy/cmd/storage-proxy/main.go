@@ -302,7 +302,20 @@ func main() {
 		ReplayDetectionEnabled: false, // Disable for high-throughput scenarios
 	})
 
-	authenticator := auth.NewGRPCAuthenticator(validator, zapLogger)
+	sessionResolver := auth.SessionClaimsResolverFunc(func(ctx context.Context, volumeID, sessionID, sessionSecret string) (*internalauth.Claims, error) {
+		principal, err := volMgr.AuthenticateMountSession(volumeID, sessionID, sessionSecret)
+		if err != nil {
+			return nil, err
+		}
+		return &internalauth.Claims{
+			Caller:    internalauth.ServiceProcd,
+			Target:    internalauth.ServiceStorageProxy,
+			TeamID:    principal.TeamID,
+			SandboxID: principal.SandboxID,
+		}, nil
+	})
+
+	authenticator := auth.NewGRPCAuthenticator(validator, sessionResolver, zapLogger)
 	grpcInterceptor = authenticator.UnaryInterceptor()
 
 	httpAuthenticator = auth.NewHTTPAuthenticator(validator, zapLogger)

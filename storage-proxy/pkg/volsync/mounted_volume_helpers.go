@@ -19,7 +19,7 @@ import (
 var errLogicalPathNotFound = errors.New("logical path not found")
 
 type mountedVolumeManager interface {
-	MountVolume(ctx context.Context, s3Prefix, volumeID, teamID string, config *volume.VolumeConfig, accessMode volume.AccessMode) (string, time.Time, error)
+	MountVolume(ctx context.Context, s3Prefix, volumeID, teamID string, config *volume.VolumeConfig, accessMode volume.AccessMode) (string, string, time.Time, error)
 	UnmountVolume(ctx context.Context, volumeID, sessionID string) error
 	GetVolume(volumeID string) (*volume.VolumeContext, error)
 }
@@ -38,7 +38,7 @@ func ensureMountedVolume(ctx context.Context, volMgr mountedVolumeManager, logge
 	if err != nil {
 		return nil, "", fmt.Errorf("build s3 prefix: %w", err)
 	}
-	sessionID, _, err := volMgr.MountVolume(ctx, prefix, volumeRecord.ID, volumeRecord.TeamID, &volume.VolumeConfig{
+	sessionID, _, _, err := volMgr.MountVolume(ctx, prefix, volumeRecord.ID, volumeRecord.TeamID, &volume.VolumeConfig{
 		CacheSize:  volumeRecord.CacheSize,
 		Prefetch:   volumeRecord.Prefetch,
 		BufferSize: volumeRecord.BufferSize,

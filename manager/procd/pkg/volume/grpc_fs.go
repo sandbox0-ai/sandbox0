@@ -2,10 +2,12 @@ package volume
 
 import (
 	"context"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
@@ -16,19 +18,23 @@ import (
 type grpcFS struct {
 	fuse.RawFileSystem
 	volumeID      string
+	sessionID     string
+	sessionSecret string
 	client        pb.FileSystemClient
 	tokenProvider TokenProvider
 	cacheTTL      time.Duration
 	logger        *zap.Logger
 }
 
-func newGrpcFS(volumeID string, client pb.FileSystemClient, tokenProvider TokenProvider, cacheTTL time.Duration, logger *zap.Logger) *grpcFS {
+func newGrpcFS(volumeID, sessionID, sessionSecret string, client pb.FileSystemClient, tokenProvider TokenProvider, cacheTTL time.Duration, logger *zap.Logger) *grpcFS {
 	if cacheTTL < 0 {
 		cacheTTL = time.Second
 	}
 	return &grpcFS{
 		RawFileSystem: fuse.NewDefaultRawFileSystem(),
 		volumeID:      volumeID,
+		sessionID:     sessionID,
+		sessionSecret: sessionSecret,
 		client:        client,
 		tokenProvider: tokenProvider,
 		cacheTTL:      cacheTTL,
@@ -41,6 +47,13 @@ func (fs *grpcFS) String() string {
 }
 
 func (fs *grpcFS) withToken(ctx context.Context) (context.Context, error) {
+	if fs.sessionID != "" && fs.sessionSecret != "" {
+		return metadata.AppendToOutgoingContext(
+			ctx,
+			strings.ToLower(internalauth.VolumeSessionIDHeader), fs.sessionID,
+			strings.ToLower(internalauth.VolumeSessionSecretHeader), fs.sessionSecret,
+		), nil
+	}
 	if fs.tokenProvider == nil {
 		return nil, ErrMissingInternalToken
 	}

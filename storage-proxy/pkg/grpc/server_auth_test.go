@@ -164,6 +164,9 @@ func TestMountVolumeTracksAuthorizedTeam(t *testing.T) {
 	if resp.MountSessionId != "session-1" {
 		t.Fatalf("MountVolume() session = %q, want %q", resp.MountSessionId, "session-1")
 	}
+	if resp.MountSessionSecret == "" {
+		t.Fatal("MountVolume() secret should not be empty")
+	}
 	if volMgr.mountCalls != 1 {
 		t.Fatalf("MountVolume() calls = %d, want 1", volMgr.mountCalls)
 	}
@@ -535,6 +538,7 @@ type fakeVolumeManager struct {
 	unmountCalls   int
 	ackCalls       int
 	mountSessionID string
+	mountSecret    string
 	mountedAt      time.Time
 	lastMount      struct {
 		s3Prefix   string
@@ -548,7 +552,7 @@ type fakeVolumeManager struct {
 	trackedSessionID string
 }
 
-func (m *fakeVolumeManager) MountVolume(_ context.Context, s3Prefix, volumeID, teamID string, config *volume.VolumeConfig, accessMode volume.AccessMode) (string, time.Time, error) {
+func (m *fakeVolumeManager) MountVolume(_ context.Context, s3Prefix, volumeID, teamID string, config *volume.VolumeConfig, accessMode volume.AccessMode) (string, string, time.Time, error) {
 	m.mountCalls++
 	m.lastMount.s3Prefix = s3Prefix
 	m.lastMount.volumeID = volumeID
@@ -559,11 +563,15 @@ func (m *fakeVolumeManager) MountVolume(_ context.Context, s3Prefix, volumeID, t
 	if sessionID == "" {
 		sessionID = "session-test"
 	}
+	sessionSecret := m.mountSecret
+	if sessionSecret == "" {
+		sessionSecret = "secret-test"
+	}
 	mountedAt := m.mountedAt
 	if mountedAt.IsZero() {
 		mountedAt = time.Unix(1700000000, 0)
 	}
-	return sessionID, mountedAt, nil
+	return sessionID, sessionSecret, mountedAt, nil
 }
 
 func (m *fakeVolumeManager) UnmountVolume(_ context.Context, _, _ string) error {

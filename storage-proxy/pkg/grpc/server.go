@@ -46,7 +46,7 @@ type dirtyWriteHandle struct {
 }
 
 type volumeManager interface {
-	MountVolume(ctx context.Context, s3Prefix, volumeID, teamID string, config *volume.VolumeConfig, accessMode volume.AccessMode) (string, time.Time, error)
+	MountVolume(ctx context.Context, s3Prefix, volumeID, teamID string, config *volume.VolumeConfig, accessMode volume.AccessMode) (string, string, time.Time, error)
 	UnmountVolume(ctx context.Context, volumeID, sessionID string) error
 	AckInvalidate(volumeID, sessionID, invalidateID string, success bool, errorMessage string) error
 	GetVolume(volumeID string) (*volume.VolumeContext, error)
@@ -321,7 +321,7 @@ func (s *FileSystemServer) MountVolume(ctx context.Context, req *pb.MountVolumeR
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
-	sessionID, mountedAt, err := s.volMgr.MountVolume(ctx, prefix, req.VolumeId, claims.TeamID, config, accessMode)
+	sessionID, sessionSecret, mountedAt, err := s.volMgr.MountVolume(ctx, prefix, req.VolumeId, claims.TeamID, config, accessMode)
 	if err != nil {
 		s.logger.WithError(err).WithField("volume_id", req.VolumeId).Error("Failed to mount volume")
 		if strings.Contains(err.Error(), "another team") {
@@ -341,9 +341,10 @@ func (s *FileSystemServer) MountVolume(ctx context.Context, req *pb.MountVolumeR
 	}
 
 	return &pb.MountVolumeResponse{
-		VolumeId:       req.VolumeId,
-		MountedAt:      mountedAt.Unix(),
-		MountSessionId: sessionID,
+		VolumeId:           req.VolumeId,
+		MountedAt:          mountedAt.Unix(),
+		MountSessionId:     sessionID,
+		MountSessionSecret: sessionSecret,
 	}, nil
 }
 

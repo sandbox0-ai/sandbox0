@@ -2,6 +2,9 @@ package volume
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -53,9 +56,18 @@ type VolumeContext struct {
 // MountSession tracks a single mount session on this instance.
 type MountSession struct {
 	ID        string
+	Secret    string
+	TeamID    string
 	SandboxID string
 	CreatedAt time.Time
 	Scope     MountSessionScope
+}
+
+// MountSessionPrincipal captures the authorization identity resolved from a
+// mount session credential.
+type MountSessionPrincipal struct {
+	TeamID    string
+	SandboxID string
 }
 
 type MountSessionScope string
@@ -114,7 +126,7 @@ func (m *Manager) SetMountRegistrar(registrar MountRegistrar) {
 
 // MountVolume mounts a JuiceFS volume using SDK mode (in-memory, no FUSE).
 // AccessMode is enforced per storage-proxy instance (not per sandbox).
-func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID string, config *VolumeConfig, accessMode AccessMode) (string, time.Time, error) {
+func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID string, config *VolumeConfig, accessMode AccessMode) (string, string, time.Time, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -124,32 +136,39 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID st
 	sessionTime := time.Now()
 
 	if teamID == "" {
-		return "", time.Time{}, fmt.Errorf("missing team id for volume mount")
+		return "", "", time.Time{}, fmt.Errorf("missing team id for volume mount")
 	}
 
 	// Validate mount with coordinator if available.
 	if m.registrar != nil {
 		if err := m.registrar.ValidateMount(ctx, volumeID, accessMode); err != nil {
-			return "", time.Time{}, err
+			return "", "", time.Time{}, err
 		}
+	}
+
+	sessionSecret, err := generateMountSessionSecret()
+	if err != nil {
+		return "", "", time.Time{}, fmt.Errorf("generate mount session secret: %w", err)
 	}
 
 	// Check if already mounted
 	if existing, exists := m.volumes[volumeID]; exists {
 		if existing.TeamID != "" && existing.TeamID != teamID {
-			return "", time.Time{}, fmt.Errorf("volume %s already mounted by another team", volumeID)
+			return "", "", time.Time{}, fmt.Errorf("volume %s already mounted by another team", volumeID)
 		}
 		if existing.Access != accessMode {
-			return "", time.Time{}, fmt.Errorf("volume %s already mounted with access_mode=%s", volumeID, existing.Access)
+			return "", "", time.Time{}, fmt.Errorf("volume %s already mounted with access_mode=%s", volumeID, existing.Access)
 		}
 		if m.mountSessions[volumeID] == nil {
 			m.mountSessions[volumeID] = make(map[string]*MountSession)
 		}
 		m.mountSessions[volumeID][sessionID] = &MountSession{
 			ID:        sessionID,
+			Secret:    sessionSecret,
+			TeamID:    teamID,
 			CreatedAt: sessionTime,
 		}
-		return sessionID, sessionTime, nil
+		return sessionID, sessionSecret, sessionTime, nil
 	}
 
 	m.logger.WithField("volume_id", volumeID).Info("Mounting volume")
@@ -167,13 +186,13 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID st
 	// Load or create format
 	format, err := metaClient.Load(true)
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("failed to load juicefs format: %w", err)
+		return "", "", time.Time{}, fmt.Errorf("failed to load juicefs format: %w", err)
 	}
 
 	// 2. Initialize object storage
 	blob, err := m.createObjectStorage(config, s3Prefix, format)
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("failed to create object storage: %w", err)
+		return "", "", time.Time{}, fmt.Errorf("failed to create object storage: %w", err)
 	}
 
 	// 3. Initialize chunk store with local cache
@@ -233,11 +252,11 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID st
 	// 5. Ensure per-volume root directory exists in JuiceFS namespace
 	rootPath, err := naming.JuiceFSVolumePath(volumeID)
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("volume path: %w", err)
+		return "", "", time.Time{}, fmt.Errorf("volume path: %w", err)
 	}
 	rootInode, err := ensureVolumeRoot(metaClient, rootPath)
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("ensure volume root: %w", err)
+		return "", "", time.Time{}, fmt.Errorf("ensure volume root: %w", err)
 	}
 
 	// 6. Store volume context
@@ -258,6 +277,8 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID st
 	}
 	m.mountSessions[volumeID][sessionID] = &MountSession{
 		ID:        sessionID,
+		Secret:    sessionSecret,
+		TeamID:    teamID,
 		CreatedAt: sessionTime,
 	}
 
@@ -277,7 +298,47 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID st
 		"access_mode": accessMode,
 	}).Info("Volume mounted successfully")
 
-	return sessionID, sessionTime, nil
+	return sessionID, sessionSecret, sessionTime, nil
+}
+
+// AuthenticateMountSession validates a mount session credential for a specific
+// mounted volume and returns the principal bound to that session.
+func (m *Manager) AuthenticateMountSession(volumeID, sessionID, sessionSecret string) (*MountSessionPrincipal, error) {
+	if volumeID == "" || sessionID == "" || sessionSecret == "" {
+		return nil, fmt.Errorf("missing mount session credential")
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	volCtx, ok := m.volumes[volumeID]
+	if !ok || volCtx == nil {
+		return nil, fmt.Errorf("volume %s not mounted", volumeID)
+	}
+	sessions := m.mountSessions[volumeID]
+	if len(sessions) == 0 {
+		return nil, fmt.Errorf("mount session %s not found for volume %s", sessionID, volumeID)
+	}
+	session := sessions[sessionID]
+	if session == nil {
+		return nil, fmt.Errorf("mount session %s not found for volume %s", sessionID, volumeID)
+	}
+	if subtle.ConstantTimeCompare([]byte(session.Secret), []byte(sessionSecret)) != 1 {
+		return nil, fmt.Errorf("invalid mount session secret")
+	}
+
+	teamID := session.TeamID
+	if teamID == "" {
+		teamID = volCtx.TeamID
+	}
+	if teamID == "" {
+		return nil, fmt.Errorf("team id not found for mount session")
+	}
+
+	return &MountSessionPrincipal{
+		TeamID:    teamID,
+		SandboxID: session.SandboxID,
+	}, nil
 }
 
 // Use meta client directly to create the internal root path.
@@ -919,4 +980,12 @@ func parseSizeString(sizeStr string, defaultSize int64) int64 {
 	var size int64
 	fmt.Sscanf(numStr, "%d", &size)
 	return size * multiplier
+}
+
+func generateMountSessionSecret() (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
 }

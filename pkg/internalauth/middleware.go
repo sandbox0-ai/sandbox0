@@ -20,6 +20,12 @@ const (
 
 	// TokenForProcdHeader is the header name used to pass a storage token to procd.
 	TokenForProcdHeader = "X-Token-For-Procd"
+
+	// VolumeSessionIDHeader is the header for a storage-proxy mount session identifier.
+	VolumeSessionIDHeader = "X-Volume-Session-ID"
+
+	// VolumeSessionSecretHeader is the header for a storage-proxy mount session secret.
+	VolumeSessionSecretHeader = "X-Volume-Session-Secret"
 )
 
 // TokenExtractor extracts the internal token from an HTTP request.

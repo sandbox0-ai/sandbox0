@@ -10,7 +10,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -187,29 +186,6 @@ func configuredTeamTemplateMemoryPerCPU() resource.Quantity {
 func memoryForCPU(cpu, memoryPerCPU resource.Quantity) resource.Quantity {
 	requiredBytes := cpu.MilliValue() * memoryPerCPU.Value() / 1000
 	return *resource.NewQuantity(requiredBytes, resource.BinarySI)
-}
-
-func validateProbe(probe *corev1.Probe, field string) error {
-	if probe == nil {
-		return nil
-	}
-	handlerCount := 0
-	if probe.Exec != nil {
-		handlerCount++
-	}
-	if probe.HTTPGet != nil {
-		handlerCount++
-	}
-	if probe.TCPSocket != nil {
-		handlerCount++
-	}
-	if probe.GRPC != nil {
-		handlerCount++
-	}
-	if handlerCount != 1 {
-		return fmt.Errorf("%s must define exactly one handler", field)
-	}
-	return nil
 }
 
 func validateCIDRs(values []string, field string) error {

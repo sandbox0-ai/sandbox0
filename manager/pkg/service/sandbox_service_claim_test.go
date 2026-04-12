@@ -8,12 +8,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -194,6 +197,61 @@ func TestWaitForPodClaimReadyUsesSandboxReadinessWithoutPodReady(t *testing.T) {
 	}
 }
 
+func TestCreateNewPodCleansUpAfterNetworkApplyFailure(t *testing.T) {
+	keyPath := filepath.Join(t.TempDir(), "internal_jwt_public.key")
+	if err := os.WriteFile(keyPath, []byte("test-public-key"), 0o600); err != nil {
+		t.Fatalf("write public key: %v", err)
+	}
+	previousKeyPath := internalauth.DefaultInternalJWTPublicKeyPath
+	internalauth.DefaultInternalJWTPublicKeyPath = keyPath
+	t.Cleanup(func() { internalauth.DefaultInternalJWTPublicKeyPath = previousKeyPath })
+
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			MainContainer: v1alpha1.ContainerSpec{Image: "busybox"},
+		},
+	}
+	applyErr := errors.New("apply failed")
+	removed := make([]string, 0, 1)
+	client := fake.NewSimpleClientset()
+	svc := &SandboxService{
+		k8sClient:            client,
+		secretLister:         newClaimTestSecretLister(t),
+		NetworkPolicyService: NewNetworkPolicyService(zap.NewNop()),
+		networkProvider: &assertingNetworkProvider{
+			applyErr: applyErr,
+			removeFunc: func(namespace, sandboxID string) {
+				removed = append(removed, namespace+"/"+sandboxID)
+			},
+		},
+		clock:  systemTime{},
+		logger: zap.NewNop(),
+	}
+
+	_, err := svc.createNewPod(context.Background(), template, &ClaimRequest{TeamID: "team-a", UserID: "user-a"})
+	if err == nil {
+		t.Fatal("createNewPod() error = nil, want network apply failure")
+	}
+	if !errors.Is(err, applyErr) {
+		t.Fatalf("createNewPod() error = %v, want wrapped apply failure", err)
+	}
+
+	pods, err := client.CoreV1().Pods("ns-a").List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
+	if len(pods.Items) != 0 {
+		t.Fatalf("pods after failed cold claim = %d, want 0", len(pods.Items))
+	}
+	if len(removed) != 1 {
+		t.Fatalf("network policy removals = %d, want 1", len(removed))
+	}
+}
+
 func TestWaitForPodClaimReadyWaitsForProcdContainerRunning(t *testing.T) {
 	pod := newClaimReadyTestPod("ns-a", "cold-pod", "template-a")
 	pod.Status.ContainerStatuses = nil
@@ -301,6 +359,19 @@ func TestClaimMountWaitTimeoutDefaultsWhenEnabled(t *testing.T) {
 func newClaimTestPodLister(t *testing.T, pods ...*corev1.Pod) corelisters.PodLister {
 	t.Helper()
 	return corelisters.NewPodLister(newClaimTestPodIndexer(t, pods...))
+}
+
+func newClaimTestSecretLister(t *testing.T, secrets ...*corev1.Secret) corelisters.SecretLister {
+	t.Helper()
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{
+		cache.NamespaceIndex: cache.MetaNamespaceIndexFunc,
+	})
+	for _, secret := range secrets {
+		if err := indexer.Add(secret); err != nil {
+			t.Fatalf("add secret: %v", err)
+		}
+	}
+	return corelisters.NewSecretLister(indexer)
 }
 
 func newClaimTestPodIndexer(t *testing.T, pods ...*corev1.Pod) cache.Indexer {

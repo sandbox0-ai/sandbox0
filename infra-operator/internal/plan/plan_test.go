@@ -1,6 +1,7 @@
 package plan
 
 import (
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -146,6 +147,30 @@ func TestCompileDerivesCrossServiceReferences(t *testing.T) {
 	}
 	if compiled.RegionalGateway.IngressConfig == nil || !compiled.RegionalGateway.IngressConfig.Enabled {
 		t.Fatalf("expected regional gateway ingress config to be compiled, got %#v", compiled.RegionalGateway.IngressConfig)
+	}
+}
+
+func TestCompileRejectsInvalidClusterID(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Cluster: &infrav1alpha1.ClusterConfig{ID: "sandbox0-gcp-use4-gke"},
+			Services: &infrav1alpha1.ServicesConfig{
+				Manager: &infrav1alpha1.ManagerServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+			},
+		},
+	}
+
+	compiled := Compile(infra)
+	if len(compiled.Validation.FatalErrors) == 0 {
+		t.Fatal("expected validation error")
+	}
+	if got := compiled.Validation.FatalErrors[0]; !strings.Contains(got, "spec.cluster.id is invalid") {
+		t.Fatalf("unexpected validation error: %q", got)
 	}
 }
 

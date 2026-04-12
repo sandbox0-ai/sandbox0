@@ -12,6 +12,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/registry"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 )
 
@@ -646,8 +647,13 @@ func compileValidationPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPl
 		!clusterGatewayInternalAuthEnabled(clusterGatewayAuthMode(infra)) {
 		plan.FatalErrors = append(plan.FatalErrors, "regionalGateway requires clusterGateway authMode internal/both when clusterGateway is enabled")
 	}
-	if infra.Spec.Cluster != nil && (compiled == nil || !compiled.Components.HasDataPlane) {
-		plan.FatalErrors = append(plan.FatalErrors, "cluster configuration requires at least one data-plane service")
+	if infra.Spec.Cluster != nil {
+		if err := naming.ValidateClusterID(infra.Spec.Cluster.ID); err != nil {
+			plan.FatalErrors = append(plan.FatalErrors, fmt.Sprintf("spec.cluster.id is invalid: %v", err))
+		}
+		if compiled == nil || !compiled.Components.HasDataPlane {
+			plan.FatalErrors = append(plan.FatalErrors, "cluster configuration requires at least one data-plane service")
+		}
 	}
 	if compiled != nil && compiled.Components.EnableNetd && netdEgressAuthEnabled(infra) && !compiled.Components.EnableManager {
 		plan.FatalErrors = append(plan.FatalErrors, "netd egress auth requires manager to be enabled")

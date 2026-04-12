@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
@@ -451,7 +452,7 @@ func (s *Server) listSandboxes(c *gin.Context) {
 
 	if len(clusters) == 0 {
 		spec.JSONSuccess(c, http.StatusOK, gin.H{
-			"sandboxes": []client.SandboxSummary{},
+			"sandboxes": []apispec.SandboxSummary{},
 			"count":     0,
 			"has_more":  false,
 		})
@@ -478,7 +479,7 @@ func (s *Server) listSandboxes(c *gin.Context) {
 	// Fan-out to all clusters in parallel
 	type clusterResult struct {
 		clusterID string
-		response  *client.ListSandboxesResponse
+		response  *apispec.SuccessSandboxListResponse
 		err       error
 	}
 
@@ -513,7 +514,7 @@ func (s *Server) listSandboxes(c *gin.Context) {
 	}()
 
 	// Collect and aggregate results
-	var allSandboxes []client.SandboxSummary
+	var allSandboxes []apispec.SandboxSummary
 	for result := range results {
 		if result.err != nil {
 			s.logger.Warn("Failed to list sandboxes from cluster",
@@ -522,16 +523,24 @@ func (s *Server) listSandboxes(c *gin.Context) {
 			)
 			continue
 		}
-		// Add cluster_id to each sandbox
-		for i := range result.response.Sandboxes {
-			result.response.Sandboxes[i].ClusterID = result.clusterID
+		if result.response == nil || result.response.Data == nil {
+			s.logger.Warn("Cluster sandbox list response missing data",
+				zap.String("cluster_id", result.clusterID),
+			)
+			continue
 		}
-		allSandboxes = append(allSandboxes, result.response.Sandboxes...)
+
+		// Add cluster_id to each sandbox
+		clusterID := result.clusterID
+		for i := range result.response.Data.Sandboxes {
+			result.response.Data.Sandboxes[i].ClusterId = &clusterID
+		}
+		allSandboxes = append(allSandboxes, result.response.Data.Sandboxes...)
 	}
 
 	// Sort by created_at descending (newest first)
 	sort.Slice(allSandboxes, func(i, j int) bool {
-		return allSandboxes[i].CreatedAt > allSandboxes[j].CreatedAt
+		return allSandboxes[i].CreatedAt.After(allSandboxes[j].CreatedAt)
 	})
 
 	// Parse pagination parameters
@@ -555,7 +564,7 @@ func (s *Server) listSandboxes(c *gin.Context) {
 	// Apply pagination
 	hasMore := false
 	if offset >= totalCount {
-		allSandboxes = []client.SandboxSummary{}
+		allSandboxes = []apispec.SandboxSummary{}
 	} else {
 		end := offset + limit
 		if end > totalCount {

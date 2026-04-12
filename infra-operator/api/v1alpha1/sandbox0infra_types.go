@@ -1152,7 +1152,11 @@ type PublicExposureConfig struct {
 
 // ClusterConfig defines cluster identification and capacity
 type ClusterConfig struct {
-	// ID is the unique cluster identifier
+	// ID is the unique Sandbox0 data-plane cluster identifier used in routing and sandbox names.
+	// It is separate from the provider cluster name and must stay short enough for sandbox name encoding.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=20
+	// +kubebuilder:validation:Pattern=^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
 	ID string `json:"id"`
 
 	// Name is the human-readable cluster name

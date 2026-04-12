@@ -297,6 +297,25 @@ func TestValidateSpecSemanticsRejectsInvalidNodePortServicePort(t *testing.T) {
 	}
 }
 
+func TestValidateSpecSemanticsRejectsInvalidClusterID(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Cluster: &infrav1alpha1.ClusterConfig{
+				ID: "sandbox0-gcp-use4-gke",
+			},
+		},
+	}
+
+	err := validateSpecSemantics(context.Background(), newValidationTestClient(t), infra)
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "spec.cluster.id is invalid") {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+}
+
 func TestValidateSpecSemanticsAcceptsValidNodePortServicePort(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},

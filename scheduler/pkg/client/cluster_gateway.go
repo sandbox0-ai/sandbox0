@@ -299,28 +299,8 @@ func (c *ClusterGatewayClient) DeleteTemplate(ctx context.Context, baseURL strin
 	return nil
 }
 
-// SandboxSummary represents a summary of a sandbox for listing
-type SandboxSummary struct {
-	ID            string                    `json:"id"`
-	TemplateID    string                    `json:"template_id"`
-	Status        string                    `json:"status"`
-	Paused        bool                      `json:"paused"`
-	PowerState    apispec.SandboxPowerState `json:"power_state"`
-	ClusterID     string                    `json:"cluster_id,omitempty"`
-	CreatedAt     string                    `json:"created_at"`
-	ExpiresAt     string                    `json:"expires_at"`
-	HardExpiresAt string                    `json:"hard_expires_at"`
-}
-
-// ListSandboxesResponse represents the response from listing sandboxes
-type ListSandboxesResponse struct {
-	Sandboxes []SandboxSummary `json:"sandboxes"`
-	Count     int              `json:"count"`
-	HasMore   bool             `json:"has_more"`
-}
-
 // ListSandboxes lists sandboxes from cluster-gateway with the given query parameters
-func (c *ClusterGatewayClient) ListSandboxes(ctx context.Context, baseURL, teamID, userID, query string, permissions []string) (*ListSandboxesResponse, error) {
+func (c *ClusterGatewayClient) ListSandboxes(ctx context.Context, baseURL, teamID, userID, query string, permissions []string) (*apispec.SuccessSandboxListResponse, error) {
 	// Preserve the caller team/user context so cluster-gateway and manager
 	// can apply the same team-scoped authorization as other sandbox routes.
 	token, err := c.internalAuthGen.Generate("cluster-gateway", teamID, userID, internalauth.GenerateOptions{
@@ -361,14 +341,16 @@ func (c *ClusterGatewayClient) ListSandboxes(ctx context.Context, baseURL, teamI
 		return nil, fmt.Errorf("unexpected status code %d: %s", resp.StatusCode, string(body))
 	}
 
-	// Parse response
-	result, apiErr, err := spec.DecodeResponse[ListSandboxesResponse](resp.Body)
-	if err != nil {
+	var result apispec.SuccessSandboxListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
-	if apiErr != nil {
-		return nil, fmt.Errorf("cluster-gateway error: %s", apiErr.Message)
+	if !bool(result.Success) {
+		return nil, fmt.Errorf("cluster-gateway returned unsuccessful sandbox list response")
+	}
+	if result.Data == nil {
+		return nil, fmt.Errorf("cluster-gateway sandbox list response missing data")
 	}
 
-	return result, nil
+	return &result, nil
 }

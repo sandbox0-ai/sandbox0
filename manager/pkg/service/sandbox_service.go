@@ -578,26 +578,39 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		}
 	}
 
-	if metrics != nil {
-		metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "success").Inc()
-		metrics.SandboxClaimDuration.WithLabelValues(req.Template, claimType).Observe(time.Since(start).Seconds())
-	}
-
-	// Note: Network policies are stored in pod annotations
-	// They are set in claimIdlePod() and createNewPod() methods
-
-	pod, err = s.waitForPodReady(ctx, pod.Namespace, pod.Name)
-	if err != nil {
-		return nil, fmt.Errorf("wait for pod ready: %w", err)
+	// Note: Network policies are stored in pod annotations.
+	// They are set in claimIdlePod() and createNewPod() methods. Hot claims have
+	// already selected a Kubernetes-ready idle pod; cold claims use the faster
+	// claim-ready path below and let Kubernetes PodReady catch up asynchronously.
+	if claimType == "cold" {
+		pod, err = s.waitForPodClaimReady(ctx, pod.Namespace, pod.Name)
+		if err != nil {
+			if metrics != nil {
+				metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+			}
+			return nil, fmt.Errorf("wait for pod claim readiness: %w", err)
+		}
+		s.refreshSandboxProbeConditionsAsync(pod)
 	}
 
 	procdAddress, err := s.prodAddress(ctx, pod)
 	if err != nil {
+		if metrics != nil {
+			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+		}
 		return nil, fmt.Errorf("get procd address: %w", err)
 	}
 	initResp, err := s.initializeProcd(ctx, pod, req, procdAddress)
 	if err != nil {
+		if metrics != nil {
+			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+		}
 		return nil, fmt.Errorf("initialize procd: %w", err)
+	}
+
+	if metrics != nil {
+		metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "success").Inc()
+		metrics.SandboxClaimDuration.WithLabelValues(req.Template, claimType).Observe(time.Since(start).Seconds())
 	}
 
 	return &ClaimResponse{
@@ -2236,6 +2249,116 @@ func (s *SandboxService) waitForPodReady(ctx context.Context, namespace, name st
 		case <-ticker.C:
 		}
 	}
+}
+
+func (s *SandboxService) waitForPodClaimReady(ctx context.Context, namespace, name string) (*corev1.Pod, error) {
+	timeout := s.config.ProcdInitTimeout
+	if timeout < defaultPodReadyTimeout {
+		timeout = defaultPodReadyTimeout
+	}
+
+	readyCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	lastReason := "pod is not ready"
+	for {
+		pod, err := s.podLister.Pods(namespace).Get(name)
+		if err != nil {
+			if k8serrors.IsNotFound(err) {
+				lastReason = fmt.Sprintf("pod %s/%s is not visible", namespace, name)
+				select {
+				case <-readyCtx.Done():
+					return nil, fmt.Errorf("pod %s/%s not claim-ready after %s: %s", namespace, name, timeout, lastReason)
+				case <-ticker.C:
+					continue
+				}
+			}
+			return nil, fmt.Errorf("get pod for claim readiness: %w", err)
+		}
+
+		ready, reason := s.isPodClaimReady(readyCtx, pod)
+		if ready {
+			return pod, nil
+		}
+		if reason != "" {
+			lastReason = reason
+		}
+
+		select {
+		case <-readyCtx.Done():
+			return nil, fmt.Errorf("pod %s/%s not claim-ready after %s: %s", namespace, name, timeout, lastReason)
+		case <-ticker.C:
+		}
+	}
+}
+
+func (s *SandboxService) isPodClaimReady(ctx context.Context, pod *corev1.Pod) (bool, string) {
+	if pod == nil {
+		return false, "pod is nil"
+	}
+	if pod.Status.Phase != corev1.PodRunning {
+		return false, fmt.Sprintf("pod phase is %s", pod.Status.Phase)
+	}
+	if strings.TrimSpace(pod.Status.PodIP) == "" {
+		return false, "pod IP is not assigned"
+	}
+	if !podContainerRunning(pod, "procd") {
+		return false, "procd container is not running"
+	}
+	if !controller.HasSandboxPodReadinessGate(pod) {
+		return true, ""
+	}
+
+	result, err := s.ProbeSandboxPod(ctx, pod, sandboxprobe.KindReadiness)
+	if err != nil {
+		return false, err.Error()
+	}
+	if result == nil {
+		return false, "sandbox readiness probe returned no result"
+	}
+	if result.Status != sandboxprobe.StatusPassed {
+		message := strings.TrimSpace(result.Message)
+		if message != "" {
+			return false, message
+		}
+		if result.Reason != "" {
+			return false, result.Reason
+		}
+		return false, fmt.Sprintf("sandbox readiness probe is %s", result.Status)
+	}
+	return true, ""
+}
+
+func podContainerRunning(pod *corev1.Pod, name string) bool {
+	if pod == nil {
+		return false
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name == name && status.State.Running != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *SandboxService) refreshSandboxProbeConditionsAsync(pod *corev1.Pod) {
+	if s == nil || pod == nil || !controller.HasSandboxPodReadinessGate(pod) {
+		return
+	}
+	go func(snapshot *corev1.Pod) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := s.refreshSandboxProbeConditions(ctx, snapshot); err != nil && s.logger != nil {
+			s.logger.Warn("Failed to refresh sandbox probe conditions asynchronously",
+				zap.String("pod", snapshot.Name),
+				zap.String("namespace", snapshot.Namespace),
+				zap.Error(err),
+			)
+		}
+	}(pod.DeepCopy())
 }
 
 func (s *SandboxService) refreshSandboxProbeConditions(ctx context.Context, pod *corev1.Pod) (*corev1.Pod, error) {

@@ -28,6 +28,9 @@ const (
 
 const DefaultClusterID = defaultClusterID
 
+// ClusterIDMaxLen is the longest cluster ID that can be encoded into sandbox names.
+const ClusterIDMaxLen = clusterIDMaxLen
+
 // ClusterIDOrDefault returns the cluster ID or a default value.
 func ClusterIDOrDefault(clusterID *string) string {
 	if clusterID != nil && *clusterID != "" {
@@ -43,6 +46,20 @@ var (
 func validateDNSLabel(name string) error {
 	if errs := validation.IsDNS1123Label(name); len(errs) > 0 {
 		return fmt.Errorf("invalid DNS-1123 label '%s': %v", name, errs)
+	}
+	return nil
+}
+
+// ValidateClusterID ensures a cluster ID is safe for routing and sandbox name encoding.
+func ValidateClusterID(clusterID string) error {
+	if clusterID == "" {
+		return fmt.Errorf("clusterID is required")
+	}
+	if len(clusterID) > clusterIDMaxLen {
+		return fmt.Errorf("clusterID '%s' is too long (%d > %d)", clusterID, len(clusterID), clusterIDMaxLen)
+	}
+	if err := validateDNSLabel(clusterID); err != nil {
+		return err
 	}
 	return nil
 }
@@ -116,8 +133,8 @@ func slugWithHash(input string, maxLen int) (string, error) {
 }
 
 func encodeClusterID(clusterID string) (string, error) {
-	if clusterID == "" {
-		return "", fmt.Errorf("clusterID is empty")
+	if err := ValidateClusterID(clusterID); err != nil {
+		return "", err
 	}
 	encoded := strings.ToLower(base32NoPadding.EncodeToString([]byte(clusterID)))
 	if len(encoded) > clusterKeyMaxLen {

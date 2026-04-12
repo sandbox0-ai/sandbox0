@@ -2,6 +2,7 @@ package http
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/middleware"
@@ -106,6 +107,9 @@ func (s *Server) generateManagerToken(authCtx *authn.AuthContext, claims *intern
 		Permissions: permissions,
 	}
 	if claims != nil && claims.IsSystem {
+		return s.internalAuthGen.GenerateSystem("manager", opts)
+	}
+	if authCtx != nil && authCtx.IsSystemAdmin && strings.TrimSpace(authCtx.TeamID) == "" {
 		return s.internalAuthGen.GenerateSystem("manager", opts)
 	}
 

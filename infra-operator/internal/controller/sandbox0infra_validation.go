@@ -13,6 +13,7 @@ import (
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 )
 
 const (
@@ -39,9 +40,20 @@ func validateSpecSemantics(ctx context.Context, kubeClient ctrlclient.Client, in
 		errs = append(errs, validateBuiltinStorageSemantics(ctx, kubeClient, infra)...)
 		errs = append(errs, validateBuiltinRegistrySemantics(ctx, kubeClient, infra)...)
 	}
+	errs = append(errs, validateClusterSemantics(infra)...)
 	errs = append(errs, validateServiceSemantics(infra)...)
 
 	return utilerrors.NewAggregate(errs)
+}
+
+func validateClusterSemantics(infra *infrav1alpha1.Sandbox0Infra) []error {
+	if infra == nil || infra.Spec.Cluster == nil {
+		return nil
+	}
+	if err := naming.ValidateClusterID(infra.Spec.Cluster.ID); err != nil {
+		return []error{fmt.Errorf("spec.cluster.id is invalid: %w", err)}
+	}
+	return nil
 }
 
 func validateServiceSemantics(infra *infrav1alpha1.Sandbox0Infra) []error {

@@ -1,6 +1,9 @@
 package naming
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestReplicasetAndSandboxNames(t *testing.T) {
 	clusterID := "aws-us-east-1"
@@ -99,6 +102,34 @@ func TestClusterIDFromName(t *testing.T) {
 	}
 	if err := validateDNSLabel(clusterID); err != nil {
 		t.Fatalf("cluster_id invalid: %v", err)
+	}
+}
+
+func TestValidateClusterID(t *testing.T) {
+	valid := []string{
+		"default",
+		"aws-us-east-1",
+		"cluster-a",
+		strings.Repeat("a", ClusterIDMaxLen),
+	}
+	for _, clusterID := range valid {
+		if err := ValidateClusterID(clusterID); err != nil {
+			t.Fatalf("expected clusterID %q to be valid: %v", clusterID, err)
+		}
+	}
+
+	invalid := []string{
+		"",
+		"Sandbox0-GCP-USE4-GKE",
+		"bad_name",
+		"-starts-with-dash",
+		"ends-with-dash-",
+		strings.Repeat("a", ClusterIDMaxLen+1),
+	}
+	for _, clusterID := range invalid {
+		if err := ValidateClusterID(clusterID); err == nil {
+			t.Fatalf("expected clusterID %q to be invalid", clusterID)
+		}
 	}
 }
 

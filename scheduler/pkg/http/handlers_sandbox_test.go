@@ -571,7 +571,8 @@ func TestListSandboxesRoutesTeamScopedToken(t *testing.T) {
 		Success bool `json:"success"`
 		Data    struct {
 			Sandboxes []struct {
-				ID         string `json:"id"`
+				ID         string  `json:"id"`
+				ClusterID  *string `json:"cluster_id"`
 				PowerState struct {
 					Desired            string `json:"desired"`
 					DesiredGeneration  int64  `json:"desired_generation"`
@@ -595,6 +596,9 @@ func TestListSandboxesRoutesTeamScopedToken(t *testing.T) {
 	}
 	if body.Data.Sandboxes[0].HardExpiresAt != "2026-04-07T02:00:00Z" {
 		t.Fatalf("hard_expires_at = %q, want 2026-04-07T02:00:00Z", body.Data.Sandboxes[0].HardExpiresAt)
+	}
+	if body.Data.Sandboxes[0].ClusterID == nil || *body.Data.Sandboxes[0].ClusterID != "home" {
+		t.Fatalf("cluster_id = %v, want home", body.Data.Sandboxes[0].ClusterID)
 	}
 	if body.Data.Sandboxes[0].PowerState.Desired != "active" || body.Data.Sandboxes[0].PowerState.Phase != "stable" {
 		t.Fatalf("power_state = %+v, want active/stable", body.Data.Sandboxes[0].PowerState)

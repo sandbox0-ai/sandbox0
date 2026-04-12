@@ -118,7 +118,12 @@ spec:
                         type: object
                     type: object
                   id:
-                    description: ID is the unique cluster identifier
+                    description: |-
+                      ID is the unique Sandbox0 data-plane cluster identifier used in routing and sandbox names.
+                      It is separate from the provider cluster name and must stay short enough for sandbox name encoding.
+                    maxLength: 20
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
                   name:
                     description: Name is the human-readable cluster name

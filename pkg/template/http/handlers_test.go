@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -646,6 +647,41 @@ func TestValidateTemplateSpec_StrictValidation(t *testing.T) {
 			},
 			wantErr: "spec.warmProcesses[0].type must be one of: repl, cmd",
 		},
+		{
+			name: "reject warm process probe without handler",
+			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
+				s.WarmProcesses = []v1alpha1.WarmProcessSpec{{
+					Type:   v1alpha1.WarmProcessTypeREPL,
+					Probes: &v1alpha1.SandboxProbeSet{Readiness: &v1alpha1.SandboxProbeSpec{}},
+				}}
+			},
+			wantErr: "spec.warmProcesses[0].probes.readiness must configure one of process, exec, httpGet, or tcpSocket",
+		},
+		{
+			name: "reject warm process probe with multiple handlers",
+			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
+				s.WarmProcesses = []v1alpha1.WarmProcessSpec{{
+					Type: v1alpha1.WarmProcessTypeREPL,
+					Probes: &v1alpha1.SandboxProbeSet{Liveness: &v1alpha1.SandboxProbeSpec{
+						Process: &v1alpha1.ProcessProbeSpec{},
+						Exec:    &v1alpha1.ExecProbeSpec{Command: []string{"true"}},
+					}},
+				}}
+			},
+			wantErr: "spec.warmProcesses[0].probes.liveness must configure only one of process, exec, httpGet, or tcpSocket",
+		},
+		{
+			name: "reject warm process probe with invalid http port",
+			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
+				s.WarmProcesses = []v1alpha1.WarmProcessSpec{{
+					Type: v1alpha1.WarmProcessTypeREPL,
+					Probes: &v1alpha1.SandboxProbeSet{Startup: &v1alpha1.SandboxProbeSpec{
+						HTTPGet: &v1alpha1.HTTPGetProbeSpec{Port: intstr.FromInt(0)},
+					}},
+				}}
+			},
+			wantErr: "spec.warmProcesses[0].probes.startup.httpGet.port must be positive",
+		},
 	}
 
 	for _, tc := range cases {
@@ -677,8 +713,14 @@ func TestValidateTemplateSpecForClaims_AllowsWarmProcesses(t *testing.T) {
 				Memory: resource.MustParse("4Gi"),
 			},
 		},
-		WarmProcesses: []v1alpha1.WarmProcessSpec{{Type: v1alpha1.WarmProcessTypeREPL, Alias: "bash"}},
-		Pool:          v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
+		WarmProcesses: []v1alpha1.WarmProcessSpec{{
+			Type:  v1alpha1.WarmProcessTypeREPL,
+			Alias: "bash",
+			Probes: &v1alpha1.SandboxProbeSet{Readiness: &v1alpha1.SandboxProbeSpec{
+				Process: &v1alpha1.ProcessProbeSpec{},
+			}},
+		}},
+		Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
 	}
 
 	if err := validateTemplateSpecForClaims(spec, &internalauth.Claims{TeamID: "team-1"}); err != nil {

@@ -4,6 +4,7 @@ package http
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -22,6 +23,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 )
@@ -74,8 +76,7 @@ type Server struct {
 	// Webhook dispatcher
 	webhookDispatcher *webhook.Dispatcher
 
-	healthChecker func() error
-	readyChecker  func() error
+	probeRunner func(sandboxprobe.Kind) sandboxprobe.Response
 }
 
 // NewServer creates a new HTTP server.
@@ -89,8 +90,7 @@ func NewServer(
 	webhookDispatcher *webhook.Dispatcher,
 	logger *zap.Logger,
 	obsProvider *observability.Provider,
-	healthChecker func() error,
-	readyChecker func() error,
+	probeRunner func(sandboxprobe.Kind) sandboxprobe.Response,
 ) *Server {
 	s := &Server{
 		router:            mux.NewRouter(),
@@ -103,8 +103,7 @@ func NewServer(
 		webhookDispatcher: webhookDispatcher,
 		logger:            logger,
 		obsProvider:       obsProvider,
-		healthChecker:     healthChecker,
-		readyChecker:      readyChecker,
+		probeRunner:       probeRunner,
 	}
 
 	s.setupRoutes()
@@ -122,6 +121,7 @@ func (s *Server) setupRoutes() {
 	// Health check endpoints (no auth required)
 	s.router.HandleFunc("/healthz", s.healthHandler).Methods("GET")
 	s.router.HandleFunc("/readyz", s.readyHandler).Methods("GET")
+	s.router.HandleFunc("/sandbox-probes/{kind}", s.sandboxProbeHandler).Methods("GET", "POST")
 
 	// Local-only API (localhost access only, no auth)
 	local := s.router.PathPrefix("/api/v1").Subrouter()
@@ -203,33 +203,44 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 func (s *Server) healthHandler(w http.ResponseWriter, r *http.Request) {
-	if err := s.checkHealthProbe(); err != nil {
-		_ = spec.WriteError(w, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())
+	result := s.runSandboxProbe(sandboxprobe.KindLiveness)
+	if result.Status == sandboxprobe.StatusFailed {
+		_ = spec.WriteError(w, http.StatusServiceUnavailable, spec.CodeUnavailable, result.Message)
 		return
 	}
 	_ = spec.WriteSuccess(w, http.StatusOK, map[string]string{"status": "healthy"})
 }
 
 func (s *Server) readyHandler(w http.ResponseWriter, r *http.Request) {
-	if err := s.checkReadyProbe(); err != nil {
-		_ = spec.WriteError(w, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())
+	result := s.runSandboxProbe(sandboxprobe.KindReadiness)
+	if result.Status != sandboxprobe.StatusPassed {
+		_ = spec.WriteError(w, http.StatusServiceUnavailable, spec.CodeUnavailable, result.Message)
 		return
 	}
 	_ = spec.WriteSuccess(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
-func (s *Server) checkHealthProbe() error {
-	if s.healthChecker == nil {
-		return nil
+func (s *Server) sandboxProbeHandler(w http.ResponseWriter, r *http.Request) {
+	kind := sandboxprobe.Kind(mux.Vars(r)["kind"])
+	if !sandboxprobe.ValidKind(kind) {
+		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "invalid sandbox probe kind")
+		return
 	}
-	return s.healthChecker()
+	result := s.runSandboxProbe(kind)
+	status := http.StatusOK
+	if result.Status == sandboxprobe.StatusFailed {
+		status = http.StatusServiceUnavailable
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(result)
 }
 
-func (s *Server) checkReadyProbe() error {
-	if s.readyChecker == nil {
-		return nil
+func (s *Server) runSandboxProbe(kind sandboxprobe.Kind) sandboxprobe.Response {
+	if s.probeRunner == nil {
+		return sandboxprobe.Passed(kind, "SandboxProbePassed", "sandbox probe passed", nil)
 	}
-	return s.readyChecker()
+	return s.probeRunner(kind)
 }
 
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {

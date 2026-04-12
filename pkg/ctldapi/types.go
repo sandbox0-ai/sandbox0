@@ -1,5 +1,7 @@
 package ctldapi
 
+import "github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
+
 // SandboxResourceUsage is the whole-sandbox usage view returned by ctld.
 type SandboxResourceUsage struct {
 	ContainerMemoryUsage      int64 `json:"container_memory_usage"`
@@ -28,3 +30,5 @@ type ResumeResponse struct {
 	Resumed bool   `json:"resumed"`
 	Error   string `json:"error,omitempty"`
 }
+
+type ProbeResponse = sandboxprobe.Response

@@ -297,6 +297,7 @@ func main() {
 		managerMetrics,
 	)
 	sandboxService.SetCredentialStore(credentialStore)
+	operator.SetSandboxProbeRunner(sandboxService)
 	staticAuth := make([]egressauthruntime.StaticAuthConfig, 0, len(cfg.EgressAuthStaticAuth))
 	for _, entry := range cfg.EgressAuthStaticAuth {
 		staticAuth = append(staticAuth, egressauthruntime.StaticAuthConfig{

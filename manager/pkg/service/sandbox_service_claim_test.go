@@ -2,12 +2,19 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -150,6 +157,88 @@ func TestWaitForPodReadyWaitsForPodToAppear(t *testing.T) {
 	}
 }
 
+func TestWaitForPodClaimReadyUsesSandboxReadinessWithoutPodReady(t *testing.T) {
+	pod := newClaimReadyTestPod("ns-a", "cold-pod", "template-a")
+	indexer := newClaimTestPodIndexer(t, pod)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/api/v1/pods/ns-a/cold-pod/probes/readiness" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(sandboxprobe.Passed(sandboxprobe.KindReadiness, "SandboxProbePassed", "sandbox probe passed", nil))
+	}))
+	defer server.Close()
+	host, port := splitTestServerAddress(t, server)
+
+	svc := &SandboxService{
+		k8sClient:  fake.NewSimpleClientset(pod.DeepCopy(), newClaimTestNode("node-a", host)),
+		podLister:  corelisters.NewPodLister(indexer),
+		ctldClient: NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		config: SandboxServiceConfig{
+			CtldPort: port,
+		},
+		logger: zap.NewNop(),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	readyPod, err := svc.waitForPodClaimReady(ctx, pod.Namespace, pod.Name)
+	if err != nil {
+		t.Fatalf("waitForPodClaimReady() error = %v", err)
+	}
+	if controller.IsPodReady(readyPod) {
+		t.Fatal("waitForPodClaimReady() waited for Kubernetes PodReady; want sandbox claim readiness only")
+	}
+}
+
+func TestWaitForPodClaimReadyWaitsForProcdContainerRunning(t *testing.T) {
+	pod := newClaimReadyTestPod("ns-a", "cold-pod", "template-a")
+	pod.Status.ContainerStatuses = nil
+	indexer := newClaimTestPodIndexer(t, pod)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(sandboxprobe.Passed(sandboxprobe.KindReadiness, "SandboxProbePassed", "sandbox probe passed", nil))
+	}))
+	defer server.Close()
+	host, port := splitTestServerAddress(t, server)
+
+	svc := &SandboxService{
+		k8sClient:  fake.NewSimpleClientset(pod.DeepCopy(), newClaimTestNode("node-a", host)),
+		podLister:  corelisters.NewPodLister(indexer),
+		ctldClient: NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		config: SandboxServiceConfig{
+			CtldPort: port,
+		},
+		logger: zap.NewNop(),
+	}
+
+	go func() {
+		time.Sleep(80 * time.Millisecond)
+		updated := pod.DeepCopy()
+		updated.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name:  "procd",
+			Ready: true,
+			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.Now()}},
+		}}
+		if err := indexer.Update(updated); err != nil {
+			t.Errorf("update pod: %v", err)
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	readyPod, err := svc.waitForPodClaimReady(ctx, pod.Namespace, pod.Name)
+	if err != nil {
+		t.Fatalf("waitForPodClaimReady() error = %v", err)
+	}
+	if !podContainerRunning(readyPod, "procd") {
+		t.Fatal("waitForPodClaimReady() returned before procd container was running")
+	}
+}
+
 func TestValidateClaimMountsRejectsDuplicateVolume(t *testing.T) {
 	req := &ClaimRequest{
 		Mounts: []ClaimMount{
@@ -254,4 +343,48 @@ func newClaimTestPod(namespace, name, templateID string, ready bool) *corev1.Pod
 			},
 		},
 	}
+}
+
+func newClaimReadyTestPod(namespace, name, templateID string) *corev1.Pod {
+	pod := newClaimTestPod(namespace, name, templateID, false)
+	pod.Spec.NodeName = "node-a"
+	pod.Spec.ReadinessGates = []corev1.PodReadinessGate{{ConditionType: v1alpha1.SandboxPodReadinessConditionType}}
+	pod.Status.PodIP = "10.244.0.10"
+	pod.Status.Conditions = append(pod.Status.Conditions,
+		corev1.PodCondition{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+		corev1.PodCondition{Type: v1alpha1.SandboxPodReadinessConditionType, Status: corev1.ConditionFalse},
+	)
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:  "procd",
+		Ready: true,
+		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.Now()}},
+	}}
+	return pod
+}
+
+func newClaimTestNode(name, internalIP string) *corev1.Node {
+	return &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Status: corev1.NodeStatus{Addresses: []corev1.NodeAddress{{
+			Type:    corev1.NodeInternalIP,
+			Address: internalIP,
+		}}},
+	}
+}
+
+func splitTestServerAddress(t *testing.T, server *httptest.Server) (string, int) {
+	t.Helper()
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	host, portString, err := net.SplitHostPort(parsed.Host)
+	if err != nil {
+		t.Fatalf("split server host: %v", err)
+	}
+	port, err := strconv.Atoi(portString)
+	if err != nil {
+		t.Fatalf("parse server port: %v", err)
+	}
+	return host, port
 }

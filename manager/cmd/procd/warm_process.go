@@ -13,6 +13,8 @@ import (
 
 const warmProcessesEnvVar = "SANDBOX0_WARM_PROCESSES"
 
+var warmProcessExit = os.Exit
+
 type warmProcessSpec struct {
 	Type    string            `json:"type"`
 	Alias   string            `json:"alias,omitempty"`
@@ -86,6 +88,16 @@ func startWarmProcesses(manager *ctxpkg.Manager, logger *zap.Logger) ([]string, 
 			return nil, fmt.Errorf("start warm process %d: %w", i, err)
 		}
 		ctx.SetCleanupPolicy(ctxpkg.CleanupPolicy{})
+		ctx.AddExitHandler(func(event process.ExitEvent) {
+			if logger != nil {
+				logger.Error("Warm process exited; terminating procd for Kubernetes restart",
+					zap.String("context_id", ctx.ID),
+					zap.Int("exit_code", event.ExitCode),
+					zap.String("state", string(event.State)),
+				)
+			}
+			warmProcessExit(1)
+		})
 		contextIDs = append(contextIDs, ctx.ID)
 		if logger != nil {
 			logger.Info("Started warm process",
@@ -106,6 +118,19 @@ func (r warmProcessChecker) Check() error {
 			return fmt.Errorf("warm process context %s is missing", contextID)
 		}
 		if !ctx.IsRunning() {
+			return fmt.Errorf("warm process context %s is not running", contextID)
+		}
+	}
+	return nil
+}
+
+func (r warmProcessChecker) CheckHealth() error {
+	for _, contextID := range r.contextIDs {
+		ctx, err := r.manager.GetContext(contextID)
+		if err != nil {
+			return fmt.Errorf("warm process context %s is missing", contextID)
+		}
+		if !ctx.IsRunning() && !ctx.IsPaused() {
 			return fmt.Errorf("warm process context %s is not running", contextID)
 		}
 	}

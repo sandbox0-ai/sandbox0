@@ -216,6 +216,27 @@ manager_image: sandbox0/manager:test
 	}
 }
 
+func TestBuildPodSpecSkipsLivenessProbeWhenCtldEnabled(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+ctld_enabled: true
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	spec := BuildPodSpec(newTestTemplate())
+	if len(spec.Containers) == 0 {
+		t.Fatal("expected at least one container")
+	}
+
+	main := spec.Containers[0]
+	if main.StartupProbe == nil || main.ReadinessProbe == nil {
+		t.Fatalf("expected startup and readiness probes, got startup=%#v readiness=%#v", main.StartupProbe, main.ReadinessProbe)
+	}
+	if main.LivenessProbe != nil {
+		t.Fatalf("liveness probe = %#v, want nil when ctld is enabled", main.LivenessProbe)
+	}
+}
+
 func TestBuildPodSpecUsesRestartPolicyAlways(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test

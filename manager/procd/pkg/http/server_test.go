@@ -7,9 +7,12 @@ import (
 	"testing"
 )
 
-func TestProbeHandlersUseProbeChecker(t *testing.T) {
+func TestProbeHandlersUseProbeCheckers(t *testing.T) {
 	warmErr := errors.New("warm process is not running")
-	server := &Server{probeChecker: func() error { return warmErr }}
+	server := &Server{
+		healthChecker: func() error { return warmErr },
+		readyChecker:  func() error { return warmErr },
+	}
 
 	for _, tt := range []struct {
 		name    string
@@ -33,7 +36,10 @@ func TestProbeHandlersUseProbeChecker(t *testing.T) {
 }
 
 func TestProbeHandlersSucceedWhenProbeCheckerPasses(t *testing.T) {
-	server := &Server{probeChecker: func() error { return nil }}
+	server := &Server{
+		healthChecker: func() error { return nil },
+		readyChecker:  func() error { return nil },
+	}
 
 	for _, tt := range []struct {
 		name    string

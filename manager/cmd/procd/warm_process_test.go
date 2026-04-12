@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"testing"
 	"time"
 
@@ -8,6 +9,11 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
+
+func TestMain(m *testing.M) {
+	warmProcessExit = func(int) {}
+	os.Exit(m.Run())
+}
 
 func TestParseWarmProcesses(t *testing.T) {
 	t.Parallel()
@@ -83,8 +89,29 @@ func TestStartWarmProcessesKeepsContextsReady(t *testing.T) {
 	require.Equal(t, ctxpkg.CleanupPolicy{}, ctx.CleanupPolicy)
 
 	ready := warmProcessChecker{manager: manager, contextIDs: contextIDs}
+	require.NoError(t, ready.CheckHealth())
 	require.NoError(t, ready.Check())
 
 	require.NoError(t, manager.DeleteContext(contextIDs[0]))
 	require.ErrorContains(t, ready.Check(), "warm process context")
+}
+
+func TestWarmProcessHealthAllowsPausedContext(t *testing.T) {
+	t.Setenv(warmProcessesEnvVar, `[{"type":"cmd","command":["/bin/sh","-lc","sleep 5"]}]`)
+
+	manager := ctxpkg.NewManager()
+	defer manager.Cleanup()
+
+	contextIDs, err := startWarmProcesses(manager, zap.NewNop())
+	require.NoError(t, err)
+	require.Len(t, contextIDs, 1)
+
+	ctx, err := manager.GetContext(contextIDs[0])
+	require.NoError(t, err)
+	require.NoError(t, ctx.Pause())
+	defer func() { _ = ctx.Resume() }()
+
+	checker := warmProcessChecker{manager: manager, contextIDs: contextIDs}
+	require.NoError(t, checker.CheckHealth())
+	require.ErrorContains(t, checker.Check(), "is not running")
 }

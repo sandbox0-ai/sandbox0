@@ -232,9 +232,11 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Conta
 	})
 	container.StartupProbe = procdHTTPProbe("/healthz")
 	container.StartupProbe.FailureThreshold = 60
-	container.LivenessProbe = procdHTTPProbe("/healthz")
-	container.LivenessProbe.PeriodSeconds = 5
-	container.LivenessProbe.FailureThreshold = 3
+	if !configuredCtldEnabled() {
+		container.LivenessProbe = procdHTTPProbe("/healthz")
+		container.LivenessProbe.PeriodSeconds = 5
+		container.LivenessProbe.FailureThreshold = 3
+	}
 	container.ReadinessProbe = procdHTTPProbe("/readyz")
 	container.ReadinessProbe.PeriodSeconds = 1
 	container.ReadinessProbe.FailureThreshold = 3
@@ -278,6 +280,11 @@ func procdHTTPProbe(path string) *corev1.Probe {
 		TimeoutSeconds:   1,
 		FailureThreshold: 3,
 	}
+}
+
+func configuredCtldEnabled() bool {
+	cfg := config.LoadManagerConfig()
+	return cfg != nil && cfg.CtldEnabled
 }
 
 func buildResourceRequirements(quota ResourceQuota) corev1.ResourceRequirements {

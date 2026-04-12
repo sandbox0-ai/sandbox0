@@ -560,37 +560,46 @@ func requireMeteringAccess() gin.HandlerFunc {
 
 // Start starts the HTTP server
 func (s *Server) Start(ctx context.Context) error {
-	addr := fmt.Sprintf(":%d", s.cfg.HTTPPort)
-	s.logger.Info("Starting HTTP server",
-		zap.String("addr", addr),
-		zap.Int("port", s.cfg.HTTPPort),
-	)
-
-	server := &http.Server{
-		Addr:         addr,
-		Handler:      s.router,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 60 * time.Second,
-		IdleTimeout:  120 * time.Second,
+	servers := make([]*http.Server, 0, 2)
+	errChan := make(chan error, 2)
+	tlsEnabled := strings.TrimSpace(s.cfg.TLSCertPath) != "" && strings.TrimSpace(s.cfg.TLSKeyPath) != ""
+	tlsPort := s.cfg.TLSPort
+	if tlsEnabled {
+		if tlsPort == 0 {
+			tlsPort = s.cfg.HTTPPort + 1
+		}
+		if tlsPort == s.cfg.HTTPPort {
+			return fmt.Errorf("tls_port must differ from http_port")
+		}
 	}
 
-	// Start server in a goroutine
-	errChan := make(chan error, 1)
+	httpServer := s.newHTTPServer(s.cfg.HTTPPort)
+	servers = append(servers, httpServer)
+	s.logger.Info("Starting HTTP server",
+		zap.String("addr", httpServer.Addr),
+		zap.Int("port", s.cfg.HTTPPort),
+	)
 	go func() {
-		var err error
-		if strings.TrimSpace(s.cfg.TLSCertPath) != "" && strings.TrimSpace(s.cfg.TLSKeyPath) != "" {
-			s.logger.Info("Gateway TLS enabled",
-				zap.String("cert_path", s.cfg.TLSCertPath),
-				zap.String("key_path", s.cfg.TLSKeyPath),
-			)
-			err = server.ListenAndServeTLS(s.cfg.TLSCertPath, s.cfg.TLSKeyPath)
-		} else {
-			err = server.ListenAndServe()
-		}
-		if err != nil && err != http.ErrServerClosed {
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errChan <- err
 		}
 	}()
+
+	if tlsEnabled {
+		tlsServer := s.newHTTPServer(tlsPort)
+		servers = append(servers, tlsServer)
+		s.logger.Info("Starting HTTPS server",
+			zap.String("addr", tlsServer.Addr),
+			zap.Int("port", tlsPort),
+			zap.String("cert_path", s.cfg.TLSCertPath),
+			zap.String("key_path", s.cfg.TLSKeyPath),
+		)
+		go func() {
+			if err := tlsServer.ListenAndServeTLS(s.cfg.TLSCertPath, s.cfg.TLSKeyPath); err != nil && err != http.ErrServerClosed {
+				errChan <- err
+			}
+		}()
+	}
 
 	// Wait for context cancellation or error
 	select {
@@ -604,9 +613,25 @@ func (s *Server) Start(ctx context.Context) error {
 
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout.Duration)
 		defer cancel()
-		return server.Shutdown(shutdownCtx)
+		var shutdownErr error
+		for _, server := range servers {
+			if err := server.Shutdown(shutdownCtx); err != nil && shutdownErr == nil {
+				shutdownErr = err
+			}
+		}
+		return shutdownErr
 	case err := <-errChan:
 		return err
+	}
+}
+
+func (s *Server) newHTTPServer(port int) *http.Server {
+	return &http.Server{
+		Addr:         fmt.Sprintf(":%d", port),
+		Handler:      s.router,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 }
 

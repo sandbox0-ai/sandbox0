@@ -89,6 +89,10 @@ type GatewayConfig struct {
 	// TLSKeyPath points at the PEM private key file served by the gateway.
 	// +optional
 	TLSKeyPath string `yaml:"tls_key_path" json:"-"`
+	// TLSPort is the external HTTPS listener port. HTTPPort remains the
+	// internal plain HTTP listener when TLS is enabled.
+	// +optional
+	TLSPort int `yaml:"tls_port" json:"-"`
 
 	// SSH endpoint advertised to users for sandbox detail responses.
 	// +optional

@@ -43,6 +43,24 @@ func TestBuildConfigUsesRegionalGatewayURL(t *testing.T) {
 	}
 }
 
+func TestBuildConfigUsesPlainInternalRegionalGatewayURLWhenRegionalTLS(t *testing.T) {
+	scheme := newTestScheme(t)
+	infra := newTestSSHGatewayInfra()
+	infra.Spec.Services.RegionalGateway.Service = &infrav1alpha1.ServiceNetworkConfig{Port: 443}
+	infra.Spec.Services.RegionalGateway.Config.BaseURL = "https://api.example.com"
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(newExternalDatabasePasswordSecret(), newControlPlaneKeySecret(infra), newDataPlaneKeySecret(infra)).Build()
+	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
+	compiled := infraplan.Compile(infra)
+
+	cfg, err := reconciler.buildConfig(context.Background(), infra, compiled)
+	if err != nil {
+		t.Fatalf("buildConfig() error = %v", err)
+	}
+	if got, want := cfg.RegionalGatewayURL, "http://demo-regional-gateway-internal:18080"; got != want {
+		t.Fatalf("RegionalGatewayURL = %q, want %q", got, want)
+	}
+}
+
 func TestReconcileCreatesSSHGatewayResources(t *testing.T) {
 	scheme := newTestScheme(t)
 	infra := newTestSSHGatewayInfra()

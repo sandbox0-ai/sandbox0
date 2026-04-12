@@ -19,8 +19,10 @@ import (
 const (
 	defaultManagerHTTPPort         = 8080
 	defaultClusterGatewayHTTPPort  = 8443
+	defaultClusterGatewayTLSPort   = 9443
 	defaultClusterGatewayAuthMode  = "internal"
 	defaultRegionalGatewayAuthMode = "self_hosted"
+	defaultRegionalGatewayTLSPort  = 8443
 	defaultSSHGatewayPort          = 2222
 	defaultStorageProxyHTTPPort    = 8081
 	registryCredentialsPath        = "/etc/sandbox0/registry/.dockerconfigjson"
@@ -272,6 +274,10 @@ func compileClusterGatewayServiceReference(infra *infrav1alpha1.Sandbox0Infra) S
 
 	port := common.ResolveServicePort(clusterGatewayServiceConfig(infra), int32(clusterGatewayHTTPPort(infra)))
 	name := fmt.Sprintf("%s-cluster-gateway", infra.Name)
+	if clusterGatewayExternalTLSConfigured(infra) {
+		name = internalServiceName(name)
+		port = int32(clusterGatewayHTTPPort(infra))
+	}
 
 	return ServiceReference{
 		Name: name,
@@ -584,6 +590,9 @@ func compileRegionalGatewayRuntimeConfig(plan *RegionalGatewayPlan, infra *infra
 	}
 
 	cfg.DefaultClusterGatewayURL = plan.DefaultClusterGatewayURL
+	if cfg.HTTPPort == 0 {
+		cfg.HTTPPort = int(regionalGatewayHTTPPort(infra))
+	}
 	if compiled != nil {
 		cfg.SchedulerEnabled = compiled.Components.EnableScheduler
 		cfg.SchedulerURL = compiled.Services.Scheduler.URL
@@ -609,6 +618,9 @@ func compileRegionalGatewayRuntimeConfig(plan *RegionalGatewayPlan, infra *infra
 		if parsed, err := url.Parse(base); err == nil && strings.EqualFold(parsed.Scheme, "https") {
 			cfg.TLSCertPath = "/tls/tls.crt"
 			cfg.TLSKeyPath = "/tls/tls.key"
+			if cfg.TLSPort == 0 {
+				cfg.TLSPort = nonConflictingPort(defaultRegionalGatewayTLSPort, cfg.HTTPPort)
+			}
 		}
 	}
 }
@@ -687,6 +699,7 @@ func compileCleanupPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
 			namespacedRef("Deployment", infra.Namespace, fmt.Sprintf("%s-regional-gateway", infra.Name)),
 			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-regional-gateway", infra.Name)),
+			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-regional-gateway-internal", infra.Name)),
 			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-regional-gateway", infra.Name)),
 			namespacedRef("Ingress", infra.Namespace, fmt.Sprintf("%s-regional-gateway", infra.Name)),
 		)
@@ -711,6 +724,7 @@ func compileCleanupPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
 			namespacedRef("Deployment", infra.Namespace, fmt.Sprintf("%s-cluster-gateway", infra.Name)),
 			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-cluster-gateway", infra.Name)),
+			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-cluster-gateway-internal", infra.Name)),
 			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-cluster-gateway", infra.Name)),
 		)
 	}
@@ -1140,7 +1154,45 @@ func regionalGatewayInternalStatusURL(compiled *InfraPlan) string {
 	}
 	serviceName := fmt.Sprintf("%s-regional-gateway", infra.Name)
 	servicePort := common.ResolveServicePort(regionalGatewayServiceConfig(infra), regionalGatewayHTTPPort(infra))
+	if regionalGatewayExternalTLSConfigured(compiled) {
+		serviceName = internalServiceName(serviceName)
+		servicePort = regionalGatewayHTTPPort(infra)
+	}
 	return fmt.Sprintf("http://%s:%d", serviceName, servicePort)
+}
+
+func internalServiceName(serviceName string) string {
+	return serviceName + "-internal"
+}
+
+func regionalGatewayExternalTLSConfigured(compiled *InfraPlan) bool {
+	if compiled == nil || compiled.RegionalGateway.Config == nil {
+		return false
+	}
+	return gatewayRuntimeTLSConfigured(&compiled.RegionalGateway.Config.GatewayConfig)
+}
+
+func clusterGatewayExternalTLSConfigured(infra *infrav1alpha1.Sandbox0Infra) bool {
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.ClusterGateway == nil || infra.Spec.Services.ClusterGateway.Config == nil {
+		return false
+	}
+	return baseURLUsesHTTPS(infra.Spec.Services.ClusterGateway.Config.BaseURL)
+}
+
+func gatewayRuntimeTLSConfigured(cfg *apiconfig.GatewayConfig) bool {
+	return cfg != nil && strings.TrimSpace(cfg.TLSCertPath) != "" && strings.TrimSpace(cfg.TLSKeyPath) != ""
+}
+
+func baseURLUsesHTTPS(baseURL string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	return err == nil && strings.EqualFold(parsed.Scheme, "https")
+}
+
+func nonConflictingPort(preferred, reserved int) int {
+	if preferred != reserved {
+		return preferred
+	}
+	return preferred + 1
 }
 
 func regionalGatewayExternalStatusURL(compiled *InfraPlan) string {

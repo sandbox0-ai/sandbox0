@@ -481,6 +481,41 @@ func TestDesiredBootstrapRegionUsesRegionalGatewayServiceAddress(t *testing.T) {
 	}
 }
 
+func TestDesiredBootstrapRegionUsesInternalRegionalGatewayWhenRegionalTLS(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Services: &infrav1alpha1.ServicesConfig{
+				RegionalGateway: &infrav1alpha1.RegionalGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					ServiceExposureConfig: infrav1alpha1.ServiceExposureConfig{
+						Service: &infrav1alpha1.ServiceNetworkConfig{Port: 443},
+					},
+					Config: &infrav1alpha1.RegionalGatewayConfig{
+						HTTPPort: 18080,
+						GatewayConfig: infrav1alpha1.GatewayConfig{
+							BaseURL: "https://api.example.com",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	region := desiredBootstrapRegion(infra, "aws-us-east-1")
+	if region == nil {
+		t.Fatal("expected bootstrap region")
+	}
+	if region.RegionalGatewayURL != "http://demo-regional-gateway-internal:18080" {
+		t.Fatalf("unexpected regional gateway url: %q", region.RegionalGatewayURL)
+	}
+}
+
 func TestReconcileCreatesGlobalGatewayResources(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := appsv1.AddToScheme(scheme); err != nil {

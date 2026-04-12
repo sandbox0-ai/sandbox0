@@ -84,10 +84,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 	resources := compiledPlan.RegionalGateway.Resources
 	serviceConfig := compiledPlan.RegionalGateway.ServiceConfig
 	tlsEnabled := strings.TrimSpace(config.TLSCertPath) != "" && strings.TrimSpace(config.TLSKeyPath) != ""
-	containerPortName := "http"
-	if tlsEnabled {
-		containerPortName = "https"
-	}
 
 	volumeMounts := []corev1.VolumeMount{
 		{
@@ -197,16 +193,23 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 
 	// Create deployment
 	httpPort := int32(config.HTTPPort)
-	if err := r.Resources.ReconcileDeploymentWithScope(ctx, scope, deploymentName, labels, replicas, common.ServiceDefinition{
-		Name:       "regional-gateway",
-		Port:       httpPort,
-		TargetPort: httpPort,
-		Ports: []corev1.ContainerPort{
-			{
-				Name:          containerPortName,
-				ContainerPort: httpPort,
-			},
+	containerPorts := []corev1.ContainerPort{
+		{
+			Name:          "http",
+			ContainerPort: httpPort,
 		},
+	}
+	if tlsEnabled {
+		containerPorts = append(containerPorts, corev1.ContainerPort{
+			Name:          "https",
+			ContainerPort: int32(config.TLSPort),
+		})
+	}
+	if err := r.Resources.ReconcileDeploymentWithScope(ctx, scope, deploymentName, labels, replicas, common.ServiceDefinition{
+		Name:           "regional-gateway",
+		Port:           httpPort,
+		TargetPort:     httpPort,
+		Ports:          containerPorts,
 		Image:          fmt.Sprintf("%s:%s", imageRepo, imageTag),
 		EnvVars:        envVars,
 		VolumeMounts:   volumeMounts,
@@ -216,8 +219,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{
 					Path:   "/healthz",
-					Port:   intstr.FromString(containerPortName),
-					Scheme: probeSchemeForTLS(tlsEnabled),
+					Port:   intstr.FromString("http"),
+					Scheme: corev1.URISchemeHTTP,
 				},
 			},
 			InitialDelaySeconds: 10,
@@ -227,8 +230,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{
 					Path:   "/readyz",
-					Port:   intstr.FromString(containerPortName),
-					Scheme: probeSchemeForTLS(tlsEnabled),
+					Port:   intstr.FromString("http"),
+					Scheme: corev1.URISchemeHTTP,
 				},
 			},
 			InitialDelaySeconds: 5,
@@ -241,14 +244,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 
 	// Create service
 	serviceType := common.ResolveServiceType(serviceConfig)
-	servicePort := common.ResolveServicePort(serviceConfig, httpPort)
+	defaultServicePort := httpPort
+	if tlsEnabled {
+		defaultServicePort = 443
+	}
+	servicePort := common.ResolveServicePort(serviceConfig, defaultServicePort)
 	serviceAnnotations := common.ResolveServiceAnnotations(serviceConfig)
 	servicePortName := "http"
 	serviceTargetPort := intstr.FromInt(int(httpPort))
 	var serviceAppProtocol *string
 	if tlsEnabled {
 		servicePortName = "https"
-		serviceTargetPort = intstr.FromString(containerPortName)
+		serviceTargetPort = intstr.FromString("https")
 		appProtocol := "HTTPS"
 		serviceAppProtocol = &appProtocol
 	}
@@ -272,6 +279,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 		}
 	}); err != nil {
 		return err
+	}
+	if tlsEnabled {
+		if err := r.Resources.ReconcileServiceWithScope(ctx, scope, serviceName+"-internal", labels, corev1.ServiceTypeClusterIP, nil, httpPort, httpPort); err != nil {
+			return err
+		}
 	}
 
 	// Create ingress if enabled
@@ -394,13 +406,6 @@ func regionalGatewayTLSDNSNames(cfg *apiconfig.RegionalGatewayConfig) []string {
 		return nil
 	}
 	return []string{parsed.Hostname()}
-}
-
-func probeSchemeForTLS(enabled bool) corev1.URIScheme {
-	if enabled {
-		return corev1.URISchemeHTTPS
-	}
-	return corev1.URISchemeHTTP
 }
 
 func (r *Reconciler) applyRegistryConfig(infra *infrav1alpha1.Sandbox0Infra, cfg *apiconfig.RegionalGatewayConfig) ([]corev1.EnvVar, error) {

@@ -11,9 +11,7 @@ Sandbox0 has two categories of templates:
 | **Builtin** | System-provided templates managed by the platform operator | Public — visible to all teams |
 | **Custom** | Templates created and owned by your team | Private — visible to your team only (configurable) |
 
-Builtin templates use curated public images and are ready to use immediately. Custom templates let you bring your own image, and fine-tune resources.
-
-Custom templates can also define sidecar containers. This is useful for template-owned warm processes, for example a long-running Codex agent or helper daemon. Pool capacity only counts pods that are ready for claiming, so a sidecar readiness probe can gate whether a warm pod is claimable. See [Template Sidecars](/docs/template/sidecars) for the dedicated guide.
+Builtin templates use curated public images and are ready to use immediately. Custom templates let you bring your own image, fine-tune resources, and declare warm processes that start as soon as the template pod enters the warm pool. Procd remains PID 1 and owns those processes. See [Warm Processes](/docs/template/warm-processes) for the dedicated guide.
 
 ---
 
@@ -50,7 +48,7 @@ spec:
         maxIdle: 10
 ```
 
-**Example with a sidecar-hosted warm process:**
+**Example with a template-started warm process:**
 
 ```yaml
 spec:
@@ -59,23 +57,19 @@ spec:
         resources:
             cpu: "1"
             memory: 2Gi
-    sidecars:
-        - name: codex
-          image: ghcr.io/example/codex:latest
-          command: ["sh", "-lc", "/app/start-codex.sh"]
-          readinessProbe:
-            httpGet:
-              path: /healthz
-              port: 8081
-          startupProbe:
-            exec:
-              command: ["test", "-f", "/tmp/codex-started"]
+    warmProcesses:
+        - type: cmd
+          alias: codex
+          command: ["/bin/sh", "-lc", "/app/start-codex.sh"]
+          cwd: /workspace
+          envVars:
+              MODE: warm
     pool:
         minIdle: 2
         maxIdle: 10
 ```
 
-Use `readinessProbe` when a sidecar must finish warming up before the pod should count as ready warm capacity. Use `startupProbe` for slow-starting sidecars that need extra time before regular readiness checks should matter.
+Warm processes start during template pod creation, before the pod is claimable from the warm pool. They are intended for long-running helpers such as agents, language servers, and daemon-style workers; if a configured warm process exits, procd readiness fails and the pod is not hot-claimed.
 
 <Tabs
   tabs={[
@@ -92,25 +86,13 @@ Use `readinessProbe` when a sidecar must finish warming up before the pod should
                 Memory: apispec.NewOptString("4Gi"),
             },
         }),
-        Sidecars: []apispec.SidecarContainerSpec{
+        WarmProcesses: []apispec.WarmProcessSpec{
             {
-                Name:    "codex",
-                Image:   "ghcr.io/example/codex:latest",
-                Command: []string{"sh", "-lc", "/app/start-codex.sh"},
-                Resources: apispec.ResourceQuota{
-                    CPU:    apispec.NewOptString("500m"),
-                    Memory: apispec.NewOptString("2Gi"),
-                },
-                ReadinessProbe: apispec.NewOptProbe(apispec.Probe{
-                    HTTPGet:            apispec.NewOptHTTPGetAction(apispec.HTTPGetAction{Path: "/healthz", Port: 8081}),
-                    PeriodSeconds:      apispec.NewOptInt32(2),
-                    FailureThreshold:   apispec.NewOptInt32(1),
-                }),
-                StartupProbe: apispec.NewOptProbe(apispec.Probe{
-                    Exec:                apispec.NewOptExecAction(apispec.ExecAction{Command: []string{"test", "-f", "/tmp/codex-started"}}),
-                    PeriodSeconds:       apispec.NewOptInt32(2),
-                    FailureThreshold:    apispec.NewOptInt32(5),
-                }),
+                Type:    apispec.WarmProcessSpecTypeCmd,
+                Alias:   apispec.NewOptString("codex"),
+                Command: []string{"/bin/sh", "-lc", "/app/start-codex.sh"},
+                CWD:     apispec.NewOptString("/workspace"),
+                EnvVars: map[string]string{"MODE": "warm"},
             },
         },
         Pool: apispec.NewOptPoolStrategy(apispec.PoolStrategy{
@@ -127,10 +109,7 @@ fmt.Printf("Template created: %s\\n", tpl.TemplateID)`
     {
       label: "Python",
       language: "python",
-      code: `from sandbox0.apispec.models.http_get_action import HTTPGetAction
-from sandbox0.apispec.models.probe import Probe
-from sandbox0.apispec.models.sidecar_container_spec import SidecarContainerSpec
-from sandbox0.apispec.models.template_create_request import TemplateCreateRequest
+      code: `from sandbox0.apispec.models.template_create_request import TemplateCreateRequest
 from sandbox0.apispec.models.sandbox_template_spec import SandboxTemplateSpec
 
 tpl = client.create_template(TemplateCreateRequest(
@@ -140,20 +119,13 @@ tpl = client.create_template(TemplateCreateRequest(
             "image": "ubuntu:24.04",
             "resources": {"cpu": "1", "memory": "4Gi"},
         },
-        "sidecars": [
-            SidecarContainerSpec(
-                name="codex",
-                image="ghcr.io/example/codex:latest",
-                command=["sh", "-lc", "/app/start-codex.sh"],
-                resources={"cpu": "500m", "memory": "2Gi"},
-                readiness_probe=Probe(
-                    http_get=HTTPGetAction(path="/healthz", port=8081),
-                    initial_delay_seconds=1,
-                    period_seconds=2,
-                    failure_threshold=1,
-                ),
-            ).to_dict()
-        ],
+        "warmProcesses": [{
+            "type": "cmd",
+            "alias": "codex",
+            "command": ["/bin/sh", "-lc", "/app/start-codex.sh"],
+            "cwd": "/workspace",
+            "envVars": {"MODE": "warm"},
+        }],
         "pool": {"minIdle": 2, "maxIdle": 10},
     }),
 ))
@@ -169,23 +141,13 @@ print(f"Template created: {tpl.template_id}")`
             image: "ubuntu:24.04",
             resources: { cpu: "1", memory: "2Gi" },
         },
-        sidecars: [
-            {
-                name: "codex",
-                image: "ghcr.io/example/codex:latest",
-                command: ["sh", "-lc", "/app/start-codex.sh"],
-                readinessProbe: {
-                    httpGet: { path: "/healthz", port: 8081 },
-                    periodSeconds: 2,
-                    failureThreshold: 1,
-                },
-                startupProbe: {
-                    exec: { command: ["test", "-f", "/tmp/codex-started"] },
-                    periodSeconds: 2,
-                    failureThreshold: 5,
-                },
-            },
-        ],
+        warmProcesses: [{
+            type: "cmd",
+            alias: "codex",
+            command: ["/bin/sh", "-lc", "/app/start-codex.sh"],
+            cwd: "/workspace",
+            envVars: { MODE: "warm" },
+        }],
         pool: { minIdle: 2, maxIdle: 10 },
     },
 });
@@ -201,17 +163,13 @@ spec:
         resources:
             cpu: "1"
             memory: 2Gi
-    sidecars:
-        - name: codex
-          image: ghcr.io/example/codex:latest
-          command: ["sh", "-lc", "/app/start-codex.sh"]
-          readinessProbe:
-              httpGet:
-                  path: /healthz
-                  port: 8081
-          startupProbe:
-              exec:
-                  command: ["test", "-f", "/tmp/codex-started"]
+    warmProcesses:
+        - type: cmd
+          alias: codex
+          command: ["/bin/sh", "-lc", "/app/start-codex.sh"]
+          cwd: /workspace
+          envVars:
+              MODE: warm
     pool:
         minIdle: 2
         maxIdle: 10
@@ -519,11 +477,11 @@ console.log("Template deleted");`
   </LinkCard>
 
   <LinkCard
-    title="Sidecars"
-    href="/docs/template/sidecars"
+    title="Warm Processes"
+    href="/docs/template/warm-processes"
     cta="Learn More"
   >
-    Model warm helper processes with template-owned sidecars
+    Start helper processes before a warm pod is claimable
   </LinkCard>
 
   <LinkCard

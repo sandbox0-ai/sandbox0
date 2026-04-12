@@ -3,7 +3,7 @@
 Use standard SSH clients to open a shell inside a sandbox or copy files with `scp`. Sandbox0 terminates SSH at a region-scoped `ssh-gateway`, authenticates the user from uploaded SSH public keys, and bridges the session into the sandbox runtime.
 
 <Callout variant="info">
-SSH access currently targets the main sandbox container. Sidecars are not exposed as separate SSH targets.
+SSH access targets the sandbox procd runtime in the main sandbox container. Template warm processes are managed by procd and are not exposed as separate SSH targets.
 </Callout>
 
 ## Connection Model

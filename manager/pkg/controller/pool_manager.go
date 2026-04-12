@@ -210,15 +210,8 @@ func (pm *PoolManager) getOrCreateReplicaSet(ctx context.Context, template *v1al
 // buildPodTemplate builds the pod template for a template
 func (pm *PoolManager) buildPodTemplate(template *v1alpha1.SandboxTemplate, restart bool, specHash string) (corev1.PodTemplateSpec, error) {
 	spec := v1alpha1.BuildPodSpec(template, restart)
-	managedReadiness, err := v1alpha1.BuildManagedReadinessProbesAnnotation(template)
-	if err != nil {
-		return corev1.PodTemplateSpec{}, fmt.Errorf("build managed readiness probes annotation: %w", err)
-	}
 	annotations := map[string]string{
 		AnnotationTemplateSpecHash: specHash,
-	}
-	if managedReadiness != "" {
-		annotations[v1alpha1.ManagedReadinessProbesAnnotation] = managedReadiness
 	}
 	return corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
@@ -338,16 +331,10 @@ func (pm *PoolManager) deleteStaleIdlePodWithRetry(ctx context.Context, namespac
 
 func templateSpecHash(template *v1alpha1.SandboxTemplate) (string, error) {
 	podSpec := v1alpha1.BuildPodSpec(template, true)
-	managedReadiness, err := v1alpha1.BuildManagedReadinessProbesAnnotation(template)
-	if err != nil {
-		return "", err
-	}
 	payload := struct {
-		PodSpec          corev1.PodSpec `json:"podSpec"`
-		ManagedReadiness string         `json:"managedReadiness,omitempty"`
+		PodSpec corev1.PodSpec `json:"podSpec"`
 	}{
-		PodSpec:          podSpec,
-		ManagedReadiness: managedReadiness,
+		PodSpec: podSpec,
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {

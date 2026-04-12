@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -195,86 +194,6 @@ func TestValidateClaimMountsNormalizesMountPoint(t *testing.T) {
 	}
 	if got := req.Mounts[0].MountPoint; got != "/workspace/data" {
 		t.Fatalf("mount point = %q, want %q", got, "/workspace/data")
-	}
-}
-
-func TestMergeTemplateSharedVolumeMountsUsesClaimBindingForOptionalSharedVolume(t *testing.T) {
-	claimWriteback := true
-	claimPrefetch := int32(128)
-	got, err := mergeTemplateSharedVolumeMounts(
-		[]ClaimMount{{
-			SandboxVolumeID: "vol-claim",
-			MountPoint:      "/workspace/shared",
-			VolumeConfig: &MountVolumeConfig{
-				Writeback: &claimWriteback,
-				Prefetch:  &claimPrefetch,
-			},
-		}},
-		[]v1alpha1.SharedVolumeSpec{{
-			Name:      "workspace",
-			MountPath: "/workspace/shared",
-			CacheSize: "4Gi",
-		}},
-	)
-	if err != nil {
-		t.Fatalf("mergeTemplateSharedVolumeMounts() error = %v", err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("mount count = %d, want 1", len(got))
-	}
-	if got[0].SandboxVolumeID != "vol-claim" {
-		t.Fatalf("sandbox volume id = %q, want %q", got[0].SandboxVolumeID, "vol-claim")
-	}
-	if got[0].MountPoint != "/workspace/shared" {
-		t.Fatalf("mount point = %q, want %q", got[0].MountPoint, "/workspace/shared")
-	}
-	if got[0].VolumeConfig == nil {
-		t.Fatal("expected merged volume config")
-	}
-	if got[0].VolumeConfig.CacheSize != "4Gi" {
-		t.Fatalf("cache size = %q, want %q", got[0].VolumeConfig.CacheSize, "4Gi")
-	}
-	if got[0].VolumeConfig.Prefetch == nil || *got[0].VolumeConfig.Prefetch != claimPrefetch {
-		t.Fatalf("prefetch = %v, want %d", got[0].VolumeConfig.Prefetch, claimPrefetch)
-	}
-	if got[0].VolumeConfig.Writeback == nil || !*got[0].VolumeConfig.Writeback {
-		t.Fatalf("writeback = %v, want true", got[0].VolumeConfig.Writeback)
-	}
-}
-
-func TestMergeTemplateSharedVolumeMountsRejectsMissingClaimBindingForOptionalSharedVolume(t *testing.T) {
-	_, err := mergeTemplateSharedVolumeMounts(nil, []v1alpha1.SharedVolumeSpec{{
-		Name:      "workspace",
-		MountPath: "/workspace/shared",
-	}})
-	if err == nil {
-		t.Fatal("expected missing claim binding error")
-	}
-	if !errors.Is(err, ErrInvalidClaimRequest) {
-		t.Fatalf("expected ErrInvalidClaimRequest, got %v", err)
-	}
-	if !strings.Contains(err.Error(), `shared volume "workspace" requires a claim mount for "/workspace/shared"`) {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestMergeTemplateSharedVolumeMountsRejectsClaimConflictForPinnedSharedVolume(t *testing.T) {
-	_, err := mergeTemplateSharedVolumeMounts(
-		[]ClaimMount{{SandboxVolumeID: "vol-claim", MountPoint: "/workspace/shared"}},
-		[]v1alpha1.SharedVolumeSpec{{
-			Name:            "workspace",
-			SandboxVolumeID: "vol-template",
-			MountPath:       "/workspace/shared",
-		}},
-	)
-	if err == nil {
-		t.Fatal("expected claim conflict error")
-	}
-	if !errors.Is(err, ErrInvalidClaimRequest) {
-		t.Fatalf("expected ErrInvalidClaimRequest, got %v", err)
-	}
-	if !strings.Contains(err.Error(), `claim mount "/workspace/shared" conflicts with template shared volume "workspace"`) {
-		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

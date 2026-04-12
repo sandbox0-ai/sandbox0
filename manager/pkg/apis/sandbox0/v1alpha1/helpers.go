@@ -14,16 +14,15 @@ import (
 )
 
 const (
-	procdBinVolumeName = "procd-bin"
-	procdConfigVolume  = "procd-config"
-	netdMITMCAVolume   = "netd-mitm-ca"
-	netdMITMCACertKey  = "ca.crt"
-	netdMITMCAEnvVar   = "SANDBOX0_NETD_MITM_CA_FILE"
-	netdMITMCADir      = "/var/run/sandbox0/netd"
-	netdMITMCACertPath = netdMITMCADir + "/mitm-ca.crt"
+	procdBinVolumeName  = "procd-bin"
+	procdConfigVolume   = "procd-config"
+	WarmProcessesEnvVar = "SANDBOX0_WARM_PROCESSES"
+	netdMITMCAVolume    = "netd-mitm-ca"
+	netdMITMCACertKey   = "ca.crt"
+	netdMITMCAEnvVar    = "SANDBOX0_NETD_MITM_CA_FILE"
+	netdMITMCADir       = "/var/run/sandbox0/netd"
+	netdMITMCACertPath  = netdMITMCADir + "/mitm-ca.crt"
 )
-
-const ManagedReadinessProbesAnnotation = "sandbox0.ai/managed-readiness-probes"
 
 // buildPodSpec builds a pod spec from a template
 func BuildPodSpec(template *SandboxTemplate, restart bool) corev1.PodSpec {
@@ -38,7 +37,6 @@ func BuildPodSpec(template *SandboxTemplate, restart bool) corev1.PodSpec {
 		spec.RestartPolicy = corev1.RestartPolicyAlways
 	}
 
-	applySharedTemplateVolumes(&spec, template)
 	applyProcdSecretVolume(&spec, template)
 	applyNetdMITMCATrustMaterial(&spec)
 	applyProcdInit(&spec)
@@ -190,14 +188,9 @@ func applyFuseResource(spec *corev1.PodSpec) {
 
 // buildContainers builds containers from template
 func buildContainers(template *SandboxTemplate) []corev1.Container {
-	containers := []corev1.Container{
+	return []corev1.Container{
 		buildContainer(&template.Spec.MainContainer, template),
 	}
-
-	for _, sidecar := range template.Spec.Sidecars {
-		containers = append(containers, buildSidecarContainer(&sidecar, template))
-	}
-	return containers
 }
 
 // buildContainer builds a single container
@@ -230,6 +223,10 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Conta
 		envVars = append(envVars, corev1.EnvVar{Name: ev.Name, Value: ev.Value})
 	}
 	envVars = appendProcdConfigEnvVars(envVars)
+	if len(template.Spec.WarmProcesses) > 0 {
+		data, _ := json.Marshal(template.Spec.WarmProcesses)
+		envVars = append(envVars, corev1.EnvVar{Name: WarmProcessesEnvVar, Value: string(data)})
+	}
 	container.Env = envVars
 	container.Command = []string{"/procd/bin/procd"}
 	container.Ports = append(container.Ports, corev1.ContainerPort{
@@ -274,76 +271,8 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Conta
 		container.SecurityContext.Capabilities = &corev1.Capabilities{}
 	}
 	container.SecurityContext.Capabilities.Add = append(container.SecurityContext.Capabilities.Add, corev1.Capability("SYS_ADMIN"))
-	if template.Spec.UsesSharedVolumes() {
-		privileged := true
-		container.SecurityContext.Privileged = &privileged
-	}
 
 	return container
-}
-
-func buildSidecarContainer(spec *SidecarContainerSpec, template *SandboxTemplate) corev1.Container {
-	container := corev1.Container{
-		Name:            spec.Name,
-		Image:           spec.Image,
-		ImagePullPolicy: corev1.PullIfNotPresent,
-		Command:         append([]string(nil), spec.Command...),
-		Args:            append([]string(nil), spec.Args...),
-		Resources:       buildResourceRequirements(spec.Resources),
-	}
-
-	var envVars []corev1.EnvVar
-	for k, v := range template.Spec.EnvVars {
-		envVars = append(envVars, corev1.EnvVar{Name: k, Value: v})
-	}
-	sort.Slice(envVars, func(i, j int) bool {
-		if envVars[i].Name != envVars[j].Name {
-			return envVars[i].Name < envVars[j].Name
-		}
-		return envVars[i].Value < envVars[j].Value
-	})
-	for _, ev := range spec.Env {
-		envVars = append(envVars, corev1.EnvVar{Name: ev.Name, Value: ev.Value})
-	}
-	container.Env = envVars
-	if spec.StartupProbe != nil {
-		container.StartupProbe = spec.StartupProbe.DeepCopy()
-	}
-
-	return container
-}
-
-func BuildManagedReadinessProbes(template *SandboxTemplate) []ManagedSidecarReadinessProbe {
-	if template == nil || len(template.Spec.Sidecars) == 0 {
-		return nil
-	}
-
-	probes := make([]ManagedSidecarReadinessProbe, 0, len(template.Spec.Sidecars))
-	for _, sidecar := range template.Spec.Sidecars {
-		if sidecar.ReadinessProbe == nil {
-			continue
-		}
-		probes = append(probes, ManagedSidecarReadinessProbe{
-			Name:  sidecar.Name,
-			Probe: sidecar.ReadinessProbe.DeepCopy(),
-		})
-	}
-	if len(probes) == 0 {
-		return nil
-	}
-	return probes
-}
-
-func BuildManagedReadinessProbesAnnotation(template *SandboxTemplate) (string, error) {
-	probes := BuildManagedReadinessProbes(template)
-	if len(probes) == 0 {
-		return "", nil
-	}
-	data, err := json.Marshal(probes)
-	if err != nil {
-		return "", err
-	}
-	return string(data), nil
 }
 
 func buildResourceRequirements(quota ResourceQuota) corev1.ResourceRequirements {
@@ -364,60 +293,6 @@ func buildResourceRequirements(quota ResourceQuota) corev1.ResourceRequirements 
 		limits = nil
 	}
 	return corev1.ResourceRequirements{Requests: requests, Limits: limits}
-}
-
-func applySharedTemplateVolumes(spec *corev1.PodSpec, template *SandboxTemplate) {
-	if spec == nil || template == nil || len(template.Spec.SharedVolumes) == 0 {
-		return
-	}
-
-	bidirectional := corev1.MountPropagationBidirectional
-	hostToContainer := corev1.MountPropagationHostToContainer
-	volumeNames := make(map[string]string, len(template.Spec.SharedVolumes))
-	for i, volume := range template.Spec.SharedVolumes {
-		volumeName := sharedTemplateVolumeName(i)
-		volumeNames[volume.Name] = volumeName
-		spec.Volumes = append(spec.Volumes, corev1.Volume{
-			Name: volumeName,
-			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{},
-			},
-		})
-		ensureNamedContainerVolumeMount(spec, "procd", corev1.VolumeMount{
-			Name:             volumeName,
-			MountPath:        volume.MountPath,
-			MountPropagation: &bidirectional,
-		})
-	}
-
-	for _, sidecar := range template.Spec.Sidecars {
-		for _, mount := range sidecar.Mounts {
-			volumeName := volumeNames[mount.Name]
-			ensureNamedContainerVolumeMount(spec, sidecar.Name, corev1.VolumeMount{
-				Name:             volumeName,
-				MountPath:        mount.MountPath,
-				ReadOnly:         mount.ReadOnly,
-				MountPropagation: &hostToContainer,
-			})
-		}
-	}
-}
-
-func ensureNamedContainerVolumeMount(spec *corev1.PodSpec, containerName string, mount corev1.VolumeMount) {
-	if spec == nil {
-		return
-	}
-	for i := range spec.Containers {
-		if spec.Containers[i].Name != containerName {
-			continue
-		}
-		ensureContainerVolumeMount(&spec.Containers[i], mount)
-		return
-	}
-}
-
-func sharedTemplateVolumeName(index int) string {
-	return "shared-volume-" + strconv.Itoa(index)
 }
 
 func appendProcdConfigEnvVars(envVars []corev1.EnvVar) []corev1.EnvVar {

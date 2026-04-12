@@ -184,8 +184,6 @@ func main() {
 		managerMetrics,
 		cfg.Autoscaler,
 	)
-	readinessEvaluator := controller.NewManagedReadinessEvaluator(k8sClient, k8sConfig, logger)
-	operator.SetSandboxReadinessEvaluator(readinessEvaluator)
 	if pool != nil {
 		operator.SetTemplateStatsPublisher(controller.NewPGTemplateStatsPublisher(pool, cfg.DefaultClusterId, clk, logger))
 	}
@@ -298,7 +296,6 @@ func main() {
 		logger,
 		managerMetrics,
 	)
-	sandboxService.SetSandboxReadinessEvaluator(readinessEvaluator)
 	sandboxService.SetCredentialStore(credentialStore)
 	staticAuth := make([]egressauthruntime.StaticAuthConfig, 0, len(cfg.EgressAuthStaticAuth))
 	for _, entry := range cfg.EgressAuthStaticAuth {

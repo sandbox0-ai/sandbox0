@@ -44,12 +44,6 @@ func validateTemplateImagesForClaims(spec v1alpha1.SandboxTemplateSpec, claims *
 	if err := validateImageOwnershipForTeam(spec.MainContainer.Image, "spec.mainContainer.image", claims.TeamID, privateRegistryHosts); err != nil {
 		return err
 	}
-	for i, sidecar := range spec.Sidecars {
-		field := fmt.Sprintf("spec.sidecars[%d].image", i)
-		if err := validateImageOwnershipForTeam(sidecar.Image, field, claims.TeamID, privateRegistryHosts); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -70,13 +64,7 @@ func validateTemplateSpec(spec v1alpha1.SandboxTemplateSpec) error {
 	if spec.MainContainer.Resources.Memory.Sign() <= 0 {
 		return fmt.Errorf("spec.mainContainer.resources.memory must be > 0")
 	}
-	if err := validateSidecars(spec.Sidecars); err != nil {
-		return err
-	}
-	if err := validateSharedVolumes(spec.SharedVolumes); err != nil {
-		return err
-	}
-	if err := validateContainerMounts(spec.Sidecars, spec.SharedVolumes); err != nil {
+	if err := validateWarmProcesses(spec.WarmProcesses); err != nil {
 		return err
 	}
 
@@ -113,107 +101,32 @@ func validateTemplateSpec(spec v1alpha1.SandboxTemplateSpec) error {
 	return nil
 }
 
-func validateSidecars(sidecars []v1alpha1.SidecarContainerSpec) error {
-	seenNames := make(map[string]struct{}, len(sidecars))
-	for i, sidecar := range sidecars {
-		field := fmt.Sprintf("spec.sidecars[%d]", i)
-		if strings.TrimSpace(sidecar.Name) == "" {
-			return fmt.Errorf("%s.name is required", field)
-		}
-		if sidecar.Name == "procd" {
-			return fmt.Errorf("%s.name must not be \"procd\"", field)
-		}
-		if _, exists := seenNames[sidecar.Name]; exists {
-			return fmt.Errorf("duplicate sidecar name %q", sidecar.Name)
-		}
-		seenNames[sidecar.Name] = struct{}{}
-		if strings.TrimSpace(sidecar.Image) == "" {
-			return fmt.Errorf("%s.image is required", field)
-		}
-		if sidecar.Resources.CPU.Sign() <= 0 {
-			return fmt.Errorf("%s.resources.cpu must be > 0", field)
-		}
-		if sidecar.Resources.Memory.Sign() <= 0 {
-			return fmt.Errorf("%s.resources.memory must be > 0", field)
-		}
-		if err := validateProbe(sidecar.ReadinessProbe, field+".readinessProbe"); err != nil {
-			return err
-		}
-		if err := validateProbe(sidecar.StartupProbe, field+".startupProbe"); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func validateSharedVolumes(volumes []v1alpha1.SharedVolumeSpec) error {
-	seenNames := make(map[string]struct{}, len(volumes))
-	seenVolumeIDs := make(map[string]struct{}, len(volumes))
-	seenMountPaths := make(map[string]struct{}, len(volumes))
-	for i, volume := range volumes {
-		field := fmt.Sprintf("spec.sharedVolumes[%d]", i)
-		if strings.TrimSpace(volume.Name) == "" {
-			return fmt.Errorf("%s.name is required", field)
-		}
-		if _, exists := seenNames[volume.Name]; exists {
-			return fmt.Errorf("duplicate shared volume name %q", volume.Name)
-		}
-		seenNames[volume.Name] = struct{}{}
-		if volumeID := strings.TrimSpace(volume.SandboxVolumeID); volumeID != "" {
-			if _, exists := seenVolumeIDs[volumeID]; exists {
-				return fmt.Errorf("duplicate shared volume sandboxVolumeId %q", volumeID)
+func validateWarmProcesses(processes []v1alpha1.WarmProcessSpec) error {
+	for i, proc := range processes {
+		field := fmt.Sprintf("spec.warmProcesses[%d]", i)
+		switch proc.Type {
+		case v1alpha1.WarmProcessTypeREPL:
+			if len(proc.Command) > 0 {
+				return fmt.Errorf("%s.command is only valid for cmd warm processes", field)
 			}
-			seenVolumeIDs[volumeID] = struct{}{}
-		}
-
-		cleanMountPath, err := validateAbsoluteMountPath(volume.MountPath, field+".mountPath")
-		if err != nil {
-			return err
-		}
-		if err := validateReservedMountPath(cleanMountPath, field+".mountPath"); err != nil {
-			return err
-		}
-		if _, exists := seenMountPaths[cleanMountPath]; exists {
-			return fmt.Errorf("duplicate shared volume mountPath %q", cleanMountPath)
-		}
-		seenMountPaths[cleanMountPath] = struct{}{}
-	}
-	return nil
-}
-
-func validateContainerMounts(sidecars []v1alpha1.SidecarContainerSpec, volumes []v1alpha1.SharedVolumeSpec) error {
-	knownVolumes := make(map[string]struct{}, len(volumes))
-	for _, volume := range volumes {
-		knownVolumes[volume.Name] = struct{}{}
-	}
-
-	for i, sidecar := range sidecars {
-		seenMountNames := make(map[string]struct{}, len(sidecar.Mounts))
-		seenMountPaths := make(map[string]struct{}, len(sidecar.Mounts))
-		for j, mount := range sidecar.Mounts {
-			field := fmt.Sprintf("spec.sidecars[%d].mounts[%d]", i, j)
-			if strings.TrimSpace(mount.Name) == "" {
-				return fmt.Errorf("%s.name is required", field)
+		case v1alpha1.WarmProcessTypeCMD:
+			if len(proc.Command) == 0 {
+				return fmt.Errorf("%s.command is required for cmd warm processes", field)
 			}
-			if _, ok := knownVolumes[mount.Name]; !ok {
-				return fmt.Errorf("%s.name references unknown shared volume %q", field, mount.Name)
+			if strings.TrimSpace(proc.Command[0]) == "" {
+				return fmt.Errorf("%s.command[0] is required", field)
 			}
-			if _, exists := seenMountNames[mount.Name]; exists {
-				return fmt.Errorf("duplicate sidecar mount name %q in spec.sidecars[%d]", mount.Name, i)
-			}
-			seenMountNames[mount.Name] = struct{}{}
-
-			cleanMountPath, err := validateAbsoluteMountPath(mount.MountPath, field+".mountPath")
+		default:
+			return fmt.Errorf("%s.type must be one of: repl, cmd", field)
+		}
+		if strings.TrimSpace(proc.CWD) != "" {
+			cleanCWD, err := validateAbsoluteMountPath(proc.CWD, field+".cwd")
 			if err != nil {
 				return err
 			}
-			if err := validateReservedMountPath(cleanMountPath, field+".mountPath"); err != nil {
+			if err := validateReservedMountPath(cleanCWD, field+".cwd"); err != nil {
 				return err
 			}
-			if _, exists := seenMountPaths[cleanMountPath]; exists {
-				return fmt.Errorf("duplicate sidecar mountPath %q in spec.sidecars[%d]", cleanMountPath, i)
-			}
-			seenMountPaths[cleanMountPath] = struct{}{}
 		}
 	}
 	return nil
@@ -245,10 +158,6 @@ func validateTeamTemplateResourceRatio(spec v1alpha1.SandboxTemplateSpec) error 
 	memoryPerCPU := configuredTeamTemplateMemoryPerCPU()
 	totalCPU := spec.MainContainer.Resources.CPU.DeepCopy()
 	totalMemory := spec.MainContainer.Resources.Memory.DeepCopy()
-	for _, sidecar := range spec.Sidecars {
-		totalCPU.Add(sidecar.Resources.CPU)
-		totalMemory.Add(sidecar.Resources.Memory)
-	}
 	requiredMemory := memoryForCPU(totalCPU, memoryPerCPU)
 	if totalMemory.Cmp(requiredMemory) != 0 {
 		return fmt.Errorf(

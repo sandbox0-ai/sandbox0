@@ -11,9 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -154,115 +152,6 @@ func TestCreateTemplate_RejectsImagePullPolicyForRegularTeam(t *testing.T) {
 	}
 }
 
-func TestCreateTemplate_AllowsSharedVolumesForRegularTeam(t *testing.T) {
-	t.Parallel()
-
-	store := &testTemplateStore{}
-	h := &Handler{Store: store, Logger: zap.NewNop()}
-
-	router := gin.New()
-	router.Use(withClaims(&internalauth.Claims{
-		TeamID: "team-1",
-		UserID: "user-1",
-	}))
-	router.POST("/api/v1/templates", h.CreateTemplate)
-
-	body := []byte(`{
-		"template_id":"demo",
-		"spec":{
-			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
-			"sharedVolumes":[{"name":"workspace","sandboxVolumeId":"vol-1","mountPath":"/workspace"}],
-			"pool":{"minIdle":0,"maxIdle":1}
-		}
-	}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("expected status %d, got %d", http.StatusCreated, rec.Code)
-	}
-	if !store.createCalled {
-		t.Fatalf("expected create to be called")
-	}
-}
-
-func TestCreateTemplate_RejectsSharedVolumeMountedUnderConfig(t *testing.T) {
-	t.Parallel()
-
-	store := &testTemplateStore{}
-	h := &Handler{Store: store, Logger: zap.NewNop()}
-
-	router := gin.New()
-	router.Use(withClaims(&internalauth.Claims{
-		TeamID: "team-1",
-		UserID: "user-1",
-	}))
-	router.POST("/api/v1/templates", h.CreateTemplate)
-
-	body := []byte(`{
-		"template_id":"demo",
-		"spec":{
-			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
-			"sharedVolumes":[{"name":"workspace","sandboxVolumeId":"vol-1","mountPath":"/config/shared"}],
-			"pool":{"minIdle":0,"maxIdle":1}
-		}
-	}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, rec.Code)
-	}
-	if store.createCalled {
-		t.Fatalf("expected create not called for invalid request")
-	}
-	if !strings.Contains(rec.Body.String(), "reserved path") || !strings.Contains(rec.Body.String(), "/config") {
-		t.Fatalf("expected reserved /config path error, got %s", rec.Body.String())
-	}
-}
-
-func TestCreateTemplate_RejectsSidecarMountUnderConfig(t *testing.T) {
-	t.Parallel()
-
-	store := &testTemplateStore{}
-	h := &Handler{Store: store, Logger: zap.NewNop()}
-
-	router := gin.New()
-	router.Use(withClaims(&internalauth.Claims{
-		TeamID: "team-1",
-		UserID: "user-1",
-	}))
-	router.POST("/api/v1/templates", h.CreateTemplate)
-
-	body := []byte(`{
-		"template_id":"demo",
-		"spec":{
-			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
-			"sharedVolumes":[{"name":"workspace","sandboxVolumeId":"vol-1","mountPath":"/workspace/shared"}],
-			"sidecars":[{"name":"helper","image":"busybox","resources":{"cpu":"500m","memory":"2Gi"},"mounts":[{"name":"workspace","mountPath":"/config/shared"}]}],
-			"pool":{"minIdle":0,"maxIdle":1}
-		}
-	}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, rec.Code)
-	}
-	if store.createCalled {
-		t.Fatalf("expected create not called for invalid request")
-	}
-	if !strings.Contains(rec.Body.String(), "reserved path") || !strings.Contains(rec.Body.String(), "/config") {
-		t.Fatalf("expected reserved /config path error, got %s", rec.Body.String())
-	}
-}
-
 func TestCreateTemplate_RejectsPrivateImageFromDifferentTeam(t *testing.T) {
 	t.Parallel()
 
@@ -339,47 +228,6 @@ func TestCreateTemplate_AllowsTeamScopedPrivateImage(t *testing.T) {
 	}
 	if !store.createCalled {
 		t.Fatalf("expected create to be called")
-	}
-}
-
-func TestUpdateTemplate_RejectsPrivateSidecarImageFromDifferentTeam(t *testing.T) {
-	t.Parallel()
-
-	store := &testTemplateStore{
-		getTemplateFn: func(context.Context, string, string, string) (*template.Template, error) {
-			return &template.Template{TemplateID: "demo", Scope: naming.ScopeTeam, TeamID: "team-1"}, nil
-		},
-	}
-	h := &Handler{
-		Store:                store,
-		PrivateRegistryHosts: []string{"registry.internal.svc:5000"},
-		Logger:               zap.NewNop(),
-	}
-
-	router := gin.New()
-	router.Use(withClaims(&internalauth.Claims{
-		TeamID: "team-1",
-		UserID: "user-1",
-	}))
-	router.PUT("/api/v1/templates/:id", h.UpdateTemplate)
-
-	body := []byte(`{
-		"spec":{
-			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
-			"pool":{"minIdle":0,"maxIdle":1},
-			"sidecars":[{"name":"helper","image":"registry.internal.svc:5000/t-other/helper:v1","resources":{"cpu":"500m","memory":"2Gi"}}]
-		}
-	}`)
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/templates/demo", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected status %d, got %d", http.StatusForbidden, rec.Code)
-	}
-	if store.updateCalled {
-		t.Fatalf("expected update not called for forbidden request")
 	}
 }
 
@@ -550,7 +398,7 @@ func TestUpdateTemplate_RejectsInvalidPoolRange(t *testing.T) {
 	}
 }
 
-func TestUpdateTemplate_AllowsSidecarsForRegularTeam(t *testing.T) {
+func TestUpdateTemplate_AllowsWarmProcessesForRegularTeam(t *testing.T) {
 	t.Parallel()
 
 	store := &testTemplateStore{
@@ -585,7 +433,7 @@ func TestUpdateTemplate_AllowsSidecarsForRegularTeam(t *testing.T) {
 		"spec":{
 			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
 			"pool":{"minIdle":0,"maxIdle":1},
-			"sidecars":[{"name":"helper","image":"busybox","command":["sleep","3600"],"resources":{"cpu":"500m","memory":"2Gi"}}]
+			"warmProcesses":[{"type":"cmd","command":["/bin/sh","-lc","sleep 3600"],"cwd":"/workspace","envVars":{"MODE":"warm"}}]
 		}
 	}`)
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/templates/demo", bytes.NewReader(body))
@@ -597,11 +445,11 @@ func TestUpdateTemplate_AllowsSidecarsForRegularTeam(t *testing.T) {
 		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
 	}
 	if !store.updateCalled {
-		t.Fatalf("expected update called for sidecar request")
+		t.Fatalf("expected update called for warm process request")
 	}
 }
 
-func TestCreateTemplate_AllowsSidecarsWithStartupProbeForRegularTeam(t *testing.T) {
+func TestCreateTemplate_AllowsWarmProcessesForRegularTeam(t *testing.T) {
 	t.Parallel()
 
 	store := &testTemplateStore{}
@@ -619,13 +467,7 @@ func TestCreateTemplate_AllowsSidecarsWithStartupProbeForRegularTeam(t *testing.
 		"spec":{
 			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
 			"pool":{"minIdle":0,"maxIdle":1},
-			"sidecars":[{
-				"name":"codex",
-				"image":"busybox",
-				"command":["sh","-lc","sleep 3600"],
-				"resources":{"cpu":"500m","memory":"2Gi"},
-				"startupProbe":{"exec":{"command":["test","-f","/tmp/started"]}}
-			}]
+			"warmProcesses":[{"type":"repl","alias":"bash","cwd":"/workspace"}]
 		}
 	}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates", bytes.NewReader(body))
@@ -637,88 +479,7 @@ func TestCreateTemplate_AllowsSidecarsWithStartupProbeForRegularTeam(t *testing.
 		t.Fatalf("expected status %d, got %d", http.StatusCreated, rec.Code)
 	}
 	if !store.createCalled {
-		t.Fatalf("expected create called for sidecar request")
-	}
-}
-
-func TestCreateTemplate_AllowsSidecarReadinessProbe(t *testing.T) {
-	t.Parallel()
-
-	store := &testTemplateStore{}
-	h := &Handler{Store: store, Logger: zap.NewNop()}
-
-	router := gin.New()
-	router.Use(withClaims(&internalauth.Claims{
-		TeamID: "team-1",
-		UserID: "user-1",
-	}))
-	router.POST("/api/v1/templates", h.CreateTemplate)
-
-	body := []byte(`{
-		"template_id":"demo",
-		"spec":{
-			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
-			"pool":{"minIdle":0,"maxIdle":1},
-			"sidecars":[{
-				"name":"codex",
-				"image":"busybox",
-				"resources":{"cpu":"500m","memory":"2Gi"},
-				"readinessProbe":{"exec":{"command":["test","-f","/tmp/ready"]}}
-			}]
-		}
-	}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("expected status %d, got %d", http.StatusCreated, rec.Code)
-	}
-	if !store.createCalled {
-		t.Fatalf("expected create called for readiness probe request")
-	}
-}
-
-func TestCreateTemplate_RejectsSidecarLivenessProbe(t *testing.T) {
-	t.Parallel()
-
-	store := &testTemplateStore{}
-	h := &Handler{Store: store, Logger: zap.NewNop()}
-
-	router := gin.New()
-	router.Use(withClaims(&internalauth.Claims{
-		TeamID: "team-1",
-		UserID: "user-1",
-	}))
-	router.POST("/api/v1/templates", h.CreateTemplate)
-
-	body := []byte(`{
-		"template_id":"demo",
-		"spec":{
-			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
-			"pool":{"minIdle":0,"maxIdle":1},
-			"sidecars":[{
-				"name":"codex",
-				"image":"busybox",
-				"resources":{"cpu":"500m","memory":"2Gi"},
-				"livenessProbe":{"exec":{"command":["test","-f","/tmp/healthy"]}}
-			}]
-		}
-	}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, rec.Code)
-	}
-	if store.createCalled {
-		t.Fatalf("expected create not called for invalid request")
-	}
-	if got := rec.Body.String(); !strings.Contains(got, "spec.sidecars[0].livenessProbe is not supported") {
-		t.Fatalf("expected liveness rejection, got %q", got)
+		t.Fatalf("expected create called for warm process request")
 	}
 }
 
@@ -790,11 +551,6 @@ func TestValidateTemplateSpecForClaims_WildcardPermissionRejected(t *testing.T) 
 				RunAsUser: ptrInt64(1000),
 			},
 		},
-		Sidecars: []v1alpha1.SidecarContainerSpec{{
-			Name:      "helper",
-			Image:     "busybox",
-			Resources: v1alpha1.ResourceQuota{CPU: resource.MustParse("500m"), Memory: resource.MustParse("2Gi")},
-		}},
 		Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
 	}
 
@@ -870,46 +626,25 @@ func TestValidateTemplateSpec_StrictValidation(t *testing.T) {
 			wantErr: "spec.network.egress.allowedPorts[0].endPort must be between port and 65535",
 		},
 		{
-			name: "reject sidecar without name",
+			name: "reject cmd warm process without command",
 			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
-				s.Sidecars = []v1alpha1.SidecarContainerSpec{
-					{Image: "busybox"},
-				}
+				s.WarmProcesses = []v1alpha1.WarmProcessSpec{{Type: v1alpha1.WarmProcessTypeCMD}}
 			},
-			wantErr: "spec.sidecars[0].name is required",
+			wantErr: "spec.warmProcesses[0].command is required for cmd warm processes",
 		},
 		{
-			name: "reject sidecar startup probe without handler",
+			name: "reject repl warm process with command",
 			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
-				s.Sidecars = []v1alpha1.SidecarContainerSpec{
-					{
-						Name:         "helper",
-						Image:        "busybox",
-						Resources:    v1alpha1.ResourceQuota{CPU: resource.MustParse("500m"), Memory: resource.MustParse("2Gi")},
-						StartupProbe: &corev1.Probe{},
-					},
-				}
+				s.WarmProcesses = []v1alpha1.WarmProcessSpec{{Type: v1alpha1.WarmProcessTypeREPL, Command: []string{"bash"}}}
 			},
-			wantErr: "spec.sidecars[0].startupProbe must define exactly one handler",
+			wantErr: "spec.warmProcesses[0].command is only valid for cmd warm processes",
 		},
 		{
-			name: "reject sidecar startup probe with multiple handlers",
+			name: "reject invalid warm process type",
 			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
-				s.Sidecars = []v1alpha1.SidecarContainerSpec{
-					{
-						Name:      "helper",
-						Image:     "busybox",
-						Resources: v1alpha1.ResourceQuota{CPU: resource.MustParse("500m"), Memory: resource.MustParse("2Gi")},
-						StartupProbe: &corev1.Probe{
-							ProbeHandler: corev1.ProbeHandler{
-								Exec:    &corev1.ExecAction{Command: []string{"true"}},
-								HTTPGet: &corev1.HTTPGetAction{Path: "/ready", Port: intstr.FromInt32(8080)},
-							},
-						},
-					},
-				}
+				s.WarmProcesses = []v1alpha1.WarmProcessSpec{{Type: "daemon"}}
 			},
-			wantErr: "spec.sidecars[0].startupProbe must define exactly one handler",
+			wantErr: "spec.warmProcesses[0].type must be one of: repl, cmd",
 		},
 	}
 
@@ -931,7 +666,7 @@ func TestValidateTemplateSpec_StrictValidation(t *testing.T) {
 	}
 }
 
-func TestValidateTemplateSpecForClaims_AllowsClaimableSidecars(t *testing.T) {
+func TestValidateTemplateSpecForClaims_AllowsWarmProcesses(t *testing.T) {
 	t.Parallel()
 
 	spec := v1alpha1.SandboxTemplateSpec{
@@ -942,28 +677,16 @@ func TestValidateTemplateSpecForClaims_AllowsClaimableSidecars(t *testing.T) {
 				Memory: resource.MustParse("4Gi"),
 			},
 		},
-		Sidecars: []v1alpha1.SidecarContainerSpec{
-			{
-				Name:      "codex",
-				Image:     "busybox",
-				Command:   []string{"sh", "-lc", "sleep 3600"},
-				Resources: v1alpha1.ResourceQuota{CPU: resource.MustParse("500m"), Memory: resource.MustParse("2Gi")},
-				StartupProbe: &corev1.Probe{
-					ProbeHandler: corev1.ProbeHandler{
-						Exec: &corev1.ExecAction{Command: []string{"test", "-f", "/tmp/started"}},
-					},
-				},
-			},
-		},
-		Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
+		WarmProcesses: []v1alpha1.WarmProcessSpec{{Type: v1alpha1.WarmProcessTypeREPL, Alias: "bash"}},
+		Pool:          v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
 	}
 
 	if err := validateTemplateSpecForClaims(spec, &internalauth.Claims{TeamID: "team-1"}); err != nil {
-		t.Fatalf("expected sidecars to be allowed, got %v", err)
+		t.Fatalf("expected warm processes to be allowed, got %v", err)
 	}
 }
 
-func TestValidateTemplateSpecForClaims_RejectsMismatchedAggregateResources(t *testing.T) {
+func TestValidateTemplateSpecForClaims_RejectsMismatchedMainResources(t *testing.T) {
 	t.Parallel()
 
 	spec := v1alpha1.SandboxTemplateSpec{
@@ -971,14 +694,7 @@ func TestValidateTemplateSpecForClaims_RejectsMismatchedAggregateResources(t *te
 			Image: "ubuntu:22.04",
 			Resources: v1alpha1.ResourceQuota{
 				CPU:    resource.MustParse("1"),
-				Memory: resource.MustParse("4Gi"),
-			},
-		},
-		Sidecars: []v1alpha1.SidecarContainerSpec{
-			{
-				Name:      "codex",
-				Image:     "busybox",
-				Resources: v1alpha1.ResourceQuota{CPU: resource.MustParse("500m"), Memory: resource.MustParse("1Gi")},
+				Memory: resource.MustParse("1Gi"),
 			},
 		},
 		Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
@@ -1004,19 +720,12 @@ func TestValidateTemplateSpecForClaims_AllowsSystemOwnedRatioOverride(t *testing
 				Memory: resource.MustParse("1Gi"),
 			},
 		},
-		Sidecars: []v1alpha1.SidecarContainerSpec{
-			{
-				Name:      "codex",
-				Image:     "busybox",
-				Resources: v1alpha1.ResourceQuota{CPU: resource.MustParse("500m"), Memory: resource.MustParse("1Gi")},
-			},
-		},
 		Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
 	}
 
 	claims := &internalauth.Claims{IsSystem: true}
 	if err := validateTemplateSpecForClaims(spec, claims); err != nil {
-		t.Fatalf("expected system token to allow sidecar fields, got %v", err)
+		t.Fatalf("expected system token to allow resource ratio override, got %v", err)
 	}
 }
 

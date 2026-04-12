@@ -73,7 +73,7 @@ The main sandbox container configuration.
 
 ## `envVars`
 
-Global environment variables shared across all containers (main container and sidecars).
+Global environment variables injected into the procd-managed sandbox environment.
 
 ```yaml
 envVars:
@@ -95,53 +95,38 @@ Warm pool configuration. See [Warm Pool](/docs/template/pool) for a detailed gui
 | `minIdle` | integer | — | Minimum idle pods to pre-warm. Required (`>= 0`). |
 | `maxIdle` | integer | — | Maximum idle pods allowed. Required (`>= minIdle`). |
 
-Only ready idle pods count toward pool capacity. This matters when your template uses sidecars to host a warm process.
+Only ready idle pods count toward pool capacity. This matters when your template declares warm processes, because procd readiness stays unavailable until those processes are running.
 
 ---
 
-## `sidecars`
+## `warmProcesses`
 
-Additional containers that run alongside the main sandbox container in the same pod.
-
-This is the recommended way to model a template-owned warm process, such as a long-running Codex agent, language server, or helper daemon that should start before the pod is claimed.
+Processes that procd starts when the template pod is created, before the pod becomes claimable from the warm pool.
 
 ```yaml
 spec:
-    sidecars:
-        - name: codex
-          image: ghcr.io/example/codex:latest
-          command: ["sh", "-lc", "/app/start-codex.sh"]
-          readinessProbe:
-              httpGet:
-                  path: /healthz
-                  port: 8081
-          startupProbe:
-              exec:
-                  command: ["test", "-f", "/tmp/codex-started"]
+    warmProcesses:
+        - type: cmd
+          alias: codex
+          command: ["/bin/sh", "-lc", "/app/start-codex.sh"]
+          cwd: /workspace
+          envVars:
+              MODE: warm
 ```
 
-Commonly used sidecar fields:
+Warm process fields:
 
 | Field | Description |
 |-------|-------------|
-| `name` | Container name. Required. |
-| `image` | Container image reference. Required. |
-| `resources` | CPU and memory request/limit pair. Required. |
-| `command` / `args` | Process startup command for the sidecar. |
-| `env` | Sidecar-specific environment variables. |
-| `mounts` | References to template `sharedVolumes` when the sidecar needs pod-shared storage. |
-| `readinessProbe` | Optional readiness probe for sidecars. Use it when a sidecar must finish warming up before the pod should count toward warm-pool capacity. |
-| `startupProbe` | Optional startup probe for slow-starting sidecars. |
+| `type` | `cmd` or `repl`. Required. |
+| `alias` | Optional process alias used by procd context metadata. |
+| `command` | Required for `cmd`; not allowed for `repl`. Use an absolute executable path when the environment is minimal. |
+| `cwd` | Optional working directory. Must be an absolute non-reserved path. |
+| `envVars` | Optional environment variables for the warm process. |
 
 <Callout variant="info">
-A pod that is `Running` but not `Ready` does not count as available warm-pool capacity and will not be hot-claimed.
+Warm processes are intended to stay running. If a configured warm process exits, procd readiness fails and the pod is not hot-claimed.
 </Callout>
-
-<Callout variant="warning">
-`livenessProbe` is not part of the public template surface. Whole-sandbox soft pause freezes the sandbox, so kubelet liveness semantics would conflict with pause/resume.
-</Callout>
-
-If a sidecar also needs shared storage, declare `spec.sharedVolumes` on the template and mount them from `sidecars[*].mounts`. For end-to-end examples in Go, Python, TypeScript, and CLI, see [Template Sidecars](/docs/template/sidecars).
 
 ---
 
@@ -203,9 +188,7 @@ The following fields require a system-level token. They are not available to reg
 Attempting to set privileged fields without a system identity returns `403 Forbidden`. Contact your platform administrator if you need access to these fields.
 </Callout>
 
-Regular team-owned templates can still use public sidecar fields such as `command`, `args`, `env`, `resources`, `mounts`, `readinessProbe`, and `startupProbe`.
-
-Operator-only Kubernetes-native sidecar fields that are not part of the public OpenAPI schema should not be relied on from the public SDKs.
+Regular team-owned templates can declare `warmProcesses` for template-started helpers.
 
 ---
 
@@ -229,11 +212,11 @@ Operator-only Kubernetes-native sidecar fields that are not part of the public O
   </LinkCard>
 
   <LinkCard
-    title="Sidecars"
-    href="/docs/template/sidecars"
+    title="Warm Processes"
+    href="/docs/template/warm-processes"
     cta="Learn More"
   >
-    Model warm helper processes with template-owned sidecars
+    Start helper processes before a warm pod is claimable
   </LinkCard>
 
   <LinkCard

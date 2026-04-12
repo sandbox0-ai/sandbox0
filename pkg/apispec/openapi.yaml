@@ -5498,14 +5498,10 @@ components:
             type: string
         mainContainer:
           $ref: "#/components/schemas/ContainerSpec"
-        sidecars:
+        warmProcesses:
           type: array
           items:
-            $ref: "#/components/schemas/SidecarContainerSpec"
-        sharedVolumes:
-          type: array
-          items:
-            $ref: "#/components/schemas/SharedVolumeSpec"
+            $ref: "#/components/schemas/WarmProcessSpec"
         pod:
           $ref: "#/components/schemas/PodSpecOverride"
         network:
@@ -5542,65 +5538,25 @@ components:
         securityContext:
           $ref: "#/components/schemas/SecurityContext"
       required: [image, resources]
-    SidecarContainerSpec:
+    WarmProcessSpec:
       type: object
       properties:
-        name:
+        type:
           type: string
-        image:
+          enum: [repl, cmd]
+        alias:
           type: string
         command:
           type: array
           items:
             type: string
-        args:
-          type: array
-          items:
+        cwd:
+          type: string
+        envVars:
+          type: object
+          additionalProperties:
             type: string
-        env:
-          type: array
-          items:
-            $ref: "#/components/schemas/EnvVar"
-        resources:
-          $ref: "#/components/schemas/ResourceQuota"
-        mounts:
-          type: array
-          items:
-            $ref: "#/components/schemas/ContainerMountSpec"
-        readinessProbe:
-          $ref: "#/components/schemas/Probe"
-        startupProbe:
-          $ref: "#/components/schemas/Probe"
-      required: [name, image, resources]
-    ContainerMountSpec:
-      type: object
-      properties:
-        name:
-          type: string
-        mountPath:
-          type: string
-        readOnly:
-          type: boolean
-      required: [name, mountPath]
-    SharedVolumeSpec:
-      type: object
-      properties:
-        name:
-          type: string
-        sandboxVolumeId:
-          type: string
-        mountPath:
-          type: string
-        cacheSize:
-          type: string
-        prefetch:
-          type: integer
-          format: int32
-        bufferSize:
-          type: string
-        writeback:
-          type: boolean
-      required: [name, mountPath]
+      required: [type]
     EnvVar:
       type: object
       properties:

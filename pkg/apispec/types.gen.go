@@ -4,10 +4,8 @@
 package apispec
 
 import (
-	"encoding/json"
 	"time"
 
-	"github.com/oapi-codegen/runtime"
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
@@ -118,8 +116,8 @@ const (
 
 // Defines values for ProcessType.
 const (
-	Cmd  ProcessType = "cmd"
-	Repl ProcessType = "repl"
+	ProcessTypeCmd  ProcessType = "cmd"
+	ProcessTypeRepl ProcessType = "repl"
 )
 
 // Defines values for REPLReadyMode.
@@ -549,6 +547,12 @@ const (
 	False VolumeSyncReseedRequiredErrorEnvelopeSuccess = false
 )
 
+// Defines values for WarmProcessSpecType.
+const (
+	WarmProcessSpecTypeCmd  WarmProcessSpecType = "cmd"
+	WarmProcessSpecTypeRepl WarmProcessSpecType = "repl"
+)
+
 // Defines values for GetApiV1SandboxesParamsStatus.
 const (
 	GetApiV1SandboxesParamsStatusCompleted GetApiV1SandboxesParamsStatus = "completed"
@@ -680,13 +684,6 @@ type ClaimResponse struct {
 	SandboxId       string         `json:"sandbox_id"`
 	Status          string         `json:"status"`
 	Template        string         `json:"template"`
-}
-
-// ContainerMountSpec defines model for ContainerMountSpec.
-type ContainerMountSpec struct {
-	MountPath string `json:"mountPath"`
-	Name      string `json:"name"`
-	ReadOnly  *bool  `json:"readOnly,omitempty"`
 }
 
 // ContainerSpec defines model for ContainerSpec.
@@ -983,11 +980,6 @@ type ErrorEnvelope struct {
 // ErrorEnvelopeSuccess defines model for ErrorEnvelope.Success.
 type ErrorEnvelopeSuccess bool
 
-// ExecAction defines model for ExecAction.
-type ExecAction struct {
-	Command *[]string `json:"command,omitempty"`
-}
-
 // ExecCandidate defines model for ExecCandidate.
 type ExecCandidate struct {
 	Args *[]string `json:"args,omitempty"`
@@ -1048,12 +1040,6 @@ type ForkVolumeRequest struct {
 	Writeback       *bool  `json:"writeback,omitempty"`
 }
 
-// GRPCAction defines model for GRPCAction.
-type GRPCAction struct {
-	Port    int32   `json:"port"`
-	Service *string `json:"service,omitempty"`
-}
-
 // GatewayMetadata defines model for GatewayMetadata.
 type GatewayMetadata struct {
 	GatewayMode GatewayMetadataGatewayMode `json:"gateway_mode"`
@@ -1062,21 +1048,6 @@ type GatewayMetadata struct {
 
 // GatewayMetadataGatewayMode defines model for GatewayMetadata.GatewayMode.
 type GatewayMetadataGatewayMode string
-
-// HTTPGetAction defines model for HTTPGetAction.
-type HTTPGetAction struct {
-	Host        *string       `json:"host,omitempty"`
-	HttpHeaders *[]HTTPHeader `json:"httpHeaders,omitempty"`
-	Path        *string       `json:"path,omitempty"`
-	Port        ProbePort     `json:"port"`
-	Scheme      *string       `json:"scheme,omitempty"`
-}
-
-// HTTPHeader defines model for HTTPHeader.
-type HTTPHeader struct {
-	Name  string `json:"name"`
-	Value string `json:"value"`
-}
 
 // HTTPHeadersProjection defines model for HTTPHeadersProjection.
 type HTTPHeadersProjection struct {
@@ -1300,31 +1271,6 @@ type PreferredSchedulingTerm struct {
 	Preference NodeSelectorTerm `json:"preference"`
 	Weight     int32            `json:"weight"`
 }
-
-// Probe defines model for Probe.
-type Probe struct {
-	Exec                          *ExecAction      `json:"exec,omitempty"`
-	FailureThreshold              *int32           `json:"failureThreshold,omitempty"`
-	Grpc                          *GRPCAction      `json:"grpc,omitempty"`
-	HttpGet                       *HTTPGetAction   `json:"httpGet,omitempty"`
-	InitialDelaySeconds           *int32           `json:"initialDelaySeconds,omitempty"`
-	PeriodSeconds                 *int32           `json:"periodSeconds,omitempty"`
-	SuccessThreshold              *int32           `json:"successThreshold,omitempty"`
-	TcpSocket                     *TCPSocketAction `json:"tcpSocket,omitempty"`
-	TerminationGracePeriodSeconds *int64           `json:"terminationGracePeriodSeconds,omitempty"`
-	TimeoutSeconds                *int32           `json:"timeoutSeconds,omitempty"`
-}
-
-// ProbePort defines model for ProbePort.
-type ProbePort struct {
-	union json.RawMessage
-}
-
-// ProbePort0 defines model for .
-type ProbePort0 = int32
-
-// ProbePort1 defines model for .
-type ProbePort1 = string
 
 // ProcessType defines model for ProcessType.
 type ProcessType string
@@ -1634,20 +1580,19 @@ type SandboxTemplateCondition struct {
 
 // SandboxTemplateSpec defines model for SandboxTemplateSpec.
 type SandboxTemplateSpec struct {
-	AllowedTeams  *[]string               `json:"allowedTeams,omitempty"`
-	ClusterId     *string                 `json:"clusterId,omitempty"`
-	Description   *string                 `json:"description,omitempty"`
-	DisplayName   *string                 `json:"displayName,omitempty"`
-	EnvVars       *map[string]string      `json:"envVars,omitempty"`
-	Lifecycle     *LifecyclePolicy        `json:"lifecycle,omitempty"`
-	MainContainer *ContainerSpec          `json:"mainContainer,omitempty"`
-	Network       *SandboxNetworkPolicy   `json:"network,omitempty"`
-	Pod           *PodSpecOverride        `json:"pod,omitempty"`
-	Pool          *PoolStrategy           `json:"pool,omitempty"`
-	Public        *bool                   `json:"public,omitempty"`
-	SharedVolumes *[]SharedVolumeSpec     `json:"sharedVolumes,omitempty"`
-	Sidecars      *[]SidecarContainerSpec `json:"sidecars,omitempty"`
-	Tags          *[]string               `json:"tags,omitempty"`
+	AllowedTeams  *[]string             `json:"allowedTeams,omitempty"`
+	ClusterId     *string               `json:"clusterId,omitempty"`
+	Description   *string               `json:"description,omitempty"`
+	DisplayName   *string               `json:"displayName,omitempty"`
+	EnvVars       *map[string]string    `json:"envVars,omitempty"`
+	Lifecycle     *LifecyclePolicy      `json:"lifecycle,omitempty"`
+	MainContainer *ContainerSpec        `json:"mainContainer,omitempty"`
+	Network       *SandboxNetworkPolicy `json:"network,omitempty"`
+	Pod           *PodSpecOverride      `json:"pod,omitempty"`
+	Pool          *PoolStrategy         `json:"pool,omitempty"`
+	Public        *bool                 `json:"public,omitempty"`
+	Tags          *[]string             `json:"tags,omitempty"`
+	WarmProcesses *[]WarmProcessSpec    `json:"warmProcesses,omitempty"`
 }
 
 // SandboxTemplateStatus defines model for SandboxTemplateStatus.
@@ -1700,30 +1645,6 @@ type SecurityContext struct {
 	Capabilities *Capabilities `json:"capabilities,omitempty"`
 	RunAsGroup   *int64        `json:"runAsGroup,omitempty"`
 	RunAsUser    *int64        `json:"runAsUser,omitempty"`
-}
-
-// SharedVolumeSpec defines model for SharedVolumeSpec.
-type SharedVolumeSpec struct {
-	BufferSize      *string `json:"bufferSize,omitempty"`
-	CacheSize       *string `json:"cacheSize,omitempty"`
-	MountPath       string  `json:"mountPath"`
-	Name            string  `json:"name"`
-	Prefetch        *int32  `json:"prefetch,omitempty"`
-	SandboxVolumeId *string `json:"sandboxVolumeId,omitempty"`
-	Writeback       *bool   `json:"writeback,omitempty"`
-}
-
-// SidecarContainerSpec defines model for SidecarContainerSpec.
-type SidecarContainerSpec struct {
-	Args           *[]string             `json:"args,omitempty"`
-	Command        *[]string             `json:"command,omitempty"`
-	Env            *[]EnvVar             `json:"env,omitempty"`
-	Image          string                `json:"image"`
-	Mounts         *[]ContainerMountSpec `json:"mounts,omitempty"`
-	Name           string                `json:"name"`
-	ReadinessProbe *Probe                `json:"readinessProbe,omitempty"`
-	Resources      ResourceQuota         `json:"resources"`
-	StartupProbe   *Probe                `json:"startupProbe,omitempty"`
 }
 
 // SignalContextRequest defines model for SignalContextRequest.
@@ -2435,12 +2356,6 @@ type SyncReplica struct {
 	VolumeId       *string                           `json:"volume_id,omitempty"`
 }
 
-// TCPSocketAction defines model for TCPSocketAction.
-type TCPSocketAction struct {
-	Host *string   `json:"host,omitempty"`
-	Port ProbePort `json:"port"`
-}
-
 // TLSClientCertificateProjection Client certificate projection used for TLS terminate-reoriginate auth.
 type TLSClientCertificateProjection = map[string]interface{}
 
@@ -2676,6 +2591,18 @@ type VolumeSyncReseedRequiredErrorEnvelope struct {
 
 // VolumeSyncReseedRequiredErrorEnvelopeSuccess defines model for VolumeSyncReseedRequiredErrorEnvelope.Success.
 type VolumeSyncReseedRequiredErrorEnvelopeSuccess bool
+
+// WarmProcessSpec defines model for WarmProcessSpec.
+type WarmProcessSpec struct {
+	Alias   *string             `json:"alias,omitempty"`
+	Command *[]string           `json:"command,omitempty"`
+	Cwd     *string             `json:"cwd,omitempty"`
+	EnvVars *map[string]string  `json:"envVars,omitempty"`
+	Type    WarmProcessSpecType `json:"type"`
+}
+
+// WarmProcessSpecType defines model for WarmProcessSpec.Type.
+type WarmProcessSpecType string
 
 // WebhookConfig defines model for WebhookConfig.
 type WebhookConfig struct {
@@ -2979,65 +2906,3 @@ type PutUsersMeJSONRequestBody = UpdateUserRequest
 
 // PostUsersMeSshKeysJSONRequestBody defines body for PostUsersMeSshKeys for application/json ContentType.
 type PostUsersMeSshKeysJSONRequestBody = CreateSSHPublicKeyRequest
-
-// AsProbePort0 returns the union data inside the ProbePort as a ProbePort0
-func (t ProbePort) AsProbePort0() (ProbePort0, error) {
-	var body ProbePort0
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromProbePort0 overwrites any union data inside the ProbePort as the provided ProbePort0
-func (t *ProbePort) FromProbePort0(v ProbePort0) error {
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeProbePort0 performs a merge with any union data inside the ProbePort, using the provided ProbePort0
-func (t *ProbePort) MergeProbePort0(v ProbePort0) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsProbePort1 returns the union data inside the ProbePort as a ProbePort1
-func (t ProbePort) AsProbePort1() (ProbePort1, error) {
-	var body ProbePort1
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromProbePort1 overwrites any union data inside the ProbePort as the provided ProbePort1
-func (t *ProbePort) FromProbePort1(v ProbePort1) error {
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeProbePort1 performs a merge with any union data inside the ProbePort, using the provided ProbePort1
-func (t *ProbePort) MergeProbePort1(v ProbePort1) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-func (t ProbePort) MarshalJSON() ([]byte, error) {
-	b, err := t.union.MarshalJSON()
-	return b, err
-}
-
-func (t *ProbePort) UnmarshalJSON(b []byte) error {
-	err := t.union.UnmarshalJSON(b)
-	return err
-}

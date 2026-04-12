@@ -140,36 +140,11 @@ func normalizeTeamTemplateResourceRatioForCreate(spec *apispec.SandboxTemplateSp
 		return
 	}
 
-	totalCPU := mainCPU.DeepCopy()
-	sidecarMemory := resource.Quantity{}
-	if spec.Sidecars != nil {
-		for _, sidecar := range *spec.Sidecars {
-			cpu, ok := parseQuotaQuantity(sidecar.Resources.Cpu)
-			if !ok {
-				return
-			}
-			memory, ok := parseQuotaQuantity(sidecar.Resources.Memory)
-			if !ok {
-				return
-			}
-			totalCPU.Add(cpu)
-			sidecarMemory.Add(memory)
-		}
-	}
-
-	requiredMemory := memoryForCPU(totalCPU, resource.MustParse("4Gi"))
-	totalMemory := mainMemory.DeepCopy()
-	totalMemory.Add(sidecarMemory)
-	if totalMemory.Cmp(requiredMemory) == 0 {
+	requiredMemory := memoryForCPU(mainCPU, resource.MustParse("4Gi"))
+	if mainMemory.Cmp(requiredMemory) == 0 {
 		return
 	}
-
-	normalizedMainMemory := requiredMemory.DeepCopy()
-	normalizedMainMemory.Sub(sidecarMemory)
-	if normalizedMainMemory.Sign() <= 0 {
-		return
-	}
-	spec.MainContainer.Resources.Memory = ptr(normalizedMainMemory.String())
+	spec.MainContainer.Resources.Memory = ptr(requiredMemory.String())
 }
 
 func parseQuotaQuantity(value *string) (resource.Quantity, bool) {

@@ -36,7 +36,6 @@ type Operator struct {
 	podsSynced     cache.InformerSynced
 	poolManager    *PoolManager
 	autoScaler     *AutoScaler
-	readinessEval  SandboxReadinessEvaluator
 	recorder       record.EventRecorder
 	clock          TimeProvider
 	logger         *zap.Logger
@@ -59,11 +58,6 @@ type Operator struct {
 // SetNamespacePolicyReconciler installs the manager-owned template namespace baseline reconciler.
 func (op *Operator) SetNamespacePolicyReconciler(reconciler namespacepolicy.TemplateNamespaceReconciler) {
 	op.namespacePolicy = reconciler
-}
-
-// SetSandboxReadinessEvaluator installs the sandbox0-managed readiness evaluator.
-func (op *Operator) SetSandboxReadinessEvaluator(evaluator SandboxReadinessEvaluator) {
-	op.readinessEval = evaluator
 }
 
 // TemplateListerImpl implements TemplateLister
@@ -298,7 +292,7 @@ func (op *Operator) updateTemplateStatus(ctx context.Context, template *v1alpha1
 
 	reconciledPods := make(map[string]*corev1.Pod, len(idlePods)+len(activePods))
 	for _, pod := range append(append([]*corev1.Pod(nil), idlePods...), activePods...) {
-		updatedPod, err := EnsureSandboxPodReadinessCondition(ctx, op.k8sClient, pod, op.readinessEval)
+		updatedPod, err := EnsureSandboxPodReadinessCondition(ctx, op.k8sClient, pod)
 		if err != nil {
 			return fmt.Errorf("ensure sandbox pod readiness condition for %s/%s: %w", pod.Namespace, pod.Name, err)
 		}

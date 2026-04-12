@@ -63,7 +63,7 @@ func TestParseSSHUsername(t *testing.T) {
 		{name: "sandbox id only", username: "sb_123", want: "sb_123"},
 		{name: "main suffix", username: "sb_123+main", want: "sb_123"},
 		{name: "empty", username: "", wantErr: true},
-		{name: "unsupported target", username: "sb_123+sidecar", wantErr: true},
+		{name: "unsupported target", username: "sb_123+worker", wantErr: true},
 		{name: "invalid characters", username: "sb 123", wantErr: true},
 	}
 

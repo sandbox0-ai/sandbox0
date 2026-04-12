@@ -73,6 +73,8 @@ type Server struct {
 
 	// Webhook dispatcher
 	webhookDispatcher *webhook.Dispatcher
+
+	readyChecker func() error
 }
 
 // NewServer creates a new HTTP server.
@@ -86,6 +88,7 @@ func NewServer(
 	webhookDispatcher *webhook.Dispatcher,
 	logger *zap.Logger,
 	obsProvider *observability.Provider,
+	readyChecker func() error,
 ) *Server {
 	s := &Server{
 		router:            mux.NewRouter(),
@@ -98,6 +101,7 @@ func NewServer(
 		webhookDispatcher: webhookDispatcher,
 		logger:            logger,
 		obsProvider:       obsProvider,
+		readyChecker:      readyChecker,
 	}
 
 	s.setupRoutes()
@@ -200,6 +204,12 @@ func (s *Server) healthHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) readyHandler(w http.ResponseWriter, r *http.Request) {
+	if s.readyChecker != nil {
+		if err := s.readyChecker(); err != nil {
+			_ = spec.WriteError(w, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())
+			return
+		}
+	}
 	_ = spec.WriteSuccess(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 

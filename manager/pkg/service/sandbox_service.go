@@ -131,7 +131,6 @@ type SandboxService struct {
 	autoScaler             AutoScalerInterface
 	credentialStore        egressauth.BindingStore
 	powerExecutor          SandboxPowerExecutor
-	readinessEvaluator     controller.SandboxReadinessEvaluator
 	powerStateLocks        sync.Map
 	powerStateReconcilers  sync.Map
 }
@@ -239,11 +238,6 @@ func (s *SandboxService) SetCtldClient(client *CtldClient) {
 // SetAutoScaler injects the auto scaler for automatic pool scaling.
 func (s *SandboxService) SetAutoScaler(scaler AutoScalerInterface) {
 	s.autoScaler = scaler
-}
-
-// SetSandboxReadinessEvaluator overrides sandbox0-managed readiness evaluation.
-func (s *SandboxService) SetSandboxReadinessEvaluator(evaluator controller.SandboxReadinessEvaluator) {
-	s.readinessEvaluator = evaluator
 }
 
 // SetCredentialStore injects the sandbox credential binding store.
@@ -426,104 +420,6 @@ func normalizeClaimMounts(mounts []ClaimMount) ([]ClaimMount, error) {
 	return normalized, nil
 }
 
-func mergeTemplateSharedVolumeMounts(claimMounts []ClaimMount, sharedVolumes []v1alpha1.SharedVolumeSpec) ([]ClaimMount, error) {
-	merged := append([]ClaimMount(nil), claimMounts...)
-	claimMountIndexByPoint := make(map[string]int, len(merged))
-	for i, mount := range merged {
-		claimMountIndexByPoint[mount.MountPoint] = i
-	}
-	for _, volume := range sharedVolumes {
-		mountPath := filepath.Clean(strings.TrimSpace(volume.MountPath))
-		defaultConfig := sharedVolumeConfigToClaimMountConfig(volume)
-		if templateVolumeID := strings.TrimSpace(volume.SandboxVolumeID); templateVolumeID != "" {
-			if _, exists := claimMountIndexByPoint[mountPath]; exists {
-				return nil, fmt.Errorf("%w: claim mount %q conflicts with template shared volume %q", ErrInvalidClaimRequest, mountPath, volume.Name)
-			}
-			merged = append(merged, ClaimMount{
-				SandboxVolumeID: templateVolumeID,
-				MountPoint:      mountPath,
-				VolumeConfig:    defaultConfig,
-			})
-			claimMountIndexByPoint[mountPath] = len(merged) - 1
-			continue
-		}
-
-		idx, exists := claimMountIndexByPoint[mountPath]
-		if !exists {
-			return nil, fmt.Errorf("%w: shared volume %q requires a claim mount for %q", ErrInvalidClaimRequest, volume.Name, mountPath)
-		}
-		merged[idx].VolumeConfig = mergeMountVolumeConfig(defaultConfig, merged[idx].VolumeConfig)
-	}
-	return normalizeClaimMounts(merged)
-}
-
-func mergeMountVolumeConfig(defaults, claim *MountVolumeConfig) *MountVolumeConfig {
-	if defaults == nil && claim == nil {
-		return nil
-	}
-	if defaults == nil {
-		return cloneMountVolumeConfig(claim)
-	}
-	if claim == nil {
-		return cloneMountVolumeConfig(defaults)
-	}
-
-	merged := cloneMountVolumeConfig(defaults)
-	if strings.TrimSpace(claim.CacheSize) != "" {
-		merged.CacheSize = claim.CacheSize
-	}
-	if claim.Prefetch != nil {
-		merged.Prefetch = cloneInt32Pointer(claim.Prefetch)
-	}
-	if strings.TrimSpace(claim.BufferSize) != "" {
-		merged.BufferSize = claim.BufferSize
-	}
-	if claim.Writeback != nil {
-		merged.Writeback = cloneBoolPointer(claim.Writeback)
-	}
-	return merged
-}
-
-func cloneMountVolumeConfig(src *MountVolumeConfig) *MountVolumeConfig {
-	if src == nil {
-		return nil
-	}
-	return &MountVolumeConfig{
-		CacheSize:  src.CacheSize,
-		Prefetch:   cloneInt32Pointer(src.Prefetch),
-		BufferSize: src.BufferSize,
-		Writeback:  cloneBoolPointer(src.Writeback),
-	}
-}
-
-func sharedVolumeConfigToClaimMountConfig(volume v1alpha1.SharedVolumeSpec) *MountVolumeConfig {
-	if strings.TrimSpace(volume.CacheSize) == "" && volume.Prefetch == nil && strings.TrimSpace(volume.BufferSize) == "" && volume.Writeback == nil {
-		return nil
-	}
-	return &MountVolumeConfig{
-		CacheSize:  volume.CacheSize,
-		Prefetch:   cloneInt32Pointer(volume.Prefetch),
-		BufferSize: volume.BufferSize,
-		Writeback:  cloneBoolPointer(volume.Writeback),
-	}
-}
-
-func cloneInt32Pointer(src *int32) *int32 {
-	if src == nil {
-		return nil
-	}
-	value := *src
-	return &value
-}
-
-func cloneBoolPointer(src *bool) *bool {
-	if src == nil {
-		return nil
-	}
-	value := *src
-	return &value
-}
-
 func claimMountWaitTimeout(req *ClaimRequest) time.Duration {
 	if req == nil || !req.WaitForMounts {
 		return 0
@@ -633,12 +529,6 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	}
 
 	_ = resolvedName // reserved for audit/debugging (name used is template.ObjectMeta.Name)
-
-	effectiveMounts, err := mergeTemplateSharedVolumeMounts(req.Mounts, template.Spec.SharedVolumes)
-	if err != nil {
-		return nil, err
-	}
-	req.Mounts = effectiveMounts
 
 	// Try to claim an idle pod first
 	pod, err := s.claimIdlePod(ctx, template, req)
@@ -851,19 +741,12 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 
 	// Build pod spec from template
 	spec := v1alpha1.BuildPodSpec(template, false)
-	managedReadiness, err := v1alpha1.BuildManagedReadinessProbesAnnotation(template)
-	if err != nil {
-		return nil, fmt.Errorf("build managed readiness probes annotation: %w", err)
-	}
 	annotations := map[string]string{
 		controller.AnnotationSandboxID: podName,
 		controller.AnnotationTeamID:    req.TeamID,
 		controller.AnnotationUserID:    req.UserID,
 		controller.AnnotationClaimedAt: s.clock.Now().Format(time.RFC3339),
 		controller.AnnotationClaimType: "cold",
-	}
-	if managedReadiness != "" {
-		annotations[v1alpha1.ManagedReadinessProbesAnnotation] = managedReadiness
 	}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -2338,7 +2221,7 @@ func (s *SandboxService) waitForPodReady(ctx context.Context, namespace, name st
 			}
 			return nil, fmt.Errorf("get pod for readiness: %w", err)
 		}
-		pod, err = controller.EnsureSandboxPodReadinessCondition(readyCtx, s.k8sClient, pod, s.readinessEvaluator)
+		pod, err = controller.EnsureSandboxPodReadinessCondition(readyCtx, s.k8sClient, pod)
 		if err != nil {
 			return nil, fmt.Errorf("ensure pod readiness condition: %w", err)
 		}

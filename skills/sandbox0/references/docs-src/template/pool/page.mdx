@@ -74,25 +74,23 @@ Warm-pool capacity is counted from idle pods that are ready for claiming.
 
 - An idle pod in `Running` phase but with `Ready=False` does not count toward `idleCount`
 - A hot claim only selects idle pods that are already `Ready`
-- Sidecar `readinessProbe` is allowed and can delay when a pod becomes claimable.
+- If `warmProcesses` are configured, procd readiness stays unavailable until every warm process is running.
 
-If a template uses a sidecar to host a warm process, use `readinessProbe` on the sidecar so the pod only becomes claimable after that sidecar is ready:
+Use `warmProcesses` for template-owned helpers that should already be running when the sandbox is claimed:
 
 ```yaml
 spec:
-    sidecars:
-        - name: codex
-          image: ghcr.io/example/codex:latest
-          command: ["sh", "-lc", "/app/start-codex.sh"]
-          readinessProbe:
-              exec:
-                  command: ["test", "-f", "/tmp/codex-ready"]
+    warmProcesses:
+        - type: cmd
+          alias: codex
+          command: ["/bin/sh", "-lc", "/app/start-codex.sh"]
+          cwd: /workspace
     pool:
         minIdle: 2
         maxIdle: 10
 ```
 
-In this model, the pod only counts as warm-pool capacity after the sidecar becomes ready.
+In this model, the pod only counts as warm-pool capacity after procd has started the warm process and `/readyz` is healthy.
 
 **Choosing `minIdle`:**
 
@@ -142,11 +140,11 @@ During the transition, the pool may temporarily drop below `minIdle`. Plan updat
 
 <CardGrid>
   <LinkCard
-    title="Sidecars"
-    href="/docs/template/sidecars"
+    title="Warm Processes"
+    href="/docs/template/warm-processes"
     cta="Learn More"
   >
-    Gate warm-pool readiness with template-owned helper processes
+    Start template-owned helpers before hot claims
   </LinkCard>
 
   <LinkCard

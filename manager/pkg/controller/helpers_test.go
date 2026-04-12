@@ -135,26 +135,26 @@ func TestIsPodReady(t *testing.T) {
 
 func TestDesiredSandboxPodReadiness(t *testing.T) {
 	t.Run("running active sandbox is ready", func(t *testing.T) {
-		status, reason, _ := DesiredSandboxPodReadiness(context.Background(), &corev1.Pod{
+		status, reason, _ := DesiredSandboxPodReadiness(&corev1.Pod{
 			Status: corev1.PodStatus{Phase: corev1.PodRunning},
-		}, nil)
+		})
 		require.Equal(t, corev1.ConditionTrue, status)
 		require.Equal(t, "SandboxActive", reason)
 	})
 
 	t.Run("paused sandbox is not ready", func(t *testing.T) {
-		status, reason, _ := DesiredSandboxPodReadiness(context.Background(), &corev1.Pod{
+		status, reason, _ := DesiredSandboxPodReadiness(&corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Annotations: map[string]string{AnnotationPaused: "true"},
 			},
 			Status: corev1.PodStatus{Phase: corev1.PodRunning},
-		}, nil)
+		})
 		require.Equal(t, corev1.ConditionFalse, status)
 		require.Equal(t, "PowerStatePaused", reason)
 	})
 
 	t.Run("resuming sandbox is not ready", func(t *testing.T) {
-		status, reason, _ := DesiredSandboxPodReadiness(context.Background(), &corev1.Pod{
+		status, reason, _ := DesiredSandboxPodReadiness(&corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Annotations: map[string]string{
 					AnnotationPowerStateDesired:  "active",
@@ -163,24 +163,11 @@ func TestDesiredSandboxPodReadiness(t *testing.T) {
 				},
 			},
 			Status: corev1.PodStatus{Phase: corev1.PodRunning},
-		}, nil)
+		})
 		require.Equal(t, corev1.ConditionFalse, status)
 		require.Equal(t, "PowerStateTransitioning", reason)
 	})
 
-	t.Run("sandbox0-managed sidecar readiness blocks readiness", func(t *testing.T) {
-		status, reason, _ := DesiredSandboxPodReadiness(context.Background(), &corev1.Pod{
-			Status: corev1.PodStatus{Phase: corev1.PodRunning},
-		}, staticReadinessEvaluator{
-			failure: &SandboxReadinessFailure{
-				Name:    "helper",
-				Reason:  "SidecarNotReady",
-				Message: "sidecar helper readiness probe has not succeeded",
-			},
-		})
-		require.Equal(t, corev1.ConditionFalse, status)
-		require.Equal(t, "SidecarNotReady", reason)
-	})
 }
 
 func TestEnsureSandboxPodReadinessConditionUpdatesGateStatus(t *testing.T) {
@@ -203,7 +190,7 @@ func TestEnsureSandboxPodReadinessConditionUpdatesGateStatus(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(pod.DeepCopy())
-	updated, err := EnsureSandboxPodReadinessCondition(context.Background(), client, pod, nil)
+	updated, err := EnsureSandboxPodReadinessCondition(context.Background(), client, pod)
 	require.NoError(t, err)
 	require.NotNil(t, updated)
 
@@ -217,15 +204,6 @@ func TestEnsureSandboxPodReadinessConditionUpdatesGateStatus(t *testing.T) {
 	require.NotNil(t, condition)
 	require.Equal(t, corev1.ConditionTrue, condition.Status)
 	require.Equal(t, "SandboxActive", condition.Reason)
-}
-
-type staticReadinessEvaluator struct {
-	failure *SandboxReadinessFailure
-	err     error
-}
-
-func (e staticReadinessEvaluator) FirstFailure(context.Context, *corev1.Pod) (*SandboxReadinessFailure, error) {
-	return e.failure, e.err
 }
 
 func TestEnsureNetdMITMCASecretCopiesCertIntoTemplateNamespace(t *testing.T) {

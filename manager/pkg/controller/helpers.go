@@ -126,7 +126,7 @@ func HasSandboxPodReadinessGate(pod *corev1.Pod) bool {
 	return false
 }
 
-func DesiredSandboxPodReadiness(ctx context.Context, pod *corev1.Pod, evaluator SandboxReadinessEvaluator) (corev1.ConditionStatus, string, string) {
+func DesiredSandboxPodReadiness(pod *corev1.Pod) (corev1.ConditionStatus, string, string) {
 	if pod == nil {
 		return corev1.ConditionFalse, "PodMissing", "pod is missing"
 	}
@@ -141,19 +141,10 @@ func DesiredSandboxPodReadiness(ctx context.Context, pod *corev1.Pod, evaluator 
 	if observed != "active" || phase != "stable" {
 		return corev1.ConditionFalse, "PowerStateTransitioning", "sandbox power state is not yet active and stable"
 	}
-	if evaluator != nil {
-		failure, err := evaluator.FirstFailure(ctx, pod)
-		if err != nil {
-			return corev1.ConditionFalse, "ManagedReadinessError", fmt.Sprintf("sandbox0-managed readiness evaluation failed: %v", err)
-		}
-		if failure != nil {
-			return corev1.ConditionFalse, failure.Reason, failure.Message
-		}
-	}
 	return corev1.ConditionTrue, "SandboxActive", "sandbox is active and ready"
 }
 
-func EnsureSandboxPodReadinessCondition(ctx context.Context, client kubernetes.Interface, pod *corev1.Pod, evaluator SandboxReadinessEvaluator) (*corev1.Pod, error) {
+func EnsureSandboxPodReadinessCondition(ctx context.Context, client kubernetes.Interface, pod *corev1.Pod) (*corev1.Pod, error) {
 	if client == nil || pod == nil || !HasSandboxPodReadinessGate(pod) {
 		return pod, nil
 	}
@@ -169,7 +160,7 @@ func EnsureSandboxPodReadinessCondition(ctx context.Context, client kubernetes.I
 			return nil
 		}
 
-		status, reason, message := DesiredSandboxPodReadiness(ctx, current, evaluator)
+		status, reason, message := DesiredSandboxPodReadiness(current)
 		existing := findPodCondition(current.Status.Conditions, v1alpha1.SandboxPodReadinessConditionType)
 		if existing != nil && existing.Status == status && existing.Reason == reason && existing.Message == message {
 			updated = current

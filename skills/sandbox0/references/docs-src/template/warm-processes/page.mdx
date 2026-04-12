@@ -1,0 +1,79 @@
+# Template Warm Processes
+
+Use `spec.warmProcesses` when a template needs a helper process to be running before an idle pod is claimed from the warm pool. Procd remains PID 1 in the sandbox container and starts each warm process during template pod creation.
+
+Warm processes are intended for long-running helpers such as agents, language servers, REPL sessions, and daemon-style workers. If a configured warm process exits, procd readiness fails and the pod is not hot-claimed.
+
+## Spec
+
+```yaml
+spec:
+    mainContainer:
+        image: ubuntu:24.04
+        resources:
+            cpu: "1"
+            memory: 2Gi
+    warmProcesses:
+        - type: cmd
+          alias: codex
+          command: ["/bin/sh", "-lc", "/app/start-codex.sh"]
+          cwd: /workspace
+          envVars:
+              MODE: warm
+    pool:
+        minIdle: 2
+        maxIdle: 10
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `type` | yes | `cmd` or `repl`. |
+| `alias` | no | Process alias stored in procd context metadata. |
+| `command` | for `cmd` | Command path and arguments. Not allowed for `repl`. |
+| `cwd` | no | Absolute working directory. Reserved paths such as `/config` and `/procd/bin` are rejected. |
+| `envVars` | no | Process-specific environment variables. |
+
+## Readiness
+
+Warm-pool capacity is based on pod readiness. When `warmProcesses` is present, procd starts the configured processes before serving healthy `/readyz` responses. A pod with `Ready=False` does not count toward idle capacity and is not selected for a hot claim.
+
+For `cmd` warm processes, use commands that keep running. One-shot setup commands that exit successfully still make readiness fail because there is no warm process left to claim.
+
+## Process Placement
+
+Put template-owned helper binaries in the main sandbox image and start them with `warmProcesses`.
+
+```yaml
+spec:
+    mainContainer:
+        image: ghcr.io/example/sandbox-with-helper:v1
+        resources:
+            cpu: "1"
+            memory: 2Gi
+    warmProcesses:
+        - type: cmd
+          alias: helper
+          command: ["/bin/sh", "-lc", "/app/helper"]
+```
+
+If the helper needs persistent files, use normal sandbox volume mounts and paths visible inside the main sandbox container.
+
+## Next Steps
+
+<CardGrid>
+  <LinkCard
+    title="Warm Pool"
+    href="/docs/template/pool"
+    cta="Learn More"
+  >
+    Keep idle pods ready for fast claims
+  </LinkCard>
+
+  <LinkCard
+    title="Configuration"
+    href="/docs/template/configuration"
+    cta="Learn More"
+  >
+    Template spec field reference
+  </LinkCard>
+</CardGrid>

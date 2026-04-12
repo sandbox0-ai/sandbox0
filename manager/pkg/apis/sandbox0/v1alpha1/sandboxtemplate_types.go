@@ -37,12 +37,9 @@ type SandboxTemplateSpec struct {
 	// MainContainer configuration (required)
 	MainContainer ContainerSpec `json:"mainContainer"`
 
-	// Sidecar containers (optional)
-	Sidecars []SidecarContainerSpec `json:"sidecars,omitempty"`
-
-	// SharedVolumes declares sandbox volumes that procd mounts into the main
-	// container and sidecars can reference by name.
-	SharedVolumes []SharedVolumeSpec `json:"sharedVolumes,omitempty"`
+	// WarmProcesses are started by procd when the template pod starts, before the
+	// pod becomes claimable from the warm pool.
+	WarmProcesses []WarmProcessSpec `json:"warmProcesses,omitempty"`
 
 	// Pod-level configuration
 	Pod *PodSpecOverride `json:"pod,omitempty"`
@@ -53,17 +50,11 @@ type SandboxTemplateSpec struct {
 	// Pool strategy
 	Pool PoolStrategy `json:"pool"`
 
-	// Environment variables (global, shared by all containers)
+	// Environment variables injected into the procd-managed sandbox environment.
 	EnvVars map[string]string `json:"envVars,omitempty"`
 
 	// Environment configuration
 	ClusterId *string `json:"clusterId,omitempty"`
-}
-
-// UsesSharedVolumes reports whether the template opts into the dedicated
-// shared-volume path that requires mount propagation support.
-func (s SandboxTemplateSpec) UsesSharedVolumes() bool {
-	return len(s.SharedVolumes) > 0
 }
 
 type ContainerSpec struct {
@@ -74,44 +65,22 @@ type ContainerSpec struct {
 	SecurityContext *SecurityContext `json:"securityContext,omitempty"`
 }
 
-type SidecarContainerSpec struct {
-	Name           string               `json:"name"`
-	Image          string               `json:"image"`
-	Command        []string             `json:"command,omitempty"`
-	Args           []string             `json:"args,omitempty"`
-	Env            []EnvVar             `json:"env,omitempty"`
-	Resources      ResourceQuota        `json:"resources"`
-	Mounts         []ContainerMountSpec `json:"mounts,omitempty"`
-	ReadinessProbe *corev1.Probe        `json:"readinessProbe,omitempty"`
-	StartupProbe   *corev1.Probe        `json:"startupProbe,omitempty"`
-}
-
 const SandboxPodReadinessConditionType corev1.PodConditionType = "sandbox0.ai/ready"
 
-// ManagedSidecarReadinessProbe keeps K8s-compatible readinessProbe syntax in the
-// template while letting sandbox0 execute and aggregate the checks itself.
-type ManagedSidecarReadinessProbe struct {
-	Name  string        `json:"name"`
-	Probe *corev1.Probe `json:"probe"`
-}
+// +kubebuilder:validation:Enum=repl;cmd
+type WarmProcessType string
 
-type ContainerMountSpec struct {
-	Name      string `json:"name"`
-	MountPath string `json:"mountPath"`
-	ReadOnly  bool   `json:"readOnly,omitempty"`
-}
+const (
+	WarmProcessTypeREPL WarmProcessType = "repl"
+	WarmProcessTypeCMD  WarmProcessType = "cmd"
+)
 
-type SharedVolumeSpec struct {
-	Name string `json:"name"`
-	// SandboxVolumeID optionally pins the shared volume to a fixed volume at
-	// template creation time. When omitted, claim-time mounts bind the shared
-	// volume by matching sharedVolumes[*].mountPath to mounts[*].mount_point.
-	SandboxVolumeID string `json:"sandboxVolumeId,omitempty"`
-	MountPath       string `json:"mountPath"`
-	CacheSize       string `json:"cacheSize,omitempty"`
-	Prefetch        *int32 `json:"prefetch,omitempty"`
-	BufferSize      string `json:"bufferSize,omitempty"`
-	Writeback       *bool  `json:"writeback,omitempty"`
+type WarmProcessSpec struct {
+	Type    WarmProcessType   `json:"type"`
+	Alias   string            `json:"alias,omitempty"`
+	Command []string          `json:"command,omitempty"`
+	CWD     string            `json:"cwd,omitempty"`
+	EnvVars map[string]string `json:"envVars,omitempty"`
 }
 
 // EnvVar represents an environment variable

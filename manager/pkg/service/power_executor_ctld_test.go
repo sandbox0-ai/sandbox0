@@ -244,7 +244,7 @@ func TestCtldPowerExecutorDistributesPauseResizeAcrossContainers(t *testing.T) {
 					},
 				},
 				{
-					Name: "sidecar",
+					Name: "helper",
 					Resources: corev1.ResourceRequirements{
 						Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m"), corev1.ResourceMemory: resource.MustParse("100Mi")},
 						Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m"), corev1.ResourceMemory: resource.MustParse("100Mi")},

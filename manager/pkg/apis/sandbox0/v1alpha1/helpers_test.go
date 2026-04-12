@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -91,64 +92,6 @@ sandbox_pod_placement:
 	}
 }
 
-func TestBuildPodSpecMountsSharedTemplateVolumes(t *testing.T) {
-	configPath := writeManagerConfig(t, `
-manager_image: sandbox0/manager:test
-`)
-	t.Setenv("CONFIG_PATH", configPath)
-
-	template := newTestTemplate()
-	template.Spec.SharedVolumes = []SharedVolumeSpec{
-		{
-			Name:            "workspace",
-			SandboxVolumeID: "vol-1",
-			MountPath:       "/workspace",
-		},
-	}
-	template.Spec.Sidecars = []SidecarContainerSpec{
-		{
-			Name:      "sidecar",
-			Image:     "busybox:latest",
-			Resources: ResourceQuota{CPU: resource.MustParse("500m"), Memory: resource.MustParse("2Gi")},
-			Mounts: []ContainerMountSpec{{
-				Name:      "workspace",
-				MountPath: "/mnt/workspace",
-			}},
-		},
-	}
-
-	spec := BuildPodSpec(template, false)
-	if len(spec.Containers) != 2 {
-		t.Fatalf("expected 2 containers, got %d", len(spec.Containers))
-	}
-
-	volume := findVolume(spec.Volumes, sharedTemplateVolumeName(0))
-	if volume == nil || volume.EmptyDir == nil {
-		t.Fatalf("expected shared template emptyDir volume, got %#v", volume)
-	}
-
-	main := spec.Containers[0]
-	mainMount := findVolumeMount(main.VolumeMounts, sharedTemplateVolumeName(0))
-	if mainMount == nil || mainMount.MountPath != "/workspace" {
-		t.Fatalf("expected main shared mount at /workspace, got %#v", mainMount)
-	}
-	if main.SecurityContext == nil || main.SecurityContext.Privileged == nil || !*main.SecurityContext.Privileged {
-		t.Fatalf("expected shared-volume main container to be privileged, got %#v", main.SecurityContext)
-	}
-	if mainMount.MountPropagation == nil || *mainMount.MountPropagation != corev1.MountPropagationBidirectional {
-		t.Fatalf("expected main mount propagation bidirectional, got %#v", mainMount.MountPropagation)
-	}
-
-	sidecar := spec.Containers[1]
-	sidecarMount := findVolumeMount(sidecar.VolumeMounts, sharedTemplateVolumeName(0))
-	if sidecarMount == nil || sidecarMount.MountPath != "/mnt/workspace" {
-		t.Fatalf("expected sidecar shared mount at /mnt/workspace, got %#v", sidecarMount)
-	}
-	if sidecarMount.MountPropagation == nil || *sidecarMount.MountPropagation != corev1.MountPropagationHostToContainer {
-		t.Fatalf("expected sidecar mount propagation host-to-container, got %#v", sidecarMount.MountPropagation)
-	}
-}
-
 func TestBuildPodSpecAppliesConfiguredSandboxRuntimeClass(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test
@@ -216,78 +159,42 @@ procd_config:
 	}
 }
 
-func TestBuildPodSpecPreservesSidecarCommandAndProbes(t *testing.T) {
+func TestBuildPodSpecInjectsWarmProcessesEnv(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test
 `)
 	t.Setenv("CONFIG_PATH", configPath)
 
 	template := newTestTemplate()
-	template.Spec.Sidecars = []SidecarContainerSpec{
-		{
-			Name:      "codex",
-			Image:     "busybox:latest",
-			Command:   []string{"sh", "-lc", "sleep 30; touch /tmp/ready; tail -f /dev/null"},
-			Args:      []string{"--verbose"},
-			Resources: ResourceQuota{CPU: resource.MustParse("500m"), Memory: resource.MustParse("2Gi")},
-			ReadinessProbe: &corev1.Probe{
-				ProbeHandler: corev1.ProbeHandler{
-					Exec: &corev1.ExecAction{Command: []string{"test", "-f", "/tmp/ready"}},
-				},
-				PeriodSeconds: 5,
-			},
-			StartupProbe: &corev1.Probe{
-				ProbeHandler: corev1.ProbeHandler{
-					Exec: &corev1.ExecAction{Command: []string{"test", "-f", "/tmp/started"}},
-				},
-				FailureThreshold: 30,
-			},
-		},
-	}
+	template.Spec.WarmProcesses = []WarmProcessSpec{{
+		Type:    WarmProcessTypeCMD,
+		Command: []string{"/bin/sh", "-lc", "sleep 3600"},
+		CWD:     "/workspace",
+		EnvVars: map[string]string{"MODE": "warm"},
+	}}
 
 	spec := BuildPodSpec(template, false)
-	if len(spec.Containers) != 2 {
-		t.Fatalf("expected 2 containers, got %d", len(spec.Containers))
+	if len(spec.Containers) != 1 {
+		t.Fatalf("expected procd-only pod, got %d containers", len(spec.Containers))
 	}
 
 	main := spec.Containers[0]
 	if main.Name != "procd" {
 		t.Fatalf("expected main container to remain procd, got %q", main.Name)
 	}
-
-	sidecar := spec.Containers[1]
-	if sidecar.Name != "codex" {
-		t.Fatalf("expected sidecar name codex, got %q", sidecar.Name)
+	env := findEnvVar(main.Env, WarmProcessesEnvVar)
+	if env == nil || env.Value == "" {
+		t.Fatalf("expected %s env var, got %#v", WarmProcessesEnvVar, env)
 	}
-	if len(sidecar.Command) != 3 || sidecar.Command[0] != "sh" || sidecar.Command[1] != "-lc" {
-		t.Fatalf("unexpected sidecar command: %v", sidecar.Command)
+	var decoded []WarmProcessSpec
+	if err := json.Unmarshal([]byte(env.Value), &decoded); err != nil {
+		t.Fatalf("warm process env is invalid JSON: %v", err)
 	}
-	if len(sidecar.Args) != 1 || sidecar.Args[0] != "--verbose" {
-		t.Fatalf("unexpected sidecar args: %v", sidecar.Args)
+	if len(decoded) != 1 || decoded[0].Type != WarmProcessTypeCMD {
+		t.Fatalf("unexpected warm processes: %#v", decoded)
 	}
-	if sidecar.StartupProbe == nil || sidecar.StartupProbe.Exec == nil {
-		t.Fatal("expected startup probe to be preserved")
-	}
-	if sidecar.ReadinessProbe != nil {
-		t.Fatal("expected kubelet readiness probe to be omitted from rendered sidecar")
-	}
-	if sidecar.StartupProbe.FailureThreshold != 30 {
-		t.Fatalf("startup failureThreshold = %d, want 30", sidecar.StartupProbe.FailureThreshold)
-	}
-
-	annotation, err := BuildManagedReadinessProbesAnnotation(template)
-	if err != nil {
-		t.Fatalf("BuildManagedReadinessProbesAnnotation() error = %v", err)
-	}
-	if annotation == "" {
-		t.Fatal("expected managed readiness annotation to be emitted")
-	}
-	probes := BuildManagedReadinessProbes(template)
-	if len(probes) != 1 || probes[0].Probe == nil || probes[0].Probe.Exec == nil {
-		t.Fatalf("expected one managed readiness probe, got %#v", probes)
-	}
-	if probes[0].Probe.PeriodSeconds != 5 {
-		t.Fatalf("managed readiness periodSeconds = %d, want 5", probes[0].Probe.PeriodSeconds)
+	if len(decoded[0].Command) != 3 || decoded[0].Command[2] != "sleep 3600" {
+		t.Fatalf("unexpected warm command: %#v", decoded[0].Command)
 	}
 }
 
@@ -306,26 +213,14 @@ manager_image: sandbox0/manager:test
 	}
 }
 
-func TestBuildPodSpecInjectsNetdMITMCATrustMaterialIntoAllContainers(t *testing.T) {
+func TestBuildPodSpecInjectsNetdMITMCATrustMaterialIntoProcdContainer(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test
 netd_mitm_ca_secret_name: fullmode-netd-mitm-ca
 `)
 	t.Setenv("CONFIG_PATH", configPath)
 
-	template := newTestTemplate()
-	template.Spec.Sidecars = []SidecarContainerSpec{
-		{
-			Name:      "sidecar",
-			Image:     "busybox:latest",
-			Resources: ResourceQuota{CPU: resource.MustParse("500m"), Memory: resource.MustParse("2Gi")},
-			Env: []EnvVar{
-				{Name: netdMITMCAEnvVar, Value: "/tmp/ignored.crt"},
-			},
-		},
-	}
-
-	spec := BuildPodSpec(template, false)
+	spec := BuildPodSpec(newTestTemplate(), false)
 
 	volume := findVolume(spec.Volumes, netdMITMCAVolume)
 	if volume == nil || volume.Secret == nil {
@@ -338,7 +233,7 @@ netd_mitm_ca_secret_name: fullmode-netd-mitm-ca
 		t.Fatalf("unexpected secret items: %#v", volume.Secret.Items)
 	}
 
-	for _, name := range []string{"procd", "sidecar"} {
+	for _, name := range []string{"procd"} {
 		container := findContainer(spec.Containers, name)
 		if container == nil {
 			t.Fatalf("expected container %q", name)

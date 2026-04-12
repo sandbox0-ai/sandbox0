@@ -93,7 +93,6 @@ CREATE TABLE IF NOT EXISTS api_keys (
     team_id UUID NOT NULL,
     created_by UUID NOT NULL,
     name TEXT NOT NULL,
-    type TEXT NOT NULL CHECK (type IN ('user', 'service', 'internal')),
     roles JSONB NOT NULL DEFAULT '[]',
     is_active BOOLEAN NOT NULL DEFAULT true,
     expires_at TIMESTAMPTZ NOT NULL,

@@ -27,12 +27,6 @@ const (
 	ChangeRequestEntryKindFile      ChangeRequestEntryKind = "file"
 )
 
-// Defines values for CreateAPIKeyRequestType.
-const (
-	CreateAPIKeyRequestTypeService CreateAPIKeyRequestType = "service"
-	CreateAPIKeyRequestTypeUser    CreateAPIKeyRequestType = "user"
-)
-
 // Defines values for CredentialProjectionType.
 const (
 	HttpHeaders          CredentialProjectionType = "http_headers"
@@ -573,7 +567,6 @@ type APIKey struct {
 	Name       string     `json:"name"`
 	Roles      []string   `json:"roles"`
 	TeamId     string     `json:"team_id"`
-	Type       string     `json:"type"`
 	UpdatedAt  time.Time  `json:"updated_at"`
 	UsageCount *int64     `json:"usage_count,omitempty"`
 	UserId     *string    `json:"user_id"`
@@ -747,14 +740,10 @@ type ContextStatsResponse struct {
 // CreateAPIKeyRequest defines model for CreateAPIKeyRequest.
 type CreateAPIKeyRequest struct {
 	// ExpiresIn 30d, 90d, 180d, 365d, or never
-	ExpiresIn *string                 `json:"expires_in,omitempty"`
-	Name      string                  `json:"name"`
-	Roles     *[]string               `json:"roles,omitempty"`
-	Type      CreateAPIKeyRequestType `json:"type"`
+	ExpiresIn *string   `json:"expires_in,omitempty"`
+	Name      string    `json:"name"`
+	Roles     *[]string `json:"roles,omitempty"`
 }
-
-// CreateAPIKeyRequestType defines model for CreateAPIKeyRequest.Type.
-type CreateAPIKeyRequestType string
 
 // CreateAPIKeyResponse defines model for CreateAPIKeyResponse.
 type CreateAPIKeyResponse struct {
@@ -765,7 +754,6 @@ type CreateAPIKeyResponse struct {
 	Name      string    `json:"name"`
 	Roles     []string  `json:"roles"`
 	TeamId    string    `json:"team_id"`
-	Type      string    `json:"type"`
 }
 
 // CreateCMDContextRequest defines model for CreateCMDContextRequest.
@@ -897,7 +885,6 @@ type CurrentAPIKeyResponse struct {
 	Permissions []string  `json:"permissions"`
 	Roles       []string  `json:"roles"`
 	TeamId      string    `json:"team_id"`
-	Type        string    `json:"type"`
 }
 
 // DeviceLoginPollRequest defines model for DeviceLoginPollRequest.

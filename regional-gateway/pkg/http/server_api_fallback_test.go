@@ -129,3 +129,69 @@ func TestSetupRoutesFallsBackToClusterGatewayForUnmatchedAPIPaths(t *testing.T) 
 		t.Fatal("expected forwarded internal token")
 	}
 }
+
+func TestSetupRoutesWithSchedulerRegistersSandboxRoutesWithoutConflict(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	logger := zap.NewNop()
+	obsProvider, err := observability.New(observability.Config{
+		ServiceName:    "regional-gateway-test",
+		Logger:         logger,
+		DisableTracing: true,
+		DisableMetrics: true,
+		DisableLogging: true,
+		TraceExporter: observability.TraceExporterConfig{
+			Type: "noop",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create observability provider: %v", err)
+	}
+
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ed25519 keypair: %v", err)
+	}
+
+	clusterGatewayTarget := httptest.NewServer(http.NotFoundHandler())
+	defer clusterGatewayTarget.Close()
+	schedulerTarget := httptest.NewServer(http.NotFoundHandler())
+	defer schedulerTarget.Close()
+
+	clusterGatewayRouter, err := proxy.NewRouter(clusterGatewayTarget.URL, logger, time.Second)
+	if err != nil {
+		t.Fatalf("create cluster-gateway proxy: %v", err)
+	}
+	schedulerRouter, err := proxy.NewRouter(schedulerTarget.URL, logger, time.Second)
+	if err != nil {
+		t.Fatalf("create scheduler proxy: %v", err)
+	}
+
+	jwtIssuer := authn.NewIssuer("regional-gateway", "secret", time.Minute, time.Hour)
+	server := &Server{
+		router:               gin.New(),
+		cfg:                  &config.RegionalGatewayConfig{AuthMode: edgeAuthModeSelfHosted},
+		apiKeyRepo:           &apikey.Repository{},
+		clusterGatewayRouter: clusterGatewayRouter,
+		schedulerRouter:      schedulerRouter,
+		authMiddleware:       gatewaymiddleware.NewAuthMiddleware(nil, "secret", jwtIssuer, logger),
+		rateLimiter:          gatewaymiddleware.NewRateLimiter(100, 200, time.Minute, logger),
+		requestLogger:        gatewaymiddleware.NewRequestLogger(logger),
+		logger:               logger,
+		internalAuthGen: internalauth.NewGenerator(internalauth.GeneratorConfig{
+			Caller:     "regional-gateway",
+			PrivateKey: privateKey,
+			TTL:        time.Minute,
+		}),
+		obsProvider: obsProvider,
+		jwtIssuer:   jwtIssuer,
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("setupRoutes panicked: %v", r)
+		}
+	}()
+
+	server.setupRoutes()
+}

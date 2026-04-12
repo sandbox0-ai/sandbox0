@@ -302,7 +302,15 @@ func (s *Server) setupRoutes() {
 			sandboxes.GET("", s.injectInternalTokenForTarget("scheduler"), s.schedulerRouter.ProxyToTarget)
 			sandboxes.POST("", s.injectInternalTokenForTarget("scheduler"), s.schedulerRouter.ProxyToTarget)
 			sandboxes.GET("/:id", s.getSandboxDetail)
-			sandboxes.Any("/:id", s.proxySandbox)
+			// GET /:id is handled by regional-gateway so it can enrich the response with
+			// region-scoped connection details. All other exact-ID operations proxy to
+			// the owning cluster-gateway.
+			sandboxes.DELETE("/:id", s.proxySandbox)
+			sandboxes.HEAD("/:id", s.proxySandbox)
+			sandboxes.OPTIONS("/:id", s.proxySandbox)
+			sandboxes.PATCH("/:id", s.proxySandbox)
+			sandboxes.POST("/:id", s.proxySandbox)
+			sandboxes.PUT("/:id", s.proxySandbox)
 			sandboxes.Any("/:id/*path", s.proxySandbox)
 		}
 

@@ -454,12 +454,15 @@ func TestCMD_WithWorkingDirectory(t *testing.T) {
 
 // TestCMD_WithEnvironment tests command with custom environment variables.
 func TestCMD_WithEnvironment(t *testing.T) {
+	t.Setenv("SANDBOX0_CMD_INHERITED_ENV", "from-image")
+	t.Setenv("SANDBOX0_CMD_OVERRIDE_ENV", "from-parent")
+
 	config := process.ProcessConfig{
 		Type:    process.ProcessTypeCMD,
-		EnvVars: map[string]string{"TEST_VAR": "test_value", "ANOTHER_VAR": "another_value"},
+		EnvVars: map[string]string{"TEST_VAR": "test_value", "SANDBOX0_CMD_OVERRIDE_ENV": "from-config"},
 	}
 
-	cmd, err := NewCMD("test-env", config, []string{"/bin/sh", "-c", "echo $TEST_VAR"})
+	cmd, err := NewCMD("test-env", config, []string{"/bin/sh", "-c", "printf '%s:%s:%s' \"$TEST_VAR\" \"$SANDBOX0_CMD_INHERITED_ENV\" \"$SANDBOX0_CMD_OVERRIDE_ENV\""})
 	if err != nil {
 		t.Fatalf("NewCMD() failed = %v", err)
 	}
@@ -475,8 +478,8 @@ func TestCMD_WithEnvironment(t *testing.T) {
 	}
 
 	stdout, _ := cmd.GetOutput()
-	if !strings.Contains(stdout, "test_value") {
-		t.Errorf("env var output = %s, want to contain 'test_value'", stdout)
+	if stdout != "test_value:from-image:from-config" {
+		t.Errorf("env var output = %q, want inherited env with config override", stdout)
 	}
 }
 

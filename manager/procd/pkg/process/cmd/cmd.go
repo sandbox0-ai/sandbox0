@@ -4,6 +4,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -98,7 +99,7 @@ func (c *CMD) prepareExecCmd(ctx context.Context) *exec.Cmd {
 	}
 
 	// Set environment variables
-	env := []string{}
+	env := os.Environ()
 	for k, v := range config.EnvVars {
 		env = append(env, fmt.Sprintf("%s=%s", k, v))
 	}

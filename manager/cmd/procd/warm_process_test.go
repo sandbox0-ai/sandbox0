@@ -13,7 +13,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	warmProcessExit = func(int) {}
+	warmProcessExit.Store(func(int) {})
 	os.Exit(m.Run())
 }
 
@@ -136,10 +136,10 @@ func TestWarmProcessHealthAllowsPausedContext(t *testing.T) {
 }
 
 func TestWarmProcessLivenessFailureExitsProcd(t *testing.T) {
-	previousExit := warmProcessExit
+	previousExit, _ := warmProcessExit.Load().(func(int))
 	var exitCode atomic.Int32
-	warmProcessExit = func(code int) { exitCode.Store(int32(code)) }
-	t.Cleanup(func() { warmProcessExit = previousExit })
+	warmProcessExit.Store(func(code int) { exitCode.Store(int32(code)) })
+	t.Cleanup(func() { warmProcessExit.Store(previousExit) })
 
 	prober := &warmProcessProber{
 		exitOnFailedLiveness: true,

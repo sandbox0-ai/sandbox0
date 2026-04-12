@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	ctxpkg "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/context"
@@ -22,7 +23,19 @@ import (
 
 const warmProcessesEnvVar = "SANDBOX0_WARM_PROCESSES"
 
-var warmProcessExit = os.Exit
+var warmProcessExit atomic.Value
+
+func init() {
+	warmProcessExit.Store(func(code int) { os.Exit(code) })
+}
+
+func exitWarmProcessProcd(code int) {
+	if exitFunc, ok := warmProcessExit.Load().(func(int)); ok && exitFunc != nil {
+		exitFunc(code)
+		return
+	}
+	os.Exit(code)
+}
 
 type warmProcessSpec struct {
 	Name    string            `json:"name,omitempty"`
@@ -215,7 +228,7 @@ func startWarmProcesses(manager *ctxpkg.Manager, logger *zap.Logger) ([]warmProc
 					zap.String("state", string(event.State)),
 				)
 			}
-			warmProcessExit(1)
+			exitWarmProcessProcd(1)
 		})
 		processes = append(processes, warmProcessRuntime{Spec: spec, ContextID: ctx.ID, StartedAt: time.Now()})
 		if logger != nil {
@@ -309,7 +322,7 @@ func (r *warmProcessProber) exitAfterFailedLiveness(result sandboxprobe.Response
 		}
 		go func() {
 			time.Sleep(100 * time.Millisecond)
-			warmProcessExit(1)
+			exitWarmProcessProcd(1)
 		}()
 	})
 }

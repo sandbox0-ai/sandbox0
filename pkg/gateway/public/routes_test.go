@@ -11,7 +11,36 @@ import (
 	"go.uber.org/zap"
 )
 
-func TestRegisterIdentityRoutesOmitsRegionalAPIKeys(t *testing.T) {
+func TestRegisterRoutesMountsSelfHostedPublicSurface(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	router := gin.New()
+	RegisterRoutes(router, testDeps())
+
+	if !hasRoute(router, "POST", "/auth/login") {
+		t.Fatal("expected full public routes to include /auth/login")
+	}
+	if !hasRoute(router, "GET", "/users/me") {
+		t.Fatal("expected full public routes to include /users/me")
+	}
+	if !hasRoute(router, "GET", "/teams") {
+		t.Fatal("expected full public routes to include /teams")
+	}
+	if !hasRoute(router, "GET", "/users/me/ssh-keys") {
+		t.Fatal("expected full public routes to include SSH key list")
+	}
+	if !hasRoute(router, "POST", "/users/me/ssh-keys") {
+		t.Fatal("expected full public routes to include SSH key create")
+	}
+	if !hasRoute(router, "DELETE", "/users/me/ssh-keys/:id") {
+		t.Fatal("expected full public routes to include SSH key delete")
+	}
+	if !hasRoute(router, "GET", "/api-keys") {
+		t.Fatal("expected full public routes to include /api-keys")
+	}
+}
+
+func TestRegisterIdentityRoutesOmitsRegionalStateRoutes(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	router := gin.New()
@@ -19,6 +48,15 @@ func TestRegisterIdentityRoutesOmitsRegionalAPIKeys(t *testing.T) {
 
 	if hasRoute(router, "GET", "/api-keys") {
 		t.Fatal("expected identity routes to omit /api-keys")
+	}
+	if hasRoute(router, "GET", "/users/me/ssh-keys") {
+		t.Fatal("expected identity routes to omit SSH key list")
+	}
+	if hasRoute(router, "POST", "/users/me/ssh-keys") {
+		t.Fatal("expected identity routes to omit SSH key create")
+	}
+	if hasRoute(router, "DELETE", "/users/me/ssh-keys/:id") {
+		t.Fatal("expected identity routes to omit SSH key delete")
 	}
 	if !hasRoute(router, "GET", "/users/me") {
 		t.Fatal("expected identity routes to include /users/me")

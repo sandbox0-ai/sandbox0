@@ -11,7 +11,11 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	cachepkg "github.com/sandbox0-ai/sandbox0/pkg/cache"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
+	gatewaymiddleware "github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/tenantdir"
+	"github.com/sandbox0-ai/sandbox0/pkg/licensing"
+	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"go.uber.org/zap"
 )
@@ -28,6 +32,51 @@ func (s *stubRegionDirectory) GetRegion(_ context.Context, _ string) (*tenantdir
 		return nil, s.err
 	}
 	return s.region, nil
+}
+
+func TestGlobalGatewaySetupRoutesOmitsRegionLocalSSHKeys(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logger := zap.NewNop()
+	jwtIssuer := authn.NewIssuer("test", "secret", time.Minute, time.Hour)
+	obsProvider, err := observability.New(observability.Config{
+		ServiceName:    "global-gateway-test",
+		Logger:         logger,
+		DisableTracing: true,
+		DisableMetrics: true,
+		DisableLogging: true,
+	})
+	if err != nil {
+		t.Fatalf("create observability provider: %v", err)
+	}
+
+	server := &Server{
+		router:         gin.New(),
+		logger:         logger,
+		authMiddleware: gatewaymiddleware.NewAuthMiddleware(nil, "secret", jwtIssuer, logger),
+		requestLogger:  gatewaymiddleware.NewRequestLogger(logger),
+		jwtIssuer:      jwtIssuer,
+		entitlements:   licensing.NewStaticEntitlements(),
+		obsProvider:    obsProvider,
+		proxyTimeout:   time.Second,
+		regionProxies:  make(map[string]*proxy.Router),
+	}
+	server.setupRoutes()
+
+	if globalHasRoute(server.router, http.MethodGet, "/users/me/ssh-keys") {
+		t.Fatal("expected global-gateway routes to omit region-local SSH key list")
+	}
+	if globalHasRoute(server.router, http.MethodPost, "/users/me/ssh-keys") {
+		t.Fatal("expected global-gateway routes to omit region-local SSH key create")
+	}
+	if globalHasRoute(server.router, http.MethodDelete, "/users/me/ssh-keys/:id") {
+		t.Fatal("expected global-gateway routes to omit region-local SSH key delete")
+	}
+	if !globalHasRoute(server.router, http.MethodGet, "/users/me") {
+		t.Fatal("expected global-gateway routes to include global user profile")
+	}
+	if !globalHasRoute(server.router, http.MethodGet, "/regions") {
+		t.Fatal("expected global-gateway routes to include region directory")
+	}
 }
 
 func TestGlobalGatewayResolveRoutableRegionCachesLookups(t *testing.T) {
@@ -53,6 +102,15 @@ func TestGlobalGatewayResolveRoutableRegionCachesLookups(t *testing.T) {
 	if dir.calls != 1 {
 		t.Fatalf("expected one backing lookup, got %d", dir.calls)
 	}
+}
+
+func globalHasRoute(router *gin.Engine, method, path string) bool {
+	for _, route := range router.Routes() {
+		if route.Method == method && route.Path == path {
+			return true
+		}
+	}
+	return false
 }
 
 func TestGlobalGatewayResolveRoutableRegionExpiresCache(t *testing.T) {

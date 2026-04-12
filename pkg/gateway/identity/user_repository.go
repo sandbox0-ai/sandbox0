@@ -138,12 +138,24 @@ func (r *Repository) UpdateUserPassword(ctx context.Context, userID, passwordHas
 
 // DeleteUser deletes a user.
 func (r *Repository) DeleteUser(ctx context.Context, id string) error {
-	result, err := r.pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, id)
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	result, err := tx.Exec(ctx, `DELETE FROM users WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("delete user: %w", err)
 	}
 	if result.RowsAffected() == 0 {
 		return ErrUserNotFound
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM user_ssh_public_keys WHERE user_id = $1`, id); err != nil {
+		return fmt.Errorf("delete user ssh public keys: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit tx: %w", err)
 	}
 	return nil
 }

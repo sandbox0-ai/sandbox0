@@ -70,6 +70,81 @@ func TestUserSSHPublicKeyRepositoryLifecycle(t *testing.T) {
 	}
 }
 
+func TestUserSSHPublicKeyRepositoryAllowsFederatedUserID(t *testing.T) {
+	pool, schema := newGatewayIdentityTestPool(t)
+	if pool == nil {
+		return
+	}
+
+	ctx := context.Background()
+	repo := NewRepository(pool)
+	userID := uuid.NewString()
+	publicKey, keyType, fingerprint, comment, err := NormalizeAuthorizedSSHPublicKey("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ4dLZLZOA/asaP+5QO6t81jzbe5G4jrI2F+jbjL6TY8 sandbox0-e2e")
+	if err != nil {
+		t.Fatalf("normalize ssh public key: %v", err)
+	}
+
+	key := &UserSSHPublicKey{
+		UserID:            userID,
+		Name:              "Federated laptop",
+		PublicKey:         publicKey,
+		KeyType:           keyType,
+		FingerprintSHA256: fingerprint,
+		Comment:           comment,
+	}
+	if err := repo.CreateUserSSHPublicKey(ctx, key); err != nil {
+		t.Fatalf("create ssh public key for federated user: %v", err)
+	}
+
+	keys, err := repo.ListUserSSHPublicKeysByUserID(ctx, userID)
+	if err != nil {
+		t.Fatalf("list federated user ssh public keys: %v", err)
+	}
+	if len(keys) != 1 {
+		t.Fatalf("keys len = %d, want 1 (schema %s)", len(keys), schema)
+	}
+}
+
+func TestDeleteUserRemovesSSHPublicKeys(t *testing.T) {
+	pool, _ := newGatewayIdentityTestPool(t)
+	if pool == nil {
+		return
+	}
+
+	ctx := context.Background()
+	repo := NewRepository(pool)
+	user := &User{
+		Email: "delete-ssh-user@example.com",
+		Name:  "Delete SSH User",
+	}
+	if err := repo.CreateUser(ctx, user); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	publicKey, keyType, fingerprint, comment, err := NormalizeAuthorizedSSHPublicKey("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ4dLZLZOA/asaP+5QO6t81jzbe5G4jrI2F+jbjL6TY8 sandbox0-e2e")
+	if err != nil {
+		t.Fatalf("normalize ssh public key: %v", err)
+	}
+	key := &UserSSHPublicKey{
+		UserID:            user.ID,
+		Name:              "Laptop",
+		PublicKey:         publicKey,
+		KeyType:           keyType,
+		FingerprintSHA256: fingerprint,
+		Comment:           comment,
+	}
+	if err := repo.CreateUserSSHPublicKey(ctx, key); err != nil {
+		t.Fatalf("create ssh public key: %v", err)
+	}
+
+	if err := repo.DeleteUser(ctx, user.ID); err != nil {
+		t.Fatalf("delete user: %v", err)
+	}
+	if _, err := repo.GetUserSSHPublicKeyByFingerprint(ctx, fingerprint); err != ErrSSHPublicKeyNotFound {
+		t.Fatalf("get ssh public key after user delete err = %v, want %v", err, ErrSSHPublicKeyNotFound)
+	}
+}
+
 func newGatewayIdentityTestPool(t *testing.T) (*pgxpool.Pool, string) {
 	t.Helper()
 

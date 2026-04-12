@@ -31,7 +31,7 @@ func TestBuildPodTemplateIncludesTemplateHash(t *testing.T) {
 		},
 	}
 
-	got, err := pm.buildPodTemplate(template, true, "hash-v1")
+	got, err := pm.buildPodTemplate(template, "hash-v1")
 	require.NoError(t, err)
 	require.NotNil(t, got.Annotations)
 	assert.Equal(t, "hash-v1", got.Annotations[AnnotationTemplateSpecHash])

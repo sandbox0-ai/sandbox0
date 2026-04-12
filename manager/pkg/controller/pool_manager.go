@@ -166,7 +166,7 @@ func (pm *PoolManager) getOrCreateReplicaSet(ctx context.Context, template *v1al
 	if err != nil {
 		return nil, fmt.Errorf("compute template hash: %w", err)
 	}
-	podTemplate, err := pm.buildPodTemplate(template, true, hash)
+	podTemplate, err := pm.buildPodTemplate(template, hash)
 	if err != nil {
 		return nil, fmt.Errorf("build pod template: %w", err)
 	}
@@ -208,8 +208,8 @@ func (pm *PoolManager) getOrCreateReplicaSet(ctx context.Context, template *v1al
 }
 
 // buildPodTemplate builds the pod template for a template
-func (pm *PoolManager) buildPodTemplate(template *v1alpha1.SandboxTemplate, restart bool, specHash string) (corev1.PodTemplateSpec, error) {
-	spec := v1alpha1.BuildPodSpec(template, restart)
+func (pm *PoolManager) buildPodTemplate(template *v1alpha1.SandboxTemplate, specHash string) (corev1.PodTemplateSpec, error) {
+	spec := v1alpha1.BuildPodSpec(template)
 	annotations := map[string]string{
 		AnnotationTemplateSpecHash: specHash,
 	}
@@ -236,7 +236,7 @@ func (pm *PoolManager) reconcileReplicaSetTemplate(
 		return rs, nil
 	}
 
-	newTemplate, err := pm.buildPodTemplate(template, true, desiredTemplateHash)
+	newTemplate, err := pm.buildPodTemplate(template, desiredTemplateHash)
 	if err != nil {
 		return nil, fmt.Errorf("build pod template: %w", err)
 	}
@@ -330,7 +330,7 @@ func (pm *PoolManager) deleteStaleIdlePodWithRetry(ctx context.Context, namespac
 }
 
 func templateSpecHash(template *v1alpha1.SandboxTemplate) (string, error) {
-	podSpec := v1alpha1.BuildPodSpec(template, true)
+	podSpec := v1alpha1.BuildPodSpec(template)
 	payload := struct {
 		PodSpec corev1.PodSpec `json:"podSpec"`
 	}{

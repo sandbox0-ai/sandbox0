@@ -21,7 +21,7 @@ type warmProcessSpec struct {
 	EnvVars map[string]string `json:"envVars,omitempty"`
 }
 
-type warmProcessReadiness struct {
+type warmProcessChecker struct {
 	manager    *ctxpkg.Manager
 	contextIDs []string
 }
@@ -99,7 +99,7 @@ func startWarmProcesses(manager *ctxpkg.Manager, logger *zap.Logger) ([]string, 
 	return contextIDs, nil
 }
 
-func (r warmProcessReadiness) Check() error {
+func (r warmProcessChecker) Check() error {
 	for _, contextID := range r.contextIDs {
 		ctx, err := r.manager.GetContext(contextID)
 		if err != nil {

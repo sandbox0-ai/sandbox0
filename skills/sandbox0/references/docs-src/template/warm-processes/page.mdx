@@ -39,6 +39,8 @@ Warm-pool capacity is based on pod readiness. When `warmProcesses` is present, p
 
 For `cmd` warm processes, use commands that keep running. One-shot setup commands that exit successfully still make readiness fail because there is no warm process left to claim.
 
+Sandbox0 wires warm process state into the pod's Kubernetes probes. If a warm process exits, `/readyz` fails and the pod leaves the warm pool. `/healthz` also fails, so Kubernetes restarts `procd`; during restart, `procd` starts the configured warm processes again before the pod becomes Ready.
+
 ## Process Placement
 
 Put template-owned helper binaries in the main sandbox image and start them with `warmProcesses`.

@@ -25,16 +25,13 @@ const (
 )
 
 // buildPodSpec builds a pod spec from a template
-func BuildPodSpec(template *SandboxTemplate, restart bool) corev1.PodSpec {
+func BuildPodSpec(template *SandboxTemplate) corev1.PodSpec {
 	spec := corev1.PodSpec{
-		RestartPolicy: corev1.RestartPolicyNever,
+		RestartPolicy: corev1.RestartPolicyAlways,
 		Containers:    buildContainers(template),
 		ReadinessGates: []corev1.PodReadinessGate{{
 			ConditionType: SandboxPodReadinessConditionType,
 		}},
-	}
-	if restart {
-		spec.RestartPolicy = corev1.RestartPolicyAlways
 	}
 
 	applyProcdSecretVolume(&spec, template)
@@ -233,17 +230,14 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Conta
 		Name:          "http",
 		ContainerPort: int32(procdHTTPPort()),
 	})
-	container.ReadinessProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			HTTPGet: &corev1.HTTPGetAction{
-				Path: "/readyz",
-				Port: intstr.FromString("http"),
-			},
-		},
-		PeriodSeconds:    1,
-		TimeoutSeconds:   1,
-		FailureThreshold: 3,
-	}
+	container.StartupProbe = procdHTTPProbe("/healthz")
+	container.StartupProbe.FailureThreshold = 60
+	container.LivenessProbe = procdHTTPProbe("/healthz")
+	container.LivenessProbe.PeriodSeconds = 5
+	container.LivenessProbe.FailureThreshold = 3
+	container.ReadinessProbe = procdHTTPProbe("/readyz")
+	container.ReadinessProbe.PeriodSeconds = 1
+	container.ReadinessProbe.FailureThreshold = 3
 	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
 		Name:      procdBinVolumeName,
 		MountPath: "/procd/bin",
@@ -273,6 +267,17 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Conta
 	container.SecurityContext.Capabilities.Add = append(container.SecurityContext.Capabilities.Add, corev1.Capability("SYS_ADMIN"))
 
 	return container
+}
+
+func procdHTTPProbe(path string) *corev1.Probe {
+	return &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{Path: path, Port: intstr.FromString("http")},
+		},
+		PeriodSeconds:    1,
+		TimeoutSeconds:   1,
+		FailureThreshold: 3,
+	}
 }
 
 func buildResourceRequirements(quota ResourceQuota) corev1.ResourceRequirements {

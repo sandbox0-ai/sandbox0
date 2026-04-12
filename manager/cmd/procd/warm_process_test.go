@@ -82,7 +82,7 @@ func TestStartWarmProcessesKeepsContextsReady(t *testing.T) {
 	require.True(t, ctx.IsRunning())
 	require.Equal(t, ctxpkg.CleanupPolicy{}, ctx.CleanupPolicy)
 
-	ready := warmProcessReadiness{manager: manager, contextIDs: contextIDs}
+	ready := warmProcessChecker{manager: manager, contextIDs: contextIDs}
 	require.NoError(t, ready.Check())
 
 	require.NoError(t, manager.DeleteContext(contextIDs[0]))

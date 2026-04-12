@@ -269,7 +269,7 @@ func TestCompletePausedSandboxRejectsStaleGeneration(t *testing.T) {
 		logger: zap.NewNop(),
 	}
 
-	resp, err := svc.completePausedSandbox(context.Background(), pod, "sandbox-1", &SandboxResourceUsage{ContainerMemoryWorkingSet: 128}, false, expectedSandboxPowerState{Desired: SandboxPowerStatePaused, Generation: 1})
+	resp, err := svc.completePausedSandbox(context.Background(), pod, "sandbox-1", &SandboxResourceUsage{ContainerMemoryWorkingSet: 128}, expectedSandboxPowerState{Desired: SandboxPowerStatePaused, Generation: 1})
 	require.ErrorIs(t, err, errSandboxPowerStateStale)
 	assert.False(t, resp.Paused)
 	assert.Equal(t, SandboxPowerStateActive, resp.PowerState.Desired)

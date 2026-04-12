@@ -74,7 +74,7 @@ type Server struct {
 	// Webhook dispatcher
 	webhookDispatcher *webhook.Dispatcher
 
-	readyChecker func() error
+	probeChecker func() error
 }
 
 // NewServer creates a new HTTP server.
@@ -88,7 +88,7 @@ func NewServer(
 	webhookDispatcher *webhook.Dispatcher,
 	logger *zap.Logger,
 	obsProvider *observability.Provider,
-	readyChecker func() error,
+	probeChecker func() error,
 ) *Server {
 	s := &Server{
 		router:            mux.NewRouter(),
@@ -101,7 +101,7 @@ func NewServer(
 		webhookDispatcher: webhookDispatcher,
 		logger:            logger,
 		obsProvider:       obsProvider,
-		readyChecker:      readyChecker,
+		probeChecker:      probeChecker,
 	}
 
 	s.setupRoutes()
@@ -200,17 +200,26 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 func (s *Server) healthHandler(w http.ResponseWriter, r *http.Request) {
+	if err := s.checkProbes(); err != nil {
+		_ = spec.WriteError(w, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())
+		return
+	}
 	_ = spec.WriteSuccess(w, http.StatusOK, map[string]string{"status": "healthy"})
 }
 
 func (s *Server) readyHandler(w http.ResponseWriter, r *http.Request) {
-	if s.readyChecker != nil {
-		if err := s.readyChecker(); err != nil {
-			_ = spec.WriteError(w, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())
-			return
-		}
+	if err := s.checkProbes(); err != nil {
+		_ = spec.WriteError(w, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())
+		return
 	}
 	_ = spec.WriteSuccess(w, http.StatusOK, map[string]string{"status": "ready"})
+}
+
+func (s *Server) checkProbes() error {
+	if s.probeChecker == nil {
+		return nil
+	}
+	return s.probeChecker()
 }
 
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {

@@ -168,9 +168,9 @@ func main() {
 	if err != nil {
 		logger.Fatal("Failed to start warm processes", zap.Error(err))
 	}
-	var readyChecker func() error
+	var probeChecker func() error
 	if len(warmContextIDs) > 0 {
-		readyChecker = warmProcessReadiness{
+		probeChecker = warmProcessChecker{
 			manager:    contextManager,
 			contextIDs: warmContextIDs,
 		}.Check
@@ -187,7 +187,7 @@ func main() {
 		webhookDispatcher,
 		logger,
 		obsProvider,
-		readyChecker,
+		probeChecker,
 	)
 
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())

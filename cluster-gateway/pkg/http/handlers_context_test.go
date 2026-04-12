@@ -108,9 +108,9 @@ func TestGetProcdURLPausedSandboxReturnsWakingUp(t *testing.T) {
 				PowerState: mgr.SandboxPowerState{
 					Desired:            mgr.SandboxPowerStateActive,
 					DesiredGeneration:  4,
-					Observed:           mgr.SandboxPowerStatePaused,
-					ObservedGeneration: 3,
-					Phase:              mgr.SandboxPowerPhaseResuming,
+					Observed:           mgr.SandboxPowerStateActive,
+					ObservedGeneration: 4,
+					Phase:              mgr.SandboxPowerPhaseStable,
 				},
 			})
 		default:
@@ -131,12 +131,9 @@ func TestGetProcdURLPausedSandboxReturnsWakingUp(t *testing.T) {
 	}
 	defer server.sandboxAddrCache.Close()
 
-	addr, rec := mustGetProcdURL(t, server, "team-a", "user-a", "sb-1")
-	if addr != nil {
-		t.Fatalf("expected nil addr, got %q", addr.String())
-	}
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	addr, _ := mustGetProcdURL(t, server, "team-a", "user-a", "sb-1")
+	if addr == nil || addr.String() != "http://127.0.0.1:7777" {
+		t.Fatalf("addr = %v, want http://127.0.0.1:7777", addr)
 	}
 	if resumeCalls != 1 {
 		t.Fatalf("resumeCalls = %d, want 1", resumeCalls)

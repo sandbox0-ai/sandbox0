@@ -448,6 +448,8 @@ func main() {
 		}
 	}()
 
+	go sandboxService.StartPowerStateReconciler(ctx, cfg.ResyncPeriod.Duration)
+
 	// Start HTTP server
 	go func() {
 		if err := httpServer.Start(ctx); err != nil && err != http.ErrServerClosed {

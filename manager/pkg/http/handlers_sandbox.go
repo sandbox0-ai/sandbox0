@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -345,17 +346,13 @@ func (s *Server) pauseSandbox(c *gin.Context) {
 		return
 	}
 
-	resp, err := s.sandboxService.RequestPauseSandbox(c.Request.Context(), sandboxID)
+	resp, err := s.sandboxService.PauseSandboxAndWait(c.Request.Context(), sandboxID)
 	if err != nil {
-		s.logger.Error("Failed to pause sandbox",
-			zap.String("sandboxID", sandboxID),
-			zap.Error(err),
-		)
-		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, fmt.Sprintf("failed to pause sandbox: %v", err))
+		s.writeSandboxPowerTransitionError(c, "pause", sandboxID, err)
 		return
 	}
 
-	spec.JSONSuccess(c, http.StatusAccepted, resp)
+	spec.JSONSuccess(c, http.StatusOK, resp)
 }
 
 // resumeSandbox resumes a sandbox
@@ -385,17 +382,31 @@ func (s *Server) resumeSandbox(c *gin.Context) {
 		return
 	}
 
-	resp, err := s.sandboxService.RequestResumeSandbox(c.Request.Context(), sandboxID)
+	resp, err := s.sandboxService.ResumeSandboxAndWait(c.Request.Context(), sandboxID)
 	if err != nil {
-		s.logger.Error("Failed to resume sandbox",
-			zap.String("sandboxID", sandboxID),
-			zap.Error(err),
-		)
-		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, fmt.Sprintf("failed to resume sandbox: %v", err))
+		s.writeSandboxPowerTransitionError(c, "resume", sandboxID, err)
 		return
 	}
 
-	spec.JSONSuccess(c, http.StatusAccepted, resp)
+	spec.JSONSuccess(c, http.StatusOK, resp)
+}
+
+func (s *Server) writeSandboxPowerTransitionError(c *gin.Context, action, sandboxID string, err error) {
+	s.logger.Error("Failed to change sandbox power state",
+		zap.String("action", action),
+		zap.String("sandboxID", sandboxID),
+		zap.Error(err),
+	)
+	switch {
+	case errors.Is(err, service.ErrSandboxPowerTransitionSuperseded):
+		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, fmt.Sprintf("sandbox %s was superseded by a newer power transition", action))
+	case errors.Is(err, context.DeadlineExceeded):
+		spec.JSONError(c, http.StatusGatewayTimeout, spec.CodeUnavailable, fmt.Sprintf("timed out waiting for sandbox to %s", action))
+	case errors.Is(err, context.Canceled):
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, fmt.Sprintf("canceled while waiting for sandbox to %s", action))
+	default:
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, fmt.Sprintf("failed to %s sandbox: %v", action, err))
+	}
 }
 
 // refreshSandbox refreshes sandbox TTL

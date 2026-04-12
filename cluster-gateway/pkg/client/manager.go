@@ -146,7 +146,7 @@ func (c *ManagerClient) GetSandboxInternal(ctx context.Context, sandboxID string
 	return sandbox, nil
 }
 
-// ResumeSandbox asks manager to resume a paused sandbox.
+// ResumeSandbox asks manager to resume a paused sandbox and waits for it to become active.
 func (c *ManagerClient) ResumeSandbox(ctx context.Context, sandboxID, userID, teamID string) error {
 	token, err := c.internalAuthGen.Generate("manager", teamID, userID, internalauth.GenerateOptions{})
 	if err != nil {
@@ -170,7 +170,7 @@ func (c *ManagerClient) ResumeSandbox(ctx context.Context, sandboxID, userID, te
 	if resp.StatusCode == http.StatusNotFound {
 		return fmt.Errorf("%w: %s", ErrSandboxNotFound, sandboxID)
 	}
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		var payload map[string]any
 		_ = json.Unmarshal(body, &payload)

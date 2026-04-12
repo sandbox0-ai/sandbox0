@@ -19,6 +19,8 @@ import (
 	"go.uber.org/zap"
 )
 
+const defaultAutoResumeTimeout = 2 * time.Minute
+
 // === Process/Context Management Handlers (→ Procd) ===
 
 // createContext creates a new context in a sandbox
@@ -322,20 +324,16 @@ func (s *Server) getProcdURL(c *gin.Context, sandboxID string) (*url.URL, error)
 			return nil, errors.New("sandbox auto_resume is disabled")
 		}
 		if sandboxWantsPaused(sandbox) {
-			if sandbox.PowerState.Desired != mgr.SandboxPowerStateActive {
-				resumeCtx, cancel := context.WithTimeout(c.Request.Context(), 45*time.Second)
-				defer cancel()
-				if err := s.managerClient.ResumeSandbox(resumeCtx, sandboxID, authCtx.UserID, authCtx.TeamID); err != nil {
-					s.logger.Warn("Resume sandbox failed",
-						zap.String("sandbox_id", sandboxID),
-						zap.Error(err),
-					)
-					spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
-					return nil, err
-				}
+			resumeCtx, cancel := context.WithTimeout(c.Request.Context(), defaultAutoResumeTimeout)
+			defer cancel()
+			if err := s.managerClient.ResumeSandbox(resumeCtx, sandboxID, authCtx.UserID, authCtx.TeamID); err != nil {
+				s.logger.Warn("Resume sandbox failed",
+					zap.String("sandbox_id", sandboxID),
+					zap.Error(err),
+				)
+				spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
+				return nil, err
 			}
-			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
-			return nil, errors.New("sandbox is waking up")
 		}
 
 		// Parse procd address

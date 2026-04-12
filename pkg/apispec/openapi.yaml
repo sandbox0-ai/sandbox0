@@ -1310,12 +1310,24 @@ paths:
       parameters:
         - $ref: "#/components/parameters/SandboxID"
       responses:
-        "202":
-          description: Pause request accepted; sandbox power state will converge asynchronously
+        "200":
+          description: Sandbox paused
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessPauseSandboxResponse"
+        "409":
+          description: Pause was superseded by a newer power transition
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "504":
+          description: Timed out waiting for the sandbox to pause
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
         "404":
           description: Not found
           content:
@@ -1333,12 +1345,24 @@ paths:
       parameters:
         - $ref: "#/components/parameters/SandboxID"
       responses:
-        "202":
-          description: Resume request accepted; sandbox power state will converge asynchronously
+        "200":
+          description: Sandbox resumed
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessResumeSandboxResponse"
+        "409":
+          description: Resume was superseded by a newer power transition
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "504":
+          description: Timed out waiting for the sandbox to resume
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
         "404":
           description: Not found
           content:

@@ -70,17 +70,13 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is paused and resume is disabled")
 			return
 		}
-		if sandbox.PowerState.Desired != mgr.SandboxPowerStateActive {
-			resumeCtx, cancel := context.WithTimeout(c.Request.Context(), 45*time.Second)
-			defer cancel()
-			if err := s.managerClient.ResumeSandbox(resumeCtx, sandboxID, "", sandbox.TeamID); err != nil {
-				s.logger.Warn("Auto resume failed", zap.String("sandbox_id", sandboxID), zap.Error(err))
-				spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
-				return
-			}
+		resumeCtx, cancel := context.WithTimeout(c.Request.Context(), defaultAutoResumeTimeout)
+		defer cancel()
+		if err := s.managerClient.ResumeSandbox(resumeCtx, sandboxID, "", sandbox.TeamID); err != nil {
+			s.logger.Warn("Auto resume failed", zap.String("sandbox_id", sandboxID), zap.Error(err))
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
+			return
 		}
-		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
-		return
 	}
 
 	if basePort, parseErr := portFromURL(sandbox.InternalAddr); parseErr == nil && basePort == port {

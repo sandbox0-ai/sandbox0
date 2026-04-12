@@ -83,7 +83,12 @@ var errNoIdlePod = errors.New("no idle pod available")
 var ErrInvalidClaimRequest = errors.New("invalid claim request")
 var errSandboxPowerStateStale = errors.New("sandbox power state changed during execution")
 
+// ErrSandboxPowerTransitionSuperseded is returned when a newer pause/resume request replaces the requested transition.
+var ErrSandboxPowerTransitionSuperseded = errors.New("sandbox power transition superseded")
+
 const defaultPodReadyTimeout = 30 * time.Second
+const defaultSandboxPowerTransitionTimeout = 2 * time.Minute
+const defaultSandboxPowerPollInterval = 100 * time.Millisecond
 
 // claimIdlePodBackoff is the retry backoff for claiming idle pods.
 // Designed to balance between:
@@ -2060,6 +2065,35 @@ func (s *SandboxService) requestSandboxPowerState(ctx context.Context, sandboxID
 	return state, nil
 }
 
+func (s *SandboxService) waitForSandboxPowerState(ctx context.Context, sandboxID, target string, generation int64) (SandboxPowerState, error) {
+	var state SandboxPowerState
+	err := wait.PollUntilContextCancel(ctx, defaultSandboxPowerPollInterval, true, func(ctx context.Context) (bool, error) {
+		pod, err := s.getSandboxPodForPowerState(ctx, sandboxID)
+		if err != nil {
+			return false, err
+		}
+		state = sandboxPowerStateFromAnnotations(pod.Annotations)
+		if generation > 0 && (state.Desired != target || state.DesiredGeneration != generation) {
+			return false, fmt.Errorf("%w: %w", ErrSandboxPowerTransitionSuperseded, staleSandboxPowerStateError(state))
+		}
+		return state.Desired == target && state.Observed == target && state.Phase == SandboxPowerPhaseStable, nil
+	})
+	if err != nil {
+		if ctx.Err() != nil {
+			return state, ctx.Err()
+		}
+		return state, err
+	}
+	return state, nil
+}
+
+func sandboxPowerTransitionContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, defaultSandboxPowerTransitionTimeout)
+}
+
 func (s *SandboxService) triggerSandboxPowerStateReconcile(sandboxID string) {
 	if _, loaded := s.powerStateReconcilers.LoadOrStore(sandboxID, struct{}{}); loaded {
 		return
@@ -2068,6 +2102,48 @@ func (s *SandboxService) triggerSandboxPowerStateReconcile(sandboxID string) {
 		defer s.finishSandboxPowerStateReconcile(sandboxID)
 		s.reconcileSandboxPowerState(sandboxID)
 	}()
+}
+
+// StartPowerStateReconciler periodically reconciles power transitions left pending by another manager replica.
+func (s *SandboxService) StartPowerStateReconciler(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	s.reconcilePendingSandboxPowerStates(ctx)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.reconcilePendingSandboxPowerStates(ctx)
+		}
+	}
+}
+
+func (s *SandboxService) reconcilePendingSandboxPowerStates(ctx context.Context) {
+	if ctx.Err() != nil || s.podLister == nil {
+		return
+	}
+	pods, err := s.podLister.List(labels.Everything())
+	if err != nil {
+		s.logger.Warn("Failed to list sandboxes for power state reconcile", zap.Error(err))
+		return
+	}
+	for _, pod := range pods {
+		if pod == nil {
+			continue
+		}
+		sandboxID := strings.TrimSpace(pod.Labels[controller.LabelSandboxID])
+		if sandboxID == "" {
+			continue
+		}
+		state := sandboxPowerStateFromAnnotations(pod.Annotations)
+		if state.Phase != SandboxPowerPhaseStable || state.Desired != state.Observed {
+			s.triggerSandboxPowerStateReconcile(sandboxID)
+		}
+	}
 }
 
 func (s *SandboxService) finishSandboxPowerStateReconcile(sandboxID string) {
@@ -2544,7 +2620,18 @@ func (s *SandboxService) pauseSandboxLocal(ctx context.Context, sandboxID string
 		return nil, fmt.Errorf("procd pause failed: %s", pauseResp.Error)
 	}
 
-	return s.completePausedSandbox(ctx, pod, sandboxID, pauseResp.ResourceUsage, expected)
+	completedResp, err := s.completePausedSandbox(ctx, pod, sandboxID, pauseResp.ResourceUsage, expected)
+	if err != nil && errors.Is(err, errSandboxPowerStateStale) && completedResp != nil && completedResp.PowerState.Desired == SandboxPowerStateActive {
+		resumeResp, resumeErr := s.procdClient.Resume(ctx, procdAddress, internalToken, procdToken)
+		if resumeErr != nil {
+			return completedResp, fmt.Errorf("resume procd after stale pause: %w", resumeErr)
+		}
+		if !resumeResp.Resumed {
+			return completedResp, fmt.Errorf("procd resume after stale pause failed: %s", resumeResp.Error)
+		}
+		return &PauseSandboxResponse{SandboxID: sandboxID, Paused: false, PowerState: completedResp.PowerState, ResourceUsage: pauseResp.ResourceUsage}, nil
+	}
+	return completedResp, err
 }
 
 // RequestPauseSandbox records a desired paused state and reconciles it asynchronously.
@@ -2558,6 +2645,26 @@ func (s *SandboxService) RequestPauseSandbox(ctx context.Context, sandboxID stri
 		Paused:     true,
 		PowerState: state,
 	}, nil
+}
+
+// PauseSandboxAndWait records a desired paused state and waits until the sandbox observes it.
+func (s *SandboxService) PauseSandboxAndWait(ctx context.Context, sandboxID string) (*PauseSandboxResponse, error) {
+	resp, err := s.RequestPauseSandbox(ctx, sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	if resp.PowerState.Desired == SandboxPowerStatePaused && resp.PowerState.Observed == SandboxPowerStatePaused && resp.PowerState.Phase == SandboxPowerPhaseStable {
+		return resp, nil
+	}
+	waitCtx, cancel := sandboxPowerTransitionContext(ctx)
+	defer cancel()
+	state, err := s.waitForSandboxPowerState(waitCtx, sandboxID, SandboxPowerStatePaused, resp.PowerState.DesiredGeneration)
+	if err != nil {
+		return &PauseSandboxResponse{SandboxID: sandboxID, Paused: state.Observed == SandboxPowerStatePaused, PowerState: state}, err
+	}
+	resp.PowerState = state
+	resp.Paused = true
+	return resp, nil
 }
 
 // ResumeSandbox delegates sandbox resume execution to the configured power executor.
@@ -2919,6 +3026,26 @@ func (s *SandboxService) RequestResumeSandbox(ctx context.Context, sandboxID str
 		Resumed:    true,
 		PowerState: state,
 	}, nil
+}
+
+// ResumeSandboxAndWait records a desired active state and waits until the sandbox observes it.
+func (s *SandboxService) ResumeSandboxAndWait(ctx context.Context, sandboxID string) (*ResumeSandboxResponse, error) {
+	resp, err := s.RequestResumeSandbox(ctx, sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	if resp.PowerState.Desired == SandboxPowerStateActive && resp.PowerState.Observed == SandboxPowerStateActive && resp.PowerState.Phase == SandboxPowerPhaseStable {
+		return resp, nil
+	}
+	waitCtx, cancel := sandboxPowerTransitionContext(ctx)
+	defer cancel()
+	state, err := s.waitForSandboxPowerState(waitCtx, sandboxID, SandboxPowerStateActive, resp.PowerState.DesiredGeneration)
+	if err != nil {
+		return &ResumeSandboxResponse{SandboxID: sandboxID, Resumed: state.Observed == SandboxPowerStateActive, PowerState: state}, err
+	}
+	resp.PowerState = state
+	resp.Resumed = true
+	return resp, nil
 }
 
 // PauseSandboxByID implements the SandboxPauser interface from controller package.

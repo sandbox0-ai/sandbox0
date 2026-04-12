@@ -87,6 +87,7 @@ var errSandboxPowerStateStale = errors.New("sandbox power state changed during e
 var ErrSandboxPowerTransitionSuperseded = errors.New("sandbox power transition superseded")
 
 const defaultPodReadyTimeout = 30 * time.Second
+const defaultPodClaimReadyTimeout = 90 * time.Second
 const defaultSandboxPowerTransitionTimeout = 2 * time.Minute
 const defaultSandboxPowerPollInterval = 100 * time.Millisecond
 
@@ -2377,8 +2378,8 @@ func (s *SandboxService) waitForPodReady(ctx context.Context, namespace, name st
 
 func (s *SandboxService) waitForPodClaimReady(ctx context.Context, namespace, name string) (*corev1.Pod, error) {
 	timeout := s.config.ProcdInitTimeout
-	if timeout < defaultPodReadyTimeout {
-		timeout = defaultPodReadyTimeout
+	if timeout < defaultPodClaimReadyTimeout {
+		timeout = defaultPodClaimReadyTimeout
 	}
 
 	readyCtx, cancel := context.WithTimeout(ctx, timeout)

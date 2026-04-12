@@ -16,7 +16,9 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -198,13 +200,7 @@ func TestWaitForPodClaimReadyUsesSandboxReadinessWithoutPodReady(t *testing.T) {
 }
 
 func TestCreateNewPodCleansUpAfterNetworkApplyFailure(t *testing.T) {
-	keyPath := filepath.Join(t.TempDir(), "internal_jwt_public.key")
-	if err := os.WriteFile(keyPath, []byte("test-public-key"), 0o600); err != nil {
-		t.Fatalf("write public key: %v", err)
-	}
-	previousKeyPath := internalauth.DefaultInternalJWTPublicKeyPath
-	internalauth.DefaultInternalJWTPublicKeyPath = keyPath
-	t.Cleanup(func() { internalauth.DefaultInternalJWTPublicKeyPath = previousKeyPath })
+	withClaimTestPublicKey(t)
 
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
@@ -249,6 +245,50 @@ func TestCreateNewPodCleansUpAfterNetworkApplyFailure(t *testing.T) {
 	}
 	if len(removed) != 1 {
 		t.Fatalf("network policy removals = %d, want 1", len(removed))
+	}
+}
+
+func TestClaimSandboxCleansColdPodWhenClaimReadinessFails(t *testing.T) {
+	withClaimTestPublicKey(t)
+	templateNamespace, err := naming.TemplateNamespaceForBuiltin("managed-agent-claude")
+	if err != nil {
+		t.Fatalf("template namespace: %v", err)
+	}
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "managed-agent-claude",
+			Namespace: templateNamespace,
+		},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			MainContainer: v1alpha1.ContainerSpec{Image: "busybox"},
+		},
+	}
+	client := fake.NewSimpleClientset()
+	ctx, cancel := context.WithCancel(context.Background())
+	svc := &SandboxService{
+		k8sClient:            client,
+		podLister:            newClaimTestPodLister(t),
+		secretLister:         newClaimTestSecretLister(t),
+		templateLister:       staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
+		NetworkPolicyService: NewNetworkPolicyService(zap.NewNop()),
+		networkProvider: &assertingNetworkProvider{applyFunc: func(_ network.SandboxPolicyInput) {
+			cancel()
+		}},
+		clock:  systemTime{},
+		logger: zap.NewNop(),
+	}
+
+	_, err = svc.ClaimSandbox(ctx, &ClaimRequest{Template: "managed-agent-claude", TeamID: "team-a", UserID: "user-a"})
+	if err == nil {
+		t.Fatal("ClaimSandbox() error = nil, want claim readiness failure")
+	}
+
+	pods, err := client.CoreV1().Pods(templateNamespace).List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
+	if len(pods.Items) != 0 {
+		t.Fatalf("pods after failed cold claim = %d, want 0", len(pods.Items))
 	}
 }
 
@@ -359,6 +399,17 @@ func TestClaimMountWaitTimeoutDefaultsWhenEnabled(t *testing.T) {
 func newClaimTestPodLister(t *testing.T, pods ...*corev1.Pod) corelisters.PodLister {
 	t.Helper()
 	return corelisters.NewPodLister(newClaimTestPodIndexer(t, pods...))
+}
+
+func withClaimTestPublicKey(t *testing.T) {
+	t.Helper()
+	keyPath := filepath.Join(t.TempDir(), "internal_jwt_public.key")
+	if err := os.WriteFile(keyPath, []byte("test-public-key"), 0o600); err != nil {
+		t.Fatalf("write public key: %v", err)
+	}
+	previousKeyPath := internalauth.DefaultInternalJWTPublicKeyPath
+	internalauth.DefaultInternalJWTPublicKeyPath = keyPath
+	t.Cleanup(func() { internalauth.DefaultInternalJWTPublicKeyPath = previousKeyPath })
 }
 
 func newClaimTestSecretLister(t *testing.T, secrets ...*corev1.Secret) corelisters.SecretLister {

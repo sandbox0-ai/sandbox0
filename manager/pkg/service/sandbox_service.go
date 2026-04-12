@@ -588,7 +588,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	// already selected a Kubernetes-ready idle pod; cold claims use the faster
 	// claim-ready path below and let Kubernetes PodReady catch up asynchronously.
 	if claimType == "cold" {
-		pod, err = s.waitForPodClaimReady(ctx, pod.Namespace, pod.Name)
+		readyPod, err := s.waitForPodClaimReady(ctx, pod.Namespace, pod.Name)
 		if err != nil {
 			s.cleanupFailedColdClaim(pod, "claim readiness failed")
 			if metrics != nil {
@@ -596,6 +596,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 			}
 			return nil, fmt.Errorf("wait for pod claim readiness: %w", err)
 		}
+		pod = readyPod
 		s.refreshSandboxProbeConditionsAsync(pod)
 	}
 

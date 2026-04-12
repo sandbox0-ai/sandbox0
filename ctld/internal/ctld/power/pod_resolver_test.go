@@ -1,6 +1,7 @@
 package power
 
 import (
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -9,8 +10,12 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
+	corelisters "k8s.io/client-go/listers/core/v1"
+	k8stesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/tools/cache"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -18,6 +23,18 @@ import (
 
 func strPtr(value string) *string {
 	return &value
+}
+
+func newTestResolverPodCache(t *testing.T, pods ...*corev1.Pod) (corelisters.PodLister, cache.Indexer) {
+	t.Helper()
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{
+		cache.NamespaceIndex: cache.MetaNamespaceIndexFunc,
+		podSandboxIDIndex:    podSandboxIDIndexFunc,
+	})
+	for _, pod := range pods {
+		require.NoError(t, indexer.Add(pod))
+	}
+	return corelisters.NewPodLister(indexer), indexer
 }
 
 func createKataSandboxCgroup(t *testing.T, procRoot, dir, pid, process string) {
@@ -182,6 +199,89 @@ func TestPodResolverResolvePodDoesNotRequireSandboxLabel(t *testing.T) {
 	assert.Equal(t, "idle-pod-1", target.PodName)
 	assert.Equal(t, "10.0.0.10", target.PodIP)
 	assert.Equal(t, int32(49983), target.ProcdPort)
+}
+
+func TestPodResolverResolvePodUsesCacheBeforeLiveGet(t *testing.T) {
+	root := t.TempDir()
+	uid := types.UID("acacacac-bbbb-cccc-dddd-eeeeeeeeeeee")
+	podDir := filepath.Join(root, "kubepods", "podacacacac-bbbb-cccc-dddd-eeeeeeeeeeee")
+	require.NoError(t, os.MkdirAll(podDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(podDir, "cgroup.freeze"), []byte("0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(podDir, "memory.current"), []byte("64\n"), 0o644))
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "cached-pod", Namespace: "default", UID: uid},
+		Spec:       corev1.PodSpec{NodeName: "node-a"},
+		Status:     corev1.PodStatus{QOSClass: corev1.PodQOSGuaranteed},
+	}
+	lister, indexer := newTestResolverPodCache(t, pod)
+	client := fake.NewSimpleClientset()
+	client.PrependReactor("get", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("live get should not be called")
+	})
+
+	resolver := NewPodResolver(client, "node-a", root)
+	resolver.SetPodCache(lister, indexer)
+	target, err := resolver.ResolvePod(&http.Request{}, "default", "cached-pod")
+	require.NoError(t, err)
+	assert.Equal(t, "cached-pod", target.PodName)
+	assert.Equal(t, podDir, target.CgroupDir)
+}
+
+func TestPodResolverResolvePodFallsBackToLiveGetOnCacheMiss(t *testing.T) {
+	root := t.TempDir()
+	uid := types.UID("adadadad-bbbb-cccc-dddd-eeeeeeeeeeee")
+	podDir := filepath.Join(root, "kubepods", "podadadadad-bbbb-cccc-dddd-eeeeeeeeeeee")
+	require.NoError(t, os.MkdirAll(podDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(podDir, "cgroup.freeze"), []byte("0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(podDir, "memory.current"), []byte("64\n"), 0o644))
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "live-pod", Namespace: "default", UID: uid},
+		Spec:       corev1.PodSpec{NodeName: "node-a"},
+		Status:     corev1.PodStatus{QOSClass: corev1.PodQOSGuaranteed},
+	}
+	lister, indexer := newTestResolverPodCache(t)
+	resolver := NewPodResolver(fake.NewSimpleClientset(pod), "node-a", root)
+	resolver.SetPodCache(lister, indexer)
+
+	target, err := resolver.ResolvePod(&http.Request{}, "default", "live-pod")
+	require.NoError(t, err)
+	assert.Equal(t, "live-pod", target.PodName)
+	assert.Equal(t, podDir, target.CgroupDir)
+}
+
+func TestPodResolverResolveUsesSandboxIDCacheIndexBeforeLiveList(t *testing.T) {
+	root := t.TempDir()
+	uid := types.UID("aeaeaeae-bbbb-cccc-dddd-eeeeeeeeeeee")
+	podDir := filepath.Join(root, "kubepods", "podaeaeaeae-bbbb-cccc-dddd-eeeeeeeeeeee")
+	require.NoError(t, os.MkdirAll(podDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(podDir, "cgroup.freeze"), []byte("0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(podDir, "memory.current"), []byte("64\n"), 0o644))
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sandbox-cache-pod",
+			Namespace: "default",
+			UID:       uid,
+			Labels:    map[string]string{controller.LabelSandboxID: "sandbox-cache"},
+		},
+		Spec:   corev1.PodSpec{NodeName: "node-a"},
+		Status: corev1.PodStatus{QOSClass: corev1.PodQOSGuaranteed},
+	}
+	lister, indexer := newTestResolverPodCache(t, pod)
+	client := fake.NewSimpleClientset()
+	client.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("live list should not be called")
+	})
+
+	resolver := NewPodResolver(client, "node-a", root)
+	resolver.SetPodCache(lister, indexer)
+	target, err := resolver.Resolve(&http.Request{}, "sandbox-cache")
+	require.NoError(t, err)
+	assert.Equal(t, "sandbox-cache", target.SandboxID)
+	assert.Equal(t, "sandbox-cache-pod", target.PodName)
+	assert.Equal(t, podDir, target.CgroupDir)
 }
 
 func TestPodResolverResolveUsesPodCgroupForGVisor(t *testing.T) {

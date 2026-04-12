@@ -41,7 +41,10 @@ func main() {
 	log.Println("Starting ctld")
 	defer func() { log.Println("Stopped ctld") }()
 
-	httpServer := newHTTPServer(httpAddr, buildPowerController())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	httpServer := newHTTPServer(httpAddr, buildPowerController(ctx))
 	go func() {
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("ctld http server failed: %v", err)
@@ -94,6 +97,7 @@ L:
 				restart = true
 			default:
 				log.Printf("Received signal \"%v\", shutting down.", s)
+				cancel()
 				if devicePlugin != nil {
 					devicePlugin.Stop()
 				}
@@ -110,7 +114,10 @@ func newHTTPServer(addr string, controller ctldserver.Controller) *http.Server {
 	return &http.Server{Addr: addr, Handler: ctldserver.NewMux(controller)}
 }
 
-func buildPowerController() ctldserver.Controller {
+func buildPowerController(ctx context.Context) ctldserver.Controller {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	k8sClient, err := k8s.NewClient(kubeconfig)
 	if err != nil {
 		log.Printf("ctld power control disabled: build kubernetes client: %v", err)
@@ -118,6 +125,19 @@ func buildPowerController() ctldserver.Controller {
 	}
 	resolver := ctldpower.NewPodResolver(k8sClient, nodeName, cgroupRoot)
 	resolver.ProcRoot = procRoot
+	if podCache, err := ctldpower.NewNodePodCache(k8sClient, nodeName, 0); err != nil {
+		log.Printf("ctld pod cache disabled: %v", err)
+	} else {
+		podCache.Start(ctx)
+		resolver.SetPodCache(podCache.PodLister(), podCache.PodIndexer())
+		go func() {
+			syncCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			if !podCache.WaitForSync(syncCtx) && ctx.Err() == nil {
+				log.Printf("ctld pod cache did not sync before timeout; live kubernetes lookups remain enabled")
+			}
+		}()
+	}
 	controller := ctldpower.NewController(resolver, nil)
 	controller.StatsProvider = ctldpower.NewCRIStatsProvider(criEndpoint)
 	return controller

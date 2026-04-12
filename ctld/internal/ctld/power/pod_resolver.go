@@ -17,6 +17,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
+	corelisters "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/tools/cache"
 )
 
 const defaultCgroupRoot = "/sys/fs/cgroup"
@@ -24,6 +26,8 @@ const defaultProcRoot = "/proc"
 
 type PodResolver struct {
 	K8sClient  kubernetes.Interface
+	PodLister  corelisters.PodLister
+	PodIndexer cache.Indexer
 	NodeName   string
 	CgroupRoot string
 	ProcRoot   string
@@ -53,8 +57,16 @@ func NewPodResolver(k8sClient kubernetes.Interface, nodeName, cgroupRoot string)
 	}
 }
 
+func (r *PodResolver) SetPodCache(lister corelisters.PodLister, indexer cache.Indexer) {
+	if r == nil {
+		return
+	}
+	r.PodLister = lister
+	r.PodIndexer = indexer
+}
+
 func (r *PodResolver) Resolve(req *http.Request, sandboxID string) (Target, error) {
-	if r == nil || r.K8sClient == nil {
+	if r == nil || !r.canLookupPods() {
 		return Target{}, ErrNotImplemented
 	}
 	ctx := context.Background()
@@ -69,21 +81,22 @@ func (r *PodResolver) Resolve(req *http.Request, sandboxID string) (Target, erro
 }
 
 func (r *PodResolver) ResolvePod(req *http.Request, namespace, name string) (Target, error) {
-	if r == nil || r.K8sClient == nil {
+	if r == nil || !r.canLookupPods() {
 		return Target{}, ErrNotImplemented
 	}
 	ctx := context.Background()
 	if req != nil {
 		ctx = req.Context()
 	}
-	pod, err := r.K8sClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+	pod, err := r.lookupPod(ctx, namespace, name)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return Target{}, ErrPodNotFound
-		}
-		return Target{}, fmt.Errorf("get sandbox pod %s/%s: %w", namespace, name, err)
+		return Target{}, err
 	}
 	return r.resolvePodTarget(pod, "")
+}
+
+func (r *PodResolver) canLookupPods() bool {
+	return r != nil && (r.K8sClient != nil || r.PodLister != nil || r.PodIndexer != nil)
 }
 
 func (r *PodResolver) resolvePodTarget(pod *corev1.Pod, sandboxID string) (Target, error) {
@@ -377,6 +390,24 @@ func hasMatchingProcesses(procRoot, cgroupPath string, match func(string, int) b
 }
 
 func (r *PodResolver) lookupSandboxPod(ctx context.Context, sandboxID string) (*corev1.Pod, error) {
+	if r.PodIndexer != nil {
+		objects, err := r.PodIndexer.ByIndex(podSandboxIDIndex, sandboxID)
+		if err != nil {
+			return nil, fmt.Errorf("get cached sandbox pod: %w", err)
+		}
+		for _, obj := range objects {
+			pod, ok := obj.(*corev1.Pod)
+			if !ok || pod == nil {
+				continue
+			}
+			return pod.DeepCopy(), nil
+		}
+	}
+
+	if r.K8sClient == nil {
+		return nil, ErrSandboxNotFound
+	}
+
 	selector := labels.SelectorFromSet(map[string]string{controller.LabelSandboxID: sandboxID}).String()
 	pods, err := r.K8sClient.CoreV1().Pods(corev1.NamespaceAll).List(ctx, metav1.ListOptions{LabelSelector: selector})
 	if err != nil {
@@ -386,6 +417,31 @@ func (r *PodResolver) lookupSandboxPod(ctx context.Context, sandboxID string) (*
 		return nil, ErrSandboxNotFound
 	}
 	return pods.Items[0].DeepCopy(), nil
+}
+
+func (r *PodResolver) lookupPod(ctx context.Context, namespace, name string) (*corev1.Pod, error) {
+	if r.PodLister != nil {
+		pod, err := r.PodLister.Pods(namespace).Get(name)
+		if err == nil {
+			return pod.DeepCopy(), nil
+		}
+		if err != nil && !apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("get cached sandbox pod %s/%s: %w", namespace, name, err)
+		}
+	}
+
+	if r.K8sClient == nil {
+		return nil, ErrPodNotFound
+	}
+
+	pod, err := r.K8sClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, ErrPodNotFound
+		}
+		return nil, fmt.Errorf("get sandbox pod %s/%s: %w", namespace, name, err)
+	}
+	return pod.DeepCopy(), nil
 }
 
 func (r *PodResolver) resolvePodCgroupDir(pod *corev1.Pod) (string, error) {

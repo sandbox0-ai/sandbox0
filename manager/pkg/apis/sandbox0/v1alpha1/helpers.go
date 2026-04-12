@@ -10,7 +10,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 const (
@@ -230,16 +229,6 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Conta
 		Name:          "http",
 		ContainerPort: int32(procdHTTPPort()),
 	})
-	container.StartupProbe = procdHTTPProbe("/healthz")
-	container.StartupProbe.FailureThreshold = 60
-	if !configuredCtldEnabled() {
-		container.LivenessProbe = procdHTTPProbe("/healthz")
-		container.LivenessProbe.PeriodSeconds = 5
-		container.LivenessProbe.FailureThreshold = 3
-	}
-	container.ReadinessProbe = procdHTTPProbe("/readyz")
-	container.ReadinessProbe.PeriodSeconds = 1
-	container.ReadinessProbe.FailureThreshold = 3
 	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
 		Name:      procdBinVolumeName,
 		MountPath: "/procd/bin",
@@ -269,22 +258,6 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Conta
 	container.SecurityContext.Capabilities.Add = append(container.SecurityContext.Capabilities.Add, corev1.Capability("SYS_ADMIN"))
 
 	return container
-}
-
-func procdHTTPProbe(path string) *corev1.Probe {
-	return &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			HTTPGet: &corev1.HTTPGetAction{Path: path, Port: intstr.FromString("http")},
-		},
-		PeriodSeconds:    1,
-		TimeoutSeconds:   1,
-		FailureThreshold: 3,
-	}
-}
-
-func configuredCtldEnabled() bool {
-	cfg := config.LoadManagerConfig()
-	return cfg != nil && cfg.CtldEnabled
 }
 
 func buildResourceRequirements(quota ResourceQuota) corev1.ResourceRequirements {

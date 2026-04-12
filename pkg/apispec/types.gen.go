@@ -980,6 +980,11 @@ type ErrorEnvelope struct {
 // ErrorEnvelopeSuccess defines model for ErrorEnvelope.Success.
 type ErrorEnvelopeSuccess bool
 
+// ExecAction defines model for ExecAction.
+type ExecAction struct {
+	Command *[]string `json:"command,omitempty"`
+}
+
 // ExecCandidate defines model for ExecCandidate.
 type ExecCandidate struct {
 	Args *[]string `json:"args,omitempty"`
@@ -1048,6 +1053,21 @@ type GatewayMetadata struct {
 
 // GatewayMetadataGatewayMode defines model for GatewayMetadata.GatewayMode.
 type GatewayMetadataGatewayMode string
+
+// HTTPGetAction defines model for HTTPGetAction.
+type HTTPGetAction struct {
+	Host        *string       `json:"host,omitempty"`
+	HttpHeaders *[]HTTPHeader `json:"httpHeaders,omitempty"`
+	Path        *string       `json:"path,omitempty"`
+	Port        ProbePort     `json:"port"`
+	Scheme      *string       `json:"scheme,omitempty"`
+}
+
+// HTTPHeader defines model for HTTPHeader.
+type HTTPHeader struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
 
 // HTTPHeadersProjection defines model for HTTPHeadersProjection.
 type HTTPHeadersProjection struct {
@@ -1271,6 +1291,12 @@ type PreferredSchedulingTerm struct {
 	Preference NodeSelectorTerm `json:"preference"`
 	Weight     int32            `json:"weight"`
 }
+
+// ProbePort defines model for ProbePort.
+type ProbePort = int32
+
+// ProcessProbeAction defines model for ProcessProbeAction.
+type ProcessProbeAction = map[string]interface{}
 
 // ProcessType defines model for ProcessType.
 type ProcessType string
@@ -1505,6 +1531,23 @@ type SandboxPowerStateObserved string
 
 // SandboxPowerStatePhase defines model for SandboxPowerState.Phase.
 type SandboxPowerStatePhase string
+
+// SandboxProbeSet defines model for SandboxProbeSet.
+type SandboxProbeSet struct {
+	Liveness  *SandboxProbeSpec `json:"liveness,omitempty"`
+	Readiness *SandboxProbeSpec `json:"readiness,omitempty"`
+	Startup   *SandboxProbeSpec `json:"startup,omitempty"`
+}
+
+// SandboxProbeSpec defines model for SandboxProbeSpec.
+type SandboxProbeSpec struct {
+	Exec                *ExecAction         `json:"exec,omitempty"`
+	HttpGet             *HTTPGetAction      `json:"httpGet,omitempty"`
+	InitialDelaySeconds *int32              `json:"initialDelaySeconds,omitempty"`
+	Process             *ProcessProbeAction `json:"process,omitempty"`
+	TcpSocket           *TCPSocketAction    `json:"tcpSocket,omitempty"`
+	TimeoutSeconds      *int32              `json:"timeoutSeconds,omitempty"`
+}
 
 // SandboxRefreshRequest defines model for SandboxRefreshRequest.
 type SandboxRefreshRequest struct {
@@ -2356,6 +2399,12 @@ type SyncReplica struct {
 	VolumeId       *string                           `json:"volume_id,omitempty"`
 }
 
+// TCPSocketAction defines model for TCPSocketAction.
+type TCPSocketAction struct {
+	Host *string   `json:"host,omitempty"`
+	Port ProbePort `json:"port"`
+}
+
 // TLSClientCertificateProjection Client certificate projection used for TLS terminate-reoriginate auth.
 type TLSClientCertificateProjection = map[string]interface{}
 
@@ -2598,6 +2647,8 @@ type WarmProcessSpec struct {
 	Command *[]string           `json:"command,omitempty"`
 	Cwd     *string             `json:"cwd,omitempty"`
 	EnvVars *map[string]string  `json:"envVars,omitempty"`
+	Name    *string             `json:"name,omitempty"`
+	Probes  *SandboxProbeSet    `json:"probes,omitempty"`
 	Type    WarmProcessSpecType `json:"type"`
 }
 

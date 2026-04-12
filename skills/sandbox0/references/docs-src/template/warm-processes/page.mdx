@@ -2,7 +2,7 @@
 
 Use `spec.warmProcesses` when a template needs a helper process to be running before an idle pod is claimed from the warm pool. Procd remains PID 1 in the sandbox container and starts each warm process during template pod creation.
 
-Warm processes are intended for long-running helpers such as agents, language servers, REPL sessions, and daemon-style workers. If a configured warm process exits, procd readiness fails and the pod is not hot-claimed.
+Warm processes are intended for long-running helpers such as agents, language servers, REPL sessions, and daemon-style workers. If a configured warm process exits, procd exits and Kubernetes restarts the sandbox container with the pod's restart policy.
 
 ## Spec
 
@@ -14,12 +14,19 @@ spec:
             cpu: "1"
             memory: 2Gi
     warmProcesses:
-        - type: cmd
+        - name: codex
+          type: cmd
           alias: codex
           command: ["/bin/sh", "-lc", "/app/start-codex.sh"]
           cwd: /workspace
           envVars:
               MODE: warm
+          probes:
+              readiness:
+                  process: {}
+              liveness:
+                  exec:
+                      command: ["/bin/sh", "-lc", "test -S /tmp/codex.sock"]
     pool:
         minIdle: 2
         maxIdle: 10
@@ -27,19 +34,23 @@ spec:
 
 | Field | Required | Description |
 |-------|----------|-------------|
+| `name` | no | Stable name used in SandboxProbe check results. Defaults to the procd context ID. |
 | `type` | yes | `cmd` or `repl`. |
 | `alias` | no | Process alias stored in procd context metadata. |
 | `command` | for `cmd` | Command path and arguments. Not allowed for `repl`. |
 | `cwd` | no | Absolute working directory. Reserved paths such as `/config` and `/procd/bin` are rejected. |
 | `envVars` | no | Process-specific environment variables. |
+| `probes` | no | Optional `startup`, `readiness`, and `liveness` SandboxProbe definitions for this warm process. |
 
-## Readiness
+## SandboxProbe
 
-Warm-pool capacity is based on pod readiness. When `warmProcesses` is present, procd starts the configured processes before serving healthy `/readyz` responses. A pod with `Ready=False` does not count toward idle capacity and is not selected for a hot claim.
+Warm-pool capacity is based on pod readiness. Sandbox0 does not attach Kubernetes startup, readiness, or liveness probes to sandbox pods. Manager asks ctld to run SandboxProbe checks, and ctld forwards each check to procd inside the target sandbox. Procd evaluates itself plus each managed warm process, then returns one aggregated result.
+
+A pod with `Ready=False` does not count toward idle capacity and is not selected for a hot claim. Without an explicit probe, procd uses a process-state check: the warm process must still be running. Use `exec`, `httpGet`, or `tcpSocket` probes when the helper can be alive but not useful.
 
 For `cmd` warm processes, use commands that keep running. One-shot setup commands that exit successfully still make readiness fail because there is no warm process left to claim.
 
-Sandbox0 wires warm process state into the pod's Kubernetes probes. If a warm process exits, `/readyz` and `/healthz` fail and `procd` terminates so Kubernetes can restart PID 1 with the pod's restart policy. In ctld-backed deployments, liveness probing is skipped to avoid conflicting with frozen paused sandboxes; process exit still hands restart back to Kubernetes.
+Startup and readiness failures keep the pod out of the claimable warm pool. Liveness failures make procd terminate after returning the failed SandboxProbe response, so Kubernetes restarts PID 1 with the pod's normal restart policy. A frozen paused sandbox reports liveness as `suspended` from ctld instead of failing.
 
 ## Process Placement
 
@@ -53,7 +64,8 @@ spec:
             cpu: "1"
             memory: 2Gi
     warmProcesses:
-        - type: cmd
+        - name: helper
+          type: cmd
           alias: helper
           command: ["/bin/sh", "-lc", "/app/helper"]
 ```

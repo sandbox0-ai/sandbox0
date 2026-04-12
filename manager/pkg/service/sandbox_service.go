@@ -21,6 +21,7 @@ import (
 	egressauth "github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -2221,9 +2222,9 @@ func (s *SandboxService) waitForPodReady(ctx context.Context, namespace, name st
 			}
 			return nil, fmt.Errorf("get pod for readiness: %w", err)
 		}
-		pod, err = controller.EnsureSandboxPodReadinessCondition(readyCtx, s.k8sClient, pod)
+		pod, err = s.refreshSandboxProbeConditions(readyCtx, pod)
 		if err != nil {
-			return nil, fmt.Errorf("ensure pod readiness condition: %w", err)
+			return nil, fmt.Errorf("ensure pod probe conditions: %w", err)
 		}
 		if controller.IsPodReady(pod) {
 			return pod, nil
@@ -2235,6 +2236,48 @@ func (s *SandboxService) waitForPodReady(ctx context.Context, namespace, name st
 		case <-ticker.C:
 		}
 	}
+}
+
+func (s *SandboxService) refreshSandboxProbeConditions(ctx context.Context, pod *corev1.Pod) (*corev1.Pod, error) {
+	if !controller.HasSandboxPodReadinessGate(pod) {
+		return pod, nil
+	}
+	startup := s.probeSandboxPodOrFailure(ctx, pod, sandboxprobe.KindStartup)
+	readiness := s.probeSandboxPodOrFailure(ctx, pod, sandboxprobe.KindReadiness)
+	liveness := s.probeSandboxPodOrFailure(ctx, pod, sandboxprobe.KindLiveness)
+	return controller.EnsureSandboxPodProbeConditions(ctx, s.k8sClient, pod, startup, readiness, liveness)
+}
+
+func (s *SandboxService) ProbeSandboxPod(ctx context.Context, pod *corev1.Pod, kind sandboxprobe.Kind) (*sandboxprobe.Response, error) {
+	if pod == nil {
+		return nil, fmt.Errorf("pod is nil")
+	}
+	if pod.Status.Phase != corev1.PodRunning {
+		result := sandboxprobe.Failed(kind, "PodNotRunning", fmt.Sprintf("pod phase is %s", pod.Status.Phase), nil)
+		return &result, nil
+	}
+	ctldAddress, err := s.ctldAddressForPod(ctx, pod)
+	if err != nil {
+		return nil, err
+	}
+	result, err := s.ctldClient.ProbePod(ctx, ctldAddress, pod.Namespace, pod.Name, kind)
+	if result != nil && result.Status != "" {
+		return result, nil
+	}
+	return result, err
+}
+
+func (s *SandboxService) probeSandboxPodOrFailure(ctx context.Context, pod *corev1.Pod, kind sandboxprobe.Kind) *sandboxprobe.Response {
+	result, err := s.ProbeSandboxPod(ctx, pod, kind)
+	if err != nil {
+		failure := sandboxprobe.Failed(kind, "SandboxProbeFailed", err.Error(), nil)
+		return &failure
+	}
+	if result == nil {
+		failure := sandboxprobe.Failed(kind, "SandboxProbeMissing", "sandbox probe returned no result", nil)
+		return &failure
+	}
+	return result
 }
 
 // podPhaseToSandboxStatus converts pod phase to sandbox status

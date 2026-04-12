@@ -13,6 +13,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
@@ -64,14 +65,41 @@ func (r *PodResolver) Resolve(req *http.Request, sandboxID string) (Target, erro
 	if err != nil {
 		return Target{}, err
 	}
+	return r.resolvePodTarget(pod, sandboxID)
+}
+
+func (r *PodResolver) ResolvePod(req *http.Request, namespace, name string) (Target, error) {
+	if r == nil || r.K8sClient == nil {
+		return Target{}, ErrNotImplemented
+	}
+	ctx := context.Background()
+	if req != nil {
+		ctx = req.Context()
+	}
+	pod, err := r.K8sClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return Target{}, ErrPodNotFound
+		}
+		return Target{}, fmt.Errorf("get sandbox pod %s/%s: %w", namespace, name, err)
+	}
+	return r.resolvePodTarget(pod, "")
+}
+
+func (r *PodResolver) resolvePodTarget(pod *corev1.Pod, sandboxID string) (Target, error) {
 	if r.NodeName != "" && pod.Spec.NodeName != r.NodeName {
-		return Target{}, fmt.Errorf("sandbox %s is scheduled on node %s, not %s", sandboxID, pod.Spec.NodeName, r.NodeName)
+		return Target{}, fmt.Errorf("sandbox pod %s/%s is scheduled on node %s, not %s", pod.Namespace, pod.Name, pod.Spec.NodeName, r.NodeName)
+	}
+	if sandboxID == "" && pod.Labels != nil {
+		sandboxID = strings.TrimSpace(pod.Labels[controller.LabelSandboxID])
 	}
 	base := Target{
 		SandboxID:    sandboxID,
 		PodNamespace: pod.Namespace,
 		PodName:      pod.Name,
 		PodUID:       string(pod.UID),
+		PodIP:        pod.Status.PodIP,
+		ProcdPort:    procdHTTPPort(pod),
 	}
 	var adapter RuntimeAdapter
 	for _, candidate := range r.runtimeAdapters() {
@@ -89,6 +117,23 @@ func (r *PodResolver) Resolve(req *http.Request, sandboxID string) (Target, erro
 		return Target{}, err
 	}
 	return adapter.ResolveTarget(r, pod, podCgroupDir, base)
+}
+
+func procdHTTPPort(pod *corev1.Pod) int32 {
+	if pod == nil {
+		return 0
+	}
+	for _, container := range pod.Spec.Containers {
+		if container.Name != "procd" {
+			continue
+		}
+		for _, port := range container.Ports {
+			if port.Name == "http" && port.ContainerPort > 0 {
+				return port.ContainerPort
+			}
+		}
+	}
+	return 0
 }
 
 func isKataRuntimeClassName(runtimeClassName *string) bool {

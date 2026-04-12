@@ -148,6 +148,42 @@ func TestPodResolverResolveUsesPodCgroupForDefaultRunc(t *testing.T) {
 	assert.Equal(t, podDir, target.CgroupDir)
 }
 
+func TestPodResolverResolvePodDoesNotRequireSandboxLabel(t *testing.T) {
+	root := t.TempDir()
+	uid := types.UID("abababab-cccc-dddd-eeee-ffffffffffff")
+	podDir := filepath.Join(root, "kubepods", "podabababab-cccc-dddd-eeee-ffffffffffff")
+	require.NoError(t, os.MkdirAll(podDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(podDir, "cgroup.freeze"), []byte("0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(podDir, "memory.current"), []byte("64\n"), 0o644))
+
+	client := fake.NewSimpleClientset(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "idle-pod-1",
+			Namespace: "tpl-default",
+			UID:       uid,
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-a",
+			Containers: []corev1.Container{{
+				Name:  "procd",
+				Ports: []corev1.ContainerPort{{Name: "http", ContainerPort: 49983}},
+			}},
+		},
+		Status: corev1.PodStatus{QOSClass: corev1.PodQOSGuaranteed, PodIP: "10.0.0.10"},
+	})
+
+	resolver := NewPodResolver(client, "node-a", root)
+	target, err := resolver.ResolvePod(&http.Request{}, "tpl-default", "idle-pod-1")
+	require.NoError(t, err)
+	assert.Empty(t, target.SandboxID)
+	assert.Equal(t, "runc", target.Runtime)
+	assert.Equal(t, podDir, target.CgroupDir)
+	assert.Equal(t, "tpl-default", target.PodNamespace)
+	assert.Equal(t, "idle-pod-1", target.PodName)
+	assert.Equal(t, "10.0.0.10", target.PodIP)
+	assert.Equal(t, int32(49983), target.ProcdPort)
+}
+
 func TestPodResolverResolveUsesPodCgroupForGVisor(t *testing.T) {
 	root := t.TempDir()
 	procRoot := t.TempDir()

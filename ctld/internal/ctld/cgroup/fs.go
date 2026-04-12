@@ -36,6 +36,21 @@ func (fs *FS) Thaw(dir string) error {
 	return fs.setFrozen(dir, false)
 }
 
+func (fs *FS) IsFrozen(dir string) (bool, error) {
+	state, err := readFreezeState(dir)
+	if err != nil {
+		return false, err
+	}
+	switch strings.ToUpper(state) {
+	case "1", "FROZEN":
+		return true, nil
+	case "0", "THAWED":
+		return false, nil
+	default:
+		return false, fmt.Errorf("unknown freezer state %q", state)
+	}
+}
+
 func (fs *FS) MemoryCurrent(dir string) (int64, error) {
 	for _, candidate := range []string{memoryV2File, memoryV1File} {
 		value, err := readInt64File(filepath.Join(dir, candidate))

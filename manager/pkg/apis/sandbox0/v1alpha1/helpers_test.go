@@ -130,7 +130,7 @@ manager_image: sandbox0/manager:test
 	}
 }
 
-func TestBuildPodSpecAddsProcdProbes(t *testing.T) {
+func TestBuildPodSpecOmitsKubernetesProbes(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test
 procd_config:
@@ -144,32 +144,8 @@ procd_config:
 	}
 
 	main := spec.Containers[0]
-	if main.StartupProbe == nil || main.StartupProbe.HTTPGet == nil {
-		t.Fatalf("expected procd startup probe, got %#v", main.StartupProbe)
-	}
-	if main.StartupProbe.HTTPGet.Path != "/healthz" {
-		t.Fatalf("startup path = %q, want /healthz", main.StartupProbe.HTTPGet.Path)
-	}
-	if main.StartupProbe.HTTPGet.Port.StrVal != "http" {
-		t.Fatalf("startup port = %#v, want named http port", main.StartupProbe.HTTPGet.Port)
-	}
-	if main.LivenessProbe == nil || main.LivenessProbe.HTTPGet == nil {
-		t.Fatalf("expected procd liveness probe, got %#v", main.LivenessProbe)
-	}
-	if main.LivenessProbe.HTTPGet.Path != "/healthz" {
-		t.Fatalf("liveness path = %q, want /healthz", main.LivenessProbe.HTTPGet.Path)
-	}
-	if main.LivenessProbe.HTTPGet.Port.StrVal != "http" {
-		t.Fatalf("liveness port = %#v, want named http port", main.LivenessProbe.HTTPGet.Port)
-	}
-	if main.ReadinessProbe == nil || main.ReadinessProbe.HTTPGet == nil {
-		t.Fatalf("expected procd readiness probe, got %#v", main.ReadinessProbe)
-	}
-	if main.ReadinessProbe.HTTPGet.Path != "/readyz" {
-		t.Fatalf("readiness path = %q, want /readyz", main.ReadinessProbe.HTTPGet.Path)
-	}
-	if main.ReadinessProbe.HTTPGet.Port.StrVal != "http" {
-		t.Fatalf("readiness port = %#v, want named http port", main.ReadinessProbe.HTTPGet.Port)
+	if main.StartupProbe != nil || main.ReadinessProbe != nil || main.LivenessProbe != nil {
+		t.Fatalf("expected no Kubernetes probes on sandbox pod, got startup=%#v readiness=%#v liveness=%#v", main.StartupProbe, main.ReadinessProbe, main.LivenessProbe)
 	}
 	port := findContainerPort(main.Ports, "http")
 	if port == nil || port.ContainerPort != 41000 {
@@ -213,27 +189,6 @@ manager_image: sandbox0/manager:test
 	}
 	if len(decoded[0].Command) != 3 || decoded[0].Command[2] != "sleep 3600" {
 		t.Fatalf("unexpected warm command: %#v", decoded[0].Command)
-	}
-}
-
-func TestBuildPodSpecSkipsLivenessProbeWhenCtldEnabled(t *testing.T) {
-	configPath := writeManagerConfig(t, `
-manager_image: sandbox0/manager:test
-ctld_enabled: true
-`)
-	t.Setenv("CONFIG_PATH", configPath)
-
-	spec := BuildPodSpec(newTestTemplate())
-	if len(spec.Containers) == 0 {
-		t.Fatal("expected at least one container")
-	}
-
-	main := spec.Containers[0]
-	if main.StartupProbe == nil || main.ReadinessProbe == nil {
-		t.Fatalf("expected startup and readiness probes, got startup=%#v readiness=%#v", main.StartupProbe, main.ReadinessProbe)
-	}
-	if main.LivenessProbe != nil {
-		t.Fatalf("liveness probe = %#v, want nil when ctld is enabled", main.LivenessProbe)
 	}
 }
 

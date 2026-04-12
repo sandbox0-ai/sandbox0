@@ -58,18 +58,22 @@ spec:
             cpu: "1"
             memory: 2Gi
     warmProcesses:
-        - type: cmd
+        - name: codex
+          type: cmd
           alias: codex
           command: ["/bin/sh", "-lc", "/app/start-codex.sh"]
           cwd: /workspace
           envVars:
               MODE: warm
+          probes:
+              readiness:
+                  process: {}
     pool:
         minIdle: 2
         maxIdle: 10
 ```
 
-Warm processes start during template pod creation, before the pod is claimable from the warm pool. They are intended for long-running helpers such as agents, language servers, and daemon-style workers; if a configured warm process exits, procd readiness fails and the pod is not hot-claimed.
+Warm processes start during template pod creation, before the pod is claimable from the warm pool. They are intended for long-running helpers such as agents, language servers, and daemon-style workers. SandboxProbe readiness keeps unhealthy helpers out of the warm pool, and SandboxProbe liveness hands restart back to Kubernetes by terminating procd on failure.
 
 <Tabs
   tabs={[
@@ -88,6 +92,7 @@ Warm processes start during template pod creation, before the pod is claimable f
         }),
         WarmProcesses: []apispec.WarmProcessSpec{
             {
+                Name:    apispec.NewOptString("codex"),
                 Type:    apispec.WarmProcessSpecTypeCmd,
                 Alias:   apispec.NewOptString("codex"),
                 Command: []string{"/bin/sh", "-lc", "/app/start-codex.sh"},
@@ -120,11 +125,13 @@ tpl = client.create_template(TemplateCreateRequest(
             "resources": {"cpu": "1", "memory": "4Gi"},
         },
         "warmProcesses": [{
+            "name": "codex",
             "type": "cmd",
             "alias": "codex",
             "command": ["/bin/sh", "-lc", "/app/start-codex.sh"],
             "cwd": "/workspace",
             "envVars": {"MODE": "warm"},
+            "probes": {"readiness": {"process": {}}},
         }],
         "pool": {"minIdle": 2, "maxIdle": 10},
     }),
@@ -142,11 +149,13 @@ print(f"Template created: {tpl.template_id}")`
             resources: { cpu: "1", memory: "2Gi" },
         },
         warmProcesses: [{
+            name: "codex",
             type: "cmd",
             alias: "codex",
             command: ["/bin/sh", "-lc", "/app/start-codex.sh"],
             cwd: "/workspace",
             envVars: { MODE: "warm" },
+            probes: { readiness: { process: {} } },
         }],
         pool: { minIdle: 2, maxIdle: 10 },
     },
@@ -164,12 +173,16 @@ spec:
             cpu: "1"
             memory: 2Gi
     warmProcesses:
-        - type: cmd
+        - name: codex
+          type: cmd
           alias: codex
           command: ["/bin/sh", "-lc", "/app/start-codex.sh"]
           cwd: /workspace
           envVars:
               MODE: warm
+          probes:
+              readiness:
+                  process: {}
     pool:
         minIdle: 2
         maxIdle: 10

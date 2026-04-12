@@ -2,10 +2,12 @@ package main
 
 import (
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	ctxpkg "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/context"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
@@ -50,6 +52,16 @@ func TestParseWarmProcesses(t *testing.T) {
 			raw:     `[{"type":"daemon"}]`,
 			wantErr: "warmProcesses[0].type must be one of",
 		},
+		{
+			name:    "invalid probe",
+			raw:     `[{"type":"repl","probes":{"readiness":{}}}]`,
+			wantErr: "warmProcesses[0].probes.readiness must configure one of",
+		},
+		{
+			name:    "invalid probe port",
+			raw:     `[{"type":"repl","probes":{"liveness":{"tcpSocket":{"port":"http"}}}}]`,
+			wantErr: "probe named ports are not supported",
+		},
 	}
 
 	for _, tt := range tests {
@@ -79,21 +91,23 @@ func TestStartWarmProcessesKeepsContextsReady(t *testing.T) {
 	manager.SetDefaultCleanupPolicy(ctxpkg.CleanupPolicy{IdleTimeout: time.Nanosecond})
 	defer manager.Cleanup()
 
-	contextIDs, err := startWarmProcesses(manager, zap.NewNop())
+	processes, err := startWarmProcesses(manager, zap.NewNop())
 	require.NoError(t, err)
-	require.Len(t, contextIDs, 1)
+	require.Len(t, processes, 1)
 
-	ctx, err := manager.GetContext(contextIDs[0])
+	ctx, err := manager.GetContext(processes[0].ContextID)
 	require.NoError(t, err)
 	require.True(t, ctx.IsRunning())
 	require.Equal(t, ctxpkg.CleanupPolicy{}, ctx.CleanupPolicy)
 
-	ready := warmProcessChecker{manager: manager, contextIDs: contextIDs}
-	require.NoError(t, ready.CheckHealth())
-	require.NoError(t, ready.Check())
+	prober := &warmProcessProber{manager: manager, processes: processes}
+	require.Equal(t, sandboxprobe.StatusPassed, prober.Probe(sandboxprobe.KindLiveness).Status)
+	require.Equal(t, sandboxprobe.StatusPassed, prober.Probe(sandboxprobe.KindReadiness).Status)
 
-	require.NoError(t, manager.DeleteContext(contextIDs[0]))
-	require.ErrorContains(t, ready.Check(), "warm process context")
+	require.NoError(t, manager.DeleteContext(processes[0].ContextID))
+	result := prober.Probe(sandboxprobe.KindReadiness)
+	require.Equal(t, sandboxprobe.StatusFailed, result.Status)
+	require.Equal(t, "WarmProcessMissing", result.Reason)
 }
 
 func TestWarmProcessHealthAllowsPausedContext(t *testing.T) {
@@ -102,16 +116,45 @@ func TestWarmProcessHealthAllowsPausedContext(t *testing.T) {
 	manager := ctxpkg.NewManager()
 	defer manager.Cleanup()
 
-	contextIDs, err := startWarmProcesses(manager, zap.NewNop())
+	processes, err := startWarmProcesses(manager, zap.NewNop())
 	require.NoError(t, err)
-	require.Len(t, contextIDs, 1)
+	require.Len(t, processes, 1)
 
-	ctx, err := manager.GetContext(contextIDs[0])
+	ctx, err := manager.GetContext(processes[0].ContextID)
 	require.NoError(t, err)
 	require.NoError(t, ctx.Pause())
 	defer func() { _ = ctx.Resume() }()
 
-	checker := warmProcessChecker{manager: manager, contextIDs: contextIDs}
-	require.NoError(t, checker.CheckHealth())
-	require.ErrorContains(t, checker.Check(), "is not running")
+	prober := &warmProcessProber{manager: manager, processes: processes}
+	liveness := prober.Probe(sandboxprobe.KindLiveness)
+	require.Equal(t, sandboxprobe.StatusSuspended, liveness.Status)
+	require.Equal(t, "WarmProcessPaused", liveness.Reason)
+
+	readiness := prober.Probe(sandboxprobe.KindReadiness)
+	require.Equal(t, sandboxprobe.StatusFailed, readiness.Status)
+	require.Equal(t, "WarmProcessNotRunning", readiness.Reason)
+}
+
+func TestWarmProcessLivenessFailureExitsProcd(t *testing.T) {
+	previousExit := warmProcessExit
+	var exitCode atomic.Int32
+	warmProcessExit = func(code int) { exitCode.Store(int32(code)) }
+	t.Cleanup(func() { warmProcessExit = previousExit })
+
+	prober := &warmProcessProber{
+		exitOnFailedLiveness: true,
+		processes: []warmProcessRuntime{{
+			Spec: warmProcessSpec{
+				Name:   "hung-helper",
+				Probes: &warmProbeSet{Liveness: &warmProbeSpec{Exec: &execProbeSpec{Command: []string{"/bin/sh", "-lc", "exit 7"}}}},
+			},
+			ContextID: "ctx-1",
+			StartedAt: time.Now(),
+		}},
+	}
+
+	result := prober.Probe(sandboxprobe.KindLiveness)
+	require.Equal(t, sandboxprobe.StatusFailed, result.Status)
+	require.Equal(t, "ExecProbeFailed", result.Reason)
+	require.Eventually(t, func() bool { return exitCode.Load() == 1 }, time.Second, 10*time.Millisecond)
 }

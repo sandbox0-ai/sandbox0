@@ -4,6 +4,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 // +genclient
@@ -65,7 +66,11 @@ type ContainerSpec struct {
 	SecurityContext *SecurityContext `json:"securityContext,omitempty"`
 }
 
-const SandboxPodReadinessConditionType corev1.PodConditionType = "sandbox0.ai/ready"
+const (
+	SandboxPodStartupConditionType   corev1.PodConditionType = "sandbox0.ai/startup"
+	SandboxPodReadinessConditionType corev1.PodConditionType = "sandbox0.ai/ready"
+	SandboxPodLivenessConditionType  corev1.PodConditionType = "sandbox0.ai/live"
+)
 
 // +kubebuilder:validation:Enum=repl;cmd
 type WarmProcessType string
@@ -76,11 +81,52 @@ const (
 )
 
 type WarmProcessSpec struct {
+	Name    string            `json:"name,omitempty"`
 	Type    WarmProcessType   `json:"type"`
 	Alias   string            `json:"alias,omitempty"`
 	Command []string          `json:"command,omitempty"`
 	CWD     string            `json:"cwd,omitempty"`
 	EnvVars map[string]string `json:"envVars,omitempty"`
+	Probes  *SandboxProbeSet  `json:"probes,omitempty"`
+}
+
+type SandboxProbeSet struct {
+	Startup   *SandboxProbeSpec `json:"startup,omitempty"`
+	Readiness *SandboxProbeSpec `json:"readiness,omitempty"`
+	Liveness  *SandboxProbeSpec `json:"liveness,omitempty"`
+}
+
+type SandboxProbeSpec struct {
+	Process             *ProcessProbeSpec   `json:"process,omitempty"`
+	Exec                *ExecProbeSpec      `json:"exec,omitempty"`
+	HTTPGet             *HTTPGetProbeSpec   `json:"httpGet,omitempty"`
+	TCPSocket           *TCPSocketProbeSpec `json:"tcpSocket,omitempty"`
+	TimeoutSeconds      int32               `json:"timeoutSeconds,omitempty"`
+	InitialDelaySeconds int32               `json:"initialDelaySeconds,omitempty"`
+}
+
+type ProcessProbeSpec struct{}
+
+type ExecProbeSpec struct {
+	Command []string `json:"command"`
+}
+
+type HTTPGetProbeSpec struct {
+	Host        string             `json:"host,omitempty"`
+	Path        string             `json:"path,omitempty"`
+	Port        intstr.IntOrString `json:"port"`
+	Scheme      string             `json:"scheme,omitempty"`
+	HTTPHeaders []HTTPHeader       `json:"httpHeaders,omitempty"`
+}
+
+type HTTPHeader struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+type TCPSocketProbeSpec struct {
+	Host string             `json:"host,omitempty"`
+	Port intstr.IntOrString `json:"port"`
 }
 
 // EnvVar represents an environment variable

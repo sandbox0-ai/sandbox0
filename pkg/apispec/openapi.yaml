@@ -5541,6 +5541,8 @@ components:
     WarmProcessSpec:
       type: object
       properties:
+        name:
+          type: string
         type:
           type: string
           enum: [repl, cmd]
@@ -5556,7 +5558,38 @@ components:
           type: object
           additionalProperties:
             type: string
+        probes:
+          $ref: "#/components/schemas/SandboxProbeSet"
       required: [type]
+    SandboxProbeSet:
+      type: object
+      properties:
+        startup:
+          $ref: "#/components/schemas/SandboxProbeSpec"
+        readiness:
+          $ref: "#/components/schemas/SandboxProbeSpec"
+        liveness:
+          $ref: "#/components/schemas/SandboxProbeSpec"
+    SandboxProbeSpec:
+      type: object
+      properties:
+        process:
+          $ref: "#/components/schemas/ProcessProbeAction"
+        exec:
+          $ref: "#/components/schemas/ExecAction"
+        httpGet:
+          $ref: "#/components/schemas/HTTPGetAction"
+        tcpSocket:
+          $ref: "#/components/schemas/TCPSocketAction"
+        initialDelaySeconds:
+          type: integer
+          format: int32
+        timeoutSeconds:
+          type: integer
+          format: int32
+    ProcessProbeAction:
+      type: object
+      additionalProperties: false
     EnvVar:
       type: object
       properties:
@@ -5668,10 +5701,8 @@ components:
           type: string
       required: [name, value]
     ProbePort:
-      oneOf:
-        - type: integer
-          format: int32
-        - type: string
+      type: integer
+      format: int32
     PodSpecOverride:
       type: object
       properties:

@@ -27,11 +27,17 @@ type testTemplateStore struct {
 	createCalled         bool
 	updateCalled         bool
 	createdOrUpdatedID   string
+	createdScope         string
+	createdTeamID        string
+	updatedScope         string
+	updatedTeamID        string
 }
 
 func (s *testTemplateStore) CreateTemplate(_ context.Context, tpl *template.Template) error {
 	s.createCalled = true
 	s.createdOrUpdatedID = tpl.TemplateID
+	s.createdScope = tpl.Scope
+	s.createdTeamID = tpl.TeamID
 	return nil
 }
 
@@ -75,6 +81,8 @@ func (p *testTemplateStatsProvider) GetTemplateStats(context.Context) (*Template
 func (s *testTemplateStore) UpdateTemplate(_ context.Context, tpl *template.Template) error {
 	s.updateCalled = true
 	s.createdOrUpdatedID = tpl.TemplateID
+	s.updatedScope = tpl.Scope
+	s.updatedTeamID = tpl.TeamID
 	return nil
 }
 
@@ -312,6 +320,91 @@ func TestCreateTemplate_AllowsPrivilegedFieldForSystemToken(t *testing.T) {
 	}
 }
 
+func TestCreateTemplate_SystemWithoutTeamCreatesPublicTemplate(t *testing.T) {
+	t.Parallel()
+
+	store := &testTemplateStore{
+		getTemplateFn: func(_ context.Context, scope, teamID, templateID string) (*template.Template, error) {
+			if scope != naming.ScopePublic || teamID != "" || templateID != "demo" {
+				t.Fatalf("GetTemplate scope/team/id = %q/%q/%q, want public//demo", scope, teamID, templateID)
+			}
+			return nil, nil
+		},
+	}
+	h := &Handler{Store: store, Logger: zap.NewNop()}
+
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{
+		UserID:   "system",
+		IsSystem: true,
+	}))
+	router.POST("/api/v1/templates", h.CreateTemplate)
+
+	body := []byte(`{
+		"template_id":"demo",
+		"spec":{
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
+			"pool":{"minIdle":0,"maxIdle":1}
+		}
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d", http.StatusCreated, rec.Code)
+	}
+	if !store.createCalled {
+		t.Fatalf("expected create to be called")
+	}
+	if store.createdScope != naming.ScopePublic || store.createdTeamID != "" {
+		t.Fatalf("created scope/team = %q/%q, want public/empty", store.createdScope, store.createdTeamID)
+	}
+}
+
+func TestGetTemplate_SystemWithoutTeamReadsPublicTemplate(t *testing.T) {
+	t.Parallel()
+
+	calledGetTemplate := false
+	calledGetTemplateForTeam := false
+	store := &testTemplateStore{
+		getTemplateFn: func(_ context.Context, scope, teamID, templateID string) (*template.Template, error) {
+			calledGetTemplate = true
+			if scope != naming.ScopePublic || teamID != "" || templateID != "demo" {
+				t.Fatalf("GetTemplate scope/team/id = %q/%q/%q, want public//demo", scope, teamID, templateID)
+			}
+			return &template.Template{TemplateID: templateID, Scope: scope, TeamID: teamID, Spec: validTemplateSpec()}, nil
+		},
+		getTemplateForTeamFn: func(context.Context, string, string) (*template.Template, error) {
+			calledGetTemplateForTeam = true
+			return nil, nil
+		},
+	}
+	h := &Handler{Store: store, Logger: zap.NewNop()}
+
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{
+		UserID:   "system",
+		IsSystem: true,
+	}))
+	router.GET("/api/v1/templates/:id", h.GetTemplate)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/templates/demo", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+	if !calledGetTemplate {
+		t.Fatalf("expected public GetTemplate to be called")
+	}
+	if calledGetTemplateForTeam {
+		t.Fatalf("did not expect team fallback lookup for system public template")
+	}
+}
+
 func TestCreateTemplate_RejectsMissingMainContainerImage(t *testing.T) {
 	t.Parallel()
 
@@ -447,6 +540,48 @@ func TestUpdateTemplate_AllowsWarmProcessesForRegularTeam(t *testing.T) {
 	}
 	if !store.updateCalled {
 		t.Fatalf("expected update called for warm process request")
+	}
+}
+
+func TestUpdateTemplate_SystemWithoutTeamUpdatesPublicTemplate(t *testing.T) {
+	t.Parallel()
+
+	store := &testTemplateStore{
+		getTemplateFn: func(_ context.Context, scope, teamID, templateID string) (*template.Template, error) {
+			if scope != naming.ScopePublic || teamID != "" || templateID != "demo" {
+				t.Fatalf("GetTemplate scope/team/id = %q/%q/%q, want public//demo", scope, teamID, templateID)
+			}
+			return &template.Template{TemplateID: templateID, Scope: scope, TeamID: teamID, Spec: validTemplateSpec()}, nil
+		},
+	}
+	h := &Handler{Store: store, Logger: zap.NewNop()}
+
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{
+		UserID:   "system",
+		IsSystem: true,
+	}))
+	router.PUT("/api/v1/templates/:id", h.UpdateTemplate)
+
+	body := []byte(`{
+		"spec":{
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
+			"pool":{"minIdle":0,"maxIdle":1}
+		}
+	}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/templates/demo", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+	if !store.updateCalled {
+		t.Fatalf("expected update to be called")
+	}
+	if store.updatedScope != naming.ScopePublic || store.updatedTeamID != "" {
+		t.Fatalf("updated scope/team = %q/%q, want public/empty", store.updatedScope, store.updatedTeamID)
 	}
 }
 
@@ -842,6 +977,19 @@ func withClaims(claims *internalauth.Claims) gin.HandlerFunc {
 		ctx := internalauth.WithClaims(c.Request.Context(), claims)
 		c.Request = c.Request.WithContext(ctx)
 		c.Next()
+	}
+}
+
+func validTemplateSpec() v1alpha1.SandboxTemplateSpec {
+	return v1alpha1.SandboxTemplateSpec{
+		MainContainer: v1alpha1.ContainerSpec{
+			Image: "ubuntu:22.04",
+			Resources: v1alpha1.ResourceQuota{
+				CPU:    resource.MustParse("1"),
+				Memory: resource.MustParse("4Gi"),
+			},
+		},
+		Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
 	}
 }
 

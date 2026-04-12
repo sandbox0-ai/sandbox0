@@ -161,7 +161,7 @@ func TestClusterGatewayIntegration_PublicAuthAPIKey(t *testing.T) {
 		t.Fatalf("set team home region: %v", err)
 	}
 
-	_, keyValue, err := apiKeyRepo.CreateAPIKey(ctx, team.ID, "aws-us-east-1", user.ID, "test-key", "user", []string{"admin"}, time.Now().Add(time.Hour))
+	_, keyValue, err := apiKeyRepo.CreateAPIKey(ctx, team.ID, "aws-us-east-1", user.ID, "test-key", []string{"admin"}, time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("create api key: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestClusterGatewayIntegration_APIKeyCanBeCreatedWithoutLocalTeamOrUserRow(t
 		t.Fatalf("delete local user row: %v", err)
 	}
 
-	key, keyValue, err := apiKeyRepo.CreateAPIKey(ctx, team.ID, "aws-us-east-1", user.ID, "test-key", "service", []string{"developer"}, time.Now().Add(time.Hour))
+	key, keyValue, err := apiKeyRepo.CreateAPIKey(ctx, team.ID, "aws-us-east-1", user.ID, "test-key", []string{"developer"}, time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("create api key without local team or user row: %v", err)
 	}

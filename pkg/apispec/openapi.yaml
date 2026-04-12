@@ -3692,8 +3692,6 @@ components:
           type: string
         name:
           type: string
-        type:
-          type: string
         roles:
           type: array
           items:
@@ -3720,7 +3718,6 @@ components:
         - team_id
         - created_by
         - name
-        - type
         - roles
         - is_active
         - expires_at
@@ -3731,9 +3728,6 @@ components:
       properties:
         name:
           type: string
-        type:
-          type: string
-          enum: [user, service]
         roles:
           type: array
           items:
@@ -3741,15 +3735,13 @@ components:
         expires_in:
           type: string
           description: "30d, 90d, 180d, 365d, or never"
-      required: [name, type]
+      required: [name]
     CreateAPIKeyResponse:
       type: object
       properties:
         id:
           type: string
         name:
-          type: string
-        type:
           type: string
         roles:
           type: array
@@ -3765,7 +3757,7 @@ components:
         created_at:
           type: string
           format: date-time
-      required: [id, name, type, roles, team_id, expires_at, created_at]
+      required: [id, name, roles, team_id, expires_at, created_at]
     CurrentAPIKeyResponse:
       type: object
       properties:
@@ -3774,8 +3766,6 @@ components:
         team_id:
           type: string
         created_by:
-          type: string
-        type:
           type: string
         roles:
           type: array
@@ -3790,7 +3780,7 @@ components:
         expires_at:
           type: string
           format: date-time
-      required: [id, team_id, created_by, type, roles, permissions, is_active, expires_at]
+      required: [id, team_id, created_by, roles, permissions, is_active, expires_at]
     SuccessCreateAPIKeyResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"

@@ -62,7 +62,6 @@ func (h *APIKeyHandler) ListAPIKeys(c *gin.Context) {
 // CreateAPIKeyRequest is the request body for creating an API key
 type CreateAPIKeyRequest struct {
 	Name      string   `json:"name" binding:"required"`
-	Type      string   `json:"type" binding:"required,oneof=user service"`
 	Roles     []string `json:"roles"`
 	ExpiresIn string   `json:"expires_in"` // e.g., "30d", "90d", "365d", "never"
 }
@@ -71,7 +70,6 @@ type CreateAPIKeyRequest struct {
 type CreateAPIKeyResponse struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
-	Type      string    `json:"type"`
 	Roles     []string  `json:"roles"`
 	TeamID    string    `json:"team_id"`
 	Key       string    `json:"key,omitempty"` // Only returned on creation
@@ -84,7 +82,6 @@ type CurrentAPIKeyResponse struct {
 	ID          string    `json:"id"`
 	TeamID      string    `json:"team_id"`
 	CreatedBy   string    `json:"created_by"`
-	Type        string    `json:"type"`
 	Roles       []string  `json:"roles"`
 	Permissions []string  `json:"permissions"`
 	IsActive    bool      `json:"is_active"`
@@ -115,7 +112,6 @@ func (h *APIKeyHandler) GetCurrentAPIKey(c *gin.Context) {
 			ID:          key.ID,
 			TeamID:      key.TeamID,
 			CreatedBy:   key.CreatedBy,
-			Type:        key.Type,
 			Roles:       key.Roles,
 			Permissions: append([]string(nil), authCtx.Permissions...),
 			IsActive:    key.IsActive,
@@ -186,7 +182,6 @@ func (h *APIKeyHandler) CreateAPIKey(c *gin.Context) {
 		regionID,
 		authCtx.UserID,
 		req.Name,
-		req.Type,
 		roles,
 		expiresAt,
 	)
@@ -200,7 +195,6 @@ func (h *APIKeyHandler) CreateAPIKey(c *gin.Context) {
 	response := &CreateAPIKeyResponse{
 		ID:        key.ID,
 		Name:      key.Name,
-		Type:      key.Type,
 		Roles:     key.Roles,
 		TeamID:    key.TeamID,
 		Key:       keyValue, // Full key, only shown at creation

@@ -136,6 +136,23 @@ func RegisterIdentityRoutes(router gin.IRouter, deps Deps) {
 	}
 }
 
+// RegisterUserSSHKeyRoutes mounts the user SSH key surface without the full
+// identity and team management API. Federated regional gateways use this to
+// keep SSH gateway authorization data region-local while global-gateway remains
+// the identity entrypoint.
+func RegisterUserSSHKeyRoutes(router gin.IRouter, deps Deps) {
+	userHandler := handlers.NewUserHandler(deps.IdentityRepo, deps.Logger)
+
+	sshKeys := router.Group("/users/me/ssh-keys")
+	sshKeys.Use(deps.AuthMiddleware.Authenticate())
+	sshKeys.Use(deps.AuthMiddleware.RequireJWTAuth())
+	{
+		sshKeys.GET("", userHandler.ListUserSSHPublicKeys)
+		sshKeys.POST("", userHandler.CreateUserSSHPublicKey)
+		sshKeys.DELETE("/:id", userHandler.DeleteUserSSHPublicKey)
+	}
+}
+
 // RegisterAPIKeyRoutes mounts home-region API key management routes.
 func RegisterAPIKeyRoutes(router gin.IRouter, deps Deps) {
 	if deps.APIKeyRepo != nil {

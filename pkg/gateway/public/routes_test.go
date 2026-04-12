@@ -48,6 +48,29 @@ func TestRegisterAPIKeyRoutesOnlyMountsRegionalAPIKeySurface(t *testing.T) {
 	}
 }
 
+func TestRegisterUserSSHKeyRoutesMountsSSHKeysOnly(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	router := gin.New()
+	RegisterUserSSHKeyRoutes(router, testDeps())
+
+	if !hasRoute(router, "GET", "/users/me/ssh-keys") {
+		t.Fatal("expected SSH key routes to include list")
+	}
+	if !hasRoute(router, "POST", "/users/me/ssh-keys") {
+		t.Fatal("expected SSH key routes to include create")
+	}
+	if !hasRoute(router, "DELETE", "/users/me/ssh-keys/:id") {
+		t.Fatal("expected SSH key routes to include delete")
+	}
+	if hasRoute(router, "GET", "/users/me") {
+		t.Fatal("expected SSH key routes to omit full user profile")
+	}
+	if hasRoute(router, "POST", "/auth/login") {
+		t.Fatal("expected SSH key routes to omit /auth/login")
+	}
+}
+
 func testDeps() Deps {
 	logger := zap.NewNop()
 	jwtIssuer := authn.NewIssuer("test", "secret", time.Minute, time.Hour)

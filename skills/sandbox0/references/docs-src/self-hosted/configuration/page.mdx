@@ -105,7 +105,7 @@ Enable `spec.services.sshGateway` when you want a region-scoped SSH entrypoint t
 The routing model is intentionally simple:
 
 - One `ssh-gateway` per region
-- One fixed host or load balancer address per region
+- One fixed DNS-only host or TCP proxy address per region, for example `aws-us-east-1.ssh.sandbox0.app`
 - SSH username is the target sandbox ID
 - User authentication uses SSH public keys uploaded to the gateway API
 

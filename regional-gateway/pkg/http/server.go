@@ -381,6 +381,7 @@ func (s *Server) setupPublicRoutes() {
 		return
 	}
 
+	public.RegisterUserSSHKeyRoutes(s.router, deps)
 	public.RegisterAPIKeyRoutes(s.router, deps)
 }
 

@@ -8,11 +8,11 @@ import (
 )
 
 func TestBuildConnectionInfo(t *testing.T) {
-	info := BuildConnectionInfo("ssh.aws-us-east-1.sandbox0.app", 30222, "sb_123")
+	info := BuildConnectionInfo("aws-us-east-1.ssh.sandbox0.app", 30222, "sb_123")
 	if info == nil {
 		t.Fatal("expected connection info")
 	}
-	if info.Host != "ssh.aws-us-east-1.sandbox0.app" {
+	if info.Host != "aws-us-east-1.ssh.sandbox0.app" {
 		t.Fatalf("host = %q", info.Host)
 	}
 	if info.Port != 30222 {
@@ -41,14 +41,14 @@ func TestSandboxToAPIIncludesSSHInfo(t *testing.T) {
 		HardExpiresAt: now,
 	}
 
-	payload := SandboxToAPI(sandbox, BuildConnectionInfo("ssh.aws-us-east-1.sandbox0.app", 30222, sandbox.ID))
+	payload := SandboxToAPI(sandbox, BuildConnectionInfo("aws-us-east-1.ssh.sandbox0.app", 30222, sandbox.ID))
 	if payload == nil {
 		t.Fatal("expected payload")
 	}
 	if payload.Ssh == nil {
 		t.Fatal("expected ssh payload")
 	}
-	if payload.Ssh.Host != "ssh.aws-us-east-1.sandbox0.app" {
+	if payload.Ssh.Host != "aws-us-east-1.ssh.sandbox0.app" {
 		t.Fatalf("ssh host = %q", payload.Ssh.Host)
 	}
 	if payload.Ssh.Port != 30222 {

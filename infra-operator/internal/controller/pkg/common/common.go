@@ -359,7 +359,7 @@ func ResolveSSHEndpoint(infra *infrav1alpha1.Sandbox0Infra, fallbackPort int32) 
 		return "", 0, false
 	}
 
-	return fmt.Sprintf("ssh.%s.%s", regionLabel, rootDomain), port, true
+	return fmt.Sprintf("%s.ssh.%s", regionLabel, rootDomain), port, true
 }
 
 func ResolveServiceAnnotations(config *infrav1alpha1.ServiceNetworkConfig) map[string]string {

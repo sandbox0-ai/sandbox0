@@ -41,6 +41,15 @@ func TestSetupPublicRoutesFederatedMountsRegionalAPIKeysOnly(t *testing.T) {
 	if !hasRoute(server.router, "GET", "/api-keys") {
 		t.Fatal("expected federated mode to mount /api-keys")
 	}
+	if !hasRoute(server.router, "GET", "/users/me/ssh-keys") {
+		t.Fatal("expected federated mode to mount SSH key list route")
+	}
+	if !hasRoute(server.router, "POST", "/users/me/ssh-keys") {
+		t.Fatal("expected federated mode to mount SSH key create route")
+	}
+	if !hasRoute(server.router, "DELETE", "/users/me/ssh-keys/:id") {
+		t.Fatal("expected federated mode to mount SSH key delete route")
+	}
 	if hasRoute(server.router, "POST", "/auth/login") {
 		t.Fatal("expected federated mode to omit /auth/login")
 	}

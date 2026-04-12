@@ -10,7 +10,7 @@ SSH access targets the sandbox procd runtime in the main sandbox container. Temp
 
 | Part | Value | Example |
 |------|-------|---------|
-| Gateway host | Returned by the sandbox detail `ssh.host` field | `ssh.aws-us-east-1.sandbox0.example.com` |
+| Gateway host | Returned by the sandbox detail `ssh.host` field | `aws-us-east-1.ssh.sandbox0.example.com` |
 | SSH port | Returned by the sandbox detail `ssh.port` field | `22` |
 | SSH username | Target sandbox ID | `rs-abc123-default-x7k9m` |
 | Authentication | SSH public key uploaded to the current user | `ssh-ed25519 AAAA...` |
@@ -23,7 +23,7 @@ Most clients should read the connection info from `GET /api/v1/sandboxes/{'{id}'
 ```json
 {
   "ssh": {
-    "host": "ssh.aws-us-east-1.sandbox0.example.com",
+    "host": "aws-us-east-1.ssh.sandbox0.example.com",
     "port": 22,
     "username": "rs-abc123-default-x7k9m"
   }
@@ -112,13 +112,13 @@ curl "$SANDBOX0_BASE_URL/api/v1/sandboxes/$SANDBOX_ID" \
 Use the returned values with `ssh`:
 
 ```bash
-ssh -p 22 rs-abc123-default-x7k9m@ssh.aws-us-east-1.sandbox0.example.com
+ssh -p 22 rs-abc123-default-x7k9m@aws-us-east-1.ssh.sandbox0.example.com
 ```
 
 Run a one-shot remote command instead of opening an interactive shell:
 
 ```bash
-ssh -p 22 rs-abc123-default-x7k9m@ssh.aws-us-east-1.sandbox0.example.com 'uname -a'
+ssh -p 22 rs-abc123-default-x7k9m@aws-us-east-1.ssh.sandbox0.example.com 'uname -a'
 ```
 
 If the sandbox is paused, `ssh-gateway` asks the control plane to resume it before attaching the session.
@@ -132,19 +132,19 @@ Use standard `scp` to upload or download files. The default OpenSSH mode is supp
 Upload a local file:
 
 ```bash
-scp -P 22 ./build.log rs-abc123-default-x7k9m@ssh.aws-us-east-1.sandbox0.example.com:/workspace/build.log
+scp -P 22 ./build.log rs-abc123-default-x7k9m@aws-us-east-1.ssh.sandbox0.example.com:/workspace/build.log
 ```
 
 Download a file from the sandbox:
 
 ```bash
-scp -P 22 rs-abc123-default-x7k9m@ssh.aws-us-east-1.sandbox0.example.com:/workspace/output.txt ./output.txt
+scp -P 22 rs-abc123-default-x7k9m@aws-us-east-1.ssh.sandbox0.example.com:/workspace/output.txt ./output.txt
 ```
 
 Because `scp` runs over the SFTP subsystem here, `sftp` clients work too:
 
 ```bash
-sftp -P 22 rs-abc123-default-x7k9m@ssh.aws-us-east-1.sandbox0.example.com
+sftp -P 22 rs-abc123-default-x7k9m@aws-us-east-1.ssh.sandbox0.example.com
 ```
 
 ---

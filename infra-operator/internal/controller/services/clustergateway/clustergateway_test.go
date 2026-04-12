@@ -484,8 +484,8 @@ func TestBuildConfigPublishesSSHEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildConfig returned error: %v", err)
 	}
-	if cfg.SSHEndpointHost != "ssh.aws-us-east-1.sandbox0.app" {
-		t.Fatalf("ssh endpoint host = %q, want %q", cfg.SSHEndpointHost, "ssh.aws-us-east-1.sandbox0.app")
+	if cfg.SSHEndpointHost != "aws-us-east-1.ssh.sandbox0.app" {
+		t.Fatalf("ssh endpoint host = %q, want %q", cfg.SSHEndpointHost, "aws-us-east-1.ssh.sandbox0.app")
 	}
 	if cfg.SSHEndpointPort != 30222 {
 		t.Fatalf("ssh endpoint port = %d, want %d", cfg.SSHEndpointPort, 30222)

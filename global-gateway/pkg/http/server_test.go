@@ -204,6 +204,79 @@ func TestGlobalGatewayNoRouteProxiesAPIKeyRequestsToRegion(t *testing.T) {
 	}
 }
 
+func TestGlobalGatewayNoRouteProxiesCurrentAPIKeyRequestToRegion(t *testing.T) {
+	gin.SetMode(gin.ReleaseMode)
+	var gotAuth string
+	var gotPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"key_123"}`))
+	}))
+	defer upstream.Close()
+
+	server := &Server{
+		router:        gin.New(),
+		logger:        zap.NewNop(),
+		regionLookup:  &stubRegionDirectory{region: &tenantdir.Region{ID: "aws-us-east-1", Enabled: true, RegionalGatewayURL: upstream.URL}},
+		proxyTimeout:  time.Second,
+		regionProxies: make(map[string]*proxy.Router),
+	}
+	server.router.NoRoute(server.handleNoRoute)
+	gw := httptest.NewServer(server.router)
+	defer gw.Close()
+
+	req, err := http.NewRequest(http.MethodGet, gw.URL+"/api-keys/current", nil)
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer s0_aws-us-east-1_deadbeefdeadbeefdeadbeefdeadbeef")
+	resp, err := gw.Client().Do(req)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if gotAuth != "Bearer s0_aws-us-east-1_deadbeefdeadbeefdeadbeefdeadbeef" {
+		t.Fatalf("Authorization = %q", gotAuth)
+	}
+	if gotPath != "/api-keys/current" {
+		t.Fatalf("path = %q, want /api-keys/current", gotPath)
+	}
+}
+
+func TestGlobalGatewayNoRouteDoesNotProxyAPIKeyManagementRequests(t *testing.T) {
+	gin.SetMode(gin.ReleaseMode)
+	server := &Server{
+		router:        gin.New(),
+		logger:        zap.NewNop(),
+		proxyTimeout:  time.Second,
+		regionProxies: make(map[string]*proxy.Router),
+	}
+	server.router.NoRoute(server.handleNoRoute)
+	gw := httptest.NewServer(server.router)
+	defer gw.Close()
+
+	req, err := http.NewRequest(http.MethodPost, gw.URL+"/api-keys", nil)
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer s0_aws-us-east-1_deadbeefdeadbeefdeadbeefdeadbeef")
+	resp, err := gw.Client().Do(req)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+}
+
 func TestGlobalGatewayNoRouteLeavesNonAPIKeyRequestsAsNotFound(t *testing.T) {
 	gin.SetMode(gin.ReleaseMode)
 	server := &Server{

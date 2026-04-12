@@ -211,7 +211,7 @@ func (s *Server) handleAPIKeyRegionProxy(c *gin.Context) bool {
 		return false
 	}
 	path := c.Request.URL.Path
-	if path != "/api" && !strings.HasPrefix(path, "/api/") {
+	if !shouldProxyAPIKeyRegionRequest(c.Request.Method, path) {
 		return false
 	}
 
@@ -254,6 +254,13 @@ func (s *Server) handleAPIKeyRegionProxy(c *gin.Context) bool {
 
 	router.ProxyToTarget(c)
 	return true
+}
+
+func shouldProxyAPIKeyRegionRequest(method string, path string) bool {
+	if path == "/api" || strings.HasPrefix(path, "/api/") {
+		return true
+	}
+	return method == stdhttp.MethodGet && path == "/api-keys/current"
 }
 
 func (s *Server) resolveRoutableRegion(ctx context.Context, regionID string) (*tenantdir.Region, error) {

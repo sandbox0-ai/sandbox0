@@ -215,7 +215,6 @@ func (s *Server) openShell(ctx context.Context, target *SessionTarget, pty ptySp
 	}
 
 	bridge := newShellBridge(channel, wsConn)
-	bridge.start()
 	return bridge, nil
 }
 
@@ -236,7 +235,6 @@ func (s *Server) openExec(ctx context.Context, target *SessionTarget, pty ptySpe
 	}
 
 	bridge := newShellBridge(channel, wsConn)
-	bridge.start()
 	return bridge, nil
 }
 

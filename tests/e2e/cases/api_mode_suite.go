@@ -515,6 +515,7 @@ func assertTemplateNamespaceIngressBaselineLifecycle(env *framework.ScenarioEnv,
 		templateNamespaceBaselineDenyPolicyName,
 		templateNamespaceBaselineAllowPolicyName,
 	} {
+		originalUID := templateNamespaceNetworkPolicyUID(env, templateNamespace, policyName)
 		Expect(framework.Kubectl(
 			env.TestCtx.Context,
 			env.Config.Kubeconfig,
@@ -525,14 +526,7 @@ func assertTemplateNamespaceIngressBaselineLifecycle(env *framework.ScenarioEnv,
 			templateNamespace,
 			"--ignore-not-found=false",
 		)).To(Succeed())
-		Expect(framework.KubectlWaitForDelete(
-			env.TestCtx.Context,
-			env.Config.Kubeconfig,
-			templateNamespace,
-			"networkpolicy",
-			policyName,
-			"30s",
-		)).To(Succeed())
+		assertTemplateNamespaceNetworkPolicyOriginalUIDGoneEventually(env, templateNamespace, policyName, originalUID)
 	}
 
 	updated := *created
@@ -547,6 +541,50 @@ func assertTemplateNamespaceIngressBaselineLifecycle(env *framework.ScenarioEnv,
 	Expect(*updatedResp.Spec.Description).To(Equal(desc))
 
 	assertTemplateNamespaceBaselinePoliciesEventually(env, templateNamespace)
+}
+
+func templateNamespaceNetworkPolicyUID(env *framework.ScenarioEnv, namespace, policyName string) string {
+	output, err := framework.KubectlOutput(
+		env.TestCtx.Context,
+		env.Config.Kubeconfig,
+		"get",
+		"networkpolicy",
+		policyName,
+		"--namespace",
+		namespace,
+		"-o",
+		"jsonpath={.metadata.uid}",
+	)
+	Expect(err).NotTo(HaveOccurred())
+	uid := strings.TrimSpace(output)
+	Expect(uid).NotTo(BeEmpty(), "expected networkpolicy %s/%s to have a uid", namespace, policyName)
+	return uid
+}
+
+func assertTemplateNamespaceNetworkPolicyOriginalUIDGoneEventually(env *framework.ScenarioEnv, namespace, policyName, originalUID string) {
+	Eventually(func() error {
+		output, err := framework.KubectlOutput(
+			env.TestCtx.Context,
+			env.Config.Kubeconfig,
+			"get",
+			"networkpolicy",
+			policyName,
+			"--namespace",
+			namespace,
+			"--ignore-not-found=true",
+			"-o",
+			"jsonpath={.metadata.uid}",
+		)
+		if err != nil {
+			return err
+		}
+
+		currentUID := strings.TrimSpace(output)
+		if currentUID == originalUID {
+			return fmt.Errorf("networkpolicy %s/%s still has original uid %s", namespace, policyName, originalUID)
+		}
+		return nil
+	}).WithTimeout(30 * time.Second).WithPolling(1 * time.Second).Should(Succeed())
 }
 
 func assertTemplateNamespaceBaselinePoliciesEventually(env *framework.ScenarioEnv, namespace string) {

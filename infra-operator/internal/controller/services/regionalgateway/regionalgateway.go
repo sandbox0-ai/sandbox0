@@ -19,7 +19,6 @@ package regionalgateway
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -32,7 +31,6 @@ import (
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
-	webhookcerts "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/webhook"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
@@ -83,7 +81,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 
 	resources := compiledPlan.RegionalGateway.Resources
 	serviceConfig := compiledPlan.RegionalGateway.ServiceConfig
-	tlsEnabled := strings.TrimSpace(config.TLSCertPath) != "" && strings.TrimSpace(config.TLSKeyPath) != ""
 
 	volumeMounts := []corev1.VolumeMount{
 		{
@@ -146,38 +143,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 	if needEnterpriseLicense {
 		volumeMounts, volumes = common.AppendEnterpriseLicenseVolumeWithSecretRef(compiledPlan.EnterpriseLicenseSecretRef(), config.LicenseFile, volumeMounts, volumes)
 	}
-	if tlsEnabled {
-		tlsSecretName := fmt.Sprintf("%s-regional-gateway-tls", scope.Name)
-		dnsNames := regionalGatewayTLSDNSNames(config)
-		if len(dnsNames) == 0 {
-			return fmt.Errorf("regional-gateway TLS enabled but no DNS names were derived")
-		}
-		if err := webhookcerts.NewReconciler(r.Resources).ReconcileCertSecretWithScope(ctx, scope, tlsSecretName, labels, dnsNames); err != nil {
-			return err
-		}
-		volumeMounts = append(volumeMounts,
-			corev1.VolumeMount{
-				Name:      "gateway-tls",
-				MountPath: "/tls/tls.crt",
-				SubPath:   corev1.TLSCertKey,
-				ReadOnly:  true,
-			},
-			corev1.VolumeMount{
-				Name:      "gateway-tls",
-				MountPath: "/tls/tls.key",
-				SubPath:   corev1.TLSPrivateKeyKey,
-				ReadOnly:  true,
-			},
-		)
-		volumes = append(volumes, corev1.Volume{
-			Name: "gateway-tls",
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName: tlsSecretName,
-				},
-			},
-		})
-	}
 
 	envVars := []corev1.EnvVar{
 		{
@@ -193,23 +158,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 
 	// Create deployment
 	httpPort := int32(config.HTTPPort)
-	containerPorts := []corev1.ContainerPort{
-		{
-			Name:          "http",
-			ContainerPort: httpPort,
-		},
-	}
-	if tlsEnabled {
-		containerPorts = append(containerPorts, corev1.ContainerPort{
-			Name:          "https",
-			ContainerPort: int32(config.TLSPort),
-		})
-	}
 	if err := r.Resources.ReconcileDeploymentWithScope(ctx, scope, deploymentName, labels, replicas, common.ServiceDefinition{
-		Name:           "regional-gateway",
-		Port:           httpPort,
-		TargetPort:     httpPort,
-		Ports:          containerPorts,
+		Name:       "regional-gateway",
+		Port:       httpPort,
+		TargetPort: httpPort,
+		Ports: []corev1.ContainerPort{
+			{
+				Name:          "http",
+				ContainerPort: httpPort,
+			},
+		},
 		Image:          fmt.Sprintf("%s:%s", imageRepo, imageTag),
 		EnvVars:        envVars,
 		VolumeMounts:   volumeMounts,
@@ -244,28 +202,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 
 	// Create service
 	serviceType := common.ResolveServiceType(serviceConfig)
-	defaultServicePort := httpPort
-	if tlsEnabled {
-		defaultServicePort = 443
-	}
-	servicePort := common.ResolveServicePort(serviceConfig, defaultServicePort)
+	servicePort := common.ResolveServicePort(serviceConfig, httpPort)
 	serviceAnnotations := common.ResolveServiceAnnotations(serviceConfig)
-	servicePortName := "http"
-	serviceTargetPort := intstr.FromInt(int(httpPort))
-	var serviceAppProtocol *string
-	if tlsEnabled {
-		servicePortName = "https"
-		serviceTargetPort = intstr.FromString("https")
-		appProtocol := "HTTPS"
-		serviceAppProtocol = &appProtocol
-	}
 	if err := r.Resources.ReconcileServicePortsWithScopeAndSpecMutator(ctx, scope, serviceName, labels, serviceType, serviceAnnotations, []corev1.ServicePort{
 		{
-			Name:        servicePortName,
-			Port:        servicePort,
-			TargetPort:  serviceTargetPort,
-			Protocol:    corev1.ProtocolTCP,
-			AppProtocol: serviceAppProtocol,
+			Name:       "http",
+			Port:       servicePort,
+			TargetPort: intstr.FromInt(int(httpPort)),
+			Protocol:   corev1.ProtocolTCP,
 			NodePort: func() int32 {
 				if serviceType == corev1.ServiceTypeNodePort {
 					return servicePort
@@ -279,11 +223,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 		}
 	}); err != nil {
 		return err
-	}
-	if tlsEnabled {
-		if err := r.Resources.ReconcileServiceWithScope(ctx, scope, serviceName+"-internal", labels, corev1.ServiceTypeClusterIP, nil, httpPort, httpPort); err != nil {
-			return err
-		}
 	}
 
 	// Create ingress if enabled
@@ -391,21 +330,6 @@ func (r *Reconciler) buildConfig(ctx context.Context, compiledPlan *infraplan.In
 	}
 
 	return cfg, registryEnvVars, nil
-}
-
-func regionalGatewayTLSDNSNames(cfg *apiconfig.RegionalGatewayConfig) []string {
-	if cfg == nil {
-		return nil
-	}
-	base := strings.TrimSpace(cfg.BaseURL)
-	if base == "" {
-		return nil
-	}
-	parsed, err := url.Parse(base)
-	if err != nil || parsed.Hostname() == "" {
-		return nil
-	}
-	return []string{parsed.Hostname()}
 }
 
 func (r *Reconciler) applyRegistryConfig(infra *infrav1alpha1.Sandbox0Infra, cfg *apiconfig.RegionalGatewayConfig) ([]corev1.EnvVar, error) {

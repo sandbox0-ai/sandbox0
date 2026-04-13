@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
 	"strings"
 	"time"
 
@@ -319,24 +318,12 @@ func desiredBootstrapRegion(infra *infrav1alpha1.Sandbox0Infra, regionID string)
 
 	servicePort := common.ResolveServicePort(infra.Spec.Services.RegionalGateway.Service, regionalHTTPPort)
 	serviceName := fmt.Sprintf("%s-regional-gateway", infra.Name)
-	if regionalGatewayBaseURLUsesHTTPS(infra) {
-		serviceName += "-internal"
-		servicePort = regionalHTTPPort
-	}
 	return &tenantdir.Region{
 		ID:                 regionID,
 		DisplayName:        regionID,
 		RegionalGatewayURL: fmt.Sprintf("http://%s:%d", serviceName, servicePort),
 		Enabled:            true,
 	}
-}
-
-func regionalGatewayBaseURLUsesHTTPS(infra *infrav1alpha1.Sandbox0Infra) bool {
-	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.RegionalGateway == nil || infra.Spec.Services.RegionalGateway.Config == nil {
-		return false
-	}
-	parsed, err := url.Parse(strings.TrimSpace(infra.Spec.Services.RegionalGateway.Config.BaseURL))
-	return err == nil && strings.EqualFold(parsed.Scheme, "https")
 }
 
 func ensureGlobalGatewayBootstrapState(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, cfg *apiconfig.GlobalGatewayConfig) error {

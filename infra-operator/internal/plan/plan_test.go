@@ -142,12 +142,6 @@ func TestCompileDerivesCrossServiceReferences(t *testing.T) {
 	if compiled.RegionalGateway.Config == nil || compiled.RegionalGateway.Config.SSHEndpointHost != "" {
 		t.Fatalf("expected regional gateway config without ssh endpoint, got %#v", compiled.RegionalGateway.Config)
 	}
-	if compiled.RegionalGateway.Config == nil || compiled.RegionalGateway.Config.TLSCertPath == "" {
-		t.Fatalf("expected regional gateway TLS paths to be compiled, got %#v", compiled.RegionalGateway.Config)
-	}
-	if compiled.RegionalGateway.Config.TLSPort != 8443 {
-		t.Fatalf("expected regional gateway TLS port 8443, got %d", compiled.RegionalGateway.Config.TLSPort)
-	}
 	if compiled.RegionalGateway.IngressConfig == nil || !compiled.RegionalGateway.IngressConfig.Enabled {
 		t.Fatalf("expected regional gateway ingress config to be compiled, got %#v", compiled.RegionalGateway.IngressConfig)
 	}
@@ -495,44 +489,6 @@ func TestCompileUsesConfiguredBaseURLsForGatewayStatusEndpoints(t *testing.T) {
 	}
 	if got := compiled.Status.Endpoints.RegionalGateway; got != "https://api.example.com" {
 		t.Fatalf("unexpected regional-gateway endpoint %q", got)
-	}
-	if got := compiled.Status.Endpoints.RegionalGatewayInternal; got != "http://demo-regional-gateway-internal:8080" {
-		t.Fatalf("unexpected regional-gateway internal endpoint %q", got)
-	}
-}
-
-func TestCompileUsesPlainInternalClusterGatewayURLWhenClusterGatewayTLS(t *testing.T) {
-	infra := &infrav1alpha1.Sandbox0Infra{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "demo",
-			Namespace: "sandbox0-system",
-		},
-		Spec: infrav1alpha1.Sandbox0InfraSpec{
-			Services: &infrav1alpha1.ServicesConfig{
-				RegionalGateway: &infrav1alpha1.RegionalGatewayServiceConfig{
-					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
-						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
-					},
-				},
-				ClusterGateway: &infrav1alpha1.ClusterGatewayServiceConfig{
-					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
-						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
-					},
-					Config: &infrav1alpha1.ClusterGatewayConfig{
-						GatewayConfig: infrav1alpha1.GatewayConfig{BaseURL: "https://cluster.example.com"},
-					},
-				},
-			},
-		},
-	}
-
-	compiled := Compile(infra)
-
-	if got, want := compiled.Services.ClusterGateway.URL, "http://demo-cluster-gateway-internal:8443"; got != want {
-		t.Fatalf("cluster gateway URL = %q, want %q", got, want)
-	}
-	if got, want := compiled.RegionalGateway.DefaultClusterGatewayURL, "http://demo-cluster-gateway-internal:8443"; got != want {
-		t.Fatalf("regional default cluster gateway URL = %q, want %q", got, want)
 	}
 }
 

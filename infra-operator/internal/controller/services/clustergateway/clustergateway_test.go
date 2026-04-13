@@ -18,7 +18,7 @@ import (
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 )
 
-func TestReconcileEnablesTLSForHTTPSBaseURL(t *testing.T) {
+func TestReconcileKeepsHTTPBackendForHTTPSBaseURL(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "demo",
@@ -90,26 +90,18 @@ func TestReconcileEnablesTLSForHTTPSBaseURL(t *testing.T) {
 		t.Fatalf("reconcile returned unexpected error: %v", err)
 	}
 
-	secret := &corev1.Secret{}
-	if err := client.Get(context.Background(), types.NamespacedName{Name: "demo-cluster-gateway-tls", Namespace: infra.Namespace}, secret); err != nil {
-		t.Fatalf("get tls secret: %v", err)
-	}
-	if secret.Type != corev1.SecretTypeTLS {
-		t.Fatalf("expected tls secret type, got %q", secret.Type)
-	}
-
 	service := &corev1.Service{}
 	if err := client.Get(context.Background(), types.NamespacedName{Name: "demo-cluster-gateway", Namespace: infra.Namespace}, service); err != nil {
 		t.Fatalf("get cluster gateway service: %v", err)
 	}
-	if service.Spec.Ports[0].Port != 443 {
-		t.Fatalf("expected external service port 443, got %d", service.Spec.Ports[0].Port)
+	if service.Spec.Ports[0].Port != 8443 {
+		t.Fatalf("expected http service port 8443, got %d", service.Spec.Ports[0].Port)
 	}
-	if service.Spec.Ports[0].Name != "https" {
-		t.Fatalf("expected https service port name, got %q", service.Spec.Ports[0].Name)
+	if service.Spec.Ports[0].Name != "http" {
+		t.Fatalf("expected http service port name, got %q", service.Spec.Ports[0].Name)
 	}
-	if service.Spec.Ports[0].TargetPort.StrVal != "https" {
-		t.Fatalf("expected https target port, got %#v", service.Spec.Ports[0].TargetPort)
+	if service.Spec.Ports[0].TargetPort.IntVal != 8443 {
+		t.Fatalf("expected http target port, got %#v", service.Spec.Ports[0].TargetPort)
 	}
 
 	deployment := &appsv1.Deployment{}
@@ -119,28 +111,14 @@ func TestReconcileEnablesTLSForHTTPSBaseURL(t *testing.T) {
 	if !hasContainerPort(deployment.Spec.Template.Spec.Containers[0].Ports, "http", 8443) {
 		t.Fatalf("expected plain http container port, got %#v", deployment.Spec.Template.Spec.Containers[0].Ports)
 	}
-	if !hasContainerPort(deployment.Spec.Template.Spec.Containers[0].Ports, "https", 9443) {
-		t.Fatalf("expected external https container port, got %#v", deployment.Spec.Template.Spec.Containers[0].Ports)
-	}
 	if deployment.Spec.Template.Spec.Containers[0].ReadinessProbe.HTTPGet.Scheme != corev1.URISchemeHTTP {
 		t.Fatalf("expected http readiness probe, got %s", deployment.Spec.Template.Spec.Containers[0].ReadinessProbe.HTTPGet.Scheme)
 	}
 	if deployment.Spec.Template.Spec.Containers[0].ReadinessProbe.HTTPGet.Port.StrVal != "http" {
 		t.Fatalf("expected readiness probe to use http port, got %#v", deployment.Spec.Template.Spec.Containers[0].ReadinessProbe.HTTPGet.Port)
 	}
-	if !hasVolume(deployment.Spec.Template.Spec.Volumes, "gateway-tls") {
-		t.Fatal("expected gateway-tls volume to be mounted")
-	}
-
-	internalService := &corev1.Service{}
-	if err := client.Get(context.Background(), types.NamespacedName{Name: "demo-cluster-gateway-internal", Namespace: infra.Namespace}, internalService); err != nil {
-		t.Fatalf("get cluster gateway internal service: %v", err)
-	}
-	if internalService.Spec.Type != corev1.ServiceTypeClusterIP {
-		t.Fatalf("expected internal service type ClusterIP, got %q", internalService.Spec.Type)
-	}
-	if len(internalService.Spec.Ports) != 1 || internalService.Spec.Ports[0].Port != 8443 || internalService.Spec.Ports[0].TargetPort.IntVal != 8443 {
-		t.Fatalf("unexpected internal service ports: %#v", internalService.Spec.Ports)
+	if hasVolume(deployment.Spec.Template.Spec.Volumes, "gateway-tls") {
+		t.Fatal("did not expect gateway-tls volume for ingress-terminated TLS")
 	}
 }
 

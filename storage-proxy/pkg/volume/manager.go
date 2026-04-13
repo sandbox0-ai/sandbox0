@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -88,6 +89,13 @@ type directMountLease struct {
 	SessionID string
 	InFlight  int
 	LastUsed  time.Time
+}
+
+var errVolumeRootNotFound = errors.New("volume root not found")
+
+type volumeRootMeta interface {
+	Lookup(ctx meta.Context, parent meta.Ino, name string, inode *meta.Ino, attr *meta.Attr, checkPerm bool) syscall.Errno
+	Mkdir(ctx meta.Context, parent meta.Ino, name string, mode uint16, cumask uint16, copysgid uint8, inode *meta.Ino, attr *meta.Attr) syscall.Errno
 }
 
 // Manager manages JuiceFS volumes
@@ -174,12 +182,7 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID st
 	m.logger.WithField("volume_id", volumeID).Info("Mounting volume")
 
 	// 1. Initialize JuiceFS metadata client
-	metaConf := meta.DefaultConf()
-	metaConf.Retries = m.config.JuiceFSMetaRetries
-	if metaConf.Retries == 0 {
-		metaConf.Retries = 10
-	}
-	metaConf.ReadOnly = readOnly
+	metaConf := buildMetaConf(m.config, readOnly)
 
 	metaClient := meta.NewClient(m.config.MetaURL, metaConf)
 
@@ -254,7 +257,7 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID st
 	if err != nil {
 		return "", "", time.Time{}, fmt.Errorf("volume path: %w", err)
 	}
-	rootInode, err := ensureVolumeRoot(metaClient, rootPath)
+	rootInode, err := resolveMountRoot(metaClient, rootPath, readOnly, m.ensureWritableVolumeRoot)
 	if err != nil {
 		return "", "", time.Time{}, fmt.Errorf("ensure volume root: %w", err)
 	}
@@ -341,10 +344,66 @@ func (m *Manager) AuthenticateMountSession(volumeID, sessionID, sessionSecret st
 	}, nil
 }
 
+func buildMetaConf(cfg *config.StorageProxyConfig, readOnly bool) *meta.Config {
+	metaConf := meta.DefaultConf()
+	if cfg != nil {
+		metaConf.Retries = cfg.JuiceFSMetaRetries
+	}
+	if metaConf.Retries == 0 {
+		metaConf.Retries = 10
+	}
+	metaConf.ReadOnly = readOnly
+	return metaConf
+}
+
+func resolveMountRoot(metaClient volumeRootMeta, path string, readOnly bool, ensureWritable func(string) (meta.Ino, error)) (meta.Ino, error) {
+	if !readOnly {
+		return ensureVolumeRoot(metaClient, path)
+	}
+
+	rootInode, err := lookupVolumeRoot(metaClient, path)
+	if err == nil {
+		return rootInode, nil
+	}
+	if !errors.Is(err, errVolumeRootNotFound) {
+		return 0, err
+	}
+	if ensureWritable == nil {
+		return 0, err
+	}
+	return ensureWritable(path)
+}
+
+func (m *Manager) ensureWritableVolumeRoot(path string) (meta.Ino, error) {
+	if m == nil || m.config == nil {
+		return 0, fmt.Errorf("storage proxy config is not available")
+	}
+
+	metaClient := meta.NewClient(m.config.MetaURL, buildMetaConf(m.config, false))
+	defer func() {
+		if err := metaClient.Shutdown(); err != nil && m.logger != nil {
+			m.logger.WithError(err).Warn("Failed to shutdown writable metadata client after root initialization")
+		}
+	}()
+	if _, err := metaClient.Load(true); err != nil {
+		return 0, fmt.Errorf("load writable metadata: %w", err)
+	}
+
+	return ensureVolumeRoot(metaClient, path)
+}
+
+func lookupVolumeRoot(metaClient volumeRootMeta, path string) (meta.Ino, error) {
+	return resolveVolumeRoot(metaClient, path, false)
+}
+
 // Use meta client directly to create the internal root path.
 // This avoids FUSE/VFS semantics (handles/permissions) and keeps it
 // consistent with snapshot operations which also use meta clients.
-func ensureVolumeRoot(metaClient meta.Meta, path string) (meta.Ino, error) {
+func ensureVolumeRoot(metaClient volumeRootMeta, path string) (meta.Ino, error) {
+	return resolveVolumeRoot(metaClient, path, true)
+}
+
+func resolveVolumeRoot(metaClient volumeRootMeta, path string, createMissing bool) (meta.Ino, error) {
 	if metaClient == nil {
 		return 0, fmt.Errorf("meta client is nil")
 	}
@@ -363,6 +422,9 @@ func ensureVolumeRoot(metaClient meta.Meta, path string) (meta.Ino, error) {
 		var next meta.Ino
 		errno := metaClient.Lookup(jfsCtx, current, part, &next, &attr, false)
 		if errno == syscall.ENOENT {
+			if !createMissing {
+				return 0, fmt.Errorf("%w: %s", errVolumeRootNotFound, part)
+			}
 			errno = metaClient.Mkdir(jfsCtx, current, part, 0o755, 0, 0, &next, &attr)
 			if errno != 0 && errno != syscall.EEXIST {
 				return 0, fmt.Errorf("mkdir %s: %s", part, errno.Error())

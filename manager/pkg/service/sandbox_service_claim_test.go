@@ -92,6 +92,53 @@ func TestClaimIdlePodClaimsReadyPod(t *testing.T) {
 	}
 }
 
+func TestClaimIdlePodRequestsDeleteAfterNetworkApplyFailure(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+	}
+	readyPod := newClaimTestPod("ns-a", "idle-ready", "template-a", true)
+	applyErr := errors.New("apply failed")
+	removed := make([]string, 0, 1)
+	client := fake.NewSimpleClientset(readyPod.DeepCopy())
+	svc := &SandboxService{
+		k8sClient:            client,
+		podLister:            newClaimTestPodLister(t, readyPod),
+		NetworkPolicyService: NewNetworkPolicyService(zap.NewNop()),
+		networkProvider: &assertingNetworkProvider{
+			applyErr: applyErr,
+			removeFunc: func(namespace, sandboxID string) {
+				removed = append(removed, namespace+"/"+sandboxID)
+			},
+		},
+		clock:  systemTime{},
+		logger: zap.NewNop(),
+	}
+
+	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{TeamID: "team-a", UserID: "user-a"})
+	if err == nil {
+		t.Fatal("claimIdlePod() error = nil, want network apply failure")
+	}
+	if !errors.Is(err, applyErr) {
+		t.Fatalf("claimIdlePod() error = %v, want wrapped apply failure", err)
+	}
+	if pod != nil {
+		t.Fatalf("claimIdlePod() pod = %s, want nil on failure", pod.Name)
+	}
+	pods, err := client.CoreV1().Pods("ns-a").List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
+	if len(pods.Items) != 0 {
+		t.Fatalf("pods after failed hot claim = %d, want 0", len(pods.Items))
+	}
+	if len(removed) != 0 {
+		t.Fatalf("network policy removals = %d, want 0; lifecycle controller owns delete cleanup", len(removed))
+	}
+}
+
 func TestWaitForPodReadyWaitsUntilReady(t *testing.T) {
 	pod := newClaimTestPod("ns-a", "cold-pod", "template-a", false)
 	indexer := newClaimTestPodIndexer(t, pod)
@@ -199,7 +246,7 @@ func TestWaitForPodClaimReadyUsesSandboxReadinessWithoutPodReady(t *testing.T) {
 	}
 }
 
-func TestCreateNewPodCleansUpAfterNetworkApplyFailure(t *testing.T) {
+func TestCreateNewPodRequestsDeleteAfterNetworkApplyFailure(t *testing.T) {
 	withClaimTestPublicKey(t)
 
 	template := &v1alpha1.SandboxTemplate{
@@ -243,8 +290,8 @@ func TestCreateNewPodCleansUpAfterNetworkApplyFailure(t *testing.T) {
 	if len(pods.Items) != 0 {
 		t.Fatalf("pods after failed cold claim = %d, want 0", len(pods.Items))
 	}
-	if len(removed) != 1 {
-		t.Fatalf("network policy removals = %d, want 1", len(removed))
+	if len(removed) != 0 {
+		t.Fatalf("network policy removals = %d, want 0; lifecycle controller owns delete cleanup", len(removed))
 	}
 }
 

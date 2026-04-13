@@ -297,6 +297,8 @@ func main() {
 		managerMetrics,
 	)
 	sandboxService.SetCredentialStore(credentialStore)
+	sandboxLifecycleController := service.NewSandboxLifecycleController(k8sClient, podLister, sandboxService, logger)
+	podInformer.Informer().AddEventHandler(sandboxLifecycleController.ResourceEventHandler())
 	operator.SetSandboxProbeRunner(sandboxService)
 	staticAuth := make([]egressauthruntime.StaticAuthConfig, 0, len(cfg.EgressAuthStaticAuth))
 	for _, entry := range cfg.EgressAuthStaticAuth {
@@ -445,6 +447,12 @@ func main() {
 	go func() {
 		if err := cleanupController.Start(ctx); err != nil && err != context.Canceled {
 			logger.Error("Cleanup controller failed", zap.Error(err))
+		}
+	}()
+
+	go func() {
+		if err := sandboxLifecycleController.Run(ctx, 2); err != nil && err != context.Canceled {
+			logger.Error("Sandbox lifecycle controller failed", zap.Error(err))
 		}
 	}()
 

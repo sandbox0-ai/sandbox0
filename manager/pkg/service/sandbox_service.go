@@ -591,7 +591,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	if claimType == "cold" {
 		readyPod, err := s.waitForPodClaimReady(ctx, pod.Namespace, pod.Name)
 		if err != nil {
-			s.cleanupFailedColdClaim(pod, "claim readiness failed")
+			s.requestSandboxDeletionAfterClaimFailure(pod, "claim readiness failed")
 			if metrics != nil {
 				metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
 			}
@@ -603,9 +603,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 
 	procdAddress, err := s.prodAddress(ctx, pod)
 	if err != nil {
-		if claimType == "cold" {
-			s.cleanupFailedColdClaim(pod, "procd address resolution failed")
-		}
+		s.requestSandboxDeletionAfterClaimFailure(pod, "procd address resolution failed")
 		if metrics != nil {
 			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
 		}
@@ -613,9 +611,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	}
 	initResp, err := s.initializeProcd(ctx, pod, req, procdAddress)
 	if err != nil {
-		if claimType == "cold" {
-			s.cleanupFailedColdClaim(pod, "procd initialization failed")
-		}
+		s.requestSandboxDeletionAfterClaimFailure(pod, "procd initialization failed")
 		if metrics != nil {
 			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
 		}
@@ -678,6 +674,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		// Change pool type from idle to active
 		pod.Labels[controller.LabelPoolType] = controller.PoolTypeActive
 		pod.Labels[controller.LabelSandboxID] = pod.Name
+		ensureSandboxCleanupFinalizer(pod)
 
 		// Remove owner reference (so it's no longer managed by ReplicaSet)
 		pod.OwnerReferences = nil
@@ -731,6 +728,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		}
 
 		if applyErr := s.applyNetworkProvider(ctx, updatedPod, req.TeamID, policySpecFromState(networkState)); applyErr != nil {
+			s.requestSandboxDeletionAfterClaimFailure(updatedPod, "network policy apply failed")
 			return fmt.Errorf("apply network policy: %w", applyErr)
 		}
 
@@ -780,6 +778,9 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      podName,
 			Namespace: template.Namespace,
+			Finalizers: []string{
+				sandboxCleanupFinalizer,
+			},
 			Labels: map[string]string{
 				controller.LabelTemplateID: template.Name,
 				controller.LabelPoolType:   controller.PoolTypeActive,
@@ -829,7 +830,7 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 	}
 
 	if err := s.applyNetworkProvider(ctx, createdPod, req.TeamID, policySpecFromState(networkState)); err != nil {
-		s.cleanupFailedColdClaim(createdPod, "network policy apply failed")
+		s.requestSandboxDeletionAfterClaimFailure(createdPod, "network policy apply failed")
 		return nil, fmt.Errorf("apply network policy: %w", err)
 	}
 
@@ -842,7 +843,7 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 	return createdPod, nil
 }
 
-func (s *SandboxService) cleanupFailedColdClaim(pod *corev1.Pod, reason string) {
+func (s *SandboxService) requestSandboxDeletionAfterClaimFailure(pod *corev1.Pod, reason string) {
 	if s == nil || pod == nil || pod.Name == "" || pod.Namespace == "" || s.k8sClient == nil {
 		return
 	}
@@ -853,11 +854,11 @@ func (s *SandboxService) cleanupFailedColdClaim(pod *corev1.Pod, reason string) 
 		logger = zap.NewNop()
 	}
 
-	if s.networkProvider != nil {
-		if err := s.networkProvider.RemoveSandboxPolicy(cleanupCtx, pod.Namespace, pod.Name); err != nil {
-			logger.Warn("Network provider cleanup failed after cold claim failure",
-				zap.String("provider", s.networkProvider.Name()),
+	if !hasSandboxCleanupFinalizer(pod) {
+		if _, err := s.ensureSandboxDeletionFinalizer(cleanupCtx, pod); err != nil {
+			logger.Warn("Failed to ensure sandbox cleanup finalizer after claim failure",
 				zap.String("sandboxID", pod.Name),
+				zap.String("namespace", pod.Namespace),
 				zap.String("reason", reason),
 				zap.Error(err),
 			)
@@ -865,16 +866,9 @@ func (s *SandboxService) cleanupFailedColdClaim(pod *corev1.Pod, reason string) 
 	}
 
 	if err := s.k8sClient.CoreV1().Pods(pod.Namespace).Delete(cleanupCtx, pod.Name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
-		logger.Warn("Delete pod failed after cold claim failure",
+		logger.Warn("Delete pod failed after claim failure",
 			zap.String("sandboxID", pod.Name),
 			zap.String("namespace", pod.Namespace),
-			zap.String("reason", reason),
-			zap.Error(err),
-		)
-	}
-	if err := s.deleteCredentialBindings(cleanupCtx, pod); err != nil {
-		logger.Warn("Credential binding cleanup failed after cold claim failure",
-			zap.String("sandboxID", pod.Name),
 			zap.String("reason", reason),
 			zap.Error(err),
 		)
@@ -1083,13 +1077,6 @@ func cloneBindingRecord(record *egressauth.BindingRecord) *egressauth.BindingRec
 	cloned := *record
 	cloned.Bindings = cloneStoreCredentialBindings(record.Bindings)
 	return &cloned
-}
-
-func (s *SandboxService) deleteCredentialBindings(ctx context.Context, pod *corev1.Pod) error {
-	if s.credentialStore == nil || pod == nil {
-		return nil
-	}
-	return s.credentialStore.DeleteBindings(ctx, sandboxTeamID(pod), pod.Name)
 }
 
 func (s *SandboxService) loadCredentialBindings(ctx context.Context, pod *corev1.Pod) ([]v1alpha1.CredentialBinding, error) {
@@ -1394,31 +1381,21 @@ func (s *SandboxService) TerminateSandbox(ctx context.Context, sandboxID string)
 		return fmt.Errorf("get pod: %w", err)
 	}
 
-	// Note: Network policies are stored in pod annotations
-	// They are automatically deleted when the pod is deleted
-	if s.networkProvider != nil {
-		if err := s.networkProvider.RemoveSandboxPolicy(ctx, pod.Namespace, pod.Name); err != nil {
-			s.logger.Warn("Network provider remove failed",
-				zap.String("provider", s.networkProvider.Name()),
-				zap.String("sandboxID", pod.Name),
-				zap.Error(err),
-			)
-		}
+	pod, err = s.ensureSandboxDeletionFinalizer(ctx, pod)
+	if err != nil {
+		return fmt.Errorf("ensure sandbox cleanup finalizer: %w", err)
 	}
 
-	// Delete the pod
 	err = s.k8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{})
+	if k8serrors.IsNotFound(err) {
+		s.logger.Info("Sandbox already terminated", zap.String("sandboxID", sandboxID))
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("delete pod: %w", err)
 	}
-	if err := s.deleteCredentialBindings(ctx, pod); err != nil {
-		s.logger.Warn("Credential binding cleanup failed",
-			zap.String("sandboxID", pod.Name),
-			zap.Error(err),
-		)
-	}
 
-	s.logger.Info("Sandbox terminated", zap.String("sandboxID", sandboxID), zap.String("pod", pod.Name))
+	s.logger.Info("Sandbox termination requested", zap.String("sandboxID", sandboxID), zap.String("pod", pod.Name))
 
 	return nil
 }

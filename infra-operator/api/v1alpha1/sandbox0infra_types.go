@@ -1117,6 +1117,10 @@ type IngressConfig struct {
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`
 
+	// Annotations specifies provider-specific ingress annotations.
+	// +optional
+	Annotations map[string]string `json:"annotations,omitempty"`
+
 	// ClassName specifies the ingress class name
 	// +optional
 	ClassName string `json:"className,omitempty"`
@@ -1125,9 +1129,29 @@ type IngressConfig struct {
 	// +optional
 	Host string `json:"host,omitempty"`
 
+	// ExtraHosts specifies additional ingress hosts routed to the same backend.
+	// +optional
+	ExtraHosts []string `json:"extraHosts,omitempty"`
+
 	// TLSSecret specifies the TLS secret name
 	// +optional
 	TLSSecret string `json:"tlsSecret,omitempty"`
+
+	// TLS specifies host groups and their backing TLS secrets.
+	// When set, TLS takes precedence over TLSSecret.
+	// +optional
+	TLS []IngressTLSConfig `json:"tls,omitempty"`
+}
+
+// IngressTLSConfig defines one TLS certificate binding for ingress hosts.
+type IngressTLSConfig struct {
+	// Hosts specifies the hosts covered by this TLS secret.
+	// +optional
+	Hosts []string `json:"hosts,omitempty"`
+
+	// SecretName specifies the Kubernetes TLS secret name.
+	// +optional
+	SecretName string `json:"secretName,omitempty"`
 }
 
 // PublicExposureConfig defines public URL exposure configuration for sandboxes.

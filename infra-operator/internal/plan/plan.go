@@ -2,7 +2,6 @@ package plan
 
 import (
 	"fmt"
-	"net/url"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -584,6 +583,9 @@ func compileRegionalGatewayRuntimeConfig(plan *RegionalGatewayPlan, infra *infra
 	}
 
 	cfg.DefaultClusterGatewayURL = plan.DefaultClusterGatewayURL
+	if cfg.HTTPPort == 0 {
+		cfg.HTTPPort = int(regionalGatewayHTTPPort(infra))
+	}
 	if compiled != nil {
 		cfg.SchedulerEnabled = compiled.Components.EnableScheduler
 		cfg.SchedulerURL = compiled.Services.Scheduler.URL
@@ -604,12 +606,6 @@ func compileRegionalGatewayRuntimeConfig(plan *RegionalGatewayPlan, infra *infra
 		cfg.PublicExposureEnabled = infra.Spec.PublicExposure.Enabled
 		cfg.PublicRootDomain = infra.Spec.PublicExposure.RootDomain
 		cfg.PublicRegionID = infra.Spec.PublicExposure.RegionID
-	}
-	if base := strings.TrimSpace(cfg.BaseURL); base != "" {
-		if parsed, err := url.Parse(base); err == nil && strings.EqualFold(parsed.Scheme, "https") {
-			cfg.TLSCertPath = "/tls/tls.crt"
-			cfg.TLSKeyPath = "/tls/tls.key"
-		}
 	}
 }
 

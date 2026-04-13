@@ -96,7 +96,10 @@ func (s *memoryBindingStore) addStaticHeadersSource(teamID, ref string, sourceID
 }
 
 type assertingNetworkProvider struct {
-	applyFunc func(network.SandboxPolicyInput)
+	applyFunc  func(network.SandboxPolicyInput)
+	applyErr   error
+	removeFunc func(namespace, sandboxID string)
+	removeErr  error
 }
 
 func (p *assertingNetworkProvider) Name() string { return "test" }
@@ -109,11 +112,14 @@ func (p *assertingNetworkProvider) ApplySandboxPolicy(_ context.Context, input n
 	if p.applyFunc != nil {
 		p.applyFunc(input)
 	}
-	return nil
+	return p.applyErr
 }
 
-func (p *assertingNetworkProvider) RemoveSandboxPolicy(context.Context, string, string) error {
-	return nil
+func (p *assertingNetworkProvider) RemoveSandboxPolicy(_ context.Context, namespace, sandboxID string) error {
+	if p.removeFunc != nil {
+		p.removeFunc(namespace, sandboxID)
+	}
+	return p.removeErr
 }
 
 func newSandboxServiceForNetworkTests(

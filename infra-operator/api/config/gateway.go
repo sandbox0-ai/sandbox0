@@ -83,13 +83,6 @@ type GatewayConfig struct {
 	// +kubebuilder:default="aws-us-east-1"
 	PublicRegionID string `yaml:"public_region_id" json:"-"`
 
-	// TLSCertPath points at the PEM certificate file served by the gateway.
-	// +optional
-	TLSCertPath string `yaml:"tls_cert_path" json:"-"`
-	// TLSKeyPath points at the PEM private key file served by the gateway.
-	// +optional
-	TLSKeyPath string `yaml:"tls_key_path" json:"-"`
-
 	// SSH endpoint advertised to users for sandbox detail responses.
 	// +optional
 	SSHEndpointHost string `yaml:"ssh_endpoint_host" json:"-"`

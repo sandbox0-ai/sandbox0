@@ -15,12 +15,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func TestReconcileEnablesTLSForHTTPSBaseURL(t *testing.T) {
+func TestReconcileKeepsHTTPBackendForHTTPSIngress(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("failed to add core scheme: %v", err)
@@ -60,8 +59,31 @@ func TestReconcileEnablesTLSForHTTPSBaseURL(t *testing.T) {
 					},
 					ServiceExposureConfig: infrav1alpha1.ServiceExposureConfig{
 						Service: &infrav1alpha1.ServiceNetworkConfig{
-							Type: "LoadBalancer",
-							Port: 443,
+							Type: "ClusterIP",
+							Port: 80,
+							Annotations: map[string]string{
+								"cloud.google.com/neg": `{"ingress": true}`,
+							},
+						},
+					},
+					IngressExposureConfig: infrav1alpha1.IngressExposureConfig{
+						Ingress: &infrav1alpha1.IngressConfig{
+							Enabled: true,
+							Annotations: map[string]string{
+								"kubernetes.io/ingress.class": "gce",
+							},
+							Host:       "gcp-ue4.sandbox0.ai",
+							ExtraHosts: []string{"*.gcp-ue4.sandbox0.app"},
+							TLS: []infrav1alpha1.IngressTLSConfig{
+								{
+									Hosts:      []string{"gcp-ue4.sandbox0.ai"},
+									SecretName: "gcp-ue4-sandbox0-ai-tls",
+								},
+								{
+									Hosts:      []string{"*.gcp-ue4.sandbox0.app"},
+									SecretName: "gcp-ue4-sandbox0-app-tls",
+								},
+							},
 						},
 					},
 					Config: &infrav1alpha1.RegionalGatewayConfig{
@@ -103,46 +125,65 @@ func TestReconcileEnablesTLSForHTTPSBaseURL(t *testing.T) {
 		t.Fatalf("reconcile returned unexpected error: %v", err)
 	}
 
-	secret := &corev1.Secret{}
-	if err := client.Get(context.Background(), types.NamespacedName{Name: "demo-regional-gateway-tls", Namespace: infra.Namespace}, secret); err != nil {
-		t.Fatalf("get tls secret: %v", err)
-	}
-	if secret.Type != corev1.SecretTypeTLS {
-		t.Fatalf("expected tls secret type, got %q", secret.Type)
-	}
-
 	service := &corev1.Service{}
 	if err := client.Get(context.Background(), types.NamespacedName{Name: "demo-regional-gateway", Namespace: infra.Namespace}, service); err != nil {
 		t.Fatalf("get regional gateway service: %v", err)
 	}
-	if service.Spec.Ports[0].Port != 443 {
-		t.Fatalf("expected external service port 443, got %d", service.Spec.Ports[0].Port)
+	if service.Spec.Type != corev1.ServiceTypeClusterIP {
+		t.Fatalf("expected ClusterIP service for ingress backend, got %q", service.Spec.Type)
 	}
-	if service.Spec.Ports[0].Name != "https" {
-		t.Fatalf("expected https service port name, got %q", service.Spec.Ports[0].Name)
+	if service.Spec.Ports[0].Port != 80 {
+		t.Fatalf("expected http service port 80, got %d", service.Spec.Ports[0].Port)
 	}
-	if service.Spec.Ports[0].TargetPort.Type != intstr.String || service.Spec.Ports[0].TargetPort.StrVal != "https" {
-		t.Fatalf("expected https target port, got %#v", service.Spec.Ports[0].TargetPort)
+	if service.Spec.Ports[0].Name != "http" {
+		t.Fatalf("expected http service port name, got %q", service.Spec.Ports[0].Name)
 	}
-	if service.Spec.Ports[0].AppProtocol == nil || *service.Spec.Ports[0].AppProtocol != "HTTPS" {
-		t.Fatalf("expected HTTPS appProtocol, got %#v", service.Spec.Ports[0].AppProtocol)
+	if service.Spec.Ports[0].TargetPort.IntVal != 8080 {
+		t.Fatalf("expected http target port 8080, got %#v", service.Spec.Ports[0].TargetPort)
 	}
-	if service.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyLocal {
-		t.Fatalf("expected externalTrafficPolicy Local, got %q", service.Spec.ExternalTrafficPolicy)
+	if got := service.Annotations["cloud.google.com/neg"]; got != `{"ingress": true}` {
+		t.Fatalf("expected GKE NEG service annotation, got %q", got)
 	}
 
 	deployment := &appsv1.Deployment{}
 	if err := client.Get(context.Background(), types.NamespacedName{Name: "demo-regional-gateway", Namespace: infra.Namespace}, deployment); err != nil {
 		t.Fatalf("get regional gateway deployment: %v", err)
 	}
-	if deployment.Spec.Template.Spec.Containers[0].Ports[0].Name != "https" {
-		t.Fatalf("expected https container port name, got %q", deployment.Spec.Template.Spec.Containers[0].Ports[0].Name)
+	if deployment.Spec.Template.Spec.Containers[0].Ports[0].Name != "http" {
+		t.Fatalf("expected http container port name, got %q", deployment.Spec.Template.Spec.Containers[0].Ports[0].Name)
 	}
-	if deployment.Spec.Template.Spec.Containers[0].ReadinessProbe.HTTPGet.Scheme != corev1.URISchemeHTTPS {
-		t.Fatalf("expected https readiness probe, got %s", deployment.Spec.Template.Spec.Containers[0].ReadinessProbe.HTTPGet.Scheme)
+	if deployment.Spec.Template.Spec.Containers[0].ReadinessProbe.HTTPGet.Scheme != corev1.URISchemeHTTP {
+		t.Fatalf("expected http readiness probe, got %s", deployment.Spec.Template.Spec.Containers[0].ReadinessProbe.HTTPGet.Scheme)
 	}
-	if !hasVolume(deployment.Spec.Template.Spec.Volumes, "gateway-tls") {
-		t.Fatal("expected gateway-tls volume to be mounted")
+	if hasVolume(deployment.Spec.Template.Spec.Volumes, "gateway-tls") {
+		t.Fatal("did not expect gateway-tls volume for ingress-terminated TLS")
+	}
+
+	ingress := &networkingv1.Ingress{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: "demo-regional-gateway", Namespace: infra.Namespace}, ingress); err != nil {
+		t.Fatalf("get regional gateway ingress: %v", err)
+	}
+	if ingress.Spec.IngressClassName != nil {
+		t.Fatalf("did not expect spec.ingressClassName for GKE ingress, got %#v", ingress.Spec.IngressClassName)
+	}
+	if got := ingress.Annotations["kubernetes.io/ingress.class"]; got != "gce" {
+		t.Fatalf("expected GKE ingress class annotation, got %q", got)
+	}
+	if len(ingress.Spec.Rules) != 2 || ingress.Spec.Rules[1].Host != "*.gcp-ue4.sandbox0.app" {
+		t.Fatalf("expected public exposure wildcard rule, got %#v", ingress.Spec.Rules)
+	}
+	if len(ingress.Spec.TLS) != 2 {
+		t.Fatalf("expected ingress TLS secret, got %#v", ingress.Spec.TLS)
+	}
+	if ingress.Spec.TLS[0].SecretName != "gcp-ue4-sandbox0-ai-tls" || !hasString(ingress.Spec.TLS[0].Hosts, "gcp-ue4.sandbox0.ai") {
+		t.Fatalf("expected API hostname TLS entry, got %#v", ingress.Spec.TLS[0])
+	}
+	if ingress.Spec.TLS[1].SecretName != "gcp-ue4-sandbox0-app-tls" || !hasString(ingress.Spec.TLS[1].Hosts, "*.gcp-ue4.sandbox0.app") {
+		t.Fatalf("expected public exposure wildcard TLS entry, got %#v", ingress.Spec.TLS[1])
+	}
+	backend := ingress.Spec.Rules[0].HTTP.Paths[0].Backend.Service
+	if backend == nil || backend.Name != "demo-regional-gateway" || backend.Port.Number != 80 {
+		t.Fatalf("unexpected ingress backend: %#v", backend)
 	}
 }
 
@@ -786,6 +827,15 @@ func newRegionalGatewayTestReconciler(t *testing.T, objects ...runtime.Object) (
 func hasVolume(volumes []corev1.Volume, name string) bool {
 	for _, volume := range volumes {
 		if volume.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func hasString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
 			return true
 		}
 	}

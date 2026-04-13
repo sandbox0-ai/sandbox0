@@ -507,30 +507,23 @@ func (r *ResourceManager) ReconcileIngressWithScope(ctx context.Context, scope O
 
 	pathType := networkingv1.PathTypePrefix
 	desiredLabels := EnsureManagedLabels(ingress.Labels, ingressName)
-	desiredIngress := &networkingv1.Ingress{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      ingressName,
-			Namespace: scope.Namespace,
-			Labels:    desiredLabels,
-		},
-		Spec: networkingv1.IngressSpec{
-			IngressClassName: &config.ClassName,
-			Rules: []networkingv1.IngressRule{
-				{
-					Host: config.Host,
-					IngressRuleValue: networkingv1.IngressRuleValue{
-						HTTP: &networkingv1.HTTPIngressRuleValue{
-							Paths: []networkingv1.HTTPIngressPath{
-								{
-									Path:     "/",
-									PathType: &pathType,
-									Backend: networkingv1.IngressBackend{
-										Service: &networkingv1.IngressServiceBackend{
-											Name: serviceName,
-											Port: networkingv1.ServiceBackendPort{
-												Number: servicePort,
-											},
-										},
+	desiredAnnotations := CloneStringMap(config.Annotations)
+	hosts := ingressHosts(config)
+	rules := make([]networkingv1.IngressRule, 0, len(hosts))
+	for _, host := range hosts {
+		rules = append(rules, networkingv1.IngressRule{
+			Host: host,
+			IngressRuleValue: networkingv1.IngressRuleValue{
+				HTTP: &networkingv1.HTTPIngressRuleValue{
+					Paths: []networkingv1.HTTPIngressPath{
+						{
+							Path:     "/",
+							PathType: &pathType,
+							Backend: networkingv1.IngressBackend{
+								Service: &networkingv1.IngressServiceBackend{
+									Name: serviceName,
+									Port: networkingv1.ServiceBackendPort{
+										Number: servicePort,
 									},
 								},
 							},
@@ -538,17 +531,23 @@ func (r *ResourceManager) ReconcileIngressWithScope(ctx context.Context, scope O
 					},
 				},
 			},
+		})
+	}
+	desiredIngress := &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        ingressName,
+			Namespace:   scope.Namespace,
+			Labels:      desiredLabels,
+			Annotations: desiredAnnotations,
+		},
+		Spec: networkingv1.IngressSpec{
+			Rules: rules,
 		},
 	}
-
-	if config.TLSSecret != "" {
-		desiredIngress.Spec.TLS = []networkingv1.IngressTLS{
-			{
-				Hosts:      []string{config.Host},
-				SecretName: config.TLSSecret,
-			},
-		}
+	if config.ClassName != "" {
+		desiredIngress.Spec.IngressClassName = &config.ClassName
 	}
+	desiredIngress.Spec.TLS = ingressTLS(config, hosts)
 
 	if err := scope.SetControllerReference(desiredIngress, r.Scheme); err != nil {
 		return err
@@ -560,7 +559,80 @@ func (r *ResourceManager) ReconcileIngressWithScope(ctx context.Context, scope O
 
 	ingress.Spec = desiredIngress.Spec
 	ingress.Labels = desiredLabels
+	ingress.Annotations = desiredAnnotations
 	return r.Client.Update(ctx, ingress)
+}
+
+func ingressHosts(config *infrav1alpha1.IngressConfig) []string {
+	seen := map[string]struct{}{}
+	hosts := []string{}
+	add := func(host string) {
+		host = strings.ToLower(strings.TrimSpace(host))
+		if host == "" {
+			return
+		}
+		if _, ok := seen[host]; ok {
+			return
+		}
+		seen[host] = struct{}{}
+		hosts = append(hosts, host)
+	}
+	add(config.Host)
+	for _, host := range config.ExtraHosts {
+		add(host)
+	}
+	if len(hosts) == 0 {
+		return []string{""}
+	}
+	return hosts
+}
+
+func ingressTLS(config *infrav1alpha1.IngressConfig, defaultHosts []string) []networkingv1.IngressTLS {
+	if len(config.TLS) == 0 {
+		if config.TLSSecret == "" {
+			return nil
+		}
+		return []networkingv1.IngressTLS{
+			{
+				Hosts:      defaultHosts,
+				SecretName: config.TLSSecret,
+			},
+		}
+	}
+
+	tls := make([]networkingv1.IngressTLS, 0, len(config.TLS))
+	for _, entry := range config.TLS {
+		secretName := strings.TrimSpace(entry.SecretName)
+		if secretName == "" {
+			continue
+		}
+		hosts := normalizeHostList(entry.Hosts)
+		if len(hosts) == 0 {
+			hosts = defaultHosts
+		}
+		tls = append(tls, networkingv1.IngressTLS{
+			Hosts:      hosts,
+			SecretName: secretName,
+		})
+	}
+	return tls
+}
+
+func normalizeHostList(values []string) []string {
+	seen := map[string]struct{}{}
+	hosts := []string{}
+	for _, value := range values {
+		host := strings.ToLower(strings.TrimSpace(value))
+		if host == "" {
+			continue
+		}
+		if _, ok := seen[host]; ok {
+			continue
+		}
+		seen[host] = struct{}{}
+		hosts = append(hosts, host)
+	}
+	return hosts
 }
 
 // ReconcileServiceConfigMap creates or updates a configmap for a service.

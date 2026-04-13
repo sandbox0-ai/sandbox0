@@ -19,7 +19,6 @@ package clustergateway
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -29,7 +28,6 @@ import (
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
-	webhookcerts "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/webhook"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -38,6 +36,8 @@ import (
 type Reconciler struct {
 	Resources *common.ResourceManager
 }
+
+const defaultClusterGatewayHTTPPort = 8443
 
 func NewReconciler(resources *common.ResourceManager) *Reconciler {
 	return &Reconciler{Resources: resources}
@@ -97,7 +97,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 		}
 	}
 	httpPort := int32(config.HTTPPort)
-	tlsEnabled := strings.TrimSpace(config.TLSCertPath) != "" && strings.TrimSpace(config.TLSKeyPath) != ""
 
 	// Create deployment
 	volumeMounts := []corev1.VolumeMount{
@@ -163,38 +162,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 	if needEnterpriseLicense {
 		volumeMounts, volumes = common.AppendEnterpriseLicenseVolumeWithSecretRef(compiledPlan.EnterpriseLicenseSecretRef(), config.LicenseFile, volumeMounts, volumes)
 	}
-	if tlsEnabled {
-		tlsSecretName := fmt.Sprintf("%s-cluster-gateway-tls", scope.Name)
-		dnsNames := clusterGatewayTLSDNSNames(config)
-		if len(dnsNames) == 0 {
-			return fmt.Errorf("cluster-gateway TLS enabled but no DNS names were derived")
-		}
-		if err := webhookcerts.NewReconciler(r.Resources).ReconcileCertSecretWithScope(ctx, scope, tlsSecretName, labels, dnsNames); err != nil {
-			return err
-		}
-		volumeMounts = append(volumeMounts,
-			corev1.VolumeMount{
-				Name:      "gateway-tls",
-				MountPath: "/tls/tls.crt",
-				SubPath:   corev1.TLSCertKey,
-				ReadOnly:  true,
-			},
-			corev1.VolumeMount{
-				Name:      "gateway-tls",
-				MountPath: "/tls/tls.key",
-				SubPath:   corev1.TLSPrivateKeyKey,
-				ReadOnly:  true,
-			},
-		)
-		volumes = append(volumes, corev1.Volume{
-			Name: "gateway-tls",
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName: tlsSecretName,
-				},
-			},
-		})
-	}
 
 	if err := r.Resources.ReconcileDeploymentWithScope(ctx, scope, deploymentName, labels, replicas, common.ServiceDefinition{
 		Name:       "cluster-gateway",
@@ -225,7 +192,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 				HTTPGet: &corev1.HTTPGetAction{
 					Path:   "/healthz",
 					Port:   intstr.FromString("http"),
-					Scheme: probeScheme(tlsEnabled),
+					Scheme: corev1.URISchemeHTTP,
 				},
 			},
 			InitialDelaySeconds: 10,
@@ -236,7 +203,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 				HTTPGet: &corev1.HTTPGetAction{
 					Path:   "/readyz",
 					Port:   intstr.FromString("http"),
-					Scheme: probeScheme(tlsEnabled),
+					Scheme: corev1.URISchemeHTTP,
 				},
 			},
 			InitialDelaySeconds: 5,
@@ -249,11 +216,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 
 	// Create service
 	serviceType := common.ResolveServiceType(serviceConfig)
-	defaultServicePort := httpPort
-	if tlsEnabled {
-		defaultServicePort = 443
-	}
-	servicePort := common.ResolveServicePort(serviceConfig, defaultServicePort)
+	servicePort := common.ResolveServicePort(serviceConfig, httpPort)
 	serviceAnnotations := common.ResolveServiceAnnotations(serviceConfig)
 	if err := r.Resources.ReconcileServiceWithScope(ctx, scope, serviceName, labels, serviceType, serviceAnnotations, servicePort, httpPort); err != nil {
 		return err
@@ -267,26 +230,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 	return nil
 }
 
-func clusterGatewayTLSDNSNames(cfg *apiconfig.ClusterGatewayConfig) []string {
-	names := make([]string, 0, 2)
-	if base := strings.TrimSpace(cfg.BaseURL); base != "" {
-		if parsed, err := url.Parse(base); err == nil && parsed.Hostname() != "" {
-			names = append(names, parsed.Hostname())
-		}
-	}
-	if cfg.PublicExposureEnabled && strings.TrimSpace(cfg.PublicRegionID) != "" && strings.TrimSpace(cfg.PublicRootDomain) != "" {
-		names = append(names, fmt.Sprintf("*.%s.%s", cfg.PublicRegionID, cfg.PublicRootDomain))
-	}
-	return names
-}
-
-func probeScheme(tlsEnabled bool) corev1.URIScheme {
-	if tlsEnabled {
-		return corev1.URISchemeHTTPS
-	}
-	return corev1.URISchemeHTTP
-}
-
 func (r *Reconciler) buildConfig(ctx context.Context, compiledPlan *infraplan.InfraPlan) (*apiconfig.ClusterGatewayConfig, error) {
 	cfg := &apiconfig.ClusterGatewayConfig{}
 	if compiledPlan != nil && compiledPlan.Components.EnableClusterGateway && compiledPlan.Services.ClusterGateway.Name != "" {
@@ -296,6 +239,9 @@ func (r *Reconciler) buildConfig(ctx context.Context, compiledPlan *infraplan.In
 	}
 	if compiledPlan == nil {
 		return nil, fmt.Errorf("compiled plan is required")
+	}
+	if cfg.HTTPPort == 0 {
+		cfg.HTTPPort = defaultClusterGatewayHTTPPort
 	}
 	cfg.AuthMode = deriveClusterGatewayAuthMode(cfg.AuthMode, compiledPlan)
 	resolvedRegionID := strings.TrimSpace(cfg.RegionID)
@@ -386,12 +332,6 @@ func (r *Reconciler) buildConfig(ctx context.Context, compiledPlan *infraplan.In
 	cfg.RegionID = resolvedRegionID
 	if cfg.BuiltInAuth.InitUser != nil && strings.TrimSpace(cfg.BuiltInAuth.InitUser.HomeRegionID) == "" {
 		cfg.BuiltInAuth.InitUser.HomeRegionID = resolvedRegionID
-	}
-	if base := strings.TrimSpace(cfg.BaseURL); base != "" {
-		if parsed, err := url.Parse(base); err == nil && strings.EqualFold(parsed.Scheme, "https") {
-			cfg.TLSCertPath = "/tls/tls.crt"
-			cfg.TLSKeyPath = "/tls/tls.key"
-		}
 	}
 
 	return cfg, nil

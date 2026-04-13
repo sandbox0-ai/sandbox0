@@ -142,9 +142,6 @@ func TestCompileDerivesCrossServiceReferences(t *testing.T) {
 	if compiled.RegionalGateway.Config == nil || compiled.RegionalGateway.Config.SSHEndpointHost != "" {
 		t.Fatalf("expected regional gateway config without ssh endpoint, got %#v", compiled.RegionalGateway.Config)
 	}
-	if compiled.RegionalGateway.Config == nil || compiled.RegionalGateway.Config.TLSCertPath == "" {
-		t.Fatalf("expected regional gateway TLS paths to be compiled, got %#v", compiled.RegionalGateway.Config)
-	}
 	if compiled.RegionalGateway.IngressConfig == nil || !compiled.RegionalGateway.IngressConfig.Enabled {
 		t.Fatalf("expected regional gateway ingress config to be compiled, got %#v", compiled.RegionalGateway.IngressConfig)
 	}

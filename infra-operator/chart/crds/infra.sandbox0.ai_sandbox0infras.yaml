@@ -646,6 +646,12 @@ spec:
                         description: Ingress configures ingress settings for external
                           registry access.
                         properties:
+                          annotations:
+                            additionalProperties:
+                              type: string
+                            description: Annotations specifies provider-specific ingress
+                              annotations.
+                            type: object
                           className:
                             description: ClassName specifies the ingress class name
                             type: string
@@ -653,9 +659,35 @@ spec:
                             default: false
                             description: Enabled enables ingress
                             type: boolean
+                          extraHosts:
+                            description: ExtraHosts specifies additional ingress hosts
+                              routed to the same backend.
+                            items:
+                              type: string
+                            type: array
                           host:
                             description: Host specifies the ingress host
                             type: string
+                          tls:
+                            description: |-
+                              TLS specifies host groups and their backing TLS secrets.
+                              When set, TLS takes precedence over TLSSecret.
+                            items:
+                              description: IngressTLSConfig defines one TLS certificate
+                                binding for ingress hosts.
+                              properties:
+                                hosts:
+                                  description: Hosts specifies the hosts covered by
+                                    this TLS secret.
+                                  items:
+                                    type: string
+                                  type: array
+                                secretName:
+                                  description: SecretName specifies the Kubernetes
+                                    TLS secret name.
+                                  type: string
+                              type: object
+                            type: array
                           tlsSecret:
                             description: TLSSecret specifies the TLS secret name
                             type: string
@@ -1340,6 +1372,12 @@ spec:
                       ingress:
                         description: Ingress configures ingress settings
                         properties:
+                          annotations:
+                            additionalProperties:
+                              type: string
+                            description: Annotations specifies provider-specific ingress
+                              annotations.
+                            type: object
                           className:
                             description: ClassName specifies the ingress class name
                             type: string
@@ -1347,9 +1385,35 @@ spec:
                             default: false
                             description: Enabled enables ingress
                             type: boolean
+                          extraHosts:
+                            description: ExtraHosts specifies additional ingress hosts
+                              routed to the same backend.
+                            items:
+                              type: string
+                            type: array
                           host:
                             description: Host specifies the ingress host
                             type: string
+                          tls:
+                            description: |-
+                              TLS specifies host groups and their backing TLS secrets.
+                              When set, TLS takes precedence over TLSSecret.
+                            items:
+                              description: IngressTLSConfig defines one TLS certificate
+                                binding for ingress hosts.
+                              properties:
+                                hosts:
+                                  description: Hosts specifies the hosts covered by
+                                    this TLS secret.
+                                  items:
+                                    type: string
+                                  type: array
+                                secretName:
+                                  description: SecretName specifies the Kubernetes
+                                    TLS secret name.
+                                  type: string
+                              type: object
+                            type: array
                           tlsSecret:
                             description: TLSSecret specifies the TLS secret name
                             type: string
@@ -2073,6 +2137,12 @@ spec:
                       ingress:
                         description: Ingress configures ingress settings
                         properties:
+                          annotations:
+                            additionalProperties:
+                              type: string
+                            description: Annotations specifies provider-specific ingress
+                              annotations.
+                            type: object
                           className:
                             description: ClassName specifies the ingress class name
                             type: string
@@ -2080,9 +2150,35 @@ spec:
                             default: false
                             description: Enabled enables ingress
                             type: boolean
+                          extraHosts:
+                            description: ExtraHosts specifies additional ingress hosts
+                              routed to the same backend.
+                            items:
+                              type: string
+                            type: array
                           host:
                             description: Host specifies the ingress host
                             type: string
+                          tls:
+                            description: |-
+                              TLS specifies host groups and their backing TLS secrets.
+                              When set, TLS takes precedence over TLSSecret.
+                            items:
+                              description: IngressTLSConfig defines one TLS certificate
+                                binding for ingress hosts.
+                              properties:
+                                hosts:
+                                  description: Hosts specifies the hosts covered by
+                                    this TLS secret.
+                                  items:
+                                    type: string
+                                  type: array
+                                secretName:
+                                  description: SecretName specifies the Kubernetes
+                                    TLS secret name.
+                                  type: string
+                              type: object
+                            type: array
                           tlsSecret:
                             description: TLSSecret specifies the TLS secret name
                             type: string

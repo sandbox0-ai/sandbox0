@@ -493,17 +493,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// Start server in a goroutine
 	errChan := make(chan error, 1)
 	go func() {
-		var err error
-		if strings.TrimSpace(s.cfg.TLSCertPath) != "" && strings.TrimSpace(s.cfg.TLSKeyPath) != "" {
-			s.logger.Info("Gateway TLS enabled",
-				zap.String("cert_path", s.cfg.TLSCertPath),
-				zap.String("key_path", s.cfg.TLSKeyPath),
-			)
-			err = server.ListenAndServeTLS(s.cfg.TLSCertPath, s.cfg.TLSKeyPath)
-		} else {
-			err = server.ListenAndServe()
-		}
-		if err != nil && err != http.ErrServerClosed {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errChan <- err
 		}
 	}()

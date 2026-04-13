@@ -88,6 +88,7 @@ spec:
   # Shared placement for sandbox template Pods plus node-local helpers such as
   # netd and ctld. In production, point this at your dedicated sandbox
   # node pool and pair it with services.manager.config.sandboxRuntimeClassName.
+  # infra-operator manages sandbox0.ai/data-plane-ready; do not include it here.
   # The example below targets a Kata node pool; adjust labels and tolerations
   # for your cluster.
   #sandboxNodePlacement:

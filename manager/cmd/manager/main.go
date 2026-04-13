@@ -284,6 +284,7 @@ func main() {
 	sandboxService := service.NewSandboxService(
 		k8sClient,
 		podLister,
+		nodeLister,
 		sandboxIndex,
 		secretLister,
 		operator.GetTemplateLister(),

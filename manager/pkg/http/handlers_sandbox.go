@@ -46,6 +46,11 @@ func (s *Server) claimSandbox(c *gin.Context) {
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 			return
 		}
+		if errors.Is(err, service.ErrDataPlaneNotReady) {
+			c.Header("Retry-After", "1")
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())
+			return
+		}
 		s.logger.Error("Failed to claim sandbox",
 			zap.String("template", req.Template),
 			zap.String("teamID", req.TeamID),

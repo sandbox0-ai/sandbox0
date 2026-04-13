@@ -55,32 +55,39 @@ func (s *sshSession) run() {
 				requests = nil
 				continue
 			}
-			handled, success := s.handleRequest(req)
+			handled, success, afterReply := s.handleRequest(req)
 			if req.WantReply && handled {
 				_ = req.Reply(success, nil)
+			}
+			// Start bridges after replying so fast commands cannot close the SSH
+			// channel before the client receives request success.
+			if success && afterReply != nil {
+				afterReply()
 			}
 		}
 	}
 }
 
-func (s *sshSession) handleRequest(req *ssh.Request) (handled, success bool) {
+func (s *sshSession) handleRequest(req *ssh.Request) (handled, success bool, afterReply func()) {
 	switch req.Type {
 	case "pty-req":
-		return true, s.handlePTY(req.Payload)
+		return true, s.handlePTY(req.Payload), nil
 	case "shell":
-		return true, s.handleShell()
+		success, afterReply := s.handleShell()
+		return true, success, afterReply
 	case "window-change":
-		return true, s.handleWindowChange(req.Payload)
+		return true, s.handleWindowChange(req.Payload), nil
 	case "signal":
-		return true, s.handleSignal(req.Payload)
+		return true, s.handleSignal(req.Payload), nil
 	case "subsystem":
 		return s.handleSubsystem(req)
 	case "exec":
-		return true, s.handleExec(req.Payload)
+		success, afterReply := s.handleExec(req.Payload)
+		return true, success, afterReply
 	case "eow@openssh.com":
-		return true, true
+		return true, true, nil
 	default:
-		return true, false
+		return true, false, nil
 	}
 }
 
@@ -99,9 +106,9 @@ func (s *sshSession) handlePTY(payload []byte) bool {
 	return true
 }
 
-func (s *sshSession) handleShell() bool {
+func (s *sshSession) handleShell() (bool, func()) {
 	if s.bridge != nil || s.sftpDone != nil {
-		return false
+		return false, nil
 	}
 	bridge, err := s.server.openShell(s.ctx, s.target, s.pty, s.channel)
 	if err != nil {
@@ -111,11 +118,11 @@ func (s *sshSession) handleShell() bool {
 			zap.String("user_id", s.target.UserID),
 			zap.Error(err),
 		)
-		return false
+		return false, nil
 	}
 	s.setBridge(bridge)
 	s.watchBridge("sandbox shell disconnected\n", "Sandbox shell bridge exited with error", nil)
-	return true
+	return true, bridge.start
 }
 
 func (s *sshSession) handleWindowChange(payload []byte) bool {
@@ -146,43 +153,44 @@ func (s *sshSession) handleSignal(payload []byte) bool {
 	return true
 }
 
-func (s *sshSession) handleSubsystem(req *ssh.Request) (handled, success bool) {
+func (s *sshSession) handleSubsystem(req *ssh.Request) (handled, success bool, afterReply func()) {
 	var payload sftpSubsystemRequest
 	if err := ssh.Unmarshal(req.Payload, &payload); err != nil || payload.Subsystem != "sftp" {
-		return true, false
+		return true, false, nil
 	}
 	if s.bridge != nil || s.sftpDone != nil {
-		return true, false
+		return true, false, nil
 	}
 	done := make(chan sftpExit, 1)
 	s.sftpDone = done
-	go func() {
-		result := sftpExit{}
-		if err := s.server.serveSFTP(s.channel, s.target); err != nil && !errors.Is(err, io.EOF) {
-			result.status = 1
-			result.err = err
-		}
-		done <- result
-	}()
-	return true, true
+	return true, true, func() {
+		go func() {
+			result := sftpExit{}
+			if err := s.server.serveSFTP(s.channel, s.target); err != nil && !errors.Is(err, io.EOF) {
+				result.status = 1
+				result.err = err
+			}
+			done <- result
+		}()
+	}
 }
 
-func (s *sshSession) handleExec(payload []byte) bool {
+func (s *sshSession) handleExec(payload []byte) (bool, func()) {
 	if s.bridge != nil || s.sftpDone != nil {
-		return false
+		return false, nil
 	}
 	var req execRequest
 	if err := ssh.Unmarshal(payload, &req); err != nil {
-		return false
+		return false, nil
 	}
 	command := strings.TrimSpace(req.Command)
 	if command == "" {
 		_, _ = s.channel.Stderr().Write([]byte("empty exec command\n"))
-		return false
+		return false, nil
 	}
 	if strings.HasPrefix(command, "scp ") {
 		_, _ = s.channel.Stderr().Write([]byte("legacy scp mode is not supported; use default scp/sftp mode\n"))
-		return false
+		return false, nil
 	}
 
 	bridge, err := s.server.openExec(s.ctx, s.target, s.pty, command, s.channel)
@@ -194,11 +202,11 @@ func (s *sshSession) handleExec(payload []byte) bool {
 			zap.String("command", command),
 			zap.Error(err),
 		)
-		return false
+		return false, nil
 	}
 	s.setBridge(bridge)
 	s.watchBridge("sandbox command disconnected\n", "Sandbox command bridge exited with error", []zap.Field{zap.String("command", command)})
-	return true
+	return true, bridge.start
 }
 
 func (s *sshSession) handleSFTPExit(result sftpExit) {

@@ -52,6 +52,7 @@ spec:
         maxIdle: 5
   # Shared placement for sandbox template Pods plus node-local helpers such as
   # netd and ctld.
+  # infra-operator manages sandbox0.ai/data-plane-ready; do not include it here.
   #sandboxNodePlacement:
   #  nodeSelector:
   #    sandbox0.ai/node-role: sandbox

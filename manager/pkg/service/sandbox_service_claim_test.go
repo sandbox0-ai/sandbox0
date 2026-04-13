@@ -17,6 +17,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
+	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
@@ -89,6 +90,37 @@ func TestClaimIdlePodClaimsReadyPod(t *testing.T) {
 	}
 	if got := pod.Labels[controller.LabelPoolType]; got != controller.PoolTypeActive {
 		t.Fatalf("pool-type = %q, want %q", got, controller.PoolTypeActive)
+	}
+}
+
+func TestClaimIdlePodRequiresDataPlaneReadyNode(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+	}
+	readyPod := newClaimTestPod("ns-a", "idle-ready", "template-a", true)
+	readyPod.Spec.NodeName = "node-a"
+	readyPod.Spec.NodeSelector = dataplane.DataPlaneReadyNodeSelector()
+
+	node := newClaimTestNode("node-a", "10.0.0.1")
+	node.Labels = map[string]string{dataplane.NodeDataPlaneReadyLabel: dataplane.NotReadyLabelValue}
+	client := fake.NewSimpleClientset(readyPod.DeepCopy(), node.DeepCopy())
+	svc := &SandboxService{
+		k8sClient:  client,
+		podLister:  newClaimTestPodLister(t, readyPod),
+		nodeLister: newClaimTestNodeLister(t, node),
+		clock:      systemTime{},
+		logger:     zap.NewNop(),
+	}
+
+	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{TeamID: "team-a", UserID: "user-a"})
+	if err != nil {
+		t.Fatalf("claimIdlePod() error = %v", err)
+	}
+	if pod != nil {
+		t.Fatalf("claimIdlePod() = %s, want nil for pod on data-plane-not-ready node", pod.Name)
 	}
 }
 
@@ -295,6 +327,44 @@ func TestCreateNewPodRequestsDeleteAfterNetworkApplyFailure(t *testing.T) {
 	}
 }
 
+func TestCreateNewPodFailsBeforeCreateWhenDataPlaneNotReady(t *testing.T) {
+	withClaimTestManagerConfig(t, `sandbox_pod_placement:
+  node_selector:
+    sandbox0.ai/data-plane-ready: "true"
+`)
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			MainContainer: v1alpha1.ContainerSpec{Image: "busybox"},
+		},
+	}
+	client := fake.NewSimpleClientset()
+	svc := &SandboxService{
+		k8sClient:  client,
+		nodeLister: newClaimTestNodeLister(t),
+		clock:      systemTime{},
+		logger:     zap.NewNop(),
+	}
+
+	_, err := svc.createNewPod(context.Background(), template, &ClaimRequest{TeamID: "team-a", UserID: "user-a"})
+	if err == nil {
+		t.Fatal("createNewPod() error = nil, want data-plane-not-ready")
+	}
+	if !errors.Is(err, ErrDataPlaneNotReady) {
+		t.Fatalf("createNewPod() error = %v, want ErrDataPlaneNotReady", err)
+	}
+	pods, err := client.CoreV1().Pods("ns-a").List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
+	if len(pods.Items) != 0 {
+		t.Fatalf("pods after data-plane-not-ready cold claim = %d, want 0", len(pods.Items))
+	}
+}
+
 func TestClaimSandboxCleansColdPodWhenClaimReadinessFails(t *testing.T) {
 	withClaimTestPublicKey(t)
 	templateNamespace, err := naming.TemplateNamespaceForBuiltin("managed-agent-claude")
@@ -459,6 +529,25 @@ func withClaimTestPublicKey(t *testing.T) {
 	t.Cleanup(func() { internalauth.DefaultInternalJWTPublicKeyPath = previousKeyPath })
 }
 
+func withClaimTestManagerConfig(t *testing.T, content string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "manager-config.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write manager config: %v", err)
+	}
+	previousPath, hadPath := os.LookupEnv("CONFIG_PATH")
+	if err := os.Setenv("CONFIG_PATH", path); err != nil {
+		t.Fatalf("set CONFIG_PATH: %v", err)
+	}
+	t.Cleanup(func() {
+		if hadPath {
+			_ = os.Setenv("CONFIG_PATH", previousPath)
+			return
+		}
+		_ = os.Unsetenv("CONFIG_PATH")
+	})
+}
+
 func newClaimTestSecretLister(t *testing.T, secrets ...*corev1.Secret) corelisters.SecretLister {
 	t.Helper()
 	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{
@@ -470,6 +559,17 @@ func newClaimTestSecretLister(t *testing.T, secrets ...*corev1.Secret) coreliste
 		}
 	}
 	return corelisters.NewSecretLister(indexer)
+}
+
+func newClaimTestNodeLister(t *testing.T, nodes ...*corev1.Node) corelisters.NodeLister {
+	t.Helper()
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	for _, node := range nodes {
+		if err := indexer.Add(node); err != nil {
+			t.Fatalf("add node: %v", err)
+		}
+	}
+	return corelisters.NewNodeLister(indexer)
 }
 
 func newClaimTestPodIndexer(t *testing.T, pods ...*corev1.Pod) cache.Indexer {

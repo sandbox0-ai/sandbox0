@@ -18,6 +18,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
+	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	egressauth "github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
@@ -81,6 +82,7 @@ type SandboxPowerState struct {
 // errNoIdlePod is returned when no idle pod is available for claiming.
 var errNoIdlePod = errors.New("no idle pod available")
 var ErrInvalidClaimRequest = errors.New("invalid claim request")
+var ErrDataPlaneNotReady = errors.New("data plane not ready")
 var errSandboxPowerStateStale = errors.New("sandbox power state changed during execution")
 
 // ErrSandboxPowerTransitionSuperseded is returned when a newer pause/resume request replaces the requested transition.
@@ -122,6 +124,7 @@ type SandboxServiceConfig struct {
 type SandboxService struct {
 	k8sClient              kubernetes.Interface
 	podLister              corelisters.PodLister
+	nodeLister             corelisters.NodeLister
 	sandboxIndex           *SandboxIndex
 	secretLister           corelisters.SecretLister
 	templateLister         controller.TemplateLister
@@ -175,6 +178,7 @@ type TokenGenerator interface {
 func NewSandboxService(
 	k8sClient kubernetes.Interface,
 	podLister corelisters.PodLister,
+	nodeLister corelisters.NodeLister,
 	sandboxIndex *SandboxIndex,
 	secretLister corelisters.SecretLister,
 	templateLister controller.TemplateLister,
@@ -203,6 +207,7 @@ func NewSandboxService(
 	service := &SandboxService{
 		k8sClient:              k8sClient,
 		podLister:              podLister,
+		nodeLister:             nodeLister,
 		sandboxIndex:           sandboxIndex,
 		secretLister:           secretLister,
 		templateLister:         templateLister,
@@ -650,7 +655,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		// Filter hot-claimable pods to Kubernetes-ready instances only.
 		var readyPods []*corev1.Pod
 		for _, pod := range pods {
-			if controller.IsPodReady(pod) {
+			if controller.IsPodReady(pod) && s.podDataPlaneReady(pod) {
 				readyPods = append(readyPods, pod)
 			}
 		}
@@ -758,6 +763,14 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 	if err != nil {
 		return nil, fmt.Errorf("generate sandbox name: %w", err)
 	}
+
+	// Build pod spec before side-effecting resources so claims fail fast when the
+	// sandbox data plane has no ready nodes to receive the pod.
+	spec := v1alpha1.BuildPodSpec(template)
+	if err := s.ensureDataPlaneReadyCapacity(spec); err != nil {
+		return nil, err
+	}
+
 	if err := controller.EnsureProcdConfigSecret(ctx, s.k8sClient, s.secretLister, template); err != nil {
 		return nil, fmt.Errorf("ensure procd config secret: %w", err)
 	}
@@ -765,8 +778,6 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 		return nil, fmt.Errorf("ensure netd MITM CA secret: %w", err)
 	}
 
-	// Build pod spec from template
-	spec := v1alpha1.BuildPodSpec(template)
 	annotations := map[string]string{
 		controller.AnnotationSandboxID: podName,
 		controller.AnnotationTeamID:    req.TeamID,
@@ -873,6 +884,41 @@ func (s *SandboxService) requestSandboxDeletionAfterClaimFailure(pod *corev1.Pod
 			zap.Error(err),
 		)
 	}
+}
+
+func (s *SandboxService) podDataPlaneReady(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	if !dataplane.SelectorRequiresReadyNode(pod.Spec.NodeSelector) {
+		return true
+	}
+	if pod.Spec.NodeName == "" || s == nil || s.nodeLister == nil {
+		return false
+	}
+	node, err := s.nodeLister.Get(pod.Spec.NodeName)
+	if err != nil {
+		return false
+	}
+	return dataplane.NodeReady(node)
+}
+
+func (s *SandboxService) ensureDataPlaneReadyCapacity(spec corev1.PodSpec) error {
+	if !dataplane.SelectorRequiresReadyNode(spec.NodeSelector) {
+		return nil
+	}
+	if s == nil || s.nodeLister == nil {
+		return fmt.Errorf("%w: manager node cache is not configured", ErrDataPlaneNotReady)
+	}
+	selector := labels.SelectorFromSet(spec.NodeSelector)
+	nodes, err := s.nodeLister.List(selector)
+	if err != nil {
+		return fmt.Errorf("list data-plane-ready nodes: %w", err)
+	}
+	if len(nodes) == 0 {
+		return fmt.Errorf("%w: no nodes match selector %q", ErrDataPlaneNotReady, labels.Set(spec.NodeSelector).String())
+	}
+	return nil
 }
 
 type webhookInfo struct {
@@ -1285,6 +1331,9 @@ func (s *SandboxService) applyNetworkProvider(
 		NetworkPolicy: networkSpec,
 	}
 	if err := s.networkProvider.ApplySandboxPolicy(ctx, input); err != nil {
+		if errors.Is(err, network.ErrPolicyApplyTimeout) {
+			return fmt.Errorf("%w: %v", ErrDataPlaneNotReady, err)
+		}
 		return err
 	}
 	return nil

@@ -8,6 +8,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 )
 
 func TestCompileDerivesCrossServiceReferences(t *testing.T) {
@@ -120,6 +121,12 @@ func TestCompileDerivesCrossServiceReferences(t *testing.T) {
 	}
 	if got := compiled.Manager.SandboxPodPlacement.NodeSelector["sandbox0.ai/node-role"]; got != "shared" {
 		t.Fatalf("expected shared sandbox placement, got %q", got)
+	}
+	if got := compiled.Manager.SandboxPodPlacement.NodeSelector[dataplane.NodeDataPlaneReadyLabel]; got != dataplane.ReadyLabelValue {
+		t.Fatalf("expected manager sandbox placement to require data-plane-ready nodes, got %q", got)
+	}
+	if _, ok := compiled.Netd.NodeSelector[dataplane.NodeDataPlaneReadyLabel]; ok {
+		t.Fatalf("expected netd placement not to require data-plane-ready nodes, got %#v", compiled.Netd.NodeSelector)
 	}
 	if len(compiled.Netd.Tolerations) != 1 || compiled.Netd.Tolerations[0].Key != "sandbox0.ai/sandbox" {
 		t.Fatalf("expected shared netd tolerations, got %#v", compiled.Netd.Tolerations)
@@ -890,9 +897,10 @@ func TestCompileTracksWorkflowRequirements(t *testing.T) {
 		"fuse-device-plugin",
 		"manager-rbac",
 		"manager",
-		"builtin-template-pods",
 		"netd-rbac",
 		"netd",
+		"data-plane-node-readiness",
+		"builtin-template-pods",
 		"storage-proxy-rbac",
 		"storage-proxy",
 		"register-cluster",

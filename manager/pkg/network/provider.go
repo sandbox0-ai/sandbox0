@@ -2,9 +2,12 @@ package network
 
 import (
 	"context"
+	"errors"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 )
+
+var ErrPolicyApplyTimeout = errors.New("network policy apply timeout")
 
 // SandboxPolicyInput contains the policy data needed by a network provider.
 type SandboxPolicyInput struct {

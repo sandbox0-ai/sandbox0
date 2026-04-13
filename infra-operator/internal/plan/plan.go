@@ -11,6 +11,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/registry"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
+	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 )
@@ -349,6 +350,7 @@ func compileSchedulerHomeCluster(infra *infrav1alpha1.Sandbox0Infra, compiled *I
 
 func compileManagerPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) ManagerPlan {
 	nodeSelector, tolerations := common.ResolveSandboxNodePlacement(infra)
+	nodeSelector = withDataPlaneReadyNodeSelector(nodeSelector, compiled)
 	templateStoreEnabled := clusterGatewayAuthMode(infra) != defaultClusterGatewayAuthMode
 	if infrav1alpha1.IsRegionalGatewayEnabled(infra) && !infrav1alpha1.IsSchedulerEnabled(infra) {
 		templateStoreEnabled = true
@@ -390,6 +392,29 @@ func compileManagerPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 	}
 
 	return managerPlan
+}
+
+func withDataPlaneReadyNodeSelector(selector map[string]string, compiled *InfraPlan) map[string]string {
+	if compiled == nil || !compiled.Components.EnableManager {
+		return selector
+	}
+	out := cloneStringMap(selector)
+	if out == nil {
+		out = make(map[string]string, 1)
+	}
+	out[dataplane.NodeDataPlaneReadyLabel] = dataplane.ReadyLabelValue
+	return out
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }
 
 func compileManagerRuntimeConfig(managerPlan *ManagerPlan, infra *infrav1alpha1.Sandbox0Infra) {
@@ -928,11 +953,14 @@ func compileWorkflowPlan(compiled *InfraPlan) WorkflowPlan {
 	if compiled.Components.EnableManager {
 		appendCheckStep("manager-rbac", infrav1alpha1.ConditionTypeManagerReady, "ManagerRBACFailed")
 		appendSuccessStep("manager", infrav1alpha1.ConditionTypeManagerReady, "ManagerReady", "Manager is ready", "ManagerFailed")
-		appendCheckStep("builtin-template-pods", infrav1alpha1.ConditionTypeManagerReady, "BuiltinTemplatePodsNotReady")
 	}
 	if compiled.Components.EnableNetd {
 		appendCheckStep("netd-rbac", infrav1alpha1.ConditionTypeNetdReady, "NetdRBACFailed")
 		appendSuccessStep("netd", infrav1alpha1.ConditionTypeNetdReady, "NetdReady", "netd is ready", "NetdFailed")
+	}
+	if compiled.Components.EnableManager {
+		appendCheckStep("data-plane-node-readiness", infrav1alpha1.ConditionTypeManagerReady, "DataPlaneNodesNotReady")
+		appendCheckStep("builtin-template-pods", infrav1alpha1.ConditionTypeManagerReady, "BuiltinTemplatePodsNotReady")
 	}
 	if compiled.Components.EnableStorageProxy {
 		appendCheckStep("storage-proxy-rbac", infrav1alpha1.ConditionTypeStorageProxyReady, "StorageProxyRBACFailed")

@@ -129,6 +129,7 @@ func newManagerTestEnvWithOptions(t *testing.T, opts managerTestEnvOptions) *man
 	sandboxService := service.NewSandboxService(
 		k8sClient,
 		podLister,
+		nil,
 		sandboxIndex,
 		secretLister,
 		templateLister,

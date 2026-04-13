@@ -140,7 +140,7 @@ func (p *NetdProvider) waitForAppliedHashes(
 		case <-waiter.done:
 			return nil
 		case <-ctx.Done():
-			return fmt.Errorf("timeout waiting for netd policy apply for pod %s/%s", namespace, podName)
+			return fmt.Errorf("%w: timeout waiting for netd policy apply for pod %s/%s", ErrPolicyApplyTimeout, namespace, podName)
 		case <-p.tick(ticker):
 			if p.isApplied(namespace, podName, expectedNetworkHash) {
 				p.completeWaiter(key, waiter)

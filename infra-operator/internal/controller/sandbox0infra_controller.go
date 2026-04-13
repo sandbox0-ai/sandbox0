@@ -39,7 +39,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	controller "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
@@ -51,6 +53,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/manager"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/netd"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/nodereadiness"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/regionalgateway"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/registry"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/scheduler"
@@ -239,13 +242,14 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 	storageProxyReconciler := storageproxy.NewReconciler(resources)
 	fusePluginReconciler := fuseplugin.NewReconciler(resources)
 	netdReconciler := netd.NewReconciler(resources)
+	nodeReadinessReconciler := nodereadiness.NewReconciler(resources)
 	rbacReconciler := rbac.NewReconciler(resources)
 
 	if err := r.cleanupDisabledServiceResources(ctx, infra, compiledPlan.Cleanup, dbReconciler, storageReconciler, registryReconciler); err != nil {
 		return ctrl.Result{RequeueAfter: requeueInterval}, err
 	}
 
-	steps, err := r.bindWorkflowSteps(infra, compiledPlan, resources, imageRepo, imageTag, authReconciler, dbReconciler, storageReconciler, registryReconciler, globalGatewayReconciler, regionalGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, fusePluginReconciler, netdReconciler, rbacReconciler)
+	steps, err := r.bindWorkflowSteps(infra, compiledPlan, resources, imageRepo, imageTag, authReconciler, dbReconciler, storageReconciler, registryReconciler, globalGatewayReconciler, regionalGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, fusePluginReconciler, netdReconciler, nodeReadinessReconciler, rbacReconciler)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -270,11 +274,12 @@ func (r *Sandbox0InfraReconciler) bindWorkflowSteps(
 	storageProxyReconciler *storageproxy.Reconciler,
 	fusePluginReconciler *fuseplugin.Reconciler,
 	netdReconciler *netd.Reconciler,
+	nodeReadinessReconciler *nodereadiness.Reconciler,
 	rbacReconciler *rbac.Reconciler,
 ) ([]reconcileStep, error) {
 	steps := make([]reconcileStep, 0, len(compiledPlan.Workflow.Steps))
 	for _, planned := range compiledPlan.Workflow.Steps {
-		run, err := r.workflowStepRunner(infra, compiledPlan, resources, imageRepo, imageTag, planned.Name, authReconciler, dbReconciler, storageReconciler, registryReconciler, globalGatewayReconciler, regionalGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, fusePluginReconciler, netdReconciler, rbacReconciler)
+		run, err := r.workflowStepRunner(infra, compiledPlan, resources, imageRepo, imageTag, planned.Name, authReconciler, dbReconciler, storageReconciler, registryReconciler, globalGatewayReconciler, regionalGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, fusePluginReconciler, netdReconciler, nodeReadinessReconciler, rbacReconciler)
 		if err != nil {
 			return nil, err
 		}
@@ -309,6 +314,7 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 	storageProxyReconciler *storageproxy.Reconciler,
 	fusePluginReconciler *fuseplugin.Reconciler,
 	netdReconciler *netd.Reconciler,
+	nodeReadinessReconciler *nodereadiness.Reconciler,
 	rbacReconciler *rbac.Reconciler,
 ) (func(context.Context) error, error) {
 	switch name {
@@ -392,6 +398,10 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 	case "netd":
 		return func(ctx context.Context) error {
 			return netdReconciler.Reconcile(ctx, imageRepo, imageTag, compiledPlan)
+		}, nil
+	case "data-plane-node-readiness":
+		return func(ctx context.Context) error {
+			return nodeReadinessReconciler.Reconcile(ctx, infra, compiledPlan)
 		}, nil
 	case "storage-proxy-rbac":
 		return func(ctx context.Context) error { return rbacReconciler.ReconcileStorageProxyRBAC(ctx, infra) }, nil
@@ -866,6 +876,7 @@ func isReadyPod(pod *corev1.Pod) bool {
 func (r *Sandbox0InfraReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&infrav1alpha1.Sandbox0Infra{}).
+		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.requestsForManagedDataPlanePod)).
 		Owns(&appsv1.Deployment{}).
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&appsv1.DaemonSet{}).
@@ -879,4 +890,23 @@ func (r *Sandbox0InfraReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			RateLimiter: workqueue.NewTypedItemExponentialFailureRateLimiter[ctrl.Request](retryBaseDelay, retryMaxDelay),
 		}).
 		Complete(r)
+}
+
+func (r *Sandbox0InfraReconciler) requestsForManagedDataPlanePod(_ context.Context, obj client.Object) []reconcile.Request {
+	if obj == nil {
+		return nil
+	}
+	labels := obj.GetLabels()
+	if labels["app.kubernetes.io/managed-by"] != "sandbox0infra-operator" {
+		return nil
+	}
+	component := labels["app.kubernetes.io/component"]
+	if component != "netd" && component != "ctld" {
+		return nil
+	}
+	instance := labels["app.kubernetes.io/instance"]
+	if instance == "" {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: instance}}}
 }

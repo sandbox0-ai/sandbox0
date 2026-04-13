@@ -122,6 +122,21 @@ func (p *assertingNetworkProvider) RemoveSandboxPolicy(_ context.Context, namesp
 	return p.removeErr
 }
 
+func TestApplyNetworkProviderMapsTimeoutToDataPlaneNotReady(t *testing.T) {
+	svc := &SandboxService{
+		networkProvider: &assertingNetworkProvider{applyErr: network.ErrPolicyApplyTimeout},
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "ns-a"}}
+
+	err := svc.applyNetworkProvider(context.Background(), pod, "team-a", &v1alpha1.NetworkPolicySpec{})
+	if err == nil {
+		t.Fatal("applyNetworkProvider() error = nil, want data-plane-not-ready")
+	}
+	if !errors.Is(err, ErrDataPlaneNotReady) {
+		t.Fatalf("applyNetworkProvider() error = %v, want ErrDataPlaneNotReady", err)
+	}
+}
+
 func newSandboxServiceForNetworkTests(
 	t *testing.T,
 	pod *corev1.Pod,

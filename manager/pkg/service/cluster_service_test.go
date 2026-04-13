@@ -8,6 +8,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -70,6 +71,49 @@ sandbox_pod_placement:
 	}
 	if summary.TotalPodCount != 4 {
 		t.Fatalf("TotalPodCount = %d, want 4", summary.TotalPodCount)
+	}
+}
+
+func TestGetClusterSummaryCountsOnlyDataPlaneReadySandboxNodes(t *testing.T) {
+	configPath := writeClusterServiceManagerConfig(t, `
+default_cluster_id: cluster-a
+sandbox_pod_placement:
+  node_selector:
+    sandbox0.ai/node-role: sandbox
+    `+dataplane.NodeDataPlaneReadyLabel+`: "true"
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	svc := &ClusterService{
+		podLister: newClusterServicePodLister(t),
+		nodeLister: newClusterServiceNodeLister(t,
+			newClusterServiceNode("node-ready", map[string]string{
+				"sandbox0.ai/node-role":           "sandbox",
+				dataplane.NodeDataPlaneReadyLabel: dataplane.ReadyLabelValue,
+			}),
+			newClusterServiceNode("node-not-ready", map[string]string{
+				"sandbox0.ai/node-role":           "sandbox",
+				dataplane.NodeDataPlaneReadyLabel: dataplane.NotReadyLabelValue,
+			}),
+			newClusterServiceNode("node-missing-ready", map[string]string{"sandbox0.ai/node-role": "sandbox"}),
+			newClusterServiceNode("node-system", map[string]string{
+				"sandbox0.ai/node-role":           "system",
+				dataplane.NodeDataPlaneReadyLabel: dataplane.ReadyLabelValue,
+			}),
+		),
+		logger: zap.NewNop(),
+	}
+
+	summary, err := svc.GetClusterSummary(context.Background())
+	if err != nil {
+		t.Fatalf("GetClusterSummary() error = %v", err)
+	}
+
+	if summary.NodeCount != 4 {
+		t.Fatalf("NodeCount = %d, want 4", summary.NodeCount)
+	}
+	if summary.SandboxNodeCount != 1 {
+		t.Fatalf("SandboxNodeCount = %d, want 1", summary.SandboxNodeCount)
 	}
 }
 

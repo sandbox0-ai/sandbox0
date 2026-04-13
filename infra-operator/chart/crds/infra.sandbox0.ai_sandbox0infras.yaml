@@ -659,6 +659,12 @@ spec:
                             default: false
                             description: Enabled enables ingress
                             type: boolean
+                          extraHosts:
+                            description: ExtraHosts specifies additional ingress hosts
+                              routed to the same backend.
+                            items:
+                              type: string
+                            type: array
                           host:
                             description: Host specifies the ingress host
                             type: string
@@ -1359,6 +1365,12 @@ spec:
                             default: false
                             description: Enabled enables ingress
                             type: boolean
+                          extraHosts:
+                            description: ExtraHosts specifies additional ingress hosts
+                              routed to the same backend.
+                            items:
+                              type: string
+                            type: array
                           host:
                             description: Host specifies the ingress host
                             type: string
@@ -2098,6 +2110,12 @@ spec:
                             default: false
                             description: Enabled enables ingress
                             type: boolean
+                          extraHosts:
+                            description: ExtraHosts specifies additional ingress hosts
+                              routed to the same backend.
+                            items:
+                              type: string
+                            type: array
                           host:
                             description: Host specifies the ingress host
                             type: string

@@ -72,8 +72,9 @@ func TestReconcileKeepsHTTPBackendForHTTPSIngress(t *testing.T) {
 							Annotations: map[string]string{
 								"kubernetes.io/ingress.class": "gce",
 							},
-							Host:      "gcp-ue4.sandbox0.ai",
-							TLSSecret: "gcp-ue4-sandbox0-ai-tls",
+							Host:       "gcp-ue4.sandbox0.ai",
+							ExtraHosts: []string{"*.gcp-ue4.sandbox0.app"},
+							TLSSecret:  "gcp-ue4-sandbox0-ai-tls",
 						},
 					},
 					Config: &infrav1alpha1.RegionalGatewayConfig{
@@ -159,8 +160,14 @@ func TestReconcileKeepsHTTPBackendForHTTPSIngress(t *testing.T) {
 	if got := ingress.Annotations["kubernetes.io/ingress.class"]; got != "gce" {
 		t.Fatalf("expected GKE ingress class annotation, got %q", got)
 	}
+	if len(ingress.Spec.Rules) != 2 || ingress.Spec.Rules[1].Host != "*.gcp-ue4.sandbox0.app" {
+		t.Fatalf("expected public exposure wildcard rule, got %#v", ingress.Spec.Rules)
+	}
 	if len(ingress.Spec.TLS) != 1 || ingress.Spec.TLS[0].SecretName != "gcp-ue4-sandbox0-ai-tls" {
 		t.Fatalf("expected ingress TLS secret, got %#v", ingress.Spec.TLS)
+	}
+	if !hasString(ingress.Spec.TLS[0].Hosts, "*.gcp-ue4.sandbox0.app") {
+		t.Fatalf("expected public exposure wildcard TLS host, got %#v", ingress.Spec.TLS[0].Hosts)
 	}
 	backend := ingress.Spec.Rules[0].HTTP.Paths[0].Backend.Service
 	if backend == nil || backend.Name != "demo-regional-gateway" || backend.Port.Number != 80 {
@@ -808,6 +815,15 @@ func newRegionalGatewayTestReconciler(t *testing.T, objects ...runtime.Object) (
 func hasVolume(volumes []corev1.Volume, name string) bool {
 	for _, volume := range volumes {
 		if volume.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func hasString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
 			return true
 		}
 	}

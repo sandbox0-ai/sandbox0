@@ -1129,6 +1129,10 @@ type IngressConfig struct {
 	// +optional
 	Host string `json:"host,omitempty"`
 
+	// ExtraHosts specifies additional ingress hosts routed to the same backend.
+	// +optional
+	ExtraHosts []string `json:"extraHosts,omitempty"`
+
 	// TLSSecret specifies the TLS secret name
 	// +optional
 	TLSSecret string `json:"tlsSecret,omitempty"`

@@ -508,6 +508,31 @@ func (r *ResourceManager) ReconcileIngressWithScope(ctx context.Context, scope O
 	pathType := networkingv1.PathTypePrefix
 	desiredLabels := EnsureManagedLabels(ingress.Labels, ingressName)
 	desiredAnnotations := CloneStringMap(config.Annotations)
+	hosts := ingressHosts(config)
+	rules := make([]networkingv1.IngressRule, 0, len(hosts))
+	for _, host := range hosts {
+		rules = append(rules, networkingv1.IngressRule{
+			Host: host,
+			IngressRuleValue: networkingv1.IngressRuleValue{
+				HTTP: &networkingv1.HTTPIngressRuleValue{
+					Paths: []networkingv1.HTTPIngressPath{
+						{
+							Path:     "/",
+							PathType: &pathType,
+							Backend: networkingv1.IngressBackend{
+								Service: &networkingv1.IngressServiceBackend{
+									Name: serviceName,
+									Port: networkingv1.ServiceBackendPort{
+										Number: servicePort,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		})
+	}
 	desiredIngress := &networkingv1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        ingressName,
@@ -516,29 +541,7 @@ func (r *ResourceManager) ReconcileIngressWithScope(ctx context.Context, scope O
 			Annotations: desiredAnnotations,
 		},
 		Spec: networkingv1.IngressSpec{
-			Rules: []networkingv1.IngressRule{
-				{
-					Host: config.Host,
-					IngressRuleValue: networkingv1.IngressRuleValue{
-						HTTP: &networkingv1.HTTPIngressRuleValue{
-							Paths: []networkingv1.HTTPIngressPath{
-								{
-									Path:     "/",
-									PathType: &pathType,
-									Backend: networkingv1.IngressBackend{
-										Service: &networkingv1.IngressServiceBackend{
-											Name: serviceName,
-											Port: networkingv1.ServiceBackendPort{
-												Number: servicePort,
-											},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
+			Rules: rules,
 		},
 	}
 	if config.ClassName != "" {
@@ -548,7 +551,7 @@ func (r *ResourceManager) ReconcileIngressWithScope(ctx context.Context, scope O
 	if config.TLSSecret != "" {
 		desiredIngress.Spec.TLS = []networkingv1.IngressTLS{
 			{
-				Hosts:      []string{config.Host},
+				Hosts:      hosts,
 				SecretName: config.TLSSecret,
 			},
 		}
@@ -566,6 +569,30 @@ func (r *ResourceManager) ReconcileIngressWithScope(ctx context.Context, scope O
 	ingress.Labels = desiredLabels
 	ingress.Annotations = desiredAnnotations
 	return r.Client.Update(ctx, ingress)
+}
+
+func ingressHosts(config *infrav1alpha1.IngressConfig) []string {
+	seen := map[string]struct{}{}
+	hosts := []string{}
+	add := func(host string) {
+		host = strings.ToLower(strings.TrimSpace(host))
+		if host == "" {
+			return
+		}
+		if _, ok := seen[host]; ok {
+			return
+		}
+		seen[host] = struct{}{}
+		hosts = append(hosts, host)
+	}
+	add(config.Host)
+	for _, host := range config.ExtraHosts {
+		add(host)
+	}
+	if len(hosts) == 0 {
+		return []string{""}
+	}
+	return hosts
 }
 
 // ReconcileServiceConfigMap creates or updates a configmap for a service.

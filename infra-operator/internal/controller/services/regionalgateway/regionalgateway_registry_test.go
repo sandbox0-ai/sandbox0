@@ -74,7 +74,16 @@ func TestReconcileKeepsHTTPBackendForHTTPSIngress(t *testing.T) {
 							},
 							Host:       "gcp-ue4.sandbox0.ai",
 							ExtraHosts: []string{"*.gcp-ue4.sandbox0.app"},
-							TLSSecret:  "gcp-ue4-sandbox0-ai-tls",
+							TLS: []infrav1alpha1.IngressTLSConfig{
+								{
+									Hosts:      []string{"gcp-ue4.sandbox0.ai"},
+									SecretName: "gcp-ue4-sandbox0-ai-tls",
+								},
+								{
+									Hosts:      []string{"*.gcp-ue4.sandbox0.app"},
+									SecretName: "gcp-ue4-sandbox0-app-tls",
+								},
+							},
 						},
 					},
 					Config: &infrav1alpha1.RegionalGatewayConfig{
@@ -163,11 +172,14 @@ func TestReconcileKeepsHTTPBackendForHTTPSIngress(t *testing.T) {
 	if len(ingress.Spec.Rules) != 2 || ingress.Spec.Rules[1].Host != "*.gcp-ue4.sandbox0.app" {
 		t.Fatalf("expected public exposure wildcard rule, got %#v", ingress.Spec.Rules)
 	}
-	if len(ingress.Spec.TLS) != 1 || ingress.Spec.TLS[0].SecretName != "gcp-ue4-sandbox0-ai-tls" {
+	if len(ingress.Spec.TLS) != 2 {
 		t.Fatalf("expected ingress TLS secret, got %#v", ingress.Spec.TLS)
 	}
-	if !hasString(ingress.Spec.TLS[0].Hosts, "*.gcp-ue4.sandbox0.app") {
-		t.Fatalf("expected public exposure wildcard TLS host, got %#v", ingress.Spec.TLS[0].Hosts)
+	if ingress.Spec.TLS[0].SecretName != "gcp-ue4-sandbox0-ai-tls" || !hasString(ingress.Spec.TLS[0].Hosts, "gcp-ue4.sandbox0.ai") {
+		t.Fatalf("expected API hostname TLS entry, got %#v", ingress.Spec.TLS[0])
+	}
+	if ingress.Spec.TLS[1].SecretName != "gcp-ue4-sandbox0-app-tls" || !hasString(ingress.Spec.TLS[1].Hosts, "*.gcp-ue4.sandbox0.app") {
+		t.Fatalf("expected public exposure wildcard TLS entry, got %#v", ingress.Spec.TLS[1])
 	}
 	backend := ingress.Spec.Rules[0].HTTP.Paths[0].Backend.Service
 	if backend == nil || backend.Name != "demo-regional-gateway" || backend.Port.Number != 80 {

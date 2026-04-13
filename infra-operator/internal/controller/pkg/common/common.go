@@ -547,15 +547,7 @@ func (r *ResourceManager) ReconcileIngressWithScope(ctx context.Context, scope O
 	if config.ClassName != "" {
 		desiredIngress.Spec.IngressClassName = &config.ClassName
 	}
-
-	if config.TLSSecret != "" {
-		desiredIngress.Spec.TLS = []networkingv1.IngressTLS{
-			{
-				Hosts:      hosts,
-				SecretName: config.TLSSecret,
-			},
-		}
-	}
+	desiredIngress.Spec.TLS = ingressTLS(config, hosts)
 
 	if err := scope.SetControllerReference(desiredIngress, r.Scheme); err != nil {
 		return err
@@ -591,6 +583,54 @@ func ingressHosts(config *infrav1alpha1.IngressConfig) []string {
 	}
 	if len(hosts) == 0 {
 		return []string{""}
+	}
+	return hosts
+}
+
+func ingressTLS(config *infrav1alpha1.IngressConfig, defaultHosts []string) []networkingv1.IngressTLS {
+	if len(config.TLS) == 0 {
+		if config.TLSSecret == "" {
+			return nil
+		}
+		return []networkingv1.IngressTLS{
+			{
+				Hosts:      defaultHosts,
+				SecretName: config.TLSSecret,
+			},
+		}
+	}
+
+	tls := make([]networkingv1.IngressTLS, 0, len(config.TLS))
+	for _, entry := range config.TLS {
+		secretName := strings.TrimSpace(entry.SecretName)
+		if secretName == "" {
+			continue
+		}
+		hosts := normalizeHostList(entry.Hosts)
+		if len(hosts) == 0 {
+			hosts = defaultHosts
+		}
+		tls = append(tls, networkingv1.IngressTLS{
+			Hosts:      hosts,
+			SecretName: secretName,
+		})
+	}
+	return tls
+}
+
+func normalizeHostList(values []string) []string {
+	seen := map[string]struct{}{}
+	hosts := []string{}
+	for _, value := range values {
+		host := strings.ToLower(strings.TrimSpace(value))
+		if host == "" {
+			continue
+		}
+		if _, ok := seen[host]; ok {
+			continue
+		}
+		seen[host] = struct{}{}
+		hosts = append(hosts, host)
 	}
 	return hosts
 }

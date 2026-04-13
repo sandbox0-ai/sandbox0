@@ -668,6 +668,26 @@ spec:
                           host:
                             description: Host specifies the ingress host
                             type: string
+                          tls:
+                            description: |-
+                              TLS specifies host groups and their backing TLS secrets.
+                              When set, TLS takes precedence over TLSSecret.
+                            items:
+                              description: IngressTLSConfig defines one TLS certificate
+                                binding for ingress hosts.
+                              properties:
+                                hosts:
+                                  description: Hosts specifies the hosts covered by
+                                    this TLS secret.
+                                  items:
+                                    type: string
+                                  type: array
+                                secretName:
+                                  description: SecretName specifies the Kubernetes
+                                    TLS secret name.
+                                  type: string
+                              type: object
+                            type: array
                           tlsSecret:
                             description: TLSSecret specifies the TLS secret name
                             type: string
@@ -1374,6 +1394,26 @@ spec:
                           host:
                             description: Host specifies the ingress host
                             type: string
+                          tls:
+                            description: |-
+                              TLS specifies host groups and their backing TLS secrets.
+                              When set, TLS takes precedence over TLSSecret.
+                            items:
+                              description: IngressTLSConfig defines one TLS certificate
+                                binding for ingress hosts.
+                              properties:
+                                hosts:
+                                  description: Hosts specifies the hosts covered by
+                                    this TLS secret.
+                                  items:
+                                    type: string
+                                  type: array
+                                secretName:
+                                  description: SecretName specifies the Kubernetes
+                                    TLS secret name.
+                                  type: string
+                              type: object
+                            type: array
                           tlsSecret:
                             description: TLSSecret specifies the TLS secret name
                             type: string
@@ -2119,6 +2159,26 @@ spec:
                           host:
                             description: Host specifies the ingress host
                             type: string
+                          tls:
+                            description: |-
+                              TLS specifies host groups and their backing TLS secrets.
+                              When set, TLS takes precedence over TLSSecret.
+                            items:
+                              description: IngressTLSConfig defines one TLS certificate
+                                binding for ingress hosts.
+                              properties:
+                                hosts:
+                                  description: Hosts specifies the hosts covered by
+                                    this TLS secret.
+                                  items:
+                                    type: string
+                                  type: array
+                                secretName:
+                                  description: SecretName specifies the Kubernetes
+                                    TLS secret name.
+                                  type: string
+                              type: object
+                            type: array
                           tlsSecret:
                             description: TLSSecret specifies the TLS secret name
                             type: string

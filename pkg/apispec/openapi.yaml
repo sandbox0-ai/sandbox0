@@ -1644,6 +1644,7 @@ paths:
     post:
       tags: [contexts]
       summary: Send input to context
+      description: Writes input to the context stdin exactly as provided. For REPL contexts, include a trailing newline to submit a line for execution.
       security:
         - bearerAuth: []
       x-upstream-service: procd
@@ -1668,7 +1669,7 @@ paths:
     post:
       tags: [contexts]
       summary: Execute context input (sync)
-      description: Sends input and blocks until the context completes or times out.
+      description: Sends input and blocks until the context completes or times out. For REPL contexts, the server appends a trailing newline when the input does not already end in \n or \r.
       security:
         - bearerAuth: []
       x-upstream-service: procd
@@ -1761,6 +1762,7 @@ paths:
       summary: Context WebSocket (I/O)
       description: |
         Upgrades to WebSocket for streaming I/O.
+        WebSocket input data is written to stdin exactly as provided; include "\n" when submitting a REPL line.
         Client messages (JSON):
         - { "type": "input", "data": "ls\n", "request_id": "req-1" }
         - { "type": "resize", "rows": 24, "cols": 80 }
@@ -4495,6 +4497,7 @@ components:
       properties:
         data:
           type: string
+          description: Input bytes encoded as a string. The /input endpoint writes this value exactly as provided. The /exec endpoint appends a trailing newline for REPL contexts when missing.
       required: [data]
     ContextExecResponse:
       type: object
@@ -4709,6 +4712,7 @@ components:
           enum: [input]
         data:
           type: string
+          description: Input bytes encoded as a string. The WebSocket endpoint writes this value exactly as provided and does not append a newline.
         request_id:
           type: string
       required: [type]

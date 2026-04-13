@@ -869,13 +869,8 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 			case "input":
 				setPendingRequestID(msg.RequestID)
 				if msg.Data != "" {
-					input := msg.Data
-					if ctx.Type == process.ProcessTypeREPL {
-						if !strings.HasSuffix(input, "\n") && !strings.HasSuffix(input, "\r") {
-							input += "\n"
-						}
-					}
-					_ = h.manager.WriteInput(id, []byte(input))
+					// WebSocket input is a byte stream; callers include newlines when submitting a line.
+					_ = h.manager.WriteInput(id, []byte(msg.Data))
 				}
 			case "resize":
 				if msg.Rows == 0 || msg.Cols == 0 {

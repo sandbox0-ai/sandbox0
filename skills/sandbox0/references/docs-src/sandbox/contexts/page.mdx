@@ -649,7 +649,7 @@ print(f"Context restarted: {result.running}")`
 
 ### Send Input
 
-Send input to a context's stdin.
+Send input to a context's stdin. The data is written exactly as provided. For REPL contexts, include a trailing newline when you want the REPL to execute the line.
 
 <Endpoint method="POST">
 /api/v1/sandboxes/{'{id}'}/contexts/{'{ctx_id}'}/input
@@ -660,7 +660,7 @@ Send input to a context's stdin.
     {
       label: "Go",
       language: "go",
-      code: `_, err = sandbox.ContextInput(ctx, ctxResp.ID, "print('hello')")
+      code: `_, err = sandbox.ContextInput(ctx, ctxResp.ID, "print('hello')\\n")
 if err != nil {
     log.Fatal(err)
 }`
@@ -668,7 +668,7 @@ if err != nil {
     {
       label: "Python",
       language: "python",
-      code: `result = sandbox.context_input(context.id, "print('hello')")
+      code: `result = sandbox.context_input(context.id, "print('hello')\\n")
 print(f"Context input: {result.success}")`
     },
     {
@@ -837,7 +837,7 @@ console.log('Context deleted');`
 
 ## WebSocket Streaming
 
-For real-time I/O, connect to a context via WebSocket.
+For real-time I/O, connect to a context via WebSocket. WebSocket input is a byte stream: `data` is written exactly as provided, so include `\n` when submitting a REPL line.
 
 <Endpoint method="GET">
 /api/v1/sandboxes/{'{id}'}/contexts/{'{ctx_id}'}/ws
@@ -975,7 +975,7 @@ await outputPromise;`
 
 ## Exec (Synchronous Execution)
 
-Execute input and wait for completion.
+Execute input and wait for completion. For REPL contexts, the server appends a trailing newline when the input does not already end in `\n` or `\r`.
 
 <Endpoint method="POST">
 /api/v1/sandboxes/{'{id}'}/contexts/{'{ctx_id}'}/exec
@@ -995,13 +995,13 @@ fmt.Print(execResult.OutputRaw)`
     {
       label: "Python",
       language: "python",
-      code: `result = sandbox.context_exec(ctx.id, "print(1 + 2)\\n")
+      code: `result = sandbox.context_exec(ctx.id, "print(1 + 2)")
 print(result.output_raw, end="")`
     },
     {
       label: "TypeScript",
       language: "typescript",
-      code: `const execResult = await sandbox.contextExec(ctx.id, "print(1 + 2)\\n");
+      code: `const execResult = await sandbox.contextExec(ctx.id, "print(1 + 2)");
 process.stdout.write(execResult.outputRaw);`
     },
     {

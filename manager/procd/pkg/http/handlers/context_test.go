@@ -444,3 +444,46 @@ func TestWebSocketSendsProcessDoneMessage(t *testing.T) {
 		t.Fatalf("state = %v, want %q", got, process.ProcessStateCrashed)
 	}
 }
+
+func TestWebSocketInputPassesREPLBytesWithoutAppendingNewline(t *testing.T) {
+	outputCh := make(chan process.ProcessOutput)
+	written := make(chan string, 1)
+	proc := &fakeProcess{
+		outputCh: outputCh,
+		onWrite: func(data []byte) {
+			written <- string(data)
+		},
+	}
+	handler, ctx := newHandlerWithContext(proc, process.ProcessTypeREPL)
+
+	router := mux.NewRouter()
+	router.HandleFunc("/contexts/{id}/ws", handler.WebSocket)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("url.Parse() error = %v", err)
+	}
+	wsURL.Scheme = "ws"
+	wsURL.Path = "/contexts/" + ctx.ID + "/ws"
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL.String(), nil)
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer conn.Close()
+
+	if err := conn.WriteJSON(wsControlMessage{Type: "input", Data: "e"}); err != nil {
+		t.Fatalf("WriteJSON() error = %v", err)
+	}
+
+	select {
+	case got := <-written:
+		if got != "e" {
+			t.Fatalf("input = %q, want %q", got, "e")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for WebSocket input")
+	}
+}

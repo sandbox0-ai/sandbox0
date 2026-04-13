@@ -22,9 +22,10 @@ import (
 )
 
 func (s *Server) resolveInternalSSHTarget(c *gin.Context) {
-	userID := strings.TrimSpace(c.GetHeader(internalauth.UserIDHeader))
-	if userID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "user_id header is required")
+	legacyUserID := strings.TrimSpace(c.GetHeader(internalauth.UserIDHeader))
+	sshGrants := sharedssh.ParseAuthorizedGrants(c.GetHeader(sharedssh.AuthorizedGrantsHeader))
+	if legacyUserID == "" && len(sshGrants) == 0 {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "ssh authorization grants are required")
 		return
 	}
 
@@ -38,7 +39,7 @@ func (s *Server) resolveInternalSSHTarget(c *gin.Context) {
 	if err != nil {
 		s.logger.Warn("Failed to resolve cluster-gateway for SSH target",
 			zap.String("sandbox_id", sandboxID),
-			zap.String("user_id", userID),
+			zap.String("user_id", legacyUserID),
 			zap.Error(err),
 		)
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "cluster gateway unavailable")
@@ -49,7 +50,7 @@ func (s *Server) resolveInternalSSHTarget(c *gin.Context) {
 	if err != nil {
 		s.logger.Warn("Failed to fetch sandbox metadata for SSH target",
 			zap.String("sandbox_id", sandboxID),
-			zap.String("user_id", userID),
+			zap.String("user_id", legacyUserID),
 			zap.String("cluster_gateway_url", targetURL),
 			zap.Error(err),
 		)
@@ -62,7 +63,8 @@ func (s *Server) resolveInternalSSHTarget(c *gin.Context) {
 		return
 	}
 
-	if _, err := s.teamMembership.GetTeamMember(c.Request.Context(), sandbox.TeamID, userID); err != nil {
+	sshUserID, err := authorizeSSHUserForSandboxTeam(c.Request.Context(), sandbox.TeamID, sshGrants, legacyUserID, s.teamMembership)
+	if err != nil {
 		if errors.Is(err, identity.ErrMemberNotFound) {
 			spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "sandbox access denied")
 			return
@@ -70,7 +72,7 @@ func (s *Server) resolveInternalSSHTarget(c *gin.Context) {
 		s.logger.Error("Failed to authorize SSH sandbox membership",
 			zap.String("sandbox_id", sandboxID),
 			zap.String("team_id", sandbox.TeamID),
-			zap.String("user_id", userID),
+			zap.String("user_id", legacyUserID),
 			zap.Error(err),
 		)
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "authorization failed")
@@ -83,11 +85,11 @@ func (s *Server) resolveInternalSSHTarget(c *gin.Context) {
 			return
 		}
 		if sandbox.PowerState.Desired != mgr.SandboxPowerStateActive {
-			if err := s.resumeSandboxViaClusterGateway(c.Request.Context(), targetURL, sandboxID, sandbox.TeamID, userID); err != nil {
+			if err := s.resumeSandboxViaClusterGateway(c.Request.Context(), targetURL, sandboxID, sandbox.TeamID, sshUserID); err != nil {
 				s.logger.Warn("Failed to request SSH sandbox resume via cluster-gateway",
 					zap.String("sandbox_id", sandboxID),
 					zap.String("team_id", sandbox.TeamID),
-					zap.String("user_id", userID),
+					zap.String("user_id", sshUserID),
 					zap.String("cluster_gateway_url", targetURL),
 					zap.Error(err),
 				)
@@ -107,9 +109,30 @@ func (s *Server) resolveInternalSSHTarget(c *gin.Context) {
 	spec.JSONSuccess(c, http.StatusOK, &sharedssh.ResolvedTarget{
 		SandboxID: sandboxID,
 		TeamID:    sandbox.TeamID,
-		UserID:    userID,
+		UserID:    sshUserID,
 		ProcdURL:  sandbox.InternalAddr,
 	})
+}
+
+func authorizeSSHUserForSandboxTeam(ctx context.Context, teamID string, grants []sharedssh.AuthorizedGrant, legacyUserID string, membership teamMembershipLookup) (string, error) {
+	if userID, ok := sharedssh.UserIDForTeam(grants, teamID); ok {
+		return userID, nil
+	}
+	if len(grants) > 0 {
+		return "", identity.ErrMemberNotFound
+	}
+
+	legacyUserID = strings.TrimSpace(legacyUserID)
+	if legacyUserID == "" {
+		return "", identity.ErrMemberNotFound
+	}
+	if membership == nil {
+		return "", identity.ErrMemberNotFound
+	}
+	if _, err := membership.GetTeamMember(ctx, teamID, legacyUserID); err != nil {
+		return "", err
+	}
+	return legacyUserID, nil
 }
 
 func (s *Server) resolveClusterGatewayTarget(c *gin.Context, sandboxID string) (string, error) {

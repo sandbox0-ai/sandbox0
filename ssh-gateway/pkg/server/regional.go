@@ -38,12 +38,13 @@ func NewRegionalSandboxResolver(baseURL string, internalAuthGen *internalauth.Ge
 	}
 }
 
-func (r *RegionalSandboxResolver) ResolveSandbox(ctx context.Context, sandboxID, userID string) (*sharedssh.ResolvedTarget, error) {
+func (r *RegionalSandboxResolver) ResolveSandbox(ctx context.Context, sandboxID string, grants []sharedssh.AuthorizedGrant) (*sharedssh.ResolvedTarget, error) {
 	if strings.TrimSpace(r.baseURL) == "" {
 		return nil, fmt.Errorf("regional gateway URL is required")
 	}
-	if strings.TrimSpace(userID) == "" {
-		return nil, fmt.Errorf("userID is required")
+	encodedGrants := sharedssh.EncodeAuthorizedGrants(grants)
+	if encodedGrants == "" {
+		return nil, fmt.Errorf("authorized SSH key grants are required")
 	}
 
 	token, err := r.internalAuthGen.GenerateSystem(internalauth.ServiceRegionalGateway, internalauth.GenerateOptions{})
@@ -56,7 +57,7 @@ func (r *RegionalSandboxResolver) ResolveSandbox(ctx context.Context, sandboxID,
 		return nil, fmt.Errorf("create regional-gateway request: %w", err)
 	}
 	req.Header.Set(internalauth.DefaultTokenHeader, token)
-	req.Header.Set(internalauth.UserIDHeader, userID)
+	req.Header.Set(sharedssh.AuthorizedGrantsHeader, encodedGrants)
 
 	resp, err := r.httpClient.Do(req)
 	if err != nil {

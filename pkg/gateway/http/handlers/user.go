@@ -49,8 +49,8 @@ type userRepository interface {
 	GetUserIdentitiesByUserID(ctx context.Context, userID string) ([]*identity.UserIdentity, error)
 	DeleteUserIdentity(ctx context.Context, id string) error
 	CreateUserSSHPublicKey(ctx context.Context, key *identity.UserSSHPublicKey) error
-	ListUserSSHPublicKeysByUserID(ctx context.Context, userID string) ([]*identity.UserSSHPublicKey, error)
-	DeleteUserSSHPublicKey(ctx context.Context, userID, keyID string) error
+	ListUserSSHPublicKeysByTeamAndUserID(ctx context.Context, teamID, userID string) ([]*identity.UserSSHPublicKey, error)
+	DeleteUserSSHPublicKeyByTeamAndUserID(ctx context.Context, teamID, userID, keyID string) error
 }
 
 // UserHandler handles user endpoints
@@ -256,8 +256,12 @@ func (h *UserHandler) ListUserSSHPublicKeys(c *gin.Context) {
 		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "not authenticated")
 		return
 	}
+	if strings.TrimSpace(authCtx.TeamID) == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "no team selected")
+		return
+	}
 
-	keys, err := h.repo.ListUserSSHPublicKeysByUserID(c.Request.Context(), authCtx.UserID)
+	keys, err := h.repo.ListUserSSHPublicKeysByTeamAndUserID(c.Request.Context(), authCtx.TeamID, authCtx.UserID)
 	if err != nil {
 		h.logger.Error("Failed to list ssh public keys", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to list ssh public keys")
@@ -276,6 +280,10 @@ func (h *UserHandler) CreateUserSSHPublicKey(c *gin.Context) {
 	authCtx := middleware.GetAuthContext(c)
 	if authCtx == nil || authCtx.UserID == "" {
 		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "not authenticated")
+		return
+	}
+	if strings.TrimSpace(authCtx.TeamID) == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "no team selected")
 		return
 	}
 
@@ -298,6 +306,7 @@ func (h *UserHandler) CreateUserSSHPublicKey(c *gin.Context) {
 	}
 
 	key := &identity.UserSSHPublicKey{
+		TeamID:            authCtx.TeamID,
 		UserID:            authCtx.UserID,
 		Name:              name,
 		PublicKey:         publicKey,
@@ -325,6 +334,10 @@ func (h *UserHandler) DeleteUserSSHPublicKey(c *gin.Context) {
 		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "not authenticated")
 		return
 	}
+	if strings.TrimSpace(authCtx.TeamID) == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "no team selected")
+		return
+	}
 
 	keyID := strings.TrimSpace(c.Param("id"))
 	if keyID == "" {
@@ -332,7 +345,7 @@ func (h *UserHandler) DeleteUserSSHPublicKey(c *gin.Context) {
 		return
 	}
 
-	if err := h.repo.DeleteUserSSHPublicKey(c.Request.Context(), authCtx.UserID, keyID); err != nil {
+	if err := h.repo.DeleteUserSSHPublicKeyByTeamAndUserID(c.Request.Context(), authCtx.TeamID, authCtx.UserID, keyID); err != nil {
 		if errors.Is(err, identity.ErrSSHPublicKeyNotFound) {
 			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "ssh public key not found")
 			return

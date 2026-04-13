@@ -15,25 +15,27 @@ import (
 const authTestPublicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ4dLZLZOA/asaP+5QO6t81jzbe5G4jrI2F+jbjL6TY8 sandbox0-e2e"
 
 type fakeIdentityStore struct {
-	key    *identity.UserSSHPublicKey
+	keys   []*identity.UserSSHPublicKey
 	keyErr error
 }
 
-func (f *fakeIdentityStore) GetUserSSHPublicKeyByFingerprint(context.Context, string) (*identity.UserSSHPublicKey, error) {
+func (f *fakeIdentityStore) ListUserSSHPublicKeysByFingerprint(context.Context, string) ([]*identity.UserSSHPublicKey, error) {
 	if f.keyErr != nil {
 		return nil, f.keyErr
 	}
-	return f.key, nil
+	return f.keys, nil
 }
 
 type fakeSandboxResolver struct {
 	targets []*sharedssh.ResolvedTarget
 	errs    []error
 	calls   int
+	grants  []sharedssh.AuthorizedGrant
 }
 
-func (f *fakeSandboxResolver) ResolveSandbox(context.Context, string, string) (*sharedssh.ResolvedTarget, error) {
+func (f *fakeSandboxResolver) ResolveSandbox(_ context.Context, _ string, grants []sharedssh.AuthorizedGrant) (*sharedssh.ResolvedTarget, error) {
 	f.calls++
+	f.grants = append([]sharedssh.AuthorizedGrant(nil), grants...)
 	if len(f.errs) > 0 {
 		err := f.errs[0]
 		if len(f.errs) > 1 {
@@ -93,10 +95,11 @@ func TestAuthenticatorAuthenticate(t *testing.T) {
 	}
 
 	repo := &fakeIdentityStore{
-		key: &identity.UserSSHPublicKey{
+		keys: []*identity.UserSSHPublicKey{{
+			TeamID:            "team-1",
 			UserID:            "user-1",
 			FingerprintSHA256: ssh.FingerprintSHA256(parsedKey),
-		},
+		}},
 	}
 	resolver := &fakeSandboxResolver{
 		targets: []*sharedssh.ResolvedTarget{{
@@ -117,6 +120,9 @@ func TestAuthenticatorAuthenticate(t *testing.T) {
 	}
 	if target.ProcdURL != "http://10.0.0.8:8091" {
 		t.Fatalf("ProcdURL = %q, want %q", target.ProcdURL, "http://10.0.0.8:8091")
+	}
+	if len(resolver.grants) != 1 || resolver.grants[0].TeamID != "team-1" || resolver.grants[0].UserID != "user-1" {
+		t.Fatalf("resolver grants = %+v", resolver.grants)
 	}
 }
 
@@ -142,10 +148,11 @@ func TestAuthenticatorAuthenticateRejectsAccessDenied(t *testing.T) {
 	}
 
 	repo := &fakeIdentityStore{
-		key: &identity.UserSSHPublicKey{
+		keys: []*identity.UserSSHPublicKey{{
+			TeamID:            "team-1",
 			UserID:            "user-1",
 			FingerprintSHA256: ssh.FingerprintSHA256(parsedKey),
-		},
+		}},
 	}
 	authenticator := NewAuthenticator(repo, &fakeSandboxResolver{errs: []error{ErrSandboxAccessDenied}}, time.Second, 10*time.Millisecond, zaptest.NewLogger(t))
 
@@ -162,10 +169,11 @@ func TestAuthenticatorAuthenticatePollsWhileSandboxWakesUp(t *testing.T) {
 	}
 
 	repo := &fakeIdentityStore{
-		key: &identity.UserSSHPublicKey{
+		keys: []*identity.UserSSHPublicKey{{
+			TeamID:            "team-1",
 			UserID:            "user-1",
 			FingerprintSHA256: ssh.FingerprintSHA256(parsedKey),
-		},
+		}},
 	}
 	resolver := &fakeSandboxResolver{
 		errs: []error{ErrSandboxWakingUp, nil},
@@ -196,7 +204,7 @@ func TestAuthenticatorAuthenticateHandlesMissingSandbox(t *testing.T) {
 		t.Fatalf("ParseAuthorizedKey() error = %v", err)
 	}
 
-	repo := &fakeIdentityStore{key: &identity.UserSSHPublicKey{UserID: "user-1"}}
+	repo := &fakeIdentityStore{keys: []*identity.UserSSHPublicKey{{TeamID: "team-1", UserID: "user-1"}}}
 	authenticator := NewAuthenticator(repo, &fakeSandboxResolver{errs: []error{ErrSandboxUnavailable}}, time.Second, 10*time.Millisecond, zaptest.NewLogger(t))
 
 	_, err = authenticator.Authenticate(context.Background(), "sb_123", parsedKey)

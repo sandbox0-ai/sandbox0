@@ -36,11 +36,11 @@ type SessionAuthorizer interface {
 }
 
 type identityStore interface {
-	GetUserSSHPublicKeyByFingerprint(ctx context.Context, fingerprint string) (*identity.UserSSHPublicKey, error)
+	ListUserSSHPublicKeysByFingerprint(ctx context.Context, fingerprint string) ([]*identity.UserSSHPublicKey, error)
 }
 
 type sandboxResolver interface {
-	ResolveSandbox(ctx context.Context, sandboxID, userID string) (*sharedssh.ResolvedTarget, error)
+	ResolveSandbox(ctx context.Context, sandboxID string, grants []sharedssh.AuthorizedGrant) (*sharedssh.ResolvedTarget, error)
 }
 
 // Authenticator resolves the uploaded SSH public key to a user and asks the
@@ -105,12 +105,16 @@ func (a *Authenticator) Authenticate(ctx context.Context, username string, key s
 		return nil, err
 	}
 
-	storedKey, err := a.repo.GetUserSSHPublicKeyByFingerprint(ctx, ssh.FingerprintSHA256(key))
+	storedKeys, err := a.repo.ListUserSSHPublicKeysByFingerprint(ctx, ssh.FingerprintSHA256(key))
 	if err != nil {
 		if errors.Is(err, identity.ErrSSHPublicKeyNotFound) {
 			return nil, ErrUnauthorizedSSHPublicKey
 		}
 		return nil, fmt.Errorf("lookup ssh public key: %w", err)
+	}
+	grants := authorizedGrantsFromSSHKeys(storedKeys)
+	if len(grants) == 0 {
+		return nil, ErrUnauthorizedSSHPublicKey
 	}
 
 	resolveCtx, cancel := context.WithTimeout(ctx, a.resumeTimeout)
@@ -120,15 +124,15 @@ func (a *Authenticator) Authenticate(ctx context.Context, username string, key s
 	defer ticker.Stop()
 
 	for {
-		target, err := a.resolver.ResolveSandbox(resolveCtx, sandboxID, storedKey.UserID)
+		target, err := a.resolver.ResolveSandbox(resolveCtx, sandboxID, grants)
 		if err == nil {
-			if target == nil || strings.TrimSpace(target.ProcdURL) == "" || strings.TrimSpace(target.TeamID) == "" {
+			if target == nil || strings.TrimSpace(target.ProcdURL) == "" || strings.TrimSpace(target.TeamID) == "" || strings.TrimSpace(target.UserID) == "" {
 				return nil, fmt.Errorf("regional sandbox resolver returned incomplete target")
 			}
 			return &SessionTarget{
 				Username:  username,
 				SandboxID: sandboxID,
-				UserID:    storedKey.UserID,
+				UserID:    target.UserID,
 				TeamID:    target.TeamID,
 				ProcdURL:  target.ProcdURL,
 			}, nil
@@ -148,4 +152,25 @@ func (a *Authenticator) Authenticate(ctx context.Context, username string, key s
 		}
 		return nil, err
 	}
+}
+
+func authorizedGrantsFromSSHKeys(keys []*identity.UserSSHPublicKey) []sharedssh.AuthorizedGrant {
+	grants := make([]sharedssh.AuthorizedGrant, 0, len(keys))
+	seenTeams := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		if key == nil {
+			continue
+		}
+		teamID := strings.TrimSpace(key.TeamID)
+		userID := strings.TrimSpace(key.UserID)
+		if teamID == "" || userID == "" {
+			continue
+		}
+		if _, ok := seenTeams[teamID]; ok {
+			continue
+		}
+		seenTeams[teamID] = struct{}{}
+		grants = append(grants, sharedssh.AuthorizedGrant{TeamID: teamID, UserID: userID})
+	}
+	return grants
 }

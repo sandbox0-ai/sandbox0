@@ -26,6 +26,7 @@ type fakeUserRepository struct {
 	listSSHPublicKeysErr   error
 	deleteSSHPublicKeyErr  error
 	lastDeletedSSHPublicID string
+	lastDeletedTeamID      string
 	lastDeletedUserID      string
 }
 
@@ -66,17 +67,24 @@ func (f *fakeUserRepository) CreateUserSSHPublicKey(_ context.Context, key *iden
 	return nil
 }
 
-func (f *fakeUserRepository) ListUserSSHPublicKeysByUserID(_ context.Context, userID string) ([]*identity.UserSSHPublicKey, error) {
+func (f *fakeUserRepository) ListUserSSHPublicKeysByTeamAndUserID(_ context.Context, teamID, userID string) ([]*identity.UserSSHPublicKey, error) {
 	if f.listSSHPublicKeysErr != nil {
 		return nil, f.listSSHPublicKeysErr
 	}
 	if f.user == nil || f.user.ID != userID {
 		return nil, nil
 	}
-	return f.sshKeys, nil
+	keys := make([]*identity.UserSSHPublicKey, 0, len(f.sshKeys))
+	for _, key := range f.sshKeys {
+		if key.TeamID == teamID {
+			keys = append(keys, key)
+		}
+	}
+	return keys, nil
 }
 
-func (f *fakeUserRepository) DeleteUserSSHPublicKey(_ context.Context, userID, keyID string) error {
+func (f *fakeUserRepository) DeleteUserSSHPublicKeyByTeamAndUserID(_ context.Context, teamID, userID, keyID string) error {
+	f.lastDeletedTeamID = teamID
 	f.lastDeletedUserID = userID
 	f.lastDeletedSSHPublicID = keyID
 	if f.deleteSSHPublicKeyErr != nil {
@@ -95,7 +103,7 @@ func newAuthenticatedUserContext(t *testing.T, method, target, body string) (*gi
 		req.Header.Set("Content-Type", "application/json")
 	}
 	ctx.Request = req
-	ctx.Set("auth_context", &authn.AuthContext{UserID: "user-1"})
+	ctx.Set("auth_context", &authn.AuthContext{TeamID: "team-1", UserID: "user-1"})
 	return ctx, rec
 }
 
@@ -117,6 +125,9 @@ func TestCreateUserSSHPublicKey(t *testing.T) {
 	if repo.sshKeys[0].Name != "Laptop" {
 		t.Fatalf("stored key name = %q, want %q", repo.sshKeys[0].Name, "Laptop")
 	}
+	if repo.sshKeys[0].TeamID != "team-1" {
+		t.Fatalf("stored key team_id = %q, want team-1", repo.sshKeys[0].TeamID)
+	}
 	if repo.sshKeys[0].PublicKey != "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ4dLZLZOA/asaP+5QO6t81jzbe5G4jrI2F+jbjL6TY8" {
 		t.Fatalf("stored key public_key = %q", repo.sshKeys[0].PublicKey)
 	}
@@ -133,6 +144,24 @@ func TestCreateUserSSHPublicKey(t *testing.T) {
 	}
 	if resp.Name != "Laptop" {
 		t.Fatalf("response name = %q, want %q", resp.Name, "Laptop")
+	}
+}
+
+func TestCreateUserSSHPublicKeyRequiresTeam(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	repo := &fakeUserRepository{user: &identity.User{ID: "user-1"}}
+	handler := NewUserHandler(repo, zap.NewNop())
+	ctx, rec := newAuthenticatedUserContext(t, http.MethodPost, "/users/me/ssh-keys", `{"name":"Laptop","public_key":"`+testSSHPublicKey+`"}`)
+	ctx.Set("auth_context", &authn.AuthContext{UserID: "user-1"})
+
+	handler.CreateUserSSHPublicKey(ctx)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+	if len(repo.sshKeys) != 0 {
+		t.Fatalf("stored keys = %d, want 0", len(repo.sshKeys))
 	}
 }
 
@@ -160,6 +189,7 @@ func TestListUserSSHPublicKeys(t *testing.T) {
 		user: &identity.User{ID: "user-1"},
 		sshKeys: []*identity.UserSSHPublicKey{{
 			ID:                "sshkey-1",
+			TeamID:            "team-1",
 			UserID:            "user-1",
 			Name:              "Laptop",
 			PublicKey:         "ssh-ed25519 AAAAC3Nza...",
@@ -210,8 +240,8 @@ func TestDeleteUserSSHPublicKey(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
-	if repo.lastDeletedUserID != "user-1" || repo.lastDeletedSSHPublicID != "sshkey-1" {
-		t.Fatalf("delete args = (%q, %q), want (%q, %q)", repo.lastDeletedUserID, repo.lastDeletedSSHPublicID, "user-1", "sshkey-1")
+	if repo.lastDeletedTeamID != "team-1" || repo.lastDeletedUserID != "user-1" || repo.lastDeletedSSHPublicID != "sshkey-1" {
+		t.Fatalf("delete args = (%q, %q, %q), want (%q, %q, %q)", repo.lastDeletedTeamID, repo.lastDeletedUserID, repo.lastDeletedSSHPublicID, "team-1", "user-1", "sshkey-1")
 	}
 }
 

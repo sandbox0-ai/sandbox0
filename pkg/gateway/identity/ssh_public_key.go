@@ -11,6 +11,7 @@ import (
 // UserSSHPublicKey stores one normalized SSH public key uploaded by a user.
 type UserSSHPublicKey struct {
 	ID                string    `json:"id"`
+	TeamID            string    `json:"team_id"`
 	UserID            string    `json:"user_id"`
 	Name              string    `json:"name"`
 	PublicKey         string    `json:"public_key"`

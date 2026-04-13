@@ -35,6 +35,7 @@ func TestUserSSHPublicKeyRepositoryLifecycle(t *testing.T) {
 		t.Fatalf("normalize ssh public key: %v", err)
 	}
 	key := &UserSSHPublicKey{
+		TeamID:            "team-1",
 		UserID:            user.ID,
 		Name:              "Laptop",
 		PublicKey:         publicKey,
@@ -46,7 +47,7 @@ func TestUserSSHPublicKeyRepositoryLifecycle(t *testing.T) {
 		t.Fatalf("create ssh public key: %v", err)
 	}
 
-	keys, err := repo.ListUserSSHPublicKeysByUserID(ctx, user.ID)
+	keys, err := repo.ListUserSSHPublicKeysByTeamAndUserID(ctx, "team-1", user.ID)
 	if err != nil {
 		t.Fatalf("list ssh public keys: %v", err)
 	}
@@ -61,8 +62,19 @@ func TestUserSSHPublicKeyRepositoryLifecycle(t *testing.T) {
 	if loaded.UserID != user.ID {
 		t.Fatalf("loaded user_id = %q, want %q", loaded.UserID, user.ID)
 	}
+	if loaded.TeamID != "team-1" {
+		t.Fatalf("loaded team_id = %q, want team-1", loaded.TeamID)
+	}
 
-	if err := repo.DeleteUserSSHPublicKey(ctx, user.ID, key.ID); err != nil {
+	fingerprintKeys, err := repo.ListUserSSHPublicKeysByFingerprint(ctx, fingerprint)
+	if err != nil {
+		t.Fatalf("list ssh public keys by fingerprint: %v", err)
+	}
+	if len(fingerprintKeys) != 1 || fingerprintKeys[0].TeamID != "team-1" {
+		t.Fatalf("fingerprint keys = %+v, want one team-1 key", fingerprintKeys)
+	}
+
+	if err := repo.DeleteUserSSHPublicKeyByTeamAndUserID(ctx, "team-1", user.ID, key.ID); err != nil {
 		t.Fatalf("delete ssh public key: %v", err)
 	}
 	if _, err := repo.GetUserSSHPublicKeyByFingerprint(ctx, fingerprint); err != ErrSSHPublicKeyNotFound {
@@ -85,6 +97,7 @@ func TestUserSSHPublicKeyRepositoryAllowsFederatedUserID(t *testing.T) {
 	}
 
 	key := &UserSSHPublicKey{
+		TeamID:            "team-1",
 		UserID:            userID,
 		Name:              "Federated laptop",
 		PublicKey:         publicKey,
@@ -96,12 +109,50 @@ func TestUserSSHPublicKeyRepositoryAllowsFederatedUserID(t *testing.T) {
 		t.Fatalf("create ssh public key for federated user: %v", err)
 	}
 
-	keys, err := repo.ListUserSSHPublicKeysByUserID(ctx, userID)
+	keys, err := repo.ListUserSSHPublicKeysByTeamAndUserID(ctx, "team-1", userID)
 	if err != nil {
 		t.Fatalf("list federated user ssh public keys: %v", err)
 	}
 	if len(keys) != 1 {
 		t.Fatalf("keys len = %d, want 1 (schema %s)", len(keys), schema)
+	}
+}
+
+func TestUserSSHPublicKeyRepositoryAllowsSameFingerprintAcrossTeams(t *testing.T) {
+	pool, _ := newGatewayIdentityTestPool(t)
+	if pool == nil {
+		return
+	}
+
+	ctx := context.Background()
+	repo := NewRepository(pool)
+	userID := uuid.NewString()
+	publicKey, keyType, fingerprint, comment, err := NormalizeAuthorizedSSHPublicKey("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ4dLZLZOA/asaP+5QO6t81jzbe5G4jrI2F+jbjL6TY8 sandbox0-e2e")
+	if err != nil {
+		t.Fatalf("normalize ssh public key: %v", err)
+	}
+
+	for _, teamID := range []string{"team-1", "team-2"} {
+		key := &UserSSHPublicKey{
+			TeamID:            teamID,
+			UserID:            userID,
+			Name:              "Laptop " + teamID,
+			PublicKey:         publicKey,
+			KeyType:           keyType,
+			FingerprintSHA256: fingerprint,
+			Comment:           comment,
+		}
+		if err := repo.CreateUserSSHPublicKey(ctx, key); err != nil {
+			t.Fatalf("create ssh public key for %s: %v", teamID, err)
+		}
+	}
+
+	keys, err := repo.ListUserSSHPublicKeysByFingerprint(ctx, fingerprint)
+	if err != nil {
+		t.Fatalf("list ssh public keys by fingerprint: %v", err)
+	}
+	if len(keys) != 2 {
+		t.Fatalf("keys len = %d, want 2", len(keys))
 	}
 }
 
@@ -126,6 +177,7 @@ func TestDeleteUserRemovesSSHPublicKeys(t *testing.T) {
 		t.Fatalf("normalize ssh public key: %v", err)
 	}
 	key := &UserSSHPublicKey{
+		TeamID:            "team-1",
 		UserID:            user.ID,
 		Name:              "Laptop",
 		PublicKey:         publicKey,

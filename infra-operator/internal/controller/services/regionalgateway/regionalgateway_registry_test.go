@@ -61,12 +61,17 @@ func TestReconcileKeepsHTTPBackendForHTTPSIngress(t *testing.T) {
 						Service: &infrav1alpha1.ServiceNetworkConfig{
 							Type: "ClusterIP",
 							Port: 80,
+							Annotations: map[string]string{
+								"cloud.google.com/neg": `{"ingress": true}`,
+							},
 						},
 					},
 					IngressExposureConfig: infrav1alpha1.IngressExposureConfig{
 						Ingress: &infrav1alpha1.IngressConfig{
-							Enabled:   true,
-							ClassName: "nginx",
+							Enabled: true,
+							Annotations: map[string]string{
+								"kubernetes.io/ingress.class": "gce",
+							},
 							Host:      "gcp-ue4.sandbox0.ai",
 							TLSSecret: "gcp-ue4-sandbox0-ai-tls",
 						},
@@ -126,6 +131,9 @@ func TestReconcileKeepsHTTPBackendForHTTPSIngress(t *testing.T) {
 	if service.Spec.Ports[0].TargetPort.IntVal != 8080 {
 		t.Fatalf("expected http target port 8080, got %#v", service.Spec.Ports[0].TargetPort)
 	}
+	if got := service.Annotations["cloud.google.com/neg"]; got != `{"ingress": true}` {
+		t.Fatalf("expected GKE NEG service annotation, got %q", got)
+	}
 
 	deployment := &appsv1.Deployment{}
 	if err := client.Get(context.Background(), types.NamespacedName{Name: "demo-regional-gateway", Namespace: infra.Namespace}, deployment); err != nil {
@@ -145,8 +153,11 @@ func TestReconcileKeepsHTTPBackendForHTTPSIngress(t *testing.T) {
 	if err := client.Get(context.Background(), types.NamespacedName{Name: "demo-regional-gateway", Namespace: infra.Namespace}, ingress); err != nil {
 		t.Fatalf("get regional gateway ingress: %v", err)
 	}
-	if ingress.Spec.IngressClassName == nil || *ingress.Spec.IngressClassName != "nginx" {
-		t.Fatalf("expected nginx ingress class, got %#v", ingress.Spec.IngressClassName)
+	if ingress.Spec.IngressClassName != nil {
+		t.Fatalf("did not expect spec.ingressClassName for GKE ingress, got %#v", ingress.Spec.IngressClassName)
+	}
+	if got := ingress.Annotations["kubernetes.io/ingress.class"]; got != "gce" {
+		t.Fatalf("expected GKE ingress class annotation, got %q", got)
 	}
 	if len(ingress.Spec.TLS) != 1 || ingress.Spec.TLS[0].SecretName != "gcp-ue4-sandbox0-ai-tls" {
 		t.Fatalf("expected ingress TLS secret, got %#v", ingress.Spec.TLS)

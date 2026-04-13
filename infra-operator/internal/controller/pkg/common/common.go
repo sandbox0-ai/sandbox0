@@ -507,14 +507,15 @@ func (r *ResourceManager) ReconcileIngressWithScope(ctx context.Context, scope O
 
 	pathType := networkingv1.PathTypePrefix
 	desiredLabels := EnsureManagedLabels(ingress.Labels, ingressName)
+	desiredAnnotations := CloneStringMap(config.Annotations)
 	desiredIngress := &networkingv1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      ingressName,
-			Namespace: scope.Namespace,
-			Labels:    desiredLabels,
+			Name:        ingressName,
+			Namespace:   scope.Namespace,
+			Labels:      desiredLabels,
+			Annotations: desiredAnnotations,
 		},
 		Spec: networkingv1.IngressSpec{
-			IngressClassName: &config.ClassName,
 			Rules: []networkingv1.IngressRule{
 				{
 					Host: config.Host,
@@ -540,6 +541,9 @@ func (r *ResourceManager) ReconcileIngressWithScope(ctx context.Context, scope O
 			},
 		},
 	}
+	if config.ClassName != "" {
+		desiredIngress.Spec.IngressClassName = &config.ClassName
+	}
 
 	if config.TLSSecret != "" {
 		desiredIngress.Spec.TLS = []networkingv1.IngressTLS{
@@ -560,6 +564,7 @@ func (r *ResourceManager) ReconcileIngressWithScope(ctx context.Context, scope O
 
 	ingress.Spec = desiredIngress.Spec
 	ingress.Labels = desiredLabels
+	ingress.Annotations = desiredAnnotations
 	return r.Client.Update(ctx, ingress)
 }
 

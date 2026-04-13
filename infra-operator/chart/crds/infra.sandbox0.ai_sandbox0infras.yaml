@@ -646,6 +646,12 @@ spec:
                         description: Ingress configures ingress settings for external
                           registry access.
                         properties:
+                          annotations:
+                            additionalProperties:
+                              type: string
+                            description: Annotations specifies provider-specific ingress
+                              annotations.
+                            type: object
                           className:
                             description: ClassName specifies the ingress class name
                             type: string
@@ -1340,6 +1346,12 @@ spec:
                       ingress:
                         description: Ingress configures ingress settings
                         properties:
+                          annotations:
+                            additionalProperties:
+                              type: string
+                            description: Annotations specifies provider-specific ingress
+                              annotations.
+                            type: object
                           className:
                             description: ClassName specifies the ingress class name
                             type: string
@@ -2073,6 +2085,12 @@ spec:
                       ingress:
                         description: Ingress configures ingress settings
                         properties:
+                          annotations:
+                            additionalProperties:
+                              type: string
+                            description: Annotations specifies provider-specific ingress
+                              annotations.
+                            type: object
                           className:
                             description: ClassName specifies the ingress class name
                             type: string

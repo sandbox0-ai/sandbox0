@@ -1117,6 +1117,10 @@ type IngressConfig struct {
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`
 
+	// Annotations specifies provider-specific ingress annotations.
+	// +optional
+	Annotations map[string]string `json:"annotations,omitempty"`
+
 	// ClassName specifies the ingress class name
 	// +optional
 	ClassName string `json:"className,omitempty"`

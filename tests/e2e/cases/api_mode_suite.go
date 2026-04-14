@@ -529,7 +529,7 @@ func assertTemplateRolloutClaimFallsBackToColdStart(env *framework.ScenarioEnv, 
 	Expect(err).NotTo(HaveOccurred())
 	Expect(templates).NotTo(BeEmpty())
 
-	name := fmt.Sprintf("%s-rollout-cold-%d", templateNamePrefix, time.Now().UnixNano())
+	name := fmt.Sprintf("%s-rc-%d", templateNamePrefix, time.Now().UnixNano()%1_000_000_000)
 	templateReq := e2eutils.CloneTemplateForCreate(templates[0], name)
 	Expect(templateReq.Spec.Pool).NotTo(BeNil())
 	Expect(templateReq.Spec.MainContainer).NotTo(BeNil())

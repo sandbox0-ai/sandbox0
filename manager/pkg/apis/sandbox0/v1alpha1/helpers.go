@@ -21,6 +21,13 @@ const (
 	netdMITMCAEnvVar    = "SANDBOX0_NETD_MITM_CA_FILE"
 	netdMITMCADir       = "/var/run/sandbox0/netd"
 	netdMITMCACertPath  = netdMITMCADir + "/mitm-ca.crt"
+
+	// Template resources remain hard limits; requests reserve a smaller baseline
+	// so warm pools and cold-start sandboxes can be packed efficiently.
+	defaultSandboxCPURequestRatioMillis    = int64(100)
+	defaultSandboxMemoryRequestRatioMillis = int64(250)
+	minSandboxCPURequestMilli              = int64(10)
+	minSandboxMemoryRequestBytes           = int64(64 * 1024 * 1024)
 )
 
 // buildPodSpec builds a pod spec from a template
@@ -264,12 +271,14 @@ func buildResourceRequirements(quota ResourceQuota) corev1.ResourceRequirements 
 	requests := corev1.ResourceList{}
 	limits := corev1.ResourceList{}
 	if quota.CPU.Sign() > 0 {
-		requests[corev1.ResourceCPU] = quota.CPU.DeepCopy()
-		limits[corev1.ResourceCPU] = quota.CPU.DeepCopy()
+		limit := quota.CPU.DeepCopy()
+		requests[corev1.ResourceCPU] = scaledCPURequest(limit)
+		limits[corev1.ResourceCPU] = limit
 	}
 	if quota.Memory.Sign() > 0 {
-		requests[corev1.ResourceMemory] = quota.Memory.DeepCopy()
-		limits[corev1.ResourceMemory] = quota.Memory.DeepCopy()
+		limit := quota.Memory.DeepCopy()
+		requests[corev1.ResourceMemory] = scaledMemoryRequest(limit)
+		limits[corev1.ResourceMemory] = limit
 	}
 	if len(requests) == 0 {
 		requests = nil
@@ -278,6 +287,32 @@ func buildResourceRequirements(quota ResourceQuota) corev1.ResourceRequirements 
 		limits = nil
 	}
 	return corev1.ResourceRequirements{Requests: requests, Limits: limits}
+}
+
+func scaledCPURequest(limit resource.Quantity) resource.Quantity {
+	limitMilli := limit.MilliValue()
+	requestMilli := scaleResource(limitMilli, defaultSandboxCPURequestRatioMillis, minSandboxCPURequestMilli)
+	return *resource.NewMilliQuantity(requestMilli, resource.DecimalSI)
+}
+
+func scaledMemoryRequest(limit resource.Quantity) resource.Quantity {
+	limitBytes := limit.Value()
+	requestBytes := scaleResource(limitBytes, defaultSandboxMemoryRequestRatioMillis, minSandboxMemoryRequestBytes)
+	return *resource.NewQuantity(requestBytes, resource.BinarySI)
+}
+
+func scaleResource(limit, ratioMillis, minimum int64) int64 {
+	if limit <= 0 {
+		return 0
+	}
+	request := (limit*ratioMillis + 999) / 1000
+	if request < minimum {
+		request = minimum
+	}
+	if request > limit {
+		return limit
+	}
+	return request
 }
 
 func appendProcdConfigEnvVars(envVars []corev1.EnvVar) []corev1.EnvVar {

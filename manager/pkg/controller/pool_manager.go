@@ -53,7 +53,19 @@ const (
 	AnnotationNetworkPolicyAppliedHash     = "sandbox0.ai/network-policy-applied-hash"
 	AnnotationSandboxID                    = "sandbox0.ai/sandbox-id"
 	AnnotationTemplateSpecHash             = "sandbox0.ai/template-spec-hash"
+	AnnotationClusterAutoscalerSafeToEvict = "cluster-autoscaler.kubernetes.io/safe-to-evict"
 )
+
+// ClaimedSandboxPodAnnotations returns manager-owned metadata for active sandbox
+// pods. Idle pool pods intentionally do not carry these annotations.
+func ClaimedSandboxPodAnnotations(extra map[string]string) map[string]string {
+	annotations := make(map[string]string, len(extra)+1)
+	for key, value := range extra {
+		annotations[key] = value
+	}
+	annotations[AnnotationClusterAutoscalerSafeToEvict] = "false"
+	return annotations
+}
 
 // PoolManager manages the idle pool (ReplicaSet)
 type PoolManager struct {

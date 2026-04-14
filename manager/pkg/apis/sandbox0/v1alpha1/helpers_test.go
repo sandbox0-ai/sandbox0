@@ -204,6 +204,42 @@ manager_image: sandbox0/manager:test
 	}
 }
 
+func TestBuildPodSpecUsesReducedRequestsAndQuotaLimits(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	spec := BuildPodSpec(newTestTemplate())
+	resources := spec.Containers[0].Resources
+
+	assertResourceQuantity(t, resources.Requests[corev1.ResourceCPU], "100m")
+	assertResourceQuantity(t, resources.Limits[corev1.ResourceCPU], "1")
+	assertResourceQuantity(t, resources.Requests[corev1.ResourceMemory], "256Mi")
+	assertResourceQuantity(t, resources.Limits[corev1.ResourceMemory], "1Gi")
+}
+
+func TestBuildPodSpecClampsReducedRequestsToSmallQuota(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	template := newTestTemplate()
+	template.Spec.MainContainer.Resources = ResourceQuota{
+		CPU:    resource.MustParse("5m"),
+		Memory: resource.MustParse("32Mi"),
+	}
+
+	spec := BuildPodSpec(template)
+	resources := spec.Containers[0].Resources
+
+	assertResourceQuantity(t, resources.Requests[corev1.ResourceCPU], "5m")
+	assertResourceQuantity(t, resources.Limits[corev1.ResourceCPU], "5m")
+	assertResourceQuantity(t, resources.Requests[corev1.ResourceMemory], "32Mi")
+	assertResourceQuantity(t, resources.Limits[corev1.ResourceMemory], "32Mi")
+}
+
 func TestBuildPodSpecAddsSandboxReadinessGate(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test
@@ -355,6 +391,14 @@ func findContainerPort(ports []corev1.ContainerPort, name string) *corev1.Contai
 		}
 	}
 	return nil
+}
+
+func assertResourceQuantity(t *testing.T, got resource.Quantity, want string) {
+	t.Helper()
+	wantQuantity := resource.MustParse(want)
+	if got.Cmp(wantQuantity) != 0 {
+		t.Fatalf("resource quantity = %s, want %s", got.String(), wantQuantity.String())
+	}
 }
 
 func TestBuildPodSpecOverridesTenantStorageProxyEnvVars(t *testing.T) {

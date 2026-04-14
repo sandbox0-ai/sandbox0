@@ -91,6 +91,9 @@ func TestClaimIdlePodClaimsReadyPod(t *testing.T) {
 	if got := pod.Labels[controller.LabelPoolType]; got != controller.PoolTypeActive {
 		t.Fatalf("pool-type = %q, want %q", got, controller.PoolTypeActive)
 	}
+	if got := pod.Annotations[controller.AnnotationClusterAutoscalerSafeToEvict]; got != "false" {
+		t.Fatalf("safe-to-evict annotation = %q, want false", got)
+	}
 }
 
 func TestClaimIdlePodRequiresDataPlaneReadyNode(t *testing.T) {
@@ -324,6 +327,35 @@ func TestCreateNewPodRequestsDeleteAfterNetworkApplyFailure(t *testing.T) {
 	}
 	if len(removed) != 0 {
 		t.Fatalf("network policy removals = %d, want 0; lifecycle controller owns delete cleanup", len(removed))
+	}
+}
+
+func TestCreateNewPodMarksColdPodNonEvictable(t *testing.T) {
+	withClaimTestPublicKey(t)
+
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			MainContainer: v1alpha1.ContainerSpec{Image: "busybox"},
+		},
+	}
+	client := fake.NewSimpleClientset()
+	svc := &SandboxService{
+		k8sClient:    client,
+		secretLister: newClaimTestSecretLister(t),
+		clock:        systemTime{},
+		logger:       zap.NewNop(),
+	}
+
+	pod, err := svc.createNewPod(context.Background(), template, &ClaimRequest{TeamID: "team-a", UserID: "user-a"})
+	if err != nil {
+		t.Fatalf("createNewPod() error = %v", err)
+	}
+	if got := pod.Annotations[controller.AnnotationClusterAutoscalerSafeToEvict]; got != "false" {
+		t.Fatalf("safe-to-evict annotation = %q, want false", got)
 	}
 }
 

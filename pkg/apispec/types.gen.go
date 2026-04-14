@@ -2790,8 +2790,11 @@ type GetApiV1SandboxesIdLogsParams struct {
 	// TailLines Maximum number of log lines to return from the end of the log.
 	TailLines *int64 `form:"tail_lines,omitempty" json:"tail_lines,omitempty"`
 
-	// LimitBytes Maximum response log payload bytes read from Kubernetes.
+	// LimitBytes Maximum response log payload bytes read from Kubernetes. Defaults only apply when follow is false.
 	LimitBytes *int64 `form:"limit_bytes,omitempty" json:"limit_bytes,omitempty"`
+
+	// Follow Stream logs until the client disconnects. When true, the response content type is text/plain.
+	Follow *bool `form:"follow,omitempty" json:"follow,omitempty"`
 
 	// Previous Return logs for the previously terminated container instance.
 	Previous *bool `form:"previous,omitempty" json:"previous,omitempty"`

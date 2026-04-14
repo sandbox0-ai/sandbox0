@@ -1305,7 +1305,7 @@ paths:
       summary: Get sandbox pod logs
       description: |
         Returns a bounded snapshot of Kubernetes container logs for the sandbox pod.
-        This endpoint does not stream or follow logs.
+        Set `follow=true` to stream logs as text/plain until the client disconnects.
       security:
         - bearerAuth: []
       x-upstream-service: manager
@@ -1329,13 +1329,19 @@ paths:
             maximum: 5000
         - name: limit_bytes
           in: query
-          description: Maximum response log payload bytes read from Kubernetes.
+          description: Maximum response log payload bytes read from Kubernetes. Defaults only apply when follow is false.
           schema:
             type: integer
             format: int64
             default: 1048576
             minimum: 1
             maximum: 8388608
+        - name: follow
+          in: query
+          description: Stream logs until the client disconnects. When true, the response content type is text/plain.
+          schema:
+            type: boolean
+            default: false
         - name: previous
           in: query
           description: Return logs for the previously terminated container instance.
@@ -1362,6 +1368,9 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessSandboxLogsResponse"
+            text/plain:
+              schema:
+                type: string
         "400":
           description: Invalid log query parameters
           content:

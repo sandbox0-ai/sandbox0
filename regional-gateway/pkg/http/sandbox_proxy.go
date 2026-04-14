@@ -2,6 +2,7 @@ package http
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
@@ -9,6 +10,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"go.uber.org/zap"
 )
 
@@ -67,6 +69,9 @@ func (s *Server) proxySandbox(c *gin.Context) {
 	}
 
 	s.applyInternalHeaders(c, token, authCtx)
+	if sandboxLogsFollowRequested(c) {
+		c.Request = proxy.WithUpstreamTimeoutDisabledRequest(c.Request)
+	}
 
 	router.ProxyToTarget(c)
 }
@@ -85,6 +90,9 @@ func (s *Server) proxyToScheduler(c *gin.Context, authCtx *authn.AuthContext) {
 	}
 
 	s.applyInternalHeaders(c, token, authCtx)
+	if sandboxLogsFollowRequested(c) {
+		c.Request = proxy.WithUpstreamTimeoutDisabledRequest(c.Request)
+	}
 	s.schedulerRouter.ProxyToTarget(c)
 }
 
@@ -103,7 +111,18 @@ func (s *Server) proxyToDefaultClusterGateway(c *gin.Context) {
 	}
 
 	s.applyInternalHeaders(c, token, authCtx)
+	if sandboxLogsFollowRequested(c) {
+		c.Request = proxy.WithUpstreamTimeoutDisabledRequest(c.Request)
+	}
 	s.clusterGatewayRouter.ProxyToTarget(c)
+}
+
+func sandboxLogsFollowRequested(c *gin.Context) bool {
+	if c.Request.Method != http.MethodGet || c.Param("path") != "/logs" {
+		return false
+	}
+	follow, err := strconv.ParseBool(c.Query("follow"))
+	return err == nil && follow
 }
 
 func (s *Server) applyInternalHeaders(c *gin.Context, token string, authCtx *authn.AuthContext) {

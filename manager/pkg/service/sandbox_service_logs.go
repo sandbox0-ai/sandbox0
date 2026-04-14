@@ -44,8 +44,45 @@ type SandboxLogsResponse struct {
 	Logs      string `json:"logs"`
 }
 
+// SandboxLogsStream is an open Kubernetes pod log stream. Callers must close Body.
+type SandboxLogsStream struct {
+	SandboxID string
+	PodName   string
+	Container string
+	Previous  bool
+	Body      io.ReadCloser
+}
+
 // GetSandboxLogs returns a bounded snapshot of logs from one container in the sandbox pod.
 func (s *SandboxService) GetSandboxLogs(ctx context.Context, sandboxID, teamID string, opts *SandboxLogsOptions) (*SandboxLogsResponse, error) {
+	stream, err := s.openSandboxLogs(ctx, sandboxID, teamID, opts, false, true)
+	if err != nil {
+		return nil, err
+	}
+	data, readErr := io.ReadAll(stream.Body)
+	closeErr := stream.Body.Close()
+	if readErr != nil {
+		return nil, fmt.Errorf("read sandbox pod logs: %w", readErr)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("close sandbox pod logs: %w", closeErr)
+	}
+
+	return &SandboxLogsResponse{
+		SandboxID: stream.SandboxID,
+		PodName:   stream.PodName,
+		Container: stream.Container,
+		Previous:  stream.Previous,
+		Logs:      string(data),
+	}, nil
+}
+
+// StreamSandboxLogs returns a followable stream of logs from one container in the sandbox pod.
+func (s *SandboxService) StreamSandboxLogs(ctx context.Context, sandboxID, teamID string, opts *SandboxLogsOptions) (*SandboxLogsStream, error) {
+	return s.openSandboxLogs(ctx, sandboxID, teamID, opts, true, false)
+}
+
+func (s *SandboxService) openSandboxLogs(ctx context.Context, sandboxID, teamID string, opts *SandboxLogsOptions, follow bool, defaultLimit bool) (*SandboxLogsStream, error) {
 	if s.k8sClient == nil {
 		return nil, errors.New("kubernetes client is not configured")
 	}
@@ -58,17 +95,20 @@ func (s *SandboxService) GetSandboxLogs(ctx context.Context, sandboxID, teamID s
 		return nil, ErrSandboxTeamMismatch
 	}
 
-	options := normalizeSandboxLogsOptions(opts)
+	options := normalizeSandboxLogsOptions(opts, defaultLimit)
 	if !podHasContainer(pod, options.Container) {
 		return nil, fmt.Errorf("%w: %s", ErrSandboxLogContainerNotFound, options.Container)
 	}
 
 	logOptions := &corev1.PodLogOptions{
 		Container:  options.Container,
+		Follow:     follow,
 		Previous:   options.Previous,
 		Timestamps: options.Timestamps,
 		TailLines:  &options.TailLines,
-		LimitBytes: &options.LimitBytes,
+	}
+	if options.LimitBytes > 0 {
+		logOptions.LimitBytes = &options.LimitBytes
 	}
 	if options.SinceSeconds != nil {
 		logOptions.SinceSeconds = options.SinceSeconds
@@ -78,25 +118,17 @@ func (s *SandboxService) GetSandboxLogs(ctx context.Context, sandboxID, teamID s
 	if err != nil {
 		return nil, fmt.Errorf("stream sandbox pod logs: %w", err)
 	}
-	data, readErr := io.ReadAll(stream)
-	closeErr := stream.Close()
-	if readErr != nil {
-		return nil, fmt.Errorf("read sandbox pod logs: %w", readErr)
-	}
-	if closeErr != nil {
-		return nil, fmt.Errorf("close sandbox pod logs: %w", closeErr)
-	}
 
-	return &SandboxLogsResponse{
+	return &SandboxLogsStream{
 		SandboxID: sandboxID,
 		PodName:   pod.Name,
 		Container: options.Container,
 		Previous:  options.Previous,
-		Logs:      string(data),
+		Body:      stream,
 	}, nil
 }
 
-func normalizeSandboxLogsOptions(opts *SandboxLogsOptions) SandboxLogsOptions {
+func normalizeSandboxLogsOptions(opts *SandboxLogsOptions, defaultLimit bool) SandboxLogsOptions {
 	options := SandboxLogsOptions{}
 	if opts != nil {
 		options = *opts
@@ -112,12 +144,12 @@ func normalizeSandboxLogsOptions(opts *SandboxLogsOptions) SandboxLogsOptions {
 	} else if options.TailLines < 0 {
 		options.TailLines = DefaultSandboxLogTailLines
 	}
-	if options.LimitBytes == 0 {
+	if options.LimitBytes == 0 && defaultLimit {
 		options.LimitBytes = DefaultSandboxLogLimitBytes
 	} else if options.LimitBytes > MaxSandboxLogLimitBytes {
 		options.LimitBytes = MaxSandboxLogLimitBytes
 	} else if options.LimitBytes < 0 {
-		options.LimitBytes = DefaultSandboxLogLimitBytes
+		options.LimitBytes = 0
 	}
 	if options.SinceSeconds != nil && *options.SinceSeconds < 1 {
 		options.SinceSeconds = nil

@@ -267,13 +267,17 @@ Read bounded pod logs for sandbox startup and container diagnostics.
 |-----------|------|-------------|
 | `container` | string | Pod container name (default: `procd`) |
 | `tail_lines` | integer | Number of lines from the end of the log (default: 200, max: 5000) |
-| `limit_bytes` | integer | Maximum log bytes returned (default: 1048576, max: 8388608) |
+| `limit_bytes` | integer | Maximum log bytes returned (default: 1048576 for snapshot responses, max: 8388608) |
+| `follow` | boolean | Stream logs as `text/plain` until the client disconnects |
 | `previous` | boolean | Return logs from the previously terminated container instance |
 | `timestamps` | boolean | Include Kubernetes log timestamps when available |
 | `since_seconds` | integer | Return logs newer than this many seconds |
 
     curl -H "Authorization: Bearer $SANDBOX0_TOKEN" \
       "$SANDBOX0_BASE_URL/api/v1/sandboxes/sb_abc123/logs?tail_lines=200"
+
+    curl -N -H "Authorization: Bearer $SANDBOX0_TOKEN" \
+      "$SANDBOX0_BASE_URL/api/v1/sandboxes/sb_abc123/logs?follow=true&tail_lines=50"
 
 ---
 

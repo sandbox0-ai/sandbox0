@@ -60,6 +60,43 @@ func TestGetSandboxLogsReturnsOK(t *testing.T) {
 	assert.Equal(t, "fake logs", payload.Logs)
 }
 
+func TestGetSandboxLogsStreamsWhenFollowTrue(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	pod := newHTTPLogsTestPod("sandbox-1", "team-1")
+	sandboxService := service.NewSandboxService(
+		fake.NewSimpleClientset(pod),
+		newHTTPTestPodLister(t, pod),
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		service.SandboxServiceConfig{},
+		zap.NewNop(),
+		nil,
+	)
+	server := &Server{sandboxService: sandboxService, logger: zap.NewNop()}
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/sandbox-1/logs?follow=true&tail_lines=10", nil)
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-1", UserID: "user-1"}))
+	ctx.Request = req
+	ctx.Params = gin.Params{{Key: "id", Value: "sandbox-1"}}
+
+	server.getSandboxLogs(ctx)
+
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	assert.Contains(t, recorder.Header().Get("Content-Type"), "text/plain")
+	assert.Equal(t, "sandbox-1", recorder.Header().Get("X-Sandbox-ID"))
+	assert.Equal(t, "procd", recorder.Header().Get("X-Sandbox-Log-Container"))
+	assert.Equal(t, "fake logs", recorder.Body.String())
+}
+
 func TestGetSandboxLogsRejectsInvalidTailLines(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

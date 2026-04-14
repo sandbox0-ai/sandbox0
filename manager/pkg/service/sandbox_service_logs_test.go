@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"io"
 	"testing"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
@@ -51,6 +52,34 @@ func TestGetSandboxLogsUsesBoundedPodLogOptions(t *testing.T) {
 	assert.EqualValues(t, 1024, *logOptions.LimitBytes)
 	require.NotNil(t, logOptions.SinceSeconds)
 	assert.EqualValues(t, 60, *logOptions.SinceSeconds)
+}
+
+func TestStreamSandboxLogsUsesFollowWithoutDefaultLimit(t *testing.T) {
+	pod := newSandboxLogsTestPod("sandbox-1", "team-1", "procd")
+	client := fake.NewSimpleClientset(pod)
+	svc := &SandboxService{
+		k8sClient: client,
+		podLister: newTestPodLister(t, pod),
+		logger:    zap.NewNop(),
+	}
+
+	stream, err := svc.StreamSandboxLogs(context.Background(), "sandbox-1", "team-1", &SandboxLogsOptions{
+		Container: "procd",
+		TailLines: 10,
+	})
+	require.NoError(t, err)
+	data, err := io.ReadAll(stream.Body)
+	require.NoError(t, err)
+	require.NoError(t, stream.Body.Close())
+	assert.Equal(t, "fake logs", string(data))
+
+	logOptions := findPodLogOptions(t, client.Actions())
+	require.NotNil(t, logOptions)
+	assert.Equal(t, "procd", logOptions.Container)
+	assert.True(t, logOptions.Follow)
+	require.NotNil(t, logOptions.TailLines)
+	assert.EqualValues(t, 10, *logOptions.TailLines)
+	assert.Nil(t, logOptions.LimitBytes)
 }
 
 func TestGetSandboxLogsRejectsDifferentTeam(t *testing.T) {

@@ -21,7 +21,7 @@ CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE TABLE IF NOT EXISTS teams (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name VARCHAR(255) NOT NULL,
-    slug VARCHAR(255) UNIQUE,
+    slug VARCHAR(255),
     owner_id UUID REFERENCES users(id) ON DELETE SET NULL,
     home_region_id TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS teams (
 
 CREATE INDEX IF NOT EXISTS idx_teams_owner_id ON teams(owner_id);
 CREATE INDEX IF NOT EXISTS idx_teams_slug ON teams(slug);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_teams_owner_slug ON teams(owner_id, slug);
 CREATE INDEX IF NOT EXISTS idx_teams_home_region_id ON teams(home_region_id);
 
 -- Team members table
@@ -191,6 +192,7 @@ DROP INDEX IF EXISTS idx_user_identities_user_id;
 DROP INDEX IF EXISTS idx_team_members_user_id;
 DROP INDEX IF EXISTS idx_team_members_team_id;
 DROP INDEX IF EXISTS idx_teams_home_region_id;
+DROP INDEX IF EXISTS idx_teams_owner_slug;
 DROP INDEX IF EXISTS idx_teams_slug;
 DROP INDEX IF EXISTS idx_teams_owner_id;
 DROP INDEX IF EXISTS idx_users_email;

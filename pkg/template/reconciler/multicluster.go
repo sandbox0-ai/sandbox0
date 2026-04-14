@@ -147,6 +147,18 @@ func (r *MultiClusterReconciler) GetTemplateStatsAge(clusterID string) (time.Dur
 	return r.since(updatedAt), true
 }
 
+// GetTemplateStatsUpdatedAt returns the timestamp for the latest template stats snapshot.
+func (r *MultiClusterReconciler) GetTemplateStatsUpdatedAt(clusterID string) (time.Time, bool) {
+	r.statsMu.RLock()
+	defer r.statsMu.RUnlock()
+
+	updatedAt, ok := r.templateStatsAt[clusterID]
+	if !ok || updatedAt.IsZero() {
+		return time.Time{}, false
+	}
+	return updatedAt, true
+}
+
 // GetClusterSummary returns the cached cluster summary for a shard.
 func (r *MultiClusterReconciler) GetClusterSummary(clusterID string) (*ClusterSummary, bool) {
 	r.cacheMu.RLock()

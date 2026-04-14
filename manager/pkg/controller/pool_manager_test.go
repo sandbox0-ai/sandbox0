@@ -220,7 +220,7 @@ sandbox_pod_placement:
 `)
 	t.Setenv("CONFIG_PATH", configA)
 
-	hashA, err := templateSpecHash(template)
+	hashA, err := TemplateSpecHash(template)
 	require.NoError(t, err)
 
 	configB := writeManagerConfig(t, `
@@ -231,7 +231,7 @@ sandbox_pod_placement:
 `)
 	t.Setenv("CONFIG_PATH", configB)
 
-	hashB, err := templateSpecHash(template)
+	hashB, err := TemplateSpecHash(template)
 	require.NoError(t, err)
 
 	assert.NotEqual(t, hashA, hashB)

@@ -642,7 +642,11 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 // claimIdlePod claims an idle pod from the pool
 func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.SandboxTemplate, req *ClaimRequest) (*corev1.Pod, error) {
 	var claimedPod *corev1.Pod
-	err := retry.OnError(claimIdlePodBackoff, k8serrors.IsConflict, func() error {
+	desiredTemplateHash, err := controller.TemplateSpecHash(template)
+	if err != nil {
+		return nil, fmt.Errorf("compute template hash: %w", err)
+	}
+	err = retry.OnError(claimIdlePodBackoff, k8serrors.IsConflict, func() error {
 		// Get all idle pods for this template
 		pods, listErr := s.podLister.Pods(template.Namespace).List(labels.SelectorFromSet(map[string]string{
 			controller.LabelTemplateID: template.Name,
@@ -655,7 +659,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		// Filter hot-claimable pods to Kubernetes-ready instances only.
 		var readyPods []*corev1.Pod
 		for _, pod := range pods {
-			if controller.IsPodReady(pod) && s.podDataPlaneReady(pod) {
+			if s.isHotClaimableIdlePod(pod, desiredTemplateHash) {
 				readyPods = append(readyPods, pod)
 			}
 		}
@@ -729,6 +733,9 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 					zap.Error(rollbackErr),
 				)
 			}
+			if isIdlePodLostDuringClaim(updateErr) {
+				return errNoIdlePod
+			}
 			return updateErr
 		}
 
@@ -753,6 +760,28 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		return nil, err
 	}
 	return claimedPod, nil
+}
+
+func (s *SandboxService) isHotClaimableIdlePod(pod *corev1.Pod, desiredTemplateHash string) bool {
+	if pod == nil || pod.DeletionTimestamp != nil {
+		return false
+	}
+	if pod.Annotations[controller.AnnotationTemplateSpecHash] != desiredTemplateHash {
+		return false
+	}
+	return controller.IsPodReady(pod) && s.podDataPlaneReady(pod)
+}
+
+func isIdlePodLostDuringClaim(err error) bool {
+	if k8serrors.IsNotFound(err) {
+		return true
+	}
+	if !k8serrors.IsInvalid(err) {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "metadata.finalizers") &&
+		strings.Contains(msg, "no new finalizers can be added if the object is being deleted")
 }
 
 // createNewPod creates a new pod for cold start

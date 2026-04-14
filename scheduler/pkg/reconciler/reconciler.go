@@ -72,6 +72,11 @@ func (r *Reconciler) GetTemplateStatsAge(clusterID string) (time.Duration, bool)
 	return r.inner.GetTemplateStatsAge(clusterID)
 }
 
+// GetTemplateStatsUpdatedAt returns when the latest template stats snapshot was collected.
+func (r *Reconciler) GetTemplateStatsUpdatedAt(clusterID string) (time.Time, bool) {
+	return r.inner.GetTemplateStatsUpdatedAt(clusterID)
+}
+
 // GetClusterSummary returns the cached cluster summary for a shard.
 func (r *Reconciler) GetClusterSummary(clusterID string) (*templreconciler.ClusterSummary, bool) {
 	return r.inner.GetClusterSummary(clusterID)

@@ -96,6 +96,20 @@ func (s *Server) getSandboxStatus(c *gin.Context) {
 	s.proxyToManager(c)
 }
 
+// getSandboxLogs gets sandbox pod logs
+func (s *Server) getSandboxLogs(c *gin.Context) {
+	sandboxID := c.Param("id")
+	if sandboxID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
+		return
+	}
+
+	// Rewrite path to manager API
+	c.Request.URL.Path = "/api/v1/sandboxes/" + sandboxID + "/logs"
+
+	s.proxyToManager(c)
+}
+
 // updateSandbox updates sandbox configuration
 func (s *Server) updateSandbox(c *gin.Context) {
 	sandboxID := c.Param("id")

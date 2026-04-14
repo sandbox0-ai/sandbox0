@@ -283,6 +283,112 @@ func (s *Server) getSandboxStatus(c *gin.Context) {
 	spec.JSONSuccess(c, http.StatusOK, status)
 }
 
+// getSandboxLogs gets sandbox pod logs.
+func (s *Server) getSandboxLogs(c *gin.Context) {
+	sandboxID := c.Param("id")
+	if sandboxID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
+		return
+	}
+
+	claims := internalauth.ClaimsFromContext(c.Request.Context())
+	if claims == nil {
+		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
+		return
+	}
+
+	tailLines, err := parseBoundedInt64Query(c, "tail_lines", service.DefaultSandboxLogTailLines, service.MaxSandboxLogTailLines)
+	if err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
+	limitBytes, err := parseBoundedInt64Query(c, "limit_bytes", service.DefaultSandboxLogLimitBytes, service.MaxSandboxLogLimitBytes)
+	if err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
+	previous, err := parseBoolQuery(c, "previous")
+	if err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
+	timestamps, err := parseBoolQuery(c, "timestamps")
+	if err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
+	sinceSeconds, err := parseOptionalPositiveInt64Query(c, "since_seconds")
+	if err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
+
+	logs, err := s.sandboxService.GetSandboxLogs(c.Request.Context(), sandboxID, claims.TeamID, &service.SandboxLogsOptions{
+		Container:    c.Query("container"),
+		TailLines:    tailLines,
+		LimitBytes:   limitBytes,
+		Previous:     previous,
+		Timestamps:   timestamps,
+		SinceSeconds: sinceSeconds,
+	})
+	if err != nil {
+		s.logger.Error("Failed to get sandbox logs",
+			zap.String("sandboxID", sandboxID),
+			zap.String("teamID", claims.TeamID),
+			zap.Error(err),
+		)
+		switch {
+		case errors.Is(err, service.ErrSandboxTeamMismatch):
+			spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, err.Error())
+		case errors.Is(err, service.ErrSandboxLogContainerNotFound):
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		case apierrors.IsNotFound(err):
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, fmt.Sprintf("sandbox not found: %v", err))
+		default:
+			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, fmt.Sprintf("failed to get sandbox logs: %v", err))
+		}
+		return
+	}
+
+	spec.JSONSuccess(c, http.StatusOK, logs)
+}
+
+func parseBoundedInt64Query(c *gin.Context, name string, defaultValue, maxValue int64) (int64, error) {
+	raw := c.Query(name)
+	if raw == "" {
+		return defaultValue, nil
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value < 1 || value > maxValue {
+		return 0, fmt.Errorf("%s must be between 1 and %d", name, maxValue)
+	}
+	return value, nil
+}
+
+func parseOptionalPositiveInt64Query(c *gin.Context, name string) (*int64, error) {
+	raw := c.Query(name)
+	if raw == "" {
+		return nil, nil
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value < 1 {
+		return nil, fmt.Errorf("%s must be greater than 0", name)
+	}
+	return &value, nil
+}
+
+func parseBoolQuery(c *gin.Context, name string) (bool, error) {
+	raw := c.Query(name)
+	if raw == "" {
+		return false, nil
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean", name)
+	}
+	return value, nil
+}
+
 // terminateSandbox terminates a sandbox
 func (s *Server) terminateSandbox(c *gin.Context) {
 	sandboxID := c.Param("id")

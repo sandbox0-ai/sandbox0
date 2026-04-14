@@ -64,6 +64,11 @@ func (r *Reconciler) ReconcileManagerRBAC(ctx context.Context, infra *infrav1alp
 			Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 		},
 		{
+			APIGroups: []string{""},
+			Resources: []string{"pods/log"},
+			Verbs:     []string{"get"},
+		},
+		{
 			APIGroups: []string{"apps"},
 			Resources: []string{"replicasets", "deployments"},
 			Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},

@@ -253,6 +253,30 @@ console.log('Status:', status.status);`
 
 ---
 
+## Get Sandbox Logs
+
+Read bounded pod logs for sandbox startup and container diagnostics.
+
+<Endpoint method="GET">
+/api/v1/sandboxes/{'{id}'}/logs
+</Endpoint>
+
+### Query Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `container` | string | Pod container name (default: `procd`) |
+| `tail_lines` | integer | Number of lines from the end of the log (default: 200, max: 5000) |
+| `limit_bytes` | integer | Maximum log bytes returned (default: 1048576, max: 8388608) |
+| `previous` | boolean | Return logs from the previously terminated container instance |
+| `timestamps` | boolean | Include Kubernetes log timestamps when available |
+| `since_seconds` | integer | Return logs newer than this many seconds |
+
+    curl -H "Authorization: Bearer $SANDBOX0_TOKEN" \
+      "$SANDBOX0_BASE_URL/api/v1/sandboxes/sb_abc123/logs?tail_lines=200"
+
+---
+
 ## List Sandboxes
 
 List all sandboxes with optional filters.

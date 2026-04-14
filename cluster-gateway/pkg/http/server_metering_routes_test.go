@@ -100,6 +100,19 @@ func TestSetupRoutesMountsMetadataEndpoint(t *testing.T) {
 	}
 }
 
+func TestSetupRoutesMountsSandboxLogsEndpoint(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server, _, _ := testMeteringRouteServer(t, "public")
+	server.requestLogger = middleware.NewRequestLogger(zap.NewNop())
+	server.obsProvider = newTestMeteringObservability(t)
+	server.setupRoutes()
+
+	if !hasRoute(server.router, "GET", "/api/v1/sandboxes/:id/logs") {
+		t.Fatal("expected sandbox logs route to be mounted")
+	}
+}
+
 func TestSetupMeteringRoutesDoesNotRequireManagerUpstream(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

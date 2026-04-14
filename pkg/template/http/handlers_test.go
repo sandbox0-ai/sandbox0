@@ -673,6 +673,41 @@ func TestUpdateTemplate_RejectsImagePullPolicyForRegularTeam(t *testing.T) {
 	}
 }
 
+func TestCreateTemplate_RejectsUnclaimableNameBudget(t *testing.T) {
+	t.Parallel()
+
+	store := &testTemplateStore{}
+	h := &Handler{Store: store, Logger: zap.NewNop()}
+
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{IsSystem: true}))
+	router.POST("/api/v1/templates", h.CreateTemplate)
+
+	clusterID := strings.Repeat("a", naming.ClusterIDMaxLen+1)
+	body := []byte(`{
+		"template_id":"demo",
+		"spec":{
+			"clusterId":"` + clusterID + `",
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"cpu":"1","memory":"4Gi"}},
+			"pool":{"minIdle":0,"maxIdle":1}
+		}
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "cannot generate claimable sandbox names") {
+		t.Fatalf("expected claimable name budget error, got %s", rec.Body.String())
+	}
+	if store.createCalled {
+		t.Fatalf("expected create not called for unclaimable name budget")
+	}
+}
+
 func TestValidateTemplateSpecForClaims_WildcardPermissionRejected(t *testing.T) {
 	t.Parallel()
 
@@ -695,6 +730,30 @@ func TestValidateTemplateSpecForClaims_WildcardPermissionRejected(t *testing.T) 
 	})
 	if err == nil {
 		t.Fatalf("expected wildcard permission to be rejected")
+	}
+}
+
+func TestValidateTemplateClaimNameBudget_AllowsMaxLengthTemplateID(t *testing.T) {
+	t.Parallel()
+
+	err := validateTemplateClaimNameBudget(naming.ScopeTeam, "team-1", strings.Repeat("a", 255), validTemplateSpec())
+	if err != nil {
+		t.Fatalf("validateTemplateClaimNameBudget: %v", err)
+	}
+}
+
+func TestValidateTemplateClaimNameBudget_RejectsUnclaimableClusterID(t *testing.T) {
+	t.Parallel()
+
+	spec := validTemplateSpec()
+	clusterID := strings.Repeat("a", naming.ClusterIDMaxLen+1)
+	spec.ClusterId = &clusterID
+	err := validateTemplateClaimNameBudget(naming.ScopePublic, "", "demo", spec)
+	if err == nil {
+		t.Fatalf("expected unclaimable naming budget error")
+	}
+	if !strings.Contains(err.Error(), "cannot generate claimable sandbox names") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

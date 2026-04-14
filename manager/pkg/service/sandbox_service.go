@@ -688,6 +688,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		if pod.Annotations == nil {
 			pod.Annotations = make(map[string]string)
 		}
+		pod.Annotations = controller.ClaimedSandboxPodAnnotations(pod.Annotations)
 		pod.Annotations[controller.AnnotationSandboxID] = pod.Name
 		pod.Annotations[controller.AnnotationTeamID] = req.TeamID
 		pod.Annotations[controller.AnnotationUserID] = req.UserID
@@ -778,13 +779,13 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 		return nil, fmt.Errorf("ensure netd MITM CA secret: %w", err)
 	}
 
-	annotations := map[string]string{
+	annotations := controller.ClaimedSandboxPodAnnotations(map[string]string{
 		controller.AnnotationSandboxID: podName,
 		controller.AnnotationTeamID:    req.TeamID,
 		controller.AnnotationUserID:    req.UserID,
 		controller.AnnotationClaimedAt: s.clock.Now().Format(time.RFC3339),
 		controller.AnnotationClaimType: "cold",
-	}
+	})
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      podName,

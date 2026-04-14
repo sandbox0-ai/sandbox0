@@ -34,6 +34,34 @@ func TestReplicasetAndSandboxNames(t *testing.T) {
 	}
 }
 
+func TestSandboxNameForLongTeamTemplateFitsExposureHostLabel(t *testing.T) {
+	templateName := TemplateNameForCluster(ScopeTeam, "team-a", "e2e-fullmode-rc-123456789")
+	sandboxName, err := SandboxName(DefaultClusterID, templateName, "abcde")
+	if err != nil {
+		t.Fatalf("SandboxName: %v", err)
+	}
+	if len(sandboxName) > sandboxNameMaxLen {
+		t.Fatalf("sandbox name too long: %d", len(sandboxName))
+	}
+	if _, err := BuildExposureHostLabel(sandboxName, 65535); err != nil {
+		t.Fatalf("BuildExposureHostLabel: %v", err)
+	}
+}
+
+func TestReplicasetNameFitsSandboxExposureBudget(t *testing.T) {
+	rsName, err := ReplicasetName(DefaultClusterID, strings.Repeat("long-template-", 8))
+	if err != nil {
+		t.Fatalf("ReplicasetName: %v", err)
+	}
+	maxReplicaSetNameForExposure := sandboxNameMaxLen - 1 - podRandSuffixLen
+	if len(rsName) > maxReplicaSetNameForExposure {
+		t.Fatalf("replicaset name too long for exposure-safe pods: %d > %d", len(rsName), maxReplicaSetNameForExposure)
+	}
+	if _, err := BuildExposureHostLabel(rsName+"-abcde", 65535); err != nil {
+		t.Fatalf("BuildExposureHostLabel: %v", err)
+	}
+}
+
 func TestExposureHostLabel(t *testing.T) {
 	sandboxName := "rs-mfwha2dbfzzsayjaomxwg2dbon2gc-zd0b8631-abcde"
 	label, err := BuildExposureHostLabel(sandboxName, 3000)

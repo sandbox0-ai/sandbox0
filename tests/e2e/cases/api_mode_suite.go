@@ -524,12 +524,12 @@ func assertTemplatePoolReadinessGate(env *framework.ScenarioEnv, session *e2euti
 	}).WithTimeout(2 * time.Minute).WithPolling(3 * time.Second).Should(Succeed())
 }
 
-func assertTemplateRolloutClaimFallsBackToColdStart(env *framework.ScenarioEnv, session *e2eutils.Session, templateNamePrefix string) {
+func assertTemplateRolloutClaimFallsBackToColdStart(env *framework.ScenarioEnv, session *e2eutils.Session, _ string) {
 	templates, err := session.ListTemplates(env.TestCtx.Context, GinkgoT())
 	Expect(err).NotTo(HaveOccurred())
 	Expect(templates).NotTo(BeEmpty())
 
-	name := fmt.Sprintf("%s-rc-%d", templateNamePrefix, time.Now().UnixNano()%1_000_000_000)
+	name := fmt.Sprintf("rc-%d", time.Now().UnixNano()%1_000_000_000)
 	templateReq := e2eutils.CloneTemplateForCreate(templates[0], name)
 	Expect(templateReq.Spec.Pool).NotTo(BeNil())
 	Expect(templateReq.Spec.MainContainer).NotTo(BeNil())

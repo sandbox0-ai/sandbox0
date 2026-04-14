@@ -240,6 +240,10 @@ func (h *Handler) CreateTemplate(c *gin.Context) {
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, err.Error())
 		return
 	}
+	if err := validateTemplateClaimNameBudget(scope, teamID, req.TemplateID, req.Spec); err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
 
 	templateID := req.TemplateID
 
@@ -323,6 +327,10 @@ func (h *Handler) UpdateTemplate(c *gin.Context) {
 	}
 	if err := validateTemplateImagesForClaims(req.Spec, claims, h.PrivateRegistryHosts); err != nil {
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, err.Error())
+		return
+	}
+	if err := validateTemplateClaimNameBudget(scope, teamID, templateID, req.Spec); err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
 

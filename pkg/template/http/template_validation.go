@@ -102,6 +102,19 @@ func validateTemplateSpec(spec v1alpha1.SandboxTemplateSpec) error {
 	return nil
 }
 
+func validateTemplateClaimNameBudget(scope, teamID, templateID string, spec v1alpha1.SandboxTemplateSpec) error {
+	clusterTemplateID := naming.TemplateNameForCluster(scope, teamID, templateID)
+	clusterID := naming.ClusterIDOrDefault(spec.ClusterId)
+	sandboxName, err := naming.SandboxName(clusterID, clusterTemplateID, strings.Repeat("a", 5))
+	if err != nil {
+		return fmt.Errorf("template_id cannot generate claimable sandbox names: %w", err)
+	}
+	if _, err := naming.BuildExposureHostLabel(sandboxName, 65535); err != nil {
+		return fmt.Errorf("template_id cannot generate claimable sandbox exposure labels: %w", err)
+	}
+	return nil
+}
+
 func validateWarmProcesses(processes []v1alpha1.WarmProcessSpec) error {
 	for i, proc := range processes {
 		field := fmt.Sprintf("spec.warmProcesses[%d]", i)

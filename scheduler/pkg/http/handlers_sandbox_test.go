@@ -157,6 +157,106 @@ func TestSelectClusterForTemplateUsesHeadroomWhenIdleStatsAreStale(t *testing.T)
 	}
 }
 
+func TestSelectClusterForTemplateUsesHeadroomWhenIdleStatsPredateTemplateSync(t *testing.T) {
+	syncedAt := time.Date(2026, 4, 14, 16, 54, 3, 0, time.UTC)
+	tpl := newRoutingTemplate("tmpl-a")
+	tpl.UpdatedAt = syncedAt.Add(-time.Second)
+	clusterTemplateID := naming.TemplateNameForCluster(tpl.Scope, tpl.TeamID, tpl.TemplateID)
+	clusterAAlloc := newRoutingAllocation("cluster-a", 2, 4)
+	clusterAAlloc.LastSyncedAt = &syncedAt
+	server := newRoutingTestServer(
+		tpl,
+		[]*template.TemplateAllocation{
+			clusterAAlloc,
+			newRoutingAllocation("cluster-b", 2, 4),
+		},
+		[]*template.Cluster{
+			newRoutingCluster("cluster-a", 5),
+			newRoutingCluster("cluster-b", 1),
+		},
+		&fakeRoutingReconciler{
+			templateIdle: map[string]map[string]int32{
+				"cluster-a": {clusterTemplateID: 5},
+			},
+			templateStatsAge: map[string]time.Duration{
+				"cluster-a": time.Second,
+			},
+			templateStatsUpdatedAt: map[string]time.Time{
+				"cluster-a": syncedAt.Add(-time.Millisecond),
+			},
+			clusterSummaries: map[string]*templreconciler.ClusterSummary{
+				"cluster-a": {SandboxNodeCount: 1, TotalNodeCount: 1, TotalPodCount: 9},
+				"cluster-b": {SandboxNodeCount: 3, TotalNodeCount: 3, TotalPodCount: 10},
+			},
+			clusterSummaryAge: map[string]time.Duration{
+				"cluster-a": time.Second,
+				"cluster-b": time.Second,
+			},
+		},
+	)
+
+	selected, _, selectedBy, err := server.selectClusterForTemplate(newRoutingContext(), "tmpl-a", "team-a")
+	if err != nil {
+		t.Fatalf("selectClusterForTemplate() error = %v", err)
+	}
+	if selected == nil || selected.ClusterID != "cluster-b" {
+		t.Fatalf("selected cluster = %v, want cluster-b", clusterID(selected))
+	}
+	if selectedBy != "headroom" {
+		t.Fatalf("selectedBy = %q, want %q", selectedBy, "headroom")
+	}
+}
+
+func TestSelectClusterForTemplateUsesHeadroomWhenTemplateUpdateIsUnsynced(t *testing.T) {
+	syncedAt := time.Date(2026, 4, 14, 16, 54, 3, 0, time.UTC)
+	tpl := newRoutingTemplate("tmpl-a")
+	tpl.UpdatedAt = syncedAt.Add(time.Second)
+	clusterTemplateID := naming.TemplateNameForCluster(tpl.Scope, tpl.TeamID, tpl.TemplateID)
+	clusterAAlloc := newRoutingAllocation("cluster-a", 2, 4)
+	clusterAAlloc.LastSyncedAt = &syncedAt
+	server := newRoutingTestServer(
+		tpl,
+		[]*template.TemplateAllocation{
+			clusterAAlloc,
+			newRoutingAllocation("cluster-b", 2, 4),
+		},
+		[]*template.Cluster{
+			newRoutingCluster("cluster-a", 5),
+			newRoutingCluster("cluster-b", 1),
+		},
+		&fakeRoutingReconciler{
+			templateIdle: map[string]map[string]int32{
+				"cluster-a": {clusterTemplateID: 5},
+			},
+			templateStatsAge: map[string]time.Duration{
+				"cluster-a": time.Second,
+			},
+			templateStatsUpdatedAt: map[string]time.Time{
+				"cluster-a": syncedAt.Add(2 * time.Second),
+			},
+			clusterSummaries: map[string]*templreconciler.ClusterSummary{
+				"cluster-a": {SandboxNodeCount: 1, TotalNodeCount: 1, TotalPodCount: 9},
+				"cluster-b": {SandboxNodeCount: 3, TotalNodeCount: 3, TotalPodCount: 10},
+			},
+			clusterSummaryAge: map[string]time.Duration{
+				"cluster-a": time.Second,
+				"cluster-b": time.Second,
+			},
+		},
+	)
+
+	selected, _, selectedBy, err := server.selectClusterForTemplate(newRoutingContext(), "tmpl-a", "team-a")
+	if err != nil {
+		t.Fatalf("selectClusterForTemplate() error = %v", err)
+	}
+	if selected == nil || selected.ClusterID != "cluster-b" {
+		t.Fatalf("selected cluster = %v, want cluster-b", clusterID(selected))
+	}
+	if selectedBy != "headroom" {
+		t.Fatalf("selectedBy = %q, want %q", selectedBy, "headroom")
+	}
+}
+
 func TestSelectClusterForTemplateFallsBackToWeight(t *testing.T) {
 	tpl := newRoutingTemplate("tmpl-a")
 	server := newRoutingTestServer(
@@ -702,10 +802,11 @@ func (r *fakeRoutingClusterRepo) DeleteCluster(ctx context.Context, clusterID st
 }
 
 type fakeRoutingReconciler struct {
-	templateIdle      map[string]map[string]int32
-	templateStatsAge  map[string]time.Duration
-	clusterSummaries  map[string]*templreconciler.ClusterSummary
-	clusterSummaryAge map[string]time.Duration
+	templateIdle           map[string]map[string]int32
+	templateStatsAge       map[string]time.Duration
+	templateStatsUpdatedAt map[string]time.Time
+	clusterSummaries       map[string]*templreconciler.ClusterSummary
+	clusterSummaryAge      map[string]time.Duration
 }
 
 func (r *fakeRoutingReconciler) TriggerReconcile(ctx context.Context) {}
@@ -725,6 +826,14 @@ func (r *fakeRoutingReconciler) GetTemplateIdleCount(clusterID, templateID strin
 func (r *fakeRoutingReconciler) GetTemplateStatsAge(clusterID string) (time.Duration, bool) {
 	age, ok := r.templateStatsAge[clusterID]
 	return age, ok
+}
+
+func (r *fakeRoutingReconciler) GetTemplateStatsUpdatedAt(clusterID string) (time.Time, bool) {
+	if r.templateStatsUpdatedAt == nil {
+		return time.Time{}, false
+	}
+	updatedAt, ok := r.templateStatsUpdatedAt[clusterID]
+	return updatedAt, ok
 }
 
 func (r *fakeRoutingReconciler) GetClusterSummary(clusterID string) (*templreconciler.ClusterSummary, bool) {

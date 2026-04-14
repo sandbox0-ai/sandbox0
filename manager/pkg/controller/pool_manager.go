@@ -104,7 +104,7 @@ func (pm *PoolManager) ReconcilePool(ctx context.Context, template *v1alpha1.San
 		zap.Int32("minIdle", template.Spec.Pool.MinIdle),
 	)
 
-	desiredTemplateHash, err := templateSpecHash(template)
+	desiredTemplateHash, err := TemplateSpecHash(template)
 	if err != nil {
 		return fmt.Errorf("compute template hash: %w", err)
 	}
@@ -174,7 +174,7 @@ func (pm *PoolManager) getOrCreateReplicaSet(ctx context.Context, template *v1al
 
 	// Create new ReplicaSet
 	pm.logger.Info("Creating new ReplicaSet", zap.String("name", rsName))
-	hash, err := templateSpecHash(template)
+	hash, err := TemplateSpecHash(template)
 	if err != nil {
 		return nil, fmt.Errorf("compute template hash: %w", err)
 	}
@@ -341,7 +341,8 @@ func (pm *PoolManager) deleteStaleIdlePodWithRetry(ctx context.Context, namespac
 	return false, nil
 }
 
-func templateSpecHash(template *v1alpha1.SandboxTemplate) (string, error) {
+// TemplateSpecHash returns the pod spec hash used to identify current idle pods.
+func TemplateSpecHash(template *v1alpha1.SandboxTemplate) (string, error) {
 	podSpec := v1alpha1.BuildPodSpec(template)
 	payload := struct {
 		PodSpec corev1.PodSpec `json:"podSpec"`

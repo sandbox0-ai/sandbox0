@@ -55,6 +55,7 @@ type Reconciler interface {
 	TriggerReconcile(ctx context.Context)
 	GetTemplateIdleCount(clusterID, templateID string) (int32, bool)
 	GetTemplateStatsAge(clusterID string) (time.Duration, bool)
+	GetTemplateStatsUpdatedAt(clusterID string) (time.Time, bool)
 	GetClusterSummary(clusterID string) (*templreconciler.ClusterSummary, bool)
 	GetClusterSummaryAge(clusterID string) (time.Duration, bool)
 }

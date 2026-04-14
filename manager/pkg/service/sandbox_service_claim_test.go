@@ -23,9 +23,12 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	corelisters "k8s.io/client-go/listers/core/v1"
+	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 )
 
@@ -93,6 +96,93 @@ func TestClaimIdlePodClaimsReadyPod(t *testing.T) {
 	}
 	if got := pod.Annotations[controller.AnnotationClusterAutoscalerSafeToEvict]; got != "false" {
 		t.Fatalf("safe-to-evict annotation = %q, want false", got)
+	}
+}
+
+func TestClaimIdlePodRequiresCurrentTemplateHash(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+	}
+	readyPod := newClaimTestPod("ns-a", "idle-ready", "template-a", true)
+	readyPod.Annotations[controller.AnnotationTemplateSpecHash] = "stale"
+
+	client := fake.NewSimpleClientset(readyPod.DeepCopy())
+	svc := &SandboxService{
+		k8sClient: client,
+		podLister: newClaimTestPodLister(t, readyPod),
+		clock:     systemTime{},
+		logger:    zap.NewNop(),
+	}
+
+	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{TeamID: "team-a", UserID: "user-a"})
+	if err != nil {
+		t.Fatalf("claimIdlePod() error = %v", err)
+	}
+	if pod != nil {
+		t.Fatalf("claimIdlePod() = %s, want nil for stale template hash", pod.Name)
+	}
+}
+
+func TestClaimIdlePodSkipsDeletingPod(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+	}
+	readyPod := newClaimTestPod("ns-a", "idle-ready", "template-a", true)
+	deletedAt := metav1.NewTime(time.Now().UTC())
+	readyPod.DeletionTimestamp = &deletedAt
+
+	client := fake.NewSimpleClientset(readyPod.DeepCopy())
+	svc := &SandboxService{
+		k8sClient: client,
+		podLister: newClaimTestPodLister(t, readyPod),
+		clock:     systemTime{},
+		logger:    zap.NewNop(),
+	}
+
+	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{TeamID: "team-a", UserID: "user-a"})
+	if err != nil {
+		t.Fatalf("claimIdlePod() error = %v", err)
+	}
+	if pod != nil {
+		t.Fatalf("claimIdlePod() = %s, want nil for deleting pod", pod.Name)
+	}
+}
+
+func TestClaimIdlePodFallsBackWhenPodStartsDeletingDuringClaim(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+	}
+	readyPod := newClaimTestPod("ns-a", "idle-ready", "template-a", true)
+
+	client := fake.NewSimpleClientset(readyPod.DeepCopy())
+	client.PrependReactor("update", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, &apierrors.StatusError{ErrStatus: metav1.Status{
+			Reason:  metav1.StatusReasonInvalid,
+			Message: `Pod "idle-ready" is invalid: metadata.finalizers: Forbidden: no new finalizers can be added if the object is being deleted, found new finalizers []string{"sandbox0.ai/sandbox-cleanup"}`,
+		}}
+	})
+	svc := &SandboxService{
+		k8sClient: client,
+		podLister: newClaimTestPodLister(t, readyPod),
+		clock:     systemTime{},
+		logger:    zap.NewNop(),
+	}
+
+	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{TeamID: "team-a", UserID: "user-a"})
+	if err != nil {
+		t.Fatalf("claimIdlePod() error = %v", err)
+	}
+	if pod != nil {
+		t.Fatalf("claimIdlePod() = %s, want nil to trigger cold fallback", pod.Name)
 	}
 }
 
@@ -631,6 +721,9 @@ func newClaimTestPod(namespace, name, templateID string, ready bool) *corev1.Pod
 				controller.LabelTemplateID: templateID,
 				controller.LabelPoolType:   controller.PoolTypeIdle,
 			},
+			Annotations: map[string]string{
+				controller.AnnotationTemplateSpecHash: claimTestTemplateHash(templateID),
+			},
 			ResourceVersion: "1",
 		},
 		Status: corev1.PodStatus{
@@ -644,6 +737,13 @@ func newClaimTestPod(namespace, name, templateID string, ready bool) *corev1.Pod
 			},
 		},
 	}
+}
+
+func claimTestTemplateHash(templateID string) string {
+	hash, _ := controller.TemplateSpecHash(&v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: templateID},
+	})
+	return hash
 }
 
 func newClaimReadyTestPod(namespace, name, templateID string) *corev1.Pod {

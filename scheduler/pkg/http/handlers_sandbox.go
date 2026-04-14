@@ -216,7 +216,7 @@ func (s *Server) selectClusterForTemplate(c *gin.Context, templateID, teamID str
 	clusterTemplateID := naming.TemplateNameForCluster(tpl.Scope, tpl.TeamID, tpl.TemplateID)
 	maxAge := s.cfg.ReconcileInterval.Duration * 2
 
-	selected, selectedBy := s.selectClusterByIdleWithAllocations(allocations, clusterMap, clusterTemplateID, maxAge)
+	selected, selectedBy := s.selectClusterByIdleWithAllocations(allocations, clusterMap, tpl, clusterTemplateID, maxAge)
 	if selected == nil {
 		selected = s.selectClusterByHeadroomWithAllocations(allocations, clusterMap, maxAge)
 		if selected != nil {
@@ -257,7 +257,7 @@ func (s *Server) selectClusterForTemplate(c *gin.Context, templateID, teamID str
 	return selected, tpl, selectedBy, nil
 }
 
-func (s *Server) selectClusterByIdleWithAllocations(allocations []*template.TemplateAllocation, clusterMap map[string]*template.Cluster, clusterTemplateID string, maxAge time.Duration) (*template.Cluster, string) {
+func (s *Server) selectClusterByIdleWithAllocations(allocations []*template.TemplateAllocation, clusterMap map[string]*template.Cluster, tpl *template.Template, clusterTemplateID string, maxAge time.Duration) (*template.Cluster, string) {
 	var selected *template.Cluster
 	var selectedAlloc *template.TemplateAllocation
 	var bestIdle int32 = -1
@@ -272,6 +272,16 @@ func (s *Server) selectClusterByIdleWithAllocations(allocations []*template.Temp
 		s.recordClusterSummaryAge(cluster.ClusterID)
 		if !ok || age > maxAge {
 			continue
+		}
+		cutoff, ok := idleStatsFreshAfter(tpl, alloc)
+		if !ok {
+			continue
+		}
+		if !cutoff.IsZero() {
+			statsUpdatedAt, ok := s.reconciler.GetTemplateStatsUpdatedAt(cluster.ClusterID)
+			if !ok || statsUpdatedAt.Before(cutoff) {
+				continue
+			}
 		}
 
 		idleCount, ok := s.reconciler.GetTemplateIdleCount(cluster.ClusterID, clusterTemplateID)
@@ -294,6 +304,22 @@ func (s *Server) selectClusterByIdleWithAllocations(allocations []*template.Temp
 		return nil, ""
 	}
 	return selected, "idle"
+}
+
+func idleStatsFreshAfter(tpl *template.Template, alloc *template.TemplateAllocation) (time.Time, bool) {
+	if tpl == nil {
+		return time.Time{}, true
+	}
+	if tpl.UpdatedAt.IsZero() {
+		if alloc != nil && alloc.LastSyncedAt != nil {
+			return *alloc.LastSyncedAt, true
+		}
+		return time.Time{}, true
+	}
+	if alloc == nil || alloc.LastSyncedAt == nil || alloc.LastSyncedAt.Before(tpl.UpdatedAt) {
+		return time.Time{}, false
+	}
+	return *alloc.LastSyncedAt, true
 }
 
 func (s *Server) selectClusterByHeadroomWithAllocations(allocations []*template.TemplateAllocation, clusterMap map[string]*template.Cluster, maxAge time.Duration) *template.Cluster {

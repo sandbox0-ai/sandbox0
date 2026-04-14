@@ -42,6 +42,35 @@ const (
 	templateNamespaceBaselineProcdPort       = 49983
 )
 
+type e2ePodList struct {
+	Items []e2ePod `json:"items"`
+}
+
+type e2ePod struct {
+	Metadata e2ePodMetadata `json:"metadata"`
+	Status   e2ePodStatus   `json:"status"`
+}
+
+type e2ePodMetadata struct {
+	Name              string            `json:"name"`
+	Annotations       map[string]string `json:"annotations"`
+	DeletionTimestamp *metav1.Time      `json:"deletionTimestamp,omitempty"`
+}
+
+type e2ePodStatus struct {
+	Conditions []e2ePodCondition `json:"conditions"`
+}
+
+type e2ePodCondition struct {
+	Type   string `json:"type"`
+	Status string `json:"status"`
+}
+
+type idlePoolPodInfo struct {
+	Name             string
+	TemplateSpecHash string
+}
+
 func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiModeSuiteOptions) {
 	Describe(opts.describe, Ordered, func() {
 		var (
@@ -103,6 +132,10 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 			if opts.includePoolReadinessGate {
 				It("gates pooled capacity on sandbox0-managed pod readiness", func() {
 					assertTemplatePoolReadinessGate(env, session, opts.templateNamePrefix)
+				})
+
+				It("falls back to cold start while stale idle pods drain during template rollout", func() {
+					assertTemplateRolloutClaimFallsBackToColdStart(env, session, opts.templateNamePrefix)
 				})
 			}
 		})
@@ -489,6 +522,169 @@ func assertTemplatePoolReadinessGate(env *framework.ScenarioEnv, session *e2euti
 		}
 		return nil
 	}).WithTimeout(2 * time.Minute).WithPolling(3 * time.Second).Should(Succeed())
+}
+
+func assertTemplateRolloutClaimFallsBackToColdStart(env *framework.ScenarioEnv, session *e2eutils.Session, templateNamePrefix string) {
+	templates, err := session.ListTemplates(env.TestCtx.Context, GinkgoT())
+	Expect(err).NotTo(HaveOccurred())
+	Expect(templates).NotTo(BeEmpty())
+
+	name := fmt.Sprintf("%s-rollout-cold-%d", templateNamePrefix, time.Now().UnixNano())
+	templateReq := e2eutils.CloneTemplateForCreate(templates[0], name)
+	Expect(templateReq.Spec.Pool).NotTo(BeNil())
+	Expect(templateReq.Spec.MainContainer).NotTo(BeNil())
+	templateReq.Spec.MainContainer.Resources = apispec.ResourceQuota{
+		Cpu:    ptr("500m"),
+		Memory: ptr("2Gi"),
+	}
+	templateReq.Spec.Pool.MinIdle = 1
+	templateReq.Spec.Pool.MaxIdle = 1
+	templateReq.Spec.WarmProcesses = ptr(rolloutClaimWarmProcesses("before"))
+
+	created, err := session.CreateTemplate(env.TestCtx.Context, GinkgoT(), templateReq)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(created).NotTo(BeNil())
+	defer func() {
+		Expect(session.DeleteTemplate(env.TestCtx.Context, GinkgoT(), name)).To(Succeed())
+	}()
+
+	templateNamespace, err := naming.TemplateNamespaceForTeam(expectStringPtr(created.TeamId, "team id"))
+	Expect(err).NotTo(HaveOccurred())
+	templateNameForCluster := naming.TemplateNameForCluster(naming.ScopeTeam, expectStringPtr(created.TeamId, "team id"), name)
+	staleIdlePod := waitForReadyIdlePoolPodEventually(env, templateNamespace, templateNameForCluster)
+	Expect(staleIdlePod.TemplateSpecHash).NotTo(BeEmpty())
+
+	updated := *created
+	Expect(updated.Spec.Pool).NotTo(BeNil())
+	updated.Spec.Pool.MinIdle = 0
+	updated.Spec.Pool.MaxIdle = 0
+	updated.Spec.WarmProcesses = ptr(rolloutClaimWarmProcesses("after"))
+	updatedResp, err := session.UpdateTemplate(env.TestCtx.Context, GinkgoT(), name, apispec.TemplateUpdateRequest{
+		Spec: updated.Spec,
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(updatedResp).NotTo(BeNil())
+
+	waitForPodDeletingOrGoneEventually(env, templateNamespace, staleIdlePod.Name)
+
+	claimResp, err := session.ClaimSandbox(env.TestCtx.Context, GinkgoT(), name)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(claimResp).NotTo(BeNil())
+	defer func() {
+		Expect(session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), claimResp.SandboxId)).To(Succeed())
+	}()
+
+	sandbox := waitForSandboxPodReadyEventually(env, session, claimResp.SandboxId, templateNamespace)
+	Expect(sandbox.PodName).NotTo(Equal(staleIdlePod.Name))
+	Expect(podAnnotationEventually(env, templateNamespace, sandbox.PodName, "sandbox0.ai/claim-type")).To(Equal("cold"))
+}
+
+func rolloutClaimWarmProcesses(marker string) []apispec.WarmProcessSpec {
+	return []apispec.WarmProcessSpec{{
+		Alias:   ptr("rollout-cold-start"),
+		Type:    apispec.WarmProcessSpecTypeCmd,
+		Command: ptr([]string{"/bin/sh", "-lc", "touch /tmp/rollout-warm; sleep 3600"}),
+		EnvVars: ptr(map[string]string{"E2E_ROLLOUT_MARKER": marker}),
+	}}
+}
+
+func waitForReadyIdlePoolPodEventually(env *framework.ScenarioEnv, namespace, templateNameForCluster string) idlePoolPodInfo {
+	var selected idlePoolPodInfo
+	Eventually(func() error {
+		output, err := framework.KubectlOutput(
+			env.TestCtx.Context,
+			env.Config.Kubeconfig,
+			"get", "pods",
+			"--namespace", namespace,
+			"--selector", fmt.Sprintf("sandbox0.ai/template-id=%s,sandbox0.ai/pool-type=idle", templateNameForCluster),
+			"-o", "json",
+		)
+		if err != nil {
+			return err
+		}
+
+		var pods e2ePodList
+		if err := json.Unmarshal([]byte(output), &pods); err != nil {
+			return err
+		}
+		for _, pod := range pods.Items {
+			if pod.Metadata.DeletionTimestamp != nil || !podHasCondition(pod, "sandbox0.ai/ready", "True") {
+				continue
+			}
+			templateHash := pod.Metadata.Annotations["sandbox0.ai/template-spec-hash"]
+			if strings.TrimSpace(templateHash) == "" {
+				return fmt.Errorf("ready idle pod %s is missing template spec hash", pod.Metadata.Name)
+			}
+			selected = idlePoolPodInfo{Name: pod.Metadata.Name, TemplateSpecHash: templateHash}
+			return nil
+		}
+		return fmt.Errorf("ready idle pod for template %s not found", templateNameForCluster)
+	}).WithTimeout(2 * time.Minute).WithPolling(3 * time.Second).Should(Succeed())
+	return selected
+}
+
+func waitForPodDeletingOrGoneEventually(env *framework.ScenarioEnv, namespace, podName string) {
+	Eventually(func() error {
+		output, err := framework.KubectlOutput(
+			env.TestCtx.Context,
+			env.Config.Kubeconfig,
+			"get", "pod", podName,
+			"--namespace", namespace,
+			"--ignore-not-found=true",
+			"-o", "json",
+		)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(output) == "" {
+			return nil
+		}
+
+		var pod e2ePod
+		if err := json.Unmarshal([]byte(output), &pod); err != nil {
+			return err
+		}
+		if pod.Metadata.DeletionTimestamp == nil {
+			return fmt.Errorf("pod %s is not deleting yet", podName)
+		}
+		return nil
+	}).WithTimeout(2 * time.Minute).WithPolling(500 * time.Millisecond).Should(Succeed())
+}
+
+func podAnnotationEventually(env *framework.ScenarioEnv, namespace, podName, annotation string) string {
+	var value string
+	Eventually(func() error {
+		output, err := framework.KubectlOutput(
+			env.TestCtx.Context,
+			env.Config.Kubeconfig,
+			"get", "pod", podName,
+			"--namespace", namespace,
+			"-o", "json",
+		)
+		if err != nil {
+			return err
+		}
+
+		var pod e2ePod
+		if err := json.Unmarshal([]byte(output), &pod); err != nil {
+			return err
+		}
+		value = strings.TrimSpace(pod.Metadata.Annotations[annotation])
+		if value == "" {
+			return fmt.Errorf("pod %s annotation %s is not set", podName, annotation)
+		}
+		return nil
+	}).WithTimeout(30 * time.Second).WithPolling(time.Second).Should(Succeed())
+	return value
+}
+
+func podHasCondition(pod e2ePod, conditionType, status string) bool {
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == conditionType && condition.Status == status {
+			return true
+		}
+	}
+	return false
 }
 
 func assertTemplateNamespaceIngressBaselineLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session, templateNamePrefix string) {

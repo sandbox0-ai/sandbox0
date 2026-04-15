@@ -179,7 +179,7 @@ func NewSandboxService(
 		config.CtldPort = 8095
 	}
 	if config.CtldClientTimeout == 0 {
-		config.CtldClientTimeout = 5 * time.Second
+		config.CtldClientTimeout = defaultCtldClientTimeout
 	}
 	if networkProvider == nil {
 		networkProvider = network.NewNoopProvider()

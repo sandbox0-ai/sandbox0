@@ -125,7 +125,7 @@ type ManagerConfig struct {
 	// +kubebuilder:default="30s"
 	ProcdClientTimeout metav1.Duration `yaml:"procd_client_timeout" json:"procdClientTimeout"`
 	// +optional
-	// +kubebuilder:default="5s"
+	// +kubebuilder:default="15s"
 	CtldClientTimeout metav1.Duration `yaml:"ctld_client_timeout" json:"-"`
 	// +optional
 	// +kubebuilder:default="6s"

@@ -14,6 +14,8 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 )
 
+const defaultCtldClientTimeout = 15 * time.Second
+
 // CtldClientConfig holds configuration for the node-local ctld client.
 type CtldClientConfig struct {
 	Timeout time.Duration
@@ -28,7 +30,7 @@ type CtldClient struct {
 func NewCtldClient(config CtldClientConfig) *CtldClient {
 	timeout := config.Timeout
 	if timeout == 0 {
-		timeout = 5 * time.Second
+		timeout = defaultCtldClientTimeout
 	}
 	return &CtldClient{httpClient: &http.Client{Timeout: timeout}}
 }
@@ -36,7 +38,7 @@ func NewCtldClient(config CtldClientConfig) *CtldClient {
 // NewCtldClientWithHTTPClient creates a ctld client with a custom HTTP client.
 func NewCtldClientWithHTTPClient(httpClient *http.Client) *CtldClient {
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 5 * time.Second}
+		httpClient = &http.Client{Timeout: defaultCtldClientTimeout}
 	}
 	return &CtldClient{httpClient: httpClient}
 }

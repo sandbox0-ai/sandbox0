@@ -1,0 +1,780 @@
+package service
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math/rand"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"go.uber.org/zap"
+	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	utilrand "k8s.io/apimachinery/pkg/util/rand"
+	"k8s.io/client-go/util/retry"
+)
+
+// ClaimRequest represents a sandbox claim request
+type ClaimRequest struct {
+	TeamID             string
+	UserID             string
+	Template           string         `json:"template"`
+	Config             *SandboxConfig `json:"config,omitempty"`
+	Mounts             []ClaimMount   `json:"mounts,omitempty"`
+	WaitForMounts      bool           `json:"wait_for_mounts,omitempty"`
+	MountWaitTimeoutMs *int32         `json:"mount_wait_timeout_ms,omitempty"`
+}
+
+type ClaimMount struct {
+	SandboxVolumeID string             `json:"sandboxvolume_id"`
+	MountPoint      string             `json:"mount_point"`
+	VolumeConfig    *MountVolumeConfig `json:"volume_config,omitempty"`
+}
+
+type MountVolumeConfig struct {
+	CacheSize  string `json:"cache_size,omitempty"`
+	Prefetch   *int32 `json:"prefetch,omitempty"`
+	BufferSize string `json:"buffer_size,omitempty"`
+	Writeback  *bool  `json:"writeback,omitempty"`
+}
+
+type BootstrapMountStatus struct {
+	SandboxVolumeID     string `json:"sandboxvolume_id"`
+	MountPoint          string `json:"mount_point"`
+	State               string `json:"state"`
+	MountedAt           string `json:"mounted_at,omitempty"`
+	MountedDurationSecs int64  `json:"mounted_duration_sec,omitempty"`
+	MountSessionID      string `json:"mount_session_id,omitempty"`
+	ErrorCode           string `json:"error_code,omitempty"`
+	ErrorMessage        string `json:"error_message,omitempty"`
+}
+
+// SandboxConfig represents sandbox configuration
+type SandboxConfig struct {
+	EnvVars      map[string]string              `json:"env_vars,omitempty"`
+	TTL          *int32                         `json:"ttl,omitempty"`      // Time-to-live in seconds (0 disables)
+	HardTTL      *int32                         `json:"hard_ttl,omitempty"` // Hard time-to-live in seconds (0 disables)
+	Network      *v1alpha1.SandboxNetworkPolicy `json:"network,omitempty"`
+	Webhook      *WebhookConfig                 `json:"webhook,omitempty"`
+	AutoResume   *bool                          `json:"auto_resume,omitempty"`
+	ExposedPorts []ExposedPortConfig            `json:"exposed_ports,omitempty"`
+}
+
+// SandboxUpdateConfig represents sandbox configuration fields that can be updated at runtime.
+// Unlike SandboxConfig, env_vars and webhook are excluded as they only affect new processes
+// or require restart to take effect.
+type SandboxUpdateConfig struct {
+	TTL          *int32                         `json:"ttl,omitempty"`
+	HardTTL      *int32                         `json:"hard_ttl,omitempty"`
+	Network      *v1alpha1.SandboxNetworkPolicy `json:"network,omitempty"`
+	AutoResume   *bool                          `json:"auto_resume,omitempty"`
+	ExposedPorts []ExposedPortConfig            `json:"exposed_ports,omitempty"`
+}
+
+type ExposedPortConfig struct {
+	Port   int  `json:"port"`
+	Resume bool `json:"resume"`
+}
+
+func int32Ptr(v int32) *int32 {
+	return &v
+}
+
+func cloneSandboxConfig(cfg *SandboxConfig) *SandboxConfig {
+	if cfg == nil {
+		return nil
+	}
+	cloned := *cfg
+	if cloned.Network != nil {
+		cloned.Network = sanitizedNetworkPolicyForPersistence(cloned.Network)
+	}
+	return &cloned
+}
+
+func (s *SandboxService) claimConfigForPersistence(cfg *SandboxConfig) *SandboxConfig {
+	persisted := cloneSandboxConfig(cfg)
+	if persisted == nil {
+		if s.config.DefaultTTL <= 0 {
+			return nil
+		}
+		persisted = &SandboxConfig{}
+	}
+	if persisted.TTL == nil && s.config.DefaultTTL > 0 {
+		persisted.TTL = int32Ptr(int32(s.config.DefaultTTL.Seconds()))
+	}
+	return persisted
+}
+
+func setExpirationAnnotation(annotations map[string]string, now time.Time, ttl *int32) {
+	if annotations == nil {
+		return
+	}
+	if ttl == nil || *ttl <= 0 {
+		delete(annotations, controller.AnnotationExpiresAt)
+		return
+	}
+	expiresAt := now.Add(time.Duration(*ttl) * time.Second)
+	annotations[controller.AnnotationExpiresAt] = expiresAt.Format(time.RFC3339)
+}
+
+func setHardExpirationAnnotation(annotations map[string]string, now time.Time, hardTTL *int32) {
+	if annotations == nil {
+		return
+	}
+	if hardTTL == nil || *hardTTL <= 0 {
+		delete(annotations, controller.AnnotationHardExpiresAt)
+		return
+	}
+	hardExpiresAt := now.Add(time.Duration(*hardTTL) * time.Second)
+	annotations[controller.AnnotationHardExpiresAt] = hardExpiresAt.Format(time.RFC3339)
+}
+
+func validateClaimMounts(req *ClaimRequest) error {
+	if req == nil {
+		return nil
+	}
+	if req.MountWaitTimeoutMs != nil && *req.MountWaitTimeoutMs <= 0 {
+		return fmt.Errorf("%w: mount_wait_timeout_ms must be greater than zero", ErrInvalidClaimRequest)
+	}
+	normalized, err := normalizeClaimMounts(req.Mounts)
+	if err != nil {
+		return err
+	}
+	req.Mounts = normalized
+	return nil
+}
+
+func normalizeClaimMounts(mounts []ClaimMount) ([]ClaimMount, error) {
+	if len(mounts) == 0 {
+		return nil, nil
+	}
+	normalized := append([]ClaimMount(nil), mounts...)
+	seenVolumes := make(map[string]struct{}, len(normalized))
+	seenMountPoints := make(map[string]string, len(normalized))
+	for i := range normalized {
+		mount := &normalized[i]
+		mount.SandboxVolumeID = strings.TrimSpace(mount.SandboxVolumeID)
+		if mount.SandboxVolumeID == "" {
+			return nil, fmt.Errorf("%w: mounts[%d].sandboxvolume_id is required", ErrInvalidClaimRequest, i)
+		}
+		cleanMountPoint := filepath.Clean(strings.TrimSpace(mount.MountPoint))
+		if !filepath.IsAbs(cleanMountPoint) || cleanMountPoint == string(filepath.Separator) || strings.Contains(cleanMountPoint, "..") {
+			return nil, fmt.Errorf("%w: mounts[%d].mount_point is invalid", ErrInvalidClaimRequest, i)
+		}
+		if _, exists := seenVolumes[mount.SandboxVolumeID]; exists {
+			return nil, fmt.Errorf("%w: duplicate sandboxvolume_id %q in claim mounts", ErrInvalidClaimRequest, mount.SandboxVolumeID)
+		}
+		if existing, exists := seenMountPoints[cleanMountPoint]; exists && existing != mount.SandboxVolumeID {
+			return nil, fmt.Errorf("%w: duplicate mount_point %q in claim mounts", ErrInvalidClaimRequest, cleanMountPoint)
+		}
+		mount.MountPoint = cleanMountPoint
+		seenVolumes[mount.SandboxVolumeID] = struct{}{}
+		seenMountPoints[cleanMountPoint] = mount.SandboxVolumeID
+	}
+	return normalized, nil
+}
+
+func claimMountWaitTimeout(req *ClaimRequest) time.Duration {
+	if req == nil || !req.WaitForMounts {
+		return 0
+	}
+	if req.MountWaitTimeoutMs != nil && *req.MountWaitTimeoutMs > 0 {
+		return time.Duration(*req.MountWaitTimeoutMs) * time.Millisecond
+	}
+	return 30 * time.Second
+}
+
+func toInitializeMountRequests(in []ClaimMount) []InitializeMountRequest {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]InitializeMountRequest, len(in))
+	for i := range in {
+		out[i] = InitializeMountRequest(in[i])
+	}
+	return out
+}
+
+func toBootstrapMountStatuses(in []BootstrapMountStatus) []BootstrapMountStatus {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]BootstrapMountStatus, 0, len(in))
+	out = append(out, in...)
+	return out
+}
+
+// WebhookConfig represents outbound webhook configuration.
+type WebhookConfig struct {
+	URL      string `json:"url"`
+	Secret   string `json:"secret,omitempty"`
+	WatchDir string `json:"watch_dir,omitempty"`
+}
+
+// ClaimResponse represents a sandbox claim response
+type ClaimResponse struct {
+	SandboxID       string                 `json:"sandbox_id"`
+	Status          string                 `json:"status"`
+	ProcdAddress    string                 `json:"procd_address"`
+	PodName         string                 `json:"pod_name"`
+	Template        string                 `json:"template"`
+	ClusterId       *string                `json:"cluster_id,omitempty"`
+	BootstrapMounts []BootstrapMountStatus `json:"bootstrap_mounts,omitempty"`
+}
+
+// ClaimSandbox claims a sandbox from the idle pool or creates a new one
+func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*ClaimResponse, error) {
+	start := time.Now()
+	metrics := s.metrics
+	canonicalTemplateID, err := naming.CanonicalTemplateID(req.Template)
+	if err != nil {
+		return nil, err
+	}
+	req.Template = canonicalTemplateID
+	if err := validateClaimMounts(req); err != nil {
+		return nil, err
+	}
+	s.logger.Info("Claiming sandbox",
+		zap.String("template", req.Template),
+		zap.String("teamID", req.TeamID),
+	)
+
+	// Resolve tenant template name:
+	// prefer team-scoped template, fall back to public, and always enforce ownership checks.
+	resolvedName := req.Template
+	var template *v1alpha1.SandboxTemplate
+
+	if req.TeamID != "" {
+		privateName := naming.TemplateNameForCluster(naming.ScopeTeam, req.TeamID, req.Template)
+		privateNamespace, nsErr := naming.TemplateNamespaceForTeam(req.TeamID)
+		if nsErr != nil {
+			return nil, fmt.Errorf("resolve template namespace for %s: %w", privateName, nsErr)
+		}
+		t, getErr := s.templateLister.Get(privateNamespace, privateName)
+		if getErr == nil {
+			template = t
+			resolvedName = privateName
+		}
+	}
+
+	if template == nil {
+		publicNamespace, nsErr := naming.TemplateNamespaceForBuiltin(req.Template)
+		if nsErr != nil {
+			return nil, fmt.Errorf("resolve template namespace for %s: %w", req.Template, nsErr)
+		}
+		template, err = s.templateLister.Get(publicNamespace, req.Template)
+		if err != nil {
+			if k8serrors.IsNotFound(err) {
+				return nil, fmt.Errorf("template %s not found in namespace %s", req.Template, publicNamespace)
+			}
+			return nil, fmt.Errorf("get template: %w", err)
+		}
+	}
+
+	// Enforce tenant isolation (best-effort based on scheduler-projected metadata).
+	if template.Labels != nil && template.Labels["sandbox0.ai/template-scope"] == naming.ScopeTeam {
+		teamID := ""
+		if template.Annotations != nil {
+			teamID = template.Annotations["sandbox0.ai/template-team-id"]
+		}
+		if teamID != "" && teamID != req.TeamID {
+			return nil, fmt.Errorf("forbidden: template belongs to a different team")
+		}
+	}
+
+	_ = resolvedName // reserved for audit/debugging (name used is template.ObjectMeta.Name)
+
+	// Try to claim an idle pod first
+	pod, err := s.claimIdlePod(ctx, template, req)
+	if err != nil {
+		if metrics != nil {
+			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+		}
+		return nil, fmt.Errorf("claim idle pod: %w", err)
+	}
+	claimType := "hot"
+
+	// If no idle pod available, create a new one (cold start)
+	if pod == nil {
+		claimType = "cold"
+		s.logger.Info("No idle pod available, creating new pod",
+			zap.String("template", req.Template),
+		)
+
+		// Trigger async scale-up to replenish the idle pool
+		// This runs in a goroutine to not block the cold claim response
+		if s.autoScaler != nil {
+			go func() {
+				scaleCtx := context.Background()
+				scaleDecision, scaleErr := s.autoScaler.OnColdClaim(scaleCtx, template)
+				if scaleErr != nil {
+					s.logger.Warn("Auto scale failed during cold claim",
+						zap.String("template", req.Template),
+						zap.Error(scaleErr),
+					)
+				} else if scaleDecision != nil && scaleDecision.ShouldScale {
+					s.logger.Info("Auto scale triggered",
+						zap.String("template", req.Template),
+						zap.Int32("delta", scaleDecision.Delta),
+						zap.String("reason", scaleDecision.Reason),
+					)
+				}
+			}()
+		}
+
+		pod, err = s.createNewPod(ctx, template, req)
+		if err != nil {
+			if metrics != nil {
+				metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+			}
+			return nil, fmt.Errorf("create new pod: %w", err)
+		}
+	}
+
+	// Note: Network policies are stored in pod annotations.
+	// They are set in claimIdlePod() and createNewPod() methods. Hot claims have
+	// already selected a Kubernetes-ready idle pod; cold claims use the faster
+	// claim-ready path below and let Kubernetes PodReady catch up asynchronously.
+	if claimType == "cold" {
+		readyPod, err := s.waitForPodClaimReady(ctx, pod.Namespace, pod.Name)
+		if err != nil {
+			s.requestSandboxDeletionAfterClaimFailure(pod, "claim readiness failed")
+			if metrics != nil {
+				metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+			}
+			return nil, fmt.Errorf("wait for pod claim readiness: %w", err)
+		}
+		pod = readyPod
+		s.refreshSandboxProbeConditionsAsync(pod)
+	}
+
+	procdAddress, err := s.prodAddress(ctx, pod)
+	if err != nil {
+		s.requestSandboxDeletionAfterClaimFailure(pod, "procd address resolution failed")
+		if metrics != nil {
+			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+		}
+		return nil, fmt.Errorf("get procd address: %w", err)
+	}
+	initResp, err := s.initializeProcd(ctx, pod, req, procdAddress)
+	if err != nil {
+		s.requestSandboxDeletionAfterClaimFailure(pod, "procd initialization failed")
+		if metrics != nil {
+			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+		}
+		return nil, fmt.Errorf("initialize procd: %w", err)
+	}
+
+	if metrics != nil {
+		metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "success").Inc()
+		metrics.SandboxClaimDuration.WithLabelValues(req.Template, claimType).Observe(time.Since(start).Seconds())
+	}
+
+	return &ClaimResponse{
+		SandboxID:       pod.Name,
+		Status:          "starting",
+		ProcdAddress:    procdAddress,
+		PodName:         pod.Name,
+		Template:        req.Template,
+		ClusterId:       template.Spec.ClusterId,
+		BootstrapMounts: toBootstrapMountStatuses(initResp.BootstrapMounts),
+	}, nil
+}
+
+// claimIdlePod claims an idle pod from the pool
+func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.SandboxTemplate, req *ClaimRequest) (*corev1.Pod, error) {
+	var claimedPod *corev1.Pod
+	desiredTemplateHash, err := controller.TemplateSpecHash(template)
+	if err != nil {
+		return nil, fmt.Errorf("compute template hash: %w", err)
+	}
+	err = retry.OnError(claimIdlePodBackoff, k8serrors.IsConflict, func() error {
+		// Get all idle pods for this template
+		pods, listErr := s.podLister.Pods(template.Namespace).List(labels.SelectorFromSet(map[string]string{
+			controller.LabelTemplateID: template.Name,
+			controller.LabelPoolType:   controller.PoolTypeIdle,
+		}))
+		if listErr != nil {
+			return listErr
+		}
+
+		// Filter hot-claimable pods to Kubernetes-ready instances only.
+		var readyPods []*corev1.Pod
+		for _, pod := range pods {
+			if s.isHotClaimableIdlePod(pod, desiredTemplateHash) {
+				readyPods = append(readyPods, pod)
+			}
+		}
+
+		if len(readyPods) == 0 {
+			// No idle pod available, not an error - use a special error to stop retry
+			return errNoIdlePod
+		}
+
+		// Claim an available pod
+		pod := readyPods[rand.Intn(len(readyPods))]
+
+		s.logger.Info("Claiming idle pod",
+			zap.String("pod", pod.Name),
+			zap.String("sandboxID", pod.Name),
+		)
+
+		// Update pod labels and annotations
+		pod = pod.DeepCopy()
+
+		// Change pool type from idle to active
+		pod.Labels[controller.LabelPoolType] = controller.PoolTypeActive
+		pod.Labels[controller.LabelSandboxID] = pod.Name
+		ensureSandboxCleanupFinalizer(pod)
+
+		// Remove owner reference (so it's no longer managed by ReplicaSet)
+		pod.OwnerReferences = nil
+
+		// Add annotations
+		if pod.Annotations == nil {
+			pod.Annotations = make(map[string]string)
+		}
+		pod.Annotations = controller.ClaimedSandboxPodAnnotations(pod.Annotations)
+		pod.Annotations[controller.AnnotationSandboxID] = pod.Name
+		pod.Annotations[controller.AnnotationTeamID] = req.TeamID
+		pod.Annotations[controller.AnnotationUserID] = req.UserID
+		pod.Annotations[controller.AnnotationClaimedAt] = s.clock.Now().Format(time.RFC3339)
+		pod.Annotations[controller.AnnotationClaimType] = "hot"
+
+		// Set expiration annotations. Explicit 0 disables TTLs; omitted TTL uses the configured default.
+		persistedConfig := s.claimConfigForPersistence(req.Config)
+		if persistedConfig != nil {
+			setExpirationAnnotation(pod.Annotations, s.clock.Now(), persistedConfig.TTL)
+			setHardExpirationAnnotation(pod.Annotations, s.clock.Now(), persistedConfig.HardTTL)
+		}
+
+		// Serialize config
+		if persistedConfig != nil {
+			configJSON, marshalErr := json.Marshal(persistedConfig)
+			if marshalErr != nil {
+				return fmt.Errorf("marshal config: %w", marshalErr)
+			}
+			pod.Annotations[controller.AnnotationConfig] = string(configJSON)
+		}
+
+		// Build and add network policy annotation
+		networkState, policyErr := s.applyPoliciesForPod(ctx, pod, template, req)
+		if policyErr != nil {
+			return policyErr
+		}
+		rollbackBindings, err := s.syncCredentialBindings(ctx, pod, req.TeamID, networkState)
+		if err != nil {
+			return fmt.Errorf("stage credential bindings: %w", err)
+		}
+
+		// Update the pod
+		updatedPod, updateErr := s.k8sClient.CoreV1().Pods(pod.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
+		if updateErr != nil {
+			if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
+				s.logger.Warn("Failed to roll back credential bindings after hot-claim update failure",
+					zap.String("sandboxID", pod.Name),
+					zap.Error(rollbackErr),
+				)
+			}
+			if isIdlePodLostDuringClaim(updateErr) {
+				return errNoIdlePod
+			}
+			return updateErr
+		}
+
+		if applyErr := s.applyNetworkProvider(ctx, updatedPod, req.TeamID, policySpecFromState(networkState)); applyErr != nil {
+			s.requestSandboxDeletionAfterClaimFailure(updatedPod, "network policy apply failed")
+			return fmt.Errorf("apply network policy: %w", applyErr)
+		}
+
+		s.logger.Info("Successfully claimed idle pod",
+			zap.String("pod", updatedPod.Name),
+			zap.String("sandboxID", updatedPod.Name),
+			zap.String("expiresAt", updatedPod.Annotations[controller.AnnotationExpiresAt]),
+		)
+
+		claimedPod = updatedPod
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, errNoIdlePod) {
+			return nil, nil // No idle pod available
+		}
+		return nil, err
+	}
+	return claimedPod, nil
+}
+
+func (s *SandboxService) isHotClaimableIdlePod(pod *corev1.Pod, desiredTemplateHash string) bool {
+	if pod == nil || pod.DeletionTimestamp != nil {
+		return false
+	}
+	if pod.Annotations[controller.AnnotationTemplateSpecHash] != desiredTemplateHash {
+		return false
+	}
+	return controller.IsPodReady(pod) && s.podDataPlaneReady(pod)
+}
+
+func isIdlePodLostDuringClaim(err error) bool {
+	if k8serrors.IsNotFound(err) {
+		return true
+	}
+	if !k8serrors.IsInvalid(err) {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "metadata.finalizers") &&
+		strings.Contains(msg, "no new finalizers can be added if the object is being deleted")
+}
+
+// createNewPod creates a new pod for cold start
+func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.SandboxTemplate, req *ClaimRequest) (*corev1.Pod, error) {
+	// Simulate K8s pod name generation: rs-name + "-" + 5 random chars
+	clusterID := naming.ClusterIDOrDefault(template.Spec.ClusterId)
+	podName, err := naming.SandboxName(clusterID, template.Name, utilrand.String(5))
+	if err != nil {
+		return nil, fmt.Errorf("generate sandbox name: %w", err)
+	}
+
+	// Build pod spec before side-effecting resources so claims fail fast when the
+	// sandbox data plane has no ready nodes to receive the pod.
+	spec := v1alpha1.BuildPodSpec(template)
+	if err := s.ensureDataPlaneReadyCapacity(spec); err != nil {
+		return nil, err
+	}
+
+	if err := controller.EnsureProcdConfigSecret(ctx, s.k8sClient, s.secretLister, template); err != nil {
+		return nil, fmt.Errorf("ensure procd config secret: %w", err)
+	}
+	if err := controller.EnsureNetdMITMCASecret(ctx, s.k8sClient, template.Namespace); err != nil {
+		return nil, fmt.Errorf("ensure netd MITM CA secret: %w", err)
+	}
+
+	annotations := controller.ClaimedSandboxPodAnnotations(map[string]string{
+		controller.AnnotationSandboxID: podName,
+		controller.AnnotationTeamID:    req.TeamID,
+		controller.AnnotationUserID:    req.UserID,
+		controller.AnnotationClaimedAt: s.clock.Now().Format(time.RFC3339),
+		controller.AnnotationClaimType: "cold",
+	})
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      podName,
+			Namespace: template.Namespace,
+			Finalizers: []string{
+				sandboxCleanupFinalizer,
+			},
+			Labels: map[string]string{
+				controller.LabelTemplateID: template.Name,
+				controller.LabelPoolType:   controller.PoolTypeActive,
+				controller.LabelSandboxID:  podName,
+			},
+			Annotations: annotations,
+		},
+		Spec: spec,
+	}
+
+	// Set expiration annotations. Explicit 0 disables TTLs; omitted TTL uses the configured default.
+	persistedConfig := s.claimConfigForPersistence(req.Config)
+	if persistedConfig != nil {
+		setExpirationAnnotation(pod.Annotations, s.clock.Now(), persistedConfig.TTL)
+		setHardExpirationAnnotation(pod.Annotations, s.clock.Now(), persistedConfig.HardTTL)
+	}
+
+	// Serialize config
+	if persistedConfig != nil {
+		configJSON, err := json.Marshal(persistedConfig)
+		if err != nil {
+			return nil, fmt.Errorf("marshal config: %w", err)
+		}
+		pod.Annotations[controller.AnnotationConfig] = string(configJSON)
+	}
+
+	// Build and add network policy annotation
+	networkState, err := s.applyPoliciesForPod(ctx, pod, template, req)
+	if err != nil {
+		return nil, err
+	}
+	rollbackBindings, err := s.syncCredentialBindings(ctx, pod, req.TeamID, networkState)
+	if err != nil {
+		return nil, fmt.Errorf("stage credential bindings: %w", err)
+	}
+
+	// Create the pod
+	createdPod, err := s.k8sClient.CoreV1().Pods(template.ObjectMeta.Namespace).Create(ctx, pod, metav1.CreateOptions{})
+	if err != nil {
+		if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
+			s.logger.Warn("Failed to clean up staged credential bindings after create failure",
+				zap.String("sandboxID", pod.Name),
+				zap.Error(rollbackErr),
+			)
+		}
+		return nil, fmt.Errorf("create pod: %w", err)
+	}
+
+	if err := s.applyNetworkProvider(ctx, createdPod, req.TeamID, policySpecFromState(networkState)); err != nil {
+		s.requestSandboxDeletionAfterClaimFailure(createdPod, "network policy apply failed")
+		return nil, fmt.Errorf("apply network policy: %w", err)
+	}
+
+	s.logger.Info("Created new pod for cold start",
+		zap.String("pod", createdPod.Name),
+		zap.String("sandboxID", createdPod.Name),
+		zap.String("expiresAt", createdPod.Annotations[controller.AnnotationExpiresAt]),
+	)
+
+	return createdPod, nil
+}
+
+func (s *SandboxService) requestSandboxDeletionAfterClaimFailure(pod *corev1.Pod, reason string) {
+	if s == nil || pod == nil || pod.Name == "" || pod.Namespace == "" || s.k8sClient == nil {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	logger := s.logger
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+
+	if !hasSandboxCleanupFinalizer(pod) {
+		if _, err := s.ensureSandboxDeletionFinalizer(cleanupCtx, pod); err != nil {
+			logger.Warn("Failed to ensure sandbox cleanup finalizer after claim failure",
+				zap.String("sandboxID", pod.Name),
+				zap.String("namespace", pod.Namespace),
+				zap.String("reason", reason),
+				zap.Error(err),
+			)
+		}
+	}
+
+	if err := s.k8sClient.CoreV1().Pods(pod.Namespace).Delete(cleanupCtx, pod.Name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
+		logger.Warn("Delete pod failed after claim failure",
+			zap.String("sandboxID", pod.Name),
+			zap.String("namespace", pod.Namespace),
+			zap.String("reason", reason),
+			zap.Error(err),
+		)
+	}
+}
+
+func (s *SandboxService) podDataPlaneReady(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	if !dataplane.SelectorRequiresReadyNode(pod.Spec.NodeSelector) {
+		return true
+	}
+	if pod.Spec.NodeName == "" || s == nil || s.nodeLister == nil {
+		return false
+	}
+	node, err := s.nodeLister.Get(pod.Spec.NodeName)
+	if err != nil {
+		return false
+	}
+	return dataplane.NodeReady(node)
+}
+
+func (s *SandboxService) ensureDataPlaneReadyCapacity(spec corev1.PodSpec) error {
+	if !dataplane.SelectorRequiresReadyNode(spec.NodeSelector) {
+		return nil
+	}
+	if s == nil || s.nodeLister == nil {
+		return fmt.Errorf("%w: manager node cache is not configured", ErrDataPlaneNotReady)
+	}
+	selector := labels.SelectorFromSet(spec.NodeSelector)
+	nodes, err := s.nodeLister.List(selector)
+	if err != nil {
+		return fmt.Errorf("list data-plane-ready nodes: %w", err)
+	}
+	if len(nodes) == 0 {
+		return fmt.Errorf("%w: no nodes match selector %q", ErrDataPlaneNotReady, labels.Set(spec.NodeSelector).String())
+	}
+	return nil
+}
+
+func (s *SandboxService) initializeProcd(
+	ctx context.Context,
+	pod *corev1.Pod,
+	req *ClaimRequest,
+	procdAddress string,
+) (*InitializeResponse, error) {
+	if s.internalTokenGenerator == nil || s.procdTokenGenerator == nil {
+		return nil, fmt.Errorf("token generators not configured, cannot authenticate with procd")
+	}
+	if pod == nil || req == nil {
+		return nil, fmt.Errorf("missing sandbox context")
+	}
+
+	teamID := req.TeamID
+	userID := req.UserID
+	sandboxID := pod.Name
+
+	internalToken, err := s.internalTokenGenerator.GenerateToken(teamID, userID, sandboxID)
+	if err != nil {
+		return nil, fmt.Errorf("generate internal token: %w", err)
+	}
+
+	procdToken, err := s.procdTokenGenerator.GenerateToken(teamID, userID, sandboxID)
+	if err != nil {
+		return nil, fmt.Errorf("generate procd token: %w", err)
+	}
+
+	webhookInfo := s.getWebhookInfo(req)
+	var webhookConfig *InitializeWebhook
+	if webhookInfo != nil {
+		webhookConfig = &InitializeWebhook{
+			URL:      webhookInfo.URL,
+			Secret:   webhookInfo.Secret,
+			WatchDir: webhookInfo.WatchDir,
+		}
+	}
+
+	initReq := InitializeRequest{
+		SandboxID:          sandboxID,
+		TeamID:             teamID,
+		Webhook:            webhookConfig,
+		Mounts:             toInitializeMountRequests(req.Mounts),
+		WaitForMounts:      req.WaitForMounts,
+		MountWaitTimeoutMs: int32(claimMountWaitTimeout(req) / time.Millisecond),
+	}
+
+	var initErr error
+	var initResp *InitializeResponse
+	timeout := s.config.ProcdInitTimeout
+	if timeout == 0 {
+		timeout = 6 * time.Second
+	}
+	if waitTimeout := claimMountWaitTimeout(req); waitTimeout > timeout {
+		timeout = waitTimeout + time.Second
+	}
+
+	initCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		initResp, initErr = s.procdClient.Initialize(initCtx, procdAddress, initReq, internalToken, procdToken)
+		if initErr == nil {
+			return initResp, nil
+		}
+
+		select {
+		case <-initCtx.Done():
+			return nil, fmt.Errorf("initialize procd timed out after %s: %w", timeout, initErr)
+		case <-ticker.C:
+			continue
+		}
+	}
+}

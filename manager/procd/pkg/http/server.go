@@ -112,9 +112,7 @@ func NewServer(
 
 func (s *Server) setupRoutes() {
 	// Global middleware (applied to all routes)
-	s.router.Use(httpobs.ServerMiddleware(httpobs.ServerConfig{
-		Tracer: s.obsProvider.Tracer(),
-	}))
+	s.router.Use(httpobs.ServerMiddleware(s.obsProvider.HTTPServerConfig(nil)))
 	s.router.Use(s.loggingMiddleware)
 	s.router.Use(s.recoveryMiddleware)
 

@@ -94,7 +94,7 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 	if proxyTimeout == 0 {
 		proxyTimeout = 10 * time.Second
 	}
-	router, err := proxy.NewRouter(targetURL.String(), s.logger, proxyTimeout)
+	router, err := proxy.NewRouter(targetURL.String(), s.logger, proxyTimeout, proxy.WithHTTPClient(s.outboundHTTPClient()))
 	if err != nil {
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "proxy initialization failed")
 		return

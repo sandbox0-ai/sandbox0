@@ -110,6 +110,14 @@ func NewServer(cfg *config.SSHGatewayConfig, authorizer SessionAuthorizer, dataP
 	return server, nil
 }
 
+// SetHTTPClient replaces the HTTP client used for procd requests.
+func (s *Server) SetHTTPClient(httpClient *http.Client) {
+	if s == nil || httpClient == nil {
+		return
+	}
+	s.httpClient = httpClient
+}
+
 func parseHostSigner(hostKey []byte) (ssh.Signer, error) {
 	hostSigner, err := ssh.ParsePrivateKey(hostKey)
 	if err == nil {

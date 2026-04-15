@@ -133,16 +133,16 @@ func initDatabase(
 	}
 
 	pool, err := dbpool.New(ctx, dbpool.Options{
-		DatabaseURL: cfg.DatabaseURL,
-		MaxConns:    int32(cfg.DatabaseMaxConns),
-		MinConns:    int32(cfg.DatabaseMinConns),
-		Schema:      schema,
+		DatabaseURL:    cfg.DatabaseURL,
+		MaxConns:       int32(cfg.DatabaseMaxConns),
+		MinConns:       int32(cfg.DatabaseMinConns),
+		Schema:         schema,
+		ConfigModifier: obsProvider.Pgx.ConfigModifier(),
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	obsProvider.Pgx.WrapPool(pool)
 	logger.Info("Database connection established",
 		zap.String("schema", schema),
 		zap.Int32("max_conns", pool.Config().MaxConns),

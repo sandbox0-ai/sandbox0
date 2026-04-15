@@ -32,6 +32,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
+	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	templmigrations "github.com/sandbox0-ai/sandbox0/pkg/template/migrations"
 	templreconciler "github.com/sandbox0-ai/sandbox0/pkg/template/reconciler"
@@ -276,8 +277,10 @@ func main() {
 		CtldEnabled:            cfg.CtldEnabled,
 		CtldPort:               cfg.CtldPort,
 		CtldClientTimeout:      cfg.CtldClientTimeout.Duration,
+		CtldHTTPClient:         obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.CtldClientTimeout.Duration}),
 		ProcdPort:              cfg.ProcdConfig.HTTPPort,
 		ProcdClientTimeout:     cfg.ProcdClientTimeout.Duration,
+		ProcdHTTPClient:        obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ProcdClientTimeout.Duration}),
 		ProcdInitTimeout:       cfg.ProcdInitTimeout.Duration,
 	}
 
@@ -566,17 +569,15 @@ func runEgressAuthMigrations(ctx context.Context, pool *pgxpool.Pool, logger *za
 // initDatabase initializes the database connection pool
 func initDatabase(ctx context.Context, databaseURL string, maxConns, minConns int32, logger *zap.Logger, obsProvider *observability.Provider) (*pgxpool.Pool, error) {
 	pool, err := dbpool.New(ctx, dbpool.Options{
-		DatabaseURL: databaseURL,
-		MaxConns:    maxConns,
-		MinConns:    minConns,
-		Schema:      "scheduler",
+		DatabaseURL:    databaseURL,
+		MaxConns:       maxConns,
+		MinConns:       minConns,
+		Schema:         "scheduler",
+		ConfigModifier: obsProvider.Pgx.ConfigModifier(),
 	})
 	if err != nil {
 		return nil, err
 	}
-
-	// Wrap pool with observability
-	obsProvider.Pgx.WrapPool(pool)
 
 	logger.Info("Database connection established",
 		zap.Int32("max_conns", pool.Config().MaxConns),

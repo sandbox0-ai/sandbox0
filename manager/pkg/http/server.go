@@ -85,9 +85,7 @@ func NewServer(
 	gin.SetMode(gin.ReleaseMode)
 
 	router := gin.New()
-	router.Use(httpobs.GinMiddleware(httpobs.ServerConfig{
-		Tracer: obsProvider.Tracer(),
-	}))
+	router.Use(httpobs.GinMiddleware(obsProvider.HTTPServerConfig(nil)))
 	router.Use(gin.Recovery())
 	router.Use(requestLogger(logger))
 

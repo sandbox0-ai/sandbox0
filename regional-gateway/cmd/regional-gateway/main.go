@@ -139,17 +139,15 @@ func initLogger(level string) (*zap.Logger, error) {
 // initDatabase initializes the database connection pool
 func initDatabase(ctx context.Context, cfg *config.RegionalGatewayConfig, logger *zap.Logger, obsProvider *observability.Provider) (*pgxpool.Pool, error) {
 	pool, err := dbpool.New(ctx, dbpool.Options{
-		DatabaseURL: cfg.DatabaseURL,
-		MaxConns:    int32(cfg.DatabaseMaxConns),
-		MinConns:    int32(cfg.DatabaseMinConns),
-		Schema:      "shared_gateway",
+		DatabaseURL:    cfg.DatabaseURL,
+		MaxConns:       int32(cfg.DatabaseMaxConns),
+		MinConns:       int32(cfg.DatabaseMinConns),
+		Schema:         "shared_gateway",
+		ConfigModifier: obsProvider.Pgx.ConfigModifier(),
 	})
 	if err != nil {
 		return nil, err
 	}
-
-	// Wrap pool with observability
-	obsProvider.Pgx.WrapPool(pool)
 
 	logger.Info("Database connection established",
 		zap.Int32("max_conns", pool.Config().MaxConns),

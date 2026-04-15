@@ -22,6 +22,8 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
+	"github.com/sandbox0-ai/sandbox0/pkg/observability"
+	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"go.uber.org/zap"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -33,16 +35,18 @@ type Daemon struct {
 	healthServer  *http.Server
 	metricsServer *http.Server
 	proxyServer   *proxy.Server
+	obsProvider   *observability.Provider
 	ready         atomic.Bool
 }
 
-func New(cfg *config.NetdConfig, logger *zap.Logger) *Daemon {
+func New(cfg *config.NetdConfig, logger *zap.Logger, obsProvider *observability.Provider) *Daemon {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
 	return &Daemon{
-		cfg:    cfg,
-		logger: logger,
+		cfg:         cfg,
+		logger:      logger,
+		obsProvider: obsProvider,
 	}
 }
 
@@ -93,6 +97,9 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 	if err != nil {
 		return err
 	}
+	if d.obsProvider != nil {
+		d.obsProvider.K8s.WrapConfig(k8sConfig)
+	}
 	client, err := kubernetes.NewForConfig(k8sConfig)
 	if err != nil {
 		return fmt.Errorf("create k8s client: %w", err)
@@ -114,6 +121,7 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 			DatabaseURL:     d.cfg.DatabaseURL,
 			DefaultMaxConns: 5,
 			DefaultMinConns: 1,
+			ConfigModifier:  d.dbConfigModifier(),
 		})
 		if err != nil {
 			return fmt.Errorf("create netd database pool: %w", err)
@@ -204,10 +212,11 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 			PrivateKey: privateKey,
 			TTL:        30 * time.Second,
 		})
-		proxyOpts = append(proxyOpts, proxy.WithEgressAuthResolver(proxy.NewHTTPEgressAuthResolver(
+		proxyOpts = append(proxyOpts, proxy.WithEgressAuthResolver(proxy.NewHTTPEgressAuthResolverWithHTTPClient(
 			d.cfg.EgressAuthResolverURL,
 			d.cfg.EgressAuthResolverTimeout.Duration,
 			netdEgressAuthTokenProvider{generator: tokenGenerator},
+			d.egressAuthHTTPClient(),
 		)))
 	}
 	proxyServer, err := proxy.NewServer(d.cfg, policyStore, tracker, usageAggregator, d.logger, proxyOpts...)
@@ -273,6 +282,28 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func (d *Daemon) dbConfigModifier() func(*pgxpool.Config) error {
+	if d == nil || d.obsProvider == nil {
+		return nil
+	}
+	return d.obsProvider.Pgx.ConfigModifier()
+}
+
+func (d *Daemon) egressAuthHTTPClient() *http.Client {
+	if d == nil || d.obsProvider == nil {
+		timeout := 2 * time.Second
+		if d != nil && d.cfg != nil && d.cfg.EgressAuthResolverTimeout.Duration > 0 {
+			timeout = d.cfg.EgressAuthResolverTimeout.Duration
+		}
+		return &http.Client{Timeout: timeout}
+	}
+	timeout := d.cfg.EgressAuthResolverTimeout.Duration
+	if timeout <= 0 {
+		timeout = 2 * time.Second
+	}
+	return d.obsProvider.HTTP.NewClient(httpobs.Config{Timeout: timeout})
 }
 
 type netdEgressAuthTokenProvider struct {

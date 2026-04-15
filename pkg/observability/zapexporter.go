@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.uber.org/zap"
 )
@@ -77,16 +76,7 @@ func (e *zapSpanExporter) logSpan(span sdktrace.ReadOnlySpan) {
 		fields = append(fields, zap.Any("event", eventFields))
 	}
 
-	// Log with appropriate level based on status
-	msg := "trace_span"
-	switch span.Status().Code {
-	case codes.Error:
-		e.logger.Error(msg, fields...)
-	case codes.Ok:
-		e.logger.Info(msg, fields...)
-	default:
-		e.logger.Debug(msg, fields...)
-	}
+	e.logger.Info("trace_span", fields...)
 }
 
 // attributeToZapField converts an OTEL attribute to a zap field

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"net/http"
 	"sync"
 	"time"
 
@@ -95,8 +96,10 @@ type SandboxServiceConfig struct {
 	CtldEnabled            bool
 	CtldPort               int
 	CtldClientTimeout      time.Duration
+	CtldHTTPClient         *http.Client
 	ProcdPort              int
 	ProcdClientTimeout     time.Duration
+	ProcdHTTPClient        *http.Client
 	ProcdInitTimeout       time.Duration
 }
 
@@ -184,6 +187,15 @@ func NewSandboxService(
 	if networkProvider == nil {
 		networkProvider = network.NewNoopProvider()
 	}
+	ctldClient := NewCtldClient(CtldClientConfig{Timeout: config.CtldClientTimeout})
+	if config.CtldHTTPClient != nil {
+		ctldClient = NewCtldClientWithHTTPClient(config.CtldHTTPClient)
+	}
+	procdClient := NewProcdClient(ProcdClientConfig{Timeout: config.ProcdClientTimeout})
+	if config.ProcdHTTPClient != nil {
+		procdClient = NewProcdClientWithHTTPClient(config.ProcdHTTPClient)
+	}
+
 	service := &SandboxService{
 		k8sClient:              k8sClient,
 		podLister:              podLister,
@@ -193,8 +205,8 @@ func NewSandboxService(
 		templateLister:         templateLister,
 		NetworkPolicyService:   networkPolicyService,
 		networkProvider:        networkProvider,
-		ctldClient:             NewCtldClient(CtldClientConfig{Timeout: config.CtldClientTimeout}),
-		procdClient:            NewProcdClient(ProcdClientConfig{Timeout: config.ProcdClientTimeout}),
+		ctldClient:             ctldClient,
+		procdClient:            procdClient,
 		internalTokenGenerator: internalTokenGenerator,
 		procdTokenGenerator:    procdTokenGenerator,
 		clock:                  clock,

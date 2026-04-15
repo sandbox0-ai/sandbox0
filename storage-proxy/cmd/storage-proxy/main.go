@@ -324,7 +324,10 @@ func main() {
 
 	// Create gRPC server
 	grpcServer := grpc.NewServer(
-		grpc.UnaryInterceptor(grpcInterceptor),
+		grpc.ChainUnaryInterceptor(
+			storageProxyUnaryMetricsInterceptor(storageProxyMetrics, zapLogger),
+			grpcInterceptor,
+		),
 	)
 
 	// Register FileSystem service
@@ -388,9 +391,7 @@ func main() {
 		idleTimeout = 60 * time.Second
 	}
 
-	httpHandler := httpobs.ServerMiddleware(httpobs.ServerConfig{
-		Tracer: obsProvider.Tracer(),
-	})(httpSrv)
+	httpHandler := httpobs.ServerMiddleware(obsProvider.HTTPServerConfig(nil))(httpSrv)
 
 	httpServer := &http.Server{
 		Addr:         httpAddr,
@@ -464,13 +465,11 @@ func initDatabase(ctx context.Context, databaseURL string, cfg *config.StoragePr
 		DefaultMaxConns: 30,
 		DefaultMinConns: 5,
 		Schema:          schema,
+		ConfigModifier:  obsProvider.Pgx.ConfigModifier(),
 	})
 	if err != nil {
 		return nil, err
 	}
-
-	// Wrap pool with observability
-	obsProvider.Pgx.WrapPool(pool)
 
 	logger.Info("Database connection established",
 		zap.Int32("max_conns", pool.Config().MaxConns),
@@ -482,6 +481,37 @@ func initDatabase(ctx context.Context, databaseURL string, cfg *config.StoragePr
 
 type zapLoggerAdapter struct {
 	logger *zap.Logger
+}
+
+func storageProxyUnaryMetricsInterceptor(metrics *obsmetrics.StorageProxyMetrics, logger *zap.Logger) grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		start := time.Now()
+		resp, err := handler(ctx, req)
+		if metrics != nil && metrics.GRPCRequestsTotal != nil && metrics.GRPCRequestDuration != nil {
+			status := "success"
+			if err != nil {
+				status = "error"
+			}
+			method := "unknown"
+			if info != nil && info.FullMethod != "" {
+				method = info.FullMethod
+			}
+			metrics.GRPCRequestsTotal.WithLabelValues(method, status).Inc()
+			metrics.GRPCRequestDuration.WithLabelValues(method).Observe(time.Since(start).Seconds())
+		}
+		if err != nil && logger != nil {
+			method := "unknown"
+			if info != nil && info.FullMethod != "" {
+				method = info.FullMethod
+			}
+			logger.Warn("gRPC request failed",
+				zap.String("method", method),
+				zap.Duration("duration", time.Since(start)),
+				zap.Error(err),
+			)
+		}
+		return resp, err
+	}
 }
 
 func (z *zapLoggerAdapter) Printf(format string, args ...any) {

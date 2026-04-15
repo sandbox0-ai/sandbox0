@@ -187,7 +187,7 @@ func (s *Server) getSandboxFromClusterGateway(ctx context.Context, clusterGatewa
 	req, cancel := proxy.ApplyRequestTimeout(req, s.cfg.ProxyTimeout.Duration)
 	defer cancel()
 
-	resp, err := (&http.Client{}).Do(req)
+	resp, err := s.outboundHTTPClient().Do(req)
 	if err != nil {
 		return nil, http.StatusServiceUnavailable, fmt.Errorf("call cluster-gateway sandbox endpoint: %w", err)
 	}
@@ -237,7 +237,7 @@ func (s *Server) resumeSandboxViaClusterGateway(ctx context.Context, clusterGate
 	req, cancel := proxy.ApplyRequestTimeout(req, s.cfg.ProxyTimeout.Duration)
 	defer cancel()
 
-	resp, err := (&http.Client{}).Do(req)
+	resp, err := s.outboundHTTPClient().Do(req)
 	if err != nil {
 		return fmt.Errorf("call cluster-gateway resume endpoint: %w", err)
 	}

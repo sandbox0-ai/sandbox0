@@ -255,13 +255,11 @@ func initDatabase(ctx context.Context, cfg *config.SchedulerConfig, logger *zap.
 		MaxConnLifetime: maxConnLifetime,
 		MaxConnIdleTime: maxConnIdleTime,
 		Schema:          "scheduler",
+		ConfigModifier:  obsProvider.Pgx.ConfigModifier(),
 	})
 	if err != nil {
 		return nil, err
 	}
-
-	// Wrap pool with observability
-	obsProvider.Pgx.WrapPool(pool)
 
 	logger.Info("Connected to database",
 		zap.Int32("max_conns", pool.Config().MaxConns),

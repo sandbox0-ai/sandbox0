@@ -144,17 +144,15 @@ func initLogger(level string) (*zap.Logger, error) {
 
 func initDatabase(ctx context.Context, cfg *config.ClusterGatewayConfig, logger *zap.Logger, obsProvider *observability.Provider) *pgxpool.Pool {
 	pool, err := dbpool.New(ctx, dbpool.Options{
-		DatabaseURL: cfg.DatabaseURL,
-		MaxConns:    int32(cfg.DatabaseMaxConns),
-		MinConns:    int32(cfg.DatabaseMinConns),
-		Schema:      "shared_gateway",
+		DatabaseURL:    cfg.DatabaseURL,
+		MaxConns:       int32(cfg.DatabaseMaxConns),
+		MinConns:       int32(cfg.DatabaseMinConns),
+		Schema:         "shared_gateway",
+		ConfigModifier: obsProvider.Pgx.ConfigModifier(),
 	})
 	if err != nil {
 		logger.Fatal("Failed to connect to database", zap.Error(err))
 	}
-
-	// Wrap pool with observability
-	obsProvider.Pgx.WrapPool(pool)
 
 	logger.Info("Database connection established",
 		zap.Int32("max_conns", pool.Config().MaxConns),

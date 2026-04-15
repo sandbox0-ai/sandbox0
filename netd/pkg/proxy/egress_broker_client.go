@@ -24,6 +24,10 @@ type EgressAuthTokenProvider interface {
 }
 
 func NewHTTPEgressAuthResolver(baseURL string, timeout time.Duration, tokenProvider EgressAuthTokenProvider) egressAuthResolver {
+	return NewHTTPEgressAuthResolverWithHTTPClient(baseURL, timeout, tokenProvider, nil)
+}
+
+func NewHTTPEgressAuthResolverWithHTTPClient(baseURL string, timeout time.Duration, tokenProvider EgressAuthTokenProvider, client *http.Client) egressAuthResolver {
 	baseURL = strings.TrimSpace(baseURL)
 	if baseURL == "" {
 		return noopEgressAuthResolver{}
@@ -31,12 +35,13 @@ func NewHTTPEgressAuthResolver(baseURL string, timeout time.Duration, tokenProvi
 	if timeout <= 0 {
 		timeout = 2 * time.Second
 	}
+	if client == nil {
+		client = &http.Client{Timeout: timeout}
+	}
 	return &httpEgressAuthResolver{
 		baseURL:       strings.TrimRight(baseURL, "/"),
 		tokenProvider: tokenProvider,
-		client: &http.Client{
-			Timeout: timeout,
-		},
+		client:        client,
 	}
 }
 

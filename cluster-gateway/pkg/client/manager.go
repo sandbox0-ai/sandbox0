@@ -49,6 +49,14 @@ func NewManagerClient(baseURL string, internalAuthGen *internalauth.Generator, l
 	}
 }
 
+// SetHTTPClient replaces the underlying HTTP client.
+func (c *ManagerClient) SetHTTPClient(httpClient *http.Client) {
+	if c == nil || httpClient == nil {
+		return
+	}
+	c.httpClient = httpClient
+}
+
 // GetSandbox retrieves sandbox information from manager
 func (c *ManagerClient) GetSandbox(ctx context.Context, sandboxID, userID, teamID string) (*mgr.Sandbox, error) {
 	// Generate internal token for manager

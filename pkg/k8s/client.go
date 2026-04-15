@@ -60,8 +60,9 @@ func NewClientWithObservability(kubeconfigPath string, obsProvider *observabilit
 		return nil, err
 	}
 
-	// Wrap config with observability
-	obsProvider.K8s.WrapConfig(config)
+	if obsProvider != nil {
+		obsProvider.K8s.WrapConfig(config)
+	}
 
 	return kubernetes.NewForConfig(config)
 }

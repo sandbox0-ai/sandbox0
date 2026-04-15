@@ -41,6 +41,7 @@ type Server struct {
 	logger          *zap.Logger
 	obsProvider     *observability.Provider
 	metrics         *obsmetrics.SchedulerMetrics
+	httpClient      *http.Client
 
 	clusterGatewayProxies   map[string]*proxy.Router
 	clusterGatewayProxiesMu sync.RWMutex
@@ -98,9 +99,7 @@ func NewServer(
 
 	// Create router
 	router := gin.New()
-	router.Use(httpobs.GinMiddleware(httpobs.ServerConfig{
-		Tracer: obsProvider.Tracer(),
-	}))
+	router.Use(httpobs.GinMiddleware(obsProvider.HTTPServerConfig(nil)))
 	router.Use(gin.Recovery())
 	router.Use(requestLogger(logger))
 	router.Use(gatewaymiddleware.UpstreamTimeoutWhitelist())
@@ -117,6 +116,7 @@ func NewServer(
 		logger:                logger,
 		obsProvider:           obsProvider,
 		metrics:               metrics,
+		httpClient:            obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ProxyTimeout.Duration}),
 		clusterGatewayProxies: make(map[string]*proxy.Router),
 		clusterCache:          make(map[string]*template.Cluster),
 	}
@@ -387,7 +387,7 @@ func (s *Server) getClusterGatewayProxy(targetURL string) (*proxy.Router, error)
 		proxyTimeout = 10 * time.Second
 	}
 
-	p, err := proxy.NewRouter(targetURL, s.logger, proxyTimeout)
+	p, err := proxy.NewRouter(targetURL, s.logger, proxyTimeout, proxy.WithHTTPClient(s.httpClient))
 	if err != nil {
 		return nil, err
 	}

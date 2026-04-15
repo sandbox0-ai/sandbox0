@@ -19,6 +19,7 @@ type Options struct {
 	MaxConnLifetime time.Duration
 	MaxConnIdleTime time.Duration
 	Schema          string
+	ConfigModifier  func(*pgxpool.Config) error
 }
 
 // New creates a pgx pool and validates connectivity.
@@ -68,6 +69,11 @@ func New(ctx context.Context, opts Options) (*pgxpool.Pool, error) {
 	}
 	if opts.MaxConnIdleTime > 0 {
 		poolConfig.MaxConnIdleTime = opts.MaxConnIdleTime
+	}
+	if opts.ConfigModifier != nil {
+		if err := opts.ConfigModifier(poolConfig); err != nil {
+			return nil, fmt.Errorf("apply pool config modifier: %w", err)
+		}
 	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)

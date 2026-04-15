@@ -3,13 +3,16 @@ package k8s
 import (
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/sandbox0-ai/sandbox0/pkg/observability/internal/promutil"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 // Adapter provides observable Kubernetes clients
@@ -20,11 +23,13 @@ type Adapter struct {
 
 // AdapterConfig configures the K8s adapter
 type AdapterConfig struct {
-	ServiceName string
-	Tracer      trace.Tracer
-	Logger      *zap.Logger
-	Registry    prometheus.Registerer
-	Disabled    bool
+	ServiceName    string
+	Tracer         trace.Tracer
+	Logger         *zap.Logger
+	Registry       prometheus.Registerer
+	DisableMetrics bool
+	DisableLogging bool
+	Disabled       bool
 }
 
 // Config holds configuration for creating an observable K8s client
@@ -43,7 +48,7 @@ type Config struct {
 // NewAdapter creates a new K8s adapter
 func NewAdapter(cfg AdapterConfig) Adapter {
 	var m *metrics
-	if !cfg.Disabled && cfg.Registry != nil {
+	if !cfg.Disabled && !cfg.DisableMetrics && cfg.Registry != nil {
 		m = newMetrics(cfg.ServiceName, cfg.Registry)
 	}
 
@@ -143,27 +148,30 @@ type metrics struct {
 }
 
 func newMetrics(serviceName string, registry prometheus.Registerer) *metrics {
-	factory := promauto.With(registry)
+	prefix := promutil.MetricPrefix(serviceName)
 
 	return &metrics{
-		requestsTotal: factory.NewCounterVec(
+		requestsTotal: promutil.RegisterCounterVec(
+			registry,
 			prometheus.CounterOpts{
-				Name: serviceName + "_k8s_client_requests_total",
+				Name: prefix + "_k8s_client_requests_total",
 				Help: "Total number of Kubernetes API requests",
 			},
 			[]string{"verb", "resource", "status"},
 		),
-		requestDuration: factory.NewHistogramVec(
+		requestDuration: promutil.RegisterHistogramVec(
+			registry,
 			prometheus.HistogramOpts{
-				Name:    serviceName + "_k8s_client_request_duration_seconds",
+				Name:    prefix + "_k8s_client_request_duration_seconds",
 				Help:    "Kubernetes API request duration in seconds",
 				Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5},
 			},
 			[]string{"verb", "resource"},
 		),
-		activeRequests: factory.NewGaugeVec(
+		activeRequests: promutil.RegisterGaugeVec(
+			registry,
 			prometheus.GaugeOpts{
-				Name: serviceName + "_k8s_client_active_requests",
+				Name: prefix + "_k8s_client_active_requests",
 				Help: "Number of active Kubernetes API requests",
 			},
 			[]string{"verb", "resource"},
@@ -181,11 +189,21 @@ func buildRestConfig(kubeconfigPath string) (*rest.Config, error) {
 		}
 	}
 
-	// Try kubeconfig file
+	if kubeconfigPath == "" {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			kubeconfigPath = filepath.Join(home, ".kube", "config")
+		}
+	}
+
 	if kubeconfigPath != "" {
-		// Import from k8s package or implement inline
-		// For now, return a simple implementation
-		return nil, fmt.Errorf("kubeconfig loading not yet implemented in observability package")
+		if _, err := os.Stat(kubeconfigPath); err == nil {
+			config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+			if err != nil {
+				return nil, fmt.Errorf("build kubeconfig from %s: %w", kubeconfigPath, err)
+			}
+			return config, nil
+		}
 	}
 
 	return nil, fmt.Errorf("no Kubernetes config found")

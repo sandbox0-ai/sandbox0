@@ -6,7 +6,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/sandbox0-ai/sandbox0/pkg/observability/internal/promutil"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 )
@@ -19,11 +19,13 @@ type Adapter struct {
 
 // AdapterConfig configures the Pgx adapter
 type AdapterConfig struct {
-	ServiceName string
-	Tracer      trace.Tracer
-	Logger      *zap.Logger
-	Registry    prometheus.Registerer
-	Disabled    bool
+	ServiceName    string
+	Tracer         trace.Tracer
+	Logger         *zap.Logger
+	Registry       prometheus.Registerer
+	DisableMetrics bool
+	DisableLogging bool
+	Disabled       bool
 }
 
 // Config holds configuration for creating an observable pgx pool
@@ -47,7 +49,7 @@ type Config struct {
 // NewAdapter creates a new Pgx adapter
 func NewAdapter(cfg AdapterConfig) Adapter {
 	var m *metrics
-	if !cfg.Disabled && cfg.Registry != nil {
+	if !cfg.Disabled && !cfg.DisableMetrics && cfg.Registry != nil {
 		m = newMetrics(cfg.ServiceName, cfg.Registry)
 	}
 
@@ -92,13 +94,7 @@ func (a Adapter) NewPool(ctx context.Context, cfg Config) (*pgxpool.Pool, error)
 		}
 	}
 
-	// Attach observable tracer
-	if !a.config.Disabled {
-		poolConfig.ConnConfig.Tracer = &observableTracer{
-			config:  a.config,
-			metrics: a.metrics,
-		}
-	}
+	a.ConfigurePool(poolConfig)
 
 	// Create pool
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
@@ -121,20 +117,34 @@ func (a Adapter) NewPool(ctx context.Context, cfg Config) (*pgxpool.Pool, error)
 	return pool, nil
 }
 
-// WrapPool wraps an existing pgx pool with observability instrumentation
+// ConfigurePool attaches query tracing to a pgx pool config before the pool is created.
+func (a Adapter) ConfigurePool(poolConfig *pgxpool.Config) {
+	if poolConfig == nil || a.config.Disabled {
+		return
+	}
+	poolConfig.ConnConfig.Tracer = &observableTracer{
+		config:  a.config,
+		metrics: a.metrics,
+	}
+}
+
+// ConfigModifier returns a dbpool.Options-compatible modifier.
+func (a Adapter) ConfigModifier() func(*pgxpool.Config) error {
+	return func(poolConfig *pgxpool.Config) error {
+		a.ConfigurePool(poolConfig)
+		return nil
+	}
+}
+
+// WrapPool cannot retrofit pgx query tracing onto an already-created pool.
+// Use ConfigurePool or ConfigModifier before pgxpool.NewWithConfig instead.
 func (a Adapter) WrapPool(pool *pgxpool.Pool) {
 	if pool == nil || a.config.Disabled {
 		return
 	}
-
-	// Get the pool config and attach observable tracer
-	config := pool.Config()
-	config.ConnConfig.Tracer = &observableTracer{
-		config:  a.config,
-		metrics: a.metrics,
+	if !a.config.DisableLogging && a.config.Logger != nil {
+		a.config.Logger.Warn("PostgreSQL pool was already created; query tracing was not attached")
 	}
-
-	a.config.Logger.Debug("PostgreSQL pool wrapped with observability")
 }
 
 // metrics holds Prometheus metrics for pgx
@@ -147,41 +157,46 @@ type metrics struct {
 }
 
 func newMetrics(serviceName string, registry prometheus.Registerer) *metrics {
-	factory := promauto.With(registry)
+	prefix := promutil.MetricPrefix(serviceName)
 
 	return &metrics{
-		queriesTotal: factory.NewCounterVec(
+		queriesTotal: promutil.RegisterCounterVec(
+			registry,
 			prometheus.CounterOpts{
-				Name: serviceName + "_pgx_queries_total",
+				Name: prefix + "_pgx_queries_total",
 				Help: "Total number of PostgreSQL queries",
 			},
 			[]string{"operation", "status"},
 		),
-		queryDuration: factory.NewHistogramVec(
+		queryDuration: promutil.RegisterHistogramVec(
+			registry,
 			prometheus.HistogramOpts{
-				Name:    serviceName + "_pgx_query_duration_seconds",
+				Name:    prefix + "_pgx_query_duration_seconds",
 				Help:    "PostgreSQL query duration in seconds",
 				Buckets: []float64{.0001, .0005, .001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5},
 			},
 			[]string{"operation"},
 		),
-		activeQueries: factory.NewGaugeVec(
+		activeQueries: promutil.RegisterGaugeVec(
+			registry,
 			prometheus.GaugeOpts{
-				Name: serviceName + "_pgx_active_queries",
+				Name: prefix + "_pgx_active_queries",
 				Help: "Number of active PostgreSQL queries",
 			},
 			[]string{"operation"},
 		),
-		rowsAffected: factory.NewCounterVec(
+		rowsAffected: promutil.RegisterCounterVec(
+			registry,
 			prometheus.CounterOpts{
-				Name: serviceName + "_pgx_rows_affected_total",
+				Name: prefix + "_pgx_rows_affected_total",
 				Help: "Total number of rows affected by PostgreSQL queries",
 			},
 			[]string{"operation"},
 		),
-		poolConnections: factory.NewGaugeVec(
+		poolConnections: promutil.RegisterGaugeVec(
+			registry,
 			prometheus.GaugeOpts{
-				Name: serviceName + "_pgx_pool_connections",
+				Name: prefix + "_pgx_pool_connections",
 				Help: "Number of connections in the pool",
 			},
 			[]string{"state"}, // idle, acquired, constructing

@@ -62,8 +62,7 @@ func (s *Server) createContext(c *gin.Context) {
 	upReq.Header = c.Request.Header.Clone()
 	requestModifier(upReq)
 
-	client := &http.Client{}
-	resp, err := client.Do(upReq)
+	resp, err := s.outboundHTTPClient().Do(upReq)
 	if err != nil {
 		if proxy.IsTimeoutError(err) {
 			spec.JSONError(c, http.StatusGatewayTimeout, spec.CodeUnavailable, "sandbox process request timed out")
@@ -420,7 +419,13 @@ func (s *Server) proxyToProcd(c *gin.Context, procdURL *url.URL) {
 	if proxyTimeout == 0 {
 		proxyTimeout = 10 * time.Second
 	}
-	router, err := proxy.NewRouter(procdURL.String(), s.logger, proxyTimeout, proxy.WithRequestModifier(requestModifier))
+	router, err := proxy.NewRouter(
+		procdURL.String(),
+		s.logger,
+		proxyTimeout,
+		proxy.WithRequestModifier(requestModifier),
+		proxy.WithHTTPClient(s.outboundHTTPClient()),
+	)
 	if err != nil {
 		s.logger.Error("Failed to create procd proxy router",
 			zap.String("procd_url", procdURL.String()),

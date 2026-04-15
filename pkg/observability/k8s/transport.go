@@ -57,13 +57,14 @@ func (t *observableTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	// Inject trace context
 	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
 
-	// Log request start
-	t.config.Logger.Debug("K8s API request started",
-		zap.String("verb", verb),
-		zap.String("resource", resource),
-		zap.String("path", req.URL.Path),
-		zap.String("trace_id", span.SpanContext().TraceID().String()),
-	)
+	if !t.config.DisableLogging && t.config.Logger != nil {
+		t.config.Logger.Debug("K8s API request started",
+			zap.String("verb", verb),
+			zap.String("resource", resource),
+			zap.String("path", req.URL.Path),
+			zap.String("trace_id", span.SpanContext().TraceID().String()),
+		)
+	}
 
 	// Execute request
 	req = req.WithContext(ctx)
@@ -81,13 +82,15 @@ func (t *observableTransport) RoundTrip(req *http.Request) (*http.Response, erro
 			t.metrics.requestDuration.WithLabelValues(verb, resource).Observe(duration.Seconds())
 		}
 
-		t.config.Logger.Error("K8s API request failed",
-			zap.String("verb", verb),
-			zap.String("resource", resource),
-			zap.Duration("duration", duration),
-			zap.Error(err),
-			zap.String("trace_id", span.SpanContext().TraceID().String()),
-		)
+		if !t.config.DisableLogging && t.config.Logger != nil {
+			t.config.Logger.Error("K8s API request failed",
+				zap.String("verb", verb),
+				zap.String("resource", resource),
+				zap.Duration("duration", duration),
+				zap.Error(err),
+				zap.String("trace_id", span.SpanContext().TraceID().String()),
+			)
+		}
 
 		return nil, err
 	}
@@ -118,13 +121,15 @@ func (t *observableTransport) RoundTrip(req *http.Request) (*http.Response, erro
 		logLevel = zap.WarnLevel
 	}
 
-	t.config.Logger.Log(logLevel, "K8s API request completed",
-		zap.String("verb", verb),
-		zap.String("resource", resource),
-		zap.Int("status", statusCode),
-		zap.Duration("duration", duration),
-		zap.String("trace_id", span.SpanContext().TraceID().String()),
-	)
+	if !t.config.DisableLogging && t.config.Logger != nil {
+		t.config.Logger.Log(logLevel, "K8s API request completed",
+			zap.String("verb", verb),
+			zap.String("resource", resource),
+			zap.Int("status", statusCode),
+			zap.Duration("duration", duration),
+			zap.String("trace_id", span.SpanContext().TraceID().String()),
+		)
+	}
 
 	return resp, nil
 }
@@ -144,19 +149,17 @@ func extractK8sResource(path string) string {
 		return "unknown"
 	}
 
-	// Look for common resource types in reverse order
-	for i := len(parts) - 1; i >= 0; i-- {
-		part := parts[i]
-		// Skip common non-resource parts
-		if part == "namespaces" || part == "api" || part == "apis" ||
-			strings.HasPrefix(part, "v") && len(part) <= 3 {
-			continue
+	for i, part := range parts {
+		if part == "namespaces" && i+2 < len(parts) {
+			return parts[i+2]
 		}
-		// Skip namespace names (they come after "namespaces")
-		if i > 0 && parts[i-1] == "namespaces" {
-			continue
-		}
-		return part
+	}
+
+	if len(parts) >= 3 && parts[0] == "api" {
+		return parts[2]
+	}
+	if len(parts) >= 4 && parts[0] == "apis" {
+		return parts[3]
 	}
 
 	return "unknown"

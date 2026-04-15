@@ -49,6 +49,7 @@ type Server struct {
 	internalAuthGen      *internalauth.Generator
 	meteringHandler      *gatewayhandlers.MeteringHandler
 	obsProvider          *observability.Provider
+	httpClient           *http.Client
 
 	clusterGatewayProxies   map[string]*proxy.Router
 	clusterGatewayProxiesMu sync.RWMutex
@@ -237,6 +238,7 @@ func NewServer(
 		internalAuthGen:       internalAuthGen,
 		meteringHandler:       gatewayhandlers.NewMeteringHandler(meteringRepo, cfg.RegionID, logger),
 		obsProvider:           obsProvider,
+		httpClient:            httpClient,
 		clusterGatewayProxies: make(map[string]*proxy.Router),
 		clusterCache:          make(map[string]string),
 		entitlements:          publicEntitlements,
@@ -253,12 +255,17 @@ func NewServer(
 	return server, nil
 }
 
+func (s *Server) outboundHTTPClient() *http.Client {
+	if s != nil && s.httpClient != nil {
+		return s.httpClient
+	}
+	return &http.Client{}
+}
+
 // setupRoutes configures all HTTP routes
 func (s *Server) setupRoutes() {
 	// Global middleware (order matters)
-	s.router.Use(httpobs.GinMiddleware(httpobs.ServerConfig{
-		Tracer: s.obsProvider.Tracer(),
-	}))
+	s.router.Use(httpobs.GinMiddleware(s.obsProvider.HTTPServerConfig(nil)))
 	s.router.Use(middleware.Recovery(s.logger))
 	s.router.Use(s.requestLogger.Logger())
 	s.router.Use(middleware.UpstreamTimeoutWhitelist())

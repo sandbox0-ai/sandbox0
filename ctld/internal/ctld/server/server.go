@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 )
@@ -47,6 +48,7 @@ func NewMux(controller Controller) http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/api/v1/sandboxes/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)

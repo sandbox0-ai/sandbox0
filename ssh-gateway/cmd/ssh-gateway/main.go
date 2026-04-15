@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
@@ -15,6 +16,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
+	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	sshserver "github.com/sandbox0-ai/sandbox0/ssh-gateway/pkg/server"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -86,11 +88,13 @@ func main() {
 
 	repo := identity.NewRepository(pool)
 	resolver := sshserver.NewRegionalSandboxResolver(cfg.RegionalGatewayURL, controlPlaneAuthGen, logger, cfg.ResumeTimeout.Duration)
+	resolver.SetHTTPClient(obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ResumeTimeout.Duration}))
 	authorizer := sshserver.NewAuthenticator(repo, resolver, cfg.ResumeTimeout.Duration, cfg.ResumePollInterval.Duration, logger)
 	server, err := sshserver.NewServer(cfg, authorizer, dataPlaneAuthGen, logger)
 	if err != nil {
 		logger.Fatal("Failed to create ssh-gateway server", zap.Error(err))
 	}
+	server.SetHTTPClient(obsProvider.HTTP.NewClient(httpobs.Config{Timeout: 10 * time.Second}))
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -152,15 +156,15 @@ func initLogger(level string) (*zap.Logger, error) {
 
 func initDatabase(ctx context.Context, cfg *config.SSHGatewayConfig, logger *zap.Logger, obsProvider *observability.Provider) (*pgxpool.Pool, error) {
 	pool, err := dbpool.New(ctx, dbpool.Options{
-		DatabaseURL: cfg.DatabaseURL,
-		MaxConns:    int32(cfg.DatabaseMaxConns),
-		MinConns:    int32(cfg.DatabaseMinConns),
-		Schema:      "shared_gateway",
+		DatabaseURL:    cfg.DatabaseURL,
+		MaxConns:       int32(cfg.DatabaseMaxConns),
+		MinConns:       int32(cfg.DatabaseMinConns),
+		Schema:         "shared_gateway",
+		ConfigModifier: obsProvider.Pgx.ConfigModifier(),
 	})
 	if err != nil {
 		return nil, err
 	}
-	obsProvider.Pgx.WrapPool(pool)
 	logger.Info("Database connection established",
 		zap.Int32("max_conns", pool.Config().MaxConns),
 		zap.Int32("min_conns", pool.Config().MinConns),

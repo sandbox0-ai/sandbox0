@@ -82,27 +82,33 @@ func New(cfg Config) (*Provider, error) {
 
 	// Initialize client adapters
 	p.HTTP = httpobs.NewAdapter(httpobs.AdapterConfig{
-		ServiceName: cfg.ServiceName,
-		Tracer:      p.tracer,
-		Logger:      cfg.Logger,
-		Registry:    cfg.MetricsRegistry,
-		Disabled:    cfg.DisableTracing && cfg.DisableMetrics && cfg.DisableLogging,
+		ServiceName:    cfg.ServiceName,
+		Tracer:         p.tracer,
+		Logger:         cfg.Logger,
+		Registry:       cfg.MetricsRegistry,
+		DisableMetrics: cfg.DisableMetrics,
+		DisableLogging: cfg.DisableLogging,
+		Disabled:       cfg.DisableTracing && cfg.DisableMetrics && cfg.DisableLogging,
 	})
 
 	p.K8s = k8sobs.NewAdapter(k8sobs.AdapterConfig{
-		ServiceName: cfg.ServiceName,
-		Tracer:      p.tracer,
-		Logger:      cfg.Logger,
-		Registry:    cfg.MetricsRegistry,
-		Disabled:    cfg.DisableTracing && cfg.DisableMetrics && cfg.DisableLogging,
+		ServiceName:    cfg.ServiceName,
+		Tracer:         p.tracer,
+		Logger:         cfg.Logger,
+		Registry:       cfg.MetricsRegistry,
+		DisableMetrics: cfg.DisableMetrics,
+		DisableLogging: cfg.DisableLogging,
+		Disabled:       cfg.DisableTracing && cfg.DisableMetrics && cfg.DisableLogging,
 	})
 
 	p.Pgx = pgxobs.NewAdapter(pgxobs.AdapterConfig{
-		ServiceName: cfg.ServiceName,
-		Tracer:      p.tracer,
-		Logger:      cfg.Logger,
-		Registry:    cfg.MetricsRegistry,
-		Disabled:    cfg.DisableTracing && cfg.DisableMetrics && cfg.DisableLogging,
+		ServiceName:    cfg.ServiceName,
+		Tracer:         p.tracer,
+		Logger:         cfg.Logger,
+		Registry:       cfg.MetricsRegistry,
+		DisableMetrics: cfg.DisableMetrics,
+		DisableLogging: cfg.DisableLogging,
+		Disabled:       cfg.DisableTracing && cfg.DisableMetrics && cfg.DisableLogging,
 	})
 
 	cfg.Logger.Info("Observability provider initialized",
@@ -138,6 +144,22 @@ func (p *Provider) MetricsRegistryOrNil() prometheus.Registerer {
 		return nil
 	}
 	return p.MetricsRegistry
+}
+
+// HTTPServerConfig returns server middleware config using this provider.
+func (p *Provider) HTTPServerConfig(logger *zap.Logger) httpobs.ServerConfig {
+	if p == nil {
+		return httpobs.ServerConfig{Disabled: true}
+	}
+	return httpobs.ServerConfig{
+		ServiceName:    p.config.ServiceName,
+		Tracer:         p.tracer,
+		Logger:         logger,
+		Registry:       p.MetricsRegistryOrNil(),
+		DisableMetrics: p.config.DisableMetrics,
+		DisableLogging: p.config.DisableLogging || logger == nil,
+		Disabled:       p.config.DisableTracing && p.config.DisableMetrics && p.config.DisableLogging,
+	}
 }
 
 // initTracing initializes OpenTelemetry tracing with the configured exporter

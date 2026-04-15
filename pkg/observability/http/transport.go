@@ -2,6 +2,7 @@ package http
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -31,10 +32,7 @@ func (t *observableTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	start := time.Now()
 
 	method := req.Method
-	host := req.URL.Host
-	if host == "" {
-		host = req.Host
-	}
+	host := outboundHostLabel(req)
 
 	// Track active requests
 	if t.metrics != nil {
@@ -59,14 +57,15 @@ func (t *observableTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	// Inject trace context into HTTP headers
 	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
 
-	// Log request start
-	t.config.Logger.Debug("HTTP request started",
-		zap.String("method", method),
-		zap.String("url", req.URL.String()),
-		zap.String("host", host),
-		zap.String("trace_id", span.SpanContext().TraceID().String()),
-		zap.String("span_id", span.SpanContext().SpanID().String()),
-	)
+	if !t.config.DisableLogging && t.config.Logger != nil {
+		t.config.Logger.Debug("HTTP request started",
+			zap.String("method", method),
+			zap.String("url", req.URL.String()),
+			zap.String("host", host),
+			zap.String("trace_id", span.SpanContext().TraceID().String()),
+			zap.String("span_id", span.SpanContext().SpanID().String()),
+		)
+	}
 
 	// Record request size
 	if t.metrics != nil && req.ContentLength > 0 {
@@ -89,13 +88,15 @@ func (t *observableTransport) RoundTrip(req *http.Request) (*http.Response, erro
 			t.metrics.requestDuration.WithLabelValues(method, host).Observe(duration.Seconds())
 		}
 
-		t.config.Logger.Error("HTTP request failed",
-			zap.String("method", method),
-			zap.String("url", req.URL.String()),
-			zap.Duration("duration", duration),
-			zap.Error(err),
-			zap.String("trace_id", span.SpanContext().TraceID().String()),
-		)
+		if !t.config.DisableLogging && t.config.Logger != nil {
+			t.config.Logger.Error("HTTP request failed",
+				zap.String("method", method),
+				zap.String("url", req.URL.String()),
+				zap.Duration("duration", duration),
+				zap.Error(err),
+				zap.String("trace_id", span.SpanContext().TraceID().String()),
+			)
+		}
 
 		return nil, err
 	}
@@ -132,14 +133,33 @@ func (t *observableTransport) RoundTrip(req *http.Request) (*http.Response, erro
 		logLevel = zap.WarnLevel
 	}
 
-	t.config.Logger.Log(logLevel, "HTTP request completed",
-		zap.String("method", method),
-		zap.String("url", req.URL.String()),
-		zap.Int("status", statusCode),
-		zap.Duration("duration", duration),
-		zap.Int64("response_size", resp.ContentLength),
-		zap.String("trace_id", span.SpanContext().TraceID().String()),
-	)
+	if !t.config.DisableLogging && t.config.Logger != nil {
+		t.config.Logger.Log(logLevel, "HTTP request completed",
+			zap.String("method", method),
+			zap.String("url", req.URL.String()),
+			zap.Int("status", statusCode),
+			zap.Duration("duration", duration),
+			zap.Int64("response_size", resp.ContentLength),
+			zap.String("trace_id", span.SpanContext().TraceID().String()),
+		)
+	}
 
 	return resp, nil
+}
+
+func outboundHostLabel(req *http.Request) string {
+	if req == nil || req.URL == nil {
+		return "unknown"
+	}
+	host := req.URL.Hostname()
+	if host == "" {
+		host = req.Host
+	}
+	if host == "" {
+		return "unknown"
+	}
+	if parsed := net.ParseIP(host); parsed != nil {
+		return "ip"
+	}
+	return host
 }

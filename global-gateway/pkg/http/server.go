@@ -47,6 +47,7 @@ type Server struct {
 	obsProvider     *observability.Provider
 	logger          *zap.Logger
 	proxyTimeout    time.Duration
+	httpClient      *stdhttp.Client
 	regionProxies   map[string]*proxy.Router
 	regionProxiesMu sync.RWMutex
 	regionRoutes    *cachepkg.Cache[string, tenantdir.Region]
@@ -133,6 +134,7 @@ func NewServer(
 		obsProvider:     obsProvider,
 		logger:          logger,
 		proxyTimeout:    effectiveProxyTimeout(cfg.ServerWriteTimeout.Duration),
+		httpClient:      obsProvider.HTTP.NewClient(httpobs.Config{Timeout: effectiveProxyTimeout(cfg.ServerWriteTimeout.Duration)}),
 		regionProxies:   make(map[string]*proxy.Router),
 		regionRoutes: cachepkg.New[string, tenantdir.Region](cachepkg.Config{
 			MaxSize: regionRouteCacheMaxEntries,
@@ -149,9 +151,7 @@ func (s *Server) Handler() stdhttp.Handler {
 }
 
 func (s *Server) setupRoutes() {
-	s.router.Use(httpobs.GinMiddleware(httpobs.ServerConfig{
-		Tracer: s.obsProvider.Tracer(),
-	}))
+	s.router.Use(httpobs.GinMiddleware(s.obsProvider.HTTPServerConfig(nil)))
 	s.router.Use(gatewaymiddleware.Recovery(s.logger))
 	s.router.Use(s.requestLogger.Logger())
 	s.router.Use(gatewaymiddleware.UpstreamTimeoutWhitelist())
@@ -329,7 +329,7 @@ func (s *Server) getRegionProxy(targetURL string) (*proxy.Router, error) {
 		return existing, nil
 	}
 
-	router, err := proxy.NewRouter(normalizedTargetURL, s.logger, s.proxyTimeout)
+	router, err := proxy.NewRouter(normalizedTargetURL, s.logger, s.proxyTimeout, proxy.WithHTTPClient(s.httpClient))
 	if err != nil {
 		return nil, err
 	}

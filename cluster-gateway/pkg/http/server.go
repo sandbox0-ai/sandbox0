@@ -59,6 +59,7 @@ type Server struct {
 	entitlements       licensing.Entitlements
 	sandboxAddrCache   *cache.Cache[sandboxAddrCacheKey, *url.URL]
 	obsProvider        *observability.Provider
+	httpClient         *http.Client
 }
 
 // NewServer creates a new HTTP server
@@ -166,6 +167,7 @@ func NewServer(
 	var managerClient *client.ManagerClient
 	if strings.TrimSpace(cfg.ManagerURL) != "" {
 		managerClient = client.NewManagerClient(cfg.ManagerURL, internalAuthGen, logger, proxyTimeout)
+		managerClient.SetHTTPClient(httpClient)
 	}
 
 	// Create sandbox cache to reduce manager API calls
@@ -275,6 +277,7 @@ func NewServer(
 		entitlements:       entitlements,
 		sandboxAddrCache:   sandboxAddrCache,
 		obsProvider:        obsProvider,
+		httpClient:         httpClient,
 	}
 
 	server.setupRoutes()
@@ -287,12 +290,17 @@ func (s *Server) Handler() http.Handler {
 	return s.router
 }
 
+func (s *Server) outboundHTTPClient() *http.Client {
+	if s != nil && s.httpClient != nil {
+		return s.httpClient
+	}
+	return &http.Client{}
+}
+
 // setupRoutes configures all HTTP routes
 func (s *Server) setupRoutes() {
 	// Global middleware (order matters)
-	s.router.Use(httpobs.GinMiddleware(httpobs.ServerConfig{
-		Tracer: s.obsProvider.Tracer(),
-	}))
+	s.router.Use(httpobs.GinMiddleware(s.obsProvider.HTTPServerConfig(nil)))
 	s.router.Use(middleware.Recovery(s.logger))
 	s.router.Use(s.requestLogger.Logger())
 	s.router.Use(gatewaymiddleware.UpstreamTimeoutWhitelist())

@@ -15,6 +15,9 @@ import (
 	ctldpower "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/power"
 	ctldserver "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/server"
 	"github.com/sandbox0-ai/sandbox0/pkg/k8s"
+	"github.com/sandbox0-ai/sandbox0/pkg/observability"
+	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
+	"go.uber.org/zap"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 )
 
@@ -44,7 +47,33 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	httpServer := newHTTPServer(httpAddr, buildPowerController(ctx))
+	zapLogger, err := zap.NewProduction()
+	if err != nil {
+		log.Printf("ctld observability disabled: create zap logger: %v", err)
+	}
+	var obsProvider *observability.Provider
+	if zapLogger != nil {
+		defer zapLogger.Sync()
+		obsProvider, err = observability.New(observability.Config{
+			ServiceName: "ctld",
+			Logger:      zapLogger,
+			TraceExporter: observability.TraceExporterConfig{
+				Type:     os.Getenv("OTEL_EXPORTER_TYPE"),
+				Endpoint: os.Getenv("OTEL_EXPORTER_ENDPOINT"),
+			},
+		})
+		if err != nil {
+			log.Printf("ctld observability disabled: %v", err)
+			obsProvider = nil
+		} else {
+			defer obsProvider.Shutdown(ctx)
+		}
+	}
+
+	httpServer := newHTTPServer(httpAddr, buildPowerController(ctx, obsProvider))
+	if obsProvider != nil {
+		httpServer.Handler = httpobs.ServerMiddleware(obsProvider.HTTPServerConfig(zapLogger))(httpServer.Handler)
+	}
 	go func() {
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("ctld http server failed: %v", err)
@@ -114,11 +143,11 @@ func newHTTPServer(addr string, controller ctldserver.Controller) *http.Server {
 	return &http.Server{Addr: addr, Handler: ctldserver.NewMux(controller)}
 }
 
-func buildPowerController(ctx context.Context) ctldserver.Controller {
+func buildPowerController(ctx context.Context, obsProvider *observability.Provider) ctldserver.Controller {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	k8sClient, err := k8s.NewClient(kubeconfig)
+	k8sClient, err := k8s.NewClientWithObservability(kubeconfig, obsProvider)
 	if err != nil {
 		log.Printf("ctld power control disabled: build kubernetes client: %v", err)
 		return ctldserver.NotImplementedController{}
@@ -139,6 +168,9 @@ func buildPowerController(ctx context.Context) ctldserver.Controller {
 		}()
 	}
 	controller := ctldpower.NewController(resolver, nil)
+	if obsProvider != nil {
+		controller.HTTPClient = obsProvider.HTTP.NewClient(httpobs.Config{Timeout: 2 * time.Second})
+	}
 	controller.StatsProvider = ctldpower.NewCRIStatsProvider(criEndpoint)
 	return controller
 }

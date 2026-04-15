@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/sandbox0-ai/sandbox0/pkg/observability/internal/promutil"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 )
@@ -18,11 +18,13 @@ type Adapter struct {
 
 // AdapterConfig configures the HTTP adapter
 type AdapterConfig struct {
-	ServiceName string
-	Tracer      trace.Tracer
-	Logger      *zap.Logger
-	Registry    prometheus.Registerer
-	Disabled    bool
+	ServiceName    string
+	Tracer         trace.Tracer
+	Logger         *zap.Logger
+	Registry       prometheus.Registerer
+	DisableMetrics bool
+	DisableLogging bool
+	Disabled       bool
 }
 
 // Config holds configuration for creating an observable HTTP client
@@ -39,7 +41,7 @@ type Config struct {
 // NewAdapter creates a new HTTP adapter
 func NewAdapter(cfg AdapterConfig) Adapter {
 	var m *metrics
-	if !cfg.Disabled && cfg.Registry != nil {
+	if !cfg.Disabled && !cfg.DisableMetrics && cfg.Registry != nil {
 		m = newMetrics(cfg.ServiceName, cfg.Registry)
 	}
 
@@ -85,6 +87,20 @@ func (a Adapter) NewTransport(base http.RoundTripper) http.RoundTripper {
 	}
 }
 
+// ServerConfig returns the base server middleware config for this adapter.
+func (a Adapter) ServerConfig(logger *zap.Logger) ServerConfig {
+	cfg := ServerConfig{
+		ServiceName:    a.config.ServiceName,
+		Tracer:         a.config.Tracer,
+		Registry:       a.config.Registry,
+		Logger:         logger,
+		DisableLogging: logger == nil || a.config.DisableLogging,
+		DisableMetrics: a.config.DisableMetrics,
+		Disabled:       a.config.Disabled,
+	}
+	return cfg
+}
+
 // metrics holds Prometheus metrics for HTTP client
 type metrics struct {
 	requestsTotal   *prometheus.CounterVec
@@ -95,43 +111,48 @@ type metrics struct {
 }
 
 func newMetrics(serviceName string, registry prometheus.Registerer) *metrics {
-	factory := promauto.With(registry)
+	prefix := promutil.MetricPrefix(serviceName)
 
 	return &metrics{
-		requestsTotal: factory.NewCounterVec(
+		requestsTotal: promutil.RegisterCounterVec(
+			registry,
 			prometheus.CounterOpts{
-				Name: serviceName + "_http_client_requests_total",
+				Name: prefix + "_http_client_requests_total",
 				Help: "Total number of HTTP client requests",
 			},
 			[]string{"method", "host", "status"},
 		),
-		requestDuration: factory.NewHistogramVec(
+		requestDuration: promutil.RegisterHistogramVec(
+			registry,
 			prometheus.HistogramOpts{
-				Name:    serviceName + "_http_client_request_duration_seconds",
+				Name:    prefix + "_http_client_request_duration_seconds",
 				Help:    "HTTP client request duration in seconds",
 				Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
 			},
 			[]string{"method", "host"},
 		),
-		requestSize: factory.NewHistogramVec(
+		requestSize: promutil.RegisterHistogramVec(
+			registry,
 			prometheus.HistogramOpts{
-				Name:    serviceName + "_http_client_request_size_bytes",
+				Name:    prefix + "_http_client_request_size_bytes",
 				Help:    "HTTP client request size in bytes",
 				Buckets: prometheus.ExponentialBuckets(100, 10, 7),
 			},
 			[]string{"method", "host"},
 		),
-		responseSize: factory.NewHistogramVec(
+		responseSize: promutil.RegisterHistogramVec(
+			registry,
 			prometheus.HistogramOpts{
-				Name:    serviceName + "_http_client_response_size_bytes",
+				Name:    prefix + "_http_client_response_size_bytes",
 				Help:    "HTTP client response size in bytes",
 				Buckets: prometheus.ExponentialBuckets(100, 10, 7),
 			},
 			[]string{"method", "host"},
 		),
-		activeRequests: factory.NewGaugeVec(
+		activeRequests: promutil.RegisterGaugeVec(
+			registry,
 			prometheus.GaugeOpts{
-				Name: serviceName + "_http_client_active_requests",
+				Name: prefix + "_http_client_active_requests",
 				Help: "Number of active HTTP client requests",
 			},
 			[]string{"method", "host"},

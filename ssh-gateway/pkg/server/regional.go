@@ -38,6 +38,14 @@ func NewRegionalSandboxResolver(baseURL string, internalAuthGen *internalauth.Ge
 	}
 }
 
+// SetHTTPClient replaces the resolver HTTP client.
+func (r *RegionalSandboxResolver) SetHTTPClient(httpClient *http.Client) {
+	if r == nil || httpClient == nil {
+		return
+	}
+	r.httpClient = httpClient
+}
+
 func (r *RegionalSandboxResolver) ResolveSandbox(ctx context.Context, sandboxID string, grants []sharedssh.AuthorizedGrant) (*sharedssh.ResolvedTarget, error) {
 	if strings.TrimSpace(r.baseURL) == "" {
 		return nil, fmt.Errorf("regional gateway URL is required")

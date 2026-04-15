@@ -33,7 +33,7 @@ type Config struct {
 
 // TraceExporterConfig configures the trace exporter
 type TraceExporterConfig struct {
-	// Type of exporter: "otlp", "stdout", or "noop" (default: "stdout")
+	// Type of exporter: "otlp", "stdout", or "noop" (default: "noop")
 	Type string
 
 	// Endpoint for the exporter
@@ -66,7 +66,7 @@ func (c *Config) setDefaults() {
 		c.TraceSampleRate = 1.0
 	}
 	if c.TraceExporter.Type == "" {
-		c.TraceExporter.Type = "stdout"
+		c.TraceExporter.Type = "noop"
 	}
 	if c.TraceExporter.Timeout == 0 {
 		c.TraceExporter.Timeout = 10 * time.Second

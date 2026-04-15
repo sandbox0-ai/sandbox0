@@ -9,6 +9,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/daemon"
+	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -34,7 +35,20 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	daemon := daemon.New(cfg, logger)
+	obsProvider, err := observability.New(observability.Config{
+		ServiceName: "netd",
+		Logger:      logger,
+		TraceExporter: observability.TraceExporterConfig{
+			Type:     os.Getenv("OTEL_EXPORTER_TYPE"),
+			Endpoint: os.Getenv("OTEL_EXPORTER_ENDPOINT"),
+		},
+	})
+	if err != nil {
+		logger.Fatal("Failed to initialize observability", zap.Error(err))
+	}
+	defer obsProvider.Shutdown(ctx)
+
+	daemon := daemon.New(cfg, logger, obsProvider)
 	if err := daemon.Run(ctx); err != nil {
 		logger.Fatal("netd exited with error", zap.Error(err))
 	}

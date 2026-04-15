@@ -3,6 +3,7 @@ package pgx
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -48,12 +49,13 @@ func (t *observableTracer) TraceQueryStart(ctx context.Context, conn *pgx.Conn, 
 	ctx = context.WithValue(ctx, queryStartKey{}, start)
 	ctx = context.WithValue(ctx, queryOperationKey{}, operation)
 
-	// Log query start
-	t.config.Logger.Debug("PostgreSQL query started",
-		zap.String("operation", operation),
-		zap.String("sql", truncateSQL(data.SQL)),
-		zap.String("trace_id", span.SpanContext().TraceID().String()),
-	)
+	if !t.config.DisableLogging && t.config.Logger != nil {
+		t.config.Logger.Debug("PostgreSQL query started",
+			zap.String("operation", operation),
+			zap.String("sql", truncateSQL(data.SQL)),
+			zap.String("trace_id", span.SpanContext().TraceID().String()),
+		)
+	}
 
 	return ctx
 }
@@ -91,12 +93,14 @@ func (t *observableTracer) TraceQueryEnd(ctx context.Context, conn *pgx.Conn, da
 			t.metrics.queryDuration.WithLabelValues(operation).Observe(duration.Seconds())
 		}
 
-		t.config.Logger.Error("PostgreSQL query failed",
-			zap.String("operation", operation),
-			zap.Duration("duration", duration),
-			zap.Error(data.Err),
-			zap.String("trace_id", span.SpanContext().TraceID().String()),
-		)
+		if !t.config.DisableLogging && t.config.Logger != nil {
+			t.config.Logger.Error("PostgreSQL query failed",
+				zap.String("operation", operation),
+				zap.Duration("duration", duration),
+				zap.Error(data.Err),
+				zap.String("trace_id", span.SpanContext().TraceID().String()),
+			)
+		}
 
 		return
 	}
@@ -112,12 +116,14 @@ func (t *observableTracer) TraceQueryEnd(ctx context.Context, conn *pgx.Conn, da
 		t.metrics.rowsAffected.WithLabelValues(operation).Add(float64(data.CommandTag.RowsAffected()))
 	}
 
-	t.config.Logger.Debug("PostgreSQL query completed",
-		zap.String("operation", operation),
-		zap.Duration("duration", duration),
-		zap.Int64("rows_affected", data.CommandTag.RowsAffected()),
-		zap.String("trace_id", span.SpanContext().TraceID().String()),
-	)
+	if !t.config.DisableLogging && t.config.Logger != nil {
+		t.config.Logger.Debug("PostgreSQL query completed",
+			zap.String("operation", operation),
+			zap.Duration("duration", duration),
+			zap.Int64("rows_affected", data.CommandTag.RowsAffected()),
+			zap.String("trace_id", span.SpanContext().TraceID().String()),
+		)
+	}
 }
 
 // Context keys for storing span metadata
@@ -127,32 +133,11 @@ type queryOperationKey struct{}
 
 // inferOperation extracts the SQL operation type from the query
 func inferOperation(sql string) string {
-	// Simple heuristic: look at the first word
-	for i, ch := range sql {
-		if ch == ' ' || ch == '\n' || ch == '\t' {
-			op := sql[:i]
-			// Normalize common operations
-			switch op {
-			case "SELECT", "select":
-				return "SELECT"
-			case "INSERT", "insert":
-				return "INSERT"
-			case "UPDATE", "update":
-				return "UPDATE"
-			case "DELETE", "delete":
-				return "DELETE"
-			case "BEGIN", "begin":
-				return "BEGIN"
-			case "COMMIT", "commit":
-				return "COMMIT"
-			case "ROLLBACK", "rollback":
-				return "ROLLBACK"
-			default:
-				return op
-			}
-		}
+	fields := strings.Fields(strings.TrimSpace(sql))
+	if len(fields) == 0 {
+		return "UNKNOWN"
 	}
-	return "UNKNOWN"
+	return strings.ToUpper(fields[0])
 }
 
 // truncateSQL truncates SQL statements for logging/tracing

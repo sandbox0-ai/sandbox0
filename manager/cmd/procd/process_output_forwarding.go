@@ -10,33 +10,38 @@ import (
 )
 
 const (
-	processOutputForwardingEnvVar        = "SANDBOX0_FORWARD_PROCESS_OUTPUT_TO_CONTAINER_LOGS"
-	processOutputForwardingMaxLineEnvVar = "SANDBOX0_PROCESS_OUTPUT_LOG_MAX_LINE_BYTES"
+	processOutputLogsEnvVar             = "SANDBOX0_PROCESS_LOGS"
+	processOutputLogsMaxLineBytesEnvVar = "SANDBOX0_PROCESS_LOG_MAX_BYTES"
 )
 
 func configureProcessOutputForwarding(logger *zap.Logger) {
-	enabled, err := boolEnv(processOutputForwardingEnvVar)
+	enabled, err := processOutputLogsEnabled()
 	if err != nil {
 		if logger != nil {
-			logger.Warn("Ignoring invalid process output forwarding setting",
-				zap.String("env", processOutputForwardingEnvVar),
+			logger.Warn("Ignoring invalid process log setting; defaulting to enabled",
+				zap.String("env", processOutputLogsEnvVar),
 				zap.Error(err),
+			)
+		}
+		enabled = true
+	}
+	if !enabled {
+		process.SetDefaultOutputForwarder(nil)
+		if logger != nil {
+			logger.Info("Sandbox process output forwarding disabled",
+				zap.String("env", processOutputLogsEnvVar),
 			)
 		}
 		return
 	}
-	if !enabled {
-		process.SetDefaultOutputForwarder(nil)
-		return
-	}
 
 	maxLineBytes := process.DefaultContainerLogMaxLineBytes
-	if raw := strings.TrimSpace(os.Getenv(processOutputForwardingMaxLineEnvVar)); raw != "" {
+	if raw := strings.TrimSpace(os.Getenv(processOutputLogsMaxLineBytesEnvVar)); raw != "" {
 		parsed, parseErr := strconv.Atoi(raw)
 		if parseErr != nil || parsed <= 0 {
 			if logger != nil {
 				logger.Warn("Ignoring invalid process output log line limit",
-					zap.String("env", processOutputForwardingMaxLineEnvVar),
+					zap.String("env", processOutputLogsMaxLineBytesEnvVar),
 					zap.String("value", raw),
 				)
 			}
@@ -52,16 +57,16 @@ func configureProcessOutputForwarding(logger *zap.Logger) {
 	}))
 	if logger != nil {
 		logger.Info("Sandbox process output forwarding enabled",
-			zap.String("env", processOutputForwardingEnvVar),
+			zap.String("env", processOutputLogsEnvVar),
 			zap.Int("max_line_bytes", maxLineBytes),
 		)
 	}
 }
 
-func boolEnv(name string) (bool, error) {
-	raw := strings.TrimSpace(os.Getenv(name))
+func processOutputLogsEnabled() (bool, error) {
+	raw := strings.TrimSpace(os.Getenv(processOutputLogsEnvVar))
 	if raw == "" {
-		return false, nil
+		return true, nil
 	}
 	return strconv.ParseBool(raw)
 }

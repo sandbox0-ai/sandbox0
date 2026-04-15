@@ -186,7 +186,7 @@ func (s *Server) Start() error {
 		Addr:         addr,
 		Handler:      s.router,
 		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 0, // Disabled for SSE streaming support
+		WriteTimeout: 0, // Disabled for long-running stream responses.
 		IdleTimeout:  120 * time.Second,
 	}
 

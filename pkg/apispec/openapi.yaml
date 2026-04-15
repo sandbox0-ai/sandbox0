@@ -1304,8 +1304,9 @@ paths:
       tags: [sandboxes]
       summary: Get sandbox pod logs
       description: |
-        Returns a bounded snapshot of Kubernetes container logs for the sandbox pod.
-        Set `follow=true` to stream logs as text/plain until the client disconnects.
+        Returns Kubernetes container logs for the sandbox pod.
+        When `follow=false`, the response is a bounded text/plain snapshot.
+        When `follow=true`, the response is a text/plain stream until the client disconnects.
       security:
         - bearerAuth: []
       x-upstream-service: manager
@@ -1338,7 +1339,7 @@ paths:
             maximum: 8388608
         - name: follow
           in: query
-          description: Stream logs until the client disconnects. When true, the response content type is text/plain.
+          description: Stream logs as text/plain until the client disconnects. When false, return a text/plain snapshot.
           schema:
             type: boolean
             default: false
@@ -1364,10 +1365,24 @@ paths:
       responses:
         "200":
           description: Sandbox pod logs
-          content:
-            application/json:
+          headers:
+            X-Sandbox-ID:
+              description: Sandbox ID for the returned log payload.
               schema:
-                $ref: "#/components/schemas/SuccessSandboxLogsResponse"
+                type: string
+            X-Sandbox-Pod-Name:
+              description: Kubernetes pod name that produced the returned log payload.
+              schema:
+                type: string
+            X-Sandbox-Log-Container:
+              description: Kubernetes container name that produced the returned log payload.
+              schema:
+                type: string
+            X-Sandbox-Log-Previous:
+              description: Whether the returned payload came from a previously terminated container instance.
+              schema:
+                type: boolean
+          content:
             text/plain:
               schema:
                 type: string
@@ -4193,26 +4208,6 @@ components:
           type: string
         created_at:
           type: string
-    SandboxLogs:
-      type: object
-      properties:
-        sandbox_id:
-          type: string
-        pod_name:
-          type: string
-        container:
-          type: string
-        previous:
-          type: boolean
-        logs:
-          type: string
-          description: Log text returned by Kubernetes for the selected container.
-      required:
-        - sandbox_id
-        - pod_name
-        - container
-        - previous
-        - logs
     SuccessSandboxResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
@@ -4227,13 +4222,6 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/SandboxStatus"
-    SuccessSandboxLogsResponse:
-      allOf:
-        - $ref: "#/components/schemas/SuccessEnvelope"
-        - type: object
-          properties:
-            data:
-              $ref: "#/components/schemas/SandboxLogs"
     SandboxSummary:
       type: object
       properties:

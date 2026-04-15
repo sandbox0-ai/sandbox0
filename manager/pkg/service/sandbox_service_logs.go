@@ -35,7 +35,7 @@ type SandboxLogsOptions struct {
 	SinceSeconds *int64 `json:"since_seconds,omitempty"`
 }
 
-// SandboxLogsResponse is the public payload returned by the sandbox logs API.
+// SandboxLogsResponse carries a bounded log snapshot plus Kubernetes metadata.
 type SandboxLogsResponse struct {
 	SandboxID string `json:"sandbox_id"`
 	PodName   string `json:"pod_name"`

@@ -441,6 +441,28 @@ procd_config:
 	}
 }
 
+func TestBuildPodSpecForwardsProcessOutputToContainerLogs(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	template := newTestTemplate()
+	template.Spec.EnvVars = map[string]string{
+		processOutputForwardingEnvVar: "false",
+	}
+
+	spec := BuildPodSpec(template)
+	if len(spec.Containers) == 0 {
+		t.Fatal("expected at least one container")
+	}
+
+	env := findEnvVar(spec.Containers[0].Env, processOutputForwardingEnvVar)
+	if env == nil || env.Value != "true" {
+		t.Fatalf("%s = %#v, want true", processOutputForwardingEnvVar, env)
+	}
+}
+
 func TestBuildPodSpecFailsClosedForStorageProxyEnvOverridesWhenManagerConfigUnset(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test

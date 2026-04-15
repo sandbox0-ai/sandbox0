@@ -23,8 +23,9 @@ func TestGetSandboxLogsReturnsOK(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	pod := newHTTPLogsTestPod("sandbox-1", "team-1")
+	client := fake.NewSimpleClientset(pod)
 	sandboxService := service.NewSandboxService(
-		fake.NewSimpleClientset(pod),
+		client,
 		newHTTPTestPodLister(t, pod),
 		nil,
 		nil,
@@ -50,14 +51,11 @@ func TestGetSandboxLogsReturnsOK(t *testing.T) {
 	server.getSandboxLogs(ctx)
 
 	assert.Equal(t, http.StatusOK, recorder.Code)
-	payload, apiErr, err := spec.DecodeResponse[service.SandboxLogsResponse](bytes.NewReader(recorder.Body.Bytes()))
-	require.NoError(t, err)
-	require.Nil(t, apiErr)
-	require.NotNil(t, payload)
-	assert.Equal(t, "sandbox-1", payload.SandboxID)
-	assert.Equal(t, "procd", payload.Container)
-	assert.True(t, payload.Previous)
-	assert.Equal(t, "fake logs", payload.Logs)
+	assert.Contains(t, recorder.Header().Get("Content-Type"), "text/plain")
+	assert.Equal(t, "sandbox-1", recorder.Header().Get("X-Sandbox-ID"))
+	assert.Equal(t, "procd", recorder.Header().Get("X-Sandbox-Log-Container"))
+	assert.Equal(t, "true", recorder.Header().Get("X-Sandbox-Log-Previous"))
+	assert.Equal(t, "fake logs", recorder.Body.String())
 }
 
 func TestGetSandboxLogsStreamsWhenFollowTrue(t *testing.T) {
@@ -94,6 +92,7 @@ func TestGetSandboxLogsStreamsWhenFollowTrue(t *testing.T) {
 	assert.Contains(t, recorder.Header().Get("Content-Type"), "text/plain")
 	assert.Equal(t, "sandbox-1", recorder.Header().Get("X-Sandbox-ID"))
 	assert.Equal(t, "procd", recorder.Header().Get("X-Sandbox-Log-Container"))
+	assert.Equal(t, "false", recorder.Header().Get("X-Sandbox-Log-Previous"))
 	assert.Equal(t, "fake logs", recorder.Body.String())
 }
 

@@ -1,9 +1,9 @@
 package http
 
 import (
+	"bufio"
 	"crypto/ed25519"
 	"crypto/rand"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -22,10 +22,18 @@ import (
 func TestSandboxLogsFollowDisablesManagerProxyTimeout(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
+	unblock := make(chan struct{})
 	manager := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(100 * time.Millisecond)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = io.WriteString(w, "stream logs")
+		_, _ = w.Write([]byte("stream logs\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		select {
+		case <-unblock:
+		case <-r.Context().Done():
+		}
 	}))
 	defer manager.Close()
 
@@ -86,11 +94,13 @@ func TestSandboxLogsFollowDisablesManagerProxyTimeout(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
-	body, err := io.ReadAll(resp.Body)
+	defer close(unblock)
+	reader := bufio.NewReader(resp.Body)
+	line, err := reader.ReadString('\n')
 	if err != nil {
-		t.Fatalf("read body: %v", err)
+		t.Fatalf("read stream line: %v", err)
 	}
-	if string(body) != "stream logs" {
-		t.Fatalf("body = %q, want %q", string(body), "stream logs")
+	if line != "stream logs\n" {
+		t.Fatalf("stream line = %q, want %q", line, "stream logs\n")
 	}
 }

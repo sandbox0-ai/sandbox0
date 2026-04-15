@@ -255,7 +255,7 @@ console.log('Status:', status.status);`
 
 ## Get Sandbox Logs
 
-Read bounded pod logs for sandbox startup and container diagnostics.
+Read pod logs for sandbox startup and container diagnostics. Snapshot and streaming requests return `text/plain`.
 
 <Endpoint method="GET">
 /api/v1/sandboxes/{'{id}'}/logs
@@ -278,6 +278,8 @@ Read bounded pod logs for sandbox startup and container diagnostics.
 
     curl -N -H "Authorization: Bearer $SANDBOX0_TOKEN" \
       "$SANDBOX0_BASE_URL/api/v1/sandboxes/sb_abc123/logs?follow=true&tail_lines=50"
+
+With `follow=true`, the response stays open and streams log bytes until the client disconnects.
 
 ---
 

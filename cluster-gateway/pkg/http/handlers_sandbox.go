@@ -1,8 +1,12 @@
 package http
 
 import (
+	"bufio"
+	"context"
 	"errors"
+	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
@@ -10,7 +14,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
-	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	sharedssh "github.com/sandbox0-ai/sandbox0/pkg/sshgateway"
 	"go.uber.org/zap"
 )
@@ -109,10 +112,104 @@ func (s *Server) getSandboxLogs(c *gin.Context) {
 	// Rewrite path to manager API
 	c.Request.URL.Path = "/api/v1/sandboxes/" + sandboxID + "/logs"
 	if sandboxLogsFollowRequested(c) {
-		c.Request = proxy.WithUpstreamTimeoutDisabledRequest(c.Request)
+		s.streamSandboxLogsFromManager(c, sandboxID)
+		return
 	}
 
 	s.proxyToManager(c)
+}
+
+func (s *Server) streamSandboxLogsFromManager(c *gin.Context, sandboxID string) {
+	authCtx := middleware.GetAuthContext(c)
+	claims := internalauth.ClaimsFromContext(c.Request.Context())
+
+	internalToken, err := s.generateManagerToken(authCtx, claims, nil)
+	if err != nil {
+		s.logger.Error("Failed to generate internal token for manager",
+			zap.String("team_id", authCtx.TeamID),
+			zap.Error(err),
+		)
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "internal authentication failed")
+		return
+	}
+
+	managerURL, err := url.Parse(s.cfg.ManagerURL)
+	if err != nil {
+		s.logger.Error("Failed to parse manager URL", zap.Error(err))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "manager upstream is invalid")
+		return
+	}
+	upstreamURL := *managerURL
+	upstreamURL.Path = "/api/v1/sandboxes/" + url.PathEscape(sandboxID) + "/logs"
+	upstreamURL.RawQuery = c.Request.URL.RawQuery
+
+	upReq, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, upstreamURL.String(), nil)
+	if err != nil {
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "proxy initialization failed")
+		return
+	}
+	upReq.Header = c.Request.Header.Clone()
+	upReq.Header.Set(internalauth.TeamIDHeader, authCtx.TeamID)
+	upReq.Header.Set(internalauth.DefaultTokenHeader, internalToken)
+	upReq.Header.Set("Accept", "text/plain")
+
+	resp, err := http.DefaultClient.Do(upReq)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
+		s.logger.Error("Failed to connect to manager log stream",
+			zap.String("sandbox_id", sandboxID),
+			zap.String("team_id", authCtx.TeamID),
+			zap.Error(err),
+		)
+		spec.JSONError(c, http.StatusBadGateway, spec.CodeUnavailable, "failed to connect to manager log stream")
+		return
+	}
+	defer resp.Body.Close()
+
+	copyResponseHeaders(c.Writer.Header(), resp.Header)
+	c.Status(resp.StatusCode)
+	if flusher, ok := c.Writer.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	if err := copyAndFlush(c.Writer, resp.Body); err != nil && !errors.Is(err, context.Canceled) {
+		s.logger.Debug("Manager log stream copy ended with error",
+			zap.String("sandbox_id", sandboxID),
+			zap.String("team_id", authCtx.TeamID),
+			zap.Error(err),
+		)
+	}
+}
+
+func copyResponseHeaders(dst, src http.Header) {
+	for key, values := range src {
+		for _, value := range values {
+			dst.Add(key, value)
+		}
+	}
+}
+
+func copyAndFlush(dst http.ResponseWriter, src io.Reader) error {
+	flusher, _ := dst.(http.Flusher)
+	reader := bufio.NewReader(src)
+	for {
+		line, readErr := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			if _, err := dst.Write(line); err != nil {
+				return err
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return nil
+			}
+			return readErr
+		}
+	}
 }
 
 func sandboxLogsFollowRequested(c *gin.Context) bool {

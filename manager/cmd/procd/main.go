@@ -64,6 +64,8 @@ func main() {
 	defer obsProvider.Shutdown(context.Background())
 
 	// Initialize managers
+	configureProcessOutputForwarding(logger)
+
 	contextManager := ctxpkg.NewManager()
 	contextManager.SetDefaultCleanupPolicy(ctxpkg.CleanupPolicy{
 		IdleTimeout: cfg.ContextIdleTimeout.Duration,

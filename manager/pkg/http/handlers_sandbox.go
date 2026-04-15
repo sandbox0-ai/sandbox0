@@ -348,7 +348,8 @@ func (s *Server) getSandboxLogs(c *gin.Context) {
 		return
 	}
 
-	spec.JSONSuccess(c, http.StatusOK, logs)
+	writeSandboxLogHeaders(c, logs.SandboxID, logs.PodName, logs.Container, logs.Previous)
+	c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte(logs.Logs))
 }
 
 func (s *Server) streamSandboxLogs(c *gin.Context, sandboxID, teamID string, options *service.SandboxLogsOptions) {
@@ -362,19 +363,27 @@ func (s *Server) streamSandboxLogs(c *gin.Context, sandboxID, teamID string, opt
 	c.Header("Content-Type", "text/plain; charset=utf-8")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("X-Accel-Buffering", "no")
-	c.Header("X-Sandbox-ID", stream.SandboxID)
-	c.Header("X-Sandbox-Pod-Name", stream.PodName)
-	c.Header("X-Sandbox-Log-Container", stream.Container)
+	writeSandboxLogHeaders(c, stream.SandboxID, stream.PodName, stream.Container, stream.Previous)
 	c.Status(http.StatusOK)
 	c.Writer.Flush()
 
-	if _, err := io.Copy(flushingResponseWriter{ResponseWriter: c.Writer}, stream.Body); err != nil && !errors.Is(err, context.Canceled) {
-		s.logger.Debug("Sandbox log stream ended with error",
-			zap.String("sandboxID", sandboxID),
-			zap.String("teamID", teamID),
-			zap.Error(err),
-		)
+	writer := flushingResponseWriter{ResponseWriter: c.Writer}
+	if _, err := io.Copy(writer, stream.Body); err != nil {
+		if !errors.Is(err, context.Canceled) {
+			s.logger.Debug("Sandbox log stream ended with error",
+				zap.String("sandboxID", sandboxID),
+				zap.String("teamID", teamID),
+				zap.Error(err),
+			)
+		}
 	}
+}
+
+func writeSandboxLogHeaders(c *gin.Context, sandboxID, podName, container string, previous bool) {
+	c.Header("X-Sandbox-ID", sandboxID)
+	c.Header("X-Sandbox-Pod-Name", podName)
+	c.Header("X-Sandbox-Log-Container", container)
+	c.Header("X-Sandbox-Log-Previous", strconv.FormatBool(previous))
 }
 
 func (s *Server) writeSandboxLogsError(c *gin.Context, sandboxID, teamID string, err error) {

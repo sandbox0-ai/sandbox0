@@ -110,6 +110,7 @@ func (s *Server) getSandboxLogs(c *gin.Context) {
 	c.Request.URL.Path = "/api/v1/sandboxes/" + sandboxID + "/logs"
 	if sandboxLogsFollowRequested(c) {
 		c.Request = proxy.WithUpstreamTimeoutDisabledRequest(c.Request)
+		c.Request.Header.Set("Accept", "text/plain")
 	}
 
 	s.proxyToManager(c)

@@ -4,6 +4,8 @@ Use `spec.warmProcesses` when a template needs a helper process to be running be
 
 Warm processes are intended for long-running helpers such as agents, language servers, REPL sessions, and daemon-style workers. If a configured warm process exits, procd exits and Kubernetes restarts the sandbox container with the pod's restart policy.
 
+Warm process stdout and stderr are mirrored to Kubernetes pod logs by default. Procd still keeps the normal process-output API as the source of truth; container logs are an extra diagnostic sink with bounded JSON lines. Set `SANDBOX0_PROCESS_LOGS=false` in template `envVars` to disable the container-log mirror. Set `SANDBOX0_PROCESS_LOG_MAX_BYTES` to change the per-line mirror limit from the default `4096` bytes.
+
 ## Spec
 
 ```yaml

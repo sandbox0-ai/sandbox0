@@ -441,6 +441,36 @@ procd_config:
 	}
 }
 
+func TestBuildPodSpecKeepsProcessLogsDefaultAndOptOutEnv(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	template := newTestTemplate()
+	const processLogsEnvVar = "SANDBOX0_PROCESS_LOGS"
+
+	defaultSpec := BuildPodSpec(template)
+	if len(defaultSpec.Containers) == 0 {
+		t.Fatal("expected at least one container")
+	}
+	if env := findEnvVar(defaultSpec.Containers[0].Env, processLogsEnvVar); env != nil {
+		t.Fatalf("%s = %#v, want omitted because procd defaults it on", processLogsEnvVar, env)
+	}
+
+	template.Spec.EnvVars = map[string]string{processLogsEnvVar: "false"}
+
+	spec := BuildPodSpec(template)
+	if len(spec.Containers) == 0 {
+		t.Fatal("expected at least one container")
+	}
+
+	env := findEnvVar(spec.Containers[0].Env, processLogsEnvVar)
+	if env == nil || env.Value != "false" {
+		t.Fatalf("%s = %#v, want false", processLogsEnvVar, env)
+	}
+}
+
 func TestBuildPodSpecFailsClosedForStorageProxyEnvOverridesWhenManagerConfigUnset(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test

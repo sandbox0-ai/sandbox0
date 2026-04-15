@@ -62,6 +62,24 @@ type ProcessConfig struct {
 	BufferSize int               `json:"buffer_size"` // Number of messages to buffer for the output multiplexer, default is 64 if not set
 }
 
+// ProcessDescriptor identifies the process that emitted an output event.
+type ProcessDescriptor struct {
+	ProcessID   string
+	ProcessType ProcessType
+	PID         int
+	Alias       string
+}
+
+// OutputForwarder mirrors process output to an additional diagnostic sink.
+type OutputForwarder interface {
+	ForwardOutput(ProcessDescriptor, ProcessOutput)
+}
+
+// FlushableOutputForwarder can flush buffered partial output before a process closes.
+type FlushableOutputForwarder interface {
+	FlushProcessOutput(ProcessDescriptor)
+}
+
 // ProcessOutput represents output from a process.
 type ProcessOutput struct {
 	Source OutputSource `json:"source"`
@@ -185,6 +203,7 @@ type BaseProcess struct {
 	exitCode        int
 	pty             *os.File
 	outputMultiplex *MultiplexedChannel[ProcessOutput]
+	outputForwarder OutputForwarder
 	startTime       time.Time
 
 	// cpuTracker tracks CPU time between samples for percentage calculation
@@ -214,6 +233,7 @@ func NewBaseProcess(id string, processType ProcessType, config ProcessConfig) *B
 		config:          config,
 		state:           ProcessStateCreated,
 		outputMultiplex: NewMultiplexedChannel[ProcessOutput](config.BufferSize),
+		outputForwarder: defaultOutputForwarderSnapshot(),
 		cpuTracker:      newCPUTracker(),
 		inputQueue:      make(chan []byte, config.BufferSize),
 		inputReady:      make(chan struct{}),
@@ -223,6 +243,13 @@ func NewBaseProcess(id string, processType ProcessType, config ProcessConfig) *B
 		close(bp.inputReady)
 	}
 	return bp
+}
+
+// SetOutputForwarder configures an optional diagnostic sink for process output.
+func (bp *BaseProcess) SetOutputForwarder(forwarder OutputForwarder) {
+	bp.mu.Lock()
+	defer bp.mu.Unlock()
+	bp.outputForwarder = forwarder
 }
 
 // AddExitHandler appends an exit handler to the handler chain.
@@ -581,11 +608,34 @@ func (bp *BaseProcess) NotifyStart(event StartEvent) {
 // PublishOutput publishes output to all subscribers.
 func (bp *BaseProcess) PublishOutput(output ProcessOutput) {
 	bp.outputMultiplex.Publish(output)
+	if forwarder := bp.outputForwarderSnapshot(); forwarder != nil {
+		forwarder.ForwardOutput(bp.descriptor(), output)
+	}
 }
 
 // CloseOutput closes the output channel.
 func (bp *BaseProcess) CloseOutput() {
+	if forwarder, ok := bp.outputForwarderSnapshot().(FlushableOutputForwarder); ok && forwarder != nil {
+		forwarder.FlushProcessOutput(bp.descriptor())
+	}
 	bp.outputMultiplex.Close()
+}
+
+func (bp *BaseProcess) outputForwarderSnapshot() OutputForwarder {
+	bp.mu.RLock()
+	defer bp.mu.RUnlock()
+	return bp.outputForwarder
+}
+
+func (bp *BaseProcess) descriptor() ProcessDescriptor {
+	bp.mu.RLock()
+	defer bp.mu.RUnlock()
+	return ProcessDescriptor{
+		ProcessID:   bp.id,
+		ProcessType: bp.processType,
+		PID:         bp.pid,
+		Alias:       bp.config.Alias,
+	}
 }
 
 // GetPTY returns the PTY file descriptor.

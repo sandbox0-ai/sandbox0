@@ -2020,6 +2020,14 @@ func annotationValue(annotations map[string]string, key string) string {
 	return annotations[key]
 }
 
+func shouldReconcileSandboxPowerState(pod *corev1.Pod) bool {
+	if pod == nil || pod.DeletionTimestamp != nil {
+		return false
+	}
+	state := sandboxPowerStateFromAnnotations(pod.Annotations)
+	return state.Phase != SandboxPowerPhaseStable || state.Desired != state.Observed
+}
+
 func hasExplicitSandboxPowerStateAnnotations(annotations map[string]string) bool {
 	if len(annotations) == 0 {
 		return false
@@ -2237,17 +2245,14 @@ func (s *SandboxService) reconcilePendingSandboxPowerStates(ctx context.Context)
 		return
 	}
 	for _, pod := range pods {
-		if pod == nil {
+		if !shouldReconcileSandboxPowerState(pod) {
 			continue
 		}
 		sandboxID := strings.TrimSpace(pod.Labels[controller.LabelSandboxID])
 		if sandboxID == "" {
 			continue
 		}
-		state := sandboxPowerStateFromAnnotations(pod.Annotations)
-		if state.Phase != SandboxPowerPhaseStable || state.Desired != state.Observed {
-			s.triggerSandboxPowerStateReconcile(sandboxID)
-		}
+		s.triggerSandboxPowerStateReconcile(sandboxID)
 	}
 }
 
@@ -2261,8 +2266,7 @@ func (s *SandboxService) finishSandboxPowerStateReconcile(sandboxID string) {
 	if err != nil {
 		return
 	}
-	state := sandboxPowerStateFromAnnotations(pod.Annotations)
-	if state.Phase != SandboxPowerPhaseStable || state.Desired != state.Observed {
+	if shouldReconcileSandboxPowerState(pod) {
 		s.triggerSandboxPowerStateReconcile(sandboxID)
 	}
 }
@@ -2278,6 +2282,9 @@ func (s *SandboxService) reconcileSandboxPowerState(sandboxID string) {
 				zap.String("sandboxID", sandboxID),
 				zap.Error(err),
 			)
+			return
+		}
+		if pod.DeletionTimestamp != nil {
 			return
 		}
 

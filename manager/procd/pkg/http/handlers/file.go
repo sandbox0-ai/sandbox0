@@ -9,6 +9,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/file"
+	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"go.uber.org/zap"
 )
 
@@ -187,6 +188,9 @@ func (h *FileHandler) Move(w http.ResponseWriter, r *http.Request) {
 
 // Watch handles WebSocket file watching.
 func (h *FileHandler) Watch(w http.ResponseWriter, r *http.Request) {
+	if err := proxy.DisableResponseDeadlines(w); err != nil {
+		h.logger.Debug("Failed to disable file watch response deadlines", zap.Error(err))
+	}
 	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		h.logger.Error("WebSocket upgrade failed", zap.Error(err))

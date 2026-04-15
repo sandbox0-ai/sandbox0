@@ -43,6 +43,9 @@ func NewRouter(targetUrl string, logger *zap.Logger, timeout time.Duration, opts
 // ProxyToTarget creates a reverse proxy handler for target service
 func (r *Router) ProxyToTarget(c *gin.Context) {
 	if isWebSocketUpgrade(c.Request) {
+		if err := PrepareStreamingProxyResponse(c.Writer, c.Request); err != nil {
+			r.logger.Debug("Failed to disable proxy response deadlines", zap.Error(err))
+		}
 		opts := make([]Option, 0, len(r.requestModifiers))
 		for _, mod := range r.requestModifiers {
 			opts = append(opts, WithRequestModifier(mod))
@@ -52,6 +55,9 @@ func (r *Router) ProxyToTarget(c *gin.Context) {
 	}
 
 	req := c.Request
+	if err := PrepareStreamingProxyResponse(c.Writer, req); err != nil {
+		r.logger.Debug("Failed to disable proxy response deadlines", zap.Error(err))
+	}
 	cancel := context.CancelFunc(func() {})
 	if r.timeout > 0 {
 		req, cancel = ApplyRequestTimeout(c.Request, r.timeout)

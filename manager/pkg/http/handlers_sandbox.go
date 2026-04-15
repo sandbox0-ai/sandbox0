@@ -12,6 +12,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"go.uber.org/zap"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
@@ -353,6 +354,13 @@ func (s *Server) getSandboxLogs(c *gin.Context) {
 }
 
 func (s *Server) streamSandboxLogs(c *gin.Context, sandboxID, teamID string, options *service.SandboxLogsOptions) {
+	if err := proxy.DisableResponseWriteDeadline(c.Writer); err != nil {
+		s.logger.Debug("Failed to disable sandbox log stream response deadlines",
+			zap.String("sandboxID", sandboxID),
+			zap.String("teamID", teamID),
+			zap.Error(err),
+		)
+	}
 	stream, err := s.sandboxService.StreamSandboxLogs(c.Request.Context(), sandboxID, teamID, options)
 	if err != nil {
 		s.writeSandboxLogsError(c, sandboxID, teamID, err)

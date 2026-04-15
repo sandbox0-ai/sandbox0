@@ -17,6 +17,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	httpproxy "github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"google.golang.org/grpc/codes"
@@ -261,6 +262,9 @@ func (s *Server) handleVolumeFileWatch(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.loadAuthorizedVolume(r.Context(), volumeID); err != nil {
 		s.writeVolumeFileError(w, err)
 		return
+	}
+	if err := httpproxy.DisableResponseDeadlines(w); err != nil {
+		s.logger.WithError(err).WithField("volume_id", volumeID).Debug("Failed to disable volume file watch response deadlines")
 	}
 	proxied, err := s.proxyVolumeRequestToOwnerIfNeeded(w, r, volumeID)
 	if err != nil {

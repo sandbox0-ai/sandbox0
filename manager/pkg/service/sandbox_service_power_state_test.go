@@ -207,6 +207,37 @@ func TestReconcileSandboxPowerStateUsesConfiguredExecutor(t *testing.T) {
 	})
 }
 
+func TestShouldReconcileSandboxPowerStateSkipsDeletingPod(t *testing.T) {
+	pending := newPowerStatePod(SandboxPowerStatePaused, SandboxPowerStateActive, SandboxPowerPhasePausing)
+	assert.True(t, shouldReconcileSandboxPowerState(pending))
+
+	stable := newPowerStatePod(SandboxPowerStatePaused, SandboxPowerStatePaused, SandboxPowerPhaseStable)
+	assert.False(t, shouldReconcileSandboxPowerState(stable))
+
+	deleting := newPowerStatePod(SandboxPowerStatePaused, SandboxPowerStateActive, SandboxPowerPhasePausing)
+	deletedAt := metav1.NewTime(time.Now())
+	deleting.DeletionTimestamp = &deletedAt
+	assert.False(t, shouldReconcileSandboxPowerState(deleting))
+}
+
+func TestReconcileSandboxPowerStateSkipsDeletingPod(t *testing.T) {
+	pod := newPowerStatePod(SandboxPowerStatePaused, SandboxPowerStateActive, SandboxPowerPhasePausing)
+	deletedAt := metav1.NewTime(time.Now())
+	pod.DeletionTimestamp = &deletedAt
+	executor := &recordingPowerExecutor{}
+	svc := &SandboxService{
+		k8sClient: fake.NewSimpleClientset(pod),
+		podLister: newTestPodLister(t, pod),
+		logger:    zap.NewNop(),
+	}
+	svc.SetPowerExecutor(executor)
+
+	svc.reconcileSandboxPowerState("sandbox-1")
+
+	assert.Empty(t, executor.pauseCalls)
+	assert.Empty(t, executor.resumeCalls)
+}
+
 func TestStartPowerStateReconcilerTriggersPendingTransitions(t *testing.T) {
 	pod := newPowerStatePod(SandboxPowerStatePaused, SandboxPowerStateActive, SandboxPowerPhasePausing)
 	pauseCalled := make(chan struct{})

@@ -3,12 +3,14 @@ package http
 import (
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/client"
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	sharedssh "github.com/sandbox0-ai/sandbox0/pkg/sshgateway"
 	"go.uber.org/zap"
 )
@@ -94,6 +96,28 @@ func (s *Server) getSandboxStatus(c *gin.Context) {
 	c.Request.URL.Path = "/api/v1/sandboxes/" + sandboxID + "/status"
 
 	s.proxyToManager(c)
+}
+
+// getSandboxLogs gets sandbox pod logs
+func (s *Server) getSandboxLogs(c *gin.Context) {
+	sandboxID := c.Param("id")
+	if sandboxID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
+		return
+	}
+
+	// Rewrite path to manager API
+	c.Request.URL.Path = "/api/v1/sandboxes/" + sandboxID + "/logs"
+	if sandboxLogsFollowRequested(c) {
+		c.Request = proxy.WithUpstreamTimeoutDisabledRequest(c.Request)
+	}
+
+	s.proxyToManager(c)
+}
+
+func sandboxLogsFollowRequested(c *gin.Context) bool {
+	follow, err := strconv.ParseBool(c.Query("follow"))
+	return err == nil && follow
 }
 
 // updateSandbox updates sandbox configuration

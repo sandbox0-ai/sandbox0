@@ -1299,6 +1299,96 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/sandboxes/{id}/logs:
+    get:
+      tags: [sandboxes]
+      summary: Get sandbox pod logs
+      description: |
+        Returns a bounded snapshot of Kubernetes container logs for the sandbox pod.
+        Set `follow=true` to stream logs as text/plain until the client disconnects.
+      security:
+        - bearerAuth: []
+      x-upstream-service: manager
+      x-upstream-path: /api/v1/sandboxes/{id}/logs
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+        - name: container
+          in: query
+          description: Pod container name. Defaults to the sandbox main container.
+          schema:
+            type: string
+            default: procd
+        - name: tail_lines
+          in: query
+          description: Maximum number of log lines to return from the end of the log.
+          schema:
+            type: integer
+            format: int64
+            default: 200
+            minimum: 1
+            maximum: 5000
+        - name: limit_bytes
+          in: query
+          description: Maximum response log payload bytes read from Kubernetes. Defaults only apply when follow is false.
+          schema:
+            type: integer
+            format: int64
+            default: 1048576
+            minimum: 1
+            maximum: 8388608
+        - name: follow
+          in: query
+          description: Stream logs until the client disconnects. When true, the response content type is text/plain.
+          schema:
+            type: boolean
+            default: false
+        - name: previous
+          in: query
+          description: Return logs for the previously terminated container instance.
+          schema:
+            type: boolean
+            default: false
+        - name: timestamps
+          in: query
+          description: Include Kubernetes log timestamps when available.
+          schema:
+            type: boolean
+            default: false
+        - name: since_seconds
+          in: query
+          description: Only return logs newer than this many seconds.
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        "200":
+          description: Sandbox pod logs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessSandboxLogsResponse"
+            text/plain:
+              schema:
+                type: string
+        "400":
+          description: Invalid log query parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
   /api/v1/sandboxes/{id}/pause:
     post:
       tags: [sandboxes]
@@ -4103,6 +4193,26 @@ components:
           type: string
         created_at:
           type: string
+    SandboxLogs:
+      type: object
+      properties:
+        sandbox_id:
+          type: string
+        pod_name:
+          type: string
+        container:
+          type: string
+        previous:
+          type: boolean
+        logs:
+          type: string
+          description: Log text returned by Kubernetes for the selected container.
+      required:
+        - sandbox_id
+        - pod_name
+        - container
+        - previous
+        - logs
     SuccessSandboxResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
@@ -4117,6 +4227,13 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/SandboxStatus"
+    SuccessSandboxLogsResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/SandboxLogs"
     SandboxSummary:
       type: object
       properties:

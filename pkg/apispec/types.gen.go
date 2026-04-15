@@ -349,6 +349,11 @@ const (
 	SuccessSandboxListResponseSuccessTrue SuccessSandboxListResponseSuccess = true
 )
 
+// Defines values for SuccessSandboxLogsResponseSuccess.
+const (
+	SuccessSandboxLogsResponseSuccessTrue SuccessSandboxLogsResponseSuccess = true
+)
+
 // Defines values for SuccessSandboxNetworkPolicyResponseSuccess.
 const (
 	SuccessSandboxNetworkPolicyResponseSuccessTrue SuccessSandboxNetworkPolicyResponseSuccess = true
@@ -461,7 +466,7 @@ const (
 
 // Defines values for SuccessWrittenResponseSuccess.
 const (
-	True SuccessWrittenResponseSuccess = true
+	SuccessWrittenResponseSuccessTrue SuccessWrittenResponseSuccess = true
 )
 
 // Defines values for SyncEventType.
@@ -1486,6 +1491,17 @@ type SandboxConfig struct {
 	Webhook      *WebhookConfig        `json:"webhook,omitempty"`
 }
 
+// SandboxLogs defines model for SandboxLogs.
+type SandboxLogs struct {
+	Container string `json:"container"`
+
+	// Logs Log text returned by Kubernetes for the selected container.
+	Logs      string `json:"logs"`
+	PodName   string `json:"pod_name"`
+	Previous  bool   `json:"previous"`
+	SandboxId string `json:"sandbox_id"`
+}
+
 // SandboxNetworkPolicy defines model for SandboxNetworkPolicy.
 type SandboxNetworkPolicy struct {
 	CredentialBindings *[]CredentialBinding `json:"credentialBindings,omitempty"`
@@ -2100,6 +2116,15 @@ type SuccessSandboxListResponse struct {
 
 // SuccessSandboxListResponseSuccess defines model for SuccessSandboxListResponse.Success.
 type SuccessSandboxListResponseSuccess bool
+
+// SuccessSandboxLogsResponse defines model for SuccessSandboxLogsResponse.
+type SuccessSandboxLogsResponse struct {
+	Data    *SandboxLogs                      `json:"data,omitempty"`
+	Success SuccessSandboxLogsResponseSuccess `json:"success"`
+}
+
+// SuccessSandboxLogsResponseSuccess defines model for SuccessSandboxLogsResponse.Success.
+type SuccessSandboxLogsResponseSuccess bool
 
 // SuccessSandboxNetworkPolicyResponse defines model for SuccessSandboxNetworkPolicyResponse.
 type SuccessSandboxNetworkPolicyResponse struct {
@@ -2755,6 +2780,30 @@ type GetApiV1SandboxesIdFilesListParams struct {
 // GetApiV1SandboxesIdFilesStatParams defines parameters for GetApiV1SandboxesIdFilesStat.
 type GetApiV1SandboxesIdFilesStatParams struct {
 	Path FilePath `form:"path" json:"path"`
+}
+
+// GetApiV1SandboxesIdLogsParams defines parameters for GetApiV1SandboxesIdLogs.
+type GetApiV1SandboxesIdLogsParams struct {
+	// Container Pod container name. Defaults to the sandbox main container.
+	Container *string `form:"container,omitempty" json:"container,omitempty"`
+
+	// TailLines Maximum number of log lines to return from the end of the log.
+	TailLines *int64 `form:"tail_lines,omitempty" json:"tail_lines,omitempty"`
+
+	// LimitBytes Maximum response log payload bytes read from Kubernetes. Defaults only apply when follow is false.
+	LimitBytes *int64 `form:"limit_bytes,omitempty" json:"limit_bytes,omitempty"`
+
+	// Follow Stream logs until the client disconnects. When true, the response content type is text/plain.
+	Follow *bool `form:"follow,omitempty" json:"follow,omitempty"`
+
+	// Previous Return logs for the previously terminated container instance.
+	Previous *bool `form:"previous,omitempty" json:"previous,omitempty"`
+
+	// Timestamps Include Kubernetes log timestamps when available.
+	Timestamps *bool `form:"timestamps,omitempty" json:"timestamps,omitempty"`
+
+	// SinceSeconds Only return logs newer than this many seconds.
+	SinceSeconds *int64 `form:"since_seconds,omitempty" json:"since_seconds,omitempty"`
 }
 
 // DeleteApiV1SandboxvolumesIdParams defines parameters for DeleteApiV1SandboxvolumesId.

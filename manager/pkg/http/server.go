@@ -151,6 +151,7 @@ func (s *Server) setupRoutes() {
 			sandboxes.GET("/:id", s.getSandbox)
 			sandboxes.PUT("/:id", s.requireNetworkPolicyInBody(func() any { return &updateSandboxCapabilityRequest{} }), s.updateSandbox)
 			sandboxes.GET("/:id/status", s.getSandboxStatus)
+			sandboxes.GET("/:id/logs", s.getSandboxLogs)
 			sandboxes.GET("/:id/stats", s.getSandboxStats)
 			sandboxes.GET("/:id/network", s.requireNetworkPolicyCapability(), s.getNetworkPolicy)
 			sandboxes.PUT("/:id/network", s.requireNetworkPolicyCapability(), s.updateNetworkPolicy)

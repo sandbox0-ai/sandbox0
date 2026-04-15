@@ -64,6 +64,21 @@ func TestContainerLogForwarderTruncatesLongLines(t *testing.T) {
 	}
 }
 
+func TestDefaultOutputForwarderIsInheritedByNewProcesses(t *testing.T) {
+	var stdout bytes.Buffer
+	forwarder := NewContainerLogForwarder(ContainerLogForwarderOptions{Stdout: &stdout})
+	SetDefaultOutputForwarder(forwarder)
+	t.Cleanup(func() { SetDefaultOutputForwarder(nil) })
+
+	base := NewBaseProcess("ctx-default", ProcessTypeCMD, ProcessConfig{Type: ProcessTypeCMD, Alias: "helper"})
+	base.PublishOutput(ProcessOutput{Source: OutputSourceStdout, Data: []byte("ready\n")})
+
+	event := decodeContainerLogLine(t, stdout.Bytes())
+	if event.ProcessID != "ctx-default" || event.Alias != "helper" || event.Source != OutputSourceStdout || event.Data != "ready" {
+		t.Fatalf("unexpected inherited forwarder event: %#v", event)
+	}
+}
+
 func decodeContainerLogLine(t *testing.T, data []byte) containerLogLine {
 	t.Helper()
 	events := decodeContainerLogLines(t, data)

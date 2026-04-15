@@ -441,25 +441,33 @@ procd_config:
 	}
 }
 
-func TestBuildPodSpecForwardsProcessOutputToContainerLogs(t *testing.T) {
+func TestBuildPodSpecKeepsProcessOutputForwardingOptIn(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test
 `)
 	t.Setenv("CONFIG_PATH", configPath)
 
 	template := newTestTemplate()
-	template.Spec.EnvVars = map[string]string{
-		processOutputForwardingEnvVar: "false",
+	const forwardingEnvVar = "SANDBOX0_FORWARD_PROCESS_OUTPUT_TO_CONTAINER_LOGS"
+
+	defaultSpec := BuildPodSpec(template)
+	if len(defaultSpec.Containers) == 0 {
+		t.Fatal("expected at least one container")
 	}
+	if env := findEnvVar(defaultSpec.Containers[0].Env, forwardingEnvVar); env != nil {
+		t.Fatalf("%s = %#v, want omitted by default", forwardingEnvVar, env)
+	}
+
+	template.Spec.EnvVars = map[string]string{forwardingEnvVar: "true"}
 
 	spec := BuildPodSpec(template)
 	if len(spec.Containers) == 0 {
 		t.Fatal("expected at least one container")
 	}
 
-	env := findEnvVar(spec.Containers[0].Env, processOutputForwardingEnvVar)
+	env := findEnvVar(spec.Containers[0].Env, forwardingEnvVar)
 	if env == nil || env.Value != "true" {
-		t.Fatalf("%s = %#v, want true", processOutputForwardingEnvVar, env)
+		t.Fatalf("%s = %#v, want true", forwardingEnvVar, env)
 	}
 }
 

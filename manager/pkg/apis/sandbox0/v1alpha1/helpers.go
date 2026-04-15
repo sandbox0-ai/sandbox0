@@ -22,8 +22,6 @@ const (
 	netdMITMCADir       = "/var/run/sandbox0/netd"
 	netdMITMCACertPath  = netdMITMCADir + "/mitm-ca.crt"
 
-	processOutputForwardingEnvVar = "SANDBOX0_FORWARD_PROCESS_OUTPUT_TO_CONTAINER_LOGS"
-
 	// Template resources remain hard limits; requests reserve a smaller baseline
 	// so warm pools and cold-start sandboxes can be packed efficiently.
 	defaultSandboxCPURequestRatioMillis    = int64(100)
@@ -328,10 +326,6 @@ func appendProcdConfigEnvVars(envVars []corev1.EnvVar) []corev1.EnvVar {
 		ValueFrom: &corev1.EnvVarSource{
 			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.nodeName"},
 		},
-	})
-	upsertProcdEnvVar(envIndex, &envVars, corev1.EnvVar{
-		Name:  processOutputForwardingEnvVar,
-		Value: "true",
 	})
 
 	cfg := config.LoadManagerConfig()

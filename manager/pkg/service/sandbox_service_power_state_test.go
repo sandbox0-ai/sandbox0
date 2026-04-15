@@ -157,6 +157,39 @@ func TestRequestPauseSandboxRetriesConflict(t *testing.T) {
 	assert.Equal(t, SandboxPowerPhasePausing, state.Phase)
 }
 
+func TestRequestPauseSandboxByIDRecordsDesiredState(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sandbox-1",
+			Namespace: "default",
+			Labels: map[string]string{
+				controller.LabelSandboxID: "sandbox-1",
+			},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	k8sClient := fake.NewSimpleClientset(pod)
+	executor := &recordingPowerExecutor{}
+	svc := &SandboxService{
+		k8sClient: k8sClient,
+		podLister: newTestPodLister(t, pod),
+		clock:     systemTime{},
+		logger:    zap.NewNop(),
+	}
+	svc.SetPowerExecutor(executor)
+	svc.powerStateReconcilers.Store("sandbox-1", struct{}{})
+
+	require.NoError(t, svc.RequestPauseSandboxByID(context.Background(), "sandbox-1"))
+
+	assert.Empty(t, executor.pauseCalls)
+	updated, err := k8sClient.CoreV1().Pods("default").Get(context.Background(), "sandbox-1", metav1.GetOptions{})
+	require.NoError(t, err)
+	state := sandboxPowerStateFromAnnotations(updated.Annotations)
+	assert.Equal(t, SandboxPowerStatePaused, state.Desired)
+	assert.Equal(t, SandboxPowerStateActive, state.Observed)
+	assert.Equal(t, SandboxPowerPhasePausing, state.Phase)
+}
+
 func TestSandboxPowerExecutorOverrideIsUsed(t *testing.T) {
 	executor := &recordingPowerExecutor{}
 	svc := &SandboxService{logger: zap.NewNop()}

@@ -56,6 +56,9 @@ func TestNewSandboxServiceUsesCtldExecutorWhenEnabled(t *testing.T) {
 	_, ok := svc.powerExecutor.(*ctldSandboxPowerExecutor)
 	assert.True(t, ok)
 	assert.Equal(t, 8095, svc.config.CtldPort)
+	assert.Equal(t, 15*time.Second, svc.config.CtldClientTimeout)
+	require.NotNil(t, svc.ctldClient)
+	assert.Equal(t, 15*time.Second, svc.ctldClient.httpClient.Timeout)
 }
 
 func TestCtldPowerExecutorCallsCtldPause(t *testing.T) {

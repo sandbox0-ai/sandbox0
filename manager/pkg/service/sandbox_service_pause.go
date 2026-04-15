@@ -559,11 +559,17 @@ func (s *SandboxService) ResumeSandboxAndWait(ctx context.Context, sandboxID str
 	return resp, nil
 }
 
-// PauseSandboxByID implements the SandboxPauser interface from controller package.
-// It wraps PauseSandbox and returns only the error.
-func (s *SandboxService) PauseSandboxByID(ctx context.Context, sandboxID string) error {
-	_, err := s.PauseSandbox(ctx, sandboxID)
+// RequestPauseSandboxByID records the desired paused state for controller-driven reconciliation.
+func (s *SandboxService) RequestPauseSandboxByID(ctx context.Context, sandboxID string) error {
+	_, err := s.RequestPauseSandbox(ctx, sandboxID)
 	return err
+}
+
+// PauseSandboxByID records the desired paused state for compatibility with older controller callers.
+//
+// Deprecated: use RequestPauseSandboxByID for declarative pause requests.
+func (s *SandboxService) PauseSandboxByID(ctx context.Context, sandboxID string) error {
+	return s.RequestPauseSandboxByID(ctx, sandboxID)
 }
 
 // TerminateSandboxByID implements the SandboxTerminator interface from controller package.

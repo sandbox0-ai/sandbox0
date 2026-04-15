@@ -6,12 +6,20 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestNewCtldClientUsesDefaultTimeout(t *testing.T) {
+	client := NewCtldClient(CtldClientConfig{})
+
+	require.NotNil(t, client.httpClient)
+	assert.Equal(t, 15*time.Second, client.httpClient.Timeout)
+}
 
 func TestCtldClientPause(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

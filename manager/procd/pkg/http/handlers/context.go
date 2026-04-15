@@ -18,6 +18,7 @@ import (
 	ctxpkg "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/context"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process/repl"
+	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"go.uber.org/zap"
 )
 
@@ -716,6 +717,9 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	id := vars["id"]
 
+	if err := proxy.DisableResponseDeadlines(w); err != nil {
+		h.logger.Debug("Failed to disable context websocket response deadlines", zap.String("context_id", id), zap.Error(err))
+	}
 	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		h.logger.Error("WebSocket upgrade failed", zap.Error(err))

@@ -34,11 +34,14 @@ func NewWebSocketProxy(logger *zap.Logger, opts ...Option) *WebSocketProxy {
 func (p *WebSocketProxy) Proxy(targetURL *url.URL) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// Check if this is a WebSocket upgrade request
-		if !isWebSocketUpgrade(c.Request) {
+		if !IsWebSocketUpgrade(c.Request) {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error": "expected WebSocket upgrade request",
 			})
 			return
+		}
+		if err := DisableResponseDeadlines(c.Writer); err != nil {
+			p.logger.Debug("Failed to disable WebSocket response deadlines", zap.Error(err))
 		}
 
 		hijacker, ok := c.Writer.(http.Hijacker)
@@ -116,10 +119,14 @@ func (p *WebSocketProxy) Proxy(targetURL *url.URL) gin.HandlerFunc {
 	}
 }
 
-// isWebSocketUpgrade checks if the request is a WebSocket upgrade request
-func isWebSocketUpgrade(r *http.Request) bool {
+// IsWebSocketUpgrade checks if the request is a WebSocket upgrade request.
+func IsWebSocketUpgrade(r *http.Request) bool {
 	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket") &&
 		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
+}
+
+func isWebSocketUpgrade(r *http.Request) bool {
+	return IsWebSocketUpgrade(r)
 }
 
 func dialWebSocketUpstream(ctx context.Context, targetURL *url.URL) (net.Conn, error) {

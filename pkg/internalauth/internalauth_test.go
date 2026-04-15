@@ -323,6 +323,7 @@ func TestGenerateSystem(t *testing.T) {
 
 	token, err := generator.GenerateSystem("manager", GenerateOptions{
 		Permissions: []string{"*:*"},
+		UserID:      "admin-user",
 	})
 	if err != nil {
 		t.Fatalf("GenerateSystem failed: %v", err)
@@ -343,6 +344,10 @@ func TestGenerateSystem(t *testing.T) {
 
 	if claims.TeamID != "" {
 		t.Errorf("Expected empty TeamID for system token, got '%s'", claims.TeamID)
+	}
+
+	if claims.UserID != "admin-user" {
+		t.Errorf("Expected UserID 'admin-user', got '%s'", claims.UserID)
 	}
 
 	if claims.Subject != "system" {

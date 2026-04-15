@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -13,6 +14,12 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 )
+
+var errInternalTokenTeamIDRequired = errors.New("team_id is required for team-scoped internal token")
+
+type internalTokenOptions struct {
+	systemScopeForSystemAdmin bool
+}
 
 type schedulerCluster struct {
 	ClusterID         string `json:"cluster_id"`
@@ -155,26 +162,53 @@ func (s *Server) buildSchedulerClustersURL() (string, error) {
 }
 
 func (s *Server) generateInternalToken(authCtx *authn.AuthContext, target string) (string, error) {
+	return s.generateInternalTokenWithOptions(authCtx, target, internalTokenOptions{})
+}
+
+func (s *Server) generateTemplateInternalToken(authCtx *authn.AuthContext, target string) (string, error) {
+	return s.generateInternalTokenWithOptions(authCtx, target, internalTokenOptions{
+		systemScopeForSystemAdmin: true,
+	})
+}
+
+func (s *Server) generateInternalTokenWithOptions(authCtx *authn.AuthContext, target string, opts internalTokenOptions) (string, error) {
 	if s.internalAuthGen == nil {
 		return "", fmt.Errorf("internal auth generator not configured")
 	}
 	if authCtx == nil {
 		return s.internalAuthGen.GenerateSystem(target, internalauth.GenerateOptions{})
 	}
-	if authCtx.TeamID == "" {
+	generateOpts := internalauth.GenerateOptions{
+		UserID:      authCtx.UserID,
+		Permissions: authCtx.Permissions,
+	}
+	teamID := strings.TrimSpace(authCtx.TeamID)
+	if shouldGenerateSystemInternalToken(authCtx, teamID, opts) {
 		return s.internalAuthGen.GenerateSystem(
 			target,
-			internalauth.GenerateOptions{
-				Permissions: authCtx.Permissions,
-			},
+			generateOpts,
 		)
+	}
+	if teamID == "" {
+		return "", errInternalTokenTeamIDRequired
 	}
 	return s.internalAuthGen.Generate(
 		target,
-		authCtx.TeamID,
+		teamID,
 		authCtx.UserID,
-		internalauth.GenerateOptions{
-			Permissions: authCtx.Permissions,
-		},
+		generateOpts,
 	)
+}
+
+func shouldGenerateSystemInternalToken(authCtx *authn.AuthContext, teamID string, opts internalTokenOptions) bool {
+	if authCtx.AuthMethod == authn.AuthMethodInternal && teamID == "" {
+		return true
+	}
+	if !authCtx.IsSystemAdmin {
+		return false
+	}
+	if teamID == "" {
+		return true
+	}
+	return opts.systemScopeForSystemAdmin && authCtx.AuthMethod == authn.AuthMethodAPIKey
 }

@@ -115,12 +115,22 @@ func (m *AuthMiddleware) authenticateAPIKey(c *gin.Context, keyValue string) (*a
 	}
 
 	return &authn.AuthContext{
-		AuthMethod:  authn.AuthMethodAPIKey,
-		TeamID:      apiKey.TeamID,
-		UserID:      userID,
-		APIKeyID:    apiKey.ID,
-		Permissions: authn.ExpandRolesPermissions(apiKey.Roles),
+		AuthMethod:    authn.AuthMethodAPIKey,
+		TeamID:        apiKey.TeamID,
+		UserID:        userID,
+		APIKeyID:      apiKey.ID,
+		IsSystemAdmin: apiKey.CreatorIsSystemAdmin && apiKeyHasRole(apiKey.Roles, "admin"),
+		Permissions:   authn.ExpandRolesPermissions(apiKey.Roles),
 	}, nil
+}
+
+func apiKeyHasRole(roles []string, role string) bool {
+	for _, candidate := range roles {
+		if strings.TrimSpace(candidate) == role {
+			return true
+		}
+	}
+	return false
 }
 
 // authenticateJWT validates a JWT token

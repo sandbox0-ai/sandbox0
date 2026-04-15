@@ -130,6 +130,7 @@ func (g *Generator) GenerateSystem(target string, opts GenerateOptions) (string,
 		ID:          generateJTI(),
 		Caller:      g.config.Caller,
 		Target:      target,
+		UserID:      opts.UserID,
 		IsSystem:    true,
 		Permissions: opts.Permissions,
 	}

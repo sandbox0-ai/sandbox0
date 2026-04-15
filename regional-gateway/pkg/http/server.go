@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -287,7 +288,7 @@ func (s *Server) setupRoutes() {
 		if s.schedulerRouter != nil {
 			// Template routes go to scheduler
 			templates := api.Group("/v1/templates")
-			templates.Use(s.injectInternalTokenForTarget("scheduler"))
+			templates.Use(s.injectTemplateInternalTokenForTarget("scheduler"))
 			templates.Any("", s.schedulerRouter.ProxyToTarget)
 			templates.Any("/*path", s.schedulerRouter.ProxyToTarget)
 
@@ -444,6 +445,16 @@ func (s *Server) injectInternalToken() gin.HandlerFunc {
 
 // injectInternalTokenForTarget adds internal auth token for a specific target service
 func (s *Server) injectInternalTokenForTarget(target string) gin.HandlerFunc {
+	return s.injectInternalTokenForTargetWithOptions(target, internalTokenOptions{})
+}
+
+func (s *Server) injectTemplateInternalTokenForTarget(target string) gin.HandlerFunc {
+	return s.injectInternalTokenForTargetWithOptions(target, internalTokenOptions{
+		systemScopeForSystemAdmin: true,
+	})
+}
+
+func (s *Server) injectInternalTokenForTargetWithOptions(target string, tokenOpts internalTokenOptions) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authCtx := middleware.GetAuthContext(c)
 		if authCtx == nil {
@@ -451,9 +462,13 @@ func (s *Server) injectInternalTokenForTarget(target string) gin.HandlerFunc {
 			return
 		}
 
-		// Generate internal token for the target service
-		token, err := s.generateInternalToken(authCtx, target)
+		// Generate internal token for the target service.
+		token, err := s.generateInternalTokenWithOptions(authCtx, target, tokenOpts)
 		if err != nil {
+			if errors.Is(err, errInternalTokenTeamIDRequired) {
+				spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "team_id is required")
+				return
+			}
 			s.logger.Error("Failed to generate internal token",
 				zap.String("target", target),
 				zap.Error(err),
@@ -466,7 +481,11 @@ func (s *Server) injectInternalTokenForTarget(target string) gin.HandlerFunc {
 		c.Request.Header.Set(internalauth.DefaultTokenHeader, token)
 
 		// Also forward team/user info in headers for logging
-		c.Request.Header.Set("X-Team-ID", authCtx.TeamID)
+		forwardedTeamID := authCtx.TeamID
+		if shouldGenerateSystemInternalToken(authCtx, strings.TrimSpace(authCtx.TeamID), tokenOpts) {
+			forwardedTeamID = ""
+		}
+		c.Request.Header.Set("X-Team-ID", forwardedTeamID)
 		c.Request.Header.Set("X-User-ID", authCtx.UserID)
 		c.Request.Header.Set("X-Auth-Method", string(authCtx.AuthMethod))
 

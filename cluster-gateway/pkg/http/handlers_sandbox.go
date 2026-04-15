@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/client"
@@ -19,14 +20,28 @@ import (
 
 // proxyToManager proxies a request to manager with internal authentication
 func (s *Server) proxyToManager(c *gin.Context) {
+	s.proxyToManagerWithOptions(c, managerTokenOptions{})
+}
+
+func (s *Server) proxyTemplateToManager(c *gin.Context) {
+	s.proxyToManagerWithOptions(c, managerTokenOptions{
+		systemScopeForSystemAdmin: true,
+	})
+}
+
+func (s *Server) proxyToManagerWithOptions(c *gin.Context, tokenOpts managerTokenOptions) {
 	authCtx := middleware.GetAuthContext(c)
 	claims := internalauth.ClaimsFromContext(c.Request.Context())
+	teamID := ""
+	if authCtx != nil {
+		teamID = authCtx.TeamID
+	}
 
 	// Generate internal token for manager
-	internalToken, err := s.generateManagerToken(authCtx, claims, nil)
+	internalToken, err := s.generateManagerTokenWithOptions(authCtx, claims, nil, tokenOpts)
 	if err != nil {
 		s.logger.Error("Failed to generate internal token for manager",
-			zap.String("team_id", authCtx.TeamID),
+			zap.String("team_id", teamID),
 			zap.Error(err),
 		)
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "internal authentication failed")
@@ -34,7 +49,11 @@ func (s *Server) proxyToManager(c *gin.Context) {
 	}
 
 	// Set headers
-	c.Request.Header.Set(internalauth.TeamIDHeader, authCtx.TeamID)
+	forwardedTeamID := teamID
+	if shouldGenerateSystemManagerToken(authCtx, claims, strings.TrimSpace(teamID), tokenOpts) {
+		forwardedTeamID = ""
+	}
+	c.Request.Header.Set(internalauth.TeamIDHeader, forwardedTeamID)
 	c.Request.Header.Set(internalauth.DefaultTokenHeader, internalToken)
 
 	// Forward to manager

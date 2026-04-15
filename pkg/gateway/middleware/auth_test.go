@@ -150,6 +150,59 @@ func TestAuthMiddleware_APIKeyFallsBackToCreatorUserID(t *testing.T) {
 	}
 }
 
+func TestAuthMiddleware_APIKeyCreatedBySystemAdminWithAdminRoleIsSystemAdmin(t *testing.T) {
+	t.Setenv("GIN_MODE", "release")
+
+	req := httptest.NewRequest("GET", "/api/v1/templates", nil)
+	req.Header.Set("Authorization", "Bearer s0_test")
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = req
+
+	middleware := NewAuthMiddleware(staticAPIKeyValidator{key: &apikey.APIKey{
+		ID:                   "key-1",
+		TeamID:               "team-1",
+		CreatedBy:            "admin-user",
+		Roles:                []string{"admin"},
+		CreatorIsSystemAdmin: true,
+	}}, "test-secret", nil, zap.NewNop())
+	authCtx, err := middleware.AuthenticateRequest(ctx)
+	if err != nil {
+		t.Fatalf("authenticate request: %v", err)
+	}
+	if !authCtx.IsSystemAdmin {
+		t.Fatalf("expected system admin API key auth context")
+	}
+	if !authCtx.HasPermission(authn.PermTemplateWrite) {
+		t.Fatalf("expected admin API key permissions")
+	}
+}
+
+func TestAuthMiddleware_APIKeyCreatedBySystemAdminRequiresAdminRoleForSystemAdmin(t *testing.T) {
+	t.Setenv("GIN_MODE", "release")
+
+	req := httptest.NewRequest("GET", "/api/v1/templates", nil)
+	req.Header.Set("Authorization", "Bearer s0_test")
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = req
+
+	middleware := NewAuthMiddleware(staticAPIKeyValidator{key: &apikey.APIKey{
+		ID:                   "key-1",
+		TeamID:               "team-1",
+		CreatedBy:            "admin-user",
+		Roles:                []string{"developer"},
+		CreatorIsSystemAdmin: true,
+	}}, "test-secret", nil, zap.NewNop())
+	authCtx, err := middleware.AuthenticateRequest(ctx)
+	if err != nil {
+		t.Fatalf("authenticate request: %v", err)
+	}
+	if authCtx.IsSystemAdmin {
+		t.Fatalf("developer API key should not inherit system admin privileges")
+	}
+}
+
 func TestAuthMiddleware_JWTAccessTokenExplicitTeamHeader(t *testing.T) {
 	t.Setenv("GIN_MODE", "release")
 

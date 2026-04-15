@@ -22,19 +22,21 @@ var (
 
 // APIKey represents an API key stored in the database.
 type APIKey struct {
-	ID         string     `json:"id"`
-	KeyValue   string     `json:"key_value"`
-	TeamID     string     `json:"team_id"`
-	UserID     *string    `json:"user_id,omitempty"`
-	CreatedBy  string     `json:"created_by"`
-	Name       string     `json:"name"`
-	Roles      []string   `json:"roles"`
-	IsActive   bool       `json:"is_active"`
-	ExpiresAt  time.Time  `json:"expires_at"`
-	LastUsed   *time.Time `json:"last_used_at,omitempty"`
-	UsageCount int64      `json:"usage_count"`
-	CreatedAt  time.Time  `json:"created_at"`
-	UpdatedAt  time.Time  `json:"updated_at"`
+	ID        string   `json:"id"`
+	KeyValue  string   `json:"key_value"`
+	TeamID    string   `json:"team_id"`
+	UserID    *string  `json:"user_id,omitempty"`
+	CreatedBy string   `json:"created_by"`
+	Name      string   `json:"name"`
+	Roles     []string `json:"roles"`
+	IsActive  bool     `json:"is_active"`
+	// CreatorIsSystemAdmin is derived from the current creator user record.
+	CreatorIsSystemAdmin bool       `json:"-"`
+	ExpiresAt            time.Time  `json:"expires_at"`
+	LastUsed             *time.Time `json:"last_used_at,omitempty"`
+	UsageCount           int64      `json:"usage_count"`
+	CreatedAt            time.Time  `json:"created_at"`
+	UpdatedAt            time.Time  `json:"updated_at"`
 }
 
 // Repository provides database access for team-scoped API keys.
@@ -217,15 +219,17 @@ func (r *Repository) ValidateAPIKey(ctx context.Context, keyValue string) (*APIK
 	var key APIKey
 	var rolesJSON []byte
 	err := r.pool.QueryRow(ctx, `
-		SELECT id, key_value, team_id, created_by, name, roles,
-		       is_active, expires_at, last_used_at, usage_count, created_at, updated_at, user_id
-		FROM api_keys
-		WHERE key_value = $1
+		SELECT ak.id, ak.key_value, ak.team_id, ak.created_by, ak.name, ak.roles,
+		       ak.is_active, ak.expires_at, ak.last_used_at, ak.usage_count,
+		       ak.created_at, ak.updated_at, ak.user_id, COALESCE(u.is_admin, false)
+		FROM api_keys ak
+		LEFT JOIN users u ON u.id = ak.created_by
+		WHERE ak.key_value = $1
 	`, keyValue).Scan(
 		&key.ID, &key.KeyValue, &key.TeamID, &key.CreatedBy,
 		&key.Name, &rolesJSON, &key.IsActive,
 		&key.ExpiresAt, &key.LastUsed, &key.UsageCount,
-		&key.CreatedAt, &key.UpdatedAt, &key.UserID,
+		&key.CreatedAt, &key.UpdatedAt, &key.UserID, &key.CreatorIsSystemAdmin,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

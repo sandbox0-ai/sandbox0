@@ -13,7 +13,7 @@ import (
 func (s *Server) listTemplates(c *gin.Context) {
 	// Forward to manager
 	c.Request.URL.Path = "/api/v1/templates"
-	s.proxyToManager(c)
+	s.proxyTemplateToManager(c)
 }
 
 // getTemplate gets a template by ID
@@ -25,13 +25,13 @@ func (s *Server) getTemplate(c *gin.Context) {
 	}
 
 	c.Request.URL.Path = "/api/v1/templates/" + templateID
-	s.proxyToManager(c)
+	s.proxyTemplateToManager(c)
 }
 
 // createTemplate creates a new template
 func (s *Server) createTemplate(c *gin.Context) {
 	c.Request.URL.Path = "/api/v1/templates"
-	s.proxyToManager(c)
+	s.proxyTemplateToManager(c)
 }
 
 // updateTemplate updates an existing template
@@ -43,7 +43,7 @@ func (s *Server) updateTemplate(c *gin.Context) {
 	}
 
 	c.Request.URL.Path = "/api/v1/templates/" + templateID
-	s.proxyToManager(c)
+	s.proxyTemplateToManager(c)
 }
 
 // deleteTemplate deletes a template
@@ -55,5 +55,5 @@ func (s *Server) deleteTemplate(c *gin.Context) {
 	}
 
 	c.Request.URL.Path = "/api/v1/templates/" + templateID
-	s.proxyToManager(c)
+	s.proxyTemplateToManager(c)
 }

@@ -1,6 +1,7 @@
 package http
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
@@ -11,6 +12,12 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
 )
+
+var errManagerTokenTeamIDRequired = errors.New("team_id is required for team-scoped manager token")
+
+type managerTokenOptions struct {
+	systemScopeForSystemAdmin bool
+}
 
 // === Internal API Handlers (for scheduler) ===
 
@@ -103,21 +110,47 @@ func (s *Server) proxyInternalTemplateRequest(c *gin.Context) {
 }
 
 func (s *Server) generateManagerToken(authCtx *authn.AuthContext, claims *internalauth.Claims, permissions []string) (string, error) {
+	return s.generateManagerTokenWithOptions(authCtx, claims, permissions, managerTokenOptions{})
+}
+
+func (s *Server) generateTemplateManagerToken(authCtx *authn.AuthContext, claims *internalauth.Claims, permissions []string) (string, error) {
+	return s.generateManagerTokenWithOptions(authCtx, claims, permissions, managerTokenOptions{
+		systemScopeForSystemAdmin: true,
+	})
+}
+
+func (s *Server) generateManagerTokenWithOptions(authCtx *authn.AuthContext, claims *internalauth.Claims, permissions []string, tokenOpts managerTokenOptions) (string, error) {
 	opts := internalauth.GenerateOptions{
 		Permissions: permissions,
 	}
-	if claims != nil && claims.IsSystem {
-		return s.internalAuthGen.GenerateSystem("manager", opts)
-	}
-	if authCtx != nil && authCtx.IsSystemAdmin && strings.TrimSpace(authCtx.TeamID) == "" {
-		return s.internalAuthGen.GenerateSystem("manager", opts)
+	if authCtx != nil {
+		opts.UserID = authCtx.UserID
 	}
 
 	teamID := ""
 	userID := ""
 	if authCtx != nil {
-		teamID = authCtx.TeamID
+		teamID = strings.TrimSpace(authCtx.TeamID)
 		userID = authCtx.UserID
 	}
+	if shouldGenerateSystemManagerToken(authCtx, claims, teamID, tokenOpts) {
+		return s.internalAuthGen.GenerateSystem("manager", opts)
+	}
+	if teamID == "" {
+		return "", errManagerTokenTeamIDRequired
+	}
 	return s.internalAuthGen.Generate("manager", teamID, userID, opts)
+}
+
+func shouldGenerateSystemManagerToken(authCtx *authn.AuthContext, claims *internalauth.Claims, teamID string, opts managerTokenOptions) bool {
+	if claims != nil && claims.IsSystem {
+		return true
+	}
+	if authCtx == nil || !authCtx.IsSystemAdmin {
+		return false
+	}
+	if teamID == "" {
+		return true
+	}
+	return opts.systemScopeForSystemAdmin && authCtx.AuthMethod == authn.AuthMethodAPIKey
 }

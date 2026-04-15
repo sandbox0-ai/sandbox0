@@ -157,6 +157,114 @@ func TestCtldPowerExecutorCallsCtldResumeAfterRestoringState(t *testing.T) {
 	assert.Equal(t, SandboxPowerStateActive, updated.Annotations[controller.AnnotationPowerStateObserved])
 }
 
+func TestCtldPowerExecutorResumesPartiallyPausedPod(t *testing.T) {
+	resumeCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resumeCalls++
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "/api/v1/sandboxes/sandbox-1/resume", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"resumed":true}`))
+	}))
+	defer server.Close()
+	target, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sandbox-1",
+			Namespace: "default",
+			Labels:    map[string]string{"sandbox0.ai/sandbox-id": "sandbox-1"},
+			Annotations: map[string]string{
+				controller.AnnotationPowerStateDesired:           SandboxPowerStatePaused,
+				controller.AnnotationPowerStateDesiredGeneration: "2",
+				controller.AnnotationPowerStateObserved:          SandboxPowerStateActive,
+				controller.AnnotationPowerStatePhase:             SandboxPowerPhasePausing,
+			},
+		},
+		Spec: corev1.PodSpec{NodeName: "node-1"},
+		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{
+			Type:    corev1.PodConditionType("sandbox0.ai/live"),
+			Status:  corev1.ConditionUnknown,
+			Reason:  "SandboxPaused",
+			Message: "sandbox cgroup is frozen",
+		}}},
+	}
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
+		Status:     corev1.NodeStatus{Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.12"}}},
+	}
+	transport := &rewriteTransport{base: server.Client().Transport, target: target}
+
+	svc := &SandboxService{
+		k8sClient:  fake.NewSimpleClientset(pod, node),
+		ctldClient: NewCtldClientWithHTTPClient(&http.Client{Transport: transport}),
+		config:     SandboxServiceConfig{CtldEnabled: true, CtldPort: 8095, PauseMinCPU: "10m", PauseMemoryBufferRatio: 1.1},
+		logger:     zap.NewNop(),
+		clock:      systemTime{},
+	}
+	svc.SetPowerExecutor(&ctldSandboxPowerExecutor{service: svc})
+
+	resp, err := svc.ResumeSandbox(context.Background(), "sandbox-1")
+	require.NoError(t, err)
+	assert.True(t, resp.Resumed)
+	assert.Equal(t, 1, resumeCalls)
+
+	updated, err := svc.k8sClient.CoreV1().Pods("default").Get(context.Background(), "sandbox-1", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, SandboxPowerStateActive, updated.Annotations[controller.AnnotationPowerStateDesired])
+	assert.Equal(t, SandboxPowerStateActive, updated.Annotations[controller.AnnotationPowerStateObserved])
+	assert.Equal(t, SandboxPowerPhaseStable, updated.Annotations[controller.AnnotationPowerStatePhase])
+}
+
+func TestTerminateSandboxThawsFrozenPodBeforeDelete(t *testing.T) {
+	resumeCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resumeCalls++
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "/api/v1/sandboxes/sandbox-1/resume", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"resumed":true}`))
+	}))
+	defer server.Close()
+	target, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sandbox-1",
+			Namespace: "default",
+			Labels:    map[string]string{"sandbox0.ai/sandbox-id": "sandbox-1"},
+			Annotations: map[string]string{
+				controller.AnnotationPowerStateDesired:  SandboxPowerStatePaused,
+				controller.AnnotationPowerStateObserved: SandboxPowerStateActive,
+				controller.AnnotationPowerStatePhase:    SandboxPowerPhasePausing,
+			},
+		},
+		Spec: corev1.PodSpec{NodeName: "node-1"},
+		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{
+			Type:    corev1.PodConditionType("sandbox0.ai/live"),
+			Status:  corev1.ConditionUnknown,
+			Reason:  "SandboxPaused",
+			Message: "sandbox cgroup is frozen",
+		}}},
+	}
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
+		Status:     corev1.NodeStatus{Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.12"}}},
+	}
+	transport := &rewriteTransport{base: server.Client().Transport, target: target}
+	svc := &SandboxService{
+		k8sClient:  fake.NewSimpleClientset(pod, node),
+		podLister:  newTestPodLister(t, pod),
+		ctldClient: NewCtldClientWithHTTPClient(&http.Client{Transport: transport}),
+		config:     SandboxServiceConfig{CtldEnabled: true, CtldPort: 8095},
+		logger:     zap.NewNop(),
+	}
+
+	err = svc.TerminateSandbox(context.Background(), "sandbox-1")
+	require.NoError(t, err)
+	assert.Equal(t, 1, resumeCalls)
+}
+
 func TestCtldPowerExecutorResumeFailureKeepsPausedStateAuthoritative(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodPost, r.Method)

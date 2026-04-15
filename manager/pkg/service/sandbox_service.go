@@ -1459,6 +1459,7 @@ func (s *SandboxService) TerminateSandbox(ctx context.Context, sandboxID string)
 		}
 		return fmt.Errorf("get pod: %w", err)
 	}
+	s.thawSandboxBeforeTermination(ctx, pod, sandboxID)
 
 	pod, err = s.ensureSandboxDeletionFinalizer(ctx, pod)
 	if err != nil {
@@ -1477,6 +1478,34 @@ func (s *SandboxService) TerminateSandbox(ctx context.Context, sandboxID string)
 	s.logger.Info("Sandbox termination requested", zap.String("sandboxID", sandboxID), zap.String("pod", pod.Name))
 
 	return nil
+}
+
+func (s *SandboxService) thawSandboxBeforeTermination(ctx context.Context, pod *corev1.Pod, sandboxID string) {
+	if s == nil || s.ctldClient == nil || !s.config.CtldEnabled || !sandboxPodMayHaveFrozenCgroup(pod) {
+		return
+	}
+	ctldAddress, err := s.ctldAddressForPod(ctx, pod)
+	if err != nil {
+		s.logger.Warn("Failed to resolve ctld before sandbox termination",
+			zap.String("sandboxID", sandboxID),
+			zap.Error(err),
+		)
+		return
+	}
+	resp, err := s.ctldClient.Resume(ctx, ctldAddress, sandboxID)
+	if err != nil {
+		s.logger.Warn("Failed to thaw sandbox before termination",
+			zap.String("sandboxID", sandboxID),
+			zap.Error(err),
+		)
+		return
+	}
+	if !resp.Resumed {
+		s.logger.Warn("ctld did not thaw sandbox before termination",
+			zap.String("sandboxID", sandboxID),
+			zap.String("error", resp.Error),
+		)
+	}
 }
 
 // GetSandbox gets a sandbox by ID
@@ -2026,6 +2055,25 @@ func shouldReconcileSandboxPowerState(pod *corev1.Pod) bool {
 	}
 	state := sandboxPowerStateFromAnnotations(pod.Annotations)
 	return state.Phase != SandboxPowerPhaseStable || state.Desired != state.Observed
+}
+
+func sandboxPodMayHaveFrozenCgroup(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	if pod.Annotations[controller.AnnotationPaused] == "true" {
+		return true
+	}
+	state := sandboxPowerStateFromAnnotations(pod.Annotations)
+	if state.Phase == SandboxPowerPhasePausing {
+		return true
+	}
+	for _, condition := range pod.Status.Conditions {
+		if condition.Reason == "SandboxPaused" || strings.Contains(strings.ToLower(condition.Message), "cgroup is frozen") {
+			return true
+		}
+	}
+	return false
 }
 
 func hasExplicitSandboxPowerStateAnnotations(annotations map[string]string) bool {
@@ -3003,12 +3051,15 @@ func (s *SandboxService) applyPausedResourceTargets(resizePod *corev1.Pod, newRe
 }
 
 func (s *SandboxService) prepareSandboxResume(ctx context.Context, pod *corev1.Pod, sandboxID string, expected expectedSandboxPowerState) (*resumeSandboxPreparation, *ResumeSandboxResponse, error) {
-	if pod.Annotations[controller.AnnotationPaused] != "true" {
+	if pod.Annotations[controller.AnnotationPaused] != "true" && !sandboxPodMayHaveFrozenCgroup(pod) {
 		return nil, &ResumeSandboxResponse{
 			SandboxID:  sandboxID,
 			Resumed:    true,
 			PowerState: sandboxPowerStateFromAnnotations(pod.Annotations),
 		}, nil
+	}
+	if pod.Annotations[controller.AnnotationPaused] != "true" {
+		return &resumeSandboxPreparation{Pod: pod, PowerState: sandboxPowerStateFromAnnotations(pod.Annotations)}, nil, nil
 	}
 
 	var restoredMemory string
@@ -3088,8 +3139,19 @@ func (s *SandboxService) completeSandboxResume(ctx context.Context, sandboxID st
 			return getErr
 		}
 		if currentPod.Annotations[controller.AnnotationPaused] != "true" {
-			powerState = sandboxPowerStateFromAnnotations(currentPod.Annotations)
-			return nil
+			currentState := sandboxPowerStateFromAnnotations(currentPod.Annotations)
+			if !sandboxPodMayHaveFrozenCgroup(currentPod) && currentState.Desired == SandboxPowerStateActive && currentState.Observed == SandboxPowerStateActive && currentState.Phase == SandboxPowerPhaseStable {
+				powerState = currentState
+				return nil
+			}
+			annotationPod := currentPod.DeepCopy()
+			if annotationPod.Annotations == nil {
+				annotationPod.Annotations = make(map[string]string)
+			}
+			powerState = completedSandboxPowerState(annotationPod.Annotations, SandboxPowerStateActive)
+			applySandboxPowerStateAnnotations(annotationPod.Annotations, powerState)
+			_, updateErr := s.k8sClient.CoreV1().Pods(currentPod.Namespace).Update(ctx, annotationPod, metav1.UpdateOptions{})
+			return updateErr
 		}
 		currentState, matchErr := s.matchSandboxPowerExpectation(currentPod, expected)
 		if matchErr != nil {

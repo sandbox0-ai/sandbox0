@@ -206,6 +206,12 @@ paths:
           schema:
             type: string
           required: false
+        - name: web_login
+          in: query
+          schema:
+            type: boolean
+          required: false
+          description: When true, the OIDC callback redirects to return_url with a short-lived login_code for server-side exchange.
       responses:
         "302":
           description: Redirect to OIDC provider
@@ -239,7 +245,7 @@ paths:
             type: string
       responses:
         "302":
-          description: Redirect to local CLI return_url with token query parameters when return_url is localhost
+          description: Redirect to local CLI return_url with token query parameters, or to a web return_url with login_code when web_login was requested
         "200":
           description: Tokens issued
           content:
@@ -254,6 +260,36 @@ paths:
                 $ref: "#/components/schemas/ErrorEnvelope"
         "401":
           description: OIDC authorization failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+  /auth/web-login/exchange:
+    post:
+      tags: [auth]
+      summary: Exchange web login code
+      description: Exchanges a short-lived, one-time browser login handoff code for Sandbox0 tokens.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WebLoginExchangeRequest"
+      responses:
+        "200":
+          description: Login code exchanged
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessLoginResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "401":
+          description: Invalid or expired login code
           content:
             application/json:
               schema:
@@ -3421,6 +3457,16 @@ components:
         refresh_token:
           type: string
       required: [refresh_token]
+    WebLoginExchangeRequest:
+      type: object
+      properties:
+        login_code:
+          type: string
+          description: Short-lived one-time code returned to the web login callback.
+        return_url:
+          type: string
+          description: Exact return URL used when the login code was created.
+      required: [login_code, return_url]
     ChangePasswordRequest:
       type: object
       properties:

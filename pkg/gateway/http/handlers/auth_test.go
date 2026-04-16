@@ -21,6 +21,7 @@ type mockAuthRepository struct {
 	users              map[string]*identity.User
 	teams              map[string]*identity.Team
 	refreshTokens      map[string]*identity.RefreshToken
+	webLoginCodes      map[string]*identity.WebLoginCode
 	deviceAuthSessions map[string]*identity.DeviceAuthSession
 	teamMembers        map[string]*identity.TeamMember
 	teamGrantCalls     int
@@ -32,6 +33,7 @@ func newMockAuthRepository() *mockAuthRepository {
 		users:              map[string]*identity.User{},
 		teams:              map[string]*identity.Team{},
 		refreshTokens:      map[string]*identity.RefreshToken{},
+		webLoginCodes:      map[string]*identity.WebLoginCode{},
 		deviceAuthSessions: map[string]*identity.DeviceAuthSession{},
 		teamMembers:        map[string]*identity.TeamMember{},
 	}
@@ -68,6 +70,30 @@ func (m *mockAuthRepository) RevokeAllUserRefreshTokens(_ context.Context, userI
 		}
 	}
 	return nil
+}
+
+func (m *mockAuthRepository) CreateWebLoginCode(_ context.Context, code *identity.WebLoginCode) error {
+	if _, exists := m.webLoginCodes[code.CodeHash]; exists {
+		return errors.New("duplicate web login code hash")
+	}
+	copyCode := *code
+	if copyCode.ID == "" {
+		copyCode.ID = "web-login-code-1"
+	}
+	m.webLoginCodes[copyCode.CodeHash] = &copyCode
+	code.ID = copyCode.ID
+	return nil
+}
+
+func (m *mockAuthRepository) ConsumeWebLoginCode(_ context.Context, codeHash, returnURL string) (*identity.WebLoginCode, error) {
+	code, ok := m.webLoginCodes[codeHash]
+	if !ok || code.ReturnURL != returnURL || code.ConsumedAt != nil || time.Now().After(code.ExpiresAt) {
+		return nil, identity.ErrWebLoginCodeNotFound
+	}
+	now := time.Now()
+	code.ConsumedAt = &now
+	copyCode := *code
+	return &copyCode, nil
 }
 
 func (m *mockAuthRepository) GetUserByID(_ context.Context, id string) (*identity.User, error) {

@@ -6,6 +6,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,11 +19,19 @@ import (
 
 // StateData stores OAuth state information
 type StateData struct {
-	Provider     string    `json:"provider"`
-	Nonce        string    `json:"nonce"`
-	CodeVerifier string    `json:"code_verifier"`
-	ReturnURL    string    `json:"return_url"`
-	CreatedAt    time.Time `json:"created_at"`
+	Provider        string    `json:"provider"`
+	Nonce           string    `json:"nonce"`
+	CodeVerifier    string    `json:"code_verifier"`
+	ReturnURL       string    `json:"return_url"`
+	WebLoginHandoff bool      `json:"web_login_handoff"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+// CallbackResult contains the resolved user and post-login return metadata.
+type CallbackResult struct {
+	User            *identity.User
+	ReturnURL       string
+	WebLoginHandoff bool
 }
 
 type identityStore interface {
@@ -35,14 +45,15 @@ type identityStore interface {
 
 // Manager manages multiple OIDC providers
 type Manager struct {
-	providers       map[string]*Provider
-	providerOrder   []string
-	repo            identityStore
-	baseURL         string
-	defaultTeamName string
-	stateTTL        time.Duration
-	cleanupInterval time.Duration
-	logger          *zap.Logger
+	providers        map[string]*Provider
+	providerOrder    []string
+	repo             identityStore
+	baseURL          string
+	publicRootDomain string
+	defaultTeamName  string
+	stateTTL         time.Duration
+	cleanupInterval  time.Duration
+	logger           *zap.Logger
 
 	// State management (in-memory for simplicity, use Redis in production)
 	states   map[string]*StateData
@@ -52,15 +63,16 @@ type Manager struct {
 // NewManager creates a new OIDC manager
 func NewManager(ctx context.Context, cfg *config.GatewayConfig, repo *identity.Repository, logger *zap.Logger) (*Manager, error) {
 	m := &Manager{
-		providers:       make(map[string]*Provider),
-		providerOrder:   make([]string, 0),
-		repo:            repo,
-		baseURL:         cfg.BaseURL,
-		defaultTeamName: cfg.DefaultTeamName,
-		stateTTL:        cfg.OIDCStateTTL.Duration,
-		cleanupInterval: cfg.OIDCStateCleanupInterval.Duration,
-		logger:          logger,
-		states:          make(map[string]*StateData),
+		providers:        make(map[string]*Provider),
+		providerOrder:    make([]string, 0),
+		repo:             repo,
+		baseURL:          cfg.BaseURL,
+		publicRootDomain: cfg.PublicRootDomain,
+		defaultTeamName:  cfg.DefaultTeamName,
+		stateTTL:         cfg.OIDCStateTTL.Duration,
+		cleanupInterval:  cfg.OIDCStateCleanupInterval.Duration,
+		logger:           logger,
+		states:           make(map[string]*StateData),
 	}
 
 	// Initialize enabled providers
@@ -110,11 +122,34 @@ func (m *Manager) ListProviders() []*Provider {
 	return providers
 }
 
-// GenerateAuthURL generates an OAuth authorization URL
-func (m *Manager) GenerateAuthURL(providerID, returnURL string) (string, error) {
+type authURLConfig struct {
+	webLoginHandoff bool
+}
+
+// AuthURLOption configures OIDC authorization URL generation.
+type AuthURLOption func(*authURLConfig)
+
+// WithWebLoginHandoff requests a one-time code redirect after OIDC callback.
+func WithWebLoginHandoff() AuthURLOption {
+	return func(cfg *authURLConfig) {
+		cfg.webLoginHandoff = true
+	}
+}
+
+// GenerateAuthURL generates an OAuth authorization URL.
+func (m *Manager) GenerateAuthURL(providerID, returnURL string, opts ...AuthURLOption) (string, error) {
 	provider, err := m.GetProvider(providerID)
 	if err != nil {
 		return "", err
+	}
+	cfg := authURLConfig{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	if cfg.webLoginHandoff && !m.IsAllowedWebReturnURL(returnURL) {
+		return "", ErrInvalidReturnURL
 	}
 
 	// Generate state
@@ -128,15 +163,62 @@ func (m *Manager) GenerateAuthURL(providerID, returnURL string) (string, error) 
 	// Store state
 	m.statesMu.Lock()
 	m.states[state] = &StateData{
-		Provider:     providerID,
-		Nonce:        state,
-		CodeVerifier: verifier,
-		ReturnURL:    returnURL,
-		CreatedAt:    time.Now(),
+		Provider:        providerID,
+		Nonce:           state,
+		CodeVerifier:    verifier,
+		ReturnURL:       returnURL,
+		WebLoginHandoff: cfg.webLoginHandoff,
+		CreatedAt:       time.Now(),
 	}
 	m.statesMu.Unlock()
 
 	return provider.AuthURL(state, verifier), nil
+}
+
+// IsAllowedWebReturnURL reports whether returnURL may receive a web login code.
+func (m *Manager) IsAllowedWebReturnURL(raw string) bool {
+	parsed, err := url.Parse(raw)
+	if err != nil || !parsed.IsAbs() || parsed.Hostname() == "" {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	switch parsed.Scheme {
+	case "https":
+	case "http":
+		if !isLocalhost(host) {
+			return false
+		}
+	default:
+		return false
+	}
+	if isLocalhost(host) {
+		return true
+	}
+	if baseHost := hostFromURL(m.baseURL); baseHost != "" && host == baseHost {
+		return true
+	}
+	rootDomain := strings.ToLower(strings.TrimSpace(m.publicRootDomain))
+	if rootDomain != "" && (host == rootDomain || strings.HasSuffix(host, "."+rootDomain)) {
+		return true
+	}
+	return false
+}
+
+func hostFromURL(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(parsed.Hostname())
+}
+
+func isLocalhost(host string) bool {
+	switch strings.ToLower(strings.Trim(host, "[]")) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
 }
 
 // ValidateState validates and consumes a state parameter
@@ -160,41 +242,45 @@ func (m *Manager) ValidateState(state string) (*StateData, error) {
 	return data, nil
 }
 
-// HandleCallback processes an OIDC callback
-func (m *Manager) HandleCallback(ctx context.Context, providerID, code, state string) (*identity.User, string, error) {
+// HandleCallback processes an OIDC callback.
+func (m *Manager) HandleCallback(ctx context.Context, providerID, code, state string) (*CallbackResult, error) {
 	// Validate state
 	stateData, err := m.ValidateState(state)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 
 	if stateData.Provider != providerID {
-		return nil, "", ErrInvalidState
+		return nil, ErrInvalidState
 	}
 
 	// Get provider
 	provider, err := m.GetProvider(providerID)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 
 	// Exchange code for token
 	token, err := provider.Exchange(ctx, code, stateData.CodeVerifier)
 	if err != nil {
-		return nil, "", fmt.Errorf("exchange code: %w", err)
+		return nil, fmt.Errorf("exchange code: %w", err)
 	}
 
 	// Verify token and get user info
 	userInfo, err := provider.VerifyToken(ctx, token)
 	if err != nil {
-		return nil, "", fmt.Errorf("verify token: %w", err)
+		return nil, fmt.Errorf("verify token: %w", err)
 	}
 
 	user, err := m.completeUserInfo(ctx, provider, userInfo)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
-	return user, stateData.ReturnURL, nil
+	return &CallbackResult{
+		User:            user,
+		ReturnURL:       stateData.ReturnURL,
+		WebLoginHandoff: stateData.WebLoginHandoff,
+	}, nil
 }
 
 // StartDeviceAuthorization begins a device authorization flow for the provider.

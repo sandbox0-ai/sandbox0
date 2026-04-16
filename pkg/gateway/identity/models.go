@@ -97,3 +97,14 @@ type DeviceAuthSession struct {
 	CreatedAt               time.Time  `json:"created_at"`
 	UpdatedAt               time.Time  `json:"updated_at"`
 }
+
+// WebLoginCode stores a one-time browser login handoff code.
+type WebLoginCode struct {
+	ID         string     `json:"id"`
+	CodeHash   string     `json:"-"`
+	UserID     string     `json:"user_id"`
+	ReturnURL  string     `json:"return_url"`
+	ExpiresAt  time.Time  `json:"expires_at"`
+	ConsumedAt *time.Time `json:"consumed_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+}

@@ -29,6 +29,8 @@ var (
 	ErrDeviceAuthSessionNotFound = errors.New("device auth session not found")
 	ErrDeviceAuthSessionExpired  = errors.New("device auth session expired")
 	ErrDeviceAuthSessionConsumed = errors.New("device auth session already consumed")
+
+	ErrWebLoginCodeNotFound = errors.New("web login code not found")
 )
 
 // Repository provides database access for identity and tenancy data.

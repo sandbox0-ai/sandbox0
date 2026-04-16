@@ -2,6 +2,8 @@ package handlers
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -32,6 +34,8 @@ type AuthHandler struct {
 	logger                    *zap.Logger
 }
 
+const webLoginCodeTTL = 2 * time.Minute
+
 // AuthHandlerOption configures AuthHandler behavior.
 type AuthHandlerOption func(*AuthHandler)
 
@@ -47,6 +51,8 @@ type authRepository interface {
 	CreateRefreshToken(ctx context.Context, token *identity.RefreshToken) error
 	ValidateRefreshToken(ctx context.Context, tokenHash string) (*identity.RefreshToken, error)
 	RevokeAllUserRefreshTokens(ctx context.Context, userID string) error
+	CreateWebLoginCode(ctx context.Context, code *identity.WebLoginCode) error
+	ConsumeWebLoginCode(ctx context.Context, codeHash, returnURL string) (*identity.WebLoginCode, error)
 	GetUserByID(ctx context.Context, id string) (*identity.User, error)
 	ListTeamGrantsByUserID(ctx context.Context, userID string) ([]identity.TeamGrantRecord, error)
 	CreateDeviceAuthSession(ctx context.Context, session *identity.DeviceAuthSession) error
@@ -244,6 +250,12 @@ type RefreshRequest struct {
 	RefreshToken string `json:"refresh_token" binding:"required"`
 }
 
+// WebLoginExchangeRequest exchanges a one-time browser handoff code for tokens.
+type WebLoginExchangeRequest struct {
+	LoginCode string `json:"login_code" binding:"required"`
+	ReturnURL string `json:"return_url" binding:"required"`
+}
+
 // RefreshToken refreshes an access token
 func (h *AuthHandler) RefreshToken(c *gin.Context) {
 	var req RefreshRequest
@@ -294,6 +306,50 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 		ExpiresAt:    tokens.ExpiresAt.Unix(),
 		User:         NewUserResponse(user),
 	})
+}
+
+// WebLoginExchange exchanges a short-lived OIDC browser handoff code for Sandbox0 tokens.
+func (h *AuthHandler) WebLoginExchange(c *gin.Context) {
+	var req WebLoginExchangeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
+		return
+	}
+	if h.oidcManager == nil || !h.oidcManager.IsAllowedWebReturnURL(req.ReturnURL) {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid return URL")
+		return
+	}
+
+	code, err := h.repo.ConsumeWebLoginCode(
+		c.Request.Context(),
+		authn.HashRefreshToken(strings.TrimSpace(req.LoginCode)),
+		strings.TrimSpace(req.ReturnURL),
+	)
+	if err != nil {
+		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "invalid login code")
+		return
+	}
+
+	user, err := h.repo.GetUserByID(c.Request.Context(), code.UserID)
+	if err != nil {
+		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "user not found")
+		return
+	}
+
+	loginResponse, _, err := h.buildLoginResponse(c.Request.Context(), user)
+	if err != nil {
+		h.logger.Warn("Failed to exchange web login code", zap.Error(err))
+		status := http.StatusInternalServerError
+		apiCode := spec.CodeInternal
+		if errors.Is(err, errUserNotMemberOfSelectedTeam) {
+			status = http.StatusForbidden
+			apiCode = spec.CodeForbidden
+		}
+		spec.JSONError(c, status, apiCode, err.Error())
+		return
+	}
+
+	spec.JSONSuccess(c, http.StatusOK, loginResponse)
 }
 
 // ChangePasswordRequest is the request body for password change
@@ -385,7 +441,11 @@ func (h *AuthHandler) OIDCLogin(c *gin.Context) {
 		returnURL = "/"
 	}
 
-	authURL, err := h.oidcManager.GenerateAuthURL(providerID, returnURL)
+	authOpts := []oidc.AuthURLOption(nil)
+	if isTruthyQuery(c.Query("web_login")) {
+		authOpts = append(authOpts, oidc.WithWebLoginHandoff())
+	}
+	authURL, err := h.oidcManager.GenerateAuthURL(providerID, returnURL, authOpts...)
 	if err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, oidc.ErrProviderNotFound) {
@@ -422,7 +482,7 @@ func (h *AuthHandler) OIDCCallback(c *gin.Context) {
 		return
 	}
 
-	user, returnURL, err := h.oidcManager.HandleCallback(c.Request.Context(), providerID, code, state)
+	callback, err := h.oidcManager.HandleCallback(c.Request.Context(), providerID, code, state)
 	if err != nil {
 		h.logger.Warn("OIDC callback failed",
 			zap.String("provider", providerID),
@@ -436,6 +496,25 @@ func (h *AuthHandler) OIDCCallback(c *gin.Context) {
 			apiCode = spec.CodeBadRequest
 		}
 		spec.JSONError(c, status, apiCode, err.Error())
+		return
+	}
+	user := callback.User
+	returnURL := callback.ReturnURL
+
+	if callback.WebLoginHandoff {
+		loginCode, expiresAt, err := h.createWebLoginCode(c.Request.Context(), user, returnURL)
+		if err != nil {
+			h.logger.Error("Failed to create web login code", zap.Error(err))
+			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to complete oidc login")
+			return
+		}
+		redirectURL, err := buildWebLoginReturnURL(returnURL, loginCode, expiresAt)
+		if err != nil {
+			h.logger.Warn("Failed to build web login redirect URL", zap.Error(err))
+			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to complete oidc login")
+			return
+		}
+		c.Redirect(http.StatusFound, redirectURL)
 		return
 	}
 
@@ -680,6 +759,52 @@ func (h *AuthHandler) persistRefreshToken(ctx context.Context, userID string, to
 		TokenHash: authn.HashRefreshToken(tokens.RefreshToken),
 		ExpiresAt: tokens.RefreshExpiresAt,
 	})
+}
+
+func (h *AuthHandler) createWebLoginCode(ctx context.Context, user *identity.User, returnURL string) (string, time.Time, error) {
+	loginCode, err := generateWebLoginCode()
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	expiresAt := time.Now().Add(webLoginCodeTTL)
+	if err := h.repo.CreateWebLoginCode(ctx, &identity.WebLoginCode{
+		UserID:    user.ID,
+		CodeHash:  authn.HashRefreshToken(loginCode),
+		ReturnURL: strings.TrimSpace(returnURL),
+		ExpiresAt: expiresAt,
+	}); err != nil {
+		return "", time.Time{}, err
+	}
+	return loginCode, expiresAt, nil
+}
+
+func generateWebLoginCode() (string, error) {
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(bytes), nil
+}
+
+func buildWebLoginReturnURL(raw, loginCode string, expiresAt time.Time) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	q := u.Query()
+	q.Set("login_code", loginCode)
+	q.Set("expires_unix", fmt.Sprintf("%d", expiresAt.Unix()))
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
+func isTruthyQuery(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "t", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func isLocalReturnURL(raw string) bool {

@@ -21,6 +21,7 @@ var (
 	ErrProviderDisabled            = errors.New("OIDC provider is disabled")
 	ErrInvalidState                = errors.New("invalid OAuth state")
 	ErrInvalidCode                 = errors.New("invalid authorization code")
+	ErrInvalidReturnURL            = errors.New("invalid return URL")
 	ErrMissingEmail                = errors.New("email not provided by IdP")
 	ErrHomeRegionNotRoutable       = errors.New("home region is not routable")
 	ErrEmailDomainMismatch         = errors.New("email domain not allowed")

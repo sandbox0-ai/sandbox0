@@ -2653,6 +2653,15 @@ type WarmProcessSpec struct {
 // WarmProcessSpecType defines model for WarmProcessSpec.Type.
 type WarmProcessSpecType string
 
+// WebLoginExchangeRequest defines model for WebLoginExchangeRequest.
+type WebLoginExchangeRequest struct {
+	// LoginCode Short-lived one-time code returned to the web login callback.
+	LoginCode string `json:"login_code"`
+
+	// ReturnUrl Exact return URL used when the login code was created.
+	ReturnUrl string `json:"return_url"`
+}
+
 // WebhookConfig defines model for WebhookConfig.
 type WebhookConfig struct {
 	// Secret Optional. Shared secret used to sign webhook payloads.
@@ -2855,6 +2864,9 @@ type GetAuthOidcProviderCallbackParams struct {
 // GetAuthOidcProviderLoginParams defines parameters for GetAuthOidcProviderLogin.
 type GetAuthOidcProviderLoginParams struct {
 	ReturnUrl *string `form:"return_url,omitempty" json:"return_url,omitempty"`
+
+	// WebLogin When true, the OIDC callback redirects to return_url with a short-lived login_code for server-side exchange.
+	WebLogin *bool `form:"web_login,omitempty" json:"web_login,omitempty"`
 }
 
 // PostApiKeysJSONRequestBody defines body for PostApiKeys for application/json ContentType.
@@ -2955,6 +2967,9 @@ type PostAuthRefreshJSONRequestBody = RefreshRequest
 
 // PostAuthRegisterJSONRequestBody defines body for PostAuthRegister for application/json ContentType.
 type PostAuthRegisterJSONRequestBody = RegisterRequest
+
+// PostAuthWebLoginExchangeJSONRequestBody defines body for PostAuthWebLoginExchange for application/json ContentType.
+type PostAuthWebLoginExchangeJSONRequestBody = WebLoginExchangeRequest
 
 // PostRegionsJSONRequestBody defines body for PostRegions for application/json ContentType.
 type PostRegionsJSONRequestBody = CreateRegionRequest

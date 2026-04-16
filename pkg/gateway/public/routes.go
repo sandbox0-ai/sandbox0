@@ -71,6 +71,7 @@ func RegisterIdentityRoutes(router gin.IRouter, deps Deps) {
 		auth.POST("/login", authHandler.Login)
 		auth.POST("/register", authHandler.Register)
 		auth.POST("/refresh", authHandler.RefreshToken)
+		auth.POST("/web-login/exchange", authHandler.WebLoginExchange)
 
 		// OIDC auth
 		auth.GET(

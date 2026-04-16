@@ -109,7 +109,7 @@ func (s *Server) generateManagerToken(authCtx *authn.AuthContext, claims *intern
 	if claims != nil && claims.IsSystem {
 		return s.internalAuthGen.GenerateSystem("manager", opts)
 	}
-	if authCtx != nil && authCtx.IsSystemAdmin && strings.TrimSpace(authCtx.TeamID) == "" {
+	if authCtx != nil && authCtx.IsSystemAdmin && (strings.TrimSpace(authCtx.TeamID) == "" || authCtx.AuthMethod == authn.AuthMethodAPIKey) {
 		return s.internalAuthGen.GenerateSystem("manager", opts)
 	}
 

@@ -143,6 +143,10 @@ func (cc *CleanupController) cleanupExpired(ctx context.Context, template *v1alp
 	expiredCount := 0
 
 	for _, pod := range pods {
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
+
 		// Hard expiry: delete even if paused.
 		if hardExpiresAtStr := pod.Annotations[AnnotationHardExpiresAt]; hardExpiresAtStr != "" {
 			hardExpiresAt, err := time.Parse(time.RFC3339, hardExpiresAtStr)

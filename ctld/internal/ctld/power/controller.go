@@ -20,6 +20,8 @@ var ErrNotImplemented = errors.New("ctld power resolver not implemented")
 var ErrSandboxNotFound = errors.New("sandbox not found")
 var ErrPodNotFound = errors.New("pod not found")
 
+const defaultPauseUsageTimeout = 2 * time.Second
+
 type Target struct {
 	SandboxID    string
 	Runtime      string
@@ -41,10 +43,11 @@ type SandboxStatsProvider interface {
 }
 
 type Controller struct {
-	Resolver      Resolver
-	FS            *cgroup.FS
-	StatsProvider SandboxStatsProvider
-	HTTPClient    *http.Client
+	Resolver          Resolver
+	FS                *cgroup.FS
+	StatsProvider     SandboxStatsProvider
+	PauseUsageTimeout time.Duration
+	HTTPClient        *http.Client
 }
 
 func NewController(resolver Resolver, fs *cgroup.FS) *Controller {
@@ -138,10 +141,20 @@ func (c *Controller) PauseTarget(ctx context.Context, sandboxID string, target T
 	if err := c.FS.Freeze(target.CgroupDir); err != nil {
 		return ctldapi.PauseResponse{Paused: false, Error: fmt.Sprintf("freeze cgroup: %v", err)}, http.StatusInternalServerError
 	}
+	paused := false
+	defer func() {
+		if paused {
+			return
+		}
+		if err := c.FS.Thaw(target.CgroupDir); err != nil {
+			log.Printf("ctld pause rollback thaw failed sandbox=%s runtime=%s cgroup=%s error=%v", sandboxID, target.Runtime, target.CgroupDir, err)
+		}
+	}()
 	usage, err := c.pauseUsage(ctx, target)
 	if err != nil {
 		return ctldapi.PauseResponse{Paused: false, Error: err.Error()}, http.StatusInternalServerError
 	}
+	paused = true
 	log.Printf("ctld pause complete sandbox=%s runtime=%s working_set=%d usage=%d", sandboxID, target.Runtime, usage.ContainerMemoryWorkingSet, usage.ContainerMemoryUsage)
 	return ctldapi.PauseResponse{
 		Paused:        true,
@@ -196,6 +209,9 @@ func mapResolveResult(target Target, err error) (Target, int, ctldapi.PauseRespo
 }
 
 func (c *Controller) pauseUsage(ctx context.Context, target Target) (*ctldapi.SandboxResourceUsage, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	fallback, fallbackErr := c.cgroupPauseUsage(target.CgroupDir)
 	if c == nil || c.StatsProvider == nil {
 		if fallbackErr != nil {
@@ -204,7 +220,9 @@ func (c *Controller) pauseUsage(ctx context.Context, target Target) (*ctldapi.Sa
 		return fallback, nil
 	}
 
-	statsUsage, statsErr := c.StatsProvider.SandboxResourceUsage(ctx, target)
+	statsCtx, cancel := context.WithTimeout(ctx, c.pauseUsageTimeout())
+	defer cancel()
+	statsUsage, statsErr := c.StatsProvider.SandboxResourceUsage(statsCtx, target)
 	usage := mergeSandboxResourceUsage(fallback, statsUsage)
 	if usage != nil {
 		return usage, nil
@@ -219,6 +237,13 @@ func (c *Controller) pauseUsage(ctx context.Context, target Target) (*ctldapi.Sa
 		return nil, fmt.Errorf("collect sandbox usage from cri stats: %w", statsErr)
 	}
 	return nil, fmt.Errorf("read settled memory.current: %w", fallbackErr)
+}
+
+func (c *Controller) pauseUsageTimeout() time.Duration {
+	if c != nil && c.PauseUsageTimeout > 0 {
+		return c.PauseUsageTimeout
+	}
+	return defaultPauseUsageTimeout
 }
 
 func (c *Controller) cgroupPauseUsage(dir string) (*ctldapi.SandboxResourceUsage, error) {

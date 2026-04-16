@@ -42,6 +42,13 @@ func (p staticStatsProvider) SandboxResourceUsage(_ context.Context, _ Target) (
 	return p.usage, p.err
 }
 
+type blockingStatsProvider struct{}
+
+func (blockingStatsProvider) SandboxResourceUsage(ctx context.Context, _ Target) (*ctldapi.SandboxResourceUsage, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
 func TestControllerPauseAndResume(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "cgroup.freeze"), []byte("0\n"), 0o644))
@@ -79,6 +86,40 @@ func TestControllerPausePrefersCRIStatsWhenAvailable(t *testing.T) {
 	assert.Equal(t, int64(300), resp.ResourceUsage.TotalMemoryRSS)
 	assert.Equal(t, 8, resp.ResourceUsage.TotalThreadCount)
 	assert.Equal(t, int64(123), resp.ResourceUsage.ContainerMemoryLimit)
+}
+
+func TestControllerPauseFallsBackWhenStatsProviderTimesOut(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "cgroup.freeze"), []byte("0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "memory.current"), []byte("123\n"), 0o644))
+	controller := NewController(staticResolver{target: Target{SandboxID: "sandbox-1", CgroupDir: dir, PodNamespace: "default", PodName: "sandbox", PodUID: "uid-1"}}, &cgroup.FS{SettleTimeout: 100 * time.Millisecond, PollInterval: time.Millisecond})
+	controller.StatsProvider = blockingStatsProvider{}
+	controller.PauseUsageTimeout = 10 * time.Millisecond
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/sandbox-1/pause", nil)
+
+	resp, status := controller.Pause(req, "sandbox-1")
+
+	assert.Equal(t, http.StatusOK, status)
+	assert.True(t, resp.Paused)
+	assert.Equal(t, int64(123), resp.ResourceUsage.ContainerMemoryWorkingSet)
+	state, err := os.ReadFile(filepath.Join(dir, "cgroup.freeze"))
+	require.NoError(t, err)
+	assert.Equal(t, "1", string(state))
+}
+
+func TestControllerPauseThawsWhenUsageFails(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "cgroup.freeze"), []byte("0\n"), 0o644))
+	controller := NewController(staticResolver{target: Target{SandboxID: "sandbox-1", CgroupDir: dir}}, &cgroup.FS{SettleTimeout: 100 * time.Millisecond, PollInterval: time.Millisecond})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/sandbox-1/pause", nil)
+
+	resp, status := controller.Pause(req, "sandbox-1")
+
+	assert.Equal(t, http.StatusInternalServerError, status)
+	assert.False(t, resp.Paused)
+	state, err := os.ReadFile(filepath.Join(dir, "cgroup.freeze"))
+	require.NoError(t, err)
+	assert.Equal(t, "0", string(state))
 }
 
 func TestControllerMapsResolverErrors(t *testing.T) {

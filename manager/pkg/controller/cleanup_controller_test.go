@@ -83,3 +83,55 @@ func TestCleanupExpiredRequestsPauseDesiredState(t *testing.T) {
 		t.Fatal("expected pause-requested event")
 	}
 }
+
+func TestCleanupExpiredSkipsDeletingPod(t *testing.T) {
+	now := time.Date(2026, time.April, 15, 19, 31, 0, 0, time.UTC)
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "default",
+			Namespace: "tpl-default",
+		},
+	}
+	deletedAt := metav1.NewTime(now.Add(-time.Minute))
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "sandbox-1",
+			Namespace:         "tpl-default",
+			DeletionTimestamp: &deletedAt,
+			Labels: map[string]string{
+				LabelTemplateID: "default",
+				LabelPoolType:   PoolTypeActive,
+			},
+			Annotations: map[string]string{
+				AnnotationExpiresAt: now.Add(-time.Minute).Format(time.RFC3339),
+			},
+		},
+	}
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{
+		cache.NamespaceIndex: cache.MetaNamespaceIndexFunc,
+	})
+	require.NoError(t, indexer.Add(pod))
+
+	pauseRequester := &recordingPauseRequester{}
+	recorder := record.NewFakeRecorder(1)
+	controller := NewCleanupController(
+		nil,
+		corelisters.NewPodLister(indexer),
+		nil,
+		recorder,
+		staticCleanupClock{now: now},
+		pauseRequester,
+		nil,
+		zap.NewNop(),
+		time.Minute,
+	)
+
+	require.NoError(t, controller.cleanupExpired(context.Background(), template))
+
+	assert.Empty(t, pauseRequester.calls)
+	select {
+	case event := <-recorder.Events:
+		t.Fatalf("unexpected event: %s", event)
+	default:
+	}
+}

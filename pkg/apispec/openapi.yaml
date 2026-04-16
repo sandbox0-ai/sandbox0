@@ -1032,7 +1032,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
         "403":
-          description: Requested roles exceed caller permissions
+          description: Requested roles exceed caller permissions, or platform scope requires a system admin user session
           content:
             application/json:
               schema:
@@ -3805,6 +3805,9 @@ components:
           type: string
         name:
           type: string
+        scope:
+          type: string
+          description: "API key scope. team keys use roles for team-scoped access. platform keys grant system admin access and can only be created or managed by system admin user sessions."
         roles:
           type: array
           items:
@@ -3831,6 +3834,7 @@ components:
         - team_id
         - created_by
         - name
+        - scope
         - roles
         - is_active
         - expires_at
@@ -3841,6 +3845,9 @@ components:
       properties:
         name:
           type: string
+        scope:
+          type: string
+          description: "API key scope: team or platform. Defaults to team. platform keys grant system admin access, require a system admin user session, and do not support roles."
         roles:
           type: array
           description: "Requested API key roles. Supported roles: admin, developer, builder, viewer. The roles must not grant permissions outside the authenticated caller's permissions."
@@ -3857,6 +3864,8 @@ components:
           type: string
         name:
           type: string
+        scope:
+          type: string
         roles:
           type: array
           items:
@@ -3871,7 +3880,7 @@ components:
         created_at:
           type: string
           format: date-time
-      required: [id, name, roles, team_id, expires_at, created_at]
+      required: [id, name, scope, roles, team_id, expires_at, created_at]
     CurrentAPIKeyResponse:
       type: object
       properties:
@@ -3880,6 +3889,8 @@ components:
         team_id:
           type: string
         created_by:
+          type: string
+        scope:
           type: string
         roles:
           type: array
@@ -3894,7 +3905,7 @@ components:
         expires_at:
           type: string
           format: date-time
-      required: [id, team_id, created_by, roles, permissions, is_active, expires_at]
+      required: [id, team_id, created_by, scope, roles, permissions, is_active, expires_at]
     SuccessCreateAPIKeyResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"

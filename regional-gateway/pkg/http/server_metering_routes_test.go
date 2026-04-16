@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	gatewayhandlers "github.com/sandbox0-ai/sandbox0/pkg/gateway/http/handlers"
 	gatewaymiddleware "github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
@@ -73,6 +75,28 @@ func TestSetupMeteringRoutesAllowsSystemAdmin(t *testing.T) {
 	}
 }
 
+func TestSetupMeteringRoutesAllowsPlatformAPIKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := testMeteringRouteServer()
+	server.authMiddleware = gatewaymiddleware.NewAuthMiddleware(staticAPIKeyValidator{key: &apikey.APIKey{
+		ID:        "key-1",
+		TeamID:    "team-1",
+		CreatedBy: "user-1",
+		Scope:     apikey.ScopePlatform,
+	}}, "secret", server.jwtIssuer, zap.NewNop())
+	server.setupMeteringRoutes()
+
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/metering/status", nil)
+	req.Header.Set("Authorization", "Bearer s0_test")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+}
+
 func testMeteringRouteServer() *Server {
 	logger := zap.NewNop()
 	jwtIssuer := authn.NewIssuer("regional-gateway", "secret", time.Minute, time.Hour)
@@ -84,4 +108,12 @@ func testMeteringRouteServer() *Server {
 		jwtIssuer:       jwtIssuer,
 		meteringHandler: gatewayhandlers.NewMeteringHandler(nil, "aws-us-east-1", logger),
 	}
+}
+
+type staticAPIKeyValidator struct {
+	key *apikey.APIKey
+}
+
+func (v staticAPIKeyValidator) ValidateAPIKey(context.Context, string) (*apikey.APIKey, error) {
+	return v.key, nil
 }

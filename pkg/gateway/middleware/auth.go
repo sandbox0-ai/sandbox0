@@ -114,12 +114,24 @@ func (m *AuthMiddleware) authenticateAPIKey(c *gin.Context, keyValue string) (*a
 		userID = strings.TrimSpace(*apiKey.UserID)
 	}
 
+	scope, ok := apikey.NormalizeScope(apiKey.Scope)
+	if !ok {
+		return nil, ErrInvalidToken
+	}
+	permissions := authn.ExpandRolesPermissions(apiKey.Roles)
+	isSystemAdmin := false
+	if scope == apikey.ScopePlatform {
+		permissions = []string{"*"}
+		isSystemAdmin = true
+	}
+
 	return &authn.AuthContext{
-		AuthMethod:  authn.AuthMethodAPIKey,
-		TeamID:      apiKey.TeamID,
-		UserID:      userID,
-		APIKeyID:    apiKey.ID,
-		Permissions: authn.ExpandRolesPermissions(apiKey.Roles),
+		AuthMethod:    authn.AuthMethodAPIKey,
+		TeamID:        apiKey.TeamID,
+		UserID:        userID,
+		APIKeyID:      apiKey.ID,
+		IsSystemAdmin: isSystemAdmin,
+		Permissions:   permissions,
 	}, nil
 }
 

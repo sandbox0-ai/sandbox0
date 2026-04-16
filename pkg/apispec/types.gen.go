@@ -566,10 +566,13 @@ type APIKey struct {
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 	Name       string     `json:"name"`
 	Roles      []string   `json:"roles"`
-	TeamId     string     `json:"team_id"`
-	UpdatedAt  time.Time  `json:"updated_at"`
-	UsageCount *int64     `json:"usage_count,omitempty"`
-	UserId     *string    `json:"user_id"`
+
+	// Scope API key scope. team keys use roles for team-scoped access. platform keys grant system admin access and can only be created or managed by system admin user sessions.
+	Scope      string    `json:"scope"`
+	TeamId     string    `json:"team_id"`
+	UpdatedAt  time.Time `json:"updated_at"`
+	UsageCount *int64    `json:"usage_count,omitempty"`
+	UserId     *string   `json:"user_id"`
 }
 
 // AddTeamMemberRequest defines model for AddTeamMemberRequest.
@@ -746,6 +749,9 @@ type CreateAPIKeyRequest struct {
 
 	// Roles Requested API key roles. Supported roles: admin, developer, builder, viewer. The roles must not grant permissions outside the authenticated caller's permissions.
 	Roles *[]string `json:"roles,omitempty"`
+
+	// Scope API key scope: team or platform. Defaults to team. platform keys grant system admin access, require a system admin user session, and do not support roles.
+	Scope *string `json:"scope,omitempty"`
 }
 
 // CreateAPIKeyResponse defines model for CreateAPIKeyResponse.
@@ -756,6 +762,7 @@ type CreateAPIKeyResponse struct {
 	Key       *string   `json:"key,omitempty"`
 	Name      string    `json:"name"`
 	Roles     []string  `json:"roles"`
+	Scope     string    `json:"scope"`
 	TeamId    string    `json:"team_id"`
 }
 
@@ -887,6 +894,7 @@ type CurrentAPIKeyResponse struct {
 	IsActive    bool      `json:"is_active"`
 	Permissions []string  `json:"permissions"`
 	Roles       []string  `json:"roles"`
+	Scope       string    `json:"scope"`
 	TeamId      string    `json:"team_id"`
 }
 

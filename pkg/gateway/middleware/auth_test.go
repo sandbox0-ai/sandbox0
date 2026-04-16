@@ -150,6 +150,39 @@ func TestAuthMiddleware_APIKeyFallsBackToCreatorUserID(t *testing.T) {
 	}
 }
 
+func TestAuthMiddleware_PlatformAPIKeySetsSystemAdmin(t *testing.T) {
+	t.Setenv("GIN_MODE", "release")
+
+	ownerID := "user-1"
+	req := httptest.NewRequest("GET", "/internal/v1/metering/status", nil)
+	req.Header.Set("Authorization", "Bearer s0_test")
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = req
+
+	middleware := NewAuthMiddleware(staticAPIKeyValidator{key: &apikey.APIKey{
+		ID:        "key-1",
+		TeamID:    "team-1",
+		UserID:    &ownerID,
+		CreatedBy: "creator-1",
+		Scope:     apikey.ScopePlatform,
+		Roles:     []string{"viewer"},
+	}}, "test-secret", nil, zap.NewNop())
+	authCtx, err := middleware.AuthenticateRequest(ctx)
+	if err != nil {
+		t.Fatalf("authenticate request: %v", err)
+	}
+	if !authCtx.IsSystemAdmin {
+		t.Fatal("expected platform API key to set system admin")
+	}
+	if !authCtx.HasPermission(authn.PermTemplateDelete) || !authCtx.HasPermission("anything:anywhere") {
+		t.Fatalf("expected wildcard permissions, got %v", authCtx.Permissions)
+	}
+	if authCtx.AuthMethod != authn.AuthMethodAPIKey || authCtx.APIKeyID != "key-1" {
+		t.Fatalf("unexpected auth context: %+v", authCtx)
+	}
+}
+
 func TestAuthMiddleware_JWTAccessTokenExplicitTeamHeader(t *testing.T) {
 	t.Setenv("GIN_MODE", "release")
 
@@ -368,6 +401,17 @@ func TestAuthMiddleware_RequireSystemAdmin(t *testing.T) {
 				AuthMethod:    authn.AuthMethodJWT,
 				UserID:        "user-1",
 				TeamID:        "team-1",
+				IsSystemAdmin: true,
+			},
+			wantStatus: http.StatusNoContent,
+		},
+		{
+			name: "platform api key allowed",
+			authCtx: &authn.AuthContext{
+				AuthMethod:    authn.AuthMethodAPIKey,
+				UserID:        "user-1",
+				TeamID:        "team-1",
+				APIKeyID:      "key-1",
 				IsSystemAdmin: true,
 			},
 			wantStatus: http.StatusNoContent,

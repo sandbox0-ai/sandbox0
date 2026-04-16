@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -17,10 +18,19 @@ import (
 
 // APIKeyHandler handles API key endpoints
 type APIKeyHandler struct {
-	keys     *apikey.Repository
+	keys     apiKeyStore
 	identity *identity.Repository
 	logger   *zap.Logger
 	regionID string
+}
+
+type apiKeyStore interface {
+	CreateAPIKey(ctx context.Context, teamID, regionID, userID, name, scope string, roles []string, expiresAt time.Time) (*apikey.APIKey, string, error)
+	GetAPIKeysByTeamID(ctx context.Context, teamID string) ([]*apikey.APIKey, error)
+	GetAPIKeysByUserID(ctx context.Context, userID string) ([]*apikey.APIKey, error)
+	GetAPIKeyByID(ctx context.Context, id string) (*apikey.APIKey, error)
+	DeleteAPIKey(ctx context.Context, id string) error
+	DeactivateAPIKey(ctx context.Context, id string) error
 }
 
 // NewAPIKeyHandler creates a new API key handler
@@ -56,6 +66,7 @@ func (h *APIKeyHandler) ListAPIKeys(c *gin.Context) {
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to get API keys")
 		return
 	}
+	keys = filterVisibleAPIKeys(authCtx, keys)
 
 	spec.JSONSuccess(c, http.StatusOK, gin.H{"api_keys": keys})
 }
@@ -63,6 +74,7 @@ func (h *APIKeyHandler) ListAPIKeys(c *gin.Context) {
 // CreateAPIKeyRequest is the request body for creating an API key
 type CreateAPIKeyRequest struct {
 	Name      string   `json:"name" binding:"required"`
+	Scope     string   `json:"scope"`
 	Roles     []string `json:"roles"`
 	ExpiresIn string   `json:"expires_in"` // e.g., "30d", "90d", "365d", "never"
 }
@@ -71,6 +83,7 @@ type CreateAPIKeyRequest struct {
 type CreateAPIKeyResponse struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
+	Scope     string    `json:"scope"`
 	Roles     []string  `json:"roles"`
 	TeamID    string    `json:"team_id"`
 	Key       string    `json:"key,omitempty"` // Only returned on creation
@@ -83,6 +96,7 @@ type CurrentAPIKeyResponse struct {
 	ID          string    `json:"id"`
 	TeamID      string    `json:"team_id"`
 	CreatedBy   string    `json:"created_by"`
+	Scope       string    `json:"scope"`
 	Roles       []string  `json:"roles"`
 	Permissions []string  `json:"permissions"`
 	IsActive    bool      `json:"is_active"`
@@ -113,6 +127,7 @@ func (h *APIKeyHandler) GetCurrentAPIKey(c *gin.Context) {
 			ID:          key.ID,
 			TeamID:      key.TeamID,
 			CreatedBy:   key.CreatedBy,
+			Scope:       key.Scope,
 			Roles:       key.Roles,
 			Permissions: append([]string(nil), authCtx.Permissions...),
 			IsActive:    key.IsActive,
@@ -155,15 +170,34 @@ func (h *APIKeyHandler) CreateAPIKey(c *gin.Context) {
 		expiresAt = time.Now().AddDate(100, 0, 0) // ~100 years
 	}
 
-	// Default roles if not provided
-	roles, err := normalizeCreateAPIKeyRoles(req.Roles)
+	scope, err := normalizeCreateAPIKeyScope(req.Scope)
 	if err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
-	if !canGrantAPIKeyRoles(authCtx, roles) {
-		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "cannot create API key with roles that grant permissions outside the caller's permissions")
-		return
+
+	var roles []string
+	if scope == apikey.ScopePlatform {
+		if !canManagePlatformAPIKeys(authCtx) {
+			spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "platform API keys require system admin user access")
+			return
+		}
+		if len(req.Roles) > 0 {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "platform API keys do not support roles")
+			return
+		}
+		roles = []string{}
+	} else {
+		// Default roles if not provided
+		roles, err = normalizeCreateAPIKeyRoles(req.Roles)
+		if err != nil {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+			return
+		}
+		if !canGrantAPIKeyRoles(authCtx, roles) {
+			spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "cannot create API key with roles that grant permissions outside the caller's permissions")
+			return
+		}
 	}
 
 	regionID := h.regionID
@@ -188,6 +222,7 @@ func (h *APIKeyHandler) CreateAPIKey(c *gin.Context) {
 		regionID,
 		authCtx.UserID,
 		req.Name,
+		scope,
 		roles,
 		expiresAt,
 	)
@@ -201,6 +236,7 @@ func (h *APIKeyHandler) CreateAPIKey(c *gin.Context) {
 	response := &CreateAPIKeyResponse{
 		ID:        key.ID,
 		Name:      key.Name,
+		Scope:     key.Scope,
 		Roles:     key.Roles,
 		TeamID:    key.TeamID,
 		Key:       keyValue, // Full key, only shown at creation
@@ -230,6 +266,11 @@ func (h *APIKeyHandler) DeleteAPIKey(c *gin.Context) {
 		}
 		h.logger.Error("Failed to get API key", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to get API key")
+		return
+	}
+
+	if key.Scope == apikey.ScopePlatform && !canManagePlatformAPIKeys(authCtx) {
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "not authorized to delete this API key")
 		return
 	}
 
@@ -274,6 +315,11 @@ func (h *APIKeyHandler) DeactivateAPIKey(c *gin.Context) {
 		return
 	}
 
+	if key.Scope == apikey.ScopePlatform && !canManagePlatformAPIKeys(authCtx) {
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "not authorized to deactivate this API key")
+		return
+	}
+
 	// Verify the key belongs to the user's team
 	if key.TeamID != authCtx.TeamID {
 		_, err := h.identity.GetTeamMember(c.Request.Context(), key.TeamID, authCtx.UserID)
@@ -290,6 +336,14 @@ func (h *APIKeyHandler) DeactivateAPIKey(c *gin.Context) {
 	}
 
 	spec.JSONSuccess(c, http.StatusOK, gin.H{"message": "API key deactivated"})
+}
+
+func normalizeCreateAPIKeyScope(scope string) (string, error) {
+	normalized, ok := apikey.NormalizeScope(scope)
+	if !ok {
+		return "", errors.New("scope must be team or platform")
+	}
+	return normalized, nil
 }
 
 func normalizeCreateAPIKeyRoles(roles []string) ([]string, error) {
@@ -339,6 +393,27 @@ func canGrantAPIKeyRoles(authCtx *authn.AuthContext, roles []string) bool {
 		}
 	}
 	return true
+}
+
+func canManagePlatformAPIKeys(authCtx *authn.AuthContext) bool {
+	return authCtx != nil && authCtx.AuthMethod == authn.AuthMethodJWT && authCtx.IsSystemAdmin
+}
+
+func filterVisibleAPIKeys(authCtx *authn.AuthContext, keys []*apikey.APIKey) []*apikey.APIKey {
+	if len(keys) == 0 {
+		return keys
+	}
+	filtered := make([]*apikey.APIKey, 0, len(keys))
+	for _, key := range keys {
+		if key == nil {
+			continue
+		}
+		if key.Scope == apikey.ScopePlatform && !canManagePlatformAPIKeys(authCtx) {
+			continue
+		}
+		filtered = append(filtered, key)
+	}
+	return filtered
 }
 
 func hasWildcardPermission(permissions []string) bool {

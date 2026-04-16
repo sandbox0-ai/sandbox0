@@ -160,7 +160,7 @@ func (s *Server) generateInternalToken(authCtx *authn.AuthContext, target string
 	if authCtx == nil {
 		return s.internalAuthGen.GenerateSystem(target, internalauth.GenerateOptions{})
 	}
-	if authCtx.TeamID == "" {
+	if authCtx.TeamID == "" || (authCtx.AuthMethod == authn.AuthMethodAPIKey && authCtx.IsSystemAdmin) {
 		return s.internalAuthGen.GenerateSystem(
 			target,
 			internalauth.GenerateOptions{

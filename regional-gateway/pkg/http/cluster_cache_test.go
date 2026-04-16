@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
@@ -80,5 +81,38 @@ func TestGetClusterGatewayURLForClusterRefreshesCacheWithSystemToken(t *testing.
 	}
 	if cached := server.getClusterFromCache("cluster-a"); cached != got {
 		t.Fatalf("cached cluster gateway url = %q, want %q", cached, got)
+	}
+}
+
+func TestGenerateInternalTokenUsesSystemTokenForPlatformAPIKey(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	server := &Server{internalAuthGen: internalauth.NewGenerator(internalauth.GeneratorConfig{Caller: "regional-gateway", PrivateKey: privateKey, TTL: time.Minute})}
+
+	token, err := server.generateInternalToken(&authn.AuthContext{
+		AuthMethod:    authn.AuthMethodAPIKey,
+		TeamID:        "team-1",
+		UserID:        "user-1",
+		APIKeyID:      "key-1",
+		IsSystemAdmin: true,
+		Permissions:   []string{"*"},
+	}, "scheduler")
+	if err != nil {
+		t.Fatalf("generateInternalToken: %v", err)
+	}
+	claims, err := internalauth.NewValidator(internalauth.ValidatorConfig{Target: "scheduler", PublicKey: publicKey}).Validate(token)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !claims.IsSystemToken() {
+		t.Fatalf("expected system token, got team_id=%q", claims.TeamID)
+	}
+	if claims.TeamID != "" {
+		t.Fatalf("TeamID = %q, want empty", claims.TeamID)
+	}
+	if len(claims.Permissions) != 1 || claims.Permissions[0] != "*" {
+		t.Fatalf("Permissions = %v, want [*]", claims.Permissions)
 	}
 }

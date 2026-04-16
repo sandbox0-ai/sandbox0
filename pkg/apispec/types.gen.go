@@ -741,9 +741,11 @@ type ContextStatsResponse struct {
 // CreateAPIKeyRequest defines model for CreateAPIKeyRequest.
 type CreateAPIKeyRequest struct {
 	// ExpiresIn 30d, 90d, 180d, 365d, or never
-	ExpiresIn *string   `json:"expires_in,omitempty"`
-	Name      string    `json:"name"`
-	Roles     *[]string `json:"roles,omitempty"`
+	ExpiresIn *string `json:"expires_in,omitempty"`
+	Name      string  `json:"name"`
+
+	// Roles Requested API key roles. Supported roles: admin, developer, builder, viewer. The roles must not grant permissions outside the authenticated caller's permissions.
+	Roles *[]string `json:"roles,omitempty"`
 }
 
 // CreateAPIKeyResponse defines model for CreateAPIKeyResponse.

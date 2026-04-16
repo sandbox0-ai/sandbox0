@@ -1031,6 +1031,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: Requested roles exceed caller permissions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
   /api-keys/current:
     get:
       tags: [api-keys]
@@ -3837,6 +3843,7 @@ components:
           type: string
         roles:
           type: array
+          description: "Requested API key roles. Supported roles: admin, developer, builder, viewer. The roles must not grant permissions outside the authenticated caller's permissions."
           items:
             type: string
         expires_in:

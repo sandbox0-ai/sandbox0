@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
@@ -155,9 +156,14 @@ func (h *APIKeyHandler) CreateAPIKey(c *gin.Context) {
 	}
 
 	// Default roles if not provided
-	roles := req.Roles
-	if len(roles) == 0 {
-		roles = []string{"developer"}
+	roles, err := normalizeCreateAPIKeyRoles(req.Roles)
+	if err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
+	if !canGrantAPIKeyRoles(authCtx, roles) {
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "cannot create API key with roles that grant permissions outside the caller's permissions")
+		return
 	}
 
 	regionID := h.regionID
@@ -284,4 +290,62 @@ func (h *APIKeyHandler) DeactivateAPIKey(c *gin.Context) {
 	}
 
 	spec.JSONSuccess(c, http.StatusOK, gin.H{"message": "API key deactivated"})
+}
+
+func normalizeCreateAPIKeyRoles(roles []string) ([]string, error) {
+	if len(roles) == 0 {
+		return []string{"developer"}, nil
+	}
+
+	normalized := make([]string, 0, len(roles))
+	seen := make(map[string]struct{}, len(roles))
+	for _, role := range roles {
+		role = strings.TrimSpace(role)
+		if role == "" {
+			return nil, errors.New("role cannot be empty")
+		}
+		if _, ok := authn.RolePermissions[role]; !ok {
+			return nil, errors.New("unsupported role: " + role)
+		}
+		if _, ok := seen[role]; ok {
+			continue
+		}
+		seen[role] = struct{}{}
+		normalized = append(normalized, role)
+	}
+	if len(normalized) == 0 {
+		return nil, errors.New("at least one role is required")
+	}
+	return normalized, nil
+}
+
+func canGrantAPIKeyRoles(authCtx *authn.AuthContext, roles []string) bool {
+	if authCtx == nil {
+		return false
+	}
+
+	callerPermissions := append([]string(nil), authCtx.Permissions...)
+	if len(callerPermissions) == 0 && authCtx.TeamRole != "" {
+		callerPermissions = authn.ExpandRolePermissions(authCtx.TeamRole)
+	}
+	if hasWildcardPermission(callerPermissions) {
+		return true
+	}
+
+	caller := &authn.AuthContext{Permissions: callerPermissions}
+	for _, permission := range authn.ExpandRolesPermissions(roles) {
+		if !caller.HasPermission(permission) {
+			return false
+		}
+	}
+	return true
+}
+
+func hasWildcardPermission(permissions []string) bool {
+	for _, permission := range permissions {
+		if permission == "*" || permission == "*:*" {
+			return true
+		}
+	}
+	return false
 }

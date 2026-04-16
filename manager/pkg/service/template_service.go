@@ -17,8 +17,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
+)
+
+const (
+	managerNamespaceLabelKey   = "app.kubernetes.io/managed-by"
+	managerNamespaceLabelValue = "sandbox0-manager"
 )
 
 // TemplateService handles template operations
@@ -179,14 +185,122 @@ func (s *TemplateService) DeleteTemplate(ctx context.Context, id string) error {
 		}
 		return fmt.Errorf("resolve template namespace: %w", err)
 	}
-	err = s.crdClient.Sandbox0V1alpha1().SandboxTemplates(existing.Namespace).Delete(ctx, id, metav1.DeleteOptions{})
+
+	deleteNamespace, err := s.shouldDeleteNamespaceForTemplate(ctx, existing)
 	if err != nil {
-		if errors.IsNotFound(err) {
-			return nil // Already deleted
-		}
-		return fmt.Errorf("delete template: %w", err)
+		return fmt.Errorf("resolve template namespace cleanup: %w", err)
+	}
+	if deleteNamespace {
+		// Delete the namespace first so a transient namespace cleanup failure leaves
+		// the template visible for the scheduler's orphan retry path.
+		return s.deleteTemplateNamespace(ctx, existing.Namespace)
 	}
 
+	err = s.crdClient.Sandbox0V1alpha1().SandboxTemplates(existing.Namespace).Delete(ctx, id, metav1.DeleteOptions{})
+	if err != nil {
+		if !errors.IsNotFound(err) {
+			return fmt.Errorf("delete template: %w", err)
+		}
+	}
+
+	if err := s.deleteTemplatePods(ctx, existing.Namespace, id); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (s *TemplateService) shouldDeleteNamespaceForTemplate(ctx context.Context, template *v1alpha1.SandboxTemplate) (bool, error) {
+	if template == nil || template.Namespace == "" || s.k8sClient == nil || s.crdClient == nil {
+		return false, nil
+	}
+
+	managed, err := s.isManagedTemplateNamespace(ctx, template.Namespace)
+	if err != nil {
+		return false, err
+	}
+	if !managed {
+		return false, nil
+	}
+
+	hasOtherTemplates, err := s.namespaceHasOtherTemplates(ctx, template.Namespace, template.Name)
+	if err != nil {
+		return false, err
+	}
+	return !hasOtherTemplates, nil
+}
+
+func (s *TemplateService) isManagedTemplateNamespace(ctx context.Context, namespace string) (bool, error) {
+	ns, err := s.k8sClient.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("get namespace %s: %w", namespace, err)
+	}
+	if ns.Labels[managerNamespaceLabelKey] != managerNamespaceLabelValue {
+		s.logger.Info("Skipping template namespace cleanup for unmanaged namespace",
+			zap.String("namespace", namespace),
+		)
+		return false, nil
+	}
+	return true, nil
+}
+
+func (s *TemplateService) namespaceHasOtherTemplates(ctx context.Context, namespace, deletingName string) (bool, error) {
+	templates, err := s.crdClient.Sandbox0V1alpha1().SandboxTemplates(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("list templates in namespace %s: %w", namespace, err)
+	}
+	for _, template := range templates.Items {
+		if template.Name != deletingName {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *TemplateService) deleteTemplateNamespace(ctx context.Context, namespace string) error {
+	if namespace == "" || s.k8sClient == nil {
+		return nil
+	}
+	if err := s.k8sClient.CoreV1().Namespaces().Delete(ctx, namespace, metav1.DeleteOptions{}); err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("delete template namespace %s: %w", namespace, err)
+	}
+	s.logger.Info("Template namespace deletion requested",
+		zap.String("namespace", namespace),
+	)
+	return nil
+}
+
+func (s *TemplateService) deleteTemplatePods(ctx context.Context, namespace, templateID string) error {
+	if namespace == "" || templateID == "" || s.k8sClient == nil {
+		return nil
+	}
+	selector := labels.Set{controller.LabelTemplateID: templateID}.AsSelector().String()
+	pods, err := s.k8sClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("list template pods in namespace %s: %w", namespace, err)
+	}
+
+	for _, pod := range pods.Items {
+		poolType := pod.Labels[controller.LabelPoolType]
+		if poolType != controller.PoolTypeIdle && poolType != controller.PoolTypeActive {
+			continue
+		}
+		if err := s.k8sClient.CoreV1().Pods(namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("delete template pod %s/%s: %w", namespace, pod.Name, err)
+		}
+	}
 	return nil
 }
 
@@ -238,7 +352,7 @@ func (s *TemplateService) ensureNamespace(ctx context.Context, namespace string)
 		ObjectMeta: metav1.ObjectMeta{
 			Name: namespace,
 			Labels: map[string]string{
-				"app.kubernetes.io/managed-by": "sandbox0-manager",
+				managerNamespaceLabelKey: managerNamespaceLabelValue,
 			},
 		},
 	}

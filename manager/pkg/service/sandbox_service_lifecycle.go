@@ -52,29 +52,13 @@ func (s *SandboxService) TerminateSandbox(ctx context.Context, sandboxID string)
 }
 
 func (s *SandboxService) thawSandboxBeforeTermination(ctx context.Context, pod *corev1.Pod, sandboxID string) {
-	if s == nil || s.ctldClient == nil || !s.config.CtldEnabled || !sandboxPodMayHaveFrozenCgroup(pod) {
+	if s == nil || !s.config.CtldEnabled || !sandboxPodMayHaveFrozenCgroup(pod) {
 		return
 	}
-	ctldAddress, err := s.ctldAddressForPod(ctx, pod)
-	if err != nil {
-		s.logger.Warn("Failed to resolve ctld before sandbox termination",
+	if _, err := s.RequestResumeSandbox(ctx, sandboxID); err != nil {
+		s.logger.Warn("Failed to request sandbox thaw before termination",
 			zap.String("sandboxID", sandboxID),
 			zap.Error(err),
-		)
-		return
-	}
-	resp, err := s.ctldClient.Resume(ctx, ctldAddress, sandboxID)
-	if err != nil {
-		s.logger.Warn("Failed to thaw sandbox before termination",
-			zap.String("sandboxID", sandboxID),
-			zap.Error(err),
-		)
-		return
-	}
-	if !resp.Resumed {
-		s.logger.Warn("ctld did not thaw sandbox before termination",
-			zap.String("sandboxID", sandboxID),
-			zap.String("error", resp.Error),
 		)
 	}
 }

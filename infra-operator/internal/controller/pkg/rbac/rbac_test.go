@@ -155,10 +155,20 @@ func TestReconcileCtldRBACIncludesPodReadPermissions(t *testing.T) {
 		if !contains(rule.Resources, "pods") {
 			continue
 		}
-		assert.ElementsMatch(t, []string{"get", "list", "watch"}, rule.Verbs)
+		assert.ElementsMatch(t, []string{"get", "list", "watch", "update", "patch"}, rule.Verbs)
 		found = true
 	}
-	assert.True(t, found, "expected ctld cluster role to include pod read permissions")
+	assert.True(t, found, "expected ctld cluster role to include pod reconcile permissions")
+
+	found = false
+	for _, rule := range role.Rules {
+		if !contains(rule.Resources, "pods/resize") {
+			continue
+		}
+		assert.ElementsMatch(t, []string{"update", "patch"}, rule.Verbs)
+		found = true
+	}
+	assert.True(t, found, "expected ctld cluster role to include pod resize permissions")
 }
 
 func contains(values []string, target string) bool {

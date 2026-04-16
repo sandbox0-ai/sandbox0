@@ -123,11 +123,22 @@ func (c *Controller) Pause(r *http.Request, sandboxID string) (ctldapi.PauseResp
 	if status != http.StatusOK {
 		return errResp, status
 	}
+	ctx := context.Background()
+	if r != nil {
+		ctx = r.Context()
+	}
+	return c.PauseTarget(ctx, sandboxID, target)
+}
+
+func (c *Controller) PauseTarget(ctx context.Context, sandboxID string, target Target) (ctldapi.PauseResponse, int) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	log.Printf("ctld pause start sandbox=%s runtime=%s cgroup=%s", sandboxID, target.Runtime, target.CgroupDir)
 	if err := c.FS.Freeze(target.CgroupDir); err != nil {
 		return ctldapi.PauseResponse{Paused: false, Error: fmt.Sprintf("freeze cgroup: %v", err)}, http.StatusInternalServerError
 	}
-	usage, err := c.pauseUsage(r.Context(), target)
+	usage, err := c.pauseUsage(ctx, target)
 	if err != nil {
 		return ctldapi.PauseResponse{Paused: false, Error: err.Error()}, http.StatusInternalServerError
 	}
@@ -143,6 +154,10 @@ func (c *Controller) Resume(r *http.Request, sandboxID string) (ctldapi.ResumeRe
 	if status != http.StatusOK {
 		return ctldapi.ResumeResponse{Resumed: false, Error: pauseErr.Error}, status
 	}
+	return c.ResumeTarget(sandboxID, target)
+}
+
+func (c *Controller) ResumeTarget(sandboxID string, target Target) (ctldapi.ResumeResponse, int) {
 	log.Printf("ctld resume start sandbox=%s runtime=%s cgroup=%s", sandboxID, target.Runtime, target.CgroupDir)
 	if err := c.FS.Thaw(target.CgroupDir); err != nil {
 		return ctldapi.ResumeResponse{Resumed: false, Error: fmt.Sprintf("thaw cgroup: %v", err)}, http.StatusInternalServerError

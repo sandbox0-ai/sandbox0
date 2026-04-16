@@ -2,16 +2,14 @@ package service
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
-	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // SandboxPowerExecutor executes pause and resume transitions for a sandbox.
-// The default implementation stays manager-local today and will be replaced by ctld later.
+// The manager-local implementation executes transitions directly; ctld mode records desired state for node-local reconciliation.
 type SandboxPowerExecutor interface {
 	Pause(ctx context.Context, sandboxID string) (*PauseSandboxResponse, error)
 	Resume(ctx context.Context, sandboxID string) (*ResumeSandboxResponse, error)
@@ -45,85 +43,11 @@ func (e *localSandboxPowerExecutor) Resume(ctx context.Context, sandboxID string
 }
 
 func (e *ctldSandboxPowerExecutor) Pause(ctx context.Context, sandboxID string) (*PauseSandboxResponse, error) {
-	pod, err := e.service.getSandboxPodForPowerState(ctx, sandboxID)
-	if err != nil {
-		return nil, fmt.Errorf("get pod: %w", err)
-	}
-	expected := currentSandboxPowerExpectation(pod.Annotations, SandboxPowerStatePaused)
-	ctldAddress, err := e.service.ctldAddressForSandbox(ctx, sandboxID)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := e.service.ctldClient.Pause(ctx, ctldAddress, sandboxID)
-	if err != nil {
-		return nil, err
-	}
-	if !resp.Paused {
-		return nil, fmt.Errorf("ctld pause failed: %s", resp.Error)
-	}
-	pauseResp, err := e.service.completePausedSandbox(ctx, pod, sandboxID, sandboxUsageFromCtld(resp.ResourceUsage), expected)
-	if err != nil && errors.Is(err, errSandboxPowerStateStale) {
-		freshPod, getErr := e.service.getSandboxPodForPowerState(ctx, sandboxID)
-		if getErr == nil {
-			current := sandboxPowerStateFromAnnotations(freshPod.Annotations)
-			if current.Desired == SandboxPowerStateActive {
-				_, _ = e.service.ctldClient.Resume(ctx, ctldAddress, sandboxID)
-				return &PauseSandboxResponse{SandboxID: sandboxID, Paused: false, PowerState: current}, nil
-			}
-		}
-	}
-	return pauseResp, err
+	return e.service.RequestPauseSandbox(ctx, sandboxID)
 }
 
 func (e *ctldSandboxPowerExecutor) Resume(ctx context.Context, sandboxID string) (*ResumeSandboxResponse, error) {
-	pod, err := e.service.getSandboxPodForPowerState(ctx, sandboxID)
-	if err != nil {
-		return nil, fmt.Errorf("get pod: %w", err)
-	}
-	expected := currentSandboxPowerExpectation(pod.Annotations, SandboxPowerStateActive)
-	prep, resp, err := e.service.prepareSandboxResume(ctx, pod, sandboxID, expected)
-	if err != nil {
-		return nil, err
-	}
-	if resp != nil {
-		return resp, nil
-	}
-	ctldAddress, err := e.service.ctldAddressForPod(ctx, prep.Pod)
-	if err != nil {
-		return nil, err
-	}
-	ctldResp, err := e.service.ctldClient.Resume(ctx, ctldAddress, sandboxID)
-	if err != nil {
-		return nil, err
-	}
-	if !ctldResp.Resumed {
-		return nil, fmt.Errorf("ctld resume failed: %s", ctldResp.Error)
-	}
-	powerState, err := e.service.completeSandboxResume(ctx, sandboxID, expected)
-	if err != nil {
-		return nil, err
-	}
-	return &ResumeSandboxResponse{SandboxID: sandboxID, Resumed: true, PowerState: powerState, RestoredMemory: prep.RestoredMemory}, nil
-}
-
-func sandboxUsageFromCtld(in *ctldapi.SandboxResourceUsage) *SandboxResourceUsage {
-	if in == nil {
-		return nil
-	}
-	return &SandboxResourceUsage{
-		ContainerMemoryUsage:      in.ContainerMemoryUsage,
-		ContainerMemoryLimit:      in.ContainerMemoryLimit,
-		ContainerMemoryWorkingSet: in.ContainerMemoryWorkingSet,
-		TotalMemoryRSS:            in.TotalMemoryRSS,
-		TotalMemoryVMS:            in.TotalMemoryVMS,
-		TotalOpenFiles:            in.TotalOpenFiles,
-		TotalThreadCount:          in.TotalThreadCount,
-		TotalIOReadBytes:          in.TotalIOReadBytes,
-		TotalIOWriteBytes:         in.TotalIOWriteBytes,
-		ContextCount:              in.ContextCount,
-		RunningContextCount:       in.RunningContextCount,
-		PausedContextCount:        in.PausedContextCount,
-	}
+	return e.service.RequestResumeSandbox(ctx, sandboxID)
 }
 
 func (s *SandboxService) ctldAddressForSandbox(ctx context.Context, sandboxID string) (string, error) {

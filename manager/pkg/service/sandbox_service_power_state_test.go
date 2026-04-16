@@ -46,6 +46,116 @@ func TestCompletedSandboxPowerStateAssignsGeneration(t *testing.T) {
 	assert.Equal(t, SandboxPowerPhaseStable, state.Phase)
 }
 
+func TestCtldPowerStateRequestsPreserveInFlightTransitions(t *testing.T) {
+	tests := []struct {
+		name      string
+		current   SandboxPowerState
+		target    string
+		wantState SandboxPowerState
+	}{
+		{
+			name: "pause from stable active",
+			current: SandboxPowerState{
+				Desired:            SandboxPowerStateActive,
+				DesiredGeneration:  4,
+				Observed:           SandboxPowerStateActive,
+				ObservedGeneration: 4,
+				Phase:              SandboxPowerPhaseStable,
+			},
+			target: SandboxPowerStatePaused,
+			wantState: SandboxPowerState{
+				Desired:            SandboxPowerStatePaused,
+				DesiredGeneration:  5,
+				Observed:           SandboxPowerStateActive,
+				ObservedGeneration: 4,
+				Phase:              SandboxPowerPhasePausing,
+			},
+		},
+		{
+			name: "resume from stable paused",
+			current: SandboxPowerState{
+				Desired:            SandboxPowerStatePaused,
+				DesiredGeneration:  4,
+				Observed:           SandboxPowerStatePaused,
+				ObservedGeneration: 4,
+				Phase:              SandboxPowerPhaseStable,
+			},
+			target: SandboxPowerStateActive,
+			wantState: SandboxPowerState{
+				Desired:            SandboxPowerStateActive,
+				DesiredGeneration:  5,
+				Observed:           SandboxPowerStatePaused,
+				ObservedGeneration: 4,
+				Phase:              SandboxPowerPhaseResuming,
+			},
+		},
+		{
+			name: "resume cancels in-flight pause without claiming active is already observed",
+			current: SandboxPowerState{
+				Desired:            SandboxPowerStatePaused,
+				DesiredGeneration:  4,
+				Observed:           SandboxPowerStateActive,
+				ObservedGeneration: 3,
+				Phase:              SandboxPowerPhasePausing,
+			},
+			target: SandboxPowerStateActive,
+			wantState: SandboxPowerState{
+				Desired:            SandboxPowerStateActive,
+				DesiredGeneration:  5,
+				Observed:           SandboxPowerStateActive,
+				ObservedGeneration: 3,
+				Phase:              SandboxPowerPhaseResuming,
+			},
+		},
+		{
+			name: "pause cancels in-flight resume without claiming paused is already observed",
+			current: SandboxPowerState{
+				Desired:            SandboxPowerStateActive,
+				DesiredGeneration:  4,
+				Observed:           SandboxPowerStatePaused,
+				ObservedGeneration: 3,
+				Phase:              SandboxPowerPhaseResuming,
+			},
+			target: SandboxPowerStatePaused,
+			wantState: SandboxPowerState{
+				Desired:            SandboxPowerStatePaused,
+				DesiredGeneration:  5,
+				Observed:           SandboxPowerStatePaused,
+				ObservedGeneration: 3,
+				Phase:              SandboxPowerPhasePausing,
+			},
+		},
+		{
+			name: "duplicate in-flight pause is idempotent",
+			current: SandboxPowerState{
+				Desired:            SandboxPowerStatePaused,
+				DesiredGeneration:  4,
+				Observed:           SandboxPowerStateActive,
+				ObservedGeneration: 3,
+				Phase:              SandboxPowerPhasePausing,
+			},
+			target: SandboxPowerStatePaused,
+			wantState: SandboxPowerState{
+				Desired:            SandboxPowerStatePaused,
+				DesiredGeneration:  4,
+				Observed:           SandboxPowerStateActive,
+				ObservedGeneration: 3,
+				Phase:              SandboxPowerPhasePausing,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			annotations := powerStateAnnotations(tt.current)
+			requested := requestedSandboxPowerState(annotations, tt.target)
+			got := preserveCtldInFlightPowerTransition(tt.current, requested, tt.target)
+
+			assert.Equal(t, tt.wantState, got)
+		})
+	}
+}
+
 func TestPodToSandboxIncludesPowerState(t *testing.T) {
 	svc := &SandboxService{
 		config: SandboxServiceConfig{ProcdPort: 49983},
@@ -293,6 +403,35 @@ func TestStartPowerStateReconcilerTriggersPendingTransitions(t *testing.T) {
 	<-done
 }
 
+func TestStartPowerStateReconcilerSkipsWhenCtldEnabled(t *testing.T) {
+	pod := newPowerStatePod(SandboxPowerStatePaused, SandboxPowerStateActive, SandboxPowerPhasePausing)
+	pauseCalled := make(chan struct{})
+	svc := &SandboxService{
+		k8sClient: fake.NewSimpleClientset(pod),
+		podLister: newTestPodLister(t, pod),
+		config:    SandboxServiceConfig{CtldEnabled: true},
+		logger:    zap.NewNop(),
+	}
+	svc.SetPowerExecutor(&completingPowerExecutor{service: svc, pauseCalled: pauseCalled})
+
+	done := make(chan struct{})
+	go func() {
+		svc.StartPowerStateReconciler(context.Background(), time.Millisecond)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("StartPowerStateReconciler did not return when ctld is enabled")
+	}
+	select {
+	case <-pauseCalled:
+		t.Fatal("manager reconciler executed a ctld-owned power transition")
+	default:
+	}
+}
+
 func TestRequestResumeSandboxDoesNotBlockOnInFlightReconcile(t *testing.T) {
 	pod := newPowerStatePod(SandboxPowerStatePaused, SandboxPowerStateActive, SandboxPowerPhasePausing)
 	executor := newBlockingPowerExecutor()
@@ -330,6 +469,52 @@ func TestRequestResumeSandboxDoesNotBlockOnInFlightReconcile(t *testing.T) {
 
 	close(executor.pauseRelease)
 	<-executor.pauseFinished
+}
+
+func TestRequestResumeSandboxKeepsCtldInFlightPausePending(t *testing.T) {
+	pod := newPowerStatePod(SandboxPowerStatePaused, SandboxPowerStateActive, SandboxPowerPhasePausing)
+	svc := &SandboxService{
+		k8sClient: fake.NewSimpleClientset(pod),
+		podLister: newTestPodLister(t, pod),
+		config:    SandboxServiceConfig{CtldEnabled: true},
+		clock:     systemTime{},
+		logger:    zap.NewNop(),
+	}
+
+	resp, err := svc.RequestResumeSandbox(context.Background(), "sandbox-1")
+	require.NoError(t, err)
+	assert.Equal(t, SandboxPowerStateActive, resp.PowerState.Desired)
+	assert.Equal(t, SandboxPowerStateActive, resp.PowerState.Observed)
+	assert.Equal(t, SandboxPowerPhaseResuming, resp.PowerState.Phase)
+	assert.Equal(t, int64(1), resp.PowerState.ObservedGeneration)
+
+	updated, err := svc.k8sClient.CoreV1().Pods("default").Get(context.Background(), "sandbox-1", metav1.GetOptions{})
+	require.NoError(t, err)
+	state := sandboxPowerStateFromAnnotations(updated.Annotations)
+	assert.Equal(t, SandboxPowerPhaseResuming, state.Phase)
+}
+
+func TestRequestPauseSandboxKeepsCtldInFlightResumePending(t *testing.T) {
+	pod := newPowerStatePod(SandboxPowerStateActive, SandboxPowerStatePaused, SandboxPowerPhaseResuming)
+	svc := &SandboxService{
+		k8sClient: fake.NewSimpleClientset(pod),
+		podLister: newTestPodLister(t, pod),
+		config:    SandboxServiceConfig{CtldEnabled: true},
+		clock:     systemTime{},
+		logger:    zap.NewNop(),
+	}
+
+	resp, err := svc.RequestPauseSandbox(context.Background(), "sandbox-1")
+	require.NoError(t, err)
+	assert.Equal(t, SandboxPowerStatePaused, resp.PowerState.Desired)
+	assert.Equal(t, SandboxPowerStatePaused, resp.PowerState.Observed)
+	assert.Equal(t, SandboxPowerPhasePausing, resp.PowerState.Phase)
+	assert.Equal(t, int64(1), resp.PowerState.ObservedGeneration)
+
+	updated, err := svc.k8sClient.CoreV1().Pods("default").Get(context.Background(), "sandbox-1", metav1.GetOptions{})
+	require.NoError(t, err)
+	state := sandboxPowerStateFromAnnotations(updated.Annotations)
+	assert.Equal(t, SandboxPowerPhasePausing, state.Phase)
 }
 
 func TestPauseSandboxAndWaitReturnsAfterObservedPaused(t *testing.T) {
@@ -675,5 +860,15 @@ func newPowerStatePod(desired, observed, phase string) *corev1.Pod {
 			},
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+}
+
+func powerStateAnnotations(state SandboxPowerState) map[string]string {
+	return map[string]string{
+		controller.AnnotationPowerStateDesired:            state.Desired,
+		controller.AnnotationPowerStateDesiredGeneration:  strconv.FormatInt(state.DesiredGeneration, 10),
+		controller.AnnotationPowerStateObserved:           state.Observed,
+		controller.AnnotationPowerStateObservedGeneration: strconv.FormatInt(state.ObservedGeneration, 10),
+		controller.AnnotationPowerStatePhase:              state.Phase,
 	}
 }

@@ -203,12 +203,6 @@ func (s *Server) updateSandbox(c *gin.Context) {
 
 	sandbox, err := s.sandboxService.GetSandbox(c.Request.Context(), sandboxID)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
-			spec.JSONSuccess(c, http.StatusOK, gin.H{
-				"message": "sandbox terminated successfully",
-			})
-			return
-		}
 		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, fmt.Sprintf("sandbox not found: %v", err))
 		return
 	}

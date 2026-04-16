@@ -46,6 +46,116 @@ func TestCompletedSandboxPowerStateAssignsGeneration(t *testing.T) {
 	assert.Equal(t, SandboxPowerPhaseStable, state.Phase)
 }
 
+func TestCtldPowerStateRequestsPreserveInFlightTransitions(t *testing.T) {
+	tests := []struct {
+		name      string
+		current   SandboxPowerState
+		target    string
+		wantState SandboxPowerState
+	}{
+		{
+			name: "pause from stable active",
+			current: SandboxPowerState{
+				Desired:            SandboxPowerStateActive,
+				DesiredGeneration:  4,
+				Observed:           SandboxPowerStateActive,
+				ObservedGeneration: 4,
+				Phase:              SandboxPowerPhaseStable,
+			},
+			target: SandboxPowerStatePaused,
+			wantState: SandboxPowerState{
+				Desired:            SandboxPowerStatePaused,
+				DesiredGeneration:  5,
+				Observed:           SandboxPowerStateActive,
+				ObservedGeneration: 4,
+				Phase:              SandboxPowerPhasePausing,
+			},
+		},
+		{
+			name: "resume from stable paused",
+			current: SandboxPowerState{
+				Desired:            SandboxPowerStatePaused,
+				DesiredGeneration:  4,
+				Observed:           SandboxPowerStatePaused,
+				ObservedGeneration: 4,
+				Phase:              SandboxPowerPhaseStable,
+			},
+			target: SandboxPowerStateActive,
+			wantState: SandboxPowerState{
+				Desired:            SandboxPowerStateActive,
+				DesiredGeneration:  5,
+				Observed:           SandboxPowerStatePaused,
+				ObservedGeneration: 4,
+				Phase:              SandboxPowerPhaseResuming,
+			},
+		},
+		{
+			name: "resume cancels in-flight pause without claiming active is already observed",
+			current: SandboxPowerState{
+				Desired:            SandboxPowerStatePaused,
+				DesiredGeneration:  4,
+				Observed:           SandboxPowerStateActive,
+				ObservedGeneration: 3,
+				Phase:              SandboxPowerPhasePausing,
+			},
+			target: SandboxPowerStateActive,
+			wantState: SandboxPowerState{
+				Desired:            SandboxPowerStateActive,
+				DesiredGeneration:  5,
+				Observed:           SandboxPowerStateActive,
+				ObservedGeneration: 3,
+				Phase:              SandboxPowerPhaseResuming,
+			},
+		},
+		{
+			name: "pause cancels in-flight resume without claiming paused is already observed",
+			current: SandboxPowerState{
+				Desired:            SandboxPowerStateActive,
+				DesiredGeneration:  4,
+				Observed:           SandboxPowerStatePaused,
+				ObservedGeneration: 3,
+				Phase:              SandboxPowerPhaseResuming,
+			},
+			target: SandboxPowerStatePaused,
+			wantState: SandboxPowerState{
+				Desired:            SandboxPowerStatePaused,
+				DesiredGeneration:  5,
+				Observed:           SandboxPowerStatePaused,
+				ObservedGeneration: 3,
+				Phase:              SandboxPowerPhasePausing,
+			},
+		},
+		{
+			name: "duplicate in-flight pause is idempotent",
+			current: SandboxPowerState{
+				Desired:            SandboxPowerStatePaused,
+				DesiredGeneration:  4,
+				Observed:           SandboxPowerStateActive,
+				ObservedGeneration: 3,
+				Phase:              SandboxPowerPhasePausing,
+			},
+			target: SandboxPowerStatePaused,
+			wantState: SandboxPowerState{
+				Desired:            SandboxPowerStatePaused,
+				DesiredGeneration:  4,
+				Observed:           SandboxPowerStateActive,
+				ObservedGeneration: 3,
+				Phase:              SandboxPowerPhasePausing,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			annotations := powerStateAnnotations(tt.current)
+			requested := requestedSandboxPowerState(annotations, tt.target)
+			got := preserveCtldInFlightPowerTransition(tt.current, requested, tt.target)
+
+			assert.Equal(t, tt.wantState, got)
+		})
+	}
+}
+
 func TestPodToSandboxIncludesPowerState(t *testing.T) {
 	svc := &SandboxService{
 		config: SandboxServiceConfig{ProcdPort: 49983},
@@ -750,5 +860,15 @@ func newPowerStatePod(desired, observed, phase string) *corev1.Pod {
 			},
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+}
+
+func powerStateAnnotations(state SandboxPowerState) map[string]string {
+	return map[string]string{
+		controller.AnnotationPowerStateDesired:            state.Desired,
+		controller.AnnotationPowerStateDesiredGeneration:  strconv.FormatInt(state.DesiredGeneration, 10),
+		controller.AnnotationPowerStateObserved:           state.Observed,
+		controller.AnnotationPowerStateObservedGeneration: strconv.FormatInt(state.ObservedGeneration, 10),
+		controller.AnnotationPowerStatePhase:              state.Phase,
 	}
 }

@@ -40,6 +40,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	}
 
 	nodeSelector, tolerations := common.ResolveSandboxNodePlacement(infra)
+	args := ctldArgs(infra)
 
 	desired := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -67,7 +68,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 							Name:            "ctld",
 							Image:           image,
 							ImagePullPolicy: pullPolicy,
-							Args:            []string{"-http-addr=:8095", "-cgroup-root=/host-sys/fs/cgroup", "-cri-endpoint=/host-run/containerd/containerd.sock"},
+							Args:            args,
 							Env: []corev1.EnvVar{
 								{
 									Name:  "SERVICE",
@@ -149,4 +150,48 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	}
 
 	return r.Resources.ApplyDaemonSet(ctx, infra, desired)
+}
+
+func ctldArgs(infra *infrav1alpha1.Sandbox0Infra) []string {
+	cfg := ctldManagerConfig(infra)
+	pauseMinMemoryRequest := "10Mi"
+	pauseMinMemoryLimit := "32Mi"
+	pauseMemoryBufferRatio := "1.1"
+	pauseMinCPU := "10m"
+	defaultTTL := "0s"
+	if cfg != nil {
+		pauseMinMemoryRequest = stringOrDefault(cfg.PauseMinMemoryRequest, pauseMinMemoryRequest)
+		pauseMinMemoryLimit = stringOrDefault(cfg.PauseMinMemoryLimit, pauseMinMemoryLimit)
+		pauseMemoryBufferRatio = stringOrDefault(cfg.PauseMemoryBufferRatio, pauseMemoryBufferRatio)
+		pauseMinCPU = stringOrDefault(cfg.PauseMinCPU, pauseMinCPU)
+		if cfg.DefaultSandboxTTL.Duration > 0 {
+			defaultTTL = cfg.DefaultSandboxTTL.Duration.String()
+		}
+	}
+
+	args := []string{
+		"-http-addr=:8095",
+		"-cgroup-root=/host-sys/fs/cgroup",
+		"-cri-endpoint=/host-run/containerd/containerd.sock",
+		fmt.Sprintf("-pause-min-memory-request=%s", pauseMinMemoryRequest),
+		fmt.Sprintf("-pause-min-memory-limit=%s", pauseMinMemoryLimit),
+		fmt.Sprintf("-pause-memory-buffer-ratio=%s", pauseMemoryBufferRatio),
+		fmt.Sprintf("-pause-min-cpu=%s", pauseMinCPU),
+		fmt.Sprintf("-default-sandbox-ttl=%s", defaultTTL),
+	}
+	return args
+}
+
+func ctldManagerConfig(infra *infrav1alpha1.Sandbox0Infra) *infrav1alpha1.ManagerConfig {
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.Manager == nil {
+		return nil
+	}
+	return infra.Spec.Services.Manager.Config
+}
+
+func stringOrDefault(value, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
 }

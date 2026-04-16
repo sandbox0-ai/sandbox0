@@ -3,6 +3,7 @@ package fuseplugin
 import (
 	"context"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -118,6 +119,45 @@ func reconcileFusePluginDaemonSet(t *testing.T, infra *infrav1alpha1.Sandbox0Inf
 	}
 
 	return ds
+}
+
+func TestReconcilePassesDefaultPauseConfigToCtld(t *testing.T) {
+	ds := reconcileFusePluginDaemonSet(t, newFusePluginTestInfra())
+	args := ds.Spec.Template.Spec.Containers[0].Args
+	assertContainsArg(t, args, "-pause-min-memory-request=10Mi")
+	assertContainsArg(t, args, "-pause-min-memory-limit=32Mi")
+	assertContainsArg(t, args, "-pause-memory-buffer-ratio=1.1")
+	assertContainsArg(t, args, "-pause-min-cpu=10m")
+	assertContainsArg(t, args, "-default-sandbox-ttl=0s")
+}
+
+func TestReconcilePassesPauseConfigToCtld(t *testing.T) {
+	infra := newFusePluginTestInfra()
+	infra.Spec.Services.Manager.Config = &infrav1alpha1.ManagerConfig{
+		PauseMinMemoryRequest:  "24Mi",
+		PauseMinMemoryLimit:    "96Mi",
+		PauseMemoryBufferRatio: "1.4",
+		PauseMinCPU:            "25m",
+		DefaultSandboxTTL:      metav1.Duration{Duration: 5 * time.Minute},
+	}
+
+	ds := reconcileFusePluginDaemonSet(t, infra)
+	args := ds.Spec.Template.Spec.Containers[0].Args
+	assertContainsArg(t, args, "-pause-min-memory-request=24Mi")
+	assertContainsArg(t, args, "-pause-min-memory-limit=96Mi")
+	assertContainsArg(t, args, "-pause-memory-buffer-ratio=1.4")
+	assertContainsArg(t, args, "-pause-min-cpu=25m")
+	assertContainsArg(t, args, "-default-sandbox-ttl=5m0s")
+}
+
+func assertContainsArg(t *testing.T, args []string, want string) {
+	t.Helper()
+	for _, arg := range args {
+		if arg == want {
+			return
+		}
+	}
+	t.Fatalf("expected args to contain %q, got %#v", want, args)
 }
 
 func newFusePluginTestInfra() *infrav1alpha1.Sandbox0Infra {

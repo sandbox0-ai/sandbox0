@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -22,13 +23,18 @@ import (
 )
 
 var (
-	mountsAllowed = 5
-	httpAddr      = ":8095"
-	kubeconfig    = ""
-	cgroupRoot    = "/host-sys/fs/cgroup"
-	criEndpoint   = "/host-run/containerd/containerd.sock"
-	procRoot      = "/proc"
-	nodeName      = os.Getenv("NODE_NAME")
+	mountsAllowed          = 5
+	httpAddr               = ":8095"
+	kubeconfig             = ""
+	cgroupRoot             = "/host-sys/fs/cgroup"
+	criEndpoint            = "/host-run/containerd/containerd.sock"
+	procRoot               = "/proc"
+	nodeName               = os.Getenv("NODE_NAME")
+	pauseMinMemoryRequest  = "10Mi"
+	pauseMinMemoryLimit    = "32Mi"
+	pauseMemoryBufferRatio = "1.1"
+	pauseMinCPU            = "10m"
+	defaultSandboxTTL      time.Duration
 )
 
 func main() {
@@ -39,6 +45,11 @@ func main() {
 	flag.StringVar(&criEndpoint, "cri-endpoint", "/host-run/containerd/containerd.sock", "host CRI socket used to read pod sandbox stats")
 	flag.StringVar(&procRoot, "proc-root", "/proc", "host proc root used to inspect sandbox processes")
 	flag.StringVar(&nodeName, "node-name", os.Getenv("NODE_NAME"), "current node name used to validate local sandbox ownership")
+	flag.StringVar(&pauseMinMemoryRequest, "pause-min-memory-request", "10Mi", "minimum memory request to apply to paused sandbox pods")
+	flag.StringVar(&pauseMinMemoryLimit, "pause-min-memory-limit", "32Mi", "minimum memory limit to apply to paused sandbox pods")
+	flag.StringVar(&pauseMemoryBufferRatio, "pause-memory-buffer-ratio", "1.1", "memory limit multiplier applied to paused sandbox working set")
+	flag.StringVar(&pauseMinCPU, "pause-min-cpu", "10m", "minimum CPU request and limit to apply to paused sandbox pods")
+	flag.DurationVar(&defaultSandboxTTL, "default-sandbox-ttl", 0, "default sandbox TTL restored on resume when no original TTL is recorded")
 	flag.Parse()
 
 	log.Println("Starting ctld")
@@ -154,9 +165,30 @@ func buildPowerController(ctx context.Context, obsProvider *observability.Provid
 	}
 	resolver := ctldpower.NewPodResolver(k8sClient, nodeName, cgroupRoot)
 	resolver.ProcRoot = procRoot
+	controller := ctldpower.NewController(resolver, nil)
+	if obsProvider != nil {
+		controller.HTTPClient = obsProvider.HTTP.NewClient(httpobs.Config{Timeout: 2 * time.Second})
+	}
+	controller.StatsProvider = ctldpower.NewCRIStatsProvider(criEndpoint)
+
 	if podCache, err := ctldpower.NewNodePodCache(k8sClient, nodeName, 0); err != nil {
 		log.Printf("ctld pod cache disabled: %v", err)
 	} else {
+		ratio, err := strconv.ParseFloat(pauseMemoryBufferRatio, 64)
+		if err != nil || ratio <= 0 {
+			log.Printf("invalid pause memory buffer ratio %q, using default 1.1", pauseMemoryBufferRatio)
+			ratio = 1.1
+		}
+		powerReconciler := ctldpower.NewPowerReconciler(k8sClient, podCache.PodLister(), resolver, controller, ctldpower.PowerReconcilerConfig{
+			PauseMinMemoryRequest:  pauseMinMemoryRequest,
+			PauseMinMemoryLimit:    pauseMinMemoryLimit,
+			PauseMemoryBufferRatio: ratio,
+			PauseMinCPU:            pauseMinCPU,
+			DefaultSandboxTTL:      defaultSandboxTTL,
+		})
+		if err := podCache.AddEventHandler(powerReconciler.EventHandler()); err != nil {
+			log.Printf("ctld power reconciler disabled: add pod handler: %v", err)
+		}
 		podCache.Start(ctx)
 		resolver.SetPodCache(podCache.PodLister(), podCache.PodIndexer())
 		go func() {
@@ -165,12 +197,9 @@ func buildPowerController(ctx context.Context, obsProvider *observability.Provid
 			if !podCache.WaitForSync(syncCtx) && ctx.Err() == nil {
 				log.Printf("ctld pod cache did not sync before timeout; live kubernetes lookups remain enabled")
 			}
+			powerReconciler.EnqueueAll()
+			powerReconciler.Run(ctx, 1)
 		}()
 	}
-	controller := ctldpower.NewController(resolver, nil)
-	if obsProvider != nil {
-		controller.HTTPClient = obsProvider.HTTP.NewClient(httpobs.Config{Timeout: 2 * time.Second})
-	}
-	controller.StatsProvider = ctldpower.NewCRIStatsProvider(criEndpoint)
 	return controller
 }

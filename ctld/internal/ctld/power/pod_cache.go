@@ -85,6 +85,14 @@ func (c *PodCache) PodIndexer() cache.Indexer {
 	return c.informer.GetIndexer()
 }
 
+func (c *PodCache) AddEventHandler(handler cache.ResourceEventHandler) error {
+	if c == nil || c.informer == nil {
+		return errors.New("pod informer is not configured")
+	}
+	_, err := c.informer.AddEventHandler(handler)
+	return err
+}
+
 func podSandboxIDIndexFunc(obj interface{}) ([]string, error) {
 	accessor, err := meta.Accessor(obj)
 	if err != nil {

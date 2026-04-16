@@ -183,11 +183,18 @@ func (r *Reconciler) ReconcileCtldRBAC(ctx context.Context, infra *infrav1alpha1
 		return err
 	}
 
-	rules := []rbacv1.PolicyRule{{
-		APIGroups: []string{""},
-		Resources: []string{"pods"},
-		Verbs:     []string{"get", "list", "watch"},
-	}}
+	rules := []rbacv1.PolicyRule{
+		{
+			APIGroups: []string{""},
+			Resources: []string{"pods"},
+			Verbs:     []string{"get", "list", "watch", "update", "patch"},
+		},
+		{
+			APIGroups: []string{""},
+			Resources: []string{"pods/resize"},
+			Verbs:     []string{"update", "patch"},
+		},
+	}
 
 	if err := r.reconcileClusterRole(ctx, name, labels, rules); err != nil {
 		return err

@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 )
 
@@ -41,14 +40,6 @@ func NewCtldClientWithHTTPClient(httpClient *http.Client) *CtldClient {
 		httpClient = &http.Client{Timeout: defaultCtldClientTimeout}
 	}
 	return &CtldClient{httpClient: httpClient}
-}
-
-func (c *CtldClient) Pause(ctx context.Context, ctldAddress, sandboxID string) (*ctldapi.PauseResponse, error) {
-	return doCtldRequest[ctldapi.PauseResponse](ctx, c.httpClient, ctldAddress, sandboxID, "/pause")
-}
-
-func (c *CtldClient) Resume(ctx context.Context, ctldAddress, sandboxID string) (*ctldapi.ResumeResponse, error) {
-	return doCtldRequest[ctldapi.ResumeResponse](ctx, c.httpClient, ctldAddress, sandboxID, "/resume")
 }
 
 func (c *CtldClient) Probe(ctx context.Context, ctldAddress, sandboxID string, kind sandboxprobe.Kind) (*sandboxprobe.Response, error) {

@@ -238,8 +238,11 @@ func (s *SandboxService) requestSandboxPowerState(ctx context.Context, sandboxID
 			return err
 		}
 
-		state = requestedSandboxPowerState(pod.Annotations, target)
 		current := sandboxPowerStateFromAnnotations(pod.Annotations)
+		state = requestedSandboxPowerState(pod.Annotations, target)
+		if s.config.CtldEnabled {
+			state = preserveCtldInFlightPowerTransition(current, state, target)
+		}
 		if hasExplicitSandboxPowerStateAnnotations(pod.Annotations) && sandboxPowerStateEqual(current, state) {
 			return nil
 		}
@@ -250,7 +253,7 @@ func (s *SandboxService) requestSandboxPowerState(ctx context.Context, sandboxID
 		return SandboxPowerState{}, fmt.Errorf("update power state annotations: %w", err)
 	}
 
-	if state.Phase != SandboxPowerPhaseStable {
+	if state.Phase != SandboxPowerPhaseStable && s.managerExecutesPowerTransitions() {
 		s.triggerSandboxPowerStateReconcile(sandboxID)
 	}
 
@@ -279,6 +282,19 @@ func (s *SandboxService) waitForSandboxPowerState(ctx context.Context, sandboxID
 	return state, nil
 }
 
+func preserveCtldInFlightPowerTransition(current, requested SandboxPowerState, target string) SandboxPowerState {
+	if current.Phase == SandboxPowerPhaseStable || current.Observed != target {
+		return requested
+	}
+	requested.ObservedGeneration = current.ObservedGeneration
+	if target == SandboxPowerStatePaused {
+		requested.Phase = SandboxPowerPhasePausing
+	} else {
+		requested.Phase = SandboxPowerPhaseResuming
+	}
+	return requested
+}
+
 func sandboxPowerTransitionContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	if _, ok := ctx.Deadline(); ok {
 		return context.WithCancel(ctx)
@@ -296,8 +312,15 @@ func (s *SandboxService) triggerSandboxPowerStateReconcile(sandboxID string) {
 	}()
 }
 
+func (s *SandboxService) managerExecutesPowerTransitions() bool {
+	return s != nil && !s.config.CtldEnabled
+}
+
 // StartPowerStateReconciler periodically reconciles power transitions left pending by another manager replica.
 func (s *SandboxService) StartPowerStateReconciler(ctx context.Context, interval time.Duration) {
+	if !s.managerExecutesPowerTransitions() {
+		return
+	}
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}

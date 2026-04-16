@@ -25,7 +25,7 @@ var (
 	ErrSandboxLogContainerNotFound = errors.New("sandbox log container not found")
 )
 
-// SandboxLogsOptions controls a bounded snapshot read from Kubernetes pod logs.
+// SandboxLogsOptions controls a bounded snapshot read from sandbox process logs.
 type SandboxLogsOptions struct {
 	Container    string `json:"container"`
 	TailLines    int64  `json:"tail_lines"`
@@ -53,7 +53,7 @@ type SandboxLogsStream struct {
 	Body      io.ReadCloser
 }
 
-// GetSandboxLogs returns a bounded snapshot of logs from one container in the sandbox pod.
+// GetSandboxLogs returns a bounded snapshot of sandbox process logs from one container in the sandbox pod.
 func (s *SandboxService) GetSandboxLogs(ctx context.Context, sandboxID, teamID string, opts *SandboxLogsOptions) (*SandboxLogsResponse, error) {
 	stream, err := s.openSandboxLogs(ctx, sandboxID, teamID, opts, false, true)
 	if err != nil {
@@ -62,10 +62,10 @@ func (s *SandboxService) GetSandboxLogs(ctx context.Context, sandboxID, teamID s
 	data, readErr := io.ReadAll(stream.Body)
 	closeErr := stream.Body.Close()
 	if readErr != nil {
-		return nil, fmt.Errorf("read sandbox pod logs: %w", readErr)
+		return nil, fmt.Errorf("read sandbox process logs: %w", readErr)
 	}
 	if closeErr != nil {
-		return nil, fmt.Errorf("close sandbox pod logs: %w", closeErr)
+		return nil, fmt.Errorf("close sandbox process logs: %w", closeErr)
 	}
 
 	return &SandboxLogsResponse{
@@ -77,7 +77,7 @@ func (s *SandboxService) GetSandboxLogs(ctx context.Context, sandboxID, teamID s
 	}, nil
 }
 
-// StreamSandboxLogs returns a followable stream of logs from one container in the sandbox pod.
+// StreamSandboxLogs returns a followable stream of sandbox process logs from one container in the sandbox pod.
 func (s *SandboxService) StreamSandboxLogs(ctx context.Context, sandboxID, teamID string, opts *SandboxLogsOptions) (*SandboxLogsStream, error) {
 	return s.openSandboxLogs(ctx, sandboxID, teamID, opts, true, false)
 }
@@ -124,7 +124,7 @@ func (s *SandboxService) openSandboxLogs(ctx context.Context, sandboxID, teamID 
 		PodName:   pod.Name,
 		Container: options.Container,
 		Previous:  options.Previous,
-		Body:      stream,
+		Body:      newSandboxProcessLogReadCloser(stream),
 	}, nil
 }
 

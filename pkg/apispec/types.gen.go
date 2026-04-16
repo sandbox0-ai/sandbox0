@@ -2781,7 +2781,7 @@ type GetApiV1SandboxesIdLogsParams struct {
 	// Container Pod container name. Defaults to the sandbox main container.
 	Container *string `form:"container,omitempty" json:"container,omitempty"`
 
-	// TailLines Maximum number of log lines to return from the end of the log.
+	// TailLines Maximum number of Kubernetes log lines read from the end of the log before procd service log filtering.
 	TailLines *int64 `form:"tail_lines,omitempty" json:"tail_lines,omitempty"`
 
 	// LimitBytes Maximum response log payload bytes read from Kubernetes. Defaults only apply when follow is false.

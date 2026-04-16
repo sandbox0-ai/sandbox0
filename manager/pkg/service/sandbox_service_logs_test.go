@@ -39,7 +39,7 @@ func TestGetSandboxLogsUsesBoundedPodLogOptions(t *testing.T) {
 	assert.Equal(t, "sandbox-1", resp.PodName)
 	assert.Equal(t, "procd", resp.Container)
 	assert.True(t, resp.Previous)
-	assert.Equal(t, "fake logs", resp.Logs)
+	assert.Empty(t, resp.Logs)
 
 	logOptions := findPodLogOptions(t, client.Actions())
 	require.NotNil(t, logOptions)
@@ -71,7 +71,7 @@ func TestStreamSandboxLogsUsesFollowWithoutDefaultLimit(t *testing.T) {
 	data, err := io.ReadAll(stream.Body)
 	require.NoError(t, err)
 	require.NoError(t, stream.Body.Close())
-	assert.Equal(t, "fake logs", string(data))
+	assert.Empty(t, string(data))
 
 	logOptions := findPodLogOptions(t, client.Actions())
 	require.NotNil(t, logOptions)

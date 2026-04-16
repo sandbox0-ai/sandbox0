@@ -1344,11 +1344,14 @@ paths:
   /api/v1/sandboxes/{id}/logs:
     get:
       tags: [sandboxes]
-      summary: Get sandbox pod logs
+      summary: Get sandbox process logs
       description: |
-        Returns Kubernetes container logs for the sandbox pod.
+        Returns sandbox process output mirrored through the sandbox main container.
+        Procd service logs are filtered out and remain available through Kubernetes pod logs.
         When `follow=false`, the response is a bounded text/plain snapshot.
         When `follow=true`, the response is a text/plain stream until the client disconnects.
+        Kubernetes log selection parameters such as `tail_lines` and `limit_bytes`
+        are applied before procd service log filtering.
       security:
         - bearerAuth: []
       x-upstream-service: manager
@@ -1363,7 +1366,7 @@ paths:
             default: procd
         - name: tail_lines
           in: query
-          description: Maximum number of log lines to return from the end of the log.
+          description: Maximum number of Kubernetes log lines read from the end of the log before procd service log filtering.
           schema:
             type: integer
             format: int64
@@ -1406,7 +1409,7 @@ paths:
             minimum: 1
       responses:
         "200":
-          description: Sandbox pod logs
+          description: Sandbox process logs
           headers:
             X-Sandbox-ID:
               description: Sandbox ID for the returned log payload.

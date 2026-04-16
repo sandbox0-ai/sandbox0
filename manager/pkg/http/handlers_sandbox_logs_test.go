@@ -55,7 +55,7 @@ func TestGetSandboxLogsReturnsOK(t *testing.T) {
 	assert.Equal(t, "sandbox-1", recorder.Header().Get("X-Sandbox-ID"))
 	assert.Equal(t, "procd", recorder.Header().Get("X-Sandbox-Log-Container"))
 	assert.Equal(t, "true", recorder.Header().Get("X-Sandbox-Log-Previous"))
-	assert.Equal(t, "fake logs", recorder.Body.String())
+	assert.Empty(t, recorder.Body.String())
 }
 
 func TestGetSandboxLogsStreamsWhenFollowTrue(t *testing.T) {
@@ -93,7 +93,7 @@ func TestGetSandboxLogsStreamsWhenFollowTrue(t *testing.T) {
 	assert.Equal(t, "sandbox-1", recorder.Header().Get("X-Sandbox-ID"))
 	assert.Equal(t, "procd", recorder.Header().Get("X-Sandbox-Log-Container"))
 	assert.Equal(t, "false", recorder.Header().Get("X-Sandbox-Log-Previous"))
-	assert.Equal(t, "fake logs", recorder.Body.String())
+	assert.Empty(t, recorder.Body.String())
 }
 
 func TestGetSandboxLogsRejectsInvalidTailLines(t *testing.T) {

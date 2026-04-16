@@ -285,7 +285,7 @@ func (s *Server) getSandboxStatus(c *gin.Context) {
 	spec.JSONSuccess(c, http.StatusOK, status)
 }
 
-// getSandboxLogs gets sandbox pod logs.
+// getSandboxLogs gets sandbox process logs.
 func (s *Server) getSandboxLogs(c *gin.Context) {
 	sandboxID := c.Param("id")
 	if sandboxID == "" {

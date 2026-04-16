@@ -9,7 +9,11 @@ import (
 	"sync"
 )
 
-const DefaultContainerLogMaxLineBytes = 4096
+const (
+	DefaultContainerLogMaxLineBytes = 4096
+	// ContainerLogProcessOutputMessage marks container log lines emitted from sandbox process output.
+	ContainerLogProcessOutputMessage = "sandbox process output"
+)
 
 var (
 	defaultOutputForwarderMu sync.RWMutex
@@ -148,7 +152,7 @@ func (f *ContainerLogForwarder) forwardLocked(desc ProcessDescriptor, source Out
 
 func (f *ContainerLogForwarder) writeLineLocked(desc ProcessDescriptor, source OutputSource, data []byte, truncated bool) {
 	line := containerLogLine{
-		Message:     "sandbox process output",
+		Message:     ContainerLogProcessOutputMessage,
 		ProcessID:   desc.ProcessID,
 		ProcessType: desc.ProcessType,
 		PID:         desc.PID,

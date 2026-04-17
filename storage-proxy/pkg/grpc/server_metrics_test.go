@@ -41,7 +41,7 @@ func TestHandlePathCacheCarriesPathIntoDirtyWrite(t *testing.T) {
 	t.Parallel()
 
 	server := NewFileSystemServer(nil, nil, nil, nil, nil, nil, nil)
-	server.rememberHandlePath("vol-1", 7, "/created.txt")
+	server.rememberHandlePath("vol-1", 7, 42, "/created.txt")
 
 	if path := server.resolvePathForHandleOrInode(nil, "vol-1", 7, 42, "Write"); path != "/created.txt" {
 		t.Fatalf("cached path = %q, want /created.txt", path)

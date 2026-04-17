@@ -842,7 +842,9 @@ func (s *Service) RecordRemoteChange(ctx context.Context, change *RemoteChange) 
 		return nil
 	}
 
+	stageStart := time.Now()
 	volume, err := s.getAccessibleVolume(ctx, change.VolumeID, change.TeamID)
+	s.observeStage("record_remote_change", "get_accessible_volume", stageStart)
 	if err != nil {
 		return err
 	}
@@ -871,7 +873,9 @@ func (s *Service) RecordRemoteChange(ctx context.Context, change *RemoteChange) 
 	}
 
 	if eventType == db.SyncEventWrite && normalizedPath != "" {
+		stageStart = time.Now()
 		latest, err := s.repo.GetLatestSyncJournalEntryByNormalizedPath(ctx, change.VolumeID, normalizedPath)
+		s.observeStage("record_remote_change", "coalesce_lookup", stageStart)
 		if err == nil &&
 			latest != nil &&
 			latest.Source == db.SyncSourceSandbox &&
@@ -890,14 +894,17 @@ func (s *Service) RecordRemoteChange(ctx context.Context, change *RemoteChange) 
 		if s.replayPayloads == nil {
 			return fmt.Errorf("replay payload storage unavailable")
 		}
+		stageStart = time.Now()
 		ref, err := s.putReplayPayloadOnce(ctx, volume, *contentSHA256, change.ContentBytes)
+		s.observeStage("record_remote_change", "put_replay_payload", stageStart)
 		if err != nil {
 			return err
 		}
 		contentRef = &ref
 	}
 
-	return s.repo.WithTx(ctx, func(tx pgx.Tx) error {
+	stageStart = time.Now()
+	err = s.repo.WithTx(ctx, func(tx pgx.Tx) error {
 		entry := &db.SyncJournalEntry{
 			VolumeID:          change.VolumeID,
 			TeamID:            change.TeamID,
@@ -923,6 +930,8 @@ func (s *Service) RecordRemoteChange(ctx context.Context, change *RemoteChange) 
 
 		return s.repo.CreateSyncJournalEntryTx(ctx, tx, entry)
 	})
+	s.observeStage("record_remote_change", "transaction", stageStart)
+	return err
 }
 
 func (s *Service) putReplayPayloadOnce(ctx context.Context, volume *db.SandboxVolume, contentSHA256 string, payload []byte) (string, error) {
@@ -1381,6 +1390,13 @@ func (s *Service) observeOperation(operation string, started time.Time, err erro
 	}
 	s.metrics.VolumeSyncOperationsTotal.WithLabelValues(operation, status).Inc()
 	s.metrics.VolumeSyncOperationDuration.WithLabelValues(operation).Observe(time.Since(started).Seconds())
+}
+
+func (s *Service) observeStage(operation, stage string, started time.Time) {
+	if s == nil || s.metrics == nil {
+		return
+	}
+	s.metrics.ObserveVolumeSyncStage(operation, stage, time.Since(started))
 }
 
 func (s *Service) observeConflict(source, reason string) {

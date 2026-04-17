@@ -150,6 +150,7 @@ func main() {
 	syncMaintenanceCfg := buildSyncMaintenanceConfig(cfg)
 	if pool != nil {
 		volumeBarrier = volumelock.New(pool)
+		volumeBarrier.SetMetrics(storageProxyMetrics)
 	}
 	if repo != nil {
 		syncSvc = volsync.NewService(repo, logrusLogger)

@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -66,6 +67,9 @@ type StorageProxyConfig struct {
 	// +optional
 	// +kubebuilder:default=20
 	JuiceFSMaxUpload int `yaml:"juicefs_max_upload" json:"juicefsMaxUpload"`
+	// +optional
+	// +kubebuilder:default="0s"
+	JuiceFSUploadDelay string `yaml:"juicefs_upload_delay" json:"juicefsUploadDelay"`
 	// +optional
 	// +kubebuilder:default=false
 	JuiceFSEncryptionEnabled bool `yaml:"juicefs_encryption_enabled" json:"juicefsEncryptionEnabled"`
@@ -220,6 +224,11 @@ func loadStorageProxyConfig(path string) (*StorageProxyConfig, error) {
 func (c *StorageProxyConfig) Validate() error {
 	if c.JuiceFSEncryptionEnabled && c.JuiceFSEncryptionKeyPath == "" {
 		return &ConfigError{Message: "juicefs encryption enabled but juicefs_encryption_key_path is empty"}
+	}
+	if c.JuiceFSUploadDelay != "" {
+		if _, err := time.ParseDuration(c.JuiceFSUploadDelay); err != nil {
+			return &ConfigError{Message: fmt.Sprintf("invalid juicefs_upload_delay %q", c.JuiceFSUploadDelay)}
+		}
 	}
 	return nil
 }

@@ -536,6 +536,9 @@ type StorageProxyConfig struct {
 	// +kubebuilder:default=20
 	JuiceFSMaxUpload int `json:"juicefsMaxUpload,omitempty"`
 	// +optional
+	// +kubebuilder:default="0s"
+	JuiceFSUploadDelay string `json:"juicefsUploadDelay,omitempty"`
+	// +optional
 	// +kubebuilder:default=false
 	JuiceFSEncryptionEnabled bool `json:"juicefsEncryptionEnabled,omitempty"`
 	// +optional

@@ -2661,6 +2661,9 @@ spec:
                           juicefsTrashDays:
                             default: 1
                             type: integer
+                          juicefsUploadDelay:
+                            default: 0s
+                            type: string
                           kubeconfigPath:
                             type: string
                           logLevel:

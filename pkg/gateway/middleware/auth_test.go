@@ -150,7 +150,7 @@ func TestAuthMiddleware_APIKeyFallsBackToCreatorUserID(t *testing.T) {
 	}
 }
 
-func TestAuthMiddleware_PlatformAPIKeySetsSystemAdmin(t *testing.T) {
+func TestAuthMiddleware_PlatformAPIKeySetsSystemAdminWithoutSelectedTeam(t *testing.T) {
 	t.Setenv("GIN_MODE", "release")
 
 	ownerID := "user-1"
@@ -180,6 +180,58 @@ func TestAuthMiddleware_PlatformAPIKeySetsSystemAdmin(t *testing.T) {
 	}
 	if authCtx.AuthMethod != authn.AuthMethodAPIKey || authCtx.APIKeyID != "key-1" {
 		t.Fatalf("unexpected auth context: %+v", authCtx)
+	}
+	if authCtx.TeamID != "" {
+		t.Fatalf("team id = %q, want empty without selected team", authCtx.TeamID)
+	}
+}
+
+func TestAuthMiddleware_PlatformAPIKeyUsesSelectedTeamHeader(t *testing.T) {
+	t.Setenv("GIN_MODE", "release")
+
+	req := httptest.NewRequest("GET", "/api/v1/sandboxes/sbox-1", nil)
+	req.Header.Set("Authorization", "Bearer s0_test")
+	req.Header.Set(internalauth.TeamIDHeader, "team-target")
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = req
+
+	middleware := NewAuthMiddleware(staticAPIKeyValidator{key: &apikey.APIKey{
+		ID:        "key-1",
+		TeamID:    "platform-owner-team",
+		CreatedBy: "creator-1",
+		Scope:     apikey.ScopePlatform,
+	}}, "test-secret", nil, zap.NewNop())
+	authCtx, err := middleware.AuthenticateRequest(ctx)
+	if err != nil {
+		t.Fatalf("authenticate request: %v", err)
+	}
+	if !authCtx.IsSystemAdmin {
+		t.Fatal("expected platform API key to set system admin")
+	}
+	if authCtx.TeamID != "team-target" {
+		t.Fatalf("team id = %q, want selected team", authCtx.TeamID)
+	}
+}
+
+func TestAuthMiddleware_TeamAPIKeyRejectsMismatchedTeamHeader(t *testing.T) {
+	t.Setenv("GIN_MODE", "release")
+
+	req := httptest.NewRequest("GET", "/api/v1/sandboxes/sbox-1", nil)
+	req.Header.Set("Authorization", "Bearer s0_test")
+	req.Header.Set(internalauth.TeamIDHeader, "team-other")
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = req
+
+	middleware := NewAuthMiddleware(staticAPIKeyValidator{key: &apikey.APIKey{
+		ID:        "key-1",
+		TeamID:    "team-1",
+		CreatedBy: "creator-1",
+		Roles:     []string{"developer"},
+	}}, "test-secret", nil, zap.NewNop())
+	if _, err := middleware.AuthenticateRequest(ctx); err != ErrSelectedTeamForbidden {
+		t.Fatalf("authenticate request error = %v, want %v", err, ErrSelectedTeamForbidden)
 	}
 }
 

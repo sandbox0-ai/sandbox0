@@ -120,14 +120,18 @@ func (m *AuthMiddleware) authenticateAPIKey(c *gin.Context, keyValue string) (*a
 	}
 	permissions := authn.ExpandRolesPermissions(apiKey.Roles)
 	isSystemAdmin := false
+	teamID := strings.TrimSpace(apiKey.TeamID)
 	if scope == apikey.ScopePlatform {
 		permissions = []string{"*"}
 		isSystemAdmin = true
+		teamID = strings.TrimSpace(c.GetHeader(internalauth.TeamIDHeader))
+	} else if selectedTeamID := strings.TrimSpace(c.GetHeader(internalauth.TeamIDHeader)); selectedTeamID != "" && selectedTeamID != teamID {
+		return nil, ErrSelectedTeamForbidden
 	}
 
 	return &authn.AuthContext{
 		AuthMethod:    authn.AuthMethodAPIKey,
-		TeamID:        apiKey.TeamID,
+		TeamID:        teamID,
 		UserID:        userID,
 		APIKeyID:      apiKey.ID,
 		IsSystemAdmin: isSystemAdmin,

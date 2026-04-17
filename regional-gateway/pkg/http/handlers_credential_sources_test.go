@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"io"
@@ -11,12 +12,21 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	gatewaymiddleware "github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"go.uber.org/zap"
 )
+
+type edgeStaticAPIKeyValidator struct {
+	key *apikey.APIKey
+}
+
+func (v edgeStaticAPIKeyValidator) ValidateAPIKey(context.Context, string) (*apikey.APIKey, error) {
+	return v.key, nil
+}
 
 func TestCredentialSourcesRequireDedicatedPermissionsAtEdge(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -79,6 +89,71 @@ func TestCredentialSourcesRequireDedicatedPermissionsAtEdge(t *testing.T) {
 			t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
 		}
 	})
+}
+
+func TestCredentialSourcesRejectPlatformAPIKeyWithoutSelectedTeam(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	logger := zap.NewNop()
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ed25519 keypair: %v", err)
+	}
+
+	called := false
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	clusterGatewayRouter, err := proxy.NewRouter(target.URL, logger, time.Second)
+	if err != nil {
+		t.Fatalf("create cluster-gateway proxy: %v", err)
+	}
+
+	server := &Server{
+		authMiddleware: gatewaymiddleware.NewAuthMiddleware(edgeStaticAPIKeyValidator{key: &apikey.APIKey{
+			ID:        "key-1",
+			TeamID:    "platform-owner-team",
+			CreatedBy: "user-1",
+			Scope:     apikey.ScopePlatform,
+		}}, "secret", nil, logger),
+		logger:               logger,
+		clusterGatewayRouter: clusterGatewayRouter,
+		internalAuthGen: internalauth.NewGenerator(internalauth.GeneratorConfig{
+			Caller:     "regional-gateway",
+			PrivateKey: privateKey,
+			TTL:        time.Minute,
+		}),
+	}
+	server.router = gin.New()
+	api := server.router.Group("/api")
+	api.Use(server.authMiddleware.Authenticate())
+	credentialSources := api.Group("/v1/credential-sources")
+	credentialSources.Use(server.requireTeamContextForTeamScopedAPI())
+	credentialSources.GET("/:name", server.authMiddleware.RequirePermission(authn.PermCredentialSourceRead), server.injectInternalToken(), server.clusterGatewayRouter.ProxyToTarget)
+	gateway := httptest.NewServer(server.router)
+	defer gateway.Close()
+
+	req, err := http.NewRequest(http.MethodGet, gateway.URL+"/api/v1/credential-sources/source-a", nil)
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer s0_test")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+	if called {
+		t.Fatal("target should not be called without selected team")
+	}
 }
 
 type edgeCredentialSourceRequestSpy struct {

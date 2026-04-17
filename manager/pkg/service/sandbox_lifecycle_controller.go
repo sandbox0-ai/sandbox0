@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -29,10 +30,14 @@ const (
 
 // SandboxLifecycleInfo carries the durable identity needed to clean sandbox-scoped state.
 type SandboxLifecycleInfo struct {
-	Namespace string
-	PodName   string
-	SandboxID string
-	TeamID    string
+	Namespace            string
+	PodName              string
+	SandboxID            string
+	TeamID               string
+	UserID               string
+	WebhookURL           string
+	WebhookSecret        string
+	WebhookStateVolumeID string
 }
 
 // SandboxDeletionCleaner cleans external state for a deleted sandbox.
@@ -41,11 +46,15 @@ type SandboxDeletionCleaner interface {
 }
 
 type sandboxLifecycleQueueItem struct {
-	Namespace string
-	PodName   string
-	SandboxID string
-	TeamID    string
-	Deleted   bool
+	Namespace            string
+	PodName              string
+	SandboxID            string
+	TeamID               string
+	UserID               string
+	WebhookURL           string
+	WebhookSecret        string
+	WebhookStateVolumeID string
+	Deleted              bool
 }
 
 // SandboxLifecycleController reconciles sandbox deletion side effects from Pod lifecycle state.
@@ -242,10 +251,14 @@ func (c *SandboxLifecycleController) ensurePodCleanupFinalizer(ctx context.Conte
 
 func (c *SandboxLifecycleController) cleanupDeletedSandbox(ctx context.Context, item sandboxLifecycleQueueItem) error {
 	info := SandboxLifecycleInfo{
-		Namespace: item.Namespace,
-		PodName:   item.PodName,
-		SandboxID: item.SandboxID,
-		TeamID:    item.TeamID,
+		Namespace:            item.Namespace,
+		PodName:              item.PodName,
+		SandboxID:            item.SandboxID,
+		TeamID:               item.TeamID,
+		UserID:               item.UserID,
+		WebhookURL:           item.WebhookURL,
+		WebhookSecret:        item.WebhookSecret,
+		WebhookStateVolumeID: item.WebhookStateVolumeID,
 	}
 	if info.SandboxID == "" {
 		info.SandboxID = info.PodName
@@ -290,6 +303,11 @@ func (s *SandboxService) CleanupDeletedSandbox(ctx context.Context, info Sandbox
 	}
 
 	var errs []error
+	if s.deletionWebhookEmitter != nil && strings.TrimSpace(info.WebhookURL) != "" {
+		if err := s.deletionWebhookEmitter.EmitSandboxDeleted(ctx, info); err != nil {
+			errs = append(errs, fmt.Errorf("emit sandbox.deleted webhook: %w", err))
+		}
+	}
 	if s.networkProvider != nil && info.Namespace != "" {
 		if err := s.networkProvider.RemoveSandboxPolicy(ctx, info.Namespace, sandboxID); err != nil {
 			errs = append(errs, fmt.Errorf("remove network policy: %w", err))
@@ -305,6 +323,9 @@ func (s *SandboxService) CleanupDeletedSandbox(ctx context.Context, info Sandbox
 		} else if err := s.credentialStore.DeleteBindings(ctx, teamID, sandboxID); err != nil {
 			errs = append(errs, fmt.Errorf("delete credential bindings: %w", err))
 		}
+	}
+	if err := s.deleteWebhookStateVolume(ctx, info); err != nil {
+		errs = append(errs, fmt.Errorf("delete webhook state volume: %w", err))
 	}
 	s.powerStateLocks.Delete(sandboxID)
 	s.powerStateReconcilers.Delete(sandboxID)
@@ -338,11 +359,15 @@ func (s *SandboxService) ensureSandboxDeletionFinalizer(ctx context.Context, pod
 
 func sandboxLifecycleItemFromInfo(info SandboxLifecycleInfo, deleted bool) sandboxLifecycleQueueItem {
 	return sandboxLifecycleQueueItem{
-		Namespace: info.Namespace,
-		PodName:   info.PodName,
-		SandboxID: info.SandboxID,
-		TeamID:    info.TeamID,
-		Deleted:   deleted,
+		Namespace:            info.Namespace,
+		PodName:              info.PodName,
+		SandboxID:            info.SandboxID,
+		TeamID:               info.TeamID,
+		UserID:               info.UserID,
+		WebhookURL:           info.WebhookURL,
+		WebhookSecret:        info.WebhookSecret,
+		WebhookStateVolumeID: info.WebhookStateVolumeID,
+		Deleted:              deleted,
 	}
 }
 
@@ -358,14 +383,31 @@ func sandboxLifecycleInfoFromPod(pod *corev1.Pod) (SandboxLifecycleInfo, bool) {
 		return SandboxLifecycleInfo{}, false
 	}
 	teamID := ""
+	userID := ""
+	webhookURL := ""
+	webhookSecret := ""
+	webhookStateVolumeID := ""
 	if pod.Annotations != nil {
 		teamID = strings.TrimSpace(pod.Annotations[controller.AnnotationTeamID])
+		userID = strings.TrimSpace(pod.Annotations[controller.AnnotationUserID])
+		webhookStateVolumeID = strings.TrimSpace(pod.Annotations[controller.AnnotationWebhookStateVolumeID])
+		if configJSON := strings.TrimSpace(pod.Annotations[controller.AnnotationConfig]); configJSON != "" {
+			var cfg SandboxConfig
+			if err := json.Unmarshal([]byte(configJSON), &cfg); err == nil && cfg.Webhook != nil {
+				webhookURL = strings.TrimSpace(cfg.Webhook.URL)
+				webhookSecret = strings.TrimSpace(cfg.Webhook.Secret)
+			}
+		}
 	}
 	return SandboxLifecycleInfo{
-		Namespace: pod.Namespace,
-		PodName:   pod.Name,
-		SandboxID: sandboxID,
-		TeamID:    teamID,
+		Namespace:            pod.Namespace,
+		PodName:              pod.Name,
+		SandboxID:            sandboxID,
+		TeamID:               teamID,
+		UserID:               userID,
+		WebhookURL:           webhookURL,
+		WebhookSecret:        webhookSecret,
+		WebhookStateVolumeID: webhookStateVolumeID,
 	}, true
 }
 

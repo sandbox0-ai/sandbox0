@@ -53,7 +53,11 @@ func (h *WebhookHandler) Publish(w http.ResponseWriter, r *http.Request) {
 		EventType: webhook.EventTypeAgentEvent,
 		Payload:   payload,
 	}
-	h.dispatcher.Enqueue(event)
+	eventID, err := h.dispatcher.Enqueue(event)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "webhook_enqueue_failed", err.Error())
+		return
+	}
 
-	writeJSON(w, http.StatusAccepted, PublishResponse{EventID: event.EventID})
+	writeJSON(w, http.StatusAccepted, PublishResponse{EventID: eventID})
 }

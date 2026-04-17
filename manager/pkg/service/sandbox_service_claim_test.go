@@ -623,6 +623,20 @@ func TestValidateClaimMountsNormalizesMountPoint(t *testing.T) {
 	}
 }
 
+func TestValidateClaimMountsRejectsWebhookStatePath(t *testing.T) {
+	req := &ClaimRequest{
+		Mounts: []ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: webhookStateMountPoint + "/custom"}},
+	}
+
+	err := validateClaimMounts(req)
+	if err == nil {
+		t.Fatal("expected reserved mount point validation error")
+	}
+	if !errors.Is(err, ErrInvalidClaimRequest) {
+		t.Fatalf("expected ErrInvalidClaimRequest, got %v", err)
+	}
+}
+
 func TestClaimMountWaitTimeoutDefaultsWhenEnabled(t *testing.T) {
 	got := claimMountWaitTimeout(&ClaimRequest{WaitForMounts: true})
 	if got != 30*time.Second {

@@ -1493,7 +1493,9 @@ type SandboxConfig struct {
 	HardTtl      *int32                `json:"hard_ttl,omitempty"`
 	Network      *SandboxNetworkPolicy `json:"network,omitempty"`
 	Ttl          *int32                `json:"ttl,omitempty"`
-	Webhook      *WebhookConfig        `json:"webhook,omitempty"`
+
+	// Webhook Per-sandbox webhook configuration. Sandbox0 delivers webhook events at least once and consumers should deduplicate by event_id. For sandbox lifecycle events, procd persists signed delivery records to a manager-owned SandboxVolume outside the workspace before dispatch; manager also emits sandbox.deleted during pod deletion cleanup.
+	Webhook *WebhookConfig `json:"webhook,omitempty"`
 }
 
 // SandboxNetworkPolicy defines model for SandboxNetworkPolicy.
@@ -2662,7 +2664,7 @@ type WebLoginExchangeRequest struct {
 	ReturnUrl string `json:"return_url"`
 }
 
-// WebhookConfig defines model for WebhookConfig.
+// WebhookConfig Per-sandbox webhook configuration. Sandbox0 delivers webhook events at least once and consumers should deduplicate by event_id. For sandbox lifecycle events, procd persists signed delivery records to a manager-owned SandboxVolume outside the workspace before dispatch; manager also emits sandbox.deleted during pod deletion cleanup.
 type WebhookConfig struct {
 	// Secret Optional. Shared secret used to sign webhook payloads.
 	Secret *string `json:"secret,omitempty"`

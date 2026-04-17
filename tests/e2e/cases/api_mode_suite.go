@@ -31,6 +31,7 @@ type apiModeSuiteOptions struct {
 	includePoolReadinessGate  bool
 	includeNetworkPolicy      bool
 	includeVolumeLifecycle    bool
+	includeWebhookLifecycle   bool
 	includeMeteringAssertions bool
 	expectStorageUnavailable  bool
 	expectNetworkUnavailable  bool
@@ -236,6 +237,14 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 			})
 		}
 
+		if opts.includeWebhookLifecycle {
+			Context("sandbox webhooks", func() {
+				It("delivers lifecycle events through durable state volume and pod deletion", func() {
+					assertSandboxWebhookDurabilityLifecycle(env, session)
+				})
+			})
+		}
+
 		if opts.expectStorageUnavailable || opts.expectNetworkUnavailable {
 			Context("missing services", func() {
 				It("returns expected degraded-mode errors", func() {
@@ -408,6 +417,184 @@ func runTemplateLifecycleAssertions(env *framework.ScenarioEnv, session *e2eutil
 
 	err = session.DeleteTemplate(env.TestCtx.Context, GinkgoT(), name)
 	Expect(err).NotTo(HaveOccurred())
+}
+
+func assertSandboxWebhookDurabilityLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session) {
+	receiverName := "sandbox0-e2e-webhook"
+	cleanup := setupWebhookReceiver(env, receiverName)
+	defer cleanup()
+
+	webhookURL := fmt.Sprintf("http://%s.%s.svc.cluster.local:8080/events", receiverName, env.Infra.Namespace)
+	webhookSecret := "e2e-secret"
+	template := "default"
+	claimReq := apispec.ClaimRequest{
+		Template: &template,
+		Config: &apispec.SandboxConfig{
+			Webhook: &apispec.WebhookConfig{
+				Url:    &webhookURL,
+				Secret: &webhookSecret,
+			},
+		},
+	}
+
+	claimResp, err := session.ClaimSandboxWithRequest(env.TestCtx.Context, GinkgoT(), claimReq)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(claimResp).NotTo(BeNil())
+	Expect(claimResp.BootstrapMounts).To(BeNil())
+	sandboxID := claimResp.SandboxId
+	defer func() {
+		_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+	}()
+	sandboxNamespace, err := naming.TemplateNamespaceForBuiltin(template)
+	Expect(err).NotTo(HaveOccurred())
+
+	volumeID, err := framework.KubectlGetJSONPath(
+		env.TestCtx.Context,
+		env.Config.Kubeconfig,
+		sandboxNamespace,
+		"pod",
+		claimResp.PodName,
+		"{.metadata.annotations.sandbox0\\.ai/webhook-state-volume-id}",
+	)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(strings.TrimSpace(volumeID)).NotTo(BeEmpty())
+
+	Eventually(func() error {
+		events := readWebhookReceiverEvents(env, receiverName)
+		if !strings.Contains(events, `"event_type":"sandbox.ready"`) {
+			return fmt.Errorf("missing sandbox.ready event: %s", events)
+		}
+		return nil
+	}).WithTimeout(90 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
+
+	Expect(framework.Kubectl(
+		env.TestCtx.Context,
+		env.Config.Kubeconfig,
+		"delete",
+		"pod",
+		claimResp.PodName,
+		"--namespace",
+		sandboxNamespace,
+		"--wait=true",
+	)).To(Succeed())
+	sandboxID = ""
+
+	Eventually(func() error {
+		events := readWebhookReceiverEvents(env, receiverName)
+		if !strings.Contains(events, `"event_type":"sandbox.deleted"`) {
+			return fmt.Errorf("missing sandbox.deleted event: %s", events)
+		}
+		return nil
+	}).WithTimeout(90 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
+}
+
+func setupWebhookReceiver(env *framework.ScenarioEnv, name string) func() {
+	manifest := fmt.Sprintf(`
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: %[1]s-script
+  namespace: %[2]s
+data:
+  server.py: |
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from pathlib import Path
+
+    events = Path("/data/events.jsonl")
+    events.parent.mkdir(parents=True, exist_ok=True)
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("content-length", "0"))
+            body = self.rfile.read(length)
+            with events.open("ab") as f:
+                f.write(body + b"\n")
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, fmt, *args):
+            return
+
+    HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: %[1]s
+  namespace: %[2]s
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: %[1]s
+  template:
+    metadata:
+      labels:
+        app: %[1]s
+    spec:
+      containers:
+        - name: receiver
+          image: python:3.12-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["python", "/app/server.py"]
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: script
+              mountPath: /app
+              readOnly: true
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: script
+          configMap:
+            name: %[1]s-script
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: %[1]s
+  namespace: %[2]s
+spec:
+  selector:
+    app: %[1]s
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+`, name, env.Infra.Namespace)
+	Expect(framework.ApplyManifestContent(env.TestCtx.Context, env.Config.Kubeconfig, "sandbox0-e2e-webhook-", manifest)).To(Succeed())
+	Expect(framework.WaitForDeployment(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, name, "3m")).To(Succeed())
+	return func() {
+		_ = framework.Kubectl(env.TestCtx.Context, env.Config.Kubeconfig, "delete", "service", name, "--namespace", env.Infra.Namespace, "--ignore-not-found=true")
+		_ = framework.Kubectl(env.TestCtx.Context, env.Config.Kubeconfig, "delete", "deployment", name, "--namespace", env.Infra.Namespace, "--ignore-not-found=true")
+		_ = framework.Kubectl(env.TestCtx.Context, env.Config.Kubeconfig, "delete", "configmap", name+"-script", "--namespace", env.Infra.Namespace, "--ignore-not-found=true")
+	}
+}
+
+func readWebhookReceiverEvents(env *framework.ScenarioEnv, name string) string {
+	podName, err := framework.KubectlGetJSONPath(
+		env.TestCtx.Context,
+		env.Config.Kubeconfig,
+		env.Infra.Namespace,
+		"pod",
+		"-l=app="+name,
+		"{.items[0].metadata.name}",
+	)
+	Expect(err).NotTo(HaveOccurred())
+	output, err := framework.KubectlExecOutput(
+		env.TestCtx.Context,
+		env.Config.Kubeconfig,
+		env.Infra.Namespace,
+		strings.TrimSpace(podName),
+		"sh",
+		"-c",
+		"cat /data/events.jsonl 2>/dev/null || true",
+	)
+	Expect(err).NotTo(HaveOccurred())
+	return output
 }
 
 func assertTemplateStatusCountersEventually(env *framework.ScenarioEnv, session *e2eutils.Session) {

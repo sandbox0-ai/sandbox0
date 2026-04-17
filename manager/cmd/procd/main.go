@@ -78,6 +78,7 @@ func main() {
 		MaxRetries:     cfg.WebhookMaxRetries,
 		BaseBackoff:    cfg.WebhookBaseBackoff.Duration,
 		RequestTimeout: cfg.WebhookRequestTimeout.Duration,
+		OutboxDir:      cfg.WebhookOutboxDir,
 	}, logger)
 
 	contextManager.SetExitHandler(func(event process.ExitEvent) {
@@ -95,10 +96,12 @@ func main() {
 			"stderr_preview": event.StderrPreview,
 			"state":          event.State,
 		}
-		webhookDispatcher.Enqueue(webhook.Event{
+		if _, err := webhookDispatcher.Enqueue(webhook.Event{
 			EventType: eventType,
 			Payload:   payload,
-		})
+		}); err != nil {
+			logger.Warn("Failed to enqueue process exit webhook", zap.Error(err))
+		}
 	})
 
 	contextManager.SetStartHandler(func(event process.StartEvent) {
@@ -117,10 +120,12 @@ func main() {
 		if event.Config.Term != "" {
 			payload["term"] = event.Config.Term
 		}
-		webhookDispatcher.Enqueue(webhook.Event{
+		if _, err := webhookDispatcher.Enqueue(webhook.Event{
 			EventType: webhook.EventTypeProcessStarted,
 			Payload:   payload,
-		})
+		}); err != nil {
+			logger.Warn("Failed to enqueue process start webhook", zap.Error(err))
+		}
 	})
 
 	// Create shared token provider for storage-proxy communication
@@ -205,13 +210,15 @@ func main() {
 
 		cleanupCancel()
 
-		webhookDispatcher.Enqueue(webhook.Event{
+		if _, err := webhookDispatcher.Enqueue(webhook.Event{
 			EventType: webhook.EventTypeSandboxKilled,
 			Payload: map[string]any{
 				"signal": sig.String(),
 				"reason": "shutdown",
 			},
-		})
+		}); err != nil {
+			logger.Warn("Failed to enqueue sandbox killed webhook", zap.Error(err))
+		}
 
 		// Graceful shutdown
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

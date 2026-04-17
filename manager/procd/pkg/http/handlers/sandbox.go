@@ -68,12 +68,14 @@ func (h *SandboxHandler) Pause(w http.ResponseWriter, r *http.Request) {
 		zap.Int64("memory_working_set", resourceUsage.ContainerMemoryWorkingSet),
 	)
 	if h.dispatcher != nil {
-		h.dispatcher.Enqueue(webhook.Event{
+		if _, err := h.dispatcher.Enqueue(webhook.Event{
 			EventType: webhook.EventTypeSandboxPaused,
 			Payload: map[string]any{
 				"resource_usage": resourceUsage,
 			},
-		})
+		}); err != nil {
+			h.logger.Warn("Failed to enqueue sandbox paused webhook", zap.Error(err))
+		}
 	}
 	writeJSON(w, http.StatusOK, PauseAllResponse{
 		Paused:        true,
@@ -109,12 +111,14 @@ func (h *SandboxHandler) Resume(w http.ResponseWriter, r *http.Request) {
 
 	h.logger.Info("All contexts resumed successfully")
 	if h.dispatcher != nil {
-		h.dispatcher.Enqueue(webhook.Event{
+		if _, err := h.dispatcher.Enqueue(webhook.Event{
 			EventType: webhook.EventTypeSandboxResumed,
 			Payload: map[string]any{
 				"resumed": true,
 			},
-		})
+		}); err != nil {
+			h.logger.Warn("Failed to enqueue sandbox resumed webhook", zap.Error(err))
+		}
 	}
 	writeJSON(w, http.StatusOK, ResumeAllResponse{
 		Resumed: true,

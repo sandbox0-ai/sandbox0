@@ -243,6 +243,7 @@ func main() {
 	// Initialize internal auth generator for procd communication
 	var internalTokenGenerator service.TokenGenerator
 	var procdTokenGenerator service.TokenGenerator
+	var storageProxyAdminTokenGenerator service.TokenGenerator
 	privateKey, err := internalauth.LoadEd25519PrivateKeyFromFile(internalauth.DefaultInternalJWTPrivateKeyPath)
 	if err != nil {
 		logger.Warn("Failed to load internal auth private key, pause/resume will not work",
@@ -257,6 +258,7 @@ func main() {
 		})
 		internalTokenGenerator = service.NewInternalTokenGenerator(internalAuthGen)
 		procdTokenGenerator = service.NewProcdTokenGenerator(internalAuthGen)
+		storageProxyAdminTokenGenerator = service.NewStorageProxyAdminTokenGenerator(internalAuthGen)
 		logger.Info("Internal auth generators initialized for procd communication")
 	}
 
@@ -301,6 +303,18 @@ func main() {
 		managerMetrics,
 	)
 	sandboxService.SetCredentialStore(credentialStore)
+	if cfg.StorageProxyBaseURL != "" && cfg.StorageProxyHTTPPort > 0 && storageProxyAdminTokenGenerator != nil {
+		storageProxyBaseURL := fmt.Sprintf("http://%s:%d", strings.TrimSpace(cfg.StorageProxyBaseURL), cfg.StorageProxyHTTPPort)
+		sandboxService.SetWebhookStateVolumeClient(service.NewStorageProxyVolumeClient(service.StorageProxyVolumeClientConfig{
+			BaseURL:        storageProxyBaseURL,
+			HTTPClient:     obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ProcdClientTimeout.Duration}),
+			TokenGenerator: storageProxyAdminTokenGenerator,
+		}))
+		logger.Info("Webhook state volumes enabled", zap.String("storageProxyBaseURL", storageProxyBaseURL))
+	} else {
+		logger.Warn("Webhook state volumes disabled; sandbox claims with webhooks will fail until storage-proxy is configured")
+	}
+	sandboxService.SetDeletionWebhookEmitter(service.NewHTTPSandboxDeletionWebhookEmitter(obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ProcdClientTimeout.Duration})))
 	sandboxLifecycleController := service.NewSandboxLifecycleController(k8sClient, podLister, sandboxService, logger)
 	podInformer.Informer().AddEventHandler(sandboxLifecycleController.ResourceEventHandler())
 	operator.SetSandboxProbeRunner(sandboxService)

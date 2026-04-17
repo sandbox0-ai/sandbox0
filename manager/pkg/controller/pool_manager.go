@@ -52,6 +52,7 @@ const (
 	AnnotationNetworkPolicyHash            = "sandbox0.ai/network-policy-hash"
 	AnnotationNetworkPolicyAppliedHash     = "sandbox0.ai/network-policy-applied-hash"
 	AnnotationSandboxID                    = "sandbox0.ai/sandbox-id"
+	AnnotationWebhookStateVolumeID         = "sandbox0.ai/webhook-state-volume-id"
 	AnnotationTemplateSpecHash             = "sandbox0.ai/template-spec-hash"
 	AnnotationClusterAutoscalerSafeToEvict = "cluster-autoscaler.kubernetes.io/safe-to-evict"
 )

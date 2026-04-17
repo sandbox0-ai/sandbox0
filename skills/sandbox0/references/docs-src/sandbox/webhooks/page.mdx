@@ -20,6 +20,18 @@ Webhooks are configured per-sandbox at creation time. Each sandbox can have its 
 `secret` is optional. For quick debugging, you can leave it empty and use services like <DocLink href="https://webhook.site" newTab>webhook.site</DocLink> to inspect incoming events directly.
 </Callout>
 
+## Delivery Guarantees
+
+Webhook events are delivered at least once. Your endpoint should return a `2xx` status only after it has durably recorded the event, and should deduplicate by `event_id`.
+
+When a sandbox is created with a webhook, Sandbox0 creates a manager-owned SandboxVolume for webhook delivery state and mounts it at a reserved procd path outside the workspace. Procd writes signed delivery records to that volume before acknowledging the internal publish request, then retries delivery from the outbox until the endpoint accepts the event.
+
+Sandbox deletion has an additional manager-level path. If the sandbox pod is deleted directly, or procd exits before it can emit `sandbox.killed`, manager emits `sandbox.deleted` from the pod finalizer cleanup path.
+
+<Callout variant="info">
+Webhook delivery is eventually consistent. Temporary endpoint outages, procd container restarts, and manager restarts can cause retries. Consumers must treat repeated `event_id` values as duplicate deliveries.
+</Callout>
+
 ---
 
 ## Event Types
@@ -32,6 +44,7 @@ Webhooks are configured per-sandbox at creation time. Each sandbox can have its 
 | `sandbox.paused` | Sandbox has been paused |
 | `sandbox.resumed` | Sandbox has been resumed |
 | `sandbox.killed` | Sandbox has been killed |
+| `sandbox.deleted` | Sandbox pod has been deleted and manager is cleaning sandbox-scoped state |
 
 ### Process Events
 
@@ -250,6 +263,8 @@ done`
 ## Triggering Webhook Events
 
 ### Sandbox Events
+
+`sandbox.ready` is emitted after initialization. `sandbox.paused` and `sandbox.resumed` are emitted when pause and resume requests complete. `sandbox.killed` is emitted by procd during graceful shutdown, and `sandbox.deleted` is emitted by manager when the sandbox pod deletion cleanup runs.
 
 <Tabs
   tabs={[

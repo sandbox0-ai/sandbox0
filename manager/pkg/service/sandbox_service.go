@@ -124,6 +124,8 @@ type SandboxService struct {
 	autoScaler             AutoScalerInterface
 	credentialStore        egressauth.BindingStore
 	powerExecutor          SandboxPowerExecutor
+	webhookStateVolumes    SandboxSystemVolumeClient
+	deletionWebhookEmitter SandboxDeletionWebhookEmitter
 	powerStateLocks        sync.Map
 	powerStateReconcilers  sync.Map
 }
@@ -255,6 +257,16 @@ func (s *SandboxService) SetPowerExecutor(executor SandboxPowerExecutor) {
 		return
 	}
 	s.powerExecutor = executor
+}
+
+// SetWebhookStateVolumeClient injects the system volume client used for durable webhook state.
+func (s *SandboxService) SetWebhookStateVolumeClient(client SandboxSystemVolumeClient) {
+	s.webhookStateVolumes = client
+}
+
+// SetDeletionWebhookEmitter injects the emitter for manager-owned sandbox deletion events.
+func (s *SandboxService) SetDeletionWebhookEmitter(emitter SandboxDeletionWebhookEmitter) {
+	s.deletionWebhookEmitter = emitter
 }
 
 func (s *SandboxService) sandboxPowerExecutor() SandboxPowerExecutor {

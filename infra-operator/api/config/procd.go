@@ -79,6 +79,9 @@ type ProcdConfig struct {
 	// +optional
 	// +kubebuilder:default="500ms"
 	WebhookBaseBackoff metav1.Duration `yaml:"webhook_base_backoff" json:"webhookBaseBackoff"`
+	// +optional
+	// +kubebuilder:default="/var/lib/sandbox0/procd/webhook-outbox"
+	WebhookOutboxDir string `yaml:"webhook_outbox_dir" json:"webhookOutboxDir"`
 
 	setKeys map[string]bool `yaml:"-" json:"-"`
 }
@@ -148,7 +151,7 @@ var (
 // LoadProcdConfig returns the procd configuration.
 func LoadProcdConfig() *ProcdConfig {
 	procdCfgOnce.Do(func() {
-		cfg := ProcdConfig{}
+		cfg := ProcdConfig{WebhookOutboxDir: "/var/lib/sandbox0/procd/webhook-outbox"}
 		if err := applyProcdEnvOverrides(&cfg); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to apply procd env overrides: %v\n", err)
 		}

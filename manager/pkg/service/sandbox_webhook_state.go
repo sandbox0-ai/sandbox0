@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 )
 
 const (
@@ -49,11 +50,15 @@ func NewStorageProxyVolumeClient(cfg StorageProxyVolumeClientConfig) *StoragePro
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 10 * time.Second}
 	}
+	clusterID := strings.TrimSpace(cfg.ClusterID)
+	if clusterID == "" {
+		clusterID = naming.DefaultClusterID
+	}
 	return &StorageProxyVolumeClient{
 		baseURL:        strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/"),
 		httpClient:     httpClient,
 		tokenGenerator: cfg.TokenGenerator,
-		clusterID:      strings.TrimSpace(cfg.ClusterID),
+		clusterID:      clusterID,
 	}
 }
 

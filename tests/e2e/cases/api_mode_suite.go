@@ -445,11 +445,13 @@ func assertSandboxWebhookDurabilityLifecycle(env *framework.ScenarioEnv, session
 	defer func() {
 		_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
 	}()
+	sandboxNamespace, err := naming.TemplateNamespaceForBuiltin(template)
+	Expect(err).NotTo(HaveOccurred())
 
 	volumeID, err := framework.KubectlGetJSONPath(
 		env.TestCtx.Context,
 		env.Config.Kubeconfig,
-		env.Infra.Namespace,
+		sandboxNamespace,
 		"pod",
 		claimResp.PodName,
 		"{.metadata.annotations.sandbox0\\.ai/webhook-state-volume-id}",
@@ -472,7 +474,7 @@ func assertSandboxWebhookDurabilityLifecycle(env *framework.ScenarioEnv, session
 		"pod",
 		claimResp.PodName,
 		"--namespace",
-		env.Infra.Namespace,
+		sandboxNamespace,
 		"--wait=true",
 	)).To(Succeed())
 	sandboxID = ""

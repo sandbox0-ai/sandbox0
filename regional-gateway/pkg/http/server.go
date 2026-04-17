@@ -306,6 +306,7 @@ func (s *Server) setupRoutes() {
 
 			// Sandbox creation and listing go to scheduler, others route to cluster-gateway
 			sandboxes := api.Group("/v1/sandboxes")
+			sandboxes.Use(s.requireTeamContextForTeamScopedAPI())
 			sandboxes.GET("", s.injectInternalTokenForTarget("scheduler"), s.schedulerRouter.ProxyToTarget)
 			sandboxes.POST("", s.injectInternalTokenForTarget("scheduler"), s.schedulerRouter.ProxyToTarget)
 			sandboxes.GET("/:id", s.getSandboxDetail)
@@ -324,6 +325,7 @@ func (s *Server) setupRoutes() {
 		}
 
 		credentialSources := api.Group("/v1/credential-sources")
+		credentialSources.Use(s.requireTeamContextForTeamScopedAPI())
 		{
 			credentialSources.GET("", s.authMiddleware.RequirePermission(authn.PermCredentialSourceRead), s.injectInternalToken(), s.clusterGatewayRouter.ProxyToTarget)
 			credentialSources.POST("", s.authMiddleware.RequirePermission(authn.PermCredentialSourceWrite), s.injectInternalToken(), s.clusterGatewayRouter.ProxyToTarget)
@@ -433,6 +435,9 @@ func (s *Server) handleAPINoRoute(c *gin.Context) bool {
 	if c.IsAborted() {
 		return true
 	}
+	if rejectTeamScopedPlatformAPIKeyWithoutTeam(c, authCtx) {
+		return true
+	}
 	token, err := s.generateInternalToken(authCtx, "cluster-gateway")
 	if err != nil {
 		s.logger.Error("Failed to generate internal token for cluster-gateway fallback", zap.Error(err))
@@ -441,6 +446,28 @@ func (s *Server) handleAPINoRoute(c *gin.Context) bool {
 	}
 	s.applyInternalHeaders(c, token, authCtx)
 	s.clusterGatewayRouter.ProxyToTarget(c)
+	return true
+}
+
+func (s *Server) requireTeamContextForTeamScopedAPI() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		authCtx := middleware.GetAuthContext(c)
+		if rejectTeamScopedPlatformAPIKeyWithoutTeam(c, authCtx) {
+			return
+		}
+		c.Next()
+	}
+}
+
+func rejectTeamScopedPlatformAPIKeyWithoutTeam(c *gin.Context, authCtx *authn.AuthContext) bool {
+	if authCtx == nil || authCtx.AuthMethod != authn.AuthMethodAPIKey || !authCtx.IsSystemAdmin {
+		return false
+	}
+	if strings.TrimSpace(authCtx.TeamID) != "" {
+		return false
+	}
+	spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "x-team-id is required for team-scoped platform API key requests")
+	c.Abort()
 	return true
 }
 

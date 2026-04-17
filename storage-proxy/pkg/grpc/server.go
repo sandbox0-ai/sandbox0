@@ -56,6 +56,7 @@ type volumeManager interface {
 // VolumeRepository provides volume metadata lookup for access mode enforcement.
 type VolumeRepository interface {
 	GetSandboxVolume(ctx context.Context, id string) (*db.SandboxVolume, error)
+	GetSandboxVolumeOwner(ctx context.Context, volumeID string) (*db.SandboxVolumeOwner, error)
 }
 
 type syncRecorder interface {
@@ -538,6 +539,15 @@ func (s *FileSystemServer) authorizeVolumeMount(ctx context.Context, volumeID st
 	if vol.TeamID != claims.TeamID {
 		s.logUnauthorizedVolumeAccess(volumeID, claims.TeamID, vol.TeamID, "mount")
 		return nil, status.Error(codes.PermissionDenied, "access denied to volume")
+	}
+	owner, err := s.volumeRepo.GetSandboxVolumeOwner(ctx, volumeID)
+	if err != nil && !errors.Is(err, db.ErrNotFound) {
+		s.logger.WithError(err).WithField("volume_id", volumeID).Error("Failed to load sandbox volume owner")
+		return nil, status.Error(codes.Internal, "failed to load sandbox volume owner")
+	}
+	if owner != nil && !claims.IsSystemToken() && claims.SandboxID != owner.OwnerSandboxID {
+		s.logUnauthorizedVolumeAccess(volumeID, claims.TeamID, vol.TeamID, "mount_owned")
+		return nil, status.Error(codes.PermissionDenied, "access denied to system volume")
 	}
 	return vol, nil
 }

@@ -530,6 +530,9 @@ func (s *Server) loadAuthorizedVolume(ctx context.Context, volumeID string) (*db
 	if volumeRecord.TeamID != claims.TeamID {
 		return nil, errVolumeNotFound
 	}
+	if s.isOwnedSandboxVolume(ctx, volumeID) {
+		return nil, errVolumeNotFound
+	}
 	return volumeRecord, nil
 }
 

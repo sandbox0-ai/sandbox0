@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -23,20 +24,24 @@ const (
 
 // SandboxSystemVolumeClient creates and deletes manager-owned sandbox volumes.
 type SandboxSystemVolumeClient interface {
-	Create(ctx context.Context, teamID, userID, sandboxID, kind string) (string, error)
+	Create(ctx context.Context, teamID, userID, sandboxID, purpose string) (string, error)
+	MarkSandboxForCleanup(ctx context.Context, teamID, userID, sandboxID, reason string) error
 	Delete(ctx context.Context, teamID, userID, sandboxID, volumeID string) error
+	List(ctx context.Context) ([]SandboxSystemVolume, error)
 }
 
 type StorageProxyVolumeClient struct {
 	baseURL        string
 	httpClient     *http.Client
 	tokenGenerator TokenGenerator
+	clusterID      string
 }
 
 type StorageProxyVolumeClientConfig struct {
 	BaseURL        string
 	HTTPClient     *http.Client
 	TokenGenerator TokenGenerator
+	ClusterID      string
 }
 
 func NewStorageProxyVolumeClient(cfg StorageProxyVolumeClientConfig) *StorageProxyVolumeClient {
@@ -48,18 +53,36 @@ func NewStorageProxyVolumeClient(cfg StorageProxyVolumeClientConfig) *StoragePro
 		baseURL:        strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/"),
 		httpClient:     httpClient,
 		tokenGenerator: cfg.TokenGenerator,
+		clusterID:      strings.TrimSpace(cfg.ClusterID),
 	}
 }
 
-func (c *StorageProxyVolumeClient) Create(ctx context.Context, teamID, userID, sandboxID, kind string) (string, error) {
+type SandboxSystemVolume struct {
+	VolumeID           string
+	TeamID             string
+	UserID             string
+	OwnerSandboxID     string
+	OwnerClusterID     string
+	Purpose            string
+	CleanupRequestedAt *time.Time
+}
+
+func (c *StorageProxyVolumeClient) Create(ctx context.Context, teamID, userID, sandboxID, purpose string) (string, error) {
 	if c == nil || c.baseURL == "" {
 		return "", fmt.Errorf("storage-proxy volume client is not configured")
+	}
+	if c.clusterID == "" {
+		return "", fmt.Errorf("storage-proxy volume client cluster id is not configured")
 	}
 	token, err := c.generateToken(teamID, userID, sandboxID)
 	if err != nil {
 		return "", err
 	}
 	body := map[string]any{
+		"sandbox_id":  sandboxID,
+		"cluster_id":  c.clusterID,
+		"purpose":     purpose,
+		"user_id":     userID,
 		"cache_size":  "64M",
 		"buffer_size": "8M",
 		"access_mode": "RWO",
@@ -68,7 +91,7 @@ func (c *StorageProxyVolumeClient) Create(ctx context.Context, teamID, userID, s
 	if err != nil {
 		return "", err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/sandboxvolumes", bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/internal/v1/sandboxvolumes/owned", bytes.NewReader(payload))
 	if err != nil {
 		return "", err
 	}
@@ -77,29 +100,73 @@ func (c *StorageProxyVolumeClient) Create(ctx context.Context, teamID, userID, s
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("create %s volume: %w", kind, err)
+		return "", fmt.Errorf("create %s volume: %w", purpose, err)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", fmt.Errorf("read create volume response: %w", err)
 	}
-	volume, apiErr, err := spec.DecodeResponse[struct {
-		ID string `json:"id"`
+	owned, apiErr, err := spec.DecodeResponse[struct {
+		Volume struct {
+			ID string `json:"id"`
+		} `json:"volume"`
 	}](bytes.NewReader(data))
 	if err != nil {
 		return "", fmt.Errorf("decode create volume response: %w", err)
 	}
 	if apiErr != nil {
-		return "", fmt.Errorf("create %s volume failed: %s", kind, apiErr.Message)
+		return "", fmt.Errorf("create %s volume failed: %s", purpose, apiErr.Message)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("create %s volume failed with status %d", kind, resp.StatusCode)
+		return "", fmt.Errorf("create %s volume failed with status %d", purpose, resp.StatusCode)
 	}
-	if volume == nil || strings.TrimSpace(volume.ID) == "" {
-		return "", fmt.Errorf("create %s volume returned no id", kind)
+	if owned == nil || strings.TrimSpace(owned.Volume.ID) == "" {
+		return "", fmt.Errorf("create %s volume returned no id", purpose)
 	}
-	return volume.ID, nil
+	return owned.Volume.ID, nil
+}
+
+func (c *StorageProxyVolumeClient) MarkSandboxForCleanup(ctx context.Context, teamID, userID, sandboxID, reason string) error {
+	if c == nil || c.baseURL == "" {
+		return nil
+	}
+	if c.clusterID == "" {
+		return fmt.Errorf("storage-proxy volume client cluster id is not configured")
+	}
+	token, err := c.generateToken(teamID, userID, sandboxID)
+	if err != nil {
+		return err
+	}
+	body := map[string]any{
+		"sandbox_id": sandboxID,
+		"cluster_id": c.clusterID,
+		"reason":     reason,
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.baseURL+"/internal/v1/sandboxvolumes/owned/cleanup", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Token", token)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("mark sandbox system volumes for cleanup: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+	data, _ := io.ReadAll(resp.Body)
+	_, apiErr, decodeErr := spec.DecodeResponse[map[string]any](bytes.NewReader(data))
+	if decodeErr == nil && apiErr != nil {
+		return fmt.Errorf("mark sandbox system volumes for cleanup failed: %s", apiErr.Message)
+	}
+	return fmt.Errorf("mark sandbox system volumes for cleanup failed with status %d", resp.StatusCode)
 }
 
 func (c *StorageProxyVolumeClient) Delete(ctx context.Context, teamID, userID, sandboxID, volumeID string) error {
@@ -110,7 +177,7 @@ func (c *StorageProxyVolumeClient) Delete(ctx context.Context, teamID, userID, s
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/sandboxvolumes/"+volumeID+"?force=true", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/internal/v1/sandboxvolumes/owned/"+volumeID, nil)
 	if err != nil {
 		return err
 	}
@@ -129,6 +196,71 @@ func (c *StorageProxyVolumeClient) Delete(ctx context.Context, teamID, userID, s
 		return fmt.Errorf("delete webhook state volume failed: %s", apiErr.Message)
 	}
 	return fmt.Errorf("delete webhook state volume failed with status %d", resp.StatusCode)
+}
+
+func (c *StorageProxyVolumeClient) List(ctx context.Context) ([]SandboxSystemVolume, error) {
+	if c == nil || c.baseURL == "" {
+		return nil, fmt.Errorf("storage-proxy volume client is not configured")
+	}
+	if c.clusterID == "" {
+		return nil, fmt.Errorf("storage-proxy volume client cluster id is not configured")
+	}
+	token, err := c.generateToken("", "", "")
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/internal/v1/sandboxvolumes/owned?cluster_id="+url.QueryEscape(c.clusterID), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Internal-Token", token)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list sandbox system volumes: %w", err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read list system volumes response: %w", err)
+	}
+	owned, apiErr, err := spec.DecodeResponse[[]struct {
+		Volume struct {
+			ID     string `json:"id"`
+			TeamID string `json:"team_id"`
+			UserID string `json:"user_id"`
+		} `json:"volume"`
+		Owner struct {
+			OwnerSandboxID     string     `json:"owner_sandbox_id"`
+			OwnerClusterID     string     `json:"owner_cluster_id"`
+			Purpose            string     `json:"purpose"`
+			CleanupRequestedAt *time.Time `json:"cleanup_requested_at,omitempty"`
+		} `json:"owner"`
+	}](bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("decode list system volumes response: %w", err)
+	}
+	if apiErr != nil {
+		return nil, fmt.Errorf("list sandbox system volumes failed: %s", apiErr.Message)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("list sandbox system volumes failed with status %d", resp.StatusCode)
+	}
+	if owned == nil {
+		return nil, nil
+	}
+	out := make([]SandboxSystemVolume, 0, len(*owned))
+	for _, item := range *owned {
+		out = append(out, SandboxSystemVolume{
+			VolumeID:           item.Volume.ID,
+			TeamID:             item.Volume.TeamID,
+			UserID:             item.Volume.UserID,
+			OwnerSandboxID:     item.Owner.OwnerSandboxID,
+			OwnerClusterID:     item.Owner.OwnerClusterID,
+			Purpose:            item.Owner.Purpose,
+			CleanupRequestedAt: item.Owner.CleanupRequestedAt,
+		})
+	}
+	return out, nil
 }
 
 func (c *StorageProxyVolumeClient) generateToken(teamID, userID, sandboxID string) (string, error) {
@@ -164,11 +296,13 @@ func (s *SandboxService) prepareWebhookStateVolume(ctx context.Context, req *Cla
 }
 
 func (s *SandboxService) deleteWebhookStateVolume(ctx context.Context, info SandboxLifecycleInfo) error {
-	volumeID := strings.TrimSpace(info.WebhookStateVolumeID)
-	if volumeID == "" || s == nil || s.webhookStateVolumes == nil {
+	if s == nil || s.webhookStateVolumes == nil || strings.TrimSpace(info.SandboxID) == "" {
 		return nil
 	}
-	return s.webhookStateVolumes.Delete(ctx, info.TeamID, info.UserID, info.SandboxID, volumeID)
+	if strings.TrimSpace(info.WebhookStateVolumeID) == "" && strings.TrimSpace(info.WebhookURL) == "" {
+		return nil
+	}
+	return s.webhookStateVolumes.MarkSandboxForCleanup(ctx, info.TeamID, info.UserID, info.SandboxID, "sandbox_deleted")
 }
 
 func appendWebhookStateMount(mounts []ClaimMount, state *webhookStateVolume) []ClaimMount {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -225,6 +226,10 @@ func (r *Repository) ListSandboxVolumesByTeam(ctx context.Context, teamID string
 			created_at, updated_at
 		FROM sandbox_volumes
 		WHERE team_id = $1
+			AND NOT EXISTS (
+				SELECT 1 FROM sandbox_volume_owners
+				WHERE sandbox_volume_owners.volume_id = sandbox_volumes.id
+			)
 		ORDER BY created_at DESC
 	`, teamID)
 	if err != nil {
@@ -275,6 +280,189 @@ func (r *Repository) deleteSandboxVolume(ctx context.Context, db DB, id string) 
 	}
 
 	return nil
+}
+
+// CreateSandboxVolumeOwnerTx creates durable ownership metadata for a system volume.
+func (r *Repository) CreateSandboxVolumeOwnerTx(ctx context.Context, tx pgx.Tx, owner *SandboxVolumeOwner) error {
+	_, err := tx.Exec(ctx, `
+		INSERT INTO sandbox_volume_owners (
+			volume_id, owner_kind, owner_sandbox_id, owner_cluster_id, purpose,
+			created_at, cleanup_requested_at, cleanup_reason,
+			last_cleanup_attempt_at, last_cleanup_error, updated_at
+		) VALUES (
+			$1, $2, $3, $4, $5,
+			$6, $7, $8,
+			$9, $10, $11
+		)
+	`,
+		owner.VolumeID, owner.OwnerKind, owner.OwnerSandboxID, owner.OwnerClusterID, owner.Purpose,
+		owner.CreatedAt, owner.CleanupRequestedAt, owner.CleanupReason,
+		owner.LastCleanupAttemptAt, owner.LastCleanupError, owner.UpdatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("create sandbox volume owner: %w", err)
+	}
+	return nil
+}
+
+// GetSandboxVolumeOwner retrieves ownership metadata for a volume.
+func (r *Repository) GetSandboxVolumeOwner(ctx context.Context, volumeID string) (*SandboxVolumeOwner, error) {
+	var owner SandboxVolumeOwner
+	err := r.pool.QueryRow(ctx, `
+		SELECT
+			volume_id, owner_kind, owner_sandbox_id, owner_cluster_id, purpose,
+			created_at, cleanup_requested_at, cleanup_reason,
+			last_cleanup_attempt_at, last_cleanup_error, updated_at
+		FROM sandbox_volume_owners
+		WHERE volume_id = $1
+	`, volumeID).Scan(
+		&owner.VolumeID, &owner.OwnerKind, &owner.OwnerSandboxID, &owner.OwnerClusterID, &owner.Purpose,
+		&owner.CreatedAt, &owner.CleanupRequestedAt, &owner.CleanupReason,
+		&owner.LastCleanupAttemptAt, &owner.LastCleanupError, &owner.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("query sandbox volume owner: %w", err)
+	}
+	return &owner, nil
+}
+
+// GetOwnedSandboxVolumeByOwner retrieves a live system volume for a sandbox and purpose.
+func (r *Repository) GetOwnedSandboxVolumeByOwner(ctx context.Context, clusterID, sandboxID, purpose string) (*OwnedSandboxVolume, error) {
+	rows, err := r.queryOwnedSandboxVolumes(ctx, `
+		WHERE o.owner_cluster_id = $1
+			AND o.owner_sandbox_id = $2
+			AND o.purpose = $3
+			AND o.cleanup_requested_at IS NULL
+		ORDER BY o.created_at DESC
+		LIMIT 1
+	`, clusterID, sandboxID, purpose)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("query owned sandbox volume: %w", err)
+		}
+		return nil, ErrNotFound
+	}
+	owned, err := scanOwnedSandboxVolume(rows)
+	if err != nil {
+		return nil, err
+	}
+	return owned, nil
+}
+
+// ListOwnedSandboxVolumes lists manager-created system volumes for a cluster.
+func (r *Repository) ListOwnedSandboxVolumes(ctx context.Context, clusterID string, cleanupRequested *bool) ([]*OwnedSandboxVolume, error) {
+	where := "WHERE o.owner_cluster_id = $1"
+	args := []any{clusterID}
+	if cleanupRequested != nil {
+		if *cleanupRequested {
+			where += " AND o.cleanup_requested_at IS NOT NULL"
+		} else {
+			where += " AND o.cleanup_requested_at IS NULL"
+		}
+	}
+	rows, err := r.queryOwnedSandboxVolumes(ctx, where+" ORDER BY o.created_at ASC", args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var owned []*OwnedSandboxVolume
+	for rows.Next() {
+		item, err := scanOwnedSandboxVolume(rows)
+		if err != nil {
+			return nil, err
+		}
+		owned = append(owned, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("query owned sandbox volumes: %w", err)
+	}
+	return owned, nil
+}
+
+// MarkOwnedSandboxVolumesForCleanup marks all live system volumes for a sandbox.
+func (r *Repository) MarkOwnedSandboxVolumesForCleanup(ctx context.Context, clusterID, sandboxID, reason string) (int64, error) {
+	cmdTag, err := r.pool.Exec(ctx, `
+		UPDATE sandbox_volume_owners
+		SET cleanup_requested_at = COALESCE(cleanup_requested_at, NOW()),
+			cleanup_reason = COALESCE(NULLIF($3, ''), cleanup_reason),
+			updated_at = NOW()
+		WHERE owner_cluster_id = $1
+			AND owner_sandbox_id = $2
+			AND cleanup_requested_at IS NULL
+	`, clusterID, sandboxID, reason)
+	if err != nil {
+		return 0, fmt.Errorf("mark owned sandbox volumes for cleanup: %w", err)
+	}
+	return cmdTag.RowsAffected(), nil
+}
+
+// MarkOwnedSandboxVolumeCleanupAttempt records the result of a cleanup attempt.
+func (r *Repository) MarkOwnedSandboxVolumeCleanupAttempt(ctx context.Context, volumeID string, cleanupErr error) error {
+	var errText *string
+	if cleanupErr != nil {
+		value := strings.TrimSpace(cleanupErr.Error())
+		errText = &value
+	}
+	cmdTag, err := r.pool.Exec(ctx, `
+		UPDATE sandbox_volume_owners
+		SET last_cleanup_attempt_at = NOW(),
+			last_cleanup_error = $2,
+			updated_at = NOW()
+		WHERE volume_id = $1
+	`, volumeID, errText)
+	if err != nil {
+		return fmt.Errorf("mark owned sandbox volume cleanup attempt: %w", err)
+	}
+	if cmdTag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *Repository) queryOwnedSandboxVolumes(ctx context.Context, suffix string, args ...any) (pgx.Rows, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT
+			v.id, v.team_id, v.user_id,
+			v.source_volume_id,
+			v.default_posix_uid, v.default_posix_gid,
+			v.cache_size, v.prefetch, v.buffer_size, v.writeback, v.access_mode,
+			v.created_at, v.updated_at,
+			o.volume_id, o.owner_kind, o.owner_sandbox_id, o.owner_cluster_id, o.purpose,
+			o.created_at, o.cleanup_requested_at, o.cleanup_reason,
+			o.last_cleanup_attempt_at, o.last_cleanup_error, o.updated_at
+		FROM sandbox_volume_owners o
+		JOIN sandbox_volumes v ON v.id = o.volume_id
+		`+suffix, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query owned sandbox volumes: %w", err)
+	}
+	return rows, nil
+}
+
+func scanOwnedSandboxVolume(rows pgx.Rows) (*OwnedSandboxVolume, error) {
+	var item OwnedSandboxVolume
+	err := rows.Scan(
+		&item.Volume.ID, &item.Volume.TeamID, &item.Volume.UserID,
+		&item.Volume.SourceVolumeID,
+		&item.Volume.DefaultPosixUID, &item.Volume.DefaultPosixGID,
+		&item.Volume.CacheSize, &item.Volume.Prefetch, &item.Volume.BufferSize, &item.Volume.Writeback, &item.Volume.AccessMode,
+		&item.Volume.CreatedAt, &item.Volume.UpdatedAt,
+		&item.Owner.VolumeID, &item.Owner.OwnerKind, &item.Owner.OwnerSandboxID, &item.Owner.OwnerClusterID, &item.Owner.Purpose,
+		&item.Owner.CreatedAt, &item.Owner.CleanupRequestedAt, &item.Owner.CleanupReason,
+		&item.Owner.LastCleanupAttemptAt, &item.Owner.LastCleanupError, &item.Owner.UpdatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("scan owned sandbox volume: %w", err)
+	}
+	return &item, nil
 }
 
 // ============================================================

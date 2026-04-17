@@ -21,6 +21,7 @@ import (
 
 type fakeHTTPRepo struct {
 	volumes        map[string]*db.SandboxVolume
+	owners         map[string]*db.SandboxVolumeOwner
 	activeMounts   map[string][]*db.VolumeMount
 	getActiveFunc  func(context.Context, string, int) ([]*db.VolumeMount, error)
 	deletedMounts  []db.VolumeMount
@@ -31,6 +32,7 @@ type fakeHTTPRepo struct {
 func newFakeHTTPRepo() *fakeHTTPRepo {
 	return &fakeHTTPRepo{
 		volumes:      make(map[string]*db.SandboxVolume),
+		owners:       make(map[string]*db.SandboxVolumeOwner),
 		activeMounts: make(map[string][]*db.VolumeMount),
 	}
 }
@@ -45,14 +47,37 @@ func (r *fakeHTTPRepo) CreateSandboxVolumeTx(ctx context.Context, tx pgx.Tx, vol
 	return nil
 }
 
+func (r *fakeHTTPRepo) CreateSandboxVolumeOwnerTx(ctx context.Context, tx pgx.Tx, owner *db.SandboxVolumeOwner) error {
+	r.owners[owner.VolumeID] = owner
+	return nil
+}
+
 func (r *fakeHTTPRepo) ListSandboxVolumesByTeam(ctx context.Context, teamID string) ([]*db.SandboxVolume, error) {
 	var volumes []*db.SandboxVolume
 	for _, volume := range r.volumes {
-		if volume.TeamID == teamID {
+		if volume.TeamID == teamID && r.owners[volume.ID] == nil {
 			volumes = append(volumes, volume)
 		}
 	}
 	return volumes, nil
+}
+
+func (r *fakeHTTPRepo) ListOwnedSandboxVolumes(ctx context.Context, clusterID string, cleanupRequested *bool) ([]*db.OwnedSandboxVolume, error) {
+	var owned []*db.OwnedSandboxVolume
+	for volumeID, owner := range r.owners {
+		if owner.OwnerClusterID != clusterID {
+			continue
+		}
+		if cleanupRequested != nil && (*cleanupRequested != (owner.CleanupRequestedAt != nil)) {
+			continue
+		}
+		volume := r.volumes[volumeID]
+		if volume == nil {
+			continue
+		}
+		owned = append(owned, &db.OwnedSandboxVolume{Volume: *volume, Owner: *owner})
+	}
+	return owned, nil
 }
 
 func (r *fakeHTTPRepo) GetSandboxVolume(ctx context.Context, id string) (*db.SandboxVolume, error) {
@@ -61,6 +86,27 @@ func (r *fakeHTTPRepo) GetSandboxVolume(ctx context.Context, id string) (*db.San
 		return nil, db.ErrNotFound
 	}
 	return volume, nil
+}
+
+func (r *fakeHTTPRepo) GetSandboxVolumeOwner(ctx context.Context, volumeID string) (*db.SandboxVolumeOwner, error) {
+	owner, ok := r.owners[volumeID]
+	if !ok {
+		return nil, db.ErrNotFound
+	}
+	return owner, nil
+}
+
+func (r *fakeHTTPRepo) GetOwnedSandboxVolumeByOwner(ctx context.Context, clusterID, sandboxID, purpose string) (*db.OwnedSandboxVolume, error) {
+	for volumeID, owner := range r.owners {
+		if owner.OwnerClusterID == clusterID && owner.OwnerSandboxID == sandboxID && owner.Purpose == purpose && owner.CleanupRequestedAt == nil {
+			volume := r.volumes[volumeID]
+			if volume == nil {
+				continue
+			}
+			return &db.OwnedSandboxVolume{Volume: *volume, Owner: *owner}, nil
+		}
+	}
+	return nil, db.ErrNotFound
 }
 
 func (r *fakeHTTPRepo) GetActiveMounts(ctx context.Context, volumeID string, heartbeatTimeout int) ([]*db.VolumeMount, error) {
@@ -81,7 +127,40 @@ func (r *fakeHTTPRepo) DeleteMount(ctx context.Context, volumeID, clusterID, pod
 
 func (r *fakeHTTPRepo) DeleteSandboxVolumeTx(ctx context.Context, tx pgx.Tx, id string) error {
 	delete(r.volumes, id)
+	delete(r.owners, id)
 	r.deletedVolume = append(r.deletedVolume, id)
+	return nil
+}
+
+func (r *fakeHTTPRepo) MarkOwnedSandboxVolumesForCleanup(ctx context.Context, clusterID, sandboxID, reason string) (int64, error) {
+	now := time.Now().UTC()
+	var marked int64
+	for _, owner := range r.owners {
+		if owner.OwnerClusterID != clusterID || owner.OwnerSandboxID != sandboxID || owner.CleanupRequestedAt != nil {
+			continue
+		}
+		owner.CleanupRequestedAt = &now
+		if reason != "" {
+			owner.CleanupReason = &reason
+		}
+		marked++
+	}
+	return marked, nil
+}
+
+func (r *fakeHTTPRepo) MarkOwnedSandboxVolumeCleanupAttempt(ctx context.Context, volumeID string, cleanupErr error) error {
+	owner := r.owners[volumeID]
+	if owner == nil {
+		return db.ErrNotFound
+	}
+	now := time.Now().UTC()
+	owner.LastCleanupAttemptAt = &now
+	if cleanupErr != nil {
+		msg := cleanupErr.Error()
+		owner.LastCleanupError = &msg
+	} else {
+		owner.LastCleanupError = nil
+	}
 	return nil
 }
 

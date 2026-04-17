@@ -30,11 +30,17 @@ import (
 type volumeRepository interface {
 	WithTx(ctx context.Context, fn func(pgx.Tx) error) error
 	CreateSandboxVolumeTx(ctx context.Context, tx pgx.Tx, volume *db.SandboxVolume) error
+	CreateSandboxVolumeOwnerTx(ctx context.Context, tx pgx.Tx, owner *db.SandboxVolumeOwner) error
 	ListSandboxVolumesByTeam(ctx context.Context, teamID string) ([]*db.SandboxVolume, error)
+	ListOwnedSandboxVolumes(ctx context.Context, clusterID string, cleanupRequested *bool) ([]*db.OwnedSandboxVolume, error)
 	GetSandboxVolume(ctx context.Context, id string) (*db.SandboxVolume, error)
+	GetSandboxVolumeOwner(ctx context.Context, volumeID string) (*db.SandboxVolumeOwner, error)
+	GetOwnedSandboxVolumeByOwner(ctx context.Context, clusterID, sandboxID, purpose string) (*db.OwnedSandboxVolume, error)
 	GetActiveMounts(ctx context.Context, volumeID string, heartbeatTimeout int) ([]*db.VolumeMount, error)
 	DeleteMount(ctx context.Context, volumeID, clusterID, podID string) error
 	DeleteSandboxVolumeTx(ctx context.Context, tx pgx.Tx, id string) error
+	MarkOwnedSandboxVolumesForCleanup(ctx context.Context, clusterID, sandboxID, reason string) (int64, error)
+	MarkOwnedSandboxVolumeCleanupAttempt(ctx context.Context, volumeID string, cleanupErr error) error
 }
 
 type meteringWriter interface {
@@ -165,6 +171,13 @@ func NewServer(logger *logrus.Logger, cfg *config.StorageProxyConfig, k8sClient 
 	s.mux.HandleFunc("GET /sandboxvolumes/{id}/files/list", s.handleVolumeFileList)
 	s.mux.HandleFunc("POST /sandboxvolumes/{id}/files/move", s.handleVolumeFileMove)
 	s.mux.HandleFunc("GET /sandboxvolumes/{id}/files/watch", s.handleVolumeFileWatch)
+
+	// Internal manager-owned SandboxVolume lifecycle handlers.
+	s.mux.HandleFunc("POST /internal/v1/sandboxvolumes/owned", s.createOwnedSandboxVolume)
+	s.mux.HandleFunc("GET /internal/v1/sandboxvolumes/owned", s.listOwnedSandboxVolumes)
+	s.mux.HandleFunc("PUT /internal/v1/sandboxvolumes/owned/cleanup", s.markOwnedSandboxVolumesForCleanup)
+	s.mux.HandleFunc("PUT /internal/v1/sandboxvolumes/owned/{id}/cleanup-attempt", s.markOwnedSandboxVolumeCleanupAttempt)
+	s.mux.HandleFunc("DELETE /internal/v1/sandboxvolumes/owned/{id}", s.deleteOwnedSandboxVolume)
 
 	// Snapshot handlers
 	s.mux.HandleFunc("POST /sandboxvolumes/{volume_id}/snapshots", s.createSnapshot)

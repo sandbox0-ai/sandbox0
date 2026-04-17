@@ -309,6 +309,7 @@ func main() {
 			BaseURL:        storageProxyBaseURL,
 			HTTPClient:     obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ProcdClientTimeout.Duration}),
 			TokenGenerator: storageProxyAdminTokenGenerator,
+			ClusterID:      cfg.DefaultClusterId,
 		}))
 		logger.Info("Webhook state volumes enabled", zap.String("storageProxyBaseURL", storageProxyBaseURL))
 	} else {
@@ -475,6 +476,7 @@ func main() {
 	}()
 
 	go sandboxService.StartPowerStateReconciler(ctx, cfg.ResyncPeriod.Duration)
+	go sandboxService.StartSystemVolumeReconciler(ctx, cfg.ResyncPeriod.Duration)
 
 	// Start HTTP server
 	go func() {

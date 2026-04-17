@@ -519,6 +519,7 @@ func TestRenameRejectsNamespaceIncompatibleTargetBeforeMutation(t *testing.T) {
 
 type fakeVolumeRepo struct {
 	volumes map[string]*db.SandboxVolume
+	owners  map[string]*db.SandboxVolumeOwner
 	err     error
 }
 
@@ -528,6 +529,16 @@ func (r *fakeVolumeRepo) GetSandboxVolume(_ context.Context, id string) (*db.San
 	}
 	if vol, ok := r.volumes[id]; ok {
 		return vol, nil
+	}
+	return nil, db.ErrNotFound
+}
+
+func (r *fakeVolumeRepo) GetSandboxVolumeOwner(_ context.Context, volumeID string) (*db.SandboxVolumeOwner, error) {
+	if r.owners == nil {
+		return nil, db.ErrNotFound
+	}
+	if owner, ok := r.owners[volumeID]; ok {
+		return owner, nil
 	}
 	return nil, db.ErrNotFound
 }

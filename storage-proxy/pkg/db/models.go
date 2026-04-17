@@ -27,6 +27,32 @@ type SandboxVolume struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+const (
+	SandboxVolumeOwnerKindSandbox = "sandbox"
+)
+
+// SandboxVolumeOwner stores durable lifecycle ownership for manager-created
+// system volumes.
+type SandboxVolumeOwner struct {
+	VolumeID             string     `json:"volume_id"`
+	OwnerKind            string     `json:"owner_kind"`
+	OwnerSandboxID       string     `json:"owner_sandbox_id"`
+	OwnerClusterID       string     `json:"owner_cluster_id"`
+	Purpose              string     `json:"purpose"`
+	CreatedAt            time.Time  `json:"created_at"`
+	CleanupRequestedAt   *time.Time `json:"cleanup_requested_at,omitempty"`
+	CleanupReason        *string    `json:"cleanup_reason,omitempty"`
+	LastCleanupAttemptAt *time.Time `json:"last_cleanup_attempt_at,omitempty"`
+	LastCleanupError     *string    `json:"last_cleanup_error,omitempty"`
+	UpdatedAt            time.Time  `json:"updated_at"`
+}
+
+// OwnedSandboxVolume combines volume metadata with its system ownership row.
+type OwnedSandboxVolume struct {
+	Volume SandboxVolume      `json:"volume"`
+	Owner  SandboxVolumeOwner `json:"owner"`
+}
+
 // Snapshot represents a point-in-time copy of a SandboxVolume
 type Snapshot struct {
 	ID       string `json:"id"`

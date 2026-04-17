@@ -123,6 +123,99 @@ func TestCreateSandboxVolumeRejectsPartialDefaultPosixIdentity(t *testing.T) {
 	}
 }
 
+func TestCreateOwnedSandboxVolumeStoresOwnerMetadata(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	server := &Server{
+		logger:       logrus.New(),
+		repo:         repo,
+		meteringRepo: &fakeHTTPMeteringWriter{},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/sandboxvolumes/owned", bytes.NewReader([]byte(`{"sandbox_id":"sandbox-a","cluster_id":"cluster-a","purpose":"webhook-state"}`)))
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+		Caller:    internalauth.ServiceManager,
+		TeamID:    "team-1",
+		UserID:    "user-1",
+		SandboxID: "sandbox-a",
+	}))
+	recorder := httptest.NewRecorder()
+
+	server.createOwnedSandboxVolume(recorder, req)
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusCreated, recorder.Body.String())
+	}
+	if len(repo.createdVolumes) != 1 {
+		t.Fatalf("created volumes = %d, want 1", len(repo.createdVolumes))
+	}
+	volumeID := repo.createdVolumes[0].ID
+	owner := repo.owners[volumeID]
+	if owner == nil {
+		t.Fatalf("owner for volume %q was not stored", volumeID)
+	}
+	if owner.OwnerSandboxID != "sandbox-a" || owner.OwnerClusterID != "cluster-a" || owner.Purpose != "webhook-state" {
+		t.Fatalf("unexpected owner: %#v", owner)
+	}
+}
+
+func TestOwnedSandboxVolumeIsHiddenFromPublicVolumeAPI(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	server := &Server{logger: logrus.New(), repo: repo}
+	repo.volumes["vol-owned"] = &db.SandboxVolume{ID: "vol-owned", TeamID: "team-1", UserID: "user-1"}
+	repo.owners["vol-owned"] = &db.SandboxVolumeOwner{
+		VolumeID:       "vol-owned",
+		OwnerKind:      db.SandboxVolumeOwnerKindSandbox,
+		OwnerSandboxID: "sandbox-a",
+		OwnerClusterID: "cluster-a",
+		Purpose:        "webhook-state",
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/sandboxvolumes/vol-owned", nil)
+	req.SetPathValue("id", "vol-owned")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-1", UserID: "user-1"}))
+	recorder := httptest.NewRecorder()
+
+	server.getSandboxVolume(recorder, req)
+
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNotFound)
+	}
+}
+
+func TestMarkOwnedSandboxVolumesForCleanupIsIdempotent(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	server := &Server{logger: logrus.New(), repo: repo}
+	repo.volumes["vol-owned"] = &db.SandboxVolume{ID: "vol-owned", TeamID: "team-1", UserID: "user-1"}
+	repo.owners["vol-owned"] = &db.SandboxVolumeOwner{
+		VolumeID:       "vol-owned",
+		OwnerKind:      db.SandboxVolumeOwnerKindSandbox,
+		OwnerSandboxID: "sandbox-a",
+		OwnerClusterID: "cluster-a",
+		Purpose:        "webhook-state",
+	}
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodPut, "/internal/v1/sandboxvolumes/owned/cleanup", bytes.NewReader([]byte(`{"sandbox_id":"sandbox-a","cluster_id":"cluster-a","reason":"sandbox_deleted"}`)))
+		req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+			Caller:    internalauth.ServiceManager,
+			TeamID:    "team-1",
+			UserID:    "user-1",
+			SandboxID: "sandbox-a",
+		}))
+		recorder := httptest.NewRecorder()
+
+		server.markOwnedSandboxVolumesForCleanup(recorder, req)
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("iteration %d status = %d, want %d", i, recorder.Code, http.StatusOK)
+		}
+	}
+
+	if repo.owners["vol-owned"].CleanupRequestedAt == nil {
+		t.Fatal("cleanup_requested_at was not set")
+	}
+}
+
 func TestForkVolumePassesDefaultPosixIdentity(t *testing.T) {
 	snapshotMgr := &captureForkSnapshotManager{fakeHTTPSnapshotManager: &fakeHTTPSnapshotManager{}}
 	server := &Server{

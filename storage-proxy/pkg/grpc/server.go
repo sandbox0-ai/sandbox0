@@ -40,11 +40,18 @@ type FileSystemServer struct {
 	now               func() time.Time
 	dirtyWriteMu      sync.Mutex
 	dirtyWriteHandles map[string]dirtyWriteHandle
+	handlePathMu      sync.Mutex
+	handlePaths       map[string]openHandlePath
 }
 
 type dirtyWriteHandle struct {
 	volumeID string
 	inode    uint64
+	path     string
+}
+
+type openHandlePath struct {
+	path string
 }
 
 type volumeManager interface {
@@ -85,6 +92,7 @@ func NewFileSystemServer(volMgr volumeManager, volumeRepo VolumeRepository, even
 		logger:            logger,
 		now:               func() time.Time { return time.Now().UTC() },
 		dirtyWriteHandles: make(map[string]dirtyWriteHandle),
+		handlePaths:       make(map[string]openHandlePath),
 	}
 }
 
@@ -178,15 +186,25 @@ func dirtyWriteKey(volumeID string, handleID uint64) string {
 	return volumeID + "|" + strconv.FormatUint(handleID, 10)
 }
 
-func (s *FileSystemServer) markDirtyWrite(volumeID string, inode, handleID uint64) {
+func (s *FileSystemServer) markDirtyWrite(volumeID string, inode, handleID uint64, path string) {
 	if s == nil {
 		return
 	}
+	key := dirtyWriteKey(volumeID, handleID)
 	s.dirtyWriteMu.Lock()
 	defer s.dirtyWriteMu.Unlock()
-	s.dirtyWriteHandles[dirtyWriteKey(volumeID, handleID)] = dirtyWriteHandle{
+	if s.dirtyWriteHandles == nil {
+		s.dirtyWriteHandles = make(map[string]dirtyWriteHandle)
+	}
+	if path == "" {
+		if existing, ok := s.dirtyWriteHandles[key]; ok {
+			path = existing.path
+		}
+	}
+	s.dirtyWriteHandles[key] = dirtyWriteHandle{
 		volumeID: volumeID,
 		inode:    inode,
+		path:     path,
 	}
 }
 
@@ -223,6 +241,52 @@ func (s *FileSystemServer) clearDirtyWrite(volumeID string, handleID uint64) {
 	s.dirtyWriteMu.Lock()
 	defer s.dirtyWriteMu.Unlock()
 	delete(s.dirtyWriteHandles, key)
+}
+
+func (s *FileSystemServer) rememberHandlePath(volumeID string, handleID uint64, path string) {
+	if s == nil || handleID == 0 || path == "" {
+		return
+	}
+	s.handlePathMu.Lock()
+	defer s.handlePathMu.Unlock()
+	if s.handlePaths == nil {
+		s.handlePaths = make(map[string]openHandlePath)
+	}
+	s.handlePaths[dirtyWriteKey(volumeID, handleID)] = openHandlePath{
+		path: path,
+	}
+}
+
+func (s *FileSystemServer) lookupHandlePath(volumeID string, handleID uint64) (openHandlePath, bool) {
+	if s == nil || handleID == 0 {
+		return openHandlePath{}, false
+	}
+	s.handlePathMu.Lock()
+	defer s.handlePathMu.Unlock()
+	path, ok := s.handlePaths[dirtyWriteKey(volumeID, handleID)]
+	return path, ok
+}
+
+func (s *FileSystemServer) clearHandlePath(volumeID string, handleID uint64) {
+	if s == nil || handleID == 0 {
+		return
+	}
+	s.handlePathMu.Lock()
+	defer s.handlePathMu.Unlock()
+	delete(s.handlePaths, dirtyWriteKey(volumeID, handleID))
+}
+
+func (s *FileSystemServer) resolvePathForHandleOrInode(volCtx *volume.VolumeContext, volumeID string, handleID, inode uint64, method string) string {
+	if cached, ok := s.lookupHandlePath(volumeID, handleID); ok && cached.path != "" {
+		return cached.path
+	}
+	start := time.Now()
+	path := resolveInodePath(volCtx, uint64(mapInode(volCtx, inode)))
+	s.observeGRPCStage(method, "resolve_inode_path", start)
+	if path != "" {
+		s.rememberHandlePath(volumeID, handleID, path)
+	}
+	return path
 }
 
 func (s *FileSystemServer) recordRemoteSyncChange(ctx context.Context, change *volsync.RemoteChange) context.Context {
@@ -300,13 +364,16 @@ func (s *FileSystemServer) recordDirtyWriteReplayPayload(ctx context.Context, vo
 	if volCtx == nil {
 		return false
 	}
-	start := time.Now()
-	path := resolveInodePath(volCtx, uint64(mapInode(volCtx, dirty.inode)))
-	s.observeGRPCStage(method, "resolve_inode_path", start)
+	path := dirty.path
+	if path == "" {
+		start := time.Now()
+		path = resolveInodePath(volCtx, uint64(mapInode(volCtx, dirty.inode)))
+		s.observeGRPCStage(method, "resolve_inode_path", start)
+	}
 	if path == "" {
 		return false
 	}
-	start = time.Now()
+	start := time.Now()
 	payload, mode, err := captureInodeReplayState(volCtx, dirty.inode)
 	s.observeGRPCStage(method, "capture_replay_state", start)
 	if err != nil {
@@ -793,10 +860,8 @@ func (s *FileSystemServer) Write(ctx context.Context, req *pb.WriteRequest) (*pb
 			return nil, status.Error(codes.Internal, syscall.Errno(errno).Error())
 		}
 
-		s.markDirtyWrite(req.VolumeId, req.Inode, req.HandleId)
-		stageStart := time.Now()
-		path := resolveInodePath(volCtx, uint64(mapInode(volCtx, req.Inode)))
-		s.observeGRPCStage("Write", "resolve_inode_path", stageStart)
+		path := s.resolvePathForHandleOrInode(volCtx, req.VolumeId, req.HandleId, req.Inode, "Write")
+		s.markDirtyWrite(req.VolumeId, req.Inode, req.HandleId, path)
 		eventType := pb.WatchEventType_WATCH_EVENT_TYPE_WRITE
 		if path == "" {
 			eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
@@ -845,6 +910,7 @@ func (s *FileSystemServer) Create(ctx context.Context, req *pb.CreateRequest) (*
 			}).Error("Create failed")
 			return nil, status.Error(mapErrnoToCode(syscall.Errno(errno)), syscall.Errno(errno).Error())
 		}
+		s.rememberHandlePath(req.VolumeId, handleID, path)
 
 		eventType := pb.WatchEventType_WATCH_EVENT_TYPE_CREATE
 		if path == "" {
@@ -1157,9 +1223,7 @@ func (s *FileSystemServer) SetAttr(ctx context.Context, req *pb.SetAttrRequest) 
 			return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
 		}
 
-		stageStart := time.Now()
-		path := resolveInodePath(volCtx, uint64(mapInode(volCtx, req.Inode)))
-		s.observeGRPCStage("SetAttr", "resolve_inode_path", stageStart)
+		path := s.resolvePathForHandleOrInode(volCtx, req.VolumeId, req.HandleId, req.Inode, "SetAttr")
 		eventType := pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
 		if req.Valid&uint32(meta.SetAttrMode) != 0 {
 			eventType = pb.WatchEventType_WATCH_EVENT_TYPE_CHMOD
@@ -1179,7 +1243,7 @@ func (s *FileSystemServer) SetAttr(ctx context.Context, req *pb.SetAttrRequest) 
 				Mode:      uint32Ptr(uint32(entry.Attr.Mode)),
 			})
 		case path != "":
-			stageStart = time.Now()
+			stageStart := time.Now()
 			payload, mode, err := captureInodeReplayState(volCtx, req.Inode)
 			s.observeGRPCStage("SetAttr", "capture_replay_state", stageStart)
 			if err != nil {
@@ -1291,6 +1355,7 @@ func (s *FileSystemServer) Release(ctx context.Context, req *pb.ReleaseRequest) 
 	if dirty, ok := s.takeDirtyWrite(req.VolumeId, req.HandleId); ok {
 		s.recordDirtyWriteReplayPayload(ctx, volCtx, req.VolumeId, dirty, "Release", "release")
 	}
+	s.clearHandlePath(req.VolumeId, req.HandleId)
 
 	s.logger.WithFields(logrus.Fields{
 		"volume_id": req.VolumeId,

@@ -35,3 +35,28 @@ func TestObserveJuiceFSOperationRecordsWritebackAndStatus(t *testing.T) {
 		t.Fatal("duration histogram was not collected")
 	}
 }
+
+func TestHandlePathCacheCarriesPathIntoDirtyWrite(t *testing.T) {
+	t.Parallel()
+
+	server := NewFileSystemServer(nil, nil, nil, nil, nil, nil, nil)
+	server.rememberHandlePath("vol-1", 7, "/created.txt")
+
+	if path := server.resolvePathForHandleOrInode(nil, "vol-1", 7, 42, "Write"); path != "/created.txt" {
+		t.Fatalf("cached path = %q, want /created.txt", path)
+	}
+
+	server.markDirtyWrite("vol-1", 42, 7, "/created.txt")
+	dirty, ok := server.takeDirtyWrite("vol-1", 7)
+	if !ok {
+		t.Fatal("expected dirty write handle")
+	}
+	if dirty.path != "/created.txt" {
+		t.Fatalf("dirty path = %q, want /created.txt", dirty.path)
+	}
+
+	server.clearHandlePath("vol-1", 7)
+	if _, ok := server.lookupHandlePath("vol-1", 7); ok {
+		t.Fatal("expected handle path to be cleared")
+	}
+}

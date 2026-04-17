@@ -35,6 +35,7 @@ type StorageProxyMetrics struct {
 	GRPCRequestsTotal   *prometheus.CounterVec
 	GRPCRequestDuration *prometheus.HistogramVec
 	GRPCStageDuration   *prometheus.HistogramVec
+	GRPCSetAttrTotal    *prometheus.CounterVec
 
 	VolumeMutationBarrierStageDuration *prometheus.HistogramVec
 
@@ -176,6 +177,10 @@ func NewStorageProxy(registry prometheus.Registerer) *StorageProxyMetrics {
 			Help:    "Duration of selected storage-proxy gRPC handler stages",
 			Buckets: prometheus.DefBuckets,
 		}, []string{"method", "stage"}),
+		GRPCSetAttrTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: "storage_proxy_grpc_setattr_total",
+			Help: "Total number of storage-proxy SetAttr requests by valid mask class and remote sync behavior",
+		}, []string{"valid_class", "valid_mask", "handle", "remote_record"}),
 		VolumeMutationBarrierStageDuration: factory.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "storage_proxy_volume_mutation_barrier_stage_duration_seconds",
 			Help:    "Duration of volume mutation barrier stages",
@@ -370,6 +375,13 @@ func (m *StorageProxyMetrics) ObserveGRPCStage(method, stage string, duration ti
 		return
 	}
 	m.GRPCStageDuration.WithLabelValues(method, stage).Observe(duration.Seconds())
+}
+
+func (m *StorageProxyMetrics) ObserveGRPCSetAttr(validClass, validMask, handle, remoteRecord string) {
+	if m == nil || m.GRPCSetAttrTotal == nil {
+		return
+	}
+	m.GRPCSetAttrTotal.WithLabelValues(validClass, validMask, handle, remoteRecord).Inc()
 }
 
 func (m *StorageProxyMetrics) ObserveVolumeMutationBarrierStage(mode, stage string, duration time.Duration) {

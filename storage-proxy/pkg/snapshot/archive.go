@@ -20,6 +20,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/juicefs"
 )
@@ -257,7 +258,7 @@ func (m *Manager) openArchiveSession(_ context.Context, volume *db.SandboxVolume
 		_ = metaClient.CloseSession()
 		return nil, fmt.Errorf("build s3 prefix: %w", err)
 	}
-	obj, err := createSnapshotArchiveStorage(m.config, prefix)
+	obj, err := createSnapshotArchiveStorage(m.config, prefix, m.metrics)
 	if err != nil {
 		_ = metaClient.CloseSession()
 		return nil, err
@@ -323,7 +324,7 @@ func (m *Manager) openArchiveSession(_ context.Context, volume *db.SandboxVolume
 	}, nil
 }
 
-func createSnapshotArchiveStorage(cfg *config.StorageProxyConfig, prefix string) (object.ObjectStorage, error) {
+func createSnapshotArchiveStorage(cfg *config.StorageProxyConfig, prefix string, metrics *obsmetrics.StorageProxyMetrics) (object.ObjectStorage, error) {
 	obj, err := juicefs.CreateObjectStorage(juicefs.ObjectStorageConfig{
 		Type:         cfg.ObjectStorageType,
 		Bucket:       cfg.S3Bucket,
@@ -332,6 +333,7 @@ func createSnapshotArchiveStorage(cfg *config.StorageProxyConfig, prefix string)
 		AccessKey:    cfg.S3AccessKey,
 		SecretKey:    cfg.S3SecretKey,
 		SessionToken: cfg.S3SessionToken,
+		Metrics:      metrics,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create snapshot storage: %w", err)

@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/juicedata/juicefs/pkg/object"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 )
 
 const (
@@ -21,6 +22,7 @@ type ObjectStorageConfig struct {
 	AccessKey    string
 	SecretKey    string
 	SessionToken string
+	Metrics      *obsmetrics.StorageProxyMetrics
 }
 
 func NormalizeObjectStorageType(raw string) string {
@@ -77,5 +79,6 @@ func CreateObjectStorage(cfg ObjectStorageConfig) (object.ObjectStorage, error) 
 	if err != nil {
 		return nil, fmt.Errorf("create %s storage client: %w", storageType, err)
 	}
+	store = newObservedObjectStorage(store, storageType, cfg.Bucket, cfg.Metrics)
 	return store, nil
 }

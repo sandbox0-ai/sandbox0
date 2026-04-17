@@ -12,6 +12,7 @@ import (
 	"github.com/juicedata/juicefs/pkg/object"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/juicefs"
 )
@@ -34,7 +35,7 @@ func NewObjectReplayPayloadStore(store object.ObjectStorage) replayPayloadStore 
 	return &objectReplayPayloadStore{store: store}
 }
 
-func NewReplayPayloadStore(cfg *config.StorageProxyConfig) (replayPayloadStore, error) {
+func NewReplayPayloadStore(cfg *config.StorageProxyConfig, metrics *obsmetrics.StorageProxyMetrics) (replayPayloadStore, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("storage proxy config is nil")
 	}
@@ -47,6 +48,7 @@ func NewReplayPayloadStore(cfg *config.StorageProxyConfig) (replayPayloadStore, 
 		AccessKey:    cfg.S3AccessKey,
 		SecretKey:    cfg.S3SecretKey,
 		SessionToken: cfg.S3SessionToken,
+		Metrics:      metrics,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create replay payload storage: %w", err)

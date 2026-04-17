@@ -1,6 +1,8 @@
 package metrics
 
 import (
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -22,6 +24,10 @@ type StorageProxyMetrics struct {
 	S3OperationsTotal *prometheus.CounterVec
 	S3BytesTotal      *prometheus.CounterVec
 	S3Duration        *prometheus.HistogramVec
+
+	ObjectStoreRequestsTotal   *prometheus.CounterVec
+	ObjectStoreRequestDuration *prometheus.HistogramVec
+	ObjectStoreBytesTotal      *prometheus.CounterVec
 
 	GRPCRequestsTotal   *prometheus.CounterVec
 	GRPCRequestDuration *prometheus.HistogramVec
@@ -127,6 +133,19 @@ func NewStorageProxy(registry prometheus.Registerer) *StorageProxyMetrics {
 			Help:    "Duration of S3 operations in seconds",
 			Buckets: prometheus.DefBuckets,
 		}, []string{"operation", "volume_id"}),
+		ObjectStoreRequestsTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: "storage_proxy_object_store_requests_total",
+			Help: "Total number of object store provider requests made by storage-proxy",
+		}, []string{"provider", "bucket", "prefix_class", "operation", "status"}),
+		ObjectStoreRequestDuration: factory.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "storage_proxy_object_store_request_duration_seconds",
+			Help:    "Duration of object store provider requests made by storage-proxy",
+			Buckets: prometheus.DefBuckets,
+		}, []string{"provider", "bucket", "prefix_class", "operation", "status"}),
+		ObjectStoreBytesTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: "storage_proxy_object_store_bytes_total",
+			Help: "Total bytes transferred through object store provider requests made by storage-proxy",
+		}, []string{"provider", "bucket", "prefix_class", "operation", "direction"}),
 		GRPCRequestsTotal: factory.NewCounterVec(prometheus.CounterOpts{
 			Name: "storage_proxy_grpc_requests_total",
 			Help: "Total number of gRPC requests",
@@ -294,4 +313,23 @@ func NewStorageProxy(registry prometheus.Registerer) *StorageProxyMetrics {
 			Help: "Total number of background volume sync maintenance task runs",
 		}, []string{"task", "status"}),
 	}
+}
+
+func (m *StorageProxyMetrics) ObserveObjectStoreRequest(provider, bucket, prefixClass, operation, status string, duration time.Duration) {
+	if m == nil {
+		return
+	}
+	if m.ObjectStoreRequestsTotal != nil {
+		m.ObjectStoreRequestsTotal.WithLabelValues(provider, bucket, prefixClass, operation, status).Inc()
+	}
+	if m.ObjectStoreRequestDuration != nil {
+		m.ObjectStoreRequestDuration.WithLabelValues(provider, bucket, prefixClass, operation, status).Observe(duration.Seconds())
+	}
+}
+
+func (m *StorageProxyMetrics) ObserveObjectStoreBytes(provider, bucket, prefixClass, operation, direction string, bytes int64) {
+	if m == nil || bytes <= 0 || m.ObjectStoreBytesTotal == nil {
+		return
+	}
+	m.ObjectStoreBytesTotal.WithLabelValues(provider, bucket, prefixClass, operation, direction).Add(float64(bytes))
 }

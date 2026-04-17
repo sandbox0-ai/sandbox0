@@ -135,12 +135,13 @@ func main() {
 	}
 
 	// Initialize JuiceFS filesystem if not already initialized
-	if err := initializeJuiceFS(cfg, zapLogger); err != nil {
+	if err := initializeJuiceFS(cfg, zapLogger, storageProxyMetrics); err != nil {
 		zapLogger.Fatal("Failed to initialize JuiceFS", zap.Error(err))
 	}
 
 	// Create volume manager
 	volMgr := volume.NewManager(logrusLogger, cfg)
+	volMgr.SetMetrics(storageProxyMetrics)
 	directVolumeFileIdleTTL := buildDirectVolumeFileIdleTTL(cfg)
 	directVolumeFileCleanupInterval := buildDirectVolumeFileCleanupInterval(cfg, directVolumeFileIdleTTL)
 	var syncSvc *volsync.Service
@@ -158,7 +159,7 @@ func main() {
 		syncSvc.SetMetrics(storageProxyMetrics)
 		syncSvc.SetConflictArtifactWriter(volsync.NewConflictArtifactWriter(volMgr, logrusLogger))
 		syncSvc.SetReplicaChangeApplier(volsync.NewVolumeChangeApplier(volMgr, logrusLogger))
-		replayPayloadStore, err := volsync.NewReplayPayloadStore(cfg)
+		replayPayloadStore, err := volsync.NewReplayPayloadStore(cfg, storageProxyMetrics)
 		if err != nil {
 			zapLogger.Fatal("Failed to initialize replay payload store", zap.Error(err))
 		}
@@ -635,7 +636,7 @@ func (a *volumeContextAdapter) FlushAll(path string) error {
 }
 
 // initializeJuiceFS initializes the JuiceFS filesystem if not already initialized
-func initializeJuiceFS(cfg *config.StorageProxyConfig, logger *zap.Logger) error {
+func initializeJuiceFS(cfg *config.StorageProxyConfig, logger *zap.Logger, metrics *obsmetrics.StorageProxyMetrics) error {
 	logger.Info("Checking JuiceFS initialization status")
 
 	// Skip if essential config is missing
@@ -664,6 +665,7 @@ func initializeJuiceFS(cfg *config.StorageProxyConfig, logger *zap.Logger) error
 		EncryptionKeyPath:    cfg.JuiceFSEncryptionKeyPath,
 		EncryptionPassphrase: cfg.JuiceFSEncryptionPassphrase,
 		EncryptionAlgo:       cfg.JuiceFSEncryptionAlgo,
+		Metrics:              metrics,
 	}
 
 	initializer := juicefs.NewInitializer(initConfig, logger)

@@ -21,6 +21,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/juicefs"
 	"github.com/sirupsen/logrus"
 )
@@ -108,6 +109,7 @@ type Manager struct {
 	invalidates      map[string]map[string]*invalidateTracker
 	logger           *logrus.Logger
 	config           *config.StorageProxyConfig
+	metrics          *obsmetrics.StorageProxyMetrics
 	registrar        MountRegistrar // Optional: for distributed coordination
 }
 
@@ -130,6 +132,12 @@ func (m *Manager) SetMountRegistrar(registrar MountRegistrar) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.registrar = registrar
+}
+
+func (m *Manager) SetMetrics(metrics *obsmetrics.StorageProxyMetrics) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.metrics = metrics
 }
 
 // MountVolume mounts a JuiceFS volume using SDK mode (in-memory, no FUSE).
@@ -983,6 +991,7 @@ func (m *Manager) createObjectStorage(_ *VolumeConfig, prefix string, _ *meta.Fo
 		AccessKey:    m.config.S3AccessKey,
 		SecretKey:    m.config.S3SecretKey,
 		SessionToken: m.config.S3SessionToken,
+		Metrics:      m.metrics,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create object storage: %w", err)

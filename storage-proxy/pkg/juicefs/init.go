@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/juicedata/juicefs/pkg/object"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"go.uber.org/zap"
 )
 
@@ -30,6 +31,7 @@ type InitConfig struct {
 	EncryptionKeyPath    string
 	EncryptionPassphrase string
 	EncryptionAlgo       string
+	Metrics              *obsmetrics.StorageProxyMetrics
 }
 
 // Initializer handles JuiceFS filesystem initialization
@@ -243,6 +245,7 @@ func (i *Initializer) createStorage() (object.ObjectStorage, error) {
 		AccessKey:    i.config.S3AccessKey,
 		SecretKey:    i.config.S3SecretKey,
 		SessionToken: i.config.S3SessionToken,
+		Metrics:      i.config.Metrics,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create storage client: %w", err)

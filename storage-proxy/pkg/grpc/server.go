@@ -1162,9 +1162,6 @@ func (s *FileSystemServer) Flush(ctx context.Context, req *pb.FlushRequest) (*pb
 		return nil, status.Error(mapErrnoToCode(syscall.Errno(errno)), syscall.Errno(errno).Error())
 	}
 
-	if s.recordDirtyWriteReplayPayload(ctx, volCtx, req.VolumeId, dirty, "flush") {
-		s.clearDirtyWrite(req.VolumeId, req.HandleId)
-	}
 	return &pb.Empty{}, nil
 }
 

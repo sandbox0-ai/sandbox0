@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -77,14 +78,16 @@ type repository interface {
 
 // Service owns durable volume-sync metadata and journal behavior.
 type Service struct {
-	repo           repository
-	logger         *logrus.Logger
-	metrics        *obsmetrics.StorageProxyMetrics
-	artifactWriter conflictArtifactWriter
-	changeApplier  replicaChangeApplier
-	replayPayloads replayPayloadStore
-	barrier        volumeMutationBarrier
-	now            func() time.Time
+	repo              repository
+	logger            *logrus.Logger
+	metrics           *obsmetrics.StorageProxyMetrics
+	artifactWriter    conflictArtifactWriter
+	changeApplier     replicaChangeApplier
+	replayPayloads    replayPayloadStore
+	replayPayloadMu   sync.Mutex
+	replayPayloadRefs map[string]string
+	barrier           volumeMutationBarrier
+	now               func() time.Time
 }
 
 type conflictArtifactWriter interface {
@@ -264,7 +267,10 @@ func (s *Service) SetReplicaChangeApplier(applier replicaChangeApplier) {
 }
 
 func (s *Service) SetReplayPayloadStore(store replayPayloadStore) {
+	s.replayPayloadMu.Lock()
+	defer s.replayPayloadMu.Unlock()
 	s.replayPayloads = store
+	s.replayPayloadRefs = nil
 }
 
 func (s *Service) SetVolumeMutationBarrier(barrier volumeMutationBarrier) {
@@ -857,16 +863,8 @@ func (s *Service) RecordRemoteChange(ctx context.Context, change *RemoteChange) 
 		sizeBytes     *int64
 	)
 	if change.ContentAvailable {
-		if s.replayPayloads == nil {
-			return fmt.Errorf("replay payload storage unavailable")
-		}
 		sum := sha256.Sum256(change.ContentBytes)
 		sumHex := hex.EncodeToString(sum[:])
-		ref, err := s.replayPayloads.PutPayload(ctx, volume, sumHex, change.ContentBytes)
-		if err != nil {
-			return err
-		}
-		contentRef = &ref
 		contentSHA256 = &sumHex
 		size := int64(len(change.ContentBytes))
 		sizeBytes = &size
@@ -886,6 +884,17 @@ func (s *Service) RecordRemoteChange(ctx context.Context, change *RemoteChange) 
 		if err != nil && !errors.Is(err, db.ErrNotFound) {
 			return err
 		}
+	}
+
+	if change.ContentAvailable {
+		if s.replayPayloads == nil {
+			return fmt.Errorf("replay payload storage unavailable")
+		}
+		ref, err := s.putReplayPayloadOnce(ctx, volume, *contentSHA256, change.ContentBytes)
+		if err != nil {
+			return err
+		}
+		contentRef = &ref
 	}
 
 	return s.repo.WithTx(ctx, func(tx pgx.Tx) error {
@@ -914,6 +923,31 @@ func (s *Service) RecordRemoteChange(ctx context.Context, change *RemoteChange) 
 
 		return s.repo.CreateSyncJournalEntryTx(ctx, tx, entry)
 	})
+}
+
+func (s *Service) putReplayPayloadOnce(ctx context.Context, volume *db.SandboxVolume, contentSHA256 string, payload []byte) (string, error) {
+	cacheKey := volume.TeamID + "\x00" + volume.ID + "\x00" + contentSHA256
+
+	s.replayPayloadMu.Lock()
+	if ref, ok := s.replayPayloadRefs[cacheKey]; ok {
+		s.replayPayloadMu.Unlock()
+		return ref, nil
+	}
+	s.replayPayloadMu.Unlock()
+
+	ref, err := s.replayPayloads.PutPayload(ctx, volume, contentSHA256, payload)
+	if err != nil {
+		return "", err
+	}
+
+	s.replayPayloadMu.Lock()
+	if s.replayPayloadRefs == nil {
+		s.replayPayloadRefs = make(map[string]string)
+	}
+	s.replayPayloadRefs[cacheKey] = ref
+	s.replayPayloadMu.Unlock()
+
+	return ref, nil
 }
 
 func (s *Service) prepareReplicaEntry(ctx context.Context, tx pgx.Tx, req *AppendChangesRequest, replica *db.SyncReplica, change ChangeRequest, now time.Time) (*db.SyncJournalEntry, *db.SyncConflict, error) {

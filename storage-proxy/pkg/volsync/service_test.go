@@ -3,6 +3,8 @@ package volsync
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -31,14 +33,19 @@ type fakeRepo struct {
 
 type fakeReplayPayloadStore struct {
 	payloads map[string][]byte
+	puts     map[string]int
 }
 
 func newFakeReplayPayloadStore() *fakeReplayPayloadStore {
-	return &fakeReplayPayloadStore{payloads: make(map[string][]byte)}
+	return &fakeReplayPayloadStore{
+		payloads: make(map[string][]byte),
+		puts:     make(map[string]int),
+	}
 }
 
 func (f *fakeReplayPayloadStore) PutPayload(ctx context.Context, volume *db.SandboxVolume, contentSHA256 string, payload []byte) (string, error) {
 	key := volume.ID + ":" + buildReplayPayloadRef(contentSHA256)
+	f.puts[key]++
 	f.payloads[key] = append([]byte(nil), payload...)
 	return buildReplayPayloadRef(contentSHA256), nil
 }
@@ -50,6 +57,19 @@ func (f *fakeReplayPayloadStore) GetPayload(ctx context.Context, volume *db.Sand
 		return nil, ErrReplayPayloadNotFound
 	}
 	return io.NopCloser(bytes.NewReader(payload)), nil
+}
+
+func (f *fakeReplayPayloadStore) totalPuts() int {
+	var total int
+	for _, count := range f.puts {
+		total += count
+	}
+	return total
+}
+
+func testSHA256Hex(payload []byte) string {
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
 }
 
 func newFakeRepo() *fakeRepo {
@@ -1986,6 +2006,90 @@ func TestRecordRemoteChangeCoalescesHotWrites(t *testing.T) {
 	}
 	if len(repo.journal) != 1 {
 		t.Fatalf("journal entries = %d, want 1", len(repo.journal))
+	}
+}
+
+func TestRecordRemoteChangeCoalescesHotWritesBeforeReplayPayloadUpload(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
+	payload := []byte("hello")
+	sumHex := testSHA256Hex(payload)
+	size := int64(len(payload))
+	mode := int64(0o644)
+	base := time.Date(2026, 3, 26, 12, 0, 0, 0, time.UTC)
+	repo.journal = []*db.SyncJournalEntry{
+		{
+			Seq:            1,
+			VolumeID:       "vol-1",
+			TeamID:         "team-1",
+			Source:         db.SyncSourceSandbox,
+			EventType:      db.SyncEventWrite,
+			Path:           "/src/main.go",
+			NormalizedPath: "/src/main.go",
+			ContentSHA256:  &sumHex,
+			SizeBytes:      &size,
+			Mode:           &mode,
+			CreatedAt:      base,
+		},
+	}
+	repo.nextSeq = 1
+	store := newFakeReplayPayloadStore()
+
+	svc := NewService(repo, logrus.New())
+	svc.SetReplayPayloadStore(store)
+	requestMode := uint32(0o644)
+	if err := svc.RecordRemoteChange(context.Background(), &RemoteChange{
+		VolumeID:         "vol-1",
+		TeamID:           "team-1",
+		SandboxID:        "sandbox-1",
+		EventType:        db.SyncEventWrite,
+		Path:             "/src/main.go",
+		Mode:             &requestMode,
+		ContentAvailable: true,
+		ContentBytes:     payload,
+		OccurredAt:       base.Add(500 * time.Millisecond),
+	}); err != nil {
+		t.Fatalf("RecordRemoteChange error = %v", err)
+	}
+	if len(repo.journal) != 1 {
+		t.Fatalf("journal entries = %d, want 1", len(repo.journal))
+	}
+	if got := store.totalPuts(); got != 0 {
+		t.Fatalf("replay payload puts = %d, want 0", got)
+	}
+}
+
+func TestRecordRemoteChangeDeduplicatesReplayPayloadUploadsByContent(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1"}
+	store := newFakeReplayPayloadStore()
+	payload := []byte("same payload")
+
+	svc := NewService(repo, logrus.New())
+	svc.SetReplayPayloadStore(store)
+	for _, path := range []string{"/src/a.go", "/src/b.go"} {
+		if err := svc.RecordRemoteChange(context.Background(), &RemoteChange{
+			VolumeID:         "vol-1",
+			TeamID:           "team-1",
+			SandboxID:        "sandbox-1",
+			EventType:        db.SyncEventWrite,
+			Path:             path,
+			ContentAvailable: true,
+			ContentBytes:     payload,
+			OccurredAt:       time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("RecordRemoteChange(%s) error = %v", path, err)
+		}
+	}
+
+	if len(repo.journal) != 2 {
+		t.Fatalf("journal entries = %d, want 2", len(repo.journal))
+	}
+	if got := store.totalPuts(); got != 1 {
+		t.Fatalf("replay payload puts = %d, want 1", got)
+	}
+	if repo.journal[0].ContentRef == nil || repo.journal[1].ContentRef == nil || *repo.journal[0].ContentRef != *repo.journal[1].ContentRef {
+		t.Fatalf("content refs = %#v %#v, want same ref", repo.journal[0].ContentRef, repo.journal[1].ContentRef)
 	}
 }
 

@@ -122,6 +122,13 @@ func (s *FileSystemServer) observeJuiceFSOperation(volCtx *volume.VolumeContext,
 	s.metrics.JuiceFSOperationDuration.WithLabelValues(operation, writeback).Observe(time.Since(start).Seconds())
 }
 
+func (s *FileSystemServer) observeGRPCStage(method, stage string, start time.Time) {
+	if s == nil || s.metrics == nil {
+		return
+	}
+	s.metrics.ObserveGRPCStage(method, stage, time.Since(start))
+}
+
 func vfsContextForActor(actor *pb.PosixActor) vfs.LogContext {
 	if actor == nil {
 		return vfs.NewLogContext(meta.Background())
@@ -219,6 +226,8 @@ func (s *FileSystemServer) clearDirtyWrite(volumeID string, handleID uint64) {
 }
 
 func (s *FileSystemServer) recordRemoteSyncChange(ctx context.Context, change *volsync.RemoteChange) context.Context {
+	start := time.Now()
+	defer s.observeGRPCStage("sync", "record_remote_change", start)
 	if s.syncRecorder == nil || change == nil {
 		return ctx
 	}
@@ -287,15 +296,19 @@ func uint32Ptr(value uint32) *uint32 {
 	return &value
 }
 
-func (s *FileSystemServer) recordDirtyWriteReplayPayload(ctx context.Context, volCtx *volume.VolumeContext, volumeID string, dirty dirtyWriteHandle, warnContext string) bool {
+func (s *FileSystemServer) recordDirtyWriteReplayPayload(ctx context.Context, volCtx *volume.VolumeContext, volumeID string, dirty dirtyWriteHandle, method, warnContext string) bool {
 	if volCtx == nil {
 		return false
 	}
+	start := time.Now()
 	path := resolveInodePath(volCtx, uint64(mapInode(volCtx, dirty.inode)))
+	s.observeGRPCStage(method, "resolve_inode_path", start)
 	if path == "" {
 		return false
 	}
+	start = time.Now()
 	payload, mode, err := captureInodeReplayState(volCtx, dirty.inode)
+	s.observeGRPCStage(method, "capture_replay_state", start)
 	if err != nil {
 		s.logger.WithError(err).WithField("volume_id", volumeID).Warn("Failed to capture replay payload for " + warnContext)
 		return false
@@ -437,13 +450,16 @@ func (s *FileSystemServer) WatchVolumeEvents(req *pb.WatchRequest, stream pb.Fil
 }
 
 func (s *FileSystemServer) publishEvent(ctx context.Context, event *pb.WatchEvent) {
+	var start time.Time
 	if s.eventBroadcaster == nil || event == nil {
 		goto recordSync
 	}
 	if event.TimestampUnix == 0 {
 		event.TimestampUnix = s.currentTime().Unix()
 	}
+	start = time.Now()
 	s.eventBroadcaster.Publish(ctx, event)
+	s.observeGRPCStage("event", "publish", start)
 
 recordSync:
 	if s.syncRecorder == nil || event == nil {
@@ -459,6 +475,7 @@ recordSync:
 	if claims == nil || claims.TeamID == "" {
 		return
 	}
+	start = time.Now()
 	if err := s.syncRecorder.RecordRemoteChange(ctx, &volsync.RemoteChange{
 		VolumeID:   event.VolumeId,
 		TeamID:     claims.TeamID,
@@ -470,12 +487,15 @@ recordSync:
 	}); err != nil {
 		s.logger.WithError(err).WithField("volume_id", event.VolumeId).Warn("Failed to record remote sync journal entry")
 	}
+	s.observeGRPCStage("event", "record_remote_change", start)
 }
 
 func withAuthorizedVolumeMutation[T any](s *FileSystemServer, ctx context.Context, volumeID string, fn func(context.Context, *volume.VolumeContext) (T, error)) (T, error) {
 	var zero T
 	run := func(runCtx context.Context) (T, error) {
+		start := time.Now()
 		volCtx, err := s.getAuthorizedMountedVolume(runCtx, volumeID)
+		s.observeGRPCStage("mutation", "authorize_mounted_volume", start)
 		if err != nil {
 			return zero, err
 		}
@@ -486,11 +506,13 @@ func withAuthorizedVolumeMutation[T any](s *FileSystemServer, ctx context.Contex
 	}
 
 	var out T
+	start := time.Now()
 	err := s.mutationBarrier.WithShared(ctx, volumeID, func(runCtx context.Context) error {
 		var err error
 		out, err = run(runCtx)
 		return err
 	})
+	s.observeGRPCStage("mutation", "barrier_shared_total", start)
 	if err != nil {
 		return zero, err
 	}
@@ -772,7 +794,9 @@ func (s *FileSystemServer) Write(ctx context.Context, req *pb.WriteRequest) (*pb
 		}
 
 		s.markDirtyWrite(req.VolumeId, req.Inode, req.HandleId)
+		stageStart := time.Now()
 		path := resolveInodePath(volCtx, uint64(mapInode(volCtx, req.Inode)))
+		s.observeGRPCStage("Write", "resolve_inode_path", stageStart)
 		eventType := pb.WatchEventType_WATCH_EVENT_TYPE_WRITE
 		if path == "" {
 			eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
@@ -795,12 +819,18 @@ func (s *FileSystemServer) Create(ctx context.Context, req *pb.CreateRequest) (*
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.NodeResponse, error) {
 		parent := mapInode(volCtx, req.Parent)
 		path := resolveChildPath(volCtx, uint64(parent), req.Name)
+		stageStart := time.Now()
 		if err := s.validateNamespaceMutation(runCtx, buildNamespaceMutationRequest(runCtx, req.VolumeId, db.SyncEventCreate, path, "")); err != nil {
+			s.observeGRPCStage("Create", "validate_namespace_mutation", stageStart)
 			return nil, err
 		}
+		s.observeGRPCStage("Create", "validate_namespace_mutation", stageStart)
+		stageStart = time.Now()
 		if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, parent); err != nil {
+			s.observeGRPCStage("Create", "ensure_root_posix_identity", stageStart)
 			return nil, status.Error(codes.Internal, err.Error())
 		}
+		s.observeGRPCStage("Create", "ensure_root_posix_identity", stageStart)
 		vfsCtx := vfsContextForActor(req.Actor)
 		juiceFSStart := time.Now()
 		entry, handleID, errno := volCtx.VFS.Create(vfsCtx, parent, req.Name, uint16(req.Mode), uint16(req.Umask), req.Flags)
@@ -1127,7 +1157,9 @@ func (s *FileSystemServer) SetAttr(ctx context.Context, req *pb.SetAttrRequest) 
 			return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
 		}
 
+		stageStart := time.Now()
 		path := resolveInodePath(volCtx, uint64(mapInode(volCtx, req.Inode)))
+		s.observeGRPCStage("SetAttr", "resolve_inode_path", stageStart)
 		eventType := pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
 		if req.Valid&uint32(meta.SetAttrMode) != 0 {
 			eventType = pb.WatchEventType_WATCH_EVENT_TYPE_CHMOD
@@ -1147,7 +1179,9 @@ func (s *FileSystemServer) SetAttr(ctx context.Context, req *pb.SetAttrRequest) 
 				Mode:      uint32Ptr(uint32(entry.Attr.Mode)),
 			})
 		case path != "":
+			stageStart = time.Now()
 			payload, mode, err := captureInodeReplayState(volCtx, req.Inode)
+			s.observeGRPCStage("SetAttr", "capture_replay_state", stageStart)
 			if err != nil {
 				s.logger.WithError(err).WithField("volume_id", req.VolumeId).Warn("Failed to capture replay payload for setattr")
 			} else {
@@ -1235,7 +1269,7 @@ func (s *FileSystemServer) Fsync(ctx context.Context, req *pb.FsyncRequest) (*pb
 		return nil, status.Error(mapErrnoToCode(syscall.Errno(errno)), syscall.Errno(errno).Error())
 	}
 
-	if s.recordDirtyWriteReplayPayload(ctx, volCtx, req.VolumeId, dirty, "fsync") {
+	if s.recordDirtyWriteReplayPayload(ctx, volCtx, req.VolumeId, dirty, "Fsync", "fsync") {
 		s.clearDirtyWrite(req.VolumeId, req.HandleId)
 	}
 	return &pb.Empty{}, nil
@@ -1255,7 +1289,7 @@ func (s *FileSystemServer) Release(ctx context.Context, req *pb.ReleaseRequest) 
 	s.observeJuiceFSOperation(volCtx, "Release", 0, juiceFSStart)
 
 	if dirty, ok := s.takeDirtyWrite(req.VolumeId, req.HandleId); ok {
-		s.recordDirtyWriteReplayPayload(ctx, volCtx, req.VolumeId, dirty, "release")
+		s.recordDirtyWriteReplayPayload(ctx, volCtx, req.VolumeId, dirty, "Release", "release")
 	}
 
 	s.logger.WithFields(logrus.Fields{

@@ -34,6 +34,9 @@ type StorageProxyMetrics struct {
 
 	GRPCRequestsTotal   *prometheus.CounterVec
 	GRPCRequestDuration *prometheus.HistogramVec
+	GRPCStageDuration   *prometheus.HistogramVec
+
+	VolumeMutationBarrierStageDuration *prometheus.HistogramVec
 
 	AuthenticationTotal  *prometheus.CounterVec
 	AuthenticationErrors *prometheus.CounterVec
@@ -67,6 +70,7 @@ type StorageProxyMetrics struct {
 
 	VolumeSyncOperationsTotal    *prometheus.CounterVec
 	VolumeSyncOperationDuration  *prometheus.HistogramVec
+	VolumeSyncStageDuration      *prometheus.HistogramVec
 	VolumeSyncConflictsTotal     *prometheus.CounterVec
 	VolumeSyncReseedTotal        *prometheus.CounterVec
 	VolumeSyncRequestReplayTotal *prometheus.CounterVec
@@ -167,6 +171,16 @@ func NewStorageProxy(registry prometheus.Registerer) *StorageProxyMetrics {
 			Help:    "Duration of gRPC requests in seconds",
 			Buckets: prometheus.DefBuckets,
 		}, []string{"method"}),
+		GRPCStageDuration: factory.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "storage_proxy_grpc_stage_duration_seconds",
+			Help:    "Duration of selected storage-proxy gRPC handler stages",
+			Buckets: prometheus.DefBuckets,
+		}, []string{"method", "stage"}),
+		VolumeMutationBarrierStageDuration: factory.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "storage_proxy_volume_mutation_barrier_stage_duration_seconds",
+			Help:    "Duration of volume mutation barrier stages",
+			Buckets: prometheus.DefBuckets,
+		}, []string{"mode", "stage"}),
 		AuthenticationTotal: factory.NewCounterVec(prometheus.CounterOpts{
 			Name: "storage_proxy_authentication_total",
 			Help: "Total number of authentication attempts",
@@ -294,6 +308,11 @@ func NewStorageProxy(registry prometheus.Registerer) *StorageProxyMetrics {
 			Help:    "Duration of volume sync operations in seconds",
 			Buckets: prometheus.DefBuckets,
 		}, []string{"operation"}),
+		VolumeSyncStageDuration: factory.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "storage_proxy_volume_sync_stage_duration_seconds",
+			Help:    "Duration of selected volume sync operation stages",
+			Buckets: prometheus.DefBuckets,
+		}, []string{"operation", "stage"}),
 		VolumeSyncConflictsTotal: factory.NewCounterVec(prometheus.CounterOpts{
 			Name: "storage_proxy_volume_sync_conflicts_total",
 			Help: "Total number of durable volume sync conflicts recorded",
@@ -344,4 +363,25 @@ func (m *StorageProxyMetrics) ObserveObjectStoreBytes(provider, bucket, prefixCl
 		return
 	}
 	m.ObjectStoreBytesTotal.WithLabelValues(provider, bucket, prefixClass, operation, direction).Add(float64(bytes))
+}
+
+func (m *StorageProxyMetrics) ObserveGRPCStage(method, stage string, duration time.Duration) {
+	if m == nil || m.GRPCStageDuration == nil {
+		return
+	}
+	m.GRPCStageDuration.WithLabelValues(method, stage).Observe(duration.Seconds())
+}
+
+func (m *StorageProxyMetrics) ObserveVolumeMutationBarrierStage(mode, stage string, duration time.Duration) {
+	if m == nil || m.VolumeMutationBarrierStageDuration == nil {
+		return
+	}
+	m.VolumeMutationBarrierStageDuration.WithLabelValues(mode, stage).Observe(duration.Seconds())
+}
+
+func (m *StorageProxyMetrics) ObserveVolumeSyncStage(operation, stage string, duration time.Duration) {
+	if m == nil || m.VolumeSyncStageDuration == nil {
+		return
+	}
+	m.VolumeSyncStageDuration.WithLabelValues(operation, stage).Observe(duration.Seconds())
 }

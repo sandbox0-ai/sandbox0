@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
@@ -58,5 +59,17 @@ func TestHandlePathCacheCarriesPathIntoDirtyWrite(t *testing.T) {
 	server.clearHandlePath("vol-1", 7)
 	if _, ok := server.lookupHandlePath("vol-1", 7); ok {
 		t.Fatal("expected handle path to be cleared")
+	}
+}
+
+func TestClassifySetAttrValid(t *testing.T) {
+	t.Parallel()
+
+	valid := uint32(meta.SetAttrSize | meta.SetAttrMtimeNow)
+	if got := classifySetAttrValid(valid); got != "size+time" {
+		t.Fatalf("classifySetAttrValid() = %q, want size+time", got)
+	}
+	if got := classifySetAttrValid(0); got != "none" {
+		t.Fatalf("classifySetAttrValid(0) = %q, want none", got)
 	}
 }

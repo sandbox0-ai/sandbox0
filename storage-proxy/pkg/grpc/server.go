@@ -137,6 +137,40 @@ func (s *FileSystemServer) observeGRPCStage(method, stage string, start time.Tim
 	s.metrics.ObserveGRPCStage(method, stage, time.Since(start))
 }
 
+func (s *FileSystemServer) observeSetAttr(valid uint32, handleID uint64, remoteRecord string) {
+	if s == nil || s.metrics == nil {
+		return
+	}
+	handle := "absent"
+	if handleID != 0 {
+		handle = "present"
+	}
+	s.metrics.ObserveGRPCSetAttr(classifySetAttrValid(valid), strconv.FormatUint(uint64(valid), 10), handle, remoteRecord)
+}
+
+func classifySetAttrValid(valid uint32) string {
+	classes := make([]string, 0, 5)
+	if valid&uint32(meta.SetAttrMode) != 0 {
+		classes = append(classes, "mode")
+	}
+	if valid&uint32(meta.SetAttrUID|meta.SetAttrGID) != 0 {
+		classes = append(classes, "owner")
+	}
+	if valid&uint32(meta.SetAttrSize) != 0 {
+		classes = append(classes, "size")
+	}
+	if valid&uint32(meta.SetAttrAtime|meta.SetAttrMtime|meta.SetAttrCtime|meta.SetAttrAtimeNow|meta.SetAttrMtimeNow|meta.SetAttrCtimeNow) != 0 {
+		classes = append(classes, "time")
+	}
+	if valid&uint32(meta.SetAttrFlag) != 0 {
+		classes = append(classes, "flag")
+	}
+	if len(classes) == 0 {
+		return "none"
+	}
+	return strings.Join(classes, "+")
+}
+
 func vfsContextForActor(actor *pb.PosixActor) vfs.LogContext {
 	if actor == nil {
 		return vfs.NewLogContext(meta.Background())
@@ -1234,8 +1268,10 @@ func (s *FileSystemServer) SetAttr(ctx context.Context, req *pb.SetAttrRequest) 
 			eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
 		}
 		recordCtx := runCtx
+		remoteRecord := "none"
 		switch {
 		case path != "" && req.Valid&uint32(meta.SetAttrMode) != 0:
+			remoteRecord = "chmod"
 			recordCtx = s.recordRemoteSyncChange(runCtx, &volsync.RemoteChange{
 				VolumeID:  req.VolumeId,
 				EventType: db.SyncEventChmod,
@@ -1243,10 +1279,12 @@ func (s *FileSystemServer) SetAttr(ctx context.Context, req *pb.SetAttrRequest) 
 				Mode:      uint32Ptr(uint32(entry.Attr.Mode)),
 			})
 		case path != "":
+			remoteRecord = "write"
 			stageStart := time.Now()
 			payload, mode, err := captureInodeReplayState(volCtx, req.Inode)
 			s.observeGRPCStage("SetAttr", "capture_replay_state", stageStart)
 			if err != nil {
+				remoteRecord = "write_capture_failed"
 				s.logger.WithError(err).WithField("volume_id", req.VolumeId).Warn("Failed to capture replay payload for setattr")
 			} else {
 				recordCtx = s.recordRemoteSyncChange(runCtx, &volsync.RemoteChange{
@@ -1260,6 +1298,7 @@ func (s *FileSystemServer) SetAttr(ctx context.Context, req *pb.SetAttrRequest) 
 				})
 			}
 		}
+		s.observeSetAttr(req.Valid, req.HandleId, remoteRecord)
 		s.publishEvent(recordCtx, &pb.WatchEvent{
 			VolumeId:  req.VolumeId,
 			EventType: eventType,

@@ -214,6 +214,7 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID st
 	if maxUpload == 0 {
 		maxUpload = 20
 	}
+	uploadDelay := parseDurationString(m.config.JuiceFSUploadDelay, 0)
 
 	chunkConf := chunk.Config{
 		BlockSize:     int(format.BlockSize) * 1024,
@@ -223,6 +224,7 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID st
 		UploadLimit:   0,
 		DownloadLimit: 0,
 		Writeback:     config.Writeback,
+		UploadDelay:   uploadDelay,
 		Prefetch:      config.Prefetch,
 		BufferSize:    uint64(parseSizeString(config.BufferSize, 32<<20)), // 32MB default
 		CacheDir:      cacheDir,
@@ -1051,6 +1053,17 @@ func parseSizeString(sizeStr string, defaultSize int64) int64 {
 	var size int64
 	fmt.Sscanf(numStr, "%d", &size)
 	return size * multiplier
+}
+
+func parseDurationString(durationStr string, defaultDuration time.Duration) time.Duration {
+	if durationStr == "" {
+		return defaultDuration
+	}
+	duration, err := time.ParseDuration(durationStr)
+	if err != nil {
+		return defaultDuration
+	}
+	return duration
 }
 
 func generateMountSessionSecret() (string, error) {

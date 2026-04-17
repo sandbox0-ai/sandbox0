@@ -140,6 +140,13 @@ func TestBuildConfigMapsBuiltinStorageToS3CompatibleType(t *testing.T) {
 					Region:  "us-east-1",
 				},
 			},
+			Services: &infrav1alpha1.ServicesConfig{
+				StorageProxy: &infrav1alpha1.StorageProxyServiceConfig{
+					Config: &infrav1alpha1.StorageProxyConfig{
+						JuiceFSUploadDelay: "30s",
+					},
+				},
+			},
 		},
 	}
 
@@ -179,6 +186,9 @@ func TestBuildConfigMapsBuiltinStorageToS3CompatibleType(t *testing.T) {
 	}
 	if cfg.S3Endpoint != "http://demo-rustfs.sandbox0-system.svc:9000" {
 		t.Fatalf("unexpected s3 endpoint: %q", cfg.S3Endpoint)
+	}
+	if cfg.JuiceFSUploadDelay != "30s" {
+		t.Fatalf("expected juicefs upload delay to be propagated, got %q", cfg.JuiceFSUploadDelay)
 	}
 }
 

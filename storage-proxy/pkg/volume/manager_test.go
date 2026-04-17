@@ -608,3 +608,15 @@ func TestAuthenticateMountSessionRejectsInvalidSecret(t *testing.T) {
 		t.Fatal("AuthenticateMountSession() should reject wrong secret")
 	}
 }
+
+func TestParseDurationString(t *testing.T) {
+	if got := parseDurationString("30s", time.Second); got != 30*time.Second {
+		t.Fatalf("parseDurationString() = %v, want 30s", got)
+	}
+	if got := parseDurationString("", time.Second); got != time.Second {
+		t.Fatalf("parseDurationString(empty) = %v, want default", got)
+	}
+	if got := parseDurationString("bad", time.Second); got != time.Second {
+		t.Fatalf("parseDurationString(invalid) = %v, want default", got)
+	}
+}

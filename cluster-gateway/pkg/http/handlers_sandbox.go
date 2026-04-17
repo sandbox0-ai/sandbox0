@@ -130,13 +130,6 @@ func (s *Server) updateSandbox(c *gin.Context) {
 	}
 
 	s.proxyToManager(c)
-
-	// Invalidate cache after update to ensure fresh data on next access
-	authCtx := middleware.GetAuthContext(c)
-	s.sandboxAddrCache.Delete(sandboxCacheKey(authCtx.TeamID, sandboxID))
-	s.logger.Debug("Invalidated sandbox cache after update",
-		zap.String("sandbox_id", sandboxID),
-	)
 }
 
 // deleteSandbox deletes a sandbox
@@ -148,13 +141,6 @@ func (s *Server) deleteSandbox(c *gin.Context) {
 	}
 
 	s.proxyToManager(c)
-
-	// Invalidate cache after deletion
-	authCtx := middleware.GetAuthContext(c)
-	s.sandboxAddrCache.Delete(sandboxCacheKey(authCtx.TeamID, sandboxID))
-	s.logger.Debug("Invalidated sandbox cache after deletion",
-		zap.String("sandbox_id", sandboxID),
-	)
 }
 
 // pauseSandbox pauses a sandbox
@@ -166,13 +152,6 @@ func (s *Server) pauseSandbox(c *gin.Context) {
 	}
 
 	s.proxyToManager(c)
-
-	// Invalidate cache after state change
-	authCtx := middleware.GetAuthContext(c)
-	s.sandboxAddrCache.Delete(sandboxCacheKey(authCtx.TeamID, sandboxID))
-	s.logger.Debug("Invalidated sandbox cache after pause",
-		zap.String("sandbox_id", sandboxID),
-	)
 }
 
 // resumeSandbox resumes a paused sandbox
@@ -184,13 +163,6 @@ func (s *Server) resumeSandbox(c *gin.Context) {
 	}
 
 	s.proxyToManager(c)
-
-	// Invalidate cache after state change
-	authCtx := middleware.GetAuthContext(c)
-	s.sandboxAddrCache.Delete(sandboxCacheKey(authCtx.TeamID, sandboxID))
-	s.logger.Debug("Invalidated sandbox cache after resume",
-		zap.String("sandbox_id", sandboxID),
-	)
 }
 
 // refreshSandbox refreshes sandbox TTL

@@ -67,9 +67,5 @@ func (s *Server) resumeInternalSandbox(c *gin.Context) {
 		return
 	}
 
-	if s.sandboxAddrCache != nil {
-		s.sandboxAddrCache.Delete(sandboxCacheKey(authCtx.TeamID, sandboxID))
-	}
-
 	spec.JSONSuccess(c, http.StatusOK, gin.H{"message": "sandbox resume requested"})
 }

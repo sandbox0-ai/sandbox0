@@ -5,7 +5,6 @@ import (
 	"crypto/ed25519"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -15,7 +14,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/client"
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/middleware"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	"github.com/sandbox0-ai/sandbox0/pkg/cache"
 	gatewayapikey "github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
 	gatewaybuiltin "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/builtin"
 	gatewayoidc "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/oidc"
@@ -57,7 +55,6 @@ type Server struct {
 	internalAuthGen    *internalauth.Generator
 	procdAuthGen       *internalauth.Generator
 	entitlements       licensing.Entitlements
-	sandboxAddrCache   *cache.Cache[sandboxAddrCacheKey, *url.URL]
 	obsProvider        *observability.Provider
 	httpClient         *http.Client
 }
@@ -170,14 +167,6 @@ func NewServer(
 		managerClient.SetHTTPClient(httpClient)
 	}
 
-	// Create sandbox cache to reduce manager API calls
-	// TTL of 2 minutes balances performance and data freshness
-	sandboxAddrCache := cache.New[sandboxAddrCacheKey, *url.URL](cache.Config{
-		MaxSize:         10000,           // Support up to 10k active sandboxes
-		TTL:             2 * time.Minute, // Cache sandbox info for 2 minutes
-		CleanupInterval: 1 * time.Minute, // Cleanup expired entries every minute
-	})
-
 	var publicIdentityRepo *gatewayidentity.Repository
 	var publicAPIKeyRepo *gatewayapikey.Repository
 	var publicAuth *gatewaymiddleware.AuthMiddleware
@@ -275,7 +264,6 @@ func NewServer(
 		internalAuthGen:    internalAuthGen,
 		procdAuthGen:       procdAuthGen,
 		entitlements:       entitlements,
-		sandboxAddrCache:   sandboxAddrCache,
 		obsProvider:        obsProvider,
 		httpClient:         httpClient,
 	}
@@ -596,11 +584,6 @@ func (s *Server) Start(ctx context.Context) error {
 	case <-ctx.Done():
 		s.logger.Info("Shutting down HTTP server")
 
-		// Close sandbox cache to stop cleanup goroutine
-		if s.sandboxAddrCache != nil {
-			s.sandboxAddrCache.Close()
-		}
-
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout.Duration)
 		defer cancel()
 		return server.Shutdown(shutdownCtx)
@@ -627,18 +610,9 @@ func (s *Server) readinessCheck(c *gin.Context) {
 		}
 	}
 
-	// Include cache stats in readiness check
-	cacheStats := s.sandboxAddrCache.Stats()
-
 	spec.JSONSuccess(c, http.StatusOK, gin.H{
 		"status":    "ready",
 		"timestamp": time.Now().Unix(),
-		"sandbox_addr_cache": gin.H{
-			"size":     cacheStats.Size,
-			"hits":     cacheStats.Hits,
-			"misses":   cacheStats.Misses,
-			"hit_rate": cacheStats.HitRate,
-		},
 	})
 }
 

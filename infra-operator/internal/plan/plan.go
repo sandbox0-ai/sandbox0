@@ -524,9 +524,13 @@ func compileManagerRuntimeConfig(managerPlan *ManagerPlan, infra *infrav1alpha1.
 	if infrav1alpha1.IsStorageProxyEnabled(infra) {
 		cfg.ProcdConfig.StorageProxyBaseURL = fmt.Sprintf("%s-storage-proxy.%s.svc.cluster.local", infra.Name, infra.Namespace)
 		cfg.ProcdConfig.StorageProxyPort = int(common.ResolveServicePort(storageProxyServiceConfig, int32(storageProxyConfig.GRPCPort)))
+		cfg.StorageProxyBaseURL = cfg.ProcdConfig.StorageProxyBaseURL
+		cfg.StorageProxyHTTPPort = storageProxyHTTPPort(infra)
 	} else {
 		cfg.ProcdConfig.StorageProxyBaseURL = ""
 		cfg.ProcdConfig.StorageProxyPort = 0
+		cfg.StorageProxyBaseURL = ""
+		cfg.StorageProxyHTTPPort = 0
 	}
 	if infra.Spec.PublicExposure != nil {
 		cfg.PublicRootDomain = infra.Spec.PublicExposure.RootDomain

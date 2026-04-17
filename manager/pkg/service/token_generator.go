@@ -43,3 +43,24 @@ func (g *ProcdTokenGenerator) GenerateToken(teamID, userID, sandboxID string) (s
 		SandboxID:   sandboxID,
 	})
 }
+
+// StorageProxyAdminTokenGenerator generates manager tokens for storage-proxy volume lifecycle calls.
+type StorageProxyAdminTokenGenerator struct {
+	generator *internalauth.Generator
+}
+
+func NewStorageProxyAdminTokenGenerator(generator *internalauth.Generator) *StorageProxyAdminTokenGenerator {
+	return &StorageProxyAdminTokenGenerator{generator: generator}
+}
+
+func (g *StorageProxyAdminTokenGenerator) GenerateToken(teamID, userID, sandboxID string) (string, error) {
+	return g.generator.Generate("storage-proxy", teamID, userID, internalauth.GenerateOptions{
+		Permissions: []string{
+			"sandboxvolume:create",
+			"sandboxvolume:read",
+			"sandboxvolume:write",
+			"sandboxvolume:delete",
+		},
+		SandboxID: sandboxID,
+	})
+}

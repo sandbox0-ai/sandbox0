@@ -170,6 +170,9 @@ func normalizeClaimMounts(mounts []ClaimMount) ([]ClaimMount, error) {
 		if !filepath.IsAbs(cleanMountPoint) || cleanMountPoint == string(filepath.Separator) || strings.Contains(cleanMountPoint, "..") {
 			return nil, fmt.Errorf("%w: mounts[%d].mount_point is invalid", ErrInvalidClaimRequest, i)
 		}
+		if cleanMountPoint == webhookStateMountPoint || strings.HasPrefix(cleanMountPoint, webhookStateMountPoint+string(filepath.Separator)) {
+			return nil, fmt.Errorf("%w: mounts[%d].mount_point uses a sandbox0 reserved path", ErrInvalidClaimRequest, i)
+		}
 		if _, exists := seenVolumes[mount.SandboxVolumeID]; exists {
 			return nil, fmt.Errorf("%w: duplicate sandboxvolume_id %q in claim mounts", ErrInvalidClaimRequest, mount.SandboxVolumeID)
 		}
@@ -209,7 +212,15 @@ func toBootstrapMountStatuses(in []BootstrapMountStatus) []BootstrapMountStatus 
 		return nil
 	}
 	out := make([]BootstrapMountStatus, 0, len(in))
-	out = append(out, in...)
+	for _, status := range in {
+		if filepath.Clean(status.MountPoint) == webhookStateMountPoint {
+			continue
+		}
+		out = append(out, status)
+	}
+	if len(out) == 0 {
+		return nil
+	}
 	return out
 }
 
@@ -428,6 +439,25 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			zap.String("sandboxID", pod.Name),
 		)
 
+		stateVolume, err := s.prepareWebhookStateVolume(ctx, req, pod.Name)
+		if err != nil {
+			return fmt.Errorf("prepare webhook state volume: %w", err)
+		}
+		rollbackStateVolume := func() {
+			if stateVolume == nil {
+				return
+			}
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := s.webhookStateVolumes.Delete(cleanupCtx, req.TeamID, req.UserID, pod.Name, stateVolume.VolumeID); err != nil && s.logger != nil {
+				s.logger.Warn("Failed to roll back webhook state volume",
+					zap.String("sandboxID", pod.Name),
+					zap.String("volumeID", stateVolume.VolumeID),
+					zap.Error(err),
+				)
+			}
+		}
+
 		// Update pod labels and annotations
 		pod = pod.DeepCopy()
 
@@ -449,6 +479,11 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		pod.Annotations[controller.AnnotationUserID] = req.UserID
 		pod.Annotations[controller.AnnotationClaimedAt] = s.clock.Now().Format(time.RFC3339)
 		pod.Annotations[controller.AnnotationClaimType] = "hot"
+		if stateVolume != nil {
+			pod.Annotations[controller.AnnotationWebhookStateVolumeID] = stateVolume.VolumeID
+		} else {
+			delete(pod.Annotations, controller.AnnotationWebhookStateVolumeID)
+		}
 
 		// Set expiration annotations. Explicit 0 disables TTLs; omitted TTL uses the configured default.
 		persistedConfig := s.claimConfigForPersistence(req.Config)
@@ -479,6 +514,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		// Update the pod
 		updatedPod, updateErr := s.k8sClient.CoreV1().Pods(pod.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
 		if updateErr != nil {
+			rollbackStateVolume()
 			if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
 				s.logger.Warn("Failed to roll back credential bindings after hot-claim update failure",
 					zap.String("sandboxID", pod.Name),
@@ -551,6 +587,24 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 	if err := s.ensureDataPlaneReadyCapacity(spec); err != nil {
 		return nil, err
 	}
+	stateVolume, err := s.prepareWebhookStateVolume(ctx, req, podName)
+	if err != nil {
+		return nil, fmt.Errorf("prepare webhook state volume: %w", err)
+	}
+	rollbackStateVolume := func() {
+		if stateVolume == nil {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.webhookStateVolumes.Delete(cleanupCtx, req.TeamID, req.UserID, podName, stateVolume.VolumeID); err != nil && s.logger != nil {
+			s.logger.Warn("Failed to roll back webhook state volume",
+				zap.String("sandboxID", podName),
+				zap.String("volumeID", stateVolume.VolumeID),
+				zap.Error(err),
+			)
+		}
+	}
 
 	if err := controller.EnsureProcdConfigSecret(ctx, s.k8sClient, s.secretLister, template); err != nil {
 		return nil, fmt.Errorf("ensure procd config secret: %w", err)
@@ -566,6 +620,9 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 		controller.AnnotationClaimedAt: s.clock.Now().Format(time.RFC3339),
 		controller.AnnotationClaimType: "cold",
 	})
+	if stateVolume != nil {
+		annotations[controller.AnnotationWebhookStateVolumeID] = stateVolume.VolumeID
+	}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      podName,
@@ -612,6 +669,7 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 	// Create the pod
 	createdPod, err := s.k8sClient.CoreV1().Pods(template.ObjectMeta.Namespace).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
+		rollbackStateVolume()
 		if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
 			s.logger.Warn("Failed to clean up staged credential bindings after create failure",
 				zap.String("sandboxID", pod.Name),
@@ -731,21 +789,37 @@ func (s *SandboxService) initializeProcd(
 
 	webhookInfo := s.getWebhookInfo(req)
 	var webhookConfig *InitializeWebhook
+	mounts := req.Mounts
 	if webhookInfo != nil {
 		webhookConfig = &InitializeWebhook{
 			URL:      webhookInfo.URL,
 			Secret:   webhookInfo.Secret,
 			WatchDir: webhookInfo.WatchDir,
 		}
+		if pod.Annotations != nil {
+			if volumeID := strings.TrimSpace(pod.Annotations[controller.AnnotationWebhookStateVolumeID]); volumeID != "" {
+				mounts = appendWebhookStateMount(mounts, &webhookStateVolume{
+					VolumeID: volumeID,
+					Mount: ClaimMount{
+						SandboxVolumeID: volumeID,
+						MountPoint:      webhookStateMountPoint,
+					},
+				})
+			}
+		}
 	}
 
+	initWaitTimeout := claimMountWaitTimeout(req)
+	if len(mounts) > len(req.Mounts) && initWaitTimeout == 0 {
+		initWaitTimeout = 30 * time.Second
+	}
 	initReq := InitializeRequest{
 		SandboxID:          sandboxID,
 		TeamID:             teamID,
 		Webhook:            webhookConfig,
-		Mounts:             toInitializeMountRequests(req.Mounts),
-		WaitForMounts:      req.WaitForMounts,
-		MountWaitTimeoutMs: int32(claimMountWaitTimeout(req) / time.Millisecond),
+		Mounts:             toInitializeMountRequests(mounts),
+		WaitForMounts:      req.WaitForMounts || len(mounts) > len(req.Mounts),
+		MountWaitTimeoutMs: int32(initWaitTimeout / time.Millisecond),
 	}
 
 	var initErr error
@@ -754,8 +828,8 @@ func (s *SandboxService) initializeProcd(
 	if timeout == 0 {
 		timeout = 6 * time.Second
 	}
-	if waitTimeout := claimMountWaitTimeout(req); waitTimeout > timeout {
-		timeout = waitTimeout + time.Second
+	if initWaitTimeout > timeout {
+		timeout = initWaitTimeout + time.Second
 	}
 
 	initCtx, cancel := context.WithTimeout(ctx, timeout)

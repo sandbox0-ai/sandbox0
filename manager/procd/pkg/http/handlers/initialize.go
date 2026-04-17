@@ -122,13 +122,15 @@ func (h *InitializeHandler) Initialize(w http.ResponseWriter, r *http.Request) {
 
 	if webhookURL != "" {
 		h.readyOnce.Do(func() {
-			h.dispatcher.Enqueue(webhook.Event{
+			if _, err := h.dispatcher.Enqueue(webhook.Event{
 				EventType: webhook.EventTypeSandboxReady,
 				Payload: map[string]any{
 					"http_port":  h.httpPort,
 					"sandbox_id": req.SandboxID,
 				},
-			})
+			}); err != nil && h.logger != nil {
+				h.logger.Warn("Failed to enqueue sandbox ready webhook", zap.Error(err))
+			}
 		})
 	}
 
@@ -197,10 +199,12 @@ func (h *InitializeHandler) configureWebhookWatch(webhookURL, watchDir string) {
 		if event.OldPath != "" {
 			payload["old_path"] = event.OldPath
 		}
-		h.dispatcher.Enqueue(webhook.Event{
+		if _, err := h.dispatcher.Enqueue(webhook.Event{
 			EventType: webhook.EventTypeFileModified,
 			Payload:   payload,
-		})
+		}); err != nil && h.logger != nil {
+			h.logger.Warn("Failed to enqueue file webhook", zap.Error(err))
+		}
 	})
 	if err != nil {
 		if h.logger != nil {

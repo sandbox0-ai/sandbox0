@@ -27,6 +27,16 @@ type deleteRecordingBindingStore struct {
 	deleteCalls int
 }
 
+type recordingSystemVolumeClient struct {
+	created []string
+	deleted []string
+}
+
+type recordingDeletionWebhookEmitter struct {
+	calls []SandboxLifecycleInfo
+	err   error
+}
+
 func (c *recordingSandboxCleaner) CleanupDeletedSandbox(_ context.Context, info SandboxLifecycleInfo) error {
 	c.calls = append(c.calls, info)
 	return c.err
@@ -51,6 +61,22 @@ func (s *deleteRecordingBindingStore) GetSourceByRef(context.Context, string, st
 
 func (s *deleteRecordingBindingStore) GetSourceVersion(context.Context, int64, int64) (*egressauth.CredentialSourceVersion, error) {
 	return nil, nil
+}
+
+func (c *recordingSystemVolumeClient) Create(_ context.Context, _, _, sandboxID, kind string) (string, error) {
+	id := sandboxID + "-" + kind
+	c.created = append(c.created, id)
+	return id, nil
+}
+
+func (c *recordingSystemVolumeClient) Delete(_ context.Context, _, _, _, volumeID string) error {
+	c.deleted = append(c.deleted, volumeID)
+	return nil
+}
+
+func (e *recordingDeletionWebhookEmitter) EmitSandboxDeleted(_ context.Context, info SandboxLifecycleInfo) error {
+	e.calls = append(e.calls, info)
+	return e.err
 }
 
 func TestSandboxLifecycleControllerCleansAndRemovesFinalizer(t *testing.T) {
@@ -184,6 +210,57 @@ func TestSandboxServiceCleanupDeletedSandboxRemovesExternalState(t *testing.T) {
 	}
 	if store.deleteCalls != 1 {
 		t.Fatalf("DeleteBindings calls = %d, want 1", store.deleteCalls)
+	}
+}
+
+func TestSandboxServiceCleanupDeletedSandboxEmitsWebhookAndDeletesStateVolume(t *testing.T) {
+	volumeClient := &recordingSystemVolumeClient{}
+	emitter := &recordingDeletionWebhookEmitter{}
+	svc := &SandboxService{
+		webhookStateVolumes:    volumeClient,
+		deletionWebhookEmitter: emitter,
+		logger:                 zap.NewNop(),
+	}
+
+	err := svc.CleanupDeletedSandbox(context.Background(), SandboxLifecycleInfo{
+		Namespace:            "ns-a",
+		PodName:              "sandbox-a",
+		SandboxID:            "sandbox-a",
+		TeamID:               "team-a",
+		UserID:               "user-a",
+		WebhookURL:           "https://example.test/webhook",
+		WebhookSecret:        "secret",
+		WebhookStateVolumeID: "volume-a",
+	})
+	if err != nil {
+		t.Fatalf("CleanupDeletedSandbox() error = %v", err)
+	}
+	if len(emitter.calls) != 1 {
+		t.Fatalf("webhook calls = %d, want 1", len(emitter.calls))
+	}
+	if emitter.calls[0].WebhookSecret != "secret" {
+		t.Fatalf("webhook secret = %q, want secret", emitter.calls[0].WebhookSecret)
+	}
+	if len(volumeClient.deleted) != 1 || volumeClient.deleted[0] != "volume-a" {
+		t.Fatalf("deleted volumes = %#v, want volume-a", volumeClient.deleted)
+	}
+}
+
+func TestSandboxLifecycleInfoFromPodIncludesWebhookMetadata(t *testing.T) {
+	pod := newLifecycleTestPod()
+	pod.Annotations[controller.AnnotationUserID] = "user-a"
+	pod.Annotations[controller.AnnotationWebhookStateVolumeID] = "volume-a"
+	pod.Annotations[controller.AnnotationConfig] = `{"webhook":{"url":"https://example.test/webhook","secret":"secret"}}`
+
+	info, ok := sandboxLifecycleInfoFromPod(pod)
+	if !ok {
+		t.Fatal("expected lifecycle info")
+	}
+	if info.UserID != "user-a" || info.WebhookStateVolumeID != "volume-a" {
+		t.Fatalf("unexpected lifecycle metadata: %#v", info)
+	}
+	if info.WebhookURL != "https://example.test/webhook" || info.WebhookSecret != "secret" {
+		t.Fatalf("unexpected webhook metadata: %#v", info)
 	}
 }
 

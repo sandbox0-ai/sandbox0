@@ -12,6 +12,7 @@ func registerApiFullModeSuite(envProvider func() *framework.ScenarioEnv) {
 		includePoolReadinessGate:  true,
 		includeNetworkPolicy:      true,
 		includeVolumeLifecycle:    true,
+		includeWebhookLifecycle:   true,
 		includeMeteringAssertions: true,
 	})
 }

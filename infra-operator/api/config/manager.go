@@ -137,7 +137,9 @@ type ManagerConfig struct {
 	// Procd config injected into sandbox pods
 	// +optional
 	// +kubebuilder:default={}
-	ProcdConfig ProcdConfig `yaml:"procd_config" json:"procdConfig"`
+	ProcdConfig          ProcdConfig `yaml:"procd_config" json:"procdConfig"`
+	StorageProxyBaseURL  string      `yaml:"storage_proxy_base_url" json:"-"`
+	StorageProxyHTTPPort int         `yaml:"storage_proxy_http_port" json:"-"`
 
 	// Registry config for image pull secret provisioning
 	// +optional

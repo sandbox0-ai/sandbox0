@@ -4096,6 +4096,8 @@ components:
               required: [sandbox_id, exposed_ports]
     WebhookConfig:
       type: object
+      description: |
+        Per-sandbox webhook configuration. Sandbox0 delivers webhook events at least once and consumers should deduplicate by event_id. For sandbox lifecycle events, procd persists signed delivery records to a manager-owned SandboxVolume outside the workspace before dispatch; manager also emits sandbox.deleted during pod deletion cleanup.
       properties:
         url:
           description: Required when webhook is enabled. Target URL that receives event callbacks.

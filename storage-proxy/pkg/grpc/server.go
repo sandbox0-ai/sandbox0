@@ -14,6 +14,7 @@ import (
 	"github.com/juicedata/juicefs/pkg/vfs"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/notify"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volsync"
@@ -35,6 +36,7 @@ type FileSystemServer struct {
 	syncRecorder      syncRecorder
 	mutationBarrier   volumeMutationBarrier
 	logger            *logrus.Logger
+	metrics           *obsmetrics.StorageProxyMetrics
 	now               func() time.Time
 	dirtyWriteMu      sync.Mutex
 	dirtyWriteHandles map[string]dirtyWriteHandle
@@ -93,11 +95,31 @@ func (s *FileSystemServer) SetNowFunc(now func() time.Time) {
 	s.now = func() time.Time { return now().UTC() }
 }
 
+func (s *FileSystemServer) SetMetrics(metrics *obsmetrics.StorageProxyMetrics) {
+	s.metrics = metrics
+}
+
 func (s *FileSystemServer) currentTime() time.Time {
 	if s != nil && s.now != nil {
 		return s.now()
 	}
 	return time.Now().UTC()
+}
+
+func (s *FileSystemServer) observeJuiceFSOperation(volCtx *volume.VolumeContext, operation string, errno syscall.Errno, start time.Time) {
+	if s == nil || s.metrics == nil || s.metrics.JuiceFSOperationsTotal == nil || s.metrics.JuiceFSOperationDuration == nil {
+		return
+	}
+	writeback := "false"
+	if volCtx != nil && volCtx.Config != nil && volCtx.Config.Writeback {
+		writeback = "true"
+	}
+	status := "success"
+	if errno != 0 {
+		status = "error"
+	}
+	s.metrics.JuiceFSOperationsTotal.WithLabelValues(operation, writeback, status).Inc()
+	s.metrics.JuiceFSOperationDuration.WithLabelValues(operation, writeback).Observe(time.Since(start).Seconds())
 }
 
 func vfsContextForActor(actor *pb.PosixActor) vfs.LogContext {
@@ -611,7 +633,9 @@ func (s *FileSystemServer) GetAttr(ctx context.Context, req *pb.GetAttrRequest) 
 
 	inode := mapInode(volCtx, req.Inode)
 	vfsCtx := vfsContextForActor(req.Actor)
+	juiceFSStart := time.Now()
 	entry, st := volCtx.VFS.GetAttr(vfsCtx, inode, 0)
+	s.observeJuiceFSOperation(volCtx, "GetAttr", syscall.Errno(st), juiceFSStart)
 	if st != 0 {
 		s.logger.WithFields(logrus.Fields{
 			"volume_id": req.VolumeId,
@@ -634,7 +658,9 @@ func (s *FileSystemServer) Lookup(ctx context.Context, req *pb.LookupRequest) (*
 
 	parent := mapInode(volCtx, req.Parent)
 	vfsCtx := vfsContextForActor(req.Actor)
+	juiceFSStart := time.Now()
 	entry, st := volCtx.VFS.Lookup(vfsCtx, parent, req.Name)
+	s.observeJuiceFSOperation(volCtx, "Lookup", syscall.Errno(st), juiceFSStart)
 	if st != 0 {
 		if st == syscall.ENOENT {
 			return nil, status.Error(codes.NotFound, "entry not found")
@@ -663,7 +689,9 @@ func (s *FileSystemServer) Open(ctx context.Context, req *pb.OpenRequest) (*pb.O
 	vfsCtx := vfsContextForActor(req.Actor)
 
 	// VFS.Open returns (Entry, handleID, errno)
+	juiceFSStart := time.Now()
 	_, handleID, errno := volCtx.VFS.Open(vfsCtx, inode, req.Flags)
+	s.observeJuiceFSOperation(volCtx, "Open", errno, juiceFSStart)
 	if errno != 0 {
 		s.logger.WithFields(logrus.Fields{
 			"volume_id": req.VolumeId,
@@ -694,7 +722,9 @@ func (s *FileSystemServer) Read(ctx context.Context, req *pb.ReadRequest) (*pb.R
 	vfsCtx := vfsContextForActor(req.Actor)
 
 	// Read from JuiceFS VFS (convert offset to uint64)
+	juiceFSStart := time.Now()
 	n, errno := volCtx.VFS.Read(vfsCtx, mapInode(volCtx, req.Inode), buf, uint64(req.Offset), req.HandleId)
+	s.observeJuiceFSOperation(volCtx, "Read", errno, juiceFSStart)
 	if errno != 0 {
 		s.logger.WithFields(logrus.Fields{
 			"volume_id": req.VolumeId,
@@ -725,7 +755,9 @@ func (s *FileSystemServer) Read(ctx context.Context, req *pb.ReadRequest) (*pb.R
 func (s *FileSystemServer) Write(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResponse, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.WriteResponse, error) {
 		vfsCtx := vfsContextForActor(req.Actor)
+		juiceFSStart := time.Now()
 		errno := volCtx.VFS.Write(vfsCtx, mapInode(volCtx, req.Inode), req.Data, uint64(req.Offset), req.HandleId)
+		s.observeJuiceFSOperation(volCtx, "Write", errno, juiceFSStart)
 		if errno != 0 {
 			s.logger.WithFields(logrus.Fields{
 				"volume_id": req.VolumeId,
@@ -770,7 +802,9 @@ func (s *FileSystemServer) Create(ctx context.Context, req *pb.CreateRequest) (*
 			return nil, status.Error(codes.Internal, err.Error())
 		}
 		vfsCtx := vfsContextForActor(req.Actor)
+		juiceFSStart := time.Now()
 		entry, handleID, errno := volCtx.VFS.Create(vfsCtx, parent, req.Name, uint16(req.Mode), uint16(req.Umask), req.Flags)
+		s.observeJuiceFSOperation(volCtx, "Create", errno, juiceFSStart)
 		if errno != 0 {
 			s.logger.WithFields(logrus.Fields{
 				"volume_id": req.VolumeId,
@@ -1073,6 +1107,7 @@ func (s *FileSystemServer) SetAttr(ctx context.Context, req *pb.SetAttrRequest) 
 		}
 
 		vfsCtx := vfsContextForActor(req.Actor)
+		juiceFSStart := time.Now()
 		entry, st := volCtx.VFS.SetAttr(
 			vfsCtx,
 			inode,
@@ -1087,6 +1122,7 @@ func (s *FileSystemServer) SetAttr(ctx context.Context, req *pb.SetAttrRequest) 
 			uint32(attr.MtimeNsec),
 			attr.Size,
 		)
+		s.observeJuiceFSOperation(volCtx, "SetAttr", syscall.Errno(st), juiceFSStart)
 		if st != 0 {
 			return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
 		}
@@ -1152,7 +1188,10 @@ func (s *FileSystemServer) Flush(ctx context.Context, req *pb.FlushRequest) (*pb
 	}
 
 	vfsCtx := vfsContextForActor(req.Actor)
-	if errno := volCtx.VFS.Flush(vfsCtx, mapInode(volCtx, dirty.inode), req.HandleId, 0); errno != 0 {
+	juiceFSStart := time.Now()
+	errno := volCtx.VFS.Flush(vfsCtx, mapInode(volCtx, dirty.inode), req.HandleId, 0)
+	s.observeJuiceFSOperation(volCtx, "Flush", errno, juiceFSStart)
+	if errno != 0 {
 		s.logger.WithFields(logrus.Fields{
 			"volume_id": req.VolumeId,
 			"inode":     dirty.inode,
@@ -1182,7 +1221,10 @@ func (s *FileSystemServer) Fsync(ctx context.Context, req *pb.FsyncRequest) (*pb
 		datasync = 1
 	}
 	vfsCtx := vfsContextForActor(req.Actor)
-	if errno := volCtx.VFS.Fsync(vfsCtx, mapInode(volCtx, dirty.inode), datasync, req.HandleId); errno != 0 {
+	juiceFSStart := time.Now()
+	errno := volCtx.VFS.Fsync(vfsCtx, mapInode(volCtx, dirty.inode), datasync, req.HandleId)
+	s.observeJuiceFSOperation(volCtx, "Fsync", errno, juiceFSStart)
+	if errno != 0 {
 		s.logger.WithFields(logrus.Fields{
 			"volume_id": req.VolumeId,
 			"inode":     dirty.inode,
@@ -1208,7 +1250,9 @@ func (s *FileSystemServer) Release(ctx context.Context, req *pb.ReleaseRequest) 
 
 	// Release the file handle in VFS
 	vfsCtx := vfsContextForActor(req.Actor)
+	juiceFSStart := time.Now()
 	volCtx.VFS.Release(vfsCtx, mapInode(volCtx, req.Inode), req.HandleId)
+	s.observeJuiceFSOperation(volCtx, "Release", 0, juiceFSStart)
 
 	if dirty, ok := s.takeDirtyWrite(req.VolumeId, req.HandleId); ok {
 		s.recordDirtyWriteReplayPayload(ctx, volCtx, req.VolumeId, dirty, "release")

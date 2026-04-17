@@ -29,6 +29,9 @@ type StorageProxyMetrics struct {
 	ObjectStoreRequestDuration *prometheus.HistogramVec
 	ObjectStoreBytesTotal      *prometheus.CounterVec
 
+	JuiceFSOperationsTotal   *prometheus.CounterVec
+	JuiceFSOperationDuration *prometheus.HistogramVec
+
 	GRPCRequestsTotal   *prometheus.CounterVec
 	GRPCRequestDuration *prometheus.HistogramVec
 
@@ -146,6 +149,15 @@ func NewStorageProxy(registry prometheus.Registerer) *StorageProxyMetrics {
 			Name: "storage_proxy_object_store_bytes_total",
 			Help: "Total bytes transferred through object store provider requests made by storage-proxy",
 		}, []string{"provider", "bucket", "prefix_class", "operation", "direction"}),
+		JuiceFSOperationsTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: "storage_proxy_juicefs_operations_total",
+			Help: "Total number of JuiceFS VFS operations invoked by storage-proxy",
+		}, []string{"operation", "writeback", "status"}),
+		JuiceFSOperationDuration: factory.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "storage_proxy_juicefs_operation_duration_seconds",
+			Help:    "Duration of JuiceFS VFS operations invoked by storage-proxy",
+			Buckets: prometheus.DefBuckets,
+		}, []string{"operation", "writeback"}),
 		GRPCRequestsTotal: factory.NewCounterVec(prometheus.CounterOpts{
 			Name: "storage_proxy_grpc_requests_total",
 			Help: "Total number of gRPC requests",

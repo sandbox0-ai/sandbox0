@@ -333,6 +333,7 @@ func main() {
 
 	// Register FileSystem service
 	fsServer := grpcserver.NewFileSystemServer(volMgr, repo, eventHub, eventBroadcaster, logrusLogger, syncSvc, volumeBarrier)
+	fsServer.SetMetrics(storageProxyMetrics)
 	if sharedClock != nil {
 		fsServer.SetNowFunc(sharedClock.Now)
 	}

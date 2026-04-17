@@ -14,14 +14,13 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/client"
 	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
-	"github.com/sandbox0-ai/sandbox0/pkg/cache"
 	gatewayauthn "github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
 )
 
-func TestGetProcdURLCacheIsScopedByTeam(t *testing.T) {
+func TestGetProcdURLFetchesManagerForEachRequest(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	managerURL, managerSpy, tokenGen, cleanup := newGetProcdURLTestManager(t)
@@ -29,21 +28,23 @@ func TestGetProcdURLCacheIsScopedByTeam(t *testing.T) {
 
 	server := &Server{
 		managerClient: client.NewManagerClient(managerURL, tokenGen, zap.NewNop(), time.Second),
-		sandboxAddrCache: cache.New[sandboxAddrCacheKey, *url.URL](cache.Config{
-			MaxSize:         16,
-			TTL:             time.Minute,
-			CleanupInterval: time.Minute,
-		}),
-		logger: zap.NewNop(),
+		logger:        zap.NewNop(),
 	}
-	defer server.sandboxAddrCache.Close()
 
 	addr, rec := mustGetProcdURL(t, server, "team-a", "user-a", "sb-1")
 	if rec.Code != http.StatusOK {
-		t.Fatalf("team A status = %d, want %d", rec.Code, http.StatusOK)
+		t.Fatalf("first team A status = %d, want %d", rec.Code, http.StatusOK)
 	}
 	if got := addr.String(); got != "http://127.0.0.1:7777" {
-		t.Fatalf("team A procd url = %q, want %q", got, "http://127.0.0.1:7777")
+		t.Fatalf("first team A procd url = %q, want %q", got, "http://127.0.0.1:7777")
+	}
+
+	addr, rec = mustGetProcdURL(t, server, "team-a", "user-a", "sb-1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second team A status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if got := addr.String(); got != "http://127.0.0.1:7777" {
+		t.Fatalf("second team A procd url = %q, want %q", got, "http://127.0.0.1:7777")
 	}
 
 	addr, rec = mustGetProcdURL(t, server, "team-b", "user-b", "sb-1")
@@ -53,8 +54,97 @@ func TestGetProcdURLCacheIsScopedByTeam(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("team B status = %d, want %d", rec.Code, http.StatusForbidden)
 	}
-	if got := managerSpy.teamIDs(); len(got) != 2 || got[0] != "team-a" || got[1] != "team-b" {
-		t.Fatalf("manager team ids = %#v, want [team-a team-b]", got)
+	if got := managerSpy.teamIDs(); len(got) != 3 || got[0] != "team-a" || got[1] != "team-a" || got[2] != "team-b" {
+		t.Fatalf("manager team ids = %#v, want [team-a team-a team-b]", got)
+	}
+}
+
+func TestGetProcdURLRechecksPausedStateAfterSuccessfulAccess(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate keypair: %v", err)
+	}
+	validator := internalauth.NewValidator(internalauth.ValidatorConfig{
+		Target:             "manager",
+		PublicKey:          publicKey,
+		AllowedCallers:     []string{"cluster-gateway"},
+		ClockSkewTolerance: 5 * time.Second,
+	})
+	tokenGen := internalauth.NewGenerator(internalauth.GeneratorConfig{
+		Caller:     "cluster-gateway",
+		PrivateKey: privateKey,
+		TTL:        time.Minute,
+	})
+
+	var getCalls int
+	var resumeCalls int
+	manager := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := validator.Validate(r.Header.Get(internalauth.DefaultTokenHeader)); err != nil {
+			t.Fatalf("validate token: %v", err)
+		}
+		switch {
+		case r.Method == http.MethodGet:
+			getCalls++
+			sandbox := mgr.Sandbox{
+				ID:           "sb-1",
+				TeamID:       "team-a",
+				UserID:       "user-a",
+				InternalAddr: "http://127.0.0.1:7777",
+				Status:       mgr.SandboxStatusRunning,
+				AutoResume:   true,
+			}
+			if getCalls == 2 {
+				sandbox.Paused = true
+				sandbox.PowerState = mgr.SandboxPowerState{
+					Desired:            mgr.SandboxPowerStatePaused,
+					DesiredGeneration:  3,
+					Observed:           mgr.SandboxPowerStatePaused,
+					ObservedGeneration: 3,
+					Phase:              mgr.SandboxPowerPhaseStable,
+				}
+			}
+			_ = spec.WriteSuccess(w, http.StatusOK, sandbox)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sandboxes/sb-1/resume":
+			resumeCalls++
+			_ = spec.WriteSuccess(w, http.StatusOK, mgr.ResumeSandboxResponse{
+				SandboxID: "sb-1",
+				Resumed:   true,
+				PowerState: mgr.SandboxPowerState{
+					Desired:            mgr.SandboxPowerStateActive,
+					DesiredGeneration:  4,
+					Observed:           mgr.SandboxPowerStateActive,
+					ObservedGeneration: 4,
+					Phase:              mgr.SandboxPowerPhaseStable,
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": false})
+		}
+	}))
+	defer manager.Close()
+
+	server := &Server{
+		managerClient: client.NewManagerClient(manager.URL, tokenGen, zap.NewNop(), time.Second),
+		logger:        zap.NewNop(),
+	}
+
+	addr, _ := mustGetProcdURL(t, server, "team-a", "user-a", "sb-1")
+	if addr == nil || addr.String() != "http://127.0.0.1:7777" {
+		t.Fatalf("first addr = %v, want http://127.0.0.1:7777", addr)
+	}
+
+	addr, _ = mustGetProcdURL(t, server, "team-a", "user-a", "sb-1")
+	if addr == nil || addr.String() != "http://127.0.0.1:7777" {
+		t.Fatalf("second addr = %v, want http://127.0.0.1:7777", addr)
+	}
+	if getCalls != 2 {
+		t.Fatalf("getCalls = %d, want 2", getCalls)
+	}
+	if resumeCalls != 1 {
+		t.Fatalf("resumeCalls = %d, want 1", resumeCalls)
 	}
 }
 
@@ -122,14 +212,8 @@ func TestGetProcdURLPausedSandboxReturnsWakingUp(t *testing.T) {
 
 	server := &Server{
 		managerClient: client.NewManagerClient(manager.URL, tokenGen, zap.NewNop(), time.Second),
-		sandboxAddrCache: cache.New[sandboxAddrCacheKey, *url.URL](cache.Config{
-			MaxSize:         16,
-			TTL:             time.Minute,
-			CleanupInterval: time.Minute,
-		}),
-		logger: zap.NewNop(),
+		logger:        zap.NewNop(),
 	}
-	defer server.sandboxAddrCache.Close()
 
 	addr, _ := mustGetProcdURL(t, server, "team-a", "user-a", "sb-1")
 	if addr == nil || addr.String() != "http://127.0.0.1:7777" {

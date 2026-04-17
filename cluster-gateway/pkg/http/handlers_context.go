@@ -268,93 +268,55 @@ func (s *Server) contextWebSocket(c *gin.Context) {
 	wsProxy.Proxy(procdURL)(c)
 }
 
-type sandboxAddrCacheKey struct {
-	teamID    string
-	sandboxID string
-}
-
-func sandboxCacheKey(teamID, sandboxID string) sandboxAddrCacheKey {
-	return sandboxAddrCacheKey{
-		teamID:    teamID,
-		sandboxID: sandboxID,
-	}
-}
-
 // getProcdURL resolves the procd URL for a sandbox
-// Uses in-memory cache to reduce manager API calls and improve performance
 func (s *Server) getProcdURL(c *gin.Context, sandboxID string) (*url.URL, error) {
 	authCtx := middleware.GetAuthContext(c)
-	cacheKey := sandboxCacheKey(authCtx.TeamID, sandboxID)
 
-	// Try to get from cache first
-	var addr *url.URL
-	if cached, ok := s.sandboxAddrCache.Get(cacheKey); ok {
-		addr = cached
-		s.logger.Debug("Sandbox cache hit",
+	sandbox, err := s.managerClient.GetSandbox(c.Request.Context(), sandboxID, authCtx.UserID, authCtx.TeamID)
+	if err != nil {
+		s.logger.Error("Failed to get sandbox from manager",
 			zap.String("sandbox_id", sandboxID),
+			zap.Error(err),
 		)
-	} else {
-		// Cache miss - fetch from manager
-		s.logger.Debug("Sandbox cache miss, fetching from manager",
-			zap.String("sandbox_id", sandboxID),
-		)
-
-		sandbox, err := s.managerClient.GetSandbox(c.Request.Context(), sandboxID, authCtx.UserID, authCtx.TeamID)
-		if err != nil {
-			s.logger.Error("Failed to get sandbox from manager",
-				zap.String("sandbox_id", sandboxID),
-				zap.Error(err),
-			)
-			if errors.Is(err, client.ErrSandboxNotFound) {
-				spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "sandbox not found")
-			} else {
-				spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "manager service unavailable")
-			}
-			return nil, err
+		if errors.Is(err, client.ErrSandboxNotFound) {
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "sandbox not found")
+		} else {
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "manager service unavailable")
 		}
-
-		// Verify team ownership
-		if sandbox.TeamID != authCtx.TeamID {
-			spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "sandbox belongs to a different team")
-			return nil, errors.New("sandbox belongs to a different team")
-		}
-		if sandboxWantsPaused(sandbox) && !sandbox.AutoResume {
-			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is paused and auto_resume is disabled")
-			return nil, errors.New("sandbox auto_resume is disabled")
-		}
-		if sandboxWantsPaused(sandbox) {
-			resumeCtx, cancel := context.WithTimeout(c.Request.Context(), defaultAutoResumeTimeout)
-			defer cancel()
-			if err := s.managerClient.ResumeSandbox(resumeCtx, sandboxID, authCtx.UserID, authCtx.TeamID); err != nil {
-				s.logger.Warn("Resume sandbox failed",
-					zap.String("sandbox_id", sandboxID),
-					zap.Error(err),
-				)
-				spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
-				return nil, err
-			}
-		}
-
-		// Parse procd address
-		addr, err = url.Parse(sandbox.InternalAddr)
-		if err != nil {
-			s.logger.Error("Invalid procd address",
-				zap.String("sandbox_id", sandboxID),
-				zap.String("procd_address", sandbox.InternalAddr),
-				zap.Error(err),
-			)
-			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "invalid procd address")
-			return nil, err
-		}
-
-		// Store in cache for future requests
-		s.sandboxAddrCache.Set(cacheKey, addr)
-		s.logger.Debug("Sandbox cached",
-			zap.String("sandbox_id", sandboxID),
-			zap.String("internal_addr", addr.String()),
-		)
+		return nil, err
 	}
 
+	if sandbox.TeamID != authCtx.TeamID {
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "sandbox belongs to a different team")
+		return nil, errors.New("sandbox belongs to a different team")
+	}
+	if sandboxWantsPaused(sandbox) && !sandbox.AutoResume {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is paused and auto_resume is disabled")
+		return nil, errors.New("sandbox auto_resume is disabled")
+	}
+	if sandboxWantsPaused(sandbox) {
+		resumeCtx, cancel := context.WithTimeout(c.Request.Context(), defaultAutoResumeTimeout)
+		defer cancel()
+		if err := s.managerClient.ResumeSandbox(resumeCtx, sandboxID, authCtx.UserID, authCtx.TeamID); err != nil {
+			s.logger.Warn("Resume sandbox failed",
+				zap.String("sandbox_id", sandboxID),
+				zap.Error(err),
+			)
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
+			return nil, err
+		}
+	}
+
+	addr, err := url.Parse(sandbox.InternalAddr)
+	if err != nil {
+		s.logger.Error("Invalid procd address",
+			zap.String("sandbox_id", sandboxID),
+			zap.String("procd_address", sandbox.InternalAddr),
+			zap.Error(err),
+		)
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "invalid procd address")
+		return nil, err
+	}
 	return addr, nil
 }
 

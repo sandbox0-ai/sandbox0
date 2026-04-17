@@ -44,6 +44,8 @@ type FileSystemServer struct {
 	handlePaths       map[string]openHandlePath
 	openInodePaths    map[string]openHandlePath
 	pendingSetAttrs   map[string]pendingSetAttrWrite
+	pendingCreates    map[string]pendingCreate
+	pendingCreatePath map[string]string
 }
 
 type dirtyWriteHandle struct {
@@ -60,6 +62,12 @@ type openHandlePath struct {
 type pendingSetAttrWrite struct {
 	inode uint64
 	path  string
+}
+
+type pendingCreate struct {
+	inode uint64
+	path  string
+	mode  uint32
 }
 
 type volumeManager interface {
@@ -103,6 +111,8 @@ func NewFileSystemServer(volMgr volumeManager, volumeRepo VolumeRepository, even
 		handlePaths:       make(map[string]openHandlePath),
 		openInodePaths:    make(map[string]openHandlePath),
 		pendingSetAttrs:   make(map[string]pendingSetAttrWrite),
+		pendingCreates:    make(map[string]pendingCreate),
+		pendingCreatePath: make(map[string]string),
 	}
 }
 
@@ -234,6 +244,10 @@ func inodePathKey(volumeID string, inode uint64) string {
 	return volumeID + "|" + strconv.FormatUint(inode, 10)
 }
 
+func volumePathKey(volumeID, path string) string {
+	return volumeID + "|" + path
+}
+
 func (s *FileSystemServer) markDirtyWrite(volumeID string, inode, handleID uint64, path string) {
 	if s == nil {
 		return
@@ -345,6 +359,98 @@ func (s *FileSystemServer) clearHandlePath(volumeID string, handleID uint64) {
 	delete(s.handlePaths, dirtyWriteKey(volumeID, handleID))
 	if ok && cached.inode != 0 {
 		delete(s.openInodePaths, inodePathKey(volumeID, cached.inode))
+	}
+}
+
+func (s *FileSystemServer) rememberPendingCreate(volumeID string, inode uint64, path string, mode uint32) {
+	if s == nil || inode == 0 || path == "" {
+		return
+	}
+	s.handlePathMu.Lock()
+	defer s.handlePathMu.Unlock()
+	if s.pendingCreates == nil {
+		s.pendingCreates = make(map[string]pendingCreate)
+	}
+	if s.pendingCreatePath == nil {
+		s.pendingCreatePath = make(map[string]string)
+	}
+	inodeKey := inodePathKey(volumeID, inode)
+	s.pendingCreates[inodeKey] = pendingCreate{
+		inode: inode,
+		path:  path,
+		mode:  mode,
+	}
+	s.pendingCreatePath[volumePathKey(volumeID, path)] = inodeKey
+}
+
+func (s *FileSystemServer) takePendingCreateByInode(volumeID string, inode uint64) (pendingCreate, bool) {
+	if s == nil || inode == 0 {
+		return pendingCreate{}, false
+	}
+	s.handlePathMu.Lock()
+	defer s.handlePathMu.Unlock()
+	return s.takePendingCreateByInodeLocked(volumeID, inode)
+}
+
+func (s *FileSystemServer) takePendingCreateByPath(volumeID, path string) (pendingCreate, bool) {
+	if s == nil || path == "" {
+		return pendingCreate{}, false
+	}
+	s.handlePathMu.Lock()
+	defer s.handlePathMu.Unlock()
+	inodeKey, ok := s.pendingCreatePath[volumePathKey(volumeID, path)]
+	if !ok {
+		return pendingCreate{}, false
+	}
+	pending, ok := s.pendingCreates[inodeKey]
+	if ok {
+		delete(s.pendingCreates, inodeKey)
+		delete(s.pendingCreatePath, volumePathKey(volumeID, pending.path))
+	}
+	return pending, ok
+}
+
+func (s *FileSystemServer) clearPendingCreateByInode(volumeID string, inode uint64) {
+	if s == nil || inode == 0 {
+		return
+	}
+	s.handlePathMu.Lock()
+	defer s.handlePathMu.Unlock()
+	s.takePendingCreateByInodeLocked(volumeID, inode)
+}
+
+func (s *FileSystemServer) takePendingCreateByInodeLocked(volumeID string, inode uint64) (pendingCreate, bool) {
+	inodeKey := inodePathKey(volumeID, inode)
+	pending, ok := s.pendingCreates[inodeKey]
+	if ok {
+		delete(s.pendingCreates, inodeKey)
+		delete(s.pendingCreatePath, volumePathKey(volumeID, pending.path))
+	}
+	return pending, ok
+}
+
+func (s *FileSystemServer) recordPendingCreate(ctx context.Context, volumeID string, pending pendingCreate) {
+	if pending.path == "" {
+		return
+	}
+	s.recordRemoteSyncChange(ctx, &volsync.RemoteChange{
+		VolumeID:  volumeID,
+		EventType: db.SyncEventCreate,
+		Path:      pending.path,
+		EntryKind: "file",
+		Mode:      uint32Ptr(pending.mode),
+	})
+}
+
+func (s *FileSystemServer) recordPendingCreateByInode(ctx context.Context, volumeID string, inode uint64) {
+	if pending, ok := s.takePendingCreateByInode(volumeID, inode); ok {
+		s.recordPendingCreate(ctx, volumeID, pending)
+	}
+}
+
+func (s *FileSystemServer) recordPendingCreateByPath(ctx context.Context, volumeID, path string) {
+	if pending, ok := s.takePendingCreateByPath(volumeID, path); ok {
+		s.recordPendingCreate(ctx, volumeID, pending)
 	}
 }
 
@@ -1045,13 +1151,8 @@ func (s *FileSystemServer) Create(ctx context.Context, req *pb.CreateRequest) (*
 		}
 		recordCtx := runCtx
 		if path != "" {
-			recordCtx = s.recordRemoteSyncChange(runCtx, &volsync.RemoteChange{
-				VolumeID:  req.VolumeId,
-				EventType: db.SyncEventCreate,
-				Path:      path,
-				EntryKind: "file",
-				Mode:      uint32Ptr(uint32(entry.Attr.Mode)),
-			})
+			s.rememberPendingCreate(req.VolumeId, uint64(entry.Inode), path, uint32(entry.Attr.Mode))
+			recordCtx = suppressSyncRecord(runCtx)
 		}
 		s.publishEvent(recordCtx, &pb.WatchEvent{
 			VolumeId:  req.VolumeId,
@@ -1188,6 +1289,7 @@ func (s *FileSystemServer) Unlink(ctx context.Context, req *pb.UnlinkRequest) (*
 		}
 		recordCtx := runCtx
 		if path != "" {
+			s.recordPendingCreateByPath(runCtx, req.VolumeId, path)
 			recordCtx = s.recordRemoteSyncChange(runCtx, &volsync.RemoteChange{
 				VolumeID:  req.VolumeId,
 				EventType: db.SyncEventRemove,
@@ -1302,6 +1404,7 @@ func (s *FileSystemServer) Rename(ctx context.Context, req *pb.RenameRequest) (*
 		}
 		recordCtx := runCtx
 		if oldPath != "" || newPath != "" {
+			s.recordPendingCreateByPath(runCtx, req.VolumeId, oldPath)
 			recordCtx = s.recordRemoteSyncChange(runCtx, &volsync.RemoteChange{
 				VolumeID:  req.VolumeId,
 				EventType: db.SyncEventRename,
@@ -1366,6 +1469,7 @@ func (s *FileSystemServer) SetAttr(ctx context.Context, req *pb.SetAttrRequest) 
 		switch {
 		case path != "" && req.Valid&uint32(meta.SetAttrMode) != 0:
 			remoteRecord = "chmod"
+			s.recordPendingCreateByInode(runCtx, req.VolumeId, req.Inode)
 			recordCtx = s.recordRemoteSyncChange(runCtx, &volsync.RemoteChange{
 				VolumeID:  req.VolumeId,
 				EventType: db.SyncEventChmod,
@@ -1394,6 +1498,7 @@ func (s *FileSystemServer) SetAttr(ctx context.Context, req *pb.SetAttrRequest) 
 					ContentAvailable: true,
 					ContentBytes:     payload,
 				})
+				s.clearPendingCreateByInode(req.VolumeId, req.Inode)
 			}
 		}
 		s.observeSetAttr(req.Valid, req.HandleId, remoteRecord)
@@ -1419,6 +1524,9 @@ func (s *FileSystemServer) Flush(ctx context.Context, req *pb.FlushRequest) (*pb
 
 	dirty, ok := s.peekDirtyWrite(req.VolumeId, req.HandleId)
 	if !ok {
+		if cached, hasPath := s.lookupHandlePath(req.VolumeId, req.HandleId); hasPath {
+			s.recordPendingCreateByInode(ctx, req.VolumeId, cached.inode)
+		}
 		return &pb.Empty{}, nil
 	}
 
@@ -1448,6 +1556,9 @@ func (s *FileSystemServer) Fsync(ctx context.Context, req *pb.FsyncRequest) (*pb
 
 	dirty, ok := s.peekDirtyWrite(req.VolumeId, req.HandleId)
 	if !ok {
+		if cached, hasPath := s.lookupHandlePath(req.VolumeId, req.HandleId); hasPath {
+			s.recordPendingCreateByInode(ctx, req.VolumeId, cached.inode)
+		}
 		return &pb.Empty{}, nil
 	}
 
@@ -1473,6 +1584,9 @@ func (s *FileSystemServer) Fsync(ctx context.Context, req *pb.FsyncRequest) (*pb
 	if s.recordDirtyWriteReplayPayload(ctx, volCtx, req.VolumeId, dirty, "Fsync", "fsync") {
 		s.clearDirtyWrite(req.VolumeId, req.HandleId)
 		s.clearPendingSetAttrWrite(req.VolumeId, dirty.inode)
+		s.clearPendingCreateByInode(req.VolumeId, dirty.inode)
+	} else {
+		s.recordPendingCreateByInode(ctx, req.VolumeId, dirty.inode)
 	}
 	return &pb.Empty{}, nil
 }
@@ -1493,12 +1607,16 @@ func (s *FileSystemServer) Release(ctx context.Context, req *pb.ReleaseRequest) 
 	if dirty, ok := s.takeDirtyWrite(req.VolumeId, req.HandleId); ok {
 		s.recordDirtyWriteReplayPayload(ctx, volCtx, req.VolumeId, dirty, "Release", "release")
 		s.clearPendingSetAttrWrite(req.VolumeId, dirty.inode)
+		s.clearPendingCreateByInode(req.VolumeId, dirty.inode)
 	} else if pending, ok := s.takePendingSetAttrWrite(req.VolumeId, req.Inode); ok {
 		s.recordDirtyWriteReplayPayload(ctx, volCtx, req.VolumeId, dirtyWriteHandle{
 			volumeID: req.VolumeId,
 			inode:    pending.inode,
 			path:     pending.path,
 		}, "Release", "release")
+		s.clearPendingCreateByInode(req.VolumeId, pending.inode)
+	} else {
+		s.recordPendingCreateByInode(ctx, req.VolumeId, req.Inode)
 	}
 	s.clearHandlePath(req.VolumeId, req.HandleId)
 
@@ -1534,6 +1652,7 @@ func (s *FileSystemServer) Rmdir(ctx context.Context, req *pb.RmdirRequest) (*pb
 		}
 		recordCtx := runCtx
 		if path != "" {
+			s.recordPendingCreateByPath(runCtx, req.VolumeId, path)
 			recordCtx = s.recordRemoteSyncChange(runCtx, &volsync.RemoteChange{
 				VolumeID:  req.VolumeId,
 				EventType: db.SyncEventRemove,

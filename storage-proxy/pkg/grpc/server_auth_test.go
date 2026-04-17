@@ -320,20 +320,17 @@ func TestValidateNamespaceMutationMapsCompatibilityErrorsToFailedPrecondition(t 
 	}
 }
 
-func TestCreatePropagatesNamespaceValidationAndRecordsRemoteChange(t *testing.T) {
+func TestCreatePropagatesNamespaceValidationAndRecordsCreateOnRelease(t *testing.T) {
 	volCtx := newMountedTestVolumeContext(t, "vol-1", "team-a")
 	recorder := &fakeSyncRecorder{}
-	server := &FileSystemServer{
-		volMgr: &fakeVolumeManager{
-			volumes: map[string]*volume.VolumeContext{
-				"vol-1": volCtx,
-			},
+	server := NewFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{
+			"vol-1": volCtx,
 		},
-		syncRecorder: recorder,
-		logger:       logrus.New(),
-	}
+	}, nil, nil, nil, logrus.New(), recorder, nil)
+	ctx := authContext("team-a", "sandbox-1")
 
-	resp, err := server.Create(authContext("team-a", "sandbox-1"), &pb.CreateRequest{
+	resp, err := server.Create(ctx, &pb.CreateRequest{
 		VolumeId: "vol-1",
 		Parent:   uint64(meta.RootInode),
 		Name:     "hello.txt",
@@ -351,8 +348,19 @@ func TestCreatePropagatesNamespaceValidationAndRecordsRemoteChange(t *testing.T)
 	if recorder.lastValidate.EventType != db.SyncEventCreate || recorder.lastValidate.Path != "/hello.txt" {
 		t.Fatalf("lastValidate = %+v, want create /hello.txt", recorder.lastValidate)
 	}
+	if len(recorder.remoteChanges) != 0 {
+		t.Fatalf("remoteChanges after Create = %d, want 0", len(recorder.remoteChanges))
+	}
+
+	if _, err := server.Release(ctx, &pb.ReleaseRequest{
+		VolumeId: "vol-1",
+		Inode:    resp.Inode,
+		HandleId: resp.HandleId,
+	}); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
 	if len(recorder.remoteChanges) != 1 {
-		t.Fatalf("remoteChanges = %d, want 1", len(recorder.remoteChanges))
+		t.Fatalf("remoteChanges after Release = %d, want 1", len(recorder.remoteChanges))
 	}
 	if got := recorder.remoteChanges[0]; got.EventType != db.SyncEventCreate || got.Path != "/hello.txt" || got.SandboxID != "sandbox-1" {
 		t.Fatalf("remoteChanges[0] = %+v, want create event for /hello.txt", got)
@@ -362,6 +370,180 @@ func TestCreatePropagatesNamespaceValidationAndRecordsRemoteChange(t *testing.T)
 	var attr meta.Attr
 	if st := volCtx.Meta.Lookup(meta.Background(), meta.RootInode, "hello.txt", &inode, &attr, false); st != 0 {
 		t.Fatalf("Lookup(hello.txt) errno = %v, want 0", st)
+	}
+}
+
+func TestCreatePendingCreateFlushesBeforeChmod(t *testing.T) {
+	volCtx := newMountedTestVolumeContext(t, "vol-1", "team-a")
+	recorder := &fakeSyncRecorder{}
+	server := NewFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{
+			"vol-1": volCtx,
+		},
+	}, nil, nil, nil, logrus.New(), recorder, nil)
+	ctx := authContext("team-a", "sandbox-1")
+
+	createResp, err := server.Create(ctx, &pb.CreateRequest{
+		VolumeId: "vol-1",
+		Parent:   uint64(meta.RootInode),
+		Name:     "hello.txt",
+		Mode:     0o644,
+		Flags:    uint32(syscall.O_RDWR),
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if len(recorder.remoteChanges) != 0 {
+		t.Fatalf("remoteChanges after Create = %d, want 0", len(recorder.remoteChanges))
+	}
+
+	if _, err := server.SetAttr(ctx, &pb.SetAttrRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		Valid:    uint32(meta.SetAttrMode),
+		Attr: &pb.GetAttrResponse{
+			Mode: 0o600,
+		},
+	}); err != nil {
+		t.Fatalf("SetAttr() error = %v", err)
+	}
+	if len(recorder.remoteChanges) != 2 {
+		t.Fatalf("remoteChanges after chmod = %d, want 2", len(recorder.remoteChanges))
+	}
+	if got := recorder.remoteChanges[0]; got.EventType != db.SyncEventCreate || got.Path != "/hello.txt" {
+		t.Fatalf("remoteChanges[0] = %+v, want create /hello.txt", got)
+	}
+	if got := recorder.remoteChanges[1]; got.EventType != db.SyncEventChmod || got.Path != "/hello.txt" {
+		t.Fatalf("remoteChanges[1] = %+v, want chmod /hello.txt", got)
+	}
+}
+
+func TestCreatePendingCreateFlushesBeforeUnlink(t *testing.T) {
+	volCtx := newMountedTestVolumeContext(t, "vol-1", "team-a")
+	recorder := &fakeSyncRecorder{}
+	server := NewFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{
+			"vol-1": volCtx,
+		},
+	}, nil, nil, nil, logrus.New(), recorder, nil)
+	ctx := authContext("team-a", "sandbox-1")
+
+	if _, err := server.Create(ctx, &pb.CreateRequest{
+		VolumeId: "vol-1",
+		Parent:   uint64(meta.RootInode),
+		Name:     "hello.txt",
+		Mode:     0o644,
+		Flags:    uint32(syscall.O_RDWR),
+	}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if len(recorder.remoteChanges) != 0 {
+		t.Fatalf("remoteChanges after Create = %d, want 0", len(recorder.remoteChanges))
+	}
+
+	if _, err := server.Unlink(ctx, &pb.UnlinkRequest{
+		VolumeId: "vol-1",
+		Parent:   uint64(meta.RootInode),
+		Name:     "hello.txt",
+	}); err != nil {
+		t.Fatalf("Unlink() error = %v", err)
+	}
+	if len(recorder.remoteChanges) != 2 {
+		t.Fatalf("remoteChanges after Unlink = %d, want 2", len(recorder.remoteChanges))
+	}
+	if got := recorder.remoteChanges[0]; got.EventType != db.SyncEventCreate || got.Path != "/hello.txt" {
+		t.Fatalf("remoteChanges[0] = %+v, want create /hello.txt", got)
+	}
+	if got := recorder.remoteChanges[1]; got.EventType != db.SyncEventRemove || got.Path != "/hello.txt" {
+		t.Fatalf("remoteChanges[1] = %+v, want remove /hello.txt", got)
+	}
+}
+
+func TestCreatePendingCreateFlushesBeforeRename(t *testing.T) {
+	volCtx := newMountedTestVolumeContext(t, "vol-1", "team-a")
+	recorder := &fakeSyncRecorder{}
+	server := NewFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{
+			"vol-1": volCtx,
+		},
+	}, nil, nil, nil, logrus.New(), recorder, nil)
+	ctx := authContext("team-a", "sandbox-1")
+
+	if _, err := server.Create(ctx, &pb.CreateRequest{
+		VolumeId: "vol-1",
+		Parent:   uint64(meta.RootInode),
+		Name:     "hello.txt",
+		Mode:     0o644,
+		Flags:    uint32(syscall.O_RDWR),
+	}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if len(recorder.remoteChanges) != 0 {
+		t.Fatalf("remoteChanges after Create = %d, want 0", len(recorder.remoteChanges))
+	}
+
+	if _, err := server.Rename(ctx, &pb.RenameRequest{
+		VolumeId:  "vol-1",
+		OldParent: uint64(meta.RootInode),
+		OldName:   "hello.txt",
+		NewParent: uint64(meta.RootInode),
+		NewName:   "renamed.txt",
+	}); err != nil {
+		t.Fatalf("Rename() error = %v", err)
+	}
+	if len(recorder.remoteChanges) != 2 {
+		t.Fatalf("remoteChanges after Rename = %d, want 2", len(recorder.remoteChanges))
+	}
+	if got := recorder.remoteChanges[0]; got.EventType != db.SyncEventCreate || got.Path != "/hello.txt" {
+		t.Fatalf("remoteChanges[0] = %+v, want create /hello.txt", got)
+	}
+	if got := recorder.remoteChanges[1]; got.EventType != db.SyncEventRename || got.OldPath != "/hello.txt" || got.Path != "/renamed.txt" {
+		t.Fatalf("remoteChanges[1] = %+v, want rename /hello.txt -> /renamed.txt", got)
+	}
+}
+
+func TestCreatePendingCreateFlushRecordsCreateOnce(t *testing.T) {
+	volCtx := newMountedTestVolumeContext(t, "vol-1", "team-a")
+	recorder := &fakeSyncRecorder{}
+	server := NewFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{
+			"vol-1": volCtx,
+		},
+	}, nil, nil, nil, logrus.New(), recorder, nil)
+	ctx := authContext("team-a", "sandbox-1")
+
+	createResp, err := server.Create(ctx, &pb.CreateRequest{
+		VolumeId: "vol-1",
+		Parent:   uint64(meta.RootInode),
+		Name:     "hello.txt",
+		Mode:     0o644,
+		Flags:    uint32(syscall.O_RDWR),
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if len(recorder.remoteChanges) != 0 {
+		t.Fatalf("remoteChanges after Create = %d, want 0", len(recorder.remoteChanges))
+	}
+
+	if _, err := server.Flush(ctx, &pb.FlushRequest{
+		VolumeId: "vol-1",
+		HandleId: createResp.HandleId,
+	}); err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+	if _, err := server.Release(ctx, &pb.ReleaseRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		HandleId: createResp.HandleId,
+	}); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+	if len(recorder.remoteChanges) != 1 {
+		t.Fatalf("remoteChanges after Flush+Release = %d, want 1", len(recorder.remoteChanges))
+	}
+	if got := recorder.remoteChanges[0]; got.EventType != db.SyncEventCreate || got.Path != "/hello.txt" {
+		t.Fatalf("remoteChanges[0] = %+v, want create /hello.txt", got)
 	}
 }
 

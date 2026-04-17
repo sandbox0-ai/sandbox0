@@ -42,6 +42,8 @@ type FileSystemServer struct {
 	dirtyWriteHandles map[string]dirtyWriteHandle
 	handlePathMu      sync.Mutex
 	handlePaths       map[string]openHandlePath
+	openInodePaths    map[string]openHandlePath
+	pendingSetAttrs   map[string]pendingSetAttrWrite
 }
 
 type dirtyWriteHandle struct {
@@ -51,7 +53,13 @@ type dirtyWriteHandle struct {
 }
 
 type openHandlePath struct {
-	path string
+	inode uint64
+	path  string
+}
+
+type pendingSetAttrWrite struct {
+	inode uint64
+	path  string
 }
 
 type volumeManager interface {
@@ -93,6 +101,8 @@ func NewFileSystemServer(volMgr volumeManager, volumeRepo VolumeRepository, even
 		now:               func() time.Time { return time.Now().UTC() },
 		dirtyWriteHandles: make(map[string]dirtyWriteHandle),
 		handlePaths:       make(map[string]openHandlePath),
+		openInodePaths:    make(map[string]openHandlePath),
+		pendingSetAttrs:   make(map[string]pendingSetAttrWrite),
 	}
 }
 
@@ -220,6 +230,10 @@ func dirtyWriteKey(volumeID string, handleID uint64) string {
 	return volumeID + "|" + strconv.FormatUint(handleID, 10)
 }
 
+func inodePathKey(volumeID string, inode uint64) string {
+	return volumeID + "|" + strconv.FormatUint(inode, 10)
+}
+
 func (s *FileSystemServer) markDirtyWrite(volumeID string, inode, handleID uint64, path string) {
 	if s == nil {
 		return
@@ -277,7 +291,7 @@ func (s *FileSystemServer) clearDirtyWrite(volumeID string, handleID uint64) {
 	delete(s.dirtyWriteHandles, key)
 }
 
-func (s *FileSystemServer) rememberHandlePath(volumeID string, handleID uint64, path string) {
+func (s *FileSystemServer) rememberHandlePath(volumeID string, handleID, inode uint64, path string) {
 	if s == nil || handleID == 0 || path == "" {
 		return
 	}
@@ -286,8 +300,18 @@ func (s *FileSystemServer) rememberHandlePath(volumeID string, handleID uint64, 
 	if s.handlePaths == nil {
 		s.handlePaths = make(map[string]openHandlePath)
 	}
+	if s.openInodePaths == nil {
+		s.openInodePaths = make(map[string]openHandlePath)
+	}
 	s.handlePaths[dirtyWriteKey(volumeID, handleID)] = openHandlePath{
-		path: path,
+		inode: inode,
+		path:  path,
+	}
+	if inode != 0 {
+		s.openInodePaths[inodePathKey(volumeID, inode)] = openHandlePath{
+			inode: inode,
+			path:  path,
+		}
 	}
 }
 
@@ -301,26 +325,88 @@ func (s *FileSystemServer) lookupHandlePath(volumeID string, handleID uint64) (o
 	return path, ok
 }
 
+func (s *FileSystemServer) lookupOpenInodePath(volumeID string, inode uint64) (openHandlePath, bool) {
+	if s == nil || inode == 0 {
+		return openHandlePath{}, false
+	}
+	s.handlePathMu.Lock()
+	defer s.handlePathMu.Unlock()
+	path, ok := s.openInodePaths[inodePathKey(volumeID, inode)]
+	return path, ok
+}
+
 func (s *FileSystemServer) clearHandlePath(volumeID string, handleID uint64) {
 	if s == nil || handleID == 0 {
 		return
 	}
 	s.handlePathMu.Lock()
 	defer s.handlePathMu.Unlock()
+	cached, ok := s.handlePaths[dirtyWriteKey(volumeID, handleID)]
 	delete(s.handlePaths, dirtyWriteKey(volumeID, handleID))
+	if ok && cached.inode != 0 {
+		delete(s.openInodePaths, inodePathKey(volumeID, cached.inode))
+	}
 }
 
 func (s *FileSystemServer) resolvePathForHandleOrInode(volCtx *volume.VolumeContext, volumeID string, handleID, inode uint64, method string) string {
 	if cached, ok := s.lookupHandlePath(volumeID, handleID); ok && cached.path != "" {
 		return cached.path
 	}
+	if cached, ok := s.lookupOpenInodePath(volumeID, inode); ok && cached.path != "" {
+		return cached.path
+	}
 	start := time.Now()
 	path := resolveInodePath(volCtx, uint64(mapInode(volCtx, inode)))
 	s.observeGRPCStage(method, "resolve_inode_path", start)
 	if path != "" {
-		s.rememberHandlePath(volumeID, handleID, path)
+		s.rememberHandlePath(volumeID, handleID, inode, path)
 	}
 	return path
+}
+
+func (s *FileSystemServer) rememberPendingSetAttrWrite(volumeID string, inode uint64, path string) {
+	if s == nil || inode == 0 || path == "" {
+		return
+	}
+	s.handlePathMu.Lock()
+	defer s.handlePathMu.Unlock()
+	if s.pendingSetAttrs == nil {
+		s.pendingSetAttrs = make(map[string]pendingSetAttrWrite)
+	}
+	s.pendingSetAttrs[inodePathKey(volumeID, inode)] = pendingSetAttrWrite{
+		inode: inode,
+		path:  path,
+	}
+}
+
+func (s *FileSystemServer) takePendingSetAttrWrite(volumeID string, inode uint64) (pendingSetAttrWrite, bool) {
+	if s == nil || inode == 0 {
+		return pendingSetAttrWrite{}, false
+	}
+	s.handlePathMu.Lock()
+	defer s.handlePathMu.Unlock()
+	pending, ok := s.pendingSetAttrs[inodePathKey(volumeID, inode)]
+	if ok {
+		delete(s.pendingSetAttrs, inodePathKey(volumeID, inode))
+	}
+	return pending, ok
+}
+
+func (s *FileSystemServer) clearPendingSetAttrWrite(volumeID string, inode uint64) {
+	if s == nil || inode == 0 {
+		return
+	}
+	s.handlePathMu.Lock()
+	defer s.handlePathMu.Unlock()
+	delete(s.pendingSetAttrs, inodePathKey(volumeID, inode))
+}
+
+func shouldDeferSizeSetAttr(valid uint32, handleID uint64, hasOpenInode bool) bool {
+	if handleID != 0 || !hasOpenInode || valid&uint32(meta.SetAttrSize) == 0 {
+		return false
+	}
+	allowed := uint32(meta.SetAttrSize | meta.SetAttrAtime | meta.SetAttrMtime | meta.SetAttrCtime | meta.SetAttrAtimeNow | meta.SetAttrMtimeNow | meta.SetAttrCtimeNow)
+	return valid&^allowed == 0
 }
 
 func (s *FileSystemServer) recordRemoteSyncChange(ctx context.Context, change *volsync.RemoteChange) context.Context {
@@ -825,6 +911,13 @@ func (s *FileSystemServer) Open(ctx context.Context, req *pb.OpenRequest) (*pb.O
 		return nil, status.Error(codes.Internal, syscall.Errno(errno).Error())
 	}
 
+	if req.Flags&uint32(syscall.O_TRUNC) != 0 {
+		path := s.resolvePathForHandleOrInode(volCtx, req.VolumeId, handleID, req.Inode, "Open")
+		if path != "" {
+			s.rememberHandlePath(req.VolumeId, handleID, req.Inode, path)
+		}
+	}
+
 	return &pb.OpenResponse{
 		HandleId: handleID,
 	}, nil
@@ -944,7 +1037,7 @@ func (s *FileSystemServer) Create(ctx context.Context, req *pb.CreateRequest) (*
 			}).Error("Create failed")
 			return nil, status.Error(mapErrnoToCode(syscall.Errno(errno)), syscall.Errno(errno).Error())
 		}
-		s.rememberHandlePath(req.VolumeId, handleID, path)
+		s.rememberHandlePath(req.VolumeId, handleID, uint64(entry.Inode), path)
 
 		eventType := pb.WatchEventType_WATCH_EVENT_TYPE_CREATE
 		if path == "" {
@@ -1257,6 +1350,7 @@ func (s *FileSystemServer) SetAttr(ctx context.Context, req *pb.SetAttrRequest) 
 			return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
 		}
 
+		_, hasOpenInode := s.lookupOpenInodePath(req.VolumeId, req.Inode)
 		path := s.resolvePathForHandleOrInode(volCtx, req.VolumeId, req.HandleId, req.Inode, "SetAttr")
 		eventType := pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
 		if req.Valid&uint32(meta.SetAttrMode) != 0 {
@@ -1278,6 +1372,10 @@ func (s *FileSystemServer) SetAttr(ctx context.Context, req *pb.SetAttrRequest) 
 				Path:      path,
 				Mode:      uint32Ptr(uint32(entry.Attr.Mode)),
 			})
+		case path != "" && shouldDeferSizeSetAttr(req.Valid, req.HandleId, hasOpenInode):
+			remoteRecord = "defer_size"
+			s.rememberPendingSetAttrWrite(req.VolumeId, req.Inode, path)
+			recordCtx = suppressSyncRecord(runCtx)
 		case path != "":
 			remoteRecord = "write"
 			stageStart := time.Now()
@@ -1374,6 +1472,7 @@ func (s *FileSystemServer) Fsync(ctx context.Context, req *pb.FsyncRequest) (*pb
 
 	if s.recordDirtyWriteReplayPayload(ctx, volCtx, req.VolumeId, dirty, "Fsync", "fsync") {
 		s.clearDirtyWrite(req.VolumeId, req.HandleId)
+		s.clearPendingSetAttrWrite(req.VolumeId, dirty.inode)
 	}
 	return &pb.Empty{}, nil
 }
@@ -1393,6 +1492,13 @@ func (s *FileSystemServer) Release(ctx context.Context, req *pb.ReleaseRequest) 
 
 	if dirty, ok := s.takeDirtyWrite(req.VolumeId, req.HandleId); ok {
 		s.recordDirtyWriteReplayPayload(ctx, volCtx, req.VolumeId, dirty, "Release", "release")
+		s.clearPendingSetAttrWrite(req.VolumeId, dirty.inode)
+	} else if pending, ok := s.takePendingSetAttrWrite(req.VolumeId, req.Inode); ok {
+		s.recordDirtyWriteReplayPayload(ctx, volCtx, req.VolumeId, dirtyWriteHandle{
+			volumeID: req.VolumeId,
+			inode:    pending.inode,
+			path:     pending.path,
+		}, "Release", "release")
 	}
 	s.clearHandlePath(req.VolumeId, req.HandleId)
 

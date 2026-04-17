@@ -424,6 +424,114 @@ func TestFlushDefersDirtyWriteReplayPayloadUntilRelease(t *testing.T) {
 	}
 }
 
+func TestSetAttrSizeOnOpenInodeDefersReplayPayloadUntilRelease(t *testing.T) {
+	volCtx := newMountedTestVolumeContext(t, "vol-1", "team-a")
+	recorder := &fakeSyncRecorder{}
+	server := NewFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{
+			"vol-1": volCtx,
+		},
+	}, nil, nil, nil, logrus.New(), recorder, nil)
+	ctx := authContext("team-a", "sandbox-1")
+
+	createResp, err := server.Create(ctx, &pb.CreateRequest{
+		VolumeId: "vol-1",
+		Parent:   uint64(meta.RootInode),
+		Name:     "hello.txt",
+		Mode:     0o644,
+		Flags:    uint32(syscall.O_RDWR),
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	recorder.remoteChanges = nil
+
+	if _, err := server.SetAttr(ctx, &pb.SetAttrRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		Valid:    uint32(meta.SetAttrSize),
+		Attr: &pb.GetAttrResponse{
+			Size: 0,
+		},
+	}); err != nil {
+		t.Fatalf("SetAttr() error = %v", err)
+	}
+	if len(recorder.remoteChanges) != 0 {
+		t.Fatalf("remoteChanges after SetAttr = %d, want 0", len(recorder.remoteChanges))
+	}
+
+	if _, err := server.Write(ctx, &pb.WriteRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		HandleId: createResp.HandleId,
+		Data:     []byte("hello"),
+	}); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if _, err := server.Release(ctx, &pb.ReleaseRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		HandleId: createResp.HandleId,
+	}); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+	if len(recorder.remoteChanges) != 1 {
+		t.Fatalf("remoteChanges after Release = %d, want 1", len(recorder.remoteChanges))
+	}
+	got := recorder.remoteChanges[0]
+	if got.EventType != db.SyncEventWrite || got.Path != "/hello.txt" || !got.ContentAvailable || string(got.ContentBytes) != "hello" {
+		t.Fatalf("remoteChanges[0] = %+v, want final write content for /hello.txt", got)
+	}
+}
+
+func TestSetAttrSizeOnOpenInodeRecordsTruncateOnReleaseWithoutWrite(t *testing.T) {
+	volCtx := newMountedTestVolumeContext(t, "vol-1", "team-a")
+	recorder := &fakeSyncRecorder{}
+	server := NewFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{
+			"vol-1": volCtx,
+		},
+	}, nil, nil, nil, logrus.New(), recorder, nil)
+	ctx := authContext("team-a", "sandbox-1")
+
+	createResp, err := server.Create(ctx, &pb.CreateRequest{
+		VolumeId: "vol-1",
+		Parent:   uint64(meta.RootInode),
+		Name:     "empty.txt",
+		Mode:     0o644,
+		Flags:    uint32(syscall.O_RDWR),
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	recorder.remoteChanges = nil
+
+	if _, err := server.SetAttr(ctx, &pb.SetAttrRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		Valid:    uint32(meta.SetAttrSize),
+		Attr: &pb.GetAttrResponse{
+			Size: 0,
+		},
+	}); err != nil {
+		t.Fatalf("SetAttr() error = %v", err)
+	}
+	if _, err := server.Release(ctx, &pb.ReleaseRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		HandleId: createResp.HandleId,
+	}); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+	if len(recorder.remoteChanges) != 1 {
+		t.Fatalf("remoteChanges after Release = %d, want 1", len(recorder.remoteChanges))
+	}
+	got := recorder.remoteChanges[0]
+	if got.EventType != db.SyncEventWrite || got.Path != "/empty.txt" || !got.ContentAvailable || len(got.ContentBytes) != 0 {
+		t.Fatalf("remoteChanges[0] = %+v, want empty truncate write for /empty.txt", got)
+	}
+}
+
 func TestCreateRejectsNamespaceIncompatiblePathBeforeMutation(t *testing.T) {
 	volCtx := newMountedTestVolumeContext(t, "vol-1", "team-a")
 	recorder := &fakeSyncRecorder{

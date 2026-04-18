@@ -19,6 +19,11 @@ type Config struct {
 	JuiceFSPrefetch   int
 	JuiceFSBufferSize string
 	JuiceFSWriteback  bool
+
+	// Experimental FUSE latency knobs for storage-proxy backed mounts.
+	FuseDeferFlushToRelease bool
+	FuseAsyncRelease        bool
+	FuseWritebackCache      bool
 }
 
 // VolumeConfig holds the config for a single mount request.

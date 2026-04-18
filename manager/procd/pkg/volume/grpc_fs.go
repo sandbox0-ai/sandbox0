@@ -24,13 +24,15 @@ type grpcFS struct {
 	tokenProvider TokenProvider
 	cacheTTL      time.Duration
 	logger        *zap.Logger
+	deferFlush    bool
+	asyncRelease  bool
 }
 
-func newGrpcFS(volumeID, sessionID, sessionSecret string, client pb.FileSystemClient, tokenProvider TokenProvider, cacheTTL time.Duration, logger *zap.Logger) *grpcFS {
+func newGrpcFS(volumeID, sessionID, sessionSecret string, client pb.FileSystemClient, tokenProvider TokenProvider, cacheTTL time.Duration, logger *zap.Logger, opts ...grpcFSOption) *grpcFS {
 	if cacheTTL < 0 {
 		cacheTTL = time.Second
 	}
-	return &grpcFS{
+	fs := &grpcFS{
 		RawFileSystem: fuse.NewDefaultRawFileSystem(),
 		volumeID:      volumeID,
 		sessionID:     sessionID,
@@ -39,6 +41,26 @@ func newGrpcFS(volumeID, sessionID, sessionSecret string, client pb.FileSystemCl
 		tokenProvider: tokenProvider,
 		cacheTTL:      cacheTTL,
 		logger:        logger,
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(fs)
+		}
+	}
+	return fs
+}
+
+type grpcFSOption func(*grpcFS)
+
+func withDeferredFlushToRelease(enabled bool) grpcFSOption {
+	return func(fs *grpcFS) {
+		fs.deferFlush = enabled
+	}
+}
+
+func withAsyncRelease(enabled bool) grpcFSOption {
+	return func(fs *grpcFS) {
+		fs.asyncRelease = enabled
 	}
 }
 
@@ -425,21 +447,35 @@ func (fs *grpcFS) Write(cancel <-chan struct{}, input *fuse.WriteIn, data []byte
 }
 
 func (fs *grpcFS) Release(cancel <-chan struct{}, input *fuse.ReleaseIn) {
-	ctx, err := fs.withToken(context.Background())
-	if err != nil {
-		return
-	}
-	_, _ = fs.client.Release(ctx, &pb.ReleaseRequest{
+	req := &pb.ReleaseRequest{
 		VolumeId: fs.volumeID,
 		Inode:    input.NodeId,
 		HandleId: input.Fh,
 		Actor:    actorFromCaller(input.Caller),
-	})
+	}
+	if fs.asyncRelease {
+		go fs.release(req)
+		return
+	}
+	fs.release(req)
+}
+
+func (fs *grpcFS) release(req *pb.ReleaseRequest) {
+	ctx, err := fs.withToken(context.Background())
+	if err != nil {
+		return
+	}
+	if _, err := fs.client.Release(ctx, req); err != nil && fs.logger != nil {
+		fs.logger.Warn("Failed to release storage-proxy file handle", zap.Error(err))
+	}
 }
 
 func (fs *grpcFS) Flush(cancel <-chan struct{}, input *fuse.FlushIn) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
+	}
+	if fs.deferFlush {
+		return fuse.OK
 	}
 	ctx, err := fs.withToken(context.Background())
 	if err != nil {

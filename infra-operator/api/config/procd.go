@@ -41,6 +41,15 @@ type ProcdConfig struct {
 	// +optional
 	// +kubebuilder:default=true
 	JuiceFSWriteback bool `yaml:"juicefs_writeback" json:"juicefsWriteback"`
+	// +optional
+	// +kubebuilder:default=false
+	FuseDeferFlushToRelease bool `yaml:"fuse_defer_flush_to_release" json:"fuseDeferFlushToRelease"`
+	// +optional
+	// +kubebuilder:default=false
+	FuseAsyncRelease bool `yaml:"fuse_async_release" json:"fuseAsyncRelease"`
+	// +optional
+	// +kubebuilder:default=false
+	FuseWritebackCache bool `yaml:"fuse_writeback_cache" json:"fuseWritebackCache"`
 
 	// File manager configuration
 	// +optional

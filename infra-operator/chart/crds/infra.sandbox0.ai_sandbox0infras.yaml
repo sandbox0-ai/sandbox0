@@ -1618,6 +1618,15 @@ spec:
                               contextMaxLifetime:
                                 default: 0s
                                 type: string
+                              fuseAsyncRelease:
+                                default: false
+                                type: boolean
+                              fuseDeferFlushToRelease:
+                                default: false
+                                type: boolean
+                              fuseWritebackCache:
+                                default: false
+                                type: boolean
                               httpPort:
                                 default: 49983
                                 type: integer

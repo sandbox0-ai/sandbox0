@@ -198,7 +198,17 @@ func (m *Manager) mount(ctx context.Context, req *MountRequest, reserved bool) (
 		return nil, err
 	}
 
-	fs := newGrpcFS(req.SandboxVolumeID, mountSessionID, mountSessionSecret, client, m.tokenProvider, m.cfg.CacheTTL, m.logger)
+	fs := newGrpcFS(
+		req.SandboxVolumeID,
+		mountSessionID,
+		mountSessionSecret,
+		client,
+		m.tokenProvider,
+		m.cfg.CacheTTL,
+		m.logger,
+		withDeferredFlushToRelease(m.cfg.FuseDeferFlushToRelease),
+		withAsyncRelease(m.cfg.FuseAsyncRelease),
+	)
 	server, err := m.mountFuse(fs, mountPoint)
 	if err != nil {
 		_ = m.unmountVolumeRemote(ctx, client, req.SandboxVolumeID, mountSessionID, mountSessionSecret)
@@ -702,6 +712,9 @@ func (m *Manager) mountFuse(fs *grpcFS, mountPoint string) (*fuse.Server, error)
 		DirectMount:   true,
 		MaxWrite:      128 * 1024,
 	}
+	if m.cfg != nil {
+		opt.EnableWriteback = m.cfg.FuseWritebackCache
+	}
 
 	server, err := fuse.NewServer(fs, mountPoint, opt)
 	if err != nil {
@@ -837,7 +850,17 @@ func (m *Manager) remountVolume(volumeID, mountSessionID, invalidateID string) {
 		return
 	}
 
-	fs := newGrpcFS(volumeID, info.mountSessionID, info.mountSecret, client, m.tokenProvider, m.cfg.CacheTTL, m.logger)
+	fs := newGrpcFS(
+		volumeID,
+		info.mountSessionID,
+		info.mountSecret,
+		client,
+		m.tokenProvider,
+		m.cfg.CacheTTL,
+		m.logger,
+		withDeferredFlushToRelease(m.cfg.FuseDeferFlushToRelease),
+		withAsyncRelease(m.cfg.FuseAsyncRelease),
+	)
 	server, err := m.mountFuse(fs, mountPoint)
 	if err != nil {
 		remountErr = err

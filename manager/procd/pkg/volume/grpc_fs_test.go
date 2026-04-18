@@ -4,6 +4,7 @@ import (
 	"context"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
@@ -18,9 +19,14 @@ func (staticTokenProvider) GetInternalToken() string { return "token" }
 
 type captureFileSystemClient struct {
 	pb.FileSystemClient
-	lookupReq *pb.LookupRequest
-	writeReq  *pb.WriteRequest
-	lookupMD  metadata.MD
+	lookupReq  *pb.LookupRequest
+	writeReq   *pb.WriteRequest
+	flushReq   *pb.FlushRequest
+	releaseReq *pb.ReleaseRequest
+	lookupMD   metadata.MD
+	flushes    int
+	releases   int
+	releaseCh  chan struct{}
 }
 
 func (c *captureFileSystemClient) Lookup(ctx context.Context, req *pb.LookupRequest, _ ...grpc.CallOption) (*pb.NodeResponse, error) {
@@ -34,6 +40,21 @@ func (c *captureFileSystemClient) Lookup(ctx context.Context, req *pb.LookupRequ
 func (c *captureFileSystemClient) Write(_ context.Context, req *pb.WriteRequest, _ ...grpc.CallOption) (*pb.WriteResponse, error) {
 	c.writeReq = req
 	return &pb.WriteResponse{BytesWritten: int64(len(req.Data))}, nil
+}
+
+func (c *captureFileSystemClient) Flush(_ context.Context, req *pb.FlushRequest, _ ...grpc.CallOption) (*pb.Empty, error) {
+	c.flushReq = req
+	c.flushes++
+	return &pb.Empty{}, nil
+}
+
+func (c *captureFileSystemClient) Release(_ context.Context, req *pb.ReleaseRequest, _ ...grpc.CallOption) (*pb.Empty, error) {
+	c.releaseReq = req
+	c.releases++
+	if c.releaseCh != nil {
+		close(c.releaseCh)
+	}
+	return &pb.Empty{}, nil
 }
 
 func TestGrpcFSLookupForwardsCallerActor(t *testing.T) {
@@ -96,5 +117,65 @@ func TestGrpcFSLookupUsesSessionCredentialWhenPresent(t *testing.T) {
 	}
 	if got := client.lookupMD["x-volume-session-secret"]; len(got) != 1 || got[0] != "secret-1" {
 		t.Fatalf("x-volume-session-secret = %v, want [secret-1]", got)
+	}
+}
+
+func TestGrpcFSFlushCanDeferToRelease(t *testing.T) {
+	client := &captureFileSystemClient{}
+	fs := newGrpcFS("vol-1", "", "", client, staticTokenProvider{}, 0, zap.NewNop(), withDeferredFlushToRelease(true))
+	input := &fuse.FlushIn{InHeader: fuse.InHeader{NodeId: 5}, Fh: 11}
+
+	if st := fs.Flush(nil, input); st != fuse.OK {
+		t.Fatalf("Flush() status = %v, want OK", st)
+	}
+	if client.flushes != 0 {
+		t.Fatalf("Flush() called storage-proxy %d times, want 0", client.flushes)
+	}
+}
+
+func TestGrpcFSFlushCallsStorageProxyByDefault(t *testing.T) {
+	client := &captureFileSystemClient{}
+	fs := newGrpcFS("vol-1", "", "", client, staticTokenProvider{}, 0, zap.NewNop())
+	input := &fuse.FlushIn{InHeader: fuse.InHeader{NodeId: 5}, Fh: 11}
+
+	if st := fs.Flush(nil, input); st != fuse.OK {
+		t.Fatalf("Flush() status = %v, want OK", st)
+	}
+	if client.flushes != 1 {
+		t.Fatalf("Flush() called storage-proxy %d times, want 1", client.flushes)
+	}
+	if client.flushReq == nil || client.flushReq.HandleId != 11 {
+		t.Fatalf("Flush() request = %+v, want handle 11", client.flushReq)
+	}
+}
+
+func TestGrpcFSAsyncReleaseCopiesRequestBeforeReturning(t *testing.T) {
+	client := &captureFileSystemClient{releaseCh: make(chan struct{})}
+	fs := newGrpcFS("vol-1", "", "", client, staticTokenProvider{}, 0, zap.NewNop(), withAsyncRelease(true))
+	input := &fuse.ReleaseIn{
+		InHeader: fuse.InHeader{
+			NodeId: 5,
+			Caller: fuse.Caller{
+				Owner: fuse.Owner{Uid: 1001, Gid: 1002},
+				Pid:   1003,
+			},
+		},
+		Fh: 11,
+	}
+
+	fs.Release(nil, input)
+	select {
+	case <-client.releaseCh:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for async release")
+	}
+	if client.releases != 1 {
+		t.Fatalf("Release() calls = %d, want 1", client.releases)
+	}
+	if client.releaseReq == nil || client.releaseReq.Inode != 5 || client.releaseReq.HandleId != 11 {
+		t.Fatalf("Release() request = %+v, want inode 5 handle 11", client.releaseReq)
+	}
+	if client.releaseReq.Actor == nil || client.releaseReq.Actor.Pid != 1003 || client.releaseReq.Actor.Uid != 1001 {
+		t.Fatalf("Release() actor = %+v, want pid=1003 uid=1001", client.releaseReq.Actor)
 	}
 }

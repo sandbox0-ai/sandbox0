@@ -355,6 +355,15 @@ type ProcdConfig struct {
 	// +kubebuilder:default=true
 	JuiceFSWriteback bool `json:"juicefsWriteback,omitempty"`
 	// +optional
+	// +kubebuilder:default=false
+	FuseDeferFlushToRelease bool `json:"fuseDeferFlushToRelease,omitempty"`
+	// +optional
+	// +kubebuilder:default=false
+	FuseAsyncRelease bool `json:"fuseAsyncRelease,omitempty"`
+	// +optional
+	// +kubebuilder:default=false
+	FuseWritebackCache bool `json:"fuseWritebackCache,omitempty"`
+	// +optional
 	// +kubebuilder:default="/workspace"
 	RootPath string `json:"rootPath,omitempty"`
 	// +optional

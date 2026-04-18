@@ -44,6 +44,7 @@ type FileSystemServer struct {
 	handlePathMu      sync.Mutex
 	handlePaths       map[string]openHandlePath
 	openInodePaths    map[string]openHandlePath
+	cachedInodePaths  map[string]string
 	pendingSetAttrs   map[string]pendingSetAttrWrite
 	pendingCreates    map[string]pendingCreate
 	pendingCreatePath map[string]string
@@ -111,6 +112,7 @@ func NewFileSystemServer(volMgr volumeManager, volumeRepo VolumeRepository, even
 		dirtyWriteHandles: make(map[string]dirtyWriteHandle),
 		handlePaths:       make(map[string]openHandlePath),
 		openInodePaths:    make(map[string]openHandlePath),
+		cachedInodePaths:  make(map[string]string),
 		pendingSetAttrs:   make(map[string]pendingSetAttrWrite),
 		pendingCreates:    make(map[string]pendingCreate),
 		pendingCreatePath: make(map[string]string),
@@ -334,7 +336,63 @@ func (s *FileSystemServer) rememberHandlePath(volumeID string, handleID, inode u
 			inode: inode,
 			path:  path,
 		}
+		s.rememberCachedInodePathLocked(volumeID, inode, path)
 	}
+}
+
+func (s *FileSystemServer) rememberCachedInodePath(volumeID string, inode uint64, path string) {
+	if s == nil || inode == 0 || path == "" {
+		return
+	}
+	s.handlePathMu.Lock()
+	defer s.handlePathMu.Unlock()
+	s.rememberCachedInodePathLocked(volumeID, inode, path)
+}
+
+func (s *FileSystemServer) rememberCachedInodePathLocked(volumeID string, inode uint64, path string) {
+	if s.cachedInodePaths == nil {
+		s.cachedInodePaths = make(map[string]string)
+	}
+	s.cachedInodePaths[inodePathKey(volumeID, inode)] = path
+}
+
+func (s *FileSystemServer) lookupCachedInodePath(volumeID string, inode uint64) (string, bool) {
+	if s == nil || inode == 0 {
+		return "", false
+	}
+	s.handlePathMu.Lock()
+	defer s.handlePathMu.Unlock()
+	path, ok := s.cachedInodePaths[inodePathKey(volumeID, inode)]
+	return path, ok
+}
+
+func (s *FileSystemServer) clearCachedVolumePaths(volumeID string) {
+	if s == nil || volumeID == "" {
+		return
+	}
+	s.handlePathMu.Lock()
+	defer s.handlePathMu.Unlock()
+	prefix := volumeID + "|"
+	for key := range s.cachedInodePaths {
+		if strings.HasPrefix(key, prefix) {
+			delete(s.cachedInodePaths, key)
+		}
+	}
+}
+
+func (s *FileSystemServer) resolveChildPathCached(volCtx *volume.VolumeContext, volumeID string, parent uint64, name string) string {
+	parentPath := ""
+	if meta.Ino(parent) == volumeRootInode(volCtx) {
+		parentPath = "/"
+	} else if cached, ok := s.lookupCachedInodePath(volumeID, parent); ok {
+		parentPath = cached
+	} else {
+		parentPath = resolveInodePath(volCtx, parent)
+		if parentPath != "" {
+			s.rememberCachedInodePath(volumeID, parent, parentPath)
+		}
+	}
+	return joinChildPath(parentPath, name)
 }
 
 func (s *FileSystemServer) lookupHandlePath(volumeID string, handleID uint64) (openHandlePath, bool) {
@@ -1135,8 +1193,10 @@ func (s *FileSystemServer) Write(ctx context.Context, req *pb.WriteRequest) (*pb
 func (s *FileSystemServer) Create(ctx context.Context, req *pb.CreateRequest) (*pb.NodeResponse, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.NodeResponse, error) {
 		parent := mapInode(volCtx, req.Parent)
-		path := resolveChildPath(volCtx, uint64(parent), req.Name)
 		stageStart := time.Now()
+		path := s.resolveChildPathCached(volCtx, req.VolumeId, uint64(parent), req.Name)
+		s.observeGRPCStage("Create", "resolve_child_path", stageStart)
+		stageStart = time.Now()
 		if err := s.validateNamespaceMutation(runCtx, buildNamespaceMutationRequest(runCtx, req.VolumeId, db.SyncEventCreate, path, "")); err != nil {
 			s.observeGRPCStage("Create", "validate_namespace_mutation", stageStart)
 			return nil, err
@@ -1163,6 +1223,7 @@ func (s *FileSystemServer) Create(ctx context.Context, req *pb.CreateRequest) (*
 			return nil, status.Error(mapErrnoToCode(syscall.Errno(errno)), syscall.Errno(errno).Error())
 		}
 		s.rememberHandlePath(req.VolumeId, handleID, uint64(entry.Inode), path)
+		s.rememberCachedInodePath(req.VolumeId, uint64(entry.Inode), path)
 
 		eventType := pb.WatchEventType_WATCH_EVENT_TYPE_CREATE
 		if path == "" {
@@ -1193,7 +1254,7 @@ func (s *FileSystemServer) Create(ctx context.Context, req *pb.CreateRequest) (*
 func (s *FileSystemServer) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb.NodeResponse, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.NodeResponse, error) {
 		parent := mapInode(volCtx, req.Parent)
-		path := resolveChildPath(volCtx, uint64(parent), req.Name)
+		path := s.resolveChildPathCached(volCtx, req.VolumeId, uint64(parent), req.Name)
 		if err := s.validateNamespaceMutation(runCtx, buildNamespaceMutationRequest(runCtx, req.VolumeId, db.SyncEventCreate, path, "")); err != nil {
 			return nil, err
 		}
@@ -1205,6 +1266,7 @@ func (s *FileSystemServer) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb
 		if st != 0 {
 			return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
 		}
+		s.rememberCachedInodePath(req.VolumeId, uint64(entry.Inode), path)
 
 		eventType := pb.WatchEventType_WATCH_EVENT_TYPE_CREATE
 		if path == "" {
@@ -1239,7 +1301,7 @@ func (s *FileSystemServer) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb
 func (s *FileSystemServer) Mknod(ctx context.Context, req *pb.MknodRequest) (*pb.NodeResponse, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.NodeResponse, error) {
 		parent := mapInode(volCtx, req.Parent)
-		path := resolveChildPath(volCtx, uint64(parent), req.Name)
+		path := s.resolveChildPathCached(volCtx, req.VolumeId, uint64(parent), req.Name)
 		if err := s.validateNamespaceMutation(runCtx, buildNamespaceMutationRequest(runCtx, req.VolumeId, db.SyncEventCreate, path, "")); err != nil {
 			return nil, err
 		}
@@ -1251,6 +1313,7 @@ func (s *FileSystemServer) Mknod(ctx context.Context, req *pb.MknodRequest) (*pb
 		if st != 0 {
 			return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
 		}
+		s.rememberCachedInodePath(req.VolumeId, uint64(entry.Inode), path)
 
 		eventType := pb.WatchEventType_WATCH_EVENT_TYPE_CREATE
 		if path == "" {
@@ -1301,7 +1364,7 @@ func (s *FileSystemServer) Unlink(ctx context.Context, req *pb.UnlinkRequest) (*
 			return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
 		}
 
-		path := resolveChildPath(volCtx, uint64(mapInode(volCtx, req.Parent)), req.Name)
+		path := s.resolveChildPathCached(volCtx, req.VolumeId, uint64(mapInode(volCtx, req.Parent)), req.Name)
 		eventType := pb.WatchEventType_WATCH_EVENT_TYPE_REMOVE
 		if path == "" {
 			eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
@@ -1315,6 +1378,7 @@ func (s *FileSystemServer) Unlink(ctx context.Context, req *pb.UnlinkRequest) (*
 				Path:      path,
 			})
 		}
+		s.clearCachedVolumePaths(req.VolumeId)
 		s.publishEvent(recordCtx, &pb.WatchEvent{
 			VolumeId:  req.VolumeId,
 			EventType: eventType,
@@ -1402,8 +1466,8 @@ func (s *FileSystemServer) Rename(ctx context.Context, req *pb.RenameRequest) (*
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.Empty, error) {
 		oldParent := mapInode(volCtx, req.OldParent)
 		newParent := mapInode(volCtx, req.NewParent)
-		oldPath := resolveChildPath(volCtx, uint64(oldParent), req.OldName)
-		newPath := resolveChildPath(volCtx, uint64(newParent), req.NewName)
+		oldPath := s.resolveChildPathCached(volCtx, req.VolumeId, uint64(oldParent), req.OldName)
+		newPath := s.resolveChildPathCached(volCtx, req.VolumeId, uint64(newParent), req.NewName)
 		if err := s.validateNamespaceMutation(runCtx, buildNamespaceMutationRequest(runCtx, req.VolumeId, db.SyncEventRename, newPath, oldPath)); err != nil {
 			return nil, err
 		}
@@ -1431,6 +1495,7 @@ func (s *FileSystemServer) Rename(ctx context.Context, req *pb.RenameRequest) (*
 				OldPath:   oldPath,
 			})
 		}
+		s.clearCachedVolumePaths(req.VolumeId)
 		s.publishEvent(recordCtx, &pb.WatchEvent{
 			VolumeId:  req.VolumeId,
 			EventType: eventType,
@@ -1664,7 +1729,7 @@ func (s *FileSystemServer) Rmdir(ctx context.Context, req *pb.RmdirRequest) (*pb
 			return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
 		}
 
-		path := resolveChildPath(volCtx, uint64(mapInode(volCtx, req.Parent)), req.Name)
+		path := s.resolveChildPathCached(volCtx, req.VolumeId, uint64(mapInode(volCtx, req.Parent)), req.Name)
 		eventType := pb.WatchEventType_WATCH_EVENT_TYPE_REMOVE
 		if path == "" {
 			eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
@@ -1678,6 +1743,7 @@ func (s *FileSystemServer) Rmdir(ctx context.Context, req *pb.RmdirRequest) (*pb
 				Path:      path,
 			})
 		}
+		s.clearCachedVolumePaths(req.VolumeId)
 		s.publishEvent(recordCtx, &pb.WatchEvent{
 			VolumeId:  req.VolumeId,
 			EventType: eventType,
@@ -1727,7 +1793,7 @@ func (s *FileSystemServer) StatFs(ctx context.Context, req *pb.StatFsRequest) (*
 func (s *FileSystemServer) Symlink(ctx context.Context, req *pb.SymlinkRequest) (*pb.NodeResponse, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.NodeResponse, error) {
 		parent := mapInode(volCtx, req.Parent)
-		path := resolveChildPath(volCtx, uint64(parent), req.Name)
+		path := s.resolveChildPathCached(volCtx, req.VolumeId, uint64(parent), req.Name)
 		if err := s.validateNamespaceMutation(runCtx, buildNamespaceMutationRequest(runCtx, req.VolumeId, db.SyncEventCreate, path, "")); err != nil {
 			return nil, err
 		}
@@ -1739,6 +1805,7 @@ func (s *FileSystemServer) Symlink(ctx context.Context, req *pb.SymlinkRequest) 
 		if st != 0 {
 			return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
 		}
+		s.rememberCachedInodePath(req.VolumeId, uint64(entry.Inode), path)
 
 		eventType := pb.WatchEventType_WATCH_EVENT_TYPE_CREATE
 		if path == "" {
@@ -1784,7 +1851,7 @@ func (s *FileSystemServer) Link(ctx context.Context, req *pb.LinkRequest) (*pb.N
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.NodeResponse, error) {
 		inode := mapInode(volCtx, req.Inode)
 		newParent := mapInode(volCtx, req.NewParent)
-		path := resolveChildPath(volCtx, uint64(newParent), req.NewName)
+		path := s.resolveChildPathCached(volCtx, req.VolumeId, uint64(newParent), req.NewName)
 		if err := s.validateNamespaceMutation(runCtx, buildNamespaceMutationRequest(runCtx, req.VolumeId, db.SyncEventCreate, path, "")); err != nil {
 			return nil, err
 		}
@@ -1797,6 +1864,7 @@ func (s *FileSystemServer) Link(ctx context.Context, req *pb.LinkRequest) (*pb.N
 		if st != 0 {
 			return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
 		}
+		s.rememberCachedInodePath(req.VolumeId, uint64(entry.Inode), path)
 
 		eventType := pb.WatchEventType_WATCH_EVENT_TYPE_CREATE
 		if path == "" {
@@ -2204,15 +2272,10 @@ func resolveInodePath(volCtx *volume.VolumeContext, inode uint64) string {
 	return trimVolumeRoot(volCtx, paths[0])
 }
 
-func resolveChildPath(volCtx *volume.VolumeContext, parent uint64, name string) string {
-	if volCtx == nil {
+func joinChildPath(parentPath, name string) string {
+	if parentPath == "" || name == "" {
 		return ""
 	}
-	parentPaths := volCtx.Meta.GetPaths(meta.Background(), meta.Ino(parent))
-	if len(parentPaths) == 0 {
-		return ""
-	}
-	parentPath := trimVolumeRoot(volCtx, parentPaths[0])
 	if parentPath == "/" {
 		return "/" + name
 	}

@@ -407,6 +407,43 @@ func TestCreatePropagatesNamespaceValidationAndRecordsCreateOnRelease(t *testing
 	}
 }
 
+func TestCreateUsesCachedParentPathFromMkdir(t *testing.T) {
+	volCtx := newMountedTestVolumeContext(t, "vol-1", "team-a")
+	recorder := &fakeSyncRecorder{}
+	server := NewFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{
+			"vol-1": volCtx,
+		},
+	}, nil, nil, nil, logrus.New(), recorder, nil)
+	ctx := authContext("team-a", "sandbox-1")
+
+	dirResp, err := server.Mkdir(ctx, &pb.MkdirRequest{
+		VolumeId: "vol-1",
+		Parent:   uint64(meta.RootInode),
+		Name:     "cached",
+		Mode:     0o755,
+	})
+	if err != nil {
+		t.Fatalf("Mkdir() error = %v", err)
+	}
+	if cached, ok := server.lookupCachedInodePath("vol-1", dirResp.Inode); !ok || cached != "/cached" {
+		t.Fatalf("cached dir path = %q, %v; want /cached, true", cached, ok)
+	}
+
+	_, err = server.Create(ctx, &pb.CreateRequest{
+		VolumeId: "vol-1",
+		Parent:   dirResp.Inode,
+		Name:     "hello.txt",
+		Mode:     0o644,
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if recorder.lastValidate == nil || recorder.lastValidate.Path != "/cached/hello.txt" {
+		t.Fatalf("lastValidate = %+v, want /cached/hello.txt", recorder.lastValidate)
+	}
+}
+
 func TestCreatePendingCreateFlushesBeforeChmod(t *testing.T) {
 	volCtx := newMountedTestVolumeContext(t, "vol-1", "team-a")
 	recorder := &fakeSyncRecorder{}

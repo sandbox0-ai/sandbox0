@@ -50,6 +50,9 @@ type ProcdConfig struct {
 	// +optional
 	// +kubebuilder:default=false
 	FuseWritebackCache bool `yaml:"fuse_writeback_cache" json:"fuseWritebackCache"`
+	// +optional
+	// +kubebuilder:default=false
+	FuseSkipAccess bool `yaml:"fuse_skip_access" json:"fuseSkipAccess"`
 
 	// File manager configuration
 	// +optional

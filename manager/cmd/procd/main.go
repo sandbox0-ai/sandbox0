@@ -143,6 +143,7 @@ func main() {
 		FuseDeferFlushToRelease: cfg.FuseDeferFlushToRelease,
 		FuseAsyncRelease:        cfg.FuseAsyncRelease,
 		FuseWritebackCache:      cfg.FuseWritebackCache,
+		FuseSkipAccess:          cfg.FuseSkipAccess,
 		GRPCMaxMsgSize:          100 * 1024 * 1024, // could be made configurable if added to ProcdConfig
 	}
 	volumeManager := volume.NewManager(volumeCfg, tokenProvider, logger)

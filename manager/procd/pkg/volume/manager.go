@@ -208,6 +208,7 @@ func (m *Manager) mount(ctx context.Context, req *MountRequest, reserved bool) (
 		m.logger,
 		withDeferredFlushToRelease(m.cfg.FuseDeferFlushToRelease),
 		withAsyncRelease(m.cfg.FuseAsyncRelease),
+		withSkipAccess(m.cfg.FuseSkipAccess),
 	)
 	server, err := m.mountFuse(fs, mountPoint)
 	if err != nil {
@@ -860,6 +861,7 @@ func (m *Manager) remountVolume(volumeID, mountSessionID, invalidateID string) {
 		m.logger,
 		withDeferredFlushToRelease(m.cfg.FuseDeferFlushToRelease),
 		withAsyncRelease(m.cfg.FuseAsyncRelease),
+		withSkipAccess(m.cfg.FuseSkipAccess),
 	)
 	server, err := m.mountFuse(fs, mountPoint)
 	if err != nil {

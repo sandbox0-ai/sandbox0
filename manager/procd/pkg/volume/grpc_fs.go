@@ -26,6 +26,7 @@ type grpcFS struct {
 	logger        *zap.Logger
 	deferFlush    bool
 	asyncRelease  bool
+	skipAccess    bool
 }
 
 func newGrpcFS(volumeID, sessionID, sessionSecret string, client pb.FileSystemClient, tokenProvider TokenProvider, cacheTTL time.Duration, logger *zap.Logger, opts ...grpcFSOption) *grpcFS {
@@ -61,6 +62,12 @@ func withDeferredFlushToRelease(enabled bool) grpcFSOption {
 func withAsyncRelease(enabled bool) grpcFSOption {
 	return func(fs *grpcFS) {
 		fs.asyncRelease = enabled
+	}
+}
+
+func withSkipAccess(enabled bool) grpcFSOption {
+	return func(fs *grpcFS) {
+		fs.skipAccess = enabled
 	}
 }
 
@@ -337,6 +344,9 @@ func (fs *grpcFS) Readlink(cancel <-chan struct{}, header *fuse.InHeader) ([]byt
 func (fs *grpcFS) Access(cancel <-chan struct{}, input *fuse.AccessIn) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
+	}
+	if fs.skipAccess {
+		return fuse.OK
 	}
 	ctx, err := fs.withToken(context.Background())
 	if err != nil {

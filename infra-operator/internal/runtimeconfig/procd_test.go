@@ -12,6 +12,7 @@ func TestToManagerCopiesProcdFuseLatencyKnobs(t *testing.T) {
 			FuseDeferFlushToRelease: true,
 			FuseAsyncRelease:        true,
 			FuseWritebackCache:      true,
+			FuseSkipAccess:          true,
 		},
 	})
 
@@ -23,5 +24,8 @@ func TestToManagerCopiesProcdFuseLatencyKnobs(t *testing.T) {
 	}
 	if !cfg.ProcdConfig.FuseWritebackCache {
 		t.Fatal("expected FuseWritebackCache to be copied")
+	}
+	if !cfg.ProcdConfig.FuseSkipAccess {
+		t.Fatal("expected FuseSkipAccess to be copied")
 	}
 }

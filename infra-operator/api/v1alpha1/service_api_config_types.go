@@ -364,6 +364,9 @@ type ProcdConfig struct {
 	// +kubebuilder:default=false
 	FuseWritebackCache bool `json:"fuseWritebackCache,omitempty"`
 	// +optional
+	// +kubebuilder:default=false
+	FuseSkipAccess bool `json:"fuseSkipAccess,omitempty"`
+	// +optional
 	// +kubebuilder:default="/workspace"
 	RootPath string `json:"rootPath,omitempty"`
 	// +optional

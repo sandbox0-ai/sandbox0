@@ -24,6 +24,7 @@ type Config struct {
 	FuseDeferFlushToRelease bool
 	FuseAsyncRelease        bool
 	FuseWritebackCache      bool
+	FuseSkipAccess          bool
 }
 
 // VolumeConfig holds the config for a single mount request.

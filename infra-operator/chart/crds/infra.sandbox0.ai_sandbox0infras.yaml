@@ -1624,6 +1624,9 @@ spec:
                               fuseDeferFlushToRelease:
                                 default: false
                                 type: boolean
+                              fuseSkipAccess:
+                                default: false
+                                type: boolean
                               fuseWritebackCache:
                                 default: false
                                 type: boolean

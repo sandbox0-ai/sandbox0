@@ -20,6 +20,7 @@ func (staticTokenProvider) GetInternalToken() string { return "token" }
 type captureFileSystemClient struct {
 	pb.FileSystemClient
 	lookupReq  *pb.LookupRequest
+	accessReq  *pb.AccessRequest
 	writeReq   *pb.WriteRequest
 	flushReq   *pb.FlushRequest
 	releaseReq *pb.ReleaseRequest
@@ -40,6 +41,11 @@ func (c *captureFileSystemClient) Lookup(ctx context.Context, req *pb.LookupRequ
 func (c *captureFileSystemClient) Write(_ context.Context, req *pb.WriteRequest, _ ...grpc.CallOption) (*pb.WriteResponse, error) {
 	c.writeReq = req
 	return &pb.WriteResponse{BytesWritten: int64(len(req.Data))}, nil
+}
+
+func (c *captureFileSystemClient) Access(_ context.Context, req *pb.AccessRequest, _ ...grpc.CallOption) (*pb.Empty, error) {
+	c.accessReq = req
+	return &pb.Empty{}, nil
 }
 
 func (c *captureFileSystemClient) Flush(_ context.Context, req *pb.FlushRequest, _ ...grpc.CallOption) (*pb.Empty, error) {
@@ -146,6 +152,32 @@ func TestGrpcFSFlushCallsStorageProxyByDefault(t *testing.T) {
 	}
 	if client.flushReq == nil || client.flushReq.HandleId != 11 {
 		t.Fatalf("Flush() request = %+v, want handle 11", client.flushReq)
+	}
+}
+
+func TestGrpcFSSkipAccessReturnsWithoutStorageProxy(t *testing.T) {
+	client := &captureFileSystemClient{}
+	fs := newGrpcFS("vol-1", "", "", client, staticTokenProvider{}, 0, zap.NewNop(), withSkipAccess(true))
+	input := &fuse.AccessIn{InHeader: fuse.InHeader{NodeId: 5}, Mask: 4}
+
+	if st := fs.Access(nil, input); st != fuse.OK {
+		t.Fatalf("Access() status = %v, want OK", st)
+	}
+	if client.accessReq != nil {
+		t.Fatalf("Access() called storage-proxy with %+v, want no call", client.accessReq)
+	}
+}
+
+func TestGrpcFSAccessCallsStorageProxyByDefault(t *testing.T) {
+	client := &captureFileSystemClient{}
+	fs := newGrpcFS("vol-1", "", "", client, staticTokenProvider{}, 0, zap.NewNop())
+	input := &fuse.AccessIn{InHeader: fuse.InHeader{NodeId: 5}, Mask: 4}
+
+	if st := fs.Access(nil, input); st != fuse.OK {
+		t.Fatalf("Access() status = %v, want OK", st)
+	}
+	if client.accessReq == nil || client.accessReq.Inode != 5 || client.accessReq.Mask != 4 {
+		t.Fatalf("Access() request = %+v, want inode 5 mask 4", client.accessReq)
 	}
 }
 

@@ -45,6 +45,7 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 		FuseDeferFlushToRelease: spec.ProcdConfig.FuseDeferFlushToRelease,
 		FuseAsyncRelease:        spec.ProcdConfig.FuseAsyncRelease,
 		FuseWritebackCache:      spec.ProcdConfig.FuseWritebackCache,
+		FuseSkipAccess:          spec.ProcdConfig.FuseSkipAccess,
 		RootPath:                spec.ProcdConfig.RootPath,
 		CacheMaxBytes:           spec.ProcdConfig.CacheMaxBytes,
 		CacheTTL:                spec.ProcdConfig.CacheTTL,

@@ -71,6 +71,9 @@ type StorageProxyConfig struct {
 	// +kubebuilder:default="0s"
 	JuiceFSUploadDelay string `yaml:"juicefs_upload_delay" json:"juicefsUploadDelay"`
 	// +optional
+	// +kubebuilder:default="0s"
+	JuiceFSSkipDirMtime string `yaml:"juicefs_skip_dir_mtime" json:"juicefsSkipDirMtime"`
+	// +optional
 	// +kubebuilder:default=false
 	JuiceFSEncryptionEnabled bool `yaml:"juicefs_encryption_enabled" json:"juicefsEncryptionEnabled"`
 	// +optional
@@ -234,6 +237,11 @@ func (c *StorageProxyConfig) Validate() error {
 	if c.JuiceFSUploadDelay != "" {
 		if _, err := time.ParseDuration(c.JuiceFSUploadDelay); err != nil {
 			return &ConfigError{Message: fmt.Sprintf("invalid juicefs_upload_delay %q", c.JuiceFSUploadDelay)}
+		}
+	}
+	if c.JuiceFSSkipDirMtime != "" {
+		if _, err := time.ParseDuration(c.JuiceFSSkipDirMtime); err != nil {
+			return &ConfigError{Message: fmt.Sprintf("invalid juicefs_skip_dir_mtime %q", c.JuiceFSSkipDirMtime)}
 		}
 	}
 	return nil

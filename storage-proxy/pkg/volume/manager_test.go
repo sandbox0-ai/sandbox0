@@ -15,6 +15,20 @@ type mockMountRegistrar struct {
 	unregistered []string
 }
 
+func TestBuildMetaConfCopiesSkipDirMtime(t *testing.T) {
+	metaConf := buildMetaConf(&config.StorageProxyConfig{
+		JuiceFSMetaRetries:  3,
+		JuiceFSSkipDirMtime: "30s",
+	}, false)
+
+	if metaConf.Retries != 3 {
+		t.Fatalf("Retries = %d, want 3", metaConf.Retries)
+	}
+	if metaConf.SkipDirMtime != 30*time.Second {
+		t.Fatalf("SkipDirMtime = %v, want 30s", metaConf.SkipDirMtime)
+	}
+}
+
 func (m *mockMountRegistrar) RegisterMount(context.Context, string, MountOptions) error {
 	return nil
 }

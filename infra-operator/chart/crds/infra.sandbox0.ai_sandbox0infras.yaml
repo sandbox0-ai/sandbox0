@@ -2673,6 +2673,9 @@ spec:
                           juicefsName:
                             default: sandbox0
                             type: string
+                          juicefsSkipDirMtime:
+                            default: 0s
+                            type: string
                           juicefsTrashDays:
                             default: 1
                             type: integer

@@ -10,6 +10,7 @@ func TestToStorageProxyCopiesSmallFileDebugKnobs(t *testing.T) {
 	cfg := ToStorageProxy(&infrav1alpha1.StorageProxyConfig{
 		SharedMutationBarrierDisabled: true,
 		AsyncRemoteSyncRecord:         true,
+		JuiceFSSkipDirMtime:           "30s",
 	})
 
 	if !cfg.SharedMutationBarrierDisabled {
@@ -17,5 +18,8 @@ func TestToStorageProxyCopiesSmallFileDebugKnobs(t *testing.T) {
 	}
 	if !cfg.AsyncRemoteSyncRecord {
 		t.Fatal("expected AsyncRemoteSyncRecord to be copied")
+	}
+	if cfg.JuiceFSSkipDirMtime != "30s" {
+		t.Fatalf("JuiceFSSkipDirMtime = %q, want 30s", cfg.JuiceFSSkipDirMtime)
 	}
 }

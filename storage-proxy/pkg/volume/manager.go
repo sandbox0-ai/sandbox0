@@ -358,6 +358,7 @@ func buildMetaConf(cfg *config.StorageProxyConfig, readOnly bool) *meta.Config {
 	metaConf := meta.DefaultConf()
 	if cfg != nil {
 		metaConf.Retries = cfg.JuiceFSMetaRetries
+		metaConf.SkipDirMtime = parseDurationString(cfg.JuiceFSSkipDirMtime, 0)
 	}
 	if metaConf.Retries == 0 {
 		metaConf.Retries = 10

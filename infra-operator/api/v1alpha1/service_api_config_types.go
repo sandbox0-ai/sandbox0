@@ -551,6 +551,9 @@ type StorageProxyConfig struct {
 	// +kubebuilder:default="0s"
 	JuiceFSUploadDelay string `json:"juicefsUploadDelay,omitempty"`
 	// +optional
+	// +kubebuilder:default="0s"
+	JuiceFSSkipDirMtime string `json:"juicefsSkipDirMtime,omitempty"`
+	// +optional
 	// +kubebuilder:default=false
 	JuiceFSEncryptionEnabled bool `json:"juicefsEncryptionEnabled,omitempty"`
 	// +optional

@@ -90,6 +90,7 @@ func ToStorageProxy(spec *infrav1alpha1.StorageProxyConfig) *apiconfig.StoragePr
 	cfg.JuiceFSMetaRetries = spec.JuiceFSMetaRetries
 	cfg.JuiceFSMaxUpload = spec.JuiceFSMaxUpload
 	cfg.JuiceFSUploadDelay = spec.JuiceFSUploadDelay
+	cfg.JuiceFSSkipDirMtime = spec.JuiceFSSkipDirMtime
 	cfg.JuiceFSEncryptionEnabled = spec.JuiceFSEncryptionEnabled
 	cfg.JuiceFSEncryptionPassphrase = spec.JuiceFSEncryptionPassphrase
 	cfg.JuiceFSEncryptionAlgo = spec.JuiceFSEncryptionAlgo

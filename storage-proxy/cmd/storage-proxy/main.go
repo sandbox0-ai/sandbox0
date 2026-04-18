@@ -333,7 +333,14 @@ func main() {
 	)
 
 	// Register FileSystem service
-	fsServer := grpcserver.NewFileSystemServer(volMgr, repo, eventHub, eventBroadcaster, logrusLogger, syncSvc, volumeBarrier)
+	var fsServer *grpcserver.FileSystemServer
+	if cfg.SharedMutationBarrierDisabled {
+		zapLogger.Warn("Shared mutation barrier disabled for gRPC file operations")
+		fsServer = grpcserver.NewFileSystemServer(volMgr, repo, eventHub, eventBroadcaster, logrusLogger, syncSvc, nil)
+	} else {
+		fsServer = grpcserver.NewFileSystemServer(volMgr, repo, eventHub, eventBroadcaster, logrusLogger, syncSvc, volumeBarrier)
+	}
+	fsServer.SetAsyncRemoteSyncRecord(cfg.AsyncRemoteSyncRecord)
 	fsServer.SetMetrics(storageProxyMetrics)
 	if sharedClock != nil {
 		fsServer.SetNowFunc(sharedClock.Now)

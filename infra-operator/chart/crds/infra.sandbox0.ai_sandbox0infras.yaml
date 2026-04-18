@@ -2578,6 +2578,9 @@ spec:
                         default: {}
                         description: Config contains storage-proxy specific configuration
                         properties:
+                          asyncRemoteSyncRecord:
+                            default: false
+                            type: boolean
                           auditFile:
                             default: /var/log/storage-proxy/audit.log
                             type: string
@@ -2694,6 +2697,9 @@ spec:
                           restoreRemountTimeout:
                             default: 30s
                             type: string
+                          sharedMutationBarrierDisabled:
+                            default: false
+                            type: boolean
                           syncCompactionInterval:
                             default: 10m
                             type: string

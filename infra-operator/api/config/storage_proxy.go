@@ -107,6 +107,12 @@ type StorageProxyConfig struct {
 	// +optional
 	// +kubebuilder:default="30s"
 	DirectVolumeFileIdleTTL string `yaml:"direct_volume_file_idle_ttl" json:"directVolumeFileIdleTTL"`
+	// +optional
+	// +kubebuilder:default=false
+	SharedMutationBarrierDisabled bool `yaml:"shared_mutation_barrier_disabled" json:"sharedMutationBarrierDisabled"`
+	// +optional
+	// +kubebuilder:default=false
+	AsyncRemoteSyncRecord bool `yaml:"async_remote_sync_record" json:"asyncRemoteSyncRecord"`
 
 	// +optional
 	// +kubebuilder:default="1G"

@@ -251,12 +251,16 @@ type fakeSyncRecorder struct {
 	lastValidate  *volsync.NamespaceMutationRequest
 	remoteChanges []*volsync.RemoteChange
 	validateErr   error
+	recorded      chan *volsync.RemoteChange
 }
 
 func (f *fakeSyncRecorder) RecordRemoteChange(ctx context.Context, change *volsync.RemoteChange) error {
 	if change != nil {
 		clone := *change
 		f.remoteChanges = append(f.remoteChanges, &clone)
+		if f.recorded != nil {
+			f.recorded <- &clone
+		}
 	}
 	return nil
 }
@@ -291,6 +295,36 @@ func TestPublishEventDefaultsTimestampBeforeRecordingRemoteChange(t *testing.T) 
 	}
 	if !got.OccurredAt.Equal(fixedNow) {
 		t.Fatalf("OccurredAt = %v, want %v from injected clock", got.OccurredAt, fixedNow)
+	}
+}
+
+func TestRecordRemoteSyncChangeCanRecordAsynchronously(t *testing.T) {
+	t.Parallel()
+
+	recorder := &fakeSyncRecorder{recorded: make(chan *volsync.RemoteChange, 1)}
+	server := &FileSystemServer{
+		syncRecorder:    recorder,
+		logger:          logrus.New(),
+		asyncSyncRecord: true,
+	}
+	ctx, cancel := context.WithCancel(authContext("team-a", "sandbox-1"))
+	recordCtx := server.recordRemoteSyncChange(ctx, &volsync.RemoteChange{
+		VolumeID:  "vol-1",
+		EventType: db.SyncEventWrite,
+		Path:      "/hello.txt",
+	})
+	cancel()
+
+	if !shouldSkipSyncRecord(recordCtx) {
+		t.Fatal("expected returned context to suppress duplicate sync recording")
+	}
+	select {
+	case got := <-recorder.recorded:
+		if got.TeamID != "team-a" || got.SandboxID != "sandbox-1" || got.Path != "/hello.txt" {
+			t.Fatalf("recorded change = %+v, want team/sandbox/path populated", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for async sync record")
 	}
 }
 

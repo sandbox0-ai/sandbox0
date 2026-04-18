@@ -580,6 +580,12 @@ type StorageProxyConfig struct {
 	// +kubebuilder:default="30s"
 	DirectVolumeFileIdleTTL string `json:"directVolumeFileIdleTTL,omitempty"`
 	// +optional
+	// +kubebuilder:default=false
+	SharedMutationBarrierDisabled bool `json:"sharedMutationBarrierDisabled,omitempty"`
+	// +optional
+	// +kubebuilder:default=false
+	AsyncRemoteSyncRecord bool `json:"asyncRemoteSyncRecord,omitempty"`
+	// +optional
 	// +kubebuilder:default="1G"
 	DefaultCacheSize string `json:"defaultCacheSize,omitempty"`
 	// +optional

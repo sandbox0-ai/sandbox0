@@ -38,6 +38,7 @@ type FileSystemServer struct {
 	logger            *logrus.Logger
 	metrics           *obsmetrics.StorageProxyMetrics
 	now               func() time.Time
+	asyncSyncRecord   bool
 	dirtyWriteMu      sync.Mutex
 	dirtyWriteHandles map[string]dirtyWriteHandle
 	handlePathMu      sync.Mutex
@@ -125,6 +126,13 @@ func (s *FileSystemServer) SetNowFunc(now func() time.Time) {
 
 func (s *FileSystemServer) SetMetrics(metrics *obsmetrics.StorageProxyMetrics) {
 	s.metrics = metrics
+}
+
+func (s *FileSystemServer) SetAsyncRemoteSyncRecord(enabled bool) {
+	if s == nil {
+		return
+	}
+	s.asyncSyncRecord = enabled
 }
 
 func (s *FileSystemServer) currentTime() time.Time {
@@ -535,6 +543,17 @@ func (s *FileSystemServer) recordRemoteSyncChange(ctx context.Context, change *v
 	}
 	if clone.OccurredAt.IsZero() {
 		clone.OccurredAt = s.currentTime()
+	}
+
+	if s.asyncSyncRecord {
+		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		go func() {
+			defer cancel()
+			if err := s.syncRecorder.RecordRemoteChange(recordCtx, &clone); err != nil {
+				s.logger.WithError(err).WithField("volume_id", clone.VolumeID).Warn("Failed to record async remote sync journal entry")
+			}
+		}()
+		return suppressSyncRecord(ctx)
 	}
 
 	if err := s.syncRecorder.RecordRemoteChange(ctx, &clone); err != nil {

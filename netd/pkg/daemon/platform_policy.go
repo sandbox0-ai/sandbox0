@@ -1,7 +1,10 @@
 package daemon
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 
@@ -30,6 +33,7 @@ type platformPolicyState struct {
 	sandboxes map[string]*watcher.SandboxInfo
 	services  map[string]*watcher.ServiceInfo
 	endpoints map[string]*watcher.EndpointsInfo
+	lastHash  string
 }
 
 func newPlatformPolicyState(cfg *config.NetdConfig, store *policy.Store, logger *zap.Logger) *platformPolicyState {
@@ -158,12 +162,31 @@ func (s *platformPolicyState) rebuild() {
 	allowedCIDRs = normalizeCIDRInputs(append(allowedCIDRs, platformAllowedCIDRs...), s.logger)
 	allowedDomains = normalizeDomainInputs(append(allowedDomains, platformAllowedDomains...))
 	deniedCIDRs := normalizeCIDRInputs(platformDeniedCIDRs, s.logger)
+	deniedDomains := normalizeDomainInputs(platformDeniedDomains)
+	sort.Strings(matchedServices)
+	sort.Strings(allowedCIDRs)
+	sort.Strings(allowedDomains)
+	sort.Strings(deniedCIDRs)
+	sort.Strings(deniedDomains)
+	sandboxPodIPList := make([]string, 0, len(sandboxPodIPs))
+	for ip := range sandboxPodIPs {
+		sandboxPodIPList = append(sandboxPodIPList, ip)
+	}
+	sort.Strings(sandboxPodIPList)
+	nextHash := hashPlatformPolicyInputs(sandboxPodIPList, matchedServices, allowedCIDRs, deniedCIDRs, allowedDomains, deniedDomains)
+	s.mu.Lock()
+	if s.lastHash == nextHash {
+		s.mu.Unlock()
+		return
+	}
+	s.lastHash = nextHash
+	s.mu.Unlock()
 
 	policyRules, err := policy.BuildPlatformPolicy(
 		allowedCIDRs,
 		deniedCIDRs,
 		allowedDomains,
-		platformDeniedDomains,
+		deniedDomains,
 	)
 	if err != nil {
 		s.logger.Warn("Failed to build platform policy", zap.Error(err))
@@ -181,9 +204,21 @@ func (s *platformPolicyState) rebuild() {
 		zap.Int("allowed_cidrs", len(allowedCIDRs)),
 		zap.Int("denied_cidrs", len(deniedCIDRs)),
 		zap.Int("allowed_domains", len(allowedDomains)),
-		zap.Int("denied_domains", len(platformDeniedDomains)),
+		zap.Int("denied_domains", len(deniedDomains)),
 		zap.Strings("matched_services", matchedServices),
 	)
+}
+
+func hashPlatformPolicyInputs(parts ...[]string) string {
+	hash := sha256.New()
+	for _, values := range parts {
+		for _, value := range values {
+			_, _ = hash.Write([]byte(value))
+			_, _ = hash.Write([]byte{0})
+		}
+		_, _ = hash.Write([]byte{1})
+	}
+	return hex.EncodeToString(hash.Sum(nil))
 }
 
 func (s *platformPolicyState) snapshot() (map[string]*watcher.SandboxInfo, map[string]*watcher.ServiceInfo, map[string]*watcher.EndpointsInfo) {

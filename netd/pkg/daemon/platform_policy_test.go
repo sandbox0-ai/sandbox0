@@ -1,13 +1,16 @@
 package daemon
 
 import (
+	"bytes"
 	"net"
+	"strings"
 	"testing"
 
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	policypkg "github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/watcher"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 func TestPlatformPolicyStateTracksSandboxPodIPs(t *testing.T) {
@@ -85,5 +88,65 @@ func TestPlatformPolicyStateAllowsClusterDNSService(t *testing.T) {
 	}
 	if !policypkg.AllowEgressL4(compiled, net.ParseIP("10.244.0.53"), 53, "udp") {
 		t.Fatalf("expected kube-dns endpoint ip to be allowed")
+	}
+}
+
+func TestPlatformPolicyStateLogsOnlyWhenEffectivePolicyChanges(t *testing.T) {
+	store := policypkg.NewStore(zap.NewNop())
+	var logBuffer bytes.Buffer
+	core := zapcore.NewCore(
+		zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()),
+		zapcore.AddSync(&logBuffer),
+		zap.InfoLevel,
+	)
+	logger := zap.New(core)
+	state := newPlatformPolicyState(&apiconfig.NetdConfig{}, store, logger)
+	const logPattern = "\"msg\":\"Platform policy updated\""
+	initialLogs := strings.Count(logBuffer.String(), logPattern)
+
+	sandbox := &watcher.SandboxInfo{
+		Namespace: "default",
+		Name:      "sandbox-a",
+		PodIP:     "10.0.0.2",
+	}
+	service := &watcher.ServiceInfo{
+		Namespace: "kube-system",
+		Name:      "kube-dns",
+		ClusterIP: "10.96.0.10",
+	}
+	endpoints := &watcher.EndpointsInfo{
+		Namespace: "kube-system",
+		Name:      "kube-dns",
+		Addresses: []string{"10.244.0.53"},
+	}
+
+	state.OnSandboxUpsert(sandbox)
+	if got := strings.Count(logBuffer.String(), logPattern) - initialLogs; got != 1 {
+		t.Fatalf("log count after sandbox upsert = %d, want 1", got)
+	}
+
+	state.OnSandboxUpsert(sandbox)
+	if got := strings.Count(logBuffer.String(), logPattern) - initialLogs; got != 1 {
+		t.Fatalf("log count after duplicate sandbox upsert = %d, want 1", got)
+	}
+
+	state.OnServiceUpsert(service)
+	if got := strings.Count(logBuffer.String(), logPattern) - initialLogs; got != 2 {
+		t.Fatalf("log count after service upsert = %d, want 2", got)
+	}
+
+	state.OnServiceUpsert(service)
+	if got := strings.Count(logBuffer.String(), logPattern) - initialLogs; got != 2 {
+		t.Fatalf("log count after duplicate service upsert = %d, want 2", got)
+	}
+
+	state.OnEndpointsUpsert(endpoints)
+	if got := strings.Count(logBuffer.String(), logPattern) - initialLogs; got != 3 {
+		t.Fatalf("log count after endpoints upsert = %d, want 3", got)
+	}
+
+	state.OnEndpointsUpsert(endpoints)
+	if got := strings.Count(logBuffer.String(), logPattern) - initialLogs; got != 3 {
+		t.Fatalf("log count after duplicate endpoints upsert = %d, want 3", got)
 	}
 }

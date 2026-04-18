@@ -69,7 +69,7 @@ func (a *GRPCAuthenticator) UnaryInterceptor() grpc.UnaryServerInterceptor {
 		// Add claims to context for downstream handlers
 		ctx = internalauth.WithClaims(ctx, claims)
 
-		a.logger.Info("Request authenticated",
+		a.logger.Debug("Request authenticated",
 			zap.String("method", info.FullMethod),
 			zap.String("team_id", claims.TeamID),
 			zap.String("caller", claims.Caller),

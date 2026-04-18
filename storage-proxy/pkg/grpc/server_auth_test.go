@@ -648,6 +648,18 @@ func TestFlushDefersDirtyWriteReplayPayloadUntilRelease(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Write() error = %v", err)
 	}
+	if _, err := server.Write(ctx, &pb.WriteRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		HandleId: createResp.HandleId,
+		Offset:   5,
+		Data:     []byte("!"),
+	}); err != nil {
+		t.Fatalf("second Write() error = %v", err)
+	}
+	if dirty, ok := server.peekDirtyWrite("vol-1", createResp.HandleId); !ok || !dirty.replayPayloadValid || string(dirty.replayPayload) != "hello!" {
+		t.Fatalf("dirty write replay payload = %+v, %v; want buffered hello!", dirty, ok)
+	}
 	if _, err := server.Flush(ctx, &pb.FlushRequest{
 		VolumeId: "vol-1",
 		HandleId: createResp.HandleId,
@@ -672,8 +684,8 @@ func TestFlushDefersDirtyWriteReplayPayloadUntilRelease(t *testing.T) {
 	if got.EventType != db.SyncEventWrite || got.Path != "/hello.txt" || got.SandboxID != "sandbox-1" {
 		t.Fatalf("remoteChanges[0] = %+v, want write event for /hello.txt", got)
 	}
-	if !got.ContentAvailable || string(got.ContentBytes) != "hello" {
-		t.Fatalf("remoteChanges[0] content = available:%v bytes:%q, want hello", got.ContentAvailable, string(got.ContentBytes))
+	if !got.ContentAvailable || string(got.ContentBytes) != "hello!" {
+		t.Fatalf("remoteChanges[0] content = available:%v bytes:%q, want hello!", got.ContentAvailable, string(got.ContentBytes))
 	}
 }
 

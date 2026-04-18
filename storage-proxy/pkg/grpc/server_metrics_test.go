@@ -47,7 +47,7 @@ func TestHandlePathCacheCarriesPathIntoDirtyWrite(t *testing.T) {
 		t.Fatalf("cached path = %q, want /created.txt", path)
 	}
 
-	server.markDirtyWrite("vol-1", 42, 7, "/created.txt")
+	server.markDirtyWrite("vol-1", 42, 7, "/created.txt", 0, nil, false)
 	dirty, ok := server.takeDirtyWrite("vol-1", 7)
 	if !ok {
 		t.Fatal("expected dirty write handle")

@@ -51,9 +51,11 @@ type FileSystemServer struct {
 }
 
 type dirtyWriteHandle struct {
-	volumeID string
-	inode    uint64
-	path     string
+	volumeID           string
+	inode              uint64
+	path               string
+	replayPayload      []byte
+	replayPayloadValid bool
 }
 
 type openHandlePath struct {
@@ -71,6 +73,8 @@ type pendingCreate struct {
 	path  string
 	mode  uint32
 }
+
+const maxBufferedReplayPayloadBytes = 1 << 20
 
 type volumeManager interface {
 	MountVolume(ctx context.Context, s3Prefix, volumeID, teamID string, config *volume.VolumeConfig, accessMode volume.AccessMode) (string, string, time.Time, error)
@@ -258,7 +262,7 @@ func volumePathKey(volumeID, path string) string {
 	return volumeID + "|" + path
 }
 
-func (s *FileSystemServer) markDirtyWrite(volumeID string, inode, handleID uint64, path string) {
+func (s *FileSystemServer) markDirtyWrite(volumeID string, inode, handleID uint64, path string, offset uint64, data []byte, allowBufferedReplay bool) {
 	if s == nil {
 		return
 	}
@@ -273,11 +277,45 @@ func (s *FileSystemServer) markDirtyWrite(volumeID string, inode, handleID uint6
 			path = existing.path
 		}
 	}
-	s.dirtyWriteHandles[key] = dirtyWriteHandle{
+	dirty := dirtyWriteHandle{
 		volumeID: volumeID,
 		inode:    inode,
 		path:     path,
 	}
+	if existing, ok := s.dirtyWriteHandles[key]; ok {
+		dirty = existing
+		dirty.inode = inode
+		if path != "" {
+			dirty.path = path
+		}
+	}
+	if allowBufferedReplay {
+		dirty.replayPayload, dirty.replayPayloadValid = applyBufferedReplayWrite(dirty.replayPayload, dirty.replayPayloadValid, offset, data)
+	} else {
+		dirty.replayPayload = nil
+		dirty.replayPayloadValid = false
+	}
+	s.dirtyWriteHandles[key] = dirty
+}
+
+func applyBufferedReplayWrite(payload []byte, valid bool, offset uint64, data []byte) ([]byte, bool) {
+	if !valid && offset != 0 {
+		return nil, false
+	}
+	if offset > uint64(len(payload)) {
+		return nil, false
+	}
+	end := offset + uint64(len(data))
+	if end > maxBufferedReplayPayloadBytes {
+		return nil, false
+	}
+	if end > uint64(len(payload)) {
+		next := make([]byte, end)
+		copy(next, payload)
+		payload = next
+	}
+	copy(payload[offset:end], data)
+	return payload, true
 }
 
 func (s *FileSystemServer) takeDirtyWrite(volumeID string, handleID uint64) (dirtyWriteHandle, bool) {
@@ -456,6 +494,16 @@ func (s *FileSystemServer) takePendingCreateByInode(volumeID string, inode uint6
 	s.handlePathMu.Lock()
 	defer s.handlePathMu.Unlock()
 	return s.takePendingCreateByInodeLocked(volumeID, inode)
+}
+
+func (s *FileSystemServer) lookupPendingCreateByInode(volumeID string, inode uint64) (pendingCreate, bool) {
+	if s == nil || inode == 0 {
+		return pendingCreate{}, false
+	}
+	s.handlePathMu.Lock()
+	defer s.handlePathMu.Unlock()
+	pending, ok := s.pendingCreates[inodePathKey(volumeID, inode)]
+	return pending, ok
 }
 
 func (s *FileSystemServer) takePendingCreateByPath(volumeID, path string) (pendingCreate, bool) {
@@ -675,6 +723,23 @@ func (s *FileSystemServer) recordDirtyWriteReplayPayload(ctx context.Context, vo
 	}
 	if path == "" {
 		return false
+	}
+	if dirty.replayPayloadValid {
+		if pending, ok := s.lookupPendingCreateByInode(volumeID, dirty.inode); ok {
+			start := time.Now()
+			payload := append([]byte(nil), dirty.replayPayload...)
+			s.observeGRPCStage(method, "buffered_replay_payload", start)
+			s.recordRemoteSyncChange(ctx, &volsync.RemoteChange{
+				VolumeID:         volumeID,
+				EventType:        db.SyncEventWrite,
+				Path:             path,
+				EntryKind:        "file",
+				Mode:             uint32Ptr(pending.mode),
+				ContentAvailable: true,
+				ContentBytes:     payload,
+			})
+			return true
+		}
 	}
 	start := time.Now()
 	payload, mode, err := captureInodeReplayState(volCtx, dirty.inode)
@@ -1171,7 +1236,8 @@ func (s *FileSystemServer) Write(ctx context.Context, req *pb.WriteRequest) (*pb
 		}
 
 		path := s.resolvePathForHandleOrInode(volCtx, req.VolumeId, req.HandleId, req.Inode, "Write")
-		s.markDirtyWrite(req.VolumeId, req.Inode, req.HandleId, path)
+		_, pendingCreate := s.lookupPendingCreateByInode(req.VolumeId, req.Inode)
+		s.markDirtyWrite(req.VolumeId, req.Inode, req.HandleId, path, uint64(req.Offset), req.Data, pendingCreate)
 		eventType := pb.WatchEventType_WATCH_EVENT_TYPE_WRITE
 		if path == "" {
 			eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE

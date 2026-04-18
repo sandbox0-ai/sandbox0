@@ -408,15 +408,24 @@ procd_config:
   root_path: /workspace
   storage_proxy_base_url: storage-proxy.sandbox0-system.svc.cluster.local
   storage_proxy_port: 4001
+  mount_mode: node-local
+  ctld_base_url: http://ctld.sandbox0-system.svc:8095
+  node_local_fallback_to_storage: true
 `)
 	t.Setenv("CONFIG_PATH", configPath)
 
 	template := newTestTemplate()
 	template.Spec.EnvVars = map[string]string{
-		"root_path":              "/tenant-override",
-		"storage_proxy_base_url": "evil.local",
-		"storage_proxy_port":     "65535",
-		"node_name":              "tenant-node",
+		"root_path":                      "/tenant-override",
+		"storage_proxy_base_url":         "evil.local",
+		"storage_proxy_port":             "65535",
+		"node_name":                      "tenant-node",
+		"node_host_ip":                   "127.0.0.1",
+		"ctld_port":                      "1",
+		"mount_mode":                     "storage-proxy",
+		"ctld_base_url":                  "http://evil.local",
+		"ctld_timeout":                   "1ms",
+		"node_local_fallback_to_storage": "false",
 	}
 
 	spec := BuildPodSpec(template)
@@ -434,10 +443,29 @@ procd_config:
 	if got := envByName["root_path"].Value; got != "/workspace" {
 		t.Fatalf("root_path = %q, want manager-controlled value", got)
 	}
+	if got := envByName["mount_mode"].Value; got != "node-local" {
+		t.Fatalf("mount_mode = %q, want manager-controlled value", got)
+	}
+	if got := envByName["ctld_base_url"].Value; got != "http://ctld.sandbox0-system.svc:8095" {
+		t.Fatalf("ctld_base_url = %q, want manager-controlled value", got)
+	}
+	if got := envByName["ctld_timeout"].Value; got != "5s" {
+		t.Fatalf("ctld_timeout = %q, want manager-controlled default", got)
+	}
+	if got := envByName["node_local_fallback_to_storage"].Value; got != "true" {
+		t.Fatalf("node_local_fallback_to_storage = %q, want manager-controlled value", got)
+	}
 
 	nodeName := envByName["node_name"]
 	if nodeName.ValueFrom == nil || nodeName.ValueFrom.FieldRef == nil || nodeName.ValueFrom.FieldRef.FieldPath != "spec.nodeName" {
 		t.Fatalf("expected node_name to come from pod fieldRef spec.nodeName")
+	}
+	nodeHostIP := envByName["node_host_ip"]
+	if nodeHostIP.ValueFrom == nil || nodeHostIP.ValueFrom.FieldRef == nil || nodeHostIP.ValueFrom.FieldRef.FieldPath != "status.hostIP" {
+		t.Fatalf("expected node_host_ip to come from pod fieldRef status.hostIP")
+	}
+	if got := envByName["ctld_port"].Value; got != "8095" {
+		t.Fatalf("ctld_port = %q, want manager-controlled default", got)
 	}
 }
 
@@ -479,10 +507,16 @@ manager_image: sandbox0/manager:test
 
 	template := newTestTemplate()
 	template.Spec.EnvVars = map[string]string{
-		"root_path":              "/tenant-override",
-		"storage_proxy_base_url": "evil.local",
-		"storage_proxy_port":     "65535",
-		"node_name":              "tenant-node",
+		"root_path":                      "/tenant-override",
+		"storage_proxy_base_url":         "evil.local",
+		"storage_proxy_port":             "65535",
+		"node_name":                      "tenant-node",
+		"node_host_ip":                   "127.0.0.1",
+		"ctld_port":                      "1",
+		"mount_mode":                     "node-local",
+		"ctld_base_url":                  "http://evil.local",
+		"ctld_timeout":                   "1ms",
+		"node_local_fallback_to_storage": "true",
 	}
 
 	spec := BuildPodSpec(template)
@@ -500,9 +534,28 @@ manager_image: sandbox0/manager:test
 	if got := envByName["root_path"].Value; got != "/tenant-override" {
 		t.Fatalf("root_path = %q, want tenant value when manager config omits it", got)
 	}
+	if got := envByName["mount_mode"].Value; got != "" {
+		t.Fatalf("mount_mode = %q, want empty manager-controlled value", got)
+	}
+	if got := envByName["ctld_base_url"].Value; got != "" {
+		t.Fatalf("ctld_base_url = %q, want empty manager-controlled value", got)
+	}
+	if got := envByName["ctld_timeout"].Value; got != "5s" {
+		t.Fatalf("ctld_timeout = %q, want manager-controlled default", got)
+	}
+	if got := envByName["node_local_fallback_to_storage"].Value; got != "false" {
+		t.Fatalf("node_local_fallback_to_storage = %q, want manager-controlled default", got)
+	}
 
 	nodeName := envByName["node_name"]
 	if nodeName.ValueFrom == nil || nodeName.ValueFrom.FieldRef == nil || nodeName.ValueFrom.FieldRef.FieldPath != "spec.nodeName" {
 		t.Fatalf("expected node_name to come from pod fieldRef spec.nodeName")
+	}
+	nodeHostIP := envByName["node_host_ip"]
+	if nodeHostIP.ValueFrom == nil || nodeHostIP.ValueFrom.FieldRef == nil || nodeHostIP.ValueFrom.FieldRef.FieldPath != "status.hostIP" {
+		t.Fatalf("expected node_host_ip to come from pod fieldRef status.hostIP")
+	}
+	if got := envByName["ctld_port"].Value; got != "8095" {
+		t.Fatalf("ctld_port = %q, want manager-controlled default", got)
 	}
 }

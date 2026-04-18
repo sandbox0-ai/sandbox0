@@ -28,6 +28,15 @@ type ProcdConfig struct {
 	StorageProxyBaseURL string `yaml:"storage_proxy_base_url" json:"-"`
 	StorageProxyPort    int    `yaml:"storage_proxy_port" json:"-"`
 
+	// Runtime volume mount path. Defaults to "storage-proxy"; "node-local"
+	// asks ctld to bind a node-local mount into the sandbox.
+	MountMode                  string          `yaml:"mount_mode" json:"mountMode"`
+	CtldBaseURL                string          `yaml:"ctld_base_url" json:"ctldBaseUrl"`
+	CtldPort                   int             `yaml:"ctld_port" json:"-"`
+	CtldTimeout                metav1.Duration `yaml:"ctld_timeout" json:"ctldTimeout"`
+	NodeHostIP                 string          `yaml:"node_host_ip" json:"-"`
+	NodeLocalFallbackToStorage bool            `yaml:"node_local_fallback_to_storage" json:"nodeLocalFallbackToStorage"`
+
 	// JuiceFS Mount Defaults
 	// +optional
 	// +kubebuilder:default="100"

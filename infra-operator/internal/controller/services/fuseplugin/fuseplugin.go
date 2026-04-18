@@ -14,6 +14,18 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 )
 
+const (
+	ctldHTTPPort                  = 8095
+	volumeStagingHostPath         = "/var/lib/sandbox0/volumes"
+	volumeCacheHostPath           = "/var/lib/sandbox0/juicefs-cache"
+	volumeStagingMountPath        = "/host-var/lib/sandbox0/volumes"
+	volumeCacheMountPath          = "/host-var/lib/sandbox0/juicefs-cache"
+	volumeConfigMountPath         = "/config/storage-proxy/config.yaml"
+	juicefsEncryptionSecretSuffix = "juicefs-encryption-key"
+	juicefsEncryptionMountDir     = "/etc/storage-proxy/juicefs"
+	juicefsEncryptionKeyFilename  = "juicefs_rsa_private.pem"
+)
+
 type Reconciler struct {
 	Resources *common.ResourceManager
 }
@@ -29,8 +41,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		return nil
 	}
 
-	const ctldHTTPPort = 8095
-
 	name := fmt.Sprintf("%s-ctld", infra.Name)
 	labels := common.GetServiceLabels(infra.Name, "ctld")
 	image := fmt.Sprintf("%s:%s", imageRepo, imageTag)
@@ -41,6 +51,105 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 
 	nodeSelector, tolerations := common.ResolveSandboxNodePlacement(infra)
 	args := ctldArgs(infra)
+	volumeMounts := []corev1.VolumeMount{
+		{
+			Name:      "device-plugin",
+			MountPath: "/var/lib/kubelet/device-plugins",
+		},
+		{
+			Name:      "host-cgroup",
+			MountPath: "/host-sys/fs/cgroup",
+		},
+		{
+			Name:      "containerd-sock",
+			MountPath: "/host-run/containerd",
+		},
+		{
+			Name:      "host-sandbox0-volumes",
+			MountPath: volumeStagingMountPath,
+		},
+		{
+			Name:      "host-sandbox0-juicefs-cache",
+			MountPath: volumeCacheMountPath,
+		},
+	}
+	volumes := []corev1.Volume{
+		{
+			Name: "device-plugin",
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
+					Path: "/var/lib/kubelet/device-plugins",
+				},
+			},
+		},
+		{
+			Name: "host-cgroup",
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
+					Path: "/sys/fs/cgroup",
+				},
+			},
+		},
+		{
+			Name: "containerd-sock",
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
+					Path: "/run/containerd",
+				},
+			},
+		},
+		{
+			Name: "host-sandbox0-volumes",
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
+					Path: volumeStagingHostPath,
+				},
+			},
+		},
+		{
+			Name: "host-sandbox0-juicefs-cache",
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
+					Path: volumeCacheHostPath,
+				},
+			},
+		},
+	}
+	if infrav1alpha1.IsStorageProxyEnabled(infra) {
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "storage-proxy-config",
+			MountPath: volumeConfigMountPath,
+			SubPath:   "config.yaml",
+			ReadOnly:  true,
+		})
+		volumes = append(volumes, corev1.Volume{
+			Name: "storage-proxy-config",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: fmt.Sprintf("%s-storage-proxy", infra.Name)},
+				},
+			},
+		})
+	}
+	if ctldNeedsJuiceFSEncryptionKey(infra) {
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "juicefs-encryption-key",
+			MountPath: juicefsEncryptionMountDir,
+			ReadOnly:  true,
+		})
+		volumes = append(volumes, corev1.Volume{
+			Name: "juicefs-encryption-key",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: fmt.Sprintf("%s-%s", infra.Name, juicefsEncryptionSecretSuffix),
+					Items: []corev1.KeyToPath{{
+						Key:  "private.key",
+						Path: juicefsEncryptionKeyFilename,
+					}},
+				},
+			},
+		})
+	}
 
 	desired := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -102,48 +211,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 							SecurityContext: &corev1.SecurityContext{
 								Privileged: common.BoolPtr(true),
 							},
-							VolumeMounts: []corev1.VolumeMount{
-								{
-									Name:      "device-plugin",
-									MountPath: "/var/lib/kubelet/device-plugins",
-								},
-								{
-									Name:      "host-cgroup",
-									MountPath: "/host-sys/fs/cgroup",
-								},
-								{
-									Name:      "containerd-sock",
-									MountPath: "/host-run/containerd",
-								},
-							},
+							VolumeMounts: volumeMounts,
 						},
 					},
-					Volumes: []corev1.Volume{
-						{
-							Name: "device-plugin",
-							VolumeSource: corev1.VolumeSource{
-								HostPath: &corev1.HostPathVolumeSource{
-									Path: "/var/lib/kubelet/device-plugins",
-								},
-							},
-						},
-						{
-							Name: "host-cgroup",
-							VolumeSource: corev1.VolumeSource{
-								HostPath: &corev1.HostPathVolumeSource{
-									Path: "/sys/fs/cgroup",
-								},
-							},
-						},
-						{
-							Name: "containerd-sock",
-							VolumeSource: corev1.VolumeSource{
-								HostPath: &corev1.HostPathVolumeSource{
-									Path: "/run/containerd",
-								},
-							},
-						},
-					},
+					Volumes: volumes,
 				},
 			},
 		},
@@ -173,6 +244,10 @@ func ctldArgs(infra *infrav1alpha1.Sandbox0Infra) []string {
 		"-http-addr=:8095",
 		"-cgroup-root=/host-sys/fs/cgroup",
 		"-cri-endpoint=/host-run/containerd/containerd.sock",
+		fmt.Sprintf("-volume-staging-root=%s", volumeStagingMountPath),
+		fmt.Sprintf("-volume-cache-root=%s", volumeCacheMountPath),
+		fmt.Sprintf("-volume-config=%s", volumeConfigMountPath),
+		"-juicefs-bin=/usr/local/bin/juicefs",
 		fmt.Sprintf("-pause-min-memory-request=%s", pauseMinMemoryRequest),
 		fmt.Sprintf("-pause-min-memory-limit=%s", pauseMinMemoryLimit),
 		fmt.Sprintf("-pause-memory-buffer-ratio=%s", pauseMemoryBufferRatio),
@@ -187,6 +262,14 @@ func ctldManagerConfig(infra *infrav1alpha1.Sandbox0Infra) *infrav1alpha1.Manage
 		return nil
 	}
 	return infra.Spec.Services.Manager.Config
+}
+
+func ctldNeedsJuiceFSEncryptionKey(infra *infrav1alpha1.Sandbox0Infra) bool {
+	return infra != nil &&
+		infra.Spec.Services != nil &&
+		infra.Spec.Services.StorageProxy != nil &&
+		infra.Spec.Services.StorageProxy.Config != nil &&
+		infra.Spec.Services.StorageProxy.Config.JuiceFSEncryptionEnabled
 }
 
 func stringOrDefault(value, fallback string) string {

@@ -111,11 +111,13 @@ func reconcileFusePluginDaemonSet(t *testing.T, infra *infrav1alpha1.Sandbox0Inf
 	if len(ds.Spec.Template.Spec.Containers[0].Args) < 3 || ds.Spec.Template.Spec.Containers[0].Args[1] != "-cgroup-root=/host-sys/fs/cgroup" || ds.Spec.Template.Spec.Containers[0].Args[2] != "-cri-endpoint=/host-run/containerd/containerd.sock" {
 		t.Fatalf("expected cgroup root arg, got %#v", ds.Spec.Template.Spec.Containers[0].Args)
 	}
+	assertContainsArg(t, ds.Spec.Template.Spec.Containers[0].Args, "-volume-staging-root=/host-var/lib/sandbox0/volumes")
+	assertContainsArg(t, ds.Spec.Template.Spec.Containers[0].Args, "-volume-cache-root=/host-var/lib/sandbox0/juicefs-cache")
 	if ds.Spec.Template.Spec.Containers[0].SecurityContext == nil || ds.Spec.Template.Spec.Containers[0].SecurityContext.Privileged == nil || !*ds.Spec.Template.Spec.Containers[0].SecurityContext.Privileged {
 		t.Fatal("expected ctld container to run privileged")
 	}
-	if len(ds.Spec.Template.Spec.Containers[0].VolumeMounts) != 3 {
-		t.Fatalf("expected device-plugin, host-cgroup, and containerd mounts, got %#v", ds.Spec.Template.Spec.Containers[0].VolumeMounts)
+	if !infrav1alpha1.IsStorageProxyEnabled(infra) && len(ds.Spec.Template.Spec.Containers[0].VolumeMounts) != 5 {
+		t.Fatalf("expected device-plugin, host-cgroup, containerd, volume staging, and cache mounts, got %#v", ds.Spec.Template.Spec.Containers[0].VolumeMounts)
 	}
 
 	return ds
@@ -148,6 +150,42 @@ func TestReconcilePassesPauseConfigToCtld(t *testing.T) {
 	assertContainsArg(t, args, "-pause-memory-buffer-ratio=1.4")
 	assertContainsArg(t, args, "-pause-min-cpu=25m")
 	assertContainsArg(t, args, "-default-sandbox-ttl=5m0s")
+}
+
+func TestReconcileMountsStorageProxyConfigWhenStorageProxyEnabled(t *testing.T) {
+	infra := newFusePluginTestInfra()
+	infra.Spec.Services.StorageProxy = &infrav1alpha1.StorageProxyServiceConfig{
+		WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+			EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+		},
+	}
+
+	ds := reconcileFusePluginDaemonSet(t, infra)
+	container := ds.Spec.Template.Spec.Containers[0]
+	assertContainsArg(t, container.Args, "-volume-config=/config/storage-proxy/config.yaml")
+
+	var foundMount bool
+	for _, mount := range container.VolumeMounts {
+		if mount.Name == "storage-proxy-config" {
+			foundMount = true
+			if mount.MountPath != "/config/storage-proxy/config.yaml" || mount.SubPath != "config.yaml" || !mount.ReadOnly {
+				t.Fatalf("unexpected storage-proxy config mount: %#v", mount)
+			}
+		}
+	}
+	if !foundMount {
+		t.Fatalf("expected ctld to mount storage-proxy config, got %#v", container.VolumeMounts)
+	}
+
+	for _, volume := range ds.Spec.Template.Spec.Volumes {
+		if volume.Name == "storage-proxy-config" {
+			if volume.ConfigMap == nil || volume.ConfigMap.Name != "demo-storage-proxy" {
+				t.Fatalf("unexpected storage-proxy config volume: %#v", volume)
+			}
+			return
+		}
+	}
+	t.Fatalf("expected ctld storage-proxy config volume, got %#v", ds.Spec.Template.Spec.Volumes)
 }
 
 func assertContainsArg(t *testing.T, args []string, want string) {

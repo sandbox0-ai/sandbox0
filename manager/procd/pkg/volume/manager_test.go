@@ -2,8 +2,12 @@ package volume
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
+
+	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"go.uber.org/zap"
 )
 
 func TestValidateMountPoint(t *testing.T) {
@@ -138,4 +142,125 @@ func TestBootstrapMountsWaitReturnsFailedStatus(t *testing.T) {
 	if len(all) != 1 || all[0].State != MountStateFailed {
 		t.Fatalf("GetStatus() = %+v, want failed bootstrap mount", all)
 	}
+}
+
+func TestMountUsesNodeLocalBackendWhenConfigured(t *testing.T) {
+	client := &fakeCtldVolumeClient{
+		attachResp: &ctldapi.VolumeAttachResponse{
+			Attached:       true,
+			AttachmentID:   "attach-1",
+			MountSessionID: "session-1",
+		},
+	}
+	manager := NewManager(&Config{MountMode: MountModeNodeLocal}, staticTokenProvider{}, zap.NewNop())
+	manager.SetCtldVolumeClient(client)
+
+	resp, err := manager.Mount(context.Background(), &MountRequest{
+		SandboxID:       "sandbox-1",
+		SandboxVolumeID: "vol-1",
+		MountPoint:      t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("Mount() error = %v", err)
+	}
+	if resp.Backend != MountBackendNodeLocal {
+		t.Fatalf("Mount() backend = %q, want %q", resp.Backend, MountBackendNodeLocal)
+	}
+	if client.attachReq == nil || client.attachReq.SandboxID != "sandbox-1" || client.attachReq.SandboxVolumeID != "vol-1" {
+		t.Fatalf("attach request = %+v", client.attachReq)
+	}
+
+	status := manager.GetStatus()
+	if len(status) != 1 || status[0].Backend != MountBackendNodeLocal || status[0].State != MountStateMounted {
+		t.Fatalf("status = %+v", status)
+	}
+
+	if err := manager.Unmount(context.Background(), "vol-1", "session-1"); err != nil {
+		t.Fatalf("Unmount() error = %v", err)
+	}
+	if client.detachReq == nil || client.detachReq.AttachmentID != "attach-1" || client.detachReq.MountSessionID != "session-1" {
+		t.Fatalf("detach request = %+v", client.detachReq)
+	}
+}
+
+func TestMountNodeLocalFailureFallsBackToStorageProxyWhenEnabled(t *testing.T) {
+	client := &fakeCtldVolumeClient{attachErr: errors.New("ctld unavailable")}
+	manager := NewManager(&Config{
+		MountMode:                  MountModeNodeLocal,
+		NodeLocalFallbackToStorage: true,
+	}, staticTokenProvider{}, zap.NewNop())
+	manager.SetCtldVolumeClient(client)
+
+	storageProxyMounted := false
+	manager.mountStorageProxyHook = func(_ context.Context, req *MountRequest, mountPoint string) (*mountInfo, error) {
+		storageProxyMounted = true
+		return &mountInfo{
+			volumeID:       req.SandboxVolumeID,
+			mountPoint:     mountPoint,
+			sandboxID:      req.SandboxID,
+			mountedAt:      time.Now(),
+			mountSessionID: "session-fallback",
+			mountSecret:    "secret-fallback",
+			backend:        MountBackendStorageProxyFuse,
+			watchDone:      make(chan struct{}),
+		}, nil
+	}
+
+	resp, err := manager.Mount(context.Background(), &MountRequest{
+		SandboxID:       "sandbox-1",
+		SandboxVolumeID: "vol-1",
+		MountPoint:      t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("Mount() error = %v", err)
+	}
+	if !storageProxyMounted {
+		t.Fatalf("expected storage-proxy fallback to run")
+	}
+	if resp.Backend != MountBackendStorageProxyFuse {
+		t.Fatalf("Mount() backend = %q, want %q", resp.Backend, MountBackendStorageProxyFuse)
+	}
+}
+
+func TestMountNodeLocalFailureDoesNotFallbackByDefault(t *testing.T) {
+	client := &fakeCtldVolumeClient{attachErr: errors.New("ctld unavailable")}
+	manager := NewManager(&Config{MountMode: MountModeNodeLocal}, staticTokenProvider{}, zap.NewNop())
+	manager.SetCtldVolumeClient(client)
+	manager.mountStorageProxyHook = func(context.Context, *MountRequest, string) (*mountInfo, error) {
+		t.Fatalf("storage-proxy fallback should not run")
+		return nil, nil
+	}
+
+	_, err := manager.Mount(context.Background(), &MountRequest{
+		SandboxID:       "sandbox-1",
+		SandboxVolumeID: "vol-1",
+		MountPoint:      t.TempDir(),
+	})
+	if err == nil {
+		t.Fatalf("Mount() expected node-local error")
+	}
+}
+
+type fakeCtldVolumeClient struct {
+	attachReq  *ctldapi.VolumeAttachRequest
+	attachResp *ctldapi.VolumeAttachResponse
+	attachErr  error
+	detachReq  *ctldapi.VolumeDetachRequest
+	detachErr  error
+}
+
+func (f *fakeCtldVolumeClient) Attach(_ context.Context, req *ctldapi.VolumeAttachRequest) (*ctldapi.VolumeAttachResponse, error) {
+	f.attachReq = req
+	if f.attachErr != nil {
+		return nil, f.attachErr
+	}
+	if f.attachResp != nil {
+		return f.attachResp, nil
+	}
+	return &ctldapi.VolumeAttachResponse{Attached: true, AttachmentID: "attach-1", MountSessionID: "session-1"}, nil
+}
+
+func (f *fakeCtldVolumeClient) Detach(_ context.Context, req *ctldapi.VolumeDetachRequest) error {
+	f.detachReq = req
+	return f.detachErr
 }

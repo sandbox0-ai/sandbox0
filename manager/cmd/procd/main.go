@@ -5,9 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -131,16 +134,21 @@ func main() {
 	// Create shared token provider for storage-proxy communication
 	tokenProvider := procdhttp.NewTokenProvider()
 
+	ctldBaseURL := resolveCtldBaseURL(cfg)
 	volumeCfg := &volume.Config{
-		ProxyBaseURL:      cfg.StorageProxyBaseURL,
-		ProxyPort:         cfg.StorageProxyPort,
-		CacheMaxBytes:     cfg.CacheMaxBytes,
-		CacheTTL:          cfg.CacheTTL.Duration,
-		JuiceFSCacheSize:  cfg.JuiceFSCacheSize,
-		JuiceFSPrefetch:   cfg.JuiceFSPrefetch,
-		JuiceFSBufferSize: cfg.JuiceFSBufferSize,
-		JuiceFSWriteback:  cfg.JuiceFSWriteback,
-		GRPCMaxMsgSize:    100 * 1024 * 1024, // could be made configurable if added to ProcdConfig
+		ProxyBaseURL:               cfg.StorageProxyBaseURL,
+		ProxyPort:                  cfg.StorageProxyPort,
+		CacheMaxBytes:              cfg.CacheMaxBytes,
+		CacheTTL:                   cfg.CacheTTL.Duration,
+		MountMode:                  cfg.MountMode,
+		CtldBaseURL:                ctldBaseURL,
+		CtldTimeout:                cfg.CtldTimeout.Duration,
+		NodeLocalFallbackToStorage: cfg.NodeLocalFallbackToStorage,
+		JuiceFSCacheSize:           cfg.JuiceFSCacheSize,
+		JuiceFSPrefetch:            cfg.JuiceFSPrefetch,
+		JuiceFSBufferSize:          cfg.JuiceFSBufferSize,
+		JuiceFSWriteback:           cfg.JuiceFSWriteback,
+		GRPCMaxMsgSize:             100 * 1024 * 1024, // could be made configurable if added to ProcdConfig
 	}
 	volumeManager := volume.NewManager(volumeCfg, tokenProvider, logger)
 
@@ -248,6 +256,20 @@ func main() {
 
 	<-done
 	logger.Info("Procd shutdown complete")
+}
+
+func resolveCtldBaseURL(cfg *config.ProcdConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	if baseURL := strings.TrimSpace(cfg.CtldBaseURL); baseURL != "" {
+		return baseURL
+	}
+	nodeHostIP := strings.TrimSpace(cfg.NodeHostIP)
+	if nodeHostIP == "" || cfg.CtldPort <= 0 {
+		return ""
+	}
+	return "http://" + net.JoinHostPort(nodeHostIP, strconv.Itoa(cfg.CtldPort))
 }
 
 func initLogger(logLevel string) *zap.Logger {

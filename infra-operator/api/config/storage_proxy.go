@@ -195,6 +195,13 @@ func LoadStorageProxyConfig() *StorageProxyConfig {
 	return cfg
 }
 
+// LoadStorageProxyConfigFromFile loads storage-proxy configuration from a
+// specific path. It is used by node-side components that need the same JuiceFS
+// backend configuration without running storage-proxy in the data path.
+func LoadStorageProxyConfigFromFile(path string) (*StorageProxyConfig, error) {
+	return loadStorageProxyConfig(path)
+}
+
 func loadStorageProxyConfig(path string) (*StorageProxyConfig, error) {
 	cfg := &StorageProxyConfig{}
 	if path == "" {

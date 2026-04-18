@@ -894,6 +894,8 @@ func TestCompileTracksWorkflowRequirements(t *testing.T) {
 		"scheduler",
 		"cluster-gateway-enterprise-license",
 		"cluster-gateway",
+		"storage-proxy-rbac",
+		"storage-proxy",
 		"fuse-device-plugin",
 		"manager-rbac",
 		"manager",
@@ -901,8 +903,6 @@ func TestCompileTracksWorkflowRequirements(t *testing.T) {
 		"netd",
 		"data-plane-node-readiness",
 		"builtin-template-pods",
-		"storage-proxy-rbac",
-		"storage-proxy",
 		"register-cluster",
 	}
 	if len(got) != len(want) {

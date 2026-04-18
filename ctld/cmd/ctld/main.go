@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -15,6 +16,8 @@ import (
 	ctldfuseplugin "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/fuseplugin"
 	ctldpower "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/power"
 	ctldserver "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/server"
+	ctldvolume "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/volume"
+	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/k8s"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
@@ -29,6 +32,10 @@ var (
 	cgroupRoot             = "/host-sys/fs/cgroup"
 	criEndpoint            = "/host-run/containerd/containerd.sock"
 	procRoot               = "/proc"
+	volumeStagingRoot      = "/var/lib/sandbox0/volumes"
+	volumeCacheRoot        = "/var/lib/sandbox0/juicefs-cache"
+	volumeConfigPath       = ""
+	juicefsBin             = "juicefs"
 	nodeName               = os.Getenv("NODE_NAME")
 	pauseMinMemoryRequest  = "10Mi"
 	pauseMinMemoryLimit    = "32Mi"
@@ -44,6 +51,10 @@ func main() {
 	flag.StringVar(&cgroupRoot, "cgroup-root", "/host-sys/fs/cgroup", "host cgroup root mounted into ctld")
 	flag.StringVar(&criEndpoint, "cri-endpoint", "/host-run/containerd/containerd.sock", "host CRI socket used to read pod sandbox stats")
 	flag.StringVar(&procRoot, "proc-root", "/proc", "host proc root used to inspect sandbox processes")
+	flag.StringVar(&volumeStagingRoot, "volume-staging-root", "/var/lib/sandbox0/volumes", "host path where ctld finds node-local staged sandbox volumes")
+	flag.StringVar(&volumeCacheRoot, "volume-cache-root", "/var/lib/sandbox0/juicefs-cache", "host path where ctld stores node-local JuiceFS cache")
+	flag.StringVar(&volumeConfigPath, "volume-config", "", "storage-proxy config path used by ctld for node-local JuiceFS staging")
+	flag.StringVar(&juicefsBin, "juicefs-bin", "juicefs", "JuiceFS binary used by ctld for node-local staging")
 	flag.StringVar(&nodeName, "node-name", os.Getenv("NODE_NAME"), "current node name used to validate local sandbox ownership")
 	flag.StringVar(&pauseMinMemoryRequest, "pause-min-memory-request", "10Mi", "minimum memory request to apply to paused sandbox pods")
 	flag.StringVar(&pauseMinMemoryLimit, "pause-min-memory-limit", "32Mi", "minimum memory limit to apply to paused sandbox pods")
@@ -201,5 +212,14 @@ func buildPowerController(ctx context.Context, obsProvider *observability.Provid
 			powerReconciler.Run(ctx, 1)
 		}()
 	}
-	return controller
+	volumeController := ctldvolume.NewController(resolver, volumeStagingRoot, procRoot)
+	if strings.TrimSpace(volumeConfigPath) != "" {
+		cfg, err := apiconfig.LoadStorageProxyConfigFromFile(volumeConfigPath)
+		if err != nil {
+			log.Printf("ctld JuiceFS volume staging disabled: load volume config: %v", err)
+		} else {
+			volumeController.Stage = ctldvolume.NewJuiceFSStageProvider(cfg, juicefsBin, volumeStagingRoot, volumeCacheRoot, nil)
+		}
+	}
+	return ctldserver.WithVolumeController(controller, volumeController)
 }

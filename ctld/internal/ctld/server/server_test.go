@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,10 @@ type recordingController struct {
 	probedPodNS    string
 	probedPodName  string
 	probedKind     sandboxprobe.Kind
+	attachSandbox  string
+	attachReq      ctldapi.VolumeAttachRequest
+	detachSandbox  string
+	detachReq      ctldapi.VolumeDetachRequest
 }
 
 func (c *recordingController) Pause(_ *http.Request, sandboxID string) (ctldapi.PauseResponse, int) {
@@ -42,6 +47,18 @@ func (c *recordingController) ProbePod(_ *http.Request, namespace, name string, 
 	c.probedPodName = name
 	c.probedKind = kind
 	return sandboxprobe.Passed(kind, "SandboxProbePassed", "sandbox probe passed", nil), http.StatusOK
+}
+
+func (c *recordingController) AttachVolume(_ *http.Request, sandboxID string, req ctldapi.VolumeAttachRequest) (ctldapi.VolumeAttachResponse, int) {
+	c.attachSandbox = sandboxID
+	c.attachReq = req
+	return ctldapi.VolumeAttachResponse{Attached: true, AttachmentID: "attach-1", MountSessionID: "session-1"}, http.StatusOK
+}
+
+func (c *recordingController) DetachVolume(_ *http.Request, sandboxID string, req ctldapi.VolumeDetachRequest) (ctldapi.VolumeDetachResponse, int) {
+	c.detachSandbox = sandboxID
+	c.detachReq = req
+	return ctldapi.VolumeDetachResponse{Detached: true}, http.StatusOK
 }
 
 func TestNewMuxRoutesPauseResume(t *testing.T) {
@@ -81,6 +98,27 @@ func TestNewMuxRoutesPauseResume(t *testing.T) {
 		assert.Equal(t, "tpl-default", controller.probedPodNS)
 		assert.Equal(t, "pod-1", controller.probedPodName)
 		assert.Equal(t, sandboxprobe.KindLiveness, controller.probedKind)
+	})
+
+	t.Run("volume attach", func(t *testing.T) {
+		body := []byte(`{"sandboxvolume_id":"vol-1","mount_point":"/workspace/data"}`)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/sandbox-4/volumes/attach", bytes.NewReader(body))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "sandbox-4", controller.attachSandbox)
+		assert.Equal(t, "vol-1", controller.attachReq.SandboxVolumeID)
+		assert.Equal(t, "/workspace/data", controller.attachReq.MountPoint)
+	})
+
+	t.Run("volume detach", func(t *testing.T) {
+		body := []byte(`{"sandboxvolume_id":"vol-1","mount_point":"/workspace/data","attachment_id":"attach-1"}`)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/sandbox-4/volumes/detach", bytes.NewReader(body))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "sandbox-4", controller.detachSandbox)
+		assert.Equal(t, "attach-1", controller.detachReq.AttachmentID)
 	})
 }
 

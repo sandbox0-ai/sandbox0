@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/volume"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
 )
 
@@ -38,6 +39,17 @@ func (h *VolumeHandler) Mount(w http.ResponseWriter, r *http.Request) {
 	if req.MountPoint == "" {
 		writeError(w, http.StatusBadRequest, "invalid_mount_point", "mount_point is required")
 		return
+	}
+	if claims := internalauth.ClaimsFromContext(r.Context()); claims != nil {
+		if req.TeamID == "" {
+			req.TeamID = claims.TeamID
+		} else if claims.TeamID != "" && req.TeamID != claims.TeamID {
+			writeError(w, http.StatusForbidden, "forbidden", "team_id does not match token")
+			return
+		}
+		if req.SandboxID == "" {
+			req.SandboxID = claims.SandboxID
+		}
 	}
 
 	resp, err := h.manager.Mount(r.Context(), &req)

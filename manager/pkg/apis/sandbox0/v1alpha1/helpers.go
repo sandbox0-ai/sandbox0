@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
@@ -327,6 +328,12 @@ func appendProcdConfigEnvVars(envVars []corev1.EnvVar) []corev1.EnvVar {
 			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.nodeName"},
 		},
 	})
+	upsertProcdEnvVar(envIndex, &envVars, corev1.EnvVar{
+		Name: "node_host_ip",
+		ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.hostIP"},
+		},
+	})
 
 	cfg := config.LoadManagerConfig()
 	if cfg == nil {
@@ -338,7 +345,7 @@ func appendProcdConfigEnvVars(envVars []corev1.EnvVar) []corev1.EnvVar {
 	envMap := cfg.ProcdConfig.EnvMap()
 	keys := make([]string, 0, len(envMap))
 	for key := range envMap {
-		if key == "" || key == "node_name" {
+		if key == "" || key == "node_name" || key == "node_host_ip" || isManagerControlledProcdRuntimeEnv(key) {
 			continue
 		}
 		keys = append(keys, key)
@@ -362,8 +369,45 @@ func appendProcdConfigEnvVars(envVars []corev1.EnvVar) []corev1.EnvVar {
 		Name:  "storage_proxy_port",
 		Value: strconv.Itoa(cfg.ProcdConfig.StorageProxyPort),
 	})
+	upsertProcdEnvVar(envIndex, &envVars, corev1.EnvVar{
+		Name:  "mount_mode",
+		Value: cfg.ProcdConfig.MountMode,
+	})
+	upsertProcdEnvVar(envIndex, &envVars, corev1.EnvVar{
+		Name:  "ctld_base_url",
+		Value: cfg.ProcdConfig.CtldBaseURL,
+	})
+	ctldPort := cfg.CtldPort
+	if ctldPort <= 0 {
+		ctldPort = 8095
+	}
+	upsertProcdEnvVar(envIndex, &envVars, corev1.EnvVar{
+		Name:  "ctld_port",
+		Value: strconv.Itoa(ctldPort),
+	})
+	ctldTimeout := cfg.ProcdConfig.CtldTimeout.Duration
+	if ctldTimeout <= 0 {
+		ctldTimeout = 5 * time.Second
+	}
+	upsertProcdEnvVar(envIndex, &envVars, corev1.EnvVar{
+		Name:  "ctld_timeout",
+		Value: ctldTimeout.String(),
+	})
+	upsertProcdEnvVar(envIndex, &envVars, corev1.EnvVar{
+		Name:  "node_local_fallback_to_storage",
+		Value: strconv.FormatBool(cfg.ProcdConfig.NodeLocalFallbackToStorage),
+	})
 
 	return envVars
+}
+
+func isManagerControlledProcdRuntimeEnv(key string) bool {
+	switch key {
+	case "mount_mode", "ctld_base_url", "ctld_port", "ctld_timeout", "node_local_fallback_to_storage":
+		return true
+	default:
+		return false
+	}
 }
 
 func procdHTTPPort() int {

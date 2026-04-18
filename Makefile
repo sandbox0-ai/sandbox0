@@ -81,6 +81,11 @@ build-local-all: manifests proto apispec
 	@for service in $(SERVICES); do \
 		$(MAKE) build SERVICE=$$service BIN_DIR=$(shell pwd)/bin GOOS=linux; \
 	done
+	@if [ "$$(uname -s)" = "Linux" ]; then \
+		CGO_ENABLED=1 GOOS=linux GOFLAGS=-mod=mod $(GO) build -v -o $(shell pwd)/bin/juicefs ./tools/juicefs; \
+	else \
+		printf "$(YELLOW)Skipping juicefs: requires Linux host and GOOS=linux$(RESET)\n"; \
+	fi
 
 docker-build-local: build-local-all
 	@printf "$(GREEN)Docker building with local binaries...$(RESET)\n"

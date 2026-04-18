@@ -14,6 +14,15 @@ type Config struct {
 	CacheTTL       time.Duration
 	GRPCMaxMsgSize int
 
+	// MountMode selects the runtime volume attach path. The default keeps the
+	// existing storage-proxy backed FUSE path. "node-local" asks ctld to bind a
+	// node-local mount into this sandbox so storage-proxy is not in the
+	// per-file-operation data path.
+	MountMode                  string
+	CtldBaseURL                string
+	CtldTimeout                time.Duration
+	NodeLocalFallbackToStorage bool
+
 	// Default JuiceFS cache config for mounted volumes.
 	JuiceFSCacheSize  string
 	JuiceFSPrefetch   int
@@ -33,6 +42,7 @@ type VolumeConfig struct {
 type MountRequest struct {
 	SandboxVolumeID string        `json:"sandboxvolume_id"`
 	SandboxID       string        `json:"sandbox_id,omitempty"`
+	TeamID          string        `json:"team_id,omitempty"`
 	MountPoint      string        `json:"mount_point"`
 	VolumeConfig    *VolumeConfig `json:"volume_config,omitempty"`
 }
@@ -43,6 +53,7 @@ type MountResponse struct {
 	MountPoint      string `json:"mount_point"`
 	MountedAt       string `json:"mounted_at"`
 	MountSessionID  string `json:"mount_session_id"`
+	Backend         string `json:"backend,omitempty"`
 }
 
 // UnmountRequest represents a request to unmount a sandbox volume.
@@ -59,6 +70,7 @@ type MountStatus struct {
 	MountedAt           string `json:"mounted_at"`
 	MountedDurationSecs int64  `json:"mounted_duration_sec"`
 	MountSessionID      string `json:"mount_session_id"`
+	Backend             string `json:"backend,omitempty"`
 	ErrorCode           string `json:"error_code,omitempty"`
 	ErrorMessage        string `json:"error_message,omitempty"`
 }

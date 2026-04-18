@@ -99,6 +99,7 @@ func (h *InitializeHandler) Initialize(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	req.TeamID = teamID
 
 	webhookURL := ""
 	webhookSecret := ""
@@ -150,6 +151,7 @@ func (h *InitializeHandler) bootstrapMounts(ctx context.Context, req InitializeR
 		mounts = append(mounts, volume.MountRequest{
 			SandboxVolumeID: item.SandboxVolumeID,
 			SandboxID:       req.SandboxID,
+			TeamID:          req.TeamID,
 			MountPoint:      item.MountPoint,
 			VolumeConfig:    item.VolumeConfig,
 		})

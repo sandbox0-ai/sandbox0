@@ -19,4 +19,6 @@ var (
 	ErrMissingInternalToken = errors.New("missing internal token")
 	// ErrStorageProxyUnavailable indicates storage-proxy config is missing.
 	ErrStorageProxyUnavailable = errors.New("storage-proxy unavailable")
+	// ErrNodeLocalMountUnavailable indicates node-local volume attach is not configured.
+	ErrNodeLocalMountUnavailable = errors.New("node-local volume mount unavailable")
 )

@@ -79,6 +79,14 @@ func (c *Controller) ProbePod(r *http.Request, namespace, name string, kind sand
 	return c.probeTarget(r, target, kind)
 }
 
+func (c *Controller) AttachVolume(_ *http.Request, _ string, _ ctldapi.VolumeAttachRequest) (ctldapi.VolumeAttachResponse, int) {
+	return ctldapi.VolumeAttachResponse{Attached: false, Error: "ctld volume attach not configured"}, http.StatusNotImplemented
+}
+
+func (c *Controller) DetachVolume(_ *http.Request, _ string, _ ctldapi.VolumeDetachRequest) (ctldapi.VolumeDetachResponse, int) {
+	return ctldapi.VolumeDetachResponse{Detached: false, Error: "ctld volume detach not configured"}, http.StatusNotImplemented
+}
+
 func (c *Controller) probeTarget(r *http.Request, target Target, kind sandboxprobe.Kind) (sandboxprobe.Response, int) {
 	if c.FS != nil {
 		frozen, err := c.FS.IsFrozen(target.CgroupDir)

@@ -104,22 +104,16 @@ func TestManagerUnmountUsesBackend(t *testing.T) {
 	}
 }
 
-func TestManagerMountSelectsRequestedBackendType(t *testing.T) {
+func TestManagerMountUsesDefaultBackend(t *testing.T) {
 	s0fsBackend := &fakeBackend{}
-	juicefsBackend := &fakeBackend{}
 	mgr := NewManagerWithBackends(logrus.New(), &config.StorageProxyConfig{}, map[string]Backend{
-		BackendS0FS:    s0fsBackend,
-		BackendJuiceFS: juicefsBackend,
+		BackendS0FS: s0fsBackend,
 	}, BackendS0FS)
 
-	cfg := &VolumeConfig{BackendType: BackendJuiceFS}
-	if _, _, _, err := mgr.MountVolume(context.Background(), "team/team-a", "vol-1", "team-a", cfg, AccessModeRWO); err != nil {
+	if _, _, _, err := mgr.MountVolume(context.Background(), "team/team-a", "vol-1", "team-a", &VolumeConfig{}, AccessModeRWO); err != nil {
 		t.Fatalf("MountVolume() error = %v", err)
 	}
-	if juicefsBackend.mountCalls != 1 {
-		t.Fatalf("juicefs backend mount calls = %d, want 1", juicefsBackend.mountCalls)
-	}
-	if s0fsBackend.mountCalls != 0 {
-		t.Fatalf("s0fs backend mount calls = %d, want 0", s0fsBackend.mountCalls)
+	if s0fsBackend.mountCalls != 1 {
+		t.Fatalf("s0fs backend mount calls = %d, want 1", s0fsBackend.mountCalls)
 	}
 }

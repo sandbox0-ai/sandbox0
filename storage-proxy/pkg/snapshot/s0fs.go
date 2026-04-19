@@ -59,30 +59,6 @@ func (m *Manager) s0fsObjectStore(teamID, volumeID string) (object.ObjectStorage
 	return object.WithPrefix(store, prefix+"/s0fs/"), nil
 }
 
-func (m *Manager) shouldUseS0FS(volumeID string) bool {
-	if volumeID == "" || m == nil || m.config == nil {
-		return false
-	}
-	if m.volMgr != nil {
-		if volCtx, err := m.volMgr.GetVolume(volumeID); err == nil && volCtx != nil {
-			return volCtx.IsS0FS()
-		}
-	}
-	if m.repo != nil {
-		if volumeRecord, err := m.repo.GetSandboxVolume(context.Background(), volumeID); err == nil {
-			return volume.ResolveBackendType(volumeRecord.BackendType) == volume.BackendS0FS
-		}
-	}
-	baseDir := filepath.Join(m.config.CacheDir, "s0fs", volumeID)
-	if _, err := os.Stat(filepath.Join(baseDir, "head.json")); err == nil {
-		return true
-	}
-	if _, err := os.Stat(filepath.Join(baseDir, "engine.wal")); err == nil {
-		return true
-	}
-	return false
-}
-
 func (m *Manager) openS0FSEngine(ctx context.Context, teamID, volumeID string) (*s0fs.Engine, func() error, error) {
 	if volumeID == "" {
 		return nil, nil, fmt.Errorf("volume id is required")
@@ -403,7 +379,6 @@ func (m *Manager) forkS0FSVolume(ctx context.Context, req *ForkVolumeRequest) (*
 		BufferSize:      bufferSize,
 		Writeback:       writeback,
 		AccessMode:      string(accessMode),
-		BackendType:     volume.BackendS0FS,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}

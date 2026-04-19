@@ -5121,9 +5121,6 @@ components:
         access_mode:
           $ref: "#/components/schemas/VolumeAccessMode"
           description: Configured access mode for the volume.
-        backend_type:
-          type: string
-          description: Storage backend used by this volume. New volumes default to s0fs; legacy volumes may remain on juicefs until migrated.
         created_at:
           type: string
           format: date-time

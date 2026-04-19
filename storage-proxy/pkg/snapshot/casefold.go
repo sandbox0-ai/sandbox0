@@ -107,39 +107,31 @@ func (m *Manager) openSnapshotArchiveSession(
 		return nil, nil, nil, 0, nil, err
 	}
 
-	if m.shouldUseS0FS(volumeID) {
-		session, rootInode, rootAttr, err := m.openS0FSSnapshotArchiveSession(ctx, volumeID, snapshotID)
+	if m.newArchiveSession != nil {
+		session, err := m.newArchiveSession(ctx, volume)
 		if err != nil {
-			if errors.Is(err, s0fs.ErrSnapshotNotFound) {
+			return nil, nil, nil, 0, nil, err
+		}
+		rootInode := meta.Ino(snap.RootInode)
+		rootAttr := &meta.Attr{}
+		if errno := session.meta.GetAttr(meta.Background(), rootInode, rootAttr); errno != 0 {
+			if session.close != nil {
+				session.close()
+			}
+			if errno == syscall.ENOENT {
 				return nil, nil, nil, 0, nil, ErrSnapshotNotFound
 			}
-			return nil, nil, nil, 0, nil, err
+			return nil, nil, nil, 0, nil, fmt.Errorf("get snapshot root inode %d: %w", rootInode, syscall.Errno(errno))
 		}
 		return volume, snap, session, rootInode, rootAttr, nil
 	}
 
-	sessionFactory := m.newArchiveSession
-	if sessionFactory == nil {
-		sessionFactory = m.openArchiveSession
-	}
-	session, err := sessionFactory(ctx, volume)
+	session, rootInode, rootAttr, err := m.openS0FSSnapshotArchiveSession(ctx, volumeID, snapshotID)
 	if err != nil {
-		return nil, nil, nil, 0, nil, err
-	}
-
-	rootInode := meta.Ino(snap.RootInode)
-	rootAttr := &meta.Attr{}
-	if errno := session.meta.GetAttr(meta.Background(), rootInode, rootAttr); errno != 0 {
-		if errno == syscall.ENOENT {
-			if session.close != nil {
-				session.close()
-			}
+		if errors.Is(err, s0fs.ErrSnapshotNotFound) {
 			return nil, nil, nil, 0, nil, ErrSnapshotNotFound
 		}
-		if session.close != nil {
-			session.close()
-		}
-		return nil, nil, nil, 0, nil, fmt.Errorf("get snapshot root inode %d: %w", rootInode, syscall.Errno(errno))
+		return nil, nil, nil, 0, nil, err
 	}
 
 	return volume, snap, session, rootInode, rootAttr, nil

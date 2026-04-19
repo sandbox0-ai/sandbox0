@@ -145,7 +145,6 @@ func (s *Server) createSandboxVolume(w http.ResponseWriter, r *http.Request) {
 		BufferSize:      req.BufferSize,
 		Writeback:       req.Writeback,
 		AccessMode:      string(accessMode),
-		BackendType:     volume.DefaultBackendType(),
 		CreatedAt:       time.Now(),
 		UpdatedAt:       time.Now(),
 	}
@@ -474,7 +473,6 @@ func (s *Server) createOwnedSandboxVolume(w http.ResponseWriter, r *http.Request
 		BufferSize:      req.BufferSize,
 		Writeback:       req.Writeback,
 		AccessMode:      string(accessMode),
-		BackendType:     volume.DefaultBackendType(),
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}

@@ -31,11 +31,10 @@ type MountRegistrar interface {
 
 // VolumeConfig holds the configuration for a volume
 type VolumeConfig struct {
-	CacheSize   string
-	Prefetch    int
-	BufferSize  string
-	Writeback   bool
-	BackendType string
+	CacheSize  string
+	Prefetch   int
+	BufferSize string
+	Writeback  bool
 }
 
 // VolumeContext holds the mounted runtime state for a volume.
@@ -127,8 +126,7 @@ type Manager struct {
 // NewManager creates a new volume manager
 func NewManager(logger *logrus.Logger, cfg *config.StorageProxyConfig) *Manager {
 	return NewManagerWithBackends(logger, cfg, map[string]Backend{
-		BackendS0FS:    NewS0FSBackend(logger, cfg),
-		BackendJuiceFS: NewJuiceFSBackend(logger, cfg),
+		BackendS0FS: NewS0FSBackend(logger, cfg),
 	}, DefaultBackendType())
 }
 
@@ -268,11 +266,7 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID st
 }
 
 func (m *Manager) selectBackend(config *VolumeConfig) (Backend, error) {
-	requested := m.defaultBackend
-	if config != nil && strings.TrimSpace(config.BackendType) != "" {
-		requested = NormalizeBackendType(config.BackendType)
-	}
-	if backend, ok := m.backends[requested]; ok && backend != nil {
+	if backend, ok := m.backends[m.defaultBackend]; ok && backend != nil {
 		return backend, nil
 	}
 	if len(m.backends) == 1 {
@@ -282,7 +276,7 @@ func (m *Manager) selectBackend(config *VolumeConfig) (Backend, error) {
 			}
 		}
 	}
-	return nil, fmt.Errorf("storage backend %q is not configured", requested)
+	return nil, fmt.Errorf("storage backend %q is not configured", m.defaultBackend)
 }
 
 // AuthenticateMountSession validates a mount session credential for a specific
@@ -323,18 +317,6 @@ func (m *Manager) AuthenticateMountSession(volumeID, sessionID, sessionSecret st
 		TeamID:    teamID,
 		SandboxID: session.SandboxID,
 	}, nil
-}
-
-func buildMetaConf(cfg *config.StorageProxyConfig, readOnly bool) *meta.Config {
-	metaConf := meta.DefaultConf()
-	if cfg != nil {
-		metaConf.Retries = cfg.JuiceFSMetaRetries
-	}
-	if metaConf.Retries == 0 {
-		metaConf.Retries = 10
-	}
-	metaConf.ReadOnly = readOnly
-	return metaConf
 }
 
 func resolveMountRoot(metaClient volumeRootMeta, path string, readOnly bool, ensureWritable func(string) (meta.Ino, error)) (meta.Ino, error) {
@@ -446,7 +428,7 @@ func (m *Manager) UnmountVolume(ctx context.Context, volumeID, sessionID string)
 		}
 	}
 
-	backend, err := m.selectBackend(&VolumeConfig{BackendType: volCtx.Backend})
+	backend, err := m.selectBackend(nil)
 	if err != nil {
 		m.logger.WithError(err).Warn("Failed to resolve volume backend for unmount")
 	} else if err := backend.UnmountVolume(ctx, volCtx); err != nil {
@@ -915,38 +897,6 @@ func (m *Manager) UnmountSandboxVolumes(ctx context.Context, sandboxID string) [
 	m.mu.Unlock()
 
 	return errs
-}
-
-// parseSizeString parses size string like "10G", "100M" to bytes
-func parseSizeString(sizeStr string, defaultSize int64) int64 {
-	if sizeStr == "" {
-		return defaultSize
-	}
-
-	var multiplier int64 = 1
-	numStr := sizeStr
-
-	if len(sizeStr) > 0 {
-		lastChar := sizeStr[len(sizeStr)-1]
-		switch lastChar {
-		case 'K', 'k':
-			multiplier = 1 << 10
-			numStr = sizeStr[:len(sizeStr)-1]
-		case 'M', 'm':
-			multiplier = 1 << 20
-			numStr = sizeStr[:len(sizeStr)-1]
-		case 'G', 'g':
-			multiplier = 1 << 30
-			numStr = sizeStr[:len(sizeStr)-1]
-		case 'T', 't':
-			multiplier = 1 << 40
-			numStr = sizeStr[:len(sizeStr)-1]
-		}
-	}
-
-	var size int64
-	fmt.Sscanf(numStr, "%d", &size)
-	return size * multiplier
 }
 
 func generateMountSessionSecret() (string, error) {

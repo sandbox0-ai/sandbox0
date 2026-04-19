@@ -31,6 +31,12 @@ type Node struct {
 	Ctime  time.Time
 }
 
+type DirEntry struct {
+	Name  string
+	Inode uint64
+	Type  FileType
+}
+
 func cloneNode(node *Node) *Node {
 	if node == nil {
 		return nil

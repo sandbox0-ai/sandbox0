@@ -18,6 +18,7 @@ import (
 	"github.com/juicedata/juicefs/pkg/vfs"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sirupsen/logrus"
 )
 
@@ -41,6 +42,7 @@ type VolumeContext struct {
 	VolumeID  string
 	TeamID    string
 	Backend   string
+	S0FS      *s0fs.Engine
 	Meta      meta.Meta
 	Store     chunk.ChunkStore
 	VFS       *vfs.VFS
@@ -50,6 +52,12 @@ type VolumeContext struct {
 	RootInode meta.Ino
 	RootPath  string
 	CacheDir  string
+
+	handleMu      sync.Mutex
+	nextHandleID  uint64
+	fileHandles   map[uint64]uint64
+	dirHandleIDs  map[uint64]uint64
+	openFileCount map[uint64]int
 }
 
 // MountSession tracks a single mount session on this instance.

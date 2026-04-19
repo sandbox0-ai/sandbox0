@@ -1,6 +1,7 @@
 package s0fs
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"slices"
@@ -69,6 +70,7 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 			e.nextInode = record.Inode + 1
 		}
 	}
+	e.collectUnlinkedLocked()
 
 	return e, nil
 }
@@ -111,6 +113,34 @@ func (e *Engine) GetAttr(inode uint64) (*Node, error) {
 
 func (e *Engine) Mkdir(parent uint64, name string, mode uint32) (*Node, error) {
 	return e.create(parent, name, TypeDirectory, mode, "")
+}
+
+func (e *Engine) ReadDir(inode uint64) ([]DirEntry, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if err := e.checkOpen(); err != nil {
+		return nil, err
+	}
+	if err := e.ensureDirLocked(inode); err != nil {
+		return nil, err
+	}
+
+	entries := make([]DirEntry, 0, len(e.children[inode]))
+	for name, childInode := range e.children[inode] {
+		node := e.nodes[childInode]
+		if node == nil {
+			continue
+		}
+		entries = append(entries, DirEntry{
+			Name:  name,
+			Inode: childInode,
+			Type:  node.Type,
+		})
+	}
+	slices.SortFunc(entries, func(a, b DirEntry) int {
+		return cmp.Compare(a.Name, b.Name)
+	})
+	return entries, nil
 }
 
 func (e *Engine) CreateFile(parent uint64, name string, mode uint32) (*Node, error) {
@@ -215,6 +245,106 @@ func (e *Engine) Unlink(parent uint64, name string) error {
 	return e.apply(record)
 }
 
+func (e *Engine) Forget(inode uint64) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.checkOpen(); err != nil {
+		return err
+	}
+	node, ok := e.nodes[inode]
+	if !ok || node == nil || node.Nlink != 0 {
+		return nil
+	}
+	delete(e.children, inode)
+	delete(e.nodes, inode)
+	delete(e.data, inode)
+	return nil
+}
+
+func (e *Engine) RemoveDir(parent uint64, name string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.checkOpen(); err != nil {
+		return err
+	}
+	inode, err := e.lookupLocked(parent, name)
+	if err != nil {
+		return err
+	}
+	node := e.nodes[inode]
+	if node == nil {
+		return ErrNotFound
+	}
+	if node.Type != TypeDirectory {
+		return ErrNotDir
+	}
+	if len(e.children[inode]) > 0 {
+		return ErrNotEmpty
+	}
+	record := e.newRecord("rmdir")
+	record.Parent = parent
+	record.Name = name
+	if err := e.wal.append(record); err != nil {
+		return err
+	}
+	return e.apply(record)
+}
+
+func (e *Engine) SetMode(inode uint64, mode uint32) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.checkOpen(); err != nil {
+		return err
+	}
+	if _, ok := e.nodes[inode]; !ok {
+		return ErrNotFound
+	}
+	record := e.newRecord("chmod")
+	record.Inode = inode
+	record.Mode = mode
+	if err := e.wal.append(record); err != nil {
+		return err
+	}
+	return e.apply(record)
+}
+
+func (e *Engine) SetOwner(inode uint64, uid, gid uint32) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.checkOpen(); err != nil {
+		return err
+	}
+	if _, ok := e.nodes[inode]; !ok {
+		return ErrNotFound
+	}
+	record := e.newRecord("chown")
+	record.Inode = inode
+	record.Mode = uid
+	record.Offset = uint64(gid)
+	if err := e.wal.append(record); err != nil {
+		return err
+	}
+	return e.apply(record)
+}
+
+func (e *Engine) Truncate(inode uint64, size uint64) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.checkOpen(); err != nil {
+		return err
+	}
+	if _, err := e.fileNodeLocked(inode); err != nil {
+		return err
+	}
+	record := e.newRecord("truncate")
+	record.Inode = inode
+	record.Offset = size
+	if err := e.wal.append(record); err != nil {
+		return err
+	}
+	return e.apply(record)
+}
+
 func (e *Engine) Fsync(_ uint64) error {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -272,8 +402,16 @@ func (e *Engine) apply(record walRecord) error {
 		return e.applyCreate(record)
 	case "write":
 		return e.applyWrite(record)
+	case "rmdir":
+		return e.applyRemoveDir(record)
 	case "rename":
 		return e.applyRename(record)
+	case "chmod":
+		return e.applySetMode(record)
+	case "chown":
+		return e.applySetOwner(record)
+	case "truncate":
+		return e.applyTruncate(record)
 	case "unlink":
 		return e.applyUnlink(record)
 	default:
@@ -353,6 +491,73 @@ func (e *Engine) applyRename(record walRecord) error {
 	return nil
 }
 
+func (e *Engine) applyRemoveDir(record walRecord) error {
+	inode, err := e.lookupLocked(record.Parent, record.Name)
+	if err != nil {
+		return err
+	}
+	node := e.nodes[inode]
+	if node == nil {
+		return ErrNotFound
+	}
+	if node.Type != TypeDirectory {
+		return ErrNotDir
+	}
+	if len(e.children[inode]) > 0 {
+		return ErrNotEmpty
+	}
+	delete(e.children[record.Parent], record.Name)
+	delete(e.children, inode)
+	delete(e.nodes, inode)
+	return nil
+}
+
+func (e *Engine) applySetMode(record walRecord) error {
+	node, ok := e.nodes[record.Inode]
+	if !ok {
+		return ErrNotFound
+	}
+	node.Mode = record.Mode
+	node.Ctime = time.Unix(0, record.TimeUnix).UTC()
+	return nil
+}
+
+func (e *Engine) applySetOwner(record walRecord) error {
+	node, ok := e.nodes[record.Inode]
+	if !ok {
+		return ErrNotFound
+	}
+	node.UID = record.Mode
+	node.GID = uint32(record.Offset)
+	node.Ctime = time.Unix(0, record.TimeUnix).UTC()
+	return nil
+}
+
+func (e *Engine) applyTruncate(record walRecord) error {
+	node, err := e.fileNodeLocked(record.Inode)
+	if err != nil {
+		return err
+	}
+	current := e.data[record.Inode]
+	target := int(record.Offset)
+	switch {
+	case target < len(current):
+		current = slices.Clone(current[:target])
+	case target > len(current):
+		grown := make([]byte, target)
+		copy(grown, current)
+		current = grown
+	default:
+		current = slices.Clone(current)
+	}
+	e.data[record.Inode] = current
+	node.Size = uint64(len(current))
+	now := time.Unix(0, record.TimeUnix).UTC()
+	node.Mtime = now
+	node.Ctime = now
+	return nil
+}
+
 func (e *Engine) applyUnlink(record walRecord) error {
 	inode, err := e.lookupLocked(record.Parent, record.Name)
 	if err != nil {
@@ -363,8 +568,10 @@ func (e *Engine) applyUnlink(record walRecord) error {
 		return ErrIsDir
 	}
 	delete(e.children[record.Parent], record.Name)
-	delete(e.nodes, inode)
-	delete(e.data, inode)
+	if node != nil && node.Nlink > 0 {
+		node.Nlink--
+		node.Ctime = time.Unix(0, record.TimeUnix).UTC()
+	}
 	return nil
 }
 
@@ -409,4 +616,15 @@ func (e *Engine) fileNodeLocked(inode uint64) (*Node, error) {
 		return nil, ErrIsDir
 	}
 	return node, nil
+}
+
+func (e *Engine) collectUnlinkedLocked() {
+	for inode, node := range e.nodes {
+		if inode == RootInode || node == nil || node.Nlink != 0 {
+			continue
+		}
+		delete(e.children, inode)
+		delete(e.nodes, inode)
+		delete(e.data, inode)
+	}
 }

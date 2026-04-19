@@ -7,9 +7,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/juicedata/juicefs/pkg/meta"
-	"github.com/juicedata/juicefs/pkg/vfs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/legacyfs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"github.com/sirupsen/logrus"
 )
@@ -90,17 +90,17 @@ func writeArtifactFile(volCtx *volume.VolumeContext, artifactPath string, payloa
 		return err
 	}
 	if targetAttr != nil {
-		if targetAttr.Typ == meta.TypeDirectory {
+		if targetAttr.Typ == fsmeta.TypeDirectory {
 			return fmt.Errorf("artifact path %q points to an existing directory", artifactPath)
 		}
-		vfsCtx := vfs.NewLogContext(meta.Background())
+		vfsCtx := legacyfs.NewLogContext(fsmeta.Background())
 		if st := volCtx.VFS.Unlink(vfsCtx, parentIno, baseName); st != 0 && st != syscall.ENOENT {
 			return fmt.Errorf("unlink existing artifact %q: %w", artifactPath, syscall.Errno(st))
 		}
 		_ = targetIno
 	}
 
-	vfsCtx := vfs.NewLogContext(meta.Background())
+	vfsCtx := legacyfs.NewLogContext(fsmeta.Background())
 	entry, handleID, errno := volCtx.VFS.Create(vfsCtx, parentIno, baseName, 0o644, 0, syscall.O_WRONLY)
 	if errno != 0 {
 		return fmt.Errorf("create artifact %q: %w", artifactPath, syscall.Errno(errno))
@@ -116,14 +116,14 @@ func writeArtifactFile(volCtx *volume.VolumeContext, artifactPath string, payloa
 	return nil
 }
 
-func ensureArtifactParent(volCtx *volume.VolumeContext, artifactPath string) (meta.Ino, string, meta.Ino, *meta.Attr, error) {
-	parentIno, baseName, err := ensureLogicalParent(volCtx, meta.Background(), artifactPath)
+func ensureArtifactParent(volCtx *volume.VolumeContext, artifactPath string) (fsmeta.Ino, string, fsmeta.Ino, *fsmeta.Attr, error) {
+	parentIno, baseName, err := ensureLogicalParent(volCtx, fsmeta.Background(), artifactPath)
 	if err != nil {
 		return 0, "", 0, nil, err
 	}
-	var targetIno meta.Ino
-	targetAttr := &meta.Attr{}
-	errno := volCtx.Meta.Lookup(meta.Background(), parentIno, baseName, &targetIno, targetAttr, false)
+	var targetIno fsmeta.Ino
+	targetAttr := &fsmeta.Attr{}
+	errno := volCtx.Meta.Lookup(fsmeta.Background(), parentIno, baseName, &targetIno, targetAttr, false)
 	if errno == syscall.ENOENT {
 		return parentIno, baseName, 0, nil, nil
 	}

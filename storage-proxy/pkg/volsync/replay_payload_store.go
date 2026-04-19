@@ -9,12 +9,11 @@ import (
 	"os"
 	"strings"
 
-	"github.com/juicedata/juicefs/pkg/object"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/juicefs"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 )
 
 const replayPayloadRefPrefix = "sha256:"
@@ -25,10 +24,10 @@ type replayPayloadStore interface {
 }
 
 type objectReplayPayloadStore struct {
-	store object.ObjectStorage
+	store objectstore.Store
 }
 
-func NewObjectReplayPayloadStore(store object.ObjectStorage) replayPayloadStore {
+func NewObjectReplayPayloadStore(store objectstore.Store) replayPayloadStore {
 	if store == nil {
 		return nil
 	}
@@ -40,7 +39,7 @@ func NewReplayPayloadStore(cfg *config.StorageProxyConfig, metrics *obsmetrics.S
 		return nil, fmt.Errorf("storage proxy config is nil")
 	}
 
-	store, err := juicefs.CreateObjectStorage(juicefs.ObjectStorageConfig{
+	store, err := objectstore.Create(objectstore.Config{
 		Type:         cfg.ObjectStorageType,
 		Bucket:       cfg.S3Bucket,
 		Region:       cfg.S3Region,
@@ -54,16 +53,16 @@ func NewReplayPayloadStore(cfg *config.StorageProxyConfig, metrics *obsmetrics.S
 		return nil, fmt.Errorf("create replay payload storage: %w", err)
 	}
 
-	if cfg.JuiceFSEncryptionEnabled {
-		keyPEM, err := juicefs.LoadEncryptionKey(cfg.JuiceFSEncryptionKeyPath)
+	if cfg.ObjectEncryptionEnabled {
+		keyPEM, err := objectstore.LoadEncryptionKey(cfg.ObjectEncryptionKeyPath)
 		if err != nil {
 			return nil, fmt.Errorf("load encryption key: %w", err)
 		}
-		encryptor, err := juicefs.NewEncryptor(keyPEM, cfg.JuiceFSEncryptionPassphrase, cfg.JuiceFSEncryptionAlgo)
+		encryptor, err := objectstore.NewEncryptor(keyPEM, cfg.ObjectEncryptionPassphrase, cfg.ObjectEncryptionAlgo)
 		if err != nil {
 			return nil, fmt.Errorf("create encryptor: %w", err)
 		}
-		store = juicefs.WrapEncryptedStorage(store, encryptor)
+		store = objectstore.WrapEncrypted(store, encryptor)
 	}
 
 	return NewObjectReplayPayloadStore(store), nil

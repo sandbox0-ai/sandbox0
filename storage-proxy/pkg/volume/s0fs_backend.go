@@ -7,9 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juicedata/juicefs/pkg/object"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/juicefs"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sirupsen/logrus"
 )
@@ -80,11 +79,11 @@ func (b *S0FSBackend) UnmountVolume(ctx context.Context, volCtx *VolumeContext) 
 	return volCtx.S0FS.Close()
 }
 
-func (b *S0FSBackend) createObjectStorage(req BackendMountRequest) (object.ObjectStorage, error) {
+func (b *S0FSBackend) createObjectStorage(req BackendMountRequest) (objectstore.Store, error) {
 	if b == nil || b.config == nil || strings.TrimSpace(b.config.S3Bucket) == "" {
 		return nil, nil
 	}
-	store, err := juicefs.CreateObjectStorage(juicefs.ObjectStorageConfig{
+	store, err := objectstore.Create(objectstore.Config{
 		Type:         b.config.ObjectStorageType,
 		Bucket:       b.config.S3Bucket,
 		Region:       b.config.S3Region,
@@ -101,7 +100,7 @@ func (b *S0FSBackend) createObjectStorage(req BackendMountRequest) (object.Objec
 	if prefix == "" {
 		prefix = strings.Trim(req.VolumeID, "/")
 	}
-	return object.WithPrefix(store, prefix+"/s0fs/"), nil
+	return objectstore.Prefix(store, prefix+"/s0fs/"), nil
 }
 
 func (b *S0FSBackend) startMaterializer(volCtx *VolumeContext) {

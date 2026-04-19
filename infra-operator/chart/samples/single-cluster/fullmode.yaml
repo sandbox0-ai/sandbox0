@@ -130,6 +130,6 @@ spec:
       enabled: true
       replicas: 1
       config:
-        juicefsEncryptionEnabled: false
+        objectEncryptionEnabled: false
   initUser:
     email: "admin@example.com"

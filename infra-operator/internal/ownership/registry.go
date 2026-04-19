@@ -33,7 +33,7 @@ func Registry() []Entry {
 		exact("spec.database.builtin.statefulResourcePolicy", "database", []string{"database", "status"}, []string{"cleanup policy"}, UpdateSemanticsDeclarative, "Controls retain versus delete semantics when builtin database is disabled."),
 		prefix("spec.database.external", "database", []string{"database", "global-gateway", "regional-gateway", "scheduler", "cluster-gateway", "manager", "storage-proxy"}, nil, UpdateSemanticsDeclarative, "External database DSN is consumed by database-backed services."),
 
-		prefix("spec.juicefsDatabase", "storage-proxy", []string{"storage-proxy"}, nil, UpdateSemanticsDeclarative, "Controls JuiceFS metadata database selection."),
+		prefix("spec.metadataDatabase", "storage-proxy", []string{"storage-proxy"}, nil, UpdateSemanticsDeclarative, "Controls S0FS metadata database selection."),
 
 		exact("spec.storage.type", "plan", []string{"storage", "storage-proxy"}, []string{"InfraPlan.Components.EnableStorage"}, UpdateSemanticsDeclarative, "Selects builtin versus external object storage reconciliation."),
 		prefix("spec.storage.builtin", "storage", []string{"storage", "storage-proxy"}, nil, UpdateSemanticsMixed, "Builtin storage fields are reconciled by the storage service; immutable subpaths are declared separately."),

@@ -12,8 +12,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
 )
 
 type ExportSnapshotRequest struct {
@@ -31,13 +31,13 @@ type snapshotArchiveSession struct {
 }
 
 type snapshotArchiveMeta interface {
-	GetAttr(meta.Context, meta.Ino, *meta.Attr) syscall.Errno
-	Readdir(meta.Context, meta.Ino, uint8, *[]*meta.Entry) syscall.Errno
-	ReadLink(meta.Context, meta.Ino, *[]byte) syscall.Errno
+	GetAttr(fsmeta.Context, fsmeta.Ino, *fsmeta.Attr) syscall.Errno
+	Readdir(fsmeta.Context, fsmeta.Ino, uint8, *[]*fsmeta.Entry) syscall.Errno
+	ReadLink(fsmeta.Context, fsmeta.Ino, *[]byte) syscall.Errno
 }
 
 type snapshotArchiveReader interface {
-	ReadFile(context.Context, meta.Ino, uint64, io.Writer) error
+	ReadFile(context.Context, fsmeta.Ino, uint64, io.Writer) error
 }
 
 func (m *Manager) ExportSnapshotArchive(ctx context.Context, req *ExportSnapshotRequest, w io.Writer) error {
@@ -61,13 +61,13 @@ func (m *Manager) ExportSnapshotArchive(ctx context.Context, req *ExportSnapshot
 	return writeSnapshotArchiveTree(ctx, tarWriter, session, rootInode, "", rootAttr)
 }
 
-func writeSnapshotArchiveTree(ctx context.Context, tw *tar.Writer, session *snapshotArchiveSession, inode meta.Ino, relPath string, attr *meta.Attr) error {
+func writeSnapshotArchiveTree(ctx context.Context, tw *tar.Writer, session *snapshotArchiveSession, inode fsmeta.Ino, relPath string, attr *fsmeta.Attr) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
 	switch attr.Typ {
-	case meta.TypeDirectory:
+	case fsmeta.TypeDirectory:
 		if relPath != "" {
 			header := snapshotTarHeader(relPath+"/", attr, tar.TypeDir)
 			if err := tw.WriteHeader(header); err != nil {
@@ -75,8 +75,8 @@ func writeSnapshotArchiveTree(ctx context.Context, tw *tar.Writer, session *snap
 			}
 		}
 
-		var entries []*meta.Entry
-		if errno := session.meta.Readdir(meta.Background(), inode, 1, &entries); errno != 0 {
+		var entries []*fsmeta.Entry
+		if errno := session.meta.Readdir(fsmeta.Background(), inode, 1, &entries); errno != 0 {
 			return fmt.Errorf("readdir inode %d: %w", inode, syscall.Errno(errno))
 		}
 		sort.Slice(entries, func(i, j int) bool {
@@ -93,8 +93,8 @@ func writeSnapshotArchiveTree(ctx context.Context, tw *tar.Writer, session *snap
 			}
 			entryAttr := entry.Attr
 			if entryAttr == nil {
-				entryAttr = &meta.Attr{}
-				if errno := session.meta.GetAttr(meta.Background(), entry.Inode, entryAttr); errno != 0 {
+				entryAttr = &fsmeta.Attr{}
+				if errno := session.meta.GetAttr(fsmeta.Background(), entry.Inode, entryAttr); errno != 0 {
 					return fmt.Errorf("getattr inode %d: %w", entry.Inode, syscall.Errno(errno))
 				}
 			}
@@ -103,16 +103,16 @@ func writeSnapshotArchiveTree(ctx context.Context, tw *tar.Writer, session *snap
 			}
 		}
 		return nil
-	case meta.TypeFile:
+	case fsmeta.TypeFile:
 		header := snapshotTarHeader(relPath, attr, tar.TypeReg)
 		header.Size = int64(attr.Length)
 		if err := tw.WriteHeader(header); err != nil {
 			return err
 		}
 		return session.reader.ReadFile(ctx, inode, attr.Length, tw)
-	case meta.TypeSymlink:
+	case fsmeta.TypeSymlink:
 		var target []byte
-		if errno := session.meta.ReadLink(meta.Background(), inode, &target); errno != 0 {
+		if errno := session.meta.ReadLink(fsmeta.Background(), inode, &target); errno != 0 {
 			return fmt.Errorf("readlink inode %d: %w", inode, syscall.Errno(errno))
 		}
 		header := snapshotTarHeader(relPath, attr, tar.TypeSymlink)
@@ -126,7 +126,7 @@ func writeSnapshotArchiveTree(ctx context.Context, tw *tar.Writer, session *snap
 	}
 }
 
-func snapshotTarHeader(name string, attr *meta.Attr, typeFlag byte) *tar.Header {
+func snapshotTarHeader(name string, attr *fsmeta.Attr, typeFlag byte) *tar.Header {
 	return &tar.Header{
 		Name:     cleanArchivePath(name),
 		Mode:     int64(attr.Mode),

@@ -323,6 +323,9 @@ func main() {
 			storageProxyUnaryMetricsInterceptor(storageProxyMetrics, zapLogger),
 			grpcInterceptor,
 		),
+		grpc.ChainStreamInterceptor(
+			authenticator.StreamInterceptor(),
+		),
 	)
 
 	// Register FileSystem service

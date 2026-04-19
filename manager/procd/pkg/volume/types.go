@@ -14,11 +14,11 @@ type Config struct {
 	CacheTTL       time.Duration
 	GRPCMaxMsgSize int
 
-	// Default JuiceFS cache config for mounted volumes.
-	JuiceFSCacheSize  string
-	JuiceFSPrefetch   int
-	JuiceFSBufferSize string
-	JuiceFSWriteback  bool
+	// Default S0FS cache config for mounted volumes.
+	VolumeCacheSize  string
+	VolumePrefetch   int
+	VolumeBufferSize string
+	VolumeWriteback  bool
 }
 
 // VolumeConfig holds the config for a single mount request.

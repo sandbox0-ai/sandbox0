@@ -628,15 +628,15 @@ func buildDatabaseHost(infra *infrav1alpha1.Sandbox0Infra) string {
 	return fmt.Sprintf("%s-postgres.%s.svc", infra.Name, infra.Namespace)
 }
 
-// GetJuicefsMetaURL returns the JuiceFS metadata database URL.
-func GetJuicefsMetaURL(ctx context.Context, client client.Client, infra *infrav1alpha1.Sandbox0Infra) (string, error) {
-	if infra.Spec.JuicefsDatabase == nil || infra.Spec.JuicefsDatabase.ShareWithMain {
+// GetStorageMetadataDSN returns the storage metadata database URL.
+func GetStorageMetadataDSN(ctx context.Context, client client.Client, infra *infrav1alpha1.Sandbox0Infra) (string, error) {
+	if infra.Spec.MetadataDatabase == nil || infra.Spec.MetadataDatabase.ShareWithMain {
 		return GetDatabaseDSN(ctx, client, infra)
 	}
 
-	ext := infra.Spec.JuicefsDatabase.External
+	ext := infra.Spec.MetadataDatabase.External
 	if ext == nil {
-		return "", fmt.Errorf("juicefs external database configuration is required")
+		return "", fmt.Errorf("storage metadata external database configuration is required")
 	}
 
 	secret := &corev1.Secret{}

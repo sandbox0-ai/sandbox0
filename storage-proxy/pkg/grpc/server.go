@@ -10,11 +10,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/juicedata/juicefs/pkg/meta"
-	"github.com/juicedata/juicefs/pkg/vfs"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/legacyfs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/notify"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/router"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
@@ -140,14 +140,14 @@ func (s *FileSystemServer) requireLocalPrimary(volumeID string) error {
 	return withDetails.Err()
 }
 
-func vfsContextForActor(actor *pb.PosixActor) vfs.LogContext {
+func vfsContextForActor(actor *pb.PosixActor) legacyfs.LogContext {
 	if actor == nil {
-		return vfs.NewLogContext(meta.Background())
+		return legacyfs.NewLogContext(fsmeta.Background())
 	}
-	return vfs.NewLogContext(meta.NewContext(actor.Pid, actor.Uid, actor.Gids))
+	return legacyfs.NewLogContext(fsmeta.NewContext(actor.Pid, actor.Uid, actor.Gids))
 }
 
-func ensureLazyRootPosixIdentity(volCtx *volume.VolumeContext, actor *pb.PosixActor, inodes ...meta.Ino) error {
+func ensureLazyRootPosixIdentity(volCtx *volume.VolumeContext, actor *pb.PosixActor, inodes ...fsmeta.Ino) error {
 	if volCtx == nil || actor == nil || len(actor.Gids) == 0 {
 		return nil
 	}
@@ -268,12 +268,12 @@ func captureInodeReplayState(volCtx *volume.VolumeContext, inode uint64) ([]byte
 		return nil, 0, errors.New("volume context is nil")
 	}
 
-	var attr meta.Attr
-	if errno := volCtx.Meta.GetAttr(meta.Background(), mapInode(volCtx, inode), &attr); errno != 0 {
+	var attr fsmeta.Attr
+	if errno := volCtx.Meta.GetAttr(fsmeta.Background(), mapInode(volCtx, inode), &attr); errno != 0 {
 		return nil, 0, syscall.Errno(errno)
 	}
 
-	vfsCtx := vfs.NewLogContext(meta.Background())
+	vfsCtx := legacyfs.NewLogContext(fsmeta.Background())
 	_, handleID, errno := volCtx.VFS.Open(vfsCtx, mapInode(volCtx, inode), 0)
 	if errno != 0 {
 		return nil, 0, syscall.Errno(errno)
@@ -981,7 +981,7 @@ func (s *FileSystemServer) GetAttr(ctx context.Context, req *pb.GetAttrRequest) 
 		return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
 	}
 
-	return convertAttr(meta.Ino(req.Inode), entry.Attr), nil
+	return convertAttr(fsmeta.Ino(req.Inode), entry.Attr), nil
 }
 
 // Lookup implements FUSE lookup
@@ -1016,7 +1016,7 @@ func (s *FileSystemServer) Lookup(ctx context.Context, req *pb.LookupRequest) (*
 	}, nil
 }
 
-// Open implements FUSE open using JuiceFS VFS layer
+// Open implements FUSE open using S0FS VFS layer
 func (s *FileSystemServer) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenResponse, error) {
 
 	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
@@ -1056,7 +1056,7 @@ func (s *FileSystemServer) Open(ctx context.Context, req *pb.OpenRequest) (*pb.O
 	}, nil
 }
 
-// Read implements FUSE read using JuiceFS VFS layer
+// Read implements FUSE read using S0FS VFS layer
 func (s *FileSystemServer) Read(ctx context.Context, req *pb.ReadRequest) (*pb.ReadResponse, error) {
 
 	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
@@ -1080,7 +1080,7 @@ func (s *FileSystemServer) Read(ctx context.Context, req *pb.ReadRequest) (*pb.R
 	// Create VFS context
 	vfsCtx := vfsContextForActor(req.Actor)
 
-	// Read from JuiceFS VFS (convert offset to uint64)
+	// Read from S0FS VFS (convert offset to uint64)
 	n, errno := volCtx.VFS.Read(vfsCtx, mapInode(volCtx, req.Inode), buf, uint64(req.Offset), req.HandleId)
 	if errno != 0 {
 		s.logger.WithFields(logrus.Fields{
@@ -1108,7 +1108,7 @@ func (s *FileSystemServer) Read(ctx context.Context, req *pb.ReadRequest) (*pb.R
 	}, nil
 }
 
-// Write implements FUSE write using JuiceFS VFS layer
+// Write implements FUSE write using S0FS VFS layer
 func (s *FileSystemServer) Write(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResponse, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.WriteResponse, error) {
 		if isS0FSVolume(volCtx) {
@@ -1157,13 +1157,25 @@ func (s *FileSystemServer) Write(ctx context.Context, req *pb.WriteRequest) (*pb
 	})
 }
 
-// Create implements FUSE create using JuiceFS VFS layer
+// Create implements FUSE create using S0FS VFS layer
 func (s *FileSystemServer) Create(ctx context.Context, req *pb.CreateRequest) (*pb.NodeResponse, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.NodeResponse, error) {
 		if isS0FSVolume(volCtx) {
+			if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, fsmeta.Ino(req.Parent)); err != nil {
+				return nil, status.Error(codes.Internal, err.Error())
+			}
 			node, err := volCtx.S0FS.CreateFile(req.Parent, req.Name, req.Mode)
 			if err != nil {
 				return nil, mapS0FSError(err)
+			}
+			if req.Actor != nil && len(req.Actor.Gids) > 0 {
+				if err := volCtx.S0FS.SetOwner(node.Inode, req.Actor.Uid, req.Actor.Gids[0]); err != nil {
+					return nil, status.Error(codes.Internal, err.Error())
+				}
+				node, err = volCtx.S0FS.GetAttr(node.Inode)
+				if err != nil {
+					return nil, mapS0FSError(err)
+				}
 			}
 			s.publishEvent(runCtx, &pb.WatchEvent{
 				VolumeId:  req.VolumeId,
@@ -1227,9 +1239,21 @@ func (s *FileSystemServer) Create(ctx context.Context, req *pb.CreateRequest) (*
 func (s *FileSystemServer) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb.NodeResponse, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.NodeResponse, error) {
 		if isS0FSVolume(volCtx) {
+			if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, fsmeta.Ino(req.Parent)); err != nil {
+				return nil, status.Error(codes.Internal, err.Error())
+			}
 			node, err := volCtx.S0FS.Mkdir(req.Parent, req.Name, req.Mode)
 			if err != nil {
 				return nil, mapS0FSError(err)
+			}
+			if req.Actor != nil && len(req.Actor.Gids) > 0 {
+				if err := volCtx.S0FS.SetOwner(node.Inode, req.Actor.Uid, req.Actor.Gids[0]); err != nil {
+					return nil, status.Error(codes.Internal, err.Error())
+				}
+				node, err = volCtx.S0FS.GetAttr(node.Inode)
+				if err != nil {
+					return nil, mapS0FSError(err)
+				}
 			}
 			s.publishEvent(runCtx, &pb.WatchEvent{
 				VolumeId:  req.VolumeId,
@@ -1548,29 +1572,29 @@ func (s *FileSystemServer) SetAttr(ctx context.Context, req *pb.SetAttrRequest) 
 			if attr == nil {
 				attr = &pb.GetAttrResponse{}
 			}
-			if req.Valid&uint32(meta.SetAttrMode) != 0 {
+			if req.Valid&uint32(fsmeta.SetAttrMode) != 0 {
 				if err := volCtx.S0FS.SetMode(req.Inode, attr.Mode&0o7777); err != nil {
 					return nil, mapS0FSError(err)
 				}
 			}
-			if req.Valid&(uint32(meta.SetAttrUID)|uint32(meta.SetAttrGID)) != 0 {
+			if req.Valid&(uint32(fsmeta.SetAttrUID)|uint32(fsmeta.SetAttrGID)) != 0 {
 				current, err := volCtx.S0FS.GetAttr(req.Inode)
 				if err != nil {
 					return nil, mapS0FSError(err)
 				}
 				uid := current.UID
 				gid := current.GID
-				if req.Valid&uint32(meta.SetAttrUID) != 0 {
+				if req.Valid&uint32(fsmeta.SetAttrUID) != 0 {
 					uid = attr.Uid
 				}
-				if req.Valid&uint32(meta.SetAttrGID) != 0 {
+				if req.Valid&uint32(fsmeta.SetAttrGID) != 0 {
 					gid = attr.Gid
 				}
 				if err := volCtx.S0FS.SetOwner(req.Inode, uid, gid); err != nil {
 					return nil, mapS0FSError(err)
 				}
 			}
-			if req.Valid&uint32(meta.SetAttrSize) != 0 {
+			if req.Valid&uint32(fsmeta.SetAttrSize) != 0 {
 				if err := volCtx.S0FS.Truncate(req.Inode, attr.Size); err != nil {
 					return nil, mapS0FSError(err)
 				}
@@ -1613,7 +1637,7 @@ func (s *FileSystemServer) SetAttr(ctx context.Context, req *pb.SetAttrRequest) 
 
 		path := resolveInodePath(volCtx, uint64(mapInode(volCtx, req.Inode)))
 		eventType := pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
-		if req.Valid&uint32(meta.SetAttrMode) != 0 {
+		if req.Valid&uint32(fsmeta.SetAttrMode) != 0 {
 			eventType = pb.WatchEventType_WATCH_EVENT_TYPE_CHMOD
 		} else if path != "" {
 			eventType = pb.WatchEventType_WATCH_EVENT_TYPE_WRITE
@@ -1623,7 +1647,7 @@ func (s *FileSystemServer) SetAttr(ctx context.Context, req *pb.SetAttrRequest) 
 		}
 		recordCtx := runCtx
 		switch {
-		case path != "" && req.Valid&uint32(meta.SetAttrMode) != 0:
+		case path != "" && req.Valid&uint32(fsmeta.SetAttrMode) != 0:
 			recordCtx = s.recordRemoteSyncChange(runCtx, &volsync.RemoteChange{
 				VolumeID:  req.VolumeId,
 				EventType: db.SyncEventChmod,
@@ -1736,7 +1760,7 @@ func (s *FileSystemServer) Fsync(ctx context.Context, req *pb.FsyncRequest) (*pb
 	return &pb.Empty{}, nil
 }
 
-// Release implements FUSE release (close) using JuiceFS VFS layer
+// Release implements FUSE release (close) using S0FS VFS layer
 func (s *FileSystemServer) Release(ctx context.Context, req *pb.ReleaseRequest) (*pb.Empty, error) {
 	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
 	if err != nil {
@@ -1837,16 +1861,16 @@ func (s *FileSystemServer) StatFs(ctx context.Context, req *pb.StatFsRequest) (*
 		}, nil
 	}
 
-	// Get filesystem statistics from JuiceFS
+	// Get filesystem statistics from S0FS
 	vfsCtx := vfsContextForActor(req.Actor)
 	var totalSpace, availSpace, iused, iavail uint64
-	st := volCtx.Meta.StatFS(vfsCtx, meta.RootInode, &totalSpace, &availSpace, &iused, &iavail)
+	st := volCtx.Meta.StatFS(vfsCtx, fsmeta.RootInode, &totalSpace, &availSpace, &iused, &iavail)
 	if st != 0 {
 		return nil, status.Error(codes.Internal, syscall.Errno(st).Error())
 	}
 
 	// Use configured block size if available, otherwise default to 4096
-	blockSize := uint64(volCtx.VFS.Conf.Format.BlockSize) * 1024
+	blockSize := uint64(volCtx.VFS.Config().Format.BlockSize) * 1024
 	if blockSize == 0 {
 		blockSize = 4096
 	}
@@ -1869,9 +1893,21 @@ func (s *FileSystemServer) StatFs(ctx context.Context, req *pb.StatFsRequest) (*
 func (s *FileSystemServer) Symlink(ctx context.Context, req *pb.SymlinkRequest) (*pb.NodeResponse, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.NodeResponse, error) {
 		if isS0FSVolume(volCtx) {
+			if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, fsmeta.Ino(req.Parent)); err != nil {
+				return nil, status.Error(codes.Internal, err.Error())
+			}
 			node, err := volCtx.S0FS.Symlink(req.Parent, req.Name, req.Target, 0o777)
 			if err != nil {
 				return nil, mapS0FSError(err)
+			}
+			if req.Actor != nil && len(req.Actor.Gids) > 0 {
+				if err := volCtx.S0FS.SetOwner(node.Inode, req.Actor.Uid, req.Actor.Gids[0]); err != nil {
+					return nil, status.Error(codes.Internal, err.Error())
+				}
+				node, err = volCtx.S0FS.GetAttr(node.Inode)
+				if err != nil {
+					return nil, mapS0FSError(err)
+				}
 			}
 			s.publishEvent(runCtx, &pb.WatchEvent{
 				VolumeId:  req.VolumeId,
@@ -1930,7 +1966,7 @@ func (s *FileSystemServer) Readlink(ctx context.Context, req *pb.ReadlinkRequest
 		return &pb.ReadlinkResponse{Target: node.Target}, nil
 	}
 
-	// Read symbolic link from JuiceFS
+	// Read symbolic link from S0FS
 	inode := mapInode(volCtx, req.Inode)
 	vfsCtx := vfsContextForActor(req.Actor)
 	target, st := volCtx.VFS.Readlink(vfsCtx, inode)
@@ -1994,7 +2030,7 @@ func (s *FileSystemServer) Access(ctx context.Context, req *pb.AccessRequest) (*
 		return &pb.Empty{}, nil
 	}
 
-	// Create JuiceFS context with caller's uid/gid for permission checking
+	// Create S0FS context with caller's uid/gid for permission checking
 	inode := mapInode(volCtx, req.Inode)
 
 	actor := accessActor(req)
@@ -2004,7 +2040,7 @@ func (s *FileSystemServer) Access(ctx context.Context, req *pb.AccessRequest) (*
 	// Create context with user credentials
 	vfsCtx := vfsContextForActor(actor)
 
-	// Use JuiceFS VFS Access which implements full POSIX permission checking.
+	// Use S0FS VFS Access which implements full POSIX permission checking.
 	st := volCtx.VFS.Access(vfsCtx, inode, int(req.Mask))
 	if st != 0 {
 		s.logger.WithFields(logrus.Fields{
@@ -2100,7 +2136,7 @@ func (s *FileSystemServer) CopyFileRange(ctx context.Context, req *pb.CopyFileRa
 			req.HandleOut,
 			req.OffsetOut,
 			req.Length,
-			req.Flags,
+			uint64(req.Flags),
 		)
 		if st != 0 {
 			return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
@@ -2271,13 +2307,13 @@ func (s *FileSystemServer) GetXattr(ctx context.Context, req *pb.GetXattrRequest
 		return nil, status.Error(codes.Unimplemented, "xattr is not implemented for s0fs")
 	}
 
-	// Call JuiceFS VFS GetXattr
+	// Call S0FS VFS GetXattr
 	vfsCtx := vfsContextForActor(req.Actor)
 	inode := mapInode(volCtx, req.Inode)
 	value, st := volCtx.VFS.GetXattr(vfsCtx, inode, req.Name, req.Size)
 	if st != 0 {
 		// ENODATA/ENOATTR is not an error, just means attribute doesn't exist
-		if st == syscall.ENODATA || st == meta.ENOATTR {
+		if st == syscall.ENODATA || st == fsmeta.ENOATTR {
 			return nil, status.Error(codes.NotFound, "attribute not found")
 		}
 		s.logger.WithFields(logrus.Fields{
@@ -2340,7 +2376,7 @@ func (s *FileSystemServer) ListXattr(ctx context.Context, req *pb.ListXattrReque
 		return nil, status.Error(codes.Unimplemented, "xattr is not implemented for s0fs")
 	}
 
-	// Call JuiceFS VFS ListXattr
+	// Call S0FS VFS ListXattr
 	vfsCtx := vfsContextForActor(req.Actor)
 	inode := mapInode(volCtx, req.Inode)
 	data, st := volCtx.VFS.ListXattr(vfsCtx, inode, int(req.Size))
@@ -2397,7 +2433,7 @@ func resolveInodePath(volCtx *volume.VolumeContext, inode uint64) string {
 	if volCtx == nil {
 		return ""
 	}
-	paths := volCtx.Meta.GetPaths(meta.Background(), meta.Ino(inode))
+	paths := volCtx.Meta.GetPaths(fsmeta.Background(), fsmeta.Ino(inode))
 	if len(paths) == 0 {
 		return ""
 	}
@@ -2408,7 +2444,7 @@ func resolveChildPath(volCtx *volume.VolumeContext, parent uint64, name string) 
 	if volCtx == nil {
 		return ""
 	}
-	parentPaths := volCtx.Meta.GetPaths(meta.Background(), meta.Ino(parent))
+	parentPaths := volCtx.Meta.GetPaths(fsmeta.Background(), fsmeta.Ino(parent))
 	if len(parentPaths) == 0 {
 		return ""
 	}
@@ -2432,22 +2468,22 @@ func trimVolumeRoot(volCtx *volume.VolumeContext, path string) string {
 	return path
 }
 
-func volumeRootInode(volCtx *volume.VolumeContext) meta.Ino {
+func volumeRootInode(volCtx *volume.VolumeContext) fsmeta.Ino {
 	if volCtx == nil || volCtx.RootInode == 0 {
-		return meta.RootInode
+		return fsmeta.RootInode
 	}
 	return volCtx.RootInode
 }
 
-func mapInode(volCtx *volume.VolumeContext, inode uint64) meta.Ino {
-	if inode == uint64(meta.RootInode) {
+func mapInode(volCtx *volume.VolumeContext, inode uint64) fsmeta.Ino {
+	if inode == uint64(fsmeta.RootInode) {
 		return volumeRootInode(volCtx)
 	}
-	return meta.Ino(inode)
+	return fsmeta.Ino(inode)
 }
 
-// Helper: convert meta.Attr to protobuf GetAttrResponse
-func convertAttr(inode meta.Ino, attr *meta.Attr) *pb.GetAttrResponse {
+// Helper: convert fsmeta.Attr to protobuf GetAttrResponse
+func convertAttr(inode fsmeta.Ino, attr *fsmeta.Attr) *pb.GetAttrResponse {
 	if attr == nil {
 		return &pb.GetAttrResponse{
 			Ino: uint64(inode),
@@ -2456,7 +2492,7 @@ func convertAttr(inode meta.Ino, attr *meta.Attr) *pb.GetAttrResponse {
 
 	size := uint64(0)
 	blocks := uint64(0)
-	if attr.Typ == meta.TypeFile || attr.Typ == meta.TypeDirectory || attr.Typ == meta.TypeSymlink {
+	if attr.Typ == fsmeta.TypeFile || attr.Typ == fsmeta.TypeDirectory || attr.Typ == fsmeta.TypeSymlink {
 		size = attr.Length
 		blocks = (size + 511) / 512
 	}
@@ -2532,11 +2568,11 @@ func s0fsNodeResponse(node *s0fs.Node, handleID uint64) *pb.NodeResponse {
 func s0fsTypeNumber(typ s0fs.FileType) uint32 {
 	switch typ {
 	case s0fs.TypeDirectory:
-		return uint32(meta.TypeDirectory)
+		return uint32(fsmeta.TypeDirectory)
 	case s0fs.TypeSymlink:
-		return uint32(meta.TypeSymlink)
+		return uint32(fsmeta.TypeSymlink)
 	default:
-		return uint32(meta.TypeFile)
+		return uint32(fsmeta.TypeFile)
 	}
 }
 

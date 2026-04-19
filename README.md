@@ -14,7 +14,7 @@ Sandbox0 is a general-purpose sandbox for building AI Agents. You can set any Do
 
 Key features of Sandbox0:
 - Hot Sandbox Pool: Pre-creates idle Pods for millisecond-level startup times.
-- Persistent Storage: Persistent Volumes based on JuiceFS, supporting snapshot/restore/fork.
+- Persistent Storage: Persistent Volumes based on s0fs, supporting snapshot/restore/fork.
 - Network Control: manager applies template-namespace ingress baseline isolation, and netd implements node-level L4/L7 runtime policy enforcement.
 - Egress Auth: outbound credentials can be resolved and injected on the egress path, so raw secret material does not need to live inside the sandbox process.
 - Process Management: procd acts as the sandbox's PID=1, supporting REPL processes requiring session persistence (e.g., bash, python, node, redis-cli) and one-time Cmd processes.
@@ -29,7 +29,7 @@ It can serve as an E2B alternative, suitable for general agents, coding agents, 
 - `procd` inside each sandbox pod, giving Sandbox0 a first-class runtime for command execution, stateful contexts, file I/O, directory watches, and webhook-triggered workflows.
 - Sandbox0 REPL contexts are a unified abstraction for interactive runtimes, so the same interface can back shells, language interpreters, database consoles, and custom REPLs, for example `bash`, `python`, `sqlite`, or `redis-cli`.
 - Persistent volumes decoupled from sandbox lifetime through `storage-proxy`, so agent workspaces, caches, checkpoints, and generated artifacts can outlive any single pod.
-- Snapshot, restore, and fork-oriented volume workflows built on JuiceFS plus object storage and PostgreSQL metadata, which is exactly what long-running agent systems need for recovery and reuse.
+- Snapshot, restore, and fork-oriented volume workflows built on s0fs plus object storage and PostgreSQL metadata, which is exactly what long-running agent systems need for recovery and reuse.
 - Manager-owned template namespace ingress baselines, so sandbox pods in the same template namespace do not accept peer traffic by default even before runtime egress policy is considered.
 - Node-level network control through `netd`, which watches sandbox policy, transparently redirects traffic, and applies L4/L7 enforcement close to the workload.
 - Egress auth that resolves credential bindings outside the sandbox and injects outbound auth at the network edge, which is a safer fit for untrusted agent code than placing raw API keys or client certificates in the sandbox environment.

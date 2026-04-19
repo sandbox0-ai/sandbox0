@@ -1007,7 +1007,7 @@ func (fs *grpcFS) FsyncDir(cancel <-chan struct{}, input *fuse.FsyncIn) fuse.Sta
 	return fuse.ENOSYS
 }
 
-func (fs *grpcFS) Ioctl(cancel <-chan struct{}, in *fuse.IoctlIn, out *fuse.IoctlOut, bufIn, bufOut []byte) fuse.Status {
+func (fs *grpcFS) Ioctl(cancel <-chan struct{}, in *fuse.IoctlIn, bufIn []byte, out *fuse.IoctlOut, bufOut []byte) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}

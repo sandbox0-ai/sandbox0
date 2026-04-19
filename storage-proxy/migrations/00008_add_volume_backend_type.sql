@@ -1,9 +1,9 @@
 -- +goose Up
 ALTER TABLE sandbox_volumes
-ADD COLUMN IF NOT EXISTS backend_type TEXT NOT NULL DEFAULT 'juicefs';
+ADD COLUMN IF NOT EXISTS backend_type TEXT NOT NULL DEFAULT 's0fs';
 
 UPDATE sandbox_volumes
-SET backend_type = 'juicefs'
+SET backend_type = 's0fs'
 WHERE trim(coalesce(backend_type, '')) = '';
 
 -- +goose Down

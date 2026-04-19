@@ -84,11 +84,11 @@ type Sandbox0InfraSpec struct {
 	// +optional
 	Database *DatabaseConfig `json:"database,omitempty"`
 
-	// JuicefsDatabase configures the JuiceFS metadata database
+	// MetadataDatabase configures the S0FS metadata database
 	// +optional
-	JuicefsDatabase *JuicefsDatabaseConfig `json:"juicefsDatabase,omitempty"`
+	MetadataDatabase *MetadataDatabaseConfig `json:"metadataDatabase,omitempty"`
 
-	// Storage configures the storage backend (JuiceFS S3 backend)
+	// Storage configures the storage backend (S0FS S3 backend)
 	// +optional
 	Storage *StorageConfig `json:"storage,omitempty"`
 
@@ -265,13 +265,13 @@ type SecretKeyRef struct {
 	Key string `json:"key,omitempty"`
 }
 
-// JuicefsDatabaseConfig defines JuiceFS metadata database configuration
-type JuicefsDatabaseConfig struct {
-	// ShareWithMain uses the main database for JuiceFS metadata
+// MetadataDatabaseConfig defines S0FS metadata database configuration
+type MetadataDatabaseConfig struct {
+	// ShareWithMain uses the main database for S0FS metadata
 	// +kubebuilder:default=true
 	ShareWithMain bool `json:"shareWithMain,omitempty"`
 
-	// External configures an independent database for JuiceFS
+	// External configures an independent database for S0FS
 	// +optional
 	External *ExternalDatabaseConfig `json:"external,omitempty"`
 }

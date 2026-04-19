@@ -13,11 +13,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/juicedata/juicefs/pkg/chunk"
-	"github.com/juicedata/juicefs/pkg/meta"
-	"github.com/juicedata/juicefs/pkg/vfs"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/legacyfs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sirupsen/logrus"
 )
@@ -43,13 +42,12 @@ type VolumeContext struct {
 	TeamID    string
 	Backend   string
 	S0FS      *s0fs.Engine
-	Meta      meta.Meta
-	Store     chunk.ChunkStore
-	VFS       *vfs.VFS
+	Meta      LegacyMeta
+	VFS       legacyfs.VFS
 	Config    *VolumeConfig
 	Access    AccessMode
 	MountedAt time.Time
-	RootInode meta.Ino
+	RootInode fsmeta.Ino
 	RootPath  string
 	CacheDir  string
 
@@ -103,8 +101,8 @@ type directMountLease struct {
 var errVolumeRootNotFound = errors.New("volume root not found")
 
 type volumeRootMeta interface {
-	Lookup(ctx meta.Context, parent meta.Ino, name string, inode *meta.Ino, attr *meta.Attr, checkPerm bool) syscall.Errno
-	Mkdir(ctx meta.Context, parent meta.Ino, name string, mode uint16, cumask uint16, copysgid uint8, inode *meta.Ino, attr *meta.Attr) syscall.Errno
+	Lookup(ctx fsmeta.Context, parent fsmeta.Ino, name string, inode *fsmeta.Ino, attr *fsmeta.Attr, checkPerm bool) syscall.Errno
+	Mkdir(ctx fsmeta.Context, parent fsmeta.Ino, name string, mode uint16, cumask uint16, copysgid uint8, inode *fsmeta.Ino, attr *fsmeta.Attr) syscall.Errno
 }
 
 // Manager manages mounted volumes and mount sessions.
@@ -319,7 +317,7 @@ func (m *Manager) AuthenticateMountSession(volumeID, sessionID, sessionSecret st
 	}, nil
 }
 
-func resolveMountRoot(metaClient volumeRootMeta, path string, readOnly bool, ensureWritable func(string) (meta.Ino, error)) (meta.Ino, error) {
+func resolveMountRoot(metaClient volumeRootMeta, path string, readOnly bool, ensureWritable func(string) (fsmeta.Ino, error)) (fsmeta.Ino, error) {
 	if !readOnly {
 		return ensureVolumeRoot(metaClient, path)
 	}
@@ -337,34 +335,34 @@ func resolveMountRoot(metaClient volumeRootMeta, path string, readOnly bool, ens
 	return ensureWritable(path)
 }
 
-func lookupVolumeRoot(metaClient volumeRootMeta, path string) (meta.Ino, error) {
+func lookupVolumeRoot(metaClient volumeRootMeta, path string) (fsmeta.Ino, error) {
 	return resolveVolumeRoot(metaClient, path, false)
 }
 
 // Use meta client directly to create the internal root path.
 // This avoids FUSE/VFS semantics (handles/permissions) and keeps it
 // consistent with snapshot operations which also use meta clients.
-func ensureVolumeRoot(metaClient volumeRootMeta, path string) (meta.Ino, error) {
+func ensureVolumeRoot(metaClient volumeRootMeta, path string) (fsmeta.Ino, error) {
 	return resolveVolumeRoot(metaClient, path, true)
 }
 
-func resolveVolumeRoot(metaClient volumeRootMeta, path string, createMissing bool) (meta.Ino, error) {
+func resolveVolumeRoot(metaClient volumeRootMeta, path string, createMissing bool) (fsmeta.Ino, error) {
 	if metaClient == nil {
 		return 0, fmt.Errorf("meta client is nil")
 	}
 
 	trimmed := strings.Trim(path, "/")
 	if trimmed == "" {
-		return meta.RootInode, nil
+		return fsmeta.RootInode, nil
 	}
 
 	parts := strings.Split(trimmed, "/")
-	current := meta.RootInode
-	var attr meta.Attr
-	jfsCtx := meta.Background()
+	current := fsmeta.RootInode
+	var attr fsmeta.Attr
+	jfsCtx := fsmeta.Background()
 
 	for _, part := range parts {
-		var next meta.Ino
+		var next fsmeta.Ino
 		errno := metaClient.Lookup(jfsCtx, current, part, &next, &attr, false)
 		if errno == syscall.ENOENT {
 			if !createMissing {
@@ -575,7 +573,7 @@ func (m *Manager) clearSessionFromInvalidatesLocked(volumeID, sessionID string) 
 }
 
 // UpdateVolumeRoot updates the root inode for a mounted volume.
-func (m *Manager) UpdateVolumeRoot(volumeID string, rootInode meta.Ino) error {
+func (m *Manager) UpdateVolumeRoot(volumeID string, rootInode fsmeta.Ino) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

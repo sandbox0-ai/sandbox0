@@ -378,11 +378,11 @@ spec:
                         type: object
                     type: object
                 type: object
-              juicefsDatabase:
-                description: JuicefsDatabase configures the JuiceFS metadata database
+              metadataDatabase:
+                description: MetadataDatabase configures the S0FS metadata database
                 properties:
                   external:
-                    description: External configures an independent database for JuiceFS
+                    description: External configures an independent database for S0FS
                     properties:
                       database:
                         description: Database specifies the database name
@@ -422,8 +422,7 @@ spec:
                     type: object
                   shareWithMain:
                     default: true
-                    description: ShareWithMain uses the main database for JuiceFS
-                      metadata
+                    description: ShareWithMain uses the main database for S0FS metadata
                     type: boolean
                 type: object
               publicExposure:
@@ -1621,24 +1620,24 @@ spec:
                               httpPort:
                                 default: 49983
                                 type: integer
-                              juicefsBufferSize:
-                                default: "300"
-                                type: string
-                              juicefsCacheSize:
-                                default: "100"
-                                type: string
-                              juicefsPrefetch:
-                                default: 3
-                                type: integer
-                              juicefsWriteback:
-                                default: true
-                                type: boolean
                               logLevel:
                                 default: info
                                 type: string
                               rootPath:
                                 default: /workspace
                                 type: string
+                              volumeBufferSize:
+                                default: "300"
+                                type: string
+                              volumeCacheSize:
+                                default: "100"
+                                type: string
+                              volumePrefetch:
+                                default: 3
+                                type: integer
+                              volumeWriteback:
+                                default: true
+                                type: boolean
                               webhookBaseBackoff:
                                 default: 500ms
                                 type: string
@@ -2596,6 +2595,33 @@ spec:
                           directVolumeFileIdleTTL:
                             default: 30s
                             type: string
+                          filesystemAttrTimeout:
+                            default: 1s
+                            type: string
+                          filesystemBlockSize:
+                            default: 4096
+                            type: integer
+                          filesystemCompression:
+                            default: lz4
+                            type: string
+                          filesystemDirEntryTimeout:
+                            default: 1s
+                            type: string
+                          filesystemEntryTimeout:
+                            default: 1s
+                            type: string
+                          filesystemMaxUpload:
+                            default: 20
+                            type: integer
+                          filesystemMetaRetries:
+                            default: 10
+                            type: integer
+                          filesystemName:
+                            default: sandbox0
+                            type: string
+                          filesystemTrashDays:
+                            default: 1
+                            type: integer
                           flushTimeout:
                             default: 30s
                             type: string
@@ -2626,41 +2652,6 @@ spec:
                           httpWriteTimeout:
                             default: 15s
                             type: string
-                          juicefsAttrTimeout:
-                            default: 1s
-                            type: string
-                          juicefsBlockSize:
-                            default: 4096
-                            type: integer
-                          juicefsCompression:
-                            default: lz4
-                            type: string
-                          juicefsDirEntryTimeout:
-                            default: 1s
-                            type: string
-                          juicefsEncryptionAlgo:
-                            default: aes256gcm-rsa
-                            type: string
-                          juicefsEncryptionEnabled:
-                            default: false
-                            type: boolean
-                          juicefsEncryptionPassphrase:
-                            type: string
-                          juicefsEntryTimeout:
-                            default: 1s
-                            type: string
-                          juicefsMaxUpload:
-                            default: 20
-                            type: integer
-                          juicefsMetaRetries:
-                            default: 10
-                            type: integer
-                          juicefsName:
-                            default: sandbox0
-                            type: string
-                          juicefsTrashDays:
-                            default: 1
-                            type: integer
                           kubeconfigPath:
                             type: string
                           logLevel:
@@ -2679,6 +2670,14 @@ spec:
                           metricsPort:
                             default: 9090
                             type: integer
+                          objectEncryptionAlgo:
+                            default: aes256gcm-rsa
+                            type: string
+                          objectEncryptionEnabled:
+                            default: false
+                            type: boolean
+                          objectEncryptionPassphrase:
+                            type: string
                           restoreRemountTimeout:
                             default: 30s
                             type: string
@@ -2795,7 +2794,7 @@ spec:
                     type: object
                 type: object
               storage:
-                description: Storage configures the storage backend (JuiceFS S3 backend)
+                description: Storage configures the storage backend (S0FS S3 backend)
                 properties:
                   builtin:
                     default: {}

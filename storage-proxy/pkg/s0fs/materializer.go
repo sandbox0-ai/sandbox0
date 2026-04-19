@@ -12,7 +12,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/juicedata/juicefs/pkg/object"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 )
 
 const (
@@ -33,10 +33,10 @@ type Manifest struct {
 }
 
 type Materializer struct {
-	store object.ObjectStorage
+	store objectstore.Store
 }
 
-func NewMaterializer(store object.ObjectStorage) *Materializer {
+func NewMaterializer(store objectstore.Store) *Materializer {
 	if store == nil {
 		return nil
 	}

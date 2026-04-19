@@ -3,7 +3,7 @@ package s0fs
 import (
 	"time"
 
-	"github.com/juicedata/juicefs/pkg/object"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 )
 
 const RootInode uint64 = 1
@@ -19,7 +19,7 @@ const (
 type Config struct {
 	VolumeID            string
 	WALPath             string
-	ObjectStore         object.ObjectStorage
+	ObjectStore         objectstore.Store
 	MaterializeInterval time.Duration
 }
 

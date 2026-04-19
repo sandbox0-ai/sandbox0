@@ -5,7 +5,7 @@ A Snapshot is a point-in-time, read-only copy of a Volume. Snapshots are designe
 ## Snapshot Features
 
 - **Instant Creation**: Built on Copy-on-Write semantics, snapshot creation is near-instant
-- **Space Efficiency**: Built on JuiceFS clone semantics (Copy-on-Write), so snapshots avoid full data copies
+- **Space Efficiency**: Built on s0fs clone semantics (Copy-on-Write), so snapshots avoid full data copies
 - **Fast Recovery**: Restore operations quickly roll data back to a known state
 - **Version Traceability**: Snapshot names and descriptions support release workflows
 

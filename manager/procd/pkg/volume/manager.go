@@ -632,10 +632,10 @@ func (m *Manager) mergeVolumeConfig(override *VolumeConfig) *pb.VolumeConfig {
 	writeback := false
 
 	if m.cfg != nil {
-		cacheSize = m.cfg.JuiceFSCacheSize
-		prefetch = int32(m.cfg.JuiceFSPrefetch)
-		bufferSize = m.cfg.JuiceFSBufferSize
-		writeback = m.cfg.JuiceFSWriteback
+		cacheSize = m.cfg.VolumeCacheSize
+		prefetch = int32(m.cfg.VolumePrefetch)
+		bufferSize = m.cfg.VolumeBufferSize
+		writeback = m.cfg.VolumeWriteback
 	}
 
 	if override != nil {

@@ -13,12 +13,11 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/juicedata/juicefs/pkg/meta"
-	"github.com/juicedata/juicefs/pkg/object"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/juicefs"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 )
@@ -35,7 +34,7 @@ func (m *Manager) s0fsConfig(teamID, volumeID string) s0fs.Config {
 	return cfg
 }
 
-func (m *Manager) s0fsObjectStore(teamID, volumeID string) (object.ObjectStorage, error) {
+func (m *Manager) s0fsObjectStore(teamID, volumeID string) (objectstore.Store, error) {
 	if m == nil || m.config == nil || teamID == "" || volumeID == "" || strings.TrimSpace(m.config.S3Bucket) == "" {
 		return nil, nil
 	}
@@ -43,7 +42,7 @@ func (m *Manager) s0fsObjectStore(teamID, volumeID string) (object.ObjectStorage
 	if err != nil {
 		return nil, err
 	}
-	store, err := juicefs.CreateObjectStorage(juicefs.ObjectStorageConfig{
+	store, err := objectstore.Create(objectstore.Config{
 		Type:         m.config.ObjectStorageType,
 		Bucket:       m.config.S3Bucket,
 		Region:       m.config.S3Region,
@@ -56,7 +55,7 @@ func (m *Manager) s0fsObjectStore(teamID, volumeID string) (object.ObjectStorage
 	if err != nil {
 		return nil, err
 	}
-	return object.WithPrefix(store, prefix+"/s0fs/"), nil
+	return objectstore.Prefix(store, prefix+"/s0fs/"), nil
 }
 
 func (m *Manager) openS0FSEngine(ctx context.Context, teamID, volumeID string) (*s0fs.Engine, func() error, error) {
@@ -80,7 +79,7 @@ type s0fsArchiveMeta struct {
 	state *s0fs.SnapshotState
 }
 
-func (m *s0fsArchiveMeta) GetAttr(_ meta.Context, inode meta.Ino, attr *meta.Attr) syscall.Errno {
+func (m *s0fsArchiveMeta) GetAttr(_ fsmeta.Context, inode fsmeta.Ino, attr *fsmeta.Attr) syscall.Errno {
 	if attr == nil {
 		return syscall.EINVAL
 	}
@@ -88,7 +87,7 @@ func (m *s0fsArchiveMeta) GetAttr(_ meta.Context, inode meta.Ino, attr *meta.Att
 	if err != nil {
 		return errnoForS0FSError(err)
 	}
-	*attr = meta.Attr{
+	*attr = fsmeta.Attr{
 		Typ:       metaTypeForS0FS(node.Type),
 		Mode:      uint16(node.Mode),
 		Uid:       node.UID,
@@ -105,19 +104,19 @@ func (m *s0fsArchiveMeta) GetAttr(_ meta.Context, inode meta.Ino, attr *meta.Att
 	return 0
 }
 
-func (m *s0fsArchiveMeta) Readdir(_ meta.Context, inode meta.Ino, _ uint8, entries *[]*meta.Entry) syscall.Errno {
+func (m *s0fsArchiveMeta) Readdir(_ fsmeta.Context, inode fsmeta.Ino, _ uint8, entries *[]*fsmeta.Entry) syscall.Errno {
 	dirEntries, err := m.state.ReadDir(uint64(inode))
 	if err != nil {
 		return errnoForS0FSError(err)
 	}
-	out := make([]*meta.Entry, 0, len(dirEntries))
+	out := make([]*fsmeta.Entry, 0, len(dirEntries))
 	for _, entry := range dirEntries {
-		attr := &meta.Attr{}
-		if errno := m.GetAttr(meta.Background(), meta.Ino(entry.Inode), attr); errno != 0 {
+		attr := &fsmeta.Attr{}
+		if errno := m.GetAttr(fsmeta.Background(), fsmeta.Ino(entry.Inode), attr); errno != 0 {
 			return errno
 		}
-		out = append(out, &meta.Entry{
-			Inode: meta.Ino(entry.Inode),
+		out = append(out, &fsmeta.Entry{
+			Inode: fsmeta.Ino(entry.Inode),
 			Name:  []byte(entry.Name),
 			Attr:  attr,
 		})
@@ -126,7 +125,7 @@ func (m *s0fsArchiveMeta) Readdir(_ meta.Context, inode meta.Ino, _ uint8, entri
 	return 0
 }
 
-func (m *s0fsArchiveMeta) ReadLink(_ meta.Context, inode meta.Ino, target *[]byte) syscall.Errno {
+func (m *s0fsArchiveMeta) ReadLink(_ fsmeta.Context, inode fsmeta.Ino, target *[]byte) syscall.Errno {
 	node, err := m.state.GetAttr(uint64(inode))
 	if err != nil {
 		return errnoForS0FSError(err)
@@ -142,7 +141,7 @@ type s0fsArchiveReader struct {
 	state *s0fs.SnapshotState
 }
 
-func (r *s0fsArchiveReader) ReadFile(ctx context.Context, inode meta.Ino, size uint64, w io.Writer) error {
+func (r *s0fsArchiveReader) ReadFile(ctx context.Context, inode fsmeta.Ino, size uint64, w io.Writer) error {
 	data, err := r.state.Read(uint64(inode), 0, size)
 	if err != nil {
 		return err
@@ -157,11 +156,11 @@ func (r *s0fsArchiveReader) ReadFile(ctx context.Context, inode meta.Ino, size u
 func metaTypeForS0FS(fileType s0fs.FileType) uint8 {
 	switch fileType {
 	case s0fs.TypeDirectory:
-		return meta.TypeDirectory
+		return fsmeta.TypeDirectory
 	case s0fs.TypeSymlink:
-		return meta.TypeSymlink
+		return fsmeta.TypeSymlink
 	default:
-		return meta.TypeFile
+		return fsmeta.TypeFile
 	}
 }
 
@@ -212,7 +211,7 @@ func resolveS0FSForkState(ctx context.Context, source *s0fs.Engine) (*s0fs.Snaps
 	return source.ExportState()
 }
 
-func (m *Manager) openS0FSSnapshotArchiveSession(ctx context.Context, volumeID, snapshotID string) (*snapshotArchiveSession, meta.Ino, *meta.Attr, error) {
+func (m *Manager) openS0FSSnapshotArchiveSession(ctx context.Context, volumeID, snapshotID string) (*snapshotArchiveSession, fsmeta.Ino, *fsmeta.Attr, error) {
 	volumeRecord, err := m.repo.GetSandboxVolume(ctx, volumeID)
 	if err != nil {
 		return nil, 0, nil, err
@@ -221,15 +220,15 @@ func (m *Manager) openS0FSSnapshotArchiveSession(ctx context.Context, volumeID, 
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	rootAttr := &meta.Attr{}
+	rootAttr := &fsmeta.Attr{}
 	metaView := &s0fsArchiveMeta{state: state}
-	if errno := metaView.GetAttr(meta.Background(), meta.RootInode, rootAttr); errno != 0 {
+	if errno := metaView.GetAttr(fsmeta.Background(), fsmeta.RootInode, rootAttr); errno != 0 {
 		return nil, 0, nil, errno
 	}
 	return &snapshotArchiveSession{
 		meta:   metaView,
 		reader: &s0fsArchiveReader{state: state},
-	}, meta.RootInode, rootAttr, nil
+	}, fsmeta.RootInode, rootAttr, nil
 }
 
 func (m *Manager) createS0FSSnapshot(ctx context.Context, req *CreateSnapshotRequest) (*db.Snapshot, error) {
@@ -408,7 +407,7 @@ func (m *Manager) restoreS0FSSnapshot(ctx context.Context, req *RestoreSnapshotR
 	}
 	if m.volMgr != nil {
 		if volCtx, getErr := m.volMgr.GetVolume(req.VolumeID); getErr == nil && volCtx != nil {
-			_ = m.volMgr.UpdateVolumeRoot(req.VolumeID, meta.RootInode)
+			_ = m.volMgr.UpdateVolumeRoot(req.VolumeID, fsmeta.RootInode)
 		}
 	}
 

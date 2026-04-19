@@ -11,7 +11,7 @@ A `Sandbox0Infra` spec is easier to reason about when you split it into five lay
 | Layer | Main fields | What it controls |
 |---|---|---|
 | Platform release | `infra-operator` chart / image version | Which sandbox0 component version to deploy |
-| Core dependencies | `spec.database`, `spec.juicefsDatabase`, `spec.storage`, `spec.registry` | PostgreSQL, JuiceFS metadata, object storage, registry integration |
+| Core dependencies | `spec.database`, `spec.metadataDatabase`, `spec.storage`, `spec.registry` | PostgreSQL, s0fs metadata, object storage, registry integration |
 | Topology | `spec.services.*`, `spec.controlPlane`, `spec.cluster`, `spec.region` | Single-cluster vs multi-cluster shape and service placement |
 | Public routing | `spec.publicExposure`, `spec.internalAuth` | Public sandbox URLs and inter-service trust |
 | Runtime bootstrap | `spec.builtinTemplates`, `spec.initUser` | Default templates, warm pools, initial admin bootstrap |
@@ -195,7 +195,7 @@ Examples:
 
 - `services.clusterGateway.config.authMode` switches between `public`, `internal`, and `both`
 - `services.manager.config.autoscaler.*` tunes pool scale behavior
-- `services.storageProxy.config.juicefs*` tunes JuiceFS behavior and cache sizing
+- `services.storageProxy.config.filesystem*` tunes filesystem behavior; `services.manager.config.procdConfig.volume*` tunes mounted volume cache sizing
 - `services.netd.config.*` controls proxy ports, policy enforcement, and node-level networking behavior
 
 Use `spec.sandboxNodePlacement` for the shared node placement consumed by sandbox template Pods, `netd`, and `ctld`. `infra-operator` owns `sandbox0.ai/data-plane-ready` and adds it to sandbox Pod placement after the required node-local components are Ready. The older `services.netd.nodeSelector` and `services.netd.tolerations` fields remain as compatibility aliases when the shared placement is unset.

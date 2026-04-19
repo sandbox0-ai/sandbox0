@@ -13,11 +13,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"github.com/sirupsen/logrus"
@@ -26,7 +26,7 @@ import (
 // volumeProvider abstracts the subset of volume.Manager needed by snapshot.Manager.
 type volumeProvider interface {
 	GetVolume(string) (*volume.VolumeContext, error)
-	UpdateVolumeRoot(volumeID string, rootInode meta.Ino) error
+	UpdateVolumeRoot(volumeID string, rootInode fsmeta.Ino) error
 	BeginInvalidate(volumeID, invalidateID string) (int, error)
 	WaitForInvalidate(ctx context.Context, volumeID, invalidateID string) error
 }
@@ -405,7 +405,7 @@ func (m *Manager) DeleteSnapshot(ctx context.Context, volumeID, snapshotID, team
 		}
 
 		// 2. Delete database record first within the transaction
-		// This ensures that even if JuiceFS cleanup fails, the snapshot is marked as deleted
+		// This ensures that even if S0FS cleanup fails, the snapshot is marked as deleted
 		if err := m.repo.DeleteSnapshotTx(ctx, tx, snapshotID); err != nil {
 			return fmt.Errorf("delete snapshot record: %w", err)
 		}
@@ -529,13 +529,13 @@ func volumeForkedEvent(regionID, clusterID string, volume *db.SandboxVolume) *me
 
 // Helper functions
 
-// metaClient defines the JuiceFS meta subset required by snapshot operations.
+// metaClient defines the S0FS meta subset required by snapshot operations.
 type metaClient interface {
-	Lookup(meta.Context, meta.Ino, string, *meta.Ino, *meta.Attr, bool) syscall.Errno
-	Mkdir(meta.Context, meta.Ino, string, uint16, uint16, uint8, *meta.Ino, *meta.Attr) syscall.Errno
-	Clone(meta.Context, meta.Ino, meta.Ino, meta.Ino, string, uint8, uint16, *uint64, *uint64) syscall.Errno
-	Rename(meta.Context, meta.Ino, string, meta.Ino, string, uint32, *meta.Ino, *meta.Attr) syscall.Errno
-	Remove(meta.Context, meta.Ino, string, bool, int, *uint64) syscall.Errno
+	Lookup(fsmeta.Context, fsmeta.Ino, string, *fsmeta.Ino, *fsmeta.Attr, bool) syscall.Errno
+	Mkdir(fsmeta.Context, fsmeta.Ino, string, uint16, uint16, uint8, *fsmeta.Ino, *fsmeta.Attr) syscall.Errno
+	Clone(fsmeta.Context, fsmeta.Ino, fsmeta.Ino, fsmeta.Ino, string, uint8, uint16, *uint64, *uint64) syscall.Errno
+	Rename(fsmeta.Context, fsmeta.Ino, string, fsmeta.Ino, string, uint32, *fsmeta.Ino, *fsmeta.Attr) syscall.Errno
+	Remove(fsmeta.Context, fsmeta.Ino, string, bool, int, *uint64) syscall.Errno
 }
 
 type eventPublisher interface {
@@ -543,19 +543,19 @@ type eventPublisher interface {
 }
 
 // lookupPath resolves a path to parent inode and target inode
-func (m *Manager) lookupPath(path string) (parentIno, targetIno meta.Ino, err error) {
+func (m *Manager) lookupPath(path string) (parentIno, targetIno fsmeta.Ino, err error) {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	if len(parts) == 0 {
 		return 0, 0, fmt.Errorf("invalid path: %s", path)
 	}
 
-	currentIno := meta.RootInode
-	var attr meta.Attr
+	currentIno := fsmeta.RootInode
+	var attr fsmeta.Attr
 
-	jfsCtx := meta.Background()
+	jfsCtx := fsmeta.Background()
 
 	for i, part := range parts {
-		var nextIno meta.Ino
+		var nextIno fsmeta.Ino
 		errno := m.metaClient.Lookup(jfsCtx, currentIno, part, &nextIno, &attr, true)
 		if errno != 0 {
 			if errno == syscall.ENOENT {
@@ -586,19 +586,19 @@ func (e *pathNotFoundError) Is(target error) bool {
 }
 
 // ensurePathExists creates directories along a path if they don't exist
-func (m *Manager) ensurePathExists(ctx context.Context, path string) (meta.Ino, error) {
+func (m *Manager) ensurePathExists(ctx context.Context, path string) (fsmeta.Ino, error) {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	if len(parts) == 0 {
-		return meta.RootInode, nil
+		return fsmeta.RootInode, nil
 	}
 
-	currentIno := meta.RootInode
-	var attr meta.Attr
+	currentIno := fsmeta.RootInode
+	var attr fsmeta.Attr
 
-	jfsCtx := meta.Background()
+	jfsCtx := fsmeta.Background()
 
 	for _, part := range parts {
-		var nextIno meta.Ino
+		var nextIno fsmeta.Ino
 		errno := m.metaClient.Lookup(jfsCtx, currentIno, part, &nextIno, &attr, false)
 
 		if errno == syscall.ENOENT {
@@ -624,7 +624,7 @@ func (m *Manager) ensurePathExists(ctx context.Context, path string) (meta.Ino, 
 	return currentIno, nil
 }
 
-// deleteSnapshotDir removes a snapshot directory from JuiceFS
+// deleteSnapshotDir removes a snapshot directory from S0FS
 func (m *Manager) deleteSnapshotDir(ctx context.Context, snapshotPath string) {
 	parentIno, snapshotIno, err := m.lookupPath(snapshotPath)
 	if err != nil {
@@ -636,7 +636,7 @@ func (m *Manager) deleteSnapshotDir(ctx context.Context, snapshotPath string) {
 		return // Already deleted
 	}
 
-	jfsCtx := meta.Background()
+	jfsCtx := fsmeta.Background()
 	snapshotName := filepath.Base(snapshotPath)
 
 	var removeCount uint64

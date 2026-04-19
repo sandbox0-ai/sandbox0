@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/juicedata/juicefs/pkg/object"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 )
 
 type getCall struct {
@@ -20,17 +20,17 @@ type getCall struct {
 }
 
 type recordingStore struct {
-	object.ObjectStorage
+	objectstore.Store
 
 	mu   sync.Mutex
 	gets []getCall
 }
 
-func (s *recordingStore) Get(key string, off, limit int64, getters ...object.AttrGetter) (io.ReadCloser, error) {
+func (s *recordingStore) Get(key string, off, limit int64) (io.ReadCloser, error) {
 	s.mu.Lock()
 	s.gets = append(s.gets, getCall{key: key, off: off, limit: limit})
 	s.mu.Unlock()
-	return s.ObjectStorage.Get(key, off, limit, getters...)
+	return s.Store.Get(key, off, limit)
 }
 
 func (s *recordingStore) calls() []getCall {
@@ -239,7 +239,7 @@ func TestMaterializerCoalescesSmallFilesAndKeepsManifestMonotonic(t *testing.T) 
 		t.Fatalf("Head(manifest 2) error = %v", err)
 	}
 
-	objects, _, _, err := store.List("", "", "", "", 1000, false)
+	objects, _, _, err := store.List("", "", "", "", 1000)
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
@@ -250,11 +250,8 @@ func TestMaterializerCoalescesSmallFilesAndKeepsManifestMonotonic(t *testing.T) 
 
 func newPrefixedRecordingStore(t *testing.T, volumeID string) *recordingStore {
 	t.Helper()
-	base, err := object.CreateStorage("mem", "s0fs-tests", "", "", "")
-	if err != nil {
-		t.Fatalf("CreateStorage(mem) error = %v", err)
-	}
-	return &recordingStore{ObjectStorage: object.WithPrefix(base, "sandboxvolumes/team-a/"+volumeID+"/s0fs/")}
+	base := objectstore.NewMemoryStore("s0fs-tests")
+	return &recordingStore{Store: objectstore.Prefix(base, "sandboxvolumes/team-a/"+volumeID+"/s0fs/")}
 }
 
 func fileName(i int) string {

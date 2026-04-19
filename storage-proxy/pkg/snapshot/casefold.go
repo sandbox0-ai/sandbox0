@@ -9,8 +9,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/pathnorm"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 )
@@ -90,7 +90,7 @@ func (m *Manager) ListSnapshotCompatibilityIssues(ctx context.Context, req *List
 func (m *Manager) openSnapshotArchiveSession(
 	ctx context.Context,
 	volumeID, snapshotID, teamID string,
-) (*db.SandboxVolume, *db.Snapshot, *snapshotArchiveSession, meta.Ino, *meta.Attr, error) {
+) (*db.SandboxVolume, *db.Snapshot, *snapshotArchiveSession, fsmeta.Ino, *fsmeta.Attr, error) {
 	volume, err := m.repo.GetSandboxVolume(ctx, volumeID)
 	if err != nil {
 		if err == db.ErrNotFound {
@@ -112,9 +112,9 @@ func (m *Manager) openSnapshotArchiveSession(
 		if err != nil {
 			return nil, nil, nil, 0, nil, err
 		}
-		rootInode := meta.Ino(snap.RootInode)
-		rootAttr := &meta.Attr{}
-		if errno := session.meta.GetAttr(meta.Background(), rootInode, rootAttr); errno != 0 {
+		rootInode := fsmeta.Ino(snap.RootInode)
+		rootAttr := &fsmeta.Attr{}
+		if errno := session.meta.GetAttr(fsmeta.Background(), rootInode, rootAttr); errno != 0 {
 			if session.close != nil {
 				session.close()
 			}
@@ -146,9 +146,9 @@ type snapshotCompatibilityCollector struct {
 func (c *snapshotCompatibilityCollector) collect(
 	ctx context.Context,
 	metaClient snapshotArchiveMeta,
-	inode meta.Ino,
+	inode fsmeta.Ino,
 	relPath string,
-	attr *meta.Attr,
+	attr *fsmeta.Attr,
 ) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -173,12 +173,12 @@ func (c *snapshotCompatibilityCollector) collect(
 		}
 	}
 
-	if attr.Typ != meta.TypeDirectory {
+	if attr.Typ != fsmeta.TypeDirectory {
 		return nil
 	}
 
-	var entries []*meta.Entry
-	if errno := metaClient.Readdir(meta.Background(), inode, 1, &entries); errno != 0 {
+	var entries []*fsmeta.Entry
+	if errno := metaClient.Readdir(fsmeta.Background(), inode, 1, &entries); errno != 0 {
 		return fmt.Errorf("readdir inode %d: %w", inode, syscall.Errno(errno))
 	}
 	sort.Slice(entries, func(i, j int) bool {
@@ -195,8 +195,8 @@ func (c *snapshotCompatibilityCollector) collect(
 		}
 		entryAttr := entry.Attr
 		if entryAttr == nil {
-			entryAttr = &meta.Attr{}
-			if errno := metaClient.GetAttr(meta.Background(), entry.Inode, entryAttr); errno != 0 {
+			entryAttr = &fsmeta.Attr{}
+			if errno := metaClient.GetAttr(fsmeta.Background(), entry.Inode, entryAttr); errno != 0 {
 				return fmt.Errorf("getattr inode %d: %w", entry.Inode, syscall.Errno(errno))
 			}
 		}

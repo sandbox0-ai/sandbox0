@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/juicedata/juicefs/pkg/meta"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/router"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
@@ -159,7 +159,7 @@ func TestS0FSDirectoryAndSetAttr(t *testing.T) {
 	setResp, err := server.SetAttr(ctx, &pb.SetAttrRequest{
 		VolumeId: "vol-1",
 		Inode:    fileResp.Inode,
-		Valid:    uint32(meta.SetAttrMode | meta.SetAttrUID | meta.SetAttrGID | meta.SetAttrSize),
+		Valid:    uint32(fsmeta.SetAttrMode | fsmeta.SetAttrUID | fsmeta.SetAttrGID | fsmeta.SetAttrSize),
 		Attr: &pb.GetAttrResponse{
 			Mode: 0o600,
 			Uid:  1000,

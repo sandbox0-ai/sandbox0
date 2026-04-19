@@ -344,16 +344,16 @@ type ProcdConfig struct {
 	LogLevel string `json:"logLevel,omitempty"`
 	// +optional
 	// +kubebuilder:default="100"
-	JuiceFSCacheSize string `json:"juicefsCacheSize,omitempty"`
+	VolumeCacheSize string `json:"volumeCacheSize,omitempty"`
 	// +optional
 	// +kubebuilder:default=3
-	JuiceFSPrefetch int `json:"juicefsPrefetch,omitempty"`
+	VolumePrefetch int `json:"volumePrefetch,omitempty"`
 	// +optional
 	// +kubebuilder:default="300"
-	JuiceFSBufferSize string `json:"juicefsBufferSize,omitempty"`
+	VolumeBufferSize string `json:"volumeBufferSize,omitempty"`
 	// +optional
 	// +kubebuilder:default=true
-	JuiceFSWriteback bool `json:"juicefsWriteback,omitempty"`
+	VolumeWriteback bool `json:"volumeWriteback,omitempty"`
 	// +optional
 	// +kubebuilder:default="/workspace"
 	RootPath string `json:"rootPath,omitempty"`
@@ -519,39 +519,39 @@ type StorageProxyConfig struct {
 	DatabaseSchema string `json:"databaseSchema,omitempty"`
 	// +optional
 	// +kubebuilder:default="sandbox0"
-	JuiceFSName string `json:"juicefsName,omitempty"`
+	FilesystemName string `json:"filesystemName,omitempty"`
 	// +optional
 	// +kubebuilder:default=4096
-	JuiceFSBlockSize int `json:"juicefsBlockSize,omitempty"`
+	FilesystemBlockSize int `json:"filesystemBlockSize,omitempty"`
 	// +optional
 	// +kubebuilder:default="lz4"
-	JuiceFSCompression string `json:"juicefsCompression,omitempty"`
+	FilesystemCompression string `json:"filesystemCompression,omitempty"`
 	// +optional
 	// +kubebuilder:default=1
-	JuiceFSTrashDays int `json:"juicefsTrashDays,omitempty"`
+	FilesystemTrashDays int `json:"filesystemTrashDays,omitempty"`
 	// +optional
 	// +kubebuilder:default=10
-	JuiceFSMetaRetries int `json:"juicefsMetaRetries,omitempty"`
+	FilesystemMetaRetries int `json:"filesystemMetaRetries,omitempty"`
 	// +optional
 	// +kubebuilder:default=20
-	JuiceFSMaxUpload int `json:"juicefsMaxUpload,omitempty"`
+	FilesystemMaxUpload int `json:"filesystemMaxUpload,omitempty"`
 	// +optional
 	// +kubebuilder:default=false
-	JuiceFSEncryptionEnabled bool `json:"juicefsEncryptionEnabled,omitempty"`
+	ObjectEncryptionEnabled bool `json:"objectEncryptionEnabled,omitempty"`
 	// +optional
-	JuiceFSEncryptionPassphrase string `json:"juicefsEncryptionPassphrase,omitempty"`
+	ObjectEncryptionPassphrase string `json:"objectEncryptionPassphrase,omitempty"`
 	// +optional
 	// +kubebuilder:default="aes256gcm-rsa"
-	JuiceFSEncryptionAlgo string `json:"juicefsEncryptionAlgo,omitempty"`
+	ObjectEncryptionAlgo string `json:"objectEncryptionAlgo,omitempty"`
 	// +optional
 	// +kubebuilder:default="1s"
-	JuiceFSAttrTimeout string `json:"juicefsAttrTimeout,omitempty"`
+	FilesystemAttrTimeout string `json:"filesystemAttrTimeout,omitempty"`
 	// +optional
 	// +kubebuilder:default="1s"
-	JuiceFSEntryTimeout string `json:"juicefsEntryTimeout,omitempty"`
+	FilesystemEntryTimeout string `json:"filesystemEntryTimeout,omitempty"`
 	// +optional
 	// +kubebuilder:default="1s"
-	JuiceFSDirEntryTimeout string `json:"juicefsDirEntryTimeout,omitempty"`
+	FilesystemDirEntryTimeout string `json:"filesystemDirEntryTimeout,omitempty"`
 	// +optional
 	// +kubebuilder:default="5s"
 	HeartbeatInterval string `json:"heartbeatInterval,omitempty"`

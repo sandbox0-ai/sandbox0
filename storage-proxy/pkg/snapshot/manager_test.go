@@ -16,11 +16,11 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/pathnorm"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
@@ -178,7 +178,7 @@ func (f *fakeVolumeProvider) GetVolume(volumeID string) (*volume.VolumeContext, 
 	return f.ctx, nil
 }
 
-func (f *fakeVolumeProvider) UpdateVolumeRoot(volumeID string, rootInode meta.Ino) error {
+func (f *fakeVolumeProvider) UpdateVolumeRoot(volumeID string, rootInode fsmeta.Ino) error {
 	f.lastVolumeID = volumeID
 	if f.err != nil {
 		return f.err
@@ -208,22 +208,22 @@ func (f *fakeVolumeProvider) WaitForInvalidate(ctx context.Context, volumeID, in
 
 type fakeMeta struct {
 	mu           sync.Mutex
-	pathToIno    map[string]meta.Ino
-	inoToPath    map[meta.Ino]string
-	nextIno      meta.Ino
+	pathToIno    map[string]fsmeta.Ino
+	inoToPath    map[fsmeta.Ino]string
+	nextIno      fsmeta.Ino
 	removedPaths []string
 }
 
 type fakeArchiveMeta struct {
-	attrs   map[meta.Ino]*meta.Attr
-	entries map[meta.Ino][]*meta.Entry
-	links   map[meta.Ino]string
+	attrs   map[fsmeta.Ino]*fsmeta.Attr
+	entries map[fsmeta.Ino][]*fsmeta.Entry
+	links   map[fsmeta.Ino]string
 	getErr  syscall.Errno
 	readErr syscall.Errno
 	linkErr syscall.Errno
 }
 
-func (f *fakeArchiveMeta) GetAttr(ctx meta.Context, inode meta.Ino, attr *meta.Attr) syscall.Errno {
+func (f *fakeArchiveMeta) GetAttr(ctx fsmeta.Context, inode fsmeta.Ino, attr *fsmeta.Attr) syscall.Errno {
 	if f.getErr != 0 {
 		return f.getErr
 	}
@@ -237,7 +237,7 @@ func (f *fakeArchiveMeta) GetAttr(ctx meta.Context, inode meta.Ino, attr *meta.A
 	return 0
 }
 
-func (f *fakeArchiveMeta) Readdir(ctx meta.Context, inode meta.Ino, wantattr uint8, entries *[]*meta.Entry) syscall.Errno {
+func (f *fakeArchiveMeta) Readdir(ctx fsmeta.Context, inode fsmeta.Ino, wantattr uint8, entries *[]*fsmeta.Entry) syscall.Errno {
 	if f.readErr != 0 {
 		return f.readErr
 	}
@@ -245,7 +245,7 @@ func (f *fakeArchiveMeta) Readdir(ctx meta.Context, inode meta.Ino, wantattr uin
 	if !ok {
 		return syscall.ENOENT
 	}
-	cloned := make([]*meta.Entry, 0, len(list))
+	cloned := make([]*fsmeta.Entry, 0, len(list))
 	for _, entry := range list {
 		copyEntry := *entry
 		if entry.Attr != nil {
@@ -258,7 +258,7 @@ func (f *fakeArchiveMeta) Readdir(ctx meta.Context, inode meta.Ino, wantattr uin
 	return 0
 }
 
-func (f *fakeArchiveMeta) ReadLink(ctx meta.Context, inode meta.Ino, path *[]byte) syscall.Errno {
+func (f *fakeArchiveMeta) ReadLink(ctx fsmeta.Context, inode fsmeta.Ino, path *[]byte) syscall.Errno {
 	if f.linkErr != 0 {
 		return f.linkErr
 	}
@@ -271,10 +271,10 @@ func (f *fakeArchiveMeta) ReadLink(ctx meta.Context, inode meta.Ino, path *[]byt
 }
 
 type fakeArchiveReader struct {
-	contents map[meta.Ino][]byte
+	contents map[fsmeta.Ino][]byte
 }
 
-func (f *fakeArchiveReader) ReadFile(ctx context.Context, inode meta.Ino, size uint64, w io.Writer) error {
+func (f *fakeArchiveReader) ReadFile(ctx context.Context, inode fsmeta.Ino, size uint64, w io.Writer) error {
 	data := f.contents[inode]
 	if len(data) != int(size) {
 		return errors.New("unexpected file size")
@@ -285,16 +285,16 @@ func (f *fakeArchiveReader) ReadFile(ctx context.Context, inode meta.Ino, size u
 
 func newFakeMeta() *fakeMeta {
 	f := &fakeMeta{
-		pathToIno: make(map[string]meta.Ino),
-		inoToPath: make(map[meta.Ino]string),
-		nextIno:   meta.RootInode + 1,
+		pathToIno: make(map[string]fsmeta.Ino),
+		inoToPath: make(map[fsmeta.Ino]string),
+		nextIno:   fsmeta.RootInode + 1,
 	}
-	f.pathToIno["/"] = meta.RootInode
-	f.inoToPath[meta.RootInode] = "/"
+	f.pathToIno["/"] = fsmeta.RootInode
+	f.inoToPath[fsmeta.RootInode] = "/"
 	return f
 }
 
-func (f *fakeMeta) Lookup(ctx meta.Context, parent meta.Ino, name string, inode *meta.Ino, attr *meta.Attr, check bool) syscall.Errno {
+func (f *fakeMeta) Lookup(ctx fsmeta.Context, parent fsmeta.Ino, name string, inode *fsmeta.Ino, attr *fsmeta.Attr, check bool) syscall.Errno {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	parentPath, ok := f.inoToPath[parent]
@@ -317,7 +317,7 @@ func (f *fakeMeta) Lookup(ctx meta.Context, parent meta.Ino, name string, inode 
 	return 0
 }
 
-func (f *fakeMeta) Mkdir(ctx meta.Context, parent meta.Ino, name string, mode uint16, cumask uint16, copysgid uint8, inode *meta.Ino, attr *meta.Attr) syscall.Errno {
+func (f *fakeMeta) Mkdir(ctx fsmeta.Context, parent fsmeta.Ino, name string, mode uint16, cumask uint16, copysgid uint8, inode *fsmeta.Ino, attr *fsmeta.Attr) syscall.Errno {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	parentPath, ok := f.inoToPath[parent]
@@ -342,7 +342,7 @@ func (f *fakeMeta) Mkdir(ctx meta.Context, parent meta.Ino, name string, mode ui
 	return 0
 }
 
-func (f *fakeMeta) Clone(ctx meta.Context, srcParentIno, srcIno, parentIno meta.Ino, name string, cmode uint8, cumask uint16, count *uint64, total *uint64) syscall.Errno {
+func (f *fakeMeta) Clone(ctx fsmeta.Context, srcParentIno, srcIno, parentIno fsmeta.Ino, name string, cmode uint8, cumask uint16, count *uint64, total *uint64) syscall.Errno {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -377,11 +377,11 @@ func (f *fakeMeta) Clone(ctx meta.Context, srcParentIno, srcIno, parentIno meta.
 	return 0
 }
 
-func (f *fakeMeta) Rename(ctx meta.Context, parentSrc meta.Ino, nameSrc string, parentDst meta.Ino, nameDst string, flags uint32, inode *meta.Ino, attr *meta.Attr) syscall.Errno {
+func (f *fakeMeta) Rename(ctx fsmeta.Context, parentSrc fsmeta.Ino, nameSrc string, parentDst fsmeta.Ino, nameDst string, flags uint32, inode *fsmeta.Ino, attr *fsmeta.Attr) syscall.Errno {
 	return 0
 }
 
-func (f *fakeMeta) Remove(ctx meta.Context, parent meta.Ino, name string, skipTrash bool, numThreads int, count *uint64) syscall.Errno {
+func (f *fakeMeta) Remove(ctx fsmeta.Context, parent fsmeta.Ino, name string, skipTrash bool, numThreads int, count *uint64) syscall.Errno {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	parentPath, ok := f.inoToPath[parent]
@@ -402,12 +402,12 @@ func (f *fakeMeta) Remove(ctx meta.Context, parent meta.Ino, name string, skipTr
 	return 0
 }
 
-func (f *fakeMeta) ensurePath(path string) meta.Ino {
+func (f *fakeMeta) ensurePath(path string) fsmeta.Ino {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	clean := "/" + strings.Trim(path, "/")
 	if clean == "/" {
-		return meta.RootInode
+		return fsmeta.RootInode
 	}
 	parts := strings.Split(strings.Trim(clean, "/"), "/")
 	current := "/"
@@ -532,7 +532,7 @@ func TestDeleteSnapshotDir_RemovesDir(t *testing.T) {
 	mgr := newTestManager(repo, nil)
 	// Use the mgr's metaClient (which is created in newTestManager)
 	metaClient := mgr.metaClient.(*fakeMeta)
-	p, err := naming.JuiceFSSnapshotPath("vol1", "snap1")
+	p, err := naming.FilesystemSnapshotPath("vol1", "snap1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -546,7 +546,7 @@ func TestDeleteSnapshotDir_RemovesDir(t *testing.T) {
 func TestEnsurePathExists_CreatesDirectories(t *testing.T) {
 	repo := newFakeRepo()
 	mgr := newTestManager(repo, nil)
-	parent, err := naming.JuiceFSSnapshotParentPath("vol1")
+	parent, err := naming.FilesystemSnapshotParentPath("vol1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -785,19 +785,19 @@ func TestExportSnapshotArchive(t *testing.T) {
 		RootInode: 100,
 	}
 
-	rootAttr := &meta.Attr{Typ: meta.TypeDirectory, Mode: 0o755, Mtime: 1710000000}
-	appDirAttr := &meta.Attr{Typ: meta.TypeDirectory, Mode: 0o755, Mtime: 1710000001}
-	fileAttr := &meta.Attr{Typ: meta.TypeFile, Mode: 0o644, Length: 13, Mtime: 1710000002}
-	linkAttr := &meta.Attr{Typ: meta.TypeSymlink, Mode: 0o777, Mtime: 1710000003}
+	rootAttr := &fsmeta.Attr{Typ: fsmeta.TypeDirectory, Mode: 0o755, Mtime: 1710000000}
+	appDirAttr := &fsmeta.Attr{Typ: fsmeta.TypeDirectory, Mode: 0o755, Mtime: 1710000001}
+	fileAttr := &fsmeta.Attr{Typ: fsmeta.TypeFile, Mode: 0o644, Length: 13, Mtime: 1710000002}
+	linkAttr := &fsmeta.Attr{Typ: fsmeta.TypeSymlink, Mode: 0o777, Mtime: 1710000003}
 
 	archiveMeta := &fakeArchiveMeta{
-		attrs: map[meta.Ino]*meta.Attr{
+		attrs: map[fsmeta.Ino]*fsmeta.Attr{
 			100: rootAttr,
 			101: appDirAttr,
 			102: fileAttr,
 			103: linkAttr,
 		},
-		entries: map[meta.Ino][]*meta.Entry{
+		entries: map[fsmeta.Ino][]*fsmeta.Entry{
 			100: {
 				{Inode: 103, Name: []byte("latest"), Attr: linkAttr},
 				{Inode: 101, Name: []byte("app"), Attr: appDirAttr},
@@ -806,12 +806,12 @@ func TestExportSnapshotArchive(t *testing.T) {
 				{Inode: 102, Name: []byte("main.go"), Attr: fileAttr},
 			},
 		},
-		links: map[meta.Ino]string{
+		links: map[fsmeta.Ino]string{
 			103: "app/main.go",
 		},
 	}
 	archiveReader := &fakeArchiveReader{
-		contents: map[meta.Ino][]byte{
+		contents: map[fsmeta.Ino][]byte{
 			102: []byte("package main\n"),
 		},
 	}
@@ -891,18 +891,18 @@ func TestListSnapshotCasefoldCollisions(t *testing.T) {
 		RootInode: 100,
 	}
 
-	rootAttr := &meta.Attr{Typ: meta.TypeDirectory, Mode: 0o755}
-	appDirAttr := &meta.Attr{Typ: meta.TypeDirectory, Mode: 0o755}
-	fileAttr := &meta.Attr{Typ: meta.TypeFile, Mode: 0o644, Length: 1}
+	rootAttr := &fsmeta.Attr{Typ: fsmeta.TypeDirectory, Mode: 0o755}
+	appDirAttr := &fsmeta.Attr{Typ: fsmeta.TypeDirectory, Mode: 0o755}
+	fileAttr := &fsmeta.Attr{Typ: fsmeta.TypeFile, Mode: 0o644, Length: 1}
 
 	archiveMeta := &fakeArchiveMeta{
-		attrs: map[meta.Ino]*meta.Attr{
+		attrs: map[fsmeta.Ino]*fsmeta.Attr{
 			100: rootAttr,
 			101: appDirAttr,
 			102: fileAttr,
 			103: fileAttr,
 		},
-		entries: map[meta.Ino][]*meta.Entry{
+		entries: map[fsmeta.Ino][]*fsmeta.Entry{
 			100: {
 				{Inode: 101, Name: []byte("app"), Attr: appDirAttr},
 			},
@@ -954,15 +954,15 @@ func TestListSnapshotCasefoldCollisionsReturnsEmptyWhenNamespaceIsSafe(t *testin
 		RootInode: 100,
 	}
 
-	rootAttr := &meta.Attr{Typ: meta.TypeDirectory, Mode: 0o755}
-	fileAttr := &meta.Attr{Typ: meta.TypeFile, Mode: 0o644, Length: 1}
+	rootAttr := &fsmeta.Attr{Typ: fsmeta.TypeDirectory, Mode: 0o755}
+	fileAttr := &fsmeta.Attr{Typ: fsmeta.TypeFile, Mode: 0o644, Length: 1}
 
 	archiveMeta := &fakeArchiveMeta{
-		attrs: map[meta.Ino]*meta.Attr{
+		attrs: map[fsmeta.Ino]*fsmeta.Attr{
 			100: rootAttr,
 			101: fileAttr,
 		},
-		entries: map[meta.Ino][]*meta.Entry{
+		entries: map[fsmeta.Ino][]*fsmeta.Entry{
 			100: {
 				{Inode: 101, Name: []byte("main.go"), Attr: fileAttr},
 			},
@@ -1004,16 +1004,16 @@ func TestListSnapshotCasefoldCollisionsDetectsUnicodeNormalizationCollisions(t *
 		RootInode: 100,
 	}
 
-	rootAttr := &meta.Attr{Typ: meta.TypeDirectory, Mode: 0o755}
-	fileAttr := &meta.Attr{Typ: meta.TypeFile, Mode: 0o644, Length: 1}
+	rootAttr := &fsmeta.Attr{Typ: fsmeta.TypeDirectory, Mode: 0o755}
+	fileAttr := &fsmeta.Attr{Typ: fsmeta.TypeFile, Mode: 0o644, Length: 1}
 
 	archiveMeta := &fakeArchiveMeta{
-		attrs: map[meta.Ino]*meta.Attr{
+		attrs: map[fsmeta.Ino]*fsmeta.Attr{
 			100: rootAttr,
 			101: fileAttr,
 			102: fileAttr,
 		},
-		entries: map[meta.Ino][]*meta.Entry{
+		entries: map[fsmeta.Ino][]*fsmeta.Entry{
 			100: {
 				{Inode: 101, Name: []byte("Caf\u00e9.txt"), Attr: fileAttr},
 				{Inode: 102, Name: []byte("Cafe\u0301.txt"), Attr: fileAttr},
@@ -1062,15 +1062,15 @@ func TestListSnapshotCompatibilityIssuesDetectsWindowsReservedNames(t *testing.T
 		RootInode: 100,
 	}
 
-	rootAttr := &meta.Attr{Typ: meta.TypeDirectory, Mode: 0o755}
-	fileAttr := &meta.Attr{Typ: meta.TypeFile, Mode: 0o644, Length: 1}
+	rootAttr := &fsmeta.Attr{Typ: fsmeta.TypeDirectory, Mode: 0o755}
+	fileAttr := &fsmeta.Attr{Typ: fsmeta.TypeFile, Mode: 0o644, Length: 1}
 
 	archiveMeta := &fakeArchiveMeta{
-		attrs: map[meta.Ino]*meta.Attr{
+		attrs: map[fsmeta.Ino]*fsmeta.Attr{
 			100: rootAttr,
 			101: fileAttr,
 		},
-		entries: map[meta.Ino][]*meta.Entry{
+		entries: map[fsmeta.Ino][]*fsmeta.Entry{
 			100: {
 				{Inode: 101, Name: []byte("CON.txt"), Attr: fileAttr},
 			},

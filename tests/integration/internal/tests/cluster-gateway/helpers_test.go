@@ -56,12 +56,11 @@ func newGatewayTestEnv(t *testing.T, managerURL, storageProxyURL string, schedul
 	})
 
 	cfg := &config.ClusterGatewayConfig{
-		ManagerURL:              managerURL,
-		StorageProxyURL:         storageProxyURL,
-		AllowedCallers:          []string{"regional-gateway", "scheduler"},
-		ProxyTimeout:            metav1.Duration{Duration: 2 * time.Second},
-		SchedulerPermissions:    schedulerPerms,
-		ProcdStoragePermissions: []string{"sandboxvolume:read"},
+		ManagerURL:           managerURL,
+		StorageProxyURL:      storageProxyURL,
+		AllowedCallers:       []string{"regional-gateway", "scheduler"},
+		ProxyTimeout:         metav1.Duration{Duration: 2 * time.Second},
+		SchedulerPermissions: schedulerPerms,
 	}
 
 	obsProvider := newTestObservability(t, "cluster-gateway-test")
@@ -103,10 +102,9 @@ func newGatewayPublicTestEnv(t *testing.T, managerURL, storageProxyURL string, p
 			JWTSecret: jwtSecret,
 			JWTIssuer: jwtIssuer,
 		},
-		AllowedCallers:          []string{"regional-gateway", "scheduler"},
-		ProxyTimeout:            metav1.Duration{Duration: 2 * time.Second},
-		SchedulerPermissions:    []string{"*:*"},
-		ProcdStoragePermissions: []string{"sandboxvolume:read"},
+		AllowedCallers:       []string{"regional-gateway", "scheduler"},
+		ProxyTimeout:         metav1.Duration{Duration: 2 * time.Second},
+		SchedulerPermissions: []string{"*:*"},
 	}
 
 	obsProvider := newTestObservability(t, "cluster-gateway-test")

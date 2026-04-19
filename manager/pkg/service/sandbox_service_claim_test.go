@@ -637,16 +637,96 @@ func TestValidateClaimMountsRejectsWebhookStatePath(t *testing.T) {
 	}
 }
 
-func TestClaimMountWaitTimeoutDefaultsWhenEnabled(t *testing.T) {
-	got := claimMountWaitTimeout(&ClaimRequest{WaitForMounts: true})
-	if got != 30*time.Second {
-		t.Fatalf("claimMountWaitTimeout() = %s, want 30s", got)
+func TestValidateClaimMountsForTemplateRequiresDeclaredMountPoint(t *testing.T) {
+	req := &ClaimRequest{
+		Mounts: []ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: "/workspace/data"}},
 	}
-	custom := int32(2500)
-	got = claimMountWaitTimeout(&ClaimRequest{WaitForMounts: true, MountWaitTimeoutMs: &custom})
-	if got != 2500*time.Millisecond {
-		t.Fatalf("claimMountWaitTimeout() with override = %s, want 2500ms", got)
+	template := &v1alpha1.SandboxTemplate{
+		Spec: v1alpha1.SandboxTemplateSpec{
+			VolumeMounts: []v1alpha1.VolumeMountSpec{{Name: "cache", MountPath: "/workspace/cache"}},
+		},
 	}
+
+	err := validateClaimMountsForTemplate(req, template)
+	if err == nil {
+		t.Fatal("expected undeclared mount point validation error")
+	}
+	if !errors.Is(err, ErrInvalidClaimRequest) {
+		t.Fatalf("expected ErrInvalidClaimRequest, got %v", err)
+	}
+}
+
+func TestValidateClaimMountsForTemplateAllowsDeclaredMountPoint(t *testing.T) {
+	req := &ClaimRequest{
+		Mounts: []ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: "/workspace/project/../data"}},
+	}
+	if err := validateClaimMounts(req); err != nil {
+		t.Fatalf("validateClaimMounts() error = %v", err)
+	}
+	template := &v1alpha1.SandboxTemplate{
+		Spec: v1alpha1.SandboxTemplateSpec{
+			VolumeMounts: []v1alpha1.VolumeMountSpec{{Name: "data", MountPath: "/workspace/data"}},
+		},
+	}
+
+	if err := validateClaimMountsForTemplate(req, template); err != nil {
+		t.Fatalf("validateClaimMountsForTemplate() error = %v", err)
+	}
+}
+
+func TestValidateVolumePortalAccessRejectsRWXNodeLocalPortal(t *testing.T) {
+	svc := &SandboxService{volumeMetadata: fakeVolumeMetadataClient{accessMode: "RWX"}}
+
+	err := svc.validateVolumePortalAccess(context.Background(), "team-a", "user-a", "vol-1", v1alpha1.VolumeMountSpec{
+		Name:      "data",
+		MountPath: "/workspace/data",
+	})
+	if err == nil {
+		t.Fatal("expected RWX access mode validation error")
+	}
+	if !errors.Is(err, ErrInvalidClaimRequest) {
+		t.Fatalf("expected ErrInvalidClaimRequest, got %v", err)
+	}
+}
+
+func TestValidateVolumePortalAccessAllowsROXOnlyForReadOnlyTemplateMount(t *testing.T) {
+	svc := &SandboxService{volumeMetadata: fakeVolumeMetadataClient{accessMode: "ROX"}}
+
+	err := svc.validateVolumePortalAccess(context.Background(), "team-a", "user-a", "vol-1", v1alpha1.VolumeMountSpec{
+		Name:      "data",
+		MountPath: "/workspace/data",
+	})
+	if err == nil {
+		t.Fatal("expected read-write ROX validation error")
+	}
+	if !errors.Is(err, ErrInvalidClaimRequest) {
+		t.Fatalf("expected ErrInvalidClaimRequest, got %v", err)
+	}
+
+	if err := svc.validateVolumePortalAccess(context.Background(), "team-a", "user-a", "vol-1", v1alpha1.VolumeMountSpec{
+		Name:      "data",
+		MountPath: "/workspace/data",
+		ReadOnly:  true,
+	}); err != nil {
+		t.Fatalf("validateVolumePortalAccess() read-only error = %v", err)
+	}
+}
+
+type fakeVolumeMetadataClient struct {
+	accessMode string
+	err        error
+}
+
+func (c fakeVolumeMetadataClient) Get(_ context.Context, teamID, userID, volumeID string) (*SandboxVolumeInfo, error) {
+	if c.err != nil {
+		return nil, c.err
+	}
+	return &SandboxVolumeInfo{
+		ID:         volumeID,
+		TeamID:     teamID,
+		UserID:     userID,
+		AccessMode: c.accessMode,
+	}, nil
 }
 
 func newClaimTestPodLister(t *testing.T, pods ...*corev1.Pod) corelisters.PodLister {

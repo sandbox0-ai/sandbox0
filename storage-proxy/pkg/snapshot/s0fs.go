@@ -311,32 +311,6 @@ func (m *Manager) forkS0FSVolume(ctx context.Context, req *ForkVolumeRequest) (*
 		return nil, err
 	}
 
-	cacheSize := sourceVol.CacheSize
-	if req.CacheSize != nil && strings.TrimSpace(*req.CacheSize) != "" {
-		cacheSize = *req.CacheSize
-	}
-	if cacheSize == "" {
-		cacheSize = "1G"
-	}
-
-	bufferSize := sourceVol.BufferSize
-	if req.BufferSize != nil && strings.TrimSpace(*req.BufferSize) != "" {
-		bufferSize = *req.BufferSize
-	}
-	if bufferSize == "" {
-		bufferSize = "32M"
-	}
-
-	prefetch := sourceVol.Prefetch
-	if req.Prefetch != nil {
-		prefetch = *req.Prefetch
-	}
-
-	writeback := sourceVol.Writeback
-	if req.Writeback != nil {
-		writeback = *req.Writeback
-	}
-
 	defaultPosixUID := sourceVol.DefaultPosixUID
 	defaultPosixGID := sourceVol.DefaultPosixGID
 	if req.DefaultPosixUID != nil || req.DefaultPosixGID != nil {
@@ -373,10 +347,6 @@ func (m *Manager) forkS0FSVolume(ctx context.Context, req *ForkVolumeRequest) (*
 		SourceVolumeID:  &sourceID,
 		DefaultPosixUID: defaultPosixUID,
 		DefaultPosixGID: defaultPosixGID,
-		CacheSize:       cacheSize,
-		Prefetch:        prefetch,
-		BufferSize:      bufferSize,
-		Writeback:       writeback,
 		AccessMode:      string(accessMode),
 		CreatedAt:       now,
 		UpdatedAt:       now,

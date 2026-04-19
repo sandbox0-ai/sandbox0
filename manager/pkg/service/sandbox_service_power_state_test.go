@@ -652,7 +652,6 @@ func TestPauseSandboxLocalResumesProcdAfterStalePause(t *testing.T) {
 		podLister:              newTestPodLister(t, pod),
 		procdClient:            NewProcdClient(ProcdClientConfig{Timeout: time.Second}),
 		internalTokenGenerator: staticTokenGenerator{},
-		procdTokenGenerator:    staticTokenGenerator{},
 		config: SandboxServiceConfig{
 			ProcdPort:              port,
 			PauseMinCPU:            "10m",

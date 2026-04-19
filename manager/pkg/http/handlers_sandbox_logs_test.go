@@ -35,7 +35,6 @@ func TestGetSandboxLogsReturnsOK(t *testing.T) {
 		nil,
 		nil,
 		nil,
-		nil,
 		service.SandboxServiceConfig{},
 		zap.NewNop(),
 		nil,
@@ -65,7 +64,6 @@ func TestGetSandboxLogsStreamsWhenFollowTrue(t *testing.T) {
 	sandboxService := service.NewSandboxService(
 		fake.NewSimpleClientset(pod),
 		newHTTPTestPodLister(t, pod),
-		nil,
 		nil,
 		nil,
 		nil,

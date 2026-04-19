@@ -23,27 +23,6 @@ func (g *InternalTokenGenerator) GenerateToken(teamID, userID, sandboxID string)
 	return g.generator.Generate("procd", teamID, userID, internalauth.GenerateOptions{})
 }
 
-// ProcdTokenGenerator generates tokens for procd to access storage-proxy.
-type ProcdTokenGenerator struct {
-	generator *internalauth.Generator
-}
-
-// NewProcdTokenGenerator creates a new procd token generator.
-func NewProcdTokenGenerator(generator *internalauth.Generator) *ProcdTokenGenerator {
-	return &ProcdTokenGenerator{
-		generator: generator,
-	}
-}
-
-// GenerateToken generates a token for procd to access storage-proxy.
-func (g *ProcdTokenGenerator) GenerateToken(teamID, userID, sandboxID string) (string, error) {
-	// Permissions required by procd to access storage-proxy
-	return g.generator.Generate("storage-proxy", teamID, userID, internalauth.GenerateOptions{
-		Permissions: []string{"sandboxvolume:read", "sandboxvolume:write"},
-		SandboxID:   sandboxID,
-	})
-}
-
 // StorageProxyAdminTokenGenerator generates manager tokens for storage-proxy volume lifecycle calls.
 type StorageProxyAdminTokenGenerator struct {
 	generator *internalauth.Generator

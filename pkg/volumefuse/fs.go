@@ -1,50 +1,63 @@
-package volume
+package volumefuse
 
 import (
 	"context"
 	"errors"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volproto"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 )
 
-type volumeFS struct {
+type FileSystem struct {
 	fuse.RawFileSystem
+	mu       sync.RWMutex
 	volumeID string
-	session  volumeSession
+	session  Session
 	cacheTTL time.Duration
 }
 
-func newVolumeFS(volumeID string, cacheTTL time.Duration) *volumeFS {
+const fileOpenFlags = fuse.FOPEN_KEEP_CACHE | fuse.FOPEN_NOFLUSH
+
+func New(volumeID string, cacheTTL time.Duration, session Session) *FileSystem {
 	if cacheTTL < 0 {
 		cacheTTL = time.Second
 	}
-	return &volumeFS{
+	return &FileSystem{
 		RawFileSystem: fuse.NewDefaultRawFileSystem(),
 		volumeID:      volumeID,
+		session:       session,
 		cacheTTL:      cacheTTL,
 	}
 }
 
-func (fs *volumeFS) String() string {
+func (fs *FileSystem) String() string {
 	return "sandbox0-volume"
 }
 
-func (fs *volumeFS) setSession(session volumeSession) {
+func (fs *FileSystem) SetSession(session Session) {
 	if fs == nil {
 		return
 	}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
 	fs.session = session
 }
 
-func (fs *volumeFS) requireSession() (volumeSession, fuse.Status) {
-	if fs == nil || fs.session == nil {
+func (fs *FileSystem) requireSession() (Session, fuse.Status) {
+	if fs == nil {
 		return nil, fuse.EIO
 	}
-	return fs.session, fuse.OK
+	fs.mu.RLock()
+	session := fs.session
+	fs.mu.RUnlock()
+	if session == nil {
+		return nil, fuse.EIO
+	}
+	return session, fuse.OK
 }
 
 func actorFromCaller(caller fuse.Caller) *pb.PosixActor {
@@ -62,7 +75,7 @@ func actorFromHeader(header *fuse.InHeader) *pb.PosixActor {
 	return actorFromCaller(header.Caller)
 }
 
-func (fs *volumeFS) Lookup(cancel <-chan struct{}, header *fuse.InHeader, name string, out *fuse.EntryOut) fuse.Status {
+func (fs *FileSystem) Lookup(cancel <-chan struct{}, header *fuse.InHeader, name string, out *fuse.EntryOut) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
@@ -85,7 +98,7 @@ func (fs *volumeFS) Lookup(cancel <-chan struct{}, header *fuse.InHeader, name s
 	return fuse.OK
 }
 
-func (fs *volumeFS) GetAttr(cancel <-chan struct{}, input *fuse.GetAttrIn, out *fuse.AttrOut) fuse.Status {
+func (fs *FileSystem) GetAttr(cancel <-chan struct{}, input *fuse.GetAttrIn, out *fuse.AttrOut) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
@@ -106,7 +119,7 @@ func (fs *volumeFS) GetAttr(cancel <-chan struct{}, input *fuse.GetAttrIn, out *
 	return fuse.OK
 }
 
-func (fs *volumeFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fuse.AttrOut) fuse.Status {
+func (fs *FileSystem) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fuse.AttrOut) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
@@ -148,7 +161,7 @@ func (fs *volumeFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *
 	return fuse.OK
 }
 
-func (fs *volumeFS) Mkdir(cancel <-chan struct{}, input *fuse.MkdirIn, name string, out *fuse.EntryOut) fuse.Status {
+func (fs *FileSystem) Mkdir(cancel <-chan struct{}, input *fuse.MkdirIn, name string, out *fuse.EntryOut) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
@@ -172,7 +185,7 @@ func (fs *volumeFS) Mkdir(cancel <-chan struct{}, input *fuse.MkdirIn, name stri
 	return fuse.OK
 }
 
-func (fs *volumeFS) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name string) fuse.Status {
+func (fs *FileSystem) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name string) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
@@ -193,7 +206,7 @@ func (fs *volumeFS) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name s
 	return fuse.OK
 }
 
-func (fs *volumeFS) Rmdir(cancel <-chan struct{}, header *fuse.InHeader, name string) fuse.Status {
+func (fs *FileSystem) Rmdir(cancel <-chan struct{}, header *fuse.InHeader, name string) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
@@ -214,7 +227,7 @@ func (fs *volumeFS) Rmdir(cancel <-chan struct{}, header *fuse.InHeader, name st
 	return fuse.OK
 }
 
-func (fs *volumeFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, newName string) fuse.Status {
+func (fs *FileSystem) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, newName string) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
@@ -238,7 +251,7 @@ func (fs *volumeFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName
 	return fuse.OK
 }
 
-func (fs *volumeFS) Link(cancel <-chan struct{}, input *fuse.LinkIn, filename string, out *fuse.EntryOut) fuse.Status {
+func (fs *FileSystem) Link(cancel <-chan struct{}, input *fuse.LinkIn, filename string, out *fuse.EntryOut) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
@@ -260,7 +273,7 @@ func (fs *volumeFS) Link(cancel <-chan struct{}, input *fuse.LinkIn, filename st
 	return fuse.OK
 }
 
-func (fs *volumeFS) Symlink(cancel <-chan struct{}, header *fuse.InHeader, pointedTo, linkName string, out *fuse.EntryOut) fuse.Status {
+func (fs *FileSystem) Symlink(cancel <-chan struct{}, header *fuse.InHeader, pointedTo, linkName string, out *fuse.EntryOut) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
@@ -283,7 +296,7 @@ func (fs *volumeFS) Symlink(cancel <-chan struct{}, header *fuse.InHeader, point
 	return fuse.OK
 }
 
-func (fs *volumeFS) Readlink(cancel <-chan struct{}, header *fuse.InHeader) ([]byte, fuse.Status) {
+func (fs *FileSystem) Readlink(cancel <-chan struct{}, header *fuse.InHeader) ([]byte, fuse.Status) {
 	if isCanceled(cancel) {
 		return nil, fuse.EINTR
 	}
@@ -303,7 +316,7 @@ func (fs *volumeFS) Readlink(cancel <-chan struct{}, header *fuse.InHeader) ([]b
 	return []byte(resp.Target), fuse.OK
 }
 
-func (fs *volumeFS) Access(cancel <-chan struct{}, input *fuse.AccessIn) fuse.Status {
+func (fs *FileSystem) Access(cancel <-chan struct{}, input *fuse.AccessIn) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
@@ -326,7 +339,7 @@ func (fs *volumeFS) Access(cancel <-chan struct{}, input *fuse.AccessIn) fuse.St
 	return fuse.OK
 }
 
-func (fs *volumeFS) Create(cancel <-chan struct{}, input *fuse.CreateIn, name string, out *fuse.CreateOut) fuse.Status {
+func (fs *FileSystem) Create(cancel <-chan struct{}, input *fuse.CreateIn, name string, out *fuse.CreateOut) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
@@ -349,10 +362,11 @@ func (fs *volumeFS) Create(cancel <-chan struct{}, input *fuse.CreateIn, name st
 	}
 	setEntryOut(&out.EntryOut, resp.Inode, resp.Attr, fs.cacheTTL)
 	out.Fh = resp.HandleId
+	out.OpenFlags = fileOpenFlags
 	return fuse.OK
 }
 
-func (fs *volumeFS) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.OpenOut) fuse.Status {
+func (fs *FileSystem) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.OpenOut) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
@@ -371,10 +385,11 @@ func (fs *volumeFS) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.O
 		return statusToFuse(err)
 	}
 	out.Fh = resp.HandleId
+	out.OpenFlags = fileOpenFlags
 	return fuse.OK
 }
 
-func (fs *volumeFS) Read(cancel <-chan struct{}, input *fuse.ReadIn, buf []byte) (fuse.ReadResult, fuse.Status) {
+func (fs *FileSystem) Read(cancel <-chan struct{}, input *fuse.ReadIn, buf []byte) (fuse.ReadResult, fuse.Status) {
 	if isCanceled(cancel) {
 		return nil, fuse.EINTR
 	}
@@ -397,7 +412,7 @@ func (fs *volumeFS) Read(cancel <-chan struct{}, input *fuse.ReadIn, buf []byte)
 	return fuse.ReadResultData(resp.Data), fuse.OK
 }
 
-func (fs *volumeFS) Write(cancel <-chan struct{}, input *fuse.WriteIn, data []byte) (uint32, fuse.Status) {
+func (fs *FileSystem) Write(cancel <-chan struct{}, input *fuse.WriteIn, data []byte) (uint32, fuse.Status) {
 	if isCanceled(cancel) {
 		return 0, fuse.EINTR
 	}
@@ -420,7 +435,7 @@ func (fs *volumeFS) Write(cancel <-chan struct{}, input *fuse.WriteIn, data []by
 	return uint32(resp.BytesWritten), fuse.OK
 }
 
-func (fs *volumeFS) Release(cancel <-chan struct{}, input *fuse.ReleaseIn) {
+func (fs *FileSystem) Release(cancel <-chan struct{}, input *fuse.ReleaseIn) {
 	req := &pb.ReleaseRequest{
 		VolumeId: fs.volumeID,
 		Inode:    input.NodeId,
@@ -434,7 +449,7 @@ func (fs *volumeFS) Release(cancel <-chan struct{}, input *fuse.ReleaseIn) {
 	_, _ = session.Release(context.Background(), req)
 }
 
-func (fs *volumeFS) Flush(cancel <-chan struct{}, input *fuse.FlushIn) fuse.Status {
+func (fs *FileSystem) Flush(cancel <-chan struct{}, input *fuse.FlushIn) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
@@ -454,7 +469,7 @@ func (fs *volumeFS) Flush(cancel <-chan struct{}, input *fuse.FlushIn) fuse.Stat
 	return fuse.OK
 }
 
-func (fs *volumeFS) Fsync(cancel <-chan struct{}, input *fuse.FsyncIn) fuse.Status {
+func (fs *FileSystem) Fsync(cancel <-chan struct{}, input *fuse.FsyncIn) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
@@ -475,7 +490,7 @@ func (fs *volumeFS) Fsync(cancel <-chan struct{}, input *fuse.FsyncIn) fuse.Stat
 	return fuse.OK
 }
 
-func (fs *volumeFS) Fallocate(cancel <-chan struct{}, input *fuse.FallocateIn) fuse.Status {
+func (fs *FileSystem) Fallocate(cancel <-chan struct{}, input *fuse.FallocateIn) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
@@ -498,7 +513,7 @@ func (fs *volumeFS) Fallocate(cancel <-chan struct{}, input *fuse.FallocateIn) f
 	return fuse.OK
 }
 
-func (fs *volumeFS) OpenDir(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.OpenOut) fuse.Status {
+func (fs *FileSystem) OpenDir(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.OpenOut) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
@@ -520,7 +535,7 @@ func (fs *volumeFS) OpenDir(cancel <-chan struct{}, input *fuse.OpenIn, out *fus
 	return fuse.OK
 }
 
-func (fs *volumeFS) ReadDir(cancel <-chan struct{}, input *fuse.ReadIn, out *fuse.DirEntryList) fuse.Status {
+func (fs *FileSystem) ReadDir(cancel <-chan struct{}, input *fuse.ReadIn, out *fuse.DirEntryList) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
@@ -558,7 +573,7 @@ func (fs *volumeFS) ReadDir(cancel <-chan struct{}, input *fuse.ReadIn, out *fus
 	return fuse.OK
 }
 
-func (fs *volumeFS) ReadDirPlus(cancel <-chan struct{}, input *fuse.ReadIn, out *fuse.DirEntryList) fuse.Status {
+func (fs *FileSystem) ReadDirPlus(cancel <-chan struct{}, input *fuse.ReadIn, out *fuse.DirEntryList) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
@@ -598,7 +613,7 @@ func (fs *volumeFS) ReadDirPlus(cancel <-chan struct{}, input *fuse.ReadIn, out 
 	return fuse.OK
 }
 
-func (fs *volumeFS) ReleaseDir(input *fuse.ReleaseIn) {
+func (fs *FileSystem) ReleaseDir(input *fuse.ReleaseIn) {
 	req := &pb.ReleaseDirRequest{
 		VolumeId: fs.volumeID,
 		Inode:    input.NodeId,
@@ -612,7 +627,7 @@ func (fs *volumeFS) ReleaseDir(input *fuse.ReleaseIn) {
 	_, _ = session.ReleaseDir(context.Background(), req)
 }
 
-func (fs *volumeFS) StatFs(cancel <-chan struct{}, input *fuse.InHeader, out *fuse.StatfsOut) fuse.Status {
+func (fs *FileSystem) StatFs(cancel <-chan struct{}, input *fuse.InHeader, out *fuse.StatfsOut) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
@@ -639,7 +654,7 @@ func (fs *volumeFS) StatFs(cancel <-chan struct{}, input *fuse.InHeader, out *fu
 	return fuse.OK
 }
 
-func (fs *volumeFS) GetXAttr(cancel <-chan struct{}, header *fuse.InHeader, attr string, dest []byte) (uint32, fuse.Status) {
+func (fs *FileSystem) GetXAttr(cancel <-chan struct{}, header *fuse.InHeader, attr string, dest []byte) (uint32, fuse.Status) {
 	if isCanceled(cancel) {
 		return 0, fuse.EINTR
 	}
@@ -667,7 +682,7 @@ func (fs *volumeFS) GetXAttr(cancel <-chan struct{}, header *fuse.InHeader, attr
 	return uint32(len(resp.Value)), fuse.OK
 }
 
-func (fs *volumeFS) ListXAttr(cancel <-chan struct{}, header *fuse.InHeader, dest []byte) (uint32, fuse.Status) {
+func (fs *FileSystem) ListXAttr(cancel <-chan struct{}, header *fuse.InHeader, dest []byte) (uint32, fuse.Status) {
 	if isCanceled(cancel) {
 		return 0, fuse.EINTR
 	}
@@ -694,7 +709,7 @@ func (fs *volumeFS) ListXAttr(cancel <-chan struct{}, header *fuse.InHeader, des
 	return uint32(len(resp.Data)), fuse.OK
 }
 
-func (fs *volumeFS) SetXAttr(cancel <-chan struct{}, input *fuse.SetXAttrIn, attr string, data []byte) fuse.Status {
+func (fs *FileSystem) SetXAttr(cancel <-chan struct{}, input *fuse.SetXAttrIn, attr string, data []byte) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
@@ -716,7 +731,7 @@ func (fs *volumeFS) SetXAttr(cancel <-chan struct{}, input *fuse.SetXAttrIn, att
 	return fuse.OK
 }
 
-func (fs *volumeFS) RemoveXAttr(cancel <-chan struct{}, header *fuse.InHeader, attr string) fuse.Status {
+func (fs *FileSystem) RemoveXAttr(cancel <-chan struct{}, header *fuse.InHeader, attr string) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
@@ -736,7 +751,7 @@ func (fs *volumeFS) RemoveXAttr(cancel <-chan struct{}, header *fuse.InHeader, a
 	return fuse.OK
 }
 
-func (fs *volumeFS) Mknod(cancel <-chan struct{}, input *fuse.MknodIn, name string, out *fuse.EntryOut) fuse.Status {
+func (fs *FileSystem) Mknod(cancel <-chan struct{}, input *fuse.MknodIn, name string, out *fuse.EntryOut) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
@@ -760,11 +775,11 @@ func (fs *volumeFS) Mknod(cancel <-chan struct{}, input *fuse.MknodIn, name stri
 	return fuse.OK
 }
 
-func (fs *volumeFS) Lseek(cancel <-chan struct{}, input *fuse.LseekIn, out *fuse.LseekOut) fuse.Status {
+func (fs *FileSystem) Lseek(cancel <-chan struct{}, input *fuse.LseekIn, out *fuse.LseekOut) fuse.Status {
 	return fuse.ENOSYS
 }
 
-func (fs *volumeFS) GetLk(cancel <-chan struct{}, input *fuse.LkIn, out *fuse.LkOut) fuse.Status {
+func (fs *FileSystem) GetLk(cancel <-chan struct{}, input *fuse.LkIn, out *fuse.LkOut) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
@@ -790,15 +805,15 @@ func (fs *volumeFS) GetLk(cancel <-chan struct{}, input *fuse.LkIn, out *fuse.Lk
 	return fuse.OK
 }
 
-func (fs *volumeFS) SetLk(cancel <-chan struct{}, input *fuse.LkIn) fuse.Status {
+func (fs *FileSystem) SetLk(cancel <-chan struct{}, input *fuse.LkIn) fuse.Status {
 	return fs.setLk(cancel, input, false)
 }
 
-func (fs *volumeFS) SetLkw(cancel <-chan struct{}, input *fuse.LkIn) fuse.Status {
+func (fs *FileSystem) SetLkw(cancel <-chan struct{}, input *fuse.LkIn) fuse.Status {
 	return fs.setLk(cancel, input, true)
 }
 
-func (fs *volumeFS) CopyFileRange(cancel <-chan struct{}, input *fuse.CopyFileRangeIn) (uint32, fuse.Status) {
+func (fs *FileSystem) CopyFileRange(cancel <-chan struct{}, input *fuse.CopyFileRangeIn) (uint32, fuse.Status) {
 	if isCanceled(cancel) {
 		return 0, fuse.EINTR
 	}
@@ -827,18 +842,18 @@ func (fs *volumeFS) CopyFileRange(cancel <-chan struct{}, input *fuse.CopyFileRa
 	return uint32(resp.BytesCopied), fuse.OK
 }
 
-func (fs *volumeFS) FsyncDir(cancel <-chan struct{}, input *fuse.FsyncIn) fuse.Status {
+func (fs *FileSystem) FsyncDir(cancel <-chan struct{}, input *fuse.FsyncIn) fuse.Status {
 	return fuse.ENOSYS
 }
 
-func (fs *volumeFS) Ioctl(cancel <-chan struct{}, in *fuse.IoctlIn, bufIn []byte, out *fuse.IoctlOut, bufOut []byte) fuse.Status {
+func (fs *FileSystem) Ioctl(cancel <-chan struct{}, in *fuse.IoctlIn, bufIn []byte, out *fuse.IoctlOut, bufOut []byte) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
 	return fuse.ENOSYS
 }
 
-func (fs *volumeFS) setLk(cancel <-chan struct{}, input *fuse.LkIn, block bool) fuse.Status {
+func (fs *FileSystem) setLk(cancel <-chan struct{}, input *fuse.LkIn, block bool) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
@@ -961,18 +976,20 @@ func statusToFuse(err error) fuse.Status {
 	if err == context.DeadlineExceeded {
 		return fuse.EIO
 	}
-	var remote remoteError
-	if errors.As(err, &remote) {
-		switch remote.code {
-		case volproto.StatusNotFound:
+	var fsErr *fserror.Error
+	if errors.As(err, &fsErr) {
+		switch fsErr.Code() {
+		case fserror.NotFound:
 			return fuse.ENOENT
-		case volproto.StatusPermissionDenied, volproto.StatusUnauthenticated:
+		case fserror.AlreadyExists:
+			return fuse.Status(syscall.EEXIST)
+		case fserror.PermissionDenied, fserror.Unauthenticated:
 			return fuse.EPERM
-		case volproto.StatusInvalidArgument:
+		case fserror.InvalidArgument:
 			return fuse.EINVAL
-		case volproto.StatusFailedPrecondition:
+		case fserror.FailedPrecondition:
 			return fuse.EIO
-		case volproto.StatusUnimplemented:
+		case fserror.Unimplemented:
 			return fuse.ENOSYS
 		default:
 			return fuse.EIO

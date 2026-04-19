@@ -53,7 +53,6 @@ type Server struct {
 	logger             *zap.Logger
 	meteringHandler    *gatewayhandlers.MeteringHandler
 	internalAuthGen    *internalauth.Generator
-	procdAuthGen       *internalauth.Generator
 	entitlements       licensing.Entitlements
 	obsProvider        *observability.Provider
 	httpClient         *http.Client
@@ -151,11 +150,6 @@ func NewServer(
 	// Initialize internal auth generator (for downstream services)
 	internalAuthGen := internalauth.NewGenerator(internalauth.GeneratorConfig{
 		Caller:     "cluster-gateway",
-		PrivateKey: privateKey,
-		TTL:        10 * time.Second,
-	})
-	procdAuthGen := internalauth.NewGenerator(internalauth.GeneratorConfig{
-		Caller:     "procd",
 		PrivateKey: privateKey,
 		TTL:        10 * time.Second,
 	})
@@ -262,7 +256,6 @@ func NewServer(
 		logger:             logger,
 		meteringHandler:    meteringHandler,
 		internalAuthGen:    internalAuthGen,
-		procdAuthGen:       procdAuthGen,
 		entitlements:       entitlements,
 		obsProvider:        obsProvider,
 		httpClient:         httpClient,
@@ -367,14 +360,6 @@ func (s *Server) setupRoutes() {
 				contexts.POST("/:ctx_id/signal", s.contextSignal)
 				contexts.GET("/:ctx_id/stats", s.contextStats)
 				contexts.GET("/:ctx_id/ws", s.contextWebSocket)
-			}
-
-			// === SandboxVolume Management (→ Procd) ===
-			sandboxvolumes := sandboxes.Group("/:id/sandboxvolumes")
-			{
-				sandboxvolumes.POST("/mount", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.mountSandboxVolume)
-				sandboxvolumes.POST("/unmount", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.unmountSandboxVolume)
-				sandboxvolumes.GET("/status", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.getSandboxVolumeStatus)
 			}
 
 			// === File System (→ Procd) ===

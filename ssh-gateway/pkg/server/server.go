@@ -46,14 +46,13 @@ type execRequest struct {
 
 // Server serves SSH connections and bridges sessions to procd contexts.
 type Server struct {
-	cfg                     *config.SSHGatewayConfig
-	logger                  *zap.Logger
-	authorizer              SessionAuthorizer
-	dataPlaneAuthGen        *internalauth.Generator
-	procdStoragePermissions []string
-	hostSigner              ssh.Signer
-	httpClient              *http.Client
-	sshConfig               *ssh.ServerConfig
+	cfg              *config.SSHGatewayConfig
+	logger           *zap.Logger
+	authorizer       SessionAuthorizer
+	dataPlaneAuthGen *internalauth.Generator
+	hostSigner       ssh.Signer
+	httpClient       *http.Client
+	sshConfig        *ssh.ServerConfig
 }
 
 // NewServer creates a new ssh-gateway server.
@@ -86,11 +85,6 @@ func NewServer(cfg *config.SSHGatewayConfig, authorizer SessionAuthorizer, dataP
 			Timeout: 10 * time.Second,
 		},
 	}
-	perms := cfg.ProcdStoragePermissions
-	if len(perms) == 0 {
-		perms = []string{"sandboxvolume:read", "sandboxvolume:write"}
-	}
-	server.procdStoragePermissions = perms
 	server.sshConfig = &ssh.ServerConfig{
 		ServerVersion: "SSH-2.0-sandbox0",
 		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {

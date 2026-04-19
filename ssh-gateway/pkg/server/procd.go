@@ -650,15 +650,7 @@ func (s *Server) procdHeaders(target *SessionTarget) (http.Header, error) {
 	if err != nil {
 		return nil, fmt.Errorf("generate procd token: %w", err)
 	}
-	procdStorageToken, err := s.dataPlaneAuthGen.Generate("storage-proxy", target.TeamID, target.UserID, internalauth.GenerateOptions{
-		Permissions: s.procdStoragePermissions,
-		SandboxID:   target.SandboxID,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("generate storage-proxy token for procd: %w", err)
-	}
 	headers := make(http.Header)
 	headers.Set(internalauth.DefaultTokenHeader, internalToken)
-	headers.Set(internalauth.TokenForProcdHeader, procdStorageToken)
 	return headers, nil
 }

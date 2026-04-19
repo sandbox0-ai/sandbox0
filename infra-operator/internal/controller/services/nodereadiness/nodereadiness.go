@@ -43,7 +43,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 
 	nodeSelector, _ := common.ResolveSandboxNodePlacement(infra)
 	requireNetd := compiledPlan.Components.EnableNetd
-	requireCtld := compiledPlan.Components.EnableFusePlugin
+	requireCtld := compiledPlan.Components.EnableCtld
 
 	podList := &corev1.PodList{}
 	if err := r.Resources.Client.List(ctx, podList,

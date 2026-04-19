@@ -16,10 +16,11 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 )
 
 const (
-	webhookStateMountPoint = "/var/lib/sandbox0/procd"
+	webhookStateMountPoint = volumeportal.WebhookStateMountPath
 	webhookStateVolumeKind = "webhook-state"
 )
 
@@ -29,6 +30,12 @@ type SandboxSystemVolumeClient interface {
 	MarkSandboxForCleanup(ctx context.Context, teamID, userID, sandboxID, reason string) error
 	Delete(ctx context.Context, teamID, userID, sandboxID, volumeID string) error
 	List(ctx context.Context) ([]SandboxSystemVolume, error)
+}
+
+// SandboxVolumeMetadataClient fetches user volume metadata before binding a
+// node-local portal.
+type SandboxVolumeMetadataClient interface {
+	Get(ctx context.Context, teamID, userID, volumeID string) (*SandboxVolumeInfo, error)
 }
 
 type StorageProxyVolumeClient struct {
@@ -72,6 +79,13 @@ type SandboxSystemVolume struct {
 	CleanupRequestedAt *time.Time
 }
 
+type SandboxVolumeInfo struct {
+	ID         string `json:"id"`
+	TeamID     string `json:"team_id"`
+	UserID     string `json:"user_id"`
+	AccessMode string `json:"access_mode"`
+}
+
 func (c *StorageProxyVolumeClient) Create(ctx context.Context, teamID, userID, sandboxID, purpose string) (string, error) {
 	if c == nil || c.baseURL == "" {
 		return "", fmt.Errorf("storage-proxy volume client is not configured")
@@ -88,8 +102,6 @@ func (c *StorageProxyVolumeClient) Create(ctx context.Context, teamID, userID, s
 		"cluster_id":  c.clusterID,
 		"purpose":     purpose,
 		"user_id":     userID,
-		"cache_size":  "64M",
-		"buffer_size": "8M",
 		"access_mode": "RWO",
 	}
 	payload, err := json.Marshal(body)
@@ -130,6 +142,49 @@ func (c *StorageProxyVolumeClient) Create(ctx context.Context, teamID, userID, s
 		return "", fmt.Errorf("create %s volume returned no id", purpose)
 	}
 	return owned.Volume.ID, nil
+}
+
+func (c *StorageProxyVolumeClient) Get(ctx context.Context, teamID, userID, volumeID string) (*SandboxVolumeInfo, error) {
+	if c == nil || c.baseURL == "" {
+		return nil, fmt.Errorf("storage-proxy volume client is not configured")
+	}
+	volumeID = strings.TrimSpace(volumeID)
+	if volumeID == "" {
+		return nil, fmt.Errorf("volume id is required")
+	}
+	token, err := c.generateToken(teamID, userID, "")
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/sandboxvolumes/"+url.PathEscape(volumeID), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Internal-Token", token)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("get sandbox volume: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read get volume response: %w", err)
+	}
+	volume, apiErr, err := spec.DecodeResponse[SandboxVolumeInfo](bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("decode get volume response: %w", err)
+	}
+	if apiErr != nil {
+		return nil, fmt.Errorf("get sandbox volume failed: %s", apiErr.Message)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("get sandbox volume failed with status %d", resp.StatusCode)
+	}
+	if volume == nil || strings.TrimSpace(volume.ID) == "" {
+		return nil, fmt.Errorf("get sandbox volume returned no id")
+	}
+	return volume, nil
 }
 
 func (c *StorageProxyVolumeClient) MarkSandboxForCleanup(ctx context.Context, teamID, userID, sandboxID, reason string) error {
@@ -277,7 +332,6 @@ func (c *StorageProxyVolumeClient) generateToken(teamID, userID, sandboxID strin
 
 type webhookStateVolume struct {
 	VolumeID string
-	Mount    ClaimMount
 }
 
 func (s *SandboxService) prepareWebhookStateVolume(ctx context.Context, req *ClaimRequest, sandboxID string) (*webhookStateVolume, error) {
@@ -293,10 +347,6 @@ func (s *SandboxService) prepareWebhookStateVolume(ctx context.Context, req *Cla
 	}
 	return &webhookStateVolume{
 		VolumeID: volumeID,
-		Mount: ClaimMount{
-			SandboxVolumeID: volumeID,
-			MountPoint:      webhookStateMountPoint,
-		},
 	}, nil
 }
 
@@ -308,16 +358,6 @@ func (s *SandboxService) deleteWebhookStateVolume(ctx context.Context, info Sand
 		return nil
 	}
 	return s.webhookStateVolumes.MarkSandboxForCleanup(ctx, info.TeamID, info.UserID, info.SandboxID, "sandbox_deleted")
-}
-
-func appendWebhookStateMount(mounts []ClaimMount, state *webhookStateVolume) []ClaimMount {
-	if state == nil {
-		return mounts
-	}
-	out := make([]ClaimMount, 0, len(mounts)+1)
-	out = append(out, mounts...)
-	out = append(out, state.Mount)
-	return out
 }
 
 // SandboxDeletionWebhookEmitter emits manager-owned sandbox deletion lifecycle events.

@@ -1407,7 +1407,7 @@ const (
 	ConditionTypeClusterGatewayReady  = "ClusterGatewayReady"
 	ConditionTypeManagerReady         = "ManagerReady"
 	ConditionTypeStorageProxyReady    = "StorageProxyReady"
-	ConditionTypeFusePluginReady      = "FusePluginReady"
+	ConditionTypeCtldReady            = "CtldReady"
 	ConditionTypeNetdReady            = "NetdReady"
 	ConditionTypeSchedulerReady       = "SchedulerReady"
 	ConditionTypeInternalAuthReady    = "InternalAuthReady"

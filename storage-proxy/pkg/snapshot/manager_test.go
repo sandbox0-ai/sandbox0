@@ -772,11 +772,8 @@ func TestVolumeLock(t *testing.T) {
 func TestExportSnapshotArchive(t *testing.T) {
 	repo := newFakeRepo()
 	repo.volumes["vol1"] = &db.SandboxVolume{
-		ID:         "vol1",
-		TeamID:     "team1",
-		CacheSize:  "1G",
-		Prefetch:   1,
-		BufferSize: "32M",
+		ID:     "vol1",
+		TeamID: "team1",
 	}
 	repo.snapshots["snap1"] = &db.Snapshot{
 		ID:        "snap1",

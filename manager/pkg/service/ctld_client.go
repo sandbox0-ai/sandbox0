@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 )
 
@@ -51,16 +52,37 @@ func (c *CtldClient) ProbePod(ctx context.Context, ctldAddress, namespace, podNa
 	return doCtldPathRequest[sandboxprobe.Response](ctx, c.httpClient, ctldAddress, path)
 }
 
+func (c *CtldClient) BindVolumePortal(ctx context.Context, ctldAddress string, req ctldapi.BindVolumePortalRequest) (*ctldapi.BindVolumePortalResponse, error) {
+	return doCtldJSONRequest[ctldapi.BindVolumePortalResponse](ctx, c.httpClient, ctldAddress, "/api/v1/volume-portals/bind", req)
+}
+
+func (c *CtldClient) UnbindVolumePortal(ctx context.Context, ctldAddress string, req ctldapi.UnbindVolumePortalRequest) (*ctldapi.UnbindVolumePortalResponse, error) {
+	return doCtldJSONRequest[ctldapi.UnbindVolumePortalResponse](ctx, c.httpClient, ctldAddress, "/api/v1/volume-portals/unbind", req)
+}
+
 func doCtldRequest[T any](ctx context.Context, httpClient *http.Client, ctldAddress, sandboxID, suffix string) (*T, error) {
 	path := fmt.Sprintf("/api/v1/sandboxes/%s%s", url.PathEscape(sandboxID), suffix)
 	return doCtldPathRequest[T](ctx, httpClient, ctldAddress, path)
 }
 
 func doCtldPathRequest[T any](ctx context.Context, httpClient *http.Client, ctldAddress, path string) (*T, error) {
-	base := strings.TrimRight(ctldAddress, "/")
-	url := base + path
+	return doCtldJSONRequest[T](ctx, httpClient, ctldAddress, path, nil)
+}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+func doCtldJSONRequest[T any](ctx context.Context, httpClient *http.Client, ctldAddress, path string, requestBody any) (*T, error) {
+	base := strings.TrimRight(ctldAddress, "/")
+	requestURL := base + path
+
+	var reader io.Reader
+	if requestBody != nil {
+		payload, err := json.Marshal(requestBody)
+		if err != nil {
+			return nil, fmt.Errorf("encode request: %w", err)
+		}
+		reader = strings.NewReader(string(payload))
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, reader)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -72,14 +94,14 @@ func doCtldPathRequest[T any](ctx context.Context, httpClient *http.Client, ctld
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 
 	var result T
-	if len(body) > 0 {
-		if err := json.Unmarshal(body, &result); err != nil {
+	if len(responseBody) > 0 {
+		if err := json.Unmarshal(responseBody, &result); err != nil {
 			return nil, fmt.Errorf("decode response: %w", err)
 		}
 	}

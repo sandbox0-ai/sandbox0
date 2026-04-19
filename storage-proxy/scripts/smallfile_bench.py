@@ -96,14 +96,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--file-size", type=int, default=4096, help="Bytes per file.")
     parser.add_argument("--parallelism", type=int, default=32, help="Concurrent workers for read/write phases.")
     parser.add_argument("--files-per-dir", type=int, default=128, help="Files per logical benchmark directory.")
-    parser.add_argument("--cache-size", default="1G", help="Volume cache_size for created benchmark volumes.")
-    parser.add_argument("--buffer-size", default="32M", help="Volume buffer_size for created benchmark volumes.")
-    parser.add_argument("--prefetch", type=int, default=0, help="Volume prefetch value for created benchmark volumes.")
-    parser.add_argument(
-        "--writeback",
-        action="store_true",
-        help="Enable writeback for created benchmark volumes. Disabled by default to measure request-complete latency.",
-    )
     parser.add_argument("--keep-volumes", action="store_true", help="Keep benchmark volumes instead of deleting them.")
     parser.add_argument("--json-output", default="", help="Optional file path for JSON results.")
     parser.add_argument(
@@ -232,15 +224,7 @@ def create_volume(args: argparse.Namespace, base_url: str, token: str) -> dict[s
             base_url,
             "POST",
             "/api/v1/sandboxvolumes",
-            body=json.dumps(
-                {
-                    "cache_size": args.cache_size,
-                    "prefetch": args.prefetch,
-                    "buffer_size": args.buffer_size,
-                    "writeback": args.writeback,
-                    "access_mode": "RWO",
-                }
-            ).encode("utf-8"),
+            body=json.dumps({"access_mode": "RWO"}).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {token}",
@@ -563,10 +547,6 @@ def main() -> int:
             "file_size": args.file_size,
             "parallelism": args.parallelism,
             "files_per_dir": args.files_per_dir,
-            "cache_size": args.cache_size,
-            "buffer_size": args.buffer_size,
-            "prefetch": args.prefetch,
-            "writeback": args.writeback,
         },
         "results": [result.summary() for result in results],
     }

@@ -29,7 +29,6 @@ type BackendMountRequest struct {
 	S3Prefix   string
 	VolumeID   string
 	TeamID     string
-	Config     *VolumeConfig
 	AccessMode AccessMode
 	MountedAt  time.Time
 	Metrics    *obsmetrics.StorageProxyMetrics

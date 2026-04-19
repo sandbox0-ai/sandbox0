@@ -17,6 +17,11 @@ type Controller interface {
 	ProbePod(r *http.Request, namespace, name string, kind sandboxprobe.Kind) (sandboxprobe.Response, int)
 }
 
+type VolumePortalController interface {
+	BindVolumePortal(r *http.Request, req ctldapi.BindVolumePortalRequest) (ctldapi.BindVolumePortalResponse, int)
+	UnbindVolumePortal(r *http.Request, req ctldapi.UnbindVolumePortalRequest) (ctldapi.UnbindVolumePortalResponse, int)
+}
+
 type NotImplementedController struct{}
 
 func (NotImplementedController) Pause(_ *http.Request, _ string) (ctldapi.PauseResponse, int) {
@@ -49,6 +54,50 @@ func NewMux(controller Controller) http.Handler {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.Handle("/metrics", promhttp.Handler())
+	mux.HandleFunc("/api/v1/volume-portals/bind", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		volumeController, ok := controller.(VolumePortalController)
+		if !ok {
+			w.WriteHeader(http.StatusNotImplemented)
+			_ = json.NewEncoder(w).Encode(ctldapi.BindVolumePortalResponse{})
+			return
+		}
+		var req ctldapi.BindVolumePortalRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		resp, status := volumeController.BindVolumePortal(r, req)
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+	mux.HandleFunc("/api/v1/volume-portals/unbind", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		volumeController, ok := controller.(VolumePortalController)
+		if !ok {
+			w.WriteHeader(http.StatusNotImplemented)
+			_ = json.NewEncoder(w).Encode(ctldapi.UnbindVolumePortalResponse{Error: "ctld volume portals not implemented"})
+			return
+		}
+		var req ctldapi.UnbindVolumePortalRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(ctldapi.UnbindVolumePortalResponse{Error: err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		resp, status := volumeController.UnbindVolumePortal(r, req)
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(resp)
+	})
 	mux.HandleFunc("/api/v1/sandboxes/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)

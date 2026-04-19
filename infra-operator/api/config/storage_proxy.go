@@ -10,14 +10,6 @@ import (
 
 // StorageProxyConfig holds the server configuration.
 type StorageProxyConfig struct {
-	// s0vp volume protocol server
-	// +optional
-	// +kubebuilder:default="0.0.0.0"
-	VolumeProtocolAddr string `yaml:"volume_protocol_addr" json:"volumeProtocolAddr"`
-	// +optional
-	// +kubebuilder:default=8082
-	VolumeProtocolPort int `yaml:"volume_protocol_port" json:"volumeProtocolPort"`
-
 	// HTTP Management API
 	// +optional
 	// +kubebuilder:default="0.0.0.0"
@@ -105,9 +97,6 @@ type StorageProxyConfig struct {
 	DirectVolumeFileIdleTTL string `yaml:"direct_volume_file_idle_ttl" json:"directVolumeFileIdleTTL"`
 
 	// +optional
-	// +kubebuilder:default="1G"
-	DefaultCacheSize string `yaml:"default_cache_size" json:"defaultCacheSize"`
-	// +optional
 	// +kubebuilder:default="/var/lib/storage-proxy/cache"
 	CacheDir         string `yaml:"cache_dir" json:"cacheDir"`
 	DefaultClusterId string `yaml:"default_cluster_id" json:"-"`
@@ -191,12 +180,6 @@ func LoadStorageProxyConfig() *StorageProxyConfig {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load config from %s: %v, using empty config\n", path, err)
 		cfg = &StorageProxyConfig{}
-	}
-	if cfg.VolumeProtocolPort == 0 {
-		cfg.VolumeProtocolPort = 8082
-	}
-	if cfg.VolumeProtocolAddr == "" {
-		cfg.VolumeProtocolAddr = "0.0.0.0"
 	}
 	return cfg
 }

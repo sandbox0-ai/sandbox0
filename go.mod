@@ -12,6 +12,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ecr v1.55.1
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.72.3
 	github.com/aws/aws-sdk-go-v2/service/sts v1.33.14
+	github.com/container-storage-interface/spec v1.12.0
 	github.com/coreos/go-iptables v0.8.0
 	github.com/coreos/go-oidc/v3 v3.17.0
 	github.com/creack/pty v1.1.21
@@ -58,7 +59,6 @@ require (
 	k8s.io/apimachinery v0.35.0
 	k8s.io/client-go v0.35.0
 	k8s.io/cri-api v0.33.0
-	k8s.io/kubelet v0.33.0
 	sigs.k8s.io/controller-runtime v0.23.0
 	sigs.k8s.io/yaml v1.6.0
 	src.agwa.name/tlshacks v0.0.0-20231008131857-90d701ba3225

@@ -344,28 +344,9 @@ func (s *Server) buildProcdRequestModifier(c *gin.Context) (proxy.RequestModifie
 		return nil, err
 	}
 
-	// Generate a special token for procd to communicate with storage-proxy
-	// This token allows procd to access storage-proxy on behalf of this team
-	perms := s.cfg.ProcdStoragePermissions
-	if len(perms) == 0 {
-		perms = []string{"sandboxvolume:read", "sandboxvolume:write"}
-	}
-	procdStorageToken, err := s.procdAuthGen.Generate("storage-proxy", authCtx.TeamID, authCtx.UserID, internalauth.GenerateOptions{
-		Permissions: perms,
-	})
-	if err != nil {
-		s.logger.Error("Failed to generate procd-storage token",
-			zap.String("team_id", authCtx.TeamID),
-			zap.Error(err),
-		)
-		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "internal authentication failed")
-		return nil, err
-	}
-
 	return func(req *http.Request) {
 		req.Header.Set(internalauth.TeamIDHeader, authCtx.TeamID)
 		req.Header.Set(internalauth.DefaultTokenHeader, internalToken)
-		req.Header.Set(internalauth.TokenForProcdHeader, procdStorageToken)
 	}, nil
 }
 

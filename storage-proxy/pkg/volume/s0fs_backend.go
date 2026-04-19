@@ -52,7 +52,6 @@ func (b *S0FSBackend) MountVolume(ctx context.Context, req BackendMountRequest) 
 		TeamID:    req.TeamID,
 		Backend:   BackendS0FS,
 		S0FS:      engine,
-		Config:    req.Config,
 		Access:    req.AccessMode,
 		MountedAt: req.MountedAt,
 		RootInode: 1,

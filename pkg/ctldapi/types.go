@@ -32,3 +32,39 @@ type ResumeResponse struct {
 }
 
 type ProbeResponse = sandboxprobe.Response
+
+// BindVolumePortalRequest binds one pre-published pod portal to a concrete
+// sandbox volume at claim time.
+type BindVolumePortalRequest struct {
+	Namespace       string `json:"namespace"`
+	PodName         string `json:"pod_name"`
+	PodUID          string `json:"pod_uid"`
+	PortalName      string `json:"portal_name,omitempty"`
+	MountPath       string `json:"mount_path"`
+	SandboxID       string `json:"sandbox_id"`
+	TeamID          string `json:"team_id"`
+	SandboxVolumeID string `json:"sandboxvolume_id"`
+}
+
+// BindVolumePortalResponse describes the node-local mount session created by ctld.
+type BindVolumePortalResponse struct {
+	SandboxVolumeID string `json:"sandboxvolume_id"`
+	MountPoint      string `json:"mount_point"`
+	MountedAt       string `json:"mounted_at"`
+	Error           string `json:"error,omitempty"`
+}
+
+// UnbindVolumePortalRequest releases a bound portal and flushes local state.
+type UnbindVolumePortalRequest struct {
+	Namespace       string `json:"namespace"`
+	PodName         string `json:"pod_name"`
+	PodUID          string `json:"pod_uid"`
+	PortalName      string `json:"portal_name,omitempty"`
+	MountPath       string `json:"mount_path"`
+	SandboxVolumeID string `json:"sandboxvolume_id"`
+}
+
+type UnbindVolumePortalResponse struct {
+	Unbound bool   `json:"unbound"`
+	Error   string `json:"error,omitempty"`
+}

@@ -46,11 +46,10 @@ type dirtyWriteHandle struct {
 }
 
 type volumeManager interface {
-	MountVolume(ctx context.Context, s3Prefix, volumeID, teamID string, config *volume.VolumeConfig, accessMode volume.AccessMode) (string, string, time.Time, error)
+	MountVolume(ctx context.Context, s3Prefix, volumeID, teamID string, accessMode volume.AccessMode) (string, time.Time, error)
 	UnmountVolume(ctx context.Context, volumeID, sessionID string) error
 	AckInvalidate(volumeID, sessionID, invalidateID string, success bool, errorMessage string) error
 	GetVolume(volumeID string) (*volume.VolumeContext, error)
-	TrackVolumeSession(sandboxID, volumeID, sessionID string)
 }
 
 // VolumeRepository provides volume metadata lookup for access mode enforcement.
@@ -331,10 +330,6 @@ func (s *FileSystemServer) MountVolume(ctx context.Context, req *pb.MountVolumeR
 		return nil, fserror.New(fserror.Unauthenticated, "team id not found in context")
 	}
 
-	if req.Config == nil {
-		req.Config = &pb.VolumeConfig{}
-	}
-
 	vol, err := s.authorizeVolumeMount(ctx, req.VolumeId)
 	if err != nil {
 		return nil, err
@@ -344,20 +339,13 @@ func (s *FileSystemServer) MountVolume(ctx context.Context, req *pb.MountVolumeR
 	}
 	accessMode := volume.NormalizeAccessMode(vol.AccessMode)
 
-	config := &volume.VolumeConfig{
-		CacheSize:  req.Config.CacheSize,
-		Prefetch:   int(req.Config.Prefetch),
-		BufferSize: req.Config.BufferSize,
-		Writeback:  req.Config.Writeback,
-	}
-
 	// Build S3 prefix with team ID for multi-tenant isolation (object-store namespace).
 	prefix, err := naming.S3VolumePrefix(claims.TeamID, req.VolumeId)
 	if err != nil {
 		return nil, fserror.New(fserror.InvalidArgument, err.Error())
 	}
 
-	sessionID, sessionSecret, mountedAt, err := s.volMgr.MountVolume(ctx, prefix, req.VolumeId, claims.TeamID, config, accessMode)
+	sessionID, mountedAt, err := s.volMgr.MountVolume(ctx, prefix, req.VolumeId, claims.TeamID, accessMode)
 	if err != nil {
 		s.logger.WithError(err).WithField("volume_id", req.VolumeId).Error("Failed to mount volume")
 		if strings.Contains(err.Error(), "another team") {
@@ -372,15 +360,10 @@ func (s *FileSystemServer) MountVolume(ctx context.Context, req *pb.MountVolumeR
 		"prefix":    prefix,
 	}).Info("Volume mounted with team prefix")
 
-	if claims.SandboxID != "" {
-		s.volMgr.TrackVolumeSession(claims.SandboxID, req.VolumeId, sessionID)
-	}
-
 	return &pb.MountVolumeResponse{
-		VolumeId:           req.VolumeId,
-		MountedAt:          mountedAt.Unix(),
-		MountSessionId:     sessionID,
-		MountSessionSecret: sessionSecret,
+		VolumeId:       req.VolumeId,
+		MountedAt:      mountedAt.Unix(),
+		MountSessionId: sessionID,
 	}, nil
 }
 
@@ -1086,17 +1069,20 @@ func (s *FileSystemServer) ReadDir(ctx context.Context, req *pb.ReadDirRequest) 
 		}
 		result := make([]*pb.DirEntry, 0, len(entries)-start)
 		for i, entry := range entries[start:] {
-			node, err := volCtx.S0FS.GetAttr(entry.Inode)
-			if err != nil {
-				return nil, mapS0FSError(err)
-			}
-			result = append(result, &pb.DirEntry{
+			item := &pb.DirEntry{
 				Inode:  entry.Inode,
 				Offset: uint64(start + i + 1),
 				Name:   entry.Name,
 				Type:   s0fsTypeNumber(entry.Type),
-				Attr:   s0fsAttr(node),
-			})
+			}
+			if req.Plus {
+				node, err := volCtx.S0FS.GetAttr(entry.Inode)
+				if err != nil {
+					return nil, mapS0FSError(err)
+				}
+				item.Attr = s0fsAttr(node)
+			}
+			result = append(result, item)
 		}
 		return &pb.ReadDirResponse{Entries: result, Eof: true}, nil
 	}

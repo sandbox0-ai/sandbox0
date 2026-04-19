@@ -116,7 +116,6 @@ type SandboxService struct {
 	procdClient            *ProcdClient
 	ctldClient             *CtldClient
 	internalTokenGenerator TokenGenerator
-	procdTokenGenerator    TokenGenerator
 	clock                  TimeProvider
 	config                 SandboxServiceConfig
 	logger                 *zap.Logger
@@ -125,6 +124,7 @@ type SandboxService struct {
 	credentialStore        egressauth.BindingStore
 	powerExecutor          SandboxPowerExecutor
 	webhookStateVolumes    SandboxSystemVolumeClient
+	volumeMetadata         SandboxVolumeMetadataClient
 	deletionWebhookEmitter SandboxDeletionWebhookEmitter
 	powerStateLocks        sync.Map
 	powerStateReconcilers  sync.Map
@@ -170,7 +170,6 @@ func NewSandboxService(
 	networkPolicyService *NetworkPolicyService,
 	networkProvider network.Provider,
 	internalTokenGenerator TokenGenerator,
-	procdTokenGenerator TokenGenerator,
 	clock TimeProvider,
 	config SandboxServiceConfig,
 	logger *zap.Logger,
@@ -210,7 +209,6 @@ func NewSandboxService(
 		ctldClient:             ctldClient,
 		procdClient:            procdClient,
 		internalTokenGenerator: internalTokenGenerator,
-		procdTokenGenerator:    procdTokenGenerator,
 		clock:                  clock,
 		config:                 config,
 		logger:                 logger,
@@ -262,6 +260,14 @@ func (s *SandboxService) SetPowerExecutor(executor SandboxPowerExecutor) {
 // SetWebhookStateVolumeClient injects the system volume client used for durable webhook state.
 func (s *SandboxService) SetWebhookStateVolumeClient(client SandboxSystemVolumeClient) {
 	s.webhookStateVolumes = client
+	if metadataClient, ok := client.(SandboxVolumeMetadataClient); ok {
+		s.volumeMetadata = metadataClient
+	}
+}
+
+// SetVolumeMetadataClient injects the metadata client used to validate user volume mounts.
+func (s *SandboxService) SetVolumeMetadataClient(client SandboxVolumeMetadataClient) {
+	s.volumeMetadata = client
 }
 
 // SetDeletionWebhookEmitter injects the emitter for manager-owned sandbox deletion events.

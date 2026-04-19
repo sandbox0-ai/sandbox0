@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -32,8 +31,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volsync"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volumelock"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volumeserver"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/watcher"
 	"github.com/sirupsen/logrus"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -73,7 +70,6 @@ func main() {
 	defer zapLogger.Sync()
 
 	zapLogger.Info("Starting storage-proxy",
-		zap.Int("volume_protocol_port", cfg.VolumeProtocolPort),
 		zap.Int("http_port", cfg.HTTPPort),
 		zap.String("log_level", cfg.LogLevel),
 		zap.String("cache_dir", cfg.CacheDir),
@@ -182,7 +178,7 @@ func main() {
 		eventBroadcaster = notify.NewLocalBroadcaster(eventHub)
 	}
 
-	// Create Kubernetes client (used by coordinator orphan cleanup and pod watcher)
+	// Create Kubernetes client used by coordinator orphan cleanup.
 	k8sClient, err := k8s.NewClientWithObservability(cfg.KubeconfigPath, obsProvider)
 	if err != nil {
 		zapLogger.Warn("Failed to create Kubernetes client",
@@ -239,41 +235,6 @@ func main() {
 		zap.Duration("cleanup_interval", directVolumeFileCleanupInterval),
 	)
 
-	// Create and start pod watcher
-	if k8sClient != nil {
-		// Create and start sandbox watcher
-		podWatcher := watcher.NewWatcher(
-			k8sClient,
-			"", // Watch all namespaces
-			10*time.Minute,
-			zapLogger,
-		)
-
-		// Set up delete handler to auto-unmount volumes
-		podWatcher.SetPodDeleteHandler(func(info *watcher.SandboxInfo) {
-			zapLogger.Info("Sandbox pod deleted, unmounting volumes",
-				zap.String("sandbox_id", info.SandboxID),
-			)
-			if errs := volMgr.UnmountSandboxVolumes(context.Background(), info.SandboxID); errs != nil {
-				zapLogger.Error("Errors unmounting sandbox volumes",
-					zap.String("sandbox_id", info.SandboxID),
-					zap.Int("error_count", len(errs)),
-				)
-			}
-		})
-
-		// Start watcher in background
-		go func() {
-			if err := podWatcher.Start(context.Background()); err != nil {
-				zapLogger.Error("Watcher failed", zap.Error(err))
-			}
-		}()
-
-		zapLogger.Info("Sandbox watcher started")
-	} else {
-		zapLogger.Warn("Pod watcher disabled because Kubernetes client is unavailable")
-	}
-
 	// Create authenticators based on config.
 	var httpAuthenticator *auth.HTTPAuthenticator
 	publicKey, err := internalauth.LoadEd25519PublicKeyFromFile(internalauth.DefaultInternalJWTPublicKeyPath)
@@ -287,45 +248,19 @@ func main() {
 	validator := internalauth.NewValidator(internalauth.ValidatorConfig{
 		Target:                 "storage-proxy",
 		PublicKey:              publicKey,
-		AllowedCallers:         []string{"cluster-gateway", "manager", "procd"},
+		AllowedCallers:         []string{"cluster-gateway", "manager"},
 		ClockSkewTolerance:     5 * time.Second,
 		ReplayDetectionEnabled: false, // Disable for high-throughput scenarios
 	})
 
-	sessionResolver := auth.SessionClaimsResolverFunc(func(ctx context.Context, volumeID, sessionID, sessionSecret string) (*internalauth.Claims, error) {
-		principal, err := volMgr.AuthenticateMountSession(volumeID, sessionID, sessionSecret)
-		if err != nil {
-			return nil, err
-		}
-		return &internalauth.Claims{
-			Caller:    internalauth.ServiceProcd,
-			Target:    internalauth.ServiceStorageProxy,
-			TeamID:    principal.TeamID,
-			SandboxID: principal.SandboxID,
-		}, nil
-	})
-
 	httpAuthenticator = auth.NewHTTPAuthenticator(validator, zapLogger)
 
-	zapLogger.Info("Using internalauth validator for s0vp and HTTP authentication")
+	zapLogger.Info("Using internalauth validator for HTTP authentication")
 
 	fsServer := fsserver.NewFileSystemServer(volMgr, repo, eventHub, eventBroadcaster, logrusLogger, syncSvc, volumeBarrier)
 	if sharedClock != nil {
 		fsServer.SetNowFunc(sharedClock.Now)
 	}
-
-	volumeProtocolAddr := fmt.Sprintf("%s:%d", cfg.VolumeProtocolAddr, cfg.VolumeProtocolPort)
-	volumeProtocolListener, err := net.Listen("tcp", volumeProtocolAddr)
-	if err != nil {
-		logrusLogger.WithError(err).Fatal("Failed to listen for s0vp")
-	}
-	volumeProtocolServer := volumeserver.New(volumeProtocolListener, fsServer, validator, sessionResolver, eventHub, logrusLogger)
-	go func() {
-		logrusLogger.WithField("address", volumeProtocolAddr).Info("Starting s0vp volume protocol server")
-		if err := volumeProtocolServer.Serve(); err != nil {
-			logrusLogger.WithError(err).Fatal("Failed to serve s0vp")
-		}
-	}()
 
 	// Create snapshot manager
 	snapshotMgr, err := snapshot.NewManager(repo, volMgr, cfg, logrusLogger, storageProxyMetrics)

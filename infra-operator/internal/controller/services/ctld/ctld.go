@@ -1,17 +1,24 @@
-package fuseplugin
+package ctld
 
 import (
 	"context"
 	"fmt"
 
+	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storage"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
+	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 )
 
 type Reconciler struct {
@@ -33,6 +40,21 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 
 	name := fmt.Sprintf("%s-ctld", infra.Name)
 	labels := common.GetServiceLabels(infra.Name, "ctld")
+	storageConfig, err := r.buildStorageConfig(ctx, infra)
+	if err != nil {
+		return err
+	}
+	podAnnotations, err := common.ConfigHashAnnotation(storageConfig)
+	if err != nil {
+		return err
+	}
+	if err := r.Resources.ReconcileServiceConfigMap(ctx, infra, name, labels, storageConfig); err != nil {
+		return err
+	}
+	if err := r.ensureCSIDriver(ctx, labels); err != nil {
+		return err
+	}
+
 	image := fmt.Sprintf("%s:%s", imageRepo, imageTag)
 	pullPolicy := corev1.PullIfNotPresent
 	if r.Resources.ImagePullPolicy != nil {
@@ -41,6 +63,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 
 	nodeSelector, tolerations := common.ResolveSandboxNodePlacement(infra)
 	args := ctldArgs(infra)
+	bidirectional := corev1.MountPropagationBidirectional
+	hostPathDirectoryOrCreate := corev1.HostPathDirectoryOrCreate
 
 	desired := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -54,7 +78,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels:      labels,
-					Annotations: common.EnsurePodTemplateAnnotations(nil),
+					Annotations: common.EnsurePodTemplateAnnotations(podAnnotations),
 				},
 				Spec: corev1.PodSpec{
 					HostPID:            true,
@@ -73,6 +97,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 								{
 									Name:  "SERVICE",
 									Value: "ctld",
+								},
+								{
+									Name:  "CONFIG_PATH",
+									Value: "/config/config.yaml",
 								},
 								{
 									Name: "NODE_NAME",
@@ -104,8 +132,23 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 							},
 							VolumeMounts: []corev1.VolumeMount{
 								{
-									Name:      "device-plugin",
-									MountPath: "/var/lib/kubelet/device-plugins",
+									Name:      "config",
+									MountPath: "/config/config.yaml",
+									SubPath:   "config.yaml",
+									ReadOnly:  true,
+								},
+								{
+									Name:      "csi-plugin",
+									MountPath: "/csi",
+								},
+								{
+									Name:             "kubelet",
+									MountPath:        "/var/lib/kubelet",
+									MountPropagation: &bidirectional,
+								},
+								{
+									Name:      "ctld-data",
+									MountPath: "/var/lib/sandbox0/ctld",
 								},
 								{
 									Name:      "host-cgroup",
@@ -117,13 +160,67 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 								},
 							},
 						},
+						{
+							Name:            "csi-node-driver-registrar",
+							Image:           "registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.13.0",
+							ImagePullPolicy: corev1.PullIfNotPresent,
+							Args: []string{
+								"--csi-address=/csi/csi.sock",
+								"--kubelet-registration-path=/var/lib/kubelet/plugins/volume.sandbox0.ai/csi.sock",
+							},
+							VolumeMounts: []corev1.VolumeMount{
+								{
+									Name:      "csi-plugin",
+									MountPath: "/csi",
+								},
+								{
+									Name:      "plugin-registration",
+									MountPath: "/registration",
+								},
+							},
+						},
 					},
 					Volumes: []corev1.Volume{
 						{
-							Name: "device-plugin",
+							Name: "config",
+							VolumeSource: corev1.VolumeSource{
+								ConfigMap: &corev1.ConfigMapVolumeSource{
+									LocalObjectReference: corev1.LocalObjectReference{Name: name},
+								},
+							},
+						},
+						{
+							Name: "csi-plugin",
 							VolumeSource: corev1.VolumeSource{
 								HostPath: &corev1.HostPathVolumeSource{
-									Path: "/var/lib/kubelet/device-plugins",
+									Path: "/var/lib/kubelet/plugins/volume.sandbox0.ai",
+									Type: &hostPathDirectoryOrCreate,
+								},
+							},
+						},
+						{
+							Name: "plugin-registration",
+							VolumeSource: corev1.VolumeSource{
+								HostPath: &corev1.HostPathVolumeSource{
+									Path: "/var/lib/kubelet/plugins_registry",
+									Type: &hostPathDirectoryOrCreate,
+								},
+							},
+						},
+						{
+							Name: "kubelet",
+							VolumeSource: corev1.VolumeSource{
+								HostPath: &corev1.HostPathVolumeSource{
+									Path: "/var/lib/kubelet",
+								},
+							},
+						},
+						{
+							Name: "ctld-data",
+							VolumeSource: corev1.VolumeSource{
+								HostPath: &corev1.HostPathVolumeSource{
+									Path: "/var/lib/sandbox0/ctld",
+									Type: &hostPathDirectoryOrCreate,
 								},
 							},
 						},
@@ -173,6 +270,8 @@ func ctldArgs(infra *infrav1alpha1.Sandbox0Infra) []string {
 		"-http-addr=:8095",
 		"-cgroup-root=/host-sys/fs/cgroup",
 		"-cri-endpoint=/host-run/containerd/containerd.sock",
+		"-volume-portal-root=/var/lib/sandbox0/ctld",
+		"-csi-socket=/csi/csi.sock",
 		fmt.Sprintf("-pause-min-memory-request=%s", pauseMinMemoryRequest),
 		fmt.Sprintf("-pause-min-memory-limit=%s", pauseMinMemoryLimit),
 		fmt.Sprintf("-pause-memory-buffer-ratio=%s", pauseMemoryBufferRatio),
@@ -180,6 +279,69 @@ func ctldArgs(infra *infrav1alpha1.Sandbox0Infra) []string {
 		fmt.Sprintf("-default-sandbox-ttl=%s", defaultTTL),
 	}
 	return args
+}
+
+func (r *Reconciler) ensureCSIDriver(ctx context.Context, labels map[string]string) error {
+	attachRequired := false
+	podInfoOnMount := true
+	lifecycleModes := []storagev1.VolumeLifecycleMode{storagev1.VolumeLifecycleEphemeral}
+	desired := &storagev1.CSIDriver{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   volumeportal.DriverName,
+			Labels: labels,
+		},
+		Spec: storagev1.CSIDriverSpec{
+			AttachRequired:       &attachRequired,
+			PodInfoOnMount:       &podInfoOnMount,
+			VolumeLifecycleModes: lifecycleModes,
+		},
+	}
+	current := &storagev1.CSIDriver{}
+	err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: volumeportal.DriverName}, current)
+	if apierrors.IsNotFound(err) {
+		return r.Resources.Client.Create(ctx, desired)
+	}
+	if err != nil {
+		return err
+	}
+	current.Labels = desired.Labels
+	current.Spec = desired.Spec
+	return r.Resources.Client.Update(ctx, current)
+}
+
+func (r *Reconciler) buildStorageConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (*apiconfig.StorageProxyConfig, error) {
+	cfg := &apiconfig.StorageProxyConfig{}
+	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil {
+		cfg = runtimeconfig.ToStorageProxy(infra.Spec.Services.StorageProxy.Config)
+	}
+	if infra == nil || infra.Spec.Storage == nil {
+		return cfg, nil
+	}
+	storageConfig, err := storage.GetStorageConfig(ctx, r.Resources.Client, infra)
+	if err != nil {
+		return nil, err
+	}
+	cfg.ObjectStorageType = normalizeObjectStorageType(storageConfig.Type)
+	cfg.S3Bucket = storageConfig.Bucket
+	cfg.S3Region = storageConfig.Region
+	cfg.S3Endpoint = storageConfig.Endpoint
+	cfg.S3AccessKey = storageConfig.AccessKey
+	cfg.S3SecretKey = storageConfig.SecretKey
+	cfg.S3SessionToken = storageConfig.SessionToken
+	if infra.Spec.Region != "" {
+		cfg.RegionID = infra.Spec.Region
+	}
+	if infra.Spec.Cluster != nil && infra.Spec.Cluster.ID != "" {
+		cfg.DefaultClusterId = infra.Spec.Cluster.ID
+	}
+	return cfg, nil
+}
+
+func normalizeObjectStorageType(storageType infrav1alpha1.StorageType) string {
+	if storageType == infrav1alpha1.StorageTypeBuiltin {
+		return "s3"
+	}
+	return string(storageType)
 }
 
 func ctldManagerConfig(infra *infrav1alpha1.Sandbox0Infra) *infrav1alpha1.ManagerConfig {

@@ -62,11 +62,6 @@ type SSHGatewayConfig struct {
 	// +optional
 	// +kubebuilder:default="30s"
 	ShutdownTimeout metav1.Duration `yaml:"shutdown_timeout" json:"shutdownTimeout"`
-
-	// Permissions to grant when minting the storage-proxy token forwarded to procd.
-	// +optional
-	// +kubebuilder:default={"sandboxvolume:read","sandboxvolume:write"}
-	ProcdStoragePermissions []string `yaml:"procd_storage_permissions" json:"procdStoragePermissions"`
 }
 
 // LoadSSHGatewayConfig returns the ssh-gateway configuration.

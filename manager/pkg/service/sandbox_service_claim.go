@@ -12,8 +12,10 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -25,26 +27,16 @@ import (
 
 // ClaimRequest represents a sandbox claim request
 type ClaimRequest struct {
-	TeamID             string
-	UserID             string
-	Template           string         `json:"template"`
-	Config             *SandboxConfig `json:"config,omitempty"`
-	Mounts             []ClaimMount   `json:"mounts,omitempty"`
-	WaitForMounts      bool           `json:"wait_for_mounts,omitempty"`
-	MountWaitTimeoutMs *int32         `json:"mount_wait_timeout_ms,omitempty"`
+	TeamID   string
+	UserID   string
+	Template string         `json:"template"`
+	Config   *SandboxConfig `json:"config,omitempty"`
+	Mounts   []ClaimMount   `json:"mounts,omitempty"`
 }
 
 type ClaimMount struct {
-	SandboxVolumeID string             `json:"sandboxvolume_id"`
-	MountPoint      string             `json:"mount_point"`
-	VolumeConfig    *MountVolumeConfig `json:"volume_config,omitempty"`
-}
-
-type MountVolumeConfig struct {
-	CacheSize  string `json:"cache_size,omitempty"`
-	Prefetch   *int32 `json:"prefetch,omitempty"`
-	BufferSize string `json:"buffer_size,omitempty"`
-	Writeback  *bool  `json:"writeback,omitempty"`
+	SandboxVolumeID string `json:"sandboxvolume_id"`
+	MountPoint      string `json:"mount_point"`
 }
 
 type BootstrapMountStatus struct {
@@ -53,7 +45,6 @@ type BootstrapMountStatus struct {
 	State               string `json:"state"`
 	MountedAt           string `json:"mounted_at,omitempty"`
 	MountedDurationSecs int64  `json:"mounted_duration_sec,omitempty"`
-	MountSessionID      string `json:"mount_session_id,omitempty"`
 	ErrorCode           string `json:"error_code,omitempty"`
 	ErrorMessage        string `json:"error_message,omitempty"`
 }
@@ -142,9 +133,6 @@ func validateClaimMounts(req *ClaimRequest) error {
 	if req == nil {
 		return nil
 	}
-	if req.MountWaitTimeoutMs != nil && *req.MountWaitTimeoutMs <= 0 {
-		return fmt.Errorf("%w: mount_wait_timeout_ms must be greater than zero", ErrInvalidClaimRequest)
-	}
 	normalized, err := normalizeClaimMounts(req.Mounts)
 	if err != nil {
 		return err
@@ -184,44 +172,6 @@ func normalizeClaimMounts(mounts []ClaimMount) ([]ClaimMount, error) {
 		seenMountPoints[cleanMountPoint] = mount.SandboxVolumeID
 	}
 	return normalized, nil
-}
-
-func claimMountWaitTimeout(req *ClaimRequest) time.Duration {
-	if req == nil || !req.WaitForMounts {
-		return 0
-	}
-	if req.MountWaitTimeoutMs != nil && *req.MountWaitTimeoutMs > 0 {
-		return time.Duration(*req.MountWaitTimeoutMs) * time.Millisecond
-	}
-	return 30 * time.Second
-}
-
-func toInitializeMountRequests(in []ClaimMount) []InitializeMountRequest {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]InitializeMountRequest, len(in))
-	for i := range in {
-		out[i] = InitializeMountRequest(in[i])
-	}
-	return out
-}
-
-func toBootstrapMountStatuses(in []BootstrapMountStatus) []BootstrapMountStatus {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]BootstrapMountStatus, 0, len(in))
-	for _, status := range in {
-		if filepath.Clean(status.MountPoint) == webhookStateMountPoint {
-			continue
-		}
-		out = append(out, status)
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
 }
 
 // WebhookConfig represents outbound webhook configuration.
@@ -302,6 +252,10 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		}
 	}
 
+	if err := validateClaimMountsForTemplate(req, template); err != nil {
+		return nil, err
+	}
+
 	_ = resolvedName // reserved for audit/debugging (name used is template.ObjectMeta.Name)
 
 	// Try to claim an idle pod first
@@ -368,6 +322,22 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		s.refreshSandboxProbeConditionsAsync(pod)
 	}
 
+	portalMounts, err := s.bindVolumePortals(ctx, pod, req, template)
+	if err != nil {
+		s.requestSandboxDeletionAfterClaimFailure(pod, "volume portal bind failed")
+		if metrics != nil {
+			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+		}
+		return nil, fmt.Errorf("bind volume portals: %w", err)
+	}
+	if err := s.bindWebhookStatePortal(ctx, pod, req); err != nil {
+		s.requestSandboxDeletionAfterClaimFailure(pod, "webhook state portal bind failed")
+		if metrics != nil {
+			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+		}
+		return nil, fmt.Errorf("bind webhook state portal: %w", err)
+	}
+
 	procdAddress, err := s.prodAddress(ctx, pod)
 	if err != nil {
 		s.requestSandboxDeletionAfterClaimFailure(pod, "procd address resolution failed")
@@ -376,8 +346,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		}
 		return nil, fmt.Errorf("get procd address: %w", err)
 	}
-	initResp, err := s.initializeProcd(ctx, pod, req, procdAddress)
-	if err != nil {
+	if _, err := s.initializeProcd(ctx, pod, req, procdAddress); err != nil {
 		s.requestSandboxDeletionAfterClaimFailure(pod, "procd initialization failed")
 		if metrics != nil {
 			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
@@ -397,8 +366,142 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		PodName:         pod.Name,
 		Template:        req.Template,
 		ClusterId:       template.Spec.ClusterId,
-		BootstrapMounts: toBootstrapMountStatuses(initResp.BootstrapMounts),
+		BootstrapMounts: portalMounts,
 	}, nil
+}
+
+func validateClaimMountsForTemplate(req *ClaimRequest, template *v1alpha1.SandboxTemplate) error {
+	if req == nil || len(req.Mounts) == 0 {
+		return nil
+	}
+	allowed := declaredVolumeMountsByPath(template)
+	for i := range req.Mounts {
+		mountPoint := filepath.Clean(req.Mounts[i].MountPoint)
+		if _, ok := allowed[mountPoint]; !ok {
+			return fmt.Errorf("%w: mounts[%d].mount_point %q is not declared by template", ErrInvalidClaimRequest, i, mountPoint)
+		}
+	}
+	return nil
+}
+
+func declaredVolumeMountsByPath(template *v1alpha1.SandboxTemplate) map[string]v1alpha1.VolumeMountSpec {
+	if template == nil || len(template.Spec.VolumeMounts) == 0 {
+		return nil
+	}
+	out := make(map[string]v1alpha1.VolumeMountSpec, len(template.Spec.VolumeMounts))
+	for _, item := range template.Spec.VolumeMounts {
+		mountPath := filepath.Clean(strings.TrimSpace(item.MountPath))
+		if mountPath == "." || mountPath == string(filepath.Separator) || !filepath.IsAbs(mountPath) {
+			continue
+		}
+		if mountPath == webhookStateMountPoint || strings.HasPrefix(mountPath, webhookStateMountPoint+string(filepath.Separator)) {
+			continue
+		}
+		out[mountPath] = item
+	}
+	return out
+}
+
+func (s *SandboxService) bindVolumePortals(ctx context.Context, pod *corev1.Pod, req *ClaimRequest, template *v1alpha1.SandboxTemplate) ([]BootstrapMountStatus, error) {
+	if req == nil || len(req.Mounts) == 0 {
+		return nil, nil
+	}
+	declared := declaredVolumeMountsByPath(template)
+	out := make([]BootstrapMountStatus, 0, len(req.Mounts))
+	for _, mount := range req.Mounts {
+		mountPoint := filepath.Clean(mount.MountPoint)
+		decl := declared[mountPoint]
+		if err := s.validateVolumePortalAccess(ctx, req.TeamID, req.UserID, mount.SandboxVolumeID, decl); err != nil {
+			return nil, err
+		}
+		resp, err := s.bindVolumePortal(ctx, pod, req.TeamID, req.UserID, req.TeamID, mount.SandboxVolumeID, mountPoint, decl.Name)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, BootstrapMountStatus{
+			SandboxVolumeID:     resp.SandboxVolumeID,
+			MountPoint:          resp.MountPoint,
+			State:               "mounted",
+			MountedAt:           resp.MountedAt,
+			MountedDurationSecs: 0,
+		})
+	}
+	return out, nil
+}
+
+func (s *SandboxService) validateVolumePortalAccess(ctx context.Context, teamID, userID, volumeID string, mount v1alpha1.VolumeMountSpec) error {
+	if s.volumeMetadata == nil {
+		return fmt.Errorf("volume metadata client is not configured")
+	}
+	info, err := s.volumeMetadata.Get(ctx, teamID, userID, volumeID)
+	if err != nil {
+		return fmt.Errorf("get volume metadata for %s: %w", volumeID, err)
+	}
+	accessMode := strings.ToUpper(strings.TrimSpace(info.AccessMode))
+	if accessMode == "" {
+		accessMode = "RWO"
+	}
+	switch accessMode {
+	case "RWO":
+		return nil
+	case "ROX":
+		if mount.ReadOnly {
+			return nil
+		}
+		return fmt.Errorf("%w: volume %s is ROX but template mount %s is read-write", ErrInvalidClaimRequest, volumeID, mount.MountPath)
+	case "RWX":
+		return fmt.Errorf("%w: RWX volumes require the shared correctness path and cannot use node-local volume portals yet", ErrInvalidClaimRequest)
+	default:
+		return fmt.Errorf("%w: volume %s has invalid access_mode %q", ErrInvalidClaimRequest, volumeID, info.AccessMode)
+	}
+}
+
+func (s *SandboxService) bindWebhookStatePortal(ctx context.Context, pod *corev1.Pod, req *ClaimRequest) error {
+	if req == nil || s.getWebhookInfo(req) == nil || pod == nil || pod.Annotations == nil {
+		return nil
+	}
+	volumeID := strings.TrimSpace(pod.Annotations[controller.AnnotationWebhookStateVolumeID])
+	if volumeID == "" {
+		return nil
+	}
+	_, err := s.bindVolumePortal(ctx, pod, req.TeamID, req.UserID, req.TeamID, volumeID, webhookStateMountPoint, volumeportal.WebhookStatePortalName)
+	return err
+}
+
+func (s *SandboxService) bindVolumePortal(ctx context.Context, pod *corev1.Pod, teamID, userID, ownerTeamID, volumeID, mountPoint, portalName string) (*ctldapi.BindVolumePortalResponse, error) {
+	if s == nil || s.ctldClient == nil {
+		return nil, fmt.Errorf("ctld client is not configured")
+	}
+	if pod == nil {
+		return nil, fmt.Errorf("pod is nil")
+	}
+	ctldAddress, err := s.ctldAddressForPod(ctx, pod)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := s.ctldClient.BindVolumePortal(ctx, ctldAddress, ctldapi.BindVolumePortalRequest{
+		Namespace:       pod.Namespace,
+		PodName:         pod.Name,
+		PodUID:          string(pod.UID),
+		PortalName:      volumeportal.NormalizePortalName(portalName, mountPoint),
+		MountPath:       mountPoint,
+		SandboxID:       pod.Name,
+		TeamID:          ownerTeamID,
+		SandboxVolumeID: volumeID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if s.logger != nil {
+		s.logger.Info("Bound sandbox volume portal",
+			zap.String("sandboxID", pod.Name),
+			zap.String("teamID", teamID),
+			zap.String("userID", userID),
+			zap.String("volumeID", volumeID),
+			zap.String("mountPoint", mountPoint),
+		)
+	}
+	return resp, nil
 }
 
 // claimIdlePod claims an idle pod from the pool
@@ -766,7 +869,7 @@ func (s *SandboxService) initializeProcd(
 	req *ClaimRequest,
 	procdAddress string,
 ) (*InitializeResponse, error) {
-	if s.internalTokenGenerator == nil || s.procdTokenGenerator == nil {
+	if s.internalTokenGenerator == nil {
 		return nil, fmt.Errorf("token generators not configured, cannot authenticate with procd")
 	}
 	if pod == nil || req == nil {
@@ -782,44 +885,20 @@ func (s *SandboxService) initializeProcd(
 		return nil, fmt.Errorf("generate internal token: %w", err)
 	}
 
-	procdToken, err := s.procdTokenGenerator.GenerateToken(teamID, userID, sandboxID)
-	if err != nil {
-		return nil, fmt.Errorf("generate procd token: %w", err)
-	}
-
 	webhookInfo := s.getWebhookInfo(req)
 	var webhookConfig *InitializeWebhook
-	mounts := req.Mounts
 	if webhookInfo != nil {
 		webhookConfig = &InitializeWebhook{
 			URL:      webhookInfo.URL,
 			Secret:   webhookInfo.Secret,
 			WatchDir: webhookInfo.WatchDir,
 		}
-		if pod.Annotations != nil {
-			if volumeID := strings.TrimSpace(pod.Annotations[controller.AnnotationWebhookStateVolumeID]); volumeID != "" {
-				mounts = appendWebhookStateMount(mounts, &webhookStateVolume{
-					VolumeID: volumeID,
-					Mount: ClaimMount{
-						SandboxVolumeID: volumeID,
-						MountPoint:      webhookStateMountPoint,
-					},
-				})
-			}
-		}
 	}
 
-	initWaitTimeout := claimMountWaitTimeout(req)
-	if len(mounts) > len(req.Mounts) && initWaitTimeout == 0 {
-		initWaitTimeout = 30 * time.Second
-	}
 	initReq := InitializeRequest{
-		SandboxID:          sandboxID,
-		TeamID:             teamID,
-		Webhook:            webhookConfig,
-		Mounts:             toInitializeMountRequests(mounts),
-		WaitForMounts:      req.WaitForMounts || len(mounts) > len(req.Mounts),
-		MountWaitTimeoutMs: int32(initWaitTimeout / time.Millisecond),
+		SandboxID: sandboxID,
+		TeamID:    teamID,
+		Webhook:   webhookConfig,
 	}
 
 	var initErr error
@@ -827,9 +906,6 @@ func (s *SandboxService) initializeProcd(
 	timeout := s.config.ProcdInitTimeout
 	if timeout == 0 {
 		timeout = 6 * time.Second
-	}
-	if initWaitTimeout > timeout {
-		timeout = initWaitTimeout + time.Second
 	}
 
 	initCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -839,7 +915,7 @@ func (s *SandboxService) initializeProcd(
 	defer ticker.Stop()
 
 	for {
-		initResp, initErr = s.procdClient.Initialize(initCtx, procdAddress, initReq, internalToken, procdToken)
+		initResp, initErr = s.procdClient.Initialize(initCtx, procdAddress, initReq, internalToken)
 		if initErr == nil {
 			return initResp, nil
 		}

@@ -242,7 +242,6 @@ func main() {
 
 	// Initialize internal auth generator for procd communication
 	var internalTokenGenerator service.TokenGenerator
-	var procdTokenGenerator service.TokenGenerator
 	var storageProxyAdminTokenGenerator service.TokenGenerator
 	privateKey, err := internalauth.LoadEd25519PrivateKeyFromFile(internalauth.DefaultInternalJWTPrivateKeyPath)
 	if err != nil {
@@ -257,7 +256,6 @@ func main() {
 			TTL:        30 * time.Second,
 		})
 		internalTokenGenerator = service.NewInternalTokenGenerator(internalAuthGen)
-		procdTokenGenerator = service.NewProcdTokenGenerator(internalAuthGen)
 		storageProxyAdminTokenGenerator = service.NewStorageProxyAdminTokenGenerator(internalAuthGen)
 		logger.Info("Internal auth generators initialized for procd communication")
 	}
@@ -296,7 +294,6 @@ func main() {
 		networkPolicyService,
 		networkProvider,
 		internalTokenGenerator,
-		procdTokenGenerator,
 		clk,
 		cfgForSandbox,
 		logger,

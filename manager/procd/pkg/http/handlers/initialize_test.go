@@ -8,27 +8,20 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/volume"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/webhook"
 	"go.uber.org/zap"
 )
 
-func TestInitializeReturnsBootstrapMountStatus(t *testing.T) {
+func TestInitializeConfiguresSandboxIdentity(t *testing.T) {
 	dispatcher := webhook.NewDispatcher(webhook.Options{}, zap.NewNop())
 	t.Cleanup(func() {
 		_ = dispatcher.Shutdown(context.Background())
 	})
-	volumeManager := volume.NewManager(&volume.Config{}, bootstrapTestTokenProvider("token"), zap.NewNop())
-	handler := NewInitializeHandler(dispatcher, nil, volumeManager, 8080, zap.NewNop())
+	handler := NewInitializeHandler(dispatcher, nil, 8080, zap.NewNop())
 
 	body, err := json.Marshal(InitializeRequest{
-		SandboxID:     "sandbox-1",
-		TeamID:        "team-1",
-		WaitForMounts: true,
-		Mounts: []InitializeMount{{
-			SandboxVolumeID: "vol-1",
-			MountPoint:      t.TempDir(),
-		}},
+		SandboxID: "sandbox-1",
+		TeamID:    "team-1",
 	})
 	if err != nil {
 		t.Fatalf("marshal request: %v", err)
@@ -52,19 +45,7 @@ func TestInitializeReturnsBootstrapMountStatus(t *testing.T) {
 	if !resp.Success {
 		t.Fatalf("expected success response: %s", recorder.Body.String())
 	}
-	if len(resp.Data.BootstrapMounts) != 1 {
-		t.Fatalf("bootstrap mounts = %d, want 1", len(resp.Data.BootstrapMounts))
+	if resp.Data.SandboxID != "sandbox-1" || resp.Data.TeamID != "team-1" {
+		t.Fatalf("response data = %+v", resp.Data)
 	}
-	if resp.Data.BootstrapMounts[0].State != volume.MountStateFailed {
-		t.Fatalf("bootstrap state = %q, want %q", resp.Data.BootstrapMounts[0].State, volume.MountStateFailed)
-	}
-	if resp.Data.BootstrapMounts[0].ErrorCode != "mount_failed" {
-		t.Fatalf("bootstrap error code = %q, want %q", resp.Data.BootstrapMounts[0].ErrorCode, "mount_failed")
-	}
-}
-
-type bootstrapTestTokenProvider string
-
-func (p bootstrapTestTokenProvider) GetInternalToken() string {
-	return string(p)
 }

@@ -1079,13 +1079,6 @@ spec:
                           oidcStateTtl:
                             default: 10m
                             type: string
-                          procdStoragePermissions:
-                            default:
-                            - sandboxvolume:read
-                            - sandboxvolume:write
-                            items:
-                              type: string
-                            type: array
                           proxyTimeout:
                             default: 10s
                             type: string
@@ -1598,13 +1591,6 @@ spec:
                             description: ProcdConfig defines user-facing procd settings
                               managed by manager.
                             properties:
-                              cacheMaxBytes:
-                                default: 104857600
-                                format: int64
-                                type: integer
-                              cacheTtl:
-                                default: 30s
-                                type: string
                               contextCleanupInterval:
                                 default: 30s
                                 type: string
@@ -1626,18 +1612,6 @@ spec:
                               rootPath:
                                 default: /workspace
                                 type: string
-                              volumeBufferSize:
-                                default: "300"
-                                type: string
-                              volumeCacheSize:
-                                default: "100"
-                                type: string
-                              volumePrefetch:
-                                default: 3
-                                type: integer
-                              volumeWriteback:
-                                default: true
-                                type: boolean
                               webhookBaseBackoff:
                                 default: 500ms
                                 type: string
@@ -2445,13 +2419,6 @@ spec:
                           logLevel:
                             default: info
                             type: string
-                          procdStoragePermissions:
-                            default:
-                            - sandboxvolume:read
-                            - sandboxvolume:write
-                            items:
-                              type: string
-                            type: array
                           resumePollInterval:
                             default: 500ms
                             type: string
@@ -2589,9 +2556,6 @@ spec:
                           databaseSchema:
                             default: storage_proxy
                             type: string
-                          defaultCacheSize:
-                            default: 1G
-                            type: string
                           directVolumeFileIdleTTL:
                             default: 30s
                             type: string
@@ -2685,12 +2649,6 @@ spec:
                           syncRequestRetention:
                             default: 24h
                             type: string
-                          volumeProtocolAddr:
-                            default: 0.0.0.0
-                            type: string
-                          volumeProtocolPort:
-                            default: 8082
-                            type: integer
                           watchEventQueueSize:
                             default: 256
                             type: integer

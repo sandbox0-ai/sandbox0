@@ -21,10 +21,6 @@ import (
 )
 
 type createSandboxVolumeRequest struct {
-	CacheSize       string `json:"cache_size"`
-	Prefetch        int    `json:"prefetch"`
-	BufferSize      string `json:"buffer_size"`
-	Writeback       bool   `json:"writeback"`
 	AccessMode      string `json:"access_mode"`
 	DefaultPosixUID *int64 `json:"default_posix_uid,omitempty"`
 	DefaultPosixGID *int64 `json:"default_posix_gid,omitempty"`
@@ -35,10 +31,6 @@ type createOwnedSandboxVolumeRequest struct {
 	ClusterID       string `json:"cluster_id"`
 	Purpose         string `json:"purpose"`
 	UserID          string `json:"user_id,omitempty"`
-	CacheSize       string `json:"cache_size"`
-	Prefetch        int    `json:"prefetch"`
-	BufferSize      string `json:"buffer_size"`
-	Writeback       bool   `json:"writeback"`
 	AccessMode      string `json:"access_mode"`
 	DefaultPosixUID *int64 `json:"default_posix_uid,omitempty"`
 	DefaultPosixGID *int64 `json:"default_posix_gid,omitempty"`
@@ -57,10 +49,6 @@ type markOwnedSandboxVolumeCleanupAttemptRequest struct {
 var errVolumeHasActiveMounts = errors.New("volume has active mounts")
 
 type forkSandboxVolumeRequest struct {
-	CacheSize       *string `json:"cache_size"`
-	Prefetch        *int    `json:"prefetch"`
-	BufferSize      *string `json:"buffer_size"`
-	Writeback       *bool   `json:"writeback"`
 	AccessMode      *string `json:"access_mode"`
 	DefaultPosixUID *int64  `json:"default_posix_uid,omitempty"`
 	DefaultPosixGID *int64  `json:"default_posix_gid,omitempty"`
@@ -111,13 +99,6 @@ func (s *Server) createSandboxVolume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set defaults if not provided
-	if req.CacheSize == "" {
-		req.CacheSize = "1G"
-	}
-	if req.BufferSize == "" {
-		req.BufferSize = "32M"
-	}
 	defaultZeroPosixIdentity(&req.DefaultPosixUID, &req.DefaultPosixGID)
 
 	accessMode, ok := volume.ParseAccessMode(req.AccessMode)
@@ -140,10 +121,6 @@ func (s *Server) createSandboxVolume(w http.ResponseWriter, r *http.Request) {
 		UserID:          userId,
 		DefaultPosixUID: req.DefaultPosixUID,
 		DefaultPosixGID: req.DefaultPosixGID,
-		CacheSize:       req.CacheSize,
-		Prefetch:        req.Prefetch,
-		BufferSize:      req.BufferSize,
-		Writeback:       req.Writeback,
 		AccessMode:      string(accessMode),
 		CreatedAt:       time.Now(),
 		UpdatedAt:       time.Now(),
@@ -433,12 +410,6 @@ func (s *Server) createOwnedSandboxVolume(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if req.CacheSize == "" {
-		req.CacheSize = "64M"
-	}
-	if req.BufferSize == "" {
-		req.BufferSize = "8M"
-	}
 	defaultZeroPosixIdentity(&req.DefaultPosixUID, &req.DefaultPosixGID)
 	accessMode, ok := volume.ParseAccessMode(req.AccessMode)
 	if req.AccessMode == "" {
@@ -468,10 +439,6 @@ func (s *Server) createOwnedSandboxVolume(w http.ResponseWriter, r *http.Request
 		UserID:          userID,
 		DefaultPosixUID: req.DefaultPosixUID,
 		DefaultPosixGID: req.DefaultPosixGID,
-		CacheSize:       req.CacheSize,
-		Prefetch:        req.Prefetch,
-		BufferSize:      req.BufferSize,
-		Writeback:       req.Writeback,
 		AccessMode:      string(accessMode),
 		CreatedAt:       now,
 		UpdatedAt:       now,
@@ -673,10 +640,6 @@ func (s *Server) forkVolume(w http.ResponseWriter, r *http.Request) {
 		SourceVolumeID:  id,
 		TeamID:          claims.TeamID,
 		UserID:          claims.UserID,
-		CacheSize:       req.CacheSize,
-		Prefetch:        req.Prefetch,
-		BufferSize:      req.BufferSize,
-		Writeback:       req.Writeback,
 		AccessMode:      req.AccessMode,
 		DefaultPosixUID: req.DefaultPosixUID,
 		DefaultPosixGID: req.DefaultPosixGID,

@@ -53,9 +53,6 @@ func TestServerInteractiveShellBridge(t *testing.T) {
 			if got := r.Header.Get(internalauth.DefaultTokenHeader); got == "" {
 				t.Fatalf("missing %s header on create context", internalauth.DefaultTokenHeader)
 			}
-			if got := r.Header.Get(internalauth.TokenForProcdHeader); got == "" {
-				t.Fatalf("missing %s header on create context", internalauth.TokenForProcdHeader)
-			}
 			var req createContextRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Fatalf("decode create context request: %v", err)
@@ -90,8 +87,7 @@ func TestServerInteractiveShellBridge(t *testing.T) {
 	defer procd.Close()
 
 	cfg := &config.SSHGatewayConfig{
-		SSHHostKeyPath:          hostKeyPath,
-		ProcdStoragePermissions: []string{"sandboxvolume:read", "sandboxvolume:write"},
+		SSHHostKeyPath: hostKeyPath,
 	}
 	authorizer := &staticAuthorizer{target: &SessionTarget{SandboxID: "sb_123", UserID: "user-1", TeamID: "team-1", ProcdURL: procd.URL}}
 
@@ -358,8 +354,7 @@ func TestServerSCPUpload(t *testing.T) {
 func startTestSSHGateway(t *testing.T, hostKeyPath, procdURL string, internalAuthGen *internalauth.Generator, logger *zap.Logger) (*Server, net.Listener, func()) {
 	t.Helper()
 	server, err := NewServer(&config.SSHGatewayConfig{
-		SSHHostKeyPath:          hostKeyPath,
-		ProcdStoragePermissions: []string{"sandboxvolume:read", "sandboxvolume:write"},
+		SSHHostKeyPath: hostKeyPath,
 	}, &staticAuthorizer{target: &SessionTarget{SandboxID: "sb_123", UserID: "user-1", TeamID: "team-1", ProcdURL: procdURL}}, internalAuthGen, logger)
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
@@ -412,9 +407,6 @@ func newTestProcdFileServer(t *testing.T, fileManager *procdfile.Manager) *httpt
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get(internalauth.DefaultTokenHeader); got == "" {
 			t.Fatalf("missing %s header on %s", internalauth.DefaultTokenHeader, r.URL.Path)
-		}
-		if got := r.Header.Get(internalauth.TokenForProcdHeader); got == "" {
-			t.Fatalf("missing %s header on %s", internalauth.TokenForProcdHeader, r.URL.Path)
 		}
 		filePath := translateTestProcdPath(r.URL.Query().Get("path"))
 		switch {

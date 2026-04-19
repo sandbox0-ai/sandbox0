@@ -39,7 +39,7 @@ func TestCreateSandboxVolumeStoresDefaultPosixIdentity(t *testing.T) {
 
 	uid := int64(1001)
 	gid := int64(2002)
-	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes", bytes.NewReader([]byte(`{"cache_size":"2G","default_posix_uid":1001,"default_posix_gid":2002}`)))
+	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes", bytes.NewReader([]byte(`{"default_posix_uid":1001,"default_posix_gid":2002}`)))
 	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-1", UserID: "user-1"}))
 	recorder := httptest.NewRecorder()
 
@@ -82,7 +82,7 @@ func TestCreateSandboxVolumeDefaultsPosixIdentityToRoot(t *testing.T) {
 		snapshotMgr:  &fakeHTTPSnapshotManager{},
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes", bytes.NewReader([]byte(`{"cache_size":"2G"}`)))
+	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes", bytes.NewReader([]byte(`{}`)))
 	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-1", UserID: "user-1"}))
 	recorder := httptest.NewRecorder()
 

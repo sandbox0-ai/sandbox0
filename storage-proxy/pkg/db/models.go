@@ -60,7 +60,7 @@ type Snapshot struct {
 	TeamID   string `json:"team_id"`
 	UserID   string `json:"user_id"`
 
-	// JuiceFS metadata
+	// S0FS metadata
 	RootInode   int64 `json:"root_inode"`   // Snapshot root directory inode
 	SourceInode int64 `json:"source_inode"` // Source volume root inode at snapshot time
 

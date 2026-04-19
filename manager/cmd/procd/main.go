@@ -132,15 +132,15 @@ func main() {
 	tokenProvider := procdhttp.NewTokenProvider()
 
 	volumeCfg := &volume.Config{
-		ProxyBaseURL:      cfg.StorageProxyBaseURL,
-		ProxyPort:         cfg.StorageProxyPort,
-		CacheMaxBytes:     cfg.CacheMaxBytes,
-		CacheTTL:          cfg.CacheTTL.Duration,
-		JuiceFSCacheSize:  cfg.JuiceFSCacheSize,
-		JuiceFSPrefetch:   cfg.JuiceFSPrefetch,
-		JuiceFSBufferSize: cfg.JuiceFSBufferSize,
-		JuiceFSWriteback:  cfg.JuiceFSWriteback,
-		GRPCMaxMsgSize:    100 * 1024 * 1024, // could be made configurable if added to ProcdConfig
+		ProxyBaseURL:     cfg.StorageProxyBaseURL,
+		ProxyPort:        cfg.StorageProxyPort,
+		CacheMaxBytes:    cfg.CacheMaxBytes,
+		CacheTTL:         cfg.CacheTTL.Duration,
+		VolumeCacheSize:  cfg.VolumeCacheSize,
+		VolumePrefetch:   cfg.VolumePrefetch,
+		VolumeBufferSize: cfg.VolumeBufferSize,
+		VolumeWriteback:  cfg.VolumeWriteback,
+		GRPCMaxMsgSize:   100 * 1024 * 1024, // could be made configurable if added to ProcdConfig
 	}
 	volumeManager := volume.NewManager(volumeCfg, tokenProvider, logger)
 

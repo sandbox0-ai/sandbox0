@@ -129,3 +129,46 @@ func TestUnaryInterceptorRejectsSessionAuthWithoutVolumeID(t *testing.T) {
 		t.Fatalf("status code = %v, want %v (err=%v)", status.Code(err), codes.Unauthenticated, err)
 	}
 }
+
+func TestStreamInterceptorAcceptsVolumeSessionCredential(t *testing.T) {
+	t.Parallel()
+
+	authenticator := newTestAuthenticator(t, SessionClaimsResolverFunc(func(_ context.Context, volumeID, sessionID, sessionSecret string) (*internalauth.Claims, error) {
+		if volumeID != "vol-1" || sessionID != "session-1" || sessionSecret != "secret-1" {
+			t.Fatalf("resolver input = (%q, %q, %q)", volumeID, sessionID, sessionSecret)
+		}
+		return &internalauth.Claims{TeamID: "team-1", Caller: internalauth.ServiceProcd}, nil
+	}))
+
+	md := metadata.Pairs(
+		strings.ToLower(internalauth.VolumeIDHeader), "vol-1",
+		strings.ToLower(internalauth.VolumeSessionIDHeader), "session-1",
+		strings.ToLower(internalauth.VolumeSessionSecretHeader), "secret-1",
+	)
+	ctx := metadata.NewIncomingContext(context.Background(), md)
+
+	err := authenticator.StreamInterceptor()(
+		nil,
+		&testServerStream{ctx: ctx},
+		&grpc.StreamServerInfo{FullMethod: "/sandbox0.fs.FileSystem/MountSession"},
+		func(_ any, stream grpc.ServerStream) error {
+			claims := internalauth.ClaimsFromContext(stream.Context())
+			if claims == nil || claims.TeamID != "team-1" {
+				t.Fatalf("claims = %+v, want team-1", claims)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("StreamInterceptor() error = %v", err)
+	}
+}
+
+type testServerStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (s *testServerStream) Context() context.Context {
+	return s.ctx
+}

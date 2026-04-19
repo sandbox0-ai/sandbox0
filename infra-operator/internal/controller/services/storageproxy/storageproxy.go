@@ -43,10 +43,10 @@ import (
 )
 
 const (
-	juicefsEncryptionSecretSuffix = "juicefs-encryption-key"
-	juicefsEncryptionKeyFilename  = "juicefs_rsa_private.pem"
-	juicefsEncryptionMountDir     = "/etc/storage-proxy/juicefs"
-	juicefsEncryptionKeyPath      = "/etc/storage-proxy/juicefs/juicefs_rsa_private.pem"
+	objectEncryptionSecretSuffix  = "object-encryption-key"
+	objectEncryptionKeyFilename   = "object_rsa_private.pem"
+	objectEncryptionMountDir      = "/etc/storage-proxy/objectstore"
+	objectEncryptionKeyPath       = "/etc/storage-proxy/objectstore/object_rsa_private.pem"
 	objectStorageTypeS3Compatible = "s3"
 )
 
@@ -83,12 +83,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	if err != nil {
 		return err
 	}
-	if config.JuiceFSEncryptionEnabled {
-		secretName := fmt.Sprintf("%s-%s", infra.Name, juicefsEncryptionSecretSuffix)
+	if config.ObjectEncryptionEnabled {
+		secretName := fmt.Sprintf("%s-%s", infra.Name, objectEncryptionSecretSuffix)
 		if err := r.ensureEncryptionKeySecret(ctx, infra, secretName); err != nil {
 			return err
 		}
-		config.JuiceFSEncryptionKeyPath = juicefsEncryptionKeyPath
+		config.ObjectEncryptionKeyPath = objectEncryptionKeyPath
 	}
 	podAnnotations, err := common.ConfigHashAnnotation(config)
 	if err != nil {
@@ -167,22 +167,22 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			},
 		},
 	}
-	if config.JuiceFSEncryptionEnabled {
-		secretName := fmt.Sprintf("%s-%s", infra.Name, juicefsEncryptionSecretSuffix)
+	if config.ObjectEncryptionEnabled {
+		secretName := fmt.Sprintf("%s-%s", infra.Name, objectEncryptionSecretSuffix)
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{
-			Name:      "juicefs-encryption-key",
-			MountPath: juicefsEncryptionMountDir,
+			Name:      "object-encryption-key",
+			MountPath: objectEncryptionMountDir,
 			ReadOnly:  true,
 		})
 		volumes = append(volumes, corev1.Volume{
-			Name: "juicefs-encryption-key",
+			Name: "object-encryption-key",
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
 					SecretName: secretName,
 					Items: []corev1.KeyToPath{
 						{
 							Key:  "private.key",
-							Path: juicefsEncryptionKeyFilename,
+							Path: objectEncryptionKeyFilename,
 						},
 					},
 				},
@@ -306,7 +306,7 @@ func (r *Reconciler) ensureEncryptionKeySecret(ctx context.Context, infra *infra
 	if err := ctrl.SetControllerReference(infra, secret, r.Resources.Scheme); err != nil {
 		return err
 	}
-	logger.Info("Creating JuiceFS encryption key secret", "secretName", secretName)
+	logger.Info("Creating object encryption key secret", "secretName", secretName)
 	return r.Resources.Client.Create(ctx, secret)
 }
 
@@ -320,7 +320,7 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		cfg.DatabaseURL = dsn
 	}
 
-	metaURL, err := database.GetJuicefsMetaURL(ctx, r.Resources.Client, infra)
+	metaURL, err := database.GetStorageMetadataDSN(ctx, r.Resources.Client, infra)
 	if err != nil {
 		return nil, err
 	}

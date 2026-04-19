@@ -7,26 +7,24 @@ import (
 	"io"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/juicedata/juicefs/pkg/chunk"
-	"github.com/juicedata/juicefs/pkg/meta"
-	"github.com/juicedata/juicefs/pkg/object"
-	"github.com/juicedata/juicefs/pkg/vfs"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	storagemigrations "github.com/sandbox0-ai/sandbox0/storage-proxy/migrations"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
 	storagehttp "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/http"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/pathnorm"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/snapshot"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volsync"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
@@ -66,10 +64,7 @@ func newStorageProxySyncTestEnv(t *testing.T) *storageProxySyncTestEnv {
 
 	repo := db.NewRepository(pool)
 	syncSvc := volsync.NewService(repo, logrus.New())
-	replayStore, err := object.CreateStorage("mem", "", "", "", "")
-	if err != nil {
-		t.Fatalf("create replay payload storage: %v", err)
-	}
+	replayStore := objectstore.NewMemoryStore("integration-replay")
 	syncSvc.SetReplayPayloadStore(volsync.NewObjectReplayPayloadStore(replayStore))
 	snapshotMgr := newIntegrationSnapshotManager()
 	server := storagehttp.NewServer(logrus.New(), &config.StorageProxyConfig{}, nil, repo, nil, "test-region", nil, snapshotMgr, syncSvc, nil, nil, nil, nil)
@@ -260,100 +255,49 @@ func (m *integrationMountedVolumeManager) TrackVolumeSession(_, _, _ string) {}
 
 func newMountedIntegrationVolumeContext(t *testing.T, volumeID, teamID string) *volume.VolumeContext {
 	t.Helper()
-
-	metaConf := meta.DefaultConf()
-	metaConf.MountPoint = "/test"
-
-	metaClient := meta.NewClient("memkv://"+uuid.NewString(), metaConf)
-	format := &meta.Format{
-		Name:        "test",
-		UUID:        uuid.NewString(),
-		Storage:     "mem",
-		BlockSize:   4096,
-		Compression: "none",
-		DirStats:    true,
-	}
-	if err := metaClient.Init(format, true); err != nil {
-		t.Fatalf("Init() error = %v", err)
-	}
-	if err := metaClient.NewSession(true); err != nil {
-		t.Fatalf("NewSession() error = %v", err)
-	}
-
-	chunkConf := chunk.Config{
-		BlockSize:  format.BlockSize * 1024,
-		Compress:   format.Compression,
-		MaxUpload:  2,
-		BufferSize: 8 << 20,
-		CacheSize:  8 << 20,
-		CacheDir:   "memory",
-	}
-	blob, err := object.CreateStorage("mem", "", "", "", "")
+	engine, err := s0fs.Open(context.Background(), s0fs.Config{
+		VolumeID: volumeID,
+		WALPath:  filepath.Join(t.TempDir(), "engine.wal"),
+	})
 	if err != nil {
-		t.Fatalf("CreateStorage() error = %v", err)
+		t.Fatalf("open s0fs engine: %v", err)
 	}
-	registry := prometheus.NewRegistry()
-	store := chunk.NewCachedStore(blob, chunkConf, registry)
-	vfsConf := &vfs.Config{
-		Meta:            metaConf,
-		Format:          *format,
-		Version:         "test",
-		Chunk:           &chunkConf,
-		FuseOpts:        &vfs.FuseOptions{},
-		AttrTimeout:     time.Second,
-		EntryTimeout:    time.Second,
-		DirEntryTimeout: time.Second,
-	}
-
 	t.Cleanup(func() {
-		_ = metaClient.CloseSession()
-		_ = metaClient.Shutdown()
+		_ = engine.Close()
 	})
 
 	return &volume.VolumeContext{
 		VolumeID:  volumeID,
 		TeamID:    teamID,
-		Meta:      metaClient,
-		Store:     store,
-		VFS:       vfs.NewVFS(vfsConf, metaClient, store, registry, registry),
+		Backend:   volume.BackendS0FS,
+		S0FS:      engine,
 		MountedAt: time.Now(),
-		RootInode: meta.RootInode,
+		RootInode: fsmeta.RootInode,
 		RootPath:  "/",
 	}
 }
 
 func readMountedFile(t *testing.T, volCtx *volume.VolumeContext, logicalPath string) []byte {
 	t.Helper()
-
-	parentIno := meta.RootInode
 	parts := strings.Split(strings.Trim(strings.TrimSpace(logicalPath), "/"), "/")
 	if len(parts) == 0 || parts[0] == "" {
 		t.Fatalf("invalid logical path %q", logicalPath)
 	}
-
-	var inode meta.Ino
-	attr := &meta.Attr{}
+	inode := uint64(fsmeta.RootInode)
 	for _, part := range parts {
-		if errno := volCtx.Meta.Lookup(meta.Background(), parentIno, part, &inode, attr, false); errno != 0 {
-			t.Fatalf("Lookup(%q) error = %v", logicalPath, syscall.Errno(errno))
+		node, err := volCtx.S0FS.Lookup(inode, part)
+		if err != nil {
+			t.Fatalf("Lookup(%q) error = %v", logicalPath, err)
 		}
-		parentIno = inode
+		inode = node.Inode
 	}
-
-	vfsCtx := vfs.NewLogContext(meta.Background())
-	_, handleID, errno := volCtx.VFS.Open(vfsCtx, inode, 0)
-	if errno != 0 {
-		t.Fatalf("Open(%q) error = %v", logicalPath, syscall.Errno(errno))
+	attr, err := volCtx.S0FS.GetAttr(inode)
+	if err != nil {
+		t.Fatalf("GetAttr(%q) error = %v", logicalPath, err)
 	}
-	defer volCtx.VFS.Release(vfsCtx, inode, handleID)
-
-	data := make([]byte, attr.Length)
-	if attr.Length == 0 {
-		return data
+	data, err := volCtx.S0FS.Read(inode, 0, attr.Size)
+	if err != nil {
+		t.Fatalf("Read(%q) error = %v", logicalPath, err)
 	}
-	n, errno := volCtx.VFS.Read(vfsCtx, inode, data, 0, handleID)
-	if errno != 0 {
-		t.Fatalf("Read(%q) error = %v", logicalPath, syscall.Errno(errno))
-	}
-	return data[:n]
+	return data
 }

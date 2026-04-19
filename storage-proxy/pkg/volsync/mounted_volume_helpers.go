@@ -9,9 +9,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"github.com/sirupsen/logrus"
 )
@@ -67,9 +68,9 @@ func cleanupMountedVolume(volMgr mountedVolumeManager, logger *logrus.Logger, vo
 	}
 }
 
-func logicalRootInode(volCtx *volume.VolumeContext) meta.Ino {
+func logicalRootInode(volCtx *volume.VolumeContext) fsmeta.Ino {
 	if volCtx == nil || volCtx.RootInode == 0 {
-		return meta.RootInode
+		return fsmeta.RootInode
 	}
 	return volCtx.RootInode
 }
@@ -94,12 +95,15 @@ func splitLogicalPath(raw string) ([]string, error) {
 	return parts, nil
 }
 
-func lookupLogicalPath(volCtx *volume.VolumeContext, metaCtx meta.Context, raw string) (meta.Ino, meta.Ino, string, *meta.Attr, error) {
+func lookupLogicalPath(volCtx *volume.VolumeContext, metaCtx fsmeta.Context, raw string) (fsmeta.Ino, fsmeta.Ino, string, *fsmeta.Attr, error) {
 	if volCtx == nil {
 		return 0, 0, "", nil, fmt.Errorf("volume context is nil")
 	}
+	if volCtx.S0FS != nil {
+		return lookupLogicalPathS0FS(volCtx, raw)
+	}
 	if metaCtx == nil {
-		metaCtx = meta.Background()
+		metaCtx = fsmeta.Background()
 	}
 	parts, err := splitLogicalPath(raw)
 	if err != nil {
@@ -107,9 +111,9 @@ func lookupLogicalPath(volCtx *volume.VolumeContext, metaCtx meta.Context, raw s
 	}
 
 	current := logicalRootInode(volCtx)
-	var attr meta.Attr
+	var attr fsmeta.Attr
 	for i, part := range parts {
-		var next meta.Ino
+		var next fsmeta.Ino
 		errno := volCtx.Meta.Lookup(metaCtx, current, part, &next, &attr, false)
 		if errno == syscall.ENOENT {
 			return current, 0, part, nil, errLogicalPathNotFound
@@ -127,12 +131,15 @@ func lookupLogicalPath(volCtx *volume.VolumeContext, metaCtx meta.Context, raw s
 	return 0, 0, "", nil, fmt.Errorf("logical path %q resolution failed", raw)
 }
 
-func ensureLogicalParent(volCtx *volume.VolumeContext, metaCtx meta.Context, raw string) (meta.Ino, string, error) {
+func ensureLogicalParent(volCtx *volume.VolumeContext, metaCtx fsmeta.Context, raw string) (fsmeta.Ino, string, error) {
 	if volCtx == nil {
 		return 0, "", fmt.Errorf("volume context is nil")
 	}
+	if volCtx.S0FS != nil {
+		return ensureLogicalParentS0FS(volCtx, raw)
+	}
 	if metaCtx == nil {
-		metaCtx = meta.Background()
+		metaCtx = fsmeta.Background()
 	}
 	parts, err := splitLogicalPath(raw)
 	if err != nil {
@@ -140,9 +147,9 @@ func ensureLogicalParent(volCtx *volume.VolumeContext, metaCtx meta.Context, raw
 	}
 	baseName := parts[len(parts)-1]
 	current := logicalRootInode(volCtx)
-	var attr meta.Attr
+	var attr fsmeta.Attr
 	for _, part := range parts[:len(parts)-1] {
-		var next meta.Ino
+		var next fsmeta.Ino
 		errno := volCtx.Meta.Lookup(metaCtx, current, part, &next, &attr, false)
 		if errno == syscall.ENOENT {
 			errno = volCtx.Meta.Mkdir(metaCtx, current, part, 0o755, 0, 0, &next, &attr)
@@ -153,4 +160,84 @@ func ensureLogicalParent(volCtx *volume.VolumeContext, metaCtx meta.Context, raw
 		current = next
 	}
 	return current, baseName, nil
+}
+
+func lookupLogicalPathS0FS(volCtx *volume.VolumeContext, raw string) (fsmeta.Ino, fsmeta.Ino, string, *fsmeta.Attr, error) {
+	parts, err := splitLogicalPath(raw)
+	if err != nil {
+		return 0, 0, "", nil, err
+	}
+	current := uint64(logicalRootInode(volCtx))
+	for i, part := range parts {
+		node, err := volCtx.S0FS.Lookup(current, part)
+		if err != nil {
+			if err == s0fs.ErrNotFound {
+				return fsmeta.Ino(current), 0, part, nil, errLogicalPathNotFound
+			}
+			return 0, 0, "", nil, fmt.Errorf("lookup %q: %w", part, err)
+		}
+		if i == len(parts)-1 {
+			attr := s0fsNodeToAttr(node)
+			return fsmeta.Ino(current), fsmeta.Ino(node.Inode), part, attr, nil
+		}
+		current = node.Inode
+	}
+	return 0, 0, "", nil, fmt.Errorf("logical path %q resolution failed", raw)
+}
+
+func ensureLogicalParentS0FS(volCtx *volume.VolumeContext, raw string) (fsmeta.Ino, string, error) {
+	parts, err := splitLogicalPath(raw)
+	if err != nil {
+		return 0, "", err
+	}
+	baseName := parts[len(parts)-1]
+	current := uint64(logicalRootInode(volCtx))
+	for _, part := range parts[:len(parts)-1] {
+		node, err := volCtx.S0FS.Lookup(current, part)
+		if err != nil {
+			if err != s0fs.ErrNotFound {
+				return 0, "", fmt.Errorf("lookup %q: %w", part, err)
+			}
+			node, err = volCtx.S0FS.Mkdir(current, part, 0o755)
+			if err != nil && err != s0fs.ErrExists {
+				return 0, "", fmt.Errorf("mkdir %q: %w", part, err)
+			}
+			if err == s0fs.ErrExists {
+				node, err = volCtx.S0FS.Lookup(current, part)
+				if err != nil {
+					return 0, "", fmt.Errorf("lookup after mkdir %q: %w", part, err)
+				}
+			}
+		}
+		current = node.Inode
+	}
+	return fsmeta.Ino(current), baseName, nil
+}
+
+func s0fsNodeToAttr(node *s0fs.Node) *fsmeta.Attr {
+	if node == nil {
+		return nil
+	}
+	attr := &fsmeta.Attr{
+		Mode:      uint16(node.Mode),
+		Uid:       node.UID,
+		Gid:       node.GID,
+		Nlink:     node.Nlink,
+		Length:    node.Size,
+		Atime:     node.Atime.Unix(),
+		Atimensec: uint32(node.Atime.Nanosecond()),
+		Mtime:     node.Mtime.Unix(),
+		Mtimensec: uint32(node.Mtime.Nanosecond()),
+		Ctime:     node.Ctime.Unix(),
+		Ctimensec: uint32(node.Ctime.Nanosecond()),
+	}
+	switch node.Type {
+	case s0fs.TypeDirectory:
+		attr.Typ = fsmeta.TypeDirectory
+	case s0fs.TypeSymlink:
+		attr.Typ = fsmeta.TypeSymlink
+	default:
+		attr.Typ = fsmeta.TypeFile
+	}
+	return attr
 }

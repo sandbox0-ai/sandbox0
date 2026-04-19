@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
 	storagegrpc "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/grpc"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/pathnorm"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volsync"
@@ -320,7 +320,7 @@ func TestSyncAPISandboxOriginatedReplayableWritesExposeReplayMetadataAndPayload(
 
 	createResp, err := fsServer.Create(ctx, &pb.CreateRequest{
 		VolumeId: "vol-1",
-		Parent:   uint64(meta.RootInode),
+		Parent:   uint64(fsmeta.RootInode),
 		Name:     "hello.txt",
 		Mode:     0o644,
 	})
@@ -361,7 +361,7 @@ func TestSyncAPISandboxOriginatedReplayableWritesExposeReplayMetadataAndPayload(
 	if _, err := fsServer.SetAttr(ctx, &pb.SetAttrRequest{
 		VolumeId: "vol-1",
 		Inode:    createResp.Inode,
-		Valid:    uint32(meta.SetAttrMode),
+		Valid:    uint32(fsmeta.SetAttrMode),
 		Attr: &pb.GetAttrResponse{
 			Mode: 0o600,
 		},

@@ -6,8 +6,8 @@ import (
 )
 
 // This file centralizes naming conventions for:
-// - S3/object-store key prefixes (used by JuiceFS chunk/object storage)
-// - JuiceFS internal filesystem paths (used by JuiceFS meta operations)
+// - S3/object-store key prefixes (used by S0FS chunk/object storage)
+// - S0FS internal filesystem paths (used by S0FS meta operations)
 //
 // These are different namespaces and do not need to be identical, but they must
 // be consistent within their own layers to avoid data loss or cross-tenant leaks.
@@ -47,27 +47,27 @@ func S3VolumeSyncReplayPrefix(teamID, volumeID string) (string, error) {
 	return fmt.Sprintf("sandboxvolumes-sync/%s/%s/replay", teamID, volumeID), nil
 }
 
-// JuiceFSVolumePath returns the internal JuiceFS directory where a volume lives.
+// FilesystemVolumePath returns the internal S0FS directory where a volume lives.
 // Example: /volumes/<volumeID>
-func JuiceFSVolumePath(volumeID string) (string, error) {
+func FilesystemVolumePath(volumeID string) (string, error) {
 	if err := validatePathID("volumeID", volumeID); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("/volumes/%s", volumeID), nil
 }
 
-// JuiceFSSnapshotParentPath returns the parent directory for snapshots of a volume.
+// FilesystemSnapshotParentPath returns the parent directory for snapshots of a volume.
 // Example: /snapshots/<volumeID>
-func JuiceFSSnapshotParentPath(volumeID string) (string, error) {
+func FilesystemSnapshotParentPath(volumeID string) (string, error) {
 	if err := validatePathID("volumeID", volumeID); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("/snapshots/%s", volumeID), nil
 }
 
-// JuiceFSSnapshotPath returns the internal JuiceFS path for a specific snapshot.
+// FilesystemSnapshotPath returns the internal S0FS path for a specific snapshot.
 // Example: /snapshots/<volumeID>/<snapshotID>
-func JuiceFSSnapshotPath(volumeID, snapshotID string) (string, error) {
+func FilesystemSnapshotPath(volumeID, snapshotID string) (string, error) {
 	if err := validatePathID("volumeID", volumeID); err != nil {
 		return "", err
 	}

@@ -58,7 +58,6 @@ func TestCreateSandboxVolumeStoresDefaultPosixIdentity(t *testing.T) {
 	if created.DefaultPosixGID == nil || *created.DefaultPosixGID != gid {
 		t.Fatalf("DefaultPosixGID = %v, want %d", created.DefaultPosixGID, gid)
 	}
-
 	resp, apiErr, err := spec.DecodeResponse[db.SandboxVolume](recorder.Body)
 	if err != nil {
 		t.Fatalf("decode response: %v", err)

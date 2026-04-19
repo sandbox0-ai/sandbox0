@@ -1,7 +1,6 @@
-package juicefs
+package objectstore
 
 import (
-	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -15,7 +14,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/juicedata/juicefs/pkg/object"
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
@@ -24,7 +22,6 @@ const (
 	EncryptionAlgoCHACHA20RSA  = "chacha20-rsa"
 )
 
-// LoadEncryptionKey reads the RSA private key used for JuiceFS object encryption.
 func LoadEncryptionKey(path string) (string, error) {
 	if strings.TrimSpace(path) == "" {
 		return "", fmt.Errorf("encryption key path is empty")
@@ -39,12 +36,6 @@ func LoadEncryptionKey(path string) (string, error) {
 	return string(pemBytes), nil
 }
 
-type Encryptor interface {
-	Encrypt(plaintext []byte) ([]byte, error)
-	Decrypt(ciphertext []byte) ([]byte, error)
-}
-
-// NewEncryptor builds a data encryptor using the provided RSA private key.
 func NewEncryptor(keyPEM, passphrase, algo string) (Encryptor, error) {
 	if strings.TrimSpace(keyPEM) == "" {
 		return nil, fmt.Errorf("encryption key is empty")
@@ -178,55 +169,4 @@ func (e *dataEncryptor) Decrypt(ciphertext []byte) ([]byte, error) {
 		return nil, err
 	}
 	return aead.Open(ciphertext[:0], nonce, ciphertext, nil)
-}
-
-type encryptedStorage struct {
-	object.ObjectStorage
-	enc Encryptor
-}
-
-// WrapEncryptedStorage returns an encrypted object storage wrapper.
-func WrapEncryptedStorage(store object.ObjectStorage, enc Encryptor) object.ObjectStorage {
-	return &encryptedStorage{ObjectStorage: store, enc: enc}
-}
-
-func (e *encryptedStorage) String() string {
-	return fmt.Sprintf("%s(encrypted)", e.ObjectStorage)
-}
-
-func (e *encryptedStorage) Get(key string, off, limit int64, getters ...object.AttrGetter) (io.ReadCloser, error) {
-	r, err := e.ObjectStorage.Get(key, 0, -1, getters...)
-	if err != nil {
-		return nil, err
-	}
-	defer r.Close()
-	ciphertext, err := io.ReadAll(r)
-	if err != nil {
-		return nil, err
-	}
-	plain, err := e.enc.Decrypt(ciphertext)
-	if err != nil {
-		return nil, fmt.Errorf("decrypt: %w", err)
-	}
-	l := int64(len(plain))
-	if off > l {
-		off = l
-	}
-	if limit == -1 || off+limit > l {
-		limit = l - off
-	}
-	data := plain[off : off+limit]
-	return io.NopCloser(bytes.NewBuffer(data)), nil
-}
-
-func (e *encryptedStorage) Put(key string, in io.Reader, getters ...object.AttrGetter) error {
-	plain, err := io.ReadAll(in)
-	if err != nil {
-		return err
-	}
-	ciphertext, err := e.enc.Encrypt(plain)
-	if err != nil {
-		return err
-	}
-	return e.ObjectStorage.Put(key, bytes.NewReader(ciphertext), getters...)
 }

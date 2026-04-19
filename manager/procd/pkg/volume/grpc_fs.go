@@ -21,6 +21,7 @@ type grpcFS struct {
 	sessionID     string
 	sessionSecret string
 	client        pb.FileSystemClient
+	session       *sessionFS
 	tokenProvider TokenProvider
 	cacheTTL      time.Duration
 	logger        *zap.Logger
@@ -46,13 +47,23 @@ func (fs *grpcFS) String() string {
 	return "sandbox0-volume"
 }
 
+func (fs *grpcFS) setSession(session *sessionFS) {
+	if fs == nil {
+		return
+	}
+	fs.session = session
+}
+
 func (fs *grpcFS) withToken(ctx context.Context) (context.Context, error) {
 	if fs.sessionID != "" && fs.sessionSecret != "" {
-		return metadata.AppendToOutgoingContext(
-			ctx,
+		pairs := []string{
 			strings.ToLower(internalauth.VolumeSessionIDHeader), fs.sessionID,
 			strings.ToLower(internalauth.VolumeSessionSecretHeader), fs.sessionSecret,
-		), nil
+		}
+		if fs.volumeID != "" {
+			pairs = append(pairs, strings.ToLower(internalauth.VolumeIDHeader), fs.volumeID)
+		}
+		return metadata.AppendToOutgoingContext(ctx, pairs...), nil
 	}
 	if fs.tokenProvider == nil {
 		return nil, ErrMissingInternalToken
@@ -83,16 +94,25 @@ func (fs *grpcFS) Lookup(cancel <-chan struct{}, header *fuse.InHeader, name str
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
-	ctx, err := fs.withToken(context.Background())
-	if err != nil {
-		return fuse.EPERM
-	}
-	resp, err := fs.client.Lookup(ctx, &pb.LookupRequest{
+	req := &pb.LookupRequest{
 		VolumeId: fs.volumeID,
 		Parent:   header.NodeId,
 		Name:     name,
 		Actor:    actorFromHeader(header),
-	})
+	}
+	var (
+		resp *pb.NodeResponse
+		err  error
+	)
+	if fs.session != nil {
+		resp, err = fs.session.Lookup(context.Background(), req)
+	} else {
+		ctx, tokenErr := fs.withToken(context.Background())
+		if tokenErr != nil {
+			return fuse.EPERM
+		}
+		resp, err = fs.client.Lookup(ctx, req)
+	}
 	if err != nil {
 		return grpcToFuse(err)
 	}
@@ -105,15 +125,24 @@ func (fs *grpcFS) GetAttr(cancel <-chan struct{}, input *fuse.GetAttrIn, out *fu
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
-	ctx, err := fs.withToken(context.Background())
-	if err != nil {
-		return fuse.EPERM
-	}
-	resp, err := fs.client.GetAttr(ctx, &pb.GetAttrRequest{
+	req := &pb.GetAttrRequest{
 		VolumeId: fs.volumeID,
 		Inode:    input.NodeId,
 		Actor:    actorFromCaller(input.Caller),
-	})
+	}
+	var (
+		resp *pb.GetAttrResponse
+		err  error
+	)
+	if fs.session != nil {
+		resp, err = fs.session.GetAttr(context.Background(), req)
+	} else {
+		ctx, tokenErr := fs.withToken(context.Background())
+		if tokenErr != nil {
+			return fuse.EPERM
+		}
+		resp, err = fs.client.GetAttr(ctx, req)
+	}
 	if err != nil {
 		return grpcToFuse(err)
 	}
@@ -125,11 +154,6 @@ func (fs *grpcFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fu
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
-	ctx, err := fs.withToken(context.Background())
-	if err != nil {
-		return fuse.EPERM
-	}
-
 	attr := &pb.GetAttrResponse{
 		Ino:       input.NodeId,
 		Mode:      input.Mode,
@@ -148,14 +172,27 @@ func (fs *grpcFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fu
 	if fh, ok := input.GetFh(); ok {
 		handleID = fh
 	}
-	resp, err := fs.client.SetAttr(ctx, &pb.SetAttrRequest{
+	req := &pb.SetAttrRequest{
 		VolumeId: fs.volumeID,
 		Inode:    input.NodeId,
 		Valid:    input.Valid,
 		Attr:     attr,
 		HandleId: handleID,
 		Actor:    actorFromCaller(input.Caller),
-	})
+	}
+	var (
+		resp *pb.SetAttrResponse
+		err  error
+	)
+	if fs.session != nil {
+		resp, err = fs.session.SetAttr(context.Background(), req)
+	} else {
+		ctx, tokenErr := fs.withToken(context.Background())
+		if tokenErr != nil {
+			return fuse.EPERM
+		}
+		resp, err = fs.client.SetAttr(ctx, req)
+	}
 	if err != nil {
 		return grpcToFuse(err)
 	}
@@ -167,18 +204,27 @@ func (fs *grpcFS) Mkdir(cancel <-chan struct{}, input *fuse.MkdirIn, name string
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
-	ctx, err := fs.withToken(context.Background())
-	if err != nil {
-		return fuse.EPERM
-	}
-	resp, err := fs.client.Mkdir(ctx, &pb.MkdirRequest{
+	req := &pb.MkdirRequest{
 		VolumeId: fs.volumeID,
 		Parent:   input.NodeId,
 		Name:     name,
 		Mode:     input.Mode,
 		Umask:    input.Umask,
 		Actor:    actorFromCaller(input.Caller),
-	})
+	}
+	var (
+		resp *pb.NodeResponse
+		err  error
+	)
+	if fs.session != nil {
+		resp, err = fs.session.Mkdir(context.Background(), req)
+	} else {
+		ctx, tokenErr := fs.withToken(context.Background())
+		if tokenErr != nil {
+			return fuse.EPERM
+		}
+		resp, err = fs.client.Mkdir(ctx, req)
+	}
 	if err != nil {
 		return grpcToFuse(err)
 	}
@@ -190,16 +236,22 @@ func (fs *grpcFS) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name str
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
-	ctx, err := fs.withToken(context.Background())
-	if err != nil {
-		return fuse.EPERM
-	}
-	_, err = fs.client.Unlink(ctx, &pb.UnlinkRequest{
+	req := &pb.UnlinkRequest{
 		VolumeId: fs.volumeID,
 		Parent:   header.NodeId,
 		Name:     name,
 		Actor:    actorFromHeader(header),
-	})
+	}
+	var err error
+	if fs.session != nil {
+		_, err = fs.session.Unlink(context.Background(), req)
+	} else {
+		ctx, tokenErr := fs.withToken(context.Background())
+		if tokenErr != nil {
+			return fuse.EPERM
+		}
+		_, err = fs.client.Unlink(ctx, req)
+	}
 	if err != nil {
 		return grpcToFuse(err)
 	}
@@ -210,16 +262,22 @@ func (fs *grpcFS) Rmdir(cancel <-chan struct{}, header *fuse.InHeader, name stri
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
-	ctx, err := fs.withToken(context.Background())
-	if err != nil {
-		return fuse.EPERM
-	}
-	_, err = fs.client.Rmdir(ctx, &pb.RmdirRequest{
+	req := &pb.RmdirRequest{
 		VolumeId: fs.volumeID,
 		Parent:   header.NodeId,
 		Name:     name,
 		Actor:    actorFromHeader(header),
-	})
+	}
+	var err error
+	if fs.session != nil {
+		_, err = fs.session.Rmdir(context.Background(), req)
+	} else {
+		ctx, tokenErr := fs.withToken(context.Background())
+		if tokenErr != nil {
+			return fuse.EPERM
+		}
+		_, err = fs.client.Rmdir(ctx, req)
+	}
 	if err != nil {
 		return grpcToFuse(err)
 	}
@@ -230,11 +288,7 @@ func (fs *grpcFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, 
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
-	ctx, err := fs.withToken(context.Background())
-	if err != nil {
-		return fuse.EPERM
-	}
-	_, err = fs.client.Rename(ctx, &pb.RenameRequest{
+	req := &pb.RenameRequest{
 		VolumeId:  fs.volumeID,
 		OldParent: input.NodeId,
 		OldName:   oldName,
@@ -242,7 +296,17 @@ func (fs *grpcFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, 
 		NewName:   newName,
 		Flags:     input.Flags,
 		Actor:     actorFromCaller(input.Caller),
-	})
+	}
+	var err error
+	if fs.session != nil {
+		_, err = fs.session.Rename(context.Background(), req)
+	} else {
+		ctx, tokenErr := fs.withToken(context.Background())
+		if tokenErr != nil {
+			return fuse.EPERM
+		}
+		_, err = fs.client.Rename(ctx, req)
+	}
 	if err != nil {
 		return grpcToFuse(err)
 	}
@@ -275,17 +339,26 @@ func (fs *grpcFS) Symlink(cancel <-chan struct{}, header *fuse.InHeader, pointed
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
-	ctx, err := fs.withToken(context.Background())
-	if err != nil {
-		return fuse.EPERM
-	}
-	resp, err := fs.client.Symlink(ctx, &pb.SymlinkRequest{
+	req := &pb.SymlinkRequest{
 		VolumeId: fs.volumeID,
 		Parent:   header.NodeId,
 		Name:     linkName,
 		Target:   pointedTo,
 		Actor:    actorFromHeader(header),
-	})
+	}
+	var (
+		resp *pb.NodeResponse
+		err  error
+	)
+	if fs.session != nil {
+		resp, err = fs.session.Symlink(context.Background(), req)
+	} else {
+		ctx, tokenErr := fs.withToken(context.Background())
+		if tokenErr != nil {
+			return fuse.EPERM
+		}
+		resp, err = fs.client.Symlink(ctx, req)
+	}
 	if err != nil {
 		return grpcToFuse(err)
 	}
@@ -297,15 +370,24 @@ func (fs *grpcFS) Readlink(cancel <-chan struct{}, header *fuse.InHeader) ([]byt
 	if isCanceled(cancel) {
 		return nil, fuse.EINTR
 	}
-	ctx, err := fs.withToken(context.Background())
-	if err != nil {
-		return nil, fuse.EPERM
-	}
-	resp, err := fs.client.Readlink(ctx, &pb.ReadlinkRequest{
+	req := &pb.ReadlinkRequest{
 		VolumeId: fs.volumeID,
 		Inode:    header.NodeId,
 		Actor:    actorFromHeader(header),
-	})
+	}
+	var (
+		resp *pb.ReadlinkResponse
+		err  error
+	)
+	if fs.session != nil {
+		resp, err = fs.session.Readlink(context.Background(), req)
+	} else {
+		ctx, tokenErr := fs.withToken(context.Background())
+		if tokenErr != nil {
+			return nil, fuse.EPERM
+		}
+		resp, err = fs.client.Readlink(ctx, req)
+	}
 	if err != nil {
 		return nil, grpcToFuse(err)
 	}
@@ -316,18 +398,24 @@ func (fs *grpcFS) Access(cancel <-chan struct{}, input *fuse.AccessIn) fuse.Stat
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
-	ctx, err := fs.withToken(context.Background())
-	if err != nil {
-		return fuse.EPERM
-	}
-	_, err = fs.client.Access(ctx, &pb.AccessRequest{
+	req := &pb.AccessRequest{
 		VolumeId: fs.volumeID,
 		Inode:    input.NodeId,
 		Mask:     input.Mask,
 		Uid:      input.Uid,
 		Gids:     []uint32{input.Gid},
 		Actor:    actorFromCaller(input.Caller),
-	})
+	}
+	var err error
+	if fs.session != nil {
+		_, err = fs.session.Access(context.Background(), req)
+	} else {
+		ctx, tokenErr := fs.withToken(context.Background())
+		if tokenErr != nil {
+			return fuse.EPERM
+		}
+		_, err = fs.client.Access(ctx, req)
+	}
 	if err != nil {
 		return grpcToFuse(err)
 	}
@@ -338,11 +426,7 @@ func (fs *grpcFS) Create(cancel <-chan struct{}, input *fuse.CreateIn, name stri
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
-	ctx, err := fs.withToken(context.Background())
-	if err != nil {
-		return fuse.EPERM
-	}
-	resp, err := fs.client.Create(ctx, &pb.CreateRequest{
+	req := &pb.CreateRequest{
 		VolumeId: fs.volumeID,
 		Parent:   input.NodeId,
 		Name:     name,
@@ -350,7 +434,20 @@ func (fs *grpcFS) Create(cancel <-chan struct{}, input *fuse.CreateIn, name stri
 		Flags:    input.Flags,
 		Umask:    input.Umask,
 		Actor:    actorFromCaller(input.Caller),
-	})
+	}
+	var (
+		resp *pb.NodeResponse
+		err  error
+	)
+	if fs.session != nil {
+		resp, err = fs.session.Create(context.Background(), req)
+	} else {
+		ctx, tokenErr := fs.withToken(context.Background())
+		if tokenErr != nil {
+			return fuse.EPERM
+		}
+		resp, err = fs.client.Create(ctx, req)
+	}
 	if err != nil {
 		return grpcToFuse(err)
 	}
@@ -363,16 +460,25 @@ func (fs *grpcFS) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.Ope
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
-	ctx, err := fs.withToken(context.Background())
-	if err != nil {
-		return fuse.EPERM
-	}
-	resp, err := fs.client.Open(ctx, &pb.OpenRequest{
+	req := &pb.OpenRequest{
 		VolumeId: fs.volumeID,
 		Inode:    input.NodeId,
 		Flags:    input.Flags,
 		Actor:    actorFromCaller(input.Caller),
-	})
+	}
+	var (
+		resp *pb.OpenResponse
+		err  error
+	)
+	if fs.session != nil {
+		resp, err = fs.session.Open(context.Background(), req)
+	} else {
+		ctx, tokenErr := fs.withToken(context.Background())
+		if tokenErr != nil {
+			return fuse.EPERM
+		}
+		resp, err = fs.client.Open(ctx, req)
+	}
 	if err != nil {
 		return grpcToFuse(err)
 	}
@@ -384,18 +490,27 @@ func (fs *grpcFS) Read(cancel <-chan struct{}, input *fuse.ReadIn, buf []byte) (
 	if isCanceled(cancel) {
 		return nil, fuse.EINTR
 	}
-	ctx, err := fs.withToken(context.Background())
-	if err != nil {
-		return nil, fuse.EPERM
-	}
-	resp, err := fs.client.Read(ctx, &pb.ReadRequest{
+	req := &pb.ReadRequest{
 		VolumeId: fs.volumeID,
 		Inode:    input.NodeId,
 		Offset:   int64(input.Offset),
 		Size:     int64(input.Size),
 		HandleId: input.Fh,
 		Actor:    actorFromCaller(input.Caller),
-	})
+	}
+	var (
+		resp *pb.ReadResponse
+		err  error
+	)
+	if fs.session != nil {
+		resp, err = fs.session.Read(context.Background(), req)
+	} else {
+		ctx, tokenErr := fs.withToken(context.Background())
+		if tokenErr != nil {
+			return nil, fuse.EPERM
+		}
+		resp, err = fs.client.Read(ctx, req)
+	}
 	if err != nil {
 		return nil, grpcToFuse(err)
 	}
@@ -406,18 +521,27 @@ func (fs *grpcFS) Write(cancel <-chan struct{}, input *fuse.WriteIn, data []byte
 	if isCanceled(cancel) {
 		return 0, fuse.EINTR
 	}
-	ctx, err := fs.withToken(context.Background())
-	if err != nil {
-		return 0, fuse.EPERM
-	}
-	resp, err := fs.client.Write(ctx, &pb.WriteRequest{
+	req := &pb.WriteRequest{
 		VolumeId: fs.volumeID,
 		Inode:    input.NodeId,
 		Offset:   int64(input.Offset),
 		Data:     data,
 		HandleId: input.Fh,
 		Actor:    actorFromCaller(input.Caller),
-	})
+	}
+	var (
+		resp *pb.WriteResponse
+		err  error
+	)
+	if fs.session != nil {
+		resp, err = fs.session.Write(context.Background(), req)
+	} else {
+		ctx, tokenErr := fs.withToken(context.Background())
+		if tokenErr != nil {
+			return 0, fuse.EPERM
+		}
+		resp, err = fs.client.Write(ctx, req)
+	}
 	if err != nil {
 		return 0, grpcToFuse(err)
 	}
@@ -425,31 +549,42 @@ func (fs *grpcFS) Write(cancel <-chan struct{}, input *fuse.WriteIn, data []byte
 }
 
 func (fs *grpcFS) Release(cancel <-chan struct{}, input *fuse.ReleaseIn) {
-	ctx, err := fs.withToken(context.Background())
-	if err != nil {
-		return
-	}
-	_, _ = fs.client.Release(ctx, &pb.ReleaseRequest{
+	req := &pb.ReleaseRequest{
 		VolumeId: fs.volumeID,
 		Inode:    input.NodeId,
 		HandleId: input.Fh,
 		Actor:    actorFromCaller(input.Caller),
-	})
+	}
+	if fs.session != nil {
+		_, _ = fs.session.Release(context.Background(), req)
+		return
+	}
+	ctx, err := fs.withToken(context.Background())
+	if err != nil {
+		return
+	}
+	_, _ = fs.client.Release(ctx, req)
 }
 
 func (fs *grpcFS) Flush(cancel <-chan struct{}, input *fuse.FlushIn) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
-	ctx, err := fs.withToken(context.Background())
-	if err != nil {
-		return fuse.EPERM
-	}
-	_, err = fs.client.Flush(ctx, &pb.FlushRequest{
+	req := &pb.FlushRequest{
 		VolumeId: fs.volumeID,
 		HandleId: input.Fh,
 		Actor:    actorFromCaller(input.Caller),
-	})
+	}
+	var err error
+	if fs.session != nil {
+		_, err = fs.session.Flush(context.Background(), req)
+	} else {
+		ctx, tokenErr := fs.withToken(context.Background())
+		if tokenErr != nil {
+			return fuse.EPERM
+		}
+		_, err = fs.client.Flush(ctx, req)
+	}
 	if err != nil {
 		return grpcToFuse(err)
 	}
@@ -460,16 +595,22 @@ func (fs *grpcFS) Fsync(cancel <-chan struct{}, input *fuse.FsyncIn) fuse.Status
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
-	ctx, err := fs.withToken(context.Background())
-	if err != nil {
-		return fuse.EPERM
-	}
-	_, err = fs.client.Fsync(ctx, &pb.FsyncRequest{
+	req := &pb.FsyncRequest{
 		VolumeId: fs.volumeID,
 		HandleId: input.Fh,
 		Datasync: input.FsyncFlags != 0,
 		Actor:    actorFromCaller(input.Caller),
-	})
+	}
+	var err error
+	if fs.session != nil {
+		_, err = fs.session.Fsync(context.Background(), req)
+	} else {
+		ctx, tokenErr := fs.withToken(context.Background())
+		if tokenErr != nil {
+			return fuse.EPERM
+		}
+		_, err = fs.client.Fsync(ctx, req)
+	}
 	if err != nil {
 		return grpcToFuse(err)
 	}
@@ -503,16 +644,25 @@ func (fs *grpcFS) OpenDir(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
-	ctx, err := fs.withToken(context.Background())
-	if err != nil {
-		return fuse.EPERM
-	}
-	resp, err := fs.client.OpenDir(ctx, &pb.OpenDirRequest{
+	req := &pb.OpenDirRequest{
 		VolumeId: fs.volumeID,
 		Inode:    input.NodeId,
 		Flags:    input.Flags,
 		Actor:    actorFromCaller(input.Caller),
-	})
+	}
+	var (
+		resp *pb.OpenDirResponse
+		err  error
+	)
+	if fs.session != nil {
+		resp, err = fs.session.OpenDir(context.Background(), req)
+	} else {
+		ctx, tokenErr := fs.withToken(context.Background())
+		if tokenErr != nil {
+			return fuse.EPERM
+		}
+		resp, err = fs.client.OpenDir(ctx, req)
+	}
 	if err != nil {
 		return grpcToFuse(err)
 	}
@@ -524,11 +674,7 @@ func (fs *grpcFS) ReadDir(cancel <-chan struct{}, input *fuse.ReadIn, out *fuse.
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
-	ctx, err := fs.withToken(context.Background())
-	if err != nil {
-		return fuse.EPERM
-	}
-	resp, err := fs.client.ReadDir(ctx, &pb.ReadDirRequest{
+	req := &pb.ReadDirRequest{
 		VolumeId: fs.volumeID,
 		Inode:    input.NodeId,
 		HandleId: input.Fh,
@@ -536,7 +682,20 @@ func (fs *grpcFS) ReadDir(cancel <-chan struct{}, input *fuse.ReadIn, out *fuse.
 		Size:     input.Size,
 		Plus:     false,
 		Actor:    actorFromCaller(input.Caller),
-	})
+	}
+	var (
+		resp *pb.ReadDirResponse
+		err  error
+	)
+	if fs.session != nil {
+		resp, err = fs.session.ReadDir(context.Background(), req)
+	} else {
+		ctx, tokenErr := fs.withToken(context.Background())
+		if tokenErr != nil {
+			return fuse.EPERM
+		}
+		resp, err = fs.client.ReadDir(ctx, req)
+	}
 	if err != nil {
 		return grpcToFuse(err)
 	}
@@ -549,6 +708,7 @@ func (fs *grpcFS) ReadDir(cancel <-chan struct{}, input *fuse.ReadIn, out *fuse.
 			Ino:  entry.Inode,
 			Name: entry.Name,
 			Mode: mode,
+			Off:  entry.Offset,
 		}) {
 			break
 		}
@@ -560,11 +720,7 @@ func (fs *grpcFS) ReadDirPlus(cancel <-chan struct{}, input *fuse.ReadIn, out *f
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
-	ctx, err := fs.withToken(context.Background())
-	if err != nil {
-		return fuse.EPERM
-	}
-	resp, err := fs.client.ReadDir(ctx, &pb.ReadDirRequest{
+	req := &pb.ReadDirRequest{
 		VolumeId: fs.volumeID,
 		Inode:    input.NodeId,
 		HandleId: input.Fh,
@@ -572,7 +728,20 @@ func (fs *grpcFS) ReadDirPlus(cancel <-chan struct{}, input *fuse.ReadIn, out *f
 		Size:     input.Size,
 		Plus:     true,
 		Actor:    actorFromCaller(input.Caller),
-	})
+	}
+	var (
+		resp *pb.ReadDirResponse
+		err  error
+	)
+	if fs.session != nil {
+		resp, err = fs.session.ReadDir(context.Background(), req)
+	} else {
+		ctx, tokenErr := fs.withToken(context.Background())
+		if tokenErr != nil {
+			return fuse.EPERM
+		}
+		resp, err = fs.client.ReadDir(ctx, req)
+	}
 	if err != nil {
 		return grpcToFuse(err)
 	}
@@ -585,6 +754,7 @@ func (fs *grpcFS) ReadDirPlus(cancel <-chan struct{}, input *fuse.ReadIn, out *f
 			Ino:  entry.Inode,
 			Name: entry.Name,
 			Mode: mode,
+			Off:  entry.Offset,
 		})
 		if entryOut == nil {
 			break
@@ -595,30 +765,44 @@ func (fs *grpcFS) ReadDirPlus(cancel <-chan struct{}, input *fuse.ReadIn, out *f
 }
 
 func (fs *grpcFS) ReleaseDir(input *fuse.ReleaseIn) {
-	ctx, err := fs.withToken(context.Background())
-	if err != nil {
-		return
-	}
-	_, _ = fs.client.ReleaseDir(ctx, &pb.ReleaseDirRequest{
+	req := &pb.ReleaseDirRequest{
 		VolumeId: fs.volumeID,
 		Inode:    input.NodeId,
 		HandleId: input.Fh,
 		Actor:    actorFromCaller(input.Caller),
-	})
+	}
+	if fs.session != nil {
+		_, _ = fs.session.ReleaseDir(context.Background(), req)
+		return
+	}
+	ctx, err := fs.withToken(context.Background())
+	if err != nil {
+		return
+	}
+	_, _ = fs.client.ReleaseDir(ctx, req)
 }
 
 func (fs *grpcFS) StatFs(cancel <-chan struct{}, input *fuse.InHeader, out *fuse.StatfsOut) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
-	ctx, err := fs.withToken(context.Background())
-	if err != nil {
-		return fuse.EPERM
-	}
-	resp, err := fs.client.StatFs(ctx, &pb.StatFsRequest{
+	req := &pb.StatFsRequest{
 		VolumeId: fs.volumeID,
 		Actor:    actorFromHeader(input),
-	})
+	}
+	var (
+		resp *pb.StatFsResponse
+		err  error
+	)
+	if fs.session != nil {
+		resp, err = fs.session.StatFs(context.Background(), req)
+	} else {
+		ctx, tokenErr := fs.withToken(context.Background())
+		if tokenErr != nil {
+			return fuse.EPERM
+		}
+		resp, err = fs.client.StatFs(ctx, req)
+	}
 	if err != nil {
 		return grpcToFuse(err)
 	}
@@ -825,35 +1009,11 @@ func (fs *grpcFS) FsyncDir(cancel <-chan struct{}, input *fuse.FsyncIn) fuse.Sta
 	return fuse.ENOSYS
 }
 
-func (fs *grpcFS) Ioctl(cancel <-chan struct{}, in *fuse.IoctlIn, out *fuse.IoctlOut, bufIn, bufOut []byte) fuse.Status {
+func (fs *grpcFS) Ioctl(cancel <-chan struct{}, in *fuse.IoctlIn, bufIn []byte, out *fuse.IoctlOut, bufOut []byte) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
-	ctx, err := fs.withToken(context.Background())
-	if err != nil {
-		return fuse.EPERM
-	}
-	resp, err := fs.client.Ioctl(ctx, &pb.IoctlRequest{
-		VolumeId:    fs.volumeID,
-		Inode:       in.NodeId,
-		Cmd:         in.Cmd,
-		Arg:         in.Arg,
-		DataIn:      bufIn,
-		DataOutSize: uint32(len(bufOut)),
-		Actor:       actorFromCaller(in.Caller),
-	})
-	if err != nil {
-		return grpcToFuse(err)
-	}
-	if resp == nil {
-		return fuse.EIO
-	}
-	if len(resp.DataOut) > len(bufOut) {
-		copy(bufOut, resp.DataOut[:len(bufOut)])
-		return fuse.ERANGE
-	}
-	copy(bufOut, resp.DataOut)
-	return fuse.OK
+	return fuse.ENOSYS
 }
 
 func (fs *grpcFS) setLk(cancel <-chan struct{}, input *fuse.LkIn, block bool) fuse.Status {

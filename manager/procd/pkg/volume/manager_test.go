@@ -36,10 +36,10 @@ func TestValidateMountPoint(t *testing.T) {
 
 func TestMergeVolumeConfig(t *testing.T) {
 	manager := NewManager(&Config{
-		JuiceFSCacheSize:  "200",
-		JuiceFSPrefetch:   3,
-		JuiceFSBufferSize: "300",
-		JuiceFSWriteback:  true,
+		VolumeCacheSize:  "200",
+		VolumePrefetch:   3,
+		VolumeBufferSize: "300",
+		VolumeWriteback:  true,
 	}, nil, nil)
 
 	overridePrefetch := int32(10)

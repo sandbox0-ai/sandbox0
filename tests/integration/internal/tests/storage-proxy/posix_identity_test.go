@@ -3,12 +3,11 @@ package storageproxy
 import (
 	"context"
 	"encoding/base64"
-	"syscall"
 	"testing"
 
-	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
 	storagegrpc "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/grpc"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volsync"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
@@ -42,32 +41,30 @@ func TestVolumeSyncApplyUsesDefaultPosixIdentity(t *testing.T) {
 		t.Fatalf("ApplyChange() error = %v", err)
 	}
 
-	var dirIno meta.Ino
-	var dirAttr meta.Attr
-	if errno := volCtx.Meta.Lookup(meta.Background(), meta.RootInode, "sync", &dirIno, &dirAttr, false); errno != 0 {
-		t.Fatalf("Lookup(sync) errno = %v, want 0", syscall.Errno(errno))
+	dirNode, err := volCtx.S0FS.Lookup(uint64(fsmeta.RootInode), "sync")
+	if err != nil {
+		t.Fatalf("Lookup(sync) error = %v", err)
 	}
-	var inode meta.Ino
-	var attr meta.Attr
-	if errno := volCtx.Meta.Lookup(meta.Background(), dirIno, "main.go", &inode, &attr, false); errno != 0 {
-		t.Fatalf("Lookup(main.go) errno = %v, want 0", syscall.Errno(errno))
+	attr, err := volCtx.S0FS.Lookup(dirNode.Inode, "main.go")
+	if err != nil {
+		t.Fatalf("Lookup(main.go) error = %v", err)
 	}
-	if attr.Uid != uint32(uid) {
-		t.Fatalf("attr.Uid = %d, want %d", attr.Uid, uid)
+	if attr.UID != uint32(uid) {
+		t.Fatalf("attr.Uid = %d, want %d", attr.UID, uid)
 	}
-	if attr.Gid != uint32(gid) {
-		t.Fatalf("attr.Gid = %d, want %d", attr.Gid, gid)
+	if attr.GID != uint32(gid) {
+		t.Fatalf("attr.Gid = %d, want %d", attr.GID, gid)
 	}
 	if got := string(readMountedFile(t, volCtx, "/sync/main.go")); got != "package main\n" {
 		t.Fatalf("file content = %q, want %q", got, "package main\n")
 	}
 
-	rootAttr := &meta.Attr{}
-	if errno := volCtx.Meta.GetAttr(meta.Background(), meta.RootInode, rootAttr); errno != 0 {
-		t.Fatalf("GetAttr(root) errno = %v, want 0", syscall.Errno(errno))
+	rootAttr, err := volCtx.S0FS.GetAttr(uint64(fsmeta.RootInode))
+	if err != nil {
+		t.Fatalf("GetAttr(root) error = %v", err)
 	}
-	if rootAttr.Uid != uint32(uid) || rootAttr.Gid != uint32(gid) {
-		t.Fatalf("root owner = %d:%d, want %d:%d", rootAttr.Uid, rootAttr.Gid, uid, gid)
+	if rootAttr.UID != uint32(uid) || rootAttr.GID != uint32(gid) {
+		t.Fatalf("root owner = %d:%d, want %d:%d", rootAttr.UID, rootAttr.GID, uid, gid)
 	}
 }
 
@@ -104,7 +101,7 @@ func TestFileSystemCreateUsesActorToLazilyInitializeRoot(t *testing.T) {
 
 	if _, err := fsServer.Create(ctx, &pb.CreateRequest{
 		VolumeId: "vol-1",
-		Parent:   uint64(meta.RootInode),
+		Parent:   uint64(fsmeta.RootInode),
 		Name:     "hello.txt",
 		Mode:     0o644,
 		Actor:    actor,
@@ -112,20 +109,18 @@ func TestFileSystemCreateUsesActorToLazilyInitializeRoot(t *testing.T) {
 		t.Fatalf("Create() error = %v", err)
 	}
 
-	rootAttr := &meta.Attr{}
-	if errno := volCtx.Meta.GetAttr(meta.Background(), meta.RootInode, rootAttr); errno != 0 {
-		t.Fatalf("GetAttr(root) errno = %v, want 0", syscall.Errno(errno))
+	rootAttr, err := volCtx.S0FS.GetAttr(uint64(fsmeta.RootInode))
+	if err != nil {
+		t.Fatalf("GetAttr(root) error = %v", err)
 	}
-	if rootAttr.Uid != actor.Uid || rootAttr.Gid != actor.Gids[0] {
-		t.Fatalf("root owner = %d:%d, want %d:%d", rootAttr.Uid, rootAttr.Gid, actor.Uid, actor.Gids[0])
+	if rootAttr.UID != actor.Uid || rootAttr.GID != actor.Gids[0] {
+		t.Fatalf("root owner = %d:%d, want %d:%d", rootAttr.UID, rootAttr.GID, actor.Uid, actor.Gids[0])
 	}
-
-	var inode meta.Ino
-	var attr meta.Attr
-	if errno := volCtx.Meta.Lookup(meta.Background(), meta.RootInode, "hello.txt", &inode, &attr, false); errno != 0 {
-		t.Fatalf("Lookup(hello.txt) errno = %v, want 0", syscall.Errno(errno))
+	attr, err := volCtx.S0FS.Lookup(uint64(fsmeta.RootInode), "hello.txt")
+	if err != nil {
+		t.Fatalf("Lookup(hello.txt) error = %v", err)
 	}
-	if attr.Uid != actor.Uid || attr.Gid != actor.Gids[0] {
-		t.Fatalf("file owner = %d:%d, want %d:%d", attr.Uid, attr.Gid, actor.Uid, actor.Gids[0])
+	if attr.UID != actor.Uid || attr.GID != actor.Gids[0] {
+		t.Fatalf("file owner = %d:%d, want %d:%d", attr.UID, attr.GID, actor.Uid, actor.Gids[0])
 	}
 }

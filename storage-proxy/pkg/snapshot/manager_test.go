@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -15,27 +16,44 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/pathnorm"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"github.com/sirupsen/logrus"
 )
 
 func newTestManager(repo *fakeRepo, volMgr volumeProvider) *Manager {
+	cacheDir, err := os.MkdirTemp("", "storage-proxy-snapshot-test-*")
+	if err != nil {
+		panic(err)
+	}
 	metaClient := newFakeMeta()
 	return &Manager{
 		repo:       repo,
 		volMgr:     volMgr,
-		config:     &config.StorageProxyConfig{DefaultClusterId: "test-cluster"},
+		config:     &config.StorageProxyConfig{DefaultClusterId: "test-cluster", CacheDir: cacheDir},
 		logger:     logrus.New(),
 		clusterID:  "test-cluster",
 		podID:      "test-pod",
 		locks:      make(map[string]time.Time),
 		metaClient: metaClient, // Independent meta client for testing
+	}
+}
+
+func seedS0FSSnapshot(t *testing.T, mgr *Manager, teamID, volumeID, snapshotID string) {
+	t.Helper()
+	engine, closeFn, err := mgr.openS0FSEngine(context.Background(), teamID, volumeID)
+	if err != nil {
+		t.Fatalf("open s0fs engine: %v", err)
+	}
+	defer closeFn()
+	if _, err := engine.CreateSnapshot(snapshotID); err != nil {
+		t.Fatalf("create snapshot state: %v", err)
 	}
 }
 
@@ -154,10 +172,13 @@ func (f *fakeVolumeProvider) GetVolume(volumeID string) (*volume.VolumeContext, 
 	if f.err != nil {
 		return nil, f.err
 	}
+	if f.ctx != nil && f.ctx.VolumeID != "" && f.ctx.VolumeID != volumeID {
+		return nil, errors.New("not mounted")
+	}
 	return f.ctx, nil
 }
 
-func (f *fakeVolumeProvider) UpdateVolumeRoot(volumeID string, rootInode meta.Ino) error {
+func (f *fakeVolumeProvider) UpdateVolumeRoot(volumeID string, rootInode fsmeta.Ino) error {
 	f.lastVolumeID = volumeID
 	if f.err != nil {
 		return f.err
@@ -187,22 +208,22 @@ func (f *fakeVolumeProvider) WaitForInvalidate(ctx context.Context, volumeID, in
 
 type fakeMeta struct {
 	mu           sync.Mutex
-	pathToIno    map[string]meta.Ino
-	inoToPath    map[meta.Ino]string
-	nextIno      meta.Ino
+	pathToIno    map[string]fsmeta.Ino
+	inoToPath    map[fsmeta.Ino]string
+	nextIno      fsmeta.Ino
 	removedPaths []string
 }
 
 type fakeArchiveMeta struct {
-	attrs   map[meta.Ino]*meta.Attr
-	entries map[meta.Ino][]*meta.Entry
-	links   map[meta.Ino]string
+	attrs   map[fsmeta.Ino]*fsmeta.Attr
+	entries map[fsmeta.Ino][]*fsmeta.Entry
+	links   map[fsmeta.Ino]string
 	getErr  syscall.Errno
 	readErr syscall.Errno
 	linkErr syscall.Errno
 }
 
-func (f *fakeArchiveMeta) GetAttr(ctx meta.Context, inode meta.Ino, attr *meta.Attr) syscall.Errno {
+func (f *fakeArchiveMeta) GetAttr(ctx fsmeta.Context, inode fsmeta.Ino, attr *fsmeta.Attr) syscall.Errno {
 	if f.getErr != 0 {
 		return f.getErr
 	}
@@ -216,7 +237,7 @@ func (f *fakeArchiveMeta) GetAttr(ctx meta.Context, inode meta.Ino, attr *meta.A
 	return 0
 }
 
-func (f *fakeArchiveMeta) Readdir(ctx meta.Context, inode meta.Ino, wantattr uint8, entries *[]*meta.Entry) syscall.Errno {
+func (f *fakeArchiveMeta) Readdir(ctx fsmeta.Context, inode fsmeta.Ino, wantattr uint8, entries *[]*fsmeta.Entry) syscall.Errno {
 	if f.readErr != 0 {
 		return f.readErr
 	}
@@ -224,7 +245,7 @@ func (f *fakeArchiveMeta) Readdir(ctx meta.Context, inode meta.Ino, wantattr uin
 	if !ok {
 		return syscall.ENOENT
 	}
-	cloned := make([]*meta.Entry, 0, len(list))
+	cloned := make([]*fsmeta.Entry, 0, len(list))
 	for _, entry := range list {
 		copyEntry := *entry
 		if entry.Attr != nil {
@@ -237,7 +258,7 @@ func (f *fakeArchiveMeta) Readdir(ctx meta.Context, inode meta.Ino, wantattr uin
 	return 0
 }
 
-func (f *fakeArchiveMeta) ReadLink(ctx meta.Context, inode meta.Ino, path *[]byte) syscall.Errno {
+func (f *fakeArchiveMeta) ReadLink(ctx fsmeta.Context, inode fsmeta.Ino, path *[]byte) syscall.Errno {
 	if f.linkErr != 0 {
 		return f.linkErr
 	}
@@ -250,10 +271,10 @@ func (f *fakeArchiveMeta) ReadLink(ctx meta.Context, inode meta.Ino, path *[]byt
 }
 
 type fakeArchiveReader struct {
-	contents map[meta.Ino][]byte
+	contents map[fsmeta.Ino][]byte
 }
 
-func (f *fakeArchiveReader) ReadFile(ctx context.Context, inode meta.Ino, size uint64, w io.Writer) error {
+func (f *fakeArchiveReader) ReadFile(ctx context.Context, inode fsmeta.Ino, size uint64, w io.Writer) error {
 	data := f.contents[inode]
 	if len(data) != int(size) {
 		return errors.New("unexpected file size")
@@ -264,16 +285,16 @@ func (f *fakeArchiveReader) ReadFile(ctx context.Context, inode meta.Ino, size u
 
 func newFakeMeta() *fakeMeta {
 	f := &fakeMeta{
-		pathToIno: make(map[string]meta.Ino),
-		inoToPath: make(map[meta.Ino]string),
-		nextIno:   meta.RootInode + 1,
+		pathToIno: make(map[string]fsmeta.Ino),
+		inoToPath: make(map[fsmeta.Ino]string),
+		nextIno:   fsmeta.RootInode + 1,
 	}
-	f.pathToIno["/"] = meta.RootInode
-	f.inoToPath[meta.RootInode] = "/"
+	f.pathToIno["/"] = fsmeta.RootInode
+	f.inoToPath[fsmeta.RootInode] = "/"
 	return f
 }
 
-func (f *fakeMeta) Lookup(ctx meta.Context, parent meta.Ino, name string, inode *meta.Ino, attr *meta.Attr, check bool) syscall.Errno {
+func (f *fakeMeta) Lookup(ctx fsmeta.Context, parent fsmeta.Ino, name string, inode *fsmeta.Ino, attr *fsmeta.Attr, check bool) syscall.Errno {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	parentPath, ok := f.inoToPath[parent]
@@ -296,7 +317,7 @@ func (f *fakeMeta) Lookup(ctx meta.Context, parent meta.Ino, name string, inode 
 	return 0
 }
 
-func (f *fakeMeta) Mkdir(ctx meta.Context, parent meta.Ino, name string, mode uint16, cumask uint16, copysgid uint8, inode *meta.Ino, attr *meta.Attr) syscall.Errno {
+func (f *fakeMeta) Mkdir(ctx fsmeta.Context, parent fsmeta.Ino, name string, mode uint16, cumask uint16, copysgid uint8, inode *fsmeta.Ino, attr *fsmeta.Attr) syscall.Errno {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	parentPath, ok := f.inoToPath[parent]
@@ -321,7 +342,7 @@ func (f *fakeMeta) Mkdir(ctx meta.Context, parent meta.Ino, name string, mode ui
 	return 0
 }
 
-func (f *fakeMeta) Clone(ctx meta.Context, srcParentIno, srcIno, parentIno meta.Ino, name string, cmode uint8, cumask uint16, count *uint64, total *uint64) syscall.Errno {
+func (f *fakeMeta) Clone(ctx fsmeta.Context, srcParentIno, srcIno, parentIno fsmeta.Ino, name string, cmode uint8, cumask uint16, count *uint64, total *uint64) syscall.Errno {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -356,11 +377,11 @@ func (f *fakeMeta) Clone(ctx meta.Context, srcParentIno, srcIno, parentIno meta.
 	return 0
 }
 
-func (f *fakeMeta) Rename(ctx meta.Context, parentSrc meta.Ino, nameSrc string, parentDst meta.Ino, nameDst string, flags uint32, inode *meta.Ino, attr *meta.Attr) syscall.Errno {
+func (f *fakeMeta) Rename(ctx fsmeta.Context, parentSrc fsmeta.Ino, nameSrc string, parentDst fsmeta.Ino, nameDst string, flags uint32, inode *fsmeta.Ino, attr *fsmeta.Attr) syscall.Errno {
 	return 0
 }
 
-func (f *fakeMeta) Remove(ctx meta.Context, parent meta.Ino, name string, skipTrash bool, numThreads int, count *uint64) syscall.Errno {
+func (f *fakeMeta) Remove(ctx fsmeta.Context, parent fsmeta.Ino, name string, skipTrash bool, numThreads int, count *uint64) syscall.Errno {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	parentPath, ok := f.inoToPath[parent]
@@ -381,12 +402,12 @@ func (f *fakeMeta) Remove(ctx meta.Context, parent meta.Ino, name string, skipTr
 	return 0
 }
 
-func (f *fakeMeta) ensurePath(path string) meta.Ino {
+func (f *fakeMeta) ensurePath(path string) fsmeta.Ino {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	clean := "/" + strings.Trim(path, "/")
 	if clean == "/" {
-		return meta.RootInode
+		return fsmeta.RootInode
 	}
 	parts := strings.Split(strings.Trim(clean, "/"), "/")
 	current := "/"
@@ -511,7 +532,7 @@ func TestDeleteSnapshotDir_RemovesDir(t *testing.T) {
 	mgr := newTestManager(repo, nil)
 	// Use the mgr's metaClient (which is created in newTestManager)
 	metaClient := mgr.metaClient.(*fakeMeta)
-	p, err := naming.JuiceFSSnapshotPath("vol1", "snap1")
+	p, err := naming.FilesystemSnapshotPath("vol1", "snap1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -525,7 +546,7 @@ func TestDeleteSnapshotDir_RemovesDir(t *testing.T) {
 func TestEnsurePathExists_CreatesDirectories(t *testing.T) {
 	repo := newFakeRepo()
 	mgr := newTestManager(repo, nil)
-	parent, err := naming.JuiceFSSnapshotParentPath("vol1")
+	parent, err := naming.FilesystemSnapshotParentPath("vol1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -559,12 +580,8 @@ func TestCreateSnapshot_CreatesVolumePathWhenMissing(t *testing.T) {
 		t.Fatalf("expected snapshot to be created, got: %+v", snapshot)
 	}
 
-	volumePath, err := naming.JuiceFSVolumePath("vol1")
-	if err != nil {
-		t.Fatalf("volume path generation failed: %v", err)
-	}
-	if _, _, err := mgr.lookupPath(volumePath); err != nil {
-		t.Fatalf("volume path should exist after snapshot create, got: %v", err)
+	if _, err := s0fs.LoadSnapshot(context.Background(), mgr.s0fsConfig("team1", "vol1"), snapshot.ID); err != nil {
+		t.Fatalf("snapshot state should exist after create, got: %v", err)
 	}
 
 	if _, ok := repo.snapshots[snapshot.ID]; !ok {
@@ -586,6 +603,7 @@ func TestCreateSnapshot_CreatesVolumePathWhenMissing(t *testing.T) {
 
 func TestRestoreSnapshot_WaitsForInvalidateAck(t *testing.T) {
 	repo := newFakeRepo()
+	repo.volumes["vol1"] = &db.SandboxVolume{ID: "vol1", TeamID: "team1", UserID: "user1"}
 	repo.snapshots["snap1"] = &db.Snapshot{ID: "snap1", VolumeID: "vol1", TeamID: "team1"}
 	volMgr := &fakeVolumeProvider{
 		err:          errors.New("not mounted"),
@@ -593,20 +611,9 @@ func TestRestoreSnapshot_WaitsForInvalidateAck(t *testing.T) {
 	}
 	mgr := newTestManager(repo, volMgr)
 	mgr.config.RestoreRemountTimeout = "100ms"
+	seedS0FSSnapshot(t, mgr, "team1", "vol1", "snap1")
 
-	metaClient := mgr.metaClient.(*fakeMeta)
-	volumePath, err := naming.JuiceFSVolumePath("vol1")
-	if err != nil {
-		t.Fatalf("volume path generation failed: %v", err)
-	}
-	snapshotPath, err := naming.JuiceFSSnapshotPath("vol1", "snap1")
-	if err != nil {
-		t.Fatalf("snapshot path generation failed: %v", err)
-	}
-	metaClient.ensurePath(volumePath)
-	metaClient.ensurePath(snapshotPath)
-
-	err = mgr.RestoreSnapshot(context.Background(), &RestoreSnapshotRequest{
+	err := mgr.RestoreSnapshot(context.Background(), &RestoreSnapshotRequest{
 		VolumeID:   "vol1",
 		SnapshotID: "snap1",
 		TeamID:     "team1",
@@ -627,26 +634,16 @@ func TestRestoreSnapshot_WaitsForInvalidateAck(t *testing.T) {
 
 func TestRestoreSnapshot_SkipsInvalidateWaitWhenNoParticipantsRemain(t *testing.T) {
 	repo := newFakeRepo()
+	repo.volumes["vol1"] = &db.SandboxVolume{ID: "vol1", TeamID: "team1", UserID: "user1"}
 	repo.snapshots["snap1"] = &db.Snapshot{ID: "snap1", VolumeID: "vol1", TeamID: "team1"}
 	volMgr := &fakeVolumeProvider{
 		err:          errors.New("not mounted"),
 		beginPending: 0,
 	}
 	mgr := newTestManager(repo, volMgr)
+	seedS0FSSnapshot(t, mgr, "team1", "vol1", "snap1")
 
-	metaClient := mgr.metaClient.(*fakeMeta)
-	volumePath, err := naming.JuiceFSVolumePath("vol1")
-	if err != nil {
-		t.Fatalf("volume path generation failed: %v", err)
-	}
-	snapshotPath, err := naming.JuiceFSSnapshotPath("vol1", "snap1")
-	if err != nil {
-		t.Fatalf("snapshot path generation failed: %v", err)
-	}
-	metaClient.ensurePath(volumePath)
-	metaClient.ensurePath(snapshotPath)
-
-	err = mgr.RestoreSnapshot(context.Background(), &RestoreSnapshotRequest{
+	err := mgr.RestoreSnapshot(context.Background(), &RestoreSnapshotRequest{
 		VolumeID:   "vol1",
 		SnapshotID: "snap1",
 		TeamID:     "team1",
@@ -664,6 +661,7 @@ func TestRestoreSnapshot_SkipsInvalidateWaitWhenNoParticipantsRemain(t *testing.
 
 func TestRestoreSnapshot_RemountTimeout(t *testing.T) {
 	repo := newFakeRepo()
+	repo.volumes["vol1"] = &db.SandboxVolume{ID: "vol1", TeamID: "team1", UserID: "user1"}
 	repo.snapshots["snap1"] = &db.Snapshot{ID: "snap1", VolumeID: "vol1", TeamID: "team1"}
 	volMgr := &fakeVolumeProvider{
 		err:          errors.New("not mounted"),
@@ -672,23 +670,12 @@ func TestRestoreSnapshot_RemountTimeout(t *testing.T) {
 	}
 	mgr := newTestManager(repo, volMgr)
 	mgr.config.RestoreRemountTimeout = "1ms"
-
-	metaClient := mgr.metaClient.(*fakeMeta)
-	volumePath, err := naming.JuiceFSVolumePath("vol1")
-	if err != nil {
-		t.Fatalf("volume path generation failed: %v", err)
-	}
-	snapshotPath, err := naming.JuiceFSSnapshotPath("vol1", "snap1")
-	if err != nil {
-		t.Fatalf("snapshot path generation failed: %v", err)
-	}
-	metaClient.ensurePath(volumePath)
-	metaClient.ensurePath(snapshotPath)
+	seedS0FSSnapshot(t, mgr, "team1", "vol1", "snap1")
 
 	meteringRecorder := &fakeMeteringRecorder{}
 	mgr.SetMeteringRepository(meteringRecorder)
 
-	err = mgr.RestoreSnapshot(context.Background(), &RestoreSnapshotRequest{
+	err := mgr.RestoreSnapshot(context.Background(), &RestoreSnapshotRequest{
 		VolumeID:   "vol1",
 		SnapshotID: "snap1",
 		TeamID:     "team1",
@@ -702,14 +689,11 @@ func TestRestoreSnapshot_RemountTimeout(t *testing.T) {
 	if !volMgr.waitCalled {
 		t.Fatalf("expected WaitForInvalidate to be called")
 	}
-	if len(meteringRecorder.events) != 1 {
-		t.Fatalf("expected one metering event, got %d", len(meteringRecorder.events))
+	if len(meteringRecorder.events) != 0 {
+		t.Fatalf("expected no metering event on remount timeout, got %d", len(meteringRecorder.events))
 	}
-	if meteringRecorder.events[0].EventType != metering.EventTypeSnapshotRestored {
-		t.Fatalf("event type = %q, want %q", meteringRecorder.events[0].EventType, metering.EventTypeSnapshotRestored)
-	}
-	if len(meteringRecorder.watermarks) != 1 {
-		t.Fatalf("expected one watermark, got %d", len(meteringRecorder.watermarks))
+	if len(meteringRecorder.watermarks) != 0 {
+		t.Fatalf("expected no watermark on remount timeout, got %d", len(meteringRecorder.watermarks))
 	}
 }
 
@@ -744,6 +728,7 @@ func TestDeleteSnapshotRecordsMetering(t *testing.T) {
 
 func TestRestoreSnapshot_BeginInvalidateError(t *testing.T) {
 	repo := newFakeRepo()
+	repo.volumes["vol1"] = &db.SandboxVolume{ID: "vol1", TeamID: "team1", UserID: "user1"}
 	repo.snapshots["snap1"] = &db.Snapshot{ID: "snap1", VolumeID: "vol1", TeamID: "team1"}
 	beginErr := errors.New("begin failed")
 	volMgr := &fakeVolumeProvider{
@@ -751,25 +736,14 @@ func TestRestoreSnapshot_BeginInvalidateError(t *testing.T) {
 		beginErr: beginErr,
 	}
 	mgr := newTestManager(repo, volMgr)
+	seedS0FSSnapshot(t, mgr, "team1", "vol1", "snap1")
 
-	metaClient := mgr.metaClient.(*fakeMeta)
-	volumePath, err := naming.JuiceFSVolumePath("vol1")
-	if err != nil {
-		t.Fatalf("volume path generation failed: %v", err)
-	}
-	snapshotPath, err := naming.JuiceFSSnapshotPath("vol1", "snap1")
-	if err != nil {
-		t.Fatalf("snapshot path generation failed: %v", err)
-	}
-	metaClient.ensurePath(volumePath)
-	metaClient.ensurePath(snapshotPath)
-
-	err = mgr.RestoreSnapshot(context.Background(), &RestoreSnapshotRequest{
+	err := mgr.RestoreSnapshot(context.Background(), &RestoreSnapshotRequest{
 		VolumeID:   "vol1",
 		SnapshotID: "snap1",
 		TeamID:     "team1",
 	})
-	if err == nil || !strings.Contains(err.Error(), "begin invalidate") {
+	if !errors.Is(err, beginErr) {
 		t.Fatalf("expected begin invalidate error, got %v", err)
 	}
 	if !volMgr.beginCalled {
@@ -811,19 +785,19 @@ func TestExportSnapshotArchive(t *testing.T) {
 		RootInode: 100,
 	}
 
-	rootAttr := &meta.Attr{Typ: meta.TypeDirectory, Mode: 0o755, Mtime: 1710000000}
-	appDirAttr := &meta.Attr{Typ: meta.TypeDirectory, Mode: 0o755, Mtime: 1710000001}
-	fileAttr := &meta.Attr{Typ: meta.TypeFile, Mode: 0o644, Length: 13, Mtime: 1710000002}
-	linkAttr := &meta.Attr{Typ: meta.TypeSymlink, Mode: 0o777, Mtime: 1710000003}
+	rootAttr := &fsmeta.Attr{Typ: fsmeta.TypeDirectory, Mode: 0o755, Mtime: 1710000000}
+	appDirAttr := &fsmeta.Attr{Typ: fsmeta.TypeDirectory, Mode: 0o755, Mtime: 1710000001}
+	fileAttr := &fsmeta.Attr{Typ: fsmeta.TypeFile, Mode: 0o644, Length: 13, Mtime: 1710000002}
+	linkAttr := &fsmeta.Attr{Typ: fsmeta.TypeSymlink, Mode: 0o777, Mtime: 1710000003}
 
 	archiveMeta := &fakeArchiveMeta{
-		attrs: map[meta.Ino]*meta.Attr{
+		attrs: map[fsmeta.Ino]*fsmeta.Attr{
 			100: rootAttr,
 			101: appDirAttr,
 			102: fileAttr,
 			103: linkAttr,
 		},
-		entries: map[meta.Ino][]*meta.Entry{
+		entries: map[fsmeta.Ino][]*fsmeta.Entry{
 			100: {
 				{Inode: 103, Name: []byte("latest"), Attr: linkAttr},
 				{Inode: 101, Name: []byte("app"), Attr: appDirAttr},
@@ -832,12 +806,12 @@ func TestExportSnapshotArchive(t *testing.T) {
 				{Inode: 102, Name: []byte("main.go"), Attr: fileAttr},
 			},
 		},
-		links: map[meta.Ino]string{
+		links: map[fsmeta.Ino]string{
 			103: "app/main.go",
 		},
 	}
 	archiveReader := &fakeArchiveReader{
-		contents: map[meta.Ino][]byte{
+		contents: map[fsmeta.Ino][]byte{
 			102: []byte("package main\n"),
 		},
 	}
@@ -917,18 +891,18 @@ func TestListSnapshotCasefoldCollisions(t *testing.T) {
 		RootInode: 100,
 	}
 
-	rootAttr := &meta.Attr{Typ: meta.TypeDirectory, Mode: 0o755}
-	appDirAttr := &meta.Attr{Typ: meta.TypeDirectory, Mode: 0o755}
-	fileAttr := &meta.Attr{Typ: meta.TypeFile, Mode: 0o644, Length: 1}
+	rootAttr := &fsmeta.Attr{Typ: fsmeta.TypeDirectory, Mode: 0o755}
+	appDirAttr := &fsmeta.Attr{Typ: fsmeta.TypeDirectory, Mode: 0o755}
+	fileAttr := &fsmeta.Attr{Typ: fsmeta.TypeFile, Mode: 0o644, Length: 1}
 
 	archiveMeta := &fakeArchiveMeta{
-		attrs: map[meta.Ino]*meta.Attr{
+		attrs: map[fsmeta.Ino]*fsmeta.Attr{
 			100: rootAttr,
 			101: appDirAttr,
 			102: fileAttr,
 			103: fileAttr,
 		},
-		entries: map[meta.Ino][]*meta.Entry{
+		entries: map[fsmeta.Ino][]*fsmeta.Entry{
 			100: {
 				{Inode: 101, Name: []byte("app"), Attr: appDirAttr},
 			},
@@ -980,15 +954,15 @@ func TestListSnapshotCasefoldCollisionsReturnsEmptyWhenNamespaceIsSafe(t *testin
 		RootInode: 100,
 	}
 
-	rootAttr := &meta.Attr{Typ: meta.TypeDirectory, Mode: 0o755}
-	fileAttr := &meta.Attr{Typ: meta.TypeFile, Mode: 0o644, Length: 1}
+	rootAttr := &fsmeta.Attr{Typ: fsmeta.TypeDirectory, Mode: 0o755}
+	fileAttr := &fsmeta.Attr{Typ: fsmeta.TypeFile, Mode: 0o644, Length: 1}
 
 	archiveMeta := &fakeArchiveMeta{
-		attrs: map[meta.Ino]*meta.Attr{
+		attrs: map[fsmeta.Ino]*fsmeta.Attr{
 			100: rootAttr,
 			101: fileAttr,
 		},
-		entries: map[meta.Ino][]*meta.Entry{
+		entries: map[fsmeta.Ino][]*fsmeta.Entry{
 			100: {
 				{Inode: 101, Name: []byte("main.go"), Attr: fileAttr},
 			},
@@ -1030,16 +1004,16 @@ func TestListSnapshotCasefoldCollisionsDetectsUnicodeNormalizationCollisions(t *
 		RootInode: 100,
 	}
 
-	rootAttr := &meta.Attr{Typ: meta.TypeDirectory, Mode: 0o755}
-	fileAttr := &meta.Attr{Typ: meta.TypeFile, Mode: 0o644, Length: 1}
+	rootAttr := &fsmeta.Attr{Typ: fsmeta.TypeDirectory, Mode: 0o755}
+	fileAttr := &fsmeta.Attr{Typ: fsmeta.TypeFile, Mode: 0o644, Length: 1}
 
 	archiveMeta := &fakeArchiveMeta{
-		attrs: map[meta.Ino]*meta.Attr{
+		attrs: map[fsmeta.Ino]*fsmeta.Attr{
 			100: rootAttr,
 			101: fileAttr,
 			102: fileAttr,
 		},
-		entries: map[meta.Ino][]*meta.Entry{
+		entries: map[fsmeta.Ino][]*fsmeta.Entry{
 			100: {
 				{Inode: 101, Name: []byte("Caf\u00e9.txt"), Attr: fileAttr},
 				{Inode: 102, Name: []byte("Cafe\u0301.txt"), Attr: fileAttr},
@@ -1088,15 +1062,15 @@ func TestListSnapshotCompatibilityIssuesDetectsWindowsReservedNames(t *testing.T
 		RootInode: 100,
 	}
 
-	rootAttr := &meta.Attr{Typ: meta.TypeDirectory, Mode: 0o755}
-	fileAttr := &meta.Attr{Typ: meta.TypeFile, Mode: 0o644, Length: 1}
+	rootAttr := &fsmeta.Attr{Typ: fsmeta.TypeDirectory, Mode: 0o755}
+	fileAttr := &fsmeta.Attr{Typ: fsmeta.TypeFile, Mode: 0o644, Length: 1}
 
 	archiveMeta := &fakeArchiveMeta{
-		attrs: map[meta.Ino]*meta.Attr{
+		attrs: map[fsmeta.Ino]*fsmeta.Attr{
 			100: rootAttr,
 			101: fileAttr,
 		},
-		entries: map[meta.Ino][]*meta.Entry{
+		entries: map[fsmeta.Ino][]*fsmeta.Entry{
 			100: {
 				{Inode: 101, Name: []byte("CON.txt"), Attr: fileAttr},
 			},

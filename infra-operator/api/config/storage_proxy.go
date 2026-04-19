@@ -38,7 +38,7 @@ type StorageProxyConfig struct {
 	// +kubebuilder:default="storage_proxy"
 	DatabaseSchema string `yaml:"database_schema" json:"databaseSchema"`
 
-	// JuiceFS defaults
+	// S0FS defaults
 	ObjectStorageType string `yaml:"object_storage_type" json:"-"`
 	MetaURL           string `yaml:"meta_url" json:"-"`
 	S3Bucket          string `yaml:"s3_bucket" json:"-"`
@@ -50,42 +50,42 @@ type StorageProxyConfig struct {
 
 	// +optional
 	// +kubebuilder:default="sandbox0"
-	JuiceFSName string `yaml:"juicefs_name" json:"juicefsName"`
+	FilesystemName string `yaml:"filesystem_name" json:"filesystemName"`
 	// +optional
 	// +kubebuilder:default=4096
-	JuiceFSBlockSize int `yaml:"juicefs_block_size" json:"juicefsBlockSize"`
+	FilesystemBlockSize int `yaml:"filesystem_block_size" json:"filesystemBlockSize"`
 	// +optional
 	// +kubebuilder:default="lz4"
-	JuiceFSCompression string `yaml:"juicefs_compression" json:"juicefsCompression"`
+	FilesystemCompression string `yaml:"filesystem_compression" json:"filesystemCompression"`
 	// +optional
 	// +kubebuilder:default=1
-	JuiceFSTrashDays int `yaml:"juicefs_trash_days" json:"juicefsTrashDays"`
+	FilesystemTrashDays int `yaml:"filesystem_trash_days" json:"filesystemTrashDays"`
 	// +optional
 	// +kubebuilder:default=10
-	JuiceFSMetaRetries int `yaml:"juicefs_meta_retries" json:"juicefsMetaRetries"`
+	FilesystemMetaRetries int `yaml:"filesystem_meta_retries" json:"filesystemMetaRetries"`
 	// +optional
 	// +kubebuilder:default=20
-	JuiceFSMaxUpload int `yaml:"juicefs_max_upload" json:"juicefsMaxUpload"`
+	FilesystemMaxUpload int `yaml:"filesystem_max_upload" json:"filesystemMaxUpload"`
 	// +optional
 	// +kubebuilder:default=false
-	JuiceFSEncryptionEnabled bool `yaml:"juicefs_encryption_enabled" json:"juicefsEncryptionEnabled"`
+	ObjectEncryptionEnabled bool `yaml:"object_encryption_enabled" json:"objectEncryptionEnabled"`
 	// +optional
-	JuiceFSEncryptionKeyPath string `yaml:"juicefs_encryption_key_path" json:"juicefsEncryptionKeyPath,omitempty"`
+	ObjectEncryptionKeyPath string `yaml:"object_encryption_key_path" json:"objectEncryptionKeyPath,omitempty"`
 	// +optional
-	JuiceFSEncryptionPassphrase string `yaml:"juicefs_encryption_passphrase" json:"juicefsEncryptionPassphrase,omitempty"`
+	ObjectEncryptionPassphrase string `yaml:"object_encryption_passphrase" json:"objectEncryptionPassphrase,omitempty"`
 	// +optional
 	// +kubebuilder:default="aes256gcm-rsa"
-	JuiceFSEncryptionAlgo string `yaml:"juicefs_encryption_algo" json:"juicefsEncryptionAlgo"`
+	ObjectEncryptionAlgo string `yaml:"object_encryption_algo" json:"objectEncryptionAlgo"`
 
 	// +optional
 	// +kubebuilder:default="1s"
-	JuiceFSAttrTimeout string `yaml:"juicefs_attr_timeout" json:"juicefsAttrTimeout"`
+	FilesystemAttrTimeout string `yaml:"filesystem_attr_timeout" json:"filesystemAttrTimeout"`
 	// +optional
 	// +kubebuilder:default="1s"
-	JuiceFSEntryTimeout string `yaml:"juicefs_entry_timeout" json:"juicefsEntryTimeout"`
+	FilesystemEntryTimeout string `yaml:"filesystem_entry_timeout" json:"filesystemEntryTimeout"`
 	// +optional
 	// +kubebuilder:default="1s"
-	JuiceFSDirEntryTimeout string `yaml:"juicefs_dir_entry_timeout" json:"juicefsDirEntryTimeout"`
+	FilesystemDirEntryTimeout string `yaml:"filesystem_dir_entry_timeout" json:"filesystemDirEntryTimeout"`
 
 	// Coordination
 	// +optional
@@ -218,8 +218,8 @@ func loadStorageProxyConfig(path string) (*StorageProxyConfig, error) {
 
 // Validate validates the configuration.
 func (c *StorageProxyConfig) Validate() error {
-	if c.JuiceFSEncryptionEnabled && c.JuiceFSEncryptionKeyPath == "" {
-		return &ConfigError{Message: "juicefs encryption enabled but juicefs_encryption_key_path is empty"}
+	if c.ObjectEncryptionEnabled && c.ObjectEncryptionKeyPath == "" {
+		return &ConfigError{Message: "object encryption enabled but object_encryption_key_path is empty"}
 	}
 	return nil
 }

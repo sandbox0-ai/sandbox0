@@ -125,7 +125,10 @@ func (a *GRPCAuthenticator) authenticateWithSession(ctx context.Context, req any
 
 	volumeID, err := volumeIDFromRequest(req)
 	if err != nil {
-		return nil, status.Error(codes.Unauthenticated, err.Error())
+		volumeID = firstMetadataValue(md, strings.ToLower(internalauth.VolumeIDHeader))
+		if volumeID == "" {
+			return nil, status.Error(codes.Unauthenticated, err.Error())
+		}
 	}
 
 	claims, err := a.sessionResolver.ResolveVolumeSessionClaims(ctx, volumeID, sessionID, sessionSecret)

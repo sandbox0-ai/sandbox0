@@ -38,10 +38,10 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 	cfg.ProcdConfig = apiconfig.ProcdConfig{
 		HTTPPort:               spec.ProcdConfig.HTTPPort,
 		LogLevel:               spec.ProcdConfig.LogLevel,
-		JuiceFSCacheSize:       spec.ProcdConfig.JuiceFSCacheSize,
-		JuiceFSPrefetch:        spec.ProcdConfig.JuiceFSPrefetch,
-		JuiceFSBufferSize:      spec.ProcdConfig.JuiceFSBufferSize,
-		JuiceFSWriteback:       spec.ProcdConfig.JuiceFSWriteback,
+		VolumeCacheSize:        spec.ProcdConfig.VolumeCacheSize,
+		VolumePrefetch:         spec.ProcdConfig.VolumePrefetch,
+		VolumeBufferSize:       spec.ProcdConfig.VolumeBufferSize,
+		VolumeWriteback:        spec.ProcdConfig.VolumeWriteback,
 		RootPath:               spec.ProcdConfig.RootPath,
 		CacheMaxBytes:          spec.ProcdConfig.CacheMaxBytes,
 		CacheTTL:               spec.ProcdConfig.CacheTTL,
@@ -79,18 +79,18 @@ func ToStorageProxy(spec *infrav1alpha1.StorageProxyConfig) *apiconfig.StoragePr
 	cfg.DatabaseMaxConns = spec.DatabaseMaxConns
 	cfg.DatabaseMinConns = spec.DatabaseMinConns
 	cfg.DatabaseSchema = spec.DatabaseSchema
-	cfg.JuiceFSName = spec.JuiceFSName
-	cfg.JuiceFSBlockSize = spec.JuiceFSBlockSize
-	cfg.JuiceFSCompression = spec.JuiceFSCompression
-	cfg.JuiceFSTrashDays = spec.JuiceFSTrashDays
-	cfg.JuiceFSMetaRetries = spec.JuiceFSMetaRetries
-	cfg.JuiceFSMaxUpload = spec.JuiceFSMaxUpload
-	cfg.JuiceFSEncryptionEnabled = spec.JuiceFSEncryptionEnabled
-	cfg.JuiceFSEncryptionPassphrase = spec.JuiceFSEncryptionPassphrase
-	cfg.JuiceFSEncryptionAlgo = spec.JuiceFSEncryptionAlgo
-	cfg.JuiceFSAttrTimeout = spec.JuiceFSAttrTimeout
-	cfg.JuiceFSEntryTimeout = spec.JuiceFSEntryTimeout
-	cfg.JuiceFSDirEntryTimeout = spec.JuiceFSDirEntryTimeout
+	cfg.FilesystemName = spec.FilesystemName
+	cfg.FilesystemBlockSize = spec.FilesystemBlockSize
+	cfg.FilesystemCompression = spec.FilesystemCompression
+	cfg.FilesystemTrashDays = spec.FilesystemTrashDays
+	cfg.FilesystemMetaRetries = spec.FilesystemMetaRetries
+	cfg.FilesystemMaxUpload = spec.FilesystemMaxUpload
+	cfg.ObjectEncryptionEnabled = spec.ObjectEncryptionEnabled
+	cfg.ObjectEncryptionPassphrase = spec.ObjectEncryptionPassphrase
+	cfg.ObjectEncryptionAlgo = spec.ObjectEncryptionAlgo
+	cfg.FilesystemAttrTimeout = spec.FilesystemAttrTimeout
+	cfg.FilesystemEntryTimeout = spec.FilesystemEntryTimeout
+	cfg.FilesystemDirEntryTimeout = spec.FilesystemDirEntryTimeout
 	cfg.HeartbeatInterval = spec.HeartbeatInterval
 	cfg.HeartbeatTimeout = spec.HeartbeatTimeout
 	cfg.FlushTimeout = spec.FlushTimeout

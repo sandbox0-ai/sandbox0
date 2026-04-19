@@ -25,10 +25,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juicedata/juicefs/pkg/object"
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	"github.com/sandbox0-ai/sandbox0/pkg/framework"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -664,41 +664,40 @@ func isBucketAlreadyOwnedError(err error) bool {
 		strings.Contains(msg, "bucketalreadyexists")
 }
 
-func (r *Reconciler) createObjectStorage(config *StorageConfig) (object.ObjectStorage, error) {
-	storageType := "s3"
-	bucketURL := ""
+func (r *Reconciler) createObjectStorage(config *StorageConfig) (objectstore.Store, error) {
+	storageType := objectstore.TypeS3
+	endpoint := ""
 
 	switch config.Type {
 	case infrav1alpha1.StorageTypeS3, infrav1alpha1.StorageTypeBuiltin:
-		endpoint := strings.TrimRight(strings.TrimSpace(config.Endpoint), "/")
+		endpoint = strings.TrimRight(strings.TrimSpace(config.Endpoint), "/")
 		if endpoint == "" {
 			endpoint = fmt.Sprintf("https://s3.%s.amazonaws.com", config.Region)
 		}
 		if endpoint == "https://s3..amazonaws.com" {
 			return nil, fmt.Errorf("storage region or endpoint is required to verify bucket")
 		}
-		bucketURL = fmt.Sprintf("%s/%s", endpoint, config.Bucket)
 	case infrav1alpha1.StorageTypeOSS:
-		storageType = "oss"
-		endpoint := strings.TrimRight(strings.TrimSpace(config.Endpoint), "/")
+		storageType = objectstore.TypeOSS
+		endpoint = strings.TrimRight(strings.TrimSpace(config.Endpoint), "/")
 		if endpoint == "" {
 			return nil, fmt.Errorf("storage endpoint is required to verify bucket")
 		}
-		bucketURL = fmt.Sprintf("%s/%s", endpoint, config.Bucket)
 	case infrav1alpha1.StorageTypeGCS:
-		storageType = "gs"
-		bucketURL = fmt.Sprintf("gs://%s", strings.TrimSpace(config.Bucket))
+		storageType = objectstore.TypeGCS
 	default:
 		return nil, fmt.Errorf("unsupported storage type: %s", config.Type)
 	}
 
-	store, err := object.CreateStorage(
-		storageType,
-		bucketURL,
-		config.AccessKey,
-		config.SecretKey,
-		config.SessionToken,
-	)
+	store, err := objectstore.Create(objectstore.Config{
+		Type:         storageType,
+		Bucket:       config.Bucket,
+		Region:       config.Region,
+		Endpoint:     endpoint,
+		AccessKey:    config.AccessKey,
+		SecretKey:    config.SecretKey,
+		SessionToken: config.SessionToken,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("create storage client: %w", err)
 	}

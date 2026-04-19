@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS sandbox_volume_snapshots (
     team_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
 
-    -- JuiceFS metadata
+    -- Filesystem metadata
     root_inode BIGINT NOT NULL,           -- Snapshot root directory inode
     source_inode BIGINT NOT NULL,         -- Source volume root inode at snapshot time
 

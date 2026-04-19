@@ -11,23 +11,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-type mockMountRegistrar struct {
-	unregistered []string
-}
-
-func (m *mockMountRegistrar) RegisterMount(context.Context, string, MountOptions) error {
-	return nil
-}
-
-func (m *mockMountRegistrar) UnregisterMount(_ context.Context, volumeID string) error {
-	m.unregistered = append(m.unregistered, volumeID)
-	return nil
-}
-
-func (m *mockMountRegistrar) ValidateMount(context.Context, string, AccessMode) error {
-	return nil
-}
-
 func TestAcquireDirectVolumeFileMount_ReusesSessionUntilIdleCleanup(t *testing.T) {
 	mgr := NewManager(logrus.New(), &config.StorageProxyConfig{})
 	volumeID := "vol-direct"

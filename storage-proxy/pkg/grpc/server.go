@@ -1419,15 +1419,22 @@ func (s *FileSystemServer) ReadDir(ctx context.Context, req *pb.ReadDirRequest) 
 		if err != nil {
 			return nil, mapS0FSError(err)
 		}
-		result := make([]*pb.DirEntry, 0, len(entries))
-		for _, entry := range entries {
+		start := int(req.Offset)
+		if start < 0 {
+			start = 0
+		}
+		if start > len(entries) {
+			start = len(entries)
+		}
+		result := make([]*pb.DirEntry, 0, len(entries)-start)
+		for i, entry := range entries[start:] {
 			node, err := volCtx.S0FS.GetAttr(entry.Inode)
 			if err != nil {
 				return nil, mapS0FSError(err)
 			}
 			result = append(result, &pb.DirEntry{
 				Inode:  entry.Inode,
-				Offset: 0,
+				Offset: uint64(start + i + 1),
 				Name:   entry.Name,
 				Type:   s0fsTypeNumber(entry.Type),
 				Attr:   s0fsAttr(node),

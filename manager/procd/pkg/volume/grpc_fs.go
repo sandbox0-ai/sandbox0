@@ -708,6 +708,7 @@ func (fs *grpcFS) ReadDir(cancel <-chan struct{}, input *fuse.ReadIn, out *fuse.
 			Ino:  entry.Inode,
 			Name: entry.Name,
 			Mode: mode,
+			Off:  entry.Offset,
 		}) {
 			break
 		}
@@ -753,6 +754,7 @@ func (fs *grpcFS) ReadDirPlus(cancel <-chan struct{}, input *fuse.ReadIn, out *f
 			Ino:  entry.Inode,
 			Name: entry.Name,
 			Mode: mode,
+			Off:  entry.Offset,
 		})
 		if entryOut == nil {
 			break
@@ -1011,31 +1013,7 @@ func (fs *grpcFS) Ioctl(cancel <-chan struct{}, in *fuse.IoctlIn, bufIn []byte, 
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
-	ctx, err := fs.withToken(context.Background())
-	if err != nil {
-		return fuse.EPERM
-	}
-	resp, err := fs.client.Ioctl(ctx, &pb.IoctlRequest{
-		VolumeId:    fs.volumeID,
-		Inode:       in.NodeId,
-		Cmd:         in.Cmd,
-		Arg:         in.Arg,
-		DataIn:      bufIn,
-		DataOutSize: uint32(len(bufOut)),
-		Actor:       actorFromCaller(in.Caller),
-	})
-	if err != nil {
-		return grpcToFuse(err)
-	}
-	if resp == nil {
-		return fuse.EIO
-	}
-	if len(resp.DataOut) > len(bufOut) {
-		copy(bufOut, resp.DataOut[:len(bufOut)])
-		return fuse.ERANGE
-	}
-	copy(bufOut, resp.DataOut)
-	return fuse.OK
+	return fuse.ENOSYS
 }
 
 func (fs *grpcFS) setLk(cancel <-chan struct{}, input *fuse.LkIn, block bool) fuse.Status {

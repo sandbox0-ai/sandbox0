@@ -190,6 +190,64 @@ func TestS0FSDirectoryAndSetAttr(t *testing.T) {
 	}
 }
 
+func TestS0FSReadDirHonorsOffset(t *testing.T) {
+	t.Parallel()
+
+	volCtx := newMountedS0FSVolumeContext(t, "vol-1", "team-a")
+	server := newTestFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{
+			"vol-1": volCtx,
+		},
+	}, nil, nil)
+	ctx := authContext("team-a", "")
+
+	for _, name := range []string{"a.txt", "b.txt", "c.txt"} {
+		if _, err := server.Create(ctx, &pb.CreateRequest{
+			VolumeId: "vol-1",
+			Parent:   1,
+			Name:     name,
+			Mode:     0o644,
+		}); err != nil {
+			t.Fatalf("Create(%s) error = %v", name, err)
+		}
+	}
+
+	first, err := server.ReadDir(ctx, &pb.ReadDirRequest{
+		VolumeId: "vol-1",
+		Inode:    1,
+		Offset:   0,
+	})
+	if err != nil {
+		t.Fatalf("ReadDir(offset 0) error = %v", err)
+	}
+	assertEntryNames(t, first.Entries, []string{"a.txt", "b.txt", "c.txt"})
+	if first.Entries[0].Offset != 1 || first.Entries[1].Offset != 2 || first.Entries[2].Offset != 3 {
+		t.Fatalf("ReadDir(offset 0) offsets = [%d %d %d], want [1 2 3]", first.Entries[0].Offset, first.Entries[1].Offset, first.Entries[2].Offset)
+	}
+
+	second, err := server.ReadDir(ctx, &pb.ReadDirRequest{
+		VolumeId: "vol-1",
+		Inode:    1,
+		Offset:   1,
+	})
+	if err != nil {
+		t.Fatalf("ReadDir(offset 1) error = %v", err)
+	}
+	assertEntryNames(t, second.Entries, []string{"b.txt", "c.txt"})
+
+	done, err := server.ReadDir(ctx, &pb.ReadDirRequest{
+		VolumeId: "vol-1",
+		Inode:    1,
+		Offset:   3,
+	})
+	if err != nil {
+		t.Fatalf("ReadDir(offset 3) error = %v", err)
+	}
+	if len(done.Entries) != 0 {
+		t.Fatalf("ReadDir(offset 3) entries = %+v, want empty", done.Entries)
+	}
+}
+
 func TestS0FSUnlinkAfterOpenUntilRelease(t *testing.T) {
 	t.Parallel()
 
@@ -310,5 +368,21 @@ func newMountedS0FSVolumeContext(t *testing.T, volumeID, teamID string) *volume.
 		MountedAt: time.Now(),
 		RootInode: 1,
 		RootPath:  "/",
+	}
+}
+
+func assertEntryNames(t *testing.T, entries []*pb.DirEntry, want []string) {
+	t.Helper()
+	got := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		got = append(got, entry.Name)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("ReadDir() names = %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("ReadDir() names = %v, want %v", got, want)
+		}
 	}
 }

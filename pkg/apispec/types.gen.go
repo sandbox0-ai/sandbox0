@@ -279,16 +279,6 @@ const (
 	SuccessMessageResponseSuccessTrue SuccessMessageResponseSuccess = true
 )
 
-// Defines values for SuccessMountResponseSuccess.
-const (
-	SuccessMountResponseSuccessTrue SuccessMountResponseSuccess = true
-)
-
-// Defines values for SuccessMountStatusResponseSuccess.
-const (
-	SuccessMountStatusResponseSuccessTrue SuccessMountStatusResponseSuccess = true
-)
-
 // Defines values for SuccessMovedResponseSuccess.
 const (
 	SuccessMovedResponseSuccessTrue SuccessMovedResponseSuccess = true
@@ -419,11 +409,6 @@ const (
 	SuccessTemplateResponseSuccessTrue SuccessTemplateResponseSuccess = true
 )
 
-// Defines values for SuccessUnmountedResponseSuccess.
-const (
-	SuccessUnmountedResponseSuccessTrue SuccessUnmountedResponseSuccess = true
-)
-
 // Defines values for SuccessUserResponseSuccess.
 const (
 	SuccessUserResponseSuccessTrue SuccessUserResponseSuccess = true
@@ -461,7 +446,7 @@ const (
 
 // Defines values for SuccessWrittenResponseSuccess.
 const (
-	True SuccessWrittenResponseSuccess = true
+	SuccessWrittenResponseSuccessTrue SuccessWrittenResponseSuccess = true
 )
 
 // Defines values for SyncEventType.
@@ -651,25 +636,15 @@ type ChangeRequestEntryKind string
 
 // ClaimMountRequest defines model for ClaimMountRequest.
 type ClaimMountRequest struct {
-	MountPoint      string        `json:"mount_point"`
-	SandboxvolumeId string        `json:"sandboxvolume_id"`
-	VolumeConfig    *VolumeConfig `json:"volume_config,omitempty"`
+	MountPoint      string `json:"mount_point"`
+	SandboxvolumeId string `json:"sandboxvolume_id"`
 }
 
 // ClaimRequest defines model for ClaimRequest.
 type ClaimRequest struct {
-	Config *SandboxConfig `json:"config,omitempty"`
-
-	// MountWaitTimeoutMs Optional best-effort wait budget in milliseconds for bootstrap
-	// mounts when `wait_for_mounts` is true.
-	MountWaitTimeoutMs *int32               `json:"mount_wait_timeout_ms,omitempty"`
-	Mounts             *[]ClaimMountRequest `json:"mounts,omitempty"`
-	Template           *string              `json:"template,omitempty"`
-
-	// WaitForMounts When true, claim waits best-effort for requested bootstrap mounts to
-	// reach a terminal state before returning. The wait is bounded by
-	// `mount_wait_timeout_ms`.
-	WaitForMounts *bool `json:"wait_for_mounts,omitempty"`
+	Config   *SandboxConfig       `json:"config,omitempty"`
+	Mounts   *[]ClaimMountRequest `json:"mounts,omitempty"`
+	Template *string              `json:"template,omitempty"`
 }
 
 // ClaimResponse defines model for ClaimResponse.
@@ -811,16 +786,12 @@ type CreateSSHPublicKeyRequest struct {
 type CreateSandboxVolumeRequest struct {
 	// AccessMode Access mode for sandbox volumes. Enforcement is scoped to storage-proxy instances. RWO allows read-write mounts on a single instance; ROX allows read-only mounts across instances; RWX allows read-write mounts across instances.
 	AccessMode *VolumeAccessMode `json:"access_mode,omitempty"`
-	BufferSize *string           `json:"buffer_size,omitempty"`
-	CacheSize  *string           `json:"cache_size,omitempty"`
 
 	// DefaultPosixGid Default POSIX GID used by external volume access paths that do not carry caller identity. Defaults to 0 when omitted on create.
 	DefaultPosixGid *int64 `json:"default_posix_gid,omitempty"`
 
 	// DefaultPosixUid Default POSIX UID used by external volume access paths that do not carry caller identity. Defaults to 0 when omitted on create.
 	DefaultPosixUid *int64 `json:"default_posix_uid,omitempty"`
-	Prefetch        *int   `json:"prefetch,omitempty"`
-	Writeback       *bool  `json:"writeback,omitempty"`
 }
 
 // CreateSnapshotRequest defines model for CreateSnapshotRequest.
@@ -1031,16 +1002,12 @@ type FileInfoType string
 type ForkVolumeRequest struct {
 	// AccessMode Access mode for sandbox volumes. Enforcement is scoped to storage-proxy instances. RWO allows read-write mounts on a single instance; ROX allows read-only mounts across instances; RWX allows read-write mounts across instances.
 	AccessMode *VolumeAccessMode `json:"access_mode,omitempty"`
-	BufferSize *string           `json:"buffer_size,omitempty"`
-	CacheSize  *string           `json:"cache_size,omitempty"`
 
 	// DefaultPosixGid Override the default POSIX GID for external volume access paths. Inherits from the source volume when omitted.
 	DefaultPosixGid *int64 `json:"default_posix_gid,omitempty"`
 
 	// DefaultPosixUid Override the default POSIX UID for external volume access paths. Inherits from the source volume when omitted.
 	DefaultPosixUid *int64 `json:"default_posix_uid,omitempty"`
-	Prefetch        *int   `json:"prefetch,omitempty"`
-	Writeback       *bool  `json:"writeback,omitempty"`
 }
 
 // GatewayMetadata defines model for GatewayMetadata.
@@ -1127,28 +1094,11 @@ type LoginResponse struct {
 	User         User   `json:"user"`
 }
 
-// MountRequest defines model for MountRequest.
-type MountRequest struct {
-	MountPoint      string        `json:"mount_point"`
-	SandboxId       *string       `json:"sandbox_id,omitempty"`
-	SandboxvolumeId string        `json:"sandboxvolume_id"`
-	VolumeConfig    *VolumeConfig `json:"volume_config,omitempty"`
-}
-
-// MountResponse defines model for MountResponse.
-type MountResponse struct {
-	MountPoint      string `json:"mount_point"`
-	MountSessionId  string `json:"mount_session_id"`
-	MountedAt       string `json:"mounted_at"`
-	SandboxvolumeId string `json:"sandboxvolume_id"`
-}
-
 // MountStatus defines model for MountStatus.
 type MountStatus struct {
 	ErrorCode          *string          `json:"error_code,omitempty"`
 	ErrorMessage       *string          `json:"error_message,omitempty"`
 	MountPoint         string           `json:"mount_point"`
-	MountSessionId     *string          `json:"mount_session_id,omitempty"`
 	MountedAt          *string          `json:"mounted_at,omitempty"`
 	MountedDurationSec *int64           `json:"mounted_duration_sec,omitempty"`
 	SandboxvolumeId    string           `json:"sandboxvolume_id"`
@@ -1635,6 +1585,7 @@ type SandboxTemplateSpec struct {
 	Pool          *PoolStrategy         `json:"pool,omitempty"`
 	Public        *bool                 `json:"public,omitempty"`
 	Tags          *[]string             `json:"tags,omitempty"`
+	VolumeMounts  *[]VolumeMountSpec    `json:"volumeMounts,omitempty"`
 	WarmProcesses *[]WarmProcessSpec    `json:"warmProcesses,omitempty"`
 }
 
@@ -1669,18 +1620,14 @@ type SandboxUpdateRequest struct {
 type SandboxVolume struct {
 	// AccessMode Access mode for sandbox volumes. Enforcement is scoped to storage-proxy instances. RWO allows read-write mounts on a single instance; ROX allows read-only mounts across instances; RWX allows read-write mounts across instances.
 	AccessMode      *VolumeAccessMode `json:"access_mode,omitempty"`
-	BufferSize      string            `json:"buffer_size"`
-	CacheSize       string            `json:"cache_size"`
 	CreatedAt       time.Time         `json:"created_at"`
 	DefaultPosixGid *int64            `json:"default_posix_gid"`
 	DefaultPosixUid *int64            `json:"default_posix_uid"`
 	Id              string            `json:"id"`
-	Prefetch        *int              `json:"prefetch,omitempty"`
 	SourceVolumeId  *string           `json:"source_volume_id"`
 	TeamId          string            `json:"team_id"`
 	UpdatedAt       time.Time         `json:"updated_at"`
 	UserId          string            `json:"user_id"`
-	Writeback       *bool             `json:"writeback,omitempty"`
 }
 
 // SecurityContext defines model for SecurityContext.
@@ -1968,26 +1915,6 @@ type SuccessMessageResponse struct {
 // SuccessMessageResponseSuccess defines model for SuccessMessageResponse.Success.
 type SuccessMessageResponseSuccess bool
 
-// SuccessMountResponse defines model for SuccessMountResponse.
-type SuccessMountResponse struct {
-	Data    *MountResponse              `json:"data,omitempty"`
-	Success SuccessMountResponseSuccess `json:"success"`
-}
-
-// SuccessMountResponseSuccess defines model for SuccessMountResponse.Success.
-type SuccessMountResponseSuccess bool
-
-// SuccessMountStatusResponse defines model for SuccessMountStatusResponse.
-type SuccessMountStatusResponse struct {
-	Data *struct {
-		Mounts *[]MountStatus `json:"mounts,omitempty"`
-	} `json:"data,omitempty"`
-	Success SuccessMountStatusResponseSuccess `json:"success"`
-}
-
-// SuccessMountStatusResponseSuccess defines model for SuccessMountStatusResponse.Success.
-type SuccessMountStatusResponseSuccess bool
-
 // SuccessMovedResponse defines model for SuccessMovedResponse.
 type SuccessMovedResponse struct {
 	Data *struct {
@@ -2248,17 +2175,6 @@ type SuccessTemplateResponse struct {
 // SuccessTemplateResponseSuccess defines model for SuccessTemplateResponse.Success.
 type SuccessTemplateResponseSuccess bool
 
-// SuccessUnmountedResponse defines model for SuccessUnmountedResponse.
-type SuccessUnmountedResponse struct {
-	Data *struct {
-		Unmounted *bool `json:"unmounted,omitempty"`
-	} `json:"data,omitempty"`
-	Success SuccessUnmountedResponseSuccess `json:"success"`
-}
-
-// SuccessUnmountedResponseSuccess defines model for SuccessUnmountedResponse.Success.
-type SuccessUnmountedResponseSuccess bool
-
 // SuccessUserResponse defines model for SuccessUserResponse.
 type SuccessUserResponse struct {
 	Data    *User                      `json:"data,omitempty"`
@@ -2485,12 +2401,6 @@ type TrafficRuleAction string
 // TrafficRuleAppProtocol defines model for TrafficRuleAppProtocol.
 type TrafficRuleAppProtocol string
 
-// UnmountRequest defines model for UnmountRequest.
-type UnmountRequest struct {
-	MountSessionId  string `json:"mount_session_id"`
-	SandboxvolumeId string `json:"sandboxvolume_id"`
-}
-
 // UpdateExposedPortsRequest defines model for UpdateExposedPortsRequest.
 type UpdateExposedPortsRequest struct {
 	Ports []ExposedPortConfig `json:"ports"`
@@ -2556,12 +2466,11 @@ type UsernamePasswordProjection = map[string]interface{}
 // VolumeAccessMode Access mode for sandbox volumes. Enforcement is scoped to storage-proxy instances. RWO allows read-write mounts on a single instance; ROX allows read-only mounts across instances; RWX allows read-write mounts across instances.
 type VolumeAccessMode string
 
-// VolumeConfig defines model for VolumeConfig.
-type VolumeConfig struct {
-	BufferSize *string `json:"buffer_size,omitempty"`
-	CacheSize  *string `json:"cache_size,omitempty"`
-	Prefetch   *int32  `json:"prefetch,omitempty"`
-	Writeback  *bool   `json:"writeback,omitempty"`
+// VolumeMountSpec defines model for VolumeMountSpec.
+type VolumeMountSpec struct {
+	MountPath string `json:"mountPath"`
+	Name      string `json:"name"`
+	ReadOnly  *bool  `json:"readOnly,omitempty"`
 }
 
 // VolumeSyncBootstrap defines model for VolumeSyncBootstrap.
@@ -2915,12 +2824,6 @@ type PutApiV1SandboxesIdNetworkJSONRequestBody = SandboxNetworkPolicy
 
 // PostApiV1SandboxesIdRefreshJSONRequestBody defines body for PostApiV1SandboxesIdRefresh for application/json ContentType.
 type PostApiV1SandboxesIdRefreshJSONRequestBody = SandboxRefreshRequest
-
-// PostApiV1SandboxesIdSandboxvolumesMountJSONRequestBody defines body for PostApiV1SandboxesIdSandboxvolumesMount for application/json ContentType.
-type PostApiV1SandboxesIdSandboxvolumesMountJSONRequestBody = MountRequest
-
-// PostApiV1SandboxesIdSandboxvolumesUnmountJSONRequestBody defines body for PostApiV1SandboxesIdSandboxvolumesUnmount for application/json ContentType.
-type PostApiV1SandboxesIdSandboxvolumesUnmountJSONRequestBody = UnmountRequest
 
 // PostApiV1SandboxvolumesJSONRequestBody defines body for PostApiV1Sandboxvolumes for application/json ContentType.
 type PostApiV1SandboxvolumesJSONRequestBody = CreateSandboxVolumeRequest

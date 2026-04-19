@@ -38,13 +38,7 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 	cfg.ProcdConfig = apiconfig.ProcdConfig{
 		HTTPPort:               spec.ProcdConfig.HTTPPort,
 		LogLevel:               spec.ProcdConfig.LogLevel,
-		VolumeCacheSize:        spec.ProcdConfig.VolumeCacheSize,
-		VolumePrefetch:         spec.ProcdConfig.VolumePrefetch,
-		VolumeBufferSize:       spec.ProcdConfig.VolumeBufferSize,
-		VolumeWriteback:        spec.ProcdConfig.VolumeWriteback,
 		RootPath:               spec.ProcdConfig.RootPath,
-		CacheMaxBytes:          spec.ProcdConfig.CacheMaxBytes,
-		CacheTTL:               spec.ProcdConfig.CacheTTL,
 		ContextCleanupInterval: spec.ProcdConfig.ContextCleanupInterval,
 		ContextIdleTimeout:     spec.ProcdConfig.ContextIdleTimeout,
 		ContextMaxLifetime:     spec.ProcdConfig.ContextMaxLifetime,
@@ -72,8 +66,6 @@ func ToStorageProxy(spec *infrav1alpha1.StorageProxyConfig) *apiconfig.StoragePr
 		return cfg
 	}
 
-	cfg.VolumeProtocolAddr = spec.VolumeProtocolAddr
-	cfg.VolumeProtocolPort = spec.VolumeProtocolPort
 	cfg.HTTPAddr = spec.HTTPAddr
 	cfg.HTTPPort = spec.HTTPPort
 	cfg.DatabaseMaxConns = spec.DatabaseMaxConns
@@ -96,7 +88,6 @@ func ToStorageProxy(spec *infrav1alpha1.StorageProxyConfig) *apiconfig.StoragePr
 	cfg.FlushTimeout = spec.FlushTimeout
 	cfg.CleanupInterval = spec.CleanupInterval
 	cfg.DirectVolumeFileIdleTTL = spec.DirectVolumeFileIdleTTL
-	cfg.DefaultCacheSize = spec.DefaultCacheSize
 	cfg.CacheDir = spec.CacheDir
 	cfg.MetricsEnabled = spec.MetricsEnabled
 	cfg.MetricsPort = spec.MetricsPort

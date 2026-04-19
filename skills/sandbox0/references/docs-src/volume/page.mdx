@@ -37,22 +37,7 @@ Volumes support three access modes:
 | `RWX` | Read-Write Cross | Multi-Sandbox read-write | Collaborative workspaces, shared caches |
 
 <Callout variant="info">
-The default access mode is `RWO`. Specify `RWX` mode when creating a Volume if you need cross-Sandbox sharing.
-</Callout>
-
-## Performance Configuration
-
-Volumes support the following performance tuning parameters:
-
-| Parameter | Type | Description | Example Values |
-|-----------|------|-------------|----------------|
-| `cache_size` | string | Cache size (default: `1G`) | `512M`, `1G` |
-| `buffer_size` | string | Buffer size (default: `32M`) | `32M`, `128M`, `256M` |
-| `prefetch` | integer | Number of blocks to prefetch (default: `0`) | `0`, `1`, `2`, `4` |
-| `writeback` | boolean | Enable write-back cache (default: `false`) | `true`, `false` |
-
-<Callout variant="warning">
-Enabling `writeback` improves write performance but may lose unwritten data in exceptional cases. Disable it for scenarios requiring strong data consistency.
+The default access mode is `RWO`. Sandbox mounts are declared by the template and bound at claim time. `RWO` mounts use node-local write-ahead logging for low-latency small-file workloads, while `ROX` is for read-only sharing.
 </Callout>
 
 ## Direct File Operations
@@ -83,7 +68,7 @@ For raw endpoint usage, see the dedicated [HTTP](./http) page.
 
 ## Create Volume
 
-Create a new persistent volume with access mode and optional performance config.
+Create a new persistent volume with an access mode.
 
 <Endpoint method="POST">
 /api/v1/sandboxvolumes
@@ -95,9 +80,7 @@ Create a new persistent volume with access mode and optional performance config.
       label: "Go",
       language: "go",
       code: `volume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{
-    AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeRWX),
-    CacheSize:  apispec.NewOptString("1G"),
-    BufferSize: apispec.NewOptString("128M"),
+    AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeRWO),
 })
 if err != nil {
     log.Fatal(err)
@@ -111,9 +94,7 @@ fmt.Printf("Volume ID: %s\\n", volume.ID)`
 from sandbox0.apispec.models.volume_access_mode import VolumeAccessMode
     
 volume = client.volumes.create(CreateSandboxVolumeRequest(
-    access_mode=VolumeAccessMode.RWX,
-    cache_size="1G",
-    buffer_size="128M",
+    access_mode=VolumeAccessMode.RWO,
 ))
 print(f"Volume ID: {volume.id}")`
     },
@@ -123,20 +104,18 @@ print(f"Volume ID: {volume.id}")`
       code: `import { models } from "sandbox0";
 
 const volume = await client.volumes.create({
-    accessMode: models.VolumeAccessMode.Rwx,
-    cacheSize: "1G",
-    bufferSize: "128M",
+    accessMode: models.VolumeAccessMode.Rwo,
 });
 console.log("Volume ID:", volume.id);`
     },
     {
       label: "CLI",
       language: "bash",
-      code: `# Create a volume with performance tuning
-s0 volume create --access-mode RWX --cache-size 1G --buffer-size 128M
+      code: `# Create a volume
+s0 volume create --access-mode RWO
 
 # For automation, prefer machine-readable output
-s0 volume create --access-mode RWX -o json`
+s0 volume create --access-mode RWO -o json`
     }
   ]}
 />

@@ -24,36 +24,11 @@ type ProcdConfig struct {
 	// +kubebuilder:default="info"
 	LogLevel string `yaml:"log_level" json:"logLevel"`
 
-	// Storage Proxy configuration
-	StorageProxyBaseURL string `yaml:"storage_proxy_base_url" json:"-"`
-	StorageProxyPort    int    `yaml:"storage_proxy_port" json:"-"`
-
-	// S0FS Mount Defaults
-	// +optional
-	// +kubebuilder:default="100"
-	VolumeCacheSize string `yaml:"volume_cache_size" json:"volumeCacheSize"`
-	// +optional
-	// +kubebuilder:default=3
-	VolumePrefetch int `yaml:"volume_prefetch" json:"volumePrefetch"`
-	// +optional
-	// +kubebuilder:default="300"
-	VolumeBufferSize string `yaml:"volume_buffer_size" json:"volumeBufferSize"`
-	// +optional
-	// +kubebuilder:default=true
-	VolumeWriteback bool `yaml:"volume_writeback" json:"volumeWriteback"`
-
 	// File manager configuration
 	// +optional
 	// +kubebuilder:default="/workspace"
 	RootPath string `yaml:"root_path" json:"rootPath"`
 
-	// Cache configuration
-	// +optional
-	// +kubebuilder:default=104857600
-	CacheMaxBytes int64 `yaml:"cache_max_bytes" json:"cacheMaxBytes"`
-	// +optional
-	// +kubebuilder:default="30s"
-	CacheTTL metav1.Duration `yaml:"cache_ttl" json:"cacheTTL"`
 	// Context cleanup configuration
 	// +optional
 	// +kubebuilder:default="30s"

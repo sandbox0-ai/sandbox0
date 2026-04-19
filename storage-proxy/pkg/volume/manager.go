@@ -2,9 +2,6 @@ package volume
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/subtle"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
@@ -28,14 +25,6 @@ type MountRegistrar interface {
 	ValidateMount(ctx context.Context, volumeID string, accessMode AccessMode) error
 }
 
-// VolumeConfig holds the configuration for a volume
-type VolumeConfig struct {
-	CacheSize  string
-	Prefetch   int
-	BufferSize string
-	Writeback  bool
-}
-
 // VolumeContext holds the mounted runtime state for a volume.
 type VolumeContext struct {
 	VolumeID  string
@@ -44,7 +33,6 @@ type VolumeContext struct {
 	S0FS      *s0fs.Engine
 	Meta      LegacyMeta
 	VFS       legacyfs.VFS
-	Config    *VolumeConfig
 	Access    AccessMode
 	MountedAt time.Time
 	RootInode fsmeta.Ino
@@ -64,25 +52,15 @@ type VolumeContext struct {
 // MountSession tracks a single mount session on this instance.
 type MountSession struct {
 	ID        string
-	Secret    string
 	TeamID    string
-	SandboxID string
 	CreatedAt time.Time
 	Scope     MountSessionScope
-}
-
-// MountSessionPrincipal captures the authorization identity resolved from a
-// mount session credential.
-type MountSessionPrincipal struct {
-	TeamID    string
-	SandboxID string
 }
 
 type MountSessionScope string
 
 const (
 	MountSessionScopeUnknown MountSessionScope = ""
-	MountSessionScopeSandbox MountSessionScope = "sandbox"
 	MountSessionScopeDirect  MountSessionScope = "direct"
 )
 
@@ -107,18 +85,17 @@ type volumeRootMeta interface {
 
 // Manager manages mounted volumes and mount sessions.
 type Manager struct {
-	mu               sync.RWMutex
-	volumes          map[string]*VolumeContext
-	sandboxToVolumes map[string]map[string]struct{} // sandboxID -> set of volumeIDs
-	mountSessions    map[string]map[string]*MountSession
-	directMounts     map[string]*directMountLease
-	invalidates      map[string]map[string]*invalidateTracker
-	logger           *logrus.Logger
-	config           *config.StorageProxyConfig
-	metrics          *obsmetrics.StorageProxyMetrics
-	backends         map[string]Backend
-	defaultBackend   string
-	registrar        MountRegistrar // Optional: for distributed coordination
+	mu             sync.RWMutex
+	volumes        map[string]*VolumeContext
+	mountSessions  map[string]map[string]*MountSession
+	directMounts   map[string]*directMountLease
+	invalidates    map[string]map[string]*invalidateTracker
+	logger         *logrus.Logger
+	config         *config.StorageProxyConfig
+	metrics        *obsmetrics.StorageProxyMetrics
+	backends       map[string]Backend
+	defaultBackend string
+	registrar      MountRegistrar // Optional: for distributed coordination
 }
 
 // NewManager creates a new volume manager
@@ -141,15 +118,14 @@ func NewManagerWithBackends(logger *logrus.Logger, cfg *config.StorageProxyConfi
 		backends = make(map[string]Backend)
 	}
 	return &Manager{
-		volumes:          make(map[string]*VolumeContext),
-		sandboxToVolumes: make(map[string]map[string]struct{}),
-		mountSessions:    make(map[string]map[string]*MountSession),
-		directMounts:     make(map[string]*directMountLease),
-		invalidates:      make(map[string]map[string]*invalidateTracker),
-		logger:           logger,
-		config:           cfg,
-		backends:         backends,
-		defaultBackend:   defaultBackend,
+		volumes:        make(map[string]*VolumeContext),
+		mountSessions:  make(map[string]map[string]*MountSession),
+		directMounts:   make(map[string]*directMountLease),
+		invalidates:    make(map[string]map[string]*invalidateTracker),
+		logger:         logger,
+		config:         cfg,
+		backends:       backends,
+		defaultBackend: defaultBackend,
 	}
 }
 
@@ -169,7 +145,7 @@ func (m *Manager) SetMetrics(metrics *obsmetrics.StorageProxyMetrics) {
 
 // MountVolume mounts a volume using the configured storage backend.
 // AccessMode is enforced per storage-proxy instance (not per sandbox).
-func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID string, config *VolumeConfig, accessMode AccessMode) (string, string, time.Time, error) {
+func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID string, accessMode AccessMode) (string, time.Time, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -178,59 +154,52 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID st
 	sessionTime := time.Now()
 
 	if teamID == "" {
-		return "", "", time.Time{}, fmt.Errorf("missing team id for volume mount")
+		return "", time.Time{}, fmt.Errorf("missing team id for volume mount")
 	}
 
 	// Validate mount with coordinator if available.
 	if m.registrar != nil {
 		if err := m.registrar.ValidateMount(ctx, volumeID, accessMode); err != nil {
-			return "", "", time.Time{}, err
+			return "", time.Time{}, err
 		}
-	}
-
-	sessionSecret, err := generateMountSessionSecret()
-	if err != nil {
-		return "", "", time.Time{}, fmt.Errorf("generate mount session secret: %w", err)
 	}
 
 	// Check if already mounted
 	if existing, exists := m.volumes[volumeID]; exists {
 		if existing.TeamID != "" && existing.TeamID != teamID {
-			return "", "", time.Time{}, fmt.Errorf("volume %s already mounted by another team", volumeID)
+			return "", time.Time{}, fmt.Errorf("volume %s already mounted by another team", volumeID)
 		}
 		if existing.Access != accessMode {
-			return "", "", time.Time{}, fmt.Errorf("volume %s already mounted with access_mode=%s", volumeID, existing.Access)
+			return "", time.Time{}, fmt.Errorf("volume %s already mounted with access_mode=%s", volumeID, existing.Access)
 		}
 		if m.mountSessions[volumeID] == nil {
 			m.mountSessions[volumeID] = make(map[string]*MountSession)
 		}
 		m.mountSessions[volumeID][sessionID] = &MountSession{
 			ID:        sessionID,
-			Secret:    sessionSecret,
 			TeamID:    teamID,
 			CreatedAt: sessionTime,
 		}
-		return sessionID, sessionSecret, sessionTime, nil
+		return sessionID, sessionTime, nil
 	}
 
 	m.logger.WithField("volume_id", volumeID).Info("Mounting volume")
 
-	backend, err := m.selectBackend(config)
+	backend, err := m.selectBackend()
 	if err != nil {
-		return "", "", time.Time{}, err
+		return "", time.Time{}, err
 	}
 
 	volCtx, err := backend.MountVolume(ctx, BackendMountRequest{
 		S3Prefix:   s3Prefix,
 		VolumeID:   volumeID,
 		TeamID:     teamID,
-		Config:     config,
 		AccessMode: accessMode,
 		MountedAt:  sessionTime,
 		Metrics:    m.metrics,
 	})
 	if err != nil {
-		return "", "", time.Time{}, err
+		return "", time.Time{}, err
 	}
 
 	m.volumes[volumeID] = volCtx
@@ -239,7 +208,6 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID st
 	}
 	m.mountSessions[volumeID][sessionID] = &MountSession{
 		ID:        sessionID,
-		Secret:    sessionSecret,
 		TeamID:    teamID,
 		CreatedAt: sessionTime,
 	}
@@ -260,10 +228,10 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID st
 		"access_mode": accessMode,
 	}).Info("Volume mounted successfully")
 
-	return sessionID, sessionSecret, sessionTime, nil
+	return sessionID, sessionTime, nil
 }
 
-func (m *Manager) selectBackend(config *VolumeConfig) (Backend, error) {
+func (m *Manager) selectBackend() (Backend, error) {
 	if backend, ok := m.backends[m.defaultBackend]; ok && backend != nil {
 		return backend, nil
 	}
@@ -275,46 +243,6 @@ func (m *Manager) selectBackend(config *VolumeConfig) (Backend, error) {
 		}
 	}
 	return nil, fmt.Errorf("storage backend %q is not configured", m.defaultBackend)
-}
-
-// AuthenticateMountSession validates a mount session credential for a specific
-// mounted volume and returns the principal bound to that session.
-func (m *Manager) AuthenticateMountSession(volumeID, sessionID, sessionSecret string) (*MountSessionPrincipal, error) {
-	if volumeID == "" || sessionID == "" || sessionSecret == "" {
-		return nil, fmt.Errorf("missing mount session credential")
-	}
-
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	volCtx, ok := m.volumes[volumeID]
-	if !ok || volCtx == nil {
-		return nil, fmt.Errorf("volume %s not mounted", volumeID)
-	}
-	sessions := m.mountSessions[volumeID]
-	if len(sessions) == 0 {
-		return nil, fmt.Errorf("mount session %s not found for volume %s", sessionID, volumeID)
-	}
-	session := sessions[sessionID]
-	if session == nil {
-		return nil, fmt.Errorf("mount session %s not found for volume %s", sessionID, volumeID)
-	}
-	if subtle.ConstantTimeCompare([]byte(session.Secret), []byte(sessionSecret)) != 1 {
-		return nil, fmt.Errorf("invalid mount session secret")
-	}
-
-	teamID := session.TeamID
-	if teamID == "" {
-		teamID = volCtx.TeamID
-	}
-	if teamID == "" {
-		return nil, fmt.Errorf("team id not found for mount session")
-	}
-
-	return &MountSessionPrincipal{
-		TeamID:    teamID,
-		SandboxID: session.SandboxID,
-	}, nil
 }
 
 func resolveMountRoot(metaClient volumeRootMeta, path string, readOnly bool, ensureWritable func(string) (fsmeta.Ino, error)) (fsmeta.Ino, error) {
@@ -426,19 +354,11 @@ func (m *Manager) UnmountVolume(ctx context.Context, volumeID, sessionID string)
 		}
 	}
 
-	backend, err := m.selectBackend(nil)
+	backend, err := m.selectBackend()
 	if err != nil {
 		m.logger.WithError(err).Warn("Failed to resolve volume backend for unmount")
 	} else if err := backend.UnmountVolume(ctx, volCtx); err != nil {
 		m.logger.WithError(err).Warn("Backend volume unmount reported errors")
-	}
-
-	// Remove from sandbox tracking
-	for sandboxID, volumes := range m.sandboxToVolumes {
-		delete(volumes, volumeID)
-		if len(volumes) == 0 {
-			delete(m.sandboxToVolumes, sandboxID)
-		}
 	}
 
 	delete(m.directMounts, volumeID)
@@ -614,54 +534,6 @@ func (m *Manager) ListMountSessions(volumeID string) []string {
 	return ids
 }
 
-// TrackVolume associates a volume with a sandbox for automatic cleanup
-func (m *Manager) TrackVolume(sandboxID, volumeID string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.sandboxToVolumes[sandboxID] == nil {
-		m.sandboxToVolumes[sandboxID] = make(map[string]struct{})
-	}
-	m.sandboxToVolumes[sandboxID][volumeID] = struct{}{}
-
-	m.logger.WithFields(logrus.Fields{
-		"sandbox_id": sandboxID,
-		"volume_id":  volumeID,
-	}).Debug("Tracking volume for sandbox")
-}
-
-// TrackVolumeSession associates a specific mount session with a sandbox for precise cleanup.
-func (m *Manager) TrackVolumeSession(sandboxID, volumeID, sessionID string) {
-	if sandboxID == "" || volumeID == "" {
-		return
-	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.sandboxToVolumes[sandboxID] == nil {
-		m.sandboxToVolumes[sandboxID] = make(map[string]struct{})
-	}
-	m.sandboxToVolumes[sandboxID][volumeID] = struct{}{}
-
-	if sessionID == "" {
-		return
-	}
-	if sessions := m.mountSessions[volumeID]; sessions != nil {
-		if session := sessions[sessionID]; session != nil {
-			session.SandboxID = sandboxID
-			session.Scope = MountSessionScopeSandbox
-			return
-		}
-	}
-
-	m.logger.WithFields(logrus.Fields{
-		"sandbox_id": sandboxID,
-		"volume_id":  volumeID,
-		"session_id": sessionID,
-	}).Warn("TrackVolumeSession called for unknown mount session")
-}
-
 // AcquireDirectVolumeFileMount acquires a shared direct session for HTTP volume file APIs.
 func (m *Manager) AcquireDirectVolumeFileMount(ctx context.Context, volumeID string, mountFn func(context.Context) (string, error)) (func(), error) {
 	if volumeID == "" {
@@ -810,97 +682,4 @@ func (m *Manager) CleanupIdleDirectVolumeFileMounts(ctx context.Context, idleTTL
 		}
 	}
 	return errs
-}
-
-func (m *Manager) listSandboxMountSessions(volumeID, sandboxID string) ([]string, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	sessions := m.mountSessions[volumeID]
-	if len(sessions) == 0 {
-		return nil, false
-	}
-
-	ids := make([]string, 0, len(sessions))
-	hasLegacyUnscoped := false
-	for sessionID, session := range sessions {
-		if session == nil || session.SandboxID == "" {
-			hasLegacyUnscoped = true
-			continue
-		}
-		if session.SandboxID == sandboxID {
-			ids = append(ids, sessionID)
-		}
-	}
-	return ids, hasLegacyUnscoped
-}
-
-// UnmountSandboxVolumes unmounts all volumes associated with a sandbox
-// This is called automatically when a sandbox pod is deleted
-func (m *Manager) UnmountSandboxVolumes(ctx context.Context, sandboxID string) []error {
-	m.mu.RLock()
-	volumes, ok := m.sandboxToVolumes[sandboxID]
-	if !ok {
-		m.mu.RUnlock()
-		return nil // No volumes for this sandbox
-	}
-	volumeIDs := make([]string, 0, len(volumes))
-	for volumeID := range volumes {
-		volumeIDs = append(volumeIDs, volumeID)
-	}
-	m.mu.RUnlock()
-
-	var errs []error
-	for _, volumeID := range volumeIDs {
-		m.logger.WithFields(logrus.Fields{
-			"sandbox_id": sandboxID,
-			"volume_id":  volumeID,
-		}).Info("Auto-unmounting volume for deleted sandbox")
-
-		sessionIDs, hasLegacyUnscoped := m.listSandboxMountSessions(volumeID, sandboxID)
-		if len(sessionIDs) == 0 {
-			if hasLegacyUnscoped {
-				m.logger.WithFields(logrus.Fields{
-					"sandbox_id": sandboxID,
-					"volume_id":  volumeID,
-				}).Warn("Skipping unscoped legacy mount sessions during sandbox cleanup")
-				continue
-			}
-
-			// Best-effort cleanup for legacy/no-session state.
-			m.mu.Lock()
-			delete(m.volumes, volumeID)
-			delete(m.mountSessions, volumeID)
-			delete(m.directMounts, volumeID)
-			delete(m.invalidates, volumeID)
-			m.mu.Unlock()
-			continue
-		}
-		for _, sessionID := range sessionIDs {
-			if err := m.UnmountVolume(ctx, volumeID, sessionID); err != nil {
-				errs = append(errs, err)
-				m.logger.WithError(err).WithFields(logrus.Fields{
-					"sandbox_id": sandboxID,
-					"volume_id":  volumeID,
-					"session_id": sessionID,
-				}).Warn("Failed to auto-unmount volume session")
-			}
-		}
-	}
-
-	// Cleanup sandbox index regardless of unmount result to avoid repeated retries
-	// against already-terminated sandboxes.
-	m.mu.Lock()
-	delete(m.sandboxToVolumes, sandboxID)
-	m.mu.Unlock()
-
-	return errs
-}
-
-func generateMountSessionSecret() (string, error) {
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(raw), nil
 }

@@ -1,4 +1,4 @@
-package volume
+package volumefuse
 
 import (
 	"context"
@@ -6,7 +6,7 @@ import (
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 )
 
-type volumeSession interface {
+type Session interface {
 	Close()
 	Lookup(context.Context, *pb.LookupRequest) (*pb.NodeResponse, error)
 	GetAttr(context.Context, *pb.GetAttrRequest) (*pb.GetAttrResponse, error)

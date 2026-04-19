@@ -108,18 +108,9 @@ type StatsResponse struct {
 
 // InitializeRequest represents the procd initialize request.
 type InitializeRequest struct {
-	SandboxID          string                   `json:"sandbox_id"`
-	TeamID             string                   `json:"team_id,omitempty"`
-	Webhook            *InitializeWebhook       `json:"webhook,omitempty"`
-	Mounts             []InitializeMountRequest `json:"mounts,omitempty"`
-	WaitForMounts      bool                     `json:"wait_for_mounts,omitempty"`
-	MountWaitTimeoutMs int32                    `json:"mount_wait_timeout_ms,omitempty"`
-}
-
-type InitializeMountRequest struct {
-	SandboxVolumeID string             `json:"sandboxvolume_id"`
-	MountPoint      string             `json:"mount_point"`
-	VolumeConfig    *MountVolumeConfig `json:"volume_config,omitempty"`
+	SandboxID string             `json:"sandbox_id"`
+	TeamID    string             `json:"team_id,omitempty"`
+	Webhook   *InitializeWebhook `json:"webhook,omitempty"`
 }
 
 // InitializeWebhook represents webhook configuration for initialization.
@@ -131,17 +122,12 @@ type InitializeWebhook struct {
 
 // InitializeResponse represents the response from procd initialize API.
 type InitializeResponse struct {
-	SandboxID       string                 `json:"sandbox_id"`
-	TeamID          string                 `json:"team_id,omitempty"`
-	BootstrapMounts []BootstrapMountStatus `json:"bootstrap_mounts,omitempty"`
-}
-
-type MountStatusResponse struct {
-	Mounts []BootstrapMountStatus `json:"mounts,omitempty"`
+	SandboxID string `json:"sandbox_id"`
+	TeamID    string `json:"team_id,omitempty"`
 }
 
 // Pause calls the procd pause API and returns resource usage.
-func (c *ProcdClient) Pause(ctx context.Context, procdAddress, internalToken, procdStorageToken string) (*PauseResponse, error) {
+func (c *ProcdClient) Pause(ctx context.Context, procdAddress, internalToken string) (*PauseResponse, error) {
 	url := procdAddress + "/api/v1/sandbox/pause"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
@@ -151,7 +137,6 @@ func (c *ProcdClient) Pause(ctx context.Context, procdAddress, internalToken, pr
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Internal-Token", internalToken)
-	req.Header.Set("X-Token-For-Procd", procdStorageToken)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -179,7 +164,7 @@ func (c *ProcdClient) Pause(ctx context.Context, procdAddress, internalToken, pr
 }
 
 // Resume calls the procd resume API.
-func (c *ProcdClient) Resume(ctx context.Context, procdAddress, internalToken, procdStorageToken string) (*ResumeResponse, error) {
+func (c *ProcdClient) Resume(ctx context.Context, procdAddress, internalToken string) (*ResumeResponse, error) {
 	url := procdAddress + "/api/v1/sandbox/resume"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
@@ -189,7 +174,6 @@ func (c *ProcdClient) Resume(ctx context.Context, procdAddress, internalToken, p
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Internal-Token", internalToken)
-	req.Header.Set("X-Token-For-Procd", procdStorageToken)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -217,7 +201,7 @@ func (c *ProcdClient) Resume(ctx context.Context, procdAddress, internalToken, p
 }
 
 // Stats calls the procd stats API.
-func (c *ProcdClient) Stats(ctx context.Context, procdAddress, internalToken, procdStorageToken string) (*StatsResponse, error) {
+func (c *ProcdClient) Stats(ctx context.Context, procdAddress, internalToken string) (*StatsResponse, error) {
 	url := procdAddress + "/api/v1/sandbox/stats"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -227,7 +211,6 @@ func (c *ProcdClient) Stats(ctx context.Context, procdAddress, internalToken, pr
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Internal-Token", internalToken)
-	req.Header.Set("X-Token-For-Procd", procdStorageToken)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -255,7 +238,7 @@ func (c *ProcdClient) Stats(ctx context.Context, procdAddress, internalToken, pr
 }
 
 // Initialize calls the procd initialize API.
-func (c *ProcdClient) Initialize(ctx context.Context, procdAddress string, req InitializeRequest, internalToken, procdStorageToken string) (*InitializeResponse, error) {
+func (c *ProcdClient) Initialize(ctx context.Context, procdAddress string, req InitializeRequest, internalToken string) (*InitializeResponse, error) {
 	url := procdAddress + "/api/v1/initialize"
 
 	jsonBody, err := json.Marshal(req)
@@ -271,7 +254,6 @@ func (c *ProcdClient) Initialize(ctx context.Context, procdAddress string, req I
 
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-Internal-Token", internalToken)
-	httpReq.Header.Set("X-Token-For-Procd", procdStorageToken)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -293,44 +275,6 @@ func (c *ProcdClient) Initialize(ctx context.Context, procdAddress string, req I
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("initialize failed with status %d", resp.StatusCode)
-	}
-
-	return result, nil
-}
-
-// MountStatus calls the procd sandbox volume status API.
-func (c *ProcdClient) MountStatus(ctx context.Context, procdAddress, internalToken, procdStorageToken string) (*MountStatusResponse, error) {
-	url := procdAddress + "/api/v1/sandboxvolumes/status"
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("X-Internal-Token", internalToken)
-	httpReq.Header.Set("X-Token-For-Procd", procdStorageToken)
-
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("do request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-
-	result, errInfo, err := decodeProcdResponse[MountStatusResponse](respBody)
-	if err != nil {
-		return nil, fmt.Errorf("decode mount status response: %w", err)
-	}
-	if errInfo != nil {
-		return nil, fmt.Errorf("mount status failed: %s", errInfo.Message)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("mount status failed with status %d", resp.StatusCode)
 	}
 
 	return result, nil

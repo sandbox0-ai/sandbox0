@@ -65,7 +65,6 @@ func ToSSHGateway(spec *infrav1alpha1.SSHGatewayConfig) *apiconfig.SSHGatewayCon
 	cfg.ResumeTimeout = spec.ResumeTimeout
 	cfg.ResumePollInterval = spec.ResumePollInterval
 	cfg.ShutdownTimeout = spec.ShutdownTimeout
-	cfg.ProcdStoragePermissions = cloneStrings(spec.ProcdStoragePermissions)
 	return cfg
 }
 
@@ -109,7 +108,6 @@ func ToClusterGateway(spec *infrav1alpha1.ClusterGatewayConfig) *apiconfig.Clust
 	cfg.DatabaseMaxConns = spec.DatabaseMaxConns
 	cfg.DatabaseMinConns = spec.DatabaseMinConns
 	cfg.SchedulerPermissions = cloneStrings(spec.SchedulerPermissions)
-	cfg.ProcdStoragePermissions = cloneStrings(spec.ProcdStoragePermissions)
 	applyGatewayConfig(&cfg.GatewayConfig, spec.GatewayConfig)
 	return cfg
 }

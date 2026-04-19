@@ -17,18 +17,6 @@ const (
 
 	// UserIDHeader is the header name for passing the user ID to internal services.
 	UserIDHeader = "X-User-ID"
-
-	// TokenForProcdHeader is the header name used to pass a storage token to procd.
-	TokenForProcdHeader = "X-Token-For-Procd"
-
-	// VolumeSessionIDHeader is the header for a storage-proxy mount session identifier.
-	VolumeSessionIDHeader = "X-Volume-Session-ID"
-
-	// VolumeSessionSecretHeader is the header for a storage-proxy mount session secret.
-	VolumeSessionSecretHeader = "X-Volume-Session-Secret"
-
-	// VolumeIDHeader carries the volume identifier for stream-scoped session auth.
-	VolumeIDHeader = "X-Volume-ID"
 )
 
 // TokenExtractor extracts the internal token from an HTTP request.

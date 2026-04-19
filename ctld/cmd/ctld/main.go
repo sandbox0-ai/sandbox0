@@ -7,23 +7,23 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"syscall"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
-	ctldfuseplugin "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/fuseplugin"
+	ctldportal "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/portal"
 	ctldpower "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/power"
 	ctldserver "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/server"
+	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/k8s"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"go.uber.org/zap"
-	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 )
 
 var (
-	mountsAllowed          = 5
 	httpAddr               = ":8095"
 	kubeconfig             = ""
 	cgroupRoot             = "/host-sys/fs/cgroup"
@@ -35,10 +35,11 @@ var (
 	pauseMemoryBufferRatio = "1.1"
 	pauseMinCPU            = "10m"
 	defaultSandboxTTL      time.Duration
+	portalRoot             = "/var/lib/sandbox0/ctld"
+	csiSocket              = "/var/lib/kubelet/plugins/volume.sandbox0.ai/csi.sock"
 )
 
 func main() {
-	flag.IntVar(&mountsAllowed, "mounts-allowed", 100, "maximum times the fuse device can be mounted")
 	flag.StringVar(&httpAddr, "http-addr", ":8095", "HTTP listen address for ctld health and control endpoints")
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "optional kubeconfig path used by ctld")
 	flag.StringVar(&cgroupRoot, "cgroup-root", "/host-sys/fs/cgroup", "host cgroup root mounted into ctld")
@@ -50,6 +51,8 @@ func main() {
 	flag.StringVar(&pauseMemoryBufferRatio, "pause-memory-buffer-ratio", "1.1", "memory limit multiplier applied to paused sandbox working set")
 	flag.StringVar(&pauseMinCPU, "pause-min-cpu", "10m", "minimum CPU request and limit to apply to paused sandbox pods")
 	flag.DurationVar(&defaultSandboxTTL, "default-sandbox-ttl", 0, "default sandbox TTL restored on resume when no original TTL is recorded")
+	flag.StringVar(&portalRoot, "volume-portal-root", "/var/lib/sandbox0/ctld", "host-local root for ctld volume portal WAL and cache")
+	flag.StringVar(&csiSocket, "csi-socket", "/var/lib/kubelet/plugins/volume.sandbox0.ai/csi.sock", "CSI endpoint socket for sandbox volume portals")
 	flag.Parse()
 
 	log.Println("Starting ctld")
@@ -81,7 +84,23 @@ func main() {
 		}
 	}
 
-	httpServer := newHTTPServer(httpAddr, buildPowerController(ctx, obsProvider))
+	portalManager := ctldportal.NewManager(ctldportal.Config{
+		NodeName: nodeName,
+		RootDir:  portalRoot,
+		Logger:   zapLogger,
+	})
+	csiServer := ctldportal.NewCSIServer(nodeName, portalManager)
+	go func() {
+		if err := csiServer.Serve(csiSocket); err != nil && ctx.Err() == nil {
+			log.Fatalf("ctld volume portal CSI server failed: %v", err)
+		}
+	}()
+	defer csiServer.Stop()
+
+	httpServer := newHTTPServer(httpAddr, combinedController{
+		Controller: buildPowerController(ctx, obsProvider),
+		Portal:     portalManager,
+	})
 	if obsProvider != nil {
 		httpServer.Handler = httpobs.ServerMiddleware(obsProvider.HTTPServerConfig(zapLogger))(httpServer.Handler)
 	}
@@ -91,63 +110,14 @@ func main() {
 		}
 	}()
 
-	log.Println("Starting FS watcher.")
-	watcher, err := ctldfuseplugin.NewFSWatcher(pluginapi.DevicePluginPath)
-	if err != nil {
-		log.Println("Failed to created FS watcher.")
-		os.Exit(1)
-	}
-	defer watcher.Close()
-
-	log.Println("Starting OS watcher.")
-	sigs := ctldfuseplugin.NewOSWatcher(syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
-
-	restart := true
-	var devicePlugin *ctldfuseplugin.DevicePlugin
-
-L:
-	for {
-		if restart {
-			if devicePlugin != nil {
-				devicePlugin.Stop()
-			}
-
-			devicePlugin = ctldfuseplugin.NewDevicePlugin(mountsAllowed)
-			if err := devicePlugin.Serve(); err != nil {
-				log.Println("Could not contact Kubelet, retrying. Did you enable the device plugin feature gate?")
-			} else {
-				restart = false
-			}
-		}
-
-		select {
-		case event := <-watcher.Events:
-			if event.Name == pluginapi.KubeletSocket && event.Op&fsnotify.Create == fsnotify.Create {
-				log.Printf("inotify: %s created, restarting.", pluginapi.KubeletSocket)
-				restart = true
-			}
-
-		case err := <-watcher.Errors:
-			log.Printf("inotify: %s", err)
-
-		case s := <-sigs:
-			switch s {
-			case syscall.SIGHUP:
-				log.Println("Received SIGHUP, restarting.")
-				restart = true
-			default:
-				log.Printf("Received signal \"%v\", shutting down.", s)
-				cancel()
-				if devicePlugin != nil {
-					devicePlugin.Stop()
-				}
-				shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				_ = httpServer.Shutdown(shutdownCtx)
-				cancel()
-				break L
-			}
-		}
-	}
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+	s := <-sigs
+	log.Printf("Received signal \"%v\", shutting down.", s)
+	cancel()
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_ = httpServer.Shutdown(shutdownCtx)
+	shutdownCancel()
 }
 
 func newHTTPServer(addr string, controller ctldserver.Controller) *http.Server {
@@ -202,4 +172,29 @@ func buildPowerController(ctx context.Context, obsProvider *observability.Provid
 		}()
 	}
 	return controller
+}
+
+type combinedController struct {
+	ctldserver.Controller
+	Portal *ctldportal.Manager
+}
+
+func (c combinedController) BindVolumePortal(r *http.Request, req ctldapi.BindVolumePortalRequest) (ctldapi.BindVolumePortalResponse, int) {
+	resp, err := c.Portal.Bind(r.Context(), req)
+	if err != nil {
+		return ctldapi.BindVolumePortalResponse{Error: err.Error()}, http.StatusBadRequest
+	}
+	return resp, http.StatusOK
+}
+
+func (c combinedController) UnbindVolumePortal(r *http.Request, req ctldapi.UnbindVolumePortalRequest) (ctldapi.UnbindVolumePortalResponse, int) {
+	resp, err := c.Portal.Unbind(r.Context(), req)
+	if err != nil {
+		return ctldapi.UnbindVolumePortalResponse{Error: err.Error()}, http.StatusBadRequest
+	}
+	return resp, http.StatusOK
+}
+
+func (c combinedController) Probe(r *http.Request, sandboxID string, kind sandboxprobe.Kind) (sandboxprobe.Response, int) {
+	return c.Controller.Probe(r, sandboxID, kind)
 }

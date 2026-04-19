@@ -87,7 +87,7 @@ func (s *SandboxService) pauseSandboxLocal(ctx context.Context, sandboxID string
 	expected := currentSandboxPowerExpectation(pod.Annotations, SandboxPowerStatePaused)
 
 	// Generate internal token for procd authentication
-	if s.internalTokenGenerator == nil || s.procdTokenGenerator == nil {
+	if s.internalTokenGenerator == nil {
 		return nil, fmt.Errorf("token generators not configured, cannot authenticate with procd")
 	}
 	teamID := pod.Annotations[controller.AnnotationTeamID]
@@ -98,17 +98,12 @@ func (s *SandboxService) pauseSandboxLocal(ctx context.Context, sandboxID string
 		return nil, fmt.Errorf("generate internal token: %w", err)
 	}
 
-	procdToken, err := s.procdTokenGenerator.GenerateToken(teamID, userID, sandboxID)
-	if err != nil {
-		return nil, fmt.Errorf("generate procd token: %w", err)
-	}
-
 	// Call procd pause API
 	procdAddress, err := s.prodAddress(ctx, pod)
 	if err != nil {
 		return nil, fmt.Errorf("get procd address: %w", err)
 	}
-	pauseResp, err := s.procdClient.Pause(ctx, procdAddress, internalToken, procdToken)
+	pauseResp, err := s.procdClient.Pause(ctx, procdAddress, internalToken)
 	if err != nil {
 		return nil, fmt.Errorf("call procd pause: %w", err)
 	}
@@ -119,7 +114,7 @@ func (s *SandboxService) pauseSandboxLocal(ctx context.Context, sandboxID string
 
 	completedResp, err := s.completePausedSandbox(ctx, pod, sandboxID, pauseResp.ResourceUsage, expected)
 	if err != nil && errors.Is(err, errSandboxPowerStateStale) && completedResp != nil && completedResp.PowerState.Desired == SandboxPowerStateActive {
-		resumeResp, resumeErr := s.procdClient.Resume(ctx, procdAddress, internalToken, procdToken)
+		resumeResp, resumeErr := s.procdClient.Resume(ctx, procdAddress, internalToken)
 		if resumeErr != nil {
 			return completedResp, fmt.Errorf("resume procd after stale pause: %w", resumeErr)
 		}
@@ -190,7 +185,7 @@ func (s *SandboxService) resumeSandboxLocal(ctx context.Context, sandboxID strin
 	pod = prep.Pod
 
 	// Generate internal token for procd authentication
-	if s.internalTokenGenerator == nil || s.procdTokenGenerator == nil {
+	if s.internalTokenGenerator == nil {
 		return nil, fmt.Errorf("token generators not configured, cannot authenticate with procd")
 	}
 	teamID := pod.Annotations[controller.AnnotationTeamID]
@@ -201,17 +196,12 @@ func (s *SandboxService) resumeSandboxLocal(ctx context.Context, sandboxID strin
 		return nil, fmt.Errorf("generate internal token: %w", err)
 	}
 
-	procdToken, err := s.procdTokenGenerator.GenerateToken(teamID, userID, sandboxID)
-	if err != nil {
-		return nil, fmt.Errorf("generate procd token: %w", err)
-	}
-
 	// Call procd resume API
 	procdAddress, err := s.prodAddress(ctx, pod)
 	if err != nil {
 		return nil, fmt.Errorf("get procd address: %w", err)
 	}
-	resumeResp, err := s.procdClient.Resume(ctx, procdAddress, internalToken, procdToken)
+	resumeResp, err := s.procdClient.Resume(ctx, procdAddress, internalToken)
 	if err != nil {
 		return nil, fmt.Errorf("call procd resume: %w", err)
 	}
@@ -587,7 +577,7 @@ func (s *SandboxService) GetSandboxResourceUsage(ctx context.Context, sandboxID 
 	}
 
 	// Generate internal token for procd authentication
-	if s.internalTokenGenerator == nil || s.procdTokenGenerator == nil {
+	if s.internalTokenGenerator == nil {
 		return nil, fmt.Errorf("token generators not configured, cannot authenticate with procd")
 	}
 	teamID := pod.Annotations[controller.AnnotationTeamID]
@@ -598,17 +588,12 @@ func (s *SandboxService) GetSandboxResourceUsage(ctx context.Context, sandboxID 
 		return nil, fmt.Errorf("generate internal token: %w", err)
 	}
 
-	procdToken, err := s.procdTokenGenerator.GenerateToken(teamID, userID, sandboxID)
-	if err != nil {
-		return nil, fmt.Errorf("generate procd token: %w", err)
-	}
-
 	// Call procd stats API
 	procdAddress, err := s.prodAddress(ctx, pod)
 	if err != nil {
 		return nil, fmt.Errorf("get procd address: %w", err)
 	}
-	statsResp, err := s.procdClient.Stats(ctx, procdAddress, internalToken, procdToken)
+	statsResp, err := s.procdClient.Stats(ctx, procdAddress, internalToken)
 	if err != nil {
 		return nil, fmt.Errorf("call procd stats: %w", err)
 	}

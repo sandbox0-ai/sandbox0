@@ -47,8 +47,8 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/rbac"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/clustergateway"
+	ctldsvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/ctld"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/fuseplugin"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/globalgateway"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/manager"
@@ -91,6 +91,7 @@ type Sandbox0InfraReconciler struct {
 //+kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses;networkpolicies,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings;clusterroles;clusterrolebindings,verbs=get;list;watch;create;update;patch;delete;bind
 //+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=storage.k8s.io,resources=csidrivers,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=validatingwebhookconfigurations;mutatingwebhookconfigurations,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=sandbox0.ai,resources=sandboxtemplates;sandboxtemplates/status,verbs=get;list;watch;create;update;patch;delete
 
@@ -241,7 +242,7 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 	clusterGatewayReconciler := clustergateway.NewReconciler(resources)
 	managerReconciler := manager.NewReconciler(resources)
 	storageProxyReconciler := storageproxy.NewReconciler(resources)
-	fusePluginReconciler := fuseplugin.NewReconciler(resources)
+	ctldReconciler := ctldsvc.NewReconciler(resources)
 	netdReconciler := netd.NewReconciler(resources)
 	nodeReadinessReconciler := nodereadiness.NewReconciler(resources)
 	rbacReconciler := rbac.NewReconciler(resources)
@@ -250,7 +251,7 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 		return ctrl.Result{RequeueAfter: requeueInterval}, err
 	}
 
-	steps, err := r.bindWorkflowSteps(infra, compiledPlan, resources, imageRepo, imageTag, authReconciler, dbReconciler, storageReconciler, registryReconciler, globalGatewayReconciler, regionalGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, fusePluginReconciler, netdReconciler, nodeReadinessReconciler, rbacReconciler)
+	steps, err := r.bindWorkflowSteps(infra, compiledPlan, resources, imageRepo, imageTag, authReconciler, dbReconciler, storageReconciler, registryReconciler, globalGatewayReconciler, regionalGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, ctldReconciler, netdReconciler, nodeReadinessReconciler, rbacReconciler)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -273,14 +274,14 @@ func (r *Sandbox0InfraReconciler) bindWorkflowSteps(
 	clusterGatewayReconciler *clustergateway.Reconciler,
 	managerReconciler *manager.Reconciler,
 	storageProxyReconciler *storageproxy.Reconciler,
-	fusePluginReconciler *fuseplugin.Reconciler,
+	ctldReconciler *ctldsvc.Reconciler,
 	netdReconciler *netd.Reconciler,
 	nodeReadinessReconciler *nodereadiness.Reconciler,
 	rbacReconciler *rbac.Reconciler,
 ) ([]reconcileStep, error) {
 	steps := make([]reconcileStep, 0, len(compiledPlan.Workflow.Steps))
 	for _, planned := range compiledPlan.Workflow.Steps {
-		run, err := r.workflowStepRunner(infra, compiledPlan, resources, imageRepo, imageTag, planned.Name, authReconciler, dbReconciler, storageReconciler, registryReconciler, globalGatewayReconciler, regionalGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, fusePluginReconciler, netdReconciler, nodeReadinessReconciler, rbacReconciler)
+		run, err := r.workflowStepRunner(infra, compiledPlan, resources, imageRepo, imageTag, planned.Name, authReconciler, dbReconciler, storageReconciler, registryReconciler, globalGatewayReconciler, regionalGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, ctldReconciler, netdReconciler, nodeReadinessReconciler, rbacReconciler)
 		if err != nil {
 			return nil, err
 		}
@@ -313,7 +314,7 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 	clusterGatewayReconciler *clustergateway.Reconciler,
 	managerReconciler *manager.Reconciler,
 	storageProxyReconciler *storageproxy.Reconciler,
-	fusePluginReconciler *fuseplugin.Reconciler,
+	ctldReconciler *ctldsvc.Reconciler,
 	netdReconciler *netd.Reconciler,
 	nodeReadinessReconciler *nodereadiness.Reconciler,
 	rbacReconciler *rbac.Reconciler,
@@ -379,12 +380,12 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 		return func(ctx context.Context) error {
 			return clusterGatewayReconciler.Reconcile(ctx, imageRepo, imageTag, compiledPlan)
 		}, nil
-	case "fuse-device-plugin":
+	case "ctld":
 		return func(ctx context.Context) error {
 			if err := rbacReconciler.ReconcileCtldRBAC(ctx, infra); err != nil {
 				return err
 			}
-			return fusePluginReconciler.Reconcile(ctx, infra, imageRepo, imageTag)
+			return ctldReconciler.Reconcile(ctx, infra, imageRepo, imageTag)
 		}, nil
 	case "manager-rbac":
 		return func(ctx context.Context) error { return rbacReconciler.ReconcileManagerRBAC(ctx, infra) }, nil
@@ -765,7 +766,7 @@ func managedConditionTypeSet() map[string]struct{} {
 		infrav1alpha1.ConditionTypeManagerReady:         {},
 		infrav1alpha1.ConditionTypeStorageProxyReady:    {},
 		infrav1alpha1.ConditionTypeNetdReady:            {},
-		infrav1alpha1.ConditionTypeFusePluginReady:      {},
+		infrav1alpha1.ConditionTypeCtldReady:            {},
 		infrav1alpha1.ConditionTypeClusterRegistered:    {},
 		infrav1alpha1.ConditionTypeSecretsGenerated:     {},
 	}

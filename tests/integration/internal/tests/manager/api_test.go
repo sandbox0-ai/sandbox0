@@ -21,6 +21,7 @@ import (
 	managerhttp "github.com/sandbox0-ai/sandbox0/manager/pkg/http"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/namespacepolicy"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
@@ -31,6 +32,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	corelisters "k8s.io/client-go/listers/core/v1"
@@ -47,8 +49,8 @@ type managerTestEnv struct {
 type managerTestEnvOptions struct {
 	sandboxConfig          service.SandboxServiceConfig
 	internalTokenGenerator service.TokenGenerator
-	procdTokenGenerator    service.TokenGenerator
 	procdClient            *service.ProcdClient
+	volumeMetadata         service.SandboxVolumeMetadataClient
 }
 
 func newManagerTestEnv(t *testing.T) *managerTestEnv {
@@ -80,7 +82,6 @@ func newManagerTestEnvWithProcd(t *testing.T) *managerTestEnv {
 			ProcdInitTimeout:       5 * time.Second,
 		},
 		internalTokenGenerator: service.NewInternalTokenGenerator(procdGen),
-		procdTokenGenerator:    service.NewProcdTokenGenerator(procdGen),
 		procdClient:            procdClient,
 	})
 }
@@ -146,7 +147,6 @@ func newManagerTestEnvWithOptions(t *testing.T, opts managerTestEnvOptions) *man
 		nil,
 		nil,
 		opts.internalTokenGenerator,
-		opts.procdTokenGenerator,
 		nil,
 		opts.sandboxConfig,
 		logger,
@@ -154,6 +154,9 @@ func newManagerTestEnvWithOptions(t *testing.T, opts managerTestEnvOptions) *man
 	)
 	if opts.procdClient != nil {
 		sandboxService.SetProcdClient(opts.procdClient)
+	}
+	if opts.volumeMetadata != nil {
+		sandboxService.SetVolumeMetadataClient(opts.volumeMetadata)
 	}
 
 	templateService := service.NewTemplateService(
@@ -257,20 +260,22 @@ func TestCreateTemplateLegacyEnsuresNamespaceIngressBaseline(t *testing.T) {
 	}
 }
 
-func TestClaimSandboxPassesBootstrapMountsToProcd(t *testing.T) {
+func TestClaimSandboxBindsDeclaredVolumePortal(t *testing.T) {
 	recorder := &initializeRequestRecorder{}
 	procdServer := newInitializeRecordingProcdServer(t, recorder, service.InitializeResponse{
 		SandboxID: "initialized",
-		BootstrapMounts: []service.BootstrapMountStatus{{
-			SandboxVolumeID: "vol-1",
-			MountPoint:      "/workspace/data",
-			State:           "mounted",
-			MountSessionID:  "session-1",
-		}},
 	})
 	t.Cleanup(procdServer.Close)
+	ctldRecorder := &volumePortalBindRecorder{}
+	ctldServer := newVolumePortalBindRecordingCtldServer(t, ctldRecorder, ctldapi.BindVolumePortalResponse{
+		SandboxVolumeID: "vol-1",
+		MountPoint:      "/workspace/data",
+		MountedAt:       time.Now().UTC().Format(time.RFC3339),
+	})
+	t.Cleanup(ctldServer.Close)
 
 	procdClient := newProcdClientForURL(t, procdServer.URL)
+	ctldHTTPClient := newRewriteHTTPClientForURL(t, ctldServer.URL)
 	privateKey, _, err := createInternalKeys()
 	utils.RequireNoError(t, err, "create procd keys")
 	procdGen := internalauth.NewGenerator(internalauth.DefaultGeneratorConfig("manager", privateKey))
@@ -285,16 +290,23 @@ func TestClaimSandboxPassesBootstrapMountsToProcd(t *testing.T) {
 			ProcdPort:              49983,
 			ProcdClientTimeout:     5 * time.Second,
 			ProcdInitTimeout:       5 * time.Second,
+			CtldPort:               8095,
+			CtldHTTPClient:         ctldHTTPClient,
 		},
 		internalTokenGenerator: service.NewInternalTokenGenerator(procdGen),
-		procdTokenGenerator:    service.NewProcdTokenGenerator(procdGen),
 		procdClient:            procdClient,
+		volumeMetadata:         staticVolumeMetadataClient{accessMode: "RWO"},
 	})
 
 	templateName := "claim-bootstrap"
 	resp, body := doRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/internal/v1/templates", env.token, map[string]any{
 		"metadata": map[string]any{"name": templateName},
-		"spec":     map[string]any{},
+		"spec": map[string]any{
+			"volumeMounts": []map[string]any{{
+				"name":      "data",
+				"mountPath": "/workspace/data",
+			}},
+		},
 	})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create template status = %d, body = %s", resp.StatusCode, string(body))
@@ -302,7 +314,13 @@ func TestClaimSandboxPassesBootstrapMountsToProcd(t *testing.T) {
 
 	namespace, err := naming.TemplateNamespaceForBuiltin(templateName)
 	utils.RequireNoError(t, err, "resolve template namespace")
-	addIdleReadyPod(t, env, namespace, "idle-bootstrap", templateName, "10.0.0.10")
+	addNode(t, env, "node-a", "10.0.0.1")
+	addIdleReadyPodForTemplate(t, env, &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: templateName, Namespace: namespace},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			VolumeMounts: []v1alpha1.VolumeMountSpec{{Name: "data", MountPath: "/workspace/data"}},
+		},
+	}, "idle-bootstrap", "10.0.0.10", "node-a")
 
 	resp, body = doRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/api/v1/sandboxes", env.token, map[string]any{
 		"template": templateName,
@@ -310,8 +328,6 @@ func TestClaimSandboxPassesBootstrapMountsToProcd(t *testing.T) {
 			"sandboxvolume_id": "vol-1",
 			"mount_point":      "/workspace/data",
 		}},
-		"wait_for_mounts":       true,
-		"mount_wait_timeout_ms": 1500,
 	})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("claim status = %d, body = %s", resp.StatusCode, string(body))
@@ -330,19 +346,14 @@ func TestClaimSandboxPassesBootstrapMountsToProcd(t *testing.T) {
 	if claimResp.BootstrapMounts[0].State != "mounted" {
 		t.Fatalf("claim bootstrap state = %q, want mounted", claimResp.BootstrapMounts[0].State)
 	}
+	bindReq := ctldRecorder.Get()
+	if bindReq.SandboxVolumeID != "vol-1" || bindReq.MountPath != "/workspace/data" || bindReq.PortalName != "data" {
+		t.Fatalf("unexpected ctld bind request: %+v", bindReq)
+	}
 
 	initReq := recorder.Get()
-	if !initReq.WaitForMounts {
-		t.Fatal("expected wait_for_mounts to be forwarded")
-	}
-	if initReq.MountWaitTimeoutMs != 1500 {
-		t.Fatalf("mount_wait_timeout_ms = %d, want 1500", initReq.MountWaitTimeoutMs)
-	}
-	if len(initReq.Mounts) != 1 {
-		t.Fatalf("initialize mounts = %d, want 1", len(initReq.Mounts))
-	}
-	if initReq.Mounts[0].SandboxVolumeID != "vol-1" || initReq.Mounts[0].MountPoint != "/workspace/data" {
-		t.Fatalf("unexpected initialize mount payload: %+v", initReq.Mounts[0])
+	if initReq.SandboxID != claimResp.SandboxID || initReq.TeamID != "team-1" {
+		t.Fatalf("unexpected initialize request: %+v", initReq)
 	}
 }
 
@@ -423,19 +434,25 @@ func addSandboxPod(t *testing.T, env *managerTestEnv, name, teamID, userID strin
 
 func addIdleReadyPod(t *testing.T, env *managerTestEnv, namespace, name, templateID, podIP string) {
 	t.Helper()
-	templateHash, err := controller.TemplateSpecHash(&v1alpha1.SandboxTemplate{
+	addIdleReadyPodForTemplate(t, env, &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      templateID,
 			Namespace: namespace,
 		},
-	})
+	}, name, podIP, "")
+}
+
+func addIdleReadyPodForTemplate(t *testing.T, env *managerTestEnv, template *v1alpha1.SandboxTemplate, name, podIP, nodeName string) {
+	t.Helper()
+	templateHash, err := controller.TemplateSpecHash(template)
 	utils.RequireNoError(t, err, "compute template spec hash")
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
-			Namespace: namespace,
+			Namespace: template.Namespace,
+			UID:       types.UID("pod-" + name),
 			Labels: map[string]string{
-				controller.LabelTemplateID: templateID,
+				controller.LabelTemplateID: template.Name,
 				controller.LabelPoolType:   controller.PoolTypeIdle,
 			},
 			Annotations: map[string]string{
@@ -443,6 +460,7 @@ func addIdleReadyPod(t *testing.T, env *managerTestEnv, namespace, name, templat
 			},
 			ResourceVersion: "1",
 		},
+		Spec: corev1.PodSpec{NodeName: nodeName},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
 			PodIP: podIP,
@@ -452,9 +470,24 @@ func addIdleReadyPod(t *testing.T, env *managerTestEnv, namespace, name, templat
 			}},
 		},
 	}
-	_, err = env.k8sClient.CoreV1().Pods(namespace).Create(context.Background(), pod, metav1.CreateOptions{})
+	_, err = env.k8sClient.CoreV1().Pods(template.Namespace).Create(context.Background(), pod, metav1.CreateOptions{})
 	utils.RequireNoError(t, err, "create ready idle pod in fake client")
 	utils.RequireNoError(t, env.podIndexer.Add(pod), "add ready idle pod to indexer")
+}
+
+func addNode(t *testing.T, env *managerTestEnv, name, internalIP string) {
+	t.Helper()
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Status: corev1.NodeStatus{
+			Addresses: []corev1.NodeAddress{{
+				Type:    corev1.NodeInternalIP,
+				Address: internalIP,
+			}},
+		},
+	}
+	_, err := env.k8sClient.CoreV1().Nodes().Create(context.Background(), node, metav1.CreateOptions{})
+	utils.RequireNoError(t, err, "create node in fake client")
 }
 
 type initializeRequestRecorder struct {
@@ -463,6 +496,47 @@ type initializeRequestRecorder struct {
 
 func (r *initializeRequestRecorder) Set(req service.InitializeRequest) {
 	r.request = req
+}
+
+type volumePortalBindRecorder struct {
+	request ctldapi.BindVolumePortalRequest
+}
+
+type staticVolumeMetadataClient struct {
+	accessMode string
+}
+
+func (c staticVolumeMetadataClient) Get(_ context.Context, teamID, userID, volumeID string) (*service.SandboxVolumeInfo, error) {
+	return &service.SandboxVolumeInfo{
+		ID:         volumeID,
+		TeamID:     teamID,
+		UserID:     userID,
+		AccessMode: c.accessMode,
+	}, nil
+}
+
+func (r *volumePortalBindRecorder) Set(req ctldapi.BindVolumePortalRequest) {
+	r.request = req
+}
+
+func (r *volumePortalBindRecorder) Get() ctldapi.BindVolumePortalRequest {
+	return r.request
+}
+
+func newVolumePortalBindRecordingCtldServer(t *testing.T, recorder *volumePortalBindRecorder, response ctldapi.BindVolumePortalResponse) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/volume-portals/bind", func(w http.ResponseWriter, r *http.Request) {
+		var req ctldapi.BindVolumePortalRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode ctld bind request: %v", err)
+		}
+		if recorder != nil {
+			recorder.Set(req)
+		}
+		_ = json.NewEncoder(w).Encode(response)
+	})
+	return httptest.NewServer(mux)
 }
 
 func (r *initializeRequestRecorder) Get() service.InitializeRequest {
@@ -499,19 +573,21 @@ func (r rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 func newProcdClientForURL(t *testing.T, baseURL string) *service.ProcdClient {
 	t.Helper()
+	return service.NewProcdClientWithHTTPClient(newRewriteHTTPClientForURL(t, baseURL))
+}
 
+func newRewriteHTTPClientForURL(t *testing.T, baseURL string) *http.Client {
+	t.Helper()
 	parsed, err := url.Parse(baseURL)
-	utils.RequireNoError(t, err, "parse procd url")
+	utils.RequireNoError(t, err, "parse url")
 
-	httpClient := &http.Client{
+	return &http.Client{
 		Timeout: 5 * time.Second,
 		Transport: rewriteTransport{
 			base:      parsed,
 			transport: http.DefaultTransport,
 		},
 	}
-
-	return service.NewProcdClientWithHTTPClient(httpClient)
 }
 
 func newProcdStubServer(t *testing.T) *httptest.Server {

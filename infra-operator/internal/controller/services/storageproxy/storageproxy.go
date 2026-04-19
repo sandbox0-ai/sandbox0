@@ -98,10 +98,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		return err
 	}
 
-	volumeProtocolPort := int32(config.VolumeProtocolPort)
-	if volumeProtocolPort == 0 {
-		volumeProtocolPort = 8082
-	}
 	httpPort := int32(config.HTTPPort)
 	metricsPort := int32(config.MetricsPort)
 
@@ -196,14 +192,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	// Create deployment
 	if err := r.Resources.ReconcileDeployment(ctx, infra, deploymentName, labels, replicas, common.ServiceDefinition{
 		Name:               "storage-proxy",
-		Port:               volumeProtocolPort,
-		TargetPort:         volumeProtocolPort,
+		Port:               httpPort,
+		TargetPort:         httpPort,
 		ServiceAccountName: fmt.Sprintf("%s-storage-proxy", infra.Name),
 		Ports: []corev1.ContainerPort{
-			{
-				Name:          "s0vp",
-				ContainerPort: volumeProtocolPort,
-			},
 			{
 				Name:          "http",
 				ContainerPort: httpPort,
@@ -257,7 +249,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	httpServicePort := common.ResolveServicePort(serviceConfig, httpPort)
 	serviceAnnotations := common.ResolveServiceAnnotations(serviceConfig)
 	if err := r.Resources.ReconcileServicePorts(ctx, infra, serviceName, labels, serviceType, serviceAnnotations, []corev1.ServicePort{
-		common.BuildServicePort("s0vp", volumeProtocolPort, volumeProtocolPort, serviceType),
 		common.BuildServicePort("http", httpServicePort, httpPort, serviceType),
 		common.BuildServicePort("metrics", metricsPort, metricsPort, serviceType),
 	}); err != nil {

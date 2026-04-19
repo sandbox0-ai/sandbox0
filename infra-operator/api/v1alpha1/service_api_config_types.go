@@ -240,9 +240,6 @@ type SSHGatewayConfig struct {
 	// +optional
 	// +kubebuilder:default="30s"
 	ShutdownTimeout metav1.Duration `json:"shutdownTimeout,omitempty"`
-	// +optional
-	// +kubebuilder:default={"sandboxvolume:read","sandboxvolume:write"}
-	ProcdStoragePermissions []string `json:"procdStoragePermissions,omitempty"`
 }
 
 // DatabasePoolConfig defines scheduler database pool settings.
@@ -329,9 +326,6 @@ type ClusterGatewayConfig struct {
 	// +optional
 	// +kubebuilder:default={"*:*"}
 	SchedulerPermissions []string `json:"schedulerPermissions,omitempty"`
-	// +optional
-	// +kubebuilder:default={"sandboxvolume:read","sandboxvolume:write"}
-	ProcdStoragePermissions []string `json:"procdStoragePermissions,omitempty"`
 }
 
 // ProcdConfig defines user-facing procd settings managed by manager.
@@ -343,26 +337,8 @@ type ProcdConfig struct {
 	// +kubebuilder:default="info"
 	LogLevel string `json:"logLevel,omitempty"`
 	// +optional
-	// +kubebuilder:default="100"
-	VolumeCacheSize string `json:"volumeCacheSize,omitempty"`
-	// +optional
-	// +kubebuilder:default=3
-	VolumePrefetch int `json:"volumePrefetch,omitempty"`
-	// +optional
-	// +kubebuilder:default="300"
-	VolumeBufferSize string `json:"volumeBufferSize,omitempty"`
-	// +optional
-	// +kubebuilder:default=true
-	VolumeWriteback bool `json:"volumeWriteback,omitempty"`
-	// +optional
 	// +kubebuilder:default="/workspace"
 	RootPath string `json:"rootPath,omitempty"`
-	// +optional
-	// +kubebuilder:default=104857600
-	CacheMaxBytes int64 `json:"cacheMaxBytes,omitempty"`
-	// +optional
-	// +kubebuilder:default="30s"
-	CacheTTL metav1.Duration `json:"cacheTtl,omitempty"`
 	// +optional
 	// +kubebuilder:default="30s"
 	ContextCleanupInterval metav1.Duration `json:"contextCleanupInterval,omitempty"`
@@ -498,12 +474,6 @@ type ManagerConfig struct {
 type StorageProxyConfig struct {
 	// +optional
 	// +kubebuilder:default="0.0.0.0"
-	VolumeProtocolAddr string `json:"volumeProtocolAddr,omitempty"`
-	// +optional
-	// +kubebuilder:default=8082
-	VolumeProtocolPort int `json:"volumeProtocolPort,omitempty"`
-	// +optional
-	// +kubebuilder:default="0.0.0.0"
 	HTTPAddr string `json:"httpAddr,omitempty"`
 	// +optional
 	// +kubebuilder:default=8081
@@ -567,9 +537,6 @@ type StorageProxyConfig struct {
 	// +optional
 	// +kubebuilder:default="30s"
 	DirectVolumeFileIdleTTL string `json:"directVolumeFileIdleTTL,omitempty"`
-	// +optional
-	// +kubebuilder:default="1G"
-	DefaultCacheSize string `json:"defaultCacheSize,omitempty"`
 	// +optional
 	// +kubebuilder:default="/var/lib/storage-proxy/cache"
 	CacheDir string `json:"cacheDir,omitempty"`

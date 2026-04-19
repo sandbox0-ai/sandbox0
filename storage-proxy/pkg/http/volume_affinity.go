@@ -155,7 +155,6 @@ func (s *Server) prepareVolumeFileMount(ctx context.Context, volumeID string) (f
 	cleanup, err := s.volMgr.AcquireDirectVolumeFileMount(ctx, volumeID, func(mountCtx context.Context) (string, error) {
 		resp, err := s.fileRPC.MountVolume(mountCtx, &pb.MountVolumeRequest{
 			VolumeId: volumeID,
-			Config:   &pb.VolumeConfig{},
 		})
 		if err != nil {
 			return "", translateVolumeRPCError(err)

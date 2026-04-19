@@ -11,6 +11,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
@@ -68,6 +69,9 @@ func validateTemplateSpec(spec v1alpha1.SandboxTemplateSpec) error {
 	if err := validateWarmProcesses(spec.WarmProcesses); err != nil {
 		return err
 	}
+	if err := validateVolumeMounts(spec.VolumeMounts); err != nil {
+		return err
+	}
 
 	if spec.Pool.MinIdle < 0 {
 		return fmt.Errorf("spec.pool.minIdle must be >= 0")
@@ -99,6 +103,36 @@ func validateTemplateSpec(spec v1alpha1.SandboxTemplateSpec) error {
 		}
 	}
 
+	return nil
+}
+
+func validateVolumeMounts(mounts []v1alpha1.VolumeMountSpec) error {
+	seenNames := make(map[string]struct{}, len(mounts))
+	seenPaths := make(map[string]struct{}, len(mounts))
+	for i, mount := range mounts {
+		field := fmt.Sprintf("spec.volumeMounts[%d]", i)
+		name := strings.TrimSpace(mount.Name)
+		if name == "" {
+			return fmt.Errorf("%s.name is required", field)
+		}
+		if _, ok := seenNames[name]; ok {
+			return fmt.Errorf("%s.name %q is duplicated", field, name)
+		}
+		seenNames[name] = struct{}{}
+
+		mountPath := strings.TrimSpace(mount.MountPath)
+		cleanMountPath := filepath.Clean(mountPath)
+		if mountPath == "" || mountPath != cleanMountPath || !filepath.IsAbs(cleanMountPath) || cleanMountPath == string(filepath.Separator) {
+			return fmt.Errorf("%s.mountPath is invalid", field)
+		}
+		if cleanMountPath == volumeportal.WebhookStateMountPath || strings.HasPrefix(cleanMountPath, volumeportal.WebhookStateMountPath+string(filepath.Separator)) {
+			return fmt.Errorf("%s.mountPath uses a sandbox0 reserved path", field)
+		}
+		if _, ok := seenPaths[cleanMountPath]; ok {
+			return fmt.Errorf("%s.mountPath %q is duplicated", field, cleanMountPath)
+		}
+		seenPaths[cleanMountPath] = struct{}{}
+	}
 	return nil
 }
 

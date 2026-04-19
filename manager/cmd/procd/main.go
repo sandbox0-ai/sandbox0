@@ -16,7 +16,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/file"
 	procdhttp "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/http"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process"
-	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/volume"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/webhook"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
@@ -128,26 +127,10 @@ func main() {
 		}
 	})
 
-	// Create shared token provider for storage-proxy communication
-	tokenProvider := procdhttp.NewTokenProvider()
-
-	volumeCfg := &volume.Config{
-		ProxyBaseURL:     cfg.StorageProxyBaseURL,
-		ProxyPort:        cfg.StorageProxyPort,
-		CacheMaxBytes:    cfg.CacheMaxBytes,
-		CacheTTL:         cfg.CacheTTL.Duration,
-		VolumeCacheSize:  cfg.VolumeCacheSize,
-		VolumePrefetch:   cfg.VolumePrefetch,
-		VolumeBufferSize: cfg.VolumeBufferSize,
-		VolumeWriteback:  cfg.VolumeWriteback,
-	}
-	volumeManager := volume.NewManager(volumeCfg, tokenProvider, logger)
-
 	fileManager, err := file.NewManager(cfg.RootPath)
 	if err != nil {
 		logger.Fatal("Failed to create file manager", zap.Error(err))
 	}
-	volumeManager.SetEventSink(fileManager)
 
 	// Initialize internal auth validator
 	publicKey, err := internalauth.LoadEd25519PublicKeyFromFile(internalauth.DefaultInternalJWTPublicKeyPath)
@@ -185,10 +168,8 @@ func main() {
 	server := procdhttp.NewServer(
 		cfg,
 		contextManager,
-		volumeManager,
 		fileManager,
 		authValidator,
-		tokenProvider,
 		webhookDispatcher,
 		logger,
 		obsProvider,
@@ -230,7 +211,6 @@ func main() {
 
 		// Cleanup managers
 		contextManager.Cleanup()
-		volumeManager.Cleanup()
 		fileManager.Close()
 
 		if err := webhookDispatcher.Shutdown(context.Background()); err != nil {

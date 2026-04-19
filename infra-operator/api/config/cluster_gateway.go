@@ -71,9 +71,6 @@ type ClusterGatewayConfig struct {
 	// +optional
 	// +kubebuilder:default={"*:*"}
 	SchedulerPermissions []string `yaml:"scheduler_permissions" json:"schedulerPermissions"`
-	// +optional
-	// +kubebuilder:default={"sandboxvolume:read","sandboxvolume:write"}
-	ProcdStoragePermissions []string `yaml:"procd_storage_permissions" json:"procdStoragePermissions"`
 }
 
 // LoadClusterGatewayConfig returns the cluster-gateway configuration.

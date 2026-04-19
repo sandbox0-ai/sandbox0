@@ -35,8 +35,9 @@ The normal workflow is:
 
 1. create or choose a Volume
 2. attach a local directory to that Volume
-3. mount the same Volume into a sandbox
-4. work locally, in the sandbox, or both
+3. define a Sandbox template mount path
+4. claim a Sandbox with that Volume bound to the declared path
+5. work locally, in the sandbox, or both
 
 ## Attach a Local Workspace
 
@@ -65,10 +66,10 @@ s0 sync attach vol_abc123xyz ~/work/my-project --foreground
 
 ## Mount the Same Volume into a Sandbox
 
-Once the Volume is attached locally, mount the same Volume into a sandbox:
+Once the Volume is attached locally, claim a Sandbox from a template that declares the workspace mount path:
 
 ```bash
-s0 sandbox volume mount --volume-id vol_abc123xyz --path /workspace -s sb_abc123xyz
+s0 sandbox claim --template workspace --mount vol_abc123xyz:/workspace
 ```
 
 Now the same workspace is available in two places:
@@ -92,7 +93,7 @@ The practical flow is simple:
 
 1. on machine A, attach the workspace and work normally
 2. on machine B, attach the same Volume with `--init-from volume`
-3. mount that Volume into a sandbox whenever you need remote execution or agent help
+3. claim a sandbox with that Volume bound to a template-declared mount path whenever you need remote execution or agent help
 
 ## Work with Sandboxes and AI Agents
 
@@ -101,7 +102,7 @@ Volume Sync is especially useful when you want sandbox execution without losing 
 A common pattern is:
 
 1. attach your repo locally
-2. mount the same Volume into a sandbox at `/workspace`
+2. claim a sandbox with the same Volume bound at `/workspace`
 3. run an AI agent or command inside the sandbox against `/workspace`
 4. review the resulting file changes locally
 

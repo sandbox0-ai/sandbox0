@@ -236,21 +236,12 @@ message FsyncRequest {
 // Mount volume
 message MountVolumeRequest {
   string volume_id = 1;
-  VolumeConfig config = 2;
-}
-
-message VolumeConfig {
-  string cache_size = 1;
-  int32 prefetch = 2;
-  string buffer_size = 3;
-  bool writeback = 4;
 }
 
 message MountVolumeResponse {
   string volume_id = 1;
   int64 mounted_at = 2;
   string mount_session_id = 3;
-  string mount_session_secret = 4;
 }
 
 message UnmountVolumeRequest {

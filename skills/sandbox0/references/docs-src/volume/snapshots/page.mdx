@@ -33,9 +33,7 @@ flowchart TB
       label: "Go",
       language: "go",
       code: `volume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{
-    AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeRWX),
-    CacheSize:  apispec.NewOptString("1G"),
-    BufferSize: apispec.NewOptString("128M"),
+    AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeRWO),
 })
 if err != nil {
     log.Fatal(err)
@@ -60,9 +58,7 @@ from sandbox0.apispec.models.create_sandbox_volume_request import CreateSandboxV
 from sandbox0.apispec.models.volume_access_mode import VolumeAccessMode
 
 volume = client.volumes.create(CreateSandboxVolumeRequest(
-    access_mode=VolumeAccessMode.RWX,
-    cache_size="1G",
-    buffer_size="128M",
+    access_mode=VolumeAccessMode.RWO,
 ))
 print(f"Volume ID: {volume.id}")
 
@@ -80,9 +76,7 @@ print(f"Snapshot created: {snapshot.id} ({snapshot.name})")`
       label: "TypeScript",
       language: "typescript",
       code: `var volume = await client.volumes.create({
-    accessMode: models.VolumeAccessMode.Rwx,
-    cacheSize: "1G",
-    bufferSize: "128M",
+    accessMode: models.VolumeAccessMode.Rwo,
 });
 console.log("Volume ID:", volume.id);
 

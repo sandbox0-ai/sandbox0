@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -17,7 +16,6 @@ import (
 	ctxpkg "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/context"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/file"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/http/handlers"
-	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/volume"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/webhook"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -27,32 +25,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 )
-
-// TokenProvider provides internal token for storage-proxy authentication.
-// It is thread-safe and can be shared between HTTP server and volume manager.
-type TokenProvider struct {
-	mu    sync.RWMutex
-	token string
-}
-
-// NewTokenProvider creates a new token provider.
-func NewTokenProvider() *TokenProvider {
-	return &TokenProvider{}
-}
-
-// GetInternalToken returns the current internal token.
-func (p *TokenProvider) GetInternalToken() string {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.token
-}
-
-// SetInternalToken sets the internal token.
-func (p *TokenProvider) SetInternalToken(token string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.token = token
-}
 
 // Server is the Procd HTTP server.
 type Server struct {
@@ -64,11 +36,7 @@ type Server struct {
 
 	// Managers
 	contextManager *ctxpkg.Manager
-	volumeManager  *volume.Manager
 	fileManager    *file.Manager
-
-	// Token provider for storage-proxy communication
-	tokenProvider *TokenProvider
 
 	// Internal auth validator
 	authValidator *internalauth.Validator
@@ -83,10 +51,8 @@ type Server struct {
 func NewServer(
 	cfg *config.ProcdConfig,
 	contextManager *ctxpkg.Manager,
-	volumeManager *volume.Manager,
 	fileManager *file.Manager,
 	authValidator *internalauth.Validator,
-	tokenProvider *TokenProvider,
 	webhookDispatcher *webhook.Dispatcher,
 	logger *zap.Logger,
 	obsProvider *observability.Provider,
@@ -96,10 +62,8 @@ func NewServer(
 		router:            mux.NewRouter(),
 		cfg:               cfg,
 		contextManager:    contextManager,
-		volumeManager:     volumeManager,
 		fileManager:       fileManager,
 		authValidator:     authValidator,
-		tokenProvider:     tokenProvider,
 		webhookDispatcher: webhookDispatcher,
 		logger:            logger,
 		obsProvider:       obsProvider,
@@ -156,16 +120,8 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/contexts/{id}/ws", contextHandler.WebSocket).Methods("GET")
 
 	// Initialize handler
-	initializeHandler := handlers.NewInitializeHandler(s.webhookDispatcher, s.fileManager, s.volumeManager, s.cfg.HTTPPort, s.logger)
+	initializeHandler := handlers.NewInitializeHandler(s.webhookDispatcher, s.fileManager, s.cfg.HTTPPort, s.logger)
 	api.HandleFunc("/initialize", initializeHandler.Initialize).Methods("POST")
-
-	// SandboxVolume handlers
-	volumeHandler := handlers.NewVolumeHandler(s.volumeManager, s.logger)
-	volumeRouter := api.PathPrefix("/sandboxvolumes").Subrouter()
-	volumeRouter.Use(s.storageProxyUpstreamMiddleware)
-	volumeRouter.HandleFunc("/mount", volumeHandler.Mount).Methods("POST")
-	volumeRouter.HandleFunc("/unmount", volumeHandler.Unmount).Methods("POST")
-	volumeRouter.HandleFunc("/status", volumeHandler.Status).Methods("GET")
 
 	// File handlers
 	fileHandler := handlers.NewFileHandler(s.fileManager, s.logger)
@@ -332,48 +288,18 @@ func isLoopbackAddress(addr string) bool {
 	return ip.IsLoopback()
 }
 
-// internalTokenMiddleware extracts and stores the internal token from request headers.
-// This token is used for authenticating storage-proxy control requests.
+// internalTokenMiddleware keeps the internal token requirement explicit for all
+// authenticated procd API calls.
 func (s *Server) internalTokenMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Extract token from X-Token-For-Procd header
-		token := r.Header.Get("X-Token-For-Procd")
-		if token == "" {
-			s.logger.Warn("Missing internal token",
+		if strings.TrimSpace(r.Header.Get(internalauth.DefaultTokenHeader)) == "" {
+			s.logger.Warn("Missing internal token header",
 				zap.String("path", r.URL.Path),
 			)
 			_ = spec.WriteError(w, http.StatusUnauthorized, spec.CodeUnauthorized, "missing internal token")
 			return
 		}
-
-		if s.tokenProvider != nil {
-			s.tokenProvider.SetInternalToken(token)
-		}
-
-		s.logger.Debug("Updated internal token for storage-proxy",
-			zap.String("path", r.URL.Path),
-		)
-
 		next.ServeHTTP(w, r)
-	})
-}
-
-func (s *Server) storageProxyUpstreamMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		baseURL := strings.TrimSpace(s.cfg.StorageProxyBaseURL)
-		port := s.cfg.StorageProxyPort
-		if baseURL != "" && port > 0 {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		s.logger.Error("Storage-proxy upstream not configured",
-			zap.String("proxy_base_url", baseURL),
-			zap.Int("proxy_port", port),
-		)
-		_ = spec.WriteError(w, http.StatusServiceUnavailable, "storage_proxy_unavailable",
-			fmt.Sprintf("storage-proxy upstream not configured (base_url=%q port=%d)", baseURL, port),
-		)
 	})
 }
 
@@ -420,15 +346,6 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 // extractAuthToken extracts authentication token from request headers.
 func (s *Server) extractAuthToken(r *http.Request) string {
 	return r.Header.Get("X-Internal-Token")
-}
-
-// GetInternalToken returns the current internal token for storage-proxy communication.
-// This method is thread-safe and can be called by volume clients.
-func (s *Server) GetInternalToken() string {
-	if s.tokenProvider == nil {
-		return ""
-	}
-	return s.tokenProvider.GetInternalToken()
 }
 
 type responseWriter struct {

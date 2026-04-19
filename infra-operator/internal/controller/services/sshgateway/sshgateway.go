@@ -206,9 +206,6 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	if cfg.SSHHostKeyPath == "" {
 		cfg.SSHHostKeyPath = defaultSSHHostKeyMountPath
 	}
-	if len(cfg.ProcdStoragePermissions) == 0 {
-		cfg.ProcdStoragePermissions = []string{"sandboxvolume:read", "sandboxvolume:write"}
-	}
 
 	if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {
 		cfg.DatabaseURL = dsn

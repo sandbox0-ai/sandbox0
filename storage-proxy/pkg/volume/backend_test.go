@@ -22,7 +22,6 @@ func (b *fakeBackend) MountVolume(_ context.Context, req BackendMountRequest) (*
 		VolumeID:  req.VolumeID,
 		TeamID:    req.TeamID,
 		Backend:   "fake",
-		Config:    req.Config,
 		Access:    req.AccessMode,
 		MountedAt: req.MountedAt,
 		CacheDir:  "/tmp/fake-cache",
@@ -37,22 +36,13 @@ func (b *fakeBackend) UnmountVolume(_ context.Context, _ *VolumeContext) error {
 func TestManagerMountUsesBackend(t *testing.T) {
 	backend := &fakeBackend{}
 	mgr := NewManagerWithBackend(logrus.New(), &config.StorageProxyConfig{}, backend)
-	cfg := &VolumeConfig{
-		CacheSize:  "2G",
-		Prefetch:   1,
-		BufferSize: "64M",
-		Writeback:  true,
-	}
 
-	sessionID, sessionSecret, mountedAt, err := mgr.MountVolume(context.Background(), "team/team-a", "vol-1", "team-a", cfg, AccessModeRWO)
+	sessionID, mountedAt, err := mgr.MountVolume(context.Background(), "team/team-a", "vol-1", "team-a", AccessModeRWO)
 	if err != nil {
 		t.Fatalf("MountVolume() error = %v", err)
 	}
 	if sessionID == "" {
 		t.Fatal("MountVolume() returned empty session id")
-	}
-	if sessionSecret == "" {
-		t.Fatal("MountVolume() returned empty session secret")
 	}
 	if mountedAt.IsZero() {
 		t.Fatal("MountVolume() returned zero mount time")
@@ -65,9 +55,6 @@ func TestManagerMountUsesBackend(t *testing.T) {
 	}
 	if backend.mountReq.VolumeID != "vol-1" || backend.mountReq.TeamID != "team-a" {
 		t.Fatalf("backend mount request identity = %+v", backend.mountReq)
-	}
-	if backend.mountReq.Config != cfg {
-		t.Fatalf("backend config pointer = %p, want %p", backend.mountReq.Config, cfg)
 	}
 	if backend.mountReq.AccessMode != AccessModeRWO {
 		t.Fatalf("backend access mode = %q, want %q", backend.mountReq.AccessMode, AccessModeRWO)
@@ -89,7 +76,7 @@ func TestManagerUnmountUsesBackend(t *testing.T) {
 	backend := &fakeBackend{}
 	mgr := NewManagerWithBackend(logrus.New(), &config.StorageProxyConfig{}, backend)
 
-	sessionID, _, _, err := mgr.MountVolume(context.Background(), "", "vol-1", "team-a", &VolumeConfig{}, AccessModeRWO)
+	sessionID, _, err := mgr.MountVolume(context.Background(), "", "vol-1", "team-a", AccessModeRWO)
 	if err != nil {
 		t.Fatalf("MountVolume() error = %v", err)
 	}
@@ -110,7 +97,7 @@ func TestManagerMountUsesDefaultBackend(t *testing.T) {
 		BackendS0FS: s0fsBackend,
 	}, BackendS0FS)
 
-	if _, _, _, err := mgr.MountVolume(context.Background(), "team/team-a", "vol-1", "team-a", &VolumeConfig{}, AccessModeRWO); err != nil {
+	if _, _, err := mgr.MountVolume(context.Background(), "team/team-a", "vol-1", "team-a", AccessModeRWO); err != nil {
 		t.Fatalf("MountVolume() error = %v", err)
 	}
 	if s0fsBackend.mountCalls != 1 {

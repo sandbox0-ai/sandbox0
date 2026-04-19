@@ -2,12 +2,14 @@ package v1alpha1
 
 import (
 	"encoding/json"
+	"fmt"
+	"path"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
@@ -42,8 +44,8 @@ func BuildPodSpec(template *SandboxTemplate) corev1.PodSpec {
 
 	applyProcdSecretVolume(&spec, template)
 	applyNetdMITMCATrustMaterial(&spec)
+	applyVolumePortals(&spec, template)
 	applyProcdInit(&spec)
-	applyFuseResource(&spec)
 	applyDefaultSandboxPlacement(&spec)
 
 	if runtimeClassName := configuredSandboxRuntimeClassName(); runtimeClassName != nil {
@@ -161,32 +163,82 @@ func tolerationKey(tol corev1.Toleration) string {
 	return string(tol.Operator) + "\x00" + tol.Key + "\x00" + tol.Value + "\x00" + string(tol.Effect)
 }
 
-func applyFuseResource(spec *corev1.PodSpec) {
-	if spec == nil {
+func applyVolumePortals(spec *corev1.PodSpec, template *SandboxTemplate) {
+	if spec == nil || template == nil {
 		return
 	}
+	mounts := make([]VolumeMountSpec, 0, len(template.Spec.VolumeMounts)+1)
+	mounts = append(mounts, VolumeMountSpec{
+		Name:      volumeportal.WebhookStatePortalName,
+		MountPath: volumeportal.WebhookStateMountPath,
+	})
+	mounts = append(mounts, template.Spec.VolumeMounts...)
 
-	for i := range spec.Containers {
-		if spec.Containers[i].Name != "procd" {
+	seenMountPaths := make(map[string]struct{}, len(mounts))
+	for i, mount := range mounts {
+		mountPath := path.Clean(strings.TrimSpace(mount.MountPath))
+		if mountPath == "." || !strings.HasPrefix(mountPath, "/") || mountPath == "/" {
 			continue
 		}
+		if _, exists := seenMountPaths[mountPath]; exists {
+			continue
+		}
+		seenMountPaths[mountPath] = struct{}{}
 
-		if spec.Containers[i].Resources.Requests == nil {
-			spec.Containers[i].Resources.Requests = make(corev1.ResourceList)
+		portalName := volumeportal.NormalizePortalName(mount.Name, mountPath)
+		if portalName == "" {
+			continue
 		}
-		if spec.Containers[i].Resources.Limits == nil {
-			spec.Containers[i].Resources.Limits = make(corev1.ResourceList)
-		}
-
-		fuseResource := corev1.ResourceName("sandbox0.ai/fuse")
-		fuseQuantity := resource.MustParse("1")
-		if _, exists := spec.Containers[i].Resources.Requests[fuseResource]; !exists {
-			spec.Containers[i].Resources.Requests[fuseResource] = fuseQuantity
-		}
-		if _, exists := spec.Containers[i].Resources.Limits[fuseResource]; !exists {
-			spec.Containers[i].Resources.Limits[fuseResource] = fuseQuantity
+		volumeName := volumePortalVolumeName(i, portalName)
+		readOnly := mount.ReadOnly
+		spec.Volumes = append(spec.Volumes, corev1.Volume{
+			Name: volumeName,
+			VolumeSource: corev1.VolumeSource{
+				CSI: &corev1.CSIVolumeSource{
+					Driver:   volumeportal.DriverName,
+					ReadOnly: &readOnly,
+					VolumeAttributes: map[string]string{
+						volumeportal.AttributePortalName: portalName,
+						volumeportal.AttributeMountPath:  mountPath,
+					},
+				},
+			},
+		})
+		for j := range spec.Containers {
+			ensureContainerVolumeMount(&spec.Containers[j], corev1.VolumeMount{
+				Name:      volumeName,
+				MountPath: mountPath,
+				ReadOnly:  readOnly,
+			})
 		}
 	}
+}
+
+func volumePortalVolumeName(index int, portalName string) string {
+	name := strings.ToLower(strings.TrimSpace(portalName))
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	name = strings.Trim(b.String(), "-")
+	if name == "" {
+		name = "volume"
+	}
+	prefix := fmt.Sprintf("sandbox0-volume-%d-", index)
+	maxName := 63 - len(prefix)
+	if len(name) > maxName {
+		name = strings.TrimRight(name[:maxName], "-")
+	}
+	return prefix + name
 }
 
 // buildContainers builds containers from template
@@ -262,7 +314,6 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Conta
 	if container.SecurityContext.Capabilities == nil {
 		container.SecurityContext.Capabilities = &corev1.Capabilities{}
 	}
-	container.SecurityContext.Capabilities.Add = append(container.SecurityContext.Capabilities.Add, corev1.Capability("SYS_ADMIN"))
 
 	return container
 }
@@ -351,17 +402,6 @@ func appendProcdConfigEnvVars(envVars []corev1.EnvVar) []corev1.EnvVar {
 			Value: envMap[key],
 		})
 	}
-
-	// Storage-proxy connectivity must always remain manager-controlled, even
-	// when the corresponding fields are omitted from manager config.
-	upsertProcdEnvVar(envIndex, &envVars, corev1.EnvVar{
-		Name:  "storage_proxy_base_url",
-		Value: cfg.ProcdConfig.StorageProxyBaseURL,
-	})
-	upsertProcdEnvVar(envIndex, &envVars, corev1.EnvVar{
-		Name:  "storage_proxy_port",
-		Value: strconv.Itoa(cfg.ProcdConfig.StorageProxyPort),
-	})
 
 	return envVars
 }

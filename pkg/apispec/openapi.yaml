@@ -1936,69 +1936,6 @@ paths:
       responses:
         "101":
           description: Switching Protocols
-  /api/v1/sandboxes/{id}/sandboxvolumes/mount:
-    post:
-      tags: [sandbox-volumes]
-      summary: Mount sandbox volume in sandbox
-      security:
-        - bearerAuth: []
-      x-upstream-service: procd
-      x-upstream-path: /api/v1/sandboxvolumes/mount
-      parameters:
-        - $ref: "#/components/parameters/SandboxID"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/MountRequest"
-      responses:
-        "200":
-          description: Volume mounted
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SuccessMountResponse"
-  /api/v1/sandboxes/{id}/sandboxvolumes/unmount:
-    post:
-      tags: [sandbox-volumes]
-      summary: Unmount sandbox volume
-      security:
-        - bearerAuth: []
-      x-upstream-service: procd
-      x-upstream-path: /api/v1/sandboxvolumes/unmount
-      parameters:
-        - $ref: "#/components/parameters/SandboxID"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/UnmountRequest"
-      responses:
-        "200":
-          description: Volume unmounted
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SuccessUnmountedResponse"
-  /api/v1/sandboxes/{id}/sandboxvolumes/status:
-    get:
-      tags: [sandbox-volumes]
-      summary: Get sandbox volume mount status
-      security:
-        - bearerAuth: []
-      x-upstream-service: procd
-      x-upstream-path: /api/v1/sandboxvolumes/status
-      parameters:
-        - $ref: "#/components/parameters/SandboxID"
-      responses:
-        "200":
-          description: Mount status
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SuccessMountStatusResponse"
   /api/v1/sandboxes/{id}/files/move:
     post:
       tags: [files]
@@ -3387,16 +3324,6 @@ components:
               properties:
                 signaled:
                   type: boolean
-    SuccessUnmountedResponse:
-      allOf:
-        - $ref: "#/components/schemas/SuccessEnvelope"
-        - type: object
-          properties:
-            data:
-              type: object
-              properties:
-                unmounted:
-                  type: boolean
     AuthProvider:
       type: object
       properties:
@@ -3995,19 +3922,6 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ClaimMountRequest"
-        wait_for_mounts:
-          type: boolean
-          default: false
-          description: |
-            When true, claim waits best-effort for requested bootstrap mounts to
-            reach a terminal state before returning. The wait is bounded by
-            `mount_wait_timeout_ms`.
-        mount_wait_timeout_ms:
-          type: integer
-          format: int32
-          description: |
-            Optional best-effort wait budget in milliseconds for bootstrap
-            mounts when `wait_for_mounts` is true.
       required: []
     ClaimMountRequest:
       type: object
@@ -4016,8 +3930,6 @@ components:
           type: string
         mount_point:
           type: string
-        volume_config:
-          $ref: "#/components/schemas/VolumeConfig"
       required: [sandboxvolume_id, mount_point]
     SandboxConfig:
       type: object
@@ -4945,30 +4857,6 @@ components:
           type: string
           description: Final process state when the underlying process has exited.
       required: [type]
-    MountRequest:
-      type: object
-      properties:
-        sandboxvolume_id:
-          type: string
-        sandbox_id:
-          type: string
-        mount_point:
-          type: string
-        volume_config:
-          $ref: "#/components/schemas/VolumeConfig"
-      required: [sandboxvolume_id, mount_point]
-    VolumeConfig:
-      type: object
-      properties:
-        cache_size:
-          type: string
-        prefetch:
-          type: integer
-          format: int32
-        buffer_size:
-          type: string
-        writeback:
-          type: boolean
     VolumeAccessMode:
       type: string
       enum: [RWO, ROX, RWX]
@@ -4977,26 +4865,6 @@ components:
         instances. RWO allows read-write mounts on a single instance; ROX allows
         read-only mounts across instances; RWX allows read-write mounts across
         instances.
-    MountResponse:
-      type: object
-      properties:
-        sandboxvolume_id:
-          type: string
-        mount_point:
-          type: string
-        mounted_at:
-          type: string
-        mount_session_id:
-          type: string
-      required: [sandboxvolume_id, mount_point, mounted_at, mount_session_id]
-    UnmountRequest:
-      type: object
-      properties:
-        sandboxvolume_id:
-          type: string
-        mount_session_id:
-          type: string
-      required: [sandboxvolume_id, mount_session_id]
     MountStatus:
       type: object
       properties:
@@ -5012,32 +4880,11 @@ components:
         mounted_duration_sec:
           type: integer
           format: int64
-        mount_session_id:
-          type: string
         error_code:
           type: string
         error_message:
           type: string
       required: [sandboxvolume_id, mount_point, state]
-    SuccessMountResponse:
-      allOf:
-        - $ref: "#/components/schemas/SuccessEnvelope"
-        - type: object
-          properties:
-            data:
-              $ref: "#/components/schemas/MountResponse"
-    SuccessMountStatusResponse:
-      allOf:
-        - $ref: "#/components/schemas/SuccessEnvelope"
-        - type: object
-          properties:
-            data:
-              type: object
-              properties:
-                mounts:
-                  type: array
-                  items:
-                    $ref: "#/components/schemas/MountStatus"
     CreateSandboxVolumeRequest:
       type: object
       properties:
@@ -5053,14 +4900,6 @@ components:
           minimum: 0
           default: 0
           description: Default POSIX GID used by external volume access paths that do not carry caller identity. Defaults to 0 when omitted on create.
-        cache_size:
-          type: string
-        prefetch:
-          type: integer
-        buffer_size:
-          type: string
-        writeback:
-          type: boolean
         access_mode:
           $ref: "#/components/schemas/VolumeAccessMode"
           description: Access mode for the volume. Defaults to RWO when omitted.
@@ -5077,14 +4916,6 @@ components:
           format: int64
           minimum: 0
           description: Override the default POSIX GID for external volume access paths. Inherits from the source volume when omitted.
-        cache_size:
-          type: string
-        prefetch:
-          type: integer
-        buffer_size:
-          type: string
-        writeback:
-          type: boolean
         access_mode:
           $ref: "#/components/schemas/VolumeAccessMode"
           description: Access mode for the volume. Defaults to RWO when omitted.
@@ -5110,14 +4941,6 @@ components:
           format: int64
           minimum: 0
           nullable: true
-        cache_size:
-          type: string
-        prefetch:
-          type: integer
-        buffer_size:
-          type: string
-        writeback:
-          type: boolean
         access_mode:
           $ref: "#/components/schemas/VolumeAccessMode"
           description: Configured access mode for the volume.
@@ -5127,7 +4950,7 @@ components:
         updated_at:
           type: string
           format: date-time
-      required: [id, team_id, user_id, cache_size, buffer_size, created_at, updated_at]
+      required: [id, team_id, user_id, created_at, updated_at]
     UpsertSyncReplicaRequest:
       type: object
       properties:
@@ -5694,6 +5517,10 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/WarmProcessSpec"
+        volumeMounts:
+          type: array
+          items:
+            $ref: "#/components/schemas/VolumeMountSpec"
         pod:
           $ref: "#/components/schemas/PodSpecOverride"
         network:
@@ -5730,6 +5557,16 @@ components:
         securityContext:
           $ref: "#/components/schemas/SecurityContext"
       required: [image, resources]
+    VolumeMountSpec:
+      type: object
+      properties:
+        name:
+          type: string
+        mountPath:
+          type: string
+        readOnly:
+          type: boolean
+      required: [name, mountPath]
     WarmProcessSpec:
       type: object
       properties:

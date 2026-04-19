@@ -52,7 +52,7 @@ type ComponentPlan struct {
 	EnableClusterGateway      bool
 	EnableManager             bool
 	EnableStorageProxy        bool
-	EnableFusePlugin          bool
+	EnableCtld                bool
 	EnableNetd                bool
 	EnableInternalAuth        bool
 	EnableDatabase            bool
@@ -215,7 +215,7 @@ func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 		EnableClusterGateway:      enableClusterGateway,
 		EnableManager:             enableManager,
 		EnableStorageProxy:        enableStorageProxy,
-		EnableFusePlugin:          enableManager,
+		EnableCtld:                enableManager,
 		EnableNetd:                infrav1alpha1.IsNetdEnabled(infra),
 		EnableInternalAuth:        hasControlPlane || hasDataPlane,
 		EnableDatabase:            enableDatabase,
@@ -513,24 +513,10 @@ func compileManagerRuntimeConfig(managerPlan *ManagerPlan, infra *infrav1alpha1.
 		}
 	}
 
-	storageProxyConfig := &apiconfig.StorageProxyConfig{}
-	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil {
-		if infra.Spec.Services.StorageProxy.Config != nil {
-			storageProxyConfig = runtimeconfig.ToStorageProxy(infra.Spec.Services.StorageProxy.Config)
-		}
-	}
 	if infrav1alpha1.IsStorageProxyEnabled(infra) {
-		cfg.ProcdConfig.StorageProxyBaseURL = fmt.Sprintf("%s-storage-proxy.%s.svc.cluster.local", infra.Name, infra.Namespace)
-		volumeProtocolPort := storageProxyConfig.VolumeProtocolPort
-		if volumeProtocolPort == 0 {
-			volumeProtocolPort = 8082
-		}
-		cfg.ProcdConfig.StorageProxyPort = volumeProtocolPort
-		cfg.StorageProxyBaseURL = cfg.ProcdConfig.StorageProxyBaseURL
+		cfg.StorageProxyBaseURL = fmt.Sprintf("%s-storage-proxy.%s.svc.cluster.local", infra.Name, infra.Namespace)
 		cfg.StorageProxyHTTPPort = storageProxyHTTPPort(infra)
 	} else {
-		cfg.ProcdConfig.StorageProxyBaseURL = ""
-		cfg.ProcdConfig.StorageProxyPort = 0
 		cfg.StorageProxyBaseURL = ""
 		cfg.StorageProxyHTTPPort = 0
 	}
@@ -783,10 +769,9 @@ func compileCleanupPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 			clusterScopedRef("ClusterRoleBinding", fmt.Sprintf("%s-netd", infra.Name)),
 		)
 	}
-	if !compiled.Components.EnableFusePlugin {
+	if !compiled.Components.EnableCtld {
 		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
 			namespacedRef("DaemonSet", infra.Namespace, fmt.Sprintf("%s-ctld", infra.Name)),
-			namespacedRef("DaemonSet", infra.Namespace, fmt.Sprintf("%s-k8s-plugin", infra.Name)),
 			namespacedRef("ServiceAccount", infra.Namespace, fmt.Sprintf("%s-ctld", infra.Name)),
 		)
 		cleanup.DeleteClusterScoped = append(cleanup.DeleteClusterScoped,
@@ -868,8 +853,8 @@ func compileStatusPlan(compiled *InfraPlan) StatusPlan {
 	if components.EnableNetd {
 		expected = append(expected, infrav1alpha1.ConditionTypeNetdReady)
 	}
-	if components.EnableFusePlugin {
-		expected = append(expected, infrav1alpha1.ConditionTypeFusePluginReady)
+	if components.EnableCtld {
+		expected = append(expected, infrav1alpha1.ConditionTypeCtldReady)
 	}
 	if components.EnableClusterRegistration {
 		expected = append(expected, infrav1alpha1.ConditionTypeClusterRegistered)
@@ -953,8 +938,8 @@ func compileWorkflowPlan(compiled *InfraPlan) WorkflowPlan {
 	if compiled.Components.EnableClusterGateway {
 		appendSuccessStep("cluster-gateway", infrav1alpha1.ConditionTypeClusterGatewayReady, "ClusterGatewayReady", "Internal gateway is ready", "ClusterGatewayFailed")
 	}
-	if compiled.Components.EnableFusePlugin {
-		appendSuccessStep("fuse-device-plugin", infrav1alpha1.ConditionTypeFusePluginReady, "FusePluginReady", "FUSE device plugin is ready", "FusePluginFailed")
+	if compiled.Components.EnableCtld {
+		appendSuccessStep("ctld", infrav1alpha1.ConditionTypeCtldReady, "CtldReady", "ctld is ready", "CtldFailed")
 	}
 	if compiled.Components.EnableManager {
 		appendCheckStep("manager-rbac", infrav1alpha1.ConditionTypeManagerReady, "ManagerRBACFailed")

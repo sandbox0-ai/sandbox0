@@ -177,10 +177,6 @@ type ForkVolumeRequest struct {
 	SourceVolumeID  string
 	TeamID          string
 	UserID          string
-	CacheSize       *string
-	Prefetch        *int
-	BufferSize      *string
-	Writeback       *bool
 	AccessMode      *string
 	DefaultPosixUID *int64
 	DefaultPosixGID *int64

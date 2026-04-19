@@ -216,15 +216,15 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 		if opts.includeVolumeLifecycle {
 			Context("sandbox volumes", func() {
 				It("creates volumes and snapshots", func() {
-					assertVolumeLifecycle(env, session, sandboxID)
+					assertVolumeLifecycle(env, session)
 				})
 
 				It("bootstraps an existing volume during claim", func() {
 					assertClaimBootstrapMountLifecycle(env, session)
 				})
 
-				It("keeps bootstrap mounts writable after procd token expiry", func() {
-					assertBootstrapMountWritableAfterProcdTokenExpiry(env, session)
+				It("keeps claim-mounted volumes writable", func() {
+					assertClaimMountedVolumeWritable(env, session)
 				})
 
 				It("rejects invalid bootstrap mount requests at claim time", func() {
@@ -282,11 +282,9 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					Expect(resumeResp.Resumed).To(BeTrue())
 					waitForSandboxPowerStateEventually(env, session, sandboxID, apispec.SandboxPowerStateObserved("active"))
 
-					cacheSize := "512M"
 					defaultUID := int64(1000)
 					defaultGID := int64(1000)
 					volume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), apispec.CreateSandboxVolumeRequest{
-						CacheSize:       &cacheSize,
 						DefaultPosixUid: &defaultUID,
 						DefaultPosixGid: &defaultGID,
 					})
@@ -1716,6 +1714,37 @@ func execInSandboxPod(env *framework.ScenarioEnv, namespace, podName, script str
 	return strings.ReplaceAll(output, "\r\n", "\n"), err
 }
 
+func createVolumePortalTemplate(env *framework.ScenarioEnv, session *e2eutils.Session, mountPath string) string {
+	templateID := fmt.Sprintf("volume-portal-%d", time.Now().UnixNano())
+	base, err := session.GetTemplate(env.TestCtx.Context, GinkgoT(), "default")
+	Expect(err).NotTo(HaveOccurred())
+
+	req := e2eutils.CloneTemplateForCreate(*base, templateID)
+	req.Spec.VolumeMounts = &[]apispec.VolumeMountSpec{{
+		Name:      "data",
+		MountPath: mountPath,
+	}}
+
+	_, err = session.CreateTemplate(env.TestCtx.Context, GinkgoT(), req)
+	Expect(err).NotTo(HaveOccurred())
+	DeferCleanup(func() {
+		_ = session.DeleteTemplate(env.TestCtx.Context, GinkgoT(), templateID)
+	})
+
+	Eventually(func() error {
+		tpl, getErr := session.GetTemplate(env.TestCtx.Context, GinkgoT(), templateID)
+		if getErr != nil {
+			return getErr
+		}
+		if tpl.Status == nil || tpl.Status.IdleCount == nil || *tpl.Status.IdleCount < 1 {
+			return fmt.Errorf("template %s idle pool is not ready", templateID)
+		}
+		return nil
+	}).WithTimeout(3 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
+
+	return templateID
+}
+
 func publicExposureHostForPort(ports []apispec.ExposedPortConfig, port int32) string {
 	for _, item := range ports {
 		if item.Port != port || item.PublicUrl == nil {
@@ -1732,12 +1761,10 @@ func publicExposureHostForPort(ports []apispec.ExposedPortConfig, port int32) st
 	return ""
 }
 
-func assertVolumeLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string) {
-	cacheSize := "512M"
+func assertVolumeLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session) {
 	defaultUID := int64(1000)
 	defaultGID := int64(1000)
 	createReq := apispec.CreateSandboxVolumeRequest{
-		CacheSize:       &cacheSize,
 		DefaultPosixUid: &defaultUID,
 		DefaultPosixGid: &defaultGID,
 	}
@@ -1746,24 +1773,6 @@ func assertVolumeLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session
 	Expect(status).To(Equal(http.StatusCreated))
 	Expect(volume).NotTo(BeNil())
 	volumeID := expectStringPtr(volume.Id, "volume id")
-
-	mountPoint := fmt.Sprintf("/workspace/volume-e2e-%d", time.Now().UnixNano())
-	mountResp, status, err := session.MountSandboxVolume(env.TestCtx.Context, GinkgoT(), sandboxID, apispec.MountRequest{
-		SandboxvolumeId: volumeID,
-		MountPoint:      mountPoint,
-	})
-	Expect(err).NotTo(HaveOccurred())
-	Expect(status).To(Equal(http.StatusOK))
-	Expect(mountResp).NotTo(BeNil())
-	Expect(mountResp.MountSessionId).NotTo(BeEmpty())
-
-	statusResp, status, err := session.GetSandboxVolumeStatus(env.TestCtx.Context, GinkgoT(), sandboxID)
-	Expect(err).NotTo(HaveOccurred())
-	Expect(status).To(Equal(http.StatusOK))
-	Expect(statusResp).NotTo(BeNil())
-	Expect(statusResp.Data).NotTo(BeNil())
-	Expect(statusResp.Data.Mounts).NotTo(BeNil())
-	Expect(*statusResp.Data.Mounts).NotTo(BeEmpty())
 
 	directFilePath := "/direct-e2e/hello.txt"
 	directContent := []byte("hello direct volume api")
@@ -1775,37 +1784,6 @@ func assertVolumeLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
 	Expect(directBody).To(Equal(directContent))
-
-	Eventually(func() ([]byte, error) {
-		body, _, readErr := session.ReadFile(env.TestCtx.Context, GinkgoT(), sandboxID, mountPoint+"/direct-e2e/hello.txt")
-		return body, readErr
-	}).WithTimeout(20 * time.Second).WithPolling(1 * time.Second).Should(Equal(directContent))
-
-	statusResp, status, err = session.GetSandboxVolumeStatus(env.TestCtx.Context, GinkgoT(), sandboxID)
-	Expect(err).NotTo(HaveOccurred())
-	Expect(status).To(Equal(http.StatusOK))
-	Expect(statusResp).NotTo(BeNil())
-	Expect(statusResp.Data).NotTo(BeNil())
-	Expect(statusResp.Data.Mounts).NotTo(BeNil())
-
-	var foundMountedVolume bool
-	for _, mount := range *statusResp.Data.Mounts {
-		if mount.SandboxvolumeId == volumeID {
-			foundMountedVolume = true
-			if mount.MountSessionId != nil {
-				Expect(*mount.MountSessionId).To(Equal(mountResp.MountSessionId))
-			}
-			break
-		}
-	}
-	Expect(foundMountedVolume).To(BeTrue())
-
-	status, err = session.UnmountSandboxVolume(env.TestCtx.Context, GinkgoT(), sandboxID, apispec.UnmountRequest{
-		SandboxvolumeId: volumeID,
-		MountSessionId:  mountResp.MountSessionId,
-	})
-	Expect(err).NotTo(HaveOccurred())
-	Expect(status).To(Equal(http.StatusOK))
 
 	snapReq := apispec.CreateSnapshotRequest{
 		Name: "e2e-snap",
@@ -1834,8 +1812,7 @@ func assertVolumeLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session
 }
 
 func assertClaimBootstrapMountLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session) {
-	cacheSize := "512M"
-	createReq := apispec.CreateSandboxVolumeRequest{CacheSize: &cacheSize}
+	createReq := apispec.CreateSandboxVolumeRequest{}
 	volume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), createReq)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusCreated))
@@ -1851,18 +1828,14 @@ func assertClaimBootstrapMountLifecycle(env *framework.ScenarioEnv, session *e2e
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
 
-	mountWaitTimeout := int32(45000)
-	waitForMounts := true
-	templateID := "default"
 	mountPoint := "/workspace/bootstrap-data"
+	templateID := createVolumePortalTemplate(env, session, mountPoint)
 	claimReq := apispec.ClaimRequest{
 		Template: &templateID,
 		Mounts: &[]apispec.ClaimMountRequest{{
 			SandboxvolumeId: volumeID,
 			MountPoint:      mountPoint,
 		}},
-		WaitForMounts:      &waitForMounts,
-		MountWaitTimeoutMs: &mountWaitTimeout,
 	}
 	claimResp, err := session.ClaimSandboxWithRequest(env.TestCtx.Context, GinkgoT(), claimReq)
 	Expect(err).NotTo(HaveOccurred())
@@ -1875,28 +1848,14 @@ func assertClaimBootstrapMountLifecycle(env *framework.ScenarioEnv, session *e2e
 	Expect(*claimResp.BootstrapMounts).NotTo(BeEmpty())
 	Expect((*claimResp.BootstrapMounts)[0].State).To(Equal(apispec.MountStatusStateMounted))
 
-	Eventually(func() apispec.MountStatusState {
-		statusResp, statusCode, statusErr := session.GetSandboxVolumeStatus(env.TestCtx.Context, GinkgoT(), sandboxID)
-		if statusErr != nil || statusCode != http.StatusOK || statusResp == nil || statusResp.Data == nil || statusResp.Data.Mounts == nil {
-			return apispec.MountStatusStatePending
-		}
-		for _, mount := range *statusResp.Data.Mounts {
-			if mount.SandboxvolumeId == volumeID {
-				return mount.State
-			}
-		}
-		return apispec.MountStatusStatePending
-	}).WithTimeout(45 * time.Second).WithPolling(1 * time.Second).Should(Equal(apispec.MountStatusStateMounted))
-
 	Eventually(func() ([]byte, error) {
 		body, _, readErr := session.ReadFile(env.TestCtx.Context, GinkgoT(), sandboxID, mountPoint+seedPath)
 		return body, readErr
 	}).WithTimeout(20 * time.Second).WithPolling(1 * time.Second).Should(Equal(seedContent))
 }
 
-func assertBootstrapMountWritableAfterProcdTokenExpiry(env *framework.ScenarioEnv, session *e2eutils.Session) {
-	cacheSize := "512M"
-	volume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), apispec.CreateSandboxVolumeRequest{CacheSize: &cacheSize})
+func assertClaimMountedVolumeWritable(env *framework.ScenarioEnv, session *e2eutils.Session) {
+	volume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), apispec.CreateSandboxVolumeRequest{})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusCreated))
 	Expect(volume).NotTo(BeNil())
@@ -1905,18 +1864,14 @@ func assertBootstrapMountWritableAfterProcdTokenExpiry(env *framework.ScenarioEn
 		Expect(session.DeleteSandboxVolumeEventually(env.TestCtx.Context, GinkgoT(), volumeID, 30*time.Second)).To(Succeed())
 	})
 
-	mountWaitTimeout := int32(45000)
-	waitForMounts := true
-	templateID := "default"
-	mountPoint := "/workspace/bootstrap-token-expiry"
+	mountPoint := "/workspace/claim-writable"
+	templateID := createVolumePortalTemplate(env, session, mountPoint)
 	claimReq := apispec.ClaimRequest{
 		Template: &templateID,
 		Mounts: &[]apispec.ClaimMountRequest{{
 			SandboxvolumeId: volumeID,
 			MountPoint:      mountPoint,
 		}},
-		WaitForMounts:      &waitForMounts,
-		MountWaitTimeoutMs: &mountWaitTimeout,
 	}
 	claimResp, err := session.ClaimSandboxWithRequest(env.TestCtx.Context, GinkgoT(), claimReq)
 	Expect(err).NotTo(HaveOccurred())
@@ -1929,8 +1884,8 @@ func assertBootstrapMountWritableAfterProcdTokenExpiry(env *framework.ScenarioEn
 	Expect(*claimResp.BootstrapMounts).NotTo(BeEmpty())
 	Expect((*claimResp.BootstrapMounts)[0].State).To(Equal(apispec.MountStatusStateMounted))
 
-	latePath := "/late-after-procd-token-expiry.txt"
-	lateContent := fmt.Sprintf("late write after procd token expiry %d", time.Now().UnixNano())
+	latePath := "/late-after-claim.txt"
+	lateContent := fmt.Sprintf("late write after claim %d", time.Now().UnixNano())
 	processType := apispec.ProcessTypeCmd
 	ttlSec := int32(120)
 	envVars := map[string]string{"S0_LATE_CONTENT": lateContent}
@@ -1940,7 +1895,7 @@ func assertBootstrapMountWritableAfterProcdTokenExpiry(env *framework.ScenarioEn
 			Command: []string{
 				"/bin/sh",
 				"-lc",
-				"sleep 45; printf '%s' \"$S0_LATE_CONTENT\" > /workspace/bootstrap-token-expiry/late-after-procd-token-expiry.txt; sync",
+				"printf '%s' \"$S0_LATE_CONTENT\" > /workspace/claim-writable/late-after-claim.txt; sync",
 			},
 		},
 		EnvVars: &envVars,
@@ -1961,7 +1916,6 @@ func assertBootstrapMountWritableAfterProcdTokenExpiry(env *framework.ScenarioEn
 }
 
 func assertClaimBootstrapMountValidation(env *framework.ScenarioEnv, session *e2eutils.Session) {
-	waitForMounts := true
 	templateID := "default"
 	claimReq := apispec.ClaimRequest{
 		Template: &templateID,
@@ -1969,7 +1923,6 @@ func assertClaimBootstrapMountValidation(env *framework.ScenarioEnv, session *e2
 			{SandboxvolumeId: "vol-a", MountPoint: "/workspace/data"},
 			{SandboxvolumeId: "vol-b", MountPoint: "/workspace/data"},
 		},
-		WaitForMounts: &waitForMounts,
 	}
 	_, status, err := session.ClaimSandboxDetailed(env.TestCtx.Context, GinkgoT(), claimReq)
 	Expect(err).To(HaveOccurred())
@@ -1977,11 +1930,9 @@ func assertClaimBootstrapMountValidation(env *framework.ScenarioEnv, session *e2
 }
 
 func assertVolumeSyncBackendLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session) {
-	cacheSize := "512M"
 	defaultUID := int64(1000)
 	defaultGID := int64(1000)
 	volume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), apispec.CreateSandboxVolumeRequest{
-		CacheSize:       &cacheSize,
 		DefaultPosixUid: &defaultUID,
 		DefaultPosixGid: &defaultGID,
 	})

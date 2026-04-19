@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -127,6 +128,41 @@ manager_image: sandbox0/manager:test
 	}
 	if main.SecurityContext.Privileged != nil && *main.SecurityContext.Privileged {
 		t.Fatalf("expected ordinary sandbox to remain non-privileged, got %#v", main.SecurityContext)
+	}
+}
+
+func TestBuildPodSpecInjectsVolumePortalMounts(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	template := newTestTemplate()
+	template.Spec.VolumeMounts = []VolumeMountSpec{
+		{Name: "workspace", MountPath: "/workspace/bench-volume"},
+	}
+
+	spec := BuildPodSpec(template)
+	userVolume := findCSIVolumeByPortal(spec.Volumes, "workspace")
+	if userVolume == nil {
+		t.Fatalf("expected workspace csi volume, got %#v", spec.Volumes)
+	}
+	if userVolume.CSI.Driver != volumeportal.DriverName {
+		t.Fatalf("csi driver = %q, want %q", userVolume.CSI.Driver, volumeportal.DriverName)
+	}
+	if got := userVolume.CSI.VolumeAttributes[volumeportal.AttributeMountPath]; got != "/workspace/bench-volume" {
+		t.Fatalf("mount path attr = %q", got)
+	}
+	if mount := findVolumeMount(spec.Containers[0].VolumeMounts, userVolume.Name); mount == nil || mount.MountPath != "/workspace/bench-volume" {
+		t.Fatalf("expected container mount for workspace volume, got %#v", spec.Containers[0].VolumeMounts)
+	}
+
+	webhookVolume := findCSIVolumeByPortal(spec.Volumes, volumeportal.WebhookStatePortalName)
+	if webhookVolume == nil {
+		t.Fatalf("expected webhook state portal volume, got %#v", spec.Volumes)
+	}
+	if mount := findVolumeMount(spec.Containers[0].VolumeMounts, webhookVolume.Name); mount == nil || mount.MountPath != volumeportal.WebhookStateMountPath {
+		t.Fatalf("expected webhook state mount, got %#v", spec.Containers[0].VolumeMounts)
 	}
 }
 
@@ -357,6 +393,18 @@ func findVolume(volumes []corev1.Volume, name string) *corev1.Volume {
 	return nil
 }
 
+func findCSIVolumeByPortal(volumes []corev1.Volume, portalName string) *corev1.Volume {
+	for i := range volumes {
+		if volumes[i].CSI == nil {
+			continue
+		}
+		if volumes[i].CSI.VolumeAttributes[volumeportal.AttributePortalName] == portalName {
+			return &volumes[i]
+		}
+	}
+	return nil
+}
+
 func findContainer(containers []corev1.Container, name string) *corev1.Container {
 	for i := range containers {
 		if containers[i].Name == name {
@@ -401,22 +449,18 @@ func assertResourceQuantity(t *testing.T, got resource.Quantity, want string) {
 	}
 }
 
-func TestBuildPodSpecOverridesTenantStorageProxyEnvVars(t *testing.T) {
+func TestBuildPodSpecOverridesManagerControlledProcdEnvVars(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test
 procd_config:
   root_path: /workspace
-  storage_proxy_base_url: storage-proxy.sandbox0-system.svc.cluster.local
-  storage_proxy_port: 4001
 `)
 	t.Setenv("CONFIG_PATH", configPath)
 
 	template := newTestTemplate()
 	template.Spec.EnvVars = map[string]string{
-		"root_path":              "/tenant-override",
-		"storage_proxy_base_url": "evil.local",
-		"storage_proxy_port":     "65535",
-		"node_name":              "tenant-node",
+		"root_path": "/tenant-override",
+		"node_name": "tenant-node",
 	}
 
 	spec := BuildPodSpec(template)
@@ -425,12 +469,6 @@ procd_config:
 		envByName[env.Name] = env
 	}
 
-	if got := envByName["storage_proxy_base_url"].Value; got != "storage-proxy.sandbox0-system.svc.cluster.local" {
-		t.Fatalf("storage_proxy_base_url = %q, want manager-controlled value", got)
-	}
-	if got := envByName["storage_proxy_port"].Value; got != "4001" {
-		t.Fatalf("storage_proxy_port = %q, want manager-controlled value", got)
-	}
 	if got := envByName["root_path"].Value; got != "/workspace" {
 		t.Fatalf("root_path = %q, want manager-controlled value", got)
 	}
@@ -471,7 +509,7 @@ manager_image: sandbox0/manager:test
 	}
 }
 
-func TestBuildPodSpecFailsClosedForStorageProxyEnvOverridesWhenManagerConfigUnset(t *testing.T) {
+func TestBuildPodSpecKeepsTenantProcdEnvWhenManagerConfigUnset(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test
 `)
@@ -479,10 +517,8 @@ manager_image: sandbox0/manager:test
 
 	template := newTestTemplate()
 	template.Spec.EnvVars = map[string]string{
-		"root_path":              "/tenant-override",
-		"storage_proxy_base_url": "evil.local",
-		"storage_proxy_port":     "65535",
-		"node_name":              "tenant-node",
+		"root_path": "/tenant-override",
+		"node_name": "tenant-node",
 	}
 
 	spec := BuildPodSpec(template)
@@ -491,12 +527,6 @@ manager_image: sandbox0/manager:test
 		envByName[env.Name] = env
 	}
 
-	if got := envByName["storage_proxy_base_url"].Value; got != "" {
-		t.Fatalf("storage_proxy_base_url = %q, want empty manager-controlled value", got)
-	}
-	if got := envByName["storage_proxy_port"].Value; got != "0" {
-		t.Fatalf("storage_proxy_port = %q, want 0 manager-controlled value", got)
-	}
 	if got := envByName["root_path"].Value; got != "/tenant-override" {
 		t.Fatalf("root_path = %q, want tenant value when manager config omits it", got)
 	}

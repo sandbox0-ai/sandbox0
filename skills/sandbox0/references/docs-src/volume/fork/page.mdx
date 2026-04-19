@@ -27,7 +27,7 @@ flowchart TB
 
 - **Endpoint**: `POST /api/v1/sandboxvolumes/{id}/fork`
 - **Path Parameter**: `id` is the source Volume ID
-- **Request Body**: Optional, used to override inherited configuration from the source Volume
+- **Request Body**: Optional, used to set the forked Volume access mode
 - **Success Response**: `201 Created`, returns the new `SandboxVolume` including `source_volume_id`
 - **Common Errors**: `400` (invalid `access_mode`), `404` (source Volume not found or not visible to your team)
 
@@ -36,10 +36,6 @@ flowchart TB
 | Field | Type | Description |
 |------|------|-------------|
 | `access_mode` | enum | Access mode for the forked Volume. If omitted, defaults to `RWO` |
-| `cache_size` | string | Cache size for the forked Volume. If omitted, inherits from source Volume |
-| `buffer_size` | string | Buffer size for the forked Volume. If omitted, inherits from source Volume |
-| `prefetch` | integer | Number of blocks to prefetch. If omitted, inherits from source Volume |
-| `writeback` | boolean | Enable or disable write-back cache. If omitted, inherits from source Volume |
 
 ## Fork a Volume
 
@@ -50,10 +46,6 @@ flowchart TB
       language: "go",
       code: `forked, err := client.ForkVolume(ctx, volume.ID, &apispec.ForkVolumeRequest{
     AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeRWO),
-    CacheSize:  apispec.NewOptString("2G"),
-    BufferSize: apispec.NewOptString("64M"),
-    Prefetch:   apispec.NewOptInt(10),
-    Writeback:  apispec.NewOptBool(false),
 })
 if err != nil {
     panic(err)
@@ -76,10 +68,6 @@ forked = client.volumes.fork(
     volume.id,
     ForkVolumeRequest(
         access_mode=VolumeAccessMode.RWO,
-        cache_size="2G",
-        buffer_size="64M",
-        prefetch=10,
-        writeback=False,
     ),
 )
 
@@ -95,10 +83,6 @@ else:
       language: "typescript",
       code: `const forked = await client.volumes.fork(volume.id, {
     accessMode: models.VolumeAccessMode.Rwo,
-    cacheSize: "2G",
-    bufferSize: "64M",
-    prefetch: 10,
-    writeback: false,
 });
 
 console.log("Forked Volume:", forked.id);
@@ -114,13 +98,9 @@ if (forked.sourceVolumeId) {
       code: `# Fork a volume with default settings
 s0 volume fork <source-volume-id>
 
-# Fork with configuration overrides
+# Fork with an explicit access mode
 s0 volume fork <source-volume-id> \\
-    --access-mode RWX \\
-    --cache-size 2G \\
-    --buffer-size 64M \\
-    --prefetch 10 \\
-    --writeback false`
+    --access-mode RWO`
     }
   ]}
 />

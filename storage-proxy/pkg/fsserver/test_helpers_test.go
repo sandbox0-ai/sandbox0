@@ -28,40 +28,30 @@ type fakeVolumeManager struct {
 	unmountCalls   int
 	ackCalls       int
 	mountSessionID string
-	mountSecret    string
 	mountedAt      time.Time
 	lastMount      struct {
 		s3Prefix   string
 		volumeID   string
 		teamID     string
-		config     *volume.VolumeConfig
 		accessMode volume.AccessMode
 	}
-	trackedSandboxID string
-	trackedVolumeID  string
-	trackedSessionID string
 }
 
-func (m *fakeVolumeManager) MountVolume(_ context.Context, s3Prefix, volumeID, teamID string, config *volume.VolumeConfig, accessMode volume.AccessMode) (string, string, time.Time, error) {
+func (m *fakeVolumeManager) MountVolume(_ context.Context, s3Prefix, volumeID, teamID string, accessMode volume.AccessMode) (string, time.Time, error) {
 	m.mountCalls++
 	m.lastMount.s3Prefix = s3Prefix
 	m.lastMount.volumeID = volumeID
 	m.lastMount.teamID = teamID
-	m.lastMount.config = config
 	m.lastMount.accessMode = accessMode
 	sessionID := m.mountSessionID
 	if sessionID == "" {
 		sessionID = "session-test"
 	}
-	sessionSecret := m.mountSecret
-	if sessionSecret == "" {
-		sessionSecret = "secret-test"
-	}
 	mountedAt := m.mountedAt
 	if mountedAt.IsZero() {
 		mountedAt = time.Unix(1700000000, 0)
 	}
-	return sessionID, sessionSecret, mountedAt, nil
+	return sessionID, mountedAt, nil
 }
 
 func (m *fakeVolumeManager) UnmountVolume(_ context.Context, _, _ string) error {
@@ -79,10 +69,4 @@ func (m *fakeVolumeManager) GetVolume(volumeID string) (*volume.VolumeContext, e
 		return vol, nil
 	}
 	return nil, fserror.New(fserror.NotFound, "volume not mounted")
-}
-
-func (m *fakeVolumeManager) TrackVolumeSession(sandboxID, volumeID, sessionID string) {
-	m.trackedSandboxID = sandboxID
-	m.trackedVolumeID = volumeID
-	m.trackedSessionID = sessionID
 }

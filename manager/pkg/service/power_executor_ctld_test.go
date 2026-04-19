@@ -36,7 +36,7 @@ func TestCtldAddressForSandboxUsesNodeInternalIP(t *testing.T) {
 }
 
 func TestNewSandboxServiceUsesCtldExecutorWhenEnabled(t *testing.T) {
-	svc := NewSandboxService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, SandboxServiceConfig{CtldEnabled: true}, zap.NewNop(), nil)
+	svc := NewSandboxService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, SandboxServiceConfig{CtldEnabled: true}, zap.NewNop(), nil)
 	_, ok := svc.powerExecutor.(*ctldSandboxPowerExecutor)
 	assert.True(t, ok)
 	assert.Equal(t, 8095, svc.config.CtldPort)

@@ -54,8 +54,7 @@ func TestReconcileUsesServicePortForHTTPServiceExposure(t *testing.T) {
 						},
 					},
 					Config: &infrav1alpha1.StorageProxyConfig{
-						HTTPPort:           8081,
-						VolumeProtocolPort: 8082,
+						HTTPPort: 8081,
 					},
 				},
 			},
@@ -109,13 +108,6 @@ func TestReconcileUsesServicePortForHTTPServiceExposure(t *testing.T) {
 		t.Fatalf("expected http target port 8081, got %d", httpPort.TargetPort.IntValue())
 	}
 
-	s0vpPort := findServicePort(t, service, "s0vp")
-	if s0vpPort.Port != 8082 {
-		t.Fatalf("expected s0vp service port 8082, got %d", s0vpPort.Port)
-	}
-	if hasServicePort(service, "grpc") {
-		t.Fatalf("storage-proxy service should not expose a grpc port")
-	}
 }
 
 func TestBuildConfigMapsBuiltinStorageToS3CompatibleType(t *testing.T) {
@@ -216,13 +208,4 @@ func findServicePort(t *testing.T, service *corev1.Service, name string) corev1.
 	}
 	t.Fatalf("expected service port %q to exist", name)
 	return corev1.ServicePort{}
-}
-
-func hasServicePort(service *corev1.Service, name string) bool {
-	for _, port := range service.Spec.Ports {
-		if port.Name == name {
-			return true
-		}
-	}
-	return false
 }

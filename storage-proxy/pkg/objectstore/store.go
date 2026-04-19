@@ -500,9 +500,9 @@ func (s *observedStore) Get(key string, off, limit int64) (io.ReadCloser, error)
 func (s *observedStore) Put(key string, in io.Reader) error {
 	start := time.Now()
 	prefixClass := classifyPrefix(key)
-	counted := &countingReader{Reader: in}
+	counted := countingReaderFor(in)
 	err := s.store.Put(key, counted)
-	s.observeBytes("put", prefixClass, "write", counted.bytes)
+	s.observeBytes("put", prefixClass, "write", counted.BytesRead())
 	s.observeRequest("put", prefixClass, objectStoreStatus(err), start)
 	return err
 }
@@ -539,6 +539,18 @@ func (s *observedStore) observeBytes(operation, prefixClass, direction string, b
 	s.metrics.ObserveObjectStoreBytes(s.provider, s.bucket, prefixClass, operation, direction, bytes)
 }
 
+type byteCountingReader interface {
+	io.Reader
+	BytesRead() int64
+}
+
+func countingReaderFor(in io.Reader) byteCountingReader {
+	if rs, ok := in.(io.ReadSeeker); ok {
+		return &countingReadSeeker{ReadSeeker: rs}
+	}
+	return &countingReader{Reader: in}
+}
+
 type countingReader struct {
 	io.Reader
 	bytes int64
@@ -548,6 +560,31 @@ func (r *countingReader) Read(p []byte) (int, error) {
 	n, err := r.Reader.Read(p)
 	r.bytes += int64(n)
 	return n, err
+}
+
+func (r *countingReader) BytesRead() int64 {
+	if r == nil {
+		return 0
+	}
+	return r.bytes
+}
+
+type countingReadSeeker struct {
+	io.ReadSeeker
+	bytes int64
+}
+
+func (r *countingReadSeeker) Read(p []byte) (int, error) {
+	n, err := r.ReadSeeker.Read(p)
+	r.bytes += int64(n)
+	return n, err
+}
+
+func (r *countingReadSeeker) BytesRead() int64 {
+	if r == nil {
+		return 0
+	}
+	return r.bytes
 }
 
 type observedReadCloser struct {

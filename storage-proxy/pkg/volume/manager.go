@@ -44,6 +44,7 @@ type VolumeContext struct {
 	fileHandles   map[uint64]uint64
 	dirHandleIDs  map[uint64]uint64
 	openFileCount map[uint64]int
+	unlinkedFiles map[uint64]struct{}
 
 	materializeCancel context.CancelFunc
 	materializeDone   chan struct{}

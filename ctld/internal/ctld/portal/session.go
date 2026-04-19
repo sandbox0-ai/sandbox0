@@ -261,11 +261,9 @@ func (s *localSession) Release(ctx context.Context, req *pb.ReleaseRequest) (*pb
 	s.fix(&req.VolumeId)
 	if s.takeReadOnlyHandle(req.VolumeId, req.HandleId) {
 		if volCtx, err := s.localS0FSVolume(req.VolumeId); err == nil && volCtx != nil {
-			if inode, remaining, ok := volCtx.ReleaseHandle(req.HandleId); ok && remaining == 0 {
-				if node, err := volCtx.S0FS.GetAttr(inode); err == nil && node.Nlink == 0 {
-					s.evictReadCache(volCtx, inode)
-					_ = volCtx.S0FS.Forget(inode)
-				}
+			if inode, remaining, unlinked, ok := volCtx.ReleaseFileHandle(req.HandleId); ok && remaining == 0 && unlinked {
+				s.evictReadCache(volCtx, inode)
+				_ = volCtx.S0FS.Forget(inode)
 			}
 			return &pb.Empty{}, nil
 		}

@@ -1009,8 +1009,12 @@ func mapErrnoToCode(errno syscall.Errno) fserror.Code {
 func (s *FileSystemServer) Unlink(ctx context.Context, req *pb.UnlinkRequest) (*pb.Empty, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.Empty, error) {
 		if isS0FSVolume(volCtx) {
-			if err := volCtx.S0FS.Unlink(req.Parent, req.Name); err != nil {
+			inode, err := volCtx.S0FS.UnlinkWithInode(req.Parent, req.Name)
+			if err != nil {
 				return nil, mapS0FSError(err)
+			}
+			if !volCtx.MarkUnlinkedFileIfOpen(inode) {
+				_ = volCtx.S0FS.Forget(inode)
 			}
 			s.publishEvent(runCtx, &pb.WatchEvent{
 				VolumeId:  req.VolumeId,
@@ -1421,10 +1425,8 @@ func (s *FileSystemServer) Release(ctx context.Context, req *pb.ReleaseRequest) 
 		return nil, err
 	}
 	if isS0FSVolume(volCtx) {
-		if inode, remaining, ok := volCtx.ReleaseHandle(req.HandleId); ok && remaining == 0 {
-			if node, err := volCtx.S0FS.GetAttr(inode); err == nil && node.Nlink == 0 {
-				_ = volCtx.S0FS.Forget(inode)
-			}
+		if inode, remaining, unlinked, ok := volCtx.ReleaseFileHandle(req.HandleId); ok && remaining == 0 && unlinked {
+			_ = volCtx.S0FS.Forget(inode)
 		}
 		s.takeDirtyWrite(req.VolumeId, req.HandleId)
 		return &pb.Empty{}, nil

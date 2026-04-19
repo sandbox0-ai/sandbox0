@@ -327,7 +327,11 @@ func TestLocalSessionOpenUsesMountedS0FS(t *testing.T) {
 	if len(session.readOnlyHandles) != 1 {
 		t.Fatalf("read-only handle count = %d, want 1", len(session.readOnlyHandles))
 	}
-	if err := engine.Unlink(s0fs.RootInode, "data.txt"); err != nil {
+	if _, err := session.Unlink(context.Background(), &pb.UnlinkRequest{
+		VolumeId: "ignored-by-local-session",
+		Parent:   s0fs.RootInode,
+		Name:     "data.txt",
+	}); err != nil {
 		t.Fatalf("Unlink() error = %v", err)
 	}
 	if _, err := session.Release(context.Background(), &pb.ReleaseRequest{

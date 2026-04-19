@@ -316,6 +316,45 @@ func TestS0FSUnlinkAfterOpenUntilRelease(t *testing.T) {
 	}
 }
 
+func TestS0FSUnlinkWithoutOpenForgetsFile(t *testing.T) {
+	t.Parallel()
+
+	volCtx := newMountedS0FSVolumeContext(t, "vol-1", "team-a")
+	server := newTestFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{
+			"vol-1": volCtx,
+		},
+	}, nil, nil)
+	ctx := authContext("team-a", "")
+
+	createResp, err := server.Create(ctx, &pb.CreateRequest{
+		VolumeId: "vol-1",
+		Parent:   1,
+		Name:     "temp.txt",
+		Mode:     0o644,
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if _, err := server.Release(ctx, &pb.ReleaseRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		HandleId: createResp.HandleId,
+	}); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+	if _, err := server.Unlink(ctx, &pb.UnlinkRequest{
+		VolumeId: "vol-1",
+		Parent:   1,
+		Name:     "temp.txt",
+	}); err != nil {
+		t.Fatalf("Unlink() error = %v", err)
+	}
+	if _, err := volCtx.S0FS.GetAttr(createResp.Inode); err == nil {
+		t.Fatal("GetAttr() after unlink without open handle returned nil error")
+	}
+}
+
 func TestS0FSOpenAndAccessCheckPermissions(t *testing.T) {
 	t.Parallel()
 

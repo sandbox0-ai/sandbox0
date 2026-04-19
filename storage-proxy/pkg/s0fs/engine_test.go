@@ -283,8 +283,12 @@ func TestEngineUnlinkThenForget(t *testing.T) {
 	if _, err := engine.Write(node.Inode, 0, []byte("payload")); err != nil {
 		t.Fatalf("Write() error = %v", err)
 	}
-	if err := engine.Unlink(RootInode, "open.txt"); err != nil {
-		t.Fatalf("Unlink() error = %v", err)
+	unlinkedInode, err := engine.UnlinkWithInode(RootInode, "open.txt")
+	if err != nil {
+		t.Fatalf("UnlinkWithInode() error = %v", err)
+	}
+	if unlinkedInode != node.Inode {
+		t.Fatalf("UnlinkWithInode() inode = %d, want %d", unlinkedInode, node.Inode)
 	}
 	if _, err := engine.Lookup(RootInode, "open.txt"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Lookup() after unlink err = %v, want ErrNotFound", err)

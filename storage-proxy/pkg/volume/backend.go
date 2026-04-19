@@ -94,6 +94,45 @@ func (v *VolumeContext) ReleaseHandle(handleID uint64) (uint64, int, bool) {
 	return inode, v.openFileCount[inode], ok
 }
 
+func (v *VolumeContext) MarkUnlinkedFileIfOpen(inode uint64) bool {
+	v.handleMu.Lock()
+	defer v.handleMu.Unlock()
+	if v.openFileCount[inode] == 0 {
+		return false
+	}
+	if v.unlinkedFiles == nil {
+		v.unlinkedFiles = make(map[uint64]struct{})
+	}
+	v.unlinkedFiles[inode] = struct{}{}
+	return true
+}
+
+func (v *VolumeContext) FileOpenCount(inode uint64) int {
+	v.handleMu.Lock()
+	defer v.handleMu.Unlock()
+	return v.openFileCount[inode]
+}
+
+func (v *VolumeContext) ReleaseFileHandle(handleID uint64) (uint64, int, bool, bool) {
+	v.handleMu.Lock()
+	defer v.handleMu.Unlock()
+	inode, ok := v.fileHandles[handleID]
+	if ok {
+		if v.openFileCount[inode] > 1 {
+			v.openFileCount[inode]--
+		} else {
+			delete(v.openFileCount, inode)
+		}
+	}
+	delete(v.fileHandles, handleID)
+	remaining := v.openFileCount[inode]
+	_, unlinked := v.unlinkedFiles[inode]
+	if unlinked && remaining == 0 {
+		delete(v.unlinkedFiles, inode)
+	}
+	return inode, remaining, unlinked, ok
+}
+
 func (v *VolumeContext) HandleInode(handleID uint64) (uint64, bool) {
 	v.handleMu.Lock()
 	defer v.handleMu.Unlock()

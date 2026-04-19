@@ -290,30 +290,36 @@ func (e *Engine) Rename(oldParent uint64, oldName string, newParent uint64, newN
 }
 
 func (e *Engine) Unlink(parent uint64, name string) error {
+	_, err := e.UnlinkWithInode(parent, name)
+	return err
+}
+
+// UnlinkWithInode removes a file entry and returns the inode that was unlinked.
+func (e *Engine) UnlinkWithInode(parent uint64, name string) (uint64, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if err := e.checkOpen(); err != nil {
-		return err
+		return 0, err
 	}
 	inode, err := e.lookupLocked(parent, name)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	node := e.nodes[inode]
 	if node.Type == TypeDirectory {
-		return ErrIsDir
+		return 0, ErrIsDir
 	}
 	record := e.newRecord("unlink")
 	record.Parent = parent
 	record.Name = name
 	if err := e.wal.append(record); err != nil {
-		return err
+		return 0, err
 	}
 	if err := e.apply(record); err != nil {
-		return err
+		return 0, err
 	}
 	e.markDirtyLocked()
-	return nil
+	return inode, nil
 }
 
 func (e *Engine) Forget(inode uint64) error {

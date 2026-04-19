@@ -104,3 +104,42 @@ func TestManagerMountUsesDefaultBackend(t *testing.T) {
 		t.Fatalf("s0fs backend mount calls = %d, want 1", s0fsBackend.mountCalls)
 	}
 }
+
+func TestVolumeContextReleaseFileHandleTracksUnlinkedInodes(t *testing.T) {
+	volCtx := &VolumeContext{}
+	first := volCtx.OpenFileHandle(10)
+	second := volCtx.OpenFileHandle(10)
+	if !volCtx.MarkUnlinkedFileIfOpen(10) {
+		t.Fatal("MarkUnlinkedFileIfOpen() = false, want true")
+	}
+
+	inode, remaining, unlinked, ok := volCtx.ReleaseFileHandle(first)
+	if !ok || inode != 10 || remaining != 1 || !unlinked {
+		t.Fatalf("first ReleaseFileHandle() = inode %d remaining %d unlinked %v ok %v", inode, remaining, unlinked, ok)
+	}
+	if got := volCtx.FileOpenCount(10); got != 1 {
+		t.Fatalf("FileOpenCount() after first release = %d, want 1", got)
+	}
+
+	inode, remaining, unlinked, ok = volCtx.ReleaseFileHandle(second)
+	if !ok || inode != 10 || remaining != 0 || !unlinked {
+		t.Fatalf("second ReleaseFileHandle() = inode %d remaining %d unlinked %v ok %v", inode, remaining, unlinked, ok)
+	}
+	if _, _, unlinked, ok = volCtx.ReleaseFileHandle(second); ok || unlinked {
+		t.Fatalf("duplicate ReleaseFileHandle() = unlinked %v ok %v, want false false", unlinked, ok)
+	}
+}
+
+func TestVolumeContextMarkUnlinkedFileIfOpenReturnsFalseForClosedInode(t *testing.T) {
+	volCtx := &VolumeContext{}
+	if volCtx.MarkUnlinkedFileIfOpen(10) {
+		t.Fatal("MarkUnlinkedFileIfOpen() = true, want false")
+	}
+	handle := volCtx.OpenFileHandle(10)
+	if _, _, _, ok := volCtx.ReleaseFileHandle(handle); !ok {
+		t.Fatal("ReleaseFileHandle() ok = false, want true")
+	}
+	if volCtx.MarkUnlinkedFileIfOpen(10) {
+		t.Fatal("MarkUnlinkedFileIfOpen() after release = true, want false")
+	}
+}

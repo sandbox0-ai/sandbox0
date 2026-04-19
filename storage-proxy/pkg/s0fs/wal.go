@@ -98,3 +98,20 @@ func (w *wal) close() error {
 	w.file = nil
 	return err
 }
+
+func (w *wal) reset() error {
+	if w == nil {
+		return ErrClosed
+	}
+	if w.file != nil {
+		if err := w.file.Close(); err != nil {
+			return err
+		}
+	}
+	file, err := os.OpenFile(w.path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("reset wal: %w", err)
+	}
+	w.file = file
+	return nil
+}

@@ -154,6 +154,9 @@ func (f *fakeVolumeProvider) GetVolume(volumeID string) (*volume.VolumeContext, 
 	if f.err != nil {
 		return nil, f.err
 	}
+	if f.ctx != nil && f.ctx.VolumeID != "" && f.ctx.VolumeID != volumeID {
+		return nil, errors.New("not mounted")
+	}
 	return f.ctx, nil
 }
 

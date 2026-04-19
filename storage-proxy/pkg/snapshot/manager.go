@@ -232,6 +232,23 @@ func (m *Manager) CreateSnapshot(ctx context.Context, req *CreateSnapshotRequest
 		m.logger.WithField("volume_id", req.VolumeID).Info("Distributed flush coordination completed")
 	}
 
+	if m.shouldUseS0FS(req.VolumeID) {
+		snapshot, err := m.createS0FSSnapshot(ctx, req)
+		if err != nil {
+			if metrics != nil {
+				metrics.SnapshotOperationsTotal.WithLabelValues("create", "failure").Inc()
+				metrics.SnapshotOperationDuration.WithLabelValues("create").Observe(time.Since(startTime).Seconds())
+			}
+			return nil, err
+		}
+		if metrics != nil {
+			metrics.SnapshotOperationsTotal.WithLabelValues("create", "success").Inc()
+			metrics.SnapshotOperationDuration.WithLabelValues("create").Observe(time.Since(startTime).Seconds())
+			metrics.SnapshotsTotal.Inc()
+		}
+		return snapshot, nil
+	}
+
 	var snapshot *db.Snapshot
 	var snapshotPath string
 
@@ -424,6 +441,22 @@ func (m *Manager) ForkVolume(ctx context.Context, req *ForkVolumeRequest) (*db.S
 			return nil, fmt.Errorf("distributed flush coordination: %w", err)
 		}
 		m.logger.WithField("volume_id", req.SourceVolumeID).Info("Distributed flush coordination completed")
+	}
+
+	if m.shouldUseS0FS(req.SourceVolumeID) {
+		vol, err := m.forkS0FSVolume(ctx, req)
+		if err != nil {
+			if metrics != nil {
+				metrics.SnapshotOperationsTotal.WithLabelValues("fork", "failure").Inc()
+				metrics.SnapshotOperationDuration.WithLabelValues("fork").Observe(time.Since(startTime).Seconds())
+			}
+			return nil, err
+		}
+		if metrics != nil {
+			metrics.SnapshotOperationsTotal.WithLabelValues("fork", "success").Inc()
+			metrics.SnapshotOperationDuration.WithLabelValues("fork").Observe(time.Since(startTime).Seconds())
+		}
+		return vol, nil
 	}
 
 	// 1. Get source volume and verify ownership
@@ -644,6 +677,10 @@ func (m *Manager) RestoreSnapshot(ctx context.Context, req *RestoreSnapshotReque
 	}
 	defer m.releaseVolumeLock(req.VolumeID)
 
+	if m.shouldUseS0FS(req.VolumeID) {
+		return m.restoreS0FSSnapshot(ctx, req, snapshot)
+	}
+
 	// 3. Optional: Try to flush local cached data if volume is mounted on this instance.
 	if volCtx, err := m.volMgr.GetVolume(req.VolumeID); err == nil {
 		if err := volCtx.FlushAll(""); err != nil {
@@ -826,14 +863,19 @@ func (m *Manager) DeleteSnapshot(ctx context.Context, volumeID, snapshotID, team
 		return err
 	}
 
-	// 3. Clean up JuiceFS directory outside the transaction using independent meta client
-	// This is done after the DB transaction to avoid long-running transactions
-	// If this fails, it's not critical as the snapshot metadata is already deleted
-	snapshotPath, err := naming.JuiceFSSnapshotPath(volumeID, snapshotID)
-	if err != nil {
-		m.logger.WithError(err).Warn("Invalid snapshot path, skipping JuiceFS cleanup")
+	// 3. Clean up snapshot state outside the transaction.
+	// This is done after the DB transaction to avoid long-running transactions.
+	if m.shouldUseS0FS(volumeID) {
+		if cleanupErr := m.deleteS0FSSnapshot(ctx, volumeID, snapshotID); cleanupErr != nil {
+			m.logger.WithError(cleanupErr).Warn("Failed to delete s0fs snapshot state")
+		}
 	} else {
-		m.deleteSnapshotDir(ctx, snapshotPath)
+		snapshotPath, err := naming.JuiceFSSnapshotPath(volumeID, snapshotID)
+		if err != nil {
+			m.logger.WithError(err).Warn("Invalid snapshot path, skipping JuiceFS cleanup")
+		} else {
+			m.deleteSnapshotDir(ctx, snapshotPath)
+		}
 	}
 
 	// Record success metrics

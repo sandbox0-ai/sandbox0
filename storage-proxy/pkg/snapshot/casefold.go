@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"sort"
@@ -11,6 +12,7 @@ import (
 	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/pathnorm"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 )
 
 type ListSnapshotCasefoldCollisionsRequest struct {
@@ -103,6 +105,17 @@ func (m *Manager) openSnapshotArchiveSession(
 	snap, err := m.GetSnapshot(ctx, volumeID, snapshotID, teamID)
 	if err != nil {
 		return nil, nil, nil, 0, nil, err
+	}
+
+	if m.shouldUseS0FS(volumeID) {
+		session, rootInode, rootAttr, err := m.openS0FSSnapshotArchiveSession(ctx, volumeID, snapshotID)
+		if err != nil {
+			if errors.Is(err, s0fs.ErrSnapshotNotFound) {
+				return nil, nil, nil, 0, nil, ErrSnapshotNotFound
+			}
+			return nil, nil, nil, 0, nil, err
+		}
+		return volume, snap, session, rootInode, rootAttr, nil
 	}
 
 	sessionFactory := m.newArchiveSession

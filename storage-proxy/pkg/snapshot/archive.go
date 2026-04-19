@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"path"
@@ -23,6 +24,7 @@ import (
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/juicefs"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 )
 
 const snapshotArchiveChunkSize = 128 * 1024
@@ -107,6 +109,23 @@ func (m *Manager) ExportSnapshotArchive(ctx context.Context, req *ExportSnapshot
 	snapshot, err := m.GetSnapshot(ctx, req.VolumeID, req.SnapshotID, req.TeamID)
 	if err != nil {
 		return err
+	}
+
+	if m.shouldUseS0FS(req.VolumeID) {
+		session, rootInode, rootAttr, err := m.openS0FSSnapshotArchiveSession(ctx, req.VolumeID, req.SnapshotID)
+		if err != nil {
+			if errors.Is(err, s0fs.ErrSnapshotNotFound) {
+				return ErrSnapshotNotFound
+			}
+			return err
+		}
+		gzipWriter := gzip.NewWriter(w)
+		defer gzipWriter.Close()
+
+		tarWriter := tar.NewWriter(gzipWriter)
+		defer tarWriter.Close()
+
+		return writeSnapshotArchiveTree(ctx, tarWriter, session, rootInode, "", rootAttr)
 	}
 
 	sessionFactory := m.newArchiveSession

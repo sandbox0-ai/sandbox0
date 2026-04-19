@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"os"
 	"slices"
 	"sync"
 	"time"
@@ -35,27 +36,42 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 		return nil, err
 	}
 
-	now := time.Now().UTC()
+	state, err := loadCurrentState(cfg)
+	if err != nil && err != ErrSnapshotNotFound {
+		_ = walFile.close()
+		return nil, err
+	}
+	if state == nil {
+		now := time.Now().UTC()
+		state = &SnapshotState{
+			NextSeq:   1,
+			NextInode: RootInode + 1,
+			Nodes: map[uint64]*Node{
+				RootInode: {
+					Inode: RootInode,
+					Type:  TypeDirectory,
+					Mode:  0o755,
+					Nlink: 1,
+					Atime: now,
+					Mtime: now,
+					Ctime: now,
+				},
+			},
+			Children: map[uint64]map[string]uint64{
+				RootInode: {},
+			},
+			Data: make(map[uint64][]byte),
+		}
+	}
+
 	e := &Engine{
 		volumeID:  cfg.VolumeID,
 		wal:       walFile,
-		nextSeq:   1,
-		nextInode: RootInode + 1,
-		nodes: map[uint64]*Node{
-			RootInode: {
-				Inode: RootInode,
-				Type:  TypeDirectory,
-				Mode:  0o755,
-				Nlink: 1,
-				Atime: now,
-				Mtime: now,
-				Ctime: now,
-			},
-		},
-		children: map[uint64]map[string]uint64{
-			RootInode: {},
-		},
-		data: make(map[uint64][]byte),
+		nextSeq:   state.NextSeq,
+		nextInode: state.NextInode,
+		nodes:     state.Nodes,
+		children:  state.Children,
+		data:      state.Data,
 	}
 
 	for _, record := range records {
@@ -80,6 +96,12 @@ func (e *Engine) Close() error {
 	defer e.mu.Unlock()
 	if e.closed {
 		return nil
+	}
+	if err := e.persistCurrentStateLocked(); err != nil {
+		return err
+	}
+	if err := e.wal.reset(); err != nil {
+		return err
 	}
 	e.closed = true
 	return e.wal.close()
@@ -354,6 +376,76 @@ func (e *Engine) Fsync(_ uint64) error {
 	return e.wal.sync()
 }
 
+func (e *Engine) SnapshotState() *SnapshotState {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return cloneState(e.currentStateLocked())
+}
+
+func (e *Engine) CreateSnapshot(snapshotID string) (*SnapshotState, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.checkOpen(); err != nil {
+		return nil, err
+	}
+	if snapshotID == "" {
+		return nil, fmt.Errorf("%w: snapshot id is required", ErrInvalidInput)
+	}
+	state := cloneState(e.currentStateLocked())
+	if err := saveSnapshotState(snapshotFilePath(e.wal.path, snapshotID), state); err != nil {
+		return nil, err
+	}
+	return state, nil
+}
+
+func (e *Engine) RestoreSnapshot(snapshotID string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.checkOpen(); err != nil {
+		return err
+	}
+	state, err := loadSnapshotState(snapshotFilePath(e.wal.path, snapshotID))
+	if err != nil {
+		return err
+	}
+	e.replaceStateLocked(state)
+	if err := e.persistCurrentStateLocked(); err != nil {
+		return err
+	}
+	return e.wal.reset()
+}
+
+func (e *Engine) ReplaceState(state *SnapshotState) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.checkOpen(); err != nil {
+		return err
+	}
+	e.replaceStateLocked(cloneState(state))
+	if err := e.persistCurrentStateLocked(); err != nil {
+		return err
+	}
+	return e.wal.reset()
+}
+
+func (e *Engine) DeleteSnapshot(snapshotID string) error {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if err := e.checkOpen(); err != nil {
+		return err
+	}
+	if snapshotID == "" {
+		return fmt.Errorf("%w: snapshot id is required", ErrInvalidInput)
+	}
+	if err := os.Remove(snapshotFilePath(e.wal.path, snapshotID)); err != nil {
+		if os.IsNotExist(err) {
+			return ErrSnapshotNotFound
+		}
+		return fmt.Errorf("delete snapshot state: %w", err)
+	}
+	return nil
+}
+
 func (e *Engine) create(parent uint64, name string, typ FileType, mode uint32, target string) (*Node, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -394,6 +486,43 @@ func (e *Engine) newRecord(op string) walRecord {
 	}
 	e.nextSeq++
 	return record
+}
+
+func (e *Engine) currentStateLocked() *SnapshotState {
+	return &SnapshotState{
+		NextSeq:   e.nextSeq,
+		NextInode: e.nextInode,
+		Nodes:     e.nodes,
+		Children:  e.children,
+		Data:      e.data,
+	}
+}
+
+func (e *Engine) replaceStateLocked(state *SnapshotState) {
+	normalizeState(state)
+	e.nextSeq = state.NextSeq
+	if e.nextSeq == 0 {
+		e.nextSeq = 1
+	}
+	e.nextInode = state.NextInode
+	if e.nextInode <= RootInode {
+		e.nextInode = RootInode + 1
+	}
+	e.nodes = state.Nodes
+	e.children = state.Children
+	e.data = state.Data
+	e.collectUnlinkedLocked()
+}
+
+func (e *Engine) persistCurrentStateLocked() error {
+	return saveSnapshotState(headStatePath(e.wal.path), cloneState(e.currentStateLocked()))
+}
+
+func loadCurrentState(cfg Config) (*SnapshotState, error) {
+	if cfg.WALPath == "" {
+		return nil, fmt.Errorf("%w: wal path is required", ErrInvalidInput)
+	}
+	return loadSnapshotState(headStatePath(cfg.WALPath))
 }
 
 func (e *Engine) apply(record walRecord) error {

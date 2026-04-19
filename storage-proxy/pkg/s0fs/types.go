@@ -17,6 +17,14 @@ type Config struct {
 	WALPath  string
 }
 
+type SnapshotState struct {
+	NextSeq   uint64                      `json:"next_seq"`
+	NextInode uint64                      `json:"next_inode"`
+	Nodes     map[uint64]*Node            `json:"nodes"`
+	Children  map[uint64]map[string]uint64 `json:"children"`
+	Data      map[uint64][]byte           `json:"data"`
+}
+
 type Node struct {
 	Inode  uint64
 	Type   FileType

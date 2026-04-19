@@ -13,18 +13,50 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/juicedata/juicefs/pkg/meta"
+	"github.com/juicedata/juicefs/pkg/object"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/juicefs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 )
 
-func (m *Manager) s0fsConfig(volumeID string) s0fs.Config {
-	return s0fs.Config{
+func (m *Manager) s0fsConfig(teamID, volumeID string) s0fs.Config {
+	cfg := s0fs.Config{
 		VolumeID: volumeID,
 		WALPath:  filepath.Join(m.config.CacheDir, "s0fs", volumeID, "engine.wal"),
 	}
+	store, err := m.s0fsObjectStore(teamID, volumeID)
+	if err == nil {
+		cfg.ObjectStore = store
+	}
+	return cfg
+}
+
+func (m *Manager) s0fsObjectStore(teamID, volumeID string) (object.ObjectStorage, error) {
+	if m == nil || m.config == nil || teamID == "" || volumeID == "" || strings.TrimSpace(m.config.S3Bucket) == "" {
+		return nil, nil
+	}
+	prefix, err := naming.S3VolumePrefix(teamID, volumeID)
+	if err != nil {
+		return nil, err
+	}
+	store, err := juicefs.CreateObjectStorage(juicefs.ObjectStorageConfig{
+		Type:         m.config.ObjectStorageType,
+		Bucket:       m.config.S3Bucket,
+		Region:       m.config.S3Region,
+		Endpoint:     m.config.S3Endpoint,
+		AccessKey:    m.config.S3AccessKey,
+		SecretKey:    m.config.S3SecretKey,
+		SessionToken: m.config.S3SessionToken,
+		Metrics:      m.metrics,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return object.WithPrefix(store, prefix+"/s0fs/"), nil
 }
 
 func (m *Manager) shouldUseS0FS(volumeID string) bool {
@@ -46,15 +78,17 @@ func (m *Manager) shouldUseS0FS(volumeID string) bool {
 	return false
 }
 
-func (m *Manager) openS0FSEngine(ctx context.Context, volumeID string) (*s0fs.Engine, func() error, error) {
+func (m *Manager) openS0FSEngine(ctx context.Context, teamID, volumeID string) (*s0fs.Engine, func() error, error) {
 	if volumeID == "" {
 		return nil, nil, fmt.Errorf("volume id is required")
 	}
-	if volCtx, err := m.volMgr.GetVolume(volumeID); err == nil && volCtx != nil && volCtx.IsS0FS() {
-		return volCtx.S0FS, func() error { return nil }, nil
+	if m.volMgr != nil {
+		if volCtx, err := m.volMgr.GetVolume(volumeID); err == nil && volCtx != nil && volCtx.IsS0FS() {
+			return volCtx.S0FS, func() error { return nil }, nil
+		}
 	}
 
-	engine, err := s0fs.Open(ctx, m.s0fsConfig(volumeID))
+	engine, err := s0fs.Open(ctx, m.s0fsConfig(teamID, volumeID))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -74,17 +108,17 @@ func (m *s0fsArchiveMeta) GetAttr(_ meta.Context, inode meta.Ino, attr *meta.Att
 		return errnoForS0FSError(err)
 	}
 	*attr = meta.Attr{
-		Typ:      metaTypeForS0FS(node.Type),
-		Mode:     uint16(node.Mode),
-		Uid:      node.UID,
-		Gid:      node.GID,
-		Nlink:    node.Nlink,
-		Length:   node.Size,
-		Atime:    node.Atime.Unix(),
+		Typ:       metaTypeForS0FS(node.Type),
+		Mode:      uint16(node.Mode),
+		Uid:       node.UID,
+		Gid:       node.GID,
+		Nlink:     node.Nlink,
+		Length:    node.Size,
+		Atime:     node.Atime.Unix(),
 		Atimensec: uint32(node.Atime.Nanosecond()),
-		Mtime:    node.Mtime.Unix(),
+		Mtime:     node.Mtime.Unix(),
 		Mtimensec: uint32(node.Mtime.Nanosecond()),
-		Ctime:    node.Ctime.Unix(),
+		Ctime:     node.Ctime.Unix(),
 		Ctimensec: uint32(node.Ctime.Nanosecond()),
 	}
 	return 0
@@ -194,11 +228,15 @@ func resolveS0FSForkState(ctx context.Context, source *s0fs.Engine) (*s0fs.Snaps
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return source.SnapshotState(), nil
+	return source.ExportState()
 }
 
 func (m *Manager) openS0FSSnapshotArchiveSession(ctx context.Context, volumeID, snapshotID string) (*snapshotArchiveSession, meta.Ino, *meta.Attr, error) {
-	state, err := s0fs.LoadSnapshot(ctx, m.s0fsConfig(volumeID), snapshotID)
+	volumeRecord, err := m.repo.GetSandboxVolume(ctx, volumeID)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	state, err := s0fs.LoadSnapshot(ctx, m.s0fsConfig(volumeRecord.TeamID, volumeID), snapshotID)
 	if err != nil {
 		return nil, 0, nil, err
 	}
@@ -225,14 +263,16 @@ func (m *Manager) createS0FSSnapshot(ctx context.Context, req *CreateSnapshotReq
 		return nil, ErrVolumeNotFound
 	}
 
-	engine, closeFn, err := m.openS0FSEngine(ctx, req.VolumeID)
+	engine, closeFn, err := m.openS0FSEngine(ctx, vol.TeamID, req.VolumeID)
 	if err != nil {
 		return nil, err
 	}
 	defer closeFn()
 
-	if volCtx, getErr := m.volMgr.GetVolume(req.VolumeID); getErr == nil && volCtx != nil {
-		_ = volCtx.FlushAll("")
+	if m.volMgr != nil {
+		if volCtx, getErr := m.volMgr.GetVolume(req.VolumeID); getErr == nil && volCtx != nil {
+			_ = volCtx.FlushAll("")
+		}
 	}
 
 	snapshotID := uuid.New().String()
@@ -274,14 +314,16 @@ func (m *Manager) forkS0FSVolume(ctx context.Context, req *ForkVolumeRequest) (*
 		return nil, ErrVolumeNotFound
 	}
 
-	sourceEngine, closeSource, err := m.openS0FSEngine(ctx, req.SourceVolumeID)
+	sourceEngine, closeSource, err := m.openS0FSEngine(ctx, sourceVol.TeamID, req.SourceVolumeID)
 	if err != nil {
 		return nil, err
 	}
 	defer closeSource()
 
-	if volCtx, getErr := m.volMgr.GetVolume(req.SourceVolumeID); getErr == nil && volCtx != nil {
-		_ = volCtx.FlushAll("")
+	if m.volMgr != nil {
+		if volCtx, getErr := m.volMgr.GetVolume(req.SourceVolumeID); getErr == nil && volCtx != nil {
+			_ = volCtx.FlushAll("")
+		}
 	}
 
 	state, err := resolveS0FSForkState(ctx, sourceEngine)
@@ -332,7 +374,7 @@ func (m *Manager) forkS0FSVolume(ctx context.Context, req *ForkVolumeRequest) (*
 	}
 
 	newVolumeID := uuid.New().String()
-	targetEngine, closeTarget, err := m.openS0FSEngine(ctx, newVolumeID)
+	targetEngine, closeTarget, err := m.openS0FSEngine(ctx, req.TeamID, newVolumeID)
 	if err != nil {
 		return nil, err
 	}
@@ -374,7 +416,7 @@ func (m *Manager) forkS0FSVolume(ctx context.Context, req *ForkVolumeRequest) (*
 }
 
 func (m *Manager) restoreS0FSSnapshot(ctx context.Context, req *RestoreSnapshotRequest, snapshot *db.Snapshot) error {
-	engine, closeFn, err := m.openS0FSEngine(ctx, req.VolumeID)
+	engine, closeFn, err := m.openS0FSEngine(ctx, snapshot.TeamID, req.VolumeID)
 	if err != nil {
 		return err
 	}
@@ -383,11 +425,16 @@ func (m *Manager) restoreS0FSSnapshot(ctx context.Context, req *RestoreSnapshotR
 	if err := engine.RestoreSnapshot(req.SnapshotID); err != nil {
 		return err
 	}
-	if volCtx, getErr := m.volMgr.GetVolume(req.VolumeID); getErr == nil && volCtx != nil {
-		_ = m.volMgr.UpdateVolumeRoot(req.VolumeID, meta.RootInode)
+	if m.volMgr != nil {
+		if volCtx, getErr := m.volMgr.GetVolume(req.VolumeID); getErr == nil && volCtx != nil {
+			_ = m.volMgr.UpdateVolumeRoot(req.VolumeID, meta.RootInode)
+		}
 	}
 
 	invalidateID := uuid.New().String()
+	if m.volMgr == nil {
+		return m.appendMeteringEvent(ctx, snapshotRestoredEvent(m.regionID(), m.clusterID, snapshot, req.VolumeID, req.TeamID, req.UserID))
+	}
 	participants, err := m.volMgr.BeginInvalidate(req.VolumeID, invalidateID)
 	if err != nil {
 		return err
@@ -404,7 +451,11 @@ func (m *Manager) restoreS0FSSnapshot(ctx context.Context, req *RestoreSnapshotR
 }
 
 func (m *Manager) deleteS0FSSnapshot(ctx context.Context, volumeID, snapshotID string) error {
-	engine, closeFn, err := m.openS0FSEngine(ctx, volumeID)
+	volumeRecord, err := m.repo.GetSandboxVolume(ctx, volumeID)
+	if err != nil {
+		return err
+	}
+	engine, closeFn, err := m.openS0FSEngine(ctx, volumeRecord.TeamID, volumeID)
 	if err != nil {
 		return err
 	}

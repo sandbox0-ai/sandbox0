@@ -58,6 +58,9 @@ type VolumeContext struct {
 	fileHandles   map[uint64]uint64
 	dirHandleIDs  map[uint64]uint64
 	openFileCount map[uint64]int
+
+	materializeCancel context.CancelFunc
+	materializeDone   chan struct{}
 }
 
 // MountSession tracks a single mount session on this instance.

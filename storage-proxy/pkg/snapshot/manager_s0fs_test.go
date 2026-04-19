@@ -61,7 +61,7 @@ func TestS0FSSnapshotCreateRestoreAndDelete(t *testing.T) {
 	if err := mgr.DeleteSnapshot(context.Background(), "vol-1", snap.ID, "team-1"); err != nil {
 		t.Fatalf("DeleteSnapshot() error = %v", err)
 	}
-	if _, err := s0fs.LoadSnapshot(context.Background(), mgr.s0fsConfig("vol-1"), snap.ID); err == nil {
+	if _, err := s0fs.LoadSnapshot(context.Background(), mgr.s0fsConfig("team-1", "vol-1"), snap.ID); err == nil {
 		t.Fatal("LoadSnapshot() after delete returned nil error")
 	}
 	if len(repo.deleted) != 1 || repo.deleted[0] != snap.ID {
@@ -90,7 +90,7 @@ func TestS0FSForkVolumeCopiesState(t *testing.T) {
 		t.Fatalf("forked volume not persisted: %+v", repo.volumes)
 	}
 
-	forkedEngine, err := s0fs.Open(context.Background(), mgr.s0fsConfig(forked.ID))
+	forkedEngine, err := s0fs.Open(context.Background(), mgr.s0fsConfig("team-1", forked.ID))
 	if err != nil {
 		t.Fatalf("Open(forked) error = %v", err)
 	}

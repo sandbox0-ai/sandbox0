@@ -1,9 +1,12 @@
 package s0fs
 
 import (
+	"bytes"
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"slices"
 	"sync"
@@ -21,6 +24,14 @@ type Engine struct {
 	nodes     map[uint64]*Node
 	children  map[uint64]map[string]uint64
 	data      map[uint64][]byte
+	coldFiles map[uint64][]FileExtent
+	segments  map[string]*Segment
+
+	materializer            *Materializer
+	mutationVersion         uint64
+	lastMaterializedVersion uint64
+	dirty                   bool
+	dirtyAt                 time.Time
 }
 
 func Open(ctx context.Context, cfg Config) (*Engine, error) {
@@ -37,7 +48,13 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 	}
 
 	state, err := loadCurrentState(cfg)
-	if err != nil && err != ErrSnapshotNotFound {
+	if errors.Is(err, ErrSnapshotNotFound) && cfg.ObjectStore != nil {
+		materializer := NewMaterializer(cfg.ObjectStore)
+		if materializer != nil {
+			state, _, err = materializer.LoadLatestState(ctx)
+		}
+	}
+	if err != nil && !errors.Is(err, ErrSnapshotNotFound) && !errors.Is(err, ErrMaterializedManifestNotFound) {
 		_ = walFile.close()
 		return nil, err
 	}
@@ -60,18 +77,23 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 			Children: map[uint64]map[string]uint64{
 				RootInode: {},
 			},
-			Data: make(map[uint64][]byte),
+			Data:      make(map[uint64][]byte),
+			ColdFiles: make(map[uint64][]FileExtent),
+			Segments:  make(map[string]*Segment),
 		}
 	}
 
 	e := &Engine{
-		volumeID:  cfg.VolumeID,
-		wal:       walFile,
-		nextSeq:   state.NextSeq,
-		nextInode: state.NextInode,
-		nodes:     state.Nodes,
-		children:  state.Children,
-		data:      state.Data,
+		volumeID:     cfg.VolumeID,
+		wal:          walFile,
+		nextSeq:      state.NextSeq,
+		nextInode:    state.NextInode,
+		nodes:        state.Nodes,
+		children:     state.Children,
+		data:         state.Data,
+		coldFiles:    state.ColdFiles,
+		segments:     state.Segments,
+		materializer: NewMaterializer(cfg.ObjectStore),
 	}
 
 	for _, record := range records {
@@ -87,6 +109,11 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 		}
 	}
 	e.collectUnlinkedLocked()
+	if len(records) > 0 {
+		e.dirty = true
+		e.dirtyAt = time.Now().UTC()
+		e.mutationVersion = 1
+	}
 
 	return e, nil
 }
@@ -195,6 +222,7 @@ func (e *Engine) Write(inode uint64, offset uint64, payload []byte) (int, error)
 	if err := e.apply(record); err != nil {
 		return 0, err
 	}
+	e.markDirtyLocked()
 	return len(payload), nil
 }
 
@@ -204,18 +232,11 @@ func (e *Engine) Read(inode uint64, offset uint64, size uint64) ([]byte, error) 
 	if err := e.checkOpen(); err != nil {
 		return nil, err
 	}
-	if _, err := e.fileNodeLocked(inode); err != nil {
+	node, err := e.fileNodeLocked(inode)
+	if err != nil {
 		return nil, err
 	}
-	fileData := e.data[inode]
-	if offset >= uint64(len(fileData)) {
-		return nil, nil
-	}
-	end := offset + size
-	if end > uint64(len(fileData)) {
-		end = uint64(len(fileData))
-	}
-	return slices.Clone(fileData[offset:end]), nil
+	return e.readFileLocked(node, inode, offset, size)
 }
 
 func (e *Engine) Rename(oldParent uint64, oldName string, newParent uint64, newName string) error {
@@ -241,7 +262,11 @@ func (e *Engine) Rename(oldParent uint64, oldName string, newParent uint64, newN
 	if err := e.wal.append(record); err != nil {
 		return err
 	}
-	return e.apply(record)
+	if err := e.apply(record); err != nil {
+		return err
+	}
+	e.markDirtyLocked()
+	return nil
 }
 
 func (e *Engine) Unlink(parent uint64, name string) error {
@@ -264,7 +289,11 @@ func (e *Engine) Unlink(parent uint64, name string) error {
 	if err := e.wal.append(record); err != nil {
 		return err
 	}
-	return e.apply(record)
+	if err := e.apply(record); err != nil {
+		return err
+	}
+	e.markDirtyLocked()
+	return nil
 }
 
 func (e *Engine) Forget(inode uint64) error {
@@ -309,7 +338,11 @@ func (e *Engine) RemoveDir(parent uint64, name string) error {
 	if err := e.wal.append(record); err != nil {
 		return err
 	}
-	return e.apply(record)
+	if err := e.apply(record); err != nil {
+		return err
+	}
+	e.markDirtyLocked()
+	return nil
 }
 
 func (e *Engine) SetMode(inode uint64, mode uint32) error {
@@ -327,7 +360,11 @@ func (e *Engine) SetMode(inode uint64, mode uint32) error {
 	if err := e.wal.append(record); err != nil {
 		return err
 	}
-	return e.apply(record)
+	if err := e.apply(record); err != nil {
+		return err
+	}
+	e.markDirtyLocked()
+	return nil
 }
 
 func (e *Engine) SetOwner(inode uint64, uid, gid uint32) error {
@@ -346,7 +383,11 @@ func (e *Engine) SetOwner(inode uint64, uid, gid uint32) error {
 	if err := e.wal.append(record); err != nil {
 		return err
 	}
-	return e.apply(record)
+	if err := e.apply(record); err != nil {
+		return err
+	}
+	e.markDirtyLocked()
+	return nil
 }
 
 func (e *Engine) Truncate(inode uint64, size uint64) error {
@@ -364,7 +405,11 @@ func (e *Engine) Truncate(inode uint64, size uint64) error {
 	if err := e.wal.append(record); err != nil {
 		return err
 	}
-	return e.apply(record)
+	if err := e.apply(record); err != nil {
+		return err
+	}
+	e.markDirtyLocked()
+	return nil
 }
 
 func (e *Engine) Fsync(_ uint64) error {
@@ -382,6 +427,54 @@ func (e *Engine) SnapshotState() *SnapshotState {
 	return cloneState(e.currentStateLocked())
 }
 
+func (e *Engine) ExportState() (*SnapshotState, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if err := e.checkOpen(); err != nil {
+		return nil, err
+	}
+	return e.exportStateLocked()
+}
+
+func (e *Engine) SyncMaterialize(ctx context.Context) (*Manifest, error) {
+	e.mu.RLock()
+	if err := e.checkOpen(); err != nil {
+		e.mu.RUnlock()
+		return nil, err
+	}
+	if e.materializer == nil || !e.materializer.Enabled() || !e.dirty {
+		e.mu.RUnlock()
+		return nil, nil
+	}
+	version := e.mutationVersion
+	state, err := e.exportStateLocked()
+	if err != nil {
+		e.mu.RUnlock()
+		return nil, err
+	}
+	volumeID := e.volumeID
+	e.mu.RUnlock()
+
+	manifest, err := e.materializer.Materialize(ctx, volumeID, state)
+	if err != nil || manifest == nil {
+		return manifest, err
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.mutationVersion == version {
+		if err := e.persistCurrentStateLocked(); err != nil {
+			return nil, err
+		}
+		if err := e.wal.reset(); err != nil {
+			return nil, err
+		}
+		e.lastMaterializedVersion = version
+		e.dirty = false
+	}
+	return manifest, nil
+}
+
 func (e *Engine) CreateSnapshot(snapshotID string) (*SnapshotState, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -391,7 +484,10 @@ func (e *Engine) CreateSnapshot(snapshotID string) (*SnapshotState, error) {
 	if snapshotID == "" {
 		return nil, fmt.Errorf("%w: snapshot id is required", ErrInvalidInput)
 	}
-	state := cloneState(e.currentStateLocked())
+	state, err := e.exportStateLocked()
+	if err != nil {
+		return nil, err
+	}
 	if err := saveSnapshotState(snapshotFilePath(e.wal.path, snapshotID), state); err != nil {
 		return nil, err
 	}
@@ -412,7 +508,11 @@ func (e *Engine) RestoreSnapshot(snapshotID string) error {
 	if err := e.persistCurrentStateLocked(); err != nil {
 		return err
 	}
-	return e.wal.reset()
+	if err := e.wal.reset(); err != nil {
+		return err
+	}
+	e.markDirtyLocked()
+	return nil
 }
 
 func (e *Engine) ReplaceState(state *SnapshotState) error {
@@ -425,7 +525,11 @@ func (e *Engine) ReplaceState(state *SnapshotState) error {
 	if err := e.persistCurrentStateLocked(); err != nil {
 		return err
 	}
-	return e.wal.reset()
+	if err := e.wal.reset(); err != nil {
+		return err
+	}
+	e.markDirtyLocked()
+	return nil
 }
 
 func (e *Engine) DeleteSnapshot(snapshotID string) error {
@@ -475,6 +579,7 @@ func (e *Engine) create(parent uint64, name string, typ FileType, mode uint32, t
 	if err := e.apply(record); err != nil {
 		return nil, err
 	}
+	e.markDirtyLocked()
 	return cloneNode(e.nodes[record.Inode]), nil
 }
 
@@ -495,6 +600,8 @@ func (e *Engine) currentStateLocked() *SnapshotState {
 		Nodes:     e.nodes,
 		Children:  e.children,
 		Data:      e.data,
+		ColdFiles: e.coldFiles,
+		Segments:  e.segments,
 	}
 }
 
@@ -511,6 +618,8 @@ func (e *Engine) replaceStateLocked(state *SnapshotState) {
 	e.nodes = state.Nodes
 	e.children = state.Children
 	e.data = state.Data
+	e.coldFiles = state.ColdFiles
+	e.segments = state.Segments
 	e.collectUnlinkedLocked()
 }
 
@@ -588,7 +697,10 @@ func (e *Engine) applyWrite(record walRecord) error {
 	if err != nil {
 		return err
 	}
-	current := e.data[record.Inode]
+	current, err := e.mutableFileDataLocked(record.Inode)
+	if err != nil {
+		return err
+	}
 	end := record.Offset + uint64(len(record.Data))
 	if end > uint64(len(current)) {
 		grown := make([]byte, end)
@@ -667,7 +779,10 @@ func (e *Engine) applyTruncate(record walRecord) error {
 	if err != nil {
 		return err
 	}
-	current := e.data[record.Inode]
+	current, err := e.mutableFileDataLocked(record.Inode)
+	if err != nil {
+		return err
+	}
 	target := int(record.Offset)
 	switch {
 	case target < len(current):
@@ -702,6 +817,138 @@ func (e *Engine) applyUnlink(record walRecord) error {
 		node.Ctime = time.Unix(0, record.TimeUnix).UTC()
 	}
 	return nil
+}
+
+func (e *Engine) markDirtyLocked() {
+	e.mutationVersion++
+	e.dirty = true
+	e.dirtyAt = time.Now().UTC()
+}
+
+func (e *Engine) exportStateLocked() (*SnapshotState, error) {
+	state := cloneState(e.currentStateLocked())
+	if len(state.ColdFiles) == 0 {
+		state.Segments = make(map[string]*Segment)
+		return state, nil
+	}
+	for inode := range state.ColdFiles {
+		node := state.Nodes[inode]
+		if node == nil {
+			continue
+		}
+		payload, err := e.readColdRangeLocked(inode, 0, node.Size)
+		if err != nil {
+			return nil, err
+		}
+		state.Data[inode] = payload
+	}
+	state.ColdFiles = make(map[uint64][]FileExtent)
+	state.Segments = make(map[string]*Segment)
+	return state, nil
+}
+
+func (e *Engine) readFileLocked(node *Node, inode uint64, offset uint64, size uint64) ([]byte, error) {
+	if node == nil {
+		return nil, ErrNotFound
+	}
+	if offset >= node.Size {
+		return nil, nil
+	}
+	if payload := e.data[inode]; len(payload) > 0 || len(e.coldFiles[inode]) == 0 {
+		if offset >= uint64(len(payload)) {
+			return nil, nil
+		}
+		end := offset + size
+		if end > uint64(len(payload)) {
+			end = uint64(len(payload))
+		}
+		return slices.Clone(payload[offset:end]), nil
+	}
+	return e.readColdRangeLocked(inode, offset, size)
+}
+
+func (e *Engine) mutableFileDataLocked(inode uint64) ([]byte, error) {
+	if payload := e.data[inode]; len(payload) > 0 || len(e.coldFiles[inode]) == 0 {
+		return payload, nil
+	}
+	node := e.nodes[inode]
+	if node == nil {
+		return nil, ErrNotFound
+	}
+	payload, err := e.readColdRangeLocked(inode, 0, node.Size)
+	if err != nil {
+		return nil, err
+	}
+	e.data[inode] = payload
+	delete(e.coldFiles, inode)
+	return payload, nil
+}
+
+func (e *Engine) readColdRangeLocked(inode uint64, offset uint64, size uint64) ([]byte, error) {
+	if e.materializer == nil || !e.materializer.Enabled() {
+		return nil, fmt.Errorf("%w: cold data resolver is not configured", ErrInvalidInput)
+	}
+	extents := e.coldFiles[inode]
+	if len(extents) == 0 {
+		return nil, nil
+	}
+	var out bytes.Buffer
+	remaining := size
+	rangeStart := offset
+	rangeEnd := offset + size
+	fileOffset := uint64(0)
+
+	for _, extent := range extents {
+		extentStart := fileOffset
+		extentEnd := fileOffset + extent.Length
+		if rangeEnd <= extentStart || rangeStart >= extentEnd {
+			fileOffset = extentEnd
+			continue
+		}
+
+		readStart := maxUint64(rangeStart, extentStart)
+		readEnd := minUint64(rangeEnd, extentEnd)
+		segment := e.segments[extent.SegmentID]
+		if segment == nil {
+			return nil, fmt.Errorf("%w: missing segment %s", ErrInvalidInput, extent.SegmentID)
+		}
+		segmentOffset := extent.Offset + (readStart - extentStart)
+		reader, err := e.materializer.store.Get(segment.Key, int64(segmentOffset), int64(readEnd-readStart))
+		if err != nil {
+			return nil, fmt.Errorf("read cold segment %s: %w", segment.Key, err)
+		}
+		chunk, readErr := io.ReadAll(reader)
+		closeErr := reader.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("read cold segment payload %s: %w", segment.Key, readErr)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("close cold segment reader %s: %w", segment.Key, closeErr)
+		}
+		if _, err := out.Write(chunk); err != nil {
+			return nil, fmt.Errorf("assemble cold file data: %w", err)
+		}
+		remaining -= uint64(len(chunk))
+		if remaining == 0 {
+			break
+		}
+		fileOffset = extentEnd
+	}
+	return out.Bytes(), nil
+}
+
+func minUint64(a, b uint64) uint64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxUint64(a, b uint64) uint64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func (e *Engine) checkOpen() error {
@@ -755,5 +1002,6 @@ func (e *Engine) collectUnlinkedLocked() {
 		delete(e.children, inode)
 		delete(e.nodes, inode)
 		delete(e.data, inode)
+		delete(e.coldFiles, inode)
 	}
 }

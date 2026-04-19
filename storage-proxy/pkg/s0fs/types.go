@@ -1,6 +1,10 @@
 package s0fs
 
-import "time"
+import (
+	"time"
+
+	"github.com/juicedata/juicefs/pkg/object"
+)
 
 const RootInode uint64 = 1
 
@@ -13,16 +17,33 @@ const (
 )
 
 type Config struct {
-	VolumeID string
-	WALPath  string
+	VolumeID            string
+	WALPath             string
+	ObjectStore         object.ObjectStorage
+	MaterializeInterval time.Duration
 }
 
 type SnapshotState struct {
-	NextSeq   uint64                      `json:"next_seq"`
-	NextInode uint64                      `json:"next_inode"`
-	Nodes     map[uint64]*Node            `json:"nodes"`
+	NextSeq   uint64                       `json:"next_seq"`
+	NextInode uint64                       `json:"next_inode"`
+	Nodes     map[uint64]*Node             `json:"nodes"`
 	Children  map[uint64]map[string]uint64 `json:"children"`
-	Data      map[uint64][]byte           `json:"data"`
+	Data      map[uint64][]byte            `json:"data,omitempty"`
+	ColdFiles map[uint64][]FileExtent      `json:"cold_files,omitempty"`
+	Segments  map[string]*Segment          `json:"segments,omitempty"`
+}
+
+type FileExtent struct {
+	SegmentID string `json:"segment_id"`
+	Offset    uint64 `json:"offset"`
+	Length    uint64 `json:"length"`
+}
+
+type Segment struct {
+	ID     string `json:"id"`
+	Key    string `json:"key"`
+	Length uint64 `json:"length"`
+	SHA256 string `json:"sha256,omitempty"`
 }
 
 type Node struct {

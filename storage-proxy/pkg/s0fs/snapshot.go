@@ -79,6 +79,12 @@ func normalizeState(state *SnapshotState) {
 	if state.Data == nil {
 		state.Data = make(map[uint64][]byte)
 	}
+	if state.ColdFiles == nil {
+		state.ColdFiles = make(map[uint64][]FileExtent)
+	}
+	if state.Segments == nil {
+		state.Segments = make(map[string]*Segment)
+	}
 	for inode, children := range state.Children {
 		if children == nil {
 			state.Children[inode] = make(map[string]uint64)
@@ -97,6 +103,8 @@ func cloneState(state *SnapshotState) *SnapshotState {
 		Nodes:     make(map[uint64]*Node, len(state.Nodes)),
 		Children:  make(map[uint64]map[string]uint64, len(state.Children)),
 		Data:      make(map[uint64][]byte, len(state.Data)),
+		ColdFiles: make(map[uint64][]FileExtent, len(state.ColdFiles)),
+		Segments:  make(map[string]*Segment, len(state.Segments)),
 	}
 	for inode, node := range state.Nodes {
 		clone.Nodes[inode] = cloneNode(node)
@@ -110,6 +118,12 @@ func cloneState(state *SnapshotState) *SnapshotState {
 	}
 	for inode, payload := range state.Data {
 		clone.Data[inode] = slices.Clone(payload)
+	}
+	for inode, extents := range state.ColdFiles {
+		clone.ColdFiles[inode] = slices.Clone(extents)
+	}
+	for segmentID, segment := range state.Segments {
+		clone.Segments[segmentID] = cloneSegment(segment)
 	}
 	return clone
 }
@@ -187,6 +201,9 @@ func (s *SnapshotState) Read(inode uint64, offset uint64, size uint64) ([]byte, 
 		return nil, ErrIsDir
 	}
 	payload := s.Data[inode]
+	if len(payload) == 0 && len(s.ColdFiles[inode]) > 0 {
+		return nil, fmt.Errorf("%w: detached snapshot state does not have inline data for inode %d", ErrInvalidInput, inode)
+	}
 	if offset >= uint64(len(payload)) {
 		return nil, nil
 	}

@@ -4,8 +4,12 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
+	"time"
 
+	"github.com/juicedata/juicefs/pkg/object"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/juicefs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sirupsen/logrus"
 )
@@ -31,15 +35,20 @@ func (b *S0FSBackend) MountVolume(ctx context.Context, req BackendMountRequest) 
 		return nil, fmt.Errorf("storage proxy config is not available")
 	}
 	cacheDir := filepath.Join(b.config.CacheDir, "s0fs", req.VolumeID)
+	remoteStore, err := b.createObjectStorage(req)
+	if err != nil {
+		return nil, fmt.Errorf("create s0fs object storage: %w", err)
+	}
 	engine, err := s0fs.Open(ctx, s0fs.Config{
-		VolumeID: req.VolumeID,
-		WALPath:  filepath.Join(cacheDir, "engine.wal"),
+		VolumeID:    req.VolumeID,
+		WALPath:     filepath.Join(cacheDir, "engine.wal"),
+		ObjectStore: remoteStore,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open s0fs engine: %w", err)
 	}
 
-	return &VolumeContext{
+	volCtx := &VolumeContext{
 		VolumeID:  req.VolumeID,
 		TeamID:    req.TeamID,
 		Backend:   BackendS0FS,
@@ -50,12 +59,73 @@ func (b *S0FSBackend) MountVolume(ctx context.Context, req BackendMountRequest) 
 		RootInode: 1,
 		RootPath:  "/",
 		CacheDir:  cacheDir,
-	}, nil
+	}
+	b.startMaterializer(volCtx)
+	return volCtx, nil
 }
 
-func (b *S0FSBackend) UnmountVolume(_ context.Context, volCtx *VolumeContext) error {
+func (b *S0FSBackend) UnmountVolume(ctx context.Context, volCtx *VolumeContext) error {
 	if volCtx == nil || volCtx.S0FS == nil {
 		return nil
 	}
+	if volCtx.materializeCancel != nil {
+		volCtx.materializeCancel()
+		if volCtx.materializeDone != nil {
+			<-volCtx.materializeDone
+		}
+	}
+	if _, err := volCtx.S0FS.SyncMaterialize(ctx); err != nil {
+		return fmt.Errorf("materialize s0fs volume: %w", err)
+	}
 	return volCtx.S0FS.Close()
+}
+
+func (b *S0FSBackend) createObjectStorage(req BackendMountRequest) (object.ObjectStorage, error) {
+	if b == nil || b.config == nil || strings.TrimSpace(b.config.S3Bucket) == "" {
+		return nil, nil
+	}
+	store, err := juicefs.CreateObjectStorage(juicefs.ObjectStorageConfig{
+		Type:         b.config.ObjectStorageType,
+		Bucket:       b.config.S3Bucket,
+		Region:       b.config.S3Region,
+		Endpoint:     b.config.S3Endpoint,
+		AccessKey:    b.config.S3AccessKey,
+		SecretKey:    b.config.S3SecretKey,
+		SessionToken: b.config.S3SessionToken,
+		Metrics:      req.Metrics,
+	})
+	if err != nil {
+		return nil, err
+	}
+	prefix := strings.Trim(req.S3Prefix, "/")
+	if prefix == "" {
+		prefix = strings.Trim(req.VolumeID, "/")
+	}
+	return object.WithPrefix(store, prefix+"/s0fs/"), nil
+}
+
+func (b *S0FSBackend) startMaterializer(volCtx *VolumeContext) {
+	if volCtx == nil || volCtx.S0FS == nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	volCtx.materializeCancel = cancel
+	volCtx.materializeDone = done
+
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if _, err := volCtx.S0FS.SyncMaterialize(ctx); err != nil {
+					b.logger.WithError(err).WithField("volume_id", volCtx.VolumeID).Warn("Failed to materialize s0fs volume")
+				}
+			}
+		}
+	}()
 }

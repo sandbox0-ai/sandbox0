@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -15,21 +14,13 @@ import (
 
 type FileSystem struct {
 	fuse.RawFileSystem
-	mu                    sync.RWMutex
-	volumeID              string
-	session               Session
-	cacheTTL              time.Duration
-	kernelCache           kernelCacheNotifier
-	storeCacheUnsupported atomic.Bool
+	mu       sync.RWMutex
+	volumeID string
+	session  Session
+	cacheTTL time.Duration
 }
 
 const fileOpenFlags = fuse.FOPEN_KEEP_CACHE | fuse.FOPEN_NOFLUSH
-
-type kernelCacheNotifier interface {
-	InodeNotify(node uint64, off int64, length int64) fuse.Status
-	InodeNotifyStoreCache(node uint64, offset int64, data []byte) fuse.Status
-	EntryNotify(parent uint64, name string) fuse.Status
-}
 
 func New(volumeID string, cacheTTL time.Duration, session Session) *FileSystem {
 	if cacheTTL < 0 {
@@ -47,12 +38,14 @@ func (fs *FileSystem) String() string {
 	return "sandbox0-volume"
 }
 
+// Kernel cache notifications are intentionally not issued from request
+// handlers. go-fuse notify/store-cache calls can block behind the in-flight
+// kernel request on some runtimes; correctness here relies on the kernel's
+// normal write-through cache plus the mount TTL instead.
 func (fs *FileSystem) Init(server *fuse.Server) {
-	fs.setKernelCache(server)
 }
 
 func (fs *FileSystem) OnUnmount() {
-	fs.setKernelCache(nil)
 }
 
 func (fs *FileSystem) SetSession(session Session) {
@@ -77,32 +70,7 @@ func (fs *FileSystem) requireSession() (Session, fuse.Status) {
 	return session, fuse.OK
 }
 
-func (fs *FileSystem) setKernelCache(cache kernelCacheNotifier) {
-	if fs == nil {
-		return
-	}
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-	fs.kernelCache = cache
-	fs.storeCacheUnsupported.Store(false)
-}
-
-func (fs *FileSystem) kernelCacheNotifyTarget() kernelCacheNotifier {
-	if fs == nil {
-		return nil
-	}
-	fs.mu.RLock()
-	cache := fs.kernelCache
-	fs.mu.RUnlock()
-	return cache
-}
-
 func (fs *FileSystem) invalidateKernelData(inode uint64, off int64, length int64) {
-	cache := fs.kernelCacheNotifyTarget()
-	if cache == nil {
-		return
-	}
-	_ = cache.InodeNotify(inode, off, length)
 }
 
 func (fs *FileSystem) invalidateKernelInode(inode uint64) {
@@ -114,24 +82,9 @@ func (fs *FileSystem) invalidateKernelAttr(inode uint64) {
 }
 
 func (fs *FileSystem) invalidateKernelEntry(parent uint64, name string) {
-	cache := fs.kernelCacheNotifyTarget()
-	if cache == nil || name == "" {
-		return
-	}
-	_ = cache.EntryNotify(parent, name)
 }
 
 func (fs *FileSystem) storeKernelCache(inode uint64, off int64, data []byte) {
-	if len(data) == 0 || fs.storeCacheUnsupported.Load() {
-		return
-	}
-	cache := fs.kernelCacheNotifyTarget()
-	if cache == nil {
-		return
-	}
-	if st := cache.InodeNotifyStoreCache(inode, off, data); st == fuse.ENOSYS {
-		fs.storeCacheUnsupported.Store(true)
-	}
 }
 
 func actorFromCaller(caller fuse.Caller) *pb.PosixActor {

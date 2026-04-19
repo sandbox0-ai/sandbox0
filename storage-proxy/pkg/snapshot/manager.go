@@ -261,7 +261,7 @@ func (m *Manager) CreateSnapshot(ctx context.Context, req *CreateSnapshotRequest
 		// Note: If coordinator is set, distributed flush was already done above.
 		// This local flush is a safety measure for instances that have the volume mounted.
 		if volCtx, err := m.volMgr.GetVolume(req.VolumeID); err == nil {
-			if err := volCtx.VFS.FlushAll(""); err != nil {
+			if err := volCtx.FlushAll(""); err != nil {
 				m.logger.WithError(err).Warn("Failed to flush VFS data before snapshot")
 				// Continue anyway - data should still be consistent
 			}
@@ -440,7 +440,7 @@ func (m *Manager) ForkVolume(ctx context.Context, req *ForkVolumeRequest) (*db.S
 
 	// 2. Optional: Try to flush local cached data if volume is mounted on this instance.
 	if volCtx, err := m.volMgr.GetVolume(req.SourceVolumeID); err == nil {
-		if err := volCtx.VFS.FlushAll(""); err != nil {
+		if err := volCtx.FlushAll(""); err != nil {
 			m.logger.WithError(err).Warn("Failed to flush VFS data before fork")
 		}
 	}
@@ -646,7 +646,7 @@ func (m *Manager) RestoreSnapshot(ctx context.Context, req *RestoreSnapshotReque
 
 	// 3. Optional: Try to flush local cached data if volume is mounted on this instance.
 	if volCtx, err := m.volMgr.GetVolume(req.VolumeID); err == nil {
-		if err := volCtx.VFS.FlushAll(""); err != nil {
+		if err := volCtx.FlushAll(""); err != nil {
 			m.logger.WithError(err).Warn("Failed to flush VFS data before restore")
 		}
 	}

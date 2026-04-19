@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -16,13 +15,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/juicedata/juicefs/pkg/chunk"
 	"github.com/juicedata/juicefs/pkg/meta"
-	"github.com/juicedata/juicefs/pkg/object"
 	"github.com/juicedata/juicefs/pkg/vfs"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/juicefs"
 	"github.com/sirupsen/logrus"
 )
 
@@ -41,10 +36,11 @@ type VolumeConfig struct {
 	Writeback  bool
 }
 
-// VolumeContext holds JuiceFS VFS instance for a volume
+// VolumeContext holds the mounted runtime state for a volume.
 type VolumeContext struct {
 	VolumeID  string
 	TeamID    string
+	Backend   string
 	Meta      meta.Meta
 	Store     chunk.ChunkStore
 	VFS       *vfs.VFS
@@ -53,6 +49,7 @@ type VolumeContext struct {
 	MountedAt time.Time
 	RootInode meta.Ino
 	RootPath  string
+	CacheDir  string
 }
 
 // MountSession tracks a single mount session on this instance.
@@ -99,7 +96,7 @@ type volumeRootMeta interface {
 	Mkdir(ctx meta.Context, parent meta.Ino, name string, mode uint16, cumask uint16, copysgid uint8, inode *meta.Ino, attr *meta.Attr) syscall.Errno
 }
 
-// Manager manages JuiceFS volumes
+// Manager manages mounted volumes and mount sessions.
 type Manager struct {
 	mu               sync.RWMutex
 	volumes          map[string]*VolumeContext
@@ -110,11 +107,20 @@ type Manager struct {
 	logger           *logrus.Logger
 	config           *config.StorageProxyConfig
 	metrics          *obsmetrics.StorageProxyMetrics
+	backend          Backend
 	registrar        MountRegistrar // Optional: for distributed coordination
 }
 
 // NewManager creates a new volume manager
 func NewManager(logger *logrus.Logger, cfg *config.StorageProxyConfig) *Manager {
+	return NewManagerWithBackend(logger, cfg, nil)
+}
+
+// NewManagerWithBackend creates a manager with an explicit storage backend.
+func NewManagerWithBackend(logger *logrus.Logger, cfg *config.StorageProxyConfig, backend Backend) *Manager {
+	if backend == nil {
+		backend = NewJuiceFSBackend(logger, cfg)
+	}
 	return &Manager{
 		volumes:          make(map[string]*VolumeContext),
 		sandboxToVolumes: make(map[string]map[string]struct{}),
@@ -123,6 +129,7 @@ func NewManager(logger *logrus.Logger, cfg *config.StorageProxyConfig) *Manager 
 		invalidates:      make(map[string]map[string]*invalidateTracker),
 		logger:           logger,
 		config:           cfg,
+		backend:          backend,
 	}
 }
 
@@ -140,14 +147,13 @@ func (m *Manager) SetMetrics(metrics *obsmetrics.StorageProxyMetrics) {
 	m.metrics = metrics
 }
 
-// MountVolume mounts a JuiceFS volume using SDK mode (in-memory, no FUSE).
+// MountVolume mounts a volume using the configured storage backend.
 // AccessMode is enforced per storage-proxy instance (not per sandbox).
 func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID string, config *VolumeConfig, accessMode AccessMode) (string, string, time.Time, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	accessMode = NormalizeAccessMode(string(accessMode))
-	readOnly := accessMode == AccessModeROX
 	sessionID := uuid.New().String()
 	sessionTime := time.Now()
 
@@ -189,100 +195,20 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID st
 
 	m.logger.WithField("volume_id", volumeID).Info("Mounting volume")
 
-	// 1. Initialize JuiceFS metadata client
-	metaConf := buildMetaConf(m.config, readOnly)
-
-	metaClient := meta.NewClient(m.config.MetaURL, metaConf)
-
-	// Load or create format
-	format, err := metaClient.Load(true)
+	volCtx, err := m.backend.MountVolume(ctx, BackendMountRequest{
+		S3Prefix:   s3Prefix,
+		VolumeID:   volumeID,
+		TeamID:     teamID,
+		Config:     config,
+		AccessMode: accessMode,
+		MountedAt:  sessionTime,
+		Metrics:    m.metrics,
+	})
 	if err != nil {
-		return "", "", time.Time{}, fmt.Errorf("failed to load juicefs format: %w", err)
+		return "", "", time.Time{}, err
 	}
 
-	// 2. Initialize object storage
-	blob, err := m.createObjectStorage(config, s3Prefix, format)
-	if err != nil {
-		return "", "", time.Time{}, fmt.Errorf("failed to create object storage: %w", err)
-	}
-
-	// 3. Initialize chunk store with local cache
-	cacheDir := filepath.Join(m.config.CacheDir, volumeID)
-	defaultCacheSize := parseSizeString(m.config.DefaultCacheSize, 1<<30)
-
-	maxUpload := m.config.JuiceFSMaxUpload
-	if maxUpload == 0 {
-		maxUpload = 20
-	}
-
-	chunkConf := chunk.Config{
-		BlockSize:     int(format.BlockSize) * 1024,
-		Compress:      format.Compression,
-		MaxUpload:     maxUpload,
-		MaxRetries:    10,
-		UploadLimit:   0,
-		DownloadLimit: 0,
-		Writeback:     config.Writeback,
-		Prefetch:      config.Prefetch,
-		BufferSize:    uint64(parseSizeString(config.BufferSize, 32<<20)), // 32MB default
-		CacheDir:      cacheDir,
-		CacheSize:     uint64(parseSizeString(config.CacheSize, defaultCacheSize)),
-		FreeSpace:     0.1,
-		CacheMode:     0o600,
-		AutoCreate:    true,
-	}
-
-	registry := prometheus.NewRegistry()
-	store := chunk.NewCachedStore(blob, chunkConf, registry)
-
-	// 4. Create JuiceFS VFS (in-memory, NO FUSE)
-	attrTimeout, _ := time.ParseDuration(m.config.JuiceFSAttrTimeout)
-	if attrTimeout == 0 {
-		attrTimeout = time.Second
-	}
-	entryTimeout, _ := time.ParseDuration(m.config.JuiceFSEntryTimeout)
-	if entryTimeout == 0 {
-		entryTimeout = time.Second
-	}
-	dirEntryTimeout, _ := time.ParseDuration(m.config.JuiceFSDirEntryTimeout)
-	if dirEntryTimeout == 0 {
-		dirEntryTimeout = time.Second
-	}
-
-	vfsConf := &vfs.Config{
-		Meta:            metaConf,
-		Format:          *format,
-		Chunk:           &chunkConf,
-		Version:         "1.0.0",
-		AttrTimeout:     attrTimeout,
-		EntryTimeout:    entryTimeout,
-		DirEntryTimeout: dirEntryTimeout,
-	}
-	vfsInst := vfs.NewVFS(vfsConf, metaClient, store, registry, registry)
-
-	// 5. Ensure per-volume root directory exists in JuiceFS namespace
-	rootPath, err := naming.JuiceFSVolumePath(volumeID)
-	if err != nil {
-		return "", "", time.Time{}, fmt.Errorf("volume path: %w", err)
-	}
-	rootInode, err := resolveMountRoot(metaClient, rootPath, readOnly, m.ensureWritableVolumeRoot)
-	if err != nil {
-		return "", "", time.Time{}, fmt.Errorf("ensure volume root: %w", err)
-	}
-
-	// 6. Store volume context
-	m.volumes[volumeID] = &VolumeContext{
-		VolumeID:  volumeID,
-		TeamID:    teamID,
-		Meta:      metaClient,
-		Store:     store,
-		VFS:       vfsInst,
-		Config:    config,
-		Access:    accessMode,
-		MountedAt: time.Now(),
-		RootInode: rootInode,
-		RootPath:  rootPath,
-	}
+	m.volumes[volumeID] = volCtx
 	if m.mountSessions[volumeID] == nil {
 		m.mountSessions[volumeID] = make(map[string]*MountSession)
 	}
@@ -299,13 +225,13 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID st
 			AccessMode: accessMode,
 		}); err != nil {
 			m.logger.WithError(err).Warn("Failed to register mount for coordination")
-			// Don't fail the mount operation, coordination is optional
 		}
 	}
 
 	m.logger.WithFields(logrus.Fields{
 		"volume_id":   volumeID,
-		"cache_dir":   cacheDir,
+		"backend":     volCtx.Backend,
+		"cache_dir":   volCtx.CacheDir,
 		"access_mode": accessMode,
 	}).Info("Volume mounted successfully")
 
@@ -491,25 +417,8 @@ func (m *Manager) UnmountVolume(ctx context.Context, volumeID, sessionID string)
 		}
 	}
 
-	// Flush all buffered data in VFS
-	if volCtx.VFS != nil {
-		if err := volCtx.VFS.FlushAll(""); err != nil {
-			m.logger.WithError(err).Warn("Failed to flush VFS data")
-		}
-	}
-
-	// Close metadata session
-	if volCtx.Meta != nil {
-		func() {
-			defer func() {
-				if recoverErr := recover(); recoverErr != nil {
-					m.logger.WithField("panic", recoverErr).Warn("Metadata session close panicked")
-				}
-			}()
-			if err := volCtx.Meta.CloseSession(); err != nil {
-				m.logger.WithError(err).Warn("Failed to close metadata session")
-			}
-		}()
+	if err := m.backend.UnmountVolume(ctx, volCtx); err != nil {
+		m.logger.WithError(err).Warn("Backend volume unmount reported errors")
 	}
 
 	// Remove from sandbox tracking
@@ -519,11 +428,6 @@ func (m *Manager) UnmountVolume(ctx context.Context, volumeID, sessionID string)
 			delete(m.sandboxToVolumes, sandboxID)
 		}
 	}
-
-	// Note: ChunkStore doesn't have Shutdown method.
-	// In writeback mode, background uploader goroutines in ChunkStore will continue
-	// until all staging chunks are uploaded, as long as the process is running.
-	// For absolute safety, one could wait for the staging directory to be empty.
 
 	delete(m.directMounts, volumeID)
 	delete(m.volumes, volumeID)
@@ -979,46 +883,6 @@ func (m *Manager) UnmountSandboxVolumes(ctx context.Context, sandboxID string) [
 	m.mu.Unlock()
 
 	return errs
-}
-
-// createObjectStorage creates the configured object storage for JuiceFS.
-func (m *Manager) createObjectStorage(_ *VolumeConfig, prefix string, _ *meta.Format) (object.ObjectStorage, error) {
-	obj, err := juicefs.CreateObjectStorage(juicefs.ObjectStorageConfig{
-		Type:         m.config.ObjectStorageType,
-		Bucket:       m.config.S3Bucket,
-		Region:       m.config.S3Region,
-		Endpoint:     m.config.S3Endpoint,
-		AccessKey:    m.config.S3AccessKey,
-		SecretKey:    m.config.S3SecretKey,
-		SessionToken: m.config.S3SessionToken,
-		Metrics:      m.metrics,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create object storage: %w", err)
-	}
-
-	// Apply an object key prefix for namespace isolation (e.g. per-team).
-	if prefix != "" {
-		p := strings.Trim(prefix, "/")
-		if p != "" {
-			p += "/"
-		}
-		obj = object.WithPrefix(obj, p)
-	}
-
-	if m.config.JuiceFSEncryptionEnabled {
-		keyPEM, err := juicefs.LoadEncryptionKey(m.config.JuiceFSEncryptionKeyPath)
-		if err != nil {
-			return nil, fmt.Errorf("load encryption key: %w", err)
-		}
-		encryptor, err := juicefs.NewEncryptor(keyPEM, m.config.JuiceFSEncryptionPassphrase, m.config.JuiceFSEncryptionAlgo)
-		if err != nil {
-			return nil, fmt.Errorf("create encryptor: %w", err)
-		}
-		obj = juicefs.WrapEncryptedStorage(obj, encryptor)
-	}
-
-	return obj, nil
 }
 
 // parseSizeString parses size string like "10G", "100M" to bytes

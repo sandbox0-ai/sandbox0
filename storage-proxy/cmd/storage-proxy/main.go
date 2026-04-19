@@ -619,20 +619,11 @@ func (a *volumeProviderAdapter) GetVolume(volumeID string) (coordinator.VolumeCo
 	if err != nil {
 		return nil, err
 	}
-	return &volumeContextAdapter{vfs: volCtx.VFS}, nil
+	return volCtx, nil
 }
 
 func (a *volumeProviderAdapter) ListVolumes() []string {
 	return a.volMgr.ListVolumes()
-}
-
-// volumeContextAdapter adapts VFS to coordinator.VolumeContext interface
-type volumeContextAdapter struct {
-	vfs interface{ FlushAll(string) error }
-}
-
-func (a *volumeContextAdapter) FlushAll(path string) error {
-	return a.vfs.FlushAll(path)
 }
 
 // initializeJuiceFS initializes the JuiceFS filesystem if not already initialized

@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/notify"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"github.com/sirupsen/logrus"
@@ -87,32 +86,4 @@ func (m *fakeVolumeManager) TrackVolumeSession(sandboxID, volumeID, sessionID st
 	m.trackedSandboxID = sandboxID
 	m.trackedVolumeID = volumeID
 	m.trackedSessionID = sessionID
-}
-
-type fakeVolumeRepo struct {
-	volumes map[string]*db.SandboxVolume
-	owners  map[string]*db.SandboxVolumeOwner
-}
-
-func (f *fakeVolumeRepo) GetSandboxVolume(_ context.Context, id string) (*db.SandboxVolume, error) {
-	if f == nil {
-		return nil, db.ErrNotFound
-	}
-	if volume, ok := f.volumes[id]; ok {
-		return volume, nil
-	}
-	return nil, db.ErrNotFound
-}
-
-func (f *fakeVolumeRepo) GetSandboxVolumeOwner(_ context.Context, volumeID string) (*db.SandboxVolumeOwner, error) {
-	if f == nil {
-		return nil, db.ErrNotFound
-	}
-	if owner, ok := f.owners[volumeID]; ok {
-		return owner, nil
-	}
-	if volume, ok := f.volumes[volumeID]; ok {
-		return &db.SandboxVolumeOwner{VolumeID: volume.ID}, nil
-	}
-	return nil, db.ErrNotFound
 }

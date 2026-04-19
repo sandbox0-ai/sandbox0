@@ -2,8 +2,11 @@ package portal
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -69,9 +72,12 @@ func (m *localVolumeManager) GetVolume(volumeID string) (*volume.VolumeContext, 
 }
 
 type localSession struct {
-	volumeID string
-	fs       *fsserver.FileSystemServer
-	baseCtx  context.Context
+	volumeID         string
+	mgr              *localVolumeManager
+	fs               *fsserver.FileSystemServer
+	baseCtx          context.Context
+	readOnlyHandleMu sync.Mutex
+	readOnlyHandles  map[string]struct{}
 }
 
 func newLocalSession(volumeID string, mgr *localVolumeManager, logger *logrus.Logger) *localSession {
@@ -79,8 +85,10 @@ func newLocalSession(volumeID string, mgr *localVolumeManager, logger *logrus.Lo
 		logger = logrus.New()
 	}
 	return &localSession{
-		volumeID: volumeID,
-		fs:       fsserver.NewFileSystemServer(mgr, nil, nil, nil, logger, nil, nil),
+		volumeID:        volumeID,
+		mgr:             mgr,
+		fs:              fsserver.NewFileSystemServer(mgr, nil, nil, nil, logger, nil, nil),
+		readOnlyHandles: make(map[string]struct{}),
 		baseCtx: internalauth.WithClaims(context.Background(), &internalauth.Claims{
 			Caller:   internalauth.ServiceCtld,
 			Target:   internalauth.ServiceCtld,
@@ -160,12 +168,60 @@ func (s *localSession) Access(ctx context.Context, req *pb.AccessRequest) (*pb.E
 	return s.fs.Access(s.ctx(ctx), req)
 }
 func (s *localSession) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenResponse, error) {
+	if ctx != nil && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	s.fix(&req.VolumeId)
+	volCtx, err := s.localS0FSVolume(req.VolumeId)
+	if err != nil {
+		return nil, err
+	}
+	if volCtx != nil {
+		node, err := volCtx.S0FS.GetAttr(req.Inode)
+		if err != nil {
+			return nil, mapLocalS0FSError(err)
+		}
+		if node.Type == s0fs.TypeDirectory {
+			return nil, fserror.New(fserror.FailedPrecondition, "inode is a directory")
+		}
+		handleID := volCtx.OpenFileHandle(node.Inode)
+		if req.Flags&syscall.O_ACCMODE == syscall.O_RDONLY {
+			s.trackReadOnlyHandle(req.VolumeId, handleID)
+		}
+		return &pb.OpenResponse{HandleId: handleID}, nil
+	}
 	return s.fs.Open(s.ctx(ctx), req)
 }
 func (s *localSession) Read(ctx context.Context, req *pb.ReadRequest) (*pb.ReadResponse, error) {
 	s.fix(&req.VolumeId)
 	return s.fs.Read(s.ctx(ctx), req)
+}
+func (s *localSession) ReadInto(ctx context.Context, req *pb.ReadRequest, dest []byte) (int, bool, error) {
+	if ctx != nil && ctx.Err() != nil {
+		return 0, false, ctx.Err()
+	}
+	if req.Offset < 0 || req.Size < 0 {
+		return 0, false, fserror.New(fserror.InvalidArgument, "negative read offset or size")
+	}
+	if int64(len(dest)) > req.Size {
+		dest = dest[:req.Size]
+	}
+	if len(dest) == 0 {
+		return 0, true, nil
+	}
+	s.fix(&req.VolumeId)
+	volCtx, err := s.localS0FSVolume(req.VolumeId)
+	if err != nil {
+		return 0, false, err
+	}
+	if volCtx == nil {
+		return 0, false, fserror.New(fserror.Internal, "local ReadInto requires s0fs volume")
+	}
+	n, err := volCtx.S0FS.ReadInto(req.Inode, uint64(req.Offset), dest)
+	if err != nil {
+		return 0, false, mapLocalS0FSError(err)
+	}
+	return n, n < len(dest), nil
 }
 func (s *localSession) Write(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResponse, error) {
 	s.fix(&req.VolumeId)
@@ -173,6 +229,16 @@ func (s *localSession) Write(ctx context.Context, req *pb.WriteRequest) (*pb.Wri
 }
 func (s *localSession) Release(ctx context.Context, req *pb.ReleaseRequest) (*pb.Empty, error) {
 	s.fix(&req.VolumeId)
+	if s.takeReadOnlyHandle(req.VolumeId, req.HandleId) {
+		if volCtx, err := s.localS0FSVolume(req.VolumeId); err == nil && volCtx != nil {
+			if inode, remaining, ok := volCtx.ReleaseHandle(req.HandleId); ok && remaining == 0 {
+				if node, err := volCtx.S0FS.GetAttr(inode); err == nil && node.Nlink == 0 {
+					_ = volCtx.S0FS.Forget(inode)
+				}
+			}
+			return &pb.Empty{}, nil
+		}
+	}
 	return s.fs.Release(s.ctx(ctx), req)
 }
 func (s *localSession) Flush(ctx context.Context, req *pb.FlushRequest) (*pb.Empty, error) {
@@ -245,6 +311,70 @@ func (s *localSession) Flock(ctx context.Context, req *pb.FlockRequest) (*pb.Emp
 }
 
 var _ volumefuse.Session = (*localSession)(nil)
+var _ volumefuse.ReadIntoSession = (*localSession)(nil)
+
+func (s *localSession) trackReadOnlyHandle(volumeID string, handleID uint64) {
+	if s == nil {
+		return
+	}
+	s.readOnlyHandleMu.Lock()
+	defer s.readOnlyHandleMu.Unlock()
+	if s.readOnlyHandles == nil {
+		s.readOnlyHandles = make(map[string]struct{})
+	}
+	s.readOnlyHandles[localHandleKey(volumeID, handleID)] = struct{}{}
+}
+
+func (s *localSession) takeReadOnlyHandle(volumeID string, handleID uint64) bool {
+	if s == nil {
+		return false
+	}
+	s.readOnlyHandleMu.Lock()
+	defer s.readOnlyHandleMu.Unlock()
+	key := localHandleKey(volumeID, handleID)
+	if _, ok := s.readOnlyHandles[key]; !ok {
+		return false
+	}
+	delete(s.readOnlyHandles, key)
+	return true
+}
+
+func localHandleKey(volumeID string, handleID uint64) string {
+	return volumeID + "|" + strconv.FormatUint(handleID, 10)
+}
+
+func (s *localSession) localS0FSVolume(volumeID string) (*volume.VolumeContext, error) {
+	if s == nil || s.mgr == nil {
+		return nil, fserror.New(fserror.FailedPrecondition, "local session is not bound")
+	}
+	volCtx, err := s.mgr.GetVolume(volumeID)
+	if err != nil {
+		return nil, err
+	}
+	if volCtx.IsS0FS() {
+		return volCtx, nil
+	}
+	return nil, nil
+}
+
+func mapLocalS0FSError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, s0fs.ErrNotFound):
+		return fserror.New(fserror.NotFound, err.Error())
+	case errors.Is(err, s0fs.ErrExists):
+		return fserror.New(fserror.AlreadyExists, err.Error())
+	case errors.Is(err, s0fs.ErrNotEmpty), errors.Is(err, s0fs.ErrIsDir):
+		return fserror.New(fserror.FailedPrecondition, err.Error())
+	case errors.Is(err, s0fs.ErrInvalidInput), errors.Is(err, s0fs.ErrNotDir):
+		return fserror.New(fserror.InvalidArgument, err.Error())
+	case errors.Is(err, s0fs.ErrClosed):
+		return fserror.New(fserror.FailedPrecondition, err.Error())
+	default:
+		return fserror.New(fserror.Internal, err.Error())
+	}
+}
 
 type unboundSession struct{}
 

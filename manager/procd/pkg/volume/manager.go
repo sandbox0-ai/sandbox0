@@ -19,6 +19,7 @@ import (
 
 type mountInfo struct {
 	volumeID       string
+	sandboxID      string
 	mountPoint     string
 	mountedAt      time.Time
 	mountSessionID string
@@ -206,6 +207,7 @@ func (m *Manager) mount(ctx context.Context, req *MountRequest, reserved bool) (
 
 	info := &mountInfo{
 		volumeID:       req.SandboxVolumeID,
+		sandboxID:      req.SandboxID,
 		mountPoint:     mountPoint,
 		mountedAt:      time.Now(),
 		mountSessionID: mountSessionID,
@@ -651,7 +653,7 @@ func (m *Manager) handleSessionEvent(volumeID, mountSessionID string, event *pb.
 	if event == nil {
 		return
 	}
-	if event.EventType == pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE && (event.Path == "" || event.Path == "/") {
+	if shouldRemountForEvent(event) {
 		go m.remountVolume(volumeID, mountSessionID, event.InvalidateId)
 		return
 	}
@@ -662,7 +664,37 @@ func (m *Manager) handleSessionEvent(volumeID, mountSessionID string, event *pb.
 	if info == nil {
 		return
 	}
+	m.notifyKernelCacheInvalidation(info, event)
 	m.emitWatchEvent(info, event)
+}
+
+func shouldRemountForEvent(event *pb.WatchEvent) bool {
+	return event != nil &&
+		event.EventType == pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE &&
+		(event.Path == "" || event.Path == "/") &&
+		event.InvalidateId != ""
+}
+
+func (m *Manager) notifyKernelCacheInvalidation(info *mountInfo, event *pb.WatchEvent) {
+	if info == nil || info.fuseServer == nil || event == nil || event.Inode == 0 {
+		return
+	}
+	if info.sandboxID != "" && event.OriginSandboxId == info.sandboxID {
+		return
+	}
+	switch event.EventType {
+	case pb.WatchEventType_WATCH_EVENT_TYPE_WRITE,
+		pb.WatchEventType_WATCH_EVENT_TYPE_CHMOD,
+		pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE:
+		status := info.fuseServer.InodeNotify(event.Inode, -1, 0)
+		if status != fuse.OK && status != fuse.ENOSYS && m.logger != nil {
+			m.logger.Debug("Failed to notify kernel inode cache invalidation",
+				zap.String("volume_id", info.volumeID),
+				zap.Uint64("inode", event.Inode),
+				zap.String("status", status.String()),
+			)
+		}
+	}
 }
 
 func (m *Manager) emitWatchEvent(info *mountInfo, event *pb.WatchEvent) {

@@ -420,6 +420,10 @@ func (s *FileSystemServer) AckInvalidate(ctx context.Context, req *pb.AckInvalid
 }
 
 func (s *FileSystemServer) publishEvent(ctx context.Context, event *pb.WatchEvent) {
+	claims := internalauth.ClaimsFromContext(ctx)
+	if claims != nil && event != nil && event.OriginSandboxId == "" {
+		event.OriginSandboxId = claims.SandboxID
+	}
 	if s.eventBroadcaster == nil || event == nil {
 		goto recordSync
 	}
@@ -438,7 +442,6 @@ recordSync:
 	if event.TimestampUnix == 0 {
 		event.TimestampUnix = s.currentTime().Unix()
 	}
-	claims := internalauth.ClaimsFromContext(ctx)
 	if claims == nil || claims.TeamID == "" {
 		return
 	}

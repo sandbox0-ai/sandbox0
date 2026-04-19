@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 )
 
 func TestValidateMountPoint(t *testing.T) {
@@ -84,6 +86,27 @@ func TestJoinMountPath(t *testing.T) {
 	}
 	if joinMountPath("/mnt", "") != "" {
 		t.Fatalf("expected empty path")
+	}
+}
+
+func TestShouldRemountForEventRequiresInvalidateID(t *testing.T) {
+	if shouldRemountForEvent(&pb.WatchEvent{
+		EventType: pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE,
+		Inode:     2,
+	}) {
+		t.Fatal("regular mutation invalidation should not force remount")
+	}
+	if !shouldRemountForEvent(&pb.WatchEvent{
+		EventType:    pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE,
+		InvalidateId: "restore-1",
+	}) {
+		t.Fatal("explicit global invalidation should force remount")
+	}
+	if shouldRemountForEvent(&pb.WatchEvent{
+		EventType:    pb.WatchEventType_WATCH_EVENT_TYPE_WRITE,
+		InvalidateId: "restore-1",
+	}) {
+		t.Fatal("non-invalidate event should not force remount")
 	}
 }
 

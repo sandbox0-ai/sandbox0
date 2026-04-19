@@ -1,4 +1,4 @@
-package grpc
+package fsserver
 
 import (
 	"bytes"
@@ -7,13 +7,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/router"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 func TestS0FSFileLifecycle(t *testing.T) {
@@ -341,8 +340,8 @@ func TestS0FSMutationRedirectsWhenRemotePrimary(t *testing.T) {
 		Name:     "blocked.txt",
 		Mode:     0o644,
 	})
-	if got := status.Code(err); got != codes.FailedPrecondition {
-		t.Fatalf("Create() code = %v, want %v (err=%v)", got, codes.FailedPrecondition, err)
+	if got := fserror.CodeOf(err); got != fserror.FailedPrecondition {
+		t.Fatalf("Create() code = %v, want %v (err=%v)", got, fserror.FailedPrecondition, err)
 	}
 }
 

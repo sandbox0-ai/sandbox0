@@ -1,57 +1,57 @@
-package grpc
+package fsserver
 
 import (
 	"syscall"
 	"testing"
 
-	"google.golang.org/grpc/codes"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 )
 
 func TestMapErrnoToCode(t *testing.T) {
 	tests := []struct {
 		name  string
 		errno syscall.Errno
-		want  codes.Code
+		want  fserror.Code
 	}{
 		{
 			name:  "already exists",
 			errno: syscall.EEXIST,
-			want:  codes.AlreadyExists,
+			want:  fserror.AlreadyExists,
 		},
 		{
 			name:  "not found",
 			errno: syscall.ENOENT,
-			want:  codes.NotFound,
+			want:  fserror.NotFound,
 		},
 		{
 			name:  "permission denied",
 			errno: syscall.EACCES,
-			want:  codes.PermissionDenied,
+			want:  fserror.PermissionDenied,
 		},
 		{
 			name:  "operation not permitted",
 			errno: syscall.EPERM,
-			want:  codes.PermissionDenied,
+			want:  fserror.PermissionDenied,
 		},
 		{
 			name:  "no space",
 			errno: syscall.ENOSPC,
-			want:  codes.ResourceExhausted,
+			want:  fserror.ResourceExhausted,
 		},
 		{
 			name:  "invalid argument",
 			errno: syscall.EINVAL,
-			want:  codes.InvalidArgument,
+			want:  fserror.InvalidArgument,
 		},
 		{
 			name:  "not a directory",
 			errno: syscall.ENOTDIR,
-			want:  codes.InvalidArgument,
+			want:  fserror.InvalidArgument,
 		},
 		{
 			name:  "unknown errno",
 			errno: syscall.EIO,
-			want:  codes.Internal,
+			want:  fserror.Internal,
 		},
 	}
 

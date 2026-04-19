@@ -154,6 +154,48 @@ func TestCompileDerivesCrossServiceReferences(t *testing.T) {
 	}
 }
 
+func TestCompileUsesStorageProxyVolumeProtocolPortForProcd(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Services: &infrav1alpha1.ServicesConfig{
+				Manager: &infrav1alpha1.ManagerServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+				StorageProxy: &infrav1alpha1.StorageProxyServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					ServiceExposureConfig: infrav1alpha1.ServiceExposureConfig{
+						Service: &infrav1alpha1.ServiceNetworkConfig{Port: 18083},
+					},
+					Config: &infrav1alpha1.StorageProxyConfig{
+						HTTPPort:           8081,
+						VolumeProtocolPort: 19082,
+					},
+				},
+			},
+		},
+	}
+
+	compiled := Compile(infra)
+
+	if got := compiled.Manager.Config.ProcdConfig.StorageProxyBaseURL; got != "demo-storage-proxy.sandbox0-system.svc.cluster.local" {
+		t.Fatalf("unexpected procd storage-proxy base URL: %q", got)
+	}
+	if got := compiled.Manager.Config.ProcdConfig.StorageProxyPort; got != 19082 {
+		t.Fatalf("expected procd to use s0vp port 19082, got %d", got)
+	}
+	if got := compiled.Manager.Config.StorageProxyHTTPPort; got != 8081 {
+		t.Fatalf("expected HTTP port to stay 8081, got %d", got)
+	}
+}
+
 func TestCompileRejectsInvalidClusterID(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},

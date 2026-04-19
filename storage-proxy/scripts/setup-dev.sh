@@ -27,7 +27,6 @@ echo "✓ protoc version: $(protoc --version)"
 # Install Go protobuf plugins
 echo "Installing protobuf Go plugins..."
 go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
 
 echo "✓ Protobuf plugins installed"
 
@@ -49,4 +48,3 @@ echo "  1. Set environment variables (copy .env.example to .env)"
 echo "  2. Run tests: make test"
 echo "  3. Build: make build"
 echo "  4. Run locally: make run"
-

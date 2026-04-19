@@ -19,9 +19,8 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	httpproxy "github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 const maxVolumeFileSize = 100 * 1024 * 1024
@@ -570,7 +569,7 @@ func (s *Server) lookupVolumePath(ctx context.Context, volumeID, raw string, all
 			Actor:    volumeFileActor(ctx),
 		})
 		if err != nil {
-			if status.Code(err) == codes.NotFound {
+			if fserror.CodeOf(err) == fserror.NotFound {
 				return &volumeResolvedPath{
 					Clean:  cleaned,
 					Parent: current,
@@ -616,7 +615,7 @@ func (s *Server) ensureVolumeParent(ctx context.Context, volumeID, raw string, r
 			Actor:    volumeFileActor(ctx),
 		})
 		if err != nil {
-			if status.Code(err) == codes.NotFound {
+			if fserror.CodeOf(err) == fserror.NotFound {
 				if !recursive {
 					return 0, "", errDirNotFound
 				}
@@ -629,7 +628,7 @@ func (s *Server) ensureVolumeParent(ctx context.Context, volumeID, raw string, r
 					Actor:    volumeFileActor(ctx),
 				})
 				if err != nil {
-					if status.Code(err) == codes.AlreadyExists {
+					if fserror.CodeOf(err) == fserror.AlreadyExists {
 						node, err = s.fileRPC.Lookup(ctx, &pb.LookupRequest{
 							VolumeId: volumeID,
 							Parent:   current,
@@ -682,7 +681,7 @@ func (s *Server) mkdirVolumePath(ctx context.Context, volumeID, raw string, recu
 		Actor:    volumeFileActor(ctx),
 	})
 	if err != nil {
-		if status.Code(err) == codes.AlreadyExists && recursive {
+		if fserror.CodeOf(err) == fserror.AlreadyExists && recursive {
 			return nil
 		}
 		return translateVolumeRPCError(err)
@@ -979,14 +978,14 @@ func translateVolumeRPCError(err error) error {
 	if err == nil {
 		return nil
 	}
-	switch status.Code(err) {
-	case codes.NotFound:
+	switch fserror.CodeOf(err) {
+	case fserror.NotFound:
 		return errFileNotFound
-	case codes.PermissionDenied:
+	case fserror.PermissionDenied:
 		return errPermissionDenied
-	case codes.AlreadyExists:
+	case fserror.AlreadyExists:
 		return errPathAlreadyExists
-	case codes.FailedPrecondition:
+	case fserror.FailedPrecondition:
 		if strings.Contains(strings.ToLower(err.Error()), "not empty") {
 			return errDirectoryNotEmpty
 		}

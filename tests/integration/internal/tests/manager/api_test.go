@@ -95,6 +95,16 @@ func newManagerTestEnvWithOptions(t *testing.T, opts managerTestEnvOptions) *man
 	err := os.WriteFile(configPath, []byte(""), 0o600)
 	utils.RequireNoError(t, err, "write manager config")
 	t.Setenv("CONFIG_PATH", configPath)
+	_, publicPEM, err := internalauth.GenerateEd25519KeyPair()
+	utils.RequireNoError(t, err, "generate procd public key")
+	publicKeyPath := filepath.Join(t.TempDir(), "internal_jwt_public.key")
+	err = os.WriteFile(publicKeyPath, publicPEM, 0o600)
+	utils.RequireNoError(t, err, "write procd public key")
+	previousPublicKeyPath := internalauth.DefaultInternalJWTPublicKeyPath
+	internalauth.DefaultInternalJWTPublicKeyPath = publicKeyPath
+	t.Cleanup(func() {
+		internalauth.DefaultInternalJWTPublicKeyPath = previousPublicKeyPath
+	})
 
 	podIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
 	nodeIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
@@ -413,6 +423,13 @@ func addSandboxPod(t *testing.T, env *managerTestEnv, name, teamID, userID strin
 
 func addIdleReadyPod(t *testing.T, env *managerTestEnv, namespace, name, templateID, podIP string) {
 	t.Helper()
+	templateHash, err := controller.TemplateSpecHash(&v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      templateID,
+			Namespace: namespace,
+		},
+	})
+	utils.RequireNoError(t, err, "compute template spec hash")
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -420,6 +437,9 @@ func addIdleReadyPod(t *testing.T, env *managerTestEnv, namespace, name, templat
 			Labels: map[string]string{
 				controller.LabelTemplateID: templateID,
 				controller.LabelPoolType:   controller.PoolTypeIdle,
+			},
+			Annotations: map[string]string{
+				controller.AnnotationTemplateSpecHash: templateHash,
 			},
 			ResourceVersion: "1",
 		},
@@ -432,7 +452,7 @@ func addIdleReadyPod(t *testing.T, env *managerTestEnv, namespace, name, templat
 			}},
 		},
 	}
-	_, err := env.k8sClient.CoreV1().Pods(namespace).Create(context.Background(), pod, metav1.CreateOptions{})
+	_, err = env.k8sClient.CoreV1().Pods(namespace).Create(context.Background(), pod, metav1.CreateOptions{})
 	utils.RequireNoError(t, err, "create ready idle pod in fake client")
 	utils.RequireNoError(t, env.podIndexer.Add(pod), "add ready idle pod to indexer")
 }

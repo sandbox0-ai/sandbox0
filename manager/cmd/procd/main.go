@@ -140,7 +140,6 @@ func main() {
 		VolumePrefetch:   cfg.VolumePrefetch,
 		VolumeBufferSize: cfg.VolumeBufferSize,
 		VolumeWriteback:  cfg.VolumeWriteback,
-		GRPCMaxMsgSize:   100 * 1024 * 1024, // could be made configurable if added to ProcdConfig
 	}
 	volumeManager := volume.NewManager(volumeCfg, tokenProvider, logger)
 

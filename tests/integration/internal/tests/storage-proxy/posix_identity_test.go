@@ -8,7 +8,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
-	storagegrpc "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/grpc"
+	storagefsserver "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsserver"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volsync"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
@@ -93,7 +93,7 @@ func TestVolumeSyncApplyRequiresDefaultPosixIdentity(t *testing.T) {
 
 func TestFileSystemCreateUsesActorToLazilyInitializeRoot(t *testing.T) {
 	volCtx := newMountedIntegrationVolumeContext(t, "vol-1", "team-1")
-	fsServer := storagegrpc.NewFileSystemServer(&integrationMountedVolumeManager{
+	fsServer := storagefsserver.NewFileSystemServer(&integrationMountedVolumeManager{
 		volumes: map[string]*volume.VolumeContext{"vol-1": volCtx},
 	}, nil, nil, nil, logrus.New(), nil, nil)
 	actor := &pb.PosixActor{Pid: 4321, Uid: 1234, Gids: []uint32{2345}}

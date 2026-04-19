@@ -1,15 +1,14 @@
-package grpc
+package fsserver
 
 import (
 	"context"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/notify"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"github.com/sirupsen/logrus"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 func authContext(teamID, sandboxID string) context.Context {
@@ -79,7 +78,7 @@ func (m *fakeVolumeManager) GetVolume(volumeID string) (*volume.VolumeContext, e
 	if vol, ok := m.volumes[volumeID]; ok {
 		return vol, nil
 	}
-	return nil, status.Error(codes.NotFound, "volume not mounted")
+	return nil, fserror.New(fserror.NotFound, "volume not mounted")
 }
 
 func (m *fakeVolumeManager) TrackVolumeSession(sandboxID, volumeID, sessionID string) {

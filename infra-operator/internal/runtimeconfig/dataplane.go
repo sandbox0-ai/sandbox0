@@ -72,8 +72,8 @@ func ToStorageProxy(spec *infrav1alpha1.StorageProxyConfig) *apiconfig.StoragePr
 		return cfg
 	}
 
-	cfg.GRPCAddr = spec.GRPCAddr
-	cfg.GRPCPort = spec.GRPCPort
+	cfg.VolumeProtocolAddr = spec.VolumeProtocolAddr
+	cfg.VolumeProtocolPort = spec.VolumeProtocolPort
 	cfg.HTTPAddr = spec.HTTPAddr
 	cfg.HTTPPort = spec.HTTPPort
 	cfg.DatabaseMaxConns = spec.DatabaseMaxConns

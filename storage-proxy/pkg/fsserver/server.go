@@ -1,4 +1,4 @@
-package grpc
+package fsserver
 
 import (
 	"context"
@@ -13,6 +13,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/legacyfs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/notify"
@@ -22,14 +23,10 @@ import (
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"github.com/sirupsen/logrus"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
-// FileSystemServer implements the gRPC FileSystem service
+// FileSystemServer implements storage-proxy filesystem operations.
 type FileSystemServer struct {
-	pb.UnimplementedFileSystemServer
-
 	volMgr            volumeManager
 	volumeRepo        VolumeRepository
 	eventHub          *notify.Hub
@@ -127,17 +124,12 @@ func (s *FileSystemServer) requireLocalPrimary(volumeID string) error {
 		return nil
 	}
 
-	st := status.New(codes.FailedPrecondition, "volume primary is remote")
-	withDetails, err := st.WithDetails(&pb.PrimaryRedirect{
+	return fserror.WithRedirect(fserror.New(fserror.FailedPrecondition, "volume primary is remote"), &pb.PrimaryRedirect{
 		VolumeId:      volumeID,
 		PrimaryNodeId: route.PrimaryNodeID,
 		PrimaryAddr:   route.PrimaryAddr,
 		Epoch:         route.Epoch,
 	})
-	if err != nil {
-		return st.Err()
-	}
-	return withDetails.Err()
 }
 
 func vfsContextForActor(actor *pb.PosixActor) legacyfs.LogContext {
@@ -336,7 +328,7 @@ func (s *FileSystemServer) MountVolume(ctx context.Context, req *pb.MountVolumeR
 	claims := internalauth.ClaimsFromContext(ctx)
 	if claims == nil || claims.TeamID == "" {
 		s.logger.WithField("volume_id", req.VolumeId).Error("TeamID not found in context")
-		return nil, status.Error(codes.Unauthenticated, "team id not found in context")
+		return nil, fserror.New(fserror.Unauthenticated, "team id not found in context")
 	}
 
 	if req.Config == nil {
@@ -362,16 +354,16 @@ func (s *FileSystemServer) MountVolume(ctx context.Context, req *pb.MountVolumeR
 	// Build S3 prefix with team ID for multi-tenant isolation (object-store namespace).
 	prefix, err := naming.S3VolumePrefix(claims.TeamID, req.VolumeId)
 	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
+		return nil, fserror.New(fserror.InvalidArgument, err.Error())
 	}
 
 	sessionID, sessionSecret, mountedAt, err := s.volMgr.MountVolume(ctx, prefix, req.VolumeId, claims.TeamID, config, accessMode)
 	if err != nil {
 		s.logger.WithError(err).WithField("volume_id", req.VolumeId).Error("Failed to mount volume")
 		if strings.Contains(err.Error(), "another team") {
-			return nil, status.Error(codes.PermissionDenied, err.Error())
+			return nil, fserror.New(fserror.PermissionDenied, err.Error())
 		}
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, fserror.New(fserror.Internal, err.Error())
 	}
 
 	s.logger.WithFields(logrus.Fields{
@@ -395,7 +387,7 @@ func (s *FileSystemServer) MountVolume(ctx context.Context, req *pb.MountVolumeR
 // UnmountVolume unmounts a volume
 func (s *FileSystemServer) UnmountVolume(ctx context.Context, req *pb.UnmountVolumeRequest) (*pb.Empty, error) {
 	if req.MountSessionId == "" {
-		return nil, status.Error(codes.InvalidArgument, "mount_session_id is required")
+		return nil, fserror.New(fserror.InvalidArgument, "mount_session_id is required")
 	}
 	if _, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId); err != nil {
 		return nil, err
@@ -404,9 +396,9 @@ func (s *FileSystemServer) UnmountVolume(ctx context.Context, req *pb.UnmountVol
 	if err != nil {
 		s.logger.WithError(err).WithField("volume_id", req.VolumeId).Error("Failed to unmount volume")
 		if strings.Contains(err.Error(), "not mounted") || strings.Contains(err.Error(), "not found") {
-			return nil, status.Error(codes.NotFound, err.Error())
+			return nil, fserror.New(fserror.NotFound, err.Error())
 		}
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, fserror.New(fserror.Internal, err.Error())
 	}
 
 	return &pb.Empty{}, nil
@@ -415,353 +407,16 @@ func (s *FileSystemServer) UnmountVolume(ctx context.Context, req *pb.UnmountVol
 // AckInvalidate acknowledges a volume invalidate event after remount.
 func (s *FileSystemServer) AckInvalidate(ctx context.Context, req *pb.AckInvalidateRequest) (*pb.Empty, error) {
 	if req == nil || req.VolumeId == "" || req.MountSessionId == "" || req.InvalidateId == "" {
-		return nil, status.Error(codes.InvalidArgument, "volume_id, mount_session_id and invalidate_id are required")
+		return nil, fserror.New(fserror.InvalidArgument, "volume_id, mount_session_id and invalidate_id are required")
 	}
 	if _, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId); err != nil {
 		return nil, err
 	}
 	if err := s.volMgr.AckInvalidate(req.VolumeId, req.MountSessionId, req.InvalidateId, req.Success, req.ErrorMessage); err != nil {
 		s.logger.WithError(err).WithField("volume_id", req.VolumeId).Error("Failed to ack invalidate")
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, fserror.New(fserror.Internal, err.Error())
 	}
 	return &pb.Empty{}, nil
-}
-
-// WatchVolumeEvents streams volume change events to clients.
-func (s *FileSystemServer) WatchVolumeEvents(req *pb.WatchRequest, stream pb.FileSystem_WatchVolumeEventsServer) error {
-	if s.eventHub == nil {
-		return status.Error(codes.FailedPrecondition, "watch events disabled")
-	}
-	if req == nil || req.VolumeId == "" {
-		return status.Error(codes.InvalidArgument, "volume_id is required")
-	}
-	if _, err := s.getAuthorizedMountedVolume(stream.Context(), req.VolumeId); err != nil {
-		return err
-	}
-
-	_, ch, cancel := s.eventHub.Subscribe(req)
-	defer cancel()
-
-	for {
-		select {
-		case <-stream.Context().Done():
-			return stream.Context().Err()
-		case event, ok := <-ch:
-			if !ok {
-				return nil
-			}
-			if err := stream.Send(event); err != nil {
-				return err
-			}
-		}
-	}
-}
-
-func (s *FileSystemServer) MountSession(stream pb.FileSystem_MountSessionServer) error {
-	if stream == nil {
-		return status.Error(codes.InvalidArgument, "stream is required")
-	}
-
-	ctx := stream.Context()
-	var (
-		sendMu      sync.Mutex
-		wg          sync.WaitGroup
-		cancelWatch func()
-		watchReady  bool
-		volumeID    string
-	)
-
-	for {
-		req, err := stream.Recv()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			if cancelWatch != nil {
-				cancelWatch()
-			}
-			wg.Wait()
-			return err
-		}
-		if req == nil {
-			continue
-		}
-		if req.VolumeId == "" {
-			req.VolumeId = volumeID
-		}
-		if req.VolumeId == "" {
-			if err := sendMountSessionResponse(&sendMu, stream, sessionErrorResponse(req.RequestId, status.Error(codes.InvalidArgument, "volume_id is required"))); err != nil {
-				return err
-			}
-			continue
-		}
-		if volumeID == "" {
-			volumeID = req.VolumeId
-		}
-		if req.VolumeId != volumeID {
-			if err := sendMountSessionResponse(&sendMu, stream, sessionErrorResponse(req.RequestId, status.Error(codes.InvalidArgument, "mount session volume_id mismatch"))); err != nil {
-				return err
-			}
-			continue
-		}
-		if !watchReady && s.eventHub != nil {
-			if _, err := s.getAuthorizedMountedVolume(ctx, volumeID); err != nil {
-				return err
-			}
-			watchReady = true
-			_, ch, cancel := s.eventHub.Subscribe(&pb.WatchRequest{
-				VolumeId:    volumeID,
-				Recursive:   true,
-				IncludeSelf: true,
-			})
-			cancelWatch = cancel
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for {
-					select {
-					case <-ctx.Done():
-						return
-					case event, ok := <-ch:
-						if !ok {
-							return
-						}
-						if event == nil || event.EventType != pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE {
-							continue
-						}
-						if err := sendMountSessionResponse(&sendMu, stream, &pb.MountSessionResponse{
-							Payload: &pb.MountSessionResponse_WatchEvent{
-								WatchEvent: event,
-							},
-						}); err != nil {
-							return
-						}
-					}
-				}
-			}()
-		}
-
-		wg.Add(1)
-		go func(req *pb.MountSessionRequest) {
-			defer wg.Done()
-			resp := s.dispatchMountSessionRequest(ctx, req)
-			if err := sendMountSessionResponse(&sendMu, stream, resp); err != nil {
-				if s.logger != nil {
-					s.logger.WithError(err).WithField("volume_id", req.VolumeId).Debug("Failed to send mount session response")
-				}
-			}
-		}(req)
-	}
-
-	if cancelWatch != nil {
-		cancelWatch()
-	}
-	wg.Wait()
-	return nil
-}
-
-func sendMountSessionResponse(sendMu *sync.Mutex, stream pb.FileSystem_MountSessionServer, resp *pb.MountSessionResponse) error {
-	if resp == nil {
-		return nil
-	}
-	sendMu.Lock()
-	defer sendMu.Unlock()
-	return stream.Send(resp)
-}
-
-func (s *FileSystemServer) dispatchMountSessionRequest(ctx context.Context, req *pb.MountSessionRequest) *pb.MountSessionResponse {
-	if req == nil {
-		return sessionErrorResponse(0, status.Error(codes.InvalidArgument, "request is required"))
-	}
-
-	switch payload := req.Payload.(type) {
-	case *pb.MountSessionRequest_Heartbeat:
-		return &pb.MountSessionResponse{
-			RequestId: req.RequestId,
-			Payload: &pb.MountSessionResponse_Ack{
-				Ack: &pb.MountSessionAck{ReceivedAtUnix: s.currentTime().Unix()},
-			},
-		}
-	case *pb.MountSessionRequest_Lookup:
-		resp, err := s.Lookup(ctx, payload.Lookup)
-		if err != nil {
-			return sessionErrorResponse(req.RequestId, err)
-		}
-		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Node{Node: resp}}
-	case *pb.MountSessionRequest_LookupBatch:
-		resp := &pb.LookupBatchResponse{Items: make([]*pb.LookupBatchItem, 0, len(payload.LookupBatch.Names))}
-		for _, name := range payload.LookupBatch.Names {
-			node, err := s.Lookup(ctx, &pb.LookupRequest{
-				VolumeId: payload.LookupBatch.VolumeId,
-				Parent:   payload.LookupBatch.Parent,
-				Name:     name,
-				Actor:    payload.LookupBatch.Actor,
-			})
-			item := &pb.LookupBatchItem{Name: name, Node: node}
-			if err != nil {
-				item.Error = sessionErrorBody(err)
-			}
-			resp.Items = append(resp.Items, item)
-		}
-		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_LookupBatch{LookupBatch: resp}}
-	case *pb.MountSessionRequest_GetAttr:
-		resp, err := s.GetAttr(ctx, payload.GetAttr)
-		if err != nil {
-			return sessionErrorResponse(req.RequestId, err)
-		}
-		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Attr{Attr: resp}}
-	case *pb.MountSessionRequest_SetAttr:
-		resp, err := s.SetAttr(ctx, payload.SetAttr)
-		if err != nil {
-			return sessionErrorResponse(req.RequestId, err)
-		}
-		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_SetAttr{SetAttr: resp}}
-	case *pb.MountSessionRequest_Mkdir:
-		resp, err := s.Mkdir(ctx, payload.Mkdir)
-		if err != nil {
-			return sessionErrorResponse(req.RequestId, err)
-		}
-		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Node{Node: resp}}
-	case *pb.MountSessionRequest_Create:
-		resp, err := s.Create(ctx, payload.Create)
-		if err != nil {
-			return sessionErrorResponse(req.RequestId, err)
-		}
-		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Node{Node: resp}}
-	case *pb.MountSessionRequest_Unlink:
-		resp, err := s.Unlink(ctx, payload.Unlink)
-		if err != nil {
-			return sessionErrorResponse(req.RequestId, err)
-		}
-		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Empty{Empty: resp}}
-	case *pb.MountSessionRequest_Rmdir:
-		resp, err := s.Rmdir(ctx, payload.Rmdir)
-		if err != nil {
-			return sessionErrorResponse(req.RequestId, err)
-		}
-		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Empty{Empty: resp}}
-	case *pb.MountSessionRequest_Rename:
-		resp, err := s.Rename(ctx, payload.Rename)
-		if err != nil {
-			return sessionErrorResponse(req.RequestId, err)
-		}
-		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Empty{Empty: resp}}
-	case *pb.MountSessionRequest_Open:
-		resp, err := s.Open(ctx, payload.Open)
-		if err != nil {
-			return sessionErrorResponse(req.RequestId, err)
-		}
-		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Open{Open: resp}}
-	case *pb.MountSessionRequest_Read:
-		resp, err := s.Read(ctx, payload.Read)
-		if err != nil {
-			return sessionErrorResponse(req.RequestId, err)
-		}
-		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Read{Read: resp}}
-	case *pb.MountSessionRequest_Write:
-		resp, err := s.Write(ctx, payload.Write)
-		if err != nil {
-			return sessionErrorResponse(req.RequestId, err)
-		}
-		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Write{Write: resp}}
-	case *pb.MountSessionRequest_Release:
-		resp, err := s.Release(ctx, payload.Release)
-		if err != nil {
-			return sessionErrorResponse(req.RequestId, err)
-		}
-		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Empty{Empty: resp}}
-	case *pb.MountSessionRequest_Flush:
-		resp, err := s.Flush(ctx, payload.Flush)
-		if err != nil {
-			return sessionErrorResponse(req.RequestId, err)
-		}
-		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Empty{Empty: resp}}
-	case *pb.MountSessionRequest_Fsync:
-		resp, err := s.Fsync(ctx, payload.Fsync)
-		if err != nil {
-			return sessionErrorResponse(req.RequestId, err)
-		}
-		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Empty{Empty: resp}}
-	case *pb.MountSessionRequest_OpenDir:
-		resp, err := s.OpenDir(ctx, payload.OpenDir)
-		if err != nil {
-			return sessionErrorResponse(req.RequestId, err)
-		}
-		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_OpenDir{OpenDir: resp}}
-	case *pb.MountSessionRequest_ReadDir:
-		resp, err := s.ReadDir(ctx, payload.ReadDir)
-		if err != nil {
-			return sessionErrorResponse(req.RequestId, err)
-		}
-		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_ReadDir{ReadDir: resp}}
-	case *pb.MountSessionRequest_ReleaseDir:
-		resp, err := s.ReleaseDir(ctx, payload.ReleaseDir)
-		if err != nil {
-			return sessionErrorResponse(req.RequestId, err)
-		}
-		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Empty{Empty: resp}}
-	case *pb.MountSessionRequest_StatFs:
-		resp, err := s.StatFs(ctx, payload.StatFs)
-		if err != nil {
-			return sessionErrorResponse(req.RequestId, err)
-		}
-		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_StatFs{StatFs: resp}}
-	case *pb.MountSessionRequest_Access:
-		resp, err := s.Access(ctx, payload.Access)
-		if err != nil {
-			return sessionErrorResponse(req.RequestId, err)
-		}
-		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Empty{Empty: resp}}
-	case *pb.MountSessionRequest_Symlink:
-		resp, err := s.Symlink(ctx, payload.Symlink)
-		if err != nil {
-			return sessionErrorResponse(req.RequestId, err)
-		}
-		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Node{Node: resp}}
-	case *pb.MountSessionRequest_Readlink:
-		resp, err := s.Readlink(ctx, payload.Readlink)
-		if err != nil {
-			return sessionErrorResponse(req.RequestId, err)
-		}
-		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Readlink{Readlink: resp}}
-	default:
-		return sessionErrorResponse(req.RequestId, status.Error(codes.InvalidArgument, "unsupported mount session request"))
-	}
-}
-
-func sessionErrorResponse(requestID uint64, err error) *pb.MountSessionResponse {
-	return &pb.MountSessionResponse{
-		RequestId: requestID,
-		Payload: &pb.MountSessionResponse_Error{
-			Error: sessionErrorBody(err),
-		},
-	}
-}
-
-func sessionErrorBody(err error) *pb.MountSessionError {
-	if err == nil {
-		return nil
-	}
-	st, ok := status.FromError(err)
-	if !ok {
-		return &pb.MountSessionError{
-			Code:    int32(codes.Internal),
-			Message: err.Error(),
-		}
-	}
-
-	body := &pb.MountSessionError{
-		Code:    int32(st.Code()),
-		Message: st.Message(),
-	}
-	for _, detail := range st.Details() {
-		redirect, ok := detail.(*pb.PrimaryRedirect)
-		if ok {
-			body.Redirect = redirect
-			break
-		}
-	}
-	return body
 }
 
 func (s *FileSystemServer) publishEvent(ctx context.Context, event *pb.WatchEvent) {
@@ -834,9 +489,9 @@ func (s *FileSystemServer) validateNamespaceMutation(ctx context.Context, req *v
 	}
 	if err := s.syncRecorder.ValidateNamespaceMutation(ctx, req); err != nil {
 		if errors.Is(err, volsync.ErrNamespaceIncompatible) {
-			return status.Error(codes.FailedPrecondition, err.Error())
+			return fserror.New(fserror.FailedPrecondition, err.Error())
 		}
-		return status.Error(codes.Internal, err.Error())
+		return fserror.New(fserror.Internal, err.Error())
 	}
 	return nil
 }
@@ -875,32 +530,32 @@ func watchEventTypeToSyncEvent(eventType pb.WatchEventType) string {
 func (s *FileSystemServer) authorizeVolumeMount(ctx context.Context, volumeID string) (*db.SandboxVolume, error) {
 	claims := internalauth.ClaimsFromContext(ctx)
 	if claims == nil || claims.TeamID == "" {
-		return nil, status.Error(codes.Unauthenticated, "team id not found in context")
+		return nil, fserror.New(fserror.Unauthenticated, "team id not found in context")
 	}
 	if s.volumeRepo == nil {
-		return nil, status.Error(codes.FailedPrecondition, "volume authorization unavailable")
+		return nil, fserror.New(fserror.FailedPrecondition, "volume authorization unavailable")
 	}
 
 	vol, err := s.volumeRepo.GetSandboxVolume(ctx, volumeID)
 	if err != nil {
 		if err == db.ErrNotFound {
-			return nil, status.Error(codes.NotFound, "sandbox volume not found")
+			return nil, fserror.New(fserror.NotFound, "sandbox volume not found")
 		}
 		s.logger.WithError(err).WithField("volume_id", volumeID).Error("Failed to load sandbox volume")
-		return nil, status.Error(codes.Internal, "failed to load sandbox volume")
+		return nil, fserror.New(fserror.Internal, "failed to load sandbox volume")
 	}
 	if vol.TeamID != claims.TeamID {
 		s.logUnauthorizedVolumeAccess(volumeID, claims.TeamID, vol.TeamID, "mount")
-		return nil, status.Error(codes.PermissionDenied, "access denied to volume")
+		return nil, fserror.New(fserror.PermissionDenied, "access denied to volume")
 	}
 	owner, err := s.volumeRepo.GetSandboxVolumeOwner(ctx, volumeID)
 	if err != nil && !errors.Is(err, db.ErrNotFound) {
 		s.logger.WithError(err).WithField("volume_id", volumeID).Error("Failed to load sandbox volume owner")
-		return nil, status.Error(codes.Internal, "failed to load sandbox volume owner")
+		return nil, fserror.New(fserror.Internal, "failed to load sandbox volume owner")
 	}
 	if owner != nil && !claims.IsSystemToken() && claims.SandboxID != owner.OwnerSandboxID {
 		s.logUnauthorizedVolumeAccess(volumeID, claims.TeamID, vol.TeamID, "mount_owned")
-		return nil, status.Error(codes.PermissionDenied, "access denied to system volume")
+		return nil, fserror.New(fserror.PermissionDenied, "access denied to system volume")
 	}
 	return vol, nil
 }
@@ -908,18 +563,18 @@ func (s *FileSystemServer) authorizeVolumeMount(ctx context.Context, volumeID st
 func (s *FileSystemServer) getAuthorizedMountedVolume(ctx context.Context, volumeID string) (*volume.VolumeContext, error) {
 	claims := internalauth.ClaimsFromContext(ctx)
 	if claims == nil {
-		return nil, status.Error(codes.Unauthenticated, "missing auth claims")
+		return nil, fserror.New(fserror.Unauthenticated, "missing auth claims")
 	}
 
 	volCtx, err := s.volMgr.GetVolume(volumeID)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, err.Error())
+		return nil, fserror.New(fserror.NotFound, err.Error())
 	}
 	if claims.IsSystemToken() {
 		return volCtx, nil
 	}
 	if claims.TeamID == "" {
-		return nil, status.Error(codes.Unauthenticated, "team id not found in context")
+		return nil, fserror.New(fserror.Unauthenticated, "team id not found in context")
 	}
 
 	ownerTeamID := volCtx.TeamID
@@ -927,19 +582,19 @@ func (s *FileSystemServer) getAuthorizedMountedVolume(ctx context.Context, volum
 		vol, repoErr := s.volumeRepo.GetSandboxVolume(ctx, volumeID)
 		if repoErr != nil {
 			if repoErr == db.ErrNotFound {
-				return nil, status.Error(codes.NotFound, "sandbox volume not found")
+				return nil, fserror.New(fserror.NotFound, "sandbox volume not found")
 			}
 			s.logger.WithError(repoErr).WithField("volume_id", volumeID).Error("Failed to load sandbox volume")
-			return nil, status.Error(codes.Internal, "failed to load sandbox volume")
+			return nil, fserror.New(fserror.Internal, "failed to load sandbox volume")
 		}
 		ownerTeamID = vol.TeamID
 	}
 	if ownerTeamID == "" {
-		return nil, status.Error(codes.FailedPrecondition, "volume authorization unavailable")
+		return nil, fserror.New(fserror.FailedPrecondition, "volume authorization unavailable")
 	}
 	if ownerTeamID != claims.TeamID {
 		s.logUnauthorizedVolumeAccess(volumeID, claims.TeamID, ownerTeamID, "access")
-		return nil, status.Error(codes.PermissionDenied, "access denied to volume")
+		return nil, fserror.New(fserror.PermissionDenied, "access denied to volume")
 	}
 	return volCtx, nil
 }
@@ -978,7 +633,7 @@ func (s *FileSystemServer) GetAttr(ctx context.Context, req *pb.GetAttrRequest) 
 			"inode":     req.Inode,
 			"error":     st,
 		}).Error("GetAttr failed")
-		return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
+		return nil, fserror.New(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
 	}
 
 	return convertAttr(fsmeta.Ino(req.Inode), entry.Attr), nil
@@ -1004,9 +659,9 @@ func (s *FileSystemServer) Lookup(ctx context.Context, req *pb.LookupRequest) (*
 	entry, st := volCtx.VFS.Lookup(vfsCtx, parent, req.Name)
 	if st != 0 {
 		if st == syscall.ENOENT {
-			return nil, status.Error(codes.NotFound, "entry not found")
+			return nil, fserror.New(fserror.NotFound, "entry not found")
 		}
-		return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
+		return nil, fserror.New(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
 	}
 
 	return &pb.NodeResponse{
@@ -1029,7 +684,7 @@ func (s *FileSystemServer) Open(ctx context.Context, req *pb.OpenRequest) (*pb.O
 			return nil, mapS0FSError(err)
 		}
 		if node.Type == s0fs.TypeDirectory {
-			return nil, status.Error(codes.FailedPrecondition, "inode is a directory")
+			return nil, fserror.New(fserror.FailedPrecondition, "inode is a directory")
 		}
 		return &pb.OpenResponse{HandleId: volCtx.OpenFileHandle(node.Inode)}, nil
 	}
@@ -1048,7 +703,7 @@ func (s *FileSystemServer) Open(ctx context.Context, req *pb.OpenRequest) (*pb.O
 			"flags":     req.Flags,
 			"error":     errno,
 		}).Error("Open failed")
-		return nil, status.Error(codes.Internal, syscall.Errno(errno).Error())
+		return nil, fserror.New(fserror.Internal, syscall.Errno(errno).Error())
 	}
 
 	return &pb.OpenResponse{
@@ -1092,7 +747,7 @@ func (s *FileSystemServer) Read(ctx context.Context, req *pb.ReadRequest) (*pb.R
 			"error":     errno,
 		}).Error("Read failed")
 
-		return nil, status.Error(codes.Internal, syscall.Errno(errno).Error())
+		return nil, fserror.New(fserror.Internal, syscall.Errno(errno).Error())
 	}
 
 	// Check if EOF
@@ -1135,7 +790,7 @@ func (s *FileSystemServer) Write(ctx context.Context, req *pb.WriteRequest) (*pb
 				"error":     errno,
 			}).Error("Write failed")
 
-			return nil, status.Error(codes.Internal, syscall.Errno(errno).Error())
+			return nil, fserror.New(fserror.Internal, syscall.Errno(errno).Error())
 		}
 
 		s.markDirtyWrite(req.VolumeId, req.Inode, req.HandleId)
@@ -1162,7 +817,7 @@ func (s *FileSystemServer) Create(ctx context.Context, req *pb.CreateRequest) (*
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.NodeResponse, error) {
 		if isS0FSVolume(volCtx) {
 			if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, fsmeta.Ino(req.Parent)); err != nil {
-				return nil, status.Error(codes.Internal, err.Error())
+				return nil, fserror.New(fserror.Internal, err.Error())
 			}
 			node, err := volCtx.S0FS.CreateFile(req.Parent, req.Name, req.Mode)
 			if err != nil {
@@ -1170,7 +825,7 @@ func (s *FileSystemServer) Create(ctx context.Context, req *pb.CreateRequest) (*
 			}
 			if req.Actor != nil && len(req.Actor.Gids) > 0 {
 				if err := volCtx.S0FS.SetOwner(node.Inode, req.Actor.Uid, req.Actor.Gids[0]); err != nil {
-					return nil, status.Error(codes.Internal, err.Error())
+					return nil, fserror.New(fserror.Internal, err.Error())
 				}
 				node, err = volCtx.S0FS.GetAttr(node.Inode)
 				if err != nil {
@@ -1190,7 +845,7 @@ func (s *FileSystemServer) Create(ctx context.Context, req *pb.CreateRequest) (*
 			return nil, err
 		}
 		if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, parent); err != nil {
-			return nil, status.Error(codes.Internal, err.Error())
+			return nil, fserror.New(fserror.Internal, err.Error())
 		}
 		vfsCtx := vfsContextForActor(req.Actor)
 		entry, handleID, errno := volCtx.VFS.Create(vfsCtx, parent, req.Name, uint16(req.Mode), uint16(req.Umask), req.Flags)
@@ -1202,7 +857,7 @@ func (s *FileSystemServer) Create(ctx context.Context, req *pb.CreateRequest) (*
 				"mode":      req.Mode,
 				"error":     errno,
 			}).Error("Create failed")
-			return nil, status.Error(mapErrnoToCode(syscall.Errno(errno)), syscall.Errno(errno).Error())
+			return nil, fserror.New(mapErrnoToCode(syscall.Errno(errno)), syscall.Errno(errno).Error())
 		}
 
 		eventType := pb.WatchEventType_WATCH_EVENT_TYPE_CREATE
@@ -1240,7 +895,7 @@ func (s *FileSystemServer) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.NodeResponse, error) {
 		if isS0FSVolume(volCtx) {
 			if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, fsmeta.Ino(req.Parent)); err != nil {
-				return nil, status.Error(codes.Internal, err.Error())
+				return nil, fserror.New(fserror.Internal, err.Error())
 			}
 			node, err := volCtx.S0FS.Mkdir(req.Parent, req.Name, req.Mode)
 			if err != nil {
@@ -1248,7 +903,7 @@ func (s *FileSystemServer) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb
 			}
 			if req.Actor != nil && len(req.Actor.Gids) > 0 {
 				if err := volCtx.S0FS.SetOwner(node.Inode, req.Actor.Uid, req.Actor.Gids[0]); err != nil {
-					return nil, status.Error(codes.Internal, err.Error())
+					return nil, fserror.New(fserror.Internal, err.Error())
 				}
 				node, err = volCtx.S0FS.GetAttr(node.Inode)
 				if err != nil {
@@ -1268,12 +923,12 @@ func (s *FileSystemServer) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb
 			return nil, err
 		}
 		if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, parent); err != nil {
-			return nil, status.Error(codes.Internal, err.Error())
+			return nil, fserror.New(fserror.Internal, err.Error())
 		}
 		vfsCtx := vfsContextForActor(req.Actor)
 		entry, st := volCtx.VFS.Mkdir(vfsCtx, parent, req.Name, uint16(req.Mode), uint16(req.Umask))
 		if st != 0 {
-			return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
+			return nil, fserror.New(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
 		}
 
 		eventType := pb.WatchEventType_WATCH_EVENT_TYPE_CREATE
@@ -1309,7 +964,7 @@ func (s *FileSystemServer) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb
 func (s *FileSystemServer) Mknod(ctx context.Context, req *pb.MknodRequest) (*pb.NodeResponse, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.NodeResponse, error) {
 		if isS0FSVolume(volCtx) {
-			return nil, status.Error(codes.Unimplemented, "mknod is not implemented for s0fs")
+			return nil, fserror.New(fserror.Unimplemented, "mknod is not implemented for s0fs")
 		}
 		parent := mapInode(volCtx, req.Parent)
 		path := resolveChildPath(volCtx, uint64(parent), req.Name)
@@ -1317,12 +972,12 @@ func (s *FileSystemServer) Mknod(ctx context.Context, req *pb.MknodRequest) (*pb
 			return nil, err
 		}
 		if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, parent); err != nil {
-			return nil, status.Error(codes.Internal, err.Error())
+			return nil, fserror.New(fserror.Internal, err.Error())
 		}
 		vfsCtx := vfsContextForActor(req.Actor)
 		entry, st := volCtx.VFS.Mknod(vfsCtx, parent, req.Name, uint16(req.Mode), uint16(req.Umask), uint32(req.Rdev))
 		if st != 0 {
-			return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
+			return nil, fserror.New(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
 		}
 
 		eventType := pb.WatchEventType_WATCH_EVENT_TYPE_CREATE
@@ -1344,20 +999,20 @@ func (s *FileSystemServer) Mknod(ctx context.Context, req *pb.MknodRequest) (*pb
 	})
 }
 
-func mapErrnoToCode(errno syscall.Errno) codes.Code {
+func mapErrnoToCode(errno syscall.Errno) fserror.Code {
 	switch errno {
 	case syscall.EEXIST:
-		return codes.AlreadyExists
+		return fserror.AlreadyExists
 	case syscall.ENOENT:
-		return codes.NotFound
+		return fserror.NotFound
 	case syscall.EACCES, syscall.EPERM:
-		return codes.PermissionDenied
+		return fserror.PermissionDenied
 	case syscall.ENOSPC:
-		return codes.ResourceExhausted
+		return fserror.ResourceExhausted
 	case syscall.EINVAL, syscall.ENOTDIR:
-		return codes.InvalidArgument
+		return fserror.InvalidArgument
 	default:
-		return codes.Internal
+		return fserror.Internal
 	}
 }
 
@@ -1376,12 +1031,12 @@ func (s *FileSystemServer) Unlink(ctx context.Context, req *pb.UnlinkRequest) (*
 		}
 		parent := mapInode(volCtx, req.Parent)
 		if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, parent); err != nil {
-			return nil, status.Error(codes.Internal, err.Error())
+			return nil, fserror.New(fserror.Internal, err.Error())
 		}
 		vfsCtx := vfsContextForActor(req.Actor)
 		st := volCtx.VFS.Unlink(vfsCtx, parent, req.Name)
 		if st != 0 {
-			return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
+			return nil, fserror.New(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
 		}
 
 		path := resolveChildPath(volCtx, uint64(mapInode(volCtx, req.Parent)), req.Name)
@@ -1451,7 +1106,7 @@ func (s *FileSystemServer) ReadDir(ctx context.Context, req *pb.ReadDirRequest) 
 	}
 	entries, _, st := volCtx.VFS.Readdir(vfsCtx, inode, size, int(req.Offset), req.HandleId, req.Plus)
 	if st != 0 {
-		return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
+		return nil, fserror.New(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
 	}
 
 	var result []*pb.DirEntry
@@ -1492,7 +1147,7 @@ func (s *FileSystemServer) OpenDir(ctx context.Context, req *pb.OpenDirRequest) 
 	vfsCtx := vfsContextForActor(req.Actor)
 	fh, st := volCtx.VFS.Opendir(vfsCtx, inode, req.Flags)
 	if st != 0 {
-		return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
+		return nil, fserror.New(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
 	}
 
 	return &pb.OpenDirResponse{
@@ -1538,13 +1193,13 @@ func (s *FileSystemServer) Rename(ctx context.Context, req *pb.RenameRequest) (*
 			return nil, err
 		}
 		if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, oldParent, newParent); err != nil {
-			return nil, status.Error(codes.Internal, err.Error())
+			return nil, fserror.New(fserror.Internal, err.Error())
 		}
 
 		vfsCtx := vfsContextForActor(req.Actor)
 		st := volCtx.VFS.Rename(vfsCtx, oldParent, req.OldName, newParent, req.NewName, req.Flags)
 		if st != 0 {
-			return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
+			return nil, fserror.New(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
 		}
 
 		eventType := pb.WatchEventType_WATCH_EVENT_TYPE_RENAME
@@ -1639,7 +1294,7 @@ func (s *FileSystemServer) SetAttr(ctx context.Context, req *pb.SetAttrRequest) 
 			attr.Size,
 		)
 		if st != 0 {
-			return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
+			return nil, fserror.New(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
 		}
 
 		path := resolveInodePath(volCtx, uint64(mapInode(volCtx, req.Inode)))
@@ -1713,7 +1368,7 @@ func (s *FileSystemServer) Flush(ctx context.Context, req *pb.FlushRequest) (*pb
 			"handle_id": req.HandleId,
 			"error":     errno,
 		}).Error("Flush failed")
-		return nil, status.Error(mapErrnoToCode(syscall.Errno(errno)), syscall.Errno(errno).Error())
+		return nil, fserror.New(mapErrnoToCode(syscall.Errno(errno)), syscall.Errno(errno).Error())
 	}
 
 	return &pb.Empty{}, nil
@@ -1758,7 +1413,7 @@ func (s *FileSystemServer) Fsync(ctx context.Context, req *pb.FsyncRequest) (*pb
 			"datasync":  req.Datasync,
 			"error":     errno,
 		}).Error("Fsync failed")
-		return nil, status.Error(mapErrnoToCode(syscall.Errno(errno)), syscall.Errno(errno).Error())
+		return nil, fserror.New(mapErrnoToCode(syscall.Errno(errno)), syscall.Errno(errno).Error())
 	}
 
 	if s.recordDirtyWriteReplayPayload(ctx, volCtx, req.VolumeId, dirty, "fsync") {
@@ -1815,15 +1470,15 @@ func (s *FileSystemServer) Rmdir(ctx context.Context, req *pb.RmdirRequest) (*pb
 		}
 		parent := mapInode(volCtx, req.Parent)
 		if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, parent); err != nil {
-			return nil, status.Error(codes.Internal, err.Error())
+			return nil, fserror.New(fserror.Internal, err.Error())
 		}
 		vfsCtx := vfsContextForActor(req.Actor)
 		st := volCtx.VFS.Rmdir(vfsCtx, parent, req.Name)
 		if st != 0 {
 			if st == syscall.ENOTEMPTY {
-				return nil, status.Error(codes.FailedPrecondition, "directory not empty")
+				return nil, fserror.New(fserror.FailedPrecondition, "directory not empty")
 			}
-			return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
+			return nil, fserror.New(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
 		}
 
 		path := resolveChildPath(volCtx, uint64(mapInode(volCtx, req.Parent)), req.Name)
@@ -1873,7 +1528,7 @@ func (s *FileSystemServer) StatFs(ctx context.Context, req *pb.StatFsRequest) (*
 	var totalSpace, availSpace, iused, iavail uint64
 	st := volCtx.Meta.StatFS(vfsCtx, fsmeta.RootInode, &totalSpace, &availSpace, &iused, &iavail)
 	if st != 0 {
-		return nil, status.Error(codes.Internal, syscall.Errno(st).Error())
+		return nil, fserror.New(fserror.Internal, syscall.Errno(st).Error())
 	}
 
 	// Use configured block size if available, otherwise default to 4096
@@ -1901,7 +1556,7 @@ func (s *FileSystemServer) Symlink(ctx context.Context, req *pb.SymlinkRequest) 
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.NodeResponse, error) {
 		if isS0FSVolume(volCtx) {
 			if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, fsmeta.Ino(req.Parent)); err != nil {
-				return nil, status.Error(codes.Internal, err.Error())
+				return nil, fserror.New(fserror.Internal, err.Error())
 			}
 			node, err := volCtx.S0FS.Symlink(req.Parent, req.Name, req.Target, 0o777)
 			if err != nil {
@@ -1909,7 +1564,7 @@ func (s *FileSystemServer) Symlink(ctx context.Context, req *pb.SymlinkRequest) 
 			}
 			if req.Actor != nil && len(req.Actor.Gids) > 0 {
 				if err := volCtx.S0FS.SetOwner(node.Inode, req.Actor.Uid, req.Actor.Gids[0]); err != nil {
-					return nil, status.Error(codes.Internal, err.Error())
+					return nil, fserror.New(fserror.Internal, err.Error())
 				}
 				node, err = volCtx.S0FS.GetAttr(node.Inode)
 				if err != nil {
@@ -1929,12 +1584,12 @@ func (s *FileSystemServer) Symlink(ctx context.Context, req *pb.SymlinkRequest) 
 			return nil, err
 		}
 		if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, parent); err != nil {
-			return nil, status.Error(codes.Internal, err.Error())
+			return nil, fserror.New(fserror.Internal, err.Error())
 		}
 		vfsCtx := vfsContextForActor(req.Actor)
 		entry, st := volCtx.VFS.Symlink(vfsCtx, req.Target, parent, req.Name)
 		if st != 0 {
-			return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
+			return nil, fserror.New(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
 		}
 
 		eventType := pb.WatchEventType_WATCH_EVENT_TYPE_CREATE
@@ -1968,7 +1623,7 @@ func (s *FileSystemServer) Readlink(ctx context.Context, req *pb.ReadlinkRequest
 			return nil, mapS0FSError(err)
 		}
 		if node.Type != s0fs.TypeSymlink {
-			return nil, status.Error(codes.FailedPrecondition, "inode is not a symbolic link")
+			return nil, fserror.New(fserror.FailedPrecondition, "inode is not a symbolic link")
 		}
 		return &pb.ReadlinkResponse{Target: node.Target}, nil
 	}
@@ -1978,7 +1633,7 @@ func (s *FileSystemServer) Readlink(ctx context.Context, req *pb.ReadlinkRequest
 	vfsCtx := vfsContextForActor(req.Actor)
 	target, st := volCtx.VFS.Readlink(vfsCtx, inode)
 	if st != 0 {
-		return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
+		return nil, fserror.New(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
 	}
 
 	return &pb.ReadlinkResponse{
@@ -1996,13 +1651,13 @@ func (s *FileSystemServer) Link(ctx context.Context, req *pb.LinkRequest) (*pb.N
 			return nil, err
 		}
 		if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, newParent); err != nil {
-			return nil, status.Error(codes.Internal, err.Error())
+			return nil, fserror.New(fserror.Internal, err.Error())
 		}
 
 		vfsCtx := vfsContextForActor(req.Actor)
 		entry, st := volCtx.VFS.Link(vfsCtx, inode, newParent, req.NewName)
 		if st != 0 {
-			return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
+			return nil, fserror.New(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
 		}
 
 		eventType := pb.WatchEventType_WATCH_EVENT_TYPE_CREATE
@@ -2059,7 +1714,7 @@ func (s *FileSystemServer) Access(ctx context.Context, req *pb.AccessRequest) (*
 			"gids":      gids,
 			"error":     st,
 		}).Debug("Access denied")
-		return nil, status.Error(codes.PermissionDenied, syscall.Errno(st).Error())
+		return nil, fserror.New(fserror.PermissionDenied, syscall.Errno(st).Error())
 	}
 
 	return &pb.Empty{}, nil
@@ -2069,7 +1724,7 @@ func (s *FileSystemServer) Access(ctx context.Context, req *pb.AccessRequest) (*
 func (s *FileSystemServer) Fallocate(ctx context.Context, req *pb.FallocateRequest) (*pb.Empty, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.Empty, error) {
 		if isS0FSVolume(volCtx) {
-			return nil, status.Error(codes.Unimplemented, "fallocate is not implemented for s0fs")
+			return nil, fserror.New(fserror.Unimplemented, "fallocate is not implemented for s0fs")
 		}
 		vfsCtx := vfsContextForActor(req.Actor)
 		inode := mapInode(volCtx, req.Inode)
@@ -2083,7 +1738,7 @@ func (s *FileSystemServer) Fallocate(ctx context.Context, req *pb.FallocateReque
 				"length":    req.Length,
 				"error":     st,
 			}).Error("Fallocate failed")
-			return nil, status.Error(codes.Internal, syscall.Errno(st).Error())
+			return nil, fserror.New(fserror.Internal, syscall.Errno(st).Error())
 		}
 
 		s.logger.WithFields(logrus.Fields{
@@ -2131,7 +1786,7 @@ func (s *FileSystemServer) Fallocate(ctx context.Context, req *pb.FallocateReque
 func (s *FileSystemServer) CopyFileRange(ctx context.Context, req *pb.CopyFileRangeRequest) (*pb.CopyFileRangeResponse, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.CopyFileRangeResponse, error) {
 		if isS0FSVolume(volCtx) {
-			return nil, status.Error(codes.Unimplemented, "copy_file_range is not implemented for s0fs")
+			return nil, fserror.New(fserror.Unimplemented, "copy_file_range is not implemented for s0fs")
 		}
 		vfsCtx := vfsContextForActor(req.Actor)
 		copied, st := volCtx.VFS.CopyFileRange(
@@ -2146,7 +1801,7 @@ func (s *FileSystemServer) CopyFileRange(ctx context.Context, req *pb.CopyFileRa
 			uint64(req.Flags),
 		)
 		if st != 0 {
-			return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
+			return nil, fserror.New(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
 		}
 
 		path := resolveInodePath(volCtx, uint64(mapInode(volCtx, req.InodeOut)))
@@ -2191,10 +1846,10 @@ func (s *FileSystemServer) GetLk(ctx context.Context, req *pb.GetLkRequest) (*pb
 		return nil, err
 	}
 	if isS0FSVolume(volCtx) {
-		return nil, status.Error(codes.Unimplemented, "locks are not implemented for s0fs")
+		return nil, fserror.New(fserror.Unimplemented, "locks are not implemented for s0fs")
 	}
 	if req.Lock == nil {
-		return nil, status.Error(codes.InvalidArgument, "lock is required")
+		return nil, fserror.New(fserror.InvalidArgument, "lock is required")
 	}
 
 	start := req.Lock.Start
@@ -2205,7 +1860,7 @@ func (s *FileSystemServer) GetLk(ctx context.Context, req *pb.GetLkRequest) (*pb
 	vfsCtx := vfsContextForActor(req.Actor)
 	st := volCtx.VFS.Getlk(vfsCtx, mapInode(volCtx, req.Inode), req.HandleId, req.Owner, &start, &end, &typ, &pid)
 	if st != 0 {
-		return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
+		return nil, fserror.New(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
 	}
 
 	return &pb.GetLkResponse{
@@ -2225,10 +1880,10 @@ func (s *FileSystemServer) SetLk(ctx context.Context, req *pb.SetLkRequest) (*pb
 		return nil, err
 	}
 	if isS0FSVolume(volCtx) {
-		return nil, status.Error(codes.Unimplemented, "locks are not implemented for s0fs")
+		return nil, fserror.New(fserror.Unimplemented, "locks are not implemented for s0fs")
 	}
 	if req.Lock == nil {
-		return nil, status.Error(codes.InvalidArgument, "lock is required")
+		return nil, fserror.New(fserror.InvalidArgument, "lock is required")
 	}
 
 	vfsCtx := vfsContextForActor(req.Actor)
@@ -2244,7 +1899,7 @@ func (s *FileSystemServer) SetLk(ctx context.Context, req *pb.SetLkRequest) (*pb
 		req.Block,
 	)
 	if st != 0 {
-		return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
+		return nil, fserror.New(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
 	}
 	return &pb.Empty{}, nil
 }
@@ -2264,7 +1919,7 @@ func (s *FileSystemServer) Flock(ctx context.Context, req *pb.FlockRequest) (*pb
 		return nil, err
 	}
 	if isS0FSVolume(volCtx) {
-		return nil, status.Error(codes.Unimplemented, "flock is not implemented for s0fs")
+		return nil, fserror.New(fserror.Unimplemented, "flock is not implemented for s0fs")
 	}
 
 	vfsCtx := vfsContextForActor(req.Actor)
@@ -2277,7 +1932,7 @@ func (s *FileSystemServer) Flock(ctx context.Context, req *pb.FlockRequest) (*pb
 		req.Block,
 	)
 	if st != 0 {
-		return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
+		return nil, fserror.New(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
 	}
 	return &pb.Empty{}, nil
 }
@@ -2289,14 +1944,14 @@ func (s *FileSystemServer) Ioctl(ctx context.Context, req *pb.IoctlRequest) (*pb
 		return nil, err
 	}
 	if isS0FSVolume(volCtx) {
-		return nil, status.Error(codes.Unimplemented, "ioctl is not implemented for s0fs")
+		return nil, fserror.New(fserror.Unimplemented, "ioctl is not implemented for s0fs")
 	}
 
 	bufOut := make([]byte, req.DataOutSize)
 	vfsCtx := vfsContextForActor(req.Actor)
 	st := volCtx.VFS.Ioctl(vfsCtx, mapInode(volCtx, req.Inode), req.Cmd, req.Arg, req.DataIn, bufOut)
 	if st != 0 {
-		return nil, status.Error(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
+		return nil, fserror.New(mapErrnoToCode(syscall.Errno(st)), syscall.Errno(st).Error())
 	}
 
 	return &pb.IoctlResponse{
@@ -2311,7 +1966,7 @@ func (s *FileSystemServer) GetXattr(ctx context.Context, req *pb.GetXattrRequest
 		return nil, err
 	}
 	if isS0FSVolume(volCtx) {
-		return nil, status.Error(codes.Unimplemented, "xattr is not implemented for s0fs")
+		return nil, fserror.New(fserror.Unimplemented, "xattr is not implemented for s0fs")
 	}
 
 	// Call S0FS VFS GetXattr
@@ -2321,7 +1976,7 @@ func (s *FileSystemServer) GetXattr(ctx context.Context, req *pb.GetXattrRequest
 	if st != 0 {
 		// ENODATA/ENOATTR is not an error, just means attribute doesn't exist
 		if st == syscall.ENODATA || st == fsmeta.ENOATTR {
-			return nil, status.Error(codes.NotFound, "attribute not found")
+			return nil, fserror.New(fserror.NotFound, "attribute not found")
 		}
 		s.logger.WithFields(logrus.Fields{
 			"volume_id": req.VolumeId,
@@ -2329,7 +1984,7 @@ func (s *FileSystemServer) GetXattr(ctx context.Context, req *pb.GetXattrRequest
 			"name":      req.Name,
 			"error":     st,
 		}).Error("GetXattr failed")
-		return nil, status.Error(codes.Internal, syscall.Errno(st).Error())
+		return nil, fserror.New(fserror.Internal, syscall.Errno(st).Error())
 	}
 
 	return &pb.GetXattrResponse{
@@ -2341,7 +1996,7 @@ func (s *FileSystemServer) GetXattr(ctx context.Context, req *pb.GetXattrRequest
 func (s *FileSystemServer) SetXattr(ctx context.Context, req *pb.SetXattrRequest) (*pb.Empty, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.Empty, error) {
 		if isS0FSVolume(volCtx) {
-			return nil, status.Error(codes.Unimplemented, "xattr is not implemented for s0fs")
+			return nil, fserror.New(fserror.Unimplemented, "xattr is not implemented for s0fs")
 		}
 		vfsCtx := vfsContextForActor(req.Actor)
 		inode := mapInode(volCtx, req.Inode)
@@ -2354,7 +2009,7 @@ func (s *FileSystemServer) SetXattr(ctx context.Context, req *pb.SetXattrRequest
 				"flags":     req.Flags,
 				"error":     st,
 			}).Error("SetXattr failed")
-			return nil, status.Error(codes.Internal, syscall.Errno(st).Error())
+			return nil, fserror.New(fserror.Internal, syscall.Errno(st).Error())
 		}
 
 		path := resolveInodePath(volCtx, uint64(mapInode(volCtx, req.Inode)))
@@ -2380,7 +2035,7 @@ func (s *FileSystemServer) ListXattr(ctx context.Context, req *pb.ListXattrReque
 		return nil, err
 	}
 	if isS0FSVolume(volCtx) {
-		return nil, status.Error(codes.Unimplemented, "xattr is not implemented for s0fs")
+		return nil, fserror.New(fserror.Unimplemented, "xattr is not implemented for s0fs")
 	}
 
 	// Call S0FS VFS ListXattr
@@ -2393,7 +2048,7 @@ func (s *FileSystemServer) ListXattr(ctx context.Context, req *pb.ListXattrReque
 			"inode":     req.Inode,
 			"error":     st,
 		}).Error("ListXattr failed")
-		return nil, status.Error(codes.Internal, syscall.Errno(st).Error())
+		return nil, fserror.New(fserror.Internal, syscall.Errno(st).Error())
 	}
 
 	return &pb.ListXattrResponse{
@@ -2405,7 +2060,7 @@ func (s *FileSystemServer) ListXattr(ctx context.Context, req *pb.ListXattrReque
 func (s *FileSystemServer) RemoveXattr(ctx context.Context, req *pb.RemoveXattrRequest) (*pb.Empty, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.Empty, error) {
 		if isS0FSVolume(volCtx) {
-			return nil, status.Error(codes.Unimplemented, "xattr is not implemented for s0fs")
+			return nil, fserror.New(fserror.Unimplemented, "xattr is not implemented for s0fs")
 		}
 		vfsCtx := vfsContextForActor(req.Actor)
 		inode := mapInode(volCtx, req.Inode)
@@ -2417,7 +2072,7 @@ func (s *FileSystemServer) RemoveXattr(ctx context.Context, req *pb.RemoveXattrR
 				"name":      req.Name,
 				"error":     st,
 			}).Error("RemoveXattr failed")
-			return nil, status.Error(codes.Internal, syscall.Errno(st).Error())
+			return nil, fserror.New(fserror.Internal, syscall.Errno(st).Error())
 		}
 
 		path := resolveInodePath(volCtx, uint64(mapInode(volCtx, req.Inode)))
@@ -2588,16 +2243,16 @@ func mapS0FSError(err error) error {
 	case err == nil:
 		return nil
 	case errors.Is(err, s0fs.ErrNotFound):
-		return status.Error(codes.NotFound, err.Error())
+		return fserror.New(fserror.NotFound, err.Error())
 	case errors.Is(err, s0fs.ErrExists):
-		return status.Error(codes.AlreadyExists, err.Error())
+		return fserror.New(fserror.AlreadyExists, err.Error())
 	case errors.Is(err, s0fs.ErrNotEmpty), errors.Is(err, s0fs.ErrIsDir):
-		return status.Error(codes.FailedPrecondition, err.Error())
+		return fserror.New(fserror.FailedPrecondition, err.Error())
 	case errors.Is(err, s0fs.ErrInvalidInput), errors.Is(err, s0fs.ErrNotDir):
-		return status.Error(codes.InvalidArgument, err.Error())
+		return fserror.New(fserror.InvalidArgument, err.Error())
 	case errors.Is(err, s0fs.ErrClosed):
-		return status.Error(codes.FailedPrecondition, err.Error())
+		return fserror.New(fserror.FailedPrecondition, err.Error())
 	default:
-		return status.Error(codes.Internal, err.Error())
+		return fserror.New(fserror.Internal, err.Error())
 	}
 }

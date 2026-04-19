@@ -28,7 +28,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// TokenProvider provides internal token for gRPC authentication.
+// TokenProvider provides internal token for storage-proxy authentication.
 // It is thread-safe and can be shared between HTTP server and volume manager.
 type TokenProvider struct {
 	mu    sync.RWMutex
@@ -333,7 +333,7 @@ func isLoopbackAddress(addr string) bool {
 }
 
 // internalTokenMiddleware extracts and stores the internal token from request headers.
-// This token is used for authenticating requests to storage-proxy gRPC service.
+// This token is used for authenticating storage-proxy control requests.
 func (s *Server) internalTokenMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Extract token from X-Token-For-Procd header
@@ -423,7 +423,7 @@ func (s *Server) extractAuthToken(r *http.Request) string {
 }
 
 // GetInternalToken returns the current internal token for storage-proxy communication.
-// This method is thread-safe and can be called by gRPC clients.
+// This method is thread-safe and can be called by volume clients.
 func (s *Server) GetInternalToken() string {
 	if s.tokenProvider == nil {
 		return ""

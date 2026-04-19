@@ -498,10 +498,10 @@ type ManagerConfig struct {
 type StorageProxyConfig struct {
 	// +optional
 	// +kubebuilder:default="0.0.0.0"
-	GRPCAddr string `json:"grpcAddr,omitempty"`
+	VolumeProtocolAddr string `json:"volumeProtocolAddr,omitempty"`
 	// +optional
-	// +kubebuilder:default=8080
-	GRPCPort int `json:"grpcPort,omitempty"`
+	// +kubebuilder:default=8082
+	VolumeProtocolPort int `json:"volumeProtocolPort,omitempty"`
 	// +optional
 	// +kubebuilder:default="0.0.0.0"
 	HTTPAddr string `json:"httpAddr,omitempty"`

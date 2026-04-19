@@ -10,13 +10,13 @@ import (
 
 // StorageProxyConfig holds the server configuration.
 type StorageProxyConfig struct {
-	// gRPC Server
+	// s0vp volume protocol server
 	// +optional
 	// +kubebuilder:default="0.0.0.0"
-	GRPCAddr string `yaml:"grpc_addr" json:"grpcAddr"`
+	VolumeProtocolAddr string `yaml:"volume_protocol_addr" json:"volumeProtocolAddr"`
 	// +optional
-	// +kubebuilder:default=8080
-	GRPCPort int `yaml:"grpc_port" json:"grpcPort"`
+	// +kubebuilder:default=8082
+	VolumeProtocolPort int `yaml:"volume_protocol_port" json:"volumeProtocolPort"`
 
 	// HTTP Management API
 	// +optional
@@ -191,6 +191,12 @@ func LoadStorageProxyConfig() *StorageProxyConfig {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load config from %s: %v, using empty config\n", path, err)
 		cfg = &StorageProxyConfig{}
+	}
+	if cfg.VolumeProtocolPort == 0 {
+		cfg.VolumeProtocolPort = 8082
+	}
+	if cfg.VolumeProtocolAddr == "" {
+		cfg.VolumeProtocolAddr = "0.0.0.0"
 	}
 	return cfg
 }

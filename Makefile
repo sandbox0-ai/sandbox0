@@ -202,7 +202,6 @@ proto: protoc
 	@printf "$(CYAN)Generating storage-proxy protobufs...$(RESET)\n"
 	@mkdir -p storage-proxy/proto/fs
 	@PATH="$(LOCALBIN):$(PATH)" $(PROTOC) --go_out=. --go_opt=paths=source_relative \
-		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
 		storage-proxy/proto/filesystem.proto
 	@mv storage-proxy/proto/*.pb.go storage-proxy/proto/fs/
 
@@ -227,9 +226,6 @@ protoc:
 	@command -v $(PROTOC) >/dev/null 2>&1 || $(MAKE) install-protoc
 	@if ! PATH="$(LOCALBIN):$(PATH)" command -v protoc-gen-go >/dev/null 2>&1; then \
 		GOBIN=$(LOCALBIN) $(GO) install google.golang.org/protobuf/cmd/protoc-gen-go@latest; \
-	fi
-	@if ! PATH="$(LOCALBIN):$(PATH)" command -v protoc-gen-go-grpc >/dev/null 2>&1; then \
-		GOBIN=$(LOCALBIN) $(GO) install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest; \
 	fi
 
 install-protoc: $(LOCALBIN)

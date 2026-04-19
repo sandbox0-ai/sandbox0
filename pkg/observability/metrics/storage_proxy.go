@@ -29,9 +29,6 @@ type StorageProxyMetrics struct {
 	ObjectStoreRequestDuration *prometheus.HistogramVec
 	ObjectStoreBytesTotal      *prometheus.CounterVec
 
-	GRPCRequestsTotal   *prometheus.CounterVec
-	GRPCRequestDuration *prometheus.HistogramVec
-
 	AuthenticationTotal  *prometheus.CounterVec
 	AuthenticationErrors *prometheus.CounterVec
 
@@ -146,15 +143,6 @@ func NewStorageProxy(registry prometheus.Registerer) *StorageProxyMetrics {
 			Name: "storage_proxy_object_store_bytes_total",
 			Help: "Total bytes transferred through object store provider requests made by storage-proxy",
 		}, []string{"provider", "bucket", "prefix_class", "operation", "direction"}),
-		GRPCRequestsTotal: factory.NewCounterVec(prometheus.CounterOpts{
-			Name: "storage_proxy_grpc_requests_total",
-			Help: "Total number of gRPC requests",
-		}, []string{"method", "status"}),
-		GRPCRequestDuration: factory.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "storage_proxy_grpc_request_duration_seconds",
-			Help:    "Duration of gRPC requests in seconds",
-			Buckets: prometheus.DefBuckets,
-		}, []string{"method"}),
 		AuthenticationTotal: factory.NewCounterVec(prometheus.CounterOpts{
 			Name: "storage_proxy_authentication_total",
 			Help: "Total number of authentication attempts",

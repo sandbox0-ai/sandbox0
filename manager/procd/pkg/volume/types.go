@@ -8,11 +8,10 @@ import (
 
 // Config holds configuration for the volume manager.
 type Config struct {
-	ProxyBaseURL   string
-	ProxyPort      int
-	CacheMaxBytes  int64
-	CacheTTL       time.Duration
-	GRPCMaxMsgSize int
+	ProxyBaseURL  string
+	ProxyPort     int
+	CacheMaxBytes int64
+	CacheTTL      time.Duration
 
 	// Default S0FS cache config for mounted volumes.
 	VolumeCacheSize  string
@@ -70,7 +69,7 @@ const (
 	MountStateFailed   = "failed"
 )
 
-// TokenProvider supplies the internal token for storage-proxy gRPC calls.
+// TokenProvider supplies the internal token for storage-proxy control calls.
 type TokenProvider interface {
 	GetInternalToken() string
 }

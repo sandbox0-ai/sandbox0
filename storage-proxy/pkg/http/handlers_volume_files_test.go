@@ -16,11 +16,10 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"github.com/sirupsen/logrus"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 type fakeHTTPVolumeMountManager struct {
@@ -329,7 +328,7 @@ func TestHandleVolumeFileStatReturnsResolvedEntry(t *testing.T) {
 			case req.Parent == 2 && req.Name == "report.txt":
 				return &pb.NodeResponse{Inode: 3, Attr: volumeFileAttr(12)}, nil
 			default:
-				return nil, status.Error(codes.NotFound, "missing")
+				return nil, fserror.New(fserror.NotFound, "missing")
 			}
 		},
 	}
@@ -366,7 +365,7 @@ func TestHandleVolumeFileListReturnsEntries(t *testing.T) {
 			if req.Parent == 1 && req.Name == "docs" {
 				return &pb.NodeResponse{Inode: 2, Attr: volumeDirAttr()}, nil
 			}
-			return nil, status.Error(codes.NotFound, "missing")
+			return nil, fserror.New(fserror.NotFound, "missing")
 		},
 		openDirFunc: func(_ context.Context, req *pb.OpenDirRequest) (*pb.OpenDirResponse, error) {
 			if req.Inode != 2 {
@@ -421,7 +420,7 @@ func TestReadVolumeFileReturnsBinaryBody(t *testing.T) {
 			if req.Parent == 1 && req.Name == "hello.txt" {
 				return &pb.NodeResponse{Inode: 3, Attr: volumeFileAttr(5)}, nil
 			}
-			return nil, status.Error(codes.NotFound, "missing")
+			return nil, fserror.New(fserror.NotFound, "missing")
 		},
 		openFunc: func(_ context.Context, req *pb.OpenRequest) (*pb.OpenResponse, error) {
 			return &pb.OpenResponse{HandleId: 11}, nil
@@ -460,7 +459,7 @@ func TestWriteVolumeFileWritesExistingPath(t *testing.T) {
 			if req.Parent == 1 && req.Name == "hello.txt" {
 				return &pb.NodeResponse{Inode: 3, Attr: volumeFileAttr(0)}, nil
 			}
-			return nil, status.Error(codes.NotFound, "missing")
+			return nil, fserror.New(fserror.NotFound, "missing")
 		},
 		openFunc: func(_ context.Context, req *pb.OpenRequest) (*pb.OpenResponse, error) {
 			if req.Inode != 3 {
@@ -497,7 +496,7 @@ func TestDeleteVolumeFileUnlinksResolvedPath(t *testing.T) {
 			if req.Parent == 1 && req.Name == "hello.txt" {
 				return &pb.NodeResponse{Inode: 3, Attr: volumeFileAttr(5)}, nil
 			}
-			return nil, status.Error(codes.NotFound, "missing")
+			return nil, fserror.New(fserror.NotFound, "missing")
 		},
 		unlinkFunc: func(_ context.Context, req *pb.UnlinkRequest) (*pb.Empty, error) {
 			unlinked = req
@@ -533,7 +532,7 @@ func TestHandleVolumeFileMoveRenamesPath(t *testing.T) {
 			case req.Parent == 1 && req.Name == "archive":
 				return &pb.NodeResponse{Inode: 4, Attr: volumeDirAttr()}, nil
 			default:
-				return nil, status.Error(codes.NotFound, "missing")
+				return nil, fserror.New(fserror.NotFound, "missing")
 			}
 		},
 		renameFunc: func(_ context.Context, req *pb.RenameRequest) (*pb.Empty, error) {
@@ -616,7 +615,7 @@ func TestHandleVolumeFileStatPrefersLocalOwnerPod(t *testing.T) {
 			case req.Parent == 2 && req.Name == "report.txt":
 				return &pb.NodeResponse{Inode: 3, Attr: volumeFileAttr(12)}, nil
 			default:
-				return nil, status.Error(codes.NotFound, "missing")
+				return nil, fserror.New(fserror.NotFound, "missing")
 			}
 		},
 	}

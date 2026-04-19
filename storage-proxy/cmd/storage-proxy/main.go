@@ -25,22 +25,18 @@ import (
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/auth"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/coordinator"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
-	grpcserver "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/grpc"
+	fsserver "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsserver"
 	httpserver "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/http"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/notify"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/snapshot"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volsync"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volumelock"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volumeserver"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/watcher"
-	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"github.com/sirupsen/logrus"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/health"
-	"google.golang.org/grpc/health/grpc_health_v1"
-	"google.golang.org/grpc/reflection"
 )
 
 func main() {
@@ -77,7 +73,7 @@ func main() {
 	defer zapLogger.Sync()
 
 	zapLogger.Info("Starting storage-proxy",
-		zap.Int("grpc_port", cfg.GRPCPort),
+		zap.Int("volume_protocol_port", cfg.VolumeProtocolPort),
 		zap.Int("http_port", cfg.HTTPPort),
 		zap.String("log_level", cfg.LogLevel),
 		zap.String("cache_dir", cfg.CacheDir),
@@ -278,8 +274,7 @@ func main() {
 		zapLogger.Warn("Pod watcher disabled because Kubernetes client is unavailable")
 	}
 
-	// Create authenticator based on config
-	var grpcInterceptor grpc.UnaryServerInterceptor
+	// Create authenticators based on config.
 	var httpAuthenticator *auth.HTTPAuthenticator
 	publicKey, err := internalauth.LoadEd25519PublicKeyFromFile(internalauth.DefaultInternalJWTPublicKeyPath)
 	if err != nil {
@@ -310,50 +305,25 @@ func main() {
 		}, nil
 	})
 
-	authenticator := auth.NewGRPCAuthenticator(validator, sessionResolver, zapLogger)
-	grpcInterceptor = authenticator.UnaryInterceptor()
-
 	httpAuthenticator = auth.NewHTTPAuthenticator(validator, zapLogger)
 
-	zapLogger.Info("Using internalauth validator for gRPC and HTTP authentication")
+	zapLogger.Info("Using internalauth validator for s0vp and HTTP authentication")
 
-	// Create gRPC server
-	grpcServer := grpc.NewServer(
-		grpc.ChainUnaryInterceptor(
-			storageProxyUnaryMetricsInterceptor(storageProxyMetrics, zapLogger),
-			grpcInterceptor,
-		),
-		grpc.ChainStreamInterceptor(
-			authenticator.StreamInterceptor(),
-		),
-	)
-
-	// Register FileSystem service
-	fsServer := grpcserver.NewFileSystemServer(volMgr, repo, eventHub, eventBroadcaster, logrusLogger, syncSvc, volumeBarrier)
+	fsServer := fsserver.NewFileSystemServer(volMgr, repo, eventHub, eventBroadcaster, logrusLogger, syncSvc, volumeBarrier)
 	if sharedClock != nil {
 		fsServer.SetNowFunc(sharedClock.Now)
 	}
-	pb.RegisterFileSystemServer(grpcServer, fsServer)
 
-	// Register health service
-	healthServer := health.NewServer()
-	grpc_health_v1.RegisterHealthServer(grpcServer, healthServer)
-	healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
-
-	// Enable reflection for grpcurl
-	reflection.Register(grpcServer)
-
-	// Start gRPC server
-	grpcAddr := fmt.Sprintf("%s:%d", cfg.GRPCAddr, cfg.GRPCPort)
-	grpcListener, err := net.Listen("tcp", grpcAddr)
+	volumeProtocolAddr := fmt.Sprintf("%s:%d", cfg.VolumeProtocolAddr, cfg.VolumeProtocolPort)
+	volumeProtocolListener, err := net.Listen("tcp", volumeProtocolAddr)
 	if err != nil {
-		logrusLogger.WithError(err).Fatal("Failed to listen for gRPC")
+		logrusLogger.WithError(err).Fatal("Failed to listen for s0vp")
 	}
-
+	volumeProtocolServer := volumeserver.New(volumeProtocolListener, fsServer, validator, sessionResolver, eventHub, logrusLogger)
 	go func() {
-		logrusLogger.WithField("address", grpcAddr).Info("Starting gRPC server")
-		if err := grpcServer.Serve(grpcListener); err != nil {
-			logrusLogger.WithError(err).Fatal("Failed to serve gRPC")
+		logrusLogger.WithField("address", volumeProtocolAddr).Info("Starting s0vp volume protocol server")
+		if err := volumeProtocolServer.Serve(); err != nil {
+			logrusLogger.WithError(err).Fatal("Failed to serve s0vp")
 		}
 	}()
 
@@ -426,9 +396,6 @@ func main() {
 		zapLogger.Error("HTTP server shutdown error", zap.Error(err))
 	}
 
-	// Stop gRPC server
-	grpcServer.GracefulStop()
-
 	// Unmount all volumes
 	for _, volumeID := range volMgr.ListVolumes() {
 		zapLogger.Info("Unmounting volume", zap.String("volume_id", volumeID))
@@ -479,37 +446,6 @@ func initDatabase(ctx context.Context, databaseURL string, cfg *config.StoragePr
 
 type zapLoggerAdapter struct {
 	logger *zap.Logger
-}
-
-func storageProxyUnaryMetricsInterceptor(metrics *obsmetrics.StorageProxyMetrics, logger *zap.Logger) grpc.UnaryServerInterceptor {
-	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
-		start := time.Now()
-		resp, err := handler(ctx, req)
-		if metrics != nil && metrics.GRPCRequestsTotal != nil && metrics.GRPCRequestDuration != nil {
-			status := "success"
-			if err != nil {
-				status = "error"
-			}
-			method := "unknown"
-			if info != nil && info.FullMethod != "" {
-				method = info.FullMethod
-			}
-			metrics.GRPCRequestsTotal.WithLabelValues(method, status).Inc()
-			metrics.GRPCRequestDuration.WithLabelValues(method).Observe(time.Since(start).Seconds())
-		}
-		if err != nil && logger != nil {
-			method := "unknown"
-			if info != nil && info.FullMethod != "" {
-				method = info.FullMethod
-			}
-			logger.Warn("gRPC request failed",
-				zap.String("method", method),
-				zap.Duration("duration", time.Since(start)),
-				zap.Error(err),
-			)
-		}
-		return resp, err
-	}
 }
 
 func (z *zapLoggerAdapter) Printf(format string, args ...any) {

@@ -2625,12 +2625,6 @@ spec:
                           flushTimeout:
                             default: 30s
                             type: string
-                          grpcAddr:
-                            default: 0.0.0.0
-                            type: string
-                          grpcPort:
-                            default: 8080
-                            type: integer
                           heartbeatInterval:
                             default: 5s
                             type: string
@@ -2691,6 +2685,12 @@ spec:
                           syncRequestRetention:
                             default: 24h
                             type: string
+                          volumeProtocolAddr:
+                            default: 0.0.0.0
+                            type: string
+                          volumeProtocolPort:
+                            default: 8082
+                            type: integer
                           watchEventQueueSize:
                             default: 256
                             type: integer

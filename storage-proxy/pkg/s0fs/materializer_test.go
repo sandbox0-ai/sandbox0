@@ -3,6 +3,7 @@ package s0fs
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -174,6 +175,127 @@ func TestEngineRecoversFromManifestAndRetainedWAL(t *testing.T) {
 	}
 	if string(payload) != "delta" {
 		t.Fatalf("Read(delta) = %q, want %q", payload, "delta")
+	}
+}
+
+func TestEngineRefreshMaterializedLoadsNewerManifest(t *testing.T) {
+	ctx := context.Background()
+	store := newPrefixedRecordingStore(t, "vol-refresh")
+
+	reader, err := Open(ctx, Config{
+		VolumeID:    "vol-refresh",
+		WALPath:     filepath.Join(t.TempDir(), "reader.wal"),
+		ObjectStore: store,
+	})
+	if err != nil {
+		t.Fatalf("Open(reader) error = %v", err)
+	}
+	defer reader.Close()
+	if _, err := reader.Lookup(RootInode, "late.txt"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Lookup(late before refresh) err = %v, want ErrNotFound", err)
+	}
+
+	writer, err := Open(ctx, Config{
+		VolumeID:    "vol-refresh",
+		WALPath:     filepath.Join(t.TempDir(), "writer.wal"),
+		ObjectStore: store,
+	})
+	if err != nil {
+		t.Fatalf("Open(writer) error = %v", err)
+	}
+	node, err := writer.CreateFile(RootInode, "late.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile(late) error = %v", err)
+	}
+	if _, err := writer.Write(node.Inode, 0, []byte("late data")); err != nil {
+		t.Fatalf("Write(late) error = %v", err)
+	}
+	if _, err := writer.SyncMaterialize(ctx); err != nil {
+		t.Fatalf("SyncMaterialize(writer) error = %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Close(writer) error = %v", err)
+	}
+
+	refreshed, err := reader.RefreshMaterialized(ctx)
+	if err != nil {
+		t.Fatalf("RefreshMaterialized() error = %v", err)
+	}
+	if !refreshed {
+		t.Fatal("RefreshMaterialized() refreshed = false, want true")
+	}
+	refreshedNode, err := reader.Lookup(RootInode, "late.txt")
+	if err != nil {
+		t.Fatalf("Lookup(late after refresh) error = %v", err)
+	}
+	payload, err := reader.Read(refreshedNode.Inode, 0, 1024)
+	if err != nil {
+		t.Fatalf("Read(late after refresh) error = %v", err)
+	}
+	if string(payload) != "late data" {
+		t.Fatalf("Read(late after refresh) = %q, want %q", payload, "late data")
+	}
+}
+
+func TestEngineOpenPrefersNewerMaterializedManifestOverStaleHead(t *testing.T) {
+	ctx := context.Background()
+	store := newPrefixedRecordingStore(t, "vol-stale-head")
+	staleWALPath := filepath.Join(t.TempDir(), "stale.wal")
+
+	stale, err := Open(ctx, Config{
+		VolumeID:    "vol-stale-head",
+		WALPath:     staleWALPath,
+		ObjectStore: store,
+	})
+	if err != nil {
+		t.Fatalf("Open(stale) error = %v", err)
+	}
+	if err := stale.Close(); err != nil {
+		t.Fatalf("Close(stale) error = %v", err)
+	}
+
+	writer, err := Open(ctx, Config{
+		VolumeID:    "vol-stale-head",
+		WALPath:     filepath.Join(t.TempDir(), "writer.wal"),
+		ObjectStore: store,
+	})
+	if err != nil {
+		t.Fatalf("Open(writer) error = %v", err)
+	}
+	node, err := writer.CreateFile(RootInode, "remote.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile(remote) error = %v", err)
+	}
+	if _, err := writer.Write(node.Inode, 0, []byte("remote data")); err != nil {
+		t.Fatalf("Write(remote) error = %v", err)
+	}
+	if _, err := writer.SyncMaterialize(ctx); err != nil {
+		t.Fatalf("SyncMaterialize(writer) error = %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Close(writer) error = %v", err)
+	}
+
+	reopened, err := Open(ctx, Config{
+		VolumeID:    "vol-stale-head",
+		WALPath:     staleWALPath,
+		ObjectStore: store,
+	})
+	if err != nil {
+		t.Fatalf("Open(reopened) error = %v", err)
+	}
+	defer reopened.Close()
+
+	reopenedNode, err := reopened.Lookup(RootInode, "remote.txt")
+	if err != nil {
+		t.Fatalf("Lookup(remote) error = %v", err)
+	}
+	payload, err := reopened.Read(reopenedNode.Inode, 0, 1024)
+	if err != nil {
+		t.Fatalf("Read(remote) error = %v", err)
+	}
+	if string(payload) != "remote data" {
+		t.Fatalf("Read(remote) = %q, want %q", payload, "remote data")
 	}
 }
 

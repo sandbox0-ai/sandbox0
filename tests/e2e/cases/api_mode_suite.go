@@ -1725,10 +1725,13 @@ func createVolumePortalTemplate(env *framework.ScenarioEnv, session *e2eutils.Se
 		MountPath: mountPath,
 	}}
 
-	_, err = session.CreateTemplate(env.TestCtx.Context, GinkgoT(), req)
+	created, err := session.CreateTemplate(env.TestCtx.Context, GinkgoT(), req)
 	Expect(err).NotTo(HaveOccurred())
+	templateNamespace, err := naming.TemplateNamespaceForTeam(expectStringPtr(created.TeamId, "team id"))
+	Expect(err).NotTo(HaveOccurred())
+
 	DeferCleanup(func() {
-		_ = session.DeleteTemplate(env.TestCtx.Context, GinkgoT(), templateID)
+		deleteTeamTemplateAndWaitForNamespaceCleanup(env, session, templateID, templateNamespace)
 	})
 
 	Eventually(func() error {
@@ -1743,6 +1746,41 @@ func createVolumePortalTemplate(env *framework.ScenarioEnv, session *e2eutils.Se
 	}).WithTimeout(3 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
 
 	return templateID
+}
+
+func deleteTeamTemplateAndWaitForNamespaceCleanup(env *framework.ScenarioEnv, session *e2eutils.Session, templateID, namespace string) {
+	if err := session.DeleteTemplate(env.TestCtx.Context, GinkgoT(), templateID); err != nil {
+		GinkgoWriter.Printf("delete template %q through API failed during cleanup, falling back to kubectl cleanup: %v\n", templateID, err)
+		_, _ = framework.KubectlOutput(
+			env.TestCtx.Context,
+			env.Config.Kubeconfig,
+			"delete", "sandboxtemplate", templateID,
+			"--namespace", namespace,
+			"--ignore-not-found=true",
+		)
+		_, _ = framework.KubectlOutput(
+			env.TestCtx.Context,
+			env.Config.Kubeconfig,
+			"delete", "namespace", namespace,
+			"--ignore-not-found=true",
+			"--wait=false",
+		)
+	}
+	Eventually(func() error {
+		output, err := framework.KubectlOutput(
+			env.TestCtx.Context,
+			env.Config.Kubeconfig,
+			"get", "namespace", namespace,
+			"--ignore-not-found",
+		)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(output) != "" {
+			return fmt.Errorf("namespace %s still exists", namespace)
+		}
+		return nil
+	}).WithTimeout(2 * time.Minute).WithPolling(2 * time.Second).Should(Succeed())
 }
 
 func publicExposureHostForPort(ports []apispec.ExposedPortConfig, port int32) string {
@@ -1819,7 +1857,7 @@ func assertClaimBootstrapMountLifecycle(env *framework.ScenarioEnv, session *e2e
 	Expect(volume).NotTo(BeNil())
 	volumeID := expectStringPtr(volume.Id, "volume id")
 	DeferCleanup(func() {
-		Expect(session.DeleteSandboxVolumeEventually(env.TestCtx.Context, GinkgoT(), volumeID, 30*time.Second)).To(Succeed())
+		deleteSandboxVolumeForCleanup(env, session, volumeID)
 	})
 
 	seedPath := "/claim-bootstrap/hello.txt"
@@ -1861,7 +1899,7 @@ func assertClaimMountedVolumeWritable(env *framework.ScenarioEnv, session *e2eut
 	Expect(volume).NotTo(BeNil())
 	volumeID := expectStringPtr(volume.Id, "volume id")
 	DeferCleanup(func() {
-		Expect(session.DeleteSandboxVolumeEventually(env.TestCtx.Context, GinkgoT(), volumeID, 30*time.Second)).To(Succeed())
+		deleteSandboxVolumeForCleanup(env, session, volumeID)
 	})
 
 	mountPoint := "/workspace/claim-writable"
@@ -1913,6 +1951,12 @@ func assertClaimMountedVolumeWritable(env *framework.ScenarioEnv, session *e2eut
 		body, _, readErr := session.ReadVolumeFile(env.TestCtx.Context, GinkgoT(), volumeID, latePath)
 		return body, readErr
 	}).WithTimeout(90 * time.Second).WithPolling(2 * time.Second).Should(Equal([]byte(lateContent)))
+}
+
+func deleteSandboxVolumeForCleanup(env *framework.ScenarioEnv, session *e2eutils.Session, volumeID string) {
+	if err := session.DeleteSandboxVolumeEventually(env.TestCtx.Context, GinkgoT(), volumeID, 30*time.Second); err != nil {
+		GinkgoWriter.Printf("delete sandbox volume %q failed during cleanup: %v\n", volumeID, err)
+	}
 }
 
 func assertClaimBootstrapMountValidation(env *framework.ScenarioEnv, session *e2eutils.Session) {

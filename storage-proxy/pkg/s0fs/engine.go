@@ -48,10 +48,17 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 	}
 
 	state, err := loadCurrentState(cfg)
-	if errors.Is(err, ErrSnapshotNotFound) && cfg.ObjectStore != nil {
+	if cfg.ObjectStore != nil {
 		materializer := NewMaterializer(cfg.ObjectStore)
 		if materializer != nil {
-			state, _, err = materializer.LoadLatestState(ctx)
+			latestState, _, latestErr := materializer.LoadLatestState(ctx)
+			switch {
+			case latestErr == nil && shouldUseMaterializedState(state, err, latestState, len(records)):
+				state = latestState
+				err = nil
+			case errors.Is(err, ErrSnapshotNotFound) && latestErr != nil && !errors.Is(latestErr, ErrMaterializedManifestNotFound):
+				err = latestErr
+			}
 		}
 	}
 	if err != nil && !errors.Is(err, ErrSnapshotNotFound) && !errors.Is(err, ErrMaterializedManifestNotFound) {
@@ -475,6 +482,48 @@ func (e *Engine) SyncMaterialize(ctx context.Context) (*Manifest, error) {
 	return manifest, nil
 }
 
+func (e *Engine) RefreshMaterialized(ctx context.Context) (bool, error) {
+	e.mu.RLock()
+	if err := e.checkOpen(); err != nil {
+		e.mu.RUnlock()
+		return false, err
+	}
+	if e.materializer == nil || !e.materializer.Enabled() || e.dirty {
+		e.mu.RUnlock()
+		return false, nil
+	}
+	currentNextSeq := e.nextSeq
+	e.mu.RUnlock()
+
+	state, _, err := e.materializer.LoadLatestState(ctx)
+	if errors.Is(err, ErrMaterializedManifestNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if state == nil || state.NextSeq <= currentNextSeq {
+		return false, nil
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.checkOpen(); err != nil {
+		return false, err
+	}
+	if e.dirty || state.NextSeq <= e.nextSeq {
+		return false, nil
+	}
+	e.replaceStateLocked(cloneState(state))
+	if err := e.persistCurrentStateLocked(); err != nil {
+		return false, err
+	}
+	if err := e.wal.reset(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (e *Engine) CreateSnapshot(snapshotID string) (*SnapshotState, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -632,6 +681,25 @@ func loadCurrentState(cfg Config) (*SnapshotState, error) {
 		return nil, fmt.Errorf("%w: wal path is required", ErrInvalidInput)
 	}
 	return loadSnapshotState(headStatePath(cfg.WALPath))
+}
+
+func shouldUseMaterializedState(current *SnapshotState, currentErr error, latest *SnapshotState, walRecords int) bool {
+	if latest == nil {
+		return false
+	}
+	if errors.Is(currentErr, ErrSnapshotNotFound) {
+		return true
+	}
+	if currentErr != nil {
+		return false
+	}
+	if current == nil {
+		return true
+	}
+	if walRecords > 0 {
+		return false
+	}
+	return latest.NextSeq > current.NextSeq
 }
 
 func (e *Engine) apply(record walRecord) error {

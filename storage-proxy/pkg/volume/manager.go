@@ -603,6 +603,15 @@ func (m *Manager) AcquireDirectVolumeFileMount(ctx context.Context, volumeID str
 	return m.releaseDirectVolumeFileMount(volumeID, sessionID), nil
 }
 
+func (m *Manager) RefreshDirectVolumeFileMount(ctx context.Context, volumeID string) error {
+	volCtx, err := m.GetVolume(volumeID)
+	if err != nil || volCtx == nil || volCtx.S0FS == nil {
+		return err
+	}
+	_, err = volCtx.S0FS.RefreshMaterialized(ctx)
+	return err
+}
+
 func (m *Manager) releaseDirectVolumeFileMount(volumeID, sessionID string) func() {
 	return func() {
 		m.mu.Lock()

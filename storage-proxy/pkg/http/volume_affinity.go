@@ -25,6 +25,10 @@ type volumeFilePodResolver interface {
 	ResolvePodURL(ctx context.Context, podID string) (*url.URL, error)
 }
 
+type directVolumeMountRefresher interface {
+	RefreshDirectVolumeFileMount(ctx context.Context, volumeID string) error
+}
+
 type volumeOwnerRedirectError struct {
 	PodID     string
 	TargetURL *url.URL
@@ -174,6 +178,12 @@ func (s *Server) prepareVolumeFileMount(ctx context.Context, volumeID string) (f
 			}
 		}
 		return func() {}, err
+	}
+	if refresher, ok := s.volMgr.(directVolumeMountRefresher); ok {
+		if err := refresher.RefreshDirectVolumeFileMount(ctx, volumeID); err != nil {
+			cleanup()
+			return func() {}, err
+		}
 	}
 	return cleanup, nil
 }

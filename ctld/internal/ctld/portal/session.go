@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"sync"
 	"syscall"
@@ -12,6 +13,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumefuse"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
 	fsserver "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsserver"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
@@ -78,6 +80,9 @@ type localSession struct {
 	baseCtx          context.Context
 	readOnlyHandleMu sync.Mutex
 	readOnlyHandles  map[string]struct{}
+	readCacheMu      sync.RWMutex
+	readCache        map[string][]byte
+	readCacheBytes   int
 }
 
 func newLocalSession(volumeID string, mgr *localVolumeManager, logger *logrus.Logger) *localSession {
@@ -89,6 +94,7 @@ func newLocalSession(volumeID string, mgr *localVolumeManager, logger *logrus.Lo
 		mgr:             mgr,
 		fs:              fsserver.NewFileSystemServer(mgr, nil, nil, nil, logger, nil, nil),
 		readOnlyHandles: make(map[string]struct{}),
+		readCache:       make(map[string][]byte),
 		baseCtx: internalauth.WithClaims(context.Background(), &internalauth.Claims{
 			Caller:   internalauth.ServiceCtld,
 			Target:   internalauth.ServiceCtld,
@@ -129,7 +135,21 @@ func (s *localSession) GetAttr(ctx context.Context, req *pb.GetAttrRequest) (*pb
 }
 func (s *localSession) SetAttr(ctx context.Context, req *pb.SetAttrRequest) (*pb.SetAttrResponse, error) {
 	s.fix(&req.VolumeId)
-	return s.fs.SetAttr(s.ctx(ctx), req)
+	resp, err := s.fs.SetAttr(s.ctx(ctx), req)
+	if err != nil {
+		return nil, err
+	}
+	if req.Valid&uint32(fsmeta.SetAttrSize) != 0 {
+		volCtx, volErr := s.localS0FSVolume(req.VolumeId)
+		if volErr == nil && volCtx != nil {
+			size := uint64(0)
+			if req.Attr != nil {
+				size = req.Attr.Size
+			}
+			s.resizeReadCache(volCtx, req.Inode, size)
+		}
+	}
+	return resp, nil
 }
 func (s *localSession) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb.NodeResponse, error) {
 	s.fix(&req.VolumeId)
@@ -201,6 +221,9 @@ func (s *localSession) ReadInto(ctx context.Context, req *pb.ReadRequest, dest [
 		return 0, true, nil
 	}
 	s.fix(&req.VolumeId)
+	if !s.hasReadOnlyHandle(req.VolumeId, req.HandleId) {
+		return s.readIntoViaFSServer(ctx, req, dest)
+	}
 	volCtx, err := s.localS0FSVolume(req.VolumeId)
 	if err != nil {
 		return 0, false, err
@@ -208,15 +231,31 @@ func (s *localSession) ReadInto(ctx context.Context, req *pb.ReadRequest, dest [
 	if volCtx == nil {
 		return 0, false, fserror.New(fserror.Internal, "local ReadInto requires s0fs volume")
 	}
+	if n, eof, ok := s.readCacheLookup(volCtx, req.Inode, uint64(req.Offset), dest); ok {
+		return n, eof, nil
+	}
 	n, err := volCtx.S0FS.ReadInto(req.Inode, uint64(req.Offset), dest)
 	if err != nil {
 		return 0, false, mapLocalS0FSError(err)
+	}
+	if n <= len(dest) && n <= maxLocalReadCacheFileSize && n < len(dest) && req.Offset == 0 {
+		s.storeCompleteReadCache(volCtx, req.Inode, dest[:n])
 	}
 	return n, n < len(dest), nil
 }
 func (s *localSession) Write(ctx context.Context, req *pb.WriteRequest) (*pb.WriteResponse, error) {
 	s.fix(&req.VolumeId)
-	return s.fs.Write(s.ctx(ctx), req)
+	resp, err := s.fs.Write(s.ctx(ctx), req)
+	if err != nil {
+		return nil, err
+	}
+	if resp != nil && resp.BytesWritten > 0 {
+		volCtx, volErr := s.localS0FSVolume(req.VolumeId)
+		if volErr == nil && volCtx != nil {
+			s.updateReadCacheAfterWrite(volCtx, req, int(resp.BytesWritten))
+		}
+	}
+	return resp, nil
 }
 func (s *localSession) Release(ctx context.Context, req *pb.ReleaseRequest) (*pb.Empty, error) {
 	s.fix(&req.VolumeId)
@@ -224,6 +263,7 @@ func (s *localSession) Release(ctx context.Context, req *pb.ReleaseRequest) (*pb
 		if volCtx, err := s.localS0FSVolume(req.VolumeId); err == nil && volCtx != nil {
 			if inode, remaining, ok := volCtx.ReleaseHandle(req.HandleId); ok && remaining == 0 {
 				if node, err := volCtx.S0FS.GetAttr(inode); err == nil && node.Nlink == 0 {
+					s.evictReadCache(volCtx, inode)
 					_ = volCtx.S0FS.Forget(inode)
 				}
 			}
@@ -242,11 +282,23 @@ func (s *localSession) Fsync(ctx context.Context, req *pb.FsyncRequest) (*pb.Emp
 }
 func (s *localSession) Fallocate(ctx context.Context, req *pb.FallocateRequest) (*pb.Empty, error) {
 	s.fix(&req.VolumeId)
-	return s.fs.Fallocate(s.ctx(ctx), req)
+	resp, err := s.fs.Fallocate(s.ctx(ctx), req)
+	if err == nil {
+		if volCtx, volErr := s.localS0FSVolume(req.VolumeId); volErr == nil && volCtx != nil {
+			s.evictReadCache(volCtx, req.Inode)
+		}
+	}
+	return resp, err
 }
 func (s *localSession) CopyFileRange(ctx context.Context, req *pb.CopyFileRangeRequest) (*pb.CopyFileRangeResponse, error) {
 	s.fix(&req.VolumeId)
-	return s.fs.CopyFileRange(s.ctx(ctx), req)
+	resp, err := s.fs.CopyFileRange(s.ctx(ctx), req)
+	if err == nil {
+		if volCtx, volErr := s.localS0FSVolume(req.VolumeId); volErr == nil && volCtx != nil {
+			s.evictReadCache(volCtx, req.InodeOut)
+		}
+	}
+	return resp, err
 }
 func (s *localSession) OpenDir(ctx context.Context, req *pb.OpenDirRequest) (*pb.OpenDirResponse, error) {
 	s.fix(&req.VolumeId)
@@ -334,6 +386,34 @@ func localHandleKey(volumeID string, handleID uint64) string {
 	return volumeID + "|" + strconv.FormatUint(handleID, 10)
 }
 
+func localReadCacheKey(volumeID string, inode uint64) string {
+	return volumeID + "|" + strconv.FormatUint(inode, 10)
+}
+
+const (
+	maxLocalReadCacheFileSize = 1 << 20
+	maxLocalReadCacheBytes    = 64 << 20
+)
+
+func (s *localSession) hasReadOnlyHandle(volumeID string, handleID uint64) bool {
+	if s == nil {
+		return false
+	}
+	s.readOnlyHandleMu.Lock()
+	defer s.readOnlyHandleMu.Unlock()
+	_, ok := s.readOnlyHandles[localHandleKey(volumeID, handleID)]
+	return ok
+}
+
+func (s *localSession) readIntoViaFSServer(ctx context.Context, req *pb.ReadRequest, dest []byte) (int, bool, error) {
+	resp, err := s.fs.Read(s.ctx(ctx), req)
+	if err != nil {
+		return 0, false, err
+	}
+	n := copy(dest, resp.Data)
+	return n, resp.Eof || n < len(dest), nil
+}
+
 func (s *localSession) localS0FSVolume(volumeID string) (*volume.VolumeContext, error) {
 	if s == nil || s.mgr == nil {
 		return nil, fserror.New(fserror.FailedPrecondition, "local session is not bound")
@@ -346,6 +426,144 @@ func (s *localSession) localS0FSVolume(volumeID string) (*volume.VolumeContext, 
 		return volCtx, nil
 	}
 	return nil, nil
+}
+
+func (s *localSession) localReadCacheEnabled(volCtx *volume.VolumeContext) bool {
+	if s == nil || volCtx == nil || !volCtx.IsS0FS() {
+		return false
+	}
+	return volume.NormalizeAccessMode(string(volCtx.Access)) != volume.AccessModeRWX
+}
+
+func (s *localSession) readCacheLookup(volCtx *volume.VolumeContext, inode uint64, offset uint64, dest []byte) (int, bool, bool) {
+	if !s.localReadCacheEnabled(volCtx) {
+		return 0, false, false
+	}
+	s.readCacheMu.RLock()
+	defer s.readCacheMu.RUnlock()
+	data, ok := s.readCache[localReadCacheKey(volCtx.VolumeID, inode)]
+	if !ok {
+		return 0, false, false
+	}
+	if offset >= uint64(len(data)) {
+		return 0, true, true
+	}
+	n := copy(dest, data[offset:])
+	return n, offset+uint64(n) >= uint64(len(data)), true
+}
+
+func (s *localSession) storeCompleteReadCache(volCtx *volume.VolumeContext, inode uint64, data []byte) {
+	if !s.localReadCacheEnabled(volCtx) || len(data) > maxLocalReadCacheFileSize {
+		return
+	}
+	s.readCacheMu.Lock()
+	defer s.readCacheMu.Unlock()
+	s.putReadCacheLocked(localReadCacheKey(volCtx.VolumeID, inode), slices.Clone(data))
+}
+
+func (s *localSession) updateReadCacheAfterWrite(volCtx *volume.VolumeContext, req *pb.WriteRequest, written int) {
+	if !s.localReadCacheEnabled(volCtx) || req == nil || req.Offset < 0 || written < 0 {
+		return
+	}
+	if written > len(req.Data) {
+		written = len(req.Data)
+	}
+	if written == 0 {
+		return
+	}
+	offset := uint64(req.Offset)
+	end := offset + uint64(written)
+	if end > maxLocalReadCacheFileSize {
+		s.evictReadCache(volCtx, req.Inode)
+		return
+	}
+
+	key := localReadCacheKey(volCtx.VolumeID, req.Inode)
+	s.readCacheMu.Lock()
+	data, ok := s.readCache[key]
+	if ok {
+		if int(end) > len(data) {
+			data = append(data, make([]byte, int(end)-len(data))...)
+		}
+		copy(data[offset:end], req.Data[:written])
+		s.putReadCacheLocked(key, data)
+		s.readCacheMu.Unlock()
+		return
+	}
+	s.readCacheMu.Unlock()
+
+	if offset != 0 {
+		return
+	}
+	node, err := volCtx.S0FS.GetAttr(req.Inode)
+	if err != nil || node.Size != end {
+		return
+	}
+	s.storeCompleteReadCache(volCtx, req.Inode, req.Data[:written])
+}
+
+func (s *localSession) resizeReadCache(volCtx *volume.VolumeContext, inode uint64, size uint64) {
+	if !s.localReadCacheEnabled(volCtx) {
+		s.evictReadCache(volCtx, inode)
+		return
+	}
+	if size > maxLocalReadCacheFileSize {
+		s.evictReadCache(volCtx, inode)
+		return
+	}
+	key := localReadCacheKey(volCtx.VolumeID, inode)
+	s.readCacheMu.Lock()
+	defer s.readCacheMu.Unlock()
+	data, ok := s.readCache[key]
+	if !ok {
+		if size == 0 {
+			s.putReadCacheLocked(key, nil)
+		}
+		return
+	}
+	switch {
+	case size < uint64(len(data)):
+		s.putReadCacheLocked(key, data[:size])
+	case size > uint64(len(data)):
+		s.putReadCacheLocked(key, append(data, make([]byte, int(size)-len(data))...))
+	}
+}
+
+func (s *localSession) evictReadCache(volCtx *volume.VolumeContext, inode uint64) {
+	if s == nil || volCtx == nil {
+		return
+	}
+	s.readCacheMu.Lock()
+	defer s.readCacheMu.Unlock()
+	key := localReadCacheKey(volCtx.VolumeID, inode)
+	s.readCacheBytes -= len(s.readCache[key])
+	if s.readCacheBytes < 0 {
+		s.readCacheBytes = 0
+	}
+	delete(s.readCache, key)
+}
+
+func (s *localSession) putReadCacheLocked(key string, data []byte) {
+	if s.readCache == nil {
+		s.readCache = make(map[string][]byte)
+	}
+	oldLen := len(s.readCache[key])
+	if len(data) > maxLocalReadCacheFileSize {
+		delete(s.readCache, key)
+		s.readCacheBytes -= oldLen
+		if s.readCacheBytes < 0 {
+			s.readCacheBytes = 0
+		}
+		return
+	}
+	delta := len(data) - oldLen
+	if s.readCacheBytes+delta > maxLocalReadCacheBytes {
+		clear(s.readCache)
+		s.readCacheBytes = 0
+		oldLen = 0
+	}
+	s.readCache[key] = data
+	s.readCacheBytes += len(data) - oldLen
 }
 
 func mapLocalS0FSError(err error) error {

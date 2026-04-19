@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
@@ -44,11 +45,19 @@ func TestLocalSessionReadIntoUsesMountedS0FS(t *testing.T) {
 		RootPath:  "/",
 	})
 	session := newLocalSession("vol-1", mgr, nil)
+	openResp, err := session.Open(context.Background(), &pb.OpenRequest{
+		VolumeId: "ignored-by-local-session",
+		Inode:    node.Inode,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
 
 	buf := bytes.Repeat([]byte{0xff}, 8)
 	n, eof, err := session.ReadInto(context.Background(), &pb.ReadRequest{
 		VolumeId: "ignored-by-local-session",
 		Inode:    node.Inode,
+		HandleId: openResp.HandleId,
 		Offset:   1,
 		Size:     3,
 	}, buf)
@@ -66,6 +75,210 @@ func TestLocalSessionReadIntoUsesMountedS0FS(t *testing.T) {
 	}
 	if !bytes.Equal(buf[3:], bytes.Repeat([]byte{0xff}, 5)) {
 		t.Fatalf("ReadInto() modified bytes past requested size: %#v", buf)
+	}
+}
+
+func TestLocalSessionReadIntoRequiresTrackedHandleForCache(t *testing.T) {
+	engine, err := s0fs.Open(context.Background(), s0fs.Config{
+		VolumeID: "vol-1",
+		WALPath:  filepath.Join(t.TempDir(), "volume.wal"),
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+
+	node, err := engine.CreateFile(s0fs.RootInode, "data.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+	if _, err := engine.Write(node.Inode, 0, []byte("engine")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	mgr := newLocalVolumeManager()
+	volCtx := &volume.VolumeContext{
+		VolumeID:  "vol-1",
+		TeamID:    "team-a",
+		Backend:   volume.BackendS0FS,
+		S0FS:      engine,
+		Access:    volume.AccessModeRWO,
+		MountedAt: time.Now().UTC(),
+		RootInode: 1,
+		RootPath:  "/",
+	}
+	mgr.add(volCtx)
+	session := newLocalSession("vol-1", mgr, nil)
+	session.storeCompleteReadCache(volCtx, node.Inode, []byte("cached"))
+
+	buf := make([]byte, 16)
+	n, eof, err := session.ReadInto(context.Background(), &pb.ReadRequest{
+		VolumeId: "ignored-by-local-session",
+		Inode:    node.Inode,
+		Size:     int64(len(buf)),
+	}, buf)
+	if err != nil {
+		t.Fatalf("ReadInto() error = %v", err)
+	}
+	if !eof {
+		t.Fatal("ReadInto() eof = false, want true")
+	}
+	if got := string(buf[:n]); got != "engine" {
+		t.Fatalf("ReadInto() without tracked handle = %q, want engine", got)
+	}
+}
+
+func TestLocalSessionReadCacheTracksSmallWrites(t *testing.T) {
+	engine, err := s0fs.Open(context.Background(), s0fs.Config{
+		VolumeID: "vol-1",
+		WALPath:  filepath.Join(t.TempDir(), "volume.wal"),
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+
+	node, err := engine.CreateFile(s0fs.RootInode, "data.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+
+	mgr := newLocalVolumeManager()
+	volCtx := &volume.VolumeContext{
+		VolumeID:  "vol-1",
+		TeamID:    "team-a",
+		Backend:   volume.BackendS0FS,
+		S0FS:      engine,
+		Access:    volume.AccessModeRWO,
+		MountedAt: time.Now().UTC(),
+		RootInode: 1,
+		RootPath:  "/",
+	}
+	mgr.add(volCtx)
+	session := newLocalSession("vol-1", mgr, nil)
+
+	if _, err := session.Write(context.Background(), &pb.WriteRequest{
+		VolumeId: "ignored-by-local-session",
+		Inode:    node.Inode,
+		Data:     []byte("cached"),
+	}); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if got := string(session.readCache[localReadCacheKey("vol-1", node.Inode)]); got != "cached" {
+		t.Fatalf("read cache = %q, want cached", got)
+	}
+
+	openResp, err := session.Open(context.Background(), &pb.OpenRequest{
+		VolumeId: "ignored-by-local-session",
+		Inode:    node.Inode,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	buf := make([]byte, 16)
+	n, eof, err := session.ReadInto(context.Background(), &pb.ReadRequest{
+		VolumeId: "ignored-by-local-session",
+		Inode:    node.Inode,
+		HandleId: openResp.HandleId,
+		Size:     int64(len(buf)),
+	}, buf)
+	if err != nil {
+		t.Fatalf("ReadInto() error = %v", err)
+	}
+	if !eof {
+		t.Fatal("ReadInto() eof = false, want true")
+	}
+	if got := string(buf[:n]); got != "cached" {
+		t.Fatalf("ReadInto() = %q, want cached", got)
+	}
+}
+
+func TestLocalSessionReadCacheResizesOnTruncate(t *testing.T) {
+	engine, err := s0fs.Open(context.Background(), s0fs.Config{
+		VolumeID: "vol-1",
+		WALPath:  filepath.Join(t.TempDir(), "volume.wal"),
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+
+	node, err := engine.CreateFile(s0fs.RootInode, "data.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+
+	mgr := newLocalVolumeManager()
+	volCtx := &volume.VolumeContext{
+		VolumeID:  "vol-1",
+		TeamID:    "team-a",
+		Backend:   volume.BackendS0FS,
+		S0FS:      engine,
+		Access:    volume.AccessModeRWO,
+		MountedAt: time.Now().UTC(),
+		RootInode: 1,
+		RootPath:  "/",
+	}
+	mgr.add(volCtx)
+	session := newLocalSession("vol-1", mgr, nil)
+
+	if _, err := session.Write(context.Background(), &pb.WriteRequest{
+		VolumeId: "ignored-by-local-session",
+		Inode:    node.Inode,
+		Data:     []byte("abcdef"),
+	}); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if _, err := session.SetAttr(context.Background(), &pb.SetAttrRequest{
+		VolumeId: "ignored-by-local-session",
+		Inode:    node.Inode,
+		Valid:    uint32(fsmeta.SetAttrSize),
+		Attr:     &pb.GetAttrResponse{Size: 3},
+	}); err != nil {
+		t.Fatalf("SetAttr() error = %v", err)
+	}
+	if got := string(session.readCache[localReadCacheKey("vol-1", node.Inode)]); got != "abc" {
+		t.Fatalf("read cache after truncate = %q, want abc", got)
+	}
+}
+
+func TestLocalSessionReadCacheDisabledForRWX(t *testing.T) {
+	engine, err := s0fs.Open(context.Background(), s0fs.Config{
+		VolumeID: "vol-1",
+		WALPath:  filepath.Join(t.TempDir(), "volume.wal"),
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+
+	node, err := engine.CreateFile(s0fs.RootInode, "data.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+
+	mgr := newLocalVolumeManager()
+	mgr.add(&volume.VolumeContext{
+		VolumeID:  "vol-1",
+		TeamID:    "team-a",
+		Backend:   volume.BackendS0FS,
+		S0FS:      engine,
+		Access:    volume.AccessModeRWX,
+		MountedAt: time.Now().UTC(),
+		RootInode: 1,
+		RootPath:  "/",
+	})
+	session := newLocalSession("vol-1", mgr, nil)
+
+	if _, err := session.Write(context.Background(), &pb.WriteRequest{
+		VolumeId: "ignored-by-local-session",
+		Inode:    node.Inode,
+		Data:     []byte("uncached"),
+	}); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if len(session.readCache) != 0 {
+		t.Fatalf("read cache entries = %d, want 0 for RWX volume", len(session.readCache))
 	}
 }
 

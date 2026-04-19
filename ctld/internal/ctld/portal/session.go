@@ -172,25 +172,16 @@ func (s *localSession) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenR
 		return nil, ctx.Err()
 	}
 	s.fix(&req.VolumeId)
-	volCtx, err := s.localS0FSVolume(req.VolumeId)
+	resp, err := s.fs.Open(s.ctx(ctx), req)
 	if err != nil {
 		return nil, err
 	}
-	if volCtx != nil {
-		node, err := volCtx.S0FS.GetAttr(req.Inode)
-		if err != nil {
-			return nil, mapLocalS0FSError(err)
+	if req.Flags&syscall.O_ACCMODE == syscall.O_RDONLY {
+		if volCtx, err := s.localS0FSVolume(req.VolumeId); err == nil && volCtx != nil {
+			s.trackReadOnlyHandle(req.VolumeId, resp.HandleId)
 		}
-		if node.Type == s0fs.TypeDirectory {
-			return nil, fserror.New(fserror.FailedPrecondition, "inode is a directory")
-		}
-		handleID := volCtx.OpenFileHandle(node.Inode)
-		if req.Flags&syscall.O_ACCMODE == syscall.O_RDONLY {
-			s.trackReadOnlyHandle(req.VolumeId, handleID)
-		}
-		return &pb.OpenResponse{HandleId: handleID}, nil
 	}
-	return s.fs.Open(s.ctx(ctx), req)
+	return resp, nil
 }
 func (s *localSession) Read(ctx context.Context, req *pb.ReadRequest) (*pb.ReadResponse, error) {
 	s.fix(&req.VolumeId)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -312,6 +313,80 @@ func TestS0FSUnlinkAfterOpenUntilRelease(t *testing.T) {
 	}
 	if _, err := volCtx.S0FS.GetAttr(createResp.Inode); err == nil {
 		t.Fatal("GetAttr() after final release returned nil error")
+	}
+}
+
+func TestS0FSOpenAndAccessCheckPermissions(t *testing.T) {
+	t.Parallel()
+
+	volCtx := newMountedS0FSVolumeContext(t, "vol-1", "team-a")
+	server := newTestFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{
+			"vol-1": volCtx,
+		},
+	}, nil, nil)
+	ctx := authContext("team-a", "")
+
+	node, err := volCtx.S0FS.CreateFile(1, "private.txt", 0o640)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+	if err := volCtx.S0FS.SetOwner(node.Inode, 1000, 2000); err != nil {
+		t.Fatalf("SetOwner() error = %v", err)
+	}
+
+	owner := &pb.PosixActor{Uid: 1000, Gids: []uint32{2000}}
+	groupReader := &pb.PosixActor{Uid: 1001, Gids: []uint32{2000}}
+	other := &pb.PosixActor{Uid: 1001, Gids: []uint32{1001}}
+
+	resp, err := server.Open(ctx, &pb.OpenRequest{
+		VolumeId: "vol-1",
+		Inode:    node.Inode,
+		Flags:    uint32(syscall.O_RDONLY),
+		Actor:    owner,
+	})
+	if err != nil {
+		t.Fatalf("Open(owner read) error = %v", err)
+	}
+	if _, err := server.Release(ctx, &pb.ReleaseRequest{
+		VolumeId: "vol-1",
+		Inode:    node.Inode,
+		HandleId: resp.HandleId,
+	}); err != nil {
+		t.Fatalf("Release(owner read) error = %v", err)
+	}
+
+	if _, err := server.Open(ctx, &pb.OpenRequest{
+		VolumeId: "vol-1",
+		Inode:    node.Inode,
+		Flags:    uint32(syscall.O_RDONLY),
+		Actor:    groupReader,
+	}); err != nil {
+		t.Fatalf("Open(group read) error = %v", err)
+	}
+	if _, err := server.Open(ctx, &pb.OpenRequest{
+		VolumeId: "vol-1",
+		Inode:    node.Inode,
+		Flags:    uint32(syscall.O_WRONLY),
+		Actor:    groupReader,
+	}); fserror.CodeOf(err) != fserror.PermissionDenied {
+		t.Fatalf("Open(group write) code = %v, want %v (err=%v)", fserror.CodeOf(err), fserror.PermissionDenied, err)
+	}
+	if _, err := server.Access(ctx, &pb.AccessRequest{
+		VolumeId: "vol-1",
+		Inode:    node.Inode,
+		Mask:     4,
+		Actor:    other,
+	}); fserror.CodeOf(err) != fserror.PermissionDenied {
+		t.Fatalf("Access(other read) code = %v, want %v (err=%v)", fserror.CodeOf(err), fserror.PermissionDenied, err)
+	}
+	if _, err := server.Open(ctx, &pb.OpenRequest{
+		VolumeId: "vol-1",
+		Inode:    node.Inode,
+		Flags:    uint32(syscall.O_WRONLY),
+		Actor:    &pb.PosixActor{Uid: 0, Gids: []uint32{0}},
+	}); err != nil {
+		t.Fatalf("Open(root write) error = %v", err)
 	}
 }
 

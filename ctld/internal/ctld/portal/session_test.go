@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
@@ -131,5 +132,49 @@ func TestLocalSessionOpenUsesMountedS0FS(t *testing.T) {
 	}
 	if _, err := engine.GetAttr(node.Inode); !errors.Is(err, s0fs.ErrNotFound) {
 		t.Fatalf("GetAttr() after unlinked read-only Release err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestLocalSessionOpenUsesFSServerPermissions(t *testing.T) {
+	engine, err := s0fs.Open(context.Background(), s0fs.Config{
+		VolumeID: "vol-1",
+		WALPath:  filepath.Join(t.TempDir(), "volume.wal"),
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+
+	node, err := engine.CreateFile(s0fs.RootInode, "private.txt", 0o600)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+	if err := engine.SetOwner(node.Inode, 0, 0); err != nil {
+		t.Fatalf("SetOwner() error = %v", err)
+	}
+
+	mgr := newLocalVolumeManager()
+	mgr.add(&volume.VolumeContext{
+		VolumeID:  "vol-1",
+		TeamID:    "team-a",
+		Backend:   volume.BackendS0FS,
+		S0FS:      engine,
+		Access:    volume.AccessModeRWO,
+		MountedAt: time.Now().UTC(),
+		RootInode: 1,
+		RootPath:  "/",
+	})
+	session := newLocalSession("vol-1", mgr, nil)
+
+	_, err = session.Open(context.Background(), &pb.OpenRequest{
+		VolumeId: "ignored-by-local-session",
+		Inode:    node.Inode,
+		Actor:    &pb.PosixActor{Uid: 1000, Gids: []uint32{1000}},
+	})
+	if fserror.CodeOf(err) != fserror.PermissionDenied {
+		t.Fatalf("Open() code = %v, want %v (err=%v)", fserror.CodeOf(err), fserror.PermissionDenied, err)
+	}
+	if len(session.readOnlyHandles) != 0 {
+		t.Fatalf("read-only handle count = %d, want 0 after denied open", len(session.readOnlyHandles))
 	}
 }

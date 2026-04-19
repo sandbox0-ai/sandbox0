@@ -672,6 +672,9 @@ func (s *FileSystemServer) Open(ctx context.Context, req *pb.OpenRequest) (*pb.O
 		if node.Type == s0fs.TypeDirectory {
 			return nil, fserror.New(fserror.FailedPrecondition, "inode is a directory")
 		}
+		if err := checkS0FSAccess(node, req.Actor, s0fsOpenAccessMask(req.Flags)); err != nil {
+			return nil, err
+		}
 		return &pb.OpenResponse{HandleId: volCtx.OpenFileHandle(node.Inode)}, nil
 	}
 
@@ -1675,8 +1678,12 @@ func (s *FileSystemServer) Access(ctx context.Context, req *pb.AccessRequest) (*
 		return nil, err
 	}
 	if isS0FSVolume(volCtx) {
-		if _, err := volCtx.S0FS.GetAttr(req.Inode); err != nil {
+		node, err := volCtx.S0FS.GetAttr(req.Inode)
+		if err != nil {
 			return nil, mapS0FSError(err)
+		}
+		if err := checkS0FSAccess(node, accessActor(req), req.Mask); err != nil {
+			return nil, err
 		}
 		return &pb.Empty{}, nil
 	}
@@ -2170,6 +2177,13 @@ func isS0FSVolume(volCtx *volume.VolumeContext) bool {
 	return volCtx != nil && volCtx.IsS0FS()
 }
 
+const (
+	s0fsAccessExists  = uint32(0)
+	s0fsAccessExecute = uint32(1)
+	s0fsAccessWrite   = uint32(2)
+	s0fsAccessRead    = uint32(4)
+)
+
 func s0fsAttr(node *s0fs.Node) *pb.GetAttrResponse {
 	if node == nil {
 		return &pb.GetAttrResponse{}
@@ -2202,6 +2216,57 @@ func s0fsAttr(node *s0fs.Node) *pb.GetAttrResponse {
 		CtimeSec:  node.Ctime.Unix(),
 		CtimeNsec: int64(node.Ctime.Nanosecond()),
 	}
+}
+
+func s0fsOpenAccessMask(flags uint32) uint32 {
+	mask := s0fsAccessRead
+	switch flags & uint32(syscall.O_ACCMODE) {
+	case uint32(syscall.O_WRONLY):
+		mask = s0fsAccessWrite
+	case uint32(syscall.O_RDWR):
+		mask = s0fsAccessRead | s0fsAccessWrite
+	}
+	if flags&(uint32(syscall.O_TRUNC)|uint32(syscall.O_APPEND)) != 0 {
+		mask |= s0fsAccessWrite
+	}
+	return mask
+}
+
+func checkS0FSAccess(node *s0fs.Node, actor *pb.PosixActor, mask uint32) error {
+	if node == nil {
+		return fserror.New(fserror.NotFound, "entry not found")
+	}
+	if actor == nil || actor.Uid == 0 || mask == s0fsAccessExists {
+		return nil
+	}
+
+	perm := node.Mode & 0o7
+	switch {
+	case actor.Uid == node.UID:
+		perm = (node.Mode >> 6) & 0o7
+	case containsGID(actor.Gids, node.GID):
+		perm = (node.Mode >> 3) & 0o7
+	}
+
+	if mask&s0fsAccessRead != 0 && perm&0o4 == 0 {
+		return fserror.New(fserror.PermissionDenied, "read permission denied")
+	}
+	if mask&s0fsAccessWrite != 0 && perm&0o2 == 0 {
+		return fserror.New(fserror.PermissionDenied, "write permission denied")
+	}
+	if mask&s0fsAccessExecute != 0 && perm&0o1 == 0 {
+		return fserror.New(fserror.PermissionDenied, "execute permission denied")
+	}
+	return nil
+}
+
+func containsGID(gids []uint32, gid uint32) bool {
+	for _, candidate := range gids {
+		if candidate == gid {
+			return true
+		}
+	}
+	return false
 }
 
 func s0fsNodeResponse(node *s0fs.Node, handleID uint64) *pb.NodeResponse {

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -32,23 +31,18 @@ type StageProvider interface {
 	Release(ctx context.Context, req ctldapi.VolumeDetachRequest) error
 }
 
-type execRunner struct{}
-
-func (execRunner) Run(ctx context.Context, name string, args ...string) error {
-	cmd := exec.CommandContext(ctx, name, args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(output)))
-	}
-	return nil
+type NamespaceOperator interface {
+	EnsureMountPoint(ctx context.Context, mountNSPath, mountPoint string) error
+	BindMount(ctx context.Context, mountNSPath, sourcePath, mountPoint string) error
+	Unmount(ctx context.Context, mountNSPath, mountPoint string) error
 }
 
 type Controller struct {
 	Resolver    Resolver
 	StagingRoot string
 	ProcRoot    string
-	Runner      CommandRunner
 	Stage       StageProvider
+	Namespace   NamespaceOperator
 }
 
 func NewController(resolver Resolver, stagingRoot, procRoot string) *Controller {
@@ -62,7 +56,7 @@ func NewController(resolver Resolver, stagingRoot, procRoot string) *Controller 
 		Resolver:    resolver,
 		StagingRoot: filepath.Clean(stagingRoot),
 		ProcRoot:    filepath.Clean(procRoot),
-		Runner:      execRunner{},
+		Namespace:   newNamespaceOperator(),
 	}
 }
 
@@ -88,16 +82,18 @@ func (c *Controller) AttachVolume(r *http.Request, sandboxID string, req ctldapi
 		}
 		return ctldapi.VolumeAttachResponse{Attached: false, Error: err.Error()}, http.StatusInternalServerError
 	}
-	mountNS, err := c.mountNamespacePath(target)
+	pid, err := c.sandboxProcessID(target)
 	if err != nil {
 		return ctldapi.VolumeAttachResponse{Attached: false, Error: err.Error()}, http.StatusInternalServerError
 	}
+	mountNS := c.mountNamespacePathForPID(pid)
 	ctx := requestContext(r)
-	if err := c.runner().Run(ctx, "nsenter", "--mount="+mountNS, "--", "mkdir", "-p", mountPoint); err != nil {
-		return ctldapi.VolumeAttachResponse{Attached: false, Error: err.Error()}, http.StatusInternalServerError
+	ops := c.namespaceOperator()
+	if err := ops.EnsureMountPoint(ctx, mountNS, mountPoint); err != nil {
+		return ctldapi.VolumeAttachResponse{Attached: false, Error: fmt.Sprintf("prepare mount target %s: %v", mountPoint, err)}, http.StatusInternalServerError
 	}
-	if err := c.runner().Run(ctx, "nsenter", "--mount="+mountNS, "--", "mount", "--bind", c.sourcePathForMountNamespace(source), mountPoint); err != nil {
-		return ctldapi.VolumeAttachResponse{Attached: false, Error: err.Error()}, http.StatusInternalServerError
+	if err := ops.BindMount(ctx, mountNS, source, mountPoint); err != nil {
+		return ctldapi.VolumeAttachResponse{Attached: false, Error: fmt.Sprintf("bind mount %s -> %s: %v", source, mountPoint, err)}, http.StatusInternalServerError
 	}
 	attachmentID := attachmentID(req.SandboxID, req.SandboxVolumeID, mountPoint)
 	return ctldapi.VolumeAttachResponse{
@@ -122,11 +118,11 @@ func (c *Controller) DetachVolume(r *http.Request, sandboxID string, req ctldapi
 	if status != http.StatusOK {
 		return ctldapi.VolumeDetachResponse{Detached: false, Error: errMessage}, status
 	}
-	mountNS, err := c.mountNamespacePath(target)
+	pid, err := c.sandboxProcessID(target)
 	if err != nil {
 		return ctldapi.VolumeDetachResponse{Detached: false, Error: err.Error()}, http.StatusInternalServerError
 	}
-	if err := c.runner().Run(requestContext(r), "nsenter", "--mount="+mountNS, "--", "umount", mountPoint); err != nil {
+	if err := c.namespaceOperator().Unmount(requestContext(r), c.mountNamespacePathForPID(pid), mountPoint); err != nil {
 		return ctldapi.VolumeDetachResponse{Detached: false, Error: err.Error()}, http.StatusInternalServerError
 	}
 	if err := c.stageProvider().Release(requestContext(r), req); err != nil {
@@ -167,12 +163,11 @@ func (c *Controller) stageProvider() StageProvider {
 	return existingStageProvider{controller: c}
 }
 
-func (c *Controller) sourcePathForMountNamespace(source string) string {
-	procRoot := defaultProcRoot
-	if c != nil && strings.TrimSpace(c.ProcRoot) != "" {
-		procRoot = c.ProcRoot
+func (c *Controller) namespaceOperator() NamespaceOperator {
+	if c != nil && c.Namespace != nil {
+		return c.Namespace
 	}
-	return filepath.Join(procRoot, fmt.Sprintf("%d", os.Getpid()), "root", source)
+	return newNamespaceOperator()
 }
 
 func cleanVolumeID(volumeID string) (string, error) {
@@ -194,25 +189,23 @@ func cleanMountPoint(mountPoint string) (string, error) {
 	return cleaned, nil
 }
 
-func (c *Controller) mountNamespacePath(target ctldpower.Target) (string, error) {
-	pid, err := firstProcessInCgroupTree(target.CgroupDir)
-	if err != nil {
-		return "", err
+func (c *Controller) sandboxProcessID(target ctldpower.Target) (string, error) {
+	procRoot := defaultProcRoot
+	if c != nil && strings.TrimSpace(c.ProcRoot) != "" {
+		procRoot = c.ProcRoot
 	}
-	return filepath.Join(c.ProcRoot, pid, "ns/mnt"), nil
+	return preferredProcessInCgroupTree(procRoot, target.CgroupDir)
 }
 
-func (c *Controller) runner() CommandRunner {
-	if c != nil && c.Runner != nil {
-		return c.Runner
-	}
-	return execRunner{}
+func (c *Controller) mountNamespacePathForPID(pid string) string {
+	return filepath.Join(c.ProcRoot, pid, "ns/mnt")
 }
 
-func firstProcessInCgroupTree(root string) (string, error) {
+func preferredProcessInCgroupTree(procRoot, root string) (string, error) {
 	root = filepath.Clean(root)
-	var pid string
-	errStop := errors.New("stop")
+	procRoot = filepath.Clean(procRoot)
+	var candidates []string
+	seen := make(map[string]struct{})
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -224,20 +217,61 @@ func firstProcessInCgroupTree(root string) (string, error) {
 		if err != nil {
 			return err
 		}
-		fields := strings.Fields(string(data))
-		if len(fields) == 0 {
-			return nil
+		for _, pid := range strings.Fields(string(data)) {
+			if _, ok := seen[pid]; ok {
+				continue
+			}
+			seen[pid] = struct{}{}
+			candidates = append(candidates, pid)
 		}
-		pid = fields[0]
-		return errStop
+		return nil
 	})
-	if err != nil && !errors.Is(err, errStop) {
+	if err != nil {
 		return "", err
 	}
-	if pid == "" {
+	if len(candidates) == 0 {
 		return "", fmt.Errorf("no process found under cgroup %s", root)
 	}
-	return pid, nil
+	if pid := selectPreferredProcessID(procRoot, candidates); pid != "" {
+		return pid, nil
+	}
+	return candidates[0], nil
+}
+
+func selectPreferredProcessID(procRoot string, candidates []string) string {
+	var fallback string
+	var pause string
+	for _, pid := range candidates {
+		cmdline := processCommandLine(procRoot, pid)
+		switch {
+		case strings.Contains(cmdline, "/procd/bin/procd") || strings.HasPrefix(cmdline, "procd"):
+			return pid
+		case strings.Contains(cmdline, "/pause") || strings.HasPrefix(cmdline, "pause"):
+			if pause == "" {
+				pause = pid
+			}
+		case cmdline != "":
+			if fallback == "" {
+				fallback = pid
+			}
+		default:
+			if fallback == "" {
+				fallback = pid
+			}
+		}
+	}
+	if fallback != "" {
+		return fallback
+	}
+	return pause
+}
+
+func processCommandLine(procRoot, pid string) string {
+	data, err := os.ReadFile(filepath.Join(procRoot, pid, "cmdline"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(strings.ReplaceAll(string(data), "\x00", " "))
 }
 
 func requestContext(r *http.Request) context.Context {

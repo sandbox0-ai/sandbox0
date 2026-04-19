@@ -359,20 +359,6 @@ func appendProcdConfigEnvVars(envVars []corev1.EnvVar) []corev1.EnvVar {
 		})
 	}
 
-	// Storage-proxy connectivity must always remain manager-controlled, even
-	// when the corresponding fields are omitted from manager config.
-	upsertProcdEnvVar(envIndex, &envVars, corev1.EnvVar{
-		Name:  "storage_proxy_base_url",
-		Value: cfg.ProcdConfig.StorageProxyBaseURL,
-	})
-	upsertProcdEnvVar(envIndex, &envVars, corev1.EnvVar{
-		Name:  "storage_proxy_port",
-		Value: strconv.Itoa(cfg.ProcdConfig.StorageProxyPort),
-	})
-	upsertProcdEnvVar(envIndex, &envVars, corev1.EnvVar{
-		Name:  "mount_mode",
-		Value: cfg.ProcdConfig.MountMode,
-	})
 	upsertProcdEnvVar(envIndex, &envVars, corev1.EnvVar{
 		Name:  "ctld_base_url",
 		Value: cfg.ProcdConfig.CtldBaseURL,
@@ -393,17 +379,15 @@ func appendProcdConfigEnvVars(envVars []corev1.EnvVar) []corev1.EnvVar {
 		Name:  "ctld_timeout",
 		Value: ctldTimeout.String(),
 	})
-	upsertProcdEnvVar(envIndex, &envVars, corev1.EnvVar{
-		Name:  "node_local_fallback_to_storage",
-		Value: strconv.FormatBool(cfg.ProcdConfig.NodeLocalFallbackToStorage),
-	})
 
 	return envVars
 }
 
 func isManagerControlledProcdRuntimeEnv(key string) bool {
 	switch key {
-	case "mount_mode", "ctld_base_url", "ctld_port", "ctld_timeout", "node_local_fallback_to_storage":
+	case "ctld_base_url", "ctld_port", "ctld_timeout",
+		"storage_proxy_base_url", "storage_proxy_port",
+		"mount_mode", "node_local_fallback_to_storage":
 		return true
 	default:
 		return false

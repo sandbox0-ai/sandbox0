@@ -2,7 +2,6 @@ package volume
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -35,59 +34,6 @@ func TestValidateMountPoint(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 		})
-	}
-}
-
-func TestMergeVolumeConfig(t *testing.T) {
-	manager := NewManager(&Config{
-		JuiceFSCacheSize:  "200",
-		JuiceFSPrefetch:   3,
-		JuiceFSBufferSize: "300",
-		JuiceFSWriteback:  true,
-	}, nil, nil)
-
-	overridePrefetch := int32(10)
-	overrideWriteback := false
-	cfg := manager.mergeVolumeConfig(&VolumeConfig{
-		CacheSize: "500",
-		Prefetch:  &overridePrefetch,
-		Writeback: &overrideWriteback,
-	})
-
-	if cfg.CacheSize != "500" {
-		t.Fatalf("expected cache size override, got %q", cfg.CacheSize)
-	}
-	if cfg.Prefetch != 10 {
-		t.Fatalf("expected prefetch override, got %d", cfg.Prefetch)
-	}
-	if cfg.BufferSize != "300" {
-		t.Fatalf("expected buffer size default, got %q", cfg.BufferSize)
-	}
-	if cfg.Writeback != false {
-		t.Fatalf("expected writeback override")
-	}
-}
-
-func TestMergeVolumeConfigNilDefaults(t *testing.T) {
-	manager := NewManager(nil, nil, nil)
-	cfg := manager.mergeVolumeConfig(nil)
-	if cfg == nil {
-		t.Fatalf("expected config")
-	}
-	if cfg.CacheSize != "" || cfg.BufferSize != "" || cfg.Prefetch != 0 || cfg.Writeback {
-		t.Fatalf("expected zero defaults, got %+v", cfg)
-	}
-}
-
-func TestJoinMountPath(t *testing.T) {
-	if joinMountPath("/mnt", "/dir/file.txt") != "/mnt/dir/file.txt" {
-		t.Fatalf("unexpected join result")
-	}
-	if joinMountPath("/mnt", "dir/file.txt") != "/mnt/dir/file.txt" {
-		t.Fatalf("unexpected join result for relative path")
-	}
-	if joinMountPath("/mnt", "") != "" {
-		t.Fatalf("expected empty path")
 	}
 }
 
@@ -144,7 +90,7 @@ func TestBootstrapMountsWaitReturnsFailedStatus(t *testing.T) {
 	}
 }
 
-func TestMountUsesNodeLocalBackendWhenConfigured(t *testing.T) {
+func TestMountUsesNodeLocalBackend(t *testing.T) {
 	client := &fakeCtldVolumeClient{
 		attachResp: &ctldapi.VolumeAttachResponse{
 			Attached:       true,
@@ -152,11 +98,12 @@ func TestMountUsesNodeLocalBackendWhenConfigured(t *testing.T) {
 			MountSessionID: "session-1",
 		},
 	}
-	manager := NewManager(&Config{MountMode: MountModeNodeLocal}, staticTokenProvider{}, zap.NewNop())
+	manager := NewManager(&Config{}, staticTokenProvider{}, zap.NewNop())
 	manager.SetCtldVolumeClient(client)
 
 	resp, err := manager.Mount(context.Background(), &MountRequest{
 		SandboxID:       "sandbox-1",
+		TeamID:          "team-1",
 		SandboxVolumeID: "vol-1",
 		MountPoint:      t.TempDir(),
 	})
@@ -166,7 +113,7 @@ func TestMountUsesNodeLocalBackendWhenConfigured(t *testing.T) {
 	if resp.Backend != MountBackendNodeLocal {
 		t.Fatalf("Mount() backend = %q, want %q", resp.Backend, MountBackendNodeLocal)
 	}
-	if client.attachReq == nil || client.attachReq.SandboxID != "sandbox-1" || client.attachReq.SandboxVolumeID != "vol-1" {
+	if client.attachReq == nil || client.attachReq.SandboxID != "sandbox-1" || client.attachReq.TeamID != "team-1" || client.attachReq.SandboxVolumeID != "vol-1" {
 		t.Fatalf("attach request = %+v", client.attachReq)
 	}
 
@@ -183,61 +130,26 @@ func TestMountUsesNodeLocalBackendWhenConfigured(t *testing.T) {
 	}
 }
 
-func TestMountNodeLocalFailureFallsBackToStorageProxyWhenEnabled(t *testing.T) {
-	client := &fakeCtldVolumeClient{attachErr: errors.New("ctld unavailable")}
-	manager := NewManager(&Config{
-		MountMode:                  MountModeNodeLocal,
-		NodeLocalFallbackToStorage: true,
-	}, staticTokenProvider{}, zap.NewNop())
+func TestMountUsesRememberedIdentity(t *testing.T) {
+	client := &fakeCtldVolumeClient{}
+	manager := NewManager(&Config{}, staticTokenProvider{}, zap.NewNop())
 	manager.SetCtldVolumeClient(client)
+	manager.SetIdentity("sandbox-remembered", "team-remembered")
 
-	storageProxyMounted := false
-	manager.mountStorageProxyHook = func(_ context.Context, req *MountRequest, mountPoint string) (*mountInfo, error) {
-		storageProxyMounted = true
-		return &mountInfo{
-			volumeID:       req.SandboxVolumeID,
-			mountPoint:     mountPoint,
-			sandboxID:      req.SandboxID,
-			mountedAt:      time.Now(),
-			mountSessionID: "session-fallback",
-			mountSecret:    "secret-fallback",
-			backend:        MountBackendStorageProxyFuse,
-			watchDone:      make(chan struct{}),
-		}, nil
-	}
-
-	resp, err := manager.Mount(context.Background(), &MountRequest{
-		SandboxID:       "sandbox-1",
+	if _, err := manager.Mount(context.Background(), &MountRequest{
 		SandboxVolumeID: "vol-1",
 		MountPoint:      t.TempDir(),
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatalf("Mount() error = %v", err)
 	}
-	if !storageProxyMounted {
-		t.Fatalf("expected storage-proxy fallback to run")
+	if client.attachReq == nil {
+		t.Fatal("Attach() was not called")
 	}
-	if resp.Backend != MountBackendStorageProxyFuse {
-		t.Fatalf("Mount() backend = %q, want %q", resp.Backend, MountBackendStorageProxyFuse)
+	if client.attachReq.SandboxID != "sandbox-remembered" {
+		t.Fatalf("sandbox id = %q, want remembered value", client.attachReq.SandboxID)
 	}
-}
-
-func TestMountNodeLocalFailureDoesNotFallbackByDefault(t *testing.T) {
-	client := &fakeCtldVolumeClient{attachErr: errors.New("ctld unavailable")}
-	manager := NewManager(&Config{MountMode: MountModeNodeLocal}, staticTokenProvider{}, zap.NewNop())
-	manager.SetCtldVolumeClient(client)
-	manager.mountStorageProxyHook = func(context.Context, *MountRequest, string) (*mountInfo, error) {
-		t.Fatalf("storage-proxy fallback should not run")
-		return nil, nil
-	}
-
-	_, err := manager.Mount(context.Background(), &MountRequest{
-		SandboxID:       "sandbox-1",
-		SandboxVolumeID: "vol-1",
-		MountPoint:      t.TempDir(),
-	})
-	if err == nil {
-		t.Fatalf("Mount() expected node-local error")
+	if client.attachReq.TeamID != "team-remembered" {
+		t.Fatalf("team id = %q, want remembered value", client.attachReq.TeamID)
 	}
 }
 
@@ -263,4 +175,10 @@ func (f *fakeCtldVolumeClient) Attach(_ context.Context, req *ctldapi.VolumeAtta
 func (f *fakeCtldVolumeClient) Detach(_ context.Context, req *ctldapi.VolumeDetachRequest) error {
 	f.detachReq = req
 	return f.detachErr
+}
+
+type staticTokenProvider struct{}
+
+func (staticTokenProvider) GetInternalToken() string {
+	return "token"
 }

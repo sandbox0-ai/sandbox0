@@ -67,7 +67,7 @@ type Server struct {
 	volumeManager  *volume.Manager
 	fileManager    *file.Manager
 
-	// Token provider for storage-proxy communication
+	// Token provider for internal ctld communication
 	tokenProvider *TokenProvider
 
 	// Internal auth validator
@@ -162,7 +162,6 @@ func (s *Server) setupRoutes() {
 	// SandboxVolume handlers
 	volumeHandler := handlers.NewVolumeHandler(s.volumeManager, s.logger)
 	volumeRouter := api.PathPrefix("/sandboxvolumes").Subrouter()
-	volumeRouter.Use(s.storageProxyUpstreamMiddleware)
 	volumeRouter.HandleFunc("/mount", volumeHandler.Mount).Methods("POST")
 	volumeRouter.HandleFunc("/unmount", volumeHandler.Unmount).Methods("POST")
 	volumeRouter.HandleFunc("/status", volumeHandler.Status).Methods("GET")
@@ -333,7 +332,7 @@ func isLoopbackAddress(addr string) bool {
 }
 
 // internalTokenMiddleware extracts and stores the internal token from request headers.
-// This token is used for authenticating requests to storage-proxy gRPC service.
+// This token is used for authenticating requests to ctld.
 func (s *Server) internalTokenMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Extract token from X-Token-For-Procd header
@@ -350,30 +349,11 @@ func (s *Server) internalTokenMiddleware(next http.Handler) http.Handler {
 			s.tokenProvider.SetInternalToken(token)
 		}
 
-		s.logger.Debug("Updated internal token for storage-proxy",
+		s.logger.Debug("Updated internal token for ctld",
 			zap.String("path", r.URL.Path),
 		)
 
 		next.ServeHTTP(w, r)
-	})
-}
-
-func (s *Server) storageProxyUpstreamMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		baseURL := strings.TrimSpace(s.cfg.StorageProxyBaseURL)
-		port := s.cfg.StorageProxyPort
-		if baseURL != "" && port > 0 {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		s.logger.Error("Storage-proxy upstream not configured",
-			zap.String("proxy_base_url", baseURL),
-			zap.Int("proxy_port", port),
-		)
-		_ = spec.WriteError(w, http.StatusServiceUnavailable, "storage_proxy_unavailable",
-			fmt.Sprintf("storage-proxy upstream not configured (base_url=%q port=%d)", baseURL, port),
-		)
 	})
 }
 
@@ -422,8 +402,8 @@ func (s *Server) extractAuthToken(r *http.Request) string {
 	return r.Header.Get("X-Internal-Token")
 }
 
-// GetInternalToken returns the current internal token for storage-proxy communication.
-// This method is thread-safe and can be called by gRPC clients.
+// GetInternalToken returns the current internal token for ctld communication.
+// This method is thread-safe and can be called by the node-local volume client.
 func (s *Server) GetInternalToken() string {
 	if s.tokenProvider == nil {
 		return ""

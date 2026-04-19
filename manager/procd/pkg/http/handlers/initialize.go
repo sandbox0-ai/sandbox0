@@ -112,6 +112,9 @@ func (h *InitializeHandler) Initialize(w http.ResponseWriter, r *http.Request) {
 
 	h.dispatcher.SetConfig(webhookURL, webhookSecret)
 	h.dispatcher.SetIdentity(req.SandboxID, teamID)
+	if h.volumeManager != nil {
+		h.volumeManager.SetIdentity(req.SandboxID, teamID)
+	}
 
 	h.configureWebhookWatch(strings.TrimSpace(webhookURL), strings.TrimSpace(webhookWatchDir))
 

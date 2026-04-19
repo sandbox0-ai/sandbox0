@@ -191,18 +191,28 @@ func mount(cfg *mountConfig) error {
 	}
 	registry := prometheus.NewRegistry()
 	cachedStore := chunk.NewCachedStore(store, chunkConf, registry)
-	vfsConf := &vfs.Config{
-		Meta:            metaConf,
-		Format:          *format,
-		Chunk:           &chunkConf,
-		Version:         "sandbox0",
-		AttrTimeout:     parseDuration(cfg.attrCache, time.Second),
-		EntryTimeout:    parseDuration(cfg.entryCache, time.Second),
-		DirEntryTimeout: parseDuration(cfg.dirEntryCache, time.Second),
-		Subdir:          cfg.subdir,
-	}
+	vfsConf := newVFSConfig(metaConf, format, &chunkConf, cfg)
 	v := vfs.NewVFS(vfsConf, metaClient, cachedStore, registry, registry)
 	return jfsfuse.Serve(v, "allow_other", true, false)
+}
+
+func newVFSConfig(metaConf *meta.Config, format *meta.Format, chunkConf *chunk.Config, cfg *mountConfig) *vfs.Config {
+	vfsConf := &vfs.Config{
+		Meta:     metaConf,
+		Version:  "sandbox0",
+		Chunk:    chunkConf,
+		FuseOpts: &vfs.FuseOptions{},
+	}
+	if format != nil {
+		vfsConf.Format = *format
+	}
+	if cfg != nil {
+		vfsConf.AttrTimeout = parseDuration(cfg.attrCache, time.Second)
+		vfsConf.EntryTimeout = parseDuration(cfg.entryCache, time.Second)
+		vfsConf.DirEntryTimeout = parseDuration(cfg.dirEntryCache, time.Second)
+		vfsConf.Subdir = cfg.subdir
+	}
+	return vfsConf
 }
 
 func parseDuration(value string, fallback time.Duration) time.Duration {

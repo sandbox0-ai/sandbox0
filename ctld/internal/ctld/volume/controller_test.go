@@ -3,7 +3,6 @@ package volume
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -22,9 +21,16 @@ func (f fakeResolver) Resolve(_ *http.Request, _ string) (ctldpower.Target, erro
 	return f.target, f.err
 }
 
-type recordedCommand struct {
-	name string
-	args []string
+type recordedNamespaceCall struct {
+	op        string
+	mountNS   string
+	source    string
+	mountPath string
+}
+
+type recordingNamespaceOperator struct {
+	calls []recordedNamespaceCall
+	err   error
 }
 
 type recordingRunner struct {
@@ -32,8 +38,28 @@ type recordingRunner struct {
 	err      error
 }
 
+type recordedCommand struct {
+	name string
+	args []string
+}
+
 func (r *recordingRunner) Run(_ context.Context, name string, args ...string) error {
 	r.commands = append(r.commands, recordedCommand{name: name, args: append([]string(nil), args...)})
+	return r.err
+}
+
+func (r *recordingNamespaceOperator) EnsureMountPoint(_ context.Context, mountNSPath, mountPoint string) error {
+	r.calls = append(r.calls, recordedNamespaceCall{op: "mkdir", mountNS: mountNSPath, mountPath: mountPoint})
+	return r.err
+}
+
+func (r *recordingNamespaceOperator) BindMount(_ context.Context, mountNSPath, sourcePath, mountPoint string) error {
+	r.calls = append(r.calls, recordedNamespaceCall{op: "mount", mountNS: mountNSPath, source: sourcePath, mountPath: mountPoint})
+	return r.err
+}
+
+func (r *recordingNamespaceOperator) Unmount(_ context.Context, mountNSPath, mountPoint string) error {
+	r.calls = append(r.calls, recordedNamespaceCall{op: "umount", mountNS: mountNSPath, mountPath: mountPoint})
 	return r.err
 }
 
@@ -46,12 +72,12 @@ func TestControllerAttachVolumeBindsStagedMountIntoSandboxNamespace(t *testing.T
 	requireWriteFile(t, filepath.Join(procRoot, "1234", "ns", "mnt"), "")
 	requireWriteFile(t, filepath.Join(cgroupRoot, "cgroup.procs"), "1234\n")
 
-	runner := &recordingRunner{}
+	operator := &recordingNamespaceOperator{}
 	controller := NewController(fakeResolver{target: ctldpower.Target{
 		SandboxID: "sandbox-1",
 		CgroupDir: cgroupRoot,
 	}}, stagingRoot, procRoot)
-	controller.Runner = runner
+	controller.Namespace = operator
 
 	resp, status := controller.AttachVolume(httptestRequest(), "sandbox-1", ctldapi.VolumeAttachRequest{
 		SandboxVolumeID: "vol-1",
@@ -63,15 +89,14 @@ func TestControllerAttachVolumeBindsStagedMountIntoSandboxNamespace(t *testing.T
 	if !resp.Attached || resp.AttachmentID == "" || resp.MountSessionID != resp.AttachmentID {
 		t.Fatalf("AttachVolume() response = %+v", resp)
 	}
-	if len(runner.commands) != 2 {
-		t.Fatalf("commands = %+v, want mkdir and bind mount", runner.commands)
+	if len(operator.calls) != 2 {
+		t.Fatalf("calls = %+v, want mkdir and bind mount", operator.calls)
 	}
 	mountNS := filepath.Join(procRoot, "1234", "ns/mnt")
-	wantMkdirArgs := []string{"--mount=" + mountNS, "--", "mkdir", "-p", "/workspace/data"}
-	wantSource := filepath.Join(procRoot, fmt.Sprintf("%d", os.Getpid()), "root", filepath.Join(stagingRoot, "vol-1"))
-	wantMountArgs := []string{"--mount=" + mountNS, "--", "mount", "--bind", wantSource, "/workspace/data"}
-	assertCommand(t, runner.commands[0], "nsenter", wantMkdirArgs)
-	assertCommand(t, runner.commands[1], "nsenter", wantMountArgs)
+	wantTarget := "/workspace/data"
+	wantSource := filepath.Join(stagingRoot, "vol-1")
+	assertNamespaceCall(t, operator.calls[0], "mkdir", mountNS, "", wantTarget)
+	assertNamespaceCall(t, operator.calls[1], "mount", mountNS, wantSource, wantTarget)
 }
 
 func TestControllerDetachVolumeUnmountsFromSandboxNamespace(t *testing.T) {
@@ -81,12 +106,12 @@ func TestControllerDetachVolumeUnmountsFromSandboxNamespace(t *testing.T) {
 	requireWriteFile(t, filepath.Join(procRoot, "1234", "ns", "mnt"), "")
 	requireWriteFile(t, filepath.Join(cgroupRoot, "nested", "cgroup.procs"), "1234\n")
 
-	runner := &recordingRunner{}
+	operator := &recordingNamespaceOperator{}
 	controller := NewController(fakeResolver{target: ctldpower.Target{
 		SandboxID: "sandbox-1",
 		CgroupDir: cgroupRoot,
 	}}, t.TempDir(), procRoot)
-	controller.Runner = runner
+	controller.Namespace = operator
 
 	resp, status := controller.DetachVolume(httptestRequest(), "sandbox-1", ctldapi.VolumeDetachRequest{
 		SandboxVolumeID: "vol-1",
@@ -100,11 +125,12 @@ func TestControllerDetachVolumeUnmountsFromSandboxNamespace(t *testing.T) {
 	if !resp.Detached {
 		t.Fatalf("DetachVolume() response = %+v", resp)
 	}
-	if len(runner.commands) != 1 {
-		t.Fatalf("commands = %+v, want one umount", runner.commands)
+	if len(operator.calls) != 1 {
+		t.Fatalf("calls = %+v, want one umount", operator.calls)
 	}
 	mountNS := filepath.Join(procRoot, "1234", "ns/mnt")
-	assertCommand(t, runner.commands[0], "nsenter", []string{"--mount=" + mountNS, "--", "umount", "/workspace/data"})
+	wantTarget := "/workspace/data"
+	assertNamespaceCall(t, operator.calls[0], "umount", mountNS, "", wantTarget)
 }
 
 func TestControllerAttachVolumeRequiresStagedMount(t *testing.T) {
@@ -171,7 +197,7 @@ func TestControllerCommandFailureReturnsInternalError(t *testing.T) {
 	requireWriteFile(t, filepath.Join(cgroupRoot, "cgroup.procs"), "1234\n")
 
 	controller := NewController(fakeResolver{target: ctldpower.Target{CgroupDir: cgroupRoot}}, stagingRoot, procRoot)
-	controller.Runner = &recordingRunner{err: errors.New("boom")}
+	controller.Namespace = &recordingNamespaceOperator{err: errors.New("boom")}
 
 	resp, status := controller.AttachVolume(httptestRequest(), "sandbox-1", ctldapi.VolumeAttachRequest{
 		SandboxVolumeID: "vol-1",
@@ -182,6 +208,38 @@ func TestControllerCommandFailureReturnsInternalError(t *testing.T) {
 	}
 	if resp.Attached || resp.Error == "" {
 		t.Fatalf("AttachVolume() response = %+v", resp)
+	}
+}
+
+func TestPreferredProcessInCgroupTreePrefersProcdOverPause(t *testing.T) {
+	procRoot := t.TempDir()
+	cgroupRoot := t.TempDir()
+	requireWriteFile(t, filepath.Join(cgroupRoot, "pod", "cgroup.procs"), "101\n100\n")
+	requireWriteFile(t, filepath.Join(procRoot, "100", "cmdline"), "/pause\x00")
+	requireWriteFile(t, filepath.Join(procRoot, "101", "cmdline"), "/procd/bin/procd\x00")
+
+	pid, err := preferredProcessInCgroupTree(procRoot, cgroupRoot)
+	if err != nil {
+		t.Fatalf("preferredProcessInCgroupTree() error = %v", err)
+	}
+	if pid != "101" {
+		t.Fatalf("preferredProcessInCgroupTree() pid = %q, want 101", pid)
+	}
+}
+
+func TestPreferredProcessInCgroupTreeFallsBackToNonPauseProcess(t *testing.T) {
+	procRoot := t.TempDir()
+	cgroupRoot := t.TempDir()
+	requireWriteFile(t, filepath.Join(cgroupRoot, "pod", "cgroup.procs"), "200\n201\n")
+	requireWriteFile(t, filepath.Join(procRoot, "200", "cmdline"), "/pause\x00")
+	requireWriteFile(t, filepath.Join(procRoot, "201", "cmdline"), "/bin/sh\x00-c\x00sleep 10\x00")
+
+	pid, err := preferredProcessInCgroupTree(procRoot, cgroupRoot)
+	if err != nil {
+		t.Fatalf("preferredProcessInCgroupTree() error = %v", err)
+	}
+	if pid != "201" {
+		t.Fatalf("preferredProcessInCgroupTree() pid = %q, want 201", pid)
 	}
 }
 
@@ -207,17 +265,18 @@ func requireWriteFile(t *testing.T, path string, data string) {
 	}
 }
 
-func assertCommand(t *testing.T, got recordedCommand, wantName string, wantArgs []string) {
+func assertNamespaceCall(t *testing.T, got recordedNamespaceCall, wantOp, wantMountNS, wantSource, wantMountPath string) {
 	t.Helper()
-	if got.name != wantName {
-		t.Fatalf("command name = %q, want %q", got.name, wantName)
+	if got.op != wantOp {
+		t.Fatalf("op = %q, want %q", got.op, wantOp)
 	}
-	if len(got.args) != len(wantArgs) {
-		t.Fatalf("command args = %#v, want %#v", got.args, wantArgs)
+	if got.mountNS != wantMountNS {
+		t.Fatalf("mountNS = %q, want %q", got.mountNS, wantMountNS)
 	}
-	for i := range wantArgs {
-		if got.args[i] != wantArgs[i] {
-			t.Fatalf("command args = %#v, want %#v", got.args, wantArgs)
-		}
+	if got.source != wantSource {
+		t.Fatalf("source = %q, want %q", got.source, wantSource)
+	}
+	if got.mountPath != wantMountPath {
+		t.Fatalf("mountPath = %q, want %q", got.mountPath, wantMountPath)
 	}
 }

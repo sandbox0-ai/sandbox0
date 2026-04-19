@@ -10,14 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
-	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
-	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"go.uber.org/zap"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/metadata"
 )
 
 type mountInfo struct {
@@ -26,14 +20,8 @@ type mountInfo struct {
 	sandboxID      string
 	mountedAt      time.Time
 	mountSessionID string
-	mountSecret    string
 	backend        string
 	attachmentID   string
-	fuseServer     *fuse.Server
-	fs             *grpcFS
-	cancelWatch    context.CancelFunc
-	watchDone      chan struct{}
-	remounting     bool
 }
 
 // Manager manages sandbox volume mounts in a sandbox.
@@ -49,15 +37,10 @@ type Manager struct {
 	mountStatus map[string]*MountStatus
 	statusCond  *sync.Cond
 
-	eventSink EventSink
-
-	conn   *grpc.ClientConn
-	client pb.FileSystemClient
+	sandboxID string
+	teamID    string
 
 	ctldVolumeClient CtldVolumeClient
-
-	mountStorageProxyHook   func(context.Context, *MountRequest, string) (*mountInfo, error)
-	unmountStorageProxyHook func(context.Context, *mountInfo) error
 }
 
 // NewManager creates a new volume manager.
@@ -91,11 +74,16 @@ func (m *Manager) SetCtldVolumeClient(client CtldVolumeClient) {
 	m.ctldVolumeClient = client
 }
 
-// SetEventSink sets the sink for volume watch events.
-func (m *Manager) SetEventSink(sink EventSink) {
+// SetIdentity records the sandbox identity used for dynamic node-local mounts.
+func (m *Manager) SetIdentity(sandboxID, teamID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.eventSink = sink
+	if sandboxID != "" {
+		m.sandboxID = sandboxID
+	}
+	if teamID != "" {
+		m.teamID = teamID
+	}
 }
 
 // BootstrapMounts schedules sandbox bootstrap mounts and optionally waits for them
@@ -174,6 +162,7 @@ func (m *Manager) mount(ctx context.Context, req *MountRequest, reserved bool) (
 	if req == nil {
 		return nil, fmt.Errorf("missing request")
 	}
+	m.applyIdentity(req)
 	if req.SandboxVolumeID == "" {
 		return nil, fmt.Errorf("missing volume id")
 	}
@@ -210,7 +199,7 @@ func (m *Manager) mount(ctx context.Context, req *MountRequest, reserved bool) (
 		m.mu.Unlock()
 	}()
 
-	info, err := m.mountWithSelectedBackend(ctx, req, mountPoint)
+	info, err := m.mountNodeLocal(ctx, req, mountPoint)
 	if err != nil {
 		m.finishMountWithError(req.SandboxVolumeID, mountPoint, err)
 		return nil, err
@@ -260,20 +249,7 @@ func (m *Manager) Unmount(ctx context.Context, volumeID, mountSessionID string) 
 		return ErrMountSessionNotFound
 	}
 
-	if info.cancelWatch != nil {
-		info.cancelWatch()
-		<-info.watchDone
-	}
-
-	if info.fuseServer != nil {
-		if err := info.fuseServer.Unmount(); err != nil {
-			if m.logger != nil {
-				m.logger.Warn("Failed to unmount fuse server", zap.Error(err))
-			}
-		}
-	}
-
-	if err := m.unmountMountedBackend(ctx, info); err != nil {
+	if err := m.unmountNodeLocal(ctx, info); err != nil {
 		return err
 	}
 
@@ -285,37 +261,6 @@ func (m *Manager) Unmount(ctx context.Context, volumeID, mountSessionID string) 
 	m.mu.Unlock()
 
 	return nil
-}
-
-func (m *Manager) mountWithSelectedBackend(ctx context.Context, req *MountRequest, mountPoint string) (*mountInfo, error) {
-	if normalizeMountMode(m.mountMode()) == MountModeNodeLocal {
-		info, err := m.mountNodeLocal(ctx, req, mountPoint)
-		if err == nil {
-			return info, nil
-		}
-		if !m.nodeLocalFallbackEnabled() {
-			return nil, err
-		}
-		if m.logger != nil {
-			m.logger.Warn("Node-local volume attach failed, falling back to storage-proxy FUSE",
-				zap.String("volume_id", req.SandboxVolumeID),
-				zap.String("mount_point", mountPoint),
-				zap.Error(err),
-			)
-		}
-	}
-	return m.mountStorageProxy(ctx, req, mountPoint)
-}
-
-func (m *Manager) mountMode() string {
-	if m.cfg == nil {
-		return MountModeStorageProxy
-	}
-	return m.cfg.MountMode
-}
-
-func (m *Manager) nodeLocalFallbackEnabled() bool {
-	return m.cfg != nil && m.cfg.NodeLocalFallbackToStorage
 }
 
 func (m *Manager) mountNodeLocal(ctx context.Context, req *MountRequest, mountPoint string) (*mountInfo, error) {
@@ -351,65 +296,8 @@ func (m *Manager) mountNodeLocal(ctx context.Context, req *MountRequest, mountPo
 		mountSessionID: strings.TrimSpace(resp.MountSessionID),
 		backend:        MountBackendNodeLocal,
 		attachmentID:   strings.TrimSpace(resp.AttachmentID),
-		watchDone:      make(chan struct{}),
 	}
-	close(info.watchDone)
 	return info, nil
-}
-
-func (m *Manager) mountStorageProxy(ctx context.Context, req *MountRequest, mountPoint string) (*mountInfo, error) {
-	if m.mountStorageProxyHook != nil {
-		return m.mountStorageProxyHook(ctx, req, mountPoint)
-	}
-
-	client, err := m.getClient(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	volumeConfig := m.mergeVolumeConfig(req.VolumeConfig)
-	mountSessionID, mountSessionSecret, err := m.mountVolumeRemote(ctx, client, req.SandboxVolumeID, volumeConfig)
-	if err != nil {
-		return nil, err
-	}
-
-	cacheTTL := time.Duration(0)
-	if m.cfg != nil {
-		cacheTTL = m.cfg.CacheTTL
-	}
-	fs := newGrpcFS(req.SandboxVolumeID, mountSessionID, mountSessionSecret, client, m.tokenProvider, cacheTTL, m.logger)
-	server, err := m.mountFuse(fs, mountPoint)
-	if err != nil {
-		_ = m.unmountVolumeRemote(ctx, client, req.SandboxVolumeID, mountSessionID, mountSessionSecret)
-		return nil, err
-	}
-
-	info := &mountInfo{
-		volumeID:       req.SandboxVolumeID,
-		mountPoint:     mountPoint,
-		sandboxID:      req.SandboxID,
-		mountedAt:      time.Now(),
-		mountSessionID: mountSessionID,
-		mountSecret:    mountSessionSecret,
-		backend:        MountBackendStorageProxyFuse,
-		fuseServer:     server,
-		fs:             fs,
-		watchDone:      make(chan struct{}),
-	}
-	m.startWatch(info, req)
-	return info, nil
-}
-
-func (m *Manager) unmountMountedBackend(ctx context.Context, info *mountInfo) error {
-	if info == nil {
-		return ErrVolumeNotMounted
-	}
-	switch info.backend {
-	case MountBackendNodeLocal:
-		return m.unmountNodeLocal(ctx, info)
-	default:
-		return m.unmountStorageProxy(ctx, info)
-	}
 }
 
 func (m *Manager) unmountNodeLocal(ctx context.Context, info *mountInfo) error {
@@ -426,17 +314,6 @@ func (m *Manager) unmountNodeLocal(ctx context.Context, info *mountInfo) error {
 		AttachmentID:    info.attachmentID,
 		MountSessionID:  info.mountSessionID,
 	})
-}
-
-func (m *Manager) unmountStorageProxy(ctx context.Context, info *mountInfo) error {
-	if m.unmountStorageProxyHook != nil {
-		return m.unmountStorageProxyHook(ctx, info)
-	}
-	client, err := m.getClient(ctx)
-	if err != nil {
-		return err
-	}
-	return m.unmountVolumeRemote(ctx, client, info.volumeID, info.mountSessionID, info.mountSecret)
 }
 
 // GetStatus returns mount statuses.
@@ -489,6 +366,26 @@ func (m *Manager) runBootstrapMount(req MountRequest) {
 	if _, err := m.mount(context.Background(), &req, true); err != nil {
 		return
 	}
+}
+
+func (m *Manager) applyIdentity(req *MountRequest) {
+	if req == nil {
+		return
+	}
+
+	m.mu.RLock()
+	sandboxID := m.sandboxID
+	teamID := m.teamID
+	m.mu.RUnlock()
+
+	if req.SandboxID == "" {
+		req.SandboxID = sandboxID
+	}
+	if req.TeamID == "" {
+		req.TeamID = teamID
+	}
+
+	m.SetIdentity(req.SandboxID, req.TeamID)
 }
 
 func (m *Manager) reserveMountLocked(volumeID, mountPoint string) error {
@@ -638,10 +535,12 @@ func (m *Manager) Cleanup() {
 
 	for _, info := range volumes {
 		if err := m.Unmount(context.Background(), info.volumeID, info.mountSessionID); err != nil {
-			m.logger.Warn("Failed to unmount volume during cleanup",
-				zap.String("volume_id", info.volumeID),
-				zap.Error(err),
-			)
+			if m.logger != nil {
+				m.logger.Warn("Failed to unmount volume during cleanup",
+					zap.String("volume_id", info.volumeID),
+					zap.Error(err),
+				)
+			}
 		}
 	}
 }
@@ -675,78 +574,6 @@ func (m *Manager) ensureMountPoint(path string) error {
 		return fmt.Errorf("create mount point: %w", err)
 	}
 	return nil
-}
-
-func (m *Manager) getClient(ctx context.Context) (pb.FileSystemClient, error) {
-	m.mu.RLock()
-	if m.client != nil {
-		client := m.client
-		m.mu.RUnlock()
-		return client, nil
-	}
-	m.mu.RUnlock()
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.client != nil {
-		return m.client, nil
-	}
-
-	if m.cfg == nil || strings.TrimSpace(m.cfg.ProxyBaseURL) == "" || m.cfg.ProxyPort <= 0 {
-		return nil, ErrStorageProxyUnavailable
-	}
-
-	addr := fmt.Sprintf("%s:%d", strings.TrimSpace(m.cfg.ProxyBaseURL), m.cfg.ProxyPort)
-	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	conn, err := grpc.DialContext(
-		dialCtx,
-		addr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithDefaultCallOptions(
-			grpc.MaxCallRecvMsgSize(m.cfg.GRPCMaxMsgSize),
-			grpc.MaxCallSendMsgSize(m.cfg.GRPCMaxMsgSize),
-		),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("dial storage-proxy: %w", err)
-	}
-
-	m.conn = conn
-	m.client = pb.NewFileSystemClient(conn)
-	return m.client, nil
-}
-
-func (m *Manager) withToken(ctx context.Context) (context.Context, error) {
-	if m.tokenProvider == nil {
-		return nil, ErrMissingInternalToken
-	}
-	token := strings.TrimSpace(m.tokenProvider.GetInternalToken())
-	if token == "" {
-		return nil, ErrMissingInternalToken
-	}
-	return metadata.AppendToOutgoingContext(ctx, "x-internal-token", token), nil
-}
-
-func withSessionCredential(ctx context.Context, sessionID, sessionSecret string) (context.Context, error) {
-	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(sessionSecret) == "" {
-		return nil, fmt.Errorf("missing mount session credential")
-	}
-	return metadata.AppendToOutgoingContext(
-		ctx,
-		strings.ToLower(internalauth.VolumeSessionIDHeader), sessionID,
-		strings.ToLower(internalauth.VolumeSessionSecretHeader), sessionSecret,
-	), nil
-}
-
-func (m *Manager) mergeVolumeConfig(override *VolumeConfig) *pb.VolumeConfig {
-	return &pb.VolumeConfig{
-		CacheSize:  effectiveCacheSize(m.cfg, override),
-		Prefetch:   int32(effectivePrefetch(m.cfg, override)),
-		BufferSize: effectiveBufferSize(m.cfg, override),
-		Writeback:  effectiveWriteback(m.cfg, override),
-	}
 }
 
 func effectiveCacheSize(cfg *Config, override *VolumeConfig) string {
@@ -787,239 +614,4 @@ func effectiveWriteback(cfg *Config, override *VolumeConfig) bool {
 		return cfg.JuiceFSWriteback
 	}
 	return false
-}
-
-func (m *Manager) mountVolumeRemote(ctx context.Context, client pb.FileSystemClient, volumeID string, cfg *pb.VolumeConfig) (string, string, error) {
-	callCtx, err := m.withToken(ctx)
-	if err != nil {
-		return "", "", err
-	}
-	resp, err := client.MountVolume(callCtx, &pb.MountVolumeRequest{
-		VolumeId: volumeID,
-		Config:   cfg,
-	})
-	if err != nil {
-		return "", "", fmt.Errorf("mount volume via storage-proxy: %w", err)
-	}
-	if resp == nil || resp.MountSessionId == "" {
-		return "", "", fmt.Errorf("mount volume via storage-proxy: missing mount session id")
-	}
-	if strings.TrimSpace(resp.MountSessionSecret) == "" {
-		return "", "", fmt.Errorf("mount volume via storage-proxy: missing mount session secret")
-	}
-	return resp.MountSessionId, resp.MountSessionSecret, nil
-}
-
-func (m *Manager) unmountVolumeRemote(ctx context.Context, client pb.FileSystemClient, volumeID, mountSessionID, mountSessionSecret string) error {
-	callCtx, err := withSessionCredential(ctx, mountSessionID, mountSessionSecret)
-	if err != nil {
-		callCtx, err = m.withToken(ctx)
-	}
-	if err != nil {
-		return err
-	}
-	_, err = client.UnmountVolume(callCtx, &pb.UnmountVolumeRequest{
-		VolumeId:       volumeID,
-		MountSessionId: mountSessionID,
-	})
-	if err != nil {
-		return fmt.Errorf("unmount volume via storage-proxy: %w", err)
-	}
-	return nil
-}
-
-func (m *Manager) ackInvalidate(ctx context.Context, volumeID, mountSessionID, mountSessionSecret, invalidateID string, remountErr error) {
-	if volumeID == "" || mountSessionID == "" || invalidateID == "" {
-		return
-	}
-	client, err := m.getClient(ctx)
-	if err != nil {
-		m.logger.Warn("Failed to get storage-proxy client to ack invalidate", zap.Error(err))
-		return
-	}
-	callCtx, err := withSessionCredential(ctx, mountSessionID, mountSessionSecret)
-	if err != nil {
-		callCtx, err = m.withToken(ctx)
-	}
-	if err != nil {
-		m.logger.Warn("Failed to get internal token to ack invalidate", zap.Error(err))
-		return
-	}
-	success := remountErr == nil
-	errorMessage := ""
-	if remountErr != nil {
-		errorMessage = remountErr.Error()
-	}
-	_, err = client.AckInvalidate(callCtx, &pb.AckInvalidateRequest{
-		VolumeId:       volumeID,
-		MountSessionId: mountSessionID,
-		InvalidateId:   invalidateID,
-		Success:        success,
-		ErrorMessage:   errorMessage,
-	})
-	if err != nil {
-		m.logger.Warn("Failed to ack invalidate", zap.Error(err))
-	}
-}
-
-func (m *Manager) mountFuse(fs *grpcFS, mountPoint string) (*fuse.Server, error) {
-	opt := &fuse.MountOptions{
-		FsName:        "sandbox0-volume",
-		Name:          "sandbox0-volume",
-		MaxBackground: 64,
-		EnableLocks:   true,
-		AllowOther:    os.Getuid() == 0,
-		DirectMount:   true,
-		MaxWrite:      128 * 1024,
-	}
-
-	server, err := fuse.NewServer(fs, mountPoint, opt)
-	if err != nil {
-		return nil, fmt.Errorf("mount fuse: %w", err)
-	}
-
-	go server.Serve()
-	if err := server.WaitMount(); err != nil {
-		_ = server.Unmount()
-		return nil, fmt.Errorf("wait for fuse mount: %w", err)
-	}
-	return server, nil
-}
-
-func (m *Manager) startWatch(info *mountInfo, req *MountRequest) {
-	client := info.fs.client
-	if client == nil {
-		close(info.watchDone)
-		return
-	}
-
-	watchReq := &pb.WatchRequest{
-		VolumeId:    req.SandboxVolumeID,
-		PathPrefix:  "",
-		Recursive:   true,
-		IncludeSelf: req.SandboxID == "",
-		SandboxId:   req.SandboxID,
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	info.cancelWatch = cancel
-
-	go func() {
-		defer close(info.watchDone)
-
-		callCtx, err := withSessionCredential(ctx, info.mountSessionID, info.mountSecret)
-		if err != nil {
-			callCtx, err = m.withToken(ctx)
-		}
-		if err != nil {
-			m.logger.Warn("Missing storage-proxy token for watch", zap.Error(err))
-			return
-		}
-		stream, err := client.WatchVolumeEvents(callCtx, watchReq)
-		if err != nil {
-			m.logger.Warn("Failed to watch volume events", zap.Error(err))
-			return
-		}
-
-		for {
-			event, err := stream.Recv()
-			if err != nil {
-				return
-			}
-			m.emitWatchEvent(info, event)
-		}
-	}()
-}
-
-func (m *Manager) emitWatchEvent(info *mountInfo, event *pb.WatchEvent) {
-	if event == nil {
-		return
-	}
-
-	if event.EventType == pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE && (event.Path == "" || event.Path == "/") {
-		go m.remountVolume(info.volumeID, info.mountSessionID, event.InvalidateId)
-		return
-	}
-
-	m.mu.RLock()
-	sink := m.eventSink
-	m.mu.RUnlock()
-	if sink == nil {
-		return
-	}
-
-	eventType := mapWatchEventType(event.EventType)
-	path := joinMountPath(info.mountPoint, event.Path)
-	oldPath := joinMountPath(info.mountPoint, event.OldPath)
-	if path == "" && oldPath == "" {
-		return
-	}
-
-	sink.Emit(fileWatchEvent(eventType, path, oldPath))
-}
-
-func joinMountPath(mountPoint, path string) string {
-	if path == "" {
-		return ""
-	}
-	trimmed := strings.TrimPrefix(path, "/")
-	return filepath.Join(mountPoint, trimmed)
-}
-
-func (m *Manager) remountVolume(volumeID, mountSessionID, invalidateID string) {
-	m.mu.Lock()
-	info, ok := m.mounts[volumeID]
-	if !ok || info == nil || info.remounting {
-		m.mu.Unlock()
-		return
-	}
-	info.remounting = true
-	mountPoint := info.mountPoint
-	m.mu.Unlock()
-	remountErr := error(nil)
-
-	defer func() {
-		m.mu.Lock()
-		if info, ok := m.mounts[volumeID]; ok && info != nil {
-			info.remounting = false
-		}
-		m.mu.Unlock()
-		if invalidateID != "" {
-			m.ackInvalidate(context.Background(), volumeID, mountSessionID, info.mountSecret, invalidateID, remountErr)
-		}
-	}()
-
-	m.logger.Info("Remounting volume to invalidate cache",
-		zap.String("volume_id", volumeID),
-		zap.String("mount_point", mountPoint),
-	)
-
-	if info.fuseServer != nil {
-		if err := info.fuseServer.Unmount(); err != nil {
-			m.logger.Warn("Failed to unmount fuse server during remount", zap.Error(err))
-		}
-	}
-
-	client, err := m.getClient(context.Background())
-	if err != nil {
-		remountErr = err
-		m.logger.Warn("Failed to get storage-proxy client during remount", zap.Error(err))
-		return
-	}
-
-	fs := newGrpcFS(volumeID, info.mountSessionID, info.mountSecret, client, m.tokenProvider, m.cfg.CacheTTL, m.logger)
-	server, err := m.mountFuse(fs, mountPoint)
-	if err != nil {
-		remountErr = err
-		m.logger.Warn("Failed to remount fuse server", zap.Error(err))
-		return
-	}
-
-	m.mu.Lock()
-	if info, ok := m.mounts[volumeID]; ok && info != nil {
-		info.fuseServer = server
-		info.fs = fs
-		info.mountedAt = time.Now()
-	}
-	m.mu.Unlock()
 }

@@ -16,11 +16,7 @@ import (
 )
 
 const (
-	MountModeStorageProxy = "storage-proxy"
-	MountModeNodeLocal    = "node-local"
-
-	MountBackendStorageProxyFuse = "storage-proxy-fuse"
-	MountBackendNodeLocal        = "ctld-bind"
+	MountBackendNodeLocal = "ctld-bind"
 )
 
 type CtldVolumeClient interface {
@@ -136,15 +132,4 @@ func (c *HTTPCtldVolumeClient) doJSON(ctx context.Context, method, requestPath s
 		return fmt.Errorf("decode ctld volume response: %w", err)
 	}
 	return nil
-}
-
-func normalizeMountMode(mode string) string {
-	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "", MountModeStorageProxy:
-		return MountModeStorageProxy
-	case MountModeNodeLocal:
-		return MountModeNodeLocal
-	default:
-		return MountModeStorageProxy
-	}
 }

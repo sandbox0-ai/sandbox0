@@ -15,10 +15,6 @@ var (
 	ErrInvalidMountPoint = errors.New("invalid mount point")
 	// ErrMountSessionNotFound indicates the mount session is not found.
 	ErrMountSessionNotFound = errors.New("mount session not found")
-	// ErrMissingInternalToken indicates the storage-proxy token is missing.
-	ErrMissingInternalToken = errors.New("missing internal token")
-	// ErrStorageProxyUnavailable indicates storage-proxy config is missing.
-	ErrStorageProxyUnavailable = errors.New("storage-proxy unavailable")
 	// ErrNodeLocalMountUnavailable indicates node-local volume attach is not configured.
 	ErrNodeLocalMountUnavailable = errors.New("node-local volume mount unavailable")
 )

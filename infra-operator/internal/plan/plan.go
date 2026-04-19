@@ -512,23 +512,10 @@ func compileManagerRuntimeConfig(managerPlan *ManagerPlan, infra *infrav1alpha1.
 			}
 		}
 	}
-
-	storageProxyConfig := &apiconfig.StorageProxyConfig{}
-	storageProxyServiceConfig := (*infrav1alpha1.ServiceNetworkConfig)(nil)
-	if infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil {
-		if infra.Spec.Services.StorageProxy.Config != nil {
-			storageProxyConfig = runtimeconfig.ToStorageProxy(infra.Spec.Services.StorageProxy.Config)
-		}
-		storageProxyServiceConfig = infra.Spec.Services.StorageProxy.Service
-	}
 	if infrav1alpha1.IsStorageProxyEnabled(infra) {
-		cfg.ProcdConfig.StorageProxyBaseURL = fmt.Sprintf("%s-storage-proxy.%s.svc.cluster.local", infra.Name, infra.Namespace)
-		cfg.ProcdConfig.StorageProxyPort = int(common.ResolveServicePort(storageProxyServiceConfig, int32(storageProxyConfig.GRPCPort)))
-		cfg.StorageProxyBaseURL = cfg.ProcdConfig.StorageProxyBaseURL
+		cfg.StorageProxyBaseURL = fmt.Sprintf("%s-storage-proxy.%s.svc.cluster.local", infra.Name, infra.Namespace)
 		cfg.StorageProxyHTTPPort = storageProxyHTTPPort(infra)
 	} else {
-		cfg.ProcdConfig.StorageProxyBaseURL = ""
-		cfg.ProcdConfig.StorageProxyPort = 0
 		cfg.StorageProxyBaseURL = ""
 		cfg.StorageProxyHTTPPort = 0
 	}

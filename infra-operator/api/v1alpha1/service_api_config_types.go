@@ -343,16 +343,10 @@ type ProcdConfig struct {
 	// +kubebuilder:default="info"
 	LogLevel string `json:"logLevel,omitempty"`
 	// +optional
-	// +kubebuilder:default="storage-proxy"
-	MountMode string `json:"mountMode,omitempty"`
-	// +optional
 	CtldBaseURL string `json:"ctldBaseUrl,omitempty"`
 	// +optional
 	// +kubebuilder:default="5s"
 	CtldTimeout metav1.Duration `json:"ctldTimeout,omitempty"`
-	// +optional
-	// +kubebuilder:default=false
-	NodeLocalFallbackToStorage bool `json:"nodeLocalFallbackToStorage,omitempty"`
 	// +optional
 	// +kubebuilder:default="100"
 	JuiceFSCacheSize string `json:"juicefsCacheSize,omitempty"`

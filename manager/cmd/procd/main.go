@@ -131,24 +131,17 @@ func main() {
 		}
 	})
 
-	// Create shared token provider for storage-proxy communication
+	// Create shared token provider for ctld communication
 	tokenProvider := procdhttp.NewTokenProvider()
 
 	ctldBaseURL := resolveCtldBaseURL(cfg)
 	volumeCfg := &volume.Config{
-		ProxyBaseURL:               cfg.StorageProxyBaseURL,
-		ProxyPort:                  cfg.StorageProxyPort,
-		CacheMaxBytes:              cfg.CacheMaxBytes,
-		CacheTTL:                   cfg.CacheTTL.Duration,
-		MountMode:                  cfg.MountMode,
-		CtldBaseURL:                ctldBaseURL,
-		CtldTimeout:                cfg.CtldTimeout.Duration,
-		NodeLocalFallbackToStorage: cfg.NodeLocalFallbackToStorage,
-		JuiceFSCacheSize:           cfg.JuiceFSCacheSize,
-		JuiceFSPrefetch:            cfg.JuiceFSPrefetch,
-		JuiceFSBufferSize:          cfg.JuiceFSBufferSize,
-		JuiceFSWriteback:           cfg.JuiceFSWriteback,
-		GRPCMaxMsgSize:             100 * 1024 * 1024, // could be made configurable if added to ProcdConfig
+		CtldBaseURL:       ctldBaseURL,
+		CtldTimeout:       cfg.CtldTimeout.Duration,
+		JuiceFSCacheSize:  cfg.JuiceFSCacheSize,
+		JuiceFSPrefetch:   cfg.JuiceFSPrefetch,
+		JuiceFSBufferSize: cfg.JuiceFSBufferSize,
+		JuiceFSWriteback:  cfg.JuiceFSWriteback,
 	}
 	volumeManager := volume.NewManager(volumeCfg, tokenProvider, logger)
 
@@ -156,7 +149,6 @@ func main() {
 	if err != nil {
 		logger.Fatal("Failed to create file manager", zap.Error(err))
 	}
-	volumeManager.SetEventSink(fileManager)
 
 	// Initialize internal auth validator
 	publicKey, err := internalauth.LoadEd25519PublicKeyFromFile(internalauth.DefaultInternalJWTPublicKeyPath)

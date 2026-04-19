@@ -1641,12 +1641,6 @@ spec:
                               logLevel:
                                 default: info
                                 type: string
-                              mountMode:
-                                default: storage-proxy
-                                type: string
-                              nodeLocalFallbackToStorage:
-                                default: false
-                                type: boolean
                               rootPath:
                                 default: /workspace
                                 type: string

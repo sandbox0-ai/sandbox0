@@ -1,27 +1,11 @@
 package volume
 
-import (
-	"time"
-
-	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/file"
-)
+import "time"
 
 // Config holds configuration for the volume manager.
 type Config struct {
-	ProxyBaseURL   string
-	ProxyPort      int
-	CacheMaxBytes  int64
-	CacheTTL       time.Duration
-	GRPCMaxMsgSize int
-
-	// MountMode selects the runtime volume attach path. The default keeps the
-	// existing storage-proxy backed FUSE path. "node-local" asks ctld to bind a
-	// node-local mount into this sandbox so storage-proxy is not in the
-	// per-file-operation data path.
-	MountMode                  string
-	CtldBaseURL                string
-	CtldTimeout                time.Duration
-	NodeLocalFallbackToStorage bool
+	CtldBaseURL string
+	CtldTimeout time.Duration
 
 	// Default JuiceFS cache config for mounted volumes.
 	JuiceFSCacheSize  string
@@ -82,12 +66,7 @@ const (
 	MountStateFailed   = "failed"
 )
 
-// TokenProvider supplies the internal token for storage-proxy gRPC calls.
+// TokenProvider supplies the internal token for node-local ctld calls.
 type TokenProvider interface {
 	GetInternalToken() string
-}
-
-// EventSink receives volume watch events for file watchers.
-type EventSink interface {
-	Emit(event file.WatchEvent)
 }

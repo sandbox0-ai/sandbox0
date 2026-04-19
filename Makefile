@@ -200,6 +200,7 @@ app-configs:
 
 proto: protoc
 	@printf "$(CYAN)Generating storage-proxy protobufs...$(RESET)\n"
+	@rm -f storage-proxy/proto/*.pb.go storage-proxy/proto/fs/*.pb.go
 	@mkdir -p storage-proxy/proto/fs
 	@PATH="$(LOCALBIN):$(PATH)" $(PROTOC) --go_out=. --go_opt=paths=source_relative \
 		storage-proxy/proto/filesystem.proto

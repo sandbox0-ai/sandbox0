@@ -223,6 +223,10 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					assertClaimBootstrapMountLifecycle(env, session)
 				})
 
+				It("keeps claim-mounted volumes writable", func() {
+					assertClaimMountedVolumeWritable(env, session)
+				})
+
 				It("rejects invalid bootstrap mount requests at claim time", func() {
 					assertClaimBootstrapMountValidation(env, session)
 				})
@@ -1848,22 +1852,50 @@ func assertClaimBootstrapMountLifecycle(env *framework.ScenarioEnv, session *e2e
 		body, _, readErr := session.ReadFile(env.TestCtx.Context, GinkgoT(), sandboxID, mountPoint+seedPath)
 		return body, readErr
 	}).WithTimeout(20 * time.Second).WithPolling(1 * time.Second).Should(Equal(seedContent))
+}
+
+func assertClaimMountedVolumeWritable(env *framework.ScenarioEnv, session *e2eutils.Session) {
+	volume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), apispec.CreateSandboxVolumeRequest{})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusCreated))
+	Expect(volume).NotTo(BeNil())
+	volumeID := expectStringPtr(volume.Id, "volume id")
+	DeferCleanup(func() {
+		Expect(session.DeleteSandboxVolumeEventually(env.TestCtx.Context, GinkgoT(), volumeID, 30*time.Second)).To(Succeed())
+	})
+
+	mountPoint := "/workspace/claim-writable"
+	templateID := createVolumePortalTemplate(env, session, mountPoint)
+	claimReq := apispec.ClaimRequest{
+		Template: &templateID,
+		Mounts: &[]apispec.ClaimMountRequest{{
+			SandboxvolumeId: volumeID,
+			MountPoint:      mountPoint,
+		}},
+	}
+	claimResp, err := session.ClaimSandboxWithRequest(env.TestCtx.Context, GinkgoT(), claimReq)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(claimResp).NotTo(BeNil())
+	sandboxID := claimResp.SandboxId
+	DeferCleanup(func() {
+		_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+	})
+	Expect(claimResp.BootstrapMounts).NotTo(BeNil())
+	Expect(*claimResp.BootstrapMounts).NotTo(BeEmpty())
+	Expect((*claimResp.BootstrapMounts)[0].State).To(Equal(apispec.MountStatusStateMounted))
 
 	latePath := "/late-after-claim.txt"
 	lateContent := fmt.Sprintf("late write after claim %d", time.Now().UnixNano())
 	processType := apispec.ProcessTypeCmd
 	ttlSec := int32(120)
-	envVars := map[string]string{
-		"S0_LATE_CONTENT": lateContent,
-		"S0_MOUNT_POINT":  mountPoint,
-	}
+	envVars := map[string]string{"S0_LATE_CONTENT": lateContent}
 	ctxReq := apispec.CreateContextRequest{
 		Type: &processType,
 		Cmd: &apispec.CreateCMDContextRequest{
 			Command: []string{
 				"/bin/sh",
 				"-lc",
-				"printf '%s' \"$S0_LATE_CONTENT\" > \"$S0_MOUNT_POINT/late-after-claim.txt\"; sync",
+				"printf '%s' \"$S0_LATE_CONTENT\" > /workspace/claim-writable/late-after-claim.txt; sync",
 			},
 		},
 		EnvVars: &envVars,

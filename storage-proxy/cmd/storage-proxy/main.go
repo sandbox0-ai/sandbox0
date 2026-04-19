@@ -27,7 +27,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	grpcserver "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/grpc"
 	httpserver "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/http"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/juicefs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/notify"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/snapshot"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volsync"
@@ -132,11 +131,6 @@ func main() {
 		meteringRepo = metering.NewRepository(pool)
 	} else {
 		zapLogger.Warn("DATABASE_URL not set, running without database persistence")
-	}
-
-	// Initialize JuiceFS filesystem if not already initialized
-	if err := initializeJuiceFS(cfg, zapLogger, storageProxyMetrics); err != nil {
-		zapLogger.Fatal("Failed to initialize JuiceFS", zap.Error(err))
 	}
 
 	// Create volume manager
@@ -619,62 +613,11 @@ func (a *volumeProviderAdapter) GetVolume(volumeID string) (coordinator.VolumeCo
 	if err != nil {
 		return nil, err
 	}
-	return &volumeContextAdapter{vfs: volCtx.VFS}, nil
+	return volCtx, nil
 }
 
 func (a *volumeProviderAdapter) ListVolumes() []string {
 	return a.volMgr.ListVolumes()
-}
-
-// volumeContextAdapter adapts VFS to coordinator.VolumeContext interface
-type volumeContextAdapter struct {
-	vfs interface{ FlushAll(string) error }
-}
-
-func (a *volumeContextAdapter) FlushAll(path string) error {
-	return a.vfs.FlushAll(path)
-}
-
-// initializeJuiceFS initializes the JuiceFS filesystem if not already initialized
-func initializeJuiceFS(cfg *config.StorageProxyConfig, logger *zap.Logger, metrics *obsmetrics.StorageProxyMetrics) error {
-	logger.Info("Checking JuiceFS initialization status")
-
-	// Skip if essential config is missing
-	if cfg.MetaURL == "" || cfg.S3Bucket == "" {
-		logger.Warn("JuiceFS config incomplete, skipping initialization",
-			zap.String("meta_url", cfg.MetaURL),
-			zap.String("s3_bucket", cfg.S3Bucket))
-		return nil
-	}
-
-	initConfig := &juicefs.InitConfig{
-		Name:                 cfg.JuiceFSName,
-		MetaURL:              cfg.MetaURL,
-		ObjectStorageType:    cfg.ObjectStorageType,
-		S3Bucket:             cfg.S3Bucket,
-		S3Region:             cfg.S3Region,
-		S3Endpoint:           cfg.S3Endpoint,
-		S3AccessKey:          cfg.S3AccessKey,
-		S3SecretKey:          cfg.S3SecretKey,
-		S3SessionToken:       cfg.S3SessionToken,
-		BlockSize:            cfg.JuiceFSBlockSize,
-		Compression:          cfg.JuiceFSCompression,
-		TrashDays:            cfg.JuiceFSTrashDays,
-		MetaRetries:          cfg.JuiceFSMetaRetries,
-		EncryptionEnabled:    cfg.JuiceFSEncryptionEnabled,
-		EncryptionKeyPath:    cfg.JuiceFSEncryptionKeyPath,
-		EncryptionPassphrase: cfg.JuiceFSEncryptionPassphrase,
-		EncryptionAlgo:       cfg.JuiceFSEncryptionAlgo,
-		Metrics:              metrics,
-	}
-
-	initializer := juicefs.NewInitializer(initConfig, logger)
-
-	if err := initializer.Initialize(); err != nil {
-		return fmt.Errorf("initialize juicefs: %w", err)
-	}
-
-	return nil
 }
 
 func buildSyncMaintenanceConfig(cfg *config.StorageProxyConfig) volsync.MaintenanceConfig {

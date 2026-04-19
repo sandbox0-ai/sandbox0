@@ -59,6 +59,9 @@ service FileSystem {
 
   // Volume event watch
   rpc WatchVolumeEvents(WatchRequest) returns (stream WatchEvent);
+
+  // Persistent mount session for multiplexed filesystem operations.
+  rpc MountSession(stream MountSessionRequest) returns (stream MountSessionResponse);
 }
 
 message PosixActor {
@@ -352,6 +355,97 @@ message WatchEvent {
   string origin_instance = 7;
   string origin_sandbox_id = 8;
   string invalidate_id = 9;
+}
+
+message PrimaryRedirect {
+  string volume_id = 1;
+  string primary_node_id = 2;
+  string primary_addr = 3;
+  uint64 epoch = 4;
+}
+
+message MountSessionHeartbeat {
+  int64 sent_at_unix = 1;
+}
+
+message MountSessionAck {
+  int64 received_at_unix = 1;
+}
+
+message MountSessionError {
+  int32 code = 1;
+  string message = 2;
+  PrimaryRedirect redirect = 3;
+}
+
+message LookupBatchRequest {
+  string volume_id = 1;
+  uint64 parent = 2;
+  repeated string names = 3;
+  PosixActor actor = 4;
+}
+
+message LookupBatchItem {
+  string name = 1;
+  NodeResponse node = 2;
+  MountSessionError error = 3;
+}
+
+message LookupBatchResponse {
+  repeated LookupBatchItem items = 1;
+}
+
+message MountSessionRequest {
+  string volume_id = 1;
+  uint64 request_id = 2;
+
+  oneof payload {
+    MountSessionHeartbeat heartbeat = 10;
+    LookupRequest lookup = 11;
+    LookupBatchRequest lookup_batch = 12;
+    GetAttrRequest get_attr = 13;
+    SetAttrRequest set_attr = 14;
+    MkdirRequest mkdir = 15;
+    CreateRequest create = 16;
+    UnlinkRequest unlink = 17;
+    RmdirRequest rmdir = 18;
+    RenameRequest rename = 19;
+    OpenRequest open = 20;
+    ReadRequest read = 21;
+    WriteRequest write = 22;
+    ReleaseRequest release = 23;
+    FlushRequest flush = 24;
+    FsyncRequest fsync = 25;
+    OpenDirRequest open_dir = 26;
+    ReadDirRequest read_dir = 27;
+    ReleaseDirRequest release_dir = 28;
+    StatFsRequest stat_fs = 29;
+    AccessRequest access = 30;
+    SymlinkRequest symlink = 31;
+    ReadlinkRequest readlink = 32;
+  }
+}
+
+message MountSessionResponse {
+  uint64 request_id = 1;
+
+  oneof payload {
+    MountSessionAck ack = 10;
+    NodeResponse node = 11;
+    LookupBatchResponse lookup_batch = 12;
+    GetAttrResponse attr = 13;
+    SetAttrResponse set_attr = 14;
+    OpenResponse open = 15;
+    ReadResponse read = 16;
+    WriteResponse write = 17;
+    ReadDirResponse read_dir = 18;
+    OpenDirResponse open_dir = 19;
+    StatFsResponse stat_fs = 20;
+    ReadlinkResponse readlink = 21;
+    Empty empty = 22;
+    WatchEvent watch_event = 23;
+    MountSessionError error = 24;
+  }
 }
 
 // Filesystem statistics

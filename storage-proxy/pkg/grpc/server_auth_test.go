@@ -17,6 +17,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/notify"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/pathnorm"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/router"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volsync"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
@@ -191,6 +192,53 @@ func TestMountVolumeTracksAuthorizedTeam(t *testing.T) {
 	}
 	if volMgr.trackedSessionID != "session-1" {
 		t.Fatalf("TrackVolumeSession() session = %q, want %q", volMgr.trackedSessionID, "session-1")
+	}
+}
+
+func TestMountVolumeRedirectsWhenRemotePrimary(t *testing.T) {
+	t.Parallel()
+
+	volMgr := &fakeVolumeManager{}
+	server := newTestFileSystemServer(volMgr, &fakeVolumeRepo{
+		volumes: map[string]*db.SandboxVolume{
+			"vol-1": {
+				ID:         "vol-1",
+				TeamID:     "team-a",
+				AccessMode: string(volume.AccessModeRWO),
+			},
+		},
+	}, nil)
+	volumeRouter := router.NewVolumeRouter()
+	volumeRouter.SetRoute(router.Route{
+		VolumeID:      "vol-1",
+		PrimaryNodeID: "node-b",
+		PrimaryAddr:   "10.0.0.2:8080",
+		Epoch:         7,
+		LocalPrimary:  false,
+	})
+	server.SetVolumeRouter(volumeRouter)
+
+	_, err := server.MountVolume(authContext("team-a", "sandbox-1"), &pb.MountVolumeRequest{VolumeId: "vol-1"})
+	if got := status.Code(err); got != codes.FailedPrecondition {
+		t.Fatalf("MountVolume() code = %v, want %v (err=%v)", got, codes.FailedPrecondition, err)
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		t.Fatalf("status.FromError() ok=false for %v", err)
+	}
+	var redirect *pb.PrimaryRedirect
+	for _, detail := range st.Details() {
+		value, ok := detail.(*pb.PrimaryRedirect)
+		if ok {
+			redirect = value
+			break
+		}
+	}
+	if redirect == nil || redirect.PrimaryAddr != "10.0.0.2:8080" || redirect.Epoch != 7 {
+		t.Fatalf("redirect = %+v", redirect)
+	}
+	if volMgr.mountCalls != 0 {
+		t.Fatalf("MountVolume() should not reach volume manager, got %d calls", volMgr.mountCalls)
 	}
 }
 

@@ -16,7 +16,6 @@ import (
 	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
-	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
@@ -90,7 +89,7 @@ type Manager struct {
 	logger            *logrus.Logger
 	clusterID         string
 	podID             string
-	metaClient        metaClient // Independent meta client for snapshot operations (no mount required)
+	metaClient        metaClient
 	eventPublisher    eventPublisher
 	meteringRepo      meteringRecorder
 	metrics           *obsmetrics.StorageProxyMetrics
@@ -104,33 +103,15 @@ func NewManager(
 	logger *logrus.Logger,
 	metrics *obsmetrics.StorageProxyMetrics,
 ) (*Manager, error) {
-	// Initialize independent JuiceFS meta client for snapshot operations.
-	// This allows snapshots to be created/restored/deleted without requiring the volume to be mounted.
-	metaConf := meta.DefaultConf()
-	metaConf.Retries = cfg.JuiceFSMetaRetries
-	if metaConf.Retries == 0 {
-		metaConf.Retries = 5
-	}
-	// Snapshot operations are read-only from the cache perspective
-	metaConf.ReadOnly = false
-	metaClient := meta.NewClient(cfg.MetaURL, metaConf)
-	if _, err := metaClient.Load(true); err != nil {
-		return nil, fmt.Errorf("load juicefs format: %w", err)
-	}
-	if err := metaClient.NewSession(false); err != nil {
-		return nil, fmt.Errorf("create meta session: %w", err)
-	}
-
 	return &Manager{
-		locks:      make(map[string]time.Time),
-		repo:       repo,
-		volMgr:     volMgr,
-		config:     cfg,
-		logger:     logger,
-		clusterID:  cfg.DefaultClusterId,
-		podID:      uuid.New().String(), // Unique pod identifier
-		metaClient: metaClient,          // Independent meta client
-		metrics:    metrics,
+		locks:     make(map[string]time.Time),
+		repo:      repo,
+		volMgr:    volMgr,
+		config:    cfg,
+		logger:    logger,
+		clusterID: cfg.DefaultClusterId,
+		podID:     uuid.New().String(), // Unique pod identifier
+		metrics:   metrics,
 	}, nil
 }
 
@@ -205,9 +186,7 @@ type ForkVolumeRequest struct {
 	DefaultPosixGID *int64
 }
 
-// CreateSnapshot creates a new snapshot of a volume using JuiceFS COW clone.
-// This operation does NOT require the volume to be mounted on this instance.
-// Uses a transaction to ensure data consistency and row-level locking to avoid deadlocks.
+// CreateSnapshot creates a new snapshot of a volume using the s0fs snapshot engine.
 func (m *Manager) CreateSnapshot(ctx context.Context, req *CreateSnapshotRequest) (*db.Snapshot, error) {
 	startTime := time.Now()
 	metrics := m.metrics
@@ -232,128 +211,7 @@ func (m *Manager) CreateSnapshot(ctx context.Context, req *CreateSnapshotRequest
 		m.logger.WithField("volume_id", req.VolumeID).Info("Distributed flush coordination completed")
 	}
 
-	var snapshot *db.Snapshot
-	var snapshotPath string
-
-	// Execute within a transaction to ensure atomicity
-	err := m.repo.WithTx(ctx, func(tx pgx.Tx) error {
-		// 1. Get volume with FOR UPDATE NOWAIT lock to prevent concurrent modifications
-		// This ensures exclusive access and fails immediately if locked (avoiding deadlock)
-		vol, err := m.repo.GetSandboxVolumeForUpdate(ctx, tx, req.VolumeID)
-		if err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				return ErrVolumeNotFound
-			}
-			// Check for lock timeout (55P03 is PostgreSQL lock_not_available)
-			var pgErr *pgconn.PgError
-			if errors.As(err, &pgErr) && pgErr.Code == "55P03" {
-				return ErrVolumeBusy
-			}
-			return fmt.Errorf("get volume: %w", err)
-		}
-
-		// Verify team ownership
-		if vol.TeamID != req.TeamID {
-			return ErrVolumeNotFound // Don't reveal existence
-		}
-
-		// 2. Optional: Try to flush local cached data if volume is mounted on this instance.
-		// Note: If coordinator is set, distributed flush was already done above.
-		// This local flush is a safety measure for instances that have the volume mounted.
-		if volCtx, err := m.volMgr.GetVolume(req.VolumeID); err == nil {
-			if err := volCtx.VFS.FlushAll(""); err != nil {
-				m.logger.WithError(err).Warn("Failed to flush VFS data before snapshot")
-				// Continue anyway - data should still be consistent
-			}
-		}
-
-		// 3. Look up the volume root directory using independent meta client
-		volumePath, err := naming.JuiceFSVolumePath(req.VolumeID)
-		if err != nil {
-			return err
-		}
-		parentIno, rootIno, err := m.lookupPath(volumePath)
-		if err != nil {
-			// A newly created volume can exist in DB before its JuiceFS namespace
-			// path is materialized. Create it lazily so snapshot APIs work without
-			// requiring a prior mount operation.
-			if errors.Is(err, errPathNotFound) {
-				if _, ensureErr := m.ensurePathExists(ctx, volumePath); ensureErr != nil {
-					return fmt.Errorf("ensure volume path: %w", ensureErr)
-				}
-				parentIno, rootIno, err = m.lookupPath(volumePath)
-			}
-			if err != nil {
-				return fmt.Errorf("lookup volume path: %w", err)
-			}
-		}
-
-		// 4. Ensure snapshot parent directory exists
-		snapshotID := uuid.New().String()
-		snapshotParentPath, err := naming.JuiceFSSnapshotParentPath(req.VolumeID)
-		if err != nil {
-			return err
-		}
-
-		snapshotParentIno, err := m.ensurePathExists(ctx, snapshotParentPath)
-		if err != nil {
-			return fmt.Errorf("ensure snapshot parent path: %w", err)
-		}
-
-		// 5. Clone volume root to snapshot location using JuiceFS COW
-		var cloneCount, cloneTotal uint64
-		jfsCtx := meta.Background()
-
-		errno := m.metaClient.Clone(jfsCtx, parentIno, rootIno, snapshotParentIno, snapshotID, 0, 0, &cloneCount, &cloneTotal)
-		if errno != 0 {
-			return fmt.Errorf("%w: %s", ErrCloneFailed, errno.Error())
-		}
-
-		m.logger.WithFields(logrus.Fields{
-			"volume_id":   req.VolumeID,
-			"snapshot_id": snapshotID,
-			"clone_count": cloneCount,
-			"clone_total": cloneTotal,
-		}).Info("JuiceFS clone completed")
-
-		// 6. Look up the new snapshot inode
-		snapshotPath, err = naming.JuiceFSSnapshotPath(req.VolumeID, snapshotID)
-		if err != nil {
-			return err
-		}
-		_, snapshotIno, err := m.lookupPath(snapshotPath)
-		if err != nil {
-			// Cleanup on error
-			m.deleteSnapshotDir(ctx, snapshotPath)
-			return fmt.Errorf("lookup snapshot path: %w", err)
-		}
-
-		// 7. Save snapshot metadata to database within the transaction
-		snapshot = &db.Snapshot{
-			ID:          snapshotID,
-			VolumeID:    req.VolumeID,
-			TeamID:      req.TeamID,
-			UserID:      req.UserID,
-			RootInode:   int64(snapshotIno),
-			SourceInode: int64(rootIno),
-			Name:        req.Name,
-			Description: req.Description,
-			SizeBytes:   0, // Logical size, can be computed later
-			CreatedAt:   time.Now(),
-		}
-
-		if err := m.repo.CreateSnapshotTx(ctx, tx, snapshot); err != nil {
-			// Cleanup: delete the cloned snapshot directory
-			m.logger.WithError(err).Error("Failed to save snapshot metadata, cleaning up")
-			m.deleteSnapshotDir(ctx, snapshotPath)
-			return fmt.Errorf("save snapshot: %w", err)
-		}
-		if err := m.appendMeteringEventTx(ctx, tx, snapshotCreatedEvent(m.regionID(), m.clusterID, snapshot)); err != nil {
-			return fmt.Errorf("append metering event: %w", err)
-		}
-
-		return nil
-	})
+	snapshot, err := m.createS0FSSnapshot(ctx, req)
 	if err != nil {
 		if metrics != nil {
 			metrics.SnapshotOperationsTotal.WithLabelValues("create", "failure").Inc()
@@ -376,7 +234,6 @@ func (m *Manager) CreateSnapshot(ctx context.Context, req *CreateSnapshotRequest
 		return nil, err
 	}
 
-	// Record success metrics
 	if metrics != nil {
 		metrics.SnapshotOperationsTotal.WithLabelValues("create", "success").Inc()
 		metrics.SnapshotOperationDuration.WithLabelValues("create").Observe(time.Since(startTime).Seconds())
@@ -402,8 +259,7 @@ func (m *Manager) CreateSnapshotSimple(ctx context.Context, req *CreateSnapshotR
 	return m.CreateSnapshot(ctx, req)
 }
 
-// ForkVolume creates a new volume using JuiceFS COW clone.
-// This operation does NOT require the source volume to be mounted.
+// ForkVolume creates a new volume using the s0fs snapshot engine state.
 func (m *Manager) ForkVolume(ctx context.Context, req *ForkVolumeRequest) (*db.SandboxVolume, error) {
 	startTime := time.Now()
 	metrics := m.metrics
@@ -426,151 +282,20 @@ func (m *Manager) ForkVolume(ctx context.Context, req *ForkVolumeRequest) (*db.S
 		m.logger.WithField("volume_id", req.SourceVolumeID).Info("Distributed flush coordination completed")
 	}
 
-	// 1. Get source volume and verify ownership
-	sourceVol, err := m.repo.GetSandboxVolume(ctx, req.SourceVolumeID)
+	vol, err := m.forkS0FSVolume(ctx, req)
 	if err != nil {
-		if errors.Is(err, db.ErrNotFound) {
-			return nil, ErrVolumeNotFound
-		}
-		return nil, fmt.Errorf("get source volume: %w", err)
-	}
-	if sourceVol.TeamID != req.TeamID {
-		return nil, ErrVolumeNotFound
-	}
-
-	// 2. Optional: Try to flush local cached data if volume is mounted on this instance.
-	if volCtx, err := m.volMgr.GetVolume(req.SourceVolumeID); err == nil {
-		if err := volCtx.VFS.FlushAll(""); err != nil {
-			m.logger.WithError(err).Warn("Failed to flush VFS data before fork")
-		}
-	}
-
-	// 3. Look up source volume path
-	sourcePath, err := naming.JuiceFSVolumePath(req.SourceVolumeID)
-	if err != nil {
-		return nil, err
-	}
-	sourceParentIno, sourceRootIno, err := m.lookupPath(sourcePath)
-	if err != nil {
-		if errors.Is(err, errPathNotFound) {
-			if _, ensureErr := m.ensurePathExists(ctx, sourcePath); ensureErr != nil {
-				return nil, fmt.Errorf("ensure volume path: %w", ensureErr)
-			}
-			sourceParentIno, sourceRootIno, err = m.lookupPath(sourcePath)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("lookup source volume path: %w", err)
-		}
-	}
-
-	// 4. Ensure volume parent directory exists
-	volumesParentPath := filepath.Dir(sourcePath)
-	volumesParentIno, err := m.ensurePathExists(ctx, volumesParentPath)
-	if err != nil {
-		return nil, fmt.Errorf("ensure volume parent path: %w", err)
-	}
-
-	// 5. Clone source to new volume using JuiceFS COW
-	newVolumeID := uuid.New().String()
-	var cloneCount, cloneTotal uint64
-	jfsCtx := meta.Background()
-	errno := m.metaClient.Clone(jfsCtx, sourceParentIno, sourceRootIno, volumesParentIno, newVolumeID, 0, 0, &cloneCount, &cloneTotal)
-	if errno != 0 {
-		return nil, fmt.Errorf("%w: %s", ErrCloneFailed, errno.Error())
-	}
-
-	m.logger.WithFields(logrus.Fields{
-		"source_volume_id": req.SourceVolumeID,
-		"new_volume_id":    newVolumeID,
-		"clone_count":      cloneCount,
-		"clone_total":      cloneTotal,
-	}).Info("JuiceFS clone completed")
-
-	// 6. Resolve volume configuration
-	cacheSize := sourceVol.CacheSize
-	if req.CacheSize != nil && strings.TrimSpace(*req.CacheSize) != "" {
-		cacheSize = *req.CacheSize
-	}
-	if cacheSize == "" {
-		cacheSize = "1G"
-	}
-
-	bufferSize := sourceVol.BufferSize
-	if req.BufferSize != nil && strings.TrimSpace(*req.BufferSize) != "" {
-		bufferSize = *req.BufferSize
-	}
-	if bufferSize == "" {
-		bufferSize = "32M"
-	}
-
-	prefetch := sourceVol.Prefetch
-	if req.Prefetch != nil {
-		prefetch = *req.Prefetch
-	}
-
-	writeback := sourceVol.Writeback
-	if req.Writeback != nil {
-		writeback = *req.Writeback
-	}
-
-	defaultPosixUID := sourceVol.DefaultPosixUID
-	defaultPosixGID := sourceVol.DefaultPosixGID
-	if req.DefaultPosixUID != nil || req.DefaultPosixGID != nil {
-		defaultPosixUID = req.DefaultPosixUID
-		defaultPosixGID = req.DefaultPosixGID
-	}
-
-	accessMode := volume.AccessModeRWO
-	if req.AccessMode != nil && strings.TrimSpace(*req.AccessMode) != "" {
-		parsedMode, ok := volume.ParseAccessMode(*req.AccessMode)
-		if !ok {
-			return nil, ErrInvalidAccessMode
-		}
-		accessMode = parsedMode
-	}
-
-	now := time.Now()
-	sourceID := sourceVol.ID
-	newVol := &db.SandboxVolume{
-		ID:              newVolumeID,
-		TeamID:          req.TeamID,
-		UserID:          req.UserID,
-		SourceVolumeID:  &sourceID,
-		DefaultPosixUID: defaultPosixUID,
-		DefaultPosixGID: defaultPosixGID,
-		CacheSize:       cacheSize,
-		Prefetch:        prefetch,
-		BufferSize:      bufferSize,
-		Writeback:       writeback,
-		AccessMode:      string(accessMode),
-		CreatedAt:       now,
-		UpdatedAt:       now,
-	}
-
-	if err := m.repo.WithTx(ctx, func(tx pgx.Tx) error {
-		if err := m.repo.CreateSandboxVolumeTx(ctx, tx, newVol); err != nil {
-			return err
-		}
-		if err := m.appendMeteringEventTx(ctx, tx, volumeForkedEvent(m.regionID(), m.clusterID, newVol)); err != nil {
-			return err
-		}
-		return nil
-	}); err != nil {
-		m.logger.WithError(err).Error("Failed to create forked volume record, cleaning up")
-		m.deleteVolumeDir(ctx, newVolumeID)
 		if metrics != nil {
 			metrics.SnapshotOperationsTotal.WithLabelValues("fork", "failure").Inc()
 			metrics.SnapshotOperationDuration.WithLabelValues("fork").Observe(time.Since(startTime).Seconds())
 		}
-		return nil, fmt.Errorf("create forked volume: %w", err)
+		return nil, err
 	}
-
 	if metrics != nil {
 		metrics.SnapshotOperationsTotal.WithLabelValues("fork", "success").Inc()
 		metrics.SnapshotOperationDuration.WithLabelValues("fork").Observe(time.Since(startTime).Seconds())
 	}
 
-	return newVol, nil
+	return vol, nil
 }
 
 // ListSnapshots returns all snapshots for a volume
@@ -618,7 +343,6 @@ type RestoreSnapshotRequest struct {
 }
 
 // RestoreSnapshot restores a volume to a previous snapshot state.
-// This operation does NOT require the volume to be mounted on this instance.
 func (m *Manager) RestoreSnapshot(ctx context.Context, req *RestoreSnapshotRequest) error {
 	m.logger.WithFields(logrus.Fields{
 		"volume_id":   req.VolumeID,
@@ -644,120 +368,7 @@ func (m *Manager) RestoreSnapshot(ctx context.Context, req *RestoreSnapshotReque
 	}
 	defer m.releaseVolumeLock(req.VolumeID)
 
-	// 3. Optional: Try to flush local cached data if volume is mounted on this instance.
-	if volCtx, err := m.volMgr.GetVolume(req.VolumeID); err == nil {
-		if err := volCtx.VFS.FlushAll(""); err != nil {
-			m.logger.WithError(err).Warn("Failed to flush VFS data before restore")
-		}
-	}
-
-	// 4. Look up paths using independent meta client
-	volumePath, err := naming.JuiceFSVolumePath(req.VolumeID)
-	if err != nil {
-		return err
-	}
-	parentIno, rootIno, err := m.lookupPath(volumePath)
-	if err != nil {
-		return fmt.Errorf("lookup volume path: %w", err)
-	}
-
-	jfsCtx := meta.Background()
-	_ = rootIno // Will be replaced by snapshot
-
-	// 5. Backup current volume by renaming
-	tempName := fmt.Sprintf(".restore_%d", time.Now().UnixNano())
-	volumeName := filepath.Base(volumePath)
-
-	var renamedIno meta.Ino
-	var renamedAttr meta.Attr
-	errno := m.metaClient.Rename(jfsCtx, parentIno, volumeName, parentIno, tempName, 0, &renamedIno, &renamedAttr)
-	if errno != 0 {
-		return fmt.Errorf("backup current volume failed: %s", errno.Error())
-	}
-
-	// 6. Clone snapshot to volume location
-	var cloneCount, cloneTotal uint64
-	snapshotPath, err := naming.JuiceFSSnapshotPath(req.VolumeID, req.SnapshotID)
-	if err != nil {
-		// Rollback: restore the backup
-		m.metaClient.Rename(jfsCtx, parentIno, tempName, parentIno, volumeName, 0, &renamedIno, &renamedAttr)
-		return err
-	}
-	snapshotParentIno, snapshotIno, err := m.lookupPath(snapshotPath)
-	if err != nil {
-		// Rollback: restore the backup
-		m.logger.WithError(err).Error("Failed to lookup snapshot path, rolling back")
-		m.metaClient.Rename(jfsCtx, parentIno, tempName, parentIno, volumeName, 0, &renamedIno, &renamedAttr)
-		return fmt.Errorf("lookup snapshot path: %w", err)
-	}
-
-	errno = m.metaClient.Clone(jfsCtx, snapshotParentIno, snapshotIno, parentIno, volumeName, 0, 0, &cloneCount, &cloneTotal)
-	if errno != 0 {
-		// Rollback: restore the backup
-		m.logger.WithError(errno).Error("Clone failed, rolling back")
-		m.metaClient.Rename(jfsCtx, parentIno, tempName, parentIno, volumeName, 0, &renamedIno, &renamedAttr)
-		return fmt.Errorf("%w: %s", ErrCloneFailed, errno.Error())
-	}
-
-	// 7. Refresh volume root inode for mounted volumes
-	if m.volMgr != nil {
-		if _, newRootIno, lookupErr := m.lookupPath(volumePath); lookupErr == nil {
-			if err := m.volMgr.UpdateVolumeRoot(req.VolumeID, newRootIno); err != nil {
-				m.logger.WithError(err).Warn("Failed to update volume root inode after restore")
-			}
-		} else {
-			m.logger.WithError(lookupErr).Warn("Failed to lookup volume path after restore")
-		}
-	}
-
-	// 8. Delete the backup
-	var removeCount uint64
-	tempPath, _ := naming.JuiceFSVolumePath(tempName)
-	tempIno, _, _ := m.lookupPath(tempPath)
-	if tempIno > 0 {
-		errno = m.metaClient.Remove(jfsCtx, parentIno, tempName, true, 4, &removeCount)
-		if errno != 0 {
-			m.logger.WithError(errno).Warn("Failed to cleanup backup directory")
-		}
-	}
-
-	if err := m.appendMeteringEvent(ctx, snapshotRestoredEvent(m.regionID(), m.clusterID, snapshot, req.VolumeID, req.TeamID, req.UserID)); err != nil {
-		return fmt.Errorf("append metering event: %w", err)
-	}
-
-	m.logger.WithFields(logrus.Fields{
-		"volume_id":   req.VolumeID,
-		"snapshot_id": req.SnapshotID,
-		"clone_count": cloneCount,
-	}).Info("Snapshot restored successfully")
-
-	invalidateID := uuid.New().String()
-	pending := 0
-	if m.volMgr != nil {
-		var beginErr error
-		pending, beginErr = m.volMgr.BeginInvalidate(req.VolumeID, invalidateID)
-		if beginErr != nil {
-			return fmt.Errorf("begin invalidate: %w", beginErr)
-		}
-	}
-	m.publishInvalidateEvent(req.VolumeID, invalidateID)
-	if pending > 0 && m.volMgr != nil {
-		timeout := 30 * time.Second
-		if m.config != nil && strings.TrimSpace(m.config.RestoreRemountTimeout) != "" {
-			if parsed, err := time.ParseDuration(m.config.RestoreRemountTimeout); err == nil {
-				timeout = parsed
-			}
-		}
-		waitCtx, cancel := context.WithTimeout(ctx, timeout)
-		defer cancel()
-		if err := m.volMgr.WaitForInvalidate(waitCtx, req.VolumeID, invalidateID); err != nil {
-			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-				return ErrRemountTimeout
-			}
-			return err
-		}
-	}
-	return nil
+	return m.restoreS0FSSnapshot(ctx, req, snapshot)
 }
 
 // DeleteSnapshot removes a snapshot.
@@ -826,14 +437,10 @@ func (m *Manager) DeleteSnapshot(ctx context.Context, volumeID, snapshotID, team
 		return err
 	}
 
-	// 3. Clean up JuiceFS directory outside the transaction using independent meta client
-	// This is done after the DB transaction to avoid long-running transactions
-	// If this fails, it's not critical as the snapshot metadata is already deleted
-	snapshotPath, err := naming.JuiceFSSnapshotPath(volumeID, snapshotID)
-	if err != nil {
-		m.logger.WithError(err).Warn("Invalid snapshot path, skipping JuiceFS cleanup")
-	} else {
-		m.deleteSnapshotDir(ctx, snapshotPath)
+	// 3. Clean up snapshot state outside the transaction.
+	// This is done after the DB transaction to avoid long-running transactions.
+	if cleanupErr := m.deleteS0FSSnapshot(ctx, volumeID, snapshotID); cleanupErr != nil {
+		m.logger.WithError(cleanupErr).Warn("Failed to delete s0fs snapshot state")
 	}
 
 	// Record success metrics
@@ -1036,33 +643,6 @@ func (m *Manager) deleteSnapshotDir(ctx context.Context, snapshotPath string) {
 	errno := m.metaClient.Remove(jfsCtx, parentIno, snapshotName, true, 4, &removeCount)
 	if errno != 0 && errno != syscall.ENOENT {
 		m.logger.WithError(errno).Warn("Failed to delete snapshot directory")
-	}
-}
-
-func (m *Manager) deleteVolumeDir(ctx context.Context, volumeID string) {
-	volumePath, err := naming.JuiceFSVolumePath(volumeID)
-	if err != nil {
-		m.logger.WithError(err).Warn("Invalid volume path, skipping JuiceFS cleanup")
-		return
-	}
-
-	parentIno, volumeIno, err := m.lookupPath(volumePath)
-	if err != nil {
-		m.logger.WithError(err).Warn("Failed to lookup volume path for deletion")
-		return
-	}
-
-	if volumeIno == 0 {
-		return
-	}
-
-	jfsCtx := meta.Background()
-	volumeName := filepath.Base(volumePath)
-
-	var removeCount uint64
-	errno := m.metaClient.Remove(jfsCtx, parentIno, volumeName, true, 4, &removeCount)
-	if errno != 0 && errno != syscall.ENOENT {
-		m.logger.WithError(errno).Warn("Failed to delete volume directory")
 	}
 }
 

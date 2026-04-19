@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -21,21 +22,38 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/pathnorm"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"github.com/sirupsen/logrus"
 )
 
 func newTestManager(repo *fakeRepo, volMgr volumeProvider) *Manager {
+	cacheDir, err := os.MkdirTemp("", "storage-proxy-snapshot-test-*")
+	if err != nil {
+		panic(err)
+	}
 	metaClient := newFakeMeta()
 	return &Manager{
 		repo:       repo,
 		volMgr:     volMgr,
-		config:     &config.StorageProxyConfig{DefaultClusterId: "test-cluster"},
+		config:     &config.StorageProxyConfig{DefaultClusterId: "test-cluster", CacheDir: cacheDir},
 		logger:     logrus.New(),
 		clusterID:  "test-cluster",
 		podID:      "test-pod",
 		locks:      make(map[string]time.Time),
 		metaClient: metaClient, // Independent meta client for testing
+	}
+}
+
+func seedS0FSSnapshot(t *testing.T, mgr *Manager, teamID, volumeID, snapshotID string) {
+	t.Helper()
+	engine, closeFn, err := mgr.openS0FSEngine(context.Background(), teamID, volumeID)
+	if err != nil {
+		t.Fatalf("open s0fs engine: %v", err)
+	}
+	defer closeFn()
+	if _, err := engine.CreateSnapshot(snapshotID); err != nil {
+		t.Fatalf("create snapshot state: %v", err)
 	}
 }
 
@@ -153,6 +171,9 @@ func (f *fakeVolumeProvider) GetVolume(volumeID string) (*volume.VolumeContext, 
 	f.lastVolumeID = volumeID
 	if f.err != nil {
 		return nil, f.err
+	}
+	if f.ctx != nil && f.ctx.VolumeID != "" && f.ctx.VolumeID != volumeID {
+		return nil, errors.New("not mounted")
 	}
 	return f.ctx, nil
 }
@@ -559,12 +580,8 @@ func TestCreateSnapshot_CreatesVolumePathWhenMissing(t *testing.T) {
 		t.Fatalf("expected snapshot to be created, got: %+v", snapshot)
 	}
 
-	volumePath, err := naming.JuiceFSVolumePath("vol1")
-	if err != nil {
-		t.Fatalf("volume path generation failed: %v", err)
-	}
-	if _, _, err := mgr.lookupPath(volumePath); err != nil {
-		t.Fatalf("volume path should exist after snapshot create, got: %v", err)
+	if _, err := s0fs.LoadSnapshot(context.Background(), mgr.s0fsConfig("team1", "vol1"), snapshot.ID); err != nil {
+		t.Fatalf("snapshot state should exist after create, got: %v", err)
 	}
 
 	if _, ok := repo.snapshots[snapshot.ID]; !ok {
@@ -586,6 +603,7 @@ func TestCreateSnapshot_CreatesVolumePathWhenMissing(t *testing.T) {
 
 func TestRestoreSnapshot_WaitsForInvalidateAck(t *testing.T) {
 	repo := newFakeRepo()
+	repo.volumes["vol1"] = &db.SandboxVolume{ID: "vol1", TeamID: "team1", UserID: "user1"}
 	repo.snapshots["snap1"] = &db.Snapshot{ID: "snap1", VolumeID: "vol1", TeamID: "team1"}
 	volMgr := &fakeVolumeProvider{
 		err:          errors.New("not mounted"),
@@ -593,20 +611,9 @@ func TestRestoreSnapshot_WaitsForInvalidateAck(t *testing.T) {
 	}
 	mgr := newTestManager(repo, volMgr)
 	mgr.config.RestoreRemountTimeout = "100ms"
+	seedS0FSSnapshot(t, mgr, "team1", "vol1", "snap1")
 
-	metaClient := mgr.metaClient.(*fakeMeta)
-	volumePath, err := naming.JuiceFSVolumePath("vol1")
-	if err != nil {
-		t.Fatalf("volume path generation failed: %v", err)
-	}
-	snapshotPath, err := naming.JuiceFSSnapshotPath("vol1", "snap1")
-	if err != nil {
-		t.Fatalf("snapshot path generation failed: %v", err)
-	}
-	metaClient.ensurePath(volumePath)
-	metaClient.ensurePath(snapshotPath)
-
-	err = mgr.RestoreSnapshot(context.Background(), &RestoreSnapshotRequest{
+	err := mgr.RestoreSnapshot(context.Background(), &RestoreSnapshotRequest{
 		VolumeID:   "vol1",
 		SnapshotID: "snap1",
 		TeamID:     "team1",
@@ -627,26 +634,16 @@ func TestRestoreSnapshot_WaitsForInvalidateAck(t *testing.T) {
 
 func TestRestoreSnapshot_SkipsInvalidateWaitWhenNoParticipantsRemain(t *testing.T) {
 	repo := newFakeRepo()
+	repo.volumes["vol1"] = &db.SandboxVolume{ID: "vol1", TeamID: "team1", UserID: "user1"}
 	repo.snapshots["snap1"] = &db.Snapshot{ID: "snap1", VolumeID: "vol1", TeamID: "team1"}
 	volMgr := &fakeVolumeProvider{
 		err:          errors.New("not mounted"),
 		beginPending: 0,
 	}
 	mgr := newTestManager(repo, volMgr)
+	seedS0FSSnapshot(t, mgr, "team1", "vol1", "snap1")
 
-	metaClient := mgr.metaClient.(*fakeMeta)
-	volumePath, err := naming.JuiceFSVolumePath("vol1")
-	if err != nil {
-		t.Fatalf("volume path generation failed: %v", err)
-	}
-	snapshotPath, err := naming.JuiceFSSnapshotPath("vol1", "snap1")
-	if err != nil {
-		t.Fatalf("snapshot path generation failed: %v", err)
-	}
-	metaClient.ensurePath(volumePath)
-	metaClient.ensurePath(snapshotPath)
-
-	err = mgr.RestoreSnapshot(context.Background(), &RestoreSnapshotRequest{
+	err := mgr.RestoreSnapshot(context.Background(), &RestoreSnapshotRequest{
 		VolumeID:   "vol1",
 		SnapshotID: "snap1",
 		TeamID:     "team1",
@@ -664,6 +661,7 @@ func TestRestoreSnapshot_SkipsInvalidateWaitWhenNoParticipantsRemain(t *testing.
 
 func TestRestoreSnapshot_RemountTimeout(t *testing.T) {
 	repo := newFakeRepo()
+	repo.volumes["vol1"] = &db.SandboxVolume{ID: "vol1", TeamID: "team1", UserID: "user1"}
 	repo.snapshots["snap1"] = &db.Snapshot{ID: "snap1", VolumeID: "vol1", TeamID: "team1"}
 	volMgr := &fakeVolumeProvider{
 		err:          errors.New("not mounted"),
@@ -672,23 +670,12 @@ func TestRestoreSnapshot_RemountTimeout(t *testing.T) {
 	}
 	mgr := newTestManager(repo, volMgr)
 	mgr.config.RestoreRemountTimeout = "1ms"
-
-	metaClient := mgr.metaClient.(*fakeMeta)
-	volumePath, err := naming.JuiceFSVolumePath("vol1")
-	if err != nil {
-		t.Fatalf("volume path generation failed: %v", err)
-	}
-	snapshotPath, err := naming.JuiceFSSnapshotPath("vol1", "snap1")
-	if err != nil {
-		t.Fatalf("snapshot path generation failed: %v", err)
-	}
-	metaClient.ensurePath(volumePath)
-	metaClient.ensurePath(snapshotPath)
+	seedS0FSSnapshot(t, mgr, "team1", "vol1", "snap1")
 
 	meteringRecorder := &fakeMeteringRecorder{}
 	mgr.SetMeteringRepository(meteringRecorder)
 
-	err = mgr.RestoreSnapshot(context.Background(), &RestoreSnapshotRequest{
+	err := mgr.RestoreSnapshot(context.Background(), &RestoreSnapshotRequest{
 		VolumeID:   "vol1",
 		SnapshotID: "snap1",
 		TeamID:     "team1",
@@ -702,14 +689,11 @@ func TestRestoreSnapshot_RemountTimeout(t *testing.T) {
 	if !volMgr.waitCalled {
 		t.Fatalf("expected WaitForInvalidate to be called")
 	}
-	if len(meteringRecorder.events) != 1 {
-		t.Fatalf("expected one metering event, got %d", len(meteringRecorder.events))
+	if len(meteringRecorder.events) != 0 {
+		t.Fatalf("expected no metering event on remount timeout, got %d", len(meteringRecorder.events))
 	}
-	if meteringRecorder.events[0].EventType != metering.EventTypeSnapshotRestored {
-		t.Fatalf("event type = %q, want %q", meteringRecorder.events[0].EventType, metering.EventTypeSnapshotRestored)
-	}
-	if len(meteringRecorder.watermarks) != 1 {
-		t.Fatalf("expected one watermark, got %d", len(meteringRecorder.watermarks))
+	if len(meteringRecorder.watermarks) != 0 {
+		t.Fatalf("expected no watermark on remount timeout, got %d", len(meteringRecorder.watermarks))
 	}
 }
 
@@ -744,6 +728,7 @@ func TestDeleteSnapshotRecordsMetering(t *testing.T) {
 
 func TestRestoreSnapshot_BeginInvalidateError(t *testing.T) {
 	repo := newFakeRepo()
+	repo.volumes["vol1"] = &db.SandboxVolume{ID: "vol1", TeamID: "team1", UserID: "user1"}
 	repo.snapshots["snap1"] = &db.Snapshot{ID: "snap1", VolumeID: "vol1", TeamID: "team1"}
 	beginErr := errors.New("begin failed")
 	volMgr := &fakeVolumeProvider{
@@ -751,25 +736,14 @@ func TestRestoreSnapshot_BeginInvalidateError(t *testing.T) {
 		beginErr: beginErr,
 	}
 	mgr := newTestManager(repo, volMgr)
+	seedS0FSSnapshot(t, mgr, "team1", "vol1", "snap1")
 
-	metaClient := mgr.metaClient.(*fakeMeta)
-	volumePath, err := naming.JuiceFSVolumePath("vol1")
-	if err != nil {
-		t.Fatalf("volume path generation failed: %v", err)
-	}
-	snapshotPath, err := naming.JuiceFSSnapshotPath("vol1", "snap1")
-	if err != nil {
-		t.Fatalf("snapshot path generation failed: %v", err)
-	}
-	metaClient.ensurePath(volumePath)
-	metaClient.ensurePath(snapshotPath)
-
-	err = mgr.RestoreSnapshot(context.Background(), &RestoreSnapshotRequest{
+	err := mgr.RestoreSnapshot(context.Background(), &RestoreSnapshotRequest{
 		VolumeID:   "vol1",
 		SnapshotID: "snap1",
 		TeamID:     "team1",
 	})
-	if err == nil || !strings.Contains(err.Error(), "begin invalidate") {
+	if !errors.Is(err, beginErr) {
 		t.Fatalf("expected begin invalidate error, got %v", err)
 	}
 	if !volMgr.beginCalled {

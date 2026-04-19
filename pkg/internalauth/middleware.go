@@ -26,6 +26,9 @@ const (
 
 	// VolumeSessionSecretHeader is the header for a storage-proxy mount session secret.
 	VolumeSessionSecretHeader = "X-Volume-Session-Secret"
+
+	// VolumeIDHeader carries the volume identifier for stream-scoped session auth.
+	VolumeIDHeader = "X-Volume-ID"
 )
 
 // TokenExtractor extracts the internal token from an HTTP request.

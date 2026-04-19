@@ -31,10 +31,11 @@ type MountRegistrar interface {
 
 // VolumeConfig holds the configuration for a volume
 type VolumeConfig struct {
-	CacheSize  string
-	Prefetch   int
-	BufferSize string
-	Writeback  bool
+	CacheSize   string
+	Prefetch    int
+	BufferSize  string
+	Writeback   bool
+	BackendType string
 }
 
 // VolumeContext holds the mounted runtime state for a volume.
@@ -118,19 +119,30 @@ type Manager struct {
 	logger           *logrus.Logger
 	config           *config.StorageProxyConfig
 	metrics          *obsmetrics.StorageProxyMetrics
-	backend          Backend
+	backends         map[string]Backend
+	defaultBackend   string
 	registrar        MountRegistrar // Optional: for distributed coordination
 }
 
 // NewManager creates a new volume manager
 func NewManager(logger *logrus.Logger, cfg *config.StorageProxyConfig) *Manager {
-	return NewManagerWithBackend(logger, cfg, nil)
+	return NewManagerWithBackends(logger, cfg, map[string]Backend{
+		BackendS0FS:    NewS0FSBackend(logger, cfg),
+		BackendJuiceFS: NewJuiceFSBackend(logger, cfg),
+	}, DefaultBackendType())
 }
 
 // NewManagerWithBackend creates a manager with an explicit storage backend.
 func NewManagerWithBackend(logger *logrus.Logger, cfg *config.StorageProxyConfig, backend Backend) *Manager {
 	if backend == nil {
-		backend = NewJuiceFSBackend(logger, cfg)
+		return NewManager(logger, cfg)
+	}
+	return NewManagerWithBackends(logger, cfg, map[string]Backend{"default": backend}, "default")
+}
+
+func NewManagerWithBackends(logger *logrus.Logger, cfg *config.StorageProxyConfig, backends map[string]Backend, defaultBackend string) *Manager {
+	if backends == nil {
+		backends = make(map[string]Backend)
 	}
 	return &Manager{
 		volumes:          make(map[string]*VolumeContext),
@@ -140,7 +152,8 @@ func NewManagerWithBackend(logger *logrus.Logger, cfg *config.StorageProxyConfig
 		invalidates:      make(map[string]map[string]*invalidateTracker),
 		logger:           logger,
 		config:           cfg,
-		backend:          backend,
+		backends:         backends,
+		defaultBackend:   defaultBackend,
 	}
 }
 
@@ -206,7 +219,12 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID st
 
 	m.logger.WithField("volume_id", volumeID).Info("Mounting volume")
 
-	volCtx, err := m.backend.MountVolume(ctx, BackendMountRequest{
+	backend, err := m.selectBackend(config)
+	if err != nil {
+		return "", "", time.Time{}, err
+	}
+
+	volCtx, err := backend.MountVolume(ctx, BackendMountRequest{
 		S3Prefix:   s3Prefix,
 		VolumeID:   volumeID,
 		TeamID:     teamID,
@@ -247,6 +265,24 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID st
 	}).Info("Volume mounted successfully")
 
 	return sessionID, sessionSecret, sessionTime, nil
+}
+
+func (m *Manager) selectBackend(config *VolumeConfig) (Backend, error) {
+	requested := m.defaultBackend
+	if config != nil && strings.TrimSpace(config.BackendType) != "" {
+		requested = NormalizeBackendType(config.BackendType)
+	}
+	if backend, ok := m.backends[requested]; ok && backend != nil {
+		return backend, nil
+	}
+	if len(m.backends) == 1 {
+		for _, backend := range m.backends {
+			if backend != nil {
+				return backend, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("storage backend %q is not configured", requested)
 }
 
 // AuthenticateMountSession validates a mount session credential for a specific
@@ -317,24 +353,6 @@ func resolveMountRoot(metaClient volumeRootMeta, path string, readOnly bool, ens
 		return 0, err
 	}
 	return ensureWritable(path)
-}
-
-func (m *Manager) ensureWritableVolumeRoot(path string) (meta.Ino, error) {
-	if m == nil || m.config == nil {
-		return 0, fmt.Errorf("storage proxy config is not available")
-	}
-
-	metaClient := meta.NewClient(m.config.MetaURL, buildMetaConf(m.config, false))
-	defer func() {
-		if err := metaClient.Shutdown(); err != nil && m.logger != nil {
-			m.logger.WithError(err).Warn("Failed to shutdown writable metadata client after root initialization")
-		}
-	}()
-	if _, err := metaClient.Load(true); err != nil {
-		return 0, fmt.Errorf("load writable metadata: %w", err)
-	}
-
-	return ensureVolumeRoot(metaClient, path)
 }
 
 func lookupVolumeRoot(metaClient volumeRootMeta, path string) (meta.Ino, error) {
@@ -428,7 +446,10 @@ func (m *Manager) UnmountVolume(ctx context.Context, volumeID, sessionID string)
 		}
 	}
 
-	if err := m.backend.UnmountVolume(ctx, volCtx); err != nil {
+	backend, err := m.selectBackend(&VolumeConfig{BackendType: volCtx.Backend})
+	if err != nil {
+		m.logger.WithError(err).Warn("Failed to resolve volume backend for unmount")
+	} else if err := backend.UnmountVolume(ctx, volCtx); err != nil {
 		m.logger.WithError(err).Warn("Backend volume unmount reported errors")
 	}
 

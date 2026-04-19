@@ -68,6 +68,11 @@ func (m *Manager) shouldUseS0FS(volumeID string) bool {
 			return volCtx.IsS0FS()
 		}
 	}
+	if m.repo != nil {
+		if volumeRecord, err := m.repo.GetSandboxVolume(context.Background(), volumeID); err == nil {
+			return volume.ResolveBackendType(volumeRecord.BackendType) == volume.BackendS0FS
+		}
+	}
 	baseDir := filepath.Join(m.config.CacheDir, "s0fs", volumeID)
 	if _, err := os.Stat(filepath.Join(baseDir, "head.json")); err == nil {
 		return true
@@ -398,6 +403,7 @@ func (m *Manager) forkS0FSVolume(ctx context.Context, req *ForkVolumeRequest) (*
 		BufferSize:      bufferSize,
 		Writeback:       writeback,
 		AccessMode:      string(accessMode),
+		BackendType:     volume.BackendS0FS,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}

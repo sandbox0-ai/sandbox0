@@ -3,12 +3,35 @@ package volume
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 )
 
-const BackendS0FS = "s0fs"
+const (
+	BackendJuiceFS = "juicefs"
+	BackendS0FS    = "s0fs"
+)
+
+func DefaultBackendType() string {
+	return BackendS0FS
+}
+
+func NormalizeBackendType(raw string) string {
+	return strings.TrimSpace(strings.ToLower(raw))
+}
+
+func ResolveBackendType(raw string) string {
+	switch NormalizeBackendType(raw) {
+	case BackendS0FS:
+		return BackendS0FS
+	case BackendJuiceFS:
+		return BackendJuiceFS
+	default:
+		return BackendJuiceFS
+	}
+}
 
 // Backend is the storage engine boundary behind storage-proxy volumes.
 // Implementations own filesystem metadata, file data, durability, and backend

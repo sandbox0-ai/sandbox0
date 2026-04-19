@@ -353,10 +353,11 @@ func (s *FileSystemServer) MountVolume(ctx context.Context, req *pb.MountVolumeR
 	accessMode := volume.NormalizeAccessMode(vol.AccessMode)
 
 	config := &volume.VolumeConfig{
-		CacheSize:  req.Config.CacheSize,
-		Prefetch:   int(req.Config.Prefetch),
-		BufferSize: req.Config.BufferSize,
-		Writeback:  req.Config.Writeback,
+		CacheSize:   req.Config.CacheSize,
+		Prefetch:    int(req.Config.Prefetch),
+		BufferSize:  req.Config.BufferSize,
+		Writeback:   req.Config.Writeback,
+		BackendType: volume.ResolveBackendType(vol.BackendType),
 	}
 
 	// Build S3 prefix with team ID for multi-tenant isolation (object-store namespace).

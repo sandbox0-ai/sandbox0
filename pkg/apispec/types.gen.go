@@ -1668,19 +1668,22 @@ type SandboxUpdateRequest struct {
 // SandboxVolume defines model for SandboxVolume.
 type SandboxVolume struct {
 	// AccessMode Access mode for sandbox volumes. Enforcement is scoped to storage-proxy instances. RWO allows read-write mounts on a single instance; ROX allows read-only mounts across instances; RWX allows read-write mounts across instances.
-	AccessMode      *VolumeAccessMode `json:"access_mode,omitempty"`
-	BufferSize      string            `json:"buffer_size"`
-	CacheSize       string            `json:"cache_size"`
-	CreatedAt       time.Time         `json:"created_at"`
-	DefaultPosixGid *int64            `json:"default_posix_gid"`
-	DefaultPosixUid *int64            `json:"default_posix_uid"`
-	Id              string            `json:"id"`
-	Prefetch        *int              `json:"prefetch,omitempty"`
-	SourceVolumeId  *string           `json:"source_volume_id"`
-	TeamId          string            `json:"team_id"`
-	UpdatedAt       time.Time         `json:"updated_at"`
-	UserId          string            `json:"user_id"`
-	Writeback       *bool             `json:"writeback,omitempty"`
+	AccessMode *VolumeAccessMode `json:"access_mode,omitempty"`
+
+	// BackendType Storage backend used by this volume. New volumes default to s0fs; legacy volumes may remain on juicefs until migrated.
+	BackendType     *string   `json:"backend_type,omitempty"`
+	BufferSize      string    `json:"buffer_size"`
+	CacheSize       string    `json:"cache_size"`
+	CreatedAt       time.Time `json:"created_at"`
+	DefaultPosixGid *int64    `json:"default_posix_gid"`
+	DefaultPosixUid *int64    `json:"default_posix_uid"`
+	Id              string    `json:"id"`
+	Prefetch        *int      `json:"prefetch,omitempty"`
+	SourceVolumeId  *string   `json:"source_volume_id"`
+	TeamId          string    `json:"team_id"`
+	UpdatedAt       time.Time `json:"updated_at"`
+	UserId          string    `json:"user_id"`
+	Writeback       *bool     `json:"writeback,omitempty"`
 }
 
 // SecurityContext defines model for SecurityContext.

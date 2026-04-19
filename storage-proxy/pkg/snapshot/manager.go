@@ -576,6 +576,7 @@ func (m *Manager) ForkVolume(ctx context.Context, req *ForkVolumeRequest) (*db.S
 		BufferSize:      bufferSize,
 		Writeback:       writeback,
 		AccessMode:      string(accessMode),
+		BackendType:     volume.ResolveBackendType(sourceVol.BackendType),
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}

@@ -11,6 +11,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/snapshot"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"github.com/sirupsen/logrus"
 )
 
@@ -58,6 +59,9 @@ func TestCreateSandboxVolumeStoresDefaultPosixIdentity(t *testing.T) {
 	if created.DefaultPosixGID == nil || *created.DefaultPosixGID != gid {
 		t.Fatalf("DefaultPosixGID = %v, want %d", created.DefaultPosixGID, gid)
 	}
+	if created.BackendType != volume.BackendS0FS {
+		t.Fatalf("BackendType = %q, want %q", created.BackendType, volume.BackendS0FS)
+	}
 
 	resp, apiErr, err := spec.DecodeResponse[db.SandboxVolume](recorder.Body)
 	if err != nil {
@@ -71,6 +75,9 @@ func TestCreateSandboxVolumeStoresDefaultPosixIdentity(t *testing.T) {
 	}
 	if resp.DefaultPosixGID == nil || *resp.DefaultPosixGID != gid {
 		t.Fatalf("response DefaultPosixGID = %v, want %d", resp.DefaultPosixGID, gid)
+	}
+	if resp.BackendType != volume.BackendS0FS {
+		t.Fatalf("response BackendType = %q, want %q", resp.BackendType, volume.BackendS0FS)
 	}
 }
 
@@ -101,6 +108,9 @@ func TestCreateSandboxVolumeDefaultsPosixIdentityToRoot(t *testing.T) {
 	}
 	if created.DefaultPosixGID == nil || *created.DefaultPosixGID != 0 {
 		t.Fatalf("DefaultPosixGID = %v, want 0", created.DefaultPosixGID)
+	}
+	if created.BackendType != volume.BackendS0FS {
+		t.Fatalf("BackendType = %q, want %q", created.BackendType, volume.BackendS0FS)
 	}
 }
 

@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"slices"
 	"sort"
 	"time"
 
@@ -285,15 +284,4 @@ func cloneSegment(segment *Segment) *Segment {
 	}
 	copy := *segment
 	return &copy
-}
-
-func cloneFileExtents(extents map[uint64][]FileExtent) map[uint64][]FileExtent {
-	if extents == nil {
-		return nil
-	}
-	cloned := make(map[uint64][]FileExtent, len(extents))
-	for inode, ranges := range extents {
-		cloned[inode] = slices.Clone(ranges)
-	}
-	return cloned
 }

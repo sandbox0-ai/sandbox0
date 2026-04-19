@@ -18,8 +18,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-const BackendJuiceFS = "juicefs"
-
 // JuiceFSBackend adapts the existing JuiceFS SDK/VFS runtime to the storage
 // backend boundary. It is kept as an implementation detail while s0fs is built.
 type JuiceFSBackend struct {

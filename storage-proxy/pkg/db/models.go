@@ -17,11 +17,12 @@ type SandboxVolume struct {
 	DefaultPosixGID *int64 `json:"default_posix_gid,omitempty"`
 
 	// Volume Configuration
-	CacheSize  string `json:"cache_size"`
-	Prefetch   int    `json:"prefetch"`
-	BufferSize string `json:"buffer_size"`
-	Writeback  bool   `json:"writeback"`
-	AccessMode string `json:"access_mode"`
+	CacheSize   string `json:"cache_size"`
+	Prefetch    int    `json:"prefetch"`
+	BufferSize  string `json:"buffer_size"`
+	Writeback   bool   `json:"writeback"`
+	AccessMode  string `json:"access_mode"`
+	BackendType string `json:"backend_type"`
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`

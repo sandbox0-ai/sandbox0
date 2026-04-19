@@ -9,8 +9,11 @@ import (
 
 	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/router"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestS0FSFileLifecycle(t *testing.T) {
@@ -252,6 +255,36 @@ func TestS0FSUnlinkAfterOpenUntilRelease(t *testing.T) {
 	}
 	if _, err := volCtx.S0FS.GetAttr(createResp.Inode); err == nil {
 		t.Fatal("GetAttr() after final release returned nil error")
+	}
+}
+
+func TestS0FSMutationRedirectsWhenRemotePrimary(t *testing.T) {
+	t.Parallel()
+
+	volCtx := newMountedS0FSVolumeContext(t, "vol-1", "team-a")
+	server := newTestFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{
+			"vol-1": volCtx,
+		},
+	}, nil, nil)
+	volumeRouter := router.NewVolumeRouter()
+	volumeRouter.SetRoute(router.Route{
+		VolumeID:      "vol-1",
+		PrimaryNodeID: "node-b",
+		PrimaryAddr:   "10.0.0.2:8080",
+		Epoch:         9,
+		LocalPrimary:  false,
+	})
+	server.SetVolumeRouter(volumeRouter)
+
+	_, err := server.Create(authContext("team-a", ""), &pb.CreateRequest{
+		VolumeId: "vol-1",
+		Parent:   1,
+		Name:     "blocked.txt",
+		Mode:     0o644,
+	})
+	if got := status.Code(err); got != codes.FailedPrecondition {
+		t.Fatalf("Create() code = %v, want %v (err=%v)", got, codes.FailedPrecondition, err)
 	}
 }
 

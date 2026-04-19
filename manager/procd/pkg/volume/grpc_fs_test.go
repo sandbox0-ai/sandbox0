@@ -97,4 +97,7 @@ func TestGrpcFSLookupUsesSessionCredentialWhenPresent(t *testing.T) {
 	if got := client.lookupMD["x-volume-session-secret"]; len(got) != 1 || got[0] != "secret-1" {
 		t.Fatalf("x-volume-session-secret = %v, want [secret-1]", got)
 	}
+	if got := client.lookupMD["x-volume-id"]; len(got) != 1 || got[0] != "vol-1" {
+		t.Fatalf("x-volume-id = %v, want [vol-1]", got)
+	}
 }

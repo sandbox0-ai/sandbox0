@@ -16,6 +16,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/notify"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/router"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volsync"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
@@ -35,6 +36,7 @@ type FileSystemServer struct {
 	eventBroadcaster  notify.Broadcaster
 	syncRecorder      syncRecorder
 	mutationBarrier   volumeMutationBarrier
+	volumeRouter      *router.VolumeRouter
 	logger            *logrus.Logger
 	now               func() time.Time
 	dirtyWriteMu      sync.Mutex
@@ -81,10 +83,18 @@ func NewFileSystemServer(volMgr volumeManager, volumeRepo VolumeRepository, even
 		eventBroadcaster:  eventBroadcaster,
 		syncRecorder:      syncRecorder,
 		mutationBarrier:   mutationBarrier,
+		volumeRouter:      router.NewVolumeRouter(),
 		logger:            logger,
 		now:               func() time.Time { return time.Now().UTC() },
 		dirtyWriteHandles: make(map[string]dirtyWriteHandle),
 	}
+}
+
+func (s *FileSystemServer) SetVolumeRouter(volumeRouter *router.VolumeRouter) {
+	if s == nil || volumeRouter == nil {
+		return
+	}
+	s.volumeRouter = volumeRouter
 }
 
 func (s *FileSystemServer) SetNowFunc(now func() time.Time) {
@@ -99,6 +109,35 @@ func (s *FileSystemServer) currentTime() time.Time {
 		return s.now()
 	}
 	return time.Now().UTC()
+}
+
+func (s *FileSystemServer) primaryRoute(volumeID string) router.Route {
+	if s == nil || s.volumeRouter == nil {
+		return router.Route{
+			VolumeID:     volumeID,
+			LocalPrimary: true,
+		}
+	}
+	return s.volumeRouter.Resolve(volumeID)
+}
+
+func (s *FileSystemServer) requireLocalPrimary(volumeID string) error {
+	route := s.primaryRoute(volumeID)
+	if route.LocalPrimary {
+		return nil
+	}
+
+	st := status.New(codes.FailedPrecondition, "volume primary is remote")
+	withDetails, err := st.WithDetails(&pb.PrimaryRedirect{
+		VolumeId:      volumeID,
+		PrimaryNodeId: route.PrimaryNodeID,
+		PrimaryAddr:   route.PrimaryAddr,
+		Epoch:         route.Epoch,
+	})
+	if err != nil {
+		return st.Err()
+	}
+	return withDetails.Err()
 }
 
 func vfsContextForActor(actor *pb.PosixActor) vfs.LogContext {
@@ -308,6 +347,9 @@ func (s *FileSystemServer) MountVolume(ctx context.Context, req *pb.MountVolumeR
 	if err != nil {
 		return nil, err
 	}
+	if err := s.requireLocalPrimary(req.VolumeId); err != nil {
+		return nil, err
+	}
 	accessMode := volume.NormalizeAccessMode(vol.AccessMode)
 
 	config := &volume.VolumeConfig{
@@ -415,6 +457,313 @@ func (s *FileSystemServer) WatchVolumeEvents(req *pb.WatchRequest, stream pb.Fil
 	}
 }
 
+func (s *FileSystemServer) MountSession(stream pb.FileSystem_MountSessionServer) error {
+	if stream == nil {
+		return status.Error(codes.InvalidArgument, "stream is required")
+	}
+
+	ctx := stream.Context()
+	var (
+		sendMu      sync.Mutex
+		wg          sync.WaitGroup
+		cancelWatch func()
+		watchReady  bool
+		volumeID    string
+	)
+
+	for {
+		req, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			if cancelWatch != nil {
+				cancelWatch()
+			}
+			wg.Wait()
+			return err
+		}
+		if req == nil {
+			continue
+		}
+		if req.VolumeId == "" {
+			req.VolumeId = volumeID
+		}
+		if req.VolumeId == "" {
+			if err := sendMountSessionResponse(&sendMu, stream, sessionErrorResponse(req.RequestId, status.Error(codes.InvalidArgument, "volume_id is required"))); err != nil {
+				return err
+			}
+			continue
+		}
+		if volumeID == "" {
+			volumeID = req.VolumeId
+		}
+		if req.VolumeId != volumeID {
+			if err := sendMountSessionResponse(&sendMu, stream, sessionErrorResponse(req.RequestId, status.Error(codes.InvalidArgument, "mount session volume_id mismatch"))); err != nil {
+				return err
+			}
+			continue
+		}
+		if !watchReady && s.eventHub != nil {
+			if _, err := s.getAuthorizedMountedVolume(ctx, volumeID); err != nil {
+				return err
+			}
+			watchReady = true
+			_, ch, cancel := s.eventHub.Subscribe(&pb.WatchRequest{
+				VolumeId:    volumeID,
+				Recursive:   true,
+				IncludeSelf: true,
+			})
+			cancelWatch = cancel
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case event, ok := <-ch:
+						if !ok {
+							return
+						}
+						if event == nil || event.EventType != pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE {
+							continue
+						}
+						if err := sendMountSessionResponse(&sendMu, stream, &pb.MountSessionResponse{
+							Payload: &pb.MountSessionResponse_WatchEvent{
+								WatchEvent: event,
+							},
+						}); err != nil {
+							return
+						}
+					}
+				}
+			}()
+		}
+
+		wg.Add(1)
+		go func(req *pb.MountSessionRequest) {
+			defer wg.Done()
+			resp := s.dispatchMountSessionRequest(ctx, req)
+			if err := sendMountSessionResponse(&sendMu, stream, resp); err != nil {
+				if s.logger != nil {
+					s.logger.WithError(err).WithField("volume_id", req.VolumeId).Debug("Failed to send mount session response")
+				}
+			}
+		}(req)
+	}
+
+	if cancelWatch != nil {
+		cancelWatch()
+	}
+	wg.Wait()
+	return nil
+}
+
+func sendMountSessionResponse(sendMu *sync.Mutex, stream pb.FileSystem_MountSessionServer, resp *pb.MountSessionResponse) error {
+	if resp == nil {
+		return nil
+	}
+	sendMu.Lock()
+	defer sendMu.Unlock()
+	return stream.Send(resp)
+}
+
+func (s *FileSystemServer) dispatchMountSessionRequest(ctx context.Context, req *pb.MountSessionRequest) *pb.MountSessionResponse {
+	if req == nil {
+		return sessionErrorResponse(0, status.Error(codes.InvalidArgument, "request is required"))
+	}
+
+	switch payload := req.Payload.(type) {
+	case *pb.MountSessionRequest_Heartbeat:
+		return &pb.MountSessionResponse{
+			RequestId: req.RequestId,
+			Payload: &pb.MountSessionResponse_Ack{
+				Ack: &pb.MountSessionAck{ReceivedAtUnix: s.currentTime().Unix()},
+			},
+		}
+	case *pb.MountSessionRequest_Lookup:
+		resp, err := s.Lookup(ctx, payload.Lookup)
+		if err != nil {
+			return sessionErrorResponse(req.RequestId, err)
+		}
+		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Node{Node: resp}}
+	case *pb.MountSessionRequest_LookupBatch:
+		resp := &pb.LookupBatchResponse{Items: make([]*pb.LookupBatchItem, 0, len(payload.LookupBatch.Names))}
+		for _, name := range payload.LookupBatch.Names {
+			node, err := s.Lookup(ctx, &pb.LookupRequest{
+				VolumeId: payload.LookupBatch.VolumeId,
+				Parent:   payload.LookupBatch.Parent,
+				Name:     name,
+				Actor:    payload.LookupBatch.Actor,
+			})
+			item := &pb.LookupBatchItem{Name: name, Node: node}
+			if err != nil {
+				item.Error = sessionErrorBody(err)
+			}
+			resp.Items = append(resp.Items, item)
+		}
+		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_LookupBatch{LookupBatch: resp}}
+	case *pb.MountSessionRequest_GetAttr:
+		resp, err := s.GetAttr(ctx, payload.GetAttr)
+		if err != nil {
+			return sessionErrorResponse(req.RequestId, err)
+		}
+		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Attr{Attr: resp}}
+	case *pb.MountSessionRequest_SetAttr:
+		resp, err := s.SetAttr(ctx, payload.SetAttr)
+		if err != nil {
+			return sessionErrorResponse(req.RequestId, err)
+		}
+		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_SetAttr{SetAttr: resp}}
+	case *pb.MountSessionRequest_Mkdir:
+		resp, err := s.Mkdir(ctx, payload.Mkdir)
+		if err != nil {
+			return sessionErrorResponse(req.RequestId, err)
+		}
+		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Node{Node: resp}}
+	case *pb.MountSessionRequest_Create:
+		resp, err := s.Create(ctx, payload.Create)
+		if err != nil {
+			return sessionErrorResponse(req.RequestId, err)
+		}
+		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Node{Node: resp}}
+	case *pb.MountSessionRequest_Unlink:
+		resp, err := s.Unlink(ctx, payload.Unlink)
+		if err != nil {
+			return sessionErrorResponse(req.RequestId, err)
+		}
+		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Empty{Empty: resp}}
+	case *pb.MountSessionRequest_Rmdir:
+		resp, err := s.Rmdir(ctx, payload.Rmdir)
+		if err != nil {
+			return sessionErrorResponse(req.RequestId, err)
+		}
+		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Empty{Empty: resp}}
+	case *pb.MountSessionRequest_Rename:
+		resp, err := s.Rename(ctx, payload.Rename)
+		if err != nil {
+			return sessionErrorResponse(req.RequestId, err)
+		}
+		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Empty{Empty: resp}}
+	case *pb.MountSessionRequest_Open:
+		resp, err := s.Open(ctx, payload.Open)
+		if err != nil {
+			return sessionErrorResponse(req.RequestId, err)
+		}
+		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Open{Open: resp}}
+	case *pb.MountSessionRequest_Read:
+		resp, err := s.Read(ctx, payload.Read)
+		if err != nil {
+			return sessionErrorResponse(req.RequestId, err)
+		}
+		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Read{Read: resp}}
+	case *pb.MountSessionRequest_Write:
+		resp, err := s.Write(ctx, payload.Write)
+		if err != nil {
+			return sessionErrorResponse(req.RequestId, err)
+		}
+		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Write{Write: resp}}
+	case *pb.MountSessionRequest_Release:
+		resp, err := s.Release(ctx, payload.Release)
+		if err != nil {
+			return sessionErrorResponse(req.RequestId, err)
+		}
+		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Empty{Empty: resp}}
+	case *pb.MountSessionRequest_Flush:
+		resp, err := s.Flush(ctx, payload.Flush)
+		if err != nil {
+			return sessionErrorResponse(req.RequestId, err)
+		}
+		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Empty{Empty: resp}}
+	case *pb.MountSessionRequest_Fsync:
+		resp, err := s.Fsync(ctx, payload.Fsync)
+		if err != nil {
+			return sessionErrorResponse(req.RequestId, err)
+		}
+		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Empty{Empty: resp}}
+	case *pb.MountSessionRequest_OpenDir:
+		resp, err := s.OpenDir(ctx, payload.OpenDir)
+		if err != nil {
+			return sessionErrorResponse(req.RequestId, err)
+		}
+		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_OpenDir{OpenDir: resp}}
+	case *pb.MountSessionRequest_ReadDir:
+		resp, err := s.ReadDir(ctx, payload.ReadDir)
+		if err != nil {
+			return sessionErrorResponse(req.RequestId, err)
+		}
+		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_ReadDir{ReadDir: resp}}
+	case *pb.MountSessionRequest_ReleaseDir:
+		resp, err := s.ReleaseDir(ctx, payload.ReleaseDir)
+		if err != nil {
+			return sessionErrorResponse(req.RequestId, err)
+		}
+		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Empty{Empty: resp}}
+	case *pb.MountSessionRequest_StatFs:
+		resp, err := s.StatFs(ctx, payload.StatFs)
+		if err != nil {
+			return sessionErrorResponse(req.RequestId, err)
+		}
+		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_StatFs{StatFs: resp}}
+	case *pb.MountSessionRequest_Access:
+		resp, err := s.Access(ctx, payload.Access)
+		if err != nil {
+			return sessionErrorResponse(req.RequestId, err)
+		}
+		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Empty{Empty: resp}}
+	case *pb.MountSessionRequest_Symlink:
+		resp, err := s.Symlink(ctx, payload.Symlink)
+		if err != nil {
+			return sessionErrorResponse(req.RequestId, err)
+		}
+		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Node{Node: resp}}
+	case *pb.MountSessionRequest_Readlink:
+		resp, err := s.Readlink(ctx, payload.Readlink)
+		if err != nil {
+			return sessionErrorResponse(req.RequestId, err)
+		}
+		return &pb.MountSessionResponse{RequestId: req.RequestId, Payload: &pb.MountSessionResponse_Readlink{Readlink: resp}}
+	default:
+		return sessionErrorResponse(req.RequestId, status.Error(codes.InvalidArgument, "unsupported mount session request"))
+	}
+}
+
+func sessionErrorResponse(requestID uint64, err error) *pb.MountSessionResponse {
+	return &pb.MountSessionResponse{
+		RequestId: requestID,
+		Payload: &pb.MountSessionResponse_Error{
+			Error: sessionErrorBody(err),
+		},
+	}
+}
+
+func sessionErrorBody(err error) *pb.MountSessionError {
+	if err == nil {
+		return nil
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		return &pb.MountSessionError{
+			Code:    int32(codes.Internal),
+			Message: err.Error(),
+		}
+	}
+
+	body := &pb.MountSessionError{
+		Code:    int32(st.Code()),
+		Message: st.Message(),
+	}
+	for _, detail := range st.Details() {
+		redirect, ok := detail.(*pb.PrimaryRedirect)
+		if ok {
+			body.Redirect = redirect
+			break
+		}
+	}
+	return body
+}
+
 func (s *FileSystemServer) publishEvent(ctx context.Context, event *pb.WatchEvent) {
 	if s.eventBroadcaster == nil || event == nil {
 		goto recordSync
@@ -454,6 +803,9 @@ recordSync:
 func withAuthorizedVolumeMutation[T any](s *FileSystemServer, ctx context.Context, volumeID string, fn func(context.Context, *volume.VolumeContext) (T, error)) (T, error) {
 	var zero T
 	run := func(runCtx context.Context) (T, error) {
+		if err := s.requireLocalPrimary(volumeID); err != nil {
+			return zero, err
+		}
 		volCtx, err := s.getAuthorizedMountedVolume(runCtx, volumeID)
 		if err != nil {
 			return zero, err

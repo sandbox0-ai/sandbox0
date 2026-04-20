@@ -1,17 +1,21 @@
 ---
 name: sandbox0
-description: Use this skill when an AI agent developer wants to add Sandbox0 sandboxing to their own agent through the CLI or SDK, or needs help choosing templates, contexts, volumes, network policy, ports, webhooks, or self-hosted deployment. It uses only files bundled inside the skill.
+description: Use this skill when an AI agent developer wants to integrate Sandbox0 sandboxes, templates, volumes, credentials, managed agents, CLI, SDKs, or self-hosted deployment. For current API, CLI, SDK, and Managed Agents details, always consult the live Sandbox0 docs.
 ---
 
 # Sandbox0
 
-Use this skill for Sandbox0 product usage and integration guidance for AI agent developers.
+Use this skill for Sandbox0 integration guidance for AI agent developers.
 
-## Start here
+## Source Of Truth
 
-1. Identify the user's integration goal.
-2. Read `references/integration-map.md`.
-3. Read only the relevant page under `references/docs-src/`.
+For exact API, CLI, SDK, and Managed Agents behavior, read the live docs first:
+
+- https://sandbox0.ai/llms.txt
+- https://sandbox0.ai/docs
+- https://sandbox0.ai/docs/managed-agents
+
+This skill is intentionally thin. Do not rely on local bundled docs for product details.
 
 ## Typical triggers
 
@@ -24,17 +28,19 @@ Use this skill for Sandbox0 product usage and integration guidance for AI agent 
 - Receive sandbox events through webhooks
 - Decide whether self-hosted Sandbox0 is needed
 
+## Stable Guidance
+
+- For long-running coding agents, prefer Sandbox + REPL context + Volume.
+- For one-shot work, prefer Sandbox + Cmd context.
+- For durable workspace state, use Volumes.
+- For restore points, use Volume snapshots.
+- For restricted outbound access, use network policy and credentials.
+- For Claude Managed Agents-compatible flows, use the official Anthropic SDK against Sandbox0 Managed Agents and store model credentials in vaults.
+- Prefer Sandbox0 Cloud unless the user asks for self-hosting, private deployment, or data-plane ownership.
+
 ## Working rules
 
+- Check live docs before giving exact SDK code, CLI flags, API fields, metadata keys, or deployment commands.
 - Prefer s0 CLI- and SDK-oriented guidance over internal implementation details.
 - Recommend concrete compositions when helpful, for example `REPL + Volume` for persistent coding sessions.
-- Use architecture detail only when it changes the user's design choice, security model, or deployment shape.
-
-## Which references to read
-
-- Topic routing and common solution shapes:
-  `references/integration-map.md`
-- Product docs and examples:
-  `references/docs-src/<section>/.../page.mdx`
-- Table of contents:
-  `references/docs-src/manifest.json`
+- Use architecture detail only when it changes the user's design choice, security model, persistence model, networking, or deployment tradeoff.

@@ -1,7 +1,0 @@
-interface:
-  display_name: "Sandbox0"
-  short_description: "Add Sandbox0 to your AI agent"
-  default_prompt: "Use $sandbox0 to help me add Sandbox0 sandboxing, persistence, or network controls to my AI agent."
-
-policy:
-  allow_implicit_invocation: true

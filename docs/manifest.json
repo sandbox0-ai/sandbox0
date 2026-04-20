@@ -24,6 +24,10 @@
           "title": "Overview"
         },
         {
+          "slug": "pause-resume",
+          "title": "Pause And Resume"
+        },
+        {
           "slug": "contexts",
           "title": "Contexts"
         },

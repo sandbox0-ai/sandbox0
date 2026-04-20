@@ -4,6 +4,10 @@ A Sandbox is an isolated execution environment where you can run code, manage fi
 
 For shell access and file copy over standard SSH clients, see [SSH](/docs/sandbox/ssh).
 
+<Callout variant="info">
+Sandbox0 Cloud clients should use `https://api.sandbox0.ai`. Set `SANDBOX0_BASE_URL` only when you are connecting to a self-hosted or private deployment.
+</Callout>
+
 ## Sandbox Model
 
 ### Key Identifiers
@@ -118,7 +122,7 @@ from sandbox0.apispec.models.sandbox_config import SandboxConfig
 
 client = Client(
     token=os.environ["SANDBOX0_TOKEN"],
-    base_url=os.environ.get("SANDBOX0_BASE_URL", "http://localhost:30080"),
+    base_url=os.environ.get("SANDBOX0_BASE_URL", "https://api.sandbox0.ai"),
 )
 
 # Claim a sandbox from the "default" template
@@ -141,7 +145,7 @@ client.delete_sandbox(sandbox.id)`
 
 const client = new Client({
     token: process.env.SANDBOX0_TOKEN!,
-    baseUrl: process.env.SANDBOX0_BASE_URL || 'http://localhost:30080',
+    baseUrl: process.env.SANDBOX0_BASE_URL || 'https://api.sandbox0.ai',
 });
 
 // Claim a sandbox from the "default" template
@@ -234,7 +238,7 @@ fmt.Printf("Status: %s\\n", status.Status.Value)`
     {
       label: "Python",
       language: "python",
-      code: `status = client.status_sandbox(sandbox.id)
+      code: `status = client.sandboxes.status(sandbox.id)
 print(f"Status: {status.status}")`
     },
     {
@@ -273,13 +277,45 @@ Read sandbox process output. Procd service logs are filtered out of this API and
 | `timestamps` | boolean | Include Kubernetes log timestamps when available |
 | `since_seconds` | integer | Return logs newer than this many seconds |
 
-    curl -H "Authorization: Bearer $SANDBOX0_TOKEN" \
-      "$SANDBOX0_BASE_URL/api/v1/sandboxes/sb_abc123/logs?tail_lines=200"
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `tailLines := int64(200)
+logs, err := sandbox.GetLogs(ctx, &sandbox0.SandboxLogsOptions{
+    TailLines: &tailLines,
+})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Print(logs.Logs)`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0.sandbox_logs import SandboxLogsOptions
 
-    curl -N -H "Authorization: Bearer $SANDBOX0_TOKEN" \
-      "$SANDBOX0_BASE_URL/api/v1/sandboxes/sb_abc123/logs?follow=true&tail_lines=50"
+logs = sandbox.get_logs(SandboxLogsOptions(tail_lines=200))
+print(logs.logs, end="")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const logs = await sandbox.getLogs({ tailLines: 200 });
+process.stdout.write(logs.logs);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 sandbox logs sb_abc123 --tail 200`
+    }
+  ]}
+/>
 
-With `follow=true`, the response stays open and streams log bytes until the client disconnects.
+<Callout variant="info">
+For live streaming, use `sandbox.StreamLogs(...)`, `sandbox.stream_logs(...)`, `sandbox.streamLogs(...)`, or `s0 sandbox logs --follow`.
+</Callout>
 
 ---
 
@@ -322,7 +358,7 @@ for _, sb := range sandboxes.Sandboxes {
     {
       label: "Python",
       language: "python",
-      code: `sandboxes = client.list_sandboxes(
+      code: `sandboxes = client.sandboxes.list(
     status="running",
     template_id="default",
     limit=10,
@@ -397,7 +433,7 @@ if err != nil {
       code: `from sandbox0.apispec.models.sandbox_update_config import SandboxUpdateConfig
 from sandbox0.apispec.models.sandbox_update_request import SandboxUpdateRequest
 
-client.update_sandbox(
+client.sandboxes.update(
     sandbox.id,
     SandboxUpdateRequest(config=SandboxUpdateConfig.from_dict({
         "ttl": 600,
@@ -422,90 +458,19 @@ client.update_sandbox(
 
 ---
 
-## Pause Sandbox
+## Pause And Resume
 
-Pause a sandbox to save resources. The sandbox state is preserved.
+Pause and resume is covered in a dedicated page because it affects TTL, `auto_resume`, exposed ports, SSH, and webhook behavior.
 
-<Endpoint method="POST">
-/api/v1/sandboxes/{'{id}'}/pause
-</Endpoint>
-
-<Callout variant="info">
-When a sandbox is paused, all processes are stopped but memory state is preserved.
-Use `auto_resume` to automatically resume when accessed.
-</Callout>
-
-<Tabs
-  tabs={[
-    {
-      label: "Go",
-      language: "go",
-      code: `_, err = client.PauseSandbox(ctx, sandbox.ID)
-if err != nil {
-    log.Fatal(err)
-}
-fmt.Println("Sandbox paused")`
-    },
-    {
-      label: "Python",
-      language: "python",
-      code: `client.pause_sandbox(sandbox.id)
-print("Sandbox paused")`
-    },
-    {
-      label: "TypeScript",
-      language: "typescript",
-      code: `await client.sandboxes.pause(sandbox.id);
-console.log('Sandbox paused');`
-    },
-    {
-      label: "CLI",
-      language: "bash",
-      code: `s0 sandbox pause sb_abc123`
-    }
-  ]}
-/>
-
----
-
-## Resume Sandbox
-
-Resume a paused sandbox.
-
-<Endpoint method="POST">
-/api/v1/sandboxes/{'{id}'}/resume
-</Endpoint>
-
-<Tabs
-  tabs={[
-    {
-      label: "Go",
-      language: "go",
-      code: `_, err = client.ResumeSandbox(ctx, sandbox.ID)
-if err != nil {
-    log.Fatal(err)
-}
-fmt.Println("Sandbox resumed")`
-    },
-    {
-      label: "Python",
-      language: "python",
-      code: `client.resume_sandbox(sandbox.id)
-print("Sandbox resumed")`
-    },
-    {
-      label: "TypeScript",
-      language: "typescript",
-      code: `await client.sandboxes.resume(sandbox.id);
-console.log('Sandbox resumed');`
-    },
-    {
-      label: "CLI",
-      language: "bash",
-      code: `s0 sandbox resume sb_abc123`
-    }
-  ]}
-/>
+<CardGrid>
+  <LinkCard
+    title="Pause And Resume"
+    href="/docs/sandbox/pause-resume"
+    cta="Learn More"
+  >
+    Pause sandboxes explicitly, inspect paused state, resume them, and control auto-resume behavior
+  </LinkCard>
+</CardGrid>
 
 ---
 
@@ -539,7 +504,7 @@ if err != nil {
 }
 fmt.Printf("New expires at: %s\\n", resp.ExpiresAt)
 
-// Refresh with custom duration (e.g., 1 minutes)
+// Refresh with custom duration (e.g., 1 minute)
 resp, err = client.RefreshSandbox(ctx, sandbox.ID, &apispec.SandboxRefreshRequest{
     Duration: apispec.NewOptInt32(60),
 })
@@ -554,11 +519,11 @@ fmt.Printf("New expires at: %s\\n", resp.ExpiresAt)`
       code: `from sandbox0.apispec.models.sandbox_refresh_request import SandboxRefreshRequest
 
 # Refresh with default duration (original TTL)
-resp = client.refresh_sandbox(sandbox.id)
+resp = client.sandboxes.refresh(sandbox.id)
 print(f"New expires at: {resp.expires_at}")
 
-# Refresh with custom duration (e.g., 1 minutes)
-resp = client.refresh_sandbox(sandbox.id, SandboxRefreshRequest(duration=60))
+# Refresh with custom duration (e.g., 1 minute)
+resp = client.sandboxes.refresh(sandbox.id, SandboxRefreshRequest(duration=60))
 print(f"New expires at: {resp.expires_at}")`
     },
     {
@@ -568,7 +533,7 @@ print(f"New expires at: {resp.expires_at}")`
 const resp = await client.sandboxes.refresh(sandbox.id);
 console.log('New expires at:', resp.expiresAt);
 
-// Refresh with custom duration (e.g., 1 minutes)
+// Refresh with custom duration (e.g., 1 minute)
 const resp2 = await client.sandboxes.refresh(sandbox.id, { duration: 60 });
 console.log('New expires at:', resp2.expiresAt);`
     },
@@ -578,11 +543,7 @@ console.log('New expires at:', resp2.expiresAt);`
       code: `# Refresh with default duration
 s0 sandbox refresh sb_abc123
 
-# Refresh with custom duration (e.g., 10 minutes)
-s0 sandbox refresh sb_abc123 --duration 600
-
-# Output:
-# New expires at: 2024-01-15T11:00:00Z`
+# Output includes the new expiry timestamp`
     }
   ]}
 />
@@ -611,7 +572,7 @@ fmt.Println("Sandbox deleted")`
     {
       label: "Python",
       language: "python",
-      code: `client.delete_sandbox(sandbox.id)
+      code: `client.sandboxes.delete(sandbox.id)
 print("Sandbox deleted")`
     },
     {
@@ -633,6 +594,14 @@ console.log('Sandbox deleted');`
 ## Next Steps
 
 <CardGrid>
+  <LinkCard
+    title="Pause And Resume"
+    href="/docs/sandbox/pause-resume"
+    cta="Learn More"
+  >
+    Pause sandboxes, resume them, and control `auto_resume`
+  </LinkCard>
+
   <LinkCard
     title="Contexts"
     href="/docs/sandbox/contexts"

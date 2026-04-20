@@ -1,0 +1,197 @@
+# Pause And Resume
+
+Sandbox0 can pause an idle sandbox without deleting it. Pause preserves sandbox state, while resume makes the sandbox runnable again.
+
+Use this page when you need to:
+
+- pause a sandbox explicitly
+- resume a paused sandbox explicitly
+- understand how `ttl`, `auto_resume`, exposed ports, and SSH interact with pause state
+- inspect whether a pause or resume request has completed
+
+<Callout variant="info">
+Pause state is separate from `status`. Use `paused` for the simple user-facing state, and `power_state` when you need to inspect desired versus observed transition progress.
+</Callout>
+
+## Pause A Sandbox
+
+Pause a sandbox to release compute while keeping its state available for a later resume.
+
+<Endpoint method="POST">
+/api/v1/sandboxes/{'{id}'}/pause
+</Endpoint>
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `_, err := client.PauseSandbox(ctx, sandbox.ID)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println("Pause requested")`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `client.sandboxes.pause(sandbox.id)
+print("Pause requested")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `await client.sandboxes.pause(sandbox.id);
+console.log("Pause requested");`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 sandbox pause sb_abc123`
+    }
+  ]}
+/>
+
+## Resume A Sandbox
+
+Resume a sandbox that was paused manually or by TTL expiry.
+
+<Endpoint method="POST">
+/api/v1/sandboxes/{'{id}'}/resume
+</Endpoint>
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `_, err := client.ResumeSandbox(ctx, sandbox.ID)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println("Resume requested")`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `client.sandboxes.resume(sandbox.id)
+print("Resume requested")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `await client.sandboxes.resume(sandbox.id);
+console.log("Resume requested");`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 sandbox resume sb_abc123`
+    }
+  ]}
+/>
+
+## Inspect Pause State
+
+After requesting a pause or resume, fetch sandbox details to check whether the transition has completed.
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `sb, err := client.GetSandbox(ctx, sandbox.ID)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("paused=%v\n", sb.Paused)
+fmt.Printf("power_state=%+v\n", sb.PowerState)`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `sb = client.sandboxes.get(sandbox.id)
+print("paused=", sb.paused)
+print("power_state=", sb.power_state)`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const sb = await client.sandboxes.get(sandbox.id);
+console.log("paused=", sb.paused);
+console.log("powerState=", sb.powerState);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 sandbox get sb_abc123`
+    }
+  ]}
+/>
+
+## TTL And Auto Resume
+
+`ttl` and `hard_ttl` interact with pause differently:
+
+| Field | Behavior |
+|-------|----------|
+| `ttl` | Soft timeout. When it expires, Sandbox0 pauses the sandbox. |
+| `hard_ttl` | Hard timeout. When it expires, Sandbox0 deletes the sandbox. |
+
+`auto_resume` controls whether inbound access can wake a paused sandbox:
+
+- when `auto_resume` is `true`, supported access paths can resume the sandbox automatically
+- when `auto_resume` is `false`, you must call resume explicitly
+
+Common auto-resume entrypoints:
+
+- exposed ports configured with `resume: true`
+- SSH access through Sandbox0 SSH Gateway
+
+See [Ports](/docs/sandbox/ports) and [SSH](/docs/sandbox/ssh) for the user-facing flows.
+
+## Typical Pattern
+
+For long-running agent workflows, a common pattern is:
+
+1. claim a sandbox with `ttl` set
+2. do active work through contexts and files
+3. let idle sandboxes pause automatically
+4. resume on the next user action, SSH session, or exposed-port hit
+5. use `hard_ttl` to cap the maximum lifetime
+
+## Next Steps
+
+<CardGrid>
+  <LinkCard
+    title="Sandbox Overview"
+    href="/docs/sandbox"
+    cta="Back"
+  >
+    Core sandbox lifecycle operations and refresh behavior
+  </LinkCard>
+
+  <LinkCard
+    title="Ports"
+    href="/docs/sandbox/ports"
+    cta="Learn More"
+  >
+    Expose services and configure port-level auto-resume
+  </LinkCard>
+
+  <LinkCard
+    title="SSH"
+    href="/docs/sandbox/ssh"
+    cta="Learn More"
+  >
+    Resume paused sandboxes through SSH access
+  </LinkCard>
+
+  <LinkCard
+    title="Webhooks"
+    href="/docs/sandbox/webhooks"
+    cta="Learn More"
+  >
+    Observe `sandbox.paused` and `sandbox.resumed` events
+  </LinkCard>
+</CardGrid>

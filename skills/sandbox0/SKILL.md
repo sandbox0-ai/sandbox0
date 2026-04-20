@@ -17,6 +17,23 @@ For exact API, CLI, SDK, and Managed Agents behavior, read the live docs first:
 
 This skill is intentionally thin. Do not rely on local bundled docs for product details.
 
+## Default Onboarding
+
+Start from Sandbox0 Cloud unless the user explicitly needs self-hosting.
+
+1. Install `s0`:
+   - macOS/Linux: `curl -fsSL https://raw.githubusercontent.com/sandbox0-ai/s0/main/scripts/install.sh | bash`
+   - Windows PowerShell: `irm https://raw.githubusercontent.com/sandbox0-ai/s0/main/scripts/install.ps1 | iex`
+2. Sign in with `s0 auth login`.
+3. If the server did not auto-select a team, use `s0 team list`, `s0 team create`, and `s0 team use`.
+4. For SDK or raw HTTP usage, create an API key:
+   - `export SANDBOX0_TOKEN="$(s0 apikey create --name sdk-quickstart --role developer --expires-in 30d --raw)"`
+   - `export SANDBOX0_BASE_URL="https://api.sandbox0.ai"`
+
+If the user is only using the interactive `s0` CLI, `s0 auth login` is usually enough and no API key export is required.
+
+Managed Agents uses `https://agents.sandbox0.ai`. Sandbox, Template, Volume, and Credential APIs use `https://api.sandbox0.ai`.
+
 ## Typical triggers
 
 - Add Sandbox0 to an AI agent project

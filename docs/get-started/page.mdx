@@ -1,6 +1,6 @@
 # Get Started
 
-Sandbox0 provides isolated execution environments for AI Agents with persistent storage, session state maintenance, sub-200ms cold starts, and easy self-hosted deployment.
+Sandbox0 provides isolated execution environments for AI agents with persistent storage, session state maintenance, and fast warm claims. Sandbox0 Cloud uses `https://api.sandbox0.ai` for sandboxes, templates, volumes, and credentials. Managed Agents uses `https://agents.sandbox0.ai`.
 
 ## What is Sandbox0?
 
@@ -30,7 +30,7 @@ Get your first sandbox running in minutes.
 
 ### Prerequisites
 
-- A self-hosted deployment
+- A Sandbox0 account
 - `s0` CLI installed
 
 ### Install s0 CLI (Required)
@@ -79,18 +79,27 @@ Manual release archives are available from <DocLink href="https://github.com/san
 
 ### Authenticate
 
-Set up your credentials. Configure the base URL for your [self-hosted deployment](/docs/self-hosted):
+For Sandbox0 Cloud, sign in with `s0 auth login`. That is enough for interactive CLI usage.
 
-First, create an API key to use as `SANDBOX0_TOKEN`:
+If you want to use the SDKs or raw HTTP API, create a team-scoped API key and export it as `SANDBOX0_TOKEN`:
 
 ```bash
 # Login with your account (stores session in ~/.s0/config.yaml)
 s0 auth login
 
-# Create a 30-day admin API key and export it
-export SANDBOX0_TOKEN="$(s0 apikey create --name test-apikey --role admin --expires-in 30d --raw)"
-export SANDBOX0_BASE_URL="http://localhost:30080"
+# If the server did not auto-select a team yet:
+# s0 team list
+# s0 team create --name my-team --home-region <region-id>
+# s0 team use <team-id>
+
+# Create a 30-day API key for SDK and automation usage.
+export SANDBOX0_TOKEN="$(s0 apikey create --name sdk-quickstart --role developer --expires-in 30d --raw)"
+export SANDBOX0_BASE_URL="https://api.sandbox0.ai"
 ```
+
+<Callout variant="info">
+If you only use the local `s0` CLI interactively, you can stop after `s0 auth login`. API keys are the standard way to authenticate SDK and HTTP requests.
+</Callout>
 
 <Tabs
   tabs={[
@@ -98,6 +107,7 @@ export SANDBOX0_BASE_URL="http://localhost:30080"
       label: "Go",
       language: "go",
       code: `import sandbox0 "github.com/sandbox0-ai/sdk-go"
+import "os"
 
 client, err := sandbox0.NewClient(
     sandbox0.WithToken(os.Getenv("SANDBOX0_TOKEN")),
@@ -112,7 +122,7 @@ import os
 
 client = Client(
     token=os.environ["SANDBOX0_TOKEN"],
-    base_url=os.environ.get("SANDBOX0_BASE_URL", "http://localhost:30080"),
+    base_url=os.environ.get("SANDBOX0_BASE_URL", "https://api.sandbox0.ai"),
 )`
     },
     {
@@ -122,7 +132,7 @@ client = Client(
 
 const client = new Client({
     token: process.env.SANDBOX0_TOKEN!,
-    baseUrl: process.env.SANDBOX0_BASE_URL || 'http://localhost:30080',
+    baseUrl: process.env.SANDBOX0_BASE_URL || 'https://api.sandbox0.ai',
 });`
     }
   ]}
@@ -130,7 +140,7 @@ const client = new Client({
 
 ### Claim Your First Sandbox
 
-Create a sandbox from the default template:
+Create a sandbox from the `default` template:
 
 <Tabs
   tabs={[
@@ -183,7 +193,7 @@ import os
 
 client = Client(
     token=os.environ["SANDBOX0_TOKEN"],
-    base_url=os.environ.get("SANDBOX0_BASE_URL", "http://localhost:30080"),
+    base_url=os.environ.get("SANDBOX0_BASE_URL", "https://api.sandbox0.ai"),
 )
 
 # Claim a sandbox from the "default" template
@@ -203,7 +213,7 @@ import { Client } from 'sandbox0';
 
 const client = new Client({
     token: process.env.SANDBOX0_TOKEN!,
-    baseUrl: process.env.SANDBOX0_BASE_URL || 'http://localhost:30080',
+    baseUrl: process.env.SANDBOX0_BASE_URL || 'https://api.sandbox0.ai',
 });
 
 // Claim a sandbox from the "default" template

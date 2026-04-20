@@ -129,20 +129,31 @@ go install github.com/sandbox0-ai/s0/cmd/s0@latest
 
 Manual release archives are available from <DocLink href="https://github.com/sandbox0-ai/s0/releases/latest" newTab>GitHub Releases</DocLink>. See the <DocLink href="https://github.com/sandbox0-ai/s0#installation" newTab>s0 README</DocLink> for platform-specific manual install steps.
 
-## 5) Configure the API URL and Create a Token
+## 5) Configure the API URL, Log In, and Optionally Create an API Key
 
 For the local `kind` setup above, the API endpoint is `http://localhost:30080`.
 
 That is because the `kind` config maps host port `30080`, and the sample `Sandbox0Infra` exposes `cluster-gateway` on the same NodePort.
 
-Export the base URL, log in with the initial admin account, then create an API token:
+Export the base URL, then log in with the initial admin account:
 
 ```bash
 export SANDBOX0_BASE_URL="http://localhost:30080"
 
 s0 auth login
+```
 
-unset SANDBOX0_TOKEN && export SANDBOX0_TOKEN="$(s0 apikey create --name test-apikey --role admin --expires-in 30d --raw)"
+At that point, interactive `s0` CLI usage is ready.
+
+Create an API key only if you want to use the SDKs or raw HTTP API:
+
+```bash
+# If the server did not auto-select a team yet:
+# s0 team list
+# s0 team use <team-id>
+
+unset SANDBOX0_TOKEN
+export SANDBOX0_TOKEN="$(s0 apikey create --name sdk-quickstart --role developer --expires-in 30d --raw)"
 ```
 
 After that, continue with [Get Started](/docs/get-started) to make your first Sandbox0 API request.

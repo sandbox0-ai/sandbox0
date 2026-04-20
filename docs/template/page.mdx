@@ -48,7 +48,7 @@ spec:
         image: python:3.12-slim
         resources:
             cpu: "1"
-            memory: 2Gi
+            memory: 4Gi
     pool:
         minIdle: 2
         maxIdle: 10
@@ -62,7 +62,7 @@ spec:
         image: ubuntu:24.04
         resources:
             cpu: "1"
-            memory: 2Gi
+            memory: 4Gi
     warmProcesses:
         - name: codex
           type: cmd
@@ -152,7 +152,7 @@ print(f"Template created: {tpl.template_id}")`
     spec: {
         mainContainer: {
             image: "ubuntu:24.04",
-            resources: { cpu: "1", memory: "2Gi" },
+            resources: { cpu: "1", memory: "4Gi" },
         },
         warmProcesses: [{
             name: "codex",
@@ -177,7 +177,7 @@ spec:
         image: ubuntu:24.04
         resources:
             cpu: "1"
-            memory: 2Gi
+            memory: 4Gi
     warmProcesses:
         - name: codex
           type: cmd
@@ -236,7 +236,7 @@ tpl = client.create_template(TemplateCreateRequest(
     spec=SandboxTemplateSpec.from_dict({
         "mainContainer": {
             "image": "python:3.12-slim",
-            "resources": {"cpu": "1", "memory": "2Gi"},
+            "resources": {"cpu": "1", "memory": "4Gi"},
         },
         "pool": {"minIdle": 2, "maxIdle": 10},
     }),
@@ -251,7 +251,7 @@ print(f"Template created: {tpl.template_id}")`
     spec: {
         mainContainer: {
             image: "python:3.12-slim",
-            resources: { cpu: "1", memory: "2Gi" },
+            resources: { cpu: "1", memory: "4Gi" },
         },
         pool: { minIdle: 2, maxIdle: 10 },
     },

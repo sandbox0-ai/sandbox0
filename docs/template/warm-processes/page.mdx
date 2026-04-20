@@ -14,7 +14,7 @@ spec:
         image: ubuntu:24.04
         resources:
             cpu: "1"
-            memory: 2Gi
+            memory: 4Gi
     warmProcesses:
         - name: codex
           type: cmd
@@ -64,7 +64,7 @@ spec:
         image: ghcr.io/example/sandbox-with-helper:v1
         resources:
             cpu: "1"
-            memory: 2Gi
+            memory: 4Gi
     warmProcesses:
         - name: helper
           type: cmd

@@ -1,6 +1,8 @@
 # Compatibility
 
-Sandbox0 Managed Agents follows the Claude Managed Agents API shape where practical, while using Sandbox0 as the execution backend. This page documents the important compatibility boundaries.
+Sandbox0 Managed Agents follows the Claude Managed Agents API shape where practical, while using Sandbox0 as the execution backend.
+
+Official reference: [Claude Managed Agents quickstart](https://platform.claude.com/docs/en/managed-agents/quickstart).
 
 ## Supported Surface
 
@@ -13,10 +15,11 @@ Sandbox0 Managed Agents follows the Claude Managed Agents API shape where practi
 | Sessions | Supported with durable status, metadata, agent snapshot, resources, vault ids, usage, and stats |
 | Events | Supported for list, send, and event streaming |
 | Files | Supported for upload, metadata, download, delete, and file-backed message content |
-| Vaults and credentials | Supported for LLM credentials and MCP credentials |
+| Vaults and credentials | Supported for LLM credentials, MCP credentials, and Sandbox0 HTTP header credential projection |
 | Custom skills | Supported through uploaded skill versions |
 | MCP servers | Supported for URL MCP servers and vault-backed credentials |
 | GitHub repository resources | Supported at session creation |
+| Agent engines | Supported for `claude` and `codex` |
 
 ## Current Differences
 
@@ -24,11 +27,12 @@ Sandbox0 Managed Agents follows the Claude Managed Agents API shape where practi
 |------------|-------------------|
 | SDK ownership | Sandbox0 does not ship a Managed Agents SDK. Use the official Anthropic SDK. |
 | API token | SDK `apiKey` is a Sandbox0 API key, not the Anthropic LLM token. |
-| LLM token | Stored in an LLM vault and attached to the session. |
-| Sandbox claim | Session creation eagerly claims a sandbox, bootstraps wrapper state, and pauses the sandbox to reduce first-run latency. |
-| Sandbox hard TTL | Configurable at session creation through `metadata["sandbox0.managed_agents.hard_ttl_seconds"]`; defaults to 3600 seconds and accepts `"0"` to disable the hard cap. |
-| Engine support | Claude engine only. The LLM endpoint must be Anthropic-compatible. |
-| OpenAI-compatible providers | Not supported by the Claude engine. Use a future separate engine. |
+| LLM token | Stored in an LLM vault and projected by Sandbox0 credential policy. |
+| Agent engine | Selected by `sandbox0.managed_agents.engine` on the LLM vault. |
+| Sandbox claim | Runtime setup claims or resumes a Sandbox0 sandbox and mounts a persistent workspace volume. |
+| Sandbox TTL | Controlled by deployment runtime config. `sandbox0.managed_agents.hard_ttl_seconds` session metadata is rejected. |
+| Claude engine | Requires an Anthropic-compatible endpoint. |
+| Codex engine | Requires an OpenAI-compatible endpoint. |
 | Anthropic pre-built skills | Not supported. Use Sandbox0 custom skills. |
 | Multi-agent threads | Not implemented in the current backend surface. |
 | Outcomes and memory research preview | Not implemented in the current backend surface. |
@@ -40,7 +44,7 @@ The Claude wrapper maps Managed Agents tool definitions to Claude Agent SDK opti
 
 | Tool type | Status | Notes |
 |-----------|--------|-------|
-| `agent_toolset_20260401` | Supported | Enables built-in tools such as bash, file operations, grep/glob, web fetch, and web search through the Claude wrapper |
+| `agent_toolset_20260401` | Supported | Enables built-in tools such as bash, file operations, grep/glob, web fetch, and web search through the selected engine wrapper |
 | `mcp_toolset` | Supported | Requires matching `mcp_servers` entries and vault credentials when the server needs auth |
 | Custom tools | Supported | The wrapper emits `agent.custom_tool_use` and waits for `user.custom_tool_result` |
 
@@ -66,13 +70,34 @@ Package managers supported in environment config:
 - `npm`
 - `pip`
 
+## Metadata Rules
+
+Only vault metadata supports reserved `sandbox0.managed_agents.*` keys today.
+
+| Resource | Reserved keys |
+|----------|---------------|
+| Agent | Rejected |
+| Environment | Rejected |
+| Session | Rejected |
+| Credential | Rejected |
+| Vault | Supported for LLM and credential vault config |
+
+## Vault Compatibility
+
+| Vault role | Required metadata |
+|------------|-------------------|
+| `llm` | `role`, `engine`, optional `llm_base_url` |
+| `credential` | `role`, `kind=http_headers`, `target_domains`, `headers_json` |
+
+LLM vaults must contain exactly one active `static_bearer` credential and must not set `mcp_server_url`.
+
 ## Session Lifecycle Notes
 
 Sandbox0 stores the session and event log outside the sandbox. Sandbox attachment state is stored outside the sandbox and points at the sandbox and volumes.
 
 | Action | Behavior |
 |--------|----------|
-| Create session | Stores durable session truth, claims a sandbox, bootstraps wrapper state, then pauses the sandbox until work starts. |
+| Create session | Stores durable session truth, snapshots the agent, and records environment, resources, and vault ids. |
 | Send user message | Ensures a sandbox is ready, bootstraps wrapper state, starts a run, and appends status events. |
 | Interrupt | Interrupts the active wrapper run and moves local session truth back toward idle. |
 | Delete | Rejects active running sessions. Delete after interrupting and reaching idle. |
@@ -96,9 +121,9 @@ For application code, prefer SDK methods over hardcoded endpoint paths.
   </LinkCard>
 
   <LinkCard
-    title="Claude SDK"
-    href="/docs/managed-agents/claude-sdk"
-    cta="Connect"
+    title="SDK Usage"
+    href="/docs/managed-agents/sdk"
+    cta="Run"
   >
     Use the official Anthropic SDK with the Sandbox0 Managed Agents endpoint
   </LinkCard>

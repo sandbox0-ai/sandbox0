@@ -1,25 +1,26 @@
 # Managed Agents
 
-Sandbox0 Managed Agents is a backend implementation for Claude Managed Agents-style workflows. You use the official Anthropic SDK, but point the SDK at a Sandbox0 Managed Agents API endpoint instead of Anthropic's hosted Managed Agents endpoint.
+Sandbox0 Managed Agents is a backend-compatible implementation of the Claude Managed Agents API shape. Application code uses the official Anthropic SDK, but points the SDK at a Sandbox0 Managed Agents endpoint.
 
-Sandbox0 provides the backend pieces behind the API: session truth, event history, runtime orchestration, Sandbox0 sandboxes, persistent volumes, network policy, and credential injection boundaries.
+Sandbox0 provides the backend execution layer: durable sessions, event history, sandbox orchestration, persistent workspaces, network policy, and credential injection.
 
 <Callout variant="info">
-Sandbox0 does not provide a separate Managed Agents SDK. Use the official Anthropic SDK or the HTTP API shape generated from the official Managed Agents contract.
+Use the official Anthropic SDK for client code. The SDK talks to Sandbox0 with a Sandbox0 API key. Model provider credentials belong in vaults, not in the SDK client.
 </Callout>
 
-## What It Is
+## Core Objects
 
-Managed Agents sit one layer above raw sandboxes. A normal sandbox gives you process execution, files, volumes, networking, and webhooks. A managed agent adds a durable agent session model around those primitives.
+Managed Agents sit above raw sandboxes. A sandbox gives an agent processes, files, volumes, networking, and webhooks. Managed Agents add a durable API model around those primitives.
 
 | Object | Role |
 |--------|------|
-| Agent | Versioned model, system prompt, tools, MCP servers, and custom skills |
-| Environment | Container-like runtime configuration: packages and network mode |
-| Session | Durable unit of agent work, attached to one environment and agent snapshot |
-| Events | Append-only history for user messages, agent output, tool use, status, and errors |
-| Vaults | Session-scoped credentials for the LLM and external MCP services |
-| Resources | Files and GitHub repositories mounted into the session workspace |
+| Agent | Versioned instructions, model, tools, MCP servers, and skills |
+| Environment | Runtime package and networking configuration |
+| Session | Durable unit of work that binds an agent snapshot, environment, resources, and vaults |
+| Events | Append-only interaction log for user input, agent output, tools, status, and errors |
+| Vault | Credential container attached to a session |
+| Resource | File or repository materialized into the session workspace |
+| Agent engine | Sandbox0 runtime adapter that runs the agent implementation inside the sandbox |
 
 ## Architecture
 
@@ -29,77 +30,72 @@ flowchart TD
     gateway --> pg[(PostgreSQL session and event truth)]
     gateway --> sandbox0[Sandbox0 API]
     sandbox0 --> runtime[Sandbox0 sandbox]
-    runtime --> wrapper[Claude wrapper warm process]
+    runtime --> wrapper[agent wrapper warm process]
     wrapper --> callbacks[Signed runtime callbacks]
     callbacks --> gateway
-    wrapper --> llm[Anthropic-compatible LLM API]
-    gateway --> credentials[Sandbox0 credential and network policy]
+    wrapper --> llm[model provider API]
+    gateway --> credentials[credential sources and network policy]
     credentials --> runtime
 ```
 
-The key boundary is that session truth lives outside the sandbox. The sandbox is the execution attachment for a session, not the source of truth for the session.
+Session truth lives outside the sandbox. The sandbox is the execution attachment for a session, not the source of truth for session state.
 
 ## Request Flow
 
-1. Create an `agent` and an `environment` through the Managed Agents API.
-2. Create a session that references the agent and environment.
-3. Attach an LLM vault and optional resource or MCP vaults.
-4. Send `user.message` events.
-5. The backend claims or resumes a sandbox, mounts volumes, syncs resources, applies network policy, and starts the wrapper run.
-6. The wrapper emits signed callbacks. The gateway appends those events to the session log.
-7. The client lists or streams events until the session becomes idle, requires action, terminates, or is deleted.
+1. Create an `agent` with a model, system prompt, tools, and optional skills.
+2. Create an `environment` with package and network settings.
+3. Create an LLM vault with `sandbox0.managed_agents.role = llm` and the target agent engine.
+4. Create a session that references the agent, environment, and vault ids.
+5. Send `user.message` events.
+6. Sandbox0 claims or resumes a sandbox, mounts the workspace, applies network policy, injects credentials, and starts the selected agent engine.
+7. The wrapper emits callbacks. The gateway appends events to the durable session log.
+8. The client lists or streams events until the session becomes idle, requires action, or terminates.
 
-## Why It Uses Sandbox0
+## Sandbox0-Specific Boundaries
 
-Managed agent workloads need more than a chat loop. They need a workspace that can survive across turns, tool calls that run in an isolated runtime, and a credential boundary that does not assume generated code should see every token.
+The public object model follows Claude Managed Agents where practical. The backend behavior is Sandbox0-specific in these places:
 
-Sandbox0 maps naturally to those requirements:
+- The API host is Sandbox0, not Anthropic.
+- The SDK `apiKey` is a Sandbox0 API key.
+- The LLM token is stored in a vault and projected by Sandbox0 credential policy.
+- The agent engine is selected through LLM vault metadata.
+- The sandbox workspace is persistent across turns through a Sandbox0 volume.
+- Network policy and credential injection are enforced by Sandbox0.
 
-| Managed Agents need | Sandbox0 primitive |
-|---------------------|--------------------|
-| Runtime execution | Sandbox and `procd` |
-| Workspace state | SandboxVolume mounts |
-| Fast startup | Template warm pool |
-| Agent-side service | Template warm process |
-| Event callback | Sandbox webhooks |
-| Network control | `SandboxNetworkPolicy` and `netd` |
-| Secret-safe outbound access | Credential sources and egress auth |
+## Official References
 
-## API Host vs LLM Host
+The official Claude Managed Agents documentation is still the canonical SDK reference:
 
-Keep these two endpoints separate:
+- [Quickstart](https://platform.claude.com/docs/en/managed-agents/quickstart)
+- [Agent setup](https://platform.claude.com/docs/en/managed-agents/agent-setup)
+- [Environments](https://platform.claude.com/docs/en/managed-agents/environments)
+- [Sessions](https://platform.claude.com/docs/en/managed-agents/sessions)
+- [Vaults](https://platform.claude.com/docs/en/managed-agents/vaults)
 
-| Endpoint | Meaning |
-|----------|---------|
-| Managed Agents API host | The Sandbox0 endpoint the official SDK calls, for example `https://agents.sandbox0.ai` |
-| LLM host | The Anthropic-compatible model endpoint used by the wrapper, configured through an LLM vault |
-
-Your SDK client uses a Sandbox0 API key. Your Anthropic or Anthropic-compatible model token goes in an LLM vault.
-
-## Next Steps
+## Next
 
 <CardGrid>
   <LinkCard
-    title="Claude SDK"
-    href="/docs/managed-agents/claude-sdk"
+    title="SDK Usage"
+    href="/docs/managed-agents/sdk"
     cta="Connect"
   >
-    Point the official Anthropic SDK at Sandbox0 Managed Agents
+    Point the official SDK at Sandbox0 and run the first session
   </LinkCard>
 
   <LinkCard
-    title="LLM Credentials"
-    href="/docs/managed-agents/llm-credentials"
-    cta="Configure"
+    title="Agents"
+    href="/docs/managed-agents/agents"
+    cta="Define"
   >
-    Store model host and token in a Sandbox0 managed vault
+    Create versioned agent definitions with tools and skills
   </LinkCard>
 
   <LinkCard
-    title="Compatibility"
-    href="/docs/managed-agents/compatibility"
-    cta="Compare"
+    title="Vaults"
+    href="/docs/managed-agents/vaults"
+    cta="Secure"
   >
-    Understand the current API surface and Sandbox0-specific behavior
+    Store LLM and external service credentials outside agent code
   </LinkCard>
 </CardGrid>

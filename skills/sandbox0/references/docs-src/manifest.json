@@ -58,12 +58,32 @@
           "title": "Overview"
         },
         {
-          "slug": "claude-sdk",
-          "title": "Claude SDK"
+          "slug": "sdk",
+          "title": "SDK Usage"
         },
         {
-          "slug": "llm-credentials",
-          "title": "LLM Credentials"
+          "slug": "agents",
+          "title": "Agents"
+        },
+        {
+          "slug": "environments",
+          "title": "Environments"
+        },
+        {
+          "slug": "sessions",
+          "title": "Sessions"
+        },
+        {
+          "slug": "events",
+          "title": "Events"
+        },
+        {
+          "slug": "vaults",
+          "title": "Vaults"
+        },
+        {
+          "slug": "agent-engines",
+          "title": "Agent Engines"
         },
         {
           "slug": "compatibility",

@@ -23,8 +23,13 @@ references/docs-src/
 │   └── webhooks/page.mdx
 ├── managed-agents/
 │   ├── page.mdx
-│   ├── claude-sdk/page.mdx
-│   ├── llm-credentials/page.mdx
+│   ├── sdk/page.mdx
+│   ├── agents/page.mdx
+│   ├── environments/page.mdx
+│   ├── sessions/page.mdx
+│   ├── events/page.mdx
+│   ├── vaults/page.mdx
+│   ├── agent-engines/page.mdx
 │   └── compatibility/page.mdx
 ├── template/
 │   ├── page.mdx

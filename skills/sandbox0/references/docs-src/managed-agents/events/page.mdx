@@ -1,0 +1,105 @@
+# Events
+
+Events are the durable interface for a session. Send user input as events, then list or stream events to observe status, agent output, tool calls, and errors.
+
+Official reference: [Claude Managed Agents events and streaming](https://platform.claude.com/docs/en/managed-agents/events-and-streaming).
+
+## Send User Input
+
+```typescript
+await client.beta.sessions.events.send(session.id, {
+    events: [{
+        type: "user.message",
+        content: [{ type: "text", text: "Inspect the test failure and propose a fix." }],
+    }],
+});
+```
+
+## List Events
+
+```typescript
+for await (const event of client.beta.sessions.events.list(session.id, {
+    order: "asc",
+    limit: 100,
+})) {
+    console.log(event.type);
+}
+```
+
+## Stream Events
+
+```typescript
+const stream = await client.beta.sessions.events.stream(session.id);
+
+for await (const event of stream) {
+    if (event.type === "agent.message") {
+        console.log(event.content);
+    }
+    if (event.type === "session.status_idle") {
+        break;
+    }
+}
+```
+
+## Common Event Types
+
+| Event | Meaning |
+|-------|---------|
+| `user.message` | User input sent by your application |
+| `agent.message` | Agent text output |
+| `agent.tool_use` | Built-in tool request |
+| `agent.mcp_tool_use` | MCP tool request |
+| `agent.custom_tool_use` | Custom tool request for your application |
+| `user.tool_confirmation` | Allow or deny a tool that requires confirmation |
+| `user.custom_tool_result` | Result for a custom tool call |
+| `session.status_running` | A run is active |
+| `session.status_idle` | The turn ended or the agent requires action |
+| `session.error` | Session-level error |
+
+Treat `session.status_idle` with `stop_reason.type = "end_turn"` as a normal turn completion. If the stop reason is `requires_action`, send the required confirmation or custom tool result before expecting the run to continue.
+
+## File-Backed Input
+
+Uploaded files can be referenced from message content:
+
+```typescript
+await client.beta.sessions.events.send(session.id, {
+    events: [{
+        type: "user.message",
+        content: [
+            { type: "text", text: "Summarize this document." },
+            {
+                type: "document",
+                source: { type: "file", file_id: uploaded.id },
+                title: "input",
+            },
+        ],
+    }],
+});
+```
+
+## Sandbox0 Notes
+
+- Event history is stored outside the sandbox.
+- Runtime callbacks are signed before being appended to the session log.
+- Event streaming is compatible with the SDK surface and backed by Sandbox0 session events.
+
+## Next
+
+<CardGrid>
+  <LinkCard
+    title="Sessions"
+    href="/docs/managed-agents/sessions"
+    cta="Review"
+  >
+    Understand session lifecycle and resources
+  </LinkCard>
+
+  <LinkCard
+    title="Compatibility"
+    href="/docs/managed-agents/compatibility"
+    cta="Compare"
+  >
+    Check supported event and lifecycle behavior
+  </LinkCard>
+</CardGrid>

@@ -1,0 +1,80 @@
+# Environments
+
+An environment describes the runtime surface for sessions: package configuration and networking policy.
+
+Official reference: [Claude Managed Agents environments](https://platform.claude.com/docs/en/managed-agents/environments).
+
+## Create An Environment
+
+```typescript
+const environment = await client.beta.environments.create({
+    name: "node-test-env",
+    config: {
+        type: "cloud",
+        networking: {
+            type: "limited",
+            allowed_hosts: ["api.example.com"],
+            allow_package_managers: true,
+            allow_mcp_servers: true,
+        },
+        packages: {
+            type: "packages",
+            npm: ["typescript", "tsx"],
+            pip: ["pytest==8.3.4"],
+        },
+    },
+});
+```
+
+## Supported Configuration
+
+Only `type: cloud` environments are accepted today.
+
+| Area | Supported values |
+|------|------------------|
+| Networking | `unrestricted` or `limited` |
+| Package managers | `apt`, `cargo`, `gem`, `go`, `npm`, `pip` |
+
+`unrestricted` maps to a Sandbox0 allow-all network policy. `limited` maps to a block-all policy with explicit allowed domains.
+
+## Package Artifacts
+
+Sandbox0 may prebuild and reuse environment artifacts for package-heavy environments. A session pins the environment artifact it was created with so package state remains stable while the session runs.
+
+## Limited Networking
+
+For limited environments, Sandbox0 builds allowed domains from:
+
+- `networking.allowed_hosts`
+- Package manager registries when `allow_package_managers` is enabled
+- MCP server hosts when `allow_mcp_servers` is enabled
+- Sandbox0 runtime callback and platform domains
+- Credential vault target domains
+
+The final policy is enforced by Sandbox0 network policy and credential projection, not by application code inside the agent.
+
+## Sandbox0 Notes
+
+- Reserved `sandbox0.managed_agents.*` metadata keys are not accepted on environments.
+- Environment packages affect the sandbox filesystem by mounting prebuilt package artifacts.
+- Updating an environment does not retroactively rebuild already pinned session artifacts.
+
+## Next
+
+<CardGrid>
+  <LinkCard
+    title="Sessions"
+    href="/docs/managed-agents/sessions"
+    cta="Run"
+  >
+    Create a session with this environment
+  </LinkCard>
+
+  <LinkCard
+    title="Vaults"
+    href="/docs/managed-agents/vaults"
+    cta="Secure"
+  >
+    Add credentials to limited network sessions
+  </LinkCard>
+</CardGrid>

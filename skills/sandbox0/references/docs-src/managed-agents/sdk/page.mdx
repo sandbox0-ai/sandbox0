@@ -1,0 +1,127 @@
+# SDK Usage
+
+Use the official Anthropic SDK and point it at the Sandbox0 Managed Agents API endpoint.
+
+| SDK field | Sandbox0 value |
+|-----------|----------------|
+| `baseURL` | `https://agents.sandbox0.ai` |
+| `apiKey` | Sandbox0 API key |
+| Model token | Stored in an LLM vault, not passed to the SDK client |
+
+Official reference: [Claude Managed Agents quickstart](https://platform.claude.com/docs/en/managed-agents/quickstart).
+
+## Minimal TypeScript Flow
+
+```typescript
+import Anthropic from "@anthropic-ai/sdk";
+
+const client = new Anthropic({
+    baseURL: "https://agents.sandbox0.ai",
+    apiKey: process.env.SANDBOX0_API_KEY,
+});
+
+const suffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+const environment = await client.beta.environments.create({
+    name: `demo-env-${suffix}`,
+    config: {
+        type: "cloud",
+        networking: { type: "unrestricted" },
+        packages: { type: "packages" },
+    },
+});
+
+const agent = await client.beta.agents.create({
+    name: `Demo Agent ${suffix}`,
+    model: { id: process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-20250514" },
+    system: "Reply in one short sentence.",
+    tools: [{ type: "agent_toolset_20260401" }],
+});
+
+const llmVault = await client.beta.vaults.create({
+    display_name: `Claude LLM ${suffix}`,
+    metadata: {
+        "sandbox0.managed_agents.role": "llm",
+        "sandbox0.managed_agents.engine": "claude",
+        "sandbox0.managed_agents.llm_base_url": process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com",
+    },
+});
+
+await client.beta.vaults.credentials.create(llmVault.id, {
+    display_name: "Anthropic-compatible API key",
+    auth: {
+        type: "static_bearer",
+        token: process.env.ANTHROPIC_API_KEY,
+    },
+});
+
+const session = await client.beta.sessions.create({
+    agent: agent.id,
+    environment_id: environment.id,
+    title: `Sandbox0 demo ${suffix}`,
+    vault_ids: [llmVault.id],
+});
+
+await client.beta.sessions.events.send(session.id, {
+    events: [{
+        type: "user.message",
+        content: [{ type: "text", text: "Say hello from Sandbox0 managed agents." }],
+    }],
+});
+
+for await (const event of client.beta.sessions.events.list(session.id, { limit: 100 })) {
+    if (event.type === "agent.message") {
+        console.log(event.content?.map((block) => block.text ?? "").join(""));
+    }
+}
+```
+
+## Required Variables
+
+| Variable | Purpose |
+|----------|---------|
+| `SANDBOX0_API_KEY` | Authenticates the SDK client to Sandbox0 |
+| `ANTHROPIC_API_KEY` | Model provider token stored in the LLM vault |
+| `ANTHROPIC_BASE_URL` | Optional Anthropic-compatible model endpoint |
+| `ANTHROPIC_MODEL` | Optional model id for the agent |
+
+<Callout variant="warning">
+Do not set the SDK client's `apiKey` to the model provider token. That key authenticates to Sandbox0. The model token belongs in the LLM vault.
+</Callout>
+
+## Direct HTTP Calls
+
+Prefer the SDK for application code. Direct HTTP calls are useful for debugging.
+
+```bash
+curl -fsS "https://agents.sandbox0.ai/v1/sessions" \
+    -H "x-api-key: $SANDBOX0_API_KEY" \
+    -H "anthropic-version: 2023-06-01" \
+    -H "anthropic-beta: managed-agents-2026-04-01" \
+    -H "content-type: application/json" \
+    -d '{
+        "agent": "agent_...",
+        "environment_id": "env_...",
+        "vault_ids": ["vlt_..."]
+    }'
+```
+
+## Next
+
+<CardGrid>
+  <LinkCard
+    title="Agents"
+    href="/docs/managed-agents/agents"
+    cta="Define"
+  >
+    Configure the model, prompt, tools, MCP servers, and skills
+  </LinkCard>
+
+  <LinkCard
+    title="Vaults"
+    href="/docs/managed-agents/vaults"
+    cta="Secure"
+  >
+    Store model and external service credentials
+  </LinkCard>
+</CardGrid>

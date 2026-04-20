@@ -1,0 +1,100 @@
+# Agents
+
+An agent is the versioned definition of what should run: model, system prompt, tool policy, MCP servers, and skills.
+
+Official reference: [Claude Managed Agents agent setup](https://platform.claude.com/docs/en/managed-agents/agent-setup).
+
+## What Goes In An Agent
+
+| Field | Purpose |
+|-------|---------|
+| `name` | Human-readable agent name |
+| `model` | Model id and optional speed |
+| `system` | Stable instruction text |
+| `tools` | Built-in, MCP, and custom tool definitions |
+| `mcp_servers` | URL MCP servers available through `mcp_toolset` |
+| `skills` | Uploaded skill versions attached to the agent |
+| `metadata` | Application metadata |
+
+Sandbox0 stores agent versions. Updating an agent creates a new version; sessions keep the agent snapshot they were created with.
+
+## Create An Agent
+
+```typescript
+const agent = await client.beta.agents.create({
+    name: "Coding Assistant",
+    model: { id: "claude-sonnet-4-20250514", speed: "standard" },
+    system: "Make small, reviewed code changes.",
+    tools: [{
+        type: "agent_toolset_20260401",
+        default_config: {
+            enabled: true,
+            permission_policy: { type: "always_ask" },
+        },
+        configs: [
+            {
+                name: "bash",
+                enabled: true,
+                permission_policy: { type: "always_allow" },
+            },
+            { name: "web_search", enabled: false },
+        ],
+    }],
+});
+```
+
+## Tool Types
+
+| Tool type | Status in Sandbox0 |
+|-----------|--------------------|
+| `agent_toolset_20260401` | Supported through the selected agent engine |
+| `mcp_toolset` | Supported for URL MCP servers |
+| `custom` | Supported through `agent.custom_tool_use` and `user.custom_tool_result` events |
+
+Built-in tool names include `bash`, `edit`, `read`, `write`, `glob`, `grep`, `web_fetch`, and `web_search`.
+
+## MCP Servers
+
+```typescript
+const agent = await client.beta.agents.create({
+    name: "Docs Agent",
+    model: "claude-sonnet-4-20250514",
+    mcp_servers: [{
+        type: "url",
+        name: "docs",
+        url: "https://mcp.example.com/sse",
+    }],
+    tools: [{
+        type: "mcp_toolset",
+        mcp_server_name: "docs",
+    }],
+});
+```
+
+If the MCP server needs credentials, attach a vault to the session. The agent declares the server and toolset; the session decides which vaults are available.
+
+## Sandbox0 Notes
+
+- Reserved `sandbox0.managed_agents.*` metadata keys are not accepted on agents.
+- The agent model defaults to the Claude engine unless a session attaches an LLM vault that selects another supported engine.
+- The agent object is copied into the session snapshot. Later agent updates do not mutate existing sessions.
+
+## Next
+
+<CardGrid>
+  <LinkCard
+    title="Sessions"
+    href="/docs/managed-agents/sessions"
+    cta="Run"
+  >
+    Bind an agent snapshot to an environment and vaults
+  </LinkCard>
+
+  <LinkCard
+    title="Agent Engines"
+    href="/docs/managed-agents/agent-engines"
+    cta="Choose"
+  >
+    Select the runtime adapter with LLM vault metadata
+  </LinkCard>
+</CardGrid>

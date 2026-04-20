@@ -1,0 +1,112 @@
+# Vaults
+
+Vaults keep credentials out of agent code. Attach vault ids to a session, and Sandbox0 projects the matching credentials into network policy for that session.
+
+Official reference: [Claude Managed Agents vaults](https://platform.claude.com/docs/en/managed-agents/vaults).
+
+## LLM Vaults
+
+Every running session should attach exactly one LLM vault. The LLM vault selects the agent engine and model provider endpoint.
+
+```typescript
+const llmVault = await client.beta.vaults.create({
+    display_name: "Claude LLM",
+    metadata: {
+        "sandbox0.managed_agents.role": "llm",
+        "sandbox0.managed_agents.engine": "claude",
+        "sandbox0.managed_agents.llm_base_url": "https://api.anthropic.com",
+    },
+});
+
+await client.beta.vaults.credentials.create(llmVault.id, {
+    display_name: "Anthropic API key",
+    auth: {
+        type: "static_bearer",
+        token: process.env.ANTHROPIC_API_KEY,
+    },
+});
+```
+
+| Metadata key | Required | Meaning |
+|--------------|----------|---------|
+| `sandbox0.managed_agents.role` | Yes | Must be `llm` for an LLM vault |
+| `sandbox0.managed_agents.engine` | Yes | `claude` or `codex` |
+| `sandbox0.managed_agents.llm_base_url` | No | Model provider base URL |
+
+The LLM credential must be an unbound `static_bearer` credential. Do not set `mcp_server_url` on LLM credentials.
+
+## Generic Credential Vaults
+
+Use credential vaults when the agent needs authenticated outbound access to an external HTTP service.
+
+```typescript
+const apiVault = await client.beta.vaults.create({
+    display_name: "Example API",
+    metadata: {
+        "sandbox0.managed_agents.role": "credential",
+        "sandbox0.managed_agents.kind": "http_headers",
+        "sandbox0.managed_agents.version": "1",
+        "sandbox0.managed_agents.target_domains": "api.example.com",
+        "sandbox0.managed_agents.protocol": "https",
+        "sandbox0.managed_agents.tls_mode": "terminate-reoriginate",
+        "sandbox0.managed_agents.failure_policy": "fail-closed",
+        "sandbox0.managed_agents.headers_json": "{\"authorization\":\"{{ .authorization }}\"}",
+    },
+});
+
+await client.beta.vaults.credentials.create(apiVault.id, {
+    display_name: "Example API token",
+    auth: {
+        type: "static_bearer",
+        token: process.env.EXAMPLE_API_TOKEN,
+    },
+});
+```
+
+Credential vaults can use `static_bearer` or `mcp_oauth` credentials. Sandbox0 resolves secret values and projects headers only for the target domains.
+
+## MCP Credentials
+
+For MCP servers, the credential auth includes `mcp_server_url`.
+
+```typescript
+await client.beta.vaults.credentials.create(vault.id, {
+    display_name: "MCP token",
+    auth: {
+        type: "static_bearer",
+        token: process.env.MCP_TOKEN,
+        mcp_server_url: "https://mcp.example.com/sse",
+    },
+});
+```
+
+## Runtime Injection
+
+Sandbox0 injects credentials through egress auth and compatibility environment variables:
+
+| Engine | Compatibility environment |
+|--------|---------------------------|
+| `claude` | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL` |
+| `codex` | `CODEX_API_KEY`, `OPENAI_API_KEY`, and `openai_base_url` engine config |
+
+The environment variables may contain placeholders. The real token is projected by Sandbox0-managed credential policy when the sandbox contacts the configured host.
+
+## Next
+
+<CardGrid>
+  <LinkCard
+    title="Agent Engines"
+    href="/docs/managed-agents/agent-engines"
+    cta="Choose"
+  >
+    Use LLM vault metadata to select Claude or Codex runtime behavior
+  </LinkCard>
+
+  <LinkCard
+    title="Environments"
+    href="/docs/managed-agents/environments"
+    cta="Restrict"
+  >
+    Combine credentials with limited network policy
+  </LinkCard>
+</CardGrid>

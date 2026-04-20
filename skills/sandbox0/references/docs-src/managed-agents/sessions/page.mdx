@@ -1,0 +1,99 @@
+# Sessions
+
+A session is the durable unit of agent work. It binds one agent snapshot, one environment, optional resources, and one or more vaults.
+
+Official reference: [Claude Managed Agents sessions](https://platform.claude.com/docs/en/managed-agents/sessions).
+
+## Create A Session
+
+```typescript
+const session = await client.beta.sessions.create({
+    agent: agent.id,
+    environment_id: environment.id,
+    title: "Triage failing tests",
+    vault_ids: [llmVault.id],
+    resources: [{
+        type: "github_repository",
+        url: "https://github.com/anthropics/anthropic-sdk-typescript",
+        checkout: { type: "branch", name: "main" },
+    }],
+    metadata: {
+        workflow: "test-triage",
+    },
+});
+```
+
+## Agent Snapshot
+
+The `agent` field can reference the latest agent:
+
+```typescript
+const session = await client.beta.sessions.create({
+    agent: agent.id,
+    environment_id: environment.id,
+    vault_ids: [llmVault.id],
+});
+```
+
+It can also pin a specific version:
+
+```typescript
+const session = await client.beta.sessions.create({
+    agent: {
+        type: "agent",
+        id: agent.id,
+        version: 1,
+    },
+    environment_id: environment.id,
+    vault_ids: [llmVault.id],
+});
+```
+
+## Resources
+
+Resources are materialized into the session workspace.
+
+| Resource | Purpose |
+|----------|---------|
+| `file` | Mount an uploaded file into the workspace |
+| `github_repository` | Clone a repository into the workspace |
+
+Repository authorization tokens are accepted on create or update, but are not returned in responses.
+
+## Lifecycle
+
+| State | Meaning |
+|-------|---------|
+| `idle` | Ready for new input or waiting for required action |
+| `running` | The agent engine is processing events |
+| `terminated` | The session is no longer active |
+
+Sandbox0 keeps session state and event history outside the sandbox. The sandbox and workspace volume are runtime attachments for the session.
+
+## Sandbox0 Runtime Behavior
+
+- Creating or resuming work ensures a sandbox exists for the session.
+- The workspace is backed by a Sandbox0 volume mounted at `/workspace`.
+- The runtime sandbox uses auto-resume.
+- Sandbox TTL is configured by the Managed Agents deployment. Session metadata such as `sandbox0.managed_agents.hard_ttl_seconds` is rejected.
+- The selected agent engine is resolved from the attached LLM vault; if no engine is selected, the default is `claude`.
+
+## Next
+
+<CardGrid>
+  <LinkCard
+    title="Events"
+    href="/docs/managed-agents/events"
+    cta="Send"
+  >
+    Append user input and stream agent output
+  </LinkCard>
+
+  <LinkCard
+    title="Vaults"
+    href="/docs/managed-agents/vaults"
+    cta="Attach"
+  >
+    Provide model and external service credentials
+  </LinkCard>
+</CardGrid>

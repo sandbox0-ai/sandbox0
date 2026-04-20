@@ -1,0 +1,97 @@
+# Agent Engines
+
+Agent engine is the Sandbox0 name for the runtime adapter that executes an agent inside the per-session sandbox.
+
+The public API still uses the Claude Managed Agents object model. The agent engine decides which local wrapper runs in the sandbox, how model credentials are projected, and how tool events are mapped back to the Managed Agents event stream.
+
+Official references:
+
+- [Claude Managed Agents quickstart](https://platform.claude.com/docs/en/managed-agents/quickstart)
+- [Claude Managed Agents agent setup](https://platform.claude.com/docs/en/managed-agents/agent-setup)
+
+## Supported Engines
+
+| Engine | Runtime adapter | Model API shape |
+|--------|-----------------|-----------------|
+| `claude` | Claude Agent SDK wrapper | Anthropic-compatible |
+| `codex` | Codex app-server wrapper | OpenAI-compatible |
+
+## Select An Engine
+
+The session engine is selected by the attached LLM vault:
+
+```typescript
+const claudeVault = await client.beta.vaults.create({
+    display_name: "Claude LLM",
+    metadata: {
+        "sandbox0.managed_agents.role": "llm",
+        "sandbox0.managed_agents.engine": "claude",
+        "sandbox0.managed_agents.llm_base_url": "https://api.anthropic.com",
+    },
+});
+```
+
+For Codex:
+
+```typescript
+const codexVault = await client.beta.vaults.create({
+    display_name: "Codex LLM",
+    metadata: {
+        "sandbox0.managed_agents.role": "llm",
+        "sandbox0.managed_agents.engine": "codex",
+        "sandbox0.managed_agents.llm_base_url": "https://api.openai.com/v1",
+    },
+});
+```
+
+Attach exactly one LLM vault to the session:
+
+```typescript
+const session = await client.beta.sessions.create({
+    agent: agent.id,
+    environment_id: environment.id,
+    vault_ids: [codexVault.id],
+});
+```
+
+If no LLM vault selects an engine, Sandbox0 defaults to `claude`.
+
+## Claude Engine
+
+The Claude engine expects an Anthropic-compatible API. Use it for Claude Agent SDK behavior and Anthropic-compatible provider endpoints.
+
+Sandbox0 sets compatibility environment values such as `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_BASE_URL`, then injects the real credential through egress auth for the configured LLM host.
+
+## Codex Engine
+
+The Codex engine launches Codex app-server inside the session sandbox. It expects an OpenAI-compatible model endpoint. Sandbox0 stores Codex home and thread state under the session workspace so runtime state stays session-scoped.
+
+For Minimax-compatible endpoints, Sandbox0 detects the provider from the LLM base URL and configures Codex provider settings accordingly.
+
+## Engine Configuration
+
+Agent engine behavior can be configured by deployment defaults and internal engine config. Application-level engine selection should normally happen through the LLM vault, not by putting reserved Sandbox0 keys into session metadata.
+
+<Callout variant="warning">
+Do not use `sandbox0.managed_agents.engine` as session metadata. Reserved `sandbox0.managed_agents.*` keys are only supported on vault metadata today.
+</Callout>
+
+## Next
+
+<CardGrid>
+  <LinkCard
+    title="Vaults"
+    href="/docs/managed-agents/vaults"
+    cta="Configure"
+  >
+    Store engine metadata and model credentials
+  </LinkCard>
+
+  <LinkCard
+    title="Compatibility"
+    href="/docs/managed-agents/compatibility"
+    cta="Check"
+  >
+    Review the current differences from hosted Claude Managed Agents
+  </LinkCard>
+</CardGrid>

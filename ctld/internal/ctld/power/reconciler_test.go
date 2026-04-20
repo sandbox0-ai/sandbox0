@@ -158,6 +158,33 @@ func TestPowerReconcilerResumesInFlightPauseCancellation(t *testing.T) {
 	assert.Equal(t, powerPhaseStable, state.Phase)
 }
 
+func TestPowerReconcilerIgnoresDeletingTerminalPod(t *testing.T) {
+	const uid = "pod-uid-deleting-terminal"
+	root := t.TempDir()
+	deletionTime := metav1.NewTime(time.Now())
+	pod := newReconcilerTestPod(uid, map[string]string{})
+	pod.DeletionTimestamp = &deletionTime
+	pod.Spec.RuntimeClassName = strPtr("gvisor")
+	pod.Status.Phase = corev1.PodFailed
+	client := fake.NewSimpleClientset(pod)
+	reconciler := newReconcilerForTest(client, root)
+
+	require.NoError(t, reconciler.reconcilePod(context.Background(), pod))
+}
+
+func TestPowerReconcilerIgnoresDeletingPodWhenRuntimeTargetGone(t *testing.T) {
+	const uid = "pod-uid-deleting-runtime-gone"
+	root := t.TempDir()
+	deletionTime := metav1.NewTime(time.Now())
+	pod := newReconcilerTestPod(uid, map[string]string{})
+	pod.DeletionTimestamp = &deletionTime
+	pod.Spec.RuntimeClassName = strPtr("gvisor")
+	client := fake.NewSimpleClientset(pod)
+	reconciler := newReconcilerForTest(client, root)
+
+	require.NoError(t, reconciler.reconcilePod(context.Background(), pod))
+}
+
 func newReconcilerForTest(client kubernetes.Interface, cgroupRoot string) *PowerReconciler {
 	resolver := NewPodResolver(client, "node-a", cgroupRoot)
 	controller := NewController(resolver, &cgroup.FS{SettleTimeout: 100 * time.Millisecond, PollInterval: time.Millisecond})

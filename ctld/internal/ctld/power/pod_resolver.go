@@ -285,7 +285,7 @@ func (r *PodResolver) findKataSandboxCgroupDir(root string) (string, error) {
 		return "", err
 	}
 	if found == "" {
-		return "", fmt.Errorf("kata sandbox cgroup not found under %s; ensure sandbox_cgroup_only=true", root)
+		return "", fmt.Errorf("%w: kata sandbox cgroup not found under %s; ensure sandbox_cgroup_only=true", ErrRuntimeTargetNotFound, root)
 	}
 	return found, nil
 }
@@ -341,7 +341,7 @@ func (r *PodResolver) validateGVisorSandboxCgroup(pod *corev1.Pod, podCgroupDir 
 	if hasRuntimeProcessesInCgroupTree(procRoot, podCgroupDir, isGVisorProcess) {
 		return nil
 	}
-	return fmt.Errorf("resolve gvisor sandbox cgroup for sandbox pod %s/%s: gvisor sandbox processes not found under %s", pod.Namespace, pod.Name, podCgroupDir)
+	return fmt.Errorf("%w: resolve gvisor sandbox cgroup for sandbox pod %s/%s: gvisor sandbox processes not found under %s", ErrRuntimeTargetNotFound, pod.Namespace, pod.Name, podCgroupDir)
 }
 
 func hasRuntimeProcessesInCgroupTree(procRoot, root string, match func(string, int) bool) bool {
@@ -566,7 +566,7 @@ func findPodCgroupDir(root, uid string) (string, error) {
 		return "", err
 	}
 	if found == "" {
-		return "", fmt.Errorf("pod cgroup not found under %s", root)
+		return "", fmt.Errorf("%w: pod cgroup not found under %s", ErrRuntimeTargetNotFound, root)
 	}
 	return found, nil
 }

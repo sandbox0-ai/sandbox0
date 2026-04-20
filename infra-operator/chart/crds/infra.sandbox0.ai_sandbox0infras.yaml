@@ -2864,6 +2864,11 @@ spec:
                       bucket:
                         description: Bucket specifies the GCS bucket name.
                         type: string
+                      workloadIdentityServiceAccountEmail:
+                        description: |-
+                          WorkloadIdentityServiceAccountEmail is the Google service account email
+                          used by storage clients through GKE Workload Identity.
+                        type: string
                     required:
                     - bucket
                     type: object

@@ -19,6 +19,7 @@ import (
 var ErrNotImplemented = errors.New("ctld power resolver not implemented")
 var ErrSandboxNotFound = errors.New("sandbox not found")
 var ErrPodNotFound = errors.New("pod not found")
+var ErrRuntimeTargetNotFound = errors.New("runtime target not found")
 
 const defaultPauseUsageTimeout = 2 * time.Second
 

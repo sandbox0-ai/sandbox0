@@ -2,6 +2,10 @@
 
 A Template is the blueprint for creating Sandboxes. It defines the container image, resource limits, warm pool size, and default network policy. Every Sandbox is created from a Template.
 
+<Callout variant="info">
+Creating, updating, and deleting team-owned templates requires team admin permissions. `developer` and `builder` roles can read templates, and `builder` is typically used for registry push workflows rather than template management.
+</Callout>
+
 ## Template Types
 
 Sandbox0 has two categories of templates:
@@ -18,6 +22,8 @@ Builtin templates use curated public images and are ready to use immediately. Cu
 ## Create Template
 
 Create a custom template for your team. The template spec is defined in a YAML file.
+
+CLI examples assume you already ran `s0 auth login` and selected the correct current team.
 
 <Endpoint method="POST">
 /api/v1/templates

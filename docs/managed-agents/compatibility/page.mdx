@@ -30,7 +30,6 @@ Official reference: [Claude Managed Agents quickstart](https://platform.claude.c
 | LLM token | Stored in an LLM vault and projected by Sandbox0 credential policy. |
 | Agent engine | Selected by `sandbox0.managed_agents.engine` on the LLM vault. |
 | Sandbox claim | Runtime setup claims or resumes a Sandbox0 sandbox and mounts a persistent workspace volume. |
-| Sandbox TTL | Controlled by deployment runtime config. `sandbox0.managed_agents.hard_ttl_seconds` session metadata is rejected. |
 | Claude engine | Requires an Anthropic-compatible endpoint. |
 | Codex engine | Requires an OpenAI-compatible endpoint. |
 | Anthropic pre-built skills | Not supported. Use Sandbox0 custom skills. |
@@ -113,18 +112,18 @@ For application code, prefer SDK methods over hardcoded endpoint paths.
 
 <CardGrid>
   <LinkCard
-    title="Overview"
-    href="/docs/managed-agents"
-    cta="Read"
+    title="Credential"
+    href="/docs/credential"
+    cta="Secure"
   >
-    Understand how Managed Agents map onto Sandbox0 primitives
+    Use Sandbox0 credentials for authenticated outbound access
   </LinkCard>
 
   <LinkCard
-    title="SDK Usage"
-    href="/docs/managed-agents/sdk"
-    cta="Run"
+    title="Template"
+    href="/docs/template"
+    cta="Prepare"
   >
-    Use the official Anthropic SDK with the Sandbox0 Managed Agents endpoint
+    Define runtime images, packages, and warm pools
   </LinkCard>
 </CardGrid>

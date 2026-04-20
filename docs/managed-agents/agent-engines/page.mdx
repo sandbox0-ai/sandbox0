@@ -44,6 +44,20 @@ const codexVault = await client.beta.vaults.create({
 });
 ```
 
+Add the model provider token to the selected LLM vault:
+
+```typescript
+await client.beta.vaults.credentials.create(codexVault.id, {
+    display_name: "Model provider API key",
+    auth: {
+        type: "static_bearer",
+        token: process.env.MODEL_API_KEY,
+    },
+});
+```
+
+Use `claudeVault.id` instead of `codexVault.id` when the session should run the Claude engine. LLM credentials must be unbound `static_bearer` credentials; do not set `mcp_server_url` for the model provider token.
+
 Attach exactly one LLM vault to the session:
 
 ```typescript

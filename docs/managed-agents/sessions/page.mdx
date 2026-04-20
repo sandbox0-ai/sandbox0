@@ -75,7 +75,7 @@ Sandbox0 keeps session state and event history outside the sandbox. The sandbox 
 - Creating or resuming work ensures a sandbox exists for the session.
 - The workspace is backed by a Sandbox0 volume mounted at `/workspace`.
 - The runtime sandbox uses auto-resume.
-- Sandbox TTL is configured by the Managed Agents deployment. Session metadata such as `sandbox0.managed_agents.hard_ttl_seconds` is rejected.
+- Runtime sandbox lifetime is managed by the Managed Agents deployment.
 - The selected agent engine is resolved from the attached LLM vault; if no engine is selected, the default is `claude`.
 
 ## Next

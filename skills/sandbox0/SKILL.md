@@ -44,3 +44,14 @@ This skill is intentionally thin. Do not rely on local bundled docs for product 
 - Prefer s0 CLI- and SDK-oriented guidance over internal implementation details.
 - Recommend concrete compositions when helpful, for example `REPL + Volume` for persistent coding sessions.
 - Use architecture detail only when it changes the user's design choice, security model, persistence model, networking, or deployment tradeoff.
+
+## Source Repositories
+
+- Sandbox0 core: https://github.com/sandbox0-ai/sandbox0
+- CLI: https://github.com/sandbox0-ai/s0
+- Go SDK: https://github.com/sandbox0-ai/sdk-go
+- JavaScript SDK: https://github.com/sandbox0-ai/sdk-js
+- Python SDK: https://github.com/sandbox0-ai/sdk-py
+- Managed Agents examples and runtime work: https://github.com/sandbox0-ai/managed-agents
+
+When reporting issues, include a minimal reproduction and relevant logs, but remove API keys, tokens, kubeconfigs, customer data, private repository URLs, and any other sensitive personal or organizational information.

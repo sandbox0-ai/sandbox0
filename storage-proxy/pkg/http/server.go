@@ -178,6 +178,7 @@ func NewServer(logger *logrus.Logger, cfg *config.StorageProxyConfig, k8sClient 
 	s.mux.HandleFunc("PUT /internal/v1/sandboxvolumes/owned/cleanup", s.markOwnedSandboxVolumesForCleanup)
 	s.mux.HandleFunc("PUT /internal/v1/sandboxvolumes/owned/{id}/cleanup-attempt", s.markOwnedSandboxVolumeCleanupAttempt)
 	s.mux.HandleFunc("DELETE /internal/v1/sandboxvolumes/owned/{id}", s.deleteOwnedSandboxVolume)
+	s.mux.HandleFunc("POST /internal/v1/sandboxvolumes/{id}/prepare-bind", s.prepareSandboxVolumeBind)
 
 	// Snapshot handlers
 	s.mux.HandleFunc("POST /sandboxvolumes/{volume_id}/snapshots", s.createSnapshot)

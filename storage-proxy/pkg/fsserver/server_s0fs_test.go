@@ -10,6 +10,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/notify"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/router"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
@@ -187,6 +188,154 @@ func TestS0FSDirectoryAndSetAttr(t *testing.T) {
 		Name:     "dir",
 	}); err != nil {
 		t.Fatalf("Rmdir() error = %v", err)
+	}
+}
+
+func TestS0FSOpenTruncateShrinksExistingFile(t *testing.T) {
+	t.Parallel()
+
+	volCtx := newMountedS0FSVolumeContext(t, "vol-1", "team-a")
+	server := newTestFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{
+			"vol-1": volCtx,
+		},
+	}, nil, nil)
+	ctx := authContext("team-a", "")
+
+	createResp, err := server.Create(ctx, &pb.CreateRequest{
+		VolumeId: "vol-1",
+		Parent:   1,
+		Name:     "overwrite.txt",
+		Mode:     0o644,
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if _, err := server.Write(ctx, &pb.WriteRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		Offset:   0,
+		Data:     []byte("abcdef"),
+		HandleId: createResp.HandleId,
+	}); err != nil {
+		t.Fatalf("Write(initial) error = %v", err)
+	}
+	if _, err := server.Release(ctx, &pb.ReleaseRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		HandleId: createResp.HandleId,
+	}); err != nil {
+		t.Fatalf("Release(initial) error = %v", err)
+	}
+
+	openResp, err := server.Open(ctx, &pb.OpenRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		Flags:    uint32(syscall.O_WRONLY | syscall.O_TRUNC),
+	})
+	if err != nil {
+		t.Fatalf("Open(O_TRUNC) error = %v", err)
+	}
+	if _, err := server.Write(ctx, &pb.WriteRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		Offset:   0,
+		Data:     []byte("xy"),
+		HandleId: openResp.HandleId,
+	}); err != nil {
+		t.Fatalf("Write(overwrite) error = %v", err)
+	}
+	if _, err := server.Release(ctx, &pb.ReleaseRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		HandleId: openResp.HandleId,
+	}); err != nil {
+		t.Fatalf("Release(overwrite) error = %v", err)
+	}
+
+	attr, err := server.GetAttr(ctx, &pb.GetAttrRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+	})
+	if err != nil {
+		t.Fatalf("GetAttr() error = %v", err)
+	}
+	if attr.Size != 2 {
+		t.Fatalf("size after overwrite = %d, want 2", attr.Size)
+	}
+	readResp, err := server.Read(ctx, &pb.ReadRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		Offset:   0,
+		Size:     16,
+	})
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if !bytes.Equal(readResp.Data, []byte("xy")) {
+		t.Fatalf("Read() data = %q, want xy", readResp.Data)
+	}
+}
+
+func TestS0FSWritePublishesResolvedWatchPath(t *testing.T) {
+	t.Parallel()
+
+	volCtx := newMountedS0FSVolumeContext(t, "vol-1", "team-a")
+	hub := notify.NewHub(nil, 16)
+	server := newTestFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{
+			"vol-1": volCtx,
+		},
+	}, nil, hub)
+	ctx := authContext("team-a", "")
+
+	dirResp, err := server.Mkdir(ctx, &pb.MkdirRequest{
+		VolumeId: "vol-1",
+		Parent:   1,
+		Name:     "dir",
+		Mode:     0o755,
+	})
+	if err != nil {
+		t.Fatalf("Mkdir() error = %v", err)
+	}
+	createResp, err := server.Create(ctx, &pb.CreateRequest{
+		VolumeId: "vol-1",
+		Parent:   dirResp.Inode,
+		Name:     "watch.txt",
+		Mode:     0o644,
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	_, events, cancel := hub.Subscribe(&pb.WatchRequest{
+		VolumeId:    "vol-1",
+		PathPrefix:  "/dir",
+		Recursive:   true,
+		IncludeSelf: true,
+	})
+	defer cancel()
+
+	if _, err := server.Write(ctx, &pb.WriteRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		Offset:   0,
+		Data:     []byte("payload"),
+		HandleId: createResp.HandleId,
+	}); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	select {
+	case event := <-events:
+		if event.EventType != pb.WatchEventType_WATCH_EVENT_TYPE_WRITE {
+			t.Fatalf("event type = %v, want write", event.EventType)
+		}
+		if event.Path != "/dir/watch.txt" {
+			t.Fatalf("event path = %q, want /dir/watch.txt", event.Path)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for watch event")
 	}
 }
 

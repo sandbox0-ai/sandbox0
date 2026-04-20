@@ -353,6 +353,72 @@ func (s *Server) deleteSandboxVolumeRecord(ctx context.Context, id string, force
 	return vol, nil
 }
 
+func (s *Server) prepareSandboxVolumeBind(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "id is required")
+		return
+	}
+	if _, err := s.loadAuthorizedVolume(r.Context(), id); err != nil {
+		s.writeVolumeFileError(w, err)
+		return
+	}
+
+	if r.Header.Get(volumeFileAffinityRoutedPodHeader) == "" {
+		targetURL, ownerPodID, err := s.resolveRemoteVolumeOwnerURL(r.Context(), id)
+		if err != nil {
+			s.writeVolumeFileError(w, err)
+			return
+		}
+		if targetURL != nil {
+			s.proxyVolumeRequestToOwner(w, r, targetURL, ownerPodID)
+			return
+		}
+	}
+
+	if s.volMgr == nil {
+		s.writeVolumeFileError(w, errVolumeFileUnavailable)
+		return
+	}
+
+	deadline := time.NewTimer(30 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		cleaned, err := s.volMgr.CleanupIdleDirectVolumeFileMount(r.Context(), id)
+		if err != nil {
+			s.logger.WithError(err).WithField("volume_id", id).Warn("Failed to cleanup direct volume mount before bind")
+			s.writeVolumeFileError(w, err)
+			return
+		}
+		mounts, err := s.repo.GetActiveMounts(r.Context(), id, 15)
+		if err != nil {
+			s.logger.WithError(err).WithField("volume_id", id).Error("Failed to check active mounts before bind")
+			_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "failed to check active mounts")
+			return
+		}
+		if len(mounts) == 0 {
+			_ = spec.WriteSuccess(w, http.StatusOK, map[string]bool{"prepared": true})
+			return
+		}
+		if cleaned {
+			continue
+		}
+
+		select {
+		case <-r.Context().Done():
+			_ = spec.WriteError(w, http.StatusServiceUnavailable, spec.CodeUnavailable, r.Context().Err().Error())
+			return
+		case <-deadline.C:
+			_ = spec.WriteError(w, http.StatusConflict, spec.CodeConflict, "volume has active direct file operations")
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
 func (s *Server) isOwnedSandboxVolume(ctx context.Context, id string) bool {
 	if s == nil || s.repo == nil {
 		return false

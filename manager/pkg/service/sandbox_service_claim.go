@@ -475,6 +475,11 @@ func (s *SandboxService) bindVolumePortal(ctx context.Context, pod *corev1.Pod, 
 	if pod == nil {
 		return nil, fmt.Errorf("pod is nil")
 	}
+	if preparer, ok := s.volumeMetadata.(SandboxVolumeBindPreparer); ok && preparer != nil {
+		if err := preparer.PrepareForBind(ctx, teamID, userID, volumeID); err != nil {
+			return nil, fmt.Errorf("prepare volume %s for ctld bind: %w", volumeID, err)
+		}
+	}
 	ctldAddress, err := s.ctldAddressForPod(ctx, pod)
 	if err != nil {
 		return nil, err

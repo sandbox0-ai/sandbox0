@@ -1823,6 +1823,15 @@ func assertVolumeLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session
 	Expect(status).To(Equal(http.StatusOK))
 	Expect(directBody).To(Equal(directContent))
 
+	overwriteContent := []byte("short")
+	status, err = session.WriteVolumeFile(env.TestCtx.Context, GinkgoT(), volumeID, directFilePath, overwriteContent, "")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	overwrittenBody, status, err := session.ReadVolumeFile(env.TestCtx.Context, GinkgoT(), volumeID, directFilePath)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(overwrittenBody).To(Equal(overwriteContent))
+
 	snapReq := apispec.CreateSnapshotRequest{
 		Name: "e2e-snap",
 	}

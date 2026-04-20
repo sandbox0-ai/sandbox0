@@ -185,7 +185,14 @@ func (s *Server) prepareVolumeFileMount(ctx context.Context, volumeID string) (f
 			return func() {}, err
 		}
 	}
-	return cleanup, nil
+	return func() {
+		cleanup()
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if _, err := s.volMgr.CleanupIdleDirectVolumeFileMount(cleanupCtx, volumeID); err != nil && s.logger != nil {
+			s.logger.WithError(err).WithField("volume_id", volumeID).Warn("Failed to release direct volume file mount after request")
+		}
+	}, nil
 }
 
 func (s *Server) proxyVolumeRequestToOwnerIfNeeded(w http.ResponseWriter, r *http.Request, volumeID string) (bool, error) {

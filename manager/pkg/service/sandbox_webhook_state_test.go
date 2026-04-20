@@ -44,3 +44,26 @@ func TestStorageProxyVolumeClientDefaultsClusterID(t *testing.T) {
 		t.Fatalf("clusterID = %q, want %q", gotClusterID, naming.DefaultClusterID)
 	}
 }
+
+func TestStorageProxyVolumeClientPrepareForBind(t *testing.T) {
+	var sawToken string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/internal/v1/sandboxvolumes/vol-1/prepare-bind" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		sawToken = r.Header.Get("X-Internal-Token")
+		_ = spec.WriteSuccess(w, http.StatusOK, map[string]bool{"prepared": true})
+	}))
+	defer server.Close()
+
+	client := NewStorageProxyVolumeClient(StorageProxyVolumeClientConfig{
+		BaseURL:        server.URL,
+		TokenGenerator: staticTokenGenerator{},
+	})
+	if err := client.PrepareForBind(t.Context(), "team-1", "user-1", "vol-1"); err != nil {
+		t.Fatalf("PrepareForBind returned error: %v", err)
+	}
+	if sawToken == "" {
+		t.Fatal("PrepareForBind did not send an internal token")
+	}
+}

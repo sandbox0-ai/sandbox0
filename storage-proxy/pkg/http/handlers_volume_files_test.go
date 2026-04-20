@@ -651,6 +651,68 @@ func TestHandleVolumeFileStatPrefersLocalOwnerPod(t *testing.T) {
 	}
 }
 
+func TestHandleVolumeFileStatReleasesDirectMountAfterRequest(t *testing.T) {
+	fileRPC := &fakeHTTPVolumeFileRPC{
+		lookupFunc: func(_ context.Context, req *pb.LookupRequest) (*pb.NodeResponse, error) {
+			if req.Parent == 1 && req.Name == "report.txt" {
+				return &pb.NodeResponse{Inode: 3, Attr: volumeFileAttr(12)}, nil
+			}
+			return nil, fserror.New(fserror.NotFound, "missing")
+		},
+	}
+	server, volMgr := newVolumeFileTestServer(fileRPC)
+
+	req := httptest.NewRequest(http.MethodGet, "/sandboxvolumes/vol-1/files/stat?path=/report.txt", nil)
+	req.SetPathValue("id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-a"}))
+	recorder := httptest.NewRecorder()
+
+	server.handleVolumeFileStat(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	if volMgr.releaseCalls != 1 {
+		t.Fatalf("release calls = %d, want 1", volMgr.releaseCalls)
+	}
+	if volMgr.cleanupCalls != 1 || volMgr.lastCleanupVolume != "vol-1" {
+		t.Fatalf("cleanup = (%d, %q), want (1, vol-1)", volMgr.cleanupCalls, volMgr.lastCleanupVolume)
+	}
+}
+
+func TestPrepareSandboxVolumeBindCleansLocalDirectOwner(t *testing.T) {
+	fileRPC := &fakeHTTPVolumeFileRPC{}
+	server, volMgr := newVolumeFileTestServer(fileRPC)
+	repo := server.repo.(*fakeHTTPRepo)
+	repo.activeMounts["vol-1"] = []*db.VolumeMount{{
+		VolumeID:  "vol-1",
+		ClusterID: "cluster-a",
+		PodID:     "local-pod",
+		MountedAt: time.Unix(20, 0),
+	}}
+	volMgr.cleanupDirectFunc = func(_ context.Context, volumeID string) (bool, error) {
+		delete(repo.activeMounts, volumeID)
+		return true, nil
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/sandboxvolumes/vol-1/prepare-bind", nil)
+	req.SetPathValue("id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-a"}))
+	recorder := httptest.NewRecorder()
+
+	server.prepareSandboxVolumeBind(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	if volMgr.cleanupCalls != 1 || volMgr.lastCleanupVolume != "vol-1" {
+		t.Fatalf("cleanup = (%d, %q), want (1, vol-1)", volMgr.cleanupCalls, volMgr.lastCleanupVolume)
+	}
+	if len(repo.activeMounts["vol-1"]) != 0 {
+		t.Fatalf("active mounts after prepare = %+v, want empty", repo.activeMounts["vol-1"])
+	}
+}
+
 func TestPrepareOrProxyVolumeFileRequestReroutesAfterMountConflict(t *testing.T) {
 	remoteSeen := make(chan struct{}, 1)
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

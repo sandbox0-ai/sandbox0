@@ -176,14 +176,8 @@ func normalizePayload(contentType string, payload any) (any, error) {
 	if !isJSONContentType(contentType) {
 		switch value := payload.(type) {
 		case []byte:
-			if len(value) == 0 {
-				return nil, nil
-			}
 			return string(value), nil
 		case string:
-			if strings.TrimSpace(value) == "" {
-				return nil, nil
-			}
 			return value, nil
 		default:
 			return payload, nil

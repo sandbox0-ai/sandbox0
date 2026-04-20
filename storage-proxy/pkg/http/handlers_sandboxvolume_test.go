@@ -215,6 +215,42 @@ func TestMarkOwnedSandboxVolumesForCleanupIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestPrepareSandboxVolumeForPortalBindCleansIdleDirectMount(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1", UserID: "user-1"}
+	volMgr := &fakeHTTPVolumeMountManager{
+		cleanupDirectFunc: func(context.Context, string) (bool, error) {
+			return true, nil
+		},
+	}
+	server := &Server{
+		logger: logrus.New(),
+		repo:   repo,
+		volMgr: volMgr,
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/internal/v1/sandboxvolumes/vol-1/prepare-portal-bind", nil)
+	req.SetPathValue("id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+		Caller: internalauth.ServiceManager,
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	recorder := httptest.NewRecorder()
+
+	server.prepareSandboxVolumeForPortalBind(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if volMgr.cleanupCalls != 1 {
+		t.Fatalf("cleanup calls = %d, want 1", volMgr.cleanupCalls)
+	}
+	if volMgr.lastCleanupVolume != "vol-1" {
+		t.Fatalf("cleanup volume = %q, want %q", volMgr.lastCleanupVolume, "vol-1")
+	}
+}
+
 func TestForkVolumePassesDefaultPosixIdentity(t *testing.T) {
 	snapshotMgr := &captureForkSnapshotManager{fakeHTTPSnapshotManager: &fakeHTTPSnapshotManager{}}
 	server := &Server{

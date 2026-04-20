@@ -51,15 +51,23 @@ func (m *Manager) validateBindableVolume(ctx context.Context, req ctldBindContex
 	}
 	selfPodID := m.ownerPodID()
 	for _, mount := range mounts {
-		if mount == nil {
-			continue
-		}
-		if mount.ClusterID == m.clusterID && mount.PodID == selfPodID {
+		if !isConflictingMountForCtldBind(mount, m.clusterID, selfPodID) {
 			continue
 		}
 		return nil, fmt.Errorf("volume %s already has an active owner on %s/%s", req.volumeID, mount.ClusterID, mount.PodID)
 	}
 	return vol, nil
+}
+
+func isConflictingMountForCtldBind(mount *db.VolumeMount, selfClusterID, selfPodID string) bool {
+	if mount == nil {
+		return false
+	}
+	if mount.ClusterID == selfClusterID && mount.PodID == selfPodID {
+		return false
+	}
+	opts := volume.DecodeMountOptions(mount.MountOptions)
+	return opts.OwnerKind != volume.OwnerKindStorageProxy
 }
 
 type ctldBindContext struct {

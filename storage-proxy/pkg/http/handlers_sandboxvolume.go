@@ -608,6 +608,49 @@ func (s *Server) deleteOwnedSandboxVolume(w http.ResponseWriter, r *http.Request
 	_ = spec.WriteSuccess(w, http.StatusOK, map[string]bool{"deleted": true})
 }
 
+func (s *Server) prepareSandboxVolumeForPortalBind(w http.ResponseWriter, r *http.Request) {
+	claims, ok := s.requireManagerInternal(w, r)
+	if !ok {
+		return
+	}
+
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "id is required")
+		return
+	}
+
+	vol, err := s.repo.GetSandboxVolume(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			_ = spec.WriteError(w, http.StatusNotFound, spec.CodeNotFound, "not found")
+			return
+		}
+		s.logger.WithError(err).WithField("volume_id", id).Error("Failed to get sandbox volume before portal bind preparation")
+		_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "internal server error")
+		return
+	}
+	if !claims.IsSystemToken() && claims.TeamID != "" && vol.TeamID != claims.TeamID {
+		_ = spec.WriteError(w, http.StatusNotFound, spec.CodeNotFound, "not found")
+		return
+	}
+
+	cleaned := false
+	if s.volMgr != nil {
+		cleaned, err = s.volMgr.CleanupIdleDirectVolumeFileMount(r.Context(), id)
+		if err != nil {
+			s.logger.WithError(err).WithField("volume_id", id).Warn("Failed to cleanup direct volume mount before portal bind")
+			_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "failed to cleanup direct volume mount")
+			return
+		}
+	}
+
+	_ = spec.WriteSuccess(w, http.StatusOK, map[string]any{
+		"prepared": true,
+		"cleaned":  cleaned,
+	})
+}
+
 func (s *Server) forkVolume(w http.ResponseWriter, r *http.Request) {
 	claims := internalauth.ClaimsFromContext(r.Context())
 	if claims == nil {

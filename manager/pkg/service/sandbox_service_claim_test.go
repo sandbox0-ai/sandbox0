@@ -715,6 +715,8 @@ func TestValidateVolumePortalAccessAllowsROXOnlyForReadOnlyTemplateMount(t *test
 type fakeVolumeMetadataClient struct {
 	accessMode string
 	err        error
+	prepared   []string
+	prepareErr error
 }
 
 func (c fakeVolumeMetadataClient) Get(_ context.Context, teamID, userID, volumeID string) (*SandboxVolumeInfo, error) {
@@ -727,6 +729,29 @@ func (c fakeVolumeMetadataClient) Get(_ context.Context, teamID, userID, volumeI
 		UserID:     userID,
 		AccessMode: c.accessMode,
 	}, nil
+}
+
+func (c *fakeVolumeMetadataClient) PrepareForVolumePortalBind(_ context.Context, teamID, userID, volumeID string) error {
+	if c == nil {
+		return nil
+	}
+	c.prepared = append(c.prepared, teamID+":"+userID+":"+volumeID)
+	return c.prepareErr
+}
+
+func TestPrepareVolumePortalBindUsesPreparationClientWhenAvailable(t *testing.T) {
+	metadata := &fakeVolumeMetadataClient{}
+	svc := &SandboxService{volumeMetadata: metadata}
+
+	if err := svc.prepareVolumePortalBind(context.Background(), "team-a", "user-a", "vol-1"); err != nil {
+		t.Fatalf("prepareVolumePortalBind() error = %v", err)
+	}
+	if len(metadata.prepared) != 1 {
+		t.Fatalf("prepared calls = %d, want 1", len(metadata.prepared))
+	}
+	if metadata.prepared[0] != "team-a:user-a:vol-1" {
+		t.Fatalf("prepared call = %q, want %q", metadata.prepared[0], "team-a:user-a:vol-1")
+	}
 }
 
 func newClaimTestPodLister(t *testing.T, pods ...*corev1.Pod) corelisters.PodLister {

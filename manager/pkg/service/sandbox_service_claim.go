@@ -468,12 +468,26 @@ func (s *SandboxService) bindWebhookStatePortal(ctx context.Context, pod *corev1
 	return err
 }
 
+func (s *SandboxService) prepareVolumePortalBind(ctx context.Context, teamID, userID, volumeID string) error {
+	if s == nil || s.volumeMetadata == nil {
+		return nil
+	}
+	preparer, ok := s.volumeMetadata.(SandboxVolumePortalPreparationClient)
+	if !ok {
+		return nil
+	}
+	return preparer.PrepareForVolumePortalBind(ctx, teamID, userID, volumeID)
+}
+
 func (s *SandboxService) bindVolumePortal(ctx context.Context, pod *corev1.Pod, teamID, userID, ownerTeamID, volumeID, mountPoint, portalName string) (*ctldapi.BindVolumePortalResponse, error) {
 	if s == nil || s.ctldClient == nil {
 		return nil, fmt.Errorf("ctld client is not configured")
 	}
 	if pod == nil {
 		return nil, fmt.Errorf("pod is nil")
+	}
+	if err := s.prepareVolumePortalBind(ctx, teamID, userID, volumeID); err != nil {
+		return nil, fmt.Errorf("prepare volume portal bind: %w", err)
 	}
 	ctldAddress, err := s.ctldAddressForPod(ctx, pod)
 	if err != nil {

@@ -38,6 +38,10 @@ type SandboxVolumeMetadataClient interface {
 	Get(ctx context.Context, teamID, userID, volumeID string) (*SandboxVolumeInfo, error)
 }
 
+type SandboxVolumePortalPreparationClient interface {
+	PrepareForVolumePortalBind(ctx context.Context, teamID, userID, volumeID string) error
+}
+
 type StorageProxyVolumeClient struct {
 	baseURL        string
 	httpClient     *http.Client
@@ -185,6 +189,40 @@ func (c *StorageProxyVolumeClient) Get(ctx context.Context, teamID, userID, volu
 		return nil, fmt.Errorf("get sandbox volume returned no id")
 	}
 	return volume, nil
+}
+
+func (c *StorageProxyVolumeClient) PrepareForVolumePortalBind(ctx context.Context, teamID, userID, volumeID string) error {
+	if c == nil || c.baseURL == "" {
+		return fmt.Errorf("storage-proxy volume client is not configured")
+	}
+	volumeID = strings.TrimSpace(volumeID)
+	if volumeID == "" {
+		return fmt.Errorf("volume id is required")
+	}
+	token, err := c.generateToken(teamID, userID, "")
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.baseURL+"/internal/v1/sandboxvolumes/"+url.PathEscape(volumeID)+"/prepare-portal-bind", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-Internal-Token", token)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("prepare sandbox volume for portal bind: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+	data, _ := io.ReadAll(resp.Body)
+	_, apiErr, decodeErr := spec.DecodeResponse[map[string]any](bytes.NewReader(data))
+	if decodeErr == nil && apiErr != nil {
+		return fmt.Errorf("prepare sandbox volume for portal bind failed: %s", apiErr.Message)
+	}
+	return fmt.Errorf("prepare sandbox volume for portal bind failed with status %d", resp.StatusCode)
 }
 
 func (c *StorageProxyVolumeClient) MarkSandboxForCleanup(ctx context.Context, teamID, userID, sandboxID, reason string) error {

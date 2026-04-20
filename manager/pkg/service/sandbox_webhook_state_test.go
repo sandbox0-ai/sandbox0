@@ -44,3 +44,31 @@ func TestStorageProxyVolumeClientDefaultsClusterID(t *testing.T) {
 		t.Fatalf("clusterID = %q, want %q", gotClusterID, naming.DefaultClusterID)
 	}
 }
+
+func TestStorageProxyVolumeClientPrepareForPortalBind(t *testing.T) {
+	var gotMethod, gotPath, gotToken string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotToken = r.Header.Get("X-Internal-Token")
+		_ = spec.WriteSuccess(w, http.StatusOK, map[string]any{"prepared": true})
+	}))
+	defer server.Close()
+
+	client := NewStorageProxyVolumeClient(StorageProxyVolumeClientConfig{
+		BaseURL:        server.URL,
+		TokenGenerator: staticTokenGenerator{},
+	})
+	if err := client.PrepareForVolumePortalBind(t.Context(), "team-1", "user-1", "vol-1"); err != nil {
+		t.Fatalf("PrepareForVolumePortalBind() error = %v", err)
+	}
+	if gotMethod != http.MethodPut {
+		t.Fatalf("method = %q, want %q", gotMethod, http.MethodPut)
+	}
+	if gotPath != "/internal/v1/sandboxvolumes/vol-1/prepare-portal-bind" {
+		t.Fatalf("path = %q, want %q", gotPath, "/internal/v1/sandboxvolumes/vol-1/prepare-portal-bind")
+	}
+	if gotToken == "" {
+		t.Fatal("expected internal token header to be set")
+	}
+}

@@ -149,6 +149,12 @@ func (cc *CleanupController) cleanupExpired(ctx context.Context, template *v1alp
 			cc.forceDeleteStaleDeletingPod(ctx, template, pod, now)
 			continue
 		}
+		if pod.Status.Phase == corev1.PodSucceeded {
+			if cc.deleteCompletedPod(ctx, template, pod) {
+				expiredCount++
+			}
+			continue
+		}
 
 		// Hard expiry: delete even if paused.
 		if hardExpiresAtStr := pod.Annotations[AnnotationHardExpiresAt]; hardExpiresAtStr != "" {
@@ -247,6 +253,45 @@ func (cc *CleanupController) cleanupExpired(ctx context.Context, template *v1alp
 	}
 
 	return nil
+}
+
+func (cc *CleanupController) deleteCompletedPod(ctx context.Context, template *v1alpha1.SandboxTemplate, pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+
+	cc.logger.Info("Deleting completed sandbox pod",
+		zap.String("pod", pod.Name),
+		zap.String("phase", string(pod.Status.Phase)),
+	)
+
+	if cc.sandboxTerminator != nil {
+		if err := cc.sandboxTerminator.TerminateSandboxByID(ctx, pod.Name); err != nil {
+			cc.logger.Error("Failed to delete completed sandbox pod",
+				zap.String("pod", pod.Name),
+				zap.Error(err),
+			)
+			return false
+		}
+	} else {
+		if cc.k8sClient == nil {
+			cc.logger.Warn("Kubernetes client not configured, skipping completed sandbox pod delete",
+				zap.String("pod", pod.Name),
+			)
+			return false
+		}
+		if err := cc.k8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil {
+			cc.logger.Error("Failed to delete completed sandbox pod",
+				zap.String("pod", pod.Name),
+				zap.Error(err),
+			)
+			return false
+		}
+	}
+
+	cc.recorder.Eventf(template, corev1.EventTypeNormal, "CompletedPodDeleted",
+		"Deleted completed sandbox pod %s", pod.Name)
+	return true
 }
 
 func (cc *CleanupController) forceDeleteStaleDeletingPod(ctx context.Context, template *v1alpha1.SandboxTemplate, pod *corev1.Pod, now time.Time) {

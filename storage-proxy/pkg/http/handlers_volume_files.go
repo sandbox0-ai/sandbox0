@@ -262,14 +262,15 @@ func (s *Server) handleVolumeFileWatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := s.loadAuthorizedVolume(r.Context(), volumeID); err != nil {
+	volumeRecord, err := s.loadAuthorizedVolume(r.Context(), volumeID)
+	if err != nil {
 		s.writeVolumeFileError(w, err)
 		return
 	}
 	if err := httpproxy.DisableResponseDeadlines(w); err != nil {
 		s.logger.WithError(err).WithField("volume_id", volumeID).Debug("Failed to disable volume file watch response deadlines")
 	}
-	proxied, err := s.proxyVolumeRequestToOwnerIfNeeded(w, r, volumeID)
+	proxied, err := s.proxyVolumeRequestToOwnerIfNeeded(w, r, volumeRecord)
 	if err != nil {
 		s.writeVolumeFileError(w, err)
 		return
@@ -519,7 +520,7 @@ func (s *Server) prepareVolumeFileRequest(ctx context.Context, volumeID string) 
 	if err != nil {
 		return ctx, nil, func() {}, err
 	}
-	cleanup, err := s.prepareVolumeFileMount(ctx, volumeID)
+	cleanup, err := s.prepareVolumeFileMount(ctx, volumeID, volumeRecord.TeamID)
 	if err != nil {
 		return ctx, nil, func() {}, err
 	}

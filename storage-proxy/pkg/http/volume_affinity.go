@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -13,6 +14,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -20,6 +22,7 @@ import (
 )
 
 const volumeFileAffinityRoutedPodHeader = "X-Sandbox0-Volume-Routed-Pod"
+const volumeFileAffinityTeamHeader = "X-Sandbox0-Volume-Team-Id"
 
 type volumeFilePodResolver interface {
 	ResolvePodURL(ctx context.Context, podID string) (*url.URL, error)
@@ -122,7 +125,7 @@ func (s *Server) prepareOrProxyVolumeFileRequest(w http.ResponseWriter, r *http.
 		return r.Context(), nil, func() {}, true
 	}
 
-	proxied, err := s.proxyVolumeRequestToOwnerIfNeeded(w, r, volumeID)
+	proxied, err := s.proxyVolumeRequestToOwnerIfNeeded(w, r, volumeRecord)
 	if err != nil {
 		s.writeVolumeFileError(w, err)
 		return r.Context(), nil, func() {}, true
@@ -137,11 +140,11 @@ func (s *Server) prepareOrProxyVolumeFileRequest(w http.ResponseWriter, r *http.
 		return r.Context(), nil, func() {}, true
 	}
 
-	cleanup, err := s.prepareVolumeFileMount(r.Context(), volumeID)
+	cleanup, err := s.prepareVolumeFileMount(r.Context(), volumeID, volumeRecord.TeamID)
 	if err != nil {
 		var redirectErr *volumeOwnerRedirectError
 		if errors.As(err, &redirectErr) && redirectErr != nil && redirectErr.TargetURL != nil && r.Header.Get(volumeFileAffinityRoutedPodHeader) == "" {
-			s.proxyVolumeRequestToOwner(w, r, redirectErr.TargetURL, redirectErr.PodID)
+			s.proxyVolumeRequestToOwner(w, r, redirectErr.TargetURL, redirectErr.PodID, volumeRecord.TeamID)
 			return r.Context(), volumeRecord, func() {}, true
 		}
 		s.writeVolumeFileError(w, err)
@@ -151,7 +154,7 @@ func (s *Server) prepareOrProxyVolumeFileRequest(w http.ResponseWriter, r *http.
 	return withVolumeFileActor(r.Context(), actor), volumeRecord, cleanup, false
 }
 
-func (s *Server) prepareVolumeFileMount(ctx context.Context, volumeID string) (func(), error) {
+func (s *Server) prepareVolumeFileMount(ctx context.Context, volumeID, teamID string) (func(), error) {
 	if s.volMgr == nil || s.fileRPC == nil {
 		return func() {}, errVolumeFileUnavailable
 	}
@@ -188,15 +191,15 @@ func (s *Server) prepareVolumeFileMount(ctx context.Context, volumeID string) (f
 	return cleanup, nil
 }
 
-func (s *Server) proxyVolumeRequestToOwnerIfNeeded(w http.ResponseWriter, r *http.Request, volumeID string) (bool, error) {
-	if s == nil || s.repo == nil || s.podResolver == nil || volumeID == "" {
+func (s *Server) proxyVolumeRequestToOwnerIfNeeded(w http.ResponseWriter, r *http.Request, volumeRecord *db.SandboxVolume) (bool, error) {
+	if s == nil || s.repo == nil || s.podResolver == nil || volumeRecord == nil || volumeRecord.ID == "" {
 		return false, nil
 	}
 	if r != nil && r.Header.Get(volumeFileAffinityRoutedPodHeader) != "" {
 		return false, nil
 	}
 
-	targetURL, ownerPodID, err := s.resolveRemoteVolumeOwnerURL(r.Context(), volumeID)
+	targetURL, ownerPodID, err := s.resolveRemoteVolumeOwnerURL(r.Context(), volumeRecord.ID)
 	if err != nil {
 		return false, err
 	}
@@ -204,7 +207,7 @@ func (s *Server) proxyVolumeRequestToOwnerIfNeeded(w http.ResponseWriter, r *htt
 		return false, nil
 	}
 
-	s.proxyVolumeRequestToOwner(w, r, targetURL, ownerPodID)
+	s.proxyVolumeRequestToOwner(w, r, targetURL, ownerPodID, volumeRecord.TeamID)
 	return true, nil
 }
 
@@ -222,7 +225,11 @@ func (s *Server) resolveRemoteVolumeOwnerURL(ctx context.Context, volumeID strin
 		return nil, "", err
 	}
 	owner := s.selectPreferredVolumeOwner(mounts)
-	if owner == nil || owner.PodID == "" || owner.PodID == s.selfPodID {
+	if owner == nil || owner.PodID == "" {
+		return nil, "", nil
+	}
+	ownerOpts := volume.DecodeMountOptions(owner.MountOptions)
+	if ownerOpts.OwnerKind != volume.OwnerKindCtld && owner.PodID == s.selfPodID {
 		return nil, "", nil
 	}
 
@@ -230,11 +237,23 @@ func (s *Server) resolveRemoteVolumeOwnerURL(ctx context.Context, volumeID strin
 	if err != nil {
 		return nil, "", err
 	}
+	if targetURL == nil {
+		return nil, "", nil
+	}
+	targetURL = cloneURL(targetURL)
+	ownerPort := ownerOpts.OwnerPort
+	if ownerPort == 0 && ownerOpts.OwnerKind == volume.OwnerKindCtld {
+		ownerPort = 8095
+	}
+	if ownerPort > 0 {
+		targetURL.Host = hostWithPort(targetURL.Host, ownerPort)
+	}
 	return targetURL, owner.PodID, nil
 }
 
 func (s *Server) selectPreferredVolumeOwner(mounts []*db.VolumeMount) *db.VolumeMount {
 	var chosen *db.VolumeMount
+	bestScore := int(^uint(0) >> 1)
 	for _, mount := range mounts {
 		if mount == nil || mount.PodID == "" {
 			continue
@@ -242,25 +261,48 @@ func (s *Server) selectPreferredVolumeOwner(mounts []*db.VolumeMount) *db.Volume
 		if s.selfClusterID != "" && mount.ClusterID != "" && mount.ClusterID != s.selfClusterID {
 			continue
 		}
-		if mount.PodID == s.selfPodID {
-			return mount
-		}
-		if chosen == nil {
+		score := s.volumeOwnerPriority(mount)
+		if chosen == nil || score < bestScore ||
+			(score == bestScore && mount.MountedAt.Before(chosen.MountedAt)) ||
+			(score == bestScore && mount.MountedAt.Equal(chosen.MountedAt) && mount.PodID < chosen.PodID) {
 			chosen = mount
-			continue
-		}
-		if mount.MountedAt.Before(chosen.MountedAt) {
-			chosen = mount
-			continue
-		}
-		if mount.MountedAt.Equal(chosen.MountedAt) && mount.PodID < chosen.PodID {
-			chosen = mount
+			bestScore = score
 		}
 	}
 	return chosen
 }
 
-func (s *Server) proxyVolumeRequestToOwner(w http.ResponseWriter, r *http.Request, targetURL *url.URL, ownerPodID string) {
+func (s *Server) volumeOwnerPriority(mount *db.VolumeMount) int {
+	if mount == nil {
+		return 100
+	}
+	opts := volume.DecodeMountOptions(mount.MountOptions)
+	if opts.OwnerKind == volume.OwnerKindCtld {
+		return 0
+	}
+	if mount.PodID == s.selfPodID {
+		return 1
+	}
+	return 2
+}
+
+func cloneURL(in *url.URL) *url.URL {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
+}
+
+func hostWithPort(hostport string, port int) string {
+	host := hostport
+	if parsedHost, _, err := net.SplitHostPort(hostport); err == nil {
+		host = parsedHost
+	}
+	return net.JoinHostPort(host, fmt.Sprintf("%d", port))
+}
+
+func (s *Server) proxyVolumeRequestToOwner(w http.ResponseWriter, r *http.Request, targetURL *url.URL, ownerPodID, teamID string) {
 	if targetURL == nil {
 		s.writeVolumeFileError(w, errVolumeFileUnavailable)
 		return
@@ -272,6 +314,9 @@ func (s *Server) proxyVolumeRequestToOwner(w http.ResponseWriter, r *http.Reques
 			req.URL.Host = targetURL.Host
 			req.Host = targetURL.Host
 			req.Header.Set(volumeFileAffinityRoutedPodHeader, ownerPodID)
+			if strings.TrimSpace(teamID) != "" {
+				req.Header.Set(volumeFileAffinityTeamHeader, teamID)
+			}
 		},
 		Transport: &http.Transport{
 			MaxIdleConns:        50,

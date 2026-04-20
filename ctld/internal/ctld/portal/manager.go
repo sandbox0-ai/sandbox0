@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumefuse"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
@@ -26,11 +28,17 @@ import (
 const defaultRootDir = "/var/lib/sandbox0/ctld"
 
 type Manager struct {
-	nodeName string
-	rootDir  string
-	logger   *zap.Logger
-	logrus   *logrus.Logger
-	storage  *apiconfig.StorageProxyConfig
+	nodeName          string
+	rootDir           string
+	logger            *zap.Logger
+	logrus            *logrus.Logger
+	storage           *apiconfig.StorageProxyConfig
+	repo              *db.Repository
+	clusterID         string
+	podName           string
+	podNamespace      string
+	heartbeatInterval time.Duration
+	volumeAPI         http.Handler
 
 	mu              sync.Mutex
 	portals         map[string]*portalMount
@@ -52,6 +60,9 @@ type portalMount struct {
 	teamID    string
 	mountedAt time.Time
 
+	heartbeatCancel context.CancelFunc
+	heartbeatDone   chan struct{}
+
 	materializeCancel context.CancelFunc
 	materializeDone   chan struct{}
 }
@@ -61,6 +72,9 @@ type Config struct {
 	RootDir       string
 	Logger        *zap.Logger
 	StorageConfig *apiconfig.StorageProxyConfig
+	Repository    *db.Repository
+	PodName       string
+	PodNamespace  string
 }
 
 func NewManager(cfg Config) *Manager {
@@ -78,16 +92,34 @@ func NewManager(cfg Config) *Manager {
 	if storageConfig == nil {
 		storageConfig = apiconfig.LoadStorageProxyConfig()
 	}
-	return &Manager{
-		nodeName:        strings.TrimSpace(cfg.NodeName),
-		rootDir:         rootDir,
-		logger:          logger,
-		logrus:          l,
-		storage:         storageConfig,
-		portals:         make(map[string]*portalMount),
-		portalsByTarget: make(map[string]*portalMount),
-		volumes:         newLocalVolumeManager(),
+	heartbeatInterval, _ := time.ParseDuration(storageConfig.HeartbeatInterval)
+	if heartbeatInterval <= 0 {
+		heartbeatInterval = 5 * time.Second
 	}
+	manager := &Manager{
+		nodeName:          strings.TrimSpace(cfg.NodeName),
+		rootDir:           rootDir,
+		logger:            logger,
+		logrus:            l,
+		storage:           storageConfig,
+		repo:              cfg.Repository,
+		clusterID:         strings.TrimSpace(storageConfig.DefaultClusterId),
+		podName:           strings.TrimSpace(cfg.PodName),
+		podNamespace:      strings.TrimSpace(cfg.PodNamespace),
+		heartbeatInterval: heartbeatInterval,
+		portals:           make(map[string]*portalMount),
+		portalsByTarget:   make(map[string]*portalMount),
+		volumes:           newLocalVolumeManager(),
+	}
+	manager.volumeAPI = newMountedVolumeAPIHandler(storageConfig, cfg.Repository, manager.volumes, l)
+	return manager
+}
+
+func (m *Manager) MountedVolumeHandler() http.Handler {
+	if m == nil {
+		return nil
+	}
+	return m.volumeAPI
 }
 
 func (m *Manager) PublishPortal(ctx context.Context, req publishRequest) error {
@@ -195,6 +227,13 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 	if req.PodUID == "" || req.SandboxVolumeID == "" || req.TeamID == "" {
 		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("pod_uid, sandboxvolume_id and team_id are required")
 	}
+	volumeRecord, err := m.validateBindableVolume(ctx, ctldBindContext{
+		volumeID: req.SandboxVolumeID,
+		teamID:   req.TeamID,
+	})
+	if err != nil {
+		return ctldapi.BindVolumePortalResponse{}, err
+	}
 
 	key := portalKey(req.PodUID, portalName)
 	m.mu.Lock()
@@ -232,10 +271,10 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 	}
 	volCtx := &volume.VolumeContext{
 		VolumeID:  req.SandboxVolumeID,
-		TeamID:    req.TeamID,
+		TeamID:    volumeRecord.TeamID,
 		Backend:   volume.BackendS0FS,
 		S0FS:      engine,
-		Access:    volume.AccessModeRWO,
+		Access:    volume.NormalizeAccessMode(volumeRecord.AccessMode),
 		MountedAt: time.Now().UTC(),
 		RootInode: 1,
 		RootPath:  "/",
@@ -268,8 +307,18 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 	m.volumes.add(volCtx)
 	pm.fs.SetSession(session)
 	pm.volumeID = req.SandboxVolumeID
-	pm.teamID = req.TeamID
+	pm.teamID = volumeRecord.TeamID
 	pm.mountedAt = mountedAt
+	if err := m.registerOwner(ctx, pm, volCtx.Access); err != nil {
+		pm.fs.SetSession(unboundSession{})
+		pm.volumeID = ""
+		pm.teamID = ""
+		pm.mountedAt = time.Time{}
+		m.volumes.remove(req.SandboxVolumeID)
+		m.mu.Unlock()
+		_ = engine.Close()
+		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("register ctld volume owner: %w", err)
+	}
 	m.startMaterializer(pm, engine)
 	m.mu.Unlock()
 
@@ -304,6 +353,7 @@ func (m *Manager) Unbind(ctx context.Context, req ctldapi.UnbindVolumePortalRequ
 
 func (m *Manager) unbindLockedSnapshot(pm *portalMount) error {
 	volumeID := pm.volumeID
+	m.unregisterOwner(pm, volumeID)
 	pm.fs.SetSession(unboundSession{})
 	pm.volumeID = ""
 	pm.teamID = ""

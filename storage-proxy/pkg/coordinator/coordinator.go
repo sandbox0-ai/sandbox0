@@ -267,6 +267,12 @@ func (c *Coordinator) RegisterMount(ctx context.Context, volumeID string, option
 
 	normalizedOptions := options
 	normalizedOptions.AccessMode = volume.NormalizeAccessMode(string(options.AccessMode))
+	if normalizedOptions.OwnerKind == "" {
+		normalizedOptions.OwnerKind = volume.OwnerKindStorageProxy
+	}
+	if normalizedOptions.OwnerPort == 0 && c.config != nil && c.config.HTTPPort > 0 {
+		normalizedOptions.OwnerPort = c.config.HTTPPort
+	}
 	rawOptions, err := json.Marshal(normalizedOptions)
 	if err != nil {
 		return fmt.Errorf("marshal mount options: %w", err)

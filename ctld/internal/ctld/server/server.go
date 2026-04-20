@@ -22,6 +22,10 @@ type VolumePortalController interface {
 	UnbindVolumePortal(r *http.Request, req ctldapi.UnbindVolumePortalRequest) (ctldapi.UnbindVolumePortalResponse, int)
 }
 
+type MountedVolumeController interface {
+	MountedVolumeHandler() http.Handler
+}
+
 type NotImplementedController struct{}
 
 func (NotImplementedController) Pause(_ *http.Request, _ string) (ctldapi.PauseResponse, int) {
@@ -54,6 +58,11 @@ func NewMux(controller Controller) http.Handler {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.Handle("/metrics", promhttp.Handler())
+	if mountedController, ok := controller.(MountedVolumeController); ok {
+		if mountedHandler := mountedController.MountedVolumeHandler(); mountedHandler != nil {
+			mux.Handle("/sandboxvolumes/", mountedHandler)
+		}
+	}
 	mux.HandleFunc("/api/v1/volume-portals/bind", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)

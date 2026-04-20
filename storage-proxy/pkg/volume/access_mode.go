@@ -1,6 +1,9 @@
 package volume
 
-import "strings"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // AccessMode describes how a volume can be mounted across storage-proxy instances.
 type AccessMode string
@@ -14,9 +17,18 @@ const (
 	AccessModeRWX AccessMode = "RWX"
 )
 
+const (
+	OwnerKindStorageProxy = "storage-proxy"
+	OwnerKindCtld         = "ctld"
+)
+
 // MountOptions describes how a volume is mounted by an instance.
 type MountOptions struct {
-	AccessMode AccessMode `json:"access_mode,omitempty"`
+	AccessMode   AccessMode `json:"access_mode,omitempty"`
+	OwnerKind    string     `json:"owner_kind,omitempty"`
+	OwnerPort    int        `json:"owner_port,omitempty"`
+	NodeName     string     `json:"node_name,omitempty"`
+	PodNamespace string     `json:"pod_namespace,omitempty"`
 }
 
 // NormalizeAccessMode normalizes the input and applies the default mode (RWO).
@@ -46,4 +58,28 @@ func ParseAccessMode(value string) (AccessMode, bool) {
 	default:
 		return "", false
 	}
+}
+
+func NormalizeOwnerKind(value string) string {
+	switch strings.TrimSpace(value) {
+	case OwnerKindCtld:
+		return OwnerKindCtld
+	case OwnerKindStorageProxy:
+		return OwnerKindStorageProxy
+	default:
+		return ""
+	}
+}
+
+func DecodeMountOptions(raw *json.RawMessage) MountOptions {
+	if raw == nil || len(*raw) == 0 {
+		return MountOptions{}
+	}
+	var opts MountOptions
+	if err := json.Unmarshal(*raw, &opts); err != nil {
+		return MountOptions{}
+	}
+	opts.AccessMode = NormalizeAccessMode(string(opts.AccessMode))
+	opts.OwnerKind = NormalizeOwnerKind(opts.OwnerKind)
+	return opts
 }

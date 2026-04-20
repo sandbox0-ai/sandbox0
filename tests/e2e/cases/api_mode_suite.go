@@ -1922,6 +1922,17 @@ func assertClaimMountedVolumeWritable(env *framework.ScenarioEnv, session *e2eut
 	Expect(*claimResp.BootstrapMounts).NotTo(BeEmpty())
 	Expect((*claimResp.BootstrapMounts)[0].State).To(Equal(apispec.MountStatusStateMounted))
 
+	apiPath := "/api-after-claim.txt"
+	apiContent := []byte(fmt.Sprintf("api write after claim %d", time.Now().UnixNano()))
+	status, err = session.WriteVolumeFile(env.TestCtx.Context, GinkgoT(), volumeID, apiPath, apiContent, "")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+
+	Eventually(func() ([]byte, error) {
+		body, _, readErr := session.ReadFile(env.TestCtx.Context, GinkgoT(), sandboxID, mountPoint+apiPath)
+		return body, readErr
+	}).WithTimeout(90 * time.Second).WithPolling(2 * time.Second).Should(Equal(apiContent))
+
 	latePath := "/late-after-claim.txt"
 	lateContent := fmt.Sprintf("late write after claim %d", time.Now().UnixNano())
 	processType := apispec.ProcessTypeCmd

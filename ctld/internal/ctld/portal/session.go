@@ -44,8 +44,14 @@ func (m *localVolumeManager) remove(volumeID string) (*volume.VolumeContext, boo
 	return volCtx, ok
 }
 
-func (m *localVolumeManager) MountVolume(context.Context, string, string, string, volume.AccessMode) (string, time.Time, error) {
-	return "", time.Time{}, fmt.Errorf("ctld portal does not support remote mount")
+func (m *localVolumeManager) MountVolume(_ context.Context, _ string, volumeID string, _ string, _ volume.AccessMode) (string, time.Time, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	volCtx := m.volumes[volumeID]
+	if volCtx == nil {
+		return "", time.Time{}, fmt.Errorf("volume %s not mounted", volumeID)
+	}
+	return "local-" + volumeID, time.Now().UTC(), nil
 }
 
 func (m *localVolumeManager) UnmountVolume(_ context.Context, volumeID, _ string) error {
@@ -61,6 +67,36 @@ func (m *localVolumeManager) UnmountVolume(_ context.Context, volumeID, _ string
 
 func (m *localVolumeManager) AckInvalidate(string, string, string, bool, string) error {
 	return nil
+}
+
+func (m *localVolumeManager) AcquireDirectVolumeFileMount(ctx context.Context, volumeID string, mountFn func(context.Context) (string, error)) (func(), error) {
+	m.mu.RLock()
+	volCtx := m.volumes[volumeID]
+	m.mu.RUnlock()
+	if volCtx == nil {
+		return nil, fmt.Errorf("volume %s not mounted", volumeID)
+	}
+	if mountFn != nil {
+		if _, err := mountFn(ctx); err != nil {
+			return nil, err
+		}
+	}
+	return func() {}, nil
+}
+
+func (m *localVolumeManager) CleanupIdleDirectVolumeFileMount(context.Context, string) (bool, error) {
+	return false, nil
+}
+
+func (m *localVolumeManager) SyncDirectVolumeFileMount(_ context.Context, volumeID string) error {
+	m.mu.RLock()
+	volCtx := m.volumes[volumeID]
+	m.mu.RUnlock()
+	if volCtx == nil || volCtx.S0FS == nil {
+		return fmt.Errorf("volume %s not mounted", volumeID)
+	}
+	_, err := volCtx.S0FS.SyncMaterialize(context.Background())
+	return err
 }
 
 func (m *localVolumeManager) GetVolume(volumeID string) (*volume.VolumeContext, error) {

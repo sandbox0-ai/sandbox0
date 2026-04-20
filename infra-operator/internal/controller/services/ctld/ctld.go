@@ -16,6 +16,7 @@ import (
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storage"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
@@ -106,6 +107,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 									Name: "NODE_NAME",
 									ValueFrom: &corev1.EnvVarSource{
 										FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.nodeName"},
+									},
+								},
+								{
+									Name: "POD_NAME",
+									ValueFrom: &corev1.EnvVarSource{
+										FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
+									},
+								},
+								{
+									Name: "POD_NAMESPACE",
+									ValueFrom: &corev1.EnvVarSource{
+										FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
 									},
 								},
 							},
@@ -313,6 +326,11 @@ func (r *Reconciler) buildStorageConfig(ctx context.Context, infra *infrav1alpha
 	cfg := &apiconfig.StorageProxyConfig{}
 	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.StorageProxy != nil {
 		cfg = runtimeconfig.ToStorageProxy(infra.Spec.Services.StorageProxy.Config)
+	}
+	if infra != nil && infra.Spec.Database != nil && r != nil && r.Resources != nil && r.Resources.Client != nil {
+		if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {
+			cfg.DatabaseURL = dsn
+		}
 	}
 	if infra == nil || infra.Spec.Storage == nil {
 		return cfg, nil

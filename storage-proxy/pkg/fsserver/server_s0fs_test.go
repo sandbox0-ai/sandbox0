@@ -14,6 +14,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestS0FSFileLifecycle(t *testing.T) {
@@ -102,6 +103,132 @@ func TestS0FSFileLifecycle(t *testing.T) {
 		HandleId: createResp.HandleId,
 	}); err != nil {
 		t.Fatalf("Release() error = %v", err)
+	}
+}
+
+func TestS0FSOpenTruncatesExistingFile(t *testing.T) {
+	t.Parallel()
+
+	volCtx := newMountedS0FSVolumeContext(t, "vol-1", "team-a")
+	server := newTestFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{
+			"vol-1": volCtx,
+		},
+	}, nil, nil)
+	ctx := authContext("team-a", "")
+
+	createResp, err := server.Create(ctx, &pb.CreateRequest{
+		VolumeId: "vol-1",
+		Parent:   1,
+		Name:     "truncate.txt",
+		Mode:     0o644,
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if _, err := server.Write(ctx, &pb.WriteRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		Offset:   0,
+		Data:     []byte("abcdef"),
+		HandleId: createResp.HandleId,
+	}); err != nil {
+		t.Fatalf("Write(initial) error = %v", err)
+	}
+	if _, err := server.Release(ctx, &pb.ReleaseRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		HandleId: createResp.HandleId,
+	}); err != nil {
+		t.Fatalf("Release(initial) error = %v", err)
+	}
+
+	openResp, err := server.Open(ctx, &pb.OpenRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		Flags:    uint32(syscall.O_WRONLY | syscall.O_TRUNC),
+	})
+	if err != nil {
+		t.Fatalf("Open(O_TRUNC) error = %v", err)
+	}
+	if _, err := server.Write(ctx, &pb.WriteRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		Offset:   0,
+		Data:     []byte("xy"),
+		HandleId: openResp.HandleId,
+	}); err != nil {
+		t.Fatalf("Write(after truncate) error = %v", err)
+	}
+
+	readResp, err := server.Read(ctx, &pb.ReadRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		Offset:   0,
+		Size:     16,
+		HandleId: openResp.HandleId,
+	})
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if string(readResp.Data) != "xy" {
+		t.Fatalf("Read() data = %q, want xy", readResp.Data)
+	}
+	attrResp, err := server.GetAttr(ctx, &pb.GetAttrRequest{VolumeId: "vol-1", Inode: createResp.Inode})
+	if err != nil {
+		t.Fatalf("GetAttr() error = %v", err)
+	}
+	if attrResp.Size != 2 {
+		t.Fatalf("GetAttr() size = %d, want 2", attrResp.Size)
+	}
+}
+
+func TestS0FSWatchEventsIncludePaths(t *testing.T) {
+	t.Parallel()
+
+	volCtx := newMountedS0FSVolumeContext(t, "vol-1", "team-a")
+	broadcaster := &recordingBroadcaster{}
+	server := NewFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{
+			"vol-1": volCtx,
+		},
+	}, nil, nil, broadcaster, nil, nil, nil)
+	ctx := authContext("team-a", "")
+
+	createResp, err := server.Create(ctx, &pb.CreateRequest{
+		VolumeId: "vol-1",
+		Parent:   1,
+		Name:     "hello.txt",
+		Mode:     0o644,
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if _, err := server.Write(ctx, &pb.WriteRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		Offset:   0,
+		Data:     []byte("hello"),
+		HandleId: createResp.HandleId,
+	}); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	var sawCreate, sawWrite bool
+	for _, event := range broadcaster.events {
+		switch event.EventType {
+		case pb.WatchEventType_WATCH_EVENT_TYPE_CREATE:
+			if event.Path == "/hello.txt" {
+				sawCreate = true
+			}
+		case pb.WatchEventType_WATCH_EVENT_TYPE_WRITE:
+			if event.Path == "/hello.txt" {
+				sawWrite = true
+			}
+		}
+	}
+	if !sawCreate || !sawWrite {
+		t.Fatalf("events = %+v, want create and write for /hello.txt", broadcaster.events)
 	}
 }
 
@@ -482,6 +609,21 @@ func newMountedS0FSVolumeContext(t *testing.T, volumeID, teamID string) *volume.
 		RootInode: 1,
 		RootPath:  "/",
 	}
+}
+
+type recordingBroadcaster struct {
+	events []*pb.WatchEvent
+}
+
+func (b *recordingBroadcaster) Publish(_ context.Context, event *pb.WatchEvent) {
+	if event == nil {
+		return
+	}
+	clone, ok := proto.Clone(event).(*pb.WatchEvent)
+	if !ok {
+		return
+	}
+	b.events = append(b.events, clone)
 }
 
 func assertEntryNames(t *testing.T, entries []*pb.DirEntry, want []string) {

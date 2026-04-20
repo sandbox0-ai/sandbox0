@@ -247,6 +247,10 @@ func (s *Server) handleVolumeFileMove(w http.ResponseWriter, r *http.Request) {
 		s.writeVolumeFileError(w, err)
 		return
 	}
+	if err := s.finalizeVolumeFileMutation(ctx, volumeID); err != nil {
+		s.writeVolumeFileError(w, err)
+		return
+	}
 
 	_ = spec.WriteSuccess(w, http.StatusOK, map[string]bool{"moved": true})
 }
@@ -450,6 +454,10 @@ func (s *Server) writeVolumeFile(w http.ResponseWriter, r *http.Request, volumeI
 			s.writeVolumeFileError(w, err)
 			return
 		}
+		if err := s.finalizeVolumeFileMutation(ctx, volumeID); err != nil {
+			s.writeVolumeFileError(w, err)
+			return
+		}
 		_ = spec.WriteSuccess(w, http.StatusCreated, map[string]bool{"created": true})
 		return
 	}
@@ -465,6 +473,10 @@ func (s *Server) writeVolumeFile(w http.ResponseWriter, r *http.Request, volumeI
 	}
 
 	if err := s.writeVolumePath(ctx, volumeID, logicalPath, data); err != nil {
+		s.writeVolumeFileError(w, err)
+		return
+	}
+	if err := s.finalizeVolumeFileMutation(ctx, volumeID); err != nil {
 		s.writeVolumeFileError(w, err)
 		return
 	}
@@ -489,6 +501,10 @@ func (s *Server) deleteVolumeFile(w http.ResponseWriter, r *http.Request, volume
 			s.writeVolumeFileError(w, err)
 			return
 		}
+		if err := s.finalizeVolumeFileMutation(ctx, volumeID); err != nil {
+			s.writeVolumeFileError(w, err)
+			return
+		}
 	}
 
 	_ = spec.WriteSuccess(w, http.StatusOK, map[string]bool{"deleted": true})
@@ -508,6 +524,17 @@ func (s *Server) prepareVolumeFileRequest(ctx context.Context, volumeID string) 
 		return ctx, nil, func() {}, err
 	}
 	return withVolumeFileActor(ctx, actor), volumeRecord, cleanup, nil
+}
+
+func (s *Server) finalizeVolumeFileMutation(ctx context.Context, volumeID string) error {
+	if s == nil || s.volMgr == nil {
+		return nil
+	}
+	syncer, ok := s.volMgr.(directVolumeMountSyncer)
+	if !ok {
+		return nil
+	}
+	return syncer.SyncDirectVolumeFileMount(ctx, volumeID)
 }
 
 func (s *Server) loadAuthorizedVolume(ctx context.Context, volumeID string) (*db.SandboxVolume, error) {

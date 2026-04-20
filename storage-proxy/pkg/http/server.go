@@ -83,6 +83,10 @@ type volumeMountManager interface {
 	CleanupIdleDirectVolumeFileMount(ctx context.Context, volumeID string) (bool, error)
 }
 
+type directVolumeMountSyncer interface {
+	SyncDirectVolumeFileMount(ctx context.Context, volumeID string) error
+}
+
 type volumeFileRPC interface {
 	MountVolume(ctx context.Context, req *pb.MountVolumeRequest) (*pb.MountVolumeResponse, error)
 	GetAttr(ctx context.Context, req *pb.GetAttrRequest) (*pb.GetAttrResponse, error)

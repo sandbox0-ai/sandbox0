@@ -613,6 +613,21 @@ func (m *Manager) RefreshDirectVolumeFileMount(ctx context.Context, volumeID str
 	return err
 }
 
+func (m *Manager) SyncDirectVolumeFileMount(ctx context.Context, volumeID string) error {
+	m.mu.RLock()
+	lease := m.directMounts[volumeID]
+	m.mu.RUnlock()
+	if lease == nil {
+		return nil
+	}
+	volCtx, err := m.GetVolume(volumeID)
+	if err != nil || volCtx == nil || volCtx.S0FS == nil {
+		return err
+	}
+	_, err = volCtx.S0FS.SyncMaterialize(ctx)
+	return err
+}
+
 func (m *Manager) releaseDirectVolumeFileMount(volumeID, sessionID string) func() {
 	return func() {
 		m.mu.Lock()

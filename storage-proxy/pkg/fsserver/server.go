@@ -665,17 +665,12 @@ func (s *FileSystemServer) Open(ctx context.Context, req *pb.OpenRequest) (*pb.O
 		return nil, err
 	}
 	if isS0FSVolume(volCtx) {
-		node, err := volCtx.S0FS.GetAttr(req.Inode)
-		if err != nil {
-			return nil, mapS0FSError(err)
+		if req.Flags&uint32(syscall.O_TRUNC) != 0 {
+			return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.OpenResponse, error) {
+				return s.openS0FS(runCtx, volCtx, req)
+			})
 		}
-		if node.Type == s0fs.TypeDirectory {
-			return nil, fserror.New(fserror.FailedPrecondition, "inode is a directory")
-		}
-		if err := checkS0FSAccess(node, req.Actor, s0fsOpenAccessMask(req.Flags)); err != nil {
-			return nil, err
-		}
-		return &pb.OpenResponse{HandleId: volCtx.OpenFileHandle(node.Inode)}, nil
+		return s.openS0FS(ctx, volCtx, req)
 	}
 
 	inode := mapInode(volCtx, req.Inode)
@@ -760,9 +755,15 @@ func (s *FileSystemServer) Write(ctx context.Context, req *pb.WriteRequest) (*pb
 				return nil, mapS0FSError(err)
 			}
 			s.markDirtyWrite(req.VolumeId, req.Inode, req.HandleId)
-			s.publishEvent(runCtx, &pb.WatchEvent{
+			path := resolveInodePath(volCtx, req.Inode)
+			eventType := pb.WatchEventType_WATCH_EVENT_TYPE_WRITE
+			if path == "" {
+				eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
+			}
+			s.publishEvent(suppressSyncRecord(runCtx), &pb.WatchEvent{
 				VolumeId:  req.VolumeId,
-				EventType: pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE,
+				EventType: eventType,
+				Path:      path,
 				Inode:     req.Inode,
 			})
 			return &pb.WriteResponse{BytesWritten: int64(len(req.Data))}, nil
@@ -808,6 +809,7 @@ func (s *FileSystemServer) Create(ctx context.Context, req *pb.CreateRequest) (*
 			if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, fsmeta.Ino(req.Parent)); err != nil {
 				return nil, fserror.New(fserror.Internal, err.Error())
 			}
+			path := resolveChildPath(volCtx, req.Parent, req.Name)
 			node, err := volCtx.S0FS.CreateFile(req.Parent, req.Name, req.Mode)
 			if err != nil {
 				return nil, mapS0FSError(err)
@@ -821,9 +823,17 @@ func (s *FileSystemServer) Create(ctx context.Context, req *pb.CreateRequest) (*
 					return nil, mapS0FSError(err)
 				}
 			}
+			if path == "" {
+				path = resolveInodePath(volCtx, node.Inode)
+			}
+			eventType := pb.WatchEventType_WATCH_EVENT_TYPE_CREATE
+			if path == "" {
+				eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
+			}
 			s.publishEvent(runCtx, &pb.WatchEvent{
 				VolumeId:  req.VolumeId,
-				EventType: pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE,
+				EventType: eventType,
+				Path:      path,
 				Inode:     node.Inode,
 			})
 			return s0fsNodeResponse(node, volCtx.OpenFileHandle(node.Inode)), nil
@@ -886,6 +896,7 @@ func (s *FileSystemServer) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb
 			if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, fsmeta.Ino(req.Parent)); err != nil {
 				return nil, fserror.New(fserror.Internal, err.Error())
 			}
+			path := resolveChildPath(volCtx, req.Parent, req.Name)
 			node, err := volCtx.S0FS.Mkdir(req.Parent, req.Name, req.Mode)
 			if err != nil {
 				return nil, mapS0FSError(err)
@@ -899,9 +910,17 @@ func (s *FileSystemServer) Mkdir(ctx context.Context, req *pb.MkdirRequest) (*pb
 					return nil, mapS0FSError(err)
 				}
 			}
+			if path == "" {
+				path = resolveInodePath(volCtx, node.Inode)
+			}
+			eventType := pb.WatchEventType_WATCH_EVENT_TYPE_CREATE
+			if path == "" {
+				eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
+			}
 			s.publishEvent(runCtx, &pb.WatchEvent{
 				VolumeId:  req.VolumeId,
-				EventType: pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE,
+				EventType: eventType,
+				Path:      path,
 				Inode:     node.Inode,
 			})
 			return s0fsNodeResponse(node, 0), nil
@@ -1005,10 +1024,41 @@ func mapErrnoToCode(errno syscall.Errno) fserror.Code {
 	}
 }
 
+func (s *FileSystemServer) openS0FS(ctx context.Context, volCtx *volume.VolumeContext, req *pb.OpenRequest) (*pb.OpenResponse, error) {
+	node, err := volCtx.S0FS.GetAttr(req.Inode)
+	if err != nil {
+		return nil, mapS0FSError(err)
+	}
+	if node.Type == s0fs.TypeDirectory {
+		return nil, fserror.New(fserror.FailedPrecondition, "inode is a directory")
+	}
+	if err := checkS0FSAccess(node, req.Actor, s0fsOpenAccessMask(req.Flags)); err != nil {
+		return nil, err
+	}
+	if req.Flags&uint32(syscall.O_TRUNC) != 0 {
+		if err := volCtx.S0FS.Truncate(req.Inode, 0); err != nil {
+			return nil, mapS0FSError(err)
+		}
+		path := resolveInodePath(volCtx, req.Inode)
+		eventType := pb.WatchEventType_WATCH_EVENT_TYPE_WRITE
+		if path == "" {
+			eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
+		}
+		s.publishEvent(suppressSyncRecord(ctx), &pb.WatchEvent{
+			VolumeId:  req.VolumeId,
+			EventType: eventType,
+			Path:      path,
+			Inode:     req.Inode,
+		})
+	}
+	return &pb.OpenResponse{HandleId: volCtx.OpenFileHandle(node.Inode)}, nil
+}
+
 // Unlink implements FUSE unlink
 func (s *FileSystemServer) Unlink(ctx context.Context, req *pb.UnlinkRequest) (*pb.Empty, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.Empty, error) {
 		if isS0FSVolume(volCtx) {
+			path := resolveChildPath(volCtx, req.Parent, req.Name)
 			inode, err := volCtx.S0FS.UnlinkWithInode(req.Parent, req.Name)
 			if err != nil {
 				return nil, mapS0FSError(err)
@@ -1016,9 +1066,15 @@ func (s *FileSystemServer) Unlink(ctx context.Context, req *pb.UnlinkRequest) (*
 			if !volCtx.MarkUnlinkedFileIfOpen(inode) {
 				_ = volCtx.S0FS.Forget(inode)
 			}
+			eventType := pb.WatchEventType_WATCH_EVENT_TYPE_REMOVE
+			if path == "" {
+				eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
+			}
 			s.publishEvent(runCtx, &pb.WatchEvent{
 				VolumeId:  req.VolumeId,
-				EventType: pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE,
+				EventType: eventType,
+				Path:      path,
+				Inode:     inode,
 			})
 			return &pb.Empty{}, nil
 		}
@@ -1172,12 +1228,20 @@ func (s *FileSystemServer) ReleaseDir(ctx context.Context, req *pb.ReleaseDirReq
 func (s *FileSystemServer) Rename(ctx context.Context, req *pb.RenameRequest) (*pb.Empty, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.Empty, error) {
 		if isS0FSVolume(volCtx) {
+			oldPath := resolveChildPath(volCtx, req.OldParent, req.OldName)
+			newPath := resolveChildPath(volCtx, req.NewParent, req.NewName)
 			if err := volCtx.S0FS.Rename(req.OldParent, req.OldName, req.NewParent, req.NewName); err != nil {
 				return nil, mapS0FSError(err)
 			}
+			eventType := pb.WatchEventType_WATCH_EVENT_TYPE_RENAME
+			if oldPath == "" && newPath == "" {
+				eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
+			}
 			s.publishEvent(runCtx, &pb.WatchEvent{
 				VolumeId:  req.VolumeId,
-				EventType: pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE,
+				EventType: eventType,
+				Path:      newPath,
+				OldPath:   oldPath,
 			})
 			return &pb.Empty{}, nil
 		}
@@ -1230,6 +1294,7 @@ func (s *FileSystemServer) SetAttr(ctx context.Context, req *pb.SetAttrRequest) 
 			if attr == nil {
 				attr = &pb.GetAttrResponse{}
 			}
+			path := resolveInodePath(volCtx, req.Inode)
 			if req.Valid&uint32(fsmeta.SetAttrMode) != 0 {
 				if err := volCtx.S0FS.SetMode(req.Inode, attr.Mode&0o7777); err != nil {
 					return nil, mapS0FSError(err)
@@ -1261,9 +1326,19 @@ func (s *FileSystemServer) SetAttr(ctx context.Context, req *pb.SetAttrRequest) 
 			if err != nil {
 				return nil, mapS0FSError(err)
 			}
+			eventType := pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
+			if req.Valid&uint32(fsmeta.SetAttrMode) != 0 {
+				eventType = pb.WatchEventType_WATCH_EVENT_TYPE_CHMOD
+			} else if path != "" {
+				eventType = pb.WatchEventType_WATCH_EVENT_TYPE_WRITE
+			}
+			if path == "" {
+				eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
+			}
 			s.publishEvent(runCtx, &pb.WatchEvent{
 				VolumeId:  req.VolumeId,
-				EventType: pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE,
+				EventType: eventType,
+				Path:      path,
 				Inode:     req.Inode,
 			})
 			return &pb.SetAttrResponse{Attr: s0fsAttr(updated)}, nil
@@ -1453,12 +1528,18 @@ func (s *FileSystemServer) Release(ctx context.Context, req *pb.ReleaseRequest) 
 func (s *FileSystemServer) Rmdir(ctx context.Context, req *pb.RmdirRequest) (*pb.Empty, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.Empty, error) {
 		if isS0FSVolume(volCtx) {
+			path := resolveChildPath(volCtx, req.Parent, req.Name)
 			if err := volCtx.S0FS.RemoveDir(req.Parent, req.Name); err != nil {
 				return nil, mapS0FSError(err)
 			}
+			eventType := pb.WatchEventType_WATCH_EVENT_TYPE_REMOVE
+			if path == "" {
+				eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
+			}
 			s.publishEvent(runCtx, &pb.WatchEvent{
 				VolumeId:  req.VolumeId,
-				EventType: pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE,
+				EventType: eventType,
+				Path:      path,
 			})
 			return &pb.Empty{}, nil
 		}
@@ -1552,6 +1633,7 @@ func (s *FileSystemServer) Symlink(ctx context.Context, req *pb.SymlinkRequest) 
 			if err := ensureLazyRootPosixIdentity(volCtx, req.Actor, fsmeta.Ino(req.Parent)); err != nil {
 				return nil, fserror.New(fserror.Internal, err.Error())
 			}
+			path := resolveChildPath(volCtx, req.Parent, req.Name)
 			node, err := volCtx.S0FS.Symlink(req.Parent, req.Name, req.Target, 0o777)
 			if err != nil {
 				return nil, mapS0FSError(err)
@@ -1565,9 +1647,17 @@ func (s *FileSystemServer) Symlink(ctx context.Context, req *pb.SymlinkRequest) 
 					return nil, mapS0FSError(err)
 				}
 			}
+			if path == "" {
+				path = resolveInodePath(volCtx, node.Inode)
+			}
+			eventType := pb.WatchEventType_WATCH_EVENT_TYPE_CREATE
+			if path == "" {
+				eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
+			}
 			s.publishEvent(runCtx, &pb.WatchEvent{
 				VolumeId:  req.VolumeId,
-				EventType: pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE,
+				EventType: eventType,
+				Path:      path,
 				Inode:     node.Inode,
 			})
 			return s0fsNodeResponse(node, 0), nil
@@ -2093,6 +2183,16 @@ func resolveInodePath(volCtx *volume.VolumeContext, inode uint64) string {
 	if volCtx == nil {
 		return ""
 	}
+	if isS0FSVolume(volCtx) {
+		path, ok := volCtx.S0FS.Path(inode)
+		if !ok {
+			return ""
+		}
+		return path
+	}
+	if volCtx.Meta == nil {
+		return ""
+	}
 	paths := volCtx.Meta.GetPaths(fsmeta.Background(), fsmeta.Ino(inode))
 	if len(paths) == 0 {
 		return ""
@@ -2102,6 +2202,16 @@ func resolveInodePath(volCtx *volume.VolumeContext, inode uint64) string {
 
 func resolveChildPath(volCtx *volume.VolumeContext, parent uint64, name string) string {
 	if volCtx == nil {
+		return ""
+	}
+	if isS0FSVolume(volCtx) {
+		path, ok := volCtx.S0FS.ChildPath(parent, name)
+		if !ok {
+			return ""
+		}
+		return path
+	}
+	if volCtx.Meta == nil {
 		return ""
 	}
 	parentPaths := volCtx.Meta.GetPaths(fsmeta.Background(), fsmeta.Ino(parent))

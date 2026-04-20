@@ -199,6 +199,31 @@ func (e *Engine) ReadDir(inode uint64) ([]DirEntry, error) {
 	return entries, nil
 }
 
+func (e *Engine) Path(inode uint64) (string, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if err := e.checkOpen(); err != nil {
+		return "", false
+	}
+	return e.pathLocked(inode)
+}
+
+func (e *Engine) ChildPath(parent uint64, name string) (string, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if err := e.checkOpen(); err != nil {
+		return "", false
+	}
+	parentPath, ok := e.pathLocked(parent)
+	if !ok || name == "" {
+		return "", false
+	}
+	if parentPath == "/" {
+		return "/" + name, true
+	}
+	return parentPath + "/" + name, true
+}
+
 func (e *Engine) CreateFile(parent uint64, name string, mode uint32) (*Node, error) {
 	return e.create(parent, name, TypeFile, mode, "")
 }
@@ -1103,6 +1128,53 @@ func (e *Engine) fileNodeLocked(inode uint64) (*Node, error) {
 		return nil, ErrIsDir
 	}
 	return node, nil
+}
+
+func (e *Engine) pathLocked(target uint64) (string, bool) {
+	if target == RootInode {
+		return "/", true
+	}
+	if e.nodes[target] == nil {
+		return "", false
+	}
+
+	type frame struct {
+		inode uint64
+		path  string
+	}
+	queue := []frame{{inode: RootInode, path: "/"}}
+	seen := map[uint64]struct{}{RootInode: {}}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		children := e.children[current.inode]
+		if len(children) == 0 {
+			continue
+		}
+		names := make([]string, 0, len(children))
+		for name := range children {
+			names = append(names, name)
+		}
+		slices.Sort(names)
+		for _, name := range names {
+			child := children[name]
+			childPath := current.path + name
+			if current.path != "/" {
+				childPath = current.path + "/" + name
+			}
+			if child == target {
+				return childPath, true
+			}
+			if _, ok := seen[child]; ok {
+				continue
+			}
+			seen[child] = struct{}{}
+			if node := e.nodes[child]; node != nil && node.Type == TypeDirectory {
+				queue = append(queue, frame{inode: child, path: childPath})
+			}
+		}
+	}
+	return "", false
 }
 
 func (e *Engine) collectUnlinkedLocked() {

@@ -33,6 +33,9 @@ type fakeHTTPVolumeMountManager struct {
 	cleanupCalls      int
 	lastCleanupVolume string
 	cleanupDirectFunc func(context.Context, string) (bool, error)
+	syncCalls         int
+	lastSyncVolume    string
+	syncFunc          func(context.Context, string) error
 }
 
 type fakeVolumeFilePodResolver struct {
@@ -81,6 +84,15 @@ func (f *fakeHTTPVolumeMountManager) CleanupIdleDirectVolumeFileMount(ctx contex
 		return f.cleanupDirectFunc(ctx, volumeID)
 	}
 	return false, nil
+}
+
+func (f *fakeHTTPVolumeMountManager) SyncDirectVolumeFileMount(ctx context.Context, volumeID string) error {
+	f.syncCalls++
+	f.lastSyncVolume = volumeID
+	if f.syncFunc != nil {
+		return f.syncFunc(ctx, volumeID)
+	}
+	return nil
 }
 
 type fakeHTTPVolumeFileRPC struct {
@@ -465,6 +477,9 @@ func TestWriteVolumeFileWritesExistingPath(t *testing.T) {
 			if req.Inode != 3 {
 				t.Fatalf("Open inode = %d, want 3", req.Inode)
 			}
+			if req.Flags&uint32(syscall.O_TRUNC) == 0 {
+				t.Fatalf("Open flags = %#x, want O_TRUNC", req.Flags)
+			}
 			return &pb.OpenResponse{HandleId: 15}, nil
 		},
 		writeFunc: func(_ context.Context, req *pb.WriteRequest) (*pb.WriteResponse, error) {
@@ -472,7 +487,7 @@ func TestWriteVolumeFileWritesExistingPath(t *testing.T) {
 			return &pb.WriteResponse{BytesWritten: int64(len(req.Data))}, nil
 		},
 	}
-	server, _ := newVolumeFileTestServer(fileRPC)
+	server, volMgr := newVolumeFileTestServer(fileRPC)
 
 	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/files?path=/hello.txt", bytes.NewReader([]byte("hello world")))
 	req.SetPathValue("id", "vol-1")
@@ -486,6 +501,9 @@ func TestWriteVolumeFileWritesExistingPath(t *testing.T) {
 	}
 	if wrote == nil || string(wrote.Data) != "hello world" || wrote.HandleId != 15 {
 		t.Fatalf("unexpected write request: %+v", wrote)
+	}
+	if volMgr.syncCalls != 1 || volMgr.lastSyncVolume != "vol-1" {
+		t.Fatalf("SyncDirectVolumeFileMount() got calls=%d volume=%q, want 1 vol-1", volMgr.syncCalls, volMgr.lastSyncVolume)
 	}
 }
 
@@ -503,7 +521,7 @@ func TestDeleteVolumeFileUnlinksResolvedPath(t *testing.T) {
 			return &pb.Empty{}, nil
 		},
 	}
-	server, _ := newVolumeFileTestServer(fileRPC)
+	server, volMgr := newVolumeFileTestServer(fileRPC)
 
 	req := httptest.NewRequest(http.MethodDelete, "/sandboxvolumes/vol-1/files?path=/hello.txt", nil)
 	req.SetPathValue("id", "vol-1")
@@ -517,6 +535,9 @@ func TestDeleteVolumeFileUnlinksResolvedPath(t *testing.T) {
 	}
 	if unlinked == nil || unlinked.Parent != 1 || unlinked.Name != "hello.txt" {
 		t.Fatalf("unexpected unlink request: %+v", unlinked)
+	}
+	if volMgr.syncCalls != 1 || volMgr.lastSyncVolume != "vol-1" {
+		t.Fatalf("SyncDirectVolumeFileMount() got calls=%d volume=%q, want 1 vol-1", volMgr.syncCalls, volMgr.lastSyncVolume)
 	}
 }
 
@@ -540,7 +561,7 @@ func TestHandleVolumeFileMoveRenamesPath(t *testing.T) {
 			return &pb.Empty{}, nil
 		},
 	}
-	server, _ := newVolumeFileTestServer(fileRPC)
+	server, volMgr := newVolumeFileTestServer(fileRPC)
 
 	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/files/move", bytes.NewReader([]byte(`{"source":"/docs/report.txt","destination":"/archive/report-old.txt"}`)))
 	req.SetPathValue("id", "vol-1")
@@ -554,6 +575,9 @@ func TestHandleVolumeFileMoveRenamesPath(t *testing.T) {
 	}
 	if renamed == nil || renamed.OldParent != 2 || renamed.OldName != "report.txt" || renamed.NewParent != 4 || renamed.NewName != "report-old.txt" {
 		t.Fatalf("unexpected rename request: %+v", renamed)
+	}
+	if volMgr.syncCalls != 1 || volMgr.lastSyncVolume != "vol-1" {
+		t.Fatalf("SyncDirectVolumeFileMount() got calls=%d volume=%q, want 1 vol-1", volMgr.syncCalls, volMgr.lastSyncVolume)
 	}
 }
 

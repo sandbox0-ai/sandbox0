@@ -171,6 +171,42 @@ func TestReconcileCtldRBACIncludesPodReadPermissions(t *testing.T) {
 	assert.True(t, found, "expected ctld cluster role to include pod resize permissions")
 }
 
+func TestReconcileStorageClientRBACAppliesGCSWorkloadIdentity(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, rbacv1.AddToScheme(scheme))
+	require.NoError(t, infrav1alpha1.AddToScheme(scheme))
+
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Storage: &infrav1alpha1.StorageConfig{
+				Type: infrav1alpha1.StorageTypeGCS,
+				GCS: &infrav1alpha1.GCSStorageConfig{
+					Bucket:                              "demo-bucket",
+					WorkloadIdentityServiceAccountEmail: "storage@example.iam.gserviceaccount.com",
+				},
+			},
+		},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(infra).Build()
+	reconciler := NewReconciler(&common.ResourceManager{Client: client, Scheme: scheme})
+
+	require.NoError(t, reconciler.ReconcileStorageProxyRBAC(context.Background(), infra))
+	require.NoError(t, reconciler.ReconcileCtldRBAC(context.Background(), infra))
+
+	storageProxySA := &corev1.ServiceAccount{}
+	require.NoError(t, client.Get(context.Background(), types.NamespacedName{Name: "demo-storage-proxy", Namespace: "sandbox0-system"}, storageProxySA))
+	assert.Equal(t, "storage@example.iam.gserviceaccount.com", storageProxySA.Annotations[gkeWorkloadIdentityAnnotation])
+
+	ctldSA := &corev1.ServiceAccount{}
+	require.NoError(t, client.Get(context.Background(), types.NamespacedName{Name: "demo-ctld", Namespace: "sandbox0-system"}, ctldSA))
+	assert.Equal(t, "storage@example.iam.gserviceaccount.com", ctldSA.Annotations[gkeWorkloadIdentityAnnotation])
+}
+
 func contains(values []string, target string) bool {
 	for _, value := range values {
 		if value == target {

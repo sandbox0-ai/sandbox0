@@ -3,6 +3,7 @@ package power
 import (
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -13,7 +14,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -208,7 +209,7 @@ func (r *PowerReconciler) reconcileKey(ctx context.Context, key string) error {
 		return err
 	}
 	pod, err := r.podLister.Pods(namespace).Get(name)
-	if errors.IsNotFound(err) {
+	if apierrors.IsNotFound(err) {
 		return nil
 	}
 	if err != nil {
@@ -288,8 +289,14 @@ func (r *PowerReconciler) reconcileResume(ctx context.Context, pod *corev1.Pod, 
 }
 
 func (r *PowerReconciler) thawDeletingPod(ctx context.Context, pod *corev1.Pod) error {
+	if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+		return nil
+	}
 	target, err := r.resolvePodTarget(pod)
-	if errors.IsNotFound(err) || errors.IsGone(err) {
+	if apierrors.IsNotFound(err) || apierrors.IsGone(err) {
+		return nil
+	}
+	if stderrors.Is(err, ErrRuntimeTargetNotFound) {
 		return nil
 	}
 	if err != nil {

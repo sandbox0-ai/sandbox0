@@ -42,7 +42,7 @@ func Registry() []Entry {
 		exact("spec.storage.builtin.credentials", "storage", []string{"storage", "storage-proxy"}, nil, UpdateSemanticsCreateOnce, "Seeds the generated RustFS credentials secret."),
 		exact("spec.storage.builtin.statefulResourcePolicy", "storage", []string{"storage", "status"}, []string{"cleanup policy"}, UpdateSemanticsDeclarative, "Controls retain versus delete semantics when builtin storage is disabled."),
 		prefix("spec.storage.s3", "storage-proxy", []string{"storage", "storage-proxy"}, nil, UpdateSemanticsDeclarative, "External S3 settings are converted into storage and storage-proxy runtime config."),
-		prefix("spec.storage.gcs", "storage-proxy", []string{"storage", "storage-proxy"}, nil, UpdateSemanticsDeclarative, "External GCS settings are converted into storage and storage-proxy runtime config."),
+		prefix("spec.storage.gcs", "storage-proxy", []string{"storage", "storage-proxy", "ctld"}, nil, UpdateSemanticsDeclarative, "External GCS settings are converted into storage runtime config and storage client service accounts."),
 		prefix("spec.storage.oss", "storage-proxy", []string{"storage", "storage-proxy"}, nil, UpdateSemanticsDeclarative, "External OSS settings are converted into storage and storage-proxy runtime config."),
 
 		exact("spec.registry.provider", "plan", []string{"registry"}, []string{"InfraPlan.Components.EnableRegistry"}, UpdateSemanticsDeclarative, "Selects builtin versus external registry reconciliation."),

@@ -335,6 +335,7 @@ func TestPodResolverResolveRequiresGVisorSandboxProcesses(t *testing.T) {
 	resolver := NewPodResolver(client, "node-a", root)
 	_, err := resolver.Resolve(&http.Request{}, "sandbox-8")
 	require.Error(t, err)
+	require.ErrorIs(t, err, ErrRuntimeTargetNotFound)
 	assert.Contains(t, err.Error(), "gvisor sandbox processes not found")
 }
 

@@ -14,6 +14,8 @@ import (
 	"k8s.io/client-go/tools/record"
 )
 
+const staleDeletingPodForceDeleteAfter = 10 * time.Minute
+
 // SandboxPauseRequester defines the interface for declaring that a sandbox should be paused.
 type SandboxPauseRequester interface {
 	RequestPauseSandboxByID(ctx context.Context, sandboxID string) error
@@ -144,6 +146,7 @@ func (cc *CleanupController) cleanupExpired(ctx context.Context, template *v1alp
 
 	for _, pod := range pods {
 		if pod.DeletionTimestamp != nil {
+			cc.forceDeleteStaleDeletingPod(ctx, template, pod, now)
 			continue
 		}
 
@@ -244,4 +247,42 @@ func (cc *CleanupController) cleanupExpired(ctx context.Context, template *v1alp
 	}
 
 	return nil
+}
+
+func (cc *CleanupController) forceDeleteStaleDeletingPod(ctx context.Context, template *v1alpha1.SandboxTemplate, pod *corev1.Pod, now time.Time) {
+	if pod == nil || pod.DeletionTimestamp == nil {
+		return
+	}
+	if now.Sub(pod.DeletionTimestamp.Time) < staleDeletingPodForceDeleteAfter {
+		return
+	}
+	if cc.k8sClient == nil {
+		cc.logger.Warn("Kubernetes client not configured, skipping stale deleting pod force delete",
+			zap.String("pod", pod.Name),
+			zap.Time("deletionTimestamp", pod.DeletionTimestamp.Time),
+		)
+		return
+	}
+
+	gracePeriodSeconds := int64(0)
+	uid := pod.UID
+	deleteOptions := metav1.DeleteOptions{
+		GracePeriodSeconds: &gracePeriodSeconds,
+		Preconditions: &metav1.Preconditions{
+			UID: &uid,
+		},
+	}
+	cc.logger.Warn("Force deleting stale terminating pod",
+		zap.String("pod", pod.Name),
+		zap.Time("deletionTimestamp", pod.DeletionTimestamp.Time),
+	)
+	if err := cc.k8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, deleteOptions); err != nil {
+		cc.logger.Error("Failed to force delete stale terminating pod",
+			zap.String("pod", pod.Name),
+			zap.Error(err),
+		)
+		return
+	}
+	cc.recorder.Eventf(template, corev1.EventTypeWarning, "StaleDeletingPodForceDeleted",
+		"Force deleted stale terminating pod %s", pod.Name)
 }

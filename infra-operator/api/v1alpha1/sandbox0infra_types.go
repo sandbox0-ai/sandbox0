@@ -454,6 +454,11 @@ type OSSCredentialsSecret struct {
 type GCSStorageConfig struct {
 	// Bucket specifies the GCS bucket name.
 	Bucket string `json:"bucket"`
+
+	// WorkloadIdentityServiceAccountEmail is the Google service account email
+	// used by storage clients through GKE Workload Identity.
+	// +optional
+	WorkloadIdentityServiceAccountEmail string `json:"workloadIdentityServiceAccountEmail,omitempty"`
 }
 
 // RegistryConfig defines container registry configuration.

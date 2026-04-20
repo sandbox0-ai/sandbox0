@@ -19,6 +19,8 @@ package rbac
 import (
 	"context"
 	"fmt"
+	"reflect"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -30,6 +32,8 @@ import (
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 )
+
+const gkeWorkloadIdentityAnnotation = "iam.gke.io/gcp-service-account"
 
 type Reconciler struct {
 	Resources *common.ResourceManager
@@ -48,7 +52,7 @@ func (r *Reconciler) ReconcileManagerRBAC(ctx context.Context, infra *infrav1alp
 		"app.kubernetes.io/managed-by": "sandbox0infra-operator",
 	}
 
-	if err := r.reconcileServiceAccount(ctx, infra, name, labels); err != nil {
+	if err := r.reconcileServiceAccount(ctx, infra, name, labels, nil); err != nil {
 		return err
 	}
 
@@ -106,7 +110,7 @@ func (r *Reconciler) ReconcileNetdRBAC(ctx context.Context, infra *infrav1alpha1
 		"app.kubernetes.io/managed-by": "sandbox0infra-operator",
 	}
 
-	if err := r.reconcileServiceAccount(ctx, infra, name, labels); err != nil {
+	if err := r.reconcileServiceAccount(ctx, infra, name, labels, nil); err != nil {
 		return err
 	}
 
@@ -139,7 +143,7 @@ func (r *Reconciler) ReconcileSchedulerRBAC(ctx context.Context, infra *infrav1a
 		"app.kubernetes.io/managed-by": "sandbox0infra-operator",
 	}
 
-	return r.reconcileServiceAccount(ctx, infra, name, labels)
+	return r.reconcileServiceAccount(ctx, infra, name, labels, nil)
 }
 
 // ReconcileStorageProxyRBAC reconciles RBAC for the storage-proxy service.
@@ -151,7 +155,7 @@ func (r *Reconciler) ReconcileStorageProxyRBAC(ctx context.Context, infra *infra
 		"app.kubernetes.io/managed-by": "sandbox0infra-operator",
 	}
 
-	if err := r.reconcileServiceAccount(ctx, infra, name, labels); err != nil {
+	if err := r.reconcileServiceAccount(ctx, infra, name, labels, storageWorkloadIdentityAnnotations(infra)); err != nil {
 		return err
 	}
 
@@ -179,7 +183,7 @@ func (r *Reconciler) ReconcileCtldRBAC(ctx context.Context, infra *infrav1alpha1
 		"app.kubernetes.io/managed-by": "sandbox0infra-operator",
 	}
 
-	if err := r.reconcileServiceAccount(ctx, infra, name, labels); err != nil {
+	if err := r.reconcileServiceAccount(ctx, infra, name, labels, storageWorkloadIdentityAnnotations(infra)); err != nil {
 		return err
 	}
 
@@ -204,12 +208,13 @@ func (r *Reconciler) ReconcileCtldRBAC(ctx context.Context, infra *infrav1alpha1
 }
 
 // reconcileServiceAccount creates or updates a ServiceAccount for a service.
-func (r *Reconciler) reconcileServiceAccount(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, labels map[string]string) error {
+func (r *Reconciler) reconcileServiceAccount(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, labels map[string]string, annotations map[string]string) error {
 	sa := &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: infra.Namespace,
-			Labels:    labels,
+			Name:        name,
+			Namespace:   infra.Namespace,
+			Labels:      labels,
+			Annotations: annotations,
 		},
 	}
 
@@ -225,7 +230,42 @@ func (r *Reconciler) reconcileServiceAccount(ctx context.Context, infra *infrav1
 		return err
 	}
 
-	return nil
+	updated := found.DeepCopy()
+	updated.Labels = labels
+	if annotations != nil {
+		updated.Annotations = reconcileServiceAccountAnnotations(updated.Annotations, annotations)
+	}
+	if reflect.DeepEqual(found.Labels, updated.Labels) && reflect.DeepEqual(found.Annotations, updated.Annotations) {
+		return nil
+	}
+	return r.Resources.Client.Update(ctx, updated)
+}
+
+func storageWorkloadIdentityAnnotations(infra *infrav1alpha1.Sandbox0Infra) map[string]string {
+	if infra == nil || infra.Spec.Storage == nil || infra.Spec.Storage.Type != infrav1alpha1.StorageTypeGCS || infra.Spec.Storage.GCS == nil {
+		return map[string]string{}
+	}
+	email := strings.TrimSpace(infra.Spec.Storage.GCS.WorkloadIdentityServiceAccountEmail)
+	if email == "" {
+		return map[string]string{}
+	}
+	return map[string]string{gkeWorkloadIdentityAnnotation: email}
+}
+
+func reconcileServiceAccountAnnotations(current, desired map[string]string) map[string]string {
+	next := common.CloneStringMap(current)
+	if next == nil {
+		next = map[string]string{}
+	}
+	if value := strings.TrimSpace(desired[gkeWorkloadIdentityAnnotation]); value != "" {
+		next[gkeWorkloadIdentityAnnotation] = value
+	} else {
+		delete(next, gkeWorkloadIdentityAnnotation)
+	}
+	if len(next) == 0 {
+		return nil
+	}
+	return next
 }
 
 // reconcileClusterRole creates or updates a ClusterRole for a service.

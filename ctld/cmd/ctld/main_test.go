@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -59,4 +60,39 @@ func TestCtldPauseResumeStubsReturnNotImplemented(t *testing.T) {
 		assert.False(t, resp.Resumed)
 		assert.Equal(t, "ctld resume not implemented", resp.Error)
 	})
+}
+
+func TestCombinedControllerRoutesMountedVolumeAPIToPortalHandler(t *testing.T) {
+	portal := fakeVolumePortalHandler{
+		mountedHandler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			assert.Equal(t, "/sandboxvolumes/vol-1/files", r.URL.Path)
+			w.WriteHeader(http.StatusNoContent)
+		}),
+	}
+	server := newHTTPServer(":0", combinedController{
+		Controller: ctldserver.NotImplementedController{},
+		Portal:     portal,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/files?path=/hello.txt", nil)
+	rec := httptest.NewRecorder()
+	server.Handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+type fakeVolumePortalHandler struct {
+	mountedHandler http.Handler
+}
+
+func (f fakeVolumePortalHandler) Bind(_ context.Context, _ ctldapi.BindVolumePortalRequest) (ctldapi.BindVolumePortalResponse, error) {
+	return ctldapi.BindVolumePortalResponse{}, nil
+}
+
+func (f fakeVolumePortalHandler) Unbind(_ context.Context, _ ctldapi.UnbindVolumePortalRequest) (ctldapi.UnbindVolumePortalResponse, error) {
+	return ctldapi.UnbindVolumePortalResponse{}, nil
+}
+
+func (f fakeVolumePortalHandler) MountedVolumeHandler() http.Handler {
+	return f.mountedHandler
 }

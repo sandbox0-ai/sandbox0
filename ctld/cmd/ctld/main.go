@@ -222,10 +222,13 @@ func initPortalDatabase(ctx context.Context, cfg *apiconfig.StorageProxyConfig, 
 
 type combinedController struct {
 	ctldserver.Controller
-	Portal *ctldportal.Manager
+	Portal volumePortalHandler
 }
 
 func (c combinedController) BindVolumePortal(r *http.Request, req ctldapi.BindVolumePortalRequest) (ctldapi.BindVolumePortalResponse, int) {
+	if c.Portal == nil {
+		return ctldapi.BindVolumePortalResponse{Error: "ctld volume portals not implemented"}, http.StatusNotImplemented
+	}
 	resp, err := c.Portal.Bind(r.Context(), req)
 	if err != nil {
 		return ctldapi.BindVolumePortalResponse{Error: err.Error()}, http.StatusBadRequest
@@ -234,6 +237,9 @@ func (c combinedController) BindVolumePortal(r *http.Request, req ctldapi.BindVo
 }
 
 func (c combinedController) UnbindVolumePortal(r *http.Request, req ctldapi.UnbindVolumePortalRequest) (ctldapi.UnbindVolumePortalResponse, int) {
+	if c.Portal == nil {
+		return ctldapi.UnbindVolumePortalResponse{Error: "ctld volume portals not implemented"}, http.StatusNotImplemented
+	}
 	resp, err := c.Portal.Unbind(r.Context(), req)
 	if err != nil {
 		return ctldapi.UnbindVolumePortalResponse{Error: err.Error()}, http.StatusBadRequest
@@ -241,6 +247,19 @@ func (c combinedController) UnbindVolumePortal(r *http.Request, req ctldapi.Unbi
 	return resp, http.StatusOK
 }
 
+func (c combinedController) MountedVolumeHandler() http.Handler {
+	if c.Portal == nil {
+		return nil
+	}
+	return c.Portal.MountedVolumeHandler()
+}
+
 func (c combinedController) Probe(r *http.Request, sandboxID string, kind sandboxprobe.Kind) (sandboxprobe.Response, int) {
 	return c.Controller.Probe(r, sandboxID, kind)
+}
+
+type volumePortalHandler interface {
+	Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest) (ctldapi.BindVolumePortalResponse, error)
+	Unbind(ctx context.Context, req ctldapi.UnbindVolumePortalRequest) (ctldapi.UnbindVolumePortalResponse, error)
+	MountedVolumeHandler() http.Handler
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -180,6 +181,102 @@ func TestS0FSOpenTruncatesExistingFile(t *testing.T) {
 	}
 	if attrResp.Size != 2 {
 		t.Fatalf("GetAttr() size = %d, want 2", attrResp.Size)
+	}
+}
+
+func TestS0FSFlushSyncsDirtyWrites(t *testing.T) {
+	t.Parallel()
+
+	volCtx, syncs := newMountedS0FSVolumeContextWithSyncCounter(t, "vol-1", "team-a")
+	server := newTestFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{
+			"vol-1": volCtx,
+		},
+	}, nil, nil)
+	ctx := authContext("team-a", "")
+
+	createResp, err := server.Create(ctx, &pb.CreateRequest{
+		VolumeId: "vol-1",
+		Parent:   1,
+		Name:     "flush.txt",
+		Mode:     0o644,
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if _, err := server.Write(ctx, &pb.WriteRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		Offset:   0,
+		Data:     []byte("hello"),
+		HandleId: createResp.HandleId,
+	}); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if got := syncs.Load(); got != 0 {
+		t.Fatalf("sync count after Write() = %d, want 0", got)
+	}
+	if _, err := server.Flush(ctx, &pb.FlushRequest{
+		VolumeId: "vol-1",
+		HandleId: createResp.HandleId,
+	}); err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+	if got := syncs.Load(); got != 1 {
+		t.Fatalf("sync count after Flush() = %d, want 1", got)
+	}
+	if _, err := server.Flush(ctx, &pb.FlushRequest{
+		VolumeId: "vol-1",
+		HandleId: createResp.HandleId,
+	}); err != nil {
+		t.Fatalf("second Flush() error = %v", err)
+	}
+	if got := syncs.Load(); got != 1 {
+		t.Fatalf("sync count after second Flush() = %d, want 1", got)
+	}
+}
+
+func TestS0FSReleaseSyncsDirtyWritesWithoutExplicitFsync(t *testing.T) {
+	t.Parallel()
+
+	volCtx, syncs := newMountedS0FSVolumeContextWithSyncCounter(t, "vol-1", "team-a")
+	server := newTestFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{
+			"vol-1": volCtx,
+		},
+	}, nil, nil)
+	ctx := authContext("team-a", "")
+
+	createResp, err := server.Create(ctx, &pb.CreateRequest{
+		VolumeId: "vol-1",
+		Parent:   1,
+		Name:     "release.txt",
+		Mode:     0o644,
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if _, err := server.Write(ctx, &pb.WriteRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		Offset:   0,
+		Data:     []byte("hello"),
+		HandleId: createResp.HandleId,
+	}); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if got := syncs.Load(); got != 0 {
+		t.Fatalf("sync count after Write() = %d, want 0", got)
+	}
+	if _, err := server.Release(ctx, &pb.ReleaseRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		HandleId: createResp.HandleId,
+	}); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+	if got := syncs.Load(); got != 1 {
+		t.Fatalf("sync count after Release() = %d, want 1", got)
 	}
 }
 
@@ -589,9 +686,30 @@ func TestS0FSMutationRedirectsWhenRemotePrimary(t *testing.T) {
 func newMountedS0FSVolumeContext(t *testing.T, volumeID, teamID string) *volume.VolumeContext {
 	t.Helper()
 
+	volCtx, _ := newMountedS0FSVolumeContextWithSyncCounter(t, volumeID, teamID)
+	return volCtx
+}
+
+type walSyncCounter struct {
+	count atomic.Int64
+}
+
+func (c *walSyncCounter) Hook() {
+	c.count.Add(1)
+}
+
+func (c *walSyncCounter) Load() int64 {
+	return c.count.Load()
+}
+
+func newMountedS0FSVolumeContextWithSyncCounter(t *testing.T, volumeID, teamID string) (*volume.VolumeContext, *walSyncCounter) {
+	t.Helper()
+
+	counter := &walSyncCounter{}
 	engine, err := s0fs.Open(context.Background(), s0fs.Config{
-		VolumeID: volumeID,
-		WALPath:  filepath.Join(t.TempDir(), "engine.wal"),
+		VolumeID:    volumeID,
+		WALPath:     filepath.Join(t.TempDir(), "engine.wal"),
+		WALSyncHook: counter.Hook,
 	})
 	if err != nil {
 		t.Fatalf("open s0fs engine: %v", err)
@@ -608,7 +726,7 @@ func newMountedS0FSVolumeContext(t *testing.T, volumeID, teamID string) *volume.
 		MountedAt: time.Now(),
 		RootInode: 1,
 		RootPath:  "/",
-	}
+	}, counter
 }
 
 type recordingBroadcaster struct {

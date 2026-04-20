@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -193,6 +194,64 @@ func TestLocalSessionReadCacheTracksSmallWrites(t *testing.T) {
 	}
 }
 
+func TestLocalSessionReleaseSyncsDirtyWrites(t *testing.T) {
+	counter := &walSyncCounter{}
+	engine, err := s0fs.Open(context.Background(), s0fs.Config{
+		VolumeID:    "vol-1",
+		WALPath:     filepath.Join(t.TempDir(), "volume.wal"),
+		WALSyncHook: counter.Hook,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+
+	mgr := newLocalVolumeManager()
+	volCtx := &volume.VolumeContext{
+		VolumeID:  "vol-1",
+		TeamID:    "team-a",
+		Backend:   volume.BackendS0FS,
+		S0FS:      engine,
+		Access:    volume.AccessModeRWO,
+		MountedAt: time.Now().UTC(),
+		RootInode: 1,
+		RootPath:  "/",
+	}
+	mgr.add(volCtx)
+	session := newLocalSession("vol-1", mgr, nil)
+
+	createResp, err := session.Create(context.Background(), &pb.CreateRequest{
+		VolumeId: "ignored-by-local-session",
+		Parent:   s0fs.RootInode,
+		Name:     "data.txt",
+		Mode:     0o644,
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if _, err := session.Write(context.Background(), &pb.WriteRequest{
+		VolumeId: "ignored-by-local-session",
+		Inode:    createResp.Inode,
+		HandleId: createResp.HandleId,
+		Data:     []byte("persist"),
+	}); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if got := counter.Load(); got != 0 {
+		t.Fatalf("sync count after Write() = %d, want 0", got)
+	}
+	if _, err := session.Release(context.Background(), &pb.ReleaseRequest{
+		VolumeId: "ignored-by-local-session",
+		Inode:    createResp.Inode,
+		HandleId: createResp.HandleId,
+	}); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+	if got := counter.Load(); got != 1 {
+		t.Fatalf("sync count after Release() = %d, want 1", got)
+	}
+}
+
 func TestLocalSessionReadCacheResizesOnTruncate(t *testing.T) {
 	engine, err := s0fs.Open(context.Background(), s0fs.Config{
 		VolumeID: "vol-1",
@@ -240,6 +299,18 @@ func TestLocalSessionReadCacheResizesOnTruncate(t *testing.T) {
 	if got := string(session.readCache[localReadCacheKey("vol-1", node.Inode)]); got != "abc" {
 		t.Fatalf("read cache after truncate = %q, want abc", got)
 	}
+}
+
+type walSyncCounter struct {
+	count atomic.Int64
+}
+
+func (c *walSyncCounter) Hook() {
+	c.count.Add(1)
+}
+
+func (c *walSyncCounter) Load() int64 {
+	return c.count.Load()
 }
 
 func TestLocalSessionReadCacheDisabledForRWX(t *testing.T) {

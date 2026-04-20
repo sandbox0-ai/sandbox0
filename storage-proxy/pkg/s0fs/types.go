@@ -21,6 +21,7 @@ type Config struct {
 	WALPath             string
 	ObjectStore         objectstore.Store
 	MaterializeInterval time.Duration
+	WALSyncHook         func()
 }
 
 type SnapshotState struct {

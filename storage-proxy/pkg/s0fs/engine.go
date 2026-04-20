@@ -41,7 +41,7 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 		return nil, fmt.Errorf("%w: volume id is required", ErrInvalidInput)
 	}
 
-	walFile, records, err := openWAL(cfg.WALPath)
+	walFile, records, err := openWAL(cfg.WALPath, cfg.WALSyncHook)
 	if err != nil {
 		return nil, err
 	}

@@ -11,11 +11,12 @@ import (
 )
 
 type wal struct {
-	path string
-	file *os.File
+	path   string
+	file   *os.File
+	onSync func()
 }
 
-func openWAL(path string) (*wal, []walRecord, error) {
+func openWAL(path string, onSync func()) (*wal, []walRecord, error) {
 	if path == "" {
 		return nil, nil, fmt.Errorf("%w: wal path is required", ErrInvalidInput)
 	}
@@ -32,7 +33,7 @@ func openWAL(path string) (*wal, []walRecord, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("open wal: %w", err)
 	}
-	return &wal{path: path, file: file}, records, nil
+	return &wal{path: path, file: file, onSync: onSync}, records, nil
 }
 
 func readWAL(path string) ([]walRecord, error) {
@@ -86,6 +87,9 @@ func (w *wal) sync() error {
 	}
 	if err := w.file.Sync(); err != nil {
 		return fmt.Errorf("sync wal: %w", err)
+	}
+	if w.onSync != nil {
+		w.onSync()
 	}
 	return nil
 }

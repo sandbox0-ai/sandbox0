@@ -227,6 +227,19 @@ func (s *FileSystemServer) clearDirtyWrite(volumeID string, handleID uint64) {
 	delete(s.dirtyWriteHandles, key)
 }
 
+func (s *FileSystemServer) syncS0FSHandle(volCtx *volume.VolumeContext, inode uint64) error {
+	if volCtx == nil || volCtx.S0FS == nil {
+		return nil
+	}
+	if inode == 0 {
+		return nil
+	}
+	if err := volCtx.S0FS.Fsync(inode); err != nil {
+		return mapS0FSError(err)
+	}
+	return nil
+}
+
 func (s *FileSystemServer) recordRemoteSyncChange(ctx context.Context, change *volsync.RemoteChange) context.Context {
 	if s.syncRecorder == nil || change == nil {
 		return ctx
@@ -1423,6 +1436,12 @@ func (s *FileSystemServer) Flush(ctx context.Context, req *pb.FlushRequest) (*pb
 		return nil, err
 	}
 	if isS0FSVolume(volCtx) {
+		if dirty, ok := s.peekDirtyWrite(req.VolumeId, req.HandleId); ok {
+			if err := s.syncS0FSHandle(volCtx, dirty.inode); err != nil {
+				return nil, err
+			}
+			s.clearDirtyWrite(req.VolumeId, req.HandleId)
+		}
 		return &pb.Empty{}, nil
 	}
 
@@ -1455,12 +1474,13 @@ func (s *FileSystemServer) Fsync(ctx context.Context, req *pb.FsyncRequest) (*pb
 		inode, ok := volCtx.HandleInode(req.HandleId)
 		if dirty, dirtyOK := s.peekDirtyWrite(req.VolumeId, req.HandleId); dirtyOK {
 			inode = dirty.inode
+			ok = true
 		}
-		if !ok && inode == 0 {
+		if !ok || inode == 0 {
 			return &pb.Empty{}, nil
 		}
-		if err := volCtx.S0FS.Fsync(inode); err != nil {
-			return nil, mapS0FSError(err)
+		if err := s.syncS0FSHandle(volCtx, inode); err != nil {
+			return nil, err
 		}
 		s.clearDirtyWrite(req.VolumeId, req.HandleId)
 		return &pb.Empty{}, nil
@@ -1500,10 +1520,18 @@ func (s *FileSystemServer) Release(ctx context.Context, req *pb.ReleaseRequest) 
 		return nil, err
 	}
 	if isS0FSVolume(volCtx) {
+		var syncErr error
+		if dirty, ok := s.peekDirtyWrite(req.VolumeId, req.HandleId); ok {
+			syncErr = s.syncS0FSHandle(volCtx, dirty.inode)
+		}
 		if inode, remaining, unlinked, ok := volCtx.ReleaseFileHandle(req.HandleId); ok && remaining == 0 && unlinked {
 			_ = volCtx.S0FS.Forget(inode)
 		}
-		s.takeDirtyWrite(req.VolumeId, req.HandleId)
+		if syncErr != nil {
+			s.clearDirtyWrite(req.VolumeId, req.HandleId)
+			return nil, syncErr
+		}
+		s.clearDirtyWrite(req.VolumeId, req.HandleId)
 		return &pb.Empty{}, nil
 	}
 

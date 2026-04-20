@@ -20,11 +20,17 @@ type getCall struct {
 	limit int64
 }
 
+type putCall struct {
+	key  string
+	size int
+}
+
 type recordingStore struct {
 	objectstore.Store
 
 	mu   sync.Mutex
 	gets []getCall
+	puts []putCall
 }
 
 func (s *recordingStore) Get(key string, off, limit int64) (io.ReadCloser, error) {
@@ -34,12 +40,38 @@ func (s *recordingStore) Get(key string, off, limit int64) (io.ReadCloser, error
 	return s.Store.Get(key, off, limit)
 }
 
+func (s *recordingStore) Put(key string, in io.Reader) error {
+	payload, err := io.ReadAll(in)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.puts = append(s.puts, putCall{key: key, size: len(payload)})
+	s.mu.Unlock()
+	return s.Store.Put(key, bytes.NewReader(payload))
+}
+
 func (s *recordingStore) calls() []getCall {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]getCall, len(s.gets))
 	copy(out, s.gets)
 	return out
+}
+
+func (s *recordingStore) putCalls() []putCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]putCall, len(s.puts))
+	copy(out, s.puts)
+	return out
+}
+
+func (s *recordingStore) resetCalls() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gets = nil
+	s.puts = nil
 }
 
 func TestEngineMaterializeRecoversViaColdRangeRead(t *testing.T) {
@@ -107,8 +139,8 @@ func TestEngineMaterializeRecoversViaColdRangeRead(t *testing.T) {
 	if segmentRead == nil {
 		t.Fatal("expected a cold segment Get call")
 	}
-	if segmentRead.off != 6 || segmentRead.limit != 5 {
-		t.Fatalf("segment range read = %+v, want off=6 limit=5", *segmentRead)
+	if segmentRead.off != 0 || segmentRead.limit != 11 {
+		t.Fatalf("segment cache read = %+v, want full segment read", *segmentRead)
 	}
 }
 
@@ -367,6 +399,223 @@ func TestMaterializerCoalescesSmallFilesAndKeepsManifestMonotonic(t *testing.T) 
 	}
 	if len(objects) >= 12 {
 		t.Fatalf("object count = %d, want < 12 for 64 files", len(objects))
+	}
+}
+
+func TestMaterializerRetainsColdFilesAndWritesOnlyHotData(t *testing.T) {
+	ctx := context.Background()
+	store := newPrefixedRecordingStore(t, "vol-retain")
+	walPath := filepath.Join(t.TempDir(), "engine.wal")
+
+	engine, err := Open(ctx, Config{
+		VolumeID:    "vol-retain",
+		WALPath:     walPath,
+		ObjectStore: store,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+
+	baseA, err := engine.CreateFile(RootInode, "a.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile(a) error = %v", err)
+	}
+	if _, err := engine.Write(baseA.Inode, 0, []byte("alpha")); err != nil {
+		t.Fatalf("Write(a) error = %v", err)
+	}
+	baseB, err := engine.CreateFile(RootInode, "b.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile(b) error = %v", err)
+	}
+	if _, err := engine.Write(baseB.Inode, 0, []byte("bravo")); err != nil {
+		t.Fatalf("Write(b) error = %v", err)
+	}
+	first, err := engine.SyncMaterialize(ctx)
+	if err != nil {
+		t.Fatalf("SyncMaterialize(first) error = %v", err)
+	}
+	if first == nil || len(first.State.Segments) != 1 {
+		t.Fatalf("first manifest segments = %+v", first)
+	}
+	firstSegmentID := first.State.ColdFiles[baseA.Inode][0].SegmentID
+	store.resetCalls()
+
+	tail, err := engine.CreateFile(RootInode, "tail.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile(tail) error = %v", err)
+	}
+	if _, err := engine.Write(tail.Inode, 0, []byte("tail")); err != nil {
+		t.Fatalf("Write(tail) error = %v", err)
+	}
+	second, err := engine.SyncMaterialize(ctx)
+	if err != nil {
+		t.Fatalf("SyncMaterialize(second) error = %v", err)
+	}
+	if second == nil || second.ManifestSeq != 2 {
+		t.Fatalf("second manifest = %+v, want seq 2", second)
+	}
+	if len(second.State.Segments) != 2 {
+		t.Fatalf("second manifest segment count = %d, want 2", len(second.State.Segments))
+	}
+	if got := second.State.ColdFiles[baseA.Inode][0].SegmentID; got != firstSegmentID {
+		t.Fatalf("a.txt segment = %s, want retained %s", got, firstSegmentID)
+	}
+	if got := second.State.ColdFiles[tail.Inode][0].SegmentID; got == firstSegmentID {
+		t.Fatalf("tail.txt reused base segment %s", got)
+	}
+
+	var segmentGets int
+	for _, call := range store.calls() {
+		if strings.HasPrefix(call.key, segmentDir+"/") {
+			segmentGets++
+		}
+	}
+	if segmentGets != 0 {
+		t.Fatalf("segment Get calls during incremental materialize = %d, want 0", segmentGets)
+	}
+	var segmentPuts []putCall
+	for _, call := range store.putCalls() {
+		if strings.HasPrefix(call.key, segmentDir+"/") {
+			segmentPuts = append(segmentPuts, call)
+		}
+	}
+	if len(segmentPuts) != 1 || segmentPuts[0].size != len("tail") {
+		t.Fatalf("segment Put calls = %+v, want one hot segment of size 4", segmentPuts)
+	}
+}
+
+func TestEngineColdSmallFileReadsUseSegmentCache(t *testing.T) {
+	ctx := context.Background()
+	store := newPrefixedRecordingStore(t, "vol-cache")
+	walPath := filepath.Join(t.TempDir(), "engine.wal")
+
+	engine, err := Open(ctx, Config{
+		VolumeID:    "vol-cache",
+		WALPath:     walPath,
+		ObjectStore: store,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	for _, item := range []struct {
+		name string
+		body string
+	}{
+		{name: "a.txt", body: "alpha"},
+		{name: "b.txt", body: "bravo"},
+		{name: "c.txt", body: "charlie"},
+	} {
+		node, err := engine.CreateFile(RootInode, item.name, 0o644)
+		if err != nil {
+			t.Fatalf("CreateFile(%s) error = %v", item.name, err)
+		}
+		if _, err := engine.Write(node.Inode, 0, []byte(item.body)); err != nil {
+			t.Fatalf("Write(%s) error = %v", item.name, err)
+		}
+	}
+	if _, err := engine.SyncMaterialize(ctx); err != nil {
+		t.Fatalf("SyncMaterialize() error = %v", err)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if err := os.Remove(headStatePath(walPath)); err != nil {
+		t.Fatalf("Remove(head) error = %v", err)
+	}
+	if err := os.Remove(walPath); err != nil {
+		t.Fatalf("Remove(wal) error = %v", err)
+	}
+
+	recovered, err := Open(ctx, Config{
+		VolumeID:    "vol-cache",
+		WALPath:     walPath,
+		ObjectStore: store,
+	})
+	if err != nil {
+		t.Fatalf("Open(recovered) error = %v", err)
+	}
+	defer recovered.Close()
+	store.resetCalls()
+
+	for _, item := range []struct {
+		name string
+		body string
+	}{
+		{name: "a.txt", body: "alpha"},
+		{name: "b.txt", body: "bravo"},
+		{name: "c.txt", body: "charlie"},
+	} {
+		node, err := recovered.Lookup(RootInode, item.name)
+		if err != nil {
+			t.Fatalf("Lookup(%s) error = %v", item.name, err)
+		}
+		payload, err := recovered.Read(node.Inode, 0, node.Size)
+		if err != nil {
+			t.Fatalf("Read(%s) error = %v", item.name, err)
+		}
+		if string(payload) != item.body {
+			t.Fatalf("Read(%s) = %q, want %q", item.name, payload, item.body)
+		}
+	}
+
+	var segmentGets []getCall
+	for _, call := range store.calls() {
+		if strings.HasPrefix(call.key, segmentDir+"/") {
+			segmentGets = append(segmentGets, call)
+		}
+	}
+	if len(segmentGets) != 1 {
+		t.Fatalf("segment Get calls = %+v, want exactly one cached segment read", segmentGets)
+	}
+	if segmentGets[0].off != 0 || segmentGets[0].limit <= 0 {
+		t.Fatalf("segment cache read = %+v, want full segment read", segmentGets[0])
+	}
+}
+
+func TestCreateSnapshotHydratesColdFilesInline(t *testing.T) {
+	ctx := context.Background()
+	store := newPrefixedRecordingStore(t, "vol-snapshot")
+	walPath := filepath.Join(t.TempDir(), "engine.wal")
+
+	engine, err := Open(ctx, Config{
+		VolumeID:    "vol-snapshot",
+		WALPath:     walPath,
+		ObjectStore: store,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+
+	node, err := engine.CreateFile(RootInode, "snap.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+	if _, err := engine.Write(node.Inode, 0, []byte("snapshot-data")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if _, err := engine.SyncMaterialize(ctx); err != nil {
+		t.Fatalf("SyncMaterialize() error = %v", err)
+	}
+
+	state, err := engine.CreateSnapshot("snap-1")
+	if err != nil {
+		t.Fatalf("CreateSnapshot() error = %v", err)
+	}
+	if len(state.ColdFiles) != 0 {
+		t.Fatalf("snapshot cold files = %+v, want inline data", state.ColdFiles)
+	}
+	snapNode, err := state.Lookup(RootInode, "snap.txt")
+	if err != nil {
+		t.Fatalf("snapshot Lookup() error = %v", err)
+	}
+	payload, err := state.Read(snapNode.Inode, 0, snapNode.Size)
+	if err != nil {
+		t.Fatalf("SnapshotState.Read() error = %v", err)
+	}
+	if string(payload) != "snapshot-data" {
+		t.Fatalf("snapshot data = %q, want snapshot-data", payload)
 	}
 }
 

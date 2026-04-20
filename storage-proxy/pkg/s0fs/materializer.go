@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
@@ -20,6 +21,8 @@ const (
 	manifestDir       = "manifests"
 	segmentDir        = "segments"
 )
+
+const defaultSegmentCacheMaxBytes int64 = 64 << 20
 
 var ErrMaterializedManifestNotFound = errors.New("materialized manifest not found")
 
@@ -34,13 +37,17 @@ type Manifest struct {
 
 type Materializer struct {
 	store objectstore.Store
+	cache *segmentCache
 }
 
 func NewMaterializer(store objectstore.Store) *Materializer {
 	if store == nil {
 		return nil
 	}
-	return &Materializer{store: store}
+	return &Materializer{
+		store: store,
+		cache: newSegmentCache(defaultSegmentCacheMaxBytes),
+	}
 }
 
 func (m *Materializer) Enabled() bool {
@@ -62,9 +69,7 @@ func (m *Materializer) Materialize(ctx context.Context, volumeID string, state *
 	}
 
 	inline := cloneState(state)
-	if len(inline.ColdFiles) > 0 {
-		return nil, fmt.Errorf("%w: materializer requires inline file data", ErrInvalidInput)
-	}
+	normalizeState(inline)
 
 	nextSeq, err := m.nextManifestSequence(ctx)
 	if err != nil {
@@ -76,21 +81,9 @@ func (m *Materializer) Materialize(ctx context.Context, volumeID string, state *
 		return nil, err
 	}
 
-	manifestState := &SnapshotState{
-		NextSeq:   inline.NextSeq,
-		NextInode: inline.NextInode,
-		Nodes:     cloneNodeMap(inline.Nodes),
-		Children:  cloneChildrenMap(inline.Children),
-		Data:      nil,
-		ColdFiles: fileExtents,
-		Segments: map[string]*Segment{
-			segment.ID: &Segment{
-				ID:     segment.ID,
-				Key:    segment.Key,
-				Length: uint64(len(segment.Payload)),
-				SHA256: segment.SHA256,
-			},
-		},
+	manifestState, err := buildManifestState(inline, segment, fileExtents)
+	if err != nil {
+		return nil, err
 	}
 	manifest := &Manifest{
 		Version:       1,
@@ -105,6 +98,7 @@ func (m *Materializer) Materialize(ctx context.Context, volumeID string, state *
 		if err := m.putBytes(ctx, segment.Key, segment.Payload); err != nil {
 			return nil, err
 		}
+		m.cache.put(segment.Key, segment.Payload)
 	}
 	if err := m.putJSON(ctx, manifestKey(nextSeq), manifest); err != nil {
 		return nil, err
@@ -114,6 +108,55 @@ func (m *Materializer) Materialize(ctx context.Context, volumeID string, state *
 	}
 
 	return manifest, nil
+}
+
+func (m *Materializer) ReadSegmentRange(segment *Segment, off, limit int64) ([]byte, error) {
+	if !m.Enabled() {
+		return nil, fmt.Errorf("%w: materializer is not configured", ErrInvalidInput)
+	}
+	if segment == nil || segment.Key == "" {
+		return nil, fmt.Errorf("%w: segment is required", ErrInvalidInput)
+	}
+	if limit == 0 {
+		return nil, nil
+	}
+	if off < 0 {
+		return nil, fmt.Errorf("%w: negative segment offset", ErrInvalidInput)
+	}
+
+	if segment.Length > 0 && int64(segment.Length) <= defaultSegmentCacheMaxBytes {
+		if payload, ok := m.cache.get(segment.Key); ok {
+			return cloneByteRange(payload, off, limit), nil
+		}
+		reader, err := m.store.Get(segment.Key, 0, int64(segment.Length))
+		if err != nil {
+			return nil, err
+		}
+		payload, readErr := io.ReadAll(reader)
+		closeErr := reader.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+		m.cache.put(segment.Key, payload)
+		return cloneByteRange(payload, off, limit), nil
+	}
+
+	reader, err := m.store.Get(segment.Key, off, limit)
+	if err != nil {
+		return nil, err
+	}
+	payload, readErr := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if readErr != nil {
+		return nil, readErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	return payload, nil
 }
 
 func (m *Materializer) LoadLatestManifest(ctx context.Context) (*Manifest, error) {
@@ -194,6 +237,56 @@ func buildSegment(manifestSeq uint64, state *SnapshotState) (*materializedSegmen
 	return segment, files, nil
 }
 
+func buildManifestState(state *SnapshotState, segment *materializedSegment, hotFiles map[uint64][]FileExtent) (*SnapshotState, error) {
+	manifestState := &SnapshotState{
+		NextSeq:   state.NextSeq,
+		NextInode: state.NextInode,
+		Nodes:     cloneNodeMap(state.Nodes),
+		Children:  cloneChildrenMap(state.Children),
+		Data:      make(map[uint64][]byte),
+		ColdFiles: make(map[uint64][]FileExtent),
+		Segments:  make(map[string]*Segment),
+	}
+
+	hotInodes := make(map[uint64]struct{}, len(state.Data))
+	for inode := range state.Data {
+		hotInodes[inode] = struct{}{}
+	}
+
+	for inode, extents := range state.ColdFiles {
+		if _, hot := hotInodes[inode]; hot {
+			continue
+		}
+		if state.Nodes[inode] == nil {
+			continue
+		}
+		manifestState.ColdFiles[inode] = append([]FileExtent(nil), extents...)
+		for _, extent := range extents {
+			existing := state.Segments[extent.SegmentID]
+			if existing == nil {
+				return nil, fmt.Errorf("%w: missing retained segment %s", ErrInvalidInput, extent.SegmentID)
+			}
+			manifestState.Segments[extent.SegmentID] = cloneSegment(existing)
+		}
+	}
+
+	for inode, extents := range hotFiles {
+		if state.Nodes[inode] == nil {
+			continue
+		}
+		manifestState.ColdFiles[inode] = append([]FileExtent(nil), extents...)
+	}
+	if segment != nil && len(segment.Payload) > 0 {
+		manifestState.Segments[segment.ID] = &Segment{
+			ID:     segment.ID,
+			Key:    segment.Key,
+			Length: uint64(len(segment.Payload)),
+			SHA256: segment.SHA256,
+		}
+	}
+	return manifestState, nil
+}
+
 func manifestKey(seq uint64) string {
 	return fmt.Sprintf("%s/%020d.json", manifestDir, seq)
 }
@@ -256,6 +349,70 @@ func (m *Materializer) putBytes(ctx context.Context, key string, payload []byte)
 		return fmt.Errorf("put %s: %w", key, err)
 	}
 	return nil
+}
+
+func cloneByteRange(payload []byte, off, limit int64) []byte {
+	if off > int64(len(payload)) {
+		off = int64(len(payload))
+	}
+	end := int64(len(payload))
+	if limit >= 0 && off+limit < end {
+		end = off + limit
+	}
+	return append([]byte(nil), payload[off:end]...)
+}
+
+type segmentCache struct {
+	mu       sync.Mutex
+	maxBytes int64
+	size     int64
+	entries  map[string][]byte
+	order    []string
+}
+
+func newSegmentCache(maxBytes int64) *segmentCache {
+	if maxBytes <= 0 {
+		maxBytes = defaultSegmentCacheMaxBytes
+	}
+	return &segmentCache{
+		maxBytes: maxBytes,
+		entries:  make(map[string][]byte),
+	}
+}
+
+func (c *segmentCache) get(key string) ([]byte, bool) {
+	if c == nil || key == "" {
+		return nil, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	payload, ok := c.entries[key]
+	return payload, ok
+}
+
+func (c *segmentCache) put(key string, payload []byte) {
+	if c == nil || key == "" || int64(len(payload)) > c.maxBytes {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if existing, ok := c.entries[key]; ok {
+		c.size -= int64(len(existing))
+	} else {
+		c.order = append(c.order, key)
+	}
+	c.entries[key] = append([]byte(nil), payload...)
+	c.size += int64(len(payload))
+
+	for c.size > c.maxBytes && len(c.order) > 0 {
+		evict := c.order[0]
+		c.order = c.order[1:]
+		if evicted, ok := c.entries[evict]; ok {
+			delete(c.entries, evict)
+			c.size -= int64(len(evicted))
+		}
+	}
 }
 
 func cloneNodeMap(nodes map[uint64]*Node) map[uint64]*Node {

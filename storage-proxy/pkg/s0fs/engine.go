@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"slices"
 	"sync"
@@ -498,7 +497,7 @@ func (e *Engine) SyncMaterialize(ctx context.Context) (*Manifest, error) {
 		return nil, nil
 	}
 	version := e.mutationVersion
-	state, err := e.exportStateLocked()
+	state, err := e.materializeStateLocked()
 	if err != nil {
 		e.mu.RUnlock()
 		return nil, err
@@ -514,6 +513,9 @@ func (e *Engine) SyncMaterialize(ctx context.Context) (*Manifest, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.mutationVersion == version {
+		if manifest.State != nil {
+			e.replaceStateLocked(cloneState(manifest.State))
+		}
 		if err := e.persistCurrentStateLocked(); err != nil {
 			return nil, err
 		}
@@ -959,6 +961,19 @@ func (e *Engine) exportStateLocked() (*SnapshotState, error) {
 	return state, nil
 }
 
+func (e *Engine) materializeStateLocked() (*SnapshotState, error) {
+	state := cloneState(e.currentStateLocked())
+	if len(state.ColdFiles) == 0 {
+		return state, nil
+	}
+	for inode := range state.ColdFiles {
+		if state.Nodes[inode] == nil {
+			delete(state.ColdFiles, inode)
+		}
+	}
+	return state, nil
+}
+
 func (e *Engine) readFileLocked(node *Node, inode uint64, offset uint64, size uint64) ([]byte, error) {
 	if node == nil {
 		return nil, ErrNotFound
@@ -1049,17 +1064,9 @@ func (e *Engine) readColdRangeLocked(inode uint64, offset uint64, size uint64) (
 			return nil, fmt.Errorf("%w: missing segment %s", ErrInvalidInput, extent.SegmentID)
 		}
 		segmentOffset := extent.Offset + (readStart - extentStart)
-		reader, err := e.materializer.store.Get(segment.Key, int64(segmentOffset), int64(readEnd-readStart))
+		chunk, err := e.materializer.ReadSegmentRange(segment, int64(segmentOffset), int64(readEnd-readStart))
 		if err != nil {
 			return nil, fmt.Errorf("read cold segment %s: %w", segment.Key, err)
-		}
-		chunk, readErr := io.ReadAll(reader)
-		closeErr := reader.Close()
-		if readErr != nil {
-			return nil, fmt.Errorf("read cold segment payload %s: %w", segment.Key, readErr)
-		}
-		if closeErr != nil {
-			return nil, fmt.Errorf("close cold segment reader %s: %w", segment.Key, closeErr)
 		}
 		if _, err := out.Write(chunk); err != nil {
 			return nil, fmt.Errorf("assemble cold file data: %w", err)

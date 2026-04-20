@@ -1962,6 +1962,34 @@ func assertClaimMountedVolumeWritable(env *framework.ScenarioEnv, session *e2eut
 		body, _, readErr := session.ReadVolumeFile(env.TestCtx.Context, GinkgoT(), volumeID, latePath)
 		return body, readErr
 	}).WithTimeout(90 * time.Second).WithPolling(2 * time.Second).Should(Equal([]byte(lateContent)))
+
+	batchReq := apispec.CreateContextRequest{
+		Type: &processType,
+		Cmd: &apispec.CreateCMDContextRequest{
+			Command: []string{
+				"/bin/sh",
+				"-lc",
+				`set -eu; mkdir -p /workspace/claim-writable/small-batch; i=0; while [ "$i" -lt 16 ]; do name=$(printf "file-%02d.txt" "$i"); body=$(printf "batch-%02d" "$i"); printf "%s" "$body" > "/workspace/claim-writable/small-batch/$name"; i=$((i + 1)); done; sync`,
+			},
+		},
+		TtlSec: &ttlSec,
+	}
+	batchCtxResp, status, err := session.CreateContext(env.TestCtx.Context, GinkgoT(), sandboxID, batchReq)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusCreated))
+	Expect(batchCtxResp).NotTo(BeNil())
+	DeferCleanup(func() {
+		_, _ = session.DeleteContext(env.TestCtx.Context, GinkgoT(), sandboxID, batchCtxResp.Id)
+	})
+
+	for _, index := range []int{0, 7, 15} {
+		path := fmt.Sprintf("/small-batch/file-%02d.txt", index)
+		expected := []byte(fmt.Sprintf("batch-%02d", index))
+		Eventually(func() ([]byte, error) {
+			body, _, readErr := session.ReadVolumeFile(env.TestCtx.Context, GinkgoT(), volumeID, path)
+			return body, readErr
+		}).WithTimeout(90 * time.Second).WithPolling(2 * time.Second).Should(Equal(expected))
+	}
 }
 
 func deleteSandboxVolumeForCleanup(env *framework.ScenarioEnv, session *e2eutils.Session, volumeID string) {

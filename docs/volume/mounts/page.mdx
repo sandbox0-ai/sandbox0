@@ -69,6 +69,16 @@ The claim request binds existing Volumes to template-declared paths.
 
 `RWX` is not accepted for Sandbox mounts in this node-local implementation. Use direct file APIs for control-plane file operations, or use separate `RWO` volumes for write-heavy Sandbox workloads.
 
+## Correctness Guarantees
+
+Mounted `RWO` volumes use one active writable owner at a time.
+
+- the mounted sandbox path is the authoritative writer
+- direct volume file API requests are routed to that mounted owner while the mount is active
+- Sandbox0 avoids opening a second writable direct mount for the same mounted `RWO` volume
+
+This is what keeps file changes visible both from inside the sandbox and through the volume file API.
+
 ## File Operations
 
 After claim completes, use the mounted path like a normal filesystem:

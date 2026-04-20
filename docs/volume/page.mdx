@@ -15,15 +15,13 @@ The default Sandbox filesystem is ephemeral—when a Sandbox is deleted, all its
 ## Volume and Sandbox Relationship
 
 ```mermaid
-flowchart TB
-    vol["Volume (Persistent Storage)<br/>/data/<br/>- models/<br/>- cache/<br/>- output/"]
-    sa["Sandbox A (RWX)"]
-    sb["Sandbox B (ROX)"]
-    sc["Sandbox C (RWX)"]
+flowchart LR
+    vol["Volume"]
+    sb["Sandbox mount<br/>RWO or ROX"]
+    api["Direct volume file API"]
 
-    vol --> sa
     vol --> sb
-    vol --> sc
+    vol --> api
 ```
 
 ## Access Modes
@@ -32,13 +30,23 @@ Volumes support three access modes:
 
 | Mode | Full Name | Description | Typical Use Cases |
 |------|-----------|-------------|-------------------|
-| `RWO` | Read-Write Once | Single Sandbox read-write | Database storage, exclusive workspaces |
-| `ROX` | Read-Only Cross | Multi-Sandbox read-only | Shared model files, static resource distribution |
-| `RWX` | Read-Write Cross | Multi-Sandbox read-write | Collaborative workspaces, shared caches |
+| `RWO` | Read-Write Once | One writable owner at a time | Agent workspaces, databases, exclusive write-heavy state |
+| `ROX` | Read-Only Cross | Multi-sandbox read-only distribution | Shared model files, static assets, reference datasets |
+| `RWX` | Read-Write Cross | Shared read-write volume mode for direct API workflows | Control-plane style file workflows and shared storage patterns that do not rely on sandbox mounts |
 
 <Callout variant="info">
-The default access mode is `RWO`. Sandbox mounts are declared by the template and bound at claim time. `RWO` mounts use node-local write-ahead logging for low-latency small-file workloads, while `ROX` is for read-only sharing.
+The default access mode is `RWO`. Sandbox mounts are declared by the template and bound at claim time. `RWO` mounts use node-local write-ahead logging for low-latency small-file workloads, `ROX` is for read-only sharing, and `RWX` is not accepted for sandbox mounts in the current node-local mount path.
 </Callout>
+
+## Correctness Model
+
+For mounted `RWO` volumes, Sandbox0 keeps one active writable owner at a time.
+
+- when a sandbox mounts an `RWO` volume, the node-local mount owner becomes authoritative for reads and writes
+- direct volume file API requests are routed to that mounted owner instead of opening a second writable mount
+- when the volume is not mounted into a sandbox, `storage-proxy` serves direct file API requests itself
+
+This keeps the mounted filesystem view and the direct volume API view consistent in both directions.
 
 ## Direct File Operations
 
@@ -47,7 +55,7 @@ You can operate on files in a Volume directly by volume ID, without mounting the
 This is useful for SDK workflows, developer tooling, and small control-plane style file tasks where starting or reusing a Sandbox would only add latency.
 
 <Callout variant="info">
-Direct volume file APIs still go through the normal gateway chain and team-scoped auth. Internally, `storage-proxy` lazily attaches the Volume on demand and reclaims idle direct mounts later. Sandbox mounts continue to work unchanged.
+Direct volume file APIs still go through the normal gateway chain and team-scoped auth. When a volume is already mounted into a sandbox, the API request is served by that mounted owner. When it is not mounted, `storage-proxy` lazily attaches the volume on demand and reclaims idle direct mounts later.
 </Callout>
 
 The direct file API surface mirrors the Sandbox file API:

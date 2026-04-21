@@ -402,20 +402,6 @@ func (m *Manager) forkS0FSVolume(ctx context.Context, req *ForkVolumeRequest) (*
 	}
 
 	newVolumeID := uuid.New().String()
-	targetEngine, closeTarget, err := m.openS0FSEngine(ctx, req.TeamID, newVolumeID)
-	if err != nil {
-		return nil, err
-	}
-	if err := targetEngine.ReplaceState(state); err != nil {
-		closeTarget()
-		return nil, err
-	}
-	if _, err := targetEngine.SyncMaterialize(ctx); err != nil {
-		closeTarget()
-		return nil, err
-	}
-	_ = closeTarget()
-
 	now := time.Now()
 	sourceID := sourceVol.ID
 	newVol := &db.SandboxVolume{
@@ -434,12 +420,43 @@ func (m *Manager) forkS0FSVolume(ctx context.Context, req *ForkVolumeRequest) (*
 		if err := m.repo.CreateSandboxVolumeTx(ctx, tx, newVol); err != nil {
 			return err
 		}
-		return m.appendMeteringEventTx(ctx, tx, volumeForkedEvent(m.regionID(), m.clusterID, newVol))
+		return nil
 	}); err != nil {
-		_ = cleanupS0FSVolume(newVolumeID, m.config)
 		return nil, err
 	}
+	success := false
+	defer func() {
+		if success {
+			return
+		}
+		_ = cleanupS0FSVolume(newVolumeID, m.config)
+		_ = m.repo.WithTx(context.Background(), func(tx pgx.Tx) error {
+			err := m.repo.DeleteSandboxVolumeTx(context.Background(), tx, newVolumeID)
+			if errors.Is(err, db.ErrNotFound) {
+				return nil
+			}
+			return err
+		})
+	}()
 
+	targetEngine, closeTarget, err := m.openS0FSEngine(ctx, req.TeamID, newVolumeID)
+	if err != nil {
+		return nil, err
+	}
+	if err := targetEngine.ReplaceState(state); err != nil {
+		closeTarget()
+		return nil, err
+	}
+	if _, err := targetEngine.SyncMaterialize(ctx); err != nil {
+		closeTarget()
+		return nil, err
+	}
+	_ = closeTarget()
+
+	if err := m.appendMeteringEvent(ctx, volumeForkedEvent(m.regionID(), m.clusterID, newVol)); err != nil {
+		return nil, err
+	}
+	success = true
 	return newVol, nil
 }
 

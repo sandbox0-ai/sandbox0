@@ -170,6 +170,9 @@ func (r *fakeRepo) GetS0FSCommittedHead(_ context.Context, volumeID string) (*db
 }
 
 func (r *fakeRepo) CompareAndSwapS0FSCommittedHead(_ context.Context, volumeID string, expectedManifestSeq uint64, head *db.S0FSCommittedHead) error {
+	if _, ok := r.volumes[volumeID]; !ok {
+		return db.ErrNotFound
+	}
 	current, ok := r.heads[volumeID]
 	if !ok {
 		if expectedManifestSeq != 0 {

@@ -191,9 +191,12 @@ func (s *TemplateService) DeleteTemplate(ctx context.Context, id string) error {
 		return fmt.Errorf("resolve template namespace cleanup: %w", err)
 	}
 	if deleteNamespace {
-		// Delete the namespace first so a transient namespace cleanup failure leaves
-		// the template visible for the scheduler's orphan retry path.
-		return s.deleteTemplateNamespace(ctx, existing.Namespace)
+		// Request namespace deletion first, then continue deleting the template CR
+		// and matching pods so terminating namespaces do not keep stale template
+		// objects around while the single-cluster reconciler is still looping.
+		if err := s.deleteTemplateNamespace(ctx, existing.Namespace); err != nil {
+			return err
+		}
 	}
 
 	err = s.crdClient.Sandbox0V1alpha1().SandboxTemplates(existing.Namespace).Delete(ctx, id, metav1.DeleteOptions{})

@@ -231,6 +231,14 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					assertClaimMountedRWOVolumeConflict(env, session)
 				})
 
+				It("allows ROX volumes to be mounted read-only across sandboxes", func() {
+					assertClaimMountedROXVolumeSharedReadOnly(env, session)
+				})
+
+				It("rejects RWX volumes for sandbox mounts", func() {
+					assertClaimMountedRWXVolumeRejected(env, session)
+				})
+
 				It("rejects invalid bootstrap mount requests at claim time", func() {
 					assertClaimBootstrapMountValidation(env, session)
 				})
@@ -1719,14 +1727,24 @@ func execInSandboxPod(env *framework.ScenarioEnv, namespace, podName, script str
 }
 
 func createVolumePortalTemplate(env *framework.ScenarioEnv, session *e2eutils.Session, mountPath string) string {
+	return createVolumePortalTemplateWithReadOnly(env, session, mountPath, false)
+}
+
+func createReadOnlyVolumePortalTemplate(env *framework.ScenarioEnv, session *e2eutils.Session, mountPath string) string {
+	return createVolumePortalTemplateWithReadOnly(env, session, mountPath, true)
+}
+
+func createVolumePortalTemplateWithReadOnly(env *framework.ScenarioEnv, session *e2eutils.Session, mountPath string, readOnly bool) string {
 	templateID := fmt.Sprintf("volume-portal-%d", time.Now().UnixNano())
 	base, err := session.GetTemplate(env.TestCtx.Context, GinkgoT(), "default")
 	Expect(err).NotTo(HaveOccurred())
 
 	req := e2eutils.CloneTemplateForCreate(*base, templateID)
+	readOnlyValue := readOnly
 	req.Spec.VolumeMounts = &[]apispec.VolumeMountSpec{{
 		Name:      "data",
 		MountPath: mountPath,
+		ReadOnly:  &readOnlyValue,
 	}}
 
 	created, err := session.CreateTemplate(env.TestCtx.Context, GinkgoT(), req)
@@ -2047,6 +2065,87 @@ func assertClaimMountedRWOVolumeConflict(env *framework.ScenarioEnv, session *e2
 	_, status, err = session.ClaimSandboxDetailed(env.TestCtx.Context, GinkgoT(), claimReq)
 	Expect(err).To(HaveOccurred())
 	Expect(status).To(Equal(http.StatusConflict))
+}
+
+func assertClaimMountedROXVolumeSharedReadOnly(env *framework.ScenarioEnv, session *e2eutils.Session) {
+	accessMode := apispec.ROX
+	volume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), apispec.CreateSandboxVolumeRequest{
+		AccessMode: &accessMode,
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusCreated))
+	Expect(volume).NotTo(BeNil())
+	volumeID := expectStringPtr(volume.Id, "volume id")
+	DeferCleanup(func() {
+		deleteSandboxVolumeForCleanup(env, session, volumeID)
+	})
+
+	seedPath := "/shared-seed.txt"
+	seedContent := []byte("shared-rox-seed")
+	status, err = session.WriteVolumeFile(env.TestCtx.Context, GinkgoT(), volumeID, seedPath, seedContent, "")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+
+	mountPoint := "/workspace/claim-rox"
+	templateID := createReadOnlyVolumePortalTemplate(env, session, mountPoint)
+	claimReq := apispec.ClaimRequest{
+		Template: &templateID,
+		Mounts: &[]apispec.ClaimMountRequest{{
+			SandboxvolumeId: volumeID,
+			MountPoint:      mountPoint,
+		}},
+	}
+
+	firstClaim, err := session.ClaimSandboxWithRequest(env.TestCtx.Context, GinkgoT(), claimReq)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(firstClaim).NotTo(BeNil())
+	firstSandboxID := firstClaim.SandboxId
+	DeferCleanup(func() {
+		_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), firstSandboxID)
+	})
+
+	secondClaim, err := session.ClaimSandboxWithRequest(env.TestCtx.Context, GinkgoT(), claimReq)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(secondClaim).NotTo(BeNil())
+	secondSandboxID := secondClaim.SandboxId
+	DeferCleanup(func() {
+		_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), secondSandboxID)
+	})
+
+	for _, sandboxID := range []string{firstSandboxID, secondSandboxID} {
+		Eventually(func() ([]byte, error) {
+			body, _, readErr := session.ReadFile(env.TestCtx.Context, GinkgoT(), sandboxID, mountPoint+seedPath)
+			return body, readErr
+		}).WithTimeout(20 * time.Second).WithPolling(1 * time.Second).Should(Equal(seedContent))
+	}
+}
+
+func assertClaimMountedRWXVolumeRejected(env *framework.ScenarioEnv, session *e2eutils.Session) {
+	accessMode := apispec.RWX
+	volume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), apispec.CreateSandboxVolumeRequest{
+		AccessMode: &accessMode,
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusCreated))
+	Expect(volume).NotTo(BeNil())
+	volumeID := expectStringPtr(volume.Id, "volume id")
+	DeferCleanup(func() {
+		deleteSandboxVolumeForCleanup(env, session, volumeID)
+	})
+
+	mountPoint := "/workspace/claim-rwx"
+	templateID := createVolumePortalTemplate(env, session, mountPoint)
+	claimReq := apispec.ClaimRequest{
+		Template: &templateID,
+		Mounts: &[]apispec.ClaimMountRequest{{
+			SandboxvolumeId: volumeID,
+			MountPoint:      mountPoint,
+		}},
+	}
+
+	_, status, err = session.ClaimSandboxDetailed(env.TestCtx.Context, GinkgoT(), claimReq)
+	Expect(err).To(HaveOccurred())
+	Expect(status).To(Equal(http.StatusBadRequest))
 }
 
 func assertVolumeSyncBackendLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session) {

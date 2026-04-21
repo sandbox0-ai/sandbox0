@@ -43,6 +43,7 @@ type Manager struct {
 	mu              sync.Mutex
 	portals         map[string]*portalMount
 	portalsByTarget map[string]*portalMount
+	boundVolumes    map[string]*boundVolume
 	volumes         *localVolumeManager
 }
 
@@ -59,6 +60,15 @@ type portalMount struct {
 	volumeID  string
 	teamID    string
 	mountedAt time.Time
+}
+
+type boundVolume struct {
+	volumeID  string
+	teamID    string
+	access    volume.AccessMode
+	mountedAt time.Time
+	refCount  int
+	volCtx    *volume.VolumeContext
 
 	heartbeatCancel context.CancelFunc
 	heartbeatDone   chan struct{}
@@ -109,6 +119,7 @@ func NewManager(cfg Config) *Manager {
 		heartbeatInterval: heartbeatInterval,
 		portals:           make(map[string]*portalMount),
 		portalsByTarget:   make(map[string]*portalMount),
+		boundVolumes:      make(map[string]*boundVolume),
 		volumes:           newLocalVolumeManager(),
 	}
 	manager.volumeAPI = newMountedVolumeAPIHandler(storageConfig, cfg.Repository, manager.volumes, l)
@@ -234,6 +245,10 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 	if err != nil {
 		return ctldapi.BindVolumePortalResponse{}, err
 	}
+	accessMode, err := validateBindableAccessMode(volumeRecord.AccessMode)
+	if err != nil {
+		return ctldapi.BindVolumePortalResponse{}, err
+	}
 
 	key := portalKey(req.PodUID, portalName)
 	m.mu.Lock()
@@ -246,12 +261,42 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume portal already bound to %s", pm.volumeID)
 	}
 	if pm.volumeID == req.SandboxVolumeID {
-		return ctldapi.BindVolumePortalResponse{
-			SandboxVolumeID: pm.volumeID,
-			MountPoint:      pm.mountPath,
-			MountedAt:       pm.mountedAt.Format(time.RFC3339),
-		}, nil
+		return boundResponse(pm), nil
 	}
+
+	mountedAt := time.Now().UTC()
+	m.mu.Lock()
+	pm = m.portals[key]
+	if pm == nil {
+		m.mu.Unlock()
+		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume portal %s for pod %s is not published", portalName, req.PodUID)
+	}
+	if pm.volumeID != "" {
+		response := boundResponse(pm)
+		m.mu.Unlock()
+		if response.SandboxVolumeID != req.SandboxVolumeID {
+			return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume portal already bound to %s", response.SandboxVolumeID)
+		}
+		return response, nil
+	}
+	if bound := m.boundVolumes[req.SandboxVolumeID]; bound != nil {
+		if accessMode != volume.AccessModeROX {
+			conflictPath := boundMountPath(m.portals, req.SandboxVolumeID, key)
+			m.mu.Unlock()
+			return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume %s is already bound to %s", req.SandboxVolumeID, conflictPath)
+		}
+		m.attachPortalLocked(pm, req.SandboxVolumeID, volumeRecord.TeamID, mountedAt)
+		bound.refCount++
+		response := boundResponse(pm)
+		m.mu.Unlock()
+		return response, nil
+	}
+	if existing := findBoundPortalForVolume(m.portals, req.SandboxVolumeID, key); existing != nil {
+		conflictPath := existing.mountPath
+		m.mu.Unlock()
+		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume %s is already bound to %s", req.SandboxVolumeID, conflictPath)
+	}
+	m.mu.Unlock()
 
 	cacheDir := filepath.Join(m.rootDir, "volumes", safePath(req.TeamID), safePath(req.SandboxVolumeID))
 	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
@@ -275,15 +320,13 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 		TeamID:    volumeRecord.TeamID,
 		Backend:   volume.BackendS0FS,
 		S0FS:      engine,
-		Access:    volume.NormalizeAccessMode(volumeRecord.AccessMode),
-		MountedAt: time.Now().UTC(),
+		Access:    accessMode,
+		MountedAt: mountedAt,
 		RootInode: 1,
 		RootPath:  "/",
 		CacheDir:  cacheDir,
 	}
 
-	mountedAt := time.Now().UTC()
-	session := newLocalSession(req.SandboxVolumeID, m.volumes, m.logrus)
 	m.mu.Lock()
 	pm = m.portals[key]
 	if pm == nil {
@@ -292,17 +335,26 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume portal %s for pod %s is not published", portalName, req.PodUID)
 	}
 	if pm.volumeID != "" {
-		boundVolumeID := pm.volumeID
-		response := ctldapi.BindVolumePortalResponse{
-			SandboxVolumeID: boundVolumeID,
-			MountPoint:      pm.mountPath,
-			MountedAt:       pm.mountedAt.Format(time.RFC3339),
-		}
+		response := boundResponse(pm)
 		m.mu.Unlock()
 		_ = engine.Close()
-		if boundVolumeID != req.SandboxVolumeID {
-			return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume portal already bound to %s", boundVolumeID)
+		if response.SandboxVolumeID != req.SandboxVolumeID {
+			return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume portal already bound to %s", response.SandboxVolumeID)
 		}
+		return response, nil
+	}
+	if bound := m.boundVolumes[req.SandboxVolumeID]; bound != nil {
+		if accessMode != volume.AccessModeROX {
+			conflictPath := boundMountPath(m.portals, req.SandboxVolumeID, key)
+			m.mu.Unlock()
+			_ = engine.Close()
+			return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume %s is already bound to %s", req.SandboxVolumeID, conflictPath)
+		}
+		m.attachPortalLocked(pm, req.SandboxVolumeID, volumeRecord.TeamID, mountedAt)
+		bound.refCount++
+		response := boundResponse(pm)
+		m.mu.Unlock()
+		_ = engine.Close()
 		return response, nil
 	}
 	if existing := findBoundPortalForVolume(m.portals, req.SandboxVolumeID, key); existing != nil {
@@ -311,29 +363,30 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 		_ = engine.Close()
 		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume %s is already bound to %s", req.SandboxVolumeID, conflictPath)
 	}
+	bound := &boundVolume{
+		volumeID:  req.SandboxVolumeID,
+		teamID:    volumeRecord.TeamID,
+		access:    accessMode,
+		mountedAt: mountedAt,
+		refCount:  1,
+		volCtx:    volCtx,
+	}
+	m.boundVolumes[req.SandboxVolumeID] = bound
 	m.volumes.add(volCtx)
-	pm.fs.SetSession(session)
-	pm.volumeID = req.SandboxVolumeID
-	pm.teamID = volumeRecord.TeamID
-	pm.mountedAt = mountedAt
-	if err := m.registerOwner(ctx, pm, volCtx.Access); err != nil {
-		pm.fs.SetSession(unboundSession{})
-		pm.volumeID = ""
-		pm.teamID = ""
-		pm.mountedAt = time.Time{}
+	m.attachPortalLocked(pm, req.SandboxVolumeID, volumeRecord.TeamID, mountedAt)
+	if err := m.registerOwner(ctx, bound); err != nil {
+		m.clearPortalLocked(pm)
+		delete(m.boundVolumes, req.SandboxVolumeID)
 		m.volumes.remove(req.SandboxVolumeID)
 		m.mu.Unlock()
 		_ = engine.Close()
 		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("register ctld volume owner: %w", err)
 	}
-	m.startMaterializer(pm, engine)
+	m.startMaterializer(bound)
+	response := boundResponse(pm)
 	m.mu.Unlock()
 
-	return ctldapi.BindVolumePortalResponse{
-		SandboxVolumeID: req.SandboxVolumeID,
-		MountPoint:      pm.mountPath,
-		MountedAt:       pm.mountedAt.Format(time.RFC3339),
-	}, nil
+	return response, nil
 }
 
 func (m *Manager) Unbind(ctx context.Context, req ctldapi.UnbindVolumePortalRequest) (ctldapi.UnbindVolumePortalResponse, error) {
@@ -360,21 +413,27 @@ func (m *Manager) Unbind(ctx context.Context, req ctldapi.UnbindVolumePortalRequ
 
 func (m *Manager) unbindLockedSnapshot(pm *portalMount) error {
 	volumeID := pm.volumeID
-	m.unregisterOwner(pm, volumeID)
-	pm.fs.SetSession(unboundSession{})
-	pm.volumeID = ""
-	pm.teamID = ""
-	pm.mountedAt = time.Time{}
-	if pm.materializeCancel != nil {
-		pm.materializeCancel()
-		pm.materializeCancel = nil
-	}
-	if pm.materializeDone != nil {
-		<-pm.materializeDone
-		pm.materializeDone = nil
-	}
+	m.clearPortalLocked(pm)
 	if volumeID == "" {
 		return nil
+	}
+	bound := m.boundVolumes[volumeID]
+	if bound == nil {
+		return nil
+	}
+	if bound.refCount > 1 {
+		bound.refCount--
+		return nil
+	}
+	delete(m.boundVolumes, volumeID)
+	m.unregisterOwner(bound)
+	if bound.materializeCancel != nil {
+		bound.materializeCancel()
+		bound.materializeCancel = nil
+	}
+	if bound.materializeDone != nil {
+		<-bound.materializeDone
+		bound.materializeDone = nil
 	}
 	return m.volumes.UnmountVolume(context.Background(), volumeID, "")
 }
@@ -428,14 +487,14 @@ func (m *Manager) createObjectStore(teamID, volumeID string) (objectstore.Store,
 	return objectstore.Prefix(store, prefix+"/s0fs/"), nil
 }
 
-func (m *Manager) startMaterializer(pm *portalMount, engine *s0fs.Engine) {
-	if pm == nil || engine == nil {
+func (m *Manager) startMaterializer(bound *boundVolume) {
+	if bound == nil || bound.volCtx == nil || bound.volCtx.S0FS == nil {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	pm.materializeCancel = cancel
-	pm.materializeDone = done
+	bound.materializeCancel = cancel
+	bound.materializeDone = done
 	go func(volumeID string) {
 		defer close(done)
 		ticker := time.NewTicker(2 * time.Second)
@@ -445,12 +504,54 @@ func (m *Manager) startMaterializer(pm *portalMount, engine *s0fs.Engine) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if _, err := engine.SyncMaterialize(ctx); err != nil && m.logger != nil {
+				if _, err := bound.volCtx.S0FS.SyncMaterialize(ctx); err != nil && m.logger != nil {
 					m.logger.Warn("ctld volume materialize failed", zap.String("volume_id", volumeID), zap.Error(err))
 				}
 			}
 		}
-	}(pm.volumeID)
+	}(bound.volumeID)
+}
+
+func (m *Manager) attachPortalLocked(pm *portalMount, volumeID, teamID string, mountedAt time.Time) {
+	if pm == nil {
+		return
+	}
+	if pm.fs != nil {
+		pm.fs.SetSession(newLocalSession(volumeID, m.volumes, m.logrus))
+	}
+	pm.volumeID = volumeID
+	pm.teamID = teamID
+	pm.mountedAt = mountedAt
+}
+
+func (m *Manager) clearPortalLocked(pm *portalMount) {
+	if pm == nil {
+		return
+	}
+	if pm.fs != nil {
+		pm.fs.SetSession(unboundSession{})
+	}
+	pm.volumeID = ""
+	pm.teamID = ""
+	pm.mountedAt = time.Time{}
+}
+
+func boundResponse(pm *portalMount) ctldapi.BindVolumePortalResponse {
+	if pm == nil {
+		return ctldapi.BindVolumePortalResponse{}
+	}
+	return ctldapi.BindVolumePortalResponse{
+		SandboxVolumeID: pm.volumeID,
+		MountPoint:      pm.mountPath,
+		MountedAt:       pm.mountedAt.Format(time.RFC3339),
+	}
+}
+
+func boundMountPath(portals map[string]*portalMount, volumeID, exceptKey string) string {
+	if existing := findBoundPortalForVolume(portals, volumeID, exceptKey); existing != nil {
+		return existing.mountPath
+	}
+	return volumeID
 }
 
 func safePath(value string) string {

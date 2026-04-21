@@ -56,6 +56,22 @@ func TestFindBoundPortalForVolumeIgnoresExcludedPortal(t *testing.T) {
 	}
 }
 
+func TestValidateBindableAccessModeAllowsROX(t *testing.T) {
+	accessMode, err := validateBindableAccessMode("ROX")
+	if err != nil {
+		t.Fatalf("validateBindableAccessMode(ROX) error = %v", err)
+	}
+	if accessMode != volume.AccessModeROX {
+		t.Fatalf("validateBindableAccessMode(ROX) = %s, want %s", accessMode, volume.AccessModeROX)
+	}
+}
+
+func TestValidateBindableAccessModeRejectsRWX(t *testing.T) {
+	if _, err := validateBindableAccessMode("RWX"); err == nil {
+		t.Fatal("validateBindableAccessMode(RWX) error = nil, want rejection")
+	}
+}
+
 func mustRegistryMountOptions(t *testing.T, opts volume.MountOptions) *json.RawMessage {
 	t.Helper()
 	raw, err := json.Marshal(opts)

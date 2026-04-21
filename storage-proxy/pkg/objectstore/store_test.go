@@ -88,3 +88,28 @@ func TestCountingReaderForPreservesReadSeeker(t *testing.T) {
 		t.Fatalf("BytesRead() after seek = %d, want 4", reader.BytesRead())
 	}
 }
+
+func TestNewMemoryStoreSharesNamespace(t *testing.T) {
+	t.Parallel()
+
+	first := NewMemoryStore("shared-test")
+	second := NewMemoryStore("shared-test")
+
+	if err := first.Put("objects/one.txt", bytes.NewReader([]byte("alpha"))); err != nil {
+		t.Fatalf("first.Put() error = %v", err)
+	}
+
+	reader, err := second.Get("objects/one.txt", 0, -1)
+	if err != nil {
+		t.Fatalf("second.Get() error = %v", err)
+	}
+	defer reader.Close()
+
+	payload, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("io.ReadAll() error = %v", err)
+	}
+	if got := string(payload); got != "alpha" {
+		t.Fatalf("payload = %q, want alpha", got)
+	}
+}

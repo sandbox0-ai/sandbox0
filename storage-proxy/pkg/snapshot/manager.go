@@ -74,6 +74,7 @@ var (
 	ErrVolumeBusy                = errors.New("volume is busy, try again later")
 	ErrRemountTimeout            = errors.New("remount timeout")
 	ErrInvalidAccessMode         = errors.New("invalid access mode")
+	ErrMountedCtldOwner          = errors.New("snapshot operations require ctld-mounted volumes to be unmounted")
 	errPathNotFound              = errors.New("path not found")
 )
 
@@ -190,6 +191,14 @@ func (m *Manager) CreateSnapshot(ctx context.Context, req *CreateSnapshotRequest
 		"volume_id": req.VolumeID,
 		"name":      req.Name,
 	}).Info("Creating snapshot")
+
+	ctldMounted, err := m.hasMountedCtldOwner(ctx, req.VolumeID)
+	if err != nil {
+		return nil, err
+	}
+	if ctldMounted {
+		return nil, ErrMountedCtldOwner
+	}
 
 	// 0. Distributed flush coordination (if coordinator is set)
 	// This ensures all storage-proxy instances that have this volume mounted
@@ -344,6 +353,14 @@ func (m *Manager) RestoreSnapshot(ctx context.Context, req *RestoreSnapshotReque
 		"volume_id":   req.VolumeID,
 		"snapshot_id": req.SnapshotID,
 	}).Info("Restoring snapshot")
+
+	ctldMounted, err := m.hasMountedCtldOwner(ctx, req.VolumeID)
+	if err != nil {
+		return err
+	}
+	if ctldMounted {
+		return ErrMountedCtldOwner
+	}
 
 	// 1. Get snapshot and verify ownership
 	snapshot, err := m.repo.GetSnapshot(ctx, req.SnapshotID)

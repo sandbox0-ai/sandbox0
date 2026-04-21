@@ -139,10 +139,20 @@ func Prefix(store Store, prefix string) Store {
 	}
 }
 
+var sharedMemoryNamespaces sync.Map
+
 func NewMemoryStore(namespace string) Store {
+	namespace = strings.TrimSpace(namespace)
+	state := &memoryStoreState{
+		objects: make(map[string][]byte),
+	}
+	if namespace != "" {
+		shared, _ := sharedMemoryNamespaces.LoadOrStore(namespace, state)
+		state = shared.(*memoryStoreState)
+	}
 	return &memoryStore{
-		namespace: strings.TrimSpace(namespace),
-		objects:   make(map[string][]byte),
+		namespace: namespace,
+		state:     state,
 	}
 }
 
@@ -641,9 +651,13 @@ func (s *prefixedStore) prefixed(key string) string {
 }
 
 type memoryStore struct {
-	mu        sync.RWMutex
 	namespace string
-	objects   map[string][]byte
+	state     *memoryStoreState
+}
+
+type memoryStoreState struct {
+	mu      sync.RWMutex
+	objects map[string][]byte
 }
 
 func (s *memoryStore) String() string {
@@ -658,9 +672,9 @@ func (s *memoryStore) Create() error {
 }
 
 func (s *memoryStore) Get(key string, off, limit int64) (io.ReadCloser, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	payload, ok := s.objects[strings.TrimLeft(key, "/")]
+	s.state.mu.RLock()
+	defer s.state.mu.RUnlock()
+	payload, ok := s.state.objects[strings.TrimLeft(key, "/")]
 	if !ok {
 		return nil, errors.New("object not found")
 	}
@@ -680,16 +694,16 @@ func (s *memoryStore) Put(key string, in io.Reader) error {
 	if err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.objects[strings.TrimLeft(key, "/")] = payload
+	s.state.mu.Lock()
+	defer s.state.mu.Unlock()
+	s.state.objects[strings.TrimLeft(key, "/")] = payload
 	return nil
 }
 
 func (s *memoryStore) Delete(key string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.objects, strings.TrimLeft(key, "/"))
+	s.state.mu.Lock()
+	defer s.state.mu.Unlock()
+	delete(s.state.objects, strings.TrimLeft(key, "/"))
 	return nil
 }
 
@@ -697,9 +711,9 @@ func (s *memoryStore) Head(key string) (Info, error) {
 	if strings.TrimSpace(key) == "" {
 		return Info{}, nil
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	payload, ok := s.objects[strings.TrimLeft(key, "/")]
+	s.state.mu.RLock()
+	defer s.state.mu.RUnlock()
+	payload, ok := s.state.objects[strings.TrimLeft(key, "/")]
 	if !ok {
 		return Info{}, errors.New("object not found")
 	}
@@ -710,12 +724,12 @@ func (s *memoryStore) Head(key string) (Info, error) {
 }
 
 func (s *memoryStore) List(prefix, startAfter, _ string, _ string, limit int64) ([]Info, bool, string, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.state.mu.RLock()
+	defer s.state.mu.RUnlock()
 	prefix = strings.TrimLeft(prefix, "/")
 	startAfter = strings.TrimLeft(startAfter, "/")
-	keys := make([]string, 0, len(s.objects))
-	for key := range s.objects {
+	keys := make([]string, 0, len(s.state.objects))
+	for key := range s.state.objects {
 		if strings.HasPrefix(key, prefix) && key > startAfter {
 			keys = append(keys, key)
 		}
@@ -731,7 +745,7 @@ func (s *memoryStore) List(prefix, startAfter, _ string, _ string, limit int64) 
 	}
 	objects := make([]Info, 0, max)
 	for _, key := range keys[:max] {
-		objects = append(objects, Info{Key: key, Size: int64(len(s.objects[key]))})
+		objects = append(objects, Info{Key: key, Size: int64(len(s.state.objects[key]))})
 	}
 	return objects, hasMore, nextToken, nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strconv"
 	"sync"
@@ -62,7 +63,15 @@ func (m *localVolumeManager) UnmountVolume(_ context.Context, volumeID, _ string
 	if _, err := volCtx.S0FS.SyncMaterialize(context.Background()); err != nil {
 		return err
 	}
-	return volCtx.S0FS.Close()
+	if err := volCtx.S0FS.Close(); err != nil {
+		return err
+	}
+	if volCtx.CacheDir != "" {
+		if err := os.RemoveAll(volCtx.CacheDir); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (m *localVolumeManager) AckInvalidate(string, string, string, bool, string) error {

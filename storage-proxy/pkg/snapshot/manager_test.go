@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -58,16 +59,20 @@ func seedS0FSSnapshot(t *testing.T, mgr *Manager, teamID, volumeID, snapshotID s
 }
 
 type fakeRepo struct {
-	volumes   map[string]*db.SandboxVolume
-	snapshots map[string]*db.Snapshot
-	deleted   []string
-	deleteErr error
+	volumes      map[string]*db.SandboxVolume
+	snapshots    map[string]*db.Snapshot
+	heads        map[string]*db.S0FSCommittedHead
+	activeMounts map[string][]*db.VolumeMount
+	deleted      []string
+	deleteErr    error
 }
 
 func newFakeRepo() *fakeRepo {
 	return &fakeRepo{
-		volumes:   make(map[string]*db.SandboxVolume),
-		snapshots: make(map[string]*db.Snapshot),
+		volumes:      make(map[string]*db.SandboxVolume),
+		snapshots:    make(map[string]*db.Snapshot),
+		heads:        make(map[string]*db.S0FSCommittedHead),
+		activeMounts: make(map[string][]*db.VolumeMount),
 	}
 }
 
@@ -153,6 +158,43 @@ func (r *fakeRepo) DeleteSnapshotTx(ctx context.Context, tx pgx.Tx, id string) e
 func (r *fakeRepo) DeleteSandboxVolumeTx(ctx context.Context, tx pgx.Tx, id string) error {
 	delete(r.volumes, id)
 	return nil
+}
+
+func (r *fakeRepo) GetS0FSCommittedHead(_ context.Context, volumeID string) (*db.S0FSCommittedHead, error) {
+	head, ok := r.heads[volumeID]
+	if !ok {
+		return nil, db.ErrNotFound
+	}
+	copy := *head
+	return &copy, nil
+}
+
+func (r *fakeRepo) CompareAndSwapS0FSCommittedHead(_ context.Context, volumeID string, expectedManifestSeq uint64, head *db.S0FSCommittedHead) error {
+	current, ok := r.heads[volumeID]
+	if !ok {
+		if expectedManifestSeq != 0 {
+			return db.ErrConflict
+		}
+	} else if current.ManifestSeq != expectedManifestSeq {
+		return db.ErrConflict
+	}
+	copy := *head
+	r.heads[volumeID] = &copy
+	return nil
+}
+
+func (r *fakeRepo) GetActiveMounts(_ context.Context, volumeID string, _ int) ([]*db.VolumeMount, error) {
+	return r.activeMounts[volumeID], nil
+}
+
+func rawMountOptions(t *testing.T, opts volume.MountOptions) *json.RawMessage {
+	t.Helper()
+	payload, err := json.Marshal(opts)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	msg := json.RawMessage(payload)
+	return &msg
 }
 
 type fakeVolumeProvider struct {
@@ -751,6 +793,46 @@ func TestRestoreSnapshot_BeginInvalidateError(t *testing.T) {
 	}
 	if volMgr.waitCalled {
 		t.Fatalf("expected WaitForInvalidate not to be called")
+	}
+}
+
+func TestCreateSnapshot_RejectsMountedCtldOwner(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol1"] = &db.SandboxVolume{ID: "vol1", TeamID: "team1"}
+	repo.activeMounts["vol1"] = []*db.VolumeMount{{
+		VolumeID:     "vol1",
+		MountOptions: rawMountOptions(t, volume.MountOptions{AccessMode: volume.AccessModeRWO, OwnerKind: volume.OwnerKindCtld}),
+	}}
+	mgr := newTestManager(repo, nil)
+
+	_, err := mgr.CreateSnapshot(context.Background(), &CreateSnapshotRequest{
+		VolumeID: "vol1",
+		Name:     "snap1",
+		TeamID:   "team1",
+		UserID:   "user1",
+	})
+	if !errors.Is(err, ErrMountedCtldOwner) {
+		t.Fatalf("CreateSnapshot() error = %v, want %v", err, ErrMountedCtldOwner)
+	}
+}
+
+func TestRestoreSnapshot_RejectsMountedCtldOwner(t *testing.T) {
+	repo := newFakeRepo()
+	repo.snapshots["snap1"] = &db.Snapshot{ID: "snap1", VolumeID: "vol1", TeamID: "team1"}
+	repo.activeMounts["vol1"] = []*db.VolumeMount{{
+		VolumeID:     "vol1",
+		MountOptions: rawMountOptions(t, volume.MountOptions{AccessMode: volume.AccessModeRWO, OwnerKind: volume.OwnerKindCtld}),
+	}}
+	mgr := newTestManager(repo, nil)
+
+	err := mgr.RestoreSnapshot(context.Background(), &RestoreSnapshotRequest{
+		VolumeID:   "vol1",
+		SnapshotID: "snap1",
+		TeamID:     "team1",
+		UserID:     "user1",
+	})
+	if !errors.Is(err, ErrMountedCtldOwner) {
+		t.Fatalf("RestoreSnapshot() error = %v, want %v", err, ErrMountedCtldOwner)
 	}
 }
 

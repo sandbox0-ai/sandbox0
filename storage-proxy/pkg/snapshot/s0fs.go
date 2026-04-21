@@ -22,6 +22,56 @@ import (
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 )
 
+type s0fsHeadRepository interface {
+	GetS0FSCommittedHead(ctx context.Context, volumeID string) (*db.S0FSCommittedHead, error)
+	CompareAndSwapS0FSCommittedHead(ctx context.Context, volumeID string, expectedManifestSeq uint64, head *db.S0FSCommittedHead) error
+}
+
+type activeMountRepository interface {
+	GetActiveMounts(ctx context.Context, volumeID string, heartbeatTimeout int) ([]*db.VolumeMount, error)
+}
+
+type snapshotHeadStore struct {
+	repo s0fsHeadRepository
+}
+
+func (s *snapshotHeadStore) LoadCommittedHead(ctx context.Context, volumeID string) (*s0fs.CommittedHead, error) {
+	if s == nil || s.repo == nil {
+		return nil, s0fs.ErrCommittedHeadNotFound
+	}
+	head, err := s.repo.GetS0FSCommittedHead(ctx, volumeID)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			return nil, s0fs.ErrCommittedHeadNotFound
+		}
+		return nil, err
+	}
+	return &s0fs.CommittedHead{
+		VolumeID:      head.VolumeID,
+		ManifestSeq:   head.ManifestSeq,
+		CheckpointSeq: head.CheckpointSeq,
+		ManifestKey:   head.ManifestKey,
+		UpdatedAt:     head.UpdatedAt,
+	}, nil
+}
+
+func (s *snapshotHeadStore) CompareAndSwapCommittedHead(ctx context.Context, volumeID string, expectedManifestSeq uint64, head *s0fs.CommittedHead) error {
+	if s == nil || s.repo == nil {
+		return s0fs.ErrCommittedHeadNotFound
+	}
+	err := s.repo.CompareAndSwapS0FSCommittedHead(ctx, volumeID, expectedManifestSeq, &db.S0FSCommittedHead{
+		VolumeID:      head.VolumeID,
+		ManifestSeq:   head.ManifestSeq,
+		CheckpointSeq: head.CheckpointSeq,
+		ManifestKey:   head.ManifestKey,
+		UpdatedAt:     head.UpdatedAt,
+	})
+	if errors.Is(err, db.ErrConflict) {
+		return s0fs.ErrCommittedHeadConflict
+	}
+	return err
+}
+
 func (m *Manager) s0fsConfig(teamID, volumeID string) s0fs.Config {
 	cfg := s0fs.Config{
 		VolumeID: volumeID,
@@ -31,7 +81,31 @@ func (m *Manager) s0fsConfig(teamID, volumeID string) s0fs.Config {
 	if err == nil {
 		cfg.ObjectStore = store
 	}
+	if repo, ok := any(m.repo).(s0fsHeadRepository); ok {
+		cfg.HeadStore = &snapshotHeadStore{repo: repo}
+	}
 	return cfg
+}
+
+func (m *Manager) hasMountedCtldOwner(ctx context.Context, volumeID string) (bool, error) {
+	repo, ok := any(m.repo).(activeMountRepository)
+	if !ok || repo == nil || volumeID == "" {
+		return false, nil
+	}
+	heartbeatTimeout := 15
+	if m.config != nil && m.config.HeartbeatTimeout > 0 {
+		heartbeatTimeout = m.config.HeartbeatTimeout
+	}
+	mounts, err := repo.GetActiveMounts(ctx, volumeID, heartbeatTimeout)
+	if err != nil {
+		return false, fmt.Errorf("get active mounts: %w", err)
+	}
+	for _, mount := range mounts {
+		if volume.DecodeMountOptions(mount.MountOptions).OwnerKind == volume.OwnerKindCtld {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (m *Manager) s0fsObjectStore(teamID, volumeID string) (objectstore.Store, error) {
@@ -336,6 +410,10 @@ func (m *Manager) forkS0FSVolume(ctx context.Context, req *ForkVolumeRequest) (*
 		closeTarget()
 		return nil, err
 	}
+	if _, err := targetEngine.SyncMaterialize(ctx); err != nil {
+		closeTarget()
+		return nil, err
+	}
 	_ = closeTarget()
 
 	now := time.Now()
@@ -373,6 +451,9 @@ func (m *Manager) restoreS0FSSnapshot(ctx context.Context, req *RestoreSnapshotR
 	defer closeFn()
 
 	if err := engine.RestoreSnapshot(req.SnapshotID); err != nil {
+		return err
+	}
+	if _, err := engine.SyncMaterialize(ctx); err != nil {
 		return err
 	}
 	if m.volMgr != nil {

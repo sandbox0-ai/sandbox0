@@ -57,6 +57,11 @@ func TestS0FSSnapshotCreateRestoreAndDelete(t *testing.T) {
 	if !volMgr.beginCalled || !volMgr.waitCalled {
 		t.Fatalf("invalidate coordination = begin:%v wait:%v", volMgr.beginCalled, volMgr.waitCalled)
 	}
+	fresh := openFreshS0FSEngine(t, mgr, "team-1", "vol-1")
+	defer fresh.Close()
+	if got := readS0FSFile(t, fresh, "state.txt"); got != "alpha" {
+		t.Fatalf("fresh engine read after restore = %q, want alpha", got)
+	}
 
 	if err := mgr.DeleteSnapshot(context.Background(), "vol-1", snap.ID, "team-1"); err != nil {
 		t.Fatalf("DeleteSnapshot() error = %v", err)
@@ -102,6 +107,12 @@ func TestS0FSForkVolumeCopiesState(t *testing.T) {
 	writeS0FSFile(t, forkedEngine, "fork.txt", "forked")
 	if got := readS0FSFile(t, engine, "fork.txt"); got != "seed" {
 		t.Fatalf("source file after fork mutation = %q, want seed", got)
+	}
+
+	freshForked := openFreshS0FSEngine(t, mgr, "team-1", forked.ID)
+	defer freshForked.Close()
+	if got := readS0FSFile(t, freshForked, "fork.txt"); got != "seed" {
+		t.Fatalf("fresh forked file = %q, want seed", got)
 	}
 }
 
@@ -160,35 +171,37 @@ func newS0FSSnapshotTestManager(t *testing.T, volumeID string) (*Manager, *fakeR
 		UpdatedAt:  time.Now(),
 	}
 
-	engine, err := s0fs.Open(context.Background(), s0fs.Config{
-		VolumeID: volumeID,
-		WALPath:  filepath.Join(cacheDir, "s0fs", volumeID, "engine.wal"),
-	})
+	volMgr := &fakeVolumeProvider{
+		ctx: &volume.VolumeContext{
+			VolumeID:  volumeID,
+			TeamID:    "team-1",
+			Backend:   volume.BackendS0FS,
+			RootInode: 1,
+		},
+	}
+	mgr := &Manager{
+		repo:   repo,
+		volMgr: volMgr,
+		config: &config.StorageProxyConfig{
+			CacheDir:              cacheDir,
+			DefaultClusterId:      "test-cluster",
+			RestoreRemountTimeout: "100ms",
+			ObjectStorageType:     "mem",
+			S3Bucket:              "snapshot-tests",
+		},
+		logger:    logrus.New(),
+		clusterID: "test-cluster",
+		podID:     "test-pod",
+		locks:     make(map[string]time.Time),
+	}
+	engine, err := s0fs.Open(context.Background(), mgr.s0fsConfig("team-1", volumeID))
 	if err != nil {
 		t.Fatalf("Open(s0fs) error = %v", err)
 	}
 	t.Cleanup(func() {
 		_ = engine.Close()
 	})
-
-	volMgr := &fakeVolumeProvider{
-		ctx: &volume.VolumeContext{
-			VolumeID:  volumeID,
-			TeamID:    "team-1",
-			Backend:   volume.BackendS0FS,
-			S0FS:      engine,
-			RootInode: 1,
-		},
-	}
-	mgr := &Manager{
-		repo:      repo,
-		volMgr:    volMgr,
-		config:    &config.StorageProxyConfig{CacheDir: cacheDir, DefaultClusterId: "test-cluster", RestoreRemountTimeout: "100ms"},
-		logger:    logrus.New(),
-		clusterID: "test-cluster",
-		podID:     "test-pod",
-		locks:     make(map[string]time.Time),
-	}
+	volMgr.ctx.S0FS = engine
 	return mgr, repo, volMgr, engine
 }
 
@@ -253,4 +266,15 @@ func untarSnapshotArchive(t *testing.T, payload []byte) map[string][]byte {
 		files[header.Name] = body
 	}
 	return files
+}
+
+func openFreshS0FSEngine(t *testing.T, mgr *Manager, teamID, volumeID string) *s0fs.Engine {
+	t.Helper()
+	cfg := mgr.s0fsConfig(teamID, volumeID)
+	cfg.WALPath = filepath.Join(t.TempDir(), "s0fs", volumeID, "engine.wal")
+	engine, err := s0fs.Open(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Open(fresh %s) error = %v", volumeID, err)
+	}
+	return engine
 }

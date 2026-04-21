@@ -236,6 +236,8 @@ func (s *Server) handleSnapshotError(w http.ResponseWriter, err error) {
 		_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "clone operation failed")
 	case errors.Is(err, snapshot.ErrRemountTimeout):
 		_ = spec.WriteError(w, http.StatusGatewayTimeout, spec.CodeInternal, "remount timeout")
+	case errors.Is(err, snapshot.ErrMountedCtldOwner):
+		_ = spec.WriteError(w, http.StatusConflict, spec.CodeConflict, "ctld-mounted volumes must be unmounted before snapshot or restore")
 	default:
 		s.logger.WithError(err).Error("Snapshot operation failed")
 		_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "internal server error")

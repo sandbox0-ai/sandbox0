@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -249,6 +250,37 @@ func TestLocalSessionReleaseSyncsDirtyWrites(t *testing.T) {
 	}
 	if got := counter.Load(); got != 1 {
 		t.Fatalf("sync count after Release() = %d, want 1", got)
+	}
+}
+
+func TestLocalVolumeManagerUnmountRemovesCacheDir(t *testing.T) {
+	cacheDir := filepath.Join(t.TempDir(), "volume-cache")
+	engine, err := s0fs.Open(context.Background(), s0fs.Config{
+		VolumeID: "vol-1",
+		WALPath:  filepath.Join(cacheDir, "engine.wal"),
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+
+	mgr := newLocalVolumeManager()
+	mgr.add(&volume.VolumeContext{
+		VolumeID:  "vol-1",
+		TeamID:    "team-a",
+		Backend:   volume.BackendS0FS,
+		S0FS:      engine,
+		Access:    volume.AccessModeRWO,
+		MountedAt: time.Now().UTC(),
+		RootInode: 1,
+		RootPath:  "/",
+		CacheDir:  cacheDir,
+	})
+
+	if err := mgr.UnmountVolume(context.Background(), "vol-1", ""); err != nil {
+		t.Fatalf("UnmountVolume() error = %v", err)
+	}
+	if _, err := os.Stat(cacheDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cache dir stat error = %v, want not exist", err)
 	}
 }
 

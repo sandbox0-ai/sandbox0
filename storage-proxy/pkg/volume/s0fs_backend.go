@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sirupsen/logrus"
@@ -15,14 +16,16 @@ import (
 
 // S0FSBackend mounts the in-process active volume engine.
 type S0FSBackend struct {
-	logger *logrus.Logger
-	config *config.StorageProxyConfig
+	logger    *logrus.Logger
+	config    *config.StorageProxyConfig
+	headStore s0fs.HeadStore
 }
 
-func NewS0FSBackend(logger *logrus.Logger, cfg *config.StorageProxyConfig) *S0FSBackend {
+func NewS0FSBackend(logger *logrus.Logger, cfg *config.StorageProxyConfig, repo *db.Repository) *S0FSBackend {
 	return &S0FSBackend{
-		logger: logger,
-		config: cfg,
+		logger:    logger,
+		config:    cfg,
+		headStore: db.NewS0FSHeadStore(repo),
 	}
 }
 
@@ -42,6 +45,7 @@ func (b *S0FSBackend) MountVolume(ctx context.Context, req BackendMountRequest) 
 		VolumeID:    req.VolumeID,
 		WALPath:     filepath.Join(cacheDir, "engine.wal"),
 		ObjectStore: remoteStore,
+		HeadStore:   b.headStore,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open s0fs engine: %w", err)

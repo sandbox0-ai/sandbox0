@@ -13,6 +13,7 @@ import (
 
 var (
 	ErrNotFound = errors.New("not found")
+	ErrConflict = errors.New("conflict")
 )
 
 // CoordinatorRepository defines the database operations needed by coordinator

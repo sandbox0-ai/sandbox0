@@ -28,6 +28,7 @@ type Engine struct {
 
 	materializer            *Materializer
 	mutationVersion         uint64
+	lastCommittedManifest   uint64
 	lastMaterializedVersion uint64
 	dirty                   bool
 	dirtyAt                 time.Time
@@ -47,17 +48,19 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 	}
 
 	state, err := loadCurrentState(cfg)
-	if cfg.ObjectStore != nil {
-		materializer := NewMaterializer(cfg.ObjectStore)
-		if materializer != nil {
-			latestState, _, latestErr := materializer.LoadLatestState(ctx)
-			switch {
-			case latestErr == nil && shouldUseMaterializedState(state, err, latestState, len(records)):
-				state = latestState
-				err = nil
-			case errors.Is(err, ErrSnapshotNotFound) && latestErr != nil && !errors.Is(latestErr, ErrMaterializedManifestNotFound):
-				err = latestErr
-			}
+	materializer := NewMaterializer(cfg.VolumeID, cfg.ObjectStore, cfg.HeadStore)
+	var latestManifest *Manifest
+	if materializer != nil {
+		latestState, manifest, latestErr := materializer.LoadLatestState(ctx)
+		switch {
+		case latestErr == nil && shouldUseMaterializedState(state, err, latestState, len(records)):
+			state = latestState
+			err = nil
+			latestManifest = manifest
+		case latestErr == nil:
+			latestManifest = manifest
+		case errors.Is(err, ErrSnapshotNotFound) && latestErr != nil && !errors.Is(latestErr, ErrMaterializedManifestNotFound):
+			err = latestErr
 		}
 	}
 	if err != nil && !errors.Is(err, ErrSnapshotNotFound) && !errors.Is(err, ErrMaterializedManifestNotFound) {
@@ -99,7 +102,10 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 		data:         state.Data,
 		coldFiles:    state.ColdFiles,
 		segments:     state.Segments,
-		materializer: NewMaterializer(cfg.ObjectStore),
+		materializer: materializer,
+	}
+	if latestManifest != nil {
+		e.lastCommittedManifest = latestManifest.ManifestSeq
 	}
 
 	for _, record := range records {
@@ -502,17 +508,17 @@ func (e *Engine) SyncMaterialize(ctx context.Context) (*Manifest, error) {
 		e.mu.RUnlock()
 		return nil, err
 	}
-	volumeID := e.volumeID
+	expectedManifestSeq := e.lastCommittedManifest
 	e.mu.RUnlock()
 
-	manifest, err := e.materializer.Materialize(ctx, volumeID, state)
+	manifest, err := e.materializer.Materialize(ctx, state, expectedManifestSeq)
 	if err != nil || manifest == nil {
 		return manifest, err
 	}
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.mutationVersion == version {
+	if e.mutationVersion == version && e.lastCommittedManifest == expectedManifestSeq {
 		if manifest.State != nil {
 			e.replaceStateLocked(cloneState(manifest.State))
 		}
@@ -522,6 +528,7 @@ func (e *Engine) SyncMaterialize(ctx context.Context) (*Manifest, error) {
 		if err := e.wal.reset(); err != nil {
 			return nil, err
 		}
+		e.lastCommittedManifest = manifest.ManifestSeq
 		e.lastMaterializedVersion = version
 		e.dirty = false
 	}
@@ -541,7 +548,7 @@ func (e *Engine) RefreshMaterialized(ctx context.Context) (bool, error) {
 	currentNextSeq := e.nextSeq
 	e.mu.RUnlock()
 
-	state, _, err := e.materializer.LoadLatestState(ctx)
+	state, manifest, err := e.materializer.LoadLatestState(ctx)
 	if errors.Is(err, ErrMaterializedManifestNotFound) {
 		return false, nil
 	}
@@ -566,6 +573,9 @@ func (e *Engine) RefreshMaterialized(ctx context.Context) (bool, error) {
 	}
 	if err := e.wal.reset(); err != nil {
 		return false, err
+	}
+	if manifest != nil {
+		e.lastCommittedManifest = manifest.ManifestSeq
 	}
 	return true, nil
 }

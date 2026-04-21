@@ -20,6 +20,7 @@ type Config struct {
 	VolumeID            string
 	WALPath             string
 	ObjectStore         objectstore.Store
+	HeadStore           HeadStore
 	MaterializeInterval time.Duration
 	WALSyncHook         func()
 }

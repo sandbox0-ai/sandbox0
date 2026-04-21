@@ -126,7 +126,7 @@ func main() {
 	}
 
 	// Create volume manager
-	volMgr := volume.NewManager(logrusLogger, cfg)
+	volMgr := volume.NewManager(logrusLogger, cfg, repo)
 	volMgr.SetMetrics(storageProxyMetrics)
 	directVolumeFileIdleTTL := buildDirectVolumeFileIdleTTL(cfg)
 	directVolumeFileCleanupInterval := buildDirectVolumeFileCleanupInterval(cfg, directVolumeFileIdleTTL)

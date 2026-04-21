@@ -12,7 +12,7 @@ import (
 )
 
 func TestAcquireDirectVolumeFileMount_ReusesSessionUntilIdleCleanup(t *testing.T) {
-	mgr := NewManager(logrus.New(), &config.StorageProxyConfig{})
+	mgr := NewManager(logrus.New(), &config.StorageProxyConfig{}, nil)
 	volumeID := "vol-direct"
 	mgr.volumes[volumeID] = &VolumeContext{VolumeID: volumeID}
 
@@ -200,7 +200,7 @@ func (f *fakeVolumeRootMeta) Mkdir(_ fsmeta.Context, parent fsmeta.Ino, name str
 }
 
 func TestCleanupIdleDirectVolumeFileMounts_SkipsInflightRequests(t *testing.T) {
-	mgr := NewManager(logrus.New(), &config.StorageProxyConfig{})
+	mgr := NewManager(logrus.New(), &config.StorageProxyConfig{}, nil)
 	volumeID := "vol-busy"
 	sessionID := "direct-session-1"
 	mgr.volumes[volumeID] = &VolumeContext{VolumeID: volumeID}
@@ -226,7 +226,7 @@ func TestCleanupIdleDirectVolumeFileMounts_SkipsInflightRequests(t *testing.T) {
 }
 
 func TestCleanupIdleDirectVolumeFileMount_SkipsInflightLease(t *testing.T) {
-	mgr := NewManager(logrus.New(), &config.StorageProxyConfig{})
+	mgr := NewManager(logrus.New(), &config.StorageProxyConfig{}, nil)
 	volumeID := "vol-busy-single"
 	sessionID := "direct-session-1"
 
@@ -253,7 +253,7 @@ func TestCleanupIdleDirectVolumeFileMount_SkipsInflightLease(t *testing.T) {
 }
 
 func TestBeginInvalidate_IgnoresDirectSessions(t *testing.T) {
-	mgr := NewManager(logrus.New(), &config.StorageProxyConfig{})
+	mgr := NewManager(logrus.New(), &config.StorageProxyConfig{}, nil)
 	volumeID := "vol-invalidate"
 	mgr.mountSessions[volumeID] = map[string]*MountSession{
 		"remote-session": {ID: "remote-session", CreatedAt: time.Now()},

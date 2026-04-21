@@ -22,6 +22,15 @@ type SandboxVolume struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// S0FSCommittedHead stores the current committed immutable manifest pointer for one volume.
+type S0FSCommittedHead struct {
+	VolumeID      string    `json:"volume_id"`
+	ManifestSeq   uint64    `json:"manifest_seq"`
+	CheckpointSeq uint64    `json:"checkpoint_seq"`
+	ManifestKey   string    `json:"manifest_key"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
 const (
 	SandboxVolumeOwnerKindSandbox = "sandbox"
 )

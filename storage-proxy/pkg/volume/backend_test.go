@@ -35,7 +35,7 @@ func (b *fakeBackend) UnmountVolume(_ context.Context, _ *VolumeContext) error {
 
 func TestManagerMountUsesBackend(t *testing.T) {
 	backend := &fakeBackend{}
-	mgr := NewManagerWithBackend(logrus.New(), &config.StorageProxyConfig{}, backend)
+	mgr := NewManagerWithBackend(logrus.New(), &config.StorageProxyConfig{}, nil, backend)
 
 	sessionID, mountedAt, err := mgr.MountVolume(context.Background(), "team/team-a", "vol-1", "team-a", AccessModeRWO)
 	if err != nil {
@@ -74,7 +74,7 @@ func TestManagerMountUsesBackend(t *testing.T) {
 
 func TestManagerUnmountUsesBackend(t *testing.T) {
 	backend := &fakeBackend{}
-	mgr := NewManagerWithBackend(logrus.New(), &config.StorageProxyConfig{}, backend)
+	mgr := NewManagerWithBackend(logrus.New(), &config.StorageProxyConfig{}, nil, backend)
 
 	sessionID, _, err := mgr.MountVolume(context.Background(), "", "vol-1", "team-a", AccessModeRWO)
 	if err != nil {

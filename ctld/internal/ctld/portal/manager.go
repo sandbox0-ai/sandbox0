@@ -265,6 +265,7 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 		VolumeID:    req.SandboxVolumeID,
 		WALPath:     filepath.Join(cacheDir, "engine.wal"),
 		ObjectStore: remoteStore,
+		HeadStore:   db.NewS0FSHeadStore(m.repo),
 	})
 	if err != nil {
 		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("open local s0fs engine: %w", err)

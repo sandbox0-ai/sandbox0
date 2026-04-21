@@ -14,6 +14,46 @@ import (
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 )
 
+type memoryHeadStore struct {
+	mu    sync.Mutex
+	heads map[string]*CommittedHead
+}
+
+func newMemoryHeadStore() *memoryHeadStore {
+	return &memoryHeadStore{heads: make(map[string]*CommittedHead)}
+}
+
+func (s *memoryHeadStore) LoadCommittedHead(_ context.Context, volumeID string) (*CommittedHead, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	head := s.heads[volumeID]
+	if head == nil {
+		return nil, ErrCommittedHeadNotFound
+	}
+	clone := *head
+	return &clone, nil
+}
+
+func (s *memoryHeadStore) CompareAndSwapCommittedHead(_ context.Context, volumeID string, expectedManifestSeq uint64, head *CommittedHead) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current := s.heads[volumeID]
+	if current == nil {
+		if expectedManifestSeq != 0 {
+			return ErrCommittedHeadConflict
+		}
+		clone := *head
+		s.heads[volumeID] = &clone
+		return nil
+	}
+	if current.ManifestSeq != expectedManifestSeq || head.ManifestSeq <= current.ManifestSeq {
+		return ErrCommittedHeadConflict
+	}
+	clone := *head
+	s.heads[volumeID] = &clone
+	return nil
+}
+
 type getCall struct {
 	key   string
 	off   int64
@@ -77,12 +117,14 @@ func (s *recordingStore) resetCalls() {
 func TestEngineMaterializeRecoversViaColdRangeRead(t *testing.T) {
 	ctx := context.Background()
 	store := newPrefixedRecordingStore(t, "vol-1")
+	heads := newMemoryHeadStore()
 	walPath := filepath.Join(t.TempDir(), "engine.wal")
 
 	engine, err := Open(ctx, Config{
 		VolumeID:    "vol-1",
 		WALPath:     walPath,
 		ObjectStore: store,
+		HeadStore:   heads,
 	})
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
@@ -112,6 +154,7 @@ func TestEngineMaterializeRecoversViaColdRangeRead(t *testing.T) {
 		VolumeID:    "vol-1",
 		WALPath:     walPath,
 		ObjectStore: store,
+		HeadStore:   heads,
 	})
 	if err != nil {
 		t.Fatalf("Open(recovered) error = %v", err)
@@ -147,12 +190,14 @@ func TestEngineMaterializeRecoversViaColdRangeRead(t *testing.T) {
 func TestEngineRecoversFromManifestAndRetainedWAL(t *testing.T) {
 	ctx := context.Background()
 	store := newPrefixedRecordingStore(t, "vol-1")
+	heads := newMemoryHeadStore()
 	walPath := filepath.Join(t.TempDir(), "engine.wal")
 
 	engine, err := Open(ctx, Config{
 		VolumeID:    "vol-1",
 		WALPath:     walPath,
 		ObjectStore: store,
+		HeadStore:   heads,
 	})
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
@@ -187,6 +232,7 @@ func TestEngineRecoversFromManifestAndRetainedWAL(t *testing.T) {
 		VolumeID:    "vol-1",
 		WALPath:     walPath,
 		ObjectStore: store,
+		HeadStore:   heads,
 	})
 	if err != nil {
 		t.Fatalf("Open(recovered) error = %v", err)
@@ -213,11 +259,13 @@ func TestEngineRecoversFromManifestAndRetainedWAL(t *testing.T) {
 func TestEngineRefreshMaterializedLoadsNewerManifest(t *testing.T) {
 	ctx := context.Background()
 	store := newPrefixedRecordingStore(t, "vol-refresh")
+	heads := newMemoryHeadStore()
 
 	reader, err := Open(ctx, Config{
 		VolumeID:    "vol-refresh",
 		WALPath:     filepath.Join(t.TempDir(), "reader.wal"),
 		ObjectStore: store,
+		HeadStore:   heads,
 	})
 	if err != nil {
 		t.Fatalf("Open(reader) error = %v", err)
@@ -231,6 +279,7 @@ func TestEngineRefreshMaterializedLoadsNewerManifest(t *testing.T) {
 		VolumeID:    "vol-refresh",
 		WALPath:     filepath.Join(t.TempDir(), "writer.wal"),
 		ObjectStore: store,
+		HeadStore:   heads,
 	})
 	if err != nil {
 		t.Fatalf("Open(writer) error = %v", err)
@@ -272,12 +321,14 @@ func TestEngineRefreshMaterializedLoadsNewerManifest(t *testing.T) {
 func TestEngineOpenPrefersNewerMaterializedManifestOverStaleHead(t *testing.T) {
 	ctx := context.Background()
 	store := newPrefixedRecordingStore(t, "vol-stale-head")
+	heads := newMemoryHeadStore()
 	staleWALPath := filepath.Join(t.TempDir(), "stale.wal")
 
 	stale, err := Open(ctx, Config{
 		VolumeID:    "vol-stale-head",
 		WALPath:     staleWALPath,
 		ObjectStore: store,
+		HeadStore:   heads,
 	})
 	if err != nil {
 		t.Fatalf("Open(stale) error = %v", err)
@@ -290,6 +341,7 @@ func TestEngineOpenPrefersNewerMaterializedManifestOverStaleHead(t *testing.T) {
 		VolumeID:    "vol-stale-head",
 		WALPath:     filepath.Join(t.TempDir(), "writer.wal"),
 		ObjectStore: store,
+		HeadStore:   heads,
 	})
 	if err != nil {
 		t.Fatalf("Open(writer) error = %v", err)
@@ -312,6 +364,7 @@ func TestEngineOpenPrefersNewerMaterializedManifestOverStaleHead(t *testing.T) {
 		VolumeID:    "vol-stale-head",
 		WALPath:     staleWALPath,
 		ObjectStore: store,
+		HeadStore:   heads,
 	})
 	if err != nil {
 		t.Fatalf("Open(reopened) error = %v", err)
@@ -334,12 +387,14 @@ func TestEngineOpenPrefersNewerMaterializedManifestOverStaleHead(t *testing.T) {
 func TestMaterializerCoalescesSmallFilesAndKeepsManifestMonotonic(t *testing.T) {
 	ctx := context.Background()
 	store := newPrefixedRecordingStore(t, "vol-1")
+	heads := newMemoryHeadStore()
 	walPath := filepath.Join(t.TempDir(), "engine.wal")
 
 	engine, err := Open(ctx, Config{
 		VolumeID:    "vol-1",
 		WALPath:     walPath,
 		ObjectStore: store,
+		HeadStore:   heads,
 	})
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
@@ -359,8 +414,11 @@ func TestMaterializerCoalescesSmallFilesAndKeepsManifestMonotonic(t *testing.T) 
 	if err != nil {
 		t.Fatalf("SyncMaterialize(first) error = %v", err)
 	}
-	if first == nil || first.ManifestSeq != 1 {
-		t.Fatalf("first manifest = %+v, want seq 1", first)
+	if first == nil {
+		t.Fatal("first manifest is nil")
+	}
+	if first.ManifestSeq != first.CheckpointSeq {
+		t.Fatalf("first manifest seq/checkpoint = %d/%d, want equal", first.ManifestSeq, first.CheckpointSeq)
 	}
 
 	node, err := engine.CreateFile(RootInode, "tail.txt", 0o644)
@@ -374,23 +432,26 @@ func TestMaterializerCoalescesSmallFilesAndKeepsManifestMonotonic(t *testing.T) 
 	if err != nil {
 		t.Fatalf("SyncMaterialize(second) error = %v", err)
 	}
-	if second == nil || second.ManifestSeq != 2 {
-		t.Fatalf("second manifest = %+v, want seq 2", second)
+	if second == nil {
+		t.Fatal("second manifest is nil")
+	}
+	if second.ManifestSeq <= first.ManifestSeq {
+		t.Fatalf("second manifest seq = %d, want > %d", second.ManifestSeq, first.ManifestSeq)
 	}
 
-	materializer := NewMaterializer(store)
+	materializer := NewMaterializer("vol-1", store, heads)
 	latest, err := materializer.LoadLatestManifest(ctx)
 	if err != nil {
 		t.Fatalf("LoadLatestManifest() error = %v", err)
 	}
-	if latest.ManifestSeq != 2 {
-		t.Fatalf("latest manifest seq = %d, want 2", latest.ManifestSeq)
+	if latest.ManifestSeq != second.ManifestSeq {
+		t.Fatalf("latest manifest seq = %d, want %d", latest.ManifestSeq, second.ManifestSeq)
 	}
-	if _, err := store.Head(manifestKey(1)); err != nil {
-		t.Fatalf("Head(manifest 1) error = %v", err)
+	if _, err := store.Head(manifestKey(first.ManifestSeq)); err != nil {
+		t.Fatalf("Head(manifest %d) error = %v", first.ManifestSeq, err)
 	}
-	if _, err := store.Head(manifestKey(2)); err != nil {
-		t.Fatalf("Head(manifest 2) error = %v", err)
+	if _, err := store.Head(manifestKey(second.ManifestSeq)); err != nil {
+		t.Fatalf("Head(manifest %d) error = %v", second.ManifestSeq, err)
 	}
 
 	objects, _, _, err := store.List("", "", "", "", 1000)
@@ -405,12 +466,14 @@ func TestMaterializerCoalescesSmallFilesAndKeepsManifestMonotonic(t *testing.T) 
 func TestMaterializerRetainsColdFilesAndWritesOnlyHotData(t *testing.T) {
 	ctx := context.Background()
 	store := newPrefixedRecordingStore(t, "vol-retain")
+	heads := newMemoryHeadStore()
 	walPath := filepath.Join(t.TempDir(), "engine.wal")
 
 	engine, err := Open(ctx, Config{
 		VolumeID:    "vol-retain",
 		WALPath:     walPath,
 		ObjectStore: store,
+		HeadStore:   heads,
 	})
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
@@ -452,8 +515,11 @@ func TestMaterializerRetainsColdFilesAndWritesOnlyHotData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SyncMaterialize(second) error = %v", err)
 	}
-	if second == nil || second.ManifestSeq != 2 {
-		t.Fatalf("second manifest = %+v, want seq 2", second)
+	if second == nil {
+		t.Fatal("second manifest is nil")
+	}
+	if second.ManifestSeq <= first.ManifestSeq {
+		t.Fatalf("second manifest seq = %d, want > %d", second.ManifestSeq, first.ManifestSeq)
 	}
 	if len(second.State.Segments) != 2 {
 		t.Fatalf("second manifest segment count = %d, want 2", len(second.State.Segments))
@@ -485,15 +551,116 @@ func TestMaterializerRetainsColdFilesAndWritesOnlyHotData(t *testing.T) {
 	}
 }
 
+func TestMaterializerWithCommittedHeadStoreSkipsLegacyLatestObject(t *testing.T) {
+	ctx := context.Background()
+	store := newPrefixedRecordingStore(t, "vol-headstore")
+	heads := newMemoryHeadStore()
+	walPath := filepath.Join(t.TempDir(), "engine.wal")
+
+	engine, err := Open(ctx, Config{
+		VolumeID:    "vol-headstore",
+		WALPath:     walPath,
+		ObjectStore: store,
+		HeadStore:   heads,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+
+	node, err := engine.CreateFile(RootInode, "hello.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+	if _, err := engine.Write(node.Inode, 0, []byte("hello")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	manifest, err := engine.SyncMaterialize(ctx)
+	if err != nil {
+		t.Fatalf("SyncMaterialize() error = %v", err)
+	}
+	if manifest == nil {
+		t.Fatal("SyncMaterialize() returned nil manifest")
+	}
+
+	if _, err := store.Head(manifestLatestKey); err == nil {
+		t.Fatalf("Head(%s) unexpectedly succeeded", manifestLatestKey)
+	}
+	for _, call := range store.putCalls() {
+		if call.key == manifestLatestKey {
+			t.Fatalf("legacy latest manifest Put call = %+v, want none", call)
+		}
+	}
+	head, err := heads.LoadCommittedHead(ctx, "vol-headstore")
+	if err != nil {
+		t.Fatalf("LoadCommittedHead() error = %v", err)
+	}
+	if head.ManifestSeq != manifest.ManifestSeq || head.ManifestKey != manifestKey(manifest.ManifestSeq) {
+		t.Fatalf("committed head = %+v, want manifest seq %d key %s", head, manifest.ManifestSeq, manifestKey(manifest.ManifestSeq))
+	}
+}
+
+func TestEngineSyncMaterializeDetectsCommittedHeadConflicts(t *testing.T) {
+	ctx := context.Background()
+	store := newPrefixedRecordingStore(t, "vol-conflict")
+	heads := newMemoryHeadStore()
+
+	first, err := Open(ctx, Config{
+		VolumeID:    "vol-conflict",
+		WALPath:     filepath.Join(t.TempDir(), "first.wal"),
+		ObjectStore: store,
+		HeadStore:   heads,
+	})
+	if err != nil {
+		t.Fatalf("Open(first) error = %v", err)
+	}
+	defer first.Close()
+	second, err := Open(ctx, Config{
+		VolumeID:    "vol-conflict",
+		WALPath:     filepath.Join(t.TempDir(), "second.wal"),
+		ObjectStore: store,
+		HeadStore:   heads,
+	})
+	if err != nil {
+		t.Fatalf("Open(second) error = %v", err)
+	}
+	defer second.Close()
+
+	firstNode, err := first.CreateFile(RootInode, "first.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile(first) error = %v", err)
+	}
+	if _, err := first.Write(firstNode.Inode, 0, []byte("one")); err != nil {
+		t.Fatalf("Write(first) error = %v", err)
+	}
+
+	secondNode, err := second.CreateFile(RootInode, "second.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile(second) error = %v", err)
+	}
+	if _, err := second.Write(secondNode.Inode, 0, []byte("two")); err != nil {
+		t.Fatalf("Write(second) error = %v", err)
+	}
+
+	if _, err := first.SyncMaterialize(ctx); err != nil {
+		t.Fatalf("SyncMaterialize(first) error = %v", err)
+	}
+	if _, err := second.SyncMaterialize(ctx); !errors.Is(err, ErrCommittedHeadConflict) {
+		t.Fatalf("SyncMaterialize(second) err = %v, want %v", err, ErrCommittedHeadConflict)
+	}
+}
+
 func TestEngineColdSmallFileReadsUseSegmentCache(t *testing.T) {
 	ctx := context.Background()
 	store := newPrefixedRecordingStore(t, "vol-cache")
+	heads := newMemoryHeadStore()
 	walPath := filepath.Join(t.TempDir(), "engine.wal")
 
 	engine, err := Open(ctx, Config{
 		VolumeID:    "vol-cache",
 		WALPath:     walPath,
 		ObjectStore: store,
+		HeadStore:   heads,
 	})
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
@@ -531,6 +698,7 @@ func TestEngineColdSmallFileReadsUseSegmentCache(t *testing.T) {
 		VolumeID:    "vol-cache",
 		WALPath:     walPath,
 		ObjectStore: store,
+		HeadStore:   heads,
 	})
 	if err != nil {
 		t.Fatalf("Open(recovered) error = %v", err)
@@ -576,12 +744,14 @@ func TestEngineColdSmallFileReadsUseSegmentCache(t *testing.T) {
 func TestCreateSnapshotHydratesColdFilesInline(t *testing.T) {
 	ctx := context.Background()
 	store := newPrefixedRecordingStore(t, "vol-snapshot")
+	heads := newMemoryHeadStore()
 	walPath := filepath.Join(t.TempDir(), "engine.wal")
 
 	engine, err := Open(ctx, Config{
 		VolumeID:    "vol-snapshot",
 		WALPath:     walPath,
 		ObjectStore: store,
+		HeadStore:   heads,
 	})
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)

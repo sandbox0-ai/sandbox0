@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/legacyfs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
@@ -100,16 +101,16 @@ type Manager struct {
 }
 
 // NewManager creates a new volume manager
-func NewManager(logger *logrus.Logger, cfg *config.StorageProxyConfig) *Manager {
+func NewManager(logger *logrus.Logger, cfg *config.StorageProxyConfig, repo *db.Repository) *Manager {
 	return NewManagerWithBackends(logger, cfg, map[string]Backend{
-		BackendS0FS: NewS0FSBackend(logger, cfg),
+		BackendS0FS: NewS0FSBackend(logger, cfg, repo),
 	}, DefaultBackendType())
 }
 
 // NewManagerWithBackend creates a manager with an explicit storage backend.
-func NewManagerWithBackend(logger *logrus.Logger, cfg *config.StorageProxyConfig, backend Backend) *Manager {
+func NewManagerWithBackend(logger *logrus.Logger, cfg *config.StorageProxyConfig, repo *db.Repository, backend Backend) *Manager {
 	if backend == nil {
-		return NewManager(logger, cfg)
+		return NewManager(logger, cfg, repo)
 	}
 	return NewManagerWithBackends(logger, cfg, map[string]Backend{"default": backend}, "default")
 }

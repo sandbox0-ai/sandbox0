@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,17 +37,21 @@ type Manifest struct {
 }
 
 type Materializer struct {
-	store objectstore.Store
-	cache *segmentCache
+	volumeID  string
+	store     objectstore.Store
+	headStore HeadStore
+	cache     *segmentCache
 }
 
-func NewMaterializer(store objectstore.Store) *Materializer {
+func NewMaterializer(volumeID string, store objectstore.Store, headStore HeadStore) *Materializer {
 	if store == nil {
 		return nil
 	}
 	return &Materializer{
-		store: store,
-		cache: newSegmentCache(defaultSegmentCacheMaxBytes),
+		volumeID:  volumeID,
+		store:     store,
+		headStore: headStore,
+		cache:     newSegmentCache(defaultSegmentCacheMaxBytes),
 	}
 }
 
@@ -54,14 +59,14 @@ func (m *Materializer) Enabled() bool {
 	return m != nil && m.store != nil
 }
 
-func (m *Materializer) Materialize(ctx context.Context, volumeID string, state *SnapshotState) (*Manifest, error) {
+func (m *Materializer) Materialize(ctx context.Context, state *SnapshotState, expectedManifestSeq uint64) (*Manifest, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if !m.Enabled() {
 		return nil, nil
 	}
-	if volumeID == "" {
+	if m.volumeID == "" {
 		return nil, fmt.Errorf("%w: volume id is required", ErrInvalidInput)
 	}
 	if state == nil {
@@ -71,9 +76,12 @@ func (m *Materializer) Materialize(ctx context.Context, volumeID string, state *
 	inline := cloneState(state)
 	normalizeState(inline)
 
-	nextSeq, err := m.nextManifestSequence(ctx)
-	if err != nil {
-		return nil, err
+	nextSeq := checkpointSequence(inline)
+	if nextSeq == 0 {
+		return nil, fmt.Errorf("%w: manifest sequence must be non-zero", ErrInvalidInput)
+	}
+	if nextSeq <= expectedManifestSeq {
+		return nil, fmt.Errorf("%w: manifest seq %d must advance beyond %d", ErrCommittedHeadConflict, nextSeq, expectedManifestSeq)
 	}
 
 	segment, fileExtents, err := buildSegment(nextSeq, inline)
@@ -87,7 +95,7 @@ func (m *Materializer) Materialize(ctx context.Context, volumeID string, state *
 	}
 	manifest := &Manifest{
 		Version:       1,
-		VolumeID:      volumeID,
+		VolumeID:      m.volumeID,
 		ManifestSeq:   nextSeq,
 		CheckpointSeq: checkpointSequence(inline),
 		CreatedAt:     time.Now().UTC(),
@@ -103,7 +111,18 @@ func (m *Materializer) Materialize(ctx context.Context, volumeID string, state *
 	if err := m.putJSON(ctx, manifestKey(nextSeq), manifest); err != nil {
 		return nil, err
 	}
-	if err := m.putJSON(ctx, manifestLatestKey, manifest); err != nil {
+	if m.headStore != nil {
+		head := &CommittedHead{
+			VolumeID:      m.volumeID,
+			ManifestSeq:   manifest.ManifestSeq,
+			CheckpointSeq: manifest.CheckpointSeq,
+			ManifestKey:   manifestKey(manifest.ManifestSeq),
+			UpdatedAt:     manifest.CreatedAt,
+		}
+		if err := m.headStore.CompareAndSwapCommittedHead(ctx, m.volumeID, expectedManifestSeq, head); err != nil {
+			return nil, err
+		}
+	} else if err := m.putJSON(ctx, manifestLatestKey, manifest); err != nil {
 		return nil, err
 	}
 
@@ -166,18 +185,35 @@ func (m *Materializer) LoadLatestManifest(ctx context.Context) (*Manifest, error
 	if !m.Enabled() {
 		return nil, ErrMaterializedManifestNotFound
 	}
-	if _, err := m.store.Head(manifestLatestKey); err != nil {
-		return nil, ErrMaterializedManifestNotFound
+	if m.headStore != nil {
+		head, err := m.headStore.LoadCommittedHead(ctx, m.volumeID)
+		switch {
+		case err == nil:
+			return m.loadManifestByKey(ctx, head.ManifestKey)
+		case !errors.Is(err, ErrCommittedHeadNotFound):
+			return nil, err
+		}
+
+		manifest, err := m.loadLegacyLatestManifest(ctx)
+		if err != nil {
+			return nil, err
+		}
+		head = &CommittedHead{
+			VolumeID:      m.volumeID,
+			ManifestSeq:   manifest.ManifestSeq,
+			CheckpointSeq: manifest.CheckpointSeq,
+			ManifestKey:   manifestKey(manifest.ManifestSeq),
+			UpdatedAt:     manifest.CreatedAt,
+		}
+		if err := m.headStore.CompareAndSwapCommittedHead(ctx, m.volumeID, 0, head); err != nil {
+			if errors.Is(err, ErrCommittedHeadConflict) {
+				return m.LoadLatestManifest(ctx)
+			}
+			return nil, err
+		}
+		return manifest, nil
 	}
-	var manifest Manifest
-	if err := m.getJSON(ctx, manifestLatestKey, &manifest); err != nil {
-		return nil, err
-	}
-	if manifest.State == nil {
-		return nil, fmt.Errorf("materialized manifest %s has no state", manifestLatestKey)
-	}
-	normalizeState(manifest.State)
-	return &manifest, nil
+	return m.loadLegacyLatestManifest(ctx)
 }
 
 func (m *Materializer) LoadLatestState(ctx context.Context) (*SnapshotState, *Manifest, error) {
@@ -298,18 +334,6 @@ func checkpointSequence(state *SnapshotState) uint64 {
 	return state.NextSeq - 1
 }
 
-func (m *Materializer) nextManifestSequence(ctx context.Context) (uint64, error) {
-	manifest, err := m.LoadLatestManifest(ctx)
-	switch {
-	case err == nil:
-		return manifest.ManifestSeq + 1, nil
-	case errors.Is(err, ErrMaterializedManifestNotFound):
-		return 1, nil
-	default:
-		return 0, err
-	}
-}
-
 func (m *Materializer) putJSON(ctx context.Context, key string, value any) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -339,6 +363,28 @@ func (m *Materializer) getJSON(ctx context.Context, key string, value any) error
 		return fmt.Errorf("decode %s: %w", key, err)
 	}
 	return nil
+}
+
+func (m *Materializer) loadManifestByKey(ctx context.Context, key string) (*Manifest, error) {
+	if strings.TrimSpace(key) == "" {
+		return nil, ErrMaterializedManifestNotFound
+	}
+	var manifest Manifest
+	if err := m.getJSON(ctx, key, &manifest); err != nil {
+		return nil, err
+	}
+	if manifest.State == nil {
+		return nil, fmt.Errorf("materialized manifest %s has no state", key)
+	}
+	normalizeState(manifest.State)
+	return &manifest, nil
+}
+
+func (m *Materializer) loadLegacyLatestManifest(ctx context.Context) (*Manifest, error) {
+	if _, err := m.store.Head(manifestLatestKey); err != nil {
+		return nil, ErrMaterializedManifestNotFound
+	}
+	return m.loadManifestByKey(ctx, manifestLatestKey)
 }
 
 func (m *Materializer) putBytes(ctx context.Context, key string, payload []byte) error {

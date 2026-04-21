@@ -285,17 +285,22 @@ func TestDeleteLastTeamTemplateDeletesManagedNamespace(t *testing.T) {
 	require.NoError(t, err)
 
 	template := teamTemplate(namespace, "demo", "team-123")
+	pod := templatePod(namespace, "demo-pod", "demo", controller.PoolTypeActive)
 	k8sClient := fake.NewSimpleClientset(
 		managedNamespace(namespace),
-		templatePod(namespace, "demo-pod", "demo", controller.PoolTypeActive),
+		pod,
 	)
-	service, _ := newTemplateServiceForDeleteTests(k8sClient, template)
+	service, crdClient := newTemplateServiceForDeleteTests(k8sClient, template)
 
 	err = service.DeleteTemplate(ctx, "demo")
 	require.NoError(t, err)
 
 	_, err = k8sClient.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
 	require.True(t, apierrors.IsNotFound(err), "last team template should remove managed namespace")
+	_, err = crdClient.Sandbox0V1alpha1().SandboxTemplates(namespace).Get(ctx, "demo", metav1.GetOptions{})
+	require.True(t, apierrors.IsNotFound(err), "last team template CRD should be deleted")
+	_, err = k8sClient.CoreV1().Pods(namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+	require.True(t, apierrors.IsNotFound(err), "last team template pod should be deleted")
 }
 
 func managedNamespace(name string) *corev1.Namespace {

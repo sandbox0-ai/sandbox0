@@ -38,6 +38,9 @@ func TestS0FSSnapshotCreateRestoreAndDelete(t *testing.T) {
 	}
 
 	writeS0FSFile(t, engine, "state.txt", "beta")
+	if _, err := engine.SyncMaterialize(context.Background()); err != nil {
+		t.Fatalf("SyncMaterialize() before restore error = %v", err)
+	}
 	if got := readS0FSFile(t, engine, "state.txt"); got != "beta" {
 		t.Fatalf("Read() before restore = %q, want beta", got)
 	}

@@ -609,6 +609,13 @@ func (e *Engine) RestoreSnapshot(snapshotID string) error {
 	if err != nil {
 		return err
 	}
+	minNextSeq := e.nextSeq + 1
+	if committedNext := e.lastCommittedManifest + 2; committedNext > minNextSeq {
+		minNextSeq = committedNext
+	}
+	if state.NextSeq < minNextSeq {
+		state.NextSeq = minNextSeq
+	}
 	e.replaceStateLocked(state)
 	if err := e.persistCurrentStateLocked(); err != nil {
 		return err

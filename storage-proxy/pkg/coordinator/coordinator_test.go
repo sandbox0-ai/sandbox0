@@ -19,6 +19,7 @@ import (
 
 // Mock implementations using simple Go structs
 type MockRepository struct {
+	acquireMountFunc             func(ctx context.Context, mount *db.VolumeMount, heartbeatTimeout int) error
 	createMountFunc              func(ctx context.Context, mount *db.VolumeMount) error
 	updateMountHeartbeatFunc     func(ctx context.Context, volumeID, clusterID, podID string) error
 	deleteMountFunc              func(ctx context.Context, volumeID, clusterID, podID string) error
@@ -32,6 +33,16 @@ type MockRepository struct {
 	createFlushResponseFunc      func(ctx context.Context, resp *db.FlushResponse) error
 	countCompletedFlushesFunc    func(ctx context.Context, coordID string) (int, error)
 	getFlushResponsesFunc        func(ctx context.Context, coordID string) ([]*db.FlushResponse, error)
+}
+
+func (m *MockRepository) AcquireMount(ctx context.Context, mount *db.VolumeMount, heartbeatTimeout int) error {
+	if m.acquireMountFunc != nil {
+		return m.acquireMountFunc(ctx, mount, heartbeatTimeout)
+	}
+	if m.createMountFunc != nil {
+		return m.createMountFunc(ctx, mount)
+	}
+	return nil
 }
 
 func (m *MockRepository) CreateMount(ctx context.Context, mount *db.VolumeMount) error {
@@ -266,13 +277,13 @@ func TestRegisterMount_DatabaseError(t *testing.T) {
 		t.Fatal("Expected error, got nil")
 	}
 
-	// Should still track internally even if DB fails
+	// Failed mount acquisition must not leave local tracking behind.
 	coord.mu.RLock()
 	_, exists := coord.mountedVolumes[volumeID]
 	coord.mu.RUnlock()
 
-	if !exists {
-		t.Error("Volume should be tracked internally even on DB error")
+	if exists {
+		t.Error("Volume should not be tracked internally when mount acquisition fails")
 	}
 }
 

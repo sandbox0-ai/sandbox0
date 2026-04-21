@@ -256,15 +256,6 @@ func (c *Coordinator) RegisterMount(ctx context.Context, volumeID string, option
 		return nil
 	}
 
-	// Register in memory first to ensure local tracking even if DB fails
-	// This is critical for multi-replica coordination - the volume is mounted
-	// locally regardless of DB state, and we need to track it for heartbeats
-	// and flush coordination.
-	c.mountedVolumes[volumeID] = struct{}{}
-	if metrics != nil {
-		metrics.CoordinatorMountsActive.Inc()
-	}
-
 	normalizedOptions := options
 	normalizedOptions.AccessMode = volume.NormalizeAccessMode(string(options.AccessMode))
 	if normalizedOptions.OwnerKind == "" {
@@ -289,18 +280,24 @@ func (c *Coordinator) RegisterMount(ctx context.Context, volumeID string, option
 		MountOptions:  &rawMsg,
 	}
 
-	if err := c.repo.CreateMount(ctx, mount); err != nil {
+	heartbeatTimeout := c.config.HeartbeatTimeout
+	if heartbeatTimeout == 0 {
+		heartbeatTimeout = HeartbeatTimeout
+	}
+	if err := c.repo.AcquireMount(ctx, mount, heartbeatTimeout); err != nil {
 		if metrics != nil {
 			metrics.CoordinatorMountRegistrations.WithLabelValues("failure").Inc()
 		}
-		// Note: We still track locally even if DB registration fails
-		// This ensures heartbeat updates and flush coordination work
 		c.logger.WithFields(logrus.Fields{
 			"volume_id":  volumeID,
 			"cluster_id": c.clusterID,
 			"pod_id":     c.podID,
-		}).WithError(err).Warn("Failed to register mount in DB, but tracking locally")
-		return fmt.Errorf("create mount: %w", err)
+		}).WithError(err).Warn("Failed to acquire mount in DB")
+		return fmt.Errorf("acquire mount: %w", err)
+	}
+	c.mountedVolumes[volumeID] = struct{}{}
+	if metrics != nil {
+		metrics.CoordinatorMountsActive.Inc()
 	}
 
 	if metrics != nil {

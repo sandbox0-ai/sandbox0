@@ -487,6 +487,9 @@ func (s *SandboxService) bindVolumePortal(ctx context.Context, pod *corev1.Pod, 
 		return nil, fmt.Errorf("pod is nil")
 	}
 	if err := s.prepareVolumePortalBind(ctx, teamID, userID, volumeID); err != nil {
+		if errors.Is(err, ErrVolumePortalBindConflict) {
+			return nil, fmt.Errorf("%w: %v", ErrClaimConflict, err)
+		}
 		return nil, fmt.Errorf("prepare volume portal bind: %w", err)
 	}
 	ctldAddress, err := s.ctldAddressForPod(ctx, pod)

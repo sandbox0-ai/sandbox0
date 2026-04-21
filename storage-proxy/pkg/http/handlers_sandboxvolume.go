@@ -644,6 +644,19 @@ func (s *Server) prepareSandboxVolumeForPortalBind(w http.ResponseWriter, r *htt
 			return
 		}
 	}
+	if volume.NormalizeAccessMode(vol.AccessMode) == volume.AccessModeRWO {
+		const heartbeatTimeout = 15
+		mounts, err := s.repo.GetActiveMounts(r.Context(), id, heartbeatTimeout)
+		if err != nil {
+			s.logger.WithError(err).WithField("volume_id", id).Warn("Failed to check active mounts before portal bind")
+			_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "failed to check active mounts")
+			return
+		}
+		if len(mounts) > 0 {
+			_ = spec.WriteError(w, http.StatusConflict, spec.CodeConflict, "volume has active mounts")
+			return
+		}
+	}
 
 	_ = spec.WriteSuccess(w, http.StatusOK, map[string]any{
 		"prepared": true,

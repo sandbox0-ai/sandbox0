@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,6 +24,8 @@ const (
 	webhookStateMountPoint = volumeportal.WebhookStateMountPath
 	webhookStateVolumeKind = "webhook-state"
 )
+
+var ErrVolumePortalBindConflict = errors.New("volume portal bind conflict")
 
 // SandboxSystemVolumeClient creates and deletes manager-owned sandbox volumes.
 type SandboxSystemVolumeClient interface {
@@ -220,7 +223,13 @@ func (c *StorageProxyVolumeClient) PrepareForVolumePortalBind(ctx context.Contex
 	data, _ := io.ReadAll(resp.Body)
 	_, apiErr, decodeErr := spec.DecodeResponse[map[string]any](bytes.NewReader(data))
 	if decodeErr == nil && apiErr != nil {
+		if resp.StatusCode == http.StatusConflict {
+			return fmt.Errorf("%w: %s", ErrVolumePortalBindConflict, apiErr.Message)
+		}
 		return fmt.Errorf("prepare sandbox volume for portal bind failed: %s", apiErr.Message)
+	}
+	if resp.StatusCode == http.StatusConflict {
+		return fmt.Errorf("%w: status %d", ErrVolumePortalBindConflict, resp.StatusCode)
 	}
 	return fmt.Errorf("prepare sandbox volume for portal bind failed with status %d", resp.StatusCode)
 }

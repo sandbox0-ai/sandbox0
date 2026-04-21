@@ -34,6 +34,28 @@ func TestIsConflictingMountForCtldBindBlocksCtldOwners(t *testing.T) {
 	}
 }
 
+func TestFindBoundPortalForVolumeReturnsOtherPortal(t *testing.T) {
+	portals := map[string]*portalMount{
+		"portal-a": {mountPath: "/workspace/a", volumeID: "vol-1"},
+		"portal-b": {mountPath: "/workspace/b", volumeID: "vol-2"},
+	}
+
+	pm := findBoundPortalForVolume(portals, "vol-1", "portal-b")
+	if pm == nil || pm.mountPath != "/workspace/a" {
+		t.Fatalf("findBoundPortalForVolume() = %+v, want /workspace/a", pm)
+	}
+}
+
+func TestFindBoundPortalForVolumeIgnoresExcludedPortal(t *testing.T) {
+	portals := map[string]*portalMount{
+		"portal-a": {mountPath: "/workspace/a", volumeID: "vol-1"},
+	}
+
+	if pm := findBoundPortalForVolume(portals, "vol-1", "portal-a"); pm != nil {
+		t.Fatalf("findBoundPortalForVolume() = %+v, want nil", pm)
+	}
+}
+
 func mustRegistryMountOptions(t *testing.T, opts volume.MountOptions) *json.RawMessage {
 	t.Helper()
 	raw, err := json.Marshal(opts)

@@ -63,6 +63,7 @@ type SandboxPowerState struct {
 // errNoIdlePod is returned when no idle pod is available for claiming.
 var errNoIdlePod = errors.New("no idle pod available")
 var ErrInvalidClaimRequest = errors.New("invalid claim request")
+var ErrClaimConflict = errors.New("claim conflict")
 var ErrDataPlaneNotReady = errors.New("data plane not ready")
 var errSandboxPowerStateStale = errors.New("sandbox power state changed during execution")
 

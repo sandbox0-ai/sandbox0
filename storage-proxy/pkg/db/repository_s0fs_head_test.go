@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -108,6 +109,90 @@ func TestS0FSHeadStoreAdapterMapsConflicts(t *testing.T) {
 	}
 }
 
+func TestAcquireMountRejectsConflictingRWOMount(t *testing.T) {
+	repo := newS0FSCommittedHeadTestRepository(t)
+	if repo == nil {
+		return
+	}
+
+	ctx := context.Background()
+	volumeID := "vol-" + uuid.NewString()
+	createTestSandboxVolume(t, repo, volumeID)
+
+	first := &VolumeMount{
+		ID:            uuid.NewString(),
+		VolumeID:      volumeID,
+		ClusterID:     "cluster-a",
+		PodID:         "pod-a",
+		LastHeartbeat: time.Now().UTC(),
+		MountedAt:     time.Now().UTC(),
+		MountOptions:  mustMountOptionsRaw(t, "RWO"),
+	}
+	if err := repo.AcquireMount(ctx, first, 15); err != nil {
+		t.Fatalf("AcquireMount(first) error = %v", err)
+	}
+
+	second := &VolumeMount{
+		ID:            uuid.NewString(),
+		VolumeID:      volumeID,
+		ClusterID:     "cluster-b",
+		PodID:         "pod-b",
+		LastHeartbeat: time.Now().UTC(),
+		MountedAt:     time.Now().UTC(),
+		MountOptions:  mustMountOptionsRaw(t, "RWO"),
+	}
+	if err := repo.AcquireMount(ctx, second, 15); err != ErrConflict {
+		t.Fatalf("AcquireMount(second) err = %v, want %v", err, ErrConflict)
+	}
+}
+
+func TestAcquireMountAllowsROXSharing(t *testing.T) {
+	repo := newS0FSCommittedHeadTestRepository(t)
+	if repo == nil {
+		return
+	}
+
+	ctx := context.Background()
+	volumeID := "vol-" + uuid.NewString()
+	now := time.Now().UTC()
+	if err := repo.CreateSandboxVolume(ctx, &SandboxVolume{
+		ID:         volumeID,
+		TeamID:     "team-1",
+		UserID:     "user-1",
+		AccessMode: "ROX",
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}); err != nil {
+		t.Fatalf("CreateSandboxVolume(%s) error = %v", volumeID, err)
+	}
+
+	first := &VolumeMount{
+		ID:            uuid.NewString(),
+		VolumeID:      volumeID,
+		ClusterID:     "cluster-a",
+		PodID:         "pod-a",
+		LastHeartbeat: time.Now().UTC(),
+		MountedAt:     time.Now().UTC(),
+		MountOptions:  mustMountOptionsRaw(t, "ROX"),
+	}
+	if err := repo.AcquireMount(ctx, first, 15); err != nil {
+		t.Fatalf("AcquireMount(first) error = %v", err)
+	}
+
+	second := &VolumeMount{
+		ID:            uuid.NewString(),
+		VolumeID:      volumeID,
+		ClusterID:     "cluster-b",
+		PodID:         "pod-b",
+		LastHeartbeat: time.Now().UTC(),
+		MountedAt:     time.Now().UTC(),
+		MountOptions:  mustMountOptionsRaw(t, "ROX"),
+	}
+	if err := repo.AcquireMount(ctx, second, 15); err != nil {
+		t.Fatalf("AcquireMount(second) error = %v", err)
+	}
+}
+
 func newS0FSCommittedHeadTestRepository(t *testing.T) *Repository {
 	t.Helper()
 
@@ -154,4 +239,18 @@ func createTestSandboxVolume(t *testing.T, repo *Repository, volumeID string) {
 	}); err != nil {
 		t.Fatalf("CreateSandboxVolume(%s) error = %v", volumeID, err)
 	}
+}
+
+func mustMountOptionsRaw(t *testing.T, accessMode string) *json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(struct {
+		AccessMode string `json:"access_mode"`
+	}{
+		AccessMode: accessMode,
+	})
+	if err != nil {
+		t.Fatalf("marshal mount options: %v", err)
+	}
+	msg := json.RawMessage(raw)
+	return &msg
 }

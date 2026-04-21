@@ -227,6 +227,10 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					assertClaimMountedVolumeWritable(env, session)
 				})
 
+				It("rejects mounting an active RWO volume into a second sandbox", func() {
+					assertClaimMountedRWOVolumeConflict(env, session)
+				})
+
 				It("rejects invalid bootstrap mount requests at claim time", func() {
 					assertClaimBootstrapMountValidation(env, session)
 				})
@@ -2010,6 +2014,39 @@ func assertClaimBootstrapMountValidation(env *framework.ScenarioEnv, session *e2
 	_, status, err := session.ClaimSandboxDetailed(env.TestCtx.Context, GinkgoT(), claimReq)
 	Expect(err).To(HaveOccurred())
 	Expect(status).To(Equal(http.StatusBadRequest))
+}
+
+func assertClaimMountedRWOVolumeConflict(env *framework.ScenarioEnv, session *e2eutils.Session) {
+	volume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), apispec.CreateSandboxVolumeRequest{})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusCreated))
+	Expect(volume).NotTo(BeNil())
+	volumeID := expectStringPtr(volume.Id, "volume id")
+	DeferCleanup(func() {
+		deleteSandboxVolumeForCleanup(env, session, volumeID)
+	})
+
+	mountPoint := "/workspace/claim-rwo-conflict"
+	templateID := createVolumePortalTemplate(env, session, mountPoint)
+	claimReq := apispec.ClaimRequest{
+		Template: &templateID,
+		Mounts: &[]apispec.ClaimMountRequest{{
+			SandboxvolumeId: volumeID,
+			MountPoint:      mountPoint,
+		}},
+	}
+
+	firstClaim, err := session.ClaimSandboxWithRequest(env.TestCtx.Context, GinkgoT(), claimReq)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(firstClaim).NotTo(BeNil())
+	firstSandboxID := firstClaim.SandboxId
+	DeferCleanup(func() {
+		_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), firstSandboxID)
+	})
+
+	_, status, err = session.ClaimSandboxDetailed(env.TestCtx.Context, GinkgoT(), claimReq)
+	Expect(err).To(HaveOccurred())
+	Expect(status).To(Equal(http.StatusConflict))
 }
 
 func assertVolumeSyncBackendLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session) {

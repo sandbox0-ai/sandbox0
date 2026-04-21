@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -20,6 +21,7 @@ var (
 // This interface is implemented by *Repository
 type CoordinatorRepository interface {
 	// Mount operations
+	AcquireMount(ctx context.Context, mount *VolumeMount, heartbeatTimeout int) error
 	CreateMount(ctx context.Context, mount *VolumeMount) error
 	UpdateMountHeartbeat(ctx context.Context, volumeID, clusterID, podID string) error
 	DeleteMount(ctx context.Context, volumeID, clusterID, podID string) error
@@ -35,6 +37,32 @@ type CoordinatorRepository interface {
 	CreateFlushResponse(ctx context.Context, resp *FlushResponse) error
 	CountCompletedFlushes(ctx context.Context, coordID string) (int, error)
 	GetFlushResponses(ctx context.Context, coordID string) ([]*FlushResponse, error)
+}
+
+type mountOptionsEnvelope struct {
+	AccessMode string `json:"access_mode"`
+}
+
+func normalizeMountAccessMode(value string) string {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "ROX":
+		return "ROX"
+	case "RWX":
+		return "RWX"
+	default:
+		return "RWO"
+	}
+}
+
+func decodeMountAccessMode(raw *json.RawMessage) string {
+	if raw == nil || len(*raw) == 0 {
+		return "RWO"
+	}
+	var opts mountOptionsEnvelope
+	if err := json.Unmarshal(*raw, &opts); err != nil {
+		return "RWO"
+	}
+	return normalizeMountAccessMode(opts.AccessMode)
 }
 
 // Repository provides database access for storage-proxy
@@ -620,9 +648,55 @@ func (r *Repository) deleteSnapshot(ctx context.Context, db DB, id string) error
 // Volume Mount Repository Methods (for cross-cluster coordination)
 // ============================================================
 
+// AcquireMount atomically enforces the volume access mode and upserts the active mount row.
+func (r *Repository) AcquireMount(ctx context.Context, mount *VolumeMount, heartbeatTimeout int) error {
+	if mount == nil {
+		return fmt.Errorf("mount is required")
+	}
+	if heartbeatTimeout <= 0 {
+		heartbeatTimeout = 15
+	}
+	return r.WithTx(ctx, func(tx pgx.Tx) error {
+		var accessMode string
+		if err := tx.QueryRow(ctx, `SELECT access_mode FROM sandbox_volumes WHERE id = $1 FOR UPDATE`, mount.VolumeID).Scan(&accessMode); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("lock sandbox volume: %w", err)
+		}
+		activeMounts, err := r.getActiveMounts(ctx, tx, mount.VolumeID, heartbeatTimeout)
+		if err != nil {
+			return err
+		}
+		switch normalizeMountAccessMode(accessMode) {
+		case "RWO":
+			for _, active := range activeMounts {
+				if active.ClusterID == mount.ClusterID && active.PodID == mount.PodID {
+					continue
+				}
+				return fmt.Errorf("%w: volume %s already mounted on another instance", ErrConflict, mount.VolumeID)
+			}
+		case "ROX":
+			for _, active := range activeMounts {
+				if decodeMountAccessMode(active.MountOptions) != "ROX" {
+					return fmt.Errorf("%w: volume %s already mounted read-write", ErrConflict, mount.VolumeID)
+				}
+			}
+		case "RWX":
+		default:
+			return fmt.Errorf("invalid access_mode %q", accessMode)
+		}
+		return r.createMount(ctx, tx, mount)
+	})
+}
+
 // CreateMount creates a volume mount record
 func (r *Repository) CreateMount(ctx context.Context, mount *VolumeMount) error {
-	_, err := r.pool.Exec(ctx, `
+	return r.createMount(ctx, r.pool, mount)
+}
+
+func (r *Repository) createMount(ctx context.Context, db DB, mount *VolumeMount) error {
+	_, err := db.Exec(ctx, `
 		INSERT INTO sandbox_volume_mounts (
 			id, volume_id, cluster_id, pod_id,
 			last_heartbeat, mounted_at, mount_options
@@ -691,7 +765,11 @@ func (r *Repository) DeleteMountByPodID(ctx context.Context, clusterID, podID st
 
 // GetActiveMounts retrieves active mounts for a volume (heartbeat within threshold)
 func (r *Repository) GetActiveMounts(ctx context.Context, volumeID string, heartbeatTimeout int) ([]*VolumeMount, error) {
-	rows, err := r.pool.Query(ctx, `
+	return r.getActiveMounts(ctx, r.pool, volumeID, heartbeatTimeout)
+}
+
+func (r *Repository) getActiveMounts(ctx context.Context, db DB, volumeID string, heartbeatTimeout int) ([]*VolumeMount, error) {
+	rows, err := db.Query(ctx, `
 		SELECT
 			id, volume_id, cluster_id, pod_id,
 			last_heartbeat, mounted_at, mount_options

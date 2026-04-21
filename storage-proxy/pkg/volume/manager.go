@@ -159,13 +159,6 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID st
 		return "", time.Time{}, fmt.Errorf("missing team id for volume mount")
 	}
 
-	// Validate mount with coordinator if available.
-	if m.registrar != nil {
-		if err := m.registrar.ValidateMount(ctx, volumeID, accessMode); err != nil {
-			return "", time.Time{}, err
-		}
-	}
-
 	// Check if already mounted
 	if existing, exists := m.volumes[volumeID]; exists {
 		if existing.TeamID != "" && existing.TeamID != teamID {
@@ -187,8 +180,21 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID st
 
 	m.logger.WithField("volume_id", volumeID).Info("Mounting volume")
 
+	registeredMount := false
+	if m.registrar != nil {
+		if err := m.registrar.RegisterMount(ctx, volumeID, MountOptions{
+			AccessMode: accessMode,
+		}); err != nil {
+			return "", time.Time{}, err
+		}
+		registeredMount = true
+	}
+
 	backend, err := m.selectBackend()
 	if err != nil {
+		if registeredMount {
+			_ = m.registrar.UnregisterMount(ctx, volumeID)
+		}
 		return "", time.Time{}, err
 	}
 
@@ -201,6 +207,9 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID st
 		Metrics:    m.metrics,
 	})
 	if err != nil {
+		if registeredMount {
+			_ = m.registrar.UnregisterMount(ctx, volumeID)
+		}
 		return "", time.Time{}, err
 	}
 
@@ -212,15 +221,6 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID st
 		ID:        sessionID,
 		TeamID:    teamID,
 		CreatedAt: sessionTime,
-	}
-
-	// 7. Register mount for distributed coordination (if registrar is set)
-	if m.registrar != nil {
-		if err := m.registrar.RegisterMount(ctx, volumeID, MountOptions{
-			AccessMode: accessMode,
-		}); err != nil {
-			m.logger.WithError(err).Warn("Failed to register mount for coordination")
-		}
 	}
 
 	m.logger.WithFields(logrus.Fields{

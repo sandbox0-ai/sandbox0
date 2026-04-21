@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -70,5 +71,24 @@ func TestStorageProxyVolumeClientPrepareForPortalBind(t *testing.T) {
 	}
 	if gotToken == "" {
 		t.Fatal("expected internal token header to be set")
+	}
+}
+
+func TestStorageProxyVolumeClientPrepareForPortalBindConflict(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = spec.WriteError(w, http.StatusConflict, spec.CodeConflict, "volume has active mounts")
+	}))
+	defer server.Close()
+
+	client := NewStorageProxyVolumeClient(StorageProxyVolumeClientConfig{
+		BaseURL:        server.URL,
+		TokenGenerator: staticTokenGenerator{},
+	})
+	err := client.PrepareForVolumePortalBind(t.Context(), "team-1", "user-1", "vol-1")
+	if err == nil {
+		t.Fatal("PrepareForVolumePortalBind() error = nil, want conflict")
+	}
+	if !errors.Is(err, ErrVolumePortalBindConflict) {
+		t.Fatalf("PrepareForVolumePortalBind() error = %v, want ErrVolumePortalBindConflict", err)
 	}
 }

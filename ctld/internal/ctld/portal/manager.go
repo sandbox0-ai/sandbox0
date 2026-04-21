@@ -305,6 +305,12 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 		}
 		return response, nil
 	}
+	if existing := findBoundPortalForVolume(m.portals, req.SandboxVolumeID, key); existing != nil {
+		conflictPath := existing.mountPath
+		m.mu.Unlock()
+		_ = engine.Close()
+		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("volume %s is already bound to %s", req.SandboxVolumeID, conflictPath)
+	}
 	m.volumes.add(volCtx)
 	pm.fs.SetSession(session)
 	pm.volumeID = req.SandboxVolumeID

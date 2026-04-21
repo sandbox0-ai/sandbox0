@@ -754,6 +754,23 @@ func TestPrepareVolumePortalBindUsesPreparationClientWhenAvailable(t *testing.T)
 	}
 }
 
+func TestBindVolumePortalTreatsPreparationConflictAsClaimConflict(t *testing.T) {
+	metadata := &fakeVolumeMetadataClient{prepareErr: ErrVolumePortalBindConflict}
+	svc := &SandboxService{
+		ctldClient:     &CtldClient{},
+		volumeMetadata: metadata,
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "team-a", UID: "pod-uid"}}
+
+	_, err := svc.bindVolumePortal(context.Background(), pod, "team-a", "user-a", "team-a", "vol-1", "/workspace/data", "data")
+	if err == nil {
+		t.Fatal("bindVolumePortal() error = nil, want claim conflict")
+	}
+	if !errors.Is(err, ErrClaimConflict) {
+		t.Fatalf("bindVolumePortal() error = %v, want ErrClaimConflict", err)
+	}
+}
+
 func newClaimTestPodLister(t *testing.T, pods ...*corev1.Pod) corelisters.PodLister {
 	t.Helper()
 	return corelisters.NewPodLister(newClaimTestPodIndexer(t, pods...))

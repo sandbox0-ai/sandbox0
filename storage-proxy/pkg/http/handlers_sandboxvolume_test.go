@@ -251,6 +251,35 @@ func TestPrepareSandboxVolumeForPortalBindCleansIdleDirectMount(t *testing.T) {
 	}
 }
 
+func TestPrepareSandboxVolumeForPortalBindRejectsActiveRWOMounts(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1", UserID: "user-1", AccessMode: "RWO"}
+	repo.activeMounts["vol-1"] = []*db.VolumeMount{{
+		VolumeID:  "vol-1",
+		ClusterID: "cluster-a",
+		PodID:     "sandbox0-system/ctld-a",
+	}}
+	server := &Server{
+		logger: logrus.New(),
+		repo:   repo,
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/internal/v1/sandboxvolumes/vol-1/prepare-portal-bind", nil)
+	req.SetPathValue("id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+		Caller: internalauth.ServiceManager,
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	recorder := httptest.NewRecorder()
+
+	server.prepareSandboxVolumeForPortalBind(recorder, req)
+
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusConflict, recorder.Body.String())
+	}
+}
+
 func TestForkVolumePassesDefaultPosixIdentity(t *testing.T) {
 	snapshotMgr := &captureForkSnapshotManager{fakeHTTPSnapshotManager: &fakeHTTPSnapshotManager{}}
 	server := &Server{

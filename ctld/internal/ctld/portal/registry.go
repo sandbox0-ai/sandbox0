@@ -70,6 +70,21 @@ func isConflictingMountForCtldBind(mount *db.VolumeMount, selfClusterID, selfPod
 	return opts.OwnerKind != volume.OwnerKindStorageProxy
 }
 
+func findBoundPortalForVolume(portals map[string]*portalMount, volumeID, exceptKey string) *portalMount {
+	if strings.TrimSpace(volumeID) == "" {
+		return nil
+	}
+	for key, pm := range portals {
+		if key == exceptKey || pm == nil {
+			continue
+		}
+		if pm.volumeID == volumeID {
+			return pm
+		}
+	}
+	return nil
+}
+
 type ctldBindContext struct {
 	volumeID string
 	teamID   string
@@ -105,7 +120,11 @@ func (m *Manager) registerOwner(ctx context.Context, pm *portalMount, accessMode
 		MountedAt:     pm.mountedAt,
 		MountOptions:  &rawMsg,
 	}
-	if err := m.repo.CreateMount(ctx, mount); err != nil {
+	heartbeatTimeout := 15
+	if m.storage != nil && m.storage.HeartbeatTimeout > 0 {
+		heartbeatTimeout = m.storage.HeartbeatTimeout
+	}
+	if err := m.repo.AcquireMount(ctx, mount, heartbeatTimeout); err != nil {
 		return err
 	}
 

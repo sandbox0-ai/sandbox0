@@ -593,6 +593,84 @@ func TestHandleVolumeFileMoveRenamesPath(t *testing.T) {
 	}
 }
 
+func TestHandleVolumeFileMoveProxiesBodyToCtldOwner(t *testing.T) {
+	remoteSeen := make(chan struct {
+		header http.Header
+		body   []byte
+	}, 1)
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read proxied body: %v", err)
+		}
+		select {
+		case remoteSeen <- struct {
+			header http.Header
+			body   []byte
+		}{
+			header: r.Header.Clone(),
+			body:   body,
+		}:
+		default:
+		}
+		_ = spec.WriteSuccess(w, http.StatusOK, map[string]bool{"moved": true})
+	}))
+	defer remote.Close()
+	remoteURL, err := url.Parse(remote.URL)
+	if err != nil {
+		t.Fatalf("parse remote url: %v", err)
+	}
+	remotePort, err := strconv.Atoi(remoteURL.Port())
+	if err != nil {
+		t.Fatalf("parse remote port: %v", err)
+	}
+
+	fileRPC := &fakeHTTPVolumeFileRPC{}
+	server, volMgr := newVolumeFileTestServer(fileRPC)
+	repo := server.repo.(*fakeHTTPRepo)
+	repo.activeMounts["vol-1"] = []*db.VolumeMount{
+		{
+			VolumeID:     "vol-1",
+			ClusterID:    "cluster-a",
+			PodID:        "sandbox0-system/ctld-node-a",
+			MountedAt:    time.Unix(10, 0),
+			MountOptions: mustMountOptionsRaw(t, volume.MountOptions{AccessMode: volume.AccessModeRWO, OwnerKind: volume.OwnerKindCtld, OwnerPort: remotePort}),
+		},
+	}
+	server.podResolver = &fakeVolumeFilePodResolver{
+		urls: map[string]string{"sandbox0-system/ctld-node-a": "http://127.0.0.1"},
+	}
+
+	reqBody := []byte(`{"source":"/docs/report.txt","destination":"/archive/report-old.txt"}`)
+	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/files/move", bytes.NewReader(reqBody))
+	req.SetPathValue("id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-a"}))
+	recorder := httptest.NewRecorder()
+
+	server.handleVolumeFileMove(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	if volMgr.acquireCalls != 0 {
+		t.Fatalf("AcquireDirectVolumeFileMount() calls = %d, want 0", volMgr.acquireCalls)
+	}
+	select {
+	case seen := <-remoteSeen:
+		if got := seen.header.Get(volumeFileAffinityRoutedPodHeader); got != "sandbox0-system/ctld-node-a" {
+			t.Fatalf("routed pod header = %q, want %q", got, "sandbox0-system/ctld-node-a")
+		}
+		if got := seen.header.Get(volumeFileAffinityTeamHeader); got != "team-a" {
+			t.Fatalf("team header = %q, want %q", got, "team-a")
+		}
+		if !bytes.Equal(seen.body, reqBody) {
+			t.Fatalf("proxied body = %q, want %q", string(seen.body), string(reqBody))
+		}
+	default:
+		t.Fatal("expected move request to be proxied to ctld owner")
+	}
+}
+
 func TestHandleVolumeFileStatProxiesToRemoteOwnerPod(t *testing.T) {
 	remoteSeen := make(chan *http.Request, 1)
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

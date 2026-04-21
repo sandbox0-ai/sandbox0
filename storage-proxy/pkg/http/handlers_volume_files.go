@@ -227,6 +227,12 @@ func (s *Server) handleVolumeFileMove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ctx, _, cleanup, handled := s.prepareOrProxyVolumeFileRequest(w, r, volumeID)
+	if handled {
+		return
+	}
+	defer cleanup()
+
 	var req volumeFileMoveRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
@@ -236,12 +242,6 @@ func (s *Server) handleVolumeFileMove(w http.ResponseWriter, r *http.Request) {
 		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "source and destination are required")
 		return
 	}
-
-	ctx, _, cleanup, handled := s.prepareOrProxyVolumeFileRequest(w, r, volumeID)
-	if handled {
-		return
-	}
-	defer cleanup()
 
 	if err := s.moveVolumePath(ctx, volumeID, req.Source, req.Destination); err != nil {
 		s.writeVolumeFileError(w, err)

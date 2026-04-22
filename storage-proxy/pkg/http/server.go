@@ -78,6 +78,7 @@ type syncManager interface {
 }
 
 type volumeMutationBarrier interface {
+	WithShared(ctx context.Context, volumeID string, fn func(context.Context) error) error
 	WithExclusive(ctx context.Context, volumeID string, fn func(context.Context) error) error
 }
 

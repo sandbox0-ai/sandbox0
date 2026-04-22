@@ -122,6 +122,24 @@ func (s *Server) handleVolumeFileOperation(w http.ResponseWriter, r *http.Reques
 	}
 }
 
+func (s *Server) withSharedVolumeFileRequest(w http.ResponseWriter, r *http.Request, volumeID string, fn func(*http.Request)) bool {
+	if fn == nil {
+		return true
+	}
+	if s == nil || s.barrier == nil || strings.TrimSpace(volumeID) == "" {
+		fn(r)
+		return true
+	}
+	if err := s.barrier.WithShared(r.Context(), volumeID, func(ctx context.Context) error {
+		fn(r.WithContext(ctx))
+		return nil
+	}); err != nil {
+		s.writeVolumeFileError(w, err)
+		return false
+	}
+	return true
+}
+
 func (s *Server) handleVolumeFileStat(w http.ResponseWriter, r *http.Request) {
 	volumeID := r.PathValue("id")
 	if volumeID == "" {
@@ -134,27 +152,29 @@ func (s *Server) handleVolumeFileStat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, _, cleanup, handled := s.prepareOrProxyVolumeFileRequest(w, r, volumeID)
-	if handled {
-		return
-	}
-	defer cleanup()
+	s.withSharedVolumeFileRequest(w, r, volumeID, func(lockedReq *http.Request) {
+		ctx, _, cleanup, handled := s.prepareOrProxyVolumeFileRequest(w, lockedReq, volumeID)
+		if handled {
+			return
+		}
+		defer cleanup()
 
-	resolved, err := s.lookupVolumePath(ctx, volumeID, filePath, true)
-	if err != nil {
-		s.writeVolumeFileError(w, err)
-		return
-	}
-	if !resolved.Exists {
-		s.writeVolumeFileError(w, errFileNotFound)
-		return
-	}
+		resolved, err := s.lookupVolumePath(ctx, volumeID, filePath, true)
+		if err != nil {
+			s.writeVolumeFileError(w, err)
+			return
+		}
+		if !resolved.Exists {
+			s.writeVolumeFileError(w, errFileNotFound)
+			return
+		}
 
-	name := pathpkg.Base(resolved.Clean)
-	if resolved.Clean == "/" {
-		name = "/"
-	}
-	_ = spec.WriteSuccess(w, http.StatusOK, attrToVolumeFileInfo(name, resolved.Clean, resolved.Attr))
+		name := pathpkg.Base(resolved.Clean)
+		if resolved.Clean == "/" {
+			name = "/"
+		}
+		_ = spec.WriteSuccess(w, http.StatusOK, attrToVolumeFileInfo(name, resolved.Clean, resolved.Attr))
+	})
 }
 
 func (s *Server) handleVolumeFileList(w http.ResponseWriter, r *http.Request) {
@@ -169,56 +189,58 @@ func (s *Server) handleVolumeFileList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, _, cleanup, handled := s.prepareOrProxyVolumeFileRequest(w, r, volumeID)
-	if handled {
-		return
-	}
-	defer cleanup()
-
-	resolved, err := s.lookupVolumePath(ctx, volumeID, dirPath, true)
-	if err != nil {
-		s.writeVolumeFileError(w, err)
-		return
-	}
-	if !resolved.Exists {
-		s.writeVolumeFileError(w, errDirNotFound)
-		return
-	}
-	if !attrModeIsDir(resolved.Attr.Mode) {
-		s.writeVolumeFileError(w, errPathNotDir)
-		return
-	}
-
-	handleID, releaseDir, err := s.openVolumeDir(ctx, volumeID, resolved.Inode)
-	if err != nil {
-		s.writeVolumeFileError(w, err)
-		return
-	}
-	defer releaseDir()
-
-	dirResp, err := s.fileRPC.ReadDir(ctx, &pb.ReadDirRequest{
-		VolumeId: volumeID,
-		Inode:    resolved.Inode,
-		HandleId: handleID,
-		Size:     16384,
-		Plus:     true,
-		Actor:    volumeFileActor(ctx),
-	})
-	if err != nil {
-		s.writeVolumeFileError(w, translateVolumeRPCError(err))
-		return
-	}
-
-	entries := make([]*volumeFileInfo, 0, len(dirResp.Entries))
-	for _, entry := range dirResp.Entries {
-		if entry == nil || entry.Name == "" || entry.Name == "." || entry.Name == ".." {
-			continue
+	s.withSharedVolumeFileRequest(w, r, volumeID, func(lockedReq *http.Request) {
+		ctx, _, cleanup, handled := s.prepareOrProxyVolumeFileRequest(w, lockedReq, volumeID)
+		if handled {
+			return
 		}
-		entryPath := joinVolumePath(resolved.Clean, entry.Name)
-		entries = append(entries, attrToVolumeFileInfo(entry.Name, entryPath, entry.Attr))
-	}
+		defer cleanup()
 
-	_ = spec.WriteSuccess(w, http.StatusOK, map[string]any{"entries": entries})
+		resolved, err := s.lookupVolumePath(ctx, volumeID, dirPath, true)
+		if err != nil {
+			s.writeVolumeFileError(w, err)
+			return
+		}
+		if !resolved.Exists {
+			s.writeVolumeFileError(w, errDirNotFound)
+			return
+		}
+		if !attrModeIsDir(resolved.Attr.Mode) {
+			s.writeVolumeFileError(w, errPathNotDir)
+			return
+		}
+
+		handleID, releaseDir, err := s.openVolumeDir(ctx, volumeID, resolved.Inode)
+		if err != nil {
+			s.writeVolumeFileError(w, err)
+			return
+		}
+		defer releaseDir()
+
+		dirResp, err := s.fileRPC.ReadDir(ctx, &pb.ReadDirRequest{
+			VolumeId: volumeID,
+			Inode:    resolved.Inode,
+			HandleId: handleID,
+			Size:     16384,
+			Plus:     true,
+			Actor:    volumeFileActor(ctx),
+		})
+		if err != nil {
+			s.writeVolumeFileError(w, translateVolumeRPCError(err))
+			return
+		}
+
+		entries := make([]*volumeFileInfo, 0, len(dirResp.Entries))
+		for _, entry := range dirResp.Entries {
+			if entry == nil || entry.Name == "" || entry.Name == "." || entry.Name == ".." {
+				continue
+			}
+			entryPath := joinVolumePath(resolved.Clean, entry.Name)
+			entries = append(entries, attrToVolumeFileInfo(entry.Name, entryPath, entry.Attr))
+		}
+
+		_ = spec.WriteSuccess(w, http.StatusOK, map[string]any{"entries": entries})
+	})
 }
 
 func (s *Server) handleVolumeFileMove(w http.ResponseWriter, r *http.Request) {
@@ -228,32 +250,34 @@ func (s *Server) handleVolumeFileMove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, _, cleanup, handled := s.prepareOrProxyVolumeFileRequest(w, r, volumeID)
-	if handled {
-		return
-	}
-	defer cleanup()
+	s.withSharedVolumeFileRequest(w, r, volumeID, func(lockedReq *http.Request) {
+		ctx, _, cleanup, handled := s.prepareOrProxyVolumeFileRequest(w, lockedReq, volumeID)
+		if handled {
+			return
+		}
+		defer cleanup()
 
-	var req volumeFileMoveRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
-		return
-	}
-	if req.Source == "" || req.Destination == "" {
-		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "source and destination are required")
-		return
-	}
+		var req volumeFileMoveRequest
+		if err := json.NewDecoder(lockedReq.Body).Decode(&req); err != nil {
+			_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+			return
+		}
+		if req.Source == "" || req.Destination == "" {
+			_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "source and destination are required")
+			return
+		}
 
-	if err := s.moveVolumePath(ctx, volumeID, req.Source, req.Destination); err != nil {
-		s.writeVolumeFileError(w, err)
-		return
-	}
-	if err := s.finalizeVolumeFileMutation(ctx, volumeID); err != nil {
-		s.writeVolumeFileError(w, err)
-		return
-	}
+		if err := s.moveVolumePath(ctx, volumeID, req.Source, req.Destination); err != nil {
+			s.writeVolumeFileError(w, err)
+			return
+		}
+		if err := s.finalizeVolumeFileMutation(ctx, volumeID); err != nil {
+			s.writeVolumeFileError(w, err)
+			return
+		}
 
-	_ = spec.WriteSuccess(w, http.StatusOK, map[string]bool{"moved": true})
+		_ = spec.WriteSuccess(w, http.StatusOK, map[string]bool{"moved": true})
+	})
 }
 
 func (s *Server) handleVolumeFileWatch(w http.ResponseWriter, r *http.Request) {
@@ -395,67 +419,95 @@ func (s *Server) handleVolumeFileWatch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) readVolumeFile(w http.ResponseWriter, r *http.Request, volumeID, logicalPath string) {
-	ctx, _, cleanup, handled := s.prepareOrProxyVolumeFileRequest(w, r, volumeID)
-	if handled {
-		return
-	}
-	defer cleanup()
+	s.withSharedVolumeFileRequest(w, r, volumeID, func(lockedReq *http.Request) {
+		ctx, _, cleanup, handled := s.prepareOrProxyVolumeFileRequest(w, lockedReq, volumeID)
+		if handled {
+			return
+		}
+		defer cleanup()
 
-	resolved, err := s.lookupVolumePath(ctx, volumeID, logicalPath, false)
-	if err != nil {
-		s.writeVolumeFileError(w, err)
-		return
-	}
-	if !resolved.Exists {
-		s.writeVolumeFileError(w, errFileNotFound)
-		return
-	}
-	if attrModeIsDir(resolved.Attr.Mode) {
-		s.writeVolumeFileError(w, errPathNotDir)
-		return
-	}
+		resolved, err := s.lookupVolumePath(ctx, volumeID, logicalPath, false)
+		if err != nil {
+			s.writeVolumeFileError(w, err)
+			return
+		}
+		if !resolved.Exists {
+			s.writeVolumeFileError(w, errFileNotFound)
+			return
+		}
+		if attrModeIsDir(resolved.Attr.Mode) {
+			s.writeVolumeFileError(w, errPathNotDir)
+			return
+		}
 
-	handleID, releaseFile, err := s.openVolumeFile(ctx, volumeID, resolved.Inode, uint32(syscall.O_RDONLY))
-	if err != nil {
-		s.writeVolumeFileError(w, err)
-		return
-	}
-	defer releaseFile()
+		handleID, releaseFile, err := s.openVolumeFile(ctx, volumeID, resolved.Inode, uint32(syscall.O_RDONLY))
+		if err != nil {
+			s.writeVolumeFileError(w, err)
+			return
+		}
+		defer releaseFile()
 
-	readResp, err := s.fileRPC.Read(ctx, &pb.ReadRequest{
-		VolumeId: volumeID,
-		Inode:    resolved.Inode,
-		Offset:   0,
-		Size:     int64(resolved.Attr.Size),
-		HandleId: handleID,
-		Actor:    volumeFileActor(ctx),
-	})
-	if err != nil {
-		s.writeVolumeFileError(w, translateVolumeRPCError(err))
-		return
-	}
-
-	if acceptsVolumeFileJSON(r) {
-		_ = spec.WriteSuccess(w, http.StatusOK, map[string]string{
-			"content":  base64.StdEncoding.EncodeToString(readResp.Data),
-			"encoding": "base64",
+		readResp, err := s.fileRPC.Read(ctx, &pb.ReadRequest{
+			VolumeId: volumeID,
+			Inode:    resolved.Inode,
+			Offset:   0,
+			Size:     int64(resolved.Attr.Size),
+			HandleId: handleID,
+			Actor:    volumeFileActor(ctx),
 		})
-		return
-	}
+		if err != nil {
+			s.writeVolumeFileError(w, translateVolumeRPCError(err))
+			return
+		}
 
-	w.Header().Set("Content-Type", "application/octet-stream")
-	_, _ = w.Write(readResp.Data)
+		if acceptsVolumeFileJSON(lockedReq) {
+			_ = spec.WriteSuccess(w, http.StatusOK, map[string]string{
+				"content":  base64.StdEncoding.EncodeToString(readResp.Data),
+				"encoding": "base64",
+			})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write(readResp.Data)
+	})
 }
 
 func (s *Server) writeVolumeFile(w http.ResponseWriter, r *http.Request, volumeID, logicalPath string) {
-	ctx, _, cleanup, handled := s.prepareOrProxyVolumeFileRequest(w, r, volumeID)
-	if handled {
-		return
-	}
-	defer cleanup()
+	s.withSharedVolumeFileRequest(w, r, volumeID, func(lockedReq *http.Request) {
+		ctx, _, cleanup, handled := s.prepareOrProxyVolumeFileRequest(w, lockedReq, volumeID)
+		if handled {
+			return
+		}
+		defer cleanup()
 
-	if r.URL.Query().Get("mkdir") == "true" {
-		changed, err := s.mkdirVolumePath(ctx, volumeID, logicalPath, r.URL.Query().Get("recursive") == "true")
+		if lockedReq.URL.Query().Get("mkdir") == "true" {
+			changed, err := s.mkdirVolumePath(ctx, volumeID, logicalPath, lockedReq.URL.Query().Get("recursive") == "true")
+			if err != nil {
+				s.writeVolumeFileError(w, err)
+				return
+			}
+			if changed {
+				if err := s.finalizeVolumeFileMutation(ctx, volumeID); err != nil {
+					s.writeVolumeFileError(w, err)
+					return
+				}
+			}
+			_ = spec.WriteSuccess(w, http.StatusCreated, map[string]bool{"created": true})
+			return
+		}
+
+		data, err := io.ReadAll(lockedReq.Body)
+		if err != nil {
+			_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+			return
+		}
+		if len(data) > maxVolumeFileSize {
+			s.writeVolumeFileError(w, errFileTooLarge)
+			return
+		}
+
+		changed, err := s.writeVolumePath(ctx, volumeID, logicalPath, data)
 		if err != nil {
 			s.writeVolumeFileError(w, err)
 			return
@@ -466,59 +518,37 @@ func (s *Server) writeVolumeFile(w http.ResponseWriter, r *http.Request, volumeI
 				return
 			}
 		}
-		_ = spec.WriteSuccess(w, http.StatusCreated, map[string]bool{"created": true})
-		return
-	}
 
-	data, err := io.ReadAll(r.Body)
-	if err != nil {
-		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
-		return
-	}
-	if len(data) > maxVolumeFileSize {
-		s.writeVolumeFileError(w, errFileTooLarge)
-		return
-	}
-
-	changed, err := s.writeVolumePath(ctx, volumeID, logicalPath, data)
-	if err != nil {
-		s.writeVolumeFileError(w, err)
-		return
-	}
-	if changed {
-		if err := s.finalizeVolumeFileMutation(ctx, volumeID); err != nil {
-			s.writeVolumeFileError(w, err)
-			return
-		}
-	}
-
-	_ = spec.WriteSuccess(w, http.StatusOK, map[string]bool{"written": true})
+		_ = spec.WriteSuccess(w, http.StatusOK, map[string]bool{"written": true})
+	})
 }
 
 func (s *Server) deleteVolumeFile(w http.ResponseWriter, r *http.Request, volumeID, logicalPath string) {
-	ctx, _, cleanup, handled := s.prepareOrProxyVolumeFileRequest(w, r, volumeID)
-	if handled {
-		return
-	}
-	defer cleanup()
+	s.withSharedVolumeFileRequest(w, r, volumeID, func(lockedReq *http.Request) {
+		ctx, _, cleanup, handled := s.prepareOrProxyVolumeFileRequest(w, lockedReq, volumeID)
+		if handled {
+			return
+		}
+		defer cleanup()
 
-	resolved, err := s.lookupVolumePath(ctx, volumeID, logicalPath, false)
-	if err != nil {
-		s.writeVolumeFileError(w, err)
-		return
-	}
-	if resolved.Exists {
-		if err := s.removeVolumePath(ctx, volumeID, resolved); err != nil {
+		resolved, err := s.lookupVolumePath(ctx, volumeID, logicalPath, false)
+		if err != nil {
 			s.writeVolumeFileError(w, err)
 			return
 		}
-		if err := s.finalizeVolumeFileMutation(ctx, volumeID); err != nil {
-			s.writeVolumeFileError(w, err)
-			return
+		if resolved.Exists {
+			if err := s.removeVolumePath(ctx, volumeID, resolved); err != nil {
+				s.writeVolumeFileError(w, err)
+				return
+			}
+			if err := s.finalizeVolumeFileMutation(ctx, volumeID); err != nil {
+				s.writeVolumeFileError(w, err)
+				return
+			}
 		}
-	}
 
-	_ = spec.WriteSuccess(w, http.StatusOK, map[string]bool{"deleted": true})
+		_ = spec.WriteSuccess(w, http.StatusOK, map[string]bool{"deleted": true})
+	})
 }
 
 func (s *Server) prepareVolumeFileRequest(ctx context.Context, volumeID string) (context.Context, *db.SandboxVolume, func(), error) {

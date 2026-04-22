@@ -182,6 +182,12 @@ type fakeHTTPVolumeMutationBarrier struct {
 	lastVolumeID string
 }
 
+func (f *fakeHTTPVolumeMutationBarrier) WithShared(ctx context.Context, volumeID string, fn func(context.Context) error) error {
+	f.calls++
+	f.lastVolumeID = volumeID
+	return fn(ctx)
+}
+
 func (f *fakeHTTPVolumeMutationBarrier) WithExclusive(ctx context.Context, volumeID string, fn func(context.Context) error) error {
 	f.calls++
 	f.lastVolumeID = volumeID

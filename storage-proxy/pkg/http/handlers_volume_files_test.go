@@ -44,6 +44,12 @@ type fakeVolumeFilePodResolver struct {
 	urls map[string]string
 }
 
+type fakeHTTPSharedVolumeBarrier struct {
+	sharedCalls    int
+	exclusiveCalls int
+	lastVolumeID   string
+}
+
 func mustMountOptionsRaw(t *testing.T, opts volume.MountOptions) *json.RawMessage {
 	t.Helper()
 	raw, err := json.Marshal(opts)
@@ -63,6 +69,18 @@ func (f *fakeVolumeFilePodResolver) ResolvePodURL(_ context.Context, podID strin
 		return nil, errors.New("pod not found")
 	}
 	return url.Parse(rawURL)
+}
+
+func (f *fakeHTTPSharedVolumeBarrier) WithShared(ctx context.Context, volumeID string, fn func(context.Context) error) error {
+	f.sharedCalls++
+	f.lastVolumeID = volumeID
+	return fn(ctx)
+}
+
+func (f *fakeHTTPSharedVolumeBarrier) WithExclusive(ctx context.Context, volumeID string, fn func(context.Context) error) error {
+	f.exclusiveCalls++
+	f.lastVolumeID = volumeID
+	return fn(ctx)
 }
 
 func (f *fakeHTTPVolumeMountManager) GetVolume(volumeID string) (*volume.VolumeContext, error) {
@@ -247,6 +265,10 @@ func (f *fakeHTTPVolumeFileRPC) Release(ctx context.Context, req *pb.ReleaseRequ
 }
 
 func newVolumeFileTestServer(fileRPC *fakeHTTPVolumeFileRPC) (*Server, *fakeHTTPVolumeMountManager) {
+	return newVolumeFileTestServerWithBarrier(fileRPC, nil)
+}
+
+func newVolumeFileTestServerWithBarrier(fileRPC *fakeHTTPVolumeFileRPC, barrier volumeMutationBarrier) (*Server, *fakeHTTPVolumeMountManager) {
 	repo := newFakeHTTPRepo()
 	defaultUID := int64(1000)
 	defaultGID := int64(1000)
@@ -261,6 +283,7 @@ func newVolumeFileTestServer(fileRPC *fakeHTTPVolumeFileRPC) (*Server, *fakeHTTP
 	server := &Server{
 		logger:        logrus.New(),
 		repo:          repo,
+		barrier:       barrier,
 		volMgr:        volMgr,
 		fileRPC:       fileRPC,
 		cfg:           &config.StorageProxyConfig{HeartbeatTimeout: 15},
@@ -309,6 +332,55 @@ func TestPrepareVolumeFileRequestUsesSharedDirectMountLease(t *testing.T) {
 
 	if volMgr.releaseCalls != 1 {
 		t.Fatalf("release calls = %d, want 1", volMgr.releaseCalls)
+	}
+}
+
+func TestReadVolumeFileUsesSharedBarrier(t *testing.T) {
+	barrier := &fakeHTTPSharedVolumeBarrier{}
+	fileRPC := &fakeHTTPVolumeFileRPC{
+		lookupFunc: func(_ context.Context, req *pb.LookupRequest) (*pb.NodeResponse, error) {
+			switch {
+			case req.Parent == 1 && req.Name == "docs":
+				return &pb.NodeResponse{Inode: 2, Attr: volumeDirAttr()}, nil
+			case req.Parent == 2 && req.Name == "report.txt":
+				return &pb.NodeResponse{Inode: 3, Attr: volumeFileAttr(5)}, nil
+			default:
+				return nil, fserror.New(fserror.NotFound, "missing")
+			}
+		},
+		openFunc: func(_ context.Context, _ *pb.OpenRequest) (*pb.OpenResponse, error) {
+			return &pb.OpenResponse{HandleId: 7}, nil
+		},
+		readFunc: func(_ context.Context, _ *pb.ReadRequest) (*pb.ReadResponse, error) {
+			return &pb.ReadResponse{Data: []byte("hello")}, nil
+		},
+		releaseFunc: func(_ context.Context, _ *pb.ReleaseRequest) (*pb.Empty, error) {
+			return &pb.Empty{}, nil
+		},
+	}
+	server, _ := newVolumeFileTestServerWithBarrier(fileRPC, barrier)
+
+	req := httptest.NewRequest(http.MethodGet, "/sandboxvolumes/vol-1/files?path=/docs/report.txt", nil)
+	req.SetPathValue("id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-a"}))
+	recorder := httptest.NewRecorder()
+
+	server.handleVolumeFileOperation(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	if body := recorder.Body.String(); body != "hello" {
+		t.Fatalf("body = %q, want %q", body, "hello")
+	}
+	if barrier.sharedCalls != 1 {
+		t.Fatalf("shared calls = %d, want 1", barrier.sharedCalls)
+	}
+	if barrier.exclusiveCalls != 0 {
+		t.Fatalf("exclusive calls = %d, want 0", barrier.exclusiveCalls)
+	}
+	if barrier.lastVolumeID != "vol-1" {
+		t.Fatalf("barrier volume = %q, want %q", barrier.lastVolumeID, "vol-1")
 	}
 }
 

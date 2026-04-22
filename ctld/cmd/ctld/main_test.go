@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	ctldserver "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/server"
@@ -81,8 +83,24 @@ func TestCombinedControllerRoutesMountedVolumeAPIToPortalHandler(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
+func TestPrepareVolumePortalHandoffReturnsConflictForActivePortal(t *testing.T) {
+	server := newHTTPServer(":0", combinedController{
+		Controller: ctldserver.NotImplementedController{},
+		Portal: fakeVolumePortalHandler{
+			prepareErr: fmt.Errorf("volume vol-1 is actively bound to a portal"),
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/volume-portals/handoffs/prepare", strings.NewReader(`{"sandboxvolume_id":"vol-1"}`))
+	rec := httptest.NewRecorder()
+	server.Handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusConflict, rec.Code)
+}
+
 type fakeVolumePortalHandler struct {
 	mountedHandler http.Handler
+	prepareErr     error
 }
 
 func (f fakeVolumePortalHandler) Bind(_ context.Context, _ ctldapi.BindVolumePortalRequest) (ctldapi.BindVolumePortalResponse, error) {
@@ -98,6 +116,9 @@ func (f fakeVolumePortalHandler) AttachOwner(_ context.Context, _ ctldapi.Attach
 }
 
 func (f fakeVolumePortalHandler) PrepareHandoff(_ context.Context, _ ctldapi.PrepareVolumePortalHandoffRequest) (ctldapi.PrepareVolumePortalHandoffResponse, error) {
+	if f.prepareErr != nil {
+		return ctldapi.PrepareVolumePortalHandoffResponse{}, f.prepareErr
+	}
 	return ctldapi.PrepareVolumePortalHandoffResponse{Prepared: true}, nil
 }
 

@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -322,5 +323,51 @@ func TestExecutePortalBindHandoffAbortsWhenPrepareDoesNotComplete(t *testing.T) 
 	}
 	if _, err := repo.GetVolumeHandoff(context.Background(), "vol-1"); err != db.ErrNotFound {
 		t.Fatalf("GetVolumeHandoff() err = %v, want %v after cleanup", err, db.ErrNotFound)
+	}
+}
+
+func TestExecutePortalBindHandoffMapsPrepareConflictToDBConflict(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-a", AccessMode: string(volume.AccessModeRWO)}
+
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/volume-portals/handoffs/prepare" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(ctldapi.PrepareVolumePortalHandoffResponse{
+			Error: "volume vol-1 is actively bound to a portal",
+		})
+	}))
+	defer source.Close()
+	sourceURL, _ := url.Parse(source.URL)
+	sourcePort, _ := strconv.Atoi(sourceURL.Port())
+
+	server := &Server{
+		logger:      logrus.New(),
+		repo:        repo,
+		podResolver: &fakeVolumeFilePodResolver{urls: map[string]string{"sandbox0-system/ctld-source": source.URL}},
+	}
+	sourceMount := &db.VolumeMount{
+		VolumeID:     "vol-1",
+		ClusterID:    "cluster-a",
+		PodID:        "sandbox0-system/ctld-source",
+		MountOptions: mustMountOptionsRaw(t, volume.MountOptions{AccessMode: volume.AccessModeRWO, OwnerKind: volume.OwnerKindCtld, OwnerPort: sourcePort}),
+	}
+
+	err := server.executePortalBindHandoff(context.Background(), repo.volumes["vol-1"], sourceMount, preparePortalBindRequest{
+		TargetClusterID: "cluster-b",
+		TargetCtldAddr:  "http://127.0.0.1:65535",
+		Namespace:       "default",
+		PodName:         "sandbox-a",
+		PodUID:          "pod-uid",
+		PortalName:      "workspace",
+		MountPath:       "/workspace",
+		SandboxID:       "sandbox-1",
+		OwnerTeamID:     "team-a",
+	})
+	if !errors.Is(err, db.ErrConflict) {
+		t.Fatalf("executePortalBindHandoff() error = %v, want db.ErrConflict", err)
 	}
 }

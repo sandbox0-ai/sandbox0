@@ -19,6 +19,21 @@ import (
 
 const volumeHandoffPollInterval = 100 * time.Millisecond
 
+type ctldRequestError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *ctldRequestError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if strings.TrimSpace(e.Message) != "" {
+		return fmt.Sprintf("ctld request failed with status %d: %s", e.StatusCode, e.Message)
+	}
+	return fmt.Sprintf("ctld request failed with status %d", e.StatusCode)
+}
+
 type preparePortalBindRequest struct {
 	TeamID          string `json:"team_id"`
 	UserID          string `json:"user_id"`
@@ -101,6 +116,9 @@ func (s *Server) executePortalBindHandoff(ctx context.Context, volumeRecord *db.
 	})
 	if err != nil {
 		cleanup()
+		if isCtldConflictError(err) {
+			return fmt.Errorf("%w: %v", db.ErrConflict, err)
+		}
 		return err
 	}
 	if prepareResp == nil || !prepareResp.Prepared {
@@ -148,6 +166,9 @@ func (s *Server) executePortalBindHandoff(ctx context.Context, volumeRecord *db.
 			SandboxVolumeID: volumeRecord.ID,
 		})
 		cleanup()
+		if isCtldConflictError(err) {
+			return fmt.Errorf("%w: %v", db.ErrConflict, err)
+		}
 		return err
 	}
 
@@ -219,7 +240,27 @@ func postCtldJSON[T any](ctx context.Context, baseURL, path string, request any)
 		}
 	}
 	if resp.StatusCode != http.StatusOK {
-		return &out, fmt.Errorf("ctld request failed with status %d", resp.StatusCode)
+		message := ""
+		switch typed := any(&out).(type) {
+		case *ctldapi.AttachVolumeOwnerResponse:
+			message = typed.Error
+		case *ctldapi.PrepareVolumePortalHandoffResponse:
+			message = typed.Error
+		case *ctldapi.CompleteVolumePortalHandoffResponse:
+			message = typed.Error
+		case *ctldapi.AbortVolumePortalHandoffResponse:
+			message = typed.Error
+		case *ctldapi.BindVolumePortalResponse:
+			message = typed.Error
+		case *ctldapi.UnbindVolumePortalResponse:
+			message = typed.Error
+		}
+		return &out, &ctldRequestError{StatusCode: resp.StatusCode, Message: strings.TrimSpace(message)}
 	}
 	return &out, nil
+}
+
+func isCtldConflictError(err error) bool {
+	var reqErr *ctldRequestError
+	return errors.As(err, &reqErr) && reqErr != nil && reqErr.StatusCode == http.StatusConflict
 }

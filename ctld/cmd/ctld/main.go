@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -243,7 +244,7 @@ func (c combinedController) UnbindVolumePortal(r *http.Request, req ctldapi.Unbi
 	}
 	resp, err := c.Portal.Unbind(r.Context(), req)
 	if err != nil {
-		return ctldapi.UnbindVolumePortalResponse{Error: err.Error()}, http.StatusBadRequest
+		return ctldapi.UnbindVolumePortalResponse{Error: err.Error()}, volumePortalErrorStatus(err)
 	}
 	return resp, http.StatusOK
 }
@@ -254,7 +255,7 @@ func (c combinedController) AttachVolumeOwner(r *http.Request, req ctldapi.Attac
 	}
 	resp, err := c.Portal.AttachOwner(r.Context(), req)
 	if err != nil {
-		return ctldapi.AttachVolumeOwnerResponse{Error: err.Error()}, http.StatusBadRequest
+		return ctldapi.AttachVolumeOwnerResponse{Error: err.Error()}, volumePortalErrorStatus(err)
 	}
 	return resp, http.StatusOK
 }
@@ -265,7 +266,7 @@ func (c combinedController) PrepareVolumePortalHandoff(r *http.Request, req ctld
 	}
 	resp, err := c.Portal.PrepareHandoff(r.Context(), req)
 	if err != nil {
-		return ctldapi.PrepareVolumePortalHandoffResponse{Error: err.Error()}, http.StatusBadRequest
+		return ctldapi.PrepareVolumePortalHandoffResponse{Error: err.Error()}, volumePortalErrorStatus(err)
 	}
 	return resp, http.StatusOK
 }
@@ -276,7 +277,7 @@ func (c combinedController) CompleteVolumePortalHandoff(r *http.Request, req ctl
 	}
 	resp, err := c.Portal.CompleteHandoff(r.Context(), req)
 	if err != nil {
-		return ctldapi.CompleteVolumePortalHandoffResponse{Error: err.Error()}, http.StatusBadRequest
+		return ctldapi.CompleteVolumePortalHandoffResponse{Error: err.Error()}, volumePortalErrorStatus(err)
 	}
 	return resp, http.StatusOK
 }
@@ -287,9 +288,27 @@ func (c combinedController) AbortVolumePortalHandoff(r *http.Request, req ctldap
 	}
 	resp, err := c.Portal.AbortHandoff(r.Context(), req)
 	if err != nil {
-		return ctldapi.AbortVolumePortalHandoffResponse{Error: err.Error()}, http.StatusBadRequest
+		return ctldapi.AbortVolumePortalHandoffResponse{Error: err.Error()}, volumePortalErrorStatus(err)
 	}
 	return resp, http.StatusOK
+}
+
+func volumePortalErrorStatus(err error) int {
+	if err == nil {
+		return http.StatusOK
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return http.StatusRequestTimeout
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	switch {
+	case strings.Contains(message, "already has an active owner"),
+		strings.Contains(message, "actively bound to a portal"),
+		strings.Contains(message, "handoff already in progress"):
+		return http.StatusConflict
+	default:
+		return http.StatusBadRequest
+	}
 }
 
 func (c combinedController) MountedVolumeHandler() http.Handler {

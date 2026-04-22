@@ -50,14 +50,6 @@ func (e *ctldSandboxPowerExecutor) Resume(ctx context.Context, sandboxID string)
 	return e.service.RequestResumeSandbox(ctx, sandboxID)
 }
 
-func (s *SandboxService) ctldAddressForSandbox(ctx context.Context, sandboxID string) (string, error) {
-	pod, err := s.getSandboxPodForPowerState(ctx, sandboxID)
-	if err != nil {
-		return "", fmt.Errorf("get pod: %w", err)
-	}
-	return s.ctldAddressForPod(ctx, pod)
-}
-
 func (s *SandboxService) ctldAddressForPod(ctx context.Context, pod *corev1.Pod) (string, error) {
 	if pod == nil {
 		return "", fmt.Errorf("pod is nil")

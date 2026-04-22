@@ -188,7 +188,6 @@ func TestReconcileKeepsHTTPBackendForHTTPSIngress(t *testing.T) {
 }
 
 func TestApplyRegistryConfigBuiltin(t *testing.T) {
-	r := &Reconciler{}
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "s0cp",
@@ -206,7 +205,7 @@ func TestApplyRegistryConfigBuiltin(t *testing.T) {
 	}
 	cfg := &apiconfig.RegionalGatewayConfig{}
 
-	envVars, err := r.applyRegistryConfig(infra, cfg)
+	envVars, err := infraplan.Compile(infra).ConfigureRegionalGatewayRegistry(cfg)
 	if err != nil {
 		t.Fatalf("applyRegistryConfig returned error: %v", err)
 	}
@@ -235,7 +234,6 @@ func TestApplyRegistryConfigBuiltin(t *testing.T) {
 }
 
 func TestApplyRegistryConfigAWS(t *testing.T) {
-	r := &Reconciler{}
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "s0cp",
@@ -262,7 +260,7 @@ func TestApplyRegistryConfigAWS(t *testing.T) {
 	}
 	cfg := &apiconfig.RegionalGatewayConfig{}
 
-	envVars, err := r.applyRegistryConfig(infra, cfg)
+	envVars, err := infraplan.Compile(infra).ConfigureRegionalGatewayRegistry(cfg)
 	if err != nil {
 		t.Fatalf("applyRegistryConfig returned error: %v", err)
 	}
@@ -294,7 +292,6 @@ func TestApplyRegistryConfigAWS(t *testing.T) {
 }
 
 func TestApplyRegistryConfigGCPWithoutServiceAccountSecret(t *testing.T) {
-	r := &Reconciler{}
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "s0cp",
@@ -311,7 +308,7 @@ func TestApplyRegistryConfigGCPWithoutServiceAccountSecret(t *testing.T) {
 	}
 	cfg := &apiconfig.RegionalGatewayConfig{}
 
-	envVars, err := r.applyRegistryConfig(infra, cfg)
+	envVars, err := infraplan.Compile(infra).ConfigureRegionalGatewayRegistry(cfg)
 	if err != nil {
 		t.Fatalf("applyRegistryConfig returned error: %v", err)
 	}
@@ -327,7 +324,6 @@ func TestApplyRegistryConfigGCPWithoutServiceAccountSecret(t *testing.T) {
 }
 
 func TestApplyRegistryConfigSkipsWhenRegistryIsNotDeclared(t *testing.T) {
-	r := &Reconciler{}
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "s0cp",
@@ -336,7 +332,7 @@ func TestApplyRegistryConfigSkipsWhenRegistryIsNotDeclared(t *testing.T) {
 	}
 	cfg := &apiconfig.RegionalGatewayConfig{}
 
-	envVars, err := r.applyRegistryConfig(infra, cfg)
+	envVars, err := infraplan.Compile(infra).ConfigureRegionalGatewayRegistry(cfg)
 	if err != nil {
 		t.Fatalf("applyRegistryConfig returned error: %v", err)
 	}

@@ -15,26 +15,6 @@ import (
 	ktesting "k8s.io/client-go/testing"
 )
 
-func TestCtldAddressForSandboxUsesNodeInternalIP(t *testing.T) {
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-1", Namespace: "default", Labels: map[string]string{"sandbox0.ai/sandbox-id": "sandbox-1"}},
-		Spec:       corev1.PodSpec{NodeName: "node-1"},
-	}
-	node := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
-		Status:     corev1.NodeStatus{Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.12"}}},
-	}
-	svc := &SandboxService{
-		k8sClient: fake.NewSimpleClientset(pod, node),
-		config:    SandboxServiceConfig{CtldPort: 8095},
-		logger:    zap.NewNop(),
-	}
-
-	addr, err := svc.ctldAddressForSandbox(context.Background(), "sandbox-1")
-	require.NoError(t, err)
-	assert.Equal(t, "http://10.0.0.12:8095", addr)
-}
-
 func TestNewSandboxServiceUsesCtldExecutorWhenEnabled(t *testing.T) {
 	svc := NewSandboxService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, SandboxServiceConfig{CtldEnabled: true}, zap.NewNop(), nil)
 	_, ok := svc.powerExecutor.(*ctldSandboxPowerExecutor)

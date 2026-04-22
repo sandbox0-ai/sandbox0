@@ -50,47 +50,6 @@ func (s *SandboxService) waitForPodIP(ctx context.Context, namespace, name strin
 	}
 }
 
-func (s *SandboxService) waitForPodReady(ctx context.Context, namespace, name string) (*corev1.Pod, error) {
-	timeout := s.config.ProcdInitTimeout
-	if timeout < defaultPodReadyTimeout {
-		timeout = defaultPodReadyTimeout
-	}
-
-	readyCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		pod, err := s.podLister.Pods(namespace).Get(name)
-		if err != nil {
-			if k8serrors.IsNotFound(err) {
-				select {
-				case <-readyCtx.Done():
-					return nil, fmt.Errorf("pod %s/%s not visible after %s", namespace, name, timeout)
-				case <-ticker.C:
-					continue
-				}
-			}
-			return nil, fmt.Errorf("get pod for readiness: %w", err)
-		}
-		pod, err = s.refreshSandboxProbeConditions(readyCtx, pod)
-		if err != nil {
-			return nil, fmt.Errorf("ensure pod probe conditions: %w", err)
-		}
-		if controller.IsPodReady(pod) {
-			return pod, nil
-		}
-
-		select {
-		case <-readyCtx.Done():
-			return nil, fmt.Errorf("pod %s/%s not ready after %s", namespace, name, timeout)
-		case <-ticker.C:
-		}
-	}
-}
-
 func (s *SandboxService) waitForPodClaimReady(ctx context.Context, namespace, name string) (*corev1.Pod, error) {
 	timeout := s.config.ProcdInitTimeout
 	if timeout < defaultPodClaimReadyTimeout {

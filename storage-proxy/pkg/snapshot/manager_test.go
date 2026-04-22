@@ -9,9 +9,7 @@ import (
 	"errors"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -19,7 +17,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/metering"
-	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/pathnorm"
@@ -33,16 +30,14 @@ func newTestManager(repo *fakeRepo, volMgr volumeProvider) *Manager {
 	if err != nil {
 		panic(err)
 	}
-	metaClient := newFakeMeta()
 	return &Manager{
-		repo:       repo,
-		volMgr:     volMgr,
-		config:     &config.StorageProxyConfig{DefaultClusterId: "test-cluster", CacheDir: cacheDir},
-		logger:     logrus.New(),
-		clusterID:  "test-cluster",
-		podID:      "test-pod",
-		locks:      make(map[string]time.Time),
-		metaClient: metaClient, // Independent meta client for testing
+		repo:      repo,
+		volMgr:    volMgr,
+		config:    &config.StorageProxyConfig{DefaultClusterId: "test-cluster", CacheDir: cacheDir},
+		logger:    logrus.New(),
+		clusterID: "test-cluster",
+		podID:     "test-pod",
+		locks:     make(map[string]time.Time),
 	}
 }
 
@@ -251,14 +246,6 @@ func (f *fakeVolumeProvider) WaitForInvalidate(ctx context.Context, volumeID, in
 	return nil
 }
 
-type fakeMeta struct {
-	mu           sync.Mutex
-	pathToIno    map[string]fsmeta.Ino
-	inoToPath    map[fsmeta.Ino]string
-	nextIno      fsmeta.Ino
-	removedPaths []string
-}
-
 type fakeArchiveMeta struct {
 	attrs   map[fsmeta.Ino]*fsmeta.Attr
 	entries map[fsmeta.Ino][]*fsmeta.Entry
@@ -326,152 +313,6 @@ func (f *fakeArchiveReader) ReadFile(ctx context.Context, inode fsmeta.Ino, size
 	}
 	_, err := w.Write(data)
 	return err
-}
-
-func newFakeMeta() *fakeMeta {
-	f := &fakeMeta{
-		pathToIno: make(map[string]fsmeta.Ino),
-		inoToPath: make(map[fsmeta.Ino]string),
-		nextIno:   fsmeta.RootInode + 1,
-	}
-	f.pathToIno["/"] = fsmeta.RootInode
-	f.inoToPath[fsmeta.RootInode] = "/"
-	return f
-}
-
-func (f *fakeMeta) Lookup(ctx fsmeta.Context, parent fsmeta.Ino, name string, inode *fsmeta.Ino, attr *fsmeta.Attr, check bool) syscall.Errno {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	parentPath, ok := f.inoToPath[parent]
-	if !ok {
-		return syscall.ENOENT
-	}
-	var path string
-	if parentPath == "/" {
-		path = "/" + name
-	} else {
-		path = filepath.Join(parentPath, name)
-	}
-	ino, ok := f.pathToIno[path]
-	if !ok {
-		return syscall.ENOENT
-	}
-	if inode != nil {
-		*inode = ino
-	}
-	return 0
-}
-
-func (f *fakeMeta) Mkdir(ctx fsmeta.Context, parent fsmeta.Ino, name string, mode uint16, cumask uint16, copysgid uint8, inode *fsmeta.Ino, attr *fsmeta.Attr) syscall.Errno {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	parentPath, ok := f.inoToPath[parent]
-	if !ok {
-		return syscall.ENOENT
-	}
-	var path string
-	if parentPath == "/" {
-		path = "/" + name
-	} else {
-		path = filepath.Join(parentPath, name)
-	}
-	if _, exists := f.pathToIno[path]; !exists {
-		ino := f.nextIno
-		f.nextIno++
-		f.pathToIno[path] = ino
-		f.inoToPath[ino] = path
-		if inode != nil {
-			*inode = ino
-		}
-	}
-	return 0
-}
-
-func (f *fakeMeta) Clone(ctx fsmeta.Context, srcParentIno, srcIno, parentIno fsmeta.Ino, name string, cmode uint8, cumask uint16, count *uint64, total *uint64) syscall.Errno {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	if _, ok := f.inoToPath[srcIno]; !ok {
-		return syscall.ENOENT
-	}
-	parentPath, ok := f.inoToPath[parentIno]
-	if !ok {
-		return syscall.ENOENT
-	}
-
-	var path string
-	if parentPath == "/" {
-		path = "/" + name
-	} else {
-		path = filepath.Join(parentPath, name)
-	}
-
-	if _, exists := f.pathToIno[path]; !exists {
-		ino := f.nextIno
-		f.nextIno++
-		f.pathToIno[path] = ino
-		f.inoToPath[ino] = path
-	}
-
-	if count != nil {
-		*count = 1
-	}
-	if total != nil {
-		*total = 1
-	}
-	return 0
-}
-
-func (f *fakeMeta) Rename(ctx fsmeta.Context, parentSrc fsmeta.Ino, nameSrc string, parentDst fsmeta.Ino, nameDst string, flags uint32, inode *fsmeta.Ino, attr *fsmeta.Attr) syscall.Errno {
-	return 0
-}
-
-func (f *fakeMeta) Remove(ctx fsmeta.Context, parent fsmeta.Ino, name string, skipTrash bool, numThreads int, count *uint64) syscall.Errno {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	parentPath, ok := f.inoToPath[parent]
-	if !ok {
-		return syscall.ENOENT
-	}
-	var path string
-	if parentPath == "/" {
-		path = "/" + name
-	} else {
-		path = filepath.Join(parentPath, name)
-	}
-	if _, exists := f.pathToIno[path]; !exists {
-		return syscall.ENOENT
-	}
-	delete(f.pathToIno, path)
-	f.removedPaths = append(f.removedPaths, path)
-	return 0
-}
-
-func (f *fakeMeta) ensurePath(path string) fsmeta.Ino {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	clean := "/" + strings.Trim(path, "/")
-	if clean == "/" {
-		return fsmeta.RootInode
-	}
-	parts := strings.Split(strings.Trim(clean, "/"), "/")
-	current := "/"
-	for _, part := range parts {
-		var next string
-		if current == "/" {
-			next = "/" + part
-		} else {
-			next = filepath.Join(current, part)
-		}
-		if _, ok := f.pathToIno[next]; !ok {
-			ino := f.nextIno
-			f.nextIno++
-			f.pathToIno[next] = ino
-			f.inoToPath[ino] = next
-		}
-		current = next
-	}
-	return f.pathToIno[current]
 }
 
 type fakeMeteringRecorder struct {
@@ -569,37 +410,6 @@ func TestDeleteSnapshot_VolumeNotMounted(t *testing.T) {
 	}
 	if len(repo.deleted) != 1 || repo.deleted[0] != "snap1" {
 		t.Fatalf("snapshot was not deleted: %v", repo.deleted)
-	}
-}
-
-func TestDeleteSnapshotDir_RemovesDir(t *testing.T) {
-	repo := newFakeRepo()
-	mgr := newTestManager(repo, nil)
-	// Use the mgr's metaClient (which is created in newTestManager)
-	metaClient := mgr.metaClient.(*fakeMeta)
-	p, err := naming.FilesystemSnapshotPath("vol1", "snap1")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	metaClient.ensurePath(p)
-	mgr.deleteSnapshotDir(context.Background(), p)
-	if len(metaClient.removedPaths) != 1 || metaClient.removedPaths[0] != p {
-		t.Fatalf("snapshot dir not removed: %v", metaClient.removedPaths)
-	}
-}
-
-func TestEnsurePathExists_CreatesDirectories(t *testing.T) {
-	repo := newFakeRepo()
-	mgr := newTestManager(repo, nil)
-	parent, err := naming.FilesystemSnapshotParentPath("vol1")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if _, err := mgr.ensurePathExists(context.Background(), parent); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if _, _, err := mgr.lookupPath(parent); err != nil {
-		t.Fatalf("lookup failed: %v", err)
 	}
 }
 

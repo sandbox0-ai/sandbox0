@@ -306,35 +306,6 @@ func volumeFileAttr(size int) *pb.GetAttrResponse {
 	}
 }
 
-func TestPrepareVolumeFileRequestUsesSharedDirectMountLease(t *testing.T) {
-	fileRPC := &fakeHTTPVolumeFileRPC{sessionID: "direct-session-1"}
-	server, volMgr := newVolumeFileTestServer(fileRPC)
-
-	ctx := internalauth.WithClaims(context.Background(), &internalauth.Claims{TeamID: "team-a"})
-	_, volumeRecord, cleanup, err := server.prepareVolumeFileRequest(ctx, "vol-1")
-	if err != nil {
-		t.Fatalf("prepareVolumeFileRequest() error = %v", err)
-	}
-	if volumeRecord == nil || volumeRecord.ID != "vol-1" {
-		t.Fatalf("unexpected volume record: %+v", volumeRecord)
-	}
-	if volMgr.acquireCalls != 1 {
-		t.Fatalf("AcquireDirectVolumeFileMount() calls = %d, want 1", volMgr.acquireCalls)
-	}
-	if volMgr.lastAcquireVolume != "vol-1" {
-		t.Fatalf("AcquireDirectVolumeFileMount() volume = %q, want %q", volMgr.lastAcquireVolume, "vol-1")
-	}
-	if fileRPC.mountCalls != 1 || fileRPC.lastMountID != "vol-1" {
-		t.Fatalf("MountVolume() got calls=%d volume=%q", fileRPC.mountCalls, fileRPC.lastMountID)
-	}
-
-	cleanup()
-
-	if volMgr.releaseCalls != 1 {
-		t.Fatalf("release calls = %d, want 1", volMgr.releaseCalls)
-	}
-}
-
 func TestReadVolumeFileUsesSharedBarrier(t *testing.T) {
 	barrier := &fakeHTTPSharedVolumeBarrier{}
 	fileRPC := &fakeHTTPVolumeFileRPC{

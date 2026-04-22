@@ -551,25 +551,6 @@ func (s *Server) deleteVolumeFile(w http.ResponseWriter, r *http.Request, volume
 	})
 }
 
-func (s *Server) prepareVolumeFileRequest(ctx context.Context, volumeID string) (context.Context, *db.SandboxVolume, func(), error) {
-	volumeRecord, err := s.loadAuthorizedVolume(ctx, volumeID)
-	if err != nil {
-		return ctx, nil, func() {}, err
-	}
-	if err := s.ensureCtldVolumeOwner(ctx, volumeRecord); err != nil {
-		return ctx, nil, func() {}, err
-	}
-	actor, err := defaultVolumeFileActor(volumeRecord)
-	if err != nil {
-		return ctx, nil, func() {}, err
-	}
-	cleanup, err := s.prepareVolumeFileMount(ctx, volumeID, volumeRecord.TeamID)
-	if err != nil {
-		return ctx, nil, func() {}, err
-	}
-	return withVolumeFileActor(ctx, actor), volumeRecord, cleanup, nil
-}
-
 func (s *Server) finalizeVolumeFileMutation(ctx context.Context, volumeID string) error {
 	if s == nil || s.volMgr == nil {
 		return nil

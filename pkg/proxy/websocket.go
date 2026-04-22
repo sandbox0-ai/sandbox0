@@ -106,6 +106,9 @@ func (p *WebSocketProxy) Proxy(targetURL *url.URL) gin.HandlerFunc {
 			return
 		}
 		defer downstreamConn.Close()
+		if err := DisableConnectionDeadlines(downstreamConn); err != nil {
+			p.logger.Debug("Failed to clear hijacked downstream connection deadlines", zap.Error(err))
+		}
 
 		if err := resp.Write(downstreamConn); err != nil {
 			p.logger.Error("Failed to write downstream WebSocket handshake", zap.Error(err))

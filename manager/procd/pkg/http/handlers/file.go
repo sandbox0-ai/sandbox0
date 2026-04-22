@@ -197,6 +197,9 @@ func (h *FileHandler) Watch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+	if err := proxy.DisableConnectionDeadlines(conn.UnderlyingConn()); err != nil {
+		h.logger.Debug("Failed to clear file watch websocket connection deadlines", zap.Error(err))
+	}
 
 	// Active watchers for this connection
 	type watchSubscription struct {

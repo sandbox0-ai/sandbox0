@@ -9,6 +9,7 @@ import (
 )
 
 type upstreamTimeoutDisabledKey struct{}
+type longLivedRequestKey struct{}
 
 // WithUpstreamTimeoutDisabled marks a request context so gateway upstream calls
 // should not apply the default proxy timeout.
@@ -19,12 +20,27 @@ func WithUpstreamTimeoutDisabled(ctx context.Context) context.Context {
 	return context.WithValue(ctx, upstreamTimeoutDisabledKey{}, true)
 }
 
+// WithLongLivedRequest marks a request context as a long-lived streaming route.
+// Long-lived requests also bypass the default upstream proxy timeout.
+func WithLongLivedRequest(ctx context.Context) context.Context {
+	ctx = WithUpstreamTimeoutDisabled(ctx)
+	return context.WithValue(ctx, longLivedRequestKey{}, true)
+}
+
 // WithUpstreamTimeoutDisabledRequest applies the no-timeout marker to a request.
 func WithUpstreamTimeoutDisabledRequest(req *http.Request) *http.Request {
 	if req == nil {
 		return nil
 	}
 	return req.WithContext(WithUpstreamTimeoutDisabled(req.Context()))
+}
+
+// WithLongLivedRequestRequest applies the long-lived request marker to a request.
+func WithLongLivedRequestRequest(req *http.Request) *http.Request {
+	if req == nil {
+		return nil
+	}
+	return req.WithContext(WithLongLivedRequest(req.Context()))
 }
 
 // UpstreamTimeoutDisabled reports whether upstream timeout enforcement is disabled.
@@ -34,6 +50,16 @@ func UpstreamTimeoutDisabled(ctx context.Context) bool {
 	}
 	disabled, _ := ctx.Value(upstreamTimeoutDisabledKey{}).(bool)
 	return disabled
+}
+
+// LongLivedRequest reports whether the request should be treated as a
+// long-lived route that is allowed to keep the downstream connection open.
+func LongLivedRequest(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	longLived, _ := ctx.Value(longLivedRequestKey{}).(bool)
+	return longLived
 }
 
 // EffectiveUpstreamTimeout returns the timeout to apply for an upstream request.

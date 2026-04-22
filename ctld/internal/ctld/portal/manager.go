@@ -115,7 +115,7 @@ func NewManager(cfg Config) *Manager {
 		logrus:            l,
 		storage:           storageConfig,
 		repo:              cfg.Repository,
-		clusterID:         strings.TrimSpace(storageConfig.DefaultClusterId),
+		clusterID:         naming.ClusterIDOrDefault(&storageConfig.DefaultClusterId),
 		podName:           strings.TrimSpace(cfg.PodName),
 		podNamespace:      strings.TrimSpace(cfg.PodNamespace),
 		heartbeatInterval: heartbeatInterval,

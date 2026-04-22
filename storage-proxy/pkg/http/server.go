@@ -14,6 +14,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/auth"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/notify"
@@ -160,7 +161,7 @@ func NewServer(logger *logrus.Logger, cfg *config.StorageProxyConfig, k8sClient 
 		selfPodID:     selfPodID,
 	}
 	if cfg != nil {
-		s.selfClusterID = cfg.DefaultClusterId
+		s.selfClusterID = naming.ClusterIDOrDefault(&cfg.DefaultClusterId)
 	}
 
 	// Register handlers

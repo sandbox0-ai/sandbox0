@@ -34,6 +34,24 @@ func TestIsConflictingMountForCtldBindBlocksCtldOwners(t *testing.T) {
 	}
 }
 
+func TestIsTransferSourceMountAllowsLegacyEmptyClusterID(t *testing.T) {
+	mount := &db.VolumeMount{
+		VolumeID:  "vol-1",
+		ClusterID: "",
+		PodID:     "sandbox0-system/ctld-node-a",
+	}
+
+	if !isTransferSourceMount(mount, "", "sandbox0-system/ctld-node-a") {
+		t.Fatal("expected legacy empty cluster ID to match transfer source")
+	}
+	if !isTransferSourceMount(mount, "default", "sandbox0-system/ctld-node-a") {
+		t.Fatal("expected normalized default cluster ID to match legacy empty cluster ID")
+	}
+	if isTransferSourceMount(mount, "", "sandbox0-system/ctld-node-b") {
+		t.Fatal("expected different transfer source pod to be rejected")
+	}
+}
+
 func TestFindBoundPortalForVolumeReturnsOtherPortal(t *testing.T) {
 	portals := map[string]*portalMount{
 		"portal-a": {mountPath: "/workspace/a", volumeID: "vol-1"},

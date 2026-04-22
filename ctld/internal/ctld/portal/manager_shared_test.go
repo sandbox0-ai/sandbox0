@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumefuse"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 )
@@ -90,5 +92,14 @@ func TestCleanupIdleOwnerOnlyVolumesRemovesIdleOwner(t *testing.T) {
 	}
 	if _, err := mgr.volumes.GetVolume("vol-1"); err == nil {
 		t.Fatal("GetVolume() after idle owner-only cleanup error = nil, want volume removed")
+	}
+}
+
+func TestNewManagerDefaultsClusterID(t *testing.T) {
+	mgr := NewManager(Config{
+		StorageConfig: &apiconfig.StorageProxyConfig{},
+	})
+	if mgr.clusterID != naming.DefaultClusterID {
+		t.Fatalf("clusterID = %q, want %q", mgr.clusterID, naming.DefaultClusterID)
 	}
 }

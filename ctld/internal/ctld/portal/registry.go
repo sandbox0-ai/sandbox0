@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"go.uber.org/zap"
@@ -55,7 +56,7 @@ func (m *Manager) validateBindableVolume(ctx context.Context, req ctldBindContex
 	}
 	selfPodID := m.ownerPodID()
 	for _, mount := range mounts {
-		if req.sourceClusterID != "" && req.sourcePodID != "" && mount.ClusterID == req.sourceClusterID && mount.PodID == req.sourcePodID {
+		if isTransferSourceMount(mount, req.sourceClusterID, req.sourcePodID) {
 			continue
 		}
 		if !isConflictingMountForCtldBind(mount, m.clusterID, selfPodID) {
@@ -64,6 +65,16 @@ func (m *Manager) validateBindableVolume(ctx context.Context, req ctldBindContex
 		return nil, fmt.Errorf("volume %s already has an active owner on %s/%s", req.volumeID, mount.ClusterID, mount.PodID)
 	}
 	return vol, nil
+}
+
+func isTransferSourceMount(mount *db.VolumeMount, sourceClusterID, sourcePodID string) bool {
+	if mount == nil || strings.TrimSpace(sourcePodID) == "" {
+		return false
+	}
+	if mount.PodID != strings.TrimSpace(sourcePodID) {
+		return false
+	}
+	return naming.ClusterIDOrDefault(&mount.ClusterID) == naming.ClusterIDOrDefault(&sourceClusterID)
 }
 
 func validateBindableAccessMode(raw string) (volume.AccessMode, error) {

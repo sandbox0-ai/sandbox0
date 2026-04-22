@@ -70,7 +70,6 @@ var errSandboxPowerStateStale = errors.New("sandbox power state changed during e
 // ErrSandboxPowerTransitionSuperseded is returned when a newer pause/resume request replaces the requested transition.
 var ErrSandboxPowerTransitionSuperseded = errors.New("sandbox power transition superseded")
 
-const defaultPodReadyTimeout = 30 * time.Second
 const defaultPodClaimReadyTimeout = 90 * time.Second
 const defaultSandboxPowerTransitionTimeout = 2 * time.Minute
 const defaultSandboxPowerPollInterval = 100 * time.Millisecond

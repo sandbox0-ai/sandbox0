@@ -2,11 +2,8 @@ package volume
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -76,13 +73,6 @@ type directMountLease struct {
 	SessionID string
 	InFlight  int
 	LastUsed  time.Time
-}
-
-var errVolumeRootNotFound = errors.New("volume root not found")
-
-type volumeRootMeta interface {
-	Lookup(ctx fsmeta.Context, parent fsmeta.Ino, name string, inode *fsmeta.Ino, attr *fsmeta.Attr, checkPerm bool) syscall.Errno
-	Mkdir(ctx fsmeta.Context, parent fsmeta.Ino, name string, mode uint16, cumask uint16, copysgid uint8, inode *fsmeta.Ino, attr *fsmeta.Attr) syscall.Errno
 }
 
 // Manager manages mounted volumes and mount sessions.
@@ -245,76 +235,6 @@ func (m *Manager) selectBackend() (Backend, error) {
 		}
 	}
 	return nil, fmt.Errorf("storage backend %q is not configured", m.defaultBackend)
-}
-
-func resolveMountRoot(metaClient volumeRootMeta, path string, readOnly bool, ensureWritable func(string) (fsmeta.Ino, error)) (fsmeta.Ino, error) {
-	if !readOnly {
-		return ensureVolumeRoot(metaClient, path)
-	}
-
-	rootInode, err := lookupVolumeRoot(metaClient, path)
-	if err == nil {
-		return rootInode, nil
-	}
-	if !errors.Is(err, errVolumeRootNotFound) {
-		return 0, err
-	}
-	if ensureWritable == nil {
-		return 0, err
-	}
-	return ensureWritable(path)
-}
-
-func lookupVolumeRoot(metaClient volumeRootMeta, path string) (fsmeta.Ino, error) {
-	return resolveVolumeRoot(metaClient, path, false)
-}
-
-// Use meta client directly to create the internal root path.
-// This avoids FUSE/VFS semantics (handles/permissions) and keeps it
-// consistent with snapshot operations which also use meta clients.
-func ensureVolumeRoot(metaClient volumeRootMeta, path string) (fsmeta.Ino, error) {
-	return resolveVolumeRoot(metaClient, path, true)
-}
-
-func resolveVolumeRoot(metaClient volumeRootMeta, path string, createMissing bool) (fsmeta.Ino, error) {
-	if metaClient == nil {
-		return 0, fmt.Errorf("meta client is nil")
-	}
-
-	trimmed := strings.Trim(path, "/")
-	if trimmed == "" {
-		return fsmeta.RootInode, nil
-	}
-
-	parts := strings.Split(trimmed, "/")
-	current := fsmeta.RootInode
-	var attr fsmeta.Attr
-	jfsCtx := fsmeta.Background()
-
-	for _, part := range parts {
-		var next fsmeta.Ino
-		errno := metaClient.Lookup(jfsCtx, current, part, &next, &attr, false)
-		if errno == syscall.ENOENT {
-			if !createMissing {
-				return 0, fmt.Errorf("%w: %s", errVolumeRootNotFound, part)
-			}
-			errno = metaClient.Mkdir(jfsCtx, current, part, 0o755, 0, 0, &next, &attr)
-			if errno != 0 && errno != syscall.EEXIST {
-				return 0, fmt.Errorf("mkdir %s: %s", part, errno.Error())
-			}
-			if errno == syscall.EEXIST {
-				errno = metaClient.Lookup(jfsCtx, current, part, &next, &attr, false)
-				if errno != 0 {
-					return 0, fmt.Errorf("lookup after mkdir %s: %s", part, errno.Error())
-				}
-			}
-		} else if errno != 0 {
-			return 0, fmt.Errorf("lookup %s: %s", part, errno.Error())
-		}
-		current = next
-	}
-
-	return current, nil
 }
 
 // UnmountVolume unmounts a volume session and unmounts the volume if it is the last session.

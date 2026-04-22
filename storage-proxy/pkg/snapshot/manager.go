@@ -4,10 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
-	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -75,7 +72,6 @@ var (
 	ErrRemountTimeout            = errors.New("remount timeout")
 	ErrInvalidAccessMode         = errors.New("invalid access mode")
 	ErrMountedCtldOwner          = errors.New("snapshot operations require ctld-mounted volumes to be unmounted")
-	errPathNotFound              = errors.New("path not found")
 )
 
 // Manager handles snapshot operations for SandboxVolumes
@@ -90,7 +86,6 @@ type Manager struct {
 	logger            *logrus.Logger
 	clusterID         string
 	podID             string
-	metaClient        metaClient
 	eventPublisher    eventPublisher
 	meteringRepo      meteringRecorder
 	metrics           *obsmetrics.StorageProxyMetrics
@@ -542,121 +537,8 @@ func volumeForkedEvent(regionID, clusterID string, volume *db.SandboxVolume) *me
 
 // Helper functions
 
-// metaClient defines the S0FS meta subset required by snapshot operations.
-type metaClient interface {
-	Lookup(fsmeta.Context, fsmeta.Ino, string, *fsmeta.Ino, *fsmeta.Attr, bool) syscall.Errno
-	Mkdir(fsmeta.Context, fsmeta.Ino, string, uint16, uint16, uint8, *fsmeta.Ino, *fsmeta.Attr) syscall.Errno
-	Clone(fsmeta.Context, fsmeta.Ino, fsmeta.Ino, fsmeta.Ino, string, uint8, uint16, *uint64, *uint64) syscall.Errno
-	Rename(fsmeta.Context, fsmeta.Ino, string, fsmeta.Ino, string, uint32, *fsmeta.Ino, *fsmeta.Attr) syscall.Errno
-	Remove(fsmeta.Context, fsmeta.Ino, string, bool, int, *uint64) syscall.Errno
-}
-
 type eventPublisher interface {
 	Publish(ctx context.Context, event *pb.WatchEvent)
-}
-
-// lookupPath resolves a path to parent inode and target inode
-func (m *Manager) lookupPath(path string) (parentIno, targetIno fsmeta.Ino, err error) {
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) == 0 {
-		return 0, 0, fmt.Errorf("invalid path: %s", path)
-	}
-
-	currentIno := fsmeta.RootInode
-	var attr fsmeta.Attr
-
-	jfsCtx := fsmeta.Background()
-
-	for i, part := range parts {
-		var nextIno fsmeta.Ino
-		errno := m.metaClient.Lookup(jfsCtx, currentIno, part, &nextIno, &attr, true)
-		if errno != 0 {
-			if errno == syscall.ENOENT {
-				return currentIno, 0, &pathNotFoundError{path: path}
-			}
-			return 0, 0, fmt.Errorf("lookup %s: %s", part, errno.Error())
-		}
-
-		if i == len(parts)-1 {
-			return currentIno, nextIno, nil
-		}
-		currentIno = nextIno
-	}
-
-	return currentIno, currentIno, nil
-}
-
-type pathNotFoundError struct {
-	path string
-}
-
-func (e *pathNotFoundError) Error() string {
-	return fmt.Sprintf("path not found: %s", e.path)
-}
-
-func (e *pathNotFoundError) Is(target error) bool {
-	return target == errPathNotFound
-}
-
-// ensurePathExists creates directories along a path if they don't exist
-func (m *Manager) ensurePathExists(ctx context.Context, path string) (fsmeta.Ino, error) {
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) == 0 {
-		return fsmeta.RootInode, nil
-	}
-
-	currentIno := fsmeta.RootInode
-	var attr fsmeta.Attr
-
-	jfsCtx := fsmeta.Background()
-
-	for _, part := range parts {
-		var nextIno fsmeta.Ino
-		errno := m.metaClient.Lookup(jfsCtx, currentIno, part, &nextIno, &attr, false)
-
-		if errno == syscall.ENOENT {
-			// Create directory
-			errno = m.metaClient.Mkdir(jfsCtx, currentIno, part, 0o755, 0, 0, &nextIno, &attr)
-			if errno != 0 && errno != syscall.EEXIST {
-				return 0, fmt.Errorf("mkdir %s: %s", part, errno.Error())
-			}
-			// If EEXIST, look it up again
-			if errno == syscall.EEXIST {
-				errno = m.metaClient.Lookup(jfsCtx, currentIno, part, &nextIno, &attr, false)
-				if errno != 0 {
-					return 0, fmt.Errorf("lookup after mkdir %s: %s", part, errno.Error())
-				}
-			}
-		} else if errno != 0 {
-			return 0, fmt.Errorf("lookup %s: %s", part, errno.Error())
-		}
-
-		currentIno = nextIno
-	}
-
-	return currentIno, nil
-}
-
-// deleteSnapshotDir removes a snapshot directory from S0FS
-func (m *Manager) deleteSnapshotDir(ctx context.Context, snapshotPath string) {
-	parentIno, snapshotIno, err := m.lookupPath(snapshotPath)
-	if err != nil {
-		m.logger.WithError(err).Warn("Failed to lookup snapshot path for deletion")
-		return
-	}
-
-	if snapshotIno == 0 {
-		return // Already deleted
-	}
-
-	jfsCtx := fsmeta.Background()
-	snapshotName := filepath.Base(snapshotPath)
-
-	var removeCount uint64
-	errno := m.metaClient.Remove(jfsCtx, parentIno, snapshotName, true, 4, &removeCount)
-	if errno != 0 && errno != syscall.ENOENT {
-		m.logger.WithError(errno).Warn("Failed to delete snapshot directory")
-	}
 }
 
 func (m *Manager) publishInvalidateEvent(volumeID, invalidateID string) {

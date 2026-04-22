@@ -17,6 +17,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
+	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
@@ -788,6 +789,69 @@ func TestBindVolumePortalTreatsPreparationConflictAsClaimConflict(t *testing.T) 
 	}
 	if !errors.Is(err, ErrClaimConflict) {
 		t.Fatalf("bindVolumePortal() error = %v, want ErrClaimConflict", err)
+	}
+}
+
+func TestBindVolumePortalRetriesWhilePortalPublicationIsPending(t *testing.T) {
+	var bindCalls int
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/volume-portals/bind" {
+			http.NotFound(w, r)
+			return
+		}
+		bindCalls++
+		w.Header().Set("Content-Type", "application/json")
+		if bindCalls < 3 {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(ctldapi.BindVolumePortalResponse{
+				Error: "volume portal data for pod pod-uid is not published",
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(ctldapi.BindVolumePortalResponse{
+			SandboxVolumeID: "vol-1",
+			MountPoint:      "/workspace/data",
+		})
+	}))
+	defer ctld.Close()
+
+	ctldURL, err := url.Parse(ctld.URL)
+	if err != nil {
+		t.Fatalf("parse ctld url: %v", err)
+	}
+	ctldPort, err := strconv.Atoi(ctldURL.Port())
+	if err != nil {
+		t.Fatalf("parse ctld port: %v", err)
+	}
+
+	client := fake.NewSimpleClientset(&corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
+		Status: corev1.NodeStatus{
+			Addresses: []corev1.NodeAddress{{
+				Type:    corev1.NodeInternalIP,
+				Address: ctldURL.Hostname(),
+			}},
+		},
+	})
+	svc := &SandboxService{
+		k8sClient:  client,
+		ctldClient: NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		config:     SandboxServiceConfig{CtldPort: ctldPort},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "team-a", UID: "pod-uid"},
+		Spec:       corev1.PodSpec{NodeName: "node-a"},
+	}
+
+	resp, err := svc.bindVolumePortal(context.Background(), pod, "team-a", "user-a", "team-a", "vol-1", "/workspace/data", "data")
+	if err != nil {
+		t.Fatalf("bindVolumePortal() error = %v", err)
+	}
+	if resp == nil || resp.SandboxVolumeID != "vol-1" {
+		t.Fatalf("bindVolumePortal() response = %+v, want bound vol-1", resp)
+	}
+	if bindCalls != 3 {
+		t.Fatalf("bind calls = %d, want 3", bindCalls)
 	}
 }
 

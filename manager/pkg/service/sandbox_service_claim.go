@@ -25,6 +25,11 @@ import (
 	"k8s.io/client-go/util/retry"
 )
 
+const (
+	volumePortalBindRetryWindow   = 5 * time.Second
+	volumePortalBindRetryInterval = 100 * time.Millisecond
+)
+
 // ClaimRequest represents a sandbox claim request
 type ClaimRequest struct {
 	TeamID   string
@@ -508,7 +513,7 @@ func (s *SandboxService) bindVolumePortal(ctx context.Context, pod *corev1.Pod, 
 		}
 		return nil, fmt.Errorf("prepare volume portal bind: %w", err)
 	}
-	resp, err := s.ctldClient.BindVolumePortal(ctx, ctldAddress, ctldapi.BindVolumePortalRequest{
+	resp, err := s.bindVolumePortalWithRetry(ctx, ctldAddress, ctldapi.BindVolumePortalRequest{
 		Namespace:       pod.Namespace,
 		PodName:         pod.Name,
 		PodUID:          string(pod.UID),
@@ -531,6 +536,45 @@ func (s *SandboxService) bindVolumePortal(ctx context.Context, pod *corev1.Pod, 
 		)
 	}
 	return resp, nil
+}
+
+func (s *SandboxService) bindVolumePortalWithRetry(ctx context.Context, ctldAddress string, req ctldapi.BindVolumePortalRequest) (*ctldapi.BindVolumePortalResponse, error) {
+	if s == nil || s.ctldClient == nil {
+		return nil, fmt.Errorf("ctld client is not configured")
+	}
+
+	deadline := time.Now().Add(volumePortalBindRetryWindow)
+	for {
+		resp, err := s.ctldClient.BindVolumePortal(ctx, ctldAddress, req)
+		if err == nil {
+			return resp, nil
+		}
+		if !isVolumePortalPendingPublicationError(resp, err) {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if time.Now().After(deadline) {
+			return nil, err
+		}
+
+		timer := time.NewTimer(volumePortalBindRetryInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func isVolumePortalPendingPublicationError(resp *ctldapi.BindVolumePortalResponse, err error) bool {
+	if err == nil || resp == nil {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(resp.Error))
+	return strings.Contains(message, "is not published")
 }
 
 // claimIdlePod claims an idle pod from the pool

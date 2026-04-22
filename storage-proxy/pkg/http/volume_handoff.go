@@ -96,11 +96,22 @@ func (s *Server) executePortalBindHandoff(ctx context.Context, volumeRecord *db.
 		_ = s.repo.DeleteVolumeHandoff(context.Background(), volumeRecord.ID)
 	}
 
-	if _, err := postCtldJSON[ctldapi.PrepareVolumePortalHandoffResponse](ctx, sourceURL.String(), "/api/v1/volume-portals/handoffs/prepare", ctldapi.PrepareVolumePortalHandoffRequest{
+	prepareResp, err := postCtldJSON[ctldapi.PrepareVolumePortalHandoffResponse](ctx, sourceURL.String(), "/api/v1/volume-portals/handoffs/prepare", ctldapi.PrepareVolumePortalHandoffRequest{
 		SandboxVolumeID: volumeRecord.ID,
-	}); err != nil {
+	})
+	if err != nil {
 		cleanup()
 		return err
+	}
+	if prepareResp == nil || !prepareResp.Prepared {
+		_, _ = postCtldJSON[ctldapi.AbortVolumePortalHandoffResponse](context.Background(), sourceURL.String(), "/api/v1/volume-portals/handoffs/abort", ctldapi.AbortVolumePortalHandoffRequest{
+			SandboxVolumeID: volumeRecord.ID,
+		})
+		cleanup()
+		if prepareResp != nil && strings.TrimSpace(prepareResp.Error) != "" {
+			return fmt.Errorf("ctld handoff preparation did not complete: %s", prepareResp.Error)
+		}
+		return fmt.Errorf("ctld handoff preparation did not complete")
 	}
 
 	if err := s.repo.UpsertVolumeHandoff(ctx, &db.VolumeHandoff{

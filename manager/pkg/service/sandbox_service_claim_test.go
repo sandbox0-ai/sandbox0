@@ -855,6 +855,57 @@ func TestBindVolumePortalRetriesWhilePortalPublicationIsPending(t *testing.T) {
 	}
 }
 
+func TestBindVolumePortalTreatsCtldConflictAsClaimConflict(t *testing.T) {
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/volume-portals/bind" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(ctldapi.BindVolumePortalResponse{
+			Error: "volume vol-1 is already bound to /workspace",
+		})
+	}))
+	defer ctld.Close()
+
+	ctldURL, err := url.Parse(ctld.URL)
+	if err != nil {
+		t.Fatalf("parse ctld url: %v", err)
+	}
+	ctldPort, err := strconv.Atoi(ctldURL.Port())
+	if err != nil {
+		t.Fatalf("parse ctld port: %v", err)
+	}
+
+	client := fake.NewSimpleClientset(&corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
+		Status: corev1.NodeStatus{
+			Addresses: []corev1.NodeAddress{{
+				Type:    corev1.NodeInternalIP,
+				Address: ctldURL.Hostname(),
+			}},
+		},
+	})
+	svc := &SandboxService{
+		k8sClient:  client,
+		ctldClient: NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		config:     SandboxServiceConfig{CtldPort: ctldPort},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "team-a", UID: "pod-uid"},
+		Spec:       corev1.PodSpec{NodeName: "node-a"},
+	}
+
+	_, err = svc.bindVolumePortal(context.Background(), pod, "team-a", "user-a", "team-a", "vol-1", "/workspace/data", "data")
+	if err == nil {
+		t.Fatal("bindVolumePortal() error = nil, want claim conflict")
+	}
+	if !errors.Is(err, ErrClaimConflict) {
+		t.Fatalf("bindVolumePortal() error = %v, want ErrClaimConflict", err)
+	}
+}
+
 func newClaimTestPodLister(t *testing.T, pods ...*corev1.Pod) corelisters.PodLister {
 	t.Helper()
 	return corelisters.NewPodLister(newClaimTestPodIndexer(t, pods...))

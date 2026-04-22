@@ -549,6 +549,13 @@ func (s *SandboxService) bindVolumePortalWithRetry(ctx context.Context, ctldAddr
 		if err == nil {
 			return resp, nil
 		}
+		if isVolumePortalBindConflictError(resp, err) {
+			message := strings.TrimSpace(resp.Error)
+			if message == "" {
+				message = err.Error()
+			}
+			return nil, fmt.Errorf("%w: %s", ErrClaimConflict, message)
+		}
 		if !isVolumePortalPendingPublicationError(resp, err) {
 			return nil, err
 		}
@@ -567,6 +574,24 @@ func (s *SandboxService) bindVolumePortalWithRetry(ctx context.Context, ctldAddr
 		case <-timer.C:
 		}
 	}
+}
+
+func isVolumePortalBindConflictError(resp *ctldapi.BindVolumePortalResponse, err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	if strings.Contains(message, "status 409") {
+		return true
+	}
+	if resp == nil {
+		return false
+	}
+	message = strings.ToLower(strings.TrimSpace(resp.Error))
+	return strings.Contains(message, "already has an active owner") ||
+		strings.Contains(message, "actively bound to a portal") ||
+		strings.Contains(message, "already bound to") ||
+		strings.Contains(message, "handoff already in progress")
 }
 
 func isVolumePortalPendingPublicationError(resp *ctldapi.BindVolumePortalResponse, err error) bool {

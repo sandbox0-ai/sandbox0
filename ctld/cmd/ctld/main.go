@@ -304,6 +304,7 @@ func volumePortalErrorStatus(err error) int {
 	switch {
 	case strings.Contains(message, "already has an active owner"),
 		strings.Contains(message, "actively bound to a portal"),
+		strings.Contains(message, "already bound to"),
 		strings.Contains(message, "handoff already in progress"):
 		return http.StatusConflict
 	default:

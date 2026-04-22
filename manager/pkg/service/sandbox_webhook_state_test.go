@@ -48,10 +48,14 @@ func TestStorageProxyVolumeClientDefaultsClusterID(t *testing.T) {
 
 func TestStorageProxyVolumeClientPrepareForPortalBind(t *testing.T) {
 	var gotMethod, gotPath, gotToken string
+	var gotReq PrepareVolumePortalBindRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
 		gotPath = r.URL.Path
 		gotToken = r.Header.Get("X-Internal-Token")
+		if err := json.NewDecoder(r.Body).Decode(&gotReq); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
 		_ = spec.WriteSuccess(w, http.StatusOK, map[string]any{"prepared": true})
 	}))
 	defer server.Close()
@@ -60,7 +64,14 @@ func TestStorageProxyVolumeClientPrepareForPortalBind(t *testing.T) {
 		BaseURL:        server.URL,
 		TokenGenerator: staticTokenGenerator{},
 	})
-	if err := client.PrepareForVolumePortalBind(t.Context(), "team-1", "user-1", "vol-1"); err != nil {
+	if err := client.PrepareForVolumePortalBind(t.Context(), PrepareVolumePortalBindRequest{
+		TeamID:         "team-1",
+		UserID:         "user-1",
+		VolumeID:       "vol-1",
+		TargetCtldAddr: "http://10.0.0.1:8095",
+		PodUID:         "pod-uid",
+		MountPath:      "/workspace",
+	}); err != nil {
 		t.Fatalf("PrepareForVolumePortalBind() error = %v", err)
 	}
 	if gotMethod != http.MethodPut {
@@ -71,6 +82,12 @@ func TestStorageProxyVolumeClientPrepareForPortalBind(t *testing.T) {
 	}
 	if gotToken == "" {
 		t.Fatal("expected internal token header to be set")
+	}
+	if gotReq.TargetCtldAddr != "http://10.0.0.1:8095" {
+		t.Fatalf("targetCtldAddr = %q, want %q", gotReq.TargetCtldAddr, "http://10.0.0.1:8095")
+	}
+	if gotReq.PodUID != "pod-uid" {
+		t.Fatalf("podUID = %q, want %q", gotReq.PodUID, "pod-uid")
 	}
 }
 
@@ -84,7 +101,11 @@ func TestStorageProxyVolumeClientPrepareForPortalBindConflict(t *testing.T) {
 		BaseURL:        server.URL,
 		TokenGenerator: staticTokenGenerator{},
 	})
-	err := client.PrepareForVolumePortalBind(t.Context(), "team-1", "user-1", "vol-1")
+	err := client.PrepareForVolumePortalBind(t.Context(), PrepareVolumePortalBindRequest{
+		TeamID:   "team-1",
+		UserID:   "user-1",
+		VolumeID: "vol-1",
+	})
 	if err == nil {
 		t.Fatal("PrepareForVolumePortalBind() error = nil, want conflict")
 	}

@@ -42,7 +42,22 @@ type SandboxVolumeMetadataClient interface {
 }
 
 type SandboxVolumePortalPreparationClient interface {
-	PrepareForVolumePortalBind(ctx context.Context, teamID, userID, volumeID string) error
+	PrepareForVolumePortalBind(ctx context.Context, req PrepareVolumePortalBindRequest) error
+}
+
+type PrepareVolumePortalBindRequest struct {
+	TeamID          string `json:"team_id"`
+	UserID          string `json:"user_id"`
+	VolumeID        string `json:"volume_id"`
+	TargetClusterID string `json:"target_cluster_id"`
+	TargetCtldAddr  string `json:"target_ctld_addr"`
+	Namespace       string `json:"namespace"`
+	PodName         string `json:"pod_name"`
+	PodUID          string `json:"pod_uid"`
+	PortalName      string `json:"portal_name"`
+	MountPath       string `json:"mount_path"`
+	SandboxID       string `json:"sandbox_id"`
+	OwnerTeamID     string `json:"owner_team_id"`
 }
 
 type StorageProxyVolumeClient struct {
@@ -194,25 +209,33 @@ func (c *StorageProxyVolumeClient) Get(ctx context.Context, teamID, userID, volu
 	return volume, nil
 }
 
-func (c *StorageProxyVolumeClient) PrepareForVolumePortalBind(ctx context.Context, teamID, userID, volumeID string) error {
+func (c *StorageProxyVolumeClient) PrepareForVolumePortalBind(ctx context.Context, req PrepareVolumePortalBindRequest) error {
 	if c == nil || c.baseURL == "" {
 		return fmt.Errorf("storage-proxy volume client is not configured")
 	}
-	volumeID = strings.TrimSpace(volumeID)
+	volumeID := strings.TrimSpace(req.VolumeID)
 	if volumeID == "" {
 		return fmt.Errorf("volume id is required")
 	}
-	token, err := c.generateToken(teamID, userID, "")
+	if req.TargetClusterID == "" {
+		req.TargetClusterID = c.clusterID
+	}
+	token, err := c.generateToken(req.TeamID, req.UserID, "")
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.baseURL+"/internal/v1/sandboxvolumes/"+url.PathEscape(volumeID)+"/prepare-portal-bind", nil)
+	payload, err := json.Marshal(req)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("X-Internal-Token", token)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPut, c.baseURL+"/internal/v1/sandboxvolumes/"+url.PathEscape(volumeID)+"/prepare-portal-bind", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-Internal-Token", token)
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("prepare sandbox volume for portal bind: %w", err)
 	}

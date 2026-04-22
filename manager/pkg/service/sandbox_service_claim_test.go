@@ -17,6 +17,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
+	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
@@ -731,11 +732,11 @@ func (c fakeVolumeMetadataClient) Get(_ context.Context, teamID, userID, volumeI
 	}, nil
 }
 
-func (c *fakeVolumeMetadataClient) PrepareForVolumePortalBind(_ context.Context, teamID, userID, volumeID string) error {
+func (c *fakeVolumeMetadataClient) PrepareForVolumePortalBind(_ context.Context, req PrepareVolumePortalBindRequest) error {
 	if c == nil {
 		return nil
 	}
-	c.prepared = append(c.prepared, teamID+":"+userID+":"+volumeID)
+	c.prepared = append(c.prepared, req.TeamID+":"+req.UserID+":"+req.VolumeID+":"+req.TargetCtldAddr+":"+req.PodUID)
 	return c.prepareErr
 }
 
@@ -743,24 +744,44 @@ func TestPrepareVolumePortalBindUsesPreparationClientWhenAvailable(t *testing.T)
 	metadata := &fakeVolumeMetadataClient{}
 	svc := &SandboxService{volumeMetadata: metadata}
 
-	if err := svc.prepareVolumePortalBind(context.Background(), "team-a", "user-a", "vol-1"); err != nil {
+	if err := svc.prepareVolumePortalBind(context.Background(), PrepareVolumePortalBindRequest{
+		TeamID:         "team-a",
+		UserID:         "user-a",
+		VolumeID:       "vol-1",
+		TargetCtldAddr: "http://ctld",
+		PodUID:         "pod-uid",
+	}); err != nil {
 		t.Fatalf("prepareVolumePortalBind() error = %v", err)
 	}
 	if len(metadata.prepared) != 1 {
 		t.Fatalf("prepared calls = %d, want 1", len(metadata.prepared))
 	}
-	if metadata.prepared[0] != "team-a:user-a:vol-1" {
-		t.Fatalf("prepared call = %q, want %q", metadata.prepared[0], "team-a:user-a:vol-1")
+	if metadata.prepared[0] != "team-a:user-a:vol-1:http://ctld:pod-uid" {
+		t.Fatalf("prepared call = %q, want %q", metadata.prepared[0], "team-a:user-a:vol-1:http://ctld:pod-uid")
 	}
 }
 
 func TestBindVolumePortalTreatsPreparationConflictAsClaimConflict(t *testing.T) {
 	metadata := &fakeVolumeMetadataClient{prepareErr: ErrVolumePortalBindConflict}
+	client := fake.NewSimpleClientset(&corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
+		Status: corev1.NodeStatus{
+			Addresses: []corev1.NodeAddress{{
+				Type:    corev1.NodeInternalIP,
+				Address: "10.0.0.8",
+			}},
+		},
+	})
 	svc := &SandboxService{
+		k8sClient:      client,
 		ctldClient:     &CtldClient{},
 		volumeMetadata: metadata,
+		config:         SandboxServiceConfig{CtldPort: 8095},
 	}
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "team-a", UID: "pod-uid"}}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "team-a", UID: "pod-uid"},
+		Spec:       corev1.PodSpec{NodeName: "node-a"},
+	}
 
 	_, err := svc.bindVolumePortal(context.Background(), pod, "team-a", "user-a", "team-a", "vol-1", "/workspace/data", "data")
 	if err == nil {
@@ -768,6 +789,69 @@ func TestBindVolumePortalTreatsPreparationConflictAsClaimConflict(t *testing.T) 
 	}
 	if !errors.Is(err, ErrClaimConflict) {
 		t.Fatalf("bindVolumePortal() error = %v, want ErrClaimConflict", err)
+	}
+}
+
+func TestBindVolumePortalRetriesWhilePortalPublicationIsPending(t *testing.T) {
+	var bindCalls int
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/volume-portals/bind" {
+			http.NotFound(w, r)
+			return
+		}
+		bindCalls++
+		w.Header().Set("Content-Type", "application/json")
+		if bindCalls < 3 {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(ctldapi.BindVolumePortalResponse{
+				Error: "volume portal data for pod pod-uid is not published",
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(ctldapi.BindVolumePortalResponse{
+			SandboxVolumeID: "vol-1",
+			MountPoint:      "/workspace/data",
+		})
+	}))
+	defer ctld.Close()
+
+	ctldURL, err := url.Parse(ctld.URL)
+	if err != nil {
+		t.Fatalf("parse ctld url: %v", err)
+	}
+	ctldPort, err := strconv.Atoi(ctldURL.Port())
+	if err != nil {
+		t.Fatalf("parse ctld port: %v", err)
+	}
+
+	client := fake.NewSimpleClientset(&corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
+		Status: corev1.NodeStatus{
+			Addresses: []corev1.NodeAddress{{
+				Type:    corev1.NodeInternalIP,
+				Address: ctldURL.Hostname(),
+			}},
+		},
+	})
+	svc := &SandboxService{
+		k8sClient:  client,
+		ctldClient: NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		config:     SandboxServiceConfig{CtldPort: ctldPort},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "team-a", UID: "pod-uid"},
+		Spec:       corev1.PodSpec{NodeName: "node-a"},
+	}
+
+	resp, err := svc.bindVolumePortal(context.Background(), pod, "team-a", "user-a", "team-a", "vol-1", "/workspace/data", "data")
+	if err != nil {
+		t.Fatalf("bindVolumePortal() error = %v", err)
+	}
+	if resp == nil || resp.SandboxVolumeID != "vol-1" {
+		t.Fatalf("bindVolumePortal() response = %+v, want bound vol-1", resp)
+	}
+	if bindCalls != 3 {
+		t.Fatalf("bind calls = %d, want 3", bindCalls)
 	}
 }
 

@@ -89,6 +89,19 @@ type VolumeMount struct {
 	MountOptions  *json.RawMessage `json:"mount_options,omitempty"`
 }
 
+type VolumeHandoff struct {
+	VolumeID        string    `json:"volume_id"`
+	SourceClusterID string    `json:"source_cluster_id"`
+	SourcePodID     string    `json:"source_pod_id"`
+	TargetClusterID string    `json:"target_cluster_id"`
+	TargetPodID     string    `json:"target_pod_id"`
+	TargetCtldAddr  string    `json:"target_ctld_addr"`
+	Status          string    `json:"status"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+	ExpiresAt       time.Time `json:"expires_at"`
+}
+
 // SnapshotCoordination tracks the state of a snapshot creation across clusters
 type SnapshotCoordination struct {
 	ID       string `json:"id"`

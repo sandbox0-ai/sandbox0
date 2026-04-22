@@ -14,6 +14,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/auth"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/notify"
@@ -38,6 +39,10 @@ type volumeRepository interface {
 	GetOwnedSandboxVolumeByOwner(ctx context.Context, clusterID, sandboxID, purpose string) (*db.OwnedSandboxVolume, error)
 	GetActiveMounts(ctx context.Context, volumeID string, heartbeatTimeout int) ([]*db.VolumeMount, error)
 	DeleteMount(ctx context.Context, volumeID, clusterID, podID string) error
+	TransferMount(ctx context.Context, volumeID, sourceClusterID, sourcePodID string, target *db.VolumeMount, heartbeatTimeout int) error
+	UpsertVolumeHandoff(ctx context.Context, handoff *db.VolumeHandoff) error
+	GetVolumeHandoff(ctx context.Context, volumeID string) (*db.VolumeHandoff, error)
+	DeleteVolumeHandoff(ctx context.Context, volumeID string) error
 	DeleteSandboxVolumeTx(ctx context.Context, tx pgx.Tx, id string) error
 	MarkOwnedSandboxVolumesForCleanup(ctx context.Context, clusterID, sandboxID, reason string) (int64, error)
 	MarkOwnedSandboxVolumeCleanupAttempt(ctx context.Context, volumeID string, cleanupErr error) error
@@ -73,6 +78,7 @@ type syncManager interface {
 }
 
 type volumeMutationBarrier interface {
+	WithShared(ctx context.Context, volumeID string, fn func(context.Context) error) error
 	WithExclusive(ctx context.Context, volumeID string, fn func(context.Context) error) error
 }
 
@@ -125,6 +131,7 @@ type Server struct {
 	fileRPC       volumeFileRPC
 	eventHub      volumeEventHub
 	podResolver   volumeFilePodResolver
+	ctldResolver  volumeCtldResolver
 	selfPodID     string
 	selfClusterID string
 }
@@ -151,10 +158,11 @@ func NewServer(logger *logrus.Logger, cfg *config.StorageProxyConfig, k8sClient 
 		fileRPC:       fileRPC,
 		eventHub:      eventHub,
 		podResolver:   newKubernetesVolumeFilePodResolver(logger, k8sClient, cfg),
+		ctldResolver:  newKubernetesVolumeCtldResolver(k8sClient, selfPodID),
 		selfPodID:     selfPodID,
 	}
 	if cfg != nil {
-		s.selfClusterID = cfg.DefaultClusterId
+		s.selfClusterID = naming.ClusterIDOrDefault(&cfg.DefaultClusterId)
 	}
 
 	// Register handlers

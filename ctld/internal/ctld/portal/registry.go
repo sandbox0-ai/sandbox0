@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"go.uber.org/zap"
@@ -55,12 +56,25 @@ func (m *Manager) validateBindableVolume(ctx context.Context, req ctldBindContex
 	}
 	selfPodID := m.ownerPodID()
 	for _, mount := range mounts {
+		if isTransferSourceMount(mount, req.sourceClusterID, req.sourcePodID) {
+			continue
+		}
 		if !isConflictingMountForCtldBind(mount, m.clusterID, selfPodID) {
 			continue
 		}
 		return nil, fmt.Errorf("volume %s already has an active owner on %s/%s", req.volumeID, mount.ClusterID, mount.PodID)
 	}
 	return vol, nil
+}
+
+func isTransferSourceMount(mount *db.VolumeMount, sourceClusterID, sourcePodID string) bool {
+	if mount == nil || strings.TrimSpace(sourcePodID) == "" {
+		return false
+	}
+	if mount.PodID != strings.TrimSpace(sourcePodID) {
+		return false
+	}
+	return naming.ClusterIDOrDefault(&mount.ClusterID) == naming.ClusterIDOrDefault(&sourceClusterID)
 }
 
 func validateBindableAccessMode(raw string) (volume.AccessMode, error) {
@@ -102,11 +116,13 @@ func findBoundPortalForVolume(portals map[string]*portalMount, volumeID, exceptK
 }
 
 type ctldBindContext struct {
-	volumeID string
-	teamID   string
+	volumeID        string
+	teamID          string
+	sourceClusterID string
+	sourcePodID     string
 }
 
-func (m *Manager) registerOwner(ctx context.Context, bound *boundVolume) error {
+func (m *Manager) registerOwner(ctx context.Context, bound *boundVolume, sourceClusterID, sourcePodID string) error {
 	if m == nil || m.repo == nil || bound == nil || bound.volumeID == "" {
 		return fmt.Errorf("ctld volume registry unavailable")
 	}
@@ -140,8 +156,14 @@ func (m *Manager) registerOwner(ctx context.Context, bound *boundVolume) error {
 	if m.storage != nil && m.storage.HeartbeatTimeout > 0 {
 		heartbeatTimeout = m.storage.HeartbeatTimeout
 	}
-	if err := m.repo.AcquireMount(ctx, mount, heartbeatTimeout); err != nil {
-		return err
+	if sourceClusterID != "" && sourcePodID != "" {
+		if err := m.repo.TransferMount(ctx, bound.volumeID, sourceClusterID, sourcePodID, mount, heartbeatTimeout); err != nil {
+			return err
+		}
+	} else {
+		if err := m.repo.AcquireMount(ctx, mount, heartbeatTimeout); err != nil {
+			return err
+		}
 	}
 
 	interval := m.heartbeatInterval

@@ -165,6 +165,11 @@ func (r *Reconciler) ReconcileStorageProxyRBAC(ctx context.Context, infra *infra
 			Resources: []string{"pods", "events"},
 			Verbs:     []string{"get", "list", "watch", "create", "patch"},
 		},
+		{
+			APIGroups: []string{""},
+			Resources: []string{"nodes"},
+			Verbs:     []string{"get"},
+		},
 	}
 
 	if err := r.reconcileClusterRole(ctx, name, labels, rules); err != nil {

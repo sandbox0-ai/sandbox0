@@ -60,6 +60,18 @@ func (c *CtldClient) UnbindVolumePortal(ctx context.Context, ctldAddress string,
 	return doCtldJSONRequest[ctldapi.UnbindVolumePortalResponse](ctx, c.httpClient, ctldAddress, "/api/v1/volume-portals/unbind", req)
 }
 
+func (c *CtldClient) PrepareVolumePortalHandoff(ctx context.Context, ctldAddress string, req ctldapi.PrepareVolumePortalHandoffRequest) (*ctldapi.PrepareVolumePortalHandoffResponse, error) {
+	return doCtldJSONRequest[ctldapi.PrepareVolumePortalHandoffResponse](ctx, c.httpClient, ctldAddress, "/api/v1/volume-portals/handoffs/prepare", req)
+}
+
+func (c *CtldClient) CompleteVolumePortalHandoff(ctx context.Context, ctldAddress string, req ctldapi.CompleteVolumePortalHandoffRequest) (*ctldapi.CompleteVolumePortalHandoffResponse, error) {
+	return doCtldJSONRequest[ctldapi.CompleteVolumePortalHandoffResponse](ctx, c.httpClient, ctldAddress, "/api/v1/volume-portals/handoffs/complete", req)
+}
+
+func (c *CtldClient) AbortVolumePortalHandoff(ctx context.Context, ctldAddress string, req ctldapi.AbortVolumePortalHandoffRequest) (*ctldapi.AbortVolumePortalHandoffResponse, error) {
+	return doCtldJSONRequest[ctldapi.AbortVolumePortalHandoffResponse](ctx, c.httpClient, ctldAddress, "/api/v1/volume-portals/handoffs/abort", req)
+}
+
 func doCtldRequest[T any](ctx context.Context, httpClient *http.Client, ctldAddress, sandboxID, suffix string) (*T, error) {
 	path := fmt.Sprintf("/api/v1/sandboxes/%s%s", url.PathEscape(sandboxID), suffix)
 	return doCtldPathRequest[T](ctx, httpClient, ctldAddress, path)

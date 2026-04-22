@@ -38,6 +38,7 @@ type Manager struct {
 	podName           string
 	podNamespace      string
 	heartbeatInterval time.Duration
+	ownerOnlyIdleTTL  time.Duration
 	volumeAPI         http.Handler
 
 	mu              sync.Mutex
@@ -106,6 +107,7 @@ func NewManager(cfg Config) *Manager {
 	if heartbeatInterval <= 0 {
 		heartbeatInterval = 5 * time.Second
 	}
+	ownerOnlyIdleTTL, _ := time.ParseDuration(storageConfig.DirectVolumeFileIdleTTL)
 	manager := &Manager{
 		nodeName:          strings.TrimSpace(cfg.NodeName),
 		rootDir:           rootDir,
@@ -113,10 +115,11 @@ func NewManager(cfg Config) *Manager {
 		logrus:            l,
 		storage:           storageConfig,
 		repo:              cfg.Repository,
-		clusterID:         strings.TrimSpace(storageConfig.DefaultClusterId),
+		clusterID:         naming.ClusterIDOrDefault(&storageConfig.DefaultClusterId),
 		podName:           strings.TrimSpace(cfg.PodName),
 		podNamespace:      strings.TrimSpace(cfg.PodNamespace),
 		heartbeatInterval: heartbeatInterval,
+		ownerOnlyIdleTTL:  ownerOnlyIdleTTL,
 		portals:           make(map[string]*portalMount),
 		portalsByTarget:   make(map[string]*portalMount),
 		boundVolumes:      make(map[string]*boundVolume),
@@ -131,6 +134,26 @@ func (m *Manager) MountedVolumeHandler() http.Handler {
 		return nil
 	}
 	return m.volumeAPI
+}
+
+func (m *Manager) Run(ctx context.Context) {
+	if m == nil || m.ownerOnlyIdleTTL <= 0 {
+		return
+	}
+	interval := m.ownerOnlyIdleTTL / 2
+	if interval <= 0 || interval > 5*time.Second {
+		interval = 5 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.cleanupIdleOwnerOnlyVolumes(ctx)
+		}
+	}
 }
 
 func (m *Manager) PublishPortal(ctx context.Context, req publishRequest) error {
@@ -239,8 +262,10 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("pod_uid, sandboxvolume_id and team_id are required")
 	}
 	volumeRecord, err := m.validateBindableVolume(ctx, ctldBindContext{
-		volumeID: req.SandboxVolumeID,
-		teamID:   req.TeamID,
+		volumeID:        req.SandboxVolumeID,
+		teamID:          req.TeamID,
+		sourceClusterID: strings.TrimSpace(req.TransferSourceClusterID),
+		sourcePodID:     strings.TrimSpace(req.TransferSourcePodID),
 	})
 	if err != nil {
 		return ctldapi.BindVolumePortalResponse{}, err
@@ -280,6 +305,13 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 		return response, nil
 	}
 	if bound := m.boundVolumes[req.SandboxVolumeID]; bound != nil {
+		if bound.refCount == 0 {
+			m.attachPortalLocked(pm, req.SandboxVolumeID, volumeRecord.TeamID, mountedAt)
+			bound.refCount = 1
+			response := boundResponse(pm)
+			m.mu.Unlock()
+			return response, nil
+		}
 		if accessMode != volume.AccessModeROX {
 			conflictPath := boundMountPath(m.portals, req.SandboxVolumeID, key)
 			m.mu.Unlock()
@@ -344,6 +376,14 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 		return response, nil
 	}
 	if bound := m.boundVolumes[req.SandboxVolumeID]; bound != nil {
+		if bound.refCount == 0 {
+			m.attachPortalLocked(pm, req.SandboxVolumeID, volumeRecord.TeamID, mountedAt)
+			bound.refCount = 1
+			response := boundResponse(pm)
+			m.mu.Unlock()
+			_ = engine.Close()
+			return response, nil
+		}
 		if accessMode != volume.AccessModeROX {
 			conflictPath := boundMountPath(m.portals, req.SandboxVolumeID, key)
 			m.mu.Unlock()
@@ -374,7 +414,7 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 	m.boundVolumes[req.SandboxVolumeID] = bound
 	m.volumes.add(volCtx)
 	m.attachPortalLocked(pm, req.SandboxVolumeID, volumeRecord.TeamID, mountedAt)
-	if err := m.registerOwner(ctx, bound); err != nil {
+	if err := m.registerOwner(ctx, bound, strings.TrimSpace(req.TransferSourceClusterID), strings.TrimSpace(req.TransferSourcePodID)); err != nil {
 		m.clearPortalLocked(pm)
 		delete(m.boundVolumes, req.SandboxVolumeID)
 		m.volumes.remove(req.SandboxVolumeID)
@@ -409,6 +449,204 @@ func (m *Manager) Unbind(ctx context.Context, req ctldapi.UnbindVolumePortalRequ
 		return ctldapi.UnbindVolumePortalResponse{}, err
 	}
 	return ctldapi.UnbindVolumePortalResponse{Unbound: true}, nil
+}
+
+func (m *Manager) AttachOwner(ctx context.Context, req ctldapi.AttachVolumeOwnerRequest) (ctldapi.AttachVolumeOwnerResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return ctldapi.AttachVolumeOwnerResponse{}, err
+	}
+	if strings.TrimSpace(req.SandboxVolumeID) == "" || strings.TrimSpace(req.TeamID) == "" {
+		return ctldapi.AttachVolumeOwnerResponse{}, fmt.Errorf("sandboxvolume_id and team_id are required")
+	}
+	volumeRecord, err := m.validateBindableVolume(ctx, ctldBindContext{
+		volumeID: req.SandboxVolumeID,
+		teamID:   req.TeamID,
+	})
+	if err != nil {
+		return ctldapi.AttachVolumeOwnerResponse{}, err
+	}
+	accessMode, err := validateBindableAccessMode(volumeRecord.AccessMode)
+	if err != nil {
+		return ctldapi.AttachVolumeOwnerResponse{}, err
+	}
+
+	m.mu.Lock()
+	if bound := m.boundVolumes[req.SandboxVolumeID]; bound != nil {
+		m.mu.Unlock()
+		m.volumes.touch(req.SandboxVolumeID)
+		return ctldapi.AttachVolumeOwnerResponse{Attached: true}, nil
+	}
+	m.mu.Unlock()
+
+	mountedAt := time.Now().UTC()
+	cacheDir := filepath.Join(m.rootDir, "volumes", safePath(req.TeamID), safePath(req.SandboxVolumeID))
+	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+		return ctldapi.AttachVolumeOwnerResponse{}, fmt.Errorf("create local volume dir: %w", err)
+	}
+	remoteStore, err := m.createObjectStore(req.TeamID, req.SandboxVolumeID)
+	if err != nil {
+		return ctldapi.AttachVolumeOwnerResponse{}, fmt.Errorf("create object storage: %w", err)
+	}
+	engine, err := s0fs.Open(ctx, s0fs.Config{
+		VolumeID:    req.SandboxVolumeID,
+		WALPath:     filepath.Join(cacheDir, "engine.wal"),
+		ObjectStore: remoteStore,
+		HeadStore:   db.NewS0FSHeadStore(m.repo),
+	})
+	if err != nil {
+		return ctldapi.AttachVolumeOwnerResponse{}, fmt.Errorf("open local s0fs engine: %w", err)
+	}
+	volCtx := &volume.VolumeContext{
+		VolumeID:  req.SandboxVolumeID,
+		TeamID:    volumeRecord.TeamID,
+		Backend:   volume.BackendS0FS,
+		S0FS:      engine,
+		Access:    accessMode,
+		MountedAt: mountedAt,
+		RootInode: 1,
+		RootPath:  "/",
+		CacheDir:  cacheDir,
+	}
+
+	m.mu.Lock()
+	if bound := m.boundVolumes[req.SandboxVolumeID]; bound != nil {
+		m.mu.Unlock()
+		_ = engine.Close()
+		m.volumes.touch(req.SandboxVolumeID)
+		return ctldapi.AttachVolumeOwnerResponse{Attached: true}, nil
+	}
+	bound := &boundVolume{
+		volumeID:  req.SandboxVolumeID,
+		teamID:    volumeRecord.TeamID,
+		access:    accessMode,
+		mountedAt: mountedAt,
+		refCount:  0,
+		volCtx:    volCtx,
+	}
+	m.boundVolumes[req.SandboxVolumeID] = bound
+	m.volumes.add(volCtx)
+	if err := m.registerOwner(ctx, bound, "", ""); err != nil {
+		delete(m.boundVolumes, req.SandboxVolumeID)
+		m.volumes.remove(req.SandboxVolumeID)
+		m.mu.Unlock()
+		_ = engine.Close()
+		return ctldapi.AttachVolumeOwnerResponse{}, fmt.Errorf("register ctld volume owner: %w", err)
+	}
+	m.startMaterializer(bound)
+	m.mu.Unlock()
+
+	return ctldapi.AttachVolumeOwnerResponse{Attached: true}, nil
+}
+
+func (m *Manager) PrepareHandoff(ctx context.Context, req ctldapi.PrepareVolumePortalHandoffRequest) (ctldapi.PrepareVolumePortalHandoffResponse, error) {
+	volumeID := strings.TrimSpace(req.SandboxVolumeID)
+	if volumeID == "" {
+		return ctldapi.PrepareVolumePortalHandoffResponse{}, fmt.Errorf("sandboxvolume_id is required")
+	}
+	m.mu.Lock()
+	bound := m.boundVolumes[volumeID]
+	m.mu.Unlock()
+	if bound == nil || bound.volCtx == nil || bound.volCtx.S0FS == nil {
+		return ctldapi.PrepareVolumePortalHandoffResponse{}, fmt.Errorf("volume %s is not owned by this ctld", volumeID)
+	}
+	if bound.refCount > 0 {
+		return ctldapi.PrepareVolumePortalHandoffResponse{}, fmt.Errorf("volume %s is actively bound to a portal", volumeID)
+	}
+	if err := m.volumes.prepareHandoff(ctx, volumeID); err != nil {
+		return ctldapi.PrepareVolumePortalHandoffResponse{}, err
+	}
+	if _, err := bound.volCtx.S0FS.SyncMaterialize(ctx); err != nil {
+		m.volumes.abortHandoff(volumeID)
+		return ctldapi.PrepareVolumePortalHandoffResponse{}, err
+	}
+	return ctldapi.PrepareVolumePortalHandoffResponse{Prepared: true}, nil
+}
+
+func (m *Manager) CompleteHandoff(ctx context.Context, req ctldapi.CompleteVolumePortalHandoffRequest) (ctldapi.CompleteVolumePortalHandoffResponse, error) {
+	volumeID := strings.TrimSpace(req.SandboxVolumeID)
+	if volumeID == "" {
+		return ctldapi.CompleteVolumePortalHandoffResponse{}, fmt.Errorf("sandboxvolume_id is required")
+	}
+	m.volumes.abortHandoff(volumeID)
+
+	m.mu.Lock()
+	bound := m.boundVolumes[volumeID]
+	if bound == nil {
+		m.mu.Unlock()
+		return ctldapi.CompleteVolumePortalHandoffResponse{Completed: true}, nil
+	}
+	delete(m.boundVolumes, volumeID)
+	m.unregisterOwner(bound)
+	if bound.materializeCancel != nil {
+		bound.materializeCancel()
+		bound.materializeCancel = nil
+	}
+	done := bound.materializeDone
+	bound.materializeDone = nil
+	m.mu.Unlock()
+
+	if done != nil {
+		<-done
+	}
+	if err := m.volumes.UnmountVolume(ctx, volumeID, ""); err != nil {
+		return ctldapi.CompleteVolumePortalHandoffResponse{}, err
+	}
+	return ctldapi.CompleteVolumePortalHandoffResponse{Completed: true}, nil
+}
+
+func (m *Manager) AbortHandoff(ctx context.Context, req ctldapi.AbortVolumePortalHandoffRequest) (ctldapi.AbortVolumePortalHandoffResponse, error) {
+	volumeID := strings.TrimSpace(req.SandboxVolumeID)
+	if volumeID == "" {
+		return ctldapi.AbortVolumePortalHandoffResponse{}, fmt.Errorf("sandboxvolume_id is required")
+	}
+	m.volumes.abortHandoff(volumeID)
+	return ctldapi.AbortVolumePortalHandoffResponse{Aborted: true}, nil
+}
+
+func (m *Manager) cleanupIdleOwnerOnlyVolumes(ctx context.Context) {
+	if m == nil || m.ownerOnlyIdleTTL <= 0 {
+		return
+	}
+	cutoff := time.Now().UTC().Add(-m.ownerOnlyIdleTTL)
+
+	m.mu.Lock()
+	volumeIDs := make([]string, 0, len(m.boundVolumes))
+	for volumeID, bound := range m.boundVolumes {
+		if bound == nil || bound.refCount > 0 || !m.volumes.canCleanupOwnerOnly(volumeID, cutoff) {
+			continue
+		}
+		volumeIDs = append(volumeIDs, volumeID)
+	}
+	m.mu.Unlock()
+
+	for _, volumeID := range volumeIDs {
+		if err := m.releaseOwnerOnlyVolume(ctx, volumeID); err != nil && m.logger != nil {
+			m.logger.Warn("ctld idle owner-only cleanup failed", zap.String("volume_id", volumeID), zap.Error(err))
+		}
+	}
+}
+
+func (m *Manager) releaseOwnerOnlyVolume(ctx context.Context, volumeID string) error {
+	m.mu.Lock()
+	bound := m.boundVolumes[volumeID]
+	if bound == nil || bound.refCount > 0 || !m.volumes.canCleanupOwnerOnly(volumeID, time.Now().UTC().Add(-m.ownerOnlyIdleTTL)) {
+		m.mu.Unlock()
+		return nil
+	}
+	delete(m.boundVolumes, volumeID)
+	m.unregisterOwner(bound)
+	if bound.materializeCancel != nil {
+		bound.materializeCancel()
+		bound.materializeCancel = nil
+	}
+	done := bound.materializeDone
+	bound.materializeDone = nil
+	m.mu.Unlock()
+
+	if done != nil {
+		<-done
+	}
+	return m.volumes.UnmountVolume(ctx, volumeID, "")
 }
 
 func (m *Manager) unbindLockedSnapshot(pm *portalMount) error {

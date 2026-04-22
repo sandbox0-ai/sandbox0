@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+const managerOwnedNamespaceLabelSelector = "app.kubernetes.io/managed-by=sandbox0-manager"
+
 // SetupScenario provisions a cluster, installs the operator, and applies a sample manifest.
 func SetupScenario(cfg Config, scenario Scenario) (*ScenarioEnv, func(), error) {
 	workingCfg := cfg
@@ -120,6 +122,7 @@ func SetupScenario(cfg Config, scenario Scenario) (*ScenarioEnv, func(), error) 
 	}
 	appendCleanup(func() {
 		_ = KubectlDeleteManifest(testCtx.Context, workingCfg.Kubeconfig, scenario.ManifestPath)
+		_ = KubectlWaitForNamespacesDeletedByLabel(testCtx.Context, workingCfg.Kubeconfig, managerOwnedNamespaceLabelSelector, "2m")
 	})
 
 	return env, cleanup, nil

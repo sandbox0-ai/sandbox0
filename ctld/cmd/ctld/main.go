@@ -112,6 +112,7 @@ func main() {
 		PodName:       podName,
 		PodNamespace:  podNamespace,
 	})
+	go portalManager.Run(ctx)
 	csiServer := ctldportal.NewCSIServer(nodeName, portalManager)
 	go func() {
 		if err := csiServer.Serve(csiSocket); err != nil && ctx.Err() == nil {
@@ -247,6 +248,50 @@ func (c combinedController) UnbindVolumePortal(r *http.Request, req ctldapi.Unbi
 	return resp, http.StatusOK
 }
 
+func (c combinedController) AttachVolumeOwner(r *http.Request, req ctldapi.AttachVolumeOwnerRequest) (ctldapi.AttachVolumeOwnerResponse, int) {
+	if c.Portal == nil {
+		return ctldapi.AttachVolumeOwnerResponse{Error: "ctld volume owners not implemented"}, http.StatusNotImplemented
+	}
+	resp, err := c.Portal.AttachOwner(r.Context(), req)
+	if err != nil {
+		return ctldapi.AttachVolumeOwnerResponse{Error: err.Error()}, http.StatusBadRequest
+	}
+	return resp, http.StatusOK
+}
+
+func (c combinedController) PrepareVolumePortalHandoff(r *http.Request, req ctldapi.PrepareVolumePortalHandoffRequest) (ctldapi.PrepareVolumePortalHandoffResponse, int) {
+	if c.Portal == nil {
+		return ctldapi.PrepareVolumePortalHandoffResponse{Error: "ctld volume portal handoff not implemented"}, http.StatusNotImplemented
+	}
+	resp, err := c.Portal.PrepareHandoff(r.Context(), req)
+	if err != nil {
+		return ctldapi.PrepareVolumePortalHandoffResponse{Error: err.Error()}, http.StatusBadRequest
+	}
+	return resp, http.StatusOK
+}
+
+func (c combinedController) CompleteVolumePortalHandoff(r *http.Request, req ctldapi.CompleteVolumePortalHandoffRequest) (ctldapi.CompleteVolumePortalHandoffResponse, int) {
+	if c.Portal == nil {
+		return ctldapi.CompleteVolumePortalHandoffResponse{Error: "ctld volume portal handoff not implemented"}, http.StatusNotImplemented
+	}
+	resp, err := c.Portal.CompleteHandoff(r.Context(), req)
+	if err != nil {
+		return ctldapi.CompleteVolumePortalHandoffResponse{Error: err.Error()}, http.StatusBadRequest
+	}
+	return resp, http.StatusOK
+}
+
+func (c combinedController) AbortVolumePortalHandoff(r *http.Request, req ctldapi.AbortVolumePortalHandoffRequest) (ctldapi.AbortVolumePortalHandoffResponse, int) {
+	if c.Portal == nil {
+		return ctldapi.AbortVolumePortalHandoffResponse{Error: "ctld volume portal handoff not implemented"}, http.StatusNotImplemented
+	}
+	resp, err := c.Portal.AbortHandoff(r.Context(), req)
+	if err != nil {
+		return ctldapi.AbortVolumePortalHandoffResponse{Error: err.Error()}, http.StatusBadRequest
+	}
+	return resp, http.StatusOK
+}
+
 func (c combinedController) MountedVolumeHandler() http.Handler {
 	if c.Portal == nil {
 		return nil
@@ -261,5 +306,9 @@ func (c combinedController) Probe(r *http.Request, sandboxID string, kind sandbo
 type volumePortalHandler interface {
 	Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest) (ctldapi.BindVolumePortalResponse, error)
 	Unbind(ctx context.Context, req ctldapi.UnbindVolumePortalRequest) (ctldapi.UnbindVolumePortalResponse, error)
+	AttachOwner(ctx context.Context, req ctldapi.AttachVolumeOwnerRequest) (ctldapi.AttachVolumeOwnerResponse, error)
+	PrepareHandoff(ctx context.Context, req ctldapi.PrepareVolumePortalHandoffRequest) (ctldapi.PrepareVolumePortalHandoffResponse, error)
+	CompleteHandoff(ctx context.Context, req ctldapi.CompleteVolumePortalHandoffRequest) (ctldapi.CompleteVolumePortalHandoffResponse, error)
+	AbortHandoff(ctx context.Context, req ctldapi.AbortVolumePortalHandoffRequest) (ctldapi.AbortVolumePortalHandoffResponse, error)
 	MountedVolumeHandler() http.Handler
 }

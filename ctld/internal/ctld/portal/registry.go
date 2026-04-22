@@ -55,6 +55,9 @@ func (m *Manager) validateBindableVolume(ctx context.Context, req ctldBindContex
 	}
 	selfPodID := m.ownerPodID()
 	for _, mount := range mounts {
+		if req.sourceClusterID != "" && req.sourcePodID != "" && mount.ClusterID == req.sourceClusterID && mount.PodID == req.sourcePodID {
+			continue
+		}
 		if !isConflictingMountForCtldBind(mount, m.clusterID, selfPodID) {
 			continue
 		}
@@ -102,11 +105,13 @@ func findBoundPortalForVolume(portals map[string]*portalMount, volumeID, exceptK
 }
 
 type ctldBindContext struct {
-	volumeID string
-	teamID   string
+	volumeID        string
+	teamID          string
+	sourceClusterID string
+	sourcePodID     string
 }
 
-func (m *Manager) registerOwner(ctx context.Context, bound *boundVolume) error {
+func (m *Manager) registerOwner(ctx context.Context, bound *boundVolume, sourceClusterID, sourcePodID string) error {
 	if m == nil || m.repo == nil || bound == nil || bound.volumeID == "" {
 		return fmt.Errorf("ctld volume registry unavailable")
 	}
@@ -140,8 +145,14 @@ func (m *Manager) registerOwner(ctx context.Context, bound *boundVolume) error {
 	if m.storage != nil && m.storage.HeartbeatTimeout > 0 {
 		heartbeatTimeout = m.storage.HeartbeatTimeout
 	}
-	if err := m.repo.AcquireMount(ctx, mount, heartbeatTimeout); err != nil {
-		return err
+	if sourceClusterID != "" && sourcePodID != "" {
+		if err := m.repo.TransferMount(ctx, bound.volumeID, sourceClusterID, sourcePodID, mount, heartbeatTimeout); err != nil {
+			return err
+		}
+	} else {
+		if err := m.repo.AcquireMount(ctx, mount, heartbeatTimeout); err != nil {
+			return err
+		}
 	}
 
 	interval := m.heartbeatInterval

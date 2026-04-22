@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -763,6 +764,58 @@ func (r *Repository) DeleteMountByPodID(ctx context.Context, clusterID, podID st
 	return nil
 }
 
+func (r *Repository) TransferMount(ctx context.Context, volumeID, sourceClusterID, sourcePodID string, target *VolumeMount, heartbeatTimeout int) error {
+	if target == nil {
+		return fmt.Errorf("target mount is required")
+	}
+	if heartbeatTimeout <= 0 {
+		heartbeatTimeout = 15
+	}
+	if strings.TrimSpace(volumeID) == "" || strings.TrimSpace(sourceClusterID) == "" || strings.TrimSpace(sourcePodID) == "" {
+		return fmt.Errorf("volume id and source mount identity are required")
+	}
+	if strings.TrimSpace(target.ClusterID) == "" || strings.TrimSpace(target.PodID) == "" {
+		return fmt.Errorf("target mount cluster_id and pod_id are required")
+	}
+	return r.WithTx(ctx, func(tx pgx.Tx) error {
+		var accessMode string
+		if err := tx.QueryRow(ctx, `SELECT access_mode FROM sandbox_volumes WHERE id = $1 FOR UPDATE`, volumeID).Scan(&accessMode); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("lock sandbox volume: %w", err)
+		}
+		if normalizeMountAccessMode(accessMode) != "RWO" {
+			return fmt.Errorf("%w: transfer mount only supports RWO volumes", ErrConflict)
+		}
+		activeMounts, err := r.getActiveMounts(ctx, tx, volumeID, heartbeatTimeout)
+		if err != nil {
+			return err
+		}
+		foundSource := false
+		for _, active := range activeMounts {
+			if active.ClusterID == sourceClusterID && active.PodID == sourcePodID {
+				foundSource = true
+				continue
+			}
+			if active.ClusterID == target.ClusterID && active.PodID == target.PodID {
+				continue
+			}
+			return fmt.Errorf("%w: volume %s already mounted on another instance", ErrConflict, volumeID)
+		}
+		if !foundSource {
+			return ErrConflict
+		}
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM sandbox_volume_mounts
+			WHERE volume_id = $1 AND cluster_id = $2 AND pod_id = $3
+		`, volumeID, sourceClusterID, sourcePodID); err != nil {
+			return fmt.Errorf("delete source mount: %w", err)
+		}
+		return r.createMount(ctx, tx, target)
+	})
+}
+
 // GetActiveMounts retrieves active mounts for a volume (heartbeat within threshold)
 func (r *Repository) GetActiveMounts(ctx context.Context, volumeID string, heartbeatTimeout int) ([]*VolumeMount, error) {
 	return r.getActiveMounts(ctx, r.pool, volumeID, heartbeatTimeout)
@@ -826,6 +879,89 @@ func (r *Repository) GetAllMounts(ctx context.Context) ([]*VolumeMount, error) {
 	}
 
 	return mounts, nil
+}
+
+func (r *Repository) UpsertVolumeHandoff(ctx context.Context, handoff *VolumeHandoff) error {
+	if handoff == nil {
+		return fmt.Errorf("handoff is required")
+	}
+	if strings.TrimSpace(handoff.VolumeID) == "" {
+		return fmt.Errorf("handoff volume_id is required")
+	}
+	if handoff.ExpiresAt.IsZero() {
+		handoff.ExpiresAt = time.Now().UTC().Add(30 * time.Second)
+	}
+	_, err := r.pool.Exec(ctx, `
+		INSERT INTO sandbox_volume_handoffs (
+			volume_id, source_cluster_id, source_pod_id, target_cluster_id, target_pod_id,
+			target_ctld_addr, status, created_at, updated_at, expires_at
+		) VALUES (
+			$1, $2, $3, $4, $5,
+			$6, $7, COALESCE($8, NOW()), COALESCE($9, NOW()), $10
+		)
+		ON CONFLICT (volume_id)
+		DO UPDATE SET
+			source_cluster_id = EXCLUDED.source_cluster_id,
+			source_pod_id = EXCLUDED.source_pod_id,
+			target_cluster_id = EXCLUDED.target_cluster_id,
+			target_pod_id = EXCLUDED.target_pod_id,
+			target_ctld_addr = EXCLUDED.target_ctld_addr,
+			status = EXCLUDED.status,
+			expires_at = EXCLUDED.expires_at,
+			updated_at = NOW()
+	`, handoff.VolumeID, handoff.SourceClusterID, handoff.SourcePodID, handoff.TargetClusterID, handoff.TargetPodID, handoff.TargetCtldAddr, handoff.Status, nullTime(handoff.CreatedAt), nullTime(handoff.UpdatedAt), handoff.ExpiresAt)
+	if err != nil {
+		return fmt.Errorf("upsert volume handoff: %w", err)
+	}
+	return nil
+}
+
+func (r *Repository) GetVolumeHandoff(ctx context.Context, volumeID string) (*VolumeHandoff, error) {
+	var handoff VolumeHandoff
+	err := r.pool.QueryRow(ctx, `
+		SELECT
+			volume_id, source_cluster_id, source_pod_id, target_cluster_id, target_pod_id,
+			target_ctld_addr, status, created_at, updated_at, expires_at
+		FROM sandbox_volume_handoffs
+		WHERE volume_id = $1
+	`, volumeID).Scan(
+		&handoff.VolumeID,
+		&handoff.SourceClusterID,
+		&handoff.SourcePodID,
+		&handoff.TargetClusterID,
+		&handoff.TargetPodID,
+		&handoff.TargetCtldAddr,
+		&handoff.Status,
+		&handoff.CreatedAt,
+		&handoff.UpdatedAt,
+		&handoff.ExpiresAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("get volume handoff: %w", err)
+	}
+	return &handoff, nil
+}
+
+func (r *Repository) DeleteVolumeHandoff(ctx context.Context, volumeID string) error {
+	if strings.TrimSpace(volumeID) == "" {
+		return fmt.Errorf("volume id is required")
+	}
+	if _, err := r.pool.Exec(ctx, `
+		DELETE FROM sandbox_volume_handoffs WHERE volume_id = $1
+	`, volumeID); err != nil {
+		return fmt.Errorf("delete volume handoff: %w", err)
+	}
+	return nil
+}
+
+func nullTime(value time.Time) any {
+	if value.IsZero() {
+		return nil
+	}
+	return value
 }
 
 // DeleteStaleMounts deletes mounts with expired heartbeats

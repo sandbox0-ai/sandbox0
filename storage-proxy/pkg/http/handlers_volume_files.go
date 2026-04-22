@@ -526,6 +526,9 @@ func (s *Server) prepareVolumeFileRequest(ctx context.Context, volumeID string) 
 	if err != nil {
 		return ctx, nil, func() {}, err
 	}
+	if err := s.ensureCtldVolumeOwner(ctx, volumeRecord); err != nil {
+		return ctx, nil, func() {}, err
+	}
 	actor, err := defaultVolumeFileActor(volumeRecord)
 	if err != nil {
 		return ctx, nil, func() {}, err

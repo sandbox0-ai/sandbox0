@@ -1,6 +1,7 @@
 package portal
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -64,5 +65,30 @@ func TestUnbindLockedSnapshotKeepsSharedVolumeUntilLastPortal(t *testing.T) {
 	}
 	if _, err := mgr.volumes.GetVolume("vol-1"); err == nil {
 		t.Fatal("GetVolume() after last unbind error = nil, want volume removed")
+	}
+}
+
+func TestCleanupIdleOwnerOnlyVolumesRemovesIdleOwner(t *testing.T) {
+	mgr := &Manager{
+		ownerOnlyIdleTTL: 50 * time.Millisecond,
+		boundVolumes:     make(map[string]*boundVolume),
+		volumes:          newLocalVolumeManager(),
+	}
+	volCtx := &volume.VolumeContext{VolumeID: "vol-1"}
+	mgr.volumes.add(volCtx)
+	mgr.volumes.requests["vol-1"].lastAccess = time.Now().UTC().Add(-time.Minute)
+	mgr.boundVolumes["vol-1"] = &boundVolume{
+		volumeID: "vol-1",
+		refCount: 0,
+		volCtx:   volCtx,
+	}
+
+	mgr.cleanupIdleOwnerOnlyVolumes(context.Background())
+
+	if _, ok := mgr.boundVolumes["vol-1"]; ok {
+		t.Fatal("bound volume still present after idle owner-only cleanup")
+	}
+	if _, err := mgr.volumes.GetVolume("vol-1"); err == nil {
+		t.Fatal("GetVolume() after idle owner-only cleanup error = nil, want volume removed")
 	}
 }

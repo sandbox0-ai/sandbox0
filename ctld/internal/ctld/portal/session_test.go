@@ -130,6 +130,70 @@ func TestLocalSessionReadIntoRequiresTrackedHandleForCache(t *testing.T) {
 	}
 }
 
+func TestLocalVolumeManagerPrepareHandoffDrainsInflightAndBlocksNewAcquires(t *testing.T) {
+	mgr := newLocalVolumeManager()
+	mgr.add(&volume.VolumeContext{VolumeID: "vol-1"})
+
+	releaseExisting, err := mgr.AcquireDirectVolumeFileMount(context.Background(), "vol-1", nil)
+	if err != nil {
+		t.Fatalf("AcquireDirectVolumeFileMount(existing) error = %v", err)
+	}
+
+	prepared := make(chan error, 1)
+	go func() {
+		prepared <- mgr.prepareHandoff(context.Background(), "vol-1")
+	}()
+
+	select {
+	case err := <-prepared:
+		t.Fatalf("prepareHandoff() returned early: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	acquired := make(chan error, 1)
+	go func() {
+		release, err := mgr.AcquireDirectVolumeFileMount(context.Background(), "vol-1", nil)
+		if err == nil && release != nil {
+			release()
+		}
+		acquired <- err
+	}()
+
+	select {
+	case err := <-acquired:
+		t.Fatalf("AcquireDirectVolumeFileMount(new) returned during handoff: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	releaseExisting()
+
+	select {
+	case err := <-prepared:
+		if err != nil {
+			t.Fatalf("prepareHandoff() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("prepareHandoff() did not complete after inflight request drained")
+	}
+
+	select {
+	case err := <-acquired:
+		t.Fatalf("AcquireDirectVolumeFileMount(new) returned before handoff abort: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	mgr.abortHandoff("vol-1")
+
+	select {
+	case err := <-acquired:
+		if err != nil {
+			t.Fatalf("AcquireDirectVolumeFileMount(new) error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("AcquireDirectVolumeFileMount(new) did not resume after handoff abort")
+	}
+}
+
 func TestLocalSessionReadCacheTracksSmallWrites(t *testing.T) {
 	engine, err := s0fs.Open(context.Background(), s0fs.Config{
 		VolumeID: "vol-1",

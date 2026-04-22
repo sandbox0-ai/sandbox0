@@ -635,33 +635,83 @@ func (s *Server) prepareSandboxVolumeForPortalBind(w http.ResponseWriter, r *htt
 		return
 	}
 
-	cleaned := false
-	if s.volMgr != nil {
-		cleaned, err = s.volMgr.CleanupIdleDirectVolumeFileMount(r.Context(), id)
-		if err != nil {
-			s.logger.WithError(err).WithField("volume_id", id).Warn("Failed to cleanup direct volume mount before portal bind")
-			_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "failed to cleanup direct volume mount")
-			return
-		}
+	var req preparePortalBindRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
 	}
-	if volume.NormalizeAccessMode(vol.AccessMode) == volume.AccessModeRWO {
-		const heartbeatTimeout = 15
-		mounts, err := s.repo.GetActiveMounts(r.Context(), id, heartbeatTimeout)
-		if err != nil {
-			s.logger.WithError(err).WithField("volume_id", id).Warn("Failed to check active mounts before portal bind")
-			_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "failed to check active mounts")
-			return
-		}
-		if len(mounts) > 0 {
-			_ = spec.WriteError(w, http.StatusConflict, spec.CodeConflict, "volume has active mounts")
-			return
-		}
+	req.VolumeID = id
+	if req.OwnerTeamID == "" {
+		req.OwnerTeamID = vol.TeamID
 	}
 
-	_ = spec.WriteSuccess(w, http.StatusOK, map[string]any{
-		"prepared": true,
-		"cleaned":  cleaned,
-	})
+	run := func(runCtx context.Context) error {
+		cleaned := false
+		if s.volMgr != nil {
+			cleaned, err = s.volMgr.CleanupIdleDirectVolumeFileMount(runCtx, id)
+			if err != nil {
+				return fmt.Errorf("cleanup direct volume mount: %w", err)
+			}
+		}
+		if volume.NormalizeAccessMode(vol.AccessMode) != volume.AccessModeRWO {
+			_ = spec.WriteSuccess(w, http.StatusOK, map[string]any{
+				"prepared": true,
+				"cleaned":  cleaned,
+			})
+			return nil
+		}
+
+		const heartbeatTimeout = 15
+		mounts, err := s.repo.GetActiveMounts(runCtx, id, heartbeatTimeout)
+		if err != nil {
+			return fmt.Errorf("check active mounts: %w", err)
+		}
+		if len(mounts) == 0 {
+			_ = spec.WriteSuccess(w, http.StatusOK, map[string]any{
+				"prepared": true,
+				"cleaned":  cleaned,
+			})
+			return nil
+		}
+
+		source := s.selectPreferredVolumeOwner(mounts)
+		if source == nil {
+			return fmt.Errorf("%w: volume has active mounts", db.ErrConflict)
+		}
+		opts := volume.DecodeMountOptions(source.MountOptions)
+		if opts.OwnerKind != volume.OwnerKindCtld {
+			return fmt.Errorf("%w: volume has active mounts", db.ErrConflict)
+		}
+		if strings.TrimSpace(req.TargetCtldAddr) == "" {
+			return fmt.Errorf("%w: target ctld address is required for owner handoff", db.ErrConflict)
+		}
+		if err := s.executePortalBindHandoff(runCtx, vol, source, req); err != nil {
+			return err
+		}
+		_ = spec.WriteSuccess(w, http.StatusOK, map[string]any{
+			"prepared": true,
+			"cleaned":  cleaned,
+			"handoff":  true,
+		})
+		return nil
+	}
+
+	if s.barrier != nil {
+		err = s.barrier.WithExclusive(r.Context(), id, run)
+	} else {
+		err = run(r.Context())
+	}
+	if err == nil {
+		return
+	}
+	status := http.StatusInternalServerError
+	code := spec.CodeInternal
+	if errors.Is(err, db.ErrConflict) {
+		status = http.StatusConflict
+		code = spec.CodeConflict
+	}
+	s.logger.WithError(err).WithField("volume_id", id).Warn("Failed to prepare sandbox volume for portal bind")
+	_ = spec.WriteError(w, status, code, err.Error())
 }
 
 func (s *Server) forkVolume(w http.ResponseWriter, r *http.Request) {

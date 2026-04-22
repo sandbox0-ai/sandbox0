@@ -124,6 +124,14 @@ func (s *Server) prepareOrProxyVolumeFileRequest(w http.ResponseWriter, r *http.
 		s.writeVolumeFileError(w, err)
 		return r.Context(), nil, func() {}, true
 	}
+	if err := s.waitForVolumeHandoff(r.Context(), volumeID); err != nil {
+		s.writeVolumeFileError(w, err)
+		return r.Context(), nil, func() {}, true
+	}
+	if err := s.ensureCtldVolumeOwner(r.Context(), volumeRecord); err != nil {
+		s.writeVolumeFileError(w, err)
+		return r.Context(), nil, func() {}, true
+	}
 
 	proxied, err := s.proxyVolumeRequestToOwnerIfNeeded(w, r, volumeRecord)
 	if err != nil {

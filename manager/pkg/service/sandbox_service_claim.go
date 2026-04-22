@@ -468,7 +468,7 @@ func (s *SandboxService) bindWebhookStatePortal(ctx context.Context, pod *corev1
 	return err
 }
 
-func (s *SandboxService) prepareVolumePortalBind(ctx context.Context, teamID, userID, volumeID string) error {
+func (s *SandboxService) prepareVolumePortalBind(ctx context.Context, req PrepareVolumePortalBindRequest) error {
 	if s == nil || s.volumeMetadata == nil {
 		return nil
 	}
@@ -476,7 +476,7 @@ func (s *SandboxService) prepareVolumePortalBind(ctx context.Context, teamID, us
 	if !ok {
 		return nil
 	}
-	return preparer.PrepareForVolumePortalBind(ctx, teamID, userID, volumeID)
+	return preparer.PrepareForVolumePortalBind(ctx, req)
 }
 
 func (s *SandboxService) bindVolumePortal(ctx context.Context, pod *corev1.Pod, teamID, userID, ownerTeamID, volumeID, mountPoint, portalName string) (*ctldapi.BindVolumePortalResponse, error) {
@@ -486,15 +486,27 @@ func (s *SandboxService) bindVolumePortal(ctx context.Context, pod *corev1.Pod, 
 	if pod == nil {
 		return nil, fmt.Errorf("pod is nil")
 	}
-	if err := s.prepareVolumePortalBind(ctx, teamID, userID, volumeID); err != nil {
+	ctldAddress, err := s.ctldAddressForPod(ctx, pod)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.prepareVolumePortalBind(ctx, PrepareVolumePortalBindRequest{
+		TeamID:         teamID,
+		UserID:         userID,
+		VolumeID:       volumeID,
+		TargetCtldAddr: ctldAddress,
+		Namespace:      pod.Namespace,
+		PodName:        pod.Name,
+		PodUID:         string(pod.UID),
+		PortalName:     volumeportal.NormalizePortalName(portalName, mountPoint),
+		MountPath:      mountPoint,
+		SandboxID:      pod.Name,
+		OwnerTeamID:    ownerTeamID,
+	}); err != nil {
 		if errors.Is(err, ErrVolumePortalBindConflict) {
 			return nil, fmt.Errorf("%w: %v", ErrClaimConflict, err)
 		}
 		return nil, fmt.Errorf("prepare volume portal bind: %w", err)
-	}
-	ctldAddress, err := s.ctldAddressForPod(ctx, pod)
-	if err != nil {
-		return nil, err
 	}
 	resp, err := s.ctldClient.BindVolumePortal(ctx, ctldAddress, ctldapi.BindVolumePortalRequest{
 		Namespace:       pod.Namespace,

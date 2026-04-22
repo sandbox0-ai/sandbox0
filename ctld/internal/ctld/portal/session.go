@@ -23,18 +23,36 @@ import (
 )
 
 type localVolumeManager struct {
-	mu      sync.RWMutex
-	volumes map[string]*volume.VolumeContext
+	mu       sync.RWMutex
+	volumes  map[string]*volume.VolumeContext
+	requests map[string]*localVolumeRequestState
+}
+
+type localVolumeRequestState struct {
+	inFlight     int
+	transferring bool
+	lastAccess   time.Time
+	done         chan struct{}
+	cond         *sync.Cond
 }
 
 func newLocalVolumeManager() *localVolumeManager {
-	return &localVolumeManager{volumes: make(map[string]*volume.VolumeContext)}
+	return &localVolumeManager{
+		volumes:  make(map[string]*volume.VolumeContext),
+		requests: make(map[string]*localVolumeRequestState),
+	}
 }
 
 func (m *localVolumeManager) add(volCtx *volume.VolumeContext) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.volumes[volCtx.VolumeID] = volCtx
+	if _, ok := m.requests[volCtx.VolumeID]; !ok {
+		state := &localVolumeRequestState{}
+		state.cond = sync.NewCond(&m.mu)
+		state.lastAccess = time.Now().UTC()
+		m.requests[volCtx.VolumeID] = state
+	}
 }
 
 func (m *localVolumeManager) remove(volumeID string) (*volume.VolumeContext, bool) {
@@ -42,7 +60,120 @@ func (m *localVolumeManager) remove(volumeID string) (*volume.VolumeContext, boo
 	defer m.mu.Unlock()
 	volCtx, ok := m.volumes[volumeID]
 	delete(m.volumes, volumeID)
+	if state := m.requests[volumeID]; state != nil {
+		if state.transferring && state.done != nil {
+			close(state.done)
+		}
+		delete(m.requests, volumeID)
+	}
 	return volCtx, ok
+}
+
+func (m *localVolumeManager) acquire(ctx context.Context, volumeID string) (func(), error) {
+	for {
+		m.mu.Lock()
+		volCtx := m.volumes[volumeID]
+		state := m.requests[volumeID]
+		if volCtx == nil || state == nil {
+			m.mu.Unlock()
+			return nil, fmt.Errorf("volume %s not mounted", volumeID)
+		}
+		if state.transferring && state.done != nil {
+			done := state.done
+			m.mu.Unlock()
+			select {
+			case <-done:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			continue
+		}
+		state.inFlight++
+		state.lastAccess = time.Now().UTC()
+		m.mu.Unlock()
+		return func() {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			state := m.requests[volumeID]
+			if state == nil {
+				return
+			}
+			if state.inFlight > 0 {
+				state.inFlight--
+			}
+			state.lastAccess = time.Now().UTC()
+			if state.inFlight == 0 && state.cond != nil {
+				state.cond.Broadcast()
+			}
+		}, nil
+	}
+}
+
+func (m *localVolumeManager) prepareHandoff(ctx context.Context, volumeID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	state := m.requests[volumeID]
+	if m.volumes[volumeID] == nil || state == nil {
+		return fmt.Errorf("volume %s not mounted", volumeID)
+	}
+	if state.transferring {
+		return fmt.Errorf("volume %s handoff already in progress", volumeID)
+	}
+	state.transferring = true
+	state.done = make(chan struct{})
+	for state.inFlight > 0 {
+		if err := ctx.Err(); err != nil {
+			state.transferring = false
+			close(state.done)
+			state.done = nil
+			return err
+		}
+		state.cond.Wait()
+	}
+	return nil
+}
+
+func (m *localVolumeManager) abortHandoff(volumeID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	state := m.requests[volumeID]
+	if state == nil || !state.transferring {
+		return
+	}
+	state.transferring = false
+	state.lastAccess = time.Now().UTC()
+	if state.done != nil {
+		close(state.done)
+		state.done = nil
+	}
+}
+
+func (m *localVolumeManager) touch(volumeID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	state := m.requests[volumeID]
+	if state == nil {
+		return
+	}
+	state.lastAccess = time.Now().UTC()
+}
+
+func (m *localVolumeManager) canCleanupOwnerOnly(volumeID string, cutoff time.Time) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	state := m.requests[volumeID]
+	if m.volumes[volumeID] == nil || state == nil {
+		return false
+	}
+	if state.transferring || state.inFlight > 0 {
+		return false
+	}
+	if state.lastAccess.IsZero() {
+		return false
+	}
+	return !state.lastAccess.After(cutoff)
 }
 
 func (m *localVolumeManager) MountVolume(_ context.Context, _ string, volumeID string, _ string, _ volume.AccessMode) (string, time.Time, error) {
@@ -79,18 +210,17 @@ func (m *localVolumeManager) AckInvalidate(string, string, string, bool, string)
 }
 
 func (m *localVolumeManager) AcquireDirectVolumeFileMount(ctx context.Context, volumeID string, mountFn func(context.Context) (string, error)) (func(), error) {
-	m.mu.RLock()
-	volCtx := m.volumes[volumeID]
-	m.mu.RUnlock()
-	if volCtx == nil {
-		return nil, fmt.Errorf("volume %s not mounted", volumeID)
+	release, err := m.acquire(ctx, volumeID)
+	if err != nil {
+		return nil, err
 	}
 	if mountFn != nil {
 		if _, err := mountFn(ctx); err != nil {
+			release()
 			return nil, err
 		}
 	}
-	return func() {}, nil
+	return release, nil
 }
 
 func (m *localVolumeManager) CleanupIdleDirectVolumeFileMount(context.Context, string) (bool, error) {

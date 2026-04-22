@@ -93,6 +93,22 @@ func (f fakeVolumePortalHandler) Unbind(_ context.Context, _ ctldapi.UnbindVolum
 	return ctldapi.UnbindVolumePortalResponse{}, nil
 }
 
+func (f fakeVolumePortalHandler) AttachOwner(_ context.Context, _ ctldapi.AttachVolumeOwnerRequest) (ctldapi.AttachVolumeOwnerResponse, error) {
+	return ctldapi.AttachVolumeOwnerResponse{Attached: true}, nil
+}
+
+func (f fakeVolumePortalHandler) PrepareHandoff(_ context.Context, _ ctldapi.PrepareVolumePortalHandoffRequest) (ctldapi.PrepareVolumePortalHandoffResponse, error) {
+	return ctldapi.PrepareVolumePortalHandoffResponse{Prepared: true}, nil
+}
+
+func (f fakeVolumePortalHandler) CompleteHandoff(_ context.Context, _ ctldapi.CompleteVolumePortalHandoffRequest) (ctldapi.CompleteVolumePortalHandoffResponse, error) {
+	return ctldapi.CompleteVolumePortalHandoffResponse{Completed: true}, nil
+}
+
+func (f fakeVolumePortalHandler) AbortHandoff(_ context.Context, _ ctldapi.AbortVolumePortalHandoffRequest) (ctldapi.AbortVolumePortalHandoffResponse, error) {
+	return ctldapi.AbortVolumePortalHandoffResponse{Aborted: true}, nil
+}
+
 func (f fakeVolumePortalHandler) MountedVolumeHandler() http.Handler {
 	return f.mountedHandler
 }

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,9 +21,11 @@ import (
 )
 
 type fakeHTTPRepo struct {
+	mu             sync.RWMutex
 	volumes        map[string]*db.SandboxVolume
 	owners         map[string]*db.SandboxVolumeOwner
 	activeMounts   map[string][]*db.VolumeMount
+	handoffs       map[string]*db.VolumeHandoff
 	getActiveFunc  func(context.Context, string, int) ([]*db.VolumeMount, error)
 	deletedMounts  []db.VolumeMount
 	createdVolumes []*db.SandboxVolume
@@ -34,6 +37,7 @@ func newFakeHTTPRepo() *fakeHTTPRepo {
 		volumes:      make(map[string]*db.SandboxVolume),
 		owners:       make(map[string]*db.SandboxVolumeOwner),
 		activeMounts: make(map[string][]*db.VolumeMount),
+		handoffs:     make(map[string]*db.VolumeHandoff),
 	}
 }
 
@@ -122,6 +126,50 @@ func (r *fakeHTTPRepo) DeleteMount(ctx context.Context, volumeID, clusterID, pod
 		ClusterID: clusterID,
 		PodID:     podID,
 	})
+	return nil
+}
+
+func (r *fakeHTTPRepo) TransferMount(ctx context.Context, volumeID, sourceClusterID, sourcePodID string, target *db.VolumeMount, heartbeatTimeout int) error {
+	var mounts []*db.VolumeMount
+	for _, mount := range r.activeMounts[volumeID] {
+		if mount.ClusterID == sourceClusterID && mount.PodID == sourcePodID {
+			continue
+		}
+		mounts = append(mounts, mount)
+	}
+	if target != nil {
+		mounts = append(mounts, target)
+	}
+	r.activeMounts[volumeID] = mounts
+	return nil
+}
+
+func (r *fakeHTTPRepo) UpsertVolumeHandoff(ctx context.Context, handoff *db.VolumeHandoff) error {
+	if handoff == nil {
+		return nil
+	}
+	copy := *handoff
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.handoffs[handoff.VolumeID] = &copy
+	return nil
+}
+
+func (r *fakeHTTPRepo) GetVolumeHandoff(ctx context.Context, volumeID string) (*db.VolumeHandoff, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	handoff := r.handoffs[volumeID]
+	if handoff == nil {
+		return nil, db.ErrNotFound
+	}
+	copy := *handoff
+	return &copy, nil
+}
+
+func (r *fakeHTTPRepo) DeleteVolumeHandoff(ctx context.Context, volumeID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.handoffs, volumeID)
 	return nil
 }
 

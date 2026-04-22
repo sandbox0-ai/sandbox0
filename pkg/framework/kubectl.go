@@ -258,6 +258,62 @@ type podStatus struct {
 	InitContainerStatuses []containerStatus `json:"initContainerStatuses"`
 }
 
+type namespaceList struct {
+	Items []namespace `json:"items"`
+}
+
+type namespace struct {
+	Metadata namespaceMetadata `json:"metadata"`
+	Status   namespaceStatus   `json:"status"`
+}
+
+type namespaceMetadata struct {
+	Name string `json:"name"`
+}
+
+type namespaceStatus struct {
+	Phase string `json:"phase"`
+}
+
+// KubectlWaitForNamespacesDeletedByLabel waits for all namespaces matching a label selector to disappear.
+func KubectlWaitForNamespacesDeletedByLabel(ctx context.Context, kubeconfig, labelSelector, timeout string) error {
+	if labelSelector == "" {
+		return fmt.Errorf("label selector is required")
+	}
+
+	timeoutDuration, err := time.ParseDuration(timeout)
+	if err != nil {
+		return fmt.Errorf("parse timeout %q: %w", timeout, err)
+	}
+
+	deadline := time.Now().Add(timeoutDuration)
+	for {
+		output, err := KubectlOutput(ctx, kubeconfig, "get", "namespaces", "-l", labelSelector, "-o", "json")
+		if err != nil {
+			return err
+		}
+
+		var namespaces namespaceList
+		if err := json.Unmarshal([]byte(output), &namespaces); err != nil {
+			return fmt.Errorf("decode namespaces for selector %q: %w", labelSelector, err)
+		}
+		if len(namespaces.Items) == 0 {
+			return nil
+		}
+
+		names := make([]string, 0, len(namespaces.Items))
+		for _, item := range namespaces.Items {
+			names = append(names, fmt.Sprintf("%s(%s)", item.Metadata.Name, item.Status.Phase))
+		}
+		fmt.Printf("Namespaces still present for selector %q: %s\n", labelSelector, strings.Join(names, ", "))
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for namespaces with selector %q to be deleted", labelSelector)
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
 type containerStatus struct {
 	Name      string         `json:"name"`
 	State     containerState `json:"state"`

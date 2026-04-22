@@ -1833,6 +1833,9 @@ func assertVolumeLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session
 	Expect(status).To(Equal(http.StatusCreated))
 	Expect(volume).NotTo(BeNil())
 	volumeID := expectStringPtr(volume.Id, "volume id")
+	DeferCleanup(func() {
+		deleteSandboxVolumeForCleanup(env, session, volumeID)
+	})
 
 	directFilePath := "/direct-e2e/hello.txt"
 	directContent := []byte("hello direct volume api")
@@ -1845,28 +1848,37 @@ func assertVolumeLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session
 	Expect(status).To(Equal(http.StatusOK))
 	Expect(directBody).To(Equal(directContent))
 
+	_, status, err = session.CreateSnapshot(env.TestCtx.Context, GinkgoT(), volumeID, apispec.CreateSnapshotRequest{Name: "direct-mounted"})
+	Expect(err).To(HaveOccurred())
+	Expect(status).To(Equal(http.StatusConflict))
+
+	snapshotVolume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), createReq)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusCreated))
+	Expect(snapshotVolume).NotTo(BeNil())
+	snapshotVolumeID := expectStringPtr(snapshotVolume.Id, "snapshot volume id")
+	DeferCleanup(func() {
+		deleteSandboxVolumeForCleanup(env, session, snapshotVolumeID)
+	})
+
 	snapReq := apispec.CreateSnapshotRequest{
 		Name: "e2e-snap",
 	}
-	snapshot, status, err := session.CreateSnapshot(env.TestCtx.Context, GinkgoT(), volumeID, snapReq)
+	snapshot, status, err := session.CreateSnapshot(env.TestCtx.Context, GinkgoT(), snapshotVolumeID, snapReq)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusCreated))
 	Expect(snapshot).NotTo(BeNil())
 	Expect(snapshot.Id).NotTo(BeEmpty())
 
-	_, status, err = session.ListSnapshots(env.TestCtx.Context, GinkgoT(), volumeID)
+	_, status, err = session.ListSnapshots(env.TestCtx.Context, GinkgoT(), snapshotVolumeID)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
 
-	status, err = session.RestoreSnapshot(env.TestCtx.Context, GinkgoT(), volumeID, snapshot.Id)
+	status, err = session.RestoreSnapshot(env.TestCtx.Context, GinkgoT(), snapshotVolumeID, snapshot.Id)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
 
-	status, err = session.DeleteSnapshot(env.TestCtx.Context, GinkgoT(), volumeID, snapshot.Id)
-	Expect(err).NotTo(HaveOccurred())
-	Expect(status).To(Equal(http.StatusOK))
-
-	status, err = session.DeleteSandboxVolume(env.TestCtx.Context, GinkgoT(), volumeID)
+	status, err = session.DeleteSnapshot(env.TestCtx.Context, GinkgoT(), snapshotVolumeID, snapshot.Id)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
 }

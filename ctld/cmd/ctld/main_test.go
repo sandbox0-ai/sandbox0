@@ -98,12 +98,31 @@ func TestPrepareVolumePortalHandoffReturnsConflictForActivePortal(t *testing.T) 
 	assert.Equal(t, http.StatusConflict, rec.Code)
 }
 
+func TestBindVolumePortalReturnsConflictForActiveOwner(t *testing.T) {
+	server := newHTTPServer(":0", combinedController{
+		Controller: ctldserver.NotImplementedController{},
+		Portal: fakeVolumePortalHandler{
+			bindErr: fmt.Errorf("volume vol-1 already has an active owner on cluster-a/pod-a"),
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/volume-portals/bind", strings.NewReader(`{"sandboxvolume_id":"vol-1","pod_uid":"pod-1","team_id":"team-1","portal_name":"workspace","mount_path":"/workspace"}`))
+	rec := httptest.NewRecorder()
+	server.Handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusConflict, rec.Code)
+}
+
 type fakeVolumePortalHandler struct {
 	mountedHandler http.Handler
+	bindErr        error
 	prepareErr     error
 }
 
 func (f fakeVolumePortalHandler) Bind(_ context.Context, _ ctldapi.BindVolumePortalRequest) (ctldapi.BindVolumePortalResponse, error) {
+	if f.bindErr != nil {
+		return ctldapi.BindVolumePortalResponse{}, f.bindErr
+	}
 	return ctldapi.BindVolumePortalResponse{}, nil
 }
 

@@ -233,7 +233,7 @@ func (c combinedController) BindVolumePortal(r *http.Request, req ctldapi.BindVo
 	}
 	resp, err := c.Portal.Bind(r.Context(), req)
 	if err != nil {
-		return ctldapi.BindVolumePortalResponse{Error: err.Error()}, http.StatusBadRequest
+		return ctldapi.BindVolumePortalResponse{Error: err.Error()}, volumePortalErrorStatus(err)
 	}
 	return resp, http.StatusOK
 }

@@ -352,7 +352,7 @@ func (s *Server) getSandboxLogs(c *gin.Context) {
 }
 
 func (s *Server) streamSandboxLogs(c *gin.Context, sandboxID, teamID string, options *service.SandboxLogsOptions) {
-	if err := proxy.DisableResponseWriteDeadline(c.Writer); err != nil {
+	if err := proxy.DisableResponseDeadlines(c.Writer); err != nil {
 		s.logger.Debug("Failed to disable sandbox log stream response deadlines",
 			zap.String("sandboxID", sandboxID),
 			zap.String("teamID", teamID),

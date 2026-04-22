@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"errors"
+	"net"
 	"net/http"
 	"time"
 )
@@ -36,13 +37,22 @@ func DisableResponseDeadlines(w http.ResponseWriter) error {
 	return errors.Join(errs...)
 }
 
+// DisableConnectionDeadlines clears read and write deadlines on a hijacked or
+// upgraded connection used for long-lived streams.
+func DisableConnectionDeadlines(conn net.Conn) error {
+	if conn == nil {
+		return nil
+	}
+	return conn.SetDeadline(time.Time{})
+}
+
 // PrepareStreamingProxyResponse clears downstream server deadlines when a
 // proxied request is allowed to outlive the ordinary upstream timeout.
 func PrepareStreamingProxyResponse(w http.ResponseWriter, req *http.Request) error {
 	if req == nil {
 		return DisableResponseWriteDeadline(w)
 	}
-	if IsWebSocketUpgrade(req) {
+	if IsWebSocketUpgrade(req) || LongLivedRequest(req.Context()) {
 		return DisableResponseDeadlines(w)
 	}
 	if UpstreamTimeoutDisabled(req.Context()) {

@@ -284,6 +284,7 @@ func (s *Server) setupRoutes() {
 	s.router.Use(httpobs.GinMiddleware(s.obsProvider.HTTPServerConfig(nil)))
 	s.router.Use(middleware.Recovery(s.logger))
 	s.router.Use(s.requestLogger.Logger())
+	s.router.Use(gatewaymiddleware.MarkLongLivedRequests())
 	s.router.Use(gatewaymiddleware.UpstreamTimeoutWhitelist())
 
 	// Health check endpoints (no auth required)

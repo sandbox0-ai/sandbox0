@@ -130,3 +130,52 @@ func TestRouterProxyToTargetClearsWriteDeadlineWhenStreaming(t *testing.T) {
 		t.Fatalf("body = %q, want %q", body, "late stream\n")
 	}
 }
+
+func TestRouterProxyToTargetClearsDeadlinesWhenLongLivedRequestMarked(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(120 * time.Millisecond)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = io.WriteString(w, "long lived\n")
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}))
+	defer upstream.Close()
+
+	router, err := NewRouter(upstream.URL, zap.NewNop(), time.Second)
+	if err != nil {
+		t.Fatalf("NewRouter() error = %v", err)
+	}
+
+	engine := gin.New()
+	engine.GET("/", func(c *gin.Context) {
+		c.Request = WithLongLivedRequestRequest(c.Request)
+		router.ProxyToTarget(c)
+	})
+
+	server := httptest.NewUnstartedServer(engine)
+	server.Config.ReadTimeout = 50 * time.Millisecond
+	server.Config.WriteTimeout = 50 * time.Millisecond
+	server.Start()
+	defer server.Close()
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(server.URL + "/")
+	if err != nil {
+		t.Fatalf("GET() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if body := string(bodyBytes); body != "long lived\n" {
+		t.Fatalf("body = %q, want %q", body, "long lived\n")
+	}
+}

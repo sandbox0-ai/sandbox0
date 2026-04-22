@@ -296,6 +296,9 @@ func (s *Server) handleVolumeFileWatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+	if err := httpproxy.DisableConnectionDeadlines(conn.UnderlyingConn()); err != nil {
+		s.logger.WithError(err).WithField("volume_id", volumeID).Debug("Failed to clear volume file watch websocket deadlines")
+	}
 
 	type watchSubscription struct {
 		cancel func()

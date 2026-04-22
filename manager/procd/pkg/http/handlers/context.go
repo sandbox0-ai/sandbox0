@@ -726,6 +726,9 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+	if err := proxy.DisableConnectionDeadlines(conn.UnderlyingConn()); err != nil {
+		h.logger.Debug("Failed to clear context websocket connection deadlines", zap.String("context_id", id), zap.Error(err))
+	}
 
 	closeDone := make(chan struct{})
 	var closeOnce sync.Once

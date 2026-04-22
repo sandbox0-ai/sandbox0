@@ -462,6 +462,35 @@ func (h *AuthHandler) OIDCLogin(c *gin.Context) {
 	c.Redirect(http.StatusFound, authURL)
 }
 
+// OIDCLogout redirects the browser to the provider logout endpoint when supported.
+func (h *AuthHandler) OIDCLogout(c *gin.Context) {
+	if h.oidcManager == nil {
+		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, oidc.ErrProviderNotFound.Error())
+		return
+	}
+
+	providerID := c.Param("provider")
+	returnURL := c.Query("return_url")
+	if returnURL == "" {
+		returnURL = "/"
+	}
+
+	logoutURL, err := h.oidcManager.GenerateLogoutURL(providerID, returnURL)
+	if err != nil {
+		status := http.StatusBadRequest
+		code := spec.CodeBadRequest
+		switch {
+		case errors.Is(err, oidc.ErrProviderNotFound), errors.Is(err, oidc.ErrProviderLogoutNotSupported):
+			status = http.StatusNotFound
+			code = spec.CodeNotFound
+		}
+		spec.JSONError(c, status, code, err.Error())
+		return
+	}
+
+	c.Redirect(http.StatusFound, logoutURL)
+}
+
 // OIDCCallback handles OIDC callback
 func (h *AuthHandler) OIDCCallback(c *gin.Context) {
 	if h.oidcManager == nil {

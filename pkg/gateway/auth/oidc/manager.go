@@ -175,6 +175,18 @@ func (m *Manager) GenerateAuthURL(providerID, returnURL string, opts ...AuthURLO
 	return provider.AuthURL(state, verifier), nil
 }
 
+// GenerateLogoutURL builds a provider logout URL for browser logout flows.
+func (m *Manager) GenerateLogoutURL(providerID, returnURL string) (string, error) {
+	provider, err := m.GetProvider(providerID)
+	if err != nil {
+		return "", err
+	}
+	if !m.IsAllowedWebReturnURL(returnURL) {
+		return "", ErrInvalidReturnURL
+	}
+	return provider.LogoutURL(returnURL)
+}
+
 // IsAllowedWebReturnURL reports whether returnURL may receive a web login code.
 func (m *Manager) IsAllowedWebReturnURL(raw string) bool {
 	parsed, err := url.Parse(raw)

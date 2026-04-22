@@ -22,6 +22,7 @@ var (
 	ErrInvalidState                = errors.New("invalid OAuth state")
 	ErrInvalidCode                 = errors.New("invalid authorization code")
 	ErrInvalidReturnURL            = errors.New("invalid return URL")
+	ErrProviderLogoutNotSupported  = errors.New("OIDC provider logout is not supported")
 	ErrMissingEmail                = errors.New("email not provided by IdP")
 	ErrHomeRegionNotRoutable       = errors.New("home region is not routable")
 	ErrEmailDomainMismatch         = errors.New("email domain not allowed")
@@ -52,6 +53,7 @@ type Provider struct {
 	verifier                    *oidc.IDTokenVerifier
 	deviceVerifier              *oidc.IDTokenVerifier
 	deviceAuthorizationEndpoint string
+	endSessionEndpoint          string
 }
 
 const wellKnownOIDCConfigPath = "/.well-known/openid-configuration"
@@ -59,6 +61,7 @@ const wellKnownOIDCConfigPath = "/.well-known/openid-configuration"
 type discoveryMetadata struct {
 	Issuer                      string `json:"issuer"`
 	DeviceAuthorizationEndpoint string `json:"device_authorization_endpoint"`
+	EndSessionEndpoint          string `json:"end_session_endpoint"`
 }
 
 // NewProvider creates a new OIDC provider
@@ -125,6 +128,7 @@ func NewProvider(ctx context.Context, cfg *config.OIDCProviderConfig, baseURL st
 		verifier:                    verifier,
 		deviceVerifier:              deviceVerifier,
 		deviceAuthorizationEndpoint: strings.TrimSpace(metadata.DeviceAuthorizationEndpoint),
+		endSessionEndpoint:          strings.TrimSpace(metadata.EndSessionEndpoint),
 	}, nil
 }
 
@@ -258,6 +262,24 @@ func (p *Provider) VerifyToken(ctx context.Context, token *oauth2.Token) (*UserI
 	}
 
 	return userInfo, nil
+}
+
+// LogoutURL returns the provider logout URL when the IdP supports RP-initiated logout.
+func (p *Provider) LogoutURL(returnURL string) (string, error) {
+	if strings.TrimSpace(p.endSessionEndpoint) == "" {
+		return "", ErrProviderLogoutNotSupported
+	}
+	logoutURL, err := url.Parse(p.endSessionEndpoint)
+	if err != nil {
+		return "", fmt.Errorf("parse end session endpoint: %w", err)
+	}
+	query := logoutURL.Query()
+	query.Set("post_logout_redirect_uri", returnURL)
+	if clientID := strings.TrimSpace(p.config.ClientID); clientID != "" {
+		query.Set("client_id", clientID)
+	}
+	logoutURL.RawQuery = query.Encode()
+	return logoutURL.String(), nil
 }
 
 func (p *Provider) verifyIDToken(ctx context.Context, rawIDToken string) (*oidc.IDToken, error) {

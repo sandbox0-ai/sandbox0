@@ -80,6 +80,11 @@ func RegisterIdentityRoutes(router gin.IRouter, deps Deps) {
 			authHandler.OIDCLogin,
 		)
 		auth.GET(
+			"/oidc/:provider/logout",
+			licensinghttp.RequireFeature(deps.Entitlements, licensing.FeatureSSO, deps.Logger),
+			authHandler.OIDCLogout,
+		)
+		auth.GET(
 			"/oidc/:provider/callback",
 			licensinghttp.RequireFeature(deps.Entitlements, licensing.FeatureSSO, deps.Logger),
 			authHandler.OIDCCallback,

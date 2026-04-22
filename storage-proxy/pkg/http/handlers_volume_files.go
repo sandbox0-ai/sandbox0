@@ -1,6 +1,7 @@
 package http
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -451,13 +452,16 @@ func (s *Server) writeVolumeFile(w http.ResponseWriter, r *http.Request, volumeI
 	defer cleanup()
 
 	if r.URL.Query().Get("mkdir") == "true" {
-		if err := s.mkdirVolumePath(ctx, volumeID, logicalPath, r.URL.Query().Get("recursive") == "true"); err != nil {
+		changed, err := s.mkdirVolumePath(ctx, volumeID, logicalPath, r.URL.Query().Get("recursive") == "true")
+		if err != nil {
 			s.writeVolumeFileError(w, err)
 			return
 		}
-		if err := s.finalizeVolumeFileMutation(ctx, volumeID); err != nil {
-			s.writeVolumeFileError(w, err)
-			return
+		if changed {
+			if err := s.finalizeVolumeFileMutation(ctx, volumeID); err != nil {
+				s.writeVolumeFileError(w, err)
+				return
+			}
 		}
 		_ = spec.WriteSuccess(w, http.StatusCreated, map[string]bool{"created": true})
 		return
@@ -473,13 +477,16 @@ func (s *Server) writeVolumeFile(w http.ResponseWriter, r *http.Request, volumeI
 		return
 	}
 
-	if err := s.writeVolumePath(ctx, volumeID, logicalPath, data); err != nil {
+	changed, err := s.writeVolumePath(ctx, volumeID, logicalPath, data)
+	if err != nil {
 		s.writeVolumeFileError(w, err)
 		return
 	}
-	if err := s.finalizeVolumeFileMutation(ctx, volumeID); err != nil {
-		s.writeVolumeFileError(w, err)
-		return
+	if changed {
+		if err := s.finalizeVolumeFileMutation(ctx, volumeID); err != nil {
+			s.writeVolumeFileError(w, err)
+			return
+		}
 	}
 
 	_ = spec.WriteSuccess(w, http.StatusOK, map[string]bool{"written": true})
@@ -681,24 +688,24 @@ func (s *Server) ensureVolumeParent(ctx context.Context, volumeID, raw string, r
 	return current, base, nil
 }
 
-func (s *Server) mkdirVolumePath(ctx context.Context, volumeID, raw string, recursive bool) error {
+func (s *Server) mkdirVolumePath(ctx context.Context, volumeID, raw string, recursive bool) (bool, error) {
 	resolved, err := s.lookupVolumePath(ctx, volumeID, raw, false)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if resolved.Exists {
 		if attrModeIsDir(resolved.Attr.Mode) && recursive {
-			return nil
+			return false, nil
 		}
 		if attrModeIsDir(resolved.Attr.Mode) {
-			return errPathAlreadyExists
+			return false, errPathAlreadyExists
 		}
-		return errPathNotDir
+		return false, errPathNotDir
 	}
 
 	parent, base, err := s.ensureVolumeParent(ctx, volumeID, raw, recursive)
 	if err != nil {
-		return err
+		return false, err
 	}
 	_, err = s.fileRPC.Mkdir(ctx, &pb.MkdirRequest{
 		VolumeId: volumeID,
@@ -710,17 +717,17 @@ func (s *Server) mkdirVolumePath(ctx context.Context, volumeID, raw string, recu
 	})
 	if err != nil {
 		if fserror.CodeOf(err) == fserror.AlreadyExists && recursive {
-			return nil
+			return false, nil
 		}
-		return translateVolumeRPCError(err)
+		return false, translateVolumeRPCError(err)
 	}
-	return nil
+	return true, nil
 }
 
-func (s *Server) writeVolumePath(ctx context.Context, volumeID, raw string, data []byte) error {
+func (s *Server) writeVolumePath(ctx context.Context, volumeID, raw string, data []byte) (bool, error) {
 	resolved, err := s.lookupVolumePath(ctx, volumeID, raw, false)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	var (
@@ -730,7 +737,12 @@ func (s *Server) writeVolumePath(ctx context.Context, volumeID, raw string, data
 
 	if resolved.Exists {
 		if attrModeIsDir(resolved.Attr.Mode) {
-			return errPathNotDir
+			return false, errPathNotDir
+		}
+		if same, err := s.volumeFileContentMatches(ctx, volumeID, resolved, data); err != nil {
+			return false, err
+		} else if same {
+			return false, nil
 		}
 		openResp, err := s.fileRPC.Open(ctx, &pb.OpenRequest{
 			VolumeId: volumeID,
@@ -739,14 +751,14 @@ func (s *Server) writeVolumePath(ctx context.Context, volumeID, raw string, data
 			Actor:    volumeFileActor(ctx),
 		})
 		if err != nil {
-			return translateVolumeRPCError(err)
+			return false, translateVolumeRPCError(err)
 		}
 		inode = resolved.Inode
 		handleID = openResp.HandleId
 	} else {
 		parent, base, err := s.ensureVolumeParent(ctx, volumeID, raw, true)
 		if err != nil {
-			return err
+			return false, err
 		}
 		nodeResp, err := s.fileRPC.Create(ctx, &pb.CreateRequest{
 			VolumeId: volumeID,
@@ -758,7 +770,7 @@ func (s *Server) writeVolumePath(ctx context.Context, volumeID, raw string, data
 			Actor:    volumeFileActor(ctx),
 		})
 		if err != nil {
-			return translateVolumeRPCError(err)
+			return false, translateVolumeRPCError(err)
 		}
 		inode = nodeResp.Inode
 		handleID = nodeResp.HandleId
@@ -777,7 +789,7 @@ func (s *Server) writeVolumePath(ctx context.Context, volumeID, raw string, data
 	}()
 
 	if len(data) == 0 {
-		return nil
+		return true, nil
 	}
 	_, err = s.fileRPC.Write(ctx, &pb.WriteRequest{
 		VolumeId: volumeID,
@@ -788,9 +800,9 @@ func (s *Server) writeVolumePath(ctx context.Context, volumeID, raw string, data
 		Actor:    volumeFileActor(ctx),
 	})
 	if err != nil {
-		return translateVolumeRPCError(err)
+		return false, translateVolumeRPCError(err)
 	}
-	return nil
+	return true, nil
 }
 
 func (s *Server) moveVolumePath(ctx context.Context, volumeID, src, dst string) error {
@@ -920,6 +932,32 @@ func (s *Server) openVolumeDir(ctx context.Context, volumeID string, inode uint6
 		})
 	}
 	return openResp.HandleId, release, nil
+}
+
+func (s *Server) volumeFileContentMatches(ctx context.Context, volumeID string, resolved *volumeResolvedPath, expected []byte) (bool, error) {
+	if resolved == nil || !resolved.Exists || resolved.Attr == nil {
+		return false, nil
+	}
+	if attrModeIsDir(resolved.Attr.Mode) || resolved.Attr.Size != uint64(len(expected)) {
+		return false, nil
+	}
+	handleID, releaseFile, err := s.openVolumeFile(ctx, volumeID, resolved.Inode, uint32(syscall.O_RDONLY))
+	if err != nil {
+		return false, err
+	}
+	defer releaseFile()
+	readResp, err := s.fileRPC.Read(ctx, &pb.ReadRequest{
+		VolumeId: volumeID,
+		Inode:    resolved.Inode,
+		Offset:   0,
+		Size:     int64(resolved.Attr.Size),
+		HandleId: handleID,
+		Actor:    volumeFileActor(ctx),
+	})
+	if err != nil {
+		return false, translateVolumeRPCError(err)
+	}
+	return bytes.Equal(readResp.Data, expected), nil
 }
 
 func cleanVolumePath(raw string, allowRoot bool) (string, error) {

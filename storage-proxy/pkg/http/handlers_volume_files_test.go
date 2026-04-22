@@ -519,6 +519,73 @@ func TestWriteVolumeFileWritesExistingPath(t *testing.T) {
 	}
 }
 
+func TestWriteVolumeFileSkipsSyncWhenContentUnchanged(t *testing.T) {
+	const payload = "hello world"
+	var wrote *pb.WriteRequest
+	fileRPC := &fakeHTTPVolumeFileRPC{
+		lookupFunc: func(_ context.Context, req *pb.LookupRequest) (*pb.NodeResponse, error) {
+			if req.Parent == 1 && req.Name == "hello.txt" {
+				return &pb.NodeResponse{Inode: 3, Attr: volumeFileAttr(len(payload))}, nil
+			}
+			return nil, fserror.New(fserror.NotFound, "missing")
+		},
+		openFunc: func(_ context.Context, req *pb.OpenRequest) (*pb.OpenResponse, error) {
+			return &pb.OpenResponse{HandleId: 15}, nil
+		},
+		readFunc: func(_ context.Context, req *pb.ReadRequest) (*pb.ReadResponse, error) {
+			return &pb.ReadResponse{Data: []byte(payload)}, nil
+		},
+		writeFunc: func(_ context.Context, req *pb.WriteRequest) (*pb.WriteResponse, error) {
+			wrote = req
+			return &pb.WriteResponse{BytesWritten: int64(len(req.Data))}, nil
+		},
+	}
+	server, volMgr := newVolumeFileTestServer(fileRPC)
+
+	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/files?path=/hello.txt", bytes.NewReader([]byte(payload)))
+	req.SetPathValue("id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-a"}))
+	recorder := httptest.NewRecorder()
+
+	server.handleVolumeFileOperation(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	if wrote != nil {
+		t.Fatalf("unexpected write request: %+v", wrote)
+	}
+	if volMgr.syncCalls != 0 {
+		t.Fatalf("SyncDirectVolumeFileMount() calls = %d, want 0", volMgr.syncCalls)
+	}
+}
+
+func TestWriteVolumeFileMkdirRecursiveExistingDirSkipsSync(t *testing.T) {
+	fileRPC := &fakeHTTPVolumeFileRPC{
+		lookupFunc: func(_ context.Context, req *pb.LookupRequest) (*pb.NodeResponse, error) {
+			if req.Parent == 1 && req.Name == "skills" {
+				return &pb.NodeResponse{Inode: 3, Attr: volumeDirAttr()}, nil
+			}
+			return nil, fserror.New(fserror.NotFound, "missing")
+		},
+	}
+	server, volMgr := newVolumeFileTestServer(fileRPC)
+
+	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/files?path=/skills&mkdir=true&recursive=true", nil)
+	req.SetPathValue("id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-a"}))
+	recorder := httptest.NewRecorder()
+
+	server.handleVolumeFileOperation(recorder, req)
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusCreated)
+	}
+	if volMgr.syncCalls != 0 {
+		t.Fatalf("SyncDirectVolumeFileMount() calls = %d, want 0", volMgr.syncCalls)
+	}
+}
+
 func TestDeleteVolumeFileUnlinksResolvedPath(t *testing.T) {
 	var unlinked *pb.UnlinkRequest
 	fileRPC := &fakeHTTPVolumeFileRPC{

@@ -275,7 +275,7 @@ type namespaceStatus struct {
 	Phase string `json:"phase"`
 }
 
-// KubectlWaitForNamespacesDeletedByLabel waits for all namespaces matching a label selector to disappear.
+// KubectlWaitForNamespacesDeletedByLabel waits for matching namespaces that are already terminating to disappear.
 func KubectlWaitForNamespacesDeletedByLabel(ctx context.Context, kubeconfig, labelSelector, timeout string) error {
 	if labelSelector == "" {
 		return fmt.Errorf("label selector is required")
@@ -297,18 +297,24 @@ func KubectlWaitForNamespacesDeletedByLabel(ctx context.Context, kubeconfig, lab
 		if err := json.Unmarshal([]byte(output), &namespaces); err != nil {
 			return fmt.Errorf("decode namespaces for selector %q: %w", labelSelector, err)
 		}
-		if len(namespaces.Items) == 0 {
+		terminating := make([]namespace, 0, len(namespaces.Items))
+		for _, item := range namespaces.Items {
+			if strings.EqualFold(strings.TrimSpace(item.Status.Phase), "Terminating") {
+				terminating = append(terminating, item)
+			}
+		}
+		if len(terminating) == 0 {
 			return nil
 		}
 
-		names := make([]string, 0, len(namespaces.Items))
-		for _, item := range namespaces.Items {
+		names := make([]string, 0, len(terminating))
+		for _, item := range terminating {
 			names = append(names, fmt.Sprintf("%s(%s)", item.Metadata.Name, item.Status.Phase))
 		}
-		fmt.Printf("Namespaces still present for selector %q: %s\n", labelSelector, strings.Join(names, ", "))
+		fmt.Printf("Namespaces still terminating for selector %q: %s\n", labelSelector, strings.Join(names, ", "))
 
 		if time.Now().After(deadline) {
-			return fmt.Errorf("timeout waiting for namespaces with selector %q to be deleted", labelSelector)
+			return fmt.Errorf("timeout waiting for terminating namespaces with selector %q to be deleted", labelSelector)
 		}
 		time.Sleep(2 * time.Second)
 	}

@@ -171,6 +171,40 @@ func TestReconcileCtldRBACIncludesPodReadPermissions(t *testing.T) {
 	assert.True(t, found, "expected ctld cluster role to include pod resize permissions")
 }
 
+func TestReconcileStorageProxyRBACIncludesNodeReadPermission(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, rbacv1.AddToScheme(scheme))
+	require.NoError(t, infrav1alpha1.AddToScheme(scheme))
+
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: "sandbox0-system",
+		},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(infra).Build()
+	reconciler := NewReconciler(&common.ResourceManager{Client: client, Scheme: scheme})
+
+	require.NoError(t, reconciler.ReconcileStorageProxyRBAC(context.Background(), infra))
+
+	role := &rbacv1.ClusterRole{}
+	require.NoError(t, client.Get(context.Background(), types.NamespacedName{Name: "demo-storage-proxy"}, role))
+
+	found := false
+	for _, rule := range role.Rules {
+		if !contains(rule.APIGroups, "") {
+			continue
+		}
+		if !contains(rule.Resources, "nodes") {
+			continue
+		}
+		assert.ElementsMatch(t, []string{"get"}, rule.Verbs)
+		found = true
+	}
+	assert.True(t, found, "expected storage-proxy cluster role to include node read permission")
+}
+
 func TestReconcileStorageClientRBACAppliesGCSWorkloadIdentity(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -54,4 +55,33 @@ func TestCtldClientProbePod(t *testing.T) {
 	require.NotNil(t, resp)
 	assert.Equal(t, sandboxprobe.KindReadiness, resp.Kind)
 	assert.Equal(t, sandboxprobe.StatusPassed, resp.Status)
+}
+
+func TestCtldClientCheckVolumePortals(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "/api/v1/volume-portals/check", r.URL.Path)
+		var req ctldapi.CheckVolumePortalsRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		assert.Equal(t, "pod-uid", req.PodUID)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ctldapi.CheckVolumePortalsResponse{
+			Ready:   false,
+			Missing: []string{"workspace"},
+		})
+	}))
+	defer server.Close()
+
+	client := NewCtldClient(CtldClientConfig{})
+	resp, err := client.CheckVolumePortals(context.Background(), server.URL, ctldapi.CheckVolumePortalsRequest{
+		PodUID: "pod-uid",
+		Portals: []ctldapi.VolumePortalRef{{
+			PortalName: "workspace",
+			MountPath:  "/workspace",
+		}},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.False(t, resp.Ready)
+	assert.Equal(t, []string{"workspace"}, resp.Missing)
 }

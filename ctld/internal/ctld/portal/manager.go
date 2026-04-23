@@ -451,6 +451,35 @@ func (m *Manager) Unbind(ctx context.Context, req ctldapi.UnbindVolumePortalRequ
 	return ctldapi.UnbindVolumePortalResponse{Unbound: true}, nil
 }
 
+func (m *Manager) CheckPublished(ctx context.Context, req ctldapi.CheckVolumePortalsRequest) (ctldapi.CheckVolumePortalsResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return ctldapi.CheckVolumePortalsResponse{}, err
+	}
+	if strings.TrimSpace(req.PodUID) == "" {
+		return ctldapi.CheckVolumePortalsResponse{}, fmt.Errorf("pod_uid is required")
+	}
+	if len(req.Portals) == 0 {
+		return ctldapi.CheckVolumePortalsResponse{Ready: true}, nil
+	}
+
+	missing := make([]string, 0)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, portal := range req.Portals {
+		name := volumeportal.NormalizePortalName(portal.PortalName, portal.MountPath)
+		if name == "" {
+			continue
+		}
+		if m.portals[portalKey(req.PodUID, name)] == nil {
+			missing = append(missing, name)
+		}
+	}
+	return ctldapi.CheckVolumePortalsResponse{
+		Ready:   len(missing) == 0,
+		Missing: missing,
+	}, nil
+}
+
 func (m *Manager) AttachOwner(ctx context.Context, req ctldapi.AttachVolumeOwnerRequest) (ctldapi.AttachVolumeOwnerResponse, error) {
 	if err := ctx.Err(); err != nil {
 		return ctldapi.AttachVolumeOwnerResponse{}, err

@@ -249,6 +249,17 @@ func (c combinedController) UnbindVolumePortal(r *http.Request, req ctldapi.Unbi
 	return resp, http.StatusOK
 }
 
+func (c combinedController) CheckVolumePortals(r *http.Request, req ctldapi.CheckVolumePortalsRequest) (ctldapi.CheckVolumePortalsResponse, int) {
+	if c.Portal == nil {
+		return ctldapi.CheckVolumePortalsResponse{Error: "ctld volume portals not implemented"}, http.StatusNotImplemented
+	}
+	resp, err := c.Portal.CheckPublished(r.Context(), req)
+	if err != nil {
+		return ctldapi.CheckVolumePortalsResponse{Error: err.Error()}, volumePortalErrorStatus(err)
+	}
+	return resp, http.StatusOK
+}
+
 func (c combinedController) AttachVolumeOwner(r *http.Request, req ctldapi.AttachVolumeOwnerRequest) (ctldapi.AttachVolumeOwnerResponse, int) {
 	if c.Portal == nil {
 		return ctldapi.AttachVolumeOwnerResponse{Error: "ctld volume owners not implemented"}, http.StatusNotImplemented
@@ -326,6 +337,7 @@ func (c combinedController) Probe(r *http.Request, sandboxID string, kind sandbo
 type volumePortalHandler interface {
 	Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest) (ctldapi.BindVolumePortalResponse, error)
 	Unbind(ctx context.Context, req ctldapi.UnbindVolumePortalRequest) (ctldapi.UnbindVolumePortalResponse, error)
+	CheckPublished(ctx context.Context, req ctldapi.CheckVolumePortalsRequest) (ctldapi.CheckVolumePortalsResponse, error)
 	AttachOwner(ctx context.Context, req ctldapi.AttachVolumeOwnerRequest) (ctldapi.AttachVolumeOwnerResponse, error)
 	PrepareHandoff(ctx context.Context, req ctldapi.PrepareVolumePortalHandoffRequest) (ctldapi.PrepareVolumePortalHandoffResponse, error)
 	CompleteHandoff(ctx context.Context, req ctldapi.CompleteVolumePortalHandoffRequest) (ctldapi.CompleteVolumePortalHandoffResponse, error)

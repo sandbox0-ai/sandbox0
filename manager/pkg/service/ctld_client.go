@@ -60,6 +60,10 @@ func (c *CtldClient) UnbindVolumePortal(ctx context.Context, ctldAddress string,
 	return doCtldJSONRequest[ctldapi.UnbindVolumePortalResponse](ctx, c.httpClient, ctldAddress, "/api/v1/volume-portals/unbind", req)
 }
 
+func (c *CtldClient) CheckVolumePortals(ctx context.Context, ctldAddress string, req ctldapi.CheckVolumePortalsRequest) (*ctldapi.CheckVolumePortalsResponse, error) {
+	return doCtldJSONRequest[ctldapi.CheckVolumePortalsResponse](ctx, c.httpClient, ctldAddress, "/api/v1/volume-portals/check", req)
+}
+
 func (c *CtldClient) PrepareVolumePortalHandoff(ctx context.Context, ctldAddress string, req ctldapi.PrepareVolumePortalHandoffRequest) (*ctldapi.PrepareVolumePortalHandoffResponse, error) {
 	return doCtldJSONRequest[ctldapi.PrepareVolumePortalHandoffResponse](ctx, c.httpClient, ctldAddress, "/api/v1/volume-portals/handoffs/prepare", req)
 }

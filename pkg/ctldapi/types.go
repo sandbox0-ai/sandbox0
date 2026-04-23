@@ -71,6 +71,24 @@ type UnbindVolumePortalResponse struct {
 	Error   string `json:"error,omitempty"`
 }
 
+// CheckVolumePortalsRequest checks that pod-local portal mounts have been
+// published by kubelet before the sandbox is considered claim-ready.
+type CheckVolumePortalsRequest struct {
+	PodUID  string            `json:"pod_uid"`
+	Portals []VolumePortalRef `json:"portals,omitempty"`
+}
+
+type VolumePortalRef struct {
+	PortalName string `json:"portal_name,omitempty"`
+	MountPath  string `json:"mount_path,omitempty"`
+}
+
+type CheckVolumePortalsResponse struct {
+	Ready   bool     `json:"ready"`
+	Missing []string `json:"missing,omitempty"`
+	Error   string   `json:"error,omitempty"`
+}
+
 type PrepareVolumePortalHandoffRequest struct {
 	SandboxVolumeID string `json:"sandboxvolume_id"`
 }

@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
@@ -25,6 +26,12 @@ type kubernetesVolumeCtldResolver struct {
 	port      int
 }
 
+const (
+	ctldNameLabel     = "app.kubernetes.io/name"
+	ctldInstanceLabel = "app.kubernetes.io/instance"
+	ctldComponentName = "ctld"
+)
+
 func newKubernetesVolumeCtldResolver(client kubernetes.Interface, selfPodID string) volumeCtldResolver {
 	if client == nil || strings.TrimSpace(selfPodID) == "" {
 		return nil
@@ -40,23 +47,34 @@ func (r *kubernetesVolumeCtldResolver) ResolveLocalCtldURL(ctx context.Context) 
 	if r == nil || r.client == nil {
 		return "", fmt.Errorf("ctld resolver unavailable")
 	}
-	pod, err := resolveKubernetesPod(ctx, r.client, r.selfPodID)
+	selfPod, err := resolveKubernetesPod(ctx, r.client, r.selfPodID)
 	if err != nil {
 		return "", err
 	}
-	if pod == nil || pod.Spec.NodeName == "" {
+	if selfPod == nil {
+		return "", fmt.Errorf("storage-proxy pod %q not found", r.selfPodID)
+	}
+	if selfPod.Spec.NodeName == "" {
 		return "", fmt.Errorf("storage-proxy pod %q is not scheduled", r.selfPodID)
 	}
-	node, err := r.client.CoreV1().Nodes().Get(ctx, pod.Spec.NodeName, metav1.GetOptions{})
+
+	candidates, err := r.listCtldCandidates(ctx, selfPod)
 	if err != nil {
 		return "", err
 	}
-	for _, address := range node.Status.Addresses {
-		if address.Type == corev1.NodeInternalIP && strings.TrimSpace(address.Address) != "" {
-			return fmt.Sprintf("http://%s:%d", address.Address, r.port), nil
+	for _, candidate := range candidates {
+		if candidate.Spec.NodeName == selfPod.Spec.NodeName {
+			if addr, ok := podInternalURL(candidate, r.port); ok {
+				return addr, nil
+			}
 		}
 	}
-	return "", fmt.Errorf("node %s has no internal ip", node.Name)
+	for _, candidate := range candidates {
+		if addr, ok := podInternalURL(candidate, r.port); ok {
+			return addr, nil
+		}
+	}
+	return "", fmt.Errorf("no ready ctld pod available for storage-proxy pod %q", r.selfPodID)
 }
 
 func resolveKubernetesPod(ctx context.Context, client kubernetes.Interface, podID string) (*corev1.Pod, error) {
@@ -78,6 +96,63 @@ func resolveKubernetesPod(ctx context.Context, client kubernetes.Interface, podI
 		return nil, fmt.Errorf("pod %q not found", podID)
 	}
 	return &pods.Items[0], nil
+}
+
+func (r *kubernetesVolumeCtldResolver) listCtldCandidates(ctx context.Context, selfPod *corev1.Pod) ([]corev1.Pod, error) {
+	if r == nil || r.client == nil || selfPod == nil {
+		return nil, fmt.Errorf("ctld resolver unavailable")
+	}
+
+	labelSelector := ctldNameLabel + "=" + ctldComponentName
+	if instance := strings.TrimSpace(selfPod.Labels[ctldInstanceLabel]); instance != "" {
+		labelSelector += "," + ctldInstanceLabel + "=" + instance
+	}
+
+	pods, err := r.client.CoreV1().Pods(selfPod.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	candidates := make([]corev1.Pod, 0, len(pods.Items))
+	for _, pod := range pods.Items {
+		if isReadyCtldPod(&pod) {
+			candidates = append(candidates, pod)
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].Spec.NodeName == candidates[j].Spec.NodeName {
+			return candidates[i].Name < candidates[j].Name
+		}
+		if candidates[i].Spec.NodeName == selfPod.Spec.NodeName {
+			return true
+		}
+		if candidates[j].Spec.NodeName == selfPod.Spec.NodeName {
+			return false
+		}
+		return candidates[i].Name < candidates[j].Name
+	})
+	return candidates, nil
+}
+
+func isReadyCtldPod(pod *corev1.Pod) bool {
+	if pod == nil || pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning || strings.TrimSpace(pod.Status.PodIP) == "" {
+		return false
+	}
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodReady {
+			return condition.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
+func podInternalURL(pod corev1.Pod, port int) (string, bool) {
+	if strings.TrimSpace(pod.Status.PodIP) == "" {
+		return "", false
+	}
+	return fmt.Sprintf("http://%s:%d", pod.Status.PodIP, port), true
 }
 
 func (s *Server) ensureCtldVolumeOwner(ctx context.Context, volumeRecord *db.SandboxVolume) error {

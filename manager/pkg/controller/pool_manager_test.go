@@ -106,7 +106,7 @@ func TestDrainStaleIdlePodsUsesDeletePreconditions(t *testing.T) {
 		logger:    zap.NewNop(),
 	}
 
-	err := pm.drainStaleIdlePods(context.Background(), template, "new-hash")
+	err := pm.drainStaleIdlePods(context.Background(), template, "new-hash", "")
 	require.NoError(t, err)
 	assert.Equal(t, 1, deleteActions)
 }
@@ -164,7 +164,7 @@ func TestDrainStaleIdlePodsForceDeletesStaleDeletingPods(t *testing.T) {
 		logger:    zap.NewNop(),
 	}
 
-	err := pm.drainStaleIdlePods(context.Background(), template, "new-hash")
+	err := pm.drainStaleIdlePods(context.Background(), template, "new-hash", "")
 	require.NoError(t, err)
 	assert.Equal(t, 1, deleteActions)
 	select {
@@ -173,6 +173,97 @@ func TestDrainStaleIdlePodsForceDeletesStaleDeletingPods(t *testing.T) {
 	default:
 		t.Fatal("expected stale idle force-delete event")
 	}
+}
+
+func TestDrainStaleIdlePodsDeletesPodsFromOldReplicaSet(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "default",
+		},
+	}
+	controllerRef := true
+	oldOwner := metav1.OwnerReference{
+		APIVersion: "apps/v1",
+		Kind:       "ReplicaSet",
+		Name:       "old-rs",
+		UID:        types.UID("old-rs-uid"),
+		Controller: &controllerRef,
+	}
+	currentOwner := metav1.OwnerReference{
+		APIVersion: "apps/v1",
+		Kind:       "ReplicaSet",
+		Name:       "current-rs",
+		UID:        types.UID("current-rs-uid"),
+		Controller: &controllerRef,
+	}
+
+	oldPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "idle-old-owner",
+			Namespace:       "default",
+			UID:             types.UID("uid-old-owner"),
+			ResourceVersion: "41",
+			Labels: map[string]string{
+				LabelTemplateID: "template-a",
+				LabelPoolType:   PoolTypeIdle,
+			},
+			Annotations: map[string]string{
+				AnnotationTemplateSpecHash: "new-hash",
+			},
+			OwnerReferences: []metav1.OwnerReference{oldOwner},
+		},
+	}
+	currentPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "idle-current-owner",
+			Namespace:       "default",
+			UID:             types.UID("uid-current-owner"),
+			ResourceVersion: "42",
+			Labels: map[string]string{
+				LabelTemplateID: "template-a",
+				LabelPoolType:   PoolTypeIdle,
+			},
+			Annotations: map[string]string{
+				AnnotationTemplateSpecHash: "new-hash",
+			},
+			OwnerReferences: []metav1.OwnerReference{currentOwner},
+		},
+	}
+
+	client := fake.NewSimpleClientset(oldPod, currentPod)
+	podIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	require.NoError(t, podIndexer.Add(oldPod))
+	require.NoError(t, podIndexer.Add(currentPod))
+	podLister := corelisters.NewPodLister(podIndexer)
+
+	deleteActions := 0
+	client.PrependReactor("delete", "pods", func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {
+		delAction, ok := action.(k8stesting.DeleteAction)
+		require.True(t, ok)
+		deleteActions++
+		assert.Equal(t, "idle-old-owner", delAction.GetName())
+		opts := delAction.GetDeleteOptions()
+		require.NotNil(t, opts.GracePeriodSeconds)
+		assert.Equal(t, int64(0), *opts.GracePeriodSeconds)
+		require.NotNil(t, opts.Preconditions)
+		require.NotNil(t, opts.Preconditions.UID)
+		require.NotNil(t, opts.Preconditions.ResourceVersion)
+		assert.Equal(t, types.UID("uid-old-owner"), *opts.Preconditions.UID)
+		assert.Equal(t, "41", *opts.Preconditions.ResourceVersion)
+		return false, nil, nil
+	})
+
+	pm := &PoolManager{
+		k8sClient: client,
+		podLister: podLister,
+		recorder:  record.NewFakeRecorder(10),
+		logger:    zap.NewNop(),
+	}
+
+	err := pm.drainStaleIdlePods(context.Background(), template, "new-hash", types.UID("current-rs-uid"))
+	require.NoError(t, err)
+	assert.Equal(t, 1, deleteActions)
 }
 
 func TestDrainStaleIdlePodsSkipsClaimedActivePods(t *testing.T) {
@@ -217,7 +308,7 @@ func TestDrainStaleIdlePodsSkipsClaimedActivePods(t *testing.T) {
 		logger:    zap.NewNop(),
 	}
 
-	err := pm.drainStaleIdlePods(context.Background(), template, "new-hash")
+	err := pm.drainStaleIdlePods(context.Background(), template, "new-hash", "")
 	require.NoError(t, err)
 	assert.Equal(t, 0, deleteActions)
 }

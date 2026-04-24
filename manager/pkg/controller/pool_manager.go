@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	appslisters "k8s.io/client-go/listers/apps/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
@@ -124,7 +125,7 @@ func (pm *PoolManager) ReconcilePool(ctx context.Context, template *v1alpha1.San
 	}
 
 	// 3. Drain stale idle pods atomically with delete preconditions.
-	if err := pm.drainStaleIdlePods(ctx, template, desiredTemplateHash); err != nil {
+	if err := pm.drainStaleIdlePods(ctx, template, desiredTemplateHash, rs.UID); err != nil {
 		return fmt.Errorf("drain stale idle pods: %w", err)
 	}
 
@@ -271,7 +272,7 @@ func (pm *PoolManager) reconcileReplicaSetTemplate(
 	return updatedRS, nil
 }
 
-func (pm *PoolManager) drainStaleIdlePods(ctx context.Context, template *v1alpha1.SandboxTemplate, desiredTemplateHash string) error {
+func (pm *PoolManager) drainStaleIdlePods(ctx context.Context, template *v1alpha1.SandboxTemplate, desiredTemplateHash string, currentReplicaSetUID types.UID) error {
 	pods, err := pm.podLister.Pods(template.Namespace).List(labels.SelectorFromSet(map[string]string{
 		LabelTemplateID: template.Name,
 		LabelPoolType:   PoolTypeIdle,
@@ -284,15 +285,15 @@ func (pm *PoolManager) drainStaleIdlePods(ctx context.Context, template *v1alpha
 	now := time.Now()
 	for _, pod := range pods {
 		if pod.DeletionTimestamp != nil {
-			if pm.forceDeleteStaleDeletingIdlePod(ctx, template, pod, now) {
+			if pm.forceDeleteStaleDeletingIdlePod(ctx, template, pod, now, currentReplicaSetUID) {
 				drained++
 			}
 			continue
 		}
-		if pod.Annotations[AnnotationTemplateSpecHash] == desiredTemplateHash {
+		if pod.Annotations[AnnotationTemplateSpecHash] == desiredTemplateHash && idlePodOwnedByReplicaSet(pod, currentReplicaSetUID) {
 			continue
 		}
-		deleted, err := pm.deleteStaleIdlePodWithRetry(ctx, template.Namespace, pod.Name, desiredTemplateHash)
+		deleted, err := pm.deleteStaleIdlePodWithRetry(ctx, template.Namespace, pod.Name, desiredTemplateHash, currentReplicaSetUID)
 		if err != nil {
 			return err
 		}
@@ -303,7 +304,7 @@ func (pm *PoolManager) drainStaleIdlePods(ctx context.Context, template *v1alpha
 
 	if drained > 0 {
 		pm.recorder.Eventf(template, corev1.EventTypeNormal, "StaleIdlePodsDrained",
-			"Drained %d stale idle pod(s) with outdated template hash", drained)
+			"Drained %d stale idle pod(s) with outdated template hash or owner", drained)
 		pm.logger.Info("Drained stale idle pods",
 			zap.String("template", template.Name),
 			zap.Int("count", drained),
@@ -313,11 +314,12 @@ func (pm *PoolManager) drainStaleIdlePods(ctx context.Context, template *v1alpha
 	return nil
 }
 
-func (pm *PoolManager) forceDeleteStaleDeletingIdlePod(ctx context.Context, template *v1alpha1.SandboxTemplate, pod *corev1.Pod, now time.Time) bool {
+func (pm *PoolManager) forceDeleteStaleDeletingIdlePod(ctx context.Context, template *v1alpha1.SandboxTemplate, pod *corev1.Pod, now time.Time, currentReplicaSetUID types.UID) bool {
 	if pod == nil || pod.DeletionTimestamp == nil {
 		return false
 	}
-	if now.Sub(pod.DeletionTimestamp.Time) < staleDeletingPodForceDeleteAfter {
+	staleOwner := !idlePodOwnedByReplicaSet(pod, currentReplicaSetUID)
+	if !staleOwner && now.Sub(pod.DeletionTimestamp.Time) < staleDeletingPodForceDeleteAfter {
 		return false
 	}
 	if pm.k8sClient == nil {
@@ -338,6 +340,7 @@ func (pm *PoolManager) forceDeleteStaleDeletingIdlePod(ctx context.Context, temp
 	}
 	pm.logger.Warn("Force deleting stale terminating idle pod",
 		zap.String("pod", pod.Name),
+		zap.Bool("staleOwner", staleOwner),
 		zap.Time("deletionTimestamp", pod.DeletionTimestamp.Time),
 	)
 	if err := pm.k8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, deleteOptions); err != nil {
@@ -355,7 +358,7 @@ func (pm *PoolManager) forceDeleteStaleDeletingIdlePod(ctx context.Context, temp
 	return true
 }
 
-func (pm *PoolManager) deleteStaleIdlePodWithRetry(ctx context.Context, namespace, podName, desiredTemplateHash string) (bool, error) {
+func (pm *PoolManager) deleteStaleIdlePodWithRetry(ctx context.Context, namespace, podName, desiredTemplateHash string, currentReplicaSetUID types.UID) (bool, error) {
 	// Retry small transient races while still validating the pod is stale+idle.
 	deleted := false
 	retryErr := retry.OnError(retry.DefaultRetry, func(err error) bool {
@@ -369,19 +372,28 @@ func (pm *PoolManager) deleteStaleIdlePodWithRetry(ctx context.Context, namespac
 			return err
 		}
 
-		// If pod has been claimed or already updated to latest hash, skip delete.
-		if pod.Labels[LabelPoolType] != PoolTypeIdle || pod.Annotations[AnnotationTemplateSpecHash] == desiredTemplateHash {
+		if pod.Labels[LabelPoolType] != PoolTypeIdle {
+			return nil
+		}
+		staleHash := pod.Annotations[AnnotationTemplateSpecHash] != desiredTemplateHash
+		staleOwner := !idlePodOwnedByReplicaSet(pod, currentReplicaSetUID)
+		if !staleHash && !staleOwner {
 			return nil
 		}
 
 		uid := pod.UID
 		resourceVersion := pod.ResourceVersion
-		err = pm.k8sClient.CoreV1().Pods(namespace).Delete(ctx, podName, metav1.DeleteOptions{
+		deleteOptions := metav1.DeleteOptions{
 			Preconditions: &metav1.Preconditions{
 				UID:             &uid,
 				ResourceVersion: &resourceVersion,
 			},
-		})
+		}
+		if staleOwner {
+			gracePeriodSeconds := int64(0)
+			deleteOptions.GracePeriodSeconds = &gracePeriodSeconds
+		}
+		err = pm.k8sClient.CoreV1().Pods(namespace).Delete(ctx, podName, deleteOptions)
 		if err != nil && !errors.IsNotFound(err) {
 			return err
 		}
@@ -392,6 +404,14 @@ func (pm *PoolManager) deleteStaleIdlePodWithRetry(ctx context.Context, namespac
 		return false, retryErr
 	}
 	return deleted, nil
+}
+
+func idlePodOwnedByReplicaSet(pod *corev1.Pod, replicaSetUID types.UID) bool {
+	if pod == nil || replicaSetUID == "" {
+		return true
+	}
+	controllerRef := metav1.GetControllerOf(pod)
+	return controllerRef != nil && controllerRef.UID == replicaSetUID
 }
 
 // TemplateSpecHash returns the pod spec hash used to identify current idle pods.

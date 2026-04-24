@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/stretchr/testify/assert"
@@ -108,6 +109,70 @@ func TestDrainStaleIdlePodsUsesDeletePreconditions(t *testing.T) {
 	err := pm.drainStaleIdlePods(context.Background(), template, "new-hash")
 	require.NoError(t, err)
 	assert.Equal(t, 1, deleteActions)
+}
+
+func TestDrainStaleIdlePodsForceDeletesStaleDeletingPods(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "default",
+		},
+	}
+
+	deletedAt := metav1.NewTime(time.Now().Add(-30 * time.Minute))
+	staleDeletingPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "idle-terminating",
+			Namespace:         "default",
+			UID:               types.UID("uid-terminating"),
+			ResourceVersion:   "31",
+			DeletionTimestamp: &deletedAt,
+			Labels: map[string]string{
+				LabelTemplateID: "template-a",
+				LabelPoolType:   PoolTypeIdle,
+			},
+			Annotations: map[string]string{
+				AnnotationTemplateSpecHash: "new-hash",
+			},
+		},
+	}
+
+	client := fake.NewSimpleClientset(staleDeletingPod)
+	podIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	require.NoError(t, podIndexer.Add(staleDeletingPod))
+	podLister := corelisters.NewPodLister(podIndexer)
+
+	deleteActions := 0
+	client.PrependReactor("delete", "pods", func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {
+		delAction, ok := action.(k8stesting.DeleteAction)
+		require.True(t, ok)
+		deleteActions++
+		opts := delAction.GetDeleteOptions()
+		require.NotNil(t, opts.GracePeriodSeconds)
+		assert.Equal(t, int64(0), *opts.GracePeriodSeconds)
+		require.NotNil(t, opts.Preconditions)
+		require.NotNil(t, opts.Preconditions.UID)
+		assert.Equal(t, types.UID("uid-terminating"), *opts.Preconditions.UID)
+		return false, nil, nil
+	})
+
+	recorder := record.NewFakeRecorder(10)
+	pm := &PoolManager{
+		k8sClient: client,
+		podLister: podLister,
+		recorder:  recorder,
+		logger:    zap.NewNop(),
+	}
+
+	err := pm.drainStaleIdlePods(context.Background(), template, "new-hash")
+	require.NoError(t, err)
+	assert.Equal(t, 1, deleteActions)
+	select {
+	case event := <-recorder.Events:
+		assert.Contains(t, event, "StaleDeletingIdlePodForceDeleted")
+	default:
+		t.Fatal("expected stale idle force-delete event")
+	}
 }
 
 func TestDrainStaleIdlePodsSkipsClaimedActivePods(t *testing.T) {

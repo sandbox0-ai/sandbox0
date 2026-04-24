@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
@@ -280,7 +281,14 @@ func (pm *PoolManager) drainStaleIdlePods(ctx context.Context, template *v1alpha
 	}
 
 	drained := 0
+	now := time.Now()
 	for _, pod := range pods {
+		if pod.DeletionTimestamp != nil {
+			if pm.forceDeleteStaleDeletingIdlePod(ctx, template, pod, now) {
+				drained++
+			}
+			continue
+		}
 		if pod.Annotations[AnnotationTemplateSpecHash] == desiredTemplateHash {
 			continue
 		}
@@ -305,8 +313,51 @@ func (pm *PoolManager) drainStaleIdlePods(ctx context.Context, template *v1alpha
 	return nil
 }
 
+func (pm *PoolManager) forceDeleteStaleDeletingIdlePod(ctx context.Context, template *v1alpha1.SandboxTemplate, pod *corev1.Pod, now time.Time) bool {
+	if pod == nil || pod.DeletionTimestamp == nil {
+		return false
+	}
+	if now.Sub(pod.DeletionTimestamp.Time) < staleDeletingPodForceDeleteAfter {
+		return false
+	}
+	if pm.k8sClient == nil {
+		pm.logger.Warn("Kubernetes client not configured, skipping stale deleting idle pod force delete",
+			zap.String("pod", pod.Name),
+			zap.Time("deletionTimestamp", pod.DeletionTimestamp.Time),
+		)
+		return false
+	}
+
+	gracePeriodSeconds := int64(0)
+	uid := pod.UID
+	deleteOptions := metav1.DeleteOptions{
+		GracePeriodSeconds: &gracePeriodSeconds,
+		Preconditions: &metav1.Preconditions{
+			UID: &uid,
+		},
+	}
+	pm.logger.Warn("Force deleting stale terminating idle pod",
+		zap.String("pod", pod.Name),
+		zap.Time("deletionTimestamp", pod.DeletionTimestamp.Time),
+	)
+	if err := pm.k8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, deleteOptions); err != nil {
+		if errors.IsNotFound(err) {
+			return false
+		}
+		pm.logger.Error("Failed to force delete stale terminating idle pod",
+			zap.String("pod", pod.Name),
+			zap.Error(err),
+		)
+		return false
+	}
+	pm.recorder.Eventf(template, corev1.EventTypeWarning, "StaleDeletingIdlePodForceDeleted",
+		"Force deleted stale terminating idle pod %s", pod.Name)
+	return true
+}
+
 func (pm *PoolManager) deleteStaleIdlePodWithRetry(ctx context.Context, namespace, podName, desiredTemplateHash string) (bool, error) {
 	// Retry small transient races while still validating the pod is stale+idle.
+	deleted := false
 	retryErr := retry.OnError(retry.DefaultRetry, func(err error) bool {
 		return errors.IsConflict(err) || errors.IsInvalid(err)
 	}, func() error {
@@ -334,12 +385,13 @@ func (pm *PoolManager) deleteStaleIdlePodWithRetry(ctx context.Context, namespac
 		if err != nil && !errors.IsNotFound(err) {
 			return err
 		}
+		deleted = err == nil
 		return nil
 	})
 	if retryErr != nil {
 		return false, retryErr
 	}
-	return false, nil
+	return deleted, nil
 }
 
 // TemplateSpecHash returns the pod spec hash used to identify current idle pods.

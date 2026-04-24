@@ -17,8 +17,10 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	corelisters "k8s.io/client-go/listers/core/v1"
+	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 )
 
@@ -301,6 +303,48 @@ func TestDeleteLastTeamTemplateDeletesManagedNamespace(t *testing.T) {
 	require.True(t, apierrors.IsNotFound(err), "last team template CRD should be deleted")
 	_, err = k8sClient.CoreV1().Pods(namespace).Get(ctx, pod.Name, metav1.GetOptions{})
 	require.True(t, apierrors.IsNotFound(err), "last team template pod should be deleted")
+}
+
+func TestDeleteTemplateForceDeletesIdleTemplatePods(t *testing.T) {
+	ctx := context.Background()
+	namespace, err := naming.TemplateNamespaceForTeam("team-123")
+	require.NoError(t, err)
+
+	template := teamTemplate(namespace, "demo", "team-123")
+	idlePod := templatePod(namespace, "idle-pod", "demo", controller.PoolTypeIdle)
+	idlePod.UID = types.UID("idle-uid")
+	activePod := templatePod(namespace, "active-pod", "demo", controller.PoolTypeActive)
+	activePod.UID = types.UID("active-uid")
+	k8sClient := fake.NewSimpleClientset(
+		managedNamespace(namespace),
+		idlePod,
+		activePod,
+	)
+	service, _ := newTemplateServiceForDeleteTests(k8sClient, template)
+
+	deleteOptionsByPod := map[string]metav1.DeleteOptions{}
+	k8sClient.PrependReactor("delete", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		deleteAction, ok := action.(k8stesting.DeleteAction)
+		require.True(t, ok)
+		deleteOptionsByPod[deleteAction.GetName()] = deleteAction.GetDeleteOptions()
+		return false, nil, nil
+	})
+
+	err = service.DeleteTemplate(ctx, "demo")
+	require.NoError(t, err)
+
+	idleOptions, ok := deleteOptionsByPod["idle-pod"]
+	require.True(t, ok, "idle pod should be deleted")
+	require.NotNil(t, idleOptions.GracePeriodSeconds)
+	assert.Equal(t, int64(0), *idleOptions.GracePeriodSeconds)
+	require.NotNil(t, idleOptions.Preconditions)
+	require.NotNil(t, idleOptions.Preconditions.UID)
+	assert.Equal(t, types.UID("idle-uid"), *idleOptions.Preconditions.UID)
+
+	activeOptions, ok := deleteOptionsByPod["active-pod"]
+	require.True(t, ok, "active pod should be deleted")
+	assert.Nil(t, activeOptions.GracePeriodSeconds)
+	assert.Nil(t, activeOptions.Preconditions)
 }
 
 func managedNamespace(name string) *corev1.Namespace {

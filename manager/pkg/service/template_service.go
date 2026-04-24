@@ -300,7 +300,14 @@ func (s *TemplateService) deleteTemplatePods(ctx context.Context, namespace, tem
 		if poolType != controller.PoolTypeIdle && poolType != controller.PoolTypeActive {
 			continue
 		}
-		if err := s.k8sClient.CoreV1().Pods(namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+		deleteOptions := metav1.DeleteOptions{}
+		if poolType == controller.PoolTypeIdle {
+			gracePeriodSeconds := int64(0)
+			uid := pod.UID
+			deleteOptions.GracePeriodSeconds = &gracePeriodSeconds
+			deleteOptions.Preconditions = &metav1.Preconditions{UID: &uid}
+		}
+		if err := s.k8sClient.CoreV1().Pods(namespace).Delete(ctx, pod.Name, deleteOptions); err != nil && !errors.IsNotFound(err) {
 			return fmt.Errorf("delete template pod %s/%s: %w", namespace, pod.Name, err)
 		}
 	}

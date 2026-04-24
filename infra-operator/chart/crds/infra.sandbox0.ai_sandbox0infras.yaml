@@ -1080,7 +1080,7 @@ spec:
                             default: 10m
                             type: string
                           proxyTimeout:
-                            default: 10s
+                            default: 30s
                             type: string
                           rateLimitBurst:
                             default: 200

@@ -37,7 +37,7 @@ type ManagerClient struct {
 // NewManagerClient creates a new manager client
 func NewManagerClient(baseURL string, internalAuthGen *internalauth.Generator, logger *zap.Logger, timeout time.Duration) *ManagerClient {
 	if timeout == 0 {
-		timeout = 10 * time.Second
+		timeout = 30 * time.Second
 	}
 	return &ManagerClient{
 		baseURL:         baseURL,

@@ -74,7 +74,7 @@ func NewServer(
 	// Create proxy router
 	proxyTimeout := cfg.ProxyTimeout.Duration
 	if proxyTimeout == 0 {
-		proxyTimeout = 10 * time.Second
+		proxyTimeout = 30 * time.Second
 	}
 
 	// Create observable HTTP client for proxy

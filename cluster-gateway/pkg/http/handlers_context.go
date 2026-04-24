@@ -48,7 +48,7 @@ func (s *Server) createContext(c *gin.Context) {
 	}
 	proxyTimeout := s.cfg.ProxyTimeout.Duration
 	if proxyTimeout == 0 {
-		proxyTimeout = 10 * time.Second
+		proxyTimeout = 30 * time.Second
 	}
 	reqURL := *procdURL
 	reqURL.Path = "/api/v1/contexts"
@@ -360,7 +360,7 @@ func (s *Server) proxyToProcd(c *gin.Context, procdURL *url.URL) {
 	// Create and execute reverse proxy
 	proxyTimeout := s.cfg.ProxyTimeout.Duration
 	if proxyTimeout == 0 {
-		proxyTimeout = 10 * time.Second
+		proxyTimeout = 30 * time.Second
 	}
 	router, err := proxy.NewRouter(
 		procdURL.String(),

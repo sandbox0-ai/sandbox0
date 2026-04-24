@@ -47,7 +47,7 @@ type ClusterGatewayConfig struct {
 
 	// Proxy configuration
 	// +optional
-	// +kubebuilder:default="10s"
+	// +kubebuilder:default="30s"
 	ProxyTimeout metav1.Duration `yaml:"proxy_timeout" json:"proxyTimeout"`
 
 	// Public gateway (external auth) configuration

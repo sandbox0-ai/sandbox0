@@ -92,7 +92,7 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 	c.Request = proxy.WithUpstreamTimeoutDisabledRequest(c.Request)
 	proxyTimeout := s.cfg.ProxyTimeout.Duration
 	if proxyTimeout == 0 {
-		proxyTimeout = 10 * time.Second
+		proxyTimeout = 30 * time.Second
 	}
 	router, err := proxy.NewRouter(targetURL.String(), s.logger, proxyTimeout, proxy.WithHTTPClient(s.outboundHTTPClient()))
 	if err != nil {

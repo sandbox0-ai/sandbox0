@@ -313,7 +313,7 @@ type ClusterGatewayConfig struct {
 	// +kubebuilder:default="10s"
 	HealthCheckPeriod metav1.Duration `json:"healthCheckPeriod,omitempty"`
 	// +optional
-	// +kubebuilder:default="10s"
+	// +kubebuilder:default="30s"
 	ProxyTimeout metav1.Duration `json:"proxyTimeout,omitempty"`
 	// +optional
 	// +kubebuilder:default=30

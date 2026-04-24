@@ -145,6 +145,10 @@ func (f fakeVolumePortalHandler) Unbind(_ context.Context, _ ctldapi.UnbindVolum
 	return ctldapi.UnbindVolumePortalResponse{}, nil
 }
 
+func (f fakeVolumePortalHandler) CheckPublished(_ context.Context, _ ctldapi.CheckVolumePortalsRequest) (ctldapi.CheckVolumePortalsResponse, error) {
+	return ctldapi.CheckVolumePortalsResponse{Ready: true}, nil
+}
+
 func (f fakeVolumePortalHandler) AttachOwner(_ context.Context, _ ctldapi.AttachVolumeOwnerRequest) (ctldapi.AttachVolumeOwnerResponse, error) {
 	return ctldapi.AttachVolumeOwnerResponse{Attached: true}, nil
 }

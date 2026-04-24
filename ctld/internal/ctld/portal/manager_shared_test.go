@@ -6,6 +6,7 @@ import (
 	"time"
 
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumefuse"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
@@ -67,6 +68,33 @@ func TestUnbindLockedSnapshotKeepsSharedVolumeUntilLastPortal(t *testing.T) {
 	}
 	if _, err := mgr.volumes.GetVolume("vol-1"); err == nil {
 		t.Fatal("GetVolume() after last unbind error = nil, want volume removed")
+	}
+}
+
+func TestCheckPublishedReportsMissingPortals(t *testing.T) {
+	mgr := &Manager{
+		portals: make(map[string]*portalMount),
+	}
+	mgr.portals[portalKey("pod-uid", "workspace")] = &portalMount{
+		podUID: "pod-uid",
+		name:   "workspace",
+	}
+
+	resp, err := mgr.CheckPublished(context.Background(), ctldapi.CheckVolumePortalsRequest{
+		PodUID: "pod-uid",
+		Portals: []ctldapi.VolumePortalRef{
+			{PortalName: "workspace", MountPath: "/workspace"},
+			{PortalName: "cache", MountPath: "/cache"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CheckPublished() error = %v", err)
+	}
+	if resp.Ready {
+		t.Fatal("CheckPublished() ready = true, want false")
+	}
+	if len(resp.Missing) != 1 || resp.Missing[0] != "cache" {
+		t.Fatalf("CheckPublished() missing = %v, want [cache]", resp.Missing)
 	}
 }
 

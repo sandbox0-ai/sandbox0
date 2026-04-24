@@ -22,11 +22,13 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
+	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	k8stesting "k8s.io/client-go/testing"
@@ -504,6 +506,69 @@ func TestWaitForPodClaimReadyWaitsForProcdContainerRunning(t *testing.T) {
 	}
 	if !podContainerRunning(readyPod, "procd") {
 		t.Fatal("waitForPodClaimReady() returned before procd container was running")
+	}
+}
+
+func TestProbeSandboxPodReadinessRequiresPublishedVolumePortals(t *testing.T) {
+	pod := newClaimReadyTestPod("ns-a", "pod-a", "template-a")
+	pod.UID = types.UID("pod-uid")
+	pod.Spec.Volumes = []corev1.Volume{{
+		Name: "workspace",
+		VolumeSource: corev1.VolumeSource{
+			CSI: &corev1.CSIVolumeSource{
+				Driver: volumeportal.DriverName,
+				VolumeAttributes: map[string]string{
+					volumeportal.AttributePortalName: "workspace",
+					volumeportal.AttributeMountPath:  "/workspace",
+				},
+			},
+		},
+	}}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/pods/ns-a/pod-a/probes/readiness":
+			_ = json.NewEncoder(w).Encode(sandboxprobe.Passed(sandboxprobe.KindReadiness, "SandboxProbePassed", "sandbox probe passed", nil))
+		case "/api/v1/volume-portals/check":
+			var req ctldapi.CheckVolumePortalsRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode check request: %v", err)
+			}
+			if req.PodUID != "pod-uid" {
+				t.Fatalf("check pod UID = %q, want pod-uid", req.PodUID)
+			}
+			if len(req.Portals) != 1 || req.Portals[0].PortalName != "workspace" {
+				t.Fatalf("check portals = %+v, want workspace", req.Portals)
+			}
+			_ = json.NewEncoder(w).Encode(ctldapi.CheckVolumePortalsResponse{
+				Ready:   false,
+				Missing: []string{"workspace"},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	host, port := splitTestServerAddress(t, server)
+	svc := &SandboxService{
+		k8sClient:  fake.NewSimpleClientset(newClaimTestNode("node-a", host)),
+		ctldClient: NewCtldClient(CtldClientConfig{}),
+		config:     SandboxServiceConfig{CtldPort: port},
+	}
+
+	result, err := svc.ProbeSandboxPod(context.Background(), pod, sandboxprobe.KindReadiness)
+	if err != nil {
+		t.Fatalf("ProbeSandboxPod() error = %v", err)
+	}
+	if result == nil {
+		t.Fatal("ProbeSandboxPod() result = nil")
+	}
+	if result.Status != sandboxprobe.StatusFailed {
+		t.Fatalf("ProbeSandboxPod() status = %q, want failed", result.Status)
+	}
+	if result.Reason != "VolumePortalsNotReady" {
+		t.Fatalf("ProbeSandboxPod() reason = %q, want VolumePortalsNotReady", result.Reason)
 	}
 }
 

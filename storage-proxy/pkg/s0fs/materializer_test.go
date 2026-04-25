@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 )
@@ -52,6 +54,33 @@ func (s *memoryHeadStore) CompareAndSwapCommittedHead(_ context.Context, volumeI
 	clone := *head
 	s.heads[volumeID] = &clone
 	return nil
+}
+
+type blockingHeadStore struct {
+	*memoryHeadStore
+	calls        atomic.Int32
+	firstEntered chan struct{}
+	releaseFirst chan struct{}
+}
+
+func newBlockingHeadStore() *blockingHeadStore {
+	return &blockingHeadStore{
+		memoryHeadStore: newMemoryHeadStore(),
+		firstEntered:    make(chan struct{}),
+		releaseFirst:    make(chan struct{}),
+	}
+}
+
+func (s *blockingHeadStore) CompareAndSwapCommittedHead(ctx context.Context, volumeID string, expectedManifestSeq uint64, head *CommittedHead) error {
+	if s.calls.Add(1) == 1 {
+		close(s.firstEntered)
+		select {
+		case <-s.releaseFirst:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return s.memoryHeadStore.CompareAndSwapCommittedHead(ctx, volumeID, expectedManifestSeq, head)
 }
 
 type getCall struct {
@@ -647,6 +676,140 @@ func TestEngineSyncMaterializeDetectsCommittedHeadConflicts(t *testing.T) {
 	}
 	if _, err := second.SyncMaterialize(ctx); !errors.Is(err, ErrCommittedHeadConflict) {
 		t.Fatalf("SyncMaterialize(second) err = %v, want %v", err, ErrCommittedHeadConflict)
+	}
+}
+
+func TestEngineSyncMaterializeSerializesSameEngineCommits(t *testing.T) {
+	ctx := context.Background()
+	store := newPrefixedRecordingStore(t, "vol-serial-materialize")
+	heads := newBlockingHeadStore()
+
+	engine, err := Open(ctx, Config{
+		VolumeID:    "vol-serial-materialize",
+		WALPath:     filepath.Join(t.TempDir(), "engine.wal"),
+		ObjectStore: store,
+		HeadStore:   heads,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+
+	node, err := engine.CreateFile(RootInode, "data.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+	if _, err := engine.Write(node.Inode, 0, []byte("payload")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := engine.SyncMaterialize(ctx)
+		firstDone <- err
+	}()
+
+	select {
+	case <-heads.firstEntered:
+	case <-time.After(time.Second):
+		t.Fatal("first SyncMaterialize did not reach committed head CAS")
+	}
+
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := engine.SyncMaterialize(ctx)
+		secondDone <- err
+	}()
+
+	select {
+	case err := <-secondDone:
+		t.Fatalf("second SyncMaterialize completed before first commit finished: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(heads.releaseFirst)
+
+	select {
+	case err := <-firstDone:
+		if err != nil {
+			t.Fatalf("first SyncMaterialize error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first SyncMaterialize did not complete")
+	}
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatalf("second SyncMaterialize error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second SyncMaterialize did not complete")
+	}
+}
+
+func TestEngineSyncMaterializeAdvancesCommittedHeadWhenDirtyDuringCommit(t *testing.T) {
+	ctx := context.Background()
+	store := newPrefixedRecordingStore(t, "vol-dirty-during-materialize")
+	heads := newBlockingHeadStore()
+
+	engine, err := Open(ctx, Config{
+		VolumeID:    "vol-dirty-during-materialize",
+		WALPath:     filepath.Join(t.TempDir(), "engine.wal"),
+		ObjectStore: store,
+		HeadStore:   heads,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+
+	first, err := engine.CreateFile(RootInode, "first.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile(first) error = %v", err)
+	}
+	if _, err := engine.Write(first.Inode, 0, []byte("first")); err != nil {
+		t.Fatalf("Write(first) error = %v", err)
+	}
+
+	materialized := make(chan error, 1)
+	go func() {
+		_, err := engine.SyncMaterialize(ctx)
+		materialized <- err
+	}()
+
+	select {
+	case <-heads.firstEntered:
+	case <-time.After(time.Second):
+		t.Fatal("SyncMaterialize did not reach committed head CAS")
+	}
+
+	second, err := engine.CreateFile(RootInode, "second.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile(second) error = %v", err)
+	}
+	if _, err := engine.Write(second.Inode, 0, []byte("second")); err != nil {
+		t.Fatalf("Write(second) error = %v", err)
+	}
+
+	close(heads.releaseFirst)
+	select {
+	case err := <-materialized:
+		if err != nil {
+			t.Fatalf("SyncMaterialize(first) error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SyncMaterialize(first) did not complete")
+	}
+
+	if _, err := engine.SyncMaterialize(ctx); err != nil {
+		t.Fatalf("SyncMaterialize(second) error = %v", err)
+	}
+	head, err := heads.LoadCommittedHead(ctx, "vol-dirty-during-materialize")
+	if err != nil {
+		t.Fatalf("LoadCommittedHead() error = %v", err)
+	}
+	if head.ManifestSeq < 2 {
+		t.Fatalf("committed manifest seq = %d, want at least 2", head.ManifestSeq)
 	}
 }
 

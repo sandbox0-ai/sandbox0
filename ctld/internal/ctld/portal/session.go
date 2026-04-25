@@ -186,12 +186,18 @@ func (m *localVolumeManager) MountVolume(_ context.Context, _ string, volumeID s
 	return "local-" + volumeID, time.Now().UTC(), nil
 }
 
-func (m *localVolumeManager) UnmountVolume(_ context.Context, volumeID, _ string) error {
-	volCtx, ok := m.remove(volumeID)
-	if !ok || volCtx == nil || volCtx.S0FS == nil {
+func (m *localVolumeManager) UnmountVolume(ctx context.Context, volumeID, _ string) error {
+	m.mu.RLock()
+	volCtx, ok := m.volumes[volumeID]
+	m.mu.RUnlock()
+	if !ok || volCtx == nil {
 		return nil
 	}
-	if _, err := volCtx.S0FS.SyncMaterialize(context.Background()); err != nil {
+	if volCtx.S0FS == nil {
+		m.remove(volumeID)
+		return nil
+	}
+	if _, err := volCtx.S0FS.SyncMaterialize(ctx); err != nil {
 		return err
 	}
 	if err := volCtx.S0FS.Close(); err != nil {
@@ -202,6 +208,7 @@ func (m *localVolumeManager) UnmountVolume(_ context.Context, volumeID, _ string
 			return err
 		}
 	}
+	m.remove(volumeID)
 	return nil
 }
 

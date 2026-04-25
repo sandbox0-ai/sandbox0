@@ -18,10 +18,14 @@ type captureForkSnapshotManager struct {
 	*fakeHTTPSnapshotManager
 	lastFork *snapshot.ForkVolumeRequest
 	forkResp *db.SandboxVolume
+	forkErr  error
 }
 
 func (m *captureForkSnapshotManager) ForkVolume(_ context.Context, req *snapshot.ForkVolumeRequest) (*db.SandboxVolume, error) {
 	m.lastFork = req
+	if m.forkErr != nil {
+		return nil, m.forkErr
+	}
 	if m.forkResp != nil {
 		return m.forkResp, nil
 	}
@@ -306,5 +310,28 @@ func TestForkVolumePassesDefaultPosixIdentity(t *testing.T) {
 	}
 	if snapshotMgr.lastFork.DefaultPosixGID == nil || *snapshotMgr.lastFork.DefaultPosixGID != 2002 {
 		t.Fatalf("fork DefaultPosixGID = %v, want 2002", snapshotMgr.lastFork.DefaultPosixGID)
+	}
+}
+
+func TestForkVolumeReturnsConflictForMountedCtldOwner(t *testing.T) {
+	snapshotMgr := &captureForkSnapshotManager{
+		fakeHTTPSnapshotManager: &fakeHTTPSnapshotManager{},
+		forkErr:                 snapshot.ErrMountedCtldOwner,
+	}
+	server := &Server{
+		logger:      logrus.New(),
+		repo:        newFakeHTTPRepo(),
+		snapshotMgr: snapshotMgr,
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/fork", bytes.NewReader([]byte(`{}`)))
+	req.SetPathValue("id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-1", UserID: "user-1"}))
+	recorder := httptest.NewRecorder()
+
+	server.forkVolume(recorder, req)
+
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusConflict, recorder.Body.String())
 	}
 }

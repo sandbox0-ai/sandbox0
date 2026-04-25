@@ -12,10 +12,43 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 )
+
+type rejectingHeadStore struct{}
+
+func (rejectingHeadStore) LoadCommittedHead(context.Context, string) (*s0fs.CommittedHead, error) {
+	return nil, s0fs.ErrCommittedHeadNotFound
+}
+
+func (rejectingHeadStore) CompareAndSwapCommittedHead(context.Context, string, uint64, *s0fs.CommittedHead) error {
+	return s0fs.ErrCommittedHeadConflict
+}
+
+func newDirtyConflictS0FSEngine(t *testing.T, volumeID string) (*s0fs.Engine, string) {
+	t.Helper()
+	cacheDir := filepath.Join(t.TempDir(), volumeID+"-cache")
+	engine, err := s0fs.Open(context.Background(), s0fs.Config{
+		VolumeID:    volumeID,
+		WALPath:     filepath.Join(cacheDir, "engine.wal"),
+		ObjectStore: objectstore.NewMemoryStore(t.Name() + "-" + volumeID),
+		HeadStore:   rejectingHeadStore{},
+	})
+	if err != nil {
+		t.Fatalf("Open(%s) error = %v", volumeID, err)
+	}
+	node, err := engine.CreateFile(s0fs.RootInode, "dirty.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile(%s) error = %v", volumeID, err)
+	}
+	if _, err := engine.Write(node.Inode, 0, []byte("dirty")); err != nil {
+		t.Fatalf("Write(%s) error = %v", volumeID, err)
+	}
+	return engine, cacheDir
+}
 
 func TestLocalSessionReadIntoUsesMountedS0FS(t *testing.T) {
 	engine, err := s0fs.Open(context.Background(), s0fs.Config{
@@ -345,6 +378,34 @@ func TestLocalVolumeManagerUnmountRemovesCacheDir(t *testing.T) {
 	}
 	if _, err := os.Stat(cacheDir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("cache dir stat error = %v, want not exist", err)
+	}
+}
+
+func TestLocalVolumeManagerUnmountKeepsVolumeOnMaterializeFailure(t *testing.T) {
+	engine, cacheDir := newDirtyConflictS0FSEngine(t, "vol-1")
+	defer engine.Close()
+
+	mgr := newLocalVolumeManager()
+	mgr.add(&volume.VolumeContext{
+		VolumeID:  "vol-1",
+		TeamID:    "team-a",
+		Backend:   volume.BackendS0FS,
+		S0FS:      engine,
+		Access:    volume.AccessModeRWO,
+		MountedAt: time.Now().UTC(),
+		RootInode: 1,
+		RootPath:  "/",
+		CacheDir:  cacheDir,
+	})
+
+	if err := mgr.UnmountVolume(context.Background(), "vol-1", ""); !errors.Is(err, s0fs.ErrCommittedHeadConflict) {
+		t.Fatalf("UnmountVolume() error = %v, want %v", err, s0fs.ErrCommittedHeadConflict)
+	}
+	if _, err := mgr.GetVolume("vol-1"); err != nil {
+		t.Fatalf("GetVolume() after failed unmount error = %v, want mounted volume to remain", err)
+	}
+	if _, err := os.Stat(cacheDir); err != nil {
+		t.Fatalf("cache dir stat after failed unmount error = %v, want cache to remain", err)
 	}
 }
 

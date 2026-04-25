@@ -377,6 +377,16 @@ func (m *Manager) forkS0FSVolume(ctx context.Context, req *ForkVolumeRequest) (*
 		return nil, ErrVolumeNotFound
 	}
 
+	if volume.NormalizeAccessMode(sourceVol.AccessMode) != volume.AccessModeROX {
+		ctldMounted, err := m.hasMountedCtldOwner(ctx, req.SourceVolumeID)
+		if err != nil {
+			return nil, err
+		}
+		if ctldMounted {
+			return nil, ErrMountedCtldOwner
+		}
+	}
+
 	if m.volMgr != nil {
 		if volCtx, getErr := m.volMgr.GetVolume(req.SourceVolumeID); getErr == nil && volCtx != nil {
 			_ = volCtx.FlushAll("")

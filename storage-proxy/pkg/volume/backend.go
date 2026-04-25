@@ -42,10 +42,7 @@ func (v *VolumeContext) FlushAll(path string) error {
 	if v.S0FS != nil {
 		return v.S0FS.Fsync(uint64(v.RootInode))
 	}
-	if v.VFS == nil {
-		return fmt.Errorf("volume %s backend %q does not expose flush", v.VolumeID, v.Backend)
-	}
-	return v.VFS.FlushAll(path)
+	return fmt.Errorf("volume %s backend %q does not expose flush", v.VolumeID, v.Backend)
 }
 
 func (v *VolumeContext) IsS0FS() bool {

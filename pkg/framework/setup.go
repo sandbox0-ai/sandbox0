@@ -116,12 +116,25 @@ func SetupScenario(cfg Config, scenario Scenario) (*ScenarioEnv, func(), error) 
 		}
 	}
 
-	if err := ApplyManifest(testCtx.Context, workingCfg.Kubeconfig, scenario.ManifestPath); err != nil {
+	manifestPath := scenario.ManifestPath
+	if scenario.InfraNamespace != "" {
+		namespacedManifest, removeNamespacedManifest, err := RewriteManifestNamespace(scenario.ManifestPath, scenario.InfraNamespace)
+		if err != nil {
+			cleanup()
+			return nil, nil, err
+		}
+		if namespacedManifest != scenario.ManifestPath {
+			manifestPath = namespacedManifest
+			appendCleanup(removeNamespacedManifest)
+		}
+	}
+
+	if err := ApplyManifest(testCtx.Context, workingCfg.Kubeconfig, manifestPath); err != nil {
 		cleanup()
 		return nil, nil, err
 	}
 	appendCleanup(func() {
-		_ = KubectlDeleteManifest(testCtx.Context, workingCfg.Kubeconfig, scenario.ManifestPath)
+		_ = KubectlDeleteManifest(testCtx.Context, workingCfg.Kubeconfig, manifestPath)
 		_ = KubectlWaitForNamespacesDeletedByLabel(testCtx.Context, workingCfg.Kubeconfig, managerOwnedNamespaceLabelSelector, "2m")
 	})
 

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 )
 
 var ErrSnapshotNotFound = fmt.Errorf("%w: snapshot not found", ErrNotFound)
@@ -126,6 +127,42 @@ func cloneState(state *SnapshotState) *SnapshotState {
 		clone.Segments[segmentID] = cloneSegment(segment)
 	}
 	return clone
+}
+
+// PrepareForkState returns a child-ready metadata snapshot that keeps cold file
+// segments addressed to the source volume instead of inlining file contents.
+func PrepareForkState(state *SnapshotState, sourceVolumeID string) (*SnapshotState, error) {
+	sourceVolumeID = strings.TrimSpace(sourceVolumeID)
+	if sourceVolumeID == "" {
+		return nil, fmt.Errorf("%w: source volume id is required", ErrInvalidInput)
+	}
+	if state == nil {
+		return nil, fmt.Errorf("%w: source state is required", ErrInvalidInput)
+	}
+	clone := cloneState(state)
+	normalizeState(clone)
+	for inode, payload := range clone.Data {
+		if len(payload) > 0 {
+			return nil, fmt.Errorf("%w: source state has inline data for inode %d", ErrInvalidInput, inode)
+		}
+	}
+	for inode, extents := range clone.ColdFiles {
+		if clone.Nodes[inode] == nil {
+			delete(clone.ColdFiles, inode)
+			continue
+		}
+		for _, extent := range extents {
+			segment := clone.Segments[extent.SegmentID]
+			if segment == nil {
+				return nil, fmt.Errorf("%w: missing source segment %s", ErrInvalidInput, extent.SegmentID)
+			}
+			if strings.TrimSpace(segment.VolumeID) == "" {
+				segment.VolumeID = sourceVolumeID
+			}
+		}
+	}
+	clone.Data = make(map[uint64][]byte)
+	return clone, nil
 }
 
 func (s *SnapshotState) Lookup(parent uint64, name string) (*Node, error) {

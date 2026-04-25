@@ -37,21 +37,27 @@ type Manifest struct {
 }
 
 type Materializer struct {
-	volumeID  string
-	store     objectstore.Store
-	headStore HeadStore
-	cache     *segmentCache
+	volumeID             string
+	store                objectstore.Store
+	objectStoreForVolume ObjectStoreResolver
+	headStore            HeadStore
+	cache                *segmentCache
 }
 
-func NewMaterializer(volumeID string, store objectstore.Store, headStore HeadStore) *Materializer {
+func NewMaterializer(volumeID string, store objectstore.Store, headStore HeadStore, resolvers ...ObjectStoreResolver) *Materializer {
 	if store == nil {
 		return nil
 	}
+	var resolver ObjectStoreResolver
+	if len(resolvers) > 0 {
+		resolver = resolvers[0]
+	}
 	return &Materializer{
-		volumeID:  volumeID,
-		store:     store,
-		headStore: headStore,
-		cache:     newSegmentCache(defaultSegmentCacheMaxBytes),
+		volumeID:             volumeID,
+		store:                store,
+		objectStoreForVolume: resolver,
+		headStore:            headStore,
+		cache:                newSegmentCache(defaultSegmentCacheMaxBytes),
 	}
 }
 
@@ -75,6 +81,7 @@ func (m *Materializer) Materialize(ctx context.Context, state *SnapshotState, ex
 
 	inline := cloneState(state)
 	normalizeState(inline)
+	defaultSegmentVolumeIDs(inline, m.volumeID)
 
 	nextSeq := checkpointSequence(inline)
 	if nextSeq == 0 {
@@ -84,7 +91,7 @@ func (m *Materializer) Materialize(ctx context.Context, state *SnapshotState, ex
 		return nil, fmt.Errorf("%w: manifest seq %d must advance beyond %d", ErrCommittedHeadConflict, nextSeq, expectedManifestSeq)
 	}
 
-	segment, fileExtents, err := buildSegment(nextSeq, inline)
+	segment, fileExtents, err := buildSegment(nextSeq, m.volumeID, inline)
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +113,7 @@ func (m *Materializer) Materialize(ctx context.Context, state *SnapshotState, ex
 		if err := m.putBytes(ctx, segment.Key, segment.Payload); err != nil {
 			return nil, err
 		}
-		m.cache.put(segment.Key, segment.Payload)
+		m.cache.put(segmentCacheKey(segment.VolumeID, segment.Key), segment.Payload)
 	}
 	if err := m.putJSON(ctx, manifestKey(nextSeq), manifest); err != nil {
 		return nil, err
@@ -142,12 +149,17 @@ func (m *Materializer) ReadSegmentRange(segment *Segment, off, limit int64) ([]b
 	if off < 0 {
 		return nil, fmt.Errorf("%w: negative segment offset", ErrInvalidInput)
 	}
+	volumeID, store, err := m.storeForSegment(segment)
+	if err != nil {
+		return nil, err
+	}
+	cacheKey := segmentCacheKey(volumeID, segment.Key)
 
 	if segment.Length > 0 && int64(segment.Length) <= defaultSegmentCacheMaxBytes {
-		if payload, ok := m.cache.get(segment.Key); ok {
+		if payload, ok := m.cache.get(cacheKey); ok {
 			return cloneByteRange(payload, off, limit), nil
 		}
-		reader, err := m.store.Get(segment.Key, 0, int64(segment.Length))
+		reader, err := store.Get(segment.Key, 0, int64(segment.Length))
 		if err != nil {
 			return nil, err
 		}
@@ -159,11 +171,11 @@ func (m *Materializer) ReadSegmentRange(segment *Segment, off, limit int64) ([]b
 		if closeErr != nil {
 			return nil, closeErr
 		}
-		m.cache.put(segment.Key, payload)
+		m.cache.put(cacheKey, payload)
 		return cloneByteRange(payload, off, limit), nil
 	}
 
-	reader, err := m.store.Get(segment.Key, off, limit)
+	reader, err := store.Get(segment.Key, off, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -226,13 +238,14 @@ func (m *Materializer) LoadLatestState(ctx context.Context) (*SnapshotState, *Ma
 }
 
 type materializedSegment struct {
-	ID      string
-	Key     string
-	Payload []byte
-	SHA256  string
+	ID       string
+	VolumeID string
+	Key      string
+	Payload  []byte
+	SHA256   string
 }
 
-func buildSegment(manifestSeq uint64, state *SnapshotState) (*materializedSegment, map[uint64][]FileExtent, error) {
+func buildSegment(manifestSeq uint64, volumeID string, state *SnapshotState) (*materializedSegment, map[uint64][]FileExtent, error) {
 	segmentID := fmt.Sprintf("%020d-0", manifestSeq)
 	segmentKey := fmt.Sprintf("%s/%s.bin", segmentDir, segmentID)
 
@@ -265,10 +278,11 @@ func buildSegment(manifestSeq uint64, state *SnapshotState) (*materializedSegmen
 
 	sum := sha256.Sum256(buf.Bytes())
 	segment := &materializedSegment{
-		ID:      segmentID,
-		Key:     segmentKey,
-		Payload: buf.Bytes(),
-		SHA256:  hex.EncodeToString(sum[:]),
+		ID:       segmentID,
+		VolumeID: volumeID,
+		Key:      segmentKey,
+		Payload:  buf.Bytes(),
+		SHA256:   hex.EncodeToString(sum[:]),
 	}
 	return segment, files, nil
 }
@@ -314,10 +328,11 @@ func buildManifestState(state *SnapshotState, segment *materializedSegment, hotF
 	}
 	if segment != nil && len(segment.Payload) > 0 {
 		manifestState.Segments[segment.ID] = &Segment{
-			ID:     segment.ID,
-			Key:    segment.Key,
-			Length: uint64(len(segment.Payload)),
-			SHA256: segment.SHA256,
+			ID:       segment.ID,
+			VolumeID: segment.VolumeID,
+			Key:      segment.Key,
+			Length:   uint64(len(segment.Payload)),
+			SHA256:   segment.SHA256,
 		}
 	}
 	return manifestState, nil
@@ -377,6 +392,11 @@ func (m *Materializer) loadManifestByKey(ctx context.Context, key string) (*Mani
 		return nil, fmt.Errorf("materialized manifest %s has no state", key)
 	}
 	normalizeState(manifest.State)
+	sourceVolumeID := manifest.VolumeID
+	if strings.TrimSpace(sourceVolumeID) == "" {
+		sourceVolumeID = m.volumeID
+	}
+	defaultSegmentVolumeIDs(manifest.State, sourceVolumeID)
 	return &manifest, nil
 }
 
@@ -406,6 +426,45 @@ func cloneByteRange(payload []byte, off, limit int64) []byte {
 		end = off + limit
 	}
 	return append([]byte(nil), payload[off:end]...)
+}
+
+func (m *Materializer) storeForSegment(segment *Segment) (string, objectstore.Store, error) {
+	if segment == nil {
+		return "", nil, fmt.Errorf("%w: segment is required", ErrInvalidInput)
+	}
+	volumeID := strings.TrimSpace(segment.VolumeID)
+	if volumeID == "" {
+		volumeID = m.volumeID
+	}
+	if volumeID == "" || volumeID == m.volumeID {
+		return m.volumeID, m.store, nil
+	}
+	if m.objectStoreForVolume == nil {
+		return "", nil, fmt.Errorf("%w: segment %s belongs to volume %s but no object store resolver is configured", ErrInvalidInput, segment.ID, volumeID)
+	}
+	store, err := m.objectStoreForVolume(volumeID)
+	if err != nil {
+		return "", nil, err
+	}
+	if store == nil {
+		return "", nil, fmt.Errorf("%w: object store resolver returned nil for volume %s", ErrInvalidInput, volumeID)
+	}
+	return volumeID, store, nil
+}
+
+func segmentCacheKey(volumeID, key string) string {
+	return volumeID + "\x00" + key
+}
+
+func defaultSegmentVolumeIDs(state *SnapshotState, volumeID string) {
+	if state == nil {
+		return
+	}
+	for _, segment := range state.Segments {
+		if segment != nil && strings.TrimSpace(segment.VolumeID) == "" {
+			segment.VolumeID = volumeID
+		}
+	}
 }
 
 type segmentCache struct {

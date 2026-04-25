@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"io"
 	"path/filepath"
 	"testing"
@@ -77,10 +78,12 @@ func TestS0FSSnapshotCreateRestoreAndDelete(t *testing.T) {
 	}
 }
 
-func TestS0FSForkVolumeCopiesState(t *testing.T) {
+func TestS0FSForkVolumeUsesCopyOnWriteState(t *testing.T) {
 	t.Parallel()
 
 	mgr, repo, _, engine := newS0FSSnapshotTestManager(t, "vol-1")
+	coordinator := &failingFlushCoordinator{}
+	mgr.SetFlushCoordinator(coordinator)
 	writeS0FSFile(t, engine, "fork.txt", "seed")
 
 	forked, err := mgr.ForkVolume(context.Background(), &ForkVolumeRequest{
@@ -97,6 +100,33 @@ func TestS0FSForkVolumeCopiesState(t *testing.T) {
 	if _, ok := repo.volumes[forked.ID]; !ok {
 		t.Fatalf("forked volume not persisted: %+v", repo.volumes)
 	}
+	if coordinator.called {
+		t.Fatal("ForkVolume called distributed flush coordinator")
+	}
+
+	forkCfg := mgr.s0fsConfig("team-1", forked.ID)
+	forkState, _, err := s0fs.NewMaterializer(forked.ID, forkCfg.ObjectStore, forkCfg.HeadStore, forkCfg.ObjectStoreForVolume).LoadLatestState(context.Background())
+	if err != nil {
+		t.Fatalf("LoadLatestState(forked) error = %v", err)
+	}
+	if len(forkState.Data) != 0 {
+		t.Fatalf("forked materialized data = %+v, want empty", forkState.Data)
+	}
+	if len(forkState.Segments) == 0 {
+		t.Fatal("forked materialized state has no inherited segments")
+	}
+	for _, segment := range forkState.Segments {
+		if segment.VolumeID != "vol-1" {
+			t.Fatalf("forked segment volume = %q, want vol-1", segment.VolumeID)
+		}
+	}
+	childSegments, _, _, err := forkCfg.ObjectStore.List("segments/", "", "", "", 100)
+	if err != nil {
+		t.Fatalf("List(child segments) error = %v", err)
+	}
+	if len(childSegments) != 0 {
+		t.Fatalf("child segment objects after fork = %+v, want none", childSegments)
+	}
 
 	forkedEngine, err := s0fs.Open(context.Background(), mgr.s0fsConfig("team-1", forked.ID))
 	if err != nil {
@@ -108,15 +138,27 @@ func TestS0FSForkVolumeCopiesState(t *testing.T) {
 		t.Fatalf("forked file = %q, want seed", got)
 	}
 	writeS0FSFile(t, forkedEngine, "fork.txt", "forked")
+	if _, err := forkedEngine.SyncMaterialize(context.Background()); err != nil {
+		t.Fatalf("SyncMaterialize(forked) error = %v", err)
+	}
 	if got := readS0FSFile(t, engine, "fork.txt"); got != "seed" {
 		t.Fatalf("source file after fork mutation = %q, want seed", got)
 	}
 
 	freshForked := openFreshS0FSEngine(t, mgr, "team-1", forked.ID)
 	defer freshForked.Close()
-	if got := readS0FSFile(t, freshForked, "fork.txt"); got != "seed" {
-		t.Fatalf("fresh forked file = %q, want seed", got)
+	if got := readS0FSFile(t, freshForked, "fork.txt"); got != "forked" {
+		t.Fatalf("fresh forked file = %q, want forked", got)
 	}
+}
+
+type failingFlushCoordinator struct {
+	called bool
+}
+
+func (f *failingFlushCoordinator) CoordinateFlush(context.Context, string) error {
+	f.called = true
+	return errors.New("distributed flush should not be called for fork")
 }
 
 func TestExportSnapshotArchiveS0FS(t *testing.T) {

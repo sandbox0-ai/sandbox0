@@ -48,7 +48,7 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 	}
 
 	state, err := loadCurrentState(cfg)
-	materializer := NewMaterializer(cfg.VolumeID, cfg.ObjectStore, cfg.HeadStore)
+	materializer := NewMaterializer(cfg.VolumeID, cfg.ObjectStore, cfg.HeadStore, cfg.ObjectStoreForVolume)
 	var latestManifest *Manifest
 	if materializer != nil {
 		latestState, manifest, latestErr := materializer.LoadLatestState(ctx)

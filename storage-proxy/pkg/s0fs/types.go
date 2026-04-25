@@ -17,13 +17,16 @@ const (
 )
 
 type Config struct {
-	VolumeID            string
-	WALPath             string
-	ObjectStore         objectstore.Store
-	HeadStore           HeadStore
-	MaterializeInterval time.Duration
-	WALSyncHook         func()
+	VolumeID             string
+	WALPath              string
+	ObjectStore          objectstore.Store
+	ObjectStoreForVolume ObjectStoreResolver
+	HeadStore            HeadStore
+	MaterializeInterval  time.Duration
+	WALSyncHook          func()
 }
+
+type ObjectStoreResolver func(volumeID string) (objectstore.Store, error)
 
 type SnapshotState struct {
 	NextSeq   uint64                       `json:"next_seq"`
@@ -42,10 +45,11 @@ type FileExtent struct {
 }
 
 type Segment struct {
-	ID     string `json:"id"`
-	Key    string `json:"key"`
-	Length uint64 `json:"length"`
-	SHA256 string `json:"sha256,omitempty"`
+	ID       string `json:"id"`
+	VolumeID string `json:"volume_id,omitempty"`
+	Key      string `json:"key"`
+	Length   uint64 `json:"length"`
+	SHA256   string `json:"sha256,omitempty"`
 }
 
 type Node struct {

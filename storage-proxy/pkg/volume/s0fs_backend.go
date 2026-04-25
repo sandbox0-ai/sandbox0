@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
@@ -45,7 +46,10 @@ func (b *S0FSBackend) MountVolume(ctx context.Context, req BackendMountRequest) 
 		VolumeID:    req.VolumeID,
 		WALPath:     filepath.Join(cacheDir, "engine.wal"),
 		ObjectStore: remoteStore,
-		HeadStore:   b.headStore,
+		ObjectStoreForVolume: func(volumeID string) (objectstore.Store, error) {
+			return b.createObjectStorageForVolume(req, volumeID)
+		},
+		HeadStore: b.headStore,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open s0fs engine: %w", err)
@@ -83,6 +87,10 @@ func (b *S0FSBackend) UnmountVolume(ctx context.Context, volCtx *VolumeContext) 
 }
 
 func (b *S0FSBackend) createObjectStorage(req BackendMountRequest) (objectstore.Store, error) {
+	return b.createObjectStorageForVolume(req, req.VolumeID)
+}
+
+func (b *S0FSBackend) createObjectStorageForVolume(req BackendMountRequest, volumeID string) (objectstore.Store, error) {
 	if b == nil || b.config == nil || strings.TrimSpace(b.config.S3Bucket) == "" {
 		return nil, nil
 	}
@@ -99,9 +107,16 @@ func (b *S0FSBackend) createObjectStorage(req BackendMountRequest) (objectstore.
 	if err != nil {
 		return nil, err
 	}
-	prefix := strings.Trim(req.S3Prefix, "/")
+	prefix := ""
+	if volumeID == req.VolumeID {
+		prefix = strings.Trim(req.S3Prefix, "/")
+	}
 	if prefix == "" {
-		prefix = strings.Trim(req.VolumeID, "/")
+		var err error
+		prefix, err = naming.S3VolumePrefix(req.TeamID, volumeID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return objectstore.Prefix(store, prefix+"/s0fs/"), nil
 }

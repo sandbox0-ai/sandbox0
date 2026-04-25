@@ -741,6 +741,169 @@ func TestEngineColdSmallFileReadsUseSegmentCache(t *testing.T) {
 	}
 }
 
+func TestEngineForkStateReadsParentSegmentsAndWritesChildSegments(t *testing.T) {
+	ctx := context.Background()
+	base := objectstore.NewMemoryStore("s0fs-fork-state-test-" + t.Name())
+	sourceStore := &recordingStore{Store: objectstore.Prefix(base, "sandboxvolumes/team-a/source/s0fs/")}
+	childStore := &recordingStore{Store: objectstore.Prefix(base, "sandboxvolumes/team-a/child/s0fs/")}
+	heads := newMemoryHeadStore()
+	resolver := func(volumeID string) (objectstore.Store, error) {
+		switch volumeID {
+		case "source":
+			return sourceStore, nil
+		case "child":
+			return childStore, nil
+		default:
+			return nil, ErrNotFound
+		}
+	}
+
+	source, err := Open(ctx, Config{
+		VolumeID:             "source",
+		WALPath:              filepath.Join(t.TempDir(), "source.wal"),
+		ObjectStore:          sourceStore,
+		ObjectStoreForVolume: resolver,
+		HeadStore:            heads,
+	})
+	if err != nil {
+		t.Fatalf("Open(source) error = %v", err)
+	}
+	defer source.Close()
+
+	node, err := source.CreateFile(RootInode, "pkg.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile(source) error = %v", err)
+	}
+	if _, err := source.Write(node.Inode, 0, []byte("parent-data")); err != nil {
+		t.Fatalf("Write(source) error = %v", err)
+	}
+	if _, err := source.SyncMaterialize(ctx); err != nil {
+		t.Fatalf("SyncMaterialize(source) error = %v", err)
+	}
+
+	sourceState, _, err := NewMaterializer("source", sourceStore, heads, resolver).LoadLatestState(ctx)
+	if err != nil {
+		t.Fatalf("LoadLatestState(source) error = %v", err)
+	}
+	forkState, err := PrepareForkState(sourceState, "source")
+	if err != nil {
+		t.Fatalf("PrepareForkState() error = %v", err)
+	}
+	if len(forkState.Data) != 0 {
+		t.Fatalf("fork state data = %+v, want empty", forkState.Data)
+	}
+	for _, segment := range forkState.Segments {
+		if segment.VolumeID != "source" {
+			t.Fatalf("fork segment volume = %q, want source", segment.VolumeID)
+		}
+	}
+
+	child, err := Open(ctx, Config{
+		VolumeID:             "child",
+		WALPath:              filepath.Join(t.TempDir(), "child.wal"),
+		ObjectStore:          childStore,
+		ObjectStoreForVolume: resolver,
+		HeadStore:            heads,
+	})
+	if err != nil {
+		t.Fatalf("Open(child) error = %v", err)
+	}
+	defer child.Close()
+	if err := child.ReplaceState(forkState); err != nil {
+		t.Fatalf("ReplaceState(child) error = %v", err)
+	}
+	if _, err := child.SyncMaterialize(ctx); err != nil {
+		t.Fatalf("SyncMaterialize(child fork) error = %v", err)
+	}
+
+	sourceStore.resetCalls()
+	childStore.resetCalls()
+	childNode, err := child.Lookup(RootInode, "pkg.txt")
+	if err != nil {
+		t.Fatalf("Lookup(child) error = %v", err)
+	}
+	payload, err := child.Read(childNode.Inode, 0, childNode.Size)
+	if err != nil {
+		t.Fatalf("Read(child inherited) error = %v", err)
+	}
+	if string(payload) != "parent-data" {
+		t.Fatalf("Read(child inherited) = %q, want parent-data", payload)
+	}
+	if !hasSegmentGet(sourceStore.calls()) {
+		t.Fatalf("source segment reads = %+v, want inherited segment read", sourceStore.calls())
+	}
+	if hasSegmentGet(childStore.calls()) {
+		t.Fatalf("child segment reads = %+v, want no child segment read for inherited data", childStore.calls())
+	}
+
+	if _, err := child.Write(childNode.Inode, 0, []byte("child-data")); err != nil {
+		t.Fatalf("Write(child) error = %v", err)
+	}
+	if _, err := child.SyncMaterialize(ctx); err != nil {
+		t.Fatalf("SyncMaterialize(child write) error = %v", err)
+	}
+	childState, _, err := NewMaterializer("child", childStore, heads, resolver).LoadLatestState(ctx)
+	if err != nil {
+		t.Fatalf("LoadLatestState(child) error = %v", err)
+	}
+	var childSegmentCount int
+	for _, segment := range childState.Segments {
+		if segment.VolumeID == "child" {
+			childSegmentCount++
+		}
+	}
+	if childSegmentCount == 0 {
+		t.Fatalf("child segments = %+v, want at least one child-owned segment", childState.Segments)
+	}
+
+	sourceNode, err := source.Lookup(RootInode, "pkg.txt")
+	if err != nil {
+		t.Fatalf("Lookup(source) after child write error = %v", err)
+	}
+	sourcePayload, err := source.Read(sourceNode.Inode, 0, sourceNode.Size)
+	if err != nil {
+		t.Fatalf("Read(source) after child write error = %v", err)
+	}
+	if string(sourcePayload) != "parent-data" {
+		t.Fatalf("Read(source) after child write = %q, want parent-data", sourcePayload)
+	}
+}
+
+func TestMaterializerSegmentCacheIsVolumeQualified(t *testing.T) {
+	base := objectstore.NewMemoryStore("s0fs-segment-cache-volume-test-" + t.Name())
+	sourceA := objectstore.Prefix(base, "sandboxvolumes/team-a/source-a/s0fs/")
+	sourceB := objectstore.Prefix(base, "sandboxvolumes/team-a/source-b/s0fs/")
+	child := objectstore.Prefix(base, "sandboxvolumes/team-a/child/s0fs/")
+	if err := sourceA.Put("segments/shared.bin", bytes.NewReader([]byte("alpha"))); err != nil {
+		t.Fatalf("Put(source-a) error = %v", err)
+	}
+	if err := sourceB.Put("segments/shared.bin", bytes.NewReader([]byte("bravo"))); err != nil {
+		t.Fatalf("Put(source-b) error = %v", err)
+	}
+	materializer := NewMaterializer("child", child, nil, func(volumeID string) (objectstore.Store, error) {
+		switch volumeID {
+		case "source-a":
+			return sourceA, nil
+		case "source-b":
+			return sourceB, nil
+		default:
+			return nil, ErrNotFound
+		}
+	})
+
+	first, err := materializer.ReadSegmentRange(&Segment{ID: "shared", VolumeID: "source-a", Key: "segments/shared.bin", Length: 5}, 0, 5)
+	if err != nil {
+		t.Fatalf("ReadSegmentRange(source-a) error = %v", err)
+	}
+	second, err := materializer.ReadSegmentRange(&Segment{ID: "shared", VolumeID: "source-b", Key: "segments/shared.bin", Length: 5}, 0, 5)
+	if err != nil {
+		t.Fatalf("ReadSegmentRange(source-b) error = %v", err)
+	}
+	if string(first) != "alpha" || string(second) != "bravo" {
+		t.Fatalf("segment reads = %q/%q, want alpha/bravo", first, second)
+	}
+}
+
 func TestCreateSnapshotHydratesColdFilesInline(t *testing.T) {
 	ctx := context.Background()
 	store := newPrefixedRecordingStore(t, "vol-snapshot")
@@ -795,6 +958,15 @@ func newPrefixedRecordingStore(t *testing.T, volumeID string) *recordingStore {
 	return &recordingStore{Store: objectstore.Prefix(base, "sandboxvolumes/team-a/"+volumeID+"/s0fs/")}
 }
 
+func hasSegmentGet(calls []getCall) bool {
+	for _, call := range calls {
+		if strings.HasPrefix(call.key, segmentDir+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 func fileName(i int) string {
 	return strings.Join([]string{"file", string(rune('a' + (i % 26))), string(rune('0' + (i % 10))), ".txt"}, "")
 }
@@ -816,7 +988,7 @@ func TestMaterializerBuildSegmentProducesRoundTrippableLayout(t *testing.T) {
 			3: []byte("world"),
 		},
 	}
-	segment, files, err := buildSegment(7, state)
+	segment, files, err := buildSegment(7, "vol-1", state)
 	if err != nil {
 		t.Fatalf("buildSegment() error = %v", err)
 	}

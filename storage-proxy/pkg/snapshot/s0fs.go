@@ -84,6 +84,9 @@ func (m *Manager) s0fsConfig(teamID, volumeID string) s0fs.Config {
 	if repo, ok := any(m.repo).(s0fsHeadRepository); ok {
 		cfg.HeadStore = &snapshotHeadStore{repo: repo}
 	}
+	cfg.ObjectStoreForVolume = func(sourceVolumeID string) (objectstore.Store, error) {
+		return m.s0fsObjectStore(teamID, sourceVolumeID)
+	}
 	return cfg
 }
 
@@ -275,14 +278,20 @@ func snapshotSizeBytes(state *s0fs.SnapshotState) int64 {
 	return size
 }
 
-func resolveS0FSForkState(ctx context.Context, source *s0fs.Engine) (*s0fs.SnapshotState, error) {
-	if source == nil {
-		return nil, fmt.Errorf("source engine is nil")
-	}
+func (m *Manager) resolveS0FSForkState(ctx context.Context, teamID, sourceVolumeID string) (*s0fs.SnapshotState, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return source.ExportState()
+	cfg := m.s0fsConfig(teamID, sourceVolumeID)
+	materializer := s0fs.NewMaterializer(sourceVolumeID, cfg.ObjectStore, cfg.HeadStore, cfg.ObjectStoreForVolume)
+	if materializer == nil || !materializer.Enabled() {
+		return nil, fmt.Errorf("%w: s0fs materializer is not configured", s0fs.ErrInvalidInput)
+	}
+	state, _, err := materializer.LoadLatestState(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return s0fs.PrepareForkState(state, sourceVolumeID)
 }
 
 func (m *Manager) openS0FSSnapshotArchiveSession(ctx context.Context, volumeID, snapshotID string) (*snapshotArchiveSession, fsmeta.Ino, *fsmeta.Attr, error) {
@@ -368,19 +377,18 @@ func (m *Manager) forkS0FSVolume(ctx context.Context, req *ForkVolumeRequest) (*
 		return nil, ErrVolumeNotFound
 	}
 
-	sourceEngine, closeSource, err := m.openS0FSEngine(ctx, sourceVol.TeamID, req.SourceVolumeID)
-	if err != nil {
-		return nil, err
-	}
-	defer closeSource()
-
 	if m.volMgr != nil {
 		if volCtx, getErr := m.volMgr.GetVolume(req.SourceVolumeID); getErr == nil && volCtx != nil {
 			_ = volCtx.FlushAll("")
+			if volCtx.IsS0FS() {
+				if _, err := volCtx.S0FS.SyncMaterialize(ctx); err != nil {
+					return nil, err
+				}
+			}
 		}
 	}
 
-	state, err := resolveS0FSForkState(ctx, sourceEngine)
+	state, err := m.resolveS0FSForkState(ctx, sourceVol.TeamID, req.SourceVolumeID)
 	if err != nil {
 		return nil, err
 	}

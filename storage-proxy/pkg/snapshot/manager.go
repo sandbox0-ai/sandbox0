@@ -268,20 +268,6 @@ func (m *Manager) ForkVolume(ctx context.Context, req *ForkVolumeRequest) (*db.S
 		"team_id":          req.TeamID,
 	}).Info("Forking volume")
 
-	// 0. Distributed flush coordination (if coordinator is set)
-	m.mu.RLock()
-	coordinator := m.coordinator
-	m.mu.RUnlock()
-
-	if coordinator != nil {
-		m.logger.WithField("volume_id", req.SourceVolumeID).Info("Coordinating flush across all instances")
-		if err := coordinator.CoordinateFlush(ctx, req.SourceVolumeID); err != nil {
-			m.logger.WithError(err).Error("Distributed flush coordination failed")
-			return nil, fmt.Errorf("distributed flush coordination: %w", err)
-		}
-		m.logger.WithField("volume_id", req.SourceVolumeID).Info("Distributed flush coordination completed")
-	}
-
 	vol, err := m.forkS0FSVolume(ctx, req)
 	if err != nil {
 		if metrics != nil {

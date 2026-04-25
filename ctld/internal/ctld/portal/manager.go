@@ -342,7 +342,10 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 		VolumeID:    req.SandboxVolumeID,
 		WALPath:     filepath.Join(cacheDir, "engine.wal"),
 		ObjectStore: remoteStore,
-		HeadStore:   db.NewS0FSHeadStore(m.repo),
+		ObjectStoreForVolume: func(volumeID string) (objectstore.Store, error) {
+			return m.createObjectStore(req.TeamID, volumeID)
+		},
+		HeadStore: db.NewS0FSHeadStore(m.repo),
 	})
 	if err != nil {
 		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("open local s0fs engine: %w", err)
@@ -520,7 +523,10 @@ func (m *Manager) AttachOwner(ctx context.Context, req ctldapi.AttachVolumeOwner
 		VolumeID:    req.SandboxVolumeID,
 		WALPath:     filepath.Join(cacheDir, "engine.wal"),
 		ObjectStore: remoteStore,
-		HeadStore:   db.NewS0FSHeadStore(m.repo),
+		ObjectStoreForVolume: func(volumeID string) (objectstore.Store, error) {
+			return m.createObjectStore(req.TeamID, volumeID)
+		},
+		HeadStore: db.NewS0FSHeadStore(m.repo),
 	})
 	if err != nil {
 		return ctldapi.AttachVolumeOwnerResponse{}, fmt.Errorf("open local s0fs engine: %w", err)

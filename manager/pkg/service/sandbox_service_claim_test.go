@@ -572,6 +572,92 @@ func TestProbeSandboxPodReadinessRequiresPublishedVolumePortals(t *testing.T) {
 	}
 }
 
+func TestExpectedVolumePortalsForPodSkipsWebhookStatePortal(t *testing.T) {
+	pod := newClaimReadyTestPod("ns-a", "pod-a", "template-a")
+	pod.Spec.Volumes = []corev1.Volume{
+		{
+			Name: "webhook-state",
+			VolumeSource: corev1.VolumeSource{
+				CSI: &corev1.CSIVolumeSource{
+					Driver: volumeportal.DriverName,
+					VolumeAttributes: map[string]string{
+						volumeportal.AttributePortalName: volumeportal.WebhookStatePortalName,
+						volumeportal.AttributeMountPath:  volumeportal.WebhookStateMountPath,
+					},
+				},
+			},
+		},
+		{
+			Name: "workspace",
+			VolumeSource: corev1.VolumeSource{
+				CSI: &corev1.CSIVolumeSource{
+					Driver: volumeportal.DriverName,
+					VolumeAttributes: map[string]string{
+						volumeportal.AttributePortalName: "workspace",
+						volumeportal.AttributeMountPath:  "/workspace",
+					},
+				},
+			},
+		},
+	}
+
+	portals := expectedVolumePortalsForPod(pod)
+	if len(portals) != 1 {
+		t.Fatalf("expectedVolumePortalsForPod() returned %d portals, want 1", len(portals))
+	}
+	if portals[0].PortalName != "workspace" || portals[0].MountPath != "/workspace" {
+		t.Fatalf("expectedVolumePortalsForPod() = %+v, want workspace portal", portals)
+	}
+}
+
+func TestProbeSandboxPodReadinessIgnoresWebhookStatePortal(t *testing.T) {
+	pod := newClaimReadyTestPod("ns-a", "pod-a", "template-a")
+	pod.UID = types.UID("pod-uid")
+	pod.Spec.Volumes = []corev1.Volume{{
+		Name: "webhook-state",
+		VolumeSource: corev1.VolumeSource{
+			CSI: &corev1.CSIVolumeSource{
+				Driver: volumeportal.DriverName,
+				VolumeAttributes: map[string]string{
+					volumeportal.AttributePortalName: volumeportal.WebhookStatePortalName,
+					volumeportal.AttributeMountPath:  volumeportal.WebhookStateMountPath,
+				},
+			},
+		},
+	}}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/pods/ns-a/pod-a/probes/readiness":
+			_ = json.NewEncoder(w).Encode(sandboxprobe.Passed(sandboxprobe.KindReadiness, "SandboxProbePassed", "sandbox probe passed", nil))
+		case "/api/v1/volume-portals/check":
+			t.Fatal("unexpected volume portal readiness check for webhook state portal")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	host, port := splitTestServerAddress(t, server)
+	svc := &SandboxService{
+		k8sClient:  fake.NewSimpleClientset(newClaimTestNode("node-a", host)),
+		ctldClient: NewCtldClient(CtldClientConfig{}),
+		config:     SandboxServiceConfig{CtldPort: port},
+	}
+
+	result, err := svc.ProbeSandboxPod(context.Background(), pod, sandboxprobe.KindReadiness)
+	if err != nil {
+		t.Fatalf("ProbeSandboxPod() error = %v", err)
+	}
+	if result == nil {
+		t.Fatal("ProbeSandboxPod() result = nil")
+	}
+	if result.Status != sandboxprobe.StatusPassed {
+		t.Fatalf("ProbeSandboxPod() status = %q, want passed", result.Status)
+	}
+}
+
 func TestValidateClaimMountsRejectsDuplicateVolume(t *testing.T) {
 	req := &ClaimRequest{
 		Mounts: []ClaimMount{

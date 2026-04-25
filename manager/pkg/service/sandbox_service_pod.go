@@ -244,6 +244,9 @@ func expectedVolumePortalsForPod(pod *corev1.Pod) []ctldapi.VolumePortalRef {
 		if portalName == "" {
 			continue
 		}
+		if portalName == volumeportal.WebhookStatePortalName || mountPath == volumeportal.WebhookStateMountPath {
+			continue
+		}
 		if _, ok := seen[portalName]; ok {
 			continue
 		}

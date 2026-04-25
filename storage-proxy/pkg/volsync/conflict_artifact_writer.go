@@ -4,12 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"syscall"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/legacyfs"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"github.com/sirupsen/logrus"
 )
@@ -89,29 +88,28 @@ func writeArtifactFile(volCtx *volume.VolumeContext, artifactPath string, payloa
 	if err != nil {
 		return err
 	}
+	if volCtx == nil || volCtx.S0FS == nil {
+		return unsupportedVolumeBackend(volCtx)
+	}
 	if targetAttr != nil {
 		if targetAttr.Typ == fsmeta.TypeDirectory {
 			return fmt.Errorf("artifact path %q points to an existing directory", artifactPath)
 		}
-		vfsCtx := legacyfs.NewLogContext(fsmeta.Background())
-		if st := volCtx.VFS.Unlink(vfsCtx, parentIno, baseName); st != 0 && st != syscall.ENOENT {
-			return fmt.Errorf("unlink existing artifact %q: %w", artifactPath, syscall.Errno(st))
+		if err := volCtx.S0FS.Unlink(uint64(parentIno), baseName); err != nil && err != s0fs.ErrNotFound {
+			return fmt.Errorf("unlink existing artifact %q: %w", artifactPath, err)
 		}
 		_ = targetIno
 	}
 
-	vfsCtx := legacyfs.NewLogContext(fsmeta.Background())
-	entry, handleID, errno := volCtx.VFS.Create(vfsCtx, parentIno, baseName, 0o644, 0, syscall.O_WRONLY)
-	if errno != 0 {
-		return fmt.Errorf("create artifact %q: %w", artifactPath, syscall.Errno(errno))
+	node, err := volCtx.S0FS.CreateFile(uint64(parentIno), baseName, 0o644)
+	if err != nil {
+		return fmt.Errorf("create artifact %q: %w", artifactPath, err)
 	}
-	defer volCtx.VFS.Release(vfsCtx, entry.Inode, handleID)
-
 	if len(payload) == 0 {
 		return nil
 	}
-	if errno := volCtx.VFS.Write(vfsCtx, entry.Inode, payload, 0, handleID); errno != 0 {
-		return fmt.Errorf("write artifact %q: %w", artifactPath, syscall.Errno(errno))
+	if _, err := volCtx.S0FS.Write(node.Inode, 0, payload); err != nil {
+		return fmt.Errorf("write artifact %q: %w", artifactPath, err)
 	}
 	return nil
 }
@@ -121,14 +119,15 @@ func ensureArtifactParent(volCtx *volume.VolumeContext, artifactPath string) (fs
 	if err != nil {
 		return 0, "", 0, nil, err
 	}
-	var targetIno fsmeta.Ino
-	targetAttr := &fsmeta.Attr{}
-	errno := volCtx.Meta.Lookup(fsmeta.Background(), parentIno, baseName, &targetIno, targetAttr, false)
-	if errno == syscall.ENOENT {
+	if volCtx == nil || volCtx.S0FS == nil {
+		return 0, "", 0, nil, unsupportedVolumeBackend(volCtx)
+	}
+	node, err := volCtx.S0FS.Lookup(uint64(parentIno), baseName)
+	if err == s0fs.ErrNotFound {
 		return parentIno, baseName, 0, nil, nil
 	}
-	if errno != 0 {
-		return 0, "", 0, nil, fmt.Errorf("lookup artifact target %q: %w", artifactPath, syscall.Errno(errno))
+	if err != nil {
+		return 0, "", 0, nil, fmt.Errorf("lookup artifact target %q: %w", artifactPath, err)
 	}
-	return parentIno, baseName, targetIno, targetAttr, nil
+	return parentIno, baseName, fsmeta.Ino(node.Inode), s0fsNodeToAttr(node), nil
 }

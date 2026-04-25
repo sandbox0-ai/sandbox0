@@ -74,7 +74,7 @@ type VolumeProvider interface {
 	ListVolumes() []string
 }
 
-// VolumeContext provides the VFS interface for flushing
+// VolumeContext provides the mounted volume interface for flushing.
 type VolumeContext interface {
 	FlushAll(path string) error
 }

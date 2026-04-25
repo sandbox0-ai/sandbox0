@@ -11,7 +11,6 @@ import (
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/legacyfs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sirupsen/logrus"
 )
@@ -29,8 +28,6 @@ type VolumeContext struct {
 	TeamID    string
 	Backend   string
 	S0FS      *s0fs.Engine
-	Meta      LegacyMeta
-	VFS       legacyfs.VFS
 	Access    AccessMode
 	MountedAt time.Time
 	RootInode fsmeta.Ino

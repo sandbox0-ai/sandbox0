@@ -6,11 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"syscall"
 
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/legacyfs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"github.com/sirupsen/logrus"
@@ -110,16 +108,7 @@ func (a *VolumeChangeApplier) applyCreate(volCtx *volume.VolumeContext, metaCtx 
 			}
 			return nil
 		}
-		var inode fsmeta.Ino
-		var attr fsmeta.Attr
-		errno := volCtx.Meta.Mkdir(metaCtx, parentIno, baseName, uint16(defaultMode(change.Mode, 0o755)), 0, 0, &inode, &attr)
-		if errno == syscall.EEXIST {
-			return nil
-		}
-		if errno != 0 {
-			return fmt.Errorf("mkdir %q: %w", change.Path, syscall.Errno(errno))
-		}
-		return nil
+		return unsupportedVolumeBackend(volCtx)
 	case entryKindFile:
 		return a.writeFile(volCtx, metaCtx, change.Path, change.ContentBase64, defaultMode(change.Mode, 0o644), true)
 	default:
@@ -157,15 +146,7 @@ func (a *VolumeChangeApplier) applyRemove(volCtx *volume.VolumeContext, metaCtx 
 		}
 		return nil
 	}
-	var removeCount uint64
-	errno := volCtx.Meta.Remove(metaCtx, parentIno, baseName, true, 4, &removeCount)
-	if errno == syscall.ENOENT {
-		return nil
-	}
-	if errno != 0 {
-		return fmt.Errorf("remove %q: %w", change.Path, syscall.Errno(errno))
-	}
-	return nil
+	return unsupportedVolumeBackend(volCtx)
 }
 
 func (a *VolumeChangeApplier) applyRename(volCtx *volume.VolumeContext, metaCtx fsmeta.Context, change ChangeRequest) error {
@@ -186,12 +167,7 @@ func (a *VolumeChangeApplier) applyRename(volCtx *volume.VolumeContext, metaCtx 
 		}
 		return nil
 	}
-	vfsCtx := legacyfs.NewLogContext(metaCtx)
-	errno := volCtx.VFS.Rename(vfsCtx, oldParentIno, oldBaseName, newParentIno, newBaseName, 0)
-	if errno != 0 {
-		return fmt.Errorf("rename %q -> %q: %w", change.OldPath, change.Path, syscall.Errno(errno))
-	}
-	return nil
+	return unsupportedVolumeBackend(volCtx)
 }
 
 func (a *VolumeChangeApplier) applyChmod(volCtx *volume.VolumeContext, metaCtx fsmeta.Context, change ChangeRequest) error {
@@ -211,13 +187,7 @@ func (a *VolumeChangeApplier) applyChmod(volCtx *volume.VolumeContext, metaCtx f
 		}
 		return nil
 	}
-	clonedAttr := *targetAttr
-	clonedAttr.Mode = uint16(*change.Mode)
-	errno := volCtx.Meta.SetAttr(metaCtx, targetIno, fsmeta.SetAttrMode, 0, &clonedAttr)
-	if errno != 0 {
-		return fmt.Errorf("chmod %q: %w", change.Path, syscall.Errno(errno))
-	}
-	return nil
+	return unsupportedVolumeBackend(volCtx)
 }
 
 func (a *VolumeChangeApplier) writeFile(volCtx *volume.VolumeContext, metaCtx fsmeta.Context, logicalPath string, contentBase64 *string, mode uint32, createOnly bool) error {
@@ -271,51 +241,7 @@ func (a *VolumeChangeApplier) writeFile(volCtx *volume.VolumeContext, metaCtx fs
 		return nil
 	}
 
-	vfsCtx := legacyfs.NewLogContext(metaCtx)
-
-	if createOnly {
-		var existingIno fsmeta.Ino
-		var existingAttr fsmeta.Attr
-		errno := volCtx.Meta.Lookup(metaCtx, parentIno, baseName, &existingIno, &existingAttr, false)
-		if errno == 0 {
-			return nil
-		}
-		if errno != syscall.ENOENT {
-			return fmt.Errorf("lookup create target %q: %w", logicalPath, syscall.Errno(errno))
-		}
-	}
-
-	entry, handleID, errno := volCtx.VFS.Create(vfsCtx, parentIno, baseName, uint16(mode), 0, syscall.O_WRONLY)
-	if errno != 0 {
-		if errno == syscall.EEXIST && !createOnly {
-			_, targetIno, _, targetAttr, lookupErr := lookupLogicalPath(volCtx, metaCtx, logicalPath)
-			if lookupErr != nil {
-				return lookupErr
-			}
-			if targetAttr == nil || targetAttr.Typ == fsmeta.TypeDirectory {
-				return ErrInvalidChange
-			}
-			_, handleID, errno = volCtx.VFS.Open(vfsCtx, targetIno, syscall.O_WRONLY)
-			if errno != 0 {
-				return fmt.Errorf("open existing file %q: %w", logicalPath, syscall.Errno(errno))
-			}
-			entry = &legacyfs.Entry{Inode: targetIno, Attr: targetAttr}
-		} else {
-			return fmt.Errorf("create file %q: %w", logicalPath, syscall.Errno(errno))
-		}
-	}
-	defer volCtx.VFS.Release(vfsCtx, entry.Inode, handleID)
-
-	if errno := volCtx.Meta.SetAttr(metaCtx, entry.Inode, fsmeta.SetAttrSize, 0, &fsmeta.Attr{Length: uint64(len(content))}); errno != 0 {
-		return fmt.Errorf("truncate file %q: %w", logicalPath, syscall.Errno(errno))
-	}
-	if len(content) == 0 {
-		return nil
-	}
-	if errno := volCtx.VFS.Write(vfsCtx, entry.Inode, content, 0, handleID); errno != 0 {
-		return fmt.Errorf("write file %q: %w", logicalPath, syscall.Errno(errno))
-	}
-	return nil
+	return unsupportedVolumeBackend(volCtx)
 }
 
 func normalizeEntryKind(kind string) string {

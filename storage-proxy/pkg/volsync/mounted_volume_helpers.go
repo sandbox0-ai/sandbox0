@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"path"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
@@ -97,33 +96,7 @@ func lookupLogicalPath(volCtx *volume.VolumeContext, metaCtx fsmeta.Context, raw
 	if volCtx.S0FS != nil {
 		return lookupLogicalPathS0FS(volCtx, raw)
 	}
-	if metaCtx == nil {
-		metaCtx = fsmeta.Background()
-	}
-	parts, err := splitLogicalPath(raw)
-	if err != nil {
-		return 0, 0, "", nil, err
-	}
-
-	current := logicalRootInode(volCtx)
-	var attr fsmeta.Attr
-	for i, part := range parts {
-		var next fsmeta.Ino
-		errno := volCtx.Meta.Lookup(metaCtx, current, part, &next, &attr, false)
-		if errno == syscall.ENOENT {
-			return current, 0, part, nil, errLogicalPathNotFound
-		}
-		if errno != 0 {
-			return 0, 0, "", nil, fmt.Errorf("lookup %q: %w", part, syscall.Errno(errno))
-		}
-		if i == len(parts)-1 {
-			targetAttr := attr
-			return current, next, part, &targetAttr, nil
-		}
-		current = next
-	}
-
-	return 0, 0, "", nil, fmt.Errorf("logical path %q resolution failed", raw)
+	return 0, 0, "", nil, unsupportedVolumeBackend(volCtx)
 }
 
 func ensureLogicalParent(volCtx *volume.VolumeContext, metaCtx fsmeta.Context, raw string) (fsmeta.Ino, string, error) {
@@ -133,28 +106,18 @@ func ensureLogicalParent(volCtx *volume.VolumeContext, metaCtx fsmeta.Context, r
 	if volCtx.S0FS != nil {
 		return ensureLogicalParentS0FS(volCtx, raw)
 	}
-	if metaCtx == nil {
-		metaCtx = fsmeta.Background()
+	return 0, "", unsupportedVolumeBackend(volCtx)
+}
+
+func unsupportedVolumeBackend(volCtx *volume.VolumeContext) error {
+	if volCtx == nil {
+		return fmt.Errorf("volume context is nil")
 	}
-	parts, err := splitLogicalPath(raw)
-	if err != nil {
-		return 0, "", err
+	backend := strings.TrimSpace(volCtx.Backend)
+	if backend == "" {
+		backend = "unknown"
 	}
-	baseName := parts[len(parts)-1]
-	current := logicalRootInode(volCtx)
-	var attr fsmeta.Attr
-	for _, part := range parts[:len(parts)-1] {
-		var next fsmeta.Ino
-		errno := volCtx.Meta.Lookup(metaCtx, current, part, &next, &attr, false)
-		if errno == syscall.ENOENT {
-			errno = volCtx.Meta.Mkdir(metaCtx, current, part, 0o755, 0, 0, &next, &attr)
-		}
-		if errno != 0 {
-			return 0, "", fmt.Errorf("ensure parent %q: %w", part, syscall.Errno(errno))
-		}
-		current = next
-	}
-	return current, baseName, nil
+	return fmt.Errorf("storage backend %s is not supported", backend)
 }
 
 func lookupLogicalPathS0FS(volCtx *volume.VolumeContext, raw string) (fsmeta.Ino, fsmeta.Ino, string, *fsmeta.Attr, error) {

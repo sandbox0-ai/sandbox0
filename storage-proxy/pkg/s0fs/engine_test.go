@@ -171,6 +171,51 @@ func TestEngineRejectsDuplicateDentry(t *testing.T) {
 	}
 }
 
+func TestEngineLinkReplay(t *testing.T) {
+	walPath := filepath.Join(t.TempDir(), "volume.wal")
+	engine, err := Open(context.Background(), Config{VolumeID: "vol-1", WALPath: walPath})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	node, err := engine.CreateFile(RootInode, "source.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+	if _, err := engine.Write(node.Inode, 0, []byte("payload")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	linked, err := engine.Link(node.Inode, RootInode, "linked.txt")
+	if err != nil {
+		t.Fatalf("Link() error = %v", err)
+	}
+	if linked.Inode != node.Inode || linked.Nlink != 2 {
+		t.Fatalf("Link() node = %#v, want same inode with nlink 2", linked)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	replayed, err := Open(context.Background(), Config{VolumeID: "vol-1", WALPath: walPath})
+	if err != nil {
+		t.Fatalf("Open(replay) error = %v", err)
+	}
+	defer replayed.Close()
+	replayedNode, err := replayed.Lookup(RootInode, "linked.txt")
+	if err != nil {
+		t.Fatalf("Lookup(linked) error = %v", err)
+	}
+	if replayedNode.Inode != node.Inode || replayedNode.Nlink != 2 {
+		t.Fatalf("Lookup(linked) node = %#v, want same inode with nlink 2", replayedNode)
+	}
+	data, err := replayed.Read(replayedNode.Inode, 0, 1024)
+	if err != nil {
+		t.Fatalf("Read(linked) error = %v", err)
+	}
+	if !bytes.Equal(data, []byte("payload")) {
+		t.Fatalf("Read(linked) data = %q, want payload", data)
+	}
+}
+
 func TestEngineDirectoryOperationsReplay(t *testing.T) {
 	walPath := filepath.Join(t.TempDir(), "volume.wal")
 	engine, err := Open(context.Background(), Config{VolumeID: "vol-1", WALPath: walPath})

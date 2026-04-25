@@ -683,6 +683,78 @@ func TestS0FSMutationRedirectsWhenRemotePrimary(t *testing.T) {
 	}
 }
 
+func TestS0FSLinkCreatesHardLink(t *testing.T) {
+	t.Parallel()
+
+	volCtx := newMountedS0FSVolumeContext(t, "vol-1", "team-a")
+	server := newTestFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{
+			"vol-1": volCtx,
+		},
+	}, nil, nil)
+	ctx := authContext("team-a", "")
+
+	createResp, err := server.Create(ctx, &pb.CreateRequest{
+		VolumeId: "vol-1",
+		Parent:   1,
+		Name:     "source.txt",
+		Mode:     0o644,
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if _, err := server.Write(ctx, &pb.WriteRequest{
+		VolumeId: "vol-1",
+		Inode:    createResp.Inode,
+		Offset:   0,
+		Data:     []byte("payload"),
+		HandleId: createResp.HandleId,
+	}); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	linkResp, err := server.Link(ctx, &pb.LinkRequest{
+		VolumeId:  "vol-1",
+		Inode:     createResp.Inode,
+		NewParent: 1,
+		NewName:   "linked.txt",
+	})
+	if err != nil {
+		t.Fatalf("Link() error = %v", err)
+	}
+	if linkResp.Inode != createResp.Inode {
+		t.Fatalf("Link() inode = %d, want source inode %d", linkResp.Inode, createResp.Inode)
+	}
+
+	lookupResp, err := server.Lookup(ctx, &pb.LookupRequest{
+		VolumeId: "vol-1",
+		Parent:   1,
+		Name:     "linked.txt",
+	})
+	if err != nil {
+		t.Fatalf("Lookup(linked) error = %v", err)
+	}
+	if lookupResp.Inode != createResp.Inode {
+		t.Fatalf("Lookup(linked) inode = %d, want source inode %d", lookupResp.Inode, createResp.Inode)
+	}
+	if lookupResp.Attr == nil || lookupResp.Attr.Nlink != 2 {
+		t.Fatalf("Lookup(linked) nlink = %#v, want 2", lookupResp.Attr)
+	}
+
+	readResp, err := server.Read(ctx, &pb.ReadRequest{
+		VolumeId: "vol-1",
+		Inode:    lookupResp.Inode,
+		Offset:   0,
+		Size:     32,
+	})
+	if err != nil {
+		t.Fatalf("Read(linked) error = %v", err)
+	}
+	if string(readResp.Data) != "payload" {
+		t.Fatalf("Read(linked) data = %q, want payload", readResp.Data)
+	}
+}
+
 func newMountedS0FSVolumeContext(t *testing.T, volumeID, teamID string) *volume.VolumeContext {
 	t.Helper()
 

@@ -240,6 +240,42 @@ func (e *Engine) Symlink(parent uint64, name, target string, mode uint32) (*Node
 	return e.create(parent, name, TypeSymlink, mode, target)
 }
 
+func (e *Engine) Link(inode uint64, newParent uint64, newName string) (*Node, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.checkOpen(); err != nil {
+		return nil, err
+	}
+	if newName == "" {
+		return nil, fmt.Errorf("%w: empty link name", ErrInvalidInput)
+	}
+	node, ok := e.nodes[inode]
+	if !ok || node == nil {
+		return nil, ErrNotFound
+	}
+	if node.Type == TypeDirectory {
+		return nil, ErrIsDir
+	}
+	if err := e.ensureDirLocked(newParent); err != nil {
+		return nil, err
+	}
+	if _, exists := e.children[newParent][newName]; exists {
+		return nil, ErrExists
+	}
+	record := e.newRecord("link")
+	record.Inode = inode
+	record.NewParent = newParent
+	record.NewName = newName
+	if err := e.wal.append(record); err != nil {
+		return nil, err
+	}
+	if err := e.apply(record); err != nil {
+		return nil, err
+	}
+	e.markDirtyLocked()
+	return cloneNode(e.nodes[inode]), nil
+}
+
 func (e *Engine) Write(inode uint64, offset uint64, payload []byte) (int, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -771,6 +807,8 @@ func (e *Engine) apply(record walRecord) error {
 		return e.applyCreate(record)
 	case "write":
 		return e.applyWrite(record)
+	case "link":
+		return e.applyLink(record)
 	case "rmdir":
 		return e.applyRemoveDir(record)
 	case "rename":
@@ -820,6 +858,29 @@ func (e *Engine) applyCreate(record walRecord) error {
 	if record.Inode >= e.nextInode {
 		e.nextInode = record.Inode + 1
 	}
+	return nil
+}
+
+func (e *Engine) applyLink(record walRecord) error {
+	if record.Inode == 0 || record.NewParent == 0 || record.NewName == "" {
+		return fmt.Errorf("%w: invalid link record", ErrInvalidInput)
+	}
+	node := e.nodes[record.Inode]
+	if node == nil {
+		return ErrNotFound
+	}
+	if node.Type == TypeDirectory {
+		return ErrIsDir
+	}
+	if err := e.ensureDirLocked(record.NewParent); err != nil {
+		return err
+	}
+	if _, exists := e.children[record.NewParent][record.NewName]; exists {
+		return ErrExists
+	}
+	e.children[record.NewParent][record.NewName] = record.Inode
+	node.Nlink++
+	node.Ctime = time.Unix(0, record.TimeUnix).UTC()
 	return nil
 }
 

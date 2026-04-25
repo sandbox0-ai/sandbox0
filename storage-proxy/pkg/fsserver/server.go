@@ -1756,6 +1756,24 @@ func (s *FileSystemServer) Readlink(ctx context.Context, req *pb.ReadlinkRequest
 // Link implements FUSE link (create hard link)
 func (s *FileSystemServer) Link(ctx context.Context, req *pb.LinkRequest) (*pb.NodeResponse, error) {
 	return withAuthorizedVolumeMutation(s, ctx, req.VolumeId, func(runCtx context.Context, volCtx *volume.VolumeContext) (*pb.NodeResponse, error) {
+		if isS0FSVolume(volCtx) {
+			path := resolveChildPath(volCtx, req.NewParent, req.NewName)
+			node, err := volCtx.S0FS.Link(req.Inode, req.NewParent, req.NewName)
+			if err != nil {
+				return nil, mapS0FSError(err)
+			}
+			eventType := pb.WatchEventType_WATCH_EVENT_TYPE_CREATE
+			if path == "" {
+				eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
+			}
+			s.publishEvent(runCtx, &pb.WatchEvent{
+				VolumeId:  req.VolumeId,
+				EventType: eventType,
+				Path:      path,
+				Inode:     node.Inode,
+			})
+			return s0fsNodeResponse(node, 0), nil
+		}
 		inode := mapInode(volCtx, req.Inode)
 		newParent := mapInode(volCtx, req.NewParent)
 		path := resolveChildPath(volCtx, uint64(newParent), req.NewName)

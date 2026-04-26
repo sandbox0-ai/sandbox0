@@ -649,6 +649,25 @@ func TestRestoreSnapshot_RejectsMountedCtldOwner(t *testing.T) {
 	}
 }
 
+func TestForkVolume_RejectsMountedCtldOwner(t *testing.T) {
+	repo := newFakeRepo()
+	repo.volumes["vol1"] = &db.SandboxVolume{ID: "vol1", TeamID: "team1"}
+	repo.activeMounts["vol1"] = []*db.VolumeMount{{
+		VolumeID:     "vol1",
+		MountOptions: rawMountOptions(t, volume.MountOptions{AccessMode: volume.AccessModeRWO, OwnerKind: volume.OwnerKindCtld}),
+	}}
+	mgr := newTestManager(repo, nil)
+
+	_, err := mgr.ForkVolume(context.Background(), &ForkVolumeRequest{
+		SourceVolumeID: "vol1",
+		TeamID:         "team1",
+		UserID:         "user1",
+	})
+	if !errors.Is(err, ErrMountedCtldOwner) {
+		t.Fatalf("ForkVolume() error = %v, want %v", err, ErrMountedCtldOwner)
+	}
+}
+
 func TestVolumeLock(t *testing.T) {
 	repo := newFakeRepo()
 	mgr := newTestManager(repo, nil)

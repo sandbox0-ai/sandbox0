@@ -756,6 +756,8 @@ func (s *Server) forkVolume(w http.ResponseWriter, r *http.Request) {
 			_ = spec.WriteError(w, http.StatusNotFound, spec.CodeNotFound, "volume not found")
 		case errors.Is(err, snapshot.ErrInvalidAccessMode):
 			_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "invalid access_mode")
+		case errors.Is(err, snapshot.ErrMountedCtldOwner):
+			_ = spec.WriteError(w, http.StatusConflict, spec.CodeConflict, "volume has active ctld mounts")
 		case errors.Is(err, snapshot.ErrCloneFailed):
 			_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "clone operation failed")
 		default:

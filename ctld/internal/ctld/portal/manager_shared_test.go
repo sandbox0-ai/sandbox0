@@ -123,6 +123,44 @@ func TestCleanupIdleOwnerOnlyVolumesRemovesIdleOwner(t *testing.T) {
 	}
 }
 
+func TestCleanupIdleOwnerOnlyVolumesKeepsOwnerOnMaterializeFailure(t *testing.T) {
+	engine, cacheDir := newDirtyConflictS0FSEngine(t, "vol-1")
+	defer engine.Close()
+
+	mgr := &Manager{
+		ownerOnlyIdleTTL: 50 * time.Millisecond,
+		boundVolumes:     make(map[string]*boundVolume),
+		volumes:          newLocalVolumeManager(),
+	}
+	volCtx := &volume.VolumeContext{
+		VolumeID:  "vol-1",
+		TeamID:    "team-a",
+		Backend:   volume.BackendS0FS,
+		S0FS:      engine,
+		Access:    volume.AccessModeRWO,
+		MountedAt: time.Now().UTC(),
+		RootInode: 1,
+		RootPath:  "/",
+		CacheDir:  cacheDir,
+	}
+	mgr.volumes.add(volCtx)
+	mgr.volumes.requests["vol-1"].lastAccess = time.Now().UTC().Add(-time.Minute)
+	mgr.boundVolumes["vol-1"] = &boundVolume{
+		volumeID: "vol-1",
+		refCount: 0,
+		volCtx:   volCtx,
+	}
+
+	mgr.cleanupIdleOwnerOnlyVolumes(context.Background())
+
+	if _, ok := mgr.boundVolumes["vol-1"]; !ok {
+		t.Fatal("bound volume removed after failed materialize, want owner to remain active")
+	}
+	if _, err := mgr.volumes.GetVolume("vol-1"); err != nil {
+		t.Fatalf("GetVolume() after failed cleanup error = %v, want mounted volume to remain", err)
+	}
+}
+
 func TestNewManagerDefaultsClusterID(t *testing.T) {
 	mgr := NewManager(Config{
 		StorageConfig: &apiconfig.StorageProxyConfig{},

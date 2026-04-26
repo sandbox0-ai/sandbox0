@@ -13,10 +13,11 @@ import (
 )
 
 type Engine struct {
-	mu       sync.RWMutex
-	volumeID string
-	wal      *wal
-	closed   bool
+	mu            sync.RWMutex
+	materializeMu sync.Mutex
+	volumeID      string
+	wal           *wal
+	closed        bool
 
 	nextSeq   uint64
 	nextInode uint64
@@ -529,6 +530,9 @@ func (e *Engine) ExportState() (*SnapshotState, error) {
 }
 
 func (e *Engine) SyncMaterialize(ctx context.Context) (*Manifest, error) {
+	e.materializeMu.Lock()
+	defer e.materializeMu.Unlock()
+
 	e.mu.RLock()
 	if err := e.checkOpen(); err != nil {
 		e.mu.RUnlock()
@@ -567,6 +571,8 @@ func (e *Engine) SyncMaterialize(ctx context.Context) (*Manifest, error) {
 		e.lastCommittedManifest = manifest.ManifestSeq
 		e.lastMaterializedVersion = version
 		e.dirty = false
+	} else if manifest.ManifestSeq > e.lastCommittedManifest {
+		e.lastCommittedManifest = manifest.ManifestSeq
 	}
 	return manifest, nil
 }

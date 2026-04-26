@@ -610,22 +610,22 @@ func (m *Manager) CompleteHandoff(ctx context.Context, req ctldapi.CompleteVolum
 		m.mu.Unlock()
 		return ctldapi.CompleteVolumePortalHandoffResponse{Completed: true}, nil
 	}
-	delete(m.boundVolumes, volumeID)
-	m.unregisterOwner(bound)
 	if bound.materializeCancel != nil {
 		bound.materializeCancel()
 		bound.materializeCancel = nil
 	}
 	done := bound.materializeDone
 	bound.materializeDone = nil
-	m.mu.Unlock()
-
 	if done != nil {
 		<-done
 	}
 	if err := m.volumes.UnmountVolume(ctx, volumeID, ""); err != nil {
+		m.mu.Unlock()
 		return ctldapi.CompleteVolumePortalHandoffResponse{}, err
 	}
+	delete(m.boundVolumes, volumeID)
+	m.unregisterOwner(bound)
+	m.mu.Unlock()
 	return ctldapi.CompleteVolumePortalHandoffResponse{Completed: true}, nil
 }
 
@@ -668,20 +668,23 @@ func (m *Manager) releaseOwnerOnlyVolume(ctx context.Context, volumeID string) e
 		m.mu.Unlock()
 		return nil
 	}
-	delete(m.boundVolumes, volumeID)
-	m.unregisterOwner(bound)
 	if bound.materializeCancel != nil {
 		bound.materializeCancel()
 		bound.materializeCancel = nil
 	}
 	done := bound.materializeDone
 	bound.materializeDone = nil
-	m.mu.Unlock()
-
 	if done != nil {
 		<-done
 	}
-	return m.volumes.UnmountVolume(ctx, volumeID, "")
+	if err := m.volumes.UnmountVolume(ctx, volumeID, ""); err != nil {
+		m.mu.Unlock()
+		return err
+	}
+	delete(m.boundVolumes, volumeID)
+	m.unregisterOwner(bound)
+	m.mu.Unlock()
+	return nil
 }
 
 func (m *Manager) unbindLockedSnapshot(pm *portalMount) error {
@@ -698,8 +701,6 @@ func (m *Manager) unbindLockedSnapshot(pm *portalMount) error {
 		bound.refCount--
 		return nil
 	}
-	delete(m.boundVolumes, volumeID)
-	m.unregisterOwner(bound)
 	if bound.materializeCancel != nil {
 		bound.materializeCancel()
 		bound.materializeCancel = nil
@@ -708,7 +709,12 @@ func (m *Manager) unbindLockedSnapshot(pm *portalMount) error {
 		<-bound.materializeDone
 		bound.materializeDone = nil
 	}
-	return m.volumes.UnmountVolume(context.Background(), volumeID, "")
+	if err := m.volumes.UnmountVolume(context.Background(), volumeID, ""); err != nil {
+		return err
+	}
+	delete(m.boundVolumes, volumeID)
+	m.unregisterOwner(bound)
+	return nil
 }
 
 type publishRequest struct {

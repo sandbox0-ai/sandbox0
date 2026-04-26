@@ -37,9 +37,20 @@ Only `type: cloud` environments are accepted today.
 
 `unrestricted` maps to a Sandbox0 allow-all network policy. `limited` maps to a block-all policy with explicit allowed domains.
 
-## Package Artifacts
+## Package Dependencies
 
-Sandbox0 may prebuild and reuse environment artifacts for package-heavy environments. A session pins the environment artifact it was created with so package state remains stable while the session runs.
+Put repeatable project dependencies in `config.packages` instead of installing them from inside every session. For example, declare Node.js tools such as `tsx`, Python test dependencies such as `pytest==8.3.4`, or system packages that every session should have available.
+
+Package CLIs are exposed through the normal language toolchain entry points, so declared tools can be invoked by command name when the package manager installs a binary. For example, an environment with `npm: ["tsx"]` can run `tsx`, and an environment with `pip: ["pytest==8.3.4"]` can run `pytest`.
+
+Best practices:
+
+- Pin versions for packages that affect builds or tests.
+- Keep interactive or task-specific installs in the session workspace, not in the reusable environment.
+- For `limited` networking, set `allow_package_managers: true` when the environment needs to fetch packages during setup.
+- Update the environment when shared dependencies change, then create new sessions from the updated environment.
+
+Sessions created from an environment have the declared packages available at startup. A session keeps using the package set it was created with, so later environment updates do not change already-running sessions.
 
 ## Limited Networking
 
@@ -56,7 +67,6 @@ The final policy is enforced by Sandbox0 network policy and credential projectio
 ## Sandbox0 Notes
 
 - Reserved `sandbox0.managed_agents.*` metadata keys are not accepted on environments.
-- Environment packages affect the sandbox filesystem by mounting prebuilt package artifacts.
 - Updating an environment does not retroactively rebuild already pinned session artifacts.
 
 ## Next

@@ -8,190 +8,198 @@
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-1f8f5f?style=for-the-badge" alt="License" /></a>
 </p>
 
-> Note: Sandbox0 is under rapid iteration. Before the SaaS offering launches, backward compatibility is not guaranteed.
+# Sandbox0
 
-Sandbox0 is a general-purpose sandbox for building AI Agents. You can set any Docker image as a custom template image.
+Sandbox0 is infrastructure for running AI agent work in isolated, resumable sandboxes.
 
-Key features of Sandbox0:
-- Hot Sandbox Pool: Pre-creates idle Pods for millisecond-level startup times.
-- Persistent Storage: Persistent Volumes based on s0fs, supporting snapshot/restore/fork.
-- Network Control: manager applies template-namespace ingress baseline isolation, and netd implements node-level L4/L7 runtime policy enforcement.
-- Egress Auth: outbound credentials can be resolved and injected on the egress path, so raw secret material does not need to live inside the sandbox process.
-- Process Management: procd acts as the sandbox's PID=1, supporting REPL processes requiring session persistence (e.g., bash, python, node, redis-cli) and one-time Cmd processes.
-- Self-hosting Friendly: Complete private deployment solution.
-- Modular Installation: From a minimal mode with only 2 services to a single-cluster full mode, and multi-cluster horizontal scaling.
+It gives agent developers a place to run code, shell commands, browser tooling, build steps, repository operations, and long-running sessions without giving that work direct access to the host machine or production credentials.
 
-It can serve as an E2B alternative, suitable for general agents, coding agents, browser agents, and other scenarios.
+Use Sandbox0 when your agent needs:
 
-## What Makes It Different
+- **Isolated execution** for untrusted code, user files, generated scripts, and tool calls.
+- **Stateful sessions** for REPL-style workflows such as `python`, `bash`, language servers, agent runtimes, and long-running helpers.
+- **Persistent workspaces** through volumes, snapshots, restore, fork, and sync workflows.
+- **Fast startup** through template-backed warm pools and warm processes.
+- **Network control** with allow/deny policy and destination-scoped credential injection.
+- **Custom runtimes** from your own container images, packages, tools, and resource limits.
+- **Self-hosting** when you need to own the data plane, storage, network boundary, and deployment policy.
 
-- Warm sandbox pools managed by `manager`, so agent claims can come from pre-created idle pods instead of waiting for a fresh boot on every task.
-- `procd` inside each sandbox pod, giving Sandbox0 a first-class runtime for command execution, stateful contexts, file I/O, directory watches, and webhook-triggered workflows.
-- Sandbox0 REPL contexts are a unified abstraction for interactive runtimes, so the same interface can back shells, language interpreters, database consoles, and custom REPLs, for example `bash`, `python`, `sqlite`, or `redis-cli`.
-- Persistent volumes decoupled from sandbox lifetime through `storage-proxy`, so agent workspaces, caches, checkpoints, and generated artifacts can outlive any single pod.
-- Snapshot, restore, and fork-oriented volume workflows built on s0fs plus object storage and PostgreSQL metadata, which is exactly what long-running agent systems need for recovery and reuse.
-- Manager-owned template namespace ingress baselines, so sandbox pods in the same template namespace do not accept peer traffic by default even before runtime egress policy is considered.
-- Node-level network control through `netd`, which watches sandbox policy, transparently redirects traffic, and applies L4/L7 enforcement close to the workload.
-- Egress auth that resolves credential bindings outside the sandbox and injects outbound auth at the network edge, which is a safer fit for untrusted agent code than placing raw API keys or client certificates in the sandbox environment.
-- Runtime-agnostic sandboxing via template `runtimeClassName`, so the same system can run on a standard Kubernetes runtime in development and move to stronger isolation such as gVisor or Kata in production.
-- A deployment model that scales from a simple single-cluster setup to multi-cluster regional routing with `regional-gateway` and `scheduler`.
-- Operator-first lifecycle management, so installation, reconciliation, and upgrades follow a repeatable Kubernetes-native path instead of bespoke scripts.
+Sandbox0 Cloud uses `https://api.sandbox0.ai` for sandboxes, templates, volumes, credentials, and team-scoped API keys.
 
-### Architecture
+> Sandbox0 is under active development. Prefer the SDKs and `s0` CLI over hardcoded HTTP paths, and check the docs before depending on beta surfaces.
 
-```mermaid
-flowchart TD
-    client[Client / API SDK] --> igw[cluster-gateway]
+## What You Build With
 
-    subgraph cluster[Kubernetes Cluster - single cluster full mode]
-        direction TB
+| Building block | What it is                                                                                                 | Why agent developers care                                                                             |
+| -------------- | ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| **Template**   | A runtime blueprint: image, resources, warm pool, warm processes, volume mount points, and default policy. | Keeps environments reproducible and makes startup fast.                                               |
+| **Sandbox**    | An isolated runtime instance created from a template.                                                      | Gives each task, user, or agent worker its own execution boundary.                                    |
+| **Context**    | A process/session inside a sandbox.                                                                        | Choose stateful REPL behavior or one-shot command execution per tool call.                            |
+| **Volume**     | Persistent storage independent of a sandbox lifetime.                                                      | Keeps repositories, caches, checkpoints, artifacts, and session workspaces across sandbox recreation. |
+| **Credential** | A secret source plus policy for how it may be used.                                                        | Lets agents call external services without storing raw API keys in the sandbox process.               |
 
-        subgraph s0[Sandbox0 Services]
-            direction LR
-            igw --> mgr[manager]
-            igw --> pods[Sandbox Pods - procd inside]
-            mgr --> pods
-            mgr --> netd[netd]
-            mgr --> sp[storage-proxy]
-        end
+The short version: use templates for repeatable environments, sandboxes for isolation, contexts for process behavior, volumes for durable memory, and credentials/network policy for controlled external access.
 
-        subgraph mw[Middleware Dependencies]
-            direction LR
-            pg[(PostgreSQL - metadata and state)]
-            s3[(S3 / OSS - volume data)]
-            reg[(Image Registry - optional)]
-        end
+## Quickstart
 
-        igw --> pg
-        sp --> pg
-        sp --> s3
-        mgr --> reg
-    end
-```
-
-Most users start with a single-cluster deployment and only move to multi-cluster when they need regional scale-out. For deeper architecture and deployment details, see <https://sandbox0.ai/docs/self-hosted>.
-
-In multi-region deployments backed by `global-gateway`, every team creation path must provide an explicit `home_region_id` so the team's routing target is unambiguous from the start.
-
-## Claim A Sandbox
-
-All examples below assume:
-
-- `SANDBOX0_TOKEN` contains a valid API token
-- `SANDBOX0_BASE_URL` optionally overrides the default endpoint for self-hosted deployments
-
-### Python
-
-Install:
+Install the `s0` CLI:
 
 ```bash
-pip install sandbox0
+curl -fsSL https://raw.githubusercontent.com/sandbox0-ai/s0/main/scripts/install.sh | bash
 ```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/sandbox0-ai/s0/main/scripts/install.ps1 | iex
+```
+
+Sign in, then create an API key for SDK or automation usage:
+
+```bash
+s0 auth login
+
+# If no team is selected yet:
+# s0 team list
+# s0 team create --name my-team --home-region <region-id>
+# s0 team use <team-id>
+
+export SANDBOX0_TOKEN="$(s0 apikey create --name sdk-quickstart --role developer --expires-in 30d --raw)"
+export SANDBOX0_BASE_URL="https://api.sandbox0.ai"
+```
+
+Install an SDK:
+
+```bash
+# Python
+pip install sandbox0
+
+# TypeScript
+npm install sandbox0
+
+# Go
+go get github.com/sandbox0-ai/sdk-go
+```
+
+Claim a sandbox, run stateful code, and run a one-shot command:
 
 ```python
 import os
-
-from sandbox0 import Client
+from sandbox0 import Client, CmdOptions
 from sandbox0.apispec.models.sandbox_config import SandboxConfig
 
 client = Client(
     token=os.environ["SANDBOX0_TOKEN"],
-    base_url=os.environ.get("SANDBOX0_BASE_URL", "http://localhost:30080"),
+    base_url=os.environ.get("SANDBOX0_BASE_URL", "https://api.sandbox0.ai"),
 )
 
 with client.sandboxes.open(
     "default",
     config=SandboxConfig(ttl=300, hard_ttl=3600),
 ) as sandbox:
-    print(f"Sandbox ID: {sandbox.id}")
-    print(f"Status: {sandbox.status}")
+    sandbox.run("python", "x = 41")
+    second = sandbox.run("python", "print(x + 1)")
+    print(second.output_raw, end="")
+
+    result = sandbox.cmd(
+        "list workspace",
+        CmdOptions(command=["sh", "-lc", "pwd && ls -la"]),
+    )
+    print(result.output_raw, end="")
 ```
 
-For Go, TypeScript, CLI, and full getting-started guides, see <https://sandbox0.ai/docs/get-started>.
+More examples:
 
-## Self-Hosted Quickstart
+- [Get started](https://sandbox0.ai/docs/get-started)
+- [Sandbox lifecycle and execution](https://sandbox0.ai/docs/sandbox)
+- [Templates and warm pools](https://sandbox0.ai/docs/template)
+- [Volumes, snapshots, fork, and sync](https://sandbox0.ai/docs/volume)
+- [Network policy](https://sandbox0.ai/docs/sandbox/network)
+- [Credentials and egress auth](https://sandbox0.ai/docs/credential)
 
-The example below is a minimal `kind` installation for local evaluation.
+## Common Agent Patterns
 
-Prerequisites:
+**Coding agents**
 
-- `kind`
-- `kubectl`
-- `helm`
+Use a custom template with language runtimes, package managers, git, build tools, and an attached volume for the repository workspace. Use a REPL or warm process for the active agent loop, and one-shot commands for isolated build/test steps.
 
-Create a local cluster with the same Kind config used by `infra/tests/e2e`:
+**Data or browser agents**
 
-```bash
-kind create cluster --config kind-config.yaml
-```
+Use a template with the required browser or data tooling, expose only the ports needed for previews, and persist downloads or generated artifacts into a volume. Apply network policy early so agent browsing and API calls stay inside the intended boundary.
 
-`kind-config.yaml`:
+**Parallel workers**
 
-```yaml
-kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-name: sandbox0
-nodes:
-- role: control-plane
-  image: kindest/node:v1.35.0
-  kubeadmConfigPatches:
-  - |
-    kind: ClusterConfiguration
-    apiServer:
-      extraArgs:
-        enable-aggregator-routing: "true"
-  extraPortMappings:
-  # cluster-gateway HTTP port
-  - containerPort: 30080
-    hostPort: 30080
-  # registry port for template image push
-  - containerPort: 30500
-    hostPort: 30500
-```
+Create one sandbox per task or user request. Share read-only inputs through volumes or object storage, and write outputs to separate volumes or task-specific paths. Keep orchestration outside the sandbox.
 
-Install `infra-operator`:
+**Long-running sessions**
 
-```bash
-helm repo add sandbox0 https://charts.sandbox0.ai
-helm repo update
+Treat the sandbox process as runtime state and the volume as durable state. Checkpoint progress frequently, use TTLs to pause idle compute, and resume or recreate sandboxes from persisted workspace state.
 
-helm install infra-operator sandbox0/infra-operator \
-    --namespace sandbox0-system \
-    --create-namespace
-```
+## Managed Agents
 
-Apply the minimal single-cluster sample:
+Sandbox0 also provides a Managed Agents path for developers who want a higher-level, Claude Managed Agents-compatible API shape.
 
-It does not include `netd` or `storage-proxy`, so it does not provide netd-backed egress enforcement or volume capabilities. Template-namespace ingress baselines still depend on Kubernetes `NetworkPolicy` support in your CNI.
+Managed Agents sit above raw sandboxes. Application code uses the official Anthropic SDK pointed at Sandbox0's Managed Agents endpoint, while Sandbox0 provides durable sessions, event history, sandbox orchestration, persistent workspaces, network policy, and credential injection underneath.
 
-```bash
-kubectl apply -f https://raw.githubusercontent.com/sandbox0-ai/sandbox0/main/infra-operator/chart/samples/single-cluster/minimal.yaml
-kubectl get sandbox0infra -n sandbox0-system -w
-```
+- Managed Agents API: `https://agents.sandbox0.ai`
+- Documentation: <https://sandbox0.ai/docs/managed-agents>
+- Examples and runtime work: <https://github.com/sandbox0-ai/managed-agents>
 
-Get the initial admin credentials:
+Use raw Sandbox0 sandboxes when you want direct control over processes, files, templates, volumes, ports, and network policy. Use Managed Agents when you want a session/event API for agent applications and want Sandbox0 to manage the runtime attachment behind that API.
 
-```bash
-ADMIN_PASSWORD="$(kubectl get secret admin-password -n sandbox0-system -o jsonpath='{.data.password}' | base64 -d)"
-printf 'username: %s\npassword: %s\n' 'admin@example.com' "$ADMIN_PASSWORD"
-```
+## Safety And Isolation Model
 
-Configure the local API URL and create a token:
+Sandbox0 is designed for workloads that execute code the host should not trust.
 
-The local `kind` setup above exposes `cluster-gateway` at `http://localhost:30080`.
+- Each sandbox is a separate runtime instance created from a template.
+- Sandbox lifetime is controlled with `ttl` and `hard_ttl`; idle work can pause while durable state remains in volumes.
+- Network policy can block or restrict outbound traffic by default.
+- Egress auth resolves and injects credentials outside the sandbox process, so raw secrets do not need to be placed in environment variables or files inside untrusted code.
+- Persistent data lives in volumes, not in the ephemeral sandbox filesystem.
+- Self-hosted deployments let platform teams choose the Kubernetes runtime, storage, network, and regional boundary that match their security requirements.
 
-```bash
-export SANDBOX0_BASE_URL="http://localhost:30080"
+Isolation strength depends on your deployment choices. For production self-hosting, review the self-hosted docs and choose runtime, CNI, storage, and credential policies deliberately.
 
-s0 auth login
+## Performance Model
 
-unset SANDBOX0_TOKEN && export SANDBOX0_TOKEN="$(s0 apikey create --name test-apikey --role admin --expires-in 30d --raw)"
-```
+Agent workloads are latency-sensitive because every tool call can sit on the critical path of a user interaction.
 
-## Production Notes
+Sandbox0 optimizes for this in three places:
 
-- `kind` is for evaluation only and is not a production deployment shape.
-- Most teams should start with the operator-managed single-cluster setup.
-- Full architecture, configuration, and production deployment guidance live in the self-hosted docs.
+- **Warm pools** keep template instances ready so a claim does not need to build the environment from scratch.
+- **Warm processes** can start agent runtimes, language servers, or helpers before the sandbox is claimed.
+- **Volumes** keep caches, repositories, and generated state separate from sandbox lifetime, avoiding repeated setup work.
 
-For full deployment guidance, see <https://sandbox0.ai/docs/self-hosted>.
+For best results, put expensive environment setup into the template image or warm process, keep active task state in a volume, and keep sandboxes short-lived enough that idle compute does not become the source of truth.
+
+## Self-Hosting
+
+Most application developers can start with Sandbox0 Cloud. Self-host Sandbox0 when you need private deployment, data-plane ownership, custom runtime isolation, regional storage boundaries, or tighter integration with internal infrastructure.
+
+Self-hosting is operator-first:
+
+1. Install `infra-operator`.
+2. Apply a `Sandbox0Infra` resource.
+3. Let the operator reconcile gateways, manager, storage, networking, and supporting services.
+
+Start here: <https://sandbox0.ai/docs/self-hosted>
+
+## Repository Map
+
+This repository contains the core Sandbox0 control plane, data plane, API contract, Kubernetes operator, and docs.
+
+Related repositories:
+
+- CLI: <https://github.com/sandbox0-ai/s0>
+- Go SDK: <https://github.com/sandbox0-ai/sdk-go>
+- JavaScript/TypeScript SDK: <https://github.com/sandbox0-ai/sdk-js>
+- Python SDK: <https://github.com/sandbox0-ai/sdk-py>
+- Managed Agents examples and runtime work: <https://github.com/sandbox0-ai/managed-agents>
+
+For API changes, `pkg/apispec/openapi.yaml` is the source of truth. Generated SDK code and copied OpenAPI files in other repositories should be synchronized from it rather than edited by hand.
+
+## Contributing
+
+Bug reports should include a minimal reproduction, relevant logs, Sandbox0 version or deployment mode, and whether the issue is on Cloud or self-hosted. Remove API keys, tokens, kubeconfigs, private repository URLs, customer data, and any other sensitive information before sharing logs.
+
+Sandbox0 is Apache-2.0 licensed. See [LICENSE](./LICENSE).

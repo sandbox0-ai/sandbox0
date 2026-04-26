@@ -35,24 +35,9 @@ func LoadScenarios(cfg framework.Config) ([]framework.Scenario, error) {
 		if err != nil {
 			return nil, err
 		}
-		scenario.InfraNamespace = scenarioNamespace(cfg.InfraNamespace, relativePath)
-		for i := range scenario.Secrets {
-			scenario.Secrets[i].Namespace = scenario.InfraNamespace
-		}
-		for i := range scenario.Rollouts {
-			scenario.Rollouts[i].Namespace = scenario.InfraNamespace
-		}
 		scenarios = append(scenarios, scenario)
 	}
 	return scenarios, nil
-}
-
-func scenarioNamespace(baseNamespace, relativePath string) string {
-	base := strings.TrimSuffix(filepath.Base(relativePath), filepath.Ext(relativePath))
-	if strings.TrimSpace(baseNamespace) == "" {
-		baseNamespace = "sandbox0-system"
-	}
-	return strings.TrimSpace(baseNamespace) + "-" + base
 }
 
 func selectScenarioManifestPaths() ([]string, error) {

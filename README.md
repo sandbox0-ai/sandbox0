@@ -85,7 +85,7 @@ Claim a sandbox, run stateful code, and run a one-shot command:
 
 ```python
 import os
-from sandbox0 import Client, CmdOptions
+from sandbox0 import Client
 from sandbox0.apispec.models.sandbox_config import SandboxConfig
 
 client = Client(
@@ -101,10 +101,7 @@ with client.sandboxes.open(
     second = sandbox.run("python", "print(x + 1)")
     print(second.output_raw, end="")
 
-    result = sandbox.cmd(
-        "list workspace",
-        CmdOptions(command=["sh", "-lc", "pwd && ls -la"]),
-    )
+    result = sandbox.cmd("sh -lc 'pwd && ls -la'")
     print(result.output_raw, end="")
 ```
 

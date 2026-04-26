@@ -30,7 +30,7 @@ Use `trafficRules` for new policies. Legacy `allowed*` and `denied*` fields stil
 </Callout>
 
 <Callout variant="info">
-If a credential rule uses `tlsMode: terminate-reoriginate`, Sandbox0 exposes the netd MITM CA as `SANDBOX0_NETD_MITM_CA_FILE`, but it does not automatically update the container trust store. Templates and app runtimes must opt in, for example with `NODE_EXTRA_CA_CERTS` or `REQUESTS_CA_BUNDLE`.
+If a credential rule uses `tlsMode: terminate-reoriginate`, Sandbox0 exposes the netd MITM CA as `SANDBOX0_NETD_MITM_CA_FILE` and configures procd-managed processes with a combined CA bundle through common TLS environment variables.
 </Callout>
 
 ## Traffic Rule Fields

@@ -16,6 +16,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/file"
 	procdhttp "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/http"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/trust"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/webhook"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
@@ -47,6 +48,11 @@ func main() {
 		zap.Int("http_port", cfg.HTTPPort),
 		zap.String("root_path", cfg.RootPath),
 	)
+	if bundlePath, err := trust.ConfigureNetdMITMCATrust(); err != nil {
+		logger.Warn("Failed to configure netd MITM CA trust", zap.Error(err))
+	} else if bundlePath != "" {
+		logger.Info("Configured netd MITM CA trust", zap.String("bundle_path", bundlePath))
+	}
 
 	// Initialize observability provider
 	obsProvider, err := observability.New(observability.Config{

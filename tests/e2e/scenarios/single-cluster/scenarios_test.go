@@ -33,7 +33,7 @@ func TestSelectScenarioManifestPathsReturnsErrorForNoMatches(t *testing.T) {
 	}
 }
 
-func TestLoadScenariosUsesDistinctInfraNamespaces(t *testing.T) {
+func TestLoadScenariosUsesManifestInfraNamespace(t *testing.T) {
 	t.Setenv(singleClusterScenariosEnvVar, "minimal,volumes")
 
 	cfg := framework.Config{
@@ -48,10 +48,9 @@ func TestLoadScenariosUsesDistinctInfraNamespaces(t *testing.T) {
 		t.Fatalf("expected 2 scenarios, got %d", len(scenarios))
 	}
 
-	want := []string{"sandbox0-system-minimal", "sandbox0-system-volumes"}
 	for i, scenario := range scenarios {
-		if scenario.InfraNamespace != want[i] {
-			t.Fatalf("scenario %d namespace = %q, want %q", i, scenario.InfraNamespace, want[i])
+		if scenario.InfraNamespace != "sandbox0-system" {
+			t.Fatalf("scenario %d namespace = %q, want sandbox0-system", i, scenario.InfraNamespace)
 		}
 		for _, rollout := range scenario.Rollouts {
 			if rollout.Namespace != scenario.InfraNamespace {

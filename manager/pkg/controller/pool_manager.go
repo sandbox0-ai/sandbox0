@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
@@ -55,6 +56,8 @@ const (
 	AnnotationWebhookStateVolumeID         = "sandbox0.ai/webhook-state-volume-id"
 	AnnotationTemplateSpecHash             = "sandbox0.ai/template-spec-hash"
 	AnnotationClusterAutoscalerSafeToEvict = "cluster-autoscaler.kubernetes.io/safe-to-evict"
+
+	unhealthyIdlePodRepairGracePeriod = 2 * time.Minute
 )
 
 // ClaimedSandboxPodAnnotations returns manager-owned metadata for active sandbox
@@ -127,7 +130,13 @@ func (pm *PoolManager) ReconcilePool(ctx context.Context, template *v1alpha1.San
 		return fmt.Errorf("drain stale idle pods: %w", err)
 	}
 
-	// 4. Check if replicas match minIdle
+	// 4. Repair current-hash idle pods that are stuck and will keep the
+	// ReplicaSet from creating replacements.
+	if err := pm.repairUnhealthyIdlePods(ctx, template, desiredTemplateHash); err != nil {
+		return fmt.Errorf("repair unhealthy idle pods: %w", err)
+	}
+
+	// 5. Check if replicas match minIdle
 	if rs.Spec.Replicas == nil || *rs.Spec.Replicas != template.Spec.Pool.MinIdle {
 		pm.logger.Info("Updating ReplicaSet replicas",
 			zap.String("template", template.Name),
@@ -305,7 +314,100 @@ func (pm *PoolManager) drainStaleIdlePods(ctx context.Context, template *v1alpha
 	return nil
 }
 
+func (pm *PoolManager) repairUnhealthyIdlePods(ctx context.Context, template *v1alpha1.SandboxTemplate, desiredTemplateHash string) error {
+	pods, err := pm.podLister.Pods(template.Namespace).List(labels.SelectorFromSet(map[string]string{
+		LabelTemplateID: template.Name,
+		LabelPoolType:   PoolTypeIdle,
+	}))
+	if err != nil {
+		return err
+	}
+
+	now := time.Now()
+	repaired := 0
+	for _, pod := range pods {
+		if pod.Annotations[AnnotationTemplateSpecHash] != desiredTemplateHash {
+			continue
+		}
+		if !shouldRepairUnhealthyIdlePod(pod, now) {
+			continue
+		}
+		deleted, err := pm.deleteUnhealthyIdlePodWithRetry(ctx, template.Namespace, pod.Name, desiredTemplateHash)
+		if err != nil {
+			return err
+		}
+		if deleted {
+			repaired++
+		}
+	}
+
+	if repaired > 0 {
+		pm.recorder.Eventf(template, corev1.EventTypeNormal, "UnhealthyIdlePodsRepaired",
+			"Deleted %d unhealthy idle pod(s) so the ReplicaSet can recreate them", repaired)
+		pm.logger.Info("Repaired unhealthy idle pods",
+			zap.String("template", template.Name),
+			zap.Int("count", repaired),
+			zap.String("desiredHash", desiredTemplateHash),
+		)
+	}
+	return nil
+}
+
+func shouldRepairUnhealthyIdlePod(pod *corev1.Pod, now time.Time) bool {
+	if pod == nil || pod.DeletionTimestamp != nil || IsPodReady(pod) {
+		return false
+	}
+	switch pod.Status.Phase {
+	case corev1.PodSucceeded, corev1.PodFailed:
+		return true
+	}
+	if pod.CreationTimestamp.IsZero() {
+		return false
+	}
+	return now.Sub(pod.CreationTimestamp.Time) >= unhealthyIdlePodRepairGracePeriod
+}
+
+func (pm *PoolManager) deleteUnhealthyIdlePodWithRetry(ctx context.Context, namespace, podName, desiredTemplateHash string) (bool, error) {
+	deleted := false
+	retryErr := retry.OnError(retry.DefaultRetry, func(err error) bool {
+		return errors.IsConflict(err) || errors.IsInvalid(err)
+	}, func() error {
+		pod, err := pm.k8sClient.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+		if err != nil {
+			if errors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+
+		if pod.Labels[LabelPoolType] != PoolTypeIdle ||
+			pod.Annotations[AnnotationTemplateSpecHash] != desiredTemplateHash ||
+			!shouldRepairUnhealthyIdlePod(pod, time.Now()) {
+			return nil
+		}
+
+		uid := pod.UID
+		resourceVersion := pod.ResourceVersion
+		err = pm.k8sClient.CoreV1().Pods(namespace).Delete(ctx, podName, metav1.DeleteOptions{
+			Preconditions: &metav1.Preconditions{
+				UID:             &uid,
+				ResourceVersion: &resourceVersion,
+			},
+		})
+		if err != nil && !errors.IsNotFound(err) {
+			return err
+		}
+		deleted = err == nil
+		return nil
+	})
+	if retryErr != nil {
+		return false, retryErr
+	}
+	return deleted, nil
+}
+
 func (pm *PoolManager) deleteStaleIdlePodWithRetry(ctx context.Context, namespace, podName, desiredTemplateHash string) (bool, error) {
+	deleted := false
 	// Retry small transient races while still validating the pod is stale+idle.
 	retryErr := retry.OnError(retry.DefaultRetry, func(err error) bool {
 		return errors.IsConflict(err) || errors.IsInvalid(err)
@@ -334,12 +436,13 @@ func (pm *PoolManager) deleteStaleIdlePodWithRetry(ctx context.Context, namespac
 		if err != nil && !errors.IsNotFound(err) {
 			return err
 		}
+		deleted = err == nil
 		return nil
 	})
 	if retryErr != nil {
 		return false, retryErr
 	}
-	return false, nil
+	return deleted, nil
 }
 
 // TemplateSpecHash returns the pod spec hash used to identify current idle pods.

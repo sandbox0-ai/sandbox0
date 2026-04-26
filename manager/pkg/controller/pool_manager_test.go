@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/stretchr/testify/assert"
@@ -153,6 +154,139 @@ func TestDrainStaleIdlePodsSkipsClaimedActivePods(t *testing.T) {
 	}
 
 	err := pm.drainStaleIdlePods(context.Background(), template, "new-hash")
+	require.NoError(t, err)
+	assert.Equal(t, 0, deleteActions)
+}
+
+func TestRepairUnhealthyIdlePodsDeletesStuckCurrentHashIdlePod(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "default",
+		},
+	}
+
+	stuckPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "idle-stuck",
+			Namespace:         "default",
+			UID:               types.UID("uid-stuck"),
+			ResourceVersion:   "31",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-unhealthyIdlePodRepairGracePeriod - time.Second)),
+			Labels: map[string]string{
+				LabelTemplateID: "template-a",
+				LabelPoolType:   PoolTypeIdle,
+			},
+			Annotations: map[string]string{
+				AnnotationTemplateSpecHash: "new-hash",
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+		},
+	}
+	readyPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "idle-ready",
+			Namespace:         "default",
+			UID:               types.UID("uid-ready"),
+			ResourceVersion:   "32",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-unhealthyIdlePodRepairGracePeriod - time.Second)),
+			Labels: map[string]string{
+				LabelTemplateID: "template-a",
+				LabelPoolType:   PoolTypeIdle,
+			},
+			Annotations: map[string]string{
+				AnnotationTemplateSpecHash: "new-hash",
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+
+	client := fake.NewSimpleClientset(stuckPod, readyPod)
+	podIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	require.NoError(t, podIndexer.Add(stuckPod))
+	require.NoError(t, podIndexer.Add(readyPod))
+	podLister := corelisters.NewPodLister(podIndexer)
+
+	deleteActions := 0
+	client.PrependReactor("delete", "pods", func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {
+		delAction, ok := action.(k8stesting.DeleteAction)
+		require.True(t, ok)
+		deleteActions++
+		opts := delAction.GetDeleteOptions()
+		require.NotNil(t, opts.Preconditions)
+		require.NotNil(t, opts.Preconditions.UID)
+		require.NotNil(t, opts.Preconditions.ResourceVersion)
+		assert.Equal(t, types.UID("uid-stuck"), *opts.Preconditions.UID)
+		assert.Equal(t, "31", *opts.Preconditions.ResourceVersion)
+		return false, nil, nil
+	})
+
+	pm := &PoolManager{
+		k8sClient: client,
+		podLister: podLister,
+		recorder:  record.NewFakeRecorder(10),
+		logger:    zap.NewNop(),
+	}
+
+	err := pm.repairUnhealthyIdlePods(context.Background(), template, "new-hash")
+	require.NoError(t, err)
+	assert.Equal(t, 1, deleteActions)
+}
+
+func TestRepairUnhealthyIdlePodsKeepsRecentlyCreatedPod(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "default",
+		},
+	}
+
+	recentPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "idle-recent",
+			Namespace:         "default",
+			UID:               types.UID("uid-recent"),
+			ResourceVersion:   "41",
+			CreationTimestamp: metav1.NewTime(time.Now()),
+			Labels: map[string]string{
+				LabelTemplateID: "template-a",
+				LabelPoolType:   PoolTypeIdle,
+			},
+			Annotations: map[string]string{
+				AnnotationTemplateSpecHash: "new-hash",
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+		},
+	}
+
+	client := fake.NewSimpleClientset(recentPod)
+	podIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	require.NoError(t, podIndexer.Add(recentPod))
+	podLister := corelisters.NewPodLister(podIndexer)
+
+	deleteActions := 0
+	client.PrependReactor("delete", "pods", func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {
+		deleteActions++
+		return false, nil, nil
+	})
+
+	pm := &PoolManager{
+		k8sClient: client,
+		podLister: podLister,
+		recorder:  record.NewFakeRecorder(10),
+		logger:    zap.NewNop(),
+	}
+
+	err := pm.repairUnhealthyIdlePods(context.Background(), template, "new-hash")
 	require.NoError(t, err)
 	assert.Equal(t, 0, deleteActions)
 }

@@ -27,6 +27,19 @@ const (
 	ChangeRequestEntryKindFile      ChangeRequestEntryKind = "file"
 )
 
+// Defines values for CloneVolumeFileResultMode.
+const (
+	CloneVolumeFileResultModeCopy CloneVolumeFileResultMode = "copy"
+	CloneVolumeFileResultModeCow  CloneVolumeFileResultMode = "cow"
+)
+
+// Defines values for CloneVolumeFilesRequestMode.
+const (
+	CloneVolumeFilesRequestModeCopy        CloneVolumeFilesRequestMode = "copy"
+	CloneVolumeFilesRequestModeCowOrCopy   CloneVolumeFilesRequestMode = "cow_or_copy"
+	CloneVolumeFilesRequestModeCowRequired CloneVolumeFilesRequestMode = "cow_required"
+)
+
 // Defines values for CredentialProjectionType.
 const (
 	HttpHeaders          CredentialProjectionType = "http_headers"
@@ -172,6 +185,11 @@ const (
 // Defines values for SuccessClaimResponseSuccess.
 const (
 	SuccessClaimResponseSuccessTrue SuccessClaimResponseSuccess = true
+)
+
+// Defines values for SuccessCloneVolumeFilesResponseSuccess.
+const (
+	SuccessCloneVolumeFilesResponseSuccessTrue SuccessCloneVolumeFilesResponseSuccess = true
 )
 
 // Defines values for SuccessContextExecResponseSuccess.
@@ -446,7 +464,7 @@ const (
 
 // Defines values for SuccessWrittenResponseSuccess.
 const (
-	SuccessWrittenResponseSuccessTrue SuccessWrittenResponseSuccess = true
+	True SuccessWrittenResponseSuccess = true
 )
 
 // Defines values for SyncEventType.
@@ -656,6 +674,49 @@ type ClaimResponse struct {
 	Status          string         `json:"status"`
 	Template        string         `json:"template"`
 }
+
+// CloneVolumeFileEntry defines model for CloneVolumeFileEntry.
+type CloneVolumeFileEntry struct {
+	// CreateParents Create missing parent directories under the target path.
+	CreateParents *bool `json:"create_parents,omitempty"`
+
+	// Overwrite Replace an existing destination file. Existing directories are never overwritten.
+	Overwrite *bool `json:"overwrite,omitempty"`
+
+	// SourcePath Source regular file path inside the source volume.
+	SourcePath string `json:"source_path"`
+
+	// SourceVolumeId Source sandbox volume ID. It must belong to the same team as the target volume.
+	SourceVolumeId string `json:"source_volume_id"`
+
+	// TargetPath Destination file path inside the target volume.
+	TargetPath string `json:"target_path"`
+}
+
+// CloneVolumeFileResult defines model for CloneVolumeFileResult.
+type CloneVolumeFileResult struct {
+	Mode           CloneVolumeFileResultMode `json:"mode"`
+	SizeBytes      uint64                    `json:"size_bytes"`
+	SourcePath     string                    `json:"source_path"`
+	SourceVolumeId string                    `json:"source_volume_id"`
+	TargetPath     string                    `json:"target_path"`
+}
+
+// CloneVolumeFileResultMode defines model for CloneVolumeFileResult.Mode.
+type CloneVolumeFileResultMode string
+
+// CloneVolumeFilesRequest defines model for CloneVolumeFilesRequest.
+type CloneVolumeFilesRequest struct {
+	// Atomic Batch atomicity flag. Only true is currently supported.
+	Atomic  *bool                  `json:"atomic,omitempty"`
+	Entries []CloneVolumeFileEntry `json:"entries"`
+
+	// Mode Clone strategy. cow_or_copy prefers copy-on-write and falls back to server-side copy.
+	Mode *CloneVolumeFilesRequestMode `json:"mode,omitempty"`
+}
+
+// CloneVolumeFilesRequestMode Clone strategy. cow_or_copy prefers copy-on-write and falls back to server-side copy.
+type CloneVolumeFilesRequestMode string
 
 // ContainerSpec defines model for ContainerSpec.
 type ContainerSpec struct {
@@ -1701,6 +1762,17 @@ type SuccessClaimResponse struct {
 
 // SuccessClaimResponseSuccess defines model for SuccessClaimResponse.Success.
 type SuccessClaimResponseSuccess bool
+
+// SuccessCloneVolumeFilesResponse defines model for SuccessCloneVolumeFilesResponse.
+type SuccessCloneVolumeFilesResponse struct {
+	Data *struct {
+		Entries *[]CloneVolumeFileResult `json:"entries,omitempty"`
+	} `json:"data,omitempty"`
+	Success SuccessCloneVolumeFilesResponseSuccess `json:"success"`
+}
+
+// SuccessCloneVolumeFilesResponseSuccess defines model for SuccessCloneVolumeFilesResponse.Success.
+type SuccessCloneVolumeFilesResponseSuccess bool
 
 // SuccessContextExecResponse defines model for SuccessContextExecResponse.
 type SuccessContextExecResponse struct {
@@ -2827,6 +2899,9 @@ type PostApiV1SandboxesIdRefreshJSONRequestBody = SandboxRefreshRequest
 
 // PostApiV1SandboxvolumesJSONRequestBody defines body for PostApiV1Sandboxvolumes for application/json ContentType.
 type PostApiV1SandboxvolumesJSONRequestBody = CreateSandboxVolumeRequest
+
+// PostApiV1SandboxvolumesIdFilesCloneJSONRequestBody defines body for PostApiV1SandboxvolumesIdFilesClone for application/json ContentType.
+type PostApiV1SandboxvolumesIdFilesCloneJSONRequestBody = CloneVolumeFilesRequest
 
 // PostApiV1SandboxvolumesIdFilesMoveJSONRequestBody defines body for PostApiV1SandboxvolumesIdFilesMove for application/json ContentType.
 type PostApiV1SandboxvolumesIdFilesMoveJSONRequestBody = MoveFileRequest

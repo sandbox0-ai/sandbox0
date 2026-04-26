@@ -335,6 +335,71 @@ curl -X POST \
 
 ---
 
+## Clone Files
+
+Clone regular files from one Volume into another Volume without routing file bytes through the client. The storage layer uses copy-on-write metadata clones when possible and falls back to server-side copy when `mode` is `cow_or_copy`.
+
+<Endpoint method="POST">
+/api/v1/sandboxvolumes/{'{id}'}/files/clone
+</Endpoint>
+
+### Request Body
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `mode` | string | `cow_or_copy`, `cow_required`, or `copy`. Defaults to `cow_or_copy` |
+| `atomic` | boolean | Must be `true` when provided |
+| `entries` | array | Files to clone into the target Volume |
+
+Each entry contains:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `source_volume_id` | string | Source Volume ID in the same team |
+| `source_path` | string | Source regular file path |
+| `target_path` | string | Destination file path in the target Volume |
+| `overwrite` | boolean | Replace an existing destination file |
+| `create_parents` | boolean | Create missing destination parent directories |
+
+```bash
+curl -X POST \
+    "$SANDBOX0_BASE_URL/api/v1/sandboxvolumes/vol_workspace/files/clone" \
+    -H "Authorization: Bearer $SANDBOX0_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "mode": "cow_or_copy",
+        "entries": [
+            {
+                "source_volume_id": "vol_assets",
+                "source_path": "/uploads/data.csv",
+                "target_path": "/workspace/data.csv",
+                "create_parents": true
+            }
+        ]
+    }'
+```
+
+Example response:
+
+```json
+{
+    "success": true,
+    "data": {
+        "entries": [
+            {
+                "source_volume_id": "vol_assets",
+                "source_path": "/uploads/data.csv",
+                "target_path": "/workspace/data.csv",
+                "mode": "cow",
+                "size_bytes": 1048576
+            }
+        ]
+    }
+}
+```
+
+---
+
 ## Delete File or Directory
 
 Delete a file or recursively delete a directory.

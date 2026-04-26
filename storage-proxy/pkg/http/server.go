@@ -182,6 +182,7 @@ func NewServer(logger *logrus.Logger, cfg *config.StorageProxyConfig, k8sClient 
 	s.mux.HandleFunc("GET /sandboxvolumes/{id}/files/stat", s.handleVolumeFileStat)
 	s.mux.HandleFunc("GET /sandboxvolumes/{id}/files/list", s.handleVolumeFileList)
 	s.mux.HandleFunc("POST /sandboxvolumes/{id}/files/move", s.handleVolumeFileMove)
+	s.mux.HandleFunc("POST /sandboxvolumes/{id}/files/clone", s.handleVolumeFileClone)
 	s.mux.HandleFunc("GET /sandboxvolumes/{id}/files/watch", s.handleVolumeFileWatch)
 
 	// Internal manager-owned SandboxVolume lifecycle handlers.

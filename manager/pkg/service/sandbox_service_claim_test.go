@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
@@ -21,6 +23,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"go.uber.org/zap"
@@ -461,6 +464,33 @@ func TestClaimSandboxCleansColdPodWhenClaimReadinessFails(t *testing.T) {
 	}
 	if len(pods.Items) != 0 {
 		t.Fatalf("pods after failed cold claim = %d, want 0", len(pods.Items))
+	}
+}
+
+func TestObserveClaimPhaseRecordsMetric(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	svc := &SandboxService{metrics: obsmetrics.NewManager(registry)}
+
+	svc.observeClaimPhase("managed-agents", "cold", "wait_for_pod_claim_ready", time.Now().Add(-20*time.Millisecond), nil)
+
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatalf("gather metrics: %v", err)
+	}
+	metric := findMetric(families, "manager_sandbox_claim_phase_duration_seconds", map[string]string{
+		"template": "managed-agents",
+		"type":     "cold",
+		"phase":    "wait_for_pod_claim_ready",
+		"status":   "success",
+	})
+	if metric == nil || metric.GetHistogram() == nil {
+		t.Fatal("claim phase histogram metric not found")
+	}
+	if got := metric.GetHistogram().GetSampleCount(); got != 1 {
+		t.Fatalf("claim phase sample count = %d, want 1", got)
+	}
+	if got := metric.GetHistogram().GetSampleSum(); got <= 0 {
+		t.Fatalf("claim phase sample sum = %f, want > 0", got)
 	}
 }
 
@@ -1054,4 +1084,37 @@ func splitTestServerAddress(t *testing.T, server *httptest.Server) (string, int)
 		t.Fatalf("parse server port: %v", err)
 	}
 	return host, port
+}
+
+func findMetric(families []*dto.MetricFamily, name string, labels map[string]string) *dto.Metric {
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			if metricLabelsMatch(metric, labels) {
+				return metric
+			}
+		}
+	}
+	return nil
+}
+
+func metricLabelsMatch(metric *dto.Metric, labels map[string]string) bool {
+	if metric == nil {
+		return false
+	}
+	for wantName, wantValue := range labels {
+		found := false
+		for _, label := range metric.GetLabel() {
+			if label.GetName() == wantName && label.GetValue() == wantValue {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }

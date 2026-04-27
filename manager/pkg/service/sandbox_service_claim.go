@@ -201,14 +201,19 @@ type ClaimResponse struct {
 func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*ClaimResponse, error) {
 	start := time.Now()
 	metrics := s.metrics
+	phaseStarted := time.Now()
 	canonicalTemplateID, err := naming.CanonicalTemplateID(req.Template)
+	s.observeClaimPhase(req.Template, "unknown", "canonicalize_template", phaseStarted, err)
 	if err != nil {
 		return nil, err
 	}
 	req.Template = canonicalTemplateID
+	phaseStarted = time.Now()
 	if err := validateClaimMounts(req); err != nil {
+		s.observeClaimPhase(req.Template, "unknown", "validate_claim_mounts", phaseStarted, err)
 		return nil, err
 	}
+	s.observeClaimPhase(req.Template, "unknown", "validate_claim_mounts", phaseStarted, nil)
 	s.logger.Info("Claiming sandbox",
 		zap.String("template", req.Template),
 		zap.String("teamID", req.TeamID),
@@ -216,6 +221,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 
 	// Resolve tenant template name:
 	// prefer team-scoped template, fall back to public, and always enforce ownership checks.
+	phaseStarted = time.Now()
 	resolvedName := req.Template
 	var template *v1alpha1.SandboxTemplate
 
@@ -223,6 +229,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		privateName := naming.TemplateNameForCluster(naming.ScopeTeam, req.TeamID, req.Template)
 		privateNamespace, nsErr := naming.TemplateNamespaceForTeam(req.TeamID)
 		if nsErr != nil {
+			s.observeClaimPhase(req.Template, "unknown", "resolve_template", phaseStarted, nsErr)
 			return nil, fmt.Errorf("resolve template namespace for %s: %w", privateName, nsErr)
 		}
 		t, getErr := s.templateLister.Get(privateNamespace, privateName)
@@ -235,10 +242,12 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	if template == nil {
 		publicNamespace, nsErr := naming.TemplateNamespaceForBuiltin(req.Template)
 		if nsErr != nil {
+			s.observeClaimPhase(req.Template, "unknown", "resolve_template", phaseStarted, nsErr)
 			return nil, fmt.Errorf("resolve template namespace for %s: %w", req.Template, nsErr)
 		}
 		template, err = s.templateLister.Get(publicNamespace, req.Template)
 		if err != nil {
+			s.observeClaimPhase(req.Template, "unknown", "resolve_template", phaseStarted, err)
 			if k8serrors.IsNotFound(err) {
 				return nil, fmt.Errorf("template %s not found in namespace %s", req.Template, publicNamespace)
 			}
@@ -253,18 +262,33 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 			teamID = template.Annotations["sandbox0.ai/template-team-id"]
 		}
 		if teamID != "" && teamID != req.TeamID {
-			return nil, fmt.Errorf("forbidden: template belongs to a different team")
+			err := fmt.Errorf("forbidden: template belongs to a different team")
+			s.observeClaimPhase(req.Template, "unknown", "resolve_template", phaseStarted, err)
+			return nil, err
 		}
 	}
+	s.observeClaimPhase(req.Template, "unknown", "resolve_template", phaseStarted, nil)
 
+	phaseStarted = time.Now()
 	if err := validateClaimMountsForTemplate(req, template); err != nil {
+		s.observeClaimPhase(req.Template, "unknown", "validate_template_mounts", phaseStarted, err)
 		return nil, err
 	}
+	s.observeClaimPhase(req.Template, "unknown", "validate_template_mounts", phaseStarted, nil)
 
 	_ = resolvedName // reserved for audit/debugging (name used is template.ObjectMeta.Name)
 
 	// Try to claim an idle pod first
+	phaseStarted = time.Now()
 	pod, err := s.claimIdlePod(ctx, template, req)
+	claimIdleType := "hot"
+	if pod == nil {
+		claimIdleType = "cold"
+	}
+	if err != nil {
+		claimIdleType = "unknown"
+	}
+	s.observeClaimPhase(req.Template, claimIdleType, "claim_idle_pod", phaseStarted, err)
 	if err != nil {
 		if metrics != nil {
 			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
@@ -301,7 +325,9 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 			}()
 		}
 
+		phaseStarted = time.Now()
 		pod, err = s.createNewPod(ctx, template, req)
+		s.observeClaimPhase(req.Template, claimType, "create_new_pod", phaseStarted, err)
 		if err != nil {
 			if metrics != nil {
 				metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
@@ -315,7 +341,9 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	// already selected a Kubernetes-ready idle pod; cold claims use the faster
 	// claim-ready path below and let Kubernetes PodReady catch up asynchronously.
 	if claimType == "cold" {
+		phaseStarted = time.Now()
 		readyPod, err := s.waitForPodClaimReady(ctx, pod.Namespace, pod.Name)
+		s.observeClaimPhase(req.Template, claimType, "wait_for_pod_claim_ready", phaseStarted, err)
 		if err != nil {
 			s.requestSandboxDeletionAfterClaimFailure(pod, "claim readiness failed")
 			if metrics != nil {
@@ -327,7 +355,9 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		s.refreshSandboxProbeConditionsAsync(pod)
 	}
 
+	phaseStarted = time.Now()
 	portalMounts, err := s.bindVolumePortals(ctx, pod, req, template)
+	s.observeClaimPhase(req.Template, claimType, "bind_volume_portals", phaseStarted, err)
 	if err != nil {
 		s.requestSandboxDeletionAfterClaimFailure(pod, "volume portal bind failed")
 		if metrics != nil {
@@ -335,15 +365,20 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		}
 		return nil, fmt.Errorf("bind volume portals: %w", err)
 	}
+	phaseStarted = time.Now()
 	if err := s.bindWebhookStatePortal(ctx, pod, req); err != nil {
+		s.observeClaimPhase(req.Template, claimType, "bind_webhook_state_portal", phaseStarted, err)
 		s.requestSandboxDeletionAfterClaimFailure(pod, "webhook state portal bind failed")
 		if metrics != nil {
 			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
 		}
 		return nil, fmt.Errorf("bind webhook state portal: %w", err)
 	}
+	s.observeClaimPhase(req.Template, claimType, "bind_webhook_state_portal", phaseStarted, nil)
 
+	phaseStarted = time.Now()
 	procdAddress, err := s.prodAddress(ctx, pod)
+	s.observeClaimPhase(req.Template, claimType, "resolve_procd_address", phaseStarted, err)
 	if err != nil {
 		s.requestSandboxDeletionAfterClaimFailure(pod, "procd address resolution failed")
 		if metrics != nil {
@@ -351,13 +386,16 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		}
 		return nil, fmt.Errorf("get procd address: %w", err)
 	}
+	phaseStarted = time.Now()
 	if _, err := s.initializeProcd(ctx, pod, req, procdAddress); err != nil {
+		s.observeClaimPhase(req.Template, claimType, "initialize_procd", phaseStarted, err)
 		s.requestSandboxDeletionAfterClaimFailure(pod, "procd initialization failed")
 		if metrics != nil {
 			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
 		}
 		return nil, fmt.Errorf("initialize procd: %w", err)
 	}
+	s.observeClaimPhase(req.Template, claimType, "initialize_procd", phaseStarted, nil)
 
 	if metrics != nil {
 		metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "success").Inc()
@@ -373,6 +411,20 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		ClusterId:       template.Spec.ClusterId,
 		BootstrapMounts: portalMounts,
 	}, nil
+}
+
+func (s *SandboxService) observeClaimPhase(template, claimType, phase string, started time.Time, err error) {
+	if s == nil || s.metrics == nil || s.metrics.SandboxClaimPhaseDuration == nil {
+		return
+	}
+	if claimType == "" {
+		claimType = "unknown"
+	}
+	status := "success"
+	if err != nil {
+		status = "error"
+	}
+	s.metrics.SandboxClaimPhaseDuration.WithLabelValues(template, claimType, phase, status).Observe(time.Since(started).Seconds())
 }
 
 func validateClaimMountsForTemplate(req *ClaimRequest, template *v1alpha1.SandboxTemplate) error {

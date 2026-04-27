@@ -7,17 +7,18 @@ import (
 
 // ManagerMetrics holds Prometheus metrics for the manager service.
 type ManagerMetrics struct {
-	TemplatesTotal       prometheus.Gauge
-	IdlePodsTotal        *prometheus.GaugeVec
-	ActivePodsTotal      *prometheus.GaugeVec
-	SandboxClaimsTotal   *prometheus.CounterVec
-	SandboxClaimDuration *prometheus.HistogramVec
-	PodsCleanedTotal     *prometheus.CounterVec
-	ReconcileTotal       *prometheus.CounterVec
-	ReconcileDuration    *prometheus.HistogramVec
-	MeteringEventsTotal  *prometheus.CounterVec
-	MeteringWindowsTotal *prometheus.CounterVec
-	MeteringErrorsTotal  *prometheus.CounterVec
+	TemplatesTotal            prometheus.Gauge
+	IdlePodsTotal             *prometheus.GaugeVec
+	ActivePodsTotal           *prometheus.GaugeVec
+	SandboxClaimsTotal        *prometheus.CounterVec
+	SandboxClaimDuration      *prometheus.HistogramVec
+	SandboxClaimPhaseDuration *prometheus.HistogramVec
+	PodsCleanedTotal          *prometheus.CounterVec
+	ReconcileTotal            *prometheus.CounterVec
+	ReconcileDuration         *prometheus.HistogramVec
+	MeteringEventsTotal       *prometheus.CounterVec
+	MeteringWindowsTotal      *prometheus.CounterVec
+	MeteringErrorsTotal       *prometheus.CounterVec
 }
 
 // NewManager registers and returns manager metrics.
@@ -51,6 +52,11 @@ func NewManager(registry prometheus.Registerer) *ManagerMetrics {
 			Help:    "Duration of sandbox claim operations",
 			Buckets: prometheus.DefBuckets,
 		}, []string{"template", "type"}), // type: "hot" (from pool) or "cold" (new pod)
+		SandboxClaimPhaseDuration: factory.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "manager_sandbox_claim_phase_duration_seconds",
+			Help:    "Duration of sandbox claim phases",
+			Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60, 120},
+		}, []string{"template", "type", "phase", "status"}), // type: "hot", "cold", or "unknown"
 		PodsCleanedTotal: factory.NewCounterVec(prometheus.CounterOpts{
 			Name: "manager_pods_cleaned_total",
 			Help: "Total number of pods cleaned up",

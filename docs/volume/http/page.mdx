@@ -1,8 +1,8 @@
 # Volume HTTP
 
-Use the Volume HTTP API to operate on files in a Volume directly by volume ID, without mounting the Volume into a Sandbox first.
+Use direct Volume file operations to operate on files in a Volume by volume ID, without mounting the Volume into a Sandbox first.
 
-This page documents the raw HTTP and WebSocket endpoints first, then shows the equivalent helpers in the Go, Python, TypeScript SDKs, and the `s0` CLI.
+Start with the Go, Python, TypeScript SDKs, or the `s0` CLI. The endpoint reference below is for advanced integrations and custom clients that need to call the HTTP and WebSocket API directly.
 
 <Callout variant="info">
 Requests still go through the normal gateway chain and team-scoped auth. Internally, `storage-proxy` lazily attaches the Volume and reclaims idle direct mounts later.
@@ -19,9 +19,9 @@ Requests still go through the normal gateway chain and team-scoped auth. Interna
 The client helpers below call the same `SandboxVolume file` HTTP endpoints documented on this page. They do not require mounting the Volume into a Sandbox first.
 </Callout>
 
-## Client Helpers
+## SDK and CLI Quick Start
 
-Use these helpers when you want the direct Volume file API without constructing raw HTTP requests yourself.
+Use these helpers for normal direct Volume file workflows.
 
 <Tabs
   tabs={[
@@ -163,15 +163,7 @@ Write binary content to a file. Creates parent directories automatically when ne
 
 ### Request Body
 
-Raw bytes.
-
-```bash
-curl -X POST \
-    "$SANDBOX0_BASE_URL/api/v1/sandboxvolumes/vol_abc123/files?path=/docs/readme.txt" \
-    -H "Authorization: Bearer $SANDBOX0_API_KEY" \
-    -H "Content-Type: application/octet-stream" \
-    --data-binary @./README.txt
-```
+Raw bytes. For SDK and CLI usage, see the quick start and method mapping above.
 
 ---
 
@@ -183,23 +175,9 @@ Read a file from a Volume.
 /api/v1/sandboxvolumes/{'{id}'}/files?path=/docs/readme.txt
 </Endpoint>
 
-By default the response body is raw bytes:
-
-```bash
-curl \
-    "$SANDBOX0_BASE_URL/api/v1/sandboxvolumes/vol_abc123/files?path=/docs/readme.txt" \
-    -H "Authorization: Bearer $SANDBOX0_API_KEY" \
-    -o ./readme.txt
-```
+By default the response body is raw bytes.
 
 If you set `Accept: application/json`, the API returns a base64 JSON payload instead:
-
-```bash
-curl \
-    "$SANDBOX0_BASE_URL/api/v1/sandboxvolumes/vol_abc123/files?path=/docs/readme.txt" \
-    -H "Authorization: Bearer $SANDBOX0_API_KEY" \
-    -H "Accept: application/json"
-```
 
 Example response:
 
@@ -223,11 +201,7 @@ Create a directory with the same endpoint used for file writes.
 /api/v1/sandboxvolumes/{'{id}'}/files?path=/project/src&mkdir=true&recursive=true
 </Endpoint>
 
-```bash
-curl -X POST \
-    "$SANDBOX0_BASE_URL/api/v1/sandboxvolumes/vol_abc123/files?path=/project/src&mkdir=true&recursive=true" \
-    -H "Authorization: Bearer $SANDBOX0_API_KEY"
-```
+For SDK and CLI usage, see the create-directory row in the method mapping above.
 
 ---
 
@@ -238,12 +212,6 @@ Return metadata for a file or directory.
 <Endpoint method="GET">
 /api/v1/sandboxvolumes/{'{id}'}/files/stat?path=/docs/readme.txt
 </Endpoint>
-
-```bash
-curl \
-    "$SANDBOX0_BASE_URL/api/v1/sandboxvolumes/vol_abc123/files/stat?path=/docs/readme.txt" \
-    -H "Authorization: Bearer $SANDBOX0_API_KEY"
-```
 
 Example response:
 
@@ -271,12 +239,6 @@ List the direct children of a directory.
 <Endpoint method="GET">
 /api/v1/sandboxvolumes/{'{id}'}/files/list?path=/docs
 </Endpoint>
-
-```bash
-curl \
-    "$SANDBOX0_BASE_URL/api/v1/sandboxvolumes/vol_abc123/files/list?path=/docs" \
-    -H "Authorization: Bearer $SANDBOX0_API_KEY"
-```
 
 Example response:
 
@@ -325,13 +287,7 @@ Move or rename a file or directory.
 | `source` | string | Source logical path |
 | `destination` | string | Destination logical path |
 
-```bash
-curl -X POST \
-    "$SANDBOX0_BASE_URL/api/v1/sandboxvolumes/vol_abc123/files/move" \
-    -H "Authorization: Bearer $SANDBOX0_API_KEY" \
-    -H "Content-Type: application/json" \
-    -d '{"source":"/docs/readme.txt","destination":"/archive/readme-old.txt"}'
-```
+For SDK and CLI usage, see the move-or-rename row in the method mapping above.
 
 ---
 
@@ -343,11 +299,7 @@ Delete a file or recursively delete a directory.
 /api/v1/sandboxvolumes/{'{id}'}/files?path=/docs/readme.txt
 </Endpoint>
 
-```bash
-curl -X DELETE \
-    "$SANDBOX0_BASE_URL/api/v1/sandboxvolumes/vol_abc123/files?path=/docs/readme.txt" \
-    -H "Authorization: Bearer $SANDBOX0_API_KEY"
-```
+For SDK and CLI usage, see the delete-path row in the method mapping above.
 
 ---
 

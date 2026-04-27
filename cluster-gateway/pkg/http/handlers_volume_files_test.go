@@ -97,7 +97,6 @@ func newVolumeFileRouteTestServer(t *testing.T) (string, *internalauth.Generator
 			files.DELETE("", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileWrite), server.handleVolumeFileOperation)
 			files.GET("/watch", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileRead), server.handleVolumeFileWatch)
 			files.POST("/move", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileWrite), server.handleVolumeFileMove)
-			files.POST("/clone", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileWrite), server.handleVolumeFileClone)
 			files.GET("/stat", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileRead), server.handleVolumeFileStat)
 			files.GET("/list", server.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileRead), server.handleVolumeFileList)
 		}
@@ -159,15 +158,6 @@ func TestVolumeFileRoutesProxyToStorageProxy(t *testing.T) {
 			permission:   gatewayauthn.PermSandboxVolumeFileWrite,
 			wantPath:     "/sandboxvolumes/vol-1/files/move",
 			wantBodyPart: "/b.txt",
-		},
-		{
-			name:         "clone file proxies json body",
-			method:       http.MethodPost,
-			path:         "/api/v1/sandboxvolumes/vol-1/files/clone",
-			body:         `{"entries":[{"source_volume_id":"src-1","source_path":"/a.txt","target_path":"/b.txt"}]}`,
-			permission:   gatewayauthn.PermSandboxVolumeFileWrite,
-			wantPath:     "/sandboxvolumes/vol-1/files/clone",
-			wantBodyPart: "src-1",
 		},
 		{
 			name:       "stat preserves query",

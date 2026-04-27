@@ -21,8 +21,6 @@ import (
 	httpproxy "github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 )
 
@@ -43,7 +41,6 @@ var (
 	errPathNotDir            = errors.New("path is not a directory")
 	errDirectoryNotEmpty     = errors.New("directory not empty")
 	errInvalidPath           = errors.New("invalid path")
-	errCOWCloneUnavailable   = errors.New("cow clone unavailable")
 )
 
 type volumeFileInfo struct {
@@ -60,28 +57,6 @@ type volumeFileInfo struct {
 type volumeFileMoveRequest struct {
 	Source      string `json:"source"`
 	Destination string `json:"destination"`
-}
-
-type volumeFileCloneRequest struct {
-	Mode    string                 `json:"mode"`
-	Atomic  *bool                  `json:"atomic,omitempty"`
-	Entries []volumeFileCloneEntry `json:"entries"`
-}
-
-type volumeFileCloneEntry struct {
-	SourceVolumeID string `json:"source_volume_id"`
-	SourcePath     string `json:"source_path"`
-	TargetPath     string `json:"target_path"`
-	Overwrite      bool   `json:"overwrite"`
-	CreateParents  bool   `json:"create_parents"`
-}
-
-type volumeFileCloneResponseEntry struct {
-	SourceVolumeID string `json:"source_volume_id"`
-	SourcePath     string `json:"source_path"`
-	TargetPath     string `json:"target_path"`
-	Mode           string `json:"mode"`
-	SizeBytes      uint64 `json:"size_bytes"`
 }
 
 type volumeResolvedPath struct {
@@ -302,65 +277,6 @@ func (s *Server) handleVolumeFileMove(w http.ResponseWriter, r *http.Request) {
 		}
 
 		_ = spec.WriteSuccess(w, http.StatusOK, map[string]bool{"moved": true})
-	})
-}
-
-func (s *Server) handleVolumeFileClone(w http.ResponseWriter, r *http.Request) {
-	targetVolumeID := r.PathValue("id")
-	if targetVolumeID == "" {
-		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "volume id is required")
-		return
-	}
-
-	s.withSharedVolumeFileRequest(w, r, targetVolumeID, func(lockedReq *http.Request) {
-		ctx, _, targetCleanup, handled := s.prepareOrProxyVolumeFileRequest(w, lockedReq, targetVolumeID)
-		if handled {
-			return
-		}
-		defer targetCleanup()
-
-		var req volumeFileCloneRequest
-		if err := json.NewDecoder(lockedReq.Body).Decode(&req); err != nil {
-			_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
-			return
-		}
-		if err := validateVolumeFileCloneRequest(&req); err != nil {
-			_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
-			return
-		}
-
-		sourceCleanups, err := s.prepareCloneSourceVolumes(ctx, targetVolumeID, req.Entries)
-		if err != nil {
-			s.writeVolumeFileError(w, err)
-			return
-		}
-		defer func() {
-			for i := len(sourceCleanups) - 1; i >= 0; i-- {
-				sourceCleanups[i]()
-			}
-		}()
-
-		results, err := s.cloneVolumeFiles(ctx, targetVolumeID, &req)
-		if err != nil {
-			s.writeVolumeFileError(w, translateS0FSCloneError(err))
-			return
-		}
-		if err := s.finalizeVolumeFileMutation(ctx, targetVolumeID); err != nil {
-			s.writeVolumeFileError(w, err)
-			return
-		}
-
-		responseEntries := make([]volumeFileCloneResponseEntry, 0, len(results))
-		for _, result := range results {
-			responseEntries = append(responseEntries, volumeFileCloneResponseEntry{
-				SourceVolumeID: result.SourceVolumeID,
-				SourcePath:     result.SourcePath,
-				TargetPath:     result.TargetPath,
-				Mode:           string(result.Mode),
-				SizeBytes:      result.SizeBytes,
-			})
-		}
-		_ = spec.WriteSuccess(w, http.StatusOK, map[string]any{"entries": responseEntries})
 	})
 }
 
@@ -932,208 +848,6 @@ func (s *Server) moveVolumePath(ctx context.Context, volumeID, src, dst string) 
 	return nil
 }
 
-func validateVolumeFileCloneRequest(req *volumeFileCloneRequest) error {
-	if req == nil {
-		return fmt.Errorf("request is required")
-	}
-	if req.Atomic != nil && !*req.Atomic {
-		return fmt.Errorf("atomic=false is not supported")
-	}
-	switch strings.TrimSpace(req.Mode) {
-	case "", "cow_or_copy", "cow_required", "copy":
-	default:
-		return fmt.Errorf("unsupported clone mode %q", req.Mode)
-	}
-	if len(req.Entries) == 0 {
-		return fmt.Errorf("entries are required")
-	}
-	for i, entry := range req.Entries {
-		if strings.TrimSpace(entry.SourceVolumeID) == "" {
-			return fmt.Errorf("entries[%d].source_volume_id is required", i)
-		}
-		if strings.TrimSpace(entry.SourcePath) == "" {
-			return fmt.Errorf("entries[%d].source_path is required", i)
-		}
-		if strings.TrimSpace(entry.TargetPath) == "" {
-			return fmt.Errorf("entries[%d].target_path is required", i)
-		}
-	}
-	return nil
-}
-
-func (s *Server) prepareCloneSourceVolumes(ctx context.Context, targetVolumeID string, entries []volumeFileCloneEntry) ([]func(), error) {
-	seen := map[string]struct{}{targetVolumeID: {}}
-	var cleanups []func()
-	for _, entry := range entries {
-		sourceVolumeID := strings.TrimSpace(entry.SourceVolumeID)
-		if _, ok := seen[sourceVolumeID]; ok {
-			continue
-		}
-		seen[sourceVolumeID] = struct{}{}
-
-		volumeRecord, err := s.loadAuthorizedVolume(ctx, sourceVolumeID)
-		if err != nil {
-			return cleanups, err
-		}
-		if err := s.waitForVolumeHandoff(ctx, sourceVolumeID); err != nil {
-			return cleanups, err
-		}
-		if err := s.ensureCtldVolumeOwner(ctx, volumeRecord); err != nil {
-			return cleanups, err
-		}
-		cleanup, err := s.prepareVolumeFileMount(ctx, sourceVolumeID, volumeRecord.TeamID)
-		if err != nil {
-			return cleanups, err
-		}
-		cleanups = append(cleanups, cleanup)
-	}
-	return cleanups, nil
-}
-
-func (s *Server) cloneVolumeFiles(ctx context.Context, targetVolumeID string, req *volumeFileCloneRequest) ([]s0fs.FileCloneResult, error) {
-	if s == nil || s.volMgr == nil {
-		return nil, errVolumeFileUnavailable
-	}
-	targetVol, err := s.volMgr.GetVolume(targetVolumeID)
-	if err != nil {
-		return nil, err
-	}
-	if targetVol == nil || !targetVol.IsS0FS() {
-		return nil, errVolumeFileUnavailable
-	}
-
-	sourceVolumes, err := s.cloneSourceVolumeContexts(targetVolumeID, req.Entries, targetVol)
-	if err != nil {
-		return nil, err
-	}
-	requestMode := strings.TrimSpace(req.Mode)
-	if requestMode == "" {
-		requestMode = "cow_or_copy"
-	}
-	if requestMode != "copy" {
-		for _, sourceVol := range sourceVolumes {
-			if sourceVol == nil || sourceVol.S0FS == nil {
-				continue
-			}
-			if _, err := sourceVol.S0FS.SyncMaterialize(ctx); err != nil && requestMode == "cow_required" {
-				return nil, fmt.Errorf("%w: materialize source volume: %v", errCOWCloneUnavailable, err)
-			}
-		}
-	}
-
-	sources := make(map[string]s0fs.FileCloneSource, len(sourceVolumes))
-	for volumeID, sourceVol := range sourceVolumes {
-		if sourceVol == nil || !sourceVol.IsS0FS() {
-			return nil, errVolumeFileUnavailable
-		}
-		sources[volumeID] = s0fs.FileCloneSource{
-			VolumeID: volumeID,
-			State:    sourceVol.S0FS.SnapshotState(),
-		}
-	}
-
-	cloneEntries := make([]s0fs.FileCloneEntry, 0, len(req.Entries))
-	for _, entry := range req.Entries {
-		sourceVolumeID := strings.TrimSpace(entry.SourceVolumeID)
-		mode := s0fs.FileCloneModeCOW
-		var data []byte
-		if requestMode == "copy" || !canCOWCloneSource(sources[sourceVolumeID].State, entry.SourcePath) {
-			if requestMode == "cow_required" {
-				return nil, fmt.Errorf("%w: source file %s is not materialized", errCOWCloneUnavailable, entry.SourcePath)
-			}
-			mode = s0fs.FileCloneModeCopy
-			payload, err := readS0FSSourceFile(sourceVolumes[sourceVolumeID], sources[sourceVolumeID].State, entry.SourcePath)
-			if err != nil {
-				return nil, err
-			}
-			data = payload
-		}
-		cloneEntries = append(cloneEntries, s0fs.FileCloneEntry{
-			SourceVolumeID: sourceVolumeID,
-			SourcePath:     entry.SourcePath,
-			TargetPath:     entry.TargetPath,
-			Overwrite:      entry.Overwrite,
-			CreateParents:  entry.CreateParents,
-			Mode:           mode,
-			Data:           data,
-		})
-	}
-
-	nextState, results, err := s0fs.CloneFilesIntoState(targetVol.S0FS.SnapshotState(), sources, cloneEntries)
-	if err != nil {
-		return nil, err
-	}
-	if err := targetVol.S0FS.ReplaceState(nextState); err != nil {
-		return nil, err
-	}
-	s.publishVolumeFileCloneEvents(targetVolumeID, results)
-	return results, nil
-}
-
-func (s *Server) publishVolumeFileCloneEvents(targetVolumeID string, results []s0fs.FileCloneResult) {
-	publisher, ok := s.eventHub.(interface {
-		Publish(*pb.WatchEvent)
-	})
-	if !ok || publisher == nil {
-		return
-	}
-	now := time.Now().UTC().Unix()
-	for _, result := range results {
-		publisher.Publish(&pb.WatchEvent{
-			VolumeId:      targetVolumeID,
-			EventType:     pb.WatchEventType_WATCH_EVENT_TYPE_CREATE,
-			Path:          result.TargetPath,
-			TimestampUnix: now,
-		})
-	}
-}
-
-func (s *Server) cloneSourceVolumeContexts(targetVolumeID string, entries []volumeFileCloneEntry, targetVol *volume.VolumeContext) (map[string]*volume.VolumeContext, error) {
-	sourceVolumes := map[string]*volume.VolumeContext{
-		targetVolumeID: targetVol,
-	}
-	for _, entry := range entries {
-		sourceVolumeID := strings.TrimSpace(entry.SourceVolumeID)
-		if _, ok := sourceVolumes[sourceVolumeID]; ok {
-			continue
-		}
-		sourceVol, err := s.volMgr.GetVolume(sourceVolumeID)
-		if err != nil {
-			return nil, err
-		}
-		sourceVolumes[sourceVolumeID] = sourceVol
-	}
-	return sourceVolumes, nil
-}
-
-func canCOWCloneSource(state *s0fs.SnapshotState, sourcePath string) bool {
-	resolved, err := s0fs.LookupPath(state, sourcePath, false)
-	if err != nil || resolved == nil || !resolved.Exists || resolved.Node == nil || resolved.Node.Type != s0fs.TypeFile {
-		return false
-	}
-	if resolved.Node.Size == 0 {
-		return true
-	}
-	return len(state.ColdFiles[resolved.Inode]) > 0
-}
-
-func readS0FSSourceFile(volCtx *volume.VolumeContext, state *s0fs.SnapshotState, sourcePath string) ([]byte, error) {
-	if volCtx == nil || volCtx.S0FS == nil {
-		return nil, errVolumeFileUnavailable
-	}
-	resolved, err := s0fs.LookupPath(state, sourcePath, false)
-	if err != nil {
-		return nil, err
-	}
-	if resolved == nil || !resolved.Exists {
-		return nil, s0fs.ErrNotFound
-	}
-	if resolved.Node == nil || resolved.Node.Type != s0fs.TypeFile {
-		return nil, s0fs.ErrIsDir
-	}
-	return volCtx.S0FS.Read(resolved.Inode, 0, resolved.Node.Size)
-}
-
 func (s *Server) removeVolumePath(ctx context.Context, volumeID string, resolved *volumeResolvedPath) error {
 	if resolved == nil || !resolved.Exists {
 		return nil
@@ -1364,25 +1078,6 @@ func translateVolumeRPCError(err error) error {
 	}
 }
 
-func translateS0FSCloneError(err error) error {
-	switch {
-	case err == nil:
-		return nil
-	case errors.Is(err, s0fs.ErrNotFound):
-		return errFileNotFound
-	case errors.Is(err, s0fs.ErrNotDir):
-		return errPathNotDir
-	case errors.Is(err, s0fs.ErrIsDir):
-		return errPathNotDir
-	case errors.Is(err, s0fs.ErrExists):
-		return errPathAlreadyExists
-	case errors.Is(err, s0fs.ErrInvalidInput):
-		return errInvalidPath
-	default:
-		return err
-	}
-}
-
 func (s *Server) writeVolumeFileError(w http.ResponseWriter, err error) {
 	switch {
 	case err == nil:
@@ -1405,8 +1100,6 @@ func (s *Server) writeVolumeFileError(w http.ResponseWriter, err error) {
 		_ = spec.WriteError(w, http.StatusForbidden, spec.CodeForbidden, err.Error())
 	case errors.Is(err, errPathAlreadyExists), errors.Is(err, errPathNotDir), errors.Is(err, errDirectoryNotEmpty):
 		_ = spec.WriteError(w, http.StatusConflict, spec.CodeConflict, err.Error())
-	case errors.Is(err, errCOWCloneUnavailable):
-		_ = spec.WriteError(w, http.StatusPreconditionFailed, spec.CodeBadRequest, err.Error())
 	case errors.Is(err, errInvalidPath):
 		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 	default:

@@ -49,18 +49,6 @@ func (s *Server) handleVolumeFileMove(c *gin.Context) {
 	s.proxyToStorageProxy(c)
 }
 
-// handleVolumeFileClone handles volume file clone operations.
-// Route: /api/v1/sandboxvolumes/:id/files/clone
-func (s *Server) handleVolumeFileClone(c *gin.Context) {
-	id, ok := requireVolumeID(c)
-	if !ok {
-		return
-	}
-
-	c.Request.URL.Path = "/sandboxvolumes/" + id + "/files/clone"
-	s.proxyToStorageProxy(c)
-}
-
 // handleVolumeFileStat handles volume file stat operations.
 // Route: /api/v1/sandboxvolumes/:id/files/stat
 func (s *Server) handleVolumeFileStat(c *gin.Context) {

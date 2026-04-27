@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"path/filepath"
 	"strconv"
 	"syscall"
 	"testing"
@@ -20,8 +19,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"github.com/sirupsen/logrus"
@@ -41,7 +38,6 @@ type fakeHTTPVolumeMountManager struct {
 	syncCalls         int
 	lastSyncVolume    string
 	syncFunc          func(context.Context, string) error
-	volumes           map[string]*volume.VolumeContext
 }
 
 type fakeVolumeFilePodResolver struct {
@@ -88,12 +84,7 @@ func (f *fakeHTTPSharedVolumeBarrier) WithExclusive(ctx context.Context, volumeI
 }
 
 func (f *fakeHTTPVolumeMountManager) GetVolume(volumeID string) (*volume.VolumeContext, error) {
-	if f != nil && f.volumes != nil {
-		if volCtx, ok := f.volumes[volumeID]; ok {
-			return volCtx, nil
-		}
-	}
-	return nil, errors.New("volume not mounted")
+	return nil, errors.New("not implemented")
 }
 
 func (f *fakeHTTPVolumeMountManager) UnmountVolume(_ context.Context, volumeID, sessionID string) error {
@@ -312,41 +303,6 @@ func volumeFileAttr(size int) *pb.GetAttrResponse {
 		Size:      uint64(size),
 		MtimeSec:  1710000000,
 		MtimeNsec: 123,
-	}
-}
-
-func newHTTPMountedS0FSVolumeContext(t *testing.T, volumeID, teamID string, resolver s0fs.ObjectStoreResolver) *volume.VolumeContext {
-	t.Helper()
-
-	var store objectstore.Store
-	if resolver != nil {
-		var err error
-		store, err = resolver(volumeID)
-		if err != nil {
-			t.Fatalf("resolve object store: %v", err)
-		}
-	}
-	engine, err := s0fs.Open(context.Background(), s0fs.Config{
-		VolumeID:             volumeID,
-		WALPath:              filepath.Join(t.TempDir(), "engine.wal"),
-		ObjectStore:          store,
-		ObjectStoreForVolume: resolver,
-	})
-	if err != nil {
-		t.Fatalf("Open(s0fs) error = %v", err)
-	}
-	t.Cleanup(func() {
-		_ = engine.Close()
-	})
-
-	return &volume.VolumeContext{
-		VolumeID:  volumeID,
-		TeamID:    teamID,
-		Backend:   volume.BackendS0FS,
-		S0FS:      engine,
-		MountedAt: time.Now(),
-		RootInode: 1,
-		RootPath:  "/",
 	}
 }
 
@@ -747,129 +703,6 @@ func TestHandleVolumeFileMoveRenamesPath(t *testing.T) {
 	}
 }
 
-func TestHandleVolumeFileCloneCreatesCOWFile(t *testing.T) {
-	store := objectstore.NewMemoryStore("http-clone")
-	resolver := func(volumeID string) (objectstore.Store, error) {
-		return objectstore.Prefix(store, volumeID+"/s0fs/"), nil
-	}
-	source := newHTTPMountedS0FSVolumeContext(t, "vol-source", "team-a", resolver)
-	target := newHTTPMountedS0FSVolumeContext(t, "vol-1", "team-a", resolver)
-
-	sourceNode, err := source.S0FS.CreateFile(s0fs.RootInode, "asset.txt", 0o644)
-	if err != nil {
-		t.Fatalf("CreateFile(source) error = %v", err)
-	}
-	if _, err := source.S0FS.Write(sourceNode.Inode, 0, []byte("payload")); err != nil {
-		t.Fatalf("Write(source) error = %v", err)
-	}
-
-	fileRPC := &fakeHTTPVolumeFileRPC{}
-	server, volMgr := newVolumeFileTestServer(fileRPC)
-	volMgr.volumes = map[string]*volume.VolumeContext{
-		"vol-1":      target,
-		"vol-source": source,
-	}
-	repo := server.repo.(*fakeHTTPRepo)
-	defaultUID := int64(1000)
-	defaultGID := int64(1000)
-	repo.volumes["vol-source"] = &db.SandboxVolume{
-		ID:              "vol-source",
-		TeamID:          "team-a",
-		DefaultPosixUID: &defaultUID,
-		DefaultPosixGID: &defaultGID,
-		AccessMode:      string(volume.AccessModeRWX),
-	}
-
-	body := bytes.NewBufferString(`{"mode":"cow_required","entries":[{"source_volume_id":"vol-source","source_path":"/asset.txt","target_path":"/mounted/asset.txt","create_parents":true}]}`)
-	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/files/clone", body)
-	req.SetPathValue("id", "vol-1")
-	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-a"}))
-	recorder := httptest.NewRecorder()
-
-	server.handleVolumeFileClone(recorder, req)
-
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
-	}
-	if volMgr.syncCalls != 1 || volMgr.lastSyncVolume != "vol-1" {
-		t.Fatalf("SyncDirectVolumeFileMount() got calls=%d volume=%q, want 1 vol-1", volMgr.syncCalls, volMgr.lastSyncVolume)
-	}
-	parent, err := target.S0FS.Lookup(s0fs.RootInode, "mounted")
-	if err != nil {
-		t.Fatalf("Lookup(mounted) error = %v", err)
-	}
-	cloned, err := target.S0FS.Lookup(parent.Inode, "asset.txt")
-	if err != nil {
-		t.Fatalf("Lookup(cloned) error = %v", err)
-	}
-	data, err := target.S0FS.Read(cloned.Inode, 0, cloned.Size)
-	if err != nil {
-		t.Fatalf("Read(cloned) error = %v", err)
-	}
-	if string(data) != "payload" {
-		t.Fatalf("cloned data = %q, want payload", data)
-	}
-	if len(target.S0FS.SnapshotState().ColdFiles[cloned.Inode]) == 0 {
-		t.Fatal("cloned file is not backed by cold extents")
-	}
-}
-
-func TestHandleVolumeFileCloneFallsBackToCopyForHotSource(t *testing.T) {
-	source := newHTTPMountedS0FSVolumeContext(t, "vol-source", "team-a", nil)
-	target := newHTTPMountedS0FSVolumeContext(t, "vol-1", "team-a", nil)
-
-	sourceNode, err := source.S0FS.CreateFile(s0fs.RootInode, "hot.txt", 0o644)
-	if err != nil {
-		t.Fatalf("CreateFile(source) error = %v", err)
-	}
-	if _, err := source.S0FS.Write(sourceNode.Inode, 0, []byte("hot-data")); err != nil {
-		t.Fatalf("Write(source) error = %v", err)
-	}
-
-	fileRPC := &fakeHTTPVolumeFileRPC{}
-	server, volMgr := newVolumeFileTestServer(fileRPC)
-	volMgr.volumes = map[string]*volume.VolumeContext{
-		"vol-1":      target,
-		"vol-source": source,
-	}
-	repo := server.repo.(*fakeHTTPRepo)
-	defaultUID := int64(1000)
-	defaultGID := int64(1000)
-	repo.volumes["vol-source"] = &db.SandboxVolume{
-		ID:              "vol-source",
-		TeamID:          "team-a",
-		DefaultPosixUID: &defaultUID,
-		DefaultPosixGID: &defaultGID,
-		AccessMode:      string(volume.AccessModeRWX),
-	}
-
-	body := bytes.NewBufferString(`{"mode":"cow_or_copy","entries":[{"source_volume_id":"vol-source","source_path":"/hot.txt","target_path":"/hot.txt"}]}`)
-	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/files/clone", body)
-	req.SetPathValue("id", "vol-1")
-	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-a"}))
-	recorder := httptest.NewRecorder()
-
-	server.handleVolumeFileClone(recorder, req)
-
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
-	}
-	cloned, err := target.S0FS.Lookup(s0fs.RootInode, "hot.txt")
-	if err != nil {
-		t.Fatalf("Lookup(cloned) error = %v", err)
-	}
-	data, err := target.S0FS.Read(cloned.Inode, 0, cloned.Size)
-	if err != nil {
-		t.Fatalf("Read(cloned) error = %v", err)
-	}
-	if string(data) != "hot-data" {
-		t.Fatalf("cloned data = %q, want hot-data", data)
-	}
-	if len(target.S0FS.SnapshotState().Data[cloned.Inode]) == 0 {
-		t.Fatal("fallback clone did not store inline copy data")
-	}
-}
-
 func TestHandleVolumeFileMoveProxiesBodyToCtldOwner(t *testing.T) {
 	remoteSeen := make(chan struct {
 		header http.Header
@@ -945,84 +778,6 @@ func TestHandleVolumeFileMoveProxiesBodyToCtldOwner(t *testing.T) {
 		}
 	default:
 		t.Fatal("expected move request to be proxied to ctld owner")
-	}
-}
-
-func TestHandleVolumeFileCloneProxiesBodyToCtldOwner(t *testing.T) {
-	remoteSeen := make(chan struct {
-		header http.Header
-		body   []byte
-	}, 1)
-	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Fatalf("read proxied body: %v", err)
-		}
-		select {
-		case remoteSeen <- struct {
-			header http.Header
-			body   []byte
-		}{
-			header: r.Header.Clone(),
-			body:   body,
-		}:
-		default:
-		}
-		_ = spec.WriteSuccess(w, http.StatusOK, map[string]any{"entries": []volumeFileCloneResponseEntry{}})
-	}))
-	defer remote.Close()
-	remoteURL, err := url.Parse(remote.URL)
-	if err != nil {
-		t.Fatalf("parse remote url: %v", err)
-	}
-	remotePort, err := strconv.Atoi(remoteURL.Port())
-	if err != nil {
-		t.Fatalf("parse remote port: %v", err)
-	}
-
-	fileRPC := &fakeHTTPVolumeFileRPC{}
-	server, volMgr := newVolumeFileTestServer(fileRPC)
-	repo := server.repo.(*fakeHTTPRepo)
-	repo.activeMounts["vol-1"] = []*db.VolumeMount{
-		{
-			VolumeID:     "vol-1",
-			ClusterID:    "cluster-a",
-			PodID:        "sandbox0-system/ctld-node-a",
-			MountedAt:    time.Unix(10, 0),
-			MountOptions: mustMountOptionsRaw(t, volume.MountOptions{AccessMode: volume.AccessModeRWO, OwnerKind: volume.OwnerKindCtld, OwnerPort: remotePort}),
-		},
-	}
-	server.podResolver = &fakeVolumeFilePodResolver{
-		urls: map[string]string{"sandbox0-system/ctld-node-a": "http://127.0.0.1"},
-	}
-
-	reqBody := []byte(`{"mode":"cow_or_copy","entries":[{"source_volume_id":"vol-source","source_path":"/data.csv","target_path":"/data.csv","create_parents":true}]}`)
-	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/files/clone", bytes.NewReader(reqBody))
-	req.SetPathValue("id", "vol-1")
-	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-a"}))
-	recorder := httptest.NewRecorder()
-
-	server.handleVolumeFileClone(recorder, req)
-
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
-	}
-	if volMgr.acquireCalls != 0 {
-		t.Fatalf("AcquireDirectVolumeFileMount() calls = %d, want 0", volMgr.acquireCalls)
-	}
-	select {
-	case seen := <-remoteSeen:
-		if got := seen.header.Get(volumeFileAffinityRoutedPodHeader); got != "sandbox0-system/ctld-node-a" {
-			t.Fatalf("routed pod header = %q, want %q", got, "sandbox0-system/ctld-node-a")
-		}
-		if got := seen.header.Get(volumeFileAffinityTeamHeader); got != "team-a" {
-			t.Fatalf("team header = %q, want %q", got, "team-a")
-		}
-		if !bytes.Equal(seen.body, reqBody) {
-			t.Fatalf("proxied body = %q, want %q", string(seen.body), string(reqBody))
-		}
-	default:
-		t.Fatal("expected clone request to be proxied to ctld owner")
 	}
 }
 

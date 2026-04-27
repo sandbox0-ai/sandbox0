@@ -125,7 +125,7 @@ func NewManager(cfg Config) *Manager {
 		boundVolumes:      make(map[string]*boundVolume),
 		volumes:           newLocalVolumeManager(),
 	}
-	manager.volumeAPI = newMountedVolumeAPIHandler(storageConfig, cfg.Repository, manager.volumes, l)
+	manager.volumeAPI = newMountedVolumeAPIHandler(storageConfig, cfg.Repository, manager.volumes, l, manager)
 	return manager
 }
 

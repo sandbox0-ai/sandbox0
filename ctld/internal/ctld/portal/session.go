@@ -36,6 +36,8 @@ type localVolumeRequestState struct {
 	cond         *sync.Cond
 }
 
+var errLocalVolumeNotMounted = errors.New("local volume not mounted")
+
 func newLocalVolumeManager() *localVolumeManager {
 	return &localVolumeManager{
 		volumes:  make(map[string]*volume.VolumeContext),
@@ -76,7 +78,7 @@ func (m *localVolumeManager) acquire(ctx context.Context, volumeID string) (func
 		state := m.requests[volumeID]
 		if volCtx == nil || state == nil {
 			m.mu.Unlock()
-			return nil, fmt.Errorf("volume %s not mounted", volumeID)
+			return nil, fmt.Errorf("%w: %s", errLocalVolumeNotMounted, volumeID)
 		}
 		if state.transferring && state.done != nil {
 			done := state.done
@@ -218,16 +220,19 @@ func (m *localVolumeManager) AckInvalidate(string, string, string, bool, string)
 
 func (m *localVolumeManager) AcquireDirectVolumeFileMount(ctx context.Context, volumeID string, mountFn func(context.Context) (string, error)) (func(), error) {
 	release, err := m.acquire(ctx, volumeID)
-	if err != nil {
+	if err == nil {
+		return release, nil
+	}
+	if !errors.Is(err, errLocalVolumeNotMounted) {
 		return nil, err
 	}
-	if mountFn != nil {
-		if _, err := mountFn(ctx); err != nil {
-			release()
-			return nil, err
-		}
+	if mountFn == nil {
+		return nil, err
 	}
-	return release, nil
+	if _, err := mountFn(ctx); err != nil {
+		return nil, err
+	}
+	return m.acquire(ctx, volumeID)
 }
 
 func (m *localVolumeManager) CleanupIdleDirectVolumeFileMount(context.Context, string) (bool, error) {

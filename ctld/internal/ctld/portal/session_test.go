@@ -227,6 +227,27 @@ func TestLocalVolumeManagerPrepareHandoffDrainsInflightAndBlocksNewAcquires(t *t
 	}
 }
 
+func TestLocalVolumeManagerAcquireDirectMountMountsMissingVolume(t *testing.T) {
+	mgr := newLocalVolumeManager()
+	mountCalls := 0
+
+	release, err := mgr.AcquireDirectVolumeFileMount(context.Background(), "vol-source", func(context.Context) (string, error) {
+		mountCalls++
+		mgr.add(&volume.VolumeContext{VolumeID: "vol-source"})
+		return "local-vol-source", nil
+	})
+	if err != nil {
+		t.Fatalf("AcquireDirectVolumeFileMount() error = %v", err)
+	}
+	defer release()
+	if mountCalls != 1 {
+		t.Fatalf("mountFn calls = %d, want 1", mountCalls)
+	}
+	if _, err := mgr.GetVolume("vol-source"); err != nil {
+		t.Fatalf("GetVolume() error = %v", err)
+	}
+}
+
 func TestLocalSessionReadCacheTracksSmallWrites(t *testing.T) {
 	engine, err := s0fs.Open(context.Background(), s0fs.Config{
 		VolumeID: "vol-1",

@@ -179,3 +179,23 @@ func (s *Session) ReadVolumeFile(ctx context.Context, t ContractT, volumeID, fil
 	}
 	return body, status, nil
 }
+
+func (s *Session) CloneVolumeFiles(ctx context.Context, t ContractT, volumeID string, req apispec.CloneVolumeFilesRequest) ([]apispec.CloneVolumeFileResult, int, error) {
+	specPath := "/api/v1/sandboxvolumes/{id}/files/clone"
+	requestPath := "/api/v1/sandboxvolumes/" + volumeID + "/files/clone"
+	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodPost, specPath, requestPath, req, true)
+	if err != nil {
+		return nil, status, err
+	}
+	if status != http.StatusOK {
+		return nil, status, fmt.Errorf("clone volume files failed with status %d: %s", status, formatAPIError(body))
+	}
+	var resp apispec.SuccessCloneVolumeFilesResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, status, err
+	}
+	if !bool(resp.Success) || resp.Data == nil || resp.Data.Entries == nil {
+		return nil, status, fmt.Errorf("clone volume files response missing entries")
+	}
+	return *resp.Data.Entries, status, nil
+}

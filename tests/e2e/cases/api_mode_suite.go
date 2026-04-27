@@ -227,6 +227,10 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					assertClaimMountedVolumeWritable(env, session)
 				})
 
+				It("clones files into claim-mounted volumes", func() {
+					assertClaimMountedVolumeCrossVolumeClone(env, session)
+				})
+
 				It("rejects mounting an active RWO volume into a second sandbox", func() {
 					assertClaimMountedRWOVolumeConflict(env, session)
 				})
@@ -2024,6 +2028,75 @@ func assertClaimMountedVolumeWritable(env *framework.ScenarioEnv, session *e2eut
 			return body, readErr
 		}).WithTimeout(90 * time.Second).WithPolling(2 * time.Second).Should(Equal(expected))
 	}
+}
+
+func assertClaimMountedVolumeCrossVolumeClone(env *framework.ScenarioEnv, session *e2eutils.Session) {
+	sourceVolume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), apispec.CreateSandboxVolumeRequest{})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusCreated))
+	Expect(sourceVolume).NotTo(BeNil())
+	sourceVolumeID := expectStringPtr(sourceVolume.Id, "source volume id")
+	DeferCleanup(func() {
+		deleteSandboxVolumeForCleanup(env, session, sourceVolumeID)
+	})
+
+	targetVolume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), apispec.CreateSandboxVolumeRequest{})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusCreated))
+	Expect(targetVolume).NotTo(BeNil())
+	targetVolumeID := expectStringPtr(targetVolume.Id, "target volume id")
+	DeferCleanup(func() {
+		deleteSandboxVolumeForCleanup(env, session, targetVolumeID)
+	})
+
+	sourcePath := "/assets/source.txt"
+	sourceContent := []byte(fmt.Sprintf("cross volume clone %d", time.Now().UnixNano()))
+	status, err = session.WriteVolumeFile(env.TestCtx.Context, GinkgoT(), sourceVolumeID, sourcePath, sourceContent, "")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+
+	mountPoint := "/workspace/claim-clone"
+	templateID := createVolumePortalTemplate(env, session, mountPoint)
+	claimReq := apispec.ClaimRequest{
+		Template: &templateID,
+		Mounts: &[]apispec.ClaimMountRequest{{
+			SandboxvolumeId: targetVolumeID,
+			MountPoint:      mountPoint,
+		}},
+	}
+	claimResp, err := session.ClaimSandboxWithRequest(env.TestCtx.Context, GinkgoT(), claimReq)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(claimResp).NotTo(BeNil())
+	sandboxID := claimResp.SandboxId
+	DeferCleanup(func() {
+		_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+	})
+	Expect(claimResp.BootstrapMounts).NotTo(BeNil())
+	Expect(*claimResp.BootstrapMounts).NotTo(BeEmpty())
+	Expect((*claimResp.BootstrapMounts)[0].State).To(Equal(apispec.MountStatusStateMounted))
+
+	createParents := true
+	mode := apispec.CloneVolumeFilesRequestModeCowOrCopy
+	targetPath := "/cloned/from-source.txt"
+	entries, status, err := session.CloneVolumeFiles(env.TestCtx.Context, GinkgoT(), targetVolumeID, apispec.CloneVolumeFilesRequest{
+		Mode: &mode,
+		Entries: []apispec.CloneVolumeFileEntry{{
+			SourceVolumeId: sourceVolumeID,
+			SourcePath:     sourcePath,
+			TargetPath:     targetPath,
+			CreateParents:  &createParents,
+		}},
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(entries).To(HaveLen(1))
+	Expect(entries[0].SourceVolumeId).To(Equal(sourceVolumeID))
+	Expect(entries[0].TargetPath).To(Equal(targetPath))
+
+	Eventually(func() ([]byte, error) {
+		body, _, readErr := session.ReadFile(env.TestCtx.Context, GinkgoT(), sandboxID, mountPoint+targetPath)
+		return body, readErr
+	}).WithTimeout(90 * time.Second).WithPolling(2 * time.Second).Should(Equal(sourceContent))
 }
 
 func deleteSandboxVolumeForCleanup(env *framework.ScenarioEnv, session *e2eutils.Session, volumeID string) {

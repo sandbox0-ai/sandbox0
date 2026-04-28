@@ -25,6 +25,38 @@ func TestNewSandboxServiceUsesCtldExecutorWhenEnabled(t *testing.T) {
 	assert.Equal(t, 15*time.Second, svc.ctldClient.httpClient.Timeout)
 }
 
+func TestCtldAddressForPodUsesHostIPWithoutK8sClient(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-1", Namespace: "default"},
+		Status:     corev1.PodStatus{HostIP: "10.24.15.221"},
+	}
+	svc := &SandboxService{
+		config: SandboxServiceConfig{CtldPort: 8095},
+	}
+
+	address, err := svc.ctldAddressForPod(context.Background(), pod)
+	require.NoError(t, err)
+	assert.Equal(t, "http://10.24.15.221:8095", address)
+}
+
+func TestCtldAddressForPodUsesNodeCacheBeforeLiveGet(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-1", Namespace: "default"},
+		Spec:       corev1.PodSpec{NodeName: "node-a"},
+	}
+	k8sClient := fake.NewSimpleClientset()
+	svc := &SandboxService{
+		k8sClient:  k8sClient,
+		nodeLister: newClaimTestNodeLister(t, newClaimTestNode("node-a", "10.0.0.1")),
+		config:     SandboxServiceConfig{CtldPort: 8095},
+	}
+
+	address, err := svc.ctldAddressForPod(context.Background(), pod)
+	require.NoError(t, err)
+	assert.Equal(t, "http://10.0.0.1:8095", address)
+	assert.Empty(t, k8sClient.Actions())
+}
+
 func TestCtldPowerExecutorRequestsPauseAsDesiredState(t *testing.T) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{

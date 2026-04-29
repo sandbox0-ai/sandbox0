@@ -417,7 +417,7 @@ try {
 - `GET /files`, `GET /stat`, and `GET /list` require a `path` query parameter.
 - `POST /files` with `mkdir=true` creates directories instead of writing file content.
 - `DELETE /files` is recursive for directories.
-- File size is currently capped by the direct HTTP handler. Large transfer workflows should prefer snapshots or sync when appropriate.
+- File size is currently capped by the direct HTTP handler. Large transfer workflows should prefer snapshots when appropriate.
 
 ---
 
@@ -430,14 +430,6 @@ try {
     cta="Learn More"
   >
     Mount a volume into a sandbox when processes need a normal filesystem path
-  </LinkCard>
-
-  <LinkCard
-    title="Volume Sync"
-    href="/docs/volume/sync"
-    cta="Learn More"
-  >
-    Keep one workspace in sync across local machines and sandboxes
   </LinkCard>
 
   <LinkCard

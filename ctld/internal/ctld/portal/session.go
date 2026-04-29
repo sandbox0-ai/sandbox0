@@ -274,7 +274,7 @@ func newLocalSession(volumeID string, mgr *localVolumeManager, logger *logrus.Lo
 	return &localSession{
 		volumeID:        volumeID,
 		mgr:             mgr,
-		fs:              fsserver.NewFileSystemServer(mgr, nil, nil, nil, logger, nil, nil),
+		fs:              fsserver.NewFileSystemServer(mgr, nil, nil, nil, logger, nil),
 		readOnlyHandles: make(map[string]struct{}),
 		readCache:       make(map[string][]byte),
 		baseCtx: internalauth.WithClaims(context.Background(), &internalauth.Claims{

@@ -110,6 +110,18 @@ func newVolumeFileRouteTestServer(t *testing.T) (string, *internalauth.Generator
 	return gateway.URL, incomingGen, storageSpy, cleanup
 }
 
+func newStorageProxyRouteInternalToken(t *testing.T, gen *internalauth.Generator, permissions ...string) string {
+	t.Helper()
+
+	token, err := gen.Generate("cluster-gateway", "team-1", "user-1", internalauth.GenerateOptions{
+		Permissions: permissions,
+	})
+	if err != nil {
+		t.Fatalf("generate internal token: %v", err)
+	}
+	return token
+}
+
 func TestVolumeFileRoutesProxyToStorageProxy(t *testing.T) {
 	gatewayURL, incomingGen, storageSpy, cleanup := newVolumeFileRouteTestServer(t)
 	defer cleanup()

@@ -2639,16 +2639,6 @@ spec:
                           restoreRemountTimeout:
                             default: 30s
                             type: string
-                          syncCompactionInterval:
-                            default: 10m
-                            type: string
-                          syncJournalRetainEntries:
-                            default: 10000
-                            format: int64
-                            type: integer
-                          syncRequestRetention:
-                            default: 24h
-                            type: string
                           watchEventQueueSize:
                             default: 256
                             type: integer

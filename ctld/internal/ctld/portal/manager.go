@@ -338,6 +338,10 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 	if err != nil {
 		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("create object storage: %w", err)
 	}
+	encryption, err := volume.S0FSEncryptionConfig(m.storage)
+	if err != nil {
+		return ctldapi.BindVolumePortalResponse{}, err
+	}
 	engine, err := s0fs.Open(ctx, s0fs.Config{
 		VolumeID:    req.SandboxVolumeID,
 		WALPath:     filepath.Join(cacheDir, "engine.wal"),
@@ -345,7 +349,8 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 		ObjectStoreForVolume: func(volumeID string) (objectstore.Store, error) {
 			return m.createObjectStore(req.TeamID, volumeID)
 		},
-		HeadStore: db.NewS0FSHeadStore(m.repo),
+		HeadStore:  db.NewS0FSHeadStore(m.repo),
+		Encryption: encryption,
 	})
 	if err != nil {
 		return ctldapi.BindVolumePortalResponse{}, fmt.Errorf("open local s0fs engine: %w", err)
@@ -519,6 +524,10 @@ func (m *Manager) AttachOwner(ctx context.Context, req ctldapi.AttachVolumeOwner
 	if err != nil {
 		return ctldapi.AttachVolumeOwnerResponse{}, fmt.Errorf("create object storage: %w", err)
 	}
+	encryption, err := volume.S0FSEncryptionConfig(m.storage)
+	if err != nil {
+		return ctldapi.AttachVolumeOwnerResponse{}, err
+	}
 	engine, err := s0fs.Open(ctx, s0fs.Config{
 		VolumeID:    req.SandboxVolumeID,
 		WALPath:     filepath.Join(cacheDir, "engine.wal"),
@@ -526,7 +535,8 @@ func (m *Manager) AttachOwner(ctx context.Context, req ctldapi.AttachVolumeOwner
 		ObjectStoreForVolume: func(volumeID string) (objectstore.Store, error) {
 			return m.createObjectStore(req.TeamID, volumeID)
 		},
-		HeadStore: db.NewS0FSHeadStore(m.repo),
+		HeadStore:  db.NewS0FSHeadStore(m.repo),
+		Encryption: encryption,
 	})
 	if err != nil {
 		return ctldapi.AttachVolumeOwnerResponse{}, fmt.Errorf("open local s0fs engine: %w", err)

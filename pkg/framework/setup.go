@@ -1,6 +1,7 @@
 package framework
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"time"
@@ -85,6 +86,15 @@ func SetupScenario(cfg Config, scenario Scenario) (*ScenarioEnv, func(), error) 
 		})
 	}
 
+	if err := CleanupManagerOwnedNamespaces(testCtx.Context, workingCfg.Kubeconfig, "3m"); err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	if err := CleanupNamespace(testCtx.Context, workingCfg.Kubeconfig, scenario.InfraNamespace, "3m"); err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+
 	if !workingCfg.SkipOperatorInstall {
 		fmt.Printf("Installing infra-operator...\n")
 		if err := InstallOperator(testCtx.Context, workingCfg); err != nil {
@@ -134,9 +144,43 @@ func SetupScenario(cfg Config, scenario Scenario) (*ScenarioEnv, func(), error) 
 		return nil, nil, err
 	}
 	appendCleanup(func() {
-		_ = KubectlDeleteManifest(testCtx.Context, workingCfg.Kubeconfig, manifestPath)
-		_ = KubectlWaitForNamespacesDeletedByLabel(testCtx.Context, workingCfg.Kubeconfig, managerOwnedNamespaceLabelSelector, "2m")
+		// Pods can mount sandbox0 CSI volumes. Delete sandbox namespaces before the
+		// infra manifest so storage-proxy is still available for kubelet unpublish.
+		if err := CleanupManagerOwnedNamespaces(testCtx.Context, workingCfg.Kubeconfig, "3m"); err != nil {
+			fmt.Printf("Failed to clean up manager-owned namespaces: %v\n", err)
+		}
+		if err := KubectlDeleteManifest(testCtx.Context, workingCfg.Kubeconfig, manifestPath); err != nil {
+			fmt.Printf("Failed to delete scenario manifest: %v\n", err)
+		}
+		if err := KubectlWaitForNamespaceDeleted(testCtx.Context, workingCfg.Kubeconfig, scenario.InfraNamespace, "3m"); err != nil {
+			fmt.Printf("Failed to clean up infra namespace %q: %v\n", scenario.InfraNamespace, err)
+		}
 	})
 
 	return env, cleanup, nil
+}
+
+// CleanupManagerOwnedNamespaces removes namespaces created by sandbox managers during e2e scenarios.
+func CleanupManagerOwnedNamespaces(ctx context.Context, kubeconfig, timeout string) error {
+	if ctx == nil {
+		return fmt.Errorf("context is required")
+	}
+	if err := KubectlDeleteNamespacesByLabel(ctx, kubeconfig, managerOwnedNamespaceLabelSelector); err != nil {
+		return err
+	}
+	return KubectlWaitForNamespacesDeletedByLabel(ctx, kubeconfig, managerOwnedNamespaceLabelSelector, timeout)
+}
+
+// CleanupNamespace removes a scenario namespace and waits until Kubernetes finalizes it.
+func CleanupNamespace(ctx context.Context, kubeconfig, namespace, timeout string) error {
+	if ctx == nil {
+		return fmt.Errorf("context is required")
+	}
+	if namespace == "" {
+		return fmt.Errorf("namespace is required")
+	}
+	if err := KubectlDeleteNamespace(ctx, kubeconfig, namespace); err != nil {
+		return err
+	}
+	return KubectlWaitForNamespaceDeleted(ctx, kubeconfig, namespace, timeout)
 }

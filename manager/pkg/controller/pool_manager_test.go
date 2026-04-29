@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -17,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
+	appslisters "k8s.io/client-go/listers/apps/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
@@ -334,6 +337,67 @@ func TestReconcileReplicaSetTemplateUpdatesHash(t *testing.T) {
 	assert.Equal(t, "new-hash", updated.Spec.Template.Annotations[AnnotationTemplateSpecHash])
 }
 
+func TestGetOrCreateReplicaSetAdoptsExistingReplicaSetForRecreatedTemplate(t *testing.T) {
+	keyPath := filepath.Join(t.TempDir(), "internal_jwt_public.key")
+	require.NoError(t, os.WriteFile(keyPath, []byte("public-key"), 0o600))
+	previousPath := internalauth.DefaultInternalJWTPublicKeyPath
+	internalauth.DefaultInternalJWTPublicKeyPath = keyPath
+	t.Cleanup(func() {
+		internalauth.DefaultInternalJWTPublicKeyPath = previousPath
+	})
+
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "default",
+			UID:       types.UID("new-template"),
+		},
+	}
+	rsName, err := naming.ReplicasetName(naming.DefaultClusterID, template.Name)
+	require.NoError(t, err)
+	rs := &appsv1.ReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      rsName,
+			Namespace: template.Namespace,
+			Labels: map[string]string{
+				LabelTemplateID: template.Name,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: v1alpha1.SchemeGroupVersion.String(),
+					Kind:       "SandboxTemplate",
+					Name:       template.Name,
+					UID:        types.UID("old-template"),
+					Controller: boolPtr(true),
+				},
+			},
+		},
+	}
+
+	client := fake.NewSimpleClientset(rs)
+	rsIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	require.NoError(t, rsIndexer.Add(rs))
+	secretIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	pm := &PoolManager{
+		k8sClient:        client,
+		replicaSetLister: appslisters.NewReplicaSetLister(rsIndexer),
+		secretLister:     corelisters.NewSecretLister(secretIndexer),
+		recorder:         record.NewFakeRecorder(10),
+		logger:           zap.NewNop(),
+	}
+
+	got, err := pm.getOrCreateReplicaSet(context.Background(), template)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Len(t, got.OwnerReferences, 1)
+	assert.Equal(t, types.UID("new-template"), got.OwnerReferences[0].UID)
+
+	stored, err := client.AppsV1().ReplicaSets(template.Namespace).Get(context.Background(), rsName, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Len(t, stored.OwnerReferences, 1)
+	assert.Equal(t, types.UID("new-template"), stored.OwnerReferences[0].UID)
+}
+
 func TestTemplateSpecHashIncludesManagerInjectedPlacement(t *testing.T) {
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
@@ -379,4 +443,8 @@ func writeManagerConfig(t *testing.T, contents string) string {
 	err := os.WriteFile(path, []byte(contents), 0o600)
 	require.NoError(t, err)
 	return path
+}
+
+func boolPtr(v bool) *bool {
+	return &v
 }

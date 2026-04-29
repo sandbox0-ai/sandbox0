@@ -435,7 +435,11 @@ func TestCreateSnapshot_CreatesVolumePathWhenMissing(t *testing.T) {
 		t.Fatalf("expected snapshot to be created, got: %+v", snapshot)
 	}
 
-	if _, err := s0fs.LoadSnapshot(context.Background(), mgr.s0fsConfig("team1", "vol1"), snapshot.ID); err != nil {
+	cfg, err := mgr.s0fsConfig("team1", "vol1")
+	if err != nil {
+		t.Fatalf("s0fsConfig() error = %v", err)
+	}
+	if _, err := s0fs.LoadSnapshot(context.Background(), cfg, snapshot.ID); err != nil {
 		t.Fatalf("snapshot state should exist after create, got: %v", err)
 	}
 

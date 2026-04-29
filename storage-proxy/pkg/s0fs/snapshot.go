@@ -16,7 +16,7 @@ func LoadSnapshot(_ context.Context, cfg Config, snapshotID string) (*SnapshotSt
 	if cfg.WALPath == "" {
 		return nil, fmt.Errorf("%w: wal path is required", ErrInvalidInput)
 	}
-	return loadSnapshotState(snapshotFilePath(cfg.WALPath, snapshotID))
+	return loadSnapshotState(snapshotFilePath(cfg.WALPath, snapshotID), cfg.VolumeID, "snapshot:"+snapshotID, cfg.Encryption)
 }
 
 func snapshotFilePath(walPath, snapshotID string) string {
@@ -27,13 +27,19 @@ func headStatePath(walPath string) string {
 	return filepath.Join(filepath.Dir(walPath), "head.json")
 }
 
-func loadSnapshotState(path string) (*SnapshotState, error) {
+func loadSnapshotState(path, volumeID, role string, encryption *EncryptionConfig) (*SnapshotState, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, ErrSnapshotNotFound
 		}
 		return nil, fmt.Errorf("read snapshot state: %w", err)
+	}
+	if plaintext, encrypted, err := encryption.decryptBlobIfEncrypted(data, stateBlobAAD(volumeID, role)); encrypted || err != nil {
+		if err != nil {
+			return nil, err
+		}
+		data = plaintext
 	}
 
 	var state SnapshotState
@@ -44,7 +50,7 @@ func loadSnapshotState(path string) (*SnapshotState, error) {
 	return &state, nil
 }
 
-func saveSnapshotState(path string, state *SnapshotState) error {
+func saveSnapshotState(path, volumeID, role string, state *SnapshotState, encryption *EncryptionConfig) error {
 	if state == nil {
 		return fmt.Errorf("%w: snapshot state is required", ErrInvalidInput)
 	}
@@ -55,6 +61,10 @@ func saveSnapshotState(path string, state *SnapshotState) error {
 	data, err := json.Marshal(state)
 	if err != nil {
 		return fmt.Errorf("encode snapshot state: %w", err)
+	}
+	data, err = encryption.encryptBlob(data, stateBlobAAD(volumeID, role))
+	if err != nil {
+		return fmt.Errorf("encrypt snapshot state: %w", err)
 	}
 
 	tempPath := path + ".tmp"

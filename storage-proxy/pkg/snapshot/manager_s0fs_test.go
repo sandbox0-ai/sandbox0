@@ -70,7 +70,11 @@ func TestS0FSSnapshotCreateRestoreAndDelete(t *testing.T) {
 	if err := mgr.DeleteSnapshot(context.Background(), "vol-1", snap.ID, "team-1"); err != nil {
 		t.Fatalf("DeleteSnapshot() error = %v", err)
 	}
-	if _, err := s0fs.LoadSnapshot(context.Background(), mgr.s0fsConfig("team-1", "vol-1"), snap.ID); err == nil {
+	cfg, err := mgr.s0fsConfig("team-1", "vol-1")
+	if err != nil {
+		t.Fatalf("s0fsConfig() error = %v", err)
+	}
+	if _, err := s0fs.LoadSnapshot(context.Background(), cfg, snap.ID); err == nil {
 		t.Fatal("LoadSnapshot() after delete returned nil error")
 	}
 	if len(repo.deleted) != 1 || repo.deleted[0] != snap.ID {
@@ -104,8 +108,13 @@ func TestS0FSForkVolumeUsesCopyOnWriteState(t *testing.T) {
 		t.Fatal("ForkVolume called distributed flush coordinator")
 	}
 
-	forkCfg := mgr.s0fsConfig("team-1", forked.ID)
-	forkState, _, err := s0fs.NewMaterializer(forked.ID, forkCfg.ObjectStore, forkCfg.HeadStore, forkCfg.ObjectStoreForVolume).LoadLatestState(context.Background())
+	forkCfg, err := mgr.s0fsConfig("team-1", forked.ID)
+	if err != nil {
+		t.Fatalf("s0fsConfig(forked) error = %v", err)
+	}
+	forkMaterializer := s0fs.NewMaterializer(forked.ID, forkCfg.ObjectStore, forkCfg.HeadStore, forkCfg.ObjectStoreForVolume)
+	forkMaterializer.SetEncryption(forkCfg.Encryption)
+	forkState, _, err := forkMaterializer.LoadLatestState(context.Background())
 	if err != nil {
 		t.Fatalf("LoadLatestState(forked) error = %v", err)
 	}
@@ -128,7 +137,11 @@ func TestS0FSForkVolumeUsesCopyOnWriteState(t *testing.T) {
 		t.Fatalf("child segment objects after fork = %+v, want none", childSegments)
 	}
 
-	forkedEngine, err := s0fs.Open(context.Background(), mgr.s0fsConfig("team-1", forked.ID))
+	forkCfg, err = mgr.s0fsConfig("team-1", forked.ID)
+	if err != nil {
+		t.Fatalf("s0fsConfig(forked) error = %v", err)
+	}
+	forkedEngine, err := s0fs.Open(context.Background(), forkCfg)
 	if err != nil {
 		t.Fatalf("Open(forked) error = %v", err)
 	}
@@ -239,7 +252,11 @@ func newS0FSSnapshotTestManager(t *testing.T, volumeID string) (*Manager, *fakeR
 		podID:     "test-pod",
 		locks:     make(map[string]time.Time),
 	}
-	engine, err := s0fs.Open(context.Background(), mgr.s0fsConfig("team-1", volumeID))
+	cfg, err := mgr.s0fsConfig("team-1", volumeID)
+	if err != nil {
+		t.Fatalf("s0fsConfig() error = %v", err)
+	}
+	engine, err := s0fs.Open(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("Open(s0fs) error = %v", err)
 	}
@@ -315,7 +332,10 @@ func untarSnapshotArchive(t *testing.T, payload []byte) map[string][]byte {
 
 func openFreshS0FSEngine(t *testing.T, mgr *Manager, teamID, volumeID string) *s0fs.Engine {
 	t.Helper()
-	cfg := mgr.s0fsConfig(teamID, volumeID)
+	cfg, err := mgr.s0fsConfig(teamID, volumeID)
+	if err != nil {
+		t.Fatalf("s0fsConfig(fresh %s) error = %v", volumeID, err)
+	}
 	cfg.WALPath = filepath.Join(t.TempDir(), "s0fs", volumeID, "engine.wal")
 	engine, err := s0fs.Open(context.Background(), cfg)
 	if err != nil {

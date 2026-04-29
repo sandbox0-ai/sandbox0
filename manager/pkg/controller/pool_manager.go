@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
@@ -175,7 +176,7 @@ func (pm *PoolManager) getOrCreateReplicaSet(ctx context.Context, template *v1al
 	// Try to get existing ReplicaSet
 	rs, err := pm.replicaSetLister.ReplicaSets(template.Namespace).Get(rsName)
 	if err == nil {
-		return rs, nil
+		return pm.reconcileReplicaSetMetadata(ctx, template, rs)
 	}
 
 	if !errors.IsNotFound(err) {
@@ -218,6 +219,13 @@ func (pm *PoolManager) getOrCreateReplicaSet(ctx context.Context, template *v1al
 
 	rs, err = pm.k8sClient.AppsV1().ReplicaSets(template.Namespace).Create(ctx, rs, metav1.CreateOptions{})
 	if err != nil {
+		if errors.IsAlreadyExists(err) {
+			existing, getErr := pm.k8sClient.AppsV1().ReplicaSets(template.Namespace).Get(ctx, rsName, metav1.GetOptions{})
+			if getErr != nil {
+				return nil, fmt.Errorf("get replicaset after already exists: %w", getErr)
+			}
+			return pm.reconcileReplicaSetMetadata(ctx, template, existing)
+		}
 		pm.recorder.Eventf(template, corev1.EventTypeWarning, "ReplicaSetCreateFailed",
 			"Failed to create ReplicaSet: %v", err)
 		return nil, fmt.Errorf("create replicaset: %w", err)
@@ -227,6 +235,59 @@ func (pm *PoolManager) getOrCreateReplicaSet(ctx context.Context, template *v1al
 		"Created ReplicaSet with %d replicas", template.Spec.Pool.MinIdle)
 
 	return rs, nil
+}
+
+func (pm *PoolManager) reconcileReplicaSetMetadata(
+	ctx context.Context,
+	template *v1alpha1.SandboxTemplate,
+	rs *appsv1.ReplicaSet,
+) (*appsv1.ReplicaSet, error) {
+	if rs == nil {
+		return nil, fmt.Errorf("replicaset is required")
+	}
+	if rs.DeletionTimestamp != nil {
+		return rs, nil
+	}
+
+	desiredLabels := map[string]string{
+		LabelTemplateID: template.Name,
+	}
+	desiredOwnerRefs := []metav1.OwnerReference{
+		*metav1.NewControllerRef(template, v1alpha1.SchemeGroupVersion.WithKind("SandboxTemplate")),
+	}
+	if reflect.DeepEqual(rs.Labels, desiredLabels) && reflect.DeepEqual(rs.OwnerReferences, desiredOwnerRefs) {
+		return rs, nil
+	}
+
+	var updatedRS *appsv1.ReplicaSet
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current, err := pm.k8sClient.AppsV1().ReplicaSets(rs.Namespace).Get(ctx, rs.Name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if current.DeletionTimestamp != nil {
+			updatedRS = current
+			return nil
+		}
+		updated := current.DeepCopy()
+		updated.Labels = desiredLabels
+		updated.OwnerReferences = desiredOwnerRefs
+		if reflect.DeepEqual(current.Labels, updated.Labels) &&
+			reflect.DeepEqual(current.OwnerReferences, updated.OwnerReferences) {
+			updatedRS = current
+			return nil
+		}
+		updatedRS, err = pm.k8sClient.AppsV1().ReplicaSets(updated.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
+		return err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("reconcile replicaset metadata: %w", err)
+	}
+	pm.logger.Info("Reconciled ReplicaSet metadata",
+		zap.String("template", template.Name),
+		zap.String("replicaset", rs.Name),
+	)
+	return updatedRS, nil
 }
 
 // buildPodTemplate builds the pod template for a template

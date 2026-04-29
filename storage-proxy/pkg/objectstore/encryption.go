@@ -1,8 +1,6 @@
 package objectstore
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -10,11 +8,8 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"strings"
-
-	"golang.org/x/crypto/chacha20poly1305"
 )
 
 const (
@@ -36,7 +31,7 @@ func LoadEncryptionKey(path string) (string, error) {
 	return string(pemBytes), nil
 }
 
-func NewEncryptor(keyPEM, passphrase, algo string) (Encryptor, error) {
+func NewKeyEncryptor(keyPEM, passphrase string) (Encryptor, error) {
 	if strings.TrimSpace(keyPEM) == "" {
 		return nil, fmt.Errorf("encryption key is empty")
 	}
@@ -44,7 +39,7 @@ func NewEncryptor(keyPEM, passphrase, algo string) (Encryptor, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newDataEncryptor(privateKey, algo)
+	return newRSAEncryptor(privateKey), nil
 }
 
 func parsePrivateKeyFromPEM(enc []byte, passphrase []byte) (*rsa.PrivateKey, error) {
@@ -90,83 +85,4 @@ func (e *rsaEncryptor) Encrypt(plaintext []byte) ([]byte, error) {
 
 func (e *rsaEncryptor) Decrypt(ciphertext []byte) ([]byte, error) {
 	return rsa.DecryptOAEP(sha256.New(), rand.Reader, e.privKey, ciphertext, e.label)
-}
-
-type dataEncryptor struct {
-	keyEncryptor Encryptor
-	keyLen       int
-	aead         func(key []byte) (cipher.AEAD, error)
-}
-
-func newDataEncryptor(privKey *rsa.PrivateKey, algo string) (Encryptor, error) {
-	switch algo {
-	case "", EncryptionAlgoAES256GCMRSA:
-		aead := func(key []byte) (cipher.AEAD, error) {
-			block, err := aes.NewCipher(key)
-			if err != nil {
-				return nil, err
-			}
-			return cipher.NewGCM(block)
-		}
-		return &dataEncryptor{keyEncryptor: newRSAEncryptor(privKey), keyLen: 32, aead: aead}, nil
-	case EncryptionAlgoCHACHA20RSA:
-		return &dataEncryptor{keyEncryptor: newRSAEncryptor(privKey), keyLen: chacha20poly1305.KeySize, aead: chacha20poly1305.New}, nil
-	default:
-		return nil, fmt.Errorf("unsupported encryption algorithm: %s", algo)
-	}
-}
-
-func (e *dataEncryptor) Encrypt(plaintext []byte) ([]byte, error) {
-	key := make([]byte, e.keyLen)
-	if _, err := io.ReadFull(rand.Reader, key); err != nil {
-		return nil, err
-	}
-	cipherKey, err := e.keyEncryptor.Encrypt(key)
-	if err != nil {
-		return nil, err
-	}
-	aead, err := e.aead(key)
-	if err != nil {
-		return nil, err
-	}
-	nonce := make([]byte, aead.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return nil, err
-	}
-	headerSize := 3 + len(cipherKey) + len(nonce)
-	buf := make([]byte, headerSize+len(plaintext)+aead.Overhead())
-	buf[0] = byte(len(cipherKey) >> 8)
-	buf[1] = byte(len(cipherKey) & 0xFF)
-	buf[2] = byte(len(nonce))
-	p := buf[3:]
-	copy(p, cipherKey)
-	p = p[len(cipherKey):]
-	copy(p, nonce)
-	p = p[len(nonce):]
-	ciphertext := aead.Seal(p[:0], nonce, plaintext, nil)
-	return buf[:headerSize+len(ciphertext)], nil
-}
-
-func (e *dataEncryptor) Decrypt(ciphertext []byte) ([]byte, error) {
-	if len(ciphertext) < 3 {
-		return nil, fmt.Errorf("encrypted payload is too short")
-	}
-	keyLen := int(ciphertext[0])<<8 + int(ciphertext[1])
-	nonceLen := int(ciphertext[2])
-	if 3+keyLen+nonceLen >= len(ciphertext) {
-		return nil, fmt.Errorf("malformed ciphertext: %d %d", keyLen, nonceLen)
-	}
-	ciphertext = ciphertext[3:]
-	cipherKey := ciphertext[:keyLen]
-	nonce := ciphertext[keyLen : keyLen+nonceLen]
-	ciphertext = ciphertext[keyLen+nonceLen:]
-	key, err := e.keyEncryptor.Decrypt(cipherKey)
-	if err != nil {
-		return nil, fmt.Errorf("decrypt key: %w", err)
-	}
-	aead, err := e.aead(key)
-	if err != nil {
-		return nil, err
-	}
-	return aead.Open(ciphertext[:0], nonce, ciphertext, nil)
 }

@@ -42,6 +42,10 @@ func (b *S0FSBackend) MountVolume(ctx context.Context, req BackendMountRequest) 
 	if err != nil {
 		return nil, fmt.Errorf("create s0fs object storage: %w", err)
 	}
+	encryption, err := S0FSEncryptionConfig(b.config)
+	if err != nil {
+		return nil, err
+	}
 	engine, err := s0fs.Open(ctx, s0fs.Config{
 		VolumeID:    req.VolumeID,
 		WALPath:     filepath.Join(cacheDir, "engine.wal"),
@@ -49,7 +53,8 @@ func (b *S0FSBackend) MountVolume(ctx context.Context, req BackendMountRequest) 
 		ObjectStoreForVolume: func(volumeID string) (objectstore.Store, error) {
 			return b.createObjectStorageForVolume(req, volumeID)
 		},
-		HeadStore: b.headStore,
+		HeadStore:  b.headStore,
+		Encryption: encryption,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open s0fs engine: %w", err)

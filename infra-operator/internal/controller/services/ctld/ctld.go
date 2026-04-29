@@ -45,6 +45,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	if err != nil {
 		return err
 	}
+	if storageConfig.ObjectEncryptionEnabled {
+		if err := common.EnsureObjectEncryptionKeySecret(ctx, r.Resources, infra); err != nil {
+			return err
+		}
+		storageConfig.ObjectEncryptionKeyPath = common.ObjectEncryptionKeyPath
+	}
 	podAnnotations, err := common.ConfigHashAnnotation(storageConfig)
 	if err != nil {
 		return err
@@ -66,6 +72,88 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	args := ctldArgs(infra)
 	bidirectional := corev1.MountPropagationBidirectional
 	hostPathDirectoryOrCreate := corev1.HostPathDirectoryOrCreate
+	volumeMounts := []corev1.VolumeMount{
+		{Name: "config", MountPath: "/config/config.yaml", SubPath: "config.yaml", ReadOnly: true},
+		{Name: "csi-plugin", MountPath: "/csi"},
+		{Name: "kubelet", MountPath: "/var/lib/kubelet", MountPropagation: &bidirectional},
+		{Name: "ctld-data", MountPath: "/var/lib/sandbox0/ctld"},
+		{Name: "host-cgroup", MountPath: "/host-sys/fs/cgroup"},
+		{Name: "containerd-sock", MountPath: "/host-run/containerd"},
+	}
+	volumes := []corev1.Volume{
+		{
+			Name: "config",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: name},
+				},
+			},
+		},
+		{
+			Name: "csi-plugin",
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
+					Path: "/var/lib/kubelet/plugins/volume.sandbox0.ai",
+					Type: &hostPathDirectoryOrCreate,
+				},
+			},
+		},
+		{
+			Name: "plugin-registration",
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
+					Path: "/var/lib/kubelet/plugins_registry",
+					Type: &hostPathDirectoryOrCreate,
+				},
+			},
+		},
+		{
+			Name: "kubelet",
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{Path: "/var/lib/kubelet"},
+			},
+		},
+		{
+			Name: "ctld-data",
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
+					Path: "/var/lib/sandbox0/ctld",
+					Type: &hostPathDirectoryOrCreate,
+				},
+			},
+		},
+		{
+			Name: "host-cgroup",
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{Path: "/sys/fs/cgroup"},
+			},
+		},
+		{
+			Name: "containerd-sock",
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{Path: "/run/containerd"},
+			},
+		},
+	}
+	if storageConfig.ObjectEncryptionEnabled {
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "object-encryption-key",
+			MountPath: common.ObjectEncryptionMountDir,
+			ReadOnly:  true,
+		})
+		volumes = append(volumes, corev1.Volume{
+			Name: "object-encryption-key",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: common.ObjectEncryptionSecretName(infra.Name),
+					Items: []corev1.KeyToPath{{
+						Key:  common.ObjectEncryptionSecretKey,
+						Path: common.ObjectEncryptionKeyFilename,
+					}},
+				},
+			},
+		})
+	}
 
 	desired := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -143,35 +231,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 							SecurityContext: &corev1.SecurityContext{
 								Privileged: common.BoolPtr(true),
 							},
-							VolumeMounts: []corev1.VolumeMount{
-								{
-									Name:      "config",
-									MountPath: "/config/config.yaml",
-									SubPath:   "config.yaml",
-									ReadOnly:  true,
-								},
-								{
-									Name:      "csi-plugin",
-									MountPath: "/csi",
-								},
-								{
-									Name:             "kubelet",
-									MountPath:        "/var/lib/kubelet",
-									MountPropagation: &bidirectional,
-								},
-								{
-									Name:      "ctld-data",
-									MountPath: "/var/lib/sandbox0/ctld",
-								},
-								{
-									Name:      "host-cgroup",
-									MountPath: "/host-sys/fs/cgroup",
-								},
-								{
-									Name:      "containerd-sock",
-									MountPath: "/host-run/containerd",
-								},
-							},
+							VolumeMounts: volumeMounts,
 						},
 						{
 							Name:            "csi-node-driver-registrar",
@@ -193,67 +253,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 							},
 						},
 					},
-					Volumes: []corev1.Volume{
-						{
-							Name: "config",
-							VolumeSource: corev1.VolumeSource{
-								ConfigMap: &corev1.ConfigMapVolumeSource{
-									LocalObjectReference: corev1.LocalObjectReference{Name: name},
-								},
-							},
-						},
-						{
-							Name: "csi-plugin",
-							VolumeSource: corev1.VolumeSource{
-								HostPath: &corev1.HostPathVolumeSource{
-									Path: "/var/lib/kubelet/plugins/volume.sandbox0.ai",
-									Type: &hostPathDirectoryOrCreate,
-								},
-							},
-						},
-						{
-							Name: "plugin-registration",
-							VolumeSource: corev1.VolumeSource{
-								HostPath: &corev1.HostPathVolumeSource{
-									Path: "/var/lib/kubelet/plugins_registry",
-									Type: &hostPathDirectoryOrCreate,
-								},
-							},
-						},
-						{
-							Name: "kubelet",
-							VolumeSource: corev1.VolumeSource{
-								HostPath: &corev1.HostPathVolumeSource{
-									Path: "/var/lib/kubelet",
-								},
-							},
-						},
-						{
-							Name: "ctld-data",
-							VolumeSource: corev1.VolumeSource{
-								HostPath: &corev1.HostPathVolumeSource{
-									Path: "/var/lib/sandbox0/ctld",
-									Type: &hostPathDirectoryOrCreate,
-								},
-							},
-						},
-						{
-							Name: "host-cgroup",
-							VolumeSource: corev1.VolumeSource{
-								HostPath: &corev1.HostPathVolumeSource{
-									Path: "/sys/fs/cgroup",
-								},
-							},
-						},
-						{
-							Name: "containerd-sock",
-							VolumeSource: corev1.VolumeSource{
-								HostPath: &corev1.HostPathVolumeSource{
-									Path: "/run/containerd",
-								},
-							},
-						},
-					},
+					Volumes: volumes,
 				},
 			},
 		},

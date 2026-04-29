@@ -72,22 +72,28 @@ func (s *snapshotHeadStore) CompareAndSwapCommittedHead(ctx context.Context, vol
 	return err
 }
 
-func (m *Manager) s0fsConfig(teamID, volumeID string) s0fs.Config {
+func (m *Manager) s0fsConfig(teamID, volumeID string) (s0fs.Config, error) {
 	cfg := s0fs.Config{
 		VolumeID: volumeID,
 		WALPath:  filepath.Join(m.config.CacheDir, "s0fs", volumeID, "engine.wal"),
 	}
-	store, err := m.s0fsObjectStore(teamID, volumeID)
-	if err == nil {
-		cfg.ObjectStore = store
+	encryption, err := volume.S0FSEncryptionConfig(m.config)
+	if err != nil {
+		return s0fs.Config{}, err
 	}
+	cfg.Encryption = encryption
+	store, err := m.s0fsObjectStore(teamID, volumeID)
+	if err != nil {
+		return s0fs.Config{}, err
+	}
+	cfg.ObjectStore = store
 	if repo, ok := any(m.repo).(s0fsHeadRepository); ok {
 		cfg.HeadStore = &snapshotHeadStore{repo: repo}
 	}
 	cfg.ObjectStoreForVolume = func(sourceVolumeID string) (objectstore.Store, error) {
 		return m.s0fsObjectStore(teamID, sourceVolumeID)
 	}
-	return cfg
+	return cfg, nil
 }
 
 func (m *Manager) hasMountedCtldOwner(ctx context.Context, volumeID string) (bool, error) {
@@ -145,7 +151,11 @@ func (m *Manager) openS0FSEngine(ctx context.Context, teamID, volumeID string) (
 		}
 	}
 
-	engine, err := s0fs.Open(ctx, m.s0fsConfig(teamID, volumeID))
+	cfg, err := m.s0fsConfig(teamID, volumeID)
+	if err != nil {
+		return nil, nil, err
+	}
+	engine, err := s0fs.Open(ctx, cfg)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -282,8 +292,12 @@ func (m *Manager) resolveS0FSForkState(ctx context.Context, teamID, sourceVolume
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	cfg := m.s0fsConfig(teamID, sourceVolumeID)
+	cfg, err := m.s0fsConfig(teamID, sourceVolumeID)
+	if err != nil {
+		return nil, err
+	}
 	materializer := s0fs.NewMaterializer(sourceVolumeID, cfg.ObjectStore, cfg.HeadStore, cfg.ObjectStoreForVolume)
+	materializer.SetEncryption(cfg.Encryption)
 	if materializer == nil || !materializer.Enabled() {
 		return nil, fmt.Errorf("%w: s0fs materializer is not configured", s0fs.ErrInvalidInput)
 	}
@@ -299,7 +313,11 @@ func (m *Manager) openS0FSSnapshotArchiveSession(ctx context.Context, volumeID, 
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	state, err := s0fs.LoadSnapshot(ctx, m.s0fsConfig(volumeRecord.TeamID, volumeID), snapshotID)
+	cfg, err := m.s0fsConfig(volumeRecord.TeamID, volumeID)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	state, err := s0fs.LoadSnapshot(ctx, cfg, snapshotID)
 	if err != nil {
 		return nil, 0, nil, err
 	}

@@ -856,10 +856,127 @@ func (r *Sandbox0InfraReconciler) waitBuiltinTemplatePodsReady(ctx context.Conte
 			}
 		}
 		if readyPods < minIdle {
-			return fmt.Errorf("builtin template %q pods not ready: %d/%d ready", templateID, readyPods, minIdle)
+			return fmt.Errorf("builtin template %q pods not ready: %d/%d ready; %s", templateID, readyPods, minIdle, r.notReadyTemplatePodSummary(ctx, namespace, podList.Items))
 		}
 	}
 	return nil
+}
+
+func (r *Sandbox0InfraReconciler) notReadyTemplatePodSummary(ctx context.Context, namespace string, pods []corev1.Pod) string {
+	if len(pods) == 0 {
+		return "no pods found"
+	}
+
+	const maxPods = 3
+	summaries := make([]string, 0, len(pods))
+	for i := range pods {
+		pod := &pods[i]
+		if isReadyPod(pod) {
+			continue
+		}
+
+		summary := podReadinessSummary(pod)
+		if eventSummary := r.latestPodEventSummary(ctx, namespace, pod.Name); eventSummary != "" {
+			summary += ", latestEvent=" + eventSummary
+		}
+		summaries = append(summaries, summary)
+		if len(summaries) == maxPods {
+			break
+		}
+	}
+	if len(summaries) == 0 {
+		return "not enough ready pods"
+	}
+	if len(pods) > maxPods {
+		summaries = append(summaries, fmt.Sprintf("%d more pod(s)", len(pods)-maxPods))
+	}
+	return "pods: " + strings.Join(summaries, "; ")
+}
+
+func (r *Sandbox0InfraReconciler) latestPodEventSummary(ctx context.Context, namespace, podName string) string {
+	events := &corev1.EventList{}
+	if err := r.List(ctx, events, client.InNamespace(namespace)); err != nil {
+		return ""
+	}
+
+	var latest *corev1.Event
+	for i := range events.Items {
+		event := &events.Items[i]
+		if event.InvolvedObject.Kind != "Pod" || event.InvolvedObject.Name != podName {
+			continue
+		}
+		if latest == nil || eventTimestamp(event).After(eventTimestamp(latest)) {
+			latest = event
+		}
+	}
+	if latest == nil {
+		return ""
+	}
+	if latest.Message == "" {
+		return latest.Reason
+	}
+	return fmt.Sprintf("%s(%s)", latest.Reason, compactStatusMessage(latest.Message, 160))
+}
+
+func eventTimestamp(event *corev1.Event) time.Time {
+	if event.EventTime.Time != (time.Time{}) {
+		return event.EventTime.Time
+	}
+	if !event.LastTimestamp.IsZero() {
+		return event.LastTimestamp.Time
+	}
+	return event.CreationTimestamp.Time
+}
+
+func podReadinessSummary(pod *corev1.Pod) string {
+	if pod == nil {
+		return "pod=<nil>"
+	}
+
+	parts := []string{fmt.Sprintf("%s phase=%s", pod.Name, pod.Status.Phase)}
+	for _, status := range pod.Status.InitContainerStatuses {
+		if status.State.Waiting != nil {
+			parts = append(parts, fmt.Sprintf("init/%s=waiting(%s)", status.Name, status.State.Waiting.Reason))
+		}
+		if status.State.Terminated != nil && status.State.Terminated.ExitCode != 0 {
+			parts = append(parts, fmt.Sprintf("init/%s=terminated(%s:%d)", status.Name, status.State.Terminated.Reason, status.State.Terminated.ExitCode))
+		}
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Ready {
+			continue
+		}
+		switch {
+		case status.State.Waiting != nil:
+			parts = append(parts, fmt.Sprintf("%s=waiting(%s)", status.Name, status.State.Waiting.Reason))
+		case status.State.Terminated != nil:
+			parts = append(parts, fmt.Sprintf("%s=terminated(%s:%d)", status.Name, status.State.Terminated.Reason, status.State.Terminated.ExitCode))
+		default:
+			parts = append(parts, fmt.Sprintf("%s=notReady", status.Name))
+		}
+	}
+	for _, condition := range pod.Status.Conditions {
+		if condition.Status == corev1.ConditionTrue {
+			continue
+		}
+		if condition.Reason != "" {
+			parts = append(parts, fmt.Sprintf("%s=%s", condition.Type, condition.Reason))
+		} else {
+			parts = append(parts, fmt.Sprintf("%s=%s", condition.Type, condition.Status))
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+func compactStatusMessage(message string, limit int) string {
+	message = strings.Join(strings.Fields(message), " ")
+	if len(message) <= limit {
+		return message
+	}
+	if limit <= 3 {
+		return message[:limit]
+	}
+	return message[:limit-3] + "..."
 }
 
 func isReadyPod(pod *corev1.Pod) bool {

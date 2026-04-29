@@ -11,12 +11,14 @@ import (
 )
 
 type wal struct {
-	path   string
-	file   *os.File
-	onSync func()
+	path       string
+	file       *os.File
+	volumeID   string
+	encryption *EncryptionConfig
+	onSync     func()
 }
 
-func openWAL(path string, onSync func()) (*wal, []walRecord, error) {
+func openWAL(path, volumeID string, encryption *EncryptionConfig, onSync func()) (*wal, []walRecord, error) {
 	if path == "" {
 		return nil, nil, fmt.Errorf("%w: wal path is required", ErrInvalidInput)
 	}
@@ -24,7 +26,7 @@ func openWAL(path string, onSync func()) (*wal, []walRecord, error) {
 		return nil, nil, fmt.Errorf("create wal directory: %w", err)
 	}
 
-	records, err := readWAL(path)
+	records, err := readWAL(path, volumeID, encryption)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -33,10 +35,10 @@ func openWAL(path string, onSync func()) (*wal, []walRecord, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("open wal: %w", err)
 	}
-	return &wal{path: path, file: file, onSync: onSync}, records, nil
+	return &wal{path: path, file: file, volumeID: volumeID, encryption: encryption, onSync: onSync}, records, nil
 }
 
-func readWAL(path string) ([]walRecord, error) {
+func readWAL(path, volumeID string, encryption *EncryptionConfig) ([]walRecord, error) {
 	file, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -51,8 +53,15 @@ func readWAL(path string) ([]walRecord, error) {
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
+			payload := line
+			if plaintext, encrypted, err := encryption.decryptBlobIfEncrypted(line, walRecordAAD(volumeID)); encrypted || err != nil {
+				if err != nil {
+					return nil, fmt.Errorf("decrypt wal record: %w", err)
+				}
+				payload = plaintext
+			}
 			var record walRecord
-			if decodeErr := json.Unmarshal(line, &record); decodeErr != nil {
+			if decodeErr := json.Unmarshal(payload, &record); decodeErr != nil {
 				return nil, fmt.Errorf("decode wal record: %w", decodeErr)
 			}
 			records = append(records, record)
@@ -73,6 +82,10 @@ func (w *wal) append(record walRecord) error {
 	payload, err := json.Marshal(record)
 	if err != nil {
 		return fmt.Errorf("marshal wal record: %w", err)
+	}
+	payload, err = w.encryption.encryptBlob(payload, walRecordAAD(w.volumeID))
+	if err != nil {
+		return fmt.Errorf("encrypt wal record: %w", err)
 	}
 	payload = append(payload, '\n')
 	if _, err := w.file.Write(payload); err != nil {

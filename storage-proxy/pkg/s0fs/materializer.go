@@ -25,6 +25,8 @@ const (
 
 const defaultSegmentCacheMaxBytes int64 = 64 << 20
 
+var segmentCacheMaxBytes int64 = defaultSegmentCacheMaxBytes
+
 var ErrMaterializedManifestNotFound = errors.New("materialized manifest not found")
 
 type Manifest struct {
@@ -41,6 +43,7 @@ type Materializer struct {
 	store                objectstore.Store
 	objectStoreForVolume ObjectStoreResolver
 	headStore            HeadStore
+	encryption           *EncryptionConfig
 	cache                *segmentCache
 }
 
@@ -57,7 +60,13 @@ func NewMaterializer(volumeID string, store objectstore.Store, headStore HeadSto
 		store:                store,
 		objectStoreForVolume: resolver,
 		headStore:            headStore,
-		cache:                newSegmentCache(defaultSegmentCacheMaxBytes),
+		cache:                newSegmentCache(segmentCacheMaxBytes),
+	}
+}
+
+func (m *Materializer) SetEncryption(encryption *EncryptionConfig) {
+	if m != nil {
+		m.encryption = encryption
 	}
 }
 
@@ -96,6 +105,14 @@ func (m *Materializer) Materialize(ctx context.Context, state *SnapshotState, ex
 		return nil, err
 	}
 
+	storedSegmentPayload, segmentEncryption, err := m.encryption.encryptSegment(m.volumeID, segment)
+	if err != nil {
+		return nil, err
+	}
+	if segment != nil {
+		segment.Encryption = segmentEncryption
+	}
+
 	manifestState, err := buildManifestState(inline, segment, fileExtents)
 	if err != nil {
 		return nil, err
@@ -110,7 +127,7 @@ func (m *Materializer) Materialize(ctx context.Context, state *SnapshotState, ex
 	}
 
 	if len(segment.Payload) > 0 {
-		if err := m.putBytes(ctx, segment.Key, segment.Payload); err != nil {
+		if err := m.putBytes(ctx, segment.Key, storedSegmentPayload); err != nil {
 			return nil, err
 		}
 		m.cache.put(segmentCacheKey(segment.VolumeID, segment.Key), segment.Payload)
@@ -155,8 +172,16 @@ func (m *Materializer) ReadSegmentRange(segment *Segment, off, limit int64) ([]b
 	}
 	cacheKey := segmentCacheKey(volumeID, segment.Key)
 
-	if segment.Length > 0 && int64(segment.Length) <= defaultSegmentCacheMaxBytes {
+	if segment.Length > 0 && int64(segment.Length) <= segmentCacheMaxBytes {
 		if payload, ok := m.cache.get(cacheKey); ok {
+			return cloneByteRange(payload, off, limit), nil
+		}
+		if segment.Encryption != nil {
+			payload, err := m.encryption.decryptSegmentRange(store, volumeID, segment, 0, int64(segment.Length))
+			if err != nil {
+				return nil, err
+			}
+			m.cache.put(cacheKey, payload)
 			return cloneByteRange(payload, off, limit), nil
 		}
 		reader, err := store.Get(segment.Key, 0, int64(segment.Length))
@@ -175,6 +200,9 @@ func (m *Materializer) ReadSegmentRange(segment *Segment, off, limit int64) ([]b
 		return cloneByteRange(payload, off, limit), nil
 	}
 
+	if segment.Encryption != nil {
+		return m.encryption.decryptSegmentRange(store, volumeID, segment, off, limit)
+	}
 	reader, err := store.Get(segment.Key, off, limit)
 	if err != nil {
 		return nil, err
@@ -238,11 +266,12 @@ func (m *Materializer) LoadLatestState(ctx context.Context) (*SnapshotState, *Ma
 }
 
 type materializedSegment struct {
-	ID       string
-	VolumeID string
-	Key      string
-	Payload  []byte
-	SHA256   string
+	ID         string
+	VolumeID   string
+	Key        string
+	Payload    []byte
+	SHA256     string
+	Encryption *SegmentEncryption
 }
 
 func buildSegment(manifestSeq uint64, volumeID string, state *SnapshotState) (*materializedSegment, map[uint64][]FileExtent, error) {
@@ -328,11 +357,12 @@ func buildManifestState(state *SnapshotState, segment *materializedSegment, hotF
 	}
 	if segment != nil && len(segment.Payload) > 0 {
 		manifestState.Segments[segment.ID] = &Segment{
-			ID:       segment.ID,
-			VolumeID: segment.VolumeID,
-			Key:      segment.Key,
-			Length:   uint64(len(segment.Payload)),
-			SHA256:   segment.SHA256,
+			ID:         segment.ID,
+			VolumeID:   segment.VolumeID,
+			Key:        segment.Key,
+			Length:     uint64(len(segment.Payload)),
+			SHA256:     segment.SHA256,
+			Encryption: segment.Encryption,
 		}
 	}
 	return manifestState, nil
@@ -357,6 +387,10 @@ func (m *Materializer) putJSON(ctx context.Context, key string, value any) error
 	if err != nil {
 		return fmt.Errorf("marshal %s: %w", key, err)
 	}
+	payload, err = m.encryption.encryptBlob(payload, stateBlobAAD(m.volumeID, "object:"+key))
+	if err != nil {
+		return fmt.Errorf("encrypt %s: %w", key, err)
+	}
 	return m.putBytes(ctx, key, payload)
 }
 
@@ -373,6 +407,12 @@ func (m *Materializer) getJSON(ctx context.Context, key string, value any) error
 	payload, err := io.ReadAll(reader)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", key, err)
+	}
+	if plaintext, encrypted, err := m.encryption.decryptBlobIfEncrypted(payload, stateBlobAAD(m.volumeID, "object:"+key)); encrypted || err != nil {
+		if err != nil {
+			return err
+		}
+		payload = plaintext
 	}
 	if err := json.Unmarshal(payload, value); err != nil {
 		return fmt.Errorf("decode %s: %w", key, err)
@@ -545,5 +585,11 @@ func cloneSegment(segment *Segment) *Segment {
 		return nil
 	}
 	copy := *segment
+	if segment.Encryption != nil {
+		enc := *segment.Encryption
+		enc.WrappedKey = append([]byte(nil), segment.Encryption.WrappedKey...)
+		enc.NoncePrefix = append([]byte(nil), segment.Encryption.NoncePrefix...)
+		copy.Encryption = &enc
+	}
 	return &copy
 }

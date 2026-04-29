@@ -50,13 +50,15 @@ This keeps the mounted filesystem view and the direct volume API view consistent
 
 ## Application-Layer Encryption
 
-Self-hosted deployments can enable Sandbox0 application-layer volume encryption with `services.storageProxy.config.objectEncryptionEnabled`.
+Sandbox0 encrypts persisted S0FS volume data at the application layer before it is written to object storage.
 
-When enabled, S0FS encrypts persisted volume objects before they are written to object storage. Manifest objects are encrypted as full blobs. Segment objects are encrypted in independently authenticated chunks, so cold file reads can still fetch only the ciphertext chunks needed for the requested byte range. Node-local cache files, including the S0FS WAL, head state, and snapshot state, are also encrypted before they are written to disk.
+Manifest objects are encrypted as full blobs. Segment objects are encrypted in independently authenticated chunks, so cold file reads can still fetch only the ciphertext chunks needed for the requested byte range. Node-local cache files, including the S0FS WAL, head state, and snapshot state, are also encrypted before they are written to disk.
 
 <Callout variant="info">
-Object encryption is service-side application-layer encryption. `storage-proxy` and `ctld` hold the configured key so they can serve normal POSIX filesystem reads and writes. This is not end-to-end encryption where Sandbox0 services cannot decrypt volume data.
+This is service-side application-layer encryption. `storage-proxy` and `ctld` hold the volume encryption key so they can serve normal POSIX filesystem reads and writes. It is not end-to-end encryption where Sandbox0 services cannot decrypt volume data.
 </Callout>
+
+For self-hosted deployments, see [Self-hosted Configuration](/docs/self-hosted/configuration) for the storage-proxy encryption setting.
 
 ## Direct File Operations
 

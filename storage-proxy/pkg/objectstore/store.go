@@ -936,11 +936,6 @@ func classifyPrefix(key string) string {
 	switch {
 	case value == "":
 		return "none"
-	case strings.HasPrefix(value, "sandboxvolumes-sync/"):
-		if strings.Contains(value, "/replay/") {
-			return "volume_sync_replay"
-		}
-		return "volume_sync"
 	case strings.HasPrefix(value, "sandboxvolumes/"):
 		return "volume_data"
 	default:

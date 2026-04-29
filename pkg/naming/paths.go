@@ -35,18 +35,6 @@ func S3VolumePrefix(teamID, volumeID string) (string, error) {
 	return fmt.Sprintf("sandboxvolumes/%s/%s", teamID, volumeID), nil
 }
 
-// S3VolumeSyncReplayPrefix returns the object-store prefix for replay payloads of one volume.
-// Example: sandboxvolumes-sync/<teamID>/<volumeID>/replay
-func S3VolumeSyncReplayPrefix(teamID, volumeID string) (string, error) {
-	if err := validatePathID("teamID", teamID); err != nil {
-		return "", err
-	}
-	if err := validatePathID("volumeID", volumeID); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("sandboxvolumes-sync/%s/%s/replay", teamID, volumeID), nil
-}
-
 // FilesystemVolumePath returns the internal S0FS directory where a volume lives.
 // Example: /volumes/<volumeID>
 func FilesystemVolumePath(volumeID string) (string, error) {

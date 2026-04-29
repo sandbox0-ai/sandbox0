@@ -19,7 +19,7 @@ func authContext(teamID, sandboxID string) context.Context {
 }
 
 func newTestFileSystemServer(volMgr volumeManager, repo VolumeRepository, hub *notify.Hub) *FileSystemServer {
-	return NewFileSystemServer(volMgr, repo, hub, nil, logrus.New(), nil, nil)
+	return NewFileSystemServer(volMgr, repo, hub, nil, logrus.New(), nil)
 }
 
 type fakeVolumeManager struct {

@@ -148,17 +148,6 @@ type StorageProxyConfig struct {
 	// +kubebuilder:default=256
 	WatchEventQueueSize int `yaml:"watch_event_queue_size" json:"watchEventQueueSize"`
 
-	// Volume sync maintenance
-	// +optional
-	// +kubebuilder:default="10m"
-	SyncCompactionInterval string `yaml:"sync_compaction_interval" json:"syncCompactionInterval"`
-	// +optional
-	// +kubebuilder:default=10000
-	SyncJournalRetainEntries int64 `yaml:"sync_journal_retain_entries" json:"syncJournalRetainEntries"`
-	// +optional
-	// +kubebuilder:default="24h"
-	SyncRequestRetention string `yaml:"sync_request_retention" json:"syncRequestRetention"`
-
 	// Snapshot restore
 	// +optional
 	// +kubebuilder:default="30s"

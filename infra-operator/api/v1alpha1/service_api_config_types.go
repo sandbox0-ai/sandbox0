@@ -577,15 +577,6 @@ type StorageProxyConfig struct {
 	// +kubebuilder:default=256
 	WatchEventQueueSize int `json:"watchEventQueueSize,omitempty"`
 	// +optional
-	// +kubebuilder:default="10m"
-	SyncCompactionInterval string `json:"syncCompactionInterval,omitempty"`
-	// +optional
-	// +kubebuilder:default=10000
-	SyncJournalRetainEntries int64 `json:"syncJournalRetainEntries,omitempty"`
-	// +optional
-	// +kubebuilder:default="24h"
-	SyncRequestRetention string `json:"syncRequestRetention,omitempty"`
-	// +optional
 	// +kubebuilder:default="30s"
 	RestoreRemountTimeout string `json:"restoreRemountTimeout,omitempty"`
 	// +optional

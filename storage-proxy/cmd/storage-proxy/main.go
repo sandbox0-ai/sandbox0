@@ -28,7 +28,6 @@ import (
 	httpserver "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/http"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/notify"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/snapshot"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volsync"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volumelock"
 	"github.com/sirupsen/logrus"
@@ -130,44 +129,9 @@ func main() {
 	volMgr.SetMetrics(storageProxyMetrics)
 	directVolumeFileIdleTTL := buildDirectVolumeFileIdleTTL(cfg)
 	directVolumeFileCleanupInterval := buildDirectVolumeFileCleanupInterval(cfg, directVolumeFileIdleTTL)
-	var syncSvc *volsync.Service
-	var syncMaintenance *volsync.Maintenance
 	var volumeBarrier *volumelock.Locker
-	syncMaintenanceCfg := buildSyncMaintenanceConfig(cfg)
 	if pool != nil {
 		volumeBarrier = volumelock.New(pool)
-	}
-	if repo != nil {
-		syncSvc = volsync.NewService(repo, logrusLogger)
-		if sharedClock != nil {
-			syncSvc.SetNowFunc(sharedClock.Now)
-		}
-		syncSvc.SetMetrics(storageProxyMetrics)
-		syncSvc.SetConflictArtifactWriter(volsync.NewConflictArtifactWriter(volMgr, logrusLogger))
-		syncSvc.SetReplicaChangeApplier(volsync.NewVolumeChangeApplier(volMgr, logrusLogger))
-		replayPayloadStore, err := volsync.NewReplayPayloadStore(cfg, storageProxyMetrics)
-		if err != nil {
-			zapLogger.Fatal("Failed to initialize replay payload store", zap.Error(err))
-		}
-		syncSvc.SetReplayPayloadStore(replayPayloadStore)
-		syncSvc.SetVolumeMutationBarrier(volumeBarrier)
-		syncMaintenance = volsync.NewMaintenance(repo, syncSvc, logrusLogger, syncMaintenanceCfg)
-		if sharedClock != nil {
-			syncMaintenance.SetNowFunc(sharedClock.Now)
-		}
-		syncMaintenance.SetMetrics(storageProxyMetrics)
-	}
-
-	var syncMaintenanceCancel context.CancelFunc
-	if syncMaintenance != nil && syncMaintenance.Enabled() {
-		var maintenanceCtx context.Context
-		maintenanceCtx, syncMaintenanceCancel = context.WithCancel(context.Background())
-		go syncMaintenance.Run(maintenanceCtx)
-		zapLogger.Info("Volume sync maintenance started",
-			zap.Duration("compaction_interval", syncMaintenanceCfg.CompactionInterval),
-			zap.Int64("journal_retain_entries", syncMaintenanceCfg.JournalRetainEntries),
-			zap.Duration("request_retention", syncMaintenanceCfg.RequestRetention),
-		)
 	}
 
 	// Create watch event hub
@@ -257,7 +221,7 @@ func main() {
 
 	zapLogger.Info("Using internalauth validator for HTTP authentication")
 
-	fsServer := fsserver.NewFileSystemServer(volMgr, repo, eventHub, eventBroadcaster, logrusLogger, syncSvc, volumeBarrier)
+	fsServer := fsserver.NewFileSystemServer(volMgr, repo, eventHub, eventBroadcaster, logrusLogger, volumeBarrier)
 	if sharedClock != nil {
 		fsServer.SetNowFunc(sharedClock.Now)
 	}
@@ -278,7 +242,7 @@ func main() {
 	}
 
 	// Create HTTP server
-	httpSrv := httpserver.NewServer(logrusLogger, cfg, k8sClient, repo, meteringRepo, cfg.RegionID, httpAuthenticator, snapshotMgr, syncSvc, volumeBarrier, volMgr, fsServer, eventHub)
+	httpSrv := httpserver.NewServer(logrusLogger, cfg, k8sClient, repo, meteringRepo, cfg.RegionID, httpAuthenticator, snapshotMgr, volumeBarrier, volMgr, fsServer, eventHub)
 	httpAddr := fmt.Sprintf("%s:%d", cfg.HTTPAddr, cfg.HTTPPort)
 
 	readTimeout, _ := time.ParseDuration(cfg.HTTPReadTimeout)
@@ -318,9 +282,6 @@ func main() {
 
 	zapLogger.Info("Shutting down gracefully...")
 
-	if syncMaintenanceCancel != nil {
-		syncMaintenanceCancel()
-	}
 	directMountCleanupCancel()
 
 	// Shutdown HTTP server
@@ -492,29 +453,6 @@ func (a *volumeProviderAdapter) GetVolume(volumeID string) (coordinator.VolumeCo
 
 func (a *volumeProviderAdapter) ListVolumes() []string {
 	return a.volMgr.ListVolumes()
-}
-
-func buildSyncMaintenanceConfig(cfg *config.StorageProxyConfig) volsync.MaintenanceConfig {
-	compactionInterval, _ := time.ParseDuration(cfg.SyncCompactionInterval)
-	if compactionInterval == 0 {
-		compactionInterval = 10 * time.Minute
-	}
-
-	journalRetainEntries := cfg.SyncJournalRetainEntries
-	if journalRetainEntries == 0 {
-		journalRetainEntries = 10000
-	}
-
-	requestRetention, _ := time.ParseDuration(cfg.SyncRequestRetention)
-	if requestRetention == 0 {
-		requestRetention = 24 * time.Hour
-	}
-
-	return volsync.MaintenanceConfig{
-		CompactionInterval:   compactionInterval,
-		JournalRetainEntries: journalRetainEntries,
-		RequestRetention:     requestRetention,
-	}
 }
 
 func buildDirectVolumeFileIdleTTL(cfg *config.StorageProxyConfig) time.Duration {

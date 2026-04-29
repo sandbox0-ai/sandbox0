@@ -101,9 +101,6 @@ func ToStorageProxy(spec *infrav1alpha1.StorageProxyConfig) *apiconfig.StoragePr
 	cfg.MaxBytesPerSecond = spec.MaxBytesPerSecond
 	cfg.WatchEventsEnabled = spec.WatchEventsEnabled
 	cfg.WatchEventQueueSize = spec.WatchEventQueueSize
-	cfg.SyncCompactionInterval = spec.SyncCompactionInterval
-	cfg.SyncJournalRetainEntries = spec.SyncJournalRetainEntries
-	cfg.SyncRequestRetention = spec.SyncRequestRetention
 	cfg.RestoreRemountTimeout = spec.RestoreRemountTimeout
 	cfg.KubeconfigPath = spec.KubeconfigPath
 	return cfg

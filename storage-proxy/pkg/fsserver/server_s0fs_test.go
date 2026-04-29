@@ -289,7 +289,7 @@ func TestS0FSWatchEventsIncludePaths(t *testing.T) {
 		volumes: map[string]*volume.VolumeContext{
 			"vol-1": volCtx,
 		},
-	}, nil, nil, broadcaster, nil, nil, nil)
+	}, nil, nil, broadcaster, nil, nil)
 	ctx := authContext("team-a", "")
 
 	createResp, err := server.Create(ctx, &pb.CreateRequest{

@@ -20,7 +20,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/notify"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/pathnorm"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/snapshot"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volsync"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"github.com/sirupsen/logrus"
@@ -63,18 +62,6 @@ type snapshotManager interface {
 	RestoreSnapshot(ctx context.Context, req *snapshot.RestoreSnapshotRequest) error
 	DeleteSnapshot(ctx context.Context, volumeID, snapshotID, teamID string) error
 	ForkVolume(ctx context.Context, req *snapshot.ForkVolumeRequest) (*db.SandboxVolume, error)
-}
-
-type syncManager interface {
-	UpsertReplica(ctx context.Context, req *volsync.UpsertReplicaRequest) (*volsync.ReplicaEnvelope, error)
-	GetReplica(ctx context.Context, volumeID, teamID, replicaID string) (*volsync.ReplicaEnvelope, error)
-	GetHead(ctx context.Context, volumeID, teamID string) (int64, error)
-	ListChanges(ctx context.Context, req *volsync.ListChangesRequest) (*volsync.ListChangesResponse, error)
-	OpenReplayPayload(ctx context.Context, req *volsync.OpenReplayPayloadRequest) (io.ReadCloser, error)
-	AppendReplicaChanges(ctx context.Context, req *volsync.AppendChangesRequest) (*volsync.AppendChangesResponse, error)
-	UpdateReplicaCursor(ctx context.Context, req *volsync.UpdateCursorRequest) (*volsync.ReplicaEnvelope, error)
-	ListConflicts(ctx context.Context, req *volsync.ListConflictsRequest) (*volsync.ListConflictsResponse, error)
-	ResolveConflict(ctx context.Context, req *volsync.ResolveConflictRequest) (*db.SyncConflict, error)
 }
 
 type volumeMutationBarrier interface {
@@ -125,7 +112,6 @@ type Server struct {
 	regionID      string
 	authenticator *auth.HTTPAuthenticator
 	snapshotMgr   snapshotManager
-	syncMgr       syncManager
 	barrier       volumeMutationBarrier
 	volMgr        volumeMountManager
 	fileRPC       volumeFileRPC
@@ -137,7 +123,7 @@ type Server struct {
 }
 
 // NewServer creates a new HTTP server
-func NewServer(logger *logrus.Logger, cfg *config.StorageProxyConfig, k8sClient kubernetes.Interface, repo volumeRepository, meteringRepo meteringWriter, regionID string, authenticator *auth.HTTPAuthenticator, snapshotMgr snapshotManager, syncMgr syncManager, barrier volumeMutationBarrier, volMgr volumeMountManager, fileRPC volumeFileRPC, eventHub *notify.Hub) *Server {
+func NewServer(logger *logrus.Logger, cfg *config.StorageProxyConfig, k8sClient kubernetes.Interface, repo volumeRepository, meteringRepo meteringWriter, regionID string, authenticator *auth.HTTPAuthenticator, snapshotMgr snapshotManager, barrier volumeMutationBarrier, volMgr volumeMountManager, fileRPC volumeFileRPC, eventHub *notify.Hub) *Server {
 	selfPodID, err := os.Hostname()
 	if err != nil {
 		selfPodID = ""
@@ -152,7 +138,6 @@ func NewServer(logger *logrus.Logger, cfg *config.StorageProxyConfig, k8sClient 
 		regionID:      regionID,
 		authenticator: authenticator,
 		snapshotMgr:   snapshotMgr,
-		syncMgr:       syncMgr,
 		barrier:       barrier,
 		volMgr:        volMgr,
 		fileRPC:       fileRPC,
@@ -198,18 +183,6 @@ func NewServer(logger *logrus.Logger, cfg *config.StorageProxyConfig, k8sClient 
 	s.mux.HandleFunc("GET /sandboxvolumes/{volume_id}/snapshots/{snapshot_id}", s.getSnapshot)
 	s.mux.HandleFunc("POST /sandboxvolumes/{volume_id}/snapshots/{snapshot_id}/restore", s.restoreSnapshot)
 	s.mux.HandleFunc("DELETE /sandboxvolumes/{volume_id}/snapshots/{snapshot_id}", s.deleteSnapshot)
-
-	// Volume sync handlers
-	s.mux.HandleFunc("PUT /sandboxvolumes/{id}/sync/replicas/{replica_id}", s.upsertSyncReplica)
-	s.mux.HandleFunc("GET /sandboxvolumes/{id}/sync/replicas/{replica_id}", s.getSyncReplica)
-	s.mux.HandleFunc("POST /sandboxvolumes/{id}/sync/bootstrap", s.createSyncBootstrap)
-	s.mux.HandleFunc("GET /sandboxvolumes/{id}/sync/bootstrap/archive", s.downloadSyncBootstrapArchive)
-	s.mux.HandleFunc("GET /sandboxvolumes/{id}/sync/changes", s.listSyncChanges)
-	s.mux.HandleFunc("GET /sandboxvolumes/{id}/sync/replay-payload", s.downloadSyncReplayPayload)
-	s.mux.HandleFunc("GET /sandboxvolumes/{id}/sync/conflicts", s.listSyncConflicts)
-	s.mux.HandleFunc("PUT /sandboxvolumes/{id}/sync/conflicts/{conflict_id}", s.resolveSyncConflict)
-	s.mux.HandleFunc("POST /sandboxvolumes/{id}/sync/replicas/{replica_id}/changes", s.appendSyncChanges)
-	s.mux.HandleFunc("PUT /sandboxvolumes/{id}/sync/replicas/{replica_id}/cursor", s.updateSyncReplicaCursor)
 
 	return s
 }

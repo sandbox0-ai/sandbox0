@@ -17,7 +17,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/notify"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/router"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volsync"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"github.com/sirupsen/logrus"
@@ -29,7 +28,6 @@ type FileSystemServer struct {
 	volumeRepo        VolumeRepository
 	eventHub          *notify.Hub
 	eventBroadcaster  notify.Broadcaster
-	syncRecorder      syncRecorder
 	mutationBarrier   volumeMutationBarrier
 	volumeRouter      *router.VolumeRouter
 	logger            *logrus.Logger
@@ -56,16 +54,12 @@ type VolumeRepository interface {
 	GetSandboxVolumeOwner(ctx context.Context, volumeID string) (*db.SandboxVolumeOwner, error)
 }
 
-type syncRecorder interface {
-	RecordRemoteChange(ctx context.Context, change *volsync.RemoteChange) error
-}
-
 type volumeMutationBarrier interface {
 	WithShared(ctx context.Context, volumeID string, fn func(context.Context) error) error
 }
 
 // NewFileSystemServer creates a new file system server
-func NewFileSystemServer(volMgr volumeManager, volumeRepo VolumeRepository, eventHub *notify.Hub, eventBroadcaster notify.Broadcaster, logger *logrus.Logger, syncRecorder syncRecorder, mutationBarrier volumeMutationBarrier) *FileSystemServer {
+func NewFileSystemServer(volMgr volumeManager, volumeRepo VolumeRepository, eventHub *notify.Hub, eventBroadcaster notify.Broadcaster, logger *logrus.Logger, mutationBarrier volumeMutationBarrier) *FileSystemServer {
 	if eventBroadcaster == nil && eventHub != nil {
 		eventBroadcaster = notify.NewLocalBroadcaster(eventHub)
 	}
@@ -74,7 +68,6 @@ func NewFileSystemServer(volMgr volumeManager, volumeRepo VolumeRepository, even
 		volumeRepo:        volumeRepo,
 		eventHub:          eventHub,
 		eventBroadcaster:  eventBroadcaster,
-		syncRecorder:      syncRecorder,
 		mutationBarrier:   mutationBarrier,
 		volumeRouter:      router.NewVolumeRouter(),
 		logger:            logger,
@@ -153,17 +146,6 @@ func accessActor(req *pb.AccessRequest) *pb.PosixActor {
 		Uid:  req.Uid,
 		Gids: req.Gids,
 	}
-}
-
-type syncRecordSuppressedKey struct{}
-
-func suppressSyncRecord(ctx context.Context) context.Context {
-	return context.WithValue(ctx, syncRecordSuppressedKey{}, true)
-}
-
-func shouldSkipSyncRecord(ctx context.Context) bool {
-	skip, _ := ctx.Value(syncRecordSuppressedKey{}).(bool)
-	return skip
 }
 
 func dirtyWriteKey(volumeID string, handleID uint64) string {
@@ -303,37 +285,12 @@ func (s *FileSystemServer) publishEvent(ctx context.Context, event *pb.WatchEven
 		event.OriginSandboxId = claims.SandboxID
 	}
 	if s.eventBroadcaster == nil || event == nil {
-		goto recordSync
+		return
 	}
 	if event.TimestampUnix == 0 {
 		event.TimestampUnix = s.currentTime().Unix()
 	}
 	s.eventBroadcaster.Publish(ctx, event)
-
-recordSync:
-	if s.syncRecorder == nil || event == nil {
-		return
-	}
-	if shouldSkipSyncRecord(ctx) {
-		return
-	}
-	if event.TimestampUnix == 0 {
-		event.TimestampUnix = s.currentTime().Unix()
-	}
-	if claims == nil || claims.TeamID == "" {
-		return
-	}
-	if err := s.syncRecorder.RecordRemoteChange(ctx, &volsync.RemoteChange{
-		VolumeID:   event.VolumeId,
-		TeamID:     claims.TeamID,
-		SandboxID:  claims.SandboxID,
-		EventType:  watchEventTypeToSyncEvent(event.EventType),
-		Path:       event.Path,
-		OldPath:    event.OldPath,
-		OccurredAt: time.Unix(event.TimestampUnix, 0),
-	}); err != nil {
-		s.logger.WithError(err).WithField("volume_id", event.VolumeId).Warn("Failed to record remote sync journal entry")
-	}
 }
 
 func withAuthorizedVolumeMutation[T any](s *FileSystemServer, ctx context.Context, volumeID string, fn func(context.Context, *volume.VolumeContext) (T, error)) (T, error) {
@@ -362,23 +319,6 @@ func withAuthorizedVolumeMutation[T any](s *FileSystemServer, ctx context.Contex
 		return zero, err
 	}
 	return out, nil
-}
-
-func watchEventTypeToSyncEvent(eventType pb.WatchEventType) string {
-	switch eventType {
-	case pb.WatchEventType_WATCH_EVENT_TYPE_CREATE:
-		return db.SyncEventCreate
-	case pb.WatchEventType_WATCH_EVENT_TYPE_WRITE:
-		return db.SyncEventWrite
-	case pb.WatchEventType_WATCH_EVENT_TYPE_REMOVE:
-		return db.SyncEventRemove
-	case pb.WatchEventType_WATCH_EVENT_TYPE_RENAME:
-		return db.SyncEventRename
-	case pb.WatchEventType_WATCH_EVENT_TYPE_CHMOD:
-		return db.SyncEventChmod
-	default:
-		return db.SyncEventInvalidate
-	}
 }
 
 func (s *FileSystemServer) authorizeVolumeMount(ctx context.Context, volumeID string) (*db.SandboxVolume, error) {
@@ -552,7 +492,7 @@ func (s *FileSystemServer) Write(ctx context.Context, req *pb.WriteRequest) (*pb
 			if path == "" {
 				eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
 			}
-			s.publishEvent(suppressSyncRecord(runCtx), &pb.WatchEvent{
+			s.publishEvent(runCtx, &pb.WatchEvent{
 				VolumeId:  req.VolumeId,
 				EventType: eventType,
 				Path:      path,
@@ -691,7 +631,7 @@ func (s *FileSystemServer) openS0FS(ctx context.Context, volCtx *volume.VolumeCo
 		if path == "" {
 			eventType = pb.WatchEventType_WATCH_EVENT_TYPE_INVALIDATE
 		}
-		s.publishEvent(suppressSyncRecord(ctx), &pb.WatchEvent{
+		s.publishEvent(ctx, &pb.WatchEvent{
 			VolumeId:  req.VolumeId,
 			EventType: eventType,
 			Path:      path,

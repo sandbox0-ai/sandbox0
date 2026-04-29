@@ -216,6 +216,14 @@ func KubectlDeleteNamespacesByLabel(ctx context.Context, kubeconfig, labelSelect
 	return Kubectl(ctx, kubeconfig, "delete", "namespaces", "-l", labelSelector, "--ignore-not-found=true", "--wait=false")
 }
 
+// KubectlDeleteNamespace requests deletion for a namespace without waiting in kubectl.
+func KubectlDeleteNamespace(ctx context.Context, kubeconfig, namespace string) error {
+	if namespace == "" {
+		return fmt.Errorf("namespace is required")
+	}
+	return Kubectl(ctx, kubeconfig, "delete", "namespace", namespace, "--ignore-not-found=true", "--wait=false")
+}
+
 func withNamespace(namespace string) []string {
 	if namespace == "" {
 		return nil
@@ -314,6 +322,41 @@ func KubectlWaitForNamespacesDeletedByLabel(ctx context.Context, kubeconfig, lab
 
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timeout waiting for namespaces with selector %q to be deleted: %s", labelSelector, strings.Join(names, ", "))
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
+// KubectlWaitForNamespaceDeleted waits for a namespace to disappear.
+func KubectlWaitForNamespaceDeleted(ctx context.Context, kubeconfig, namespaceName, timeout string) error {
+	if namespaceName == "" {
+		return fmt.Errorf("namespace is required")
+	}
+
+	timeoutDuration, err := time.ParseDuration(timeout)
+	if err != nil {
+		return fmt.Errorf("parse timeout %q: %w", timeout, err)
+	}
+
+	deadline := time.Now().Add(timeoutDuration)
+	for {
+		output, err := KubectlOutput(ctx, kubeconfig, "get", "namespace", namespaceName, "--ignore-not-found=true", "-o", "json")
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(output) == "" {
+			return nil
+		}
+
+		var item namespace
+		if err := json.Unmarshal([]byte(output), &item); err != nil {
+			return fmt.Errorf("decode namespace %q: %w", namespaceName, err)
+		}
+
+		description := strings.Join(namespacePhaseDescriptions([]namespace{item}), ", ")
+		fmt.Printf("Namespace still present: %s\n", description)
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for namespace %q to be deleted: %s", namespaceName, description)
 		}
 		time.Sleep(2 * time.Second)
 	}

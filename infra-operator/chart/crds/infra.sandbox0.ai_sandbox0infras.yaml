@@ -2632,7 +2632,7 @@ spec:
                             default: aes256gcm-rsa
                             type: string
                           objectEncryptionEnabled:
-                            default: false
+                            default: true
                             type: boolean
                           objectEncryptionPassphrase:
                             type: string

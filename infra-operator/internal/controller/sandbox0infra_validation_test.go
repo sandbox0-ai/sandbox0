@@ -91,6 +91,27 @@ func TestGeneratedCRDIncludesCreateOncePresenceValidations(t *testing.T) {
 	}
 }
 
+func TestGeneratedCRDDefaultsObjectEncryptionEnabled(t *testing.T) {
+	crdPath := filepath.Join("..", "..", "chart", "crds", "infra.sandbox0.ai_sandbox0infras.yaml")
+	content, err := os.ReadFile(crdPath)
+	if err != nil {
+		t.Fatalf("read generated CRD: %v", err)
+	}
+
+	text := string(content)
+	idx := strings.Index(text, "objectEncryptionEnabled:")
+	if idx < 0 {
+		t.Fatal("expected generated CRD to include objectEncryptionEnabled")
+	}
+	end := idx + 200
+	if end > len(text) {
+		end = len(text)
+	}
+	if !strings.Contains(text[idx:end], "default: true") {
+		t.Fatalf("expected objectEncryptionEnabled default true near CRD field, got:\n%s", text[idx:end])
+	}
+}
+
 func TestValidateSpecSemanticsRejectsBuiltinDatabaseCreateOnceChanges(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},

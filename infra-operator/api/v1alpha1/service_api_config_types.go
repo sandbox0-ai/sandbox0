@@ -506,7 +506,7 @@ type StorageProxyConfig struct {
 	// +kubebuilder:default=20
 	FilesystemMaxUpload int `json:"filesystemMaxUpload,omitempty"`
 	// +optional
-	// +kubebuilder:default=false
+	// +kubebuilder:default=true
 	ObjectEncryptionEnabled bool `json:"objectEncryptionEnabled,omitempty"`
 	// +optional
 	ObjectEncryptionPassphrase string `json:"objectEncryptionPassphrase,omitempty"`

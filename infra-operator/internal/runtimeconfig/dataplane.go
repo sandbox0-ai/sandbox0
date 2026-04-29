@@ -61,7 +61,7 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 }
 
 func ToStorageProxy(spec *infrav1alpha1.StorageProxyConfig) *apiconfig.StorageProxyConfig {
-	cfg := &apiconfig.StorageProxyConfig{}
+	cfg := &apiconfig.StorageProxyConfig{ObjectEncryptionEnabled: true}
 	if spec == nil {
 		return cfg
 	}

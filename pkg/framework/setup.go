@@ -1,6 +1,7 @@
 package framework
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"time"
@@ -85,6 +86,11 @@ func SetupScenario(cfg Config, scenario Scenario) (*ScenarioEnv, func(), error) 
 		})
 	}
 
+	if err := CleanupManagerOwnedNamespaces(testCtx.Context, workingCfg.Kubeconfig, "3m"); err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+
 	if !workingCfg.SkipOperatorInstall {
 		fmt.Printf("Installing infra-operator...\n")
 		if err := InstallOperator(testCtx.Context, workingCfg); err != nil {
@@ -135,8 +141,21 @@ func SetupScenario(cfg Config, scenario Scenario) (*ScenarioEnv, func(), error) 
 	}
 	appendCleanup(func() {
 		_ = KubectlDeleteManifest(testCtx.Context, workingCfg.Kubeconfig, manifestPath)
-		_ = KubectlWaitForNamespacesDeletedByLabel(testCtx.Context, workingCfg.Kubeconfig, managerOwnedNamespaceLabelSelector, "2m")
+		if err := CleanupManagerOwnedNamespaces(testCtx.Context, workingCfg.Kubeconfig, "3m"); err != nil {
+			fmt.Printf("Failed to clean up manager-owned namespaces: %v\n", err)
+		}
 	})
 
 	return env, cleanup, nil
+}
+
+// CleanupManagerOwnedNamespaces removes namespaces created by sandbox managers during e2e scenarios.
+func CleanupManagerOwnedNamespaces(ctx context.Context, kubeconfig, timeout string) error {
+	if ctx == nil {
+		return fmt.Errorf("context is required")
+	}
+	if err := KubectlDeleteNamespacesByLabel(ctx, kubeconfig, managerOwnedNamespaceLabelSelector); err != nil {
+		return err
+	}
+	return KubectlWaitForNamespacesDeletedByLabel(ctx, kubeconfig, managerOwnedNamespaceLabelSelector, timeout)
 }

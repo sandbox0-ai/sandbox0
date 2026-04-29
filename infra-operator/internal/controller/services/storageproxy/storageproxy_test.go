@@ -110,6 +110,92 @@ func TestReconcileUsesServicePortForHTTPServiceExposure(t *testing.T) {
 
 }
 
+func TestReconcileMountsObjectEncryptionKeyWhenEnabled(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeBuiltin,
+				Builtin: &infrav1alpha1.BuiltinDatabaseConfig{
+					Enabled:  true,
+					Port:     5432,
+					Username: "sandbox0",
+					Database: "sandbox0",
+					SSLMode:  "disable",
+				},
+			},
+			Storage: &infrav1alpha1.StorageConfig{
+				Type: infrav1alpha1.StorageTypeBuiltin,
+				Builtin: &infrav1alpha1.BuiltinStorageConfig{
+					Enabled: true,
+					Bucket:  "sandbox0",
+					Region:  "us-east-1",
+				},
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				StorageProxy: &infrav1alpha1.StorageProxyServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						Replicas:             1,
+					},
+					Config: &infrav1alpha1.StorageProxyConfig{
+						ObjectEncryptionEnabled: true,
+					},
+				},
+			},
+		},
+	}
+
+	reconciler, client := newStorageProxyTestReconciler(t,
+		infra.DeepCopy(),
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "demo-sandbox0-database-credentials",
+				Namespace: infra.Namespace,
+			},
+			Data: map[string][]byte{
+				"username": []byte("sandbox0"),
+				"password": []byte("db-password"),
+				"database": []byte("sandbox0"),
+				"port":     []byte("5432"),
+			},
+		},
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "demo-sandbox0-rustfs-credentials",
+				Namespace: infra.Namespace,
+			},
+			Data: map[string][]byte{
+				"endpoint":          []byte("http://demo-rustfs.sandbox0-system.svc:9000"),
+				"RUSTFS_ACCESS_KEY": []byte("access-key"),
+				"RUSTFS_SECRET_KEY": []byte("secret-key"),
+			},
+		},
+	)
+
+	if err := reconciler.Reconcile(context.Background(), infra, "sandbox0ai/infra", "latest"); err != nil && !strings.Contains(err.Error(), "not ready") {
+		t.Fatalf("reconcile returned unexpected error: %v", err)
+	}
+
+	deployment := &appsv1.Deployment{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: "demo-storage-proxy", Namespace: infra.Namespace}, deployment); err != nil {
+		t.Fatalf("get storage-proxy deployment: %v", err)
+	}
+	assertStorageProxyVolumeMount(t, deployment.Spec.Template.Spec.Containers[0].VolumeMounts, "object-encryption-key", common.ObjectEncryptionMountDir)
+	assertStorageProxyVolume(t, deployment.Spec.Template.Spec.Volumes, "object-encryption-key")
+
+	secret := &corev1.Secret{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: common.ObjectEncryptionSecretName(infra.Name), Namespace: infra.Namespace}, secret); err != nil {
+		t.Fatalf("get object encryption secret: %v", err)
+	}
+	if len(secret.Data[common.ObjectEncryptionSecretKey]) == 0 {
+		t.Fatal("expected object encryption secret to contain a private key")
+	}
+}
+
 func TestBuildConfigMapsBuiltinStorageToS3CompatibleType(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{
@@ -208,4 +294,27 @@ func findServicePort(t *testing.T, service *corev1.Service, name string) corev1.
 	}
 	t.Fatalf("expected service port %q to exist", name)
 	return corev1.ServicePort{}
+}
+
+func assertStorageProxyVolumeMount(t *testing.T, mounts []corev1.VolumeMount, name, mountPath string) {
+	t.Helper()
+	for _, mount := range mounts {
+		if mount.Name == name {
+			if mount.MountPath != mountPath {
+				t.Fatalf("volume mount %q path = %q, want %q", name, mount.MountPath, mountPath)
+			}
+			return
+		}
+	}
+	t.Fatalf("expected volume mount %q, got %#v", name, mounts)
+}
+
+func assertStorageProxyVolume(t *testing.T, volumes []corev1.Volume, name string) {
+	t.Helper()
+	for _, volume := range volumes {
+		if volume.Name == name {
+			return
+		}
+	}
+	t.Fatalf("expected volume %q, got %#v", name, volumes)
 }

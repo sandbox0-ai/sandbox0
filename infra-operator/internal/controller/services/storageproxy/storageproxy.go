@@ -18,18 +18,10 @@ package storageproxy
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
-	"encoding/pem"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
@@ -43,10 +35,6 @@ import (
 )
 
 const (
-	objectEncryptionSecretSuffix  = "object-encryption-key"
-	objectEncryptionKeyFilename   = "object_rsa_private.pem"
-	objectEncryptionMountDir      = "/etc/storage-proxy/objectstore"
-	objectEncryptionKeyPath       = "/etc/storage-proxy/objectstore/object_rsa_private.pem"
 	objectStorageTypeS3Compatible = "s3"
 )
 
@@ -84,11 +72,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		return err
 	}
 	if config.ObjectEncryptionEnabled {
-		secretName := fmt.Sprintf("%s-%s", infra.Name, objectEncryptionSecretSuffix)
-		if err := r.ensureEncryptionKeySecret(ctx, infra, secretName); err != nil {
+		if err := common.EnsureObjectEncryptionKeySecret(ctx, r.Resources, infra); err != nil {
 			return err
 		}
-		config.ObjectEncryptionKeyPath = objectEncryptionKeyPath
+		config.ObjectEncryptionKeyPath = common.ObjectEncryptionKeyPath
 	}
 	podAnnotations, err := common.ConfigHashAnnotation(config)
 	if err != nil {
@@ -167,21 +154,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		},
 	}
 	if config.ObjectEncryptionEnabled {
-		secretName := fmt.Sprintf("%s-%s", infra.Name, objectEncryptionSecretSuffix)
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{
 			Name:      "object-encryption-key",
-			MountPath: objectEncryptionMountDir,
+			MountPath: common.ObjectEncryptionMountDir,
 			ReadOnly:  true,
 		})
 		volumes = append(volumes, corev1.Volume{
 			Name: "object-encryption-key",
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName: secretName,
+					SecretName: common.ObjectEncryptionSecretName(infra.Name),
 					Items: []corev1.KeyToPath{
 						{
-							Key:  "private.key",
-							Path: objectEncryptionKeyFilename,
+							Key:  common.ObjectEncryptionSecretKey,
+							Path: common.ObjectEncryptionKeyFilename,
 						},
 					},
 				},
@@ -261,47 +247,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 
 	logger.Info("Storage proxy reconciled successfully")
 	return nil
-}
-
-func (r *Reconciler) ensureEncryptionKeySecret(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, secretName string) error {
-	logger := log.FromContext(ctx)
-	secret := &corev1.Secret{}
-	err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: secretName, Namespace: infra.Namespace}, secret)
-	if err == nil {
-		return nil
-	}
-	if !apierrors.IsNotFound(err) {
-		return err
-	}
-
-	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return fmt.Errorf("generate RSA private key: %w", err)
-	}
-	privateKeyPEM := pem.EncodeToMemory(&pem.Block{
-		Type:  "RSA PRIVATE KEY",
-		Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
-	})
-	secret = &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      secretName,
-			Namespace: infra.Namespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/name":       "storage-proxy",
-				"app.kubernetes.io/instance":   infra.Name,
-				"app.kubernetes.io/managed-by": "sandbox0infra-operator",
-			},
-		},
-		Type: corev1.SecretTypeOpaque,
-		Data: map[string][]byte{
-			"private.key": privateKeyPEM,
-		},
-	}
-	if err := ctrl.SetControllerReference(infra, secret, r.Resources.Scheme); err != nil {
-		return err
-	}
-	logger.Info("Creating object encryption key secret", "secretName", secretName)
-	return r.Resources.Client.Create(ctx, secret)
 }
 
 func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (*apiconfig.StorageProxyConfig, error) {

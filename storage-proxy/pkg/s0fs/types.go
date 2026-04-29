@@ -22,6 +22,7 @@ type Config struct {
 	ObjectStore          objectstore.Store
 	ObjectStoreForVolume ObjectStoreResolver
 	HeadStore            HeadStore
+	Encryption           *EncryptionConfig
 	MaterializeInterval  time.Duration
 	WALSyncHook          func()
 }
@@ -45,11 +46,12 @@ type FileExtent struct {
 }
 
 type Segment struct {
-	ID       string `json:"id"`
-	VolumeID string `json:"volume_id,omitempty"`
-	Key      string `json:"key"`
-	Length   uint64 `json:"length"`
-	SHA256   string `json:"sha256,omitempty"`
+	ID         string             `json:"id"`
+	VolumeID   string             `json:"volume_id,omitempty"`
+	Key        string             `json:"key"`
+	Length     uint64             `json:"length"`
+	SHA256     string             `json:"sha256,omitempty"`
+	Encryption *SegmentEncryption `json:"encryption,omitempty"`
 }
 
 type Node struct {

@@ -164,6 +164,19 @@ func TestReconcilePassesPauseConfigToCtld(t *testing.T) {
 	assertContainsArg(t, args, "-default-sandbox-ttl=5m0s")
 }
 
+func TestReconcileMountsObjectEncryptionKeyWhenEnabled(t *testing.T) {
+	infra := newCtldTestInfra()
+	infra.Spec.Services.StorageProxy = &infrav1alpha1.StorageProxyServiceConfig{
+		Config: &infrav1alpha1.StorageProxyConfig{
+			ObjectEncryptionEnabled: true,
+		},
+	}
+
+	ds := reconcileCtldDaemonSet(t, infra)
+	assertContainerVolumeMount(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "object-encryption-key", common.ObjectEncryptionMountDir)
+	assertPodVolume(t, ds.Spec.Template.Spec.Volumes, "object-encryption-key")
+}
+
 func assertContainsArg(t *testing.T, args []string, want string) {
 	t.Helper()
 	for _, arg := range args {
@@ -172,6 +185,29 @@ func assertContainsArg(t *testing.T, args []string, want string) {
 		}
 	}
 	t.Fatalf("expected args to contain %q, got %#v", want, args)
+}
+
+func assertContainerVolumeMount(t *testing.T, mounts []corev1.VolumeMount, name, mountPath string) {
+	t.Helper()
+	for _, mount := range mounts {
+		if mount.Name == name {
+			if mount.MountPath != mountPath {
+				t.Fatalf("volume mount %q path = %q, want %q", name, mount.MountPath, mountPath)
+			}
+			return
+		}
+	}
+	t.Fatalf("expected volume mount %q, got %#v", name, mounts)
+}
+
+func assertPodVolume(t *testing.T, volumes []corev1.Volume, name string) {
+	t.Helper()
+	for _, volume := range volumes {
+		if volume.Name == name {
+			return
+		}
+	}
+	t.Fatalf("expected volume %q, got %#v", name, volumes)
 }
 
 func newCtldTestInfra() *infrav1alpha1.Sandbox0Infra {

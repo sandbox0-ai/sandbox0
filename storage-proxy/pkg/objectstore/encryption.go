@@ -47,6 +47,17 @@ func NewEncryptor(keyPEM, passphrase, algo string) (Encryptor, error) {
 	return newDataEncryptor(privateKey, algo)
 }
 
+func NewKeyEncryptor(keyPEM, passphrase string) (Encryptor, error) {
+	if strings.TrimSpace(keyPEM) == "" {
+		return nil, fmt.Errorf("encryption key is empty")
+	}
+	privateKey, err := parsePrivateKeyFromPEM([]byte(keyPEM), []byte(passphrase))
+	if err != nil {
+		return nil, err
+	}
+	return newRSAEncryptor(privateKey), nil
+}
+
 func parsePrivateKeyFromPEM(enc []byte, passphrase []byte) (*rsa.PrivateKey, error) {
 	block, _ := pem.Decode(enc)
 	if block == nil {

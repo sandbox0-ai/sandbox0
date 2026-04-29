@@ -48,6 +48,16 @@ For mounted `RWO` volumes, Sandbox0 keeps one active writable owner at a time.
 
 This keeps the mounted filesystem view and the direct volume API view consistent in both directions.
 
+## Application-Layer Encryption
+
+Self-hosted deployments can enable Sandbox0 application-layer volume encryption with `services.storageProxy.config.objectEncryptionEnabled`.
+
+When enabled, S0FS encrypts persisted volume objects before they are written to object storage. Manifest objects are encrypted as full blobs. Segment objects are encrypted in independently authenticated chunks, so cold file reads can still fetch only the ciphertext chunks needed for the requested byte range. Node-local cache files, including the S0FS WAL, head state, and snapshot state, are also encrypted before they are written to disk.
+
+<Callout variant="info">
+Object encryption is service-side application-layer encryption. `storage-proxy` and `ctld` hold the configured key so they can serve normal POSIX filesystem reads and writes. This is not end-to-end encryption where Sandbox0 services cannot decrypt volume data.
+</Callout>
+
 ## Direct File Operations
 
 You can operate on files in a Volume directly by volume ID, without mounting the Volume into a Sandbox first.

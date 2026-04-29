@@ -2,6 +2,10 @@ package objectstore
 
 import (
 	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"io"
 	"testing"
 )
@@ -51,6 +55,37 @@ func TestGCSObjectURLEscapesObjectNameAsSinglePathSegment(t *testing.T) {
 	want := "https://storage.googleapis.com/storage/v1/b/sandbox0-data/o/team-a%2Fvolume-a%2Fmeta.json"
 	if got != want {
 		t.Fatalf("object URL = %q, want %q", got, want)
+	}
+}
+
+func TestNewKeyEncryptorRoundTrip(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
+	})
+
+	encryptor, err := NewKeyEncryptor(string(keyPEM), "")
+	if err != nil {
+		t.Fatalf("NewKeyEncryptor() error = %v", err)
+	}
+	plaintext := []byte("sandbox0 object data key")
+	ciphertext, err := encryptor.Encrypt(plaintext)
+	if err != nil {
+		t.Fatalf("Encrypt() error = %v", err)
+	}
+	if bytes.Equal(ciphertext, plaintext) {
+		t.Fatal("ciphertext should not equal plaintext")
+	}
+	got, err := encryptor.Decrypt(ciphertext)
+	if err != nil {
+		t.Fatalf("Decrypt() error = %v", err)
+	}
+	if !bytes.Equal(got, plaintext) {
+		t.Fatalf("Decrypt() = %q, want %q", got, plaintext)
 	}
 }
 

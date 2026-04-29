@@ -28,6 +28,7 @@ type Engine struct {
 	segments  map[string]*Segment
 
 	materializer            *Materializer
+	encryption              *EncryptionConfig
 	mutationVersion         uint64
 	lastCommittedManifest   uint64
 	lastMaterializedVersion uint64
@@ -43,13 +44,16 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 		return nil, fmt.Errorf("%w: volume id is required", ErrInvalidInput)
 	}
 
-	walFile, records, err := openWAL(cfg.WALPath, cfg.WALSyncHook)
+	walFile, records, err := openWAL(cfg.WALPath, cfg.VolumeID, cfg.Encryption, cfg.WALSyncHook)
 	if err != nil {
 		return nil, err
 	}
 
 	state, err := loadCurrentState(cfg)
 	materializer := NewMaterializer(cfg.VolumeID, cfg.ObjectStore, cfg.HeadStore, cfg.ObjectStoreForVolume)
+	if materializer != nil {
+		materializer.SetEncryption(cfg.Encryption)
+	}
 	var latestManifest *Manifest
 	if materializer != nil {
 		latestState, manifest, latestErr := materializer.LoadLatestState(ctx)
@@ -104,6 +108,7 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 		coldFiles:    state.ColdFiles,
 		segments:     state.Segments,
 		materializer: materializer,
+		encryption:   cfg.Encryption,
 	}
 	if latestManifest != nil {
 		e.lastCommittedManifest = latestManifest.ManifestSeq
@@ -635,7 +640,7 @@ func (e *Engine) CreateSnapshot(snapshotID string) (*SnapshotState, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := saveSnapshotState(snapshotFilePath(e.wal.path, snapshotID), state); err != nil {
+	if err := saveSnapshotState(snapshotFilePath(e.wal.path, snapshotID), e.volumeID, "snapshot:"+snapshotID, state, e.encryption); err != nil {
 		return nil, err
 	}
 	return state, nil
@@ -647,7 +652,7 @@ func (e *Engine) RestoreSnapshot(snapshotID string) error {
 	if err := e.checkOpen(); err != nil {
 		return err
 	}
-	state, err := loadSnapshotState(snapshotFilePath(e.wal.path, snapshotID))
+	state, err := loadSnapshotState(snapshotFilePath(e.wal.path, snapshotID), e.volumeID, "snapshot:"+snapshotID, e.encryption)
 	if err != nil {
 		return err
 	}
@@ -778,14 +783,14 @@ func (e *Engine) replaceStateLocked(state *SnapshotState) {
 }
 
 func (e *Engine) persistCurrentStateLocked() error {
-	return saveSnapshotState(headStatePath(e.wal.path), cloneState(e.currentStateLocked()))
+	return saveSnapshotState(headStatePath(e.wal.path), e.volumeID, "head", cloneState(e.currentStateLocked()), e.encryption)
 }
 
 func loadCurrentState(cfg Config) (*SnapshotState, error) {
 	if cfg.WALPath == "" {
 		return nil, fmt.Errorf("%w: wal path is required", ErrInvalidInput)
 	}
-	return loadSnapshotState(headStatePath(cfg.WALPath))
+	return loadSnapshotState(headStatePath(cfg.WALPath), cfg.VolumeID, "head", cfg.Encryption)
 }
 
 func shouldUseMaterializedState(current *SnapshotState, currentErr error, latest *SnapshotState, walRecords int) bool {

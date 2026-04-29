@@ -140,10 +140,12 @@ func SetupScenario(cfg Config, scenario Scenario) (*ScenarioEnv, func(), error) 
 		return nil, nil, err
 	}
 	appendCleanup(func() {
-		_ = KubectlDeleteManifest(testCtx.Context, workingCfg.Kubeconfig, manifestPath)
+		// Pods can mount sandbox0 CSI volumes. Delete sandbox namespaces before the
+		// infra manifest so storage-proxy is still available for kubelet unpublish.
 		if err := CleanupManagerOwnedNamespaces(testCtx.Context, workingCfg.Kubeconfig, "3m"); err != nil {
 			fmt.Printf("Failed to clean up manager-owned namespaces: %v\n", err)
 		}
+		_ = KubectlDeleteManifest(testCtx.Context, workingCfg.Kubeconfig, manifestPath)
 	})
 
 	return env, cleanup, nil

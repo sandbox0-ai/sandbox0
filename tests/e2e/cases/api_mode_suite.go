@@ -1,6 +1,7 @@
 package cases
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -31,6 +32,7 @@ type apiModeSuiteOptions struct {
 	includePoolReadinessGate  bool
 	includeNetworkPolicy      bool
 	includeVolumeLifecycle    bool
+	includeObjectEncryption   bool
 	includeWebhookLifecycle   bool
 	includeMeteringAssertions bool
 	expectStorageUnavailable  bool
@@ -243,6 +245,11 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					assertClaimBootstrapMountValidation(env, session)
 				})
 
+				if opts.includeObjectEncryption {
+					It("keeps encrypted volume objects and local cache opaque", func() {
+						assertObjectEncryptionLifecycle(env, session)
+					})
+				}
 			})
 		}
 
@@ -1878,6 +1885,149 @@ func assertVolumeLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session
 	status, err = session.DeleteSnapshot(env.TestCtx.Context, GinkgoT(), snapshotVolumeID, snapshot.Id)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
+}
+
+func assertObjectEncryptionLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session) {
+	secretName := env.Infra.Name + "-object-encryption-key"
+	privateKey := getSecretValueWithEscapedKey(env, secretName, "private\\.key")
+	Expect(privateKey).To(ContainSubstring("BEGIN"))
+
+	assertConfigMapContains(env, env.Infra.Name+"-storage-proxy", "object_encryption_enabled: true")
+	assertConfigMapContains(env, env.Infra.Name+"-ctld", "object_encryption_enabled: true")
+
+	volume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), apispec.CreateSandboxVolumeRequest{})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusCreated))
+	Expect(volume).NotTo(BeNil())
+	volumeID := expectStringPtr(volume.Id, "volume id")
+	DeferCleanup(func() {
+		if err := session.DeleteSandboxVolumeEventually(env.TestCtx.Context, GinkgoT(), volumeID, 90*time.Second); err != nil {
+			GinkgoWriter.Printf("delete encrypted sandbox volume %q failed during cleanup: %v\n", volumeID, err)
+		}
+	})
+
+	sentinel := fmt.Sprintf("S0FS_OBJECT_ENCRYPTION_E2E_%d", time.Now().UnixNano())
+	beforeContent := []byte(sentinel + "_before\n" + strings.Repeat("a", 128*1024))
+	afterContent := []byte(sentinel + "_after\n" + strings.Repeat("b", 96*1024))
+	filePath := "/object-encryption/sentinel.txt"
+
+	status, err = session.WriteVolumeFile(env.TestCtx.Context, GinkgoT(), volumeID, filePath, beforeContent, "")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+
+	body, status, err := session.ReadVolumeFile(env.TestCtx.Context, GinkgoT(), volumeID, filePath)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(body).To(Equal(beforeContent))
+
+	assertNoPlaintextInStorage(env, "deploy/"+env.Infra.Name+"-storage-proxy", "/var/lib/storage-proxy/cache", sentinel)
+
+	snapshot := createSnapshotEventually(env, session, volumeID, "object-encryption-e2e")
+	Expect(snapshot).NotTo(BeNil())
+	Expect(snapshot.Id).NotTo(BeEmpty())
+
+	status, err = session.WriteVolumeFile(env.TestCtx.Context, GinkgoT(), volumeID, filePath, afterContent, "")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+
+	body, status, err = session.ReadVolumeFile(env.TestCtx.Context, GinkgoT(), volumeID, filePath)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(body).To(Equal(afterContent))
+
+	restoreSnapshotEventually(env, session, volumeID, snapshot.Id)
+
+	body, status, err = session.ReadVolumeFile(env.TestCtx.Context, GinkgoT(), volumeID, filePath)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(body).To(Equal(beforeContent))
+
+	assertNoPlaintextInStorage(env, "deploy/"+env.Infra.Name+"-storage-proxy", "/var/lib/storage-proxy/cache", sentinel)
+	assertNoPlaintextInStorage(env, "pod/"+env.Infra.Name+"-rustfs-0", "/data", sentinel)
+}
+
+func createSnapshotEventually(env *framework.ScenarioEnv, session *e2eutils.Session, volumeID, name string) *apispec.Snapshot {
+	var snapshot *apispec.Snapshot
+	Eventually(func() error {
+		var status int
+		var err error
+		snapshot, status, err = session.CreateSnapshot(env.TestCtx.Context, GinkgoT(), volumeID, apispec.CreateSnapshotRequest{Name: name})
+		if err != nil {
+			return fmt.Errorf("create snapshot status %d: %w", status, err)
+		}
+		if status != http.StatusCreated {
+			return fmt.Errorf("create snapshot status %d", status)
+		}
+		return nil
+	}).WithTimeout(90 * time.Second).WithPolling(5 * time.Second).Should(Succeed())
+	return snapshot
+}
+
+func restoreSnapshotEventually(env *framework.ScenarioEnv, session *e2eutils.Session, volumeID, snapshotID string) {
+	Eventually(func() error {
+		status, err := session.RestoreSnapshot(env.TestCtx.Context, GinkgoT(), volumeID, snapshotID)
+		if err != nil {
+			return fmt.Errorf("restore snapshot status %d: %w", status, err)
+		}
+		if status != http.StatusOK {
+			return fmt.Errorf("restore snapshot status %d", status)
+		}
+		return nil
+	}).WithTimeout(90 * time.Second).WithPolling(5 * time.Second).Should(Succeed())
+}
+
+func getSecretValueWithEscapedKey(env *framework.ScenarioEnv, secretName, escapedKey string) string {
+	output, err := framework.KubectlOutput(
+		env.TestCtx.Context,
+		env.Config.Kubeconfig,
+		"get",
+		"secret",
+		secretName,
+		"-o",
+		fmt.Sprintf("jsonpath={.data.%s}", escapedKey),
+		"--namespace",
+		env.Infra.Namespace,
+	)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(strings.TrimSpace(output)).NotTo(BeEmpty())
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(output))
+	Expect(err).NotTo(HaveOccurred())
+	return string(decoded)
+}
+
+func assertConfigMapContains(env *framework.ScenarioEnv, configMapName, expected string) {
+	output, err := framework.KubectlOutput(
+		env.TestCtx.Context,
+		env.Config.Kubeconfig,
+		"get",
+		"configmap",
+		configMapName,
+		"-o",
+		"yaml",
+		"--namespace",
+		env.Infra.Namespace,
+	)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(output).To(ContainSubstring(expected))
+}
+
+func assertNoPlaintextInStorage(env *framework.ScenarioEnv, target, root, sentinel string) {
+	command := fmt.Sprintf("grep -R -a -n -- %s %s || true", shellQuote(sentinel), shellQuote(root))
+	output, err := framework.KubectlExecOutput(
+		env.TestCtx.Context,
+		env.Config.Kubeconfig,
+		env.Infra.Namespace,
+		target,
+		"sh",
+		"-lc",
+		command,
+	)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(strings.TrimSpace(output)).To(BeEmpty())
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 func assertClaimBootstrapMountLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session) {

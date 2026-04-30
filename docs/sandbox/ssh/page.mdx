@@ -18,17 +18,13 @@ SSH access targets the sandbox procd runtime in the main sandbox container. Temp
 
 The gateway uses the SSH username to decide which sandbox to connect to. Your uploaded public key identifies the user, and the platform still enforces normal sandbox authorization before opening the session.
 
-Most clients should read the connection info from `GET /api/v1/sandboxes/{'{id}'}` instead of hard-coding a region host. The response includes:
+Use `s0 sandbox get` to read the connection info instead of hard-coding a region host:
 
-```json
-{
-  "ssh": {
-    "host": "aws-us-east-1.ssh.sandbox0.example.com",
-    "port": 22,
-    "username": "rs-abc123-default-x7k9m"
-  }
-}
+```bash
+s0 sandbox get "$SANDBOX_ID"
 ```
+
+The table output includes `SSH Host`, `SSH Port`, and `SSH Username` when SSH is available for the sandbox. Use `s0 -o json sandbox get "$SANDBOX_ID"` when you want to script against the same fields.
 
 <Callout variant="warning">
 Legacy `scp -O` is not supported. Use the default OpenSSH `scp` behavior, which runs over the SFTP subsystem.
@@ -40,85 +36,62 @@ Legacy `scp -O` is not supported. Use the default OpenSSH `scp` behavior, which 
 
 Upload your SSH public key once, then reuse standard `ssh`, `scp`, and `sftp` clients.
 
-<Endpoint method="GET">
-/users/me/ssh-keys
-</Endpoint>
-
-<Endpoint method="POST">
-/users/me/ssh-keys
-</Endpoint>
-
-### Create Request Body
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `name` | string | User-defined label for the key |
-| `public_key` | string | Authorized-key format public key |
-
-### SSH Public Key Object
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | string | Stable key ID |
-| `name` | string | User-defined label |
-| `public_key` | string | Normalized authorized-key line |
-| `key_type` | string | Parsed key type, such as `ssh-ed25519` |
-| `fingerprint_sha256` | string | SHA-256 fingerprint |
-| `comment` | string | Optional key comment from the authorized-key line |
-| `created_at` | string | Creation time |
-| `updated_at` | string | Last update time |
+Create a key if you do not already have one:
 
 ```bash
-curl -X POST "$SANDBOX0_BASE_URL/users/me/ssh-keys" \
-  -H "Authorization: Bearer $SANDBOX0_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "laptop",
-    "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample user@host"
-  }'
+ssh-keygen -t ed25519 -f ~/.ssh/sandbox0_ed25519 -C "sandbox0"
+```
+
+Upload the public key with the `s0` CLI:
+
+```bash
+s0 user ssh-key add --public-key-file ~/.ssh/sandbox0_ed25519.pub
+```
+
+You can also pass the public key inline. Inline keys require an explicit name:
+
+```bash
+s0 user ssh-key add --name laptop --public-key "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample user@host"
 ```
 
 List the keys currently attached to your user:
 
 ```bash
-curl "$SANDBOX0_BASE_URL/users/me/ssh-keys" \
-  -H "Authorization: Bearer $SANDBOX0_TOKEN"
+s0 user ssh-key list
 ```
 
-Delete a key you no longer want to trust:
-
-<Endpoint method="DELETE">
-/users/me/ssh-keys/{'{id}'}
-</Endpoint>
+Delete a key you no longer want to trust. Use the key ID from `s0 user ssh-key list`:
 
 ```bash
-curl -X DELETE "$SANDBOX0_BASE_URL/users/me/ssh-keys/$KEY_ID" \
-  -H "Authorization: Bearer $SANDBOX0_TOKEN"
+s0 user ssh-key delete "$SSH_KEY_ID"
 ```
 
 ---
 
 ## Connect to a Sandbox
 
-Read `ssh.host`, `ssh.port`, and `ssh.username` from the sandbox detail response, then connect with a standard SSH client.
+Read `SSH Host`, `SSH Port`, and `SSH Username` from `s0 sandbox get`, then connect with a standard SSH client.
 
 Fetch the connection info:
 
 ```bash
-curl "$SANDBOX0_BASE_URL/api/v1/sandboxes/$SANDBOX_ID" \
-  -H "Authorization: Bearer $SANDBOX0_TOKEN"
+s0 sandbox get "$SANDBOX_ID"
 ```
 
-Use the returned values with `ssh`:
+For scripts, extract the same fields from JSON output:
 
 ```bash
-ssh -p 22 rs-abc123-default-x7k9m@aws-us-east-1.ssh.sandbox0.example.com
+SANDBOX_JSON="$(s0 -o json sandbox get "$SANDBOX_ID")"
+SSH_HOST="$(printf '%s' "$SANDBOX_JSON" | jq -r '.ssh.host')"
+SSH_PORT="$(printf '%s' "$SANDBOX_JSON" | jq -r '.ssh.port')"
+SSH_USER="$(printf '%s' "$SANDBOX_JSON" | jq -r '.ssh.username')"
+ssh -i ~/.ssh/sandbox0_ed25519 -p "$SSH_PORT" "$SSH_USER@$SSH_HOST"
 ```
 
 Run a one-shot remote command instead of opening an interactive shell:
 
 ```bash
-ssh -p 22 rs-abc123-default-x7k9m@aws-us-east-1.ssh.sandbox0.example.com 'uname -a'
+ssh -i ~/.ssh/sandbox0_ed25519 -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" 'uname -a'
 ```
 
 If the sandbox is paused, `ssh-gateway` asks the control plane to resume it before attaching the session.
@@ -132,19 +105,19 @@ Use standard `scp` to upload or download files. The default OpenSSH mode is supp
 Upload a local file:
 
 ```bash
-scp -P 22 ./build.log rs-abc123-default-x7k9m@aws-us-east-1.ssh.sandbox0.example.com:/workspace/build.log
+scp -i ~/.ssh/sandbox0_ed25519 -P "$SSH_PORT" ./build.log "$SSH_USER@$SSH_HOST:/workspace/build.log"
 ```
 
 Download a file from the sandbox:
 
 ```bash
-scp -P 22 rs-abc123-default-x7k9m@aws-us-east-1.ssh.sandbox0.example.com:/workspace/output.txt ./output.txt
+scp -i ~/.ssh/sandbox0_ed25519 -P "$SSH_PORT" "$SSH_USER@$SSH_HOST:/workspace/output.txt" ./output.txt
 ```
 
 Because `scp` runs over the SFTP subsystem here, `sftp` clients work too:
 
 ```bash
-sftp -P 22 rs-abc123-default-x7k9m@aws-us-east-1.ssh.sandbox0.example.com
+sftp -i ~/.ssh/sandbox0_ed25519 -P "$SSH_PORT" "$SSH_USER@$SSH_HOST"
 ```
 
 ---

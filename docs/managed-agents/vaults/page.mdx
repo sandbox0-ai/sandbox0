@@ -67,7 +67,7 @@ Credential vaults can use `static_bearer` or `mcp_oauth` credentials. Sandbox0 r
 
 ## MCP Credentials
 
-For MCP servers, the credential auth includes `mcp_server_url`.
+For remote URL MCP servers, the credential auth includes `mcp_server_url`.
 
 ```typescript
 await client.beta.vaults.credentials.create(vault.id, {
@@ -79,6 +79,8 @@ await client.beta.vaults.credentials.create(vault.id, {
     },
 });
 ```
+
+For local stdio MCP servers, prefer generic credential vaults with HTTP header projection. The local MCP process can use non-secret placeholder environment variables; Sandbox0 injects the real auth material when the process calls the configured external service domains.
 
 ## Runtime Injection
 

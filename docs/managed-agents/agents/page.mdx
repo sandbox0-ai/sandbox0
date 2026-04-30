@@ -12,7 +12,7 @@ Official reference: [Claude Managed Agents agent setup](https://platform.claude.
 | `model` | Model id and optional speed |
 | `system` | Stable instruction text |
 | `tools` | Built-in, MCP, and custom tool definitions |
-| `mcp_servers` | URL MCP servers available through `mcp_toolset` |
+| `mcp_servers` | URL or local stdio MCP servers available through `mcp_toolset` |
 | `skills` | Uploaded skill versions attached to the agent |
 | `metadata` | Application metadata |
 
@@ -48,12 +48,14 @@ const agent = await client.beta.agents.create({
 | Tool type | Status in Sandbox0 |
 |-----------|--------------------|
 | `agent_toolset_20260401` | Supported through the selected agent engine |
-| `mcp_toolset` | Supported for URL MCP servers |
+| `mcp_toolset` | Supported for URL and local stdio MCP servers |
 | `custom` | Supported through `agent.custom_tool_use` and `user.custom_tool_result` events |
 
 Built-in tool names include `bash`, `edit`, `read`, `write`, `glob`, `grep`, `web_fetch`, and `web_search`.
 
 ## MCP Servers
+
+URL MCP servers connect to a remote HTTP or SSE endpoint:
 
 ```typescript
 const agent = await client.beta.agents.create({
@@ -71,7 +73,33 @@ const agent = await client.beta.agents.create({
 });
 ```
 
-If the MCP server needs credentials, attach a vault to the session. The agent declares the server and toolset; the session decides which vaults are available.
+Local stdio MCP servers run inside the managed agent sandbox through the selected engine wrapper:
+
+```typescript
+const agent = await client.beta.agents.create({
+    name: "Local Docs Agent",
+    model: "claude-sonnet-4-20250514",
+    mcp_servers: [{
+        type: "stdio",
+        name: "local_docs",
+        command: "node",
+        args: ["./mcp-server.js", "--stdio"],
+        env: {
+            API_BASE_URL: "https://api.example.com",
+        },
+    }],
+    tools: [{
+        type: "mcp_toolset",
+        mcp_server_name: "local_docs",
+        default_config: {
+            enabled: true,
+            permission_policy: { type: "always_ask" },
+        },
+    }],
+});
+```
+
+Keep `env` values non-secret. If the MCP server needs credentials for outbound HTTP calls, attach a credential vault to the session and let Sandbox0 inject auth through egress policy. The agent declares the server and toolset; the session decides which vaults are available.
 
 ## Sandbox0 Notes
 

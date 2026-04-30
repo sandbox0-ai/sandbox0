@@ -17,7 +17,7 @@ Official reference: [Claude Managed Agents quickstart](https://platform.claude.c
 | Files | Supported for upload, metadata, download, delete, and file-backed message content |
 | Vaults and credentials | Supported for LLM credentials, MCP credentials, and Sandbox0 HTTP header credential projection |
 | Custom skills | Supported through uploaded skill versions |
-| MCP servers | Supported for URL MCP servers and vault-backed credentials |
+| MCP servers | Supported for URL MCP servers, local stdio MCP servers, and vault-backed credentials |
 | GitHub repository resources | Supported at session creation |
 | Agent engines | Supported for `claude` and `codex` |
 
@@ -48,6 +48,17 @@ The Claude wrapper maps Managed Agents tool definitions to Claude Agent SDK opti
 | Custom tools | Supported | The wrapper emits `agent.custom_tool_use` and waits for `user.custom_tool_result` |
 
 Tool confirmation events are supported. When a tool policy requires confirmation, the session emits `session.status_idle` with `stop_reason.type = "requires_action"` and the relevant event ids.
+
+## MCP Server Support
+
+Sandbox0 supports two `mcp_servers` connection types:
+
+| Type | Behavior |
+|------|----------|
+| `url` | Remote MCP server reached over HTTP or SSE |
+| `stdio` | Local MCP server process launched inside the managed agent sandbox |
+
+For `stdio` servers, put only non-secret values in `env`. Use a Managed Agents credential vault plus Sandbox0 egress auth when the local MCP server needs authenticated outbound HTTP access.
 
 ## Environment Support
 

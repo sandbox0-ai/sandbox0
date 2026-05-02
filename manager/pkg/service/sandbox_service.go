@@ -20,21 +20,22 @@ import (
 
 // Sandbox represents a sandbox instance
 type Sandbox struct {
-	ID            string              `json:"id"`
-	TemplateID    string              `json:"template_id"`
-	TeamID        string              `json:"team_id"`
-	UserID        string              `json:"user_id"`
-	InternalAddr  string              `json:"internal_addr"`
-	Status        string              `json:"status"`
-	Paused        bool                `json:"paused"`
-	PowerState    SandboxPowerState   `json:"power_state"`
-	AutoResume    bool                `json:"auto_resume"`
-	ExposedPorts  []ExposedPortConfig `json:"exposed_ports,omitempty"`
-	PodName       string              `json:"pod_name"`
-	ExpiresAt     time.Time           `json:"expires_at"`
-	HardExpiresAt time.Time           `json:"hard_expires_at"`
-	ClaimedAt     time.Time           `json:"claimed_at"`
-	CreatedAt     time.Time           `json:"created_at"`
+	ID            string               `json:"id"`
+	TemplateID    string               `json:"template_id"`
+	TeamID        string               `json:"team_id"`
+	UserID        string               `json:"user_id"`
+	InternalAddr  string               `json:"internal_addr"`
+	Status        string               `json:"status"`
+	Paused        bool                 `json:"paused"`
+	PowerState    SandboxPowerState    `json:"power_state"`
+	AutoResume    bool                 `json:"auto_resume"`
+	ExposedPorts  []ExposedPortConfig  `json:"exposed_ports,omitempty"`
+	PublicGateway *PublicGatewayConfig `json:"public_gateway,omitempty"`
+	PodName       string               `json:"pod_name"`
+	ExpiresAt     time.Time            `json:"expires_at"`
+	HardExpiresAt time.Time            `json:"hard_expires_at"`
+	ClaimedAt     time.Time            `json:"claimed_at"`
+	CreatedAt     time.Time            `json:"created_at"`
 }
 
 // SandboxStatus represents possible sandbox statuses

@@ -346,6 +346,8 @@ func (s *Server) setupRoutes() {
 			sandboxes.PUT("/:id/exposed-ports", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.updateExposedPorts)
 			sandboxes.DELETE("/:id/exposed-ports", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.clearExposedPorts)
 			sandboxes.DELETE("/:id/exposed-ports/:port", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.deleteExposedPort)
+			sandboxes.GET("/:id/public-gateway", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.getPublicGateway)
+			sandboxes.PUT("/:id/public-gateway", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.updatePublicGateway)
 
 			// === Process/Context Management (→ Procd) ===
 			contexts := sandboxes.Group("/:id/contexts")

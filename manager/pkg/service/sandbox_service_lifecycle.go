@@ -125,6 +125,13 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 		if cfg.ExposedPorts != nil {
 			merged.ExposedPorts = cfg.ExposedPorts
 		}
+		if cfg.PublicGateway != nil {
+			publicGateway, err := normalizePublicGatewayConfig(cfg.PublicGateway)
+			if err != nil {
+				return err
+			}
+			merged.PublicGateway = publicGateway
+		}
 
 		if cfg.Network != nil {
 			if s.NetworkPolicyService == nil {
@@ -245,6 +252,7 @@ func (s *SandboxService) podToSandbox(ctx context.Context, pod *corev1.Pod, sand
 		PowerState:    powerState,
 		AutoResume:    autoResume,
 		ExposedPorts:  cfg.ExposedPorts,
+		PublicGateway: cfg.PublicGateway,
 		PodName:       pod.Name,
 		ExpiresAt:     expiresAt,
 		HardExpiresAt: hardExpiresAt,

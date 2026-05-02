@@ -157,6 +157,8 @@ func (s *Server) setupRoutes() {
 			sandboxes.PUT("/:id/exposed-ports", s.updateExposedPorts)
 			sandboxes.DELETE("/:id/exposed-ports", s.clearExposedPorts)
 			sandboxes.DELETE("/:id/exposed-ports/:port", s.deleteExposedPort)
+			sandboxes.GET("/:id/public-gateway", s.getPublicGateway)
+			sandboxes.PUT("/:id/public-gateway", s.updatePublicGateway)
 			sandboxes.POST("/:id/pause", s.pauseSandbox)
 			sandboxes.POST("/:id/resume", s.resumeSandbox)
 			sandboxes.POST("/:id/refresh", s.refreshSandbox)

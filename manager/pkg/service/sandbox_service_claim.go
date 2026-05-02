@@ -56,24 +56,26 @@ type BootstrapMountStatus struct {
 
 // SandboxConfig represents sandbox configuration
 type SandboxConfig struct {
-	EnvVars      map[string]string              `json:"env_vars,omitempty"`
-	TTL          *int32                         `json:"ttl,omitempty"`      // Time-to-live in seconds (0 disables)
-	HardTTL      *int32                         `json:"hard_ttl,omitempty"` // Hard time-to-live in seconds (0 disables)
-	Network      *v1alpha1.SandboxNetworkPolicy `json:"network,omitempty"`
-	Webhook      *WebhookConfig                 `json:"webhook,omitempty"`
-	AutoResume   *bool                          `json:"auto_resume,omitempty"`
-	ExposedPorts []ExposedPortConfig            `json:"exposed_ports,omitempty"`
+	EnvVars       map[string]string              `json:"env_vars,omitempty"`
+	TTL           *int32                         `json:"ttl,omitempty"`      // Time-to-live in seconds (0 disables)
+	HardTTL       *int32                         `json:"hard_ttl,omitempty"` // Hard time-to-live in seconds (0 disables)
+	Network       *v1alpha1.SandboxNetworkPolicy `json:"network,omitempty"`
+	Webhook       *WebhookConfig                 `json:"webhook,omitempty"`
+	AutoResume    *bool                          `json:"auto_resume,omitempty"`
+	ExposedPorts  []ExposedPortConfig            `json:"exposed_ports,omitempty"`
+	PublicGateway *PublicGatewayConfig           `json:"public_gateway,omitempty"`
 }
 
 // SandboxUpdateConfig represents sandbox configuration fields that can be updated at runtime.
 // Unlike SandboxConfig, env_vars and webhook are excluded as they only affect new processes
 // or require restart to take effect.
 type SandboxUpdateConfig struct {
-	TTL          *int32                         `json:"ttl,omitempty"`
-	HardTTL      *int32                         `json:"hard_ttl,omitempty"`
-	Network      *v1alpha1.SandboxNetworkPolicy `json:"network,omitempty"`
-	AutoResume   *bool                          `json:"auto_resume,omitempty"`
-	ExposedPorts []ExposedPortConfig            `json:"exposed_ports,omitempty"`
+	TTL           *int32                         `json:"ttl,omitempty"`
+	HardTTL       *int32                         `json:"hard_ttl,omitempty"`
+	Network       *v1alpha1.SandboxNetworkPolicy `json:"network,omitempty"`
+	AutoResume    *bool                          `json:"auto_resume,omitempty"`
+	ExposedPorts  []ExposedPortConfig            `json:"exposed_ports,omitempty"`
+	PublicGateway *PublicGatewayConfig           `json:"public_gateway,omitempty"`
 }
 
 type ExposedPortConfig struct {
@@ -212,6 +214,19 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	if err := validateClaimMounts(req); err != nil {
 		s.observeClaimPhase(req.Template, "unknown", "validate_claim_mounts", phaseStarted, err)
 		return nil, err
+	}
+	if req.Config != nil && req.Config.PublicGateway != nil {
+		publicGateway, err := normalizePublicGatewayConfig(req.Config.PublicGateway)
+		if err != nil {
+			s.observeClaimPhase(req.Template, "unknown", "validate_claim_mounts", phaseStarted, err)
+			return nil, err
+		}
+		if req.Config.AutoResume != nil && !*req.Config.AutoResume && PublicGatewayHasResumeRoute(publicGateway) {
+			err := fmt.Errorf("cannot set resume=true on public gateway routes when sandbox auto_resume is disabled")
+			s.observeClaimPhase(req.Template, "unknown", "validate_claim_mounts", phaseStarted, err)
+			return nil, err
+		}
+		req.Config.PublicGateway = publicGateway
 	}
 	s.observeClaimPhase(req.Template, "unknown", "validate_claim_mounts", phaseStarted, nil)
 	s.logger.Info("Claiming sandbox",

@@ -48,6 +48,10 @@
           "title": "Ports"
         },
         {
+          "slug": "gateway-policy",
+          "title": "Gateway Policy"
+        },
+        {
           "slug": "webhooks",
           "title": "Webhooks"
         }

@@ -62,8 +62,9 @@ Claim a sandbox from a template. The sandbox is created from a pre-warmed pool f
 | `webhook` | object | Webhook configuration |
 | `auto_resume` | boolean | Auto-resume when accessed (default: true) |
 | `exposed_ports` | array | Ports to expose publicly |
+| `public_gateway` | object | Request-level gateway policy for public sandbox traffic |
 
-See [Network](/docs/sandbox/network) for traffic control and [Credential](/docs/credential) for outbound auth and secret handling.
+See [Network](/docs/sandbox/network) for traffic control, [Gateway Policy](/docs/sandbox/gateway-policy) for public HTTP controls, and [Credential](/docs/credential) for outbound auth and secret handling.
 
 ### TTL vs Hard TTL
 
@@ -407,6 +408,7 @@ Only the following fields can be updated at runtime:
 | `network` | object | Network policy configuration |
 | `auto_resume` | boolean | Auto-resume when accessed |
 | `exposed_ports` | array | Ports to expose publicly |
+| `public_gateway` | object | Request-level gateway policy for public sandbox traffic |
 
 <Callout variant="warning">
 <code>env_vars</code> and <code>webhook</code> cannot be updated at runtime. These fields only take effect when the sandbox is created. To use different environment variables, create a new sandbox.
@@ -632,5 +634,13 @@ console.log('Sandbox deleted');`
     cta="Learn More"
   >
     Control network access and egress rules
+  </LinkCard>
+
+  <LinkCard
+    title="Gateway Policy"
+    href="/docs/sandbox/gateway-policy"
+    cta="Learn More"
+  >
+    Control public HTTP routes, auth, CORS, and rate limits
   </LinkCard>
 </CardGrid>

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -210,6 +211,9 @@ func normalizePublicGatewayAuth(auth PublicGatewayAuth) (PublicGatewayAuth, erro
 			return auth, fmt.Errorf("auth.bearer_token_sha256 is required for bearer auth")
 		}
 		auth.BearerTokenSHA256 = strings.ToLower(strings.TrimSpace(auth.BearerTokenSHA256))
+		if !validSHA256Hex(auth.BearerTokenSHA256) {
+			return auth, fmt.Errorf("auth.bearer_token_sha256 must be a hex encoded SHA-256 digest")
+		}
 		auth.HeaderName = ""
 		auth.HeaderValueSHA256 = ""
 	case PublicGatewayAuthModeHeader:
@@ -218,10 +222,21 @@ func normalizePublicGatewayAuth(auth PublicGatewayAuth) (PublicGatewayAuth, erro
 		if auth.HeaderName == "" || auth.HeaderValueSHA256 == "" {
 			return auth, fmt.Errorf("auth.header_name and auth.header_value_sha256 are required for header auth")
 		}
+		if !validSHA256Hex(auth.HeaderValueSHA256) {
+			return auth, fmt.Errorf("auth.header_value_sha256 must be a hex encoded SHA-256 digest")
+		}
 	default:
 		return auth, fmt.Errorf("unsupported auth.mode %q", auth.Mode)
 	}
 	return auth, nil
+}
+
+func validSHA256Hex(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == 32
 }
 
 func normalizePublicGatewayCORS(cors PublicGatewayCORS) (PublicGatewayCORS, error) {

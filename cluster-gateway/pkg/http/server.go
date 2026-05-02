@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -14,6 +15,8 @@ import (
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/client"
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/middleware"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/pkg/cache"
 	gatewayapikey "github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
 	gatewaybuiltin "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/builtin"
 	gatewayoidc "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/oidc"
@@ -34,28 +37,30 @@ import (
 
 // Server represents the HTTP server for cluster-gateway
 type Server struct {
-	router             *gin.Engine
-	cfg                *config.ClusterGatewayConfig
-	proxy2Mgr          *proxy.Router
-	proxy2sp           *proxy.Router
-	managerClient      *client.ManagerClient
-	authMiddleware     *middleware.InternalAuthMiddleware
-	publicAuth         *gatewaymiddleware.AuthMiddleware
-	compositeAuth      *middleware.CompositeAuthMiddleware
-	publicIdentityRepo *gatewayidentity.Repository
-	publicAPIKeyRepo   *gatewayapikey.Repository
-	rateLimiter        *gatewaymiddleware.RateLimiter
-	externalLimiter    *middleware.ExternalRateLimiter
-	publicBuiltin      *gatewaybuiltin.Provider
-	publicOIDC         *gatewayoidc.Manager
-	publicJWT          *gatewayauthn.Issuer
-	requestLogger      *middleware.RequestLogger
-	logger             *zap.Logger
-	meteringHandler    *gatewayhandlers.MeteringHandler
-	internalAuthGen    *internalauth.Generator
-	entitlements       licensing.Entitlements
-	obsProvider        *observability.Provider
-	httpClient         *http.Client
+	router                *gin.Engine
+	cfg                   *config.ClusterGatewayConfig
+	proxy2Mgr             *proxy.Router
+	proxy2sp              *proxy.Router
+	managerClient         *client.ManagerClient
+	authMiddleware        *middleware.InternalAuthMiddleware
+	publicAuth            *gatewaymiddleware.AuthMiddleware
+	compositeAuth         *middleware.CompositeAuthMiddleware
+	publicIdentityRepo    *gatewayidentity.Repository
+	publicAPIKeyRepo      *gatewayapikey.Repository
+	rateLimiter           *gatewaymiddleware.RateLimiter
+	externalLimiter       *middleware.ExternalRateLimiter
+	publicBuiltin         *gatewaybuiltin.Provider
+	publicOIDC            *gatewayoidc.Manager
+	publicJWT             *gatewayauthn.Issuer
+	requestLogger         *middleware.RequestLogger
+	logger                *zap.Logger
+	meteringHandler       *gatewayhandlers.MeteringHandler
+	internalAuthGen       *internalauth.Generator
+	entitlements          licensing.Entitlements
+	obsProvider           *observability.Provider
+	httpClient            *http.Client
+	exposureSandboxCache  *cache.Cache[string, *mgr.Sandbox]
+	publicGatewayLimiters sync.Map
 }
 
 // NewServer creates a new HTTP server
@@ -259,6 +264,11 @@ func NewServer(
 		entitlements:       entitlements,
 		obsProvider:        obsProvider,
 		httpClient:         httpClient,
+		exposureSandboxCache: cache.New[string, *mgr.Sandbox](cache.Config{
+			MaxSize:         4096,
+			TTL:             5 * time.Second,
+			CleanupInterval: 5 * time.Second,
+		}),
 	}
 
 	server.setupRoutes()

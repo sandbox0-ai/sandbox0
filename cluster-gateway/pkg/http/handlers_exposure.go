@@ -40,7 +40,7 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 		return
 	}
 
-	sandbox, err := s.managerClient.GetSandboxInternal(c.Request.Context(), sandboxID)
+	sandbox, err := s.getSandboxForPublicExposure(c, sandboxID)
 	if err != nil {
 		s.logger.Warn("Failed to get sandbox for public exposure",
 			zap.String("sandbox_id", sandboxID),
@@ -54,19 +54,47 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 		}
 		return
 	}
-	policy, ok := findExposedPortPolicy(sandbox, port)
-	if !ok {
-		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "port is not exposed")
-		return
+	var route *mgr.PublicGatewayRoute
+	var policy mgr.ExposedPortConfig
+	if sandbox.PublicGateway != nil && sandbox.PublicGateway.Enabled {
+		match := matchPublicGatewayRoute(sandbox.PublicGateway, port, c.Request.URL.Path, c.Request.Method)
+		if !match.pathMatched {
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "route is not exposed")
+			return
+		}
+		route = match.route
+		if c.Request.Method == http.MethodOptions && route.CORS != nil {
+			if !s.enforcePublicGatewayRoute(c, sandboxID, route) {
+				return
+			}
+		}
+		if !match.methodAllowed {
+			spec.JSONError(c, http.StatusMethodNotAllowed, spec.CodeForbidden, "method is not allowed")
+			return
+		}
+		if !s.enforcePublicGatewayRoute(c, sandboxID, route) {
+			return
+		}
+	} else {
+		var ok bool
+		policy, ok = findExposedPortPolicy(sandbox, port)
+		if !ok {
+			spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "port is not exposed")
+			return
+		}
 	}
 	if sandboxWantsPaused(sandbox) {
 		// Resume precedence:
-		// sandbox.auto_resume must be true, then per-port exposed_ports[].resume must be true.
+		// sandbox.auto_resume must be true, then the matching public route or exposed port resume gate must be true.
 		if !sandbox.AutoResume {
 			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is paused and auto_resume is disabled")
 			return
 		}
-		if !policy.Resume {
+		resumeAllowed := policy.Resume
+		if route != nil {
+			resumeAllowed = route.Resume
+		}
+		if !resumeAllowed {
 			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is paused and resume is disabled")
 			return
 		}
@@ -89,10 +117,13 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "invalid sandbox address")
 		return
 	}
-	c.Request = proxy.WithUpstreamTimeoutDisabledRequest(c.Request)
 	proxyTimeout := s.cfg.ProxyTimeout.Duration
 	if proxyTimeout == 0 {
 		proxyTimeout = 10 * time.Second
+	}
+	proxyTimeout = publicGatewayProxyTimeout(proxyTimeout, route)
+	if !publicGatewayHasTimeout(route) {
+		c.Request = proxy.WithUpstreamTimeoutDisabledRequest(c.Request)
 	}
 	router, err := proxy.NewRouter(targetURL.String(), s.logger, proxyTimeout, proxy.WithHTTPClient(s.outboundHTTPClient()))
 	if err != nil {

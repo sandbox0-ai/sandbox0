@@ -1592,111 +1592,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessSandboxNetworkPolicyResponse"
-  /api/v1/sandboxes/{id}/exposed-ports:
-    get:
-      tags: [sandboxes]
-      summary: Get sandbox exposed ports
-      security:
-        - bearerAuth: []
-      x-upstream-service: manager
-      x-upstream-path: /api/v1/sandboxes/{id}/exposed-ports
-      parameters:
-        - $ref: "#/components/parameters/SandboxID"
-      responses:
-        "200":
-          description: Exposed ports
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SuccessExposedPortsResponse"
-        "404":
-          description: Not found
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
-    put:
-      tags: [sandboxes]
-      summary: Update sandbox exposed ports
-      description: |
-        Replaces all exposed ports for the sandbox. Used to control which ports
-        are publicly accessible via the exposure domain.
-      security:
-        - bearerAuth: []
-      x-upstream-service: manager
-      x-upstream-path: /api/v1/sandboxes/{id}/exposed-ports
-      parameters:
-        - $ref: "#/components/parameters/SandboxID"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/UpdateExposedPortsRequest"
-      responses:
-        "200":
-          description: Exposed ports updated
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SuccessExposedPortsResponse"
-        "404":
-          description: Not found
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
-    delete:
-      tags: [sandboxes]
-      summary: Clear all exposed ports
-      security:
-        - bearerAuth: []
-      x-upstream-service: manager
-      x-upstream-path: /api/v1/sandboxes/{id}/exposed-ports
-      parameters:
-        - $ref: "#/components/parameters/SandboxID"
-      responses:
-        "200":
-          description: Exposed ports cleared
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SuccessExposedPortsResponse"
-        "404":
-          description: Not found
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
-  /api/v1/sandboxes/{id}/exposed-ports/{port}:
-    delete:
-      tags: [sandboxes]
-      summary: Remove a specific exposed port
-      security:
-        - bearerAuth: []
-      x-upstream-service: manager
-      x-upstream-path: /api/v1/sandboxes/{id}/exposed-ports/{port}
-      parameters:
-        - $ref: "#/components/parameters/SandboxID"
-        - name: port
-          in: path
-          required: true
-          schema:
-            type: integer
-            format: int32
-      responses:
-        "200":
-          description: Exposed port removed
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SuccessExposedPortsResponse"
-        "404":
-          description: Not found
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
   /api/v1/sandboxes/{id}/public-gateway:
     get:
       tags: [sandboxes]
@@ -3711,39 +3606,8 @@ components:
           description: |
             Sandbox-level resume gate for paused sandboxes. When false, any inbound request
             (API or public exposure) must not auto resume the sandbox.
-        exposed_ports:
-          type: array
-          items:
-            $ref: "#/components/schemas/ExposedPortConfig"
         public_gateway:
           $ref: "#/components/schemas/PublicGatewayConfig"
-    ExposedPortConfig:
-      type: object
-      properties:
-        port:
-          type: integer
-          format: int32
-        resume:
-          type: boolean
-          description: |
-            Port-level resume gate for public exposure traffic. Evaluated only when
-            sandbox auto_resume is true. Priority: sandbox auto_resume (global gate)
-            > exposed_ports[].resume (per-port gate).
-        public_url:
-          type: string
-          readOnly: true
-          description: |
-            The full public URL to access this exposed port.
-            Format: https://<sandboxName>--p<port>.<regionID>.<rootDomain>
-      required: [port, resume]
-    UpdateExposedPortsRequest:
-      type: object
-      properties:
-        ports:
-          type: array
-          items:
-            $ref: "#/components/schemas/ExposedPortConfig"
-      required: [ports]
     PublicGatewayConfig:
       type: object
       properties:
@@ -3860,27 +3724,6 @@ components:
                 exposure_domain:
                   type: string
               required: [sandbox_id, public_gateway]
-    SuccessExposedPortsResponse:
-      allOf:
-        - $ref: "#/components/schemas/SuccessEnvelope"
-        - type: object
-          properties:
-            data:
-              type: object
-              properties:
-                sandbox_id:
-                  type: string
-                exposed_ports:
-                  type: array
-                  items:
-                    $ref: "#/components/schemas/ExposedPortConfig"
-                exposure_domain:
-                  type: string
-                  readOnly: true
-                  description: |
-                    The base exposure domain (e.g., "aws-us-east-1.sandbox0.app").
-                    Useful for clients that need to construct URLs manually.
-              required: [sandbox_id, exposed_ports]
     WebhookConfig:
       type: object
       description: |
@@ -3964,10 +3807,6 @@ components:
           $ref: "#/components/schemas/SandboxPowerState"
         auto_resume:
           type: boolean
-        exposed_ports:
-          type: array
-          items:
-            $ref: "#/components/schemas/ExposedPortConfig"
         public_gateway:
           $ref: "#/components/schemas/PublicGatewayConfig"
         pod_name:
@@ -4034,10 +3873,6 @@ components:
           description: |
             Sandbox-level resume gate for paused sandboxes. When false, any inbound request
             (API or public exposure) must not auto resume the sandbox.
-        exposed_ports:
-          type: array
-          items:
-            $ref: "#/components/schemas/ExposedPortConfig"
         public_gateway:
           $ref: "#/components/schemas/PublicGatewayConfig"
     SandboxUpdateRequest:

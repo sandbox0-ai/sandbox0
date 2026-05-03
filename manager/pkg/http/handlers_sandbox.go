@@ -215,15 +215,7 @@ func (s *Server) updateSandbox(c *gin.Context) {
 		return
 	}
 
-	// Validate: if disabling auto_resume, check no exposed ports have resume=true
 	if req.Config.AutoResume != nil && !*req.Config.AutoResume {
-		for _, p := range sandbox.ExposedPorts {
-			if p.Resume {
-				spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest,
-					"cannot disable auto_resume while exposed ports have resume=true; remove or update those ports first")
-				return
-			}
-		}
 		if service.PublicGatewayHasResumeRoute(sandbox.PublicGateway) {
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest,
 				"cannot disable auto_resume while public gateway routes have resume=true; remove or update those routes first")

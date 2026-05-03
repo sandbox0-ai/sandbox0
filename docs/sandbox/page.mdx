@@ -61,7 +61,6 @@ Claim a sandbox from a template. The sandbox is created from a pre-warmed pool f
 | `network` | object | `SandboxNetworkPolicy`. Controls traffic rules, credential bindings, and destination-scoped egress auth |
 | `webhook` | object | Webhook configuration |
 | `auto_resume` | boolean | Auto-resume when accessed (default: true) |
-| `exposed_ports` | array | Ports to expose publicly |
 | `public_gateway` | object | Request-level gateway policy for public sandbox traffic |
 
 See [Network](/docs/sandbox/network) for traffic control, [Gateway Policy](/docs/sandbox/gateway-policy) for public HTTP controls, and [Credential](/docs/credential) for outbound auth and secret handling.
@@ -407,7 +406,6 @@ Only the following fields can be updated at runtime:
 | `hard_ttl` | integer | Maximum lifetime in seconds (hard limit) |
 | `network` | object | Network policy configuration |
 | `auto_resume` | boolean | Auto-resume when accessed |
-| `exposed_ports` | array | Ports to expose publicly |
 | `public_gateway` | object | Request-level gateway policy for public sandbox traffic |
 
 <Callout variant="warning">
@@ -462,7 +460,7 @@ client.sandboxes.update(
 
 ## Pause And Resume
 
-Pause and resume is covered in a dedicated page because it affects TTL, `auto_resume`, exposed ports, SSH, and webhook behavior.
+Pause and resume is covered in a dedicated page because it affects TTL, `auto_resume`, public gateway routes, SSH, and webhook behavior.
 
 <CardGrid>
   <LinkCard

@@ -6,7 +6,7 @@ Use this page when you need to:
 
 - pause a sandbox explicitly
 - resume a paused sandbox explicitly
-- understand how `ttl`, `auto_resume`, exposed ports, and SSH interact with pause state
+- understand how `ttl`, `auto_resume`, public gateway routes, and SSH interact with pause state
 - inspect whether a pause or resume request has completed
 
 <Callout variant="info">
@@ -145,10 +145,10 @@ console.log("powerState=", sb.powerState);`
 
 Common auto-resume entrypoints:
 
-- exposed ports configured with `resume: true`
+- public gateway routes configured with `resume: true`
 - SSH access through Sandbox0 SSH Gateway
 
-See [Ports](/docs/sandbox/ports) and [SSH](/docs/sandbox/ssh) for the user-facing flows.
+See [Gateway Policy](/docs/sandbox/gateway-policy) and [SSH](/docs/sandbox/ssh) for the user-facing flows.
 
 ## Typical Pattern
 
@@ -157,7 +157,7 @@ For long-running agent workflows, a common pattern is:
 1. claim a sandbox with `ttl` set
 2. do active work through contexts and files
 3. let idle sandboxes pause automatically
-4. resume on the next user action, SSH session, or exposed-port hit
+4. resume on the next user action, SSH session, or public gateway route hit
 5. use `hard_ttl` to cap the maximum lifetime
 
 ## Next Steps
@@ -172,11 +172,11 @@ For long-running agent workflows, a common pattern is:
   </LinkCard>
 
   <LinkCard
-    title="Ports"
-    href="/docs/sandbox/ports"
+    title="Gateway Policy"
+    href="/docs/sandbox/gateway-policy"
     cta="Learn More"
   >
-    Expose services and configure port-level auto-resume
+    Expose services and configure route-level auto-resume
   </LinkCard>
 
   <LinkCard

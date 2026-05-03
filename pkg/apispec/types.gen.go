@@ -234,11 +234,6 @@ const (
 	SuccessEnvelopeSuccessTrue SuccessEnvelopeSuccess = true
 )
 
-// Defines values for SuccessExposedPortsResponseSuccess.
-const (
-	SuccessExposedPortsResponseSuccessTrue SuccessExposedPortsResponseSuccess = true
-)
-
 // Defines values for SuccessFileListResponseSuccess.
 const (
 	SuccessFileListResponseSuccessTrue SuccessFileListResponseSuccess = true
@@ -416,7 +411,7 @@ const (
 
 // Defines values for SuccessWrittenResponseSuccess.
 const (
-	True SuccessWrittenResponseSuccess = true
+	SuccessWrittenResponseSuccessTrue SuccessWrittenResponseSuccess = true
 )
 
 // Defines values for TrafficRuleAction.
@@ -848,20 +843,6 @@ type ExecAction struct {
 type ExecCandidate struct {
 	Args *[]string `json:"args,omitempty"`
 	Name string    `json:"name"`
-}
-
-// ExposedPortConfig defines model for ExposedPortConfig.
-type ExposedPortConfig struct {
-	Port int32 `json:"port"`
-
-	// PublicUrl The full public URL to access this exposed port.
-	// Format: https://<sandboxName>--p<port>.<regionID>.<rootDomain>
-	PublicUrl *string `json:"public_url,omitempty"`
-
-	// Resume Port-level resume gate for public exposure traffic. Evaluated only when
-	// sandbox auto_resume is true. Priority: sandbox auto_resume (global gate)
-	// > exposed_ports[].resume (per-port gate).
-	Resume bool `json:"resume"`
 }
 
 // FileContentResponse defines model for FileContentResponse.
@@ -1351,8 +1332,7 @@ type Sandbox struct {
 	CreatedAt  time.Time `json:"created_at"`
 
 	// ExpiresAt Soft expiration timestamp. Zero value means not set.
-	ExpiresAt    time.Time            `json:"expires_at"`
-	ExposedPorts *[]ExposedPortConfig `json:"exposed_ports,omitempty"`
+	ExpiresAt time.Time `json:"expires_at"`
 
 	// HardExpiresAt Hard expiration timestamp. Zero value means not set.
 	HardExpiresAt time.Time             `json:"hard_expires_at"`
@@ -1374,7 +1354,6 @@ type SandboxConfig struct {
 	// (API or public exposure) must not auto resume the sandbox.
 	AutoResume    *bool                 `json:"auto_resume,omitempty"`
 	EnvVars       *map[string]string    `json:"env_vars,omitempty"`
-	ExposedPorts  *[]ExposedPortConfig  `json:"exposed_ports,omitempty"`
 	HardTtl       *int32                `json:"hard_ttl,omitempty"`
 	Network       *SandboxNetworkPolicy `json:"network,omitempty"`
 	PublicGateway *PublicGatewayConfig  `json:"public_gateway,omitempty"`
@@ -1539,7 +1518,6 @@ type SandboxUpdateConfig struct {
 	// AutoResume Sandbox-level resume gate for paused sandboxes. When false, any inbound request
 	// (API or public exposure) must not auto resume the sandbox.
 	AutoResume    *bool                 `json:"auto_resume,omitempty"`
-	ExposedPorts  *[]ExposedPortConfig  `json:"exposed_ports,omitempty"`
 	HardTtl       *int32                `json:"hard_ttl,omitempty"`
 	Network       *SandboxNetworkPolicy `json:"network,omitempty"`
 	PublicGateway *PublicGatewayConfig  `json:"public_gateway,omitempty"`
@@ -1763,22 +1741,6 @@ type SuccessEnvelope struct {
 
 // SuccessEnvelopeSuccess defines model for SuccessEnvelope.Success.
 type SuccessEnvelopeSuccess bool
-
-// SuccessExposedPortsResponse defines model for SuccessExposedPortsResponse.
-type SuccessExposedPortsResponse struct {
-	Data *struct {
-		ExposedPorts []ExposedPortConfig `json:"exposed_ports"`
-
-		// ExposureDomain The base exposure domain (e.g., "aws-us-east-1.sandbox0.app").
-		// Useful for clients that need to construct URLs manually.
-		ExposureDomain *string `json:"exposure_domain,omitempty"`
-		SandboxId      string  `json:"sandbox_id"`
-	} `json:"data,omitempty"`
-	Success SuccessExposedPortsResponseSuccess `json:"success"`
-}
-
-// SuccessExposedPortsResponseSuccess defines model for SuccessExposedPortsResponse.Success.
-type SuccessExposedPortsResponseSuccess bool
 
 // SuccessFileListResponse defines model for SuccessFileListResponse.
 type SuccessFileListResponse struct {
@@ -2231,11 +2193,6 @@ type TrafficRuleAction string
 // TrafficRuleAppProtocol defines model for TrafficRuleAppProtocol.
 type TrafficRuleAppProtocol string
 
-// UpdateExposedPortsRequest defines model for UpdateExposedPortsRequest.
-type UpdateExposedPortsRequest struct {
-	Ports []ExposedPortConfig `json:"ports"`
-}
-
 // UpdateRegionRequest defines model for UpdateRegionRequest.
 type UpdateRegionRequest struct {
 	DisplayName        *string `json:"display_name,omitempty"`
@@ -2523,9 +2480,6 @@ type PostApiV1SandboxesIdContextsCtxIdResizeJSONRequestBody = ResizeContextReque
 
 // PostApiV1SandboxesIdContextsCtxIdSignalJSONRequestBody defines body for PostApiV1SandboxesIdContextsCtxIdSignal for application/json ContentType.
 type PostApiV1SandboxesIdContextsCtxIdSignalJSONRequestBody = SignalContextRequest
-
-// PutApiV1SandboxesIdExposedPortsJSONRequestBody defines body for PutApiV1SandboxesIdExposedPorts for application/json ContentType.
-type PutApiV1SandboxesIdExposedPortsJSONRequestBody = UpdateExposedPortsRequest
 
 // PostApiV1SandboxesIdFilesMoveJSONRequestBody defines body for PostApiV1SandboxesIdFilesMove for application/json ContentType.
 type PostApiV1SandboxesIdFilesMoveJSONRequestBody = MoveFileRequest

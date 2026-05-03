@@ -122,9 +122,6 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 		if cfg.AutoResume != nil {
 			merged.AutoResume = cfg.AutoResume
 		}
-		if cfg.ExposedPorts != nil {
-			merged.ExposedPorts = cfg.ExposedPorts
-		}
 		if cfg.PublicGateway != nil {
 			publicGateway, err := normalizePublicGatewayConfig(cfg.PublicGateway)
 			if err != nil {
@@ -251,7 +248,6 @@ func (s *SandboxService) podToSandbox(ctx context.Context, pod *corev1.Pod, sand
 		Paused:        powerState.Observed == SandboxPowerStatePaused,
 		PowerState:    powerState,
 		AutoResume:    autoResume,
-		ExposedPorts:  cfg.ExposedPorts,
 		PublicGateway: cfg.PublicGateway,
 		PodName:       pod.Name,
 		ExpiresAt:     expiresAt,

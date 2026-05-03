@@ -35,16 +35,6 @@ func SandboxToAPI(sandbox *mgr.Sandbox, sshInfo *ConnectionInfo) *apispec.Sandbo
 	if sandbox.UserID != "" {
 		payload.UserId = &sandbox.UserID
 	}
-	if len(sandbox.ExposedPorts) > 0 {
-		exposed := make([]apispec.ExposedPortConfig, 0, len(sandbox.ExposedPorts))
-		for _, port := range sandbox.ExposedPorts {
-			exposed = append(exposed, apispec.ExposedPortConfig{
-				Port:   int32(port.Port),
-				Resume: port.Resume,
-			})
-		}
-		payload.ExposedPorts = &exposed
-	}
 	if sshInfo != nil {
 		payload.Ssh = &apispec.SandboxSSHConnection{
 			Host:     sshInfo.Host,

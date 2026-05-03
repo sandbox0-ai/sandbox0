@@ -62,7 +62,6 @@ type SandboxConfig struct {
 	Network       *v1alpha1.SandboxNetworkPolicy `json:"network,omitempty"`
 	Webhook       *WebhookConfig                 `json:"webhook,omitempty"`
 	AutoResume    *bool                          `json:"auto_resume,omitempty"`
-	ExposedPorts  []ExposedPortConfig            `json:"exposed_ports,omitempty"`
 	PublicGateway *PublicGatewayConfig           `json:"public_gateway,omitempty"`
 }
 
@@ -74,13 +73,7 @@ type SandboxUpdateConfig struct {
 	HardTTL       *int32                         `json:"hard_ttl,omitempty"`
 	Network       *v1alpha1.SandboxNetworkPolicy `json:"network,omitempty"`
 	AutoResume    *bool                          `json:"auto_resume,omitempty"`
-	ExposedPorts  []ExposedPortConfig            `json:"exposed_ports,omitempty"`
 	PublicGateway *PublicGatewayConfig           `json:"public_gateway,omitempty"`
-}
-
-type ExposedPortConfig struct {
-	Port   int  `json:"port"`
-	Resume bool `json:"resume"`
 }
 
 func int32Ptr(v int32) *int32 {

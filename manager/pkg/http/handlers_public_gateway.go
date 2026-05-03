@@ -3,6 +3,7 @@ package http
 import (
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
@@ -10,6 +11,17 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
 )
+
+func (s *Server) getExposureDomain() string {
+	rootDomain := strings.TrimSpace(s.publicRootDomain)
+	if rootDomain == "" {
+		rootDomain = "sandbox0.app"
+	}
+	if s.publicRegionID == "" {
+		return ""
+	}
+	return s.publicRegionID + "." + rootDomain
+}
 
 func (s *Server) getPublicGateway(c *gin.Context) {
 	sandboxID := c.Param("id")

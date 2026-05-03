@@ -57,45 +57,50 @@ func (s *Session) UpdateNetworkPolicy(ctx context.Context, t ContractT, sandboxI
 	return resp.Data, status, nil, nil
 }
 
-func (s *Session) GetExposedPorts(ctx context.Context, t ContractT, sandboxID string) ([]apispec.ExposedPortConfig, int, error) {
-	specPath := "/api/v1/sandboxes/{id}/exposed-ports"
-	requestPath := "/api/v1/sandboxes/" + sandboxID + "/exposed-ports"
-	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodGet, specPath, requestPath, nil, true)
+func (s *Session) UpdatePublicGateway(ctx context.Context, t ContractT, sandboxID string, policy apispec.PublicGatewayConfig) (*apispec.PublicGatewayConfig, string, int, error) {
+	specPath := "/api/v1/sandboxes/{id}/public-gateway"
+	requestPath := "/api/v1/sandboxes/" + sandboxID + "/public-gateway"
+	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodPut, specPath, requestPath, policy, true)
 	if err != nil {
-		return nil, status, err
+		return nil, "", status, err
 	}
 	if status != http.StatusOK {
-		return nil, status, fmt.Errorf("get exposed ports failed with status %d: %s", status, formatAPIError(body))
+		return nil, "", status, fmt.Errorf("update public gateway failed with status %d: %s", status, formatAPIError(body))
 	}
-	var resp apispec.SuccessExposedPortsResponse
+	var resp apispec.SuccessPublicGatewayResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, status, err
+		return nil, "", status, err
 	}
 	if !resp.Success || resp.Data == nil {
-		return nil, status, fmt.Errorf("get exposed ports response missing data")
+		return nil, "", status, fmt.Errorf("update public gateway response missing data")
 	}
-	return resp.Data.ExposedPorts, status, nil
+	exposureDomain := ""
+	if resp.Data.ExposureDomain != nil {
+		exposureDomain = *resp.Data.ExposureDomain
+	}
+	return &resp.Data.PublicGateway, exposureDomain, status, nil
 }
 
-func (s *Session) UpdateExposedPorts(ctx context.Context, t ContractT, sandboxID string, ports []apispec.ExposedPortConfig) ([]apispec.ExposedPortConfig, int, error) {
-	specPath := "/api/v1/sandboxes/{id}/exposed-ports"
-	requestPath := "/api/v1/sandboxes/" + sandboxID + "/exposed-ports"
-	req := apispec.UpdateExposedPortsRequest{
-		Ports: ports,
-	}
-	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodPut, specPath, requestPath, req, true)
+func (s *Session) GetPublicGateway(ctx context.Context, t ContractT, sandboxID string) (*apispec.PublicGatewayConfig, string, int, error) {
+	specPath := "/api/v1/sandboxes/{id}/public-gateway"
+	requestPath := "/api/v1/sandboxes/" + sandboxID + "/public-gateway"
+	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodGet, specPath, requestPath, nil, true)
 	if err != nil {
-		return nil, status, err
+		return nil, "", status, err
 	}
 	if status != http.StatusOK {
-		return nil, status, fmt.Errorf("update exposed ports failed with status %d: %s", status, formatAPIError(body))
+		return nil, "", status, fmt.Errorf("get public gateway failed with status %d: %s", status, formatAPIError(body))
 	}
-	var resp apispec.SuccessExposedPortsResponse
+	var resp apispec.SuccessPublicGatewayResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, status, err
+		return nil, "", status, err
 	}
 	if !resp.Success || resp.Data == nil {
-		return nil, status, fmt.Errorf("update exposed ports response missing data")
+		return nil, "", status, fmt.Errorf("get public gateway response missing data")
 	}
-	return resp.Data.ExposedPorts, status, nil
+	exposureDomain := ""
+	if resp.Data.ExposureDomain != nil {
+		exposureDomain = *resp.Data.ExposureDomain
+	}
+	return &resp.Data.PublicGateway, exposureDomain, status, nil
 }

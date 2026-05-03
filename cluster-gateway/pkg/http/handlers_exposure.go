@@ -13,7 +13,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/client"
-	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
@@ -54,47 +53,34 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 		}
 		return
 	}
-	var route *mgr.PublicGatewayRoute
-	var policy mgr.ExposedPortConfig
-	if sandbox.PublicGateway != nil && sandbox.PublicGateway.Enabled {
-		match := matchPublicGatewayRoute(sandbox.PublicGateway, port, c.Request.URL.Path, c.Request.Method)
-		if !match.pathMatched {
-			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "route is not exposed")
-			return
-		}
-		route = match.route
-		if c.Request.Method == http.MethodOptions && route.CORS != nil {
-			if !s.enforcePublicGatewayRoute(c, sandboxID, route) {
-				return
-			}
-		}
-		if !match.methodAllowed {
-			spec.JSONError(c, http.StatusMethodNotAllowed, spec.CodeForbidden, "method is not allowed")
-			return
-		}
+	if sandbox.PublicGateway == nil || !sandbox.PublicGateway.Enabled {
+		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "route is not exposed")
+		return
+	}
+	match := matchPublicGatewayRoute(sandbox.PublicGateway, port, c.Request.URL.Path, c.Request.Method)
+	if !match.pathMatched {
+		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "route is not exposed")
+		return
+	}
+	route := match.route
+	if c.Request.Method == http.MethodOptions && route.CORS != nil {
 		if !s.enforcePublicGatewayRoute(c, sandboxID, route) {
 			return
 		}
-	} else {
-		var ok bool
-		policy, ok = findExposedPortPolicy(sandbox, port)
-		if !ok {
-			spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "port is not exposed")
-			return
-		}
+	}
+	if !match.methodAllowed {
+		spec.JSONError(c, http.StatusMethodNotAllowed, spec.CodeForbidden, "method is not allowed")
+		return
+	}
+	if !s.enforcePublicGatewayRoute(c, sandboxID, route) {
+		return
 	}
 	if sandboxWantsPaused(sandbox) {
-		// Resume precedence:
-		// sandbox.auto_resume must be true, then the matching public route or exposed port resume gate must be true.
 		if !sandbox.AutoResume {
 			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is paused and auto_resume is disabled")
 			return
 		}
-		resumeAllowed := policy.Resume
-		if route != nil {
-			resumeAllowed = route.Resume
-		}
-		if !resumeAllowed {
+		if !route.Resume {
 			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is paused and resume is disabled")
 			return
 		}
@@ -202,13 +188,4 @@ func portFromURL(raw string) (int, error) {
 		return 0, fmt.Errorf("port missing")
 	}
 	return strconv.Atoi(p)
-}
-
-func findExposedPortPolicy(sandbox *mgr.Sandbox, port int) (mgr.ExposedPortConfig, bool) {
-	for _, item := range sandbox.ExposedPorts {
-		if item.Port == port {
-			return item, true
-		}
-	}
-	return mgr.ExposedPortConfig{}, false
 }

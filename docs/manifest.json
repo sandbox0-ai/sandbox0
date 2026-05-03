@@ -44,10 +44,6 @@
           "title": "Network"
         },
         {
-          "slug": "ports",
-          "title": "Ports"
-        },
-        {
           "slug": "gateway-policy",
           "title": "Gateway Policy"
         },

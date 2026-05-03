@@ -1385,14 +1385,20 @@ func assertSandboxNetworkIsolation(env *framework.ScenarioEnv, session *e2eutils
 		return nil
 	}).WithTimeout(30 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
 
-	updatedPorts, status, err := session.UpdateExposedPorts(env.TestCtx.Context, GinkgoT(), sandboxBID, []apispec.ExposedPortConfig{{
-		Port:   exposedPort,
-		Resume: true,
-	}})
+	routes := []apispec.PublicGatewayRoute{{
+		Id:         "web",
+		Port:       exposedPort,
+		PathPrefix: ptr("/"),
+		Resume:     true,
+	}}
+	_, exposureDomain, status, err := session.UpdatePublicGateway(env.TestCtx.Context, GinkgoT(), sandboxBID, apispec.PublicGatewayConfig{
+		Enabled: true,
+		Routes:  &routes,
+	})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
 
-	publicHost := publicExposureHostForPort(updatedPorts, exposedPort)
+	publicHost := publicExposureHostForRoute(sandboxBID, exposedPort, exposureDomain)
 	Expect(publicHost).NotTo(BeEmpty())
 
 	Eventually(func() error {
@@ -1809,20 +1815,13 @@ func deleteTeamTemplateAndWaitForNamespaceCleanup(env *framework.ScenarioEnv, se
 	}).WithTimeout(2 * time.Minute).WithPolling(2 * time.Second).Should(Succeed())
 }
 
-func publicExposureHostForPort(ports []apispec.ExposedPortConfig, port int32) string {
-	for _, item := range ports {
-		if item.Port != port || item.PublicUrl == nil {
-			continue
-		}
-		host := strings.TrimSpace(*item.PublicUrl)
-		host = strings.TrimPrefix(host, "https://")
-		host = strings.TrimPrefix(host, "http://")
-		host = strings.TrimSuffix(host, "/")
-		if host != "" {
-			return host
-		}
+func publicExposureHostForRoute(sandboxID string, port int32, exposureDomain string) string {
+	sandboxID = strings.TrimSpace(sandboxID)
+	exposureDomain = strings.Trim(strings.TrimSpace(exposureDomain), ".")
+	if sandboxID == "" || port <= 0 || exposureDomain == "" {
+		return ""
 	}
-	return ""
+	return fmt.Sprintf("%s--p%d.%s", sandboxID, port, exposureDomain)
 }
 
 func assertVolumeLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session) {

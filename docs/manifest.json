@@ -90,6 +90,10 @@
           "title": "Agent Engines"
         },
         {
+          "slug": "llmproxy",
+          "title": "LLMProxy"
+        },
+        {
           "slug": "compatibility",
           "title": "Compatibility"
         }

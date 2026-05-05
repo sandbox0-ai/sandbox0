@@ -19,7 +19,8 @@ Official reference: [Claude Managed Agents quickstart](https://platform.claude.c
 | Custom skills | Supported through uploaded skill versions |
 | MCP servers | Supported for URL MCP servers and vault-backed credentials |
 | GitHub repository resources | Supported at session creation |
-| Agent engines | Supported for `claude` and `codex` |
+| Agent engines | Supported for `claude`, `codex`, and `openai-agents` |
+| LLMProxy | Supported as an optional protocol translator for OpenAI-compatible engines |
 
 ## Current Differences
 
@@ -32,6 +33,8 @@ Official reference: [Claude Managed Agents quickstart](https://platform.claude.c
 | Sandbox claim | Runtime setup claims or resumes a Sandbox0 sandbox and mounts a persistent workspace volume. |
 | Claude engine | Requires an Anthropic-compatible endpoint. |
 | Codex engine | Requires an OpenAI-compatible endpoint. |
+| OpenAI Agents engine | Requires an OpenAI Responses-compatible endpoint and uses Sandbox0 as a tool target. |
+| LLMProxy | Optional. Use it when an OpenAI-compatible engine needs to call an Anthropic-compatible provider. |
 | Anthropic pre-built skills | Not supported. Use Sandbox0 custom skills. |
 | Multi-agent threads | Not implemented in the current backend surface. |
 | Outcomes and memory research preview | Not implemented in the current backend surface. |
@@ -101,6 +104,8 @@ Sandbox0 stores the session and event log outside the sandbox. Sandbox attachmen
 | Interrupt | Interrupts the active wrapper run and moves local session truth back toward idle. |
 | Delete | Rejects active running sessions. Delete after interrupting and reaching idle. |
 | Archive | Makes the session read-only for new input events. |
+
+`claude` and `codex` use agent in sandbox behavior. `openai-agents` uses sandbox as tool behavior, so the resident runtime can start a run before a Sandbox0 sandbox is claimed.
 
 ## Version Drift
 

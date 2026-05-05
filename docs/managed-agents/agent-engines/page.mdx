@@ -1,20 +1,34 @@
 # Agent Engines
 
-Agent engine is the Sandbox0 name for the runtime adapter that executes an agent inside the per-session sandbox.
+An agent engine is the Sandbox0 runtime adapter behind a Managed Agents session.
 
-The public API still uses the Claude Managed Agents object model. The agent engine decides which local wrapper runs in the sandbox, how model credentials are projected, and how tool events are mapped back to the Managed Agents event stream.
+The public API still uses the Claude Managed Agents object model. The engine decides where the agent loop runs, which model API shape it expects, how credentials are projected, and how tool events are mapped back to the Managed Agents event stream.
 
 Official references:
 
 - [Claude Managed Agents quickstart](https://platform.claude.com/docs/en/managed-agents/quickstart)
 - [Claude Managed Agents agent setup](https://platform.claude.com/docs/en/managed-agents/agent-setup)
 
+## Execution Models
+
+Sandbox0 supports two execution models.
+
+| Model | How it works | Engines |
+|-------|--------------|---------|
+| Agent in sandbox | The agent runtime process runs inside the per-session Sandbox0 sandbox. The sandbox contains the agent process, workspace, tools, and engine state. | `claude`, `codex` |
+| Sandbox as tool | A resident runtime service runs the agent loop outside the sandbox. The sandbox is claimed lazily and exposed to the agent as tools such as `bash`. | `openai-agents` |
+
+Use agent in sandbox when you want the agent process itself to live with the workspace. This is the most direct fit for coding agents that expect local files, shell commands, home-directory state, and long-lived process state inside the sandbox.
+
+Use sandbox as tool when you want to embed an agent into a product workflow or control plane. The agent harness stays in a managed runtime service, while Sandbox0 provides isolated tool execution only when the agent needs to inspect files or run commands.
+
 ## Supported Engines
 
-| Engine | Runtime adapter | Model API shape |
-|--------|-----------------|-----------------|
-| `claude` | Claude Agent SDK wrapper | Anthropic-compatible |
-| `codex` | Codex app-server wrapper | OpenAI-compatible |
+| Engine | Execution model | Runtime adapter | Model API shape | Best fit |
+|--------|-----------------|-----------------|-----------------|----------|
+| `claude` | Agent in sandbox | Claude Agent SDK wrapper | Anthropic-compatible | Claude Code style coding agents and Anthropic-compatible providers |
+| `codex` | Agent in sandbox | Codex app-server wrapper | OpenAI-compatible | Codex app-server sessions that should keep Codex state inside the workspace |
+| `openai-agents` | Sandbox as tool | Resident OpenAI Agents Python runtime | OpenAI Responses-compatible | Product copilots and agent workflows built on the OpenAI Agents SDK |
 
 ## Select An Engine
 
@@ -31,7 +45,7 @@ const claudeVault = await client.beta.vaults.create({
 });
 ```
 
-For Codex:
+For `codex`:
 
 ```typescript
 const codexVault = await client.beta.vaults.create({
@@ -44,10 +58,23 @@ const codexVault = await client.beta.vaults.create({
 });
 ```
 
+For `openai-agents`:
+
+```typescript
+const openAIAgentsVault = await client.beta.vaults.create({
+    display_name: "OpenAI Agents LLM",
+    metadata: {
+        "sandbox0.managed_agents.role": "llm",
+        "sandbox0.managed_agents.engine": "openai-agents",
+        "sandbox0.managed_agents.llm_base_url": "https://api.openai.com/v1",
+    },
+});
+```
+
 Add the model provider token to the selected LLM vault:
 
 ```typescript
-await client.beta.vaults.credentials.create(codexVault.id, {
+await client.beta.vaults.credentials.create(openAIAgentsVault.id, {
     display_name: "Model provider API key",
     auth: {
         type: "static_bearer",
@@ -56,7 +83,7 @@ await client.beta.vaults.credentials.create(codexVault.id, {
 });
 ```
 
-Use `claudeVault.id` instead of `codexVault.id` when the session should run the Claude engine. LLM credentials must be unbound `static_bearer` credentials; do not set `mcp_server_url` for the model provider token.
+Use the vault id for the engine you want. LLM credentials must be unbound `static_bearer` credentials; do not set `mcp_server_url` for the model provider token.
 
 Attach exactly one LLM vault to the session:
 
@@ -64,7 +91,7 @@ Attach exactly one LLM vault to the session:
 const session = await client.beta.sessions.create({
     agent: agent.id,
     environment_id: environment.id,
-    vault_ids: [codexVault.id],
+    vault_ids: [openAIAgentsVault.id],
 });
 ```
 
@@ -72,7 +99,7 @@ If no LLM vault selects an engine, Sandbox0 defaults to `claude`.
 
 ## Claude Engine
 
-The Claude engine expects an Anthropic-compatible API. Use it for Claude Agent SDK behavior and Anthropic-compatible provider endpoints.
+The Claude engine runs the Claude Agent SDK wrapper inside the session sandbox. It expects an Anthropic-compatible API. Use it when the provider already exposes the Anthropic Messages API shape and you want Claude Code style behavior.
 
 Sandbox0 sets compatibility environment values such as `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_BASE_URL`, then injects the real credential through egress auth for the configured LLM host.
 
@@ -81,6 +108,29 @@ Sandbox0 sets compatibility environment values such as `ANTHROPIC_API_KEY`, `ANT
 The Codex engine launches Codex app-server inside the session sandbox. It expects an OpenAI-compatible model endpoint. Sandbox0 stores Codex home and thread state under the session workspace so runtime state stays session-scoped.
 
 For Minimax-compatible endpoints, Sandbox0 detects the provider from the LLM base URL and configures Codex provider settings accordingly.
+
+## OpenAI Agents Engine
+
+The `openai-agents` engine uses a resident Python runtime service built on the official OpenAI Agents SDK. The runtime receives the session snapshot from the Managed Agents gateway, runs the agent loop in the runtime service, and claims a Sandbox0 sandbox only when the agent needs sandbox tools.
+
+This is the sandbox as tool model. The session still has durable Managed Agents event history, but the agent process is not the same process as the sandbox. The sandbox is an isolated tool target for commands and workspace work.
+
+The engine expects an OpenAI Responses-compatible endpoint. For Anthropic-compatible providers, place [LLMProxy](/docs/managed-agents/llmproxy) in front of the provider and store the proxy URL as the LLM vault base URL.
+
+```typescript
+const zaiViaLLMProxyVault = await client.beta.vaults.create({
+    display_name: "Z.ai through LLMProxy",
+    metadata: {
+        "sandbox0.managed_agents.role": "llm",
+        "sandbox0.managed_agents.engine": "openai-agents",
+        "sandbox0.managed_agents.llm_base_url": "https://llmproxy.sandbox0.ai/claude2codex/https://api.z.ai/api/anthropic",
+    },
+});
+```
+
+<Callout variant="info">
+For self-hosted deployments, configure the OpenAI Agents runtime callback base URL to an internal gateway URL when possible. The runtime sends session events back to the Managed Agents gateway; routing that callback through a public edge can introduce avoidable policy and timeout failures.
+</Callout>
 
 ## Engine Configuration
 
@@ -107,5 +157,13 @@ Do not use `sandbox0.managed_agents.engine` as session metadata. Reserved `sandb
     cta="Check"
   >
     Review the current differences from hosted Claude Managed Agents
+  </LinkCard>
+
+  <LinkCard
+    title="LLMProxy"
+    href="/docs/managed-agents/llmproxy"
+    cta="Translate"
+  >
+    Use Anthropic-compatible providers with OpenAI-compatible engines
   </LinkCard>
 </CardGrid>

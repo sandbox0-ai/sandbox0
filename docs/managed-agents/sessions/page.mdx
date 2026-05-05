@@ -77,6 +77,8 @@ Sandbox0 keeps session state and event history outside the sandbox. The sandbox 
 - The runtime sandbox uses auto-resume.
 - Runtime sandbox lifetime is managed by the Managed Agents deployment.
 - The selected agent engine is resolved from the attached LLM vault; if no engine is selected, the default is `claude`.
+- `claude` and `codex` run the agent process inside the sandbox.
+- `openai-agents` runs the agent loop in a resident runtime and uses Sandbox0 as a sandbox tool.
 
 ## Next
 

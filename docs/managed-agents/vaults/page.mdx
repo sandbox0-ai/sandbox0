@@ -30,7 +30,7 @@ await client.beta.vaults.credentials.create(llmVault.id, {
 | Metadata key | Required | Meaning |
 |--------------|----------|---------|
 | `sandbox0.managed_agents.role` | Yes | Must be `llm` for an LLM vault |
-| `sandbox0.managed_agents.engine` | Yes | `claude` or `codex` |
+| `sandbox0.managed_agents.engine` | Yes | `claude`, `codex`, or `openai-agents` |
 | `sandbox0.managed_agents.llm_base_url` | No | Model provider base URL |
 
 The LLM credential must be an unbound `static_bearer` credential. Do not set `mcp_server_url` on LLM credentials.
@@ -88,8 +88,11 @@ Sandbox0 injects credentials through egress auth and compatibility environment v
 |--------|---------------------------|
 | `claude` | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL` |
 | `codex` | `CODEX_API_KEY`, `OPENAI_API_KEY`, and `openai_base_url` engine config |
+| `openai-agents` | `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `openai_base_url` engine config |
 
 The environment variables may contain placeholders. The real token is projected by Sandbox0-managed credential policy when the sandbox contacts the configured host.
+
+For `openai-agents`, the runtime expects an OpenAI Responses-compatible base URL. If the provider exposes an Anthropic-compatible endpoint, use [LLMProxy](/docs/managed-agents/llmproxy) and store the LLMProxy URL in `sandbox0.managed_agents.llm_base_url`.
 
 ## Next
 
@@ -99,7 +102,15 @@ The environment variables may contain placeholders. The real token is projected 
     href="/docs/managed-agents/agent-engines"
     cta="Choose"
   >
-    Use LLM vault metadata to select Claude or Codex runtime behavior
+    Use LLM vault metadata to select Claude, Codex, or OpenAI Agents runtime behavior
+  </LinkCard>
+
+  <LinkCard
+    title="LLMProxy"
+    href="/docs/managed-agents/llmproxy"
+    cta="Translate"
+  >
+    Adapt Anthropic-compatible providers for OpenAI-compatible engines
   </LinkCard>
 
   <LinkCard

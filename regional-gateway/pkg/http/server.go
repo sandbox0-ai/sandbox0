@@ -122,7 +122,7 @@ func NewServer(
 	httpClient := obsProvider.HTTP.NewClient(httpobs.Config{
 		Timeout: cfg.ProxyTimeout.Duration,
 	})
-	observabilityReader, err := newObservabilityReader(cfg.GatewayConfig.Observability, httpClient)
+	observabilityReader, err := newObservabilityReader(cfg.Observability, httpClient)
 	if err != nil {
 		logger.Warn("Observability query API disabled", zap.Error(err))
 	}

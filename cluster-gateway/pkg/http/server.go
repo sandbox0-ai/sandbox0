@@ -242,7 +242,7 @@ func NewServer(
 		meteringRepo = metering.NewRepository(pool)
 	}
 	meteringHandler := gatewayhandlers.NewMeteringHandler(meteringRepo, cfg.RegionID, logger)
-	observabilityReader, err := newObservabilityReader(cfg.GatewayConfig.Observability, httpClient)
+	observabilityReader, err := newObservabilityReader(cfg.Observability, httpClient)
 	if err != nil {
 		logger.Warn("Observability query API disabled", zap.Error(err))
 	}

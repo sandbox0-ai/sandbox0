@@ -31,6 +31,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
+	obsquery "github.com/sandbox0-ai/sandbox0/pkg/observability/query"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"go.uber.org/zap"
 )
@@ -55,6 +56,7 @@ type Server struct {
 	requestLogger         *middleware.RequestLogger
 	logger                *zap.Logger
 	meteringHandler       *gatewayhandlers.MeteringHandler
+	observabilityHandler  *gatewayhandlers.ObservabilityHandler
 	internalAuthGen       *internalauth.Generator
 	entitlements          licensing.Entitlements
 	obsProvider           *observability.Provider
@@ -240,30 +242,36 @@ func NewServer(
 		meteringRepo = metering.NewRepository(pool)
 	}
 	meteringHandler := gatewayhandlers.NewMeteringHandler(meteringRepo, cfg.RegionID, logger)
+	observabilityReader, err := newObservabilityReader(cfg.GatewayConfig.Observability, httpClient)
+	if err != nil {
+		logger.Warn("Observability query API disabled", zap.Error(err))
+	}
+	observabilityHandler := gatewayhandlers.NewObservabilityHandler(observabilityReader, logger)
 
 	server := &Server{
-		router:             router,
-		cfg:                cfg,
-		proxy2Mgr:          proxy2Mgr,
-		proxy2sp:           proxy2sp,
-		managerClient:      managerClient,
-		authMiddleware:     authMiddleware,
-		publicAuth:         publicAuth,
-		compositeAuth:      compositeAuth,
-		publicIdentityRepo: publicIdentityRepo,
-		publicAPIKeyRepo:   publicAPIKeyRepo,
-		rateLimiter:        rateLimiter,
-		externalLimiter:    externalLimiter,
-		publicBuiltin:      publicBuiltin,
-		publicOIDC:         publicOIDC,
-		publicJWT:          publicJWT,
-		requestLogger:      requestLogger,
-		logger:             logger,
-		meteringHandler:    meteringHandler,
-		internalAuthGen:    internalAuthGen,
-		entitlements:       entitlements,
-		obsProvider:        obsProvider,
-		httpClient:         httpClient,
+		router:               router,
+		cfg:                  cfg,
+		proxy2Mgr:            proxy2Mgr,
+		proxy2sp:             proxy2sp,
+		managerClient:        managerClient,
+		authMiddleware:       authMiddleware,
+		publicAuth:           publicAuth,
+		compositeAuth:        compositeAuth,
+		publicIdentityRepo:   publicIdentityRepo,
+		publicAPIKeyRepo:     publicAPIKeyRepo,
+		rateLimiter:          rateLimiter,
+		externalLimiter:      externalLimiter,
+		publicBuiltin:        publicBuiltin,
+		publicOIDC:           publicOIDC,
+		publicJWT:            publicJWT,
+		requestLogger:        requestLogger,
+		logger:               logger,
+		meteringHandler:      meteringHandler,
+		observabilityHandler: observabilityHandler,
+		internalAuthGen:      internalAuthGen,
+		entitlements:         entitlements,
+		obsProvider:          obsProvider,
+		httpClient:           httpClient,
 		exposureSandboxCache: cache.New[string, *mgr.Sandbox](cache.Config{
 			MaxSize:         4096,
 			TTL:             5 * time.Second,
@@ -411,6 +419,12 @@ func (s *Server) setupRoutes() {
 			credentialSources.DELETE("/:name", s.authMiddleware.RequirePermission(gatewayauthn.PermCredentialSourceDelete), s.deleteCredentialSource)
 		}
 
+		observabilityRoutes := v1.Group("/observability")
+		{
+			observabilityRoutes.GET("/traces", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.observabilityHandler.ListTraceSpans)
+			observabilityRoutes.GET("/logs", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.observabilityHandler.ListLogs)
+		}
+
 		// === SandboxVolume Management (→ Storage Proxy) ===
 		sandboxvolumes := v1.Group("/sandboxvolumes")
 		sandboxvolumes.Use(s.storageProxyUpstreamMiddleware())
@@ -455,6 +469,22 @@ func (s *Server) setupRoutes() {
 
 	// Host-based public exposure fallback (for non-/api paths)
 	s.router.NoRoute(s.handlePublicExposureNoRoute)
+}
+
+func newObservabilityReader(cfg config.ObservabilityQueryConfig, httpClient *http.Client) (gatewayhandlers.ObservabilityReader, error) {
+	if strings.TrimSpace(cfg.ClickHouseHTTPURL) == "" {
+		return nil, nil
+	}
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 15 * time.Second}
+	}
+	return obsquery.NewClickHouseClient(obsquery.ClickHouseConfig{
+		HTTPURL:  cfg.ClickHouseHTTPURL,
+		Database: cfg.ClickHouseDatabase,
+		Username: cfg.ClickHouseUsername,
+		Password: cfg.ClickHousePassword,
+		Client:   httpClient,
+	})
 }
 
 func (s *Server) setupInternalControlPlaneRoutes() {

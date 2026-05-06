@@ -75,6 +75,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 	if err != nil {
 		return err
 	}
+	observabilityQueryEnvVars := compiledPlan.ConfigureGatewayObservability(&config.GatewayConfig)
 	needEnterpriseLicense := compiledPlan.Enterprise.ClusterGateway
 	common.NormalizeEnterpriseLicenseFile(&config.LicenseFile, needEnterpriseLicense)
 	podAnnotations, err := common.ConfigHashAnnotation(config)
@@ -173,6 +174,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 		},
 	}
 	envVars = append(envVars, compiledPlan.ObservabilityEnvVars()...)
+	envVars = append(envVars, observabilityQueryEnvVars...)
 
 	if err := r.Resources.ReconcileDeploymentWithScope(ctx, scope, deploymentName, labels, replicas, common.ServiceDefinition{
 		Name:       "cluster-gateway",

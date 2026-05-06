@@ -113,6 +113,23 @@ func TestSetupRoutesMountsSandboxLogsEndpoint(t *testing.T) {
 	}
 }
 
+func TestSetupRoutesMountsObservabilityEndpoints(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server, _, _ := testMeteringRouteServer(t, "public")
+	server.requestLogger = middleware.NewRequestLogger(zap.NewNop())
+	server.obsProvider = newTestMeteringObservability(t)
+	server.observabilityHandler = gatewayhandlers.NewObservabilityHandler(nil, zap.NewNop())
+	server.setupRoutes()
+
+	if !hasRoute(server.router, "GET", "/api/v1/observability/traces") {
+		t.Fatal("expected observability traces route to be mounted")
+	}
+	if !hasRoute(server.router, "GET", "/api/v1/observability/logs") {
+		t.Fatal("expected observability logs route to be mounted")
+	}
+}
+
 func TestSetupMeteringRoutesDoesNotRequireManagerUpstream(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

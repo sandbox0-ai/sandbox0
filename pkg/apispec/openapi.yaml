@@ -1448,6 +1448,130 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/observability/traces:
+    get:
+      tags: [observability]
+      summary: Query observability trace spans
+      description: Returns OpenTelemetry trace spans stored for the selected team and region.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: sandbox_id
+          in: query
+          schema:
+            type: string
+          description: Filter spans by sandbox id when available in resource attributes.
+        - name: trace_id
+          in: query
+          schema:
+            type: string
+          description: Filter spans by OpenTelemetry trace id.
+        - name: start_time
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Include spans at or after this timestamp.
+        - name: end_time
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Include spans at or before this timestamp.
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+      responses:
+        "200":
+          description: Trace spans
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessObservabilityTraceSpanListResponse"
+        "400":
+          description: Invalid query parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "503":
+          description: Observability is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/observability/logs:
+    get:
+      tags: [observability]
+      summary: Query observability logs
+      description: Returns OpenTelemetry log records stored for the selected team and region.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: sandbox_id
+          in: query
+          schema:
+            type: string
+          description: Filter logs by sandbox id when available in resource attributes.
+        - name: trace_id
+          in: query
+          schema:
+            type: string
+          description: Filter logs by OpenTelemetry trace id.
+        - name: start_time
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Include logs at or after this timestamp.
+        - name: end_time
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Include logs at or before this timestamp.
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+      responses:
+        "200":
+          description: Log records
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessObservabilityLogRecordListResponse"
+        "400":
+          description: Invalid query parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "503":
+          description: Observability is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
   /api/v1/sandboxes/{id}/pause:
     post:
       tags: [sandboxes]
@@ -3903,6 +4027,85 @@ components:
           type: string
         created_at:
           type: string
+    ObservabilityTraceSpan:
+      type: object
+      properties:
+        timestamp:
+          type: string
+        trace_id:
+          type: string
+        span_id:
+          type: string
+        parent_span_id:
+          type: string
+        service_name:
+          type: string
+        name:
+          type: string
+        kind:
+          type: string
+        duration_nano:
+          type: integer
+          format: int64
+        status_code:
+          type: string
+        status_message:
+          type: string
+        resource_attributes:
+          type: object
+          additionalProperties:
+            type: string
+        attributes:
+          type: object
+          additionalProperties:
+            type: string
+    ObservabilityLogRecord:
+      type: object
+      properties:
+        timestamp:
+          type: string
+        trace_id:
+          type: string
+        span_id:
+          type: string
+        severity_text:
+          type: string
+        severity_number:
+          type: integer
+        body:
+          type: string
+        resource_attributes:
+          type: object
+          additionalProperties:
+            type: string
+        attributes:
+          type: object
+          additionalProperties:
+            type: string
+    SuccessObservabilityTraceSpanListResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                spans:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/ObservabilityTraceSpan"
+    SuccessObservabilityLogRecordListResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                logs:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/ObservabilityLogRecord"
     SuccessSandboxResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"

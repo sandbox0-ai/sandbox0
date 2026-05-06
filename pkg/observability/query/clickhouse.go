@@ -83,7 +83,7 @@ func NewClickHouseClient(cfg ClickHouseConfig) (*Client, error) {
 
 func (c *Client) ListTraceSpans(ctx context.Context, opts ListOptions) ([]TraceSpan, error) {
 	limit := normalizeLimit(opts.Limit)
-	where := buildWhere(opts)
+	where := buildWhere(opts, "SpanAttributes")
 	sql := fmt.Sprintf(`SELECT
   toString(Timestamp) AS timestamp,
   TraceId AS trace_id,
@@ -123,7 +123,7 @@ FORMAT JSONEachRow`, ident(c.cfg.Database), ident(defaultTracesTable), where, li
 
 func (c *Client) ListLogs(ctx context.Context, opts ListOptions) ([]LogRecord, error) {
 	limit := normalizeLimit(opts.Limit)
-	where := buildWhere(opts)
+	where := buildWhere(opts, "LogAttributes")
 	sql := fmt.Sprintf(`SELECT
   toString(Timestamp) AS timestamp,
   TraceId AS trace_id,
@@ -195,13 +195,13 @@ func (c *Client) queryJSONEachRow(ctx context.Context, sql string, consume func(
 	return nil
 }
 
-func buildWhere(opts ListOptions) string {
+func buildWhere(opts ListOptions, signalAttributesColumn string) string {
 	clauses := make([]string, 0, 5)
 	if opts.TeamID != "" {
-		clauses = append(clauses, "ResourceAttributes['sandbox0.team_id'] = "+quote(opts.TeamID))
+		clauses = append(clauses, attributeFilter(signalAttributesColumn, "sandbox0.team_id", opts.TeamID))
 	}
 	if opts.SandboxID != "" {
-		clauses = append(clauses, "ResourceAttributes['sandbox0.sandbox_id'] = "+quote(opts.SandboxID))
+		clauses = append(clauses, attributeFilter(signalAttributesColumn, "sandbox0.sandbox_id", opts.SandboxID))
 	}
 	if opts.TraceID != "" {
 		clauses = append(clauses, "TraceId = "+quote(opts.TraceID))
@@ -216,6 +216,13 @@ func buildWhere(opts ListOptions) string {
 		return ""
 	}
 	return "WHERE " + strings.Join(clauses, " AND ")
+}
+
+func attributeFilter(signalAttributesColumn, key, value string) string {
+	quotedKey := quote(key)
+	quotedValue := quote(value)
+	column := ident(strings.TrimSpace(signalAttributesColumn))
+	return fmt.Sprintf("(ResourceAttributes[%s] = %s OR %s[%s] = %s)", quotedKey, quotedValue, column, quotedKey, quotedValue)
 }
 
 func normalizeLimit(limit int) int {

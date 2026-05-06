@@ -49,8 +49,8 @@ func TestClickHouseClientListTraceSpansBuildsScopedQuery(t *testing.T) {
 	}
 	for _, want := range []string{
 		"FROM `sandbox0_observability`.`otel_traces`",
-		"ResourceAttributes['sandbox0.team_id'] = 'team-1'",
-		"ResourceAttributes['sandbox0.sandbox_id'] = 'sb_1'",
+		"(ResourceAttributes['sandbox0.team_id'] = 'team-1' OR `SpanAttributes`['sandbox0.team_id'] = 'team-1')",
+		"(ResourceAttributes['sandbox0.sandbox_id'] = 'sb_1' OR `SpanAttributes`['sandbox0.sandbox_id'] = 'sb_1')",
 		"TraceId = 'tr1'",
 		"LIMIT 1000",
 	} {

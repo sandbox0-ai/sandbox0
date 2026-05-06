@@ -193,6 +193,18 @@ func (p *InfraPlan) ConfigureRegionalGatewayRegistry(cfg *apiconfig.RegionalGate
 	}
 }
 
+func (p *InfraPlan) ObservabilityEnvVars() []corev1.EnvVar {
+	if p == nil || !p.Observability.Enabled || !p.Observability.CollectorEnabled || strings.TrimSpace(p.Observability.CollectorServiceURL) == "" {
+		return nil
+	}
+	endpoint := strings.TrimPrefix(strings.TrimSpace(p.Observability.CollectorServiceURL), "http://")
+	endpoint = strings.TrimPrefix(endpoint, "https://")
+	return []corev1.EnvVar{
+		{Name: "OTEL_EXPORTER_TYPE", Value: "otlp"},
+		{Name: "OTEL_EXPORTER_ENDPOINT", Value: endpoint},
+	}
+}
+
 func (p *InfraPlan) DefaultFederatedGlobalJWTIssuer() string {
 	if p != nil && p.infra != nil && p.infra.Spec.Services != nil && p.infra.Spec.Services.GlobalGateway != nil && p.infra.Spec.Services.GlobalGateway.Config != nil {
 		if issuer := strings.TrimSpace(p.infra.Spec.Services.GlobalGateway.Config.JWTIssuer); issuer != "" {

@@ -15,6 +15,7 @@ import (
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
+	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 )
 
 func TestReconcileUsesServicePortForHTTPServiceExposure(t *testing.T) {
@@ -88,7 +89,7 @@ func TestReconcileUsesServicePortForHTTPServiceExposure(t *testing.T) {
 		},
 	)
 
-	if err := reconciler.Reconcile(context.Background(), infra, "sandbox0ai/infra", "latest"); err != nil && !strings.Contains(err.Error(), "not ready") {
+	if err := reconciler.Reconcile(context.Background(), infra, "sandbox0ai/infra", "latest", infraplan.Compile(infra)); err != nil && !strings.Contains(err.Error(), "not ready") {
 		t.Fatalf("reconcile returned unexpected error: %v", err)
 	}
 
@@ -176,7 +177,7 @@ func TestReconcileMountsObjectEncryptionKeyWhenEnabled(t *testing.T) {
 		},
 	)
 
-	if err := reconciler.Reconcile(context.Background(), infra, "sandbox0ai/infra", "latest"); err != nil && !strings.Contains(err.Error(), "not ready") {
+	if err := reconciler.Reconcile(context.Background(), infra, "sandbox0ai/infra", "latest", infraplan.Compile(infra)); err != nil && !strings.Contains(err.Error(), "not ready") {
 		t.Fatalf("reconcile returned unexpected error: %v", err)
 	}
 

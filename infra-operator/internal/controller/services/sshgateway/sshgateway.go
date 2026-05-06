@@ -140,6 +140,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	}
 
 	sshPort := int32(config.SSHPort)
+	envVars := []corev1.EnvVar{
+		{Name: "SERVICE", Value: "ssh-gateway"},
+		{Name: "CONFIG_PATH", Value: "/config/config.yaml"},
+	}
+	envVars = append(envVars, compiledPlan.ObservabilityEnvVars()...)
 	if err := r.Resources.ReconcileDeployment(ctx, infra, deploymentName, labels, replicas, common.ServiceDefinition{
 		Name:       "ssh-gateway",
 		Port:       sshPort,
@@ -148,11 +153,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			Name:          "ssh",
 			ContainerPort: sshPort,
 		}},
-		Image: fmt.Sprintf("%s:%s", imageRepo, imageTag),
-		EnvVars: []corev1.EnvVar{
-			{Name: "SERVICE", Value: "ssh-gateway"},
-			{Name: "CONFIG_PATH", Value: "/config/config.yaml"},
-		},
+		Image:          fmt.Sprintf("%s:%s", imageRepo, imageTag),
+		EnvVars:        envVars,
 		VolumeMounts:   volumeMounts,
 		Volumes:        volumes,
 		PodAnnotations: podAnnotations,

@@ -115,6 +115,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	if needEnterpriseLicense {
 		volumeMounts, volumes = common.AppendEnterpriseLicenseVolume(infra, config.LicenseFile, volumeMounts, volumes)
 	}
+	envVars := []corev1.EnvVar{
+		{
+			Name:  "SERVICE",
+			Value: "global-gateway",
+		},
+		{
+			Name:  "CONFIG_PATH",
+			Value: "/config/config.yaml",
+		},
+	}
+	envVars = append(envVars, compiledPlan.ObservabilityEnvVars()...)
 
 	httpPort := int32(config.HTTPPort)
 	if err := r.Resources.ReconcileDeployment(ctx, infra, deploymentName, labels, replicas, common.ServiceDefinition{
@@ -127,17 +138,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 				ContainerPort: httpPort,
 			},
 		},
-		Image: fmt.Sprintf("%s:%s", imageRepo, imageTag),
-		EnvVars: []corev1.EnvVar{
-			{
-				Name:  "SERVICE",
-				Value: "global-gateway",
-			},
-			{
-				Name:  "CONFIG_PATH",
-				Value: "/config/config.yaml",
-			},
-		},
+		Image:          fmt.Sprintf("%s:%s", imageRepo, imageTag),
+		EnvVars:        envVars,
 		VolumeMounts:   volumeMounts,
 		Volumes:        volumes,
 		PodAnnotations: podAnnotations,

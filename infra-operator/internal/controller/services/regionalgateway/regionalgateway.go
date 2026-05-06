@@ -153,6 +153,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 			Value: "/config/config.yaml",
 		},
 	}
+	envVars = append(envVars, compiledPlan.ObservabilityEnvVars()...)
 	envVars = append(envVars, registryEnvVars...)
 
 	// Create deployment

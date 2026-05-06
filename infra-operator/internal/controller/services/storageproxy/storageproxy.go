@@ -30,6 +30,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storage"
+	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
@@ -47,7 +48,7 @@ func NewReconciler(resources *common.ResourceManager) *Reconciler {
 }
 
 // Reconcile reconciles the storage-proxy deployment.
-func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, imageRepo, imageTag string) error {
+func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, imageRepo, imageTag string, compiledPlan *infraplan.InfraPlan) error {
 	logger := log.FromContext(ctx)
 
 	// Skip if not enabled
@@ -174,6 +175,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			},
 		})
 	}
+	envVars := []corev1.EnvVar{
+		{
+			Name:  "SERVICE",
+			Value: "storage-proxy",
+		},
+		{
+			Name:  "CONFIG_PATH",
+			Value: "/config/config.yaml",
+		},
+	}
+	if compiledPlan != nil {
+		envVars = append(envVars, compiledPlan.ObservabilityEnvVars()...)
+	}
 
 	// Create deployment
 	if err := r.Resources.ReconcileDeployment(ctx, infra, deploymentName, labels, replicas, common.ServiceDefinition{
@@ -191,17 +205,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 				ContainerPort: metricsPort,
 			},
 		},
-		Image: fmt.Sprintf("%s:%s", imageRepo, imageTag),
-		EnvVars: []corev1.EnvVar{
-			{
-				Name:  "SERVICE",
-				Value: "storage-proxy",
-			},
-			{
-				Name:  "CONFIG_PATH",
-				Value: "/config/config.yaml",
-			},
-		},
+		Image:          fmt.Sprintf("%s:%s", imageRepo, imageTag),
+		EnvVars:        envVars,
 		VolumeMounts:   volumeMounts,
 		Volumes:        volumes,
 		PodAnnotations: podAnnotations,

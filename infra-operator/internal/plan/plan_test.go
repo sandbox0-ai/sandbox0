@@ -154,6 +154,49 @@ func TestCompileDerivesCrossServiceReferences(t *testing.T) {
 	}
 }
 
+func TestCompileAddsObservabilityWorkflowAndEndpoints(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Region: "aws-us-east-1",
+			Cluster: &infrav1alpha1.ClusterConfig{
+				ID: "cluster-a",
+			},
+			Observability: &infrav1alpha1.ObservabilityConfig{
+				Enabled: true,
+			},
+		},
+	}
+
+	compiled := Compile(infra)
+
+	if !compiled.Components.EnableObservability {
+		t.Fatalf("expected observability to be enabled")
+	}
+	if !compiled.Observability.CollectorEnabled || !compiled.Observability.ClickHouseEnabled || !compiled.Observability.ClickHouseBuiltin {
+		t.Fatalf("unexpected observability plan: %#v", compiled.Observability)
+	}
+	if got, want := compiled.Observability.CollectorServiceURL, "http://demo-otel-collector.sandbox0-system.svc.cluster.local:4317"; got != want {
+		t.Fatalf("collector URL = %q, want %q", got, want)
+	}
+	envVars := compiled.ObservabilityEnvVars()
+	if len(envVars) != 2 || envVars[0].Name != "OTEL_EXPORTER_TYPE" || envVars[0].Value != "otlp" {
+		t.Fatalf("unexpected observability env vars: %#v", envVars)
+	}
+	if got, want := envVars[1].Value, "demo-otel-collector.sandbox0-system.svc.cluster.local:4317"; got != want {
+		t.Fatalf("OTEL endpoint = %q, want %q", got, want)
+	}
+	if got, want := compiled.Observability.ClickHouseEndpoint, "tcp://demo-clickhouse.sandbox0-system.svc.cluster.local:9000"; got != want {
+		t.Fatalf("clickhouse endpoint = %q, want %q", got, want)
+	}
+	if !containsString(compiled.Status.ExpectedConditions, infrav1alpha1.ConditionTypeObservabilityReady) {
+		t.Fatalf("expected observability condition, got %#v", compiled.Status.ExpectedConditions)
+	}
+	if !containsString(workflowStepNames(compiled.Workflow.Steps), "observability") {
+		t.Fatalf("expected observability workflow step, got %#v", workflowStepNames(compiled.Workflow.Steps))
+	}
+}
+
 func TestCompileExposesStorageProxyHTTPToManager(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{

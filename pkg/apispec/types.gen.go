@@ -274,6 +274,16 @@ const (
 	SuccessMovedResponseSuccessTrue SuccessMovedResponseSuccess = true
 )
 
+// Defines values for SuccessObservabilityLogRecordListResponseSuccess.
+const (
+	SuccessObservabilityLogRecordListResponseSuccessTrue SuccessObservabilityLogRecordListResponseSuccess = true
+)
+
+// Defines values for SuccessObservabilityTraceSpanListResponseSuccess.
+const (
+	SuccessObservabilityTraceSpanListResponseSuccessTrue SuccessObservabilityTraceSpanListResponseSuccess = true
+)
+
 // Defines values for SuccessPauseSandboxResponseSuccess.
 const (
 	SuccessPauseSandboxResponseSuccessTrue SuccessPauseSandboxResponseSuccess = true
@@ -1035,6 +1045,34 @@ type NodeSelectorRequirement struct {
 type NodeSelectorTerm struct {
 	MatchExpressions *[]NodeSelectorRequirement `json:"matchExpressions,omitempty"`
 	MatchFields      *[]NodeSelectorRequirement `json:"matchFields,omitempty"`
+}
+
+// ObservabilityLogRecord defines model for ObservabilityLogRecord.
+type ObservabilityLogRecord struct {
+	Attributes         *map[string]string `json:"attributes,omitempty"`
+	Body               *string            `json:"body,omitempty"`
+	ResourceAttributes *map[string]string `json:"resource_attributes,omitempty"`
+	SeverityNumber     *int               `json:"severity_number,omitempty"`
+	SeverityText       *string            `json:"severity_text,omitempty"`
+	SpanId             *string            `json:"span_id,omitempty"`
+	Timestamp          *string            `json:"timestamp,omitempty"`
+	TraceId            *string            `json:"trace_id,omitempty"`
+}
+
+// ObservabilityTraceSpan defines model for ObservabilityTraceSpan.
+type ObservabilityTraceSpan struct {
+	Attributes         *map[string]string `json:"attributes,omitempty"`
+	DurationNano       *int64             `json:"duration_nano,omitempty"`
+	Kind               *string            `json:"kind,omitempty"`
+	Name               *string            `json:"name,omitempty"`
+	ParentSpanId       *string            `json:"parent_span_id,omitempty"`
+	ResourceAttributes *map[string]string `json:"resource_attributes,omitempty"`
+	ServiceName        *string            `json:"service_name,omitempty"`
+	SpanId             *string            `json:"span_id,omitempty"`
+	StatusCode         *string            `json:"status_code,omitempty"`
+	StatusMessage      *string            `json:"status_message,omitempty"`
+	Timestamp          *string            `json:"timestamp,omitempty"`
+	TraceId            *string            `json:"trace_id,omitempty"`
 }
 
 // PTYSize defines model for PTYSize.
@@ -1825,6 +1863,28 @@ type SuccessMovedResponse struct {
 // SuccessMovedResponseSuccess defines model for SuccessMovedResponse.Success.
 type SuccessMovedResponseSuccess bool
 
+// SuccessObservabilityLogRecordListResponse defines model for SuccessObservabilityLogRecordListResponse.
+type SuccessObservabilityLogRecordListResponse struct {
+	Data *struct {
+		Logs *[]ObservabilityLogRecord `json:"logs,omitempty"`
+	} `json:"data,omitempty"`
+	Success SuccessObservabilityLogRecordListResponseSuccess `json:"success"`
+}
+
+// SuccessObservabilityLogRecordListResponseSuccess defines model for SuccessObservabilityLogRecordListResponse.Success.
+type SuccessObservabilityLogRecordListResponseSuccess bool
+
+// SuccessObservabilityTraceSpanListResponse defines model for SuccessObservabilityTraceSpanListResponse.
+type SuccessObservabilityTraceSpanListResponse struct {
+	Data *struct {
+		Spans *[]ObservabilityTraceSpan `json:"spans,omitempty"`
+	} `json:"data,omitempty"`
+	Success SuccessObservabilityTraceSpanListResponseSuccess `json:"success"`
+}
+
+// SuccessObservabilityTraceSpanListResponseSuccess defines model for SuccessObservabilityTraceSpanListResponse.Success.
+type SuccessObservabilityTraceSpanListResponseSuccess bool
+
 // SuccessPauseSandboxResponse defines model for SuccessPauseSandboxResponse.
 type SuccessPauseSandboxResponse struct {
 	Data    *PauseSandboxResponse              `json:"data,omitempty"`
@@ -2328,6 +2388,38 @@ type TemplateID = string
 
 // UserID defines model for UserID.
 type UserID = string
+
+// GetApiV1ObservabilityLogsParams defines parameters for GetApiV1ObservabilityLogs.
+type GetApiV1ObservabilityLogsParams struct {
+	// SandboxId Filter logs by sandbox id when available in resource attributes.
+	SandboxId *string `form:"sandbox_id,omitempty" json:"sandbox_id,omitempty"`
+
+	// TraceId Filter logs by OpenTelemetry trace id.
+	TraceId *string `form:"trace_id,omitempty" json:"trace_id,omitempty"`
+
+	// StartTime Include logs at or after this timestamp.
+	StartTime *time.Time `form:"start_time,omitempty" json:"start_time,omitempty"`
+
+	// EndTime Include logs at or before this timestamp.
+	EndTime *time.Time `form:"end_time,omitempty" json:"end_time,omitempty"`
+	Limit   *int       `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// GetApiV1ObservabilityTracesParams defines parameters for GetApiV1ObservabilityTraces.
+type GetApiV1ObservabilityTracesParams struct {
+	// SandboxId Filter spans by sandbox id when available in resource attributes.
+	SandboxId *string `form:"sandbox_id,omitempty" json:"sandbox_id,omitempty"`
+
+	// TraceId Filter spans by OpenTelemetry trace id.
+	TraceId *string `form:"trace_id,omitempty" json:"trace_id,omitempty"`
+
+	// StartTime Include spans at or after this timestamp.
+	StartTime *time.Time `form:"start_time,omitempty" json:"start_time,omitempty"`
+
+	// EndTime Include spans at or before this timestamp.
+	EndTime *time.Time `form:"end_time,omitempty" json:"end_time,omitempty"`
+	Limit   *int       `form:"limit,omitempty" json:"limit,omitempty"`
+}
 
 // GetApiV1SandboxesParams defines parameters for GetApiV1Sandboxes.
 type GetApiV1SandboxesParams struct {

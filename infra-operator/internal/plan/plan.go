@@ -33,6 +33,7 @@ type InfraPlan struct {
 	Scheduler       SchedulerPlan
 	Manager         ManagerPlan
 	Netd            NetdPlan
+	Observability   ObservabilityPlan
 	RegionalGateway RegionalGatewayPlan
 	Enterprise      EnterpriseLicensePlan
 	Validation      ValidationPlan
@@ -58,6 +59,7 @@ type ComponentPlan struct {
 	EnableDatabase            bool
 	EnableStorage             bool
 	EnableRegistry            bool
+	EnableObservability       bool
 	EnableInitUser            bool
 	EnableClusterRegistration bool
 }
@@ -127,6 +129,17 @@ type NetdPlan struct {
 	Tolerations           []corev1.Toleration
 }
 
+type ObservabilityPlan struct {
+	Enabled             bool
+	CollectorEnabled    bool
+	ClickHouseEnabled   bool
+	ClickHouseBuiltin   bool
+	CollectorServiceURL string
+	ClickHouseEndpoint  string
+	ClickHouseHTTPURL   string
+	ClickHouseDatabase  string
+}
+
 type RegionalGatewayPlan struct {
 	Enabled                  bool
 	Replicas                 int32
@@ -183,6 +196,7 @@ func Compile(infra *infrav1alpha1.Sandbox0Infra) *InfraPlan {
 	compiled.Scheduler = compileSchedulerPlan(infra, compiled)
 	compiled.Manager = compileManagerPlan(infra, compiled)
 	compiled.Netd = compileNetdPlan(infra, compiled)
+	compiled.Observability = compileObservabilityPlan(infra)
 	compiled.RegionalGateway = compileRegionalGatewayPlan(infra, compiled)
 	compiled.Enterprise = compileEnterpriseLicensePlan(infra, compiled)
 	compiled.Validation = compileValidationPlan(infra, compiled)
@@ -201,6 +215,7 @@ func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 	enableManager := infrav1alpha1.IsManagerEnabled(infra)
 	enableStorageProxy := infrav1alpha1.IsStorageProxyEnabled(infra)
 	enableDatabase := infrav1alpha1.IsDatabaseEnabled(infra)
+	enableObservability := infrav1alpha1.IsObservabilityEnabled(infra)
 
 	hasControlPlane := enableRegionalGateway || enableSSHGateway || enableScheduler
 	hasDataPlane := enableClusterGateway || enableManager || enableStorageProxy
@@ -221,6 +236,7 @@ func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 		EnableDatabase:            enableDatabase,
 		EnableStorage:             infrav1alpha1.IsStorageEnabled(infra),
 		EnableRegistry:            infrav1alpha1.IsRegistryEnabled(infra),
+		EnableObservability:       enableObservability,
 		EnableInitUser:            enableDatabase && initUserConsumerEnabled(infra),
 		EnableClusterRegistration: hasDataPlane && infra != nil && infra.Spec.Cluster != nil && infra.Spec.ControlPlane != nil,
 	}
@@ -559,6 +575,61 @@ func compileNetdPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) Ne
 	return netdPlan
 }
 
+func compileObservabilityPlan(infra *infrav1alpha1.Sandbox0Infra) ObservabilityPlan {
+	plan := ObservabilityPlan{}
+	if infra == nil || infra.Spec.Observability == nil || !infra.Spec.Observability.Enabled {
+		return plan
+	}
+
+	plan.Enabled = true
+	collector := infra.Spec.Observability.Collector
+	plan.CollectorEnabled = collector == nil || collector.Enabled
+
+	clickhouse := infra.Spec.Observability.ClickHouse
+	clickhouseType := infrav1alpha1.ClickHouseTypeBuiltin
+	if clickhouse != nil && clickhouse.Type != "" {
+		clickhouseType = clickhouse.Type
+	}
+	plan.ClickHouseBuiltin = clickhouseType != infrav1alpha1.ClickHouseTypeExternal
+	plan.ClickHouseEnabled = true
+
+	database := "sandbox0_observability"
+	if plan.ClickHouseBuiltin {
+		if clickhouse != nil && clickhouse.Builtin != nil {
+			plan.ClickHouseEnabled = clickhouse.Builtin.Enabled
+			if clickhouse.Builtin.Database != "" {
+				database = clickhouse.Builtin.Database
+			}
+		}
+		httpPort := int32(8123)
+		nativePort := int32(9000)
+		if clickhouse != nil && clickhouse.Builtin != nil {
+			if clickhouse.Builtin.HTTPPort != 0 {
+				httpPort = clickhouse.Builtin.HTTPPort
+			}
+			if clickhouse.Builtin.NativePort != 0 {
+				nativePort = clickhouse.Builtin.NativePort
+			}
+		}
+		name := fmt.Sprintf("%s-clickhouse", infra.Name)
+		plan.ClickHouseEndpoint = fmt.Sprintf("tcp://%s.%s.svc.cluster.local:%d", name, infra.Namespace, nativePort)
+		plan.ClickHouseHTTPURL = fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", name, infra.Namespace, httpPort)
+	} else if clickhouse != nil && clickhouse.External != nil {
+		database = clickhouse.External.Database
+		plan.ClickHouseEndpoint = clickhouse.External.Endpoint
+		plan.ClickHouseHTTPURL = clickhouse.External.HTTPURL
+	}
+	plan.ClickHouseDatabase = database
+
+	collectorPort := int32(4317)
+	if collector != nil && collector.OTLPGRPCPort != 0 {
+		collectorPort = collector.OTLPGRPCPort
+	}
+	name := fmt.Sprintf("%s-otel-collector", infra.Name)
+	plan.CollectorServiceURL = fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", name, infra.Namespace, collectorPort)
+	return plan
+}
+
 func compileRegionalGatewayPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) RegionalGatewayPlan {
 	plan := RegionalGatewayPlan{
 		Enabled: infrav1alpha1.IsRegionalGatewayEnabled(infra),
@@ -798,6 +869,25 @@ func compileCleanupPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 			namespacedRef("Ingress", infra.Namespace, fmt.Sprintf("%s-registry", infra.Name)),
 		)
 	}
+	if !compiled.Observability.Enabled || !compiled.Observability.CollectorEnabled {
+		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
+			namespacedRef("Deployment", infra.Namespace, fmt.Sprintf("%s-otel-collector", infra.Name)),
+			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-otel-collector", infra.Name)),
+			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-otel-collector", infra.Name)),
+		)
+	}
+	if !compiled.Observability.Enabled || !compiled.Observability.ClickHouseBuiltin || !compiled.Observability.ClickHouseEnabled {
+		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
+			namespacedRef("StatefulSet", infra.Namespace, fmt.Sprintf("%s-clickhouse", infra.Name)),
+			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-clickhouse", infra.Name)),
+		)
+		if observabilityClickHouseStatefulResourcePolicy(infra) == infrav1alpha1.BuiltinStatefulResourcePolicyDelete {
+			cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
+				namespacedRef("PersistentVolumeClaim", infra.Namespace, fmt.Sprintf("%s-clickhouse-data", infra.Name)),
+				namespacedRef("Secret", infra.Namespace, fmt.Sprintf("%s-clickhouse-credentials", infra.Name)),
+			)
+		}
+	}
 
 	return cleanup
 }
@@ -828,6 +918,9 @@ func compileStatusPlan(compiled *InfraPlan) StatusPlan {
 	}
 	if components.EnableRegistry {
 		expected = append(expected, infrav1alpha1.ConditionTypeRegistryReady)
+	}
+	if components.EnableObservability {
+		expected = append(expected, infrav1alpha1.ConditionTypeObservabilityReady)
 	}
 	if components.EnableGlobalGateway {
 		expected = append(expected, infrav1alpha1.ConditionTypeGlobalGatewayReady)
@@ -907,6 +1000,9 @@ func compileWorkflowPlan(compiled *InfraPlan) WorkflowPlan {
 	if compiled.Components.EnableRegistry {
 		appendSuccessStep("registry", infrav1alpha1.ConditionTypeRegistryReady, "RegistryReady", "Registry is ready", "RegistryFailed")
 	}
+	if compiled.Components.EnableObservability {
+		appendSuccessStep("observability", infrav1alpha1.ConditionTypeObservabilityReady, "ObservabilityReady", "Observability stack is ready", "ObservabilityFailed")
+	}
 	if compiled.Components.EnableGlobalGateway && compiled.Enterprise.GlobalGateway {
 		appendCheckStep("global-gateway-enterprise-license", infrav1alpha1.ConditionTypeGlobalGatewayReady, "EnterpriseLicenseMissing")
 	}
@@ -932,6 +1028,10 @@ func compileWorkflowPlan(compiled *InfraPlan) WorkflowPlan {
 		appendCheckStep("scheduler-rbac", infrav1alpha1.ConditionTypeSchedulerReady, "SchedulerRBACFailed")
 		appendSuccessStep("scheduler", infrav1alpha1.ConditionTypeSchedulerReady, "SchedulerReady", "Scheduler is ready", "SchedulerFailed")
 	}
+	if compiled.Components.EnableStorageProxy {
+		appendCheckStep("storage-proxy-rbac", infrav1alpha1.ConditionTypeStorageProxyReady, "StorageProxyRBACFailed")
+		appendSuccessStep("storage-proxy", infrav1alpha1.ConditionTypeStorageProxyReady, "StorageProxyReady", "Storage proxy is ready", "StorageProxyFailed")
+	}
 	if compiled.Components.EnableClusterGateway && compiled.Enterprise.ClusterGateway {
 		appendCheckStep("cluster-gateway-enterprise-license", infrav1alpha1.ConditionTypeClusterGatewayReady, "EnterpriseLicenseMissing")
 	}
@@ -952,10 +1052,6 @@ func compileWorkflowPlan(compiled *InfraPlan) WorkflowPlan {
 	if compiled.Components.EnableManager {
 		appendCheckStep("data-plane-node-readiness", infrav1alpha1.ConditionTypeManagerReady, "DataPlaneNodesNotReady")
 		appendCheckStep("builtin-template-pods", infrav1alpha1.ConditionTypeManagerReady, "BuiltinTemplatePodsNotReady")
-	}
-	if compiled.Components.EnableStorageProxy {
-		appendCheckStep("storage-proxy-rbac", infrav1alpha1.ConditionTypeStorageProxyReady, "StorageProxyRBACFailed")
-		appendSuccessStep("storage-proxy", infrav1alpha1.ConditionTypeStorageProxyReady, "StorageProxyReady", "Storage proxy is ready", "StorageProxyFailed")
 	}
 	if compiled.Components.EnableClusterRegistration {
 		appendSuccessStep("register-cluster", infrav1alpha1.ConditionTypeClusterRegistered, "ClusterRegistered", "Cluster registration completed", "ClusterRegistrationFailed")
@@ -1016,6 +1112,12 @@ func compileRetainedResourceStatusPlan(compiled *InfraPlan) []infrav1alpha1.Reta
 	if infra.Spec.Registry != nil && !builtinRegistryActive(infra) && registryStatefulResourcePolicy(infra) == infrav1alpha1.BuiltinStatefulResourcePolicyRetain {
 		retained = append(retained,
 			common.NewRetainedResourceStatus("registry", "PersistentVolumeClaim", common.BuiltinRegistryPVCName(infra.Name)),
+		)
+	}
+	if infra.Spec.Observability != nil && !builtinClickHouseActive(infra) && observabilityClickHouseStatefulResourcePolicy(infra) == infrav1alpha1.BuiltinStatefulResourcePolicyRetain {
+		retained = append(retained,
+			common.NewRetainedResourceStatus("observability", "Secret", fmt.Sprintf("%s-clickhouse-credentials", infra.Name)),
+			common.NewRetainedResourceStatus("observability", "PersistentVolumeClaim", fmt.Sprintf("%s-clickhouse-data", infra.Name)),
 		)
 	}
 
@@ -1379,6 +1481,19 @@ func builtinRegistryActive(infra *infrav1alpha1.Sandbox0Infra) bool {
 	return infra.Spec.Registry.Builtin.Enabled
 }
 
+func builtinClickHouseActive(infra *infrav1alpha1.Sandbox0Infra) bool {
+	if infra == nil || infra.Spec.Observability == nil || !infra.Spec.Observability.Enabled {
+		return false
+	}
+	if infra.Spec.Observability.ClickHouse != nil && infra.Spec.Observability.ClickHouse.Type == infrav1alpha1.ClickHouseTypeExternal {
+		return false
+	}
+	if infra.Spec.Observability.ClickHouse == nil || infra.Spec.Observability.ClickHouse.Builtin == nil {
+		return true
+	}
+	return infra.Spec.Observability.ClickHouse.Builtin.Enabled
+}
+
 func databaseStatefulResourcePolicy(infra *infrav1alpha1.Sandbox0Infra) infrav1alpha1.BuiltinStatefulResourcePolicy {
 	if infra == nil || infra.Spec.Database == nil || infra.Spec.Database.Builtin == nil || infra.Spec.Database.Builtin.StatefulResourcePolicy == "" {
 		return infrav1alpha1.BuiltinStatefulResourcePolicyRetain
@@ -1398,4 +1513,12 @@ func registryStatefulResourcePolicy(infra *infrav1alpha1.Sandbox0Infra) infrav1a
 		return infrav1alpha1.BuiltinStatefulResourcePolicyRetain
 	}
 	return infra.Spec.Registry.Builtin.StatefulResourcePolicy
+}
+
+func observabilityClickHouseStatefulResourcePolicy(infra *infrav1alpha1.Sandbox0Infra) infrav1alpha1.BuiltinStatefulResourcePolicy {
+	if infra == nil || infra.Spec.Observability == nil || infra.Spec.Observability.ClickHouse == nil ||
+		infra.Spec.Observability.ClickHouse.Builtin == nil || infra.Spec.Observability.ClickHouse.Builtin.StatefulResourcePolicy == "" {
+		return infrav1alpha1.BuiltinStatefulResourcePolicyRetain
+	}
+	return infra.Spec.Observability.ClickHouse.Builtin.StatefulResourcePolicy
 }

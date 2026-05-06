@@ -88,6 +88,26 @@ type GatewayConfig struct {
 	SSHEndpointHost string `yaml:"ssh_endpoint_host" json:"-"`
 	// +optional
 	SSHEndpointPort int `yaml:"ssh_endpoint_port" json:"-"`
+
+	// Observability configures region-scoped observability query access.
+	// +optional
+	Observability ObservabilityQueryConfig `yaml:"observability" json:"-"`
+}
+
+// ObservabilityQueryConfig configures the product-facing observability query store.
+type ObservabilityQueryConfig struct {
+	// ClickHouseHTTPURL is the ClickHouse HTTP endpoint used by gateway query APIs.
+	// +optional
+	ClickHouseHTTPURL string `yaml:"clickhouse_http_url" json:"-"`
+	// ClickHouseDatabase is the ClickHouse database containing OTel tables.
+	// +optional
+	ClickHouseDatabase string `yaml:"clickhouse_database" json:"-"`
+	// ClickHouseUsername is the ClickHouse user for read-only query access.
+	// +optional
+	ClickHouseUsername string `yaml:"clickhouse_username" json:"-"`
+	// ClickHousePassword is the ClickHouse password for read-only query access.
+	// +optional
+	ClickHousePassword string `yaml:"clickhouse_password" json:"-"`
 }
 
 // BuiltInAuthConfig configures the built-in authentication.

@@ -425,6 +425,287 @@ spec:
                     description: ShareWithMain uses the main database for S0FS metadata
                     type: boolean
                 type: object
+              observability:
+                description: Observability configures the regional observability ingestion
+                  and storage plane.
+                properties:
+                  clickHouse:
+                    default: {}
+                    description: ClickHouse configures the observability event store.
+                    properties:
+                      builtin:
+                        default: {}
+                        description: Builtin configures the operator-managed ClickHouse
+                          instance.
+                        properties:
+                          database:
+                            default: sandbox0_observability
+                            description: Database specifies the observability database
+                              name.
+                            type: string
+                          enabled:
+                            default: true
+                            description: Enabled enables the built-in ClickHouse store.
+                            type: boolean
+                          httpPort:
+                            default: 8123
+                            description: HTTPPort specifies the ClickHouse HTTP API
+                              port.
+                            format: int32
+                            type: integer
+                          image:
+                            default: clickhouse/clickhouse-server:25.8-alpine
+                            description: Image specifies the ClickHouse server image.
+                            type: string
+                          nativePort:
+                            default: 9000
+                            description: NativePort specifies the ClickHouse native
+                              TCP port.
+                            format: int32
+                            type: integer
+                          persistence:
+                            description: Persistence configures ClickHouse storage.
+                            properties:
+                              size:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                default: 20Gi
+                                description: Size specifies the storage size
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                              storageClass:
+                                description: StorageClass specifies the storage class
+                                  (empty for default)
+                                type: string
+                            type: object
+                          resources:
+                            description: Resources specifies ClickHouse resource requirements.
+                            properties:
+                              claims:
+                                description: |-
+                                  Claims lists the names of resources, defined in spec.resourceClaims,
+                                  that are used by this container.
+
+                                  This field depends on the
+                                  DynamicResourceAllocation feature gate.
+
+                                  This field is immutable. It can only be set for containers.
+                                items:
+                                  description: ResourceClaim references one entry
+                                    in PodSpec.ResourceClaims.
+                                  properties:
+                                    name:
+                                      description: |-
+                                        Name must match the name of one entry in pod.spec.resourceClaims of
+                                        the Pod where this field is used. It makes that resource available
+                                        inside a container.
+                                      type: string
+                                    request:
+                                      description: |-
+                                        Request is the name chosen for a request in the referenced claim.
+                                        If empty, everything from the claim is made available, otherwise
+                                        only the result of this request.
+                                      type: string
+                                  required:
+                                  - name
+                                  type: object
+                                type: array
+                                x-kubernetes-list-map-keys:
+                                - name
+                                x-kubernetes-list-type: map
+                              limits:
+                                additionalProperties:
+                                  anyOf:
+                                  - type: integer
+                                  - type: string
+                                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                  x-kubernetes-int-or-string: true
+                                description: |-
+                                  Limits describes the maximum amount of compute resources allowed.
+                                  More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                                type: object
+                              requests:
+                                additionalProperties:
+                                  anyOf:
+                                  - type: integer
+                                  - type: string
+                                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                  x-kubernetes-int-or-string: true
+                                description: |-
+                                  Requests describes the minimum amount of compute resources required.
+                                  If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                                  otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                                  More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                                type: object
+                            type: object
+                          statefulResourcePolicy:
+                            default: Retain
+                            description: StatefulResourcePolicy controls what happens
+                              to the builtin ClickHouse PVC and generated credentials
+                              secret.
+                            enum:
+                            - Retain
+                            - Delete
+                            type: string
+                          username:
+                            default: sandbox0
+                            description: Username specifies the ClickHouse username
+                              used by collectors and query APIs.
+                            type: string
+                        type: object
+                        x-kubernetes-validations:
+                        - message: persistence presence is immutable after creation
+                          rule: has(self.persistence) == has(oldSelf.persistence)
+                      external:
+                        description: External configures an externally managed ClickHouse
+                          endpoint.
+                        properties:
+                          database:
+                            description: Database specifies the observability database
+                              name.
+                            type: string
+                          endpoint:
+                            description: Endpoint is the ClickHouse native endpoint,
+                              for example tcp://clickhouse.example.com:9000.
+                            type: string
+                          httpUrl:
+                            description: HTTPURL is the ClickHouse HTTP URL used by
+                              product query APIs.
+                            type: string
+                          passwordSecret:
+                            description: PasswordSecret references the secret containing
+                              the ClickHouse password.
+                            properties:
+                              key:
+                                default: password
+                                description: Key is the key in the secret
+                                type: string
+                              name:
+                                description: Name is the name of the secret
+                                type: string
+                            type: object
+                          username:
+                            description: Username specifies the ClickHouse username.
+                            type: string
+                        required:
+                        - database
+                        - endpoint
+                        - passwordSecret
+                        - username
+                        type: object
+                      type:
+                        default: builtin
+                        description: Type specifies whether ClickHouse is builtin
+                          or external.
+                        enum:
+                        - builtin
+                        - external
+                        type: string
+                    type: object
+                  collector:
+                    default: {}
+                    description: Collector configures the OpenTelemetry Collector.
+                    properties:
+                      enabled:
+                        default: true
+                        description: Enabled enables the OpenTelemetry Collector deployment.
+                        type: boolean
+                      healthPort:
+                        default: 13133
+                        description: HealthPort specifies the collector health extension
+                          port.
+                        format: int32
+                        type: integer
+                      image:
+                        default: otel/opentelemetry-collector-contrib:0.139.0
+                        description: Image specifies the collector contrib image.
+                          The contrib distribution is required for the ClickHouse
+                          exporter.
+                        type: string
+                      otlpGrpcPort:
+                        default: 4317
+                        description: OTLPGRPCPort specifies the OTLP gRPC receiver
+                          port.
+                        format: int32
+                        type: integer
+                      otlpHttpPort:
+                        default: 4318
+                        description: OTLPHTTPPort specifies the OTLP HTTP receiver
+                          port.
+                        format: int32
+                        type: integer
+                      replicas:
+                        default: 1
+                        description: Replicas specifies the number of collector replicas.
+                        format: int32
+                        type: integer
+                      resources:
+                        description: Resources specifies collector resource requirements.
+                        properties:
+                          claims:
+                            description: |-
+                              Claims lists the names of resources, defined in spec.resourceClaims,
+                              that are used by this container.
+
+                              This field depends on the
+                              DynamicResourceAllocation feature gate.
+
+                              This field is immutable. It can only be set for containers.
+                            items:
+                              description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                              properties:
+                                name:
+                                  description: |-
+                                    Name must match the name of one entry in pod.spec.resourceClaims of
+                                    the Pod where this field is used. It makes that resource available
+                                    inside a container.
+                                  type: string
+                                request:
+                                  description: |-
+                                    Request is the name chosen for a request in the referenced claim.
+                                    If empty, everything from the claim is made available, otherwise
+                                    only the result of this request.
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                            type: array
+                            x-kubernetes-list-map-keys:
+                            - name
+                            x-kubernetes-list-type: map
+                          limits:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: |-
+                              Limits describes the maximum amount of compute resources allowed.
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                            type: object
+                          requests:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: |-
+                              Requests describes the minimum amount of compute resources required.
+                              If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                              otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                            type: object
+                        type: object
+                    type: object
+                  enabled:
+                    default: false
+                    description: Enabled enables the operator-managed observability
+                      stack.
+                    type: boolean
+                type: object
               publicExposure:
                 description: PublicExposure configures public URL exposure for sandboxes
                 properties:

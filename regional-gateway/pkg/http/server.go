@@ -28,6 +28,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
+	obsquery "github.com/sandbox0-ai/sandbox0/pkg/observability/query"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"go.uber.org/zap"
 )
@@ -48,6 +49,7 @@ type Server struct {
 	logger               *zap.Logger
 	internalAuthGen      *internalauth.Generator
 	meteringHandler      *gatewayhandlers.MeteringHandler
+	observabilityHandler *gatewayhandlers.ObservabilityHandler
 	obsProvider          *observability.Provider
 	httpClient           *http.Client
 
@@ -120,6 +122,10 @@ func NewServer(
 	httpClient := obsProvider.HTTP.NewClient(httpobs.Config{
 		Timeout: cfg.ProxyTimeout.Duration,
 	})
+	observabilityReader, err := newObservabilityReader(cfg.Observability, httpClient)
+	if err != nil {
+		logger.Warn("Observability query API disabled", zap.Error(err))
+	}
 
 	// Create proxy router to cluster-gateway
 	clusterGatewayRouter, err := proxy.NewRouter(
@@ -237,6 +243,7 @@ func NewServer(
 		logger:                logger,
 		internalAuthGen:       internalAuthGen,
 		meteringHandler:       gatewayhandlers.NewMeteringHandler(meteringRepo, cfg.RegionID, logger),
+		observabilityHandler:  gatewayhandlers.NewObservabilityHandler(observabilityReader, logger),
 		obsProvider:           obsProvider,
 		httpClient:            httpClient,
 		clusterGatewayProxies: make(map[string]*proxy.Router),
@@ -335,11 +342,34 @@ func (s *Server) setupRoutes() {
 			credentialSources.DELETE("/:name", s.authMiddleware.RequirePermission(authn.PermCredentialSourceDelete), s.injectInternalToken(), s.clusterGatewayRouter.ProxyToTarget)
 		}
 
+		observabilityRoutes := api.Group("/v1/observability")
+		observabilityRoutes.Use(s.requireTeamContextForTeamScopedAPI())
+		{
+			observabilityRoutes.GET("/traces", s.authMiddleware.RequirePermission(authn.PermSandboxRead), s.observabilityHandler.ListTraceSpans)
+			observabilityRoutes.GET("/logs", s.authMiddleware.RequirePermission(authn.PermSandboxRead), s.observabilityHandler.ListLogs)
+		}
+
 	}
 
 	// Unmatched API routes fall back to the default cluster-gateway. Everything
 	// else goes through the public exposure fallback.
 	s.router.NoRoute(s.handleNoRoute)
+}
+
+func newObservabilityReader(cfg config.ObservabilityQueryConfig, httpClient *http.Client) (gatewayhandlers.ObservabilityReader, error) {
+	if strings.TrimSpace(cfg.ClickHouseHTTPURL) == "" {
+		return nil, nil
+	}
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 15 * time.Second}
+	}
+	return obsquery.NewClickHouseClient(obsquery.ClickHouseConfig{
+		HTTPURL:  cfg.ClickHouseHTTPURL,
+		Database: cfg.ClickHouseDatabase,
+		Username: cfg.ClickHouseUsername,
+		Password: cfg.ClickHousePassword,
+		Client:   httpClient,
+	})
 }
 
 func (s *Server) setupInternalSSHRoutes() {

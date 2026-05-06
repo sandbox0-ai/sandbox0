@@ -193,6 +193,33 @@ func (p *InfraPlan) ConfigureRegionalGatewayRegistry(cfg *apiconfig.RegionalGate
 	}
 }
 
+func (p *InfraPlan) ObservabilityEnvVars() []corev1.EnvVar {
+	if p == nil || !p.Observability.Enabled || !p.Observability.CollectorEnabled || strings.TrimSpace(p.Observability.CollectorServiceURL) == "" {
+		return nil
+	}
+	endpoint := strings.TrimPrefix(strings.TrimSpace(p.Observability.CollectorServiceURL), "http://")
+	endpoint = strings.TrimPrefix(endpoint, "https://")
+	return []corev1.EnvVar{
+		{Name: "OTEL_EXPORTER_TYPE", Value: "otlp"},
+		{Name: "OTEL_EXPORTER_ENDPOINT", Value: endpoint},
+	}
+}
+
+func (p *InfraPlan) ConfigureGatewayObservability(cfg *apiconfig.GatewayConfig) []corev1.EnvVar {
+	if p == nil || cfg == nil || !p.Observability.Enabled || !p.Observability.ClickHouseEnabled || strings.TrimSpace(p.Observability.ClickHouseHTTPURL) == "" {
+		return nil
+	}
+	cfg.Observability.ClickHouseHTTPURL = p.Observability.ClickHouseHTTPURL
+	cfg.Observability.ClickHouseDatabase = p.Observability.ClickHouseDatabase
+	cfg.Observability.ClickHouseUsername = p.clickHouseUsername()
+	cfg.Observability.ClickHousePassword = "${S0_OBSERVABILITY_CLICKHOUSE_PASSWORD}"
+	secretName, key := p.clickHousePasswordSecretRef()
+	if strings.TrimSpace(secretName) == "" {
+		return nil
+	}
+	return []corev1.EnvVar{secretEnvVar("S0_OBSERVABILITY_CLICKHOUSE_PASSWORD", secretName, defaultString(key, "password"))}
+}
+
 func (p *InfraPlan) DefaultFederatedGlobalJWTIssuer() string {
 	if p != nil && p.infra != nil && p.infra.Spec.Services != nil && p.infra.Spec.Services.GlobalGateway != nil && p.infra.Spec.Services.GlobalGateway.Config != nil {
 		if issuer := strings.TrimSpace(p.infra.Spec.Services.GlobalGateway.Config.JWTIssuer); issuer != "" {
@@ -243,6 +270,34 @@ func (p *InfraPlan) registryConfig() *registry.ResolvedRegistryConfig {
 		return nil
 	}
 	return registry.ResolveRegistryConfig(p.infra)
+}
+
+func (p *InfraPlan) clickHouseUsername() string {
+	if p == nil || p.infra == nil || p.infra.Spec.Observability == nil || p.infra.Spec.Observability.ClickHouse == nil {
+		return "sandbox0"
+	}
+	clickhouse := p.infra.Spec.Observability.ClickHouse
+	if clickhouse.Type == infrav1alpha1.ClickHouseTypeExternal && clickhouse.External != nil {
+		return clickhouse.External.Username
+	}
+	if clickhouse.Builtin != nil && strings.TrimSpace(clickhouse.Builtin.Username) != "" {
+		return clickhouse.Builtin.Username
+	}
+	return "sandbox0"
+}
+
+func (p *InfraPlan) clickHousePasswordSecretRef() (string, string) {
+	if p == nil {
+		return "", ""
+	}
+	if p == nil || p.infra == nil || p.infra.Spec.Observability == nil || p.infra.Spec.Observability.ClickHouse == nil {
+		return fmt.Sprintf("%s-clickhouse-credentials", p.Scope.Name), "password"
+	}
+	clickhouse := p.infra.Spec.Observability.ClickHouse
+	if clickhouse.Type == infrav1alpha1.ClickHouseTypeExternal && clickhouse.External != nil {
+		return clickhouse.External.PasswordSecret.Name, clickhouse.External.PasswordSecret.Key
+	}
+	return fmt.Sprintf("%s-clickhouse-credentials", p.Scope.Name), "password"
 }
 
 func secretEnvVar(name, secretName, key string) corev1.EnvVar {

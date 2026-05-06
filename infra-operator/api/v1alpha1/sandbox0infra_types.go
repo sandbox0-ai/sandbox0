@@ -96,6 +96,10 @@ type Sandbox0InfraSpec struct {
 	// +optional
 	Registry *RegistryConfig `json:"registry,omitempty"`
 
+	// Observability configures the regional observability ingestion and storage plane.
+	// +optional
+	Observability *ObservabilityConfig `json:"observability,omitempty"`
+
 	// ControlPlane configures external control plane connection.
 	// +optional
 	ControlPlane *ControlPlaneConfig `json:"controlPlane,omitempty"`
@@ -731,6 +735,153 @@ type HarborRegistryCredentialsSecret struct {
 	PasswordKey string `json:"passwordKey,omitempty"`
 }
 
+// ObservabilityConfig defines the optional observability ingestion and storage stack.
+type ObservabilityConfig struct {
+	// Enabled enables the operator-managed observability stack.
+	// +kubebuilder:default=false
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Collector configures the OpenTelemetry Collector.
+	// +optional
+	// +kubebuilder:default={}
+	Collector *OTelCollectorConfig `json:"collector,omitempty"`
+
+	// ClickHouse configures the observability event store.
+	// +optional
+	// +kubebuilder:default={}
+	ClickHouse *ClickHouseConfig `json:"clickHouse,omitempty"`
+}
+
+// OTelCollectorConfig configures the operator-managed OpenTelemetry Collector.
+type OTelCollectorConfig struct {
+	// Enabled enables the OpenTelemetry Collector deployment.
+	// +kubebuilder:default=true
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Image specifies the collector contrib image. The contrib distribution is required for the ClickHouse exporter.
+	// +kubebuilder:default="otel/opentelemetry-collector-contrib:0.139.0"
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// Replicas specifies the number of collector replicas.
+	// +kubebuilder:default=1
+	// +optional
+	Replicas int32 `json:"replicas,omitempty"`
+
+	// OTLPGRPCPort specifies the OTLP gRPC receiver port.
+	// +kubebuilder:default=4317
+	// +optional
+	OTLPGRPCPort int32 `json:"otlpGrpcPort,omitempty"`
+
+	// OTLPHTTPPort specifies the OTLP HTTP receiver port.
+	// +kubebuilder:default=4318
+	// +optional
+	OTLPHTTPPort int32 `json:"otlpHttpPort,omitempty"`
+
+	// HealthPort specifies the collector health extension port.
+	// +kubebuilder:default=13133
+	// +optional
+	HealthPort int32 `json:"healthPort,omitempty"`
+
+	// Resources specifies collector resource requirements.
+	// +optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+}
+
+// ClickHouseConfig configures the observability ClickHouse store.
+type ClickHouseConfig struct {
+	// Type specifies whether ClickHouse is builtin or external.
+	// +kubebuilder:default=builtin
+	// +kubebuilder:validation:Enum=builtin;external
+	// +optional
+	Type ClickHouseType `json:"type,omitempty"`
+
+	// Builtin configures the operator-managed ClickHouse instance.
+	// +optional
+	// +kubebuilder:default={}
+	Builtin *BuiltinClickHouseConfig `json:"builtin,omitempty"`
+
+	// External configures an externally managed ClickHouse endpoint.
+	// +optional
+	External *ExternalClickHouseConfig `json:"external,omitempty"`
+}
+
+// ClickHouseType is the ClickHouse deployment mode.
+type ClickHouseType string
+
+const (
+	ClickHouseTypeBuiltin  ClickHouseType = "builtin"
+	ClickHouseTypeExternal ClickHouseType = "external"
+)
+
+// BuiltinClickHouseConfig configures the single-node builtin ClickHouse store.
+// +kubebuilder:validation:XValidation:rule="has(self.persistence) == has(oldSelf.persistence)",message="persistence presence is immutable after creation"
+type BuiltinClickHouseConfig struct {
+	// Enabled enables the built-in ClickHouse store.
+	// +kubebuilder:default=true
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Image specifies the ClickHouse server image.
+	// +kubebuilder:default="clickhouse/clickhouse-server:25.8-alpine"
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// HTTPPort specifies the ClickHouse HTTP API port.
+	// +kubebuilder:default=8123
+	// +optional
+	HTTPPort int32 `json:"httpPort,omitempty"`
+
+	// NativePort specifies the ClickHouse native TCP port.
+	// +kubebuilder:default=9000
+	// +optional
+	NativePort int32 `json:"nativePort,omitempty"`
+
+	// Database specifies the observability database name.
+	// +kubebuilder:default="sandbox0_observability"
+	// +optional
+	Database string `json:"database,omitempty"`
+
+	// Username specifies the ClickHouse username used by collectors and query APIs.
+	// +kubebuilder:default="sandbox0"
+	// +optional
+	Username string `json:"username,omitempty"`
+
+	// Persistence configures ClickHouse storage.
+	// +optional
+	Persistence *PersistenceConfig `json:"persistence,omitempty"`
+
+	// Resources specifies ClickHouse resource requirements.
+	// +optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// StatefulResourcePolicy controls what happens to the builtin ClickHouse PVC and generated credentials secret.
+	// +kubebuilder:default=Retain
+	// +optional
+	StatefulResourcePolicy BuiltinStatefulResourcePolicy `json:"statefulResourcePolicy,omitempty"`
+}
+
+// ExternalClickHouseConfig defines an externally managed ClickHouse endpoint.
+type ExternalClickHouseConfig struct {
+	// Endpoint is the ClickHouse native endpoint, for example tcp://clickhouse.example.com:9000.
+	Endpoint string `json:"endpoint"`
+
+	// HTTPURL is the ClickHouse HTTP URL used by product query APIs.
+	// +optional
+	HTTPURL string `json:"httpUrl,omitempty"`
+
+	// Database specifies the observability database name.
+	Database string `json:"database"`
+
+	// Username specifies the ClickHouse username.
+	Username string `json:"username"`
+
+	// PasswordSecret references the secret containing the ClickHouse password.
+	PasswordSecret SecretKeyRef `json:"passwordSecret"`
+}
+
 // ControlPlaneConfig defines external control plane configuration
 type ControlPlaneConfig struct {
 	// URL is the control plane regional-gateway URL
@@ -1021,6 +1172,14 @@ func IsNetdEnabled(infra *Sandbox0Infra) bool {
 		return false
 	}
 	return infra.Spec.Services.Netd.Enabled
+}
+
+// IsObservabilityEnabled returns true when the observability stack should be reconciled.
+func IsObservabilityEnabled(infra *Sandbox0Infra) bool {
+	if infra == nil || infra.Spec.Observability == nil {
+		return false
+	}
+	return infra.Spec.Observability.Enabled
 }
 
 // IsDatabaseEnabled returns true when database should be reconciled.
@@ -1415,6 +1574,7 @@ const (
 	ConditionTypeCtldReady            = "CtldReady"
 	ConditionTypeNetdReady            = "NetdReady"
 	ConditionTypeSchedulerReady       = "SchedulerReady"
+	ConditionTypeObservabilityReady   = "ObservabilityReady"
 	ConditionTypeInternalAuthReady    = "InternalAuthReady"
 	ConditionTypeCRDsInstalled        = "CRDsInstalled"
 	ConditionTypeSecretsGenerated     = "SecretsGenerated"

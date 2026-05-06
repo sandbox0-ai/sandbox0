@@ -153,6 +153,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 			Value: "/config/config.yaml",
 		},
 	}
+	envVars = append(envVars, compiledPlan.ObservabilityEnvVars()...)
 	envVars = append(envVars, registryEnvVars...)
 
 	// Create deployment
@@ -323,12 +324,14 @@ func (r *Reconciler) buildConfig(ctx context.Context, compiledPlan *infraplan.In
 			cfg.JWTSecret = jwtSecret
 		}
 	}
+	observabilityQueryEnvVars := compiledPlan.ConfigureGatewayObservability(&cfg.GatewayConfig)
 	registryEnvVars, err := compiledPlan.ConfigureRegionalGatewayRegistry(cfg)
 	if err != nil {
 		return nil, nil, err
 	}
+	envVars := append(observabilityQueryEnvVars, registryEnvVars...)
 
-	return cfg, registryEnvVars, nil
+	return cfg, envVars, nil
 }
 
 func (r *Reconciler) deleteIngressIfExists(ctx context.Context, scope common.ObjectScope, name string) error {

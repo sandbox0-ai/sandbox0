@@ -54,6 +54,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/manager"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/netd"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/nodereadiness"
+	observabilitysvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/observability"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/regionalgateway"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/registry"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/scheduler"
@@ -242,6 +243,7 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 	clusterGatewayReconciler := clustergateway.NewReconciler(resources)
 	managerReconciler := manager.NewReconciler(resources)
 	storageProxyReconciler := storageproxy.NewReconciler(resources)
+	observabilityReconciler := observabilitysvc.NewReconciler(resources)
 	ctldReconciler := ctldsvc.NewReconciler(resources)
 	netdReconciler := netd.NewReconciler(resources)
 	nodeReadinessReconciler := nodereadiness.NewReconciler(resources)
@@ -251,7 +253,7 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 		return ctrl.Result{RequeueAfter: requeueInterval}, err
 	}
 
-	steps, err := r.bindWorkflowSteps(infra, compiledPlan, resources, imageRepo, imageTag, authReconciler, dbReconciler, storageReconciler, registryReconciler, globalGatewayReconciler, regionalGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, ctldReconciler, netdReconciler, nodeReadinessReconciler, rbacReconciler)
+	steps, err := r.bindWorkflowSteps(infra, compiledPlan, resources, imageRepo, imageTag, authReconciler, dbReconciler, storageReconciler, registryReconciler, globalGatewayReconciler, regionalGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, observabilityReconciler, ctldReconciler, netdReconciler, nodeReadinessReconciler, rbacReconciler)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -274,6 +276,7 @@ func (r *Sandbox0InfraReconciler) bindWorkflowSteps(
 	clusterGatewayReconciler *clustergateway.Reconciler,
 	managerReconciler *manager.Reconciler,
 	storageProxyReconciler *storageproxy.Reconciler,
+	observabilityReconciler *observabilitysvc.Reconciler,
 	ctldReconciler *ctldsvc.Reconciler,
 	netdReconciler *netd.Reconciler,
 	nodeReadinessReconciler *nodereadiness.Reconciler,
@@ -281,7 +284,7 @@ func (r *Sandbox0InfraReconciler) bindWorkflowSteps(
 ) ([]reconcileStep, error) {
 	steps := make([]reconcileStep, 0, len(compiledPlan.Workflow.Steps))
 	for _, planned := range compiledPlan.Workflow.Steps {
-		run, err := r.workflowStepRunner(infra, compiledPlan, resources, imageRepo, imageTag, planned.Name, authReconciler, dbReconciler, storageReconciler, registryReconciler, globalGatewayReconciler, regionalGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, ctldReconciler, netdReconciler, nodeReadinessReconciler, rbacReconciler)
+		run, err := r.workflowStepRunner(infra, compiledPlan, resources, imageRepo, imageTag, planned.Name, authReconciler, dbReconciler, storageReconciler, registryReconciler, globalGatewayReconciler, regionalGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, observabilityReconciler, ctldReconciler, netdReconciler, nodeReadinessReconciler, rbacReconciler)
 		if err != nil {
 			return nil, err
 		}
@@ -314,6 +317,7 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 	clusterGatewayReconciler *clustergateway.Reconciler,
 	managerReconciler *manager.Reconciler,
 	storageProxyReconciler *storageproxy.Reconciler,
+	observabilityReconciler *observabilitysvc.Reconciler,
 	ctldReconciler *ctldsvc.Reconciler,
 	netdReconciler *netd.Reconciler,
 	nodeReadinessReconciler *nodereadiness.Reconciler,
@@ -336,6 +340,8 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 		return func(ctx context.Context) error { return storageReconciler.Reconcile(ctx, infra) }, nil
 	case "registry":
 		return func(ctx context.Context) error { return registryReconciler.Reconcile(ctx, infra) }, nil
+	case "observability":
+		return func(ctx context.Context) error { return observabilityReconciler.Reconcile(ctx, infra) }, nil
 	case "global-gateway-enterprise-license":
 		return func(ctx context.Context) error {
 			licenseFile := ""
@@ -385,7 +391,7 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 			if err := rbacReconciler.ReconcileCtldRBAC(ctx, infra); err != nil {
 				return err
 			}
-			return ctldReconciler.Reconcile(ctx, infra, imageRepo, imageTag)
+			return ctldReconciler.Reconcile(ctx, infra, imageRepo, imageTag, compiledPlan)
 		}, nil
 	case "manager-rbac":
 		return func(ctx context.Context) error { return rbacReconciler.ReconcileManagerRBAC(ctx, infra) }, nil
@@ -409,7 +415,7 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 		return func(ctx context.Context) error { return rbacReconciler.ReconcileStorageProxyRBAC(ctx, infra) }, nil
 	case "storage-proxy":
 		return func(ctx context.Context) error {
-			return storageProxyReconciler.Reconcile(ctx, infra, imageRepo, imageTag)
+			return storageProxyReconciler.Reconcile(ctx, infra, imageRepo, imageTag, compiledPlan)
 		}, nil
 	case "register-cluster":
 		return func(ctx context.Context) error { return r.registerCluster(ctx, infra) }, nil
@@ -494,6 +500,8 @@ func objectForCleanupKind(kind string) (client.Object, error) {
 		return &corev1.ConfigMap{}, nil
 	case "Secret":
 		return &corev1.Secret{}, nil
+	case "PersistentVolumeClaim":
+		return &corev1.PersistentVolumeClaim{}, nil
 	case "Ingress":
 		return &networkingv1.Ingress{}, nil
 	case "ServiceAccount":

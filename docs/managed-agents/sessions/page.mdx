@@ -66,9 +66,12 @@ Repository authorization tokens are accepted on create or update, but are not re
 |-------|---------|
 | `idle` | Ready for new input or waiting for required action |
 | `running` | The agent engine is processing events |
+| `rescheduling` | The active run hit a retriable model or transport error and Sandbox0 is waiting for the selected engine to retry automatically |
 | `terminated` | The session is no longer active |
 
 Sandbox0 keeps session state and event history outside the sandbox. The sandbox and workspace volume are runtime attachments for the session.
+
+`rescheduling` is transient. It is emitted as `session.status_rescheduled` after a `session.error` whose `error.retry_status.type` is `retrying`. When the same run resumes and produces more output, Sandbox0 emits `session.status_running` again. If the retry budget is exhausted, the run returns to `idle` with `stop_reason.type = "retries_exhausted"`; terminal non-retryable failures move the session to `terminated`.
 
 ## Sandbox0 Runtime Behavior
 
@@ -79,6 +82,7 @@ Sandbox0 keeps session state and event history outside the sandbox. The sandbox 
 - The selected agent engine is resolved from the attached LLM vault; if no engine is selected, the default is `claude`.
 - `claude` and `codex` run the agent process inside the sandbox.
 - `openai-agents` runs the agent loop in a resident runtime and uses Sandbox0 as a sandbox tool.
+- All supported engines map observable automatic retry attempts to the same session state sequence: `running`, `rescheduling`, `running`, then either `idle` or `terminated`.
 
 ## Next
 

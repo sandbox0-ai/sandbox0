@@ -34,6 +34,7 @@ Official reference: [Claude Managed Agents quickstart](https://platform.claude.c
 | Claude engine | Requires an Anthropic-compatible endpoint. |
 | Codex engine | Requires an OpenAI-compatible endpoint. |
 | OpenAI Agents engine | Requires an OpenAI Responses-compatible endpoint and uses Sandbox0 as a tool target. |
+| Retry state | Automatic retries are exposed as `session.status_rescheduled` plus `retry_status.type = "retrying"` errors when the selected engine provides a retry signal. |
 | LLMProxy | Optional. Use it when an OpenAI-compatible engine needs to call an Anthropic-compatible provider. |
 | Anthropic pre-built skills | Not supported. Use Sandbox0 custom skills. |
 | Multi-agent threads | Not implemented in the current backend surface. |
@@ -106,6 +107,8 @@ Sandbox0 stores the session and event log outside the sandbox. Sandbox attachmen
 | Archive | Makes the session read-only for new input events. |
 
 `claude` and `codex` use agent in sandbox behavior. `openai-agents` uses sandbox as tool behavior, so the resident runtime can start a run before a Sandbox0 sandbox is claimed.
+
+Sandbox0 session lifecycle includes `idle`, `running`, `rescheduling`, and `terminated`. The `rescheduling` state is transient and means the active run is waiting for an automatic retry. It is currently mapped from Claude Agent SDK `api_retry` events, Codex app-server `willRetry` errors, and OpenAI Agents SDK runner-managed retry policy decisions.
 
 ## Version Drift
 

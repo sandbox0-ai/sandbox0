@@ -30,6 +30,18 @@ Use sandbox as tool when you want to embed an agent into a product workflow or c
 | `codex` | Agent in sandbox | Codex app-server wrapper | OpenAI-compatible | Codex app-server sessions that should keep Codex state inside the workspace |
 | `openai-agents` | Sandbox as tool | Resident OpenAI Agents Python runtime | OpenAI Responses-compatible | Product copilots and agent workflows built on the OpenAI Agents SDK |
 
+## Retry Behavior
+
+All supported engines report observable automatic retry attempts through the same Managed Agents events: `session.error` with `error.retry_status.type = "retrying"`, `session.status_rescheduled`, then `session.status_running` if the run resumes.
+
+| Engine | Retry signal used by Sandbox0 |
+|--------|-------------------------------|
+| `claude` | Claude Agent SDK `system` messages with `subtype = "api_retry"` |
+| `codex` | Codex app-server `error` notifications with `willRetry = true` |
+| `openai-agents` | OpenAI Agents SDK runner-managed `ModelRetrySettings` policy decisions |
+
+Sandbox0 disables hidden OpenAI Python client retries for the `openai-agents` runtime and routes model retries through the OpenAI Agents SDK retry policy so retry state is visible in the session event stream.
+
 ## Select An Engine
 
 The session engine is selected by the attached LLM vault:

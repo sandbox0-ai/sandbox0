@@ -53,10 +53,25 @@ for await (const event of stream) {
 | `user.tool_confirmation` | Allow or deny a tool that requires confirmation |
 | `user.custom_tool_result` | Result for a custom tool call |
 | `session.status_running` | A run is active |
+| `session.status_rescheduled` | The active run is waiting for an automatic engine retry after a retriable error |
 | `session.status_idle` | The turn ended or the agent requires action |
 | `session.error` | Session-level error |
 
 Treat `session.status_idle` with `stop_reason.type = "end_turn"` as a normal turn completion. If the stop reason is `requires_action`, send the required confirmation or custom tool result before expecting the run to continue.
+
+## Retry Events
+
+Sandbox0 exposes automatic model retries through the normal event stream:
+
+| Sequence | Meaning |
+|----------|---------|
+| `session.error` with `error.retry_status.type = "retrying"` | The engine observed a retriable model or transport error and will retry the same run automatically |
+| `session.status_rescheduled` | The session is in the transient `rescheduling` state while the retry is pending |
+| `session.status_running` | The same run resumed and is producing output or completion events again |
+| `session.status_idle` with `stop_reason.type = "retries_exhausted"` | The retry budget was exhausted and the turn ended without success |
+| `session.status_terminated` | The error was terminal and the session is no longer active |
+
+Do not send duplicate user input when a session is `rescheduling`. Wait for either `session.status_running`, `session.status_idle`, or `session.status_terminated`.
 
 ## File-Backed Input
 

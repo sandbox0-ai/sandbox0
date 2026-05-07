@@ -69,6 +69,5 @@ Managed Agents uses `https://agents.sandbox0.ai`. Sandbox, Template, Volume, and
 - Go SDK: https://github.com/sandbox0-ai/sdk-go
 - JavaScript SDK: https://github.com/sandbox0-ai/sdk-js
 - Python SDK: https://github.com/sandbox0-ai/sdk-py
-- Managed Agents examples and runtime work: https://github.com/sandbox0-ai/managed-agents
 
 When reporting issues, include a minimal reproduction and relevant logs, but remove API keys, tokens, kubeconfigs, customer data, private repository URLs, and any other sensitive personal or organizational information.

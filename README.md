@@ -140,7 +140,6 @@ Managed Agents sit above raw sandboxes. Application code uses the official Anthr
 
 - Managed Agents API: `https://agents.sandbox0.ai`
 - Documentation: <https://sandbox0.ai/docs/managed-agents>
-- Examples and runtime work: <https://github.com/sandbox0-ai/managed-agents>
 
 Use raw Sandbox0 sandboxes when you want direct control over processes, files, templates, volumes, ports, and network policy. Use Managed Agents when you want a session/event API for agent applications and want Sandbox0 to manage the runtime attachment behind that API.
 
@@ -191,7 +190,6 @@ Related repositories:
 - Go SDK: <https://github.com/sandbox0-ai/sdk-go>
 - JavaScript/TypeScript SDK: <https://github.com/sandbox0-ai/sdk-js>
 - Python SDK: <https://github.com/sandbox0-ai/sdk-py>
-- Managed Agents examples and runtime work: <https://github.com/sandbox0-ai/managed-agents>
 
 For API changes, `pkg/apispec/openapi.yaml` is the source of truth. Generated SDK code and copied OpenAPI files in other repositories should be synchronized from it rather than edited by hand.
 

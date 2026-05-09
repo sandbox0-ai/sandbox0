@@ -293,6 +293,55 @@ func TestPrepareUsernamePasswordDirectives(t *testing.T) {
 	}
 }
 
+func TestPrepareSSHProxyDirectives(t *testing.T) {
+	ctx := &egressAuthContext{
+		Rule: &policy.CompiledEgressAuthRule{
+			AuthRef: "git-ssh",
+		},
+		Resolved: egressauth.NewSSHProxyResolveResponse("git-ssh", &egressauth.SSHProxyDirective{
+			SandboxPublicKeys: []string{"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID////////////////////////////////////////// fake"},
+			UpstreamUsername:  "git",
+			PrivateKeyPEM:     "-----BEGIN RSA PRIVATE KEY-----\nplaceholder\n-----END RSA PRIVATE KEY-----",
+			KnownHosts:        []string{"github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID//////////////////////////////////////////"},
+		}, nil),
+		FailurePolicy: string(v1alpha1.EgressAuthFailurePolicyFailClosed),
+	}
+
+	if err := prepareSSHProxyDirectives(ctx, "ssh", true); err != nil {
+		t.Fatalf("prepare ssh proxy directives: %v", err)
+	}
+	if ctx.ResolvedSSHProxy == nil {
+		t.Fatal("expected resolved ssh proxy")
+	}
+	if ctx.ResolvedSSHProxy.UpstreamUsername != "git" {
+		t.Fatalf("upstream username = %q, want git", ctx.ResolvedSSHProxy.UpstreamUsername)
+	}
+	if len(ctx.ResolvedSSHProxy.SandboxPublicKeys) != 1 {
+		t.Fatalf("sandbox public keys = %d, want 1", len(ctx.ResolvedSSHProxy.SandboxPublicKeys))
+	}
+}
+
+func TestPrepareSSHProxyDirectivesRejectsInvalidMaterial(t *testing.T) {
+	ctx := &egressAuthContext{
+		Rule: &policy.CompiledEgressAuthRule{
+			AuthRef: "git-ssh",
+		},
+		Resolved: egressauth.NewSSHProxyResolveResponse("git-ssh", &egressauth.SSHProxyDirective{
+			UpstreamUsername: "git",
+			PrivateKeyPEM:    "-----BEGIN RSA PRIVATE KEY-----\nplaceholder\n-----END RSA PRIVATE KEY-----",
+		}, nil),
+		FailurePolicy: string(v1alpha1.EgressAuthFailurePolicyFailClosed),
+	}
+
+	err := prepareSSHProxyDirectives(ctx, "ssh", true)
+	if !errors.Is(err, errEgressAuthDirectiveInvalid) {
+		t.Fatalf("err = %v, want invalid directive", err)
+	}
+	if ctx.EnforcementReason != "invalid_directive" {
+		t.Fatalf("enforcement reason = %q", ctx.EnforcementReason)
+	}
+}
+
 func TestAttachEgressAuthBypassesWhenClusterFeatureDisabled(t *testing.T) {
 	server := &Server{
 		cfg:          &config.NetdConfig{EgressAuthEnabled: false},

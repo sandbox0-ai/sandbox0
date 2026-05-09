@@ -310,6 +310,11 @@ func validateNetworkCredentialConfig(policy *v1alpha1.SandboxNetworkPolicy, bind
 				return fmt.Errorf("egress rule %q with protocol %s requires username_password projection on %q", rule.Name, rule.Protocol, rule.CredentialRef)
 			}
 		}
+		if rule.Protocol == v1alpha1.EgressAuthProtocolSSH {
+			if projectionType, ok := bindingProjectionTypes[rule.CredentialRef]; !ok || projectionType != v1alpha1.CredentialProjectionTypeSSHProxy {
+				return fmt.Errorf("egress rule %q with protocol ssh requires ssh_proxy projection on %q", rule.Name, rule.CredentialRef)
+			}
+		}
 		if rule.Name == "" {
 			continue
 		}
@@ -397,6 +402,21 @@ func validateProjection(ref string, projection v1alpha1.ProjectionSpec) error {
 	case v1alpha1.CredentialProjectionTypeUsernamePassword:
 		if projection.UsernamePassword == nil {
 			return fmt.Errorf("credential binding projection.usernamePassword is required for %q", ref)
+		}
+	case v1alpha1.CredentialProjectionTypeSSHProxy:
+		if projection.SSHProxy == nil {
+			return fmt.Errorf("credential binding projection.sshProxy is required for %q", ref)
+		}
+		if strings.TrimSpace(projection.SSHProxy.UpstreamUsername) == "" {
+			return fmt.Errorf("credential binding projection.sshProxy upstreamUsername is required for %q", ref)
+		}
+		if len(projection.SSHProxy.SandboxPublicKeys) == 0 {
+			return fmt.Errorf("credential binding projection.sshProxy sandboxPublicKeys is required for %q", ref)
+		}
+		for _, key := range projection.SSHProxy.SandboxPublicKeys {
+			if strings.TrimSpace(key) == "" {
+				return fmt.Errorf("credential binding projection.sshProxy sandbox public key is required for %q", ref)
+			}
 		}
 	default:
 		return fmt.Errorf("credential binding projection type %q is not supported for %q", projection.Type, ref)

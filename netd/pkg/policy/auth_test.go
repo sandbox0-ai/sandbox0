@@ -156,6 +156,29 @@ func TestMatchEgressAuthRuleMatchesSOCKS5Rule(t *testing.T) {
 	}
 }
 
+func TestMatchEgressAuthRuleMatchesSSHRule(t *testing.T) {
+	p := &CompiledPolicy{
+		Egress: CompiledRuleSet{
+			AuthRules: []CompiledEgressAuthRule{{
+				Name:     "git-ssh",
+				AuthRef:  "git-cred",
+				Protocol: v1alpha1.EgressAuthProtocolSSH,
+				Domains: []DomainRule{
+					{Pattern: "github.com", Type: DomainMatchExact},
+				},
+				Ports: []PortRange{
+					{Protocol: "tcp", Start: 22, End: 22},
+				},
+			}},
+		},
+	}
+
+	rule := MatchEgressAuthRule(p, "tcp", "ssh", 22, "github.com")
+	if rule == nil || rule.AuthRef != "git-cred" {
+		t.Fatalf("unexpected ssh rule match: %+v", rule)
+	}
+}
+
 func TestMatchEgressAuthRuleMatchesMQTTRule(t *testing.T) {
 	p := &CompiledPolicy{
 		Egress: CompiledRuleSet{

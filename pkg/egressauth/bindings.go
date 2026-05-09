@@ -18,6 +18,7 @@ type ProjectionSpec struct {
 	HTTPHeaders          *HTTPHeadersProjection          `json:"httpHeaders,omitempty"`
 	TLSClientCertificate *TLSClientCertificateProjection `json:"tlsClientCertificate,omitempty"`
 	UsernamePassword     *UsernamePasswordProjection     `json:"usernamePassword,omitempty"`
+	SSHProxy             *SSHProxyProjection             `json:"sshProxy,omitempty"`
 }
 
 // CredentialProjectionType identifies the runtime projection shape.
@@ -27,6 +28,7 @@ const (
 	CredentialProjectionTypeHTTPHeaders          CredentialProjectionType = "http_headers"
 	CredentialProjectionTypeTLSClientCertificate CredentialProjectionType = "tls_client_certificate"
 	CredentialProjectionTypeUsernamePassword     CredentialProjectionType = "username_password"
+	CredentialProjectionTypeSSHProxy             CredentialProjectionType = "ssh_proxy"
 )
 
 // HTTPHeadersProjection injects HTTP headers derived from source data.
@@ -39,6 +41,13 @@ type TLSClientCertificateProjection struct{}
 
 // UsernamePasswordProjection projects one username/password pair into an early auth exchange.
 type UsernamePasswordProjection struct{}
+
+// SSHProxyProjection configures transparent SSH re-origination.
+type SSHProxyProjection struct {
+	SandboxPublicKeys []string `json:"sandboxPublicKeys,omitempty"`
+	UpstreamUsername  string   `json:"upstreamUsername,omitempty"`
+	KnownHosts        []string `json:"knownHosts,omitempty"`
+}
 
 // ProjectedHeader defines one projected header template.
 type ProjectedHeader struct {

@@ -21,6 +21,7 @@ type egressAuthContext struct {
 	ResolvedHeaders              map[string]string
 	ResolvedTLSClientCertificate *resolvedTLSClientCertificate
 	ResolvedUsernamePassword     *resolvedUsernamePassword
+	ResolvedSSHProxy             *resolvedSSHProxy
 	CacheHit                     bool
 	ResolveAttempt               bool
 	ResolveError                 error
@@ -37,6 +38,14 @@ type resolvedTLSClientCertificate struct {
 type resolvedUsernamePassword struct {
 	Username string
 	Password string
+}
+
+type resolvedSSHProxy struct {
+	SandboxPublicKeys []string
+	UpstreamUsername  string
+	PrivateKeyPEM     string
+	Passphrase        string
+	KnownHosts        []string
 }
 
 type egressAuthResolver interface {
@@ -346,6 +355,68 @@ func prepareUsernamePasswordDirectives(ctx *egressAuthContext, protocol string, 
 	material, err := resolveUsernamePasswordForAdapter(ctx, allowUsernamePassword)
 	if err == nil {
 		ctx.ResolvedUsernamePassword = material
+		return nil
+	}
+	applyEgressAuthDirectiveError(ctx, protocol, err)
+	return err
+}
+
+func resolveSSHProxyForAdapter(ctx *egressAuthContext, allowSSHProxy bool) (*resolvedSSHProxy, error) {
+	if ctx == nil || ctx.Resolved == nil {
+		return nil, errEgressAuthMaterialUnavailable
+	}
+	if !allowSSHProxy {
+		if len(ctx.Resolved.Directives) > 0 || len(ctx.Resolved.Headers) > 0 {
+			return nil, errEgressAuthDirectiveUnsupported
+		}
+		return nil, errEgressAuthMaterialUnavailable
+	}
+	for _, directive := range ctx.Resolved.Directives {
+		switch directive.Kind {
+		case egressauth.ResolveDirectiveKindSSHProxy:
+			if directive.SSHProxy == nil {
+				continue
+			}
+			upstreamUsername := strings.TrimSpace(directive.SSHProxy.UpstreamUsername)
+			privateKeyPEM := strings.TrimSpace(directive.SSHProxy.PrivateKeyPEM)
+			if upstreamUsername == "" || privateKeyPEM == "" || len(directive.SSHProxy.SandboxPublicKeys) == 0 {
+				return nil, errEgressAuthDirectiveInvalid
+			}
+			return &resolvedSSHProxy{
+				SandboxPublicKeys: append([]string(nil), directive.SSHProxy.SandboxPublicKeys...),
+				UpstreamUsername:  upstreamUsername,
+				PrivateKeyPEM:     privateKeyPEM,
+				Passphrase:        directive.SSHProxy.Passphrase,
+				KnownHosts:        append([]string(nil), directive.SSHProxy.KnownHosts...),
+			}, nil
+		default:
+			return nil, errEgressAuthDirectiveUnsupported
+		}
+	}
+	if len(ctx.Resolved.Headers) > 0 {
+		return nil, errEgressAuthDirectiveUnsupported
+	}
+	return nil, errEgressAuthMaterialUnavailable
+}
+
+func prepareSSHProxyDirectives(ctx *egressAuthContext, protocol string, allowSSHProxy bool) error {
+	if ctx == nil || ctx.Rule == nil {
+		return nil
+	}
+	if ctx.ShouldBypass() {
+		return nil
+	}
+	if ctx.ResolveError != nil {
+		return ctx.ResolveError
+	}
+	if ctx.Resolved == nil {
+		applyEgressAuthFailurePolicy(ctx, protocol, "material_unavailable")
+		return errEgressAuthMaterialUnavailable
+	}
+
+	material, err := resolveSSHProxyForAdapter(ctx, allowSSHProxy)
+	if err == nil {
+		ctx.ResolvedSSHProxy = material
 		return nil
 	}
 	applyEgressAuthDirectiveError(ctx, protocol, err)

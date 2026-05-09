@@ -201,6 +201,10 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					assertSSHAppProtocolTrafficRules(env, session, sandboxID, sshFixtureState)
 				})
 
+				It("proxies SSH egress auth without exposing upstream private keys to the sandbox", func() {
+					assertSSHTransparentEgressAuthProxy(env, session, sandboxID, sshFixtureState)
+				})
+
 				It("creates and repairs template namespace ingress baseline policies", func() {
 					assertTemplateNamespaceIngressBaselineLifecycle(env, session, opts.templateNamePrefix)
 				})

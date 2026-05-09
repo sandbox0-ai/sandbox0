@@ -128,6 +128,19 @@ func testStaticUsernamePasswordSourceVersion(username, password string) *egressa
 	}
 }
 
+func testStaticSSHPrivateKeySourceVersion(privateKeyPEM string) *egressauth.CredentialSourceVersion {
+	return &egressauth.CredentialSourceVersion{
+		SourceID:     1,
+		Version:      1,
+		ResolverKind: "static_ssh_private_key",
+		Spec: egressauth.CredentialSourceSecretSpec{
+			StaticSSHPrivateKey: &egressauth.StaticSSHPrivateKeySourceSpec{
+				PrivateKeyPEM: privateKeyPEM,
+			},
+		},
+	}
+}
+
 func testBindingRecord(updatedAt time.Time) *egressauth.BindingRecord {
 	return &egressauth.BindingRecord{
 		TeamID:    "team-1",
@@ -158,6 +171,28 @@ func testUsernamePasswordBindingRecord(updatedAt time.Time) *egressauth.BindingR
 			Projection: egressauth.ProjectionSpec{
 				Type:             egressauth.CredentialProjectionTypeUsernamePassword,
 				UsernamePassword: &egressauth.UsernamePasswordProjection{},
+			},
+		}},
+	}
+}
+
+func testSSHProxyBindingRecord(updatedAt time.Time) *egressauth.BindingRecord {
+	return &egressauth.BindingRecord{
+		TeamID:    "team-1",
+		SandboxID: "sbx-1",
+		UpdatedAt: updatedAt,
+		Bindings: []egressauth.CredentialBinding{{
+			Ref:           "git-ssh",
+			SourceRef:     "git-ssh-source",
+			SourceID:      1,
+			SourceVersion: 1,
+			Projection: egressauth.ProjectionSpec{
+				Type: egressauth.CredentialProjectionTypeSSHProxy,
+				SSHProxy: &egressauth.SSHProxyProjection{
+					SandboxPublicKeys: []string{"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID////////////////////////////////////////// fake"},
+					UpstreamUsername:  "git",
+					KnownHosts:        []string{"github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID//////////////////////////////////////////"},
+				},
 			},
 		}},
 	}
@@ -356,6 +391,62 @@ func TestResolveUsesStaticTLSClientCertificateProvider(t *testing.T) {
 	if resp.Directives[0].TLSClientCertificate == nil || resp.Directives[0].TLSClientCertificate.CertificatePEM == "" {
 		t.Fatalf("expected tls client certificate payload, got %#v", resp.Directives[0].TLSClientCertificate)
 	}
+}
+
+func TestResolveReturnsSSHProxyDirective(t *testing.T) {
+	privateKeyPEM, err := testSSHPrivateKeyPEM()
+	if err != nil {
+		t.Fatalf("test ssh private key: %v", err)
+	}
+	store := &fakeBindingStore{
+		recordFn: func() *egressauth.BindingRecord {
+			return testSSHProxyBindingRecord(time.Unix(10, 0).UTC())
+		},
+		sourceVersionFn: func(int64, int64) *egressauth.CredentialSourceVersion {
+			return testStaticSSHPrivateKeySourceVersion(privateKeyPEM)
+		},
+	}
+
+	service := NewService(Config{
+		DefaultResolveTTL: time.Minute,
+	}, store, zap.NewNop())
+
+	resp, err := service.Resolve(context.Background(), &egressauth.ResolveRequest{
+		TeamID:    "team-1",
+		SandboxID: "sbx-1",
+		AuthRef:   "git-ssh",
+		Protocol:  "ssh",
+	})
+	if err != nil {
+		t.Fatalf("resolve ssh proxy: %v", err)
+	}
+	if len(resp.Directives) != 1 || resp.Directives[0].Kind != egressauth.ResolveDirectiveKindSSHProxy {
+		t.Fatalf("unexpected directives: %#v", resp.Directives)
+	}
+	directive := resp.Directives[0].SSHProxy
+	if directive == nil {
+		t.Fatal("expected ssh proxy directive")
+	}
+	if directive.UpstreamUsername != "git" {
+		t.Fatalf("upstream username = %q, want git", directive.UpstreamUsername)
+	}
+	if directive.PrivateKeyPEM == "" {
+		t.Fatal("expected private key pem")
+	}
+	if len(directive.SandboxPublicKeys) != 1 {
+		t.Fatalf("sandbox public keys = %d, want 1", len(directive.SandboxPublicKeys))
+	}
+}
+
+func testSSHPrivateKeyPEM() (string, error) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return "", err
+	}
+	return string(pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(key),
+	})), nil
 }
 
 func testTLSKeyPair(t *testing.T) (string, string, error) {

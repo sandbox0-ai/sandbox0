@@ -5358,10 +5358,12 @@ components:
           $ref: "#/components/schemas/TLSClientCertificateProjection"
         usernamePassword:
           $ref: "#/components/schemas/UsernamePasswordProjection"
+        sshProxy:
+          $ref: "#/components/schemas/SSHProxyProjection"
       required: [type]
     CredentialProjectionType:
       type: string
-      enum: [http_headers, tls_client_certificate, username_password]
+      enum: [http_headers, tls_client_certificate, username_password, ssh_proxy]
     HTTPHeadersProjection:
       type: object
       properties:
@@ -5376,6 +5378,23 @@ components:
     UsernamePasswordProjection:
       type: object
       description: Username/password projection used for SOCKS5 and MQTT auth handshakes.
+    SSHProxyProjection:
+      type: object
+      description: Transparent SSH proxy projection used for SSH egress re-origination.
+      properties:
+        sandboxPublicKeys:
+          type: array
+          description: Fake public keys accepted from sandbox-side SSH clients.
+          items:
+            type: string
+        upstreamUsername:
+          type: string
+          description: Username used by netd when authenticating to the upstream SSH server.
+        knownHosts:
+          type: array
+          description: OpenSSH known_hosts entries used to verify upstream host keys.
+          items:
+            type: string
     ProjectedHeader:
       type: object
       properties:
@@ -5425,7 +5444,7 @@ components:
       required: [name, resolverKind, spec]
     CredentialSourceResolverKind:
       type: string
-      enum: [static_headers, static_tls_client_certificate, static_username_password]
+      enum: [static_headers, static_tls_client_certificate, static_username_password, static_ssh_private_key]
     CredentialSourceWriteSpec:
       type: object
       properties:
@@ -5435,6 +5454,8 @@ components:
           $ref: "#/components/schemas/StaticTLSClientCertificateSourceSpec"
         staticUsernamePassword:
           $ref: "#/components/schemas/StaticUsernamePasswordSourceSpec"
+        staticSSHPrivateKey:
+          $ref: "#/components/schemas/StaticSSHPrivateKeySourceSpec"
     StaticHeadersSourceSpec:
       type: object
       properties:
@@ -5466,9 +5487,19 @@ components:
           type: string
           writeOnly: true
       required: [username, password]
+    StaticSSHPrivateKeySourceSpec:
+      type: object
+      properties:
+        privateKeyPem:
+          type: string
+          writeOnly: true
+        passphrase:
+          type: string
+          writeOnly: true
+      required: [privateKeyPem]
     EgressAuthProtocol:
       type: string
-      enum: [http, https, grpc, tls, socks5, mqtt, redis]
+      enum: [http, https, grpc, tls, ssh, socks5, mqtt, redis]
     EgressAuthRolloutMode:
       type: string
       enum: [enabled, disabled]

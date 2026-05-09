@@ -394,6 +394,8 @@ type ProjectionSpec struct {
 	TLSClientCertificate *TLSClientCertificateProjection `json:"tlsClientCertificate,omitempty"`
 	// UsernamePassword projects one username/password pair into an early auth exchange.
 	UsernamePassword *UsernamePasswordProjection `json:"usernamePassword,omitempty"`
+	// SSHProxy projects sandbox-side fake keys and upstream identity for transparent SSH proxying.
+	SSHProxy *SSHProxyProjection `json:"sshProxy,omitempty"`
 }
 
 // CredentialProjectionType identifies the runtime projection shape.
@@ -403,6 +405,7 @@ const (
 	CredentialProjectionTypeHTTPHeaders          CredentialProjectionType = "http_headers"
 	CredentialProjectionTypeTLSClientCertificate CredentialProjectionType = "tls_client_certificate"
 	CredentialProjectionTypeUsernamePassword     CredentialProjectionType = "username_password"
+	CredentialProjectionTypeSSHProxy             CredentialProjectionType = "ssh_proxy"
 )
 
 // HTTPHeadersProjection injects HTTP headers derived from source data.
@@ -416,6 +419,16 @@ type TLSClientCertificateProjection struct{}
 
 // UsernamePasswordProjection projects one username/password pair into an early auth exchange.
 type UsernamePasswordProjection struct{}
+
+// SSHProxyProjection configures transparent SSH re-origination.
+type SSHProxyProjection struct {
+	// SandboxPublicKeys are fake public keys accepted from sandbox-side SSH clients.
+	SandboxPublicKeys []string `json:"sandboxPublicKeys,omitempty"`
+	// UpstreamUsername is the username netd uses when authenticating to the upstream SSH server.
+	UpstreamUsername string `json:"upstreamUsername,omitempty"`
+	// KnownHosts contains OpenSSH known_hosts entries used to verify upstream host keys.
+	KnownHosts []string `json:"knownHosts,omitempty"`
+}
 
 // ProjectedHeader defines one projected header template.
 type ProjectedHeader struct {
@@ -439,6 +452,7 @@ const (
 	EgressAuthProtocolHTTPS  EgressAuthProtocol = "https"
 	EgressAuthProtocolGRPC   EgressAuthProtocol = "grpc"
 	EgressAuthProtocolTLS    EgressAuthProtocol = "tls"
+	EgressAuthProtocolSSH    EgressAuthProtocol = "ssh"
 	EgressAuthProtocolSOCKS5 EgressAuthProtocol = "socks5"
 	EgressAuthProtocolMQTT   EgressAuthProtocol = "mqtt"
 	EgressAuthProtocolRedis  EgressAuthProtocol = "redis"

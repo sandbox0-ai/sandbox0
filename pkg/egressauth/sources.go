@@ -28,6 +28,7 @@ type CredentialSourceSecretSpec struct {
 	StaticHeaders              *StaticHeadersSourceSpec              `json:"staticHeaders,omitempty"`
 	StaticTLSClientCertificate *StaticTLSClientCertificateSourceSpec `json:"staticTLSClientCertificate,omitempty"`
 	StaticUsernamePassword     *StaticUsernamePasswordSourceSpec     `json:"staticUsernamePassword,omitempty"`
+	StaticSSHPrivateKey        *StaticSSHPrivateKeySourceSpec        `json:"staticSSHPrivateKey,omitempty"`
 }
 
 // StaticHeadersSourceSpec stores named values used by header projections.
@@ -46,6 +47,12 @@ type StaticTLSClientCertificateSourceSpec struct {
 type StaticUsernamePasswordSourceSpec struct {
 	Username string `json:"username,omitempty"`
 	Password string `json:"password,omitempty"`
+}
+
+// StaticSSHPrivateKeySourceSpec stores one PEM-encoded SSH private key.
+type StaticSSHPrivateKeySourceSpec struct {
+	PrivateKeyPEM string `json:"privateKeyPem,omitempty"`
+	Passphrase    string `json:"passphrase,omitempty"`
 }
 
 // CredentialSourceWriteRequest is the secret-bearing public write model.

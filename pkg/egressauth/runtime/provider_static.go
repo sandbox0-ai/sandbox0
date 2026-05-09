@@ -17,6 +17,8 @@ type staticTLSClientCertificateProvider struct{}
 
 type staticUsernamePasswordProvider struct{}
 
+type staticSSHPrivateKeyProvider struct{}
+
 func (p *staticHeadersProvider) Resolve(
 	_ context.Context,
 	req *egressauth.ResolveRequest,
@@ -110,6 +112,42 @@ func (p *staticUsernamePasswordProvider) Resolve(
 		Response: egressauth.NewUsernamePasswordResolveResponse(req.AuthRef, &egressauth.UsernamePasswordDirective{
 			Username: spec.Username,
 			Password: spec.Password,
+		}, &expiresAt),
+		TTL: ttl,
+	}, nil
+}
+
+func (p *staticSSHPrivateKeyProvider) Resolve(
+	_ context.Context,
+	req *egressauth.ResolveRequest,
+	binding *egressauth.CredentialBinding,
+	source *egressauth.CredentialSourceVersion,
+	defaultTTL time.Duration,
+) (*ResolveResult, error) {
+	if binding == nil || source == nil || req == nil {
+		return nil, nil
+	}
+	if source.Spec.StaticSSHPrivateKey == nil {
+		return nil, fmt.Errorf("static_ssh_private_key source spec is required")
+	}
+	if binding.Projection.Type != egressauth.CredentialProjectionTypeSSHProxy || binding.Projection.SSHProxy == nil {
+		return nil, fmt.Errorf("ssh_proxy projection is required")
+	}
+
+	spec := source.Spec.StaticSSHPrivateKey
+	projection := binding.Projection.SSHProxy
+	ttl := defaultTTL
+	if ttlOverride, ok := parseBindingTTL(binding.CachePolicy, defaultTTL); ok {
+		ttl = ttlOverride
+	}
+	expiresAt := time.Now().UTC().Add(ttl)
+	return &ResolveResult{
+		Response: egressauth.NewSSHProxyResolveResponse(req.AuthRef, &egressauth.SSHProxyDirective{
+			SandboxPublicKeys: append([]string(nil), projection.SandboxPublicKeys...),
+			UpstreamUsername:  projection.UpstreamUsername,
+			PrivateKeyPEM:     spec.PrivateKeyPEM,
+			Passphrase:        spec.Passphrase,
+			KnownHosts:        append([]string(nil), projection.KnownHosts...),
 		}, &expiresAt),
 		TTL: ttl,
 	}, nil

@@ -59,6 +59,15 @@ func TestCompileNetworkPolicy(t *testing.T) {
 						{Port: 6379, Protocol: "tcp"},
 					},
 				},
+				{
+					Name:          "git-ssh",
+					CredentialRef: "git-cred",
+					Protocol:      v1alpha1.EgressAuthProtocolSSH,
+					Domains:       []string{"github.com"},
+					Ports: []v1alpha1.PortSpec{
+						{Port: 22, Protocol: "tcp"},
+					},
+				},
 			},
 		},
 	}
@@ -85,7 +94,7 @@ func TestCompileNetworkPolicy(t *testing.T) {
 	if len(compiled.Egress.TrafficRules[0].Ports) != 1 {
 		t.Fatalf("expected normalized allowed ports")
 	}
-	if len(compiled.Egress.AuthRules) != 5 {
+	if len(compiled.Egress.AuthRules) != 6 {
 		t.Fatalf("expected auth rules")
 	}
 	if compiled.Egress.AuthRules[2].Protocol != v1alpha1.EgressAuthProtocolSOCKS5 {
@@ -96,6 +105,9 @@ func TestCompileNetworkPolicy(t *testing.T) {
 	}
 	if compiled.Egress.AuthRules[4].Protocol != v1alpha1.EgressAuthProtocolRedis {
 		t.Fatalf("unexpected fifth auth rule protocol: %s", compiled.Egress.AuthRules[4].Protocol)
+	}
+	if compiled.Egress.AuthRules[5].Protocol != v1alpha1.EgressAuthProtocolSSH {
+		t.Fatalf("unexpected sixth auth rule protocol: %s", compiled.Egress.AuthRules[5].Protocol)
 	}
 }
 

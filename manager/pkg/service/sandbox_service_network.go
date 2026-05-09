@@ -335,6 +335,13 @@ func toStoreProjection(in v1alpha1.ProjectionSpec) egressauth.ProjectionSpec {
 	if in.UsernamePassword != nil {
 		out.UsernamePassword = &egressauth.UsernamePasswordProjection{}
 	}
+	if in.SSHProxy != nil {
+		out.SSHProxy = &egressauth.SSHProxyProjection{
+			SandboxPublicKeys: append([]string(nil), in.SSHProxy.SandboxPublicKeys...),
+			UpstreamUsername:  in.SSHProxy.UpstreamUsername,
+			KnownHosts:        append([]string(nil), in.SSHProxy.KnownHosts...),
+		}
+	}
 	return out
 }
 
@@ -353,6 +360,13 @@ func cloneStoreProjection(in egressauth.ProjectionSpec) egressauth.ProjectionSpe
 	}
 	if in.UsernamePassword != nil {
 		out.UsernamePassword = &egressauth.UsernamePasswordProjection{}
+	}
+	if in.SSHProxy != nil {
+		out.SSHProxy = &egressauth.SSHProxyProjection{
+			SandboxPublicKeys: append([]string(nil), in.SSHProxy.SandboxPublicKeys...),
+			UpstreamUsername:  in.SSHProxy.UpstreamUsername,
+			KnownHosts:        append([]string(nil), in.SSHProxy.KnownHosts...),
+		}
 	}
 	return out
 }
@@ -377,6 +391,13 @@ func fromStoreProjection(in egressauth.ProjectionSpec) v1alpha1.ProjectionSpec {
 	}
 	if in.UsernamePassword != nil {
 		out.UsernamePassword = &v1alpha1.UsernamePasswordProjection{}
+	}
+	if in.SSHProxy != nil {
+		out.SSHProxy = &v1alpha1.SSHProxyProjection{
+			SandboxPublicKeys: append([]string(nil), in.SSHProxy.SandboxPublicKeys...),
+			UpstreamUsername:  in.SSHProxy.UpstreamUsername,
+			KnownHosts:        append([]string(nil), in.SSHProxy.KnownHosts...),
+		}
 	}
 	return out
 }

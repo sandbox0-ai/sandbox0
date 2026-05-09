@@ -24,6 +24,7 @@ const (
 // Defines values for CredentialProjectionType.
 const (
 	HttpHeaders          CredentialProjectionType = "http_headers"
+	SshProxy             CredentialProjectionType = "ssh_proxy"
 	TlsClientCertificate CredentialProjectionType = "tls_client_certificate"
 	UsernamePassword     CredentialProjectionType = "username_password"
 )
@@ -31,6 +32,7 @@ const (
 // Defines values for CredentialSourceResolverKind.
 const (
 	StaticHeaders              CredentialSourceResolverKind = "static_headers"
+	StaticSshPrivateKey        CredentialSourceResolverKind = "static_ssh_private_key"
 	StaticTlsClientCertificate CredentialSourceResolverKind = "static_tls_client_certificate"
 	StaticUsernamePassword     CredentialSourceResolverKind = "static_username_password"
 )
@@ -56,6 +58,7 @@ const (
 	EgressAuthProtocolMqtt   EgressAuthProtocol = "mqtt"
 	EgressAuthProtocolRedis  EgressAuthProtocol = "redis"
 	EgressAuthProtocolSocks5 EgressAuthProtocol = "socks5"
+	EgressAuthProtocolSsh    EgressAuthProtocol = "ssh"
 	EgressAuthProtocolTls    EgressAuthProtocol = "tls"
 )
 
@@ -738,6 +741,7 @@ type CredentialSourceWriteRequest struct {
 // CredentialSourceWriteSpec defines model for CredentialSourceWriteSpec.
 type CredentialSourceWriteSpec struct {
 	StaticHeaders              *StaticHeadersSourceSpec              `json:"staticHeaders,omitempty"`
+	StaticSSHPrivateKey        *StaticSSHPrivateKeySourceSpec        `json:"staticSSHPrivateKey,omitempty"`
 	StaticTLSClientCertificate *StaticTLSClientCertificateSourceSpec `json:"staticTLSClientCertificate,omitempty"`
 	StaticUsernamePassword     *StaticUsernamePasswordSourceSpec     `json:"staticUsernamePassword,omitempty"`
 }
@@ -1121,6 +1125,9 @@ type ProjectedHeader struct {
 type ProjectionSpec struct {
 	HttpHeaders *HTTPHeadersProjection `json:"httpHeaders,omitempty"`
 
+	// SshProxy Transparent SSH proxy projection used for SSH egress re-origination.
+	SshProxy *SSHProxyProjection `json:"sshProxy,omitempty"`
+
 	// TlsClientCertificate Client certificate projection used for TLS terminate-reoriginate auth.
 	TlsClientCertificate *TLSClientCertificateProjection `json:"tlsClientCertificate,omitempty"`
 	Type                 CredentialProjectionType        `json:"type"`
@@ -1311,6 +1318,18 @@ type ResumeSandboxResponse struct {
 	RestoredMemory *string           `json:"restored_memory,omitempty"`
 	Resumed        bool              `json:"resumed"`
 	SandboxId      string            `json:"sandbox_id"`
+}
+
+// SSHProxyProjection Transparent SSH proxy projection used for SSH egress re-origination.
+type SSHProxyProjection struct {
+	// KnownHosts OpenSSH known_hosts entries used to verify upstream host keys.
+	KnownHosts *[]string `json:"knownHosts,omitempty"`
+
+	// SandboxPublicKeys Fake public keys accepted from sandbox-side SSH clients.
+	SandboxPublicKeys *[]string `json:"sandboxPublicKeys,omitempty"`
+
+	// UpstreamUsername Username used by netd when authenticating to the upstream SSH server.
+	UpstreamUsername *string `json:"upstreamUsername,omitempty"`
 }
 
 // SSHPublicKey defines model for SSHPublicKey.
@@ -1571,6 +1590,12 @@ type Snapshot struct {
 // StaticHeadersSourceSpec defines model for StaticHeadersSourceSpec.
 type StaticHeadersSourceSpec struct {
 	Values *map[string]string `json:"values,omitempty"`
+}
+
+// StaticSSHPrivateKeySourceSpec defines model for StaticSSHPrivateKeySourceSpec.
+type StaticSSHPrivateKeySourceSpec struct {
+	Passphrase    *string `json:"passphrase,omitempty"`
+	PrivateKeyPem *string `json:"privateKeyPem,omitempty"`
 }
 
 // StaticTLSClientCertificateSourceSpec defines model for StaticTLSClientCertificateSourceSpec.

@@ -36,6 +36,7 @@ const (
 	ResolveDirectiveKindGRPCMetadata         ResolveDirectiveKind = "grpc_metadata"
 	ResolveDirectiveKindTLSClientCertificate ResolveDirectiveKind = "tls_client_certificate"
 	ResolveDirectiveKindUsernamePassword     ResolveDirectiveKind = "username_password"
+	ResolveDirectiveKindSSHProxy             ResolveDirectiveKind = "ssh_proxy"
 	ResolveDirectiveKindSSHAgentSign         ResolveDirectiveKind = "ssh_agent_sign"
 	ResolveDirectiveKindCustom               ResolveDirectiveKind = "custom"
 )
@@ -46,6 +47,7 @@ type ResolveDirective struct {
 	HTTPHeaders          *HTTPHeadersDirective          `json:"httpHeaders,omitempty"`
 	TLSClientCertificate *TLSClientCertificateDirective `json:"tlsClientCertificate,omitempty"`
 	UsernamePassword     *UsernamePasswordDirective     `json:"usernamePassword,omitempty"`
+	SSHProxy             *SSHProxyDirective             `json:"sshProxy,omitempty"`
 }
 
 // HTTPHeadersDirective injects HTTP headers into a matching request.
@@ -64,6 +66,15 @@ type TLSClientCertificateDirective struct {
 type UsernamePasswordDirective struct {
 	Username string `json:"username,omitempty"`
 	Password string `json:"password,omitempty"`
+}
+
+// SSHProxyDirective configures transparent SSH proxy authentication.
+type SSHProxyDirective struct {
+	SandboxPublicKeys []string `json:"sandboxPublicKeys,omitempty"`
+	UpstreamUsername  string   `json:"upstreamUsername,omitempty"`
+	PrivateKeyPEM     string   `json:"privateKeyPem,omitempty"`
+	Passphrase        string   `json:"passphrase,omitempty"`
+	KnownHosts        []string `json:"knownHosts,omitempty"`
 }
 
 type resolveResponseWire struct {
@@ -129,6 +140,31 @@ func NewUsernamePasswordResolveResponse(authRef string, directive *UsernamePassw
 			UsernamePassword: &UsernamePasswordDirective{
 				Username: directive.Username,
 				Password: directive.Password,
+			},
+		}}
+	}
+	if expiresAt != nil {
+		expiresCopy := *expiresAt
+		resp.ExpiresAt = &expiresCopy
+	}
+	resp.EnsureCompatibilityFields()
+	return resp
+}
+
+// NewSSHProxyResolveResponse constructs a typed transparent SSH proxy response.
+func NewSSHProxyResolveResponse(authRef string, directive *SSHProxyDirective, expiresAt *time.Time) *ResolveResponse {
+	resp := &ResolveResponse{
+		AuthRef: authRef,
+	}
+	if directive != nil {
+		resp.Directives = []ResolveDirective{{
+			Kind: ResolveDirectiveKindSSHProxy,
+			SSHProxy: &SSHProxyDirective{
+				SandboxPublicKeys: append([]string(nil), directive.SandboxPublicKeys...),
+				UpstreamUsername:  directive.UpstreamUsername,
+				PrivateKeyPEM:     directive.PrivateKeyPEM,
+				Passphrase:        directive.Passphrase,
+				KnownHosts:        append([]string(nil), directive.KnownHosts...),
 			},
 		}}
 	}
@@ -250,6 +286,15 @@ func cloneDirectives(in []ResolveDirective) []ResolveDirective {
 			cloned.UsernamePassword = &UsernamePasswordDirective{
 				Username: directive.UsernamePassword.Username,
 				Password: directive.UsernamePassword.Password,
+			}
+		}
+		if directive.SSHProxy != nil {
+			cloned.SSHProxy = &SSHProxyDirective{
+				SandboxPublicKeys: append([]string(nil), directive.SSHProxy.SandboxPublicKeys...),
+				UpstreamUsername:  directive.SSHProxy.UpstreamUsername,
+				PrivateKeyPEM:     directive.SSHProxy.PrivateKeyPEM,
+				Passphrase:        directive.SSHProxy.Passphrase,
+				KnownHosts:        append([]string(nil), directive.SSHProxy.KnownHosts...),
 			}
 		}
 		out = append(out, cloned)

@@ -129,6 +129,32 @@ func TestCredentialSourceServicePutUsernamePasswordSource(t *testing.T) {
 	}
 }
 
+func TestCredentialSourceServicePutSSHPrivateKeySource(t *testing.T) {
+	store := newMemorySourceStore()
+	svc := NewCredentialSourceService(store, zap.NewNop())
+
+	_, keyPEM, err := testTLSKeyPair(t)
+	if err != nil {
+		t.Fatalf("test private key: %v", err)
+	}
+
+	record, err := svc.PutSource(context.Background(), "team-1", &egressauth.CredentialSourceWriteRequest{
+		Name:         "git-ssh",
+		ResolverKind: "static_ssh_private_key",
+		Spec: egressauth.CredentialSourceSecretSpec{
+			StaticSSHPrivateKey: &egressauth.StaticSSHPrivateKeySourceSpec{
+				PrivateKeyPEM: keyPEM,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("put ssh private key source: %v", err)
+	}
+	if record.CurrentVersion != 1 {
+		t.Fatalf("current version = %d, want 1", record.CurrentVersion)
+	}
+}
+
 func cloneSourceMetadata(in *egressauth.CredentialSourceMetadata) *egressauth.CredentialSourceMetadata {
 	if in == nil {
 		return nil

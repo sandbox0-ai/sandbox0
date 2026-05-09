@@ -45,6 +45,20 @@ func testUsernamePasswordCredentialBinding(ref string) v1alpha1.CredentialBindin
 	}
 }
 
+func testSSHProxyCredentialBinding(ref string) v1alpha1.CredentialBinding {
+	return v1alpha1.CredentialBinding{
+		Ref:       ref,
+		SourceRef: ref + "-source",
+		Projection: v1alpha1.ProjectionSpec{
+			Type: v1alpha1.CredentialProjectionTypeSSHProxy,
+			SSHProxy: &v1alpha1.SSHProxyProjection{
+				SandboxPublicKeys: []string{"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID////////////////////////////////////////// fake"},
+				UpstreamUsername:  "git",
+			},
+		},
+	}
+}
+
 func TestBuildNetworkPolicyStateMergesNamedRulesAndBindings(t *testing.T) {
 	svc := NewNetworkPolicyService(zap.NewNop())
 	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
@@ -387,6 +401,66 @@ func TestBuildNetworkPolicyStateKeepsValidRedisRules(t *testing.T) {
 		},
 		RequestBindings: []v1alpha1.CredentialBinding{
 			testUsernamePasswordCredentialBinding("redis-cred"),
+		},
+	})
+
+	if result == nil || result.PolicySpec == nil || result.PolicySpec.Egress == nil {
+		t.Fatalf("expected egress policy")
+	}
+	if len(result.PolicySpec.Egress.CredentialRules) != 1 {
+		t.Fatalf("rule count = %d, want 1", len(result.PolicySpec.Egress.CredentialRules))
+	}
+}
+
+func TestBuildNetworkPolicyStateDropsSSHRulesWithoutSSHProxyProjection(t *testing.T) {
+	svc := NewNetworkPolicyService(zap.NewNop())
+	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
+		SandboxID: "sb-1",
+		TeamID:    "team-1",
+		RequestSpec: &v1alpha1.SandboxNetworkPolicy{
+			Mode: v1alpha1.NetworkModeBlockAll,
+			Egress: &v1alpha1.NetworkEgressPolicy{
+				CredentialRules: []v1alpha1.EgressCredentialRule{{
+					Name:          "git-ssh",
+					CredentialRef: "git-cred",
+					Protocol:      v1alpha1.EgressAuthProtocolSSH,
+				}},
+			},
+		},
+		RequestBindings: []v1alpha1.CredentialBinding{
+			testCredentialBinding("git-cred"),
+		},
+	})
+
+	if result == nil || result.PolicySpec == nil || result.PolicySpec.Egress == nil {
+		t.Fatalf("expected egress policy")
+	}
+	if len(result.PolicySpec.Egress.CredentialRules) != 0 {
+		t.Fatalf("rules = %#v, want invalid ssh rules dropped", result.PolicySpec.Egress.CredentialRules)
+	}
+	if len(result.CredentialBindings) != 0 {
+		t.Fatalf("bindings = %#v, want invalid bindings dropped with ssh rule", result.CredentialBindings)
+	}
+}
+
+func TestBuildNetworkPolicyStateKeepsValidSSHRules(t *testing.T) {
+	svc := NewNetworkPolicyService(zap.NewNop())
+	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
+		SandboxID: "sb-1",
+		TeamID:    "team-1",
+		RequestSpec: &v1alpha1.SandboxNetworkPolicy{
+			Mode: v1alpha1.NetworkModeBlockAll,
+			Egress: &v1alpha1.NetworkEgressPolicy{
+				CredentialRules: []v1alpha1.EgressCredentialRule{{
+					Name:          "git-ssh",
+					CredentialRef: "git-cred",
+					Protocol:      v1alpha1.EgressAuthProtocolSSH,
+					Domains:       []string{"github.com"},
+				}},
+			},
+		},
+		RequestBindings: []v1alpha1.CredentialBinding{
+			testSSHProxyCredentialBinding("git-cred"),
 		},
 	})
 

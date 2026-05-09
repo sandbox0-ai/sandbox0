@@ -9,6 +9,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 	"go.uber.org/zap"
+	"golang.org/x/crypto/ssh"
 )
 
 // CredentialSourceService manages team-scoped credential sources.
@@ -98,6 +99,20 @@ func validateCredentialSourceWriteRequest(record *egressauth.CredentialSourceWri
 			if !pool.AppendCertsFromPEM([]byte(caPEM)) {
 				return fmt.Errorf("static_tls_client_certificate caPem is invalid")
 			}
+		}
+	case "static_ssh_private_key":
+		if record.Spec.StaticSSHPrivateKey == nil {
+			return fmt.Errorf("static_ssh_private_key spec is required")
+		}
+		if strings.TrimSpace(record.Spec.StaticSSHPrivateKey.PrivateKeyPEM) == "" {
+			return fmt.Errorf("static_ssh_private_key privateKeyPem is required")
+		}
+		if strings.TrimSpace(record.Spec.StaticSSHPrivateKey.Passphrase) != "" {
+			if _, err := ssh.ParsePrivateKeyWithPassphrase([]byte(record.Spec.StaticSSHPrivateKey.PrivateKeyPEM), []byte(record.Spec.StaticSSHPrivateKey.Passphrase)); err != nil {
+				return fmt.Errorf("static_ssh_private_key privateKeyPem is invalid: %w", err)
+			}
+		} else if _, err := ssh.ParsePrivateKey([]byte(record.Spec.StaticSSHPrivateKey.PrivateKeyPEM)); err != nil {
+			return fmt.Errorf("static_ssh_private_key privateKeyPem is invalid: %w", err)
 		}
 	default:
 		return fmt.Errorf("credential source resolver_kind %q is not supported", record.ResolverKind)

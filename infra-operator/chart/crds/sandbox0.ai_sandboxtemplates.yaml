@@ -163,6 +163,27 @@ spec:
                                     type: object
                                   type: array
                               type: object
+                            sshProxy:
+                              description: SSHProxy projects sandbox-side fake keys
+                                and upstream identity for transparent SSH proxying.
+                              properties:
+                                knownHosts:
+                                  description: KnownHosts contains OpenSSH known_hosts
+                                    entries used to verify upstream host keys.
+                                  items:
+                                    type: string
+                                  type: array
+                                sandboxPublicKeys:
+                                  description: SandboxPublicKeys are fake public keys
+                                    accepted from sandbox-side SSH clients.
+                                  items:
+                                    type: string
+                                  type: array
+                                upstreamUsername:
+                                  description: UpstreamUsername is the username netd
+                                    uses when authenticating to the upstream SSH server.
+                                  type: string
+                              type: object
                             tlsClientCertificate:
                               description: TLSClientCertificate projects one client
                                 certificate for TLS re-origination.

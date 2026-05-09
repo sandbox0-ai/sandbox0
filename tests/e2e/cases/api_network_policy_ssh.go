@@ -22,7 +22,8 @@ const (
 	sshFixtureServiceName     = "ssh-server"
 	sshFixtureUserName        = "e2e"
 	sshFixtureImageEnvVar     = "E2E_SSH_FIXTURE_IMAGE"
-	defaultSSHFixtureImageRef = "lscr.io/linuxserver/openssh-server@sha256:68b605929e83b2efe000da09269688f6d82a44579e8a18e2d9e8c8d272917cf7"
+	sshFixtureSourceImageRef  = "lscr.io/linuxserver/openssh-server@sha256:68b605929e83b2efe000da09269688f6d82a44579e8a18e2d9e8c8d272917cf7"
+	defaultSSHFixtureImageRef = "sandbox0ai/e2e-openssh-server:68b605929e83"
 )
 
 const sshFixturePrivateKey = `-----BEGIN OPENSSH PRIVATE KEY-----
@@ -183,8 +184,17 @@ spec:
 
 func preloadSSHFixtureImage(env *framework.ScenarioEnv, imageRef string) error {
 	if _, err := framework.RunCommandOutput(env.TestCtx.Context, "docker", "image", "inspect", imageRef); err != nil {
-		if err := framework.RunCommand(env.TestCtx.Context, "docker", "pull", imageRef); err != nil {
+		sourceRef := imageRef
+		if imageRef == defaultSSHFixtureImageRef {
+			sourceRef = sshFixtureSourceImageRef
+		}
+		if err := framework.RunCommand(env.TestCtx.Context, "docker", "pull", sourceRef); err != nil {
 			return err
+		}
+		if sourceRef != imageRef {
+			if err := framework.RunCommand(env.TestCtx.Context, "docker", "tag", sourceRef, imageRef); err != nil {
+				return err
+			}
 		}
 	}
 	return env.TestCtx.Cluster.LoadDockerImage(env.TestCtx.Context, imageRef)

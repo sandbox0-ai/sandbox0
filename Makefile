@@ -15,7 +15,9 @@ PROTOC ?= protoc
 GO ?= env GOWORK=off go
 
 SERVICES := regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler storage-proxy ctld procd netd infra-operator
-E2E_DEPENDENCY_IMAGES := postgres:16-alpine rustfs/rustfs:1.0.0-alpha.79 registry:2.8.3 sandbox0ai/otemplates:default-v0.1.0 lscr.io/linuxserver/openssh-server@sha256:68b605929e83b2efe000da09269688f6d82a44579e8a18e2d9e8c8d272917cf7
+E2E_SSH_FIXTURE_SOURCE_IMAGE := lscr.io/linuxserver/openssh-server@sha256:68b605929e83b2efe000da09269688f6d82a44579e8a18e2d9e8c8d272917cf7
+E2E_SSH_FIXTURE_IMAGE := sandbox0ai/e2e-openssh-server:68b605929e83
+E2E_DEPENDENCY_IMAGES := postgres:16-alpine rustfs/rustfs:1.0.0-alpha.79 registry:2.8.3 sandbox0ai/otemplates:default-v0.1.0 $(E2E_SSH_FIXTURE_IMAGE)
 E2E_IMAGE_PLATFORM ?= linux/$(shell uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
 
 # Default version
@@ -163,6 +165,11 @@ test-e2e-load-images:
 		echo "sandbox0ai/infra:$(TAG) is missing; run make docker-build-local first"; \
 		exit 1; \
 	fi
+	@if ! docker image inspect "$(E2E_SSH_FIXTURE_IMAGE)" >/dev/null 2>&1; then \
+		printf "$(YELLOW)Pulling SSH fixture source $(E2E_SSH_FIXTURE_SOURCE_IMAGE)...$(RESET)\n"; \
+		docker pull --platform "$(E2E_IMAGE_PLATFORM)" "$(E2E_SSH_FIXTURE_SOURCE_IMAGE)" || exit 1; \
+		docker tag "$(E2E_SSH_FIXTURE_SOURCE_IMAGE)" "$(E2E_SSH_FIXTURE_IMAGE)" || exit 1; \
+	fi
 	@load_image() { \
 		image="$$1"; \
 		for node in $$(kind get nodes --name sandbox0-e2e); do \
@@ -172,8 +179,10 @@ test-e2e-load-images:
 	}; \
 	load_image sandbox0ai/infra:$(TAG); \
 	for image in $(E2E_DEPENDENCY_IMAGES); do \
-		printf "$(YELLOW)Pulling $$image for $(E2E_IMAGE_PLATFORM)...$(RESET)\n"; \
-		docker pull --platform "$(E2E_IMAGE_PLATFORM)" "$$image" || exit 1; \
+		if ! docker image inspect "$$image" >/dev/null 2>&1; then \
+			printf "$(YELLOW)Pulling $$image for $(E2E_IMAGE_PLATFORM)...$(RESET)\n"; \
+			docker pull --platform "$(E2E_IMAGE_PLATFORM)" "$$image" || exit 1; \
+		fi; \
 		load_image "$$image" || exit 1; \
 	done
 

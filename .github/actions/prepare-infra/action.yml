@@ -95,6 +95,13 @@ runs:
         path: ${{ runner.temp }}/infra-image-cache/infra-image-template-default-v0.1.0.tar
         key: infra-image-${{ runner.os }}-${{ inputs.cache-key-suffix }}-template-default-v0.1.0
 
+    - name: Restore SSH fixture image cache
+      id: infra-ssh-fixture-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/infra-image-cache/infra-image-e2e-openssh-server-68b605929e83.tar
+        key: infra-image-${{ runner.os }}-${{ inputs.cache-key-suffix }}-e2e-openssh-server-68b605929e83
+
     - name: Prepare image cache and temp directories
       shell: bash
       run: |
@@ -124,6 +131,19 @@ runs:
         ensure_image "registry:2.8.3" "${image_cache_dir}/infra-image-registry-2.8.3.tar"
         ensure_image "sandbox0ai/otemplates:default-v0.1.0" "${image_cache_dir}/infra-image-template-default-v0.1.0.tar"
 
+        ssh_fixture_archive="${image_cache_dir}/infra-image-e2e-openssh-server-68b605929e83.tar"
+        ssh_fixture_source="lscr.io/linuxserver/openssh-server@sha256:68b605929e83b2efe000da09269688f6d82a44579e8a18e2d9e8c8d272917cf7"
+        ssh_fixture_image="sandbox0ai/e2e-openssh-server:68b605929e83"
+        if [ -f "${ssh_fixture_archive}" ]; then
+          echo "Loading cached image: ${ssh_fixture_image}"
+          docker load -i "${ssh_fixture_archive}"
+        else
+          echo "Pulling image: ${ssh_fixture_source}"
+          docker pull "${ssh_fixture_source}"
+          docker tag "${ssh_fixture_source}" "${ssh_fixture_image}"
+          docker save -o "${ssh_fixture_archive}" "${ssh_fixture_image}"
+        fi
+
     - name: Load Image to Kind
       shell: bash
       run: |
@@ -139,6 +159,7 @@ runs:
         kind load image-archive "${image_cache_dir}/infra-image-rustfs-1.0.0-alpha.79.tar" --name ${{ inputs.kind-cluster-name }}
         kind load image-archive "${image_cache_dir}/infra-image-registry-2.8.3.tar" --name ${{ inputs.kind-cluster-name }}
         kind load image-archive "${image_cache_dir}/infra-image-template-default-v0.1.0.tar" --name ${{ inputs.kind-cluster-name }}
+        kind load image-archive "${image_cache_dir}/infra-image-e2e-openssh-server-68b605929e83.tar" --name ${{ inputs.kind-cluster-name }}
 
     - name: Save shared infra build cache
       uses: ./.github/actions/save-infra-build-cache
@@ -174,6 +195,13 @@ runs:
       with:
         path: ${{ runner.temp }}/infra-image-cache/infra-image-template-default-v0.1.0.tar
         key: infra-image-${{ runner.os }}-${{ inputs.cache-key-suffix }}-template-default-v0.1.0
+
+    - name: Save SSH fixture image cache
+      if: steps.infra-ssh-fixture-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ runner.temp }}/infra-image-cache/infra-image-e2e-openssh-server-68b605929e83.tar
+        key: infra-image-${{ runner.os }}-${{ inputs.cache-key-suffix }}-e2e-openssh-server-68b605929e83
 
     - name: Disk diagnostics (on failure)
       if: failure()

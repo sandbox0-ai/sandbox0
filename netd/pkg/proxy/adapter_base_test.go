@@ -16,7 +16,7 @@ func TestAdapterCapabilities(t *testing.T) {
 		{name: "redis inspect", adapter: &redisAdapter{}, capability: adapterCapabilityInspect},
 		{name: "socks5 inspect", adapter: &socks5Adapter{}, capability: adapterCapabilityInspect},
 		{name: "tls terminate", adapter: &tlsAdapter{}, capability: adapterCapabilityTerminate},
-		{name: "ssh passthrough", adapter: &sshAdapter{}, capability: adapterCapabilityPassThrough},
+		{name: "ssh terminate", adapter: &sshAdapter{}, capability: adapterCapabilityTerminate},
 		{name: "udp passthrough", adapter: &udpAdapter{}, capability: adapterCapabilityPassThrough},
 		{name: "tcp fallback passthrough", adapter: &tcpPassThroughAdapter{}, capability: adapterCapabilityPassThrough},
 		{name: "udp fallback passthrough", adapter: &udpPassThroughAdapter{}, capability: adapterCapabilityPassThrough},

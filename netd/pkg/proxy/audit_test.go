@@ -60,7 +60,7 @@ func TestAuditLoggerRecord(t *testing.T) {
 	if event.Protocol != "ssh" || event.Adapter != "ssh" {
 		t.Fatalf("unexpected protocol fields: %+v", event)
 	}
-	if event.AdapterCapability != string(adapterCapabilityPassThrough) {
+	if event.AdapterCapability != string(adapterCapabilityTerminate) {
 		t.Fatalf("unexpected adapter capability: %+v", event)
 	}
 	if event.FlowID != "tcp-1" || event.EgressBytes != 128 || event.IngressBytes != 64 {

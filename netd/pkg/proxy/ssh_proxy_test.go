@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 	"golang.org/x/crypto/ssh"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -42,20 +43,21 @@ func TestProxySSHSessionReoriginatesWithPlatformCredential(t *testing.T) {
 			return
 		}
 		defer conn.Close()
-		done <- server.proxySSHSession(&adapterRequest{
+		done <- server.runAdapter(&sshAdapter{}, &adapterRequest{
+			Server:   server,
 			Conn:     conn,
 			DestIP:   net.ParseIP(upstreamHost),
 			DestPort: upstreamPort,
 			EgressAuth: &egressAuthContext{
-				ResolvedSSHProxy: &resolvedSSHProxy{
+				Rule: &policy.CompiledEgressAuthRule{AuthRef: "git-ssh"},
+				Resolved: egressauth.NewSSHProxyResolveResponse("git-ssh", &egressauth.SSHProxyDirective{
 					SandboxPublicKeys: []string{fakeAuthorizedKey},
 					UpstreamUsername:  "git",
 					PrivateKeyPEM:     upstreamPrivateKeyPEM,
 					KnownHosts: []string{
 						knownHostLine(upstreamHost, upstreamPort, upstreamHostSigner.PublicKey()),
 					},
-				},
-				Resolved: egressauth.NewSSHProxyResolveResponse("git-ssh", &egressauth.SSHProxyDirective{}, nil),
+				}, nil),
 			},
 		})
 	}()

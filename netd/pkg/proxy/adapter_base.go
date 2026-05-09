@@ -190,7 +190,7 @@ func (a *sshAdapter) Name() string      { return "ssh" }
 func (a *sshAdapter) Transport() string { return "tcp" }
 func (a *sshAdapter) Protocol() string  { return "ssh" }
 func (a *sshAdapter) Capability() adapterCapability {
-	return adapterCapabilityPassThrough
+	return adapterCapabilityTerminate
 }
 
 func (a *sshAdapter) Handle(req *adapterRequest) error {
@@ -201,25 +201,29 @@ func (a *sshAdapter) Handle(req *adapterRequest) error {
 	if req.EgressAuth != nil && req.EgressAuth.Rule != nil {
 		if err := prepareSSHProxyDirectives(req.EgressAuth, "ssh", true); err != nil {
 			if req.EgressAuth.ShouldBypass() {
-				return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+				return req.Server.relayTCPConnWithUpstream(req.Conn, req.Prefix, req.UpstreamConn, req.UpstreamPrefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
 			}
+			closeProbedUpstream(req)
 			if errors.Is(err, errEgressAuthDirectiveUnsupported) {
 				return fmt.Errorf("egress auth directives unsupported for %q", req.EgressAuth.Rule.AuthRef)
 			}
 			return fmt.Errorf("prepare ssh proxy directives for %q: %w", req.EgressAuth.Rule.AuthRef, err)
 		}
 		if req.EgressAuth.ShouldBypass() {
-			return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+			return req.Server.relayTCPConnWithUpstream(req.Conn, req.Prefix, req.UpstreamConn, req.UpstreamPrefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
 		}
 		if req.EgressAuth.ResolveError != nil {
+			closeProbedUpstream(req)
 			return fmt.Errorf("resolve egress auth for %q: %w", req.EgressAuth.Rule.AuthRef, req.EgressAuth.ResolveError)
 		}
 		if req.EgressAuth.ResolvedSSHProxy == nil {
+			closeProbedUpstream(req)
 			return fmt.Errorf("egress auth material missing for %q", req.EgressAuth.Rule.AuthRef)
 		}
+		closeProbedUpstream(req)
 		return req.Server.proxySSHSession(req)
 	}
-	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+	return req.Server.relayTCPConnWithUpstream(req.Conn, req.Prefix, req.UpstreamConn, req.UpstreamPrefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
 }
 
 type socks5Adapter struct{}

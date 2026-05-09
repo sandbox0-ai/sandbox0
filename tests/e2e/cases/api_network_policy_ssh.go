@@ -59,7 +59,7 @@ func setupSSHFixture(env *framework.ScenarioEnv) (*sshFixture, func()) {
 		imageRef = defaultSSHFixtureImageRef
 	}
 
-	if !env.Config.UseExistingCluster && env.TestCtx != nil && env.TestCtx.Cluster != nil {
+	if env.TestCtx != nil && env.TestCtx.Cluster != nil {
 		Expect(preloadSSHFixtureImage(env, imageRef)).To(Succeed())
 	}
 
@@ -268,7 +268,7 @@ chmod 600 %s
 
 func buildSSHFixtureCommand(fixture *sshFixture, keyPath string) string {
 	return fmt.Sprintf(
-		"ssh -F /dev/null -i %s -o BatchMode=yes -o ConnectTimeout=5 -o LogLevel=ERROR -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 22 %s@%s 'printf ok'",
+		"ssh -F /dev/null -i %s -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=5 -o LogLevel=ERROR -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 22 %s@%s 'printf ok'",
 		keyPath,
 		fixture.UserName,
 		fixture.ServiceIP,

@@ -152,13 +152,28 @@ func bridgeSSHChannel(downstream ssh.Channel, downstreamRequests <-chan *ssh.Req
 		})
 	}
 	var wg sync.WaitGroup
+	var upstreamDone sync.WaitGroup
 	wg.Add(6)
-	go copySSHStream(&wg, upstream, downstream, closeBoth, false)
+	upstreamDone.Add(3)
+	go func() {
+		defer upstreamDone.Done()
+		copySSHStream(&wg, upstream, downstream, closeBoth, false)
+	}()
 	go copySSHStream(&wg, downstream, upstream, closeBoth, false)
-	go copySSHStream(&wg, upstream.Stderr(), downstream.Stderr(), closeBoth, false)
+	go func() {
+		defer upstreamDone.Done()
+		copySSHStream(&wg, upstream.Stderr(), downstream.Stderr(), closeBoth, false)
+	}()
 	go copySSHStream(&wg, downstream.Stderr(), upstream.Stderr(), closeBoth, false)
 	go forwardSSHRequests(&wg, downstreamRequests, upstream, closeBoth, true, false)
-	go forwardSSHRequests(&wg, upstreamRequests, downstream, closeBoth, false, true)
+	go func() {
+		defer upstreamDone.Done()
+		forwardSSHRequests(&wg, upstreamRequests, downstream, closeBoth, false, false)
+	}()
+	go func() {
+		upstreamDone.Wait()
+		_ = downstream.Close()
+	}()
 	wg.Wait()
 	closeBoth()
 }

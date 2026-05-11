@@ -154,7 +154,23 @@ func cloneRuleSet(in CompiledRuleSet) CompiledRuleSet {
 	out.AllowedDomains = append([]DomainRule(nil), in.AllowedDomains...)
 	out.DeniedDomains = append([]DomainRule(nil), in.DeniedDomains...)
 	out.AuthRules = append([]CompiledEgressAuthRule(nil), in.AuthRules...)
+	for i := range out.AuthRules {
+		out.AuthRules[i].HTTPMatch = cloneCompiledHTTPMatch(in.AuthRules[i].HTTPMatch)
+	}
 	return out
+}
+
+func cloneCompiledHTTPMatch(in *CompiledHTTPMatch) *CompiledHTTPMatch {
+	if in == nil {
+		return nil
+	}
+	return &CompiledHTTPMatch{
+		Methods:      append([]string(nil), in.Methods...),
+		Paths:        append([]string(nil), in.Paths...),
+		PathPrefixes: append([]string(nil), in.PathPrefixes...),
+		Query:        append([]CompiledHTTPValueMatch(nil), in.Query...),
+		Headers:      append([]CompiledHTTPValueMatch(nil), in.Headers...),
+	}
 }
 
 func clonePlatformPolicy(in *PlatformPolicy, sourcePodIP string) *PlatformPolicy {

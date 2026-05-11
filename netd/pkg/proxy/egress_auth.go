@@ -450,6 +450,17 @@ func (s *Server) attachEgressAuth(req *adapterRequest, decision trafficDecision)
 		proxyMetrics.RecordEgressAuthDecision(decision.Protocol, "bypassed", ctx.BypassReason)
 		return
 	}
+	if decision.MatchedAuthRule.HTTPMatch != nil {
+		return
+	}
+	s.resolveEgressAuth(req, decision)
+}
+
+func (s *Server) resolveEgressAuth(req *adapterRequest, decision trafficDecision) {
+	if req == nil || req.EgressAuth == nil || decision.MatchedAuthRule == nil {
+		return
+	}
+	ctx := req.EgressAuth
 	if s == nil {
 		return
 	}

@@ -803,6 +803,9 @@ type EgressCredentialRule struct {
 	Domains       *[]string                `json:"domains,omitempty"`
 	FailurePolicy *EgressAuthFailurePolicy `json:"failurePolicy,omitempty"`
 
+	// HttpMatch Request-level matcher for HTTP-family egress credential rules.
+	HttpMatch *HTTPMatch `json:"httpMatch,omitempty"`
+
 	// Name Optional stable identifier used for merge and replacement.
 	Name *string `json:"name,omitempty"`
 
@@ -913,6 +916,36 @@ type HTTPHeader struct {
 type HTTPHeadersProjection struct {
 	// Headers Outbound headers synthesized from the resolved credential source.
 	Headers *[]ProjectedHeader `json:"headers,omitempty"`
+}
+
+// HTTPMatch Request-level matcher for HTTP-family egress credential rules.
+type HTTPMatch struct {
+	// Headers HTTP request header matchers.
+	Headers *[]HTTPValueMatch `json:"headers,omitempty"`
+
+	// Methods HTTP methods matched case-insensitively after uppercasing.
+	Methods *[]string `json:"methods,omitempty"`
+
+	// PathPrefixes URL path prefix matches.
+	PathPrefixes *[]string `json:"pathPrefixes,omitempty"`
+
+	// Paths Exact URL path matches.
+	Paths *[]string `json:"paths,omitempty"`
+
+	// Query Decoded query parameter matchers.
+	Query *[]HTTPValueMatch `json:"query,omitempty"`
+}
+
+// HTTPValueMatch defines model for HTTPValueMatch.
+type HTTPValueMatch struct {
+	// Name Header or query parameter name.
+	Name string `json:"name"`
+
+	// Present When true and values is empty, only parameter/header presence is required.
+	Present *bool `json:"present,omitempty"`
+
+	// Values Accepted values. Empty with present=true requires only presence.
+	Values *[]string `json:"values,omitempty"`
 }
 
 // Identity defines model for Identity.

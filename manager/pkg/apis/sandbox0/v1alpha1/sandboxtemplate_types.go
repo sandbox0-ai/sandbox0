@@ -369,6 +369,39 @@ type EgressCredentialRule struct {
 
 	// Ports constrains the rule to specific ports/protocols.
 	Ports []PortSpec `json:"ports,omitempty"`
+
+	// HTTPMatch constrains HTTP-family credential injection to request attributes.
+	HTTPMatch *HTTPMatch `json:"httpMatch,omitempty"`
+}
+
+// HTTPMatch defines request-level matching for HTTP-family egress auth rules.
+type HTTPMatch struct {
+	// Methods matches HTTP methods. Values are normalized to uppercase.
+	Methods []string `json:"methods,omitempty"`
+
+	// Paths matches exact URL paths.
+	Paths []string `json:"paths,omitempty"`
+
+	// PathPrefixes matches URL path prefixes.
+	PathPrefixes []string `json:"pathPrefixes,omitempty"`
+
+	// Query matches decoded query parameters.
+	Query []HTTPValueMatch `json:"query,omitempty"`
+
+	// Headers matches HTTP request headers.
+	Headers []HTTPValueMatch `json:"headers,omitempty"`
+}
+
+// HTTPValueMatch defines one header or query parameter matcher.
+type HTTPValueMatch struct {
+	// Name is the header or query parameter name.
+	Name string `json:"name"`
+
+	// Values matches any one value. Empty with Present=true only requires presence.
+	Values []string `json:"values,omitempty"`
+
+	// Present controls presence-only matching when Values is empty.
+	Present bool `json:"present,omitempty"`
 }
 
 // CredentialBinding defines one named credential projection that outbound auth

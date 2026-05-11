@@ -3,6 +3,7 @@ package service
 import (
 	"fmt"
 	"net"
+	"net/http"
 	"strings"
 	"time"
 
@@ -315,6 +316,9 @@ func validateNetworkCredentialConfig(policy *v1alpha1.SandboxNetworkPolicy, bind
 				return fmt.Errorf("egress rule %q with protocol ssh requires ssh_proxy projection on %q", rule.Name, rule.CredentialRef)
 			}
 		}
+		if err := validateHTTPMatch(rule); err != nil {
+			return err
+		}
 		if rule.Name == "" {
 			continue
 		}
@@ -324,6 +328,69 @@ func validateNetworkCredentialConfig(policy *v1alpha1.SandboxNetworkPolicy, bind
 		seenNames[rule.Name] = struct{}{}
 	}
 	return nil
+}
+
+func validateHTTPMatch(rule v1alpha1.EgressCredentialRule) error {
+	if rule.HTTPMatch == nil {
+		return nil
+	}
+	switch rule.Protocol {
+	case v1alpha1.EgressAuthProtocolHTTP, v1alpha1.EgressAuthProtocolHTTPS, v1alpha1.EgressAuthProtocolGRPC:
+	default:
+		return fmt.Errorf("egress rule %q httpMatch requires protocol http, https, or grpc", rule.Name)
+	}
+	if rule.Protocol == v1alpha1.EgressAuthProtocolHTTPS || rule.Protocol == v1alpha1.EgressAuthProtocolGRPC {
+		if rule.TLSMode != v1alpha1.EgressTLSModeTerminateReoriginate {
+			return fmt.Errorf("egress rule %q httpMatch with protocol %s requires tlsMode terminate-reoriginate", rule.Name, rule.Protocol)
+		}
+	}
+	for _, method := range rule.HTTPMatch.Methods {
+		method = strings.ToUpper(strings.TrimSpace(method))
+		if method == "" {
+			return fmt.Errorf("egress rule %q httpMatch method is required", rule.Name)
+		}
+		if !validHTTPMethod(method) {
+			return fmt.Errorf("egress rule %q httpMatch method %q is invalid", rule.Name, method)
+		}
+	}
+	for _, path := range rule.HTTPMatch.Paths {
+		if strings.TrimSpace(path) == "" || !strings.HasPrefix(path, "/") {
+			return fmt.Errorf("egress rule %q httpMatch path %q must start with /", rule.Name, path)
+		}
+	}
+	for _, prefix := range rule.HTTPMatch.PathPrefixes {
+		if strings.TrimSpace(prefix) == "" || !strings.HasPrefix(prefix, "/") {
+			return fmt.Errorf("egress rule %q httpMatch pathPrefix %q must start with /", rule.Name, prefix)
+		}
+	}
+	for _, matcher := range rule.HTTPMatch.Headers {
+		if strings.TrimSpace(matcher.Name) == "" {
+			return fmt.Errorf("egress rule %q httpMatch header name is required", rule.Name)
+		}
+	}
+	for _, matcher := range rule.HTTPMatch.Query {
+		if strings.TrimSpace(matcher.Name) == "" {
+			return fmt.Errorf("egress rule %q httpMatch query name is required", rule.Name)
+		}
+	}
+	return nil
+}
+
+func validHTTPMethod(method string) bool {
+	switch method {
+	case http.MethodGet,
+		http.MethodHead,
+		http.MethodPost,
+		http.MethodPut,
+		http.MethodPatch,
+		http.MethodDelete,
+		http.MethodConnect,
+		http.MethodOptions,
+		http.MethodTrace:
+		return true
+	default:
+		return false
+	}
 }
 
 func hasLegacyTrafficLists(egress *v1alpha1.NetworkEgressPolicy) bool {

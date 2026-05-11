@@ -58,7 +58,7 @@ func (s *Server) proxyHTTPSRequest(req *adapterRequest) error {
 		return fmt.Errorf("handshake downstream tls: %w", err)
 	}
 	defer downstreamTLS.Close()
-	if req.EgressAuth != nil && req.EgressAuth.Rule != nil {
+	if req.EgressAuth != nil && req.EgressAuth.Rule != nil && !egressAuthNeedsHTTPMatch(req) {
 		if req.EgressAuth.ResolveError != nil {
 			_ = writeHTTPProxyError(downstreamTLS, http.StatusServiceUnavailable, "egress auth resolution failed")
 			return fmt.Errorf("resolve egress auth for %q: %w", req.EgressAuth.Rule.AuthRef, req.EgressAuth.ResolveError)
@@ -204,6 +204,15 @@ func (s *Server) proxyHTTPFromConn(downstream net.Conn, req *adapterRequest, ups
 	httpReq.Header.Set("Connection", "close")
 	if httpReq.Host == "" && req.Host != "" {
 		httpReq.Host = req.Host
+	}
+	s.prepareEgressAuthForHTTPRequest(req, httpReq, "tls")
+	if req.EgressAuth != nil && egressAuthNeedsHTTPMatch(req) {
+		if err := prepareHTTPHeaderDirectives(req.EgressAuth, "tls", true); err != nil {
+			if !req.EgressAuth.ShouldBypass() {
+				_ = writeHTTPProxyError(downstream, http.StatusServiceUnavailable, "egress auth resolution failed")
+				return fmt.Errorf("resolve egress auth for %q: %w", req.EgressAuth.Rule.AuthRef, err)
+			}
+		}
 	}
 	if req.EgressAuth != nil && len(req.EgressAuth.ResolvedHeaders) > 0 {
 		injectHTTPHeaders(httpReq, req.EgressAuth.ResolvedHeaders)

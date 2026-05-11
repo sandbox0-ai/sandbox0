@@ -115,12 +115,25 @@ func (s *Server) handleHTTP2ProxyRequest(w http.ResponseWriter, downstreamReq *h
 	transport := s.newHTTP2Transport(req, upstreamCounter)
 	defer transport.CloseIdleConnections()
 
-	upstreamReq, err := buildHTTP2UpstreamRequest(downstreamReq, req)
+	requestScoped := *req
+	if req.EgressAuth != nil {
+		copiedAuth := *req.EgressAuth
+		requestScoped.EgressAuth = &copiedAuth
+	}
+	upstreamReq, err := buildHTTP2UpstreamRequest(downstreamReq, &requestScoped)
 	if err != nil {
 		return err
 	}
-	if req.EgressAuth != nil && len(req.EgressAuth.ResolvedHeaders) > 0 {
-		injectHTTPHeaders(upstreamReq, req.EgressAuth.ResolvedHeaders)
+	s.prepareEgressAuthForHTTPRequest(&requestScoped, downstreamReq, "tls")
+	if requestScoped.EgressAuth != nil && egressAuthNeedsHTTPMatch(&requestScoped) {
+		if err := prepareHTTPHeaderDirectives(requestScoped.EgressAuth, "tls", true); err != nil {
+			if !requestScoped.EgressAuth.ShouldBypass() {
+				return fmt.Errorf("prepare http2 egress auth for %q: %w", requestScoped.EgressAuth.Rule.AuthRef, err)
+			}
+		}
+	}
+	if requestScoped.EgressAuth != nil && len(requestScoped.EgressAuth.ResolvedHeaders) > 0 {
+		injectHTTPHeaders(upstreamReq, requestScoped.EgressAuth.ResolvedHeaders)
 	}
 
 	resp, err := transport.RoundTrip(upstreamReq)

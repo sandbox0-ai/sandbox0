@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -30,13 +31,21 @@ import (
 )
 
 type Daemon struct {
-	cfg           *config.NetdConfig
-	logger        *zap.Logger
-	healthServer  *http.Server
-	metricsServer *http.Server
-	proxyServer   *proxy.Server
-	obsProvider   *observability.Provider
-	ready         atomic.Bool
+	cfg             *config.NetdConfig
+	logger          *zap.Logger
+	healthServer    *http.Server
+	metricsServer   *http.Server
+	proxyServer     *proxy.Server
+	obsProvider     *observability.Provider
+	runtimeMu       sync.Mutex
+	conntrackCloser runtimeResource
+	meteringCloser  runtimeResource
+	meteringDone    <-chan struct{}
+	ready           atomic.Bool
+}
+
+type runtimeResource interface {
+	Close()
 }
 
 func New(cfg *config.NetdConfig, logger *zap.Logger, obsProvider *observability.Provider) *Daemon {
@@ -112,10 +121,21 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 	if err != nil {
 		d.logger.Warn("Conntrack manager disabled", zap.Error(err))
 	}
-	defer conntrackManager.Close()
 	tracker := conntrack.NewTracker()
 	var usageAggregator *netdmetering.Aggregator
 	var meteringPool *pgxpool.Pool
+	runtimeResourcesRegistered := false
+	defer func() {
+		if runtimeResourcesRegistered {
+			return
+		}
+		if meteringPool != nil {
+			meteringPool.Close()
+		}
+		if conntrackManager != nil {
+			conntrackManager.Close()
+		}
+	}()
 	if d.cfg.DatabaseURL != "" {
 		pool, err := dbpool.New(ctx, dbpool.Options{
 			DatabaseURL:     d.cfg.DatabaseURL,
@@ -127,7 +147,6 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 			return fmt.Errorf("create netd database pool: %w", err)
 		}
 		meteringPool = pool
-		defer meteringPool.Close()
 		if err := meteringpkg.RunMigrations(ctx, meteringPool, &zapLoggerAdapter{logger: d.logger}); err != nil {
 			return fmt.Errorf("run metering migrations: %w", err)
 		}
@@ -170,7 +189,7 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 					flowsToKill = append(flowsToKill, flow)
 				}
 			}
-			if len(flowsToKill) > 0 {
+			if len(flowsToKill) > 0 && conntrackManager != nil {
 				conntrackManager.CleanupFlows(ctx, flowsToKill)
 			}
 		}
@@ -187,7 +206,9 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 			platformState.OnSandboxDelete(info)
 			policyStore.DeleteByKey(info.Namespace, info.Name)
 			flows := tracker.PopBySrc(info.PodIP)
-			conntrackManager.CleanupFlows(ctx, flows)
+			if conntrackManager != nil {
+				conntrackManager.CleanupFlows(ctx, flows)
+			}
 			d.logger.Info("Sandbox delete handler triggered",
 				zap.String("sandbox", info.Namespace+"/"+info.Name),
 				zap.String("pod_ip", info.PodIP),
@@ -272,12 +293,21 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 		}
 	}()
 
-	if usageAggregator != nil {
-		go d.runMeteringFlushLoop(ctx, usageAggregator)
-	}
-
 	select {
 	case <-syncOnce:
+		var conntrackCloser runtimeResource
+		if conntrackManager != nil {
+			conntrackCloser = conntrackManager
+		}
+		var meteringCloser runtimeResource
+		if meteringPool != nil {
+			meteringCloser = meteringPool
+		}
+		d.registerRuntimeResources(conntrackCloser, meteringCloser)
+		if usageAggregator != nil {
+			d.startMeteringFlushLoop(ctx, usageAggregator)
+		}
+		runtimeResourcesRegistered = true
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -337,6 +367,58 @@ func (d *Daemon) runMeteringFlushLoop(ctx context.Context, aggregator *netdmeter
 				d.logger.Error("Failed to flush netd metering windows", zap.Error(err))
 			}
 		}
+	}
+}
+
+func (d *Daemon) startMeteringFlushLoop(ctx context.Context, aggregator *netdmetering.Aggregator) {
+	done := make(chan struct{})
+	d.runtimeMu.Lock()
+	d.meteringDone = done
+	d.runtimeMu.Unlock()
+
+	go func() {
+		defer close(done)
+		d.runMeteringFlushLoop(ctx, aggregator)
+	}()
+}
+
+func (d *Daemon) registerRuntimeResources(conntrackCloser runtimeResource, meteringCloser runtimeResource) {
+	d.runtimeMu.Lock()
+	defer d.runtimeMu.Unlock()
+	d.conntrackCloser = conntrackCloser
+	d.meteringCloser = meteringCloser
+}
+
+func (d *Daemon) waitForMeteringFlushLoop(ctx context.Context) {
+	d.runtimeMu.Lock()
+	done := d.meteringDone
+	d.runtimeMu.Unlock()
+	if done == nil {
+		return
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+		d.logger.Warn("Timed out waiting for netd metering flush loop to stop", zap.Error(ctx.Err()))
+	}
+}
+
+func (d *Daemon) closeRuntimeResources() {
+	d.runtimeMu.Lock()
+	meteringCloser := d.meteringCloser
+	conntrackCloser := d.conntrackCloser
+	d.meteringCloser = nil
+	d.conntrackCloser = nil
+	d.meteringDone = nil
+	d.runtimeMu.Unlock()
+
+	closeRuntimeResource(meteringCloser)
+	closeRuntimeResource(conntrackCloser)
+}
+
+func closeRuntimeResource(resource runtimeResource) {
+	if resource != nil {
+		resource.Close()
 	}
 }
 
@@ -488,6 +570,8 @@ func (d *Daemon) shutdown(ctx context.Context) error {
 			d.logger.Error("Failed to shutdown metrics server", zap.Error(err))
 		}
 	}
+	d.waitForMeteringFlushLoop(ctx)
+	d.closeRuntimeResources()
 	return shutdownErr
 }
 

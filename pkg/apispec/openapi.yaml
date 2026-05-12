@@ -5332,7 +5332,53 @@ components:
           description: Port/protocol constraints for the rule.
           items:
             $ref: "#/components/schemas/PortSpec"
+        httpMatch:
+          $ref: "#/components/schemas/HTTPMatch"
       required: [credentialRef]
+    HTTPMatch:
+      type: object
+      description: Request-level matcher for HTTP-family egress credential rules.
+      properties:
+        methods:
+          type: array
+          description: HTTP methods matched case-insensitively after uppercasing.
+          items:
+            type: string
+        paths:
+          type: array
+          description: Exact URL path matches.
+          items:
+            type: string
+        pathPrefixes:
+          type: array
+          description: URL path prefix matches.
+          items:
+            type: string
+        query:
+          type: array
+          description: Decoded query parameter matchers.
+          items:
+            $ref: "#/components/schemas/HTTPValueMatch"
+        headers:
+          type: array
+          description: HTTP request header matchers.
+          items:
+            $ref: "#/components/schemas/HTTPValueMatch"
+    HTTPValueMatch:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Header or query parameter name.
+        values:
+          type: array
+          description: Accepted values. Empty with present=true requires only presence.
+          items:
+            type: string
+        present:
+          type: boolean
+          description: When true and values is empty, only parameter/header presence is required.
+      required: [name]
     CredentialBinding:
       type: object
       properties:

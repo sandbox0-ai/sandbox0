@@ -730,6 +730,15 @@ func (s *Server) proxyHTTPRequest(req *adapterRequest) error {
 	if httpReq.Host == "" && req.Host != "" {
 		httpReq.Host = req.Host
 	}
+	s.prepareEgressAuthForHTTPRequest(req, httpReq, "http")
+	if req.EgressAuth != nil && egressAuthNeedsHTTPMatch(req) {
+		if err := prepareHTTPHeaderDirectives(req.EgressAuth, "http", true); err != nil {
+			if !req.EgressAuth.ShouldBypass() {
+				_ = writeHTTPProxyError(req.Conn, http.StatusServiceUnavailable, "egress auth resolution failed")
+				return fmt.Errorf("resolve egress auth for %q: %w", req.EgressAuth.Rule.AuthRef, err)
+			}
+		}
+	}
 	if req.EgressAuth != nil && len(req.EgressAuth.ResolvedHeaders) > 0 {
 		injectHTTPHeaders(httpReq, req.EgressAuth.ResolvedHeaders)
 	}

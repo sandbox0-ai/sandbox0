@@ -294,6 +294,82 @@ func TestBuildNetworkPolicyStateDropsTLSRulesWithoutTLSProjection(t *testing.T) 
 	}
 }
 
+func TestBuildNetworkPolicyStateKeepsHTTPMatchForHTTPSRuleWithTLSInterception(t *testing.T) {
+	svc := NewNetworkPolicyService(zap.NewNop())
+	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
+		SandboxID: "sb-1",
+		TeamID:    "team-1",
+		RequestSpec: &v1alpha1.SandboxNetworkPolicy{
+			Mode: v1alpha1.NetworkModeBlockAll,
+			Egress: &v1alpha1.NetworkEgressPolicy{
+				CredentialRules: []v1alpha1.EgressCredentialRule{{
+					Name:          "github-write",
+					CredentialRef: "github-token",
+					Protocol:      v1alpha1.EgressAuthProtocolHTTPS,
+					TLSMode:       v1alpha1.EgressTLSModeTerminateReoriginate,
+					Domains:       []string{"api.github.com"},
+					HTTPMatch: &v1alpha1.HTTPMatch{
+						Methods:      []string{"POST"},
+						PathPrefixes: []string{"/repos/"},
+						Headers: []v1alpha1.HTTPValueMatch{{
+							Name:   "accept",
+							Values: []string{"application/vnd.github+json"},
+						}},
+					},
+				}},
+			},
+		},
+		RequestBindings: []v1alpha1.CredentialBinding{
+			testCredentialBinding("github-token"),
+		},
+	})
+
+	if result == nil || result.PolicySpec == nil || result.PolicySpec.Egress == nil {
+		t.Fatalf("expected egress policy")
+	}
+	if len(result.PolicySpec.Egress.CredentialRules) != 1 {
+		t.Fatalf("rule count = %d, want 1", len(result.PolicySpec.Egress.CredentialRules))
+	}
+	if result.PolicySpec.Egress.CredentialRules[0].HTTPMatch == nil {
+		t.Fatal("expected httpMatch to be preserved")
+	}
+}
+
+func TestBuildNetworkPolicyStateDropsHTTPMatchForHTTPSRuleWithoutTLSInterception(t *testing.T) {
+	svc := NewNetworkPolicyService(zap.NewNop())
+	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
+		SandboxID: "sb-1",
+		TeamID:    "team-1",
+		RequestSpec: &v1alpha1.SandboxNetworkPolicy{
+			Mode: v1alpha1.NetworkModeBlockAll,
+			Egress: &v1alpha1.NetworkEgressPolicy{
+				CredentialRules: []v1alpha1.EgressCredentialRule{{
+					Name:          "github-write",
+					CredentialRef: "github-token",
+					Protocol:      v1alpha1.EgressAuthProtocolHTTPS,
+					Domains:       []string{"api.github.com"},
+					HTTPMatch: &v1alpha1.HTTPMatch{
+						Methods: []string{"POST"},
+					},
+				}},
+			},
+		},
+		RequestBindings: []v1alpha1.CredentialBinding{
+			testCredentialBinding("github-token"),
+		},
+	})
+
+	if result == nil || result.PolicySpec == nil || result.PolicySpec.Egress == nil {
+		t.Fatalf("expected egress policy")
+	}
+	if len(result.PolicySpec.Egress.CredentialRules) != 0 {
+		t.Fatalf("rules = %#v, want invalid httpMatch rules dropped", result.PolicySpec.Egress.CredentialRules)
+	}
+	if len(result.CredentialBindings) != 0 {
+		t.Fatalf("bindings = %#v, want invalid bindings dropped with httpMatch rule", result.CredentialBindings)
+	}
+}
+
 func TestBuildNetworkPolicyStateKeepsValidTLSRules(t *testing.T) {
 	svc := NewNetworkPolicyService(zap.NewNop())
 	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{

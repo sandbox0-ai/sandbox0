@@ -55,6 +55,21 @@ type CompiledEgressAuthRule struct {
 	FailurePolicy v1alpha1.EgressAuthFailurePolicy
 	Domains       []DomainRule
 	Ports         []PortRange
+	HTTPMatch     *CompiledHTTPMatch
+}
+
+type CompiledHTTPMatch struct {
+	Methods      []string
+	Paths        []string
+	PathPrefixes []string
+	Query        []CompiledHTTPValueMatch
+	Headers      []CompiledHTTPValueMatch
+}
+
+type CompiledHTTPValueMatch struct {
+	Name    string
+	Values  []string
+	Present bool
 }
 
 type CompiledPolicy struct {
@@ -212,6 +227,7 @@ func compileEgressAuthRules(values []v1alpha1.EgressCredentialRule) ([]CompiledE
 			FailurePolicy: value.FailurePolicy,
 			Domains:       domains,
 			Ports:         ports,
+			HTTPMatch:     compileHTTPMatch(value.HTTPMatch),
 		}
 		switch rule.Rollout {
 		case "", v1alpha1.EgressAuthRolloutEnabled, v1alpha1.EgressAuthRolloutDisabled:
@@ -241,9 +257,83 @@ func compileEgressAuthRules(values []v1alpha1.EgressCredentialRule) ([]CompiledE
 		default:
 			return nil, fmt.Errorf("unsupported auth rule failure policy %q", value.FailurePolicy)
 		}
+		if rule.HTTPMatch != nil {
+			switch rule.Protocol {
+			case v1alpha1.EgressAuthProtocolHTTP:
+			case v1alpha1.EgressAuthProtocolHTTPS, v1alpha1.EgressAuthProtocolGRPC:
+				if rule.TLSMode != v1alpha1.EgressTLSModeTerminateReoriginate {
+					return nil, fmt.Errorf("auth rule %q httpMatch requires tlsMode terminate-reoriginate", value.Name)
+				}
+			default:
+				return nil, fmt.Errorf("auth rule %q httpMatch requires protocol http, https, or grpc", value.Name)
+			}
+		}
 		out = append(out, rule)
 	}
 	return out, nil
+}
+
+func compileHTTPMatch(in *v1alpha1.HTTPMatch) *CompiledHTTPMatch {
+	if in == nil {
+		return nil
+	}
+	return &CompiledHTTPMatch{
+		Methods:      normalizeUpperStrings(in.Methods),
+		Paths:        normalizeNonEmptyStrings(in.Paths),
+		PathPrefixes: normalizeNonEmptyStrings(in.PathPrefixes),
+		Query:        compileHTTPValueMatches(in.Query, false),
+		Headers:      compileHTTPValueMatches(in.Headers, true),
+	}
+}
+
+func compileHTTPValueMatches(in []v1alpha1.HTTPValueMatch, lowerName bool) []CompiledHTTPValueMatch {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]CompiledHTTPValueMatch, 0, len(in))
+	for _, matcher := range in {
+		name := strings.TrimSpace(matcher.Name)
+		if lowerName {
+			name = strings.ToLower(name)
+		}
+		if name == "" {
+			continue
+		}
+		out = append(out, CompiledHTTPValueMatch{
+			Name:    name,
+			Values:  normalizeNonEmptyStrings(matcher.Values),
+			Present: matcher.Present,
+		})
+	}
+	return out
+}
+
+func normalizeUpperStrings(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	for _, value := range in {
+		value = strings.ToUpper(strings.TrimSpace(value))
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func normalizeNonEmptyStrings(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	for _, value := range in {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func compileTrafficRules(values []v1alpha1.TrafficRule) ([]CompiledTrafficRule, error) {

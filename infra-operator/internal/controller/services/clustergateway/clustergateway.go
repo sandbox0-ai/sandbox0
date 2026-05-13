@@ -347,7 +347,7 @@ func deriveClusterGatewayAuthMode(mode string, compiledPlan *infraplan.InfraPlan
 	if normalized == "" {
 		normalized = "internal"
 	}
-	if normalized == "public" && compiledPlan != nil && compiledPlan.RegionalGateway.Enabled {
+	if normalized == "public" && compiledPlan != nil && (compiledPlan.RegionalGateway.Enabled || compiledPlan.FunctionGateway.Enabled) {
 		return "both"
 	}
 	return normalized

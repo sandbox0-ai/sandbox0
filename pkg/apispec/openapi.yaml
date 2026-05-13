@@ -5402,6 +5402,9 @@ components:
         type:
           type: string
           enum: [repl, cmd]
+          x-enum-varnames:
+            - WarmProcessSpecTypeRepl
+            - WarmProcessSpecTypeCmd
         alias:
           type: string
         command:

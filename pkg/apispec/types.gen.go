@@ -496,8 +496,8 @@ const (
 
 // Defines values for WarmProcessSpecType.
 const (
-	Cmd  WarmProcessSpecType = "cmd"
-	Repl WarmProcessSpecType = "repl"
+	WarmProcessSpecTypeCmd  WarmProcessSpecType = "cmd"
+	WarmProcessSpecTypeRepl WarmProcessSpecType = "repl"
 )
 
 // Defines values for GetApiV1SandboxesParamsStatus.

@@ -77,6 +77,7 @@ type ContextResponse struct {
 	ID        string              `json:"id"`
 	Type      process.ProcessType `json:"type"`
 	Alias     string              `json:"alias"`
+	Command   []string            `json:"command,omitempty"`
 	CWD       string              `json:"cwd"`
 	EnvVars   map[string]string   `json:"env_vars"`
 	Running   bool                `json:"running"`
@@ -97,6 +98,7 @@ func newContextResponse(ctx *ctxpkg.Context, outputRaw string) ContextResponse {
 		ID:        ctx.ID,
 		Type:      ctx.Type,
 		Alias:     ctx.Alias,
+		Command:   append([]string(nil), ctx.Command...),
 		CWD:       ctx.CWD,
 		EnvVars:   normalizeStringMap(ctx.EnvVars),
 		Running:   ctx.IsRunning(),

@@ -1,0 +1,126 @@
+# Function
+
+Sandbox0 Functions publish a sandbox service behind a stable function domain. A function has immutable revisions and a mutable `production` alias, so deleting the source sandbox does not delete the function identity or its domain.
+
+<Callout variant="info">
+Functions are created from Sandbox Services, not from uploaded ZIP files or container images. The first function API only needs a `sandbox_id` and `service_id`; the gateway snapshots the service configuration into a revision.
+</Callout>
+
+## Model
+
+| Object | Description |
+|--------|-------------|
+| Sandbox Service | A named port, ingress routes, and restartable runtime inside a sandbox |
+| Function | Stable function identity, slug, and fixed domain under `sandbox0.site` |
+| Revision | Immutable snapshot of the source sandbox service |
+| Alias | Mutable pointer from a name such as `production` to one revision |
+
+Only publishable sandbox services can become function revisions. A service is publishable when it is public and has a restartable runtime. Legacy `public_gateway` configuration is still accepted and projected into services, but it may not be publishable until a runtime is added.
+
+## Sandbox Services
+
+<Endpoint method="GET">
+/api/v1/sandboxes/{'{id}'}/services
+</Endpoint>
+
+The response includes `publishable` and `publish_blockers` for each service.
+
+<Endpoint method="PUT">
+/api/v1/sandboxes/{'{id}'}/services
+</Endpoint>
+
+Example service:
+
+```json
+{
+    "services": [
+        {
+            "id": "api",
+            "display_name": "API",
+            "port": 8080,
+            "runtime": {
+                "type": "cmd",
+                "command": ["/bin/sh", "-lc", "python -m app.server"],
+                "cwd": "/workspace"
+            },
+            "ingress": {
+                "public": true,
+                "routes": [
+                    {
+                        "id": "api",
+                        "path_prefix": "/",
+                        "resume": true
+                    }
+                ]
+            },
+            "health_check": {
+                "path": "/healthz"
+            }
+        }
+    ]
+}
+```
+
+## Create Function
+
+<Endpoint method="POST">
+/api/v1/functions
+</Endpoint>
+
+```json
+{
+    "name": "my-api",
+    "source": {
+        "sandbox_id": "sb_abc123",
+        "service_id": "api"
+    }
+}
+```
+
+This creates:
+
+| Result | Behavior |
+|--------|----------|
+| Function | Stable ID, slug, and host |
+| Revision 1 | Snapshot of the sandbox service |
+| `production` alias | Points to revision 1 |
+
+## Revisions
+
+Create a new revision from the same or another sandbox service:
+
+<Endpoint method="POST">
+/api/v1/functions/{'{id}'}/revisions
+</Endpoint>
+
+```json
+{
+    "source": {
+        "sandbox_id": "sb_def456",
+        "service_id": "api"
+    },
+    "promote": true
+}
+```
+
+Move an alias:
+
+<Endpoint method="PUT">
+/api/v1/functions/{'{id}'}/aliases/{'{alias}'}
+</Endpoint>
+
+```json
+{
+    "revision_number": 2
+}
+```
+
+## Runtime Behavior
+
+Function traffic is handled by `function-gateway` on the fixed function host. The gateway resolves the `production` alias, enforces the revision's service route policy, resumes the source sandbox if it is paused, and proxies to the service port.
+
+The current compatibility runtime still needs the source sandbox to exist. A later revision will persist function runtime state from volume snapshots so a function can be restored even after the source sandbox is deleted.
+
+## Compatibility
+
+The existing sandbox public gateway remains available. Internally, new code should treat Sandbox Service as the canonical model; `public_gateway` is a compatibility projection so existing clients continue to work during migration.

@@ -17,6 +17,7 @@ type Context struct {
 	ID             string              `json:"id"`
 	Type           process.ProcessType `json:"type"`
 	Alias          string              `json:"alias"`
+	Command        []string            `json:"command,omitempty"`
 	CWD            string              `json:"cwd"`
 	EnvVars        map[string]string   `json:"env_vars"`
 	MainProcess    process.Process     `json:"-"`
@@ -72,6 +73,7 @@ func NewContext(config process.ProcessConfig, replConfig *repl.REPLConfig, exitH
 		ID:             id,
 		Type:           config.Type,
 		Alias:          config.Alias,
+		Command:        append([]string(nil), config.Command...),
 		CWD:            config.CWD,
 		EnvVars:        config.EnvVars,
 		MainProcess:    proc,

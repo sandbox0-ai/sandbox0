@@ -29,6 +29,7 @@ type Sandbox struct {
 	Paused        bool                 `json:"paused"`
 	PowerState    SandboxPowerState    `json:"power_state"`
 	AutoResume    bool                 `json:"auto_resume"`
+	Services      []SandboxAppService  `json:"services,omitempty"`
 	PublicGateway *PublicGatewayConfig `json:"public_gateway,omitempty"`
 	PodName       string               `json:"pod_name"`
 	ExpiresAt     time.Time            `json:"expires_at"`

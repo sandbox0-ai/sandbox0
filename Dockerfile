@@ -30,6 +30,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     BUILD_GOOS="${TARGETOS:-$(go env GOOS)}" && \
     BUILD_GOARCH="${TARGETARCH:-$(go env GOARCH)}" && \
     CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/regional-gateway ./regional-gateway/cmd/regional-gateway && \
+    CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/function-gateway ./function-gateway/cmd/function-gateway && \
     CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/ssh-gateway ./ssh-gateway/cmd/ssh-gateway && \
     CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/global-gateway ./global-gateway/cmd/global-gateway && \
     CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/cluster-gateway ./cluster-gateway/cmd/cluster-gateway && \

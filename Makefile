@@ -14,7 +14,7 @@ OAPI_CODEGEN_VERSION ?= v2.4.1
 PROTOC ?= protoc
 GO ?= env GOWORK=off go
 
-SERVICES := regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler storage-proxy ctld procd netd infra-operator
+SERVICES := regional-gateway function-gateway ssh-gateway global-gateway cluster-gateway manager scheduler storage-proxy ctld procd netd infra-operator
 E2E_SSH_FIXTURE_SOURCE_IMAGE := lscr.io/linuxserver/openssh-server@sha256:68b605929e83b2efe000da09269688f6d82a44579e8a18e2d9e8c8d272917cf7
 E2E_SSH_FIXTURE_IMAGE := sandbox0ai/e2e-openssh-server:68b605929e83
 E2E_DEPENDENCY_IMAGES := postgres:16-alpine rustfs/rustfs:1.0.0-alpha.79 registry:2.8.3 sandbox0ai/otemplates:default-v0.1.0 $(E2E_SSH_FIXTURE_IMAGE)
@@ -100,6 +100,8 @@ test:
 		printf "$(CYAN)Testing $$service...$(RESET)\n"; \
 		if [ "$$service" = "regional-gateway" ]; then \
 			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./regional-gateway/...; \
+		elif [ "$$service" = "function-gateway" ]; then \
+			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./function-gateway/...; \
 		elif [ "$$service" = "ssh-gateway" ]; then \
 			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./ssh-gateway/...; \
 		elif [ "$$service" = "global-gateway" ]; then \
@@ -202,7 +204,7 @@ test-e2e-specific:
 	unset http_proxy && unset https_proxy && unset all_proxy && $(GO) test -v ./tests/e2e/... -focus="$(SPEC)" -timeout=30m
 
 # Prevent make from treating service names as targets
-regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler storage-proxy ctld procd netd infra-operator:
+regional-gateway function-gateway ssh-gateway global-gateway cluster-gateway manager scheduler storage-proxy ctld procd netd infra-operator:
 	@:
 
 lint:

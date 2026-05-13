@@ -124,6 +124,13 @@ const (
 	StartupDelay REPLReadyMode = "startup_delay"
 )
 
+// Defines values for SandboxAppServiceRuntimeType.
+const (
+	SandboxAppServiceRuntimeTypeCmd         SandboxAppServiceRuntimeType = "cmd"
+	SandboxAppServiceRuntimeTypeManual      SandboxAppServiceRuntimeType = "manual"
+	SandboxAppServiceRuntimeTypeWarmProcess SandboxAppServiceRuntimeType = "warm_process"
+)
+
 // Defines values for SandboxNetworkPolicyMode.
 const (
 	AllowAll SandboxNetworkPolicyMode = "allow-all"
@@ -247,6 +254,36 @@ const (
 	SuccessFileStatResponseSuccessTrue SuccessFileStatResponseSuccess = true
 )
 
+// Defines values for SuccessFunctionAliasResponseSuccess.
+const (
+	SuccessFunctionAliasResponseSuccessTrue SuccessFunctionAliasResponseSuccess = true
+)
+
+// Defines values for SuccessFunctionCreateResponseSuccess.
+const (
+	SuccessFunctionCreateResponseSuccessTrue SuccessFunctionCreateResponseSuccess = true
+)
+
+// Defines values for SuccessFunctionListResponseSuccess.
+const (
+	SuccessFunctionListResponseSuccessTrue SuccessFunctionListResponseSuccess = true
+)
+
+// Defines values for SuccessFunctionResponseSuccess.
+const (
+	SuccessFunctionResponseSuccessTrue SuccessFunctionResponseSuccess = true
+)
+
+// Defines values for SuccessFunctionRevisionCreateResponseSuccess.
+const (
+	SuccessFunctionRevisionCreateResponseSuccessTrue SuccessFunctionRevisionCreateResponseSuccess = true
+)
+
+// Defines values for SuccessFunctionRevisionListResponseSuccess.
+const (
+	SuccessFunctionRevisionListResponseSuccessTrue SuccessFunctionRevisionListResponseSuccess = true
+)
+
 // Defines values for SuccessGatewayMetadataResponseSuccess.
 const (
 	SuccessGatewayMetadataResponseSuccessTrue SuccessGatewayMetadataResponseSuccess = true
@@ -347,6 +384,11 @@ const (
 	SuccessSandboxResponseSuccessTrue SuccessSandboxResponseSuccess = true
 )
 
+// Defines values for SuccessSandboxServicesResponseSuccess.
+const (
+	SuccessSandboxServicesResponseSuccessTrue SuccessSandboxServicesResponseSuccess = true
+)
+
 // Defines values for SuccessSandboxStatusResponseSuccess.
 const (
 	SuccessSandboxStatusResponseSuccessTrue SuccessSandboxStatusResponseSuccess = true
@@ -414,7 +456,7 @@ const (
 
 // Defines values for SuccessWrittenResponseSuccess.
 const (
-	SuccessWrittenResponseSuccessTrue SuccessWrittenResponseSuccess = true
+	True SuccessWrittenResponseSuccess = true
 )
 
 // Defines values for TrafficRuleAction.
@@ -454,8 +496,8 @@ const (
 
 // Defines values for WarmProcessSpecType.
 const (
-	WarmProcessSpecTypeCmd  WarmProcessSpecType = "cmd"
-	WarmProcessSpecTypeRepl WarmProcessSpecType = "repl"
+	Cmd  WarmProcessSpecType = "cmd"
+	Repl WarmProcessSpecType = "repl"
 )
 
 // Defines values for GetApiV1SandboxesParamsStatus.
@@ -886,6 +928,85 @@ type ForkVolumeRequest struct {
 
 	// DefaultPosixUid Override the default POSIX UID for external volume access paths. Inherits from the source volume when omitted.
 	DefaultPosixUid *int64 `json:"default_posix_uid,omitempty"`
+}
+
+// Function defines model for Function.
+type Function struct {
+	ActiveRevisionId *string   `json:"active_revision_id,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	CreatedBy        *string   `json:"created_by,omitempty"`
+	DomainLabel      string    `json:"domain_label"`
+	Id               string    `json:"id"`
+	Name             string    `json:"name"`
+	Slug             string    `json:"slug"`
+	TeamId           string    `json:"team_id"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+// FunctionAlias defines model for FunctionAlias.
+type FunctionAlias struct {
+	Alias          string    `json:"alias"`
+	FunctionId     string    `json:"function_id"`
+	RevisionId     string    `json:"revision_id"`
+	RevisionNumber int32     `json:"revision_number"`
+	UpdatedAt      time.Time `json:"updated_at"`
+	UpdatedBy      *string   `json:"updated_by,omitempty"`
+}
+
+// FunctionAliasUpdateRequest defines model for FunctionAliasUpdateRequest.
+type FunctionAliasUpdateRequest struct {
+	RevisionNumber int32 `json:"revision_number"`
+}
+
+// FunctionCreateRequest defines model for FunctionCreateRequest.
+type FunctionCreateRequest struct {
+	// Name Function display name. Defaults to the source service name or ID when omitted.
+	Name   *string               `json:"name,omitempty"`
+	Source FunctionSourceRequest `json:"source"`
+}
+
+// FunctionRecord defines model for FunctionRecord.
+type FunctionRecord struct {
+	ActiveRevisionId *string   `json:"active_revision_id,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	CreatedBy        *string   `json:"created_by,omitempty"`
+	DomainLabel      string    `json:"domain_label"`
+	Host             string    `json:"host"`
+	Id               string    `json:"id"`
+	Name             string    `json:"name"`
+	Slug             string    `json:"slug"`
+	TeamId           string    `json:"team_id"`
+	UpdatedAt        time.Time `json:"updated_at"`
+	Url              string    `json:"url"`
+}
+
+// FunctionRevision defines model for FunctionRevision.
+type FunctionRevision struct {
+	CreatedAt      time.Time `json:"created_at"`
+	CreatedBy      *string   `json:"created_by,omitempty"`
+	FunctionId     string    `json:"function_id"`
+	Id             string    `json:"id"`
+	RevisionNumber int32     `json:"revision_number"`
+
+	// ServiceSnapshot Canonical service model for sandbox exposure and function publishing.
+	ServiceSnapshot  SandboxAppService `json:"service_snapshot"`
+	SourceSandboxId  string            `json:"source_sandbox_id"`
+	SourceServiceId  string            `json:"source_service_id"`
+	SourceTemplateId string            `json:"source_template_id"`
+	TeamId           string            `json:"team_id"`
+}
+
+// FunctionRevisionCreateRequest defines model for FunctionRevisionCreateRequest.
+type FunctionRevisionCreateRequest struct {
+	// Promote Whether to move the production alias to the new revision.
+	Promote *bool                 `json:"promote,omitempty"`
+	Source  FunctionSourceRequest `json:"source"`
+}
+
+// FunctionSourceRequest defines model for FunctionSourceRequest.
+type FunctionSourceRequest struct {
+	SandboxId string `json:"sandbox_id"`
+	ServiceId string `json:"service_id"`
 }
 
 // GatewayMetadata defines model for GatewayMetadata.
@@ -1393,11 +1514,74 @@ type Sandbox struct {
 	PodName       string                `json:"pod_name"`
 	PowerState    SandboxPowerState     `json:"power_state"`
 	PublicGateway *PublicGatewayConfig  `json:"public_gateway,omitempty"`
+	Services      *[]SandboxAppService  `json:"services,omitempty"`
 	Ssh           *SandboxSSHConnection `json:"ssh,omitempty"`
 	Status        string                `json:"status"`
 	TeamId        string                `json:"team_id"`
 	TemplateId    string                `json:"template_id"`
 	UserId        *string               `json:"user_id,omitempty"`
+}
+
+// SandboxAppService Canonical service model for sandbox exposure and function publishing.
+type SandboxAppService struct {
+	DisplayName *string                  `json:"display_name,omitempty"`
+	HealthCheck *SandboxAppServiceHealth `json:"health_check,omitempty"`
+
+	// Id Stable service ID. Must be a DNS label.
+	Id      string                    `json:"id"`
+	Ingress SandboxAppServiceIngress  `json:"ingress"`
+	Port    int32                     `json:"port"`
+	Runtime *SandboxAppServiceRuntime `json:"runtime,omitempty"`
+}
+
+// SandboxAppServiceHealth defines model for SandboxAppServiceHealth.
+type SandboxAppServiceHealth struct {
+	Path *string `json:"path,omitempty"`
+}
+
+// SandboxAppServiceIngress defines model for SandboxAppServiceIngress.
+type SandboxAppServiceIngress struct {
+	Public bool                      `json:"public"`
+	Routes *[]SandboxAppServiceRoute `json:"routes,omitempty"`
+}
+
+// SandboxAppServiceRoute defines model for SandboxAppServiceRoute.
+type SandboxAppServiceRoute struct {
+	Auth           *PublicGatewayAuth      `json:"auth,omitempty"`
+	Cors           *PublicGatewayCORS      `json:"cors,omitempty"`
+	Id             string                  `json:"id"`
+	Methods        *[]string               `json:"methods,omitempty"`
+	PathPrefix     *string                 `json:"path_prefix,omitempty"`
+	RateLimit      *PublicGatewayRateLimit `json:"rate_limit,omitempty"`
+	Resume         bool                    `json:"resume"`
+	RewritePrefix  *string                 `json:"rewrite_prefix"`
+	TimeoutSeconds *int32                  `json:"timeout_seconds,omitempty"`
+}
+
+// SandboxAppServiceRuntime defines model for SandboxAppServiceRuntime.
+type SandboxAppServiceRuntime struct {
+	Command         *[]string                    `json:"command,omitempty"`
+	Cwd             *string                      `json:"cwd,omitempty"`
+	EnvVars         *map[string]string           `json:"env_vars,omitempty"`
+	Type            SandboxAppServiceRuntimeType `json:"type"`
+	WarmProcessName *string                      `json:"warm_process_name,omitempty"`
+}
+
+// SandboxAppServiceRuntimeType defines model for SandboxAppServiceRuntime.Type.
+type SandboxAppServiceRuntimeType string
+
+// SandboxAppServiceView defines model for SandboxAppServiceView.
+type SandboxAppServiceView struct {
+	DisplayName *string                  `json:"display_name,omitempty"`
+	HealthCheck *SandboxAppServiceHealth `json:"health_check,omitempty"`
+
+	// Id Stable service ID. Must be a DNS label.
+	Id              string                    `json:"id"`
+	Ingress         SandboxAppServiceIngress  `json:"ingress"`
+	Port            int32                     `json:"port"`
+	PublishBlockers *[]string                 `json:"publish_blockers,omitempty"`
+	Publishable     bool                      `json:"publishable"`
+	Runtime         *SandboxAppServiceRuntime `json:"runtime,omitempty"`
 }
 
 // SandboxConfig defines model for SandboxConfig.
@@ -1409,6 +1593,7 @@ type SandboxConfig struct {
 	HardTtl       *int32                `json:"hard_ttl,omitempty"`
 	Network       *SandboxNetworkPolicy `json:"network,omitempty"`
 	PublicGateway *PublicGatewayConfig  `json:"public_gateway,omitempty"`
+	Services      *[]SandboxAppService  `json:"services,omitempty"`
 	Ttl           *int32                `json:"ttl,omitempty"`
 
 	// Webhook Per-sandbox webhook configuration. Sandbox0 delivers webhook events at least once and consumers should deduplicate by event_id. For sandbox lifecycle events, procd persists signed delivery records to a manager-owned SandboxVolume outside the workspace before dispatch; manager also emits sandbox.deleted during pod deletion cleanup.
@@ -1496,6 +1681,11 @@ type SandboxSSHConnection struct {
 	Username string `json:"username"`
 }
 
+// SandboxServicesUpdateRequest defines model for SandboxServicesUpdateRequest.
+type SandboxServicesUpdateRequest struct {
+	Services []SandboxAppService `json:"services"`
+}
+
 // SandboxStatus defines model for SandboxStatus.
 type SandboxStatus struct {
 	ClaimedAt     *string `json:"claimed_at,omitempty"`
@@ -1573,6 +1763,7 @@ type SandboxUpdateConfig struct {
 	HardTtl       *int32                `json:"hard_ttl,omitempty"`
 	Network       *SandboxNetworkPolicy `json:"network,omitempty"`
 	PublicGateway *PublicGatewayConfig  `json:"public_gateway,omitempty"`
+	Services      *[]SandboxAppService  `json:"services,omitempty"`
 	Ttl           *int32                `json:"ttl,omitempty"`
 }
 
@@ -1820,6 +2011,75 @@ type SuccessFileStatResponse struct {
 // SuccessFileStatResponseSuccess defines model for SuccessFileStatResponse.Success.
 type SuccessFileStatResponseSuccess bool
 
+// SuccessFunctionAliasResponse defines model for SuccessFunctionAliasResponse.
+type SuccessFunctionAliasResponse struct {
+	Data *struct {
+		Alias FunctionAlias `json:"alias"`
+	} `json:"data,omitempty"`
+	Success SuccessFunctionAliasResponseSuccess `json:"success"`
+}
+
+// SuccessFunctionAliasResponseSuccess defines model for SuccessFunctionAliasResponse.Success.
+type SuccessFunctionAliasResponseSuccess bool
+
+// SuccessFunctionCreateResponse defines model for SuccessFunctionCreateResponse.
+type SuccessFunctionCreateResponse struct {
+	Data *struct {
+		Alias    FunctionAlias    `json:"alias"`
+		Function FunctionRecord   `json:"function"`
+		Revision FunctionRevision `json:"revision"`
+	} `json:"data,omitempty"`
+	Success SuccessFunctionCreateResponseSuccess `json:"success"`
+}
+
+// SuccessFunctionCreateResponseSuccess defines model for SuccessFunctionCreateResponse.Success.
+type SuccessFunctionCreateResponseSuccess bool
+
+// SuccessFunctionListResponse defines model for SuccessFunctionListResponse.
+type SuccessFunctionListResponse struct {
+	Data *struct {
+		Functions []FunctionRecord `json:"functions"`
+	} `json:"data,omitempty"`
+	Success SuccessFunctionListResponseSuccess `json:"success"`
+}
+
+// SuccessFunctionListResponseSuccess defines model for SuccessFunctionListResponse.Success.
+type SuccessFunctionListResponseSuccess bool
+
+// SuccessFunctionResponse defines model for SuccessFunctionResponse.
+type SuccessFunctionResponse struct {
+	Data *struct {
+		Function FunctionRecord `json:"function"`
+	} `json:"data,omitempty"`
+	Success SuccessFunctionResponseSuccess `json:"success"`
+}
+
+// SuccessFunctionResponseSuccess defines model for SuccessFunctionResponse.Success.
+type SuccessFunctionResponseSuccess bool
+
+// SuccessFunctionRevisionCreateResponse defines model for SuccessFunctionRevisionCreateResponse.
+type SuccessFunctionRevisionCreateResponse struct {
+	Data *struct {
+		Promoted bool             `json:"promoted"`
+		Revision FunctionRevision `json:"revision"`
+	} `json:"data,omitempty"`
+	Success SuccessFunctionRevisionCreateResponseSuccess `json:"success"`
+}
+
+// SuccessFunctionRevisionCreateResponseSuccess defines model for SuccessFunctionRevisionCreateResponse.Success.
+type SuccessFunctionRevisionCreateResponseSuccess bool
+
+// SuccessFunctionRevisionListResponse defines model for SuccessFunctionRevisionListResponse.
+type SuccessFunctionRevisionListResponse struct {
+	Data *struct {
+		Revisions []FunctionRevision `json:"revisions"`
+	} `json:"data,omitempty"`
+	Success SuccessFunctionRevisionListResponseSuccess `json:"success"`
+}
+
+// SuccessFunctionRevisionListResponseSuccess defines model for SuccessFunctionRevisionListResponse.Success.
+type SuccessFunctionRevisionListResponseSuccess bool
+
 // SuccessGatewayMetadataResponse defines model for SuccessGatewayMetadataResponse.
 type SuccessGatewayMetadataResponse struct {
 	Data    *GatewayMetadata                      `json:"data,omitempty"`
@@ -2027,6 +2287,18 @@ type SuccessSandboxResponse struct {
 
 // SuccessSandboxResponseSuccess defines model for SuccessSandboxResponse.Success.
 type SuccessSandboxResponseSuccess bool
+
+// SuccessSandboxServicesResponse defines model for SuccessSandboxServicesResponse.
+type SuccessSandboxServicesResponse struct {
+	Data *struct {
+		SandboxId string                  `json:"sandbox_id"`
+		Services  []SandboxAppServiceView `json:"services"`
+	} `json:"data,omitempty"`
+	Success SuccessSandboxServicesResponseSuccess `json:"success"`
+}
+
+// SuccessSandboxServicesResponseSuccess defines model for SuccessSandboxServicesResponse.Success.
+type SuccessSandboxServicesResponseSuccess bool
 
 // SuccessSandboxStatusResponse defines model for SuccessSandboxStatusResponse.
 type SuccessSandboxStatusResponse struct {
@@ -2515,6 +2787,15 @@ type PostApiV1CredentialSourcesJSONRequestBody = CredentialSourceWriteRequest
 // PutApiV1CredentialSourcesNameJSONRequestBody defines body for PutApiV1CredentialSourcesName for application/json ContentType.
 type PutApiV1CredentialSourcesNameJSONRequestBody = CredentialSourceWriteRequest
 
+// PostApiV1FunctionsJSONRequestBody defines body for PostApiV1Functions for application/json ContentType.
+type PostApiV1FunctionsJSONRequestBody = FunctionCreateRequest
+
+// PutApiV1FunctionsIdAliasesAliasJSONRequestBody defines body for PutApiV1FunctionsIdAliasesAlias for application/json ContentType.
+type PutApiV1FunctionsIdAliasesAliasJSONRequestBody = FunctionAliasUpdateRequest
+
+// PostApiV1FunctionsIdRevisionsJSONRequestBody defines body for PostApiV1FunctionsIdRevisions for application/json ContentType.
+type PostApiV1FunctionsIdRevisionsJSONRequestBody = FunctionRevisionCreateRequest
+
 // PostApiV1RegistryCredentialsJSONRequestBody defines body for PostApiV1RegistryCredentials for application/json ContentType.
 type PostApiV1RegistryCredentialsJSONRequestBody = RegistryCredentialsRequest
 
@@ -2550,6 +2831,9 @@ type PutApiV1SandboxesIdPublicGatewayJSONRequestBody = PublicGatewayConfig
 
 // PostApiV1SandboxesIdRefreshJSONRequestBody defines body for PostApiV1SandboxesIdRefresh for application/json ContentType.
 type PostApiV1SandboxesIdRefreshJSONRequestBody = SandboxRefreshRequest
+
+// PutApiV1SandboxesIdServicesJSONRequestBody defines body for PutApiV1SandboxesIdServices for application/json ContentType.
+type PutApiV1SandboxesIdServicesJSONRequestBody = SandboxServicesUpdateRequest
 
 // PostApiV1SandboxvolumesJSONRequestBody defines body for PostApiV1Sandboxvolumes for application/json ContentType.
 type PostApiV1SandboxvolumesJSONRequestBody = CreateSandboxVolumeRequest

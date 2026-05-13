@@ -49,6 +49,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/clustergateway"
 	ctldsvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/ctld"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/functiongateway"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/globalgateway"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/manager"
@@ -237,6 +238,7 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 	registryReconciler := registry.NewReconciler(resources)
 	globalGatewayReconciler := globalgateway.NewReconciler(resources)
 	regionalGatewayReconciler := regionalgateway.NewReconciler(resources)
+	functionGatewayReconciler := functiongateway.NewReconciler(resources)
 	sshGatewayReconciler := sshgateway.NewReconciler(resources)
 	schedulerReconciler := scheduler.NewReconciler(resources)
 	clusterGatewayReconciler := clustergateway.NewReconciler(resources)
@@ -251,7 +253,7 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 		return ctrl.Result{RequeueAfter: requeueInterval}, err
 	}
 
-	steps, err := r.bindWorkflowSteps(infra, compiledPlan, resources, imageRepo, imageTag, authReconciler, dbReconciler, storageReconciler, registryReconciler, globalGatewayReconciler, regionalGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, ctldReconciler, netdReconciler, nodeReadinessReconciler, rbacReconciler)
+	steps, err := r.bindWorkflowSteps(infra, compiledPlan, resources, imageRepo, imageTag, authReconciler, dbReconciler, storageReconciler, registryReconciler, globalGatewayReconciler, regionalGatewayReconciler, functionGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, ctldReconciler, netdReconciler, nodeReadinessReconciler, rbacReconciler)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -269,6 +271,7 @@ func (r *Sandbox0InfraReconciler) bindWorkflowSteps(
 	registryReconciler *registry.Reconciler,
 	globalGatewayReconciler *globalgateway.Reconciler,
 	regionalGatewayReconciler *regionalgateway.Reconciler,
+	functionGatewayReconciler *functiongateway.Reconciler,
 	sshGatewayReconciler *sshgateway.Reconciler,
 	schedulerReconciler *scheduler.Reconciler,
 	clusterGatewayReconciler *clustergateway.Reconciler,
@@ -281,7 +284,7 @@ func (r *Sandbox0InfraReconciler) bindWorkflowSteps(
 ) ([]reconcileStep, error) {
 	steps := make([]reconcileStep, 0, len(compiledPlan.Workflow.Steps))
 	for _, planned := range compiledPlan.Workflow.Steps {
-		run, err := r.workflowStepRunner(infra, compiledPlan, resources, imageRepo, imageTag, planned.Name, authReconciler, dbReconciler, storageReconciler, registryReconciler, globalGatewayReconciler, regionalGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, ctldReconciler, netdReconciler, nodeReadinessReconciler, rbacReconciler)
+		run, err := r.workflowStepRunner(infra, compiledPlan, resources, imageRepo, imageTag, planned.Name, authReconciler, dbReconciler, storageReconciler, registryReconciler, globalGatewayReconciler, regionalGatewayReconciler, functionGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, ctldReconciler, netdReconciler, nodeReadinessReconciler, rbacReconciler)
 		if err != nil {
 			return nil, err
 		}
@@ -309,6 +312,7 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 	registryReconciler *registry.Reconciler,
 	globalGatewayReconciler *globalgateway.Reconciler,
 	regionalGatewayReconciler *regionalgateway.Reconciler,
+	functionGatewayReconciler *functiongateway.Reconciler,
 	sshGatewayReconciler *sshgateway.Reconciler,
 	schedulerReconciler *scheduler.Reconciler,
 	clusterGatewayReconciler *clustergateway.Reconciler,
@@ -355,6 +359,10 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 	case "regional-gateway":
 		return func(ctx context.Context) error {
 			return regionalGatewayReconciler.Reconcile(ctx, imageRepo, imageTag, compiledPlan)
+		}, nil
+	case "function-gateway":
+		return func(ctx context.Context) error {
+			return functionGatewayReconciler.Reconcile(ctx, imageRepo, imageTag, compiledPlan)
 		}, nil
 	case "ssh-gateway":
 		return func(ctx context.Context) error {
@@ -722,6 +730,7 @@ func (r *Sandbox0InfraReconciler) projectEndpointsForPlan(infra *infrav1alpha1.S
 	if endpointsPlan.GlobalGateway == "" &&
 		endpointsPlan.RegionalGateway == "" &&
 		endpointsPlan.RegionalGatewayInternal == "" &&
+		endpointsPlan.FunctionGateway == "" &&
 		endpointsPlan.ClusterGateway == "" {
 		infra.Status.Endpoints = nil
 		return
@@ -733,6 +742,7 @@ func (r *Sandbox0InfraReconciler) projectEndpointsForPlan(infra *infrav1alpha1.S
 	infra.Status.Endpoints.GlobalGateway = endpointsPlan.GlobalGateway
 	infra.Status.Endpoints.RegionalGateway = endpointsPlan.RegionalGateway
 	infra.Status.Endpoints.RegionalGatewayInternal = endpointsPlan.RegionalGatewayInternal
+	infra.Status.Endpoints.FunctionGateway = endpointsPlan.FunctionGateway
 	infra.Status.Endpoints.ClusterGateway = endpointsPlan.ClusterGateway
 }
 
@@ -760,6 +770,7 @@ func managedConditionTypeSet() map[string]struct{} {
 		infrav1alpha1.ConditionTypeRegistryReady:        {},
 		infrav1alpha1.ConditionTypeGlobalGatewayReady:   {},
 		infrav1alpha1.ConditionTypeRegionalGatewayReady: {},
+		infrav1alpha1.ConditionTypeFunctionGatewayReady: {},
 		infrav1alpha1.ConditionTypeSSHGatewayReady:      {},
 		infrav1alpha1.ConditionTypeSchedulerReady:       {},
 		infrav1alpha1.ConditionTypeClusterGatewayReady:  {},

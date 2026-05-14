@@ -445,6 +445,7 @@ func (s *Server) ensureRestoredFunctionSandbox(ctx context.Context, fn *function
 	}
 	contextID, err := s.ensureFunctionServiceRuntime(ctx, fn, rev, sandbox, service)
 	if err != nil {
+		s.deleteFunctionRuntimeSandboxBestEffort(fn, rev, sandbox.ID, "runtime startup failed")
 		return nil, rev, err
 	}
 	updated, err := s.functionRepo.SetRevisionRuntime(ctx, fn.TeamID, fn.ID, rev.ID, sandbox.ID, contextID)
@@ -588,11 +589,11 @@ func (s *Server) getFunctionRuntimeContext(ctx context.Context, sandboxID, teamI
 		body, _ := io.ReadAll(resp.Body)
 		return nil, functionRuntimeHTTPError{status: resp.StatusCode, body: strings.TrimSpace(string(body))}
 	}
-	var out functionContextResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	out, err := decodeFunctionContextResponse(resp.Body)
+	if err != nil {
 		return nil, err
 	}
-	return &out, nil
+	return out, nil
 }
 
 func (s *Server) startFunctionServiceRuntime(ctx context.Context, sandboxID, teamID, userID string, service mgr.SandboxAppService) (string, error) {
@@ -629,14 +630,43 @@ func (s *Server) startFunctionServiceRuntime(ctx context.Context, sandboxID, tea
 		respBody, _ := io.ReadAll(resp.Body)
 		return "", functionRuntimeHTTPError{status: resp.StatusCode, body: strings.TrimSpace(string(respBody))}
 	}
-	var out functionContextResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	out, err := decodeFunctionContextResponse(resp.Body)
+	if err != nil {
 		return "", err
 	}
 	if strings.TrimSpace(out.ID) == "" {
 		return "", fmt.Errorf("cluster gateway returned an empty runtime context")
 	}
 	return out.ID, nil
+}
+
+func decodeFunctionContextResponse(r io.Reader) (*functionContextResponse, error) {
+	body, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	var envelope struct {
+		Success bool                     `json:"success"`
+		Data    *functionContextResponse `json:"data,omitempty"`
+		Error   *spec.Error              `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(body, &envelope); err == nil && (envelope.Success || envelope.Data != nil || envelope.Error != nil) {
+		if envelope.Error != nil {
+			return nil, errors.New(envelope.Error.Message)
+		}
+		if !envelope.Success {
+			return nil, fmt.Errorf("context response was not successful")
+		}
+		if envelope.Data == nil {
+			return nil, fmt.Errorf("context response missing data")
+		}
+		return envelope.Data, nil
+	}
+	var out functionContextResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 func (s *Server) doFunctionRuntimeContextRequest(ctx context.Context, method, sandboxID, teamID, userID, contextID string, body io.Reader) (*nethttp.Response, error) {
@@ -663,6 +693,58 @@ func (s *Server) doFunctionRuntimeContextRequest(ctx context.Context, method, sa
 		req.Header.Set("Content-Type", "application/json")
 	}
 	return s.outboundHTTPClient().Do(req)
+}
+
+func (s *Server) deleteFunctionRuntimeSandboxBestEffort(fn *functions.Function, rev *functions.Revision, sandboxID, reason string) {
+	if s == nil || fn == nil || rev == nil || strings.TrimSpace(sandboxID) == "" {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := s.deleteSandboxViaClusterGateway(cleanupCtx, sandboxID, fn.TeamID, rev.CreatedBy); err != nil {
+		logger := s.logger
+		if logger == nil {
+			logger = zap.NewNop()
+		}
+		logger.Warn("Failed to delete failed function runtime sandbox",
+			zap.String("function_id", fn.ID),
+			zap.String("revision_id", rev.ID),
+			zap.String("sandbox_id", sandboxID),
+			zap.String("reason", reason),
+			zap.Error(err),
+		)
+	}
+}
+
+func (s *Server) deleteSandboxViaClusterGateway(ctx context.Context, sandboxID, teamID, userID string) error {
+	clusterGatewayURL := strings.TrimRight(strings.TrimSpace(s.cfg.DefaultClusterGatewayURL), "/")
+	if clusterGatewayURL == "" {
+		return fmt.Errorf("cluster gateway is not configured")
+	}
+	if s.internalAuthGen == nil {
+		return fmt.Errorf("internal auth generator is not configured")
+	}
+	token, err := s.internalAuthGen.Generate(internalauth.ServiceClusterGateway, teamID, userID, internalauth.GenerateOptions{
+		Permissions: []string{authn.PermSandboxDelete, authn.PermSandboxRead},
+	})
+	if err != nil {
+		return fmt.Errorf("generate internal token: %w", err)
+	}
+	req, err := nethttp.NewRequestWithContext(ctx, nethttp.MethodDelete, clusterGatewayURL+"/api/v1/sandboxes/"+url.PathEscape(sandboxID), nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set(internalauth.DefaultTokenHeader, token)
+	resp, err := s.outboundHTTPClient().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == nethttp.StatusNotFound || (resp.StatusCode >= 200 && resp.StatusCode < 300) {
+		return nil
+	}
+	body, _ := io.ReadAll(resp.Body)
+	return functionRuntimeHTTPError{status: resp.StatusCode, body: strings.TrimSpace(string(body))}
 }
 
 func isFunctionRuntimeStatus(err error, status int) bool {

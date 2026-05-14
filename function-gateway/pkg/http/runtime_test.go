@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -77,5 +78,25 @@ func TestRewriteFunctionPath(t *testing.T) {
 	rewriteFunctionPath(ctx, "/api", "/")
 	if got := ctx.Request.URL.Path; got != "/v1/users" {
 		t.Fatalf("path = %q, want /v1/users", got)
+	}
+}
+
+func TestDecodeFunctionContextResponseAcceptsGatewayEnvelope(t *testing.T) {
+	out, err := decodeFunctionContextResponse(strings.NewReader(`{"success":true,"data":{"id":"ctx-a","running":true}}`))
+	if err != nil {
+		t.Fatalf("decodeFunctionContextResponse() error = %v", err)
+	}
+	if out.ID != "ctx-a" || !out.Running || out.Paused {
+		t.Fatalf("decoded context = %+v, want running ctx-a", out)
+	}
+}
+
+func TestDecodeFunctionContextResponseAcceptsRawContextBody(t *testing.T) {
+	out, err := decodeFunctionContextResponse(strings.NewReader(`{"id":"ctx-a","paused":true}`))
+	if err != nil {
+		t.Fatalf("decodeFunctionContextResponse() error = %v", err)
+	}
+	if out.ID != "ctx-a" || out.Running || !out.Paused {
+		t.Fatalf("decoded context = %+v, want paused ctx-a", out)
 	}
 }

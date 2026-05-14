@@ -4124,14 +4124,37 @@ components:
           type: string
         source_template_id:
           type: string
+        restore_mounts:
+          type: array
+          description: SandboxVolume mounts captured from the source sandbox and reused when the function runtime sandbox is restored.
+          items:
+            $ref: "#/components/schemas/FunctionRestoreMount"
         service_snapshot:
           $ref: "#/components/schemas/SandboxAppService"
+        runtime_sandbox_id:
+          type: string
+          description: Current restored runtime sandbox, when the source sandbox no longer exists.
+        runtime_context_id:
+          type: string
+          description: Current runtime process context inside the restored runtime sandbox.
+        runtime_updated_at:
+          type: string
+          format: date-time
+          description: Last time the restored runtime sandbox mapping was updated.
         created_by:
           type: string
         created_at:
           type: string
           format: date-time
       required: [id, function_id, team_id, revision_number, source_sandbox_id, source_service_id, source_template_id, service_snapshot, created_at]
+    FunctionRestoreMount:
+      type: object
+      properties:
+        sandboxvolume_id:
+          type: string
+        mount_point:
+          type: string
+      required: [sandboxvolume_id, mount_point]
     FunctionAlias:
       type: object
       properties:
@@ -4315,6 +4338,10 @@ components:
             $ref: "#/components/schemas/SandboxAppService"
         public_gateway:
           $ref: "#/components/schemas/PublicGatewayConfig"
+        mounts:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClaimMountRequest"
         pod_name:
           type: string
         ssh:

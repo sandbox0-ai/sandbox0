@@ -386,6 +386,8 @@ func SandboxAppServicePublishBlockers(service SandboxAppService) []string {
 		blockers = append(blockers, "manual_runtime")
 	} else if service.Runtime.Type == SandboxAppServiceRuntimeCMD && len(service.Runtime.Command) == 0 {
 		blockers = append(blockers, "missing_command")
+	} else if service.Runtime.Type == SandboxAppServiceRuntimeWarmProcess && strings.TrimSpace(service.Runtime.WarmProcessName) == "" {
+		blockers = append(blockers, "missing_warm_process_name")
 	}
 	return blockers
 }

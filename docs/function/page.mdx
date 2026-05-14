@@ -3,7 +3,7 @@
 Sandbox0 Functions publish a sandbox service behind a stable function domain. A function has immutable revisions and a mutable `production` alias, so deleting the source sandbox does not delete the function identity or its domain.
 
 <Callout variant="info">
-Functions are created from Sandbox Services, not from uploaded ZIP files or container images. The first function API only needs a `sandbox_id` and `service_id`; the gateway snapshots the service configuration into a revision.
+Functions are created from Sandbox Services, not from uploaded ZIP files or container images. The first function API only needs a `sandbox_id` and `service_id`; the gateway snapshots the service configuration and restore mounts into a revision.
 </Callout>
 
 ## Model
@@ -12,10 +12,12 @@ Functions are created from Sandbox Services, not from uploaded ZIP files or cont
 |--------|-------------|
 | Sandbox Service | A named port, ingress routes, and restartable runtime inside a sandbox |
 | Function | Stable function identity, slug, and fixed domain under `sandbox0.site` |
-| Revision | Immutable snapshot of the source sandbox service |
+| Revision | Immutable snapshot of the source sandbox service plus the SandboxVolume mounts needed to restore it |
 | Alias | Mutable pointer from a name such as `production` to one revision |
 
 Only publishable sandbox services can become function revisions. A service is publishable when it is public and has a restartable runtime. Legacy `public_gateway` configuration is still accepted and projected into services, but it may not be publishable until a runtime is added.
+
+When the source sandbox was claimed with SandboxVolume mounts, those mount references are captured on the revision. If the source sandbox is later deleted, `function-gateway` claims a new runtime sandbox from the same template, mounts the captured volumes, starts the service runtime, and continues serving the stable function host.
 
 ## Sandbox Services
 
@@ -117,9 +119,9 @@ Move an alias:
 
 ## Runtime Behavior
 
-Function traffic is handled by `function-gateway` on the fixed function host. The gateway resolves the `production` alias, enforces the revision's service route policy, resumes the source sandbox if it is paused, and proxies to the service port.
+Function traffic is handled by `function-gateway` on the fixed function host. The gateway resolves the `production` alias, enforces the revision's service route policy, and proxies to the service port.
 
-The current compatibility runtime still needs the source sandbox to exist. A later revision will persist function runtime state from volume snapshots so a function can be restored even after the source sandbox is deleted.
+If the source sandbox still exists, the gateway resumes it when needed and routes to that sandbox. If the source sandbox has been deleted, the gateway restores a function runtime sandbox from the revision's template and captured mounts, starts the service runtime command or warm process, stores the runtime sandbox/context on the revision, and reuses that runtime until sandbox0 scales it down.
 
 ## Compatibility
 

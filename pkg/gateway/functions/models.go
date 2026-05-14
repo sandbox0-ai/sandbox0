@@ -27,9 +27,18 @@ type Revision struct {
 	SourceSandboxID  string          `json:"source_sandbox_id"`
 	SourceServiceID  string          `json:"source_service_id"`
 	SourceTemplateID string          `json:"source_template_id"`
+	RestoreMounts    []RestoreMount  `json:"restore_mounts,omitempty"`
 	ServiceSnapshot  json.RawMessage `json:"service_snapshot"`
+	RuntimeSandboxID *string         `json:"runtime_sandbox_id,omitempty"`
+	RuntimeContextID *string         `json:"runtime_context_id,omitempty"`
+	RuntimeUpdatedAt *time.Time      `json:"runtime_updated_at,omitempty"`
 	CreatedBy        string          `json:"created_by,omitempty"`
 	CreatedAt        time.Time       `json:"created_at"`
+}
+
+type RestoreMount struct {
+	SandboxVolumeID string `json:"sandboxvolume_id"`
+	MountPoint      string `json:"mount_point"`
 }
 
 type Alias struct {

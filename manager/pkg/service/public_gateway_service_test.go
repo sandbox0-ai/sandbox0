@@ -49,4 +49,15 @@ func TestSandboxAppServicePublishBlockersRequirePublicRestartableRuntime(t *test
 	if blockers := SandboxAppServicePublishBlockers(service); len(blockers) != 0 {
 		t.Fatalf("blockers = %#v, want none", blockers)
 	}
+
+	service.Runtime = &SandboxAppServiceRuntime{Type: SandboxAppServiceRuntimeWarmProcess}
+	blockers = SandboxAppServicePublishBlockers(service)
+	if len(blockers) != 1 || blockers[0] != "missing_warm_process_name" {
+		t.Fatalf("blockers = %#v, want missing_warm_process_name", blockers)
+	}
+
+	service.Runtime.WarmProcessName = "python"
+	if blockers := SandboxAppServicePublishBlockers(service); len(blockers) != 0 {
+		t.Fatalf("blockers = %#v, want none", blockers)
+	}
 }

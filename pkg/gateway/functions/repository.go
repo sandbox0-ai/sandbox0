@@ -195,7 +195,8 @@ func (r *Repository) GetActiveRevision(ctx context.Context, fn *Function) (*Revi
 	}
 	row := r.pool.QueryRow(ctx, `
 		SELECT id, function_id, team_id, revision_number, source_sandbox_id, source_service_id,
-			source_template_id, service_snapshot, created_by, created_at
+			source_template_id, restore_mounts, service_snapshot, runtime_sandbox_id, runtime_context_id,
+			runtime_updated_at, created_by, created_at
 		FROM functions_revisions
 		WHERE function_id = $1 AND id = $2
 	`, fn.ID, *fn.ActiveRevisionID)
@@ -213,7 +214,8 @@ func (r *Repository) ListRevisions(ctx context.Context, teamID, functionRef stri
 	}
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, function_id, team_id, revision_number, source_sandbox_id, source_service_id,
-			source_template_id, service_snapshot, created_by, created_at
+			source_template_id, restore_mounts, service_snapshot, runtime_sandbox_id, runtime_context_id,
+			runtime_updated_at, created_by, created_at
 		FROM functions_revisions
 		WHERE function_id = $1
 		ORDER BY revision_number DESC
@@ -231,6 +233,61 @@ func (r *Repository) ListRevisions(ctx context.Context, teamID, functionRef stri
 		out = append(out, rev)
 	}
 	return out, rows.Err()
+}
+
+func (r *Repository) GetRevision(ctx context.Context, teamID, functionID, revisionID string) (*Revision, error) {
+	if r == nil || r.pool == nil {
+		return nil, fmt.Errorf("function repository is not configured")
+	}
+	row := r.pool.QueryRow(ctx, `
+		SELECT id, function_id, team_id, revision_number, source_sandbox_id, source_service_id,
+			source_template_id, restore_mounts, service_snapshot, runtime_sandbox_id, runtime_context_id,
+			runtime_updated_at, created_by, created_at
+		FROM functions_revisions
+		WHERE team_id = $1 AND function_id = $2 AND id = $3
+	`, teamID, functionID, revisionID)
+	rev, err := scanRevision(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return rev, err
+}
+
+func (r *Repository) SetRevisionRuntime(ctx context.Context, teamID, functionID, revisionID, sandboxID, contextID string) (*Revision, error) {
+	if r == nil || r.pool == nil {
+		return nil, fmt.Errorf("function repository is not configured")
+	}
+	row := r.pool.QueryRow(ctx, `
+		UPDATE functions_revisions
+		SET runtime_sandbox_id = $4, runtime_context_id = $5, runtime_updated_at = NOW()
+		WHERE team_id = $1 AND function_id = $2 AND id = $3
+		RETURNING id, function_id, team_id, revision_number, source_sandbox_id, source_service_id,
+			source_template_id, restore_mounts, service_snapshot, runtime_sandbox_id, runtime_context_id,
+			runtime_updated_at, created_by, created_at
+	`, teamID, functionID, revisionID, sandboxID, contextID)
+	rev, err := scanRevision(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return rev, err
+}
+
+func (r *Repository) ClearRevisionRuntime(ctx context.Context, teamID, functionID, revisionID string) error {
+	if r == nil || r.pool == nil {
+		return fmt.Errorf("function repository is not configured")
+	}
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE functions_revisions
+		SET runtime_sandbox_id = NULL, runtime_context_id = NULL, runtime_updated_at = NULL
+		WHERE team_id = $1 AND function_id = $2 AND id = $3
+	`, teamID, functionID, revisionID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (r *Repository) SetAlias(ctx context.Context, teamID, functionRef, alias string, revisionNumber int, updatedBy string) (*Alias, error) {
@@ -287,7 +344,7 @@ func NewFunction(teamID, name, userID string) *Function {
 	}
 }
 
-func NewRevision(teamID, sandboxID, serviceID, templateID string, snapshot any, userID string) (*Revision, error) {
+func NewRevision(teamID, sandboxID, serviceID, templateID string, snapshot any, mounts []RestoreMount, userID string) (*Revision, error) {
 	data, err := json.Marshal(snapshot)
 	if err != nil {
 		return nil, err
@@ -297,6 +354,7 @@ func NewRevision(teamID, sandboxID, serviceID, templateID string, snapshot any, 
 		SourceSandboxID:  sandboxID,
 		SourceServiceID:  serviceID,
 		SourceTemplateID: templateID,
+		RestoreMounts:    append([]RestoreMount(nil), mounts...),
 		ServiceSnapshot:  data,
 		CreatedBy:        userID,
 	}, nil
@@ -312,13 +370,19 @@ func insertFunction(ctx context.Context, tx pgx.Tx, fn *Function) error {
 }
 
 func insertRevision(ctx context.Context, tx pgx.Tx, rev *Revision) error {
-	_, err := tx.Exec(ctx, `
+	restoreMounts, err := json.Marshal(rev.RestoreMounts)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `
 		INSERT INTO functions_revisions (
 			id, function_id, team_id, revision_number, source_sandbox_id, source_service_id,
-			source_template_id, service_snapshot, created_by, created_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+			source_template_id, restore_mounts, service_snapshot, runtime_sandbox_id, runtime_context_id,
+			runtime_updated_at, created_by, created_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 	`, rev.ID, rev.FunctionID, rev.TeamID, rev.RevisionNumber, rev.SourceSandboxID, rev.SourceServiceID,
-		rev.SourceTemplateID, rev.ServiceSnapshot, rev.CreatedBy, rev.CreatedAt)
+		rev.SourceTemplateID, restoreMounts, rev.ServiceSnapshot, rev.RuntimeSandboxID, rev.RuntimeContextID,
+		rev.RuntimeUpdatedAt, rev.CreatedBy, rev.CreatedAt)
 	return err
 }
 
@@ -346,8 +410,14 @@ func scanFunction(row rowScanner) (*Function, error) {
 
 func scanRevision(row rowScanner) (*Revision, error) {
 	var rev Revision
-	if err := row.Scan(&rev.ID, &rev.FunctionID, &rev.TeamID, &rev.RevisionNumber, &rev.SourceSandboxID, &rev.SourceServiceID, &rev.SourceTemplateID, &rev.ServiceSnapshot, &rev.CreatedBy, &rev.CreatedAt); err != nil {
+	var restoreMounts []byte
+	if err := row.Scan(&rev.ID, &rev.FunctionID, &rev.TeamID, &rev.RevisionNumber, &rev.SourceSandboxID, &rev.SourceServiceID, &rev.SourceTemplateID, &restoreMounts, &rev.ServiceSnapshot, &rev.RuntimeSandboxID, &rev.RuntimeContextID, &rev.RuntimeUpdatedAt, &rev.CreatedBy, &rev.CreatedAt); err != nil {
 		return nil, err
+	}
+	if len(restoreMounts) > 0 {
+		if err := json.Unmarshal(restoreMounts, &rev.RestoreMounts); err != nil {
+			return nil, err
+		}
 	}
 	return &rev, nil
 }

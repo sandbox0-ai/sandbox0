@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -14,10 +15,12 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functions"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -27,11 +30,27 @@ import (
 )
 
 const defaultFunctionAutoResumeTimeout = 30 * time.Second
+const defaultFunctionRuntimeStartTimeout = 30 * time.Second
 
 type functionRouteMatch struct {
 	route         *mgr.SandboxAppServiceRoute
 	pathMatched   bool
 	methodAllowed bool
+}
+
+type functionContextResponse struct {
+	ID      string `json:"id"`
+	Running bool   `json:"running"`
+	Paused  bool   `json:"paused"`
+}
+
+type functionRuntimeHTTPError struct {
+	status int
+	body   string
+}
+
+func (e functionRuntimeHTTPError) Error() string {
+	return fmt.Sprintf("cluster gateway returned status %d: %s", e.status, e.body)
 }
 
 func (s *Server) serveFunctionRevision(c *gin.Context, fn *functions.Function, rev *functions.Revision) {
@@ -64,26 +83,26 @@ func (s *Server) serveFunctionRevision(c *gin.Context, fn *functions.Function, r
 		return
 	}
 
-	sandbox, err := s.getSandboxFromClusterGateway(c.Request.Context(), rev.SourceSandboxID)
+	sandbox, rev, err := s.resolveFunctionSandbox(c.Request.Context(), fn, rev, service)
 	if err != nil {
-		s.writeFunctionRuntimeError(c, fn, rev, "function source sandbox is not available", err)
+		s.writeFunctionRuntimeError(c, fn, rev, "function sandbox is not available", err)
 		return
 	}
 	if sandbox.TeamID != fn.TeamID {
-		spec.JSONError(c, nethttp.StatusServiceUnavailable, spec.CodeUnavailable, "function source sandbox is invalid")
+		spec.JSONError(c, nethttp.StatusServiceUnavailable, spec.CodeUnavailable, "function sandbox is invalid")
 		return
 	}
 	if functionSandboxWantsPaused(sandbox) {
 		resumeCtx, cancel := context.WithTimeout(c.Request.Context(), defaultFunctionAutoResumeTimeout)
 		defer cancel()
 		if err := s.resumeSandboxViaClusterGateway(resumeCtx, sandbox.ID, fn.TeamID, rev.CreatedBy); err != nil {
-			s.logger.Warn("Function source sandbox resume failed",
+			s.logger.Warn("Function sandbox resume failed",
 				zap.String("function_id", fn.ID),
 				zap.String("revision_id", rev.ID),
 				zap.String("sandbox_id", sandbox.ID),
 				zap.Error(err),
 			)
-			spec.JSONError(c, nethttp.StatusServiceUnavailable, spec.CodeUnavailable, "function source sandbox is waking up")
+			spec.JSONError(c, nethttp.StatusServiceUnavailable, spec.CodeUnavailable, "function sandbox is waking up")
 			return
 		}
 	}
@@ -359,6 +378,326 @@ func functionSandboxWantsPaused(sandbox *mgr.Sandbox) bool {
 		return true
 	}
 	return sandbox.Paused
+}
+
+func (s *Server) resolveFunctionSandbox(ctx context.Context, fn *functions.Function, rev *functions.Revision, service mgr.SandboxAppService) (*mgr.Sandbox, *functions.Revision, error) {
+	sourceSandbox, err := s.getSandboxFromClusterGateway(ctx, rev.SourceSandboxID)
+	if err == nil {
+		return sourceSandbox, rev, nil
+	}
+	if !isPublishNotFound(err) {
+		return nil, rev, err
+	}
+	return s.ensureRestoredFunctionSandbox(ctx, fn, rev, service)
+}
+
+func (s *Server) ensureRestoredFunctionSandbox(ctx context.Context, fn *functions.Function, rev *functions.Revision, service mgr.SandboxAppService) (*mgr.Sandbox, *functions.Revision, error) {
+	lock := s.revisionRuntimeLock(rev.ID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	latest, err := s.functionRepo.GetRevision(ctx, fn.TeamID, fn.ID, rev.ID)
+	if err == nil {
+		rev = latest
+	} else if err != nil && !errorsIsFunctionNotFound(err) {
+		return nil, rev, err
+	}
+
+	if rev.RuntimeSandboxID != nil && strings.TrimSpace(*rev.RuntimeSandboxID) != "" {
+		sandbox, err := s.getSandboxFromClusterGateway(ctx, strings.TrimSpace(*rev.RuntimeSandboxID))
+		if err == nil {
+			contextID, runtimeErr := s.ensureFunctionServiceRuntime(ctx, fn, rev, sandbox, service)
+			if runtimeErr != nil {
+				return nil, rev, runtimeErr
+			}
+			if rev.RuntimeContextID == nil || strings.TrimSpace(*rev.RuntimeContextID) != contextID {
+				updated, updateErr := s.functionRepo.SetRevisionRuntime(ctx, fn.TeamID, fn.ID, rev.ID, sandbox.ID, contextID)
+				if updateErr != nil {
+					return nil, rev, updateErr
+				}
+				rev = updated
+			}
+			return sandbox, rev, nil
+		}
+		if !isPublishNotFound(err) {
+			return nil, rev, err
+		}
+		if clearErr := s.functionRepo.ClearRevisionRuntime(ctx, fn.TeamID, fn.ID, rev.ID); clearErr != nil && !errorsIsFunctionNotFound(clearErr) {
+			s.logger.Warn("Failed to clear stale function runtime sandbox",
+				zap.String("function_id", fn.ID),
+				zap.String("revision_id", rev.ID),
+				zap.String("runtime_sandbox_id", strings.TrimSpace(*rev.RuntimeSandboxID)),
+				zap.Error(clearErr),
+			)
+		}
+		rev.RuntimeSandboxID = nil
+		rev.RuntimeContextID = nil
+		rev.RuntimeUpdatedAt = nil
+	}
+
+	claim, err := s.claimFunctionSandboxViaClusterGateway(ctx, fn, rev, service)
+	if err != nil {
+		return nil, rev, err
+	}
+	sandbox, err := s.getSandboxFromClusterGateway(ctx, claim.SandboxID)
+	if err != nil {
+		return nil, rev, err
+	}
+	contextID, err := s.ensureFunctionServiceRuntime(ctx, fn, rev, sandbox, service)
+	if err != nil {
+		return nil, rev, err
+	}
+	updated, err := s.functionRepo.SetRevisionRuntime(ctx, fn.TeamID, fn.ID, rev.ID, sandbox.ID, contextID)
+	if err != nil {
+		return nil, rev, err
+	}
+	return sandbox, updated, nil
+}
+
+func (s *Server) revisionRuntimeLock(revisionID string) *sync.Mutex {
+	lock := &sync.Mutex{}
+	actual, _ := s.runtimeLocks.LoadOrStore(revisionID, lock)
+	return actual.(*sync.Mutex)
+}
+
+func errorsIsFunctionNotFound(err error) bool {
+	return errors.Is(err, functions.ErrNotFound)
+}
+
+func isPublishNotFound(err error) bool {
+	var publishErr publishError
+	if errors.As(err, &publishErr) {
+		return publishErr.status == nethttp.StatusNotFound
+	}
+	return false
+}
+
+func (s *Server) claimFunctionSandboxViaClusterGateway(ctx context.Context, fn *functions.Function, rev *functions.Revision, service mgr.SandboxAppService) (*mgr.ClaimResponse, error) {
+	clusterGatewayURL := strings.TrimRight(strings.TrimSpace(s.cfg.DefaultClusterGatewayURL), "/")
+	if clusterGatewayURL == "" {
+		return nil, fmt.Errorf("cluster gateway is not configured")
+	}
+	autoResume := true
+	runtimeService := service
+	runtimeService.Ingress = mgr.SandboxAppServiceIngress{}
+	payload, err := json.Marshal(mgr.ClaimRequest{
+		Template: rev.SourceTemplateID,
+		Config: &mgr.SandboxConfig{
+			AutoResume: &autoResume,
+			Services:   []mgr.SandboxAppService{runtimeService},
+		},
+		Mounts: claimMountsFromRevision(rev.RestoreMounts),
+	})
+	if err != nil {
+		return nil, err
+	}
+	token, err := s.internalAuthGen.Generate(internalauth.ServiceClusterGateway, fn.TeamID, rev.CreatedBy, internalauth.GenerateOptions{
+		Permissions: []string{
+			authn.PermSandboxCreate,
+			authn.PermSandboxRead,
+			authn.PermSandboxWrite,
+			authn.PermSandboxVolumeRead,
+			authn.PermSandboxVolumeWrite,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("generate internal token: %w", err)
+	}
+	req, err := nethttp.NewRequestWithContext(ctx, nethttp.MethodPost, clusterGatewayURL+"/api/v1/sandboxes", bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set(internalauth.DefaultTokenHeader, token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.outboundHTTPClient().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != nethttp.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, functionRuntimeHTTPError{status: resp.StatusCode, body: strings.TrimSpace(string(body))}
+	}
+	claim, apiErr, err := spec.DecodeResponse[mgr.ClaimResponse](resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if apiErr != nil {
+		return nil, errors.New(apiErr.Message)
+	}
+	if claim == nil || strings.TrimSpace(claim.SandboxID) == "" {
+		return nil, fmt.Errorf("cluster gateway returned an empty sandbox claim")
+	}
+	return claim, nil
+}
+
+func claimMountsFromRevision(mounts []functions.RestoreMount) []mgr.ClaimMount {
+	if len(mounts) == 0 {
+		return nil
+	}
+	out := make([]mgr.ClaimMount, 0, len(mounts))
+	for _, mount := range mounts {
+		out = append(out, mgr.ClaimMount{
+			SandboxVolumeID: strings.TrimSpace(mount.SandboxVolumeID),
+			MountPoint:      strings.TrimSpace(mount.MountPoint),
+		})
+	}
+	return out
+}
+
+func (s *Server) ensureFunctionServiceRuntime(ctx context.Context, fn *functions.Function, rev *functions.Revision, sandbox *mgr.Sandbox, service mgr.SandboxAppService) (string, error) {
+	if sandbox == nil {
+		return "", fmt.Errorf("sandbox is nil")
+	}
+	if rev.RuntimeContextID != nil && strings.TrimSpace(*rev.RuntimeContextID) != "" {
+		contextID := strings.TrimSpace(*rev.RuntimeContextID)
+		current, err := s.getFunctionRuntimeContext(ctx, sandbox.ID, fn.TeamID, rev.CreatedBy, contextID)
+		if err == nil && (current.Running || current.Paused) {
+			return contextID, nil
+		}
+		if err != nil && !isFunctionRuntimeStatus(err, nethttp.StatusNotFound) {
+			s.logger.Warn("Failed to inspect function runtime context",
+				zap.String("function_id", fn.ID),
+				zap.String("revision_id", rev.ID),
+				zap.String("sandbox_id", sandbox.ID),
+				zap.String("context_id", contextID),
+				zap.Error(err),
+			)
+		}
+	}
+	contextID, err := s.startFunctionServiceRuntime(ctx, sandbox.ID, fn.TeamID, rev.CreatedBy, service)
+	if err != nil {
+		return "", err
+	}
+	startCtx, cancel := context.WithTimeout(ctx, defaultFunctionRuntimeStartTimeout)
+	defer cancel()
+	if err := waitForFunctionServicePort(startCtx, sandbox.InternalAddr, service.Port); err != nil {
+		return "", err
+	}
+	return contextID, nil
+}
+
+func (s *Server) getFunctionRuntimeContext(ctx context.Context, sandboxID, teamID, userID, contextID string) (*functionContextResponse, error) {
+	resp, err := s.doFunctionRuntimeContextRequest(ctx, nethttp.MethodGet, sandboxID, teamID, userID, contextID, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != nethttp.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, functionRuntimeHTTPError{status: resp.StatusCode, body: strings.TrimSpace(string(body))}
+	}
+	var out functionContextResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (s *Server) startFunctionServiceRuntime(ctx context.Context, sandboxID, teamID, userID string, service mgr.SandboxAppService) (string, error) {
+	if service.Runtime == nil {
+		return "", fmt.Errorf("function service runtime is missing")
+	}
+	payload := map[string]any{
+		"cwd":      service.Runtime.CWD,
+		"env_vars": service.Runtime.EnvVars,
+	}
+	switch service.Runtime.Type {
+	case mgr.SandboxAppServiceRuntimeCMD:
+		payload["type"] = "cmd"
+		payload["cmd"] = map[string]any{"command": service.Runtime.Command}
+	case mgr.SandboxAppServiceRuntimeWarmProcess:
+		if strings.TrimSpace(service.Runtime.WarmProcessName) == "" {
+			return "", fmt.Errorf("warm_process_name is required for warm process functions")
+		}
+		payload["type"] = "repl"
+		payload["repl"] = map[string]any{"alias": strings.TrimSpace(service.Runtime.WarmProcessName)}
+	default:
+		return "", fmt.Errorf("unsupported function service runtime type %q", service.Runtime.Type)
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	resp, err := s.doFunctionRuntimeContextRequest(ctx, nethttp.MethodPost, sandboxID, teamID, userID, "", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != nethttp.StatusCreated {
+		respBody, _ := io.ReadAll(resp.Body)
+		return "", functionRuntimeHTTPError{status: resp.StatusCode, body: strings.TrimSpace(string(respBody))}
+	}
+	var out functionContextResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(out.ID) == "" {
+		return "", fmt.Errorf("cluster gateway returned an empty runtime context")
+	}
+	return out.ID, nil
+}
+
+func (s *Server) doFunctionRuntimeContextRequest(ctx context.Context, method, sandboxID, teamID, userID, contextID string, body io.Reader) (*nethttp.Response, error) {
+	clusterGatewayURL := strings.TrimRight(strings.TrimSpace(s.cfg.DefaultClusterGatewayURL), "/")
+	if clusterGatewayURL == "" {
+		return nil, fmt.Errorf("cluster gateway is not configured")
+	}
+	token, err := s.internalAuthGen.Generate(internalauth.ServiceClusterGateway, teamID, userID, internalauth.GenerateOptions{
+		Permissions: []string{authn.PermSandboxRead, authn.PermSandboxWrite},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("generate internal token: %w", err)
+	}
+	path := clusterGatewayURL + "/api/v1/sandboxes/" + url.PathEscape(sandboxID) + "/contexts"
+	if strings.TrimSpace(contextID) != "" {
+		path += "/" + url.PathEscape(contextID)
+	}
+	req, err := nethttp.NewRequestWithContext(ctx, method, path, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set(internalauth.DefaultTokenHeader, token)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	return s.outboundHTTPClient().Do(req)
+}
+
+func isFunctionRuntimeStatus(err error, status int) bool {
+	var runtimeErr functionRuntimeHTTPError
+	if errors.As(err, &runtimeErr) {
+		return runtimeErr.status == status
+	}
+	return false
+}
+
+func waitForFunctionServicePort(ctx context.Context, internalAddr string, port int) error {
+	targetURL, err := withPort(internalAddr, port)
+	if err != nil {
+		return err
+	}
+	address := targetURL.Host
+	if address == "" {
+		return fmt.Errorf("function service target address is empty")
+	}
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		conn, err := net.DialTimeout("tcp", address, 500*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("function service did not start listening on %s: %w", address, lastErr)
+		case <-ticker.C:
+		}
+	}
 }
 
 func (s *Server) resumeSandboxViaClusterGateway(ctx context.Context, sandboxID, teamID, userID string) error {

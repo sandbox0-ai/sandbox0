@@ -39,6 +39,7 @@ type Server struct {
 	obsProvider     *observability.Provider
 	httpClient      *http.Client
 	routeLimiters   sync.Map
+	runtimeLocks    sync.Map
 	logger          *zap.Logger
 }
 

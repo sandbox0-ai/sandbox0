@@ -161,6 +161,22 @@ func setHardExpirationAnnotation(annotations map[string]string, now time.Time, h
 	annotations[controller.AnnotationHardExpiresAt] = hardExpiresAt.Format(time.RFC3339)
 }
 
+func setMountsAnnotation(annotations map[string]string, mounts []ClaimMount) error {
+	if annotations == nil {
+		return nil
+	}
+	if len(mounts) == 0 {
+		delete(annotations, controller.AnnotationMounts)
+		return nil
+	}
+	data, err := json.Marshal(mounts)
+	if err != nil {
+		return fmt.Errorf("marshal mounts: %w", err)
+	}
+	annotations[controller.AnnotationMounts] = string(data)
+	return nil
+}
+
 func validateClaimMounts(req *ClaimRequest) error {
 	if req == nil {
 		return nil
@@ -777,6 +793,9 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			setExpirationAnnotation(pod.Annotations, s.clock.Now(), persistedConfig.TTL)
 			setHardExpirationAnnotation(pod.Annotations, s.clock.Now(), persistedConfig.HardTTL)
 		}
+		if err := setMountsAnnotation(pod.Annotations, req.Mounts); err != nil {
+			return err
+		}
 
 		// Serialize config
 		if persistedConfig != nil {
@@ -931,6 +950,9 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 	if persistedConfig != nil {
 		setExpirationAnnotation(pod.Annotations, s.clock.Now(), persistedConfig.TTL)
 		setHardExpirationAnnotation(pod.Annotations, s.clock.Now(), persistedConfig.HardTTL)
+	}
+	if err := setMountsAnnotation(pod.Annotations, req.Mounts); err != nil {
+		return nil, err
 	}
 
 	// Serialize config

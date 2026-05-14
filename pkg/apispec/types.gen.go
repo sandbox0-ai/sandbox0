@@ -980,13 +980,31 @@ type FunctionRecord struct {
 	Url              string    `json:"url"`
 }
 
+// FunctionRestoreMount defines model for FunctionRestoreMount.
+type FunctionRestoreMount struct {
+	MountPoint      string `json:"mount_point"`
+	SandboxvolumeId string `json:"sandboxvolume_id"`
+}
+
 // FunctionRevision defines model for FunctionRevision.
 type FunctionRevision struct {
-	CreatedAt      time.Time `json:"created_at"`
-	CreatedBy      *string   `json:"created_by,omitempty"`
-	FunctionId     string    `json:"function_id"`
-	Id             string    `json:"id"`
-	RevisionNumber int32     `json:"revision_number"`
+	CreatedAt  time.Time `json:"created_at"`
+	CreatedBy  *string   `json:"created_by,omitempty"`
+	FunctionId string    `json:"function_id"`
+	Id         string    `json:"id"`
+
+	// RestoreMounts SandboxVolume mounts captured from the source sandbox and reused when the function runtime sandbox is restored.
+	RestoreMounts  *[]FunctionRestoreMount `json:"restore_mounts,omitempty"`
+	RevisionNumber int32                   `json:"revision_number"`
+
+	// RuntimeContextId Current runtime process context inside the restored runtime sandbox.
+	RuntimeContextId *string `json:"runtime_context_id,omitempty"`
+
+	// RuntimeSandboxId Current restored runtime sandbox, when the source sandbox no longer exists.
+	RuntimeSandboxId *string `json:"runtime_sandbox_id,omitempty"`
+
+	// RuntimeUpdatedAt Last time the restored runtime sandbox mapping was updated.
+	RuntimeUpdatedAt *time.Time `json:"runtime_updated_at,omitempty"`
 
 	// ServiceSnapshot Canonical service model for sandbox exposure and function publishing.
 	ServiceSnapshot  SandboxAppService `json:"service_snapshot"`
@@ -1510,6 +1528,7 @@ type Sandbox struct {
 	// HardExpiresAt Hard expiration timestamp. Zero value means not set.
 	HardExpiresAt time.Time             `json:"hard_expires_at"`
 	Id            string                `json:"id"`
+	Mounts        *[]ClaimMountRequest  `json:"mounts,omitempty"`
 	Paused        bool                  `json:"paused"`
 	PodName       string                `json:"pod_name"`
 	PowerState    SandboxPowerState     `json:"power_state"`

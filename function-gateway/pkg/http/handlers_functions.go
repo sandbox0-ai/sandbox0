@@ -84,7 +84,7 @@ func (s *Server) createFunction(c *gin.Context) {
 
 	userID := principalID(authCtx)
 	fn := functions.NewFunction(authCtx.TeamID, name, userID)
-	rev, err := functions.NewRevision(authCtx.TeamID, sandbox.ID, serviceSnapshot.ID, sandbox.TemplateID, serviceSnapshot, userID)
+	rev, err := functions.NewRevision(authCtx.TeamID, sandbox.ID, serviceSnapshot.ID, sandbox.TemplateID, serviceSnapshot, restoreMountsFromSandbox(sandbox), userID)
 	if err != nil {
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to create revision snapshot")
 		return
@@ -158,7 +158,7 @@ func (s *Server) createFunctionRevision(c *gin.Context) {
 	}
 
 	userID := principalID(authCtx)
-	rev, err := functions.NewRevision(authCtx.TeamID, sandbox.ID, serviceSnapshot.ID, sandbox.TemplateID, serviceSnapshot, userID)
+	rev, err := functions.NewRevision(authCtx.TeamID, sandbox.ID, serviceSnapshot.ID, sandbox.TemplateID, serviceSnapshot, restoreMountsFromSandbox(sandbox), userID)
 	if err != nil {
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to create revision snapshot")
 		return
@@ -257,6 +257,20 @@ func findSandboxService(sandbox *mgr.Sandbox, serviceID string) (mgr.SandboxAppS
 		}
 	}
 	return mgr.SandboxAppService{}, false
+}
+
+func restoreMountsFromSandbox(sandbox *mgr.Sandbox) []functions.RestoreMount {
+	if sandbox == nil || len(sandbox.Mounts) == 0 {
+		return nil
+	}
+	mounts := make([]functions.RestoreMount, 0, len(sandbox.Mounts))
+	for _, mount := range sandbox.Mounts {
+		mounts = append(mounts, functions.RestoreMount{
+			SandboxVolumeID: strings.TrimSpace(mount.SandboxVolumeID),
+			MountPoint:      strings.TrimSpace(mount.MountPoint),
+		})
+	}
+	return mounts
 }
 
 func (s *Server) getSandboxFromClusterGateway(ctx context.Context, sandboxID string) (*mgr.Sandbox, error) {

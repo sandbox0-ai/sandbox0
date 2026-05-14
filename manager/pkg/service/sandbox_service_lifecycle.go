@@ -270,6 +270,7 @@ func (s *SandboxService) podToSandbox(ctx context.Context, pod *corev1.Pod, sand
 		AutoResume:    autoResume,
 		Services:      cfg.Services,
 		PublicGateway: SandboxAppServicesToPublicGatewayConfig(cfg.Services),
+		Mounts:        parseClaimMounts(pod.Annotations[controller.AnnotationMounts]),
 		PodName:       pod.Name,
 		ExpiresAt:     expiresAt,
 		HardExpiresAt: hardExpiresAt,
@@ -302,6 +303,21 @@ func parseSandboxConfig(configJSON string) SandboxConfig {
 		return SandboxConfig{}
 	}
 	return cfg
+}
+
+func parseClaimMounts(mountsJSON string) []ClaimMount {
+	if mountsJSON == "" {
+		return nil
+	}
+	var mounts []ClaimMount
+	if err := json.Unmarshal([]byte(mountsJSON), &mounts); err != nil {
+		return nil
+	}
+	normalized, err := normalizeClaimMounts(mounts)
+	if err != nil {
+		return nil
+	}
+	return normalized
 }
 
 // GetSandboxStatus gets the status of a sandbox

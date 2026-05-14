@@ -28,7 +28,11 @@ CREATE TABLE IF NOT EXISTS functions_revisions (
     source_sandbox_id TEXT NOT NULL,
     source_service_id TEXT NOT NULL,
     source_template_id TEXT NOT NULL,
+    restore_mounts JSONB NOT NULL DEFAULT '[]'::jsonb,
     service_snapshot JSONB NOT NULL,
+    runtime_sandbox_id TEXT,
+    runtime_context_id TEXT,
+    runtime_updated_at TIMESTAMPTZ,
     created_by UUID,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE(function_id, revision_number)

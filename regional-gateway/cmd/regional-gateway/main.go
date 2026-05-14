@@ -33,6 +33,7 @@ func main() {
 	logger.Info("Starting regional-gateway",
 		zap.Int("port", cfg.HTTPPort),
 		zap.String("cluster_gateway_url", cfg.DefaultClusterGatewayURL),
+		zap.String("function_gateway_url", cfg.FunctionGatewayURL),
 	)
 
 	// Create context with cancellation

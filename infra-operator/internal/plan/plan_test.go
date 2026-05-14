@@ -83,6 +83,16 @@ func TestCompileDerivesCrossServiceReferences(t *testing.T) {
 						},
 					},
 				},
+				FunctionGateway: &infrav1alpha1.FunctionGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					ServiceExposureConfig: infrav1alpha1.ServiceExposureConfig{
+						Service: &infrav1alpha1.ServiceNetworkConfig{
+							Port: 9444,
+						},
+					},
+				},
 				Netd: &infrav1alpha1.NetdServiceConfig{
 					EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{
 						Enabled: true,
@@ -112,6 +122,12 @@ func TestCompileDerivesCrossServiceReferences(t *testing.T) {
 	}
 	if got := compiled.RegionalGateway.DefaultClusterGatewayURL; got != "http://demo-cluster-gateway:9443" {
 		t.Fatalf("unexpected cluster gateway URL: %q", got)
+	}
+	if got := compiled.RegionalGateway.FunctionGatewayURL; got != "http://demo-function-gateway.sandbox0-system.svc.cluster.local:9444" {
+		t.Fatalf("unexpected function gateway URL: %q", got)
+	}
+	if got := compiled.RegionalGateway.Config.FunctionGatewayURL; got != compiled.RegionalGateway.FunctionGatewayURL {
+		t.Fatalf("expected regional gateway config to use function gateway URL %q, got %q", compiled.RegionalGateway.FunctionGatewayURL, got)
 	}
 	if got := compiled.Manager.DefaultClusterID; got != "cluster-a" {
 		t.Fatalf("unexpected default cluster ID: %q", got)

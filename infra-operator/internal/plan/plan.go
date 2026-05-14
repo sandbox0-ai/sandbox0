@@ -139,6 +139,7 @@ type RegionalGatewayPlan struct {
 	IngressConfig            *infrav1alpha1.IngressConfig
 	Config                   *apiconfig.RegionalGatewayConfig
 	DefaultClusterGatewayURL string
+	FunctionGatewayURL       string
 }
 
 type FunctionGatewayPlan struct {
@@ -600,6 +601,7 @@ func compileRegionalGatewayPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *In
 	}
 	if compiled != nil {
 		plan.DefaultClusterGatewayURL = compiled.Services.ClusterGateway.URL
+		plan.FunctionGatewayURL = compiled.Services.FunctionGateway.URL
 	}
 	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.RegionalGateway == nil {
 		return plan
@@ -634,6 +636,7 @@ func compileRegionalGatewayRuntimeConfig(plan *RegionalGatewayPlan, infra *infra
 	}
 
 	cfg.DefaultClusterGatewayURL = plan.DefaultClusterGatewayURL
+	cfg.FunctionGatewayURL = plan.FunctionGatewayURL
 	if cfg.HTTPPort == 0 {
 		cfg.HTTPPort = int(regionalGatewayHTTPPort(infra))
 	}

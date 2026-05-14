@@ -256,6 +256,7 @@ func (r *Reconciler) buildConfig(ctx context.Context, compiledPlan *infraplan.In
 		cfg.DatabaseURL = dsn
 	}
 	cfg.DefaultClusterGatewayURL = compiledPlan.RegionalGateway.DefaultClusterGatewayURL
+	cfg.FunctionGatewayURL = compiledPlan.RegionalGateway.FunctionGatewayURL
 	cfg.SchedulerEnabled = compiledPlan.Components.EnableScheduler
 	cfg.SchedulerURL = compiledPlan.Services.Scheduler.URL
 

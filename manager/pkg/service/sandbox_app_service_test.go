@@ -35,6 +35,16 @@ func TestNormalizeSandboxAppServicesCanonicalizesRoutes(t *testing.T) {
 	}
 }
 
+func TestSandboxAppServiceViewsReturnsEmptySlice(t *testing.T) {
+	views := SandboxAppServiceViews(nil)
+	if views == nil {
+		t.Fatal("SandboxAppServiceViews(nil) = nil, want empty slice")
+	}
+	if len(views) != 0 {
+		t.Fatalf("SandboxAppServiceViews(nil) length = %d, want 0", len(views))
+	}
+}
+
 func TestSandboxAppServicePublishBlockersRequirePublicRestartableRuntime(t *testing.T) {
 	service := SandboxAppService{
 		ID:   "api",

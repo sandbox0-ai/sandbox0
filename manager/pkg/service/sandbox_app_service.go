@@ -193,7 +193,7 @@ func normalizeSandboxAppService(service SandboxAppService) (SandboxAppService, e
 
 func SandboxAppServiceViews(services []SandboxAppService) []SandboxAppServiceView {
 	if len(services) == 0 {
-		return nil
+		return []SandboxAppServiceView{}
 	}
 	views := make([]SandboxAppServiceView, 0, len(services))
 	for _, service := range services {

@@ -158,11 +158,21 @@ func (r *Repository) GetFunction(ctx context.Context, teamID, ref string) (*Func
 	if r == nil || r.pool == nil {
 		return nil, fmt.Errorf("function repository is not configured")
 	}
-	row := r.pool.QueryRow(ctx, `
-		SELECT id, team_id, name, slug, domain_label, active_revision_id, created_by, created_at, updated_at
-		FROM functions
-		WHERE team_id = $1 AND (id = $2 OR slug = $2)
-	`, teamID, ref)
+	ref = strings.TrimSpace(ref)
+	var row pgx.Row
+	if id, err := uuid.Parse(ref); err == nil {
+		row = r.pool.QueryRow(ctx, `
+			SELECT id, team_id, name, slug, domain_label, active_revision_id, created_by, created_at, updated_at
+			FROM functions
+			WHERE team_id = $1 AND (id = $2 OR slug = $3)
+		`, teamID, id, ref)
+	} else {
+		row = r.pool.QueryRow(ctx, `
+			SELECT id, team_id, name, slug, domain_label, active_revision_id, created_by, created_at, updated_at
+			FROM functions
+			WHERE team_id = $1 AND slug = $2
+		`, teamID, ref)
+	}
 	fn, err := scanFunction(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound

@@ -164,6 +164,7 @@ func (r *Reconciler) desiredSystemIngressRules() []networkingv1.NetworkPolicyIng
 		{component: internalauth.ServiceManager, procdOnly: true},
 		{component: internalauth.ServiceSSHGateway, procdOnly: true},
 		{component: internalauth.ServiceClusterGateway},
+		{component: internalauth.ServiceFunctionGateway},
 	}
 
 	rules := make([]networkingv1.NetworkPolicyIngressRule, 0, len(specs))

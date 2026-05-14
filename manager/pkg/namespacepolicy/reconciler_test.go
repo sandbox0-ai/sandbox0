@@ -29,7 +29,7 @@ func TestEnsureBaselineCreatesPolicies(t *testing.T) {
 
 	allow, err := client.NetworkingV1().NetworkPolicies("tpl-demo").Get(context.Background(), policyAllowSystemName, metav1.GetOptions{})
 	require.NoError(t, err)
-	require.Len(t, allow.Spec.Ingress, 3)
+	require.Len(t, allow.Spec.Ingress, 4)
 	assert.Equal(t, "sandbox0-system", allow.Spec.Ingress[0].From[0].NamespaceSelector.MatchLabels[metadataNamespaceLabel])
 	assert.Equal(t, internalauth.ServiceManager, allow.Spec.Ingress[0].From[0].PodSelector.MatchLabels[appNameLabelKey])
 	require.Len(t, allow.Spec.Ingress[0].Ports, 1)
@@ -41,6 +41,8 @@ func TestEnsureBaselineCreatesPolicies(t *testing.T) {
 	assert.Equal(t, int32(49983), allow.Spec.Ingress[1].Ports[0].Port.IntVal)
 	assert.Equal(t, internalauth.ServiceClusterGateway, allow.Spec.Ingress[2].From[0].PodSelector.MatchLabels[appNameLabelKey])
 	assert.Empty(t, allow.Spec.Ingress[2].Ports)
+	assert.Equal(t, internalauth.ServiceFunctionGateway, allow.Spec.Ingress[3].From[0].PodSelector.MatchLabels[appNameLabelKey])
+	assert.Empty(t, allow.Spec.Ingress[3].Ports)
 }
 
 func TestEnsureBaselineRepairsDrift(t *testing.T) {

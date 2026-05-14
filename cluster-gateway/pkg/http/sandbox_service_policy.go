@@ -16,8 +16,8 @@ import (
 	"golang.org/x/time/rate"
 )
 
-type publicGatewayMatch struct {
-	route         *mgr.PublicGatewayRoute
+type sandboxServiceMatch struct {
+	route         *mgr.SandboxAppServiceRoute
 	pathMatched   bool
 	methodAllowed bool
 }
@@ -38,37 +38,37 @@ func (s *Server) getSandboxForPublicExposure(c *gin.Context, sandboxID string) (
 	return sandbox, nil
 }
 
-func matchPublicGatewayRoute(cfg *mgr.PublicGatewayConfig, port int, path string, method string) publicGatewayMatch {
-	if cfg == nil || !cfg.Enabled {
-		return publicGatewayMatch{}
-	}
+func matchSandboxServiceRoute(services []mgr.SandboxAppService, port int, path string, method string) sandboxServiceMatch {
 	requestMethod := strings.ToUpper(strings.TrimSpace(method))
-	var best *mgr.PublicGatewayRoute
+	var best *mgr.SandboxAppServiceRoute
 	bestLen := -1
-	for i := range cfg.Routes {
-		route := &cfg.Routes[i]
-		if route.Port != port {
+	for svcIdx := range services {
+		service := &services[svcIdx]
+		if !service.Ingress.Public || service.Port != port {
 			continue
 		}
-		prefix := route.PathPrefix
-		if prefix == "" {
-			prefix = "/"
-		}
-		if !pathMatchesPrefix(path, prefix) {
-			continue
-		}
-		if len(prefix) > bestLen {
-			best = route
-			bestLen = len(prefix)
+		for routeIdx := range service.Ingress.Routes {
+			route := &service.Ingress.Routes[routeIdx]
+			prefix := route.PathPrefix
+			if prefix == "" {
+				prefix = "/"
+			}
+			if !pathMatchesPrefix(path, prefix) {
+				continue
+			}
+			if len(prefix) > bestLen {
+				best = route
+				bestLen = len(prefix)
+			}
 		}
 	}
 	if best == nil {
-		return publicGatewayMatch{}
+		return sandboxServiceMatch{}
 	}
-	return publicGatewayMatch{
+	return sandboxServiceMatch{
 		route:         best,
 		pathMatched:   true,
-		methodAllowed: publicGatewayMethodAllowed(best, requestMethod),
+		methodAllowed: sandboxServiceMethodAllowed(best, requestMethod),
 	}
 }
 
@@ -82,7 +82,7 @@ func pathMatchesPrefix(path, prefix string) bool {
 	return strings.HasPrefix(path, strings.TrimRight(prefix, "/")+"/")
 }
 
-func publicGatewayMethodAllowed(route *mgr.PublicGatewayRoute, method string) bool {
+func sandboxServiceMethodAllowed(route *mgr.SandboxAppServiceRoute, method string) bool {
 	if route == nil || len(route.Methods) == 0 {
 		return true
 	}
@@ -94,27 +94,27 @@ func publicGatewayMethodAllowed(route *mgr.PublicGatewayRoute, method string) bo
 	return false
 }
 
-func (s *Server) enforcePublicGatewayRoute(c *gin.Context, sandboxID string, route *mgr.PublicGatewayRoute) bool {
+func (s *Server) enforceSandboxServiceRoute(c *gin.Context, sandboxID string, route *mgr.SandboxAppServiceRoute) bool {
 	if route == nil {
 		return true
 	}
-	if handled := s.handlePublicGatewayCORS(c, route); handled {
+	if handled := s.handleSandboxAppServiceRouteCORS(c, route); handled {
 		return false
 	}
-	if !s.authorizePublicGatewayRoute(c, route) {
+	if !s.authorizeSandboxServiceRoute(c, route) {
 		return false
 	}
-	if !s.allowPublicGatewayRate(c, sandboxID, route) {
+	if !s.allowSandboxServiceRate(c, sandboxID, route) {
 		spec.JSONError(c, nethttp.StatusTooManyRequests, spec.CodeUnavailable, "rate limit exceeded")
 		return false
 	}
 	if route.RewritePrefix != nil {
-		rewritePublicGatewayPath(c, route.PathPrefix, *route.RewritePrefix)
+		rewriteSandboxServicePath(c, route.PathPrefix, *route.RewritePrefix)
 	}
 	return true
 }
 
-func (s *Server) handlePublicGatewayCORS(c *gin.Context, route *mgr.PublicGatewayRoute) bool {
+func (s *Server) handleSandboxAppServiceRouteCORS(c *gin.Context, route *mgr.SandboxAppServiceRoute) bool {
 	cors := route.CORS
 	if cors == nil {
 		return false
@@ -142,7 +142,7 @@ func (s *Server) handlePublicGatewayCORS(c *gin.Context, route *mgr.PublicGatewa
 		return false
 	}
 	requestMethod := strings.ToUpper(strings.TrimSpace(c.GetHeader("Access-Control-Request-Method")))
-	if requestMethod != "" && !publicGatewayCORSMethodAllowed(route, requestMethod) {
+	if requestMethod != "" && !sandboxServiceCORSMethodAllowed(route, requestMethod) {
 		spec.JSONError(c, nethttp.StatusMethodNotAllowed, spec.CodeForbidden, "method is not allowed")
 		return true
 	}
@@ -163,9 +163,9 @@ func (s *Server) handlePublicGatewayCORS(c *gin.Context, route *mgr.PublicGatewa
 	return true
 }
 
-func publicGatewayCORSMethodAllowed(route *mgr.PublicGatewayRoute, method string) bool {
+func sandboxServiceCORSMethodAllowed(route *mgr.SandboxAppServiceRoute, method string) bool {
 	if route == nil || route.CORS == nil || len(route.CORS.AllowedMethods) == 0 {
-		return publicGatewayMethodAllowed(route, method)
+		return sandboxServiceMethodAllowed(route, method)
 	}
 	for _, allowed := range route.CORS.AllowedMethods {
 		if allowed == "*" || strings.EqualFold(allowed, method) {
@@ -196,12 +196,12 @@ func allowedOriginHeader(origin string, allowed []string) string {
 	return ""
 }
 
-func (s *Server) authorizePublicGatewayRoute(c *gin.Context, route *mgr.PublicGatewayRoute) bool {
-	if route.Auth == nil || route.Auth.Mode == "" || route.Auth.Mode == mgr.PublicGatewayAuthModeNone {
+func (s *Server) authorizeSandboxServiceRoute(c *gin.Context, route *mgr.SandboxAppServiceRoute) bool {
+	if route.Auth == nil || route.Auth.Mode == "" || route.Auth.Mode == mgr.SandboxAppServiceRouteAuthModeNone {
 		return true
 	}
 	switch route.Auth.Mode {
-	case mgr.PublicGatewayAuthModeBearer:
+	case mgr.SandboxAppServiceRouteAuthModeBearer:
 		token := strings.TrimSpace(c.GetHeader("Authorization"))
 		const prefix = "Bearer "
 		if !strings.HasPrefix(token, prefix) {
@@ -212,7 +212,7 @@ func (s *Server) authorizePublicGatewayRoute(c *gin.Context, route *mgr.PublicGa
 			spec.JSONError(c, nethttp.StatusUnauthorized, spec.CodeUnauthorized, "invalid bearer token")
 			return false
 		}
-	case mgr.PublicGatewayAuthModeHeader:
+	case mgr.SandboxAppServiceRouteAuthModeHeader:
 		if !sha256HexMatches(c.GetHeader(route.Auth.HeaderName), route.Auth.HeaderValueSHA256) {
 			spec.JSONError(c, nethttp.StatusUnauthorized, spec.CodeUnauthorized, "invalid header credential")
 			return false
@@ -233,13 +233,13 @@ func sha256HexMatches(value, expectedHex string) bool {
 	return subtle.ConstantTimeCompare(sum[:], expected) == 1
 }
 
-func (s *Server) allowPublicGatewayRate(c *gin.Context, sandboxID string, route *mgr.PublicGatewayRoute) bool {
+func (s *Server) allowSandboxServiceRate(c *gin.Context, sandboxID string, route *mgr.SandboxAppServiceRoute) bool {
 	if route.RateLimit == nil {
 		return true
 	}
 	key := fmt.Sprintf("%s:%s:%d:%d", sandboxID, route.ID, route.RateLimit.RPS, route.RateLimit.Burst)
 	limiter := rate.NewLimiter(rate.Limit(route.RateLimit.RPS), route.RateLimit.Burst)
-	actual, _ := s.publicGatewayLimiters.LoadOrStore(key, limiter)
+	actual, _ := s.sandboxServiceLimiters.LoadOrStore(key, limiter)
 	if !actual.(*rate.Limiter).Allow() {
 		c.Header("Retry-After", "1")
 		return false
@@ -247,18 +247,18 @@ func (s *Server) allowPublicGatewayRate(c *gin.Context, sandboxID string, route 
 	return true
 }
 
-func publicGatewayProxyTimeout(defaultTimeout time.Duration, route *mgr.PublicGatewayRoute) time.Duration {
+func sandboxServiceProxyTimeout(defaultTimeout time.Duration, route *mgr.SandboxAppServiceRoute) time.Duration {
 	if route != nil && route.TimeoutSeconds > 0 {
 		return time.Duration(route.TimeoutSeconds) * time.Second
 	}
 	return defaultTimeout
 }
 
-func publicGatewayHasTimeout(route *mgr.PublicGatewayRoute) bool {
+func sandboxServiceHasTimeout(route *mgr.SandboxAppServiceRoute) bool {
 	return route != nil && route.TimeoutSeconds > 0
 }
 
-func rewritePublicGatewayPath(c *gin.Context, matchedPrefix, rewritePrefix string) {
+func rewriteSandboxServicePath(c *gin.Context, matchedPrefix, rewritePrefix string) {
 	req := c.Request
 	if req == nil || req.URL == nil {
 		return

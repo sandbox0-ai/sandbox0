@@ -53,18 +53,14 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 		}
 		return
 	}
-	if sandbox.PublicGateway == nil || !sandbox.PublicGateway.Enabled {
-		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "route is not exposed")
-		return
-	}
-	match := matchPublicGatewayRoute(sandbox.PublicGateway, port, c.Request.URL.Path, c.Request.Method)
+	match := matchSandboxServiceRoute(sandbox.Services, port, c.Request.URL.Path, c.Request.Method)
 	if !match.pathMatched {
 		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "route is not exposed")
 		return
 	}
 	route := match.route
 	if c.Request.Method == http.MethodOptions && route.CORS != nil {
-		if !s.enforcePublicGatewayRoute(c, sandboxID, route) {
+		if !s.enforceSandboxServiceRoute(c, sandboxID, route) {
 			return
 		}
 	}
@@ -72,7 +68,7 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 		spec.JSONError(c, http.StatusMethodNotAllowed, spec.CodeForbidden, "method is not allowed")
 		return
 	}
-	if !s.enforcePublicGatewayRoute(c, sandboxID, route) {
+	if !s.enforceSandboxServiceRoute(c, sandboxID, route) {
 		return
 	}
 	if sandboxWantsPaused(sandbox) {
@@ -107,8 +103,8 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 	if proxyTimeout == 0 {
 		proxyTimeout = 10 * time.Second
 	}
-	proxyTimeout = publicGatewayProxyTimeout(proxyTimeout, route)
-	if !publicGatewayHasTimeout(route) {
+	proxyTimeout = sandboxServiceProxyTimeout(proxyTimeout, route)
+	if !sandboxServiceHasTimeout(route) {
 		c.Request = proxy.WithUpstreamTimeoutDisabledRequest(c.Request)
 	}
 	router, err := proxy.NewRouter(targetURL.String(), s.logger, proxyTimeout, proxy.WithHTTPClient(s.outboundHTTPClient()))

@@ -2,28 +2,36 @@ package service
 
 import "testing"
 
-func TestPublicGatewayConfigToSandboxAppServicesGroupsRoutesByPort(t *testing.T) {
-	cfg := &PublicGatewayConfig{
-		Enabled: true,
-		Routes: []PublicGatewayRoute{
-			{ID: "api", Port: 8080, PathPrefix: "/api", Resume: true},
-			{ID: "admin", Port: 8080, PathPrefix: "/admin", Resume: false},
-			{ID: "metrics", Port: 9090, PathPrefix: "/metrics", Resume: false},
+func TestNormalizeSandboxAppServicesCanonicalizesRoutes(t *testing.T) {
+	rewrite := "v1"
+	services, err := NormalizeSandboxAppServices([]SandboxAppService{{
+		ID:   "API",
+		Port: 8080,
+		Ingress: SandboxAppServiceIngress{
+			Public: true,
+			Routes: []SandboxAppServiceRoute{{
+				ID:            "Users",
+				PathPrefix:    "api",
+				Methods:       []string{"get", "GET"},
+				RewritePrefix: &rewrite,
+			}},
 		},
-	}
-
-	services, err := PublicGatewayConfigToSandboxAppServices(cfg)
+	}})
 	if err != nil {
-		t.Fatalf("convert public gateway: %v", err)
+		t.Fatalf("NormalizeSandboxAppServices: %v", err)
 	}
-	if len(services) != 2 {
-		t.Fatalf("services len = %d, want 2", len(services))
+	if len(services) != 1 {
+		t.Fatalf("services len = %d, want 1", len(services))
 	}
-	if services[0].ID != "p8080" || services[0].Port != 8080 || len(services[0].Ingress.Routes) != 2 {
-		t.Fatalf("unexpected first service: %#v", services[0])
+	if services[0].ID != "api" || services[0].Ingress.Routes[0].ID != "users" {
+		t.Fatalf("unexpected service ids: %#v", services[0])
 	}
-	if services[1].ID != "metrics" || services[1].Port != 9090 || len(services[1].Ingress.Routes) != 1 {
-		t.Fatalf("unexpected second service: %#v", services[1])
+	route := services[0].Ingress.Routes[0]
+	if route.PathPrefix != "/api" || *route.RewritePrefix != "/v1" {
+		t.Fatalf("unexpected prefixes: %#v", route)
+	}
+	if len(route.Methods) != 1 || route.Methods[0] != "GET" {
+		t.Fatalf("methods = %#v, want GET", route.Methods)
 	}
 }
 

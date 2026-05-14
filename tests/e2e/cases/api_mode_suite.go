@@ -1389,16 +1389,19 @@ func assertSandboxNetworkIsolation(env *framework.ScenarioEnv, session *e2eutils
 		return nil
 	}).WithTimeout(30 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
 
-	routes := []apispec.PublicGatewayRoute{{
+	routes := []apispec.SandboxAppServiceRoute{{
 		Id:         "web",
-		Port:       exposedPort,
 		PathPrefix: ptr("/"),
 		Resume:     true,
 	}}
-	_, exposureDomain, status, err := session.UpdatePublicGateway(env.TestCtx.Context, GinkgoT(), sandboxBID, apispec.PublicGatewayConfig{
-		Enabled: true,
-		Routes:  &routes,
-	})
+	_, exposureDomain, status, err := session.UpdateSandboxServices(env.TestCtx.Context, GinkgoT(), sandboxBID, []apispec.SandboxAppService{{
+		Id:   "web",
+		Port: exposedPort,
+		Ingress: apispec.SandboxAppServiceIngress{
+			Public: true,
+			Routes: &routes,
+		},
+	}})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
 

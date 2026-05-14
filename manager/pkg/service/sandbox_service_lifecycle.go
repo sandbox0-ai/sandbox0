@@ -128,17 +128,6 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 				return err
 			}
 			merged.Services = services
-			merged.PublicGateway = nil
-		}
-		if cfg.PublicGateway != nil {
-			// Compatibility adapter for the legacy public-gateway API. Keep this
-			// until clients migrate to /sandboxes/{id}/services.
-			services, err := PublicGatewayConfigToSandboxAppServices(cfg.PublicGateway)
-			if err != nil {
-				return err
-			}
-			merged.Services = services
-			merged.PublicGateway = nil
 		}
 
 		if cfg.Network != nil {
@@ -247,11 +236,6 @@ func (s *SandboxService) podToSandbox(ctx context.Context, pod *corev1.Pod, sand
 	}
 
 	cfg := parseSandboxConfig(pod.Annotations[controller.AnnotationConfig])
-	if len(cfg.Services) == 0 && cfg.PublicGateway != nil {
-		if services, err := PublicGatewayConfigToSandboxAppServices(cfg.PublicGateway); err == nil {
-			cfg.Services = services
-		}
-	}
 	autoResume := true
 	if cfg.AutoResume != nil {
 		autoResume = *cfg.AutoResume
@@ -269,7 +253,6 @@ func (s *SandboxService) podToSandbox(ctx context.Context, pod *corev1.Pod, sand
 		PowerState:    powerState,
 		AutoResume:    autoResume,
 		Services:      cfg.Services,
-		PublicGateway: SandboxAppServicesToPublicGatewayConfig(cfg.Services),
 		Mounts:        parseClaimMounts(pod.Annotations[controller.AnnotationMounts]),
 		PodName:       pod.Name,
 		ExpiresAt:     expiresAt,

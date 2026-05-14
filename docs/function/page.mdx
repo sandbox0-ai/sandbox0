@@ -15,7 +15,7 @@ Functions are created from Sandbox Services, not from uploaded ZIP files or cont
 | Revision | Immutable snapshot of the source sandbox service plus the SandboxVolume mounts needed to restore it |
 | Alias | Mutable pointer from a name such as `production` to one revision |
 
-Only publishable sandbox services can become function revisions. A service is publishable when it is public and has a restartable runtime. Legacy `public_gateway` configuration is still accepted and projected into services, but it may not be publishable until a runtime is added.
+Only publishable sandbox services can become function revisions. A service is publishable when it is public and has a restartable runtime.
 
 When the source sandbox was claimed with SandboxVolume mounts, those mount references are captured on the revision. If the source sandbox is later deleted, `function-gateway` claims a new runtime sandbox from the same template, mounts the captured volumes, starts the service runtime, and continues serving the stable function host.
 
@@ -122,7 +122,3 @@ Move an alias:
 Function traffic is handled by `function-gateway` on the fixed function host. The gateway resolves the `production` alias, enforces the revision's service route policy, and proxies to the service port.
 
 If the source sandbox still exists, the gateway resumes it when needed and routes to that sandbox. If the source sandbox has been deleted, the gateway restores a function runtime sandbox from the revision's template and captured mounts, starts the service runtime command or warm process, stores the runtime sandbox/context on the revision, and reuses that runtime until sandbox0 scales it down.
-
-## Compatibility
-
-The existing sandbox public gateway remains available. Internally, new code should treat Sandbox Service as the canonical model; `public_gateway` is a compatibility projection so existing clients continue to work during migration.

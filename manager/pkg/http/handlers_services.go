@@ -3,6 +3,7 @@ package http
 import (
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
@@ -10,6 +11,17 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
 )
+
+func (s *Server) getExposureDomain() string {
+	rootDomain := strings.TrimSpace(s.publicRootDomain)
+	if rootDomain == "" {
+		rootDomain = "sandbox0.app"
+	}
+	if s.publicRegionID == "" {
+		return ""
+	}
+	return s.publicRegionID + "." + rootDomain
+}
 
 func (s *Server) listSandboxServices(c *gin.Context) {
 	sandboxID := c.Param("id")
@@ -34,8 +46,9 @@ func (s *Server) listSandboxServices(c *gin.Context) {
 	}
 
 	spec.JSONSuccess(c, http.StatusOK, gin.H{
-		"sandbox_id": sandboxID,
-		"services":   service.SandboxAppServiceViews(sandbox.Services),
+		"sandbox_id":      sandboxID,
+		"services":        service.SandboxAppServiceViews(sandbox.Services),
+		"exposure_domain": s.getExposureDomain(),
 	})
 }
 
@@ -87,7 +100,8 @@ func (s *Server) updateSandboxServices(c *gin.Context) {
 	}
 
 	spec.JSONSuccess(c, http.StatusOK, gin.H{
-		"sandbox_id": sandboxID,
-		"services":   service.SandboxAppServiceViews(updated.Services),
+		"sandbox_id":      sandboxID,
+		"services":        service.SandboxAppServiceViews(updated.Services),
+		"exposure_domain": s.getExposureDomain(),
 	})
 }

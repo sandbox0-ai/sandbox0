@@ -111,17 +111,17 @@ const (
 	ProcessTypeRepl ProcessType = "repl"
 )
 
-// Defines values for PublicGatewayAuthMode.
-const (
-	Bearer PublicGatewayAuthMode = "bearer"
-	Header PublicGatewayAuthMode = "header"
-	None   PublicGatewayAuthMode = "none"
-)
-
 // Defines values for REPLReadyMode.
 const (
 	PromptToken  REPLReadyMode = "prompt_token"
 	StartupDelay REPLReadyMode = "startup_delay"
+)
+
+// Defines values for SandboxAppServiceRouteAuthMode.
+const (
+	Bearer SandboxAppServiceRouteAuthMode = "bearer"
+	Header SandboxAppServiceRouteAuthMode = "header"
+	None   SandboxAppServiceRouteAuthMode = "none"
 )
 
 // Defines values for SandboxAppServiceRuntimeType.
@@ -319,11 +319,6 @@ const (
 	SuccessPauseSandboxResponseSuccessTrue SuccessPauseSandboxResponseSuccess = true
 )
 
-// Defines values for SuccessPublicGatewayResponseSuccess.
-const (
-	SuccessPublicGatewayResponseSuccessTrue SuccessPublicGatewayResponseSuccess = true
-)
-
 // Defines values for SuccessRefreshResponseSuccess.
 const (
 	SuccessRefreshResponseSuccessTrue SuccessRefreshResponseSuccess = true
@@ -456,7 +451,7 @@ const (
 
 // Defines values for SuccessWrittenResponseSuccess.
 const (
-	True SuccessWrittenResponseSuccess = true
+	SuccessWrittenResponseSuccessTrue SuccessWrittenResponseSuccess = true
 )
 
 // Defines values for TrafficRuleAction.
@@ -1308,72 +1303,6 @@ type ProjectionSpec struct {
 	UsernamePassword *UsernamePasswordProjection `json:"usernamePassword,omitempty"`
 }
 
-// PublicGatewayAuth defines model for PublicGatewayAuth.
-type PublicGatewayAuth struct {
-	// BearerTokenSha256 Hex SHA-256 of the accepted bearer token. Required when mode is bearer.
-	BearerTokenSha256 *string `json:"bearer_token_sha256,omitempty"`
-
-	// HeaderName Required header name when mode is header.
-	HeaderName *string `json:"header_name,omitempty"`
-
-	// HeaderValueSha256 Hex SHA-256 of the required header value when mode is header.
-	HeaderValueSha256 *string               `json:"header_value_sha256,omitempty"`
-	Mode              PublicGatewayAuthMode `json:"mode"`
-}
-
-// PublicGatewayAuthMode defines model for PublicGatewayAuth.Mode.
-type PublicGatewayAuthMode string
-
-// PublicGatewayCORS defines model for PublicGatewayCORS.
-type PublicGatewayCORS struct {
-	AllowCredentials *bool     `json:"allow_credentials,omitempty"`
-	AllowedHeaders   *[]string `json:"allowed_headers,omitempty"`
-	AllowedMethods   *[]string `json:"allowed_methods,omitempty"`
-	AllowedOrigins   *[]string `json:"allowed_origins,omitempty"`
-	ExposeHeaders    *[]string `json:"expose_headers,omitempty"`
-	MaxAgeSeconds    *int32    `json:"max_age_seconds,omitempty"`
-}
-
-// PublicGatewayConfig defines model for PublicGatewayConfig.
-type PublicGatewayConfig struct {
-	// Enabled Enables request-level public gateway enforcement for sandbox public traffic.
-	Enabled bool                  `json:"enabled"`
-	Routes  *[]PublicGatewayRoute `json:"routes,omitempty"`
-}
-
-// PublicGatewayRateLimit defines model for PublicGatewayRateLimit.
-type PublicGatewayRateLimit struct {
-	Burst int32 `json:"burst"`
-	Rps   int32 `json:"rps"`
-}
-
-// PublicGatewayRoute defines model for PublicGatewayRoute.
-type PublicGatewayRoute struct {
-	Auth *PublicGatewayAuth `json:"auth,omitempty"`
-	Cors *PublicGatewayCORS `json:"cors,omitempty"`
-
-	// Id Stable route id. Must be a DNS label and unique within the sandbox policy.
-	Id string `json:"id"`
-
-	// Methods Allowed HTTP methods. Empty allows every method.
-	Methods *[]string `json:"methods,omitempty"`
-
-	// PathPrefix Request path prefix matched before proxying to the sandbox port.
-	PathPrefix *string                 `json:"path_prefix,omitempty"`
-	Port       int32                   `json:"port"`
-	RateLimit  *PublicGatewayRateLimit `json:"rate_limit,omitempty"`
-
-	// Resume Route-level resume gate for public gateway traffic. Evaluated only when
-	// sandbox auto_resume is true.
-	Resume bool `json:"resume"`
-
-	// RewritePrefix Optional replacement prefix applied before proxying.
-	RewritePrefix *string `json:"rewrite_prefix"`
-
-	// TimeoutSeconds Per-route upstream timeout in seconds. Zero disables the route override.
-	TimeoutSeconds *int32 `json:"timeout_seconds,omitempty"`
-}
-
 // REPLConfig defines model for REPLConfig.
 type REPLConfig struct {
 	Candidates  []ExecCandidate   `json:"candidates"`
@@ -1532,7 +1461,6 @@ type Sandbox struct {
 	Paused        bool                  `json:"paused"`
 	PodName       string                `json:"pod_name"`
 	PowerState    SandboxPowerState     `json:"power_state"`
-	PublicGateway *PublicGatewayConfig  `json:"public_gateway,omitempty"`
 	Services      *[]SandboxAppService  `json:"services,omitempty"`
 	Ssh           *SandboxSSHConnection `json:"ssh,omitempty"`
 	Status        string                `json:"status"`
@@ -1566,15 +1494,47 @@ type SandboxAppServiceIngress struct {
 
 // SandboxAppServiceRoute defines model for SandboxAppServiceRoute.
 type SandboxAppServiceRoute struct {
-	Auth           *PublicGatewayAuth      `json:"auth,omitempty"`
-	Cors           *PublicGatewayCORS      `json:"cors,omitempty"`
-	Id             string                  `json:"id"`
-	Methods        *[]string               `json:"methods,omitempty"`
-	PathPrefix     *string                 `json:"path_prefix,omitempty"`
-	RateLimit      *PublicGatewayRateLimit `json:"rate_limit,omitempty"`
-	Resume         bool                    `json:"resume"`
-	RewritePrefix  *string                 `json:"rewrite_prefix"`
-	TimeoutSeconds *int32                  `json:"timeout_seconds,omitempty"`
+	Auth           *SandboxAppServiceRouteAuth      `json:"auth,omitempty"`
+	Cors           *SandboxAppServiceRouteCORS      `json:"cors,omitempty"`
+	Id             string                           `json:"id"`
+	Methods        *[]string                        `json:"methods,omitempty"`
+	PathPrefix     *string                          `json:"path_prefix,omitempty"`
+	RateLimit      *SandboxAppServiceRouteRateLimit `json:"rate_limit,omitempty"`
+	Resume         bool                             `json:"resume"`
+	RewritePrefix  *string                          `json:"rewrite_prefix"`
+	TimeoutSeconds *int32                           `json:"timeout_seconds,omitempty"`
+}
+
+// SandboxAppServiceRouteAuth defines model for SandboxAppServiceRouteAuth.
+type SandboxAppServiceRouteAuth struct {
+	// BearerTokenSha256 Hex SHA-256 of the accepted bearer token. Required when mode is bearer.
+	BearerTokenSha256 *string `json:"bearer_token_sha256,omitempty"`
+
+	// HeaderName Required header name when mode is header.
+	HeaderName *string `json:"header_name,omitempty"`
+
+	// HeaderValueSha256 Hex SHA-256 of the required header value when mode is header.
+	HeaderValueSha256 *string                        `json:"header_value_sha256,omitempty"`
+	Mode              SandboxAppServiceRouteAuthMode `json:"mode"`
+}
+
+// SandboxAppServiceRouteAuthMode defines model for SandboxAppServiceRouteAuth.Mode.
+type SandboxAppServiceRouteAuthMode string
+
+// SandboxAppServiceRouteCORS defines model for SandboxAppServiceRouteCORS.
+type SandboxAppServiceRouteCORS struct {
+	AllowCredentials *bool     `json:"allow_credentials,omitempty"`
+	AllowedHeaders   *[]string `json:"allowed_headers,omitempty"`
+	AllowedMethods   *[]string `json:"allowed_methods,omitempty"`
+	AllowedOrigins   *[]string `json:"allowed_origins,omitempty"`
+	ExposeHeaders    *[]string `json:"expose_headers,omitempty"`
+	MaxAgeSeconds    *int32    `json:"max_age_seconds,omitempty"`
+}
+
+// SandboxAppServiceRouteRateLimit defines model for SandboxAppServiceRouteRateLimit.
+type SandboxAppServiceRouteRateLimit struct {
+	Burst int32 `json:"burst"`
+	Rps   int32 `json:"rps"`
 }
 
 // SandboxAppServiceRuntime defines model for SandboxAppServiceRuntime.
@@ -1607,13 +1567,12 @@ type SandboxAppServiceView struct {
 type SandboxConfig struct {
 	// AutoResume Sandbox-level resume gate for paused sandboxes. When false, any inbound request
 	// (API or public exposure) must not auto resume the sandbox.
-	AutoResume    *bool                 `json:"auto_resume,omitempty"`
-	EnvVars       *map[string]string    `json:"env_vars,omitempty"`
-	HardTtl       *int32                `json:"hard_ttl,omitempty"`
-	Network       *SandboxNetworkPolicy `json:"network,omitempty"`
-	PublicGateway *PublicGatewayConfig  `json:"public_gateway,omitempty"`
-	Services      *[]SandboxAppService  `json:"services,omitempty"`
-	Ttl           *int32                `json:"ttl,omitempty"`
+	AutoResume *bool                 `json:"auto_resume,omitempty"`
+	EnvVars    *map[string]string    `json:"env_vars,omitempty"`
+	HardTtl    *int32                `json:"hard_ttl,omitempty"`
+	Network    *SandboxNetworkPolicy `json:"network,omitempty"`
+	Services   *[]SandboxAppService  `json:"services,omitempty"`
+	Ttl        *int32                `json:"ttl,omitempty"`
 
 	// Webhook Per-sandbox webhook configuration. Sandbox0 delivers webhook events at least once and consumers should deduplicate by event_id. For sandbox lifecycle events, procd persists signed delivery records to a manager-owned SandboxVolume outside the workspace before dispatch; manager also emits sandbox.deleted during pod deletion cleanup.
 	Webhook *WebhookConfig `json:"webhook,omitempty"`
@@ -1778,12 +1737,11 @@ type SandboxTemplateStatus struct {
 type SandboxUpdateConfig struct {
 	// AutoResume Sandbox-level resume gate for paused sandboxes. When false, any inbound request
 	// (API or public exposure) must not auto resume the sandbox.
-	AutoResume    *bool                 `json:"auto_resume,omitempty"`
-	HardTtl       *int32                `json:"hard_ttl,omitempty"`
-	Network       *SandboxNetworkPolicy `json:"network,omitempty"`
-	PublicGateway *PublicGatewayConfig  `json:"public_gateway,omitempty"`
-	Services      *[]SandboxAppService  `json:"services,omitempty"`
-	Ttl           *int32                `json:"ttl,omitempty"`
+	AutoResume *bool                 `json:"auto_resume,omitempty"`
+	HardTtl    *int32                `json:"hard_ttl,omitempty"`
+	Network    *SandboxNetworkPolicy `json:"network,omitempty"`
+	Services   *[]SandboxAppService  `json:"services,omitempty"`
+	Ttl        *int32                `json:"ttl,omitempty"`
 }
 
 // SandboxUpdateRequest defines model for SandboxUpdateRequest.
@@ -2171,19 +2129,6 @@ type SuccessPauseSandboxResponse struct {
 // SuccessPauseSandboxResponseSuccess defines model for SuccessPauseSandboxResponse.Success.
 type SuccessPauseSandboxResponseSuccess bool
 
-// SuccessPublicGatewayResponse defines model for SuccessPublicGatewayResponse.
-type SuccessPublicGatewayResponse struct {
-	Data *struct {
-		ExposureDomain *string             `json:"exposure_domain,omitempty"`
-		PublicGateway  PublicGatewayConfig `json:"public_gateway"`
-		SandboxId      string              `json:"sandbox_id"`
-	} `json:"data,omitempty"`
-	Success SuccessPublicGatewayResponseSuccess `json:"success"`
-}
-
-// SuccessPublicGatewayResponseSuccess defines model for SuccessPublicGatewayResponse.Success.
-type SuccessPublicGatewayResponseSuccess bool
-
 // SuccessRefreshResponse defines model for SuccessRefreshResponse.
 type SuccessRefreshResponse struct {
 	Data    *RefreshResponse              `json:"data,omitempty"`
@@ -2310,8 +2255,9 @@ type SuccessSandboxResponseSuccess bool
 // SuccessSandboxServicesResponse defines model for SuccessSandboxServicesResponse.
 type SuccessSandboxServicesResponse struct {
 	Data *struct {
-		SandboxId string                  `json:"sandbox_id"`
-		Services  []SandboxAppServiceView `json:"services"`
+		ExposureDomain *string                 `json:"exposure_domain,omitempty"`
+		SandboxId      string                  `json:"sandbox_id"`
+		Services       []SandboxAppServiceView `json:"services"`
 	} `json:"data,omitempty"`
 	Success SuccessSandboxServicesResponseSuccess `json:"success"`
 }
@@ -2844,9 +2790,6 @@ type PostApiV1SandboxesIdFilesMoveJSONRequestBody = MoveFileRequest
 
 // PutApiV1SandboxesIdNetworkJSONRequestBody defines body for PutApiV1SandboxesIdNetwork for application/json ContentType.
 type PutApiV1SandboxesIdNetworkJSONRequestBody = SandboxNetworkPolicy
-
-// PutApiV1SandboxesIdPublicGatewayJSONRequestBody defines body for PutApiV1SandboxesIdPublicGateway for application/json ContentType.
-type PutApiV1SandboxesIdPublicGatewayJSONRequestBody = PublicGatewayConfig
 
 // PostApiV1SandboxesIdRefreshJSONRequestBody defines body for PostApiV1SandboxesIdRefresh for application/json ContentType.
 type PostApiV1SandboxesIdRefreshJSONRequestBody = SandboxRefreshRequest

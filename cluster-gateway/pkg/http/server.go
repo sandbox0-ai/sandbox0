@@ -37,30 +37,30 @@ import (
 
 // Server represents the HTTP server for cluster-gateway
 type Server struct {
-	router                *gin.Engine
-	cfg                   *config.ClusterGatewayConfig
-	proxy2Mgr             *proxy.Router
-	proxy2sp              *proxy.Router
-	managerClient         *client.ManagerClient
-	authMiddleware        *middleware.InternalAuthMiddleware
-	publicAuth            *gatewaymiddleware.AuthMiddleware
-	compositeAuth         *middleware.CompositeAuthMiddleware
-	publicIdentityRepo    *gatewayidentity.Repository
-	publicAPIKeyRepo      *gatewayapikey.Repository
-	rateLimiter           *gatewaymiddleware.RateLimiter
-	externalLimiter       *middleware.ExternalRateLimiter
-	publicBuiltin         *gatewaybuiltin.Provider
-	publicOIDC            *gatewayoidc.Manager
-	publicJWT             *gatewayauthn.Issuer
-	requestLogger         *middleware.RequestLogger
-	logger                *zap.Logger
-	meteringHandler       *gatewayhandlers.MeteringHandler
-	internalAuthGen       *internalauth.Generator
-	entitlements          licensing.Entitlements
-	obsProvider           *observability.Provider
-	httpClient            *http.Client
-	exposureSandboxCache  *cache.Cache[string, *mgr.Sandbox]
-	publicGatewayLimiters sync.Map
+	router                 *gin.Engine
+	cfg                    *config.ClusterGatewayConfig
+	proxy2Mgr              *proxy.Router
+	proxy2sp               *proxy.Router
+	managerClient          *client.ManagerClient
+	authMiddleware         *middleware.InternalAuthMiddleware
+	publicAuth             *gatewaymiddleware.AuthMiddleware
+	compositeAuth          *middleware.CompositeAuthMiddleware
+	publicIdentityRepo     *gatewayidentity.Repository
+	publicAPIKeyRepo       *gatewayapikey.Repository
+	rateLimiter            *gatewaymiddleware.RateLimiter
+	externalLimiter        *middleware.ExternalRateLimiter
+	publicBuiltin          *gatewaybuiltin.Provider
+	publicOIDC             *gatewayoidc.Manager
+	publicJWT              *gatewayauthn.Issuer
+	requestLogger          *middleware.RequestLogger
+	logger                 *zap.Logger
+	meteringHandler        *gatewayhandlers.MeteringHandler
+	internalAuthGen        *internalauth.Generator
+	entitlements           licensing.Entitlements
+	obsProvider            *observability.Provider
+	httpClient             *http.Client
+	exposureSandboxCache   *cache.Cache[string, *mgr.Sandbox]
+	sandboxServiceLimiters sync.Map
 }
 
 // NewServer creates a new HTTP server
@@ -353,8 +353,6 @@ func (s *Server) setupRoutes() {
 
 			sandboxes.GET("/:id/services", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.listSandboxServices)
 			sandboxes.PUT("/:id/services", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.updateSandboxServices)
-			sandboxes.GET("/:id/public-gateway", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.getPublicGateway)
-			sandboxes.PUT("/:id/public-gateway", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.updatePublicGateway)
 
 			// === Process/Context Management (→ Procd) ===
 			contexts := sandboxes.Group("/:id/contexts")

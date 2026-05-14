@@ -22,7 +22,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func TestPublicGatewayProxiesAuthorizedRouteWithRewrite(t *testing.T) {
+func TestSandboxServiceProxiesAuthorizedRouteWithRewrite(t *testing.T) {
 	upstreamHits := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamHits++
@@ -36,25 +36,28 @@ func TestPublicGatewayProxiesAuthorizedRouteWithRewrite(t *testing.T) {
 	port := serverPort(t, upstream.URL)
 	tokenHash := sha256Hex("secret-token")
 	rewritePrefix := "/v1"
-	gateway := newPublicGatewayExposureTestServer(t, &mgr.Sandbox{
+	gateway := newSandboxServiceExposureTestServer(t, &mgr.Sandbox{
 		ID:           "sb-demo",
 		TeamID:       "team-1",
 		InternalAddr: "http://127.0.0.1:1",
 		AutoResume:   true,
-		PublicGateway: &mgr.PublicGatewayConfig{
-			Enabled: true,
-			Routes: []mgr.PublicGatewayRoute{{
-				ID:            "api",
-				Port:          port,
-				PathPrefix:    "/api",
-				Methods:       []string{http.MethodGet},
-				RewritePrefix: &rewritePrefix,
-				Auth: &mgr.PublicGatewayAuth{
-					Mode:              mgr.PublicGatewayAuthModeBearer,
-					BearerTokenSHA256: tokenHash,
-				},
-			}},
-		},
+		Services: []mgr.SandboxAppService{{
+			ID:   "api",
+			Port: port,
+			Ingress: mgr.SandboxAppServiceIngress{
+				Public: true,
+				Routes: []mgr.SandboxAppServiceRoute{{
+					ID:            "api",
+					PathPrefix:    "/api",
+					Methods:       []string{http.MethodGet},
+					RewritePrefix: &rewritePrefix,
+					Auth: &mgr.SandboxAppServiceRouteAuth{
+						Mode:              mgr.SandboxAppServiceRouteAuthModeBearer,
+						BearerTokenSHA256: tokenHash,
+					},
+				}},
+			},
+		}},
 	})
 
 	gatewayServer := httptest.NewServer(gateway)
@@ -75,27 +78,30 @@ func TestPublicGatewayProxiesAuthorizedRouteWithRewrite(t *testing.T) {
 	}
 }
 
-func TestPublicGatewayRejectsDisallowedMethod(t *testing.T) {
+func TestSandboxServiceRejectsDisallowedMethod(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("upstream should not be called")
 	}))
 	defer upstream.Close()
 
 	port := serverPort(t, upstream.URL)
-	gateway := newPublicGatewayExposureTestServer(t, &mgr.Sandbox{
+	gateway := newSandboxServiceExposureTestServer(t, &mgr.Sandbox{
 		ID:           "sb-demo",
 		TeamID:       "team-1",
 		InternalAddr: "http://127.0.0.1:1",
 		AutoResume:   true,
-		PublicGateway: &mgr.PublicGatewayConfig{
-			Enabled: true,
-			Routes: []mgr.PublicGatewayRoute{{
-				ID:         "api",
-				Port:       port,
-				PathPrefix: "/api",
-				Methods:    []string{http.MethodGet},
-			}},
-		},
+		Services: []mgr.SandboxAppService{{
+			ID:   "api",
+			Port: port,
+			Ingress: mgr.SandboxAppServiceIngress{
+				Public: true,
+				Routes: []mgr.SandboxAppServiceRoute{{
+					ID:         "api",
+					PathPrefix: "/api",
+					Methods:    []string{http.MethodGet},
+				}},
+			},
+		}},
 	})
 
 	gatewayServer := httptest.NewServer(gateway)
@@ -112,33 +118,36 @@ func TestPublicGatewayRejectsDisallowedMethod(t *testing.T) {
 	}
 }
 
-func TestPublicGatewayHandlesCORSPreflight(t *testing.T) {
+func TestSandboxServiceHandlesCORSPreflight(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("upstream should not be called")
 	}))
 	defer upstream.Close()
 
 	port := serverPort(t, upstream.URL)
-	gateway := newPublicGatewayExposureTestServer(t, &mgr.Sandbox{
+	gateway := newSandboxServiceExposureTestServer(t, &mgr.Sandbox{
 		ID:           "sb-demo",
 		TeamID:       "team-1",
 		InternalAddr: "http://127.0.0.1:1",
 		AutoResume:   true,
-		PublicGateway: &mgr.PublicGatewayConfig{
-			Enabled: true,
-			Routes: []mgr.PublicGatewayRoute{{
-				ID:         "api",
-				Port:       port,
-				PathPrefix: "/api",
-				Methods:    []string{http.MethodGet},
-				CORS: &mgr.PublicGatewayCORS{
-					AllowedOrigins: []string{"https://app.example"},
-					AllowedMethods: []string{http.MethodGet},
-					AllowedHeaders: []string{"Authorization"},
-					MaxAgeSeconds:  60,
-				},
-			}},
-		},
+		Services: []mgr.SandboxAppService{{
+			ID:   "api",
+			Port: port,
+			Ingress: mgr.SandboxAppServiceIngress{
+				Public: true,
+				Routes: []mgr.SandboxAppServiceRoute{{
+					ID:         "api",
+					PathPrefix: "/api",
+					Methods:    []string{http.MethodGet},
+					CORS: &mgr.SandboxAppServiceRouteCORS{
+						AllowedOrigins: []string{"https://app.example"},
+						AllowedMethods: []string{http.MethodGet},
+						AllowedHeaders: []string{"Authorization"},
+						MaxAgeSeconds:  60,
+					},
+				}},
+			},
+		}},
 	})
 
 	gatewayServer := httptest.NewServer(gateway)
@@ -160,7 +169,7 @@ func TestPublicGatewayHandlesCORSPreflight(t *testing.T) {
 	}
 }
 
-func newPublicGatewayExposureTestServer(t *testing.T, sandbox *mgr.Sandbox) http.Handler {
+func newSandboxServiceExposureTestServer(t *testing.T, sandbox *mgr.Sandbox) http.Handler {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 

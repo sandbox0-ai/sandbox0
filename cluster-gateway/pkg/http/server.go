@@ -136,7 +136,7 @@ func NewServer(
 	// Create internal auth validator (for validating tokens from regional-gateway and optionally scheduler)
 	allowedCallers := cfg.AllowedCallers
 	if len(allowedCallers) == 0 {
-		allowedCallers = []string{"regional-gateway", "scheduler"}
+		allowedCallers = []string{"regional-gateway", "scheduler", "function-gateway"}
 	}
 	var validator *internalauth.Validator
 	if authModeEnabled(cfg.AuthMode, authModeInternal) {
@@ -351,6 +351,8 @@ func (s *Server) setupRoutes() {
 			sandboxes.GET("/:id/network", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.getNetworkPolicy)
 			sandboxes.PUT("/:id/network", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.updateNetworkPolicy)
 
+			sandboxes.GET("/:id/services", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.listSandboxServices)
+			sandboxes.PUT("/:id/services", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.updateSandboxServices)
 			sandboxes.GET("/:id/public-gateway", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.getPublicGateway)
 			sandboxes.PUT("/:id/public-gateway", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.updatePublicGateway)
 

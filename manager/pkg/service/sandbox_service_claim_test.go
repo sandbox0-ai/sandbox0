@@ -649,6 +649,25 @@ func TestValidateClaimMountsNormalizesMountPoint(t *testing.T) {
 	}
 }
 
+func TestMountsAnnotationRoundTrip(t *testing.T) {
+	annotations := map[string]string{}
+	mounts := []ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: "/workspace/project/../data"}}
+	normalized, err := normalizeClaimMounts(mounts)
+	if err != nil {
+		t.Fatalf("normalizeClaimMounts() error = %v", err)
+	}
+	if err := setMountsAnnotation(annotations, normalized); err != nil {
+		t.Fatalf("setMountsAnnotation() error = %v", err)
+	}
+	got := parseClaimMounts(annotations[controller.AnnotationMounts])
+	if len(got) != 1 {
+		t.Fatalf("parseClaimMounts() returned %d mounts, want 1", len(got))
+	}
+	if got[0].SandboxVolumeID != "vol-1" || got[0].MountPoint != "/workspace/data" {
+		t.Fatalf("mount = %+v, want vol-1 mounted at /workspace/data", got[0])
+	}
+}
+
 func TestValidateClaimMountsRejectsWebhookStatePath(t *testing.T) {
 	req := &ClaimRequest{
 		Mounts: []ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: webhookStateMountPoint + "/custom"}},

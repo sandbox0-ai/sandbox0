@@ -113,6 +113,12 @@ spec:
         port: 30080
       config:
         authMode: public
+    functionGateway:
+      enabled: true
+      replicas: 1
+      service:
+        type: NodePort
+        port: 30081
     netd:
       enabled: true
       # Keep netd on a regular host runtime such as runc; do not run netd on gVisor or Kata.

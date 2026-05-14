@@ -15,6 +15,7 @@ tags:
   - name: regions
   - name: api-keys
   - name: sandboxes
+  - name: functions
   - name: contexts
   - name: files
   - name: templates
@@ -1653,6 +1654,201 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/sandboxes/{id}/services:
+    get:
+      tags: [sandboxes]
+      summary: List sandbox services
+      description: Lists canonical sandbox services derived from `services` or the legacy `public_gateway` compatibility projection.
+      security:
+        - bearerAuth: []
+      x-upstream-service: manager
+      x-upstream-path: /api/v1/sandboxes/{id}/services
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+      responses:
+        "200":
+          description: Sandbox services
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessSandboxServicesResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+    put:
+      tags: [sandboxes]
+      summary: Replace sandbox services
+      description: Replaces the canonical sandbox services. Public gateway remains available as a compatibility projection.
+      security:
+        - bearerAuth: []
+      x-upstream-service: manager
+      x-upstream-path: /api/v1/sandboxes/{id}/services
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SandboxServicesUpdateRequest"
+      responses:
+        "200":
+          description: Sandbox services updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessSandboxServicesResponse"
+        "400":
+          description: Invalid sandbox services
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/functions:
+    get:
+      tags: [functions]
+      summary: List functions
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Functions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessFunctionListResponse"
+    post:
+      tags: [functions]
+      summary: Create a function from a sandbox service
+      description: Creates a function, revision 1, and the production alias from an existing sandbox service.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FunctionCreateRequest"
+      responses:
+        "201":
+          description: Function created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessFunctionCreateResponse"
+        "400":
+          description: Source service is invalid or not publishable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "409":
+          description: Function name already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/functions/{id}:
+    get:
+      tags: [functions]
+      summary: Get function
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Function
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessFunctionResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/functions/{id}/revisions:
+    get:
+      tags: [functions]
+      summary: List function revisions
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Function revisions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessFunctionRevisionListResponse"
+    post:
+      tags: [functions]
+      summary: Create function revision from a sandbox service
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FunctionRevisionCreateRequest"
+      responses:
+        "201":
+          description: Revision created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessFunctionRevisionCreateResponse"
+  /api/v1/functions/{id}/aliases/{alias}:
+    put:
+      tags: [functions]
+      summary: Point a function alias at a revision
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: alias
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FunctionAliasUpdateRequest"
+      responses:
+        "200":
+          description: Alias updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessFunctionAliasResponse"
   /api/v1/sandboxes/{id}/contexts:
     post:
       tags: [contexts]
@@ -3606,6 +3802,10 @@ components:
           description: |
             Sandbox-level resume gate for paused sandboxes. When false, any inbound request
             (API or public exposure) must not auto resume the sandbox.
+        services:
+          type: array
+          items:
+            $ref: "#/components/schemas/SandboxAppService"
         public_gateway:
           $ref: "#/components/schemas/PublicGatewayConfig"
     PublicGatewayConfig:
@@ -3709,6 +3909,120 @@ components:
           type: integer
           format: int32
       required: [rps, burst]
+    SandboxAppService:
+      type: object
+      description: Canonical service model for sandbox exposure and function publishing.
+      properties:
+        id:
+          type: string
+          description: Stable service ID. Must be a DNS label.
+        display_name:
+          type: string
+        port:
+          type: integer
+          format: int32
+        runtime:
+          $ref: "#/components/schemas/SandboxAppServiceRuntime"
+        ingress:
+          $ref: "#/components/schemas/SandboxAppServiceIngress"
+        health_check:
+          $ref: "#/components/schemas/SandboxAppServiceHealth"
+      required: [id, port, ingress]
+    SandboxAppServiceRuntime:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [warm_process, cmd, manual]
+        command:
+          type: array
+          items:
+            type: string
+        cwd:
+          type: string
+        env_vars:
+          type: object
+          additionalProperties:
+            type: string
+        warm_process_name:
+          type: string
+      required: [type]
+    SandboxAppServiceIngress:
+      type: object
+      properties:
+        public:
+          type: boolean
+        routes:
+          type: array
+          items:
+            $ref: "#/components/schemas/SandboxAppServiceRoute"
+      required: [public]
+    SandboxAppServiceRoute:
+      type: object
+      properties:
+        id:
+          type: string
+        path_prefix:
+          type: string
+        methods:
+          type: array
+          items:
+            type: string
+        rewrite_prefix:
+          type: string
+          nullable: true
+        auth:
+          $ref: "#/components/schemas/PublicGatewayAuth"
+        cors:
+          $ref: "#/components/schemas/PublicGatewayCORS"
+        rate_limit:
+          $ref: "#/components/schemas/PublicGatewayRateLimit"
+        timeout_seconds:
+          type: integer
+          format: int32
+        resume:
+          type: boolean
+      required: [id, resume]
+    SandboxAppServiceHealth:
+      type: object
+      properties:
+        path:
+          type: string
+    SandboxAppServiceView:
+      allOf:
+        - $ref: "#/components/schemas/SandboxAppService"
+        - type: object
+          properties:
+            publishable:
+              type: boolean
+            publish_blockers:
+              type: array
+              items:
+                type: string
+          required: [publishable]
+    SandboxServicesUpdateRequest:
+      type: object
+      properties:
+        services:
+          type: array
+          items:
+            $ref: "#/components/schemas/SandboxAppService"
+      required: [services]
+    SuccessSandboxServicesResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                sandbox_id:
+                  type: string
+                services:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/SandboxAppServiceView"
+              required: [sandbox_id, services]
     SuccessPublicGatewayResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
@@ -3724,6 +4038,217 @@ components:
                 exposure_domain:
                   type: string
               required: [sandbox_id, public_gateway]
+    FunctionSourceRequest:
+      type: object
+      properties:
+        sandbox_id:
+          type: string
+        service_id:
+          type: string
+      required: [sandbox_id, service_id]
+    FunctionCreateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Function display name. Defaults to the source service name or ID when omitted.
+        source:
+          $ref: "#/components/schemas/FunctionSourceRequest"
+      required: [source]
+    FunctionRevisionCreateRequest:
+      type: object
+      properties:
+        source:
+          $ref: "#/components/schemas/FunctionSourceRequest"
+        promote:
+          type: boolean
+          default: true
+          description: Whether to move the production alias to the new revision.
+      required: [source]
+    FunctionAliasUpdateRequest:
+      type: object
+      properties:
+        revision_number:
+          type: integer
+          format: int32
+      required: [revision_number]
+    Function:
+      type: object
+      properties:
+        id:
+          type: string
+        team_id:
+          type: string
+        name:
+          type: string
+        slug:
+          type: string
+        domain_label:
+          type: string
+        active_revision_id:
+          type: string
+        created_by:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required: [id, team_id, name, slug, domain_label, created_at, updated_at]
+    FunctionRecord:
+      allOf:
+        - $ref: "#/components/schemas/Function"
+        - type: object
+          properties:
+            host:
+              type: string
+            url:
+              type: string
+          required: [host, url]
+    FunctionRevision:
+      type: object
+      properties:
+        id:
+          type: string
+        function_id:
+          type: string
+        team_id:
+          type: string
+        revision_number:
+          type: integer
+          format: int32
+        source_sandbox_id:
+          type: string
+        source_service_id:
+          type: string
+        source_template_id:
+          type: string
+        restore_mounts:
+          type: array
+          description: SandboxVolume mounts captured from the source sandbox and reused when the function runtime sandbox is restored.
+          items:
+            $ref: "#/components/schemas/FunctionRestoreMount"
+        service_snapshot:
+          $ref: "#/components/schemas/SandboxAppService"
+        runtime_sandbox_id:
+          type: string
+          description: Current restored runtime sandbox, when the source sandbox no longer exists.
+        runtime_context_id:
+          type: string
+          description: Current runtime process context inside the restored runtime sandbox.
+        runtime_updated_at:
+          type: string
+          format: date-time
+          description: Last time the restored runtime sandbox mapping was updated.
+        created_by:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+      required: [id, function_id, team_id, revision_number, source_sandbox_id, source_service_id, source_template_id, service_snapshot, created_at]
+    FunctionRestoreMount:
+      type: object
+      properties:
+        sandboxvolume_id:
+          type: string
+        mount_point:
+          type: string
+      required: [sandboxvolume_id, mount_point]
+    FunctionAlias:
+      type: object
+      properties:
+        function_id:
+          type: string
+        alias:
+          type: string
+        revision_id:
+          type: string
+        revision_number:
+          type: integer
+          format: int32
+        updated_by:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+      required: [function_id, alias, revision_id, revision_number, updated_at]
+    SuccessFunctionResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                function:
+                  $ref: "#/components/schemas/FunctionRecord"
+              required: [function]
+    SuccessFunctionListResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                functions:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/FunctionRecord"
+              required: [functions]
+    SuccessFunctionCreateResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                function:
+                  $ref: "#/components/schemas/FunctionRecord"
+                revision:
+                  $ref: "#/components/schemas/FunctionRevision"
+                alias:
+                  $ref: "#/components/schemas/FunctionAlias"
+              required: [function, revision, alias]
+    SuccessFunctionRevisionListResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                revisions:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/FunctionRevision"
+              required: [revisions]
+    SuccessFunctionRevisionCreateResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                revision:
+                  $ref: "#/components/schemas/FunctionRevision"
+                promoted:
+                  type: boolean
+              required: [revision, promoted]
+    SuccessFunctionAliasResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                alias:
+                  $ref: "#/components/schemas/FunctionAlias"
+              required: [alias]
     WebhookConfig:
       type: object
       description: |
@@ -3807,8 +4332,16 @@ components:
           $ref: "#/components/schemas/SandboxPowerState"
         auto_resume:
           type: boolean
+        services:
+          type: array
+          items:
+            $ref: "#/components/schemas/SandboxAppService"
         public_gateway:
           $ref: "#/components/schemas/PublicGatewayConfig"
+        mounts:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClaimMountRequest"
         pod_name:
           type: string
         ssh:
@@ -3873,6 +4406,10 @@ components:
           description: |
             Sandbox-level resume gate for paused sandboxes. When false, any inbound request
             (API or public exposure) must not auto resume the sandbox.
+        services:
+          type: array
+          items:
+            $ref: "#/components/schemas/SandboxAppService"
         public_gateway:
           $ref: "#/components/schemas/PublicGatewayConfig"
     SandboxUpdateRequest:
@@ -4892,6 +5429,9 @@ components:
         type:
           type: string
           enum: [repl, cmd]
+          x-enum-varnames:
+            - WarmProcessSpecTypeRepl
+            - WarmProcessSpecTypeCmd
         alias:
           type: string
         command:

@@ -2,16 +2,24 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	k8stesting "k8s.io/client-go/testing"
@@ -257,6 +265,61 @@ func TestSandboxServiceCleanupDeletedSandboxEmitsWebhookAndMarksStateVolumeForCl
 	}
 }
 
+func TestSandboxServiceCleanupDeletedSandboxUnbindsVolumePortals(t *testing.T) {
+	var got ctldapi.UnbindVolumePortalRequest
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/volume-portals/unbind" {
+			http.NotFound(w, r)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode unbind request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ctldapi.UnbindVolumePortalResponse{Unbound: true})
+	}))
+	defer ctld.Close()
+
+	ctldURL, err := url.Parse(ctld.URL)
+	if err != nil {
+		t.Fatalf("parse ctld url: %v", err)
+	}
+	ctldPort, err := strconv.Atoi(ctldURL.Port())
+	if err != nil {
+		t.Fatalf("parse ctld port: %v", err)
+	}
+	svc := &SandboxService{
+		ctldClient: NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		config: SandboxServiceConfig{
+			CtldEnabled: true,
+			CtldPort:    ctldPort,
+		},
+		logger: zap.NewNop(),
+	}
+
+	err = svc.CleanupDeletedSandbox(context.Background(), SandboxLifecycleInfo{
+		Namespace: "ns-a",
+		PodName:   "sandbox-a",
+		SandboxID: "sandbox-a",
+		PodUID:    "pod-uid-a",
+		HostIP:    ctldURL.Hostname(),
+		VolumePortals: []SandboxLifecycleVolumePortal{{
+			SandboxVolumeID: "vol-1",
+			MountPoint:      "/workspace/data",
+			PortalName:      "data",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("CleanupDeletedSandbox() error = %v", err)
+	}
+	if got.Namespace != "ns-a" || got.PodName != "sandbox-a" || got.PodUID != "pod-uid-a" {
+		t.Fatalf("unexpected pod identity in unbind request: %+v", got)
+	}
+	if got.SandboxVolumeID != "vol-1" || got.MountPath != "/workspace/data" || got.PortalName != "data" {
+		t.Fatalf("unexpected volume portal unbind request: %+v", got)
+	}
+}
+
 func TestSandboxLifecycleInfoFromPodIncludesWebhookMetadata(t *testing.T) {
 	pod := newLifecycleTestPod()
 	pod.Annotations[controller.AnnotationUserID] = "user-a"
@@ -272,6 +335,48 @@ func TestSandboxLifecycleInfoFromPodIncludesWebhookMetadata(t *testing.T) {
 	}
 	if info.WebhookURL != "https://example.test/webhook" || info.WebhookSecret != "secret" {
 		t.Fatalf("unexpected webhook metadata: %#v", info)
+	}
+}
+
+func TestSandboxLifecycleInfoFromPodIncludesVolumePortals(t *testing.T) {
+	pod := newLifecycleTestPod()
+	pod.UID = types.UID("pod-uid-a")
+	pod.Spec.NodeName = "node-a"
+	pod.Status.HostIP = "10.0.0.8"
+	mountsJSON, err := json.Marshal([]ClaimMount{{
+		SandboxVolumeID: "vol-1",
+		MountPoint:      "/workspace/data",
+	}})
+	if err != nil {
+		t.Fatalf("marshal mounts: %v", err)
+	}
+	pod.Annotations[controller.AnnotationMounts] = string(mountsJSON)
+	pod.Spec.Volumes = []corev1.Volume{{
+		Name: "data",
+		VolumeSource: corev1.VolumeSource{
+			CSI: &corev1.CSIVolumeSource{
+				Driver: volumeportal.DriverName,
+				VolumeAttributes: map[string]string{
+					volumeportal.AttributePortalName: "data",
+					volumeportal.AttributeMountPath:  "/workspace/data",
+				},
+			},
+		},
+	}}
+
+	info, ok := sandboxLifecycleInfoFromPod(pod)
+	if !ok {
+		t.Fatal("expected lifecycle info")
+	}
+	if info.PodUID != "pod-uid-a" || info.NodeName != "node-a" || info.HostIP != "10.0.0.8" {
+		t.Fatalf("unexpected pod identity: %#v", info)
+	}
+	if len(info.VolumePortals) != 1 {
+		t.Fatalf("volume portals = %#v, want one", info.VolumePortals)
+	}
+	portal := info.VolumePortals[0]
+	if portal.SandboxVolumeID != "vol-1" || portal.MountPoint != "/workspace/data" || portal.PortalName != "data" {
+		t.Fatalf("volume portal = %+v, want vol-1 data", portal)
 	}
 }
 

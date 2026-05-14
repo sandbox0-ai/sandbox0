@@ -211,6 +211,50 @@ type RegionalGatewayConfig struct {
 	GatewayConfig `json:",inline"`
 }
 
+// FunctionGatewayConfig defines user-facing configuration for function-gateway.
+type FunctionGatewayConfig struct {
+	// +optional
+	// +kubebuilder:default=8080
+	HTTPPort int `json:"httpPort,omitempty"`
+	// +optional
+	// +kubebuilder:default="info"
+	LogLevel string `json:"logLevel,omitempty"`
+	// +optional
+	// +kubebuilder:default=30
+	DatabaseMaxConns int `json:"databaseMaxConns,omitempty"`
+	// +optional
+	// +kubebuilder:default=8
+	DatabaseMinConns int `json:"databaseMinConns,omitempty"`
+	// +optional
+	// +kubebuilder:default="sandbox0.site"
+	FunctionRootDomain string `json:"functionRootDomain,omitempty"`
+	// +optional
+	FunctionRegionID string `json:"functionRegionId,omitempty"`
+	// +optional
+	// +kubebuilder:default="30s"
+	InternalAuthTTL metav1.Duration `json:"internalAuthTtl,omitempty"`
+	// +optional
+	// +kubebuilder:default="function-gateway"
+	InternalAuthCaller string `json:"internalAuthCaller,omitempty"`
+	// +optional
+	// +kubebuilder:default="30s"
+	ProxyTimeout metav1.Duration `json:"proxyTimeout,omitempty"`
+	// +optional
+	// +kubebuilder:default="30s"
+	ShutdownTimeout metav1.Duration `json:"shutdownTimeout,omitempty"`
+	// +optional
+	// +kubebuilder:default="30s"
+	ServerReadTimeout metav1.Duration `json:"serverReadTimeout,omitempty"`
+	// +optional
+	// +kubebuilder:default="60s"
+	ServerWriteTimeout metav1.Duration `json:"serverWriteTimeout,omitempty"`
+	// +optional
+	// +kubebuilder:default="120s"
+	ServerIdleTimeout metav1.Duration `json:"serverIdleTimeout,omitempty"`
+	// +optional
+	GatewayConfig `json:",inline"`
+}
+
 // SSHGatewayConfig defines user-facing configuration for ssh-gateway.
 type SSHGatewayConfig struct {
 	// +optional
@@ -304,7 +348,7 @@ type ClusterGatewayConfig struct {
 	// +kubebuilder:default="internal"
 	AuthMode string `json:"authMode,omitempty"`
 	// +optional
-	// +kubebuilder:default={"regional-gateway","scheduler"}
+	// +kubebuilder:default={"regional-gateway","scheduler","function-gateway"}
 	AllowedCallers []string `json:"allowedCallers,omitempty"`
 	// +optional
 	// +kubebuilder:default="30s"

@@ -56,24 +56,31 @@ type BootstrapMountStatus struct {
 
 // SandboxConfig represents sandbox configuration
 type SandboxConfig struct {
-	EnvVars       map[string]string              `json:"env_vars,omitempty"`
-	TTL           *int32                         `json:"ttl,omitempty"`      // Time-to-live in seconds (0 disables)
-	HardTTL       *int32                         `json:"hard_ttl,omitempty"` // Hard time-to-live in seconds (0 disables)
-	Network       *v1alpha1.SandboxNetworkPolicy `json:"network,omitempty"`
-	Webhook       *WebhookConfig                 `json:"webhook,omitempty"`
-	AutoResume    *bool                          `json:"auto_resume,omitempty"`
-	PublicGateway *PublicGatewayConfig           `json:"public_gateway,omitempty"`
+	EnvVars    map[string]string              `json:"env_vars,omitempty"`
+	TTL        *int32                         `json:"ttl,omitempty"`      // Time-to-live in seconds (0 disables)
+	HardTTL    *int32                         `json:"hard_ttl,omitempty"` // Hard time-to-live in seconds (0 disables)
+	Network    *v1alpha1.SandboxNetworkPolicy `json:"network,omitempty"`
+	Webhook    *WebhookConfig                 `json:"webhook,omitempty"`
+	AutoResume *bool                          `json:"auto_resume,omitempty"`
+	Services   []SandboxAppService            `json:"services,omitempty"`
+	// PublicGateway is kept as a compatibility input/output for existing clients.
+	// New code should use Services; this field is converted into Services before
+	// sandbox config is persisted.
+	PublicGateway *PublicGatewayConfig `json:"public_gateway,omitempty"`
 }
 
 // SandboxUpdateConfig represents sandbox configuration fields that can be updated at runtime.
 // Unlike SandboxConfig, env_vars and webhook are excluded as they only affect new processes
 // or require restart to take effect.
 type SandboxUpdateConfig struct {
-	TTL           *int32                         `json:"ttl,omitempty"`
-	HardTTL       *int32                         `json:"hard_ttl,omitempty"`
-	Network       *v1alpha1.SandboxNetworkPolicy `json:"network,omitempty"`
-	AutoResume    *bool                          `json:"auto_resume,omitempty"`
-	PublicGateway *PublicGatewayConfig           `json:"public_gateway,omitempty"`
+	TTL        *int32                         `json:"ttl,omitempty"`
+	HardTTL    *int32                         `json:"hard_ttl,omitempty"`
+	Network    *v1alpha1.SandboxNetworkPolicy `json:"network,omitempty"`
+	AutoResume *bool                          `json:"auto_resume,omitempty"`
+	Services   []SandboxAppService            `json:"services,omitempty"`
+	// PublicGateway is a legacy update surface. It is converted into Services
+	// and should be removed after SDKs and docs migrate to sandbox services.
+	PublicGateway *PublicGatewayConfig `json:"public_gateway,omitempty"`
 }
 
 func int32Ptr(v int32) *int32 {
@@ -105,6 +112,31 @@ func (s *SandboxService) claimConfigForPersistence(cfg *SandboxConfig) *SandboxC
 	return persisted
 }
 
+func normalizeSandboxConfigForPersistence(cfg *SandboxConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	if len(cfg.Services) > 0 {
+		services, err := NormalizeSandboxAppServices(cfg.Services)
+		if err != nil {
+			return err
+		}
+		cfg.Services = services
+		cfg.PublicGateway = nil
+	} else if cfg.PublicGateway != nil {
+		services, err := PublicGatewayConfigToSandboxAppServices(cfg.PublicGateway)
+		if err != nil {
+			return err
+		}
+		cfg.Services = services
+		cfg.PublicGateway = nil
+	}
+	if cfg.AutoResume != nil && !*cfg.AutoResume && SandboxAppServicesHaveResumeRoute(cfg.Services) {
+		return fmt.Errorf("cannot set resume=true on public routes when sandbox auto_resume is disabled")
+	}
+	return nil
+}
+
 func setExpirationAnnotation(annotations map[string]string, now time.Time, ttl *int32) {
 	if annotations == nil {
 		return
@@ -127,6 +159,22 @@ func setHardExpirationAnnotation(annotations map[string]string, now time.Time, h
 	}
 	hardExpiresAt := now.Add(time.Duration(*hardTTL) * time.Second)
 	annotations[controller.AnnotationHardExpiresAt] = hardExpiresAt.Format(time.RFC3339)
+}
+
+func setMountsAnnotation(annotations map[string]string, mounts []ClaimMount) error {
+	if annotations == nil {
+		return nil
+	}
+	if len(mounts) == 0 {
+		delete(annotations, controller.AnnotationMounts)
+		return nil
+	}
+	data, err := json.Marshal(mounts)
+	if err != nil {
+		return fmt.Errorf("marshal mounts: %w", err)
+	}
+	annotations[controller.AnnotationMounts] = string(data)
+	return nil
 }
 
 func validateClaimMounts(req *ClaimRequest) error {
@@ -208,18 +256,11 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		s.observeClaimPhase(req.Template, "unknown", "validate_claim_mounts", phaseStarted, err)
 		return nil, err
 	}
-	if req.Config != nil && req.Config.PublicGateway != nil {
-		publicGateway, err := normalizePublicGatewayConfig(req.Config.PublicGateway)
-		if err != nil {
+	if req.Config != nil {
+		if err := normalizeSandboxConfigForPersistence(req.Config); err != nil {
 			s.observeClaimPhase(req.Template, "unknown", "validate_claim_mounts", phaseStarted, err)
 			return nil, err
 		}
-		if req.Config.AutoResume != nil && !*req.Config.AutoResume && PublicGatewayHasResumeRoute(publicGateway) {
-			err := fmt.Errorf("cannot set resume=true on public gateway routes when sandbox auto_resume is disabled")
-			s.observeClaimPhase(req.Template, "unknown", "validate_claim_mounts", phaseStarted, err)
-			return nil, err
-		}
-		req.Config.PublicGateway = publicGateway
 	}
 	s.observeClaimPhase(req.Template, "unknown", "validate_claim_mounts", phaseStarted, nil)
 	s.logger.Info("Claiming sandbox",
@@ -752,6 +793,9 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			setExpirationAnnotation(pod.Annotations, s.clock.Now(), persistedConfig.TTL)
 			setHardExpirationAnnotation(pod.Annotations, s.clock.Now(), persistedConfig.HardTTL)
 		}
+		if err := setMountsAnnotation(pod.Annotations, req.Mounts); err != nil {
+			return err
+		}
 
 		// Serialize config
 		if persistedConfig != nil {
@@ -906,6 +950,9 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 	if persistedConfig != nil {
 		setExpirationAnnotation(pod.Annotations, s.clock.Now(), persistedConfig.TTL)
 		setHardExpirationAnnotation(pod.Annotations, s.clock.Now(), persistedConfig.HardTTL)
+	}
+	if err := setMountsAnnotation(pod.Annotations, req.Mounts); err != nil {
+		return nil, err
 	}
 
 	// Serialize config

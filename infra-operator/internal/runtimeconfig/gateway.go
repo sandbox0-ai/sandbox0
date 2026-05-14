@@ -50,6 +50,29 @@ func ToRegionalGateway(spec *infrav1alpha1.RegionalGatewayConfig) *apiconfig.Reg
 	return cfg
 }
 
+func ToFunctionGateway(spec *infrav1alpha1.FunctionGatewayConfig) *apiconfig.FunctionGatewayConfig {
+	cfg := &apiconfig.FunctionGatewayConfig{}
+	if spec == nil {
+		return cfg
+	}
+
+	cfg.HTTPPort = spec.HTTPPort
+	cfg.LogLevel = spec.LogLevel
+	cfg.DatabaseMaxConns = spec.DatabaseMaxConns
+	cfg.DatabaseMinConns = spec.DatabaseMinConns
+	cfg.FunctionRootDomain = spec.FunctionRootDomain
+	cfg.FunctionRegionID = spec.FunctionRegionID
+	cfg.InternalAuthTTL = spec.InternalAuthTTL
+	cfg.InternalAuthCaller = spec.InternalAuthCaller
+	cfg.ProxyTimeout = spec.ProxyTimeout
+	cfg.ShutdownTimeout = spec.ShutdownTimeout
+	cfg.ServerReadTimeout = spec.ServerReadTimeout
+	cfg.ServerWriteTimeout = spec.ServerWriteTimeout
+	cfg.ServerIdleTimeout = spec.ServerIdleTimeout
+	applyGatewayConfig(&cfg.GatewayConfig, spec.GatewayConfig)
+	return cfg
+}
+
 func ToSSHGateway(spec *infrav1alpha1.SSHGatewayConfig) *apiconfig.SSHGatewayConfig {
 	cfg := &apiconfig.SSHGatewayConfig{}
 	if spec == nil {

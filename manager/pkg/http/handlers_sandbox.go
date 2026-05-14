@@ -231,6 +231,11 @@ func (s *Server) updateSandbox(c *gin.Context) {
 			"cannot set resume=true on public gateway routes when sandbox auto_resume is disabled")
 		return
 	}
+	if !resultAutoResume && service.SandboxAppServicesHaveResumeRoute(req.Config.Services) {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest,
+			"cannot set resume=true on public routes when sandbox auto_resume is disabled")
+		return
+	}
 
 	updated, err := s.sandboxService.UpdateSandbox(c.Request.Context(), sandboxID, req.Config)
 	if err != nil {

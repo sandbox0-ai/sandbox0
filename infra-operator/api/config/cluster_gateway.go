@@ -31,10 +31,10 @@ type ClusterGatewayConfig struct {
 	// +kubebuilder:validation:Enum=internal;public;both
 	// +kubebuilder:default="internal"
 	AuthMode string `yaml:"auth_mode" json:"authMode"`
-	// AllowedCallers is the list of services allowed to call cluster-gateway
-	// Default: ["regional-gateway"], can include "scheduler" for multi-cluster mode
+	// AllowedCallers is the list of services allowed to call cluster-gateway.
+	// Default: ["regional-gateway","scheduler","function-gateway"].
 	// +optional
-	// +kubebuilder:default={"regional-gateway","scheduler"}
+	// +kubebuilder:default={"regional-gateway","scheduler","function-gateway"}
 	AllowedCallers []string `yaml:"allowed_callers" json:"allowedCallers"`
 
 	// Timeouts

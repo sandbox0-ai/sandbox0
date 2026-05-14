@@ -797,6 +797,11 @@ type ServicesConfig struct {
 	// +kubebuilder:default={}
 	RegionalGateway *RegionalGatewayServiceConfig `json:"regionalGateway,omitempty"`
 
+	// FunctionGateway configures the function-gateway service (control plane)
+	// +optional
+	// +kubebuilder:default={}
+	FunctionGateway *FunctionGatewayServiceConfig `json:"functionGateway,omitempty"`
+
 	// SSHGateway configures the ssh-gateway service (control plane)
 	// +optional
 	// +kubebuilder:default={}
@@ -880,6 +885,17 @@ type RegionalGatewayServiceConfig struct {
 	// +optional
 	// +kubebuilder:default={}
 	Config *RegionalGatewayConfig `json:"config,omitempty"`
+}
+
+// FunctionGatewayServiceConfig defines configuration for function-gateway service.
+type FunctionGatewayServiceConfig struct {
+	WorkloadServiceConfig `json:",inline"`
+	ServiceExposureConfig `json:",inline"`
+	IngressExposureConfig `json:",inline"`
+	// Config contains function-gateway specific configuration
+	// +optional
+	// +kubebuilder:default={}
+	Config *FunctionGatewayConfig `json:"config,omitempty"`
 }
 
 // SSHGatewayServiceConfig defines configuration for ssh-gateway service.
@@ -973,6 +989,14 @@ func IsRegionalGatewayEnabled(infra *Sandbox0Infra) bool {
 		return false
 	}
 	return infra.Spec.Services.RegionalGateway.Enabled
+}
+
+// IsFunctionGatewayEnabled returns true when function-gateway is enabled.
+func IsFunctionGatewayEnabled(infra *Sandbox0Infra) bool {
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.FunctionGateway == nil {
+		return false
+	}
+	return infra.Spec.Services.FunctionGateway.Enabled
 }
 
 // IsSSHGatewayEnabled returns true when ssh-gateway is enabled.
@@ -1085,7 +1109,7 @@ func IsRegistryEnabled(infra *Sandbox0Infra) bool {
 
 // HasControlPlaneServices returns true when any control-plane service is enabled.
 func HasControlPlaneServices(infra *Sandbox0Infra) bool {
-	return IsRegionalGatewayEnabled(infra) || IsSSHGatewayEnabled(infra) || IsSchedulerEnabled(infra)
+	return IsRegionalGatewayEnabled(infra) || IsFunctionGatewayEnabled(infra) || IsSSHGatewayEnabled(infra) || IsSchedulerEnabled(infra)
 }
 
 // HasDataPlaneServices returns true when any data-plane service is enabled.
@@ -1317,6 +1341,10 @@ type EndpointsStatus struct {
 	// +optional
 	RegionalGatewayInternal string `json:"regionalGatewayInternal,omitempty"`
 
+	// FunctionGateway is the function-gateway URL
+	// +optional
+	FunctionGateway string `json:"functionGateway,omitempty"`
+
 	// ClusterGateway is the cluster-gateway URL
 	// +optional
 	ClusterGateway string `json:"clusterGateway,omitempty"`
@@ -1408,6 +1436,7 @@ const (
 	ConditionTypeRegistryReady        = "RegistryReady"
 	ConditionTypeGlobalGatewayReady   = "GlobalGatewayReady"
 	ConditionTypeRegionalGatewayReady = "RegionalGatewayReady"
+	ConditionTypeFunctionGatewayReady = "FunctionGatewayReady"
 	ConditionTypeSSHGatewayReady      = "SSHGatewayReady"
 	ConditionTypeClusterGatewayReady  = "ClusterGatewayReady"
 	ConditionTypeManagerReady         = "ManagerReady"

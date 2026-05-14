@@ -312,6 +312,78 @@ func TestReconcileRegionalGatewayPublicModeUpgradesToBoth(t *testing.T) {
 	}
 }
 
+func TestReconcileFunctionGatewayPublicModeUpgradesToBoth(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeBuiltin,
+				Builtin: &infrav1alpha1.BuiltinDatabaseConfig{
+					Enabled:  true,
+					Port:     5432,
+					Username: "sandbox0",
+					Database: "sandbox0",
+					SSLMode:  "disable",
+				},
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				FunctionGateway: &infrav1alpha1.FunctionGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+				ClusterGateway: &infrav1alpha1.ClusterGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					Config: &infrav1alpha1.ClusterGatewayConfig{
+						AuthMode: "public",
+					},
+				},
+			},
+		},
+	}
+
+	reconciler, client := newClusterGatewayTestReconciler(t,
+		infra.DeepCopy(),
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "demo-sandbox0-database-credentials",
+				Namespace: infra.Namespace,
+			},
+			Data: map[string][]byte{
+				"username": []byte("sandbox0"),
+				"password": []byte("db-password"),
+				"database": []byte("sandbox0"),
+				"port":     []byte("5432"),
+			},
+		},
+	)
+
+	if err := reconciler.Reconcile(context.Background(), "sandbox0ai/infra", "latest", infraplan.Compile(infra)); err != nil && !strings.Contains(err.Error(), "not ready") {
+		t.Fatalf("reconcile returned unexpected error: %v", err)
+	}
+
+	deployment := &appsv1.Deployment{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: "demo-cluster-gateway", Namespace: infra.Namespace}, deployment); err != nil {
+		t.Fatalf("get cluster gateway deployment: %v", err)
+	}
+	if !hasVolume(deployment.Spec.Template.Spec.Volumes, "internal-jwt-public-key") {
+		t.Fatal("expected function-gateway mode to mount internal-jwt-public-key volume")
+	}
+
+	configMap := &corev1.ConfigMap{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: "demo-cluster-gateway", Namespace: infra.Namespace}, configMap); err != nil {
+		t.Fatalf("get cluster gateway configmap: %v", err)
+	}
+	if !strings.Contains(configMap.Data["config.yaml"], "auth_mode: both") {
+		t.Fatalf("expected cluster-gateway auth_mode to be promoted to both, got config %q", configMap.Data["config.yaml"])
+	}
+}
+
 func newClusterGatewayTestReconciler(t *testing.T, objects ...runtime.Object) (*Reconciler, ctrlclient.Client) {
 	t.Helper()
 

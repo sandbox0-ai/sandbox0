@@ -122,12 +122,23 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 		if cfg.AutoResume != nil {
 			merged.AutoResume = cfg.AutoResume
 		}
-		if cfg.PublicGateway != nil {
-			publicGateway, err := normalizePublicGatewayConfig(cfg.PublicGateway)
+		if cfg.Services != nil {
+			services, err := NormalizeSandboxAppServices(cfg.Services)
 			if err != nil {
 				return err
 			}
-			merged.PublicGateway = publicGateway
+			merged.Services = services
+			merged.PublicGateway = nil
+		}
+		if cfg.PublicGateway != nil {
+			// Compatibility adapter for the legacy public-gateway API. Keep this
+			// until clients migrate to /sandboxes/{id}/services.
+			services, err := PublicGatewayConfigToSandboxAppServices(cfg.PublicGateway)
+			if err != nil {
+				return err
+			}
+			merged.Services = services
+			merged.PublicGateway = nil
 		}
 
 		if cfg.Network != nil {
@@ -164,6 +175,10 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 			if _, err := s.setNetworkPolicyAnnotations(updatedPod, policySpecFromState(networkState)); err != nil {
 				return err
 			}
+		}
+
+		if merged.AutoResume != nil && !*merged.AutoResume && SandboxAppServicesHaveResumeRoute(merged.Services) {
+			return fmt.Errorf("cannot set resume=true on public routes when sandbox auto_resume is disabled")
 		}
 
 		updatedConfigJSON, err := json.Marshal(merged)
@@ -232,6 +247,11 @@ func (s *SandboxService) podToSandbox(ctx context.Context, pod *corev1.Pod, sand
 	}
 
 	cfg := parseSandboxConfig(pod.Annotations[controller.AnnotationConfig])
+	if len(cfg.Services) == 0 && cfg.PublicGateway != nil {
+		if services, err := PublicGatewayConfigToSandboxAppServices(cfg.PublicGateway); err == nil {
+			cfg.Services = services
+		}
+	}
 	autoResume := true
 	if cfg.AutoResume != nil {
 		autoResume = *cfg.AutoResume
@@ -248,7 +268,9 @@ func (s *SandboxService) podToSandbox(ctx context.Context, pod *corev1.Pod, sand
 		Paused:        powerState.Observed == SandboxPowerStatePaused,
 		PowerState:    powerState,
 		AutoResume:    autoResume,
-		PublicGateway: cfg.PublicGateway,
+		Services:      cfg.Services,
+		PublicGateway: SandboxAppServicesToPublicGatewayConfig(cfg.Services),
+		Mounts:        parseClaimMounts(pod.Annotations[controller.AnnotationMounts]),
 		PodName:       pod.Name,
 		ExpiresAt:     expiresAt,
 		HardExpiresAt: hardExpiresAt,
@@ -281,6 +303,21 @@ func parseSandboxConfig(configJSON string) SandboxConfig {
 		return SandboxConfig{}
 	}
 	return cfg
+}
+
+func parseClaimMounts(mountsJSON string) []ClaimMount {
+	if mountsJSON == "" {
+		return nil
+	}
+	var mounts []ClaimMount
+	if err := json.Unmarshal([]byte(mountsJSON), &mounts); err != nil {
+		return nil
+	}
+	normalized, err := normalizeClaimMounts(mounts)
+	if err != nil {
+		return nil
+	}
+	return normalized
 }
 
 // GetSandboxStatus gets the status of a sandbox

@@ -3,7 +3,7 @@
 Gateway policy adds request-level controls to sandbox public traffic. Use it when a sandbox needs a public HTTP endpoint with path routing, method filtering, auth, CORS, rate limits, upstream timeout, and route-level resume behavior.
 
 <Callout variant="info">
-`public_gateway` is the public HTTP exposure model. Configure routes to make sandbox services reachable and to control how requests are accepted before they are proxied to sandbox ports.
+`public_gateway` remains available for compatibility. New function-aware code should use Sandbox Services; Sandbox0 projects `public_gateway` routes into services while clients migrate.
 </Callout>
 
 ## Policy Model

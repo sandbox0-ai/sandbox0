@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -67,6 +68,66 @@ type PublicGatewayRateLimit struct {
 	Burst int `json:"burst"`
 }
 
+const (
+	SandboxAppServiceRuntimeWarmProcess = "warm_process"
+	SandboxAppServiceRuntimeCMD         = "cmd"
+	SandboxAppServiceRuntimeManual      = "manual"
+)
+
+// SandboxAppService describes an application service running inside a sandbox.
+//
+// This is the canonical model for service exposure and function publishing.
+// PublicGatewayConfig remains as a compatibility projection for existing API
+// clients and the current host-based public exposure path.
+type SandboxAppService struct {
+	ID          string                    `json:"id"`
+	DisplayName string                    `json:"display_name,omitempty"`
+	Port        int                       `json:"port"`
+	Runtime     *SandboxAppServiceRuntime `json:"runtime,omitempty"`
+	Ingress     SandboxAppServiceIngress  `json:"ingress"`
+	HealthCheck *SandboxAppServiceHealth  `json:"health_check,omitempty"`
+}
+
+// SandboxAppServiceRuntime captures the restartable command for a sandbox service.
+type SandboxAppServiceRuntime struct {
+	Type            string            `json:"type"`
+	Command         []string          `json:"command,omitempty"`
+	CWD             string            `json:"cwd,omitempty"`
+	EnvVars         map[string]string `json:"env_vars,omitempty"`
+	WarmProcessName string            `json:"warm_process_name,omitempty"`
+}
+
+// SandboxAppServiceIngress captures how traffic enters a sandbox service.
+type SandboxAppServiceIngress struct {
+	Public bool                     `json:"public"`
+	Routes []SandboxAppServiceRoute `json:"routes,omitempty"`
+}
+
+// SandboxAppServiceRoute is a public route scoped to one sandbox service port.
+type SandboxAppServiceRoute struct {
+	ID             string                  `json:"id"`
+	PathPrefix     string                  `json:"path_prefix,omitempty"`
+	Methods        []string                `json:"methods,omitempty"`
+	RewritePrefix  *string                 `json:"rewrite_prefix,omitempty"`
+	Auth           *PublicGatewayAuth      `json:"auth,omitempty"`
+	CORS           *PublicGatewayCORS      `json:"cors,omitempty"`
+	RateLimit      *PublicGatewayRateLimit `json:"rate_limit,omitempty"`
+	TimeoutSeconds int                     `json:"timeout_seconds,omitempty"`
+	Resume         bool                    `json:"resume"`
+}
+
+// SandboxAppServiceHealth describes the readiness endpoint for a service.
+type SandboxAppServiceHealth struct {
+	Path string `json:"path,omitempty"`
+}
+
+// SandboxAppServiceView adds derived publishability state to a sandbox service.
+type SandboxAppServiceView struct {
+	SandboxAppService
+	Publishable     bool     `json:"publishable"`
+	PublishBlockers []string `json:"publish_blockers,omitempty"`
+}
+
 func normalizePublicGatewayConfig(cfg *PublicGatewayConfig) (*PublicGatewayConfig, error) {
 	if cfg == nil {
 		return nil, nil
@@ -100,6 +161,235 @@ func PublicGatewayHasResumeRoute(cfg *PublicGatewayConfig) bool {
 		}
 	}
 	return false
+}
+
+func SandboxAppServicesHaveResumeRoute(services []SandboxAppService) bool {
+	for _, svc := range services {
+		for _, route := range svc.Ingress.Routes {
+			if route.Resume {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// NormalizeSandboxAppServices validates and canonicalizes sandbox services.
+func NormalizeSandboxAppServices(services []SandboxAppService) ([]SandboxAppService, error) {
+	if len(services) == 0 {
+		return nil, nil
+	}
+	out := make([]SandboxAppService, 0, len(services))
+	seen := make(map[string]struct{}, len(services))
+	for i := range services {
+		service, err := normalizeSandboxAppService(services[i])
+		if err != nil {
+			return nil, fmt.Errorf("services[%d]: %w", i, err)
+		}
+		if _, ok := seen[service.ID]; ok {
+			return nil, fmt.Errorf("services[%d]: duplicate id %q", i, service.ID)
+		}
+		seen[service.ID] = struct{}{}
+		out = append(out, service)
+	}
+	return out, nil
+}
+
+func normalizeSandboxAppService(service SandboxAppService) (SandboxAppService, error) {
+	service.ID = strings.ToLower(strings.TrimSpace(service.ID))
+	if !publicGatewayRouteIDPattern.MatchString(service.ID) {
+		return service, fmt.Errorf("id must be a DNS label")
+	}
+	service.DisplayName = strings.TrimSpace(service.DisplayName)
+	if service.Port <= 0 || service.Port > 65535 {
+		return service, fmt.Errorf("port must be between 1 and 65535")
+	}
+	if service.Runtime != nil {
+		runtime := *service.Runtime
+		runtime.Type = strings.ToLower(strings.TrimSpace(runtime.Type))
+		switch runtime.Type {
+		case "", SandboxAppServiceRuntimeManual, SandboxAppServiceRuntimeCMD, SandboxAppServiceRuntimeWarmProcess:
+		default:
+			return service, fmt.Errorf("runtime.type must be one of: warm_process, cmd, manual")
+		}
+		runtime.CWD = strings.TrimSpace(runtime.CWD)
+		runtime.WarmProcessName = strings.TrimSpace(runtime.WarmProcessName)
+		if runtime.Type == "" {
+			runtime.Type = SandboxAppServiceRuntimeManual
+		}
+		if runtime.Type == SandboxAppServiceRuntimeCMD && len(runtime.Command) == 0 {
+			return service, fmt.Errorf("runtime.command is required for cmd services")
+		}
+		service.Runtime = &runtime
+	}
+	if service.Ingress.Public && len(service.Ingress.Routes) == 0 {
+		service.Ingress.Routes = []SandboxAppServiceRoute{{
+			ID:         service.ID,
+			PathPrefix: "/",
+		}}
+	}
+	seenRoutes := make(map[string]struct{}, len(service.Ingress.Routes))
+	for i := range service.Ingress.Routes {
+		route, err := normalizeSandboxAppServiceRoute(service.Port, service.Ingress.Routes[i])
+		if err != nil {
+			return service, fmt.Errorf("ingress.routes[%d]: %w", i, err)
+		}
+		if _, ok := seenRoutes[route.ID]; ok {
+			return service, fmt.Errorf("ingress.routes[%d]: duplicate id %q", i, route.ID)
+		}
+		seenRoutes[route.ID] = struct{}{}
+		service.Ingress.Routes[i] = route
+	}
+	if service.HealthCheck != nil {
+		health := *service.HealthCheck
+		health.Path = normalizeGatewayPathPrefix(health.Path)
+		service.HealthCheck = &health
+	}
+	return service, nil
+}
+
+func normalizeSandboxAppServiceRoute(port int, route SandboxAppServiceRoute) (SandboxAppServiceRoute, error) {
+	pg, err := normalizePublicGatewayRoute(PublicGatewayRoute{
+		ID:             route.ID,
+		Port:           port,
+		PathPrefix:     route.PathPrefix,
+		Methods:        route.Methods,
+		RewritePrefix:  route.RewritePrefix,
+		Auth:           route.Auth,
+		CORS:           route.CORS,
+		RateLimit:      route.RateLimit,
+		TimeoutSeconds: route.TimeoutSeconds,
+		Resume:         route.Resume,
+	})
+	if err != nil {
+		return route, err
+	}
+	return SandboxAppServiceRoute{
+		ID:             pg.ID,
+		PathPrefix:     pg.PathPrefix,
+		Methods:        pg.Methods,
+		RewritePrefix:  pg.RewritePrefix,
+		Auth:           pg.Auth,
+		CORS:           pg.CORS,
+		RateLimit:      pg.RateLimit,
+		TimeoutSeconds: pg.TimeoutSeconds,
+		Resume:         pg.Resume,
+	}, nil
+}
+
+// PublicGatewayConfigToSandboxAppServices converts the legacy public gateway
+// shape into canonical sandbox services by grouping routes by backend port.
+func PublicGatewayConfigToSandboxAppServices(cfg *PublicGatewayConfig) ([]SandboxAppService, error) {
+	cfg, err := normalizePublicGatewayConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if cfg == nil || !cfg.Enabled || len(cfg.Routes) == 0 {
+		return nil, nil
+	}
+	routesByPort := make(map[int][]SandboxAppServiceRoute)
+	for _, route := range cfg.Routes {
+		routesByPort[route.Port] = append(routesByPort[route.Port], SandboxAppServiceRoute{
+			ID:             route.ID,
+			PathPrefix:     route.PathPrefix,
+			Methods:        route.Methods,
+			RewritePrefix:  route.RewritePrefix,
+			Auth:           route.Auth,
+			CORS:           route.CORS,
+			RateLimit:      route.RateLimit,
+			TimeoutSeconds: route.TimeoutSeconds,
+			Resume:         route.Resume,
+		})
+	}
+	ports := make([]int, 0, len(routesByPort))
+	for port := range routesByPort {
+		ports = append(ports, port)
+	}
+	sort.Ints(ports)
+	services := make([]SandboxAppService, 0, len(ports))
+	for _, port := range ports {
+		routes := routesByPort[port]
+		id := fmt.Sprintf("p%d", port)
+		if len(routes) == 1 {
+			id = routes[0].ID
+		}
+		services = append(services, SandboxAppService{
+			ID:   id,
+			Port: port,
+			Ingress: SandboxAppServiceIngress{
+				Public: true,
+				Routes: routes,
+			},
+		})
+	}
+	return NormalizeSandboxAppServices(services)
+}
+
+// SandboxAppServicesToPublicGatewayConfig projects sandbox services into the
+// legacy public gateway shape consumed by the existing exposure proxy.
+func SandboxAppServicesToPublicGatewayConfig(services []SandboxAppService) *PublicGatewayConfig {
+	if len(services) == 0 {
+		return nil
+	}
+	routes := make([]PublicGatewayRoute, 0)
+	for _, service := range services {
+		if !service.Ingress.Public {
+			continue
+		}
+		for _, route := range service.Ingress.Routes {
+			routes = append(routes, PublicGatewayRoute{
+				ID:             route.ID,
+				Port:           service.Port,
+				PathPrefix:     route.PathPrefix,
+				Methods:        route.Methods,
+				RewritePrefix:  route.RewritePrefix,
+				Auth:           route.Auth,
+				CORS:           route.CORS,
+				RateLimit:      route.RateLimit,
+				TimeoutSeconds: route.TimeoutSeconds,
+				Resume:         route.Resume,
+			})
+		}
+	}
+	if len(routes) == 0 {
+		return nil
+	}
+	return &PublicGatewayConfig{Enabled: true, Routes: routes}
+}
+
+func SandboxAppServiceViews(services []SandboxAppService) []SandboxAppServiceView {
+	if len(services) == 0 {
+		return nil
+	}
+	views := make([]SandboxAppServiceView, 0, len(services))
+	for _, service := range services {
+		blockers := SandboxAppServicePublishBlockers(service)
+		views = append(views, SandboxAppServiceView{
+			SandboxAppService: service,
+			Publishable:       len(blockers) == 0,
+			PublishBlockers:   blockers,
+		})
+	}
+	return views
+}
+
+// SandboxAppServicePublishBlockers returns reasons why a service cannot be
+// published as a function revision.
+func SandboxAppServicePublishBlockers(service SandboxAppService) []string {
+	var blockers []string
+	if !service.Ingress.Public || len(service.Ingress.Routes) == 0 {
+		blockers = append(blockers, "not_public")
+	}
+	if service.Runtime == nil {
+		blockers = append(blockers, "missing_runtime")
+	} else if service.Runtime.Type == SandboxAppServiceRuntimeManual {
+		blockers = append(blockers, "manual_runtime")
+	} else if service.Runtime.Type == SandboxAppServiceRuntimeCMD && len(service.Runtime.Command) == 0 {
+		blockers = append(blockers, "missing_command")
+	} else if service.Runtime.Type == SandboxAppServiceRuntimeWarmProcess && strings.TrimSpace(service.Runtime.WarmProcessName) == "" {
+		blockers = append(blockers, "missing_warm_process_name")
+	}
+	return blockers
 }
 
 func normalizePublicGatewayRoute(route PublicGatewayRoute) (PublicGatewayRoute, error) {

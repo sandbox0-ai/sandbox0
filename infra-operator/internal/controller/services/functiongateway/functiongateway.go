@@ -221,6 +221,34 @@ func (r *Reconciler) buildConfig(ctx context.Context, compiledPlan *infraplan.In
 	if strings.TrimSpace(cfg.InternalAuthCaller) == "" {
 		cfg.InternalAuthCaller = pkginternalauth.ServiceFunctionGateway
 	}
+	if regionalGatewayUsesFederatedGlobalAuth(compiledPlan) {
+		if strings.TrimSpace(cfg.JWTIssuer) == "" {
+			cfg.JWTIssuer = compiledPlan.DefaultFederatedGlobalJWTIssuer()
+		}
+		cfg.JWTSecret = ""
+		cfg.JWTPrivateKeyPEM = ""
+		cfg.JWTPrivateKeyFile = ""
+		if strings.TrimSpace(cfg.JWTPublicKeyPEM) == "" && strings.TrimSpace(cfg.JWTPublicKeyFile) == "" {
+			if compiledPlan.RegionalGateway.Config != nil && strings.TrimSpace(compiledPlan.RegionalGateway.Config.JWTPublicKeyPEM) != "" {
+				cfg.JWTPublicKeyPEM = compiledPlan.RegionalGateway.Config.JWTPublicKeyPEM
+			} else {
+				_, publicKeyPEM, err := common.EnsureEd25519KeyPair(
+					ctx,
+					r.Resources.Client,
+					r.Resources.Scheme,
+					compiledPlan.Scope.Owner(),
+					compiledPlan.SharedUserJWTSecretName(),
+					"jwt_private_key_pem",
+					"jwt_public_key_pem",
+				)
+				if err != nil {
+					return nil, err
+				}
+				cfg.JWTPublicKeyPEM = publicKeyPEM
+			}
+		}
+		return cfg, nil
+	}
 	if strings.TrimSpace(cfg.JWTIssuer) == "" {
 		cfg.JWTIssuer = "regional-gateway"
 	}
@@ -240,6 +268,13 @@ func (r *Reconciler) buildConfig(ctx context.Context, compiledPlan *infraplan.In
 		cfg.JWTSecret = jwtSecret
 	}
 	return cfg, nil
+}
+
+func regionalGatewayUsesFederatedGlobalAuth(compiledPlan *infraplan.InfraPlan) bool {
+	if compiledPlan == nil || compiledPlan.RegionalGateway.Config == nil {
+		return false
+	}
+	return strings.TrimSpace(strings.ToLower(compiledPlan.RegionalGateway.Config.AuthMode)) == "federated_global"
 }
 
 func (r *Reconciler) deleteIngressIfExists(ctx context.Context, scope common.ObjectScope, name string) error {

@@ -42,6 +42,8 @@ type RegionalGatewayConfig struct {
 
 	// Upstream service
 	DefaultClusterGatewayURL string `yaml:"default_cluster_gateway_url" json:"-"`
+	// FunctionGatewayURL is the control-plane upstream used for function management APIs.
+	FunctionGatewayURL string `yaml:"function_gateway_url" json:"-"`
 
 	// Scheduler configuration (optional, for multi-cluster mode)
 	// +optional

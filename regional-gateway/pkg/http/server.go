@@ -34,22 +34,23 @@ import (
 
 // Server represents the HTTP server for regional-gateway
 type Server struct {
-	router               *gin.Engine
-	cfg                  *config.RegionalGatewayConfig
-	pool                 *pgxpool.Pool
-	identityRepo         *identity.Repository
-	apiKeyRepo           *apikey.Repository
-	clusterGatewayRouter *proxy.Router
-	schedulerRouter      *proxy.Router // Optional: proxy to scheduler for templates
-	authMiddleware       *middleware.AuthMiddleware
-	internalAuth         *internalmiddleware.InternalAuthMiddleware
-	rateLimiter          *middleware.RateLimiter
-	requestLogger        *middleware.RequestLogger
-	logger               *zap.Logger
-	internalAuthGen      *internalauth.Generator
-	meteringHandler      *gatewayhandlers.MeteringHandler
-	obsProvider          *observability.Provider
-	httpClient           *http.Client
+	router                *gin.Engine
+	cfg                   *config.RegionalGatewayConfig
+	pool                  *pgxpool.Pool
+	identityRepo          *identity.Repository
+	apiKeyRepo            *apikey.Repository
+	clusterGatewayRouter  *proxy.Router
+	functionGatewayRouter *proxy.Router
+	schedulerRouter       *proxy.Router // Optional: proxy to scheduler for templates
+	authMiddleware        *middleware.AuthMiddleware
+	internalAuth          *internalmiddleware.InternalAuthMiddleware
+	rateLimiter           *middleware.RateLimiter
+	requestLogger         *middleware.RequestLogger
+	logger                *zap.Logger
+	internalAuthGen       *internalauth.Generator
+	meteringHandler       *gatewayhandlers.MeteringHandler
+	obsProvider           *observability.Provider
+	httpClient            *http.Client
 
 	clusterGatewayProxies   map[string]*proxy.Router
 	clusterGatewayProxiesMu sync.RWMutex
@@ -130,6 +131,22 @@ func NewServer(
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create proxy router: %w", err)
+	}
+
+	var functionGatewayRouter *proxy.Router
+	if strings.TrimSpace(cfg.FunctionGatewayURL) != "" {
+		functionGatewayRouter, err = proxy.NewRouter(
+			cfg.FunctionGatewayURL,
+			logger,
+			cfg.ProxyTimeout.Duration,
+			proxy.WithHTTPClient(httpClient),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("create function-gateway proxy router: %w", err)
+		}
+		logger.Info("Function gateway API proxy enabled",
+			zap.String("function_gateway_url", cfg.FunctionGatewayURL),
+		)
 	}
 
 	// Create scheduler proxy router (optional, for multi-cluster mode)
@@ -229,6 +246,7 @@ func NewServer(
 		identityRepo:          identityRepo,
 		apiKeyRepo:            apiKeyRepo,
 		clusterGatewayRouter:  clusterGatewayRouter,
+		functionGatewayRouter: functionGatewayRouter,
 		schedulerRouter:       schedulerRouter,
 		authMiddleware:        authMiddleware,
 		internalAuth:          internalAuth,
@@ -284,7 +302,7 @@ func (s *Server) setupRoutes() {
 	s.setupInternalSSHRoutes()
 
 	// ===== API Proxy Routes =====
-	// These routes proxy to cluster-gateway (or scheduler for templates) after authentication
+	// These routes proxy to cluster-gateway, scheduler, or function-gateway after authentication.
 	api := s.router.Group("/api")
 	{
 		// Apply auth and rate limiting to all API routes
@@ -323,6 +341,17 @@ func (s *Server) setupRoutes() {
 		registry := api.Group("/v1/registry")
 		{
 			registry.POST("/credentials", s.authMiddleware.RequirePermission(authn.PermRegistryWrite), s.getRegistryCredentials)
+		}
+
+		functions := api.Group("/v1/functions")
+		functions.Use(s.requireTeamContextForTeamScopedAPI())
+		{
+			functions.GET("", s.authMiddleware.RequirePermission(authn.PermFunctionRead), s.proxyFunctionGatewayAPI)
+			functions.POST("", s.authMiddleware.RequirePermission(authn.PermFunctionCreate), s.proxyFunctionGatewayAPI)
+			functions.GET("/:id", s.authMiddleware.RequirePermission(authn.PermFunctionRead), s.proxyFunctionGatewayAPI)
+			functions.GET("/:id/revisions", s.authMiddleware.RequirePermission(authn.PermFunctionRead), s.proxyFunctionGatewayAPI)
+			functions.POST("/:id/revisions", s.authMiddleware.RequirePermission(authn.PermFunctionWrite), s.proxyFunctionGatewayAPI)
+			functions.PUT("/:id/aliases/:alias", s.authMiddleware.RequirePermission(authn.PermFunctionWrite), s.proxyFunctionGatewayAPI)
 		}
 
 		credentialSources := api.Group("/v1/credential-sources")

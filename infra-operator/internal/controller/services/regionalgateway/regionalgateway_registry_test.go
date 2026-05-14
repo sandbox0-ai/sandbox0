@@ -394,6 +394,7 @@ func TestBuildConfigUsesCompiledPlanForDefaultClusterGatewayURL(t *testing.T) {
 	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
 	compiled := infraplan.Compile(infra)
 	compiled.RegionalGateway.DefaultClusterGatewayURL = "http://planned-cluster-gateway:9443"
+	compiled.RegionalGateway.FunctionGatewayURL = "http://planned-function-gateway:8080"
 
 	cfg, _, err := reconciler.buildConfig(context.Background(), compiled)
 	if err != nil {
@@ -401,6 +402,9 @@ func TestBuildConfigUsesCompiledPlanForDefaultClusterGatewayURL(t *testing.T) {
 	}
 	if got := cfg.DefaultClusterGatewayURL; got != compiled.RegionalGateway.DefaultClusterGatewayURL {
 		t.Fatalf("expected cluster gateway URL %q, got %q", compiled.RegionalGateway.DefaultClusterGatewayURL, got)
+	}
+	if got := cfg.FunctionGatewayURL; got != compiled.RegionalGateway.FunctionGatewayURL {
+		t.Fatalf("expected function gateway URL %q, got %q", compiled.RegionalGateway.FunctionGatewayURL, got)
 	}
 }
 

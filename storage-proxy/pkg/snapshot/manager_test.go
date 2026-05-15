@@ -613,7 +613,7 @@ func TestRestoreSnapshot_BeginInvalidateError(t *testing.T) {
 	}
 }
 
-func TestCreateSnapshot_RejectsMountedCtldOwner(t *testing.T) {
+func TestCreateSnapshot_AllowsMountedCtldOwner(t *testing.T) {
 	repo := newFakeRepo()
 	repo.volumes["vol1"] = &db.SandboxVolume{ID: "vol1", TeamID: "team1"}
 	repo.activeMounts["vol1"] = []*db.VolumeMount{{
@@ -621,15 +621,23 @@ func TestCreateSnapshot_RejectsMountedCtldOwner(t *testing.T) {
 		MountOptions: rawMountOptions(t, volume.MountOptions{AccessMode: volume.AccessModeRWO, OwnerKind: volume.OwnerKindCtld}),
 	}}
 	mgr := newTestManager(repo, nil)
+	coordinator := &failingFlushCoordinator{}
+	mgr.SetFlushCoordinator(coordinator)
 
-	_, err := mgr.CreateSnapshot(context.Background(), &CreateSnapshotRequest{
+	snapshot, err := mgr.CreateSnapshot(context.Background(), &CreateSnapshotRequest{
 		VolumeID: "vol1",
 		Name:     "snap1",
 		TeamID:   "team1",
 		UserID:   "user1",
 	})
-	if !errors.Is(err, ErrMountedCtldOwner) {
-		t.Fatalf("CreateSnapshot() error = %v, want %v", err, ErrMountedCtldOwner)
+	if err != nil {
+		t.Fatalf("CreateSnapshot() error = %v", err)
+	}
+	if snapshot == nil || snapshot.VolumeID != "vol1" {
+		t.Fatalf("CreateSnapshot() snapshot = %#v", snapshot)
+	}
+	if coordinator.called {
+		t.Fatal("CreateSnapshot called distributed flush coordinator for ctld-owned mount")
 	}
 }
 

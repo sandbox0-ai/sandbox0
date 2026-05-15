@@ -178,6 +178,17 @@ type ForkVolumeRequest struct {
 	DefaultPosixGID *int64
 }
 
+// CreateVolumeFromSnapshotRequest contains parameters for creating a volume
+// initialized from an immutable snapshot.
+type CreateVolumeFromSnapshotRequest struct {
+	SnapshotID      string
+	TeamID          string
+	UserID          string
+	AccessMode      string
+	DefaultPosixUID *int64
+	DefaultPosixGID *int64
+}
+
 // CreateSnapshot creates a new snapshot of a volume using the s0fs snapshot engine.
 func (m *Manager) CreateSnapshot(ctx context.Context, req *CreateSnapshotRequest) (*db.Snapshot, error) {
 	startTime := time.Now()
@@ -187,14 +198,6 @@ func (m *Manager) CreateSnapshot(ctx context.Context, req *CreateSnapshotRequest
 		"name":      req.Name,
 	}).Info("Creating snapshot")
 
-	ctldMounted, err := m.hasMountedCtldOwner(ctx, req.VolumeID)
-	if err != nil {
-		return nil, err
-	}
-	if ctldMounted {
-		return nil, ErrMountedCtldOwner
-	}
-
 	// 0. Distributed flush coordination (if coordinator is set)
 	// This ensures all storage-proxy instances that have this volume mounted
 	// flush their local caches to S3 before we create the snapshot.
@@ -202,7 +205,11 @@ func (m *Manager) CreateSnapshot(ctx context.Context, req *CreateSnapshotRequest
 	coordinator := m.coordinator
 	m.mu.RUnlock()
 
-	if coordinator != nil {
+	storageProxyMounted, err := m.hasMountedStorageProxyOwner(ctx, req.VolumeID)
+	if err != nil {
+		return nil, err
+	}
+	if coordinator != nil && storageProxyMounted {
 		m.logger.WithField("volume_id", req.VolumeID).Info("Coordinating flush across all instances")
 		if err := coordinator.CoordinateFlush(ctx, req.VolumeID); err != nil {
 			m.logger.WithError(err).Error("Distributed flush coordination failed")
@@ -281,6 +288,31 @@ func (m *Manager) ForkVolume(ctx context.Context, req *ForkVolumeRequest) (*db.S
 		metrics.SnapshotOperationDuration.WithLabelValues("fork").Observe(time.Since(startTime).Seconds())
 	}
 
+	return vol, nil
+}
+
+// CreateVolumeFromSnapshot creates a new SandboxVolume initialized from a
+// snapshot's immutable state.
+func (m *Manager) CreateVolumeFromSnapshot(ctx context.Context, req *CreateVolumeFromSnapshotRequest) (*db.SandboxVolume, error) {
+	startTime := time.Now()
+	metrics := m.metrics
+	m.logger.WithFields(logrus.Fields{
+		"snapshot_id": req.SnapshotID,
+		"team_id":     req.TeamID,
+	}).Info("Creating volume from snapshot")
+
+	vol, err := m.createS0FSVolumeFromSnapshot(ctx, req)
+	if err != nil {
+		if metrics != nil {
+			metrics.SnapshotOperationsTotal.WithLabelValues("create_volume_from_snapshot", "failure").Inc()
+			metrics.SnapshotOperationDuration.WithLabelValues("create_volume_from_snapshot").Observe(time.Since(startTime).Seconds())
+		}
+		return nil, err
+	}
+	if metrics != nil {
+		metrics.SnapshotOperationsTotal.WithLabelValues("create_volume_from_snapshot", "success").Inc()
+		metrics.SnapshotOperationDuration.WithLabelValues("create_volume_from_snapshot").Observe(time.Since(startTime).Seconds())
+	}
 	return vol, nil
 }
 
@@ -511,6 +543,22 @@ func volumeForkedEvent(regionID, clusterID string, volume *db.SandboxVolume) *me
 		Producer:    "storage-proxy.volume",
 		RegionID:    regionID,
 		EventType:   meteringpkg.EventTypeVolumeForked,
+		SubjectType: meteringpkg.SubjectTypeVolume,
+		SubjectID:   volume.ID,
+		TeamID:      volume.TeamID,
+		UserID:      volume.UserID,
+		VolumeID:    volume.ID,
+		ClusterID:   clusterID,
+		OccurredAt:  volume.CreatedAt,
+	}
+}
+
+func volumeCreatedEvent(regionID, clusterID string, volume *db.SandboxVolume) *meteringpkg.Event {
+	return &meteringpkg.Event{
+		EventID:     fmt.Sprintf("volume/%s/created/%d", volume.ID, volume.CreatedAt.UTC().UnixNano()),
+		Producer:    "storage-proxy.volume",
+		RegionID:    regionID,
+		EventType:   meteringpkg.EventTypeVolumeCreated,
 		SubjectType: meteringpkg.SubjectTypeVolume,
 		SubjectID:   volume.ID,
 		TeamID:      volume.TeamID,

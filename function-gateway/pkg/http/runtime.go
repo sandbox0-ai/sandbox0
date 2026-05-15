@@ -474,25 +474,35 @@ func isPublishNotFound(err error) bool {
 }
 
 func (s *Server) claimFunctionSandboxViaClusterGateway(ctx context.Context, fn *functions.Function, rev *functions.Revision, service mgr.SandboxAppService) (*mgr.ClaimResponse, error) {
-	clusterGatewayURL := strings.TrimRight(strings.TrimSpace(s.cfg.DefaultClusterGatewayURL), "/")
+	clusterGatewayURL := s.defaultClusterGatewayURL()
+	targetService := internalauth.ServiceClusterGateway
+	requestPath := "/api/v1/sandboxes"
+	if schedulerURL := s.schedulerURL(); schedulerURL != "" {
+		clusterGatewayURL = schedulerURL
+		targetService = internalauth.ServiceScheduler
+	}
 	if clusterGatewayURL == "" {
 		return nil, fmt.Errorf("cluster gateway is not configured")
 	}
 	autoResume := true
 	runtimeService := service
 	runtimeService.Ingress = mgr.SandboxAppServiceIngress{}
+	claimMounts, err := s.claimMountsFromRevision(rev)
+	if err != nil {
+		return nil, err
+	}
 	payload, err := json.Marshal(mgr.ClaimRequest{
 		Template: rev.SourceTemplateID,
 		Config: &mgr.SandboxConfig{
 			AutoResume: &autoResume,
 			Services:   []mgr.SandboxAppService{runtimeService},
 		},
-		Mounts: claimMountsFromRevision(rev.RestoreMounts),
+		Mounts: claimMounts,
 	})
 	if err != nil {
 		return nil, err
 	}
-	token, err := s.internalAuthGen.Generate(internalauth.ServiceClusterGateway, fn.TeamID, rev.CreatedBy, internalauth.GenerateOptions{
+	token, err := s.internalAuthGen.Generate(targetService, fn.TeamID, rev.CreatedBy, internalauth.GenerateOptions{
 		Permissions: []string{
 			authn.PermSandboxCreate,
 			authn.PermSandboxRead,
@@ -504,7 +514,7 @@ func (s *Server) claimFunctionSandboxViaClusterGateway(ctx context.Context, fn *
 	if err != nil {
 		return nil, fmt.Errorf("generate internal token: %w", err)
 	}
-	req, err := nethttp.NewRequestWithContext(ctx, nethttp.MethodPost, clusterGatewayURL+"/api/v1/sandboxes", bytes.NewReader(payload))
+	req, err := nethttp.NewRequestWithContext(ctx, nethttp.MethodPost, clusterGatewayURL+requestPath, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -533,18 +543,27 @@ func (s *Server) claimFunctionSandboxViaClusterGateway(ctx context.Context, fn *
 	return claim, nil
 }
 
-func claimMountsFromRevision(mounts []functions.RestoreMount) []mgr.ClaimMount {
+func (s *Server) claimMountsFromRevision(rev *functions.Revision) ([]mgr.ClaimMount, error) {
+	mounts := rev.RestoreMounts
 	if len(mounts) == 0 {
-		return nil
+		return nil, nil
 	}
 	out := make([]mgr.ClaimMount, 0, len(mounts))
 	for _, mount := range mounts {
+		volumeID := strings.TrimSpace(mount.SandboxVolumeID)
+		mountPoint := strings.TrimSpace(mount.MountPoint)
+		if volumeID == "" {
+			return nil, fmt.Errorf("function revision restore mount is missing sandbox volume id")
+		}
+		if mountPoint == "" {
+			return nil, fmt.Errorf("function revision restore mount is missing mount point")
+		}
 		out = append(out, mgr.ClaimMount{
-			SandboxVolumeID: strings.TrimSpace(mount.SandboxVolumeID),
-			MountPoint:      strings.TrimSpace(mount.MountPoint),
+			SandboxVolumeID: volumeID,
+			MountPoint:      mountPoint,
 		})
 	}
-	return out
+	return out, nil
 }
 
 func (s *Server) ensureFunctionServiceRuntime(ctx context.Context, fn *functions.Function, rev *functions.Revision, sandbox *mgr.Sandbox, service mgr.SandboxAppService) (string, error) {
@@ -670,8 +689,8 @@ func decodeFunctionContextResponse(r io.Reader) (*functionContextResponse, error
 }
 
 func (s *Server) doFunctionRuntimeContextRequest(ctx context.Context, method, sandboxID, teamID, userID, contextID string, body io.Reader) (*nethttp.Response, error) {
-	clusterGatewayURL := strings.TrimRight(strings.TrimSpace(s.cfg.DefaultClusterGatewayURL), "/")
-	if clusterGatewayURL == "" {
+	clusterGatewayURL, err := s.clusterGatewayURLForSandbox(ctx, sandboxID)
+	if err != nil || clusterGatewayURL == "" {
 		return nil, fmt.Errorf("cluster gateway is not configured")
 	}
 	token, err := s.internalAuthGen.Generate(internalauth.ServiceClusterGateway, teamID, userID, internalauth.GenerateOptions{
@@ -717,8 +736,8 @@ func (s *Server) deleteFunctionRuntimeSandboxBestEffort(fn *functions.Function, 
 }
 
 func (s *Server) deleteSandboxViaClusterGateway(ctx context.Context, sandboxID, teamID, userID string) error {
-	clusterGatewayURL := strings.TrimRight(strings.TrimSpace(s.cfg.DefaultClusterGatewayURL), "/")
-	if clusterGatewayURL == "" {
+	clusterGatewayURL, err := s.clusterGatewayURLForSandbox(ctx, sandboxID)
+	if err != nil || clusterGatewayURL == "" {
 		return fmt.Errorf("cluster gateway is not configured")
 	}
 	if s.internalAuthGen == nil {
@@ -783,8 +802,8 @@ func waitForFunctionServicePort(ctx context.Context, internalAddr string, port i
 }
 
 func (s *Server) resumeSandboxViaClusterGateway(ctx context.Context, sandboxID, teamID, userID string) error {
-	clusterGatewayURL := strings.TrimRight(strings.TrimSpace(s.cfg.DefaultClusterGatewayURL), "/")
-	if clusterGatewayURL == "" {
+	clusterGatewayURL, err := s.clusterGatewayURLForSandbox(ctx, sandboxID)
+	if err != nil || clusterGatewayURL == "" {
 		return fmt.Errorf("cluster gateway is not configured")
 	}
 	token, err := s.internalAuthGen.Generate(internalauth.ServiceClusterGateway, teamID, userID, internalauth.GenerateOptions{})

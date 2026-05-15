@@ -192,6 +192,9 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 				It("publishes a sandbox service without capturing function /api routes", func() {
 					assertFunctionAPIRoutesReachUserService(env, session, sandboxID)
 				})
+				It("restores a runtime sandbox from revision volume snapshots", func() {
+					assertFunctionRuntimeRestoreUsesVolumeSnapshot(env, session)
+				})
 			})
 		}
 
@@ -1785,6 +1788,105 @@ func assertFunctionAPIRoutesReachUserService(env *framework.ScenarioEnv, session
 	}).WithTimeout(60 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
 }
 
+func assertFunctionRuntimeRestoreUsesVolumeSnapshot(env *framework.ScenarioEnv, session *e2eutils.Session) {
+	volume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), apispec.CreateSandboxVolumeRequest{})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusCreated))
+	Expect(volume).NotTo(BeNil())
+	volumeID := expectStringPtr(volume.Id, "volume id")
+	DeferCleanup(func() {
+		deleteSandboxVolumeForCleanup(env, session, volumeID)
+	})
+
+	mountPoint := "/workspace/function-data"
+	templateID := createVolumePortalTemplate(env, session, mountPoint)
+	seedPath := "/message.txt"
+	seedContent := []byte("function snapshot content\n")
+	status, err = session.WriteVolumeFile(env.TestCtx.Context, GinkgoT(), volumeID, seedPath, seedContent, "")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+
+	claimReq := apispec.ClaimRequest{
+		Template: &templateID,
+		Mounts: &[]apispec.ClaimMountRequest{{
+			SandboxvolumeId: volumeID,
+			MountPoint:      mountPoint,
+		}},
+	}
+	claimResp, err := session.ClaimSandboxWithRequest(env.TestCtx.Context, GinkgoT(), claimReq)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(claimResp).NotTo(BeNil())
+	sourceSandboxID := claimResp.SandboxId
+	DeferCleanup(func() {
+		_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), sourceSandboxID)
+	})
+
+	sourceTemplate, err := session.GetTemplate(env.TestCtx.Context, GinkgoT(), templateID)
+	Expect(err).NotTo(HaveOccurred())
+	templateNamespace, err := naming.TemplateNamespaceForTeam(expectStringPtr(sourceTemplate.TeamId, "team id"))
+	Expect(err).NotTo(HaveOccurred())
+	sourceSandbox := waitForSandboxPodReadyEventually(env, session, sourceSandboxID, templateNamespace)
+	Expect(sourceSandbox.PodName).NotTo(BeEmpty())
+
+	const serviceID = "function-volume"
+	const servicePort int32 = 18081
+	startCommand := fmt.Sprintf("nohup python3 -m http.server %d --bind 0.0.0.0 -d %s >/tmp/s0-function-volume.log 2>&1 &", servicePort, shellQuote(mountPoint))
+	_, err = execInSandboxPod(env, templateNamespace, sourceSandbox.PodName, startCommand)
+	Expect(err).NotTo(HaveOccurred())
+
+	pathPrefix := "/"
+	cwd := mountPoint
+	command := []string{"/bin/sh", "-lc", fmt.Sprintf("python3 -m http.server %d --bind 0.0.0.0 -d %s", servicePort, shellQuote(mountPoint))}
+	_, _, updateStatus, err := session.UpdateSandboxServices(env.TestCtx.Context, GinkgoT(), sourceSandboxID, []apispec.SandboxAppService{{
+		Id:   serviceID,
+		Port: servicePort,
+		Runtime: &apispec.SandboxAppServiceRuntime{
+			Type:    apispec.SandboxAppServiceRuntimeTypeCmd,
+			Command: &command,
+			Cwd:     &cwd,
+		},
+		Ingress: apispec.SandboxAppServiceIngress{
+			Public: true,
+			Routes: &[]apispec.SandboxAppServiceRoute{{
+				Id:         "root",
+				PathPrefix: &pathPrefix,
+				Resume:     true,
+			}},
+		},
+	}})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(updateStatus).To(Equal(http.StatusOK))
+
+	functionName := fmt.Sprintf("e2e-function-volume-%d", time.Now().UnixNano())
+	fn, createStatus, err := session.CreateFunctionFromSandbox(env.TestCtx.Context, GinkgoT(), sourceSandboxID, serviceID, functionName)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(createStatus).To(Equal(http.StatusCreated))
+	Expect(fn).NotTo(BeNil())
+	Expect(fn.Host).NotTo(BeEmpty())
+
+	_, err = execInSandboxPod(env, templateNamespace, sourceSandbox.PodName, fmt.Sprintf("printf 'mutated live content\\n' > %s", shellQuote(mountPoint+seedPath)))
+	Expect(err).NotTo(HaveOccurred())
+	Expect(session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), sourceSandboxID)).To(Succeed())
+
+	functionGatewayURL, cleanup, err := functionGatewayBaseURL(env)
+	Expect(err).NotTo(HaveOccurred())
+	defer cleanup()
+
+	Eventually(func() error {
+		status, body, err := requestFunctionHost(env.TestCtx.Context, functionGatewayURL, fn.Host, seedPath)
+		if err != nil {
+			return err
+		}
+		if status != http.StatusOK {
+			return fmt.Errorf("function restore status %d body %q", status, body)
+		}
+		if body != string(seedContent) {
+			return fmt.Errorf("function restore body = %q, want %q", body, string(seedContent))
+		}
+		return nil
+	}).WithTimeout(90 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
+}
+
 func functionGatewayBaseURL(env *framework.ScenarioEnv) (string, func(), error) {
 	serviceName := env.Infra.Name + "-function-gateway"
 	port, err := framework.GetServicePort(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, serviceName)
@@ -1965,9 +2067,11 @@ func assertVolumeLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session
 	Expect(status).To(Equal(http.StatusOK))
 	Expect(directBody).To(Equal(directContent))
 
-	_, status, err = session.CreateSnapshot(env.TestCtx.Context, GinkgoT(), volumeID, apispec.CreateSnapshotRequest{Name: "direct-mounted"})
-	Expect(err).To(HaveOccurred())
-	Expect(status).To(Equal(http.StatusConflict))
+	directSnapshot, status, err := session.CreateSnapshot(env.TestCtx.Context, GinkgoT(), volumeID, apispec.CreateSnapshotRequest{Name: "direct-mounted"})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusCreated))
+	Expect(directSnapshot).NotTo(BeNil())
+	Expect(directSnapshot.Id).NotTo(BeEmpty())
 
 	snapshotVolume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), createReq)
 	Expect(err).NotTo(HaveOccurred())

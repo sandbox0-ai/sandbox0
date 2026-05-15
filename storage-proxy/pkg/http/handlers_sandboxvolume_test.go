@@ -107,6 +107,40 @@ func TestCreateSandboxVolumeDefaultsPosixIdentityToRoot(t *testing.T) {
 	}
 }
 
+func TestCreateSandboxVolumeFromSnapshot(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	snapshotMgr := &fakeHTTPSnapshotManager{}
+	server := &Server{
+		repo:        repo,
+		snapshotMgr: snapshotMgr,
+		logger:      logrus.New(),
+	}
+	ctx := internalauth.WithClaims(context.Background(), &internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes", bytes.NewReader([]byte(`{"snapshot_id":"snap-1","default_posix_uid":1001,"default_posix_gid":1002}`))).WithContext(ctx)
+	recorder := httptest.NewRecorder()
+
+	server.createSandboxVolume(recorder, req)
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if snapshotMgr.lastCreateVolume == nil {
+		t.Fatal("expected snapshot-backed volume create request")
+	}
+	if snapshotMgr.lastCreateVolume.SnapshotID != "snap-1" {
+		t.Fatalf("snapshot_id = %q, want snap-1", snapshotMgr.lastCreateVolume.SnapshotID)
+	}
+	if snapshotMgr.lastCreateVolume.DefaultPosixUID == nil || *snapshotMgr.lastCreateVolume.DefaultPosixUID != 1001 {
+		t.Fatalf("default_posix_uid = %v, want 1001", snapshotMgr.lastCreateVolume.DefaultPosixUID)
+	}
+	if len(repo.volumes) != 0 {
+		t.Fatalf("expected handler to delegate snapshot-backed create, repo volumes = %d", len(repo.volumes))
+	}
+}
+
 func TestCreateSandboxVolumeRejectsPartialDefaultPosixIdentity(t *testing.T) {
 	server := &Server{
 		logger:       logrus.New(),

@@ -140,7 +140,7 @@ func cloneState(state *SnapshotState) *SnapshotState {
 }
 
 // PrepareForkState returns a child-ready metadata snapshot that keeps cold file
-// segments addressed to the source volume instead of inlining file contents.
+// segments addressed to the source volume while preserving inline file data.
 func PrepareForkState(state *SnapshotState, sourceVolumeID string) (*SnapshotState, error) {
 	sourceVolumeID = strings.TrimSpace(sourceVolumeID)
 	if sourceVolumeID == "" {
@@ -151,11 +151,6 @@ func PrepareForkState(state *SnapshotState, sourceVolumeID string) (*SnapshotSta
 	}
 	clone := cloneState(state)
 	normalizeState(clone)
-	for inode, payload := range clone.Data {
-		if len(payload) > 0 {
-			return nil, fmt.Errorf("%w: source state has inline data for inode %d", ErrInvalidInput, inode)
-		}
-	}
 	for inode, extents := range clone.ColdFiles {
 		if clone.Nodes[inode] == nil {
 			delete(clone.ColdFiles, inode)
@@ -171,7 +166,6 @@ func PrepareForkState(state *SnapshotState, sourceVolumeID string) (*SnapshotSta
 			}
 		}
 	}
-	clone.Data = make(map[uint64][]byte)
 	return clone, nil
 }
 

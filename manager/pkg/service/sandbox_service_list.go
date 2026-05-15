@@ -82,7 +82,7 @@ func (s *SandboxService) ListSandboxes(ctx context.Context, req *ListSandboxesRe
 		}
 
 		// Filter by template_id if specified
-		templateID := pod.Labels[controller.LabelTemplateID]
+		templateID := sandboxTemplateIDFromLabels(pod.Labels)
 		if req.TemplateID != "" && templateID != req.TemplateID {
 			continue
 		}

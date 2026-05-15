@@ -4026,6 +4026,13 @@ components:
       properties:
         sandboxvolume_id:
           type: string
+          description: Revision-owned SandboxVolume prepared when the function revision was published.
+        source_sandboxvolume_id:
+          type: string
+          description: Source SandboxVolume captured when the function revision was published.
+        snapshot_id:
+          type: string
+          description: Immutable source volume snapshot captured for this function revision.
         mount_point:
           type: string
       required: [sandboxvolume_id, mount_point]
@@ -5006,6 +5013,9 @@ components:
     CreateSandboxVolumeRequest:
       type: object
       properties:
+        snapshot_id:
+          type: string
+          description: Optional snapshot ID used to initialize the new volume from immutable snapshot state.
         default_posix_uid:
           type: integer
           format: int64

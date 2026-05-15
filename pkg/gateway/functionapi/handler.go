@@ -31,16 +31,22 @@ type Config struct {
 
 type SandboxLookup func(ctx context.Context, sandboxID string) (*mgr.Sandbox, error)
 
+type RevisionVolumeStore interface {
+	PrepareRestoreMounts(ctx context.Context, authCtx *authn.AuthContext, sandbox *mgr.Sandbox) ([]functions.RestoreMount, error)
+	DeleteRestoreMounts(ctx context.Context, authCtx *authn.AuthContext, sandbox *mgr.Sandbox, mounts []functions.RestoreMount) error
+}
+
 type PermissionMiddleware func(permission string) gin.HandlerFunc
 
 type Handler struct {
 	repo          *functions.Repository
 	cfg           Config
 	sandboxLookup SandboxLookup
+	volumeStore   RevisionVolumeStore
 	logger        *zap.Logger
 }
 
-func New(repo *functions.Repository, cfg Config, lookup SandboxLookup, logger *zap.Logger) *Handler {
+func New(repo *functions.Repository, cfg Config, lookup SandboxLookup, volumeStore RevisionVolumeStore, logger *zap.Logger) *Handler {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
@@ -48,6 +54,7 @@ func New(repo *functions.Repository, cfg Config, lookup SandboxLookup, logger *z
 		repo:          repo,
 		cfg:           cfg,
 		sandboxLookup: lookup,
+		volumeStore:   volumeStore,
 		logger:        logger,
 	}
 }
@@ -202,7 +209,18 @@ func (h *Handler) createFunction(c *gin.Context) {
 
 	userID := principalID(authCtx)
 	fn := functions.NewFunction(authCtx.TeamID, name, userID)
-	rev, err := functions.NewRevision(authCtx.TeamID, sandbox.ID, serviceSnapshot.ID, sandbox.TemplateID, serviceSnapshot, restoreMountsFromSandbox(sandbox), userID)
+	restoreMounts, err := h.prepareRestoreMounts(c.Request.Context(), authCtx, sandbox)
+	if err != nil {
+		h.writePublishError(c, err)
+		return
+	}
+	cleanupRestoreMounts := true
+	defer func() {
+		if cleanupRestoreMounts {
+			h.deletePreparedRestoreMounts(context.Background(), authCtx, sandbox, restoreMounts, "function create failed")
+		}
+	}()
+	rev, err := functions.NewRevision(authCtx.TeamID, sandbox.ID, serviceSnapshot.ID, sandbox.TemplateID, serviceSnapshot, restoreMounts, userID)
 	if err != nil {
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to create revision snapshot")
 		return
@@ -218,6 +236,7 @@ func (h *Handler) createFunction(c *gin.Context) {
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to create function")
 		return
 	}
+	cleanupRestoreMounts = false
 
 	spec.JSONSuccess(c, http.StatusCreated, gin.H{
 		"function": h.functionRecord(fn),
@@ -276,7 +295,18 @@ func (h *Handler) createFunctionRevision(c *gin.Context) {
 	}
 
 	userID := principalID(authCtx)
-	rev, err := functions.NewRevision(authCtx.TeamID, sandbox.ID, serviceSnapshot.ID, sandbox.TemplateID, serviceSnapshot, restoreMountsFromSandbox(sandbox), userID)
+	restoreMounts, err := h.prepareRestoreMounts(c.Request.Context(), authCtx, sandbox)
+	if err != nil {
+		h.writePublishError(c, err)
+		return
+	}
+	cleanupRestoreMounts := true
+	defer func() {
+		if cleanupRestoreMounts {
+			h.deletePreparedRestoreMounts(context.Background(), authCtx, sandbox, restoreMounts, "revision create failed")
+		}
+	}()
+	rev, err := functions.NewRevision(authCtx.TeamID, sandbox.ID, serviceSnapshot.ID, sandbox.TemplateID, serviceSnapshot, restoreMounts, userID)
 	if err != nil {
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to create revision snapshot")
 		return
@@ -295,6 +325,7 @@ func (h *Handler) createFunctionRevision(c *gin.Context) {
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to create revision")
 		return
 	}
+	cleanupRestoreMounts = false
 	spec.JSONSuccess(c, http.StatusCreated, gin.H{"revision": rev, "promoted": promote})
 }
 
@@ -374,18 +405,35 @@ func findSandboxService(sandbox *mgr.Sandbox, serviceID string) (mgr.SandboxAppS
 	return mgr.SandboxAppService{}, false
 }
 
-func restoreMountsFromSandbox(sandbox *mgr.Sandbox) []functions.RestoreMount {
+func (h *Handler) prepareRestoreMounts(ctx context.Context, authCtx *authn.AuthContext, sandbox *mgr.Sandbox) ([]functions.RestoreMount, error) {
 	if sandbox == nil || len(sandbox.Mounts) == 0 {
-		return nil
+		return nil, nil
 	}
-	mounts := make([]functions.RestoreMount, 0, len(sandbox.Mounts))
-	for _, mount := range sandbox.Mounts {
-		mounts = append(mounts, functions.RestoreMount{
-			SandboxVolumeID: strings.TrimSpace(mount.SandboxVolumeID),
-			MountPoint:      strings.TrimSpace(mount.MountPoint),
-		})
+	if h.volumeStore == nil {
+		return nil, publishError{status: http.StatusServiceUnavailable, code: spec.CodeUnavailable, message: "function revision volume store is not configured"}
 	}
-	return mounts
+	mounts, err := h.volumeStore.PrepareRestoreMounts(ctx, authCtx, sandbox)
+	if err != nil {
+		h.logger.Warn("Failed to prepare function restore mounts",
+			zap.String("sandbox_id", sandbox.ID),
+			zap.Error(err),
+		)
+		return nil, publishError{status: http.StatusServiceUnavailable, code: spec.CodeUnavailable, message: "failed to prepare function volumes"}
+	}
+	return mounts, nil
+}
+
+func (h *Handler) deletePreparedRestoreMounts(ctx context.Context, authCtx *authn.AuthContext, sandbox *mgr.Sandbox, mounts []functions.RestoreMount, reason string) {
+	if h == nil || h.volumeStore == nil || len(mounts) == 0 {
+		return
+	}
+	if err := h.volumeStore.DeleteRestoreMounts(ctx, authCtx, sandbox, mounts); err != nil {
+		h.logger.Warn("Failed to clean up prepared function restore mounts",
+			zap.String("sandbox_id", sandbox.ID),
+			zap.String("reason", reason),
+			zap.Error(err),
+		)
+	}
 }
 
 func (h *Handler) functionRecord(fn *functions.Function) functionRecord {

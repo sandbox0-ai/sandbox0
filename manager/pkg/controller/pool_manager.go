@@ -26,9 +26,10 @@ import (
 
 const (
 	// Labels
-	LabelTemplateID = "sandbox0.ai/template-id"
-	LabelPoolType   = "sandbox0.ai/pool-type"
-	LabelSandboxID  = "sandbox0.ai/sandbox-id"
+	LabelTemplateID        = "sandbox0.ai/template-id"
+	LabelTemplateLogicalID = "sandbox0.ai/template-logical-id"
+	LabelPoolType          = "sandbox0.ai/pool-type"
+	LabelSandboxID         = "sandbox0.ai/sandbox-id"
 
 	// Pool types
 	PoolTypeIdle   = "idle"
@@ -61,6 +62,18 @@ const (
 
 	unhealthyIdlePodRepairGracePeriod = 2 * time.Minute
 )
+
+func TemplateLogicalID(template *v1alpha1.SandboxTemplate) string {
+	if template == nil {
+		return ""
+	}
+	if template.Labels != nil {
+		if logicalID := template.Labels[LabelTemplateLogicalID]; logicalID != "" {
+			return logicalID
+		}
+	}
+	return template.Name
+}
 
 // ClaimedSandboxPodAnnotations returns manager-owned metadata for active sandbox
 // pods. Idle pool pods intentionally do not carry these annotations.
@@ -300,8 +313,9 @@ func (pm *PoolManager) buildPodTemplate(template *v1alpha1.SandboxTemplate, spec
 	return corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels: map[string]string{
-				LabelTemplateID: template.Name,
-				LabelPoolType:   PoolTypeIdle,
+				LabelTemplateID:        template.Name,
+				LabelTemplateLogicalID: TemplateLogicalID(template),
+				LabelPoolType:          PoolTypeIdle,
 			},
 			Annotations: annotations,
 		},

@@ -118,7 +118,7 @@ func main() {
 
 	// Create internal auth validator (for validating requests from regional-gateway)
 	validatorConfig := internalauth.DefaultValidatorConfig("scheduler", publicKey)
-	validatorConfig.AllowedCallers = []string{"regional-gateway"}
+	validatorConfig.AllowedCallers = []string{"regional-gateway", "function-gateway"}
 	authValidator := internalauth.NewValidator(validatorConfig)
 
 	logger.Info("Internal authentication enabled",

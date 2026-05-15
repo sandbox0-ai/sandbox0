@@ -218,6 +218,9 @@ func (r *Reconciler) buildConfig(ctx context.Context, compiledPlan *infraplan.In
 		cfg.DatabaseURL = dsn
 	}
 	cfg.DefaultClusterGatewayURL = compiledPlan.FunctionGateway.DefaultClusterGatewayURL
+	if compiledPlan.Components.EnableScheduler {
+		cfg.SchedulerURL = compiledPlan.Services.Scheduler.URL
+	}
 	if strings.TrimSpace(cfg.InternalAuthCaller) == "" {
 		cfg.InternalAuthCaller = pkginternalauth.ServiceFunctionGateway
 	}

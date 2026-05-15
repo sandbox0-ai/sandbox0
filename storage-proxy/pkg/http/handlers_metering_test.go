@@ -234,6 +234,7 @@ func (f *fakeHTTPMeteringWriter) UpsertProducerWatermarkTx(ctx context.Context, 
 type fakeHTTPSnapshotManager struct {
 	exportBody          []byte
 	lastCreate          *snapshot.CreateSnapshotRequest
+	lastCreateVolume    *snapshot.CreateVolumeFromSnapshotRequest
 	lastExport          *snapshot.ExportSnapshotRequest
 	lastCompatibility   *snapshot.ListSnapshotCompatibilityIssuesRequest
 	casefoldEntries     []snapshot.SnapshotCasefoldCollision
@@ -297,6 +298,19 @@ func (f *fakeHTTPSnapshotManager) DeleteSnapshot(ctx context.Context, volumeID, 
 
 func (f *fakeHTTPSnapshotManager) ForkVolume(ctx context.Context, req *snapshot.ForkVolumeRequest) (*db.SandboxVolume, error) {
 	return nil, nil
+}
+
+func (f *fakeHTTPSnapshotManager) CreateVolumeFromSnapshot(ctx context.Context, req *snapshot.CreateVolumeFromSnapshotRequest) (*db.SandboxVolume, error) {
+	f.lastCreateVolume = req
+	return &db.SandboxVolume{
+		ID:              "vol-from-snapshot",
+		TeamID:          req.TeamID,
+		UserID:          req.UserID,
+		DefaultPosixUID: req.DefaultPosixUID,
+		DefaultPosixGID: req.DefaultPosixGID,
+		AccessMode:      req.AccessMode,
+		CreatedAt:       time.Date(2026, 3, 25, 3, 30, 0, 0, time.UTC),
+	}, nil
 }
 
 func TestCreateSandboxVolumeRecordsMetering(t *testing.T) {

@@ -14,8 +14,8 @@ import (
 )
 
 func (s *Server) getSandboxFromClusterGateway(ctx context.Context, sandboxID string) (*mgr.Sandbox, error) {
-	clusterGatewayURL := strings.TrimRight(strings.TrimSpace(s.cfg.DefaultClusterGatewayURL), "/")
-	if clusterGatewayURL == "" {
+	clusterGatewayURL, err := s.clusterGatewayURLForSandbox(ctx, sandboxID)
+	if err != nil || clusterGatewayURL == "" {
 		return nil, publishError{status: http.StatusServiceUnavailable, code: spec.CodeUnavailable, message: "cluster gateway is not configured"}
 	}
 

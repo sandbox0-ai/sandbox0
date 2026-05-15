@@ -33,6 +33,9 @@ type FunctionGatewayConfig struct {
 	// DefaultClusterGatewayURL is used to read source sandboxes from the region's
 	// data plane. Scheduler-aware cluster routing can replace this later.
 	DefaultClusterGatewayURL string `yaml:"default_cluster_gateway_url" json:"-"`
+	// SchedulerURL enables scheduler-aware routing for multi-cluster function runtime operations.
+	// +optional
+	SchedulerURL string `yaml:"scheduler_url" json:"-"`
 
 	// FunctionRootDomain is the DNS root for function hosts.
 	// +optional

@@ -21,6 +21,7 @@ import (
 )
 
 type createSandboxVolumeRequest struct {
+	SnapshotID      string `json:"snapshot_id,omitempty"`
 	AccessMode      string `json:"access_mode"`
 	DefaultPosixUID *int64 `json:"default_posix_uid,omitempty"`
 	DefaultPosixGID *int64 `json:"default_posix_gid,omitempty"`
@@ -112,6 +113,35 @@ func (s *Server) createSandboxVolume(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := validateDefaultPosixIdentity(req.DefaultPosixUID, req.DefaultPosixGID); err != nil {
 		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
+
+	if strings.TrimSpace(req.SnapshotID) != "" {
+		if s.snapshotMgr == nil {
+			_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "snapshot manager is not configured")
+			return
+		}
+		vol, err := s.snapshotMgr.CreateVolumeFromSnapshot(r.Context(), &snapshot.CreateVolumeFromSnapshotRequest{
+			SnapshotID:      strings.TrimSpace(req.SnapshotID),
+			TeamID:          teamId,
+			UserID:          userId,
+			AccessMode:      string(accessMode),
+			DefaultPosixUID: req.DefaultPosixUID,
+			DefaultPosixGID: req.DefaultPosixGID,
+		})
+		if err != nil {
+			switch {
+			case errors.Is(err, snapshot.ErrSnapshotNotFound), errors.Is(err, snapshot.ErrVolumeNotFound):
+				_ = spec.WriteError(w, http.StatusNotFound, spec.CodeNotFound, "snapshot not found")
+			case errors.Is(err, snapshot.ErrInvalidAccessMode):
+				_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "invalid access_mode")
+			default:
+				s.logger.WithError(err).Error("Failed to create sandbox volume from snapshot")
+				_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "internal server error")
+			}
+			return
+		}
+		_ = spec.WriteSuccess(w, http.StatusCreated, vol)
 		return
 	}
 

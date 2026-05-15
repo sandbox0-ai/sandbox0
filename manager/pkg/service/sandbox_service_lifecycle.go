@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
@@ -244,7 +245,7 @@ func (s *SandboxService) podToSandbox(ctx context.Context, pod *corev1.Pod, sand
 
 	return &Sandbox{
 		ID:            sandboxID,
-		TemplateID:    pod.Labels[controller.LabelTemplateID],
+		TemplateID:    sandboxTemplateIDFromLabels(pod.Labels),
 		TeamID:        pod.Annotations[controller.AnnotationTeamID],
 		UserID:        pod.Annotations[controller.AnnotationUserID],
 		InternalAddr:  internalAddr,
@@ -260,6 +261,16 @@ func (s *SandboxService) podToSandbox(ctx context.Context, pod *corev1.Pod, sand
 		ClaimedAt:     claimedAt,
 		CreatedAt:     createdAt,
 	}
+}
+
+func sandboxTemplateIDFromLabels(labels map[string]string) string {
+	if labels == nil {
+		return ""
+	}
+	if logicalID := strings.TrimSpace(labels[controller.LabelTemplateLogicalID]); logicalID != "" {
+		return logicalID
+	}
+	return labels[controller.LabelTemplateID]
 }
 
 func parseRFC3339AnnotationTime(annotations map[string]string, key string) time.Time {

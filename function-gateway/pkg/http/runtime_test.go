@@ -105,6 +105,40 @@ func TestDecodeFunctionContextResponseAcceptsRawContextBody(t *testing.T) {
 	}
 }
 
+func TestClaimMountsFromRevisionUsesPreparedVolume(t *testing.T) {
+	server := &Server{}
+	mounts, err := server.claimMountsFromRevision(&functions.Revision{
+		RestoreMounts: []functions.RestoreMount{{
+			SandboxVolumeID:       "revision-volume",
+			SourceSandboxVolumeID: "source-volume",
+			SnapshotID:            "snapshot-1",
+			MountPoint:            "/workspace/data",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("claimMountsFromRevision() error = %v", err)
+	}
+	if len(mounts) != 1 {
+		t.Fatalf("mount count = %d, want 1", len(mounts))
+	}
+	if mounts[0].SandboxVolumeID != "revision-volume" || mounts[0].MountPoint != "/workspace/data" {
+		t.Fatalf("mount = %+v, want prepared revision volume", mounts[0])
+	}
+}
+
+func TestClaimMountsFromRevisionRequiresPreparedVolume(t *testing.T) {
+	server := &Server{}
+	_, err := server.claimMountsFromRevision(&functions.Revision{
+		RestoreMounts: []functions.RestoreMount{{
+			SnapshotID: "snapshot-1",
+			MountPoint: "/workspace/data",
+		}},
+	})
+	if err == nil {
+		t.Fatal("claimMountsFromRevision() error = nil, want missing volume error")
+	}
+}
+
 func TestFunctionDomainAPIRouteUsesFunctionDispatch(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

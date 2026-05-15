@@ -165,7 +165,8 @@ func TestPodToSandboxIncludesPowerState(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "sandbox-1",
 			Labels: map[string]string{
-				controller.LabelTemplateID: "template-1",
+				controller.LabelTemplateID:        "t-team-template-1",
+				controller.LabelTemplateLogicalID: "template-1",
 			},
 			Annotations: map[string]string{
 				controller.AnnotationTeamID:                       "team-1",
@@ -192,6 +193,7 @@ func TestPodToSandboxIncludesPowerState(t *testing.T) {
 	assert.Equal(t, int64(3), sandbox.PowerState.ObservedGeneration)
 	assert.Equal(t, SandboxPowerPhaseResuming, sandbox.PowerState.Phase)
 	assert.True(t, sandbox.Paused)
+	assert.Equal(t, "template-1", sandbox.TemplateID)
 }
 
 func TestRequestPauseSandboxRecordsDesiredPausedState(t *testing.T) {

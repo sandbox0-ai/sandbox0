@@ -32,6 +32,9 @@ func TestBuildPodTemplateIncludesTemplateHash(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "template-a",
 			Namespace: "default",
+			Labels: map[string]string{
+				LabelTemplateLogicalID: "logical-a",
+			},
 		},
 	}
 
@@ -41,6 +44,8 @@ func TestBuildPodTemplateIncludesTemplateHash(t *testing.T) {
 	assert.Equal(t, "hash-v1", got.Annotations[AnnotationTemplateSpecHash])
 	assert.NotContains(t, got.Annotations, AnnotationClusterAutoscalerSafeToEvict)
 	assert.Equal(t, PoolTypeIdle, got.Labels[LabelPoolType])
+	assert.Equal(t, "template-a", got.Labels[LabelTemplateID])
+	assert.Equal(t, "logical-a", got.Labels[LabelTemplateLogicalID])
 }
 
 func TestDrainStaleIdlePodsUsesDeletePreconditions(t *testing.T) {

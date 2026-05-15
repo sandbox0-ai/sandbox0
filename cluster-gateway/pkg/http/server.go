@@ -38,6 +38,8 @@ import (
 	"go.uber.org/zap"
 )
 
+const functionVolumeSnapshotTimeout = 2 * time.Minute
+
 // Server represents the HTTP server for cluster-gateway
 type Server struct {
 	router                 *gin.Engine
@@ -244,6 +246,9 @@ func NewServer(
 		meteringRepo = metering.NewRepository(pool)
 	}
 	meteringHandler := gatewayhandlers.NewMeteringHandler(meteringRepo, cfg.RegionID, logger)
+	snapshotHTTPClient := obsProvider.HTTP.NewClient(httpobs.Config{
+		Timeout: functionVolumeSnapshotTimeout,
+	})
 	functionHandler := functionapi.New(
 		functions.NewRepository(pool),
 		functionapi.Config{
@@ -265,6 +270,7 @@ func NewServer(
 			}
 			return sandbox, nil
 		},
+		functionapi.NewHTTPStorageProxyVolumeSnapshotter(cfg.StorageProxyURL, internalAuthGen, snapshotHTTPClient, logger),
 		logger,
 	)
 

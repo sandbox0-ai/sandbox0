@@ -12,12 +12,12 @@ Functions are created from Sandbox Services, not from uploaded ZIP files or cont
 |--------|-------------|
 | Sandbox Service | A named port, ingress routes, and restartable runtime inside a sandbox |
 | Function | Stable function identity, slug, and fixed domain under `sandbox0.site` |
-| Revision | Immutable snapshot of the source sandbox service plus the SandboxVolume mounts needed to restore it |
+| Revision | Immutable snapshot of the source sandbox service plus snapshots of the SandboxVolume mounts needed to restore it |
 | Alias | Mutable pointer from a name such as `production` to one revision |
 
 Only publishable sandbox services can become function revisions. A service is publishable when it is public and has a restartable runtime.
 
-When the source sandbox was claimed with SandboxVolume mounts, those mount references are captured on the revision. If the source sandbox is later deleted, `function-gateway` claims a new runtime sandbox from the same template, mounts the captured volumes, starts the service runtime, and continues serving the stable function host.
+When the source sandbox was claimed with SandboxVolume mounts, publish creates a snapshot for each mounted volume, immediately materializes revision-owned volumes from those snapshots, and records those volume IDs on the revision. If the source sandbox is later deleted, `function-gateway` claims a new runtime sandbox from the same template, mounts the revision-owned volumes, starts the service runtime, and continues serving the stable function host.
 
 ## Sandbox Services
 
@@ -121,4 +121,4 @@ Move an alias:
 
 Function traffic is handled by `function-gateway` on the fixed function host. The gateway resolves the `production` alias, enforces the revision's service route policy, and proxies to the service port.
 
-If the source sandbox still exists, the gateway resumes it when needed and routes to that sandbox. If the source sandbox has been deleted, the gateway restores a function runtime sandbox from the revision's template and captured mounts, starts the service runtime command or warm process, stores the runtime sandbox/context on the revision, and reuses that runtime until sandbox0 scales it down.
+If the source sandbox still exists, the gateway resumes it when needed and routes to that sandbox. If the source sandbox has been deleted, the gateway restores a function runtime sandbox from the revision's template and revision-owned volumes, starts the service runtime command or warm process, stores the runtime sandbox/context on the revision, and reuses that runtime until sandbox0 scales it down.

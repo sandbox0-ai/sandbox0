@@ -97,8 +97,16 @@ func (m *Manager) s0fsConfig(teamID, volumeID string) (s0fs.Config, error) {
 }
 
 func (m *Manager) hasMountedCtldOwner(ctx context.Context, volumeID string) (bool, error) {
+	return m.hasMountedOwnerKind(ctx, volumeID, volume.OwnerKindCtld)
+}
+
+func (m *Manager) hasMountedStorageProxyOwner(ctx context.Context, volumeID string) (bool, error) {
+	return m.hasMountedOwnerKind(ctx, volumeID, volume.OwnerKindStorageProxy)
+}
+
+func (m *Manager) hasMountedOwnerKind(ctx context.Context, volumeID, ownerKind string) (bool, error) {
 	repo, ok := any(m.repo).(activeMountRepository)
-	if !ok || repo == nil || volumeID == "" {
+	if !ok || repo == nil || volumeID == "" || ownerKind == "" {
 		return false, nil
 	}
 	heartbeatTimeout := 15
@@ -110,7 +118,7 @@ func (m *Manager) hasMountedCtldOwner(ctx context.Context, volumeID string) (boo
 		return false, fmt.Errorf("get active mounts: %w", err)
 	}
 	for _, mount := range mounts {
-		if volume.DecodeMountOptions(mount.MountOptions).OwnerKind == volume.OwnerKindCtld {
+		if volume.DecodeMountOptions(mount.MountOptions).OwnerKind == ownerKind {
 			return true, nil
 		}
 	}
@@ -490,6 +498,107 @@ func (m *Manager) forkS0FSVolume(ctx context.Context, req *ForkVolumeRequest) (*
 	_ = closeTarget()
 
 	if err := m.appendMeteringEvent(ctx, volumeForkedEvent(m.regionID(), m.clusterID, newVol)); err != nil {
+		return nil, err
+	}
+	success = true
+	return newVol, nil
+}
+
+func (m *Manager) createS0FSVolumeFromSnapshot(ctx context.Context, req *CreateVolumeFromSnapshotRequest) (*db.SandboxVolume, error) {
+	snapshotRecord, err := m.repo.GetSnapshot(ctx, strings.TrimSpace(req.SnapshotID))
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			return nil, ErrSnapshotNotFound
+		}
+		return nil, err
+	}
+	if snapshotRecord.TeamID != req.TeamID {
+		return nil, ErrSnapshotNotFound
+	}
+
+	sourceVol, err := m.repo.GetSandboxVolume(ctx, snapshotRecord.VolumeID)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			return nil, ErrVolumeNotFound
+		}
+		return nil, err
+	}
+	if sourceVol.TeamID != req.TeamID {
+		return nil, ErrVolumeNotFound
+	}
+
+	accessMode := volume.AccessModeRWO
+	if strings.TrimSpace(req.AccessMode) != "" {
+		parsedMode, ok := volume.ParseAccessMode(req.AccessMode)
+		if !ok {
+			return nil, ErrInvalidAccessMode
+		}
+		accessMode = parsedMode
+	}
+
+	cfg, err := m.s0fsConfig(snapshotRecord.TeamID, snapshotRecord.VolumeID)
+	if err != nil {
+		return nil, err
+	}
+	state, err := s0fs.LoadSnapshot(ctx, cfg, snapshotRecord.ID)
+	if err != nil {
+		return nil, err
+	}
+	forkState, err := s0fs.PrepareForkState(state, snapshotRecord.VolumeID)
+	if err != nil {
+		return nil, err
+	}
+
+	newVolumeID := uuid.New().String()
+	now := time.Now()
+	sourceID := snapshotRecord.VolumeID
+	newVol := &db.SandboxVolume{
+		ID:              newVolumeID,
+		TeamID:          req.TeamID,
+		UserID:          req.UserID,
+		SourceVolumeID:  &sourceID,
+		DefaultPosixUID: req.DefaultPosixUID,
+		DefaultPosixGID: req.DefaultPosixGID,
+		AccessMode:      string(accessMode),
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+
+	if err := m.repo.WithTx(ctx, func(tx pgx.Tx) error {
+		return m.repo.CreateSandboxVolumeTx(ctx, tx, newVol)
+	}); err != nil {
+		return nil, err
+	}
+	success := false
+	defer func() {
+		if success {
+			return
+		}
+		_ = cleanupS0FSVolume(newVolumeID, m.config)
+		_ = m.repo.WithTx(context.Background(), func(tx pgx.Tx) error {
+			err := m.repo.DeleteSandboxVolumeTx(context.Background(), tx, newVolumeID)
+			if errors.Is(err, db.ErrNotFound) {
+				return nil
+			}
+			return err
+		})
+	}()
+
+	targetEngine, closeTarget, err := m.openS0FSEngine(ctx, req.TeamID, newVolumeID)
+	if err != nil {
+		return nil, err
+	}
+	if err := targetEngine.ReplaceState(forkState); err != nil {
+		closeTarget()
+		return nil, err
+	}
+	if _, err := targetEngine.SyncMaterialize(ctx); err != nil {
+		closeTarget()
+		return nil, err
+	}
+	_ = closeTarget()
+
+	if err := m.appendMeteringEvent(ctx, volumeCreatedEvent(m.regionID(), m.clusterID, newVol)); err != nil {
 		return nil, err
 	}
 	success = true

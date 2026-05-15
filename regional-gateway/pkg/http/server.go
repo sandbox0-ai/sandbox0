@@ -34,6 +34,8 @@ import (
 	"go.uber.org/zap"
 )
 
+const functionVolumeSnapshotTimeout = 2 * time.Minute
+
 // Server represents the HTTP server for regional-gateway
 type Server struct {
 	router               *gin.Engine
@@ -264,6 +266,13 @@ func (s *Server) outboundHTTPClient() *http.Client {
 	return &http.Client{}
 }
 
+func (s *Server) functionSnapshotHTTPClient() *http.Client {
+	if s != nil && s.obsProvider != nil {
+		return s.obsProvider.HTTP.NewClient(httpobs.Config{Timeout: functionVolumeSnapshotTimeout})
+	}
+	return &http.Client{Timeout: functionVolumeSnapshotTimeout}
+}
+
 // setupRoutes configures all HTTP routes
 func (s *Server) setupRoutes() {
 	// Global middleware (order matters)
@@ -339,7 +348,8 @@ func (s *Server) setupRoutes() {
 					PublicRegionID:           s.cfg.PublicRegionID,
 					RegionID:                 s.cfg.RegionID,
 				},
-				functionapi.NewClusterGatewaySandboxLookup(s.cfg.DefaultClusterGatewayURL, s.internalAuthGen, s.outboundHTTPClient(), s.logger),
+				s.functionSandboxLookup,
+				functionapi.NewHTTPVolumeSnapshotter(s.resolveFunctionClusterGatewayURL, s.internalAuthGen, s.functionSnapshotHTTPClient(), s.logger),
 				s.logger,
 			)
 			functionHandler.RegisterRoutes(functionRoutes, s.authMiddleware.RequirePermission)

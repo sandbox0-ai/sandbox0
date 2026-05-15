@@ -1067,6 +1067,34 @@ func TestMaterializerSegmentCacheIsVolumeQualified(t *testing.T) {
 	}
 }
 
+func TestPrepareForkStatePreservesInlineData(t *testing.T) {
+	now := time.Now()
+	state := &SnapshotState{
+		NextSeq:   3,
+		NextInode: 3,
+		Nodes: map[uint64]*Node{
+			RootInode: {Inode: RootInode, Type: TypeDirectory, Mode: 0o755, Nlink: 2, Atime: now, Mtime: now, Ctime: now},
+			2:         {Inode: 2, Type: TypeFile, Mode: 0o644, Nlink: 1, Size: 6, Atime: now, Mtime: now, Ctime: now},
+		},
+		Children: map[uint64]map[string]uint64{
+			RootInode: {"inline.txt": 2},
+		},
+		Data: map[uint64][]byte{
+			2: []byte("inline"),
+		},
+		ColdFiles: map[uint64][]FileExtent{},
+		Segments:  map[string]*Segment{},
+	}
+
+	forkState, err := PrepareForkState(state, "source")
+	if err != nil {
+		t.Fatalf("PrepareForkState() error = %v", err)
+	}
+	if got := string(forkState.Data[2]); got != "inline" {
+		t.Fatalf("fork inline data = %q, want inline", got)
+	}
+}
+
 func TestCreateSnapshotHydratesColdFilesInline(t *testing.T) {
 	ctx := context.Background()
 	store := newPrefixedRecordingStore(t, "vol-snapshot")

@@ -700,11 +700,11 @@ func compileFunctionGatewayPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *In
 	if svc.Config != nil {
 		plan.Config = runtimeconfig.ToFunctionGateway(svc.Config)
 	}
-	compileFunctionGatewayRuntimeConfig(&plan, infra)
+	compileFunctionGatewayRuntimeConfig(&plan, infra, compiled)
 	return plan
 }
 
-func compileFunctionGatewayRuntimeConfig(plan *FunctionGatewayPlan, infra *infrav1alpha1.Sandbox0Infra) {
+func compileFunctionGatewayRuntimeConfig(plan *FunctionGatewayPlan, infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) {
 	if plan == nil || infra == nil {
 		return
 	}
@@ -714,6 +714,9 @@ func compileFunctionGatewayRuntimeConfig(plan *FunctionGatewayPlan, infra *infra
 		plan.Config = cfg
 	}
 	cfg.DefaultClusterGatewayURL = plan.DefaultClusterGatewayURL
+	if compiled != nil && compiled.Components.EnableScheduler {
+		cfg.SchedulerURL = compiled.Services.Scheduler.URL
+	}
 	if cfg.HTTPPort == 0 {
 		cfg.HTTPPort = functionGatewayHTTPPort(infra)
 	}

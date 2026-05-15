@@ -725,6 +725,9 @@ type CreateSandboxVolumeRequest struct {
 
 	// DefaultPosixUid Default POSIX UID used by external volume access paths that do not carry caller identity. Defaults to 0 when omitted on create.
 	DefaultPosixUid *int64 `json:"default_posix_uid,omitempty"`
+
+	// SnapshotId Optional snapshot ID used to initialize the new volume from immutable snapshot state.
+	SnapshotId *string `json:"snapshot_id,omitempty"`
 }
 
 // CreateSnapshotRequest defines model for CreateSnapshotRequest.
@@ -977,8 +980,16 @@ type FunctionRecord struct {
 
 // FunctionRestoreMount defines model for FunctionRestoreMount.
 type FunctionRestoreMount struct {
-	MountPoint      string `json:"mount_point"`
+	MountPoint string `json:"mount_point"`
+
+	// SandboxvolumeId Revision-owned SandboxVolume prepared when the function revision was published.
 	SandboxvolumeId string `json:"sandboxvolume_id"`
+
+	// SnapshotId Immutable source volume snapshot captured for this function revision.
+	SnapshotId *string `json:"snapshot_id,omitempty"`
+
+	// SourceSandboxvolumeId Source SandboxVolume captured when the function revision was published.
+	SourceSandboxvolumeId *string `json:"source_sandboxvolume_id,omitempty"`
 }
 
 // FunctionRevision defines model for FunctionRevision.

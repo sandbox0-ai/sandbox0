@@ -921,9 +921,10 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 				sandboxCleanupFinalizer,
 			},
 			Labels: map[string]string{
-				controller.LabelTemplateID: template.Name,
-				controller.LabelPoolType:   controller.PoolTypeActive,
-				controller.LabelSandboxID:  podName,
+				controller.LabelTemplateID:        template.Name,
+				controller.LabelTemplateLogicalID: controller.TemplateLogicalID(template),
+				controller.LabelPoolType:          controller.PoolTypeActive,
+				controller.LabelSandboxID:         podName,
 			},
 			Annotations: annotations,
 		},

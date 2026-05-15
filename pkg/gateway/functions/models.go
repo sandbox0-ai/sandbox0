@@ -37,8 +37,10 @@ type Revision struct {
 }
 
 type RestoreMount struct {
-	SandboxVolumeID string `json:"sandboxvolume_id"`
-	MountPoint      string `json:"mount_point"`
+	SandboxVolumeID       string `json:"sandboxvolume_id"`
+	SourceSandboxVolumeID string `json:"source_sandboxvolume_id,omitempty"`
+	SnapshotID            string `json:"snapshot_id,omitempty"`
+	MountPoint            string `json:"mount_point"`
 }
 
 type Alias struct {

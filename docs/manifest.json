@@ -44,8 +44,8 @@
           "title": "Network"
         },
         {
-          "slug": "gateway-policy",
-          "title": "Gateway Policy"
+          "slug": "services",
+          "title": "Sandbox Services"
         },
         {
           "slug": "webhooks",

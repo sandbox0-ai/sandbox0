@@ -63,10 +63,6 @@ type SandboxConfig struct {
 	Webhook    *WebhookConfig                 `json:"webhook,omitempty"`
 	AutoResume *bool                          `json:"auto_resume,omitempty"`
 	Services   []SandboxAppService            `json:"services,omitempty"`
-	// PublicGateway is kept as a compatibility input/output for existing clients.
-	// New code should use Services; this field is converted into Services before
-	// sandbox config is persisted.
-	PublicGateway *PublicGatewayConfig `json:"public_gateway,omitempty"`
 }
 
 // SandboxUpdateConfig represents sandbox configuration fields that can be updated at runtime.
@@ -78,9 +74,6 @@ type SandboxUpdateConfig struct {
 	Network    *v1alpha1.SandboxNetworkPolicy `json:"network,omitempty"`
 	AutoResume *bool                          `json:"auto_resume,omitempty"`
 	Services   []SandboxAppService            `json:"services,omitempty"`
-	// PublicGateway is a legacy update surface. It is converted into Services
-	// and should be removed after SDKs and docs migrate to sandbox services.
-	PublicGateway *PublicGatewayConfig `json:"public_gateway,omitempty"`
 }
 
 func int32Ptr(v int32) *int32 {
@@ -122,14 +115,6 @@ func normalizeSandboxConfigForPersistence(cfg *SandboxConfig) error {
 			return err
 		}
 		cfg.Services = services
-		cfg.PublicGateway = nil
-	} else if cfg.PublicGateway != nil {
-		services, err := PublicGatewayConfigToSandboxAppServices(cfg.PublicGateway)
-		if err != nil {
-			return err
-		}
-		cfg.Services = services
-		cfg.PublicGateway = nil
 	}
 	if cfg.AutoResume != nil && !*cfg.AutoResume && SandboxAppServicesHaveResumeRoute(cfg.Services) {
 		return fmt.Errorf("cannot set resume=true on public routes when sandbox auto_resume is disabled")

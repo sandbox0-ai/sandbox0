@@ -1593,72 +1593,11 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessSandboxNetworkPolicyResponse"
-  /api/v1/sandboxes/{id}/public-gateway:
-    get:
-      tags: [sandboxes]
-      summary: Get sandbox public gateway policy
-      security:
-        - bearerAuth: []
-      x-upstream-service: manager
-      x-upstream-path: /api/v1/sandboxes/{id}/public-gateway
-      parameters:
-        - $ref: "#/components/parameters/SandboxID"
-      responses:
-        "200":
-          description: Public gateway policy
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SuccessPublicGatewayResponse"
-        "404":
-          description: Not found
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
-    put:
-      tags: [sandboxes]
-      summary: Update sandbox public gateway policy
-      description: |
-        Replaces the request-level public gateway policy for sandbox public traffic.
-        When enabled, matching routes control method, path, authentication, CORS,
-        per-route rate limits, timeout, rewrite, and paused sandbox auto-resume.
-      security:
-        - bearerAuth: []
-      x-upstream-service: manager
-      x-upstream-path: /api/v1/sandboxes/{id}/public-gateway
-      parameters:
-        - $ref: "#/components/parameters/SandboxID"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/PublicGatewayConfig"
-      responses:
-        "200":
-          description: Public gateway policy updated
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SuccessPublicGatewayResponse"
-        "400":
-          description: Invalid public gateway policy
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
-        "404":
-          description: Not found
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
   /api/v1/sandboxes/{id}/services:
     get:
       tags: [sandboxes]
       summary: List sandbox services
-      description: Lists canonical sandbox services derived from `services` or the legacy `public_gateway` compatibility projection.
+      description: Lists sandbox services configured on the sandbox.
       security:
         - bearerAuth: []
       x-upstream-service: manager
@@ -1681,7 +1620,7 @@ paths:
     put:
       tags: [sandboxes]
       summary: Replace sandbox services
-      description: Replaces the canonical sandbox services. Public gateway remains available as a compatibility projection.
+      description: Replaces the sandbox services used for public exposure and function publishing.
       security:
         - bearerAuth: []
       x-upstream-service: manager
@@ -3806,59 +3745,7 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/SandboxAppService"
-        public_gateway:
-          $ref: "#/components/schemas/PublicGatewayConfig"
-    PublicGatewayConfig:
-      type: object
-      properties:
-        enabled:
-          type: boolean
-          description: Enables request-level public gateway enforcement for sandbox public traffic.
-        routes:
-          type: array
-          maxItems: 32
-          items:
-            $ref: "#/components/schemas/PublicGatewayRoute"
-      required: [enabled]
-    PublicGatewayRoute:
-      type: object
-      properties:
-        id:
-          type: string
-          description: Stable route id. Must be a DNS label and unique within the sandbox policy.
-        port:
-          type: integer
-          format: int32
-        path_prefix:
-          type: string
-          default: /
-          description: Request path prefix matched before proxying to the sandbox port.
-        methods:
-          type: array
-          description: Allowed HTTP methods. Empty allows every method.
-          items:
-            type: string
-        rewrite_prefix:
-          type: string
-          nullable: true
-          description: Optional replacement prefix applied before proxying.
-        auth:
-          $ref: "#/components/schemas/PublicGatewayAuth"
-        cors:
-          $ref: "#/components/schemas/PublicGatewayCORS"
-        rate_limit:
-          $ref: "#/components/schemas/PublicGatewayRateLimit"
-        timeout_seconds:
-          type: integer
-          format: int32
-          description: Per-route upstream timeout in seconds. Zero disables the route override.
-        resume:
-          type: boolean
-          description: |
-            Route-level resume gate for public gateway traffic. Evaluated only when
-            sandbox auto_resume is true.
-      required: [id, port, resume]
-    PublicGatewayAuth:
+    SandboxAppServiceRouteAuth:
       type: object
       properties:
         mode:
@@ -3875,7 +3762,7 @@ components:
           type: string
           description: Hex SHA-256 of the required header value when mode is header.
       required: [mode]
-    PublicGatewayCORS:
+    SandboxAppServiceRouteCORS:
       type: object
       properties:
         allowed_origins:
@@ -3899,7 +3786,7 @@ components:
         max_age_seconds:
           type: integer
           format: int32
-    PublicGatewayRateLimit:
+    SandboxAppServiceRouteRateLimit:
       type: object
       properties:
         rps:
@@ -3972,11 +3859,11 @@ components:
           type: string
           nullable: true
         auth:
-          $ref: "#/components/schemas/PublicGatewayAuth"
+          $ref: "#/components/schemas/SandboxAppServiceRouteAuth"
         cors:
-          $ref: "#/components/schemas/PublicGatewayCORS"
+          $ref: "#/components/schemas/SandboxAppServiceRouteCORS"
         rate_limit:
-          $ref: "#/components/schemas/PublicGatewayRateLimit"
+          $ref: "#/components/schemas/SandboxAppServiceRouteRateLimit"
         timeout_seconds:
           type: integer
           format: int32
@@ -4022,22 +3909,9 @@ components:
                   type: array
                   items:
                     $ref: "#/components/schemas/SandboxAppServiceView"
-              required: [sandbox_id, services]
-    SuccessPublicGatewayResponse:
-      allOf:
-        - $ref: "#/components/schemas/SuccessEnvelope"
-        - type: object
-          properties:
-            data:
-              type: object
-              properties:
-                sandbox_id:
-                  type: string
-                public_gateway:
-                  $ref: "#/components/schemas/PublicGatewayConfig"
                 exposure_domain:
                   type: string
-              required: [sandbox_id, public_gateway]
+              required: [sandbox_id, services]
     FunctionSourceRequest:
       type: object
       properties:
@@ -4336,8 +4210,6 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/SandboxAppService"
-        public_gateway:
-          $ref: "#/components/schemas/PublicGatewayConfig"
         mounts:
           type: array
           items:
@@ -4410,8 +4282,6 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/SandboxAppService"
-        public_gateway:
-          $ref: "#/components/schemas/PublicGatewayConfig"
     SandboxUpdateRequest:
       type: object
       properties:

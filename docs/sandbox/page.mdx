@@ -61,9 +61,9 @@ Claim a sandbox from a template. The sandbox is created from a pre-warmed pool f
 | `network` | object | `SandboxNetworkPolicy`. Controls traffic rules, credential bindings, and destination-scoped egress auth |
 | `webhook` | object | Webhook configuration |
 | `auto_resume` | boolean | Auto-resume when accessed (default: true) |
-| `public_gateway` | object | Request-level gateway policy for public sandbox traffic |
+| `services` | array | Sandbox Services for public HTTP routes and function publishing |
 
-See [Network](/docs/sandbox/network) for traffic control, [Gateway Policy](/docs/sandbox/gateway-policy) for public HTTP controls, and [Credential](/docs/credential) for outbound auth and secret handling.
+See [Network](/docs/sandbox/network) for traffic control, [Sandbox Services](/docs/sandbox/services) for public HTTP controls, and [Credential](/docs/credential) for outbound auth and secret handling.
 
 ### TTL vs Hard TTL
 
@@ -406,7 +406,7 @@ Only the following fields can be updated at runtime:
 | `hard_ttl` | integer | Maximum lifetime in seconds (hard limit) |
 | `network` | object | Network policy configuration |
 | `auto_resume` | boolean | Auto-resume when accessed |
-| `public_gateway` | object | Request-level gateway policy for public sandbox traffic |
+| `services` | array | Sandbox Services for public HTTP routes and function publishing |
 
 <Callout variant="warning">
 <code>env_vars</code> and <code>webhook</code> cannot be updated at runtime. These fields only take effect when the sandbox is created. To use different environment variables, create a new sandbox.
@@ -460,7 +460,7 @@ client.sandboxes.update(
 
 ## Pause And Resume
 
-Pause and resume is covered in a dedicated page because it affects TTL, `auto_resume`, public gateway routes, SSH, and webhook behavior.
+Pause and resume is covered in a dedicated page because it affects TTL, `auto_resume`, service routes, SSH, and webhook behavior.
 
 <CardGrid>
   <LinkCard
@@ -635,8 +635,8 @@ console.log('Sandbox deleted');`
   </LinkCard>
 
   <LinkCard
-    title="Gateway Policy"
-    href="/docs/sandbox/gateway-policy"
+    title="Sandbox Services"
+    href="/docs/sandbox/services"
     cta="Learn More"
   >
     Control public HTTP routes, auth, CORS, and rate limits

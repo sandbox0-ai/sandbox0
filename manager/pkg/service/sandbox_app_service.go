@@ -5,55 +5,34 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
-	"sort"
 	"strings"
 )
 
 const (
-	PublicGatewayAuthModeNone   = "none"
-	PublicGatewayAuthModeBearer = "bearer"
-	PublicGatewayAuthModeHeader = "header"
+	SandboxAppServiceRouteAuthModeNone   = "none"
+	SandboxAppServiceRouteAuthModeBearer = "bearer"
+	SandboxAppServiceRouteAuthModeHeader = "header"
 )
 
 const (
-	maxPublicGatewayRoutes        = 32
-	maxPublicGatewayMethods       = 16
-	maxPublicGatewayAllowedValues = 32
+	maxSandboxServiceRoutes        = 32
+	maxSandboxServiceMethods       = 16
+	maxSandboxServiceAllowedValues = 32
 )
 
-var publicGatewayRouteIDPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+var sandboxServiceRouteIDPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 var httpMethodPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_-]*$`)
 
-// PublicGatewayConfig controls request-level policy for sandbox public traffic.
-type PublicGatewayConfig struct {
-	Enabled bool                 `json:"enabled"`
-	Routes  []PublicGatewayRoute `json:"routes,omitempty"`
-}
-
-// PublicGatewayRoute defines one public route on an exposed sandbox port.
-type PublicGatewayRoute struct {
-	ID             string                  `json:"id"`
-	Port           int                     `json:"port"`
-	PathPrefix     string                  `json:"path_prefix,omitempty"`
-	Methods        []string                `json:"methods,omitempty"`
-	RewritePrefix  *string                 `json:"rewrite_prefix,omitempty"`
-	Auth           *PublicGatewayAuth      `json:"auth,omitempty"`
-	CORS           *PublicGatewayCORS      `json:"cors,omitempty"`
-	RateLimit      *PublicGatewayRateLimit `json:"rate_limit,omitempty"`
-	TimeoutSeconds int                     `json:"timeout_seconds,omitempty"`
-	Resume         bool                    `json:"resume"`
-}
-
-// PublicGatewayAuth controls inbound authentication for one public route.
-type PublicGatewayAuth struct {
+// SandboxAppServiceRouteAuth controls inbound authentication for one public route.
+type SandboxAppServiceRouteAuth struct {
 	Mode              string `json:"mode"`
 	BearerTokenSHA256 string `json:"bearer_token_sha256,omitempty"`
 	HeaderName        string `json:"header_name,omitempty"`
 	HeaderValueSHA256 string `json:"header_value_sha256,omitempty"`
 }
 
-// PublicGatewayCORS controls CORS responses for browser-facing public routes.
-type PublicGatewayCORS struct {
+// SandboxAppServiceRouteCORS controls CORS responses for browser-facing public routes.
+type SandboxAppServiceRouteCORS struct {
 	AllowedOrigins   []string `json:"allowed_origins,omitempty"`
 	AllowedMethods   []string `json:"allowed_methods,omitempty"`
 	AllowedHeaders   []string `json:"allowed_headers,omitempty"`
@@ -62,8 +41,8 @@ type PublicGatewayCORS struct {
 	MaxAgeSeconds    int      `json:"max_age_seconds,omitempty"`
 }
 
-// PublicGatewayRateLimit controls per-route request limiting at cluster-gateway.
-type PublicGatewayRateLimit struct {
+// SandboxAppServiceRouteRateLimit controls per-route request limiting at cluster-gateway.
+type SandboxAppServiceRouteRateLimit struct {
 	RPS   int `json:"rps"`
 	Burst int `json:"burst"`
 }
@@ -75,10 +54,6 @@ const (
 )
 
 // SandboxAppService describes an application service running inside a sandbox.
-//
-// This is the canonical model for service exposure and function publishing.
-// PublicGatewayConfig remains as a compatibility projection for existing API
-// clients and the current host-based public exposure path.
 type SandboxAppService struct {
 	ID          string                    `json:"id"`
 	DisplayName string                    `json:"display_name,omitempty"`
@@ -105,15 +80,15 @@ type SandboxAppServiceIngress struct {
 
 // SandboxAppServiceRoute is a public route scoped to one sandbox service port.
 type SandboxAppServiceRoute struct {
-	ID             string                  `json:"id"`
-	PathPrefix     string                  `json:"path_prefix,omitempty"`
-	Methods        []string                `json:"methods,omitempty"`
-	RewritePrefix  *string                 `json:"rewrite_prefix,omitempty"`
-	Auth           *PublicGatewayAuth      `json:"auth,omitempty"`
-	CORS           *PublicGatewayCORS      `json:"cors,omitempty"`
-	RateLimit      *PublicGatewayRateLimit `json:"rate_limit,omitempty"`
-	TimeoutSeconds int                     `json:"timeout_seconds,omitempty"`
-	Resume         bool                    `json:"resume"`
+	ID             string                           `json:"id"`
+	PathPrefix     string                           `json:"path_prefix,omitempty"`
+	Methods        []string                         `json:"methods,omitempty"`
+	RewritePrefix  *string                          `json:"rewrite_prefix,omitempty"`
+	Auth           *SandboxAppServiceRouteAuth      `json:"auth,omitempty"`
+	CORS           *SandboxAppServiceRouteCORS      `json:"cors,omitempty"`
+	RateLimit      *SandboxAppServiceRouteRateLimit `json:"rate_limit,omitempty"`
+	TimeoutSeconds int                              `json:"timeout_seconds,omitempty"`
+	Resume         bool                             `json:"resume"`
 }
 
 // SandboxAppServiceHealth describes the readiness endpoint for a service.
@@ -126,41 +101,6 @@ type SandboxAppServiceView struct {
 	SandboxAppService
 	Publishable     bool     `json:"publishable"`
 	PublishBlockers []string `json:"publish_blockers,omitempty"`
-}
-
-func normalizePublicGatewayConfig(cfg *PublicGatewayConfig) (*PublicGatewayConfig, error) {
-	if cfg == nil {
-		return nil, nil
-	}
-	out := *cfg
-	if len(out.Routes) > maxPublicGatewayRoutes {
-		return nil, fmt.Errorf("public_gateway.routes exceeds limit %d", maxPublicGatewayRoutes)
-	}
-	seen := make(map[string]struct{}, len(out.Routes))
-	for i := range out.Routes {
-		route, err := normalizePublicGatewayRoute(out.Routes[i])
-		if err != nil {
-			return nil, fmt.Errorf("public_gateway.routes[%d]: %w", i, err)
-		}
-		if _, ok := seen[route.ID]; ok {
-			return nil, fmt.Errorf("public_gateway.routes[%d]: duplicate id %q", i, route.ID)
-		}
-		seen[route.ID] = struct{}{}
-		out.Routes[i] = route
-	}
-	return &out, nil
-}
-
-func PublicGatewayHasResumeRoute(cfg *PublicGatewayConfig) bool {
-	if cfg == nil {
-		return false
-	}
-	for _, route := range cfg.Routes {
-		if route.Resume {
-			return true
-		}
-	}
-	return false
 }
 
 func SandboxAppServicesHaveResumeRoute(services []SandboxAppService) bool {
@@ -197,7 +137,7 @@ func NormalizeSandboxAppServices(services []SandboxAppService) ([]SandboxAppServ
 
 func normalizeSandboxAppService(service SandboxAppService) (SandboxAppService, error) {
 	service.ID = strings.ToLower(strings.TrimSpace(service.ID))
-	if !publicGatewayRouteIDPattern.MatchString(service.ID) {
+	if !sandboxServiceRouteIDPattern.MatchString(service.ID) {
 		return service, fmt.Errorf("id must be a DNS label")
 	}
 	service.DisplayName = strings.TrimSpace(service.DisplayName)
@@ -228,9 +168,12 @@ func normalizeSandboxAppService(service SandboxAppService) (SandboxAppService, e
 			PathPrefix: "/",
 		}}
 	}
+	if len(service.Ingress.Routes) > maxSandboxServiceRoutes {
+		return service, fmt.Errorf("ingress.routes exceeds limit %d", maxSandboxServiceRoutes)
+	}
 	seenRoutes := make(map[string]struct{}, len(service.Ingress.Routes))
 	for i := range service.Ingress.Routes {
-		route, err := normalizeSandboxAppServiceRoute(service.Port, service.Ingress.Routes[i])
+		route, err := normalizeSandboxAppServiceRoute(service.Ingress.Routes[i])
 		if err != nil {
 			return service, fmt.Errorf("ingress.routes[%d]: %w", i, err)
 		}
@@ -248,118 +191,9 @@ func normalizeSandboxAppService(service SandboxAppService) (SandboxAppService, e
 	return service, nil
 }
 
-func normalizeSandboxAppServiceRoute(port int, route SandboxAppServiceRoute) (SandboxAppServiceRoute, error) {
-	pg, err := normalizePublicGatewayRoute(PublicGatewayRoute{
-		ID:             route.ID,
-		Port:           port,
-		PathPrefix:     route.PathPrefix,
-		Methods:        route.Methods,
-		RewritePrefix:  route.RewritePrefix,
-		Auth:           route.Auth,
-		CORS:           route.CORS,
-		RateLimit:      route.RateLimit,
-		TimeoutSeconds: route.TimeoutSeconds,
-		Resume:         route.Resume,
-	})
-	if err != nil {
-		return route, err
-	}
-	return SandboxAppServiceRoute{
-		ID:             pg.ID,
-		PathPrefix:     pg.PathPrefix,
-		Methods:        pg.Methods,
-		RewritePrefix:  pg.RewritePrefix,
-		Auth:           pg.Auth,
-		CORS:           pg.CORS,
-		RateLimit:      pg.RateLimit,
-		TimeoutSeconds: pg.TimeoutSeconds,
-		Resume:         pg.Resume,
-	}, nil
-}
-
-// PublicGatewayConfigToSandboxAppServices converts the legacy public gateway
-// shape into canonical sandbox services by grouping routes by backend port.
-func PublicGatewayConfigToSandboxAppServices(cfg *PublicGatewayConfig) ([]SandboxAppService, error) {
-	cfg, err := normalizePublicGatewayConfig(cfg)
-	if err != nil {
-		return nil, err
-	}
-	if cfg == nil || !cfg.Enabled || len(cfg.Routes) == 0 {
-		return nil, nil
-	}
-	routesByPort := make(map[int][]SandboxAppServiceRoute)
-	for _, route := range cfg.Routes {
-		routesByPort[route.Port] = append(routesByPort[route.Port], SandboxAppServiceRoute{
-			ID:             route.ID,
-			PathPrefix:     route.PathPrefix,
-			Methods:        route.Methods,
-			RewritePrefix:  route.RewritePrefix,
-			Auth:           route.Auth,
-			CORS:           route.CORS,
-			RateLimit:      route.RateLimit,
-			TimeoutSeconds: route.TimeoutSeconds,
-			Resume:         route.Resume,
-		})
-	}
-	ports := make([]int, 0, len(routesByPort))
-	for port := range routesByPort {
-		ports = append(ports, port)
-	}
-	sort.Ints(ports)
-	services := make([]SandboxAppService, 0, len(ports))
-	for _, port := range ports {
-		routes := routesByPort[port]
-		id := fmt.Sprintf("p%d", port)
-		if len(routes) == 1 {
-			id = routes[0].ID
-		}
-		services = append(services, SandboxAppService{
-			ID:   id,
-			Port: port,
-			Ingress: SandboxAppServiceIngress{
-				Public: true,
-				Routes: routes,
-			},
-		})
-	}
-	return NormalizeSandboxAppServices(services)
-}
-
-// SandboxAppServicesToPublicGatewayConfig projects sandbox services into the
-// legacy public gateway shape consumed by the existing exposure proxy.
-func SandboxAppServicesToPublicGatewayConfig(services []SandboxAppService) *PublicGatewayConfig {
-	if len(services) == 0 {
-		return nil
-	}
-	routes := make([]PublicGatewayRoute, 0)
-	for _, service := range services {
-		if !service.Ingress.Public {
-			continue
-		}
-		for _, route := range service.Ingress.Routes {
-			routes = append(routes, PublicGatewayRoute{
-				ID:             route.ID,
-				Port:           service.Port,
-				PathPrefix:     route.PathPrefix,
-				Methods:        route.Methods,
-				RewritePrefix:  route.RewritePrefix,
-				Auth:           route.Auth,
-				CORS:           route.CORS,
-				RateLimit:      route.RateLimit,
-				TimeoutSeconds: route.TimeoutSeconds,
-				Resume:         route.Resume,
-			})
-		}
-	}
-	if len(routes) == 0 {
-		return nil
-	}
-	return &PublicGatewayConfig{Enabled: true, Routes: routes}
-}
-
 func SandboxAppServiceViews(services []SandboxAppService) []SandboxAppServiceView {
 	if len(services) == 0 {
-		return nil
+		return []SandboxAppServiceView{}
 	}
 	views := make([]SandboxAppServiceView, 0, len(services))
 	for _, service := range services {
@@ -392,13 +226,10 @@ func SandboxAppServicePublishBlockers(service SandboxAppService) []string {
 	return blockers
 }
 
-func normalizePublicGatewayRoute(route PublicGatewayRoute) (PublicGatewayRoute, error) {
+func normalizeSandboxAppServiceRoute(route SandboxAppServiceRoute) (SandboxAppServiceRoute, error) {
 	route.ID = strings.ToLower(strings.TrimSpace(route.ID))
-	if !publicGatewayRouteIDPattern.MatchString(route.ID) {
+	if !sandboxServiceRouteIDPattern.MatchString(route.ID) {
 		return route, fmt.Errorf("id must be a DNS label")
-	}
-	if route.Port <= 0 || route.Port > 65535 {
-		return route, fmt.Errorf("port must be between 1 and 65535")
 	}
 	route.PathPrefix = normalizeGatewayPathPrefix(route.PathPrefix)
 	if route.RewritePrefix != nil {
@@ -411,14 +242,14 @@ func normalizePublicGatewayRoute(route PublicGatewayRoute) (PublicGatewayRoute, 
 	}
 	route.Methods = methods
 	if route.Auth != nil {
-		auth, err := normalizePublicGatewayAuth(*route.Auth)
+		auth, err := normalizeSandboxAppServiceRouteAuth(*route.Auth)
 		if err != nil {
 			return route, err
 		}
 		route.Auth = &auth
 	}
 	if route.CORS != nil {
-		cors, err := normalizePublicGatewayCORS(*route.CORS)
+		cors, err := normalizeSandboxAppServiceRouteCORS(*route.CORS)
 		if err != nil {
 			return route, err
 		}
@@ -461,8 +292,8 @@ func normalizeGatewayRewritePrefix(prefix string) string {
 }
 
 func normalizeGatewayMethods(methods []string) ([]string, error) {
-	if len(methods) > maxPublicGatewayMethods {
-		return nil, fmt.Errorf("methods exceeds limit %d", maxPublicGatewayMethods)
+	if len(methods) > maxSandboxServiceMethods {
+		return nil, fmt.Errorf("methods exceeds limit %d", maxSandboxServiceMethods)
 	}
 	if len(methods) == 0 {
 		return nil, nil
@@ -486,17 +317,17 @@ func normalizeGatewayMethods(methods []string) ([]string, error) {
 	return out, nil
 }
 
-func normalizePublicGatewayAuth(auth PublicGatewayAuth) (PublicGatewayAuth, error) {
+func normalizeSandboxAppServiceRouteAuth(auth SandboxAppServiceRouteAuth) (SandboxAppServiceRouteAuth, error) {
 	auth.Mode = strings.ToLower(strings.TrimSpace(auth.Mode))
 	if auth.Mode == "" {
-		auth.Mode = PublicGatewayAuthModeNone
+		auth.Mode = SandboxAppServiceRouteAuthModeNone
 	}
 	switch auth.Mode {
-	case PublicGatewayAuthModeNone:
+	case SandboxAppServiceRouteAuthModeNone:
 		auth.BearerTokenSHA256 = ""
 		auth.HeaderName = ""
 		auth.HeaderValueSHA256 = ""
-	case PublicGatewayAuthModeBearer:
+	case SandboxAppServiceRouteAuthModeBearer:
 		if strings.TrimSpace(auth.BearerTokenSHA256) == "" {
 			return auth, fmt.Errorf("auth.bearer_token_sha256 is required for bearer auth")
 		}
@@ -506,7 +337,7 @@ func normalizePublicGatewayAuth(auth PublicGatewayAuth) (PublicGatewayAuth, erro
 		}
 		auth.HeaderName = ""
 		auth.HeaderValueSHA256 = ""
-	case PublicGatewayAuthModeHeader:
+	case SandboxAppServiceRouteAuthModeHeader:
 		auth.HeaderName = http.CanonicalHeaderKey(strings.TrimSpace(auth.HeaderName))
 		auth.HeaderValueSHA256 = strings.ToLower(strings.TrimSpace(auth.HeaderValueSHA256))
 		if auth.HeaderName == "" || auth.HeaderValueSHA256 == "" {
@@ -529,7 +360,7 @@ func validSHA256Hex(value string) bool {
 	return err == nil && len(decoded) == 32
 }
 
-func normalizePublicGatewayCORS(cors PublicGatewayCORS) (PublicGatewayCORS, error) {
+func normalizeSandboxAppServiceRouteCORS(cors SandboxAppServiceRouteCORS) (SandboxAppServiceRouteCORS, error) {
 	var err error
 	cors.AllowedOrigins, err = normalizeNonEmptyValues("cors.allowed_origins", cors.AllowedOrigins)
 	if err != nil {
@@ -554,8 +385,8 @@ func normalizePublicGatewayCORS(cors PublicGatewayCORS) (PublicGatewayCORS, erro
 }
 
 func normalizeNonEmptyValues(field string, values []string) ([]string, error) {
-	if len(values) > maxPublicGatewayAllowedValues {
-		return nil, fmt.Errorf("%s exceeds limit %d", field, maxPublicGatewayAllowedValues)
+	if len(values) > maxSandboxServiceAllowedValues {
+		return nil, fmt.Errorf("%s exceeds limit %d", field, maxSandboxServiceAllowedValues)
 	}
 	out := make([]string, 0, len(values))
 	seen := make(map[string]struct{}, len(values))

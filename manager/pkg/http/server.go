@@ -155,8 +155,6 @@ func (s *Server) setupRoutes() {
 			sandboxes.PUT("/:id/network", s.requireNetworkPolicyCapability(), s.updateNetworkPolicy)
 			sandboxes.GET("/:id/services", s.listSandboxServices)
 			sandboxes.PUT("/:id/services", s.updateSandboxServices)
-			sandboxes.GET("/:id/public-gateway", s.getPublicGateway)
-			sandboxes.PUT("/:id/public-gateway", s.updatePublicGateway)
 			sandboxes.POST("/:id/pause", s.pauseSandbox)
 			sandboxes.POST("/:id/resume", s.resumeSandbox)
 			sandboxes.POST("/:id/refresh", s.refreshSandbox)

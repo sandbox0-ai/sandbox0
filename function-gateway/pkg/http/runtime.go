@@ -288,11 +288,11 @@ func functionAllowedOriginHeader(origin string, allowed []string) string {
 }
 
 func authorizeFunctionRoute(c *gin.Context, route *mgr.SandboxAppServiceRoute) bool {
-	if route.Auth == nil || route.Auth.Mode == "" || route.Auth.Mode == mgr.PublicGatewayAuthModeNone {
+	if route.Auth == nil || route.Auth.Mode == "" || route.Auth.Mode == mgr.SandboxAppServiceRouteAuthModeNone {
 		return true
 	}
 	switch route.Auth.Mode {
-	case mgr.PublicGatewayAuthModeBearer:
+	case mgr.SandboxAppServiceRouteAuthModeBearer:
 		token := strings.TrimSpace(c.GetHeader("Authorization"))
 		const prefix = "Bearer "
 		if !strings.HasPrefix(token, prefix) {
@@ -303,7 +303,7 @@ func authorizeFunctionRoute(c *gin.Context, route *mgr.SandboxAppServiceRoute) b
 			spec.JSONError(c, nethttp.StatusUnauthorized, spec.CodeUnauthorized, "invalid bearer token")
 			return false
 		}
-	case mgr.PublicGatewayAuthModeHeader:
+	case mgr.SandboxAppServiceRouteAuthModeHeader:
 		if !sha256HexMatches(c.GetHeader(route.Auth.HeaderName), route.Auth.HeaderValueSHA256) {
 			spec.JSONError(c, nethttp.StatusUnauthorized, spec.CodeUnauthorized, "invalid header credential")
 			return false

@@ -1,0 +1,391 @@
+# Sandbox Services
+
+Sandbox Services expose named ports inside a sandbox. Use them when a sandbox needs public HTTP routes with method filtering, auth, CORS, rate limits, upstream timeout, path rewrite, and route-level resume behavior.
+
+Services are also the source model for Sandbox0 Functions. A publishable service is public and has a restartable runtime.
+
+## Service Model
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | Stable service ID. Must be unique in the sandbox |
+| `display_name` | string | Optional human-readable label |
+| `port` | integer | Sandbox port to proxy to |
+| `runtime` | object | Optional restartable runtime for functions |
+| `ingress` | object | Public exposure and route policy |
+| `health_check` | object | Optional readiness path |
+
+### Ingress
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `public` | boolean | Exposes the service on the deployment exposure domain |
+| `routes` | array | Ordered public HTTP routes for this service |
+
+When `public` is true and `routes` is empty, Sandbox0 creates a default route using the service ID and `/`.
+
+### Route
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | Stable route ID. Must be unique within the service |
+| `path_prefix` | string | Request path prefix to match. Defaults to `/` |
+| `methods` | string array | Allowed HTTP methods. Empty allows every method |
+| `rewrite_prefix` | string or null | Optional path prefix replacement before proxying |
+| `auth` | object | Optional request authentication |
+| `cors` | object | Optional CORS policy |
+| `rate_limit` | object | Optional per-route rate limit |
+| `timeout_seconds` | integer | Optional upstream timeout in seconds |
+| `resume` | boolean | Whether this route may resume a paused sandbox when `auto_resume` is enabled |
+
+### Auth
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `mode` | string | `none`, `bearer`, or `header` |
+| `bearer_token_sha256` | string | SHA-256 hex digest for bearer token auth |
+| `header_name` | string | Header name for header auth |
+| `header_value_sha256` | string | SHA-256 hex digest for header value auth |
+
+<Callout variant="warning">
+Route auth stores SHA-256 digests, not plaintext tokens. Hash secret values before sending service configuration.
+</Callout>
+
+## List Services
+
+<Endpoint method="GET">
+/api/v1/sandboxes/{'{id}'}/services
+</Endpoint>
+
+The response includes `publishable`, `publish_blockers`, and `exposure_domain`.
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `resp, err := sandbox.GetServices(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("exposure domain: %s\\n", resp.ExposureDomain)
+for _, service := range resp.Services {
+    fmt.Printf("%s -> port %d\\n", service.ID, service.Port)
+}`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `resp = sandbox.get_services()
+print(f"exposure domain: {resp.exposure_domain}")
+for service in resp.services:
+    print(f"{service.id} -> port {service.port}")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const resp = await sandbox.getServices();
+console.log('exposure domain:', resp.exposureDomain);
+for (const service of resp.services ?? []) {
+    console.log(\`\${service.id} -> port \${service.port}\`);
+}`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 sandbox service get -s sb_abc123`
+    }
+  ]}
+/>
+
+## Replace Services
+
+<Endpoint method="PUT">
+/api/v1/sandboxes/{'{id}'}/services
+</Endpoint>
+
+The update replaces the full service list. Include every service that should remain active.
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `tokenHash := sha256.Sum256([]byte(os.Getenv("PUBLIC_API_TOKEN")))
+
+resp, err := sandbox.UpdateServices(ctx, []apispec.SandboxAppService{
+    {
+        ID:   "api",
+        Port: 8080,
+        Ingress: apispec.SandboxAppServiceIngress{
+            Public: true,
+            Routes: []apispec.SandboxAppServiceRoute{
+                {
+                    ID:         "api",
+                    PathPrefix: apispec.NewOptString("/api"),
+                    Methods:    []string{"GET", "POST"},
+                    Auth: apispec.NewOptSandboxAppServiceRouteAuth(apispec.SandboxAppServiceRouteAuth{
+                        Mode:              apispec.SandboxAppServiceRouteAuthModeBearer,
+                        BearerTokenSHA256: apispec.NewOptString(hex.EncodeToString(tokenHash[:])),
+                    }),
+                    RateLimit: apispec.NewOptSandboxAppServiceRouteRateLimit(apispec.SandboxAppServiceRouteRateLimit{
+                        Rps:   20,
+                        Burst: 40,
+                    }),
+                    TimeoutSeconds: apispec.NewOptInt32(30),
+                    Resume:         true,
+                },
+            },
+        },
+    },
+})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("services: %d\\n", len(resp.Services))`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `import hashlib
+import os
+
+from sandbox0.apispec.models.sandbox_app_service import SandboxAppService
+from sandbox0.apispec.models.sandbox_app_service_ingress import SandboxAppServiceIngress
+from sandbox0.apispec.models.sandbox_app_service_route import SandboxAppServiceRoute
+from sandbox0.apispec.models.sandbox_app_service_route_auth import SandboxAppServiceRouteAuth
+from sandbox0.apispec.models.sandbox_app_service_route_auth_mode import SandboxAppServiceRouteAuthMode
+from sandbox0.apispec.models.sandbox_app_service_route_rate_limit import SandboxAppServiceRouteRateLimit
+
+token_hash = hashlib.sha256(os.environ["PUBLIC_API_TOKEN"].encode()).hexdigest()
+
+resp = sandbox.update_services([
+    SandboxAppService(
+        id="api",
+        port=8080,
+        ingress=SandboxAppServiceIngress(
+            public=True,
+            routes=[
+                SandboxAppServiceRoute(
+                    id="api",
+                    path_prefix="/api",
+                    methods=["GET", "POST"],
+                    auth=SandboxAppServiceRouteAuth(
+                        mode=SandboxAppServiceRouteAuthMode.BEARER,
+                        bearer_token_sha256=token_hash,
+                    ),
+                    rate_limit=SandboxAppServiceRouteRateLimit(rps=20, burst=40),
+                    timeout_seconds=30,
+                    resume=True,
+                ),
+            ],
+        ),
+    ),
+])
+print(f"services: {len(resp.services)}")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `import { createHash } from 'node:crypto';
+
+const tokenHash = createHash('sha256')
+    .update(process.env.PUBLIC_API_TOKEN!)
+    .digest('hex');
+
+const resp = await sandbox.updateServices([
+    {
+        id: 'api',
+        port: 8080,
+        ingress: {
+            public: true,
+            routes: [
+                {
+                    id: 'api',
+                    pathPrefix: '/api',
+                    methods: ['GET', 'POST'],
+                    auth: {
+                        mode: 'bearer',
+                        bearerTokenSha256: tokenHash,
+                    },
+                    rateLimit: {
+                        rps: 20,
+                        burst: 40,
+                    },
+                    timeoutSeconds: 30,
+                    resume: true,
+                },
+            ],
+        },
+    },
+]);
+console.log('services:', resp.services?.length ?? 0);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `TOKEN_HASH="$(printf %s "$PUBLIC_API_TOKEN" | sha256sum | awk '{print $1}')"
+
+cat > services.yaml <<EOF
+services:
+  - id: api
+    port: 8080
+    ingress:
+      public: true
+      routes:
+        - id: api
+          path_prefix: /api
+          methods: [GET, POST]
+          auth:
+            mode: bearer
+            bearer_token_sha256: "$TOKEN_HASH"
+          rate_limit:
+            rps: 20
+            burst: 40
+          timeout_seconds: 30
+          resume: true
+EOF
+
+s0 sandbox service update -s sb_abc123 -f services.yaml`
+    }
+  ]}
+/>
+
+## Set Services At Claim Time
+
+You can attach services when claiming a sandbox. This is useful when the sandbox starts a known HTTP service during boot.
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `sandbox, err := client.ClaimSandbox(ctx, "default",
+    sandbox0.WithSandboxAutoResume(true),
+    sandbox0.WithSandboxServices([]apispec.SandboxAppService{
+        {
+            ID:   "web",
+            Port: 3000,
+            Ingress: apispec.SandboxAppServiceIngress{
+                Public: true,
+                Routes: []apispec.SandboxAppServiceRoute{
+                    {
+                        ID:         "web",
+                        PathPrefix: apispec.NewOptString("/"),
+                        Resume:     true,
+                    },
+                },
+            },
+        },
+    }),
+)
+if err != nil {
+    log.Fatal(err)
+}`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0.apispec.models.sandbox_config import SandboxConfig
+
+sandbox = client.claim_sandbox(
+    template="default",
+    config=SandboxConfig.from_dict({
+        "auto_resume": True,
+        "services": [
+            {
+                "id": "web",
+                "port": 3000,
+                "ingress": {
+                    "public": True,
+                    "routes": [
+                        {
+                            "id": "web",
+                            "path_prefix": "/",
+                            "resume": True,
+                        },
+                    ],
+                },
+            },
+        ],
+    }),
+)`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const sandbox = await client.sandboxes.claim('default', {
+    autoResume: true,
+    services: [
+        {
+            id: 'web',
+            port: 3000,
+            ingress: {
+                public: true,
+                routes: [{ id: 'web', pathPrefix: '/', resume: true }],
+            },
+        },
+    ],
+});`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `cat > sandbox.yaml <<EOF
+template: default
+config:
+  auto_resume: true
+  services:
+    - id: web
+      port: 3000
+      ingress:
+        public: true
+        routes:
+          - id: web
+            path_prefix: /
+            resume: true
+EOF
+
+s0 sandbox create -f sandbox.yaml`
+    }
+  ]}
+/>
+
+## Clear Services
+
+Clearing services removes public HTTP exposure from the sandbox.
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `_, err := sandbox.ClearServices(ctx)
+if err != nil {
+    log.Fatal(err)
+}`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `sandbox.clear_services()`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `await sandbox.clearServices();`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 sandbox service clear -s sb_abc123`
+    }
+  ]}
+/>
+
+## Behavior Notes
+
+- Public HTTP traffic must match a route on a public service.
+- If `methods` is empty, every HTTP method is allowed for that route.
+- `resume` is evaluated with sandbox `auto_resume`. A route with `resume: false` will not resume a paused sandbox.
+- Public URLs are derived from the deployment exposure domain as `{sandbox_id}--p{port}.{exposure_domain}`.

@@ -216,20 +216,15 @@ func (s *Server) updateSandbox(c *gin.Context) {
 	}
 
 	if req.Config.AutoResume != nil && !*req.Config.AutoResume {
-		if service.PublicGatewayHasResumeRoute(sandbox.PublicGateway) {
+		if service.SandboxAppServicesHaveResumeRoute(sandbox.Services) {
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest,
-				"cannot disable auto_resume while public gateway routes have resume=true; remove or update those routes first")
+				"cannot disable auto_resume while service routes have resume=true; remove or update those routes first")
 			return
 		}
 	}
 	resultAutoResume := sandbox.AutoResume
 	if req.Config.AutoResume != nil {
 		resultAutoResume = *req.Config.AutoResume
-	}
-	if !resultAutoResume && req.Config.PublicGateway != nil && service.PublicGatewayHasResumeRoute(req.Config.PublicGateway) {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest,
-			"cannot set resume=true on public gateway routes when sandbox auto_resume is disabled")
-		return
 	}
 	if !resultAutoResume && service.SandboxAppServicesHaveResumeRoute(req.Config.Services) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest,

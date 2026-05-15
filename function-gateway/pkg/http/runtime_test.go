@@ -41,8 +41,8 @@ func TestAuthorizeFunctionRouteBearer(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	sum := sha256.Sum256([]byte("secret"))
 	route := &mgr.SandboxAppServiceRoute{
-		Auth: &mgr.PublicGatewayAuth{
-			Mode:              mgr.PublicGatewayAuthModeBearer,
+		Auth: &mgr.SandboxAppServiceRouteAuth{
+			Mode:              mgr.SandboxAppServiceRouteAuthModeBearer,
 			BearerTokenSHA256: hex.EncodeToString(sum[:]),
 		},
 	}

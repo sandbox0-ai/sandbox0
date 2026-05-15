@@ -17,7 +17,7 @@ type GatewayMetadataResponse struct {
 	Service     string `json:"service"`
 }
 
-// GatewayMetadata returns a handler that reports the public gateway mode for the current entrypoint.
+// GatewayMetadata returns a handler that reports the externally visible gateway mode for the current entrypoint.
 func GatewayMetadata(service, gatewayMode string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		spec.JSONSuccess(c, http.StatusOK, GatewayMetadataResponse{

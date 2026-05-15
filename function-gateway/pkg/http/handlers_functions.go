@@ -245,11 +245,6 @@ func findSandboxService(sandbox *mgr.Sandbox, serviceID string) (mgr.SandboxAppS
 		return mgr.SandboxAppService{}, false
 	}
 	services := sandbox.Services
-	if len(services) == 0 && sandbox.PublicGateway != nil {
-		if converted, err := mgr.PublicGatewayConfigToSandboxAppServices(sandbox.PublicGateway); err == nil {
-			services = converted
-		}
-	}
 	serviceID = strings.TrimSpace(serviceID)
 	for _, service := range services {
 		if service.ID == serviceID {

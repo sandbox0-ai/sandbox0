@@ -37,6 +37,39 @@ func (s *Server) getInternalSandbox(c *gin.Context) {
 	spec.JSONSuccess(c, http.StatusOK, sandbox)
 }
 
+// deleteInternalSandbox terminates a sandbox for trusted internal callers
+// after cluster-gateway has validated the internal token permissions.
+func (s *Server) deleteInternalSandbox(c *gin.Context) {
+	authCtx := middleware.GetAuthContext(c)
+	if authCtx == nil || authCtx.TeamID == "" {
+		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing internal team context")
+		return
+	}
+
+	sandboxID := c.Param("id")
+	if sandboxID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
+		return
+	}
+
+	if err := s.managerClient.TerminateSandbox(c.Request.Context(), sandboxID, authCtx.UserID, authCtx.TeamID); err != nil {
+		s.logger.Warn("Internal sandbox delete failed",
+			zap.String("sandbox_id", sandboxID),
+			zap.String("team_id", authCtx.TeamID),
+			zap.String("user_id", authCtx.UserID),
+			zap.Error(err),
+		)
+		if errors.Is(err, client.ErrSandboxNotFound) {
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "sandbox not found")
+			return
+		}
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox delete failed")
+		return
+	}
+
+	spec.JSONSuccess(c, http.StatusOK, gin.H{"message": "sandbox terminated successfully"})
+}
+
 // resumeInternalSandbox requests a sandbox resume for trusted internal callers
 // after the caller has already performed region-level authorization.
 func (s *Server) resumeInternalSandbox(c *gin.Context) {

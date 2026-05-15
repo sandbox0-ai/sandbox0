@@ -61,7 +61,7 @@ func (c *HTTPRuntimeController) DeleteRuntimeSandbox(ctx context.Context, authCt
 	if err != nil {
 		return fmt.Errorf("generate internal token: %w", err)
 	}
-	targetURL := clusterGatewayURL + "/api/v1/sandboxes/" + url.PathEscape(sandboxID)
+	targetURL := clusterGatewayURL + "/internal/v1/sandboxes/" + url.PathEscape(sandboxID)
 	var lastErr error
 	for attempt := range 5 {
 		req, err := http.NewRequestWithContext(ctx, http.MethodDelete, targetURL, nil)

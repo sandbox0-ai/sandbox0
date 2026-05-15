@@ -353,7 +353,7 @@ type ClusterGatewayConfig struct {
 	// +kubebuilder:default="internal"
 	AuthMode string `json:"authMode,omitempty"`
 	// +optional
-	// +kubebuilder:default={"regional-gateway","scheduler","function-gateway"}
+	// +kubebuilder:default={"regional-gateway","scheduler","function-gateway","cluster-gateway"}
 	AllowedCallers []string `json:"allowedCallers,omitempty"`
 	// +optional
 	// +kubebuilder:default="30s"

@@ -142,7 +142,7 @@ func NewServer(
 	// Create internal auth validator (for validating tokens from regional-gateway and optionally scheduler)
 	allowedCallers := cfg.AllowedCallers
 	if len(allowedCallers) == 0 {
-		allowedCallers = []string{"regional-gateway", "scheduler", "function-gateway"}
+		allowedCallers = []string{"regional-gateway", "scheduler", "function-gateway", "cluster-gateway"}
 	}
 	var validator *internalauth.Validator
 	if authModeEnabled(cfg.AuthMode, authModeInternal) {
@@ -507,6 +507,7 @@ func (s *Server) setupInternalControlPlaneRoutes() {
 
 		// Sandbox metadata and power control (→ Manager)
 		internal.GET("/sandboxes/:id", s.getInternalSandbox)
+		internal.DELETE("/sandboxes/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxDelete), s.deleteInternalSandbox)
 		internal.POST("/sandboxes/:id/resume", s.resumeInternalSandbox)
 
 		// Template management (→ Manager)

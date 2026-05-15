@@ -124,22 +124,6 @@ func (s *Server) setupRoutes() {
 	s.router.GET("/metadata", gatewayhandlers.GatewayMetadata("function-gateway", gatewayhandlers.GatewayModeDirect))
 	s.router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
-	api := s.router.Group("/api/v1")
-	api.Use(s.authMiddleware.Authenticate())
-	api.Use(s.rateLimiter.RateLimit())
-	api.Use(s.requireTeamContextForTeamScopedAPI())
-	{
-		functionsGroup := api.Group("/functions")
-		{
-			functionsGroup.GET("", s.authMiddleware.RequirePermission(authn.PermFunctionRead), s.listFunctions)
-			functionsGroup.POST("", s.authMiddleware.RequirePermission(authn.PermFunctionCreate), s.createFunction)
-			functionsGroup.GET("/:id", s.authMiddleware.RequirePermission(authn.PermFunctionRead), s.getFunction)
-			functionsGroup.GET("/:id/revisions", s.authMiddleware.RequirePermission(authn.PermFunctionRead), s.listFunctionRevisions)
-			functionsGroup.POST("/:id/revisions", s.authMiddleware.RequirePermission(authn.PermFunctionWrite), s.createFunctionRevision)
-			functionsGroup.PUT("/:id/aliases/:alias", s.authMiddleware.RequirePermission(authn.PermFunctionWrite), s.setFunctionAlias)
-		}
-	}
-
 	s.router.NoRoute(s.handleNoRoute)
 }
 
@@ -214,32 +198,7 @@ func (s *Server) readinessCheck(c *gin.Context) {
 	})
 }
 
-func (s *Server) requireTeamContextForTeamScopedAPI() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		authCtx := middleware.GetAuthContext(c)
-		if authCtx == nil || strings.TrimSpace(authCtx.TeamID) != "" {
-			c.Next()
-			return
-		}
-		if authCtx.AuthMethod == authn.AuthMethodAPIKey && authCtx.IsSystemAdmin {
-			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "x-team-id is required for team-scoped platform API key requests")
-			c.Abort()
-			return
-		}
-		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "team context is required")
-		c.Abort()
-	}
-}
-
 func (s *Server) handleNoRoute(c *gin.Context) {
-	if c.Request != nil && c.Request.URL != nil {
-		path := c.Request.URL.Path
-		if path == "/api" || strings.HasPrefix(path, "/api/") {
-			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "not found")
-			return
-		}
-	}
-
 	label, ok := s.functionDomainLabelFromRequest(c)
 	if !ok {
 		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "not found")
@@ -291,18 +250,6 @@ func functionHostSuffixes(regionID, rootDomain string) []string {
 		return []string{"." + rootDomain}
 	}
 	return []string{"." + regionID + "." + rootDomain, "." + rootDomain}
-}
-
-func functionHost(domainLabel, regionID, rootDomain string) string {
-	rootDomain = strings.Trim(strings.ToLower(rootDomain), ".")
-	if rootDomain == "" {
-		rootDomain = config.DefaultFunctionRootDomain
-	}
-	regionID = strings.Trim(strings.ToLower(regionID), ".")
-	if regionID == "" {
-		return strings.ToLower(domainLabel) + "." + rootDomain
-	}
-	return strings.ToLower(domainLabel) + "." + regionID + "." + rootDomain
 }
 
 func hostWithoutPort(hostport string) string {

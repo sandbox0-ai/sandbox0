@@ -52,6 +52,14 @@ type ClusterGatewayConfig struct {
 
 	// Public gateway (external auth) configuration
 	DatabaseURL string `yaml:"database_url" json:"-"`
+	// FunctionRootDomain is the DNS root for function hosts when cluster-gateway
+	// serves single-cluster Function management APIs.
+	// +optional
+	// +kubebuilder:default="sandbox0.site"
+	FunctionRootDomain string `yaml:"function_root_domain" json:"functionRootDomain"`
+	// FunctionRegionID is the DNS-safe region label placed under FunctionRootDomain.
+	// +optional
+	FunctionRegionID string `yaml:"function_region_id" json:"functionRegionId"`
 	// License file path used to unlock enterprise SSO features.
 	// Required when OIDC providers are configured.
 	// +optional

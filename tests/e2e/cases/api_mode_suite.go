@@ -1,9 +1,11 @@
 package cases
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -35,6 +37,7 @@ type apiModeSuiteOptions struct {
 	includeObjectEncryption   bool
 	includeWebhookLifecycle   bool
 	includeMeteringAssertions bool
+	includeFunctionLifecycle  bool
 	expectStorageUnavailable  bool
 	expectNetworkUnavailable  bool
 }
@@ -183,6 +186,14 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 				assertFilesystemAndProcessCapabilities(env, session, sandboxID, opts.name, opts.fileContent)
 			})
 		})
+
+		if opts.includeFunctionLifecycle {
+			Context("functions", func() {
+				It("publishes a sandbox service without capturing function /api routes", func() {
+					assertFunctionAPIRoutesReachUserService(env, session, sandboxID)
+				})
+			})
+		}
 
 		if opts.includeNetworkPolicy {
 			Context("network policies", func() {
@@ -1703,6 +1714,102 @@ func waitForSandboxPowerStateEventually(env *framework.ScenarioEnv, session *e2e
 		return nil
 	}).WithTimeout(90 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
 	return sandbox
+}
+
+func assertFunctionAPIRoutesReachUserService(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string) {
+	sandbox, status, err := session.GetSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(sandbox).NotTo(BeNil())
+	templateNamespace, err := naming.TemplateNamespaceForBuiltin(sandbox.TemplateId)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(sandbox.PodName).NotTo(BeEmpty())
+
+	const serviceID = "function-api"
+	const servicePort int32 = 18080
+	bodyValue := "function-api-route-ok"
+	script := fmt.Sprintf(
+		"set -eu; dir=/tmp/s0-function-e2e; rm -rf \"$dir\"; mkdir -p \"$dir/api/v1\"; printf '%s\\n' > \"$dir/api/v1/functions\"; printf 'function-health-ok\\n' > \"$dir/api/health\"; nohup python3 -m http.server %d --bind 0.0.0.0 -d \"$dir\" >/tmp/s0-function-e2e.log 2>&1 &\n",
+		bodyValue,
+		servicePort,
+	)
+	_, err = execInSandboxPod(env, templateNamespace, sandbox.PodName, script)
+	Expect(err).NotTo(HaveOccurred())
+
+	pathPrefix := "/"
+	cwd := "/tmp/s0-function-e2e"
+	command := []string{"/bin/sh", "-lc", fmt.Sprintf("python3 -m http.server %d --bind 0.0.0.0 -d /tmp/s0-function-e2e", servicePort)}
+	_, _, updateStatus, err := session.UpdateSandboxServices(env.TestCtx.Context, GinkgoT(), sandboxID, []apispec.SandboxAppService{{
+		Id:   serviceID,
+		Port: servicePort,
+		Runtime: &apispec.SandboxAppServiceRuntime{
+			Type:    apispec.SandboxAppServiceRuntimeTypeCmd,
+			Command: &command,
+			Cwd:     &cwd,
+		},
+		Ingress: apispec.SandboxAppServiceIngress{
+			Public: true,
+			Routes: &[]apispec.SandboxAppServiceRoute{{
+				Id:         "api",
+				PathPrefix: &pathPrefix,
+				Resume:     true,
+			}},
+		},
+	}})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(updateStatus).To(Equal(http.StatusOK))
+
+	functionName := fmt.Sprintf("e2e-function-api-%d", time.Now().UnixNano())
+	fn, createStatus, err := session.CreateFunctionFromSandbox(env.TestCtx.Context, GinkgoT(), sandboxID, serviceID, functionName)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(createStatus).To(Equal(http.StatusCreated))
+	Expect(fn).NotTo(BeNil())
+	Expect(fn.Host).NotTo(BeEmpty())
+
+	functionGatewayURL, cleanup, err := functionGatewayBaseURL(env)
+	Expect(err).NotTo(HaveOccurred())
+	defer cleanup()
+
+	Eventually(func() error {
+		status, body, err := requestFunctionHost(env.TestCtx.Context, functionGatewayURL, fn.Host, "/api/v1/functions")
+		if err != nil {
+			return err
+		}
+		if status != http.StatusOK {
+			return fmt.Errorf("function route status %d body %q", status, body)
+		}
+		if strings.TrimSpace(body) != bodyValue {
+			return fmt.Errorf("function route body = %q, want %q", strings.TrimSpace(body), bodyValue)
+		}
+		return nil
+	}).WithTimeout(60 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
+}
+
+func functionGatewayBaseURL(env *framework.ScenarioEnv) (string, func(), error) {
+	serviceName := env.Infra.Name + "-function-gateway"
+	port, err := framework.GetServicePort(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, serviceName)
+	if err != nil {
+		return "", nil, err
+	}
+	return framework.PortForwardService(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, serviceName, port)
+}
+
+func requestFunctionHost(ctx context.Context, baseURL, host, path string) (int, string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+path, nil)
+	if err != nil {
+		return 0, "", err
+	}
+	req.Host = host
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return 0, "", err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return resp.StatusCode, "", err
+	}
+	return resp.StatusCode, string(body), nil
 }
 
 func listWorkerNodes(env *framework.ScenarioEnv) ([]string, error) {

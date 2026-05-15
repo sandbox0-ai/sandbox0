@@ -184,6 +184,11 @@ type RegionalGatewayConfig struct {
 	// +optional
 	SchedulerURL string `json:"schedulerUrl,omitempty"`
 	// +optional
+	// +kubebuilder:default="sandbox0.site"
+	FunctionRootDomain string `json:"functionRootDomain,omitempty"`
+	// +optional
+	FunctionRegionID string `json:"functionRegionId,omitempty"`
+	// +optional
 	// +kubebuilder:default="30s"
 	InternalAuthTTL metav1.Duration `json:"internalAuthTtl,omitempty"`
 	// +optional
@@ -365,6 +370,11 @@ type ClusterGatewayConfig struct {
 	// +optional
 	// +kubebuilder:default=8
 	DatabaseMinConns int `json:"databaseMinConns,omitempty"`
+	// +optional
+	// +kubebuilder:default="sandbox0.site"
+	FunctionRootDomain string `json:"functionRootDomain,omitempty"`
+	// +optional
+	FunctionRegionID string `json:"functionRegionId,omitempty"`
 	// +optional
 	GatewayConfig `json:",inline"`
 	// +optional

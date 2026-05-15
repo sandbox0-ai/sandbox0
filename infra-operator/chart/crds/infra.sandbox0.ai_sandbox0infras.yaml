@@ -989,6 +989,11 @@ spec:
                             default: Personal Team
                             description: Identity and Teams
                             type: string
+                          functionRegionId:
+                            type: string
+                          functionRootDomain:
+                            default: sandbox0.site
+                            type: string
                           healthCheckPeriod:
                             default: 10s
                             type: string
@@ -2294,6 +2299,11 @@ spec:
                             type: string
                           edition:
                             default: self-hosted
+                            type: string
+                          functionRegionId:
+                            type: string
+                          functionRootDomain:
+                            default: sandbox0.site
                             type: string
                           httpPort:
                             default: 8080

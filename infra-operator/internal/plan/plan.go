@@ -643,6 +643,17 @@ func compileRegionalGatewayRuntimeConfig(plan *RegionalGatewayPlan, infra *infra
 	if compiled != nil {
 		cfg.SchedulerEnabled = compiled.Components.EnableScheduler
 		cfg.SchedulerURL = compiled.Services.Scheduler.URL
+		if compiled.FunctionGateway.Config != nil {
+			if strings.TrimSpace(cfg.FunctionRootDomain) == "" {
+				cfg.FunctionRootDomain = compiled.FunctionGateway.Config.FunctionRootDomain
+			}
+			if strings.TrimSpace(cfg.FunctionRegionID) == "" {
+				cfg.FunctionRegionID = compiled.FunctionGateway.Config.FunctionRegionID
+			}
+		}
+	}
+	if strings.TrimSpace(cfg.FunctionRootDomain) == "" {
+		cfg.FunctionRootDomain = apiconfig.DefaultFunctionRootDomain
 	}
 
 	sshPort := int32(defaultSSHGatewayPort)

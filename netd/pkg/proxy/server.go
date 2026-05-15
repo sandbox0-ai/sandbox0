@@ -527,10 +527,6 @@ func (s *Server) handleTCPDecision(req *adapterRequest, decision trafficDecision
 	}
 }
 
-func (s *Server) relayTCPConn(client net.Conn, prefix io.Reader, destIP net.IP, destPort int, compiled *policy.CompiledPolicy, audit *flowAudit) error {
-	return s.relayTCPConnWithUpstream(client, prefix, nil, nil, destIP, destPort, compiled, audit, nil)
-}
-
 func (s *Server) relayTCPRequest(req *adapterRequest) error {
 	if req == nil {
 		return fmt.Errorf("adapter request is nil")
@@ -621,15 +617,6 @@ func (s *Server) probeServerFirstSSH(req *adapterRequest, classification traffic
 		return classifyKnownTraffic("tcp", "ssh", req.DestIP, req.DestPort, "")
 	}
 	return classification
-}
-
-func (s *Server) probeTCPUpstream(destIP net.IP, destPort int, headerLimit int, firstByteTimeout time.Duration, readTimeout time.Duration) (net.Conn, []byte, error) {
-	upstream, err := s.dialTCPUpstream(destIP, destPort)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return probeTCPPrefix(upstream, headerLimit, firstByteTimeout, readTimeout)
 }
 
 func (s *Server) probeTCPUpstreamForRequest(req *adapterRequest, headerLimit int, firstByteTimeout time.Duration, readTimeout time.Duration) (net.Conn, []byte, error) {

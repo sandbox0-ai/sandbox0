@@ -231,23 +231,3 @@ func readSOCKS5ConnectRequest(reader *bufio.Reader) (string, int, error) {
 	}
 	return host, int(binary.BigEndian.Uint16(portBytes)), nil
 }
-
-func firstNonLoopbackIPv4(t *testing.T) net.IP {
-	t.Helper()
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		t.Fatalf("list interface addresses: %v", err)
-	}
-	for _, addr := range addrs {
-		ipNet, ok := addr.(*net.IPNet)
-		if !ok {
-			continue
-		}
-		ip := ipNet.IP.To4()
-		if ip != nil && !ip.IsLoopback() {
-			return ip
-		}
-	}
-	t.Fatal("no non-loopback IPv4 address found")
-	return nil
-}

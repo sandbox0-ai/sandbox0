@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -21,6 +22,8 @@ import (
 	gatewaybuiltin "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/builtin"
 	gatewayoidc "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/oidc"
 	gatewayauthn "github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functionapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functions"
 	gatewayhandlers "github.com/sandbox0-ai/sandbox0/pkg/gateway/http/handlers"
 	gatewayidentity "github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
 	gatewaymiddleware "github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
@@ -55,6 +58,7 @@ type Server struct {
 	requestLogger          *middleware.RequestLogger
 	logger                 *zap.Logger
 	meteringHandler        *gatewayhandlers.MeteringHandler
+	functionHandler        *functionapi.Handler
 	internalAuthGen        *internalauth.Generator
 	entitlements           licensing.Entitlements
 	obsProvider            *observability.Provider
@@ -240,6 +244,29 @@ func NewServer(
 		meteringRepo = metering.NewRepository(pool)
 	}
 	meteringHandler := gatewayhandlers.NewMeteringHandler(meteringRepo, cfg.RegionID, logger)
+	functionHandler := functionapi.New(
+		functions.NewRepository(pool),
+		functionapi.Config{
+			FunctionRegionID:   cfg.FunctionRegionID,
+			FunctionRootDomain: cfg.FunctionRootDomain,
+			PublicRegionID:     cfg.PublicRegionID,
+			RegionID:           cfg.RegionID,
+		},
+		func(ctx context.Context, sandboxID string) (*mgr.Sandbox, error) {
+			if managerClient == nil {
+				return nil, functionapi.SandboxUnavailableError("manager is not configured")
+			}
+			sandbox, err := managerClient.GetSandboxInternal(ctx, sandboxID)
+			if err != nil {
+				if errors.Is(err, client.ErrSandboxNotFound) {
+					return nil, functionapi.SandboxNotFoundError()
+				}
+				return nil, functionapi.SandboxUnavailableError("sandbox unavailable")
+			}
+			return sandbox, nil
+		},
+		logger,
+	)
 
 	server := &Server{
 		router:             router,
@@ -260,6 +287,7 @@ func NewServer(
 		requestLogger:      requestLogger,
 		logger:             logger,
 		meteringHandler:    meteringHandler,
+		functionHandler:    functionHandler,
 		internalAuthGen:    internalAuthGen,
 		entitlements:       entitlements,
 		obsProvider:        obsProvider,
@@ -399,6 +427,11 @@ func (s *Server) setupRoutes() {
 		registry.Use(s.managerUpstreamMiddleware())
 		{
 			registry.POST("/credentials", s.authMiddleware.RequirePermission(gatewayauthn.PermTemplateWrite), s.getRegistryCredentials)
+		}
+
+		functionRoutes := v1.Group("/functions")
+		{
+			s.functionHandler.RegisterRoutes(functionRoutes, s.authMiddleware.RequirePermission)
 		}
 
 		credentialSources := v1.Group("/credential-sources")

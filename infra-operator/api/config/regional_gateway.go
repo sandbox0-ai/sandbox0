@@ -42,8 +42,16 @@ type RegionalGatewayConfig struct {
 
 	// Upstream service
 	DefaultClusterGatewayURL string `yaml:"default_cluster_gateway_url" json:"-"`
-	// FunctionGatewayURL is the control-plane upstream used for function management APIs.
+	// FunctionGatewayURL is retained for generated config compatibility; regional-gateway
+	// serves Function management APIs directly.
 	FunctionGatewayURL string `yaml:"function_gateway_url" json:"-"`
+	// FunctionRootDomain is the DNS root for function hosts.
+	// +optional
+	// +kubebuilder:default="sandbox0.site"
+	FunctionRootDomain string `yaml:"function_root_domain" json:"functionRootDomain"`
+	// FunctionRegionID is the DNS-safe region label placed under FunctionRootDomain.
+	// +optional
+	FunctionRegionID string `yaml:"function_region_id" json:"functionRegionId"`
 
 	// Scheduler configuration (optional, for multi-cluster mode)
 	// +optional

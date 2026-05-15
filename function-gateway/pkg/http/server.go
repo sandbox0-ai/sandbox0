@@ -124,22 +124,6 @@ func (s *Server) setupRoutes() {
 	s.router.GET("/metadata", gatewayhandlers.GatewayMetadata("function-gateway", gatewayhandlers.GatewayModeDirect))
 	s.router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
-	api := s.router.Group("/api/v1")
-	api.Use(s.authMiddleware.Authenticate())
-	api.Use(s.rateLimiter.RateLimit())
-	api.Use(s.requireTeamContextForTeamScopedAPI())
-	{
-		functionsGroup := api.Group("/functions")
-		{
-			functionsGroup.GET("", s.authMiddleware.RequirePermission(authn.PermFunctionRead), s.listFunctions)
-			functionsGroup.POST("", s.authMiddleware.RequirePermission(authn.PermFunctionCreate), s.createFunction)
-			functionsGroup.GET("/:id", s.authMiddleware.RequirePermission(authn.PermFunctionRead), s.getFunction)
-			functionsGroup.GET("/:id/revisions", s.authMiddleware.RequirePermission(authn.PermFunctionRead), s.listFunctionRevisions)
-			functionsGroup.POST("/:id/revisions", s.authMiddleware.RequirePermission(authn.PermFunctionWrite), s.createFunctionRevision)
-			functionsGroup.PUT("/:id/aliases/:alias", s.authMiddleware.RequirePermission(authn.PermFunctionWrite), s.setFunctionAlias)
-		}
-	}
-
 	s.router.NoRoute(s.handleNoRoute)
 }
 
@@ -232,14 +216,6 @@ func (s *Server) requireTeamContextForTeamScopedAPI() gin.HandlerFunc {
 }
 
 func (s *Server) handleNoRoute(c *gin.Context) {
-	if c.Request != nil && c.Request.URL != nil {
-		path := c.Request.URL.Path
-		if path == "/api" || strings.HasPrefix(path, "/api/") {
-			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "not found")
-			return
-		}
-	}
-
 	label, ok := s.functionDomainLabelFromRequest(c)
 	if !ok {
 		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "not found")

@@ -18,6 +18,8 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/builtin"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/oidc"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functionapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functions"
 	gatewayhandlers "github.com/sandbox0-ai/sandbox0/pkg/gateway/http/handlers"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
@@ -34,23 +36,22 @@ import (
 
 // Server represents the HTTP server for regional-gateway
 type Server struct {
-	router                *gin.Engine
-	cfg                   *config.RegionalGatewayConfig
-	pool                  *pgxpool.Pool
-	identityRepo          *identity.Repository
-	apiKeyRepo            *apikey.Repository
-	clusterGatewayRouter  *proxy.Router
-	functionGatewayRouter *proxy.Router
-	schedulerRouter       *proxy.Router // Optional: proxy to scheduler for templates
-	authMiddleware        *middleware.AuthMiddleware
-	internalAuth          *internalmiddleware.InternalAuthMiddleware
-	rateLimiter           *middleware.RateLimiter
-	requestLogger         *middleware.RequestLogger
-	logger                *zap.Logger
-	internalAuthGen       *internalauth.Generator
-	meteringHandler       *gatewayhandlers.MeteringHandler
-	obsProvider           *observability.Provider
-	httpClient            *http.Client
+	router               *gin.Engine
+	cfg                  *config.RegionalGatewayConfig
+	pool                 *pgxpool.Pool
+	identityRepo         *identity.Repository
+	apiKeyRepo           *apikey.Repository
+	clusterGatewayRouter *proxy.Router
+	schedulerRouter      *proxy.Router // Optional: proxy to scheduler for templates
+	authMiddleware       *middleware.AuthMiddleware
+	internalAuth         *internalmiddleware.InternalAuthMiddleware
+	rateLimiter          *middleware.RateLimiter
+	requestLogger        *middleware.RequestLogger
+	logger               *zap.Logger
+	internalAuthGen      *internalauth.Generator
+	meteringHandler      *gatewayhandlers.MeteringHandler
+	obsProvider          *observability.Provider
+	httpClient           *http.Client
 
 	clusterGatewayProxies   map[string]*proxy.Router
 	clusterGatewayProxiesMu sync.RWMutex
@@ -131,22 +132,6 @@ func NewServer(
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create proxy router: %w", err)
-	}
-
-	var functionGatewayRouter *proxy.Router
-	if strings.TrimSpace(cfg.FunctionGatewayURL) != "" {
-		functionGatewayRouter, err = proxy.NewRouter(
-			cfg.FunctionGatewayURL,
-			logger,
-			cfg.ProxyTimeout.Duration,
-			proxy.WithHTTPClient(httpClient),
-		)
-		if err != nil {
-			return nil, fmt.Errorf("create function-gateway proxy router: %w", err)
-		}
-		logger.Info("Function gateway API proxy enabled",
-			zap.String("function_gateway_url", cfg.FunctionGatewayURL),
-		)
 	}
 
 	// Create scheduler proxy router (optional, for multi-cluster mode)
@@ -246,7 +231,6 @@ func NewServer(
 		identityRepo:          identityRepo,
 		apiKeyRepo:            apiKeyRepo,
 		clusterGatewayRouter:  clusterGatewayRouter,
-		functionGatewayRouter: functionGatewayRouter,
 		schedulerRouter:       schedulerRouter,
 		authMiddleware:        authMiddleware,
 		internalAuth:          internalAuth,
@@ -343,15 +327,22 @@ func (s *Server) setupRoutes() {
 			registry.POST("/credentials", s.authMiddleware.RequirePermission(authn.PermRegistryWrite), s.getRegistryCredentials)
 		}
 
-		functions := api.Group("/v1/functions")
-		functions.Use(s.requireTeamContextForTeamScopedAPI())
+		functionRoutes := api.Group("/v1/functions")
+		functionRoutes.Use(s.requireTeamContextForTeamScopedAPI())
 		{
-			functions.GET("", s.authMiddleware.RequirePermission(authn.PermFunctionRead), s.proxyFunctionGatewayAPI)
-			functions.POST("", s.authMiddleware.RequirePermission(authn.PermFunctionCreate), s.proxyFunctionGatewayAPI)
-			functions.GET("/:id", s.authMiddleware.RequirePermission(authn.PermFunctionRead), s.proxyFunctionGatewayAPI)
-			functions.GET("/:id/revisions", s.authMiddleware.RequirePermission(authn.PermFunctionRead), s.proxyFunctionGatewayAPI)
-			functions.POST("/:id/revisions", s.authMiddleware.RequirePermission(authn.PermFunctionWrite), s.proxyFunctionGatewayAPI)
-			functions.PUT("/:id/aliases/:alias", s.authMiddleware.RequirePermission(authn.PermFunctionWrite), s.proxyFunctionGatewayAPI)
+			functionHandler := functionapi.New(
+				functions.NewRepository(s.pool),
+				functionapi.Config{
+					DefaultClusterGatewayURL: s.cfg.DefaultClusterGatewayURL,
+					FunctionRegionID:         s.cfg.FunctionRegionID,
+					FunctionRootDomain:       s.cfg.FunctionRootDomain,
+					PublicRegionID:           s.cfg.PublicRegionID,
+					RegionID:                 s.cfg.RegionID,
+				},
+				functionapi.NewClusterGatewaySandboxLookup(s.cfg.DefaultClusterGatewayURL, s.internalAuthGen, s.outboundHTTPClient(), s.logger),
+				s.logger,
+			)
+			functionHandler.RegisterRoutes(functionRoutes, s.authMiddleware.RequirePermission)
 		}
 
 		credentialSources := api.Group("/v1/credential-sources")

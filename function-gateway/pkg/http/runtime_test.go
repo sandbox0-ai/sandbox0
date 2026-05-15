@@ -3,13 +3,17 @@ package http
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functions"
+	"go.uber.org/zap"
 )
 
 func TestMatchFunctionRouteChoosesLongestPrefix(t *testing.T) {
@@ -98,5 +102,37 @@ func TestDecodeFunctionContextResponseAcceptsRawContextBody(t *testing.T) {
 	}
 	if out.ID != "ctx-a" || out.Running || !out.Paused {
 		t.Fatalf("decoded context = %+v, want paused ctx-a", out)
+	}
+}
+
+func TestFunctionDomainAPIRouteUsesFunctionDispatch(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := &Server{
+		router: gin.New(),
+		cfg: &config.FunctionGatewayConfig{
+			FunctionRootDomain: "sandbox0.test",
+			FunctionRegionID:   "us-east-1",
+		},
+		functionRepo: functions.NewRepository(nil),
+		logger:       zap.NewNop(),
+	}
+	server.router.NoRoute(server.handleNoRoute)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/functions", nil)
+	req.Host = "demo.us-east-1.sandbox0.test"
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	var body struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response body: %v", err)
+	}
+	if rec.Code != http.StatusNotFound || body.Error.Message != "function not found" {
+		t.Fatalf("response = %d %q, want function dispatch not platform API 404", rec.Code, body.Error.Message)
 	}
 }

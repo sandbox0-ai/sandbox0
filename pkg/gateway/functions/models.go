@@ -8,15 +8,17 @@ import (
 const ProductionAlias = "production"
 
 type Function struct {
-	ID               string    `json:"id"`
-	TeamID           string    `json:"team_id"`
-	Name             string    `json:"name"`
-	Slug             string    `json:"slug"`
-	DomainLabel      string    `json:"domain_label"`
-	ActiveRevisionID *string   `json:"active_revision_id,omitempty"`
-	CreatedBy        string    `json:"created_by,omitempty"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	ID               string     `json:"id"`
+	TeamID           string     `json:"team_id"`
+	Name             string     `json:"name"`
+	Slug             string     `json:"slug"`
+	DomainLabel      string     `json:"domain_label"`
+	ActiveRevisionID *string    `json:"active_revision_id,omitempty"`
+	Enabled          bool       `json:"enabled"`
+	CreatedBy        string     `json:"created_by,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+	DeletedAt        *time.Time `json:"deleted_at,omitempty"`
 }
 
 type Revision struct {
@@ -50,4 +52,22 @@ type Alias struct {
 	RevisionNumber int       `json:"revision_number"`
 	UpdatedBy      string    `json:"updated_by,omitempty"`
 	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+type RuntimeState string
+
+const (
+	RuntimeStateDisabled RuntimeState = "disabled"
+	RuntimeStateIdle     RuntimeState = "idle"
+	RuntimeStateActive   RuntimeState = "active"
+)
+
+type RuntimeStatus struct {
+	FunctionID       string       `json:"function_id"`
+	RevisionID       string       `json:"revision_id"`
+	RevisionNumber   int          `json:"revision_number"`
+	State            RuntimeState `json:"state"`
+	RuntimeSandboxID *string      `json:"runtime_sandbox_id,omitempty"`
+	RuntimeContextID *string      `json:"runtime_context_id,omitempty"`
+	RuntimeUpdatedAt *time.Time   `json:"runtime_updated_at,omitempty"`
 }

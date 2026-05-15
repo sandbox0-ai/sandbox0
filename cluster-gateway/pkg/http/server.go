@@ -271,6 +271,7 @@ func NewServer(
 			return sandbox, nil
 		},
 		functionapi.NewHTTPStorageProxyVolumeSnapshotter(cfg.StorageProxyURL, internalAuthGen, snapshotHTTPClient, logger),
+		functionapi.NewHTTPRuntimeController(functionapi.StaticClusterGatewayURLResolver(fmt.Sprintf("http://127.0.0.1:%d", cfg.HTTPPort)), internalAuthGen, snapshotHTTPClient),
 		logger,
 	)
 

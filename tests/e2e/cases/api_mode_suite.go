@@ -192,7 +192,7 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 				It("publishes a sandbox service without capturing function /api routes", func() {
 					assertFunctionAPIRoutesReachUserService(env, session, sandboxID)
 				})
-				It("restores a runtime sandbox from revision volume snapshots", func() {
+				It("restores a runtime sandbox from revision volume snapshots and manages lifecycle APIs", func() {
 					assertFunctionRuntimeRestoreUsesVolumeSnapshot(env, session)
 				})
 			})
@@ -1511,7 +1511,7 @@ func assertCredentialSourceBindingLifecycle(env *framework.ScenarioEnv, session 
 				CredentialRef: refName,
 				Domains:       &domains,
 				Protocol:      ptrTo(apispec.EgressAuthProtocolHttps),
-				Rollout:       ptrTo(apispec.Enabled),
+				Rollout:       ptrTo(apispec.EgressAuthRolloutModeEnabled),
 			}},
 		},
 		CredentialBindings: &[]apispec.CredentialBinding{{
@@ -1882,6 +1882,111 @@ func assertFunctionRuntimeRestoreUsesVolumeSnapshot(env *framework.ScenarioEnv, 
 		}
 		if body != string(seedContent) {
 			return fmt.Errorf("function restore body = %q, want %q", body, string(seedContent))
+		}
+		return nil
+	}).WithTimeout(90 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
+
+	runtimeStatus, status, err := session.GetFunctionRuntime(env.TestCtx.Context, GinkgoT(), fn.Id)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(runtimeStatus.State).To(Equal(apispec.FunctionRuntimeStateActive))
+	Expect(runtimeStatus.RuntimeSandboxId).NotTo(BeNil())
+	firstRuntimeSandboxID := *runtimeStatus.RuntimeSandboxId
+	Expect(firstRuntimeSandboxID).NotTo(BeEmpty())
+
+	aliases, status, err := session.ListFunctionAliases(env.TestCtx.Context, GinkgoT(), fn.Id)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(aliases).NotTo(BeEmpty())
+	Expect(aliases[0].Alias).To(Equal("production"))
+	Expect(aliases[0].RevisionNumber).To(Equal(int32(1)))
+
+	alias, status, err := session.GetFunctionAlias(env.TestCtx.Context, GinkgoT(), fn.Id, "production")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(alias.RevisionNumber).To(Equal(int32(1)))
+
+	revision, status, err := session.GetFunctionRevision(env.TestCtx.Context, GinkgoT(), fn.Id, 1)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(revision.Id).To(Equal(alias.RevisionId))
+	Expect(revision.RestoreMounts).NotTo(BeNil())
+	Expect(*revision.RestoreMounts).NotTo(BeEmpty())
+
+	disabled := false
+	updated, status, err := session.UpdateFunction(env.TestCtx.Context, GinkgoT(), fn.Id, apispec.FunctionUpdateRequest{Enabled: &disabled})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(updated.Enabled).To(BeFalse())
+
+	Consistently(func() int {
+		status, _, err := requestFunctionHost(env.TestCtx.Context, functionGatewayURL, fn.Host, seedPath)
+		if err != nil {
+			return 0
+		}
+		return status
+	}).WithTimeout(5 * time.Second).WithPolling(1 * time.Second).Should(Equal(http.StatusServiceUnavailable))
+
+	runtimeStatus, status, err = session.GetFunctionRuntime(env.TestCtx.Context, GinkgoT(), fn.Id)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(runtimeStatus.State).To(Equal(apispec.FunctionRuntimeStateDisabled))
+
+	enabled := true
+	updated, status, err = session.UpdateFunction(env.TestCtx.Context, GinkgoT(), fn.Id, apispec.FunctionUpdateRequest{Enabled: &enabled})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(updated.Enabled).To(BeTrue())
+	expectFunctionBodyEventually(env, functionGatewayURL, fn.Host, seedPath, string(seedContent))
+
+	runtimeStatus, status, err = session.RestartFunctionRuntime(env.TestCtx.Context, GinkgoT(), fn.Id)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(runtimeStatus.State).To(Equal(apispec.FunctionRuntimeStateIdle))
+	Expect(runtimeStatus.RuntimeSandboxId).To(BeNil())
+	expectFunctionBodyEventually(env, functionGatewayURL, fn.Host, seedPath, string(seedContent))
+
+	runtimeStatus, status, err = session.GetFunctionRuntime(env.TestCtx.Context, GinkgoT(), fn.Id)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(runtimeStatus.State).To(Equal(apispec.FunctionRuntimeStateActive))
+	Expect(runtimeStatus.RuntimeSandboxId).NotTo(BeNil())
+	Expect(*runtimeStatus.RuntimeSandboxId).NotTo(Equal(firstRuntimeSandboxID))
+
+	runtimeStatus, status, err = session.RecycleFunctionRuntime(env.TestCtx.Context, GinkgoT(), fn.Id)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(runtimeStatus.State).To(Equal(apispec.FunctionRuntimeStateIdle))
+	Expect(runtimeStatus.RuntimeSandboxId).To(BeNil())
+	expectFunctionBodyEventually(env, functionGatewayURL, fn.Host, seedPath, string(seedContent))
+
+	status, err = session.DeleteFunction(env.TestCtx.Context, GinkgoT(), fn.Id)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+
+	Eventually(func() error {
+		status, body, err := requestFunctionHost(env.TestCtx.Context, functionGatewayURL, fn.Host, seedPath)
+		if err != nil {
+			return err
+		}
+		if status != http.StatusNotFound {
+			return fmt.Errorf("deleted function status %d body %q", status, body)
+		}
+		return nil
+	}).WithTimeout(30 * time.Second).WithPolling(1 * time.Second).Should(Succeed())
+}
+
+func expectFunctionBodyEventually(env *framework.ScenarioEnv, functionGatewayURL, host, path, expected string) {
+	Eventually(func() error {
+		status, body, err := requestFunctionHost(env.TestCtx.Context, functionGatewayURL, host, path)
+		if err != nil {
+			return err
+		}
+		if status != http.StatusOK {
+			return fmt.Errorf("function status %d body %q", status, body)
+		}
+		if body != expected {
+			return fmt.Errorf("function body = %q, want %q", body, expected)
 		}
 		return nil
 	}).WithTimeout(90 * time.Second).WithPolling(2 * time.Second).Should(Succeed())

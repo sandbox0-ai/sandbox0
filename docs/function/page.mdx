@@ -87,6 +87,30 @@ This creates:
 | Revision 1 | Snapshot of the sandbox service |
 | `production` alias | Points to revision 1 |
 
+## Lifecycle
+
+Functions can be disabled without deleting their identity, domain, aliases, or revisions:
+
+<Endpoint method="PUT">
+/api/v1/functions/{'{id}'}
+</Endpoint>
+
+```json
+{
+    "enabled": false
+}
+```
+
+Disabled functions return `503` from the function host and do not restore runtime sandboxes. Re-enable the function by setting `enabled` to `true`.
+
+Delete a function when its stable host should stop serving traffic permanently:
+
+<Endpoint method="DELETE">
+/api/v1/functions/{'{id}'}
+</Endpoint>
+
+Delete is a soft delete. The function disappears from list/get APIs, the host returns not found, and the slug/domain label stay reserved. Sandbox0 also schedules best-effort cleanup for restored runtime sandboxes and revision-owned volumes.
+
 ## Revisions
 
 Create a new revision from the same or another sandbox service:
@@ -117,8 +141,40 @@ Move an alias:
 }
 ```
 
+Read aliases:
+
+<Endpoint method="GET">
+/api/v1/functions/{'{id}'}/aliases
+</Endpoint>
+
+<Endpoint method="GET">
+/api/v1/functions/{'{id}'}/aliases/{'{alias}'}
+</Endpoint>
+
+Read a specific immutable revision by revision number:
+
+<Endpoint method="GET">
+/api/v1/functions/{'{id}'}/revisions/{'{revision_number}'}
+</Endpoint>
+
 ## Runtime Behavior
 
 Function traffic is handled by `function-gateway` on the fixed function host. The gateway resolves the `production` alias, enforces the revision's service route policy, and proxies to the service port.
 
 If the source sandbox still exists, the gateway resumes it when needed and routes to that sandbox. If the source sandbox has been deleted, the gateway restores a function runtime sandbox from the revision's template and revision-owned volumes, starts the service runtime command or warm process, stores the runtime sandbox/context on the revision, and reuses that runtime until sandbox0 scales it down.
+
+Inspect and recycle the active restored runtime:
+
+<Endpoint method="GET">
+/api/v1/functions/{'{id}'}/runtime
+</Endpoint>
+
+<Endpoint method="POST">
+/api/v1/functions/{'{id}'}/runtime/restart
+</Endpoint>
+
+<Endpoint method="POST">
+/api/v1/functions/{'{id}'}/runtime/recycle
+</Endpoint>
+
+`restart` and `recycle` both delete the current restored runtime sandbox when one exists and clear the runtime mapping. The next function request starts a fresh runtime from the active revision.

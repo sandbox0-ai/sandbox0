@@ -65,7 +65,6 @@ type publishError struct {
 	status  int
 	code    string
 	message string
-	details any
 }
 
 func (e publishError) Error() string {

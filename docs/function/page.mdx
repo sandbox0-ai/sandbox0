@@ -42,7 +42,7 @@ Example service:
             "port": 8080,
             "runtime": {
                 "type": "cmd",
-                "command": ["/bin/sh", "-lc", "python -m app.server"],
+                "command": ["python3", "-m", "app.server"],
                 "cwd": "/workspace"
             },
             "ingress": {

@@ -1741,7 +1741,7 @@ func assertFunctionAPIRoutesReachUserService(env *framework.ScenarioEnv, session
 
 	pathPrefix := "/"
 	cwd := "/tmp/s0-function-e2e"
-	command := []string{"/bin/sh", "-lc", fmt.Sprintf("python3 -m http.server %d --bind 0.0.0.0 -d /tmp/s0-function-e2e", servicePort)}
+	command := []string{"python3", "-m", "http.server", fmt.Sprint(servicePort), "--bind", "0.0.0.0", "-d", cwd}
 	_, _, updateStatus, err := session.UpdateSandboxServices(env.TestCtx.Context, GinkgoT(), sandboxID, []apispec.SandboxAppService{{
 		Id:   serviceID,
 		Port: servicePort,
@@ -1836,7 +1836,7 @@ func assertFunctionRuntimeRestoreUsesVolumeSnapshot(env *framework.ScenarioEnv, 
 
 	pathPrefix := "/"
 	cwd := mountPoint
-	command := []string{"/bin/sh", "-lc", fmt.Sprintf("python3 -m http.server %d --bind 0.0.0.0 -d %s", servicePort, shellQuote(mountPoint))}
+	command := []string{"python3", "-m", "http.server", fmt.Sprint(servicePort), "--bind", "0.0.0.0", "-d", mountPoint}
 	_, _, updateStatus, err := session.UpdateSandboxServices(env.TestCtx.Context, GinkgoT(), sourceSandboxID, []apispec.SandboxAppService{{
 		Id:   serviceID,
 		Port: servicePort,

@@ -643,5 +643,6 @@ func BuildEgressSpec(policy *SandboxNetworkPolicy) *NetworkEgressPolicy {
 		DeniedPorts:     policy.Egress.DeniedPorts,
 		TrafficRules:    policy.Egress.TrafficRules,
 		CredentialRules: policy.Egress.CredentialRules,
+		Proxy:           policy.Egress.Proxy,
 	}
 }

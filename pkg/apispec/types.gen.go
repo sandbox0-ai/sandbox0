@@ -68,6 +68,11 @@ const (
 	Enabled  EgressAuthRolloutMode = "enabled"
 )
 
+// Defines values for EgressProxyType.
+const (
+	EgressProxyTypeSocks5 EgressProxyType = "socks5"
+)
+
 // Defines values for EgressTLSMode.
 const (
 	Passthrough          EgressTLSMode = "passthrough"
@@ -856,6 +861,19 @@ type EgressCredentialRule struct {
 	TlsMode  *EgressTLSMode         `json:"tlsMode,omitempty"`
 }
 
+// EgressProxyPolicy Customer-managed transparent egress proxy for allowed TCP traffic.
+type EgressProxyPolicy struct {
+	// Address SOCKS5 proxy endpoint in host:port form.
+	Address string `json:"address"`
+
+	// CredentialRef Optional credential binding ref using a username_password projection.
+	CredentialRef *string         `json:"credentialRef,omitempty"`
+	Type          EgressProxyType `json:"type"`
+}
+
+// EgressProxyType defines model for EgressProxyType.
+type EgressProxyType string
+
 // EgressTLSMode defines model for EgressTLSMode.
 type EgressTLSMode string
 
@@ -1189,6 +1207,9 @@ type NetworkEgressPolicy struct {
 	// DeniedPorts Legacy port/protocol denylist used only when mode is `allow-all`. Use `trafficRules` instead.
 	// Deprecated:
 	DeniedPorts *[]PortSpec `json:"deniedPorts,omitempty"`
+
+	// Proxy Customer-managed transparent egress proxy for allowed TCP traffic.
+	Proxy *EgressProxyPolicy `json:"proxy,omitempty"`
 
 	// TrafficRules Ordered egress allow/deny rules. The first matching rule wins and
 	// unmatched traffic falls back to `mode`.

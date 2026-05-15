@@ -407,6 +407,26 @@ spec:
                           - port
                           type: object
                         type: array
+                      proxy:
+                        description: EgressProxyPolicy configures a transparent egress
+                          proxy for allowed TCP traffic.
+                        properties:
+                          address:
+                            description: Address is the proxy endpoint in host:port
+                              form.
+                            type: string
+                          credentialRef:
+                            description: CredentialRef optionally references a username_password
+                              credential binding.
+                            type: string
+                          type:
+                            description: Type selects the proxy protocol. The first
+                              version supports SOCKS5 only.
+                            type: string
+                        required:
+                        - address
+                        - type
+                        type: object
                       trafficRules:
                         items:
                           description: TrafficRule defines one ordered egress allow/deny

@@ -286,6 +286,24 @@ type NetworkEgressPolicy struct {
 	DeniedPorts     []PortSpec             `json:"deniedPorts,omitempty"`
 	TrafficRules    []TrafficRule          `json:"trafficRules,omitempty"`
 	CredentialRules []EgressCredentialRule `json:"credentialRules,omitempty"`
+	Proxy           *EgressProxyPolicy     `json:"proxy,omitempty"`
+}
+
+// EgressProxyType identifies the customer-managed egress proxy protocol.
+type EgressProxyType string
+
+const (
+	EgressProxyTypeSOCKS5 EgressProxyType = "socks5"
+)
+
+// EgressProxyPolicy configures a transparent egress proxy for allowed TCP traffic.
+type EgressProxyPolicy struct {
+	// Type selects the proxy protocol. The first version supports SOCKS5 only.
+	Type EgressProxyType `json:"type"`
+	// Address is the proxy endpoint in host:port form.
+	Address string `json:"address"`
+	// CredentialRef optionally references a username_password credential binding.
+	CredentialRef string `json:"credentialRef,omitempty"`
 }
 
 // TrafficRuleAction defines the enforcement action for one traffic rule.

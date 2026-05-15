@@ -1,0 +1,129 @@
+# Egress Proxy
+
+Sandbox egress proxy routes allowed outbound TCP traffic through a customer-managed SOCKS5 proxy.
+
+Use it when a sandbox needs a customer-controlled egress IP, customer-side audit, or access to services reachable from the proxy network.
+
+## Behavior
+
+- Only TCP traffic is supported.
+- Sandbox network policy is still enforced before the proxy connection is opened.
+- Platform deny rules still apply.
+- Proxy credentials are referenced through credential bindings and are not stored in pod annotations.
+- UDP, QUIC, HTTP proxy, and VPN tunnels are not part of this feature.
+
+<Callout variant="info">
+For domain-classified TCP traffic, netd sends the hostname to the SOCKS5 proxy so the proxy can resolve it from the customer network side. The sandbox process still needs to open a TCP connection first, so make sure the application can resolve or otherwise reach the initial destination address.
+</Callout>
+
+## Policy Shape
+
+Add `egress.proxy` to the sandbox network policy:
+
+```json
+{
+    "mode": "block-all",
+    "egress": {
+        "trafficRules": [
+            {
+                "name": "allow-private-api",
+                "action": "allow",
+                "domains": ["api.internal.example.com"],
+                "ports": [{"port": 443, "protocol": "tcp"}],
+                "appProtocols": ["tls"]
+            }
+        ],
+        "proxy": {
+            "type": "socks5",
+            "address": "proxy.example.com:1080",
+            "credentialRef": "corp-proxy"
+        }
+    },
+    "credentialBindings": [
+        {
+            "ref": "corp-proxy",
+            "sourceRef": "corp-proxy-source",
+            "projection": {
+                "type": "username_password",
+                "usernamePassword": {}
+            }
+        }
+    ]
+}
+```
+
+## Credentials
+
+Create a credential source that stores the SOCKS5 username and password, then reference it from `credentialBindings`.
+
+```json
+{
+    "name": "corp-proxy-source",
+    "resolverKind": "static_username_password",
+    "spec": {
+        "staticUsernamePassword": {
+            "username": "proxy-user",
+            "password": "proxy-password"
+        }
+    }
+}
+```
+
+`credentialRef` is optional. Leave it empty for a SOCKS5 proxy that does not require authentication.
+
+## Update Runtime Policy
+
+<Endpoint method="PUT">
+/api/v1/sandboxes/{'{id}'}/network
+</Endpoint>
+
+```bash
+curl -X PUT "$SANDBOX0_API_URL/api/v1/sandboxes/$SANDBOX_ID/network" \
+    -H "Authorization: Bearer $SANDBOX0_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "mode": "block-all",
+        "egress": {
+            "trafficRules": [
+                {
+                    "name": "allow-private-api",
+                    "action": "allow",
+                    "domains": ["api.internal.example.com"],
+                    "ports": [{"port": 443, "protocol": "tcp"}],
+                    "appProtocols": ["tls"]
+                }
+            ],
+            "proxy": {
+                "type": "socks5",
+                "address": "proxy.example.com:1080",
+                "credentialRef": "corp-proxy"
+            }
+        },
+        "credentialBindings": [
+            {
+                "ref": "corp-proxy",
+                "sourceRef": "corp-proxy-source",
+                "projection": {
+                    "type": "username_password",
+                    "usernamePassword": {}
+                }
+            }
+        ]
+    }'
+```
+
+## Limits
+
+Egress proxy is a TCP routing feature. It does not proxy DNS datagrams, UDP application protocols, or QUIC. If a workload uses HTTP/3 or QUIC, configure the client to use TCP/TLS instead.
+
+<CardGroup cols={3}>
+  <Card title="Network" href="/docs/sandbox/network">
+    Configure allow and deny policy.
+  </Card>
+  <Card title="Credential Sources" href="/docs/credential/sources">
+    Store SOCKS5 credentials.
+  </Card>
+  <Card title="Egress Auth" href="/docs/credential/egress-auth">
+    Inject destination-scoped outbound credentials.
+  </Card>
+</CardGroup>

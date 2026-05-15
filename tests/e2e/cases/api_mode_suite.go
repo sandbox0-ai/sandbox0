@@ -215,6 +215,10 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					assertSSHAppProtocolTrafficRules(env, session, sandboxID, sshFixtureState)
 				})
 
+				It("routes allowed TCP egress through a sandbox egress proxy", func() {
+					assertSandboxEgressProxy(env, session, sandboxID)
+				})
+
 				It("proxies SSH egress auth without exposing upstream private keys to the sandbox", func() {
 					assertSSHTransparentEgressAuthProxy(env, session, sandboxID, sshFixtureState)
 				})

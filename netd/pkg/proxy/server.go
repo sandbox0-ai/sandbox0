@@ -528,7 +528,28 @@ func (s *Server) handleTCPDecision(req *adapterRequest, decision trafficDecision
 }
 
 func (s *Server) relayTCPConn(client net.Conn, prefix io.Reader, destIP net.IP, destPort int, compiled *policy.CompiledPolicy, audit *flowAudit) error {
-	return s.relayTCPConnWithUpstream(client, prefix, nil, nil, destIP, destPort, compiled, audit)
+	return s.relayTCPConnWithUpstream(client, prefix, nil, nil, destIP, destPort, compiled, audit, nil)
+}
+
+func (s *Server) relayTCPRequest(req *adapterRequest) error {
+	if req == nil {
+		return fmt.Errorf("adapter request is nil")
+	}
+	return s.relayTCPRequestWithPrefix(req, req.Prefix)
+}
+
+func (s *Server) relayTCPRequestWithPrefix(req *adapterRequest, prefix io.Reader) error {
+	if req == nil {
+		return fmt.Errorf("adapter request is nil")
+	}
+	return s.relayTCPRequestWithUpstream(req, prefix, req.UpstreamConn, req.UpstreamPrefix)
+}
+
+func (s *Server) relayTCPRequestWithUpstream(req *adapterRequest, prefix io.Reader, upstream net.Conn, upstreamPrefix io.Reader) error {
+	if req == nil {
+		return fmt.Errorf("adapter request is nil")
+	}
+	return s.relayTCPConnWithUpstream(req.Conn, prefix, upstream, upstreamPrefix, req.DestIP, req.DestPort, req.Compiled, req.Audit, req)
 }
 
 func (s *Server) relayTCPConnWithUpstream(
@@ -540,13 +561,18 @@ func (s *Server) relayTCPConnWithUpstream(
 	destPort int,
 	compiled *policy.CompiledPolicy,
 	audit *flowAudit,
+	req *adapterRequest,
 ) error {
 	if destIP == nil || destPort <= 0 {
 		return fmt.Errorf("missing destination")
 	}
 	var err error
 	if upstream == nil {
-		upstream, err = s.dialTCPUpstream(destIP, destPort)
+		if req != nil {
+			upstream, err = s.dialTCPUpstreamForRequest(req)
+		} else {
+			upstream, err = s.dialTCPUpstream(destIP, destPort)
+		}
 		if err != nil {
 			return err
 		}
@@ -579,7 +605,7 @@ func (s *Server) probeServerFirstSSH(req *adapterRequest, classification traffic
 		return classification
 	}
 
-	upstream, upstreamPrefix, err := s.probeTCPUpstream(req.DestIP, req.DestPort, ctx.headerLimit(), ctx.firstByteTimeout(), ctx.classificationTimeout())
+	upstream, upstreamPrefix, err := s.probeTCPUpstreamForRequest(req, ctx.headerLimit(), ctx.firstByteTimeout(), ctx.classificationTimeout())
 	if err != nil {
 		return classification
 	}
@@ -603,6 +629,19 @@ func (s *Server) probeTCPUpstream(destIP net.IP, destPort int, headerLimit int, 
 		return nil, nil, err
 	}
 
+	return probeTCPPrefix(upstream, headerLimit, firstByteTimeout, readTimeout)
+}
+
+func (s *Server) probeTCPUpstreamForRequest(req *adapterRequest, headerLimit int, firstByteTimeout time.Duration, readTimeout time.Duration) (net.Conn, []byte, error) {
+	upstream, err := s.dialTCPUpstreamForRequest(req)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return probeTCPPrefix(upstream, headerLimit, firstByteTimeout, readTimeout)
+}
+
+func probeTCPPrefix(upstream net.Conn, headerLimit int, firstByteTimeout time.Duration, readTimeout time.Duration) (net.Conn, []byte, error) {
 	prefix, probeErr := readTCPPrefix(upstream, headerLimit, firstByteTimeout, readTimeout, parseSSHBannerClassification)
 	if probeErr != nil {
 		_ = upstream.Close()
@@ -618,11 +657,7 @@ func (s *Server) dialTCPUpstream(destIP net.IP, destPort int) (net.Conn, error) 
 	if destIP == nil || destPort <= 0 {
 		return nil, fmt.Errorf("missing destination")
 	}
-	timeout := 30 * time.Second
-	if s.cfg != nil && s.cfg.ProxyUpstreamTimeout.Duration > 0 {
-		timeout = s.cfg.ProxyUpstreamTimeout.Duration
-	}
-	return net.DialTimeout("tcp", net.JoinHostPort(destIP.String(), fmt.Sprintf("%d", destPort)), timeout)
+	return net.DialTimeout("tcp", net.JoinHostPort(destIP.String(), fmt.Sprintf("%d", destPort)), s.upstreamTimeout())
 }
 
 func readTCPPrefix(
@@ -948,7 +983,7 @@ func (s *Server) runPassThrough(adapter proxyAdapter, req *adapterRequest) error
 			return fmt.Errorf("tcp pass-through requires connection")
 		}
 		s.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
-		return s.relayTCPConnWithUpstream(req.Conn, req.Prefix, req.UpstreamConn, req.UpstreamPrefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+		return s.relayTCPRequestWithUpstream(req, req.Prefix, req.UpstreamConn, req.UpstreamPrefix)
 	case "udp":
 		if req.UDPConn == nil || req.UDPSource == nil {
 			return fmt.Errorf("udp pass-through requires source datagram")

@@ -44,6 +44,10 @@
           "title": "Network"
         },
         {
+          "slug": "proxy",
+          "title": "Egress Proxy"
+        },
+        {
           "slug": "services",
           "title": "Sandbox Services"
         },

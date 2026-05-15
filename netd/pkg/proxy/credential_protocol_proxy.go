@@ -214,7 +214,7 @@ func (s *Server) dialUpstreamTCP(req *adapterRequest) (*countingConn, error) {
 	if s == nil || req == nil || req.DestIP == nil || req.DestPort <= 0 {
 		return nil, fmt.Errorf("upstream tcp request is incomplete")
 	}
-	upstream, err := net.DialTimeout("tcp", net.JoinHostPort(req.DestIP.String(), fmt.Sprintf("%d", req.DestPort)), s.cfg.ProxyUpstreamTimeout.Duration)
+	upstream, err := s.dialTCPUpstreamForRequest(req)
 	if err != nil {
 		return nil, err
 	}

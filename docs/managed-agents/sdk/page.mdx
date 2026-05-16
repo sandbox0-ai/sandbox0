@@ -55,8 +55,8 @@ await client.beta.vaults.credentials.create(llmVault.id, {
     display_name: "Anthropic-compatible API key",
     auth: {
         type: "static_bearer",
-        token: process.env.MODEL_API_KEY,
-    },
+        token: process.env.MODEL_API_KEY!,
+    } as any,
 });
 
 const session = await client.beta.sessions.create({
@@ -95,6 +95,10 @@ Do not set the SDK client's `apiKey` to the model provider token. That key authe
 
 <Callout variant="warning">
 Set both `apiKey` and `authToken` to the Sandbox0 API key. The Anthropic SDK can also read `ANTHROPIC_AUTH_TOKEN` from the process environment; explicitly setting `authToken` prevents that model-provider token from being sent as the Sandbox0 client bearer token.
+</Callout>
+
+<Callout variant="info">
+The `as any` cast on unbound `static_bearer` credentials is intentional for current Anthropic TypeScript SDK types. Sandbox0 LLM credentials must omit `mcp_server_url`.
 </Callout>
 
 ## Direct HTTP Calls

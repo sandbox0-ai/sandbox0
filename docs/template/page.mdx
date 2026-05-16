@@ -211,7 +211,7 @@ s0 template create --id my-codex-env --spec-file template.yaml`
             Image: "python:3.12-slim",
             Resources: apispec.ResourceQuota{
                 CPU:    apispec.NewOptString("1"),
-                Memory: apispec.NewOptString("2Gi"),
+                Memory: apispec.NewOptString("4Gi"),
             },
         }),
         Pool: apispec.NewOptPoolStrategy(apispec.PoolStrategy{
@@ -380,7 +380,7 @@ Updating a template does not affect already-running Sandboxes. New Sandboxes cla
             Image: "python:3.12-slim",
             Resources: apispec.ResourceQuota{
                 CPU:    apispec.NewOptString("2"),
-                Memory: apispec.NewOptString("4Gi"),
+                Memory: apispec.NewOptString("8Gi"),
             },
         }),
         Pool: apispec.NewOptPoolStrategy(apispec.PoolStrategy{
@@ -406,7 +406,7 @@ tpl = client.update_template(
         spec=SandboxTemplateSpec.from_dict({
             "mainContainer": {
                 "image": "python:3.12-slim",
-                "resources": {"cpu": "2", "memory": "4Gi"},
+                "resources": {"cpu": "2", "memory": "8Gi"},
             },
             "pool": {"minIdle": 3, "maxIdle": 10},
         }),
@@ -421,7 +421,7 @@ print(f"Template updated: {tpl.template_id}")`
     spec: {
         mainContainer: {
             image: "python:3.12-slim",
-            resources: { cpu: "2", memory: "4Gi" },
+            resources: { cpu: "2", memory: "8Gi" },
         },
         pool: { minIdle: 3, maxIdle: 10 },
     },

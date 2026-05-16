@@ -68,7 +68,7 @@ The response includes `publishable`, `publish_blockers`, and `exposure_domain`.
 if err != nil {
     log.Fatal(err)
 }
-fmt.Printf("exposure domain: %s\\n", resp.ExposureDomain)
+fmt.Printf("services: %d\\n", len(resp.Services))
 for _, service := range resp.Services {
     fmt.Printf("%s -> port %d\\n", service.ID, service.Port)
 }`
@@ -77,7 +77,7 @@ for _, service := range resp.Services {
       label: "Python",
       language: "python",
       code: `resp = sandbox.get_services()
-print(f"exposure domain: {resp.exposure_domain}")
+print(f"services: {len(resp.services)}")
 for service in resp.services:
     print(f"{service.id} -> port {service.port}")`
     },
@@ -85,7 +85,7 @@ for service in resp.services:
       label: "TypeScript",
       language: "typescript",
       code: `const resp = await sandbox.getServices();
-console.log('exposure domain:', resp.exposureDomain);
+console.log('services:', resp.services?.length ?? 0);
 for (const service of resp.services ?? []) {
     console.log(\`\${service.id} -> port \${service.port}\`);
 }`
@@ -246,7 +246,7 @@ services:
           resume: true
 EOF
 
-s0 sandbox service update -s sb_abc123 -f services.yaml`
+s0 sandbox service update --services-file services.yaml -s sb_abc123`
     }
   ]}
 />

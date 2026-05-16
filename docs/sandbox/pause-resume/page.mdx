@@ -35,7 +35,7 @@ fmt.Println("Pause requested")`
     {
       label: "Python",
       language: "python",
-      code: `client.sandboxes.pause(sandbox.id)
+      code: `client.pause_sandbox(sandbox.id)
 print("Pause requested")`
     },
     {
@@ -74,7 +74,7 @@ fmt.Println("Resume requested")`
     {
       label: "Python",
       language: "python",
-      code: `client.sandboxes.resume(sandbox.id)
+      code: `client.resume_sandbox(sandbox.id)
 print("Resume requested")`
     },
     {
@@ -110,7 +110,7 @@ fmt.Printf("power_state=%+v\n", sb.PowerState)`
     {
       label: "Python",
       language: "python",
-      code: `sb = client.sandboxes.get(sandbox.id)
+      code: `sb = client.get_sandbox(sandbox.id)
 print("paused=", sb.paused)
 print("power_state=", sb.power_state)`
     },

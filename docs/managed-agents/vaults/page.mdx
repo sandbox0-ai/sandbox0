@@ -22,8 +22,8 @@ await client.beta.vaults.credentials.create(llmVault.id, {
     display_name: "Anthropic API key",
     auth: {
         type: "static_bearer",
-        token: process.env.MODEL_API_KEY,
-    },
+        token: process.env.MODEL_API_KEY!,
+    } as any,
 });
 ```
 
@@ -34,6 +34,10 @@ await client.beta.vaults.credentials.create(llmVault.id, {
 | `sandbox0.managed_agents.llm_base_url` | No | Model provider base URL |
 
 The LLM credential must be an unbound `static_bearer` credential. Do not set `mcp_server_url` on LLM credentials.
+
+<Callout variant="info">
+The `as any` cast on unbound `static_bearer` credentials is intentional for current Anthropic TypeScript SDK types. Sandbox0 LLM and generic HTTP credential vaults omit `mcp_server_url`.
+</Callout>
 
 ## Generic Credential Vaults
 
@@ -58,8 +62,8 @@ await client.beta.vaults.credentials.create(apiVault.id, {
     display_name: "Example API token",
     auth: {
         type: "static_bearer",
-        token: process.env.EXAMPLE_API_TOKEN,
-    },
+        token: process.env.EXAMPLE_API_TOKEN!,
+    } as any,
 });
 ```
 
@@ -74,7 +78,7 @@ await client.beta.vaults.credentials.create(vault.id, {
     display_name: "MCP token",
     auth: {
         type: "static_bearer",
-        token: process.env.MCP_TOKEN,
+        token: process.env.MCP_TOKEN!,
         mcp_server_url: "https://mcp.example.com/sse",
     },
 });

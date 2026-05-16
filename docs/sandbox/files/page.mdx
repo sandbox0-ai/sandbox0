@@ -120,7 +120,7 @@ console.log('Content:', Buffer.from(content).toString('utf-8'));`
       code: `s0 sandbox files cat /workspace/hello.txt -s sb_abc123
 
 # Output:
-# Hello, World!`
+# Hello from Sandbox0!`
     }
   ]}
 />
@@ -502,8 +502,7 @@ try:
 except KeyboardInterrupt:
     pass
 finally:
-    stream.unsubscribe()
-    watch_done.set()`
+    stream.unsubscribe()`
     },
     {
       label: "TypeScript",

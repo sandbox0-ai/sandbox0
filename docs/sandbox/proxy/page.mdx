@@ -16,101 +16,102 @@ Use it when a sandbox needs a customer-controlled egress IP, customer-side audit
 For domain-classified TCP traffic, netd sends the hostname to the SOCKS5 proxy so the proxy can resolve it from the customer network side. The sandbox process still needs to open a TCP connection first, so make sure the application can resolve or otherwise reach the initial destination address.
 </Callout>
 
-## Policy Shape
-
-Add `egress.proxy` to the sandbox network policy:
-
-```json
-{
-    "mode": "block-all",
-    "egress": {
-        "trafficRules": [
-            {
-                "name": "allow-private-api",
-                "action": "allow",
-                "domains": ["api.internal.example.com"],
-                "ports": [{"port": 443, "protocol": "tcp"}],
-                "appProtocols": ["tls"]
-            }
-        ],
-        "proxy": {
-            "type": "socks5",
-            "address": "proxy.example.com:1080",
-            "credentialRef": "corp-proxy"
-        }
-    },
-    "credentialBindings": [
-        {
-            "ref": "corp-proxy",
-            "sourceRef": "corp-proxy-source",
-            "projection": {
-                "type": "username_password",
-                "usernamePassword": {}
-            }
-        }
-    ]
-}
-```
-
-## Credentials
-
-Create a credential source that stores the SOCKS5 username and password, then reference it from `credentialBindings`.
-
-```json
-{
-    "name": "corp-proxy-source",
-    "resolverKind": "static_username_password",
-    "spec": {
-        "staticUsernamePassword": {
-            "username": "proxy-user",
-            "password": "proxy-password"
-        }
-    }
-}
-```
-
-`credentialRef` is optional. Leave it empty for a SOCKS5 proxy that does not require authentication.
-
-## Update Runtime Policy
+## Configure Proxy
 
 <Endpoint method="PUT">
 /api/v1/sandboxes/{'{id}'}/network
 </Endpoint>
 
-```bash
-curl -X PUT "$SANDBOX0_API_URL/api/v1/sandboxes/$SANDBOX_ID/network" \
-    -H "Authorization: Bearer $SANDBOX0_API_KEY" \
-    -H "Content-Type: application/json" \
-    -d '{
-        "mode": "block-all",
-        "egress": {
-            "trafficRules": [
-                {
-                    "name": "allow-private-api",
-                    "action": "allow",
-                    "domains": ["api.internal.example.com"],
-                    "ports": [{"port": 443, "protocol": "tcp"}],
-                    "appProtocols": ["tls"]
-                }
-            ],
-            "proxy": {
-                "type": "socks5",
-                "address": "proxy.example.com:1080",
-                "credentialRef": "corp-proxy"
-            }
-        },
-        "credentialBindings": [
+Create a credential source for proxies that require username/password auth, then attach the proxy to the sandbox network policy.
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `source, err := client.CreateCredentialSource(ctx, apispec.CredentialSourceWriteRequest{
+    Name: "corp-proxy-source",
+    ResolverKind: apispec.CredentialSourceResolverKindStaticUsernamePassword,
+    Spec: apispec.CredentialSourceWriteSpec{
+        StaticUsernamePassword: apispec.NewOptStaticUsernamePasswordSourceSpec(
+            apispec.StaticUsernamePasswordSourceSpec{
+                Username: os.Getenv("SOCKS5_USERNAME"),
+                Password: os.Getenv("SOCKS5_PASSWORD"),
+            },
+        ),
+    },
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+credentialRef := "corp-proxy"
+_, err = sandbox.UpdateNetworkPolicy(ctx, apispec.SandboxNetworkPolicy{
+    Mode: apispec.SandboxNetworkPolicyModeBlockAll,
+    Egress: apispec.NewOptNetworkEgressPolicy(apispec.NetworkEgressPolicy{
+        TrafficRules: []apispec.TrafficRule{
             {
-                "ref": "corp-proxy",
-                "sourceRef": "corp-proxy-source",
-                "projection": {
-                    "type": "username_password",
-                    "usernamePassword": {}
-                }
-            }
-        ]
-    }'
-```
+                Name: apispec.NewOptString("allow-private-api"),
+                Action: apispec.TrafficRuleActionAllow,
+                Domains: []string{"api.internal.example.com"},
+                Ports: []apispec.PortSpec{
+                    {
+                        Port: 443,
+                        Protocol: apispec.NewOptString("tcp"),
+                    },
+                },
+                AppProtocols: []apispec.TrafficRuleAppProtocol{
+                    apispec.TrafficRuleAppProtocolTLS,
+                },
+            },
+        },
+        Proxy: apispec.NewOptEgressProxyPolicy(apispec.EgressProxyPolicy{
+            Type: apispec.EgressProxyTypeSocks5,
+            Address: "proxy.example.com:1080",
+            CredentialRef: apispec.NewOptString(credentialRef),
+        }),
+    }),
+    CredentialBindings: []apispec.CredentialBinding{
+        {
+            Ref: credentialRef,
+            SourceRef: source.Name,
+            Projection: apispec.ProjectionSpec{
+                Type: apispec.CredentialProjectionTypeUsernamePassword,
+                UsernamePassword: &apispec.UsernamePasswordProjection{},
+            },
+        },
+    },
+})
+if err != nil {
+    log.Fatal(err)
+}`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `cat <<'EOF' > corp-proxy-source.yaml
+name: corp-proxy-source
+resolverKind: static_username_password
+spec:
+    staticUsernamePassword:
+        username: proxy-user
+        password: proxy-password
+EOF
+
+s0 credential create -f corp-proxy-source.yaml
+
+s0 sandbox network update -s "$SANDBOX_ID" \\
+    --mode block-all \\
+    --allow-domain api.internal.example.com \\
+    --allow-port 443/tcp \\
+    --proxy socks5://proxy.example.com:1080 \\
+    --proxy-credential-ref corp-proxy \\
+    --proxy-credential-source corp-proxy-source`
+    }
+  ]}
+/>
+
+`credentialRef` is optional. Leave it empty for a SOCKS5 proxy that does not require authentication. In the CLI, omit `--proxy-credential-ref` and `--proxy-credential-source` for unauthenticated proxies.
 
 ## Limits
 

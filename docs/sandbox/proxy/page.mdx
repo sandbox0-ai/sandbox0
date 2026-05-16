@@ -87,11 +87,85 @@ if err != nil {
 }`
     },
     {
-      label: "JavaScript",
+      label: "Python",
+      language: "python",
+      code: `import os
+
+from sandbox0 import Client
+from sandbox0.apispec.models.credential_binding import CredentialBinding
+from sandbox0.apispec.models.credential_projection_type import CredentialProjectionType
+from sandbox0.apispec.models.credential_source_resolver_kind import CredentialSourceResolverKind
+from sandbox0.apispec.models.credential_source_write_request import CredentialSourceWriteRequest
+from sandbox0.apispec.models.credential_source_write_spec import CredentialSourceWriteSpec
+from sandbox0.apispec.models.egress_proxy_policy import EgressProxyPolicy
+from sandbox0.apispec.models.egress_proxy_type import EgressProxyType
+from sandbox0.apispec.models.network_egress_policy import NetworkEgressPolicy
+from sandbox0.apispec.models.port_spec import PortSpec
+from sandbox0.apispec.models.projection_spec import ProjectionSpec
+from sandbox0.apispec.models.sandbox_network_policy import SandboxNetworkPolicy
+from sandbox0.apispec.models.sandbox_network_policy_mode import SandboxNetworkPolicyMode
+from sandbox0.apispec.models.static_username_password_source_spec import StaticUsernamePasswordSourceSpec
+from sandbox0.apispec.models.traffic_rule import TrafficRule
+from sandbox0.apispec.models.traffic_rule_action import TrafficRuleAction
+from sandbox0.apispec.models.traffic_rule_app_protocol import TrafficRuleAppProtocol
+from sandbox0.apispec.models.username_password_projection import UsernamePasswordProjection
+
+client = Client(token=os.environ["SANDBOX0_TOKEN"])
+
+source = client.create_credential_source(
+    CredentialSourceWriteRequest(
+        name="corp-proxy-source",
+        resolver_kind=CredentialSourceResolverKind.STATIC_USERNAME_PASSWORD,
+        spec=CredentialSourceWriteSpec(
+            static_username_password=StaticUsernamePasswordSourceSpec(
+                username=os.environ["SOCKS5_USERNAME"],
+                password=os.environ["SOCKS5_PASSWORD"],
+            ),
+        ),
+    )
+)
+
+sandbox = client.sandbox(os.environ["SANDBOX_ID"])
+credential_ref = "corp-proxy"
+
+sandbox.update_network_policy(
+    SandboxNetworkPolicy(
+        mode=SandboxNetworkPolicyMode.BLOCK_ALL,
+        egress=NetworkEgressPolicy(
+            traffic_rules=[
+                TrafficRule(
+                    name="allow-private-api",
+                    action=TrafficRuleAction.ALLOW,
+                    domains=["api.internal.example.com"],
+                    ports=[PortSpec(port=443, protocol="tcp")],
+                    app_protocols=[TrafficRuleAppProtocol.TLS],
+                )
+            ],
+            proxy=EgressProxyPolicy(
+                type_=EgressProxyType.SOCKS5,
+                address="proxy.example.com:1080",
+                credential_ref=credential_ref,
+            ),
+        ),
+        credential_bindings=[
+            CredentialBinding(
+                ref=credential_ref,
+                source_ref=source.name,
+                projection=ProjectionSpec(
+                    type_=CredentialProjectionType.USERNAME_PASSWORD,
+                    username_password=UsernamePasswordProjection(),
+                ),
+            )
+        ],
+    )
+)`
+    },
+    {
+      label: "TypeScript",
       language: "typescript",
       code: `import { Client, apispec } from "sandbox0";
 
-const client = new Client({ token: process.env.S0_API_KEY! });
+const client = new Client({ token: process.env.SANDBOX0_TOKEN! });
 
 const source = await client.credentialSources.create({
     name: "corp-proxy-source",
@@ -138,78 +212,6 @@ await sandbox.updateNetworkPolicy({
         },
     ],
 });`
-    },
-    {
-      label: "Python",
-      language: "python",
-      code: `import os
-
-from sandbox0 import Client
-from sandbox0.apispec.models.credential_binding import CredentialBinding
-from sandbox0.apispec.models.credential_projection_type import CredentialProjectionType
-from sandbox0.apispec.models.credential_source_resolver_kind import CredentialSourceResolverKind
-from sandbox0.apispec.models.credential_source_write_request import CredentialSourceWriteRequest
-from sandbox0.apispec.models.credential_source_write_spec import CredentialSourceWriteSpec
-from sandbox0.apispec.models.egress_proxy_policy import EgressProxyPolicy
-from sandbox0.apispec.models.egress_proxy_type import EgressProxyType
-from sandbox0.apispec.models.network_egress_policy import NetworkEgressPolicy
-from sandbox0.apispec.models.projection_spec import ProjectionSpec
-from sandbox0.apispec.models.sandbox_network_policy import SandboxNetworkPolicy
-from sandbox0.apispec.models.sandbox_network_policy_mode import SandboxNetworkPolicyMode
-from sandbox0.apispec.models.static_username_password_source_spec import StaticUsernamePasswordSourceSpec
-from sandbox0.apispec.models.traffic_rule import TrafficRule
-from sandbox0.apispec.models.traffic_rule_action import TrafficRuleAction
-from sandbox0.apispec.models.traffic_rule_app_protocol import TrafficRuleAppProtocol
-from sandbox0.apispec.models.username_password_projection import UsernamePasswordProjection
-
-client = Client(token=os.environ["S0_API_KEY"])
-
-source = client.create_credential_source(
-    CredentialSourceWriteRequest(
-        name="corp-proxy-source",
-        resolver_kind=CredentialSourceResolverKind.STATIC_USERNAME_PASSWORD,
-        spec=CredentialSourceWriteSpec(
-            static_username_password=StaticUsernamePasswordSourceSpec(
-                username=os.environ["SOCKS5_USERNAME"],
-                password=os.environ["SOCKS5_PASSWORD"],
-            ),
-        ),
-    )
-)
-
-sandbox = client.sandbox(os.environ["SANDBOX_ID"])
-credential_ref = "corp-proxy"
-
-sandbox.update_network_policy(
-    SandboxNetworkPolicy(
-        mode=SandboxNetworkPolicyMode.BLOCK_ALL,
-        egress=NetworkEgressPolicy(
-            traffic_rules=[
-                TrafficRule(
-                    name="allow-private-api",
-                    action=TrafficRuleAction.ALLOW,
-                    domains=["api.internal.example.com"],
-                    app_protocols=[TrafficRuleAppProtocol.TLS],
-                )
-            ],
-            proxy=EgressProxyPolicy(
-                type_=EgressProxyType.SOCKS5,
-                address="proxy.example.com:1080",
-                credential_ref=credential_ref,
-            ),
-        ),
-        credential_bindings=[
-            CredentialBinding(
-                ref=credential_ref,
-                source_ref=source.name,
-                projection=ProjectionSpec(
-                    type_=CredentialProjectionType.USERNAME_PASSWORD,
-                    username_password=UsernamePasswordProjection(),
-                ),
-            )
-        ],
-    )
-)`
     },
     {
       label: "CLI",

@@ -499,7 +499,7 @@ Publish custom events from within the sandbox using the webhook publish API:
       label: "Go",
       language: "go",
       code: `// Publish a custom agent event from within the sandbox
-_, err = sandbox.Run(ctx, "bash", \`curl -X POST http://localhost:49983/webhook/publish \\
+_, err = sandbox.Run(ctx, "bash", \`curl -X POST http://localhost:49983/api/v1/webhook/publish \\
   -H "Content-Type: application/json" \\
   -d '{"payload": {"message": "Task completed", "progress": 100}}'\`)
 if err != nil {
@@ -513,7 +513,7 @@ log.Println("Agent event published")`
       code: `# Publish a custom agent event from within the sandbox
 sandbox.run(
     "bash",
-    """curl -X POST http://localhost:49983/webhook/publish \\
+    """curl -X POST http://localhost:49983/api/v1/webhook/publish \\
     -H "Content-Type: application/json" \\
     -d '{"payload": {"message": "Task completed", "progress": 100}}'"""
 )
@@ -523,7 +523,7 @@ print("Agent event published")`
       label: "TypeScript",
       language: "typescript",
       code: `// Publish a custom agent event from within the sandbox
-await sandbox.run('bash', \`curl -X POST http://localhost:49983/webhook/publish \\
+await sandbox.run('bash', \`curl -X POST http://localhost:49983/api/v1/webhook/publish \\
     -H "Content-Type: application/json" \\
     -d '{"payload": {"message": "Task completed", "progress": 100}}'\`);
 console.log('Agent event published');`
@@ -533,7 +533,7 @@ console.log('Agent event published');`
       language: "bash",
       code: `# Publish a custom agent event from within the sandbox
 # Using curl inside the sandbox
-s0 sandbox exec sb_abc123 -- curl -X POST http://localhost:49983/webhook/publish \\
+s0 sandbox exec sb_abc123 -- curl -X POST http://localhost:49983/api/v1/webhook/publish \\
     -H "Content-Type: application/json" \\
     -d '{"payload": {"message": "Task completed", "progress": 100}}'`
     }

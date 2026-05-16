@@ -84,32 +84,14 @@ This keeps each agent worker simple while allowing safe parallel execution.
 - Skipping checkpoint persistence until task end.
 - Over-permissive auth/network settings in early prototypes that leak into production.
 
-## What to Learn Next
+## Next Steps
 
-If this mental model is clear, move to implementation details:
+<NextSteps>
+  <NextStep title="Overview" href="/docs/sandbox">
+    Learn the sandbox lifecycle and the runtime APIs available to each isolated environment.
+  </NextStep>
 
-<CardGrid>
-  <LinkCard
-    title="Sandbox"
-    href="/docs/sandbox"
-    cta="View Docs"
-  >
-    Lifecycle, contexts, files, network, gateway policy, and runtime operations
-  </LinkCard>
-
-  <LinkCard
-    title="Template"
-    href="/docs/template"
-    cta="Learn More"
-  >
-    Define stable execution environments and warm pools
-  </LinkCard>
-
-  <LinkCard
-    title="Volume"
-    href="/docs/volume"
-    cta="Learn More"
-  >
-    Persist agent data across sandbox lifecycles
-  </LinkCard>
-</CardGrid>
+  <NextStep title="Pause And Resume" href="/docs/sandbox/pause-resume">
+    Control sandbox power state and resume behavior before wiring long-lived workflows.
+  </NextStep>
+</NextSteps>

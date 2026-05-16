@@ -74,22 +74,14 @@ The Managed Agents gateway does not call the model provider directly. It stores 
 - For private deployments, prefer an internal LLMProxy service URL when runtime pods and LLMProxy run in the same cluster.
 - LLMProxy is a translation layer, not a session store. Managed Agents session truth and event history remain in Sandbox0.
 
-## Next
+## Next Steps
 
-<CardGrid>
-  <LinkCard
-    title="Agent Engines"
-    href="/docs/managed-agents/agent-engines"
-    cta="Choose"
-  >
-    Decide whether the session should use Claude, Codex, or OpenAI Agents
-  </LinkCard>
+<NextSteps>
+  <NextStep title="Compatibility" href="/docs/managed-agents/compatibility">
+    Review supported behavior and current compatibility boundaries.
+  </NextStep>
 
-  <LinkCard
-    title="Vaults"
-    href="/docs/managed-agents/vaults"
-    cta="Secure"
-  >
-    Store the provider token and engine metadata in an LLM vault
-  </LinkCard>
-</CardGrid>
+  <NextStep title="Overview" href="/docs/credential">
+    Learn the credential model used by sandbox egress auth and managed agent vaults.
+  </NextStep>
+</NextSteps>

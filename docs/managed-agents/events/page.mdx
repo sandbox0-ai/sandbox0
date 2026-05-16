@@ -99,22 +99,14 @@ await client.beta.sessions.events.send(session.id, {
 - Runtime callbacks are signed before being appended to the session log.
 - Event streaming is compatible with the SDK surface and backed by Sandbox0 session events.
 
-## Next
+## Next Steps
 
-<CardGrid>
-  <LinkCard
-    title="Sessions"
-    href="/docs/managed-agents/sessions"
-    cta="Review"
-  >
-    Understand session lifecycle and resources
-  </LinkCard>
+<NextSteps>
+  <NextStep title="Vaults" href="/docs/managed-agents/vaults">
+    Store model and external service credentials outside agent code.
+  </NextStep>
 
-  <LinkCard
-    title="Compatibility"
-    href="/docs/managed-agents/compatibility"
-    cta="Compare"
-  >
-    Check supported event and lifecycle behavior
-  </LinkCard>
-</CardGrid>
+  <NextStep title="Agent Engines" href="/docs/managed-agents/agent-engines">
+    Choose the runtime adapter that should execute each managed session.
+  </NextStep>
+</NextSteps>

@@ -133,28 +133,12 @@ sftp -i ~/.ssh/sandbox0_ed25519 -P "$SSH_PORT" "$SSH_USER@$SSH_HOST"
 
 ## Next Steps
 
-<CardGrid>
-  <LinkCard
-    title="Files"
-    href="/docs/sandbox/files"
-    cta="Learn More"
-  >
-    Read, write, and manage files directly through the API
-  </LinkCard>
+<NextSteps>
+  <NextStep title="Network" href="/docs/sandbox/network">
+    Configure outbound network policy, traffic rules, and protocol-aware restrictions.
+  </NextStep>
 
-  <LinkCard
-    title="Contexts"
-    href="/docs/sandbox/contexts"
-    cta="Learn More"
-  >
-    Use REPL and command contexts for programmatic execution
-  </LinkCard>
-
-  <LinkCard
-    title="Self-Hosted Configuration"
-    href="/docs/self-hosted/configuration"
-    cta="Configure"
-  >
-    Expose and operate `ssh-gateway` in your own region deployment
-  </LinkCard>
-</CardGrid>
+  <NextStep title="Egress Proxy" href="/docs/sandbox/proxy">
+    Route allowed TCP egress through a customer-managed SOCKS5 proxy.
+  </NextStep>
+</NextSteps>

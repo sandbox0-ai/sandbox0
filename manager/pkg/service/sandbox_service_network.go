@@ -664,6 +664,7 @@ func networkPolicyFromSpec(spec *v1alpha1.NetworkPolicySpec) *v1alpha1.SandboxNe
 		egressDeniedPorts     []v1alpha1.PortSpec
 		egressTrafficRules    []v1alpha1.TrafficRule
 		egressCredentialRules []v1alpha1.EgressCredentialRule
+		egressProxy           *v1alpha1.EgressProxyPolicy
 	)
 	if spec.Egress != nil {
 		egressAllowedCIDRs = append(egressAllowedCIDRs, spec.Egress.AllowedCIDRs...)
@@ -674,6 +675,9 @@ func networkPolicyFromSpec(spec *v1alpha1.NetworkPolicySpec) *v1alpha1.SandboxNe
 		egressDeniedPorts = append(egressDeniedPorts, spec.Egress.DeniedPorts...)
 		egressTrafficRules = append(egressTrafficRules, spec.Egress.TrafficRules...)
 		egressCredentialRules = append(egressCredentialRules, spec.Egress.CredentialRules...)
+		if spec.Egress.Proxy != nil {
+			egressProxy = cloneEgressProxyPolicy(spec.Egress.Proxy)
+		}
 	}
 
 	mode := v1alpha1.NetworkModeAllowAll
@@ -684,7 +688,7 @@ func networkPolicyFromSpec(spec *v1alpha1.NetworkPolicySpec) *v1alpha1.SandboxNe
 	policy := &v1alpha1.SandboxNetworkPolicy{
 		Mode: mode,
 	}
-	if len(egressAllowedCIDRs)+len(egressDeniedCIDRs)+len(egressAllowedDomains)+len(egressDeniedDomains)+len(egressAllowedPorts)+len(egressDeniedPorts)+len(egressTrafficRules)+len(egressCredentialRules) > 0 {
+	if len(egressAllowedCIDRs)+len(egressDeniedCIDRs)+len(egressAllowedDomains)+len(egressDeniedDomains)+len(egressAllowedPorts)+len(egressDeniedPorts)+len(egressTrafficRules)+len(egressCredentialRules) > 0 || egressProxy != nil {
 		policy.Egress = &v1alpha1.NetworkEgressPolicy{
 			AllowedCIDRs:    egressAllowedCIDRs,
 			DeniedCIDRs:     egressDeniedCIDRs,
@@ -694,6 +698,7 @@ func networkPolicyFromSpec(spec *v1alpha1.NetworkPolicySpec) *v1alpha1.SandboxNe
 			DeniedPorts:     egressDeniedPorts,
 			TrafficRules:    egressTrafficRules,
 			CredentialRules: egressCredentialRules,
+			Proxy:           egressProxy,
 		}
 	}
 

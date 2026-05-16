@@ -91,7 +91,7 @@ func (a *httpAdapter) Handle(req *adapterRequest) error {
 		}
 		return req.Server.proxyHTTPRequest(req)
 	}
-	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+	return req.Server.relayTCPRequest(req)
 }
 
 func parseBufferedHTTPRequest(headerBytes []byte) (*http.Request, error) {
@@ -153,12 +153,12 @@ func (a *tlsAdapter) Handle(req *adapterRequest) error {
 		if req.EgressAuth.Rule.Protocol == v1alpha1.EgressAuthProtocolTLS {
 			if err := prepareTLSClientCertificateDirectives(req.EgressAuth, "tls", tlsTerminationRequired(req)); err != nil {
 				if req.EgressAuth.ShouldBypass() {
-					return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+					return req.Server.relayTCPRequest(req)
 				}
 				return fmt.Errorf("prepare tls client certificate directives for %q: %w", req.EgressAuth.Rule.AuthRef, err)
 			}
 			if req.EgressAuth.ShouldBypass() {
-				return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+				return req.Server.relayTCPRequest(req)
 			}
 			if req.EgressAuth.ResolveError != nil {
 				return fmt.Errorf("resolve egress auth for %q: %w", req.EgressAuth.Rule.AuthRef, req.EgressAuth.ResolveError)
@@ -171,7 +171,7 @@ func (a *tlsAdapter) Handle(req *adapterRequest) error {
 		if !egressAuthNeedsHTTPMatch(req) {
 			if err := prepareHTTPHeaderDirectives(req.EgressAuth, "tls", tlsTerminationRequired(req)); err != nil {
 				if req.EgressAuth.ShouldBypass() {
-					return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+					return req.Server.relayTCPRequest(req)
 				}
 				if errors.Is(err, errEgressAuthDirectiveUnsupported) {
 					return fmt.Errorf("egress auth directives unsupported for %q", req.EgressAuth.Rule.AuthRef)
@@ -181,14 +181,14 @@ func (a *tlsAdapter) Handle(req *adapterRequest) error {
 	}
 	if tlsTerminationRequired(req) {
 		if req.EgressAuth != nil && req.EgressAuth.ShouldBypass() {
-			return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+			return req.Server.relayTCPRequest(req)
 		}
 		return req.Server.proxyHTTPSRequest(req)
 	}
 	if req.EgressAuth != nil && req.EgressAuth.Rule != nil && req.EgressAuth.Rule.Protocol == v1alpha1.EgressAuthProtocolHTTPS && req.EgressAuth.Rule.TLSMode == "" {
-		return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+		return req.Server.relayTCPRequest(req)
 	}
-	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+	return req.Server.relayTCPRequest(req)
 }
 
 type sshAdapter struct{}
@@ -208,7 +208,7 @@ func (a *sshAdapter) Handle(req *adapterRequest) error {
 	if req.EgressAuth != nil && req.EgressAuth.Rule != nil {
 		if err := prepareSSHProxyDirectives(req.EgressAuth, "ssh", true); err != nil {
 			if req.EgressAuth.ShouldBypass() {
-				return req.Server.relayTCPConnWithUpstream(req.Conn, req.Prefix, req.UpstreamConn, req.UpstreamPrefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+				return req.Server.relayTCPRequestWithUpstream(req, req.Prefix, req.UpstreamConn, req.UpstreamPrefix)
 			}
 			closeProbedUpstream(req)
 			if errors.Is(err, errEgressAuthDirectiveUnsupported) {
@@ -217,7 +217,7 @@ func (a *sshAdapter) Handle(req *adapterRequest) error {
 			return fmt.Errorf("prepare ssh proxy directives for %q: %w", req.EgressAuth.Rule.AuthRef, err)
 		}
 		if req.EgressAuth.ShouldBypass() {
-			return req.Server.relayTCPConnWithUpstream(req.Conn, req.Prefix, req.UpstreamConn, req.UpstreamPrefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+			return req.Server.relayTCPRequestWithUpstream(req, req.Prefix, req.UpstreamConn, req.UpstreamPrefix)
 		}
 		if req.EgressAuth.ResolveError != nil {
 			closeProbedUpstream(req)
@@ -230,7 +230,7 @@ func (a *sshAdapter) Handle(req *adapterRequest) error {
 		closeProbedUpstream(req)
 		return req.Server.proxySSHSession(req)
 	}
-	return req.Server.relayTCPConnWithUpstream(req.Conn, req.Prefix, req.UpstreamConn, req.UpstreamPrefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+	return req.Server.relayTCPRequestWithUpstream(req, req.Prefix, req.UpstreamConn, req.UpstreamPrefix)
 }
 
 type socks5Adapter struct{}
@@ -250,7 +250,7 @@ func (a *socks5Adapter) Handle(req *adapterRequest) error {
 	if req.EgressAuth != nil && req.EgressAuth.Rule != nil {
 		if err := prepareUsernamePasswordDirectives(req.EgressAuth, "socks5", true); err != nil {
 			if req.EgressAuth.ShouldBypass() {
-				return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+				return req.Server.relayTCPRequest(req)
 			}
 			if errors.Is(err, errEgressAuthDirectiveUnsupported) {
 				return fmt.Errorf("egress auth directives unsupported for %q", req.EgressAuth.Rule.AuthRef)
@@ -258,7 +258,7 @@ func (a *socks5Adapter) Handle(req *adapterRequest) error {
 			return fmt.Errorf("prepare username/password directives for %q: %w", req.EgressAuth.Rule.AuthRef, err)
 		}
 		if req.EgressAuth.ShouldBypass() {
-			return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+			return req.Server.relayTCPRequest(req)
 		}
 		if req.EgressAuth.ResolveError != nil {
 			return fmt.Errorf("resolve egress auth for %q: %w", req.EgressAuth.Rule.AuthRef, req.EgressAuth.ResolveError)
@@ -268,7 +268,7 @@ func (a *socks5Adapter) Handle(req *adapterRequest) error {
 		}
 		return req.Server.proxySOCKS5Session(req)
 	}
-	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+	return req.Server.relayTCPRequest(req)
 }
 
 type amqpAdapter struct{}
@@ -285,7 +285,7 @@ func (a *amqpAdapter) Handle(req *adapterRequest) error {
 		return fmt.Errorf("amqp adapter requires connection")
 	}
 	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
-	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+	return req.Server.relayTCPRequest(req)
 }
 
 type dnsAdapter struct{}
@@ -302,7 +302,7 @@ func (a *dnsAdapter) Handle(req *adapterRequest) error {
 		return fmt.Errorf("dns adapter requires connection")
 	}
 	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
-	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+	return req.Server.relayTCPRequest(req)
 }
 
 type mqttAdapter struct{}
@@ -322,7 +322,7 @@ func (a *mqttAdapter) Handle(req *adapterRequest) error {
 	if req.EgressAuth != nil && req.EgressAuth.Rule != nil {
 		if err := prepareUsernamePasswordDirectives(req.EgressAuth, "mqtt", true); err != nil {
 			if req.EgressAuth.ShouldBypass() {
-				return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+				return req.Server.relayTCPRequest(req)
 			}
 			if errors.Is(err, errEgressAuthDirectiveUnsupported) {
 				return fmt.Errorf("egress auth directives unsupported for %q", req.EgressAuth.Rule.AuthRef)
@@ -330,7 +330,7 @@ func (a *mqttAdapter) Handle(req *adapterRequest) error {
 			return fmt.Errorf("prepare username/password directives for %q: %w", req.EgressAuth.Rule.AuthRef, err)
 		}
 		if req.EgressAuth.ShouldBypass() {
-			return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+			return req.Server.relayTCPRequest(req)
 		}
 		if req.EgressAuth.ResolveError != nil {
 			return fmt.Errorf("resolve egress auth for %q: %w", req.EgressAuth.Rule.AuthRef, req.EgressAuth.ResolveError)
@@ -340,7 +340,7 @@ func (a *mqttAdapter) Handle(req *adapterRequest) error {
 		}
 		return req.Server.proxyMQTTSession(req)
 	}
-	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+	return req.Server.relayTCPRequest(req)
 }
 
 type mongodbAdapter struct{}
@@ -357,7 +357,7 @@ func (a *mongodbAdapter) Handle(req *adapterRequest) error {
 		return fmt.Errorf("mongodb adapter requires connection")
 	}
 	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
-	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+	return req.Server.relayTCPRequest(req)
 }
 
 type redisAdapter struct{}
@@ -377,7 +377,7 @@ func (a *redisAdapter) Handle(req *adapterRequest) error {
 	if req.EgressAuth != nil && req.EgressAuth.Rule != nil {
 		if err := prepareUsernamePasswordDirectives(req.EgressAuth, "redis", true); err != nil {
 			if req.EgressAuth.ShouldBypass() {
-				return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+				return req.Server.relayTCPRequest(req)
 			}
 			if errors.Is(err, errEgressAuthDirectiveUnsupported) {
 				return fmt.Errorf("egress auth directives unsupported for %q", req.EgressAuth.Rule.AuthRef)
@@ -385,7 +385,7 @@ func (a *redisAdapter) Handle(req *adapterRequest) error {
 			return fmt.Errorf("prepare username/password directives for %q: %w", req.EgressAuth.Rule.AuthRef, err)
 		}
 		if req.EgressAuth.ShouldBypass() {
-			return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+			return req.Server.relayTCPRequest(req)
 		}
 		if req.EgressAuth.ResolveError != nil {
 			return fmt.Errorf("resolve egress auth for %q: %w", req.EgressAuth.Rule.AuthRef, req.EgressAuth.ResolveError)
@@ -395,7 +395,7 @@ func (a *redisAdapter) Handle(req *adapterRequest) error {
 		}
 		return req.Server.proxyRedisSession(req)
 	}
-	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+	return req.Server.relayTCPRequest(req)
 }
 
 type udpAdapter struct{}
@@ -429,7 +429,7 @@ func (a *tcpPassThroughAdapter) Handle(req *adapterRequest) error {
 		return fmt.Errorf("tcp fallback adapter requires connection")
 	}
 	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()))
-	return req.Server.relayTCPConn(req.Conn, req.Prefix, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+	return req.Server.relayTCPRequest(req)
 }
 
 type udpPassThroughAdapter struct{}

@@ -3,6 +3,7 @@ package policy
 import (
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
@@ -44,6 +45,15 @@ type CompiledRuleSet struct {
 	DeniedDomains  []DomainRule
 	TrafficRules   []CompiledTrafficRule
 	AuthRules      []CompiledEgressAuthRule
+	Proxy          *CompiledEgressProxy
+}
+
+type CompiledEgressProxy struct {
+	Type          string
+	Address       string
+	Host          string
+	Port          int
+	CredentialRef string
 }
 
 type CompiledEgressAuthRule struct {
@@ -117,13 +127,62 @@ func CompileNetworkPolicy(spec *v1alpha1.NetworkPolicySpec) (*CompiledPolicy, er
 		if err != nil {
 			return nil, fmt.Errorf("compile egress auth rules: %w", err)
 		}
+		egressProxy, err := compileEgressProxy(spec.Egress.Proxy)
+		if err != nil {
+			return nil, fmt.Errorf("compile egress proxy: %w", err)
+		}
 		compiled.Egress = CompiledRuleSet{
 			TrafficRules: trafficRules,
 			AuthRules:    authRules,
+			Proxy:        egressProxy,
 		}
 	}
 
 	return compiled, nil
+}
+
+func compileEgressProxy(value *v1alpha1.EgressProxyPolicy) (*CompiledEgressProxy, error) {
+	if value == nil {
+		return nil, nil
+	}
+	proxyType := strings.ToLower(strings.TrimSpace(string(value.Type)))
+	if proxyType != string(v1alpha1.EgressProxyTypeSOCKS5) {
+		return nil, fmt.Errorf("unsupported type %q", value.Type)
+	}
+	address := strings.TrimSpace(value.Address)
+	host, portValue, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, fmt.Errorf("address must be in host:port form: %w", err)
+	}
+	host = strings.TrimSpace(strings.ToLower(host))
+	if host == "" {
+		return nil, fmt.Errorf("host is required")
+	}
+	port, err := parsePortNumber(portValue)
+	if err != nil {
+		return nil, err
+	}
+	return &CompiledEgressProxy{
+		Type:          proxyType,
+		Address:       net.JoinHostPort(host, fmt.Sprintf("%d", port)),
+		Host:          host,
+		Port:          port,
+		CredentialRef: strings.TrimSpace(value.CredentialRef),
+	}, nil
+}
+
+func parsePortNumber(value string) (int, error) {
+	if value == "" {
+		return 0, fmt.Errorf("port is required")
+	}
+	port, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid port %q", value)
+	}
+	if port <= 0 || port > 65535 {
+		return 0, fmt.Errorf("port %d out of range", port)
+	}
+	return port, nil
 }
 
 func parseCIDRs(values []string) ([]*net.IPNet, error) {

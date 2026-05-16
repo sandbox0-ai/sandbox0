@@ -159,16 +159,20 @@ func (s *Server) newHTTP2Transport(req *adapterRequest, upstreamCounter **counti
 		cfg.ServerName = req.Host
 	}
 	cfg.NextProtos = []string{"h2"}
-	dialer := &net.Dialer{Timeout: s.cfg.ProxyUpstreamTimeout.Duration}
 	return &http2.Transport{
 		TLSClientConfig: cfg,
 		DialTLSContext: func(ctx context.Context, network, addr string, tlsCfg *tls.Config) (net.Conn, error) {
 			_ = network
 			_ = addr
 			_ = tlsCfg
-			conn, err := tls.DialWithDialer(dialer, "tcp", net.JoinHostPort(req.DestIP.String(), fmt.Sprintf("%d", req.DestPort)), cfg)
+			rawConn, err := s.dialTCPUpstreamForRequest(req)
 			if err != nil {
 				return nil, fmt.Errorf("dial upstream http2 tls: %w", err)
+			}
+			conn := tls.Client(rawConn, cfg)
+			if err := conn.HandshakeContext(ctx); err != nil {
+				_ = rawConn.Close()
+				return nil, fmt.Errorf("handshake upstream http2 tls: %w", err)
 			}
 			wrapped := &countingConn{Conn: conn}
 			if upstreamCounter != nil && *upstreamCounter == nil {

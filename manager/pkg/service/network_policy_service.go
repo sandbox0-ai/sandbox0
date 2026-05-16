@@ -119,9 +119,20 @@ func (s *NetworkPolicyService) mergeNetworkPolicies(
 			merged.Egress.DeniedPorts = append(merged.Egress.DeniedPorts, request.Egress.DeniedPorts...)
 			merged.Egress.TrafficRules = mergeTrafficRules(merged.Egress.TrafficRules, request.Egress.TrafficRules)
 			merged.Egress.CredentialRules = mergeEgressCredentialRules(merged.Egress.CredentialRules, request.Egress.CredentialRules)
+			if request.Egress.Proxy != nil {
+				merged.Egress.Proxy = cloneEgressProxyPolicy(request.Egress.Proxy)
+			}
 		}
 	}
 	return merged
+}
+
+func cloneEgressProxyPolicy(in *v1alpha1.EgressProxyPolicy) *v1alpha1.EgressProxyPolicy {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
 }
 
 func mergeTrafficRules(base, override []v1alpha1.TrafficRule) []v1alpha1.TrafficRule {
@@ -287,6 +298,9 @@ func validateNetworkCredentialConfig(policy *v1alpha1.SandboxNetworkPolicy, bind
 	if policy.Egress == nil {
 		return nil
 	}
+	if err := validateEgressProxyConfig(policy.Egress.Proxy, bindingProjectionTypes); err != nil {
+		return err
+	}
 
 	seenNames := make(map[string]struct{}, len(policy.Egress.CredentialRules))
 	for _, rule := range policy.Egress.CredentialRules {
@@ -326,6 +340,29 @@ func validateNetworkCredentialConfig(policy *v1alpha1.SandboxNetworkPolicy, bind
 			return fmt.Errorf("duplicate egress rule name %q", rule.Name)
 		}
 		seenNames[rule.Name] = struct{}{}
+	}
+	return nil
+}
+
+func validateEgressProxyConfig(proxy *v1alpha1.EgressProxyPolicy, bindingProjectionTypes map[string]v1alpha1.CredentialProjectionType) error {
+	if proxy == nil {
+		return nil
+	}
+	if proxy.Type != v1alpha1.EgressProxyTypeSOCKS5 {
+		return fmt.Errorf("egress proxy type %q is not supported", proxy.Type)
+	}
+	if strings.TrimSpace(proxy.Address) == "" {
+		return fmt.Errorf("egress proxy address is required")
+	}
+	if proxy.CredentialRef == "" {
+		return nil
+	}
+	projectionType, ok := bindingProjectionTypes[proxy.CredentialRef]
+	if !ok {
+		return fmt.Errorf("egress proxy credentialRef %q not found", proxy.CredentialRef)
+	}
+	if projectionType != v1alpha1.CredentialProjectionTypeUsernamePassword {
+		return fmt.Errorf("egress proxy credentialRef %q requires username_password projection", proxy.CredentialRef)
 	}
 	return nil
 }

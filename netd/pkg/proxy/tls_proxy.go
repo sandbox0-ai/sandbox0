@@ -31,13 +31,13 @@ func (s *Server) proxyHTTPSRequest(req *adapterRequest) error {
 	}
 	prefixReader := bytes.NewReader(prefixBytes)
 	if req.EgressAuth != nil && req.EgressAuth.ShouldBypass() {
-		return s.relayTCPConn(req.Conn, prefixReader, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+		return s.relayTCPRequestWithPrefix(req, prefixReader)
 	}
 	clientConn := newPrefixedConn(req.Conn, prefixBytes)
 	if s.tlsAuthority == nil {
 		if req.EgressAuth != nil && req.EgressAuth.FailOpen() {
 			req.EgressAuth.BypassReason = "tls_intercept_unavailable"
-			return s.relayTCPConn(req.Conn, prefixReader, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+			return s.relayTCPRequestWithPrefix(req, prefixReader)
 		}
 		return fmt.Errorf("https interception authority is not configured")
 	}
@@ -45,7 +45,7 @@ func (s *Server) proxyHTTPSRequest(req *adapterRequest) error {
 	if err != nil {
 		if req.EgressAuth != nil && req.EgressAuth.FailOpen() {
 			req.EgressAuth.BypassReason = "tls_certificate_issue"
-			return s.relayTCPConn(req.Conn, prefixReader, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+			return s.relayTCPRequestWithPrefix(req, prefixReader)
 		}
 		return fmt.Errorf("issue downstream tls certificate: %w", err)
 	}
@@ -103,13 +103,13 @@ func (s *Server) proxyTLSStream(req *adapterRequest) error {
 	}
 	prefixReader := bytes.NewReader(prefixBytes)
 	if req.EgressAuth != nil && req.EgressAuth.ShouldBypass() {
-		return s.relayTCPConn(req.Conn, prefixReader, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+		return s.relayTCPRequestWithPrefix(req, prefixReader)
 	}
 	clientConn := newPrefixedConn(req.Conn, prefixBytes)
 	if s.tlsAuthority == nil {
 		if req.EgressAuth != nil && req.EgressAuth.FailOpen() {
 			req.EgressAuth.BypassReason = "tls_intercept_unavailable"
-			return s.relayTCPConn(req.Conn, prefixReader, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+			return s.relayTCPRequestWithPrefix(req, prefixReader)
 		}
 		return fmt.Errorf("tls interception authority is not configured")
 	}
@@ -117,7 +117,7 @@ func (s *Server) proxyTLSStream(req *adapterRequest) error {
 	if err != nil {
 		if req.EgressAuth != nil && req.EgressAuth.FailOpen() {
 			req.EgressAuth.BypassReason = "tls_certificate_issue"
-			return s.relayTCPConn(req.Conn, prefixReader, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+			return s.relayTCPRequestWithPrefix(req, prefixReader)
 		}
 		return fmt.Errorf("issue downstream tls certificate: %w", err)
 	}
@@ -179,10 +179,14 @@ func (s *Server) dialUpstreamTLS(req *adapterRequest) (net.Conn, error) {
 	if len(cfg.NextProtos) == 0 && (req.EgressAuth == nil || req.EgressAuth.Rule == nil || req.EgressAuth.Rule.Protocol != v1alpha1.EgressAuthProtocolTLS) {
 		cfg.NextProtos = []string{"http/1.1"}
 	}
-	dialer := &net.Dialer{Timeout: s.cfg.ProxyUpstreamTimeout.Duration}
-	conn, err := tls.DialWithDialer(dialer, "tcp", net.JoinHostPort(req.DestIP.String(), fmt.Sprintf("%d", req.DestPort)), cfg)
+	rawConn, err := s.dialTCPUpstreamForRequest(req)
 	if err != nil {
 		return nil, fmt.Errorf("dial upstream tls: %w", err)
+	}
+	conn := tls.Client(rawConn, cfg)
+	if err := conn.Handshake(); err != nil {
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("handshake upstream tls: %w", err)
 	}
 	return &countingConn{Conn: conn}, nil
 }

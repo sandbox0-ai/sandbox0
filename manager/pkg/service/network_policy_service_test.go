@@ -115,6 +115,45 @@ func TestBuildNetworkPolicyStateMergesNamedRulesAndBindings(t *testing.T) {
 	}
 }
 
+func TestBuildNetworkPolicyStateMergesEgressProxy(t *testing.T) {
+	svc := NewNetworkPolicyService(zap.NewNop())
+	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
+		SandboxID: "sb-1",
+		TeamID:    "team-1",
+		TemplateSpec: &v1alpha1.SandboxNetworkPolicy{
+			Mode: v1alpha1.NetworkModeBlockAll,
+			Egress: &v1alpha1.NetworkEgressPolicy{
+				Proxy: &v1alpha1.EgressProxyPolicy{
+					Type:    v1alpha1.EgressProxyTypeSOCKS5,
+					Address: "template-proxy.example.com:1080",
+				},
+			},
+		},
+		RequestSpec: &v1alpha1.SandboxNetworkPolicy{
+			Egress: &v1alpha1.NetworkEgressPolicy{
+				Proxy: &v1alpha1.EgressProxyPolicy{
+					Type:          v1alpha1.EgressProxyTypeSOCKS5,
+					Address:       "request-proxy.example.com:1080",
+					CredentialRef: "corp-proxy",
+				},
+			},
+		},
+		RequestBindings: []v1alpha1.CredentialBinding{
+			testUsernamePasswordCredentialBinding("corp-proxy"),
+		},
+	})
+
+	if result == nil || result.PolicySpec == nil || result.PolicySpec.Egress == nil || result.PolicySpec.Egress.Proxy == nil {
+		t.Fatalf("expected egress proxy")
+	}
+	if result.PolicySpec.Egress.Proxy.Address != "request-proxy.example.com:1080" {
+		t.Fatalf("proxy address = %q, want request override", result.PolicySpec.Egress.Proxy.Address)
+	}
+	if result.PolicySpec.Egress.Proxy.CredentialRef != "corp-proxy" {
+		t.Fatalf("credentialRef = %q, want corp-proxy", result.PolicySpec.Egress.Proxy.CredentialRef)
+	}
+}
+
 func TestBuildNetworkPolicyStateAppendsUnnamedRules(t *testing.T) {
 	svc := NewNetworkPolicyService(zap.NewNop())
 	result := svc.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{

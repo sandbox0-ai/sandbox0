@@ -5688,6 +5688,26 @@ components:
             destination-scoped outbound auth behavior.
           items:
             $ref: "#/components/schemas/EgressCredentialRule"
+        proxy:
+          $ref: "#/components/schemas/EgressProxyPolicy"
+    EgressProxyPolicy:
+      type: object
+      description: Customer-managed transparent egress proxy for allowed TCP traffic.
+      properties:
+        type:
+          $ref: "#/components/schemas/EgressProxyType"
+        address:
+          type: string
+          description: SOCKS5 proxy endpoint in host:port form.
+          example: proxy.example.com:1080
+        credentialRef:
+          type: string
+          description: Optional credential binding ref using a username_password projection.
+      required: [type, address]
+    EgressProxyType:
+      type: string
+      enum: [socks5]
+      x-enum-varnames: [EgressProxyTypeSocks5]
     TrafficRule:
       type: object
       properties:
@@ -5723,6 +5743,17 @@ components:
     TrafficRuleAppProtocol:
       type: string
       enum: [http, tls, ssh, socks5, mqtt, redis, amqp, dns, mongodb, udp]
+      x-enum-varnames:
+        - TrafficRuleAppProtocolHttp
+        - TrafficRuleAppProtocolTls
+        - TrafficRuleAppProtocolSsh
+        - TrafficRuleAppProtocolSocks5
+        - TrafficRuleAppProtocolMqtt
+        - TrafficRuleAppProtocolRedis
+        - TrafficRuleAppProtocolAmqp
+        - TrafficRuleAppProtocolDns
+        - TrafficRuleAppProtocolMongodb
+        - TrafficRuleAppProtocolUdp
     EgressCredentialRule:
       type: object
       properties:
@@ -5966,6 +5997,15 @@ components:
     EgressAuthProtocol:
       type: string
       enum: [http, https, grpc, tls, ssh, socks5, mqtt, redis]
+      x-enum-varnames:
+        - EgressAuthProtocolHttp
+        - EgressAuthProtocolHttps
+        - EgressAuthProtocolGrpc
+        - EgressAuthProtocolTls
+        - EgressAuthProtocolSsh
+        - EgressAuthProtocolSocks5
+        - EgressAuthProtocolMqtt
+        - EgressAuthProtocolRedis
     EgressAuthRolloutMode:
       type: string
       enum: [enabled, disabled]

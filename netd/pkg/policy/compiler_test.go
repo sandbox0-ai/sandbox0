@@ -150,6 +150,33 @@ func TestCompileNetworkPolicyTrafficRules(t *testing.T) {
 	}
 }
 
+func TestCompileNetworkPolicyEgressProxy(t *testing.T) {
+	spec := &v1alpha1.NetworkPolicySpec{
+		Mode: v1alpha1.NetworkModeBlockAll,
+		Egress: &v1alpha1.NetworkEgressPolicy{
+			Proxy: &v1alpha1.EgressProxyPolicy{
+				Type:          v1alpha1.EgressProxyTypeSOCKS5,
+				Address:       "Proxy.Example.COM:1080",
+				CredentialRef: "corp-proxy",
+			},
+		},
+	}
+
+	compiled, err := CompileNetworkPolicy(spec)
+	if err != nil {
+		t.Fatalf("compile failed: %v", err)
+	}
+	if compiled.Egress.Proxy == nil {
+		t.Fatal("expected egress proxy")
+	}
+	if compiled.Egress.Proxy.Address != "proxy.example.com:1080" {
+		t.Fatalf("proxy address = %q, want proxy.example.com:1080", compiled.Egress.Proxy.Address)
+	}
+	if compiled.Egress.Proxy.CredentialRef != "corp-proxy" {
+		t.Fatalf("credentialRef = %q, want corp-proxy", compiled.Egress.Proxy.CredentialRef)
+	}
+}
+
 func TestCompileNetworkPolicyLegacyAllowAllNormalizesToDenyTrafficRules(t *testing.T) {
 	spec := &v1alpha1.NetworkPolicySpec{
 		Mode: v1alpha1.NetworkModeAllowAll,

@@ -242,14 +242,14 @@ s0 sandbox network update -s "$SANDBOX_ID" \\
 
 Egress proxy is a TCP routing feature. It does not proxy DNS datagrams, UDP application protocols, or QUIC. If a workload uses HTTP/3 or QUIC, configure the client to use TCP/TLS instead.
 
-<CardGroup cols={3}>
-  <Card title="Network" href="/docs/sandbox/network">
-    Configure allow and deny policy.
-  </Card>
-  <Card title="Credential Sources" href="/docs/credential/sources">
-    Store SOCKS5 credentials.
-  </Card>
-  <Card title="Egress Auth" href="/docs/credential/egress-auth">
-    Inject destination-scoped outbound credentials.
-  </Card>
-</CardGroup>
+## Next Steps
+
+<NextSteps>
+  <NextStep title="Sandbox Services" href="/docs/sandbox/services">
+    Expose named sandbox ports through public HTTP service routes.
+  </NextStep>
+
+  <NextStep title="Webhooks" href="/docs/sandbox/webhooks">
+    Receive signed sandbox lifecycle, service, and file-related events.
+  </NextStep>
+</NextSteps>

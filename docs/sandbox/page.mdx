@@ -462,15 +462,7 @@ client.sandboxes.update(
 
 Pause and resume is covered in a dedicated page because it affects TTL, `auto_resume`, service routes, SSH, and webhook behavior.
 
-<CardGrid>
-  <LinkCard
-    title="Pause And Resume"
-    href="/docs/sandbox/pause-resume"
-    cta="Learn More"
-  >
-    Pause sandboxes explicitly, inspect paused state, resume them, and control auto-resume behavior
-  </LinkCard>
-</CardGrid>
+See [Pause And Resume](/docs/sandbox/pause-resume) for explicit pause, state inspection, resume, and auto-resume behavior.
 
 ---
 
@@ -593,52 +585,12 @@ console.log('Sandbox deleted');`
 
 ## Next Steps
 
-<CardGrid>
-  <LinkCard
-    title="Pause And Resume"
-    href="/docs/sandbox/pause-resume"
-    cta="Learn More"
-  >
-    Pause sandboxes, resume them, and control `auto_resume`
-  </LinkCard>
+<NextSteps>
+  <NextStep title="Pause And Resume" href="/docs/sandbox/pause-resume">
+    Control sandbox power state and resume behavior before wiring long-lived workflows.
+  </NextStep>
 
-  <LinkCard
-    title="Contexts"
-    href="/docs/sandbox/contexts"
-    cta="Learn More"
-  >
-    Run commands and manage processes (REPL and Cmd)
-  </LinkCard>
-
-  <LinkCard
-    title="Files"
-    href="/docs/sandbox/files"
-    cta="Learn More"
-  >
-    Read, write, and manage files in sandboxes
-  </LinkCard>
-
-  <LinkCard
-    title="SSH"
-    href="/docs/sandbox/ssh"
-    cta="Learn More"
-  >
-    Connect with standard `ssh` and transfer files with `scp`
-  </LinkCard>
-
-  <LinkCard
-    title="Network Policy"
-    href="/docs/sandbox/network"
-    cta="Learn More"
-  >
-    Control network access and egress rules
-  </LinkCard>
-
-  <LinkCard
-    title="Sandbox Services"
-    href="/docs/sandbox/services"
-    cta="Learn More"
-  >
-    Control public HTTP routes, auth, CORS, and rate limits
-  </LinkCard>
-</CardGrid>
+  <NextStep title="Contexts" href="/docs/sandbox/contexts">
+    Run REPL and command contexts inside a sandbox and stream process output.
+  </NextStep>
+</NextSteps>

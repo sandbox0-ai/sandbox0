@@ -84,22 +84,14 @@ Sandbox0 keeps session state and event history outside the sandbox. The sandbox 
 - `openai-agents` runs the agent loop in a resident runtime and uses Sandbox0 as a sandbox tool.
 - All supported engines map observable automatic retry attempts to the same session state sequence: `running`, `rescheduling`, `running`, then either `idle` or `terminated`.
 
-## Next
+## Next Steps
 
-<CardGrid>
-  <LinkCard
-    title="Events"
-    href="/docs/managed-agents/events"
-    cta="Send"
-  >
-    Append user input and stream agent output
-  </LinkCard>
+<NextSteps>
+  <NextStep title="Events" href="/docs/managed-agents/events">
+    Append user input, stream agent output, and interpret retry lifecycle events.
+  </NextStep>
 
-  <LinkCard
-    title="Vaults"
-    href="/docs/managed-agents/vaults"
-    cta="Attach"
-  >
-    Provide model and external service credentials
-  </LinkCard>
-</CardGrid>
+  <NextStep title="Vaults" href="/docs/managed-agents/vaults">
+    Store model and external service credentials outside agent code.
+  </NextStep>
+</NextSteps>

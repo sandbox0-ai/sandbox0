@@ -94,30 +94,14 @@ The environment variables may contain placeholders. The real token is projected 
 
 For `openai-agents`, the runtime expects an OpenAI Responses-compatible base URL. If the provider exposes an Anthropic-compatible endpoint, use [LLMProxy](/docs/managed-agents/llmproxy) and store the LLMProxy URL in `sandbox0.managed_agents.llm_base_url`.
 
-## Next
+## Next Steps
 
-<CardGrid>
-  <LinkCard
-    title="Agent Engines"
-    href="/docs/managed-agents/agent-engines"
-    cta="Choose"
-  >
-    Use LLM vault metadata to select Claude, Codex, or OpenAI Agents runtime behavior
-  </LinkCard>
+<NextSteps>
+  <NextStep title="Agent Engines" href="/docs/managed-agents/agent-engines">
+    Choose the runtime adapter that should execute each managed session.
+  </NextStep>
 
-  <LinkCard
-    title="LLMProxy"
-    href="/docs/managed-agents/llmproxy"
-    cta="Translate"
-  >
-    Adapt Anthropic-compatible providers for OpenAI-compatible engines
-  </LinkCard>
-
-  <LinkCard
-    title="Environments"
-    href="/docs/managed-agents/environments"
-    cta="Restrict"
-  >
-    Combine credentials with limited network policy
-  </LinkCard>
-</CardGrid>
+  <NextStep title="LLMProxy" href="/docs/managed-agents/llmproxy">
+    Translate Anthropic-compatible model providers for OpenAI-compatible engines.
+  </NextStep>
+</NextSteps>

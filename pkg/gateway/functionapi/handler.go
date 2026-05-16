@@ -7,7 +7,9 @@ import (
 	"io"
 	"net/http"
 	neturl "net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
@@ -36,6 +38,10 @@ type RevisionVolumeStore interface {
 	DeleteRestoreMounts(ctx context.Context, authCtx *authn.AuthContext, sandbox *mgr.Sandbox, mounts []functions.RestoreMount) error
 }
 
+type RuntimeController interface {
+	DeleteRuntimeSandbox(ctx context.Context, authCtx *authn.AuthContext, sandboxID string) error
+}
+
 type PermissionMiddleware func(permission string) gin.HandlerFunc
 
 type Handler struct {
@@ -43,10 +49,11 @@ type Handler struct {
 	cfg           Config
 	sandboxLookup SandboxLookup
 	volumeStore   RevisionVolumeStore
+	runtime       RuntimeController
 	logger        *zap.Logger
 }
 
-func New(repo *functions.Repository, cfg Config, lookup SandboxLookup, volumeStore RevisionVolumeStore, logger *zap.Logger) *Handler {
+func New(repo *functions.Repository, cfg Config, lookup SandboxLookup, volumeStore RevisionVolumeStore, runtime RuntimeController, logger *zap.Logger) *Handler {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
@@ -55,6 +62,7 @@ func New(repo *functions.Repository, cfg Config, lookup SandboxLookup, volumeSto
 		cfg:           cfg,
 		sandboxLookup: lookup,
 		volumeStore:   volumeStore,
+		runtime:       runtime,
 		logger:        logger,
 	}
 }
@@ -68,9 +76,17 @@ func (h *Handler) RegisterRoutes(group *gin.RouterGroup, require PermissionMiddl
 	group.GET("", require(authn.PermFunctionRead), h.listFunctions)
 	group.POST("", require(authn.PermFunctionCreate), h.createFunction)
 	group.GET("/:id", require(authn.PermFunctionRead), h.getFunction)
+	group.PUT("/:id", require(authn.PermFunctionWrite), h.updateFunction)
+	group.DELETE("/:id", require(authn.PermFunctionDelete), h.deleteFunction)
+	group.GET("/:id/aliases", require(authn.PermFunctionRead), h.listFunctionAliases)
+	group.GET("/:id/aliases/:alias", require(authn.PermFunctionRead), h.getFunctionAlias)
+	group.PUT("/:id/aliases/:alias", require(authn.PermFunctionWrite), h.setFunctionAlias)
 	group.GET("/:id/revisions", require(authn.PermFunctionRead), h.listFunctionRevisions)
 	group.POST("/:id/revisions", require(authn.PermFunctionWrite), h.createFunctionRevision)
-	group.PUT("/:id/aliases/:alias", require(authn.PermFunctionWrite), h.setFunctionAlias)
+	group.GET("/:id/revisions/:revision_number", require(authn.PermFunctionRead), h.getFunctionRevision)
+	group.GET("/:id/runtime", require(authn.PermFunctionRead), h.getFunctionRuntime)
+	group.POST("/:id/runtime/restart", require(authn.PermFunctionWrite), h.restartFunctionRuntime)
+	group.POST("/:id/runtime/recycle", require(authn.PermFunctionWrite), h.recycleFunctionRuntime)
 }
 
 func NewClusterGatewaySandboxLookup(clusterGatewayURL string, internalAuthGen *internalauth.Generator, httpClient *http.Client, logger *zap.Logger) SandboxLookup {
@@ -157,6 +173,11 @@ type createFunctionRequest struct {
 type createFunctionRevisionRequest struct {
 	Source  functionSourceRequest `json:"source"`
 	Promote *bool                 `json:"promote,omitempty"`
+}
+
+type updateFunctionRequest struct {
+	Name    *string `json:"name,omitempty"`
+	Enabled *bool   `json:"enabled,omitempty"`
 }
 
 type setFunctionAliasRequest struct {
@@ -266,6 +287,40 @@ func (h *Handler) getFunction(c *gin.Context) {
 	spec.JSONSuccess(c, http.StatusOK, gin.H{"function": h.functionRecord(fn)})
 }
 
+func (h *Handler) updateFunction(c *gin.Context) {
+	authCtx := middleware.GetAuthContext(c)
+	var req updateFunctionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("invalid request: %v", err))
+		return
+	}
+	fn, err := h.repo.UpdateFunction(c.Request.Context(), authCtx.TeamID, c.Param("id"), req.Name, req.Enabled)
+	if err != nil {
+		if errors.Is(err, functions.ErrNotFound) {
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "function not found")
+			return
+		}
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to update function")
+		return
+	}
+	spec.JSONSuccess(c, http.StatusOK, gin.H{"function": h.functionRecord(fn)})
+}
+
+func (h *Handler) deleteFunction(c *gin.Context) {
+	authCtx := middleware.GetAuthContext(c)
+	deleted, revisions, err := h.repo.DeleteFunction(c.Request.Context(), authCtx.TeamID, c.Param("id"))
+	if err != nil {
+		if errors.Is(err, functions.ErrNotFound) {
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "function not found")
+			return
+		}
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to delete function")
+		return
+	}
+	go h.cleanupDeletedFunctionResources(authCtx, revisions)
+	spec.JSONSuccess(c, http.StatusOK, gin.H{"function": h.functionRecord(deleted), "message": "function deleted"})
+}
+
 func (h *Handler) listFunctionRevisions(c *gin.Context) {
 	authCtx := middleware.GetAuthContext(c)
 	revisions, err := h.repo.ListRevisions(c.Request.Context(), authCtx.TeamID, c.Param("id"))
@@ -278,6 +333,25 @@ func (h *Handler) listFunctionRevisions(c *gin.Context) {
 		return
 	}
 	spec.JSONSuccess(c, http.StatusOK, gin.H{"revisions": revisions})
+}
+
+func (h *Handler) getFunctionRevision(c *gin.Context) {
+	authCtx := middleware.GetAuthContext(c)
+	revisionNumber, err := strconv.Atoi(c.Param("revision_number"))
+	if err != nil || revisionNumber <= 0 {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "revision_number must be greater than zero")
+		return
+	}
+	rev, err := h.repo.GetRevisionByNumber(c.Request.Context(), authCtx.TeamID, c.Param("id"), revisionNumber)
+	if err != nil {
+		if errors.Is(err, functions.ErrNotFound) {
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "function revision not found")
+			return
+		}
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to get revision")
+		return
+	}
+	spec.JSONSuccess(c, http.StatusOK, gin.H{"revision": rev})
 }
 
 func (h *Handler) createFunctionRevision(c *gin.Context) {
@@ -351,6 +425,78 @@ func (h *Handler) setFunctionAlias(c *gin.Context) {
 		return
 	}
 	spec.JSONSuccess(c, http.StatusOK, gin.H{"alias": alias})
+}
+
+func (h *Handler) listFunctionAliases(c *gin.Context) {
+	authCtx := middleware.GetAuthContext(c)
+	aliases, err := h.repo.ListAliases(c.Request.Context(), authCtx.TeamID, c.Param("id"))
+	if err != nil {
+		if errors.Is(err, functions.ErrNotFound) {
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "function not found")
+			return
+		}
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to list aliases")
+		return
+	}
+	spec.JSONSuccess(c, http.StatusOK, gin.H{"aliases": aliases})
+}
+
+func (h *Handler) getFunctionAlias(c *gin.Context) {
+	authCtx := middleware.GetAuthContext(c)
+	alias, err := h.repo.GetAlias(c.Request.Context(), authCtx.TeamID, c.Param("id"), c.Param("alias"))
+	if err != nil {
+		if errors.Is(err, functions.ErrNotFound) {
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "function alias not found")
+			return
+		}
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to get alias")
+		return
+	}
+	spec.JSONSuccess(c, http.StatusOK, gin.H{"alias": alias})
+}
+
+func (h *Handler) getFunctionRuntime(c *gin.Context) {
+	fn, rev, ok := h.loadActiveFunctionRevision(c)
+	if !ok {
+		return
+	}
+	spec.JSONSuccess(c, http.StatusOK, gin.H{"runtime": runtimeStatus(fn, rev)})
+}
+
+func (h *Handler) restartFunctionRuntime(c *gin.Context) {
+	h.clearFunctionRuntime(c)
+}
+
+func (h *Handler) recycleFunctionRuntime(c *gin.Context) {
+	h.clearFunctionRuntime(c)
+}
+
+func (h *Handler) clearFunctionRuntime(c *gin.Context) {
+	authCtx := middleware.GetAuthContext(c)
+	fn, rev, ok := h.loadActiveFunctionRevision(c)
+	if !ok {
+		return
+	}
+	if h.runtime != nil && rev.RuntimeSandboxID != nil && strings.TrimSpace(*rev.RuntimeSandboxID) != "" {
+		if err := h.runtime.DeleteRuntimeSandbox(c.Request.Context(), authCtx, strings.TrimSpace(*rev.RuntimeSandboxID)); err != nil {
+			h.logger.Warn("Failed to delete function runtime sandbox",
+				zap.String("function_id", fn.ID),
+				zap.String("revision_id", rev.ID),
+				zap.String("runtime_sandbox_id", strings.TrimSpace(*rev.RuntimeSandboxID)),
+				zap.Error(err),
+			)
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "failed to recycle function runtime")
+			return
+		}
+	}
+	if err := h.repo.ClearRevisionRuntime(c.Request.Context(), fn.TeamID, fn.ID, rev.ID); err != nil && !errors.Is(err, functions.ErrNotFound) {
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to clear function runtime")
+		return
+	}
+	rev.RuntimeSandboxID = nil
+	rev.RuntimeContextID = nil
+	rev.RuntimeUpdatedAt = nil
+	spec.JSONSuccess(c, http.StatusOK, gin.H{"runtime": runtimeStatus(fn, rev)})
 }
 
 func (h *Handler) loadPublishableService(ctx context.Context, authCtx *authn.AuthContext, source functionSourceRequest) (*mgr.Sandbox, mgr.SandboxAppService, error) {
@@ -433,6 +579,85 @@ func (h *Handler) deletePreparedRestoreMounts(ctx context.Context, authCtx *auth
 			zap.String("reason", reason),
 			zap.Error(err),
 		)
+	}
+}
+
+func (h *Handler) loadActiveFunctionRevision(c *gin.Context) (*functions.Function, *functions.Revision, bool) {
+	authCtx := middleware.GetAuthContext(c)
+	fn, err := h.repo.GetFunction(c.Request.Context(), authCtx.TeamID, c.Param("id"))
+	if err != nil {
+		if errors.Is(err, functions.ErrNotFound) {
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "function not found")
+			return nil, nil, false
+		}
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to get function")
+		return nil, nil, false
+	}
+	rev, err := h.repo.GetActiveRevision(c.Request.Context(), fn)
+	if err != nil {
+		if errors.Is(err, functions.ErrNotFound) {
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "function revision not found")
+			return nil, nil, false
+		}
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to get function revision")
+		return nil, nil, false
+	}
+	return fn, rev, true
+}
+
+func runtimeStatus(fn *functions.Function, rev *functions.Revision) functions.RuntimeStatus {
+	status := functions.RuntimeStatus{}
+	if fn != nil {
+		status.FunctionID = fn.ID
+	}
+	if rev != nil {
+		status.RevisionID = rev.ID
+		status.RevisionNumber = rev.RevisionNumber
+		status.RuntimeSandboxID = rev.RuntimeSandboxID
+		status.RuntimeContextID = rev.RuntimeContextID
+		status.RuntimeUpdatedAt = rev.RuntimeUpdatedAt
+	}
+	switch {
+	case fn != nil && !fn.Enabled:
+		status.State = functions.RuntimeStateDisabled
+	case rev != nil && rev.RuntimeSandboxID != nil && strings.TrimSpace(*rev.RuntimeSandboxID) != "":
+		status.State = functions.RuntimeStateActive
+	default:
+		status.State = functions.RuntimeStateIdle
+	}
+	return status
+}
+
+func (h *Handler) cleanupDeletedFunctionResources(authCtx *authn.AuthContext, revisions []*functions.Revision) {
+	if len(revisions) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	for _, rev := range revisions {
+		if rev == nil {
+			continue
+		}
+		if h.runtime != nil && rev.RuntimeSandboxID != nil && strings.TrimSpace(*rev.RuntimeSandboxID) != "" {
+			if err := h.runtime.DeleteRuntimeSandbox(ctx, authCtx, strings.TrimSpace(*rev.RuntimeSandboxID)); err != nil {
+				h.logger.Warn("Failed to clean up deleted function runtime sandbox",
+					zap.String("function_id", rev.FunctionID),
+					zap.String("revision_id", rev.ID),
+					zap.String("runtime_sandbox_id", strings.TrimSpace(*rev.RuntimeSandboxID)),
+					zap.Error(err),
+				)
+			}
+		}
+		if h.volumeStore != nil && len(rev.RestoreMounts) > 0 {
+			sandbox := &mgr.Sandbox{ID: rev.SourceSandboxID}
+			if err := h.volumeStore.DeleteRestoreMounts(ctx, authCtx, sandbox, rev.RestoreMounts); err != nil {
+				h.logger.Warn("Failed to clean up deleted function revision volumes",
+					zap.String("function_id", rev.FunctionID),
+					zap.String("revision_id", rev.ID),
+					zap.Error(err),
+				)
+			}
+		}
 	}
 }
 

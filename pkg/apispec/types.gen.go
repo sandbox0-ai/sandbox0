@@ -64,8 +64,8 @@ const (
 
 // Defines values for EgressAuthRolloutMode.
 const (
-	Disabled EgressAuthRolloutMode = "disabled"
-	Enabled  EgressAuthRolloutMode = "enabled"
+	EgressAuthRolloutModeDisabled EgressAuthRolloutMode = "disabled"
+	EgressAuthRolloutModeEnabled  EgressAuthRolloutMode = "enabled"
 )
 
 // Defines values for EgressProxyType.
@@ -94,6 +94,13 @@ const (
 	Dir     FileInfoType = "dir"
 	File    FileInfoType = "file"
 	Symlink FileInfoType = "symlink"
+)
+
+// Defines values for FunctionRuntimeState.
+const (
+	FunctionRuntimeStateActive   FunctionRuntimeState = "active"
+	FunctionRuntimeStateDisabled FunctionRuntimeState = "disabled"
+	FunctionRuntimeStateIdle     FunctionRuntimeState = "idle"
 )
 
 // Defines values for GatewayMetadataGatewayMode.
@@ -259,6 +266,11 @@ const (
 	SuccessFileStatResponseSuccessTrue SuccessFileStatResponseSuccess = true
 )
 
+// Defines values for SuccessFunctionAliasListResponseSuccess.
+const (
+	SuccessFunctionAliasListResponseSuccessTrue SuccessFunctionAliasListResponseSuccess = true
+)
+
 // Defines values for SuccessFunctionAliasResponseSuccess.
 const (
 	SuccessFunctionAliasResponseSuccessTrue SuccessFunctionAliasResponseSuccess = true
@@ -287,6 +299,16 @@ const (
 // Defines values for SuccessFunctionRevisionListResponseSuccess.
 const (
 	SuccessFunctionRevisionListResponseSuccessTrue SuccessFunctionRevisionListResponseSuccess = true
+)
+
+// Defines values for SuccessFunctionRevisionResponseSuccess.
+const (
+	SuccessFunctionRevisionResponseSuccessTrue SuccessFunctionRevisionResponseSuccess = true
+)
+
+// Defines values for SuccessFunctionRuntimeResponseSuccess.
+const (
+	SuccessFunctionRuntimeResponseSuccessTrue SuccessFunctionRuntimeResponseSuccess = true
 )
 
 // Defines values for SuccessGatewayMetadataResponseSuccess.
@@ -456,7 +478,7 @@ const (
 
 // Defines values for SuccessWrittenResponseSuccess.
 const (
-	SuccessWrittenResponseSuccessTrue SuccessWrittenResponseSuccess = true
+	True SuccessWrittenResponseSuccess = true
 )
 
 // Defines values for TrafficRuleAction.
@@ -951,12 +973,16 @@ type Function struct {
 	ActiveRevisionId *string   `json:"active_revision_id,omitempty"`
 	CreatedAt        time.Time `json:"created_at"`
 	CreatedBy        *string   `json:"created_by,omitempty"`
-	DomainLabel      string    `json:"domain_label"`
-	Id               string    `json:"id"`
-	Name             string    `json:"name"`
-	Slug             string    `json:"slug"`
-	TeamId           string    `json:"team_id"`
-	UpdatedAt        time.Time `json:"updated_at"`
+
+	// DeletedAt Set when the function has been soft-deleted. Deleted functions are hidden from normal list/get APIs and do not serve traffic.
+	DeletedAt   *time.Time `json:"deleted_at,omitempty"`
+	DomainLabel string     `json:"domain_label"`
+	Enabled     bool       `json:"enabled"`
+	Id          string     `json:"id"`
+	Name        string     `json:"name"`
+	Slug        string     `json:"slug"`
+	TeamId      string     `json:"team_id"`
+	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
 // FunctionAlias defines model for FunctionAlias.
@@ -986,14 +1012,18 @@ type FunctionRecord struct {
 	ActiveRevisionId *string   `json:"active_revision_id,omitempty"`
 	CreatedAt        time.Time `json:"created_at"`
 	CreatedBy        *string   `json:"created_by,omitempty"`
-	DomainLabel      string    `json:"domain_label"`
-	Host             string    `json:"host"`
-	Id               string    `json:"id"`
-	Name             string    `json:"name"`
-	Slug             string    `json:"slug"`
-	TeamId           string    `json:"team_id"`
-	UpdatedAt        time.Time `json:"updated_at"`
-	Url              string    `json:"url"`
+
+	// DeletedAt Set when the function has been soft-deleted. Deleted functions are hidden from normal list/get APIs and do not serve traffic.
+	DeletedAt   *time.Time `json:"deleted_at,omitempty"`
+	DomainLabel string     `json:"domain_label"`
+	Enabled     bool       `json:"enabled"`
+	Host        string     `json:"host"`
+	Id          string     `json:"id"`
+	Name        string     `json:"name"`
+	Slug        string     `json:"slug"`
+	TeamId      string     `json:"team_id"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+	Url         string     `json:"url"`
 }
 
 // FunctionRestoreMount defines model for FunctionRestoreMount.
@@ -1045,10 +1075,39 @@ type FunctionRevisionCreateRequest struct {
 	Source  FunctionSourceRequest `json:"source"`
 }
 
+// FunctionRuntimeState defines model for FunctionRuntimeState.
+type FunctionRuntimeState string
+
+// FunctionRuntimeStatus defines model for FunctionRuntimeStatus.
+type FunctionRuntimeStatus struct {
+	FunctionId     string `json:"function_id"`
+	RevisionId     string `json:"revision_id"`
+	RevisionNumber int32  `json:"revision_number"`
+
+	// RuntimeContextId Current runtime process context, if one exists.
+	RuntimeContextId *string `json:"runtime_context_id,omitempty"`
+
+	// RuntimeSandboxId Current restored runtime sandbox, if one exists.
+	RuntimeSandboxId *string `json:"runtime_sandbox_id,omitempty"`
+
+	// RuntimeUpdatedAt Last time the runtime mapping was updated.
+	RuntimeUpdatedAt *time.Time           `json:"runtime_updated_at,omitempty"`
+	State            FunctionRuntimeState `json:"state"`
+}
+
 // FunctionSourceRequest defines model for FunctionSourceRequest.
 type FunctionSourceRequest struct {
 	SandboxId string `json:"sandbox_id"`
 	ServiceId string `json:"service_id"`
+}
+
+// FunctionUpdateRequest defines model for FunctionUpdateRequest.
+type FunctionUpdateRequest struct {
+	// Enabled Whether the function host should serve traffic. Disabled functions do not restore runtime sandboxes.
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// Name Mutable function display name. Slug and domain label stay stable.
+	Name *string `json:"name,omitempty"`
 }
 
 // GatewayMetadata defines model for GatewayMetadata.
@@ -2020,6 +2079,17 @@ type SuccessFileStatResponse struct {
 // SuccessFileStatResponseSuccess defines model for SuccessFileStatResponse.Success.
 type SuccessFileStatResponseSuccess bool
 
+// SuccessFunctionAliasListResponse defines model for SuccessFunctionAliasListResponse.
+type SuccessFunctionAliasListResponse struct {
+	Data *struct {
+		Aliases []FunctionAlias `json:"aliases"`
+	} `json:"data,omitempty"`
+	Success SuccessFunctionAliasListResponseSuccess `json:"success"`
+}
+
+// SuccessFunctionAliasListResponseSuccess defines model for SuccessFunctionAliasListResponse.Success.
+type SuccessFunctionAliasListResponseSuccess bool
+
 // SuccessFunctionAliasResponse defines model for SuccessFunctionAliasResponse.
 type SuccessFunctionAliasResponse struct {
 	Data *struct {
@@ -2088,6 +2158,28 @@ type SuccessFunctionRevisionListResponse struct {
 
 // SuccessFunctionRevisionListResponseSuccess defines model for SuccessFunctionRevisionListResponse.Success.
 type SuccessFunctionRevisionListResponseSuccess bool
+
+// SuccessFunctionRevisionResponse defines model for SuccessFunctionRevisionResponse.
+type SuccessFunctionRevisionResponse struct {
+	Data *struct {
+		Revision FunctionRevision `json:"revision"`
+	} `json:"data,omitempty"`
+	Success SuccessFunctionRevisionResponseSuccess `json:"success"`
+}
+
+// SuccessFunctionRevisionResponseSuccess defines model for SuccessFunctionRevisionResponse.Success.
+type SuccessFunctionRevisionResponseSuccess bool
+
+// SuccessFunctionRuntimeResponse defines model for SuccessFunctionRuntimeResponse.
+type SuccessFunctionRuntimeResponse struct {
+	Data *struct {
+		Runtime FunctionRuntimeStatus `json:"runtime"`
+	} `json:"data,omitempty"`
+	Success SuccessFunctionRuntimeResponseSuccess `json:"success"`
+}
+
+// SuccessFunctionRuntimeResponseSuccess defines model for SuccessFunctionRuntimeResponse.Success.
+type SuccessFunctionRuntimeResponseSuccess bool
 
 // SuccessGatewayMetadataResponse defines model for SuccessGatewayMetadataResponse.
 type SuccessGatewayMetadataResponse struct {
@@ -2786,6 +2878,9 @@ type PutApiV1CredentialSourcesNameJSONRequestBody = CredentialSourceWriteRequest
 
 // PostApiV1FunctionsJSONRequestBody defines body for PostApiV1Functions for application/json ContentType.
 type PostApiV1FunctionsJSONRequestBody = FunctionCreateRequest
+
+// PutApiV1FunctionsIdJSONRequestBody defines body for PutApiV1FunctionsId for application/json ContentType.
+type PutApiV1FunctionsIdJSONRequestBody = FunctionUpdateRequest
 
 // PutApiV1FunctionsIdAliasesAliasJSONRequestBody defines body for PutApiV1FunctionsIdAliasesAlias for application/json ContentType.
 type PutApiV1FunctionsIdAliasesAliasJSONRequestBody = FunctionAliasUpdateRequest

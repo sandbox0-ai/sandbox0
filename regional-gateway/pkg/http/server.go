@@ -350,6 +350,7 @@ func (s *Server) setupRoutes() {
 				},
 				s.functionSandboxLookup,
 				functionapi.NewHTTPVolumeSnapshotter(s.resolveFunctionClusterGatewayURL, s.internalAuthGen, s.functionSnapshotHTTPClient(), s.logger),
+				functionapi.NewHTTPRuntimeController(s.resolveFunctionClusterGatewayURL, s.internalAuthGen, s.functionSnapshotHTTPClient()),
 				s.logger,
 			)
 			functionHandler.RegisterRoutes(functionRoutes, s.authMiddleware.RequirePermission)

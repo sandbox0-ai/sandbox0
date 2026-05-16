@@ -134,9 +134,9 @@ func (r *Repository) ListFunctions(ctx context.Context, teamID string) ([]*Funct
 		return nil, fmt.Errorf("function repository is not configured")
 	}
 	rows, err := r.pool.Query(ctx, `
-		SELECT id, team_id, name, slug, domain_label, active_revision_id, created_by, created_at, updated_at
+		SELECT id, team_id, name, slug, domain_label, active_revision_id, enabled, created_by, created_at, updated_at, deleted_at
 		FROM functions
-		WHERE team_id = $1
+		WHERE team_id = $1 AND deleted_at IS NULL
 		ORDER BY updated_at DESC, created_at DESC
 	`, teamID)
 	if err != nil {
@@ -162,15 +162,15 @@ func (r *Repository) GetFunction(ctx context.Context, teamID, ref string) (*Func
 	var row pgx.Row
 	if id, err := uuid.Parse(ref); err == nil {
 		row = r.pool.QueryRow(ctx, `
-			SELECT id, team_id, name, slug, domain_label, active_revision_id, created_by, created_at, updated_at
+			SELECT id, team_id, name, slug, domain_label, active_revision_id, enabled, created_by, created_at, updated_at, deleted_at
 			FROM functions
-			WHERE team_id = $1 AND (id = $2 OR slug = $3)
+			WHERE team_id = $1 AND deleted_at IS NULL AND (id = $2 OR slug = $3)
 		`, teamID, id, ref)
 	} else {
 		row = r.pool.QueryRow(ctx, `
-			SELECT id, team_id, name, slug, domain_label, active_revision_id, created_by, created_at, updated_at
+			SELECT id, team_id, name, slug, domain_label, active_revision_id, enabled, created_by, created_at, updated_at, deleted_at
 			FROM functions
-			WHERE team_id = $1 AND slug = $2
+			WHERE team_id = $1 AND deleted_at IS NULL AND slug = $2
 		`, teamID, ref)
 	}
 	fn, err := scanFunction(row)
@@ -185,9 +185,9 @@ func (r *Repository) GetFunctionByDomainLabel(ctx context.Context, domainLabel s
 		return nil, fmt.Errorf("function repository is not configured")
 	}
 	row := r.pool.QueryRow(ctx, `
-		SELECT id, team_id, name, slug, domain_label, active_revision_id, created_by, created_at, updated_at
+		SELECT id, team_id, name, slug, domain_label, active_revision_id, enabled, created_by, created_at, updated_at, deleted_at
 		FROM functions
-		WHERE domain_label = $1
+		WHERE domain_label = $1 AND deleted_at IS NULL
 	`, domainLabel)
 	fn, err := scanFunction(row)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -263,6 +263,28 @@ func (r *Repository) GetRevision(ctx context.Context, teamID, functionID, revisi
 	return rev, err
 }
 
+func (r *Repository) GetRevisionByNumber(ctx context.Context, teamID, functionRef string, revisionNumber int) (*Revision, error) {
+	if r == nil || r.pool == nil {
+		return nil, fmt.Errorf("function repository is not configured")
+	}
+	fn, err := r.GetFunction(ctx, teamID, functionRef)
+	if err != nil {
+		return nil, err
+	}
+	row := r.pool.QueryRow(ctx, `
+		SELECT id, function_id, team_id, revision_number, source_sandbox_id, source_service_id,
+			source_template_id, restore_mounts, service_snapshot, runtime_sandbox_id, runtime_context_id,
+			runtime_updated_at, created_by, created_at
+		FROM functions_revisions
+		WHERE function_id = $1 AND revision_number = $2
+	`, fn.ID, revisionNumber)
+	rev, err := scanRevision(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return rev, err
+}
+
 func (r *Repository) SetRevisionRuntime(ctx context.Context, teamID, functionID, revisionID, sandboxID, contextID string) (*Revision, error) {
 	if r == nil || r.pool == nil {
 		return nil, fmt.Errorf("function repository is not configured")
@@ -298,6 +320,114 @@ func (r *Repository) ClearRevisionRuntime(ctx context.Context, teamID, functionI
 		return ErrNotFound
 	}
 	return nil
+}
+
+func (r *Repository) UpdateFunction(ctx context.Context, teamID, functionRef string, name *string, enabled *bool) (*Function, error) {
+	if r == nil || r.pool == nil {
+		return nil, fmt.Errorf("function repository is not configured")
+	}
+	fn, err := r.GetFunction(ctx, teamID, functionRef)
+	if err != nil {
+		return nil, err
+	}
+	nextName := fn.Name
+	if name != nil && strings.TrimSpace(*name) != "" {
+		nextName = strings.TrimSpace(*name)
+	}
+	nextEnabled := fn.Enabled
+	if enabled != nil {
+		nextEnabled = *enabled
+	}
+	row := r.pool.QueryRow(ctx, `
+		UPDATE functions
+		SET name = $3, enabled = $4, updated_at = NOW()
+		WHERE team_id = $1 AND id = $2 AND deleted_at IS NULL
+		RETURNING id, team_id, name, slug, domain_label, active_revision_id, enabled, created_by, created_at, updated_at, deleted_at
+	`, teamID, fn.ID, nextName, nextEnabled)
+	updated, err := scanFunction(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return updated, err
+}
+
+func (r *Repository) DeleteFunction(ctx context.Context, teamID, functionRef string) (*Function, []*Revision, error) {
+	if r == nil || r.pool == nil {
+		return nil, nil, fmt.Errorf("function repository is not configured")
+	}
+	fn, err := r.GetFunction(ctx, teamID, functionRef)
+	if err != nil {
+		return nil, nil, err
+	}
+	revisions, err := r.ListRevisions(ctx, teamID, fn.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	row := r.pool.QueryRow(ctx, `
+		UPDATE functions
+		SET enabled = FALSE, deleted_at = NOW(), updated_at = NOW()
+		WHERE team_id = $1 AND id = $2 AND deleted_at IS NULL
+		RETURNING id, team_id, name, slug, domain_label, active_revision_id, enabled, created_by, created_at, updated_at, deleted_at
+	`, teamID, fn.ID)
+	deleted, err := scanFunction(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	return deleted, revisions, nil
+}
+
+func (r *Repository) ListAliases(ctx context.Context, teamID, functionRef string) ([]*Alias, error) {
+	if r == nil || r.pool == nil {
+		return nil, fmt.Errorf("function repository is not configured")
+	}
+	fn, err := r.GetFunction(ctx, teamID, functionRef)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT a.function_id, a.alias, a.revision_id, r.revision_number, a.updated_by, a.updated_at
+		FROM functions_aliases a
+		JOIN functions_revisions r ON r.id = a.revision_id
+		WHERE a.function_id = $1
+		ORDER BY a.alias
+	`, fn.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Alias
+	for rows.Next() {
+		alias, err := scanAlias(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, alias)
+	}
+	return out, rows.Err()
+}
+
+func (r *Repository) GetAlias(ctx context.Context, teamID, functionRef, aliasName string) (*Alias, error) {
+	if r == nil || r.pool == nil {
+		return nil, fmt.Errorf("function repository is not configured")
+	}
+	fn, err := r.GetFunction(ctx, teamID, functionRef)
+	if err != nil {
+		return nil, err
+	}
+	row := r.pool.QueryRow(ctx, `
+		SELECT a.function_id, a.alias, a.revision_id, r.revision_number, a.updated_by, a.updated_at
+		FROM functions_aliases a
+		JOIN functions_revisions r ON r.id = a.revision_id
+		WHERE a.function_id = $1 AND a.alias = $2
+	`, fn.ID, aliasName)
+	out, err := scanAlias(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return out, err
 }
 
 func (r *Repository) SetAlias(ctx context.Context, teamID, functionRef, alias string, revisionNumber int, updatedBy string) (*Alias, error) {
@@ -350,6 +480,7 @@ func NewFunction(teamID, name, userID string) *Function {
 		Name:        strings.TrimSpace(name),
 		Slug:        slug,
 		DomainLabel: DomainLabel(slug, teamID),
+		Enabled:     true,
 		CreatedBy:   userID,
 	}
 }
@@ -373,9 +504,9 @@ func NewRevision(teamID, sandboxID, serviceID, templateID string, snapshot any, 
 func insertFunction(ctx context.Context, tx pgx.Tx, fn *Function) error {
 	_, err := tx.Exec(ctx, `
 		INSERT INTO functions (
-			id, team_id, name, slug, domain_label, active_revision_id, created_by, created_at, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-	`, fn.ID, fn.TeamID, fn.Name, fn.Slug, fn.DomainLabel, fn.ActiveRevisionID, fn.CreatedBy, fn.CreatedAt, fn.UpdatedAt)
+			id, team_id, name, slug, domain_label, active_revision_id, enabled, created_by, created_at, updated_at, deleted_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+	`, fn.ID, fn.TeamID, fn.Name, fn.Slug, fn.DomainLabel, fn.ActiveRevisionID, fn.Enabled, fn.CreatedBy, fn.CreatedAt, fn.UpdatedAt, fn.DeletedAt)
 	return err
 }
 
@@ -412,10 +543,18 @@ type rowScanner interface {
 
 func scanFunction(row rowScanner) (*Function, error) {
 	var fn Function
-	if err := row.Scan(&fn.ID, &fn.TeamID, &fn.Name, &fn.Slug, &fn.DomainLabel, &fn.ActiveRevisionID, &fn.CreatedBy, &fn.CreatedAt, &fn.UpdatedAt); err != nil {
+	if err := row.Scan(&fn.ID, &fn.TeamID, &fn.Name, &fn.Slug, &fn.DomainLabel, &fn.ActiveRevisionID, &fn.Enabled, &fn.CreatedBy, &fn.CreatedAt, &fn.UpdatedAt, &fn.DeletedAt); err != nil {
 		return nil, err
 	}
 	return &fn, nil
+}
+
+func scanAlias(row rowScanner) (*Alias, error) {
+	var alias Alias
+	if err := row.Scan(&alias.FunctionID, &alias.Alias, &alias.RevisionID, &alias.RevisionNumber, &alias.UpdatedBy, &alias.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &alias, nil
 }
 
 func scanRevision(row rowScanner) (*Revision, error) {

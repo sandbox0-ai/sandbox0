@@ -209,6 +209,10 @@ func (s *Server) handleNoRoute(c *gin.Context) {
 		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "function not found")
 		return
 	}
+	if !fn.Enabled {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "function disabled")
+		return
+	}
 	rev, err := s.functionRepo.GetActiveRevision(c.Request.Context(), fn)
 	if err != nil {
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "function revision is not available")

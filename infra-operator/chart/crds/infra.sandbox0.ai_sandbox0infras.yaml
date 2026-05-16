@@ -941,6 +941,7 @@ spec:
                             - regional-gateway
                             - scheduler
                             - function-gateway
+                            - cluster-gateway
                             items:
                               type: string
                             type: array

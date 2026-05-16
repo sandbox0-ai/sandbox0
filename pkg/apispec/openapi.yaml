@@ -1715,6 +1715,61 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+    put:
+      tags: [functions]
+      summary: Update function lifecycle state
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FunctionUpdateRequest"
+      responses:
+        "200":
+          description: Function updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessFunctionResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+    delete:
+      tags: [functions]
+      summary: Delete function
+      description: Soft-deletes the function, disables its host, and schedules best-effort runtime and revision volume cleanup. The function slug and domain label remain reserved.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Function deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessFunctionResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
   /api/v1/functions/{id}/revisions:
     get:
       tags: [functions]
@@ -1758,7 +1813,86 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessFunctionRevisionCreateResponse"
+  /api/v1/functions/{id}/revisions/{revision_number}:
+    get:
+      tags: [functions]
+      summary: Get function revision
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: revision_number
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int32
+      responses:
+        "200":
+          description: Function revision
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessFunctionRevisionResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/functions/{id}/aliases:
+    get:
+      tags: [functions]
+      summary: List function aliases
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Function aliases
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessFunctionAliasListResponse"
   /api/v1/functions/{id}/aliases/{alias}:
+    get:
+      tags: [functions]
+      summary: Get function alias
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: alias
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Function alias
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessFunctionAliasResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
     put:
       tags: [functions]
       summary: Point a function alias at a revision
@@ -1788,6 +1922,65 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessFunctionAliasResponse"
+  /api/v1/functions/{id}/runtime:
+    get:
+      tags: [functions]
+      summary: Get active function runtime
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Function runtime status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessFunctionRuntimeResponse"
+  /api/v1/functions/{id}/runtime/restart:
+    post:
+      tags: [functions]
+      summary: Restart active function runtime
+      description: Deletes the current restored runtime sandbox when one exists and clears the runtime mapping; the next function request starts a fresh runtime.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Function runtime restarted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessFunctionRuntimeResponse"
+  /api/v1/functions/{id}/runtime/recycle:
+    post:
+      tags: [functions]
+      summary: Recycle active function runtime
+      description: Deletes the current restored runtime sandbox when one exists and clears the runtime mapping; the next function request starts a fresh runtime.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Function runtime recycled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessFunctionRuntimeResponse"
   /api/v1/sandboxes/{id}/contexts:
     post:
       tags: [contexts]
@@ -3939,6 +4132,15 @@ components:
           default: true
           description: Whether to move the production alias to the new revision.
       required: [source]
+    FunctionUpdateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Mutable function display name. Slug and domain label stay stable.
+        enabled:
+          type: boolean
+          description: Whether the function host should serve traffic. Disabled functions do not restore runtime sandboxes.
     FunctionAliasUpdateRequest:
       type: object
       properties:
@@ -3961,6 +4163,8 @@ components:
           type: string
         active_revision_id:
           type: string
+        enabled:
+          type: boolean
         created_by:
           type: string
         created_at:
@@ -3969,7 +4173,11 @@ components:
         updated_at:
           type: string
           format: date-time
-      required: [id, team_id, name, slug, domain_label, created_at, updated_at]
+        deleted_at:
+          type: string
+          format: date-time
+          description: Set when the function has been soft-deleted. Deleted functions are hidden from normal list/get APIs and do not serve traffic.
+      required: [id, team_id, name, slug, domain_label, enabled, created_at, updated_at]
     FunctionRecord:
       allOf:
         - $ref: "#/components/schemas/Function"
@@ -4054,6 +4262,32 @@ components:
           type: string
           format: date-time
       required: [function_id, alias, revision_id, revision_number, updated_at]
+    FunctionRuntimeState:
+      type: string
+      enum: [disabled, idle, active]
+    FunctionRuntimeStatus:
+      type: object
+      properties:
+        function_id:
+          type: string
+        revision_id:
+          type: string
+        revision_number:
+          type: integer
+          format: int32
+        state:
+          $ref: "#/components/schemas/FunctionRuntimeState"
+        runtime_sandbox_id:
+          type: string
+          description: Current restored runtime sandbox, if one exists.
+        runtime_context_id:
+          type: string
+          description: Current runtime process context, if one exists.
+        runtime_updated_at:
+          type: string
+          format: date-time
+          description: Last time the runtime mapping was updated.
+      required: [function_id, revision_id, revision_number, state]
     SuccessFunctionResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
@@ -4106,6 +4340,17 @@ components:
                   items:
                     $ref: "#/components/schemas/FunctionRevision"
               required: [revisions]
+    SuccessFunctionRevisionResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                revision:
+                  $ref: "#/components/schemas/FunctionRevision"
+              required: [revision]
     SuccessFunctionRevisionCreateResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
@@ -4119,6 +4364,19 @@ components:
                 promoted:
                   type: boolean
               required: [revision, promoted]
+    SuccessFunctionAliasListResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                aliases:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/FunctionAlias"
+              required: [aliases]
     SuccessFunctionAliasResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
@@ -4130,6 +4388,17 @@ components:
                 alias:
                   $ref: "#/components/schemas/FunctionAlias"
               required: [alias]
+    SuccessFunctionRuntimeResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                runtime:
+                  $ref: "#/components/schemas/FunctionRuntimeStatus"
+              required: [runtime]
     WebhookConfig:
       type: object
       description: |

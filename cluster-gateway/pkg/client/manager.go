@@ -154,6 +154,42 @@ func (c *ManagerClient) GetSandboxInternal(ctx context.Context, sandboxID string
 	return sandbox, nil
 }
 
+// TerminateSandbox asks manager to terminate a sandbox after cluster-gateway
+// has authenticated and authorized the caller.
+func (c *ManagerClient) TerminateSandbox(ctx context.Context, sandboxID, userID, teamID string) error {
+	token, err := c.internalAuthGen.Generate("manager", teamID, userID, internalauth.GenerateOptions{})
+	if err != nil {
+		return fmt.Errorf("generate internal token: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/api/v1/sandboxes/%s", c.baseURL, sandboxID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set(internalauth.DefaultTokenHeader, token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("execute request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("%w: %s", ErrSandboxNotFound, sandboxID)
+	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_, apiErr, err := spec.DecodeResponse[map[string]any](bytes.NewReader(body))
+	if err == nil && apiErr != nil {
+		return fmt.Errorf("%w: %s", ErrManagerUnavailable, apiErr.Message)
+	}
+	return fmt.Errorf("%w: unexpected status code %d: %s", ErrManagerUnavailable, resp.StatusCode, string(body))
+}
+
 // ResumeSandbox asks manager to resume a paused sandbox and waits for it to become active.
 func (c *ManagerClient) ResumeSandbox(ctx context.Context, sandboxID, userID, teamID string) error {
 	token, err := c.internalAuthGen.Generate("manager", teamID, userID, internalauth.GenerateOptions{})

@@ -395,7 +395,7 @@ func assertSSHTransparentEgressAuthProxy(env *framework.ScenarioEnv, session *e2
 				CredentialRef: refName,
 				Ports:         &ports,
 				Protocol:      ptrTo(apispec.EgressAuthProtocolSsh),
-				Rollout:       ptrTo(apispec.Enabled),
+				Rollout:       ptrTo(apispec.EgressAuthRolloutModeEnabled),
 			}},
 		},
 		CredentialBindings: &[]apispec.CredentialBinding{{

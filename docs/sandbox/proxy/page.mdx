@@ -16,101 +16,227 @@ Use it when a sandbox needs a customer-controlled egress IP, customer-side audit
 For domain-classified TCP traffic, netd sends the hostname to the SOCKS5 proxy so the proxy can resolve it from the customer network side. The sandbox process still needs to open a TCP connection first, so make sure the application can resolve or otherwise reach the initial destination address.
 </Callout>
 
-## Policy Shape
-
-Add `egress.proxy` to the sandbox network policy:
-
-```json
-{
-    "mode": "block-all",
-    "egress": {
-        "trafficRules": [
-            {
-                "name": "allow-private-api",
-                "action": "allow",
-                "domains": ["api.internal.example.com"],
-                "ports": [{"port": 443, "protocol": "tcp"}],
-                "appProtocols": ["tls"]
-            }
-        ],
-        "proxy": {
-            "type": "socks5",
-            "address": "proxy.example.com:1080",
-            "credentialRef": "corp-proxy"
-        }
-    },
-    "credentialBindings": [
-        {
-            "ref": "corp-proxy",
-            "sourceRef": "corp-proxy-source",
-            "projection": {
-                "type": "username_password",
-                "usernamePassword": {}
-            }
-        }
-    ]
-}
-```
-
-## Credentials
-
-Create a credential source that stores the SOCKS5 username and password, then reference it from `credentialBindings`.
-
-```json
-{
-    "name": "corp-proxy-source",
-    "resolverKind": "static_username_password",
-    "spec": {
-        "staticUsernamePassword": {
-            "username": "proxy-user",
-            "password": "proxy-password"
-        }
-    }
-}
-```
-
-`credentialRef` is optional. Leave it empty for a SOCKS5 proxy that does not require authentication.
-
-## Update Runtime Policy
+## Configure Proxy
 
 <Endpoint method="PUT">
 /api/v1/sandboxes/{'{id}'}/network
 </Endpoint>
 
-```bash
-curl -X PUT "$SANDBOX0_API_URL/api/v1/sandboxes/$SANDBOX_ID/network" \
-    -H "Authorization: Bearer $SANDBOX0_API_KEY" \
-    -H "Content-Type: application/json" \
-    -d '{
-        "mode": "block-all",
-        "egress": {
-            "trafficRules": [
-                {
-                    "name": "allow-private-api",
-                    "action": "allow",
-                    "domains": ["api.internal.example.com"],
-                    "ports": [{"port": 443, "protocol": "tcp"}],
-                    "appProtocols": ["tls"]
-                }
-            ],
-            "proxy": {
-                "type": "socks5",
-                "address": "proxy.example.com:1080",
-                "credentialRef": "corp-proxy"
-            }
-        },
-        "credentialBindings": [
+Create a credential source for proxies that require username/password auth, then attach the proxy to the sandbox network policy.
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `source, err := client.CreateCredentialSource(ctx, apispec.CredentialSourceWriteRequest{
+    Name: "corp-proxy-source",
+    ResolverKind: apispec.CredentialSourceResolverKindStaticUsernamePassword,
+    Spec: apispec.CredentialSourceWriteSpec{
+        StaticUsernamePassword: apispec.NewOptStaticUsernamePasswordSourceSpec(
+            apispec.StaticUsernamePasswordSourceSpec{
+                Username: os.Getenv("SOCKS5_USERNAME"),
+                Password: os.Getenv("SOCKS5_PASSWORD"),
+            },
+        ),
+    },
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+credentialRef := "corp-proxy"
+_, err = sandbox.UpdateNetworkPolicy(ctx, apispec.SandboxNetworkPolicy{
+    Mode: apispec.SandboxNetworkPolicyModeBlockAll,
+    Egress: apispec.NewOptNetworkEgressPolicy(apispec.NetworkEgressPolicy{
+        TrafficRules: []apispec.TrafficRule{
             {
-                "ref": "corp-proxy",
-                "sourceRef": "corp-proxy-source",
-                "projection": {
-                    "type": "username_password",
-                    "usernamePassword": {}
-                }
-            }
-        ]
-    }'
-```
+                Name: apispec.NewOptString("allow-private-api"),
+                Action: apispec.TrafficRuleActionAllow,
+                Domains: []string{"api.internal.example.com"},
+                Ports: []apispec.PortSpec{
+                    {
+                        Port: 443,
+                        Protocol: apispec.NewOptString("tcp"),
+                    },
+                },
+                AppProtocols: []apispec.TrafficRuleAppProtocol{
+                    apispec.TrafficRuleAppProtocolTLS,
+                },
+            },
+        },
+        Proxy: apispec.NewOptEgressProxyPolicy(apispec.EgressProxyPolicy{
+            Type: apispec.EgressProxyTypeSocks5,
+            Address: "proxy.example.com:1080",
+            CredentialRef: apispec.NewOptString(credentialRef),
+        }),
+    }),
+    CredentialBindings: []apispec.CredentialBinding{
+        {
+            Ref: credentialRef,
+            SourceRef: source.Name,
+            Projection: apispec.ProjectionSpec{
+                Type: apispec.CredentialProjectionTypeUsernamePassword,
+                UsernamePassword: &apispec.UsernamePasswordProjection{},
+            },
+        },
+    },
+})
+if err != nil {
+    log.Fatal(err)
+}`
+    },
+    {
+      label: "JavaScript",
+      language: "typescript",
+      code: `import { Client, apispec } from "sandbox0";
+
+const client = new Client({ token: process.env.S0_API_KEY! });
+
+const source = await client.credentialSources.create({
+    name: "corp-proxy-source",
+    resolverKind: "static_username_password",
+    spec: {
+        staticUsernamePassword: {
+            username: process.env.SOCKS5_USERNAME!,
+            password: process.env.SOCKS5_PASSWORD!,
+        },
+    },
+});
+
+const sandbox = client.sandbox(process.env.SANDBOX_ID!);
+const credentialRef = "corp-proxy";
+
+await sandbox.updateNetworkPolicy({
+    mode: apispec.models.SandboxNetworkPolicyModeEnum.BlockAll,
+    egress: {
+        trafficRules: [
+            {
+                name: "allow-private-api",
+                action: apispec.models.TrafficRuleAction.Allow,
+                domains: ["api.internal.example.com"],
+                ports: [{ port: 443, protocol: "tcp" }],
+                appProtocols: [
+                    apispec.models.TrafficRuleAppProtocol.TrafficRuleAppProtocolTls,
+                ],
+            },
+        ],
+        proxy: {
+            type: apispec.models.EgressProxyType.EgressProxyTypeSocks5,
+            address: "proxy.example.com:1080",
+            credentialRef,
+        },
+    },
+    credentialBindings: [
+        {
+            ref: credentialRef,
+            sourceRef: source.name,
+            projection: {
+                type: apispec.models.CredentialProjectionType.UsernamePassword,
+                usernamePassword: {},
+            },
+        },
+    ],
+});`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `import os
+
+from sandbox0 import Client
+from sandbox0.apispec.models.credential_binding import CredentialBinding
+from sandbox0.apispec.models.credential_projection_type import CredentialProjectionType
+from sandbox0.apispec.models.credential_source_resolver_kind import CredentialSourceResolverKind
+from sandbox0.apispec.models.credential_source_write_request import CredentialSourceWriteRequest
+from sandbox0.apispec.models.credential_source_write_spec import CredentialSourceWriteSpec
+from sandbox0.apispec.models.egress_proxy_policy import EgressProxyPolicy
+from sandbox0.apispec.models.egress_proxy_type import EgressProxyType
+from sandbox0.apispec.models.network_egress_policy import NetworkEgressPolicy
+from sandbox0.apispec.models.projection_spec import ProjectionSpec
+from sandbox0.apispec.models.sandbox_network_policy import SandboxNetworkPolicy
+from sandbox0.apispec.models.sandbox_network_policy_mode import SandboxNetworkPolicyMode
+from sandbox0.apispec.models.static_username_password_source_spec import StaticUsernamePasswordSourceSpec
+from sandbox0.apispec.models.traffic_rule import TrafficRule
+from sandbox0.apispec.models.traffic_rule_action import TrafficRuleAction
+from sandbox0.apispec.models.traffic_rule_app_protocol import TrafficRuleAppProtocol
+from sandbox0.apispec.models.username_password_projection import UsernamePasswordProjection
+
+client = Client(token=os.environ["S0_API_KEY"])
+
+source = client.create_credential_source(
+    CredentialSourceWriteRequest(
+        name="corp-proxy-source",
+        resolver_kind=CredentialSourceResolverKind.STATIC_USERNAME_PASSWORD,
+        spec=CredentialSourceWriteSpec(
+            static_username_password=StaticUsernamePasswordSourceSpec(
+                username=os.environ["SOCKS5_USERNAME"],
+                password=os.environ["SOCKS5_PASSWORD"],
+            ),
+        ),
+    )
+)
+
+sandbox = client.sandbox(os.environ["SANDBOX_ID"])
+credential_ref = "corp-proxy"
+
+sandbox.update_network_policy(
+    SandboxNetworkPolicy(
+        mode=SandboxNetworkPolicyMode.BLOCK_ALL,
+        egress=NetworkEgressPolicy(
+            traffic_rules=[
+                TrafficRule(
+                    name="allow-private-api",
+                    action=TrafficRuleAction.ALLOW,
+                    domains=["api.internal.example.com"],
+                    app_protocols=[TrafficRuleAppProtocol.TLS],
+                )
+            ],
+            proxy=EgressProxyPolicy(
+                type_=EgressProxyType.SOCKS5,
+                address="proxy.example.com:1080",
+                credential_ref=credential_ref,
+            ),
+        ),
+        credential_bindings=[
+            CredentialBinding(
+                ref=credential_ref,
+                source_ref=source.name,
+                projection=ProjectionSpec(
+                    type_=CredentialProjectionType.USERNAME_PASSWORD,
+                    username_password=UsernamePasswordProjection(),
+                ),
+            )
+        ],
+    )
+)`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `cat <<'EOF' > corp-proxy-source.yaml
+name: corp-proxy-source
+resolverKind: static_username_password
+spec:
+    staticUsernamePassword:
+        username: proxy-user
+        password: proxy-password
+EOF
+
+s0 credential create -f corp-proxy-source.yaml
+
+s0 sandbox network update -s "$SANDBOX_ID" \\
+    --mode block-all \\
+    --allow-domain api.internal.example.com \\
+    --allow-port 443/tcp \\
+    --proxy socks5://proxy.example.com:1080 \\
+    --proxy-credential-ref corp-proxy \\
+    --proxy-credential-source corp-proxy-source`
+    }
+  ]}
+/>
+
+`credentialRef` is optional. Leave it empty for a SOCKS5 proxy that does not require authentication. In the CLI, omit `--proxy-credential-ref` and `--proxy-credential-source` for unauthenticated proxies.
 
 ## Limits
 

@@ -223,7 +223,7 @@ func (s *SandboxService) getSandboxPod(ctx context.Context, sandboxID string) (*
 
 // podToSandbox converts a pod to a sandbox object
 func (s *SandboxService) podToSandbox(ctx context.Context, pod *corev1.Pod, sandboxID string) *Sandbox {
-	status := s.podPhaseToSandboxStatus(pod.Status.Phase)
+	status := s.podToSandboxStatus(pod)
 
 	// Parse timestamps
 	claimedAt := parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationClaimedAt)

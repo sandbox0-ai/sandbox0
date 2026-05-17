@@ -1162,7 +1162,7 @@ paths:
           description: Filter by sandbox status
           schema:
             type: string
-            enum: [starting, running, failed, completed]
+            enum: [starting, running, failed, completed, terminating]
         - name: template_id
           in: query
           description: Filter by template ID
@@ -4609,7 +4609,7 @@ components:
           type: string
         status:
           type: string
-          enum: [starting, running, failed, completed]
+          enum: [starting, running, failed, completed, terminating]
         paused:
           type: boolean
         power_state:

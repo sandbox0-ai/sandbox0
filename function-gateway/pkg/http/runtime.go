@@ -400,12 +400,19 @@ func functionSandboxWantsPaused(sandbox *mgr.Sandbox) bool {
 	return sandbox.Paused
 }
 
+func functionSandboxCanServeSource(sandbox *mgr.Sandbox) bool {
+	if sandbox == nil {
+		return false
+	}
+	return sandbox.Status == mgr.SandboxStatusRunning
+}
+
 func (s *Server) resolveFunctionSandbox(ctx context.Context, fn *functions.Function, rev *functions.Revision, service mgr.SandboxAppService) (*mgr.Sandbox, *functions.Revision, error) {
 	sourceSandbox, err := s.getSandboxFromClusterGateway(ctx, rev.SourceSandboxID)
-	if err == nil {
+	if err == nil && functionSandboxCanServeSource(sourceSandbox) {
 		return sourceSandbox, rev, nil
 	}
-	if !isPublishNotFound(err) {
+	if err != nil && !isPublishNotFound(err) {
 		return nil, rev, err
 	}
 	return s.ensureRestoredFunctionSandbox(ctx, fn, rev, service)

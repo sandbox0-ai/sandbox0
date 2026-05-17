@@ -269,6 +269,17 @@ func (s *SandboxService) probeSandboxPodOrFailure(ctx context.Context, pod *core
 	return result
 }
 
+// podToSandboxStatus converts pod state to sandbox status.
+func (s *SandboxService) podToSandboxStatus(pod *corev1.Pod) string {
+	if pod == nil {
+		return SandboxStatusPending
+	}
+	if pod.DeletionTimestamp != nil {
+		return SandboxStatusTerminating
+	}
+	return s.podPhaseToSandboxStatus(pod.Status.Phase)
+}
+
 // podPhaseToSandboxStatus converts pod phase to sandbox status
 func (s *SandboxService) podPhaseToSandboxStatus(phase corev1.PodPhase) string {
 	switch phase {

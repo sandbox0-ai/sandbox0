@@ -170,10 +170,11 @@ const (
 
 // Defines values for SandboxSummaryStatus.
 const (
-	SandboxSummaryStatusCompleted SandboxSummaryStatus = "completed"
-	SandboxSummaryStatusFailed    SandboxSummaryStatus = "failed"
-	SandboxSummaryStatusRunning   SandboxSummaryStatus = "running"
-	SandboxSummaryStatusStarting  SandboxSummaryStatus = "starting"
+	SandboxSummaryStatusCompleted   SandboxSummaryStatus = "completed"
+	SandboxSummaryStatusFailed      SandboxSummaryStatus = "failed"
+	SandboxSummaryStatusRunning     SandboxSummaryStatus = "running"
+	SandboxSummaryStatusStarting    SandboxSummaryStatus = "starting"
+	SandboxSummaryStatusTerminating SandboxSummaryStatus = "terminating"
 )
 
 // Defines values for SuccessAPIKeyListResponseSuccess.
@@ -524,10 +525,11 @@ const (
 
 // Defines values for GetApiV1SandboxesParamsStatus.
 const (
-	GetApiV1SandboxesParamsStatusCompleted GetApiV1SandboxesParamsStatus = "completed"
-	GetApiV1SandboxesParamsStatusFailed    GetApiV1SandboxesParamsStatus = "failed"
-	GetApiV1SandboxesParamsStatusRunning   GetApiV1SandboxesParamsStatus = "running"
-	GetApiV1SandboxesParamsStatusStarting  GetApiV1SandboxesParamsStatus = "starting"
+	GetApiV1SandboxesParamsStatusCompleted   GetApiV1SandboxesParamsStatus = "completed"
+	GetApiV1SandboxesParamsStatusFailed      GetApiV1SandboxesParamsStatus = "failed"
+	GetApiV1SandboxesParamsStatusRunning     GetApiV1SandboxesParamsStatus = "running"
+	GetApiV1SandboxesParamsStatusStarting    GetApiV1SandboxesParamsStatus = "starting"
+	GetApiV1SandboxesParamsStatusTerminating GetApiV1SandboxesParamsStatus = "terminating"
 )
 
 // APIKey defines model for APIKey.

@@ -9,6 +9,7 @@ import (
 	neturl "net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -51,6 +52,8 @@ type Handler struct {
 	volumeStore   RevisionVolumeStore
 	runtime       RuntimeController
 	logger        *zap.Logger
+
+	revisionPublishLocks sync.Map
 }
 
 func New(repo *functions.Repository, cfg Config, lookup SandboxLookup, volumeStore RevisionVolumeStore, runtime RuntimeController, logger *zap.Logger) *Handler {
@@ -65,6 +68,19 @@ func New(repo *functions.Repository, cfg Config, lookup SandboxLookup, volumeSto
 		runtime:       runtime,
 		logger:        logger,
 	}
+}
+
+func (h *Handler) tryLockFunctionRevisionPublish(teamID, functionID string) (func(), bool) {
+	key := teamID + ":" + functionID
+	newLock := &sync.Mutex{}
+	actual, _ := h.revisionPublishLocks.LoadOrStore(key, newLock)
+	lock := actual.(*sync.Mutex)
+	if !lock.TryLock() {
+		return nil, false
+	}
+	return func() {
+		lock.Unlock()
+	}, true
 }
 
 func (h *Handler) RegisterRoutes(group *gin.RouterGroup, require PermissionMiddleware) {
@@ -362,6 +378,22 @@ func (h *Handler) createFunctionRevision(c *gin.Context) {
 		return
 	}
 
+	fn, err := h.repo.GetFunction(c.Request.Context(), authCtx.TeamID, c.Param("id"))
+	if err != nil {
+		if errors.Is(err, functions.ErrNotFound) {
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "function not found")
+			return
+		}
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to get function")
+		return
+	}
+	unlockRevisionPublish, ok := h.tryLockFunctionRevisionPublish(authCtx.TeamID, fn.ID)
+	if !ok {
+		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "function revision publish already in progress")
+		return
+	}
+	defer unlockRevisionPublish()
+
 	sandbox, serviceSnapshot, err := h.loadPublishableService(c.Request.Context(), authCtx, req.Source)
 	if err != nil {
 		h.writePublishError(c, err)
@@ -390,7 +422,7 @@ func (h *Handler) createFunctionRevision(c *gin.Context) {
 		promote = *req.Promote
 	}
 
-	rev, err = h.repo.CreateRevision(c.Request.Context(), authCtx.TeamID, c.Param("id"), rev, promote, userID)
+	rev, err = h.repo.CreateRevision(c.Request.Context(), authCtx.TeamID, fn.ID, rev, promote, userID)
 	if err != nil {
 		if errors.Is(err, functions.ErrNotFound) {
 			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "function not found")

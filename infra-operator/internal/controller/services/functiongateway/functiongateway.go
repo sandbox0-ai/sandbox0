@@ -30,6 +30,7 @@ import (
 
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
+	redissvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/redis"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
@@ -216,6 +217,9 @@ func (r *Reconciler) buildConfig(ctx context.Context, compiledPlan *infraplan.In
 	}
 	if dsn, err := compiledPlan.DatabaseDSN(ctx, r.Resources.Client); err == nil {
 		cfg.DatabaseURL = dsn
+	}
+	if err := redissvc.ApplyGatewayRateLimitConfig(ctx, r.Resources.Client, compiledPlan.Scope.Owner(), &cfg.GatewayConfig); err != nil {
+		return nil, err
 	}
 	cfg.DefaultClusterGatewayURL = compiledPlan.FunctionGateway.DefaultClusterGatewayURL
 	if compiledPlan.Components.EnableScheduler {

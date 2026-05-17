@@ -444,6 +444,75 @@ spec:
                       URLs
                     type: string
                 type: object
+              redis:
+                description: |-
+                  Redis configures a region-level Redis backend for shared services such as
+                  distributed gateway rate limiting. When omitted, gateway rate limiting
+                  uses process-local memory.
+                properties:
+                  builtin:
+                    default: {}
+                    description: Builtin configures the built-in single-node Redis
+                      instance.
+                    properties:
+                      enabled:
+                        default: true
+                        description: Enabled enables the built-in Redis instance.
+                        type: boolean
+                      image:
+                        default: redis:7-alpine
+                        description: Image specifies the Redis image for the builtin
+                          instance.
+                        type: string
+                      port:
+                        default: 6379
+                        description: Port specifies the Redis port.
+                        format: int32
+                        type: integer
+                    type: object
+                  external:
+                    description: External configures connection to an external Redis
+                      instance.
+                    properties:
+                      urlSecret:
+                        description: URLSecret references a secret containing the
+                          Redis URL.
+                        properties:
+                          key:
+                            default: url
+                            description: Key is the key containing the Redis URL.
+                            type: string
+                          name:
+                            description: Name is the name of the secret.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                    required:
+                    - urlSecret
+                    type: object
+                  failOpen:
+                    default: true
+                    description: FailOpen allows traffic when Redis is temporarily
+                      unavailable.
+                    type: boolean
+                  keyPrefix:
+                    default: sandbox0:ratelimit
+                    description: KeyPrefix prefixes keys used by sandbox0 rate limiters.
+                    type: string
+                  operationTimeout:
+                    default: 100ms
+                    description: OperationTimeout bounds each Redis rate limit operation.
+                    type: string
+                  type:
+                    default: builtin
+                    description: 'Type specifies the Redis backend type: builtin or
+                      external.'
+                    enum:
+                    - builtin
+                    - external
+                    type: string
+                type: object
               region:
                 description: Region identifies the region for multi-cluster deployments
                 type: string
@@ -1089,38 +1158,11 @@ spec:
                           proxyTimeout:
                             default: 10s
                             type: string
-                          rateLimitBackend:
-                            default: memory
-                            description: 'RateLimitBackend selects the rate limit
-                              backend. Supported values: "memory", "redis".'
-                            enum:
-                            - memory
-                            - redis
-                            type: string
                           rateLimitBurst:
                             default: 200
                             type: integer
                           rateLimitCleanupInterval:
                             default: 10m
-                            type: string
-                          rateLimitFailOpen:
-                            default: true
-                            description: RateLimitFailOpen allows traffic when the
-                              configured backend is temporarily unavailable.
-                            type: boolean
-                          rateLimitRedisKeyPrefix:
-                            default: sandbox0:ratelimit
-                            description: RateLimitRedisKeyPrefix prefixes Redis keys
-                              used by the rate limiter.
-                            type: string
-                          rateLimitRedisTimeout:
-                            default: 100ms
-                            description: RateLimitRedisTimeout bounds each Redis rate
-                              limit operation.
-                            type: string
-                          rateLimitRedisURL:
-                            description: RateLimitRedisURL configures the Redis backend
-                              when RateLimitBackend is "redis".
                             type: string
                           rateLimitRps:
                             default: 100
@@ -1379,38 +1421,11 @@ spec:
                           proxyTimeout:
                             default: 30s
                             type: string
-                          rateLimitBackend:
-                            default: memory
-                            description: 'RateLimitBackend selects the rate limit
-                              backend. Supported values: "memory", "redis".'
-                            enum:
-                            - memory
-                            - redis
-                            type: string
                           rateLimitBurst:
                             default: 200
                             type: integer
                           rateLimitCleanupInterval:
                             default: 10m
-                            type: string
-                          rateLimitFailOpen:
-                            default: true
-                            description: RateLimitFailOpen allows traffic when the
-                              configured backend is temporarily unavailable.
-                            type: boolean
-                          rateLimitRedisKeyPrefix:
-                            default: sandbox0:ratelimit
-                            description: RateLimitRedisKeyPrefix prefixes Redis keys
-                              used by the rate limiter.
-                            type: string
-                          rateLimitRedisTimeout:
-                            default: 100ms
-                            description: RateLimitRedisTimeout bounds each Redis rate
-                              limit operation.
-                            type: string
-                          rateLimitRedisURL:
-                            description: RateLimitRedisURL configures the Redis backend
-                              when RateLimitBackend is "redis".
                             type: string
                           rateLimitRps:
                             default: 100
@@ -1710,38 +1725,11 @@ spec:
                           oidcStateTtl:
                             default: 10m
                             type: string
-                          rateLimitBackend:
-                            default: memory
-                            description: 'RateLimitBackend selects the rate limit
-                              backend. Supported values: "memory", "redis".'
-                            enum:
-                            - memory
-                            - redis
-                            type: string
                           rateLimitBurst:
                             default: 200
                             type: integer
                           rateLimitCleanupInterval:
                             default: 10m
-                            type: string
-                          rateLimitFailOpen:
-                            default: true
-                            description: RateLimitFailOpen allows traffic when the
-                              configured backend is temporarily unavailable.
-                            type: boolean
-                          rateLimitRedisKeyPrefix:
-                            default: sandbox0:ratelimit
-                            description: RateLimitRedisKeyPrefix prefixes Redis keys
-                              used by the rate limiter.
-                            type: string
-                          rateLimitRedisTimeout:
-                            default: 100ms
-                            description: RateLimitRedisTimeout bounds each Redis rate
-                              limit operation.
-                            type: string
-                          rateLimitRedisURL:
-                            description: RateLimitRedisURL configures the Redis backend
-                              when RateLimitBackend is "redis".
                             type: string
                           rateLimitRps:
                             default: 100
@@ -2484,38 +2472,11 @@ spec:
                           proxyTimeout:
                             default: 10s
                             type: string
-                          rateLimitBackend:
-                            default: memory
-                            description: 'RateLimitBackend selects the rate limit
-                              backend. Supported values: "memory", "redis".'
-                            enum:
-                            - memory
-                            - redis
-                            type: string
                           rateLimitBurst:
                             default: 200
                             type: integer
                           rateLimitCleanupInterval:
                             default: 10m
-                            type: string
-                          rateLimitFailOpen:
-                            default: true
-                            description: RateLimitFailOpen allows traffic when the
-                              configured backend is temporarily unavailable.
-                            type: boolean
-                          rateLimitRedisKeyPrefix:
-                            default: sandbox0:ratelimit
-                            description: RateLimitRedisKeyPrefix prefixes Redis keys
-                              used by the rate limiter.
-                            type: string
-                          rateLimitRedisTimeout:
-                            default: 100ms
-                            description: RateLimitRedisTimeout bounds each Redis rate
-                              limit operation.
-                            type: string
-                          rateLimitRedisURL:
-                            description: RateLimitRedisURL configures the Redis backend
-                              when RateLimitBackend is "redis".
                             type: string
                           rateLimitRps:
                             default: 100

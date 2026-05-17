@@ -11,7 +11,7 @@ A `Sandbox0Infra` spec is easier to reason about when you split it into five lay
 | Layer | Main fields | What it controls |
 |---|---|---|
 | Platform release | `infra-operator` chart / image version | Which sandbox0 component version to deploy |
-| Core dependencies | `spec.database`, `spec.metadataDatabase`, `spec.storage`, `spec.registry` | PostgreSQL, s0fs metadata, object storage, registry integration |
+| Core dependencies | `spec.database`, `spec.metadataDatabase`, `spec.storage`, `spec.redis`, `spec.registry` | PostgreSQL, s0fs metadata, object storage, gateway rate-limit Redis, registry integration |
 | Topology | `spec.services.*`, `spec.controlPlane`, `spec.cluster`, `spec.region` | Single-cluster vs multi-cluster shape and service placement |
 | Public routing | `spec.publicExposure`, `spec.internalAuth` | Public sandbox URLs and inter-service trust |
 | Runtime bootstrap | `spec.builtinTemplates`, `spec.initUser` | Default templates, warm pools, initial admin bootstrap |
@@ -19,7 +19,7 @@ A `Sandbox0Infra` spec is easier to reason about when you split it into five lay
 ## Recommended Reading Order
 
 1. Pick your topology with `spec.services.*`.
-2. Decide whether database/storage/registry stay `builtin` or move external.
+2. Decide whether database/storage/Redis/registry stay `builtin` or move external.
 3. Configure public exposure and cluster identity.
 4. Seed templates and initial admin user.
 5. Only then tune per-service `config` blocks.
@@ -84,6 +84,46 @@ spec:
     services:
         storageProxy:
             enabled: true
+```
+
+### Shared Redis Rate Limiting
+
+Gateway rate limiting defaults to process-local memory. Configure `spec.redis` when gateway replicas need a shared Redis backend; infra-operator injects the Redis rate-limit settings into gateway services.
+
+```yaml
+spec:
+    redis:
+        type: builtin
+        builtin:
+            enabled: true
+```
+
+For an external Redis instance, store the URL in a Secret and reference it from `spec.redis`.
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+    name: redis-url
+    namespace: sandbox0-system
+stringData:
+    url: rediss://:password@redis.example:6379/0
+---
+apiVersion: infra.sandbox0.ai/v1alpha1
+kind: Sandbox0Infra
+metadata:
+    name: fullmode
+    namespace: sandbox0-system
+spec:
+    redis:
+        type: external
+        external:
+            urlSecret:
+                name: redis-url
+                key: url
+        keyPrefix: sandbox0:ratelimit:prod
+        operationTimeout: 100ms
+        failOpen: true
 ```
 
 ### Public Routing and Region Identity

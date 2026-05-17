@@ -59,6 +59,7 @@ type ComponentPlan struct {
 	EnableNetd                bool
 	EnableInternalAuth        bool
 	EnableDatabase            bool
+	EnableRedis               bool
 	EnableStorage             bool
 	EnableRegistry            bool
 	EnableInitUser            bool
@@ -72,6 +73,7 @@ type ValidationPlan struct {
 
 type CleanupPlan struct {
 	CleanupBuiltinDatabase bool
+	CleanupBuiltinRedis    bool
 	CleanupBuiltinStorage  bool
 	CleanupBuiltinRegistry bool
 	DeleteNamespaced       []ResourceRef
@@ -219,6 +221,7 @@ func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 	enableManager := infrav1alpha1.IsManagerEnabled(infra)
 	enableStorageProxy := infrav1alpha1.IsStorageProxyEnabled(infra)
 	enableDatabase := infrav1alpha1.IsDatabaseEnabled(infra)
+	enableRedis := infrav1alpha1.IsRedisEnabled(infra)
 
 	hasControlPlane := enableRegionalGateway || enableFunctionGateway || enableSSHGateway || enableScheduler
 	hasDataPlane := enableClusterGateway || enableManager || enableStorageProxy
@@ -238,6 +241,7 @@ func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 		EnableNetd:                infrav1alpha1.IsNetdEnabled(infra),
 		EnableInternalAuth:        hasControlPlane || hasDataPlane,
 		EnableDatabase:            enableDatabase,
+		EnableRedis:               enableRedis,
 		EnableStorage:             infrav1alpha1.IsStorageEnabled(infra),
 		EnableRegistry:            infrav1alpha1.IsRegistryEnabled(infra),
 		EnableInitUser:            enableDatabase && initUserConsumerEnabled(infra),
@@ -802,6 +806,7 @@ func compileCleanupPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 	}
 
 	cleanup.CleanupBuiltinDatabase = !builtinDatabaseActive(infra)
+	cleanup.CleanupBuiltinRedis = !builtinRedisActive(infra)
 	cleanup.CleanupBuiltinStorage = !builtinStorageActive(infra)
 	cleanup.CleanupBuiltinRegistry = !builtinRegistryActive(infra)
 
@@ -948,6 +953,9 @@ func compileStatusPlan(compiled *InfraPlan) StatusPlan {
 	if components.EnableDatabase {
 		expected = append(expected, infrav1alpha1.ConditionTypeDatabaseReady)
 	}
+	if components.EnableRedis {
+		expected = append(expected, infrav1alpha1.ConditionTypeRedisReady)
+	}
 	if components.EnableStorage {
 		expected = append(expected, infrav1alpha1.ConditionTypeStorageReady)
 	}
@@ -1028,6 +1036,9 @@ func compileWorkflowPlan(compiled *InfraPlan) WorkflowPlan {
 	}
 	if compiled.Components.EnableDatabase {
 		appendSuccessStep("database", infrav1alpha1.ConditionTypeDatabaseReady, "DatabaseReady", "Database is ready", "DatabaseFailed")
+	}
+	if compiled.Components.EnableRedis {
+		appendSuccessStep("redis", infrav1alpha1.ConditionTypeRedisReady, "RedisReady", "Redis is ready", "RedisFailed")
 	}
 	if compiled.Components.EnableStorage {
 		appendSuccessStep("storage", infrav1alpha1.ConditionTypeStorageReady, "StorageReady", "Storage is ready", "StorageFailed")
@@ -1542,6 +1553,19 @@ func builtinDatabaseActive(infra *infrav1alpha1.Sandbox0Infra) bool {
 		return true
 	}
 	return infra.Spec.Database.Builtin.Enabled
+}
+
+func builtinRedisActive(infra *infrav1alpha1.Sandbox0Infra) bool {
+	if infra == nil || infra.Spec.Redis == nil {
+		return false
+	}
+	if infra.Spec.Redis.Type != "" && infra.Spec.Redis.Type != infrav1alpha1.RedisTypeBuiltin {
+		return false
+	}
+	if infra.Spec.Redis.Builtin == nil {
+		return true
+	}
+	return infra.Spec.Redis.Builtin.Enabled
 }
 
 func builtinStorageActive(infra *infrav1alpha1.Sandbox0Infra) bool {

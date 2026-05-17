@@ -55,6 +55,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/manager"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/netd"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/nodereadiness"
+	redissvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/redis"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/regionalgateway"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/registry"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/scheduler"
@@ -164,6 +165,9 @@ func (r *Sandbox0InfraReconciler) setDefaults(infra *infrav1alpha1.Sandbox0Infra
 	if infra.Spec.Storage != nil && infra.Spec.Storage.Type == "" {
 		infra.Spec.Storage.Type = infrav1alpha1.StorageTypeBuiltin
 	}
+	if infra.Spec.Redis != nil && infra.Spec.Redis.Type == "" {
+		infra.Spec.Redis.Type = infrav1alpha1.RedisTypeBuiltin
+	}
 	if infra.Spec.Registry != nil && infra.Spec.Registry.Provider == "" {
 		infra.Spec.Registry.Provider = infrav1alpha1.RegistryProviderBuiltin
 	}
@@ -234,6 +238,7 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 	imageTag := r.getImageTag(ctx)
 	authReconciler := internalauth.NewReconciler(resources)
 	dbReconciler := database.NewReconciler(resources)
+	redisReconciler := redissvc.NewReconciler(resources)
 	storageReconciler := storage.NewReconciler(resources)
 	registryReconciler := registry.NewReconciler(resources)
 	globalGatewayReconciler := globalgateway.NewReconciler(resources)
@@ -249,11 +254,11 @@ func (r *Sandbox0InfraReconciler) reconcileComponentPlan(ctx context.Context, in
 	nodeReadinessReconciler := nodereadiness.NewReconciler(resources)
 	rbacReconciler := rbac.NewReconciler(resources)
 
-	if err := r.cleanupDisabledServiceResources(ctx, infra, compiledPlan.Cleanup, dbReconciler, storageReconciler, registryReconciler); err != nil {
+	if err := r.cleanupDisabledServiceResources(ctx, infra, compiledPlan.Cleanup, dbReconciler, redisReconciler, storageReconciler, registryReconciler); err != nil {
 		return ctrl.Result{RequeueAfter: requeueInterval}, err
 	}
 
-	steps, err := r.bindWorkflowSteps(infra, compiledPlan, resources, imageRepo, imageTag, authReconciler, dbReconciler, storageReconciler, registryReconciler, globalGatewayReconciler, regionalGatewayReconciler, functionGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, ctldReconciler, netdReconciler, nodeReadinessReconciler, rbacReconciler)
+	steps, err := r.bindWorkflowSteps(infra, compiledPlan, resources, imageRepo, imageTag, authReconciler, dbReconciler, redisReconciler, storageReconciler, registryReconciler, globalGatewayReconciler, regionalGatewayReconciler, functionGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, ctldReconciler, netdReconciler, nodeReadinessReconciler, rbacReconciler)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -267,6 +272,7 @@ func (r *Sandbox0InfraReconciler) bindWorkflowSteps(
 	imageRepo, imageTag string,
 	authReconciler *internalauth.Reconciler,
 	dbReconciler *database.Reconciler,
+	redisReconciler *redissvc.Reconciler,
 	storageReconciler *storage.Reconciler,
 	registryReconciler *registry.Reconciler,
 	globalGatewayReconciler *globalgateway.Reconciler,
@@ -284,7 +290,7 @@ func (r *Sandbox0InfraReconciler) bindWorkflowSteps(
 ) ([]reconcileStep, error) {
 	steps := make([]reconcileStep, 0, len(compiledPlan.Workflow.Steps))
 	for _, planned := range compiledPlan.Workflow.Steps {
-		run, err := r.workflowStepRunner(infra, compiledPlan, resources, imageRepo, imageTag, planned.Name, authReconciler, dbReconciler, storageReconciler, registryReconciler, globalGatewayReconciler, regionalGatewayReconciler, functionGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, ctldReconciler, netdReconciler, nodeReadinessReconciler, rbacReconciler)
+		run, err := r.workflowStepRunner(infra, compiledPlan, resources, imageRepo, imageTag, planned.Name, authReconciler, dbReconciler, redisReconciler, storageReconciler, registryReconciler, globalGatewayReconciler, regionalGatewayReconciler, functionGatewayReconciler, sshGatewayReconciler, schedulerReconciler, clusterGatewayReconciler, managerReconciler, storageProxyReconciler, ctldReconciler, netdReconciler, nodeReadinessReconciler, rbacReconciler)
 		if err != nil {
 			return nil, err
 		}
@@ -308,6 +314,7 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 	imageRepo, imageTag, name string,
 	authReconciler *internalauth.Reconciler,
 	dbReconciler *database.Reconciler,
+	redisReconciler *redissvc.Reconciler,
 	storageReconciler *storage.Reconciler,
 	registryReconciler *registry.Reconciler,
 	globalGatewayReconciler *globalgateway.Reconciler,
@@ -336,6 +343,8 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 		return func(ctx context.Context) error { return authReconciler.Reconcile(ctx, infra) }, nil
 	case "database":
 		return func(ctx context.Context) error { return dbReconciler.Reconcile(ctx, infra) }, nil
+	case "redis":
+		return func(ctx context.Context) error { return redisReconciler.Reconcile(ctx, infra) }, nil
 	case "storage":
 		return func(ctx context.Context) error { return storageReconciler.Reconcile(ctx, infra) }, nil
 	case "registry":
@@ -431,6 +440,7 @@ func (r *Sandbox0InfraReconciler) cleanupDisabledServiceResources(
 	infra *infrav1alpha1.Sandbox0Infra,
 	cleanupPlan infraplan.CleanupPlan,
 	dbReconciler *database.Reconciler,
+	redisReconciler *redissvc.Reconciler,
 	storageReconciler *storage.Reconciler,
 	registryReconciler *registry.Reconciler,
 ) error {
@@ -453,6 +463,11 @@ func (r *Sandbox0InfraReconciler) cleanupDisabledServiceResources(
 
 	if cleanupPlan.CleanupBuiltinDatabase && dbReconciler != nil {
 		if err := dbReconciler.CleanupBuiltinResources(ctx, infra); err != nil {
+			return err
+		}
+	}
+	if cleanupPlan.CleanupBuiltinRedis && redisReconciler != nil {
+		if err := redisReconciler.CleanupBuiltinResources(ctx, infra); err != nil {
 			return err
 		}
 	}

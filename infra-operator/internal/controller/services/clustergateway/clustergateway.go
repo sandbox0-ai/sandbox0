@@ -28,6 +28,7 @@ import (
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
+	redissvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/redis"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -248,6 +249,9 @@ func (r *Reconciler) buildConfig(ctx context.Context, compiledPlan *infraplan.In
 
 	if dsn, err := compiledPlan.DatabaseDSN(ctx, r.Resources.Client); err == nil {
 		cfg.DatabaseURL = dsn
+	}
+	if err := redissvc.ApplyGatewayRateLimitConfig(ctx, r.Resources.Client, compiledPlan.Scope.Owner(), &cfg.GatewayConfig); err != nil {
+		return nil, err
 	}
 	if owner := compiledPlan.Scope.Owner(); owner != nil {
 		sshPort := int32(2222)

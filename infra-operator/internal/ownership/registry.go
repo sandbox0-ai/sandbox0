@@ -45,6 +45,14 @@ func Registry() []Entry {
 		prefix("spec.storage.gcs", "storage-proxy", []string{"storage", "storage-proxy", "ctld"}, nil, UpdateSemanticsDeclarative, "External GCS settings are converted into storage runtime config and storage client service accounts."),
 		prefix("spec.storage.oss", "storage-proxy", []string{"storage", "storage-proxy"}, nil, UpdateSemanticsDeclarative, "External OSS settings are converted into storage and storage-proxy runtime config."),
 
+		exact("spec.redis.type", "plan", []string{"redis", "global-gateway", "regional-gateway", "function-gateway", "cluster-gateway"}, []string{"InfraPlan.Components.EnableRedis"}, UpdateSemanticsDeclarative, "Selects builtin versus external Redis reconciliation and gateway rate-limit backend injection."),
+		prefix("spec.redis.builtin", "redis", []string{"redis", "global-gateway", "regional-gateway", "function-gateway", "cluster-gateway"}, nil, UpdateSemanticsDeclarative, "Builtin Redis fields are reconciled by the Redis service and injected into gateway rate-limit config."),
+		exact("spec.redis.builtin.enabled", "redis", []string{"redis", "status"}, []string{"InfraPlan.Components.EnableRedis"}, UpdateSemanticsDeclarative, "Enables builtin Redis reconciliation and disabled cleanup."),
+		prefix("spec.redis.external", "redis", []string{"redis", "global-gateway", "regional-gateway", "function-gateway", "cluster-gateway"}, nil, UpdateSemanticsDeclarative, "External Redis URL secret is injected into gateway rate-limit runtime config."),
+		exact("spec.redis.keyPrefix", "redis", []string{"global-gateway", "regional-gateway", "function-gateway", "cluster-gateway"}, nil, UpdateSemanticsDeclarative, "Prefixes keys used by gateway Redis rate limiters."),
+		exact("spec.redis.operationTimeout", "redis", []string{"global-gateway", "regional-gateway", "function-gateway", "cluster-gateway"}, nil, UpdateSemanticsDeclarative, "Controls Redis operation timeout for gateway rate limiting."),
+		exact("spec.redis.failOpen", "redis", []string{"global-gateway", "regional-gateway", "function-gateway", "cluster-gateway"}, nil, UpdateSemanticsDeclarative, "Controls gateway behavior when Redis rate limiting is unavailable."),
+
 		exact("spec.registry.provider", "plan", []string{"registry"}, []string{"InfraPlan.Components.EnableRegistry"}, UpdateSemanticsDeclarative, "Selects builtin versus external registry reconciliation."),
 		exact("spec.registry.imagePullSecretName", "registry", []string{"registry", "manager"}, nil, UpdateSemanticsDeclarative, "Controls the pull secret propagated into template namespaces."),
 		prefix("spec.registry.builtin", "registry", []string{"registry"}, nil, UpdateSemanticsMixed, "Builtin registry fields are reconciled by the registry service; immutable subpaths are declared separately."),

@@ -39,7 +39,7 @@ When `public` is true and `routes` is empty, Sandbox0 creates a default route us
 | `resume` | boolean | Whether this route may resume a paused sandbox when `auto_resume` is enabled |
 
 <Callout>
-Route rate limits use the gateway rate limit backend. Self-hosted deployments default to the in-memory backend for simple onboarding; configure the gateway `rate_limit_backend` as `redis` when multiple gateway replicas need shared limits.
+Route rate limits use the gateway rate limit backend. Self-hosted deployments default to process-local memory for simple onboarding. Configure `Sandbox0Infra.spec.redis` when multiple gateway replicas need shared Redis-backed limits.
 </Callout>
 
 ### Auth

@@ -35,6 +35,7 @@ import (
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
+	redissvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/redis"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
@@ -213,6 +214,9 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		return nil, err
 	}
 	cfg.DatabaseURL = dsn
+	if err := redissvc.ApplyGatewayRateLimitConfig(ctx, r.Resources.Client, infra, &cfg.GatewayConfig); err != nil {
+		return nil, err
+	}
 
 	if infra.Spec.InitUser != nil {
 		password := ""

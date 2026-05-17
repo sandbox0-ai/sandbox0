@@ -50,6 +50,12 @@ spec:
   #       name: aws-credentials
   #       accessKeyKey: accessKeyId
   #       secretKeyKey: secretAccessKey
+  # Optional region-level Redis for shared gateway rate limits. When omitted,
+  # gateways use process-local memory for simple onboarding.
+  # redis:
+  #   type: builtin
+  #   builtin:
+  #     enabled: true
   registry:
     # Builtin registry is for quick start; external registries use provider config.
     provider: builtin

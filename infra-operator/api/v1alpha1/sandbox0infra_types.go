@@ -42,6 +42,15 @@ const (
 	StorageTypeGCS     StorageType = "gcs"
 )
 
+// RedisType defines the type of Redis backend.
+// +kubebuilder:validation:Enum=builtin;external
+type RedisType string
+
+const (
+	RedisTypeBuiltin  RedisType = "builtin"
+	RedisTypeExternal RedisType = "external"
+)
+
 // RegistryProvider defines the registry provider type.
 // +kubebuilder:validation:Enum=builtin;aws;gcp;azure;aliyun;harbor
 type RegistryProvider string
@@ -91,6 +100,12 @@ type Sandbox0InfraSpec struct {
 	// Storage configures the storage backend (S0FS S3 backend)
 	// +optional
 	Storage *StorageConfig `json:"storage,omitempty"`
+
+	// Redis configures a region-level Redis backend for shared services such as
+	// distributed gateway rate limiting. When omitted, gateway rate limiting
+	// uses process-local memory.
+	// +optional
+	Redis *RedisConfig `json:"redis,omitempty"`
 
 	// Registry configures the container registry
 	// +optional
@@ -274,6 +289,71 @@ type MetadataDatabaseConfig struct {
 	// External configures an independent database for S0FS
 	// +optional
 	External *ExternalDatabaseConfig `json:"external,omitempty"`
+}
+
+// RedisConfig defines region-level Redis configuration.
+type RedisConfig struct {
+	// Type specifies the Redis backend type: builtin or external.
+	// +kubebuilder:default=builtin
+	Type RedisType `json:"type,omitempty"`
+
+	// Builtin configures the built-in single-node Redis instance.
+	// +optional
+	// +kubebuilder:default={}
+	Builtin *BuiltinRedisConfig `json:"builtin,omitempty"`
+
+	// External configures connection to an external Redis instance.
+	// +optional
+	External *ExternalRedisConfig `json:"external,omitempty"`
+
+	// KeyPrefix prefixes keys used by sandbox0 rate limiters.
+	// +optional
+	// +kubebuilder:default="sandbox0:ratelimit"
+	KeyPrefix string `json:"keyPrefix,omitempty"`
+
+	// OperationTimeout bounds each Redis rate limit operation.
+	// +optional
+	// +kubebuilder:default="100ms"
+	OperationTimeout metav1.Duration `json:"operationTimeout,omitempty"`
+
+	// FailOpen allows traffic when Redis is temporarily unavailable.
+	// +optional
+	// +kubebuilder:default=true
+	FailOpen *bool `json:"failOpen,omitempty"`
+}
+
+// BuiltinRedisConfig defines built-in Redis configuration.
+type BuiltinRedisConfig struct {
+	// Enabled enables the built-in Redis instance.
+	// +kubebuilder:default=true
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Image specifies the Redis image for the builtin instance.
+	// +kubebuilder:default="redis:7-alpine"
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// Port specifies the Redis port.
+	// +kubebuilder:default=6379
+	// +optional
+	Port int32 `json:"port,omitempty"`
+}
+
+// ExternalRedisConfig defines external Redis configuration.
+type ExternalRedisConfig struct {
+	// URLSecret references a secret containing the Redis URL.
+	URLSecret RedisURLSecretRef `json:"urlSecret"`
+}
+
+// RedisURLSecretRef references a Redis URL in a secret.
+type RedisURLSecretRef struct {
+	// Name is the name of the secret.
+	Name string `json:"name"`
+
+	// Key is the key containing the Redis URL.
+	// +kubebuilder:default="url"
+	// +optional
+	Key string `json:"key,omitempty"`
 }
 
 // StorageConfig defines storage backend configuration.
@@ -1089,6 +1169,25 @@ func IsStorageEnabled(infra *Sandbox0Infra) bool {
 	}
 }
 
+// IsRedisEnabled returns true when Redis should be reconciled and injected into
+// Redis-capable services.
+func IsRedisEnabled(infra *Sandbox0Infra) bool {
+	if infra == nil || infra.Spec.Redis == nil {
+		return false
+	}
+	switch infra.Spec.Redis.Type {
+	case RedisTypeBuiltin:
+		if infra.Spec.Redis.Builtin != nil {
+			return infra.Spec.Redis.Builtin.Enabled
+		}
+		return true
+	case RedisTypeExternal:
+		return true
+	default:
+		return true
+	}
+}
+
 // IsRegistryEnabled returns true when registry should be reconciled.
 func IsRegistryEnabled(infra *Sandbox0Infra) bool {
 	if infra == nil || infra.Spec.Registry == nil {
@@ -1432,6 +1531,7 @@ type LastOperation struct {
 const (
 	ConditionTypeReady                = "Ready"
 	ConditionTypeDatabaseReady        = "DatabaseReady"
+	ConditionTypeRedisReady           = "RedisReady"
 	ConditionTypeStorageReady         = "StorageReady"
 	ConditionTypeRegistryReady        = "RegistryReady"
 	ConditionTypeGlobalGatewayReady   = "GlobalGatewayReady"

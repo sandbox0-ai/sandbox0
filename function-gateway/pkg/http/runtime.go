@@ -22,11 +22,11 @@ import (
 	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functions"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/ratelimit"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"go.uber.org/zap"
-	"golang.org/x/time/rate"
 )
 
 const defaultFunctionAutoResumeTimeout = 30 * time.Second
@@ -71,7 +71,7 @@ func (s *Server) serveFunctionRevision(c *gin.Context, fn *functions.Function, r
 		return
 	}
 	if c.Request.Method == nethttp.MethodOptions && match.route.CORS != nil {
-		if !s.enforceFunctionRoute(c, fn.ID, match.route) {
+		if !s.enforceFunctionRoute(c, fn.TeamID, fn.ID, match.route) {
 			return
 		}
 	}
@@ -79,7 +79,7 @@ func (s *Server) serveFunctionRevision(c *gin.Context, fn *functions.Function, r
 		spec.JSONError(c, nethttp.StatusMethodNotAllowed, spec.CodeForbidden, "method is not allowed")
 		return
 	}
-	if !s.enforceFunctionRoute(c, fn.ID, match.route) {
+	if !s.enforceFunctionRoute(c, fn.TeamID, fn.ID, match.route) {
 		return
 	}
 
@@ -185,7 +185,7 @@ func functionRouteMethodAllowed(route *mgr.SandboxAppServiceRoute, method string
 	return false
 }
 
-func (s *Server) enforceFunctionRoute(c *gin.Context, functionID string, route *mgr.SandboxAppServiceRoute) bool {
+func (s *Server) enforceFunctionRoute(c *gin.Context, teamID, functionID string, route *mgr.SandboxAppServiceRoute) bool {
 	if route == nil {
 		return true
 	}
@@ -195,7 +195,18 @@ func (s *Server) enforceFunctionRoute(c *gin.Context, functionID string, route *
 	if !authorizeFunctionRoute(c, route) {
 		return false
 	}
-	if !s.allowFunctionRoute(functionID, route) {
+	allowed, err := s.allowFunctionRoute(c, teamID, functionID, route)
+	if err != nil {
+		s.logger.Warn("Function route rate limiter failed",
+			zap.String("function_id", functionID),
+			zap.String("team_id", teamID),
+			zap.String("route_id", route.ID),
+			zap.Error(err),
+		)
+		spec.JSONError(c, nethttp.StatusServiceUnavailable, spec.CodeUnavailable, "rate limiter unavailable")
+		return false
+	}
+	if !allowed {
 		spec.JSONError(c, nethttp.StatusTooManyRequests, spec.CodeUnavailable, "rate limit exceeded")
 		return false
 	}
@@ -324,14 +335,23 @@ func sha256HexMatches(value, expectedHex string) bool {
 	return subtle.ConstantTimeCompare(sum[:], expected) == 1
 }
 
-func (s *Server) allowFunctionRoute(functionID string, route *mgr.SandboxAppServiceRoute) bool {
+func (s *Server) allowFunctionRoute(c *gin.Context, teamID, functionID string, route *mgr.SandboxAppServiceRoute) (bool, error) {
 	if route == nil || route.RateLimit == nil {
-		return true
+		return true, nil
 	}
-	key := functionID + ":" + route.ID
-	limiter := rate.NewLimiter(rate.Limit(route.RateLimit.RPS), route.RateLimit.Burst)
-	actual, _ := s.routeLimiters.LoadOrStore(key, limiter)
-	return actual.(*rate.Limiter).Allow()
+	key := "function:team:" + teamID + ":function:" + functionID + ":route:" + route.ID
+	decision, err := s.routeLimiter.Allow(c.Request.Context(), key, ratelimit.Limit{
+		RPS:   route.RateLimit.RPS,
+		Burst: route.RateLimit.Burst,
+	})
+	if err != nil {
+		return false, err
+	}
+	if !decision.Allowed {
+		c.Header("Retry-After", strconv.Itoa(ratelimit.RetryAfterSeconds(decision.RetryAfter)))
+		return false, nil
+	}
+	return true, nil
 }
 
 func functionRouteProxyTimeout(defaultTimeout time.Duration, route *mgr.SandboxAppServiceRoute) time.Duration {

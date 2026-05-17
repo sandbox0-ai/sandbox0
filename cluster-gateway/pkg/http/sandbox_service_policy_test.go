@@ -16,6 +16,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/client"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/ratelimit"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
@@ -201,8 +202,9 @@ func newSandboxServiceExposureTestServer(t *testing.T, sandbox *mgr.Sandbox) htt
 			},
 			ProxyTimeout: metav1.Duration{Duration: 10 * time.Second},
 		},
-		logger:        zap.NewNop(),
-		managerClient: client.NewManagerClient(manager.URL, gen, zap.NewNop(), time.Second),
+		logger:                zap.NewNop(),
+		managerClient:         client.NewManagerClient(manager.URL, gen, zap.NewNop(), time.Second),
+		sandboxServiceLimiter: ratelimit.NewMemoryLimiter(ratelimit.MemoryConfig{}),
 	}
 	router := gin.New()
 	router.NoRoute(s.handlePublicExposureNoRoute)

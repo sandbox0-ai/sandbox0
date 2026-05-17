@@ -18,6 +18,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functions"
 	gatewayhandlers "github.com/sandbox0-ai/sandbox0/pkg/gateway/http/handlers"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/ratelimit"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
@@ -33,12 +34,11 @@ type Server struct {
 	functionRepo    *functions.Repository
 	apiKeyRepo      *apikey.Repository
 	authMiddleware  *middleware.AuthMiddleware
-	rateLimiter     *middleware.RateLimiter
 	requestLogger   *middleware.RequestLogger
 	internalAuthGen *internalauth.Generator
 	obsProvider     *observability.Provider
 	httpClient      *http.Client
-	routeLimiters   sync.Map
+	routeLimiter    ratelimit.Limiter
 	runtimeLocks    sync.Map
 	logger          *zap.Logger
 }
@@ -92,6 +92,10 @@ func NewServer(
 	if strings.TrimSpace(cfg.RegionID) != "" {
 		authMiddlewareOptions = append(authMiddlewareOptions, middleware.WithRequiredTeamRegionID(cfg.RegionID))
 	}
+	routeLimiter, err := ratelimit.New(context.Background(), middleware.RateLimitConfigFromGatewayConfig(cfg.GatewayConfig))
+	if err != nil {
+		return nil, fmt.Errorf("create function route rate limiter: %w", err)
+	}
 
 	server := &Server{
 		router:          gin.New(),
@@ -100,11 +104,11 @@ func NewServer(
 		functionRepo:    functions.NewRepository(pool),
 		apiKeyRepo:      apiKeyRepo,
 		authMiddleware:  middleware.NewAuthMiddleware(apiKeyRepo, cfg.JWTSecret, jwtIssuer, logger, authMiddlewareOptions...),
-		rateLimiter:     middleware.NewRateLimiter(cfg.RateLimitRPS, cfg.RateLimitBurst, cfg.RateLimitCleanupInterval.Duration, logger),
 		requestLogger:   middleware.NewRequestLogger(logger),
 		internalAuthGen: internalAuthGen,
 		obsProvider:     obsProvider,
 		httpClient:      httpClient,
+		routeLimiter:    routeLimiter,
 		logger:          logger,
 	}
 

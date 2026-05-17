@@ -60,7 +60,7 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 	}
 	route := match.route
 	if c.Request.Method == http.MethodOptions && route.CORS != nil {
-		if !s.enforceSandboxServiceRoute(c, sandboxID, route) {
+		if !s.enforceSandboxServiceRoute(c, sandboxID, sandbox.TeamID, route) {
 			return
 		}
 	}
@@ -68,7 +68,7 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 		spec.JSONError(c, http.StatusMethodNotAllowed, spec.CodeForbidden, "method is not allowed")
 		return
 	}
-	if !s.enforceSandboxServiceRoute(c, sandboxID, route) {
+	if !s.enforceSandboxServiceRoute(c, sandboxID, sandbox.TeamID, route) {
 		return
 	}
 	if sandboxWantsPaused(sandbox) {

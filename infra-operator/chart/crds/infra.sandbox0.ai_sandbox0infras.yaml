@@ -1089,11 +1089,38 @@ spec:
                           proxyTimeout:
                             default: 10s
                             type: string
+                          rateLimitBackend:
+                            default: memory
+                            description: 'RateLimitBackend selects the rate limit
+                              backend. Supported values: "memory", "redis".'
+                            enum:
+                            - memory
+                            - redis
+                            type: string
                           rateLimitBurst:
                             default: 200
                             type: integer
                           rateLimitCleanupInterval:
                             default: 10m
+                            type: string
+                          rateLimitFailOpen:
+                            default: true
+                            description: RateLimitFailOpen allows traffic when the
+                              configured backend is temporarily unavailable.
+                            type: boolean
+                          rateLimitRedisKeyPrefix:
+                            default: sandbox0:ratelimit
+                            description: RateLimitRedisKeyPrefix prefixes Redis keys
+                              used by the rate limiter.
+                            type: string
+                          rateLimitRedisTimeout:
+                            default: 100ms
+                            description: RateLimitRedisTimeout bounds each Redis rate
+                              limit operation.
+                            type: string
+                          rateLimitRedisURL:
+                            description: RateLimitRedisURL configures the Redis backend
+                              when RateLimitBackend is "redis".
                             type: string
                           rateLimitRps:
                             default: 100
@@ -1352,11 +1379,38 @@ spec:
                           proxyTimeout:
                             default: 30s
                             type: string
+                          rateLimitBackend:
+                            default: memory
+                            description: 'RateLimitBackend selects the rate limit
+                              backend. Supported values: "memory", "redis".'
+                            enum:
+                            - memory
+                            - redis
+                            type: string
                           rateLimitBurst:
                             default: 200
                             type: integer
                           rateLimitCleanupInterval:
                             default: 10m
+                            type: string
+                          rateLimitFailOpen:
+                            default: true
+                            description: RateLimitFailOpen allows traffic when the
+                              configured backend is temporarily unavailable.
+                            type: boolean
+                          rateLimitRedisKeyPrefix:
+                            default: sandbox0:ratelimit
+                            description: RateLimitRedisKeyPrefix prefixes Redis keys
+                              used by the rate limiter.
+                            type: string
+                          rateLimitRedisTimeout:
+                            default: 100ms
+                            description: RateLimitRedisTimeout bounds each Redis rate
+                              limit operation.
+                            type: string
+                          rateLimitRedisURL:
+                            description: RateLimitRedisURL configures the Redis backend
+                              when RateLimitBackend is "redis".
                             type: string
                           rateLimitRps:
                             default: 100
@@ -1656,11 +1710,38 @@ spec:
                           oidcStateTtl:
                             default: 10m
                             type: string
+                          rateLimitBackend:
+                            default: memory
+                            description: 'RateLimitBackend selects the rate limit
+                              backend. Supported values: "memory", "redis".'
+                            enum:
+                            - memory
+                            - redis
+                            type: string
                           rateLimitBurst:
                             default: 200
                             type: integer
                           rateLimitCleanupInterval:
                             default: 10m
+                            type: string
+                          rateLimitFailOpen:
+                            default: true
+                            description: RateLimitFailOpen allows traffic when the
+                              configured backend is temporarily unavailable.
+                            type: boolean
+                          rateLimitRedisKeyPrefix:
+                            default: sandbox0:ratelimit
+                            description: RateLimitRedisKeyPrefix prefixes Redis keys
+                              used by the rate limiter.
+                            type: string
+                          rateLimitRedisTimeout:
+                            default: 100ms
+                            description: RateLimitRedisTimeout bounds each Redis rate
+                              limit operation.
+                            type: string
+                          rateLimitRedisURL:
+                            description: RateLimitRedisURL configures the Redis backend
+                              when RateLimitBackend is "redis".
                             type: string
                           rateLimitRps:
                             default: 100
@@ -2403,11 +2484,38 @@ spec:
                           proxyTimeout:
                             default: 10s
                             type: string
+                          rateLimitBackend:
+                            default: memory
+                            description: 'RateLimitBackend selects the rate limit
+                              backend. Supported values: "memory", "redis".'
+                            enum:
+                            - memory
+                            - redis
+                            type: string
                           rateLimitBurst:
                             default: 200
                             type: integer
                           rateLimitCleanupInterval:
                             default: 10m
+                            type: string
+                          rateLimitFailOpen:
+                            default: true
+                            description: RateLimitFailOpen allows traffic when the
+                              configured backend is temporarily unavailable.
+                            type: boolean
+                          rateLimitRedisKeyPrefix:
+                            default: sandbox0:ratelimit
+                            description: RateLimitRedisKeyPrefix prefixes Redis keys
+                              used by the rate limiter.
+                            type: string
+                          rateLimitRedisTimeout:
+                            default: 100ms
+                            description: RateLimitRedisTimeout bounds each Redis rate
+                              limit operation.
+                            type: string
+                          rateLimitRedisURL:
+                            description: RateLimitRedisURL configures the Redis backend
+                              when RateLimitBackend is "redis".
                             type: string
                           rateLimitRps:
                             default: 100

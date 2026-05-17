@@ -75,6 +75,11 @@ type globalGatewayConfigYAML struct {
 	RateLimitRPS             int                  `yaml:"rate_limit_rps"`
 	RateLimitBurst           int                  `yaml:"rate_limit_burst"`
 	RateLimitCleanupInterval durationYAMLValue    `yaml:"rate_limit_cleanup_interval"`
+	RateLimitBackend         string               `yaml:"rate_limit_backend"`
+	RateLimitRedisURL        string               `yaml:"rate_limit_redis_url"`
+	RateLimitRedisKeyPrefix  string               `yaml:"rate_limit_redis_key_prefix"`
+	RateLimitRedisTimeout    durationYAMLValue    `yaml:"rate_limit_redis_timeout"`
+	RateLimitFailOpen        bool                 `yaml:"rate_limit_fail_open"`
 	DefaultTeamName          string               `yaml:"default_team_name"`
 	BuiltInAuth              BuiltInAuthConfig    `yaml:"built_in_auth"`
 	OIDCProviders            []OIDCProviderConfig `yaml:"oidc_providers"`
@@ -174,6 +179,10 @@ func applyGlobalGatewayYAML(cfg *GlobalGatewayConfig, raw globalGatewayConfigYAM
 	cfg.JWTIssuer = raw.JWTIssuer
 	cfg.RateLimitRPS = raw.RateLimitRPS
 	cfg.RateLimitBurst = raw.RateLimitBurst
+	cfg.RateLimitBackend = raw.RateLimitBackend
+	cfg.RateLimitRedisURL = raw.RateLimitRedisURL
+	cfg.RateLimitRedisKeyPrefix = raw.RateLimitRedisKeyPrefix
+	cfg.RateLimitFailOpen = raw.RateLimitFailOpen
 	cfg.DefaultTeamName = raw.DefaultTeamName
 	cfg.BuiltInAuth = raw.BuiltInAuth
 	cfg.OIDCProviders = raw.OIDCProviders
@@ -202,6 +211,9 @@ func applyGlobalGatewayYAML(cfg *GlobalGatewayConfig, raw globalGatewayConfigYAM
 		return err
 	}
 	if err := applyOptionalDuration(&cfg.RateLimitCleanupInterval, raw.RateLimitCleanupInterval, "rate_limit_cleanup_interval"); err != nil {
+		return err
+	}
+	if err := applyOptionalDuration(&cfg.RateLimitRedisTimeout, raw.RateLimitRedisTimeout, "rate_limit_redis_timeout"); err != nil {
 		return err
 	}
 	if err := applyOptionalDuration(&cfg.OIDCStateTTL, raw.OIDCStateTTL, "oidc_state_ttl"); err != nil {

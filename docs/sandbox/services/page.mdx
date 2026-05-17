@@ -38,6 +38,10 @@ When `public` is true and `routes` is empty, Sandbox0 creates a default route us
 | `timeout_seconds` | integer | Optional upstream timeout in seconds |
 | `resume` | boolean | Whether this route may resume a paused sandbox when `auto_resume` is enabled |
 
+<Callout>
+Route rate limits use the gateway rate limit backend. Self-hosted deployments default to the in-memory backend for simple onboarding; configure the gateway `rate_limit_backend` as `redis` when multiple gateway replicas need shared limits.
+</Callout>
+
 ### Auth
 
 | Field | Type | Description |

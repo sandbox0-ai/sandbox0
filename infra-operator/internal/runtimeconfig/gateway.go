@@ -154,6 +154,11 @@ func applyGatewayConfig(dst *apiconfig.GatewayConfig, src infrav1alpha1.GatewayC
 	dst.RateLimitRPS = src.RateLimitRPS
 	dst.RateLimitBurst = src.RateLimitBurst
 	dst.RateLimitCleanupInterval = src.RateLimitCleanupInterval
+	dst.RateLimitBackend = src.RateLimitBackend
+	dst.RateLimitRedisURL = src.RateLimitRedisURL
+	dst.RateLimitRedisKeyPrefix = src.RateLimitRedisKeyPrefix
+	dst.RateLimitRedisTimeout = src.RateLimitRedisTimeout
+	dst.RateLimitFailOpen = src.RateLimitFailOpen
 	dst.DefaultTeamName = src.DefaultTeamName
 	dst.BuiltInAuth = apiconfig.BuiltInAuthConfig{
 		Enabled:                   src.BuiltInAuth.Enabled,

@@ -39,6 +39,7 @@ type Server struct {
 	regionRepo      *tenantdir.Repository
 	regionLookup    regionDirectory
 	authMiddleware  *gatewaymiddleware.AuthMiddleware
+	rateLimiter     *gatewaymiddleware.RateLimiter
 	requestLogger   *gatewaymiddleware.RequestLogger
 	builtinProvider *gatewaybuiltin.Provider
 	oidcManager     *gatewayoidc.Manager
@@ -84,6 +85,10 @@ func NewServer(
 		return nil, fmt.Errorf("create jwt issuer: %w", err)
 	}
 	authMiddleware := gatewaymiddleware.NewAuthMiddleware(nil, cfg.JWTSecret, jwtIssuer, logger)
+	rateLimiter, err := gatewaymiddleware.NewRateLimiterWithConfig(context.Background(), cfg.RateLimitRPS, cfg.RateLimitBurst, gatewaymiddleware.RateLimitConfigFromGatewayConfig(cfg.GatewayConfig), logger)
+	if err != nil {
+		return nil, fmt.Errorf("create rate limiter: %w", err)
+	}
 	requestLogger := gatewaymiddleware.NewRequestLogger(logger)
 	builtinProvider := gatewaybuiltin.NewProvider(identityRepo, &cfg.BuiltInAuth, cfg.DefaultTeamName)
 
@@ -126,6 +131,7 @@ func NewServer(
 		regionRepo:      regionRepo,
 		regionLookup:    regionRepo,
 		authMiddleware:  authMiddleware,
+		rateLimiter:     rateLimiter,
 		requestLogger:   requestLogger,
 		builtinProvider: builtinProvider,
 		oidcManager:     oidcManager,
@@ -177,6 +183,9 @@ func (s *Server) setupRoutes() {
 	regionHandler := handlers.NewRegionHandler(s.regionRepo, s.logger)
 	regions := s.router.Group("/regions")
 	regions.Use(s.authMiddleware.Authenticate())
+	if s.rateLimiter != nil {
+		regions.Use(s.rateLimiter.RateLimit())
+	}
 	regions.Use(s.authMiddleware.RequireJWTAuth())
 	{
 		regions.GET("", regionHandler.ListRegions)

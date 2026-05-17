@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
-	"fmt"
 	nethttp "net/http"
 	"strconv"
 	"strings"
@@ -12,8 +11,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/ratelimit"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
-	"golang.org/x/time/rate"
+	"go.uber.org/zap"
 )
 
 type sandboxServiceMatch struct {
@@ -94,7 +94,7 @@ func sandboxServiceMethodAllowed(route *mgr.SandboxAppServiceRoute, method strin
 	return false
 }
 
-func (s *Server) enforceSandboxServiceRoute(c *gin.Context, sandboxID string, route *mgr.SandboxAppServiceRoute) bool {
+func (s *Server) enforceSandboxServiceRoute(c *gin.Context, sandboxID, teamID string, route *mgr.SandboxAppServiceRoute) bool {
 	if route == nil {
 		return true
 	}
@@ -104,7 +104,18 @@ func (s *Server) enforceSandboxServiceRoute(c *gin.Context, sandboxID string, ro
 	if !s.authorizeSandboxServiceRoute(c, route) {
 		return false
 	}
-	if !s.allowSandboxServiceRate(c, sandboxID, route) {
+	allowed, err := s.allowSandboxServiceRate(c, sandboxID, teamID, route)
+	if err != nil {
+		s.logger.Warn("Sandbox service rate limiter failed",
+			zap.String("sandbox_id", sandboxID),
+			zap.String("team_id", teamID),
+			zap.String("route_id", route.ID),
+			zap.Error(err),
+		)
+		spec.JSONError(c, nethttp.StatusServiceUnavailable, spec.CodeUnavailable, "rate limiter unavailable")
+		return false
+	}
+	if !allowed {
 		spec.JSONError(c, nethttp.StatusTooManyRequests, spec.CodeUnavailable, "rate limit exceeded")
 		return false
 	}
@@ -233,18 +244,23 @@ func sha256HexMatches(value, expectedHex string) bool {
 	return subtle.ConstantTimeCompare(sum[:], expected) == 1
 }
 
-func (s *Server) allowSandboxServiceRate(c *gin.Context, sandboxID string, route *mgr.SandboxAppServiceRoute) bool {
+func (s *Server) allowSandboxServiceRate(c *gin.Context, sandboxID, teamID string, route *mgr.SandboxAppServiceRoute) (bool, error) {
 	if route.RateLimit == nil {
-		return true
+		return true, nil
 	}
-	key := fmt.Sprintf("%s:%s:%d:%d", sandboxID, route.ID, route.RateLimit.RPS, route.RateLimit.Burst)
-	limiter := rate.NewLimiter(rate.Limit(route.RateLimit.RPS), route.RateLimit.Burst)
-	actual, _ := s.sandboxServiceLimiters.LoadOrStore(key, limiter)
-	if !actual.(*rate.Limiter).Allow() {
-		c.Header("Retry-After", "1")
-		return false
+	key := "sandbox-service:team:" + teamID + ":sandbox:" + sandboxID + ":route:" + route.ID
+	decision, err := s.sandboxServiceLimiter.Allow(c.Request.Context(), key, ratelimit.Limit{
+		RPS:   route.RateLimit.RPS,
+		Burst: route.RateLimit.Burst,
+	})
+	if err != nil {
+		return false, err
 	}
-	return true
+	if !decision.Allowed {
+		c.Header("Retry-After", strconv.Itoa(ratelimit.RetryAfterSeconds(decision.RetryAfter)))
+		return false, nil
+	}
+	return true, nil
 }
 
 func sandboxServiceProxyTimeout(defaultTimeout time.Duration, route *mgr.SandboxAppServiceRoute) time.Duration {

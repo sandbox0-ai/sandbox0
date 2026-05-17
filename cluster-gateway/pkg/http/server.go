@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -28,6 +27,7 @@ import (
 	gatewayidentity "github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
 	gatewaymiddleware "github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/public"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/ratelimit"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/licensing"
@@ -42,31 +42,31 @@ const functionVolumeSnapshotTimeout = 2 * time.Minute
 
 // Server represents the HTTP server for cluster-gateway
 type Server struct {
-	router                 *gin.Engine
-	cfg                    *config.ClusterGatewayConfig
-	proxy2Mgr              *proxy.Router
-	proxy2sp               *proxy.Router
-	managerClient          *client.ManagerClient
-	authMiddleware         *middleware.InternalAuthMiddleware
-	publicAuth             *gatewaymiddleware.AuthMiddleware
-	compositeAuth          *middleware.CompositeAuthMiddleware
-	publicIdentityRepo     *gatewayidentity.Repository
-	publicAPIKeyRepo       *gatewayapikey.Repository
-	rateLimiter            *gatewaymiddleware.RateLimiter
-	externalLimiter        *middleware.ExternalRateLimiter
-	publicBuiltin          *gatewaybuiltin.Provider
-	publicOIDC             *gatewayoidc.Manager
-	publicJWT              *gatewayauthn.Issuer
-	requestLogger          *middleware.RequestLogger
-	logger                 *zap.Logger
-	meteringHandler        *gatewayhandlers.MeteringHandler
-	functionHandler        *functionapi.Handler
-	internalAuthGen        *internalauth.Generator
-	entitlements           licensing.Entitlements
-	obsProvider            *observability.Provider
-	httpClient             *http.Client
-	exposureSandboxCache   *cache.Cache[string, *mgr.Sandbox]
-	sandboxServiceLimiters sync.Map
+	router                *gin.Engine
+	cfg                   *config.ClusterGatewayConfig
+	proxy2Mgr             *proxy.Router
+	proxy2sp              *proxy.Router
+	managerClient         *client.ManagerClient
+	authMiddleware        *middleware.InternalAuthMiddleware
+	publicAuth            *gatewaymiddleware.AuthMiddleware
+	compositeAuth         *middleware.CompositeAuthMiddleware
+	publicIdentityRepo    *gatewayidentity.Repository
+	publicAPIKeyRepo      *gatewayapikey.Repository
+	rateLimiter           *gatewaymiddleware.RateLimiter
+	externalLimiter       *middleware.ExternalRateLimiter
+	publicBuiltin         *gatewaybuiltin.Provider
+	publicOIDC            *gatewayoidc.Manager
+	publicJWT             *gatewayauthn.Issuer
+	requestLogger         *middleware.RequestLogger
+	logger                *zap.Logger
+	meteringHandler       *gatewayhandlers.MeteringHandler
+	functionHandler       *functionapi.Handler
+	internalAuthGen       *internalauth.Generator
+	entitlements          licensing.Entitlements
+	obsProvider           *observability.Provider
+	httpClient            *http.Client
+	exposureSandboxCache  *cache.Cache[string, *mgr.Sandbox]
+	sandboxServiceLimiter ratelimit.Limiter
 }
 
 // NewServer creates a new HTTP server
@@ -234,7 +234,10 @@ func NewServer(
 
 		publicAuth = gatewaymiddleware.NewAuthMiddleware(publicAPIKeyRepo, cfg.JWTSecret, jwtIssuer, logger)
 		compositeAuth = middleware.NewCompositeAuthMiddleware(authMiddleware, publicAuth, logger)
-		rateLimiter = gatewaymiddleware.NewRateLimiter(cfg.RateLimitRPS, cfg.RateLimitBurst, cfg.RateLimitCleanupInterval.Duration, logger)
+		rateLimiter, err = gatewaymiddleware.NewRateLimiterWithConfig(context.Background(), cfg.RateLimitRPS, cfg.RateLimitBurst, gatewaymiddleware.RateLimitConfigFromGatewayConfig(cfg.GatewayConfig), logger)
+		if err != nil {
+			return nil, fmt.Errorf("create rate limiter: %w", err)
+		}
 		externalLimiter = middleware.NewExternalRateLimiter(rateLimiter)
 		publicBuiltin = builtinProvider
 		publicOIDC = oidcManager
@@ -275,6 +278,11 @@ func NewServer(
 		logger,
 	)
 
+	sandboxServiceLimiter, err := ratelimit.New(context.Background(), gatewaymiddleware.RateLimitConfigFromGatewayConfig(cfg.GatewayConfig))
+	if err != nil {
+		return nil, fmt.Errorf("create sandbox service rate limiter: %w", err)
+	}
+
 	server := &Server{
 		router:             router,
 		cfg:                cfg,
@@ -304,6 +312,7 @@ func NewServer(
 			TTL:             5 * time.Second,
 			CleanupInterval: 5 * time.Second,
 		}),
+		sandboxServiceLimiter: sandboxServiceLimiter,
 	}
 
 	server.setupRoutes()

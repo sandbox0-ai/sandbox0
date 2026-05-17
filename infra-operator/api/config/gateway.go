@@ -37,6 +37,26 @@ type GatewayConfig struct {
 	// +optional
 	// +kubebuilder:default="10m"
 	RateLimitCleanupInterval metav1.Duration `yaml:"rate_limit_cleanup_interval" json:"rateLimitCleanupInterval"`
+	// RateLimitBackend selects the rate limit backend. Supported values: "memory", "redis".
+	// +optional
+	// +kubebuilder:validation:Enum=memory;redis
+	// +kubebuilder:default="memory"
+	RateLimitBackend string `yaml:"rate_limit_backend" json:"rateLimitBackend"`
+	// RateLimitRedisURL configures the Redis backend when RateLimitBackend is "redis".
+	// +optional
+	RateLimitRedisURL string `yaml:"rate_limit_redis_url" json:"-"`
+	// RateLimitRedisKeyPrefix prefixes Redis keys used by the rate limiter.
+	// +optional
+	// +kubebuilder:default="sandbox0:ratelimit"
+	RateLimitRedisKeyPrefix string `yaml:"rate_limit_redis_key_prefix" json:"rateLimitRedisKeyPrefix"`
+	// RateLimitRedisTimeout bounds each Redis rate limit operation.
+	// +optional
+	// +kubebuilder:default="100ms"
+	RateLimitRedisTimeout metav1.Duration `yaml:"rate_limit_redis_timeout" json:"rateLimitRedisTimeout"`
+	// RateLimitFailOpen allows traffic when the configured backend is temporarily unavailable.
+	// +optional
+	// +kubebuilder:default=true
+	RateLimitFailOpen bool `yaml:"rate_limit_fail_open" json:"rateLimitFailOpen"`
 
 	// Identity and Teams
 	// +optional

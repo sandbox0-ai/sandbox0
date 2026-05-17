@@ -194,7 +194,10 @@ func NewServer(
 		}
 	}
 	authMiddleware := middleware.NewAuthMiddleware(apiKeyRepo, cfg.JWTSecret, jwtIssuer, logger, authMiddlewareOptions...)
-	rateLimiter := middleware.NewRateLimiter(cfg.RateLimitRPS, cfg.RateLimitBurst, cfg.RateLimitCleanupInterval.Duration, logger)
+	rateLimiter, err := middleware.NewRateLimiterWithConfig(ctx, cfg.RateLimitRPS, cfg.RateLimitBurst, middleware.RateLimitConfigFromGatewayConfig(cfg.GatewayConfig), logger)
+	if err != nil {
+		return nil, fmt.Errorf("create rate limiter: %w", err)
+	}
 	requestLogger := middleware.NewRequestLogger(logger)
 
 	// Initialize built-in auth provider

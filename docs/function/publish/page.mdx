@@ -1,0 +1,255 @@
+# Publish Functions
+
+Publish a Function by first configuring a Sandbox Service with public ingress and a restartable runtime, then creating a function from that service.
+
+## Configure a Publishable Service
+
+<Endpoint method="PUT">
+/api/v1/sandboxes/{'{id}'}/services
+</Endpoint>
+
+The update replaces the full service list. Include every service that should remain active on the sandbox.
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `resp, err := sandbox.UpdateServices(ctx, []apispec.SandboxAppService{
+    {
+        ID:   "api",
+        Port: 8080,
+        Runtime: apispec.NewOptSandboxAppServiceRuntime(apispec.SandboxAppServiceRuntime{
+            Type:    apispec.SandboxAppServiceRuntimeTypeCmd,
+            Command: []string{"python3", "-m", "http.server", "8080", "--bind", "0.0.0.0", "-d", "/workspace/public"},
+            Cwd:     apispec.NewOptString("/workspace"),
+        }),
+        Ingress: apispec.SandboxAppServiceIngress{
+            Public: true,
+            Routes: []apispec.SandboxAppServiceRoute{
+                {
+                    ID:         "api",
+                    PathPrefix: apispec.NewOptString("/"),
+                    Methods:    []string{"GET"},
+                    Resume:     true,
+                },
+            },
+        },
+        HealthCheck: apispec.NewOptSandboxAppServiceHealth(apispec.SandboxAppServiceHealth{
+            Path: apispec.NewOptString("/"),
+        }),
+    },
+})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("services: %d\\n", len(resp.Services))`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0.apispec.models.sandbox_app_service import SandboxAppService
+from sandbox0.apispec.models.sandbox_app_service_health import SandboxAppServiceHealth
+from sandbox0.apispec.models.sandbox_app_service_ingress import SandboxAppServiceIngress
+from sandbox0.apispec.models.sandbox_app_service_route import SandboxAppServiceRoute
+from sandbox0.apispec.models.sandbox_app_service_runtime import SandboxAppServiceRuntime
+from sandbox0.apispec.models.sandbox_app_service_runtime_type import SandboxAppServiceRuntimeType
+
+resp = sandbox.update_services([
+    SandboxAppService(
+        id="api",
+        port=8080,
+        runtime=SandboxAppServiceRuntime(
+            type_=SandboxAppServiceRuntimeType.CMD,
+            command=["python3", "-m", "http.server", "8080", "--bind", "0.0.0.0", "-d", "/workspace/public"],
+            cwd="/workspace",
+        ),
+        ingress=SandboxAppServiceIngress(
+            public=True,
+            routes=[
+                SandboxAppServiceRoute(
+                    id="api",
+                    path_prefix="/",
+                    methods=["GET"],
+                    resume=True,
+                ),
+            ],
+        ),
+        health_check=SandboxAppServiceHealth(path="/"),
+    ),
+])
+print(f"services: {len(resp.services)}")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const resp = await sandbox.updateServices([
+    {
+        id: 'api',
+        port: 8080,
+        runtime: {
+            type: 'cmd',
+            command: ['python3', '-m', 'http.server', '8080', '--bind', '0.0.0.0', '-d', '/workspace/public'],
+            cwd: '/workspace',
+        },
+        ingress: {
+            _public: true,
+            routes: [
+                {
+                    id: 'api',
+                    pathPrefix: '/',
+                    methods: ['GET'],
+                    resume: true,
+                },
+            ],
+        },
+        healthCheck: { path: '/' },
+    },
+]);
+console.log('services:', resp.services.length);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `cat > services.yaml <<EOF
+services:
+  - id: api
+    port: 8080
+    runtime:
+      type: cmd
+      command: ["python3", "-m", "http.server", "8080", "--bind", "0.0.0.0", "-d", "/workspace/public"]
+      cwd: /workspace
+    ingress:
+      public: true
+      routes:
+        - id: api
+          path_prefix: /
+          methods: [GET]
+          resume: true
+    health_check:
+      path: /
+EOF
+
+s0 sandbox service update --services-file services.yaml -s sb_abc123`
+    }
+  ]}
+/>
+
+## Check Publishability
+
+<Endpoint method="GET">
+/api/v1/sandboxes/{'{id}'}/services
+</Endpoint>
+
+The response includes `publishable` and `publish_blockers` for every service. A service must be publishable before it can become a function revision.
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `resp, err := sandbox.GetServices(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+for _, service := range resp.Services {
+    fmt.Printf("%s publishable=%t blockers=%v\\n", service.ID, service.Publishable, service.PublishBlockers)
+}`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0.apispec.types import UNSET
+
+resp = sandbox.get_services()
+for service in resp.services:
+    blockers = [] if service.publish_blockers is UNSET else service.publish_blockers
+    print(f"{service.id} publishable={service.publishable} blockers={blockers}")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const services = await sandbox.getServices();
+for (const service of services.services) {
+    console.log(service.id, 'publishable=', service.publishable, 'blockers=', service.publishBlockers ?? []);
+}`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 sandbox service get -s sb_abc123`
+    }
+  ]}
+/>
+
+## Create a Function
+
+<Endpoint method="POST">
+/api/v1/functions
+</Endpoint>
+
+Creating a function creates the stable function record, revision 1, and the `production` alias.
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `result, err := client.CreateFunctionFromSandbox(
+    ctx,
+    sandbox.ID,
+    "api",
+    sandbox0.WithFunctionName("my-api"),
+)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("function URL: %s\\n", result.Function.URL)`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `result = client.functions.create_from_sandbox(
+    sandbox.id,
+    "api",
+    name="my-api",
+)
+print(f"function URL: {result.function.url}")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const result = await client.functions.createFromSandbox(
+    sandbox.id,
+    'api',
+    { name: 'my-api' },
+);
+console.log('function URL:', result.function.url);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 function create sb_abc123 api --name my-api`
+    }
+  ]}
+/>
+
+## Invoke the Function
+
+Use the returned `url` as the stable public endpoint.
+
+```bash
+curl "$FUNCTION_URL/"
+```
+
+## Next Steps
+
+<CardGroup>
+  <Card title="Revisions And Aliases" href="/docs/function/revisions" cta="Continue">
+    Publish and promote new versions without changing the function URL.
+  </Card>
+
+  <Card title="Sandbox Services" href="/docs/sandbox/services" cta="Continue">
+    Configure route auth, CORS, rate limits, rewrite rules, and timeouts.
+  </Card>
+</CardGroup>

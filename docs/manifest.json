@@ -64,6 +64,18 @@
         {
           "slug": "",
           "title": "Overview"
+        },
+        {
+          "slug": "publish",
+          "title": "Publish Functions"
+        },
+        {
+          "slug": "revisions",
+          "title": "Revisions And Aliases"
+        },
+        {
+          "slug": "runtime",
+          "title": "Runtime"
         }
       ]
     },

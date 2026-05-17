@@ -1,0 +1,220 @@
+# Function Runtime
+
+Function runtime state describes the currently restored sandbox serving a function revision. When the source sandbox still exists, Function Gateway routes to it directly. When the source sandbox is gone, Function Gateway restores a runtime sandbox from the revision's template and revision-owned volumes.
+
+## Runtime States
+
+| State | Meaning |
+|-------|---------|
+| `idle` | No restored runtime sandbox is currently recorded for the active revision |
+| `active` | A restored runtime sandbox is recorded for the active revision |
+| `disabled` | The function is disabled and does not serve host traffic |
+
+`restart` and `recycle` both delete the current restored runtime sandbox when one exists and clear the runtime mapping. The next function request starts a fresh runtime from the active revision.
+
+## Get Runtime Status
+
+<Endpoint method="GET">
+/api/v1/functions/{'{id}'}/runtime
+</Endpoint>
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `runtime, err := client.GetFunctionRuntime(ctx, functionID)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("state=%s revision=%d\\n", runtime.State, runtime.RevisionNumber)`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `runtime = client.functions.get_runtime(function_id)
+print(f"state={runtime.state} revision={runtime.revision_number}")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const runtime = await client.functions.getRuntime(functionId);
+console.log('state=', runtime.state, 'revision=', runtime.revisionNumber);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 function runtime get fn_abc123`
+    }
+  ]}
+/>
+
+## Restart Runtime
+
+<Endpoint method="POST">
+/api/v1/functions/{'{id}'}/runtime/restart
+</Endpoint>
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `runtime, err := client.RestartFunctionRuntime(ctx, functionID)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("state=%s\\n", runtime.State)`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `runtime = client.functions.restart_runtime(function_id)
+print(f"state={runtime.state}")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const runtime = await client.functions.restartRuntime(functionId);
+console.log('state=', runtime.state);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 function runtime restart fn_abc123`
+    }
+  ]}
+/>
+
+## Recycle Runtime
+
+<Endpoint method="POST">
+/api/v1/functions/{'{id}'}/runtime/recycle
+</Endpoint>
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `runtime, err := client.RecycleFunctionRuntime(ctx, functionID)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("state=%s\\n", runtime.State)`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `runtime = client.functions.recycle_runtime(function_id)
+print(f"state={runtime.state}")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const runtime = await client.functions.recycleRuntime(functionId);
+console.log('state=', runtime.state);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 function runtime recycle fn_abc123`
+    }
+  ]}
+/>
+
+## Disable Serving
+
+<Endpoint method="PUT">
+/api/v1/functions/{'{id}'}
+</Endpoint>
+
+Disabling a function keeps its identity, domain, revisions, and aliases. Disabled functions return `503` from the function host and do not restore runtime sandboxes.
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `fn, err := client.UpdateFunctionWithOptions(
+    ctx,
+    functionID,
+    sandbox0.WithFunctionEnabled(false),
+)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("enabled=%t\\n", fn.Enabled)`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0.apispec.models.function_update_request import FunctionUpdateRequest
+
+fn = client.functions.update(function_id, FunctionUpdateRequest(enabled=False))
+print(f"enabled={fn.enabled}")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const fn = await client.functions.update(functionId, { enabled: false });
+console.log('enabled=', fn.enabled);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 function update fn_abc123 --enabled=false`
+    }
+  ]}
+/>
+
+## Delete a Function
+
+<Endpoint method="DELETE">
+/api/v1/functions/{'{id}'}
+</Endpoint>
+
+Delete is a soft delete. The function disappears from normal list/get APIs, the host stops serving traffic, and the slug/domain label remain reserved. Sandbox0 schedules best-effort cleanup for restored runtime sandboxes and revision-owned volumes.
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `fn, err := client.DeleteFunction(ctx, functionID)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("deleted function: %s\\n", fn.ID)`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `fn = client.functions.delete(function_id)
+print(f"deleted function: {fn.id}")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const fn = await client.functions.delete(functionId);
+console.log('deleted function:', fn.id);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 function delete fn_abc123`
+    }
+  ]}
+/>
+
+## Next Steps
+
+<CardGroup>
+  <Card title="Revisions And Aliases" href="/docs/function/revisions" cta="Continue">
+    Move production traffic between immutable function revisions.
+  </Card>
+
+  <Card title="Volume Snapshots" href="/docs/volume/snapshots" cta="Continue">
+    Understand the snapshot model used for revision restore mounts.
+  </Card>
+</CardGroup>

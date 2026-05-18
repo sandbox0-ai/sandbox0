@@ -1143,6 +1143,92 @@ func TestCreateSnapshotHydratesColdFilesInline(t *testing.T) {
 	}
 }
 
+func TestMaterializerGarbageCollectionPlanDeletesUnreferencedObjects(t *testing.T) {
+	ctx := context.Background()
+	store := newPrefixedRecordingStore(t, "vol-gc-plan")
+	heads := newMemoryHeadStore()
+	engine, err := Open(ctx, Config{
+		VolumeID:    "vol-gc-plan",
+		WALPath:     filepath.Join(t.TempDir(), "engine.wal"),
+		ObjectStore: store,
+		HeadStore:   heads,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+
+	node, err := engine.CreateFile(RootInode, "state.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+	if _, err := engine.Write(node.Inode, 0, []byte("old")); err != nil {
+		t.Fatalf("Write(old) error = %v", err)
+	}
+	if _, err := engine.SyncMaterialize(ctx); err != nil {
+		t.Fatalf("SyncMaterialize(old) error = %v", err)
+	}
+	if err := engine.Truncate(node.Inode, 0); err != nil {
+		t.Fatalf("Truncate() error = %v", err)
+	}
+	if _, err := engine.Write(node.Inode, 0, []byte("new")); err != nil {
+		t.Fatalf("Write(new) error = %v", err)
+	}
+	latest, err := engine.SyncMaterialize(ctx)
+	if err != nil {
+		t.Fatalf("SyncMaterialize(new) error = %v", err)
+	}
+
+	retained := map[string]struct{}{
+		manifestKey(latest.ManifestSeq): {},
+	}
+	plan, err := engine.materializer.PlanGarbageCollection(ctx, []*SnapshotState{latest.State}, retained)
+	if err != nil {
+		t.Fatalf("PlanGarbageCollection() error = %v", err)
+	}
+	if got, want := plan.Segments, []string{"segments/00000000000000000002-0.bin"}; !equalStrings(got, want) {
+		t.Fatalf("plan segments = %v, want %v", got, want)
+	}
+	if got, want := plan.Manifests, []string{"manifests/00000000000000000002.json"}; !equalStrings(got, want) {
+		t.Fatalf("plan manifests = %v, want %v", got, want)
+	}
+	if _, err := plan.Apply(ctx); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if _, err := store.Head("segments/00000000000000000002-0.bin"); err == nil {
+		t.Fatal("old segment still exists after GC")
+	}
+	if _, err := store.Head("manifests/00000000000000000002.json"); err == nil {
+		t.Fatal("old manifest still exists after GC")
+	}
+	if _, err := store.Head("segments/00000000000000000004-0.bin"); err != nil {
+		t.Fatalf("current segment missing after GC: %v", err)
+	}
+	if _, err := store.Head("manifests/00000000000000000004.json"); err != nil {
+		t.Fatalf("current manifest missing after GC: %v", err)
+	}
+}
+
+func TestLiveSegmentKeysForVolumeIgnoresChildOwnedSegments(t *testing.T) {
+	state := &SnapshotState{
+		ColdFiles: map[uint64][]FileExtent{
+			2: {{SegmentID: "parent"}},
+			3: {{SegmentID: "child"}},
+		},
+		Segments: map[string]*Segment{
+			"parent": {ID: "parent", VolumeID: "vol-parent", Key: "segments/parent.bin"},
+			"child":  {ID: "child", VolumeID: "vol-child", Key: "segments/child.bin"},
+		},
+	}
+	live := liveSegmentKeysForVolume("vol-parent", state)
+	if _, ok := live["segments/parent.bin"]; !ok {
+		t.Fatal("parent segment was not marked live")
+	}
+	if _, ok := live["segments/child.bin"]; ok {
+		t.Fatal("child-owned segment was marked live for parent volume")
+	}
+}
+
 func newPrefixedRecordingStore(t *testing.T, volumeID string) *recordingStore {
 	t.Helper()
 	base := objectstore.NewMemoryStore("s0fs-tests")
@@ -1160,6 +1246,18 @@ func hasSegmentGet(calls []getCall) bool {
 
 func fileName(i int) string {
 	return strings.Join([]string{"file", string(rune('a' + (i % 26))), string(rune('0' + (i % 10))), ".txt"}, "")
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestMaterializerBuildSegmentProducesRoundTrippableLayout(t *testing.T) {

@@ -8,11 +8,13 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"github.com/sirupsen/logrus"
@@ -165,6 +167,111 @@ func TestS0FSForkVolumeUsesCopyOnWriteState(t *testing.T) {
 	}
 }
 
+func TestS0FSGarbageCollectsObjectsAfterSnapshotDelete(t *testing.T) {
+	t.Parallel()
+
+	mgr, _, _, engine := newS0FSSnapshotTestManager(t, "vol-gc-delete")
+	writeS0FSFile(t, engine, "state.txt", "old")
+	if _, err := engine.SyncMaterialize(context.Background()); err != nil {
+		t.Fatalf("SyncMaterialize(old) error = %v", err)
+	}
+	snap, err := mgr.CreateSnapshot(context.Background(), &CreateSnapshotRequest{
+		VolumeID: "vol-gc-delete",
+		Name:     "snap-old",
+		TeamID:   "team-1",
+		UserID:   "user-1",
+	})
+	if err != nil {
+		t.Fatalf("CreateSnapshot() error = %v", err)
+	}
+	writeS0FSFile(t, engine, "state.txt", "new")
+	if _, err := engine.SyncMaterialize(context.Background()); err != nil {
+		t.Fatalf("SyncMaterialize(new) error = %v", err)
+	}
+
+	if err := mgr.DeleteSnapshot(context.Background(), "vol-gc-delete", snap.ID, "team-1"); err != nil {
+		t.Fatalf("DeleteSnapshot() error = %v", err)
+	}
+	cfg, err := mgr.s0fsConfig("team-1", "vol-gc-delete")
+	if err != nil {
+		t.Fatalf("s0fsConfig() error = %v", err)
+	}
+	if got, want := listS0FSKeys(t, cfg.ObjectStore, "segments/"), []string{"segments/00000000000000000005-0.bin"}; !sameStrings(got, want) {
+		t.Fatalf("segments after GC = %v, want %v", got, want)
+	}
+	if got, want := listS0FSKeys(t, cfg.ObjectStore, "manifests/"), []string{"manifests/00000000000000000005.json"}; !sameStrings(got, want) {
+		t.Fatalf("manifests after GC = %v, want %v", got, want)
+	}
+}
+
+func TestS0FSGarbageCollectionSkipsWhenForkExists(t *testing.T) {
+	t.Parallel()
+
+	mgr, repo, _, engine := newS0FSSnapshotTestManager(t, "vol-gc-fork-source")
+	writeS0FSFile(t, engine, "state.txt", "old")
+	if _, err := engine.SyncMaterialize(context.Background()); err != nil {
+		t.Fatalf("SyncMaterialize(old) error = %v", err)
+	}
+	snap, err := mgr.CreateSnapshot(context.Background(), &CreateSnapshotRequest{
+		VolumeID: "vol-gc-fork-source",
+		Name:     "snap-old",
+		TeamID:   "team-1",
+		UserID:   "user-1",
+	})
+	if err != nil {
+		t.Fatalf("CreateSnapshot() error = %v", err)
+	}
+	sourceID := "vol-gc-fork-source"
+	repo.volumes["vol-gc-child"] = &db.SandboxVolume{
+		ID:             "vol-gc-child",
+		TeamID:         "team-1",
+		UserID:         "user-1",
+		SourceVolumeID: &sourceID,
+		AccessMode:     string(volume.AccessModeRWO),
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	writeS0FSFile(t, engine, "state.txt", "new")
+	if _, err := engine.SyncMaterialize(context.Background()); err != nil {
+		t.Fatalf("SyncMaterialize(new) error = %v", err)
+	}
+
+	if err := mgr.DeleteSnapshot(context.Background(), "vol-gc-fork-source", snap.ID, "team-1"); err != nil {
+		t.Fatalf("DeleteSnapshot() error = %v", err)
+	}
+	cfg, err := mgr.s0fsConfig("team-1", "vol-gc-fork-source")
+	if err != nil {
+		t.Fatalf("s0fsConfig() error = %v", err)
+	}
+	if got, want := listS0FSKeys(t, cfg.ObjectStore, "segments/"), []string{
+		"segments/00000000000000000003-0.bin",
+		"segments/00000000000000000005-0.bin",
+	}; !sameStrings(got, want) {
+		t.Fatalf("segments with fork child = %v, want %v", got, want)
+	}
+}
+
+func TestS0FSDeleteVolumeObjectsIfUnreferencedDeletesPrefix(t *testing.T) {
+	t.Parallel()
+
+	mgr, repo, _, engine := newS0FSSnapshotTestManager(t, "vol-gc-volume-delete")
+	writeS0FSFile(t, engine, "state.txt", "payload")
+	if _, err := engine.SyncMaterialize(context.Background()); err != nil {
+		t.Fatalf("SyncMaterialize() error = %v", err)
+	}
+	vol := repo.volumes["vol-gc-volume-delete"]
+	if err := mgr.DeleteVolumeObjectsIfUnreferenced(context.Background(), vol); err != nil {
+		t.Fatalf("DeleteVolumeObjectsIfUnreferenced() error = %v", err)
+	}
+	cfg, err := mgr.s0fsConfig("team-1", "vol-gc-volume-delete")
+	if err != nil {
+		t.Fatalf("s0fsConfig() error = %v", err)
+	}
+	if keys := listS0FSKeys(t, cfg.ObjectStore, ""); len(keys) != 0 {
+		t.Fatalf("objects after volume cleanup = %v, want none", keys)
+	}
+}
+
 type failingFlushCoordinator struct {
 	called bool
 }
@@ -245,7 +352,7 @@ func newS0FSSnapshotTestManager(t *testing.T, volumeID string) (*Manager, *fakeR
 			DefaultClusterId:      "test-cluster",
 			RestoreRemountTimeout: "100ms",
 			ObjectStorageType:     "mem",
-			S3Bucket:              "snapshot-tests",
+			S3Bucket:              "snapshot-tests-" + sanitizeTestObjectStoreName(t.Name()),
 		},
 		logger:    logrus.New(),
 		clusterID: "test-cluster",
@@ -265,6 +372,11 @@ func newS0FSSnapshotTestManager(t *testing.T, volumeID string) (*Manager, *fakeR
 	})
 	volMgr.ctx.S0FS = engine
 	return mgr, repo, volMgr, engine
+}
+
+func sanitizeTestObjectStoreName(name string) string {
+	replacer := strings.NewReplacer("/", "-", " ", "-", "\t", "-")
+	return replacer.Replace(name)
 }
 
 func writeS0FSFile(t *testing.T, engine *s0fs.Engine, name, value string) {
@@ -342,4 +454,38 @@ func openFreshS0FSEngine(t *testing.T, mgr *Manager, teamID, volumeID string) *s
 		t.Fatalf("Open(fresh %s) error = %v", volumeID, err)
 	}
 	return engine
+}
+
+func listS0FSKeys(t *testing.T, store objectstore.Store, prefix string) []string {
+	t.Helper()
+	var keys []string
+	var startAfter, token string
+	for {
+		objects, hasMore, nextToken, err := store.List(prefix, startAfter, token, "", 1000)
+		if err != nil {
+			t.Fatalf("List(%q) error = %v", prefix, err)
+		}
+		for _, object := range objects {
+			keys = append(keys, object.Key)
+		}
+		if !hasMore {
+			return keys
+		}
+		if len(objects) > 0 {
+			startAfter = objects[len(objects)-1].Key
+		}
+		token = nextToken
+	}
+}
+
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

@@ -1632,14 +1632,19 @@ type SandboxAppServiceRouteRateLimit struct {
 
 // SandboxAppServiceRuntime defines model for SandboxAppServiceRuntime.
 type SandboxAppServiceRuntime struct {
-	Command         *[]string                    `json:"command,omitempty"`
-	Cwd             *string                      `json:"cwd,omitempty"`
-	EnvVars         *map[string]string           `json:"env_vars,omitempty"`
-	Type            SandboxAppServiceRuntimeType `json:"type"`
-	WarmProcessName *string                      `json:"warm_process_name,omitempty"`
+	// Command Process argv used when type is cmd.
+	Command *[]string          `json:"command,omitempty"`
+	Cwd     *string            `json:"cwd,omitempty"`
+	EnvVars *map[string]string `json:"env_vars,omitempty"`
+
+	// Type Runtime strategy for restarting a service when it is restored as a function runtime.
+	Type SandboxAppServiceRuntimeType `json:"type"`
+
+	// WarmProcessName Warm process alias or context ID used when type is warm_process. Function runtimes require this to reference an existing cmd warm process.
+	WarmProcessName *string `json:"warm_process_name,omitempty"`
 }
 
-// SandboxAppServiceRuntimeType defines model for SandboxAppServiceRuntime.Type.
+// SandboxAppServiceRuntimeType Runtime strategy for restarting a service when it is restored as a function runtime.
 type SandboxAppServiceRuntimeType string
 
 // SandboxAppServiceView defines model for SandboxAppServiceView.

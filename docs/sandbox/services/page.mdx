@@ -15,6 +15,10 @@ Services are also the source model for Sandbox0 Functions. A publishable service
 | `ingress` | object | Public exposure and route policy |
 | `health_check` | object | Optional readiness path |
 
+### Runtime
+
+Service runtime supports `cmd`, `warm_process`, and `manual`. Use `cmd` when Function Gateway should create a new command context for a restored function runtime. Use `warm_process` when the template already starts a long-lived process and the service should bind to that existing context. For Functions, `warm_process_name` must reference a `cmd` warm process alias or context ID; REPL warm processes are not valid HTTP service runtimes.
+
 ### Ingress
 
 | Field | Type | Description |

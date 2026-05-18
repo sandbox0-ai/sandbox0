@@ -39,9 +39,18 @@ type functionRouteMatch struct {
 }
 
 type functionContextResponse struct {
-	ID      string `json:"id"`
-	Running bool   `json:"running"`
-	Paused  bool   `json:"paused"`
+	ID      string            `json:"id"`
+	Type    string            `json:"type"`
+	Alias   string            `json:"alias"`
+	Command []string          `json:"command,omitempty"`
+	CWD     string            `json:"cwd"`
+	EnvVars map[string]string `json:"env_vars"`
+	Running bool              `json:"running"`
+	Paused  bool              `json:"paused"`
+}
+
+type functionContextListResponse struct {
+	Contexts []functionContextResponse `json:"contexts"`
 }
 
 type functionRuntimeHTTPError struct {
@@ -600,7 +609,7 @@ func (s *Server) ensureFunctionServiceRuntime(ctx context.Context, fn *functions
 	if rev.RuntimeContextID != nil && strings.TrimSpace(*rev.RuntimeContextID) != "" {
 		contextID := strings.TrimSpace(*rev.RuntimeContextID)
 		current, err := s.getFunctionRuntimeContext(ctx, sandbox.ID, fn.TeamID, rev.CreatedBy, contextID)
-		if err == nil && (current.Running || current.Paused) {
+		if err == nil && functionRuntimeContextCanServe(current, service) {
 			return contextID, nil
 		}
 		if err != nil && !isFunctionRuntimeStatus(err, nethttp.StatusNotFound) {
@@ -646,6 +655,9 @@ func (s *Server) startFunctionServiceRuntime(ctx context.Context, sandboxID, tea
 	if service.Runtime == nil {
 		return "", fmt.Errorf("function service runtime is missing")
 	}
+	if service.Runtime.Type == mgr.SandboxAppServiceRuntimeWarmProcess {
+		return s.resolveFunctionWarmProcessRuntimeContext(ctx, sandboxID, teamID, userID, service.Runtime.WarmProcessName)
+	}
 	payload := map[string]any{
 		"cwd":      service.Runtime.CWD,
 		"env_vars": service.Runtime.EnvVars,
@@ -654,12 +666,6 @@ func (s *Server) startFunctionServiceRuntime(ctx context.Context, sandboxID, tea
 	case mgr.SandboxAppServiceRuntimeCMD:
 		payload["type"] = "cmd"
 		payload["cmd"] = map[string]any{"command": service.Runtime.Command}
-	case mgr.SandboxAppServiceRuntimeWarmProcess:
-		if strings.TrimSpace(service.Runtime.WarmProcessName) == "" {
-			return "", fmt.Errorf("warm_process_name is required for warm process functions")
-		}
-		payload["type"] = "repl"
-		payload["repl"] = map[string]any{"alias": strings.TrimSpace(service.Runtime.WarmProcessName)}
 	default:
 		return "", fmt.Errorf("unsupported function service runtime type %q", service.Runtime.Type)
 	}
@@ -686,6 +692,80 @@ func (s *Server) startFunctionServiceRuntime(ctx context.Context, sandboxID, tea
 	return out.ID, nil
 }
 
+func (s *Server) resolveFunctionWarmProcessRuntimeContext(ctx context.Context, sandboxID, teamID, userID, warmProcessName string) (string, error) {
+	contexts, err := s.getFunctionRuntimeContexts(ctx, sandboxID, teamID, userID)
+	if err != nil {
+		return "", err
+	}
+	selected, err := selectFunctionWarmProcessContext(contexts, warmProcessName)
+	if err != nil {
+		return "", err
+	}
+	return selected.ID, nil
+}
+
+func (s *Server) getFunctionRuntimeContexts(ctx context.Context, sandboxID, teamID, userID string) ([]functionContextResponse, error) {
+	resp, err := s.doFunctionRuntimeContextRequest(ctx, nethttp.MethodGet, sandboxID, teamID, userID, "", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != nethttp.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, functionRuntimeHTTPError{status: resp.StatusCode, body: strings.TrimSpace(string(body))}
+	}
+	out, err := decodeFunctionContextListResponse(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return out.Contexts, nil
+}
+
+func functionRuntimeContextCanServe(current *functionContextResponse, service mgr.SandboxAppService) bool {
+	if current == nil || (!current.Running && !current.Paused) || service.Runtime == nil {
+		return false
+	}
+	if service.Runtime.Type != mgr.SandboxAppServiceRuntimeWarmProcess {
+		return true
+	}
+	_, err := selectFunctionWarmProcessContext([]functionContextResponse{*current}, service.Runtime.WarmProcessName)
+	return err == nil
+}
+
+func selectFunctionWarmProcessContext(contexts []functionContextResponse, warmProcessName string) (*functionContextResponse, error) {
+	name := strings.TrimSpace(warmProcessName)
+	if name == "" {
+		return nil, fmt.Errorf("warm_process_name is required for warm process functions")
+	}
+	for i := range contexts {
+		if strings.TrimSpace(contexts[i].Alias) == name {
+			return validateFunctionWarmProcessContext(&contexts[i], name)
+		}
+	}
+	for i := range contexts {
+		if strings.TrimSpace(contexts[i].ID) == name {
+			return validateFunctionWarmProcessContext(&contexts[i], name)
+		}
+	}
+	return nil, fmt.Errorf("warm process %q was not found", name)
+}
+
+func validateFunctionWarmProcessContext(ctx *functionContextResponse, warmProcessName string) (*functionContextResponse, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("warm process %q was not found", warmProcessName)
+	}
+	if strings.TrimSpace(ctx.ID) == "" {
+		return nil, fmt.Errorf("warm process %q context id is empty", warmProcessName)
+	}
+	if strings.TrimSpace(ctx.Type) != "cmd" {
+		return nil, fmt.Errorf("warm process %q must reference a cmd context, got %q", warmProcessName, ctx.Type)
+	}
+	if !ctx.Running && !ctx.Paused {
+		return nil, fmt.Errorf("warm process %q is not running", warmProcessName)
+	}
+	return ctx, nil
+}
+
 func decodeFunctionContextResponse(r io.Reader) (*functionContextResponse, error) {
 	body, err := io.ReadAll(r)
 	if err != nil {
@@ -709,6 +789,35 @@ func decodeFunctionContextResponse(r io.Reader) (*functionContextResponse, error
 		return envelope.Data, nil
 	}
 	var out functionContextResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func decodeFunctionContextListResponse(r io.Reader) (*functionContextListResponse, error) {
+	body, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	var envelope struct {
+		Success bool                         `json:"success"`
+		Data    *functionContextListResponse `json:"data,omitempty"`
+		Error   *spec.Error                  `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(body, &envelope); err == nil && (envelope.Success || envelope.Data != nil || envelope.Error != nil) {
+		if envelope.Error != nil {
+			return nil, errors.New(envelope.Error.Message)
+		}
+		if !envelope.Success {
+			return nil, fmt.Errorf("context list response was not successful")
+		}
+		if envelope.Data == nil {
+			return nil, fmt.Errorf("context list response missing data")
+		}
+		return envelope.Data, nil
+	}
+	var out functionContextListResponse
 	if err := json.Unmarshal(body, &out); err != nil {
 		return nil, err
 	}

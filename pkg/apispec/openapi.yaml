@@ -4014,10 +4014,12 @@ components:
         type:
           type: string
           enum: [warm_process, cmd, manual]
+          description: Runtime strategy for restarting a service when it is restored as a function runtime.
         command:
           type: array
           items:
             type: string
+          description: Process argv used when type is cmd.
         cwd:
           type: string
         env_vars:
@@ -4026,6 +4028,7 @@ components:
             type: string
         warm_process_name:
           type: string
+          description: Warm process alias or context ID used when type is warm_process. Function runtimes require this to reference an existing cmd warm process.
       required: [type]
     SandboxAppServiceIngress:
       type: object

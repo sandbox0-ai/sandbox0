@@ -73,8 +73,7 @@ func (s *SandboxService) ListSandboxes(ctx context.Context, req *ListSandboxesRe
 			continue
 		}
 
-		// Get status from pod phase
-		status := s.podPhaseToSandboxStatus(pod.Status.Phase)
+		status := s.podToSandboxStatus(pod)
 
 		// Filter by status if specified
 		if req.Status != "" && status != req.Status {

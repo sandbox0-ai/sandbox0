@@ -295,6 +295,61 @@ func TestListSandboxes_IncludesPowerState(t *testing.T) {
 	assert.False(t, resp.Sandboxes[0].Paused)
 }
 
+func TestListSandboxes_TerminatingPodStatus(t *testing.T) {
+	now := time.Now()
+	pod := createTestPod("sandbox-terminating", "team-a", "template-1", controller.PoolTypeActive, now, now.Add(time.Hour), false)
+	deletionTime := metav1.NewTime(now.Add(time.Minute))
+	pod.DeletionTimestamp = &deletionTime
+	pod.Finalizers = []string{"test.sandbox0.ai/finalizer"}
+
+	svc := &SandboxService{
+		k8sClient: fake.NewSimpleClientset(),
+		podLister: newTestPodLister(t, pod),
+		clock:     systemTime{},
+		logger:    zap.NewNop(),
+	}
+
+	all, err := svc.ListSandboxes(context.Background(), &ListSandboxesRequest{
+		TeamID: "team-a",
+		Limit:  50,
+	})
+	require.NoError(t, err)
+	require.Len(t, all.Sandboxes, 1)
+	assert.Equal(t, SandboxStatusTerminating, all.Sandboxes[0].Status)
+
+	running, err := svc.ListSandboxes(context.Background(), &ListSandboxesRequest{
+		TeamID: "team-a",
+		Status: SandboxStatusRunning,
+		Limit:  50,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, running.Sandboxes)
+
+	terminating, err := svc.ListSandboxes(context.Background(), &ListSandboxesRequest{
+		TeamID: "team-a",
+		Status: SandboxStatusTerminating,
+		Limit:  50,
+	})
+	require.NoError(t, err)
+	require.Len(t, terminating.Sandboxes, 1)
+	assert.Equal(t, "sandbox-terminating", terminating.Sandboxes[0].ID)
+}
+
+func TestPodToSandboxStatusTreatsDeletionAsTerminating(t *testing.T) {
+	now := metav1.Now()
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			DeletionTimestamp: &now,
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+		},
+	}
+
+	svc := &SandboxService{}
+	assert.Equal(t, SandboxStatusTerminating, svc.podToSandboxStatus(pod))
+}
+
 func createTestPod(name, teamID, templateID, poolType string, createdAt, expiresAt time.Time, paused bool) *corev1.Pod {
 	return createTestPodWithPhase(name, teamID, templateID, poolType, createdAt, expiresAt, paused, corev1.PodRunning)
 }

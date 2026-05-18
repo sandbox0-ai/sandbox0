@@ -45,6 +45,7 @@ const (
 	SandboxStatusRunning      = "running"
 	SandboxStatusFailed       = "failed"
 	SandboxStatusCompleted    = "completed"
+	SandboxStatusTerminating  = "terminating"
 	SandboxPowerStateActive   = "active"
 	SandboxPowerStatePaused   = "paused"
 	SandboxPowerPhaseStable   = "stable"

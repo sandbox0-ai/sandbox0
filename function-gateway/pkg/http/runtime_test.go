@@ -85,6 +85,25 @@ func TestRewriteFunctionPath(t *testing.T) {
 	}
 }
 
+func TestFunctionSandboxCanServeSourceRequiresRunning(t *testing.T) {
+	if !functionSandboxCanServeSource(&mgr.Sandbox{Status: mgr.SandboxStatusRunning}) {
+		t.Fatal("running sandbox should serve source function traffic")
+	}
+
+	for _, status := range []string{
+		mgr.SandboxStatusStarting,
+		mgr.SandboxStatusFailed,
+		mgr.SandboxStatusCompleted,
+		mgr.SandboxStatusTerminating,
+	} {
+		t.Run(status, func(t *testing.T) {
+			if functionSandboxCanServeSource(&mgr.Sandbox{Status: status}) {
+				t.Fatalf("status %q should not serve source function traffic", status)
+			}
+		})
+	}
+}
+
 func TestDecodeFunctionContextResponseAcceptsGatewayEnvelope(t *testing.T) {
 	out, err := decodeFunctionContextResponse(strings.NewReader(`{"success":true,"data":{"id":"ctx-a","running":true}}`))
 	if err != nil {

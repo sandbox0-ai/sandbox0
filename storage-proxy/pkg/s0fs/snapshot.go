@@ -169,6 +169,41 @@ func PrepareForkState(state *SnapshotState, sourceVolumeID string) (*SnapshotSta
 	return clone, nil
 }
 
+// SnapshotReader reads a snapshot state that may contain cold segment
+// references. Detached SnapshotState.Read only supports inline data.
+type SnapshotReader struct {
+	state        *SnapshotState
+	materializer *Materializer
+}
+
+func NewSnapshotReader(state *SnapshotState, materializer *Materializer) *SnapshotReader {
+	return &SnapshotReader{state: state, materializer: materializer}
+}
+
+func (r *SnapshotReader) Read(inode uint64, offset uint64, size uint64) ([]byte, error) {
+	if r == nil || r.state == nil {
+		return nil, ErrNotFound
+	}
+	node := r.state.Nodes[inode]
+	if node == nil {
+		return nil, ErrNotFound
+	}
+	if node.Type == TypeDirectory {
+		return nil, ErrIsDir
+	}
+	if payload := r.state.Data[inode]; len(payload) > 0 || len(r.state.ColdFiles[inode]) == 0 {
+		if offset >= uint64(len(payload)) {
+			return nil, nil
+		}
+		end := offset + size
+		if end > uint64(len(payload)) {
+			end = uint64(len(payload))
+		}
+		return slices.Clone(payload[offset:end]), nil
+	}
+	return readColdRange(r.materializer, r.state.ColdFiles[inode], r.state.Segments, offset, size)
+}
+
 func (s *SnapshotState) Lookup(parent uint64, name string) (*Node, error) {
 	if s == nil {
 		return nil, ErrNotFound
@@ -253,4 +288,69 @@ func (s *SnapshotState) Read(inode uint64, offset uint64, size uint64) ([]byte, 
 		end = uint64(len(payload))
 	}
 	return slices.Clone(payload[offset:end]), nil
+}
+
+func readColdRange(materializer *Materializer, extents []FileExtent, segments map[string]*Segment, offset uint64, size uint64) ([]byte, error) {
+	if materializer == nil || !materializer.Enabled() {
+		return nil, fmt.Errorf("%w: cold data resolver is not configured", ErrInvalidInput)
+	}
+	if len(extents) == 0 {
+		return nil, nil
+	}
+	var out []byte
+	remaining := size
+	rangeStart := offset
+	rangeEnd := offset + size
+	fileOffset := uint64(0)
+
+	for _, extent := range extents {
+		extentStart := fileOffset
+		extentEnd := fileOffset + extent.Length
+		if rangeEnd <= extentStart || rangeStart >= extentEnd {
+			fileOffset = extentEnd
+			continue
+		}
+
+		readStart := maxUint64(rangeStart, extentStart)
+		readEnd := minUint64(rangeEnd, extentEnd)
+		segment := segments[extent.SegmentID]
+		if segment == nil {
+			return nil, fmt.Errorf("%w: missing segment %s", ErrInvalidInput, extent.SegmentID)
+		}
+		segmentOffset := extent.Offset + (readStart - extentStart)
+		chunk, err := materializer.ReadSegmentRange(segment, int64(segmentOffset), int64(readEnd-readStart))
+		if err != nil {
+			return nil, fmt.Errorf("read cold segment %s: %w", segment.Key, err)
+		}
+		out = append(out, chunk...)
+		remaining -= uint64(len(chunk))
+		if remaining == 0 {
+			break
+		}
+		fileOffset = extentEnd
+	}
+	return out, nil
+}
+
+func pruneUnreferencedSegments(state *SnapshotState) {
+	if state == nil {
+		return
+	}
+	if len(state.ColdFiles) == 0 {
+		state.Segments = make(map[string]*Segment)
+		return
+	}
+	live := make(map[string]struct{})
+	for _, extents := range state.ColdFiles {
+		for _, extent := range extents {
+			if extent.SegmentID != "" {
+				live[extent.SegmentID] = struct{}{}
+			}
+		}
+	}
+	for segmentID := range state.Segments {
+		if _, ok := live[segmentID]; !ok {
+			delete(state.Segments, segmentID)
+		}
+	}
 }

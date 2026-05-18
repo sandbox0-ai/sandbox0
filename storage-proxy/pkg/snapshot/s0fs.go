@@ -237,11 +237,14 @@ func (m *s0fsArchiveMeta) ReadLink(_ fsmeta.Context, inode fsmeta.Ino, target *[
 }
 
 type s0fsArchiveReader struct {
-	state *s0fs.SnapshotState
+	reader *s0fs.SnapshotReader
 }
 
 func (r *s0fsArchiveReader) ReadFile(ctx context.Context, inode fsmeta.Ino, size uint64, w io.Writer) error {
-	data, err := r.state.Read(uint64(inode), 0, size)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	data, err := r.reader.Read(uint64(inode), 0, size)
 	if err != nil {
 		return err
 	}
@@ -333,6 +336,8 @@ func (m *Manager) openS0FSSnapshotArchiveSession(ctx context.Context, volumeID, 
 	if err != nil {
 		return nil, 0, nil, err
 	}
+	materializer := s0fs.NewMaterializer(volumeID, cfg.ObjectStore, cfg.HeadStore, cfg.ObjectStoreForVolume)
+	materializer.SetEncryption(cfg.Encryption)
 	rootAttr := &fsmeta.Attr{}
 	metaView := &s0fsArchiveMeta{state: state}
 	if errno := metaView.GetAttr(fsmeta.Background(), fsmeta.RootInode, rootAttr); errno != 0 {
@@ -340,7 +345,7 @@ func (m *Manager) openS0FSSnapshotArchiveSession(ctx context.Context, volumeID, 
 	}
 	return &snapshotArchiveSession{
 		meta:   metaView,
-		reader: &s0fsArchiveReader{state: state},
+		reader: &s0fsArchiveReader{reader: s0fs.NewSnapshotReader(state, materializer)},
 	}, fsmeta.RootInode, rootAttr, nil
 }
 
@@ -366,6 +371,9 @@ func (m *Manager) createS0FSSnapshot(ctx context.Context, req *CreateSnapshotReq
 		if volCtx, getErr := m.volMgr.GetVolume(req.VolumeID); getErr == nil && volCtx != nil {
 			_ = volCtx.FlushAll("")
 		}
+	}
+	if _, err := engine.EnsureMaterialized(ctx); err != nil {
+		return nil, err
 	}
 
 	snapshotID := uuid.New().String()

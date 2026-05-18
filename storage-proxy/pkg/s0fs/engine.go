@@ -1,7 +1,6 @@
 package s0fs
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"errors"
@@ -535,6 +534,16 @@ func (e *Engine) ExportState() (*SnapshotState, error) {
 }
 
 func (e *Engine) SyncMaterialize(ctx context.Context) (*Manifest, error) {
+	return e.syncMaterialize(ctx, false)
+}
+
+// EnsureMaterialized writes any inline file data to immutable segments even if
+// the engine was reopened from a persisted head and is not currently dirty.
+func (e *Engine) EnsureMaterialized(ctx context.Context) (*Manifest, error) {
+	return e.syncMaterialize(ctx, true)
+}
+
+func (e *Engine) syncMaterialize(ctx context.Context, force bool) (*Manifest, error) {
 	e.materializeMu.Lock()
 	defer e.materializeMu.Unlock()
 
@@ -543,7 +552,7 @@ func (e *Engine) SyncMaterialize(ctx context.Context) (*Manifest, error) {
 		e.mu.RUnlock()
 		return nil, err
 	}
-	if e.materializer == nil || !e.materializer.Enabled() || !e.dirty {
+	if e.materializer == nil || !e.materializer.Enabled() || (!e.dirty && (!force || !e.needsMaterializationLocked())) {
 		e.mu.RUnlock()
 		return nil, nil
 	}
@@ -636,10 +645,7 @@ func (e *Engine) CreateSnapshot(snapshotID string) (*SnapshotState, error) {
 	if snapshotID == "" {
 		return nil, fmt.Errorf("%w: snapshot id is required", ErrInvalidInput)
 	}
-	state, err := e.exportStateLocked()
-	if err != nil {
-		return nil, err
-	}
+	state := e.snapshotStateLocked()
 	if err := saveSnapshotState(snapshotFilePath(e.wal.path, snapshotID), e.volumeID, "snapshot:"+snapshotID, state, e.encryption); err != nil {
 		return nil, err
 	}
@@ -1028,6 +1034,26 @@ func (e *Engine) markDirtyLocked() {
 	e.dirtyAt = time.Now().UTC()
 }
 
+func (e *Engine) needsMaterializationLocked() bool {
+	for _, payload := range e.data {
+		if len(payload) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *Engine) snapshotStateLocked() *SnapshotState {
+	state := cloneState(e.currentStateLocked())
+	for inode := range state.ColdFiles {
+		if state.Nodes[inode] == nil {
+			delete(state.ColdFiles, inode)
+		}
+	}
+	pruneUnreferencedSegments(state)
+	return state
+}
+
 func (e *Engine) exportStateLocked() (*SnapshotState, error) {
 	state := cloneState(e.currentStateLocked())
 	if len(state.ColdFiles) == 0 {
@@ -1125,48 +1151,7 @@ func (e *Engine) mutableFileDataLocked(inode uint64) ([]byte, error) {
 }
 
 func (e *Engine) readColdRangeLocked(inode uint64, offset uint64, size uint64) ([]byte, error) {
-	if e.materializer == nil || !e.materializer.Enabled() {
-		return nil, fmt.Errorf("%w: cold data resolver is not configured", ErrInvalidInput)
-	}
-	extents := e.coldFiles[inode]
-	if len(extents) == 0 {
-		return nil, nil
-	}
-	var out bytes.Buffer
-	remaining := size
-	rangeStart := offset
-	rangeEnd := offset + size
-	fileOffset := uint64(0)
-
-	for _, extent := range extents {
-		extentStart := fileOffset
-		extentEnd := fileOffset + extent.Length
-		if rangeEnd <= extentStart || rangeStart >= extentEnd {
-			fileOffset = extentEnd
-			continue
-		}
-
-		readStart := maxUint64(rangeStart, extentStart)
-		readEnd := minUint64(rangeEnd, extentEnd)
-		segment := e.segments[extent.SegmentID]
-		if segment == nil {
-			return nil, fmt.Errorf("%w: missing segment %s", ErrInvalidInput, extent.SegmentID)
-		}
-		segmentOffset := extent.Offset + (readStart - extentStart)
-		chunk, err := e.materializer.ReadSegmentRange(segment, int64(segmentOffset), int64(readEnd-readStart))
-		if err != nil {
-			return nil, fmt.Errorf("read cold segment %s: %w", segment.Key, err)
-		}
-		if _, err := out.Write(chunk); err != nil {
-			return nil, fmt.Errorf("assemble cold file data: %w", err)
-		}
-		remaining -= uint64(len(chunk))
-		if remaining == 0 {
-			break
-		}
-		fileOffset = extentEnd
-	}
-	return out.Bytes(), nil
+	return readColdRange(e.materializer, e.coldFiles[inode], e.segments, offset, size)
 }
 
 func minUint64(a, b uint64) uint64 {

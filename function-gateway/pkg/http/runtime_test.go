@@ -1,6 +1,8 @@
 package http
 
 import (
+	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -8,11 +10,13 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functions"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
 )
 
@@ -121,6 +125,121 @@ func TestDecodeFunctionContextResponseAcceptsRawContextBody(t *testing.T) {
 	}
 	if out.ID != "ctx-a" || out.Running || !out.Paused {
 		t.Fatalf("decoded context = %+v, want paused ctx-a", out)
+	}
+}
+
+func TestDecodeFunctionContextListResponseAcceptsGatewayEnvelope(t *testing.T) {
+	out, err := decodeFunctionContextListResponse(strings.NewReader(`{"success":true,"data":{"contexts":[{"id":"ctx-a","type":"cmd","alias":"api","running":true}]}}`))
+	if err != nil {
+		t.Fatalf("decodeFunctionContextListResponse() error = %v", err)
+	}
+	if len(out.Contexts) != 1 || out.Contexts[0].ID != "ctx-a" || out.Contexts[0].Type != "cmd" || out.Contexts[0].Alias != "api" || !out.Contexts[0].Running {
+		t.Fatalf("decoded contexts = %+v, want running cmd ctx-a", out.Contexts)
+	}
+}
+
+func TestDecodeFunctionContextListResponseAcceptsRawListBody(t *testing.T) {
+	out, err := decodeFunctionContextListResponse(strings.NewReader(`{"contexts":[{"id":"ctx-a","type":"cmd","alias":"api","paused":true}]}`))
+	if err != nil {
+		t.Fatalf("decodeFunctionContextListResponse() error = %v", err)
+	}
+	if len(out.Contexts) != 1 || out.Contexts[0].ID != "ctx-a" || out.Contexts[0].Type != "cmd" || out.Contexts[0].Alias != "api" || !out.Contexts[0].Paused {
+		t.Fatalf("decoded contexts = %+v, want paused cmd ctx-a", out.Contexts)
+	}
+}
+
+func TestSelectFunctionWarmProcessContextRequiresCMD(t *testing.T) {
+	contexts := []functionContextResponse{
+		{ID: "ctx-repl", Type: "repl", Alias: "node", Running: true},
+		{ID: "ctx-api", Type: "cmd", Alias: "api", Running: true},
+	}
+
+	selected, err := selectFunctionWarmProcessContext(contexts, "api")
+	if err != nil {
+		t.Fatalf("selectFunctionWarmProcessContext() error = %v", err)
+	}
+	if selected.ID != "ctx-api" {
+		t.Fatalf("selected context = %+v, want ctx-api", selected)
+	}
+
+	if _, err := selectFunctionWarmProcessContext(contexts, "node"); err == nil {
+		t.Fatal("selectFunctionWarmProcessContext() error = nil, want repl rejection")
+	}
+}
+
+func TestSelectFunctionWarmProcessContextRejectsStoppedContext(t *testing.T) {
+	_, err := selectFunctionWarmProcessContext([]functionContextResponse{
+		{ID: "ctx-api", Type: "cmd", Alias: "api"},
+	}, "api")
+	if err == nil {
+		t.Fatal("selectFunctionWarmProcessContext() error = nil, want stopped context rejection")
+	}
+}
+
+func TestFunctionRuntimeContextCanServeWarmProcess(t *testing.T) {
+	service := mgr.SandboxAppService{
+		Runtime: &mgr.SandboxAppServiceRuntime{
+			Type:            mgr.SandboxAppServiceRuntimeWarmProcess,
+			WarmProcessName: "api",
+		},
+	}
+	if !functionRuntimeContextCanServe(&functionContextResponse{ID: "ctx-api", Type: "cmd", Alias: "api", Running: true}, service) {
+		t.Fatal("running cmd warm process should serve")
+	}
+	if functionRuntimeContextCanServe(&functionContextResponse{ID: "ctx-api", Type: "repl", Alias: "api", Running: true}, service) {
+		t.Fatal("repl warm process should not serve function traffic")
+	}
+}
+
+func TestStartFunctionServiceRuntimeWarmProcessUsesExistingCMDContext(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate ed25519 keypair: %v", err)
+	}
+
+	clusterGateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s, want GET", r.Method)
+			http.Error(w, "unexpected method", http.StatusInternalServerError)
+			return
+		}
+		if r.URL.Path != "/api/v1/sandboxes/sb_test/contexts" {
+			t.Errorf("path = %s, want /api/v1/sandboxes/sb_test/contexts", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get(internalauth.DefaultTokenHeader) == "" {
+			t.Error("internal auth header is empty")
+			http.Error(w, "missing token", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"contexts":[{"id":"ctx-api","type":"cmd","alias":"api","running":true}]}`))
+	}))
+	defer clusterGateway.Close()
+
+	server := &Server{
+		cfg: &config.FunctionGatewayConfig{
+			DefaultClusterGatewayURL: clusterGateway.URL,
+		},
+		internalAuthGen: internalauth.NewGenerator(internalauth.GeneratorConfig{
+			Caller:     internalauth.ServiceFunctionGateway,
+			PrivateKey: privateKey,
+			TTL:        time.Minute,
+		}),
+		httpClient: clusterGateway.Client(),
+	}
+	contextID, err := server.startFunctionServiceRuntime(context.Background(), "sb_test", "team-1", "user-1", mgr.SandboxAppService{
+		Runtime: &mgr.SandboxAppServiceRuntime{
+			Type:            mgr.SandboxAppServiceRuntimeWarmProcess,
+			WarmProcessName: "api",
+		},
+	})
+	if err != nil {
+		t.Fatalf("startFunctionServiceRuntime() error = %v", err)
+	}
+	if contextID != "ctx-api" {
+		t.Fatalf("contextID = %q, want ctx-api", contextID)
 	}
 }
 

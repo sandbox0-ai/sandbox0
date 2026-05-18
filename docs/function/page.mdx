@@ -22,7 +22,7 @@ The `production` alias is the serving pointer used by the function host. Creatin
 
 Function traffic is handled by `function-gateway`. The gateway resolves the host to a function, loads the `production` revision, enforces the revision's service route policy, and proxies the request to the service port.
 
-If the source sandbox still exists, the gateway routes to that sandbox and resumes it when needed. If the source sandbox has been deleted, the gateway claims a new runtime sandbox from the revision's template, mounts the revision-owned volumes, starts the service runtime command or warm process, and reuses that runtime for later requests.
+If the source sandbox still exists, the gateway routes to that sandbox and resumes it when needed. If the source sandbox has been deleted, the gateway claims a new runtime sandbox from the revision's template, mounts the revision-owned volumes, starts the service runtime command or binds to the referenced warm process, and reuses that runtime for later requests.
 
 ## Publishable Services
 
@@ -35,6 +35,8 @@ Only publishable Sandbox Services can become function revisions. A service is pu
 | `manual_runtime` | The service runtime is manual and cannot be started by Function Gateway |
 | `missing_command` | A `cmd` runtime is missing its command |
 | `missing_warm_process_name` | A `warm_process` runtime is missing its warm process name |
+
+For Functions, a `warm_process` runtime must reference an existing `cmd` warm process alias or context ID. REPL warm processes are interactive execution contexts and cannot serve HTTP traffic.
 
 Use Sandbox Services route policy for path matching, allowed methods, bearer/header auth, CORS, rate limits, path rewrite, and upstream timeout. Functions reuse the same route model.
 

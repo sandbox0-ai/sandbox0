@@ -282,6 +282,45 @@ func (r *Repository) ListSandboxVolumesByTeam(ctx context.Context, teamID string
 	return volumes, nil
 }
 
+// ListSandboxVolumesBySource retrieves volumes forked from a source volume.
+func (r *Repository) ListSandboxVolumesBySource(ctx context.Context, sourceVolumeID string) ([]*SandboxVolume, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT
+			id, team_id, user_id,
+			source_volume_id,
+			default_posix_uid, default_posix_gid,
+			access_mode,
+			created_at, updated_at
+		FROM sandbox_volumes
+		WHERE source_volume_id = $1
+		ORDER BY created_at DESC
+	`, sourceVolumeID)
+	if err != nil {
+		return nil, fmt.Errorf("query sandbox volumes by source: %w", err)
+	}
+	defer rows.Close()
+
+	var volumes []*SandboxVolume
+	for rows.Next() {
+		var v SandboxVolume
+		err := rows.Scan(
+			&v.ID, &v.TeamID, &v.UserID,
+			&v.SourceVolumeID,
+			&v.DefaultPosixUID, &v.DefaultPosixGID,
+			&v.AccessMode,
+			&v.CreatedAt, &v.UpdatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scan sandbox volume by source: %w", err)
+		}
+		volumes = append(volumes, &v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate sandbox volumes by source: %w", err)
+	}
+	return volumes, nil
+}
+
 // DeleteSandboxVolume deletes a sandbox volume record
 func (r *Repository) DeleteSandboxVolume(ctx context.Context, id string) error {
 	return r.deleteSandboxVolume(ctx, r.pool, id)

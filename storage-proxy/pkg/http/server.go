@@ -61,6 +61,7 @@ type snapshotManager interface {
 	ExportSnapshotArchive(ctx context.Context, req *snapshot.ExportSnapshotRequest, w io.Writer) error
 	RestoreSnapshot(ctx context.Context, req *snapshot.RestoreSnapshotRequest) error
 	DeleteSnapshot(ctx context.Context, volumeID, snapshotID, teamID string) error
+	DeleteVolumeObjectsIfUnreferenced(ctx context.Context, volume *db.SandboxVolume) error
 	ForkVolume(ctx context.Context, req *snapshot.ForkVolumeRequest) (*db.SandboxVolume, error)
 	CreateVolumeFromSnapshot(ctx context.Context, req *snapshot.CreateVolumeFromSnapshotRequest) (*db.SandboxVolume, error)
 }

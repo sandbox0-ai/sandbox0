@@ -232,14 +232,15 @@ func (f *fakeHTTPMeteringWriter) UpsertProducerWatermarkTx(ctx context.Context, 
 }
 
 type fakeHTTPSnapshotManager struct {
-	exportBody          []byte
-	lastCreate          *snapshot.CreateSnapshotRequest
-	lastCreateVolume    *snapshot.CreateVolumeFromSnapshotRequest
-	lastExport          *snapshot.ExportSnapshotRequest
-	lastCompatibility   *snapshot.ListSnapshotCompatibilityIssuesRequest
-	casefoldEntries     []snapshot.SnapshotCasefoldCollision
-	compatibilityIssues []pathnorm.CompatibilityIssue
-	deletedSnapshot     []string
+	exportBody           []byte
+	lastCreate           *snapshot.CreateSnapshotRequest
+	lastCreateVolume     *snapshot.CreateVolumeFromSnapshotRequest
+	lastExport           *snapshot.ExportSnapshotRequest
+	lastCompatibility    *snapshot.ListSnapshotCompatibilityIssuesRequest
+	casefoldEntries      []snapshot.SnapshotCasefoldCollision
+	compatibilityIssues  []pathnorm.CompatibilityIssue
+	deletedSnapshot      []string
+	cleanedVolumeObjects []string
 }
 
 func (f *fakeHTTPSnapshotManager) CreateSnapshotSimple(ctx context.Context, req *snapshot.CreateSnapshotRequest) (*db.Snapshot, error) {
@@ -296,6 +297,13 @@ func (f *fakeHTTPSnapshotManager) DeleteSnapshot(ctx context.Context, volumeID, 
 	return nil
 }
 
+func (f *fakeHTTPSnapshotManager) DeleteVolumeObjectsIfUnreferenced(ctx context.Context, volume *db.SandboxVolume) error {
+	if volume != nil {
+		f.cleanedVolumeObjects = append(f.cleanedVolumeObjects, volume.ID)
+	}
+	return nil
+}
+
 func (f *fakeHTTPSnapshotManager) ForkVolume(ctx context.Context, req *snapshot.ForkVolumeRequest) (*db.SandboxVolume, error) {
 	return nil, nil
 }
@@ -316,12 +324,13 @@ func (f *fakeHTTPSnapshotManager) CreateVolumeFromSnapshot(ctx context.Context, 
 func TestCreateSandboxVolumeRecordsMetering(t *testing.T) {
 	repo := newFakeHTTPRepo()
 	meteringWriter := &fakeHTTPMeteringWriter{}
+	snapshotMgr := &fakeHTTPSnapshotManager{}
 	server := &Server{
 		logger:       logrus.New(),
 		repo:         repo,
 		meteringRepo: meteringWriter,
 		regionID:     "aws-us-east-1",
-		snapshotMgr:  &fakeHTTPSnapshotManager{},
+		snapshotMgr:  snapshotMgr,
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes", bytes.NewBufferString(`{}`))
@@ -382,12 +391,13 @@ func TestDeleteSandboxVolumeForceRecordsMetering(t *testing.T) {
 		PodID:     "pod-a",
 	}}
 	meteringWriter := &fakeHTTPMeteringWriter{}
+	snapshotMgr := &fakeHTTPSnapshotManager{}
 	server := &Server{
 		logger:       logrus.New(),
 		repo:         repo,
 		meteringRepo: meteringWriter,
 		regionID:     "aws-us-east-1",
-		snapshotMgr:  &fakeHTTPSnapshotManager{},
+		snapshotMgr:  snapshotMgr,
 	}
 
 	req := httptest.NewRequest(http.MethodDelete, "/sandboxvolumes/vol-1?force=true", nil)
@@ -408,6 +418,9 @@ func TestDeleteSandboxVolumeForceRecordsMetering(t *testing.T) {
 	}
 	if len(repo.deletedVolume) != 1 || repo.deletedVolume[0] != "vol-1" {
 		t.Fatalf("deleted volume = %v, want [vol-1]", repo.deletedVolume)
+	}
+	if len(snapshotMgr.cleanedVolumeObjects) != 1 || snapshotMgr.cleanedVolumeObjects[0] != "vol-1" {
+		t.Fatalf("cleaned volume objects = %v, want [vol-1]", snapshotMgr.cleanedVolumeObjects)
 	}
 	if len(meteringWriter.events) != 1 {
 		t.Fatalf("event count = %d, want 1", len(meteringWriter.events))

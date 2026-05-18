@@ -109,6 +109,49 @@ func TestS0FSHeadStoreAdapterMapsConflicts(t *testing.T) {
 	}
 }
 
+func TestListSandboxVolumesBySource(t *testing.T) {
+	repo := newS0FSCommittedHeadTestRepository(t)
+	if repo == nil {
+		return
+	}
+
+	ctx := context.Background()
+	sourceID := "vol-" + uuid.NewString()
+	childID := "vol-" + uuid.NewString()
+	unrelatedID := "vol-" + uuid.NewString()
+	createTestSandboxVolume(t, repo, sourceID)
+	now := time.Now().UTC()
+	if err := repo.CreateSandboxVolume(ctx, &SandboxVolume{
+		ID:             childID,
+		TeamID:         "team-1",
+		UserID:         "user-1",
+		SourceVolumeID: &sourceID,
+		AccessMode:     "RWO",
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}); err != nil {
+		t.Fatalf("CreateSandboxVolume(child) error = %v", err)
+	}
+	if err := repo.CreateSandboxVolume(ctx, &SandboxVolume{
+		ID:         unrelatedID,
+		TeamID:     "team-1",
+		UserID:     "user-1",
+		AccessMode: "RWO",
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}); err != nil {
+		t.Fatalf("CreateSandboxVolume(unrelated) error = %v", err)
+	}
+
+	children, err := repo.ListSandboxVolumesBySource(ctx, sourceID)
+	if err != nil {
+		t.Fatalf("ListSandboxVolumesBySource() error = %v", err)
+	}
+	if len(children) != 1 || children[0].ID != childID {
+		t.Fatalf("children = %+v, want child %s", children, childID)
+	}
+}
+
 func TestAcquireMountRejectsConflictingRWOMount(t *testing.T) {
 	repo := newS0FSCommittedHeadTestRepository(t)
 	if repo == nil {

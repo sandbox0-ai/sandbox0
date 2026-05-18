@@ -336,6 +336,7 @@ func (s *Server) deleteSandboxVolume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.cleanupDeletedSandboxVolumeObjects(r.Context(), vol)
 	s.logger.WithField("volume_id", id).WithField("team_id", vol.TeamID).Info("Sandbox volume deleted")
 	_ = spec.WriteSuccess(w, http.StatusOK, map[string]bool{"deleted": true})
 }
@@ -380,7 +381,17 @@ func (s *Server) deleteSandboxVolumeRecord(ctx context.Context, id string, force
 	}); err != nil {
 		return nil, err
 	}
+	s.cleanupDeletedSandboxVolumeObjects(ctx, vol)
 	return vol, nil
+}
+
+func (s *Server) cleanupDeletedSandboxVolumeObjects(ctx context.Context, vol *db.SandboxVolume) {
+	if s == nil || s.snapshotMgr == nil || vol == nil {
+		return
+	}
+	if err := s.snapshotMgr.DeleteVolumeObjectsIfUnreferenced(ctx, vol); err != nil {
+		s.logger.WithError(err).WithField("volume_id", vol.ID).Warn("Failed to clean up deleted sandbox volume objects")
+	}
 }
 
 func (s *Server) isOwnedSandboxVolume(ctx context.Context, id string) bool {

@@ -31,6 +31,10 @@ type activeMountRepository interface {
 	GetActiveMounts(ctx context.Context, volumeID string, heartbeatTimeout int) ([]*db.VolumeMount, error)
 }
 
+type sourceVolumeRepository interface {
+	ListSandboxVolumesBySource(ctx context.Context, sourceVolumeID string) ([]*db.SandboxVolume, error)
+}
+
 type snapshotHeadStore struct {
 	repo s0fsHeadRepository
 }
@@ -658,3 +662,186 @@ func (m *Manager) deleteS0FSSnapshot(ctx context.Context, volumeID, snapshotID s
 	}
 	return nil
 }
+
+func (m *Manager) DeleteVolumeObjectsIfUnreferenced(ctx context.Context, vol *db.SandboxVolume) error {
+	if vol == nil || strings.TrimSpace(vol.ID) == "" || strings.TrimSpace(vol.TeamID) == "" {
+		return nil
+	}
+	safe, err := m.canCollectS0FSVolume(ctx, vol.ID)
+	if err != nil {
+		return err
+	}
+	if !safe {
+		m.logger.WithField("volume_id", vol.ID).Info("Skipping s0fs volume object cleanup because references may still exist")
+		return nil
+	}
+	store, err := m.s0fsObjectStore(vol.TeamID, vol.ID)
+	if err != nil {
+		return err
+	}
+	deleted, err := s0fs.DeleteAllObjects(ctx, store)
+	if err != nil {
+		return err
+	}
+	if err := cleanupS0FSVolume(vol.ID, m.config); err != nil {
+		return err
+	}
+	if len(deleted) > 0 {
+		m.logger.WithFields(map[string]any{
+			"volume_id": vol.ID,
+			"objects":   len(deleted),
+		}).Info("Deleted unreferenced s0fs volume objects")
+	}
+	return nil
+}
+
+func (m *Manager) garbageCollectS0FSVolumeObjects(ctx context.Context, volumeID, teamID string) (*s0fs.GarbageCollectionResult, error) {
+	if strings.TrimSpace(volumeID) == "" || strings.TrimSpace(teamID) == "" {
+		return nil, nil
+	}
+	safe, err := m.canCollectS0FSVolume(ctx, volumeID)
+	if err != nil {
+		return nil, err
+	}
+	if !safe {
+		return nil, nil
+	}
+
+	cfg, err := m.s0fsConfig(teamID, volumeID)
+	if err != nil {
+		return nil, err
+	}
+	materializer := s0fs.NewMaterializer(volumeID, cfg.ObjectStore, cfg.HeadStore, cfg.ObjectStoreForVolume)
+	materializer.SetEncryption(cfg.Encryption)
+	if materializer == nil || !materializer.Enabled() {
+		return nil, nil
+	}
+
+	latestState, latestManifest, err := materializer.LoadLatestState(ctx)
+	if err != nil {
+		if errors.Is(err, s0fs.ErrMaterializedManifestNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	retainedStates := []*s0fs.SnapshotState{latestState}
+	snapshots, err := m.repo.ListSnapshotsByVolume(ctx, volumeID)
+	if err != nil {
+		return nil, err
+	}
+	for _, snapshot := range snapshots {
+		state, err := s0fs.LoadSnapshot(ctx, cfg, snapshot.ID)
+		if err != nil {
+			if errors.Is(err, s0fs.ErrSnapshotNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		retainedStates = append(retainedStates, state)
+	}
+
+	retainedManifests := map[string]struct{}{
+		s0fsLegacyLatestManifestKey: {},
+	}
+	if latestManifest.ManifestSeq > 0 {
+		retainedManifests[s0fsManifestKey(latestManifest.ManifestSeq)] = struct{}{}
+	}
+	headBefore, err := m.currentS0FSManifestKey(ctx, volumeID, latestManifest)
+	if err != nil {
+		return nil, err
+	}
+	retainedManifests[headBefore] = struct{}{}
+
+	plan, err := materializer.PlanGarbageCollection(ctx, retainedStates, retainedManifests)
+	if err != nil {
+		return nil, err
+	}
+	if len(plan.Segments) == 0 && len(plan.Manifests) == 0 {
+		return &s0fs.GarbageCollectionResult{}, nil
+	}
+
+	safe, err = m.canCollectS0FSVolume(ctx, volumeID)
+	if err != nil {
+		return nil, err
+	}
+	if !safe {
+		return nil, nil
+	}
+	headAfter, err := m.currentS0FSManifestKey(ctx, volumeID, latestManifest)
+	if err != nil {
+		return nil, err
+	}
+	if headAfter != headBefore {
+		m.logger.WithFields(map[string]any{
+			"volume_id":   volumeID,
+			"head_before": headBefore,
+			"head_after":  headAfter,
+		}).Info("Skipping s0fs garbage collection because committed head changed")
+		return nil, nil
+	}
+	result, err := plan.Apply(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(result.DeletedSegments) > 0 || len(result.DeletedManifests) > 0 {
+		m.logger.WithFields(map[string]any{
+			"volume_id": volumeID,
+			"segments":  len(result.DeletedSegments),
+			"manifests": len(result.DeletedManifests),
+		}).Info("Deleted unreferenced s0fs objects")
+	}
+	return result, nil
+}
+
+func (m *Manager) canCollectS0FSVolume(ctx context.Context, volumeID string) (bool, error) {
+	if repo, ok := any(m.repo).(sourceVolumeRepository); ok && repo != nil {
+		children, err := repo.ListSandboxVolumesBySource(ctx, volumeID)
+		if err != nil {
+			return false, err
+		}
+		if len(children) > 0 {
+			return false, nil
+		}
+	} else {
+		return false, nil
+	}
+	if repo, ok := any(m.repo).(activeMountRepository); ok && repo != nil {
+		mounts, err := repo.GetActiveMounts(ctx, volumeID, m.heartbeatTimeout())
+		if err != nil {
+			return false, err
+		}
+		if len(mounts) > 0 {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func (m *Manager) currentS0FSManifestKey(ctx context.Context, volumeID string, fallback *s0fs.Manifest) (string, error) {
+	if repo, ok := any(m.repo).(s0fsHeadRepository); ok && repo != nil {
+		head, err := repo.GetS0FSCommittedHead(ctx, volumeID)
+		if err == nil && strings.TrimSpace(head.ManifestKey) != "" {
+			return head.ManifestKey, nil
+		}
+		if err != nil && !errors.Is(err, db.ErrNotFound) {
+			return "", err
+		}
+	}
+	if fallback != nil && fallback.ManifestSeq > 0 {
+		return s0fsManifestKey(fallback.ManifestSeq), nil
+	}
+	return s0fsLegacyLatestManifestKey, nil
+}
+
+func (m *Manager) heartbeatTimeout() int {
+	if m != nil && m.config != nil && m.config.HeartbeatTimeout > 0 {
+		return m.config.HeartbeatTimeout
+	}
+	return 15
+}
+
+func s0fsManifestKey(seq uint64) string {
+	return fmt.Sprintf("manifests/%020d.json", seq)
+}
+
+const s0fsLegacyLatestManifestKey = "manifests/latest.json"

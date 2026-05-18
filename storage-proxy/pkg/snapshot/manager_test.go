@@ -101,6 +101,16 @@ func (r *fakeRepo) ListSnapshotsByVolume(ctx context.Context, volumeID string) (
 	return snaps, nil
 }
 
+func (r *fakeRepo) ListSandboxVolumesBySource(ctx context.Context, sourceVolumeID string) ([]*db.SandboxVolume, error) {
+	var volumes []*db.SandboxVolume
+	for _, volume := range r.volumes {
+		if volume.SourceVolumeID != nil && *volume.SourceVolumeID == sourceVolumeID {
+			volumes = append(volumes, volume)
+		}
+	}
+	return volumes, nil
+}
+
 func (r *fakeRepo) GetSnapshot(ctx context.Context, id string) (*db.Snapshot, error) {
 	s, ok := r.snapshots[id]
 	if !ok {

@@ -167,6 +167,77 @@ func TestS0FSForkVolumeUsesCopyOnWriteState(t *testing.T) {
 	}
 }
 
+func TestS0FSCreateVolumeFromSnapshotUsesCopyOnWriteState(t *testing.T) {
+	t.Parallel()
+
+	mgr, _, _, engine := newS0FSSnapshotTestManager(t, "vol-snapshot-source")
+	writeS0FSFile(t, engine, "snapshot.txt", "seed")
+
+	snap, err := mgr.CreateSnapshot(context.Background(), &CreateSnapshotRequest{
+		VolumeID: "vol-snapshot-source",
+		Name:     "snap-cow",
+		TeamID:   "team-1",
+		UserID:   "user-1",
+	})
+	if err != nil {
+		t.Fatalf("CreateSnapshot() error = %v", err)
+	}
+
+	child, err := mgr.CreateVolumeFromSnapshot(context.Background(), &CreateVolumeFromSnapshotRequest{
+		SnapshotID: snap.ID,
+		TeamID:     "team-1",
+		UserID:     "user-2",
+	})
+	if err != nil {
+		t.Fatalf("CreateVolumeFromSnapshot() error = %v", err)
+	}
+	if child == nil || child.ID == "" {
+		t.Fatalf("child volume = %+v", child)
+	}
+
+	childCfg, err := mgr.s0fsConfig("team-1", child.ID)
+	if err != nil {
+		t.Fatalf("s0fsConfig(child) error = %v", err)
+	}
+	childMaterializer := s0fs.NewMaterializer(child.ID, childCfg.ObjectStore, childCfg.HeadStore, childCfg.ObjectStoreForVolume)
+	childMaterializer.SetEncryption(childCfg.Encryption)
+	childState, _, err := childMaterializer.LoadLatestState(context.Background())
+	if err != nil {
+		t.Fatalf("LoadLatestState(child) error = %v", err)
+	}
+	if len(childState.Data) != 0 {
+		t.Fatalf("child materialized data = %+v, want empty", childState.Data)
+	}
+	if len(childState.Segments) == 0 {
+		t.Fatal("child materialized state has no inherited segments")
+	}
+	for _, segment := range childState.Segments {
+		if segment.VolumeID != "vol-snapshot-source" {
+			t.Fatalf("child segment volume = %q, want vol-snapshot-source", segment.VolumeID)
+		}
+	}
+	childSegments, _, _, err := childCfg.ObjectStore.List("segments/", "", "", "", 100)
+	if err != nil {
+		t.Fatalf("List(child segments) error = %v", err)
+	}
+	if len(childSegments) != 0 {
+		t.Fatalf("child segment objects after create from snapshot = %+v, want none", childSegments)
+	}
+
+	childEngine := openFreshS0FSEngine(t, mgr, "team-1", child.ID)
+	defer childEngine.Close()
+	if got := readS0FSFile(t, childEngine, "snapshot.txt"); got != "seed" {
+		t.Fatalf("child file = %q, want seed", got)
+	}
+	writeS0FSFile(t, childEngine, "snapshot.txt", "child")
+	if _, err := childEngine.SyncMaterialize(context.Background()); err != nil {
+		t.Fatalf("SyncMaterialize(child) error = %v", err)
+	}
+	if got := readS0FSFile(t, engine, "snapshot.txt"); got != "seed" {
+		t.Fatalf("source file after child mutation = %q, want seed", got)
+	}
+}
+
 func TestS0FSGarbageCollectsObjectsAfterSnapshotDelete(t *testing.T) {
 	t.Parallel()
 

@@ -1095,7 +1095,7 @@ func TestPrepareForkStatePreservesInlineData(t *testing.T) {
 	}
 }
 
-func TestCreateSnapshotHydratesColdFilesInline(t *testing.T) {
+func TestCreateSnapshotPreservesColdSegments(t *testing.T) {
 	ctx := context.Background()
 	store := newPrefixedRecordingStore(t, "vol-snapshot")
 	heads := newMemoryHeadStore()
@@ -1127,16 +1127,25 @@ func TestCreateSnapshotHydratesColdFilesInline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSnapshot() error = %v", err)
 	}
-	if len(state.ColdFiles) != 0 {
-		t.Fatalf("snapshot cold files = %+v, want inline data", state.ColdFiles)
+	if len(state.Data) != 0 {
+		t.Fatalf("snapshot inline data = %+v, want none", state.Data)
+	}
+	if len(state.ColdFiles) == 0 {
+		t.Fatal("snapshot state has no cold files")
+	}
+	for _, segment := range state.Segments {
+		if segment.VolumeID != "vol-snapshot" {
+			t.Fatalf("snapshot segment volume = %q, want vol-snapshot", segment.VolumeID)
+		}
 	}
 	snapNode, err := state.Lookup(RootInode, "snap.txt")
 	if err != nil {
 		t.Fatalf("snapshot Lookup() error = %v", err)
 	}
-	payload, err := state.Read(snapNode.Inode, 0, snapNode.Size)
+	reader := NewSnapshotReader(state, engine.materializer)
+	payload, err := reader.Read(snapNode.Inode, 0, snapNode.Size)
 	if err != nil {
-		t.Fatalf("SnapshotState.Read() error = %v", err)
+		t.Fatalf("SnapshotReader.Read() error = %v", err)
 	}
 	if string(payload) != "snapshot-data" {
 		t.Fatalf("snapshot data = %q, want snapshot-data", payload)

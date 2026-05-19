@@ -1724,28 +1724,41 @@ func waitForSandboxPowerStateEventually(env *framework.ScenarioEnv, session *e2e
 }
 
 func assertFunctionAPIRoutesReachUserService(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string) {
-	sandbox, status, err := session.GetSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
-	Expect(err).NotTo(HaveOccurred())
-	Expect(status).To(Equal(http.StatusOK))
-	Expect(sandbox).NotTo(BeNil())
-	templateNamespace, err := naming.TemplateNamespaceForBuiltin(sandbox.TemplateId)
-	Expect(err).NotTo(HaveOccurred())
-	Expect(sandbox.PodName).NotTo(BeEmpty())
-
 	const serviceID = "function-api"
 	const servicePort int32 = 18080
 	bodyValue := "function-api-route-ok"
 	script := fmt.Sprintf(
-		"set -eu; dir=/tmp/s0-function-e2e; rm -rf \"$dir\"; mkdir -p \"$dir/api/v1\"; printf '%s\\n' > \"$dir/api/v1/functions\"; printf 'function-health-ok\\n' > \"$dir/api/health\"; nohup python3 -m http.server %d --bind 0.0.0.0 -d \"$dir\" >/tmp/s0-function-e2e.log 2>&1 &\n",
-		bodyValue,
+		`from http.server import BaseHTTPRequestHandler, HTTPServer
+
+body = %q
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/api/v1/functions":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(body.encode())
+            return
+        if self.path == "/api/health":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"function-health-ok\n")
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        return
+
+HTTPServer(("0.0.0.0", %d), Handler).serve_forever()
+`,
+		bodyValue+"\n",
 		servicePort,
 	)
-	_, err = execInSandboxPod(env, templateNamespace, sandbox.PodName, script)
-	Expect(err).NotTo(HaveOccurred())
 
 	pathPrefix := "/"
-	cwd := "/tmp/s0-function-e2e"
-	command := []string{"python3", "-m", "http.server", fmt.Sprint(servicePort), "--bind", "0.0.0.0", "-d", cwd}
+	cwd := "/tmp"
+	command := []string{"python3", "-c", script}
 	_, _, updateStatus, err := session.UpdateSandboxServices(env.TestCtx.Context, GinkgoT(), sandboxID, []apispec.SandboxAppService{{
 		Id:   serviceID,
 		Port: servicePort,
@@ -1870,25 +1883,14 @@ func assertFunctionRuntimeRestoreUsesVolumeSnapshot(env *framework.ScenarioEnv, 
 
 	_, err = execInSandboxPod(env, templateNamespace, sourceSandbox.PodName, fmt.Sprintf("printf 'mutated live content\\n' > %s", shellQuote(mountPoint+seedPath)))
 	Expect(err).NotTo(HaveOccurred())
-	Expect(session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), sourceSandboxID)).To(Succeed())
 
 	functionGatewayURL, cleanup, err := functionGatewayBaseURL(env)
 	Expect(err).NotTo(HaveOccurred())
 	defer cleanup()
 
-	Eventually(func() error {
-		status, body, err := requestFunctionHost(env.TestCtx.Context, functionGatewayURL, fn.Host, seedPath)
-		if err != nil {
-			return err
-		}
-		if status != http.StatusOK {
-			return fmt.Errorf("function restore status %d body %q", status, body)
-		}
-		if body != string(seedContent) {
-			return fmt.Errorf("function restore body = %q, want %q", body, string(seedContent))
-		}
-		return nil
-	}).WithTimeout(90 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
+	expectFunctionBodyEventually(env, functionGatewayURL, fn.Host, seedPath, string(seedContent))
+	Expect(session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), sourceSandboxID)).To(Succeed())
+	expectFunctionBodyEventually(env, functionGatewayURL, fn.Host, seedPath, string(seedContent))
 
 	runtimeStatus, status, err := session.GetFunctionRuntime(env.TestCtx.Context, GinkgoT(), fn.Id)
 	Expect(err).NotTo(HaveOccurred())

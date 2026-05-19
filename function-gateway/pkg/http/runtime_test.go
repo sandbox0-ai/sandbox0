@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -89,22 +90,55 @@ func TestRewriteFunctionPath(t *testing.T) {
 	}
 }
 
-func TestFunctionSandboxCanServeSourceRequiresRunning(t *testing.T) {
-	if !functionSandboxCanServeSource(&mgr.Sandbox{Status: mgr.SandboxStatusRunning}) {
-		t.Fatal("running sandbox should serve source function traffic")
+func TestResolveFunctionSandboxDoesNotServeSourceSandbox(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate ed25519 keypair: %v", err)
 	}
 
-	for _, status := range []string{
-		mgr.SandboxStatusStarting,
-		mgr.SandboxStatusFailed,
-		mgr.SandboxStatusCompleted,
-		mgr.SandboxStatusTerminating,
-	} {
-		t.Run(status, func(t *testing.T) {
-			if functionSandboxCanServeSource(&mgr.Sandbox{Status: status}) {
-				t.Fatalf("status %q should not serve source function traffic", status)
-			}
-		})
+	var sourceLookups atomic.Int32
+	clusterGateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/v1/sandboxes/source-sandbox" {
+			t.Errorf("path = %s, want source sandbox lookup path", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		sourceLookups.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"data":{"id":"source-sandbox","team_id":"team-1","status":"running"}}`))
+	}))
+	defer clusterGateway.Close()
+
+	server := &Server{
+		cfg: &config.FunctionGatewayConfig{
+			DefaultClusterGatewayURL: clusterGateway.URL,
+		},
+		functionRepo: functions.NewRepository(nil),
+		internalAuthGen: internalauth.NewGenerator(internalauth.GeneratorConfig{
+			Caller:     internalauth.ServiceFunctionGateway,
+			PrivateKey: privateKey,
+			TTL:        time.Minute,
+		}),
+		httpClient: clusterGateway.Client(),
+		logger:     zap.NewNop(),
+	}
+
+	_, _, err = server.resolveFunctionSandbox(context.Background(), &functions.Function{
+		ID:     "fn-1",
+		TeamID: "team-1",
+	}, &functions.Revision{
+		ID:               "rev-1",
+		FunctionID:       "fn-1",
+		TeamID:           "team-1",
+		SourceSandboxID:  "source-sandbox",
+		SourceTemplateID: "tmpl-1",
+		CreatedBy:        "user-1",
+	}, mgr.SandboxAppService{})
+	if err == nil || !strings.Contains(err.Error(), "function repository is not configured") {
+		t.Fatalf("resolveFunctionSandbox() error = %v, want revision runtime path", err)
+	}
+	if got := sourceLookups.Load(); got != 0 {
+		t.Fatalf("source sandbox lookups = %d, want 0", got)
 	}
 }
 

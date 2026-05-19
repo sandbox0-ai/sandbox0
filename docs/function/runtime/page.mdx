@@ -1,6 +1,6 @@
 # Function Runtime
 
-Function runtime state describes the currently restored sandbox serving a function revision. When the source sandbox still exists, Function Gateway routes to it directly. When the source sandbox is gone, Function Gateway restores a runtime sandbox from the revision's template and revision-owned volumes.
+Function runtime state describes the currently restored sandbox serving a function revision. Function Gateway serves production traffic from revision runtime sandboxes, not from the mutable source sandbox. When no reusable runtime exists, Function Gateway restores a runtime sandbox from the revision's template and revision-owned volumes.
 
 ## Runtime States
 

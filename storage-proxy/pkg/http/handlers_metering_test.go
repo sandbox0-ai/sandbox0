@@ -235,6 +235,7 @@ type fakeHTTPSnapshotManager struct {
 	exportBody           []byte
 	lastCreate           *snapshot.CreateSnapshotRequest
 	lastCreateVolume     *snapshot.CreateVolumeFromSnapshotRequest
+	lastRestore          *snapshot.RestoreSnapshotRequest
 	lastExport           *snapshot.ExportSnapshotRequest
 	lastCompatibility    *snapshot.ListSnapshotCompatibilityIssuesRequest
 	casefoldEntries      []snapshot.SnapshotCasefoldCollision
@@ -289,6 +290,7 @@ func (f *fakeHTTPSnapshotManager) ExportSnapshotArchive(ctx context.Context, req
 }
 
 func (f *fakeHTTPSnapshotManager) RestoreSnapshot(ctx context.Context, req *snapshot.RestoreSnapshotRequest) error {
+	f.lastRestore = req
 	return nil
 }
 

@@ -128,10 +128,28 @@ func TestBindVolumePortalReturnsConflictForAlreadyBoundPortal(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, rec.Code)
 }
 
+func TestReleaseVolumeOwnerReturnsConflictForBusyOwner(t *testing.T) {
+	server := newHTTPServer(":0", combinedController{
+		Controller: ctldserver.NotImplementedController{},
+		Portal: fakeVolumePortalHandler{
+			releaseErr:  fmt.Errorf("volume vol-1 is actively bound to a portal"),
+			releaseResp: ctldapi.ReleaseVolumeOwnerResponse{Busy: true},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/volume-portals/owners/release", strings.NewReader(`{"sandboxvolume_id":"vol-1"}`))
+	rec := httptest.NewRecorder()
+	server.Handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusConflict, rec.Code)
+}
+
 type fakeVolumePortalHandler struct {
 	mountedHandler http.Handler
 	bindErr        error
 	prepareErr     error
+	releaseResp    ctldapi.ReleaseVolumeOwnerResponse
+	releaseErr     error
 }
 
 func (f fakeVolumePortalHandler) Bind(_ context.Context, _ ctldapi.BindVolumePortalRequest) (ctldapi.BindVolumePortalResponse, error) {
@@ -151,6 +169,16 @@ func (f fakeVolumePortalHandler) CheckPublished(_ context.Context, _ ctldapi.Che
 
 func (f fakeVolumePortalHandler) AttachOwner(_ context.Context, _ ctldapi.AttachVolumeOwnerRequest) (ctldapi.AttachVolumeOwnerResponse, error) {
 	return ctldapi.AttachVolumeOwnerResponse{Attached: true}, nil
+}
+
+func (f fakeVolumePortalHandler) ReleaseOwner(_ context.Context, _ ctldapi.ReleaseVolumeOwnerRequest) (ctldapi.ReleaseVolumeOwnerResponse, error) {
+	if f.releaseErr != nil {
+		return f.releaseResp, f.releaseErr
+	}
+	if f.releaseResp.Released || f.releaseResp.Busy || f.releaseResp.Error != "" {
+		return f.releaseResp, nil
+	}
+	return ctldapi.ReleaseVolumeOwnerResponse{Released: true}, nil
 }
 
 func (f fakeVolumePortalHandler) PrepareHandoff(_ context.Context, _ ctldapi.PrepareVolumePortalHandoffRequest) (ctldapi.PrepareVolumePortalHandoffResponse, error) {

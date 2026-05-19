@@ -161,6 +161,90 @@ func TestCleanupIdleOwnerOnlyVolumesKeepsOwnerOnMaterializeFailure(t *testing.T)
 	}
 }
 
+func TestReleaseOwnerRemovesOwnerOnlyVolumeBeforeIdleTTL(t *testing.T) {
+	mgr := &Manager{
+		ownerOnlyIdleTTL: time.Minute,
+		boundVolumes:     make(map[string]*boundVolume),
+		volumes:          newLocalVolumeManager(),
+	}
+	volCtx := &volume.VolumeContext{VolumeID: "vol-1"}
+	mgr.volumes.add(volCtx)
+	mgr.boundVolumes["vol-1"] = &boundVolume{
+		volumeID: "vol-1",
+		refCount: 0,
+		volCtx:   volCtx,
+	}
+
+	resp, err := mgr.ReleaseOwner(context.Background(), ctldapi.ReleaseVolumeOwnerRequest{SandboxVolumeID: "vol-1"})
+	if err != nil {
+		t.Fatalf("ReleaseOwner() error = %v", err)
+	}
+	if !resp.Released || resp.Busy {
+		t.Fatalf("ReleaseOwner() response = %+v, want released", resp)
+	}
+	if _, ok := mgr.boundVolumes["vol-1"]; ok {
+		t.Fatal("bound volume still present after ReleaseOwner")
+	}
+	if _, err := mgr.volumes.GetVolume("vol-1"); err == nil {
+		t.Fatal("GetVolume() after ReleaseOwner error = nil, want volume removed")
+	}
+}
+
+func TestReleaseOwnerReturnsBusyForActivePortal(t *testing.T) {
+	mgr := &Manager{
+		boundVolumes: make(map[string]*boundVolume),
+		volumes:      newLocalVolumeManager(),
+	}
+	volCtx := &volume.VolumeContext{VolumeID: "vol-1"}
+	mgr.volumes.add(volCtx)
+	mgr.boundVolumes["vol-1"] = &boundVolume{
+		volumeID: "vol-1",
+		refCount: 1,
+		volCtx:   volCtx,
+	}
+
+	resp, err := mgr.ReleaseOwner(context.Background(), ctldapi.ReleaseVolumeOwnerRequest{SandboxVolumeID: "vol-1"})
+	if err == nil {
+		t.Fatal("ReleaseOwner() error = nil, want busy error")
+	}
+	if !resp.Busy || resp.Released {
+		t.Fatalf("ReleaseOwner() response = %+v, want busy", resp)
+	}
+	if _, ok := mgr.boundVolumes["vol-1"]; !ok {
+		t.Fatal("bound volume removed after busy ReleaseOwner")
+	}
+}
+
+func TestReleaseOwnerReturnsBusyForInFlightDirectRequest(t *testing.T) {
+	mgr := &Manager{
+		boundVolumes: make(map[string]*boundVolume),
+		volumes:      newLocalVolumeManager(),
+	}
+	volCtx := &volume.VolumeContext{VolumeID: "vol-1"}
+	mgr.volumes.add(volCtx)
+	release, err := mgr.volumes.acquire(context.Background(), "vol-1")
+	if err != nil {
+		t.Fatalf("acquire() error = %v", err)
+	}
+	defer release()
+	mgr.boundVolumes["vol-1"] = &boundVolume{
+		volumeID: "vol-1",
+		refCount: 0,
+		volCtx:   volCtx,
+	}
+
+	resp, err := mgr.ReleaseOwner(context.Background(), ctldapi.ReleaseVolumeOwnerRequest{SandboxVolumeID: "vol-1"})
+	if err == nil {
+		t.Fatal("ReleaseOwner() error = nil, want busy error")
+	}
+	if !resp.Busy || resp.Released {
+		t.Fatalf("ReleaseOwner() response = %+v, want busy", resp)
+	}
+	if _, ok := mgr.boundVolumes["vol-1"]; !ok {
+		t.Fatal("bound volume removed after in-flight ReleaseOwner")
+	}
+}
+
 func TestNewManagerDefaultsClusterID(t *testing.T) {
 	mgr := NewManager(Config{
 		StorageConfig: &apiconfig.StorageProxyConfig{},

@@ -176,6 +176,22 @@ func (m *localVolumeManager) canCleanupOwnerOnly(volumeID string, cutoff time.Ti
 	return !state.lastAccess.After(cutoff)
 }
 
+func (m *localVolumeManager) canReleaseOwnerOnly(volumeID string) (bool, string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	state := m.requests[volumeID]
+	if state == nil {
+		return true, ""
+	}
+	if state.transferring {
+		return false, "handoff already in progress"
+	}
+	if state.inFlight > 0 {
+		return false, "still has active file requests"
+	}
+	return true, ""
+}
+
 func (m *localVolumeManager) MountVolume(_ context.Context, _ string, volumeID string, _ string, _ volume.AccessMode) (string, time.Time, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

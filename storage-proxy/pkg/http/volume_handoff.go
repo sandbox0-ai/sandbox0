@@ -244,6 +244,8 @@ func postCtldJSON[T any](ctx context.Context, baseURL, path string, request any)
 		switch typed := any(&out).(type) {
 		case *ctldapi.AttachVolumeOwnerResponse:
 			message = typed.Error
+		case *ctldapi.ReleaseVolumeOwnerResponse:
+			message = typed.Error
 		case *ctldapi.PrepareVolumePortalHandoffResponse:
 			message = typed.Error
 		case *ctldapi.CompleteVolumePortalHandoffResponse:

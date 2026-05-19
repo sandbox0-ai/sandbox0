@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -174,14 +175,29 @@ func (s *Server) restoreSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := s.snapshotMgr.RestoreSnapshot(r.Context(), &snapshot.RestoreSnapshotRequest{
-		VolumeID:   volumeID,
-		SnapshotID: snapshotID,
-		TeamID:     claims.TeamID,
-		UserID:     claims.UserID,
-	})
+	run := func(ctx context.Context) error {
+		if err := s.releaseReleasableCtldVolumeOwners(ctx, volumeID); err != nil {
+			return err
+		}
+		return s.snapshotMgr.RestoreSnapshot(ctx, &snapshot.RestoreSnapshotRequest{
+			VolumeID:   volumeID,
+			SnapshotID: snapshotID,
+			TeamID:     claims.TeamID,
+			UserID:     claims.UserID,
+		})
+	}
+	var err error
+	if s.barrier != nil {
+		err = s.barrier.WithExclusive(r.Context(), volumeID, run)
+	} else {
+		err = run(r.Context())
+	}
 
 	if err != nil {
+		if errors.Is(err, errCtldOwnerBusy) {
+			s.handleSnapshotError(w, snapshot.ErrMountedCtldOwner)
+			return
+		}
 		s.handleSnapshotError(w, err)
 		return
 	}

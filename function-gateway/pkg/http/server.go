@@ -23,24 +23,30 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
+	"github.com/sandbox0-ai/sandbox0/pkg/pglock"
 	"go.uber.org/zap"
 )
 
+type runtimeRestoreLocker interface {
+	WithExclusive(ctx context.Context, resource string, fn func(context.Context) error) error
+}
+
 // Server represents the HTTP server for function-gateway.
 type Server struct {
-	router          *gin.Engine
-	cfg             *config.FunctionGatewayConfig
-	pool            *pgxpool.Pool
-	functionRepo    *functions.Repository
-	apiKeyRepo      *apikey.Repository
-	authMiddleware  *middleware.AuthMiddleware
-	requestLogger   *middleware.RequestLogger
-	internalAuthGen *internalauth.Generator
-	obsProvider     *observability.Provider
-	httpClient      *http.Client
-	routeLimiter    ratelimit.Limiter
-	runtimeLocks    sync.Map
-	logger          *zap.Logger
+	router              *gin.Engine
+	cfg                 *config.FunctionGatewayConfig
+	pool                *pgxpool.Pool
+	functionRepo        *functions.Repository
+	apiKeyRepo          *apikey.Repository
+	authMiddleware      *middleware.AuthMiddleware
+	requestLogger       *middleware.RequestLogger
+	internalAuthGen     *internalauth.Generator
+	obsProvider         *observability.Provider
+	httpClient          *http.Client
+	routeLimiter        ratelimit.Limiter
+	runtimeLocks        sync.Map
+	runtimeRestoreLocks runtimeRestoreLocker
+	logger              *zap.Logger
 }
 
 // NewServer creates a new HTTP server.
@@ -98,18 +104,19 @@ func NewServer(
 	}
 
 	server := &Server{
-		router:          gin.New(),
-		cfg:             cfg,
-		pool:            pool,
-		functionRepo:    functions.NewRepository(pool),
-		apiKeyRepo:      apiKeyRepo,
-		authMiddleware:  middleware.NewAuthMiddleware(apiKeyRepo, cfg.JWTSecret, jwtIssuer, logger, authMiddlewareOptions...),
-		requestLogger:   middleware.NewRequestLogger(logger),
-		internalAuthGen: internalAuthGen,
-		obsProvider:     obsProvider,
-		httpClient:      httpClient,
-		routeLimiter:    routeLimiter,
-		logger:          logger,
+		router:              gin.New(),
+		cfg:                 cfg,
+		pool:                pool,
+		functionRepo:        functions.NewRepository(pool),
+		apiKeyRepo:          apiKeyRepo,
+		authMiddleware:      middleware.NewAuthMiddleware(apiKeyRepo, cfg.JWTSecret, jwtIssuer, logger, authMiddlewareOptions...),
+		requestLogger:       middleware.NewRequestLogger(logger),
+		internalAuthGen:     internalAuthGen,
+		obsProvider:         obsProvider,
+		httpClient:          httpClient,
+		routeLimiter:        routeLimiter,
+		runtimeRestoreLocks: pglock.New(pool),
+		logger:              logger,
 	}
 
 	server.setupRoutes()

@@ -191,6 +191,51 @@ func TestFunctionRuntimeContextCanServeWarmProcess(t *testing.T) {
 	}
 }
 
+type fakeRuntimeRestoreLocker struct {
+	resources []string
+}
+
+func (f *fakeRuntimeRestoreLocker) WithExclusive(ctx context.Context, resource string, fn func(context.Context) error) error {
+	f.resources = append(f.resources, resource)
+	return fn(ctx)
+}
+
+func TestWithRevisionRuntimeDistributedLockUsesRevisionResource(t *testing.T) {
+	locker := &fakeRuntimeRestoreLocker{}
+	server := &Server{runtimeRestoreLocks: locker}
+
+	called := false
+	if err := server.withRevisionRuntimeDistributedLock(context.Background(), " rev-1 ", func(context.Context) error {
+		called = true
+		return nil
+	}); err != nil {
+		t.Fatalf("withRevisionRuntimeDistributedLock() error = %v", err)
+	}
+
+	if !called {
+		t.Fatal("callback was not called")
+	}
+	if len(locker.resources) != 1 || locker.resources[0] != "function-runtime-restore:rev-1" {
+		t.Fatalf("resources = %v, want function runtime restore revision key", locker.resources)
+	}
+}
+
+func TestWithRevisionRuntimeDistributedLockFallsBackWithoutLocker(t *testing.T) {
+	server := &Server{}
+	called := false
+
+	if err := server.withRevisionRuntimeDistributedLock(context.Background(), "rev-1", func(context.Context) error {
+		called = true
+		return nil
+	}); err != nil {
+		t.Fatalf("withRevisionRuntimeDistributedLock() error = %v", err)
+	}
+
+	if !called {
+		t.Fatal("callback was not called")
+	}
+}
+
 func TestStartFunctionServiceRuntimeWarmProcessUsesExistingCMDContext(t *testing.T) {
 	_, privateKey, err := ed25519.GenerateKey(nil)
 	if err != nil {

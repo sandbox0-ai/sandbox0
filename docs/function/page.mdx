@@ -14,7 +14,7 @@ Functions are created from Sandbox Services, not from uploaded ZIP files or cont
 | Function | Stable function identity, slug, and host under the configured function domain |
 | Revision | Immutable snapshot of the source service plus the SandboxVolume restore mounts needed to restore it |
 | Alias | Mutable pointer from a name such as `production` to a revision |
-| Runtime | Restored sandbox and process context currently serving a function revision, when the source sandbox is gone |
+| Runtime | Restored sandbox and process context currently serving a function revision |
 
 The `production` alias is the serving pointer used by the function host. Creating a function creates revision 1 and points `production` at it. Creating another revision can either promote it immediately or leave it available for a later alias update.
 
@@ -22,7 +22,7 @@ The `production` alias is the serving pointer used by the function host. Creatin
 
 Function traffic is handled by `function-gateway`. The gateway resolves the host to a function, loads the `production` revision, enforces the revision's service route policy, and proxies the request to the service port.
 
-If the source sandbox still exists, the gateway routes to that sandbox and resumes it when needed. If the source sandbox has been deleted, the gateway claims a new runtime sandbox from the revision's template, mounts the revision-owned volumes, starts the service runtime command or binds to the referenced warm process, and reuses that runtime for later requests.
+Function serving is revision-first. The gateway does not proxy production traffic to the mutable source sandbox. When no reusable runtime exists, the gateway claims a new runtime sandbox from the revision's template, mounts the revision-owned volumes, starts the service runtime command or binds to the referenced warm process, and reuses that runtime for later requests. Changes made to the source sandbox after publishing require a new revision before they affect the function host.
 
 ## Publishable Services
 

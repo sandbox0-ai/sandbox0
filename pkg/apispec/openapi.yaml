@@ -4218,7 +4218,7 @@ components:
           $ref: "#/components/schemas/SandboxAppService"
         runtime_sandbox_id:
           type: string
-          description: Current restored runtime sandbox, when the source sandbox no longer exists.
+          description: Current restored runtime sandbox serving the revision, if one exists.
         runtime_context_id:
           type: string
           description: Current runtime process context inside the restored runtime sandbox.

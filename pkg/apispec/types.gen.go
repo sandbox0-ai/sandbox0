@@ -1056,7 +1056,7 @@ type FunctionRevision struct {
 	// RuntimeContextId Current runtime process context inside the restored runtime sandbox.
 	RuntimeContextId *string `json:"runtime_context_id,omitempty"`
 
-	// RuntimeSandboxId Current restored runtime sandbox, when the source sandbox no longer exists.
+	// RuntimeSandboxId Current restored runtime sandbox serving the revision, if one exists.
 	RuntimeSandboxId *string `json:"runtime_sandbox_id,omitempty"`
 
 	// RuntimeUpdatedAt Last time the restored runtime sandbox mapping was updated.

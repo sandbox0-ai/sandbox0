@@ -583,6 +583,38 @@ func (m *Manager) AttachOwner(ctx context.Context, req ctldapi.AttachVolumeOwner
 	return ctldapi.AttachVolumeOwnerResponse{Attached: true}, nil
 }
 
+func (m *Manager) ReleaseOwner(ctx context.Context, req ctldapi.ReleaseVolumeOwnerRequest) (ctldapi.ReleaseVolumeOwnerResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return ctldapi.ReleaseVolumeOwnerResponse{}, err
+	}
+	volumeID := strings.TrimSpace(req.SandboxVolumeID)
+	if volumeID == "" {
+		return ctldapi.ReleaseVolumeOwnerResponse{}, fmt.Errorf("sandboxvolume_id is required")
+	}
+	m.mu.Lock()
+	bound := m.boundVolumes[volumeID]
+	if bound == nil {
+		m.mu.Unlock()
+		return ctldapi.ReleaseVolumeOwnerResponse{Released: true}, nil
+	}
+	if bound.refCount > 0 {
+		m.mu.Unlock()
+		err := fmt.Errorf("volume %s is actively bound to a portal", volumeID)
+		return ctldapi.ReleaseVolumeOwnerResponse{Busy: true, Error: err.Error()}, err
+	}
+	if ok, reason := m.volumes.canReleaseOwnerOnly(volumeID); !ok {
+		m.mu.Unlock()
+		err := fmt.Errorf("volume %s %s", volumeID, reason)
+		return ctldapi.ReleaseVolumeOwnerResponse{Busy: true, Error: err.Error()}, err
+	}
+	if err := m.releaseOwnerOnlyVolumeLocked(ctx, volumeID, bound); err != nil {
+		m.mu.Unlock()
+		return ctldapi.ReleaseVolumeOwnerResponse{}, err
+	}
+	m.mu.Unlock()
+	return ctldapi.ReleaseVolumeOwnerResponse{Released: true}, nil
+}
+
 func (m *Manager) PrepareHandoff(ctx context.Context, req ctldapi.PrepareVolumePortalHandoffRequest) (ctldapi.PrepareVolumePortalHandoffResponse, error) {
 	volumeID := strings.TrimSpace(req.SandboxVolumeID)
 	if volumeID == "" {
@@ -678,6 +710,15 @@ func (m *Manager) releaseOwnerOnlyVolume(ctx context.Context, volumeID string) e
 		m.mu.Unlock()
 		return nil
 	}
+	if err := m.releaseOwnerOnlyVolumeLocked(ctx, volumeID, bound); err != nil {
+		m.mu.Unlock()
+		return err
+	}
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *Manager) releaseOwnerOnlyVolumeLocked(ctx context.Context, volumeID string, bound *boundVolume) error {
 	if bound.materializeCancel != nil {
 		bound.materializeCancel()
 		bound.materializeCancel = nil
@@ -688,12 +729,10 @@ func (m *Manager) releaseOwnerOnlyVolume(ctx context.Context, volumeID string) e
 		<-done
 	}
 	if err := m.volumes.UnmountVolume(ctx, volumeID, ""); err != nil {
-		m.mu.Unlock()
 		return err
 	}
 	delete(m.boundVolumes, volumeID)
 	m.unregisterOwner(bound)
-	m.mu.Unlock()
 	return nil
 }
 

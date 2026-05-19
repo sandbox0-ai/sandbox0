@@ -22,6 +22,7 @@ type VolumePortalController interface {
 	UnbindVolumePortal(r *http.Request, req ctldapi.UnbindVolumePortalRequest) (ctldapi.UnbindVolumePortalResponse, int)
 	CheckVolumePortals(r *http.Request, req ctldapi.CheckVolumePortalsRequest) (ctldapi.CheckVolumePortalsResponse, int)
 	AttachVolumeOwner(r *http.Request, req ctldapi.AttachVolumeOwnerRequest) (ctldapi.AttachVolumeOwnerResponse, int)
+	ReleaseVolumeOwner(r *http.Request, req ctldapi.ReleaseVolumeOwnerRequest) (ctldapi.ReleaseVolumeOwnerResponse, int)
 	PrepareVolumePortalHandoff(r *http.Request, req ctldapi.PrepareVolumePortalHandoffRequest) (ctldapi.PrepareVolumePortalHandoffResponse, int)
 	CompleteVolumePortalHandoff(r *http.Request, req ctldapi.CompleteVolumePortalHandoffRequest) (ctldapi.CompleteVolumePortalHandoffResponse, int)
 	AbortVolumePortalHandoff(r *http.Request, req ctldapi.AbortVolumePortalHandoffRequest) (ctldapi.AbortVolumePortalHandoffResponse, int)
@@ -153,6 +154,28 @@ func NewMux(controller Controller) http.Handler {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		resp, status := volumeController.AttachVolumeOwner(r, req)
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+	mux.HandleFunc("/api/v1/volume-portals/owners/release", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		volumeController, ok := controller.(VolumePortalController)
+		if !ok {
+			w.WriteHeader(http.StatusNotImplemented)
+			_ = json.NewEncoder(w).Encode(ctldapi.ReleaseVolumeOwnerResponse{Error: "ctld volume owners not implemented"})
+			return
+		}
+		var req ctldapi.ReleaseVolumeOwnerRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(ctldapi.ReleaseVolumeOwnerResponse{Error: err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		resp, status := volumeController.ReleaseVolumeOwner(r, req)
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(resp)
 	})

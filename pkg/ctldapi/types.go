@@ -125,3 +125,13 @@ type AttachVolumeOwnerResponse struct {
 	Attached bool   `json:"attached"`
 	Error    string `json:"error,omitempty"`
 }
+
+type ReleaseVolumeOwnerRequest struct {
+	SandboxVolumeID string `json:"sandboxvolume_id"`
+}
+
+type ReleaseVolumeOwnerResponse struct {
+	Released bool   `json:"released"`
+	Busy     bool   `json:"busy,omitempty"`
+	Error    string `json:"error,omitempty"`
+}

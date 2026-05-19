@@ -285,6 +285,19 @@ func (s *Server) deleteSandboxVolume(w http.ResponseWriter, r *http.Request) {
 			s.logger.WithError(err).WithField("volume_id", id).Warn("Failed to cleanup idle direct volume mount before delete")
 		}
 	}
+	if !force {
+		if err := s.releaseReleasableCtldVolumeOwners(r.Context(), id); err != nil {
+			status, code := http.StatusInternalServerError, spec.CodeInternal
+			message := "failed to release ctld volume owner"
+			if errors.Is(err, errCtldOwnerBusy) {
+				status, code = http.StatusConflict, spec.CodeConflict
+				message = "volume has active mounts"
+			}
+			s.logger.WithError(err).WithField("volume_id", id).Warn("Failed to release ctld volume owner before delete")
+			_ = spec.WriteError(w, status, code, message)
+			return
+		}
+	}
 	mounts, err := s.repo.GetActiveMounts(r.Context(), id, heartbeatTimeout)
 	if err != nil {
 		s.logger.WithError(err).Error("Failed to check active mounts")
@@ -354,6 +367,14 @@ func (s *Server) deleteSandboxVolumeRecord(ctx context.Context, id string, force
 	if !force && s.volMgr != nil {
 		if _, err := s.volMgr.CleanupIdleDirectVolumeFileMount(ctx, id); err != nil {
 			s.logger.WithError(err).WithField("volume_id", id).Warn("Failed to cleanup idle direct volume mount before delete")
+		}
+	}
+	if !force {
+		if err := s.releaseReleasableCtldVolumeOwners(ctx, id); err != nil {
+			if errors.Is(err, errCtldOwnerBusy) {
+				return nil, errVolumeHasActiveMounts
+			}
+			return nil, fmt.Errorf("release ctld volume owner: %w", err)
 		}
 	}
 	mounts, err := s.repo.GetActiveMounts(ctx, id, heartbeatTimeout)
@@ -783,21 +804,37 @@ func (s *Server) forkVolume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	vol, err := s.snapshotMgr.ForkVolume(r.Context(), &snapshot.ForkVolumeRequest{
-		SourceVolumeID:  id,
-		TeamID:          claims.TeamID,
-		UserID:          claims.UserID,
-		AccessMode:      req.AccessMode,
-		DefaultPosixUID: req.DefaultPosixUID,
-		DefaultPosixGID: req.DefaultPosixGID,
-	})
+	run := func(runCtx context.Context) (*db.SandboxVolume, error) {
+		if err := s.releaseReleasableCtldVolumeOwners(runCtx, id); err != nil {
+			return nil, err
+		}
+		return s.snapshotMgr.ForkVolume(runCtx, &snapshot.ForkVolumeRequest{
+			SourceVolumeID:  id,
+			TeamID:          claims.TeamID,
+			UserID:          claims.UserID,
+			AccessMode:      req.AccessMode,
+			DefaultPosixUID: req.DefaultPosixUID,
+			DefaultPosixGID: req.DefaultPosixGID,
+		})
+	}
+	var vol *db.SandboxVolume
+	var err error
+	if s.barrier != nil {
+		err = s.barrier.WithExclusive(r.Context(), id, func(runCtx context.Context) error {
+			var runErr error
+			vol, runErr = run(runCtx)
+			return runErr
+		})
+	} else {
+		vol, err = run(r.Context())
+	}
 	if err != nil {
 		switch {
 		case errors.Is(err, snapshot.ErrVolumeNotFound):
 			_ = spec.WriteError(w, http.StatusNotFound, spec.CodeNotFound, "volume not found")
 		case errors.Is(err, snapshot.ErrInvalidAccessMode):
 			_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "invalid access_mode")
-		case errors.Is(err, snapshot.ErrMountedCtldOwner):
+		case errors.Is(err, snapshot.ErrMountedCtldOwner), errors.Is(err, errCtldOwnerBusy):
 			_ = spec.WriteError(w, http.StatusConflict, spec.CodeConflict, "volume has active ctld mounts")
 		case errors.Is(err, snapshot.ErrCloneFailed):
 			_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "clone operation failed")

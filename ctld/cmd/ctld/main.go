@@ -271,6 +271,18 @@ func (c combinedController) AttachVolumeOwner(r *http.Request, req ctldapi.Attac
 	return resp, http.StatusOK
 }
 
+func (c combinedController) ReleaseVolumeOwner(r *http.Request, req ctldapi.ReleaseVolumeOwnerRequest) (ctldapi.ReleaseVolumeOwnerResponse, int) {
+	if c.Portal == nil {
+		return ctldapi.ReleaseVolumeOwnerResponse{Error: "ctld volume owners not implemented"}, http.StatusNotImplemented
+	}
+	resp, err := c.Portal.ReleaseOwner(r.Context(), req)
+	if err != nil {
+		resp.Error = err.Error()
+		return resp, volumePortalErrorStatus(err)
+	}
+	return resp, http.StatusOK
+}
+
 func (c combinedController) PrepareVolumePortalHandoff(r *http.Request, req ctldapi.PrepareVolumePortalHandoffRequest) (ctldapi.PrepareVolumePortalHandoffResponse, int) {
 	if c.Portal == nil {
 		return ctldapi.PrepareVolumePortalHandoffResponse{Error: "ctld volume portal handoff not implemented"}, http.StatusNotImplemented
@@ -315,6 +327,7 @@ func volumePortalErrorStatus(err error) int {
 	switch {
 	case strings.Contains(message, "already has an active owner"),
 		strings.Contains(message, "actively bound to a portal"),
+		strings.Contains(message, "still has active file requests"),
 		strings.Contains(message, "already bound to"),
 		strings.Contains(message, "handoff already in progress"):
 		return http.StatusConflict
@@ -339,6 +352,7 @@ type volumePortalHandler interface {
 	Unbind(ctx context.Context, req ctldapi.UnbindVolumePortalRequest) (ctldapi.UnbindVolumePortalResponse, error)
 	CheckPublished(ctx context.Context, req ctldapi.CheckVolumePortalsRequest) (ctldapi.CheckVolumePortalsResponse, error)
 	AttachOwner(ctx context.Context, req ctldapi.AttachVolumeOwnerRequest) (ctldapi.AttachVolumeOwnerResponse, error)
+	ReleaseOwner(ctx context.Context, req ctldapi.ReleaseVolumeOwnerRequest) (ctldapi.ReleaseVolumeOwnerResponse, error)
 	PrepareHandoff(ctx context.Context, req ctldapi.PrepareVolumePortalHandoffRequest) (ctldapi.PrepareVolumePortalHandoffResponse, error)
 	CompleteHandoff(ctx context.Context, req ctldapi.CompleteVolumePortalHandoffRequest) (ctldapi.CompleteVolumePortalHandoffResponse, error)
 	AbortHandoff(ctx context.Context, req ctldapi.AbortVolumePortalHandoffRequest) (ctldapi.AbortVolumePortalHandoffResponse, error)

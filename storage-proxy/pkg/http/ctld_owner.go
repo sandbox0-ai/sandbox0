@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -15,6 +16,8 @@ import (
 )
 
 const defaultCtldPort = 8095
+
+var errCtldOwnerBusy = errors.New("ctld volume owner is busy")
 
 type volumeCtldResolver interface {
 	ResolveLocalCtldURL(ctx context.Context) (string, error)
@@ -188,6 +191,54 @@ func (s *Server) ensureCtldVolumeOwner(ctx context.Context, volumeRecord *db.San
 			return nil
 		}
 		return err
+	}
+	return nil
+}
+
+func (s *Server) releaseReleasableCtldVolumeOwners(ctx context.Context, volumeID string) error {
+	if s == nil || s.repo == nil || s.podResolver == nil || strings.TrimSpace(volumeID) == "" {
+		return nil
+	}
+	if err := s.waitForVolumeHandoff(ctx, volumeID); err != nil {
+		return err
+	}
+	heartbeatTimeout := 15
+	if s.cfg != nil && s.cfg.HeartbeatTimeout > 0 {
+		heartbeatTimeout = s.cfg.HeartbeatTimeout
+	}
+	mounts, err := s.repo.GetActiveMounts(ctx, volumeID, heartbeatTimeout)
+	if err != nil {
+		return err
+	}
+	for _, mount := range mounts {
+		if mount == nil || strings.TrimSpace(mount.PodID) == "" {
+			continue
+		}
+		if s.selfClusterID != "" && mount.ClusterID != "" && mount.ClusterID != s.selfClusterID {
+			continue
+		}
+		if volume.DecodeMountOptions(mount.MountOptions).OwnerKind != volume.OwnerKindCtld {
+			continue
+		}
+		ownerURL, err := s.resolveVolumeMountURL(ctx, mount)
+		if err != nil {
+			return err
+		}
+		if ownerURL == nil {
+			continue
+		}
+		resp, err := postCtldJSON[ctldapi.ReleaseVolumeOwnerResponse](ctx, ownerURL.String(), "/api/v1/volume-portals/owners/release", ctldapi.ReleaseVolumeOwnerRequest{
+			SandboxVolumeID: volumeID,
+		})
+		if err != nil {
+			if isCtldConflictError(err) || (resp != nil && resp.Busy) {
+				return fmt.Errorf("%w: %v", errCtldOwnerBusy, err)
+			}
+			return err
+		}
+		if resp != nil && resp.Busy {
+			return fmt.Errorf("%w: %s", errCtldOwnerBusy, strings.TrimSpace(resp.Error))
+		}
 	}
 	return nil
 }

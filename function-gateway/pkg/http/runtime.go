@@ -95,11 +95,17 @@ func (s *Server) serveFunctionRevision(c *gin.Context, fn *functions.Function, r
 		return
 	}
 
-	sandbox, rev, err := s.resolveFunctionSandbox(c.Request.Context(), fn, rev, service)
+	lease, rev, err := s.acquireFunctionRuntime(c.Request.Context(), fn, rev, service)
 	if err != nil {
 		s.writeFunctionRuntimeError(c, fn, rev, "function sandbox is not available", err)
 		return
 	}
+	if lease == nil || lease.Sandbox == nil {
+		spec.JSONError(c, nethttp.StatusServiceUnavailable, spec.CodeUnavailable, "function sandbox is not available")
+		return
+	}
+	defer lease.Done()
+	sandbox := lease.Sandbox
 	if sandbox.TeamID != fn.TeamID {
 		spec.JSONError(c, nethttp.StatusServiceUnavailable, spec.CodeUnavailable, "function sandbox is invalid")
 		return
@@ -413,85 +419,23 @@ func functionSandboxWantsPaused(sandbox *mgr.Sandbox) bool {
 }
 
 func (s *Server) resolveFunctionSandbox(ctx context.Context, fn *functions.Function, rev *functions.Revision, service mgr.SandboxAppService) (*mgr.Sandbox, *functions.Revision, error) {
-	return s.ensureRestoredFunctionSandbox(ctx, fn, rev, service)
+	lease, updated, err := s.acquireFunctionRuntime(ctx, fn, rev, service)
+	if err != nil {
+		return nil, updated, err
+	}
+	if lease == nil {
+		return nil, updated, fmt.Errorf("function runtime lease is empty")
+	}
+	defer lease.Done()
+	return lease.Sandbox, updated, nil
 }
 
-func (s *Server) ensureRestoredFunctionSandbox(ctx context.Context, fn *functions.Function, rev *functions.Revision, service mgr.SandboxAppService) (*mgr.Sandbox, *functions.Revision, error) {
-	lock := s.revisionRuntimeLock(rev.ID)
-	lock.Lock()
-	defer lock.Unlock()
-
-	currentRev := rev
-	var sandbox *mgr.Sandbox
-	err := s.withRevisionRuntimeDistributedLock(ctx, rev.ID, func(runCtx context.Context) error {
-		var restoreErr error
-		sandbox, currentRev, restoreErr = s.ensureRestoredFunctionSandboxLocked(runCtx, fn, currentRev, service)
-		return restoreErr
-	})
-	if err != nil {
-		return nil, currentRev, err
+func (s *Server) acquireFunctionRuntime(ctx context.Context, fn *functions.Function, rev *functions.Revision, service mgr.SandboxAppService) (*functionRuntimeLease, *functions.Revision, error) {
+	autoscaler := s.autoscaler
+	if autoscaler == nil {
+		autoscaler = newFunctionAutoscaler(s)
 	}
-	return sandbox, currentRev, nil
-}
-
-func (s *Server) ensureRestoredFunctionSandboxLocked(ctx context.Context, fn *functions.Function, rev *functions.Revision, service mgr.SandboxAppService) (*mgr.Sandbox, *functions.Revision, error) {
-	latest, err := s.functionRepo.GetRevision(ctx, fn.TeamID, fn.ID, rev.ID)
-	if err == nil {
-		rev = latest
-	} else if err != nil && !errorsIsFunctionNotFound(err) {
-		return nil, rev, err
-	}
-
-	if rev.RuntimeSandboxID != nil && strings.TrimSpace(*rev.RuntimeSandboxID) != "" {
-		sandbox, err := s.getSandboxFromClusterGateway(ctx, strings.TrimSpace(*rev.RuntimeSandboxID))
-		if err == nil {
-			contextID, runtimeErr := s.ensureFunctionServiceRuntime(ctx, fn, rev, sandbox, service)
-			if runtimeErr != nil {
-				return nil, rev, runtimeErr
-			}
-			if rev.RuntimeContextID == nil || strings.TrimSpace(*rev.RuntimeContextID) != contextID {
-				updated, updateErr := s.functionRepo.SetRevisionRuntime(ctx, fn.TeamID, fn.ID, rev.ID, sandbox.ID, contextID)
-				if updateErr != nil {
-					return nil, rev, updateErr
-				}
-				rev = updated
-			}
-			return sandbox, rev, nil
-		}
-		if !isPublishNotFound(err) {
-			return nil, rev, err
-		}
-		if clearErr := s.functionRepo.ClearRevisionRuntime(ctx, fn.TeamID, fn.ID, rev.ID); clearErr != nil && !errorsIsFunctionNotFound(clearErr) {
-			s.logger.Warn("Failed to clear stale function runtime sandbox",
-				zap.String("function_id", fn.ID),
-				zap.String("revision_id", rev.ID),
-				zap.String("runtime_sandbox_id", strings.TrimSpace(*rev.RuntimeSandboxID)),
-				zap.Error(clearErr),
-			)
-		}
-		rev.RuntimeSandboxID = nil
-		rev.RuntimeContextID = nil
-		rev.RuntimeUpdatedAt = nil
-	}
-
-	claim, err := s.claimFunctionSandboxViaClusterGateway(ctx, fn, rev, service)
-	if err != nil {
-		return nil, rev, err
-	}
-	sandbox, err := s.getSandboxFromClusterGateway(ctx, claim.SandboxID)
-	if err != nil {
-		return nil, rev, err
-	}
-	contextID, err := s.ensureFunctionServiceRuntime(ctx, fn, rev, sandbox, service)
-	if err != nil {
-		s.deleteFunctionRuntimeSandboxBestEffort(fn, rev, sandbox.ID, "runtime startup failed")
-		return nil, rev, err
-	}
-	updated, err := s.functionRepo.SetRevisionRuntime(ctx, fn.TeamID, fn.ID, rev.ID, sandbox.ID, contextID)
-	if err != nil {
-		return nil, rev, err
-	}
-	return sandbox, updated, nil
+	return autoscaler.acquire(ctx, fn, rev, service)
 }
 
 func (s *Server) withRevisionRuntimeDistributedLock(ctx context.Context, revisionID string, fn func(context.Context) error) error {

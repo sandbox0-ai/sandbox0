@@ -1897,6 +1897,9 @@ func assertFunctionRuntimeRestoreUsesVolumeSnapshot(env *framework.ScenarioEnv, 
 	Expect(status).To(Equal(http.StatusOK))
 	Expect(runtimeStatus.State).To(Equal(apispec.FunctionRuntimeStateActive))
 	Expect(runtimeStatus.RuntimeSandboxId).NotTo(BeNil())
+	Expect(runtimeStatus.Instances).NotTo(BeNil())
+	Expect(*runtimeStatus.Instances).NotTo(BeEmpty())
+	Expect((*runtimeStatus.Instances)[0].State).To(Equal(apispec.FunctionRuntimeInstanceStateReady))
 	firstRuntimeSandboxID := *runtimeStatus.RuntimeSandboxId
 	Expect(firstRuntimeSandboxID).NotTo(BeEmpty())
 
@@ -1957,6 +1960,8 @@ func assertFunctionRuntimeRestoreUsesVolumeSnapshot(env *framework.ScenarioEnv, 
 	Expect(status).To(Equal(http.StatusOK))
 	Expect(runtimeStatus.State).To(Equal(apispec.FunctionRuntimeStateActive))
 	Expect(runtimeStatus.RuntimeSandboxId).NotTo(BeNil())
+	Expect(runtimeStatus.Instances).NotTo(BeNil())
+	Expect(*runtimeStatus.Instances).NotTo(BeEmpty())
 	Expect(*runtimeStatus.RuntimeSandboxId).NotTo(Equal(firstRuntimeSandboxID))
 
 	runtimeStatus, status, err = session.RecycleFunctionRuntime(env.TestCtx.Context, GinkgoT(), fn.Id)

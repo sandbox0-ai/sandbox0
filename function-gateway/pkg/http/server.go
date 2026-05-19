@@ -46,6 +46,7 @@ type Server struct {
 	routeLimiter        ratelimit.Limiter
 	runtimeLocks        sync.Map
 	runtimeRestoreLocks runtimeRestoreLocker
+	autoscaler          *functionAutoscaler
 	logger              *zap.Logger
 }
 
@@ -118,6 +119,7 @@ func NewServer(
 		runtimeRestoreLocks: pglock.New(pool),
 		logger:              logger,
 	}
+	server.autoscaler = newFunctionAutoscaler(server)
 
 	server.setupRoutes()
 	return server, nil
@@ -153,6 +155,11 @@ func (s *Server) Start(ctx context.Context) error {
 		ReadTimeout:  durationOrDefault(s.cfg.ServerReadTimeout.Duration, 30*time.Second),
 		WriteTimeout: durationOrDefault(s.cfg.ServerWriteTimeout.Duration, 60*time.Second),
 		IdleTimeout:  durationOrDefault(s.cfg.ServerIdleTimeout.Duration, 120*time.Second),
+	}
+	if s.autoscaler != nil {
+		autoscalerCtx, cancelAutoscaler := context.WithCancel(ctx)
+		defer cancelAutoscaler()
+		go s.autoscaler.Run(autoscalerCtx)
 	}
 
 	errChan := make(chan error, 1)

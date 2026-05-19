@@ -2,6 +2,12 @@
 
 Function runtime state describes the currently restored sandbox serving a function revision. Function Gateway serves production traffic from revision runtime sandboxes, not from the mutable source sandbox. When no reusable runtime exists, Function Gateway restores a runtime sandbox from the revision's template and revision-owned volumes.
 
+## Startup Readiness
+
+After Function Gateway starts a restored runtime context, it waits up to 30 seconds before sending user traffic. If the published service has `health_check.path`, the gateway polls that path with `GET` every 200 ms and considers the runtime ready only after the endpoint returns HTTP `2xx`. If no health check is configured, the gateway falls back to waiting for the service port to accept TCP connections.
+
+When readiness does not pass before the timeout, the request returns `503` and the gateway records a startup error that includes the health check URL plus the last HTTP status or request error.
+
 ## Runtime States
 
 | State | Meaning |

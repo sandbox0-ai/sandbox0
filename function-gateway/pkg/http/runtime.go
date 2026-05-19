@@ -31,6 +31,7 @@ import (
 
 const defaultFunctionAutoResumeTimeout = 30 * time.Second
 const defaultFunctionRuntimeStartTimeout = 30 * time.Second
+const functionRuntimeRestoreLockPrefix = "function-runtime-restore:"
 
 type functionRouteMatch struct {
 	route         *mgr.SandboxAppServiceRoute
@@ -418,6 +419,20 @@ func (s *Server) ensureRestoredFunctionSandbox(ctx context.Context, fn *function
 	lock.Lock()
 	defer lock.Unlock()
 
+	currentRev := rev
+	var sandbox *mgr.Sandbox
+	err := s.withRevisionRuntimeDistributedLock(ctx, rev.ID, func(runCtx context.Context) error {
+		var restoreErr error
+		sandbox, currentRev, restoreErr = s.ensureRestoredFunctionSandboxLocked(runCtx, fn, currentRev, service)
+		return restoreErr
+	})
+	if err != nil {
+		return nil, currentRev, err
+	}
+	return sandbox, currentRev, nil
+}
+
+func (s *Server) ensureRestoredFunctionSandboxLocked(ctx context.Context, fn *functions.Function, rev *functions.Revision, service mgr.SandboxAppService) (*mgr.Sandbox, *functions.Revision, error) {
 	latest, err := s.functionRepo.GetRevision(ctx, fn.TeamID, fn.ID, rev.ID)
 	if err == nil {
 		rev = latest
@@ -475,6 +490,17 @@ func (s *Server) ensureRestoredFunctionSandbox(ctx context.Context, fn *function
 		return nil, rev, err
 	}
 	return sandbox, updated, nil
+}
+
+func (s *Server) withRevisionRuntimeDistributedLock(ctx context.Context, revisionID string, fn func(context.Context) error) error {
+	if fn == nil {
+		return nil
+	}
+	revisionID = strings.TrimSpace(revisionID)
+	if s == nil || s.runtimeRestoreLocks == nil || revisionID == "" {
+		return fn(ctx)
+	}
+	return s.runtimeRestoreLocks.WithExclusive(ctx, functionRuntimeRestoreLockPrefix+revisionID, fn)
 }
 
 func (s *Server) revisionRuntimeLock(revisionID string) *sync.Mutex {

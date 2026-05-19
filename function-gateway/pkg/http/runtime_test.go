@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -267,6 +268,111 @@ func TestWithRevisionRuntimeDistributedLockFallsBackWithoutLocker(t *testing.T) 
 
 	if !called {
 		t.Fatal("callback was not called")
+	}
+}
+
+func TestWaitForFunctionServiceReadinessFallsBackToTCP(t *testing.T) {
+	var requests int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		http.NotFound(w, r)
+	}))
+	defer upstream.Close()
+	port, err := portFromURL(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream port: %v", err)
+	}
+
+	service := mgr.SandboxAppService{Port: port}
+	if err := (&Server{}).waitForFunctionServiceReadiness(context.Background(), upstream.URL, service); err != nil {
+		t.Fatalf("waitForFunctionServiceReadiness() error = %v", err)
+	}
+	if got := atomic.LoadInt32(&requests); got != 0 {
+		t.Fatalf("health requests = %d, want TCP fallback without HTTP requests", got)
+	}
+}
+
+func TestWaitForFunctionServiceReadinessHTTPHealthSuccess(t *testing.T) {
+	var requests int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ready" {
+			t.Errorf("path = %s, want /ready", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		if atomic.AddInt32(&requests, 1) == 1 {
+			http.Error(w, "starting", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	port, err := portFromURL(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream port: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	service := mgr.SandboxAppService{
+		Port:        port,
+		HealthCheck: &mgr.SandboxAppServiceHealth{Path: "/ready"},
+	}
+	if err := (&Server{}).waitForFunctionServiceReadiness(ctx, upstream.URL, service); err != nil {
+		t.Fatalf("waitForFunctionServiceReadiness() error = %v", err)
+	}
+	if got := atomic.LoadInt32(&requests); got < 2 {
+		t.Fatalf("health requests = %d, want retry before success", got)
+	}
+}
+
+func TestWaitForFunctionServiceReadinessHTTPHealthFailure(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not ready", http.StatusInternalServerError)
+	}))
+	defer upstream.Close()
+	port, err := portFromURL(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream port: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	service := mgr.SandboxAppService{
+		Port:        port,
+		HealthCheck: &mgr.SandboxAppServiceHealth{Path: "/ready"},
+	}
+	err = (&Server{}).waitForFunctionServiceReadiness(ctx, upstream.URL, service)
+	if err == nil {
+		t.Fatal("waitForFunctionServiceReadiness() error = nil, want health failure")
+	}
+	if !strings.Contains(err.Error(), "HTTP 500") || !strings.Contains(err.Error(), "did not return HTTP 2xx") {
+		t.Fatalf("error = %q, want readable HTTP readiness failure", err.Error())
+	}
+}
+
+func TestWaitForFunctionServiceReadinessHTTPHealthTimeout(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer upstream.Close()
+	port, err := portFromURL(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream port: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	service := mgr.SandboxAppService{
+		Port:        port,
+		HealthCheck: &mgr.SandboxAppServiceHealth{Path: "/ready"},
+	}
+	err = (&Server{}).waitForFunctionServiceReadiness(ctx, upstream.URL, service)
+	if err == nil {
+		t.Fatal("waitForFunctionServiceReadiness() error = nil, want timeout")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "did not return HTTP 2xx") {
+		t.Fatalf("error = %q, want readiness timeout with context deadline", err.Error())
 	}
 }
 

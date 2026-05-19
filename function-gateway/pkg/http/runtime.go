@@ -32,6 +32,8 @@ import (
 const defaultFunctionAutoResumeTimeout = 30 * time.Second
 const defaultFunctionRuntimeStartTimeout = 30 * time.Second
 const functionRuntimeRestoreLockPrefix = "function-runtime-restore:"
+const functionServiceReadinessProbeInterval = 200 * time.Millisecond
+const functionServiceReadinessTCPTimeout = 500 * time.Millisecond
 
 type functionRouteMatch struct {
 	route         *mgr.SandboxAppServiceRoute
@@ -640,7 +642,7 @@ func (s *Server) ensureFunctionServiceRuntime(ctx context.Context, fn *functions
 	}
 	startCtx, cancel := context.WithTimeout(ctx, defaultFunctionRuntimeStartTimeout)
 	defer cancel()
-	if err := waitForFunctionServicePort(startCtx, sandbox.InternalAddr, service.Port); err != nil {
+	if err := s.waitForFunctionServiceReadiness(startCtx, sandbox.InternalAddr, service); err != nil {
 		return "", err
 	}
 	return contextID, nil
@@ -922,6 +924,52 @@ func isFunctionRuntimeStatus(err error, status int) bool {
 	return false
 }
 
+func (s *Server) waitForFunctionServiceReadiness(ctx context.Context, internalAddr string, service mgr.SandboxAppService) error {
+	if service.HealthCheck != nil && strings.TrimSpace(service.HealthCheck.Path) != "" {
+		return s.waitForFunctionServiceHTTPHealth(ctx, internalAddr, service.Port, service.HealthCheck.Path)
+	}
+	return waitForFunctionServicePort(ctx, internalAddr, service.Port)
+}
+
+func (s *Server) waitForFunctionServiceHTTPHealth(ctx context.Context, internalAddr string, port int, healthPath string) error {
+	healthURL, err := functionServiceHealthURL(internalAddr, port, healthPath)
+	if err != nil {
+		return err
+	}
+	healthClient := *s.outboundHTTPClient()
+	healthClient.CheckRedirect = func(_ *nethttp.Request, _ []*nethttp.Request) error {
+		return nethttp.ErrUseLastResponse
+	}
+	ticker := time.NewTicker(functionServiceReadinessProbeInterval)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		req, err := nethttp.NewRequestWithContext(ctx, nethttp.MethodGet, healthURL.String(), nil)
+		if err != nil {
+			return err
+		}
+		resp, err := healthClient.Do(req)
+		if err == nil {
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				_ = resp.Body.Close()
+				return nil
+			}
+			lastErr = fmt.Errorf("health check returned HTTP %d", resp.StatusCode)
+			_ = resp.Body.Close()
+		} else {
+			lastErr = err
+		}
+		select {
+		case <-ctx.Done():
+			if lastErr == nil {
+				lastErr = ctx.Err()
+			}
+			return fmt.Errorf("function service health check %s did not return HTTP 2xx before timeout: %w", healthURL.String(), lastErr)
+		case <-ticker.C:
+		}
+	}
+}
+
 func waitForFunctionServicePort(ctx context.Context, internalAddr string, port int) error {
 	targetURL, err := withPort(internalAddr, port)
 	if err != nil {
@@ -931,11 +979,11 @@ func waitForFunctionServicePort(ctx context.Context, internalAddr string, port i
 	if address == "" {
 		return fmt.Errorf("function service target address is empty")
 	}
-	ticker := time.NewTicker(200 * time.Millisecond)
+	ticker := time.NewTicker(functionServiceReadinessProbeInterval)
 	defer ticker.Stop()
 	var lastErr error
 	for {
-		conn, err := net.DialTimeout("tcp", address, 500*time.Millisecond)
+		conn, err := net.DialTimeout("tcp", address, functionServiceReadinessTCPTimeout)
 		if err == nil {
 			_ = conn.Close()
 			return nil
@@ -947,6 +995,26 @@ func waitForFunctionServicePort(ctx context.Context, internalAddr string, port i
 		case <-ticker.C:
 		}
 	}
+}
+
+func functionServiceHealthURL(internalAddr string, port int, healthPath string) (*url.URL, error) {
+	targetURL, err := withPort(internalAddr, port)
+	if err != nil {
+		return nil, err
+	}
+	path := strings.TrimSpace(healthPath)
+	if path == "" {
+		return nil, fmt.Errorf("function service health check path is empty")
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	targetURL.Path = path
+	targetURL.RawPath = ""
+	targetURL.RawQuery = ""
+	targetURL.ForceQuery = false
+	targetURL.Fragment = ""
+	return targetURL, nil
 }
 
 func (s *Server) resumeSandboxViaClusterGateway(ctx context.Context, sandboxID, teamID, userID string) error {

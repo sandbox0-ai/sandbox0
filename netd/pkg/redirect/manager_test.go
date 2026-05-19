@@ -46,9 +46,12 @@ func TestBuildIPSetRestoreInput(t *testing.T) {
 	restore := buildIPSetRestoreInput([]string{"10.0.0.2", "10.0.0.3"})
 
 	mustContain(t, restore, "create "+ipsetName+" hash:ip family inet -exist")
-	mustContain(t, restore, "flush "+ipsetName)
-	mustContain(t, restore, "add "+ipsetName+" 10.0.0.2 -exist")
-	mustContain(t, restore, "add "+ipsetName+" 10.0.0.3 -exist")
+	mustContain(t, restore, "create "+nextIPSetName+" hash:ip family inet -exist")
+	mustContain(t, restore, "flush "+nextIPSetName)
+	mustContain(t, restore, "add "+nextIPSetName+" 10.0.0.2 -exist")
+	mustContain(t, restore, "add "+nextIPSetName+" 10.0.0.3 -exist")
+	mustContain(t, restore, "swap "+nextIPSetName+" "+ipsetName)
+	mustContain(t, restore, "destroy "+nextIPSetName)
 }
 
 func TestNatBypassRuleSpecSkipsDNATForMarkedPackets(t *testing.T) {

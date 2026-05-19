@@ -57,6 +57,10 @@ type NodeInfo struct {
 type Watcher struct {
 	k8sClient       kubernetes.Interface
 	informerFactory informers.SharedInformerFactory
+	podInformer     cache.SharedIndexInformer
+	serviceInformer cache.SharedIndexInformer
+	sliceInformer   cache.SharedIndexInformer
+	nodeInformer    cache.SharedIndexInformer
 	logger          *zap.Logger
 
 	mu             sync.RWMutex
@@ -76,11 +80,16 @@ type Watcher struct {
 	onNodeDelete      func(*NodeInfo)
 }
 
+const podNodeIndex = "spec.nodeName"
+
 func NewWatcher(
 	k8sClient kubernetes.Interface,
 	resyncPeriod time.Duration,
 	logger *zap.Logger,
 ) *Watcher {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 	return &Watcher{
 		k8sClient:       k8sClient,
 		informerFactory: informers.NewSharedInformerFactory(k8sClient, resyncPeriod),
@@ -133,6 +142,13 @@ func (w *Watcher) Start(ctx context.Context) error {
 	serviceInformer := w.informerFactory.Core().V1().Services().Informer()
 	endpointSliceInformer := w.informerFactory.Discovery().V1().EndpointSlices().Informer()
 	nodeInformer := w.informerFactory.Core().V1().Nodes().Informer()
+	if err := podInformer.AddIndexers(cache.Indexers{podNodeIndex: indexPodByNode}); err != nil {
+		return fmt.Errorf("add pod node indexer: %w", err)
+	}
+	w.podInformer = podInformer
+	w.serviceInformer = serviceInformer
+	w.sliceInformer = endpointSliceInformer
+	w.nodeInformer = nodeInformer
 
 	podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    w.handlePodUpsert,
@@ -173,6 +189,29 @@ func (w *Watcher) Start(ctx context.Context) error {
 }
 
 func (w *Watcher) ListSandboxesByNode(nodeName string) []*SandboxInfo {
+	if w.podInformer != nil {
+		var objects []any
+		if nodeName != "" {
+			items, err := w.podInformer.GetIndexer().ByIndex(podNodeIndex, nodeName)
+			if err != nil {
+				w.logger.Warn("Failed to list sandbox pods by node index", zap.String("node", nodeName), zap.Error(err))
+				return nil
+			}
+			objects = items
+		} else {
+			objects = w.podInformer.GetStore().List()
+		}
+		out := make([]*SandboxInfo, 0, len(objects))
+		for _, obj := range objects {
+			info := activeSandboxInfoFromPod(getPod(obj))
+			if info == nil {
+				continue
+			}
+			out = append(out, info)
+		}
+		return out
+	}
+
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	out := make([]*SandboxInfo, 0, len(w.sandboxes))
@@ -180,6 +219,43 @@ func (w *Watcher) ListSandboxesByNode(nodeName string) []*SandboxInfo {
 		if nodeName == "" || info.NodeName == nodeName {
 			out = append(out, cloneSandboxInfo(info))
 		}
+	}
+	return out
+}
+
+func (w *Watcher) ListServices() []*ServiceInfo {
+	if w.serviceInformer != nil {
+		objects := w.serviceInformer.GetStore().List()
+		out := make([]*ServiceInfo, 0, len(objects))
+		for _, obj := range objects {
+			info := serviceInfoFromService(getService(obj))
+			if info != nil {
+				out = append(out, info)
+			}
+		}
+		return out
+	}
+
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	out := make([]*ServiceInfo, 0, len(w.services))
+	for _, info := range w.services {
+		out = append(out, cloneServiceInfo(info))
+	}
+	return out
+}
+
+func (w *Watcher) ListEndpoints() []*EndpointsInfo {
+	if w.sliceInformer != nil {
+		objects := w.sliceInformer.GetStore().List()
+		return endpointsInfosFromSlices(objects)
+	}
+
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	out := make([]*EndpointsInfo, 0, len(w.endpoints))
+	for _, info := range w.endpoints {
+		out = append(out, cloneEndpointsInfo(info))
 	}
 	return out
 }
@@ -221,8 +297,9 @@ func (w *Watcher) handlePodUpsert(obj any) {
 	if pod == nil {
 		return
 	}
-	info := sandboxInfoFromPod(pod)
+	info := activeSandboxInfoFromPod(pod)
 	if info == nil {
+		w.removeCachedSandboxPod(pod, false)
 		return
 	}
 
@@ -255,23 +332,33 @@ func (w *Watcher) handlePodDelete(obj any) {
 	if pod == nil {
 		return
 	}
-	key := pod.Namespace + "/" + pod.Name
-	w.mu.RLock()
-	info := w.sandboxes[key]
-	w.mu.RUnlock()
-	if info == nil {
-		info = sandboxInfoFromPod(pod)
-	}
-	if info == nil {
+	w.removeCachedSandboxPod(pod, true)
+}
+
+func (w *Watcher) removeCachedSandboxPod(pod *corev1.Pod, allowPodFallback bool) {
+	if pod == nil {
 		return
 	}
-
+	key := pod.Namespace + "/" + pod.Name
 	w.mu.Lock()
-	if existing := w.sandboxes[key]; existing != nil {
-		if !isResourceVersionNewer(existing.ResourceVersion, info.ResourceVersion) {
+	info := w.sandboxes[key]
+	if info == nil {
+		if !allowPodFallback {
 			w.mu.Unlock()
 			return
 		}
+		info = sandboxInfoFromPod(pod)
+	}
+	if info == nil {
+		w.mu.Unlock()
+		return
+	}
+	if existing := w.sandboxes[key]; existing != nil {
+		if existing.UID != "" && info.UID != "" && existing.UID != info.UID {
+			w.mu.Unlock()
+			return
+		}
+		info = existing
 	}
 	delete(w.sandboxes, key)
 	w.mu.Unlock()
@@ -325,12 +412,6 @@ func (w *Watcher) handleServiceDelete(obj any) {
 
 	key := service.Namespace + "/" + service.Name
 	w.mu.Lock()
-	if existing := w.services[key]; existing != nil {
-		if !isResourceVersionNewer(existing.ResourceVersion, info.ResourceVersion) {
-			w.mu.Unlock()
-			return
-		}
-	}
 	delete(w.services, key)
 	w.mu.Unlock()
 
@@ -375,12 +456,6 @@ func (w *Watcher) handleEndpointSliceDelete(obj any) {
 
 	key := slice.Namespace + "/" + slice.Name
 	w.mu.Lock()
-	if existing := w.endpointSlices[key]; existing != nil {
-		if !isResourceVersionNewer(existing.ResourceVersion, entry.ResourceVersion) {
-			w.mu.Unlock()
-			return
-		}
-	}
 	delete(w.endpointSlices, key)
 	w.mu.Unlock()
 
@@ -475,12 +550,6 @@ func (w *Watcher) handleNodeDelete(obj any) {
 	}
 
 	w.mu.Lock()
-	if existing := w.nodes[node.Name]; existing != nil {
-		if !isResourceVersionNewer(existing.ResourceVersion, info.ResourceVersion) {
-			w.mu.Unlock()
-			return
-		}
-	}
 	delete(w.nodes, node.Name)
 	w.mu.Unlock()
 
@@ -516,6 +585,19 @@ func sandboxInfoFromPod(pod *corev1.Pod) *SandboxInfo {
 	}
 }
 
+func activeSandboxInfoFromPod(pod *corev1.Pod) *SandboxInfo {
+	if pod == nil || pod.DeletionTimestamp != nil {
+		return nil
+	}
+	if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+		return nil
+	}
+	if pod.Status.PodIP == "" || pod.Spec.NodeName == "" {
+		return nil
+	}
+	return sandboxInfoFromPod(pod)
+}
+
 func serviceInfoFromService(service *corev1.Service) *ServiceInfo {
 	if service == nil {
 		return nil
@@ -528,6 +610,35 @@ func serviceInfoFromService(service *corev1.Service) *ServiceInfo {
 		Ports:           append([]corev1.ServicePort(nil), service.Spec.Ports...),
 		Labels:          cloneStringMap(service.Labels),
 	}
+}
+
+func endpointsInfosFromSlices(objects []any) []*EndpointsInfo {
+	byService := make(map[string]*EndpointsInfo)
+	for _, obj := range objects {
+		entry := endpointSliceEntryFromSlice(getEndpointSlice(obj))
+		if entry == nil || entry.ServiceName == "" {
+			continue
+		}
+		key := entry.Namespace + "/" + entry.ServiceName
+		info := byService[key]
+		if info == nil {
+			info = &EndpointsInfo{
+				Namespace: entry.Namespace,
+				Name:      entry.ServiceName,
+			}
+			byService[key] = info
+		}
+		if isResourceVersionNewer(info.ResourceVersion, entry.ResourceVersion) {
+			info.ResourceVersion = entry.ResourceVersion
+		}
+		info.Addresses = append(info.Addresses, entry.Addresses...)
+		info.Ports = append(info.Ports, entry.Ports...)
+	}
+	out := make([]*EndpointsInfo, 0, len(byService))
+	for _, info := range byService {
+		out = append(out, cloneEndpointsInfo(info))
+	}
+	return out
 }
 
 type endpointSliceEntry struct {
@@ -634,6 +745,14 @@ func getNode(obj any) *corev1.Node {
 	}
 	node, _ = tombstone.Obj.(*corev1.Node)
 	return node
+}
+
+func indexPodByNode(obj any) ([]string, error) {
+	pod := getPod(obj)
+	if pod == nil || pod.Spec.NodeName == "" {
+		return nil, nil
+	}
+	return []string{pod.Spec.NodeName}, nil
 }
 
 func cloneSandboxInfo(info *SandboxInfo) *SandboxInfo {

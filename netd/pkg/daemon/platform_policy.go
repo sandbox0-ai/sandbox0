@@ -118,6 +118,37 @@ func (s *platformPolicyState) OnEndpointsDelete(info *watcher.EndpointsInfo) {
 	s.rebuild()
 }
 
+func (s *platformPolicyState) Reconcile(
+	sandboxes []*watcher.SandboxInfo,
+	services []*watcher.ServiceInfo,
+	endpoints []*watcher.EndpointsInfo,
+) {
+	s.mu.Lock()
+	s.sandboxes = make(map[string]*watcher.SandboxInfo, len(sandboxes))
+	for _, info := range sandboxes {
+		if info == nil {
+			continue
+		}
+		s.sandboxes[info.Namespace+"/"+info.Name] = info
+	}
+	s.services = make(map[string]*watcher.ServiceInfo, len(services))
+	for _, info := range services {
+		if info == nil {
+			continue
+		}
+		s.services[info.Namespace+"/"+info.Name] = info
+	}
+	s.endpoints = make(map[string]*watcher.EndpointsInfo, len(endpoints))
+	for _, info := range endpoints {
+		if info == nil {
+			continue
+		}
+		s.endpoints[info.Namespace+"/"+info.Name] = info
+	}
+	s.mu.Unlock()
+	s.rebuild()
+}
+
 func (s *platformPolicyState) rebuild() {
 	if s.store == nil {
 		return

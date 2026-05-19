@@ -173,25 +173,7 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 		platformState.OnSandboxUpsert(info)
 		changed, prevHash := policyStore.UpsertFromSandbox(info)
 		if changed && info.PodIP != "" {
-			flows := tracker.PopBySrc(info.PodIP)
-			p := policyStore.GetByIP(info.PodIP)
-			var flowsToKill []conntrack.FlowKey
-			// Only kill flows that are denied by the new policy.
-			// This prevents a race condition where a new connection established
-			// immediately after the policy update but before this handler runs
-			// would be killed if we blindly cleared all flows.
-			for _, flow := range flows {
-				proto := "tcp"
-				if flow.Proto == 17 {
-					proto = "udp"
-				}
-				if !policy.AllowEgressL4(p, net.IP(flow.DstIP.AsSlice()), int(flow.DstPort), proto) {
-					flowsToKill = append(flowsToKill, flow)
-				}
-			}
-			if len(flowsToKill) > 0 && conntrackManager != nil {
-				conntrackManager.CleanupFlows(ctx, flowsToKill)
-			}
+			cleanupDeniedTrackedFlows(ctx, tracker, conntrackManager, policyStore, info.PodIP)
 		}
 		d.logger.Info("Sandbox policy handler triggered",
 			zap.String("sandbox", info.Namespace+"/"+info.Name),
@@ -278,7 +260,7 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 			case <-ticker.C:
 			case <-syncTrigger:
 			}
-			if err := d.syncRedirect(ctx, netdWatcher, policyStore, redirectManager, patcher); err != nil {
+			if err := d.syncRedirect(ctx, netdWatcher, policyStore, platformState, redirectManager, patcher, tracker, conntrackManager); err != nil {
 				d.logger.Error("Failed to sync redirect rules", zap.Error(err))
 				if d.cfg.FailClosed {
 					d.ready.Store(false)
@@ -444,19 +426,39 @@ func (d *Daemon) syncRedirect(
 	ctx context.Context,
 	netdWatcher *watcher.Watcher,
 	policyStore *policy.Store,
+	platformState *platformPolicyState,
 	redirectManager redirect.Manager,
 	patcher *apply.Patcher,
+	tracker *conntrack.Tracker,
+	conntrackManager *conntrack.Manager,
 ) error {
 	if netdWatcher == nil || redirectManager == nil || patcher == nil {
 		return fmt.Errorf("missing watcher or redirect manager or patcher or policy store")
 	}
 	sandboxes := netdWatcher.ListSandboxesByNode(d.cfg.NodeName)
+	services := netdWatcher.ListServices()
+	endpoints := netdWatcher.ListEndpoints()
 	sandboxIPs := make([]string, 0, len(sandboxes))
 	for _, sandbox := range sandboxes {
 		if sandbox.PodIP == "" {
 			continue
 		}
 		sandboxIPs = append(sandboxIPs, sandbox.PodIP)
+	}
+	if policyStore != nil {
+		result := policyStore.ReconcileSandboxes(sandboxes)
+		for _, podIP := range result.RemovedIPs {
+			cleanupTrackedFlows(ctx, tracker, conntrackManager, podIP)
+		}
+		for _, change := range result.Changed {
+			if change.Initial || change.PodIP == "" {
+				continue
+			}
+			cleanupDeniedTrackedFlows(ctx, tracker, conntrackManager, policyStore, change.PodIP)
+		}
+	}
+	if platformState != nil {
+		platformState.Reconcile(sandboxes, services, endpoints)
 	}
 
 	bypassCIDRs := []string{}
@@ -495,6 +497,54 @@ func (d *Daemon) syncRedirect(
 		zap.Int("sandboxes_total", len(sandboxes)),
 	)
 	return nil
+}
+
+func cleanupTrackedFlows(
+	ctx context.Context,
+	tracker *conntrack.Tracker,
+	conntrackManager *conntrack.Manager,
+	podIP string,
+) int {
+	if tracker == nil || podIP == "" {
+		return 0
+	}
+	flows := tracker.PopBySrc(podIP)
+	if len(flows) > 0 && conntrackManager != nil {
+		conntrackManager.CleanupFlows(ctx, flows)
+	}
+	return len(flows)
+}
+
+func cleanupDeniedTrackedFlows(
+	ctx context.Context,
+	tracker *conntrack.Tracker,
+	conntrackManager *conntrack.Manager,
+	policyStore *policy.Store,
+	podIP string,
+) int {
+	if tracker == nil || policyStore == nil || podIP == "" {
+		return 0
+	}
+	flows := tracker.PopBySrc(podIP)
+	p := policyStore.GetByIP(podIP)
+	var flowsToKill []conntrack.FlowKey
+	// Only kill flows that are denied by the new policy.
+	// This prevents a race condition where a new connection established
+	// immediately after the policy update but before this handler runs
+	// would be killed if we blindly cleared all flows.
+	for _, flow := range flows {
+		proto := "tcp"
+		if flow.Proto == 17 {
+			proto = "udp"
+		}
+		if !policy.AllowEgressL4(p, net.IP(flow.DstIP.AsSlice()), int(flow.DstPort), proto) {
+			flowsToKill = append(flowsToKill, flow)
+		}
+	}
+	if len(flowsToKill) > 0 && conntrackManager != nil {
+		conntrackManager.CleanupFlows(ctx, flowsToKill)
+	}
+	return len(flowsToKill)
 }
 
 func (d *Daemon) startServers() error {

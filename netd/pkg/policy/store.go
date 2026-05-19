@@ -26,6 +26,22 @@ type policyEntry struct {
 	updatedAt  time.Time
 }
 
+type SandboxPolicyChange struct {
+	Namespace  string
+	Name       string
+	PodIP      string
+	OldPodIP   string
+	PolicyHash string
+	PrevHash   string
+	Initial    bool
+}
+
+type SandboxPolicyReconcileResult struct {
+	Upserted   int
+	RemovedIPs []string
+	Changed    []SandboxPolicyChange
+}
+
 func NewStore(logger *zap.Logger) *Store {
 	if logger == nil {
 		logger = zap.NewNop()
@@ -82,6 +98,85 @@ func (s *Store) UpsertFromSandbox(info *watcher.SandboxInfo) (bool, string) {
 		zap.String("prev_hash", prevHash),
 	)
 	return changed, prevHash
+}
+
+func (s *Store) ReconcileSandboxes(sandboxes []*watcher.SandboxInfo) SandboxPolicyReconcileResult {
+	result := SandboxPolicyReconcileResult{}
+	desired := make(map[string]*policyEntry, len(sandboxes))
+	desiredInfo := make(map[string]*watcher.SandboxInfo, len(sandboxes))
+	currentKeys := make(map[string]struct{}, len(sandboxes))
+	now := time.Now()
+	for _, info := range sandboxes {
+		if info == nil || info.PodIP == "" {
+			continue
+		}
+		key := info.Namespace + "/" + info.Name
+		currentKeys[key] = struct{}{}
+		spec, err := v1alpha1.ParseNetworkPolicyFromAnnotation(info.NetworkPolicy)
+		if err != nil {
+			s.logger.Warn("Failed to parse network policy", zap.Error(err), zap.String("pod_ip", info.PodIP))
+			continue
+		}
+		compiled, err := CompileNetworkPolicy(spec)
+		if err != nil {
+			s.logger.Warn("Failed to compile network policy", zap.Error(err), zap.String("pod_ip", info.PodIP))
+			continue
+		}
+		desired[key] = &policyEntry{
+			compiled:   compiled,
+			policyHash: info.NetworkPolicyHash,
+			podIP:      info.PodIP,
+			updatedAt:  now,
+		}
+		desiredInfo[key] = info
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, existing := range s.byKey {
+		if _, ok := currentKeys[key]; ok {
+			continue
+		}
+		delete(s.byKey, key)
+		if existing != nil && existing.podIP != "" {
+			delete(s.byIP, existing.podIP)
+			result.RemovedIPs = append(result.RemovedIPs, existing.podIP)
+		}
+	}
+	for key, entry := range desired {
+		info := desiredInfo[key]
+		existing := s.byKey[key]
+		change := SandboxPolicyChange{
+			Namespace:  info.Namespace,
+			Name:       info.Name,
+			PodIP:      entry.podIP,
+			PolicyHash: entry.policyHash,
+			Initial:    existing == nil,
+		}
+		if existing != nil {
+			change.PrevHash = existing.policyHash
+			change.OldPodIP = existing.podIP
+		}
+		if existing == nil || existing.policyHash != entry.policyHash || existing.podIP != entry.podIP {
+			result.Changed = append(result.Changed, change)
+		}
+		if existing != nil && existing.podIP != "" && existing.podIP != entry.podIP {
+			delete(s.byIP, existing.podIP)
+			result.RemovedIPs = append(result.RemovedIPs, existing.podIP)
+		}
+		s.byKey[key] = entry
+		s.byIP[entry.podIP] = entry
+		result.Upserted++
+	}
+	if len(result.RemovedIPs) > 0 || len(result.Changed) > 0 {
+		s.logger.Info(
+			"Sandbox network policies reconciled",
+			zap.Int("upserted", result.Upserted),
+			zap.Int("changed", len(result.Changed)),
+			zap.Int("removed_ips", len(result.RemovedIPs)),
+		)
+	}
+	return result
 }
 
 func (s *Store) DeleteByKey(namespace, name string) {

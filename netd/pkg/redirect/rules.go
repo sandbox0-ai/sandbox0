@@ -12,6 +12,7 @@ const (
 	chainName         = "NETD_PREROUTING"
 	natChainName      = "NETD_NAT_PREROUTING"
 	ipsetName         = "netd-sandbox-ips"
+	nextIPSetName     = "netd-sandbox-ips-next"
 	tproxyMark        = "0x1/0x1"
 	defaultLoopback   = "127.0.0.0/8"
 	natBypassJumpMark = tproxyMark
@@ -63,10 +64,13 @@ func natBypassRuleSpec() []string {
 func buildIPSetRestoreInput(ips []string) string {
 	var buf bytes.Buffer
 	buf.WriteString(fmt.Sprintf("create %s hash:ip family inet -exist\n", ipsetName))
-	buf.WriteString(fmt.Sprintf("flush %s\n", ipsetName))
+	buf.WriteString(fmt.Sprintf("create %s hash:ip family inet -exist\n", nextIPSetName))
+	buf.WriteString(fmt.Sprintf("flush %s\n", nextIPSetName))
 	for _, ip := range ips {
-		buf.WriteString(fmt.Sprintf("add %s %s -exist\n", ipsetName, ip))
+		buf.WriteString(fmt.Sprintf("add %s %s -exist\n", nextIPSetName, ip))
 	}
+	buf.WriteString(fmt.Sprintf("swap %s %s\n", nextIPSetName, ipsetName))
+	buf.WriteString(fmt.Sprintf("destroy %s\n", nextIPSetName))
 	return buf.String()
 }
 

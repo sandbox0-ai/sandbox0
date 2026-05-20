@@ -20,7 +20,7 @@ The `production` alias is the serving pointer used by the function host. Creatin
 
 ## How Serving Works
 
-Function traffic is handled by `function-gateway`. The gateway resolves the host to a function, loads the `production` revision, enforces the revision's service route policy, and proxies the request to the service port.
+Function traffic is handled by `function-gateway`. The gateway resolves the host to a function, loads the `production` revision, enforces the revision's service route policy, then proxies through the owning `cluster-gateway` to the runtime sandbox service port. `function-gateway` is regional and does not rely on direct access to cluster-internal sandbox IPs.
 
 Function serving is revision-first. The gateway does not proxy production traffic to the mutable source sandbox. When no reusable runtime exists, the gateway claims a new runtime sandbox from the revision's template, mounts the revision-owned volumes, starts the service runtime command or binds to the referenced warm process, and reuses runtime instances for later requests. The runtime pool scales out up to the function's `max_active` setting when local in-flight requests reach the soft `target_concurrency` target. Changes made to the source sandbox after publishing require a new revision before they affect the function host.
 

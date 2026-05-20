@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -88,6 +89,109 @@ func TestRewriteFunctionPath(t *testing.T) {
 	rewriteFunctionPath(ctx, "/api", "/")
 	if got := ctx.Request.URL.Path; got != "/v1/users" {
 		t.Fatalf("path = %q, want /v1/users", got)
+	}
+}
+
+func TestFunctionRuntimeProxyPath(t *testing.T) {
+	path := functionRuntimeProxyPath("sb_test", "api", "/v1/users")
+	want := "/internal/v1/functions/runtime/sandboxes/sb_test/services/api/proxy/v1/users"
+	if path != want {
+		t.Fatalf("path = %q, want %q", path, want)
+	}
+
+	root := functionRuntimeProxyPath("sb_test", "api", "")
+	if root != "/internal/v1/functions/runtime/sandboxes/sb_test/services/api/proxy/" {
+		t.Fatalf("root path = %q", root)
+	}
+}
+
+func TestFunctionRuntimeProxyUsesClusterGatewayForServing(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate ed25519 keypair: %v", err)
+	}
+	validator := internalauth.NewValidator(internalauth.ValidatorConfig{
+		Target:         internalauth.ServiceClusterGateway,
+		PublicKey:      publicKey,
+		AllowedCallers: []string{internalauth.ServiceFunctionGateway},
+	})
+
+	clusterGateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/v1/functions/runtime/sandboxes/sb_test/services/api/proxy/stream" {
+			t.Errorf("cluster-gateway path = %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.RawQuery != "q=1" {
+			t.Errorf("cluster-gateway raw query = %q", r.URL.RawQuery)
+		}
+		claims, err := validator.Validate(r.Header.Get(internalauth.DefaultTokenHeader))
+		if err != nil {
+			t.Errorf("validate internal token: %v", err)
+			http.Error(w, "bad token", http.StatusUnauthorized)
+			return
+		}
+		if claims.TeamID != "team-1" || claims.UserID != "user-1" {
+			t.Errorf("claims = team %q user %q", claims.TeamID, claims.UserID)
+		}
+		time.Sleep(120 * time.Millisecond)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: ok\n\n")
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}))
+	defer clusterGateway.Close()
+
+	server := &Server{
+		cfg: &config.FunctionGatewayConfig{
+			DefaultClusterGatewayURL: clusterGateway.URL,
+		},
+		internalAuthGen: internalauth.NewGenerator(internalauth.GeneratorConfig{
+			Caller:     internalauth.ServiceFunctionGateway,
+			PrivateKey: privateKey,
+			TTL:        time.Minute,
+		}),
+		httpClient: clusterGateway.Client(),
+		logger:     zap.NewNop(),
+	}
+	fn := &functions.Function{ID: "fn-1", TeamID: "team-1"}
+	rev := &functions.Revision{ID: "rev-1", FunctionID: "fn-1", TeamID: "team-1", CreatedBy: "user-1"}
+	sandbox := &mgr.Sandbox{
+		ID:           "sb_test",
+		TeamID:       "team-1",
+		InternalAddr: "http://203.0.113.1:49983",
+	}
+	service := mgr.SandboxAppService{ID: "api", Port: 3000}
+	route := &mgr.SandboxAppServiceRoute{ID: "api", TimeoutSeconds: 1}
+
+	engine := gin.New()
+	engine.GET("/*path", func(c *gin.Context) {
+		server.proxyFunctionRequestToRuntime(c, fn, rev, sandbox, service, route)
+	})
+	functionGateway := httptest.NewUnstartedServer(engine)
+	functionGateway.Config.WriteTimeout = 50 * time.Millisecond
+	functionGateway.Start()
+	defer functionGateway.Close()
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(functionGateway.URL + "/stream?q=1")
+	if err != nil {
+		t.Fatalf("GET() error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want %d, body = %s", resp.StatusCode, http.StatusOK, string(body))
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if string(body) != "data: ok\n\n" {
+		t.Fatalf("body = %q", string(body))
 	}
 }
 
@@ -271,34 +375,35 @@ func TestWithRevisionRuntimeDistributedLockFallsBackWithoutLocker(t *testing.T) 
 	}
 }
 
-func TestWaitForFunctionServiceReadinessFallsBackToTCP(t *testing.T) {
-	var requests int32
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&requests, 1)
-		http.NotFound(w, r)
-	}))
-	defer upstream.Close()
-	port, err := portFromURL(upstream.URL)
+func TestWaitForFunctionServiceReadinessUsesClusterGatewayTCPFallback(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
 	if err != nil {
-		t.Fatalf("parse upstream port: %v", err)
+		t.Fatalf("generate ed25519 keypair: %v", err)
 	}
+	validator := internalauth.NewValidator(internalauth.ValidatorConfig{
+		Target:         internalauth.ServiceClusterGateway,
+		PublicKey:      publicKey,
+		AllowedCallers: []string{internalauth.ServiceFunctionGateway},
+	})
 
-	service := mgr.SandboxAppService{Port: port}
-	if err := (&Server{}).waitForFunctionServiceReadiness(context.Background(), upstream.URL, service); err != nil {
-		t.Fatalf("waitForFunctionServiceReadiness() error = %v", err)
-	}
-	if got := atomic.LoadInt32(&requests); got != 0 {
-		t.Fatalf("health requests = %d, want TCP fallback without HTTP requests", got)
-	}
-}
-
-func TestWaitForFunctionServiceReadinessHTTPHealthSuccess(t *testing.T) {
 	var requests int32
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/ready" {
-			t.Errorf("path = %s, want /ready", r.URL.Path)
+	clusterGateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/v1/functions/runtime/sandboxes/sb_test/services/api/readiness" {
+			t.Errorf("path = %s", r.URL.Path)
 			http.NotFound(w, r)
 			return
+		}
+		if got := r.URL.Query().Get("health_path"); got != "" {
+			t.Errorf("health_path = %q, want empty TCP fallback", got)
+		}
+		claims, err := validator.Validate(r.Header.Get(internalauth.DefaultTokenHeader))
+		if err != nil {
+			t.Errorf("validate internal token: %v", err)
+			http.Error(w, "bad token", http.StatusUnauthorized)
+			return
+		}
+		if claims.TeamID != "team-1" || claims.UserID != "user-1" {
+			t.Errorf("claims = team %q user %q", claims.TeamID, claims.UserID)
 		}
 		if atomic.AddInt32(&requests, 1) == 1 {
 			http.Error(w, "starting", http.StatusServiceUnavailable)
@@ -306,72 +411,142 @@ func TestWaitForFunctionServiceReadinessHTTPHealthSuccess(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
-	defer upstream.Close()
-	port, err := portFromURL(upstream.URL)
-	if err != nil {
-		t.Fatalf("parse upstream port: %v", err)
-	}
+	defer clusterGateway.Close()
 
+	server := &Server{
+		cfg: &config.FunctionGatewayConfig{
+			DefaultClusterGatewayURL: clusterGateway.URL,
+		},
+		internalAuthGen: internalauth.NewGenerator(internalauth.GeneratorConfig{
+			Caller:     internalauth.ServiceFunctionGateway,
+			PrivateKey: privateKey,
+			TTL:        time.Minute,
+		}),
+		httpClient: clusterGateway.Client(),
+		logger:     zap.NewNop(),
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	service := mgr.SandboxAppService{
-		Port:        port,
-		HealthCheck: &mgr.SandboxAppServiceHealth{Path: "/ready"},
-	}
-	if err := (&Server{}).waitForFunctionServiceReadiness(ctx, upstream.URL, service); err != nil {
+	service := mgr.SandboxAppService{ID: "api"}
+	if err := server.waitForFunctionServiceReadiness(ctx, "sb_test", "team-1", "user-1", service); err != nil {
 		t.Fatalf("waitForFunctionServiceReadiness() error = %v", err)
 	}
 	if got := atomic.LoadInt32(&requests); got < 2 {
-		t.Fatalf("health requests = %d, want retry before success", got)
+		t.Fatalf("readiness requests = %d, want retry before success", got)
 	}
 }
 
-func TestWaitForFunctionServiceReadinessHTTPHealthFailure(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "not ready", http.StatusInternalServerError)
-	}))
-	defer upstream.Close()
-	port, err := portFromURL(upstream.URL)
+func TestWaitForFunctionServiceReadinessPassesHealthPathToClusterGateway(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(nil)
 	if err != nil {
-		t.Fatalf("parse upstream port: %v", err)
+		t.Fatalf("generate ed25519 keypair: %v", err)
 	}
+	var requests int32
+	clusterGateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/v1/functions/runtime/sandboxes/sb_test/services/api/readiness" {
+			t.Errorf("path = %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.URL.Query().Get("health_path"); got != "/ready" {
+			t.Errorf("health_path = %q, want /ready", got)
+		}
+		if atomic.AddInt32(&requests, 1) == 1 {
+			http.Error(w, "starting", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer clusterGateway.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	server := &Server{
+		cfg: &config.FunctionGatewayConfig{
+			DefaultClusterGatewayURL: clusterGateway.URL,
+		},
+		internalAuthGen: internalauth.NewGenerator(internalauth.GeneratorConfig{
+			Caller:     internalauth.ServiceFunctionGateway,
+			PrivateKey: privateKey,
+			TTL:        time.Minute,
+		}),
+		httpClient: clusterGateway.Client(),
+		logger:     zap.NewNop(),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	service := mgr.SandboxAppService{
-		Port:        port,
+		ID:          "api",
 		HealthCheck: &mgr.SandboxAppServiceHealth{Path: "/ready"},
 	}
-	err = (&Server{}).waitForFunctionServiceReadiness(ctx, upstream.URL, service)
-	if err == nil {
-		t.Fatal("waitForFunctionServiceReadiness() error = nil, want health failure")
+	if err := server.waitForFunctionServiceReadiness(ctx, "sb_test", "team-1", "user-1", service); err != nil {
+		t.Fatalf("waitForFunctionServiceReadiness() error = %v", err)
 	}
-	if !strings.Contains(err.Error(), "HTTP 500") || !strings.Contains(err.Error(), "did not return HTTP 2xx") {
-		t.Fatalf("error = %q, want readable HTTP readiness failure", err.Error())
+	if got := atomic.LoadInt32(&requests); got < 2 {
+		t.Fatalf("readiness requests = %d, want retry before success", got)
 	}
 }
 
-func TestWaitForFunctionServiceReadinessHTTPHealthTimeout(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func TestWaitForFunctionServiceReadinessFailure(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate ed25519 keypair: %v", err)
+	}
+	clusterGateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not ready", http.StatusServiceUnavailable)
+	}))
+	defer clusterGateway.Close()
+
+	server := &Server{
+		cfg: &config.FunctionGatewayConfig{
+			DefaultClusterGatewayURL: clusterGateway.URL,
+		},
+		internalAuthGen: internalauth.NewGenerator(internalauth.GeneratorConfig{
+			Caller:     internalauth.ServiceFunctionGateway,
+			PrivateKey: privateKey,
+			TTL:        time.Minute,
+		}),
+		httpClient: clusterGateway.Client(),
+		logger:     zap.NewNop(),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	err = server.waitForFunctionServiceReadiness(ctx, "sb_test", "team-1", "user-1", mgr.SandboxAppService{ID: "api"})
+	if err == nil {
+		t.Fatal("waitForFunctionServiceReadiness() error = nil, want readiness failure")
+	}
+	if !strings.Contains(err.Error(), "HTTP 503") || !strings.Contains(err.Error(), "did not pass") {
+		t.Fatalf("error = %q, want readable readiness failure", err.Error())
+	}
+}
+
+func TestWaitForFunctionServiceReadinessTimeout(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate ed25519 keypair: %v", err)
+	}
+	clusterGateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-r.Context().Done()
 	}))
-	defer upstream.Close()
-	port, err := portFromURL(upstream.URL)
-	if err != nil {
-		t.Fatalf("parse upstream port: %v", err)
-	}
+	defer clusterGateway.Close()
 
+	server := &Server{
+		cfg: &config.FunctionGatewayConfig{
+			DefaultClusterGatewayURL: clusterGateway.URL,
+		},
+		internalAuthGen: internalauth.NewGenerator(internalauth.GeneratorConfig{
+			Caller:     internalauth.ServiceFunctionGateway,
+			PrivateKey: privateKey,
+			TTL:        time.Minute,
+		}),
+		httpClient: clusterGateway.Client(),
+		logger:     zap.NewNop(),
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	service := mgr.SandboxAppService{
-		Port:        port,
-		HealthCheck: &mgr.SandboxAppServiceHealth{Path: "/ready"},
-	}
-	err = (&Server{}).waitForFunctionServiceReadiness(ctx, upstream.URL, service)
+	err = server.waitForFunctionServiceReadiness(ctx, "sb_test", "team-1", "user-1", mgr.SandboxAppService{ID: "api"})
 	if err == nil {
 		t.Fatal("waitForFunctionServiceReadiness() error = nil, want timeout")
 	}
-	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "did not return HTTP 2xx") {
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "did not pass") {
 		t.Fatalf("error = %q, want readiness timeout with context deadline", err.Error())
 	}
 }

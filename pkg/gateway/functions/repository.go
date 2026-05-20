@@ -40,6 +40,7 @@ func (r *Repository) CreateFunctionWithRevision(ctx context.Context, fn *Functio
 	fn.CreatedAt = now
 	fn.UpdatedAt = now
 	fn.CreatedBy = createdBy
+	fn.Autoscaling = NormalizeAutoscaling(fn.Autoscaling)
 	rev.FunctionID = fn.ID
 	rev.TeamID = fn.TeamID
 	rev.RevisionNumber = 1
@@ -134,7 +135,7 @@ func (r *Repository) ListFunctions(ctx context.Context, teamID string) ([]*Funct
 		return nil, fmt.Errorf("function repository is not configured")
 	}
 	rows, err := r.pool.Query(ctx, `
-		SELECT id, team_id, name, slug, domain_label, active_revision_id, enabled, created_by, created_at, updated_at, deleted_at
+		SELECT id, team_id, name, slug, domain_label, active_revision_id, enabled, autoscaling, created_by, created_at, updated_at, deleted_at
 		FROM functions
 		WHERE team_id = $1 AND deleted_at IS NULL
 		ORDER BY updated_at DESC, created_at DESC
@@ -162,13 +163,13 @@ func (r *Repository) GetFunction(ctx context.Context, teamID, ref string) (*Func
 	var row pgx.Row
 	if id, err := uuid.Parse(ref); err == nil {
 		row = r.pool.QueryRow(ctx, `
-			SELECT id, team_id, name, slug, domain_label, active_revision_id, enabled, created_by, created_at, updated_at, deleted_at
+			SELECT id, team_id, name, slug, domain_label, active_revision_id, enabled, autoscaling, created_by, created_at, updated_at, deleted_at
 			FROM functions
 			WHERE team_id = $1 AND deleted_at IS NULL AND (id = $2 OR slug = $3)
 		`, teamID, id, ref)
 	} else {
 		row = r.pool.QueryRow(ctx, `
-			SELECT id, team_id, name, slug, domain_label, active_revision_id, enabled, created_by, created_at, updated_at, deleted_at
+			SELECT id, team_id, name, slug, domain_label, active_revision_id, enabled, autoscaling, created_by, created_at, updated_at, deleted_at
 			FROM functions
 			WHERE team_id = $1 AND deleted_at IS NULL AND slug = $2
 		`, teamID, ref)
@@ -185,7 +186,7 @@ func (r *Repository) GetFunctionByDomainLabel(ctx context.Context, domainLabel s
 		return nil, fmt.Errorf("function repository is not configured")
 	}
 	row := r.pool.QueryRow(ctx, `
-		SELECT id, team_id, name, slug, domain_label, active_revision_id, enabled, created_by, created_at, updated_at, deleted_at
+		SELECT id, team_id, name, slug, domain_label, active_revision_id, enabled, autoscaling, created_by, created_at, updated_at, deleted_at
 		FROM functions
 		WHERE domain_label = $1 AND deleted_at IS NULL
 	`, domainLabel)
@@ -308,7 +309,12 @@ func (r *Repository) ClearRevisionRuntime(ctx context.Context, teamID, functionI
 	if r == nil || r.pool == nil {
 		return fmt.Errorf("function repository is not configured")
 	}
-	tag, err := r.pool.Exec(ctx, `
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx, `
 		UPDATE functions_revisions
 		SET runtime_sandbox_id = NULL, runtime_context_id = NULL, runtime_updated_at = NULL
 		WHERE team_id = $1 AND function_id = $2 AND id = $3
@@ -319,10 +325,277 @@ func (r *Repository) ClearRevisionRuntime(ctx context.Context, teamID, functionI
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
 	}
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM function_runtime_instances
+		WHERE team_id = $1 AND function_id = $2 AND revision_id = $3
+	`, teamID, functionID, revisionID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (r *Repository) ListRuntimeInstances(ctx context.Context, teamID, functionID, revisionID string) ([]*RuntimeInstance, error) {
+	if r == nil || r.pool == nil {
+		return nil, fmt.Errorf("function repository is not configured")
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, team_id, function_id, revision_id, sandbox_id, context_id, state, last_error,
+			ready_at, last_used_at, draining_at, failed_at, created_at, updated_at
+		FROM function_runtime_instances
+		WHERE team_id = $1 AND function_id = $2 AND revision_id = $3
+		ORDER BY
+			CASE state
+				WHEN 'ready' THEN 0
+				WHEN 'starting' THEN 1
+				WHEN 'draining' THEN 2
+				ELSE 3
+			END,
+			COALESCE(last_used_at, ready_at, created_at) ASC
+	`, teamID, functionID, revisionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*RuntimeInstance
+	for rows.Next() {
+		inst, err := scanRuntimeInstance(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, inst)
+	}
+	return out, rows.Err()
+}
+
+func (r *Repository) CreateRuntimeInstance(ctx context.Context, inst *RuntimeInstance) (*RuntimeInstance, error) {
+	if r == nil || r.pool == nil {
+		return nil, fmt.Errorf("function repository is not configured")
+	}
+	if inst == nil {
+		return nil, fmt.Errorf("runtime instance is nil")
+	}
+	if inst.ID == "" {
+		inst.ID = uuid.NewString()
+	}
+	if inst.State == "" {
+		inst.State = RuntimeInstanceStateStarting
+	}
+	row := r.pool.QueryRow(ctx, `
+		INSERT INTO function_runtime_instances (
+			id, team_id, function_id, revision_id, sandbox_id, context_id, state, last_error,
+			ready_at, last_used_at, draining_at, failed_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+		RETURNING id, team_id, function_id, revision_id, sandbox_id, context_id, state, last_error,
+			ready_at, last_used_at, draining_at, failed_at, created_at, updated_at
+	`, inst.ID, inst.TeamID, inst.FunctionID, inst.RevisionID, inst.SandboxID, inst.ContextID, inst.State, inst.LastError,
+		inst.ReadyAt, inst.LastUsedAt, inst.DrainingAt, inst.FailedAt)
+	created, err := scanRuntimeInstance(row)
+	if err != nil {
+		return nil, err
+	}
+	return created, nil
+}
+
+func (r *Repository) MarkRuntimeInstanceReady(ctx context.Context, teamID, functionID, revisionID, instanceID, sandboxID, contextID string) (*RuntimeInstance, error) {
+	if r == nil || r.pool == nil {
+		return nil, fmt.Errorf("function repository is not configured")
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	row := tx.QueryRow(ctx, `
+		UPDATE function_runtime_instances
+		SET sandbox_id = $5, context_id = $6, state = 'ready', last_error = NULL,
+			ready_at = COALESCE(ready_at, NOW()), last_used_at = NOW(), draining_at = NULL, failed_at = NULL
+		WHERE team_id = $1 AND function_id = $2 AND revision_id = $3 AND id = $4
+		RETURNING id, team_id, function_id, revision_id, sandbox_id, context_id, state, last_error,
+			ready_at, last_used_at, draining_at, failed_at, created_at, updated_at
+	`, teamID, functionID, revisionID, instanceID, sandboxID, contextID)
+	inst, err := scanRuntimeInstance(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE functions_revisions
+		SET runtime_sandbox_id = $4, runtime_context_id = $5, runtime_updated_at = NOW()
+		WHERE team_id = $1 AND function_id = $2 AND id = $3
+	`, teamID, functionID, revisionID, sandboxID, contextID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return inst, nil
+}
+
+func (r *Repository) MarkRuntimeInstanceUsed(ctx context.Context, teamID, functionID, revisionID, instanceID string) error {
+	if r == nil || r.pool == nil {
+		return fmt.Errorf("function repository is not configured")
+	}
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE function_runtime_instances
+		SET last_used_at = NOW()
+		WHERE team_id = $1 AND function_id = $2 AND revision_id = $3 AND id = $4
+	`, teamID, functionID, revisionID, instanceID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
 	return nil
 }
 
-func (r *Repository) UpdateFunction(ctx context.Context, teamID, functionRef string, name *string, enabled *bool) (*Function, error) {
+func (r *Repository) MarkRuntimeInstanceDraining(ctx context.Context, teamID, functionID, revisionID, instanceID string) error {
+	if r == nil || r.pool == nil {
+		return fmt.Errorf("function repository is not configured")
+	}
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE function_runtime_instances
+		SET state = 'draining', draining_at = NOW()
+		WHERE team_id = $1 AND function_id = $2 AND revision_id = $3 AND id = $4
+	`, teamID, functionID, revisionID, instanceID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *Repository) MarkRuntimeInstanceFailed(ctx context.Context, teamID, functionID, revisionID, instanceID, message string) error {
+	if r == nil || r.pool == nil {
+		return fmt.Errorf("function repository is not configured")
+	}
+	message = strings.TrimSpace(message)
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE function_runtime_instances
+		SET state = 'failed', last_error = NULLIF($5, ''), failed_at = NOW()
+		WHERE team_id = $1 AND function_id = $2 AND revision_id = $3 AND id = $4
+	`, teamID, functionID, revisionID, instanceID, message)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *Repository) DeleteRuntimeInstance(ctx context.Context, teamID, functionID, revisionID, instanceID string) error {
+	if r == nil || r.pool == nil {
+		return fmt.Errorf("function repository is not configured")
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var currentSandboxID *string
+	if err := tx.QueryRow(ctx, `
+		SELECT runtime_sandbox_id
+		FROM functions_revisions
+		WHERE team_id = $1 AND function_id = $2 AND id = $3
+		FOR UPDATE
+	`, teamID, functionID, revisionID).Scan(&currentSandboxID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+
+	var deletedSandboxID string
+	if err := tx.QueryRow(ctx, `
+		DELETE FROM function_runtime_instances
+		WHERE team_id = $1 AND function_id = $2 AND revision_id = $3 AND id = $4
+		RETURNING sandbox_id
+	`, teamID, functionID, revisionID, instanceID).Scan(&deletedSandboxID); errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return err
+	}
+
+	if currentSandboxID != nil && strings.TrimSpace(*currentSandboxID) == strings.TrimSpace(deletedSandboxID) {
+		var replacementSandboxID *string
+		var replacementContextID *string
+		err := tx.QueryRow(ctx, `
+			SELECT sandbox_id, context_id
+			FROM function_runtime_instances
+			WHERE team_id = $1 AND function_id = $2 AND revision_id = $3 AND state = 'ready'
+			ORDER BY COALESCE(last_used_at, ready_at, created_at) DESC
+			LIMIT 1
+		`, teamID, functionID, revisionID).Scan(&replacementSandboxID, &replacementContextID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			replacementSandboxID = nil
+			replacementContextID = nil
+		} else if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE functions_revisions
+			SET runtime_sandbox_id = $4, runtime_context_id = $5,
+				runtime_updated_at = CASE WHEN $4::text IS NULL THEN NULL ELSE NOW() END
+			WHERE team_id = $1 AND function_id = $2 AND id = $3
+		`, teamID, functionID, revisionID, replacementSandboxID, replacementContextID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+func (r *Repository) ListRuntimeScaleDownCandidates(ctx context.Context, limit int) ([]*RuntimeInstance, error) {
+	if r == nil || r.pool == nil {
+		return nil, fmt.Errorf("function repository is not configured")
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := r.pool.Query(ctx, `
+		WITH ready_instances AS (
+			SELECT i.id, i.team_id, i.function_id, i.revision_id, i.sandbox_id, i.context_id, i.state, i.last_error,
+				i.ready_at, i.last_used_at, i.draining_at, i.failed_at, i.created_at, i.updated_at,
+				GREATEST(COALESCE((f.autoscaling->>'min_warm')::int, $2), 0) AS min_warm,
+				GREATEST(COALESCE((f.autoscaling->>'scale_down_after_seconds')::int, $3), $4) AS scale_down_after_seconds,
+				COUNT(*) OVER (PARTITION BY i.revision_id) AS ready_count,
+				ROW_NUMBER() OVER (PARTITION BY i.revision_id ORDER BY COALESCE(i.last_used_at, i.ready_at, i.created_at) ASC) AS idle_rank
+			FROM function_runtime_instances i
+			JOIN functions f ON f.id = i.function_id
+			WHERE i.state = 'ready'
+				AND f.deleted_at IS NULL
+				AND f.active_revision_id = i.revision_id
+		)
+		SELECT id, team_id, function_id, revision_id, sandbox_id, context_id, state, last_error,
+			ready_at, last_used_at, draining_at, failed_at, created_at, updated_at
+		FROM ready_instances
+		WHERE ready_count > min_warm
+			AND idle_rank <= ready_count - min_warm
+			AND COALESCE(last_used_at, ready_at, created_at) < NOW() - make_interval(secs => scale_down_after_seconds)
+		ORDER BY COALESCE(last_used_at, ready_at, created_at) ASC
+		LIMIT $1
+	`, limit, DefaultMinWarm, DefaultScaleDownAfterSeconds, MinimumScaleDownAfterSeconds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*RuntimeInstance
+	for rows.Next() {
+		inst, err := scanRuntimeInstance(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, inst)
+	}
+	return out, rows.Err()
+}
+
+func (r *Repository) UpdateFunction(ctx context.Context, teamID, functionRef string, name *string, enabled *bool, autoscaling *Autoscaling) (*Function, error) {
 	if r == nil || r.pool == nil {
 		return nil, fmt.Errorf("function repository is not configured")
 	}
@@ -338,12 +611,20 @@ func (r *Repository) UpdateFunction(ctx context.Context, teamID, functionRef str
 	if enabled != nil {
 		nextEnabled = *enabled
 	}
+	nextAutoscaling := fn.Autoscaling
+	if autoscaling != nil {
+		nextAutoscaling = NormalizeAutoscaling(*autoscaling)
+	}
+	autoscalingBytes, err := json.Marshal(nextAutoscaling)
+	if err != nil {
+		return nil, err
+	}
 	row := r.pool.QueryRow(ctx, `
 		UPDATE functions
-		SET name = $3, enabled = $4, updated_at = NOW()
+		SET name = $3, enabled = $4, autoscaling = $5, updated_at = NOW()
 		WHERE team_id = $1 AND id = $2 AND deleted_at IS NULL
-		RETURNING id, team_id, name, slug, domain_label, active_revision_id, enabled, created_by, created_at, updated_at, deleted_at
-	`, teamID, fn.ID, nextName, nextEnabled)
+		RETURNING id, team_id, name, slug, domain_label, active_revision_id, enabled, autoscaling, created_by, created_at, updated_at, deleted_at
+	`, teamID, fn.ID, nextName, nextEnabled, autoscalingBytes)
 	updated, err := scanFunction(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -367,7 +648,7 @@ func (r *Repository) DeleteFunction(ctx context.Context, teamID, functionRef str
 		UPDATE functions
 		SET enabled = FALSE, deleted_at = NOW(), updated_at = NOW()
 		WHERE team_id = $1 AND id = $2 AND deleted_at IS NULL
-		RETURNING id, team_id, name, slug, domain_label, active_revision_id, enabled, created_by, created_at, updated_at, deleted_at
+		RETURNING id, team_id, name, slug, domain_label, active_revision_id, enabled, autoscaling, created_by, created_at, updated_at, deleted_at
 	`, teamID, fn.ID)
 	deleted, err := scanFunction(row)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -481,6 +762,7 @@ func NewFunction(teamID, name, userID string) *Function {
 		Slug:        slug,
 		DomainLabel: DomainLabel(slug, teamID),
 		Enabled:     true,
+		Autoscaling: DefaultAutoscaling(),
 		CreatedBy:   userID,
 	}
 }
@@ -502,11 +784,16 @@ func NewRevision(teamID, sandboxID, serviceID, templateID string, snapshot any, 
 }
 
 func insertFunction(ctx context.Context, tx pgx.Tx, fn *Function) error {
-	_, err := tx.Exec(ctx, `
+	fn.Autoscaling = NormalizeAutoscaling(fn.Autoscaling)
+	autoscalingBytes, err := json.Marshal(fn.Autoscaling)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `
 		INSERT INTO functions (
-			id, team_id, name, slug, domain_label, active_revision_id, enabled, created_by, created_at, updated_at, deleted_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-	`, fn.ID, fn.TeamID, fn.Name, fn.Slug, fn.DomainLabel, fn.ActiveRevisionID, fn.Enabled, fn.CreatedBy, fn.CreatedAt, fn.UpdatedAt, fn.DeletedAt)
+			id, team_id, name, slug, domain_label, active_revision_id, enabled, autoscaling, created_by, created_at, updated_at, deleted_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+	`, fn.ID, fn.TeamID, fn.Name, fn.Slug, fn.DomainLabel, fn.ActiveRevisionID, fn.Enabled, autoscalingBytes, fn.CreatedBy, fn.CreatedAt, fn.UpdatedAt, fn.DeletedAt)
 	return err
 }
 
@@ -543,9 +830,17 @@ type rowScanner interface {
 
 func scanFunction(row rowScanner) (*Function, error) {
 	var fn Function
-	if err := row.Scan(&fn.ID, &fn.TeamID, &fn.Name, &fn.Slug, &fn.DomainLabel, &fn.ActiveRevisionID, &fn.Enabled, &fn.CreatedBy, &fn.CreatedAt, &fn.UpdatedAt, &fn.DeletedAt); err != nil {
+	var autoscalingBytes []byte
+	if err := row.Scan(&fn.ID, &fn.TeamID, &fn.Name, &fn.Slug, &fn.DomainLabel, &fn.ActiveRevisionID, &fn.Enabled, &autoscalingBytes, &fn.CreatedBy, &fn.CreatedAt, &fn.UpdatedAt, &fn.DeletedAt); err != nil {
 		return nil, err
 	}
+	fn.Autoscaling = DefaultAutoscaling()
+	if len(autoscalingBytes) > 0 {
+		if err := json.Unmarshal(autoscalingBytes, &fn.Autoscaling); err != nil {
+			return nil, err
+		}
+	}
+	fn.Autoscaling = NormalizeAutoscaling(fn.Autoscaling)
 	return &fn, nil
 }
 
@@ -555,6 +850,14 @@ func scanAlias(row rowScanner) (*Alias, error) {
 		return nil, err
 	}
 	return &alias, nil
+}
+
+func scanRuntimeInstance(row rowScanner) (*RuntimeInstance, error) {
+	var inst RuntimeInstance
+	if err := row.Scan(&inst.ID, &inst.TeamID, &inst.FunctionID, &inst.RevisionID, &inst.SandboxID, &inst.ContextID, &inst.State, &inst.LastError, &inst.ReadyAt, &inst.LastUsedAt, &inst.DrainingAt, &inst.FailedAt, &inst.CreatedAt, &inst.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &inst, nil
 }
 
 func scanRevision(row rowScanner) (*Revision, error) {

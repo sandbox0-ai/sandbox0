@@ -182,8 +182,9 @@ type functionSourceRequest struct {
 }
 
 type createFunctionRequest struct {
-	Name   string                `json:"name"`
-	Source functionSourceRequest `json:"source"`
+	Name        string                 `json:"name"`
+	Source      functionSourceRequest  `json:"source"`
+	Autoscaling *functions.Autoscaling `json:"autoscaling,omitempty"`
 }
 
 type createFunctionRevisionRequest struct {
@@ -192,8 +193,9 @@ type createFunctionRevisionRequest struct {
 }
 
 type updateFunctionRequest struct {
-	Name    *string `json:"name,omitempty"`
-	Enabled *bool   `json:"enabled,omitempty"`
+	Name        *string                `json:"name,omitempty"`
+	Enabled     *bool                  `json:"enabled,omitempty"`
+	Autoscaling *functions.Autoscaling `json:"autoscaling,omitempty"`
 }
 
 type setFunctionAliasRequest struct {
@@ -246,6 +248,9 @@ func (h *Handler) createFunction(c *gin.Context) {
 
 	userID := principalID(authCtx)
 	fn := functions.NewFunction(authCtx.TeamID, name, userID)
+	if req.Autoscaling != nil {
+		fn.Autoscaling = functions.NormalizeAutoscaling(*req.Autoscaling)
+	}
 	restoreMounts, err := h.prepareRestoreMounts(c.Request.Context(), authCtx, sandbox)
 	if err != nil {
 		h.writePublishError(c, err)
@@ -310,7 +315,7 @@ func (h *Handler) updateFunction(c *gin.Context) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("invalid request: %v", err))
 		return
 	}
-	fn, err := h.repo.UpdateFunction(c.Request.Context(), authCtx.TeamID, c.Param("id"), req.Name, req.Enabled)
+	fn, err := h.repo.UpdateFunction(c.Request.Context(), authCtx.TeamID, c.Param("id"), req.Name, req.Enabled, req.Autoscaling)
 	if err != nil {
 		if errors.Is(err, functions.ErrNotFound) {
 			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "function not found")
@@ -492,7 +497,12 @@ func (h *Handler) getFunctionRuntime(c *gin.Context) {
 	if !ok {
 		return
 	}
-	spec.JSONSuccess(c, http.StatusOK, gin.H{"runtime": runtimeStatus(fn, rev)})
+	instances, err := h.repo.ListRuntimeInstances(c.Request.Context(), fn.TeamID, fn.ID, rev.ID)
+	if err != nil {
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to list function runtime instances")
+		return
+	}
+	spec.JSONSuccess(c, http.StatusOK, gin.H{"runtime": runtimeStatus(fn, rev, instances)})
 }
 
 func (h *Handler) restartFunctionRuntime(c *gin.Context) {
@@ -509,7 +519,31 @@ func (h *Handler) clearFunctionRuntime(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if h.runtime != nil && rev.RuntimeSandboxID != nil && strings.TrimSpace(*rev.RuntimeSandboxID) != "" {
+	instances, err := h.repo.ListRuntimeInstances(c.Request.Context(), fn.TeamID, fn.ID, rev.ID)
+	if err != nil {
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to list function runtime instances")
+		return
+	}
+	deletedLegacy := false
+	for _, inst := range instances {
+		if inst == nil || strings.TrimSpace(inst.SandboxID) == "" || h.runtime == nil {
+			continue
+		}
+		if err := h.runtime.DeleteRuntimeSandbox(c.Request.Context(), authCtx, strings.TrimSpace(inst.SandboxID)); err != nil {
+			h.logger.Warn("Failed to delete function runtime sandbox",
+				zap.String("function_id", fn.ID),
+				zap.String("revision_id", rev.ID),
+				zap.String("runtime_sandbox_id", strings.TrimSpace(inst.SandboxID)),
+				zap.Error(err),
+			)
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "failed to recycle function runtime")
+			return
+		}
+		if rev.RuntimeSandboxID != nil && strings.TrimSpace(*rev.RuntimeSandboxID) == strings.TrimSpace(inst.SandboxID) {
+			deletedLegacy = true
+		}
+	}
+	if len(instances) == 0 && h.runtime != nil && rev.RuntimeSandboxID != nil && strings.TrimSpace(*rev.RuntimeSandboxID) != "" {
 		if err := h.runtime.DeleteRuntimeSandbox(c.Request.Context(), authCtx, strings.TrimSpace(*rev.RuntimeSandboxID)); err != nil {
 			h.logger.Warn("Failed to delete function runtime sandbox",
 				zap.String("function_id", fn.ID),
@@ -520,6 +554,14 @@ func (h *Handler) clearFunctionRuntime(c *gin.Context) {
 			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "failed to recycle function runtime")
 			return
 		}
+		deletedLegacy = true
+	}
+	if !deletedLegacy && rev.RuntimeSandboxID != nil && strings.TrimSpace(*rev.RuntimeSandboxID) != "" {
+		h.logger.Warn("Legacy function runtime mapping did not match runtime pool instances",
+			zap.String("function_id", fn.ID),
+			zap.String("revision_id", rev.ID),
+			zap.String("runtime_sandbox_id", strings.TrimSpace(*rev.RuntimeSandboxID)),
+		)
 	}
 	if err := h.repo.ClearRevisionRuntime(c.Request.Context(), fn.TeamID, fn.ID, rev.ID); err != nil && !errors.Is(err, functions.ErrNotFound) {
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to clear function runtime")
@@ -528,7 +570,7 @@ func (h *Handler) clearFunctionRuntime(c *gin.Context) {
 	rev.RuntimeSandboxID = nil
 	rev.RuntimeContextID = nil
 	rev.RuntimeUpdatedAt = nil
-	spec.JSONSuccess(c, http.StatusOK, gin.H{"runtime": runtimeStatus(fn, rev)})
+	spec.JSONSuccess(c, http.StatusOK, gin.H{"runtime": runtimeStatus(fn, rev, nil)})
 }
 
 func (h *Handler) loadPublishableService(ctx context.Context, authCtx *authn.AuthContext, source functionSourceRequest) (*mgr.Sandbox, mgr.SandboxAppService, error) {
@@ -637,10 +679,11 @@ func (h *Handler) loadActiveFunctionRevision(c *gin.Context) (*functions.Functio
 	return fn, rev, true
 }
 
-func runtimeStatus(fn *functions.Function, rev *functions.Revision) functions.RuntimeStatus {
+func runtimeStatus(fn *functions.Function, rev *functions.Revision, instances []*functions.RuntimeInstance) functions.RuntimeStatus {
 	status := functions.RuntimeStatus{}
 	if fn != nil {
 		status.FunctionID = fn.ID
+		status.Autoscaling = functions.NormalizeAutoscaling(fn.Autoscaling)
 	}
 	if rev != nil {
 		status.RevisionID = rev.ID
@@ -649,15 +692,34 @@ func runtimeStatus(fn *functions.Function, rev *functions.Revision) functions.Ru
 		status.RuntimeContextID = rev.RuntimeContextID
 		status.RuntimeUpdatedAt = rev.RuntimeUpdatedAt
 	}
+	if len(instances) > 0 {
+		status.Instances = make([]functions.RuntimeInstance, 0, len(instances))
+		for _, inst := range instances {
+			if inst != nil {
+				status.Instances = append(status.Instances, *inst)
+			}
+		}
+	}
 	switch {
 	case fn != nil && !fn.Enabled:
 		status.State = functions.RuntimeStateDisabled
+	case hasReadyFunctionRuntimeInstance(instances):
+		status.State = functions.RuntimeStateActive
 	case rev != nil && rev.RuntimeSandboxID != nil && strings.TrimSpace(*rev.RuntimeSandboxID) != "":
 		status.State = functions.RuntimeStateActive
 	default:
 		status.State = functions.RuntimeStateIdle
 	}
 	return status
+}
+
+func hasReadyFunctionRuntimeInstance(instances []*functions.RuntimeInstance) bool {
+	for _, inst := range instances {
+		if inst != nil && inst.State == functions.RuntimeInstanceStateReady {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Handler) cleanupDeletedFunctionResources(authCtx *authn.AuthContext, revisions []*functions.Revision) {
@@ -670,12 +732,43 @@ func (h *Handler) cleanupDeletedFunctionResources(authCtx *authn.AuthContext, re
 		if rev == nil {
 			continue
 		}
-		if h.runtime != nil && rev.RuntimeSandboxID != nil && strings.TrimSpace(*rev.RuntimeSandboxID) != "" {
-			if err := h.runtime.DeleteRuntimeSandbox(ctx, authCtx, strings.TrimSpace(*rev.RuntimeSandboxID)); err != nil {
+		runtimeSandboxIDs := map[string]struct{}{}
+		if h.repo != nil {
+			instances, err := h.repo.ListRuntimeInstances(ctx, rev.TeamID, rev.FunctionID, rev.ID)
+			if err != nil {
+				h.logger.Warn("Failed to list deleted function runtime instances",
+					zap.String("function_id", rev.FunctionID),
+					zap.String("revision_id", rev.ID),
+					zap.Error(err),
+				)
+			}
+			for _, inst := range instances {
+				if inst != nil && strings.TrimSpace(inst.SandboxID) != "" {
+					runtimeSandboxIDs[strings.TrimSpace(inst.SandboxID)] = struct{}{}
+				}
+			}
+		}
+		if rev.RuntimeSandboxID != nil && strings.TrimSpace(*rev.RuntimeSandboxID) != "" {
+			runtimeSandboxIDs[strings.TrimSpace(*rev.RuntimeSandboxID)] = struct{}{}
+		}
+		for sandboxID := range runtimeSandboxIDs {
+			if h.runtime == nil {
+				continue
+			}
+			if err := h.runtime.DeleteRuntimeSandbox(ctx, authCtx, sandboxID); err != nil {
 				h.logger.Warn("Failed to clean up deleted function runtime sandbox",
 					zap.String("function_id", rev.FunctionID),
 					zap.String("revision_id", rev.ID),
-					zap.String("runtime_sandbox_id", strings.TrimSpace(*rev.RuntimeSandboxID)),
+					zap.String("runtime_sandbox_id", sandboxID),
+					zap.Error(err),
+				)
+			}
+		}
+		if h.repo != nil {
+			if err := h.repo.ClearRevisionRuntime(ctx, rev.TeamID, rev.FunctionID, rev.ID); err != nil && !errors.Is(err, functions.ErrNotFound) {
+				h.logger.Warn("Failed to clear deleted function runtime mapping",
+					zap.String("function_id", rev.FunctionID),
+					zap.String("revision_id", rev.ID),
 					zap.Error(err),
 				)
 			}

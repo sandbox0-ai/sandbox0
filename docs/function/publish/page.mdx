@@ -200,6 +200,7 @@ Creating a function creates the stable function record, revision 1, and the `pro
     sandbox.ID,
     "api",
     sandbox0.WithFunctionName("my-api"),
+    sandbox0.WithFunctionAutoscaling(sandbox0.FunctionAutoscaling(1, 4, 20, 300)),
 )
 if err != nil {
     log.Fatal(err)
@@ -209,10 +210,18 @@ fmt.Printf("function URL: %s\\n", result.Function.URL)`
     {
       label: "Python",
       language: "python",
-      code: `result = client.functions.create_from_sandbox(
+      code: `from sandbox0 import FunctionAutoscaling
+
+result = client.functions.create_from_sandbox(
     sandbox.id,
     "api",
     name="my-api",
+    autoscaling=FunctionAutoscaling(
+        min_warm=1,
+        max_active=4,
+        target_concurrency=20,
+        scale_down_after_seconds=300,
+    ),
 )
 print(f"function URL: {result.function.url}")`
     },
@@ -222,14 +231,27 @@ print(f"function URL: {result.function.url}")`
       code: `const result = await client.functions.createFromSandbox(
     sandbox.id,
     'api',
-    { name: 'my-api' },
+    {
+        name: 'my-api',
+        autoscaling: {
+            minWarm: 1,
+            maxActive: 4,
+            targetConcurrency: 20,
+            scaleDownAfterSeconds: 300,
+        },
+    },
 );
 console.log('function URL:', result.function.url);`
     },
     {
       label: "CLI",
       language: "bash",
-      code: `s0 function create sb_abc123 api --name my-api`
+      code: `s0 function create sb_abc123 api \\
+    --name my-api \\
+    --min-warm 1 \\
+    --max-active 4 \\
+    --target-concurrency 20 \\
+    --scale-down-after-seconds 300`
     }
   ]}
 />

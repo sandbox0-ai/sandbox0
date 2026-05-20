@@ -1945,7 +1945,7 @@ paths:
     post:
       tags: [functions]
       summary: Restart active function runtime
-      description: Deletes the current restored runtime sandbox when one exists and clears the runtime mapping; the next function request starts a fresh runtime.
+      description: Deletes the current restored runtime pool when one exists and clears the runtime mapping; the next function request starts fresh runtime instances.
       security:
         - bearerAuth: []
       parameters:
@@ -1965,7 +1965,7 @@ paths:
     post:
       tags: [functions]
       summary: Recycle active function runtime
-      description: Deletes the current restored runtime sandbox when one exists and clears the runtime mapping; the next function request starts a fresh runtime.
+      description: Deletes the current restored runtime pool when one exists and clears the runtime mapping; the next function request starts fresh runtime instances.
       security:
         - bearerAuth: []
       parameters:
@@ -4124,6 +4124,8 @@ components:
           description: Function display name. Defaults to the source service name or ID when omitted.
         source:
           $ref: "#/components/schemas/FunctionSourceRequest"
+        autoscaling:
+          $ref: "#/components/schemas/FunctionAutoscaling"
       required: [source]
     FunctionRevisionCreateRequest:
       type: object
@@ -4144,6 +4146,8 @@ components:
         enabled:
           type: boolean
           description: Whether the function host should serve traffic. Disabled functions do not restore runtime sandboxes.
+        autoscaling:
+          $ref: "#/components/schemas/FunctionAutoscaling"
     FunctionAliasUpdateRequest:
       type: object
       properties:
@@ -4168,6 +4172,8 @@ components:
           type: string
         enabled:
           type: boolean
+        autoscaling:
+          $ref: "#/components/schemas/FunctionAutoscaling"
         created_by:
           type: string
         created_at:
@@ -4180,7 +4186,36 @@ components:
           type: string
           format: date-time
           description: Set when the function has been soft-deleted. Deleted functions are hidden from normal list/get APIs and do not serve traffic.
-      required: [id, team_id, name, slug, domain_label, enabled, created_at, updated_at]
+      required: [id, team_id, name, slug, domain_label, enabled, autoscaling, created_at, updated_at]
+    FunctionAutoscaling:
+      type: object
+      description: Function runtime pool autoscaling settings. target_concurrency is a soft routing and scale-out signal; it is not a strong distributed per-instance concurrency semaphore.
+      properties:
+        min_warm:
+          type: integer
+          format: int32
+          minimum: 0
+          default: 0
+          description: Minimum ready runtime sandboxes the autoscaler keeps after traffic has created capacity.
+        max_active:
+          type: integer
+          format: int32
+          minimum: 1
+          default: 20
+          description: Hard upper bound for active runtime sandboxes for the function.
+        target_concurrency:
+          type: integer
+          format: int32
+          minimum: 1
+          default: 80
+          description: Soft per-runtime in-flight request target used for routing and scale-out.
+        scale_down_after_seconds:
+          type: integer
+          format: int32
+          minimum: 30
+          default: 300
+          description: Idle time before the autoscaler removes extra runtime sandboxes above min_warm.
+      required: [min_warm, max_active, target_concurrency, scale_down_after_seconds]
     FunctionRecord:
       allOf:
         - $ref: "#/components/schemas/Function"
@@ -4268,6 +4303,47 @@ components:
     FunctionRuntimeState:
       type: string
       enum: [disabled, idle, active]
+    FunctionRuntimeInstanceState:
+      type: string
+      enum: [starting, ready, draining, failed]
+    FunctionRuntimeInstance:
+      type: object
+      properties:
+        id:
+          type: string
+        team_id:
+          type: string
+        function_id:
+          type: string
+        revision_id:
+          type: string
+        sandbox_id:
+          type: string
+        context_id:
+          type: string
+        state:
+          $ref: "#/components/schemas/FunctionRuntimeInstanceState"
+        last_error:
+          type: string
+        ready_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+        draining_at:
+          type: string
+          format: date-time
+        failed_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required: [id, team_id, function_id, revision_id, sandbox_id, state, created_at, updated_at]
     FunctionRuntimeStatus:
       type: object
       properties:
@@ -4280,17 +4356,23 @@ components:
           format: int32
         state:
           $ref: "#/components/schemas/FunctionRuntimeState"
+        autoscaling:
+          $ref: "#/components/schemas/FunctionAutoscaling"
         runtime_sandbox_id:
           type: string
-          description: Current restored runtime sandbox, if one exists.
+          description: Compatibility summary for one current restored runtime sandbox, if one exists. Use instances for the full runtime pool.
         runtime_context_id:
           type: string
-          description: Current runtime process context, if one exists.
+          description: Compatibility summary for one current runtime process context, if one exists. Use instances for the full runtime pool.
         runtime_updated_at:
           type: string
           format: date-time
           description: Last time the runtime mapping was updated.
-      required: [function_id, revision_id, revision_number, state]
+        instances:
+          type: array
+          items:
+            $ref: "#/components/schemas/FunctionRuntimeInstance"
+      required: [function_id, revision_id, revision_number, state, autoscaling]
     SuccessFunctionResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"

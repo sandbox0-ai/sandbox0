@@ -96,6 +96,14 @@ const (
 	Symlink FileInfoType = "symlink"
 )
 
+// Defines values for FunctionRuntimeInstanceState.
+const (
+	FunctionRuntimeInstanceStateDraining FunctionRuntimeInstanceState = "draining"
+	FunctionRuntimeInstanceStateFailed   FunctionRuntimeInstanceState = "failed"
+	FunctionRuntimeInstanceStateReady    FunctionRuntimeInstanceState = "ready"
+	FunctionRuntimeInstanceStateStarting FunctionRuntimeInstanceState = "starting"
+)
+
 // Defines values for FunctionRuntimeState.
 const (
 	FunctionRuntimeStateActive   FunctionRuntimeState = "active"
@@ -525,11 +533,11 @@ const (
 
 // Defines values for GetApiV1SandboxesParamsStatus.
 const (
-	GetApiV1SandboxesParamsStatusCompleted   GetApiV1SandboxesParamsStatus = "completed"
-	GetApiV1SandboxesParamsStatusFailed      GetApiV1SandboxesParamsStatus = "failed"
-	GetApiV1SandboxesParamsStatusRunning     GetApiV1SandboxesParamsStatus = "running"
-	GetApiV1SandboxesParamsStatusStarting    GetApiV1SandboxesParamsStatus = "starting"
-	GetApiV1SandboxesParamsStatusTerminating GetApiV1SandboxesParamsStatus = "terminating"
+	Completed   GetApiV1SandboxesParamsStatus = "completed"
+	Failed      GetApiV1SandboxesParamsStatus = "failed"
+	Running     GetApiV1SandboxesParamsStatus = "running"
+	Starting    GetApiV1SandboxesParamsStatus = "starting"
+	Terminating GetApiV1SandboxesParamsStatus = "terminating"
 )
 
 // APIKey defines model for APIKey.
@@ -972,9 +980,12 @@ type ForkVolumeRequest struct {
 
 // Function defines model for Function.
 type Function struct {
-	ActiveRevisionId *string   `json:"active_revision_id,omitempty"`
-	CreatedAt        time.Time `json:"created_at"`
-	CreatedBy        *string   `json:"created_by,omitempty"`
+	ActiveRevisionId *string `json:"active_revision_id,omitempty"`
+
+	// Autoscaling Function runtime pool autoscaling settings. target_concurrency is a soft routing and scale-out signal; it is not a strong distributed per-instance concurrency semaphore.
+	Autoscaling FunctionAutoscaling `json:"autoscaling"`
+	CreatedAt   time.Time           `json:"created_at"`
+	CreatedBy   *string             `json:"created_by,omitempty"`
 
 	// DeletedAt Set when the function has been soft-deleted. Deleted functions are hidden from normal list/get APIs and do not serve traffic.
 	DeletedAt   *time.Time `json:"deleted_at,omitempty"`
@@ -1002,8 +1013,26 @@ type FunctionAliasUpdateRequest struct {
 	RevisionNumber int32 `json:"revision_number"`
 }
 
+// FunctionAutoscaling Function runtime pool autoscaling settings. target_concurrency is a soft routing and scale-out signal; it is not a strong distributed per-instance concurrency semaphore.
+type FunctionAutoscaling struct {
+	// MaxActive Hard upper bound for active runtime sandboxes for the function.
+	MaxActive int32 `json:"max_active"`
+
+	// MinWarm Minimum ready runtime sandboxes the autoscaler keeps after traffic has created capacity.
+	MinWarm int32 `json:"min_warm"`
+
+	// ScaleDownAfterSeconds Idle time before the autoscaler removes extra runtime sandboxes above min_warm.
+	ScaleDownAfterSeconds int32 `json:"scale_down_after_seconds"`
+
+	// TargetConcurrency Soft per-runtime in-flight request target used for routing and scale-out.
+	TargetConcurrency int32 `json:"target_concurrency"`
+}
+
 // FunctionCreateRequest defines model for FunctionCreateRequest.
 type FunctionCreateRequest struct {
+	// Autoscaling Function runtime pool autoscaling settings. target_concurrency is a soft routing and scale-out signal; it is not a strong distributed per-instance concurrency semaphore.
+	Autoscaling *FunctionAutoscaling `json:"autoscaling,omitempty"`
+
 	// Name Function display name. Defaults to the source service name or ID when omitted.
 	Name   *string               `json:"name,omitempty"`
 	Source FunctionSourceRequest `json:"source"`
@@ -1011,9 +1040,12 @@ type FunctionCreateRequest struct {
 
 // FunctionRecord defines model for FunctionRecord.
 type FunctionRecord struct {
-	ActiveRevisionId *string   `json:"active_revision_id,omitempty"`
-	CreatedAt        time.Time `json:"created_at"`
-	CreatedBy        *string   `json:"created_by,omitempty"`
+	ActiveRevisionId *string `json:"active_revision_id,omitempty"`
+
+	// Autoscaling Function runtime pool autoscaling settings. target_concurrency is a soft routing and scale-out signal; it is not a strong distributed per-instance concurrency semaphore.
+	Autoscaling FunctionAutoscaling `json:"autoscaling"`
+	CreatedAt   time.Time           `json:"created_at"`
+	CreatedBy   *string             `json:"created_by,omitempty"`
 
 	// DeletedAt Set when the function has been soft-deleted. Deleted functions are hidden from normal list/get APIs and do not serve traffic.
 	DeletedAt   *time.Time `json:"deleted_at,omitempty"`
@@ -1077,19 +1109,43 @@ type FunctionRevisionCreateRequest struct {
 	Source  FunctionSourceRequest `json:"source"`
 }
 
+// FunctionRuntimeInstance defines model for FunctionRuntimeInstance.
+type FunctionRuntimeInstance struct {
+	ContextId  *string                      `json:"context_id,omitempty"`
+	CreatedAt  time.Time                    `json:"created_at"`
+	DrainingAt *time.Time                   `json:"draining_at,omitempty"`
+	FailedAt   *time.Time                   `json:"failed_at,omitempty"`
+	FunctionId string                       `json:"function_id"`
+	Id         string                       `json:"id"`
+	LastError  *string                      `json:"last_error,omitempty"`
+	LastUsedAt *time.Time                   `json:"last_used_at,omitempty"`
+	ReadyAt    *time.Time                   `json:"ready_at,omitempty"`
+	RevisionId string                       `json:"revision_id"`
+	SandboxId  string                       `json:"sandbox_id"`
+	State      FunctionRuntimeInstanceState `json:"state"`
+	TeamId     string                       `json:"team_id"`
+	UpdatedAt  time.Time                    `json:"updated_at"`
+}
+
+// FunctionRuntimeInstanceState defines model for FunctionRuntimeInstanceState.
+type FunctionRuntimeInstanceState string
+
 // FunctionRuntimeState defines model for FunctionRuntimeState.
 type FunctionRuntimeState string
 
 // FunctionRuntimeStatus defines model for FunctionRuntimeStatus.
 type FunctionRuntimeStatus struct {
-	FunctionId     string `json:"function_id"`
-	RevisionId     string `json:"revision_id"`
-	RevisionNumber int32  `json:"revision_number"`
+	// Autoscaling Function runtime pool autoscaling settings. target_concurrency is a soft routing and scale-out signal; it is not a strong distributed per-instance concurrency semaphore.
+	Autoscaling    FunctionAutoscaling        `json:"autoscaling"`
+	FunctionId     string                     `json:"function_id"`
+	Instances      *[]FunctionRuntimeInstance `json:"instances,omitempty"`
+	RevisionId     string                     `json:"revision_id"`
+	RevisionNumber int32                      `json:"revision_number"`
 
-	// RuntimeContextId Current runtime process context, if one exists.
+	// RuntimeContextId Compatibility summary for one current runtime process context, if one exists. Use instances for the full runtime pool.
 	RuntimeContextId *string `json:"runtime_context_id,omitempty"`
 
-	// RuntimeSandboxId Current restored runtime sandbox, if one exists.
+	// RuntimeSandboxId Compatibility summary for one current restored runtime sandbox, if one exists. Use instances for the full runtime pool.
 	RuntimeSandboxId *string `json:"runtime_sandbox_id,omitempty"`
 
 	// RuntimeUpdatedAt Last time the runtime mapping was updated.
@@ -1105,6 +1161,9 @@ type FunctionSourceRequest struct {
 
 // FunctionUpdateRequest defines model for FunctionUpdateRequest.
 type FunctionUpdateRequest struct {
+	// Autoscaling Function runtime pool autoscaling settings. target_concurrency is a soft routing and scale-out signal; it is not a strong distributed per-instance concurrency semaphore.
+	Autoscaling *FunctionAutoscaling `json:"autoscaling,omitempty"`
+
 	// Enabled Whether the function host should serve traffic. Disabled functions do not restore runtime sandboxes.
 	Enabled *bool `json:"enabled,omitempty"`
 

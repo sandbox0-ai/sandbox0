@@ -492,14 +492,6 @@ func errorsIsFunctionNotFound(err error) bool {
 	return errors.Is(err, functions.ErrNotFound)
 }
 
-func isPublishNotFound(err error) bool {
-	var publishErr publishError
-	if errors.As(err, &publishErr) {
-		return publishErr.status == nethttp.StatusNotFound
-	}
-	return false
-}
-
 func (s *Server) claimFunctionSandboxViaClusterGateway(ctx context.Context, fn *functions.Function, rev *functions.Revision, service mgr.SandboxAppService) (*mgr.ClaimResponse, error) {
 	clusterGatewayURL := s.defaultClusterGatewayURL()
 	targetService := internalauth.ServiceClusterGateway

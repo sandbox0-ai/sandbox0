@@ -104,6 +104,25 @@ const (
 	FunctionRuntimeInstanceStateStarting FunctionRuntimeInstanceState = "starting"
 )
 
+// Defines values for FunctionRuntimePhase.
+const (
+	FunctionRuntimePhaseDisabled     FunctionRuntimePhase = "disabled"
+	FunctionRuntimePhaseDraining     FunctionRuntimePhase = "draining"
+	FunctionRuntimePhaseFailed       FunctionRuntimePhase = "failed"
+	FunctionRuntimePhaseIdle         FunctionRuntimePhase = "idle"
+	FunctionRuntimePhaseProvisioning FunctionRuntimePhase = "provisioning"
+	FunctionRuntimePhaseReady        FunctionRuntimePhase = "ready"
+	FunctionRuntimePhaseStarting     FunctionRuntimePhase = "starting"
+)
+
+// Defines values for FunctionRuntimeReadinessState.
+const (
+	FunctionRuntimeReadinessStateChecking FunctionRuntimeReadinessState = "checking"
+	FunctionRuntimeReadinessStateFailed   FunctionRuntimeReadinessState = "failed"
+	FunctionRuntimeReadinessStateReady    FunctionRuntimeReadinessState = "ready"
+	FunctionRuntimeReadinessStateUnknown  FunctionRuntimeReadinessState = "unknown"
+)
+
 // Defines values for FunctionRuntimeState.
 const (
 	FunctionRuntimeStateActive   FunctionRuntimeState = "active"
@@ -533,11 +552,11 @@ const (
 
 // Defines values for GetApiV1SandboxesParamsStatus.
 const (
-	Completed   GetApiV1SandboxesParamsStatus = "completed"
-	Failed      GetApiV1SandboxesParamsStatus = "failed"
-	Running     GetApiV1SandboxesParamsStatus = "running"
-	Starting    GetApiV1SandboxesParamsStatus = "starting"
-	Terminating GetApiV1SandboxesParamsStatus = "terminating"
+	GetApiV1SandboxesParamsStatusCompleted   GetApiV1SandboxesParamsStatus = "completed"
+	GetApiV1SandboxesParamsStatusFailed      GetApiV1SandboxesParamsStatus = "failed"
+	GetApiV1SandboxesParamsStatusRunning     GetApiV1SandboxesParamsStatus = "running"
+	GetApiV1SandboxesParamsStatusStarting    GetApiV1SandboxesParamsStatus = "starting"
+	GetApiV1SandboxesParamsStatusTerminating GetApiV1SandboxesParamsStatus = "terminating"
 )
 
 // APIKey defines model for APIKey.
@@ -1109,26 +1128,52 @@ type FunctionRevisionCreateRequest struct {
 	Source  FunctionSourceRequest `json:"source"`
 }
 
+// FunctionRuntimeEvent defines model for FunctionRuntimeEvent.
+type FunctionRuntimeEvent struct {
+	CreatedAt         time.Time                     `json:"created_at"`
+	FunctionId        string                        `json:"function_id"`
+	Id                string                        `json:"id"`
+	Message           *string                       `json:"message,omitempty"`
+	Phase             FunctionRuntimePhase          `json:"phase"`
+	ReadinessState    FunctionRuntimeReadinessState `json:"readiness_state"`
+	Reason            *string                       `json:"reason,omitempty"`
+	RevisionId        string                        `json:"revision_id"`
+	RuntimeContextId  *string                       `json:"runtime_context_id,omitempty"`
+	RuntimeInstanceId *string                       `json:"runtime_instance_id,omitempty"`
+	RuntimeSandboxId  *string                       `json:"runtime_sandbox_id,omitempty"`
+	StartupDurationMs *int32                        `json:"startup_duration_ms,omitempty"`
+	TeamId            string                        `json:"team_id"`
+}
+
 // FunctionRuntimeInstance defines model for FunctionRuntimeInstance.
 type FunctionRuntimeInstance struct {
-	ContextId  *string                      `json:"context_id,omitempty"`
-	CreatedAt  time.Time                    `json:"created_at"`
-	DrainingAt *time.Time                   `json:"draining_at,omitempty"`
-	FailedAt   *time.Time                   `json:"failed_at,omitempty"`
-	FunctionId string                       `json:"function_id"`
-	Id         string                       `json:"id"`
-	LastError  *string                      `json:"last_error,omitempty"`
-	LastUsedAt *time.Time                   `json:"last_used_at,omitempty"`
-	ReadyAt    *time.Time                   `json:"ready_at,omitempty"`
-	RevisionId string                       `json:"revision_id"`
-	SandboxId  string                       `json:"sandbox_id"`
-	State      FunctionRuntimeInstanceState `json:"state"`
-	TeamId     string                       `json:"team_id"`
-	UpdatedAt  time.Time                    `json:"updated_at"`
+	ContextId         *string                       `json:"context_id,omitempty"`
+	CreatedAt         time.Time                     `json:"created_at"`
+	DrainingAt        *time.Time                    `json:"draining_at,omitempty"`
+	FailedAt          *time.Time                    `json:"failed_at,omitempty"`
+	FunctionId        string                        `json:"function_id"`
+	Id                string                        `json:"id"`
+	LastError         *string                       `json:"last_error,omitempty"`
+	LastErrorAt       *time.Time                    `json:"last_error_at,omitempty"`
+	LastUsedAt        *time.Time                    `json:"last_used_at,omitempty"`
+	ReadinessState    FunctionRuntimeReadinessState `json:"readiness_state"`
+	ReadyAt           *time.Time                    `json:"ready_at,omitempty"`
+	RevisionId        string                        `json:"revision_id"`
+	SandboxId         string                        `json:"sandbox_id"`
+	StartupDurationMs *int32                        `json:"startup_duration_ms,omitempty"`
+	State             FunctionRuntimeInstanceState  `json:"state"`
+	TeamId            string                        `json:"team_id"`
+	UpdatedAt         time.Time                     `json:"updated_at"`
 }
 
 // FunctionRuntimeInstanceState defines model for FunctionRuntimeInstanceState.
 type FunctionRuntimeInstanceState string
+
+// FunctionRuntimePhase defines model for FunctionRuntimePhase.
+type FunctionRuntimePhase string
+
+// FunctionRuntimeReadinessState defines model for FunctionRuntimeReadinessState.
+type FunctionRuntimeReadinessState string
 
 // FunctionRuntimeState defines model for FunctionRuntimeState.
 type FunctionRuntimeState string
@@ -1136,11 +1181,16 @@ type FunctionRuntimeState string
 // FunctionRuntimeStatus defines model for FunctionRuntimeStatus.
 type FunctionRuntimeStatus struct {
 	// Autoscaling Function runtime pool autoscaling settings. target_concurrency is a soft routing and scale-out signal; it is not a strong distributed per-instance concurrency semaphore.
-	Autoscaling    FunctionAutoscaling        `json:"autoscaling"`
-	FunctionId     string                     `json:"function_id"`
-	Instances      *[]FunctionRuntimeInstance `json:"instances,omitempty"`
-	RevisionId     string                     `json:"revision_id"`
-	RevisionNumber int32                      `json:"revision_number"`
+	Autoscaling    FunctionAutoscaling           `json:"autoscaling"`
+	FunctionId     string                        `json:"function_id"`
+	Instances      *[]FunctionRuntimeInstance    `json:"instances,omitempty"`
+	LastError      *string                       `json:"last_error,omitempty"`
+	LastErrorAt    *time.Time                    `json:"last_error_at,omitempty"`
+	Phase          FunctionRuntimePhase          `json:"phase"`
+	ReadinessState FunctionRuntimeReadinessState `json:"readiness_state"`
+	RecentEvents   *[]FunctionRuntimeEvent       `json:"recent_events,omitempty"`
+	RevisionId     string                        `json:"revision_id"`
+	RevisionNumber int32                         `json:"revision_number"`
 
 	// RuntimeContextId Compatibility summary for one current runtime process context, if one exists. Use instances for the full runtime pool.
 	RuntimeContextId *string `json:"runtime_context_id,omitempty"`
@@ -1149,8 +1199,9 @@ type FunctionRuntimeStatus struct {
 	RuntimeSandboxId *string `json:"runtime_sandbox_id,omitempty"`
 
 	// RuntimeUpdatedAt Last time the runtime mapping was updated.
-	RuntimeUpdatedAt *time.Time           `json:"runtime_updated_at,omitempty"`
-	State            FunctionRuntimeState `json:"state"`
+	RuntimeUpdatedAt  *time.Time           `json:"runtime_updated_at,omitempty"`
+	StartupDurationMs *int32               `json:"startup_duration_ms,omitempty"`
+	State             FunctionRuntimeState `json:"state"`
 }
 
 // FunctionSourceRequest defines model for FunctionSourceRequest.

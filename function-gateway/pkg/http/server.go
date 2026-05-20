@@ -23,6 +23,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/pglock"
 	"go.uber.org/zap"
 )
@@ -42,6 +43,7 @@ type Server struct {
 	requestLogger       *middleware.RequestLogger
 	internalAuthGen     *internalauth.Generator
 	obsProvider         *observability.Provider
+	functionMetrics     *obsmetrics.FunctionGatewayMetrics
 	httpClient          *http.Client
 	routeLimiter        ratelimit.Limiter
 	runtimeLocks        sync.Map
@@ -114,6 +116,7 @@ func NewServer(
 		requestLogger:       middleware.NewRequestLogger(logger),
 		internalAuthGen:     internalAuthGen,
 		obsProvider:         obsProvider,
+		functionMetrics:     obsmetrics.NewFunctionGateway(obsProvider.MetricsRegistryOrNil()),
 		httpClient:          httpClient,
 		routeLimiter:        routeLimiter,
 		runtimeRestoreLocks: pglock.New(pool),

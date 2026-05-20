@@ -126,6 +126,18 @@ const (
 	RuntimeStateActive   RuntimeState = "active"
 )
 
+type RuntimePhase string
+
+const (
+	RuntimePhaseDisabled     RuntimePhase = "disabled"
+	RuntimePhaseIdle         RuntimePhase = "idle"
+	RuntimePhaseProvisioning RuntimePhase = "provisioning"
+	RuntimePhaseStarting     RuntimePhase = "starting"
+	RuntimePhaseReady        RuntimePhase = "ready"
+	RuntimePhaseDraining     RuntimePhase = "draining"
+	RuntimePhaseFailed       RuntimePhase = "failed"
+)
+
 type RuntimeInstanceState string
 
 const (
@@ -135,31 +147,65 @@ const (
 	RuntimeInstanceStateFailed   RuntimeInstanceState = "failed"
 )
 
+type RuntimeReadinessState string
+
+const (
+	RuntimeReadinessStateUnknown  RuntimeReadinessState = "unknown"
+	RuntimeReadinessStateChecking RuntimeReadinessState = "checking"
+	RuntimeReadinessStateReady    RuntimeReadinessState = "ready"
+	RuntimeReadinessStateFailed   RuntimeReadinessState = "failed"
+)
+
 type RuntimeInstance struct {
-	ID         string               `json:"id"`
-	TeamID     string               `json:"team_id"`
-	FunctionID string               `json:"function_id"`
-	RevisionID string               `json:"revision_id"`
-	SandboxID  string               `json:"sandbox_id"`
-	ContextID  *string              `json:"context_id,omitempty"`
-	State      RuntimeInstanceState `json:"state"`
-	LastError  *string              `json:"last_error,omitempty"`
-	ReadyAt    *time.Time           `json:"ready_at,omitempty"`
-	LastUsedAt *time.Time           `json:"last_used_at,omitempty"`
-	DrainingAt *time.Time           `json:"draining_at,omitempty"`
-	FailedAt   *time.Time           `json:"failed_at,omitempty"`
-	CreatedAt  time.Time            `json:"created_at"`
-	UpdatedAt  time.Time            `json:"updated_at"`
+	ID                string                `json:"id"`
+	TeamID            string                `json:"team_id"`
+	FunctionID        string                `json:"function_id"`
+	RevisionID        string                `json:"revision_id"`
+	SandboxID         string                `json:"sandbox_id"`
+	ContextID         *string               `json:"context_id,omitempty"`
+	State             RuntimeInstanceState  `json:"state"`
+	ReadinessState    RuntimeReadinessState `json:"readiness_state"`
+	StartupDurationMS *int                  `json:"startup_duration_ms,omitempty"`
+	LastError         *string               `json:"last_error,omitempty"`
+	LastErrorAt       *time.Time            `json:"last_error_at,omitempty"`
+	ReadyAt           *time.Time            `json:"ready_at,omitempty"`
+	LastUsedAt        *time.Time            `json:"last_used_at,omitempty"`
+	DrainingAt        *time.Time            `json:"draining_at,omitempty"`
+	FailedAt          *time.Time            `json:"failed_at,omitempty"`
+	CreatedAt         time.Time             `json:"created_at"`
+	UpdatedAt         time.Time             `json:"updated_at"`
+}
+
+type RuntimeEvent struct {
+	ID                string                `json:"id"`
+	TeamID            string                `json:"team_id"`
+	FunctionID        string                `json:"function_id"`
+	RevisionID        string                `json:"revision_id"`
+	RuntimeInstanceID *string               `json:"runtime_instance_id,omitempty"`
+	RuntimeSandboxID  *string               `json:"runtime_sandbox_id,omitempty"`
+	RuntimeContextID  *string               `json:"runtime_context_id,omitempty"`
+	Phase             RuntimePhase          `json:"phase"`
+	ReadinessState    RuntimeReadinessState `json:"readiness_state"`
+	Reason            string                `json:"reason,omitempty"`
+	Message           string                `json:"message,omitempty"`
+	StartupDurationMS *int                  `json:"startup_duration_ms,omitempty"`
+	CreatedAt         time.Time             `json:"created_at"`
 }
 
 type RuntimeStatus struct {
-	FunctionID       string            `json:"function_id"`
-	RevisionID       string            `json:"revision_id"`
-	RevisionNumber   int               `json:"revision_number"`
-	State            RuntimeState      `json:"state"`
-	Autoscaling      Autoscaling       `json:"autoscaling"`
-	RuntimeSandboxID *string           `json:"runtime_sandbox_id,omitempty"`
-	RuntimeContextID *string           `json:"runtime_context_id,omitempty"`
-	RuntimeUpdatedAt *time.Time        `json:"runtime_updated_at,omitempty"`
-	Instances        []RuntimeInstance `json:"instances,omitempty"`
+	FunctionID        string                `json:"function_id"`
+	RevisionID        string                `json:"revision_id"`
+	RevisionNumber    int                   `json:"revision_number"`
+	State             RuntimeState          `json:"state"`
+	Phase             RuntimePhase          `json:"phase"`
+	Autoscaling       Autoscaling           `json:"autoscaling"`
+	ReadinessState    RuntimeReadinessState `json:"readiness_state"`
+	RuntimeSandboxID  *string               `json:"runtime_sandbox_id,omitempty"`
+	RuntimeContextID  *string               `json:"runtime_context_id,omitempty"`
+	RuntimeUpdatedAt  *time.Time            `json:"runtime_updated_at,omitempty"`
+	StartupDurationMS *int                  `json:"startup_duration_ms,omitempty"`
+	LastError         *string               `json:"last_error,omitempty"`
+	LastErrorAt       *time.Time            `json:"last_error_at,omitempty"`
+	Instances         []RuntimeInstance     `json:"instances,omitempty"`
+	RecentEvents      []RuntimeEvent        `json:"recent_events,omitempty"`
 }

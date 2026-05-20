@@ -10,13 +10,45 @@ After Function Gateway starts a restored runtime context, it waits up to 30 seco
 
 When readiness does not pass before the timeout, the request returns `503` and the gateway records a startup error that includes the health check URL plus the last HTTP status or request error.
 
+## Observability
+
+Function Gateway emits Sandbox0 standard observability signals: Prometheus
+metrics, OpenTelemetry spans, and structured JSON logs. Function request metrics
+include `team_id`, `function_id`, `revision_id`, `route_id`, method, status,
+latency, and response size. Runtime metrics cover warm reuse, cold restore,
+startup latency, startup failures, lifecycle phase transitions, and scale-down
+results.
+
+Gateway request logs and runtime lifecycle logs include function, revision,
+route, runtime instance, runtime sandbox, and trace identifiers. Use runtime
+status for the current lifecycle view, Function Gateway logs for serving-path
+events, and sandbox/process logs for application output from the runtime
+sandbox.
+
 ## Runtime States
+
+`state` remains a compatibility summary for existing clients. Use `phase` and
+`readiness_state` for debugging startup and restore behavior.
 
 | State | Meaning |
 |-------|---------|
 | `idle` | No ready runtime sandbox is currently recorded for the active revision |
 | `active` | At least one ready runtime sandbox is recorded for the active revision |
 | `disabled` | The function is disabled and does not serve host traffic |
+
+| Phase | Meaning |
+|-------|---------|
+| `idle` | No active restore or ready runtime is recorded |
+| `provisioning` | Function Gateway is claiming a restored runtime sandbox |
+| `starting` | The runtime sandbox exists and the service process/readiness check is starting |
+| `ready` | At least one runtime instance is ready for traffic |
+| `draining` | Runtime instances are being removed and should not receive new traffic |
+| `failed` | The latest runtime startup attempt failed; inspect `last_error` and `recent_events` |
+| `disabled` | The function is disabled |
+
+Runtime status includes `last_error`, `last_error_at`, `startup_duration_ms`,
+per-instance readiness fields, and recent lifecycle events so startup failures
+can be diagnosed without searching gateway logs.
 
 `restart` and `recycle` both delete the current restored runtime pool when one exists and clear the runtime mapping. The next function request starts fresh runtime instances from the active revision.
 

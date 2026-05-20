@@ -339,7 +339,8 @@ func (r *Repository) ListRuntimeInstances(ctx context.Context, teamID, functionI
 		return nil, fmt.Errorf("function repository is not configured")
 	}
 	rows, err := r.pool.Query(ctx, `
-		SELECT id, team_id, function_id, revision_id, sandbox_id, context_id, state, last_error,
+		SELECT id, team_id, function_id, revision_id, sandbox_id, context_id, state,
+			readiness_state, startup_duration_ms, last_error, last_error_at,
 			ready_at, last_used_at, draining_at, failed_at, created_at, updated_at
 		FROM function_runtime_instances
 		WHERE team_id = $1 AND function_id = $2 AND revision_id = $3
@@ -367,6 +368,65 @@ func (r *Repository) ListRuntimeInstances(ctx context.Context, teamID, functionI
 	return out, rows.Err()
 }
 
+func (r *Repository) ListRuntimeEvents(ctx context.Context, teamID, functionID, revisionID string, limit int) ([]*RuntimeEvent, error) {
+	if r == nil || r.pool == nil {
+		return nil, fmt.Errorf("function repository is not configured")
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, team_id, function_id, revision_id, runtime_instance_id, runtime_sandbox_id,
+			runtime_context_id, phase, readiness_state, reason, message, startup_duration_ms, created_at
+		FROM function_runtime_events
+		WHERE team_id = $1 AND function_id = $2 AND revision_id = $3
+		ORDER BY created_at DESC
+		LIMIT $4
+	`, teamID, functionID, revisionID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]*RuntimeEvent, 0, limit)
+	for rows.Next() {
+		event, err := scanRuntimeEvent(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, event)
+	}
+	return out, rows.Err()
+}
+
+func (r *Repository) AppendRuntimeEvent(ctx context.Context, event *RuntimeEvent) (*RuntimeEvent, error) {
+	if r == nil || r.pool == nil {
+		return nil, fmt.Errorf("function repository is not configured")
+	}
+	if event == nil {
+		return nil, fmt.Errorf("runtime event is nil")
+	}
+	if event.ID == "" {
+		event.ID = uuid.NewString()
+	}
+	event.Reason = strings.TrimSpace(event.Reason)
+	event.Message = strings.TrimSpace(event.Message)
+	event.ReadinessState = normalizeRuntimeReadinessState(event.ReadinessState, RuntimeInstanceState(event.Phase))
+	row := r.pool.QueryRow(ctx, `
+		INSERT INTO function_runtime_events (
+			id, team_id, function_id, revision_id, runtime_instance_id, runtime_sandbox_id,
+			runtime_context_id, phase, readiness_state, reason, message, startup_duration_ms
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+		RETURNING id, team_id, function_id, revision_id, runtime_instance_id, runtime_sandbox_id,
+			runtime_context_id, phase, readiness_state, reason, message, startup_duration_ms, created_at
+	`, event.ID, event.TeamID, event.FunctionID, event.RevisionID, event.RuntimeInstanceID, event.RuntimeSandboxID,
+		event.RuntimeContextID, event.Phase, event.ReadinessState, event.Reason, event.Message, event.StartupDurationMS)
+	out, err := scanRuntimeEvent(row)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (r *Repository) CreateRuntimeInstance(ctx context.Context, inst *RuntimeInstance) (*RuntimeInstance, error) {
 	if r == nil || r.pool == nil {
 		return nil, fmt.Errorf("function repository is not configured")
@@ -383,11 +443,13 @@ func (r *Repository) CreateRuntimeInstance(ctx context.Context, inst *RuntimeIns
 	row := r.pool.QueryRow(ctx, `
 		INSERT INTO function_runtime_instances (
 			id, team_id, function_id, revision_id, sandbox_id, context_id, state, last_error,
-			ready_at, last_used_at, draining_at, failed_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-		RETURNING id, team_id, function_id, revision_id, sandbox_id, context_id, state, last_error,
+			readiness_state, startup_duration_ms, last_error_at, ready_at, last_used_at, draining_at, failed_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+		RETURNING id, team_id, function_id, revision_id, sandbox_id, context_id, state,
+			readiness_state, startup_duration_ms, last_error, last_error_at,
 			ready_at, last_used_at, draining_at, failed_at, created_at, updated_at
 	`, inst.ID, inst.TeamID, inst.FunctionID, inst.RevisionID, inst.SandboxID, inst.ContextID, inst.State, inst.LastError,
+		normalizeRuntimeReadinessState(inst.ReadinessState, inst.State), inst.StartupDurationMS, inst.LastErrorAt,
 		inst.ReadyAt, inst.LastUsedAt, inst.DrainingAt, inst.FailedAt)
 	created, err := scanRuntimeInstance(row)
 	if err != nil {
@@ -396,7 +458,7 @@ func (r *Repository) CreateRuntimeInstance(ctx context.Context, inst *RuntimeIns
 	return created, nil
 }
 
-func (r *Repository) MarkRuntimeInstanceReady(ctx context.Context, teamID, functionID, revisionID, instanceID, sandboxID, contextID string) (*RuntimeInstance, error) {
+func (r *Repository) MarkRuntimeInstanceReady(ctx context.Context, teamID, functionID, revisionID, instanceID, sandboxID, contextID string, startupDurationMS *int) (*RuntimeInstance, error) {
 	if r == nil || r.pool == nil {
 		return nil, fmt.Errorf("function repository is not configured")
 	}
@@ -408,11 +470,13 @@ func (r *Repository) MarkRuntimeInstanceReady(ctx context.Context, teamID, funct
 	row := tx.QueryRow(ctx, `
 		UPDATE function_runtime_instances
 		SET sandbox_id = $5, context_id = $6, state = 'ready', last_error = NULL,
+			last_error_at = NULL, readiness_state = 'ready', startup_duration_ms = COALESCE($7, startup_duration_ms),
 			ready_at = COALESCE(ready_at, NOW()), last_used_at = NOW(), draining_at = NULL, failed_at = NULL
 		WHERE team_id = $1 AND function_id = $2 AND revision_id = $3 AND id = $4
-		RETURNING id, team_id, function_id, revision_id, sandbox_id, context_id, state, last_error,
+		RETURNING id, team_id, function_id, revision_id, sandbox_id, context_id, state,
+			readiness_state, startup_duration_ms, last_error, last_error_at,
 			ready_at, last_used_at, draining_at, failed_at, created_at, updated_at
-	`, teamID, functionID, revisionID, instanceID, sandboxID, contextID)
+	`, teamID, functionID, revisionID, instanceID, sandboxID, contextID, startupDurationMS)
 	inst, err := scanRuntimeInstance(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -470,15 +534,21 @@ func (r *Repository) MarkRuntimeInstanceDraining(ctx context.Context, teamID, fu
 }
 
 func (r *Repository) MarkRuntimeInstanceFailed(ctx context.Context, teamID, functionID, revisionID, instanceID, message string) error {
+	return r.MarkRuntimeInstanceFailedWithDetails(ctx, teamID, functionID, revisionID, instanceID, message, nil)
+}
+
+func (r *Repository) MarkRuntimeInstanceFailedWithDetails(ctx context.Context, teamID, functionID, revisionID, instanceID, message string, startupDurationMS *int) error {
 	if r == nil || r.pool == nil {
 		return fmt.Errorf("function repository is not configured")
 	}
 	message = strings.TrimSpace(message)
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE function_runtime_instances
-		SET state = 'failed', last_error = NULLIF($5, ''), failed_at = NOW()
+		SET state = 'failed', last_error = NULLIF($5, ''), last_error_at = NOW(),
+			readiness_state = 'failed', startup_duration_ms = COALESCE($6, startup_duration_ms),
+			failed_at = NOW()
 		WHERE team_id = $1 AND function_id = $2 AND revision_id = $3 AND id = $4
-	`, teamID, functionID, revisionID, instanceID, message)
+	`, teamID, functionID, revisionID, instanceID, message, startupDurationMS)
 	if err != nil {
 		return err
 	}
@@ -559,7 +629,8 @@ func (r *Repository) ListRuntimeScaleDownCandidates(ctx context.Context, limit i
 	}
 	rows, err := r.pool.Query(ctx, `
 		WITH ready_instances AS (
-			SELECT i.id, i.team_id, i.function_id, i.revision_id, i.sandbox_id, i.context_id, i.state, i.last_error,
+			SELECT i.id, i.team_id, i.function_id, i.revision_id, i.sandbox_id, i.context_id, i.state,
+				i.readiness_state, i.startup_duration_ms, i.last_error, i.last_error_at,
 				i.ready_at, i.last_used_at, i.draining_at, i.failed_at, i.created_at, i.updated_at,
 				GREATEST(COALESCE((f.autoscaling->>'min_warm')::int, $2), 0) AS min_warm,
 				GREATEST(COALESCE((f.autoscaling->>'scale_down_after_seconds')::int, $3), $4) AS scale_down_after_seconds,
@@ -571,7 +642,8 @@ func (r *Repository) ListRuntimeScaleDownCandidates(ctx context.Context, limit i
 				AND f.deleted_at IS NULL
 				AND f.active_revision_id = i.revision_id
 		)
-		SELECT id, team_id, function_id, revision_id, sandbox_id, context_id, state, last_error,
+		SELECT id, team_id, function_id, revision_id, sandbox_id, context_id, state,
+			readiness_state, startup_duration_ms, last_error, last_error_at,
 			ready_at, last_used_at, draining_at, failed_at, created_at, updated_at
 		FROM ready_instances
 		WHERE ready_count > min_warm
@@ -854,10 +926,37 @@ func scanAlias(row rowScanner) (*Alias, error) {
 
 func scanRuntimeInstance(row rowScanner) (*RuntimeInstance, error) {
 	var inst RuntimeInstance
-	if err := row.Scan(&inst.ID, &inst.TeamID, &inst.FunctionID, &inst.RevisionID, &inst.SandboxID, &inst.ContextID, &inst.State, &inst.LastError, &inst.ReadyAt, &inst.LastUsedAt, &inst.DrainingAt, &inst.FailedAt, &inst.CreatedAt, &inst.UpdatedAt); err != nil {
+	if err := row.Scan(&inst.ID, &inst.TeamID, &inst.FunctionID, &inst.RevisionID, &inst.SandboxID, &inst.ContextID, &inst.State, &inst.ReadinessState, &inst.StartupDurationMS, &inst.LastError, &inst.LastErrorAt, &inst.ReadyAt, &inst.LastUsedAt, &inst.DrainingAt, &inst.FailedAt, &inst.CreatedAt, &inst.UpdatedAt); err != nil {
 		return nil, err
 	}
+	inst.ReadinessState = normalizeRuntimeReadinessState(inst.ReadinessState, inst.State)
 	return &inst, nil
+}
+
+func scanRuntimeEvent(row rowScanner) (*RuntimeEvent, error) {
+	var event RuntimeEvent
+	if err := row.Scan(&event.ID, &event.TeamID, &event.FunctionID, &event.RevisionID, &event.RuntimeInstanceID, &event.RuntimeSandboxID, &event.RuntimeContextID, &event.Phase, &event.ReadinessState, &event.Reason, &event.Message, &event.StartupDurationMS, &event.CreatedAt); err != nil {
+		return nil, err
+	}
+	event.ReadinessState = normalizeRuntimeReadinessState(event.ReadinessState, RuntimeInstanceState(event.Phase))
+	return &event, nil
+}
+
+func normalizeRuntimeReadinessState(value RuntimeReadinessState, state RuntimeInstanceState) RuntimeReadinessState {
+	switch value {
+	case RuntimeReadinessStateUnknown, RuntimeReadinessStateChecking, RuntimeReadinessStateReady, RuntimeReadinessStateFailed:
+		return value
+	}
+	switch state {
+	case RuntimeInstanceStateStarting:
+		return RuntimeReadinessStateChecking
+	case RuntimeInstanceStateReady:
+		return RuntimeReadinessStateReady
+	case RuntimeInstanceStateFailed:
+		return RuntimeReadinessStateFailed
+	default:
+		return RuntimeReadinessStateUnknown
+	}
 }
 
 func scanRevision(row rowScanner) (*Revision, error) {

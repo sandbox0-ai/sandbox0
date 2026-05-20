@@ -26,6 +26,8 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.uber.org/zap"
 )
 
@@ -66,6 +68,14 @@ func (e functionRuntimeHTTPError) Error() string {
 }
 
 func (s *Server) serveFunctionRevision(c *gin.Context, fn *functions.Function, rev *functions.Revision) {
+	requestStarted := time.Now()
+	routeID := ""
+	servedRevision := rev
+	var runtimeInstance *functions.RuntimeInstance
+	defer func() {
+		s.observeFunctionRequest(c, fn, servedRevision, routeID, runtimeInstance, requestStarted)
+	}()
+
 	var service mgr.SandboxAppService
 	if err := json.Unmarshal(rev.ServiceSnapshot, &service); err != nil {
 		s.logger.Warn("Failed to decode function service snapshot",
@@ -78,6 +88,10 @@ func (s *Server) serveFunctionRevision(c *gin.Context, fn *functions.Function, r
 	}
 
 	match := matchFunctionRoute(service, c.Request.URL.Path, c.Request.Method)
+	if match.route != nil {
+		routeID = strings.TrimSpace(match.route.ID)
+	}
+	setFunctionSpanAttributes(c.Request.Context(), fn, rev, routeID, nil)
 	if !match.pathMatched {
 		spec.JSONError(c, nethttp.StatusNotFound, spec.CodeNotFound, "route is not exposed")
 		return
@@ -95,16 +109,23 @@ func (s *Server) serveFunctionRevision(c *gin.Context, fn *functions.Function, r
 		return
 	}
 
-	lease, rev, err := s.acquireFunctionRuntime(c.Request.Context(), fn, rev, service)
+	acquireCtx, acquireSpan := s.startFunctionSpan(c.Request.Context(), "function.runtime.acquire", fn, rev,
+		attribute.String("sandbox0.function_route_id", routeID),
+	)
+	lease, rev, err := s.acquireFunctionRuntime(acquireCtx, fn, rev, service)
+	finishSpan(acquireSpan, err)
 	if err != nil {
 		s.writeFunctionRuntimeError(c, fn, rev, "function sandbox is not available", err)
 		return
 	}
+	servedRevision = rev
 	if lease == nil || lease.Sandbox == nil {
 		spec.JSONError(c, nethttp.StatusServiceUnavailable, spec.CodeUnavailable, "function sandbox is not available")
 		return
 	}
 	defer lease.Done()
+	runtimeInstance = lease.Instance
+	setFunctionSpanAttributes(c.Request.Context(), fn, rev, routeID, runtimeInstance)
 	sandbox := lease.Sandbox
 	if sandbox.TeamID != fn.TeamID {
 		spec.JSONError(c, nethttp.StatusServiceUnavailable, spec.CodeUnavailable, "function sandbox is invalid")
@@ -147,7 +168,19 @@ func (s *Server) serveFunctionRevision(c *gin.Context, fn *functions.Function, r
 		spec.JSONError(c, nethttp.StatusInternalServerError, spec.CodeInternal, "proxy initialization failed")
 		return
 	}
+	proxyCtx, proxySpan := s.startFunctionSpan(c.Request.Context(), "function.proxy", fn, rev,
+		attribute.String("sandbox0.function_route_id", routeID),
+		attribute.String("sandbox0.runtime_sandbox_id", sandbox.ID),
+		attribute.Int("sandbox0.service_port", service.Port),
+	)
+	c.Request = c.Request.WithContext(proxyCtx)
 	router.ProxyToTarget(c)
+	status := c.Writer.Status()
+	proxySpan.SetAttributes(attribute.Int("http.status_code", status))
+	if status >= 500 {
+		proxySpan.SetStatus(codes.Error, nethttp.StatusText(status))
+	}
+	proxySpan.End()
 }
 
 func matchFunctionRoute(service mgr.SandboxAppService, path string, method string) functionRouteMatch {

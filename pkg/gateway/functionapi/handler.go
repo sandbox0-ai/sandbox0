@@ -502,7 +502,12 @@ func (h *Handler) getFunctionRuntime(c *gin.Context) {
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to list function runtime instances")
 		return
 	}
-	spec.JSONSuccess(c, http.StatusOK, gin.H{"runtime": runtimeStatus(fn, rev, instances)})
+	events, err := h.repo.ListRuntimeEvents(c.Request.Context(), fn.TeamID, fn.ID, rev.ID, 20)
+	if err != nil {
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to list function runtime events")
+		return
+	}
+	spec.JSONSuccess(c, http.StatusOK, gin.H{"runtime": runtimeStatus(fn, rev, instances, events)})
 }
 
 func (h *Handler) restartFunctionRuntime(c *gin.Context) {
@@ -567,10 +572,24 @@ func (h *Handler) clearFunctionRuntime(c *gin.Context) {
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to clear function runtime")
 		return
 	}
+	if _, err := h.repo.AppendRuntimeEvent(c.Request.Context(), &functions.RuntimeEvent{
+		TeamID:         fn.TeamID,
+		FunctionID:     fn.ID,
+		RevisionID:     rev.ID,
+		Phase:          functions.RuntimePhaseIdle,
+		ReadinessState: functions.RuntimeReadinessStateUnknown,
+		Reason:         "runtime_cleared",
+	}); err != nil {
+		h.logger.Warn("Failed to append function runtime clear event",
+			zap.String("function_id", fn.ID),
+			zap.String("revision_id", rev.ID),
+			zap.Error(err),
+		)
+	}
 	rev.RuntimeSandboxID = nil
 	rev.RuntimeContextID = nil
 	rev.RuntimeUpdatedAt = nil
-	spec.JSONSuccess(c, http.StatusOK, gin.H{"runtime": runtimeStatus(fn, rev, nil)})
+	spec.JSONSuccess(c, http.StatusOK, gin.H{"runtime": runtimeStatus(fn, rev, nil, nil)})
 }
 
 func (h *Handler) loadPublishableService(ctx context.Context, authCtx *authn.AuthContext, source functionSourceRequest) (*mgr.Sandbox, mgr.SandboxAppService, error) {
@@ -679,7 +698,7 @@ func (h *Handler) loadActiveFunctionRevision(c *gin.Context) (*functions.Functio
 	return fn, rev, true
 }
 
-func runtimeStatus(fn *functions.Function, rev *functions.Revision, instances []*functions.RuntimeInstance) functions.RuntimeStatus {
+func runtimeStatus(fn *functions.Function, rev *functions.Revision, instances []*functions.RuntimeInstance, events []*functions.RuntimeEvent) functions.RuntimeStatus {
 	status := functions.RuntimeStatus{}
 	if fn != nil {
 		status.FunctionID = fn.ID
@@ -700,26 +719,135 @@ func runtimeStatus(fn *functions.Function, rev *functions.Revision, instances []
 			}
 		}
 	}
+	if len(events) > 0 {
+		status.RecentEvents = make([]functions.RuntimeEvent, 0, len(events))
+		for _, event := range events {
+			if event != nil {
+				status.RecentEvents = append(status.RecentEvents, *event)
+			}
+		}
+	}
+	latestEvent := latestRuntimeEvent(events)
+	latestFailed := latestRuntimeInstanceByState(instances, functions.RuntimeInstanceStateFailed)
+	latestReady := latestRuntimeInstanceByState(instances, functions.RuntimeInstanceStateReady)
+	if latestReady != nil {
+		status.StartupDurationMS = latestReady.StartupDurationMS
+		status.ReadinessState = latestReady.ReadinessState
+	}
+	if latestFailed != nil {
+		status.LastError = latestFailed.LastError
+		status.LastErrorAt = latestFailed.LastErrorAt
+		if status.LastErrorAt == nil {
+			status.LastErrorAt = latestFailed.FailedAt
+		}
+		if status.StartupDurationMS == nil {
+			status.StartupDurationMS = latestFailed.StartupDurationMS
+		}
+	}
+	if latestEvent != nil {
+		if status.StartupDurationMS == nil {
+			status.StartupDurationMS = latestEvent.StartupDurationMS
+		}
+		if status.LastError == nil && latestEvent.Phase == functions.RuntimePhaseFailed && strings.TrimSpace(latestEvent.Message) != "" {
+			status.LastError = &latestEvent.Message
+			status.LastErrorAt = &latestEvent.CreatedAt
+		}
+	}
 	switch {
 	case fn != nil && !fn.Enabled:
 		status.State = functions.RuntimeStateDisabled
-	case hasReadyFunctionRuntimeInstance(instances):
+		status.Phase = functions.RuntimePhaseDisabled
+		status.ReadinessState = functions.RuntimeReadinessStateUnknown
+	case latestReady != nil:
 		status.State = functions.RuntimeStateActive
+		status.Phase = functions.RuntimePhaseReady
+		status.ReadinessState = functions.RuntimeReadinessStateReady
+	case hasRuntimeInstanceState(instances, functions.RuntimeInstanceStateStarting):
+		status.State = functions.RuntimeStateIdle
+		status.Phase = functions.RuntimePhaseStarting
+		status.ReadinessState = functions.RuntimeReadinessStateChecking
+	case hasRuntimeInstanceState(instances, functions.RuntimeInstanceStateDraining):
+		status.State = functions.RuntimeStateIdle
+		status.Phase = functions.RuntimePhaseDraining
+		status.ReadinessState = functions.RuntimeReadinessStateUnknown
+	case latestFailed != nil:
+		status.State = functions.RuntimeStateIdle
+		status.Phase = functions.RuntimePhaseFailed
+		status.ReadinessState = functions.RuntimeReadinessStateFailed
+	case runtimeEventIsCurrent(latestEvent):
+		status.State = runtimeStateForPhase(latestEvent.Phase)
+		status.Phase = latestEvent.Phase
+		status.ReadinessState = latestEvent.ReadinessState
 	case rev != nil && rev.RuntimeSandboxID != nil && strings.TrimSpace(*rev.RuntimeSandboxID) != "":
 		status.State = functions.RuntimeStateActive
+		status.Phase = functions.RuntimePhaseReady
+		status.ReadinessState = functions.RuntimeReadinessStateUnknown
 	default:
 		status.State = functions.RuntimeStateIdle
+		status.Phase = functions.RuntimePhaseIdle
+		status.ReadinessState = functions.RuntimeReadinessStateUnknown
 	}
 	return status
 }
 
-func hasReadyFunctionRuntimeInstance(instances []*functions.RuntimeInstance) bool {
+func hasRuntimeInstanceState(instances []*functions.RuntimeInstance, state functions.RuntimeInstanceState) bool {
 	for _, inst := range instances {
-		if inst != nil && inst.State == functions.RuntimeInstanceStateReady {
+		if inst != nil && inst.State == state {
 			return true
 		}
 	}
 	return false
+}
+
+func latestRuntimeInstanceByState(instances []*functions.RuntimeInstance, state functions.RuntimeInstanceState) *functions.RuntimeInstance {
+	var latest *functions.RuntimeInstance
+	for _, inst := range instances {
+		if inst == nil || inst.State != state {
+			continue
+		}
+		if latest == nil || inst.UpdatedAt.After(latest.UpdatedAt) {
+			latest = inst
+		}
+	}
+	return latest
+}
+
+func latestRuntimeEvent(events []*functions.RuntimeEvent) *functions.RuntimeEvent {
+	var latest *functions.RuntimeEvent
+	for _, event := range events {
+		if event == nil {
+			continue
+		}
+		if latest == nil || event.CreatedAt.After(latest.CreatedAt) {
+			latest = event
+		}
+	}
+	return latest
+}
+
+func runtimeEventIsCurrent(event *functions.RuntimeEvent) bool {
+	if event == nil {
+		return false
+	}
+	switch event.Phase {
+	case functions.RuntimePhaseProvisioning, functions.RuntimePhaseStarting:
+		return time.Since(event.CreatedAt) <= 5*time.Minute
+	case functions.RuntimePhaseFailed, functions.RuntimePhaseIdle:
+		return true
+	default:
+		return false
+	}
+}
+
+func runtimeStateForPhase(phase functions.RuntimePhase) functions.RuntimeState {
+	switch phase {
+	case functions.RuntimePhaseDisabled:
+		return functions.RuntimeStateDisabled
+	case functions.RuntimePhaseReady:
+		return functions.RuntimeStateActive
+	default:
+		return functions.RuntimeStateIdle
+	}
 }
 
 func (h *Handler) cleanupDeletedFunctionResources(authCtx *authn.AuthContext, revisions []*functions.Revision) {

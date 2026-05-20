@@ -94,11 +94,14 @@ func (a *functionAutoscaler) scaleDownIdleRuntimes(ctx context.Context) {
 			}
 			continue
 		}
+		a.server.recordRuntimeLifecycleEvent(ctx, &functions.Function{ID: inst.FunctionID, TeamID: inst.TeamID}, &functions.Revision{ID: inst.RevisionID, FunctionID: inst.FunctionID, TeamID: inst.TeamID}, inst, functions.RuntimePhaseDraining, inst.ReadinessState, "scale_down", nil, 0)
 		deleteCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		scaleDownStarted := time.Now()
 		err := a.server.deleteSandboxViaClusterGateway(deleteCtx, inst.SandboxID, inst.TeamID, "")
 		cancel()
 		if err != nil {
-			a.markRuntimeInstanceFailed(context.Background(), &functions.Function{ID: inst.FunctionID, TeamID: inst.TeamID}, &functions.Revision{ID: inst.RevisionID, FunctionID: inst.FunctionID, TeamID: inst.TeamID}, inst, err)
+			a.server.observeRuntimeScaleDown(inst, "error", err, time.Since(scaleDownStarted))
+			a.markRuntimeInstanceFailed(context.Background(), &functions.Function{ID: inst.FunctionID, TeamID: inst.TeamID}, &functions.Revision{ID: inst.RevisionID, FunctionID: inst.FunctionID, TeamID: inst.TeamID}, inst, err, 0)
 			a.logger.Warn("Failed to delete idle function runtime sandbox",
 				zap.String("function_id", inst.FunctionID),
 				zap.String("revision_id", inst.RevisionID),
@@ -108,6 +111,7 @@ func (a *functionAutoscaler) scaleDownIdleRuntimes(ctx context.Context) {
 			)
 			continue
 		}
+		a.server.observeRuntimeScaleDown(inst, "success", nil, time.Since(scaleDownStarted))
 		if err := a.server.functionRepo.DeleteRuntimeInstance(ctx, inst.TeamID, inst.FunctionID, inst.RevisionID, inst.ID); err != nil && !errorsIsFunctionNotFound(err) {
 			a.logger.Warn("Failed to delete scaled-down function runtime instance",
 				zap.String("function_id", inst.FunctionID),
@@ -143,24 +147,30 @@ func (a *functionAutoscaler) acquire(ctx context.Context, fn *functions.Function
 		if inst, release := a.reserveReady(instances, cfg, false); inst != nil {
 			lease, err := a.acquireExistingInstance(ctx, fn, rev, inst, service, release)
 			if err == nil {
+				a.server.observeRuntimeAcquire(fn, rev, "warm_reuse", "success", nil)
 				return lease, rev, nil
 			}
+			a.server.observeRuntimeAcquire(fn, rev, "warm_reuse", "error", err)
 			lastErr = err
 			continue
 		}
 		if activeRuntimeInstanceCount(instances) < cfg.MaxActive {
 			lease, updated, err := a.createRuntimeInstance(ctx, fn, rev, service, cfg)
 			if err == nil {
+				a.server.observeRuntimeAcquire(fn, updated, "cold_restore", "success", nil)
 				return lease, updated, nil
 			}
+			a.server.observeRuntimeAcquire(fn, rev, "cold_restore", "error", err)
 			lastErr = err
 			continue
 		}
 		if inst, release := a.reserveReady(instances, cfg, true); inst != nil {
 			lease, err := a.acquireExistingInstance(ctx, fn, rev, inst, service, release)
 			if err == nil {
+				a.server.observeRuntimeAcquire(fn, rev, "warm_reuse_over_target", "success", nil)
 				return lease, rev, nil
 			}
+			a.server.observeRuntimeAcquire(fn, rev, "warm_reuse_over_target", "error", err)
 			lastErr = err
 		}
 	}
@@ -223,7 +233,7 @@ func (a *functionAutoscaler) acquireExistingInstance(ctx context.Context, fn *fu
 		}
 		return nil, fmt.Errorf("function runtime instance is missing")
 	}
-	lease, err := a.prepareInstance(ctx, fn, rev, inst, service, release)
+	lease, err := a.prepareInstance(ctx, fn, rev, inst, service, release, time.Time{})
 	if err != nil {
 		return nil, err
 	}
@@ -242,6 +252,7 @@ func (a *functionAutoscaler) createRuntimeInstance(ctx context.Context, fn *func
 	currentRev := rev
 	var lease *functionRuntimeLease
 	err := a.server.withRevisionRuntimeDistributedLock(ctx, rev.ID, func(runCtx context.Context) error {
+		startupStarted := time.Now()
 		latest, err := a.server.functionRepo.GetRevision(runCtx, fn.TeamID, fn.ID, rev.ID)
 		if err == nil {
 			currentRev = latest
@@ -273,8 +284,11 @@ func (a *functionAutoscaler) createRuntimeInstance(ctx context.Context, fn *func
 			return fmt.Errorf("function runtime capacity is starting")
 		}
 
+		a.server.recordRuntimeLifecycleEvent(runCtx, fn, currentRev, nil, functions.RuntimePhaseProvisioning, functions.RuntimeReadinessStateChecking, "claim_runtime", nil, 0)
 		claim, err := a.server.claimFunctionSandboxViaClusterGateway(runCtx, fn, currentRev, service)
 		if err != nil {
+			a.server.observeRuntimeStartup(fn, currentRev, "error", functions.RuntimeReadinessStateFailed, time.Since(startupStarted), err)
+			a.server.recordRuntimeLifecycleEvent(runCtx, fn, currentRev, nil, functions.RuntimePhaseFailed, functions.RuntimeReadinessStateFailed, functionRuntimeErrorReason(err), err, time.Since(startupStarted))
 			return err
 		}
 		inst, err := a.server.functionRepo.CreateRuntimeInstance(runCtx, &functions.RuntimeInstance{
@@ -286,15 +300,19 @@ func (a *functionAutoscaler) createRuntimeInstance(ctx context.Context, fn *func
 		})
 		if err != nil {
 			a.server.deleteFunctionRuntimeSandboxBestEffort(fn, currentRev, claim.SandboxID, "runtime instance registration failed")
+			a.server.observeRuntimeStartup(fn, currentRev, "error", functions.RuntimeReadinessStateFailed, time.Since(startupStarted), err)
+			a.server.recordRuntimeLifecycleEvent(runCtx, fn, currentRev, nil, functions.RuntimePhaseFailed, functions.RuntimeReadinessStateFailed, functionRuntimeErrorReason(err), err, time.Since(startupStarted))
 			return err
 		}
+		a.server.recordRuntimeLifecycleEvent(runCtx, fn, currentRev, inst, functions.RuntimePhaseStarting, functions.RuntimeReadinessStateChecking, "start_runtime", nil, 0)
 		release := a.reserveSandbox(claim.SandboxID)
-		selected, err := a.prepareInstance(runCtx, fn, currentRev, inst, service, release)
+		selected, err := a.prepareInstance(runCtx, fn, currentRev, inst, service, release, startupStarted)
 		if err != nil {
-			a.markRuntimeInstanceFailed(context.Background(), fn, currentRev, inst, err)
 			a.server.deleteFunctionRuntimeSandboxBestEffort(fn, currentRev, claim.SandboxID, "runtime startup failed")
 			return err
 		}
+		a.server.observeRuntimeStartup(fn, currentRev, "success", functions.RuntimeReadinessStateReady, time.Since(startupStarted), nil)
+		a.server.recordRuntimeLifecycleEvent(runCtx, fn, currentRev, selected.Instance, functions.RuntimePhaseReady, functions.RuntimeReadinessStateReady, "runtime_ready", nil, time.Since(startupStarted))
 		lease = selected
 		currentRev.RuntimeSandboxID = &selected.Instance.SandboxID
 		currentRev.RuntimeContextID = selected.Instance.ContextID
@@ -318,7 +336,7 @@ func (a *functionAutoscaler) reserveSandbox(sandboxID string) func() {
 	return a.releaseFunc(sandboxID)
 }
 
-func (a *functionAutoscaler) prepareInstance(ctx context.Context, fn *functions.Function, rev *functions.Revision, inst *functions.RuntimeInstance, service mgr.SandboxAppService, release func()) (*functionRuntimeLease, error) {
+func (a *functionAutoscaler) prepareInstance(ctx context.Context, fn *functions.Function, rev *functions.Revision, inst *functions.RuntimeInstance, service mgr.SandboxAppService, release func(), startupStarted time.Time) (*functionRuntimeLease, error) {
 	sandboxID := strings.TrimSpace(inst.SandboxID)
 	if sandboxID == "" {
 		if release != nil {
@@ -331,9 +349,7 @@ func (a *functionAutoscaler) prepareInstance(ctx context.Context, fn *functions.
 		if release != nil {
 			release()
 		}
-		if isPublishNotFound(err) {
-			a.markRuntimeInstanceFailed(context.Background(), fn, rev, inst, err)
-		}
+		a.markRuntimeInstanceFailed(context.Background(), fn, rev, inst, err, durationSince(startupStarted))
 		return nil, err
 	}
 	instanceRev := *rev
@@ -344,10 +360,10 @@ func (a *functionAutoscaler) prepareInstance(ctx context.Context, fn *functions.
 		if release != nil {
 			release()
 		}
-		a.markRuntimeInstanceFailed(context.Background(), fn, rev, inst, err)
+		a.markRuntimeInstanceFailed(context.Background(), fn, rev, inst, err, durationSince(startupStarted))
 		return nil, err
 	}
-	ready, err := a.server.functionRepo.MarkRuntimeInstanceReady(ctx, fn.TeamID, fn.ID, rev.ID, inst.ID, sandbox.ID, contextID)
+	ready, err := a.server.functionRepo.MarkRuntimeInstanceReady(ctx, fn.TeamID, fn.ID, rev.ID, inst.ID, sandbox.ID, contextID, durationMSPtr(durationSince(startupStarted)))
 	if err != nil {
 		if release != nil {
 			release()
@@ -362,7 +378,7 @@ func (a *functionAutoscaler) prepareInstance(ctx context.Context, fn *functions.
 	}, nil
 }
 
-func (a *functionAutoscaler) markRuntimeInstanceFailed(ctx context.Context, fn *functions.Function, rev *functions.Revision, inst *functions.RuntimeInstance, err error) {
+func (a *functionAutoscaler) markRuntimeInstanceFailed(ctx context.Context, fn *functions.Function, rev *functions.Revision, inst *functions.RuntimeInstance, err error, startupDuration time.Duration) {
 	if a == nil || a.server == nil || a.server.functionRepo == nil || fn == nil || rev == nil || inst == nil {
 		return
 	}
@@ -370,7 +386,10 @@ func (a *functionAutoscaler) markRuntimeInstanceFailed(ctx context.Context, fn *
 	if err != nil {
 		message = err.Error()
 	}
-	if markErr := a.server.functionRepo.MarkRuntimeInstanceFailed(ctx, fn.TeamID, fn.ID, rev.ID, inst.ID, message); markErr != nil && !errorsIsFunctionNotFound(markErr) {
+	if startupDuration > 0 {
+		a.server.observeRuntimeStartup(fn, rev, "error", functions.RuntimeReadinessStateFailed, startupDuration, err)
+	}
+	if markErr := a.server.functionRepo.MarkRuntimeInstanceFailedWithDetails(ctx, fn.TeamID, fn.ID, rev.ID, inst.ID, message, durationMSPtr(startupDuration)); markErr != nil && !errorsIsFunctionNotFound(markErr) {
 		a.logger.Warn("Failed to mark function runtime instance failed",
 			zap.String("function_id", fn.ID),
 			zap.String("revision_id", rev.ID),
@@ -378,10 +397,18 @@ func (a *functionAutoscaler) markRuntimeInstanceFailed(ctx context.Context, fn *
 			zap.Error(markErr),
 		)
 	}
+	a.server.recordRuntimeLifecycleEvent(ctx, fn, rev, inst, functions.RuntimePhaseFailed, functions.RuntimeReadinessStateFailed, functionRuntimeErrorReason(err), err, startupDuration)
 }
 
 func runtimeInstanceReady(inst *functions.RuntimeInstance) bool {
 	return inst != nil && inst.State == functions.RuntimeInstanceStateReady && strings.TrimSpace(inst.SandboxID) != ""
+}
+
+func durationSince(start time.Time) time.Duration {
+	if start.IsZero() {
+		return 0
+	}
+	return time.Since(start)
 }
 
 func activeRuntimeInstanceCount(instances []*functions.RuntimeInstance) int {

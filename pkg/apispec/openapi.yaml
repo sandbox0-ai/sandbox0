@@ -4303,6 +4303,12 @@ components:
     FunctionRuntimeState:
       type: string
       enum: [disabled, idle, active]
+    FunctionRuntimePhase:
+      type: string
+      enum: [disabled, idle, provisioning, starting, ready, draining, failed]
+    FunctionRuntimeReadinessState:
+      type: string
+      enum: [unknown, checking, ready, failed]
     FunctionRuntimeInstanceState:
       type: string
       enum: [starting, ready, draining, failed]
@@ -4323,8 +4329,16 @@ components:
           type: string
         state:
           $ref: "#/components/schemas/FunctionRuntimeInstanceState"
+        readiness_state:
+          $ref: "#/components/schemas/FunctionRuntimeReadinessState"
+        startup_duration_ms:
+          type: integer
+          format: int32
         last_error:
           type: string
+        last_error_at:
+          type: string
+          format: date-time
         ready_at:
           type: string
           format: date-time
@@ -4343,7 +4357,39 @@ components:
         updated_at:
           type: string
           format: date-time
-      required: [id, team_id, function_id, revision_id, sandbox_id, state, created_at, updated_at]
+      required: [id, team_id, function_id, revision_id, sandbox_id, state, readiness_state, created_at, updated_at]
+    FunctionRuntimeEvent:
+      type: object
+      properties:
+        id:
+          type: string
+        team_id:
+          type: string
+        function_id:
+          type: string
+        revision_id:
+          type: string
+        runtime_instance_id:
+          type: string
+        runtime_sandbox_id:
+          type: string
+        runtime_context_id:
+          type: string
+        phase:
+          $ref: "#/components/schemas/FunctionRuntimePhase"
+        readiness_state:
+          $ref: "#/components/schemas/FunctionRuntimeReadinessState"
+        reason:
+          type: string
+        message:
+          type: string
+        startup_duration_ms:
+          type: integer
+          format: int32
+        created_at:
+          type: string
+          format: date-time
+      required: [id, team_id, function_id, revision_id, phase, readiness_state, created_at]
     FunctionRuntimeStatus:
       type: object
       properties:
@@ -4356,8 +4402,12 @@ components:
           format: int32
         state:
           $ref: "#/components/schemas/FunctionRuntimeState"
+        phase:
+          $ref: "#/components/schemas/FunctionRuntimePhase"
         autoscaling:
           $ref: "#/components/schemas/FunctionAutoscaling"
+        readiness_state:
+          $ref: "#/components/schemas/FunctionRuntimeReadinessState"
         runtime_sandbox_id:
           type: string
           description: Compatibility summary for one current restored runtime sandbox, if one exists. Use instances for the full runtime pool.
@@ -4368,11 +4418,23 @@ components:
           type: string
           format: date-time
           description: Last time the runtime mapping was updated.
+        startup_duration_ms:
+          type: integer
+          format: int32
+        last_error:
+          type: string
+        last_error_at:
+          type: string
+          format: date-time
         instances:
           type: array
           items:
             $ref: "#/components/schemas/FunctionRuntimeInstance"
-      required: [function_id, revision_id, revision_number, state, autoscaling]
+        recent_events:
+          type: array
+          items:
+            $ref: "#/components/schemas/FunctionRuntimeEvent"
+      required: [function_id, revision_id, revision_number, state, phase, autoscaling, readiness_state]
     SuccessFunctionResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
@@ -4536,6 +4598,9 @@ components:
         observed:
           type: string
           enum: [active, paused]
+          x-enum-varnames:
+            - SandboxPowerStateObservedActive
+            - SandboxPowerStateObservedPaused
         observed_generation:
           type: integer
           format: int64

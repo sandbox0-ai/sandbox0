@@ -176,6 +176,7 @@ func (a *functionAutoscaler) cleanupRuntimeInstance(ctx context.Context, inst *f
 		return
 	}
 	a.server.observeRuntimeScaleDown(inst, "success", nil, time.Since(cleanupStarted))
+	a.server.recordRuntimeLifecycleEvent(ctx, &functions.Function{ID: inst.FunctionID, TeamID: inst.TeamID}, &functions.Revision{ID: inst.RevisionID, FunctionID: inst.FunctionID, TeamID: inst.TeamID}, inst, functions.RuntimePhaseIdle, functions.RuntimeReadinessStateUnknown, "runtime_gc_deleted", nil, time.Since(cleanupStarted))
 	if err := a.server.functionRepo.DeleteRuntimeInstance(ctx, inst.TeamID, inst.FunctionID, inst.RevisionID, inst.ID); err != nil && !errorsIsFunctionNotFound(err) {
 		a.logger.Warn("Failed to delete cleaned-up function runtime instance",
 			zap.String("function_id", inst.FunctionID),
@@ -185,7 +186,6 @@ func (a *functionAutoscaler) cleanupRuntimeInstance(ctx context.Context, inst *f
 		)
 		return
 	}
-	a.server.recordRuntimeLifecycleEvent(ctx, &functions.Function{ID: inst.FunctionID, TeamID: inst.TeamID}, &functions.Revision{ID: inst.RevisionID, FunctionID: inst.FunctionID, TeamID: inst.TeamID}, inst, functions.RuntimePhaseIdle, functions.RuntimeReadinessStateUnknown, "runtime_gc_deleted", nil, time.Since(cleanupStarted))
 }
 
 func (a *functionAutoscaler) acquire(ctx context.Context, fn *functions.Function, rev *functions.Revision, service mgr.SandboxAppService) (*functionRuntimeLease, *functions.Revision, error) {

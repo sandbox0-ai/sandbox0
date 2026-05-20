@@ -6,9 +6,11 @@ Runtime pool size and scale-out behavior are configured on the function's autosc
 
 ## Startup Readiness
 
-After Function Gateway starts a restored runtime context, it waits up to 30 seconds before sending user traffic. If the published service has `health_check.path`, the gateway polls that path with `GET` every 200 ms and considers the runtime ready only after the endpoint returns HTTP `2xx`. If no health check is configured, the gateway falls back to waiting for the service port to accept TCP connections.
+After Function Gateway starts a restored runtime context, it waits up to 30 seconds before sending user traffic. Function Gateway polls the owning `cluster-gateway` every 200 ms so readiness checks run inside the target cluster. On each poll, if the published service has `health_check.path`, the cluster gateway checks that path with `GET` and considers the runtime ready only after the endpoint returns HTTP `2xx`. If no health check is configured, the cluster gateway falls back to waiting for the service port to accept TCP connections.
 
-When readiness does not pass before the timeout, the request returns `503` and the gateway records a startup error that includes the health check URL plus the last HTTP status or request error.
+When readiness does not pass before the timeout, the request returns `503` and the gateway records a startup error with the last readiness status or request error.
+
+Runtime serving traffic goes from regional `function-gateway` to the runtime sandbox's owning `cluster-gateway`, and only the cluster-local gateway connects to the sandbox service IP. HTTP responses, streaming HTTP responses such as SSE, and WebSocket upgrades use the same gateway chain. Route `timeout_seconds` still bounds the upstream request when configured, while streaming responses and WebSocket upgrades keep the downstream connection open for long-running output.
 
 ## Observability
 

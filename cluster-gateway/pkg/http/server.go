@@ -518,6 +518,8 @@ func (s *Server) setupInternalControlPlaneRoutes() {
 		internal.GET("/sandboxes/:id", s.getInternalSandbox)
 		internal.DELETE("/sandboxes/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxDelete), s.deleteInternalSandbox)
 		internal.POST("/sandboxes/:id/resume", s.resumeInternalSandbox)
+		internal.Any("/functions/runtime/sandboxes/:id/services/:service_id/proxy/*path", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.proxyInternalFunctionRuntime)
+		internal.GET("/functions/runtime/sandboxes/:id/services/:service_id/readiness", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.checkInternalFunctionRuntimeReadiness)
 
 		// Template management (→ Manager)
 		internal.GET("/templates", s.proxyInternalTemplateRequest)

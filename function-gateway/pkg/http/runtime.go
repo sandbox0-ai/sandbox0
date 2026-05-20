@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	nethttp "net/http"
 	"net/url"
 	"strconv"
@@ -35,7 +34,6 @@ const defaultFunctionAutoResumeTimeout = 30 * time.Second
 const defaultFunctionRuntimeStartTimeout = 30 * time.Second
 const functionRuntimeRestoreLockPrefix = "function-runtime-restore:"
 const functionServiceReadinessProbeInterval = 200 * time.Millisecond
-const functionServiceReadinessTCPTimeout = 500 * time.Millisecond
 
 type functionRouteMatch struct {
 	route         *mgr.SandboxAppServiceRoute
@@ -146,35 +144,13 @@ func (s *Server) serveFunctionRevision(c *gin.Context, fn *functions.Function, r
 		}
 	}
 
-	if basePort, parseErr := portFromURL(sandbox.InternalAddr); parseErr == nil && basePort == service.Port {
-		spec.JSONError(c, nethttp.StatusForbidden, spec.CodeForbidden, "reserved port is not exposable")
-		return
-	}
-	targetURL, err := withPort(sandbox.InternalAddr, service.Port)
-	if err != nil {
-		spec.JSONError(c, nethttp.StatusInternalServerError, spec.CodeInternal, "invalid sandbox address")
-		return
-	}
-	proxyTimeout := s.cfg.ProxyTimeout.Duration
-	if proxyTimeout == 0 {
-		proxyTimeout = 30 * time.Second
-	}
-	proxyTimeout = functionRouteProxyTimeout(proxyTimeout, match.route)
-	if !functionRouteHasTimeout(match.route) {
-		c.Request = proxy.WithUpstreamTimeoutDisabledRequest(c.Request)
-	}
-	router, err := proxy.NewRouter(targetURL.String(), s.logger, proxyTimeout, proxy.WithHTTPClient(s.outboundHTTPClient()))
-	if err != nil {
-		spec.JSONError(c, nethttp.StatusInternalServerError, spec.CodeInternal, "proxy initialization failed")
-		return
-	}
 	proxyCtx, proxySpan := s.startFunctionSpan(c.Request.Context(), "function.proxy", fn, rev,
 		attribute.String("sandbox0.function_route_id", routeID),
 		attribute.String("sandbox0.runtime_sandbox_id", sandbox.ID),
 		attribute.Int("sandbox0.service_port", service.Port),
 	)
 	c.Request = c.Request.WithContext(proxyCtx)
-	router.ProxyToTarget(c)
+	s.proxyFunctionRequestToRuntime(c, fn, rev, sandbox, service, match.route)
 	status := c.Writer.Status()
 	proxySpan.SetAttributes(attribute.Int("http.status_code", status))
 	if status >= 500 {
@@ -416,6 +392,85 @@ func functionRouteHasTimeout(route *mgr.SandboxAppServiceRoute) bool {
 	return route != nil && route.TimeoutSeconds > 0
 }
 
+func (s *Server) proxyFunctionRequestToRuntime(c *gin.Context, fn *functions.Function, rev *functions.Revision, sandbox *mgr.Sandbox, service mgr.SandboxAppService, route *mgr.SandboxAppServiceRoute) {
+	if sandbox == nil {
+		spec.JSONError(c, nethttp.StatusServiceUnavailable, spec.CodeUnavailable, "function sandbox is not available")
+		return
+	}
+	if strings.TrimSpace(service.ID) == "" {
+		spec.JSONError(c, nethttp.StatusServiceUnavailable, spec.CodeUnavailable, "function service is invalid")
+		return
+	}
+	if basePort, parseErr := portFromURL(sandbox.InternalAddr); parseErr == nil && basePort == service.Port {
+		spec.JSONError(c, nethttp.StatusForbidden, spec.CodeForbidden, "reserved port is not exposable")
+		return
+	}
+	clusterGatewayURL, err := s.clusterGatewayURLForSandbox(c.Request.Context(), sandbox.ID)
+	if err != nil || strings.TrimSpace(clusterGatewayURL) == "" {
+		spec.JSONError(c, nethttp.StatusServiceUnavailable, spec.CodeUnavailable, "cluster gateway is not configured")
+		return
+	}
+	if s.internalAuthGen == nil {
+		spec.JSONError(c, nethttp.StatusInternalServerError, spec.CodeInternal, "internal authentication is not configured")
+		return
+	}
+	token, err := s.internalAuthGen.Generate(internalauth.ServiceClusterGateway, fn.TeamID, rev.CreatedBy, internalauth.GenerateOptions{
+		Permissions: []string{authn.PermSandboxRead},
+	})
+	if err != nil {
+		spec.JSONError(c, nethttp.StatusInternalServerError, spec.CodeInternal, "internal authentication failed")
+		return
+	}
+
+	c.Request.URL.Path = functionRuntimeProxyPath(sandbox.ID, service.ID, c.Request.URL.Path)
+	c.Request.URL.RawPath = ""
+	c.Request = proxy.WithStreamingResponseDeadlinesDisabledRequest(c.Request)
+	proxyTimeout := s.cfg.ProxyTimeout.Duration
+	if proxyTimeout == 0 {
+		proxyTimeout = 30 * time.Second
+	}
+	proxyTimeout = functionRouteProxyTimeout(proxyTimeout, route)
+	if !functionRouteHasTimeout(route) {
+		c.Request = proxy.WithUpstreamTimeoutDisabledRequest(c.Request)
+	}
+
+	router, err := proxy.NewRouter(
+		strings.TrimRight(clusterGatewayURL, "/"),
+		s.logger,
+		proxyTimeout,
+		proxy.WithHTTPClient(s.outboundHTTPClient()),
+		proxy.WithRequestModifier(func(req *nethttp.Request) {
+			req.Header.Set(internalauth.DefaultTokenHeader, token)
+			req.Header.Set("X-Team-ID", fn.TeamID)
+			if strings.TrimSpace(rev.CreatedBy) != "" {
+				req.Header.Set("X-User-ID", rev.CreatedBy)
+			}
+			req.Header.Set("X-Auth-Method", string(authn.AuthMethodInternal))
+		}),
+	)
+	if err != nil {
+		spec.JSONError(c, nethttp.StatusInternalServerError, spec.CodeInternal, "proxy initialization failed")
+		return
+	}
+	router.ProxyToTarget(c)
+}
+
+func functionRuntimeProxyPath(sandboxID, serviceID, requestPath string) string {
+	if requestPath == "" {
+		requestPath = "/"
+	}
+	if !strings.HasPrefix(requestPath, "/") {
+		requestPath = "/" + requestPath
+	}
+	return "/internal/v1/functions/runtime/sandboxes/" + url.PathEscape(sandboxID) +
+		"/services/" + url.PathEscape(serviceID) + "/proxy" + requestPath
+}
+
+func functionRuntimeReadinessPath(sandboxID, serviceID string) string {
+	return "/internal/v1/functions/runtime/sandboxes/" + url.PathEscape(sandboxID) +
+		"/services/" + url.PathEscape(serviceID) + "/readiness"
+}
+
 func rewriteFunctionPath(c *gin.Context, matchedPrefix, rewritePrefix string) {
 	original := c.Request.URL.Path
 	matchedPrefix = strings.TrimRight(matchedPrefix, "/")
@@ -611,7 +666,7 @@ func (s *Server) ensureFunctionServiceRuntime(ctx context.Context, fn *functions
 	}
 	startCtx, cancel := context.WithTimeout(ctx, defaultFunctionRuntimeStartTimeout)
 	defer cancel()
-	if err := s.waitForFunctionServiceReadiness(startCtx, sandbox.InternalAddr, service); err != nil {
+	if err := s.waitForFunctionServiceReadiness(startCtx, sandbox.ID, fn.TeamID, rev.CreatedBy, service); err != nil {
 		return "", err
 	}
 	return contextID, nil
@@ -893,37 +948,50 @@ func isFunctionRuntimeStatus(err error, status int) bool {
 	return false
 }
 
-func (s *Server) waitForFunctionServiceReadiness(ctx context.Context, internalAddr string, service mgr.SandboxAppService) error {
-	if service.HealthCheck != nil && strings.TrimSpace(service.HealthCheck.Path) != "" {
-		return s.waitForFunctionServiceHTTPHealth(ctx, internalAddr, service.Port, service.HealthCheck.Path)
+func (s *Server) waitForFunctionServiceReadiness(ctx context.Context, sandboxID, teamID, userID string, service mgr.SandboxAppService) error {
+	if strings.TrimSpace(service.ID) == "" {
+		return fmt.Errorf("function service id is required for readiness")
 	}
-	return waitForFunctionServicePort(ctx, internalAddr, service.Port)
-}
-
-func (s *Server) waitForFunctionServiceHTTPHealth(ctx context.Context, internalAddr string, port int, healthPath string) error {
-	healthURL, err := functionServiceHealthURL(internalAddr, port, healthPath)
+	clusterGatewayURL, err := s.clusterGatewayURLForSandbox(ctx, sandboxID)
+	if err != nil || clusterGatewayURL == "" {
+		return fmt.Errorf("cluster gateway is not configured")
+	}
+	if s.internalAuthGen == nil {
+		return fmt.Errorf("internal auth generator is not configured")
+	}
+	readinessURL, err := url.Parse(strings.TrimRight(clusterGatewayURL, "/") + functionRuntimeReadinessPath(sandboxID, service.ID))
 	if err != nil {
 		return err
 	}
-	healthClient := *s.outboundHTTPClient()
-	healthClient.CheckRedirect = func(_ *nethttp.Request, _ []*nethttp.Request) error {
-		return nethttp.ErrUseLastResponse
+	if service.HealthCheck != nil && strings.TrimSpace(service.HealthCheck.Path) != "" {
+		q := readinessURL.Query()
+		q.Set("health_path", strings.TrimSpace(service.HealthCheck.Path))
+		readinessURL.RawQuery = q.Encode()
 	}
+
 	ticker := time.NewTicker(functionServiceReadinessProbeInterval)
 	defer ticker.Stop()
 	var lastErr error
 	for {
-		req, err := nethttp.NewRequestWithContext(ctx, nethttp.MethodGet, healthURL.String(), nil)
+		req, err := nethttp.NewRequestWithContext(ctx, nethttp.MethodGet, readinessURL.String(), nil)
 		if err != nil {
 			return err
 		}
-		resp, err := healthClient.Do(req)
+		token, err := s.internalAuthGen.Generate(internalauth.ServiceClusterGateway, teamID, userID, internalauth.GenerateOptions{
+			Permissions: []string{authn.PermSandboxRead},
+		})
+		if err != nil {
+			return fmt.Errorf("generate internal token: %w", err)
+		}
+		req.Header.Set(internalauth.DefaultTokenHeader, token)
+		resp, err := s.outboundHTTPClient().Do(req)
 		if err == nil {
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 				_ = resp.Body.Close()
 				return nil
 			}
-			lastErr = fmt.Errorf("health check returned HTTP %d", resp.StatusCode)
+			body, _ := io.ReadAll(resp.Body)
+			lastErr = fmt.Errorf("readiness check returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 			_ = resp.Body.Close()
 		} else {
 			lastErr = err
@@ -933,57 +1001,10 @@ func (s *Server) waitForFunctionServiceHTTPHealth(ctx context.Context, internalA
 			if lastErr == nil {
 				lastErr = ctx.Err()
 			}
-			return fmt.Errorf("function service health check %s did not return HTTP 2xx before timeout: %w", healthURL.String(), lastErr)
+			return fmt.Errorf("function service readiness did not pass before timeout: %w", lastErr)
 		case <-ticker.C:
 		}
 	}
-}
-
-func waitForFunctionServicePort(ctx context.Context, internalAddr string, port int) error {
-	targetURL, err := withPort(internalAddr, port)
-	if err != nil {
-		return err
-	}
-	address := targetURL.Host
-	if address == "" {
-		return fmt.Errorf("function service target address is empty")
-	}
-	ticker := time.NewTicker(functionServiceReadinessProbeInterval)
-	defer ticker.Stop()
-	var lastErr error
-	for {
-		conn, err := net.DialTimeout("tcp", address, functionServiceReadinessTCPTimeout)
-		if err == nil {
-			_ = conn.Close()
-			return nil
-		}
-		lastErr = err
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("function service did not start listening on %s: %w", address, lastErr)
-		case <-ticker.C:
-		}
-	}
-}
-
-func functionServiceHealthURL(internalAddr string, port int, healthPath string) (*url.URL, error) {
-	targetURL, err := withPort(internalAddr, port)
-	if err != nil {
-		return nil, err
-	}
-	path := strings.TrimSpace(healthPath)
-	if path == "" {
-		return nil, fmt.Errorf("function service health check path is empty")
-	}
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
-	targetURL.Path = path
-	targetURL.RawPath = ""
-	targetURL.RawQuery = ""
-	targetURL.ForceQuery = false
-	targetURL.Fragment = ""
-	return targetURL, nil
 }
 
 func (s *Server) resumeSandboxViaClusterGateway(ctx context.Context, sandboxID, teamID, userID string) error {
@@ -1031,19 +1052,6 @@ func (s *Server) writeFunctionRuntimeError(c *gin.Context, fn *functions.Functio
 		"source_sandbox_id": rev.SourceSandboxID,
 		"source_service_id": rev.SourceServiceID,
 	})
-}
-
-func withPort(raw string, port int) (*url.URL, error) {
-	base, err := url.Parse(raw)
-	if err != nil {
-		return nil, err
-	}
-	host := base.Hostname()
-	if host == "" {
-		return nil, fmt.Errorf("empty host")
-	}
-	base.Host = net.JoinHostPort(host, strconv.Itoa(port))
-	return base, nil
 }
 
 func portFromURL(raw string) (int, error) {

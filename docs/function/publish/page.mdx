@@ -188,7 +188,7 @@ for (const service of services.services) {
 /api/v1/functions
 </Endpoint>
 
-Creating a function creates the stable function record, revision 1, and the `production` alias.
+Creating a function creates the stable function record, revision 1, and the `production` alias. Autoscaling settings are optional; omitted values use the defaults documented in [Function Autoscaling](/docs/function/autoscaling).
 
 <Tabs
   tabs={[
@@ -269,6 +269,10 @@ curl "$FUNCTION_URL/"
 <CardGroup>
   <Card title="Revisions And Aliases" href="/docs/function/revisions" cta="Continue">
     Publish and promote new versions without changing the function URL.
+  </Card>
+
+  <Card title="Autoscaling" href="/docs/function/autoscaling" cta="Continue">
+    Tune runtime pool defaults and scale-out behavior.
   </Card>
 
   <Card title="Sandbox Services" href="/docs/sandbox/services" cta="Continue">

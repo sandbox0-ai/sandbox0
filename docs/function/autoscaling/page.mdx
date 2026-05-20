@@ -1,0 +1,95 @@
+# Function Autoscaling
+
+Function Gateway maintains a runtime pool for the active revision. Each runtime instance is a restored sandbox plus the process context serving the published service. Requests are routed to ready instances using local in-flight request counts and the function's autoscaling settings.
+
+`autoscaling` is optional when creating or updating a function. When omitted, Sandbox0 uses the defaults below. When provided, the autoscaling object must include all four fields.
+
+| Setting | Default | Accepted Value | Meaning |
+|---------|---------|----------------|---------|
+| `min_warm` | `0` | `>= 0` | Minimum ready runtime sandboxes kept after traffic has created capacity |
+| `max_active` | `20` | `>= 1` | Hard upper bound for active runtime sandboxes for the function |
+| `target_concurrency` | `80` | `>= 1` | Soft per-runtime in-flight request target used for routing and scale-out |
+| `scale_down_after_seconds` | `300` | `>= 30` | Idle time before extra runtime sandboxes above `min_warm` are removed |
+
+`target_concurrency` is not a strong distributed single-instance concurrency semaphore. Multiple Function Gateway replicas can still route to the same runtime at the same time. The hard limit is `max_active`, which bounds the runtime pool size.
+
+`min_warm` controls retained ready capacity after the runtime pool has been created. Use `min_warm: 0` for scale-to-zero behavior, or a positive value when the function should keep warm runtime sandboxes once capacity exists.
+
+## Update Autoscaling
+
+<Endpoint method="PUT">
+/api/v1/functions/{'{id}'}
+</Endpoint>
+
+Autoscaling updates change the runtime pool policy for the function. The gateway uses the new `target_concurrency` for routing and scale-out decisions, and `max_active` remains the hard pool-size limit.
+
+<Tabs
+  tabs={[
+    {
+      label: "Go",
+      language: "go",
+      code: `fn, err := client.UpdateFunctionWithOptions(
+    ctx,
+    functionID,
+    sandbox0.WithFunctionUpdateAutoscaling(sandbox0.FunctionAutoscaling(1, 4, 20, 300)),
+)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("max active=%d\\n", fn.Autoscaling.MaxActive)`
+    },
+    {
+      label: "Python",
+      language: "python",
+      code: `from sandbox0 import FunctionAutoscaling
+from sandbox0.apispec.models.function_update_request import FunctionUpdateRequest
+
+fn = client.functions.update(
+    function_id,
+    FunctionUpdateRequest(
+        autoscaling=FunctionAutoscaling(
+            min_warm=1,
+            max_active=4,
+            target_concurrency=20,
+            scale_down_after_seconds=300,
+        ),
+    ),
+)
+print(f"max active={fn.autoscaling.max_active}")`
+    },
+    {
+      label: "TypeScript",
+      language: "typescript",
+      code: `const fn = await client.functions.update(functionId, {
+    autoscaling: {
+        minWarm: 1,
+        maxActive: 4,
+        targetConcurrency: 20,
+        scaleDownAfterSeconds: 300,
+    },
+});
+console.log('max active=', fn.autoscaling.maxActive);`
+    },
+    {
+      label: "CLI",
+      language: "bash",
+      code: `s0 function update fn_abc123 \\
+    --min-warm 1 \\
+    --max-active 4 \\
+    --target-concurrency 20 \\
+    --scale-down-after-seconds 300`
+    }
+  ]}
+/>
+
+## Next Steps
+
+<CardGroup>
+  <Card title="Runtime" href="/docs/function/runtime" cta="Continue">
+    Inspect, restart, and recycle function runtime sandboxes.
+  </Card>
+
+  <Card title="Publish Functions" href="/docs/function/publish" cta="Continue">
+    Configure a publishable service and create a function from it.
+  </Card>
+</CardGroup>

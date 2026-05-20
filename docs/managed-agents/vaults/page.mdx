@@ -4,6 +4,10 @@ Vaults keep credentials out of agent code. Attach vault ids to a session, and Sa
 
 Official reference: [Claude Managed Agents vaults](https://platform.claude.com/docs/en/managed-agents/vaults).
 
+<Callout variant="info">
+Managed Agents stores vault credential secret payloads as encrypted opaque secret maps at rest. Read APIs return public metadata and auth shape only, not raw secret values. Sandbox0 services decrypt secret material only when resolving runtime credential projection.
+</Callout>
+
 ## LLM Vaults
 
 Every running session should attach exactly one LLM vault. The LLM vault selects the agent engine and model provider endpoint.

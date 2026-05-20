@@ -667,6 +667,73 @@ func (r *Repository) ListRuntimeScaleDownCandidates(ctx context.Context, limit i
 	return out, rows.Err()
 }
 
+func (r *Repository) ListRuntimeCleanupCandidates(ctx context.Context, limit int) ([]*RuntimeInstance, error) {
+	if r == nil || r.pool == nil {
+		return nil, fmt.Errorf("function repository is not configured")
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := r.pool.Query(ctx, `
+		WITH candidates AS (
+			SELECT i.id, i.team_id, i.function_id, i.revision_id, i.sandbox_id, i.context_id, i.state,
+				i.readiness_state, i.startup_duration_ms, i.last_error, i.last_error_at,
+				i.ready_at, i.last_used_at, i.draining_at, i.failed_at, i.created_at, i.updated_at
+			FROM function_runtime_instances i
+			JOIN functions f ON f.id = i.function_id
+			JOIN functions_revisions r ON r.id = i.revision_id
+			WHERE f.deleted_at IS NOT NULL
+				OR f.enabled = FALSE
+				OR (
+					f.active_revision_id IS DISTINCT FROM i.revision_id
+					AND COALESCE(i.last_used_at, i.ready_at, i.updated_at, i.created_at)
+						< NOW() - make_interval(secs => GREATEST(COALESCE((f.autoscaling->>'scale_down_after_seconds')::int, $2), $3))
+				)
+				OR (
+					i.state = 'failed'
+					AND COALESCE(i.failed_at, i.updated_at, i.created_at)
+						< NOW() - make_interval(secs => $4)
+				)
+				OR (
+					i.state = 'draining'
+					AND COALESCE(i.draining_at, i.updated_at, i.created_at)
+						< NOW() - make_interval(secs => $5)
+				)
+				OR (
+					i.state = 'starting'
+					AND COALESCE(i.updated_at, i.created_at)
+						< NOW() - make_interval(secs => $6)
+				)
+		)
+		SELECT id, team_id, function_id, revision_id, sandbox_id, context_id, state,
+			readiness_state, startup_duration_ms, last_error, last_error_at,
+			ready_at, last_used_at, draining_at, failed_at, created_at, updated_at
+		FROM candidates
+		ORDER BY
+			CASE state
+				WHEN 'failed' THEN 0
+				WHEN 'draining' THEN 1
+				WHEN 'starting' THEN 2
+				ELSE 3
+			END,
+			COALESCE(failed_at, draining_at, last_used_at, ready_at, updated_at, created_at) ASC
+		LIMIT $1
+	`, limit, DefaultScaleDownAfterSeconds, MinimumScaleDownAfterSeconds, DefaultFailedRuntimeRetentionSeconds, DefaultDrainingRuntimeRetentionSeconds, DefaultStartingRuntimeRetentionSeconds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*RuntimeInstance
+	for rows.Next() {
+		inst, err := scanRuntimeInstance(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, inst)
+	}
+	return out, rows.Err()
+}
+
 func (r *Repository) UpdateFunction(ctx context.Context, teamID, functionRef string, name *string, enabled *bool, autoscaling *Autoscaling) (*Function, error) {
 	if r == nil || r.pool == nil {
 		return nil, fmt.Errorf("function repository is not configured")

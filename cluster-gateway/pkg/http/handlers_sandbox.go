@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/client"
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/middleware"
+	"github.com/sandbox0-ai/sandbox0/pkg/functionruntime"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
@@ -45,8 +46,21 @@ func (s *Server) proxyToManager(c *gin.Context) {
 func (s *Server) createSandbox(c *gin.Context) {
 	// Rewrite path for manager
 	c.Request.URL.Path = "/api/v1/sandboxes"
+	sanitizeFunctionRuntimeClaimHeaders(c.Request.Header, internalauth.ClaimsFromContext(c.Request.Context()))
 
 	s.proxyToManager(c)
+}
+
+func sanitizeFunctionRuntimeClaimHeaders(header http.Header, claims *internalauth.Claims) {
+	if claims == nil {
+		functionruntime.ClearHeaders(header)
+		return
+	}
+	switch claims.Caller {
+	case internalauth.ServiceFunctionGateway, internalauth.ServiceScheduler:
+	default:
+		functionruntime.ClearHeaders(header)
+	}
 }
 
 // listSandboxes lists all sandboxes for the authenticated team

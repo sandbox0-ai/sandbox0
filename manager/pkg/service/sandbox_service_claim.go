@@ -14,6 +14,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
+	"github.com/sandbox0-ai/sandbox0/pkg/functionruntime"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"go.uber.org/zap"
@@ -37,12 +38,15 @@ type ClaimRequest struct {
 	Template string         `json:"template"`
 	Config   *SandboxConfig `json:"config,omitempty"`
 	Mounts   []ClaimMount   `json:"mounts,omitempty"`
+	Metadata *ClaimMetadata `json:"-"`
 }
 
 type ClaimMount struct {
 	SandboxVolumeID string `json:"sandboxvolume_id"`
 	MountPoint      string `json:"mount_point"`
 }
+
+type ClaimMetadata = functionruntime.Metadata
 
 type BootstrapMountStatus struct {
 	SandboxVolumeID     string `json:"sandboxvolume_id"`
@@ -144,6 +148,40 @@ func setHardExpirationAnnotation(annotations map[string]string, now time.Time, h
 	}
 	hardExpiresAt := now.Add(time.Duration(*hardTTL) * time.Second)
 	annotations[controller.AnnotationHardExpiresAt] = hardExpiresAt.Format(time.RFC3339)
+}
+
+func applyClaimMetadata(pod *corev1.Pod, metadata *ClaimMetadata) {
+	if pod == nil || metadata == nil {
+		return
+	}
+	ownerKind := strings.TrimSpace(metadata.OwnerKind)
+	functionID := strings.TrimSpace(metadata.FunctionID)
+	revisionID := strings.TrimSpace(metadata.FunctionRevisionID)
+	instanceID := strings.TrimSpace(metadata.FunctionRuntimeInstanceID)
+	if ownerKind == "" && functionID == "" && revisionID == "" && instanceID == "" {
+		return
+	}
+	if pod.Labels == nil {
+		pod.Labels = make(map[string]string)
+	}
+	if pod.Annotations == nil {
+		pod.Annotations = make(map[string]string)
+	}
+	if ownerKind != "" {
+		pod.Labels[controller.LabelOwnerKind] = ownerKind
+		pod.Annotations[controller.AnnotationOwnerKind] = ownerKind
+	}
+	if functionID != "" {
+		pod.Labels[controller.LabelFunctionID] = functionID
+		pod.Annotations[controller.AnnotationFunctionID] = functionID
+	}
+	if revisionID != "" {
+		pod.Labels[controller.LabelFunctionRevisionID] = revisionID
+		pod.Annotations[controller.AnnotationFunctionRevisionID] = revisionID
+	}
+	if instanceID != "" {
+		pod.Annotations[controller.AnnotationFunctionRuntimeInstanceID] = instanceID
+	}
 }
 
 func setMountsAnnotation(annotations map[string]string, mounts []ClaimMount) error {
@@ -771,6 +809,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		} else {
 			delete(pod.Annotations, controller.AnnotationWebhookStateVolumeID)
 		}
+		applyClaimMetadata(pod, req.Metadata)
 
 		// Set expiration annotations. Explicit 0 disables TTLs; omitted TTL uses the configured default.
 		persistedConfig := s.claimConfigForPersistence(req.Config)
@@ -930,6 +969,7 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 		},
 		Spec: spec,
 	}
+	applyClaimMetadata(pod, req.Metadata)
 
 	// Set expiration annotations. Explicit 0 disables TTLs; omitted TTL uses the configured default.
 	persistedConfig := s.claimConfigForPersistence(req.Config)

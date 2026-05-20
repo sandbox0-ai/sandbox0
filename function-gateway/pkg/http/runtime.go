@@ -20,6 +20,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/pkg/functionruntime"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functions"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/ratelimit"
@@ -492,7 +493,7 @@ func errorsIsFunctionNotFound(err error) bool {
 	return errors.Is(err, functions.ErrNotFound)
 }
 
-func (s *Server) claimFunctionSandboxViaClusterGateway(ctx context.Context, fn *functions.Function, rev *functions.Revision, service mgr.SandboxAppService) (*mgr.ClaimResponse, error) {
+func (s *Server) claimFunctionSandboxViaClusterGateway(ctx context.Context, fn *functions.Function, rev *functions.Revision, service mgr.SandboxAppService, runtimeInstanceID string) (*mgr.ClaimResponse, error) {
 	clusterGatewayURL := s.defaultClusterGatewayURL()
 	targetService := internalauth.ServiceClusterGateway
 	requestPath := "/api/v1/sandboxes"
@@ -539,6 +540,12 @@ func (s *Server) claimFunctionSandboxViaClusterGateway(ctx context.Context, fn *
 	}
 	req.Header.Set(internalauth.DefaultTokenHeader, token)
 	req.Header.Set("Content-Type", "application/json")
+	functionruntime.SetHeaders(req.Header, functionruntime.Metadata{
+		OwnerKind:                 functionruntime.OwnerKind,
+		FunctionID:                fn.ID,
+		FunctionRevisionID:        rev.ID,
+		FunctionRuntimeInstanceID: strings.TrimSpace(runtimeInstanceID),
+	})
 
 	resp, err := s.outboundHTTPClient().Do(req)
 	if err != nil {

@@ -74,6 +74,10 @@
           "title": "Revisions And Aliases"
         },
         {
+          "slug": "autoscaling",
+          "title": "Autoscaling"
+        },
+        {
           "slug": "runtime",
           "title": "Runtime"
         }

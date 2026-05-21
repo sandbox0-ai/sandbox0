@@ -50,6 +50,8 @@ When `public` is true and `routes` is empty, Sandbox0 creates a default route us
 Route rate limits use the gateway rate limit backend. Self-hosted deployments default to process-local memory for simple onboarding. Configure `Sandbox0Infra.spec.redis` when multiple gateway replicas need shared Redis-backed limits.
 </Callout>
 
+For Functions, the public ingress path also normalizes forwarding headers and applies the Function request body limit before traffic reaches the runtime sandbox. Route auth, CORS, methods, rate limits, rewrites, and timeouts are ingress controls only; outbound traffic from the runtime is governed by the sandbox network policy and egress auth rules.
+
 ### Auth
 
 | Field | Type | Description |

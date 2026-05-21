@@ -117,6 +117,13 @@ func (s *Server) observeFunctionRequest(c *gin.Context, fn *functions.Function, 
 	}
 }
 
+func (s *Server) observeFunctionIngressFailure(fn *functions.Function, rev *functions.Revision, routeID, reason string, status int) {
+	if s == nil || s.functionMetrics == nil || fn == nil || rev == nil {
+		return
+	}
+	s.functionMetrics.ObserveFunctionIngressFailure(fn.TeamID, fn.ID, rev.ID, routeID, reason, status)
+}
+
 func (s *Server) observeRuntimeAcquire(fn *functions.Function, rev *functions.Revision, path, result string, err error) {
 	if s == nil || s.functionMetrics == nil || fn == nil || rev == nil {
 		return

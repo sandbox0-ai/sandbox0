@@ -19,14 +19,18 @@ type WebSocketProxy struct {
 	logger *zap.Logger
 	// requestModifiers are applied before proxying.
 	requestModifiers []RequestModifier
+	// trustForwardedHeader preserves forwarding headers from an authenticated
+	// upstream proxy before appending this proxy hop.
+	trustForwardedHeader bool
 }
 
 // NewWebSocketProxy creates a new WebSocket proxy
 func NewWebSocketProxy(logger *zap.Logger, opts ...Option) *WebSocketProxy {
 	parsedOpts := collectOptions(opts...)
 	return &WebSocketProxy{
-		logger:           logger,
-		requestModifiers: parsedOpts.requestModifiers,
+		logger:               logger,
+		requestModifiers:     parsedOpts.requestModifiers,
+		trustForwardedHeader: parsedOpts.trustForwardedHeader,
 	}
 }
 
@@ -58,6 +62,8 @@ func (p *WebSocketProxy) Proxy(targetURL *url.URL) gin.HandlerFunc {
 		outReq.URL.RawQuery = c.Request.URL.RawQuery
 		outReq.Host = targetURL.Host
 		outReq.RequestURI = ""
+		removeHopByHopHeaders(outReq.Header, true)
+		setForwardedHeaders(outReq, c.Request, p.trustForwardedHeader)
 
 		applyRequestModifiers(outReq, p.requestModifiers)
 

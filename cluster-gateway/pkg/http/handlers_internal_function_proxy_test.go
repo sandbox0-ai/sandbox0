@@ -45,6 +45,15 @@ func TestInternalFunctionRuntimeProxyRoutesToPrivateService(t *testing.T) {
 		if got := r.Header.Get(internalauth.TeamIDHeader); got != "" {
 			t.Errorf("upstream received internal team header %q", got)
 		}
+		if got := r.Header.Get("X-Forwarded-For"); !strings.HasPrefix(got, "203.0.113.10, ") {
+			t.Errorf("X-Forwarded-For = %q, want trusted client IP plus proxy hop", got)
+		}
+		if got := r.Header.Get("X-Forwarded-Host"); got != "fn.example.test" {
+			t.Errorf("X-Forwarded-Host = %q, want fn.example.test", got)
+		}
+		if got := r.Header.Get("X-Forwarded-Proto"); got != "https" {
+			t.Errorf("X-Forwarded-Proto = %q, want https", got)
+		}
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = io.WriteString(w, "ok")
 	}))
@@ -71,6 +80,9 @@ func TestInternalFunctionRuntimeProxyRoutesToPrivateService(t *testing.T) {
 		t.Fatalf("create request: %v", err)
 	}
 	req.Header.Set(internalauth.DefaultTokenHeader, token)
+	req.Header.Set("X-Forwarded-For", "203.0.113.10")
+	req.Header.Set("X-Forwarded-Host", "fn.example.test")
+	req.Header.Set("X-Forwarded-Proto", "https")
 
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Do(req)

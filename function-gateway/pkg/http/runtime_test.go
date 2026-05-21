@@ -64,7 +64,8 @@ func TestAuthorizeFunctionRouteBearer(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("Authorization", "Bearer secret")
 	ctx.Request = req
-	if !authorizeFunctionRoute(ctx, route) {
+	authorized, _, _ := authorizeFunctionRoute(ctx, route)
+	if !authorized {
 		t.Fatal("authorizeFunctionRoute returned false for valid bearer token")
 	}
 
@@ -73,11 +74,33 @@ func TestAuthorizeFunctionRouteBearer(t *testing.T) {
 	req = httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("Authorization", "Bearer wrong")
 	ctx.Request = req
-	if authorizeFunctionRoute(ctx, route) {
+	authorized, reason, status := authorizeFunctionRoute(ctx, route)
+	if authorized {
 		t.Fatal("authorizeFunctionRoute returned true for invalid bearer token")
+	}
+	if reason != "auth_failed" || status != http.StatusUnauthorized {
+		t.Fatalf("failure = (%q, %d), want auth_failed %d", reason, status, http.StatusUnauthorized)
 	}
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestFunctionIngressRequestLimitRejectsLargeContentLength(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPost, "/", http.NoBody)
+	req.ContentLength = defaultFunctionMaxRequestBodyBytes + 1
+	ctx.Request = req
+
+	server := &Server{}
+	if server.enforceFunctionIngressRequestLimits(ctx, &functions.Function{ID: "fn-1", TeamID: "team-1"}, &functions.Revision{ID: "rev-1"}, "api") {
+		t.Fatal("enforceFunctionIngressRequestLimits returned true for oversized body")
+	}
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusRequestEntityTooLarge)
 	}
 }
 
@@ -137,6 +160,15 @@ func TestFunctionRuntimeProxyUsesClusterGatewayForServing(t *testing.T) {
 		if claims.TeamID != "team-1" || claims.UserID != "user-1" {
 			t.Errorf("claims = team %q user %q", claims.TeamID, claims.UserID)
 		}
+		if got := r.Header.Get("Forwarded"); got != "" {
+			t.Errorf("cluster-gateway received Forwarded = %q, want empty", got)
+		}
+		if got := r.Header.Get("X-Real-IP"); got != "" {
+			t.Errorf("cluster-gateway received X-Real-IP = %q, want empty", got)
+		}
+		if got := r.Header.Get("X-Forwarded-For"); got == "" || strings.Contains(got, "203.0.113.10") {
+			t.Errorf("cluster-gateway received X-Forwarded-For = %q, want gateway remote address only", got)
+		}
 		time.Sleep(120 * time.Millisecond)
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, "data: ok\n\n")
@@ -178,9 +210,16 @@ func TestFunctionRuntimeProxyUsesClusterGatewayForServing(t *testing.T) {
 	defer functionGateway.Close()
 
 	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(functionGateway.URL + "/stream?q=1")
+	req, err := http.NewRequest(http.MethodGet, functionGateway.URL+"/stream?q=1", nil)
 	if err != nil {
-		t.Fatalf("GET() error = %v", err)
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Forwarded", "for=203.0.113.10;proto=https")
+	req.Header.Set("X-Forwarded-For", "203.0.113.10")
+	req.Header.Set("X-Real-IP", "203.0.113.11")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Do() error = %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {

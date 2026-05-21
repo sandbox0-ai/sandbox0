@@ -12,6 +12,7 @@ import (
 // FunctionGatewayMetrics holds product-level Function serving metrics.
 type FunctionGatewayMetrics struct {
 	FunctionRequestsTotal         *prometheus.CounterVec
+	FunctionIngressFailuresTotal  *prometheus.CounterVec
 	FunctionRequestDuration       *prometheus.HistogramVec
 	FunctionResponseSize          *prometheus.HistogramVec
 	RuntimeAcquireTotal           *prometheus.CounterVec
@@ -33,6 +34,10 @@ func NewFunctionGateway(registry prometheus.Registerer) *FunctionGatewayMetrics 
 			Name: prefix + "_function_requests_total",
 			Help: "Total number of function requests served by function-gateway",
 		}, []string{"team_id", "function_id", "revision_id", "route_id", "method", "status"}),
+		FunctionIngressFailuresTotal: promutil.RegisterCounterVec(registry, prometheus.CounterOpts{
+			Name: prefix + "_function_ingress_failures_total",
+			Help: "Total number of function ingress failures rejected before runtime proxying",
+		}, []string{"team_id", "function_id", "revision_id", "route_id", "reason", "status"}),
 		FunctionRequestDuration: promutil.RegisterHistogramVec(registry, prometheus.HistogramOpts{
 			Name:    prefix + "_function_request_duration_seconds",
 			Help:    "Function request duration in seconds",
@@ -87,6 +92,13 @@ func (m *FunctionGatewayMetrics) ObserveFunctionRequest(teamID, functionID, revi
 	if responseSize > 0 {
 		m.FunctionResponseSize.WithLabelValues(label(teamID), label(functionID), label(revisionID), label(routeID)).Observe(float64(responseSize))
 	}
+}
+
+func (m *FunctionGatewayMetrics) ObserveFunctionIngressFailure(teamID, functionID, revisionID, routeID, reason string, status int) {
+	if m == nil {
+		return
+	}
+	m.FunctionIngressFailuresTotal.WithLabelValues(label(teamID), label(functionID), label(revisionID), label(routeID), reasonLabel(reason), strconv.Itoa(status)).Inc()
 }
 
 func (m *FunctionGatewayMetrics) ObserveRuntimeAcquire(teamID, functionID, revisionID, path, result, reason string) {

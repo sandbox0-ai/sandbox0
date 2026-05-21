@@ -1,0 +1,87 @@
+# Protocol Controls
+
+`egress.protocolRules` adds protocol-aware controls after outbound traffic is allowed by `trafficRules`.
+
+Use it when a sandbox must reach a broad protocol endpoint but only a subset of protocol operations should be allowed. The first supported protocol is remote MCP over HTTP or HTTPS.
+
+## How It Fits
+
+| Layer | Purpose |
+|-------|---------|
+| `trafficRules` | Allow or deny the destination by domain, CIDR, port, and classified app protocol |
+| `protocolRules` | Parse an allowed protocol request and allow, deny, or audit protocol operations |
+| `credentialRules` | Resolve and inject outbound credentials for matching traffic |
+
+Protocol controls are enforced in the data plane by `netd`. Regional control plane services store and distribute policy; they are not in the per-request data path.
+
+## MCP Tool Policy
+
+MCP protocol rules inspect HTTP-carried JSON-RPC requests. For `tools/call`, netd reads `params.name` and evaluates the configured tool policy.
+
+```yaml
+mode: block-all
+egress:
+    trafficRules:
+        - name: allow-docs-mcp
+          action: allow
+          domains:
+              - mcp.example.com
+          ports:
+              - port: 443
+                protocol: tcp
+    protocolRules:
+        - name: docs-mcp-tools
+          protocol: mcp
+          domains:
+              - mcp.example.com
+          ports:
+              - port: 443
+                protocol: tcp
+          tlsMode: terminate-reoriginate
+          httpMatch:
+              methods:
+                  - POST
+              paths:
+                  - /mcp
+          mcp:
+              tools:
+                  allowed:
+                      - read_file
+                  denied:
+                      - write_file
+                      - run_command
+```
+
+`denied` is evaluated before `allowed`. If `allowed` is empty, tools are allowed unless they are listed in `denied`. If `allowed` is non-empty, only listed tools are allowed.
+
+When a tool call is denied, netd does not forward the request upstream. It returns a JSON-RPC error response to the sandbox process and writes the protocol decision to the netd audit event.
+
+MCP request bodies must be bounded and inspectable. If netd cannot safely read the JSON-RPC request body, the protocol rule fails closed and returns a JSON-RPC policy error.
+
+## HTTPS Inspection
+
+For HTTPS MCP servers, set `tlsMode: terminate-reoriginate` on the protocol rule. Sandbox0 then uses the netd MITM CA already exposed to procd-managed processes.
+
+Without TLS termination, netd can still apply destination-level `trafficRules`, but it cannot read MCP JSON-RPC bodies or enforce tool names.
+
+## Current Scope
+
+The first implementation targets remote MCP over HTTP/HTTPS Streamable HTTP style requests:
+
+- `tools/call` is enforced by tool name.
+- `tools/list` is audited but not filtered.
+- HTTP/1.1 and HTTP/2 HTTPS requests can be inspected when TLS termination is enabled.
+- Local `stdio` MCP does not traverse netd and must be controlled by a tool runner or procd-level policy.
+- Tool argument semantics are server-specific. Use tool-name allowlists as the strong boundary; treat argument-level checks as future protocol-adapter extensions.
+
+## Next Steps
+
+<CardGroup>
+  <Card title="Network" href="/docs/sandbox/network" cta="Continue">
+    Configure outbound destination policy and protocol-aware rules.
+  </Card>
+
+  <Card title="Egress Auth" href="/docs/credential/egress-auth" cta="Continue">
+    Inject credentials for allowed outbound traffic.
+  </Card>
+</CardGroup>

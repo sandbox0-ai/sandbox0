@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -83,6 +84,9 @@ func (s *Server) proxyHTTP2FromConn(downstream *tls.Conn, req *adapterRequest) e
 	var upstreamCounter *countingConn
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := s.handleHTTP2ProxyRequest(w, r, req, &upstreamCounter); err != nil {
+			if errors.Is(err, errProtocolPolicyDenied) {
+				return
+			}
 			s.logger.Warn("HTTP/2 proxy request failed",
 				zap.Error(err),
 				zap.String("host", req.Host),
@@ -134,6 +138,14 @@ func (s *Server) handleHTTP2ProxyRequest(w http.ResponseWriter, downstreamReq *h
 	}
 	if requestScoped.EgressAuth != nil && len(requestScoped.EgressAuth.ResolvedHeaders) > 0 {
 		injectHTTPHeaders(upstreamReq, requestScoped.EgressAuth.ResolvedHeaders)
+	}
+	if err := s.enforceMCPPolicyForHTTPRequest(&requestScoped, upstreamReq, func(status int, body []byte) error {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, writeErr := w.Write(body)
+		return writeErr
+	}); err != nil {
+		return err
 	}
 
 	resp, err := transport.RoundTrip(upstreamReq)

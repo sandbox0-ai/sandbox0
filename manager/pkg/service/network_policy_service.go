@@ -58,10 +58,11 @@ func (s *NetworkPolicyService) BuildNetworkPolicyState(req *BuildNetworkPolicyRe
 	}
 	mergedBindings := mergeCredentialBindings(req.TemplateBindings, req.RequestBindings)
 	if err := validateTrafficRuleConfig(mergedSpec); err != nil {
-		s.logger.Warn("Ignoring invalid traffic rules", zap.Error(err))
+		s.logger.Warn("Ignoring invalid traffic or protocol rules", zap.Error(err))
 		mergedSpec = mergedSpec.DeepCopy()
 		if mergedSpec.Egress != nil {
 			mergedSpec.Egress.TrafficRules = nil
+			mergedSpec.Egress.ProtocolRules = nil
 		}
 	}
 	if err := validateNetworkCredentialConfig(mergedSpec, mergedBindings); err != nil {
@@ -118,6 +119,7 @@ func (s *NetworkPolicyService) mergeNetworkPolicies(
 			merged.Egress.AllowedPorts = append(merged.Egress.AllowedPorts, request.Egress.AllowedPorts...)
 			merged.Egress.DeniedPorts = append(merged.Egress.DeniedPorts, request.Egress.DeniedPorts...)
 			merged.Egress.TrafficRules = mergeTrafficRules(merged.Egress.TrafficRules, request.Egress.TrafficRules)
+			merged.Egress.ProtocolRules = mergeProtocolRules(merged.Egress.ProtocolRules, request.Egress.ProtocolRules)
 			merged.Egress.CredentialRules = mergeEgressCredentialRules(merged.Egress.CredentialRules, request.Egress.CredentialRules)
 			if request.Egress.Proxy != nil {
 				merged.Egress.Proxy = cloneEgressProxyPolicy(request.Egress.Proxy)
@@ -147,6 +149,38 @@ func mergeTrafficRules(base, override []v1alpha1.TrafficRule) []v1alpha1.Traffic
 	}
 
 	out := append([]v1alpha1.TrafficRule(nil), base...)
+	indexByName := make(map[string]int, len(base))
+	for i, rule := range out {
+		if rule.Name == "" {
+			continue
+		}
+		indexByName[rule.Name] = i
+	}
+	for _, rule := range override {
+		if rule.Name != "" {
+			if idx, ok := indexByName[rule.Name]; ok {
+				out[idx] = rule
+				continue
+			}
+			indexByName[rule.Name] = len(out)
+		}
+		out = append(out, rule)
+	}
+	return out
+}
+
+func mergeProtocolRules(base, override []v1alpha1.ProtocolRule) []v1alpha1.ProtocolRule {
+	if len(base) == 0 && len(override) == 0 {
+		return nil
+	}
+	if len(base) == 0 {
+		return append([]v1alpha1.ProtocolRule(nil), override...)
+	}
+	if len(override) == 0 {
+		return append([]v1alpha1.ProtocolRule(nil), base...)
+	}
+
+	out := append([]v1alpha1.ProtocolRule(nil), base...)
 	indexByName := make(map[string]int, len(base))
 	for i, rule := range out {
 		if rule.Name == "" {
@@ -262,6 +296,19 @@ func validateTrafficRuleConfig(policy *v1alpha1.SandboxNetworkPolicy) error {
 			return fmt.Errorf("duplicate egress traffic rule name %q", rule.Name)
 		}
 		seenTrafficRuleNames[rule.Name] = struct{}{}
+	}
+	seenProtocolRuleNames := make(map[string]struct{}, len(policy.Egress.ProtocolRules))
+	for _, rule := range policy.Egress.ProtocolRules {
+		if err := validateProtocolRule(rule); err != nil {
+			return fmt.Errorf("egress protocol rule %q is invalid: %w", rule.Name, err)
+		}
+		if rule.Name == "" {
+			continue
+		}
+		if _, ok := seenProtocolRuleNames[rule.Name]; ok {
+			return fmt.Errorf("duplicate egress protocol rule name %q", rule.Name)
+		}
+		seenProtocolRuleNames[rule.Name] = struct{}{}
 	}
 	return nil
 }
@@ -381,36 +428,7 @@ func validateHTTPMatch(rule v1alpha1.EgressCredentialRule) error {
 			return fmt.Errorf("egress rule %q httpMatch with protocol %s requires tlsMode terminate-reoriginate", rule.Name, rule.Protocol)
 		}
 	}
-	for _, method := range rule.HTTPMatch.Methods {
-		method = strings.ToUpper(strings.TrimSpace(method))
-		if method == "" {
-			return fmt.Errorf("egress rule %q httpMatch method is required", rule.Name)
-		}
-		if !validHTTPMethod(method) {
-			return fmt.Errorf("egress rule %q httpMatch method %q is invalid", rule.Name, method)
-		}
-	}
-	for _, path := range rule.HTTPMatch.Paths {
-		if strings.TrimSpace(path) == "" || !strings.HasPrefix(path, "/") {
-			return fmt.Errorf("egress rule %q httpMatch path %q must start with /", rule.Name, path)
-		}
-	}
-	for _, prefix := range rule.HTTPMatch.PathPrefixes {
-		if strings.TrimSpace(prefix) == "" || !strings.HasPrefix(prefix, "/") {
-			return fmt.Errorf("egress rule %q httpMatch pathPrefix %q must start with /", rule.Name, prefix)
-		}
-	}
-	for _, matcher := range rule.HTTPMatch.Headers {
-		if strings.TrimSpace(matcher.Name) == "" {
-			return fmt.Errorf("egress rule %q httpMatch header name is required", rule.Name)
-		}
-	}
-	for _, matcher := range rule.HTTPMatch.Query {
-		if strings.TrimSpace(matcher.Name) == "" {
-			return fmt.Errorf("egress rule %q httpMatch query name is required", rule.Name)
-		}
-	}
-	return nil
+	return validateHTTPMatchFields("egress rule "+rule.Name, rule.HTTPMatch)
 }
 
 func validHTTPMethod(method string) bool {
@@ -481,6 +499,122 @@ func validateTrafficRule(rule v1alpha1.TrafficRule) error {
 		default:
 			return fmt.Errorf("unsupported app protocol %q", appProtocol)
 		}
+	}
+	return nil
+}
+
+func validateProtocolRule(rule v1alpha1.ProtocolRule) error {
+	switch rule.Protocol {
+	case v1alpha1.ProtocolRuleProtocolMCP:
+		if rule.MCP == nil {
+			return fmt.Errorf("mcp config is required")
+		}
+	default:
+		return fmt.Errorf("unsupported protocol %q", rule.Protocol)
+	}
+	switch rule.TLSMode {
+	case "", v1alpha1.EgressTLSModeTerminateReoriginate:
+	default:
+		return fmt.Errorf("unsupported tlsMode %q", rule.TLSMode)
+	}
+	if err := validateProtocolRuleDestinations(rule); err != nil {
+		return err
+	}
+	if rule.HTTPMatch != nil {
+		if err := validateHTTPMatchFields("egress protocol rule "+rule.Name, rule.HTTPMatch); err != nil {
+			return err
+		}
+	}
+	if rule.MCP != nil && rule.MCP.Tools != nil {
+		if err := validateMCPToolPolicy(rule.MCP.Tools); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateProtocolRuleDestinations(rule v1alpha1.ProtocolRule) error {
+	for _, domain := range rule.Domains {
+		value := strings.ToLower(strings.TrimSpace(domain))
+		if value == "" {
+			continue
+		}
+		if strings.HasPrefix(value, "*.") && strings.TrimPrefix(value, "*.") == "" {
+			return fmt.Errorf("invalid wildcard domain %q", domain)
+		}
+	}
+	for _, port := range rule.Ports {
+		if port.Port <= 0 || port.Port > 65535 {
+			return fmt.Errorf("invalid port %d", port.Port)
+		}
+		if port.EndPort != nil {
+			if *port.EndPort < port.Port || *port.EndPort > 65535 {
+				return fmt.Errorf("invalid end port %d", *port.EndPort)
+			}
+		}
+		proto := strings.ToLower(strings.TrimSpace(port.Protocol))
+		if proto != "" && proto != "tcp" {
+			return fmt.Errorf("unsupported protocol %q", port.Protocol)
+		}
+	}
+	return nil
+}
+
+func validateHTTPMatchFields(label string, match *v1alpha1.HTTPMatch) error {
+	for _, method := range match.Methods {
+		method = strings.ToUpper(strings.TrimSpace(method))
+		if method == "" {
+			return fmt.Errorf("%s httpMatch method is required", label)
+		}
+		if !validHTTPMethod(method) {
+			return fmt.Errorf("%s httpMatch method %q is invalid", label, method)
+		}
+	}
+	for _, path := range match.Paths {
+		if strings.TrimSpace(path) == "" || !strings.HasPrefix(path, "/") {
+			return fmt.Errorf("%s httpMatch path %q must start with /", label, path)
+		}
+	}
+	for _, prefix := range match.PathPrefixes {
+		if strings.TrimSpace(prefix) == "" || !strings.HasPrefix(prefix, "/") {
+			return fmt.Errorf("%s httpMatch pathPrefix %q must start with /", label, prefix)
+		}
+	}
+	for _, matcher := range match.Headers {
+		if strings.TrimSpace(matcher.Name) == "" {
+			return fmt.Errorf("%s httpMatch header name is required", label)
+		}
+	}
+	for _, matcher := range match.Query {
+		if strings.TrimSpace(matcher.Name) == "" {
+			return fmt.Errorf("%s httpMatch query name is required", label)
+		}
+	}
+	return nil
+}
+
+func validateMCPToolPolicy(policy *v1alpha1.MCPToolPolicy) error {
+	seenAllowed := make(map[string]struct{}, len(policy.Allowed))
+	for _, name := range policy.Allowed {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return fmt.Errorf("mcp tools allowed name is required")
+		}
+		if _, ok := seenAllowed[name]; ok {
+			return fmt.Errorf("duplicate mcp allowed tool %q", name)
+		}
+		seenAllowed[name] = struct{}{}
+	}
+	seenDenied := make(map[string]struct{}, len(policy.Denied))
+	for _, name := range policy.Denied {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return fmt.Errorf("mcp tools denied name is required")
+		}
+		if _, ok := seenDenied[name]; ok {
+			return fmt.Errorf("duplicate mcp denied tool %q", name)
+		}
+		seenDenied[name] = struct{}{}
 	}
 	return nil
 }

@@ -150,6 +150,52 @@ func TestCompileNetworkPolicyTrafficRules(t *testing.T) {
 	}
 }
 
+func TestCompileNetworkPolicyProtocolRules(t *testing.T) {
+	spec := &v1alpha1.NetworkPolicySpec{
+		Mode: v1alpha1.NetworkModeBlockAll,
+		Egress: &v1alpha1.NetworkEgressPolicy{
+			ProtocolRules: []v1alpha1.ProtocolRule{{
+				Name:     "docs-mcp",
+				Protocol: v1alpha1.ProtocolRuleProtocolMCP,
+				Domains:  []string{"MCP.Example.COM", "*.tools.example.com"},
+				Ports:    []v1alpha1.PortSpec{{Port: 443, Protocol: "tcp"}},
+				TLSMode:  v1alpha1.EgressTLSModeTerminateReoriginate,
+				HTTPMatch: &v1alpha1.HTTPMatch{
+					Methods:      []string{"post"},
+					PathPrefixes: []string{"/mcp"},
+				},
+				MCP: &v1alpha1.MCPProtocolRule{
+					Tools: &v1alpha1.MCPToolPolicy{
+						Allowed: []string{"read_file"},
+						Denied:  []string{"run_command"},
+					},
+				},
+			}},
+		},
+	}
+
+	compiled, err := CompileNetworkPolicy(spec)
+	if err != nil {
+		t.Fatalf("compile failed: %v", err)
+	}
+	if len(compiled.Egress.ProtocolRules) != 1 {
+		t.Fatalf("protocol rule count = %d, want 1", len(compiled.Egress.ProtocolRules))
+	}
+	rule := compiled.Egress.ProtocolRules[0]
+	if rule.Protocol != "mcp" || rule.TLSMode != v1alpha1.EgressTLSModeTerminateReoriginate {
+		t.Fatalf("unexpected protocol rule: %+v", rule)
+	}
+	if len(rule.Domains) != 2 || len(rule.Ports) != 1 || rule.HTTPMatch == nil || rule.MCP == nil {
+		t.Fatalf("protocol rule was not fully compiled: %+v", rule)
+	}
+	if len(rule.MCP.AllowedTools) != 1 || rule.MCP.AllowedTools[0] != "read_file" {
+		t.Fatalf("allowed tools = %#v", rule.MCP.AllowedTools)
+	}
+	if len(rule.MCP.DeniedTools) != 1 || rule.MCP.DeniedTools[0] != "run_command" {
+		t.Fatalf("denied tools = %#v", rule.MCP.DeniedTools)
+	}
+}
+
 func TestCompileNetworkPolicyEgressProxy(t *testing.T) {
 	spec := &v1alpha1.NetworkPolicySpec{
 		Mode: v1alpha1.NetworkModeBlockAll,

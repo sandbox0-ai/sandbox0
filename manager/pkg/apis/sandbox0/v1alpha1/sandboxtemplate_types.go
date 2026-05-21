@@ -285,6 +285,7 @@ type NetworkEgressPolicy struct {
 	// Deprecated: use TrafficRules instead.
 	DeniedPorts     []PortSpec             `json:"deniedPorts,omitempty"`
 	TrafficRules    []TrafficRule          `json:"trafficRules,omitempty"`
+	ProtocolRules   []ProtocolRule         `json:"protocolRules,omitempty"`
 	CredentialRules []EgressCredentialRule `json:"credentialRules,omitempty"`
 	Proxy           *EgressProxyPolicy     `json:"proxy,omitempty"`
 }
@@ -349,6 +350,52 @@ type TrafficRule struct {
 
 	// AppProtocols constrains the rule to classified application protocols.
 	AppProtocols []TrafficRuleAppProtocol `json:"appProtocols,omitempty"`
+}
+
+// ProtocolRuleProtocol identifies the protocol parser used by a protocol rule.
+type ProtocolRuleProtocol string
+
+const (
+	ProtocolRuleProtocolMCP ProtocolRuleProtocol = "mcp"
+)
+
+// ProtocolRule defines protocol-aware controls applied after traffic is allowed.
+type ProtocolRule struct {
+	// Name is an optional stable identifier used for merge and replacement.
+	Name string `json:"name,omitempty"`
+
+	// Protocol selects the protocol adapter for this rule.
+	Protocol ProtocolRuleProtocol `json:"protocol"`
+
+	// Domains matches outbound destinations by DNS name or wildcard suffix.
+	Domains []string `json:"domains,omitempty"`
+
+	// Ports constrains the rule to specific ports/protocols.
+	Ports []PortSpec `json:"ports,omitempty"`
+
+	// TLSMode controls whether netd must terminate TLS to inspect this protocol.
+	TLSMode EgressTLSMode `json:"tlsMode,omitempty"`
+
+	// HTTPMatch constrains HTTP-carried protocol rules to request attributes.
+	HTTPMatch *HTTPMatch `json:"httpMatch,omitempty"`
+
+	// MCP configures Model Context Protocol operation policy.
+	MCP *MCPProtocolRule `json:"mcp,omitempty"`
+}
+
+// MCPProtocolRule defines MCP-specific operation policy.
+type MCPProtocolRule struct {
+	// Tools controls MCP tools/call requests.
+	Tools *MCPToolPolicy `json:"tools,omitempty"`
+}
+
+// MCPToolPolicy defines allow and deny lists for MCP tool names.
+type MCPToolPolicy struct {
+	// Allowed permits only listed tools when non-empty.
+	Allowed []string `json:"allowed,omitempty"`
+
+	// Denied blocks listed tools before evaluating Allowed.
+	Denied []string `json:"denied,omitempty"`
 }
 
 // SandboxNetworkPolicy defines the public network policy shape used by

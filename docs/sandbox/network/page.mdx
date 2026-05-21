@@ -10,6 +10,7 @@ Use `mode` as the default fallback, and use `egress.trafficRules` for explicit o
 |-------|-------------|
 | `mode` | Default fallback for unmatched traffic: `allow-all` or `block-all` |
 | `egress.trafficRules` | Ordered allow/deny rules. First matching rule wins |
+| `egress.protocolRules` | Protocol-aware operation controls for allowed traffic. See [Protocol Controls](/docs/sandbox/protocol-controls) |
 | `egress.credentialRules` | Destination-scoped outbound auth rules, optionally constrained by HTTP request matchers. See [Credential / Egress Auth](/docs/credential/egress-auth) |
 | `egress.proxy` | Customer-managed SOCKS5 route for allowed TCP traffic. See [Egress Proxy](/docs/sandbox/proxy) |
 | `network.credentialBindings` | Local bindings used by `credentialRules`. See [Credential / Egress Auth](/docs/credential/egress-auth) |
@@ -50,6 +51,12 @@ If a credential rule uses `tlsMode: terminate-reoriginate`, Sandbox0 exposes the
 `credentialRules[*].httpMatch` narrows credential injection for HTTP-family rules after the HTTP request is visible to netd. It can match methods, exact paths, path prefixes, query parameters, and headers.
 
 For HTTPS and gRPC rules, request matching requires `tlsMode: terminate-reoriginate` so netd can read the request before injecting credentials.
+
+## Protocol Rules
+
+`protocolRules` run after traffic is allowed. The first supported protocol is MCP over HTTP/HTTPS. Use it to allow a sandbox to reach an MCP server while limiting tool calls by tool name.
+
+For HTTPS MCP servers, set `tlsMode: terminate-reoriginate` on the protocol rule so netd can inspect JSON-RPC request bodies.
 
 ## Get Network Policy
 
@@ -183,6 +190,10 @@ Prefer `trafficRules` for all new policies.
 ## Next Steps
 
 <CardGroup>
+  <Card title="Protocol Controls" href="/docs/sandbox/protocol-controls" cta="Continue">
+    Restrict MCP tools and future protocol-level operations.
+  </Card>
+
   <Card title="Egress Proxy" href="/docs/sandbox/proxy" cta="Continue">
     Route allowed TCP egress through a customer-managed SOCKS5 proxy.
   </Card>

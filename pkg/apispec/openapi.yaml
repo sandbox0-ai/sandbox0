@@ -6099,6 +6099,13 @@ components:
             unmatched traffic falls back to `mode`.
           items:
             $ref: "#/components/schemas/TrafficRule"
+        protocolRules:
+          type: array
+          description: |
+            Protocol-aware controls applied after traffic is allowed by
+            `trafficRules` or legacy allow/deny fields.
+          items:
+            $ref: "#/components/schemas/ProtocolRule"
         credentialRules:
           type: array
           description: |
@@ -6173,6 +6180,57 @@ components:
         - TrafficRuleAppProtocolDns
         - TrafficRuleAppProtocolMongodb
         - TrafficRuleAppProtocolUdp
+    ProtocolRule:
+      type: object
+      description: Protocol-aware egress controls applied after destination traffic is allowed.
+      properties:
+        name:
+          type: string
+          description: Optional stable identifier used for merge and replacement.
+        protocol:
+          $ref: "#/components/schemas/ProtocolRuleProtocol"
+        domains:
+          type: array
+          description: Domain match list for the rule.
+          items:
+            type: string
+        ports:
+          type: array
+          description: Port/protocol constraints for the rule.
+          items:
+            $ref: "#/components/schemas/PortSpec"
+        tlsMode:
+          $ref: "#/components/schemas/EgressTLSMode"
+        httpMatch:
+          $ref: "#/components/schemas/HTTPMatch"
+        mcp:
+          $ref: "#/components/schemas/MCPProtocolRule"
+      required: [protocol]
+    ProtocolRuleProtocol:
+      type: string
+      enum: [mcp]
+      x-enum-varnames:
+        - ProtocolRuleProtocolMcp
+    MCPProtocolRule:
+      type: object
+      description: Model Context Protocol operation policy.
+      properties:
+        tools:
+          $ref: "#/components/schemas/MCPToolPolicy"
+    MCPToolPolicy:
+      type: object
+      description: Tool-name allow and deny lists for MCP tools/call requests.
+      properties:
+        allowed:
+          type: array
+          description: When non-empty, only listed tool names are allowed.
+          items:
+            type: string
+        denied:
+          type: array
+          description: Tool names denied before the allowed list is evaluated.
+          items:
+            type: string
     EgressCredentialRule:
       type: object
       properties:

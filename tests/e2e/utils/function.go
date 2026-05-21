@@ -15,8 +15,8 @@ func (s *Session) CreateFunctionFromSandbox(ctx context.Context, t ContractT, sa
 	req := apispec.FunctionCreateRequest{
 		Name: &name,
 		Source: apispec.FunctionSourceRequest{
-			SandboxId: sandboxID,
-			ServiceId: serviceID,
+			SandboxId: &sandboxID,
+			ServiceId: &serviceID,
 		},
 	}
 	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodPost, specPath, requestPath, req, true)

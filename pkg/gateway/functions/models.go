@@ -2,6 +2,8 @@ package functions
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -38,15 +40,27 @@ type Function struct {
 }
 
 type Revision struct {
-	ID               string          `json:"id"`
-	FunctionID       string          `json:"function_id"`
-	TeamID           string          `json:"team_id"`
-	RevisionNumber   int             `json:"revision_number"`
-	SourceSandboxID  string          `json:"source_sandbox_id"`
-	SourceServiceID  string          `json:"source_service_id"`
-	SourceTemplateID string          `json:"source_template_id"`
+	ID             string             `json:"id"`
+	FunctionID     string             `json:"function_id"`
+	TeamID         string             `json:"team_id"`
+	RevisionNumber int                `json:"revision_number"`
+	SourceType     RevisionSourceType `json:"source_type"`
+
+	// Spec is the immutable execution contract for this revision. Publish flows
+	// such as sandbox service publishing compile into this model before storage.
+	Spec FunctionRevisionSpec `json:"revision_spec"`
+
+	// Provenance records how the spec was produced. It is not used for runtime
+	// execution and may differ between sandbox, CI, and future artifact flows.
+	Provenance json.RawMessage `json:"provenance,omitempty"`
+
+	// Legacy fields are retained as compatibility mirrors while the API moves
+	// to FunctionRevisionSpec as the runtime contract.
+	SourceSandboxID  string          `json:"source_sandbox_id,omitempty"`
+	SourceServiceID  string          `json:"source_service_id,omitempty"`
+	SourceTemplateID string          `json:"source_template_id,omitempty"`
 	RestoreMounts    []RestoreMount  `json:"restore_mounts,omitempty"`
-	ServiceSnapshot  json.RawMessage `json:"service_snapshot"`
+	ServiceSnapshot  json.RawMessage `json:"service_snapshot,omitempty"`
 	RuntimeSandboxID *string         `json:"runtime_sandbox_id,omitempty"`
 	RuntimeContextID *string         `json:"runtime_context_id,omitempty"`
 	RuntimeUpdatedAt *time.Time      `json:"runtime_updated_at,omitempty"`
@@ -59,6 +73,162 @@ type RestoreMount struct {
 	SourceSandboxVolumeID string `json:"source_sandboxvolume_id,omitempty"`
 	SnapshotID            string `json:"snapshot_id,omitempty"`
 	MountPoint            string `json:"mount_point"`
+}
+
+type RevisionSourceType string
+
+const (
+	RevisionSourceTypeSandboxService RevisionSourceType = "sandbox_service"
+	RevisionSourceTypeRevisionSpec   RevisionSourceType = "revision_spec"
+	RevisionSourceTypeArtifact       RevisionSourceType = "artifact"
+)
+
+type FunctionRevisionSpec struct {
+	TemplateID     string                  `json:"template_id"`
+	RuntimeService json.RawMessage         `json:"runtime_service"`
+	Mounts         []FunctionRevisionMount `json:"mounts,omitempty"`
+	StaticAssets   []FunctionStaticAsset   `json:"static_assets,omitempty"`
+	EnvRefs        []FunctionEnvRef        `json:"env_refs,omitempty"`
+}
+
+type FunctionRevisionMount struct {
+	Name            string                      `json:"name,omitempty"`
+	MountPoint      string                      `json:"mount_point"`
+	Mode            FunctionRevisionMountMode   `json:"mode,omitempty"`
+	Materialization string                      `json:"materialization,omitempty"`
+	Source          FunctionRevisionMountSource `json:"source"`
+}
+
+type FunctionRevisionMountMode string
+
+const (
+	FunctionRevisionMountModeReadOnly  FunctionRevisionMountMode = "read_only"
+	FunctionRevisionMountModeReadWrite FunctionRevisionMountMode = "read_write"
+)
+
+type FunctionRevisionMountSource struct {
+	Type                  FunctionRevisionMountSourceType `json:"type"`
+	SandboxVolumeID       string                          `json:"sandboxvolume_id,omitempty"`
+	SourceSandboxVolumeID string                          `json:"source_sandboxvolume_id,omitempty"`
+	SnapshotID            string                          `json:"snapshot_id,omitempty"`
+	ArtifactID            string                          `json:"artifact_id,omitempty"`
+	Digest                string                          `json:"digest,omitempty"`
+}
+
+type FunctionRevisionMountSourceType string
+
+const (
+	FunctionRevisionMountSourceSandboxVolume  FunctionRevisionMountSourceType = "sandbox_volume"
+	FunctionRevisionMountSourceArtifact       FunctionRevisionMountSourceType = "artifact"
+	FunctionRevisionMountSourceVolumeSnapshot FunctionRevisionMountSourceType = "volume_snapshot"
+)
+
+type FunctionStaticAsset struct {
+	ArtifactID  string `json:"artifact_id"`
+	RoutePrefix string `json:"route_prefix"`
+	Digest      string `json:"digest,omitempty"`
+}
+
+type FunctionEnvRef struct {
+	Name      string `json:"name"`
+	SourceRef string `json:"source_ref"`
+}
+
+type SandboxServiceProvenance struct {
+	SandboxID  string `json:"sandbox_id"`
+	ServiceID  string `json:"service_id"`
+	TemplateID string `json:"template_id"`
+}
+
+type RevisionProvenance struct {
+	Type           RevisionSourceType        `json:"type"`
+	SandboxService *SandboxServiceProvenance `json:"sandbox_service,omitempty"`
+}
+
+func NewSandboxServiceRevisionSpec(templateID string, service any, mounts []RestoreMount) (FunctionRevisionSpec, error) {
+	serviceBytes, err := json.Marshal(service)
+	if err != nil {
+		return FunctionRevisionSpec{}, err
+	}
+	spec := FunctionRevisionSpec{
+		TemplateID:     strings.TrimSpace(templateID),
+		RuntimeService: serviceBytes,
+		Mounts:         RevisionMountsFromRestoreMounts(mounts),
+	}
+	return spec, spec.Validate()
+}
+
+func RevisionMountsFromRestoreMounts(mounts []RestoreMount) []FunctionRevisionMount {
+	if len(mounts) == 0 {
+		return nil
+	}
+	out := make([]FunctionRevisionMount, 0, len(mounts))
+	for _, mount := range mounts {
+		out = append(out, FunctionRevisionMount{
+			MountPoint: strings.TrimSpace(mount.MountPoint),
+			Mode:       FunctionRevisionMountModeReadWrite,
+			Source: FunctionRevisionMountSource{
+				Type:                  FunctionRevisionMountSourceSandboxVolume,
+				SandboxVolumeID:       strings.TrimSpace(mount.SandboxVolumeID),
+				SourceSandboxVolumeID: strings.TrimSpace(mount.SourceSandboxVolumeID),
+				SnapshotID:            strings.TrimSpace(mount.SnapshotID),
+			},
+		})
+	}
+	return out
+}
+
+func RestoreMountsFromRevisionMounts(mounts []FunctionRevisionMount) []RestoreMount {
+	if len(mounts) == 0 {
+		return nil
+	}
+	out := make([]RestoreMount, 0, len(mounts))
+	for _, mount := range mounts {
+		if mount.Source.Type != FunctionRevisionMountSourceSandboxVolume || strings.TrimSpace(mount.Source.SandboxVolumeID) == "" {
+			continue
+		}
+		out = append(out, RestoreMount{
+			SandboxVolumeID:       strings.TrimSpace(mount.Source.SandboxVolumeID),
+			SourceSandboxVolumeID: strings.TrimSpace(mount.Source.SourceSandboxVolumeID),
+			SnapshotID:            strings.TrimSpace(mount.Source.SnapshotID),
+			MountPoint:            strings.TrimSpace(mount.MountPoint),
+		})
+	}
+	return out
+}
+
+func (s FunctionRevisionSpec) Validate() error {
+	if strings.TrimSpace(s.TemplateID) == "" {
+		return fmt.Errorf("revision_spec.template_id is required")
+	}
+	if len(s.RuntimeService) == 0 || string(s.RuntimeService) == "null" {
+		return fmt.Errorf("revision_spec.runtime_service is required")
+	}
+	for i, mount := range s.Mounts {
+		if strings.TrimSpace(mount.MountPoint) == "" {
+			return fmt.Errorf("revision_spec.mounts[%d].mount_point is required", i)
+		}
+		switch mount.Source.Type {
+		case FunctionRevisionMountSourceSandboxVolume:
+			if strings.TrimSpace(mount.Source.SandboxVolumeID) == "" {
+				return fmt.Errorf("revision_spec.mounts[%d].source.sandboxvolume_id is required", i)
+			}
+		case FunctionRevisionMountSourceArtifact:
+			if strings.TrimSpace(mount.Source.SandboxVolumeID) == "" {
+				return fmt.Errorf("revision_spec.mounts[%d].source.sandboxvolume_id is required for artifact mounts", i)
+			}
+		case FunctionRevisionMountSourceVolumeSnapshot:
+			if strings.TrimSpace(mount.Source.SnapshotID) == "" {
+				return fmt.Errorf("revision_spec.mounts[%d].source.snapshot_id is required", i)
+			}
+			if strings.TrimSpace(mount.Source.SandboxVolumeID) == "" {
+				return fmt.Errorf("revision_spec.mounts[%d].source.sandboxvolume_id is required for volume snapshot mounts", i)
+			}
+		default:
+			return fmt.Errorf("revision_spec.mounts[%d].source.type is invalid", i)
+		}
+	}
+	return nil
 }
 
 type Alias struct {

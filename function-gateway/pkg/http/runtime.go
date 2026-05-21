@@ -76,8 +76,8 @@ func (s *Server) serveFunctionRevision(c *gin.Context, fn *functions.Function, r
 		s.observeFunctionRequest(c, fn, servedRevision, routeID, runtimeInstance, requestStarted)
 	}()
 
-	var service mgr.SandboxAppService
-	if err := json.Unmarshal(rev.ServiceSnapshot, &service); err != nil {
+	service, err := functionRevisionRuntimeService(rev)
+	if err != nil {
 		s.logger.Warn("Failed to decode function service snapshot",
 			zap.String("function_id", fn.ID),
 			zap.String("revision_id", rev.ID),
@@ -548,6 +548,21 @@ func (s *Server) acquireFunctionRuntime(ctx context.Context, fn *functions.Funct
 	return autoscaler.acquire(ctx, fn, rev, service)
 }
 
+func functionRevisionRuntimeService(rev *functions.Revision) (mgr.SandboxAppService, error) {
+	if rev == nil {
+		return mgr.SandboxAppService{}, fmt.Errorf("function revision is nil")
+	}
+	serviceBytes := rev.Spec.RuntimeService
+	if len(serviceBytes) == 0 {
+		serviceBytes = rev.ServiceSnapshot
+	}
+	var service mgr.SandboxAppService
+	if err := json.Unmarshal(serviceBytes, &service); err != nil {
+		return mgr.SandboxAppService{}, err
+	}
+	return service, nil
+}
+
 func (s *Server) withRevisionRuntimeDistributedLock(ctx context.Context, revisionID string, fn func(context.Context) error) error {
 	if fn == nil {
 		return nil
@@ -587,8 +602,12 @@ func (s *Server) claimFunctionSandboxViaClusterGateway(ctx context.Context, fn *
 	if err != nil {
 		return nil, err
 	}
+	templateID := strings.TrimSpace(rev.Spec.TemplateID)
+	if templateID == "" {
+		templateID = strings.TrimSpace(rev.SourceTemplateID)
+	}
 	payload, err := json.Marshal(mgr.ClaimRequest{
-		Template: rev.SourceTemplateID,
+		Template: templateID,
 		Config: &mgr.SandboxConfig{
 			AutoResume: &autoResume,
 			Services:   []mgr.SandboxAppService{runtimeService},
@@ -646,13 +665,19 @@ func (s *Server) claimFunctionSandboxViaClusterGateway(ctx context.Context, fn *
 }
 
 func (s *Server) claimMountsFromRevision(rev *functions.Revision) ([]mgr.ClaimMount, error) {
-	mounts := rev.RestoreMounts
-	if len(mounts) == 0 {
+	if rev == nil {
 		return nil, nil
 	}
-	out := make([]mgr.ClaimMount, 0, len(mounts))
-	for _, mount := range mounts {
-		volumeID := strings.TrimSpace(mount.SandboxVolumeID)
+	specMounts := rev.Spec.Mounts
+	if len(specMounts) == 0 && len(rev.RestoreMounts) > 0 {
+		specMounts = functions.RevisionMountsFromRestoreMounts(rev.RestoreMounts)
+	}
+	if len(specMounts) == 0 {
+		return nil, nil
+	}
+	out := make([]mgr.ClaimMount, 0, len(specMounts))
+	for _, mount := range specMounts {
+		volumeID := strings.TrimSpace(mount.Source.SandboxVolumeID)
 		mountPoint := strings.TrimSpace(mount.MountPoint)
 		if volumeID == "" {
 			return nil, fmt.Errorf("function revision restore mount is missing sandbox volume id")

@@ -2,6 +2,7 @@ package functions
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -14,6 +15,41 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/migrations"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 )
+
+func TestNewRevisionCompilesSandboxServiceIntoRevisionSpec(t *testing.T) {
+	rev, err := NewRevision("team-1", "source-sandbox", "api", "tmpl-1", map[string]any{
+		"id":   "api",
+		"port": 3000,
+	}, []RestoreMount{{
+		SandboxVolumeID:       "revision-volume",
+		SourceSandboxVolumeID: "source-volume",
+		SnapshotID:            "snapshot-1",
+		MountPoint:            "/workspace/data",
+	}}, "user-1")
+	if err != nil {
+		t.Fatalf("NewRevision() error = %v", err)
+	}
+	if rev.SourceType != RevisionSourceTypeSandboxService {
+		t.Fatalf("source_type = %q, want %q", rev.SourceType, RevisionSourceTypeSandboxService)
+	}
+	if rev.Spec.TemplateID != "tmpl-1" {
+		t.Fatalf("spec.template_id = %q, want tmpl-1", rev.Spec.TemplateID)
+	}
+	if len(rev.Spec.Mounts) != 1 {
+		t.Fatalf("spec mounts = %d, want 1", len(rev.Spec.Mounts))
+	}
+	mount := rev.Spec.Mounts[0]
+	if mount.MountPoint != "/workspace/data" || mount.Source.SandboxVolumeID != "revision-volume" {
+		t.Fatalf("spec mount = %+v, want prepared sandbox volume mount", mount)
+	}
+	var provenance RevisionProvenance
+	if err := json.Unmarshal(rev.Provenance, &provenance); err != nil {
+		t.Fatalf("unmarshal provenance: %v", err)
+	}
+	if provenance.Type != RevisionSourceTypeSandboxService || provenance.SandboxService == nil || provenance.SandboxService.SandboxID != "source-sandbox" {
+		t.Fatalf("provenance = %+v, want sandbox service provenance", provenance)
+	}
+}
 
 func TestListRuntimeCleanupCandidatesIncludesInactiveAndFailedRuntimes(t *testing.T) {
 	ctx := context.Background()

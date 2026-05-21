@@ -24,6 +24,12 @@ import (
 	"go.uber.org/zap"
 )
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
 func TestMatchFunctionRouteChoosesLongestPrefix(t *testing.T) {
 	service := mgr.SandboxAppService{
 		Ingress: mgr.SandboxAppServiceIngress{
@@ -330,14 +336,30 @@ func TestClaimFunctionSandboxIncludesRuntimeOwnerMetadata(t *testing.T) {
 		ID:     "fn-1",
 		TeamID: "team-1",
 	}, &functions.Revision{
-		ID:               "rev-1",
-		FunctionID:       "fn-1",
-		TeamID:           "team-1",
-		SourceTemplateID: "tmpl-1",
+		ID:         "rev-1",
+		FunctionID: "fn-1",
+		TeamID:     "team-1",
+		Spec: functions.FunctionRevisionSpec{
+			TemplateID: "tmpl-spec",
+			Mounts: []functions.FunctionRevisionMount{{
+				MountPoint: "/workspace/app",
+				Source: functions.FunctionRevisionMountSource{
+					Type:            functions.FunctionRevisionMountSourceSandboxVolume,
+					SandboxVolumeID: "revision-volume",
+				},
+			}},
+		},
+		SourceTemplateID: "legacy-template",
 		CreatedBy:        "user-1",
 	}, mgr.SandboxAppService{}, "inst-1")
 	if err != nil {
 		t.Fatalf("claimFunctionSandboxViaClusterGateway() error = %v", err)
+	}
+	if got.Template != "tmpl-spec" {
+		t.Fatalf("claim template = %q, want spec template", got.Template)
+	}
+	if len(got.Mounts) != 1 || got.Mounts[0].SandboxVolumeID != "revision-volume" || got.Mounts[0].MountPoint != "/workspace/app" {
+		t.Fatalf("claim mounts = %+v, want spec mount", got.Mounts)
 	}
 	if got.Metadata != nil {
 		t.Fatal("claim request metadata should not be serialized in public JSON body")
@@ -603,24 +625,30 @@ func TestWaitForFunctionServiceReadinessFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate ed25519 keypair: %v", err)
 	}
-	clusterGateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "not ready", http.StatusServiceUnavailable)
-	}))
-	defer clusterGateway.Close()
 
 	server := &Server{
 		cfg: &config.FunctionGatewayConfig{
-			DefaultClusterGatewayURL: clusterGateway.URL,
+			DefaultClusterGatewayURL: "http://cluster-gateway.test",
 		},
 		internalAuthGen: internalauth.NewGenerator(internalauth.GeneratorConfig{
 			Caller:     internalauth.ServiceFunctionGateway,
 			PrivateKey: privateKey,
 			TTL:        time.Minute,
 		}),
-		httpClient: clusterGateway.Client(),
-		logger:     zap.NewNop(),
+		httpClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if got := req.URL.Path; got != "/internal/v1/functions/runtime/sandboxes/sb_test/services/api/readiness" {
+				t.Errorf("readiness path = %q, want runtime readiness path", got)
+			}
+			return &http.Response{
+				StatusCode: http.StatusServiceUnavailable,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("not ready")),
+				Request:    req,
+			}, nil
+		})},
+		logger: zap.NewNop(),
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), functionServiceReadinessProbeInterval+50*time.Millisecond)
 	defer cancel()
 	err = server.waitForFunctionServiceReadiness(ctx, "sb_test", "team-1", "user-1", mgr.SandboxAppService{ID: "api"})
 	if err == nil {
@@ -719,12 +747,17 @@ func TestStartFunctionServiceRuntimeWarmProcessUsesExistingCMDContext(t *testing
 func TestClaimMountsFromRevisionUsesPreparedVolume(t *testing.T) {
 	server := &Server{}
 	mounts, err := server.claimMountsFromRevision(&functions.Revision{
-		RestoreMounts: []functions.RestoreMount{{
-			SandboxVolumeID:       "revision-volume",
-			SourceSandboxVolumeID: "source-volume",
-			SnapshotID:            "snapshot-1",
-			MountPoint:            "/workspace/data",
-		}},
+		Spec: functions.FunctionRevisionSpec{
+			Mounts: []functions.FunctionRevisionMount{{
+				MountPoint: "/workspace/data",
+				Source: functions.FunctionRevisionMountSource{
+					Type:                  functions.FunctionRevisionMountSourceSandboxVolume,
+					SandboxVolumeID:       "revision-volume",
+					SourceSandboxVolumeID: "source-volume",
+					SnapshotID:            "snapshot-1",
+				},
+			}},
+		},
 	})
 	if err != nil {
 		t.Fatalf("claimMountsFromRevision() error = %v", err)

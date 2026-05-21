@@ -2,6 +2,7 @@ package functionapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -175,6 +176,15 @@ func SandboxUnavailableError(message string) error {
 }
 
 type functionSourceRequest struct {
+	Type           functions.RevisionSourceType    `json:"type,omitempty"`
+	SandboxID      string                          `json:"sandbox_id,omitempty"`
+	ServiceID      string                          `json:"service_id,omitempty"`
+	SandboxService *sandboxServiceSourceRequest    `json:"sandbox_service,omitempty"`
+	RevisionSpec   *functions.FunctionRevisionSpec `json:"revision_spec,omitempty"`
+	Provenance     json.RawMessage                 `json:"provenance,omitempty"`
+}
+
+type sandboxServiceSourceRequest struct {
 	SandboxID string `json:"sandbox_id"`
 	ServiceID string `json:"service_id"`
 }
@@ -230,40 +240,29 @@ func (h *Handler) createFunction(c *gin.Context) {
 		return
 	}
 
-	sandbox, serviceSnapshot, err := h.loadPublishableService(c.Request.Context(), authCtx, req.Source)
+	rev, defaultName, cleanupRevision, err := h.prepareRevisionFromSource(c.Request.Context(), authCtx, req.Source)
 	if err != nil {
 		h.writePublishError(c, err)
 		return
 	}
+	cleanupRevisionAfterFailure := true
+	if cleanupRevision != nil {
+		defer func() {
+			if cleanupRevisionAfterFailure {
+				cleanupRevision()
+			}
+		}()
+	}
 
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
-		name = strings.TrimSpace(serviceSnapshot.DisplayName)
-	}
-	if name == "" {
-		name = serviceSnapshot.ID
+		name = defaultName
 	}
 
 	userID := principalID(authCtx)
 	fn := functions.NewFunction(authCtx.TeamID, name, userID)
 	if req.Autoscaling != nil {
 		fn.Autoscaling = functions.NormalizeAutoscaling(*req.Autoscaling)
-	}
-	restoreMounts, err := h.prepareRestoreMounts(c.Request.Context(), authCtx, sandbox)
-	if err != nil {
-		h.writePublishError(c, err)
-		return
-	}
-	cleanupRestoreMounts := true
-	defer func() {
-		if cleanupRestoreMounts {
-			h.deletePreparedRestoreMounts(context.Background(), authCtx, sandbox, restoreMounts, "function create failed")
-		}
-	}()
-	rev, err := functions.NewRevision(authCtx.TeamID, sandbox.ID, serviceSnapshot.ID, sandbox.TemplateID, serviceSnapshot, restoreMounts, userID)
-	if err != nil {
-		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to create revision snapshot")
-		return
 	}
 
 	fn, rev, err = h.repo.CreateFunctionWithRevision(c.Request.Context(), fn, rev, userID)
@@ -276,7 +275,7 @@ func (h *Handler) createFunction(c *gin.Context) {
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to create function")
 		return
 	}
-	cleanupRestoreMounts = false
+	cleanupRevisionAfterFailure = false
 
 	spec.JSONSuccess(c, http.StatusCreated, gin.H{
 		"function": h.functionRecord(fn),
@@ -397,29 +396,21 @@ func (h *Handler) createFunctionRevision(c *gin.Context) {
 	}
 	defer unlockRevisionPublish()
 
-	sandbox, serviceSnapshot, err := h.loadPublishableService(c.Request.Context(), authCtx, req.Source)
+	rev, _, cleanupRevision, err := h.prepareRevisionFromSource(c.Request.Context(), authCtx, req.Source)
 	if err != nil {
 		h.writePublishError(c, err)
 		return
+	}
+	cleanupRevisionAfterFailure := true
+	if cleanupRevision != nil {
+		defer func() {
+			if cleanupRevisionAfterFailure {
+				cleanupRevision()
+			}
+		}()
 	}
 
 	userID := principalID(authCtx)
-	restoreMounts, err := h.prepareRestoreMounts(c.Request.Context(), authCtx, sandbox)
-	if err != nil {
-		h.writePublishError(c, err)
-		return
-	}
-	cleanupRestoreMounts := true
-	defer func() {
-		if cleanupRestoreMounts {
-			h.deletePreparedRestoreMounts(context.Background(), authCtx, sandbox, restoreMounts, "revision create failed")
-		}
-	}()
-	rev, err := functions.NewRevision(authCtx.TeamID, sandbox.ID, serviceSnapshot.ID, sandbox.TemplateID, serviceSnapshot, restoreMounts, userID)
-	if err != nil {
-		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to create revision snapshot")
-		return
-	}
 	promote := true
 	if req.Promote != nil {
 		promote = *req.Promote
@@ -434,7 +425,7 @@ func (h *Handler) createFunctionRevision(c *gin.Context) {
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to create revision")
 		return
 	}
-	cleanupRestoreMounts = false
+	cleanupRevisionAfterFailure = false
 	spec.JSONSuccess(c, http.StatusCreated, gin.H{"revision": rev, "promoted": promote})
 }
 
@@ -601,7 +592,110 @@ func (h *Handler) clearFunctionRuntime(c *gin.Context) {
 	spec.JSONSuccess(c, http.StatusOK, gin.H{"runtime": runtimeStatus(fn, rev, nil, nil)})
 }
 
-func (h *Handler) loadPublishableService(ctx context.Context, authCtx *authn.AuthContext, source functionSourceRequest) (*mgr.Sandbox, mgr.SandboxAppService, error) {
+func (h *Handler) prepareRevisionFromSource(ctx context.Context, authCtx *authn.AuthContext, source functionSourceRequest) (*functions.Revision, string, func(), error) {
+	sourceType := normalizeFunctionSourceType(source)
+	switch sourceType {
+	case functions.RevisionSourceTypeSandboxService:
+		sandboxSource := normalizeSandboxServiceSource(source)
+		sandbox, serviceSnapshot, err := h.loadPublishableService(ctx, authCtx, sandboxSource)
+		if err != nil {
+			return nil, "", nil, err
+		}
+		restoreMounts, err := h.prepareRestoreMounts(ctx, authCtx, sandbox)
+		if err != nil {
+			return nil, "", nil, err
+		}
+		cleanup := func() {
+			h.deletePreparedRestoreMounts(context.Background(), authCtx, sandbox, restoreMounts, "revision create failed")
+		}
+		rev, err := functions.NewRevision(authCtx.TeamID, sandbox.ID, serviceSnapshot.ID, sandbox.TemplateID, serviceSnapshot, restoreMounts, principalID(authCtx))
+		if err != nil {
+			cleanup()
+			return nil, "", nil, publishError{status: http.StatusBadRequest, code: spec.CodeBadRequest, message: err.Error()}
+		}
+		return rev, defaultFunctionName(serviceSnapshot), cleanup, nil
+	case functions.RevisionSourceTypeRevisionSpec:
+		if authCtx == nil || strings.TrimSpace(authCtx.TeamID) == "" {
+			return nil, "", nil, publishError{status: http.StatusForbidden, code: spec.CodeForbidden, message: "team context is required"}
+		}
+		if source.RevisionSpec == nil {
+			return nil, "", nil, publishError{status: http.StatusBadRequest, code: spec.CodeBadRequest, message: "source.revision_spec is required"}
+		}
+		serviceSnapshot, err := validatePublishableRevisionSpec(*source.RevisionSpec)
+		if err != nil {
+			return nil, "", nil, err
+		}
+		provenance := any(functions.RevisionProvenance{Type: functions.RevisionSourceTypeRevisionSpec})
+		if len(source.Provenance) > 0 {
+			provenance = source.Provenance
+		}
+		rev, err := functions.NewRevisionFromSpec(authCtx.TeamID, functions.RevisionSourceTypeRevisionSpec, *source.RevisionSpec, provenance, principalID(authCtx))
+		if err != nil {
+			return nil, "", nil, publishError{status: http.StatusBadRequest, code: spec.CodeBadRequest, message: err.Error()}
+		}
+		return rev, defaultFunctionName(serviceSnapshot), nil, nil
+	default:
+		return nil, "", nil, publishError{status: http.StatusBadRequest, code: spec.CodeBadRequest, message: "source.type is invalid"}
+	}
+}
+
+func normalizeFunctionSourceType(source functionSourceRequest) functions.RevisionSourceType {
+	if source.Type != "" {
+		return source.Type
+	}
+	if source.RevisionSpec != nil {
+		return functions.RevisionSourceTypeRevisionSpec
+	}
+	return functions.RevisionSourceTypeSandboxService
+}
+
+func normalizeSandboxServiceSource(source functionSourceRequest) sandboxServiceSourceRequest {
+	out := sandboxServiceSourceRequest{
+		SandboxID: source.SandboxID,
+		ServiceID: source.ServiceID,
+	}
+	if source.SandboxService != nil {
+		if strings.TrimSpace(source.SandboxService.SandboxID) != "" {
+			out.SandboxID = source.SandboxService.SandboxID
+		}
+		if strings.TrimSpace(source.SandboxService.ServiceID) != "" {
+			out.ServiceID = source.SandboxService.ServiceID
+		}
+	}
+	return out
+}
+
+func validatePublishableRevisionSpec(revisionSpec functions.FunctionRevisionSpec) (mgr.SandboxAppService, error) {
+	if err := revisionSpec.Validate(); err != nil {
+		return mgr.SandboxAppService{}, publishError{status: http.StatusBadRequest, code: spec.CodeBadRequest, message: err.Error()}
+	}
+	var serviceSnapshot mgr.SandboxAppService
+	if err := json.Unmarshal(revisionSpec.RuntimeService, &serviceSnapshot); err != nil {
+		return mgr.SandboxAppService{}, publishError{status: http.StatusBadRequest, code: spec.CodeBadRequest, message: "source.revision_spec.runtime_service is invalid"}
+	}
+	if blockers := mgr.SandboxAppServicePublishBlockers(serviceSnapshot); len(blockers) > 0 {
+		return mgr.SandboxAppService{}, publishError{
+			status:  http.StatusBadRequest,
+			code:    spec.CodeBadRequest,
+			message: "revision spec runtime service is not publishable",
+			details: gin.H{"blockers": blockers},
+		}
+	}
+	return serviceSnapshot, nil
+}
+
+func defaultFunctionName(service mgr.SandboxAppService) string {
+	name := strings.TrimSpace(service.DisplayName)
+	if name == "" {
+		name = strings.TrimSpace(service.ID)
+	}
+	if name == "" {
+		name = "function"
+	}
+	return name
+}
+
+func (h *Handler) loadPublishableService(ctx context.Context, authCtx *authn.AuthContext, source sandboxServiceSourceRequest) (*mgr.Sandbox, mgr.SandboxAppService, error) {
 	if authCtx == nil || strings.TrimSpace(authCtx.TeamID) == "" {
 		return nil, mgr.SandboxAppService{}, publishError{status: http.StatusForbidden, code: spec.CodeForbidden, message: "team context is required"}
 	}

@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
@@ -106,22 +107,23 @@ type volumeEventHub interface {
 
 // Server provides HTTP management API for health checks and metrics
 type Server struct {
-	logger        *logrus.Logger
-	mux           *http.ServeMux
-	cfg           *config.StorageProxyConfig
-	repo          volumeRepository
-	meteringRepo  meteringWriter
-	regionID      string
-	authenticator *auth.HTTPAuthenticator
-	snapshotMgr   snapshotManager
-	barrier       volumeMutationBarrier
-	volMgr        volumeMountManager
-	fileRPC       volumeFileRPC
-	eventHub      volumeEventHub
-	podResolver   volumeFilePodResolver
-	ctldResolver  volumeCtldResolver
-	selfPodID     string
-	selfClusterID string
+	logger         *logrus.Logger
+	mux            *http.ServeMux
+	cfg            *config.StorageProxyConfig
+	repo           volumeRepository
+	meteringRepo   meteringWriter
+	regionID       string
+	authenticator  *auth.HTTPAuthenticator
+	snapshotMgr    snapshotManager
+	barrier        volumeMutationBarrier
+	volMgr         volumeMountManager
+	fileRPC        volumeFileRPC
+	eventHub       volumeEventHub
+	podResolver    volumeFilePodResolver
+	ctldResolver   volumeCtldResolver
+	ctldHTTPClient *http.Client
+	selfPodID      string
+	selfClusterID  string
 }
 
 // NewServer creates a new HTTP server
@@ -146,7 +148,10 @@ func NewServer(logger *logrus.Logger, cfg *config.StorageProxyConfig, k8sClient 
 		eventHub:      eventHub,
 		podResolver:   newKubernetesVolumeFilePodResolver(logger, k8sClient, cfg),
 		ctldResolver:  newKubernetesVolumeCtldResolver(k8sClient, selfPodID),
-		selfPodID:     selfPodID,
+		ctldHTTPClient: &http.Client{
+			Timeout: ctldapi.DefaultRequestTimeout,
+		},
+		selfPodID: selfPodID,
 	}
 	if cfg != nil {
 		s.selfClusterID = naming.ClusterIDOrDefault(&cfg.DefaultClusterId)

@@ -11,6 +11,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/schedulerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
@@ -44,8 +45,8 @@ func TestGetClusterGatewayURLForClusterRefreshesCacheWithSystemToken(t *testing.
 		if got := r.Header.Get(internalauth.UserIDHeader); got != "" {
 			t.Fatalf("user header = %q, want empty", got)
 		}
-		if err := spec.WriteSuccess(w, http.StatusOK, schedulerClusterListResponse{
-			Clusters: []schedulerCluster{{
+		if err := spec.WriteSuccess(w, http.StatusOK, schedulerapi.ListClustersResponse{
+			Clusters: []schedulerapi.Cluster{{
 				ClusterID:         "cluster-a",
 				ClusterGatewayURL: "http://cluster-a:18080",
 				Enabled:           true,

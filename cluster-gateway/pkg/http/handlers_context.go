@@ -84,163 +84,83 @@ func (s *Server) createContext(c *gin.Context) {
 
 // listContexts lists all contexts in a sandbox
 func (s *Server) listContexts(c *gin.Context) {
-	sandboxID := c.Param("id")
-	if sandboxID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
+	sandboxID, ok := requireSandboxID(c)
+	if !ok {
 		return
 	}
-
-	procdURL, err := s.getProcdURL(c, sandboxID)
-	if err != nil {
-		return
-	}
-
-	c.Request.URL.Path = "/api/v1/contexts"
-	s.proxyToProcd(c, procdURL)
+	s.proxyToSandboxProcdPath(c, sandboxID, "/api/v1/contexts")
 }
 
 // getContext gets a specific context
 func (s *Server) getContext(c *gin.Context) {
-	sandboxID := c.Param("id")
-	ctxID := c.Param("ctx_id")
-	if sandboxID == "" || ctxID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id and ctx_id are required")
+	sandboxID, ctxID, ok := requireSandboxContextIDs(c)
+	if !ok {
 		return
 	}
-
-	procdURL, err := s.getProcdURL(c, sandboxID)
-	if err != nil {
-		return
-	}
-
-	c.Request.URL.Path = "/api/v1/contexts/" + ctxID
-	s.proxyToProcd(c, procdURL)
+	s.proxyToSandboxProcdPath(c, sandboxID, "/api/v1/contexts/"+ctxID)
 }
 
 // deleteContext deletes a context
 func (s *Server) deleteContext(c *gin.Context) {
-	sandboxID := c.Param("id")
-	ctxID := c.Param("ctx_id")
-	if sandboxID == "" || ctxID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id and ctx_id are required")
+	sandboxID, ctxID, ok := requireSandboxContextIDs(c)
+	if !ok {
 		return
 	}
-
-	procdURL, err := s.getProcdURL(c, sandboxID)
-	if err != nil {
-		return
-	}
-
-	c.Request.URL.Path = "/api/v1/contexts/" + ctxID
-	s.proxyToProcd(c, procdURL)
+	s.proxyToSandboxProcdPath(c, sandboxID, "/api/v1/contexts/"+ctxID)
 }
 
 // restartContext restarts a context
 func (s *Server) restartContext(c *gin.Context) {
-	sandboxID := c.Param("id")
-	ctxID := c.Param("ctx_id")
-	if sandboxID == "" || ctxID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id and ctx_id are required")
+	sandboxID, ctxID, ok := requireSandboxContextIDs(c)
+	if !ok {
 		return
 	}
-
-	procdURL, err := s.getProcdURL(c, sandboxID)
-	if err != nil {
-		return
-	}
-
-	c.Request.URL.Path = "/api/v1/contexts/" + ctxID + "/restart"
-	s.proxyToProcd(c, procdURL)
+	s.proxyToSandboxProcdPath(c, sandboxID, "/api/v1/contexts/"+ctxID+"/restart")
 }
 
 // contextInput sends input to a context
 func (s *Server) contextInput(c *gin.Context) {
-	sandboxID := c.Param("id")
-	ctxID := c.Param("ctx_id")
-	if sandboxID == "" || ctxID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id and ctx_id are required")
+	sandboxID, ctxID, ok := requireSandboxContextIDs(c)
+	if !ok {
 		return
 	}
-
-	procdURL, err := s.getProcdURL(c, sandboxID)
-	if err != nil {
-		return
-	}
-
-	c.Request.URL.Path = "/api/v1/contexts/" + ctxID + "/input"
-	s.proxyToProcd(c, procdURL)
+	s.proxyToSandboxProcdPath(c, sandboxID, "/api/v1/contexts/"+ctxID+"/input")
 }
 
 // contextExec executes context input synchronously
 func (s *Server) contextExec(c *gin.Context) {
-	sandboxID := c.Param("id")
-	ctxID := c.Param("ctx_id")
-	if sandboxID == "" || ctxID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id and ctx_id are required")
+	sandboxID, ctxID, ok := requireSandboxContextIDs(c)
+	if !ok {
 		return
 	}
-
-	procdURL, err := s.getProcdURL(c, sandboxID)
-	if err != nil {
-		return
-	}
-
-	c.Request.URL.Path = "/api/v1/contexts/" + ctxID + "/exec"
-	s.proxyToProcd(c, procdURL)
+	s.proxyToSandboxProcdPath(c, sandboxID, "/api/v1/contexts/"+ctxID+"/exec")
 }
 
 // contextResize resizes a context
 func (s *Server) contextResize(c *gin.Context) {
-	sandboxID := c.Param("id")
-	ctxID := c.Param("ctx_id")
-	if sandboxID == "" || ctxID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id and ctx_id are required")
+	sandboxID, ctxID, ok := requireSandboxContextIDs(c)
+	if !ok {
 		return
 	}
-
-	procdURL, err := s.getProcdURL(c, sandboxID)
-	if err != nil {
-		return
-	}
-
-	c.Request.URL.Path = "/api/v1/contexts/" + ctxID + "/resize"
-	s.proxyToProcd(c, procdURL)
+	s.proxyToSandboxProcdPath(c, sandboxID, "/api/v1/contexts/"+ctxID+"/resize")
 }
 
 // contextSignal sends a signal to a context
 func (s *Server) contextSignal(c *gin.Context) {
-	sandboxID := c.Param("id")
-	ctxID := c.Param("ctx_id")
-	if sandboxID == "" || ctxID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id and ctx_id are required")
+	sandboxID, ctxID, ok := requireSandboxContextIDs(c)
+	if !ok {
 		return
 	}
-
-	procdURL, err := s.getProcdURL(c, sandboxID)
-	if err != nil {
-		return
-	}
-
-	c.Request.URL.Path = "/api/v1/contexts/" + ctxID + "/signal"
-	s.proxyToProcd(c, procdURL)
+	s.proxyToSandboxProcdPath(c, sandboxID, "/api/v1/contexts/"+ctxID+"/signal")
 }
 
 // contextStats gets stats for a context
 func (s *Server) contextStats(c *gin.Context) {
-	sandboxID := c.Param("id")
-	ctxID := c.Param("ctx_id")
-	if sandboxID == "" || ctxID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id and ctx_id are required")
+	sandboxID, ctxID, ok := requireSandboxContextIDs(c)
+	if !ok {
 		return
 	}
-
-	procdURL, err := s.getProcdURL(c, sandboxID)
-	if err != nil {
-		return
-	}
-
-	c.Request.URL.Path = "/api/v1/contexts/" + ctxID + "/stats"
-	s.proxyToProcd(c, procdURL)
+	s.proxyToSandboxProcdPath(c, sandboxID, "/api/v1/contexts/"+ctxID+"/stats")
 }
 
 // contextWebSocket handles WebSocket connections for context
@@ -266,6 +186,34 @@ func (s *Server) contextWebSocket(c *gin.Context) {
 	wsProxy := proxy.NewWebSocketProxy(s.logger, proxy.WithRequestModifier(requestModifier))
 	c.Request.URL.Path = "/api/v1/contexts/" + ctxID + "/ws"
 	wsProxy.Proxy(procdURL)(c)
+}
+
+func requireSandboxID(c *gin.Context) (string, bool) {
+	sandboxID := c.Param("id")
+	if sandboxID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
+		return "", false
+	}
+	return sandboxID, true
+}
+
+func requireSandboxContextIDs(c *gin.Context) (string, string, bool) {
+	sandboxID := c.Param("id")
+	ctxID := c.Param("ctx_id")
+	if sandboxID == "" || ctxID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id and ctx_id are required")
+		return "", "", false
+	}
+	return sandboxID, ctxID, true
+}
+
+func (s *Server) proxyToSandboxProcdPath(c *gin.Context, sandboxID, path string) {
+	procdURL, err := s.getProcdURL(c, sandboxID)
+	if err != nil {
+		return
+	}
+	c.Request.URL.Path = path
+	s.proxyToProcd(c, procdURL)
 }
 
 // getProcdURL resolves the procd URL for a sandbox

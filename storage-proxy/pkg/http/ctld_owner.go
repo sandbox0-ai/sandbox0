@@ -182,7 +182,8 @@ func (s *Server) ensureCtldVolumeOwner(ctx context.Context, volumeRecord *db.San
 	if err != nil {
 		return err
 	}
-	if _, err := postCtldJSON[ctldapi.AttachVolumeOwnerResponse](ctx, ctldAddr, "/api/v1/volume-portals/owners/attach", ctldapi.AttachVolumeOwnerRequest{
+	ctldClient := ctldapi.NewClient(s.ctldHTTPClientOrDefault())
+	if _, err := ctldClient.AttachVolumeOwner(ctx, ctldAddr, ctldapi.AttachVolumeOwnerRequest{
 		TeamID:          volumeRecord.TeamID,
 		SandboxVolumeID: volumeRecord.ID,
 	}); err != nil {
@@ -227,11 +228,12 @@ func (s *Server) releaseReleasableCtldVolumeOwners(ctx context.Context, volumeID
 		if ownerURL == nil {
 			continue
 		}
-		resp, err := postCtldJSON[ctldapi.ReleaseVolumeOwnerResponse](ctx, ownerURL.String(), "/api/v1/volume-portals/owners/release", ctldapi.ReleaseVolumeOwnerRequest{
+		ctldClient := ctldapi.NewClient(s.ctldHTTPClientOrDefault())
+		resp, err := ctldClient.ReleaseVolumeOwner(ctx, ownerURL.String(), ctldapi.ReleaseVolumeOwnerRequest{
 			SandboxVolumeID: volumeID,
 		})
 		if err != nil {
-			if isCtldConflictError(err) || (resp != nil && resp.Busy) {
+			if ctldapi.IsConflictError(err) || (resp != nil && resp.Busy) {
 				return fmt.Errorf("%w: %v", errCtldOwnerBusy, err)
 			}
 			return err

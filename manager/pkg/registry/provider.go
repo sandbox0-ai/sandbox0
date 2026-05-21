@@ -152,6 +152,18 @@ func (s secretReader) read(ctx context.Context, name, key string) (string, error
 	return string(value), nil
 }
 
+func (s secretReader) readRequired(ctx context.Context, secretName, configuredKey, defaultKey, description string) (string, error) {
+	key := strings.TrimSpace(configuredKey)
+	if key == "" {
+		key = defaultKey
+	}
+	value, err := s.read(ctx, secretName, key)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", description, err)
+	}
+	return value, nil
+}
+
 func resolveNamespace(explicit string) string {
 	if strings.TrimSpace(explicit) != "" {
 		return explicit
@@ -193,22 +205,14 @@ func (p *builtinProvider) GetPushCredentials(ctx context.Context, req PushCreden
 	username := strings.TrimSpace(p.cfg.Username)
 	password := strings.TrimSpace(p.cfg.Password)
 	if username == "" || password == "" {
-		usernameKey := strings.TrimSpace(p.cfg.UsernameKey)
-		if usernameKey == "" {
-			usernameKey = "username"
-		}
-		passwordKey := strings.TrimSpace(p.cfg.PasswordKey)
-		if passwordKey == "" {
-			passwordKey = "password"
-		}
 		var err error
-		username, err = p.secrets.read(ctx, p.cfg.AuthSecretName, usernameKey)
+		username, err = p.secrets.readRequired(ctx, p.cfg.AuthSecretName, p.cfg.UsernameKey, "username", "username")
 		if err != nil {
-			return nil, fmt.Errorf("read username: %w", err)
+			return nil, err
 		}
-		password, err = p.secrets.read(ctx, p.cfg.AuthSecretName, passwordKey)
+		password, err = p.secrets.readRequired(ctx, p.cfg.AuthSecretName, p.cfg.PasswordKey, "password", "password")
 		if err != nil {
-			return nil, fmt.Errorf("read password: %w", err)
+			return nil, err
 		}
 	}
 	return &Credential{

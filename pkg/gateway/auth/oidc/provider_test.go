@@ -146,7 +146,7 @@ func TestFetchDiscoveryMetadata(t *testing.T) {
 	serverURL = server.URL
 	defer server.Close()
 
-	metadata, err := fetchDiscoveryMetadata(context.Background(), server.URL)
+	metadata, err := fetchDiscoveryMetadata(context.Background(), server.URL, server.Client())
 	if err != nil {
 		t.Fatalf("fetchDiscoveryMetadata: %v", err)
 	}
@@ -156,6 +156,65 @@ func TestFetchDiscoveryMetadata(t *testing.T) {
 	if metadata.DeviceAuthorizationEndpoint != serverURL+"/oauth/device/code" {
 		t.Fatalf("unexpected device_authorization_endpoint %q", metadata.DeviceAuthorizationEndpoint)
 	}
+}
+
+func TestResolveHTTPClientUsesTimeoutDefault(t *testing.T) {
+	t.Parallel()
+
+	got := resolveHTTPClient(nil)
+	if got == nil {
+		t.Fatal("resolveHTTPClient returned nil")
+	}
+	if got.Timeout != defaultHTTPTimeout {
+		t.Fatalf("timeout = %s, want %s", got.Timeout, defaultHTTPTimeout)
+	}
+}
+
+func TestProviderStartDeviceAuthorizationUsesConfiguredHTTPClient(t *testing.T) {
+	var calls int
+	provider := &Provider{
+		config: &config.OIDCProviderConfig{
+			DeviceAuthorizationEnabled: true,
+			DeviceClientID:             "device-client",
+			Scopes:                     []string{"openid", "email"},
+		},
+		deviceAuthorizationEndpoint: "https://issuer.example.com/oauth/device/code",
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				if req.URL.String() != "https://issuer.example.com/oauth/device/code" {
+					t.Fatalf("request URL = %q, want device endpoint", req.URL.String())
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body: io.NopCloser(strings.NewReader(`{
+						"device_code": "device-code",
+						"user_code": "user-code",
+						"verification_uri": "https://issuer.example.com/activate",
+						"expires_in": 600
+					}`)),
+				}, nil
+			}),
+		},
+	}
+
+	auth, err := provider.StartDeviceAuthorization(context.Background())
+	if err != nil {
+		t.Fatalf("StartDeviceAuthorization returned error: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("http client calls = %d, want 1", calls)
+	}
+	if auth.DeviceCode != "device-code" || auth.Interval != 5 {
+		t.Fatalf("device authorization = %#v, want decoded response with default interval", auth)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 func TestNewProviderAcceptsIssuerWithTrailingSlashFromDiscovery(t *testing.T) {

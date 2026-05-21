@@ -54,13 +54,10 @@ func (p *gcpProvider) GetPushCredentials(ctx context.Context, req PushCredential
 			}, nil
 		}
 		secretKey := strings.TrimSpace(p.cfg.ServiceAccountKey)
-		if secretKey == "" {
-			secretKey = "serviceAccount.json"
-		}
 		var err error
-		serviceAccountJSON, err = p.secrets.read(ctx, p.cfg.ServiceAccountSecret, secretKey)
+		serviceAccountJSON, err = p.secrets.readRequired(ctx, p.cfg.ServiceAccountSecret, secretKey, "serviceAccount.json", "gcp service account")
 		if err != nil {
-			return nil, fmt.Errorf("read gcp service account: %w", err)
+			return nil, err
 		}
 	}
 	tokenSource, err := gcpJWTConfigFromJSON([]byte(serviceAccountJSON), "https://www.googleapis.com/auth/cloud-platform")

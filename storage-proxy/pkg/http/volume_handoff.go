@@ -1,53 +1,21 @@
 package http
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 )
 
 const volumeHandoffPollInterval = 100 * time.Millisecond
-
-type ctldRequestError struct {
-	StatusCode int
-	Message    string
-}
-
-func (e *ctldRequestError) Error() string {
-	if e == nil {
-		return ""
-	}
-	if strings.TrimSpace(e.Message) != "" {
-		return fmt.Sprintf("ctld request failed with status %d: %s", e.StatusCode, e.Message)
-	}
-	return fmt.Sprintf("ctld request failed with status %d", e.StatusCode)
-}
-
-type preparePortalBindRequest struct {
-	TeamID          string `json:"team_id"`
-	UserID          string `json:"user_id"`
-	VolumeID        string `json:"volume_id"`
-	TargetClusterID string `json:"target_cluster_id"`
-	TargetCtldAddr  string `json:"target_ctld_addr"`
-	Namespace       string `json:"namespace"`
-	PodName         string `json:"pod_name"`
-	PodUID          string `json:"pod_uid"`
-	PortalName      string `json:"portal_name"`
-	MountPath       string `json:"mount_path"`
-	SandboxID       string `json:"sandbox_id"`
-	OwnerTeamID     string `json:"owner_team_id"`
-}
 
 func (s *Server) waitForVolumeHandoff(ctx context.Context, volumeID string) error {
 	if s == nil || s.repo == nil || strings.TrimSpace(volumeID) == "" {
@@ -76,7 +44,7 @@ func (s *Server) waitForVolumeHandoff(ctx context.Context, volumeID string) erro
 	}
 }
 
-func (s *Server) executePortalBindHandoff(ctx context.Context, volumeRecord *db.SandboxVolume, sourceMount *db.VolumeMount, req preparePortalBindRequest) error {
+func (s *Server) executePortalBindHandoff(ctx context.Context, volumeRecord *db.SandboxVolume, sourceMount *db.VolumeMount, req volumeportal.PrepareBindRequest) error {
 	if s == nil || s.repo == nil || s.podResolver == nil || volumeRecord == nil || sourceMount == nil {
 		return fmt.Errorf("volume handoff unavailable")
 	}
@@ -90,6 +58,7 @@ func (s *Server) executePortalBindHandoff(ctx context.Context, volumeRecord *db.
 	if sameCTLDAddress(sourceURL.String(), req.TargetCtldAddr) {
 		return nil
 	}
+	ctldClient := ctldapi.NewClient(s.ctldHTTPClientOrDefault())
 	targetPodID := strings.TrimSpace(req.Namespace + "/" + req.PodName)
 	if req.PodName == "" {
 		targetPodID = strings.TrimSpace(req.PodUID)
@@ -111,18 +80,18 @@ func (s *Server) executePortalBindHandoff(ctx context.Context, volumeRecord *db.
 		_ = s.repo.DeleteVolumeHandoff(context.Background(), volumeRecord.ID)
 	}
 
-	prepareResp, err := postCtldJSON[ctldapi.PrepareVolumePortalHandoffResponse](ctx, sourceURL.String(), "/api/v1/volume-portals/handoffs/prepare", ctldapi.PrepareVolumePortalHandoffRequest{
+	prepareResp, err := ctldClient.PrepareVolumePortalHandoff(ctx, sourceURL.String(), ctldapi.PrepareVolumePortalHandoffRequest{
 		SandboxVolumeID: volumeRecord.ID,
 	})
 	if err != nil {
 		cleanup()
-		if isCtldConflictError(err) {
+		if ctldapi.IsConflictError(err) {
 			return fmt.Errorf("%w: %v", db.ErrConflict, err)
 		}
 		return err
 	}
 	if prepareResp == nil || !prepareResp.Prepared {
-		_, _ = postCtldJSON[ctldapi.AbortVolumePortalHandoffResponse](context.Background(), sourceURL.String(), "/api/v1/volume-portals/handoffs/abort", ctldapi.AbortVolumePortalHandoffRequest{
+		_, _ = ctldClient.AbortVolumePortalHandoff(context.Background(), sourceURL.String(), ctldapi.AbortVolumePortalHandoffRequest{
 			SandboxVolumeID: volumeRecord.ID,
 		})
 		cleanup()
@@ -142,14 +111,14 @@ func (s *Server) executePortalBindHandoff(ctx context.Context, volumeRecord *db.
 		Status:          "binding",
 		ExpiresAt:       expiresAt,
 	}); err != nil {
-		_, _ = postCtldJSON[ctldapi.AbortVolumePortalHandoffResponse](context.Background(), sourceURL.String(), "/api/v1/volume-portals/handoffs/abort", ctldapi.AbortVolumePortalHandoffRequest{
+		_, _ = ctldClient.AbortVolumePortalHandoff(context.Background(), sourceURL.String(), ctldapi.AbortVolumePortalHandoffRequest{
 			SandboxVolumeID: volumeRecord.ID,
 		})
 		cleanup()
 		return err
 	}
 
-	_, err = postCtldJSON[ctldapi.BindVolumePortalResponse](ctx, req.TargetCtldAddr, "/api/v1/volume-portals/bind", ctldapi.BindVolumePortalRequest{
+	_, err = ctldClient.BindVolumePortal(ctx, req.TargetCtldAddr, ctldapi.BindVolumePortalRequest{
 		Namespace:               req.Namespace,
 		PodName:                 req.PodName,
 		PodUID:                  req.PodUID,
@@ -162,17 +131,17 @@ func (s *Server) executePortalBindHandoff(ctx context.Context, volumeRecord *db.
 		TransferSourcePodID:     sourceMount.PodID,
 	})
 	if err != nil {
-		_, _ = postCtldJSON[ctldapi.AbortVolumePortalHandoffResponse](context.Background(), sourceURL.String(), "/api/v1/volume-portals/handoffs/abort", ctldapi.AbortVolumePortalHandoffRequest{
+		_, _ = ctldClient.AbortVolumePortalHandoff(context.Background(), sourceURL.String(), ctldapi.AbortVolumePortalHandoffRequest{
 			SandboxVolumeID: volumeRecord.ID,
 		})
 		cleanup()
-		if isCtldConflictError(err) {
+		if ctldapi.IsConflictError(err) {
 			return fmt.Errorf("%w: %v", db.ErrConflict, err)
 		}
 		return err
 	}
 
-	if _, err := postCtldJSON[ctldapi.CompleteVolumePortalHandoffResponse](ctx, sourceURL.String(), "/api/v1/volume-portals/handoffs/complete", ctldapi.CompleteVolumePortalHandoffRequest{
+	if _, err := ctldClient.CompleteVolumePortalHandoff(ctx, sourceURL.String(), ctldapi.CompleteVolumePortalHandoffRequest{
 		SandboxVolumeID: volumeRecord.ID,
 	}); err != nil {
 		cleanup()
@@ -209,60 +178,9 @@ func sameCTLDAddress(left, right string) bool {
 	return strings.TrimRight(strings.TrimSpace(left), "/") == strings.TrimRight(strings.TrimSpace(right), "/")
 }
 
-func postCtldJSON[T any](ctx context.Context, baseURL, path string, request any) (*T, error) {
-	var reader io.Reader
-	if request != nil {
-		payload, err := json.Marshal(request)
-		if err != nil {
-			return nil, err
-		}
-		reader = bytes.NewReader(payload)
+func (s *Server) ctldHTTPClientOrDefault() *http.Client {
+	if s != nil && s.ctldHTTPClient != nil {
+		return s.ctldHTTPClient
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(baseURL, "/")+path, reader)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	var out T
-	if len(body) > 0 {
-		if err := json.Unmarshal(body, &out); err != nil {
-			return nil, err
-		}
-	}
-	if resp.StatusCode != http.StatusOK {
-		message := ""
-		switch typed := any(&out).(type) {
-		case *ctldapi.AttachVolumeOwnerResponse:
-			message = typed.Error
-		case *ctldapi.ReleaseVolumeOwnerResponse:
-			message = typed.Error
-		case *ctldapi.PrepareVolumePortalHandoffResponse:
-			message = typed.Error
-		case *ctldapi.CompleteVolumePortalHandoffResponse:
-			message = typed.Error
-		case *ctldapi.AbortVolumePortalHandoffResponse:
-			message = typed.Error
-		case *ctldapi.BindVolumePortalResponse:
-			message = typed.Error
-		case *ctldapi.UnbindVolumePortalResponse:
-			message = typed.Error
-		}
-		return &out, &ctldRequestError{StatusCode: resp.StatusCode, Message: strings.TrimSpace(message)}
-	}
-	return &out, nil
-}
-
-func isCtldConflictError(err error) bool {
-	var reqErr *ctldRequestError
-	return errors.As(err, &reqErr) && reqErr != nil && reqErr.StatusCode == http.StatusConflict
+	return &http.Client{Timeout: ctldapi.DefaultRequestTimeout}
 }

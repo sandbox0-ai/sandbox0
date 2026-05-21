@@ -9,21 +9,11 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/schedulerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 )
-
-type schedulerCluster struct {
-	ClusterID         string `json:"cluster_id"`
-	ClusterGatewayURL string `json:"cluster_gateway_url"`
-	Enabled           bool   `json:"enabled"`
-}
-
-type schedulerClusterListResponse struct {
-	Clusters []schedulerCluster `json:"clusters"`
-	Count    int                `json:"count"`
-}
 
 func (s *Server) getClusterGatewayProxy(targetURL string) (*proxy.Router, error) {
 	s.clusterGatewayProxiesMu.RLock()
@@ -118,7 +108,7 @@ func (s *Server) refreshClusterCache(ctx context.Context, authCtx *authn.AuthCon
 		return fmt.Errorf("list clusters failed: %s", resp.Status)
 	}
 
-	result, apiErr, err := spec.DecodeResponse[schedulerClusterListResponse](resp.Body)
+	result, apiErr, err := spec.DecodeResponse[schedulerapi.ListClustersResponse](resp.Body)
 	if err != nil {
 		return fmt.Errorf("decode clusters: %w", err)
 	}

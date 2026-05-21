@@ -45,20 +45,9 @@ type SandboxVolumePortalPreparationClient interface {
 	PrepareForVolumePortalBind(ctx context.Context, req PrepareVolumePortalBindRequest) error
 }
 
-type PrepareVolumePortalBindRequest struct {
-	TeamID          string `json:"team_id"`
-	UserID          string `json:"user_id"`
-	VolumeID        string `json:"volume_id"`
-	TargetClusterID string `json:"target_cluster_id"`
-	TargetCtldAddr  string `json:"target_ctld_addr"`
-	Namespace       string `json:"namespace"`
-	PodName         string `json:"pod_name"`
-	PodUID          string `json:"pod_uid"`
-	PortalName      string `json:"portal_name"`
-	MountPath       string `json:"mount_path"`
-	SandboxID       string `json:"sandbox_id"`
-	OwnerTeamID     string `json:"owner_team_id"`
-}
+// PrepareVolumePortalBindRequest is kept for the manager service API while the
+// wire type lives in the shared volumeportal package.
+type PrepareVolumePortalBindRequest = volumeportal.PrepareBindRequest
 
 type StorageProxyVolumeClient struct {
 	baseURL        string

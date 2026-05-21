@@ -7,21 +7,11 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/schedulerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 )
-
-type schedulerCluster struct {
-	ClusterID         string `json:"cluster_id"`
-	ClusterGatewayURL string `json:"cluster_gateway_url"`
-	Enabled           bool   `json:"enabled"`
-}
-
-type schedulerClusterListResponse struct {
-	Clusters []schedulerCluster `json:"clusters"`
-	Count    int                `json:"count"`
-}
 
 func (s *Server) defaultClusterGatewayURL() string {
 	return strings.TrimRight(strings.TrimSpace(s.cfg.DefaultClusterGatewayURL), "/")
@@ -58,7 +48,7 @@ func (s *Server) clusterGatewayURLForSandbox(ctx context.Context, sandboxID stri
 	return "", fmt.Errorf("cluster %q not found", parsed.ClusterID)
 }
 
-func (s *Server) listSchedulerClusters(ctx context.Context) ([]schedulerCluster, error) {
+func (s *Server) listSchedulerClusters(ctx context.Context) ([]schedulerapi.Cluster, error) {
 	if s.internalAuthGen == nil {
 		return nil, fmt.Errorf("internal auth generator is not configured")
 	}
@@ -88,7 +78,7 @@ func (s *Server) listSchedulerClusters(ctx context.Context) ([]schedulerCluster,
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("list clusters failed: %s", resp.Status)
 	}
-	result, apiErr, err := spec.DecodeResponse[schedulerClusterListResponse](resp.Body)
+	result, apiErr, err := spec.DecodeResponse[schedulerapi.ListClustersResponse](resp.Body)
 	if err != nil {
 		return nil, err
 	}

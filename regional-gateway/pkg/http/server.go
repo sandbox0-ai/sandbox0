@@ -21,6 +21,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functionapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functions"
 	gatewayhandlers "github.com/sandbox0-ai/sandbox0/pkg/gateway/http/handlers"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/httpclient"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/public"
@@ -263,10 +264,14 @@ func NewServer(
 }
 
 func (s *Server) outboundHTTPClient() *http.Client {
-	if s != nil && s.httpClient != nil {
-		return s.httpClient
+	if s != nil {
+		timeout := httpclient.DefaultTimeout
+		if s.cfg != nil && s.cfg.ProxyTimeout.Duration > 0 {
+			timeout = s.cfg.ProxyTimeout.Duration
+		}
+		return httpclient.Resolve(s.httpClient, timeout)
 	}
-	return &http.Client{}
+	return httpclient.Resolve(nil, 0)
 }
 
 func (s *Server) functionSnapshotHTTPClient() *http.Client {

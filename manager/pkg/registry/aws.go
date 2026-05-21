@@ -41,28 +41,20 @@ func (p *awsProvider) GetPushCredentials(ctx context.Context, req PushCredential
 		if strings.TrimSpace(p.cfg.AccessKeySecret) == "" {
 			return nil, fmt.Errorf("aws access key secret is required")
 		}
-		accessKeyKey := p.cfg.AccessKeyKey
-		if accessKeyKey == "" {
-			accessKeyKey = "accessKeyId"
-		}
-		secretKeyKey := p.cfg.SecretKeyKey
-		if secretKeyKey == "" {
-			secretKeyKey = "secretAccessKey"
-		}
 
 		var err error
-		accessKey, err = p.secrets.read(ctx, p.cfg.AccessKeySecret, accessKeyKey)
+		accessKey, err = p.secrets.readRequired(ctx, p.cfg.AccessKeySecret, p.cfg.AccessKeyKey, "accessKeyId", "aws access key")
 		if err != nil {
-			return nil, fmt.Errorf("read aws access key: %w", err)
+			return nil, err
 		}
-		secretKey, err = p.secrets.read(ctx, p.cfg.AccessKeySecret, secretKeyKey)
+		secretKey, err = p.secrets.readRequired(ctx, p.cfg.AccessKeySecret, p.cfg.SecretKeyKey, "secretAccessKey", "aws secret key")
 		if err != nil {
-			return nil, fmt.Errorf("read aws secret key: %w", err)
+			return nil, err
 		}
 		if strings.TrimSpace(p.cfg.SessionTokenKey) != "" {
-			sessionToken, err = p.secrets.read(ctx, p.cfg.AccessKeySecret, p.cfg.SessionTokenKey)
+			sessionToken, err = p.secrets.readRequired(ctx, p.cfg.AccessKeySecret, p.cfg.SessionTokenKey, "", "aws session token")
 			if err != nil {
-				return nil, fmt.Errorf("read aws session token: %w", err)
+				return nil, err
 			}
 		}
 	}

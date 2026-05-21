@@ -129,82 +129,38 @@ type InitializeResponse struct {
 // Pause calls the procd pause API and returns resource usage.
 func (c *ProcdClient) Pause(ctx context.Context, procdAddress, internalToken string) (*PauseResponse, error) {
 	url := procdAddress + "/api/v1/sandbox/pause"
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Internal-Token", internalToken)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("do request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-
-	result, errInfo, err := decodeProcdResponse[PauseResponse](body)
-	if err != nil {
-		return nil, fmt.Errorf("decode pause response: %w", err)
-	}
-	if errInfo != nil {
-		return nil, fmt.Errorf("pause failed: %s", errInfo.Message)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("pause failed with status %d", resp.StatusCode)
-	}
-
-	return result, nil
+	return doProcdRequest[PauseResponse](ctx, c.httpClient, http.MethodPost, url, internalToken, "pause", nil)
 }
 
 // Resume calls the procd resume API.
 func (c *ProcdClient) Resume(ctx context.Context, procdAddress, internalToken string) (*ResumeResponse, error) {
 	url := procdAddress + "/api/v1/sandbox/resume"
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Internal-Token", internalToken)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("do request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-
-	result, errInfo, err := decodeProcdResponse[ResumeResponse](body)
-	if err != nil {
-		return nil, fmt.Errorf("decode resume response: %w", err)
-	}
-	if errInfo != nil {
-		return nil, fmt.Errorf("resume failed: %s", errInfo.Message)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("resume failed with status %d", resp.StatusCode)
-	}
-
-	return result, nil
+	return doProcdRequest[ResumeResponse](ctx, c.httpClient, http.MethodPost, url, internalToken, "resume", nil)
 }
 
 // Stats calls the procd stats API.
 func (c *ProcdClient) Stats(ctx context.Context, procdAddress, internalToken string) (*StatsResponse, error) {
 	url := procdAddress + "/api/v1/sandbox/stats"
+	return doProcdRequest[StatsResponse](ctx, c.httpClient, http.MethodGet, url, internalToken, "stats", nil)
+}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+// Initialize calls the procd initialize API.
+func (c *ProcdClient) Initialize(ctx context.Context, procdAddress string, req InitializeRequest, internalToken string) (*InitializeResponse, error) {
+	url := procdAddress + "/api/v1/initialize"
+	return doProcdRequest[InitializeResponse](ctx, c.httpClient, http.MethodPost, url, internalToken, "initialize", req)
+}
+
+func doProcdRequest[T any](ctx context.Context, httpClient *http.Client, method, url, internalToken, action string, request any) (*T, error) {
+	var body io.Reader
+	if request != nil {
+		jsonBody, err := json.Marshal(request)
+		if err != nil {
+			return nil, fmt.Errorf("marshal body: %w", err)
+		}
+		body = bytes.NewReader(jsonBody)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -212,50 +168,7 @@ func (c *ProcdClient) Stats(ctx context.Context, procdAddress, internalToken str
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Internal-Token", internalToken)
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("do request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-
-	result, errInfo, err := decodeProcdResponse[StatsResponse](body)
-	if err != nil {
-		return nil, fmt.Errorf("decode stats response: %w", err)
-	}
-	if errInfo != nil {
-		return nil, fmt.Errorf("stats failed: %s", errInfo.Message)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("stats failed with status %d", resp.StatusCode)
-	}
-
-	return result, nil
-}
-
-// Initialize calls the procd initialize API.
-func (c *ProcdClient) Initialize(ctx context.Context, procdAddress string, req InitializeRequest, internalToken string) (*InitializeResponse, error) {
-	url := procdAddress + "/api/v1/initialize"
-
-	jsonBody, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshal body: %w", err)
-	}
-	reqBody := bytes.NewReader(jsonBody)
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("X-Internal-Token", internalToken)
-
-	resp, err := c.httpClient.Do(httpReq)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("do request: %w", err)
 	}
@@ -266,15 +179,15 @@ func (c *ProcdClient) Initialize(ctx context.Context, procdAddress string, req I
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 
-	result, errInfo, err := decodeProcdResponse[InitializeResponse](respBody)
+	result, errInfo, err := decodeProcdResponse[T](respBody)
 	if err != nil {
-		return nil, fmt.Errorf("decode initialize response: %w", err)
+		return nil, fmt.Errorf("decode %s response: %w", action, err)
 	}
 	if errInfo != nil {
-		return nil, fmt.Errorf("initialize failed: %s", errInfo.Message)
+		return nil, fmt.Errorf("%s failed: %s", action, errInfo.Message)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("initialize failed with status %d", resp.StatusCode)
+		return nil, fmt.Errorf("%s failed with status %d", action, resp.StatusCode)
 	}
 
 	return result, nil

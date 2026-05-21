@@ -15,6 +15,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
+	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/snapshot"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
@@ -697,7 +698,7 @@ func (s *Server) prepareSandboxVolumeForPortalBind(w http.ResponseWriter, r *htt
 		return
 	}
 
-	var req preparePortalBindRequest
+	var req volumeportal.PrepareBindRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
 		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return

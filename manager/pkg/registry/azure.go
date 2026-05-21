@@ -28,31 +28,19 @@ func (p *azureProvider) GetPushCredentials(ctx context.Context, req PushCredenti
 		if strings.TrimSpace(p.cfg.CredentialsSecret) == "" {
 			return nil, fmt.Errorf("azure credentials secret is required")
 		}
-		tenantIDKey := strings.TrimSpace(p.cfg.TenantIDKey)
-		if tenantIDKey == "" {
-			tenantIDKey = "tenantId"
-		}
-		clientIDKey := strings.TrimSpace(p.cfg.ClientIDKey)
-		if clientIDKey == "" {
-			clientIDKey = "clientId"
-		}
-		clientSecretKey := strings.TrimSpace(p.cfg.ClientSecretKey)
-		if clientSecretKey == "" {
-			clientSecretKey = "clientSecret"
-		}
 
 		var err error
-		tenantID, err = p.secrets.read(ctx, p.cfg.CredentialsSecret, tenantIDKey)
+		tenantID, err = p.secrets.readRequired(ctx, p.cfg.CredentialsSecret, p.cfg.TenantIDKey, "tenantId", "azure tenant id")
 		if err != nil {
-			return nil, fmt.Errorf("read azure tenant id: %w", err)
+			return nil, err
 		}
-		clientID, err = p.secrets.read(ctx, p.cfg.CredentialsSecret, clientIDKey)
+		clientID, err = p.secrets.readRequired(ctx, p.cfg.CredentialsSecret, p.cfg.ClientIDKey, "clientId", "azure client id")
 		if err != nil {
-			return nil, fmt.Errorf("read azure client id: %w", err)
+			return nil, err
 		}
-		clientSecret, err = p.secrets.read(ctx, p.cfg.CredentialsSecret, clientSecretKey)
+		clientSecret, err = p.secrets.readRequired(ctx, p.cfg.CredentialsSecret, p.cfg.ClientSecretKey, "clientSecret", "azure client secret")
 		if err != nil {
-			return nil, fmt.Errorf("read azure client secret: %w", err)
+			return nil, err
 		}
 	}
 

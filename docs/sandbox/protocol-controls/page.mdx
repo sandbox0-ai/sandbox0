@@ -192,37 +192,44 @@ const client = new Client({
     baseUrl: process.env.SANDBOX0_BASE_URL!,
 });
 
-await client.sandbox(process.env.SANDBOX_ID!).updateNetworkPolicy({
-    mode: models.SandboxNetworkPolicyModeEnum.BlockAll,
-    egress: {
-        trafficRules: [
-            {
-                name: "allow-docs-mcp",
-                action: models.TrafficRuleAction.Allow,
-                domains: ["mcp.example.com"],
-                ports: [{ port: 443, protocol: "tcp" }],
-            },
-        ],
-        protocolRules: [
-            {
-                name: "docs-mcp-tools",
-                protocol: models.ProtocolRuleProtocol.ProtocolRuleProtocolMcp,
-                domains: ["mcp.example.com"],
-                ports: [{ port: 443, protocol: "tcp" }],
-                tlsMode: models.EgressTLSMode.TerminateReoriginate,
-                httpMatch: {
-                    methods: ["POST"],
-                    paths: ["/mcp"],
+async function main() {
+    await client.sandbox(process.env.SANDBOX_ID!).updateNetworkPolicy({
+        mode: models.SandboxNetworkPolicyModeEnum.BlockAll,
+        egress: {
+            trafficRules: [
+                {
+                    name: "allow-docs-mcp",
+                    action: models.TrafficRuleAction.Allow,
+                    domains: ["mcp.example.com"],
+                    ports: [{ port: 443, protocol: "tcp" }],
                 },
-                mcp: {
-                    tools: {
-                        allowed: ["read_file"],
-                        denied: ["write_file", "run_command"],
+            ],
+            protocolRules: [
+                {
+                    name: "docs-mcp-tools",
+                    protocol: models.ProtocolRuleProtocol.ProtocolRuleProtocolMcp,
+                    domains: ["mcp.example.com"],
+                    ports: [{ port: 443, protocol: "tcp" }],
+                    tlsMode: models.EgressTLSMode.TerminateReoriginate,
+                    httpMatch: {
+                        methods: ["POST"],
+                        paths: ["/mcp"],
+                    },
+                    mcp: {
+                        tools: {
+                            allowed: ["read_file"],
+                            denied: ["write_file", "run_command"],
+                        },
                     },
                 },
-            },
-        ],
-    },
+            ],
+        },
+    });
+}
+
+main().catch((error) => {
+    console.error(error);
+    process.exit(1);
 });
 ```
 

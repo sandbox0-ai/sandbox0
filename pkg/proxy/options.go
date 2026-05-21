@@ -8,8 +8,9 @@ type RequestModifier func(*http.Request)
 type Option func(*options)
 
 type options struct {
-	requestModifiers []RequestModifier
-	httpClient       *http.Client
+	requestModifiers     []RequestModifier
+	httpClient           *http.Client
+	trustForwardedHeader bool
 }
 
 // WithRequestModifier registers a request modifier for proxy requests.
@@ -27,6 +28,15 @@ func WithRequestModifier(mod RequestModifier) Option {
 func WithHTTPClient(client *http.Client) Option {
 	return func(o *options) {
 		o.httpClient = client
+	}
+}
+
+// WithTrustedForwardedHeaders preserves inbound X-Forwarded-* identity headers
+// before appending the current proxy hop. Only use this on authenticated
+// internal proxy hops where the previous proxy is trusted.
+func WithTrustedForwardedHeaders() Option {
+	return func(o *options) {
+		o.trustForwardedHeader = true
 	}
 }
 

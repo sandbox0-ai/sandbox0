@@ -106,8 +106,13 @@ func NewServer(
 		return nil, fmt.Errorf("create function route rate limiter: %w", err)
 	}
 
+	router := gin.New()
+	if err := router.SetTrustedProxies(nil); err != nil {
+		return nil, fmt.Errorf("configure trusted proxies: %w", err)
+	}
+
 	server := &Server{
-		router:              gin.New(),
+		router:              router,
 		cfg:                 cfg,
 		pool:                pool,
 		functionRepo:        functions.NewRepository(pool),

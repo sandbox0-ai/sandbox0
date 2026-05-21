@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httputil"
@@ -21,6 +22,9 @@ type Router struct {
 	requestModifiers []RequestModifier
 	// httpClient is the HTTP client used for proxy requests
 	httpClient *http.Client
+	// trustForwardedHeader preserves forwarding headers from an authenticated
+	// upstream proxy before appending this proxy hop.
+	trustForwardedHeader bool
 }
 
 // NewRouter creates a new router
@@ -32,11 +36,12 @@ func NewRouter(targetUrl string, logger *zap.Logger, timeout time.Duration, opts
 
 	parsedOpts := collectOptions(opts...)
 	return &Router{
-		targetUrl:        tu,
-		logger:           logger,
-		timeout:          timeout,
-		requestModifiers: parsedOpts.requestModifiers,
-		httpClient:       parsedOpts.httpClient,
+		targetUrl:            tu,
+		logger:               logger,
+		timeout:              timeout,
+		requestModifiers:     parsedOpts.requestModifiers,
+		httpClient:           parsedOpts.httpClient,
+		trustForwardedHeader: parsedOpts.trustForwardedHeader,
 	}, nil
 }
 
@@ -49,6 +54,9 @@ func (r *Router) ProxyToTarget(c *gin.Context) {
 		opts := make([]Option, 0, len(r.requestModifiers))
 		for _, mod := range r.requestModifiers {
 			opts = append(opts, WithRequestModifier(mod))
+		}
+		if r.trustForwardedHeader {
+			opts = append(opts, WithTrustedForwardedHeaders())
 		}
 		NewWebSocketProxy(r.logger, opts...).Proxy(r.targetUrl)(c)
 		return
@@ -71,29 +79,6 @@ func (r *Router) ProxyToTarget(c *gin.Context) {
 
 // createReverseProxyDirector creates an httputil.ReverseProxy with proper configuration
 func (r *Router) createReverseProxyDirector(target *url.URL) *httputil.ReverseProxy {
-	director := func(req *http.Request) {
-		req.URL.Scheme = target.Scheme
-		req.URL.Host = target.Host
-		req.Host = target.Host
-
-		applyRequestModifiers(req, r.requestModifiers)
-
-		// Preserve the original path (don't rewrite it here)
-		// Path rewriting should be done by specific handlers if needed
-
-		// Forward auth context
-		if authCtx := req.Context().Value("auth_context"); authCtx != nil {
-			// The upstream service can validate this header
-			// In production, use mutual TLS or signed tokens
-			req.Header.Set("X-Team-ID", req.Header.Get("X-Team-ID"))
-		}
-
-		r.logger.Debug("Proxying request",
-			zap.String("method", req.Method),
-			zap.String("target", req.URL.String()),
-		)
-	}
-
 	// Use custom HTTP client's transport if provided, otherwise use default transport
 	var transport http.RoundTripper
 	if r.httpClient != nil && r.httpClient.Transport != nil {
@@ -107,12 +92,27 @@ func (r *Router) createReverseProxyDirector(target *url.URL) *httputil.ReversePr
 	}
 
 	proxy := &httputil.ReverseProxy{
-		Director:  director,
+		Rewrite: func(req *httputil.ProxyRequest) {
+			req.Out.URL.Scheme = target.Scheme
+			req.Out.URL.Host = target.Host
+			req.Out.Host = target.Host
+			setForwardedHeaders(req.Out, req.In, r.trustForwardedHeader)
+			applyRequestModifiers(req.Out, r.requestModifiers)
+
+			r.logger.Debug("Proxying request",
+				zap.String("method", req.Out.Method),
+				zap.String("target", req.Out.URL.String()),
+			)
+		},
 		Transport: transport,
 		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
 			status := http.StatusBadGateway
 			body := `{"error": "upstream service unavailable"}`
-			if IsTimeoutError(err) {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(err, &maxBytesErr) {
+				status = http.StatusRequestEntityTooLarge
+				body = `{"error": "request body too large"}`
+			} else if IsTimeoutError(err) {
 				status = http.StatusGatewayTimeout
 				body = `{"error": "upstream request timed out"}`
 			}

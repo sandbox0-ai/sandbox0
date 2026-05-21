@@ -24,6 +24,14 @@ Function traffic is handled by `function-gateway`. The gateway resolves the host
 
 Function serving is revision-first. The gateway does not proxy production traffic to the mutable source sandbox. When no reusable runtime exists, the gateway claims a new runtime sandbox from the revision's template, mounts the revision-owned volumes, starts the service runtime command or binds to the referenced warm process, and reuses runtime instances for later requests. The runtime pool scales out up to the function's `max_active` setting when local in-flight requests reach the soft `target_concurrency` target. Changes made to the source sandbox after publishing require a new revision before they affect the function host.
 
+## Public Ingress Security
+
+Function public ingress treats caller-supplied forwarding identity headers as untrusted. `function-gateway` removes `Forwarded`, `X-Forwarded-*`, `X-Real-IP`, and common CDN client-IP headers before proxying, then writes its own `X-Forwarded-For`, `X-Forwarded-Host`, and `X-Forwarded-Proto` values for the next hop. The authenticated internal hop from `function-gateway` to `cluster-gateway` is the only place where prior `X-Forwarded-*` values are preserved and extended.
+
+Function requests are rejected before runtime proxying when the declared body size exceeds 32 MiB. Chunked or streaming bodies are also bounded by the same limit while the proxy reads them.
+
+Inbound route policy controls how callers enter the Function. Outbound calls made by the runtime sandbox still use the sandbox network policy and egress auth model from the runtime template and claim path. Public ingress does not grant extra outbound access.
+
 ## Publishable Services
 
 Only publishable Sandbox Services can become function revisions. A service is publishable when it is public and has a restartable runtime:

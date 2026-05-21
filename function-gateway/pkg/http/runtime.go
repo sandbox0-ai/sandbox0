@@ -35,6 +35,7 @@ const defaultFunctionAutoResumeTimeout = 30 * time.Second
 const defaultFunctionRuntimeStartTimeout = 30 * time.Second
 const functionRuntimeRestoreLockPrefix = "function-runtime-restore:"
 const functionServiceReadinessProbeInterval = 200 * time.Millisecond
+const defaultFunctionMaxRequestBodyBytes int64 = 32 << 20
 
 type functionRouteMatch struct {
 	route         *mgr.SandboxAppServiceRoute
@@ -91,20 +92,25 @@ func (s *Server) serveFunctionRevision(c *gin.Context, fn *functions.Function, r
 		routeID = strings.TrimSpace(match.route.ID)
 	}
 	setFunctionSpanAttributes(c.Request.Context(), fn, rev, routeID, nil)
+	if !s.enforceFunctionIngressRequestLimits(c, fn, rev, routeID) {
+		return
+	}
 	if !match.pathMatched {
+		s.observeFunctionIngressFailure(fn, rev, routeID, "route_not_exposed", nethttp.StatusNotFound)
 		spec.JSONError(c, nethttp.StatusNotFound, spec.CodeNotFound, "route is not exposed")
 		return
 	}
 	if c.Request.Method == nethttp.MethodOptions && match.route.CORS != nil {
-		if !s.enforceFunctionRoute(c, fn.TeamID, fn.ID, match.route) {
+		if !s.enforceFunctionRoute(c, fn, rev, routeID, match.route) {
 			return
 		}
 	}
 	if !match.methodAllowed {
+		s.observeFunctionIngressFailure(fn, rev, routeID, "method_not_allowed", nethttp.StatusMethodNotAllowed)
 		spec.JSONError(c, nethttp.StatusMethodNotAllowed, spec.CodeForbidden, "method is not allowed")
 		return
 	}
-	if !s.enforceFunctionRoute(c, fn.TeamID, fn.ID, match.route) {
+	if !s.enforceFunctionRoute(c, fn, rev, routeID, match.route) {
 		return
 	}
 
@@ -213,15 +219,40 @@ func functionRouteMethodAllowed(route *mgr.SandboxAppServiceRoute, method string
 	return false
 }
 
-func (s *Server) enforceFunctionRoute(c *gin.Context, teamID, functionID string, route *mgr.SandboxAppServiceRoute) bool {
+func (s *Server) enforceFunctionIngressRequestLimits(c *gin.Context, fn *functions.Function, rev *functions.Revision, routeID string) bool {
+	if c == nil || c.Request == nil {
+		return true
+	}
+	if c.Request.ContentLength > defaultFunctionMaxRequestBodyBytes {
+		s.observeFunctionIngressFailure(fn, rev, routeID, "request_body_too_large", nethttp.StatusRequestEntityTooLarge)
+		spec.JSONError(c, nethttp.StatusRequestEntityTooLarge, spec.CodeBadRequest, "request body too large")
+		return false
+	}
+	if c.Request.Body != nil {
+		c.Request.Body = nethttp.MaxBytesReader(c.Writer, c.Request.Body, defaultFunctionMaxRequestBodyBytes)
+	}
+	return true
+}
+
+func (s *Server) enforceFunctionRoute(c *gin.Context, fn *functions.Function, rev *functions.Revision, routeID string, route *mgr.SandboxAppServiceRoute) bool {
 	if route == nil {
 		return true
 	}
-	if handled := handleFunctionCORS(c, route); handled {
+	if handled, failureReason, status := handleFunctionCORS(c, route); handled {
+		if failureReason != "" {
+			s.observeFunctionIngressFailure(fn, rev, routeID, failureReason, status)
+		}
 		return false
 	}
-	if !authorizeFunctionRoute(c, route) {
+	authorized, failureReason, status := authorizeFunctionRoute(c, route)
+	if !authorized {
+		s.observeFunctionIngressFailure(fn, rev, routeID, failureReason, status)
 		return false
+	}
+	teamID, functionID := "", ""
+	if fn != nil {
+		teamID = fn.TeamID
+		functionID = fn.ID
 	}
 	allowed, err := s.allowFunctionRoute(c, teamID, functionID, route)
 	if err != nil {
@@ -231,10 +262,12 @@ func (s *Server) enforceFunctionRoute(c *gin.Context, teamID, functionID string,
 			zap.String("route_id", route.ID),
 			zap.Error(err),
 		)
+		s.observeFunctionIngressFailure(fn, rev, routeID, "rate_limiter_unavailable", nethttp.StatusServiceUnavailable)
 		spec.JSONError(c, nethttp.StatusServiceUnavailable, spec.CodeUnavailable, "rate limiter unavailable")
 		return false
 	}
 	if !allowed {
+		s.observeFunctionIngressFailure(fn, rev, routeID, "rate_limited", nethttp.StatusTooManyRequests)
 		spec.JSONError(c, nethttp.StatusTooManyRequests, spec.CodeUnavailable, "rate limit exceeded")
 		return false
 	}
@@ -244,21 +277,21 @@ func (s *Server) enforceFunctionRoute(c *gin.Context, teamID, functionID string,
 	return true
 }
 
-func handleFunctionCORS(c *gin.Context, route *mgr.SandboxAppServiceRoute) bool {
+func handleFunctionCORS(c *gin.Context, route *mgr.SandboxAppServiceRoute) (bool, string, int) {
 	cors := route.CORS
 	if cors == nil {
-		return false
+		return false, "", 0
 	}
 	origin := c.GetHeader("Origin")
 	if origin == "" {
-		return false
+		return false, "", 0
 	}
 	if !functionOriginAllowed(origin, cors.AllowedOrigins) {
 		if c.Request.Method == nethttp.MethodOptions {
 			spec.JSONError(c, nethttp.StatusForbidden, spec.CodeForbidden, "origin is not allowed")
-			return true
+			return true, "cors_origin_denied", nethttp.StatusForbidden
 		}
-		return false
+		return false, "", 0
 	}
 	c.Header("Access-Control-Allow-Origin", functionAllowedOriginHeader(origin, cors.AllowedOrigins))
 	c.Header("Vary", "Origin")
@@ -269,12 +302,12 @@ func handleFunctionCORS(c *gin.Context, route *mgr.SandboxAppServiceRoute) bool 
 		c.Header("Access-Control-Expose-Headers", strings.Join(cors.ExposeHeaders, ", "))
 	}
 	if c.Request.Method != nethttp.MethodOptions {
-		return false
+		return false, "", 0
 	}
 	requestMethod := strings.ToUpper(strings.TrimSpace(c.GetHeader("Access-Control-Request-Method")))
 	if requestMethod != "" && !functionRouteCORSMethodAllowed(route, requestMethod) {
 		spec.JSONError(c, nethttp.StatusMethodNotAllowed, spec.CodeForbidden, "method is not allowed")
-		return true
+		return true, "cors_method_denied", nethttp.StatusMethodNotAllowed
 	}
 	allowedMethods := cors.AllowedMethods
 	if len(allowedMethods) == 0 {
@@ -290,7 +323,7 @@ func handleFunctionCORS(c *gin.Context, route *mgr.SandboxAppServiceRoute) bool 
 		c.Header("Access-Control-Max-Age", strconv.Itoa(cors.MaxAgeSeconds))
 	}
 	c.Status(nethttp.StatusNoContent)
-	return true
+	return true, "", nethttp.StatusNoContent
 }
 
 func functionRouteCORSMethodAllowed(route *mgr.SandboxAppServiceRoute, method string) bool {
@@ -326,9 +359,9 @@ func functionAllowedOriginHeader(origin string, allowed []string) string {
 	return ""
 }
 
-func authorizeFunctionRoute(c *gin.Context, route *mgr.SandboxAppServiceRoute) bool {
+func authorizeFunctionRoute(c *gin.Context, route *mgr.SandboxAppServiceRoute) (bool, string, int) {
 	if route.Auth == nil || route.Auth.Mode == "" || route.Auth.Mode == mgr.SandboxAppServiceRouteAuthModeNone {
-		return true
+		return true, "", 0
 	}
 	switch route.Auth.Mode {
 	case mgr.SandboxAppServiceRouteAuthModeBearer:
@@ -336,22 +369,22 @@ func authorizeFunctionRoute(c *gin.Context, route *mgr.SandboxAppServiceRoute) b
 		const prefix = "Bearer "
 		if !strings.HasPrefix(token, prefix) {
 			spec.JSONError(c, nethttp.StatusUnauthorized, spec.CodeUnauthorized, "missing bearer token")
-			return false
+			return false, "auth_failed", nethttp.StatusUnauthorized
 		}
 		if !sha256HexMatches(strings.TrimSpace(strings.TrimPrefix(token, prefix)), route.Auth.BearerTokenSHA256) {
 			spec.JSONError(c, nethttp.StatusUnauthorized, spec.CodeUnauthorized, "invalid bearer token")
-			return false
+			return false, "auth_failed", nethttp.StatusUnauthorized
 		}
 	case mgr.SandboxAppServiceRouteAuthModeHeader:
 		if !sha256HexMatches(c.GetHeader(route.Auth.HeaderName), route.Auth.HeaderValueSHA256) {
 			spec.JSONError(c, nethttp.StatusUnauthorized, spec.CodeUnauthorized, "invalid header credential")
-			return false
+			return false, "auth_failed", nethttp.StatusUnauthorized
 		}
 	default:
 		spec.JSONError(c, nethttp.StatusUnauthorized, spec.CodeUnauthorized, "unsupported auth mode")
-		return false
+		return false, "auth_unsupported", nethttp.StatusUnauthorized
 	}
-	return true
+	return true, "", 0
 }
 
 func sha256HexMatches(value, expectedHex string) bool {

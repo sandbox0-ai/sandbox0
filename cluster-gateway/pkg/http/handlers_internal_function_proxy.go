@@ -48,6 +48,7 @@ func (s *Server) proxyInternalFunctionRuntime(c *gin.Context) {
 		s.logger,
 		proxyTimeout,
 		proxy.WithHTTPClient(s.outboundHTTPClient()),
+		proxy.WithTrustedForwardedHeaders(),
 		proxy.WithRequestModifier(stripInternalFunctionProxyHeaders),
 	)
 	if err != nil {

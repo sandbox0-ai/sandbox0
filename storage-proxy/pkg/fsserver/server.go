@@ -594,23 +594,6 @@ func (s *FileSystemServer) Mknod(ctx context.Context, req *pb.MknodRequest) (*pb
 	})
 }
 
-func mapErrnoToCode(errno syscall.Errno) fserror.Code {
-	switch errno {
-	case syscall.EEXIST:
-		return fserror.AlreadyExists
-	case syscall.ENOENT:
-		return fserror.NotFound
-	case syscall.EACCES, syscall.EPERM:
-		return fserror.PermissionDenied
-	case syscall.ENOSPC:
-		return fserror.ResourceExhausted
-	case syscall.EINVAL, syscall.ENOTDIR:
-		return fserror.InvalidArgument
-	default:
-		return fserror.Internal
-	}
-}
-
 func (s *FileSystemServer) openS0FS(ctx context.Context, volCtx *volume.VolumeContext, req *pb.OpenRequest) (*pb.OpenResponse, error) {
 	node, err := volCtx.S0FS.GetAttr(req.Inode)
 	if err != nil {

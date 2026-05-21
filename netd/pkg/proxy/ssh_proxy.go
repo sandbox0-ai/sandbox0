@@ -347,15 +347,3 @@ func (e knownHostEntry) matches(host string, port int) bool {
 	}
 	return false
 }
-
-func knownHostLine(host string, port int, key ssh.PublicKey) string {
-	var buf bytes.Buffer
-	if port > 0 && port != 22 {
-		buf.WriteString(fmt.Sprintf("[%s]:%d", host, port))
-	} else {
-		buf.WriteString(host)
-	}
-	buf.WriteByte(' ')
-	buf.WriteString(strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key))))
-	return buf.String()
-}

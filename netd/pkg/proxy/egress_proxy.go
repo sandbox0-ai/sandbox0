@@ -145,23 +145,6 @@ func egressProxyDestination(req *adapterRequest) string {
 	return ""
 }
 
-func validateSOCKS5ProxyEndpoint(ctx context.Context, compiled *policy.CompiledPolicy, host string) error {
-	host = strings.TrimSpace(host)
-	if host == "" {
-		return fmt.Errorf("egress proxy host is required")
-	}
-	ips, err := resolveProxyEndpointIPs(ctx, host)
-	if err != nil {
-		return fmt.Errorf("resolve egress proxy host %q: %w", host, err)
-	}
-	for _, ip := range ips {
-		if isProtectedProxyEndpointIP(compiled, ip) {
-			return fmt.Errorf("%w: %s resolves to %s", errEgressProxyEndpointProtected, host, ip)
-		}
-	}
-	return nil
-}
-
 func resolveSOCKS5ProxyDialAddress(ctx context.Context, compiled *policy.CompiledPolicy, cfg *policy.CompiledEgressProxy) (string, error) {
 	if cfg == nil {
 		return "", fmt.Errorf("egress proxy config is nil")

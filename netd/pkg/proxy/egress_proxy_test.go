@@ -120,8 +120,11 @@ func TestDialTCPUpstreamForRequestUsesSOCKS5Credentials(t *testing.T) {
 	}
 }
 
-func TestValidateSOCKS5ProxyEndpointRejectsLoopback(t *testing.T) {
-	err := validateSOCKS5ProxyEndpoint(context.Background(), nil, "127.0.0.1")
+func TestResolveSOCKS5ProxyDialAddressRejectsLoopback(t *testing.T) {
+	_, err := resolveSOCKS5ProxyDialAddress(context.Background(), nil, &policy.CompiledEgressProxy{
+		Host: "127.0.0.1",
+		Port: 1080,
+	})
 	if err == nil {
 		t.Fatal("expected loopback endpoint rejection")
 	}

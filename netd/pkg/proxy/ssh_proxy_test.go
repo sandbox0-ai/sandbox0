@@ -55,7 +55,7 @@ func TestProxySSHSessionReoriginatesWithPlatformCredential(t *testing.T) {
 					UpstreamUsername:  "git",
 					PrivateKeyPEM:     upstreamPrivateKeyPEM,
 					KnownHosts: []string{
-						knownHostLine(upstreamHost, upstreamPort, upstreamHostSigner.PublicKey()),
+						testKnownHostLine(upstreamHost, upstreamPort, upstreamHostSigner.PublicKey()),
 					},
 				}, nil),
 			},
@@ -100,7 +100,7 @@ func TestKnownHostsCallbackRejectsUntrustedKey(t *testing.T) {
 	hostSigner, _, _ := mustTestSSHSigner(t)
 	otherSigner, _, _ := mustTestSSHSigner(t)
 	callback, err := newKnownHostsCallback("127.0.0.1", 2222, []string{
-		knownHostLine("127.0.0.1", 2222, hostSigner.PublicKey()),
+		testKnownHostLine("127.0.0.1", 2222, hostSigner.PublicKey()),
 	})
 	if err != nil {
 		t.Fatalf("known hosts callback: %v", err)
@@ -108,6 +108,14 @@ func TestKnownHostsCallbackRejectsUntrustedKey(t *testing.T) {
 	if err := callback("", nil, otherSigner.PublicKey()); err == nil {
 		t.Fatal("expected untrusted key rejection")
 	}
+}
+
+func testKnownHostLine(host string, port int, key ssh.PublicKey) string {
+	pattern := host
+	if port > 0 && port != 22 {
+		pattern = fmt.Sprintf("[%s]:%d", host, port)
+	}
+	return pattern + " " + strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key)))
 }
 
 func startTestSSHUpstream(t *testing.T, hostSigner ssh.Signer, authorizedKey ssh.PublicKey) (string, func()) {

@@ -235,7 +235,7 @@ func TestFunctionRuntimeProxyUsesClusterGatewayForServing(t *testing.T) {
 	}
 }
 
-func TestResolveFunctionSandboxDoesNotServeSourceSandbox(t *testing.T) {
+func TestAcquireFunctionRuntimeDoesNotServeSourceSandbox(t *testing.T) {
 	_, privateKey, err := ed25519.GenerateKey(nil)
 	if err != nil {
 		t.Fatalf("generate ed25519 keypair: %v", err)
@@ -268,7 +268,7 @@ func TestResolveFunctionSandboxDoesNotServeSourceSandbox(t *testing.T) {
 		logger:     zap.NewNop(),
 	}
 
-	_, _, err = server.resolveFunctionSandbox(context.Background(), &functions.Function{
+	_, _, err = server.acquireFunctionRuntime(context.Background(), &functions.Function{
 		ID:     "fn-1",
 		TeamID: "team-1",
 	}, &functions.Revision{
@@ -280,7 +280,7 @@ func TestResolveFunctionSandboxDoesNotServeSourceSandbox(t *testing.T) {
 		CreatedBy:        "user-1",
 	}, mgr.SandboxAppService{})
 	if err == nil || !strings.Contains(err.Error(), "function repository is not configured") {
-		t.Fatalf("resolveFunctionSandbox() error = %v, want revision runtime path", err)
+		t.Fatalf("acquireFunctionRuntime() error = %v, want revision runtime path", err)
 	}
 	if got := sourceLookups.Load(); got != 0 {
 		t.Fatalf("source sandbox lookups = %d, want 0", got)

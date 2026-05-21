@@ -540,18 +540,6 @@ func functionSandboxWantsPaused(sandbox *mgr.Sandbox) bool {
 	return sandbox.Paused
 }
 
-func (s *Server) resolveFunctionSandbox(ctx context.Context, fn *functions.Function, rev *functions.Revision, service mgr.SandboxAppService) (*mgr.Sandbox, *functions.Revision, error) {
-	lease, updated, err := s.acquireFunctionRuntime(ctx, fn, rev, service)
-	if err != nil {
-		return nil, updated, err
-	}
-	if lease == nil {
-		return nil, updated, fmt.Errorf("function runtime lease is empty")
-	}
-	defer lease.Done()
-	return lease.Sandbox, updated, nil
-}
-
 func (s *Server) acquireFunctionRuntime(ctx context.Context, fn *functions.Function, rev *functions.Revision, service mgr.SandboxAppService) (*functionRuntimeLease, *functions.Revision, error) {
 	autoscaler := s.autoscaler
 	if autoscaler == nil {

@@ -58,6 +58,184 @@ When a tool call is denied, netd does not forward the request upstream. It retur
 
 MCP request bodies must be bounded and inspectable. If netd cannot safely read the JSON-RPC request body, the protocol rule fails closed and returns a JSON-RPC policy error.
 
+## Update Examples
+
+The SDK and CLI examples below update an existing sandbox. Set `SANDBOX_ID` to the sandbox you want to control.
+
+### Go
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+    "os"
+
+    sandbox0 "github.com/sandbox0-ai/sdk-go"
+    "github.com/sandbox0-ai/sdk-go/pkg/apispec"
+)
+
+func main() {
+    ctx := context.Background()
+    client, err := sandbox0.NewClient(
+        sandbox0.WithToken(os.Getenv("SANDBOX0_TOKEN")),
+        sandbox0.WithBaseURL(os.Getenv("SANDBOX0_BASE_URL")),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    _, err = client.Sandbox(os.Getenv("SANDBOX_ID")).UpdateNetworkPolicy(ctx, apispec.SandboxNetworkPolicy{
+        Mode: apispec.SandboxNetworkPolicyModeBlockAll,
+        Egress: apispec.NewOptNetworkEgressPolicy(apispec.NetworkEgressPolicy{
+            TrafficRules: []apispec.TrafficRule{{
+                Name:    apispec.NewOptString("allow-docs-mcp"),
+                Action:  apispec.TrafficRuleActionAllow,
+                Domains: []string{"mcp.example.com"},
+                Ports: []apispec.PortSpec{{
+                    Port:     443,
+                    Protocol: apispec.NewOptString("tcp"),
+                }},
+            }},
+            ProtocolRules: []apispec.ProtocolRule{{
+                Name:     apispec.NewOptString("docs-mcp-tools"),
+                Protocol: apispec.ProtocolRuleProtocolMcp,
+                Domains:  []string{"mcp.example.com"},
+                Ports: []apispec.PortSpec{{
+                    Port:     443,
+                    Protocol: apispec.NewOptString("tcp"),
+                }},
+                TlsMode: apispec.NewOptEgressTLSMode(apispec.EgressTLSModeTerminateReoriginate),
+                HttpMatch: apispec.NewOptHTTPMatch(apispec.HTTPMatch{
+                    Methods: []string{"POST"},
+                    Paths:   []string{"/mcp"},
+                }),
+                Mcp: apispec.NewOptMCPProtocolRule(apispec.MCPProtocolRule{
+                    Tools: apispec.NewOptMCPToolPolicy(apispec.MCPToolPolicy{
+                        Allowed: []string{"read_file"},
+                        Denied:  []string{"write_file", "run_command"},
+                    }),
+                }),
+            }},
+        }),
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+}
+```
+
+### Python
+
+```python
+import os
+
+from sandbox0 import Client
+from sandbox0.apispec.models.egress_tls_mode import EgressTLSMode
+from sandbox0.apispec.models.http_match import HTTPMatch
+from sandbox0.apispec.models.mcp_protocol_rule import MCPProtocolRule
+from sandbox0.apispec.models.mcp_tool_policy import MCPToolPolicy
+from sandbox0.apispec.models.network_egress_policy import NetworkEgressPolicy
+from sandbox0.apispec.models.port_spec import PortSpec
+from sandbox0.apispec.models.protocol_rule import ProtocolRule
+from sandbox0.apispec.models.protocol_rule_protocol import ProtocolRuleProtocol
+from sandbox0.apispec.models.sandbox_network_policy import SandboxNetworkPolicy
+from sandbox0.apispec.models.sandbox_network_policy_mode import SandboxNetworkPolicyMode
+from sandbox0.apispec.models.traffic_rule import TrafficRule
+from sandbox0.apispec.models.traffic_rule_action import TrafficRuleAction
+
+with Client(
+    token=os.environ["SANDBOX0_TOKEN"],
+    base_url=os.environ["SANDBOX0_BASE_URL"],
+) as client:
+    client.sandbox(os.environ["SANDBOX_ID"]).update_network_policy(
+        SandboxNetworkPolicy(
+            mode=SandboxNetworkPolicyMode.BLOCK_ALL,
+            egress=NetworkEgressPolicy(
+                traffic_rules=[
+                    TrafficRule(
+                        name="allow-docs-mcp",
+                        action=TrafficRuleAction.ALLOW,
+                        domains=["mcp.example.com"],
+                        ports=[PortSpec(port=443, protocol="tcp")],
+                    )
+                ],
+                protocol_rules=[
+                    ProtocolRule(
+                        name="docs-mcp-tools",
+                        protocol=ProtocolRuleProtocol.MCP,
+                        domains=["mcp.example.com"],
+                        ports=[PortSpec(port=443, protocol="tcp")],
+                        tls_mode=EgressTLSMode.TERMINATE_REORIGINATE,
+                        http_match=HTTPMatch(methods=["POST"], paths=["/mcp"]),
+                        mcp=MCPProtocolRule(
+                            tools=MCPToolPolicy(
+                                allowed=["read_file"],
+                                denied=["write_file", "run_command"],
+                            ),
+                        ),
+                    )
+                ],
+            ),
+        )
+    )
+```
+
+### TypeScript
+
+```typescript
+import { Client, models } from "sandbox0";
+
+const client = new Client({
+    token: process.env.SANDBOX0_TOKEN!,
+    baseUrl: process.env.SANDBOX0_BASE_URL!,
+});
+
+await client.sandbox(process.env.SANDBOX_ID!).updateNetworkPolicy({
+    mode: models.SandboxNetworkPolicyModeEnum.BlockAll,
+    egress: {
+        trafficRules: [
+            {
+                name: "allow-docs-mcp",
+                action: models.TrafficRuleAction.Allow,
+                domains: ["mcp.example.com"],
+                ports: [{ port: 443, protocol: "tcp" }],
+            },
+        ],
+        protocolRules: [
+            {
+                name: "docs-mcp-tools",
+                protocol: models.ProtocolRuleProtocol.ProtocolRuleProtocolMcp,
+                domains: ["mcp.example.com"],
+                ports: [{ port: 443, protocol: "tcp" }],
+                tlsMode: models.EgressTLSMode.TerminateReoriginate,
+                httpMatch: {
+                    methods: ["POST"],
+                    paths: ["/mcp"],
+                },
+                mcp: {
+                    tools: {
+                        allowed: ["read_file"],
+                        denied: ["write_file", "run_command"],
+                    },
+                },
+            },
+        ],
+    },
+});
+```
+
+### CLI
+
+```bash
+s0 sandbox network update \
+    --sandbox-id "$SANDBOX_ID" \
+    --mode block-all \
+    --traffic-rule '{"name":"allow-docs-mcp","action":"allow","domains":["mcp.example.com"],"ports":[{"port":443,"protocol":"tcp"}]}' \
+    --protocol-rule '{"name":"docs-mcp-tools","protocol":"mcp","domains":["mcp.example.com"],"ports":[{"port":443,"protocol":"tcp"}],"tlsMode":"terminate-reoriginate","httpMatch":{"methods":["POST"],"paths":["/mcp"]},"mcp":{"tools":{"allowed":["read_file"],"denied":["write_file","run_command"]}}}'
+```
+
 ## HTTPS Inspection
 
 For HTTPS MCP servers, set `tlsMode: terminate-reoriginate` on the protocol rule. Sandbox0 then uses the netd MITM CA already exposed to procd-managed processes.

@@ -18,6 +18,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/pkg/functionruntime"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functions"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
@@ -244,6 +245,79 @@ func TestResolveFunctionSandboxDoesNotServeSourceSandbox(t *testing.T) {
 	}
 	if got := sourceLookups.Load(); got != 0 {
 		t.Fatalf("source sandbox lookups = %d, want 0", got)
+	}
+}
+
+func TestClaimFunctionSandboxIncludesRuntimeOwnerMetadata(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate ed25519 keypair: %v", err)
+	}
+
+	var got mgr.ClaimRequest
+	var gotHeader http.Header
+	clusterGateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/sandboxes" {
+			t.Errorf("path = %s, want sandbox claim path", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode claim request: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		gotHeader = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"success":true,"data":{"sandbox_id":"sb-runtime","status":"starting","procd_address":"127.0.0.1:8080","pod_name":"sb-runtime","template":"tmpl-1"}}`))
+	}))
+	defer clusterGateway.Close()
+
+	server := &Server{
+		cfg: &config.FunctionGatewayConfig{
+			DefaultClusterGatewayURL: clusterGateway.URL,
+		},
+		internalAuthGen: internalauth.NewGenerator(internalauth.GeneratorConfig{
+			Caller:     internalauth.ServiceFunctionGateway,
+			PrivateKey: privateKey,
+			TTL:        time.Minute,
+		}),
+		httpClient: clusterGateway.Client(),
+		logger:     zap.NewNop(),
+	}
+
+	_, err = server.claimFunctionSandboxViaClusterGateway(context.Background(), &functions.Function{
+		ID:     "fn-1",
+		TeamID: "team-1",
+	}, &functions.Revision{
+		ID:               "rev-1",
+		FunctionID:       "fn-1",
+		TeamID:           "team-1",
+		SourceTemplateID: "tmpl-1",
+		CreatedBy:        "user-1",
+	}, mgr.SandboxAppService{}, "inst-1")
+	if err != nil {
+		t.Fatalf("claimFunctionSandboxViaClusterGateway() error = %v", err)
+	}
+	if got.Metadata != nil {
+		t.Fatal("claim request metadata should not be serialized in public JSON body")
+	}
+	metadata := functionruntime.FromHeaders(gotHeader)
+	if metadata == nil {
+		t.Fatal("runtime metadata headers are missing")
+	}
+	if metadata.OwnerKind != functionruntime.OwnerKind {
+		t.Fatalf("owner kind header = %q, want %q", metadata.OwnerKind, functionruntime.OwnerKind)
+	}
+	if metadata.FunctionID != "fn-1" {
+		t.Fatalf("function id header = %q, want fn-1", metadata.FunctionID)
+	}
+	if metadata.FunctionRevisionID != "rev-1" {
+		t.Fatalf("function revision id header = %q, want rev-1", metadata.FunctionRevisionID)
+	}
+	if metadata.FunctionRuntimeInstanceID != "inst-1" {
+		t.Fatalf("function runtime instance id header = %q, want inst-1", metadata.FunctionRuntimeInstanceID)
 	}
 }
 

@@ -530,9 +530,15 @@ func (h *Handler) clearFunctionRuntime(c *gin.Context) {
 		return
 	}
 	deletedLegacy := false
+	needsRuntimeDelete := false
 	for _, inst := range instances {
-		if inst == nil || strings.TrimSpace(inst.SandboxID) == "" || h.runtime == nil {
+		if inst == nil || strings.TrimSpace(inst.SandboxID) == "" {
 			continue
+		}
+		needsRuntimeDelete = true
+		if h.runtime == nil {
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "function runtime cleanup is not configured")
+			return
 		}
 		if err := h.runtime.DeleteRuntimeSandbox(c.Request.Context(), authCtx, strings.TrimSpace(inst.SandboxID)); err != nil {
 			h.logger.Warn("Failed to delete function runtime sandbox",
@@ -549,6 +555,7 @@ func (h *Handler) clearFunctionRuntime(c *gin.Context) {
 		}
 	}
 	if len(instances) == 0 && h.runtime != nil && rev.RuntimeSandboxID != nil && strings.TrimSpace(*rev.RuntimeSandboxID) != "" {
+		needsRuntimeDelete = true
 		if err := h.runtime.DeleteRuntimeSandbox(c.Request.Context(), authCtx, strings.TrimSpace(*rev.RuntimeSandboxID)); err != nil {
 			h.logger.Warn("Failed to delete function runtime sandbox",
 				zap.String("function_id", fn.ID),
@@ -560,6 +567,10 @@ func (h *Handler) clearFunctionRuntime(c *gin.Context) {
 			return
 		}
 		deletedLegacy = true
+	}
+	if !needsRuntimeDelete && h.runtime == nil && rev.RuntimeSandboxID != nil && strings.TrimSpace(*rev.RuntimeSandboxID) != "" {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "function runtime cleanup is not configured")
+		return
 	}
 	if !deletedLegacy && rev.RuntimeSandboxID != nil && strings.TrimSpace(*rev.RuntimeSandboxID) != "" {
 		h.logger.Warn("Legacy function runtime mapping did not match runtime pool instances",
@@ -879,20 +890,8 @@ func (h *Handler) cleanupDeletedFunctionResources(authCtx *authn.AuthContext, re
 		if rev.RuntimeSandboxID != nil && strings.TrimSpace(*rev.RuntimeSandboxID) != "" {
 			runtimeSandboxIDs[strings.TrimSpace(*rev.RuntimeSandboxID)] = struct{}{}
 		}
-		for sandboxID := range runtimeSandboxIDs {
-			if h.runtime == nil {
-				continue
-			}
-			if err := h.runtime.DeleteRuntimeSandbox(ctx, authCtx, sandboxID); err != nil {
-				h.logger.Warn("Failed to clean up deleted function runtime sandbox",
-					zap.String("function_id", rev.FunctionID),
-					zap.String("revision_id", rev.ID),
-					zap.String("runtime_sandbox_id", sandboxID),
-					zap.Error(err),
-				)
-			}
-		}
-		if h.repo != nil {
+		runtimeCleanupComplete := h.deleteRuntimeSandboxesForRevision(ctx, authCtx, rev, runtimeSandboxIDs)
+		if h.repo != nil && runtimeCleanupComplete {
 			if err := h.repo.ClearRevisionRuntime(ctx, rev.TeamID, rev.FunctionID, rev.ID); err != nil && !errors.Is(err, functions.ErrNotFound) {
 				h.logger.Warn("Failed to clear deleted function runtime mapping",
 					zap.String("function_id", rev.FunctionID),
@@ -912,6 +911,28 @@ func (h *Handler) cleanupDeletedFunctionResources(authCtx *authn.AuthContext, re
 			}
 		}
 	}
+}
+
+func (h *Handler) deleteRuntimeSandboxesForRevision(ctx context.Context, authCtx *authn.AuthContext, rev *functions.Revision, sandboxIDs map[string]struct{}) bool {
+	if len(sandboxIDs) == 0 {
+		return true
+	}
+	if h.runtime == nil {
+		return false
+	}
+	complete := true
+	for sandboxID := range sandboxIDs {
+		if err := h.runtime.DeleteRuntimeSandbox(ctx, authCtx, sandboxID); err != nil {
+			complete = false
+			h.logger.Warn("Failed to clean up deleted function runtime sandbox",
+				zap.String("function_id", rev.FunctionID),
+				zap.String("revision_id", rev.ID),
+				zap.String("runtime_sandbox_id", sandboxID),
+				zap.Error(err),
+			)
+		}
+	}
+	return complete
 }
 
 func (h *Handler) functionRecord(fn *functions.Function) functionRecord {

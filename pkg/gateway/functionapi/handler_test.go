@@ -1,10 +1,14 @@
 package functionapi
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functions"
+	"go.uber.org/zap"
 )
 
 func TestTryLockFunctionRevisionPublishSerializesFunction(t *testing.T) {
@@ -139,4 +143,56 @@ func TestRuntimeStatusReadyInstanceOverridesOlderFailure(t *testing.T) {
 	if status.ReadinessState != functions.RuntimeReadinessStateReady {
 		t.Fatalf("readiness = %q, want %q", status.ReadinessState, functions.RuntimeReadinessStateReady)
 	}
+}
+
+func TestDeleteRuntimeSandboxesForRevisionKeepsMappingWhenDeleteFails(t *testing.T) {
+	deleteErr := errors.New("delete failed")
+	runtime := &recordingRuntimeController{errors: map[string]error{"sb-2": deleteErr}}
+	handler := &Handler{runtime: runtime, logger: zap.NewNop()}
+	rev := &functions.Revision{ID: "rev-1", FunctionID: "fn-1", TeamID: "team-1"}
+
+	complete := handler.deleteRuntimeSandboxesForRevision(context.Background(), &authn.AuthContext{TeamID: "team-1"}, rev, map[string]struct{}{
+		"sb-1": {},
+		"sb-2": {},
+	})
+
+	if complete {
+		t.Fatal("deleteRuntimeSandboxesForRevision() complete = true, want false")
+	}
+	if !runtime.deleted["sb-1"] || !runtime.deleted["sb-2"] {
+		t.Fatalf("deleted sandboxes = %#v, want both attempted", runtime.deleted)
+	}
+}
+
+func TestDeleteRuntimeSandboxesForRevisionCompletesWhenDeletesSucceed(t *testing.T) {
+	runtime := &recordingRuntimeController{}
+	handler := &Handler{runtime: runtime, logger: zap.NewNop()}
+	rev := &functions.Revision{ID: "rev-1", FunctionID: "fn-1", TeamID: "team-1"}
+
+	complete := handler.deleteRuntimeSandboxesForRevision(context.Background(), &authn.AuthContext{TeamID: "team-1"}, rev, map[string]struct{}{
+		"sb-1": {},
+	})
+
+	if !complete {
+		t.Fatal("deleteRuntimeSandboxesForRevision() complete = false, want true")
+	}
+	if !runtime.deleted["sb-1"] {
+		t.Fatalf("deleted sandboxes = %#v, want sb-1", runtime.deleted)
+	}
+}
+
+type recordingRuntimeController struct {
+	deleted map[string]bool
+	errors  map[string]error
+}
+
+func (r *recordingRuntimeController) DeleteRuntimeSandbox(_ context.Context, _ *authn.AuthContext, sandboxID string) error {
+	if r.deleted == nil {
+		r.deleted = make(map[string]bool)
+	}
+	r.deleted[sandboxID] = true
+	if r.errors != nil {
+		return r.errors[sandboxID]
+	}
+	return nil
 }

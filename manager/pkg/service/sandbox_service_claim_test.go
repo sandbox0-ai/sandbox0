@@ -105,6 +105,57 @@ func TestClaimIdlePodClaimsReadyPod(t *testing.T) {
 	}
 }
 
+func TestClaimRequestDoesNotAcceptRuntimeMetadataFromJSON(t *testing.T) {
+	var req ClaimRequest
+	if err := json.Unmarshal([]byte(`{
+		"template":"template-a",
+		"metadata":{
+			"owner_kind":"function-runtime",
+			"function_id":"fn-1",
+			"function_revision_id":"rev-1",
+			"function_runtime_instance_id":"inst-1"
+		}
+	}`), &req); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if req.Metadata != nil {
+		t.Fatalf("metadata = %#v, want nil for public JSON input", req.Metadata)
+	}
+}
+
+func TestClaimIdlePodAppliesRuntimeOwnerMetadata(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+	}
+	readyPod := newClaimTestPod("ns-a", "idle-ready", "template-a", true)
+
+	client := fake.NewSimpleClientset(readyPod.DeepCopy())
+	svc := &SandboxService{
+		k8sClient: client,
+		podLister: newClaimTestPodLister(t, readyPod),
+		clock:     systemTime{},
+		logger:    zap.NewNop(),
+	}
+
+	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{
+		TeamID: "team-a",
+		UserID: "user-a",
+		Metadata: &ClaimMetadata{
+			OwnerKind:                 "function-runtime",
+			FunctionID:                "fn-1",
+			FunctionRevisionID:        "rev-1",
+			FunctionRuntimeInstanceID: "inst-1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("claimIdlePod() error = %v", err)
+	}
+	assertClaimRuntimeMetadata(t, pod)
+}
+
 func TestClaimIdlePodRequiresCurrentTemplateHash(t *testing.T) {
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
@@ -383,6 +434,42 @@ func TestCreateNewPodMarksColdPodNonEvictable(t *testing.T) {
 	if got := pod.Annotations[controller.AnnotationClusterAutoscalerSafeToEvict]; got != "false" {
 		t.Fatalf("safe-to-evict annotation = %q, want false", got)
 	}
+}
+
+func TestCreateNewPodAppliesRuntimeOwnerMetadata(t *testing.T) {
+	withClaimTestPublicKey(t)
+
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			MainContainer: v1alpha1.ContainerSpec{Image: "busybox"},
+		},
+	}
+	client := fake.NewSimpleClientset()
+	svc := &SandboxService{
+		k8sClient:    client,
+		secretLister: newClaimTestSecretLister(t),
+		clock:        systemTime{},
+		logger:       zap.NewNop(),
+	}
+
+	pod, err := svc.createNewPod(context.Background(), template, &ClaimRequest{
+		TeamID: "team-a",
+		UserID: "user-a",
+		Metadata: &ClaimMetadata{
+			OwnerKind:                 "function-runtime",
+			FunctionID:                "fn-1",
+			FunctionRevisionID:        "rev-1",
+			FunctionRuntimeInstanceID: "inst-1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("createNewPod() error = %v", err)
+	}
+	assertClaimRuntimeMetadata(t, pod)
 }
 
 func TestCreateNewPodFailsBeforeCreateWhenDataPlaneNotReady(t *testing.T) {
@@ -1051,6 +1138,34 @@ func newClaimTestPod(namespace, name, templateID string, ready bool) *corev1.Pod
 				},
 			},
 		},
+	}
+}
+
+func assertClaimRuntimeMetadata(t *testing.T, pod *corev1.Pod) {
+	t.Helper()
+	if pod == nil {
+		t.Fatal("pod is nil")
+	}
+	if got := pod.Labels[controller.LabelOwnerKind]; got != "function-runtime" {
+		t.Fatalf("owner kind label = %q, want function-runtime", got)
+	}
+	if got := pod.Labels[controller.LabelFunctionID]; got != "fn-1" {
+		t.Fatalf("function id label = %q, want fn-1", got)
+	}
+	if got := pod.Labels[controller.LabelFunctionRevisionID]; got != "rev-1" {
+		t.Fatalf("function revision id label = %q, want rev-1", got)
+	}
+	if got := pod.Annotations[controller.AnnotationOwnerKind]; got != "function-runtime" {
+		t.Fatalf("owner kind annotation = %q, want function-runtime", got)
+	}
+	if got := pod.Annotations[controller.AnnotationFunctionID]; got != "fn-1" {
+		t.Fatalf("function id annotation = %q, want fn-1", got)
+	}
+	if got := pod.Annotations[controller.AnnotationFunctionRevisionID]; got != "rev-1" {
+		t.Fatalf("function revision id annotation = %q, want rev-1", got)
+	}
+	if got := pod.Annotations[controller.AnnotationFunctionRuntimeInstanceID]; got != "inst-1" {
+		t.Fatalf("function runtime instance id annotation = %q, want inst-1", got)
 	}
 }
 

@@ -8,15 +8,18 @@ import (
 const ProductionAlias = "production"
 
 const (
-	DefaultMinWarm               = 0
-	DefaultMaxActive             = 20
-	DefaultTargetConcurrency     = 80
-	DefaultScaleDownAfterSeconds = 300
-	MaximumMinWarm               = 100
-	MaximumMaxActive             = 1000
-	MaximumTargetConcurrency     = 1000
-	MaximumScaleDownAfterSeconds = 86400
-	MinimumScaleDownAfterSeconds = 30
+	DefaultMinWarm                         = 0
+	DefaultMaxActive                       = 20
+	DefaultTargetConcurrency               = 80
+	DefaultScaleDownAfterSeconds           = 300
+	DefaultFailedRuntimeRetentionSeconds   = 300
+	DefaultDrainingRuntimeRetentionSeconds = 30
+	DefaultStartingRuntimeRetentionSeconds = 600
+	MaximumMinWarm                         = 100
+	MaximumMaxActive                       = 1000
+	MaximumTargetConcurrency               = 1000
+	MaximumScaleDownAfterSeconds           = 86400
+	MinimumScaleDownAfterSeconds           = 30
 )
 
 type Function struct {

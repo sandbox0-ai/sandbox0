@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/functions"
 	"go.uber.org/zap"
@@ -66,6 +67,7 @@ func (a *functionAutoscaler) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			a.scaleDownIdleRuntimes(ctx)
+			a.cleanupRuntimeInstances(ctx)
 		}
 	}
 }
@@ -120,6 +122,69 @@ func (a *functionAutoscaler) scaleDownIdleRuntimes(ctx context.Context) {
 				zap.Error(err),
 			)
 		}
+	}
+}
+
+func (a *functionAutoscaler) cleanupRuntimeInstances(ctx context.Context) {
+	instances, err := a.server.functionRepo.ListRuntimeCleanupCandidates(ctx, 100)
+	if err != nil {
+		a.logger.Warn("Failed to list function runtime cleanup candidates", zap.Error(err))
+		return
+	}
+	for _, inst := range instances {
+		a.cleanupRuntimeInstance(ctx, inst)
+	}
+}
+
+func (a *functionAutoscaler) cleanupRuntimeInstance(ctx context.Context, inst *functions.RuntimeInstance) {
+	if inst == nil || strings.TrimSpace(inst.SandboxID) == "" {
+		return
+	}
+	if a.hasLocalInflight(inst.SandboxID) {
+		return
+	}
+	if inst.State != functions.RuntimeInstanceStateDraining && inst.State != functions.RuntimeInstanceStateFailed {
+		if err := a.server.functionRepo.MarkRuntimeInstanceDraining(ctx, inst.TeamID, inst.FunctionID, inst.RevisionID, inst.ID); err != nil {
+			if !errorsIsFunctionNotFound(err) {
+				a.logger.Warn("Failed to mark function runtime cleanup candidate draining",
+					zap.String("function_id", inst.FunctionID),
+					zap.String("revision_id", inst.RevisionID),
+					zap.String("runtime_instance_id", inst.ID),
+					zap.Error(err),
+				)
+			}
+			return
+		}
+		inst.State = functions.RuntimeInstanceStateDraining
+		a.server.recordRuntimeLifecycleEvent(ctx, &functions.Function{ID: inst.FunctionID, TeamID: inst.TeamID}, &functions.Revision{ID: inst.RevisionID, FunctionID: inst.FunctionID, TeamID: inst.TeamID}, inst, functions.RuntimePhaseDraining, inst.ReadinessState, "runtime_gc", nil, 0)
+	}
+
+	deleteCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	cleanupStarted := time.Now()
+	err := a.server.deleteSandboxViaClusterGateway(deleteCtx, inst.SandboxID, inst.TeamID, "")
+	cancel()
+	if err != nil {
+		a.server.observeRuntimeScaleDown(inst, "error", err, time.Since(cleanupStarted))
+		a.markRuntimeInstanceFailed(context.Background(), &functions.Function{ID: inst.FunctionID, TeamID: inst.TeamID}, &functions.Revision{ID: inst.RevisionID, FunctionID: inst.FunctionID, TeamID: inst.TeamID}, inst, err, 0)
+		a.logger.Warn("Failed to delete function runtime cleanup candidate",
+			zap.String("function_id", inst.FunctionID),
+			zap.String("revision_id", inst.RevisionID),
+			zap.String("runtime_instance_id", inst.ID),
+			zap.String("runtime_sandbox_id", inst.SandboxID),
+			zap.Error(err),
+		)
+		return
+	}
+	a.server.observeRuntimeScaleDown(inst, "success", nil, time.Since(cleanupStarted))
+	a.server.recordRuntimeLifecycleEvent(ctx, &functions.Function{ID: inst.FunctionID, TeamID: inst.TeamID}, &functions.Revision{ID: inst.RevisionID, FunctionID: inst.FunctionID, TeamID: inst.TeamID}, inst, functions.RuntimePhaseIdle, functions.RuntimeReadinessStateUnknown, "runtime_gc_deleted", nil, time.Since(cleanupStarted))
+	if err := a.server.functionRepo.DeleteRuntimeInstance(ctx, inst.TeamID, inst.FunctionID, inst.RevisionID, inst.ID); err != nil && !errorsIsFunctionNotFound(err) {
+		a.logger.Warn("Failed to delete cleaned-up function runtime instance",
+			zap.String("function_id", inst.FunctionID),
+			zap.String("revision_id", inst.RevisionID),
+			zap.String("runtime_instance_id", inst.ID),
+			zap.Error(err),
+		)
+		return
 	}
 }
 
@@ -284,14 +349,16 @@ func (a *functionAutoscaler) createRuntimeInstance(ctx context.Context, fn *func
 			return fmt.Errorf("function runtime capacity is starting")
 		}
 
+		runtimeInstanceID := uuid.NewString()
 		a.server.recordRuntimeLifecycleEvent(runCtx, fn, currentRev, nil, functions.RuntimePhaseProvisioning, functions.RuntimeReadinessStateChecking, "claim_runtime", nil, 0)
-		claim, err := a.server.claimFunctionSandboxViaClusterGateway(runCtx, fn, currentRev, service)
+		claim, err := a.server.claimFunctionSandboxViaClusterGateway(runCtx, fn, currentRev, service, runtimeInstanceID)
 		if err != nil {
 			a.server.observeRuntimeStartup(fn, currentRev, "error", functions.RuntimeReadinessStateFailed, time.Since(startupStarted), err)
 			a.server.recordRuntimeLifecycleEvent(runCtx, fn, currentRev, nil, functions.RuntimePhaseFailed, functions.RuntimeReadinessStateFailed, functionRuntimeErrorReason(err), err, time.Since(startupStarted))
 			return err
 		}
 		inst, err := a.server.functionRepo.CreateRuntimeInstance(runCtx, &functions.RuntimeInstance{
+			ID:         runtimeInstanceID,
 			TeamID:     fn.TeamID,
 			FunctionID: fn.ID,
 			RevisionID: currentRev.ID,

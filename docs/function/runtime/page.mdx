@@ -54,6 +54,12 @@ can be diagnosed without searching gateway logs.
 
 `restart` and `recycle` both delete the current restored runtime pool when one exists and clear the runtime mapping. The next function request starts fresh runtime instances from the active revision.
 
+## Runtime Cleanup
+
+Runtime sandboxes created for Function revisions carry Sandbox0 ownership metadata for the function, revision, and runtime instance that claimed them. Function Gateway periodically reconciles runtime instances and retries cleanup for sandboxes that belong to deleted or disabled functions, inactive revisions, failed startups, stale starting attempts, and runtime instances that are already draining.
+
+Cleanup is idempotent. A missing sandbox is treated as already deleted, and the runtime instance record is kept until the gateway has confirmed deletion so later GC runs can retry failed cleanup.
+
 ## Get Runtime Status
 
 <Endpoint method="GET">
